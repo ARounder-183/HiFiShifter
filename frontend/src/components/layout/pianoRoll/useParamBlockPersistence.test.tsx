@@ -3,6 +3,7 @@ import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EMPTY_PARAM_BLOCK_STATE, type ParamBlockState } from "./paramBlocks";
+import { ParamBlockCommitError } from "./paramBlockCommitError";
 import { useParamBlockPersistence } from "./useParamBlockPersistence";
 
 const mocks = vi.hoisted(() => ({
@@ -59,6 +60,8 @@ const api: {
     setState: ((next: ParamBlockState) => void) | null;
 } = { persistence: null, setState: null };
 const flags = { defer: false, enabled: true };
+/** 写入失败上报的观测点（面板注入的 onWriteError）。 */
+const writeErrors: string[] = [];
 const props = { historyKey: "0:0" };
 
 function Harness(p: { historyKey: string }) {
@@ -70,6 +73,7 @@ function Harness(p: { historyKey: string }) {
         state,
         setState,
         deferReadback: () => flags.defer,
+        onWriteError: (failure) => writeErrors.push(failure),
     });
     useEffect(() => {
         probe.state = state;
@@ -105,6 +109,7 @@ beforeEach(() => {
     mocks.getParamBlockView.mockResolvedValue(reply(3));
     flags.defer = false;
     flags.enabled = true;
+    writeErrors.length = 0;
     props.historyKey = "0:0";
     probe.state = EMPTY_PARAM_BLOCK_STATE;
     api.persistence = null;
@@ -330,6 +335,121 @@ describe("useParamBlockPersistence", () => {
         });
         expect(mocks.getParamBlockView).toHaveBeenCalled();
         expect(probe.state.editSet.revision).toBe(8);
+    });
+
+    /*
+     * 【重基的回归锁】`curve` 冲突意味着基准过期。旧实现只允许 `edit_set` 冲突
+     * 原样重放，于是这一类一律变成用户可见的失败。现在 prepare 会在槽内重新读基准，
+     * 重试因此是「按同一个意图重算补丁」。
+     */
+    it("★ curve 冲突会重跑 prepare 一次并成功", async () => {
+        await render();
+        let prepareCalls = 0;
+        mocks.getParamBlockView.mockResolvedValue(reply(9));
+        mocks.setParamBlockEdits
+            .mockRejectedValueOnce(new Error("Conflict: parameter curve changed"))
+            .mockResolvedValueOnce(reply(10));
+
+        await act(async () => {
+            await api.persistence?.commitPlan({
+                kind: "layout",
+                prepare: async () => {
+                    prepareCalls += 1;
+                    return { state: probe.state, patches: [] };
+                },
+            });
+        });
+
+        expect(prepareCalls).toBe(2);
+        expect(mocks.setParamBlockEdits).toHaveBeenCalledTimes(2);
+        expect(probe.state.editSet.revision).toBe(10);
+        expect(writeErrors).toEqual([]);
+    });
+
+    it("★ transport 失败不重试（上一次写入可能已经落地）", async () => {
+        await render();
+        let prepareCalls = 0;
+        mocks.setParamBlockEdits.mockRejectedValue(new Error("ipc down"));
+        await act(async () => {
+            await api.persistence
+                ?.commitPlan({
+                    kind: "layout",
+                    prepare: async () => {
+                        prepareCalls += 1;
+                        return { state: probe.state, patches: [] };
+                    },
+                })
+                .catch(() => undefined);
+        });
+        expect(prepareCalls).toBe(1);
+        expect(mocks.setParamBlockEdits).toHaveBeenCalledTimes(1);
+        expect(writeErrors).toEqual(["transport"]);
+    });
+
+    it("★ 取消不重试、也不发布任何用户可见反馈", async () => {
+        await render();
+        let prepareCalls = 0;
+        await act(async () => {
+            await api.persistence
+                ?.commitPlan({
+                    kind: "drag",
+                    prepare: async () => {
+                        prepareCalls += 1;
+                        throw new ParamBlockCommitError({
+                            kind: "cancelled",
+                            code: "blocks_changed",
+                        });
+                    },
+                })
+                .catch(() => undefined);
+        });
+        expect(prepareCalls).toBe(1);
+        expect(mocks.setParamBlockEdits).not.toHaveBeenCalled();
+        expect(writeErrors).toEqual(["silent"]);
+    });
+
+    /*
+     * 【单一写队列】两个 plan 必须严格串行：第二个的 prepare 不得在第一个完成前
+     * 开始。旧实现有两条互不相识的队列（这里一条、面板的 paramBlockCommitQueueRef
+     * 一条）共用同一个后端 CAS —— 交错时后写者必然过期。
+     */
+    it("★ 同一根的两个 plan 严格串行（第二个的 prepare 等第一个结束）", async () => {
+        await render();
+        const order: string[] = [];
+        let releaseFirst!: () => void;
+        const firstGate = new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+        });
+        mocks.setParamBlockEdits.mockImplementation(async () => {
+            order.push("write");
+            return reply(4);
+        });
+        let first: Promise<unknown> = Promise.resolve();
+        await act(async () => {
+            first =
+                api.persistence?.commitPlan({
+                    kind: "layout",
+                    prepare: async () => {
+                        order.push("prepare-1");
+                        await firstGate;
+                        return { state: probe.state, patches: [] };
+                    },
+                }) ?? Promise.resolve();
+            void api.persistence?.commitPlan({
+                kind: "layout",
+                prepare: async () => {
+                    order.push("prepare-2");
+                    return { state: probe.state, patches: [] };
+                },
+            });
+            await Promise.resolve();
+        });
+        expect(order).toEqual(["prepare-1"]);
+        releaseFirst();
+        await act(async () => {
+            await first;
+        });
+        expect(order).toEqual(["prepare-1", "write", "prepare-2", "write"]);
     });
 
     it("非冲突错误不重试", async () => {

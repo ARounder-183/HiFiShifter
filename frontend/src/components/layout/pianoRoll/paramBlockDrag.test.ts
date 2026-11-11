@@ -120,7 +120,6 @@ describe("block drag value readout", () => {
                 framePeriodMs: 5,
             },
             curveOwned: false,
-            paramBlockCommitQueueRef: { current: Promise.resolve() },
             paramViewRef: { current: paramView },
             liveEditActiveRef: { current: false },
             applyDenseToLiveEdit: () => {},

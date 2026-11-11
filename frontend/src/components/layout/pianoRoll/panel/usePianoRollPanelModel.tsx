@@ -87,14 +87,19 @@ import { planParamBlockGesture, type ParamBlockGesturePlan } from "../paramBlock
 import { reportParamBlockDiagnostic } from "../paramBlockDiagnostics";
 import { publishParamBlockWriteFailure } from "../paramBlockFeedback";
 import {
+    reportParamBlockLocalRejection,
+    reportParamBlockWriteFailure,
+} from "./paramBlockFailureReporting";
+import { ParamBlockCommitError } from "../paramBlockCommitError";
+import type { ParamBlockWritePreparation } from "../paramBlockWritePlan";
+import {
     toFrame,
     toParamBlockSourceClip,
     type ParamBlockSourceClip,
 } from "../paramBlockProjection";
 import { logicalBlockId, type ParamBlockView } from "../paramBlockTypes";
 import { resolveParamBlockGeometryClips } from "../paramBlockGeometryFreeze";
-import { fetchFullResCurve, readPvRange, uploadFullResCurveSegments } from "../selectionEditData";
-import type { ParamCurveCommitAuthority } from "../paramBlockCommitPolicy";
+import { fetchFullResCurve, readPvRange } from "../selectionEditData";
 import { useParamBlockTransitionPersistence } from "./useParamBlockTransitionPersistence";
 import { markParamBlockPreviewOwnedRevision as markPreviewOwnedRevision } from "../paramBlockPreviewOwnership";
 import { startPointerGesture } from "../gestures/pointerGesture";
@@ -2387,7 +2392,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         pointerGestureToken: null,
         pendingCommits: 0,
     });
-    const paramBlockCommitQueueRef = useRef<Promise<void>>(Promise.resolve());
     const paramBlockGestureSerialRef = useRef(0);
     const paramBlockActiveGestureTokenRef = useRef<number | null>(null);
     /**
@@ -3702,7 +3706,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 paramBlockEpoch,
                 getCurrentParamBlockEpoch: () => paramBlockEpochRef.current,
                 curveOwned: paramBlockViewRef.current !== null,
-                paramBlockCommitQueueRef,
                 paramViewRef,
                 liveEditActiveRef,
                 applyDenseToLiveEdit,
@@ -3713,30 +3716,14 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 setParamBlockState,
                 /*
                  * 曲线补丁与块布局走**同一个事务**：后端每次 `set` 都打一个撤销点，
-                 * 分成两次写就会让一次拖拽需要按两次撤销。`state` 是本次手势算好的
-                 * 最终编辑集（含 Pitch 块的逻辑中心）。
+                 * 分成两次写就会让一次拖拽需要按两次撤销。plan 的 prepare 里既算
+                 * 最终编辑集（含 Pitch 块的逻辑中心）也算曲线补丁。
+                 *
+                 * 【为什么交给 commitPlan 而不是 commit】prepare 会**读基准**
+                 * （全分辨率曲线 + 权威代次），它必须和写入在同一个队列槽里；
+                 * 冲突时写队列会再调一次 prepare 完成重基。
                  */
-                commitLineCurve: async (state, segments, revision, geometry, signature) => {
-                    const authority: ParamCurveCommitAuthority | undefined =
-                        revision === undefined
-                            ? undefined
-                            : {
-                                  expectedCurveRevision: revision,
-                                  ...(geometry === undefined
-                                      ? {}
-                                      : { expectedGeometryRevision: geometry }),
-                                  ...(signature === undefined
-                                      ? {}
-                                      : { expectedGeometrySignature: signature }),
-                              };
-                    await blockPersistence.commit(
-                        state,
-                        true,
-                        segments.map((segment) => ({ ...segment, param: editParam })),
-                        authority,
-                        "drag",
-                    );
-                },
+                commitBlockWrite: (plan) => blockPersistence.commitPlan(plan),
                 getAuthorityWatermark,
                 paramAuthorityRevision,
                 onParamCommitSucceeded,
@@ -3744,13 +3731,13 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 paramValuePopupEnabled: s.showParamValuePopup,
                 onParamValuePreviewChange: publishParamValuePreview,
                 paintNow: () => hostRef.current?.paintNow(),
+                /*
+                 * 写入失败已经由持久化层按类别上报过（rejected / conflict /
+                 * transport / silent）。这里再发一条只会把分类结果覆盖成一句通用
+                 * 红条 —— 只留结构化诊断。
+                 */
                 onError: (error) => {
-                    publishParamBlockFeedback({
-                        text: tf("status_param_block_action_failed"),
-                        tone: "danger",
-                        tooltip: backendDetail(error) ?? String(error),
-                        holdMs: 15_000,
-                    });
+                    reportParamBlockWriteFailure({ error, gesture: "drag", rootTrackId });
                 },
                 snapToggleHeldAt: (event) => {
                     const binding = firstBinding(mergedKeybindings["modifier.clipNoSnap"]);
@@ -3807,7 +3794,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             s.pitchSnapUnit,
             setParamBlockState,
             paramViewRef,
-            tf,
         ],
     );
 
@@ -4450,11 +4436,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                           );
                                 void transitionCommit.catch((error) => {
                                     console.error("[pianoRoll] transition commit failed", error);
-                                    publishParamBlockFeedback({
-                                        text: tf("status_param_block_action_failed"),
-                                        tone: "danger",
-                                        tooltip: backendDetail(error) ?? String(error),
-                                        holdMs: 15_000,
+                                    reportParamBlockWriteFailure({
+                                        error,
+                                        gesture: "transition",
+                                        rootTrackId,
                                     });
                                     const pvNow = paramViewRef.current;
                                     if (pvNow !== null) resetLiveEditPreview(pvNow);
@@ -4942,178 +4927,176 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                     }
                                     if (created.ok && rootTrackId !== null) {
                                         const curveBase = createCurveBase ?? paramViewRef.current;
+                                        /**
+                                         * 本槽算出的逐帧补丁（成功后抄进 handoff / 事务）。
+                                         * prepare 在冲突重基时会被再调一次，所以要 mutable。
+                                         */
+                                        let preparedCreateSegments:
+                                            | readonly {
+                                                  readonly startFrame: number;
+                                                  readonly values: readonly number[];
+                                              }[]
+                                            | undefined;
+                                        /**
+                                         * 队列槽内的准备：读全分辨率曲线 → 算补丁。
+                                         *
+                                         * 【为什么读也在这里】读与写必须在同一个槽里，否则
+                                         * `param_curve_revision` 会在两者之间被别人推进，
+                                         * 这次提交的 `expectedCurveRevision` 立刻过期 ——
+                                         * 旧实现正是这样把「新建块」变成概率性失败的。
+                                         */
+                                        const prepareCreate =
+                                            async (): Promise<ParamBlockWritePreparation> => {
+                                                if (curveBase === null) {
+                                                    /*
+                                                     * Layout-only commit: no curve window
+                                                     * exists yet, but the block must still
+                                                     * be persisted. Leaving it local was a
+                                                     * silent data-loss path.
+                                                     */
+                                                    return {
+                                                        state: created.state,
+                                                        checkpoint: true,
+                                                        patches: [],
+                                                    };
+                                                }
+                                                const fp = Math.max(1e-6, curveBase.framePeriodMs);
+                                                const startFrame = Math.max(
+                                                    0,
+                                                    Math.floor((createSpan.startSec * 1000) / fp),
+                                                );
+                                                const endFrame = Math.max(
+                                                    startFrame,
+                                                    (createLayoutBasis ? Math.round : Math.ceil)(
+                                                        (createSpan.endSec * 1000) / fp,
+                                                    ) - 1,
+                                                );
+                                                const source = await fetchFullResCurve({
+                                                    trackId: rootTrackId,
+                                                    param: editParam,
+                                                    startFrame,
+                                                    endFrame,
+                                                    paramView:
+                                                        createLayoutBasis !== null
+                                                            ? null
+                                                            : curveBase,
+                                                    // 创建提交带 curve patches；即使
+                                                    // curveBase 覆盖全分辨率也必须回源拿
+                                                    // authority，否则后端必拒。
+                                                    forceAuthority: true,
+                                                });
+                                                const segments = [
+                                                    {
+                                                        startFrame: source.startFrame,
+                                                        values: shiftParamBlockCurveValuesToTarget({
+                                                            values: source.values,
+                                                            target: resolveCreateBlockValue(
+                                                                createValue,
+                                                            ),
+                                                            param: editParam,
+                                                            flatten: createShape === "flat",
+                                                            curveOwned: createLayoutBasis !== null,
+                                                        }),
+                                                    },
+                                                ];
+                                                preparedCreateSegments = segments;
+                                                if (createLayoutBasis === null) {
+                                                    /*
+                                                     * 块图层尚未就绪：没有可写的编辑集，曲线
+                                                     * 仍然必须落盘。它同样进队列 —— 它会推进
+                                                     * `param_curve_revision`。
+                                                     */
+                                                    return {
+                                                        state: created.state,
+                                                        checkpoint: true,
+                                                        curveOnly: { param: editParam, segments },
+                                                    };
+                                                }
+                                                if (source.authorityRevision === undefined) {
+                                                    throw new ParamBlockCommitError({
+                                                        kind: "rejected",
+                                                        code: "missing_curve_authority",
+                                                        detail: "param block create requires expectedCurveRevision",
+                                                    });
+                                                }
+                                                return {
+                                                    state: created.state,
+                                                    checkpoint: true,
+                                                    patches: segments.map((segment) => ({
+                                                        ...segment,
+                                                        param: editParam,
+                                                    })),
+                                                    authority: {
+                                                        expectedCurveRevision:
+                                                            source.authorityRevision,
+                                                        ...(source.geometryRevision === undefined
+                                                            ? {}
+                                                            : {
+                                                                  expectedGeometryRevision:
+                                                                      source.geometryRevision,
+                                                              }),
+                                                        ...(source.geometrySignature === undefined
+                                                            ? {}
+                                                            : {
+                                                                  expectedGeometrySignature:
+                                                                      source.geometrySignature,
+                                                              }),
+                                                    },
+                                                };
+                                            };
                                         void enqueueParamBlockCreateCommit({
-                                            queue: paramBlockCommitQueueRef,
                                             activity: paramBlockDragActivityRef,
                                             liveActive: liveEditActiveRef,
-                                            rootTrackId,
+                                            run: () =>
+                                                blockPersistence.commitPlan({
+                                                    kind: "create",
+                                                    rootTrackId,
+                                                    prepare: prepareCreate,
+                                                }),
                                             onSettled: () => {
                                                 blockPersistence.flushReadback();
                                                 bumpRefreshToken();
                                                 bumpParamBlockStructure();
                                                 invalidate();
                                             },
-                                            work: async () => {
+                                        })
+                                            .then(() => {
                                                 if (createHandoff === null) return;
-                                                try {
-                                                    if (curveBase === null) {
-                                                        /*
-                                                         * Layout-only commit: no curve window
-                                                         * exists yet, but the block must still
-                                                         * be persisted. Leaving it local was a
-                                                         * silent data-loss path.
-                                                         */
-                                                        await blockPersistence.commit(
-                                                            created.state,
-                                                            true,
-                                                            [],
-                                                        );
-                                                        createHandoff.committed = true;
-                                                        createHandoff.requiresCurveAuthority = false;
-                                                        createHandoff.authorityRequestSeqAtCommit =
-                                                            getAuthorityWatermark().issuedRequestSeq;
-                                                        onParamCommitSucceeded();
-                                                        return;
-                                                    }
-                                                    const fp = Math.max(
-                                                        1e-6,
-                                                        curveBase.framePeriodMs,
-                                                    );
-                                                    const startFrame = Math.max(
-                                                        0,
-                                                        Math.floor(
-                                                            (createSpan.startSec * 1000) / fp,
-                                                        ),
-                                                    );
-                                                    const endFrame = Math.max(
-                                                        startFrame,
-                                                        (createLayoutBasis
-                                                            ? Math.round
-                                                            : Math.ceil)(
-                                                            (createSpan.endSec * 1000) / fp,
-                                                        ) - 1,
-                                                    );
-                                                    const source = await fetchFullResCurve({
-                                                        trackId: rootTrackId,
-                                                        param: editParam,
-                                                        startFrame,
-                                                        endFrame,
-                                                        paramView:
-                                                            createLayoutBasis !== null
-                                                                ? null
-                                                                : curveBase,
-                                                        // 创建提交带 curve patches；即使
-                                                        // curveBase 覆盖全分辨率也必须回源拿
-                                                        // authority，否则后端必拒。
-                                                        forceAuthority: true,
-                                                    });
-                                                    const segments = [
-                                                        {
-                                                            startFrame: source.startFrame,
-                                                            values: shiftParamBlockCurveValuesToTarget(
-                                                                {
-                                                                    values: source.values,
-                                                                    target: resolveCreateBlockValue(
-                                                                        createValue,
-                                                                    ),
-                                                                    param: editParam,
-                                                                    flatten: createShape === "flat",
-                                                                    curveOwned:
-                                                                        createLayoutBasis !== null,
-                                                                },
-                                                            ),
-                                                        },
-                                                    ];
-                                                    if (createLayoutBasis !== null) {
-                                                        if (
-                                                            source.authorityRevision === undefined
-                                                        ) {
-                                                            throw new Error(
-                                                                "param block create requires expectedCurveRevision",
-                                                            );
-                                                        }
-                                                        await blockPersistence.commit(
-                                                            created.state,
-                                                            true,
-                                                            segments.map((segment) => ({
-                                                                ...segment,
-                                                                param: editParam,
-                                                            })),
-                                                            {
-                                                                expectedCurveRevision:
-                                                                    source.authorityRevision,
-                                                                ...(source.geometryRevision ===
-                                                                undefined
-                                                                    ? {}
-                                                                    : {
-                                                                          expectedGeometryRevision:
-                                                                              source.geometryRevision,
-                                                                      }),
-                                                                ...(source.geometrySignature ===
-                                                                undefined
-                                                                    ? {}
-                                                                    : {
-                                                                          expectedGeometrySignature:
-                                                                              source.geometrySignature,
-                                                                      }),
-                                                            },
-                                                            "create",
-                                                        );
-                                                    } else {
-                                                        await uploadFullResCurveSegments({
-                                                            trackId: rootTrackId,
-                                                            param: editParam,
-                                                            segments,
-                                                        });
-                                                    }
-                                                    createHandoff.committedSegments = segments;
+                                                if (preparedCreateSegments !== undefined) {
+                                                    createHandoff.committedSegments =
+                                                        preparedCreateSegments;
                                                     const createTxNow =
                                                         paramBlockVisualTransactionRef.current;
                                                     if (createTxNow !== null) {
-                                                        createTxNow.committedSegments = segments;
-                                                    }
-                                                    createHandoff.authorityRequestSeqAtCommit =
-                                                        getAuthorityWatermark().issuedRequestSeq;
-                                                    createHandoff.committed = true;
-                                                    onParamCommitSucceeded();
-                                                } catch (error) {
-                                                    console.error(
-                                                        "[pianoRoll] create block curve commit failed",
-                                                        error,
-                                                    );
-                                                    publishParamBlockFeedback({
-                                                        text: tf(
-                                                            "status_param_block_action_failed",
-                                                        ),
-                                                        tone: "danger",
-                                                        tooltip:
-                                                            backendDetail(error) ?? String(error),
-                                                        holdMs: 15_000,
-                                                    });
-                                                    createHandoff.committed = true;
-                                                    createHandoff.requiresCurveAuthority = false;
-                                                    if (ownsCreatePreview()) {
-                                                        paramBlockCreateCommitRef.current = null;
-                                                        paramBlockResizeRef.current = null;
-                                                        paramBlockVisualTransactionRef.current =
-                                                            null;
-                                                        paramBlockInteractionCurveRef.current =
-                                                            null;
-                                                        const pvNow = paramViewRef.current;
-                                                        if (pvNow !== null)
-                                                            resetLiveEditPreview(pvNow);
+                                                        createTxNow.committedSegments =
+                                                            preparedCreateSegments;
                                                     }
                                                 }
-                                            },
-                                        }).catch((error) => {
-                                            console.error("[pianoRoll] create queue failed", error);
-                                            publishParamBlockFeedback({
-                                                text: tf("status_param_block_action_failed"),
-                                                tone: "danger",
-                                                tooltip: backendDetail(error) ?? String(error),
-                                                holdMs: 15_000,
+                                                createHandoff.authorityRequestSeqAtCommit =
+                                                    getAuthorityWatermark().issuedRequestSeq;
+                                                createHandoff.committed = true;
+                                                createHandoff.requiresCurveAuthority = false;
+                                                onParamCommitSucceeded();
+                                            })
+                                            .catch((error) => {
+                                                console.error(
+                                                    "[pianoRoll] create block commit failed",
+                                                    error,
+                                                );
+                                                reportParamBlockWriteFailure(error);
+                                                if (createHandoff !== null) {
+                                                    createHandoff.committed = true;
+                                                    createHandoff.requiresCurveAuthority = false;
+                                                }
+                                                if (ownsCreatePreview()) {
+                                                    paramBlockCreateCommitRef.current = null;
+                                                    paramBlockResizeRef.current = null;
+                                                    paramBlockVisualTransactionRef.current = null;
+                                                    paramBlockInteractionCurveRef.current = null;
+                                                    const pvNow = paramViewRef.current;
+                                                    if (pvNow !== null) resetLiveEditPreview(pvNow);
+                                                }
                                             });
-                                        });
                                     }
                                     {
                                         const finalFramePeriod =
@@ -5867,21 +5850,23 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         }
         if (!changed) {
             if (failures.length > 0) {
-                publishParamBlockFeedback({
-                    text: tf("status_param_block_action_failed"),
-                    tone: "danger",
-                    tooltip: failures.join(", "),
-                    holdMs: 8000,
+                reportParamBlockLocalRejection({
+                    code: "create_block_failed",
+                    detail: failures.join(", "),
+                    gesture: "create",
+                    rootTrackId,
+                    tf,
                 });
             }
             return;
         }
         if (failures.length > 0) {
-            publishParamBlockFeedback({
-                text: tf("status_param_block_action_failed"),
-                tone: "warning",
-                tooltip: failures.join(", "),
-                holdMs: 8000,
+            reportParamBlockLocalRejection({
+                code: "create_block_partially_failed",
+                detail: failures.join(", "),
+                gesture: "create",
+                rootTrackId,
+                tf,
             });
         }
         invalidateParamBlockVisualPreviews("structure");
@@ -5993,11 +5978,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     blockId: null,
                     frame: null,
                 });
-                publishParamBlockFeedback({
-                    text: tf("status_param_block_action_failed"),
-                    tone: "danger",
-                    tooltip: result.reason,
-                    holdMs: 8000,
+                reportParamBlockLocalRejection({
+                    code: result.reason,
+                    gesture,
+                    rootTrackId,
+                    tf,
                 });
                 return;
             }
@@ -6137,11 +6122,13 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         holdMs: 3000,
                     });
                 } else {
-                    publishParamBlockFeedback({
-                        text: tf("status_param_block_action_failed"),
-                        tone: "danger",
-                        tooltip: plan.error.detail ?? plan.error.code,
-                        holdMs: 8000,
+                    reportParamBlockLocalRejection({
+                        code: plan.error.code,
+                        ...(plan.error.detail === undefined ? {} : { detail: plan.error.detail }),
+                        gesture: "split",
+                        rootTrackId,
+                        blockId: target.id,
+                        tf,
                     });
                 }
                 return false;
@@ -6283,11 +6270,14 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             })
             .catch((error) => {
                 console.error("[pianoRoll] restore blocks failed", error);
-                publishParamBlockFeedback({
-                    text: tf("status_param_block_action_failed"),
-                    tone: "danger",
-                    tooltip: backendDetail(error) ?? String(error),
-                    holdMs: 15_000,
+                /* 这条命令不走块写入队列（整段还原由后端直接落盘），所以由这里上报。 */
+                publishParamBlockWriteFailure({
+                    failure: "transport",
+                    error: {
+                        code: "restore_failed",
+                        detail: backendDetail(error) ?? String(error),
+                    },
+                    tf,
                 });
             });
         setParamBlockContextMenu(null);
@@ -6316,57 +6306,69 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         async (block: ParamBlock): Promise<void> => {
             if (!rootTrackId || editParam !== "pitch" || !requireBlockPersistenceReady()) return;
             try {
-                const ranges = paramBlockLogicalFrameRanges(selectionFrameBlocks, block.id);
-                if (ranges.length === 0) return;
-                const segments: Array<{ startFrame: number; values: number[] }> = [];
-                let modeCenter = block.averageValue;
-                for (const range of ranges) {
-                    const startFrame = Math.max(0, range.startFrame);
-                    const endFrame = Math.max(startFrame, range.startFrame + range.frameCount - 1);
-                    const curve = await fetchFullResCurve({
-                        trackId: rootTrackId,
-                        param: "pitch",
-                        startFrame,
-                        endFrame,
-                        paramView,
-                    });
-                    if (modeCenter === null && curve.values.length > 0) {
-                        modeCenter = curve.values.find((value) => value > 0) ?? null;
+                /**
+                 * 队列槽内的准备：逐窗口读全分辨率曲线 → 归一到最近半音。
+                 *
+                 * 【为什么必须进队列】这条写入走 `set_param_frames`（无 CAS），但它
+                 * 同样推进 `param_curve_revision`。绕过队列就会暗算任何同时在飞的
+                 * CAS 提交 —— 旧实现正是这样把「归一化音高」变成概率性失败的。
+                 */
+                const prepareNormalize = async (): Promise<ParamBlockWritePreparation> => {
+                    const ranges = paramBlockLogicalFrameRanges(selectionFrameBlocks, block.id);
+                    const segments: Array<{ startFrame: number; values: number[] }> = [];
+                    let modeCenter = block.averageValue;
+                    for (const range of ranges) {
+                        const startFrame = Math.max(0, range.startFrame);
+                        const endFrame = Math.max(
+                            startFrame,
+                            range.startFrame + range.frameCount - 1,
+                        );
+                        const curve = await fetchFullResCurve({
+                            trackId: rootTrackId,
+                            param: "pitch",
+                            startFrame,
+                            endFrame,
+                            paramView,
+                        });
+                        if (modeCenter === null && curve.values.length > 0) {
+                            modeCenter = curve.values.find((value) => value > 0) ?? null;
+                        }
+                        const normalized = normalizePitchToNearestSemitone({
+                            values: curve.values,
+                            modeCenter,
+                        });
+                        if (normalized.every((value, index) => value === curve.values[index]))
+                            continue;
+                        segments.push({ startFrame: curve.startFrame, values: normalized });
                     }
-                    const normalized = normalizePitchToNearestSemitone({
-                        values: curve.values,
-                        modeCenter,
-                    });
-                    if (normalized.every((value, index) => value === curve.values[index])) continue;
-                    segments.push({ startFrame: curve.startFrame, values: normalized });
-                }
-                if (segments.length === 0) return;
-                await uploadFullResCurveSegments({
-                    trackId: rootTrackId,
-                    param: "pitch",
-                    segments,
+                    return {
+                        state: paramBlockStateRef.current,
+                        checkpoint: true,
+                        curveOnly: { param: "pitch", segments },
+                    };
+                };
+                await blockPersistence.commitPlan({
+                    kind: "normalize",
+                    rootTrackId,
+                    prepare: prepareNormalize,
                 });
                 bumpRefreshToken();
                 refreshParamBlockValuesAfterParamEdit("normalizePitch");
             } catch (error) {
                 console.error("[pianoRoll] normalize block pitch failed", error);
-                publishParamBlockFeedback({
-                    text: tf("status_param_block_action_failed"),
-                    tone: "danger",
-                    tooltip: backendDetail(error) ?? String(error),
-                    holdMs: 15_000,
-                });
+                reportParamBlockWriteFailure({ error, gesture: "normalize", rootTrackId });
             }
         },
         [
+            blockPersistence,
             bumpRefreshToken,
             editParam,
+            paramBlockStateRef,
             paramView,
             refreshParamBlockValuesAfterParamEdit,
             requireBlockPersistenceReady,
             rootTrackId,
             selectionFrameBlocks,
-            tf,
         ],
     );
     useLatestRefValue(normalizeSelectedParamBlockPitchRef, () => {

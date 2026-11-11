@@ -11,7 +11,17 @@ import { reportFrontendError } from "../../../services/frontendErrorLog";
 
 export interface ParamBlockDiagnostic {
     readonly code: string;
-    readonly gesture: "split" | "resize" | "create" | "delete" | "group" | "restore" | "drag";
+    readonly gesture:
+        | "split"
+        | "resize"
+        | "create"
+        | "delete"
+        | "group"
+        | "restore"
+        | "drag"
+        | "transition"
+        | "normalize"
+        | "layout";
     readonly rootTrackId: string | null;
     readonly blockId: string | null;
     readonly frame: number | null;

@@ -8,8 +8,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+    canRebaseParamBlockCommit,
     classifyParamBlockFailure,
-    isRetryableParamBlockFailure,
     ParamBlockCommitError,
     paramBlockFailureFeedback,
 } from "./paramBlockCommitError";
@@ -28,10 +28,36 @@ describe("classifyParamBlockFailure", () => {
         expect(geometry).toMatchObject({ kind: "conflict", code: "geometry" });
     });
 
-    it("treats any other Conflict: prefix as an unknown conflict (still retryable)", () => {
+    it("treats any other Conflict: prefix as an unknown conflict (still rebasable)", () => {
         const other = classifyParamBlockFailure(new Error("Conflict: something else"));
         expect(other).toMatchObject({ kind: "conflict", code: "unknown" });
-        expect(isRetryableParamBlockFailure(other)).toBe(true);
+        expect(canRebaseParamBlockCommit(other)).toBe(true);
+    });
+
+    /*
+     * 【重基判据的回归锁】旧实现只允许 `edit_set` 冲突重试，于是 `curve` /
+     * `geometry` 冲突一律变成用户可见的失败。现在写队列把「读基准」搬进了队列槽，
+     * 重试等于「重新读一遍世界、按同一个意图重算补丁」—— 三类冲突都可以重基。
+     */
+    it("★ rebases every conflict but never a transport failure", () => {
+        for (const message of [
+            "Conflict: parameter block edits changed",
+            "Conflict: parameter curve changed",
+            "Conflict: parameter geometry changed",
+            "Conflict: something else",
+        ]) {
+            expect(canRebaseParamBlockCommit(classifyParamBlockFailure(new Error(message)))).toBe(
+                true,
+            );
+        }
+        expect(canRebaseParamBlockCommit(classifyParamBlockFailure(new Error("ipc down")))).toBe(
+            false,
+        );
+        expect(
+            canRebaseParamBlockCommit(
+                classifyParamBlockFailure(new Error("Invalid: parameter block overlap")),
+            ),
+        ).toBe(false);
     });
 
     it("maps Invalid: to rejected with a stable code", () => {
@@ -42,7 +68,7 @@ describe("classifyParamBlockFailure", () => {
             kind: "rejected",
             code: "parameter_block_overlapping_members",
         });
-        expect(isRetryableParamBlockFailure(rejected)).toBe(false);
+        expect(canRebaseParamBlockCommit(rejected)).toBe(false);
         expect(paramBlockFailureFeedback(rejected)).toBe("rejected");
     });
 
@@ -52,13 +78,12 @@ describe("classifyParamBlockFailure", () => {
         );
         expect(cancelled.kind).toBe("cancelled");
         expect(paramBlockFailureFeedback(cancelled)).toBe("silent");
-        expect(isRetryableParamBlockFailure(cancelled)).toBe(false);
+        expect(canRebaseParamBlockCommit(cancelled)).toBe(false);
     });
 
     it("treats everything else as transport", () => {
         const transport = classifyParamBlockFailure(new Error("ipc disconnected"));
         expect(transport).toMatchObject({ kind: "transport", code: "transport" });
-        expect(isRetryableParamBlockFailure(transport)).toBe(true);
         expect(paramBlockFailureFeedback(transport)).toBe("transport");
     });
 

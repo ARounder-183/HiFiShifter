@@ -23,18 +23,38 @@ import {
 } from "./paramBlockCommitPolicy";
 import {
     classifyParamBlockFailure,
-    canReplayParamBlockCommit,
+    canRebaseParamBlockCommit,
     ParamBlockCommitError,
     paramBlockFailureFeedback,
     type ParamBlockFailureFeedback,
 } from "./paramBlockCommitError";
 import { validateParamBlockEditSet } from "./paramBlockValidate";
+import { uploadFullResCurveSegments } from "./selectionEditData";
+import type {
+    ParamBlockCurvePatch,
+    ParamBlockWritePlan,
+    ParamBlockWritePreparation,
+} from "./paramBlockWritePlan";
 
-/** 一次回读的权威结果：编辑集 + 帧周期。**没有几何** —— 几何永远是派生的。 */
-interface ParamBlockSnapshot {
+export type { ParamBlockCurvePatch, ParamBlockWritePlan, ParamBlockWritePreparation };
+
+/**
+ * 一次回读 / 一次写入的权威结果：编辑集 + 帧周期 + 后端曲线代次。
+ *
+ * 【为什么带着 curveRevision】它是 `set_param_block_edits` 的 CAS 单位，也是
+ * 「这次写入有没有生效」的唯一可比证据（预览释放判据要用它，见
+ * `paramBlockPreviewRelease`）。本地计数器与它不可比 —— 那是「过渡手柄每次都要
+ * 等满 2s 超时」的成因。
+ */
+export interface ParamBlockSnapshot {
     readonly edits: ParamBlockEditSet;
     readonly framePeriodMs: number;
+    /** 后端 `param_curve_revision`；0 = 还没落地过任何回包。 */
+    readonly curveRevision: number;
 }
+
+/** 冲突后最多再准备 / 重试几次。与既有「重试一次」语义一致。 */
+const PARAM_BLOCK_REBASE_ATTEMPTS = 1;
 
 function framePeriodOf(view: ParamBlockView | undefined, fallback: number | undefined): number {
     const value = view?.framePeriodMs;
@@ -61,6 +81,12 @@ function assertParamBlockEditSetValid(edits: ParamBlockEditSet): void {
     });
 }
 
+interface ParamBlockReply {
+    readonly view?: ParamBlockView;
+    readonly edits: ParamBlockEditSet;
+    readonly curveRevision?: number;
+}
+
 /**
  * 参数块编辑集的持久化。
  *
@@ -72,7 +98,7 @@ function assertParamBlockEditSetValid(edits: ParamBlockEditSet): void {
  * 【权威镜像】`server` 是**唯一**的权威代次来源。写路径的 CAS 基准
  * （`expectedEditRevision`）读的就是它，因此：
  *
- * - 任何**不经过 `commit`** 的后端写入（`restore_game_param_blocks` 等）
+ * - 任何**不经过 `commitPlan`** 的后端写入（`restore_game_param_blocks` 等）
  *   必须调 `adopt` 把回包交回来，否则下一次提交的基准是过期的；
  * - 本地编辑集的 `revision` 是**内容代次**（前端每落一个块 +1），服务端的是
  *   **权威代次**（每次提交 +1）—— 两者**不可比**。唯一的陈旧判据是
@@ -80,6 +106,16 @@ function assertParamBlockEditSetValid(edits: ParamBlockEditSet): void {
  *
  * 【为什么回读仍然存在】视图可以派生，**编辑集不能**：撤销 / 重做 / 分析回填 /
  * 宿主侧改动都只存在于后端。
+ *
+ * 【单一写队列】一个根只有一条队列（`queues`），「读基准 → 算补丁 → 写」整体在
+ * 队列槽内。旧实现有**两条**互不相识的队列（这里一条、面板的
+ * `paramBlockCommitQueueRef` 一条）共用同一个后端 CAS，交错时后写者必然过期 ——
+ * 那是「各种编辑场景下仍有概率报参数块操作失败」的结构性根因。
+ *
+ * 【违反边界的症状】
+ * - 在队列之外读基准再提交：冲突变成常态，用户看到"操作失败"；
+ * - 在队列槽内再排一次队：自己等自己，写入永久挂起（拖块 + 新建会死锁）；
+ * - 让调用点各自上报失败：单槽反馈被通用红条覆盖，真实原因被吞掉。
  */
 export function useParamBlockPersistence(args: {
     rootTrackId: string | null;
@@ -108,6 +144,7 @@ export function useParamBlockPersistence(args: {
     });
     /** 每个根的最近一次权威结果；提交队列用它做 `expectedEditRevision`。 */
     const server = useRef(new Map<string, ParamBlockSnapshot>());
+    /** 每个根**唯一**的写队列。 */
     const queues = useRef(new Map<string, Promise<unknown>>());
     const pending = useRef(new Map<string, number>());
     /** 被 deferral 挡下的回读：按根合并，手势结束后合成一次请求。 */
@@ -162,30 +199,28 @@ export function useParamBlockPersistence(args: {
      * 闸门只比**服务端代次**：迟到的回包（revision 更旧）不得覆盖更新的权威。
      * 返回 `null` 表示这份回包被丢弃。
      */
-    const adoptSnapshot = useCallback(
-        (
-            root: string,
-            reply: { readonly view?: ParamBlockView; readonly edits: ParamBlockEditSet },
-        ): ParamBlockSnapshot | null => {
-            const normalized = normalizeParamBlockEditSetWithDiagnostics(reply.edits);
-            if (normalized.diagnostics.length > 0) {
-                console.warn(
-                    "[pianoRoll] dropped malformed parameter blocks:",
-                    normalized.diagnostics.join(", "),
-                );
-            }
-            const edits = normalized.edits;
-            const known = server.current.get(root);
-            if (known !== undefined && known.edits.revision > edits.revision) return null;
-            const snapshot: ParamBlockSnapshot = {
-                edits,
-                framePeriodMs: framePeriodOf(reply.view, known?.framePeriodMs),
-            };
-            server.current.set(root, snapshot);
-            return snapshot;
-        },
-        [],
-    );
+    const adoptSnapshot = useCallback((root: string, reply: ParamBlockReply) => {
+        const normalized = normalizeParamBlockEditSetWithDiagnostics(reply.edits);
+        if (normalized.diagnostics.length > 0) {
+            console.warn(
+                "[pianoRoll] dropped malformed parameter blocks:",
+                normalized.diagnostics.join(", "),
+            );
+        }
+        const edits = normalized.edits;
+        const known = server.current.get(root);
+        if (known !== undefined && known.edits.revision > edits.revision) return null;
+        const snapshot: ParamBlockSnapshot = {
+            edits,
+            framePeriodMs: framePeriodOf(reply.view, known?.framePeriodMs),
+            curveRevision:
+                typeof reply.curveRevision === "number" && Number.isFinite(reply.curveRevision)
+                    ? reply.curveRevision
+                    : (known?.curveRevision ?? 0),
+        };
+        server.current.set(root, snapshot);
+        return snapshot;
+    }, []);
 
     /** 把手势 / 提交中的落地推到它们结束之后（只登记，不丢权威）。 */
     const deferLanding = useCallback((root: string): boolean => {
@@ -210,10 +245,7 @@ export function useParamBlockPersistence(args: {
      * 现在状态里根本没有几何。
      */
     const applyReply = useCallback(
-        (
-            root: string,
-            reply: { readonly view?: ParamBlockView; readonly edits: ParamBlockEditSet },
-        ) => {
+        (root: string, reply: ParamBlockReply) => {
             const snapshot = adoptSnapshot(root, reply);
             if (snapshot === null) return;
             if (latest.current.rootTrackId !== root) return;
@@ -242,7 +274,7 @@ export function useParamBlockPersistence(args: {
         [applyReply, publishReadError],
     );
 
-    /** 只刷新镜像（给提交冲突后的重试用）：不受手势 / 提交中守卫影响。 */
+    /** 只刷新镜像（给提交冲突后的重基用）：不受手势 / 提交中守卫影响。 */
     const refreshAuthority = useCallback(
         async (root: string): Promise<ParamBlockSnapshot | null> => {
             try {
@@ -335,81 +367,123 @@ export function useParamBlockPersistence(args: {
         void readback(root);
     });
 
-    const commit = useCallback(
-        (
-            state: ParamBlockState,
-            checkpoint = true,
-            curvePatches: readonly {
-                param: string;
-                startFrame: number;
-                values: readonly number[];
-            }[] = [],
-            authority?: ParamCurveCommitAuthority | null,
-            kind: ParamBlockCommitKind = "layout",
-        ) => {
-            /*
-             * 有曲线补丁却没有权威 revision，后端必定返回 `Conflict: parameter curve
-             * changed`。把这条契约放在队列入口，任何新调用点在开发期就会炸出
-             * 明确堆栈，而不是变成用户看到的“参数块操作失败”。
-             */
-            assertCurveCommitAuthority({ hasPatches: curvePatches.length > 0, authority });
-            const root = state.rootTrackId ?? latest.current.rootTrackId;
-            if (root === null) return Promise.resolve(undefined);
+    /** 一次 IPC。CAS 基准取镜像里的服务端代次。 */
+    const executeWrite = useCallback(
+        async (
+            root: string,
+            target: ParamBlockEditSet,
+            prepared: ParamBlockWritePreparation,
+            patches: readonly ParamBlockCurvePatch[],
+        ): Promise<ParamBlockSnapshot> => {
+            const current = server.current.get(root);
+            const reply = await timelineApi.setParamBlockEdits({
+                rootTrackId: root,
+                expectedEditRevision: current?.edits.revision ?? target.revision,
+                edits: target.blocks,
+                checkpoint: prepared.checkpoint ?? true,
+                curvePatches: patches,
+                expectedCurveRevision: prepared.authority?.expectedCurveRevision,
+                expectedGeometryRevision: prepared.authority?.expectedGeometryRevision,
+                expectedGeometrySignature: prepared.authority?.expectedGeometrySignature,
+            });
+            const snapshot: ParamBlockSnapshot = {
+                edits: normalizeParamBlockEditSet(reply.edits ?? target),
+                framePeriodMs: framePeriodOf(
+                    reply.view,
+                    current?.framePeriodMs ?? prepared.state.framePeriodMs,
+                ),
+                curveRevision:
+                    typeof reply.curveRevision === "number" && Number.isFinite(reply.curveRevision)
+                        ? reply.curveRevision
+                        : (current?.curveRevision ?? 0),
+            };
+            server.current.set(root, snapshot);
+            return snapshot;
+        },
+        [],
+    );
 
-            /** 基线就绪之后的真正写入（预检 → 排队 → CAS → 分类重试）。 */
-            const run = (): Promise<ParamBlockSnapshot | undefined> => {
-                const target = normalizeParamBlockEditSet(state.editSet);
+    /**
+     * 队列槽内的一次完整写入：准备 → 预检 → 一次 IPC →（冲突则重基再试）。
+     *
+     * 【重基而不是重放】`canRebaseParamBlockCommit` 放开了 `curve` / `geometry` 冲突，
+     * 前提正是 `prepare()` 会重新读基准并按同一个意图重算补丁。旧实现只允许
+     * `edit_set` 原样重放，于是另外两类冲突一律变成用户可见的失败。
+     *
+     * 【仍然排除 transport】传输失败时上一次写入**可能已经落地**，重试会把一次
+     * 用户操作变成两次写入（历史里出现两步）。
+     */
+    const runPlan = useCallback(
+        async (root: string, plan: ParamBlockWritePlan): Promise<ParamBlockSnapshot> => {
+            let lastFailure: ParamBlockCommitError | null = null;
+            for (let attempt = 0; attempt <= PARAM_BLOCK_REBASE_ATTEMPTS; attempt += 1) {
+                const prepared = await plan.prepare();
+                /*
+                 * 降级路径：只写曲线（无 CAS）。它没有编辑集可写，但仍然走同一个
+                 * 队列槽 —— 否则它会推进 `param_curve_revision`，暗算别人的基准。
+                 */
+                if (prepared.curveOnly !== undefined) {
+                    await uploadFullResCurveSegments({
+                        trackId: root,
+                        param: prepared.curveOnly.param,
+                        segments: prepared.curveOnly.segments.map((segment) => ({
+                            startFrame: segment.startFrame,
+                            values: segment.values.slice(),
+                        })),
+                    });
+                    const mirror = server.current.get(root);
+                    if (mirror === undefined) {
+                        throw new ParamBlockCommitError({
+                            kind: "transport",
+                            code: "not_ready",
+                            detail: "parameter block edit set is not loaded",
+                        });
+                    }
+                    return mirror;
+                }
+                const target = normalizeParamBlockEditSet(prepared.state.editSet);
                 // ★ 预检：非法编辑集不排队、不发 IPC（见 assertParamBlockEditSetValid）。
                 assertParamBlockEditSetValid(target);
+                const patches = prepared.patches ?? [];
+                assertCurveCommitAuthority({
+                    hasPatches: patches.length > 0,
+                    authority: prepared.authority,
+                });
+                try {
+                    return await executeWrite(root, target, prepared, patches);
+                } catch (error) {
+                    const failure = classifyParamBlockFailure(error);
+                    lastFailure = failure;
+                    if (!canRebaseParamBlockCommit(failure)) throw failure;
+                    if (attempt === PARAM_BLOCK_REBASE_ATTEMPTS) throw failure;
+                    // 重基：刷新权威镜像，再让 prepare() 重新读基准。
+                    if ((await refreshAuthority(root)) === null) throw failure;
+                }
+            }
+            throw (
+                lastFailure ?? new ParamBlockCommitError({ kind: "transport", code: "transport" })
+            );
+        },
+        [executeWrite, refreshAuthority],
+    );
+
+    /**
+     * **唯一**的写入入口。
+     *
+     * 顺序：确认已有基线 → 占位 pending → 排进该根的队列 → 槽内准备并写入 →
+     * 落地 / 分类上报 → 释放占位。
+     */
+    const commitPlan = useCallback(
+        (plan: ParamBlockWritePlan): Promise<ParamBlockSnapshot | undefined> => {
+            const root = plan.rootTrackId ?? latest.current.rootTrackId;
+            if (root === null) return Promise.resolve(undefined);
+
+            const start = (): Promise<ParamBlockSnapshot | undefined> => {
                 pending.current.set(root, (pending.current.get(root) ?? 0) + 1);
-                const execute = async (): Promise<ParamBlockSnapshot> => {
-                    const current = server.current.get(root);
-                    const reply = await timelineApi.setParamBlockEdits({
-                        rootTrackId: root,
-                        expectedEditRevision: current?.edits.revision ?? target.revision,
-                        edits: target.blocks,
-                        checkpoint,
-                        curvePatches,
-                        expectedCurveRevision: authority?.expectedCurveRevision,
-                        expectedGeometryRevision: authority?.expectedGeometryRevision,
-                        expectedGeometrySignature: authority?.expectedGeometrySignature,
-                    });
-                    const snapshot: ParamBlockSnapshot = {
-                        edits: normalizeParamBlockEditSet(reply.edits ?? target),
-                        framePeriodMs: framePeriodOf(
-                            reply.view,
-                            current?.framePeriodMs ?? state.framePeriodMs,
-                        ),
-                    };
-                    server.current.set(root, snapshot);
-                    return snapshot;
-                };
-                /*
-                 * 【冲突重试一次】CAS 基准是镜像里的服务端代次。镜像过期只有两种成因：
-                 * 带外写入（`restore_game_param_blocks`）与撤销 / 重做推进代次而回读
-                 * 尚未落地。两者都不代表"别人改了内容"，所以先刷新镜像再原样重试一次；
-                 * 第二次仍冲突就说明真的有人在并发改，交给调用方报错（整集覆盖本来就是
-                 * "最后写入者胜"，重试不会放大任何风险）。
-                 */
-                const executeWithRetry = async (): Promise<ParamBlockSnapshot> => {
-                    try {
-                        return await execute();
-                    } catch (error) {
-                        const failure = classifyParamBlockFailure(error);
-                        /*
-                         * 【重试一次】判据只有一份（canReplayParamBlockCommit）：它比
-                         * `isRetryableParamBlockFailure` 更窄，因为这里重放的是同一份补丁与
-                         * 同一组 expected 基准（见该函数的说明）。
-                         */
-                        if (!canReplayParamBlockCommit(failure)) throw failure;
-                        if ((await refreshAuthority(root)) === null) throw failure;
-                        return execute();
-                    }
-                };
                 const job = (queues.current.get(root) ?? Promise.resolve())
                     .catch(() => undefined)
-                    .then(executeWithRetry);
-                const complete = trackParamBlockCommit(kind, root, job)
+                    .then(() => runPlan(root, plan));
+                const complete = trackParamBlockCommit(plan.kind, root, job)
                     .then((snapshot) => {
                         if (snapshot) latest.current.onCommitted?.();
                         if (
@@ -465,12 +539,43 @@ export function useParamBlockPersistence(args: {
                             detail: "parameter block edit set is not loaded",
                         });
                     }
-                    return run();
+                    return start();
                 });
             }
-            return run();
+            return start();
         },
-        [publishWriteError, refreshAuthority, writeState],
+        [publishWriteError, refreshAuthority, runPlan, writeState],
+    );
+
+    /**
+     * 一次性写入（状态与补丁在调用时就已算好）。
+     *
+     * 【为什么保留这个签名】分割 / 编组 / 删除 / 过渡 / 幅度这些命令的补丁是
+     * 纯本地推导的，没有「读基准」这一步，重基也只是重发同一份意图。把它们都改成
+     * `ParamBlockWritePlan` 只会增加噪音；真正的队列仍然只有一条（`commitPlan`）。
+     */
+    const commit = useCallback(
+        (
+            state: ParamBlockState,
+            checkpoint = true,
+            curvePatches: readonly ParamBlockCurvePatch[] = [],
+            authority?: ParamCurveCommitAuthority | null,
+            kind: ParamBlockCommitKind = "layout",
+        ) => {
+            /*
+             * 有曲线补丁却没有权威 revision，后端必定返回 `Conflict: parameter curve
+             * changed`。把这条契约放在队列入口，任何新调用点在开发期就会炸出
+             * 明确堆栈，而不是变成用户看到的“参数块操作失败”。
+             *
+             * 这里是**同步**抛（不是 rejected promise）：契约违反必须在调用点就炸。
+             */
+            assertCurveCommitAuthority({ hasPatches: curvePatches.length > 0, authority });
+            return commitPlan({
+                kind,
+                prepare: async () => ({ state, checkpoint, patches: curvePatches, authority }),
+            });
+        },
+        [commitPlan],
     );
 
     const persist = useCallback(
@@ -496,6 +601,8 @@ export function useParamBlockPersistence(args: {
         ready: readyRoot === args.rootTrackId && args.state.rootTrackId === args.rootTrackId,
         persist,
         commit,
+        /** 唯一的写入入口（队列内读基准 + 冲突重基）。 */
+        commitPlan,
         /**
          * 后端侧改动（分析回填 / 宿主编辑）后的收敛入口。
          *
@@ -511,10 +618,7 @@ export function useParamBlockPersistence(args: {
          * 前进却不告诉镜像，下一次提交就会以过期基准被拒（用户看到"点了没反应"）。
          * 这里把回包直接交进同一条落地路径，不需要多一次 IPC。
          */
-        adopt: (
-            root: string,
-            reply: { readonly view?: ParamBlockView; readonly edits: ParamBlockEditSet },
-        ) => {
+        adopt: (root: string, reply: ParamBlockReply) => {
             applyReply(root, reply);
         },
         flushReadback,

@@ -12,9 +12,18 @@ import { useParamBlockTransitionPersistence } from "./useParamBlockTransitionPer
 const mocks = vi.hoisted(() => ({
     fetchFullResCurve: vi.fn(),
     setParamBlockTransition: vi.fn(),
-    commit: vi.fn(),
+    commitPlan: vi.fn(),
     stampCurveCommit: vi.fn(),
 }));
+
+/** 最近一次 plan 的准备结果（由 commitPlan 的 mock 填入）。 */
+const prepared: {
+    current: {
+        patches?: readonly { param: string; startFrame: number; values: readonly number[] }[];
+        authority?: { expectedCurveRevision: number } | null;
+        checkpoint?: boolean;
+    } | null;
+} = { current: null };
 
 vi.mock("../selectionEditData", async (importOriginal) => ({
     ...(await importOriginal<typeof import("../selectionEditData")>()),
@@ -65,7 +74,7 @@ function Harness() {
     const hook = useParamBlockTransitionPersistence({
         rootTrackId: "root",
         editParam: "pitch",
-        blockPersistence: { commit: mocks.commit },
+        blockPersistence: { commitPlan: mocks.commitPlan },
         paramBlockStateRef: { current: state },
         paramBlockViewRef: { current: {} as ParamBlockView },
         paramBlockSourceClipsRef: { current: [] },
@@ -89,7 +98,8 @@ function Harness() {
 beforeEach(() => {
     mocks.fetchFullResCurve.mockReset();
     mocks.setParamBlockTransition.mockReset();
-    mocks.commit.mockReset();
+    mocks.commitPlan.mockReset();
+    prepared.current = null;
     mocks.fetchFullResCurve.mockResolvedValue({
         startFrame: 180,
         values: [60, 60, 60, 60],
@@ -104,7 +114,11 @@ beforeEach(() => {
             editSet: { ...input.state.editSet, revision: input.state.editSet.revision + 1 },
         },
     }));
-    mocks.commit.mockResolvedValue(undefined);
+    mocks.commitPlan.mockImplementation(async (plan: { prepare: () => Promise<unknown> }) => {
+        const result = await plan.prepare();
+        prepared.current = result as typeof prepared.current;
+        return result;
+    });
     host = document.createElement("div");
     document.body.append(host);
     root = createRoot(host);
@@ -127,17 +141,17 @@ describe("useParamBlockTransitionPersistence", () => {
         await act(async () => {
             await api.persistPitchTransitionCurve?.(LEFT, RIGHT, 0.1);
         });
-        expect(mocks.commit).toHaveBeenCalledTimes(1);
-        const [stateArg, checkpoint, patches, authority, kind] = mocks.commit.mock.calls[0];
-        expect(stateArg.editSet.revision).toBe(1);
-        expect(checkpoint).toBe(true);
-        expect(patches.length).toBeGreaterThan(0);
-        expect(authority).toEqual({
+        expect(mocks.commitPlan).toHaveBeenCalledTimes(1);
+        expect(mocks.commitPlan.mock.calls[0][0]).toMatchObject({ kind: "transition" });
+        const plan = prepared.current;
+        expect(plan).not.toBeNull();
+        expect(plan?.checkpoint).toBe(true);
+        expect((plan?.patches ?? []).length).toBeGreaterThan(0);
+        expect(plan?.authority).toEqual({
             expectedCurveRevision: 11,
             expectedGeometryRevision: 3,
             expectedGeometrySignature: "geo",
         });
-        expect(kind).toBe("transition");
     });
 
     it("commits restore as one width=0 transaction rather than layout + upload", async () => {
@@ -147,10 +161,27 @@ describe("useParamBlockTransitionPersistence", () => {
                 restoreOriginal: true,
             });
         });
-        expect(mocks.commit).toHaveBeenCalledTimes(1);
-        const [, , patches, authority, kind] = mocks.commit.mock.calls[0];
-        expect(patches.length).toBe(1);
-        expect(authority.expectedCurveRevision).toBe(11);
-        expect(kind).toBe("transition");
+        expect(mocks.commitPlan).toHaveBeenCalledTimes(1);
+        const plan = prepared.current;
+        expect((plan?.patches ?? []).length).toBe(1);
+        expect(plan?.authority?.expectedCurveRevision).toBe(11);
+    });
+
+    /*
+     * 【读基准在队列槽内的回归锁】`fetchFullResCurve` 必须发生在
+     * `commitPlan` 的 prepare 里（= 槽内），而不是调用前。否则它与写入之间
+     * 只要有一次别的写入，`expectedCurveRevision` 就过期了。
+     */
+    it("★ 读基准发生在 commitPlan 的 prepare 里（槽内），而不是调用之前", async () => {
+        await render();
+        expect(mocks.fetchFullResCurve).not.toHaveBeenCalled();
+        await act(async () => {
+            await api.persistPitchTransitionCurve?.(LEFT, RIGHT, 0.1);
+        });
+        expect(mocks.fetchFullResCurve).toHaveBeenCalledTimes(1);
+        // prepare 被调用的时刻 fetch 尚未发生：顺序由 commitPlan 掌握。
+        const callOrder = mocks.commitPlan.mock.invocationCallOrder[0];
+        const fetchOrder = mocks.fetchFullResCurve.mock.invocationCallOrder[0];
+        expect(callOrder).toBeLessThan(fetchOrder);
     });
 });

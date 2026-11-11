@@ -785,7 +785,6 @@ export const jaJP = {
     param_blocks_create_from_selection: "選択範囲からパラメータブロックを作成",
     status_param_block_edit_rejected: "パラメータブロック編集が拒否されました",
     status_param_block_split_too_close: "分割位置がブロックの端に近すぎます",
-    status_param_block_action_failed: "パラメータブロック操作に失敗しました",
     status_param_block_conflict_resynced:
         "パラメータブロックが他の操作で変更されたため、再同期しました",
     status_param_block_write_failed: "パラメータブロックの書き込みに失敗しました",

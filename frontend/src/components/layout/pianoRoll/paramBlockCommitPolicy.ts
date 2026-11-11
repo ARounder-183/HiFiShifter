@@ -14,6 +14,8 @@
  * - 无 patches 的纯布局提交仍允许不携带 authority。
  */
 
+import { ParamBlockCommitError } from "./paramBlockCommitError";
+
 export interface ParamCurveCommitAuthority {
     /** 必须来自同一次全分辨率读数的 `authorityRevision`。 */
     readonly expectedCurveRevision: number;
@@ -26,6 +28,11 @@ export interface ParamCurveCommitAuthority {
  *
  * 抛错而不是静默降级：没有权威 watermark 的 curve patch 提交在后端**必然**
  * 被拒，提前在前端抛出能保留调用栈，且不会把一个用户手势变成“随机失败”。
+ *
+ * 【为什么是 `rejected` 而不是普通 Error】普通 Error 会被分类器归为 `transport`
+ * （见 `paramBlockCommitError`），于是这条**开发期契约违反**在用户那里显示成
+ * "写入失败，编辑可能丢了"。归成 `rejected` 之后，它至少是一条可读的校验拒绝，
+ * 而 `code` 直接指出缺的是哪个字段。
  */
 export function assertCurveCommitAuthority(args: {
     readonly hasPatches: boolean;
@@ -34,6 +41,10 @@ export function assertCurveCommitAuthority(args: {
     if (!args.hasPatches) return;
     const revision = args.authority?.expectedCurveRevision;
     if (typeof revision !== "number" || !Number.isFinite(revision)) {
-        throw new Error("param block curve commit requires expectedCurveRevision");
+        throw new ParamBlockCommitError({
+            kind: "rejected",
+            code: "missing_curve_authority",
+            detail: "param block curve commit requires expectedCurveRevision",
+        });
     }
 }

@@ -7,6 +7,8 @@
  * blocks or their curves is registered here; history jumps drain this set
  * before issuing the jump command.
  */
+import { reportParamBlockDiagnostic } from "./paramBlockDiagnostics";
+
 export type ParamBlockCommitKind =
     | "drag"
     | "resize"
@@ -71,10 +73,19 @@ export async function drainParamBlockCommits(timeoutMs = 5000): Promise<void> {
         const now = typeof performance !== "undefined" ? performance.now() : Date.now();
         const remaining = deadline - now;
         if (remaining <= 0) {
-            console.warn(
-                "[paramBlocks] commit drain timeout",
-                [...pending].map((entry) => entry.kind),
-            );
+            /*
+             * 超时是**诊断**，不是致命错误：IPC 坏掉不能把撤销永久锁死。
+             * 但 `console.warn` 在发布构建里等于没有 —— 走结构化错误日志，
+             * 用户上报问题时能查到是哪几笔写没排空。
+             */
+            reportParamBlockDiagnostic({
+                code: "commit_drain_timeout",
+                gesture: "layout",
+                rootTrackId: null,
+                blockId: null,
+                frame: null,
+                detail: [...pending].map((entry) => entry.kind).join(","),
+            });
             return;
         }
         await Promise.race([

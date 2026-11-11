@@ -7,6 +7,14 @@
  *
  * 【关键约束】带 curve patches 的提交必须携带 `expectedCurveRevision`；否则
  * 后端会以 `Conflict: parameter curve changed` 拒绝整笔事务。
+ *
+ * 【为什么读基准在队列槽里】曲线代次是进程全局计数，任何无关写入都会让它前进。
+ * 旧实现先 `fetchFullResCurve` 拿 authority、再调 `commit` 排队，两者之间只要
+ * 有一次别的写入，这次过渡就必然以 `curve` 冲突失败 —— 而旧的重试只会原样重放
+ * 同一份 authority，重试也救不回来。现在整段（读基准 → 算补丁 → 写）都在
+ * `commitPlan` 的槽内，冲突时队列会再调一次 `prepare` 完成重基。
+ *
+ * 【违反边界的症状】把读挪回槽外 ⇒ 拖完块立刻拖过渡手柄会偶发「参数块操作失败」。
  */
 import { useCallback } from "react";
 import type { Dispatch, SetStateAction } from "react";
@@ -22,21 +30,18 @@ import {
     type ParamBlockState,
 } from "../paramBlocks";
 import type { ParamCurveCommitAuthority } from "../paramBlockCommitPolicy";
+import { ParamBlockCommitError } from "../paramBlockCommitError";
 import { markParamBlockPreviewOwnedRevision } from "../paramBlockPreviewOwnership";
 import { fetchFullResCurve } from "../selectionEditData";
+import type { ParamBlockWritePreparation } from "../paramBlockWritePlan";
 import type { useParamBlockPersistence } from "../useParamBlockPersistence";
 
 type Ref<T> = { current: T };
-type CurvePatch = {
-    readonly param: string;
-    readonly startFrame: number;
-    readonly values: readonly number[];
-};
 
 export function useParamBlockTransitionPersistence(args: {
     readonly rootTrackId: string | null;
     readonly editParam: string;
-    readonly blockPersistence: Pick<ReturnType<typeof useParamBlockPersistence>, "commit">;
+    readonly blockPersistence: Pick<ReturnType<typeof useParamBlockPersistence>, "commitPlan">;
     readonly paramBlockStateRef: Ref<ParamBlockState>;
     readonly paramBlockViewRef: Ref<ParamBlockView | null>;
     readonly paramBlockSourceClipsRef: Ref<readonly ParamBlockSourceClip[]>;
@@ -65,8 +70,6 @@ export function useParamBlockTransitionPersistence(args: {
         left: ParamBlock,
         right: ParamBlock,
         widthSec: number,
-        curvePatches?: readonly CurvePatch[],
-        authority?: ParamCurveCommitAuthority | null,
     ) => Promise<void>;
     persistPitchTransitionCurve: (
         left: ParamBlock,
@@ -108,38 +111,138 @@ export function useParamBlockTransitionPersistence(args: {
         [dragSnapshotRef, resizeRef, visualTransactionRef],
     );
 
-    /** 只提交块过渡布局；所有参数都持久化 transitionOutSec。 */
-    const persistBlockTransition = useCallback(
-        async (
+    /**
+     * 把「设置过渡宽度」这一步做成可重跑的闭包。
+     *
+     * 【为什么需要 base】重基时本地状态已经被上一次尝试改过；必须始终从**本次
+     * 手势开始前**的编辑集重算，否则第二次会叠加上一次的结果。
+     */
+    const planTransition = useCallback(
+        (
             left: ParamBlock,
             right: ParamBlock,
             widthSec: number,
-            curvePatches: readonly CurvePatch[] = [],
-            authority?: ParamCurveCommitAuthority | null,
-        ): Promise<void> => {
+            withCurve: boolean,
+            restoreOriginal: boolean,
+        ): {
+            readonly prepare: () => Promise<ParamBlockWritePreparation>;
+            /** 本槽最近一次准备算出的曲线片段（重基时会刷新）。 */
+            readonly segments: { current: readonly { startFrame: number; values: number[] }[] };
+        } => {
+            let base: ParamBlockState | null = null;
+            const computed: { current: readonly { startFrame: number; values: number[] }[] } = {
+                current: [],
+            };
+            return {
+                segments: computed,
+                prepare: async () => {
+                    if (base === null) base = paramBlockStateRef.current;
+                    const edit = setParamBlockTransition({
+                        state: base,
+                        left,
+                        right,
+                        transitionSec: widthSec,
+                        clips: paramBlockSourceClipsRef.current,
+                    });
+                    if (!edit.ok) {
+                        throw new ParamBlockCommitError({
+                            kind: "rejected",
+                            code: edit.reason,
+                            detail: edit.reason,
+                        });
+                    }
+                    /*
+                     * 本地先落位：过渡宽度立刻到位，不必等回包。
+                     * 单一写入者：只通过 hook 的 setState 更新。
+                     */
+                    setParamBlockState(edit.state);
+                    markOwned(edit.state.editSet.revision);
+                    if (!withCurve) {
+                        return { state: edit.state, checkpoint: true, patches: [] };
+                    }
+                    const framePeriodMs = paramViewRef.current?.framePeriodMs ?? 5;
+                    const boundaryFrame = Math.round((right.startSec * 1000) / framePeriodMs);
+                    const widthFrames = Math.max(1, Math.round((widthSec * 1000) / framePeriodMs));
+                    const startFrame = Math.max(
+                        0,
+                        Math.floor((left.startSec * 1000) / framePeriodMs),
+                    );
+                    const endFrame = Math.max(
+                        boundaryFrame,
+                        Math.round((right.endSec * 1000) / framePeriodMs) - 1,
+                    );
+                    const readStart = Math.max(startFrame, boundaryFrame - widthFrames);
+                    const readEnd = Math.min(endFrame, boundaryFrame + widthFrames - 1);
+                    const source = await fetchFullResCurve({
+                        trackId: rootTrackId as string,
+                        param: "pitch",
+                        startFrame: readStart,
+                        endFrame: readEnd,
+                        paramView: null,
+                        forceAuthority: true,
+                    });
+                    if (source.authorityRevision === undefined) {
+                        throw new ParamBlockCommitError({
+                            kind: "rejected",
+                            code: "missing_curve_authority",
+                            detail: "param block transition requires expectedCurveRevision",
+                        });
+                    }
+                    const authority: ParamCurveCommitAuthority = {
+                        expectedCurveRevision: source.authorityRevision,
+                        ...(source.geometryRevision === undefined
+                            ? {}
+                            : { expectedGeometryRevision: source.geometryRevision }),
+                        ...(source.geometrySignature === undefined
+                            ? {}
+                            : { expectedGeometrySignature: source.geometrySignature }),
+                    };
+                    const segments = restoreOriginal
+                        ? [{ startFrame: source.startFrame, values: source.values.slice() }]
+                        : buildParamBlockTransitionSegments({
+                              boundaryFrame,
+                              widthFrames,
+                              targetValue: right.averageValue ?? 60,
+                              leftStartFrame: startFrame,
+                              rightEndFrame: endFrame,
+                              leftValue: left.averageValue ?? 60,
+                              rightValue: right.averageValue ?? 60,
+                              sourceAt: (frame: number): number =>
+                                  Number(source.values[frame - source.startFrame]) ||
+                                  (right.averageValue ?? 60),
+                          });
+                    computed.current = segments;
+                    stampCurveCommit({ segments, authority });
+                    return {
+                        state: edit.state,
+                        checkpoint: true,
+                        patches: segments.map((segment) => ({ ...segment, param: "pitch" })),
+                        authority,
+                    };
+                },
+            };
+        },
+        [
+            markOwned,
+            paramBlockSourceClipsRef,
+            paramBlockStateRef,
+            paramViewRef,
+            rootTrackId,
+            setParamBlockState,
+            stampCurveCommit,
+        ],
+    );
+
+    /** 只提交块过渡布局；所有参数都持久化 transitionOutSec。 */
+    const persistBlockTransition = useCallback(
+        async (left: ParamBlock, right: ParamBlock, widthSec: number): Promise<void> => {
             if (!rootTrackId) return;
-            const state = paramBlockStateRef.current;
             if (paramBlockViewRef.current === null) return;
-            const edit = setParamBlockTransition({
-                state,
-                left,
-                right,
-                transitionSec: widthSec,
-                clips: paramBlockSourceClipsRef.current,
+            await blockPersistence.commitPlan({
+                kind: "transition",
+                rootTrackId,
+                ...planTransition(left, right, widthSec, false, false),
             });
-            if (!edit.ok) throw new Error(edit.reason);
-            setParamBlockState(edit.state);
-            markOwned(edit.state.editSet.revision);
-            if (curvePatches.length > 0) {
-                stampCurveCommit({
-                    segments: curvePatches.map((patch) => ({
-                        startFrame: patch.startFrame,
-                        values: patch.values,
-                    })),
-                    authority,
-                });
-            }
-            await blockPersistence.commit(edit.state, true, curvePatches, authority, "transition");
             bumpRefreshToken();
             invalidate();
         },
@@ -147,13 +250,9 @@ export function useParamBlockTransitionPersistence(args: {
             blockPersistence,
             bumpRefreshToken,
             invalidate,
-            markOwned,
-            paramBlockSourceClipsRef,
-            paramBlockStateRef,
             paramBlockViewRef,
+            planTransition,
             rootTrackId,
-            setParamBlockState,
-            stampCurveCommit,
         ],
     );
 
@@ -167,95 +266,36 @@ export function useParamBlockTransitionPersistence(args: {
         ): Promise<void> => {
             if (!rootTrackId || editParam !== "pitch") return;
             if (widthSec <= 1e-6 && options?.restoreOriginal !== true) return;
-            const framePeriodMs = paramViewRef.current?.framePeriodMs ?? 5;
-            const boundaryFrame = Math.round((right.startSec * 1000) / framePeriodMs);
-            const widthFrames = Math.max(1, Math.round((widthSec * 1000) / framePeriodMs));
-            const startFrame = Math.max(0, Math.floor((left.startSec * 1000) / framePeriodMs));
-            const endFrame = Math.max(
-                boundaryFrame,
-                Math.round((right.endSec * 1000) / framePeriodMs) - 1,
-            );
-            const readStart = Math.max(startFrame, boundaryFrame - widthFrames);
-            const readEnd = Math.min(endFrame, boundaryFrame + widthFrames - 1);
-            const source = await fetchFullResCurve({
-                trackId: rootTrackId,
-                param: "pitch",
-                startFrame: readStart,
-                endFrame: readEnd,
-                paramView: null,
-                forceAuthority: true,
-            });
-            if (source.authorityRevision === undefined) {
-                throw new Error("param block transition requires expectedCurveRevision");
-            }
-            const authority: ParamCurveCommitAuthority = {
-                expectedCurveRevision: source.authorityRevision,
-                ...(source.geometryRevision === undefined
-                    ? {}
-                    : { expectedGeometryRevision: source.geometryRevision }),
-                ...(source.geometrySignature === undefined
-                    ? {}
-                    : { expectedGeometrySignature: source.geometrySignature }),
-            };
-
-            if (options?.restoreOriginal === true) {
+            const restoreOriginal = options?.restoreOriginal === true;
+            const plan = planTransition(left, right, widthSec, true, restoreOriginal);
+            await blockPersistence.commitPlan({ kind: "transition", rootTrackId, ...plan });
+            if (restoreOriginal) {
                 /*
-                 * 撤销过渡必须写回**提交态**曲线，而不是当前 live 预览；
-                 * 一次带 authority 的读 + 一次 width=0 的布局事务，保证
-                 * 布局与曲线落在同一个撤销点。
+                 * 撤销过渡必须把**提交态**曲线同步到显示（而不是留在 live 预览上）。
+                 * 片段就是刚才真正写进去的那一份 —— 不再多读一次 IPC。
                  */
-                const restoreSegments = [{ startFrame: source.startFrame, values: source.values }];
-                await persistBlockTransition(
-                    left,
-                    right,
-                    0,
-                    restoreSegments.map((segment) => ({ ...segment, param: "pitch" })),
-                    authority,
-                );
                 const pvNow = paramViewRef.current;
-                if (pvNow !== null) {
+                if (pvNow !== null && plan.segments.current.length > 0) {
                     setParamView(
                         applyFullResSegmentsToParamView({
                             paramView: pvNow,
-                            segments: restoreSegments,
+                            segments: plan.segments.current,
                         }),
                     );
                 }
-                onParamCommitSucceeded();
-                bumpRefreshToken();
-                invalidate();
-                return;
             }
-
-            const leftValue = left.averageValue ?? 60;
-            const rightValue = right.averageValue ?? 60;
-            const committedAt = (frame: number): number =>
-                Number(source.values[frame - source.startFrame]) || rightValue;
-            const segments = buildParamBlockTransitionSegments({
-                boundaryFrame,
-                widthFrames,
-                targetValue: rightValue,
-                leftStartFrame: startFrame,
-                rightEndFrame: endFrame,
-                leftValue,
-                rightValue,
-                sourceAt: committedAt,
-            });
-            await persistBlockTransition(
-                left,
-                right,
-                widthSec,
-                segments.map((segment) => ({ ...segment, param: "pitch" })),
-                authority,
-            );
+            onParamCommitSucceeded();
+            bumpRefreshToken();
+            invalidate();
         },
         [
+            blockPersistence,
             bumpRefreshToken,
             editParam,
             invalidate,
             onParamCommitSucceeded,
             paramViewRef,
-            persistBlockTransition,
+            planTransition,
             rootTrackId,
             setParamView,
         ],

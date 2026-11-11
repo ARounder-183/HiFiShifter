@@ -4,7 +4,10 @@
  * 画布内不再渲染块错误浮层；所有失败、拒绝与需要用户处置的提示都从这里进入
  * 左下角状态栏，与音高分析 / 波形分析共用同一处视线落点。
  */
-import type { ParamBlockFailureFeedback } from "./paramBlockCommitError";
+import {
+    PARAM_BLOCK_FEEDBACK_HOLD_MS,
+    type ParamBlockFailureFeedback,
+} from "./paramBlockCommitError";
 
 export interface ParamBlockFeedback {
     readonly text: string;
@@ -15,16 +18,32 @@ export interface ParamBlockFeedback {
 
 let current: ParamBlockFeedback | null = null;
 let hideTimer: ReturnType<typeof setTimeout> | null = null;
+/** 上一次真正发布的时间与内容（用于同文案去重）。 */
+let lastPublishedAt = Number.NEGATIVE_INFINITY;
 const listeners = new Set<() => void>();
+
+/** 同文案同 tone 在这个窗口内重复发布会被丢掉（连点两次同一命令不该刷两条）。 */
+const DUPLICATE_FEEDBACK_WINDOW_MS = 500;
 
 function emit(): void {
     for (const listener of listeners) listener();
 }
 
 export function publishParamBlockFeedback(next: ParamBlockFeedback | null): void {
+    /*
+     * 【单槽去重】这里只有一个槽位，后发布的会覆盖先发布的。连续两次同一命令
+     * 失败（例如连按两次分割）会产生两条一模一样的提示，视觉上像"没反应"——
+     * 短暂窗口内的重复直接丢弃。
+     */
+    if (next !== null && current !== null) {
+        if (next.text === current.text && next.tone === current.tone) {
+            if (performance.now() - lastPublishedAt < DUPLICATE_FEEDBACK_WINDOW_MS) return;
+        }
+    }
     if (hideTimer !== null) clearTimeout(hideTimer);
     hideTimer = null;
     current = next;
+    lastPublishedAt = performance.now();
     emit();
     if (next?.holdMs && next.holdMs > 0) {
         hideTimer = setTimeout(() => {
@@ -56,7 +75,7 @@ export function publishParamBlockWriteFailure(args: {
             text: tf("status_param_block_edit_rejected"),
             tone: "warning",
             tooltip: error.detail ?? error.code,
-            holdMs: 6_000,
+            holdMs: PARAM_BLOCK_FEEDBACK_HOLD_MS.rejected,
         });
         return;
     }
@@ -65,7 +84,7 @@ export function publishParamBlockWriteFailure(args: {
             text: tf("status_param_block_conflict_resynced"),
             tone: "warning",
             tooltip: error.detail ?? error.code,
-            holdMs: 6_000,
+            holdMs: PARAM_BLOCK_FEEDBACK_HOLD_MS.conflict,
         });
         return;
     }
@@ -73,7 +92,7 @@ export function publishParamBlockWriteFailure(args: {
         text: tf("status_param_block_write_failed"),
         tone: "danger",
         tooltip: error.detail ?? error.code,
-        holdMs: 15_000,
+        holdMs: PARAM_BLOCK_FEEDBACK_HOLD_MS.transport,
     });
 }
 
