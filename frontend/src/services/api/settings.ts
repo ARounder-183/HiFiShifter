@@ -154,8 +154,8 @@ export interface UiSettings {
     pitchSnapToleranceCents?: number;
     /** 新建块后是否把该段音高按曲线形状归一化到音阶。 */
     paramBlockFollowPitch?: boolean;
-    /** 参数块图层可见性（本地记忆）。 */
-    paramBlocksVisible?: boolean;
+    /** 参数块图层是否始终显示（功能设置，默认关）。 */
+    alwaysShowParamBlocks?: boolean;
     scaleHighlightMode?: string;
     ignoreGrouping?: boolean;
     /** 波纹编辑（自动跟进）模式：off / track / all（对应 REAPER Ripple Editing）。 */

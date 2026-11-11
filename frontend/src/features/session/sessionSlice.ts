@@ -67,7 +67,7 @@ import { applyHistoryDepths } from "./sessionSlice/history";
 import { applyTimelineState } from "./sessionSlice/helpersTimeline";
 import { intentPlayheadSec } from "./sessionSlice/playheadIntent";
 import {
-    applyParamBlocksVisible,
+    applyAlwaysShowParamBlocks,
     applySelectToolMode,
     applyToolMode,
     normalizeTimelineSnapSettings,
@@ -208,7 +208,10 @@ export {
     importMultipleAudioFilesAtPosition,
 } from "./thunks/importThunks";
 
-export { createDefaultTimelineSnapSettings } from "./sessionSlice/settings";
+export {
+    createDefaultTimelineSnapSettings,
+    isParamBlockLayerVisible,
+} from "./sessionSlice/settings";
 
 const sessionSlice = createSlice({
     name: "session",
@@ -767,11 +770,11 @@ const sessionSlice = createSlice({
                 state.disabledGroupIds.push(action.payload);
             }
         },
-        toggleParamBlocksVisible(state) {
-            applyParamBlocksVisible(state, !state.paramBlocksVisible);
+        toggleAlwaysShowParamBlocks(state) {
+            applyAlwaysShowParamBlocks(state, !state.alwaysShowParamBlocks);
         },
-        setParamBlocksVisible(state, action: PayloadAction<boolean>) {
-            applyParamBlocksVisible(state, action.payload);
+        setAlwaysShowParamBlocks(state, action: PayloadAction<boolean>) {
+            applyAlwaysShowParamBlocks(state, action.payload);
         },
         toggleParamEditorSeekPlayhead(state) {
             state.paramEditorSeekPlayheadEnabled = !state.paramEditorSeekPlayheadEnabled;
@@ -1283,8 +1286,8 @@ export const {
     toggleIgnoreGrouping,
     cycleRippleMode,
     setRippleMode,
-    toggleParamBlocksVisible,
-    setParamBlocksVisible,
+    toggleAlwaysShowParamBlocks,
+    setAlwaysShowParamBlocks,
     toggleParamEditorSeekPlayhead,
     toggleParamEditorTimelineClickSelectTrack,
     toggleClipboardPreview,

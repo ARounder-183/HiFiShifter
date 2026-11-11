@@ -25,7 +25,7 @@ import { ToolbarSlot } from "./toolbarParts";
 import { ParamButtons } from "./ParamButtons";
 import { DrawToolMenu } from "./DrawToolMenu";
 import { SelectToolMenu } from "./SelectToolMenu";
-import { ParamBlockLayerToggle } from "./ParamBlockLayerToggle";
+import { ParamBlockAlwaysShowToggle } from "./ParamBlockAlwaysShowToggle";
 import { PitchSnapMenu } from "./PitchSnapMenu";
 import { DragDirectionButton } from "./DragDirectionButton";
 import { ReferenceTrackGroup } from "./ReferenceTrackGroup";
@@ -107,14 +107,14 @@ export type Props = {
         | "setHoveredReferenceRootTrackId"
         | "setPitchSnapMenuOpen"
         | "paramBlockToolIcon"
-        | "paramBlocksVisible"
+        | "alwaysShowParamBlocks"
         | "selectToolButtonTitle"
         | "selectToolKb"
         | "selectToolMenuAnchorRef"
         | "selectToolMenuOpen"
         | "selectToolMenuRef"
         | "setSelectToolMenuOpen"
-        | "toggleParamBlocksVisible"
+        | "toggleAlwaysShowParamBlocks"
         | "setPitchSnapOpen"
         | "setTimeDisplaySettingsOpen"
         | "t"
@@ -314,7 +314,7 @@ export function ParamToolbar({ m }: Props) {
                             </svg>
                         }
                     />
-                    <ParamBlockLayerToggle m={m} />
+                    <ParamBlockAlwaysShowToggle m={m} />
                     <SmoothingSlider m={m} />
                 </Flex>
             </Flex>

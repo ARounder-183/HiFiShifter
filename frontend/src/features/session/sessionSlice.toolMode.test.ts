@@ -1,6 +1,10 @@
 import { test } from "vitest";
 
-import reducer, { setParamBlocksVisible, setSelectToolMode, setToolMode } from "./sessionSlice.ts";
+import reducer, {
+    setAlwaysShowParamBlocks,
+    setSelectToolMode,
+    setToolMode,
+} from "./sessionSlice.ts";
 import { loadUiSettings } from "./thunks/runtimeThunks.ts";
 import type { UiSettings } from "../../services/api/settings.ts";
 import type { ToolMode } from "./sessionTypes.ts";
@@ -39,21 +43,24 @@ test("features/session/sessionSlice.toolMode.test.ts tool family state and hydra
     assertEqual(toSelect.selectToolMode, "range", "选择族：保留 range");
     assertEqual(toSelect.drawToolMode, "vibrato", "选择族：保留上次绘制工具（供 Tab 回跳）");
 
-    // ── 设置选择族子模式：进入 block 自动打开块图层 ──
+    // ── 设置选择族子模式：只写工具身份，不写任何设置 ──
     const toBlock = reducer(toSelect, setSelectToolMode("block"));
     assertEqual(toBlock.toolMode, "select", "块选择：toolMode 仍是 select");
     assertEqual(toBlock.selectToolMode, "block", "块选择：子模式");
-    assertEqual(toBlock.paramBlocksVisible, true, "块选择：强制显示块图层");
+    assertEqual(toBlock.alwaysShowParamBlocks, false, "块选择：不代写「永远显示参数块」设置");
 
-    // ── 关闭块图层：选择子模式必须收回 range，不能留下不可达的 block ──
-    const hidden = reducer(toBlock, setParamBlocksVisible(false));
-    assertEqual(hidden.paramBlocksVisible, false, "关闭图层：可见性");
-    assertEqual(hidden.selectToolMode, "range", "关闭图层：块子模式收回 range");
+    // ── 关掉常显设置：选择子模式不受影响（工具与设置是两根轴）──
+    const off = reducer(toBlock, setAlwaysShowParamBlocks(false));
+    assertEqual(off.alwaysShowParamBlocks, false, "关闭常显：设置值");
+    assertEqual(off.selectToolMode, "block", "关闭常显：块子模式保持不变");
+    const on = reducer(toSelect, setAlwaysShowParamBlocks(true));
+    assertEqual(on.alwaysShowParamBlocks, true, "开启常显：设置值");
+    assertEqual(on.selectToolMode, "range", "开启常显：不改选择子模式");
 
-    // ── 从绘制族后台恢复 block 记忆：可见性被不变量拉起 ──
+    // ── 从绘制族切到 block：可见性由派生得到，设置仍然不动 ──
     const fromDraw = reducer(toVibrato, setSelectToolMode("block"));
     assertEqual(fromDraw.toolMode, "select", "从绘制族进入块选择：选择族");
-    assertEqual(fromDraw.paramBlocksVisible, true, "从绘制族进入块选择：显示图层");
+    assertEqual(fromDraw.alwaysShowParamBlocks, false, "从绘制族进入块选择：不写常显设置");
 
     // ── 水合：工具族与选择子模式分别读取、各自白名单校验 ──
     const hydrate = (paramEditorTool: unknown, paramEditorSelectionMode?: unknown) =>
@@ -77,11 +84,23 @@ test("features/session/sessionSlice.toolMode.test.ts tool family state and hydra
     const hydratedBlock = hydrate("select", "block");
     assertEqual(hydratedBlock.toolMode, "select", "水合 block：工具族");
     assertEqual(hydratedBlock.selectToolMode, "block", "水合 block：子模式");
-    assertEqual(hydratedBlock.paramBlocksVisible, true, "水合 block：块图层可见");
+    assertEqual(
+        hydratedBlock.alwaysShowParamBlocks,
+        false,
+        "水合 block：不代写常显设置（可见性由派生得到）",
+    );
 
     const unknownSelection = hydrate("select", "sideways");
     assertEqual(unknownSelection.selectToolMode, "range", "未知选择子模式回落 range");
-    assertEqual(unknownSelection.paramBlocksVisible, false, "未知选择子模式不打开图层");
+    assertEqual(unknownSelection.alwaysShowParamBlocks, false, "未知选择子模式不打开常显");
+
+    // ── 水合常显设置：只有显式给出才写 ──
+    const hydratedAlwaysShow = reducer(
+        base,
+        loadUiSettings.fulfilled({ alwaysShowParamBlocks: true } as UiSettings, "req", undefined),
+    );
+    assertEqual(hydratedAlwaysShow.alwaysShowParamBlocks, true, "水合常显：设置生效");
+    assertEqual(hydratedAlwaysShow.toolMode, "draw", "水合常显：不改工具族");
 
     // 旧配置里的 `paramEditorTool: "block"` 是未知工具族，回落默认绘制工具。
     assertEqual(hydrate("block").toolMode, "draw", "旧 block 工具值回落默认绘制");

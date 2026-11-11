@@ -16,7 +16,7 @@ vi.mock("../../../services/api", async (importOriginal) => {
 
 import { configureStore } from "@reduxjs/toolkit";
 
-import sessionReducer, { setEditParam, setParamBlocksVisible } from "../sessionSlice";
+import sessionReducer, { setAlwaysShowParamBlocks, setEditParam } from "../sessionSlice";
 import {
     setSelectToolModePersistent,
     setToolModePersistent,
@@ -45,7 +45,8 @@ describe("setToolModePersistent", () => {
             await store.dispatch(toggleSelectToolModePersistent());
             expect(store.getState().session.toolMode).toBe("select");
             expect(store.getState().session.selectToolMode).toBe("block");
-            expect(store.getState().session.paramBlocksVisible).toBe(true);
+            // 工具切换不写设置：可见性由 isParamBlockLayerVisible 派生。
+            expect(store.getState().session.alwaysShowParamBlocks).toBe(false);
             await store.dispatch(toggleSelectToolModePersistent());
             expect(store.getState().session.toolMode).toBe("select");
             expect(store.getState().session.selectToolMode).toBe("range");
@@ -61,12 +62,12 @@ describe("setToolModePersistent", () => {
         },
     );
 
-    it("选择 block 子模式会同步打开块图层并落盘两个字段", async () => {
+    it("选择 block 子模式只落盘工具身份，不代写常显设置", async () => {
         const store = makeStore();
         await store.dispatch(setSelectToolModePersistent("block"));
         expect(store.getState().session.toolMode).toBe("select");
         expect(store.getState().session.selectToolMode).toBe("block");
-        expect(store.getState().session.paramBlocksVisible).toBe(true);
+        expect(store.getState().session.alwaysShowParamBlocks).toBe(false);
         expect(saveMock).toHaveBeenCalledWith(
             expect.objectContaining({
                 paramEditorTool: "select",
@@ -75,15 +76,16 @@ describe("setToolModePersistent", () => {
         );
     });
 
-    it("关闭块图层会收回选择子模式，并落盘 range", async () => {
+    it("关闭常显设置不会收回选择子模式", async () => {
         const store = makeStore();
         await store.dispatch(setSelectToolModePersistent("block"));
         saveMock.mockClear();
 
-        store.dispatch(setParamBlocksVisible(false));
+        store.dispatch(setAlwaysShowParamBlocks(false));
 
-        expect(store.getState().session.paramBlocksVisible).toBe(false);
-        expect(store.getState().session.selectToolMode).toBe("range");
+        expect(store.getState().session.alwaysShowParamBlocks).toBe(false);
+        // 旧实现在这里把子模式收回 range —— 那是「图层被工具强制打开」的补丁。
+        expect(store.getState().session.selectToolMode).toBe("block");
         // 这个 reducer 本身不写盘；调用方（工具栏）会派发 persistUiSettings。
     });
 

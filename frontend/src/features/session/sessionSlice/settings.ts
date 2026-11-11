@@ -8,6 +8,7 @@ import type {
     ToolMode,
 } from "../sessionTypes";
 import type { SessionState } from "./types";
+import { isBlockSelectionActive } from "../toolMode";
 
 export const MAX_TRACK_VOLUME = 4;
 /** 播放光标"真实挪动"判定阈值：低于该值的差异视为浮点噪声，
@@ -169,40 +170,54 @@ export function normalizeTimelineSnapSettings(
 /**
  * 把一次工具族切换写进状态。
  *
- * 【唯一实现】用户切换（`setToolMode`）与启动恢复（`loadUiSettings.fulfilled`）
- * 必须落到同一组字段上：当前工具族、绘制族记忆，以及选择族记忆所要求的图层
- * 可见性。两处各写一遍，迟早会漏掉一条不变量。
+ * 【只写工具身份】当前工具族与绘制族记忆。
+ *
+ * 【不写设置】旧实现会在进入 block 子模式时把块图层强制置为可见，因为那时
+ * 「图层可见」是一个状态位，而「在块模式里却看不见块」被当成不可达状态。
+ * 可见性改成派生之后（见 isParamBlockLayerVisible）这个补丁失去理由：块模式
+ * 自己就让图层可见，不需要任何人代写设置。
  *
  * `selectToolMode` 是选择族的**当前 / 上次**子模式：切到绘制族时保留它，Tab
  * 回到选择族时才能恢复上次的 range / block。块是否**正在**激活只看
- * `toolMode === "select" && selectToolMode === "block"`，不由这里另存布尔值。
+ * `isBlockSelectionActive(toolMode, selectToolMode)`，不由这里另存布尔值。
  */
 export function applyToolMode(state: SessionState, mode: ToolMode): void {
     state.toolMode = mode;
     if (mode !== "select") state.drawToolMode = mode;
-    // block 子模式必须能看见块层；这是状态不变量，不靠组件 effect 补。
-    if (mode === "select" && state.selectToolMode === "block") {
-        state.paramBlocksVisible = true;
-    }
 }
 
-/** 写入选择族子模式；进入 block 时同步打开块层。 */
+/** 写入选择族子模式（连带把工具族切到选择族）；不碰任何设置。 */
 export function applySelectToolMode(state: SessionState, mode: SelectToolMode): void {
     state.toolMode = "select";
     state.selectToolMode = mode;
-    if (mode === "block") state.paramBlocksVisible = true;
 }
 
 /**
- * 写入参数块图层可见性。
+ * 块层**是否应当绘制** —— 全仓唯一判据。
  *
- * 图层关闭时不可能继续做块选择，因此在 reducer 收口为 range，避免出现
- * “工具仍想选块、图层却已隐藏”的死状态。重新打开图层不会自动回到 block ——
- * 可见性与工具子模式是两根轴，用户需要显式再选块。
+ * 【两根轴】常显设置（用户偏好）与块选择子模式（此刻在做什么）。两者是**或**关系：
+ * 块编辑永远需要看见块；常显设置只负责「不在块编辑时也看见」。
+ *
+ * 【为什么不是状态】派生结果没有写入者，也就不可能出现「工具已经退出块模式、图层
+ * 却还开着」或「图层关着、工具还在块模式」这两种需要额外规则去消灭的状态。
  */
-export function applyParamBlocksVisible(state: SessionState, visible: boolean): void {
-    state.paramBlocksVisible = visible;
-    if (!visible) state.selectToolMode = "range";
+export function isParamBlockLayerVisible(args: {
+    readonly alwaysShowParamBlocks: boolean;
+    readonly toolMode: ToolMode;
+    readonly selectToolMode: SelectToolMode;
+}): boolean {
+    return args.alwaysShowParamBlocks || isBlockSelectionActive(args.toolMode, args.selectToolMode);
+}
+
+/**
+ * 写入「永远显示参数块」设置。
+ *
+ * 【没有副作用】它不改工具、不改选择子模式。旧实现（applyParamBlocksVisible）在
+ * 关闭时把 selectToolMode 收回 range，那是「图层被工具强制打开」这一设计的补丁；
+ * 该设计已删除，补丁一并删除。
+ */
+export function applyAlwaysShowParamBlocks(state: SessionState, value: boolean): void {
+    state.alwaysShowParamBlocks = value;
 }
 
 /** 外部设置输入的白名单归一：只认 block，其余一律 range。 */

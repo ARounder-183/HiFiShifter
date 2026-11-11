@@ -227,8 +227,8 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
             if (s.paramBlockFollowPitch != null) {
                 state.paramBlockFollowPitch = Boolean(s.paramBlockFollowPitch);
             }
-            if (s.paramBlocksVisible != null) {
-                state.paramBlocksVisible = Boolean(s.paramBlocksVisible);
+            if (s.alwaysShowParamBlocks != null) {
+                state.alwaysShowParamBlocks = Boolean(s.alwaysShowParamBlocks);
             }
             state.playheadZoomEnabled = s.playheadZoom;
             if (s.autoScroll != null) state.autoScrollEnabled = s.autoScroll;
@@ -399,15 +399,13 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
                 );
             }
             // 上次使用的选择族子模式：非法 / 缺项一律 range。
-            // 放在工具族之前：两者共同决定 `paramBlocksVisible` 是否被块子模式
-            // 强制打开；`applyToolMode` 是这条不变量的唯一收口。
+            // 只恢复**工具身份**：块图层是否可见由 isParamBlockLayerVisible 派生，
+            // 水合不再代写任何设置 —— 旧实现在这里把图层强制打开，于是「上次是
+            // 块模式」会永久留下一个用户没开过的图层开关。
             state.selectToolMode = normalizeSelectToolMode(s.paramEditorSelectionMode);
-            if (state.selectToolMode === "block") {
-                state.paramBlocksVisible = true;
-            }
             // 上次使用的工具族：只认四个合法成员（旧配置里的 `"block"` 是未知值，
             // 回落出厂默认的绘制工具）。放在最后：`applyToolMode` 还会同步
-            // `drawToolMode` 与选择族的块图层不变量。
+            // `drawToolMode`。
             if (
                 typeof s.paramEditorTool === "string" &&
                 (TOOL_MODES as readonly string[]).includes(s.paramEditorTool)

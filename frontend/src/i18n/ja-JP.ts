@@ -770,8 +770,9 @@ export const jaJP = {
     select_tool_range: "パラメータ線選択",
     select_tool_block: "パラメータブロック選択",
     select_tool_menu: "選択ツール",
-    param_blocks_layer_show: "パラメータブロックを表示",
-    param_blocks_layer_hide: "パラメータブロックを非表示",
+    param_blocks_always_show: "パラメータブロックを常に表示",
+    param_blocks_always_show_tooltip:
+        "パラメーターブロック選択モードでは常に表示されます。有効にすると他のツールでも表示されます。",
     param_blocks_submenu: "パラメータブロック",
     param_blocks_menu: "パラメータブロック操作",
     param_blocks_ungroup: "グループ解除",

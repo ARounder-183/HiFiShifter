@@ -10,7 +10,8 @@ import {
     persistUiSettings,
     applyClipSyllableAnalysis,
     markProjectEdited,
-    toggleParamBlocksVisible as toggleParamBlocksVisibleAction,
+    toggleAlwaysShowParamBlocks as toggleAlwaysShowParamBlocksAction,
+    isParamBlockLayerVisible,
     seekPlayhead,
     setPlayheadSec,
     setParamSelectionActive,
@@ -280,6 +281,11 @@ import {
 import { usePianoRollViewport } from "./usePianoRollViewport";
 import { useProcessorParams } from "./useProcessorParams";
 
+/**
+ * 空选中集合的**共享实例**：非块模式下用它替代真实选区，避免每次渲染换引用
+ * 让 `paramBlockSpec` 的 memo 白跑一次。集合从不被写入，因此可以安全共享。
+ */
+const EMPTY_BLOCK_ID_SET: ReadonlySet<string> = new Set<string>();
 /**
  * 高频会话字段：它们由 `PianoRollPlayheadBridge` 单独订阅，面板主体不因它们重渲染。
  *
@@ -2872,11 +2878,23 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     // Pitch Snap 设置弹窗状态
     const [pitchSnapOpen, setPitchSnapOpen] = useState(false);
 
-    const paramBlocksVisible = s.paramBlocksVisible;
+    /**
+     * 块层是否应当绘制。**唯一派生点**在 isParamBlockLayerVisible。
+     *
+     * 【为什么面板里还要再算一次】面板需要的是「现在画不画」，不是设置值；把派生
+     * 放在这里而不是每个消费者各算，是因为下面有 7 处读它（宿主绘制、持久化开关、
+     * 自动分析、spec memo、drag snapshot、布局 effect、拖动快照）。
+     */
+    const alwaysShowParamBlocks = s.alwaysShowParamBlocks;
+    const paramBlocksLayerVisible = isParamBlockLayerVisible({
+        alwaysShowParamBlocks,
+        toolMode: s.toolMode,
+        selectToolMode: s.selectToolMode,
+    });
     useLayoutEffect(() => {
-        kernelDataRef.current.paramBlocksVisible = paramBlocksVisible;
+        kernelDataRef.current.paramBlocksVisible = paramBlocksLayerVisible;
         hostRef.current?.invalidate();
-    }, [paramBlocksVisible]);
+    }, [paramBlocksLayerVisible]);
     /**
      * 显式打破 `paramBlockSpec` 的 memo 缓存。
      *
@@ -3141,8 +3159,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         }
         invalidate();
     }, [invalidate, paramBlockToolActive, selectionRef, setParamBlockSelection]);
-    const toggleParamBlocksVisible = useCallback(() => {
-        dispatch(toggleParamBlocksVisibleAction());
+    const toggleAlwaysShowParamBlocks = useCallback(() => {
+        dispatch(toggleAlwaysShowParamBlocksAction());
         void dispatch(persistUiSettings());
     }, [dispatch]);
     /** 每个 Clip 在本面板会话内的自动分析尝试（只拦自动路径，手动重分析不受影响）。 */
@@ -3152,12 +3170,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     const autoAnalysisQueueRef = useRef(createSyllableAnalysisQueue());
     const autoAnalysisRootRef = useRef<string | null>(null);
     useEffect(() => {
-        autoAnalysisRootRef.current = paramBlocksVisible && pitchEnabled ? rootTrackId : null;
+        autoAnalysisRootRef.current = paramBlocksLayerVisible && pitchEnabled ? rootTrackId : null;
         return () => {
             if (autoAnalysisRootRef.current !== null) publishBlockAnalysisProgress(null);
             autoAnalysisRootRef.current = null;
         };
-    }, [paramBlocksVisible, pitchEnabled, rootTrackId]);
+    }, [paramBlocksLayerVisible, pitchEnabled, rootTrackId]);
     /*
      * 【安全网】某条 Clip "曾经有音节区间、现在没有" = 分析结果被某条路径清掉了
      * （撤销跨过分析完成点曾经是主要来源）。把自动分析的"已尝试"记录删掉，让它
@@ -3185,7 +3203,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     const blockPersistence = useParamBlockPersistence({
         rootTrackId,
         // 块选择必然 visible（reducer 不变量），因此只看图层开关。
-        enabled: paramBlocksVisible,
+        enabled: paramBlocksLayerVisible,
         onCommitted: () => {
             dispatch(markProjectEdited());
         },
@@ -3338,11 +3356,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     useEffect(() => {
         if (!rootTrackId) return;
         /*
-         * 块谱面可见性只决定“是否显示 / 分配 block 编辑 UI”；音节分析本身
-         * 只看图层眼睛是否打开。进入参数块选择模式时 reducer 会同步打开眼睛，
-         * 因此 block 模式必然包含在 `paramBlocksVisible` 里，不需要第二个开关。
+         * 自动音节分析只在「块层真的在画」时跑：块是参数线上按音节切出来的段，
+         * 没有分析结果就没有块。图层可见 = 常显设置开着，或当前就是块选择模式。
+         * 分析会跑模型推理，所以这是「常开图层」唯一的代价 —— 也是它默认关闭的理由。
          */
-        const blocksEnabled = paramBlocksVisible && blockPersistence.ready;
+        const blocksEnabled = paramBlocksLayerVisible && blockPersistence.ready;
         /*
          * 这里不再维护 `cancelled`：分析请求一旦发出，后端会落盘结果。
          * 若在依赖变化 / 卸载时直接丢弃 Promise，下一次挂载读到的旧快照会
@@ -3402,7 +3420,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         dispatch,
         paramBlockClips,
         paramBlockSyllableSpans,
-        paramBlocksVisible,
+        paramBlocksLayerVisible,
         pitchEnabled,
         rootTrackId,
         s.paramsEpoch,
@@ -3586,9 +3604,20 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         () => new Set(activeSelectedParamBlockIds),
         [activeSelectedParamBlockIds],
     );
+    /**
+     * 渲染用的块选中集合。
+     *
+     * 选区本身跨工具保留（换工具不清空选择，这是既有设计）；但「选中」在画面上是一组
+     * **交互 affordance**（高亮填充、过渡手柄、可拖光标）。非块模式下块层只负责显示，
+     * 因此这些 affordance 必须关掉 —— 否则用户看到的是「能拖的样子、拖不动的结果」。
+     */
+    const paramBlockRenderSelectedIds = useMemo(
+        () => (paramBlockToolActive ? selectedParamBlockIdSet : EMPTY_BLOCK_ID_SET),
+        [paramBlockToolActive, selectedParamBlockIdSet],
+    );
     const paramBlockSpecForDragSnapshot = useCallback(
         (snapshot: ParamBlockDragSnapshot): PianoRollParamBlockSpec | null => {
-            if (!paramBlocksVisible) return null;
+            if (!paramBlocksLayerVisible) return null;
             if (snapshot.blocks.length === 0) return null;
             const draggedById = new Map<string, (typeof snapshot.blocks)[number]>();
             for (const draggedBlock of snapshot.blocks) {
@@ -3638,7 +3667,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             bounds.min,
             editParam,
             paramBlockSpecColors,
-            paramBlocksVisible,
+            paramBlocksLayerVisible,
             paramBlocksWithValues,
             valueToY,
         ],
@@ -6535,7 +6564,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         hostRef.current?.invalidate();
     }, [hostRef, selectedParamBlockIds]);
     const paramBlockSpec = useParamBlockRenderSpec({
-        layerVisible: paramBlocksVisible,
+        layerVisible: paramBlocksLayerVisible,
         structureTick: paramBlockStructureTick,
         epoch: paramBlockEpoch,
         visualTransactionRef: paramBlockVisualTransactionRef,
@@ -6547,7 +6576,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         latestSpecRef: latestParamBlockSpecRef,
         canonicalBlocks: paramBlocksWithValues,
         paramView,
-        selectedIds: selectedParamBlockIdSet,
+        selectedIds: paramBlockRenderSelectedIds,
         editParam,
         colors: paramBlockSpecColors,
         bounds,
@@ -6784,7 +6813,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     }, [invalidate, paramBlockSpec]);
     useLayoutEffect(() => {
         hostRef.current?.invalidate();
-    }, [paramBlockToolActive, paramBlocksVisible]);
+    }, [paramBlockToolActive, paramBlocksLayerVisible]);
     useLayoutEffect(() => {
         // 类型/参数切换时，参数窗口要等下一次取数才回来。块高依赖这窗口；
         // 先清掉，避免上一参数的块轮廓停在新标尺上。
@@ -6986,7 +7015,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         pitchSnapMenuOpen,
         pitchSnapMenuRef,
         pitchSnapOpen,
-        paramBlocksVisible,
+        paramBlocksLayerVisible,
         paramBlockContextMenu,
         paramBlockMenuContext,
         handleParamBlockMenuAction,
@@ -7045,7 +7074,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         tf,
         timeDisplaySettingsOpen,
         toggleSecondaryParam,
-        toggleParamBlocksVisible,
+        toggleAlwaysShowParamBlocks,
+        alwaysShowParamBlocks,
         toolbarRowRef,
         toolbarTier,
         updateVisibleReferenceRootTrackIds,
