@@ -15,7 +15,6 @@ const epoch: ParamBlockEpoch = {
     layoutKey: "layout-a",
     editRevision: 3,
     externalHistoryToken: "0:0",
-    commitToken: "0",
     framePeriodMs: 5,
 };
 
@@ -56,7 +55,6 @@ describe("paramBlockVisualTransaction", () => {
     });
 
     it("keeps drag layout valid across a self commit but not an external jump", () => {
-        expect(sameParamBlockEpochLayout(epoch, { ...epoch, commitToken: "1" })).toBe(true);
         expect(sameParamBlockEpochLayout(epoch, { ...epoch, editRevision: 4 })).toBe(true);
         expect(sameParamBlockEpochLayout(epoch, { ...epoch, externalHistoryToken: "1:0" })).toBe(
             false,

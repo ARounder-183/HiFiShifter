@@ -155,6 +155,11 @@ import {
     type ParamBlockVisualTransaction,
     type ParamBlockVisualTransactionKind,
 } from "../paramBlockVisualTransaction";
+import {
+    isParamBlockPreviewGeometrySettled,
+    PARAM_BLOCK_PREVIEW_RELEASE_TIMEOUT_MS,
+    shouldReleaseParamBlockPreview,
+} from "../paramBlockPreviewRelease";
 import { isParamAuthorityConfirmedAfterCommit } from "../paramBlockTransaction";
 import {
     beginParamBlockDrag,
@@ -2917,7 +2922,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     /** Explicit history jumps only; self commits advance history depth too. */
     const [paramBlockExternalHistoryToken, setParamBlockExternalHistoryToken] = useState(0);
     /** Incremented after every successful parameter-block commit. */
-    const [paramBlockCommitToken, setParamBlockCommitToken] = useState(0);
     useEffect(() => {
         const onHistoryJump = () => setParamBlockExternalHistoryToken((value) => value + 1);
         window.addEventListener(HISTORY_JUMP_EVENT, onHistoryJump);
@@ -2989,7 +2993,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             layoutKey: paramBlockView?.layoutKey ?? null,
             editRevision: paramBlockView?.editRevision ?? paramBlockState.editSet.revision,
             externalHistoryToken: `${rootTrackId ?? ""}:${paramBlockExternalHistoryToken}`,
-            commitToken: String(paramBlockCommitToken),
             framePeriodMs: paramBlockState.framePeriodMs,
         }),
         [
@@ -3000,7 +3003,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             paramBlockState.editSet.revision,
             paramBlockState.framePeriodMs,
             paramBlockExternalHistoryToken,
-            paramBlockCommitToken,
         ],
     );
     const paramBlockEpochRef = useLatestRef(paramBlockEpoch);
@@ -3211,7 +3213,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         // 块选择必然 visible（reducer 不变量），因此只看图层开关。
         enabled: paramBlocksVisible,
         onCommitted: () => {
-            setParamBlockCommitToken((value) => value + 1);
             dispatch(markProjectEdited());
         },
         /*
@@ -3261,6 +3262,13 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             bumpRefreshToken,
             invalidate,
             visualTransactionRef: paramBlockVisualTransactionRef,
+            stampCurveCommit: ({ segments, authority }) => {
+                const tx = paramBlockVisualTransactionRef.current;
+                if (tx === null) return;
+                tx.authorityRevisionAtStart = authority?.expectedCurveRevision;
+                tx.authorityRequestSeqAtCommit = getAuthorityWatermark().issuedRequestSeq;
+                tx.committedSegments = segments;
+            },
             dragSnapshotRef: paramBlockDragSnapshotRef,
             resizeRef: paramBlockResizeRef,
         });
@@ -4880,6 +4888,19 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                         finalPreviewSpec,
                                         "awaiting-authority",
                                     );
+                                    /*
+                                     * 给预览盖上「这次提交依据的权威水位」。
+                                     * 没有它，释放判据只能退回几何相等 —— 那正是
+                                     * 「松手先回弹旧参数」的来源（见
+                                     * paramBlockPreviewRelease）。
+                                     */
+                                    const createTx = paramBlockVisualTransactionRef.current;
+                                    if (createTx !== null) {
+                                        createTx.authorityRevisionAtStart =
+                                            createAuthorityRevisionAtStart;
+                                        createTx.authorityRequestSeqAtCommit =
+                                            createAuthorityRequestSeqAtCommit;
+                                    }
                                 }
                                 const clip =
                                     clipAtParamBlockCreateSpan({
@@ -5051,6 +5072,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                                         });
                                                     }
                                                     createHandoff.committedSegments = segments;
+                                                    const createTxNow =
+                                                        paramBlockVisualTransactionRef.current;
+                                                    if (createTxNow !== null) {
+                                                        createTxNow.committedSegments = segments;
+                                                    }
                                                     createHandoff.authorityRequestSeqAtCommit =
                                                         getAuthorityWatermark().issuedRequestSeq;
                                                     createHandoff.committed = true;
@@ -6887,59 +6913,60 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         latestParamBlockSpecRef.current = paramBlockSpec;
     }, [paramBlockSpec]);
     /*
-     * 视觉事务收尾：本地派生几何已经与事务快照一致时释放；否则最多等
-     * 1200ms。epoch 失配的路径在 paramBlockSpec 顶部与上面的 layout effect
-     * 已同步撤下，不依赖这里。
+     * 视觉事务收尾：**唯一**判据是「这次提交产生的权威已经可见」。
+     *
+     * 【为什么不能用「本地派生几何已经等于预览几何」】`setParamBlockState` 是同步
+     * 提交，那个条件在 pointerup 之后**一次渲染**就成立。于是预览被撤下、曲线回到
+     * 旧值、块按旧曲线重新采样 —— 用户看到「先回弹旧参数、再生效新参数」。过渡
+     * 手柄更糟：它的几何根本不变化，同一次渲染就满足旧判据。
+     *
+     * 判据搬到 `shouldReleaseParamBlockPreview` 之后，带曲线补丁的提交必须等
+     * 「曲线 revision 前进 ∧ 权威水位确认 ∧ 当前窗口包含提交片段」三者同时成立。
+     *
+     * 【超时】超时前必须先把权威读回来（`flushReadback` + `clearLiveEditOverride`），
+     * 否则撤下预览的第一帧仍然是旧曲线 —— 那正是要消灭的现象。超时同时记一条
+     * 诊断，便于定位「为什么这条路径没等到权威」。
      */
     useEffect(() => {
         const tx = paramBlockVisualTransactionRef.current;
         if (tx === null || tx.phase === "gesture") return;
-        const now = performance.now();
-        const settled =
-            tx.kind === "create"
-                ? tx.spec.blocks
-                      .filter((block) => block.selected)
-                      .every((block) =>
-                          paramBlocksWithValues.some(
-                              (current) =>
-                                  current.id === block.id &&
-                                  Math.abs(current.startSec - block.startSec) <= 1e-6 &&
-                                  Math.abs(current.endSec - block.endSec) <= 1e-6,
-                          ),
-                      )
-                : tx.spec.blocks.every((block) => {
-                      const current = paramBlocksWithValues.find(
-                          (candidate) => candidate.id === block.id,
-                      );
-                      return (
-                          current !== undefined &&
-                          Math.abs(current.startSec - block.startSec) <= 1e-6 &&
-                          Math.abs(current.endSec - block.endSec) <= 1e-6
-                      );
-                  });
-        const transitionSettled =
-            tx.kind !== "transition" ||
-            tx.spec.blocks.every((block) => {
-                const handle = block.transitionHandle;
-                if (handle === undefined || handle === null) return true;
-                const current = paramBlocksWithValues.find(
-                    (candidate) => candidate.id === block.id,
-                );
-                return (
-                    current?.transitionSec !== undefined &&
-                    Math.abs(current.transitionSec - handle.widthSec) <= 1e-6
-                );
-            });
-        if (!(settled && transitionSettled) && now - tx.startedAt <= 1200) {
-            const remaining = Math.max(0, 1200 - (now - tx.startedAt));
+        const decision = shouldReleaseParamBlockPreview({
+            transaction: tx,
+            now: performance.now(),
+            geometrySettled: isParamBlockPreviewGeometrySettled({
+                transaction: tx,
+                blocks: paramBlocksWithValues,
+            }),
+            gestureActive: paramBlockDragActivityRef.current.pointerGestureToken !== null,
+            pendingCommits: paramBlockDragActivityRef.current.pendingCommits,
+            authorityRevision: paramAuthorityRevision,
+            watermark: getAuthorityWatermark(),
+            paramView,
+        });
+        if (decision === "wait") {
+            const remaining = Math.max(
+                0,
+                PARAM_BLOCK_PREVIEW_RELEASE_TIMEOUT_MS - (performance.now() - tx.startedAt),
+            );
             const timer = window.setTimeout(() => {
                 if (paramBlockVisualTransactionRef.current !== tx) return;
                 invalidateParamBlockVisualPreviews("timeout");
             }, remaining);
             return () => window.clearTimeout(timer);
         }
-        // Normal handoff: retire the transaction but keep the create handoff
-        // guard alive until its curve authority arrives.
+        if (decision === "timeout") {
+            reportParamBlockDiagnostic({
+                code: "preview_release_timeout",
+                gesture: tx.kind === "create" ? "create" : tx.kind === "drag" ? "drag" : "resize",
+                rootTrackId,
+                blockId: null,
+                frame: null,
+                detail: `kind=${tx.kind}`,
+            });
+            // 对账：把权威编辑集写回状态（进而触发曲线窗口重取），再撤预览。
+            blockPersistence.flushReadback();
+            clearLiveEditOverride();
+        }
         paramBlockVisualTransactionRef.current = null;
         paramBlockInteractionCurveRef.current = null;
         const pvNow = paramViewRef.current;
@@ -6947,13 +6974,19 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         bumpParamBlockStructure();
         invalidate();
     }, [
+        blockPersistence,
         bumpParamBlockStructure,
+        clearLiveEditOverride,
+        getAuthorityWatermark,
         invalidate,
         invalidateParamBlockVisualPreviews,
+        paramAuthorityRevision,
         paramBlockStructureTick,
         paramBlocksWithValues,
+        paramView,
         paramViewRef,
         resetLiveEditPreview,
+        rootTrackId,
     ]);
     /*
      * 新建块预览 -> 正式块的交接。只有同时满足以下条件才撤预览：

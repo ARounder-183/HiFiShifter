@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
     fetchFullResCurve: vi.fn(),
     setParamBlockTransition: vi.fn(),
     commit: vi.fn(),
+    stampCurveCommit: vi.fn(),
 }));
 
 vi.mock("../selectionEditData", async (importOriginal) => ({
@@ -74,6 +75,7 @@ function Harness() {
         onParamCommitSucceeded: vi.fn(),
         bumpRefreshToken: vi.fn(),
         invalidate: vi.fn(),
+        stampCurveCommit: mocks.stampCurveCommit,
         visualTransactionRef: { current: { ownedEditRevision: null } },
         dragSnapshotRef: { current: null },
         resizeRef: { current: null },

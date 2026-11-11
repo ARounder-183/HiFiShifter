@@ -46,6 +46,17 @@ export function useParamBlockTransitionPersistence(args: {
     readonly onParamCommitSucceeded: () => void;
     readonly bumpRefreshToken: () => void;
     readonly invalidate: () => void;
+    /**
+     * 把「这次提交依据的权威水位 + 提交的曲线片段」写到当前预览事务上。
+     *
+     * 【为什么必须做】过渡手柄的**几何根本不变化**，所以旧释放判据（几何相等）
+     * 在 pointerup 的同一次渲染就成立 —— 预览被撤、曲线回旧值，用户看到
+     * 「先回弹、再生效」。写上门槛之后，释放只能发生在权威曲线可见之后。
+     */
+    readonly stampCurveCommit: (args: {
+        readonly segments: readonly { startFrame: number; values: readonly number[] }[];
+        readonly authority: ParamCurveCommitAuthority | null | undefined;
+    }) => void;
     readonly visualTransactionRef: Ref<{ ownedEditRevision?: number | null } | null>;
     readonly dragSnapshotRef: Ref<{ ownedEditRevision?: number | null } | null>;
     readonly resizeRef: Ref<{ ownedEditRevision?: number | null } | null>;
@@ -77,6 +88,7 @@ export function useParamBlockTransitionPersistence(args: {
         onParamCommitSucceeded,
         bumpRefreshToken,
         invalidate,
+        stampCurveCommit,
         visualTransactionRef,
         dragSnapshotRef,
         resizeRef,
@@ -118,6 +130,15 @@ export function useParamBlockTransitionPersistence(args: {
             if (!edit.ok) throw new Error(edit.reason);
             setParamBlockState(edit.state);
             markOwned(edit.state.editSet.revision);
+            if (curvePatches.length > 0) {
+                stampCurveCommit({
+                    segments: curvePatches.map((patch) => ({
+                        startFrame: patch.startFrame,
+                        values: patch.values,
+                    })),
+                    authority,
+                });
+            }
             await blockPersistence.commit(edit.state, true, curvePatches, authority, "transition");
             bumpRefreshToken();
             invalidate();
@@ -132,6 +153,7 @@ export function useParamBlockTransitionPersistence(args: {
             paramBlockViewRef,
             rootTrackId,
             setParamBlockState,
+            stampCurveCommit,
         ],
     );
 

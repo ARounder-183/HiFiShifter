@@ -21,8 +21,6 @@ export interface ParamBlockEpoch {
      * its visual state over to the authoritative view.
      */
     readonly externalHistoryToken: string;
-    /** Monotonic token for commits produced by this panel. */
-    readonly commitToken: string;
     readonly framePeriodMs: number;
 }
 
@@ -42,8 +40,17 @@ export interface ParamBlockVisualTransaction {
      * may survive that revision, but never a third-party structural edit.
      */
     ownedEditRevision: number | null;
-    expectedEditRevision?: number;
-    expectedGeometrySignature?: string;
+    /**
+     * 本次提交**依据**的曲线权威 revision（= 提交时携带的 expectedCurveRevision）。
+     *
+     * 释放判据用它回答「权威有没有前进过」：只有 `authorityRevision >
+     * authorityRevisionAtStart` 才说明本轮提交已经落地。缺省（`undefined`）= 纯布局
+     * 提交，没有曲线可等。
+     */
+    authorityRevisionAtStart?: number;
+    /** 提交时的权威请求序号；配合 watermark 排除"提交前发出的在飞回包"。 */
+    authorityRequestSeqAtCommit?: number;
+    /** 本次提交写入的曲线片段；释放前必须能在当前窗口里看到它们。 */
     committedSegments?: readonly {
         readonly startFrame: number;
         readonly values: readonly number[];
@@ -51,9 +58,9 @@ export interface ParamBlockVisualTransaction {
 }
 
 /**
- * Drag visuals survive their own commit changing editRevision / commitToken,
- * but not an external history jump, root switch, parameter switch, clip layout
- * change, or frame period change.
+ * Drag visuals survive their own commit changing editRevision, but not an
+ * external history jump, root switch, parameter switch, clip layout change, or
+ * frame period change.
  */
 export function sameParamBlockEpochLayout(a: ParamBlockEpoch, b: ParamBlockEpoch): boolean {
     return (
