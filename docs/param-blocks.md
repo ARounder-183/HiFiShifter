@@ -71,7 +71,7 @@ game baseline                      playback_rate / reverse        参数块编�
 - 多选纵向拖动：按逻辑块解析每个选中块的起点中心，再扇出到它的全部 run；未选中块不进入拖动成员，提交时也只写选中逻辑块的 `value`。
 - 吸附高亮：时间轴与参数编辑器共用 surface/axis 模型。参数编辑器只渲染全高时间线，不渲染时间轴行 accent；音高 / 参数吸附只量化，value 轴不发布 guide、不画全宽值线。右键幅度不发布高亮、也不触发边缘滚动。
 - 分割不发布吸附高亮：播放头分割精确落在播放头（snapMode 为 "none"）；点击分割可吸附网格 / Clip 边缘，但候选集排除播放头，且不再创建 180ms 的临时分割高亮。
-- 时间轴换轨不做行吸附，也不画轨道边界横线：目标轨严格跟随指针所在行。跨轨拖动时目标轨道整行显示独立描边（move / copy / snap 三色）；Clip 起点回到拖拽前起点 24–32px 内时水平吸附回原起点并显示竖向对齐线，水平拖出后立即释放。
+- 时间轴换轨不做行吸附，也不画轨道边界横线：目标轨严格跟随指针所在行。**只有横向吸附真的命中时**，跨轨拖动的目标轨道才整行显示一圈描边（与吸附竖线同色、单一颜色，不区分 move / copy）；未吸附时不画任何行描边，离开吸附立即消失。Clip 起点回到拖拽前起点 24–32px 内时水平吸附回原起点并显示竖向对齐线，水平拖出后立即释放。
 
 ## 曲线与视觉预览
 
@@ -79,6 +79,23 @@ game baseline                      playback_rate / reverse        参数块编�
 - 参数块显示值按 run 缓存：当前采样 → 手动值 → 上一次同 run 且**几何一致**的有效值；canonical 块绝不回退到值域中点。没有值的块本帧不画，而不是叠到 F#4。
 - 结构命令（分割 / 删除 / 编组 / 还原 / 从选区新建）与外部历史 / 布局 / 参数变化统一走 invalidateParamBlockVisualPreviews：拖动快照、resize / create 预览、事务曲线一次性撤下，避免旧预览在结构编辑后覆盖 canonical。视觉 epoch 同时记录参数名与结构 revision；自身提交通过 ownedEditRevision 放行，第三方结构编辑立即失效。
 - paramBlockSpec 是纯投影，不在 useMemo 里写 ref；清理放在 layout effect（早于 paint）。拖动提交前校验全分辨率窗口与编辑集 revision，缺帧 / 结构变化直接取消，不写 0。
+- **预览释放只有一条判据**（`paramBlockPreviewRelease`）：这次提交产生的权威已经可见。带曲线补丁的提交必须同时满足「曲线 revision 前进 ∧ 权威水位在提交之后确认 ∧ 当前窗口包含提交片段」；纯布局提交才退回几何相等。旧实现用「本地派生几何已经等于预览几何」判断，而 `setParamBlockState` 是同步提交 —— 那个条件在 pointerup 之后一次渲染就成立，于是预览被撤、曲线回旧值、块按旧曲线重新采样，用户看到「先回弹旧参数、再生效新参数」。超时（2s）之前必须先 `flushReadback()` 对账再撤，否则撤下的第一帧仍是旧曲线。
+- 新建 / 伸缩 / 过渡的预览事务在提交时记下「依据的权威水位」与「提交的曲线片段」（`authorityRevisionAtStart` / `authorityRequestSeqAtCommit` / `committedSegments`）；没有这三个字段就无法回答「权威有没有前进过」。
+
+## 值轴边缘滚动
+
+- 竖向边缘滚动的单位是**参数值**，不是 `scrollTop`：带宽 20px、满带 0.10 个视口/秒、软启动 `ratio²`、单帧上限 0.0025 个视口（只在 ≥25ms 的卡顿帧上生效，保证 60Hz 与 120Hz 手感一致）。滚动条自己的「值域中心 ↔ scrollTop」映射仍走 `verticalScrollMapping`，两者互不影响。
+- 驱动只负责时钟与 rAF：帧时长按「距上一帧」计算，指针离开触发带即复位时钟，复位后的第一帧位移恒为 0。旧实现按「距上一次 step」计算，带外空闲会被补成一帧的大位移 —— 表现为「来回蹭边缘时视图一跳一跳」。
+- 帧时长每帧只算一次（两个轴各算一次会让第二个轴永远拿到 0）。
+
+## 提交事务
+
+- 写入只有一条入口（`useParamBlockPersistence.commit`）：**前端预检**（`paramBlockValidate`，与 Rust `validate_edit_set` 逐条同构）→ 按根串行排队 → CAS → 按类别重试。
+- 预检失败的编辑集**永远不离开浏览器**：后端 `Invalid:` 是一类确定性失败，而 `composeParamBlockView` 会静默裁掉重叠，前端"看起来正常"不代表合法。
+- 失败分四类（`paramBlockCommitError`）：`conflict`（CAS，刷新基准后可重试）、`rejected`（校验，不可重试）、`transport`（IPC，对账后最多一次）、`cancelled`（静默）。分类按 `Conflict: ` / `Invalid: ` 前缀，不按文案匹配。
+- 只有 `edit_set` 冲突会原样重放；`curve` / `geometry` 冲突意味着补丁的基准变了，必须由调用方按**意图重基**，不能盲目重放（那会覆盖别人的修改）。
+- 多块全分辨率读在窗口之间出现 revision 不一致时**整轮重读**（最多 3 次），而不是把 `Conflict: parameter curve changed during read` 抛给用户 —— 曲线 revision 是进程全局计数，任何无关写入都会让它前进。
+- 回读失败与写入失败**不共用回调**：后台回读失败只写诊断，不会再弹一条看起来像"你的编辑丢了"的 danger 提示。
 
 ## 持久化与版本
 
