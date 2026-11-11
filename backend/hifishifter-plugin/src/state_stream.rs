@@ -30,7 +30,9 @@ pub(crate) unsafe fn read_state(stream: *mut c_void) -> Result<Vec<u8>, String> 
                 &mut actual,
             )
         };
-        if actual == 0 && done == 0 {
+        if actual == 0 && done == 0 && result >= 0 {
+            // 只有宿主明确回报成功的空流才是合法的空 state。`result < 0` 且
+            // `actual == 0` 是**读失败**，绝不能伪装成空 state 让恢复静默 no-op。
             return Ok(Vec::new());
         }
         if result < 0 || actual <= 0 || actual as usize > 4 - done {
@@ -97,6 +99,8 @@ mod tests {
         vtbl: *const StreamVtbl,
         bytes: Vec<u8>,
         position: usize,
+        /// 模拟宿主 IBStream 返回 `result < 0, actual == 0` 的真实读失败。
+        fail_read: bool,
     }
     unsafe extern "system" fn query(_: *mut c_void, _: *const u8, _: *mut *mut c_void) -> i32 {
         {
@@ -123,6 +127,10 @@ mod tests {
             // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
             crate::guard_ffi(0, || {
                 let stream = unsafe { &mut *ptr.cast::<Stream>() };
+                if stream.fail_read {
+                    unsafe { *actual = 0 };
+                    return -1;
+                }
                 let size = (count as usize)
                     .min(3)
                     .min(stream.bytes.len() - stream.position);
@@ -195,6 +203,7 @@ mod tests {
             vtbl: &VTABLE,
             bytes: Vec::new(),
             position: 0,
+            fail_read: false,
         };
         let ptr = (&raw mut stream).cast();
         unsafe {
@@ -205,5 +214,28 @@ mod tests {
         stream.bytes = vec![7, 0, 0, 0, b'{'];
         stream.position = 0;
         assert!(unsafe { read_state(ptr) }.is_err());
+    }
+
+    /// `result < 0, actual == 0` 是读失败，不是"空 state"：恢复路径必须报错，
+    /// 不能静默 no-op 丢掉工程状态（`state_stream.rs` 的历史缺陷）。
+    #[test]
+    fn a_failed_empty_read_is_not_an_empty_state() {
+        let mut stream = Stream {
+            vtbl: &VTABLE,
+            bytes: Vec::new(),
+            position: 0,
+            fail_read: true,
+        };
+        let ptr = (&raw mut stream).cast();
+        let result = unsafe { read_state(ptr) };
+        assert!(result.is_err(), "read failure must surface as an error");
+        assert!(
+            !matches!(result, Ok(ref bytes) if bytes.is_empty()),
+            "an empty Ok would silently drop the component state"
+        );
+
+        // 对照组：宿主明确回报成功的空流（result >= 0, actual == 0）仍是合法空 state。
+        stream.fail_read = false;
+        assert_eq!(unsafe { read_state(ptr).unwrap() }, Vec::<u8>::new());
     }
 }

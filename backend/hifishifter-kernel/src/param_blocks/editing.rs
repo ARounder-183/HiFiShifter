@@ -1330,7 +1330,11 @@ pub fn resize_block(
             return place_user_block(&working, next);
         }
         BlockGeometry::Take { .. } => {}
-        BlockGeometry::Group { .. } => unreachable!(),
+        // 上面已把 Group 分流到 resize_group_block；这里再出现 Group 只可能是
+        // 新增枚举变体 / 前期分流被改动。返回明确错误而不是 panic（渲染线程）。
+        BlockGeometry::Group { .. } => {
+            return Err("Invalid: group block must use the group resize path".into());
+        }
     }
     let members = projected.members.clone();
     if members.is_empty() {

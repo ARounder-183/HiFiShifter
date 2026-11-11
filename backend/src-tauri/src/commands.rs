@@ -161,7 +161,7 @@ pub fn ping() -> serde_json::Value {
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_runtime_info(state: State<'_, AppState>) -> crate::models::RuntimeInfoPayload {
-    core::get_runtime_info(state)
+    common::guarded("get_runtime_info", || core::get_runtime_info(state))
 }
 
 /// 关于对话框数据（版本 / commit / 仓库链接）。
@@ -421,7 +421,7 @@ pub fn close_window(window: Window) -> serde_json::Value {
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_project_meta(state: State<'_, AppState>) -> crate::models::ProjectMetaPayload {
-    project::get_project_meta(state)
+    common::guarded("get_project_meta", || project::get_project_meta(state))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -772,7 +772,9 @@ pub async fn save_project_to_path(
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_auto_backup_settings(state: State<'_, AppState>) -> crate::config::AutoBackupSettings {
-    project::get_auto_backup_settings(state)
+    common::guarded("get_auto_backup_settings", || {
+        project::get_auto_backup_settings(state)
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -811,7 +813,9 @@ pub fn run_timed_auto_backup(
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_recording_settings(state: State<'_, AppState>) -> crate::config::RecordingSettings {
-    recording::get_recording_settings(state)
+    common::guarded("get_recording_settings", || {
+        recording::get_recording_settings(state)
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -895,7 +899,9 @@ pub async fn stop_recording(app: tauri::AppHandle) -> serde_json::Value {
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_recording_state(state: State<'_, AppState>) -> crate::recording::RecordingStatePayload {
-    recording::get_recording_state(state)
+    common::guarded("get_recording_state", || {
+        recording::get_recording_state(state)
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2123,7 +2129,9 @@ pub fn replace_clip_source(
 pub fn check_source_files_changed(
     state: State<'_, AppState>,
 ) -> crate::models::CheckSourceFilesChangedPayload {
-    timeline::check_source_files_changed(state)
+    common::guarded("check_source_files_changed", || {
+        timeline::check_source_files_changed(state)
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2527,16 +2535,18 @@ pub fn get_param_frames(
     binary: Option<bool>,
     with_sentinel: Option<bool>,
 ) -> crate::models::ParamFramesPayload {
-    params::get_param_frames(
-        state,
-        track_id,
-        param,
-        start_frame,
-        frame_count,
-        stride,
-        binary,
-        with_sentinel,
-    )
+    common::guarded("get_param_frames", || {
+        params::get_param_frames(
+            state,
+            track_id,
+            param,
+            start_frame,
+            frame_count,
+            stride,
+            binary,
+            with_sentinel,
+        )
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2630,7 +2640,9 @@ pub fn get_static_param(
     track_id: String,
     param: String,
 ) -> crate::models::StaticParamValuePayload {
-    params::get_static_param(state, track_id, param)
+    common::guarded("get_static_param", || {
+        params::get_static_param(state, track_id, param)
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2674,7 +2686,7 @@ pub fn stretch_track_linked_params(
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn load_default_model(state: State<'_, AppState>) -> crate::models::ModelConfigPayload {
-    synth::load_default_model(state)
+    common::guarded("load_default_model", || synth::load_default_model(state))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2682,7 +2694,7 @@ pub fn load_model(
     state: State<'_, AppState>,
     model_dir: String,
 ) -> crate::models::ModelConfigPayload {
-    synth::load_model(state, model_dir)
+    common::guarded("load_model", || synth::load_model(state, model_dir))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2698,12 +2710,31 @@ pub fn set_pitch_shift(semitones: f64) -> serde_json::Value {
     }
 }
 
+// 神经合成本身耗时可达分钟级：与 synthesize 同理放到阻塞线程池，避免同步命令
+// 冻结整个 UI；spawn_blocking 的任务边界同时把 panic 收成 JoinError（不会越过
+// WebView IPC 线程的 FFI 边界 abort App）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn process_audio(
-    state: State<'_, AppState>,
+pub async fn process_audio(
+    app: tauri::AppHandle,
     audio_path: String,
 ) -> crate::models::ProcessAudioPayload {
-    synth::process_audio(state, audio_path)
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        synth::process_audio(state, audio_path)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            log::error!("process_audio: join task failed: {error}");
+            crate::models::ProcessAudioPayload {
+                ok: false,
+                audio: None,
+                feature: None,
+                timeline: None,
+            }
+        }
+    }
 }
 
 // 整段 mixdown 渲染耗时可达分钟级，必须放到阻塞线程池执行；
@@ -2796,7 +2827,9 @@ pub fn cancel_export_audio() -> serde_json::Value {
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_export_audio_defaults(state: State<'_, AppState>) -> synth::ExportAudioDefaultsPayload {
-    synth::get_export_audio_defaults(state)
+    common::guarded("get_export_audio_defaults", || {
+        synth::get_export_audio_defaults(state)
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2804,7 +2837,9 @@ pub fn preview_export_audio_plan(
     state: State<'_, AppState>,
     request: synth::ExportAudioRequest,
 ) -> synth::ExportAudioPlanPayload {
-    synth::preview_export_audio_plan(state, request)
+    common::guarded("preview_export_audio_plan", || {
+        synth::preview_export_audio_plan(state, request)
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2894,14 +2929,16 @@ pub fn stop_audio(state: State<'_, AppState>) -> serde_json::Value {
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_playback_state(state: State<'_, AppState>) -> crate::models::PlaybackStatePayload {
-    // 与播放/停止同一把锁：保证轮询读到的 (is_playing, base, position) 是
-    // 某个传输命令完成后的完整状态，而不是 stop+play 交错的中间态。
-    let _transport_order = state
-        .inner()
-        .transport_lock
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    playback::get_playback_state(state)
+    common::guarded("get_playback_state", || {
+        // 与播放/停止同一把锁：保证轮询读到的 (is_playing, base, position) 是
+        // 某个传输命令完成后的完整状态，而不是 stop+play 交错的中间态。
+        let _transport_order = state
+            .inner()
+            .transport_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        playback::get_playback_state(state)
+    })
 }
 
 /// 后台预渲染：编辑操作后立即在后台开始渲染，无需等待播放。
@@ -3101,18 +3138,20 @@ pub fn get_syllable_analysis_progress() -> Option<crate::pitch_analysis::Syllabl
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_onnx_status() -> onnx_status::OnnxStatusPayload {
-    onnx_status::get_onnx_status()
+    common::guarded("get_onnx_status", onnx_status::get_onnx_status)
 }
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_onnx_diagnostic() -> crate::nsf_hifigan_onnx::OnnxDiagnosticInfo {
-    onnx_status::get_onnx_diagnostic_info()
+    common::guarded("get_onnx_diagnostic", || {
+        onnx_status::get_onnx_diagnostic_info()
+    })
 }
 
 /// vslib 是否可用 —— 供前端算法列表按能力过滤（不可用时隐藏 vslib）。
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_vslib_status() -> vslib_status::VslibStatusPayload {
-    vslib_status::get_vslib_status()
+    common::guarded("get_vslib_status", vslib_status::get_vslib_status)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -3385,7 +3424,9 @@ pub fn transliterate(
     texts: Vec<String>,
     options: Option<crate::search::SearchOptions>,
 ) -> Vec<crate::search::TranslitResult> {
-    crate::search::transliterate_batch(&texts, &options.unwrap_or_default())
+    common::guarded("transliterate", || {
+        crate::search::transliterate_batch(&texts, &options.unwrap_or_default())
+    })
 }
 
 // ===================== vocalshifter =====================
@@ -3589,7 +3630,9 @@ pub fn reveal_export_paths(app: tauri::AppHandle, paths: Vec<String>) -> serde_j
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_processor_params(algo: String) -> Vec<processor_caps::ParamDescriptorDto> {
-    processor_caps::get_processor_params(algo)
+    common::guarded("get_processor_params", || {
+        processor_caps::get_processor_params(algo)
+    })
 }
 
 // ===================== midi =====================
@@ -3834,7 +3877,7 @@ pub async fn save_ui_settings(
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn ui_kv_dump(state: State<'_, AppState>) -> std::collections::BTreeMap<String, String> {
-    ui_settings::ui_kv_dump(state)
+    common::guarded("ui_kv_dump", || ui_settings::ui_kv_dump(state))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -3842,7 +3885,7 @@ pub fn ui_kv_put(
     state: State<'_, AppState>,
     patch: std::collections::BTreeMap<String, String>,
 ) -> std::collections::BTreeMap<String, String> {
-    ui_settings::ui_kv_put(state, patch)
+    common::guarded("ui_kv_put", || ui_settings::ui_kv_put(state, patch))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -3850,5 +3893,5 @@ pub fn ui_kv_delete(
     state: State<'_, AppState>,
     keys: Vec<String>,
 ) -> std::collections::BTreeMap<String, String> {
-    ui_settings::ui_kv_delete(state, keys)
+    common::guarded("ui_kv_delete", || ui_settings::ui_kv_delete(state, keys))
 }

@@ -29,6 +29,12 @@
             "why": "只认 [package] 段里的 version；[dependencies] 里也有同名字段"
         },
         {
+            "path": "backend/hifishifter-kernel/Cargo.toml",
+            "pattern": "(?ms)(\\[package\\].*?^\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "why": "内核此前停留 0.1.0 且未纳入清单，诊断包里的 kernel 版本与插件链不同步"
+        },
+        {
             "path": "backend/hifishifter-plugin/Cargo.toml",
             "pattern": "(?ms)(\\[package\\].*?^\\s*version\\s*=\\s*\")([^\"]+)(\")",
             "occurrences": 1

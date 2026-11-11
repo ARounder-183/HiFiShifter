@@ -1,6 +1,6 @@
 [package]
 name = "hifishifter-kernel"
-version = "0.1.0"
+version = "0.2.0-beta"
 edition = "2021"
 publish = false
 description = "HiFiShifter 的离线音频内核：不依赖 Tauri，也不依赖音频设备"
