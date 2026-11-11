@@ -686,11 +686,15 @@ export function useTimelineKernelSeekDrag({
                 enabled: snapActive,
             });
             let nextStart: number;
-            /** 这一刻横向位置是否**真的**被吸附钉住了（描边只认这个事实）。 */
-            let snapped: boolean;
+            /**
+             * 是否被**拖拽起点吸附**钉住了。与 snapResult.snapped（任何候选命中：
+             * 网格 / 相邻 Clip 边缘 / 播放头 / 选区标记……）的区别就是它要求回到
+             * 自己出发时的横向位置 —— 目标轨描边只认这个事实（originPinned）。
+             */
+            let originPinned = false;
             if (originSnap.active) {
                 nextStart = originSnap.startSec;
-                snapped = true;
+                originPinned = true;
                 publishClipOriginSnapHighlight({
                     sec: originSnap.startSec,
                     trackId: args.targetTrackId === NEW_TRACK_SENTINEL ? null : args.targetTrackId,
@@ -705,7 +709,6 @@ export function useTimelineKernelSeekDrag({
                 // 生效、位置也对，但完全没有视觉反馈——表现为"吸附没生效"。
                 // `excludeClipIds` 必须覆盖**全部参与者**：整组一起移动时，组内其他
                 // clip 不应成为自己的吸附目标。
-                // ★ 接住整个 SnapResult：`snapped` 是「命中」的唯一证据。
                 const snapResult = snapActive
                     ? snapTimelineDetailed(rawStart, "clip", {
                           originSec: origin.startSec,
@@ -719,7 +722,6 @@ export function useTimelineKernelSeekDrag({
                       })
                     : null;
                 nextStart = snapResult?.sec ?? rawStart;
-                snapped = snapResult?.snapped ?? false;
                 // 吸附被关闭（拖拽中切开关 / 按住临时取反键）：高亮必须清掉，
                 // 否则会残留上一次的吸附提示（旧实现同样在 else 分支清除）。
                 if (!snapActive) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
@@ -745,12 +747,12 @@ export function useTimelineKernelSeekDrag({
                 dropToNewTrack,
             });
             origin.lastDeltaStartSec = deltaStartSec;
-            /* 目标轨道描边与吸附线共用同一个判据 —— 吸附命中（未吸附不画）。 */
+            /* 描边只认「被吸回原起点」（= 上面的 originSnap.active），与竖向对齐线同源。 */
             const targetDrop = resolveTrackDropTarget({
                 moves,
                 participants: origin.participants,
                 dropToNewTrack,
-                snapped,
+                originPinned,
             });
             if (targetDrop === null) clearTrackDropTarget();
             else publishTrackDropTarget(targetDrop);

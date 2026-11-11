@@ -9,7 +9,7 @@ const PARTICIPANTS = [
 ];
 
 describe("resolveTrackDropTarget", () => {
-    it("returns every target track for a snapped cross-track move", () => {
+    it("returns every target track when the clip is pinned back to its origin", () => {
         expect(
             resolveTrackDropTarget({
                 moves: [
@@ -18,41 +18,41 @@ describe("resolveTrackDropTarget", () => {
                 ],
                 participants: PARTICIPANTS,
                 dropToNewTrack: false,
-                snapped: true,
+                originPinned: true,
             }),
         ).toEqual({ trackIds: ["track-b", "track-c"] });
     });
 
-    it("★ does not outline anything while no snap is engaged", () => {
-        // 跨轨了、但这一刻没有吸附命中 ⇒ 没有描边。这是「未吸附也高亮」的回归锁。
+    it("★ does not outline anything when the clip is not pinned to its origin", () => {
+        // 跨轨了、但这一刻没被吸回原起点 ⇒ 没有描边。这是「只要吸附就高亮」的回归锁。
         expect(
             resolveTrackDropTarget({
                 moves: [{ clipId: "a", trackId: "track-b" }],
                 participants: PARTICIPANTS,
                 dropToNewTrack: false,
-                snapped: false,
+                originPinned: false,
             }),
         ).toBeNull();
     });
 
-    it("does not outline a same-track drag even when snapped", () => {
+    it("does not outline a same-track drag even when pinned", () => {
         expect(
             resolveTrackDropTarget({
                 moves: [{ clipId: "a", trackId: "track-a" }],
                 participants: PARTICIPANTS,
                 dropToNewTrack: false,
-                snapped: true,
+                originPinned: true,
             }),
         ).toBeNull();
     });
 
-    it("returns null for the new-track sentinel even when snapped", () => {
+    it("returns null for the new-track sentinel even when pinned", () => {
         expect(
             resolveTrackDropTarget({
                 moves: [{ clipId: "a", trackId: NEW_TRACK_SENTINEL }],
                 participants: PARTICIPANTS,
                 dropToNewTrack: true,
-                snapped: true,
+                originPinned: true,
             }),
         ).toBeNull();
     });
@@ -66,7 +66,7 @@ describe("resolveTrackDropTarget", () => {
                 ],
                 participants: PARTICIPANTS,
                 dropToNewTrack: false,
-                snapped: true,
+                originPinned: true,
             }),
         ).toEqual({ trackIds: ["track-c"] });
     });
@@ -80,7 +80,7 @@ describe("resolveTrackDropTarget", () => {
                 ],
                 participants: PARTICIPANTS,
                 dropToNewTrack: false,
-                snapped: true,
+                originPinned: true,
             }),
         ).toEqual({ trackIds: ["track-c"] });
     });
