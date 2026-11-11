@@ -25,10 +25,32 @@
  * `frameMsFor` 会推进 `lastFrameAtMs`。若每个轴各调一次，第二个轴永远拿到 0
  * —— 症状是"只有横向会滚、竖向怎么拖都不动"，或反之（取决于轴顺序）。
  *
+ * 【为什么时钟之外还需要 `ticking`：帧令牌的两个职责】
+ * `rafId` 同时表达两件事：「已经排了一帧」与「这一帧正在执行」。旧实现在
+ * `tick()` **入口**就把它置空，只完成了前者；于是任何在 `apply()` 内部发生的
+ * 重入 `track()` 都会把「正在执行」误读成「空闲」，再排一帧，而 `tick()` 末尾
+ * 又排一帧 —— 每帧**净增一个无人取消的孤儿回调**，且没有上界。
+ *
+ * 生产代码里这条重入是**必然发生**的：值轴的 `apply` → 提交值域视口 → 发布
+ * 交互视口 → 订阅者合成 `pointermove` → 手势 `onMove` → 同一个驱动的 `track()`。
+ * （Task 1 同时把那条广播改成微任务合帧，见 `pianoRollInteractionViewportBus`；
+ * 但驱动本身必须自己站得住 —— 任何轴、任何调用方都可能重入。）
+ *
+ * 症状：拖得越久越卡。第 N 帧要跑 N 次 `tick()`，每次至少两回 `getBounds()`
+ * （= `getBoundingClientRect()`，强制同步布局）⇒ O(N²)。
+ *
+ * 现在的规则（**不变式**，改代码前先读这三条）：
+ * - **I-1** `rafId !== null` ⟺ **恰好一个**待执行帧；执行期间（`ticking`）不接受
+ *   新的排帧请求，唯一的排帧入口是 `schedule()`。
+ * - **I-2** 一帧只取一次 `getBounds()`，两轴与带内判定共用同一份矩形。
+ * - **I-3** `stop()` 递增取消代次；`tick()` 收尾时若代次已变就不再续帧 ——
+ *   这样「在 `apply()` 内部被 stop()」也不会留下一帧。
+ *
  * 【违反边界的症状】
  * - 时钟按 step 计：来回蹭边缘时视图一跳一跳；
  * - 帧时长每轴各算一次：只有一个轴生效；
- * - 到达边界后仍排帧：松手前 CPU 空转、每帧标脏重绘。
+ * - 到达边界后仍排帧：松手前 CPU 空转、每帧标脏重绘；
+ * - `tick()` 入口提前清 `rafId` 却不设 `ticking`：拖得越久越卡（见上）。
  */
 import type { EdgeScrollBounds } from "../../shared/edgeAutoScroll";
 import {
@@ -62,6 +84,7 @@ export interface EdgeScrollDriver {
         onScrolled?: (clientX: number, clientY?: number) => void,
     ) => void;
     stop: () => void;
+    /** 是否有待执行帧或正处在某一帧的执行中。 */
     isRunning: () => boolean;
 }
 
@@ -70,7 +93,15 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
     const requestFrame = options.requestFrame ?? ((cb: () => void) => requestAnimationFrame(cb));
     const cancelFrame = options.cancelFrame ?? ((id: number) => cancelAnimationFrame(id));
 
+    /** 唯一的帧令牌：`!== null` ⟺ 恰好一个待执行帧（I-1）。 */
     let rafId: number | null = null;
+    /** 本帧回调正在执行。执行期间 `track()` 不得排帧（见模块头 I-1）。 */
+    let ticking = false;
+    /**
+     * 取消代次。`stop()` 递增它；`tick()` 在入口记下自己的代次，收尾时若代次
+     * 已变就不再续帧（I-3）。
+     */
+    let generation = 0;
     let lastClientX: number | null = null;
     let lastClientY: number | null = null;
     /** 上一帧的时间戳；`null` = 时钟已复位（指针不在带内 / 手势刚开始）。 */
@@ -136,10 +167,12 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
         clientX: number,
         clientY?: number,
         onScrolled?: (clientX: number, clientY?: number) => void,
+        boundsIn?: EdgeScrollBounds | null,
     ): boolean => {
         lastClientX = clientX;
         if (clientY !== undefined) lastClientY = clientY;
-        const bounds = options.getBounds();
+        // I-2：`tick()` 传进来的矩形与带内判定共用；独立调用时才自己取。
+        const bounds = boundsIn === undefined ? options.getBounds() : boundsIn;
         if (!bounds) return false;
         // ★ 每帧只算一次：frameMsFor 会推进时钟，两个轴各调一次会让第二个轴拿到 0。
         const frameMs = frameMsFor(now(), EDGE_SCROLL_MAX_AXIS_FRAME_MS);
@@ -157,27 +190,59 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
     };
 
     /** 指针是否落在**任一可滚轴**的触发带内。 */
-    const pointerInBand = (clientX: number, clientY: number | null): boolean => {
-        const bounds = options.getBounds();
+    const pointerInBand = (
+        clientX: number,
+        clientY: number | null,
+        boundsIn?: EdgeScrollBounds | null,
+    ): boolean => {
+        const bounds = boundsIn === undefined ? options.getBounds() : boundsIn;
         if (!bounds) return false;
         return options.axes.some(
             (axis) => axis.canScroll() && axisRatio(axis, clientX, clientY, bounds) !== 0,
         );
     };
 
-    const tick = () => {
-        rafId = null;
-        const clientX = lastClientX;
-        if (clientX === null) return;
-        const moved = step(clientX, lastClientY ?? undefined, trackedOnScrolled);
-        if (!pointerInBand(clientX, lastClientY)) {
-            // ★ 离开带 ⇒ 复位时钟。否则下一次进带的第一帧会拿到整段带外空闲。
-            lastFrameAtMs = null;
-            return;
-        }
-        // 复位帧（frameMs = 0）不会有位移，但必须继续排帧，否则循环在第一帧就停了。
-        if (moved || lastFrameMs === 0) rafId = requestFrame(tick);
+    /**
+     * 唯一的排帧入口（I-1）。
+     *
+     * 两个提前返回都是**不变式**，不是优化：`rafId !== null` 说明已经有一帧在
+     * 队列里；`ticking` 说明我们正站在那一帧里面，它的收尾会自己续帧。
+     */
+    const schedule = (): void => {
+        if (rafId !== null || ticking) return;
+        rafId = requestFrame(tick);
     };
+
+    function tick(): void {
+        rafId = null; // 本帧已被消费
+        ticking = true; // 但仍在执行：任何重入的 track() 都不得排帧
+        const myGeneration = generation;
+        let keep = false;
+        try {
+            const clientX = lastClientX;
+            if (clientX !== null) {
+                // I-2：一帧只取一次边界。getBoundingClientRect() 是强制同步布局，
+                // 旧实现每帧取两次，在重入泄漏下被放大成 O(N²)。
+                const bounds = options.getBounds();
+                const moved = step(clientX, lastClientY ?? undefined, trackedOnScrolled, bounds);
+                /*
+                 * 用**最新**指针位置判定带内：`apply()` 期间可能有重入的 track()
+                 * 把指针挪走（手势合成的 pointermove 就是这条路），此时本帧就该收尾。
+                 */
+                const latestX = lastClientX;
+                if (latestX === null || !pointerInBand(latestX, lastClientY, bounds)) {
+                    // ★ 离开带 ⇒ 复位时钟。否则下一次进带的第一帧会拿到整段带外空闲。
+                    lastFrameAtMs = null;
+                } else if (moved || lastFrameMs === 0) {
+                    // 复位帧（frameMs = 0）不会有位移，但必须继续排帧，否则循环在第一帧就停了。
+                    keep = true;
+                }
+            }
+        } finally {
+            ticking = false;
+            if (keep && myGeneration === generation) schedule();
+        }
+    }
 
     const track = (
         clientX: number,
@@ -198,10 +263,12 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
             }
             return;
         }
-        if (rafId === null) rafId = requestFrame(tick);
+        schedule();
     };
 
     const stop = (): void => {
+        // I-3：让正在执行的那一帧收尾时知道「我已经被取消了」。
+        generation += 1;
         if (rafId !== null) {
             cancelFrame(rafId);
             rafId = null;
@@ -217,6 +284,6 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
         step,
         track,
         stop,
-        isRunning: () => rafId !== null,
+        isRunning: () => rafId !== null || ticking,
     };
 }

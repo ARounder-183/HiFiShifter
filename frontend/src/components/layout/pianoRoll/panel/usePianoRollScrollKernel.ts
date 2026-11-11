@@ -154,10 +154,13 @@ export function usePianoRollScrollKernel({
     // 需要长期持有本函数的路径使用，避免随渲染重建引发上游回调引用抖动。
     const applyScrollLayers = useCallback(
         function applyScrollLayers(next: number) {
+            // 设备像素比一帧只读一次：它会在标尺平移与交互视口两处用到，重复读取
+            // 等于把同一个全局查询跑两遍（并且两处若读到不同值，标尺与画布会错半像素）。
+            const dpr = readDevicePixelRatio();
             if (rulerContentRef.current) {
                 // 平移量吸附到设备像素（见 `rulerLayerTranslatePx`）：与内核同一约定，
                 // 否则层内标尺竖线在系统缩放率 > 1 时粗细不一。
-                rulerContentRef.current.style.transform = `translateX(${-rulerLayerTranslatePx(next, readDevicePixelRatio())}px)`;
+                rulerContentRef.current.style.transform = `translateX(${-rulerLayerTranslatePx(next, dpr)}px)`;
             }
 
             if (gridLayerRef.current) {
@@ -179,7 +182,7 @@ export function usePianoRollScrollKernel({
             pianoRollViewportBus.emit(next, emitPxPerSec, viewSizeRef.current.w);
             const param = editParamRef.current;
             const view = getCurrentViewportForScrollbar(param);
-            pianoRollInteractionViewportBus.emit({
+            pianoRollInteractionViewportBus.publish({
                 scrollLeftPx: next,
                 pxPerSec: emitPxPerSec,
                 viewportWidthPx: viewSizeRef.current.w,
@@ -187,7 +190,7 @@ export function usePianoRollScrollKernel({
                 param,
                 valueCenter: view.center,
                 valueSpan: view.span,
-                dpr: readDevicePixelRatio(),
+                dpr,
             });
             // 标尺播放头线：**宿主模式下由内核写**（同一次帧提交、同一份内核视口，
             // 与 GL 主体播放头逐设备像素一致）。这里只在无宿主时兜底 —— 两个写者写同一
@@ -198,7 +201,7 @@ export function usePianoRollScrollKernel({
                         pxPerSec: emitPxPerSec,
                         scrollLeftPx: next,
                         viewportWidthPx: viewSizeRef.current.w,
-                        dpr: readDevicePixelRatio(),
+                        dpr,
                     }),
                     visualPlayheadSecRef.current,
                 );

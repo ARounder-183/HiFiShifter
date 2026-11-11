@@ -1016,7 +1016,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
 
     function publishInteractionViewport(param: string, view: ValueViewport): void {
         const size = viewSizeRef.current;
-        pianoRollInteractionViewportBus.emit({
+        pianoRollInteractionViewportBus.publish({
             scrollLeftPx: scrollLeftRef.current,
             pxPerSec: pxPerSecRef.current,
             viewportWidthPx: size.w,

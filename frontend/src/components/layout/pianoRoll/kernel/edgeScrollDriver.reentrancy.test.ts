@@ -90,25 +90,20 @@ function runFrames(
 }
 
 describe("edgeScrollDriver 重入安全", () => {
-    /*
-     * 前三条在 Task 0 落盘时是**已知缺陷**（用 `it.fails` 钉住：它们必须失败，
-     * 修好之后改成 `it` 才是回归锁）。这样提交历史里每一棵树都是绿的，而
-     * 「缺陷存在」这件事仍然是可执行的断言。
-     */
-    it.fails("★ apply() 内重入 track() 不得让待执行帧数增长", () => {
+    it("★ apply() 内重入 track() 不得让待执行帧数增长", () => {
         const { pendingPerFrame, driver } = runFrames({ reentrant: true }, 6);
         // 修复前实测：[1, 2, 3, 4, 5, 6]（每帧净增一个孤儿回调）。
         expect(pendingPerFrame).toEqual([1, 1, 1, 1, 1, 1]);
         driver.stop();
     });
 
-    it.fails("★ stop() 之后不得留下任何待执行帧", () => {
+    it("★ stop() 之后不得留下任何待执行帧", () => {
         const { frames, driver } = runFrames({ reentrant: true }, 6);
         driver.stop();
         expect(frames.queue.length).toBe(0);
     });
 
-    it.fails("stop() 在 apply() 内部被调用时，本帧结束后也不得再排帧", () => {
+    it("stop() 在 apply() 内部被调用时，本帧结束后也不得再排帧", () => {
         const { frames } = runFrames({ reentrant: true, stopInsideApply: true }, 3);
         expect(frames.queue.length).toBe(0);
     });

@@ -493,6 +493,15 @@ export function beginParamBlockDrag(
                 );
             }
         }
+        /*
+         * 以**按下时的已提交曲线**为基底整窗复制一次，再覆盖本帧的段。
+         *
+         * 【为什么不改成原地写】这条路径每帧只跑一次（rAF 合并后），实测
+         * 6400 帧窗口 0.009ms、200k 帧窗口 0.31ms —— 远低于一帧的预算。
+         * 原地写需要一个「上一帧写过哪些区间」的还原簿记，而那正是
+         * `useLiveParamEditing` 里最容易出错的一块；为 0.009ms 引入它不划算。
+         * 若将来窗口规模再涨一个数量级，先回来重测这个数字，再决定要不要改。
+         */
         paramBlockInteractionCurveRef.current = {
             ...pv,
             edit: applyFullResSegmentsToParamView({
