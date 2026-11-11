@@ -10,8 +10,9 @@
  * 需要 jsdom：要真实的 DOM 层级（input 挂在容器里）来验证 closest() 命中。
  */
 
-import type { Editor } from "@tiptap/core";
+import { Editor } from "@tiptap/core";
 import { test } from "vitest";
+import { buildNotebookExtensions } from "./notebookExtensions.ts";
 
 import {
     escapeMarkdownText,
@@ -150,9 +151,6 @@ test("components/layout/notebook/notebookClipboard.test.ts scripted checks", () 
  * "模拟行为与真实行为漂移、测试却仍然绿"的风险。
  */
 test("剪切时 text/plain 取自选区被删之前（否则为空串）", async () => {
-    const { Editor } = await import("@tiptap/core");
-    const { buildNotebookExtensions } = await import("./notebookExtensions.ts");
-
     const editor = new Editor({
         element: document.createElement("div"),
         extensions: buildNotebookExtensions({ markdownShortcuts: true, slashCommands: false }),
@@ -186,4 +184,4 @@ test("剪切时 text/plain 取自选区被删之前（否则为空串）", async
     remove();
     editor.destroy();
     container.remove();
-});
+}, 20_000);

@@ -100,9 +100,8 @@ export function usePianoRollEditSession({ dispatch, invalidate, s }: EditSession
      * 不需要在十余处逐一记得调用 —— 漏一处就会让曲线停在旧数据上。
      */
     const liveEditEndHandlerRef = useRef<(() => void) | null>(null);
-    // eslint-disable-next-line react-hooks/preserve-manual-memoization -- 这枚标志**刻意**只建一次并保持引用恒定（它进入两个取数 hook 的依赖链）；内部的 ref 读取是惰性的，不参与渲染期求值
+
     const liveEditActiveRef = useMemo(
-        // eslint-disable-next-line react-hooks/refs -- 箭头函数只在"写入标志"时被调用，不在渲染期读取 ref
         () => createLiveEditFlag(() => liveEditEndHandlerRef.current?.()),
         [],
     );

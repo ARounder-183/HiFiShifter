@@ -11,6 +11,12 @@
  */
 const FLAG_CHECK_INTERVAL_MS = 2000;
 
+/**
+ * 生产构建里 debug logger 必须是恒关闭的空实现：dev 开关只服务于开发期排查，
+ * 不该把 localStorage 读取与 console 调用留在发行包里。
+ */
+const PRODUCTION_LOGGING = import.meta.env.DEV;
+
 export interface DebugLogger {
     /** 当前开关是否开启（节流后的读数）。 */
     readonly enabled: boolean;
@@ -32,7 +38,10 @@ export function createDebugLogger(flag: string): DebugLogger {
         const now = Date.now();
         if (now - lastCheck < FLAG_CHECK_INTERVAL_MS) return enabled;
         lastCheck = now;
-        enabled = typeof window !== "undefined" && window.localStorage?.getItem(flag) === "1";
+        enabled =
+            PRODUCTION_LOGGING &&
+            typeof window !== "undefined" &&
+            window.localStorage?.getItem(flag) === "1";
         return enabled;
     };
 

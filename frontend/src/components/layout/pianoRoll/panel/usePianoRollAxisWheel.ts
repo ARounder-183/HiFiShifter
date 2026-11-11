@@ -238,8 +238,16 @@ export function usePianoRollAxisWheel({
         setParamViewport,
         invalidate,
         scrollHorizontalKb,
+        horizontalZoomKb,
         pianoKeysVerticalScrollKb,
         pianoKeysVerticalZoomKb,
-        horizontalZoomKb,
+        axisWrapRef,
+        clampViewport,
+        paramViewsRef,
+        pitchViewRef,
+        processorParamsRef,
+        scrollerRef,
+        syncScrollLeftRef,
+        viewSizeRef,
     ]);
 }

@@ -2625,7 +2625,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         onVibratoDragStateChange: setVibratoDragHud,
         onVibratoDragEnd: useCallback(() => {
             setVibratoDragHud(null);
-        }, []),
+        }, [setVibratoDragHud]),
         cycleDragDirectionKb,
         paramFineAdjustKb,
         onContextMenu: useCallback((x: number, y: number) => {
@@ -3773,7 +3773,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 ownedEditRevision: sameGesture ? previous.ownedEditRevision : null,
             };
         },
-        [],
+        [paramBlockEpochRef],
     );
     const beginBlockDrag = useCallback(
         (args: ParamBlockDragStart) => {
@@ -3880,6 +3880,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             bumpParamBlockStructure,
             editParam,
             blockPersistence,
+            paramBlockEpochRef,
+            paramBlockStateRef,
+            processorParamsRef,
             effectiveProjectScale,
             getAuthorityWatermark,
             invalidateParamBlockSpec,

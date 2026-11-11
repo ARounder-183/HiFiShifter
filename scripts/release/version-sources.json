@@ -95,6 +95,42 @@
             "pattern": "(?ms)(\\[\\[package\\]\\]\\s*name\\s*=\\s*\"hifishifter-clap\"\\s*version\\s*=\\s*\")([^\"]+)(\")",
             "occurrences": 1,
             "id": "backend/Cargo.lock (hifishifter-clap)"
+        },
+        {
+            "path": "backend/hifishifter-clipboard/Cargo.toml",
+            "pattern": "(?ms)(\\[package\\].*?^\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "id": "clipboard"
+        },
+        {
+            "path": "backend/hifishifter-host-link/Cargo.toml",
+            "pattern": "(?ms)(\\[package\\].*?^\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "id": "host-link"
+        },
+        {
+            "path": "backend/hfs-gui/Cargo.toml",
+            "pattern": "(?ms)(\\[package\\].*?^\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "id": "hfs-gui"
+        },
+        {
+            "path": "backend/Cargo.lock",
+            "pattern": "(?ms)(\\[\\[package\\]\\]\\s*name\\s*=\\s*\"hifishifter-clipboard\"\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "id": "backend/Cargo.lock (hifishifter-clipboard)"
+        },
+        {
+            "path": "backend/Cargo.lock",
+            "pattern": "(?ms)(\\[\\[package\\]\\]\\s*name\\s*=\\s*\"hifishifter-host-link\"\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "id": "backend/Cargo.lock (hifishifter-host-link)"
+        },
+        {
+            "path": "backend/hfs-gui/Cargo.lock",
+            "pattern": "(?ms)(\\[\\[package\\]\\]\\s*name\\s*=\\s*\"hfs-gui\"\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "id": "backend/hfs-gui/Cargo.lock (hfs-gui)"
         }
     ]
 }

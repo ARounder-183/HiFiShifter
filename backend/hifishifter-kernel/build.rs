@@ -624,13 +624,54 @@ fn build_soundtouch() {
         }
     }
 
+    // 【生成器必须显式钉住】CMake 一旦生成过 CMakeCache.txt，就只会复用缓存里的
+    // CMAKE_GENERATOR:INTERNAL —— 此后 CMAKE_GENERATOR 环境变量改了也不会生效。本机
+    // 实测 8 份旧缓存都写着 Visual Studio 17 2022，而 msvc-env.ps1 给的是
+    // NMake Makefiles；旧缓存让 clippy 门禁死在 build script 里，看起来像源码坏了。
+    // 因此：声明环境变量触发重跑、把生成器显式交给 -G、并在缓存不一致时清理重建。
+    println!("cargo:rerun-if-env-changed=CMAKE_GENERATOR");
+    let requested_generator = std::env::var("CMAKE_GENERATOR")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let cache_path = build_dir.join("CMakeCache.txt");
+    if let Some(generator) = requested_generator.as_deref() {
+        let cached = std::fs::read_to_string(&cache_path).ok();
+        let cached_generator = cached.as_deref().and_then(|text| {
+            text.lines()
+                .find_map(|line| line.strip_prefix("CMAKE_GENERATOR:INTERNAL="))
+        });
+        if cached_generator.is_some_and(|value| value != generator) {
+            println!(
+                "cargo:warning=[soundtouch] generator changed from {} to {}; reconfiguring",
+                cached_generator.unwrap_or("unknown"),
+                generator
+            );
+            std::fs::remove_dir_all(&build_dir)
+                .expect("[soundtouch] failed to remove the stale cmake build directory");
+            std::fs::create_dir_all(&build_dir)
+                .expect("[soundtouch] failed to recreate the cmake build directory");
+        }
+    }
+
     // Step 1: CMake configure - build SoundTouchDLL as a shared library.
     let mut cfg = Command::new("cmake");
     cfg.arg("-S").arg(st_src_path);
     cfg.arg("-B").arg(&build_dir);
     cfg.arg("-DCMAKE_POLICY_VERSION_MINIMUM=3.5");
+    // 上游 CMakeLists.txt 的 cmake_minimum_required(VERSION 3.1) 在现代 CMake 上会发
+    // deprecation 警告。上游源码必须保持 pristine（见 verify_soundtouch_checkout），
+    // 所以从调用方关掉这条与构建结果无关的噪音。
+    cfg.arg("-Wno-deprecated");
     cfg.arg("-DCMAKE_BUILD_TYPE=Release");
     cfg.arg("-DSOUNDTOUCH_DLL=ON");
+    if let Some(generator) = requested_generator.as_deref() {
+        cfg.arg("-G").arg(generator);
+        println!(
+            "cargo:warning=[soundtouch] using pinned CMAKE_GENERATOR={}",
+            generator
+        );
+    }
     if is_windows {
         // 引号是给 rc.exe 的：OUT_DIR 可能落在带空格的路径下（用户名里带空格很常见）。
         cfg.arg(format!(
@@ -645,13 +686,23 @@ fn build_soundtouch() {
     }
 
     println!("cargo:warning=[soundtouch] spawning cmake configure...");
-    let status = cfg
-        .status()
+    let output = cfg
+        .output()
         .expect("[soundtouch] failed to run cmake configure");
-    if !status.success() {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        println!(
+            "cargo:warning=[soundtouch] cmake configure stderr:\n{}",
+            stderr
+        );
+        println!(
+            "cargo:warning=[soundtouch] cmake configure stdout:\n{}",
+            stdout
+        );
         panic!(
             "[soundtouch] CMake configure failed with exit code {:?}",
-            status.code()
+            output.status.code()
         );
     }
     println!("cargo:warning=[soundtouch] cmake configure succeeded");

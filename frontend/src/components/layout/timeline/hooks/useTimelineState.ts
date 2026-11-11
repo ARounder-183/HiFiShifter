@@ -505,14 +505,15 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     // 以 useCallback 稳定引用（依赖仅含稳定 ref）：供只注册一次的订阅回调 /
     // useCallback 化的同步入口长期持有，引用抖动会连带放大（与 `syncScrollLeft`
     // 同一口径）。
-    const livePxPerSec = React.useCallback(
-        function livePxPerSec(): number {
+    const liveReadersRef = React.useRef({
+        pxPerSec: (): number => {
             const host = kernelHostRef.current;
-            if (host !== null) return host.getViewport().pxPerSec;
-            return pxPerSecRef.current;
+            return host !== null ? host.getViewport().pxPerSec : pxPerSecRef.current;
         },
-        [kernelHostRef],
-    );
+        scrollLeft: (): number =>
+            kernelHostRef.current?.getViewport().scrollLeft ?? scrollLeftRef.current,
+    });
+    const livePxPerSec = React.useCallback(() => liveReadersRef.current.pxPerSec(), []);
 
     /**
      * 立刻把实时滚动值提交给 React（只用于手势结束/静默收尾）。
@@ -649,10 +650,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
      * **不要**在鼠标交互里用 `scrollLeft` state —— 它按 256px 量化，残差会让
      * ToolTip/点击落点稳定偏移。
      */
-    const getScrollLeftLive = React.useCallback(
-        () => kernelHostRef.current?.getViewport().scrollLeft ?? scrollLeftRef.current,
-        [kernelHostRef],
-    );
+    const getScrollLeftLive = React.useCallback(() => liveReadersRef.current.scrollLeft(), []);
 
     // 同步开关（双向交互）：订阅共享视口，并把参数编辑器写入的值应用到轨道视图。
     useEffect(() => {
@@ -825,13 +823,10 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     ]);
 
     // ── keyboard zoom layout effect ──────────────────────────
-    // TODO(dead-path): `scrollRef` 已无 JSX 挂载点（"渲染内核唯一路径"改造后
-    // `current` 恒为 null），本 effect 连同 `useTimelineEventHandlers.ts` 的非内核
-    // 写入分支、`trackIdFromClientY` / drop 的 scroller 兜底、
-    // `useTimelineViewportController.ts` 的 gutter 量测均为生产不可达。删除需要
-    // 同步改 6 个文件的参数类型与调用方，属独立清理轮次；本轮保留并登记
-    // （2026-11-11 全仓审查 C3）。功能路径本身正常：键盘缩放走
-    // `viewport.setZoomAndScroll` 的原子提交。
+    // `scrollRef` 没有 JSX 挂载点，内核模式下这两个 effect 会在 !scroller 处早退；
+    // 保留它们是挂载期 / 内核尚未创建时（含组件测试）的兜底，不是可删的死代码。
+    // 内核就绪后的键盘缩放走 `viewport.setZoomAndScroll` 原子提交。
+    // tests/timelineViewportGates.test.ts 钉住"scrollRef 不得重新挂到 JSX"这一约束。
     useLayoutEffect(() => {
         const pending = keyboardZoomPendingRef.current;
         if (!pending) return;

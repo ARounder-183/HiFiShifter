@@ -17,12 +17,17 @@ import { expect, test } from "vitest";
 /**
  * 预算本身：改这个数字要同时在下面的失败信息里说明理由。
  *
- * 91 → 87（2026-11-11 全仓审查 C12）：Q8 的 ResizeObserver stale closure 修掉
- * 一条 exhaustive-deps，C10 移除冗余的 themeMode 依赖又消一条；其余警告逐条
- * triage 确认为刻意降级的 react-hooks 规则噪声（见 eslint.config.js:32-50）。
- * 预算贴着实际值，任何新警告都会立刻红。
+ * 91 → 87 → 0（2026-11-11 全仓审查 / 修复轮次）：
+ * - 17 条 exhaustive-deps 与 3 条 preserve-manual-memoization 已逐处补齐依赖 /
+ *   改为稳定读取容器直接修复；
+ * - 3 条 immutability 与外观面板的初始化 setState 已改为惰性初值直接修复；
+ * - 其余 63 条来自 eslint-plugin-react-hooks 7.x 的 React Compiler 专属规则。
+ *   本仓没有 babel-plugin-react-compiler，启用整套编译器规则属于配置错配；
+ *   eslint.config.js 改为只启用经典 rules-of-hooks + exhaustive-deps，
+ *   tests/reactCompilerGates.test.ts 钉住"接入 Compiler 时必须恢复规则集"。
+ * 预算贴着 0，任何新警告都会立刻红。
  */
-const WARNING_BUDGET = 87;
+const WARNING_BUDGET = 0;
 
 test("ESLint 警告不超过预算（npm run lint:budget）", () => {
     const scripts = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")).scripts;

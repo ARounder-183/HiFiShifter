@@ -1,5 +1,6 @@
 // 参数面板数据窗口：刷新与笔画推迟共用作用域，插件提交不清掉同scope可见曲线。
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createDebugLogger } from "../../../utils/debugLog";
 import { shouldAcceptParamPayload, shouldClearParamRefresh } from "./paramRefreshPolicy";
 
 import type { ParamFramesPayload } from "../../../types/api";
@@ -12,6 +13,8 @@ import type { LiveEditDeferral } from "./liveEditDeferral";
 import { resolveParamFetchWindow } from "./paramFetchWindow";
 import { framesToTime } from "./utils";
 const paramFramePeriodCache = new Map<string, number>();
+
+const pianoRollDebug = createDebugLogger("hifishifter.debugPianoRoll");
 
 /**
  * 「参数曲线取数中」提示的静默窗口（毫秒）。
@@ -483,7 +486,7 @@ export function usePianoRollData(args: {
         const debugEnabled = debug;
 
         if (debugEnabled) {
-            console.log("[usePianoRollData] Request params:", {
+            pianoRollDebug.log("[usePianoRollData] Request params:", {
                 trackId,
                 editParam,
                 visibleStartSec,
@@ -722,7 +725,7 @@ export function usePianoRollData(args: {
                 beginLoading();
                 try {
                     if (debugEnabled) {
-                        console.log("[usePianoRollData] Fetching param frames:", {
+                        pianoRollDebug.log("[usePianoRollData] Fetching param frames:", {
                             trackId,
                             editParam,
                             startFrame,
@@ -793,7 +796,7 @@ export function usePianoRollData(args: {
                     const receivedEditLen = (payload.edit ?? []).length;
 
                     if (debugEnabled) {
-                        console.log("[usePianoRollData] Received param data:", {
+                        pianoRollDebug.log("[usePianoRollData] Received param data:", {
                             trackId,
                             editParam,
                             requestedStartFrame: startFrame,

@@ -2,8 +2,6 @@
 // - Tauri: window.__TAURI__.core.invoke / window.__TAURI__.invoke (named args)
 // - pywebview: window.pywebview.api[method] (positional args)
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 import { reportFrontendError } from "./frontendErrorLog";
 import { getPluginHost, PluginInvokeError } from "./pluginHost";
 import { markBackendTerminal, sessionTerminal } from "./sessionGate";
@@ -11,7 +9,7 @@ import { markBackendTerminal, sessionTerminal } from "./sessionGate";
 declare global {
     interface Window {
         pywebview?: {
-            api?: Record<string, (...args: any[]) => Promise<any>>;
+            api?: PyWebviewApi;
         };
         __TAURI__?: {
             core?: {
@@ -22,7 +20,11 @@ declare global {
     }
 }
 
-type PyWebviewApi = Record<string, (...args: any[]) => Promise<any>>;
+/**
+ * pywebview 兼容边界没有方法级类型表；命令参数与结果在这里统一当作 unknown，
+ * 由 invoke() 在每个调用点按 T 收窄，而不是让 any 扩散进整个 services 层。
+ */
+type PyWebviewApi = Record<string, (...args: unknown[]) => Promise<unknown>>;
 
 type InvokeMode = "plugin" | "tauri" | "pywebview";
 

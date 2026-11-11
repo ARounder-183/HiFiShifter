@@ -18,6 +18,7 @@
  * @module render
  */
 
+import { createDebugLogger } from "../../../utils/debugLog";
 import type { ParamMorphOverlay, ParamName, ParamViewSegment, ValueViewport } from "./types";
 import type { ParamSelection } from "./paramSelection";
 import { frameRangeEndCut, frameRangeStartCut, selectionToFrameRanges } from "./paramSelection";
@@ -47,21 +48,9 @@ import { isDynParam } from "./paramRanges";
 import { isSameMainCanvasSignature, type MainCanvasSignature } from "./mainCanvasSignature";
 
 // 调试开关缓存：drawCurveTimed 每帧会被调用多次（主曲线 / 编辑线 / 选区叠加 /
-// 每条副参数 / 每条参考线），逐次同步读 localStorage 会拖慢绘制热路径；
-// 1 秒 TTL 足以跟踪开关变化。
-let debugFlagCache = { value: false, checkedAt: 0 };
-function isPianoRollDebugEnabled(): boolean {
-    const now = Date.now();
-    if (now - debugFlagCache.checkedAt > 1000) {
-        debugFlagCache = {
-            value:
-                typeof window !== "undefined" &&
-                window.localStorage?.getItem("hifishifter.debugPianoRoll") === "1",
-            checkedAt: now,
-        };
-    }
-    return debugFlagCache.value;
-}
+// 诊断输出统一走 debugLog.ts：开关探测节流、生产构建恒关闭，绘制热路径不再
+// 各自维护一份 localStorage 缓存。
+const pianoRollDebug = createDebugLogger("hifishifter.debugPianoRoll");
 
 /**
  * 返回视觉上固定像素长度的虚线参数，避免随 dpr/缩放产生样式漂移。
@@ -220,7 +209,7 @@ function drawCurveTimed(args: {
     const visibleDurSec = viewportEndSec(axis) - visibleStartSec;
 
     // DEBUG: 验证曲线时间参数（使用统一转换函数）
-    const debugEnabled = isPianoRollDebugEnabled();
+    const debugEnabled = pianoRollDebug.enabled;
     const curveStartSec = debugEnabled ? framesToTime(startFrame, fp) : 0;
     const curveEndSec = debugEnabled
         ? framesToTime(startFrame + (values.length - 1) * step, fp)
@@ -228,7 +217,7 @@ function drawCurveTimed(args: {
     const curveTotalDurSec = curveEndSec - curveStartSec;
 
     if (debugEnabled) {
-        console.log("[drawCurveTimed] Params:", {
+        pianoRollDebug.log("[drawCurveTimed] Params:", {
             param,
             visibleStartSec,
             visibleDurSec,
@@ -301,7 +290,7 @@ function drawCurveTimed(args: {
 
     // DEBUG: Log first and last rendered points
     if (debugEnabled && firstFrame !== -1) {
-        console.log("[drawCurveTimed] Rendered points:", {
+        pianoRollDebug.log("[drawCurveTimed] Rendered points:", {
             param,
             firstPoint: {
                 frame: firstFrame,

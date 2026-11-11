@@ -38,4 +38,10 @@ Invoke-Gate 'Product consistency gate' { & (Join-Path $PSScriptRoot 'check-produ
 # "找不到 backend\src-tauri\resources\models\models.json" 处失败。
 Invoke-Gate 'Env script scope gate' { & (Join-Path $PSScriptRoot 'check-env-scripts.ps1') }
 
+# SoundTouch 构建生成器与缓存自愈。
+Invoke-Gate 'SoundTouch generator gate' { python scripts/checks/check-soundtouch-generator.py }
+
+# 跳过清单里的测试名仍须在 Rust 源码中可解析。
+Invoke-Gate 'Test skip gate' { python scripts/checks/check-test-skips.py }
+
 Write-Host 'All static gates passed.' -ForegroundColor Green

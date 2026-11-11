@@ -24,7 +24,6 @@ export function ParamBlockAnalysisStatus(props: { readonly enabled: boolean }) {
 
     useEffect(() => {
         if (!props.enabled) {
-            // eslint-disable-next-line react-hooks/set-state-in-effect -- 关闭块层时同步隐藏旧进度，避免下次开启先闪上一轮。
             setProgress(null);
             return;
         }

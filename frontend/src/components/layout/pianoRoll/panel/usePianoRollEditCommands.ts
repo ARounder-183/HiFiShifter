@@ -232,7 +232,7 @@ export function usePianoRollEditCommands({
     );
 
     // Keep the ref in sync so usePianoRollInteractions can dispatch edit ops
-    // eslint-disable-next-line react-hooks/refs -- 渲染期刷新是**刻意**的：交互层在本 hook 之前就取走了稳定的 stableEditAction，命令实现必须随渲染更新（见文件头）
+
     handleEditActionRef.current = (op: string) => void handleEditOp(op);
 
     // Listen for edit operations dispatched from MenuBar / 全局路由

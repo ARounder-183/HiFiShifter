@@ -12,14 +12,23 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-# 预算门禁：警告数是只许降不许升的棘轮（现值见 frontend/tests/lintBudget.test.ts 的
-# WARNING_BUDGET 与 package.json 的 lint:budget，两者由该测试钉住一致）。
-npm --prefix frontend run lint:budget
+# ESLint 10 / Vite 8 / Vitest 5 都要求 Node >= 22.12（见 frontend/package.json engines）。
+# 混合环境（Windows 安装的 node_modules 被 WSL 的 node 解释）会报 util.styleText 缺失或
+# ESM 解析错误；显式校验版本，把环境问题与源码回归区分开。
+NODE_MAJOR=$(node -p "process.versions.node.split('.')[0]")
+if [ "$NODE_MAJOR" -lt 22 ]; then
+    echo "run-frontend-gates: Node >= 22.12 is required (found $(node --version))" >&2
+    exit 1
+fi
 
-npm --prefix frontend run format:check
-
-# 单元测试（含 i18n 完整性、lint 预算、文件体积预算等门禁型用例）。
+# lint:budget / format:check / typecheck 的判据已经绑在 npm test 内的
+# buildGates.test.ts 与 lintBudget.test.ts（见 frontend/README.md）：直接跑测试时
+# 也绕不开它们。这里不再重复调用，避免 CI 把同一组命令各跑两遍（实测每轮各约 70 秒）。
+# 单元测试（含 i18n 完整性、lint 预算、格式/类型检查、文件体积预算等门禁型用例）。
 npm --prefix frontend run test
 
 # 生产构建：typecheck + vite build + SDK 类型产物。
 npm --prefix frontend run build
+
+# 体积预算：构建完 dist 才能测量；不再只作为没人调用的 package.json 脚本存在。
+npm --prefix frontend run check:bundle

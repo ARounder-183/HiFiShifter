@@ -22,12 +22,63 @@ if (mountBytes > mountLimit) {
     throw new Error("mount chunk " + mount + " is " + mountBytes + " bytes; limit " + mountLimit);
 }
 
-const cssBytes = files
-    .filter((file) => file.endsWith(".css"))
-    .reduce((sum, file) => sum + statSync(join(assets, file)).size, 0);
+const cssFiles = files.filter((file) => file.endsWith(".css"));
+const cssBytes = cssFiles.reduce((sum, file) => sum + statSync(join(assets, file)).size, 0);
 const cssLimit = 800 * 1024;
 if (cssBytes > cssLimit) {
     throw new Error("CSS budget exceeded: " + cssBytes + " bytes; limit " + cssLimit);
 }
 
-console.log("bundle size ok: " + mount + "=" + mountBytes + "B, css=" + cssBytes + "B");
+/*
+ * 总量预算会放过「一个 chunk 吃掉几乎全部额度」的退化：当前最大的 CSS 已经
+ * 746.73 kB、vendor chunk 633.95 kB。这里给单文件也钉一道只降不升的上限，
+ * 失败信息直接点名文件，避免下一次增长在总量用尽之前无人察觉。
+ */
+const largestCss = cssFiles
+    .map((file) => ({ file, bytes: statSync(join(assets, file)).size }))
+    .sort((a, b) => b.bytes - a.bytes)[0];
+const cssFileLimit = 780 * 1024;
+if (largestCss && largestCss.bytes > cssFileLimit) {
+    throw new Error(
+        "largest CSS file " +
+            largestCss.file +
+            " is " +
+            largestCss.bytes +
+            " bytes; limit " +
+            cssFileLimit,
+    );
+}
+
+const jsFiles = files.filter((file) => file.endsWith(".js"));
+const largestJs = jsFiles
+    .map((file) => ({ file, bytes: statSync(join(assets, file)).size }))
+    .sort((a, b) => b.bytes - a.bytes)[0];
+const jsFileLimit = 700 * 1024;
+if (largestJs && largestJs.bytes > jsFileLimit) {
+    throw new Error(
+        "largest JS chunk " +
+            largestJs.file +
+            " is " +
+            largestJs.bytes +
+            " bytes; limit " +
+            jsFileLimit,
+    );
+}
+
+console.log(
+    "bundle size ok: " +
+        mount +
+        "=" +
+        mountBytes +
+        "B, css=" +
+        cssBytes +
+        "B, largestCss=" +
+        (largestCss?.file ?? "none") +
+        "=" +
+        (largestCss?.bytes ?? 0) +
+        "B, largestJs=" +
+        (largestJs?.file ?? "none") +
+        "=" +
+        (largestJs?.bytes ?? 0) +
+        "B",
+);

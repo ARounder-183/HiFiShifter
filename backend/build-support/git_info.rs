@@ -100,9 +100,13 @@ pub fn emit(watched: &[&str]) {
     // 非 git 构建（如 GitHub 源码 zip）：注入空值，运行时回退为纯版本号。
     // 不打印任何 git 相关的 rerun 指令，保持既有指令集不变。
     let Some(full) = git_output(&["rev-parse", "HEAD"]) else {
+        let probe = if runnable { "not-a-repo" } else { "no-git" };
+        println!("cargo:rustc-env=HIFISHIFTER_GIT_PROBE={}", probe);
+        // 降级不能只体现在二进制里的空字符串：构建日志必须给出可搜索的一行，
+        // 否则「关于」对话框没有 commit 时没人能分清是源码 zip 还是构建环境缺 git。
         println!(
-            "cargo:rustc-env=HIFISHIFTER_GIT_PROBE={}",
-            if runnable { "not-a-repo" } else { "no-git" }
+            "cargo:warning=[build-info] git probe={}; commit/dirty/repo fields will be empty",
+            probe
         );
         println!("cargo:rustc-env=HIFISHIFTER_GIT_COMMIT=");
         println!("cargo:rustc-env=HIFISHIFTER_GIT_COMMIT_SHORT=");
