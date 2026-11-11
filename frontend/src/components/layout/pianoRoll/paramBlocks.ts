@@ -17,6 +17,7 @@ import {
     deleteProjectedBlocks,
     groupProjectedBlocks,
     newParamBlockId,
+    ParamBlockEditError,
     ParamBlockPlanError,
     planSplitProjectedBlock,
     restoreDeletedBlocks,
@@ -1340,6 +1341,9 @@ export function ungroupParamBlocks(
 }
 
 function editFailureFromError(error: unknown): ParamBlockEditFailureReason {
+    if (error instanceof ParamBlockEditError) {
+        return error.code === "no_source" ? "no_members" : "too_short";
+    }
     if (error instanceof ParamBlockPlanError) {
         switch (error.code) {
             case "split_too_close_to_edge":

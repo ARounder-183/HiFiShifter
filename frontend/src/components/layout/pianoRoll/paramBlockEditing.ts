@@ -2449,6 +2449,25 @@ function clipsOf(clip: ParamBlockSourceClip): readonly ParamBlockSourceClip[] {
     return [clip];
 }
 
+/** 新建块的两条显式失败原因（不再用裸 `Error` + 文案匹配）。 */
+export type ParamBlockCreateFailure = "too_short" | "no_source";
+
+/**
+ * 新建块失败。
+ *
+ * 【为什么要有类型】旧实现抛裸 `Error("created block too short")`，再由上层用
+ * `message.includes(...)` 猜原因。文案一改，失败就被归到 `unknown` —— 用户看到
+ * "参数块操作失败"却不知道是"太短"还是"没有源"。带 code 之后映射是编译期的事。
+ */
+export class ParamBlockEditError extends Error {
+    readonly code: ParamBlockCreateFailure;
+    constructor(code: ParamBlockCreateFailure) {
+        super(`param block create failed: ${code}`);
+        this.name = "ParamBlockEditError";
+        this.code = code;
+    }
+}
+
 export function createUserBlock(
     clips: readonly ParamBlockSourceClip[],
     edits: ParamBlockEditSet,
@@ -2458,7 +2477,7 @@ export function createUserBlock(
     framePeriodMs: number,
     blockId?: string,
 ): ParamBlockEditSet {
-    if (endFrame <= startFrame) throw new Error("created block too short");
+    if (endFrame <= startFrame) throw new ParamBlockEditError("too_short");
     const startSec = toSec(startFrame, framePeriodMs);
     const endSec = toSec(endFrame, framePeriodMs);
     const members: TakeSpan[] = [];
@@ -2470,7 +2489,7 @@ export function createUserBlock(
         members.length === 0 &&
         clips.some((clip) => clip.startSec < endSec && clip.startSec + clip.lengthSec > startSec)
     ) {
-        throw new Error("create_no_source");
+        throw new ParamBlockEditError("no_source");
     }
     const geometry: BlockGeometry =
         members.length > 0

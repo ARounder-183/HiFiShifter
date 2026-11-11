@@ -340,97 +340,124 @@ export function useParamBlockPersistence(args: {
              */
             assertCurveCommitAuthority({ hasPatches: curvePatches.length > 0, authority });
             const root = state.rootTrackId ?? latest.current.rootTrackId;
-            const known = root === null ? undefined : server.current.get(root);
+            if (root === null) return Promise.resolve(undefined);
+
+            /** 基线就绪之后的真正写入（预检 → 排队 → CAS → 分类重试）。 */
+            const run = (): Promise<ParamBlockSnapshot | undefined> => {
+                const target = normalizeParamBlockEditSet(state.editSet);
+                // ★ 预检：非法编辑集不排队、不发 IPC（见 assertParamBlockEditSetValid）。
+                assertParamBlockEditSetValid(target);
+                pending.current.set(root, (pending.current.get(root) ?? 0) + 1);
+                const execute = async (): Promise<ParamBlockSnapshot> => {
+                    const current = server.current.get(root);
+                    const reply = await timelineApi.setParamBlockEdits({
+                        rootTrackId: root,
+                        expectedEditRevision: current?.edits.revision ?? target.revision,
+                        edits: target.blocks,
+                        checkpoint,
+                        curvePatches,
+                        expectedCurveRevision: authority?.expectedCurveRevision,
+                        expectedGeometryRevision: authority?.expectedGeometryRevision,
+                        expectedGeometrySignature: authority?.expectedGeometrySignature,
+                    });
+                    const snapshot: ParamBlockSnapshot = {
+                        edits: normalizeParamBlockEditSet(reply.edits ?? target),
+                        framePeriodMs: framePeriodOf(
+                            reply.view,
+                            current?.framePeriodMs ?? state.framePeriodMs,
+                        ),
+                    };
+                    server.current.set(root, snapshot);
+                    return snapshot;
+                };
+                /*
+                 * 【冲突重试一次】CAS 基准是镜像里的服务端代次。镜像过期只有两种成因：
+                 * 带外写入（`restore_game_param_blocks`）与撤销 / 重做推进代次而回读
+                 * 尚未落地。两者都不代表"别人改了内容"，所以先刷新镜像再原样重试一次；
+                 * 第二次仍冲突就说明真的有人在并发改，交给调用方报错（整集覆盖本来就是
+                 * "最后写入者胜"，重试不会放大任何风险）。
+                 */
+                const executeWithRetry = async (): Promise<ParamBlockSnapshot> => {
+                    try {
+                        return await execute();
+                    } catch (error) {
+                        const failure = classifyParamBlockFailure(error);
+                        /*
+                         * 只有 edit_set 冲突能原样重试：它的语义是"镜像里的代次过期"，
+                         * 刷新镜像后同一份 blocks 仍然成立。curve / geometry 冲突意味着
+                         * **补丁的基准**变了，原样重放会覆盖别人的修改 —— 那必须由调用方
+                         * 按意图重基（`rebase`），不能在这里猜。
+                         */
+                        if (failure.kind !== "conflict" || failure.code !== "edit_set") {
+                            throw failure;
+                        }
+                        if ((await refreshAuthority(root)) === null) throw failure;
+                        return execute();
+                    }
+                };
+                const job = (queues.current.get(root) ?? Promise.resolve())
+                    .catch(() => undefined)
+                    .then(executeWithRetry);
+                const complete = trackParamBlockCommit(kind, root, job)
+                    .then((snapshot) => {
+                        if (snapshot) latest.current.onCommitted?.();
+                        if (
+                            snapshot &&
+                            latest.current.rootTrackId === root &&
+                            !latest.current.deferReadback?.() &&
+                            pending.current.get(root) === 1
+                        ) {
+                            writeState(root, snapshot);
+                        }
+                        return snapshot;
+                    })
+                    .catch((error) => {
+                        // 写入失败：分类上报（rejected / conflict / transport），并回权威。
+                        publishWriteError(error);
+                        if (
+                            latest.current.rootTrackId === root &&
+                            pending.current.get(root) === 1
+                        ) {
+                            const current = server.current.get(root);
+                            if (current) writeState(root, current);
+                        }
+                        throw error;
+                    })
+                    .finally(() =>
+                        pending.current.set(
+                            root,
+                            Math.max(0, (pending.current.get(root) ?? 1) - 1),
+                        ),
+                    );
+                queues.current.set(
+                    root,
+                    complete.catch(() => undefined),
+                );
+                return complete;
+            };
+
             /*
              * 【为什么必须已有基线】写入是**整集覆盖**。还没读到过这个根的编辑集时
              * 提交本地空集，会把用户已有的块静默抹掉 —— 这是唯一一个能丢数据的
              * 入口，宁可不提交。就绪判据因此从"有没有 view"换成"读没读过"。
+             *
+             * 【为什么不再静默返回】旧实现直接 `return`，调用方以为写成功了 ——
+             * 用户的编辑就这样消失且没有任何提示。现在先补一次回读；仍失败就抛
+             * `transport`（可重试、会被分类反馈）。
              */
-            if (!root || known === undefined) return Promise.resolve(undefined);
-            const target = normalizeParamBlockEditSet(state.editSet);
-            // ★ 预检：非法编辑集不排队、不发 IPC（见 assertParamBlockEditSetValid）。
-            assertParamBlockEditSetValid(target);
-            pending.current.set(root, (pending.current.get(root) ?? 0) + 1);
-            const execute = async (): Promise<ParamBlockSnapshot> => {
-                const current = server.current.get(root);
-                const reply = await timelineApi.setParamBlockEdits({
-                    rootTrackId: root,
-                    expectedEditRevision: current?.edits.revision ?? target.revision,
-                    edits: target.blocks,
-                    checkpoint,
-                    curvePatches,
-                    expectedCurveRevision: authority?.expectedCurveRevision,
-                    expectedGeometryRevision: authority?.expectedGeometryRevision,
-                    expectedGeometrySignature: authority?.expectedGeometrySignature,
+            if (server.current.get(root) === undefined) {
+                return refreshAuthority(root).then((refreshed) => {
+                    if (refreshed === null) {
+                        throw new ParamBlockCommitError({
+                            kind: "transport",
+                            code: "not_ready",
+                            detail: "parameter block edit set is not loaded",
+                        });
+                    }
+                    return run();
                 });
-                const snapshot: ParamBlockSnapshot = {
-                    edits: normalizeParamBlockEditSet(reply.edits ?? target),
-                    framePeriodMs: framePeriodOf(
-                        reply.view,
-                        current?.framePeriodMs ?? state.framePeriodMs,
-                    ),
-                };
-                server.current.set(root, snapshot);
-                return snapshot;
-            };
-            /*
-             * 【冲突重试一次】CAS 基准是镜像里的服务端代次。镜像过期只有两种成因：
-             * 带外写入（`restore_game_param_blocks`）与撤销 / 重做推进代次而回读
-             * 尚未落地。两者都不代表"别人改了内容"，所以先刷新镜像再原样重试一次；
-             * 第二次仍冲突就说明真的有人在并发改，交给调用方报错（整集覆盖本来就是
-             * "最后写入者胜"，重试不会放大任何风险）。
-             */
-            const executeWithRetry = async (): Promise<ParamBlockSnapshot> => {
-                try {
-                    return await execute();
-                } catch (error) {
-                    const failure = classifyParamBlockFailure(error);
-                    /*
-                     * 只有 edit_set 冲突能原样重试：它的语义是"镜像里的代次过期"，
-                     * 刷新镜像后同一份 blocks 仍然成立。curve / geometry 冲突意味着
-                     * **补丁的基准**变了，原样重放会覆盖别人的修改 —— 那必须由调用方
-                     * 按意图重基（`rebase`），不能在这里猜。
-                     */
-                    if (failure.kind !== "conflict" || failure.code !== "edit_set") {
-                        throw failure;
-                    }
-                    if ((await refreshAuthority(root)) === null) throw failure;
-                    return execute();
-                }
-            };
-            const job = (queues.current.get(root) ?? Promise.resolve())
-                .catch(() => undefined)
-                .then(executeWithRetry);
-            const complete = trackParamBlockCommit(kind, root, job)
-                .then((snapshot) => {
-                    if (snapshot) latest.current.onCommitted?.();
-                    if (
-                        snapshot &&
-                        latest.current.rootTrackId === root &&
-                        !latest.current.deferReadback?.() &&
-                        pending.current.get(root) === 1
-                    ) {
-                        writeState(root, snapshot);
-                    }
-                    return snapshot;
-                })
-                .catch((error) => {
-                    // 写入失败：分类上报（rejected / conflict / transport），并回权威。
-                    publishWriteError(error);
-                    if (latest.current.rootTrackId === root && pending.current.get(root) === 1) {
-                        const current = server.current.get(root);
-                        if (current) writeState(root, current);
-                    }
-                    throw error;
-                })
-                .finally(() =>
-                    pending.current.set(root, Math.max(0, (pending.current.get(root) ?? 1) - 1)),
-                );
-            queues.current.set(
-                root,
-                complete.catch(() => undefined),
-            );
-            return complete;
+            }
+            return run();
         },
         [publishWriteError, refreshAuthority, writeState],
     );

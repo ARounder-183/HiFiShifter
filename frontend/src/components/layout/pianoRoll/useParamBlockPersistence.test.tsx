@@ -339,4 +339,39 @@ describe("useParamBlockPersistence", () => {
         });
         expect(mocks.setParamBlockEdits).toHaveBeenCalledTimes(1);
     });
+
+    it("★ loads a missing baseline before writing instead of dropping the write", async () => {
+        // 回读全部失败 ⇒ 镜像里没有这个根。旧实现此时直接 return，调用方以为写成功了。
+        mocks.getParamBlockView.mockRejectedValue(new Error("ipc down"));
+        await render();
+        mocks.getParamBlockView.mockResolvedValue(reply(7));
+        mocks.setParamBlockEdits.mockResolvedValue(reply(8));
+
+        await act(async () => {
+            await api.persistence?.commit(probe.state, true);
+        });
+
+        expect(mocks.setParamBlockEdits).toHaveBeenCalledTimes(1);
+        expect(
+            (mocks.setParamBlockEdits.mock.calls[0][0] as { expectedEditRevision: number })
+                .expectedEditRevision,
+        ).toBe(7);
+    });
+
+    it("★ reports a transport failure when the baseline cannot be loaded", async () => {
+        mocks.getParamBlockView.mockRejectedValue(new Error("ipc down"));
+        await render();
+
+        let caught: unknown = null;
+        await act(async () => {
+            try {
+                await api.persistence?.commit(probe.state, true);
+            } catch (error) {
+                caught = error;
+            }
+        });
+
+        expect(caught).toMatchObject({ kind: "transport", code: "not_ready" });
+        expect(mocks.setParamBlockEdits).not.toHaveBeenCalled();
+    });
 });

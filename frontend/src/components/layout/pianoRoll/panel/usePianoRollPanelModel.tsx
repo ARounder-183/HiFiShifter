@@ -6369,8 +6369,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             tf,
         ],
     );
-    const normalizeParamBlockPitchRef = useRef(normalizeParamBlockPitch);
-    useLatestRefValue(normalizeParamBlockPitchRef, normalizeParamBlockPitch);
     useLatestRefValue(normalizeSelectedParamBlockPitchRef, () => {
         if (selectedParamBlockIds.length !== 1) return;
         const block = paramBlocksWithValues.find(
@@ -6477,10 +6475,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     : null;
             const blockId = hit?.id ?? candidateHit?.id ?? null;
             if (blockId === null) return;
-            const block = paramBlocksWithValues.find((item) => item.id === blockId);
-            if (block === undefined) return;
+            /*
+             * 双击块 = **无操作**。旧实现双击就做音高归一化 —— 一条不可逆的曲线
+             * 重写：块内每个音高事件被拉到块均值，没有确认、没有预览，只能撤销
+             * 找回。归一化仍保留在右键菜单与快捷键里（显式意图）。
+             */
             paramBlockClickCandidateRef.current = null;
-            void normalizeParamBlockPitchRef.current(block);
             event.preventDefault();
         },
         [
@@ -6556,10 +6556,15 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 ),
             );
             /*
-             * 悬停状态只用于光标与局部强调；它不重建块数据，避免在一次普通
-             * hover 里改变手柄的可见性结构。
+             * 悬停状态只用于光标与局部强调；它不重建块数据（`drawParamBlocks` 在
+             * 绘制期把 hovered 叠到 spec 上），只标脏重绘一帧。
+             *
+             * 【为什么必须真的写】过渡手柄的"可见即可抓"判据是 `selected || hovered`。
+             * 旧实现把 hovered 写死成 null，于是**只有已选中的块**才抓得住手柄，
+             * 而光标却按 hover 显示成 `ew-resize` —— 用户看到"光标说能拖、按下去
+             * 却拖不动"。这条判据现在由真实命中提供。
              */
-            const nextHoverBlockId = null;
+            const nextHoverBlockId = hit.id;
             const nextTransitionId = null;
             if (
                 hoveredParamBlockIdRef.current !== nextHoverBlockId ||
@@ -6574,10 +6579,17 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                  */
                 hoveredParamBlockIdRef.current = nextHoverBlockId;
                 hoveredTransitionIdRef.current = nextTransitionId;
+                invalidate();
             }
             return true;
         },
-        [paramBlockHitSlopPx, paramBlockToolActive, paramBlocksWithValues, setCanvasCursor],
+        [
+            invalidate,
+            paramBlockHitSlopPx,
+            paramBlockToolActive,
+            paramBlocksWithValues,
+            setCanvasCursor,
+        ],
     );
     useLatestRefValue(paramBlockPointerRef, onParamBlockPointerDown);
     useEffect(() => {
