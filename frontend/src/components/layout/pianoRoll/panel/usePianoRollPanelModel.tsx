@@ -2752,8 +2752,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      *
      * 只清 `value` 并按**布局变更**提交（checkpoint=false）：用户撤销一次就回到
      * 曲线命令之前，不会被"清中心"多插一个撤销步。
+     *
+     * 【名字说的是「清中心」，不是「刷新显示值」】旧名 `refreshParamBlockValuesAfterParamEdit`
+     * 让人以为它只重算显示，于是很容易被当成纯刷新调用 —— 它其实会写一次编辑集。
      */
-    const refreshParamBlockValuesAfterParamEdit = useCallback(
+    const clearStaleBlockCentersAfterParamEdit = useCallback(
         (_op: string) => {
             if (editParam !== "pitch") return;
             const state = paramBlockStateRef.current;
@@ -2808,7 +2811,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         setSelectionUi,
         store,
         vibratoBaseline,
-        onParamEditApplied: refreshParamBlockValuesAfterParamEdit,
+        onParamEditApplied: clearStaleBlockCentersAfterParamEdit,
     });
 
     // Dispatch helper: context menu dialog ops → open MenuBar dialogs
@@ -5565,7 +5568,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         [
             editParam,
             beginBlockDrag,
-            refreshParamBlockValuesAfterParamEdit,
+            clearStaleBlockCentersAfterParamEdit,
             mergedKeybindings,
             selectedParamBlockIdSet,
             bumpParamBlockStructure,
@@ -6250,7 +6253,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     prepare: prepareNormalize,
                 });
                 bumpRefreshToken();
-                refreshParamBlockValuesAfterParamEdit("normalizePitch");
+                clearStaleBlockCentersAfterParamEdit("normalizePitch");
             } catch (error) {
                 console.error("[pianoRoll] normalize block pitch failed", error);
                 reportParamBlockWriteFailure({ error, gesture: "normalize", rootTrackId });
@@ -6262,7 +6265,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             editParam,
             paramBlockStateRef,
             paramView,
-            refreshParamBlockValuesAfterParamEdit,
+            clearStaleBlockCentersAfterParamEdit,
             requireBlockPersistenceReady,
             rootTrackId,
             selectionFrameBlocks,

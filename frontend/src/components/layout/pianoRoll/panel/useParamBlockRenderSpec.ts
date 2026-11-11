@@ -15,6 +15,16 @@
  *
  * 【为什么 framePeriodMs / curveOwned 传值而不是传 ref】它们在渲染期被读一次，
  * 与 memo 求值同一时刻；传 ref 只会让依赖数组无法表达「这两个字段变了」。
+ *
+ * 【新增命令式写入点必须 bump】任何在 React 之外写这些 ref 的路径（拖拽快照 /
+ * 伸缩 / 新建 / 视觉事务 / 值缓存）都**必须**同时调用 `bumpParamBlockStructure()`，
+ * 否则 memo 不会重算 —— 症状是「块不动」或「松手后块停在旧位置」。当前清单：
+ *   - 面板的 `invalidateParamBlockSpec`（每次都 bump）；
+ *   - `invalidateParamBlockVisualPreviews`（撤预览时 bump）；
+ *   - 拖块提交 / 取消（`paramBlockDrag` 的 finally 与 catch）；
+ *   - 伸缩 / 新建的 pointerup；
+ *   - `useParamBlockState` 的每一次 `setParamBlockState`。
+ * 新增路径漏掉这一条不会报错，只会让画面停住 —— 这是本模块唯一的隐性契约。
  */
 import { useLayoutEffect, useMemo, type MutableRefObject } from "react";
 import {

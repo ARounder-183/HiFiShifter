@@ -578,12 +578,6 @@ export function useParamBlockPersistence(args: {
         [commitPlan],
     );
 
-    const persist = useCallback(
-        (state: ParamBlockState, checkpoint = true) =>
-            commit(state, checkpoint).catch(() => undefined),
-        [commit],
-    );
-
     /**
      * 强制把最近一次权威结果写回状态（忽略手势 deferral）。
      *
@@ -596,6 +590,22 @@ export function useParamBlockPersistence(args: {
         if (root === null || current === undefined) return;
         writeState(root, current);
     }, [writeState]);
+
+    /**
+     * 「写不进去就当没写过」的入口（分割 / 编组 / 删除 / 还原）。
+     *
+     * 【为什么要回滚】本地状态已经领先（`setParamBlockState` 是同步的），写失败时
+     * 若不处理，用户看到的是「块已经变了，但重启后没了」。这里用权威覆盖本地，
+     * 把「看起来成功」压到一个 IPC 往返之内 —— 分类上报仍然由写入层负责。
+     */
+    const persist = useCallback(
+        (state: ParamBlockState, checkpoint = true) =>
+            commit(state, checkpoint).catch(() => {
+                flushReadback();
+                return undefined;
+            }),
+        [commit, flushReadback],
+    );
 
     return {
         ready: readyRoot === args.rootTrackId && args.state.rootTrackId === args.rootTrackId,

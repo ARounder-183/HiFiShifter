@@ -77,10 +77,11 @@ game baseline                      playback_rate / reverse        参数块编�
 
 - 参数窗口同 scope 刷新采用 stale-while-revalidate：paramsEpoch 前进但 root / param 未变时保留上一份可见曲线，新回包到达后原子替换；只有切 scope 才清空。同窗口空回包保留旧曲线，窗口变化后的空回包则立即接受，避免旧窗口曲线留在新坐标上。
 - 参数块显示值按 run 缓存：当前采样 → 手动值 → 上一次同 run 且**几何一致**的有效值；canonical 块绝不回退到值域中点。没有值的块本帧不画，而不是叠到 F#4。
-- 结构命令（分割 / 删除 / 编组 / 还原 / 从选区新建）与外部历史 / 布局 / 参数变化统一走 invalidateParamBlockVisualPreviews：拖动快照、resize / create 预览、事务曲线一次性撤下，避免旧预览在结构编辑后覆盖 canonical。视觉 epoch 同时记录参数名与结构 revision；自身提交通过 ownedEditRevision 放行，第三方结构编辑立即失效。
+- 结构命令（分割 / 删除 / 编组 / 还原 / 从选区新建）与外部历史 / 布局 / 参数变化统一走 invalidateParamBlockVisualPreviews：拖动快照、resize / create 预览、事务曲线一次性撤下，避免旧预览在结构编辑后覆盖 canonical。视觉 epoch 同时记录参数名与**结构令牌**（`paramBlockStructureToken`：块 id / 几何 / 过渡宽度 / 删除标记 / baseCover 的指纹）。**不**记录 revision —— 它在前端是内容代次、在后端是 CAS 代次，两者不可比；旧实现拿它做「自身提交归属」（`ownedEditRevision`），于是服务端回包一落地就撤掉自己的预览（回弹的根因）。结构令牌只在形状变化时变化，所以自身提交永不撤销自己的预览，第三方结构编辑立即失效。
 - paramBlockSpec 是纯投影，不在 useMemo 里写 ref；清理放在 layout effect（早于 paint）。拖动提交前校验全分辨率窗口与编辑集 revision，缺帧 / 结构变化直接取消，不写 0。
-- **预览释放只有一条判据**（`paramBlockPreviewRelease`）：这次提交产生的权威已经可见。带曲线补丁的提交必须同时满足「曲线 revision 前进 ∧ 权威水位在提交之后确认 ∧ 当前窗口包含提交片段」；纯布局提交才退回几何相等。旧实现用「本地派生几何已经等于预览几何」判断，而 `setParamBlockState` 是同步提交 —— 那个条件在 pointerup 之后一次渲染就成立，于是预览被撤、曲线回旧值、块按旧曲线重新采样，用户看到「先回弹旧参数、再生效新参数」。超时（2s）之前必须先 `flushReadback()` 对账再撤，否则撤下的第一帧仍是旧曲线。
-- 新建 / 伸缩 / 过渡的预览事务在提交时记下「依据的权威水位」与「提交的曲线片段」（`authorityRevisionAtStart` / `authorityRequestSeqAtCommit` / `committedSegments`）；没有这三个字段就无法回答「权威有没有前进过」。
+- **预览释放只有一条判据**（`paramBlockPreviewRelease`）：这次提交产生的权威已经可见。带曲线补丁的提交必须同时满足「已落地的权威曲线代次 ≥ 提交回包里的新代次 ∧ 权威水位在提交之后确认 ∧ 当前窗口包含提交片段」；纯布局提交才退回几何相等。旧实现用「本地派生几何已经等于预览几何」判断，而 `setParamBlockState` 是同步提交 —— 那个条件在 pointerup 之后一次渲染就成立，于是预览被撤、曲线回旧值、块按旧曲线重新采样，用户看到「先回弹旧参数、再生效新参数」。超时（2s）之前必须先 `flushReadback()` 对账再撤，否则撤下的第一帧仍是旧曲线。
+- **权威代次只有一个单位**：后端 `param_curve_revision`（`ParamAuthoritySnapshot.curveRevision`）。旧实现同时存在「本地取数计数器」与「后端代次」两个数，过渡手柄存前者、比后者，判据几乎永远为假 —— 每次拖完过渡手柄都要等满 2s 超时才释放预览。提交回包里的新代次（`curveRevisionCommitted`）是唯一证据：没有它就不放行，本地计数器再大也没用。
+- 新建 / 伸缩 / 过渡的预览事务在提交时记下「依据的曲线代次」「提交时的权威水位」与「提交的曲线片段」（`curveRevisionAtStart` / `authorityRequestSeqAtCommit` / `committedSegments`），提交成功后补上回包里的新代次（`curveRevisionCommitted`）；没有这四个字段就无法回答「权威有没有前进过」。
 
 ## 参数块图层：常显设置
 
@@ -117,12 +118,21 @@ game baseline                      playback_rate / reverse        参数块编�
 - 驱动只负责时钟与 rAF：帧时长按「距上一帧」计算，指针离开触发带即复位时钟，复位后的第一帧位移恒为 0。旧实现按「距上一次 step」计算，带外空闲会被补成一帧的大位移 —— 表现为「来回蹭边缘时视图一跳一跳」。
 - 帧时长每帧只算一次（两个轴各算一次会让第二个轴永远拿到 0）。
 
+## 边缘滚动的帧调度
+
+- `rafId !== null` ⟺ **恰好一个**待执行帧。`tick()` 入口把 `rafId` 置空只完成了「已排帧」，还必须用 `ticking` 闸门表达「正在执行」：执行期间任何重入的 `track()` 都不得再排帧，唯一的排帧入口是 `schedule()`。旧实现漏了后者，而值轴的 `apply()` 会在滚动帧内部发布交互视口 ⇒ 订阅者同步合成 `pointermove` ⇒ 手势 `onMove` 重入 `track()` ⇒ **每帧净增一个无人取消的孤儿回调**；第 N 帧要跑 N 次 `tick()`、每次两回 `getBoundingClientRect()`，拖得越久越卡。
+- 一帧只取一次 `getBounds()`，两轴与带内判定共用同一份矩形（`getBoundingClientRect()` 是强制同步布局）。
+- 交互视口广播是**微任务合帧**（`pianoRollInteractionViewportBus.publish`）：状态立刻生效，通知推迟到下一个微任务，同一帧多次发布合并成一次，值不变不广播。这样手势的 `onMove` 永远不在 `apply()` 的调用栈里被重入。
+- `stop()` 递增取消代次；`tick()` 收尾时代次已变就不再续帧 —— 在 `apply()` 内部被 `stop()` 也不会留下一帧。
+
 ## 提交事务
 
-- 写入只有一条入口（`useParamBlockPersistence.commit`）：**前端预检**（`paramBlockValidate`，与 Rust `validate_edit_set` 逐条同构）→ 按根串行排队 → CAS → 按类别重试。
+- 写入只有一条入口（`useParamBlockPersistence.commitPlan`，`commit` 是它的薄包装）：**前端预检**（`paramBlockValidate`，与 Rust `validate_edit_set` 逐条同构）→ 按根串行排队 → CAS → 按类别重基。
+- **一个根只有一条写队列**，且「读基准 → 算补丁 → 写」整体在队列槽内（`ParamBlockWritePlan.prepare`）。旧实现有两条互不相识的队列（持久化层的 `queues` 与面板的 `paramBlockCommitQueueRef`）共用同一个后端 CAS，交错时后写者必然过期 —— 那是「各种编辑场景仍有概率报参数块操作失败」的结构性根因。
+- **一次用户操作最多一条可见反馈**，且由写入层发布（`publishParamBlockWriteFailure`）。调用点只允许报**本地拒绝**（`reportParamBlockLocalRejection`，根本没有发起写入的那类）；写入失败时调用点只写结构化诊断。`paramBlockFeedback` 是单槽，重复上报必然把分类结果覆盖成一句通用红条。
 - 预检失败的编辑集**永远不离开浏览器**：后端 `Invalid:` 是一类确定性失败，而 `composeParamBlockView` 会静默裁掉重叠，前端"看起来正常"不代表合法。
 - 失败分四类（`paramBlockCommitError`）：`conflict`（CAS，刷新基准后可重试）、`rejected`（校验，不可重试）、`transport`（IPC，对账后最多一次）、`cancelled`（静默）。分类按 `Conflict: ` / `Invalid: ` 前缀，不按文案匹配。
-- 只有 `edit_set` 冲突会原样重放；`curve` / `geometry` 冲突意味着补丁的基准变了，必须由调用方按**意图重基**，不能盲目重放（那会覆盖别人的修改）。
+- **所有 CAS 冲突都会重基后重试一次**（`canRebaseParamBlockCommit`）：重试会重新调用 `prepare()`，即「重新读一遍世界、按同一个意图重算补丁」。`transport` 永远不重试 —— 上一次写入可能已经落地，重试会把一次用户操作变成两步历史。
 - 多块全分辨率读在窗口之间出现 revision 不一致时**整轮重读**（最多 3 次），而不是把 `Conflict: parameter curve changed during read` 抛给用户 —— 曲线 revision 是进程全局计数，任何无关写入都会让它前进。
 - 回读失败与写入失败**不共用回调**：后台回读失败只写诊断，不会再弹一条看起来像"你的编辑丢了"的 danger 提示。
 
@@ -154,4 +164,4 @@ game baseline                      playback_rate / reverse        参数块编�
 - 任何新增持久化字段都不得是绝对工程帧。
 - 纯块边界编辑不得 bump 音频版本。
 
-- 参数编辑器竖向边缘滚动按可见值域归一：满带 0.12 视口/秒、上下各 18px 触发带、1.6 软启动；span >= range 时不可滚且驱动不排 rAF。两个手势驱动共享同一份策略。
+- 值轴手感常量只有一份：`kernel/valueAxisEdgeScroller.ts`（带宽 / 满带速度 / 软启动指数 / 单帧上限）。文档与代码冲突时以该文件为准。
