@@ -288,8 +288,6 @@ export type PointerDeps = {
           ) => void)
         | undefined;
     onPitchSnapGestureActiveChange: ((active: boolean) => void) | undefined;
-    /** Horizontal pitch guide target; null clears it. */
-    onPitchSnapGuide: ((targetValue: number | null) => void) | undefined;
     panRef: MutableRefObject<{
         pointerId: number;
         startClientX: number;

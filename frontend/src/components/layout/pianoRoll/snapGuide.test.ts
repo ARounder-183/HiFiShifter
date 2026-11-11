@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
-    buildValueGuideEntry,
+    buildCandidateHighlightEntry,
     clearSnapHighlights,
     getSnapGuideEntriesForSurface,
     getSnapHighlightSnapshot,
@@ -13,15 +13,15 @@ describe("snap guide surface model", () => {
     it("routes piano-roll entries away from the timeline", () => {
         publishSnapHighlights(
             "paramBlock",
-            [buildValueGuideEntry({ id: "pitch", kind: "grid", value: 60 })],
+            [buildCandidateHighlightEntry({ id: "pitch", kind: "grid", sec: 1 })],
             "pianoRoll",
         );
         expect(getSnapGuideEntriesForSurface("pianoRoll")).toHaveLength(1);
         expect(getSnapGuideEntriesForSurface("timeline")).toHaveLength(0);
         expect(getSnapHighlightSnapshot().entries[0]?.surface).toBe("pianoRoll");
         expect(getSnapHighlightSnapshot().entries[0]?.markers[0]).toMatchObject({
-            axis: "value",
-            position: 60,
+            axis: "time",
+            position: 1,
         });
     });
 

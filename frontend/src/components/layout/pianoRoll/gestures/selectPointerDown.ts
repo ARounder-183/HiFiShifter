@@ -63,7 +63,6 @@ type SelectPointerDeps = Pick<
     | "onParamCommitSucceeded"
     | "onParamValuePreviewChange"
     | "onPitchSnapGestureActiveChange"
-    | "onPitchSnapGuide"
     | "paramMultiSelectKb"
     | "paramStretchKb"
     | "paramValuePopupEnabled"
@@ -138,7 +137,6 @@ export function handleSelectPointerDown(
         onParamCommitSucceeded,
         onParamValuePreviewChange,
         onPitchSnapGestureActiveChange,
-        onPitchSnapGuide,
         paramMultiSelectKb,
         paramStretchKb,
         paramValuePopupEnabled,
@@ -579,7 +577,6 @@ export function handleSelectPointerDown(
                         onParamCommitSucceeded,
                         onParamValuePreviewChange,
                         onPitchSnapGestureActiveChange,
-                        onPitchSnapGuide,
                         paramValuePopupEnabled,
                         paramViewRef,
                         pitchSnapUnit,

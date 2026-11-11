@@ -12,7 +12,8 @@ import type { SnapCandidateKind, SnapResult } from "./timelineSnapping";
 export const SNAP_HIGHLIGHT_GROUP = "timeline";
 
 export type SnapGuideSurface = "timeline" | "pianoRoll" | "all";
-export type SnapGuideAxis = "time" | "value";
+/** Snap guides only exist on the time axis; value-axis snap has no visual guide. */
+export type SnapGuideAxis = "time";
 export type SnapHighlightRole = "target" | "source";
 
 export type SnapHighlightKind =
@@ -30,7 +31,7 @@ export type SnapHighlightKind =
 
 export interface SnapGuideMarker {
     readonly role: SnapHighlightRole;
-    /** Time in seconds for axis="time"; parameter value for axis="value". */
+    /** Time in seconds. Value-axis snaps deliberately publish no guide. */
     readonly position: number;
     readonly axis: SnapGuideAxis;
     /** Timeline row owner; null means a full-height guide. */
@@ -121,15 +122,13 @@ export function buildCandidateHighlightEntry(args: {
     targetTrackId?: string | null;
     targetClipId?: string | null;
     sources?: readonly SnapHighlightSourceSpec[];
-    axis?: SnapGuideAxis;
     surface?: SnapGuideSurface;
 }): SnapGuideEntry {
-    const axis = args.axis ?? "time";
     const markers: SnapGuideMarker[] = [
         {
             role: "target",
             position: args.sec,
-            axis,
+            axis: "time",
             trackId: args.targetTrackId ?? null,
             clipId: args.targetClipId ?? null,
         },
@@ -138,7 +137,7 @@ export function buildCandidateHighlightEntry(args: {
         markers.push({
             role: "source",
             position: source.position ?? source.sec ?? args.sec,
-            axis,
+            axis: "time",
             trackId: source.trackId ?? null,
             clipId: source.clipId ?? null,
         });
@@ -218,28 +217,6 @@ export function publishClipOriginSnapHighlight(args: {
         ],
         "timeline",
     );
-}
-
-/** Value-axis guide used by pitch snapping in the parameter editor. */
-export function buildValueGuideEntry(args: {
-    readonly id: string;
-    readonly kind: SnapHighlightKind;
-    readonly value: number;
-}): SnapGuideEntry {
-    return {
-        id: args.id,
-        kind: args.kind,
-        surface: "pianoRoll",
-        markers: [
-            {
-                role: "target",
-                position: args.value,
-                axis: "value",
-                trackId: null,
-                clipId: null,
-            },
-        ],
-    };
 }
 
 export function buildLoopBoundaryHighlightEntry(args: {

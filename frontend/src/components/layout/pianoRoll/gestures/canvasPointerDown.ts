@@ -12,10 +12,14 @@ import {
 } from "../childPitchOffsetParams";
 import { createEdgeScrollDriver } from "../kernel/edgeScrollDriver";
 import {
+    VALUE_EDGE_SCROLL_BAND_PX,
+    VALUE_EDGE_SCROLL_MAX_RATIO,
+    VALUE_EDGE_SCROLL_RAMP_EXPONENT,
     valueAxisScrollable,
     valueEdgeScrollMaxSpeedPxPerSec,
     verticalScrollTopFromCenter,
 } from "../verticalScrollMapping";
+import { PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX } from "../panel/panelHelpers";
 import { getDrawPreviewValue } from "../paramValuePreviewLogic";
 import { timeToFrame } from "../utils";
 import { resolveClipSelectionModifiers } from "../../../../features/keybindings/clipSelectionModifiers";
@@ -83,7 +87,6 @@ type CanvasPointerDownDeps = Pick<
     | "onParamCommitSucceeded"
     | "onParamValuePreviewChange"
     | "onPitchSnapGestureActiveChange"
-    | "onPitchSnapGuide"
     | "panRef"
     | "paramEditorSeekPlayheadEnabled"
     | "paramMultiSelectKb"
@@ -219,7 +222,6 @@ export function handleCanvasPointerDown(
         onParamCommitSucceeded,
         onParamValuePreviewChange,
         onPitchSnapGestureActiveChange,
-        onPitchSnapGuide,
         panRef,
         paramEditorSeekPlayheadEnabled,
         paramMultiSelectKb,
@@ -269,7 +271,7 @@ export function handleCanvasPointerDown(
         viewSizeRef,
     } = deps;
 
-    const verticalScrollRangePx = 1600;
+    const verticalScrollRangePx = PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX;
     const currentVerticalView = () => getCurrentViewportForScrollbar(editParam);
     const verticalMapping = () => {
         const bounds = getParamValueBoundsForScrollbar(editParam);
@@ -293,16 +295,11 @@ export function handleCanvasPointerDown(
             nativeOffsetPx,
         });
     };
-    const blockEdgeScroll = createEdgeScrollDriver({
-        getBounds: () => {
-            const rect = canvasRef.current?.getBoundingClientRect();
-            if (rect === undefined) return null;
-            return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
-        },
-        getScrollLeft: () => getViewportTruth()?.scrollLeft ?? scrollLeftRef.current,
-        setScrollLeft: (next) => applyEdgeScrollLeft(next),
-        getMaxScrollLeft: projectMaxScrollLeft,
-        getMinScrollLeft: () => (syncTimelineEnabled ? -timelineOffsetRef.current : 0),
+    /*
+     * 值轴配置的唯一来源：块拖动与绘制类手势必须用同一套带宽 / 速度 / 软启动，
+     * 否则同一个参数编辑器里会出现两种上下滚动手感。水平上界仍由各自驱动决定。
+     */
+    const valueAxisScrollOptions = {
         getScrollTop: () => {
             const mapping = verticalMapping();
             return verticalScrollTopFromCenter({
@@ -310,7 +307,7 @@ export function handleCanvasPointerDown(
                 center: currentVerticalView().center,
             });
         },
-        setScrollTop: (next) => applyEdgeScrollTop(next),
+        setScrollTop: (next: number) => applyEdgeScrollTop(next),
         // span >= range 时值域中心不可移动：可滚动范围必须归零，否则驱动会
         // 每帧写入 scrollTop、读回同一个中点，rAF 永不停止。
         getMaxScrollTop: () => {
@@ -327,6 +324,24 @@ export function handleCanvasPointerDown(
                 scrollRangePx: verticalScrollRangePx,
             });
         },
+        verticalPolicy: {
+            bandPx: VALUE_EDGE_SCROLL_BAND_PX,
+            maxRatio: VALUE_EDGE_SCROLL_MAX_RATIO,
+            rampExponent: VALUE_EDGE_SCROLL_RAMP_EXPONENT,
+        },
+    };
+
+    const blockEdgeScroll = createEdgeScrollDriver({
+        getBounds: () => {
+            const rect = canvasRef.current?.getBoundingClientRect();
+            if (rect === undefined) return null;
+            return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
+        },
+        getScrollLeft: () => getViewportTruth()?.scrollLeft ?? scrollLeftRef.current,
+        setScrollLeft: (next) => applyEdgeScrollLeft(next),
+        getMaxScrollLeft: projectMaxScrollLeft,
+        getMinScrollLeft: () => (syncTimelineEnabled ? -timelineOffsetRef.current : 0),
+        ...valueAxisScrollOptions,
     });
 
     // 中键平移必须早于块命中：块工具下中键仍应移动视图，而不是被当成块点击。
@@ -662,16 +677,7 @@ export function handleCanvasPointerDown(
         // 传 0 会让"向左滚"每帧都被夹回 0，与内核自己的下界（−偏移）打架 ——
         // 视图在两处往复即用户看到的"闪现"。
         getMinScrollLeft: () => (syncTimelineEnabled ? -timelineOffsetRef.current : 0),
-        getScrollTop: () => {
-            const mapping = verticalMapping();
-            return verticalScrollTopFromCenter({
-                ...mapping,
-                center: currentVerticalView().center,
-            });
-        },
-        setScrollTop: (next) => applyEdgeScrollTop(next),
-        getMaxScrollTop: () => verticalScrollRangePx,
-        getMinScrollTop: () => 0,
+        ...valueAxisScrollOptions,
         onScrolled: (clientX, clientY) => onEdgeScrolledRef.current?.(clientX, clientY),
     });
 
@@ -716,7 +722,6 @@ export function handleCanvasPointerDown(
                     onParamCommitSucceeded,
                     onParamValuePreviewChange,
                     onPitchSnapGestureActiveChange,
-                    onPitchSnapGuide,
                     paramMultiSelectKb,
                     paramStretchKb,
                     paramValuePopupEnabled,

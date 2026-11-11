@@ -171,7 +171,6 @@ import {
 } from "../paramBlockModifierPolicy";
 import {
     clearParamBlockSnapHighlight,
-    publishParamBlockPitchSnapHighlight,
     publishParamBlockSnapHighlight,
     resolveParamBlockPitchSnapDelta,
     resolveParamBlockTimeSnapResult,
@@ -2656,7 +2655,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         onPitchSnapGestureActiveChange: useCallback((active: boolean) => {
             setSnapGestureActive(active);
         }, []),
-        onPitchSnapGuide: publishParamBlockPitchSnapHighlight,
         paramValuePopupEnabled: s.showParamValuePopup,
         onParamValuePreviewChange: useCallback(
             (
@@ -3834,12 +3832,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 onParamCommitSucceeded,
                 bumpRefreshToken,
                 paintNow: () => hostRef.current?.paintNow(),
-                pitchSnapEnabled: s.pitchSnapEnabled,
-                onPitchSnapGuide: (target) =>
-                    publishParamBlockPitchSnapHighlight(
-                        target,
-                        getParamValueBoundsForScrollbarImpl({ processorParamsRef }, editParam),
-                    ),
                 onError: (error) => {
                     publishParamBlockFeedback({
                         text: tf("status_param_block_action_failed"),

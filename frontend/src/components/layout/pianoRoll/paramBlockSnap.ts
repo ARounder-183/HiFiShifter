@@ -19,16 +19,13 @@ import {
     type TimelineSnapContext,
 } from "../../../utils/timelineSnapping";
 import {
-    buildValueGuideEntry,
     clearSnapHighlights,
     publishSingleTargetSnapHighlight,
-    publishSnapHighlights,
 } from "../../../utils/snapHighlight";
 import type { ScaleLike } from "../../../utils/musicalScales";
 import { getDrawPreviewValue } from "./paramValuePreviewLogic";
 
 export const PARAM_BLOCK_SNAP_HIGHLIGHT_GROUP = "paramBlock";
-export const PARAM_BLOCK_PITCH_SNAP_HIGHLIGHT_GROUP = "paramBlockPitch";
 
 export interface ParamBlockTimeSnapInput {
     readonly rawSec: number;
@@ -112,34 +109,7 @@ export function publishParamBlockSnapHighlight(result: SnapResult): void {
     });
 }
 
-/**
- * Horizontal pitch guide. Only called when a snapped target actually differs
- * from the raw value; null clears immediately on pointerup/cancel.
- */
-export function publishParamBlockPitchSnapHighlight(
-    targetValue: number | null,
-    bounds?: { readonly min: number; readonly max: number },
-): void {
-    if (targetValue === null || !Number.isFinite(targetValue)) {
-        clearSnapHighlights(PARAM_BLOCK_PITCH_SNAP_HIGHLIGHT_GROUP);
-        return;
-    }
-    const value = bounds ? Math.min(bounds.max, Math.max(bounds.min, targetValue)) : targetValue;
-    publishSnapHighlights(
-        PARAM_BLOCK_PITCH_SNAP_HIGHLIGHT_GROUP,
-        [
-            buildValueGuideEntry({
-                id: "param-block-pitch",
-                kind: "grid",
-                value,
-            }),
-        ],
-        "pianoRoll",
-    );
-}
-
-/** Clear every parameter-block guide (time and value). */
+/** Clear the parameter-block time guide. Pitch snapping publishes no guide. */
 export function clearParamBlockSnapHighlight(): void {
     clearSnapHighlights(PARAM_BLOCK_SNAP_HIGHLIGHT_GROUP);
-    clearSnapHighlights(PARAM_BLOCK_PITCH_SNAP_HIGHLIGHT_GROUP);
 }

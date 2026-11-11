@@ -15,20 +15,20 @@ describe("valueAxisScrollable", () => {
 
     it("is safe for non-finite input", () => {
         expect(valueAxisScrollable({ min: Number.NaN, max: 1, span: 0 })).toBe(false);
-        expect(valueAxisScrollable({ min: 0, max: Number.POSITIVE_INFINITY, span: 1 })).toBe(true);
+        expect(valueAxisScrollable({ min: 0, max: Number.POSITIVE_INFINITY, span: 1 })).toBe(false);
     });
 });
 
 describe("valueEdgeScrollMaxSpeedPxPerSec", () => {
-    it("moves about 0.30 visible value viewports per second", () => {
+    it("moves 0.12 visible value viewports per second", () => {
         const speed = valueEdgeScrollMaxSpeedPxPerSec({
             min: 0,
             max: 127,
             span: 24,
             scrollRangePx: 1600,
         });
-        // 0.30 * 24 * 1600 / (127 - 24)
-        expect(speed).toBeCloseTo(111.8447, 3);
+        // 0.12 * 24 * 1600 / (127 - 24)
+        expect(speed).toBeCloseTo(44.7379, 3);
 
         const centerPerSecond = speed * ((127 - 24) / 1600);
         expect(centerPerSecond / 24).toBeCloseTo(VALUE_EDGE_SCROLL_VIEWPORTS_PER_SEC, 9);
@@ -47,8 +47,8 @@ describe("valueEdgeScrollMaxSpeedPxPerSec", () => {
             span: 48,
             scrollRangePx: 1600,
         });
-        expect(at12).toBeCloseTo(50.087, 3);
-        expect(at48).toBeCloseTo(291.646, 3);
+        expect(at12).toBeCloseTo(20.0348, 3);
+        expect(at48).toBeCloseTo(116.6582, 3);
         expect(at48).toBeGreaterThan(at12);
     });
 

@@ -1,9 +1,6 @@
 import React from "react";
 import type { SnapGuideEntry, SnapHighlightKind } from "../../../utils/snapHighlight";
-import {
-    horizontalHairlineGeometry,
-    verticalHairlineGeometry,
-} from "../../../utils/devicePixelLine";
+import { verticalHairlineGeometry } from "../../../utils/devicePixelLine";
 
 const SNAP_GUIDE_KIND_COLOR: Record<SnapHighlightKind, string> = {
     grid: "var(--qt-snap-grid)",
@@ -28,16 +25,11 @@ export interface SnapGuideRowLayout {
 export interface SnapGuideOverlayProps {
     readonly entries: readonly SnapGuideEntry[];
     readonly projectTimeX: (sec: number) => number;
-    readonly projectValueY?: (value: number) => number;
     readonly layerWidth: number;
     readonly layerHeight: number;
     readonly rowLayout?: SnapGuideRowLayout;
     readonly darkMode: boolean;
     readonly dpr: number;
-}
-
-interface ValueGuideLine {
-    readonly y: number;
 }
 
 interface GuideAccent {
@@ -53,13 +45,12 @@ function finite(value: number): boolean {
 
 /**
  * Pure snap-guide renderer. It knows nothing about buses, timeline rows or
- * piano-roll axes; adapters provide the two projections and optional row
+ * piano-roll axes; adapters provide the time projection and optional row
  * layout. This is the single place where line widths and colours live.
  */
 export const SnapGuideOverlay: React.FC<SnapGuideOverlayProps> = ({
     entries,
     projectTimeX,
-    projectValueY,
     layerWidth,
     layerHeight,
     rowLayout,
@@ -79,8 +70,6 @@ export const SnapGuideOverlay: React.FC<SnapGuideOverlayProps> = ({
                     key={entry.id}
                     entry={entry}
                     projectTimeX={projectTimeX}
-                    projectValueY={projectValueY}
-                    layerWidth={layerWidth}
                     layerHeight={layerHeight}
                     rowLayout={rowLayout}
                     darkMode={darkMode}
@@ -94,8 +83,6 @@ export const SnapGuideOverlay: React.FC<SnapGuideOverlayProps> = ({
 const SnapEntry: React.FC<{
     entry: SnapGuideEntry;
     projectTimeX: (sec: number) => number;
-    projectValueY?: (value: number) => number;
-    layerWidth: number;
     layerHeight: number;
     rowLayout?: SnapGuideRowLayout;
     darkMode: boolean;
@@ -103,8 +90,6 @@ const SnapEntry: React.FC<{
 }> = ({
     entry,
     projectTimeX,
-    projectValueY,
-    layerWidth,
     layerHeight,
     rowLayout,
     darkMode,
@@ -113,7 +98,6 @@ const SnapEntry: React.FC<{
     if (entry.markers.length === 0) return null;
     const color = SNAP_GUIDE_KIND_COLOR[entry.kind];
     const timeMarkers = entry.markers.filter((marker) => marker.axis === "time");
-    const valueMarkers = entry.markers.filter((marker) => marker.axis === "value");
 
     let rangeTop = 0;
     let rangeHeight = layerHeight;
@@ -174,15 +158,6 @@ const SnapEntry: React.FC<{
         }
     }
 
-    const valueLines: ValueGuideLine[] = [];
-    if (projectValueY !== undefined) {
-        for (const marker of valueMarkers) {
-            if (!finite(marker.position)) continue;
-            const y = projectValueY(marker.position);
-            if (finite(y)) valueLines.push({ y });
-        }
-    }
-
     return (
         <>
             {rangeHeight > 0
@@ -225,26 +200,6 @@ const SnapEntry: React.FC<{
                                 : color,
                             boxShadow: darkMode
                                 ? "0 0 8px 2px color-mix(in oklab, " + color + " 75%, transparent)"
-                                : "none",
-                        }}
-                    />
-                );
-            })}
-            {valueLines.map((line, index) => {
-                const geometry = horizontalHairlineGeometry(line.y, 2, dpr);
-                return (
-                    <div
-                        key={"value-" + index}
-                        className="absolute"
-                        style={{
-                            left: 0,
-                            top: geometry.top,
-                            width: layerWidth,
-                            height: geometry.height,
-                            backgroundColor: color,
-                            opacity: darkMode ? 0.85 : 0.7,
-                            boxShadow: darkMode
-                                ? "0 0 6px 1px color-mix(in oklab, " + color + " 60%, transparent)"
                                 : "none",
                         }}
                     />

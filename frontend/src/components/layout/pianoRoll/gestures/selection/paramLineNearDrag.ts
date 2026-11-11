@@ -65,7 +65,6 @@ type Deps = Pick<
     | "onParamCommitSucceeded"
     | "onParamValuePreviewChange"
     | "onPitchSnapGestureActiveChange"
-    | "onPitchSnapGuide"
     | "paramValuePopupEnabled"
     | "paramViewRef"
     | "pitchSnapUnit"
@@ -123,7 +122,6 @@ export function handleParamLineNearDrag(
         onParamCommitSucceeded,
         onParamValuePreviewChange,
         onPitchSnapGestureActiveChange,
-        onPitchSnapGuide,
         paramValuePopupEnabled,
         paramViewRef,
         pitchSnapUnit,
@@ -415,18 +413,6 @@ export function handleParamLineNearDrag(
         lastValueDelta = yDragEnabled ? rawValueDelta : 0;
         lastFrameDelta = currentDragDir === "y-only" ? 0 : rawFrameDelta;
 
-        if (effectiveSnap && editParam === "pitch" && yDragEnabled) {
-            const target =
-                useScaleDegreeTranspose && dragAnchorScale
-                    ? transposePitchByScaleSteps(startMouseVal, lastScaleStepDelta, dragAnchorScale)
-                    : startMouseVal + rawValueDelta;
-            onPitchSnapGuide?.(
-                Number.isFinite(target) && Math.abs(target - currentVal) > 1e-6 ? target : null,
-            );
-        } else {
-            onPitchSnapGuide?.(null);
-        }
-
         if (paramValuePopupEnabled) {
             const previewCurrentVal = yDragEnabled ? currentVal : startMouseVal;
             onParamValuePreviewChange?.({
@@ -476,7 +462,6 @@ export function handleParamLineNearDrag(
 
     const onEnd = async () => {
         edgeScroll?.stop();
-        onPitchSnapGuide?.(null);
         disposeDragDirKey();
         disposeFineAdjustedPointerState(finePointerState);
         // 取消挂起的预览帧：松手后由提交路径以全分辨率

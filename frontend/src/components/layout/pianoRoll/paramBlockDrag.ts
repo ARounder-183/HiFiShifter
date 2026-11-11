@@ -154,9 +154,7 @@ export interface ParamBlockDragContext {
     readonly bumpRefreshToken: () => void;
     readonly snapToggleHeldAt: (event: SnapModifiers) => boolean;
     /** 当前音高吸附总开关；与 snapToggleHeldAt 做 XOR 得到本次手势的有效吸附。 */
-    readonly pitchSnapEnabled: boolean;
     /** Publishes/clears the horizontal pitch snap guide while the gesture runs. */
-    readonly onPitchSnapGuide?: (targetValue: number | null) => void;
     readonly onError?: (error: unknown) => void;
     readonly resolveValueDelta: (
         startValue: number,
@@ -198,7 +196,6 @@ export function beginParamBlockDrag(
     context: ParamBlockDragContext,
 ): boolean {
     const {
-        pitchSnapEnabled,
         paramBlockDragActivityRef,
         paramView,
         rootTrackId,
@@ -400,8 +397,6 @@ export function beginParamBlockDrag(
         altKey: args.altKey === true,
         metaKey: args.metaKey === true,
     });
-    const effectivePitchSnap = (toggle: boolean): boolean =>
-        toggle ? !pitchSnapEnabled : pitchSnapEnabled;
     let rafId: number | null = null;
     let gestureHandle: ReturnType<typeof startPointerGesture> | null = null;
     const framePeriodMs = pv.framePeriodMs;
@@ -470,7 +465,6 @@ export function beginParamBlockDrag(
         };
         const dragSnapshot = paramBlockDragSnapshotRef.current;
         if (dragSnapshot !== null) {
-            const snapToSemitone = effectivePitchSnap(lastSnapToggleHeld);
             const frameCenters = new Map<string, number>();
             for (const block of dragSnapshot.blocks) {
                 /*
@@ -502,23 +496,6 @@ export function beginParamBlockDrag(
             }
             dragSnapshot.frameCenters = frameCenters;
             dragSnapshot.logicalCenters = logicalCenters;
-            const snappedTarget =
-                editParam === "pitch" && snapToSemitone
-                    ? projectParamBlockDragDisplayValue({
-                          startValue: dragAnchorValue,
-                          valueDelta: lastDelta,
-                          param: editParam,
-                          snapToSemitone: true,
-                      })
-                    : null;
-            const rawTarget = dragAnchorValue + valueDeltaAtClientY(lastClientY);
-            context.onPitchSnapGuide?.(
-                snappedTarget !== null &&
-                    Number.isFinite(snappedTarget) &&
-                    Math.abs(snappedTarget - rawTarget) > 1e-6
-                    ? snappedTarget
-                    : null,
-            );
         }
         invalidateParamBlockSpec();
         requestWaveformRepaint();
@@ -577,7 +554,6 @@ export function beginParamBlockDrag(
             rafId = null;
         }
         args.edgeScroll?.stop();
-        context.onPitchSnapGuide?.(null);
         if (reason === "up") {
             const release = resolveParamBlockDragRelease({
                 didDrag,

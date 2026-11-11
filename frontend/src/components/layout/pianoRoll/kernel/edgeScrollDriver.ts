@@ -5,7 +5,11 @@
  * 让它按滚动后的投影重算笔画 / 选区 / 块预览。几何公式与时间轴共用
  * `shared/edgeAutoScroll` 的轴无关实现；本模块只负责时钟、rAF 与钳制。
  */
-import { resolveAxisEdgeScrollDeltaPx, type EdgeScrollBounds } from "../../shared/edgeAutoScroll";
+import {
+    resolveAxisEdgeScrollDeltaPx,
+    type EdgeScrollAxisPolicy,
+    type EdgeScrollBounds,
+} from "../../shared/edgeAutoScroll";
 import { EDGE_SCROLL_MAX_SPEED_PX_PER_SEC } from "./dragArithmetic";
 
 const MIN_STEP_PX = 0.01;
@@ -29,6 +33,10 @@ export interface EdgeScrollDriverOptions {
     onScrolled?: (clientX: number, clientY?: number) => void;
     maxSpeedPxPerSec?: number;
     maxSpeedYPxPerSec?: number;
+    /** 水平轴手感策略；缺省 = 时间轴既有 32px / 1.5 / 线性。 */
+    horizontalPolicy?: EdgeScrollAxisPolicy;
+    /** 竖直轴（值轴）手感策略；参数编辑器传 18px / 1.0 / 1.6。 */
+    verticalPolicy?: EdgeScrollAxisPolicy;
     /**
      * 动态竖向速度（px/秒）。参数编辑器的值域视口会缩放，速度必须按当前
      * span 现算；固定值只保留给不需要动态速度的调用方。
@@ -86,6 +94,12 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
         options.getMaxScrollTop !== undefined &&
         options.getMinScrollTop !== undefined;
 
+    const horizontalCanScroll = (): boolean =>
+        options.getMaxScrollLeft() > options.getMinScrollLeft();
+
+    const verticalCanScroll = (): boolean =>
+        hasVertical() && options.getMaxScrollTop!() > options.getMinScrollTop!();
+
     const emitScrolled = (
         clientX: number,
         clientY: number | null,
@@ -108,16 +122,19 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
         if (!bounds) return false;
         const atMs = now();
         const frameMs = frameMsFor(atMs);
-        const deltaX = resolveAxisEdgeScrollDeltaPx({
-            pointerPx: clientX,
-            minPx: bounds.left,
-            maxPx: bounds.right,
-            frameMs,
-            maxSpeedPxPerSec: maxSpeedX,
-        });
+        const deltaX = horizontalCanScroll()
+            ? resolveAxisEdgeScrollDeltaPx({
+                  pointerPx: clientX,
+                  minPx: bounds.left,
+                  maxPx: bounds.right,
+                  frameMs,
+                  maxSpeedPxPerSec: maxSpeedX,
+                  ...options.horizontalPolicy,
+              })
+            : 0;
         const maxSpeedYNow = resolveMaxSpeedY();
         const deltaY =
-            hasVertical() &&
+            verticalCanScroll() &&
             maxSpeedYNow > 0 &&
             lastClientY !== null &&
             bounds.top !== undefined &&
@@ -128,6 +145,7 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
                       maxPx: bounds.bottom,
                       frameMs,
                       maxSpeedPxPerSec: maxSpeedYNow,
+                      ...options.verticalPolicy,
                   })
                 : 0;
         lastStepAtMs = atMs;
@@ -163,22 +181,22 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
     const pointerInBand = (clientX: number, clientY: number | null): boolean => {
         const bounds = options.getBounds();
         if (!bounds) return false;
-        const horizontalCanScroll = options.getMaxScrollLeft() > options.getMinScrollLeft();
-        const verticalCanScroll =
-            hasVertical() && options.getMaxScrollTop!() > options.getMinScrollTop!();
-        if (!horizontalCanScroll && !verticalCanScroll) return false;
+        const canScrollX = horizontalCanScroll();
+        const canScrollY = verticalCanScroll();
+        if (!canScrollX && !canScrollY) return false;
         const horizontal =
-            horizontalCanScroll &&
+            canScrollX &&
             resolveAxisEdgeScrollDeltaPx({
                 pointerPx: clientX,
                 minPx: bounds.left,
                 maxPx: bounds.right,
                 frameMs: DEFAULT_FRAME_MS,
                 maxSpeedPxPerSec: maxSpeedX,
+                ...options.horizontalPolicy,
             }) !== 0;
         const maxSpeedYNow = resolveMaxSpeedY();
         const vertical =
-            verticalCanScroll &&
+            canScrollY &&
             maxSpeedYNow > 0 &&
             clientY !== null &&
             bounds.top !== undefined &&
@@ -189,6 +207,7 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
                 maxPx: bounds.bottom,
                 frameMs: DEFAULT_FRAME_MS,
                 maxSpeedPxPerSec: maxSpeedYNow,
+                ...options.verticalPolicy,
             }) !== 0;
         return horizontal || vertical;
     };

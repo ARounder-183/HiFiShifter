@@ -7,21 +7,18 @@ import { getSnapHighlightSnapshot, subscribeSnapHighlight } from "../../../../ut
 import { useDevicePixelRatio } from "../../../../hooks/useDevicePixelRatio";
 import { SnapGuideOverlay } from "../../timeline/SnapGuideOverlay";
 import { usePianoRollSnapGuideViewport } from "./usePianoRollSnapGuideViewport";
-import type { ParamName } from "../types";
 
 /**
  * Piano-roll adapter for the shared snap-guide renderer.
  *
- * Time guides are full-height vertical lines at the live viewport projection;
- * value guides are full-width horizontal lines. There are no track-row accents
- * here, and timeline-only entries are filtered out.
+ * Time guides are full-height vertical lines at the live viewport projection.
+ * There are no value guides, track-row accents or timeline-only entries here:
+ * pitch / parameter snapping is quantized but intentionally not drawn.
  */
 export const PianoRollSnapGuideLayer: React.FC<{
-    readonly param: ParamName;
     readonly viewWidth: number;
     readonly viewHeight: number;
-    readonly valueToY: (param: ParamName, value: number, heightPx: number) => number;
-}> = ({ param, viewWidth, viewHeight, valueToY }) => {
+}> = ({ viewWidth, viewHeight }) => {
     const snapshot = useSyncExternalStore(subscribeSnapHighlight, getSnapHighlightSnapshot);
     const enabled = useAppSelector(
         (state: RootState) => state.session.timelineSnap.snapHighlightEnabled !== false,
@@ -43,7 +40,6 @@ export const PianoRollSnapGuideLayer: React.FC<{
             <SnapGuideOverlay
                 entries={entries}
                 projectTimeX={(sec) => sec * viewport.pxPerSec - viewport.scrollLeftPx}
-                projectValueY={(value) => valueToY(param, value, viewHeight)}
                 layerWidth={viewWidth}
                 layerHeight={viewHeight}
                 darkMode={themeMode === "dark"}

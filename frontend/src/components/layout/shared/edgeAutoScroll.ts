@@ -48,6 +48,22 @@ export interface EdgeScrollBounds {
 /** 比例上限：指针拖出视口后不再继续加速（否则越拖越快，难以停在想看的位置）。 */
 export const EDGE_SCROLL_MAX_RATIO = 1.5;
 
+/**
+ * 单轴边缘滚屏的可选手感策略。
+ *
+ * 时间轴与参数编辑器共用同一套几何，但值轴需要更窄的触发带、更低的饱和上限
+ * 与更柔和的起步曲线。策略只影响「比例 → 本帧步长」这一段，不改变速度入参，
+ * 也不改变帧率无关性。
+ */
+export interface EdgeScrollAxisPolicy {
+    /** 触发带宽（CSS px）；必须是有限正数。 */
+    readonly bandPx?: number;
+    /** 指针拖出视口后的比例上限；必须是有限非负数。 */
+    readonly maxRatio?: number;
+    /** 比例软启动指数；1 = 线性，>1 = 越靠近带内缘越慢。 */
+    readonly rampExponent?: number;
+}
+
 /** 本帧时长的合法区间（毫秒）。上限的理由见 `resolveEdgeScrollDeltaPx`。 */
 const MIN_FRAME_MS = 1;
 const MAX_FRAME_MS = 100;
@@ -95,6 +111,9 @@ export function resolveAxisEdgeScrollDeltaPx(args: {
     readonly maxPx: number;
     readonly frameMs: number;
     readonly maxSpeedPxPerSec: number;
+    readonly bandPx?: number;
+    readonly maxRatio?: number;
+    readonly rampExponent?: number;
 }): number {
     const { pointerPx, minPx, maxPx, maxSpeedPxPerSec } = args;
     if (!Number.isFinite(pointerPx) || !Number.isFinite(minPx) || !Number.isFinite(maxPx)) {
@@ -104,21 +123,31 @@ export function resolveAxisEdgeScrollDeltaPx(args: {
     // 视口宽为 0 / 反向（布局未就绪）：没有可用的边缘语义。
     if (!(maxPx > minPx)) return 0;
 
+    const bandPx =
+        args.bandPx !== undefined && Number.isFinite(args.bandPx) && args.bandPx > 0
+            ? args.bandPx
+            : EDGE_SCROLL_BAND_PX;
+    const maxRatio =
+        args.maxRatio !== undefined && Number.isFinite(args.maxRatio) && args.maxRatio >= 0
+            ? args.maxRatio
+            : EDGE_SCROLL_MAX_RATIO;
+    const rampExponent =
+        args.rampExponent !== undefined &&
+        Number.isFinite(args.rampExponent) &&
+        args.rampExponent > 0
+            ? args.rampExponent
+            : 1;
+
     let ratio = 0;
-    if (pointerPx < minPx + EDGE_SCROLL_BAND_PX) {
-        ratio = -clampNumber(
-            (minPx + EDGE_SCROLL_BAND_PX - pointerPx) / EDGE_SCROLL_BAND_PX,
-            0,
-            EDGE_SCROLL_MAX_RATIO,
-        );
-    } else if (pointerPx > maxPx - EDGE_SCROLL_BAND_PX) {
-        ratio = clampNumber(
-            (pointerPx - (maxPx - EDGE_SCROLL_BAND_PX)) / EDGE_SCROLL_BAND_PX,
-            0,
-            EDGE_SCROLL_MAX_RATIO,
-        );
+    if (pointerPx < minPx + bandPx) {
+        ratio = -clampNumber((minPx + bandPx - pointerPx) / bandPx, 0, maxRatio);
+    } else if (pointerPx > maxPx - bandPx) {
+        ratio = clampNumber((pointerPx - (maxPx - bandPx)) / bandPx, 0, maxRatio);
     }
     if (ratio === 0) return 0;
+    if (rampExponent !== 1) {
+        ratio = Math.sign(ratio) * Math.pow(Math.abs(ratio), rampExponent);
+    }
 
     const frameMs =
         Number.isFinite(args.frameMs) && args.frameMs > 0
