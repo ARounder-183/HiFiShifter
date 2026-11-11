@@ -199,8 +199,9 @@ function hasLiveSatellites(getState: () => unknown): boolean {
  * 【为什么要瘦身】`session` 切片携带逐 clip 的波形数组（`waveform` /
  * `waveformPreview`）、逐 clip 的检测音高曲线（`clipPitchCurves[*].midiCurve`，
  * 每 clip 数百到上千个浮点）与静音预览段，一个真实工程的快照轻易到几 MB ——
- * 跨窗口事件传这么大的 JSON 又慢又容易被序列化问题绊倒，而独立窗口承载的只有
- * 文件浏览器 / 记事本 / 撤销历史，**不需要波形与曲线**。整份 `JSON.stringify`
+ * 跨窗口事件传这么大的 JSON 又慢又容易被序列化问题绊倒。独立窗口的纯 DOM
+ * 面板不需要这些大数组；参数编辑器通过 `useClipsPeaksForPianoRoll` 的
+ * `batchPreload()` 从后端按需取波形 peaks。整份 `JSON.stringify`
  * 一旦抛错，主窗口此前会静默不应答，卫星就永久停在占位符上（用户报告的
  * "完全没实现"）。请求方每 500ms 重试一次，投影不彻底会把大快照的代价变成
  * 周期性的。
