@@ -12,8 +12,10 @@ import { describe, expect, it } from "vitest";
 
 import type { PianoRollParamBlockSpec } from "./kernel/host/pianoRollKernelData";
 import {
+    isParamBlockAuthorityVisible,
     isParamBlockPreviewGeometrySettled,
     PARAM_BLOCK_PREVIEW_RELEASE_TIMEOUT_MS,
+    resolveParamBlockRelease,
     shouldReleaseParamBlockPreview,
 } from "./paramBlockPreviewRelease";
 import type { ParamBlockEpoch, ParamBlockVisualTransaction } from "./paramBlockVisualTransaction";
@@ -268,6 +270,169 @@ describe("isParamBlockPreviewGeometrySettled", () => {
             isParamBlockPreviewGeometrySettled({
                 transaction: tx({ kind: "transition", spec: withHandle }),
                 blocks: [{ id: "a", startSec: 0, endSec: 1, transitionSec: 0.1 }],
+            }),
+        ).toBe(false);
+    });
+});
+
+/**
+ * `resolveParamBlockRelease` 是**三处交接共用的那一个**判据（块拖动 / 新建 / 视觉事务）。
+ *
+ * 【为什么单独钉】上一版三处各自内联同一组三元组，其中新建那条忘了超时 —— 权威永远
+ * 不落地时预览永久停留（幽灵块）。这里把「三态 committedSegments」与超时逐格钉住。
+ */
+describe("resolveParamBlockRelease", () => {
+    const base = {
+        authorityRevision: 11,
+        watermark: { issuedRequestSeq: 6, appliedRequestSeq: 6 },
+        paramView: view([64, 64, 64, 60, 60, 60]),
+        geometrySettled: false,
+        gestureActive: false,
+        pendingCommits: 0,
+        startedAt: 0,
+        now: 100,
+    } as const;
+
+    it("undefined = pure layout commit: releases as soon as the geometry is in place", () => {
+        expect(
+            resolveParamBlockRelease({
+                ...base,
+                wait: { authorityRevisionAtStart: 10, committedSegments: undefined },
+                geometrySettled: true,
+            }),
+        ).toBe("release");
+        expect(
+            resolveParamBlockRelease({
+                ...base,
+                wait: { authorityRevisionAtStart: 10, committedSegments: undefined },
+                geometrySettled: false,
+            }),
+        ).toBe("wait");
+    });
+
+    it("null = curve write announced but segments not computed yet: always waits", () => {
+        expect(
+            resolveParamBlockRelease({
+                ...base,
+                wait: { authorityRevisionAtStart: 10, committedSegments: null },
+                geometrySettled: true,
+            }),
+        ).toBe("wait");
+        /* 几何相等在这里没有意义：过渡手柄的几何根本不变化。 */
+        expect(
+            resolveParamBlockRelease({
+                ...base,
+                wait: { authorityRevisionAtStart: 10, committedSegments: null },
+                geometrySettled: true,
+                now: PARAM_BLOCK_PREVIEW_RELEASE_TIMEOUT_MS + 1,
+            }),
+        ).toBe("timeout");
+    });
+
+    it("array = waits for the three authority conditions, then releases", () => {
+        const wait = {
+            authorityRevisionAtStart: 10,
+            authorityRequestSeqAtCommit: 5,
+            committedSegments: SEGMENTS,
+        };
+        expect(resolveParamBlockRelease({ ...base, wait })).toBe("release");
+        expect(resolveParamBlockRelease({ ...base, wait, authorityRevision: 10 })).toBe("wait");
+        expect(
+            resolveParamBlockRelease({ ...base, wait, paramView: view([60, 60, 60, 60, 60, 60]) }),
+        ).toBe("wait");
+        expect(
+            resolveParamBlockRelease({
+                ...base,
+                wait,
+                watermark: { issuedRequestSeq: 6, appliedRequestSeq: 4 },
+            }),
+        ).toBe("wait");
+    });
+
+    it("times out instead of holding the preview forever", () => {
+        expect(
+            resolveParamBlockRelease({
+                ...base,
+                wait: { authorityRevisionAtStart: 10, committedSegments: SEGMENTS },
+                authorityRevision: 10,
+                now: PARAM_BLOCK_PREVIEW_RELEASE_TIMEOUT_MS + 1,
+            }),
+        ).toBe("timeout");
+    });
+
+    it("a running gesture or a queued commit wins over the timeout", () => {
+        const timedOut = {
+            ...base,
+            wait: { authorityRevisionAtStart: 10, committedSegments: SEGMENTS },
+            now: PARAM_BLOCK_PREVIEW_RELEASE_TIMEOUT_MS + 1,
+        } as const;
+        expect(resolveParamBlockRelease({ ...timedOut, gestureActive: true })).toBe("wait");
+        expect(resolveParamBlockRelease({ ...timedOut, pendingCommits: 2 })).toBe("wait");
+    });
+
+    it("honours a caller-supplied timeout", () => {
+        expect(
+            resolveParamBlockRelease({
+                ...base,
+                wait: { authorityRevisionAtStart: 10, committedSegments: SEGMENTS },
+                authorityRevision: 10,
+                now: 50,
+                timeoutMs: 10,
+            }),
+        ).toBe("timeout");
+    });
+});
+
+describe("isParamBlockAuthorityVisible", () => {
+    it("needs revision progress, a confirmed watermark, and the segments in the window", () => {
+        const wait = {
+            authorityRevisionAtStart: 10,
+            authorityRequestSeqAtCommit: 5,
+            committedSegments: SEGMENTS,
+        };
+        expect(
+            isParamBlockAuthorityVisible({
+                wait,
+                authorityRevision: 11,
+                watermark: { issuedRequestSeq: 6, appliedRequestSeq: 6 },
+                paramView: view([64, 64, 64, 60, 60, 60]),
+            }),
+        ).toBe(true);
+        for (const overrides of [
+            { authorityRevision: 10 },
+            { watermark: { issuedRequestSeq: 6, appliedRequestSeq: 4 } },
+            { paramView: null },
+            { paramView: view([60, 60, 60, 60, 60, 60]) },
+        ]) {
+            expect(
+                isParamBlockAuthorityVisible({
+                    wait,
+                    authorityRevision: 11,
+                    watermark: { issuedRequestSeq: 6, appliedRequestSeq: 6 },
+                    paramView: view([64, 64, 64, 60, 60, 60]),
+                    ...overrides,
+                }),
+                JSON.stringify(overrides).slice(0, 60),
+            ).toBe(false);
+        }
+    });
+
+    it("is false for layout-only and not-yet-computed waits", () => {
+        const common = {
+            authorityRevision: 11,
+            watermark: { issuedRequestSeq: 6, appliedRequestSeq: 6 },
+            paramView: view([64, 64, 64, 60, 60, 60]),
+        } as const;
+        expect(
+            isParamBlockAuthorityVisible({
+                ...common,
+                wait: { authorityRevisionAtStart: 10, committedSegments: undefined },
+            }),
+        ).toBe(false);
+        expect(
+            isParamBlockAuthorityVisible({
+                ...common,
+                wait: { authorityRevisionAtStart: 10, committedSegments: null },
             }),
         ).toBe(false);
     });

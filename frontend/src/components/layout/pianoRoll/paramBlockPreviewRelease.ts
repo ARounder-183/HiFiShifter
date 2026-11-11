@@ -94,6 +94,92 @@ export function isParamBlockPreviewGeometrySettled(args: {
     });
 }
 
+/**
+ * 一次提交「权威是否已经可见」的输入 —— 全仓唯一判据的形状。
+ *
+ * 【三态 committedSegments】
+ * - undefined：纯布局提交，没有曲线可回弹 ⇒ 立即可见；
+ * - null：已宣布「这次会写曲线」但片段还没算出来 ⇒ 必须等（几何相等在这里没有意义）；
+ * - 数组：曲线片段已知 ⇒ 三个条件必须同时成立。
+ */
+export interface ParamBlockAuthorityWait {
+    readonly authorityRevisionAtStart?: number | null;
+    readonly authorityRequestSeqAtCommit?: number | null;
+    readonly committedSegments?:
+        | readonly {
+              readonly startFrame: number;
+              readonly values: readonly number[];
+          }[]
+        | null;
+}
+
+/**
+ * 这次提交写入的曲线，权威是否已经能在当前窗口里看到。
+ *
+ * 【三个条件缺一不可】revision 前进（后端确实接受了这次写）∧ 水位确认（这份回包不是
+ * 提交前发出的在飞响应）∧ 当前窗口包含提交片段（看到的不是别的窗口）。
+ */
+export function isParamBlockAuthorityVisible(args: {
+    readonly wait: ParamBlockAuthorityWait;
+    readonly authorityRevision: number;
+    readonly watermark: ParamAuthorityWatermark;
+    readonly paramView: ParamViewSegment | null;
+}): boolean {
+    const committed = args.wait.committedSegments;
+    if (committed === undefined || committed === null || committed.length === 0) return false;
+    return (
+        Number.isFinite(args.wait.authorityRevisionAtStart ?? Number.NaN) &&
+        args.authorityRevision > (args.wait.authorityRevisionAtStart ?? Number.POSITIVE_INFINITY) &&
+        isParamAuthorityConfirmedAfterCommit({
+            watermark: args.watermark,
+            issuedRequestSeqAtCommit: args.wait.authorityRequestSeqAtCommit ?? 0,
+        }) &&
+        args.paramView !== null &&
+        paramViewContainsCommittedSegments({ paramView: args.paramView, segments: committed })
+    );
+}
+
+/**
+ * 预览 / 交接的**统一**释放决策。
+ *
+ * 【为什么合成一个函数】上一版三处各自写一遍三元组判据，其中一处（新建块的交接）
+ * 忘了超时 —— 权威永远不落地时预览**永久停留**，屏幕上留一个只能切参数才消失的
+ * 幽灵块。判据只有一份，超时只有一个常量。
+ */
+export function resolveParamBlockRelease(input: {
+    readonly wait: ParamBlockAuthorityWait;
+    readonly authorityRevision: number;
+    readonly watermark: ParamAuthorityWatermark;
+    readonly paramView: ParamViewSegment | null;
+    /** 纯布局提交的补充判据（几何已到位 / 块已出现在派生视图）。 */
+    readonly geometrySettled: boolean;
+    readonly gestureActive: boolean;
+    readonly pendingCommits: number;
+    readonly startedAt: number;
+    readonly now: number;
+    readonly timeoutMs?: number;
+}): ParamBlockPreviewRelease {
+    if (input.gestureActive || input.pendingCommits > 0) return "wait";
+    const timeoutMs = input.timeoutMs ?? PARAM_BLOCK_PREVIEW_RELEASE_TIMEOUT_MS;
+    const timedOut = input.now - input.startedAt > timeoutMs;
+    const committed = input.wait.committedSegments;
+    // 已宣布要写曲线但片段还没算出来：必须等（几何相等在这里没有意义）。
+    if (committed === null) return timedOut ? "timeout" : "wait";
+    if (
+        isParamBlockAuthorityVisible({
+            wait: input.wait,
+            authorityRevision: input.authorityRevision,
+            watermark: input.watermark,
+            paramView: input.paramView,
+        })
+    ) {
+        return "release";
+    }
+    if (committed !== undefined && committed.length > 0) return timedOut ? "timeout" : "wait";
+    if (input.geometrySettled) return "release";
+    return timedOut ? "timeout" : "wait";
+}
+
 export interface ParamBlockPreviewReleaseInput {
     readonly transaction: ParamBlockVisualTransaction;
     readonly now: number;
@@ -121,31 +207,17 @@ export function shouldReleaseParamBlockPreview(
 ): ParamBlockPreviewRelease {
     const { transaction } = input;
     if (transaction.phase === "gesture") return "wait";
-    if (input.gestureActive || input.pendingCommits > 0) return "wait";
-
-    const timeoutMs = input.timeoutMs ?? PARAM_BLOCK_PREVIEW_RELEASE_TIMEOUT_MS;
-    const timedOut = input.now - transaction.startedAt > timeoutMs;
-    const committed = transaction.committedSegments;
-    // 已宣布要写曲线但片段还没算出来：必须等（几何相等在这里没有意义）。
-    if (committed === null) return timedOut ? "timeout" : "wait";
-
-    if (committed !== undefined && committed.length > 0) {
-        const authoritySettled =
-            Number.isFinite(transaction.authorityRevisionAtStart ?? Number.NaN) &&
-            input.authorityRevision > (transaction.authorityRevisionAtStart ?? Infinity) &&
-            isParamAuthorityConfirmedAfterCommit({
-                watermark: input.watermark,
-                issuedRequestSeqAtCommit: transaction.authorityRequestSeqAtCommit ?? 0,
-            }) &&
-            input.paramView !== null &&
-            paramViewContainsCommittedSegments({
-                paramView: input.paramView,
-                segments: committed,
-            });
-        if (authoritySettled) return "release";
-        return timedOut ? "timeout" : "wait";
-    }
-
-    if (input.geometrySettled) return "release";
-    return timedOut ? "timeout" : "wait";
+    /* 薄适配器：判据只有一份（resolveParamBlockRelease），这里只负责拆包。 */
+    return resolveParamBlockRelease({
+        wait: transaction,
+        authorityRevision: input.authorityRevision,
+        watermark: input.watermark,
+        paramView: input.paramView,
+        geometrySettled: input.geometrySettled,
+        gestureActive: input.gestureActive,
+        pendingCommits: input.pendingCommits,
+        startedAt: transaction.startedAt,
+        now: input.now,
+        ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+    });
 }

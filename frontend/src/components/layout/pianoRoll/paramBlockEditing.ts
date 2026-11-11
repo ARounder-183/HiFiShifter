@@ -2438,8 +2438,12 @@ function clipsOf(clip: ParamBlockSourceClip): readonly ParamBlockSourceClip[] {
     return [clip];
 }
 
-/** 新建块的两条显式失败原因（不再用裸 `Error` + 文案匹配）。 */
-export type ParamBlockCreateFailure = "too_short" | "no_source";
+/**
+ * 新建块的两条显式失败原因（不再用裸 `Error` + 文案匹配）。
+ *
+ * 只在同文件内作为 `ParamBlockEditError` 的 `code` 使用，因此不导出。
+ */
+type ParamBlockCreateFailure = "too_short" | "no_source";
 
 /**
  * 新建块失败。

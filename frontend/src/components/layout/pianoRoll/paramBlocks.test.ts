@@ -719,3 +719,51 @@ describe("paramBlockFrameSpan / translation-invariant mode center", () => {
         }
     });
 });
+
+/**
+ * 切分点的包含判定必须与**整数帧**同口径。
+ *
+ * 【为什么钉这一条】面板里两条切分路径曾经各用一套判据：播放头分支走整数帧
+ * （`resolveParamBlockSplitTarget`），而「带目标块 id」的点击分支用浮点秒直接比
+ * `startSec < sec < endSec`。两者在块边界 ±一帧内会给出不同结论 —— 用户看到的是
+ * 「位置明显在块内，却提示切分点太靠边」。
+ */
+describe("isStrictlyInsideParamBlock", () => {
+    const block = {
+        id: "b",
+        rootTrackId: "root",
+        kind: "user",
+        members: [],
+        startSec: (10 * FRAME_MS) / 1000,
+        endSec: (20 * FRAME_MS) / 1000,
+        averageValue: 60,
+        manualValue: null,
+        projected: { startFrame: 10, endFrameExclusive: 20 },
+    } as unknown as ParamBlock;
+    const at = (frame: number) => (frame * FRAME_MS) / 1000;
+
+    it("excludes both edges (the split must leave two non-empty halves)", () => {
+        expect(isStrictlyInsideParamBlock(block, at(10), FRAME_MS)).toBe(false);
+        expect(isStrictlyInsideParamBlock(block, at(20), FRAME_MS)).toBe(false);
+    });
+
+    it("accepts the frames strictly between the edges", () => {
+        expect(isStrictlyInsideParamBlock(block, at(11), FRAME_MS)).toBe(true);
+        expect(isStrictlyInsideParamBlock(block, at(19), FRAME_MS)).toBe(true);
+    });
+
+    it("quantises to whole frames, so sub-frame offsets do not flip the verdict", () => {
+        /* 起点 + 0.4 帧 ⇒ 仍是第 10 帧 ⇒ 不算内部（与浮点秒判据的差异就在这里）。 */
+        expect(isStrictlyInsideParamBlock(block, at(10.4), FRAME_MS)).toBe(false);
+        expect(isStrictlyInsideParamBlock(block, at(10.6), FRAME_MS)).toBe(true);
+        /* 浮点噪声不改变判定。 */
+        expect(isStrictlyInsideParamBlock(block, at(11) + 1e-9, FRAME_MS)).toBe(true);
+        expect(isStrictlyInsideParamBlock(block, at(19) - 1e-9, FRAME_MS)).toBe(true);
+    });
+
+    it("rejects blocks without projected geometry and non-finite positions", () => {
+        const unprojected = { ...block, projected: undefined } as unknown as ParamBlock;
+        expect(isStrictlyInsideParamBlock(unprojected, at(15), FRAME_MS)).toBe(false);
+        expect(isStrictlyInsideParamBlock(block, Number.NaN, FRAME_MS)).toBe(false);
+    });
+});

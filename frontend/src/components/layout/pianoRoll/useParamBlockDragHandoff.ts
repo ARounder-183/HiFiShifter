@@ -1,11 +1,10 @@
 import { useEffect, type RefObject } from "react";
 import type { ParamBlockDragCommit, ParamBlockDragSnapshot } from "./paramBlockDrag";
-import { paramViewContainsCommittedSegments } from "./paramBlocks";
 import {
-    isParamAuthorityConfirmedAfterCommit,
-    ownsParamBlockGesture,
-    type ParamAuthorityWatermark,
-} from "./paramBlockTransaction";
+    PARAM_BLOCK_PREVIEW_RELEASE_TIMEOUT_MS,
+    isParamBlockAuthorityVisible,
+} from "./paramBlockPreviewRelease";
+import { ownsParamBlockGesture, type ParamAuthorityWatermark } from "./paramBlockTransaction";
 import type { ParamViewSegment } from "./types";
 
 export interface ParamBlockDragHandoffInputs {
@@ -37,7 +36,7 @@ export function useParamBlockDragHandoff({
     structureVersion,
     clearLiveEditOverride,
     onReleased,
-    timeoutMs = 1200,
+    timeoutMs = PARAM_BLOCK_PREVIEW_RELEASE_TIMEOUT_MS,
 }: ParamBlockDragHandoffInputs): void {
     useEffect(() => {
         const pending = commitRef.current;
@@ -89,15 +88,17 @@ export function useParamBlockDragHandoff({
             })
         )
             return;
-        const curveSettled =
-            paramView !== null &&
-            authorityRevision > handoff.authorityRevisionAtStart &&
-            isParamAuthorityConfirmedAfterCommit({
-                watermark: getAuthorityWatermark(),
-                issuedRequestSeqAtCommit: handoff.authorityRequestSeqAtCommit,
-            }) &&
-            handoff.committedSegments !== undefined &&
-            paramViewContainsCommittedSegments({ paramView, segments: handoff.committedSegments });
+        /*
+         * 判据只有一份（isParamBlockAuthorityVisible）：revision 前进 ∧ 水位确认 ∧
+         * 当前窗口包含提交片段。三处交接（块拖动 / 新建 / 视觉事务）共用它，
+         * 上一版各写一遍，其中新建那条忘了超时。
+         */
+        const curveSettled = isParamBlockAuthorityVisible({
+            wait: handoff,
+            authorityRevision,
+            watermark: getAuthorityWatermark(),
+            paramView,
+        });
         if (!curveSettled || releaseRafRef.current !== null) return;
         handoff.releaseState = "waiting-for-paint";
         releaseRafRef.current = requestAnimationFrame(() => {

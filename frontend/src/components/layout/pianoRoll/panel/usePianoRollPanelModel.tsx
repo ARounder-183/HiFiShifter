@@ -136,7 +136,6 @@ import {
     createParamBlock,
     clipAtParamBlockCreateSpan,
     resolveCreatedParamBlockValue,
-    paramViewContainsCommittedSegments,
     newParamBlockId,
     type ParamBlock,
     type ParamBlockState,
@@ -157,10 +156,10 @@ import {
 import {
     isParamBlockPreviewGeometrySettled,
     PARAM_BLOCK_PREVIEW_RELEASE_TIMEOUT_MS,
+    resolveParamBlockRelease,
     shouldReleaseParamBlockPreview,
     stampParamBlockCurveIntent,
 } from "../paramBlockPreviewRelease";
-import { isParamAuthorityConfirmedAfterCommit } from "../paramBlockTransaction";
 import {
     beginParamBlockDrag,
     type ParamBlockDragStart,
@@ -2357,6 +2356,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      */
     const paramBlockCreateCommitRef = useRef<{
         readonly blockId: string;
+        /** 松手提交的时刻；`resolveParamBlockRelease` 用它算超时。 */
+        readonly startedAt: number;
         readonly authorityRevisionAtStart: number;
         readonly authorityRequestSeqAtCommit: number;
         readonly requiresCurveAuthority: boolean;
@@ -2389,16 +2390,20 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     const paramBlockCommitQueueRef = useRef<Promise<void>>(Promise.resolve());
     const paramBlockGestureSerialRef = useRef(0);
     const paramBlockActiveGestureTokenRef = useRef<number | null>(null);
+    /**
+     * 刚刚按下的块（供双击的第二次 pointerdown 复用稳定 id）。
+     *
+     * 【为什么只需要 blockId + at】旧实现还存了一个自增 token 字符串，但没有任何
+     * 读者 —— 双击判定只比较 id 与时间窗。
+     */
     const paramBlockClickCandidateRef = useRef<{
         readonly blockId: string;
-        readonly token: string;
         readonly at: number;
     } | null>(null);
     /** Shift 范围选择的锚点；不进入 Redux / undo / 持久化。 */
     const paramBlockAnchorRef = useRef<ParamBlockSelectionAnchor | null>(null);
     const hoveredParamBlockIdRef = useRef<string | null>(null);
     const hoveredTransitionLeftIdRef = useRef<string | null>(null);
-    const paramBlockDoubleClickTokenRef = useRef(0);
     // Stable callback that delegates to the latest handleEditOp via ref
     const stableEditAction = useCallback((op: string) => {
         handleEditActionRef.current(op);
@@ -4917,6 +4922,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                     const createHandoff = created.ok
                                         ? {
                                               blockId: createId,
+                                              startedAt: performance.now(),
                                               authorityRevisionAtStart:
                                                   createAuthorityRevisionAtStart,
                                               authorityRequestSeqAtCommit:
@@ -5582,10 +5588,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             setParamBlockContextMenu(null);
             bumpParamBlockStructure();
             if (!hit.contextMenu) {
-                paramBlockDoubleClickTokenRef.current += 1;
                 paramBlockClickCandidateRef.current = {
                     blockId: fullBlock.id,
-                    token: "block:" + paramBlockDoubleClickTokenRef.current,
                     at: performance.now(),
                 };
             }
@@ -6065,8 +6069,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                           (block) =>
                               (block.id === args.targetBlockId ||
                                   logicalBlockId(block) === args.targetBlockId) &&
-                              block.startSec < rawSec &&
-                              block.endSec > rawSec,
+                              /*
+                               * 与播放头分支同一口径（整数帧）。旧实现在这里用浮点秒判
+                               * 包含，边界上（rawSec 与块起点相差不到一帧）两个分支会给出
+                               * 不同结论 —— 表现为「位置明显在块内，却提示切分点太靠边」。
+                               */
+                              isStrictlyInsideParamBlock(block, rawSec, framePeriodMs),
                       ) ?? null);
             if (target === null) return false;
             const selectionBefore = selectionRef.current;
@@ -6465,15 +6473,13 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 sec <= candidateBlock.endSec
                     ? candidateBlock
                     : null;
-            const blockId = hit?.id ?? candidateHit?.id ?? null;
-            if (blockId === null) return;
+            if (hit === null && candidateHit === null) return;
             /*
              * 双击块 = **无操作**。旧实现双击就做音高归一化 —— 一条不可逆的曲线
              * 重写：块内每个音高事件被拉到块均值，没有确认、没有预览，只能撤销
              * 找回。归一化仍保留在右键菜单与快捷键里（显式意图）。
              */
             paramBlockClickCandidateRef.current = null;
-            event.preventDefault();
         },
         [
             editParam,
@@ -6649,38 +6655,55 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         rootTrackId,
     ]);
     /*
-     * 新建块预览 -> 正式块的交接。只有同时满足以下条件才撤预览：
-     * 1. React 块记录已包含新块；
-     * 2. pitch 曲线提交后至少一份权威 paramView 已落地；
-     * 3. 当前正式块已绘制过一帧。
+     * 新建块预览 -> 正式块的交接。
+     *
+     * 【判据与超时都归 resolveParamBlockRelease】上一版这里内联了同一组三元组，
+     * 但**忘了超时**：权威永远不包含提交片段时（例如提交后立刻被另一笔编辑覆盖），
+     * 预览会永久停留 —— 屏幕上留一个只能切参数才消失的幽灵块。
      */
     useEffect(() => {
         const handoff = paramBlockCreateCommitRef.current;
-        if (
-            handoff === null ||
-            !handoff.committed ||
-            paramBlockDragActivityRef.current.pointerGestureToken !== null ||
-            paramBlockDragActivityRef.current.pendingCommits > 0
-        )
-            return;
-        if (
-            handoff.requiresCurveAuthority &&
-            (paramAuthorityRevision <= handoff.authorityRevisionAtStart ||
-                !paramView ||
-                !handoff.committedSegments ||
-                !paramViewContainsCommittedSegments({
-                    paramView,
-                    segments: handoff.committedSegments,
-                }) ||
-                !isParamAuthorityConfirmedAfterCommit({
-                    watermark: getAuthorityWatermark(),
-                    issuedRequestSeqAtCommit: handoff.authorityRequestSeqAtCommit,
-                }))
-        ) {
-            return;
-        }
-        if (!paramBlocksWithValues.some((block) => block.id === handoff.blockId)) return;
+        if (handoff === null || !handoff.committed) return;
         if (paramBlockResizeRef.current?.blockId !== "__create__") return;
+        const decision = resolveParamBlockRelease({
+            wait: {
+                authorityRevisionAtStart: handoff.authorityRevisionAtStart,
+                authorityRequestSeqAtCommit: handoff.authorityRequestSeqAtCommit,
+                committedSegments: handoff.requiresCurveAuthority
+                    ? (handoff.committedSegments ?? null)
+                    : undefined,
+            },
+            authorityRevision: paramAuthorityRevision,
+            watermark: getAuthorityWatermark(),
+            paramView,
+            geometrySettled: paramBlocksWithValues.some((block) => block.id === handoff.blockId),
+            gestureActive: paramBlockDragActivityRef.current.pointerGestureToken !== null,
+            pendingCommits: paramBlockDragActivityRef.current.pendingCommits,
+            startedAt: handoff.startedAt,
+            now: performance.now(),
+        });
+        if (decision === "wait") {
+            /* 超时前必须让 effect 再跑一次，否则没人来判这一次超时。 */
+            const remaining = Math.max(
+                0,
+                PARAM_BLOCK_PREVIEW_RELEASE_TIMEOUT_MS - (performance.now() - handoff.startedAt),
+            );
+            const timer = window.setTimeout(() => bumpParamBlockStructure(), remaining);
+            return () => window.clearTimeout(timer);
+        }
+        if (decision === "timeout") {
+            reportParamBlockDiagnostic({
+                code: "preview_release_timeout",
+                gesture: "create",
+                rootTrackId,
+                blockId: handoff.blockId,
+                frame: null,
+                detail: "kind=create-handoff",
+            });
+            /* 对账：把权威编辑集写回状态（进而触发曲线窗口重取），再撤预览。 */
+            blockPersistence.flushReadback();
+            clearLiveEditOverride();
+        }
         if (paramBlockCreateReleaseRafRef.current !== null) return;
         paramBlockCreateReleaseRafRef.current = requestAnimationFrame(() => {
             paramBlockCreateReleaseRafRef.current = null;
@@ -6707,12 +6730,15 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             }
         };
     }, [
+        blockPersistence,
         bumpParamBlockStructure,
+        clearLiveEditOverride,
         getAuthorityWatermark,
         invalidateParamBlockSpec,
         paramAuthorityRevision,
         paramView,
         resetLiveEditPreview,
+        rootTrackId,
         paramBlockSpec,
         paramBlocksWithValues,
     ]);

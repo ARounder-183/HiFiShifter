@@ -90,6 +90,21 @@ export function isRetryableParamBlockFailure(error: ParamBlockCommitError): bool
     return error.kind === "conflict" || error.kind === "transport";
 }
 
+/**
+ * 提交队列**可以原样重放**的失败 —— 只有「镜像代次过期」这一类。
+ *
+ * 【为什么比 isRetryableParamBlockFailure 更窄】后者回答的是「刷新基准之后值得再试吗」
+ * （任何冲突与传输错误都可能一次重试就成功，是用户可见的重试语义）。提交队列这里重放
+ * 的是**同一份**补丁与**同一组** expected 基准：
+ * - curve / geometry 冲突 ⇒ 基准本身变了，重放必然以同一理由再失败；真正的修复是调用方
+ *   按意图重基（`rebase`）；
+ * - transport ⇒ 上一次写入可能**已经落地**，盲目重放会把一次用户操作变成两次写入。
+ *
+ * 把这条规则命名出来，是为了让 `commit` 里不再内联一份分类判断（两处各自演化过一次）。
+ */
+export function canReplayParamBlockCommit(error: ParamBlockCommitError): boolean {
+    return error.kind === "conflict" && error.code === "edit_set";
+}
 /** 用户可见反馈的类别（由面板映射到具体文案与 tone）。 */
 export type ParamBlockFailureFeedback = "rejected" | "conflict" | "transport" | "silent";
 

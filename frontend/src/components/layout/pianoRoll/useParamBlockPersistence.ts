@@ -23,6 +23,7 @@ import {
 } from "./paramBlockCommitPolicy";
 import {
     classifyParamBlockFailure,
+    canReplayParamBlockCommit,
     ParamBlockCommitError,
     paramBlockFailureFeedback,
     type ParamBlockFailureFeedback,
@@ -296,6 +297,19 @@ export function useParamBlockPersistence(args: {
     }, [args.rootTrackId, args.enabled, applyReply, publishReadError, readback]);
 
     /** 历史位置变了（撤销 / 重做 / 提交落库）才回读编辑集。 */
+    /*
+     * 图层关闭时回收三张按根累积的 Map。长时间运行 + 频繁切工程会让它们按
+     * `rootTrackId` 无限增长；关掉图层意味着「不再关心这些根的结果」。
+     * `queues` 里可能有未完成的 Promise —— 只 clear 不 cancel，语义与既有的
+     * 「回读失败自愈」一致：结果落地时若根已变，写入会被 rootTrackId 检查挡下。
+     */
+    useEffect(() => {
+        if (args.enabled) return;
+        server.current.clear();
+        queues.current.clear();
+        pending.current.clear();
+        refetchPending.current.clear();
+    }, [args.enabled]);
     useEffect(() => {
         const root = args.rootTrackId;
         if (!root || !args.enabled) return;
@@ -383,14 +397,11 @@ export function useParamBlockPersistence(args: {
                     } catch (error) {
                         const failure = classifyParamBlockFailure(error);
                         /*
-                         * 只有 edit_set 冲突能原样重试：它的语义是"镜像里的代次过期"，
-                         * 刷新镜像后同一份 blocks 仍然成立。curve / geometry 冲突意味着
-                         * **补丁的基准**变了，原样重放会覆盖别人的修改 —— 那必须由调用方
-                         * 按意图重基（`rebase`），不能在这里猜。
+                         * 【重试一次】判据只有一份（canReplayParamBlockCommit）：它比
+                         * `isRetryableParamBlockFailure` 更窄，因为这里重放的是同一份补丁与
+                         * 同一组 expected 基准（见该函数的说明）。
                          */
-                        if (failure.kind !== "conflict" || failure.code !== "edit_set") {
-                            throw failure;
-                        }
+                        if (!canReplayParamBlockCommit(failure)) throw failure;
                         if ((await refreshAuthority(root)) === null) throw failure;
                         return execute();
                     }

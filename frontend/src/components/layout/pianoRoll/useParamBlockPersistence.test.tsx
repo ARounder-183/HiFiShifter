@@ -58,14 +58,14 @@ const api: {
     persistence: ReturnType<typeof useParamBlockPersistence> | null;
     setState: ((next: ParamBlockState) => void) | null;
 } = { persistence: null, setState: null };
-const flags = { defer: false };
+const flags = { defer: false, enabled: true };
 const props = { historyKey: "0:0" };
 
 function Harness(p: { historyKey: string }) {
     const [state, setState] = useState<ParamBlockState>(EMPTY_PARAM_BLOCK_STATE);
     const persistence = useParamBlockPersistence({
         rootTrackId: "root",
-        enabled: true,
+        enabled: flags.enabled,
         historyKey: p.historyKey,
         state,
         setState,
@@ -104,6 +104,7 @@ beforeEach(() => {
     mocks.viewUpdatedListener = null;
     mocks.getParamBlockView.mockResolvedValue(reply(3));
     flags.defer = false;
+    flags.enabled = true;
     props.historyKey = "0:0";
     probe.state = EMPTY_PARAM_BLOCK_STATE;
     api.persistence = null;
@@ -373,5 +374,36 @@ describe("useParamBlockPersistence", () => {
 
         expect(caught).toMatchObject({ kind: "transport", code: "not_ready" });
         expect(mocks.setParamBlockEdits).not.toHaveBeenCalled();
+    });
+    /**
+     * 图层关闭时回收按根累积的镜像。
+     *
+     * 【为什么可观测】`server` 是 CAS 基准的唯一来源。关掉图层后它必须被清空，
+     * 于是下一次提交会先补一次基线回读、用**当前**代次当基准；若镜像留着，提交会
+     * 拿一个可能已经过期的代次去撞 CAS（用户看到「点了没反应」）。
+     */
+    it("recycles the per-root mirrors when the layer is switched off", async () => {
+        await render();
+        mocks.setParamBlockEdits.mockResolvedValue(reply(4));
+        await act(async () => {
+            await api.persistence?.commit(probe.state);
+        });
+        expect(mocks.setParamBlockEdits).toHaveBeenLastCalledWith(
+            expect.objectContaining({ expectedEditRevision: 3 }),
+        );
+
+        flags.enabled = false;
+        await render();
+        mocks.getParamBlockView.mockResolvedValue(reply(9));
+        mocks.setParamBlockEdits.mockClear();
+        const readsBefore = mocks.getParamBlockView.mock.calls.length;
+        await act(async () => {
+            await api.persistence?.commit(probe.state);
+        });
+        /* 镜像已清空 ⇒ 提交前必须重新读一次基线。 */
+        expect(mocks.getParamBlockView.mock.calls.length).toBeGreaterThan(readsBefore);
+        expect(mocks.setParamBlockEdits).toHaveBeenLastCalledWith(
+            expect.objectContaining({ expectedEditRevision: 9 }),
+        );
     });
 });
