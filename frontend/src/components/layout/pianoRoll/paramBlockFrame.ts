@@ -12,7 +12,7 @@ type LiveEdit = {
     readonly edit: readonly number[];
 };
 
-/** Block boundaries are shared, but a saved MIDI center belongs only to pitch. */
+/** Block boundaries are shared; every non-auto block may carry an explicit center. */
 export function resolveParamBlockPanelValues(args: {
     readonly blocks: readonly ParamBlock[];
     readonly param: string;
@@ -28,7 +28,10 @@ export function resolveParamBlockPanelValues(args: {
     readonly allowFallback?: boolean;
 }): ParamBlock[] {
     return args.blocks.map((block) => {
-        const manualValue = args.param === "pitch" ? (block.manualValue ?? null) : null;
+        // volume / dyn 的拖动落点同样写在 `value` 里；只对 pitch 生效会让块高
+        // 在下一次曲线刷新时跳回主簇。auto 块没有持久化中心，保持 null。
+        const manualValue =
+            block.kind === "auto" && args.param !== "pitch" ? null : (block.manualValue ?? null);
         const pv = args.paramView;
         const sampled =
             pv === null

@@ -794,7 +794,9 @@ export function usePianoRollInteractions(args: {
                 },
                 authority: {
                     expectedCurveRevision: authorityRevision,
-                    ...(geometryRevision === undefined ? {} : { expectedGeometryRevision: geometryRevision }),
+                    ...(geometryRevision === undefined
+                        ? {}
+                        : { expectedGeometryRevision: geometryRevision }),
                     ...(geometrySignature === undefined
                         ? {}
                         : { expectedGeometrySignature: geometrySignature }),

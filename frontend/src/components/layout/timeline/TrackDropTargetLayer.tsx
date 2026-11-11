@@ -30,7 +30,7 @@ export interface TrackDropTargetRingsProps {
 }
 
 /** Resolve the semantic color token for a drop tone. */
-export function trackDropTargetColor(tone: TrackDropTargetTone): string {
+function trackDropTargetColor(tone: TrackDropTargetTone): string {
     if (tone === "snap") return "var(--qt-snap-origin)";
     if (tone === "copy") return "var(--qt-track-drop-copy)";
     return "var(--qt-track-drop-target)";
@@ -51,9 +51,7 @@ export const TrackDropTargetRings: React.FC<TrackDropTargetRingsProps> = ({
     tracks.forEach((track, index) => rowIndexById.set(track.id, index));
     const rows = snapshot.trackIds
         .map((trackId) => ({ trackId, index: rowIndexById.get(trackId) }))
-        .filter(
-            (row): row is { trackId: string; index: number } => row.index !== undefined,
-        );
+        .filter((row): row is { trackId: string; index: number } => row.index !== undefined);
     if (rows.length === 0) return null;
 
     const color = trackDropTargetColor(snapshot.tone);
@@ -77,8 +75,7 @@ export const TrackDropTargetRings: React.FC<TrackDropTargetRingsProps> = ({
                             top,
                             height,
                             border: "2px solid " + color,
-                            background:
-                                "color-mix(in oklab, " + color + " 9%, transparent)",
+                            background: "color-mix(in oklab, " + color + " 9%, transparent)",
                             boxShadow:
                                 "0 0 0 1px color-mix(in oklab, " +
                                 color +

@@ -169,6 +169,42 @@ describe("param block visual frame", () => {
         ).toBe(value);
     });
 
+    it("keeps a persisted manual value for non-pitch user blocks", () => {
+        const userBlock: ParamBlock = {
+            id: "volume-block",
+            rootTrackId: "track",
+            kind: "user",
+            startSec: 0,
+            endSec: 0.02,
+            members: [],
+            averageValue: 0.3,
+            manualValue: 0.8,
+        };
+        const volumeView = {
+            ...authoritative,
+            key: "v2|track|volume|0|4|1",
+            edit: [0.3, 0.3, 0.3, 0.3],
+        };
+        const volume = resolveParamBlockPanelValues({
+            blocks: [userBlock],
+            param: "volume",
+            paramView: volumeView,
+            fallbackValue: 0,
+        })[0];
+        expect(volume.averageValue).toBe(0.8);
+        expect(volume.manualValue).toBe(0.8);
+
+        const autoBlock: ParamBlock = { ...userBlock, kind: "auto" };
+        expect(
+            resolveParamBlockPanelValues({
+                blocks: [autoBlock],
+                param: "volume",
+                paramView: volumeView,
+                fallbackValue: 0,
+            })[0].averageValue,
+        ).toBe(0.3);
+    });
+
     it("derives each parameter from its own curve while preserving the pitch placement", () => {
         const block: ParamBlock = {
             id: "note",

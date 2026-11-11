@@ -15,6 +15,7 @@ import {
     type ParamBlockSourceClip,
 } from "./paramBlockProjection";
 import { composeParamBlockView } from "./paramBlockComposition";
+import { narrowBaseCoverToMembers } from "./paramBlockBaseCover";
 import {
     flattenGroupChildren,
     logicalBlockId,
@@ -371,6 +372,12 @@ export function materializeProjectedFragment(
         block.id === parent.id || next.blocks.some((item) => item.id === block.id)
             ? newParamBlockId("fragment")
             : block.id;
+    /*
+     * 父块的 baseCover 不能整份复制给单 run 片段：多 run / Loop 块只编辑一个
+     * run 时，其余 run 仍需露出基块。按 fragment 成员裁剪源域，只有片段真正
+     * 覆盖整个基块 span 时才保留 full:true。
+     */
+    const childBaseCover = narrowBaseCoverToMembers(parent.baseCover, fragment);
     const child: UserParamBlock = {
         id: childId,
         geometry: { kind: "take", members: fragment },
@@ -381,7 +388,7 @@ export function materializeProjectedFragment(
             ? {}
             : { transitionOutSec: parent.transitionOutSec }),
         createdSeq: nextSeq(next),
-        ...(parent.baseCover === undefined ? {} : { baseCover: parent.baseCover }),
+        ...(childBaseCover === undefined ? {} : { baseCover: childBaseCover }),
     };
     return { edits: placeUserBlock(next, child), user: child };
 }
@@ -883,7 +890,21 @@ export function splitBaseCoverAtFrame(
             continue;
         }
         const projection = projectionForClip(clip);
-        const intervals = projectTakeSpan(projection, span, framePeriodMs);
+        /*
+         * 一个 span 只属于它自己的循环周期。projectTakeSpan 会返回该成员在
+         * 所有周期上的投影；不过滤会把 cycle 0 的切点当成 cycle 1 的切点，
+         * 把左 / 右 cover 的源域裁错。
+         */
+        const intervals = projectTakeSpan(projection, span, framePeriodMs).filter(
+            (interval) => interval.cycle === span.cycle,
+        );
+        if (intervals.length === 0) {
+            // 该周期没有可见投影（旧数据 / 已越界）：不把 span 同时塞到两侧，
+            // 也不宣称 full；否则会凭空抑制两侧基块。
+            leftFull = false;
+            rightFull = false;
+            continue;
+        }
         let crossing: { startFrame: number; endFrameExclusive: number; cycle: number } | null =
             null;
         let side: "left" | "right" | "both" | null = null;

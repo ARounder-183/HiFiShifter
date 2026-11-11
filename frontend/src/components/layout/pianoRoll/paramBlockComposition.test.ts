@@ -205,6 +205,84 @@ describe("paramBlockComposition", () => {
         expect(base.layoutKey).not.toBe(switched.layoutKey);
     });
 
+    it("narrows a shared base cover to each loop run instead of copying it wholesale", () => {
+        const loopClip: ParamBlockSourceClip = {
+            id: "loop",
+            trackId: "root",
+            startSec: 0,
+            lengthSec: 2,
+            sourceStartSec: 0,
+            sourceEndSec: 0.5,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: true,
+            loopPeriodSec: 0.5,
+            syllableSpansSec: [{ startSec: 0, endSec: 0.5 }],
+        };
+        const edits: ParamBlockEditSet = {
+            schemaVersion: 2,
+            revision: 1,
+            blocks: [
+                {
+                    id: "multi-run",
+                    geometry: {
+                        kind: "take",
+                        members: [
+                            {
+                                clipId: "loop",
+                                takeId: "loop_take_1",
+                                cycle: 0,
+                                sourceStartSec: 0.1,
+                                sourceEndSec: 0.2,
+                                label: "manual",
+                            },
+                            {
+                                clipId: "loop",
+                                takeId: "loop_take_1",
+                                cycle: 1,
+                                sourceStartSec: 0.1,
+                                sourceEndSec: 0.2,
+                                label: "manual",
+                            },
+                        ],
+                    },
+                    createdSeq: 1,
+                    baseCover: {
+                        full: true,
+                        spans: [
+                            {
+                                clipId: "loop",
+                                takeId: "loop_take_1",
+                                cycle: 0,
+                                sourceStartSec: 0,
+                                sourceEndSec: 0.5,
+                                label: "syllable",
+                            },
+                            {
+                                clipId: "loop",
+                                takeId: "loop_take_1",
+                                cycle: 1,
+                                sourceStartSec: 0,
+                                sourceEndSec: 0.5,
+                                label: "syllable",
+                            },
+                        ],
+                    },
+                },
+            ],
+        };
+        const runs = composeParamBlockView("root", [loopClip], edits, 5).blocks.filter(
+            (block) => block.userBlockId === "multi-run",
+        );
+        expect(runs).toHaveLength(2);
+        for (const run of runs) {
+            expect(run.baseCover?.full).toBe(false);
+            expect(run.baseCover?.spans).toHaveLength(1);
+            expect(run.baseCover?.spans[0]?.sourceStartSec).toBeCloseTo(0.1, 9);
+            expect(run.baseCover?.spans[0]?.sourceEndSec).toBeCloseTo(0.2, 9);
+        }
+    });
+
     it("keeps cycle>0 members when a loop span crosses the anchor", () => {
         const loopClip: ParamBlockSourceClip = {
             id: "loop",

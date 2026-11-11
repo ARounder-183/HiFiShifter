@@ -231,7 +231,9 @@ export function projectTakeSpan(
     projection: ClipProjection,
     span: Pick<TakeSpan, "sourceStartSec" | "sourceEndSec" | "cycle">,
     framePeriodMs: number,
+    fromCycle = 0,
 ): ProjectedInterval[] {
+    const startCycle = Number.isFinite(fromCycle) ? Math.max(0, Math.floor(fromCycle)) : 0;
     const fp = Math.max(0.1, framePeriodMs);
     const visibleStart = toFrame(projection.projectStartSec, fp);
     const visibleEnd = toFrame(projection.projectStartSec + projection.projectLengthSec, fp);
@@ -256,7 +258,7 @@ export function projectTakeSpan(
         const cycleTimeline = cycle / rate;
         if (cycleTimeline <= EPS) return [];
         for (
-            let startLocal = phase / rate, index = 0;
+            let startLocal = phase / rate + startCycle * cycleTimeline, index = startCycle;
             startLocal < projection.projectLengthSec - EPS && index < 20000;
             startLocal += cycleTimeline, index += 1
         ) {
@@ -271,6 +273,7 @@ export function projectTakeSpan(
         }
         return out;
     }
+    if (startCycle > 0) return [];
     const windowStart = projection.reversed
         ? projection.sourceWindowEndSec - projection.projectLengthSec * rate
         : projection.sourceWindowStartSec;

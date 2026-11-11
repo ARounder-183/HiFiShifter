@@ -9,6 +9,10 @@ import { EMPTY_PARAM_BLOCK_STATE, type ParamBlockState } from "./paramBlocks";
  * from render (the old approach) can also put a discarded render's stale state
  * back into the ref. This hook owns both values: setState updates the ref
  * first, then schedules the React render.
+ *
+ * 【单一写入者契约】外部（拖动 / 创建 / 过渡等命令）**禁止**直接写
+ * `stateRef.current = ...`。直接写会绕过 React 更新，并让本 hook 的同一性
+ * 短路把后续 setState 当成 no-op。所有写入必须经过 `setState`。
  */
 export function useParamBlockState(initial: ParamBlockState = EMPTY_PARAM_BLOCK_STATE) {
     const [state, setReactState] = useState(initial);

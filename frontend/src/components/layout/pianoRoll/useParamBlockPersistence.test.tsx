@@ -8,6 +8,8 @@ import { useParamBlockPersistence } from "./useParamBlockPersistence";
 const mocks = vi.hoisted(() => ({
     getParamBlockView: vi.fn(),
     setParamBlockEdits: vi.fn(),
+    viewUpdatedListener: null as
+        null | ((event: { payload: { rootTrackId: string; view?: unknown } }) => void),
 }));
 
 vi.mock("../../../services/api", () => ({
@@ -16,7 +18,17 @@ vi.mock("../../../services/api", () => ({
         setParamBlockEdits: (input: unknown) => mocks.setParamBlockEdits(input),
     },
 }));
-vi.mock("../../../services/hostEvents", () => ({ listen: async () => () => {} }));
+vi.mock("../../../services/hostEvents", () => ({
+    listen: async (
+        _event: string,
+        listener: (event: { payload: { rootTrackId: string; view?: unknown } }) => void,
+    ) => {
+        mocks.viewUpdatedListener = listener;
+        return () => {
+            mocks.viewUpdatedListener = null;
+        };
+    },
+}));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -89,6 +101,7 @@ function previewTo(revision: number): void {
 beforeEach(() => {
     mocks.getParamBlockView.mockReset();
     mocks.setParamBlockEdits.mockReset();
+    mocks.viewUpdatedListener = null;
     mocks.getParamBlockView.mockResolvedValue(reply(3));
     flags.defer = false;
     props.historyKey = "0:0";
@@ -284,6 +297,38 @@ describe("useParamBlockPersistence", () => {
                 { param: "pitch", startFrame: 0, values: [60] },
             ]),
         ).toThrow("expectedCurveRevision");
+    });
+
+    it("replays an in-flight view update after the commit queue drains", async () => {
+        await render();
+        mocks.getParamBlockView.mockResolvedValue(reply(8));
+        let resolveCommit: ((value: unknown) => void) | null = null;
+        mocks.setParamBlockEdits.mockImplementation(
+            () =>
+                new Promise((resolve) => {
+                    resolveCommit = resolve;
+                }),
+        );
+        let commitPromise: Promise<unknown> = Promise.resolve();
+        await act(async () => {
+            commitPromise = api.persistence?.commit(probe.state) ?? Promise.resolve();
+            await Promise.resolve();
+        });
+        // 带外更新在提交进行中到达：必须登记，不能在 finally 后丢失。
+        act(() => {
+            mocks.viewUpdatedListener?.({
+                payload: { rootTrackId: "root", view: reply(8).view },
+            });
+        });
+        await act(async () => {
+            resolveCommit?.(reply(4));
+            await commitPromise;
+        });
+        await act(async () => {
+            await Promise.resolve();
+        });
+        expect(mocks.getParamBlockView).toHaveBeenCalled();
+        expect(probe.state.editSet.revision).toBe(8);
     });
 
     it("非冲突错误不重试", async () => {

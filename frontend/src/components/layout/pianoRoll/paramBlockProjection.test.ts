@@ -39,6 +39,31 @@ describe("paramBlockProjection", () => {
         }
     });
 
+    it("starts loop projection at the requested cycle", () => {
+        const loopClip: ParamBlockSourceClip = {
+            id: "c",
+            trackId: "root",
+            startSec: 0,
+            lengthSec: 8,
+            sourceStartSec: 0.266,
+            sourceEndSec: 2.27,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: true,
+            loopPeriodSec: 2.27,
+            contentDurationSec: 2.27,
+        };
+        const projection = projectionForClip(loopClip);
+        const span = { sourceStartSec: 0.046, sourceEndSec: 0.252, cycle: 0 };
+        const full = projectTakeSpan(projection, span, 5);
+        const fromCycle = projectTakeSpan(projection, span, 5, 2);
+        expect(full.length).toBeGreaterThan(fromCycle.length);
+        expect(fromCycle.length).toBeGreaterThan(0);
+        expect(fromCycle.every((interval) => interval.cycle >= 2)).toBe(true);
+        expect(fromCycle[0]?.cycle).toBe(2);
+        expect(projectTakeSpan(projection, span, 5, 99)).toEqual([]);
+    });
+
     it("sourceAtProjectedFrame stays inside the member for loop wrap and reverse", () => {
         const loopClip: ParamBlockSourceClip = {
             id: "c",

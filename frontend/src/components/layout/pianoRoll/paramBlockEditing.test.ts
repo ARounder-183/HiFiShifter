@@ -48,6 +48,39 @@ describe("paramBlockEditing", () => {
         expect(block.geometry.members[0]?.sourceEndSec).toBeCloseTo(0.4);
     });
 
+    it("splits a loop base cover only on the span's own cycle", () => {
+        const loopClip: ParamBlockSourceClip = {
+            ...clip,
+            id: "loop",
+            lengthSec: 1,
+            sourceStartSec: 0,
+            sourceEndSec: 0.4,
+            loopEnabled: true,
+            loopPeriodSec: 0.4,
+        };
+        const cover = {
+            spans: [
+                {
+                    clipId: "loop",
+                    takeId: "loop_take_1",
+                    cycle: 1,
+                    sourceStartSec: 0.1,
+                    sourceEndSec: 0.3,
+                    label: "syllable" as const,
+                },
+            ],
+            full: true,
+        };
+        // cycle 1 = frames [100, 200); frame 120 is inside it, source 0.2.
+        const split = splitBaseCoverAtFrame([loopClip], cover, 120, 5);
+        expect(split.left?.spans[0]?.sourceStartSec).toBeCloseTo(0.1, 9);
+        expect(split.left?.spans[0]?.sourceEndSec).toBeCloseTo(0.2, 9);
+        expect(split.right?.spans[0]?.sourceStartSec).toBeCloseTo(0.2, 9);
+        expect(split.right?.spans[0]?.sourceEndSec).toBeCloseTo(0.3, 9);
+        expect(split.left?.full).toBe(false);
+        expect(split.right?.full).toBe(false);
+    });
+
     it("splits a reversed base cover on the correct source sides", () => {
         const reversed: ParamBlockSourceClip = {
             ...clip,

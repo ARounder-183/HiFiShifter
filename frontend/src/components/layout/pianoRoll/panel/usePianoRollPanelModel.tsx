@@ -93,6 +93,7 @@ import { logicalBlockId, type ParamBlockView } from "../paramBlockTypes";
 import { resolveParamBlockGeometryClips } from "../paramBlockGeometryFreeze";
 import { fetchFullResCurve, readPvRange, uploadFullResCurveSegments } from "../selectionEditData";
 import type { ParamCurveCommitAuthority } from "../paramBlockCommitPolicy";
+import { useParamBlockTransitionPersistence } from "./useParamBlockTransitionPersistence";
 import { markParamBlockPreviewOwnedRevision as markPreviewOwnedRevision } from "../paramBlockPreviewOwnership";
 import { startPointerGesture } from "../gestures/pointerGesture";
 import { armRightDragContextMenuGuard } from "../../../../utils/rightDragContextMenuGuard";
@@ -128,7 +129,6 @@ import {
     restoreDeletedParamBlocks,
     splitParamBlock,
     setParamBlockTransition,
-    buildParamBlockTransitionSegments,
     buildParamBlockTransitionPreview,
     PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_X_PX,
     PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX,
@@ -3242,170 +3242,28 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             paramBlockDragActivityRef.current.pointerGestureToken !== null ||
             paramBlockDragActivityRef.current.pendingCommits > 0,
     });
-    /** 只提交块过渡布局；所有参数都持久化 transitionOutSec。 */
-    const persistBlockTransition = useCallback(
-        async (
-            left: ParamBlock,
-            right: ParamBlock,
-            widthSec: number,
-            curvePatches: readonly {
-                param: string;
-                startFrame: number;
-                values: readonly number[];
-            }[] = [],
-            authority?: ParamCurveCommitAuthority | null,
-        ): Promise<void> => {
-            if (!rootTrackId) return;
-            const state = paramBlockStateRef.current;
-            if (paramBlockViewRef.current === null) return;
-            const edit = setParamBlockTransition({
-                state,
-                left,
-                right,
-                transitionSec: widthSec,
-                clips: paramBlockSourceClipsRef.current,
-            });
-            if (!edit.ok) throw new Error(edit.reason);
-            setParamBlockState(edit.state);
-            markParamBlockPreviewOwnedRevision(edit.state.editSet.revision);
-            await blockPersistence.commit(edit.state, true, curvePatches, authority, "transition");
-            bumpRefreshToken();
-            invalidate();
-        },
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- blockPersistence 是稳定 facade；只读其 commit 方法。
-        [blockPersistence.commit, bumpRefreshToken, invalidate, rootTrackId],
-    );
-
-    /** Pitch 额外写曲线；非 Pitch 只走上方的布局提交。 */
-    const persistPitchTransitionCurve = useCallback(
-        async (
-            left: ParamBlock,
-            right: ParamBlock,
-            widthSec: number,
-            options?: { readonly restoreOriginal?: boolean },
-        ): Promise<void> => {
-            if (!rootTrackId || editParam !== "pitch") return;
-            if (widthSec <= 1e-6 && options?.restoreOriginal !== true) return;
-            const framePeriodMs = paramViewRef.current?.framePeriodMs ?? 5;
-            if (options?.restoreOriginal === true) {
-                const boundaryFrame = Math.round((right.startSec * 1000) / framePeriodMs);
-                const widthFrames = Math.max(1, Math.round((widthSec * 1000) / framePeriodMs));
-                const startFrame = Math.max(0, Math.floor((left.startSec * 1000) / framePeriodMs));
-                const endFrame = Math.max(
-                    boundaryFrame,
-                    Math.round((right.endSec * 1000) / framePeriodMs) - 1,
-                );
-                const restoreStart = Math.max(startFrame, boundaryFrame - widthFrames);
-                const restoreEnd = Math.min(endFrame, boundaryFrame + widthFrames - 1);
-                /*
-                 * 撤销过渡必须写回**提交态**曲线，而不是当前 live 预览。
-                 * 用一次带 authority 的全分辨率读数作为恢复源，并把它与
-                 * width=0 的布局放回同一个事务：旧实现先单独 layout commit
-                 * 再 upload，既多一个撤销点，也可能在两者之间被并发写打断。
-                 */
-                const source = await fetchFullResCurve({
-                    trackId: rootTrackId,
-                    param: "pitch",
-                    startFrame: restoreStart,
-                    endFrame: restoreEnd,
-                    paramView: null,
-                    forceAuthority: true,
-                });
-                if (source.authorityRevision === undefined) {
-                    throw new Error("param block transition requires expectedCurveRevision");
-                }
-                const authority: ParamCurveCommitAuthority = {
-                    expectedCurveRevision: source.authorityRevision,
-                    ...(source.geometryRevision === undefined
-                        ? {}
-                        : { expectedGeometryRevision: source.geometryRevision }),
-                    ...(source.geometrySignature === undefined
-                        ? {}
-                        : { expectedGeometrySignature: source.geometrySignature }),
-                };
-                const restoreSegments = [{ startFrame: source.startFrame, values: source.values }];
-                await persistBlockTransition(
-                    left,
-                    right,
-                    0,
-                    restoreSegments.map((segment) => ({ ...segment, param: "pitch" })),
-                    authority,
-                );
-                const pvNow = paramViewRef.current;
-                if (pvNow !== null) {
-                    setParamView(
-                        applyFullResSegmentsToParamView({
-                            paramView: pvNow,
-                            segments: restoreSegments,
-                        }),
-                    );
-                }
-                onParamCommitSucceeded();
-                bumpRefreshToken();
-                invalidate();
-                return;
-            }
-
-            const boundaryFrame = Math.round((right.startSec * 1000) / framePeriodMs);
-            const widthFrames = Math.max(1, Math.round((widthSec * 1000) / framePeriodMs));
-            const startFrame = Math.max(0, Math.floor((left.startSec * 1000) / framePeriodMs));
-            const endFrame = Math.max(
-                boundaryFrame,
-                Math.round((right.endSec * 1000) / framePeriodMs) - 1,
-            );
-            const source = await fetchFullResCurve({
-                trackId: rootTrackId,
-                param: "pitch",
-                startFrame: Math.max(startFrame, boundaryFrame - widthFrames),
-                endFrame: Math.min(endFrame, boundaryFrame + widthFrames - 1),
-                paramView: paramBlockViewRef.current !== null ? null : paramViewRef.current,
-                forceAuthority: true,
-            });
-            if (source.authorityRevision === undefined) {
-                throw new Error("param block transition requires expectedCurveRevision");
-            }
-            const authority: ParamCurveCommitAuthority = {
-                expectedCurveRevision: source.authorityRevision,
-                ...(source.geometryRevision === undefined
-                    ? {}
-                    : { expectedGeometryRevision: source.geometryRevision }),
-                ...(source.geometrySignature === undefined
-                    ? {}
-                    : { expectedGeometrySignature: source.geometrySignature }),
-            };
-            const leftValue = left.averageValue ?? 60;
-            const rightValue = right.averageValue ?? 60;
-            const committedAt = (frame: number): number =>
-                Number(source.values[frame - source.startFrame]) || rightValue;
-            const segments = buildParamBlockTransitionSegments({
-                boundaryFrame,
-                widthFrames,
-                targetValue: rightValue,
-                leftStartFrame: startFrame,
-                rightEndFrame: endFrame,
-                leftValue,
-                rightValue,
-                sourceAt: committedAt,
-            });
-            await persistBlockTransition(
-                left,
-                right,
-                widthSec,
-                segments.map((segment) => ({ ...segment, param: "pitch" })),
-                authority,
-            );
-        },
-        [
-            bumpRefreshToken,
-            editParam,
-            invalidate,
-            onParamCommitSucceeded,
-            paramViewRef,
-            persistBlockTransition,
+    /*
+     * 过渡提交拆在专用 hook 里：布局、曲线补丁、权威 watermark 与视觉预览
+     * 归属必须一起处理，集中在一处避免再次漏传 authority。
+     */
+    const { persistBlockTransition, persistPitchTransitionCurve } =
+        useParamBlockTransitionPersistence({
             rootTrackId,
+            editParam,
+            blockPersistence,
+            paramBlockStateRef,
+            paramBlockViewRef,
+            paramBlockSourceClipsRef,
+            paramViewRef,
+            setParamBlockState,
             setParamView,
-        ],
-    );
+            onParamCommitSucceeded,
+            bumpRefreshToken,
+            invalidate,
+            visualTransactionRef: paramBlockVisualTransactionRef,
+            dragSnapshotRef: paramBlockDragSnapshotRef,
+            resizeRef: paramBlockResizeRef,
+        });
 
     /**
      * The one exit door for every visual preview.
@@ -3653,20 +3511,20 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         paramBlocksWithValuesRef.current = paramBlocksWithValues;
     }, [paramBlocksWithValues]);
     /** 块选区 = 参数选区在块层的投影；多 run 逻辑块的全部片段都参与。 */
-    const selectionFrameBlocks = useMemo(
-        () =>
-            paramBlocksWithValues.map((block) => ({
-                id: block.id,
-                ...(block.userBlockId === undefined ? {} : { userBlockId: block.userBlockId }),
-                startFrame: Math.round(
-                    (block.startSec * 1000) / Math.max(0.1, paramBlockState.framePeriodMs),
-                ),
-                endFrameExclusive: Math.round(
-                    (block.endSec * 1000) / Math.max(0.1, paramBlockState.framePeriodMs),
-                ),
-            })),
-        [paramBlocksWithValues, paramBlockState.framePeriodMs],
-    );
+    const selectionFrameBlocks = useMemo(() => {
+        /*
+         * 视图的帧周期才是当前渲染 / 命中使用的周期；用 state 的周期会在
+         * 视图切换后的一个提交间隙里把选区投影偏一帧。回退到 state 只覆盖
+         * 首次尚未合成视图的启动帧。
+         */
+        const framePeriodMs = paramBlockView?.framePeriodMs ?? paramBlockState.framePeriodMs;
+        return paramBlocksWithValues.map((block) => ({
+            id: block.id,
+            ...(block.userBlockId === undefined ? {} : { userBlockId: block.userBlockId }),
+            startFrame: Math.round((block.startSec * 1000) / Math.max(0.1, framePeriodMs)),
+            endFrameExclusive: Math.round((block.endSec * 1000) / Math.max(0.1, framePeriodMs)),
+        }));
+    }, [paramBlocksWithValues, paramBlockState.framePeriodMs, paramBlockView?.framePeriodMs]);
     const selectedParamBlockIds = useMemo(
         () =>
             paramBlockToolActive ? paramBlockIdsInSelection(selectionFrameBlocks, selectionUi) : [],
@@ -3944,7 +3802,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             blockPersistence,
             paramBlockEpochRef,
             paramBlockStateRef,
-            processorParamsRef,
             effectiveProjectScale,
             getAuthorityWatermark,
             invalidateParamBlockSpec,
@@ -4487,80 +4344,68 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                 activated = true;
                             }
                             lastTransitionEvent = event;
-                            hit.edgeScroll?.track(
-                                event.clientX,
-                                event.clientY,
-                                (clientX, clientY) => {
-                                    if (lastTransitionEvent === null) return;
-                                    window.dispatchEvent(
-                                        new PointerEvent("pointermove", {
-                                            ...lastTransitionEvent,
-                                            clientX,
-                                            clientY,
-                                            pointerId: lastTransitionEvent.pointerId,
-                                            pointerType: lastTransitionEvent.pointerType,
-                                            isPrimary: lastTransitionEvent.isPrimary,
-                                            buttons: 1,
-                                            button: -1,
-                                        }),
-                                    );
-                                },
-                            );
-                            const pointerNowSec = hit.secAtClientX(event.clientX);
-                            targetWidth = Math.max(
-                                0,
-                                Math.min(
-                                    (rightBlock.endSec - rightBlock.startSec) / 2,
-                                    startWidth + (pointerStartSec - pointerNowSec),
-                                ),
-                            );
-                            const widthSpec =
-                                paramBlockSpec ?? kernelDataRef.current.paramBlocks ?? null;
-                            if (widthSpec !== null) {
-                                kernelDataRef.current.paramBlocks = {
-                                    ...widthSpec,
-                                    blocks: widthSpec.blocks.map((block) =>
-                                        block.id === touchedHandle.leftId ||
-                                        block.id === touchedHandle.rightId
-                                            ? {
-                                                  ...block,
-                                                  displayCenterValue:
-                                                      block.id === touchedHandle.leftId
-                                                          ? lockedLeftCenter
-                                                          : lockedRightCenter,
-                                                  displayHeightPx: lockedHeightPx,
-                                                  centerPolicy: "locked",
-                                              }
-                                            : block,
+                            const applyTransitionAt = (clientX: number) => {
+                                const pointerNowSec = hit.secAtClientX(clientX);
+                                targetWidth = Math.max(
+                                    0,
+                                    Math.min(
+                                        (rightBlock.endSec - rightBlock.startSec) / 2,
+                                        startWidth + (pointerStartSec - pointerNowSec),
                                     ),
-                                };
-                            }
-                            applyTransitionPreview(targetWidth);
-                            /*
-                             * 每次先写冻结块高 / 中心，再把新手柄宽度叠到同一份
-                             * 规格上；从 ref 重读会在 React 重绘的间隙拿到旧手柄，
-                             * 拉动时就会在两个宽度之间闪。
-                             */
-                            const liveSpec = kernelDataRef.current.paramBlocks ?? widthSpec ?? null;
-                            if (liveSpec !== null) {
-                                const nextSpec = {
-                                    ...liveSpec,
-                                    blocks: liveSpec.blocks.map((block) =>
-                                        block.id === touchedHandle.leftId
-                                            ? {
-                                                  ...block,
-                                                  transitionHandle: {
-                                                      ...touchedHandle,
-                                                      widthSec: targetWidth,
-                                                  },
-                                              }
-                                            : block,
-                                    ),
-                                };
-                                kernelDataRef.current.paramBlocks = nextSpec;
-                                publishParamBlockVisualTransaction("transition", nextSpec);
-                            }
-                            invalidate();
+                                );
+                                const widthSpec =
+                                    paramBlockSpec ?? kernelDataRef.current.paramBlocks ?? null;
+                                if (widthSpec !== null) {
+                                    kernelDataRef.current.paramBlocks = {
+                                        ...widthSpec,
+                                        blocks: widthSpec.blocks.map((block) =>
+                                            block.id === touchedHandle.leftId ||
+                                            block.id === touchedHandle.rightId
+                                                ? {
+                                                      ...block,
+                                                      displayCenterValue:
+                                                          block.id === touchedHandle.leftId
+                                                              ? lockedLeftCenter
+                                                              : lockedRightCenter,
+                                                      displayHeightPx: lockedHeightPx,
+                                                      centerPolicy: "locked",
+                                                  }
+                                                : block,
+                                        ),
+                                    };
+                                }
+                                applyTransitionPreview(targetWidth);
+                                /*
+                                 * 每次先写冻结块高 / 中心，再把新手柄宽度叠到同一份
+                                 * 规格上；从 ref 重读会在 React 重绘的间隙拿到旧手柄，
+                                 * 拉动时就会在两个宽度之间闪。
+                                 */
+                                const liveSpec =
+                                    kernelDataRef.current.paramBlocks ?? widthSpec ?? null;
+                                if (liveSpec !== null) {
+                                    const nextSpec = {
+                                        ...liveSpec,
+                                        blocks: liveSpec.blocks.map((block) =>
+                                            block.id === touchedHandle.leftId
+                                                ? {
+                                                      ...block,
+                                                      transitionHandle: {
+                                                          ...touchedHandle,
+                                                          widthSec: targetWidth,
+                                                      },
+                                                  }
+                                                : block,
+                                        ),
+                                    };
+                                    kernelDataRef.current.paramBlocks = nextSpec;
+                                    publishParamBlockVisualTransaction("transition", nextSpec);
+                                }
+                                invalidate();
+                            };
+                            hit.edgeScroll?.track(event.clientX, event.clientY, (clientX) => {
+                                applyTransitionAt(clientX);
+                            });
+                            applyTransitionAt(event.clientX);
                         },
                         onEnd: (reason, event) => {
                             hit.edgeScroll?.stop();
@@ -4995,19 +4840,20 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                 event.clientX,
                                 event.clientY,
                                 (clientX, clientY) => {
-                                    if (lastCreateEvent === null) return;
-                                    window.dispatchEvent(
-                                        new PointerEvent("pointermove", {
-                                            ...lastCreateEvent,
-                                            clientX,
-                                            clientY,
-                                            pointerId: lastCreateEvent.pointerId,
-                                            pointerType: lastCreateEvent.pointerType,
-                                            isPrimary: lastCreateEvent.isPrimary,
-                                            buttons: 1,
-                                            button: -1,
-                                        }),
-                                    );
+                                    const source = lastCreateEvent;
+                                    if (source === null) return;
+                                    /*
+                                     * 直接复用同一份预览逻辑，只替换坐标；
+                                     * 修饰键从最后一次真实事件快照读取。
+                                     */
+                                    updateCreatePreview({
+                                        clientX,
+                                        clientY: clientY ?? source.clientY,
+                                        ctrlKey: source.ctrlKey,
+                                        shiftKey: source.shiftKey,
+                                        altKey: source.altKey,
+                                        metaKey: source.metaKey,
+                                    });
                                 },
                             );
                             updateCreatePreview(event);
@@ -5228,7 +5074,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                                     if (ownsCreatePreview()) {
                                                         paramBlockCreateCommitRef.current = null;
                                                         paramBlockResizeRef.current = null;
-                                                        paramBlockVisualTransactionRef.current = null;
+                                                        paramBlockVisualTransactionRef.current =
+                                                            null;
                                                         paramBlockInteractionCurveRef.current =
                                                             null;
                                                         const pvNow = paramViewRef.current;
@@ -5541,6 +5388,69 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     });
                 let activateResize = false;
                 let lastResizeEvent: globalThis.PointerEvent | null = null;
+                const applyResizeAt = (event: {
+                    clientX: number;
+                    ctrlKey: boolean;
+                    shiftKey: boolean;
+                    altKey: boolean;
+                    metaKey: boolean;
+                }) => {
+                    /*
+                     * 用“当前指针内容坐标 - 按下时内容坐标”的位移，而不是
+                     * dx / pxPerSec：滚动或缩放后 pxPerSec 与 scrollLeft 都
+                     * 会变，纯像素差会让目标边缘漂移。
+                     */
+                    const pointerNowSec = hit.secAtClientX(event.clientX);
+                    const targetSec =
+                        (gestureRef.edge === "left" ? gestureRef.startSec : gestureRef.endSec) +
+                        (pointerNowSec - gestureRef.pointerStartSec);
+                    const snappedTarget = resolveParamBlockResizeTarget({
+                        edge: gestureRef.edge,
+                        startSec: gestureRef.startSec,
+                        endSec: gestureRef.endSec,
+                        rawTargetSec: targetSec,
+                        unclampedTargetSec: targetSec,
+                        snapToGrid: (sec) => {
+                            const result = resolveParamBlockTimeSnapResult({
+                                rawSec: sec,
+                                settings: s.timelineSnap,
+                                grid: s.project.gridSize,
+                                bpm: s.bpm,
+                                beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
+                                tempoMap: s.tempoMap,
+                                pxPerSec:
+                                    hostRef.current?.getAxis()?.pxPerSec ?? pxPerSecRef.current,
+                                clips: paramBlockClips,
+                                tracks: s.tracks,
+                                selectedClipIds: s.multiSelectedClipIds,
+                                playheadSec: s.playheadSec,
+                                originSec: gestureRef.startSec,
+                                toggleModifierActive: noSnapKeyHeld(event),
+                            });
+                            publishParamBlockSnapHighlight(result);
+                            return result.sec;
+                        },
+                        minBlockSec: framePeriodMs / 1000,
+                    });
+                    const targetFrame = toFrame(snappedTarget, framePeriodMs);
+                    gestureRef.targetSec = snappedTarget;
+                    gestureRef.targetFrame = targetFrame;
+                    const result = runResizePlan(targetFrame);
+                    if (!result.ok) return;
+                    gestureRef.resizePlan = result.plan;
+                    const previewSpec = buildParamBlockRenderSpec({
+                        blocks: previewSpecBlocks(result.plan),
+                        param: editParam,
+                        valueMin: bounds.min,
+                        valueMax: bounds.max,
+                        valueToY: (value, heightPx) => valueToY(editParam, value, heightPx),
+                        colors: paramBlockSpecColors,
+                        curveOwned: paramBlockViewRef.current !== null,
+                    });
+                    kernelDataRef.current.paramBlocks = previewSpec;
+                    publishParamBlockVisualTransaction("resize", previewSpec);
+                    invalidate();
+                };
                 const resizeGesture = startPointerGesture({
                     pointerId: hit.pointerId,
                     captureTarget: hit.captureTarget,
@@ -5557,76 +5467,18 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                             activateResize = true;
                         }
                         lastResizeEvent = event;
-                        hit.edgeScroll?.track(event.clientX, event.clientY, (clientX, clientY) => {
-                            if (lastResizeEvent === null) return;
-                            window.dispatchEvent(
-                                new PointerEvent("pointermove", {
-                                    ...lastResizeEvent,
-                                    clientX,
-                                    clientY,
-                                    pointerId: lastResizeEvent.pointerId,
-                                    pointerType: lastResizeEvent.pointerType,
-                                    isPrimary: lastResizeEvent.isPrimary,
-                                    buttons: 1,
-                                    button: -1,
-                                }),
-                            );
+                        hit.edgeScroll?.track(event.clientX, event.clientY, (clientX) => {
+                            const source = lastResizeEvent;
+                            if (source === null) return;
+                            applyResizeAt({
+                                clientX,
+                                ctrlKey: source.ctrlKey,
+                                shiftKey: source.shiftKey,
+                                altKey: source.altKey,
+                                metaKey: source.metaKey,
+                            });
                         });
-                        /*
-                         * 用“当前指针内容坐标 - 按下时内容坐标”的位移，而不是
-                         * dx / pxPerSec：滚动或缩放后 pxPerSec 与 scrollLeft 都
-                         * 会变，纯像素差会让目标边缘漂移。
-                         */
-                        const pointerNowSec = hit.secAtClientX(event.clientX);
-                        const targetSec =
-                            (gestureRef.edge === "left" ? gestureRef.startSec : gestureRef.endSec) +
-                            (pointerNowSec - gestureRef.pointerStartSec);
-                        const snappedTarget = resolveParamBlockResizeTarget({
-                            edge: gestureRef.edge,
-                            startSec: gestureRef.startSec,
-                            endSec: gestureRef.endSec,
-                            rawTargetSec: targetSec,
-                            unclampedTargetSec: targetSec,
-                            snapToGrid: (sec) => {
-                                const result = resolveParamBlockTimeSnapResult({
-                                    rawSec: sec,
-                                    settings: s.timelineSnap,
-                                    grid: s.project.gridSize,
-                                    bpm: s.bpm,
-                                    beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
-                                    tempoMap: s.tempoMap,
-                                    pxPerSec:
-                                        hostRef.current?.getAxis()?.pxPerSec ?? pxPerSecRef.current,
-                                    clips: paramBlockClips,
-                                    tracks: s.tracks,
-                                    selectedClipIds: s.multiSelectedClipIds,
-                                    playheadSec: s.playheadSec,
-                                    originSec: gestureRef.startSec,
-                                    toggleModifierActive: noSnapKeyHeld(event),
-                                });
-                                publishParamBlockSnapHighlight(result);
-                                return result.sec;
-                            },
-                            minBlockSec: framePeriodMs / 1000,
-                        });
-                        const targetFrame = toFrame(snappedTarget, framePeriodMs);
-                        gestureRef.targetSec = snappedTarget;
-                        gestureRef.targetFrame = targetFrame;
-                        const result = runResizePlan(targetFrame);
-                        if (!result.ok) return;
-                        gestureRef.resizePlan = result.plan;
-                        const previewSpec = buildParamBlockRenderSpec({
-                            blocks: previewSpecBlocks(result.plan),
-                            param: editParam,
-                            valueMin: bounds.min,
-                            valueMax: bounds.max,
-                            valueToY: (value, heightPx) => valueToY(editParam, value, heightPx),
-                            colors: paramBlockSpecColors,
-                            curveOwned: paramBlockViewRef.current !== null,
-                        });
-                        kernelDataRef.current.paramBlocks = previewSpec;
-                        publishParamBlockVisualTransaction("resize", previewSpec);
-                        invalidate();
+                        applyResizeAt(event);
                     },
                     onEnd: (reason) => {
                         const plan = gestureRef.resizePlan;

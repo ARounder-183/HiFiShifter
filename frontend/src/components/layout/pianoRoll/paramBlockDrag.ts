@@ -16,6 +16,7 @@ import {
     type ParamBlockState,
 } from "./paramBlocks";
 import { resolveParamBlockDragCenters } from "./paramBlockDragCenters";
+import { mergeFrameWindows } from "./paramSelection";
 import { ownsParamBlockGesture, type ParamAuthorityWatermark } from "./paramBlockTransaction";
 import { sameParamBlockExternalEpoch, type ParamBlockEpoch } from "./paramBlockVisualTransaction";
 import type { EdgeScrollDriver } from "./kernel/edgeScrollDriver";
@@ -664,7 +665,7 @@ export function beginParamBlockDrag(
                      * 它是降采样的）。逐块取真实帧范围，再按同一帧切分合并成分段；
                      * `sourceAt` 由取回的逐帧值提供，避免把台阶写进原始曲线。
                      */
-                    const ranges = commitBlocks.flatMap((block) =>
+                    const rawRanges = commitBlocks.flatMap((block) =>
                         block.members.map((member) => {
                             const span = paramBlockFrameSpan(
                                 member.startSec,
@@ -677,6 +678,12 @@ export function beginParamBlockDrag(
                             };
                         }),
                     );
+                    /*
+                     * 一个 Loop 块可能有几十个 run；逐 member 取数会产生几十个
+                     * 并发 IPC。先合并重叠 / 相邻窗口，再每个窗口只取一次。
+                     * segments 仍按原 member 边界生成，合并不改变写回语义。
+                     */
+                    const ranges = mergeFrameWindows(rawRanges);
                     const curves = await Promise.all(
                         ranges.map((range) =>
                             fetchFullResCurve({
@@ -685,6 +692,7 @@ export function beginParamBlockDrag(
                                 startFrame: range.startFrame,
                                 endFrame: range.endFrame,
                                 paramView: null,
+                                forceAuthority: true,
                             }),
                         ),
                     );
@@ -777,7 +785,8 @@ export function beginParamBlockDrag(
                     if (commitState !== paramBlockStateRef.current) {
                         // 本地先落位：块的显示中心立刻到位，不必等回包。
                         appliedCommitState = commitState;
-                        paramBlockStateRef.current = commitState;
+                        // 单一写入者：只通过 hook 的 setState 更新；直接写 ref 会让
+                        // hook 的同一性短路吞掉 React 更新。
                         setParamBlockState(commitState);
                         const dragSnapshot = paramBlockDragSnapshotRef.current;
                         if (dragSnapshot !== null) {

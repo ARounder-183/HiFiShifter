@@ -58,6 +58,7 @@ import {
 import { computeEffectiveSnap } from "../../../../utils/timelineSnapping";
 import { resolveClipOriginSnap } from "./clipOriginSnap";
 import { clearTrackDropTarget, publishTrackDropTarget } from "../trackDropTargetHighlight";
+import { resolveTrackDropTarget } from "../trackDropTargetDrag";
 import { store } from "../../../../app/store";
 import { computeSlipWindow, toBoundarySnapClip } from "../hooks/slipWindow";
 import type { TimelineKernelHost } from "../kernel/host/timelineKernelHost";
@@ -745,30 +746,15 @@ export function useTimelineKernelSeekDrag({
              * - 哨兵落点（新建轨道）交给幽灵行虚线，不画已有轨道环；
              * - 吸附命中时换 origin 色，否则 move / copy 各用自己的语义色。
              */
-            const initialTrackById = new Map(
-                origin.participants.map((participant) => [
-                    participant.clipId,
-                    participant.trackId,
-                ]),
-            );
-            const crossTrack = moves.some(
-                (move) => move.trackId !== initialTrackById.get(move.clipId),
-            );
-            const targetTrackIds = [
-                ...new Set(
-                    moves
-                        .map((move) => move.trackId)
-                        .filter((trackId) => trackId !== NEW_TRACK_SENTINEL),
-                ),
-            ];
-            if (dropToNewTrack || !crossTrack || targetTrackIds.length === 0) {
-                clearTrackDropTarget();
-            } else {
-                publishTrackDropTarget({
-                    trackIds: targetTrackIds,
-                    tone: originSnap.active ? "snap" : origin.copyMode ? "copy" : "move",
-                });
-            }
+            const targetDrop = resolveTrackDropTarget({
+                moves,
+                participants: origin.participants,
+                dropToNewTrack,
+                snapActive: originSnap.active,
+                copyMode: origin.copyMode,
+            });
+            if (targetDrop === null) clearTrackDropTarget();
+            else publishTrackDropTarget(targetDrop);
             if (origin.copyMode) {
                 // copy：**原 clip 不动**，只更新 ghost（整组，内容坐标）。
                 // 只在几何真的变化时提交 state：⌘ 拖拽的每一帧都会走到这里，

@@ -87,14 +87,7 @@ const SnapEntry: React.FC<{
     rowLayout?: SnapGuideRowLayout;
     darkMode: boolean;
     dpr: number;
-}> = ({
-    entry,
-    projectTimeX,
-    layerHeight,
-    rowLayout,
-    darkMode,
-    dpr,
-}) => {
+}> = ({ entry, projectTimeX, layerHeight, rowLayout, darkMode, dpr }) => {
     if (entry.markers.length === 0) return null;
     const color = SNAP_GUIDE_KIND_COLOR[entry.kind];
     const timeMarkers = entry.markers.filter((marker) => marker.axis === "time");

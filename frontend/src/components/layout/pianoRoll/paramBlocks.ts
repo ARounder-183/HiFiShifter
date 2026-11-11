@@ -2004,38 +2004,43 @@ export function buildParamBlockDragSegments(args: {
 
     return merged
         .map((span) => {
-            const values: number[] = [];
+            /*
+             * 先把源值采一遍并缓存，再判断整段是否全静音。旧实现为了
+             * `emptyPitch` 先跑一次 Array.from(sourceAt)，随后映射循环再跑
+             * 一次；长块 / 高采样率下这是 O(2n) 加一份临时数组。
+             */
+            const length = span.endFrame - span.startFrame + 1;
+            const sourceValues = new Array<number>(length);
+            let hasAudiblePitch = false;
+            for (let i = 0; i < length; i += 1) {
+                const source = args.sourceAt(span.startFrame + i);
+                sourceValues[i] = source;
+                if (source > 0) hasAudiblePitch = true;
+            }
             const emptyPitch =
-                args.fillEmptyPitch &&
-                args.param === "pitch" &&
-                !Array.from({ length: span.endFrame - span.startFrame + 1 }, (_, i) =>
-                    args.sourceAt(span.startFrame + i),
-                ).some((value) => value > 0);
-            for (let frame = span.startFrame; frame <= span.endFrame; frame += 1) {
-                const source = args.sourceAt(frame);
+                args.fillEmptyPitch === true && args.param === "pitch" && !hasAudiblePitch;
+            const values: number[] = new Array<number>(length);
+            for (let i = 0; i < length; i += 1) {
+                const source = sourceValues[i];
                 if (emptyPitch) {
-                    values.push(
-                        paramBlockDragValue({
-                            param: args.param,
-                            original: args.anchorValue,
-                            anchorValue: args.anchorValue,
-                            valueDelta: args.valueDelta,
-                        }),
-                    );
+                    values[i] = paramBlockDragValue({
+                        param: args.param,
+                        original: args.anchorValue,
+                        anchorValue: args.anchorValue,
+                        valueDelta: args.valueDelta,
+                    });
                     continue;
                 }
                 if (args.param === "pitch" && source <= 0) {
-                    values.push(source);
+                    values[i] = source;
                     continue;
                 }
-                values.push(
-                    paramBlockDragValue({
-                        param: args.param,
-                        original: source,
-                        anchorValue: args.anchorValue,
-                        valueDelta: args.valueDelta,
-                    }),
-                );
+                values[i] = paramBlockDragValue({
+                    param: args.param,
+                    original: source,
+                    anchorValue: args.anchorValue,
+                    valueDelta: args.valueDelta,
+                });
             }
             return { startFrame: span.startFrame, values };
         })
@@ -2490,6 +2495,19 @@ export function averageParamValueInSpan(args: {
         const value = Number(args.values[index]);
         if (!Number.isFinite(value)) continue;
         if (args.isPitch && value <= 0) continue;
+        samples.push(value);
+    }
+    if (samples.length === 0) {
+        /*
+         * 块短于一个采样步长时 firstFrame >= endFrame，严格循环一个样本都取不到。
+         * 回退到块内最近的一个采样（而不是返回 null 让块没有高度）。
+         */
+        const index = Math.max(
+            0,
+            Math.min(args.values.length - 1, Math.round((startFrame - args.startFrame) / stride)),
+        );
+        const value = Number(args.values[index]);
+        if (!Number.isFinite(value) || (args.isPitch && value <= 0)) return null;
         samples.push(value);
     }
     return modeCenterOfValues(samples, {

@@ -21,6 +21,7 @@ import {
     type ParamBlockSourceClip,
 } from "./paramBlockProjection";
 import { flattenGroupChildren, groupCommonValue, groupLeafMembers } from "./paramBlockTypes";
+import { narrowBaseCoverToMembers } from "./paramBlockBaseCover";
 import type {
     BaseCover,
     ParamBlockEditSet,
@@ -131,7 +132,12 @@ function baseCandidates(
                     ...part,
                     syllableId: parts.length > 1 ? `${identity}:part${partIndex}` : identity,
                 };
-                for (const interval of projectTakeSpan(projection, cycleSpan, framePeriodMs)) {
+                for (const interval of projectTakeSpan(
+                    projection,
+                    cycleSpan,
+                    framePeriodMs,
+                    cycleSpan.cycle,
+                )) {
                     if (interval.cycle < cycleSpan.cycle) continue;
                     const intervalSpan: TakeSpan = { ...cycleSpan, cycle: interval.cycle };
                     out.push({
@@ -218,21 +224,38 @@ function projectTakeMembers(
         }
     }
     return {
-        candidates: runs.map((run, index) => ({
-            id: runs.length === 1 ? id : `${id}:${index}`,
-            userBlockId: id,
-            start: run.start,
-            end: run.end,
-            kind,
-            members: run.members,
-            value,
-            transitionWidthSec,
-            rate: run.rate,
-            priority: manual ? 4 : 3,
-            seq: createdSeq,
-            zOrder: 0,
-            ...(baseCover === undefined ? {} : { baseCover }),
-        })),
+        candidates: runs.map((run, index) => {
+            /*
+             * 每个 run 只继承与自身成员相交的那部分 baseCover。否则一个
+             * 多 run / Loop 块会把整份父 cover 复制到每个 run，编辑一个 run
+             * 就抑制整段基块。
+             */
+            const runCover = narrowBaseCoverToMembers(
+                baseCover,
+                run.members.map((member) => ({
+                    clipId: member.clipId,
+                    takeId: member.takeId,
+                    cycle: member.cycle,
+                    sourceStartSec: member.visibleSourceStartSec,
+                    sourceEndSec: member.visibleSourceEndSec,
+                })),
+            );
+            return {
+                id: runs.length === 1 ? id : `${id}:${index}`,
+                userBlockId: id,
+                start: run.start,
+                end: run.end,
+                kind,
+                members: run.members,
+                value,
+                transitionWidthSec,
+                rate: run.rate,
+                priority: manual ? 4 : 3,
+                seq: createdSeq,
+                zOrder: 0,
+                ...(runCover === undefined ? {} : { baseCover: runCover }),
+            };
+        }),
         orphan,
     };
 }

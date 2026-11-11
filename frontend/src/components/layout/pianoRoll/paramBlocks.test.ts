@@ -331,6 +331,31 @@ describe("resolveParamBlockSplitTarget", () => {
 });
 
 describe("buildParamBlockDragSegments", () => {
+    it("samples each merged span once for both empty-pitch detection and mapping", () => {
+        let reads = 0;
+        const segments = buildParamBlockDragSegments({
+            blocks: [
+                {
+                    members: [
+                        { clipId: "clip", startSec: 0, endSec: 0.5 },
+                        { clipId: "clip", startSec: 0.505, endSec: 1 },
+                    ],
+                },
+            ],
+            framePeriodMs: 5,
+            param: "pitch",
+            anchorValue: 60,
+            valueDelta: 1,
+            fillEmptyPitch: true,
+            sourceAt: () => {
+                reads += 1;
+                return 60;
+            },
+        });
+        expect(segments.map((segment) => segment.values.length)).toEqual([100, 99]);
+        expect(reads).toBe(199);
+    });
+
     it("does not write across a one-frame gap between members", () => {
         const segments = buildParamBlockDragSegments({
             blocks: [
@@ -412,7 +437,7 @@ describe("block value sampling on a strided param view", () => {
         expect(average).toBe(25);
     });
 
-    it("does not read a sample outside the block or miss the last one", () => {
+    it("falls back to the nearest sample when the block is shorter than the stride", () => {
         const average = averageParamValueInSpan({
             startSec: 0.006,
             endSec: 0.008,
@@ -423,8 +448,9 @@ describe("block value sampling on a strided param view", () => {
             isPitch: false,
             param: "volume",
         });
-        // No sample falls inside frames 1..1.
-        expect(average).toBeNull();
+        // No sample falls strictly inside frames 1..1; use the nearest grid
+        // sample (frame 2 -> value 20) instead of leaving the block height-less.
+        expect(average).toBe(20);
     });
 
     it("uses the same grid for the host sample mirror", () => {
