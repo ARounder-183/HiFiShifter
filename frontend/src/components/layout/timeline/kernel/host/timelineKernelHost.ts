@@ -84,6 +84,7 @@ import { noteFadeLinePointerDown } from "../../hooks/fadeLineClickGesture";
 import { effectiveFadeSec, hitClipFadeTarget } from "../interaction/fadeTargets";
 import type { FadeContextSide } from "../../FadeContextMenu";
 import { hitOverlapControl } from "../interaction/overlapControls";
+import { resolveOverlapPressTarget } from "../interaction/overlapPress";
 import {
     resolveClipHeaderLayout,
     CLIP_HEADER_RATE_BADGE_ANCHOR_WIDTH_PX,
@@ -109,7 +110,6 @@ import {
     WHEEL_ZOOM_OUT_FACTOR,
 } from "../../constants";
 import {
-    downgradeOverlapHitForPlainLeftPress,
     hitTest,
     type ClipHitRegion,
     type HitTestClip,
@@ -3598,6 +3598,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             headerHeightPx: CLIP_HEADER_HEIGHT,
         });
         if (hit.kind !== "clip" || hit.region === "header") return hit;
+        // SnapOffset 手柄的层级高于重叠区的边缘/淡变控件；重叠解析不能抢走
+        // 重叠区左下角的 ◣ 握把。
+        if (hit.region === "snap-offset-handle") return hit;
 
         // ── 重叠区按位置改写（同轨 ≥ 2 个 clip 才有重叠）──
         // 通用命中取视觉最上层的短片段；重叠区还须提供双方的边缘与淡化控件。
@@ -3632,6 +3635,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 说明：淡变命中（`kind === "fade"`）映射到既有角部区域，复用同一条
             // `clip-fade` 手势——包络线拖拽与角部拖拽在旧实现里是同一个语义（调长度），
             // 只是抓取位置不同。
+            // clip 是控件归属，foregroundClip 是 body 前景；二者不能合并。
+            // 把 clip 换成 foregroundClip 会让 A 的淡出线去拖 B。
             return {
                 kind: "clip",
                 clip: target,
@@ -4098,44 +4103,19 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     function startPrimaryGesture(event: PointerEvent): void {
         /*
-         * 左键的「无修饰键点击」优先归 clip 本体。
+         * 重叠区按下：控件归属与 body 前景分离。
          *
-         * 【为什么】重叠区里 `hitAt` 会按**位置**把命中改写为边缘 / 淡变包络，
-         * 这些控件在无修饰键单击时只改淡变长度或曲率 —— 用户实际感受到的是
-         * 「这段 clip 左键点不动，只能右键」。右键路径（`dispatchContextMenuAt`）
-         * 仍保留淡变专属菜单的优先级；左键只在**确实按住了编辑修饰键**时才让
-         * 控件接管，否则落到 clip 本体（选中 / 拖动）。
+         * hitAt 的 clip 是控件归属（A 的淡出线仍是 A），foregroundClip 只是
+         * body 的视觉最上层。选择目标由 resolveOverlapPressTarget 统一给出：
+         * 控件命中选控件所属 Clip，纯 body 命中选前景 Clip。这样拖 A 的淡出线
+         * 不会移动 B，拖 B 的淡入线也不会移动 A。
          *
-         * 例外：header 控件（静音 / 链 / 共振峰 / 旋钮 / 徽标）仍是独立控件，
-         * 不能因为这条规则被吞进 clip 拖动。它们由 `resolveHeaderControl` 识别。
+         * header 控件（静音 / 链 / 共振峰 / 旋钮 / 徽标）仍由
+         * resolveHeaderControl 单独识别，不进入重叠区解析。
          */
         const rawHit = hitAt(event.clientX, event.clientY);
-        const modifiers = {
-            altKey: event.altKey,
-            ctrlKey: event.ctrlKey,
-            metaKey: event.metaKey,
-            shiftKey: event.shiftKey,
-        };
-        const plainLeftOverlap =
-            rawHit.kind === "clip" &&
-            rawHit.fromOverlapRegion === true &&
-            rawHit.region !== "header" &&
-            !modifiers.altKey &&
-            !modifiers.ctrlKey &&
-            !modifiers.metaKey &&
-            !modifiers.shiftKey;
-        /*
-         * 重叠区普通左键选中视觉最上层的短片段；控件归属仍用于右键与修饰键编辑。
-         */
-        const hitWithTarget =
-            plainLeftOverlap && rawHit.foregroundClip !== undefined
-                ? {
-                      ...rawHit,
-                      clip: rawHit.foregroundClip,
-                      localX: (rawHit.sec - rawHit.foregroundClip.startSec) * scroll.get().pxPerSec,
-                  }
-                : rawHit;
-        const hit = downgradeOverlapHitForPlainLeftPress(hitWithTarget, modifiers);
+        const press = resolveOverlapPressTarget(rawHit);
+        const hit = press.hit;
         if (hit.kind === "clip" && interactions?.geometryReadOnly) {
             const intercepted = interactions.onClipPointerDownIntercept?.({
                 clipId: hit.clip.id,
@@ -4401,7 +4381,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 selectionMods: resolveSelectionMods(event),
             };
             primeSelectionOnPress(
-                hit.clip.id,
+                press.selectionClipId ?? hit.clip.id,
                 hit.region,
                 gesture.kind === "pending-select" ? gesture.selectionMods : null,
                 event.clientX,

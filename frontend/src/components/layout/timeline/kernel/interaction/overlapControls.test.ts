@@ -57,7 +57,7 @@ describe("hitOverlapControl", () => {
     });
 
     it("命中重叠区左缘 → 后一个 clip 的左边缘", () => {
-        // laterStartPx = 200 → 边缘带 [195, 205]
+        // laterStartPx = 200 → 边缘带向 Clip 内部 [200, 210]
         expect(
             hitOverlapControl({
                 clips: makePair(),
@@ -70,7 +70,7 @@ describe("hitOverlapControl", () => {
     });
 
     it("命中重叠区右缘 → 前一个 clip 的右边缘（内核原先完全不可达）", () => {
-        // earlierEndPx = 300 → 边缘带 [295, 305]
+        // earlierEndPx = 300 → 边缘带向 Clip 内部 [290, 300]
         expect(
             hitOverlapControl({
                 clips: makePair(),
@@ -85,6 +85,82 @@ describe("hitOverlapControl", () => {
             // 前一个 clip 的右缘仍是「控件归属」，而普通左键点击要选中后一个。
             laterClipId: "later",
         });
+    });
+
+    it("边缘带只向 Clip 内部延伸（旧实现的 ±5px 会漏掉内部 8px）", () => {
+        const hitAt = (contentX: number) =>
+            hitOverlapControl({
+                clips: makePair(),
+                contentX,
+                localY: 40,
+                pxPerSec: PX_PER_SEC,
+                rowHeight: ROW_HEIGHT,
+            });
+        expect(hitAt(300)).toEqual({
+            kind: "clip-right-edge",
+            clipId: "earlier",
+            laterClipId: "later",
+        });
+        expect(hitAt(292)).toEqual({
+            kind: "clip-right-edge",
+            clipId: "earlier",
+            laterClipId: "later",
+        });
+        expect(hitAt(308)).toBe(null);
+        expect(hitAt(200)).toEqual({
+            kind: "clip-left-edge",
+            clipId: "later",
+            laterClipId: "later",
+        });
+        expect(hitAt(208)).toEqual({
+            kind: "clip-left-edge",
+            clipId: "later",
+            laterClipId: "later",
+        });
+        expect(hitAt(192)).toBe(null);
+    });
+
+    it("极窄 Clip 的边缘带收敛到宽度的 1/3，body 仍可命中", () => {
+        const clips = [
+            clip({ id: "earlier", startSec: 1, lengthSec: 2 }),
+            clip({ id: "later", startSec: 2, lengthSec: 0.06 }),
+        ];
+        // later 宽 6px → 边缘宽 2px；x=203 是其 body 中心。
+        expect(
+            hitOverlapControl({
+                clips,
+                contentX: 202,
+                localY: 40,
+                pxPerSec: PX_PER_SEC,
+                rowHeight: ROW_HEIGHT,
+            }),
+        ).toEqual({ kind: "clip-left-edge", clipId: "later", laterClipId: "later" });
+        expect(
+            hitOverlapControl({
+                clips,
+                contentX: 205,
+                localY: 40,
+                pxPerSec: PX_PER_SEC,
+                rowHeight: ROW_HEIGHT,
+            }),
+        ).toBe(null);
+    });
+
+    it("两个边缘带重叠时前一个 Clip 的右缘优先", () => {
+        const clips = [
+            clip({ id: "earlier", startSec: 1, lengthSec: 2 }),
+            clip({ id: "later", startSec: 2.95, lengthSec: 1 }),
+        ];
+        // later 左缘 295、earlier 右缘 300：x=297 同时落在两条向内带里。
+        expect(
+            hitOverlapControl({
+                clips,
+                contentX: 297,
+                localY: 40,
+                pxPerSec: PX_PER_SEC,
+                rowHeight: ROW_HEIGHT,
+            }),
+        ).toEqual({ kind: "clip-right-edge", clipId: "earlier", laterClipId: "later" });
     });
 
     it("重叠区内部、远离两侧边缘 → 不命中控件（交回通用命中）", () => {

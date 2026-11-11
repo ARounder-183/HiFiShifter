@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-    downgradeOverlapHitForPlainLeftPress,
-    hitTest,
-    type HitTestArgs,
-    type HitTestClip,
-} from "./hitTest";
+import { hitTest, type HitTestArgs, type HitTestClip } from "./hitTest";
 
 /** 构造命中参数：2 条轨道，轨道 A 上三个 clip（含首尾相接）。 */
 function makeArgs(overrides: Partial<HitTestArgs> = {}): HitTestArgs {
@@ -417,50 +412,6 @@ describe("hitTest · clip 内局部坐标", () => {
         if (result.kind !== "clip") return;
         expect(result.localX).toBeCloseTo(100, 5);
         expect(result.localY).toBeCloseTo(15, 5);
-    });
-});
-
-describe("downgradeOverlapHitForPlainLeftPress", () => {
-    const overlapping = {
-        kind: "clip",
-        clip: { id: "later" },
-        region: "fade-in-corner",
-        fromOverlapRegion: true,
-        laterClipId: "later",
-    } as const;
-    const noModifiers = { altKey: false, ctrlKey: false, metaKey: false, shiftKey: false };
-
-    it("无修饰键 + 重叠区控件 → 降级为 body（选中 / 拖动 clip）", () => {
-        const out = downgradeOverlapHitForPlainLeftPress(overlapping, noModifiers);
-        expect(out.region).toBe("body");
-        expect(out.fromOverlapRegion).toBe(false);
-    });
-
-    it("任一编辑修饰键 → 保留控件语义（边缘 / 淡化 / 参数选区）", () => {
-        for (const key of ["altKey", "ctrlKey", "metaKey", "shiftKey"] as const) {
-            const out = downgradeOverlapHitForPlainLeftPress(overlapping, {
-                ...noModifiers,
-                [key]: true,
-            });
-            expect(out.region).toBe("fade-in-corner");
-            expect(out.fromOverlapRegion).toBe(true);
-        }
-    });
-
-    it("header 命中不降级（header 控件有自己的消费语义）", () => {
-        const out = downgradeOverlapHitForPlainLeftPress(
-            { ...overlapping, region: "header" },
-            noModifiers,
-        );
-        expect(out.region).toBe("header");
-    });
-
-    it("非重叠区命中不受影响（普通淡变角手感不变）", () => {
-        const out = downgradeOverlapHitForPlainLeftPress(
-            { ...overlapping, fromOverlapRegion: false },
-            noModifiers,
-        );
-        expect(out.region).toBe("fade-in-corner");
     });
 });
 

@@ -18,17 +18,19 @@
  * 【判定优先级】
  * 与旧实现的 DOM 层叠顺序一致（它**后 push 的在上**，因此这里按同样的顺序
  * 覆盖式赋值，最后命中的获胜）：
- * 1. clip 边缘（10px 带、**整行高**）最优先——淡变包络线的端点常与相邻 clip 的
- *    边缘重合，此时必须判为边缘，否则用户想裁短却改成了淡化长度；
+ * 1. clip 边缘（向 Clip 内部 10px 带、**整行高**）最优先——淡变包络线的端点常与
+ *    相邻 clip 的边缘重合，此时必须判为边缘，否则用户想裁短却改成了淡化长度；
  * 2. 淡变包络线 / 区域边缘竖线其次。
  *
  * 【几何来源】
  * 淡变命中区复用 `fadeTargets`（内部走旧实现的 `buildFadeHitTargets`，与绘制端
- * 逐像素一致）；clip 边缘宽度与旧实现的 `clipEdgeWidthPx` 一致（10px）。
+ * 逐像素一致）；clip 边缘命中带向 Clip 内部延伸，宽度与通用命中共享
+ * `inwardEdgeWidthPx`，不再以边界为中心向两侧各取一半。
  */
 
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "../../constants";
 import { computeCrossfadeGripPoint } from "../../crossfadeGrip";
+import { inwardEdgeWidthPx } from "./edgeGeometry";
 import { effectiveFadeSec, hitClipFadeTarget, type FadeTargetClip } from "./fadeTargets";
 
 /** 重叠区内可命中的控件类型。 */
@@ -90,7 +92,7 @@ export interface OverlapControlArgs {
     readonly localY: number;
     readonly pxPerSec: number;
     readonly rowHeight: number;
-    /** clip 边缘命中带宽度（CSS px）。缺省 10，与旧实现的 `clipEdgeWidthPx` 一致。 */
+    /** clip 边缘命中带宽度（CSS px，向 Clip 内部）。缺省 10。 */
     readonly edgeWidthPx?: number;
 }
 
@@ -198,15 +200,22 @@ export function hitOverlapControl(args: OverlapControlArgs): OverlapControlHit |
                 };
             }
 
-            // 3) clip 边缘（覆盖上面的淡变判定）：整行高、以边界为中心。
-            if (Math.abs(contentX - laterStartPx) <= edgeWidthPx / 2) {
+            // 3) clip 边缘（覆盖上面的淡变判定）：整行高、只向 Clip 内部延伸。
+            // 顺序保持：后一个左缘先赋值，前一个右缘后赋值；极窄重叠时前一个
+            // 右缘优先，与旧交互层的覆盖顺序一致。
+            const laterEdgeWidth = inwardEdgeWidthPx(laterEndPx - laterStartPx, edgeWidthPx);
+            const earlierEdgeWidth = inwardEdgeWidthPx(
+                earlierEndPx - earlierStartPx,
+                edgeWidthPx,
+            );
+            if (contentX >= laterStartPx && contentX - laterStartPx <= laterEdgeWidth) {
                 result = {
                     kind: "clip-left-edge",
                     clipId: later.id,
                     laterClipId: later.id,
                 };
             }
-            if (Math.abs(contentX - earlierEndPx) <= edgeWidthPx / 2) {
+            if (contentX <= earlierEndPx && earlierEndPx - contentX <= earlierEdgeWidth) {
                 result = {
                     kind: "clip-right-edge",
                     clipId: earlier.id,
