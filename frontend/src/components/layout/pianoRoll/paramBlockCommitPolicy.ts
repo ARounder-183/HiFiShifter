@@ -30,10 +30,7 @@ export interface ParamCurveCommitAuthority {
 export function assertCurveCommitAuthority(args: {
     readonly hasPatches: boolean;
     readonly authority?: ParamCurveCommitAuthority | null;
-}): asserts args is {
-    hasPatches: boolean;
-    authority: ParamCurveCommitAuthority | undefined;
-} {
+}): void {
     if (!args.hasPatches) return;
     const revision = args.authority?.expectedCurveRevision;
     if (typeof revision !== "number" || !Number.isFinite(revision)) {
