@@ -57,6 +57,7 @@ import {
 } from "../hooks/autoCrossfade";
 import { computeEffectiveSnap } from "../../../../utils/timelineSnapping";
 import { resolveClipOriginSnap } from "./clipOriginSnap";
+import { clearTrackDropTarget, publishTrackDropTarget } from "../trackDropTargetHighlight";
 import { store } from "../../../../app/store";
 import { computeSlipWindow, toBoundarySnapClip } from "../hooks/slipWindow";
 import type { TimelineKernelHost } from "../kernel/host/timelineKernelHost";
@@ -348,6 +349,9 @@ export function useTimelineKernelSeekDrag({
      */
     const kernelGhostGeometryRef = React.useRef<KernelGhostEntry[] | null>(null);
 
+    // 面板卸载 / 根切换时不能把目标轨道环留在全局 store 里。
+    React.useEffect(() => () => clearTrackDropTarget(), []);
+
     // 交互锁的计数语义（重叠手势不得提前释放）见
     // `useKernelGestureInteractionLock.ts` 的模块注释与同名契约测试。
     const {
@@ -538,6 +542,7 @@ export function useTimelineKernelSeekDrag({
             // copy 模式判定：复用旧实现的函数（含"已配置绑定为准 + 非 macOS 的 Ctrl
             // 回退"）。**单向**——一旦进入 copy 就不再退回移动，避免松手瞬间语义反转。
             if (origin.slipMode) {
+                clearTrackDropTarget();
                 // Alt + 拖 clip 中部 = **slip**（调整内部偏移）：时间轴位置与长度
                 // 都不变，只平移源窗口。逐帧按**增量**应用（用当前 Redux 值 + 增量
                 // 换算），避免累计位移被重复施加导致越拖越快。
@@ -733,6 +738,37 @@ export function useTimelineKernelSeekDrag({
                 dropToNewTrack,
             });
             origin.lastDeltaStartSec = deltaStartSec;
+            /*
+             * 目标轨道描边与吸附线是两条独立通道：
+             * - 只在**真正跨轨**时显示（同一轨道内拖动没有“新轨道”可提示）；
+             * - 多选跨轨时显示本次移动涉及的全部目标轨；
+             * - 哨兵落点（新建轨道）交给幽灵行虚线，不画已有轨道环；
+             * - 吸附命中时换 origin 色，否则 move / copy 各用自己的语义色。
+             */
+            const initialTrackById = new Map(
+                origin.participants.map((participant) => [
+                    participant.clipId,
+                    participant.trackId,
+                ]),
+            );
+            const crossTrack = moves.some(
+                (move) => move.trackId !== initialTrackById.get(move.clipId),
+            );
+            const targetTrackIds = [
+                ...new Set(
+                    moves
+                        .map((move) => move.trackId)
+                        .filter((trackId) => trackId !== NEW_TRACK_SENTINEL),
+                ),
+            ];
+            if (dropToNewTrack || !crossTrack || targetTrackIds.length === 0) {
+                clearTrackDropTarget();
+            } else {
+                publishTrackDropTarget({
+                    trackIds: targetTrackIds,
+                    tone: originSnap.active ? "snap" : origin.copyMode ? "copy" : "move",
+                });
+            }
             if (origin.copyMode) {
                 // copy：**原 clip 不动**，只更新 ghost（整组，内容坐标）。
                 // 只在几何真的变化时提交 state：⌘ 拖拽的每一帧都会走到这里，
@@ -806,6 +842,7 @@ export function useTimelineKernelSeekDrag({
         }) => {
             const origin = kernelDragOriginRef.current;
             kernelDragOriginRef.current = null;
+            clearTrackDropTarget();
             if (origin === null) return;
             // 手势结束：清掉吸附高亮（旧实现同样在收尾清除，否则最后一次的
             // 吸附提示会一直挂在画面上）。
