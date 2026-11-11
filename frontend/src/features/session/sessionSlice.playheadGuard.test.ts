@@ -1158,7 +1158,14 @@ test("features/session/sessionSlice.playheadGuard.test.ts playback start window 
     state = reducer(
         state,
         syncPlaybackState.fulfilled(
-            { ok: true, is_playing: false, target: "original", base_sec: 0, position_sec: 40, duration_sec: 200 },
+            {
+                ok: true,
+                is_playing: false,
+                target: "original",
+                base_sec: 0,
+                position_sec: 40,
+                duration_sec: 200,
+            },
             "req",
             { epoch, dispatchedAtMs: performance.now() },
         ),
@@ -1172,7 +1179,14 @@ test("features/session/sessionSlice.playheadGuard.test.ts playback start window 
     state = reducer(
         state,
         syncPlaybackState.fulfilled(
-            { ok: true, is_playing: true, target: "original", base_sec: 0, position_sec: 50.02, duration_sec: 200 },
+            {
+                ok: true,
+                is_playing: true,
+                target: "original",
+                base_sec: 0,
+                position_sec: 50.02,
+                duration_sec: 200,
+            },
             "req",
             { epoch: state._transportEpoch, dispatchedAtMs: performance.now() },
         ),
@@ -1184,4 +1198,3 @@ test("features/session/sessionSlice.playheadGuard.test.ts playback start window 
         throw new Error("start window should close on the first playing sample");
     }
 });
-

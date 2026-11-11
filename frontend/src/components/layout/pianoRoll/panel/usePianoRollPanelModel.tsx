@@ -152,7 +152,8 @@ import {
     type ParamBlockSpecColors,
 } from "../paramBlockRenderSpec";
 import {
-    adoptParamBlockVisualStructure,
+    adoptParamBlockVisualStructureAfterCreate,
+    adoptParamBlockVisualStructureAfterEdits,
     isParamBlockVisualEpochCurrent,
     sameParamBlockEpochLayout,
     type ParamBlockEpoch,
@@ -192,13 +193,8 @@ import { publishParamBlockFeedback } from "../paramBlockFeedback";
 import { warnDev } from "../devWarn";
 import { backendDetail } from "../../../../services/invoke";
 import { makeLoudnessAmplitudeMap } from "../PianoRollWaveformSurface";
-import { formatDbReadout, resolveParamAxisUnit, supportsParamAxisUnit } from "../paramAxisUnits";
-import {
-    formatPanValue,
-    isPanParam,
-    resolvePanAxisDirection,
-    type PanAxisDirections,
-} from "../paramPan";
+import { resolveParamAxisUnit, supportsParamAxisUnit } from "../paramAxisUnits";
+import { isPanParam, resolvePanAxisDirection, type PanAxisDirections } from "../paramPan";
 import { supportsParamFlip } from "../paramFlip";
 import { useLoudnessCurves, type LoudnessSnapshot } from "../useLoudnessCurves";
 import { createLiveOverrideReader, type LiveOverrideReader } from "../liveLoudnessOverride";
@@ -232,7 +228,6 @@ import {
     buildChildPitchOffsetCentsParam,
     buildChildPitchOffsetDegreesParam,
     buildChildFormantOffsetCentsParam,
-    childPitchOffsetValueToDisplay,
     isChildPitchOffsetCentsParam,
     isChildPitchOffsetDegreesParam,
     isChildFormantOffsetCentsParam,
@@ -260,7 +255,6 @@ import type {
     PianoRollParamBlockSpec,
 } from "../kernel/host/pianoRollKernelData";
 import { resolvePanelRenderViewport } from "../kernel/viewportSource";
-import { NOTE_NAMES_SHARP } from "./panelHelpers";
 import { usePianoRollParamGates } from "./usePianoRollParamGates";
 import { usePianoRollScrollerWiring } from "./usePianoRollScrollerWiring";
 import { usePianoRollSelectionActions } from "./usePianoRollSelectionActions";
@@ -284,15 +278,15 @@ import { useMidiImport } from "./useMidiImport";
 import {
     pitchDeltaToDegreeSteps,
     buildGridSpec as buildGridSpecImpl,
-    valueToY as valueToYImpl,
     yToViewportT as yToViewportTImpl,
-    yToValue as yToValueImpl,
     clampViewport as clampViewportImpl,
     getParamValueBoundsForScrollbar as getParamValueBoundsForScrollbarImpl,
     getCurrentViewportForScrollbar as getCurrentViewportForScrollbarImpl,
     syncVerticalScrollbarForViewport as syncVerticalScrollbarForViewportImpl,
 } from "./sceneBuilders";
 import { usePianoRollViewport } from "./usePianoRollViewport";
+import { usePianoRollProjection } from "./usePianoRollProjection";
+import { useParamValueFormatter } from "./useParamValueFormatter";
 import { useProcessorParams } from "./useProcessorParams";
 
 /**
@@ -792,42 +786,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     const axisPanDirectionToggleAvailable = isPanParam(editParam);
     const axisToggleAvailable = axisUnitToggleAvailable || axisPanDirectionToggleAvailable;
 
-    const formatParamValuePreview = useCallback(
-        (value: number): string => {
-            if (!Number.isFinite(value)) return "";
-            if (isPanParam(editParam)) {
-                return formatPanValue(value, {
-                    left: tf("pan_left"),
-                    center: tf("pan_center"),
-                    right: tf("pan_right"),
-                });
-            }
-            if (editParam === "pitch") {
-                const rounded = Math.round(value);
-                const pitchClass = ((rounded % 12) + 12) % 12;
-                const octave = Math.floor(rounded / 12) - 1;
-                const noteName = `${NOTE_NAMES_SHARP[pitchClass]}${octave}`;
-                const cents = Math.round((value - rounded) * 100);
-                const signedCents = cents >= 0 ? `+${cents}` : `${cents}`;
-                return `${noteName}${signedCents}`;
-            }
-            if (isChildPitchOffsetDegreesParam(editParam)) {
-                const display = childPitchOffsetValueToDisplay(editParam, value);
-                if (Math.abs(display) >= 100) return display.toFixed(1);
-                if (Math.abs(display) >= 10) return display.toFixed(2);
-                return display.toFixed(3);
-            }
-            // 音量 / 动态切到 dB 读法：1× = 0 dB（见 paramAxisUnits）。带 `dB` 后缀
-            // 与倍率读数区分——浮窗有空间写清楚单位，用户才不会把 −6 误读成倍率。
-            if (editParamAxisUnit === "db" && supportsParamAxisUnit(editParam)) {
-                return formatDbReadout(value);
-            }
-            if (Math.abs(value) >= 100) return value.toFixed(1);
-            if (Math.abs(value) >= 10) return value.toFixed(2);
-            return value.toFixed(3);
-        },
-        [editParam, editParamAxisUnit, tf],
-    );
+    const formatParamValuePreview = useParamValueFormatter({
+        editParam,
+        axisUnit: editParamAxisUnit,
+        tf,
+    });
 
     const currentDrawTool = s.drawToolMode;
     const selectToolButtonTitle =
@@ -1718,29 +1681,13 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     // 的自愈互相打架：内核刚写镜像，循环又把镜像读回来当作"权威"重发一次。内核自己
     // 每帧提交、且镜像由内核回写，故该职责整体消失。
 
-    const valueToY = useCallback(
-        (param: ParamName, v: number, h: number) =>
-            valueToYImpl(
-                { paramAxisDirectionsRef, paramViewsRef, pitchViewRef, processorParamsRef },
-                param,
-                v,
-                h,
-            ),
-        [processorParamsRef],
-    );
-
+    const { valueToY, yToValue } = usePianoRollProjection({
+        paramAxisDirectionsRef,
+        paramViewsRef,
+        pitchViewRef,
+        processorParamsRef,
+    });
     const yToViewportT = yToViewportTImpl;
-
-    const yToValue = useCallback(
-        (param: ParamName, y: number, h: number) =>
-            yToValueImpl(
-                { paramAxisDirectionsRef, paramViewsRef, pitchViewRef, processorParamsRef },
-                param,
-                y,
-                h,
-            ),
-        [processorParamsRef],
-    );
 
     function clampViewport(param: ParamName, v: ValueViewport): ValueViewport {
         return clampViewportImpl({ processorParamsRef }, param, v);
@@ -1757,24 +1704,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         );
     }
 
-    /**
-     * 把值域视口同步到竖向滚动位置（值域 → 像素）。
-     *
-     * 流程：钳制视口 → 更新内核数据镜像的值域 → 把 `center` 交给滚动载体。
-     *
-     * 特殊说明 1：滚动载体是内核宿主。像素域恒为 0..1600，映射由
-     * `verticalScrollTopFromCenter` 单一来源保证。宿主内部自带去重，故无需在这里
-     * 再判一次差值。宿主尚未创建时（挂载期）退回原生 scroller，语义一致。
-     *
-     * 特殊说明 2（**必须先刷新镜像的 span**）：竖向缩放（钢琴键区 alt/ctrl+滚轮）
-     * 只改 `span`，而视口存在 **ref** 里——ref 变更不触发 React 渲染，于是「内核数据
-     * 镜像」那个 effect 不会重跑，内核读到的 `valueDomain.span` 仍是旧值。此时
-     * `setValueCenter` 会按**旧 span** 反算像素位置，结果完全错位（实测：缩放后
-     * nativeTop 直接掉到 0 且再也动不了）。因此这里在提交前就地刷新镜像。
-     *
-     * @param param 参数名（决定值域边界）。
-     * @param view 目标值域视口。
-     */
+    /** 值域视口 → 竖向滚动位置；提交前先刷新镜像 span（竖向缩放只改 ref，不触发镜像 effect）。 */
     function syncVerticalScrollbarForViewport(param: ParamName, view: ValueViewport): void {
         return syncVerticalScrollbarForViewportImpl(
             {
@@ -3279,9 +3209,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 tx.curveRevisionCommitted = curveRevision;
             },
             onLocalStructureCommitted: (edits) => {
-                paramBlockVisualTransactionRef.current = adoptParamBlockVisualStructure(
+                paramBlockVisualTransactionRef.current = adoptParamBlockVisualStructureAfterEdits(
                     paramBlockVisualTransactionRef.current,
-                    paramBlockStructureToken(edits),
+                    edits,
                 );
             },
         });
@@ -4927,24 +4857,13 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                     });
                                     if (created.ok) {
                                         setParamBlockState(created.state);
-                                        const structureToken = paramBlockStructureToken(
-                                            created.state.editSet,
-                                        );
                                         paramBlockVisualTransactionRef.current =
-                                            adoptParamBlockVisualStructure(
+                                            adoptParamBlockVisualStructureAfterCreate(
                                                 paramBlockVisualTransactionRef.current,
-                                                structureToken,
+                                                created.state.editSet,
+                                                createId,
+                                                paramBlockResizeRef,
                                             );
-                                        const resizing = paramBlockResizeRef.current;
-                                        if (
-                                            resizing?.createdBlockId === createId &&
-                                            resizing.epoch !== undefined
-                                        ) {
-                                            paramBlockResizeRef.current = {
-                                                ...resizing,
-                                                epoch: { ...resizing.epoch, structureToken },
-                                            };
-                                        }
                                     } else applyParamBlockEditRef.current?.(created);
                                     preserveCreatePreview = created.ok;
                                     /*
@@ -5476,9 +5395,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                             const next: ParamBlockState = { ...state, editSet: plan.edits };
                             setParamBlockState(next);
                             paramBlockVisualTransactionRef.current =
-                                adoptParamBlockVisualStructure(
+                                adoptParamBlockVisualStructureAfterEdits(
                                     paramBlockVisualTransactionRef.current,
-                                    paramBlockStructureToken(next.editSet),
+                                    next.editSet,
                                 );
                             persistParamBlockEdits(next);
                             if (plan.removedIds.includes(gestureRef.blockId)) {

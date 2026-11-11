@@ -94,10 +94,7 @@ import {
 import { buildAxisMarkInstances, resolveAxisKind } from "../scene/axisMarkInstances";
 import { buildKeyboardInstances } from "../scene/keyboardInstances";
 import type { GlyphQuad } from "../../../renderKernel/gl/glyphQuads";
-import {
-    createGlyphSurface,
-    type GlyphSurface,
-} from "./glyphSurface";
+import { createGlyphSurface, type GlyphSurface } from "./glyphSurface";
 import {
     createTimelineAxis,
     playheadLineLeftPx,
@@ -265,10 +262,7 @@ export interface PianoRollKernelHostArgs {
      */
     readonly glSceneEnabled?: boolean;
     /** 测试注入口：按画布上下文创建独立字形表面。 */
-    readonly glyphSurfaceFactory?: (
-        gl: WebGL2RenderingContext,
-        dpr: number,
-    ) => GlyphSurface | null;
+    readonly glyphSurfaceFactory?: (gl: WebGL2RenderingContext, dpr: number) => GlyphSurface | null;
     /**
      * 水平同步偏移（CSS px）：内容层相对绘制区原点的右移量，缺省 0。
      *
@@ -2223,8 +2217,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 mainGlyphSurface?.dispose();
                 mainGlyphSurface = glHandle !== null ? createSurfaceFor(glHandle.gl) : null;
                 axisGlyphSurface?.dispose();
-                axisGlyphSurface =
-                    glAxisHandle !== null ? createSurfaceFor(glAxisHandle.gl) : null;
+                axisGlyphSurface = glAxisHandle !== null ? createSurfaceFor(glAxisHandle.gl) : null;
                 glTextQuads = [];
                 glBlockTextQuads = [];
                 lastKeyboardSignature = "";

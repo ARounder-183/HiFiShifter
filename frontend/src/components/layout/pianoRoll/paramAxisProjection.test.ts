@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { centerForPanDelta, centerForZoomAnchor, isAxisInverted, valueAtViewportT } from "./paramAxisProjection";
+import {
+    centerForPanDelta,
+    centerForZoomAnchor,
+    isAxisInverted,
+    valueAtViewportT,
+} from "./paramAxisProjection";
 
 describe("paramAxisProjection", () => {
     it("only inverts pan when direction is left-top", () => {
@@ -12,10 +17,22 @@ describe("paramAxisProjection", () => {
     it("maps t to values in both directions", () => {
         expect(valueAtViewportT({ param: "pan", directions: {}, t: 0, min: -1, span: 2 })).toBe(1);
         expect(
-            valueAtViewportT({ param: "pan", directions: { pan: "left-top" }, t: 0, min: -1, span: 2 }),
+            valueAtViewportT({
+                param: "pan",
+                directions: { pan: "left-top" },
+                t: 0,
+                min: -1,
+                span: 2,
+            }),
         ).toBe(-1);
         expect(
-            valueAtViewportT({ param: "pan", directions: { pan: "left-top" }, t: 1, min: -1, span: 2 }),
+            valueAtViewportT({
+                param: "pan",
+                directions: { pan: "left-top" },
+                t: 1,
+                min: -1,
+                span: 2,
+            }),
         ).toBe(1);
     });
 
@@ -39,10 +56,19 @@ describe("paramAxisProjection", () => {
     });
 
     it("negates pan delta only for inverted pan", () => {
-        expect(centerForPanDelta({ param: "pan", directions: {}, center: 0, deltaCenter: 0.2 })).toBe(0.2);
         expect(
-            centerForPanDelta({ param: "pan", directions: { pan: "left-top" }, center: 0, deltaCenter: 0.2 }),
+            centerForPanDelta({ param: "pan", directions: {}, center: 0, deltaCenter: 0.2 }),
+        ).toBe(0.2);
+        expect(
+            centerForPanDelta({
+                param: "pan",
+                directions: { pan: "left-top" },
+                center: 0,
+                deltaCenter: 0.2,
+            }),
         ).toBe(-0.2);
-        expect(centerForPanDelta({ param: "volume", directions: {}, center: 0, deltaCenter: 0.2 })).toBe(0.2);
+        expect(
+            centerForPanDelta({ param: "volume", directions: {}, center: 0, deltaCenter: 0.2 }),
+        ).toBe(0.2);
     });
 });

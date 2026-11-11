@@ -290,9 +290,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [transposeDegreesOpen, setTransposeDegreesOpen] = useState(false);
     const [setPitchOpen, setSetPitchOpen] = useState(false);
     const [saveAsDialogOpen, setSaveAsDialogOpen] = useState(false);
-    const [saveAsInitialFormat, setSaveAsInitialFormat] = useState<
-        ProjectSaveFormat | undefined
-    >(undefined);
+    const [saveAsInitialFormat, setSaveAsInitialFormat] = useState<ProjectSaveFormat | undefined>(
+        undefined,
+    );
     const [averageOpen, setAverageOpen] = useState(false);
     const [smoothOpen, setSmoothOpen] = useState(false);
     const [vibratoDialogOpen, setVibratoDialogOpen] = useState(false);

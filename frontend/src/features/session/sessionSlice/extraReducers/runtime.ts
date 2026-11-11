@@ -283,8 +283,7 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
             }
             if (s.silenceDetectOptions != null) {
                 const o = s.silenceDetectOptions as Partial<SilenceDetectSettings>;
-                const method =
-                    o.method === "peak" || o.method === "note_blocks" ? o.method : "rms";
+                const method = o.method === "peak" || o.method === "note_blocks" ? o.method : "rms";
                 state.silenceDetectOptions = { ...state.silenceDetectOptions, ...o, method };
             }
             if (s.search != null) state.searchSettings = normalizeSearchSettings(s.search);

@@ -94,11 +94,7 @@ describe("usePianoRollAxisInteractions tooltip refresh", () => {
     async function render(show: boolean, format: (value: number) => string) {
         await act(async () => {
             root.render(
-                <Harness
-                    show={show}
-                    format={format}
-                    onPreview={(value) => previews.push(value)}
-                />,
+                <Harness show={show} format={format} onPreview={(value) => previews.push(value)} />,
             );
         });
         const axis = container.querySelector<HTMLDivElement>("[data-axis]");
@@ -120,7 +116,9 @@ describe("usePianoRollAxisInteractions tooltip refresh", () => {
     it("recomputes immediately when the formatter changes", async () => {
         const axis = await render(true, (value) => `old:${value.toFixed(2)}`);
         await act(async () => {
-            axis.dispatchEvent(new PointerEvent("pointermove", { clientX: 20, clientY: 50, bubbles: true }));
+            axis.dispatchEvent(
+                new PointerEvent("pointermove", { clientX: 20, clientY: 50, bubbles: true }),
+            );
             await new Promise((resolve) => setTimeout(resolve, 10));
         });
         expect(previews.at(-1)).toEqual({ text: "old:0.50" });
@@ -141,7 +139,9 @@ describe("usePianoRollAxisInteractions tooltip refresh", () => {
     it("clears on pointerleave and when the popup is disabled", async () => {
         const axis = await render(true, (value) => value.toFixed(2));
         await act(async () => {
-            axis.dispatchEvent(new PointerEvent("pointermove", { clientX: 20, clientY: 50, bubbles: true }));
+            axis.dispatchEvent(
+                new PointerEvent("pointermove", { clientX: 20, clientY: 50, bubbles: true }),
+            );
             await new Promise((resolve) => setTimeout(resolve, 10));
         });
         previews = [];
@@ -154,7 +154,9 @@ describe("usePianoRollAxisInteractions tooltip refresh", () => {
         const axis2 = await render(false, (value) => value.toFixed(2));
         previews = [];
         await act(async () => {
-            axis2.dispatchEvent(new PointerEvent("pointermove", { clientX: 20, clientY: 50, bubbles: true }));
+            axis2.dispatchEvent(
+                new PointerEvent("pointermove", { clientX: 20, clientY: 50, bubbles: true }),
+            );
             await new Promise((resolve) => setTimeout(resolve, 10));
         });
         expect(previews).toEqual([]);

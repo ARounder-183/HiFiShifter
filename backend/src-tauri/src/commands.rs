@@ -105,6 +105,8 @@ pub(crate) mod playback;
 mod processor_caps;
 #[path = "commands/project.rs"]
 pub(crate) mod project;
+#[path = "commands/project_save_commands.rs"]
+pub(crate) mod project_save_commands;
 #[path = "commands/project_import.rs"]
 mod project_import;
 #[path = "commands/reaper.rs"]
@@ -717,72 +719,6 @@ pub fn notebook_save_asset_as(
             serde_json::json!({ "ok": false, "error": "panic in command: notebook_save_asset_as" }),
             || notebook::save_asset_as(state, asset_id, suggested_name),
         )
-    }
-}
-
-/// 「另存为」：rfd 对话框（阻塞等待用户选择）+ 选定路径后的完整落盘，
-/// 后者可能包含数 GB 媒体的 zip 压缩 —— 与 `save_project` 同样必须在阻塞
-/// 线程池执行（见其注释）。
-#[tauri::command(rename_all = "camelCase")]
-pub async fn save_project_as(
-    app: tauri::AppHandle,
-    window: Window,
-    notes_markdown: Option<String>,
-    format: Option<String>,
-) -> serde_json::Value {
-    match tauri::async_runtime::spawn_blocking(move || {
-        let state: State<'_, AppState> = app.state();
-        project::save_project_as(state, window, format, notes_markdown)
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => serde_json::json!({
-            "ok": false,
-            "error": format!("Failed to join save-as task: {error}"),
-        }),
-    }
-}
-
-/// 保存到指定路径（带版本冲突检测）；force=true 表示用户已在冲突对话框中
-/// 确认"继续保存"。
-///
-/// zip 归档保存会逐一压缩复制全部引用媒体（可能数 GB），普通保存也有整段
-/// JSON 序列化 + 磁盘写入，必须在阻塞线程池执行，避免冻结 UI 主线程。
-/// 只打开原生保存对话框，格式由应用内先选定；返回路径，不写文件。
-#[tauri::command(rename_all = "camelCase")]
-pub fn pick_project_save_path(
-    state: State<'_, AppState>,
-    format: String,
-    default_name: Option<String>,
-) -> serde_json::Value {
-    common::guard_command(
-        "pick_project_save_path",
-        serde_json::json!({ "ok": false, "error": "panic in command: pick_project_save_path" }),
-        || project::pick_project_save_path(state, format, default_name),
-    )
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub async fn save_project_to_path(
-    app: tauri::AppHandle,
-    window: Window,
-    project_path: String,
-    notes_markdown: Option<String>,
-    force: Option<bool>,
-    format: Option<String>,
-) -> serde_json::Value {
-    match tauri::async_runtime::spawn_blocking(move || {
-        let state: State<'_, AppState> = app.state();
-        project::save_project_to_path(state, window, project_path, notes_markdown, force, format)
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => serde_json::json!({
-            "ok": false,
-            "error": format!("Failed to join save task: {error}"),
-        }),
     }
 }
 

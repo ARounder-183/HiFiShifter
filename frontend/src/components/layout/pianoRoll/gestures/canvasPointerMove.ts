@@ -22,11 +22,13 @@ export interface HoverPreviewDeps {
     readonly hoverPreviewNearCurveRef: { current: boolean };
     readonly lastPointerClientRef: { current: { x: number; y: number } | null };
     readonly onParamValuePreviewChange:
-        | ((value: {
-              clientX: number;
-              clientY: number;
-              value: number;
-          } | null) => void)
+        | ((
+              value: {
+                  clientX: number;
+                  clientY: number;
+                  value: number;
+              } | null,
+          ) => void)
         | undefined;
     readonly paramValuePopupEnabled?: boolean;
 }

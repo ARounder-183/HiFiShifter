@@ -16,7 +16,8 @@ export const jaJP = {
     save_as_format_zip: "アーカイブ ZIP",
     save_as_desc_hshp: "編集可能。外部メディアを参照するためファイルは小さくなります。",
     save_as_desc_json: "読めるテキスト形式。HSHP より大きく、調査や受け渡しに向きます。",
-    save_as_desc_zip: "配布・バックアップ用。参照メディアを内包するため、開く前に展開してください。",
+    save_as_desc_zip:
+        "配布・バックアップ用。参照メディアを内包するため、開く前に展開してください。",
     save_as_continue: "続行",
     save_as_format_mismatch: "選択した形式と拡張子が一致しません。",
     menu_recent_projects: "最近のプロジェクト",

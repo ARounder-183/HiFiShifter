@@ -109,11 +109,7 @@ import {
     WHEEL_ZOOM_IN_FACTOR,
     WHEEL_ZOOM_OUT_FACTOR,
 } from "../../constants";
-import {
-    hitTest,
-    type ClipHitRegion,
-    type HitTestClip,
-} from "../interaction/hitTest";
+import { hitTest, type ClipHitRegion, type HitTestClip } from "../interaction/hitTest";
 import type { SeekGesturePhase } from "../interaction/seekGesture";
 import {
     resolveDragDelta,

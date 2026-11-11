@@ -172,57 +172,67 @@ export const SilenceDetectionDialog: React.FC<{
 
                 {options.method !== "note_blocks" ? (
                     <>
-                <div
-                    data-tooltip={resetHint}
-                    onDoubleClick={() =>
-                        update({ thresholdDb: SILENCE_DETECT_DEFAULTS.thresholdDb })
-                    }
-                >
-                    <AppField label={tf("silence_threshold")}>
-                        <Flex align="center" gap="2">
-                            <AppSlider
-                                value={options.thresholdDb}
-                                unit="levelDb"
-                                min={-96}
-                                max={-6}
-                                disabled={options.adaptive}
-                                ariaLabel={tf("silence_threshold")}
-                                onChange={(next) => update({ thresholdDb: next })}
-                            />
-                            <AppSliderReadout>
-                                {options.adaptive
-                                    ? tf("silence_adaptive_short")
-                                    : `${Math.round(options.thresholdDb)} dB`}
-                            </AppSliderReadout>
-                        </Flex>
-                    </AppField>
-                </div>
+                        <div
+                            data-tooltip={resetHint}
+                            onDoubleClick={() =>
+                                update({ thresholdDb: SILENCE_DETECT_DEFAULTS.thresholdDb })
+                            }
+                        >
+                            <AppField label={tf("silence_threshold")}>
+                                <Flex align="center" gap="2">
+                                    <AppSlider
+                                        value={options.thresholdDb}
+                                        unit="levelDb"
+                                        min={-96}
+                                        max={-6}
+                                        disabled={options.adaptive}
+                                        ariaLabel={tf("silence_threshold")}
+                                        onChange={(next) => update({ thresholdDb: next })}
+                                    />
+                                    <AppSliderReadout>
+                                        {options.adaptive
+                                            ? tf("silence_adaptive_short")
+                                            : `${Math.round(options.thresholdDb)} dB`}
+                                    </AppSliderReadout>
+                                </Flex>
+                            </AppField>
+                        </div>
 
-                <label
-                    className="flex items-center gap-2 text-qt-sm"
-                    data-tooltip={resetHint}
-                    onDoubleClick={() => update({ adaptive: SILENCE_DETECT_DEFAULTS.adaptive })}
-                >
-                    <Checkbox
-                        checked={options.adaptive}
-                        onCheckedChange={(v) => update({ adaptive: v === true })}
-                    />
-                    {tf("silence_adaptive")}
-                </label>
+                        <label
+                            className="flex items-center gap-2 text-qt-sm"
+                            data-tooltip={resetHint}
+                            onDoubleClick={() =>
+                                update({ adaptive: SILENCE_DETECT_DEFAULTS.adaptive })
+                            }
+                        >
+                            <Checkbox
+                                checked={options.adaptive}
+                                onCheckedChange={(v) => update({ adaptive: v === true })}
+                            />
+                            {tf("silence_adaptive")}
+                        </label>
                     </>
                 ) : (
-                    <Flex direction="column" gap="1" className="rounded border border-qt-border p-2">
+                    <Flex
+                        direction="column"
+                        gap="1"
+                        className="rounded border border-qt-border p-2"
+                    >
                         <span className="hs-type-muted">{tf("silence_note_blocks_source")}</span>
                         {reports.some((r) => r.message === "note_blocks_not_ready") ? (
                             <button
                                 type="button"
                                 className="text-left text-qt-xs text-qt-accent underline"
                                 onClick={() => {
-                                    const ids = [...new Set(
-                                        reports
-                                            .filter((r) => r.message === "note_blocks_not_ready")
-                                            .map((r) => r.clipId),
-                                    )];
+                                    const ids = [
+                                        ...new Set(
+                                            reports
+                                                .filter(
+                                                    (r) => r.message === "note_blocks_not_ready",
+                                                )
+                                                .map((r) => r.clipId),
+                                        ),
+                                    ];
                                     void (async () => {
                                         setAnalyzing(true);
                                         try {

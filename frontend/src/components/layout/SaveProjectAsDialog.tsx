@@ -2,10 +2,7 @@ import { useEffect, useState } from "react";
 import { Flex } from "@radix-ui/themes";
 
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
-import {
-    persistUiSettings,
-    setProjectLastSaveFormat,
-} from "../../features/session/sessionSlice";
+import { persistUiSettings, setProjectLastSaveFormat } from "../../features/session/sessionSlice";
 import { saveProjectToPathRemote } from "../../features/session/thunks/projectThunks";
 import { webApi } from "../../services/webviewApi";
 import type { ProjectSaveFormat } from "../../services/api/project";
@@ -50,7 +47,7 @@ export function SaveProjectAsDialog({ open, onOpenChange, initialFormat }: Props
         setSaving(false);
     }, [open, initialFormat, project.lastSaveFormat]);
 
-    const confirm = async () => {
+    const confirmSave = async () => {
         if (saving) return;
         setError(null);
         dispatch(setProjectLastSaveFormat(format));
@@ -70,9 +67,7 @@ export function SaveProjectAsDialog({ open, onOpenChange, initialFormat }: Props
         } catch (reason) {
             const message = typeof reason === "string" ? reason : "save_project_as_failed";
             setError(
-                message === "format_extension_mismatch"
-                    ? tf("save_as_format_mismatch")
-                    : message,
+                message === "format_extension_mismatch" ? tf("save_as_format_mismatch") : message,
             );
         } finally {
             setSaving(false);
@@ -96,7 +91,7 @@ export function SaveProjectAsDialog({ open, onOpenChange, initialFormat }: Props
                     label: tf("save_as_continue"),
                     intent: "primary",
                     disabled: saving,
-                    onClick: () => void confirm(),
+                    onClick: () => void confirmSave(),
                 },
             ]}
         >
@@ -119,9 +114,7 @@ export function SaveProjectAsDialog({ open, onOpenChange, initialFormat }: Props
                             }}
                         >
                             <div style={{ fontWeight: 600 }}>{tf(entry.titleKey)}</div>
-                            <div style={{ opacity: 0.8, marginTop: 4 }}>
-                                {tf(entry.descKey)}
-                            </div>
+                            <div style={{ opacity: 0.8, marginTop: 4 }}>{tf(entry.descKey)}</div>
                         </AppButton>
                     );
                 })}

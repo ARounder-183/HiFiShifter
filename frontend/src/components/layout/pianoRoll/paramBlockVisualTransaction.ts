@@ -8,6 +8,8 @@
  * `paramBlockStructureToken`.
  */
 import type { PianoRollParamBlockSpec } from "./kernel/host/pianoRollKernelData";
+import { paramBlockStructureToken } from "./paramBlockStructureToken";
+import type { ParamBlockEditSet } from "./paramBlockTypes";
 
 export interface ParamBlockEpoch {
     readonly rootTrackId: string | null;
@@ -130,6 +132,32 @@ export function adoptParamBlockVisualStructure(
         ...tx,
         epoch: { ...tx.epoch, structureToken },
     };
+}
+
+/** 本地结构提交后推进事务与新建预览的 structureToken。 */
+export function adoptParamBlockVisualStructureAfterCreate(
+    tx: ParamBlockVisualTransaction | null,
+    edits: ParamBlockEditSet,
+    createId: string,
+    resizeRef: {
+        current: { createdBlockId?: string; epoch?: ParamBlockEpoch } | null;
+    },
+): ParamBlockVisualTransaction | null {
+    const structureToken = paramBlockStructureToken(edits);
+    const next = adoptParamBlockVisualStructure(tx, structureToken);
+    const resizing = resizeRef.current;
+    if (resizing?.createdBlockId === createId && resizing.epoch !== undefined) {
+        resizeRef.current = { ...resizing, epoch: { ...resizing.epoch, structureToken } };
+    }
+    return next;
+}
+
+/** 本地 resize / transition 提交后只推进 structureToken。 */
+export function adoptParamBlockVisualStructureAfterEdits(
+    tx: ParamBlockVisualTransaction | null,
+    edits: ParamBlockEditSet,
+): ParamBlockVisualTransaction | null {
+    return adoptParamBlockVisualStructure(tx, paramBlockStructureToken(edits));
 }
 
 export function shouldUseParamBlockVisualTransaction(

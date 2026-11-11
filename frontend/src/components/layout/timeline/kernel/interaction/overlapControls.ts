@@ -204,10 +204,7 @@ export function hitOverlapControl(args: OverlapControlArgs): OverlapControlHit |
             // 顺序保持：后一个左缘先赋值，前一个右缘后赋值；极窄重叠时前一个
             // 右缘优先，与旧交互层的覆盖顺序一致。
             const laterEdgeWidth = inwardEdgeWidthPx(laterEndPx - laterStartPx, edgeWidthPx);
-            const earlierEdgeWidth = inwardEdgeWidthPx(
-                earlierEndPx - earlierStartPx,
-                edgeWidthPx,
-            );
+            const earlierEdgeWidth = inwardEdgeWidthPx(earlierEndPx - earlierStartPx, edgeWidthPx);
             if (contentX >= laterStartPx && contentX - laterStartPx <= laterEdgeWidth) {
                 result = {
                     kind: "clip-left-edge",

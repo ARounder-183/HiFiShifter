@@ -278,7 +278,8 @@ export function resolveAxisKind(param: string): AxisKind {
 export function buildAxisMarkInstances(
     args: AxisMarkArgs,
 ): (AxisMarkInstance & { readonly lineOnly: boolean })[] {
-    const { kind, view, heightPx, axisWidthPx, dpr, valueToY, paramName, axisUnit, panLabels } = args;
+    const { kind, view, heightPx, axisWidthPx, dpr, valueToY, paramName, axisUnit, panLabels } =
+        args;
     if (!Number.isFinite(view.span) || !Number.isFinite(view.center)) return [];
     if (!Number.isFinite(heightPx) || !Number.isFinite(axisWidthPx)) return [];
     if (!Number.isFinite(dpr) || dpr <= 0) return [];

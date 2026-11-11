@@ -114,9 +114,13 @@ describe("paramBlockComposition", () => {
         ]);
         expect(ranges(ba)).toEqual(ranges(ab));
         expect(ab.layoutKey).toBe(ba.layoutKey);
-        expect(ab.blocks.some((block) => block.startFrame === 40 && block.endFrameExclusive === 140)).toBe(true);
+        expect(
+            ab.blocks.some((block) => block.startFrame === 40 && block.endFrameExclusive === 140),
+        ).toBe(true);
         for (let i = 1; i < ab.blocks.length; i += 1) {
-            expect(ab.blocks[i - 1]!.endFrameExclusive).toBeLessThanOrEqual(ab.blocks[i]!.startFrame);
+            expect(ab.blocks[i - 1]!.endFrameExclusive).toBeLessThanOrEqual(
+                ab.blocks[i]!.startFrame,
+            );
         }
     });
 
@@ -162,9 +166,13 @@ describe("paramBlockComposition", () => {
             5,
         );
         for (let i = 1; i < view.blocks.length; i += 1) {
-            expect(view.blocks[i - 1]!.endFrameExclusive).toBeLessThanOrEqual(view.blocks[i]!.startFrame);
+            expect(view.blocks[i - 1]!.endFrameExclusive).toBeLessThanOrEqual(
+                view.blocks[i]!.startFrame,
+            );
         }
-        expect(view.blocks.some((block) => block.startFrame === 80 && block.endFrameExclusive === 160)).toBe(true);
+        expect(
+            view.blocks.some((block) => block.startFrame === 80 && block.endFrameExclusive === 160),
+        ).toBe(true);
     });
 
     it("hashes clip-level analysis and duration, but not the edit revision", () => {

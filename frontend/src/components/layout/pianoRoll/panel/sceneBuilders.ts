@@ -200,10 +200,7 @@ export function buildGridSpec(
         ...(supportsParamAxisUnit(editParam) ? { axisUnit: editParamAxisUnit } : {}),
         ...(isPanParam(editParam)
             ? {
-                  axisDirection: resolvePanAxisDirection(
-                      paramAxisDirectionsRef.current,
-                      editParam,
-                  ),
+                  axisDirection: resolvePanAxisDirection(paramAxisDirectionsRef.current, editParam),
                   panLabels: {
                       left: tf("pan_left"),
                       center: tf("pan_center"),

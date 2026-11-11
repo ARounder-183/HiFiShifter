@@ -230,7 +230,8 @@ export interface KeyboardGeometrySignatureArgs {
     /** pan 纵轴方向；方向变化会重建刻度文字。 */
     readonly axisDirection?: string | undefined;
     /** pan 刻度文本（左/中/右）。 */
-    readonly panLabels?: { readonly left: string; readonly center: string; readonly right: string } | undefined;
+    readonly panLabels?:
+        { readonly left: string; readonly center: string; readonly right: string } | undefined;
     readonly view: LiveGridView;
     readonly absMin: number;
     readonly absMax: number;

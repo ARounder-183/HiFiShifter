@@ -1709,17 +1709,17 @@ function AppInner() {
     const discardUnsavedAndContinue = useCallback(() => {
         void executePendingUnsavedAction().catch(() => {});
     }, [executePendingUnsavedAction]);
-
     const saveUnsavedAndContinue = useCallback(() => {
         void (async () => {
             try {
-                const result = (
+                const result = (await (
                     projectPath
-                        ? await dispatch(saveProjectRemote()).unwrap()
-                        : await dispatch(saveProjectAsRemote(undefined)).unwrap()
-                ) as { canceled?: boolean; versionConflict?: boolean };
-                // 取消 或 命中"目标版本不一致"确认框：暂不执行后续操作，
-                // 等待用户完成保存（继续保存成功后由后续入口继续，或重新操作）。
+                        ? dispatch(saveProjectRemote())
+                        : dispatch(saveProjectAsRemote(undefined))
+                ).unwrap()) as {
+                    canceled?: boolean;
+                    versionConflict?: boolean;
+                };
                 if (result?.canceled || result?.versionConflict) {
                     return;
                 }
@@ -1776,12 +1776,7 @@ function AppInner() {
         const path = saveVersionConflictDialog?.path;
         dispatch(closeSaveVersionConflictDialog());
         if (!path) return;
-        void dispatch(
-            saveProjectToPathRemote({
-                path,
-                format: saveVersionConflictDialog?.format,
-            }),
-        );
+        void dispatch(saveProjectToPathRemote({ path, format: saveVersionConflictDialog?.format }));
     }, [dispatch, saveVersionConflictDialog?.path, saveVersionConflictDialog?.format]);
 
     const handleNewProject = useCallback(() => {

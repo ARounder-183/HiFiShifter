@@ -151,10 +151,7 @@ export const saveProjectRemote = createAsyncThunk(
 
         const res: SaveProjectResponse = hasPath
             ? await webApi.saveProject(notesMarkdown)
-            : await webApi.saveProjectAs(
-                  notesMarkdown,
-                  state.session.project.lastSaveFormat,
-              );
+            : await webApi.saveProjectAs(notesMarkdown, state.session.project.lastSaveFormat);
         // 目标已存在版本不一致的工程文件：作为 fulfilled 返回，由 reducer 弹出确认框。
         if (res && (res as SaveVersionConflict).versionConflict) {
             return res as SaveVersionConflict;

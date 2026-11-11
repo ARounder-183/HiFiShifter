@@ -15,8 +15,10 @@ export const enUS = {
     save_as_format_json: "JSON Project",
     save_as_format_zip: "Archive Zip",
     save_as_desc_hshp: "Editable project; references external media and stays small.",
-    save_as_desc_json: "Readable text project; larger than HSHP, useful for inspection and exchange.",
-    save_as_desc_zip: "Distribution/backup archive; embeds referenced media. Extract before opening.",
+    save_as_desc_json:
+        "Readable text project; larger than HSHP, useful for inspection and exchange.",
+    save_as_desc_zip:
+        "Distribution/backup archive; embeds referenced media. Extract before opening.",
     save_as_continue: "Continue",
     save_as_format_mismatch: "Format does not match the file extension.",
     menu_recent_projects: "Recent",

@@ -25,7 +25,17 @@ function fakeProgram() {
 }
 
 function fakeGlyphs() {
-    const quad = { x: 1, y: 2, w: 3, h: 4, u0: 0, v0: 0, u1: 1, v1: 1, rgba: [1, 1, 1, 1] } as GlyphQuad;
+    const quad = {
+        x: 1,
+        y: 2,
+        w: 3,
+        h: 4,
+        u0: 0,
+        v0: 0,
+        u1: 1,
+        v1: 1,
+        rgba: [1, 1, 1, 1],
+    } as GlyphQuad;
     const build = vi.fn(() => [quad]);
     const consumeDirtyPages = vi.fn(() => [0]);
     const readPage = vi.fn(() => new Uint8ClampedArray(16));

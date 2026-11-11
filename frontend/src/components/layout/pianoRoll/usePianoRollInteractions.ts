@@ -112,10 +112,7 @@ import { createTimelineAxis, secToViewportPx } from "../renderKernel/timelineAxi
 import { handleCanvasPointerDown } from "./gestures/canvasPointerDown";
 import type { CanvasCursor } from "./gestures/pointerSupport";
 import { handleScrollerWheel } from "./gestures/scrollerWheel";
-import {
-    handleCanvasHoverPreview,
-    handleCanvasPointerMove,
-} from "./gestures/canvasPointerMove";
+import { handleCanvasHoverPreview, handleCanvasPointerMove } from "./gestures/canvasPointerMove";
 import { handleRulerPointerDown } from "./gestures/rulerPointerDown";
 import { handleScrollerKeyDown } from "./gestures/scrollerKeyDown";
 
