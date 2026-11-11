@@ -102,11 +102,9 @@ import { normalizeCssColor } from "../colors";
 import { parseRgbaColor } from "../../timeline/runtime/timelineClipGlRenderer";
 import {
     EMPTY_PARAM_BLOCK_STATE,
-    averageParamValueInSpan,
     canGroupParamBlocks,
     clearParamBlockValues,
     deleteParamBlocks,
-    paramBlockCursorForHover,
     paramBlockEdgeCandidates,
     hitTestParamBlockEdges,
     hitTestParamBlockTransitionHandles,
@@ -151,7 +149,6 @@ import {
 import {
     isParamBlockVisualEpochCurrent,
     sameParamBlockEpochLayout,
-    shouldUseParamBlockVisualTransaction,
     type ParamBlockEpoch,
     type ParamBlockVisualTransaction,
     type ParamBlockVisualTransactionKind,
@@ -256,6 +253,14 @@ import { usePianoRollScrollerWiring } from "./usePianoRollScrollerWiring";
 import { usePianoRollSelectionActions } from "./usePianoRollSelectionActions";
 import { useTimelineDisplayControls } from "./useTimelineDisplayControls";
 import { buildToolIcons } from "./toolIcons";
+import { handleParamBlockHover } from "./paramBlockHover";
+import { useParamBlockEditOpChannel } from "./useParamBlockEditOpChannel";
+import { useParamBlockRenderSpec, type ParamBlockResizePreview } from "./useParamBlockRenderSpec";
+import {
+    runParamBlockMenuOp,
+    type ParamBlockMenuOp,
+    type ParamBlockOpHandlers,
+} from "./paramBlockEditOps";
 import { usePianoRollEditCommands } from "./usePianoRollEditCommands";
 import { usePianoRollEditSession } from "./usePianoRollEditSession";
 import { usePianoRollFrameAssembly } from "./usePianoRollFrameAssembly";
@@ -2349,41 +2354,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      * 右块目标值；左块及其左侧帧始终不写。
      */
     /** 本次手势是否是拖拽块边缘（纵向拖动不启动）。 */
-    const paramBlockResizeRef = useRef<{
-        readonly blockId: string;
-        readonly edge: "left" | "right";
-        readonly pointerClientX: number;
-        readonly startSec: number;
-        readonly endSec: number;
-        readonly neighborStartSec: number | null;
-        readonly neighborEndSec: number | null;
-        readonly resizeCandidates: readonly ParamBlock[];
-        /** 手势起点的完整块几何；每帧从它重新投影，已删除块不会永久丢失。 */
-        readonly baseBlockSpans: readonly {
-            readonly id: string;
-            readonly startSec: number;
-            readonly endSec: number;
-            readonly selected?: boolean;
-        }[];
-        /** 新建块预览的冻结块集；提交后 React 派生变化不能污染预览。 */
-        readonly createBaseBlocks?: PianoRollParamBlockSpec["blocks"];
-        readonly createdBlockId?: string;
-        /** 手势起点 epoch；外部历史 / 布局变化后预览立即失效。 */
-        readonly epoch?: ParamBlockEpoch;
-        /** 自身提交产生的 edit revision；外部结构编辑不会写它。 */
-        ownedEditRevision?: number | null;
-        /** 手势起点的帧周期；提交与 minBlockSec 都按它折算，不受回包影响。 */
-        readonly framePeriodMsBasis?: number;
-        targetSec: number;
-        targetFrame: number;
-        /** 本帧完整伸缩计划；预览 / 宿主刷新 / 提交共用。 */
-        resizePlan: ParamBlockGesturePlan | null;
-        /** 手势起点左右块的代表值/高度；仅用于锁定预览，不提交。 */
-        readonly displayCenterValue?: number | null;
-        readonly displayHeightPx?: number | null;
-        /** 新建块的实时纵向值（只用于 `__create__` 预览）。 */
-        readonly value?: number | null;
-    } | null>(null);
+    const paramBlockResizeRef = useRef<ParamBlockResizePreview | null>(null);
     /**
      * 新建块松手后的交接。预览保持到 React 块记录与本轮权威曲线刷新都落地，
      * 然后跨越一帧再撤下，避免“预览 -> 空一帧 -> 正式块”闪烁。
@@ -2430,7 +2401,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     /** Shift 范围选择的锚点；不进入 Redux / undo / 持久化。 */
     const paramBlockAnchorRef = useRef<ParamBlockSelectionAnchor | null>(null);
     const hoveredParamBlockIdRef = useRef<string | null>(null);
-    const hoveredTransitionIdRef = useRef<string | null>(null);
+    const hoveredTransitionLeftIdRef = useRef<string | null>(null);
     const paramBlockDoubleClickTokenRef = useRef(0);
     // Stable callback that delegates to the latest handleEditOp via ref
     const stableEditAction = useCallback((op: string) => {
@@ -2552,6 +2523,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     const restoreParamBlocksRef = useRef<(() => void) | null>(null);
     const restoreGameParamBlocksRef = useRef<(() => void) | null>(null);
     const normalizeSelectedParamBlockPitchRef = useRef<(() => void) | null>(null);
+    const createParamBlocksFromSelectionRef = useRef<(() => void) | null>(null);
     /**
      * 正在拖动的块几何快照。
      *
@@ -5917,6 +5889,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         setParamBlockState,
         tf,
     ]);
+    useLatestRefValue(createParamBlocksFromSelectionRef, createParamBlocksFromSelection);
 
     const deleteSelectedParamBlocks = useCallback(() => {
         if (!requireBlockPersistenceReady()) return;
@@ -6501,93 +6474,21 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         ],
     );
     const onCanvasPointerMoveForBlocks = useCallback(
-        (event: React.PointerEvent<HTMLCanvasElement>) => {
-            if (!paramBlockToolActive) return false;
-            if (event.buttons !== 0) {
-                // 手势期间保持拖动光标；由 pointerup 的默认光标接替。
-                setCanvasCursor(
-                    paramBlockResizeRef.current?.blockId === "__create__"
-                        ? "crosshair"
-                        : "grabbing",
-                );
-                return true;
-            }
-            const rect = event.currentTarget.getBoundingClientRect();
-            const localX = event.clientX - rect.left;
-            const localY = event.clientY - rect.top;
-            const axis = hostRef.current?.getAxis();
-            if (axis === undefined) return false;
-            const sec = viewportPxToSec(axis, localX);
-            const framedHits = hostRef.current?.getParamBlockHitRects() ?? [];
-            const edgeCandidateIds = new Set(
-                paramBlockEdgeCandidates(paramBlocksWithValues).map((block) => block.id),
-            );
-            const secToX = (value: number) => value * axis.pxPerSec - axis.scrollLeftPx;
-            const transition = hitTestParamBlockTransitionHandles({
-                // 手柄可见时即可抓住；首次 hover 不依赖块已选中。
-                blocks: framedHits,
-                clientX: localX,
-                localY,
-                secToX,
-                outsetPx: PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_X_PX,
-                outsetYPx: PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX,
-            });
-            if (transition !== null) {
-                setCanvasCursor(paramBlockCursorForHover("transition"));
-                hoveredParamBlockIdRef.current = transition.leftId;
-                hoveredTransitionIdRef.current = transition.leftId;
-                return true;
-            }
-            const hit = hitTestParamBlocks({
-                blocks: framedHits,
-                sec,
-                localY,
-                slopPx: paramBlockHitSlopPx,
-            });
-            if (hit === null) return false;
-            const block = paramBlocksWithValues.find((item) => item.id === hit.id);
-            if (block === undefined) return false;
-            const edge = hitTestParamBlockEdges({
-                blocks: framedHits.filter((rect) => edgeCandidateIds.has(rect.id)),
-                clientX: localX,
-                localY,
-                secToX,
-                hitPx: 8,
-            });
-            /* 手柄在右边缘外侧上方，已在上面优先处理；这里只剩边缘与块体。 */
-            setCanvasCursor(
-                paramBlockCursorForHover(
-                    edge !== null ? (edge.edge === "left" ? "left-edge" : "right-edge") : "body",
-                ),
-            );
-            /*
-             * 悬停状态只用于光标与局部强调；它不重建块数据（`drawParamBlocks` 在
-             * 绘制期把 hovered 叠到 spec 上），只标脏重绘一帧。
-             *
-             * 【为什么必须真的写】过渡手柄的"可见即可抓"判据是 `selected || hovered`。
-             * 旧实现把 hovered 写死成 null，于是**只有已选中的块**才抓得住手柄，
-             * 而光标却按 hover 显示成 `ew-resize` —— 用户看到"光标说能拖、按下去
-             * 却拖不动"。这条判据现在由真实命中提供。
-             */
-            const nextHoverBlockId = hit.id;
-            const nextTransitionId = null;
-            if (
-                hoveredParamBlockIdRef.current !== nextHoverBlockId ||
-                hoveredTransitionIdRef.current !== nextTransitionId
-            ) {
-                /*
-                 * Hover is computed from the **host's frame geometry**, while
-                 * `invalidateParamBlockSpec()` rebuilds from React state. The two
-                 * can disagree for a frame (selection commit is async), and the
-                 * rebuilt spec may drop every transition handle. Keep the refs for
-                 * visual hover only; do not invalidate the structural spec here.
-                 */
-                hoveredParamBlockIdRef.current = nextHoverBlockId;
-                hoveredTransitionIdRef.current = nextTransitionId;
-                invalidate();
-            }
-            return true;
-        },
+        (event: React.PointerEvent<HTMLCanvasElement>) =>
+            handleParamBlockHover(
+                {
+                    paramBlockToolActive,
+                    paramBlockHitSlopPx,
+                    paramBlocksWithValues,
+                    hostRef,
+                    hoveredParamBlockIdRef,
+                    hoveredTransitionLeftIdRef,
+                    createGestureActive: paramBlockResizeRef.current?.blockId === "__create__",
+                    setCanvasCursor,
+                    invalidate,
+                },
+                event,
+            ),
         [
             invalidate,
             paramBlockHitSlopPx,
@@ -6597,79 +6498,35 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         ],
     );
     useLatestRefValue(paramBlockPointerRef, onParamBlockPointerDown);
-    useEffect(() => {
-        const handler = (event: Event) => {
-            const detail = (
-                event as CustomEvent<{
-                    op?: string;
-                    stroke?: {
-                        ctrl: boolean;
-                        shift: boolean;
-                        alt: boolean;
-                        meta: boolean;
-                    };
-                }>
-            ).detail;
-            if (detail?.op === undefined) return;
-            switch (detail.op) {
-                case "split": {
-                    /*
-                     * 切分不是拖拽手势，但"临时反转吸附"对磁吸同样有意义，
-                     * 而且与拖动块边缘 / 新建块的 XOR 语义一致。
-                     */
-                    const noSnapKb = firstBinding(mergedKeybindings["modifier.clipNoSnap"]);
-                    const stroke = detail.stroke;
-                    const toggle =
-                        noSnapKb !== undefined &&
-                        !isNoneBinding(noSnapKb) &&
-                        stroke !== undefined &&
-                        isModifierActive(noSnapKb, {
-                            ctrlKey: stroke.ctrl,
-                            shiftKey: stroke.shift,
-                            altKey: stroke.alt,
-                            metaKey: stroke.meta,
-                        });
-                    splitParamBlockAtPlayheadRef.current?.(toggle);
-                    break;
-                }
-                case "delete":
-                    deleteSelectedParamBlocksRef.current?.();
-                    break;
-                case "createFromSelection":
-                    createParamBlocksFromSelection();
-                    break;
-                case "group":
-                    groupSelectedParamBlocksRef.current?.();
-                    break;
-                case "ungroup":
-                    ungroupSelectedParamBlocksRef.current?.();
-                    break;
-                case "selectAll":
-                    selectAllParamRange();
-                    break;
-                case "deselect":
-                    clearParamBlockSelection();
-                    break;
-                case "restoreGame":
-                    restoreGameParamBlocksRef.current?.();
-                    break;
-                case "restoreDeleted":
-                    restoreParamBlocksRef.current?.();
-                    break;
-                case "normalizePitch":
-                    normalizeSelectedParamBlockPitchRef.current?.();
-                    break;
-            }
-        };
-        window.addEventListener("hifi:paramBlockEditOp", handler);
-        return () => window.removeEventListener("hifi:paramBlockEditOp", handler);
-    }, [
-        clearParamBlockSelection,
-        createParamBlocksFromSelection,
-        mergedKeybindings,
-        selectAllParamRange,
-        store,
-    ]);
+    /**
+     * 块命令的唯一执行入口。键盘通道与右键菜单共用（见 paramBlockEditOps）。
+     *
+     * 【为什么 handlers 用 ref 包一层】这些回调里有一半是在
+     * `onParamBlockPointerDown` 之后才定义的（`groupSelectedParamBlocks` /
+     * `splitParamBlockAtPlayhead` …）。用 ref 转发可以避免「为了声明顺序把 1900 行
+     * 回调往上搬」。
+     */
+    const paramBlockOpHandlersRef = useRef<ParamBlockOpHandlers | null>(null);
+    paramBlockOpHandlersRef.current = {
+        split: ({ snapToggleHeld }) => splitParamBlockAtPlayheadRef.current?.(snapToggleHeld),
+        createFromSelection: () => createParamBlocksFromSelectionRef.current?.(),
+        group: () => groupSelectedParamBlocksRef.current?.(),
+        ungroup: () => ungroupSelectedParamBlocksRef.current?.(),
+        delete: () => deleteSelectedParamBlocksRef.current?.(),
+        selectAll: () => selectAllParamRange(),
+        deselect: () => clearParamBlockSelection(),
+        restoreGame: () => restoreGameParamBlocksRef.current?.(),
+        restoreDeleted: () => restoreParamBlocksRef.current?.(),
+        normalizePitch: () => normalizeSelectedParamBlockPitchRef.current?.(),
+    };
+    const runParamBlockOp = useCallback(
+        (op: ParamBlockMenuOp, context: { readonly snapToggleHeld: boolean }) => {
+            const handlers = paramBlockOpHandlersRef.current;
+            if (handlers !== null) runParamBlockMenuOp(op, handlers, context);
+        },
+        [],
+    );
+    useParamBlockEditOpChannel({ keybindings: mergedKeybindings, runOp: runParamBlockOp });
     /**
      * 块层数据是命令式写入宿主的；用受控 effect 在选中集合变化时立即冲刷，
      * 避免 React 选择态已经更新、宿主仍持有上一个 spec 的情况。
@@ -6677,256 +6534,28 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     useEffect(() => {
         hostRef.current?.invalidate();
     }, [hostRef, selectedParamBlockIds]);
-    const paramBlockSpec = useMemo<PianoRollParamBlockSpec | null>(() => {
-        // Visibility applies before every gesture/commit preview branch too.
-        if (!paramBlocksVisible) return null;
-        // 拖动 ref 由命令式路径更新；tick 是让下一次 React memo 读取新 ref 的显式闸门。
-        void paramBlockStructureTick;
-        const activeTransaction = paramBlockVisualTransactionRef.current;
-        if (
-            activeTransaction !== null &&
-            shouldUseParamBlockVisualTransaction(activeTransaction, paramBlockEpoch) &&
-            isParamBlockVisualEpochCurrent({
-                epoch: activeTransaction.epoch,
-                current: paramBlockEpoch,
-                ownedEditRevision: activeTransaction.ownedEditRevision,
-            })
-        ) {
-            return activeTransaction.spec;
-        }
-        // 不在渲染期清 ref：失效清理统一放在 layout effect（早于 paint），
-        // 这里只回退到 canonical，绝不让旧事务再覆盖一帧。
-        /*
-         * 边缘伸缩 / 新建块的预览必须优先于拖拽快照。以前这里先检查
-         * `paramBlockDragSnapshotRef`，而它的 key 与 `paramView.key` 相同，
-         * 于是伸缩的 targetSec 记录在 ref 里却一直用旧块几何 —— 表现为
-         * “松手才跳到位，不跟手”。同一帧里，行为 ref 比旧快照更权威。
-         */
-        const resizing = paramBlockResizeRef.current;
-        if (
-            resizing !== null &&
-            paramView !== null &&
-            (resizing.epoch === undefined ||
-                isParamBlockVisualEpochCurrent({
-                    epoch: resizing.epoch,
-                    current: paramBlockEpoch,
-                    ownedEditRevision: resizing.ownedEditRevision ?? null,
-                }))
-        ) {
-            const resizeStart =
-                resizing.resizePlan?.targetSpan !== null &&
-                resizing.resizePlan?.targetSpan !== undefined
-                    ? (resizing.resizePlan.targetSpan.startFrame *
-                          resizing.resizePlan.viewAfter.framePeriodMs) /
-                      1000
-                    : resizing.startSec;
-            const resizeEnd =
-                resizing.resizePlan?.targetSpan !== null &&
-                resizing.resizePlan?.targetSpan !== undefined
-                    ? (resizing.resizePlan.targetSpan.endFrameExclusive *
-                          resizing.resizePlan.viewAfter.framePeriodMs) /
-                      1000
-                    : resizing.endSec;
-            const existingFor = (id: string, userBlockId?: string) =>
-                paramBlocksWithValues.find((item) => item.id === id) ??
-                (userBlockId === undefined
-                    ? undefined
-                    : paramBlocksWithValues.find((item) => item.userBlockId === userBlockId));
-            if (resizing.blockId === "__create__") {
-                const value =
-                    resizing.value ??
-                    averageParamValueInSpan({
-                        startSec: Math.min(resizeStart, resizeEnd),
-                        endSec: Math.max(resizeStart, resizeEnd),
-                        values: paramView.edit,
-                        startFrame: paramView.startFrame,
-                        stride: paramView.stride,
-                        framePeriodMs: paramView.framePeriodMs,
-                        isPitch: editParam === "pitch",
-                        param: editParam,
-                    }) ??
-                    null;
-                const createId = resizing.createdBlockId ?? "__create__";
-                const previewBlocks = projectParamBlockCreatePreviewFromBase({
-                    framePeriodMs: paramBlockStateRef.current.framePeriodMs,
-                    baseBlocks:
-                        resizing.createBaseBlocks ??
-                        paramBlocksWithValues.map((block) => ({
-                            id: block.id,
-                            startSec: block.startSec,
-                            endSec: block.endSec,
-                            averageValue: block.averageValue,
-                            logicalCenterValue: block.manualValue,
-                            displayCenterSnapToSemitone: block.manualValue == null,
-                            selected: false,
-                            grouped: block.kind === "grouped",
-                        })),
-                    startSec: resizeStart,
-                    endSec: resizeEnd,
-                    createId,
-                    value,
-                });
-                const blocks: ParamBlockRenderBlock[] = previewBlocks.map((raw) => {
-                    const block = raw as ParamBlockRenderBlock & {
-                        readonly grouped?: boolean;
-                        readonly manualValue?: number | null;
-                    };
-                    const existing = existingFor(block.id, block.userBlockId);
-                    const created = block.id === createId;
-                    return {
-                        id: block.id,
-                        userBlockId: block.userBlockId,
-                        startSec: block.startSec,
-                        endSec: block.endSec,
-                        averageValue: block.averageValue ?? value ?? null,
-                        logicalCenterValue: existing?.manualValue ?? block.manualValue ?? null,
-                        frameCenterValue: created ? value : undefined,
-                        displayCenterValue: created ? value : null,
-                        displayCenterSnapToSemitone: created
-                            ? false
-                            : existing?.manualValue == null,
-                        selected: created,
-                        grouped: block.grouped === true,
-                        transitionSec: existing?.transitionSec,
-                        centerPolicy: created ? "locked" : "live",
-                    };
-                });
-                return buildParamBlockRenderSpec({
-                    blocks,
-                    param: editParam,
-                    valueMin: bounds.min,
-                    valueMax: bounds.max,
-                    valueToY: (value, heightPx) => valueToY(editParam, value, heightPx),
-                    colors: paramBlockSpecColors,
-                    curveOwned: paramBlockViewRef.current !== null,
-                });
-            }
-            const plan = resizing.resizePlan;
-            const blocks: ParamBlockRenderBlock[] =
-                plan === null
-                    ? paramBlocksWithValues.map((block) => ({
-                          id: block.id,
-                          userBlockId: block.userBlockId,
-                          startSec: block.startSec,
-                          endSec: block.endSec,
-                          averageValue: block.averageValue,
-                          logicalCenterValue: block.manualValue,
-                          displayCenterSnapToSemitone: block.manualValue == null,
-                          selected:
-                              resizing.baseBlockSpans.find((item) => item.id === block.id)
-                                  ?.selected === true,
-                          grouped: block.kind === "grouped",
-                          transitionSec: block.transitionSec,
-                          centerPolicy: "live",
-                      }))
-                    : plan.viewAfter.blocks.map((block) => {
-                          const fp = plan.viewAfter.framePeriodMs;
-                          const startSec = (block.startFrame * fp) / 1000;
-                          const endSec = (block.endFrameExclusive * fp) / 1000;
-                          const existing = existingFor(block.id, block.userBlockId);
-                          const resized = block.id === resizing.blockId;
-                          return {
-                              id: block.id,
-                              userBlockId: block.userBlockId,
-                              startSec,
-                              endSec,
-                              averageValue:
-                                  existing?.averageValue ??
-                                  paramBlockValueCacheRef.current.get(block.id)?.value ??
-                                  paramBlocksWithValues.find(
-                                      (item) => item.startSec < endSec && item.endSec > startSec,
-                                  )?.averageValue ??
-                                  null,
-                              logicalCenterValue: existing?.manualValue,
-                              displayCenterValue: resized
-                                  ? (resizing.displayCenterValue ?? null)
-                                  : null,
-                              displayCenterSnapToSemitone: resized
-                                  ? false
-                                  : existing?.manualValue == null,
-                              displayHeightPx: resized ? (resizing.displayHeightPx ?? null) : null,
-                              selected:
-                                  resized ||
-                                  (resizing.baseBlockSpans.find((item) => item.id === block.id)
-                                      ?.selected === true &&
-                                      block.id !== resizing.blockId),
-                              grouped: block.kind === "grouped",
-                              transitionSec: existing?.transitionSec,
-                              centerPolicy: resized ? "locked" : "live",
-                          };
-                      });
-            return buildParamBlockRenderSpec({
-                blocks,
-                param: editParam,
-                valueMin: bounds.min,
-                valueMax: bounds.max,
-                valueToY: (value, heightPx) => valueToY(editParam, value, heightPx),
-                colors: paramBlockSpecColors,
-                curveOwned: paramBlockViewRef.current !== null,
-            });
-        }
-        const dragSnapshot = paramBlockDragSnapshotRef.current;
-        if (
-            dragSnapshot !== null &&
-            isParamBlockVisualEpochCurrent({
-                epoch: dragSnapshot.epoch,
-                current: paramBlockEpoch,
-                ownedEditRevision: dragSnapshot.ownedEditRevision,
-            }) &&
-            shouldUseParamBlockDragSnapshotForRender({
-                snapshotKey: dragSnapshot.key,
-                paramViewKey: paramView?.key ?? null,
-                gestureActive: paramBlockActiveGestureTokenRef.current !== null,
-                commitHeld: paramBlockDragCommitRef.current !== null,
-            })
-        ) {
-            return paramBlockSpecForDragSnapshot(dragSnapshot);
-        }
-        if (paramBlocksWithValues.length === 0) return null;
-        const blocks: ParamBlockRenderBlock[] = paramBlocksWithValues.map((block) => ({
-            id: block.id,
-            userBlockId: block.userBlockId,
-            startSec: block.startSec,
-            endSec: block.endSec,
-            topPx: 0,
-            heightPx: 0,
-            averageValue: block.averageValue,
-            logicalCenterValue: block.manualValue,
-            displayCenterSnapToSemitone: block.manualValue == null,
-            selected: selectedParamBlockIdSet.has(logicalBlockId(block)),
-            grouped: block.kind === "grouped",
-            transitionSec: block.transitionSec,
-            centerPolicy: "live",
-        }));
-        return buildParamBlockRenderSpec({
-            blocks,
-            param: editParam,
-            valueMin: bounds.min,
-            valueMax: bounds.max,
-            valueToY: (value, heightPx) => valueToY(editParam, value, heightPx),
-            colors: paramBlockSpecColors,
-            curveOwned: paramBlockViewRef.current !== null,
-        });
-    }, [
-        paramBlocksVisible,
-        paramBlocksWithValues,
-        paramBlockStructureTick,
-        paramBlockEpoch,
-        paramBlockSpecColors,
-        paramBlockStateRef,
-        selectedParamBlockIdSet,
-        valueToY,
+    const paramBlockSpec = useParamBlockRenderSpec({
+        layerVisible: paramBlocksVisible,
+        structureTick: paramBlockStructureTick,
+        epoch: paramBlockEpoch,
+        visualTransactionRef: paramBlockVisualTransactionRef,
+        resizeRef: paramBlockResizeRef,
+        dragSnapshotRef: paramBlockDragSnapshotRef,
+        activeGestureTokenRef: paramBlockActiveGestureTokenRef,
+        dragCommitRef: paramBlockDragCommitRef,
+        valueCacheRef: paramBlockValueCacheRef,
+        latestSpecRef: latestParamBlockSpecRef,
+        canonicalBlocks: paramBlocksWithValues,
         paramView,
-        // `themeMode` 不在此列：主题色已由 paramBlockSpecColors（其 useMemo
-        // 依赖 themeMode）承载，重复列入只会让主题切换多跑一次全量重算。
-        bounds.min,
-        bounds.max,
+        selectedIds: selectedParamBlockIdSet,
         editParam,
-        paramBlockSpecForDragSnapshot,
-    ]);
-    useLayoutEffect(() => {
-        latestParamBlockSpecRef.current = paramBlockSpec;
-    }, [paramBlockSpec]);
+        colors: paramBlockSpecColors,
+        bounds,
+        valueToY,
+        framePeriodMs: paramBlockStateRef.current.framePeriodMs,
+        curveOwned: paramBlockViewRef.current !== null,
+        buildDragSnapshotSpec: paramBlockSpecForDragSnapshot,
+    });
     /*
      * 视觉事务收尾：**唯一**判据是「这次提交产生的权威已经可见」。
      *
@@ -7087,7 +6716,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     const drawParamBlocks = useCallback(
         (spec: PianoRollParamBlockSpec | null) => {
             const hoveredBlockId = hoveredParamBlockIdRef.current;
-            const hoveredTransitionId = hoveredTransitionIdRef.current;
+            const hoveredTransitionId = hoveredTransitionLeftIdRef.current;
             kernelDataRef.current.paramBlocks =
                 spec === null
                     ? spec
