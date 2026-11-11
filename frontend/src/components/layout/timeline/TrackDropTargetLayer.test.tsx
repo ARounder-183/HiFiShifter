@@ -6,11 +6,8 @@ import type { TrackDropTargetSnapshot } from "./trackDropTargetHighlight";
 
 const TRACKS = [{ id: "track-a" }, { id: "track-b" }, { id: "track-c" }];
 
-function snapshot(
-    trackIds: readonly string[],
-    tone: TrackDropTargetSnapshot["tone"] = "move",
-): TrackDropTargetSnapshot {
-    return { rev: 1, trackIds, tone };
+function snapshot(trackIds: readonly string[]): TrackDropTargetSnapshot {
+    return { rev: 1, trackIds };
 }
 
 describe("TrackDropTargetRings", () => {
@@ -29,31 +26,23 @@ describe("TrackDropTargetRings", () => {
         expect(html).toContain("height:76px");
         expect(html).toContain("width:1200px");
         expect(html).toContain("height:400px");
-        expect(html).toContain("var(--qt-track-drop-target)");
     });
 
-    it("uses the copy and snap tokens for their tones", () => {
-        const copy = renderToStaticMarkup(
+    it("uses the snap-origin token and a fixed opacity (one meaning, one colour)", () => {
+        const html = renderToStaticMarkup(
             <TrackDropTargetRings
-                snapshot={snapshot(["track-a"], "copy")}
+                snapshot={snapshot(["track-a"])}
                 tracks={TRACKS}
                 rowHeight={50}
                 contentWidth={500}
                 contentHeight={200}
             />,
         );
-        expect(copy).toContain("var(--qt-track-drop-copy)");
-        const snap = renderToStaticMarkup(
-            <TrackDropTargetRings
-                snapshot={snapshot(["track-a"], "snap")}
-                tracks={TRACKS}
-                rowHeight={50}
-                contentWidth={500}
-                contentHeight={200}
-            />,
-        );
-        expect(snap).toContain("var(--qt-snap-origin)");
-        expect(snap).toContain("opacity:0.98");
+        expect(html).toContain("var(--qt-snap-origin)");
+        expect(html).toContain("opacity:0.95");
+        // 旧的三色语义必须彻底消失：copy / move 各有自己 token 的时代结束了。
+        expect(html).not.toContain("var(--qt-track-drop-copy)");
+        expect(html).not.toContain("var(--qt-track-drop-target)");
     });
 
     it("renders nothing for an empty snapshot, unknown ids or zero geometry", () => {

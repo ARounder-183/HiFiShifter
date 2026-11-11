@@ -243,9 +243,6 @@
     --qt-snap-sample: #94a3b8;
     --qt-snap-loop: #22c55e;
     --qt-snap-origin: #fb7185;
-    /* 跨轨拖动目标轨道描边：move / copy 两种语义色 */
-    --qt-track-drop-target: #22d3ee;
-    --qt-track-drop-copy: #a78bfa;
 }
 
 .qt-theme.light,
@@ -313,9 +310,6 @@
     --qt-snap-sample: #64748b;
     --qt-snap-loop: #16a34a;
     --qt-snap-origin: #be123c;
-    /* 跨轨拖动目标轨道描边（浅色主题取更深、可读性更高的色） */
-    --qt-track-drop-target: #0e7490;
-    --qt-track-drop-copy: #6d28d9;
 }
 
 /*

@@ -686,8 +686,17 @@ export function useTimelineKernelSeekDrag({
                 enabled: snapActive,
             });
             let nextStart: number;
+            /**
+             * 这一刻横向位置是否**真的**被吸附钉住了。
+             *
+             * 【为什么单独记一个布尔】目标轨道描边只认这个事实（见
+             * `trackDropTargetDrag`）。用「吸附开关」当判据会让「开着吸附但一个
+             * 候选都没吸到」也画描边 —— 用户报告的就是这个。
+             */
+            let snapped = false;
             if (originSnap.active) {
                 nextStart = originSnap.startSec;
+                snapped = true;
                 publishClipOriginSnapHighlight({
                     sec: originSnap.startSec,
                     trackId: args.targetTrackId === NEW_TRACK_SENTINEL ? null : args.targetTrackId,
@@ -702,18 +711,24 @@ export function useTimelineKernelSeekDrag({
                 // 生效、位置也对，但完全没有视觉反馈——表现为"吸附没生效"。
                 // `excludeClipIds` 必须覆盖**全部参与者**：整组一起移动时，组内其他
                 // clip 不应成为自己的吸附目标。
-                nextStart = snapActive
-                    ? snapTimelineDetailed(rawStart, "clip", {
-                          originSec: origin.startSec,
-                          anchorTrackId: args.targetTrackId,
-                          excludeClipIds: new Set(origin.participants.map((item) => item.clipId)),
-                          moveLengthSec: origin.lengthSec,
-                          moveSnapOffsetSec: origin.snapOffsetSec,
-                          highlight: {
-                              sources: [{ trackId: args.targetTrackId, clipId: args.clipId }],
-                          },
-                      }).sec
-                    : rawStart;
+                if (snapActive) {
+                    // ★ 先接住整个 SnapResult：`snapped` 是「命中」的唯一证据，
+                    // 目标轨道描边只认它（旧代码只取 .sec，把命中信息丢掉了）。
+                    const snapResult = snapTimelineDetailed(rawStart, "clip", {
+                        originSec: origin.startSec,
+                        anchorTrackId: args.targetTrackId,
+                        excludeClipIds: new Set(origin.participants.map((item) => item.clipId)),
+                        moveLengthSec: origin.lengthSec,
+                        moveSnapOffsetSec: origin.snapOffsetSec,
+                        highlight: {
+                            sources: [{ trackId: args.targetTrackId, clipId: args.clipId }],
+                        },
+                    });
+                    nextStart = snapResult.sec;
+                    snapped = snapResult.snapped;
+                } else {
+                    nextStart = rawStart;
+                }
                 // 吸附被关闭（拖拽中切开关 / 按住临时取反键）：高亮必须清掉，
                 // 否则会残留上一次的吸附提示（旧实现同样在 else 分支清除）。
                 if (!snapActive) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
@@ -740,18 +755,17 @@ export function useTimelineKernelSeekDrag({
             });
             origin.lastDeltaStartSec = deltaStartSec;
             /*
-             * 目标轨道描边与吸附线是两条独立通道：
-             * - 只在**真正跨轨**时显示（同一轨道内拖动没有“新轨道”可提示）；
+             * 目标轨道描边与吸附线是两条独立通道，但共用同一个判据 —— 吸附命中：
+             * - 未吸附（含"吸附开关开着但没吸到候选"）⇒ 不画任何行描边；
+             * - 只在**真正跨轨**时显示（同一轨道内拖动没有"新轨道"可提示）；
              * - 多选跨轨时显示本次移动涉及的全部目标轨；
-             * - 哨兵落点（新建轨道）交给幽灵行虚线，不画已有轨道环；
-             * - 吸附命中时换 origin 色，否则 move / copy 各用自己的语义色。
+             * - 哨兵落点（新建轨道）交给幽灵行虚线，不画已有轨道环。
              */
             const targetDrop = resolveTrackDropTarget({
                 moves,
                 participants: origin.participants,
                 dropToNewTrack,
-                snapActive: originSnap.active,
-                copyMode: origin.copyMode,
+                snapped,
             });
             if (targetDrop === null) clearTrackDropTarget();
             else publishTrackDropTarget(targetDrop);
