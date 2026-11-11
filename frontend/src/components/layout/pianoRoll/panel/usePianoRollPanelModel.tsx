@@ -84,6 +84,7 @@ import { trackParamBlockCommit } from "../paramBlockCommitCoordinator";
 import { composeParamBlockView } from "../paramBlockComposition";
 import { planParamBlockGesture, type ParamBlockGesturePlan } from "../paramBlockGesture";
 import { reportParamBlockDiagnostic } from "../paramBlockDiagnostics";
+import { publishParamBlockWriteFailure } from "../paramBlockFeedback";
 import {
     toFrame,
     toParamBlockSourceClip,
@@ -3223,13 +3224,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         historyKey: `${s.historyUndoDepth}:${s.historyRedoDepth}`,
         state: paramBlockState,
         setState: setParamBlockState,
-        onError: (detail) =>
-            publishParamBlockFeedback({
-                text: tf("status_param_block_edit_rejected"),
-                tone: "danger",
-                tooltip: detail,
-                holdMs: 15_000,
-            }),
+        /* 写入失败按**类别**反馈：rejected / conflict / transport / silent。 */
+        onWriteError: (failure, error) => {
+            publishParamBlockWriteFailure({ failure, error, tf });
+        },
         /*
          * 【只挡参数块手势】deferral 的唯一职责是保护**正在进行中的本地编辑集**
          * ——块拖动 / 过渡手柄逐帧改它，回包此刻落地会把预览打断。

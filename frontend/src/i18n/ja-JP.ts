@@ -785,6 +785,9 @@ export const jaJP = {
     status_param_block_edit_rejected: "パラメータブロック編集が拒否されました",
     status_param_block_split_too_close: "分割位置がブロックの端に近すぎます",
     status_param_block_action_failed: "パラメータブロック操作に失敗しました",
+    status_param_block_conflict_resynced:
+        "パラメータブロックが他の操作で変更されたため、再同期しました",
+    status_param_block_write_failed: "パラメータブロックの書き込みに失敗しました",
     status_param_block_not_ready:
         "パラメータブロック層の準備ができていません。しばらくしてから再試行してください。",
     kb_param_block_split: "パラメータブロックを分割",

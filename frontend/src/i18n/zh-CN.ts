@@ -753,6 +753,8 @@ export const zhCN = {
     status_param_block_edit_rejected: "参数块编辑被拒绝",
     status_param_block_split_too_close: "此位置分割太靠近参数块边缘",
     status_param_block_action_failed: "参数块操作失败",
+    status_param_block_conflict_resynced: "参数块已被其他操作修改，已重新同步",
+    status_param_block_write_failed: "参数块写入失败",
     status_param_block_not_ready: "参数块层尚未就绪，请稍后重试。",
     kb_param_block_split: "分割参数块",
     kb_param_block_delete: "删除参数块",

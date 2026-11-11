@@ -754,6 +754,8 @@ export const zhTW = {
     status_param_block_edit_rejected: "參數區塊編輯被拒絕",
     status_param_block_split_too_close: "此位置分割太靠近參數區塊邊緣",
     status_param_block_action_failed: "參數區塊操作失敗",
+    status_param_block_conflict_resynced: "參數區塊已被其他操作修改，已重新同步",
+    status_param_block_write_failed: "參數區塊寫入失敗",
     status_param_block_not_ready: "參數區塊層尚未就緒，請稍後重試。",
     kb_param_block_split: "分割參數區塊",
     kb_param_block_delete: "刪除參數區塊",

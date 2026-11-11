@@ -9,7 +9,6 @@ import {
 } from "react";
 import { timelineApi } from "../../../services/api";
 import { listen } from "../../../services/hostEvents";
-import { backendDetail } from "../../../services/invoke";
 import {
     normalizeParamBlockEditSet,
     normalizeParamBlockEditSetWithDiagnostics,
@@ -22,6 +21,13 @@ import {
     assertCurveCommitAuthority,
     type ParamCurveCommitAuthority,
 } from "./paramBlockCommitPolicy";
+import {
+    classifyParamBlockFailure,
+    ParamBlockCommitError,
+    paramBlockFailureFeedback,
+    type ParamBlockFailureFeedback,
+} from "./paramBlockCommitError";
+import { validateParamBlockEditSet } from "./paramBlockValidate";
 
 /** 一次回读的权威结果：编辑集 + 帧周期。**没有几何** —— 几何永远是派生的。 */
 interface ParamBlockSnapshot {
@@ -37,11 +43,21 @@ function framePeriodOf(view: ParamBlockView | undefined, fallback: number | unde
         : 5;
 }
 
-/** 后端拒绝整集替换时的原文（见 `ParamBlockEditSet::replace`）。 */
-const EDIT_SET_CONFLICT = "parameter block edits changed";
-
-function isEditSetConflict(error: unknown): boolean {
-    return (backendDetail(error) ?? String(error)).includes(EDIT_SET_CONFLICT);
+/**
+ * 预检：非法编辑集**永远不离开浏览器**。
+ *
+ * 【为什么放在这里而不是调用点】`commit` 是唯一的写入入口，把预检放在入口意味着
+ * 任何新调用点都自动受保护；放在调用点则迟早有人漏写（后端 `Invalid:` 拒绝，
+ * 用户看到"随机失败"）。
+ */
+function assertParamBlockEditSetValid(edits: ParamBlockEditSet): void {
+    const result = validateParamBlockEditSet(edits);
+    if (result.ok) return;
+    throw new ParamBlockCommitError({
+        kind: "rejected",
+        code: result.code,
+        detail: result.detail,
+    });
 }
 
 /**
@@ -73,7 +89,16 @@ export function useParamBlockPersistence(args: {
     setState: Dispatch<SetStateAction<ParamBlockState>>;
     deferReadback?: () => boolean;
     onCommitted?: () => void;
-    onError?: (detail: string) => void;
+    /**
+     * 写入失败。**只**用于"用户发起的那一笔没写成"。
+     *
+     * 【为什么与回读分开】回读失败是后台噪声（下一次回读会自愈），把它按
+     * danger 弹 15 秒会让用户以为自己的编辑丢了。两者共用同一个回调正是旧实现
+     * "偶尔弹一条吓人的红条、但编辑其实成功了"的来源。
+     */
+    onWriteError?: (failure: ParamBlockFailureFeedback, error: ParamBlockCommitError) => void;
+    /** 回读 / 刷新失败；默认静默（只写一条诊断）。 */
+    onReadError?: (error: ParamBlockCommitError) => void;
 }) {
     const [readyRoot, setReadyRoot] = useState<string | null>(null);
     const latest = useRef(args);
@@ -87,8 +112,15 @@ export function useParamBlockPersistence(args: {
     /** 被 deferral 挡下的回读：按根合并，手势结束后合成一次请求。 */
     const refetchPending = useRef(new Set<string>());
 
-    const publishError = useCallback((error: unknown) => {
-        latest.current.onError?.(backendDetail(error) ?? String(error));
+    const publishReadError = useCallback((error: unknown) => {
+        const failure = classifyParamBlockFailure(error);
+        if (latest.current.onReadError) latest.current.onReadError(failure);
+        else console.warn("[pianoRoll] param block read failed:", failure.detail ?? failure.code);
+    }, []);
+
+    const publishWriteError = useCallback((error: unknown) => {
+        const failure = classifyParamBlockFailure(error);
+        latest.current.onWriteError?.(paramBlockFailureFeedback(failure), failure);
     }, []);
 
     /**
@@ -203,10 +235,10 @@ export function useParamBlockPersistence(args: {
                 if (latest.current.rootTrackId !== root) return;
                 applyReply(root, reply);
             } catch (error) {
-                publishError(error);
+                publishReadError(error);
             }
         },
-        [applyReply, publishError],
+        [applyReply, publishReadError],
     );
 
     /** 只刷新镜像（给提交冲突后的重试用）：不受手势 / 提交中守卫影响。 */
@@ -216,11 +248,11 @@ export function useParamBlockPersistence(args: {
                 const reply = await timelineApi.getParamBlockView(root);
                 return adoptSnapshot(root, reply);
             } catch (error) {
-                publishError(error);
+                publishReadError(error);
                 return null;
             }
         },
-        [adoptSnapshot, publishError],
+        [adoptSnapshot, publishReadError],
     );
 
     useEffect(() => {
@@ -235,7 +267,7 @@ export function useParamBlockPersistence(args: {
                 setReadyRoot(root);
             })
             .catch((error) => {
-                if (!disposed) publishError(error);
+                if (!disposed) publishReadError(error);
             });
         const subscription = listen<{ rootTrackId: string; view?: ParamBlockView }>(
             "param_block_view_updated",
@@ -261,7 +293,7 @@ export function useParamBlockPersistence(args: {
             disposed = true;
             void subscription.then((off) => off());
         };
-    }, [args.rootTrackId, args.enabled, applyReply, publishError, readback]);
+    }, [args.rootTrackId, args.enabled, applyReply, publishReadError, readback]);
 
     /** 历史位置变了（撤销 / 重做 / 提交落库）才回读编辑集。 */
     useEffect(() => {
@@ -316,6 +348,8 @@ export function useParamBlockPersistence(args: {
              */
             if (!root || known === undefined) return Promise.resolve(undefined);
             const target = normalizeParamBlockEditSet(state.editSet);
+            // ★ 预检：非法编辑集不排队、不发 IPC（见 assertParamBlockEditSetValid）。
+            assertParamBlockEditSetValid(target);
             pending.current.set(root, (pending.current.get(root) ?? 0) + 1);
             const execute = async (): Promise<ParamBlockSnapshot> => {
                 const current = server.current.get(root);
@@ -350,8 +384,17 @@ export function useParamBlockPersistence(args: {
                 try {
                     return await execute();
                 } catch (error) {
-                    if (!isEditSetConflict(error)) throw error;
-                    if ((await refreshAuthority(root)) === null) throw error;
+                    const failure = classifyParamBlockFailure(error);
+                    /*
+                     * 只有 edit_set 冲突能原样重试：它的语义是"镜像里的代次过期"，
+                     * 刷新镜像后同一份 blocks 仍然成立。curve / geometry 冲突意味着
+                     * **补丁的基准**变了，原样重放会覆盖别人的修改 —— 那必须由调用方
+                     * 按意图重基（`rebase`），不能在这里猜。
+                     */
+                    if (failure.kind !== "conflict" || failure.code !== "edit_set") {
+                        throw failure;
+                    }
+                    if ((await refreshAuthority(root)) === null) throw failure;
                     return execute();
                 }
             };
@@ -372,7 +415,8 @@ export function useParamBlockPersistence(args: {
                     return snapshot;
                 })
                 .catch((error) => {
-                    publishError(error);
+                    // 写入失败：分类上报（rejected / conflict / transport），并回权威。
+                    publishWriteError(error);
                     if (latest.current.rootTrackId === root && pending.current.get(root) === 1) {
                         const current = server.current.get(root);
                         if (current) writeState(root, current);
@@ -388,7 +432,7 @@ export function useParamBlockPersistence(args: {
             );
             return complete;
         },
-        [publishError, refreshAuthority, writeState],
+        [publishWriteError, refreshAuthority, writeState],
     );
 
     const persist = useCallback(

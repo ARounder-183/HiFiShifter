@@ -847,6 +847,9 @@ export const koKR = {
     status_param_block_edit_rejected: "파라미터 블록 편집이 거부되었습니다",
     status_param_block_split_too_close: "분할 지점이 블록 가장자리에 너무 가깝습니다",
     status_param_block_action_failed: "파라미터 블록 작업이 실패했습니다",
+    status_param_block_conflict_resynced:
+        "다른 작업에서 파라미터 블록이 변경되어 다시 동기화했습니다",
+    status_param_block_write_failed: "파라미터 블록 쓰기에 실패했습니다",
     status_param_block_not_ready:
         "파라미터 블록 레이어가 아직 준비되지 않았습니다. 잠시 후 다시 시도하세요.",
     kb_param_block_split: "파라미터 블록 분할",

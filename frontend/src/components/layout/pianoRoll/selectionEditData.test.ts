@@ -406,3 +406,66 @@ test("fetchFullResCurve forceAuthority bypasses the pv fast path", async () => {
     expect(forced.geometrySignature).toBe("sig");
     expect(forced.values).toEqual([10, 11, 12]);
 });
+
+/**
+ * 多块全分辨率读遇到并发写入时必须**整轮重读**，而不是把
+ * `Conflict: parameter curve changed during read` 抛给用户。
+ *
+ * 【为什么这条重要】`authority_revision` 是进程全局计数，任何无关的参数写入
+ * 都会让它前进。旧实现直接失败 —— 用户看到的是"有时能提交、有时报参数块操作
+ * 失败"。这里用两次返回不同 revision 的 mock 钉住重试。
+ */
+test("fetchFullResCurve retries the whole read when windows disagree on the revision", async () => {
+    const mocked = vi.mocked(paramsApi.getParamFrames);
+    mocked.mockReset();
+    // 第一轮：两块 revision 不同（模拟中途有后台写入）。
+    mocked.mockResolvedValueOnce({
+        ok: true,
+        edit: [1, 2],
+        edit_sentinel: [],
+        authority_revision: 10,
+        geometry_revision: 1,
+        geometry_signature: "g",
+    } as never);
+    mocked.mockResolvedValueOnce({
+        ok: true,
+        edit: [3, 4],
+        edit_sentinel: [],
+        authority_revision: 11,
+        geometry_revision: 1,
+        geometry_signature: "g",
+    } as never);
+    // 第二轮：一致。
+    mocked.mockResolvedValueOnce({
+        ok: true,
+        edit: [5, 6],
+        edit_sentinel: [],
+        authority_revision: 12,
+        geometry_revision: 1,
+        geometry_signature: "g",
+    } as never);
+    mocked.mockResolvedValueOnce({
+        ok: true,
+        edit: [7, 8],
+        edit_sentinel: [],
+        authority_revision: 12,
+        geometry_revision: 1,
+        geometry_signature: "g",
+    } as never);
+
+    const result = await fetchFullResCurve({
+        trackId: "root",
+        param: "pitch",
+        startFrame: 0,
+        // 两个 chunk（CHUNK_FRAMES = 32768）。
+        endFrame: 40_000,
+        forceAuthority: true,
+    });
+    expect(mocked).toHaveBeenCalledTimes(4);
+    expect(result.authorityRevision).toBe(12);
+    // 重读必须覆盖缓冲区：第一轮的值不能残留。
+    expect(result.values[0]).toBe(5);
+    expect(result.values[1]).toBe(6);
+    expect(result.values[32_768]).toBe(7);
+    expect(result.values[32_769]).toBe(8);
+});

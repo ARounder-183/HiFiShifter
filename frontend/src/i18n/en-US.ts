@@ -916,6 +916,8 @@ export const enUS = {
     status_param_block_edit_rejected: "Parameter block edit rejected",
     status_param_block_split_too_close: "Split point is too close to the parameter block edge",
     status_param_block_action_failed: "Parameter block action failed",
+    status_param_block_conflict_resynced: "Parameter blocks were changed elsewhere; re-synced",
+    status_param_block_write_failed: "Failed to write parameter blocks",
     status_param_block_not_ready:
         "The parameter block layer is not ready yet. Please try again shortly.",
     kb_param_block_split: "Split Parameter Block",
