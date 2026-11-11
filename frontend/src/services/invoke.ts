@@ -1037,6 +1037,10 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "capture_clear",
     "plugin_get_apply_state",
     "plugin_health",
+    // 插件形态的 UI 就绪信号（无参，见 mount.tsx；后端 client.rs 的
+    // plugin_ui_ready 分支）。此前漏登记，靠 invoke 的"零参 __unwired 兜底"
+    // 恰好不炸，但违反布线纪律，且带参调用会直接抛 method not wired yet。
+    "plugin_ui_ready",
     "host_link_submit",
     "host_link_release",
     // 插件侧的宿主链接命令（仅插件形态；与 `host_link_list/open/refresh` 同名不同通道）。
