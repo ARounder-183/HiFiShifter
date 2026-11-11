@@ -13,7 +13,7 @@ const epoch: ParamBlockEpoch = {
     rootTrackId: "root",
     param: "pitch",
     layoutKey: "layout-a",
-    editRevision: 3,
+    structureToken: "structure-1",
     externalHistoryToken: "0:0",
     framePeriodMs: 5,
 };
@@ -36,9 +36,7 @@ function tx(overrides: Partial<ParamBlockVisualTransaction> = {}): ParamBlockVis
         epoch,
         kind: "resize",
         spec: spec(),
-        phase: "awaiting-authority",
         startedAt: 0,
-        ownedEditRevision: null,
         ...overrides,
     };
 }
@@ -55,33 +53,44 @@ describe("paramBlockVisualTransaction", () => {
     });
 
     it("keeps drag layout valid across a self commit but not an external jump", () => {
-        expect(sameParamBlockEpochLayout(epoch, { ...epoch, editRevision: 4 })).toBe(true);
+        expect(sameParamBlockEpochLayout(epoch, { ...epoch })).toBe(true);
         expect(sameParamBlockEpochLayout(epoch, { ...epoch, externalHistoryToken: "1:0" })).toBe(
             false,
         );
         expect(sameParamBlockExternalEpoch(epoch, { ...epoch, param: "volume" })).toBe(false);
     });
 
-    it("accepts base and owned edit revisions, but not a third-party edit", () => {
+    /*
+     * 【结构令牌取代 revision 的回归锁】
+     * - 自己的 value 变更（块中心 / 曲线）不改结构 ⇒ 预览继续有效；
+     * - 第三方几何变更（分割 / 伸缩 / 换 Clip）改结构 ⇒ 预览立即失效。
+     * 旧实现比 revision 加 ownedEditRevision，而后者永远对不上服务端回包 ——
+     * 于是自己提交的回包一落地就撤掉自己的预览（「先回弹」）。
+     */
+    it("★ 自己的值变更不失效，第三方结构变更立即失效", () => {
         expect(
             isParamBlockVisualEpochCurrent({
                 epoch,
-                current: epoch,
-                ownedEditRevision: null,
+                current: { ...epoch },
             }),
         ).toBe(true);
         expect(
             isParamBlockVisualEpochCurrent({
                 epoch,
-                current: { ...epoch, editRevision: 4 },
-                ownedEditRevision: 4,
+                current: { ...epoch, structureToken: "structure-2" },
             }),
-        ).toBe(true);
+        ).toBe(false);
+        // 布局 / 历史 / 参数变化仍然立即失效（与结构令牌无关）。
         expect(
             isParamBlockVisualEpochCurrent({
                 epoch,
-                current: { ...epoch, editRevision: 5 },
-                ownedEditRevision: 4,
+                current: { ...epoch, externalHistoryToken: "1:0" },
+            }),
+        ).toBe(false);
+        expect(
+            isParamBlockVisualEpochCurrent({
+                epoch,
+                current: { ...epoch, layoutKey: "layout-b" },
             }),
         ).toBe(false);
     });

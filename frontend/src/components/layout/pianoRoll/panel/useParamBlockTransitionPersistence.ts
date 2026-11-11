@@ -31,7 +31,6 @@ import {
 } from "../paramBlocks";
 import type { ParamCurveCommitAuthority } from "../paramBlockCommitPolicy";
 import { ParamBlockCommitError } from "../paramBlockCommitError";
-import { markParamBlockPreviewOwnedRevision } from "../paramBlockPreviewOwnership";
 import { fetchFullResCurve } from "../selectionEditData";
 import type { ParamBlockWritePreparation } from "../paramBlockWritePlan";
 import type { useParamBlockPersistence } from "../useParamBlockPersistence";
@@ -62,9 +61,8 @@ export function useParamBlockTransitionPersistence(args: {
         readonly segments: readonly { startFrame: number; values: readonly number[] }[];
         readonly authority: ParamCurveCommitAuthority | null | undefined;
     }) => void;
-    readonly visualTransactionRef: Ref<{ ownedEditRevision?: number | null } | null>;
-    readonly dragSnapshotRef: Ref<{ ownedEditRevision?: number | null } | null>;
-    readonly resizeRef: Ref<{ ownedEditRevision?: number | null } | null>;
+    /** 提交成功后把回包里的新曲线代次写到事务上（预览释放的唯一证据）。 */
+    readonly stampCurveCommitted: (curveRevision: number | undefined) => void;
 }): {
     persistBlockTransition: (
         left: ParamBlock,
@@ -92,24 +90,8 @@ export function useParamBlockTransitionPersistence(args: {
         bumpRefreshToken,
         invalidate,
         stampCurveCommit,
-        visualTransactionRef,
-        dragSnapshotRef,
-        resizeRef,
+        stampCurveCommitted,
     } = args;
-
-    const markOwned = useCallback(
-        (revision: number) => {
-            markParamBlockPreviewOwnedRevision(
-                {
-                    visualTransaction: visualTransactionRef,
-                    dragSnapshot: dragSnapshotRef,
-                    resize: resizeRef,
-                },
-                revision,
-            );
-        },
-        [dragSnapshotRef, resizeRef, visualTransactionRef],
-    );
 
     /**
      * 把「设置过渡宽度」这一步做成可重跑的闭包。
@@ -156,7 +138,6 @@ export function useParamBlockTransitionPersistence(args: {
                      * 单一写入者：只通过 hook 的 setState 更新。
                      */
                     setParamBlockState(edit.state);
-                    markOwned(edit.state.editSet.revision);
                     if (!withCurve) {
                         return { state: edit.state, checkpoint: true, patches: [] };
                     }
@@ -223,7 +204,6 @@ export function useParamBlockTransitionPersistence(args: {
             };
         },
         [
-            markOwned,
             paramBlockSourceClipsRef,
             paramBlockStateRef,
             paramViewRef,
@@ -268,7 +248,12 @@ export function useParamBlockTransitionPersistence(args: {
             if (widthSec <= 1e-6 && options?.restoreOriginal !== true) return;
             const restoreOriginal = options?.restoreOriginal === true;
             const plan = planTransition(left, right, widthSec, true, restoreOriginal);
-            await blockPersistence.commitPlan({ kind: "transition", rootTrackId, ...plan });
+            const result = await blockPersistence.commitPlan({
+                kind: "transition",
+                rootTrackId,
+                ...plan,
+            });
+            stampCurveCommitted(result?.curveRevision);
             if (restoreOriginal) {
                 /*
                  * 撤销过渡必须把**提交态**曲线同步到显示（而不是留在 live 预览上）。
@@ -298,6 +283,7 @@ export function useParamBlockTransitionPersistence(args: {
             planTransition,
             rootTrackId,
             setParamView,
+            stampCurveCommitted,
         ],
     );
 

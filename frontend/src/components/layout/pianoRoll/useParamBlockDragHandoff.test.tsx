@@ -43,7 +43,8 @@ async function harness() {
         startedAt: 0,
         startFrame: 0,
         stride: 1,
-        authorityRevisionAtStart: 1,
+        curveRevisionAtStart: 1,
+        curveRevisionCommitted: 2,
         authorityRequestSeqAtCommit: 5,
         committed: true,
         committedSegments: [{ startFrame: 0, values: targetView.edit }],
@@ -56,7 +57,7 @@ async function harness() {
         activeGestureTokenRef: { current: 1 },
         releaseRafRef: { current: null },
         paramView: oldView,
-        authorityRevision: 1,
+        authority: { curveRevision: 1, requestSeq: 5 },
         getAuthorityWatermark: () => ({ issuedRequestSeq: 5, appliedRequestSeq: 5 }),
         structureVersion: 0,
         onReleased: vi.fn(),
@@ -82,7 +83,7 @@ async function harness() {
         useParamBlockDragHandoff({
             ...inputs,
             paramView,
-            authorityRevision,
+            authority: { curveRevision: authorityRevision, requestSeq },
             getAuthorityWatermark: () => ({
                 issuedRequestSeq: requestSeq,
                 appliedRequestSeq: requestSeq,

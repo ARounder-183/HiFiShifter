@@ -28,30 +28,22 @@ export function captureParamBlockCreateCurve(
  * 【违反边界的症状】在这里再排一次队 ⇒ 两层队列共用同一个 CAS，冲突重新出现；
  * 忘记 `onSettled` ⇒ 块停留在本地预览，直到下一次无关的刷新。
  */
-export function enqueueParamBlockCreateCommit(args: {
+export function enqueueParamBlockCreateCommit<T>(args: {
     activity: RefObject<ParamBlockDragActivity>;
     liveActive: RefObject<boolean>;
     /** 完整提交（含读基准）；由 `commitPlan` 串行化。 */
-    run: () => Promise<unknown>;
+    run: () => Promise<T>;
     onSettled: () => void;
-}): Promise<void> {
+}): Promise<T> {
     args.activity.current.pendingCommits++;
     args.liveActive.current = true;
-    return args
-        .run()
-        .then(
-            () => undefined,
-            (error: unknown) => {
-                throw error;
-            },
+    return args.run().finally(() => {
+        args.activity.current.pendingCommits--;
+        if (
+            !args.activity.current.pendingCommits &&
+            args.activity.current.pointerGestureToken === null
         )
-        .finally(() => {
-            args.activity.current.pendingCommits--;
-            if (
-                !args.activity.current.pendingCommits &&
-                args.activity.current.pointerGestureToken === null
-            )
-                args.liveActive.current = false;
-            args.onSettled();
-        });
+            args.liveActive.current = false;
+        args.onSettled();
+    });
 }

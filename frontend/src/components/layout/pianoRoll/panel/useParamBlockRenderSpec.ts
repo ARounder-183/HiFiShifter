@@ -94,8 +94,6 @@ export interface ParamBlockResizePreview {
     readonly createdBlockId?: string;
     /** 手势起点 epoch；外部历史 / 布局变化后预览立即失效。 */
     readonly epoch?: ParamBlockEpoch;
-    /** 自身提交产生的 edit revision；外部结构编辑不会写它。 */
-    ownedEditRevision?: number | null;
     /** 手势起点的帧周期；提交与 minBlockSec 都按它折算，不受回包影响。 */
     readonly framePeriodMsBasis?: number;
     targetSec: number;
@@ -146,7 +144,6 @@ export function useParamBlockRenderSpec(
             isParamBlockVisualEpochCurrent({
                 epoch: activeTransaction.epoch,
                 current: epoch,
-                ownedEditRevision: activeTransaction.ownedEditRevision,
             })
         ) {
             return activeTransaction.spec;
@@ -167,7 +164,6 @@ export function useParamBlockRenderSpec(
                 isParamBlockVisualEpochCurrent({
                     epoch: resizing.epoch,
                     current: epoch,
-                    ownedEditRevision: resizing.ownedEditRevision ?? null,
                 }))
         ) {
             const resizeStart =
@@ -328,7 +324,6 @@ export function useParamBlockRenderSpec(
             isParamBlockVisualEpochCurrent({
                 epoch: dragSnapshot.epoch,
                 current: epoch,
-                ownedEditRevision: dragSnapshot.ownedEditRevision,
             }) &&
             shouldUseParamBlockDragSnapshotForRender({
                 snapshotKey: dragSnapshot.key,

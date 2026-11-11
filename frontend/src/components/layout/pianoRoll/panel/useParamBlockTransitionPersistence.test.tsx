@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
     setParamBlockTransition: vi.fn(),
     commitPlan: vi.fn(),
     stampCurveCommit: vi.fn(),
+    stampCurveCommitted: vi.fn(),
 }));
 
 /** 最近一次 plan 的准备结果（由 commitPlan 的 mock 填入）。 */
@@ -85,9 +86,7 @@ function Harness() {
         bumpRefreshToken: vi.fn(),
         invalidate: vi.fn(),
         stampCurveCommit: mocks.stampCurveCommit,
-        visualTransactionRef: { current: { ownedEditRevision: null } },
-        dragSnapshotRef: { current: null },
-        resizeRef: { current: null },
+        stampCurveCommitted: mocks.stampCurveCommitted,
     });
     useEffect(() => {
         api.persistPitchTransitionCurve = hook.persistPitchTransitionCurve;

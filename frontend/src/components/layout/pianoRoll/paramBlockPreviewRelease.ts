@@ -23,6 +23,7 @@ import type { ParamBlockVisualTransaction } from "./paramBlockVisualTransaction"
 import { paramViewContainsCommittedSegments } from "./paramBlocks";
 import {
     isParamAuthorityConfirmedAfterCommit,
+    type ParamAuthoritySnapshot,
     type ParamAuthorityWatermark,
 } from "./paramBlockTransaction";
 import type { ParamViewSegment } from "./types";
@@ -103,7 +104,10 @@ export function isParamBlockPreviewGeometrySettled(args: {
  * - 数组：曲线片段已知 ⇒ 三个条件必须同时成立。
  */
 export interface ParamBlockAuthorityWait {
-    readonly authorityRevisionAtStart?: number | null;
+    /** 提交时后端曲线代次（= 提交携带的 `expectedCurveRevision`）。 */
+    readonly curveRevisionAtStart?: number | null;
+    /** 提交成功回包里的新后端曲线代次。缺省 = 还没拿到回包。 */
+    readonly curveRevisionCommitted?: number | null;
     readonly authorityRequestSeqAtCommit?: number | null;
     readonly committedSegments?:
         | readonly {
@@ -121,15 +125,22 @@ export interface ParamBlockAuthorityWait {
  */
 export function isParamBlockAuthorityVisible(args: {
     readonly wait: ParamBlockAuthorityWait;
-    readonly authorityRevision: number;
+    /** 已落地的权威曲线代次（后端单位，全仓唯一）。 */
+    readonly authority: ParamAuthoritySnapshot;
     readonly watermark: ParamAuthorityWatermark;
     readonly paramView: ParamViewSegment | null;
 }): boolean {
     const committed = args.wait.committedSegments;
     if (committed === undefined || committed === null || committed.length === 0) return false;
+    /*
+     * 【没有回包就不算可见】提交成功回包里的新代次是唯一证据。缺它时无论本地
+     * 计数器多大都不能放行 —— 旧实现正是拿本地计数器比后端代次，判据几乎永远为假。
+     */
+    const target = args.wait.curveRevisionCommitted;
+    if (typeof target !== "number" || !Number.isFinite(target)) return false;
     return (
-        Number.isFinite(args.wait.authorityRevisionAtStart ?? Number.NaN) &&
-        args.authorityRevision > (args.wait.authorityRevisionAtStart ?? Number.POSITIVE_INFINITY) &&
+        Number.isFinite(args.wait.curveRevisionAtStart ?? Number.NaN) &&
+        args.authority.curveRevision >= target &&
         isParamAuthorityConfirmedAfterCommit({
             watermark: args.watermark,
             issuedRequestSeqAtCommit: args.wait.authorityRequestSeqAtCommit ?? 0,
@@ -148,7 +159,7 @@ export function isParamBlockAuthorityVisible(args: {
  */
 export function resolveParamBlockRelease(input: {
     readonly wait: ParamBlockAuthorityWait;
-    readonly authorityRevision: number;
+    readonly authority: ParamAuthoritySnapshot;
     readonly watermark: ParamAuthorityWatermark;
     readonly paramView: ParamViewSegment | null;
     /** 纯布局提交的补充判据（几何已到位 / 块已出现在派生视图）。 */
@@ -168,7 +179,7 @@ export function resolveParamBlockRelease(input: {
     if (
         isParamBlockAuthorityVisible({
             wait: input.wait,
-            authorityRevision: input.authorityRevision,
+            authority: input.authority,
             watermark: input.watermark,
             paramView: input.paramView,
         })
@@ -189,7 +200,7 @@ export interface ParamBlockPreviewReleaseInput {
     readonly gestureActive: boolean;
     /** 队列里还有未落地的提交。 */
     readonly pendingCommits: number;
-    readonly authorityRevision: number;
+    readonly authority: ParamAuthoritySnapshot;
     readonly watermark: ParamAuthorityWatermark;
     readonly paramView: ParamViewSegment | null;
     readonly timeoutMs?: number;
@@ -206,11 +217,10 @@ export function shouldReleaseParamBlockPreview(
     input: ParamBlockPreviewReleaseInput,
 ): ParamBlockPreviewRelease {
     const { transaction } = input;
-    if (transaction.phase === "gesture") return "wait";
     /* 薄适配器：判据只有一份（resolveParamBlockRelease），这里只负责拆包。 */
     return resolveParamBlockRelease({
         wait: transaction,
-        authorityRevision: input.authorityRevision,
+        authority: input.authority,
         watermark: input.watermark,
         paramView: input.paramView,
         geometrySettled: input.geometrySettled,

@@ -56,6 +56,16 @@ export interface ParamBlockWritePreparation {
     };
 }
 
+/**
+ * 一次写入成功后的回包摘要。
+ *
+ * 【只有 curveRevision】调用方需要的唯一事实是「这次写入之后后端的曲线代次」——
+ * 预览释放判据拿它和已落地的权威代次比（见 `paramBlockPreviewRelease`）。
+ */
+export interface ParamBlockWriteResult {
+    readonly curveRevision: number;
+}
+
 /** 一次块写入的完整意图。 */
 export interface ParamBlockWritePlan {
     readonly kind: ParamBlockCommitKind;

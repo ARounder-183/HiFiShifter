@@ -25,7 +25,7 @@ const EPOCH: ParamBlockEpoch = {
     rootTrackId: "root",
     param: "pitch",
     layoutKey: "layout",
-    editRevision: 3,
+    structureToken: "structure-1",
     externalHistoryToken: "0:0",
     framePeriodMs: 5,
 };
@@ -63,10 +63,9 @@ function tx(overrides: Partial<ParamBlockVisualTransaction> = {}): ParamBlockVis
         epoch: EPOCH,
         kind: "create",
         spec: spec(),
-        phase: "awaiting-authority",
         startedAt: 0,
-        ownedEditRevision: null,
-        authorityRevisionAtStart: 10,
+        curveRevisionAtStart: 10,
+        curveRevisionCommitted: 11,
         authorityRequestSeqAtCommit: 5,
         committedSegments: SEGMENTS,
         ...overrides,
@@ -78,7 +77,7 @@ const BASE = {
     geometrySettled: true,
     gestureActive: false,
     pendingCommits: 0,
-    authorityRevision: 11,
+    authority: { curveRevision: 11, requestSeq: 6 },
     watermark: { issuedRequestSeq: 6, appliedRequestSeq: 6 },
     paramView: view([64, 64, 64, 60, 60, 60]),
 } as const;
@@ -102,7 +101,7 @@ describe("shouldReleaseParamBlockPreview", () => {
             shouldReleaseParamBlockPreview({
                 ...BASE,
                 transaction: tx(),
-                authorityRevision: 10,
+                authority: { curveRevision: 10, requestSeq: 6 },
             }),
         ).toBe("wait");
         // revision 前进了，但窗口里仍是旧值。
@@ -163,10 +162,32 @@ describe("shouldReleaseParamBlockPreview", () => {
         ).toBe("wait");
     });
 
-    it("waits for the gesture phase to end before considering anything", () => {
+    /*
+     * 【单位统一的回归锁】旧实现把「本地取数计数器」当成 authorityRevision 传进来，
+     * 而事务上存的是**后端**代次 —— 两个数不可比，判据几乎永远为假，带曲线补丁的
+     * 过渡事务每次都要等满 2s 超时才释放。现在缺回包里的新代次就一律不放行，
+     * 本地计数器再大也没用。
+     */
+    it("★ 没有回包里的新代次就不算权威可见（本地计数器再大也没用）", () => {
         expect(
-            shouldReleaseParamBlockPreview({ ...BASE, transaction: tx({ phase: "gesture" }) }),
+            shouldReleaseParamBlockPreview({
+                ...BASE,
+                transaction: tx({ curveRevisionCommitted: undefined }),
+                authority: { curveRevision: 99_999, requestSeq: 6 },
+            }),
         ).toBe("wait");
+        expect(
+            isParamBlockAuthorityVisible({
+                wait: {
+                    curveRevisionAtStart: 10,
+                    committedSegments: SEGMENTS,
+                    authorityRequestSeqAtCommit: 5,
+                },
+                authority: { curveRevision: 99_999, requestSeq: 6 },
+                watermark: { issuedRequestSeq: 6, appliedRequestSeq: 6 },
+                paramView: view([64, 64, 64, 60, 60, 60]),
+            }),
+        ).toBe(false);
     });
 
     it("times out instead of locking the preview forever", () => {
@@ -176,7 +197,7 @@ describe("shouldReleaseParamBlockPreview", () => {
                 ...BASE,
                 transaction: stale,
                 now: PARAM_BLOCK_PREVIEW_RELEASE_TIMEOUT_MS + 1,
-                authorityRevision: 10,
+                authority: { curveRevision: 10, requestSeq: 6 },
             }),
         ).toBe("timeout");
     });
@@ -188,7 +209,7 @@ describe("shouldReleaseParamBlockPreview", () => {
                 transaction: tx(),
                 now: 50,
                 timeoutMs: 10,
-                authorityRevision: 10,
+                authority: { curveRevision: 10, requestSeq: 6 },
             }),
         ).toBe("timeout");
     });
@@ -283,7 +304,7 @@ describe("isParamBlockPreviewGeometrySettled", () => {
  */
 describe("resolveParamBlockRelease", () => {
     const base = {
-        authorityRevision: 11,
+        authority: { curveRevision: 11, requestSeq: 6 },
         watermark: { issuedRequestSeq: 6, appliedRequestSeq: 6 },
         paramView: view([64, 64, 64, 60, 60, 60]),
         geometrySettled: false,
@@ -297,14 +318,22 @@ describe("resolveParamBlockRelease", () => {
         expect(
             resolveParamBlockRelease({
                 ...base,
-                wait: { authorityRevisionAtStart: 10, committedSegments: undefined },
+                wait: {
+                    curveRevisionAtStart: 10,
+                    curveRevisionCommitted: 11,
+                    committedSegments: undefined,
+                },
                 geometrySettled: true,
             }),
         ).toBe("release");
         expect(
             resolveParamBlockRelease({
                 ...base,
-                wait: { authorityRevisionAtStart: 10, committedSegments: undefined },
+                wait: {
+                    curveRevisionAtStart: 10,
+                    curveRevisionCommitted: 11,
+                    committedSegments: undefined,
+                },
                 geometrySettled: false,
             }),
         ).toBe("wait");
@@ -314,7 +343,11 @@ describe("resolveParamBlockRelease", () => {
         expect(
             resolveParamBlockRelease({
                 ...base,
-                wait: { authorityRevisionAtStart: 10, committedSegments: null },
+                wait: {
+                    curveRevisionAtStart: 10,
+                    curveRevisionCommitted: 11,
+                    committedSegments: null,
+                },
                 geometrySettled: true,
             }),
         ).toBe("wait");
@@ -322,7 +355,11 @@ describe("resolveParamBlockRelease", () => {
         expect(
             resolveParamBlockRelease({
                 ...base,
-                wait: { authorityRevisionAtStart: 10, committedSegments: null },
+                wait: {
+                    curveRevisionAtStart: 10,
+                    curveRevisionCommitted: 11,
+                    committedSegments: null,
+                },
                 geometrySettled: true,
                 now: PARAM_BLOCK_PREVIEW_RELEASE_TIMEOUT_MS + 1,
             }),
@@ -331,12 +368,19 @@ describe("resolveParamBlockRelease", () => {
 
     it("array = waits for the three authority conditions, then releases", () => {
         const wait = {
-            authorityRevisionAtStart: 10,
+            curveRevisionAtStart: 10,
+            curveRevisionCommitted: 11,
             authorityRequestSeqAtCommit: 5,
             committedSegments: SEGMENTS,
         };
         expect(resolveParamBlockRelease({ ...base, wait })).toBe("release");
-        expect(resolveParamBlockRelease({ ...base, wait, authorityRevision: 10 })).toBe("wait");
+        expect(
+            resolveParamBlockRelease({
+                ...base,
+                wait,
+                authority: { curveRevision: 10, requestSeq: 6 },
+            }),
+        ).toBe("wait");
         expect(
             resolveParamBlockRelease({ ...base, wait, paramView: view([60, 60, 60, 60, 60, 60]) }),
         ).toBe("wait");
@@ -353,8 +397,12 @@ describe("resolveParamBlockRelease", () => {
         expect(
             resolveParamBlockRelease({
                 ...base,
-                wait: { authorityRevisionAtStart: 10, committedSegments: SEGMENTS },
-                authorityRevision: 10,
+                wait: {
+                    curveRevisionAtStart: 10,
+                    curveRevisionCommitted: 11,
+                    committedSegments: SEGMENTS,
+                },
+                authority: { curveRevision: 10, requestSeq: 6 },
                 now: PARAM_BLOCK_PREVIEW_RELEASE_TIMEOUT_MS + 1,
             }),
         ).toBe("timeout");
@@ -363,7 +411,11 @@ describe("resolveParamBlockRelease", () => {
     it("a running gesture or a queued commit wins over the timeout", () => {
         const timedOut = {
             ...base,
-            wait: { authorityRevisionAtStart: 10, committedSegments: SEGMENTS },
+            wait: {
+                curveRevisionAtStart: 10,
+                curveRevisionCommitted: 11,
+                committedSegments: SEGMENTS,
+            },
             now: PARAM_BLOCK_PREVIEW_RELEASE_TIMEOUT_MS + 1,
         } as const;
         expect(resolveParamBlockRelease({ ...timedOut, gestureActive: true })).toBe("wait");
@@ -374,8 +426,12 @@ describe("resolveParamBlockRelease", () => {
         expect(
             resolveParamBlockRelease({
                 ...base,
-                wait: { authorityRevisionAtStart: 10, committedSegments: SEGMENTS },
-                authorityRevision: 10,
+                wait: {
+                    curveRevisionAtStart: 10,
+                    curveRevisionCommitted: 11,
+                    committedSegments: SEGMENTS,
+                },
+                authority: { curveRevision: 10, requestSeq: 6 },
                 now: 50,
                 timeoutMs: 10,
             }),
@@ -386,20 +442,21 @@ describe("resolveParamBlockRelease", () => {
 describe("isParamBlockAuthorityVisible", () => {
     it("needs revision progress, a confirmed watermark, and the segments in the window", () => {
         const wait = {
-            authorityRevisionAtStart: 10,
+            curveRevisionAtStart: 10,
+            curveRevisionCommitted: 11,
             authorityRequestSeqAtCommit: 5,
             committedSegments: SEGMENTS,
         };
         expect(
             isParamBlockAuthorityVisible({
                 wait,
-                authorityRevision: 11,
+                authority: { curveRevision: 11, requestSeq: 6 },
                 watermark: { issuedRequestSeq: 6, appliedRequestSeq: 6 },
                 paramView: view([64, 64, 64, 60, 60, 60]),
             }),
         ).toBe(true);
         for (const overrides of [
-            { authorityRevision: 10 },
+            { authority: { curveRevision: 10, requestSeq: 6 } },
             { watermark: { issuedRequestSeq: 6, appliedRequestSeq: 4 } },
             { paramView: null },
             { paramView: view([60, 60, 60, 60, 60, 60]) },
@@ -407,7 +464,7 @@ describe("isParamBlockAuthorityVisible", () => {
             expect(
                 isParamBlockAuthorityVisible({
                     wait,
-                    authorityRevision: 11,
+                    authority: { curveRevision: 11, requestSeq: 6 },
                     watermark: { issuedRequestSeq: 6, appliedRequestSeq: 6 },
                     paramView: view([64, 64, 64, 60, 60, 60]),
                     ...overrides,
@@ -419,20 +476,28 @@ describe("isParamBlockAuthorityVisible", () => {
 
     it("is false for layout-only and not-yet-computed waits", () => {
         const common = {
-            authorityRevision: 11,
+            authority: { curveRevision: 11, requestSeq: 6 },
             watermark: { issuedRequestSeq: 6, appliedRequestSeq: 6 },
             paramView: view([64, 64, 64, 60, 60, 60]),
         } as const;
         expect(
             isParamBlockAuthorityVisible({
                 ...common,
-                wait: { authorityRevisionAtStart: 10, committedSegments: undefined },
+                wait: {
+                    curveRevisionAtStart: 10,
+                    curveRevisionCommitted: 11,
+                    committedSegments: undefined,
+                },
             }),
         ).toBe(false);
         expect(
             isParamBlockAuthorityVisible({
                 ...common,
-                wait: { authorityRevisionAtStart: 10, committedSegments: null },
+                wait: {
+                    curveRevisionAtStart: 10,
+                    curveRevisionCommitted: 11,
+                    committedSegments: null,
+                },
             }),
         ).toBe(false);
     });

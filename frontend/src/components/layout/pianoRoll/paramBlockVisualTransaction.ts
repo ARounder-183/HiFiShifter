@@ -2,9 +2,10 @@
  * Parameter-block visual transaction state.
  *
  * A visual preview may not outlive an external layout/history/parameter
- * change. The epoch carries those identities; the transaction additionally
- * records the edit revision produced by its own commit so a self-commit does
- * not invalidate its own preview.
+ * change. The epoch carries those identities. It deliberately does **not**
+ * carry an edit revision: revisions are a content counter on the client and a
+ * CAS counter on the server, so they are not comparable — see
+ * `paramBlockStructureToken`.
  */
 import type { PianoRollParamBlockSpec } from "./kernel/host/pianoRollKernelData";
 
@@ -13,7 +14,15 @@ export interface ParamBlockEpoch {
     /** Parameter name; pitch and volume must never share a visual transaction. */
     readonly param: string;
     readonly layoutKey: string | null;
-    readonly editRevision: number;
+    /**
+     * 编辑集的**结构身份**（块 id / 几何 / 过渡宽度 / 删除标记的指纹）。
+     *
+     * 【为什么不是 revision】revision 在前端是内容代次、在后端是 CAS 代次，两者
+     * 不可比；而视觉预览真正关心的是「块的形状有没有被第三方改过」。结构令牌只在
+     * 形状变化时变化：一次拖动只改 value（中心）与曲线，令牌不变 ⇒ 自己的提交
+     * 不会撤销自己的预览。
+     */
+    readonly structureToken: string;
     /**
      * Only explicit history jumps (undo / redo / jump / project switch) change
      * this token. A block commit also advances the backend history depth, but
@@ -25,29 +34,31 @@ export interface ParamBlockEpoch {
 }
 
 export type ParamBlockVisualTransactionKind = "drag" | "resize" | "create" | "transition";
-export type ParamBlockVisualTransactionPhase =
-    "gesture" | "committing" | "awaiting-authority" | "released";
 
 export interface ParamBlockVisualTransaction {
     readonly id: number;
     readonly epoch: ParamBlockEpoch;
     readonly kind: ParamBlockVisualTransactionKind;
     spec: PianoRollParamBlockSpec;
-    phase: ParamBlockVisualTransactionPhase;
     readonly startedAt: number;
     /**
-     * Edit revision produced by this transaction's own commit. A transaction
-     * may survive that revision, but never a third-party structural edit.
-     */
-    ownedEditRevision: number | null;
-    /**
-     * 本次提交**依据**的曲线权威 revision（= 提交时携带的 expectedCurveRevision）。
+     * 本次提交**依据**的曲线权威代次（= 提交时携带的 expectedCurveRevision）。
      *
-     * 释放判据用它回答「权威有没有前进过」：只有 `authorityRevision >
-     * authorityRevisionAtStart` 才说明本轮提交已经落地。缺省（`undefined`）= 纯布局
-     * 提交，没有曲线可等。
+     * 【单位】后端 `param_curve_revision`。全仓只有这一个单位 —— 旧实现里过渡手柄
+     * 在这里存后端代次、却拿本地取数计数器去比，于是判据几乎永远为假，每次都要等满
+     * 2s 超时才释放预览（用户看到「拖完过渡手柄卡两秒」）。
+     *
+     * 缺省（`undefined`）= 纯布局提交，没有曲线可等。
      */
-    authorityRevisionAtStart?: number;
+    curveRevisionAtStart?: number;
+    /**
+     * 提交成功回包里的**新**后端曲线代次。缺省 = 还没拿到回包。
+     *
+     * 释放判据拿它和「已落地的权威曲线代次」比：`>=` 才说明这次写入的曲线已经
+     * 进了当前窗口。用「回包里的新代次」而不是「起始代次 + 1」，是因为两者之间可能
+     * 还有别的写入。
+     */
+    curveRevisionCommitted?: number;
     /** 提交时的权威请求序号；配合 watermark 排除"提交前发出的在飞回包"。 */
     authorityRequestSeqAtCommit?: number;
     /**
@@ -68,7 +79,7 @@ export interface ParamBlockVisualTransaction {
 }
 
 /**
- * Drag visuals survive their own commit changing editRevision, but not an
+ * Drag visuals survive their own commit changing the edit set, but not an
  * external history jump, root switch, parameter switch, clip layout change, or
  * frame period change.
  */
@@ -88,25 +99,25 @@ export function sameParamBlockExternalEpoch(a: ParamBlockEpoch, b: ParamBlockEpo
 }
 
 /**
- * A visual may survive its own commit changing editRevision, but not a
- * third-party structural edit. External edits do not know the owned revision,
- * so they fail this check immediately.
+ * 视觉预览是否仍然有效。
+ *
+ * 【判据只有两条】布局 / 历史 / 参数 / 帧周期都没变，且**结构令牌**没变。
+ * 旧实现还比 revision（外加一个永远对不上的 `ownedEditRevision`），于是自己提交的
+ * 回包一落地就撤掉自己的预览 —— 「先回弹、再生效」的成因。
  */
 export function isParamBlockVisualEpochCurrent(args: {
     readonly epoch: ParamBlockEpoch;
     readonly current: ParamBlockEpoch;
-    readonly ownedEditRevision: number | null;
 }): boolean {
-    if (!sameParamBlockEpochLayout(args.epoch, args.current)) return false;
-    if (args.current.editRevision === args.epoch.editRevision) return true;
-    return args.ownedEditRevision !== null && args.current.editRevision === args.ownedEditRevision;
+    return (
+        sameParamBlockEpochLayout(args.epoch, args.current) &&
+        args.epoch.structureToken === args.current.structureToken
+    );
 }
 
 export function shouldUseParamBlockVisualTransaction(
     tx: ParamBlockVisualTransaction | null,
     currentEpoch: ParamBlockEpoch,
 ): boolean {
-    return (
-        tx !== null && tx.phase !== "released" && sameParamBlockEpochLayout(tx.epoch, currentEpoch)
-    );
+    return tx !== null && sameParamBlockEpochLayout(tx.epoch, currentEpoch);
 }

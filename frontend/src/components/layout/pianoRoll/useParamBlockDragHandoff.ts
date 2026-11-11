@@ -4,7 +4,11 @@ import {
     PARAM_BLOCK_PREVIEW_RELEASE_TIMEOUT_MS,
     isParamBlockAuthorityVisible,
 } from "./paramBlockPreviewRelease";
-import { ownsParamBlockGesture, type ParamAuthorityWatermark } from "./paramBlockTransaction";
+import {
+    ownsParamBlockGesture,
+    type ParamAuthoritySnapshot,
+    type ParamAuthorityWatermark,
+} from "./paramBlockTransaction";
 import type { ParamViewSegment } from "./types";
 
 export interface ParamBlockDragHandoffInputs {
@@ -14,7 +18,8 @@ export interface ParamBlockDragHandoffInputs {
     readonly activeGestureTokenRef: RefObject<number | null>;
     readonly releaseRafRef: RefObject<number | null>;
     readonly paramView: ParamViewSegment | null;
-    readonly authorityRevision: number;
+    /** 已落地的权威曲线代次（后端单位）。 */
+    readonly authority: ParamAuthoritySnapshot;
     readonly getAuthorityWatermark: () => ParamAuthorityWatermark;
     readonly structureVersion: number;
     readonly clearLiveEditOverride: () => void;
@@ -31,7 +36,7 @@ export function useParamBlockDragHandoff({
     activeGestureTokenRef,
     releaseRafRef,
     paramView,
-    authorityRevision,
+    authority,
     getAuthorityWatermark,
     structureVersion,
     clearLiveEditOverride,
@@ -89,13 +94,13 @@ export function useParamBlockDragHandoff({
         )
             return;
         /*
-         * 判据只有一份（isParamBlockAuthorityVisible）：revision 前进 ∧ 水位确认 ∧
-         * 当前窗口包含提交片段。三处交接（块拖动 / 新建 / 视觉事务）共用它，
+         * 判据只有一份（isParamBlockAuthorityVisible）：回包里的新代次已落地 ∧ 水位
+         * 确认 ∧ 当前窗口包含提交片段。三处交接（块拖动 / 新建 / 视觉事务）共用它，
          * 上一版各写一遍，其中新建那条忘了超时。
          */
         const curveSettled = isParamBlockAuthorityVisible({
             wait: handoff,
-            authorityRevision,
+            authority,
             watermark: getAuthorityWatermark(),
             paramView,
         });
@@ -130,7 +135,7 @@ export function useParamBlockDragHandoff({
         };
     }, [
         activeGestureTokenRef,
-        authorityRevision,
+        authority,
         clearLiveEditOverride,
         commitRef,
         getAuthorityWatermark,

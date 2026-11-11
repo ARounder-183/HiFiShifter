@@ -86,11 +86,12 @@ import { composeParamBlockView } from "../paramBlockComposition";
 import { planParamBlockGesture, type ParamBlockGesturePlan } from "../paramBlockGesture";
 import { reportParamBlockDiagnostic } from "../paramBlockDiagnostics";
 import { publishParamBlockWriteFailure } from "../paramBlockFeedback";
+import { createParamBlockWritePlan } from "./paramBlockCreateWritePlan";
+import { paramBlockStructureToken } from "../paramBlockStructureToken";
 import {
     reportParamBlockLocalRejection,
     reportParamBlockWriteFailure,
 } from "./paramBlockFailureReporting";
-import { ParamBlockCommitError } from "../paramBlockCommitError";
 import type { ParamBlockWritePreparation } from "../paramBlockWritePlan";
 import {
     toFrame,
@@ -101,7 +102,6 @@ import { logicalBlockId, type ParamBlockView } from "../paramBlockTypes";
 import { resolveParamBlockGeometryClips } from "../paramBlockGeometryFreeze";
 import { fetchFullResCurve, readPvRange } from "../selectionEditData";
 import { useParamBlockTransitionPersistence } from "./useParamBlockTransitionPersistence";
-import { markParamBlockPreviewOwnedRevision as markPreviewOwnedRevision } from "../paramBlockPreviewOwnership";
 import { startPointerGesture } from "../gestures/pointerGesture";
 import { armRightDragContextMenuGuard } from "../../../../utils/rightDragContextMenuGuard";
 import { normalizeCssColor } from "../colors";
@@ -1785,7 +1785,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
 
     const {
         paramView,
-        authorityRevision: paramAuthorityRevision,
+        authoritySnapshot: paramAuthoritySnapshot,
         getAuthorityWatermark,
         setParamView,
         secondaryParamViews,
@@ -2359,16 +2359,19 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      * 新建块松手后的交接。预览保持到 React 块记录与本轮权威曲线刷新都落地，
      * 然后跨越一帧再撤下，避免“预览 -> 空一帧 -> 正式块”闪烁。
      */
-    const paramBlockCreateCommitRef = useRef<{
+    type ParamBlockCreateHandoff = {
         readonly blockId: string;
         /** 松手提交的时刻；`resolveParamBlockRelease` 用它算超时。 */
         readonly startedAt: number;
-        readonly authorityRevisionAtStart: number;
-        readonly authorityRequestSeqAtCommit: number;
-        readonly requiresCurveAuthority: boolean;
+        readonly curveRevisionAtStart: number;
+        authorityRequestSeqAtCommit: number;
+        requiresCurveAuthority: boolean;
+        /** 提交成功回包里的新后端曲线代次（预览释放的唯一证据）。 */
+        curveRevisionCommitted?: number;
         committedSegments?: readonly { startFrame: number; values: readonly number[] }[];
         committed: boolean;
-    } | null>(null);
+    };
+    const paramBlockCreateCommitRef = useRef<ParamBlockCreateHandoff | null>(null);
     const paramBlockCreateReleaseRafRef = useRef<number | null>(null);
     /**
      * 边缘伸缩刚提交后的短前向快照。
@@ -2434,7 +2437,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     const latestParamBlockSpecRef = useRef<PianoRollParamBlockSpec | null>(null);
     const invalidateParamBlockSpec = useCallback(() => {
         const transaction = paramBlockVisualTransactionRef.current;
-        if (transaction !== null && transaction.phase !== "released") {
+        if (transaction !== null) {
             kernelDataRef.current.paramBlocks = transaction.spec;
             invalidate();
             return;
@@ -2537,25 +2540,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      * paramView 刷新会在同一帧给出两套几何，正是块在两个位置快速闪烁的来源。
      */
     const paramBlockDragSnapshotRef = useRef<ParamBlockDragSnapshot | null>(null);
-
-    /**
-     * 把“本地提交产生的 edit revision”记到所有仍存活的视觉预览上。
-     *
-     * 创建 / 拉伸 / 过渡都会在 pointerup 时同时做两件事：推进本地 editSet
-     * revision，并保留预览直到权威曲线到达。若只标记其中一种 ref，epoch 检查会
-     * 把这次**自己的** revision 变化误判成外部结构编辑，提前撤下预览 —— 用户
-     * 看到参数线与块先回弹旧值、再跳到新值。统一入口避免再漏一条路径。
-     */
-    function markParamBlockPreviewOwnedRevision(revision: number): void {
-        markPreviewOwnedRevision(
-            {
-                visualTransaction: paramBlockVisualTransactionRef,
-                dragSnapshot: paramBlockDragSnapshotRef,
-                resize: paramBlockResizeRef,
-            },
-            revision,
-        );
-    }
 
     /** 块命中容差（CSS px）：触摸 / 笔比鼠标更容易漂，分别给不同容差。 */
     const paramBlockHitSlopPx = 4;
@@ -2961,7 +2945,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             rootTrackId,
             param: editParam,
             layoutKey: paramBlockView?.layoutKey ?? null,
-            editRevision: paramBlockView?.editRevision ?? paramBlockState.editSet.revision,
+            /*
+             * 结构令牌取代 revision：revision 前端是内容代次、后端是 CAS 代次，
+             * 不可比；而预览只关心「块的形状有没有被第三方改过」。
+             */
+            structureToken: paramBlockStructureToken(paramBlockState.editSet),
             externalHistoryToken: `${rootTrackId ?? ""}:${paramBlockExternalHistoryToken}`,
             framePeriodMs: paramBlockState.framePeriodMs,
         }),
@@ -2969,8 +2957,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             rootTrackId,
             editParam,
             paramBlockView?.layoutKey,
-            paramBlockView?.editRevision,
-            paramBlockState.editSet.revision,
+            paramBlockState.editSet,
             paramBlockState.framePeriodMs,
             paramBlockExternalHistoryToken,
         ],
@@ -3228,16 +3215,20 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             onParamCommitSucceeded,
             bumpRefreshToken,
             invalidate,
-            visualTransactionRef: paramBlockVisualTransactionRef,
             stampCurveCommit: ({ segments, authority }) => {
                 const tx = paramBlockVisualTransactionRef.current;
                 if (tx === null) return;
-                tx.authorityRevisionAtStart = authority?.expectedCurveRevision;
+                tx.curveRevisionAtStart = authority?.expectedCurveRevision;
+                // 回包里的新代次由 stampCurveCommitted 在提交成功后补上。
+                tx.curveRevisionCommitted = undefined;
                 tx.authorityRequestSeqAtCommit = getAuthorityWatermark().issuedRequestSeq;
                 tx.committedSegments = segments;
             },
-            dragSnapshotRef: paramBlockDragSnapshotRef,
-            resizeRef: paramBlockResizeRef,
+            stampCurveCommitted: (curveRevision) => {
+                const tx = paramBlockVisualTransactionRef.current;
+                if (tx === null) return;
+                tx.curveRevisionCommitted = curveRevision;
+            },
         });
 
     /**
@@ -3306,7 +3297,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             !isParamBlockVisualEpochCurrent({
                 epoch: tx.epoch,
                 current: paramBlockEpoch,
-                ownedEditRevision: tx.ownedEditRevision,
             });
         const dragSnapshot = paramBlockDragSnapshotRef.current;
         const dragMismatch =
@@ -3314,7 +3304,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             !isParamBlockVisualEpochCurrent({
                 epoch: dragSnapshot.epoch,
                 current: paramBlockEpoch,
-                ownedEditRevision: dragSnapshot.ownedEditRevision,
             });
         const resizing = paramBlockResizeRef.current;
         const resizeMismatch =
@@ -3322,7 +3311,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             !isParamBlockVisualEpochCurrent({
                 epoch: resizing.epoch,
                 current: paramBlockEpoch,
-                ownedEditRevision: resizing.ownedEditRevision ?? null,
             });
         if (!txMismatch && !dragMismatch && !resizeMismatch) return;
         invalidateParamBlockVisualPreviews("layout");
@@ -3654,25 +3642,18 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         paramBlockSpecForDragSnapshotRef.current = paramBlockSpecForDragSnapshot;
     }, [paramBlockSpecForDragSnapshot]);
     const publishParamBlockVisualTransaction = useCallback(
-        (
-            kind: ParamBlockVisualTransactionKind,
-            spec: PianoRollParamBlockSpec,
-            phase: ParamBlockVisualTransaction["phase"] = "gesture",
-        ) => {
+        (kind: ParamBlockVisualTransactionKind, spec: PianoRollParamBlockSpec) => {
             const previous = paramBlockVisualTransactionRef.current;
             const sameGesture =
                 previous !== null &&
                 previous.kind === kind &&
-                previous.phase === phase &&
                 sameParamBlockEpochLayout(previous.epoch, paramBlockEpochRef.current);
             paramBlockVisualTransactionRef.current = {
                 id: sameGesture ? previous.id : ++paramBlockGestureSerialRef.current,
                 epoch: paramBlockEpochRef.current,
                 kind,
                 spec,
-                phase,
                 startedAt: sameGesture ? previous.startedAt : performance.now(),
-                ownedEditRevision: sameGesture ? previous.ownedEditRevision : null,
             };
         },
         [paramBlockEpochRef],
@@ -3725,7 +3706,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                  */
                 commitBlockWrite: (plan) => blockPersistence.commitPlan(plan),
                 getAuthorityWatermark,
-                paramAuthorityRevision,
+                authorityCurveRevision: paramAuthoritySnapshot.curveRevision,
                 onParamCommitSucceeded,
                 bumpRefreshToken,
                 paramValuePopupEnabled: s.showParamValuePopup,
@@ -3782,7 +3763,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             paramBlockEpoch,
             paramBlocksWithValues,
             paramView,
-            paramAuthorityRevision,
+            paramAuthoritySnapshot,
             publishParamValuePreview,
             projectScaleAtSec,
             s.showParamValuePopup,
@@ -4402,11 +4383,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                             if (reason === "up" && activated) {
                                 const finalSpec = kernelDataRef.current.paramBlocks ?? null;
                                 if (finalSpec !== null) {
-                                    publishParamBlockVisualTransaction(
-                                        "transition",
-                                        finalSpec,
-                                        "awaiting-authority",
-                                    );
+                                    publishParamBlockVisualTransaction("transition", finalSpec);
                                     // 过渡几何不变：不在此刻宣布"要写曲线"就会被立刻释放。
                                     stampParamBlockCurveIntent(
                                         paramBlockVisualTransactionRef.current,
@@ -4615,7 +4592,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                             value: block.averageValue,
                         });
                     }
-                    const createAuthorityRevisionAtStart = paramAuthorityRevision;
+                    const createAuthorityCurveRevision = paramAuthoritySnapshot.curveRevision;
                     const createAuthorityRequestSeqAtCommit =
                         getAuthorityWatermark().issuedRequestSeq;
                     const updateCreatePreview = (event: {
@@ -4863,16 +4840,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                 createCommitted = true;
                                 const finalPreviewSpec = kernelDataRef.current.paramBlocks ?? null;
                                 if (finalPreviewSpec !== null) {
-                                    publishParamBlockVisualTransaction(
-                                        "create",
-                                        finalPreviewSpec,
-                                        "awaiting-authority",
-                                    );
+                                    publishParamBlockVisualTransaction("create", finalPreviewSpec);
                                     // 盖上「权威水位 + 曲线意图」；否则释放判据只能退回几何相等。
                                     const createTx = paramBlockVisualTransactionRef.current;
                                     if (createTx !== null) {
-                                        createTx.authorityRevisionAtStart =
-                                            createAuthorityRevisionAtStart;
+                                        createTx.curveRevisionAtStart =
+                                            createAuthorityCurveRevision;
                                         createTx.authorityRequestSeqAtCommit =
                                             createAuthorityRequestSeqAtCommit;
                                         stampParamBlockCurveIntent(
@@ -4899,17 +4872,17 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                     });
                                     if (created.ok) {
                                         setParamBlockState(created.state);
-                                        markParamBlockPreviewOwnedRevision(
-                                            created.state.editSet.revision,
-                                        );
                                     } else applyParamBlockEditRef.current?.(created);
                                     preserveCreatePreview = created.ok;
-                                    const createHandoff = created.ok
+                                    /*
+                                     * 显式标注成 ref 的元素类型：字面量推断会漏掉
+                                     * `curveRevisionCommitted`（它只在提交成功后写入）。
+                                     */
+                                    const createHandoff: ParamBlockCreateHandoff | null = created.ok
                                         ? {
                                               blockId: createId,
                                               startedAt: performance.now(),
-                                              authorityRevisionAtStart:
-                                                  createAuthorityRevisionAtStart,
+                                              curveRevisionAtStart: createAuthorityCurveRevision,
                                               authorityRequestSeqAtCommit:
                                                   createAuthorityRequestSeqAtCommit,
                                               requiresCurveAuthority: rootTrackId !== null,
@@ -4937,113 +4910,19 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                                   readonly values: readonly number[];
                                               }[]
                                             | undefined;
-                                        /**
-                                         * 队列槽内的准备：读全分辨率曲线 → 算补丁。
-                                         *
-                                         * 【为什么读也在这里】读与写必须在同一个槽里，否则
-                                         * `param_curve_revision` 会在两者之间被别人推进，
-                                         * 这次提交的 `expectedCurveRevision` 立刻过期 ——
-                                         * 旧实现正是这样把「新建块」变成概率性失败的。
-                                         */
-                                        const prepareCreate =
-                                            async (): Promise<ParamBlockWritePreparation> => {
-                                                if (curveBase === null) {
-                                                    /*
-                                                     * Layout-only commit: no curve window
-                                                     * exists yet, but the block must still
-                                                     * be persisted. Leaving it local was a
-                                                     * silent data-loss path.
-                                                     */
-                                                    return {
-                                                        state: created.state,
-                                                        checkpoint: true,
-                                                        patches: [],
-                                                    };
-                                                }
-                                                const fp = Math.max(1e-6, curveBase.framePeriodMs);
-                                                const startFrame = Math.max(
-                                                    0,
-                                                    Math.floor((createSpan.startSec * 1000) / fp),
-                                                );
-                                                const endFrame = Math.max(
-                                                    startFrame,
-                                                    (createLayoutBasis ? Math.round : Math.ceil)(
-                                                        (createSpan.endSec * 1000) / fp,
-                                                    ) - 1,
-                                                );
-                                                const source = await fetchFullResCurve({
-                                                    trackId: rootTrackId,
-                                                    param: editParam,
-                                                    startFrame,
-                                                    endFrame,
-                                                    paramView:
-                                                        createLayoutBasis !== null
-                                                            ? null
-                                                            : curveBase,
-                                                    // 创建提交带 curve patches；即使
-                                                    // curveBase 覆盖全分辨率也必须回源拿
-                                                    // authority，否则后端必拒。
-                                                    forceAuthority: true,
-                                                });
-                                                const segments = [
-                                                    {
-                                                        startFrame: source.startFrame,
-                                                        values: shiftParamBlockCurveValuesToTarget({
-                                                            values: source.values,
-                                                            target: resolveCreateBlockValue(
-                                                                createValue,
-                                                            ),
-                                                            param: editParam,
-                                                            flatten: createShape === "flat",
-                                                            curveOwned: createLayoutBasis !== null,
-                                                        }),
-                                                    },
-                                                ];
+                                        const prepareCreate = createParamBlockWritePlan({
+                                            state: created.state,
+                                            rootTrackId,
+                                            editParam,
+                                            curveBase,
+                                            layoutBasis: createLayoutBasis,
+                                            span: createSpan,
+                                            value: resolveCreateBlockValue(createValue),
+                                            shape: createShape,
+                                            onSegments: (segments) => {
                                                 preparedCreateSegments = segments;
-                                                if (createLayoutBasis === null) {
-                                                    /*
-                                                     * 块图层尚未就绪：没有可写的编辑集，曲线
-                                                     * 仍然必须落盘。它同样进队列 —— 它会推进
-                                                     * `param_curve_revision`。
-                                                     */
-                                                    return {
-                                                        state: created.state,
-                                                        checkpoint: true,
-                                                        curveOnly: { param: editParam, segments },
-                                                    };
-                                                }
-                                                if (source.authorityRevision === undefined) {
-                                                    throw new ParamBlockCommitError({
-                                                        kind: "rejected",
-                                                        code: "missing_curve_authority",
-                                                        detail: "param block create requires expectedCurveRevision",
-                                                    });
-                                                }
-                                                return {
-                                                    state: created.state,
-                                                    checkpoint: true,
-                                                    patches: segments.map((segment) => ({
-                                                        ...segment,
-                                                        param: editParam,
-                                                    })),
-                                                    authority: {
-                                                        expectedCurveRevision:
-                                                            source.authorityRevision,
-                                                        ...(source.geometryRevision === undefined
-                                                            ? {}
-                                                            : {
-                                                                  expectedGeometryRevision:
-                                                                      source.geometryRevision,
-                                                              }),
-                                                        ...(source.geometrySignature === undefined
-                                                            ? {}
-                                                            : {
-                                                                  expectedGeometrySignature:
-                                                                      source.geometrySignature,
-                                                              }),
-                                                    },
-                                                };
-                                            };
+                                            },
+                                        });
                                         void enqueueParamBlockCreateCommit({
                                             activity: paramBlockDragActivityRef,
                                             liveActive: liveEditActiveRef,
@@ -5060,22 +4939,42 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                                 invalidate();
                                             },
                                         })
-                                            .then(() => {
+                                            .then((result) => {
                                                 if (createHandoff === null) return;
+                                                const createTxNow =
+                                                    paramBlockVisualTransactionRef.current;
                                                 if (preparedCreateSegments !== undefined) {
                                                     createHandoff.committedSegments =
                                                         preparedCreateSegments;
-                                                    const createTxNow =
-                                                        paramBlockVisualTransactionRef.current;
                                                     if (createTxNow !== null) {
                                                         createTxNow.committedSegments =
                                                             preparedCreateSegments;
                                                     }
                                                 }
+                                                /*
+                                                 * 回包里的新曲线代次是释放判据的唯一证据；
+                                                 * 没有它（纯布局提交 / 曲线上传路径）就退回
+                                                 * 「几何已到位」。
+                                                 */
+                                                const committedCurveRevision =
+                                                    result?.curveRevision;
+                                                createHandoff.curveRevisionCommitted =
+                                                    committedCurveRevision;
+                                                if (createTxNow !== null) {
+                                                    createTxNow.curveRevisionCommitted =
+                                                        committedCurveRevision;
+                                                }
                                                 createHandoff.authorityRequestSeqAtCommit =
                                                     getAuthorityWatermark().issuedRequestSeq;
                                                 createHandoff.committed = true;
-                                                createHandoff.requiresCurveAuthority = false;
+                                                /*
+                                                 * 只有**没有曲线片段**的提交才允许按几何释放。
+                                                 * 无条件置 false 会让新建块也按几何释放 ——
+                                                 * 那就是「先回弹」。
+                                                 */
+                                                createHandoff.requiresCurveAuthority =
+                                                    preparedCreateSegments !== undefined &&
+                                                    createLayoutBasis !== null;
                                                 onParamCommitSucceeded();
                                             })
                                             .catch((error) => {
@@ -5499,12 +5398,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                     colors: paramBlockSpecColors,
                                     curveOwned: paramBlockViewRef.current !== null,
                                 }),
-                                "awaiting-authority",
                             );
                             const state = paramBlockStateRef.current;
                             const next: ParamBlockState = { ...state, editSet: plan.edits };
                             setParamBlockState(next);
-                            markParamBlockPreviewOwnedRevision(next.editSet.revision);
                             persistParamBlockEdits(next);
                             if (plan.removedIds.includes(gestureRef.blockId)) {
                                 paramBlockAnchorRef.current = null;
@@ -6597,7 +6494,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      */
     useEffect(() => {
         const tx = paramBlockVisualTransactionRef.current;
-        if (tx === null || tx.phase === "gesture") return;
+        if (tx === null) return;
         const decision = shouldReleaseParamBlockPreview({
             transaction: tx,
             now: performance.now(),
@@ -6607,7 +6504,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             }),
             gestureActive: paramBlockDragActivityRef.current.pointerGestureToken !== null,
             pendingCommits: paramBlockDragActivityRef.current.pendingCommits,
-            authorityRevision: paramAuthorityRevision,
+            authority: paramAuthoritySnapshot,
             watermark: getAuthorityWatermark(),
             paramView,
         });
@@ -6648,7 +6545,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         getAuthorityWatermark,
         invalidate,
         invalidateParamBlockVisualPreviews,
-        paramAuthorityRevision,
+        paramAuthoritySnapshot,
         paramBlockStructureTick,
         paramBlocksWithValues,
         paramView,
@@ -6669,13 +6566,14 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         if (paramBlockResizeRef.current?.blockId !== "__create__") return;
         const decision = resolveParamBlockRelease({
             wait: {
-                authorityRevisionAtStart: handoff.authorityRevisionAtStart,
+                curveRevisionAtStart: handoff.curveRevisionAtStart,
+                curveRevisionCommitted: handoff.curveRevisionCommitted,
                 authorityRequestSeqAtCommit: handoff.authorityRequestSeqAtCommit,
                 committedSegments: handoff.requiresCurveAuthority
                     ? (handoff.committedSegments ?? null)
                     : undefined,
             },
-            authorityRevision: paramAuthorityRevision,
+            authority: paramAuthoritySnapshot,
             watermark: getAuthorityWatermark(),
             paramView,
             geometrySettled: paramBlocksWithValues.some((block) => block.id === handoff.blockId),
@@ -6737,7 +6635,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         clearLiveEditOverride,
         getAuthorityWatermark,
         invalidateParamBlockSpec,
-        paramAuthorityRevision,
+        paramAuthoritySnapshot,
         paramView,
         resetLiveEditPreview,
         rootTrackId,
@@ -6751,7 +6649,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         activeGestureTokenRef: paramBlockActiveGestureTokenRef,
         releaseRafRef: paramBlockDragCommitReleaseRafRef,
         paramView,
-        authorityRevision: paramAuthorityRevision,
+        authority: paramAuthoritySnapshot,
         getAuthorityWatermark,
         structureVersion: paramBlockStructureTick,
         clearLiveEditOverride,

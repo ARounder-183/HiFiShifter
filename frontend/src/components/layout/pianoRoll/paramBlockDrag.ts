@@ -23,7 +23,11 @@ import type { EdgeScrollDriver } from "./kernel/edgeScrollDriver";
 import { blockMatchesLogicalId, logicalBlockId } from "./paramBlockTypes";
 import { ParamBlockCommitError } from "./paramBlockCommitError";
 import type { ParamCurveCommitAuthority } from "./paramBlockCommitPolicy";
-import type { ParamBlockCurvePatch, ParamBlockWritePlan } from "./paramBlockWritePlan";
+import type {
+    ParamBlockCurvePatch,
+    ParamBlockWritePlan,
+    ParamBlockWriteResult,
+} from "./paramBlockWritePlan";
 
 type Ref<T> = { current: T };
 type LiveEditing = ReturnType<typeof useLiveParamEditing>;
@@ -37,12 +41,6 @@ export type SnapModifiers = {
 export type ParamBlockDragSnapshot = {
     readonly key: string;
     readonly epoch: ParamBlockEpoch;
-    /**
-     * Edit revision produced by this gesture's own commit. Mutable so the
-     * commit path can keep the visual alive while a third-party structural
-     * edit invalidates it immediately.
-     */
-    ownedEditRevision: number | null;
     readonly startedAt: number;
     readonly ids: ReadonlySet<string>;
     readonly members: readonly ParamBlockMember[];
@@ -74,8 +72,13 @@ export type ParamBlockDragCommit = {
     /** 手势冻结窗口的起点 / 步长。 */
     readonly startFrame: number;
     readonly stride: number;
-    /** 手势开始时已经落地的后端参数 revision。 */
-    readonly authorityRevisionAtStart: number;
+    /**
+     * 本次提交**依据**的后端曲线代次（= 提交携带的 `expectedCurveRevision`）。
+     * 单位与 `curveRevisionCommitted` 一致，都是后端 `param_curve_revision`。
+     */
+    readonly curveRevisionAtStart: number;
+    /** 提交成功回包里的新后端曲线代次。缺省 = 还没拿到回包。 */
+    curveRevisionCommitted?: number;
     /** 写入成功时已发出的最大请求序号，排除写入前及写入中的陈旧响应。 */
     authorityRequestSeqAtCommit: number;
     /** 后端提交的逐帧值；权威窗口必须实际包含这些值才能撤预览。 */
@@ -148,9 +151,17 @@ export interface ParamBlockDragContext {
      * 交错时后写者必然过期，那是「各种编辑场景仍有概率报参数块操作失败」的
      * 结构性根因。缺省（单测）时退回不带 CAS 的曲线上传。
      */
-    readonly commitBlockWrite?: (plan: ParamBlockWritePlan) => Promise<unknown>;
+    readonly commitBlockWrite?: (
+        plan: ParamBlockWritePlan,
+    ) => Promise<ParamBlockWriteResult | undefined>;
     readonly getAuthorityWatermark: () => ParamAuthorityWatermark;
-    readonly paramAuthorityRevision: number;
+    /**
+     * 已落地的权威曲线代次（后端单位）。
+     *
+     * 【为什么不是本地计数器】视觉事务上存的是后端 `param_curve_revision`；拿本地
+     * 取数计数器去比，判据几乎永远为假 —— 旧实现因此每次都要等满 2s 超时才释放预览。
+     */
+    readonly authorityCurveRevision: number;
     readonly onParamCommitSucceeded: () => void;
     readonly bumpRefreshToken: () => void;
     readonly snapToggleHeldAt: (event: SnapModifiers) => boolean;
@@ -233,7 +244,7 @@ export function beginParamBlockDrag(
         setParamBlockState,
         commitBlockWrite,
         getAuthorityWatermark,
-        paramAuthorityRevision,
+        authorityCurveRevision,
         onParamCommitSucceeded,
         bumpRefreshToken,
         snapToggleHeldAt,
@@ -336,7 +347,6 @@ export function beginParamBlockDrag(
     const snapshot: ParamBlockDragSnapshot = {
         key: pv.key,
         epoch: paramBlockEpoch,
-        ownedEditRevision: null,
         startedAt: performance.now(),
         ids: new Set(dragIds),
         members: dragMembers.map((member) => ({ ...member })),
@@ -696,7 +706,7 @@ export function beginParamBlockDrag(
                 startedAt: commitStartedAt,
                 startFrame: pv.startFrame,
                 stride: pv.stride,
-                authorityRevisionAtStart: paramAuthorityRevision,
+                curveRevisionAtStart: authorityCurveRevision,
                 authorityRequestSeqAtCommit: getAuthorityWatermark().issuedRequestSeq,
                 committed: false,
                 releaseState: "waiting-for-curve",
@@ -912,7 +922,7 @@ export function beginParamBlockDrag(
                 };
             };
             if (liveEditActiveRef) liveEditActiveRef.current = true;
-            const write: Promise<unknown> =
+            const write: Promise<ParamBlockWriteResult | undefined> =
                 commitBlockWrite === undefined
                     ? prepareCommit().then(async () => {
                           await uploadFullResCurveSegments({
@@ -923,10 +933,12 @@ export function beginParamBlockDrag(
                                   values: window.values.slice(),
                               })),
                           });
+                          return undefined;
                       })
                     : commitBlockWrite({ kind: "drag", rootTrackId, prepare: prepareCommit });
             const commitRun = write
-                .then(() => {
+                .then((result) => {
+                    handoff.curveRevisionCommitted = result?.curveRevision;
                     // Record completion even when a newer gesture owns the visual frame:
                     // cancelling that gesture can restore this pending handoff.
                     handoff.committedSegments = preparedWindows.map((segment) => ({
