@@ -98,6 +98,15 @@ jobs:
           ZIP=$(ls frontend-dist | grep -E "\.zip$" || true)
           if [ -z "$ZIP" ]; then echo "No zip artifact found in frontend-dist"; ls -la frontend-dist; exit 1; fi
           unzip frontend-dist/$ZIP -d frontend
+      # Windows 侧必须与 Unix 侧一样把 artifact 解到 frontend/dist：
+      # build.ps1 直接读 frontend/dist，缺了这一步会在拷贝资源时失败。
+      - name: Extract frontend dist (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem -Path frontend-dist -Filter *.zip | Select-Object -First 1
+          if (-not $zip) { Write-Host "No zip artifact found in frontend-dist"; Get-ChildItem frontend-dist; exit 1 }
+          Expand-Archive -Path $zip.FullName -DestinationPath frontend -Force
       - name: Build CLAP (Unix)
         if: runner.os != 'Windows'
         run: bash scripts/clap/unix/build.sh --reuse-frontend

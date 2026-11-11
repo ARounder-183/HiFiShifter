@@ -1146,7 +1146,9 @@ mod tests {
             .clone();
         source.ensure_params_for_root(&root_id);
         if let Some(entry) = source.params_by_root_track.get_mut(&root_id) {
-            entry.pitch_edit.resize(1600, 61.0);
+            // 0 是"无用户目标"的哨兵：ensure_params_for_root 只把数组撑到工程长度，
+            // 不会填入基线。resize 缩短时也不会写值，必须显式给出这条编辑曲线。
+            entry.pitch_edit = vec![61.0; 1600];
             entry.pitch_edit_user_modified = true;
         }
         let child_id = source
