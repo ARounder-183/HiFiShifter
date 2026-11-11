@@ -1,5 +1,7 @@
 // 时间轴内核 seek / 拖拽手势。拆自 TimelinePanel。
 import React from "react";
+import { sameKernelGhostGeometry, type KernelGhostEntry } from "./kernelGhostGeometry";
+import { useKernelGestureInteractionLock } from "./useKernelGestureInteractionLock";
 import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
 import { resolveClipDragCopyMode } from "../hooks/clipDragCopyMode";
 import { copyClipsFromDrag } from "../hooks/copyClipsFromDrag";
@@ -15,8 +17,6 @@ import {
     moveClipTrack,
     checkpointHistory,
     setClipSourceRange,
-    beginInteraction,
-    endInteraction,
 } from "../../../../features/session/sessionSlice";
 import type { TimelineSessionSlice } from "./useTimelineState";
 import { batch } from "react-redux";
@@ -25,7 +25,6 @@ import {
     moveClipsRemote,
 } from "../../../../features/session/thunks/timelineThunks";
 import { NEW_TRACK_SENTINEL } from "../constants";
-import { beginClipGeometryPreview, endClipGeometryPreview } from "../clipGeometryPreviewBus";
 import {
     SNAP_HIGHLIGHT_GROUP,
     buildLoopBoundaryHighlightEntry,
@@ -344,53 +343,18 @@ export function useTimelineKernelSeekDrag({
     /**
      * copy 幽灵块的**上次已提交几何**：预览每帧都会重算同一组值，`setKernelGhost`
      * 挂在面板级 state 上，逐帧提交新数组会重渲染整个 TimelinePanel。
-     * 与 `kernelDropToNewTrackRef` 同一手法：几何未变就不 setState。
+     * 与 `kernelDropToNewTrackRef` 同一手法：几何未变就不 setState（判据见
+     * `kernelGhostGeometry.ts`）。
      */
-    const kernelGhostGeometryRef = React.useRef<Array<{
-        key: string;
-        leftPx: number;
-        widthPx: number;
-        trackId: string;
-    }> | null>(null);
+    const kernelGhostGeometryRef = React.useRef<KernelGhostEntry[] | null>(null);
 
-    /**
-     * 内核手势的**交互锁**（`beginInteraction` / `endInteraction` 的成对封装）。
-     *
-     * 【为什么每个手势都必须持有】`sessionSlice` 在 `_interactionLockCount > 0`
-     * 时丢弃后端回包的过期快照。手势期间若有一条 `*Remote.fulfilled` 抵达（例如
-     * 上一次点击的 `selectClipRemote`、或后端的周期性状态推送），没有这把锁它的
-     * 旧快照会**覆盖掉正在预览的乐观值**——表现为拖拽中途画面突然弹回原位。
-     * 旧实现的每个连续手势都成对调用（`useClipDrag` / `useEditDrag` /
-     * `useSlipDrag` / `useSnapOffsetDrag` 各一处），内核路径此前只有 snap offset 接了。
-     *
-     * 【为什么用计数而不是布尔去重】底层 `sessionSlice` 的 `_interactionLockCount`
-     * 是计数器：手势 1 的异步提交（`.finally` 释放）尚未回来时，用户可能已经开始
-     * 手势 2。布尔去重会让手势 1 的释放把锁一次归零 —— 手势 2 拖拽期间抵达的
-     * `*Remote.fulfilled` 旧快照不再被丢弃，乐观预览被覆盖（画面弹回原位）。
-     * 计数语义下每个手势都入账，锁只在**最后一个手势结束**时释放，与后端同口径。
-     */
-    const kernelGestureInteractionDepthRef = React.useRef(0);
-    const kernelGestureGeometryTokenRef = React.useRef<symbol | null>(null);
-    const beginKernelGestureInteraction = React.useCallback((): void => {
-        kernelGestureInteractionDepthRef.current += 1;
-        if (kernelGestureInteractionDepthRef.current > 1) return;
-        // 记录**按下时**的全量 clip 几何，供参数编辑器把响度基线/曲线搬到正确位置
-        //（见 `clipGeometryPreviewBus`）。时序要求：必须早于本次手势的任何乐观写入
-        // —— 本函数在首个真实位移帧、且在任何预览派发之前调用，满足该要求。
-        // 重叠手势共用这一份按下时快照，映射存活到最后一个手势结束。
-        kernelGestureGeometryTokenRef.current = beginClipGeometryPreview(sessionRef.current.clips);
-        dispatch(beginInteraction());
-    }, [dispatch, sessionRef]);
-    const endKernelGestureInteraction = React.useCallback((): void => {
-        if (kernelGestureInteractionDepthRef.current === 0) return;
-        kernelGestureInteractionDepthRef.current -= 1;
-        if (kernelGestureInteractionDepthRef.current > 0) return;
-        // 只宣告手势结束；映射本身由消费方保留到"提交之后取的快照"落地（否则
-        // 松手瞬间会退回旧位置的基线，表现为闪一下）。
-        endClipGeometryPreview(kernelGestureGeometryTokenRef.current ?? undefined);
-        kernelGestureGeometryTokenRef.current = null;
-        dispatch(endInteraction());
-    }, [dispatch]);
+    // 交互锁的计数语义（重叠手势不得提前释放）见
+    // `useKernelGestureInteractionLock.ts` 的模块注释与同名契约测试。
+    const {
+        depthRef: kernelGestureInteractionDepthRef,
+        begin: beginKernelGestureInteraction,
+        end: endKernelGestureInteraction,
+    } = useKernelGestureInteractionLock({ dispatch, sessionRef });
 
     const kernelDragOriginRef = React.useRef<{
         clipId: string;
@@ -779,18 +743,7 @@ export function useTimelineKernelSeekDrag({
                     widthPx: Math.max(1, participant.lengthSec * pxPerSec),
                     trackId: moves[index].trackId,
                 }));
-                const previous = kernelGhostGeometryRef.current;
-                const unchanged =
-                    previous !== null &&
-                    previous.length === ghost.length &&
-                    previous.every(
-                        (item, index) =>
-                            item.key === ghost[index].key &&
-                            item.leftPx === ghost[index].leftPx &&
-                            item.widthPx === ghost[index].widthPx &&
-                            item.trackId === ghost[index].trackId,
-                    );
-                if (!unchanged) {
+                if (!sameKernelGhostGeometry(kernelGhostGeometryRef.current, ghost)) {
                     kernelGhostGeometryRef.current = ghost;
                     setKernelGhost(ghost);
                 }

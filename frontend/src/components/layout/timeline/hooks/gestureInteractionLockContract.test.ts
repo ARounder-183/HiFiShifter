@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const SOURCE = readFileSync(
-    join("src", "components", "layout", "timeline", "hooks", "useTimelineKernelSeekDrag.ts"),
+    join("src", "components", "layout", "timeline", "hooks", "useKernelGestureInteractionLock.ts"),
     "utf8",
 );
 
