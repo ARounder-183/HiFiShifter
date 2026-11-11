@@ -20,13 +20,25 @@ type Props = {
 
 export function ParamBlockAlwaysShowToggle({ m }: Props) {
     const { alwaysShowParamBlocks, toggleAlwaysShowParamBlocks, tf } = m;
-    const label = tf("param_blocks_always_show");
+    /*
+     * 提示词就是按钮名，**不再单列一条 `_tooltip`**。
+     *
+     * 工具栏上同一排的开关（「音阶高亮」「锁定参数线」）都是这个形态：
+     * `AppIconButton` 把 `tooltip` 同时当作 `aria-label`，无文字按钮的可访问名称
+     * 就是它。给这一颗按钮写一句独立的长解释，会让它在同一排里显得比邻居"重要
+     * 一级"—— 而它只是同一类开关。语义解释（"是设置不是图层指示灯"）属于手册，
+     * 见 docs/i18n/USERMANUAL.md 的选择工具一节。
+     */
     return (
         <AppIconButton
             active={alwaysShowParamBlocks}
             emphasis="accent"
-            tooltip={tf("param_blocks_always_show_tooltip")}
-            aria-label={label}
+            tooltip={tf("param_blocks_always_show")}
+            /*
+             * 显式写 `aria-pressed`（而不是让 AppIconButton 的 `active || undefined`
+             * 兜底）：开关的"关"必须表达成 `false`，不是"没有这个属性" ——
+             * 读屏器把缺失当成"不是切换按钮"。
+             */
             aria-pressed={alwaysShowParamBlocks}
             tabIndex={-1}
             onClick={toggleAlwaysShowParamBlocks}

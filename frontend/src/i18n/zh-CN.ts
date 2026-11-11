@@ -739,7 +739,6 @@ export const zhCN = {
     select_tool_block: "参数块选择",
     select_tool_menu: "选择工具",
     param_blocks_always_show: "永远显示参数块",
-    param_blocks_always_show_tooltip: "参数块选择模式下一律显示；启用后，其他工具下也显示参数块。",
     param_blocks_submenu: "参数块",
     param_blocks_menu: "参数块操作",
     param_blocks_ungroup: "取消编组",

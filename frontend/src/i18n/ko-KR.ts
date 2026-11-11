@@ -833,8 +833,6 @@ export const koKR = {
     select_tool_block: "파라미터 블록 선택",
     select_tool_menu: "선택 도구",
     param_blocks_always_show: "파라미터 블록 항상 표시",
-    param_blocks_always_show_tooltip:
-        "파라미터 블록 선택 모드에서는 항상 표시됩니다. 켜면 다른 도구에서도 표시됩니다.",
     param_blocks_submenu: "파라미터 블록",
     param_blocks_menu: "파라미터 블록 작업",
     param_blocks_ungroup: "그룹 해제",

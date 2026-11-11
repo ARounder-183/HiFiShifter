@@ -902,8 +902,6 @@ export const enUS = {
     select_tool_block: "Block Selection",
     select_tool_menu: "Selection Tool",
     param_blocks_always_show: "Always Show Param Blocks",
-    param_blocks_always_show_tooltip:
-        "Always visible in block mode; enable to show blocks with every tool.",
     param_blocks_submenu: "Parameter Blocks",
     param_blocks_menu: "Parameter Block Actions",
     param_blocks_ungroup: "Ungroup",

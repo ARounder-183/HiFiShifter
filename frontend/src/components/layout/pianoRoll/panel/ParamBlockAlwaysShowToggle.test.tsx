@@ -23,7 +23,6 @@ afterEach(() => {
 
 const labels: Record<string, string> = {
     param_blocks_always_show: "永远显示参数块",
-    param_blocks_always_show_tooltip: "参数块选择模式下一律显示；启用后，其他工具下也显示参数块。",
 };
 
 const tf = (key: string): string => labels[key] ?? key;

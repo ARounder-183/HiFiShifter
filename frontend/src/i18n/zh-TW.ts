@@ -740,8 +740,6 @@ export const zhTW = {
     select_tool_block: "參數區塊選擇",
     select_tool_menu: "選擇工具",
     param_blocks_always_show: "永遠顯示參數塊",
-    param_blocks_always_show_tooltip:
-        "參數塊選擇模式下一律顯示；啟用後，其他工具下也會顯示參數塊。",
     param_blocks_submenu: "參數區塊",
     param_blocks_menu: "參數區塊操作",
     param_blocks_ungroup: "取消編組",
