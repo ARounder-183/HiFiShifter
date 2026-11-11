@@ -41,6 +41,8 @@ const labels: Record<string, string> = {
     menu_transpose_cents: "按指定音分移调...",
     menu_transpose_degrees: "按指定度数移调...",
     menu_set_pitch: "音高设置到...",
+    menu_set_value: "设置到...",
+    param_blocks_menu_more: "更多参数操作",
     menu_average: "平均化...",
     menu_smooth: "平滑化...",
     menu_add_vibrato: "添加颤音...",
@@ -86,20 +88,32 @@ function items(): HTMLButtonElement[] {
     return [...document.querySelectorAll<HTMLButtonElement>(".hs-menu__item")];
 }
 
-test("块菜单同时包含块动作与参数动作", async () => {
+async function openMoreActions(): Promise<void> {
+    const trigger = items().find((item) => item.textContent?.trim() === "更多参数操作");
+    if (trigger === undefined) throw new Error("more actions trigger missing");
+    await act(async () => trigger.click());
+}
+
+test("块菜单把参数动作收进更多操作子菜单", async () => {
     await act(async () => {
         root.render(<ParamBlockContextMenu {...baseProps} />);
     });
-    const text = items().map((item) => item.textContent?.trim());
-    expect(text).toContain("在播放头处分割");
-    expect(text).toContain("从选区新建参数块");
-    expect(text).toContain("初始化");
-    expect(text).toContain("平滑化...");
-    expect(text).toContain("导出为 MIDI");
-    expect(text).toContain("全选");
+    const flatText = items().map((item) => item.textContent?.trim());
+    expect(flatText).toContain("在播放头处分割");
+    expect(flatText).toContain("从选区新建参数块");
+    expect(flatText).toContain("全选");
+    expect(flatText).toContain("更多参数操作");
+    expect(flatText).not.toContain("初始化");
+    expect(flatText).not.toContain("平滑化...");
+
+    await openMoreActions();
+    const expandedText = items().map((item) => item.textContent?.trim());
+    expect(expandedText).toContain("初始化");
+    expect(expandedText).toContain("平滑化...");
+    expect(expandedText).toContain("导出为 MIDI");
 });
 
-test("参数项按参数类型与选区禁用，而不是消失", async () => {
+test("菜单隐藏不可用命令，并在子菜单里按选区禁用参数动作", async () => {
     await act(async () => {
         root.render(
             <ParamBlockContextMenu
@@ -115,12 +129,20 @@ test("参数项按参数类型与选区禁用，而不是消失", async () => {
         );
     });
     const byLabel = (label: string) => items().find((item) => item.textContent?.trim() === label);
-    // copy / initialize 走 handleEditOp 的隐式全选，菜单不能比快捷键更严。
+    // 不可用的块命令直接消失，不留下灰色项。
+    expect(byLabel("在播放头处分割")).toBeUndefined();
+    expect(byLabel("编组")).toBeUndefined();
+    expect(byLabel("取消编组")).toBeUndefined();
     expect(byLabel("复制")?.disabled).toBe(false);
-    expect(byLabel("初始化")?.disabled).toBe(false);
     expect(byLabel("粘贴")?.disabled).toBe(false);
     expect(byLabel("全选")?.disabled).toBe(false);
-    expect(byLabel("在播放头处分割")?.disabled).toBe(true);
+
+    await openMoreActions();
+    expect(byLabel("初始化")?.disabled).toBe(false);
+    expect(byLabel("设置到...")?.disabled).toBe(true);
+    expect(byLabel("平滑化...")?.disabled).toBe(true);
+    expect(byLabel("按指定音分移调...")).toBeUndefined();
+    expect(byLabel("导出为 MIDI")).toBeUndefined();
 });
 
 test("块动作经统一 action 通道执行", async () => {
@@ -139,6 +161,7 @@ test("参数动作经 edit 通道执行", async () => {
     await act(async () => {
         root.render(<ParamBlockContextMenu {...baseProps} />);
     });
+    await openMoreActions();
     const smooth = items().find((item) => item.textContent?.trim() === "平滑化...");
     if (smooth === undefined) throw new Error("smooth item missing");
     await act(async () => smooth.click());

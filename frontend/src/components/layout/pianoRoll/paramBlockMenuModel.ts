@@ -53,8 +53,7 @@ export interface ParamBlockMenuItem {
 }
 
 const selectionAvailable = (ctx: ParamBlockMenuContext) => ctx.hasSelection;
-const isPitchSelection = (ctx: ParamBlockMenuContext) =>
-    ctx.isPitch && selectionAvailable(ctx);
+const isPitchSelection = (ctx: ParamBlockMenuContext) => ctx.isPitch && selectionAvailable(ctx);
 
 export const PARAM_BLOCK_MENU_ITEMS: readonly ParamBlockMenuItem[] = [
     // ── 块命令（平铺）──────────────────────────────────────────────────────

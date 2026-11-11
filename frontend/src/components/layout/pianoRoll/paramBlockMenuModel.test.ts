@@ -29,8 +29,7 @@ function context(overrides: Partial<ParamBlockMenuContext> = {}): ParamBlockMenu
 const visible = (ctx: ParamBlockMenuContext): ParamBlockMenuItem[] =>
     PARAM_BLOCK_MENU_ITEMS.filter((item) => item.visible?.(ctx) ?? true);
 
-const visibleKeys = (ctx: ParamBlockMenuContext): string[] =>
-    visible(ctx).map((item) => item.key);
+const visibleKeys = (ctx: ParamBlockMenuContext): string[] => visible(ctx).map((item) => item.key);
 
 const item = (key: string): ParamBlockMenuItem => {
     const found = PARAM_BLOCK_MENU_ITEMS.find((candidate) => candidate.key === key);

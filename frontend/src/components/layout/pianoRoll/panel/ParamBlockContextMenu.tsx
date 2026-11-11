@@ -74,18 +74,14 @@ export function ParamBlockContextMenu({
             key: item.key,
             label: tf(labelKey),
             ...(shortcut.length > 0 ? { shortcut } : {}),
-            ...(item.separatorBefore === true && !firstInGroup
-                ? { separatorBefore: true }
-                : {}),
+            ...(item.separatorBefore === true && !firstInGroup ? { separatorBefore: true } : {}),
             ...(item.danger === true ? { danger: true } : {}),
             disabled: !item.enabled(context),
             onSelect: () => onAction(item.channel, item.op),
         };
     };
 
-    const visibleItems = PARAM_BLOCK_MENU_ITEMS.filter(
-        (item) => item.visible?.(context) ?? true,
-    );
+    const visibleItems = PARAM_BLOCK_MENU_ITEMS.filter((item) => item.visible?.(context) ?? true);
     const flatItems = FLAT_GROUP_ORDER.flatMap((group) =>
         visibleItems.filter((item) => item.group === group && item.key !== "delete"),
     ).map((item, index) => toSpec(item, index === 0));
