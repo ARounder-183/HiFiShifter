@@ -125,9 +125,11 @@ function sameState(a: PluginApplyState | null, b: PluginApplyState | null): bool
         a.render_audible_stale === b.render_audible_stale &&
         a.analysis_pending === b.analysis_pending &&
         // 【为什么必须在比较表里】`publish` 在"内容相同"时保留旧引用，订阅者因此
-        // 不会重渲染。漏掉一个字段 ⇒ 它的每一次变化都被判成"没变" ⇒ 界面停在旧读数。
+        // 不会重渲染。漏掉一个字段 ⇒ 它的每一次变化都被判成"没变" ⇒ 界面停在旧读数
+        // （`mode` 此前正是这样漏掉的，见 2026-11-11 全仓审查 Q9）。
         a.audible_state === b.audible_state &&
-        a.error === b.error
+        a.error === b.error &&
+        a.mode === b.mode
     );
 }
 

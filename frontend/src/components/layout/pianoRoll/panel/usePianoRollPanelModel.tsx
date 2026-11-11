@@ -1361,10 +1361,18 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             // 裁剪（窗口外 clip 直接跳过、不发起取数）——fresh 应用在
             // 首次滚动/缩放之前总线永远不会被 emit，波形因此无法显示。
             pianoRollViewportBus.emit(scrollLeftRef.current, pxPerSecRef.current, w);
-            publishInteractionViewport(editParam, getCurrentViewportForScrollbar(editParam));
+            // ResizeObserver 只在挂载时注册，回调必须读**当前**参数轴（切换参数后
+            // 再触发 resize 时，用 mount 时的 editParam 会把旧参数的 valueCenter /
+            // valueSpan 广播到交互视口总线）。同文件 applyEdgeScrollTop 的惯例。
+            const param = editParamRef.current;
+            publishInteractionViewport(param, getCurrentViewportForScrollbar(param));
         });
         ro.observe(el);
         return () => ro.disconnect();
+        // 刻意只挂载一次：ResizeObserver 的回调只读 ref / 稳定总线，
+        // publishInteractionViewport 与 getCurrentViewportForScrollbar 是每次
+        // render 重建的普通函数，进 deps 会让缩放/参数切换时反复重注册 observer。
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [pxPerSecRef, scrollLeftRef, scrollerRef, viewSizeRef]);
 
     /**

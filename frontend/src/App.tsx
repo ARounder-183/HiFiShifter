@@ -163,6 +163,8 @@ const NotebookErrorBoundary = lazy(() =>
 );
 import { ImportProjectDialog } from "./components/layout/ImportProjectDialog";
 import { AppDialog } from "./ui/Dialog";
+import { useFrameCommitter, useWheelStepAccumulator } from "./ui/useFrameCommit";
+import { useNonPassiveWheel } from "./utils/useNonPassiveWheel";
 import { AppStatusChip } from "./ui";
 import type { AppStatusTone } from "./ui/StatusChip";
 import { QuickSearchPopup } from "./components/layout/QuickSearchPopup";
@@ -420,40 +422,39 @@ interface WheelSelectProps {
 }
 
 /**
- * 支持滚轮调整选项的下拉框。
- * 监听原生 wheel 事件（非 passive），滚动时切换选项并阻止默认滚动传播，
- * 避免其所在的可滚动网格列表被一并滚动。
+ * 支持滚轮调整选项的下拉框（原生 `<select>` 外观，Qt 风格的表单行用它）。
+ *
+ * 【为什么不再手写滚轮监听】`ui/Select.tsx` 是滚轮换项能力的**唯一**实现所在地，
+ * `ui/useFrameCommit.ts` 记录了真实事故："滚轮每格一次提交 → 同步 Tauri 命令打满
+ * UI 线程 → Windows 判定未响应（5s 消息泵饥饿）"。这里的旧实现逐格立即提交、
+ * 也没有手势累积，是能力层之外的第二份实现。现在复用同一套
+ * `useNonPassiveWheel` + `useFrameCommitter` + `useWheelStepAccumulator`：
+ * 每帧最多提交一次，连续 N 格一次走到位，同时保留原生 select 的排版。
  */
 function WheelSelect({ value, onValueChange, disabled, className, children }: WheelSelectProps) {
-    const selectRef = useRef<HTMLSelectElement | null>(null);
-
-    useEffect(() => {
-        const select = selectRef.current;
-        if (!select || disabled) return;
-
-        const handleWheel = (event: WheelEvent) => {
-            event.preventDefault();
-            event.stopPropagation();
-            const total = select.options.length;
-            if (total === 0) return;
-            const current = select.selectedIndex;
-            const step = event.deltaY > 0 ? 1 : -1;
-            const next = Math.max(0, Math.min(total - 1, current + step));
-            if (next !== current) {
-                const nextValue = select.options[next]?.value;
-                if (nextValue !== undefined) {
-                    onValueChange(nextValue);
-                }
-            }
-        };
-
-        select.addEventListener("wheel", handleWheel, { passive: false });
-        return () => select.removeEventListener("wheel", handleWheel);
-    }, [value, disabled, onValueChange]);
+    const committer = useFrameCommitter(onValueChange);
+    const accumulator = useWheelStepAccumulator<string>();
+    const setWheelTarget = useNonPassiveWheel<HTMLSelectElement>((event) => {
+        if (disabled) return;
+        const select = event.currentTarget as HTMLSelectElement | null;
+        if (!select) return;
+        const values = Array.from(select.options, (option) => option.value);
+        if (values.length <= 1 || !Number.isFinite(event.deltaY) || event.deltaY === 0) return;
+        // 先接管这次滚轮（阻止祖先滚动），再算值 —— 算不出下一格时也不该滚动容器。
+        event.preventDefault();
+        event.stopPropagation();
+        const next = accumulator.advance(value, (base) => {
+            const from = values.indexOf(base);
+            if (from < 0) return base;
+            const direction = event.deltaY > 0 ? 1 : -1;
+            return values[from + direction] ?? base;
+        });
+        if (next !== value) committer.schedule(next);
+    });
 
     return (
         <select
-            ref={selectRef}
+            ref={setWheelTarget}
             value={value}
             disabled={disabled}
             className={className}
@@ -1330,6 +1331,10 @@ function AppInner() {
                         // 当前传输纪元与派发时刻，与 30Hz 轮询响应共享乱序丢弃
                         // 与时延外推。
                         if (!active && wasActiveForTarget) {
+                            // 200ms 内出现多次 active→inactive 跃迁时只保留最后一次
+                            // 调度：旧句柄不清会照常 fire，多派发一次同步（且卸载时
+                            // 只能清掉最后那个句柄）。
+                            if (deferredSyncTimer) clearTimeout(deferredSyncTimer);
                             deferredSyncTimer = setTimeout(() => {
                                 deferredSyncTimer = null;
                                 dispatch(
@@ -2378,7 +2383,15 @@ function AppInner() {
                 "{name}",
                 item.clip_name || item.source_path,
             );
-            const picked = await coreApi.openAudioDialogForSource(item.source_path, dialogTitle);
+            // 对话框 IPC 失败时保持原状态：调用方是 `void`（点击 / 批量按钮），
+            // 未捕获的 rejection 会进全局 unhandledrejection，被当作疑似崩溃
+            // 刷进诊断日志。与 searchSourceFileReplacements 的对话框口径一致。
+            let picked: { ok: boolean; canceled?: boolean; path?: string } | undefined;
+            try {
+                picked = await coreApi.openAudioDialogForSource(item.source_path, dialogTitle);
+            } catch {
+                return;
+            }
             if (!picked?.ok || picked.canceled || !picked.path) {
                 // 取消时保留原状态（含“已忽略 / 已重新加载 / 已替换”）。
                 return;
