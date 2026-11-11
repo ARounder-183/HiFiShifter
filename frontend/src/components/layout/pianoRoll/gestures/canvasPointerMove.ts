@@ -40,6 +40,7 @@ type Deps = Pick<
     | "setCanvasCursor"
     | "strokeRef"
     | "toolMode"
+    | "rangeToolActive"
 >;
 
 /** 画布指针移动（悬停预览 / 拖拽推进）。 */
@@ -69,6 +70,7 @@ export function handleCanvasPointerMove(deps: Deps, e: ReactPointerEvent<HTMLCan
         setCanvasCursor,
         strokeRef,
         toolMode,
+        rangeToolActive,
     } = deps;
 
     lastPointerClientRef.current = { x: e.clientX, y: e.clientY };
@@ -136,7 +138,7 @@ export function handleCanvasPointerMove(deps: Deps, e: ReactPointerEvent<HTMLCan
     }
     // 多选修饰键按下时提示"可框选/可切换段"（Alt 拉伸更具体，优先）
     if (
-        toolMode === "select" &&
+        rangeToolActive &&
         !isModifierActive(paramStretchKb, e.nativeEvent) &&
         isModifierActive(paramMultiSelectKb, e.nativeEvent)
     ) {

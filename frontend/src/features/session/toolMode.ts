@@ -22,6 +22,17 @@ export function isBlockSelectionActive(
     return toolMode === "select" && selectToolMode === "block";
 }
 
+/**
+ * 选择族的 **range** 子模式是否激活。
+ *
+ * 【为什么不是 `toolMode === "select"`】block 是选择族的**对象级子模式**：它继承
+ * 工具族身份，但不继承「参数线选择」的可见 affordance —— 四点编辑控件、可拖选区
+ * 光标、选区边缘拉伸提示。这三件事此前共用同一个判断，于是按住 Alt 在块模式里
+ * 弹出四点编辑控件，而 Alt 在那里是「新建块 / 在点击处分割」。
+ */
+export function isRangeToolActive(toolMode: ToolMode, selectToolMode: SelectToolMode): boolean {
+    return toolMode === "select" && !isBlockSelectionActive(toolMode, selectToolMode);
+}
 /** 把工具族 + 选择子模式折叠成快捷键路由使用的唯一作用域。 */
 export function resolveToolScope(toolMode: ToolMode, selectToolMode: SelectToolMode): ToolScope {
     return isBlockSelectionActive(toolMode, selectToolMode) ? "block" : toolMode;

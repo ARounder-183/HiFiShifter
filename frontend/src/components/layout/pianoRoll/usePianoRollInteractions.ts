@@ -124,6 +124,14 @@ export function usePianoRollInteractions(args: {
     toolMode: string;
     /** 参数块选择是否激活；由 panel 的 toolMode + selectToolMode 派生。 */
     paramBlockToolActive: boolean;
+    /**
+     * 选择族的 **range** 子模式是否激活（`isRangeToolActive` 的派生结果）。
+     *
+     * 【为什么单独传一个布尔】四点编辑控件、可拖选区光标、选区边缘拉伸提示**只属于**
+     * range 子模式；它们此前共用 `toolMode === "select"`，而 block 也满足它，于是块
+     * 模式里按住 Alt 会弹出四点编辑控件（Alt 在块模式里是「新建块 / 在点击处分割」）。
+     */
+    rangeToolActive: boolean;
     /** 每帧时长（毫秒）。选区的单位是**帧**（见 `paramSelection.ts`），因此本 hook
      *  只需要帧周期，不再需要每拍秒数 —— 选区的所有换算都与 BPM 无关。 */
     framePeriodMs: number;
@@ -451,6 +459,7 @@ export function usePianoRollInteractions(args: {
         pitchEnabled,
         toolMode,
         paramBlockToolActive,
+        rangeToolActive,
         framePeriodMs,
         scrollLeftRef,
         pxPerSecRef,
@@ -1623,7 +1632,7 @@ export function usePianoRollInteractions(args: {
     }, [onVibratoDragEnd]);
 
     useEffect(() => {
-        if (toolMode !== "select") {
+        if (!rangeToolActive) {
             morphModifierDownRef.current = false;
             if (!morphDragRef.current) {
                 setMorphOverlay(null);
@@ -1636,7 +1645,7 @@ export function usePianoRollInteractions(args: {
                 | { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey?: boolean },
         ) => {
             const active =
-                toolMode === "select" &&
+                rangeToolActive &&
                 !panRef.current &&
                 !strokeRef.current &&
                 !morphDragRef.current &&
@@ -1688,17 +1697,17 @@ export function usePianoRollInteractions(args: {
         liveEditOverrideRef,
         panRef,
         paramMorphKb,
+        rangeToolActive,
         setMorphOverlay,
         strokeRef,
-        toolMode,
     ]);
 
     useEffect(() => {
         if (!selectionUi) return;
-        if (toolMode !== "select") return;
+        if (!rangeToolActive) return;
         if (!morphModifierDownRef.current || morphDragRef.current) return;
         setMorphOverlay(buildMorphOverlaysFromSelection());
-    }, [buildMorphOverlaysFromSelection, selectionUi, setMorphOverlay, toolMode]);
+    }, [buildMorphOverlaysFromSelection, rangeToolActive, selectionUi, setMorphOverlay]);
 
     // Track last pointer position and synthesize pointermove on key changes
     useEffect(() => {
@@ -2342,7 +2351,7 @@ export function usePianoRollInteractions(args: {
 
     const isPointerNearDraggableSelection = useCallback(
         (clientX: number, clientY: number, pointerType?: string | null): boolean => {
-            if (toolMode !== "select") return false;
+            if (!rangeToolActive) return false;
             const sel = selectionRef.current;
             const canvas = canvasRef.current;
             if (!sel || sel.length === 0 || !canvas) return false;
@@ -2371,7 +2380,7 @@ export function usePianoRollInteractions(args: {
                 }),
             );
         },
-        [toolMode, selectionRef, canvasRef, frameToViewportPx, getCurveValueNearPointer],
+        [rangeToolActive, selectionRef, canvasRef, frameToViewportPx, getCurveValueNearPointer],
     );
 
     /**
@@ -2389,7 +2398,7 @@ export function usePianoRollInteractions(args: {
             e: ReactPointerEvent<HTMLCanvasElement>,
             options?: { readonly requireModifier?: boolean },
         ): { rangeIndex: number; edge: "left" | "right" } | null => {
-            if (toolMode !== "select") return null;
+            if (!rangeToolActive) return null;
             if (
                 (options?.requireModifier ?? true) &&
                 !isModifierActive(paramStretchKb, e.nativeEvent)
@@ -2430,7 +2439,7 @@ export function usePianoRollInteractions(args: {
             }
             return best;
         },
-        [toolMode, paramStretchKb, selectionRef, canvasRef, frameToViewportPx],
+        [rangeToolActive, paramStretchKb, selectionRef, canvasRef, frameToViewportPx],
     );
 
     const isPointerNearStretchSelectionEdge = useCallback(
@@ -2479,6 +2488,7 @@ export function usePianoRollInteractions(args: {
                     setCanvasCursor,
                     strokeRef,
                     toolMode,
+                    rangeToolActive,
                 },
                 e,
             ),
@@ -2504,6 +2514,7 @@ export function usePianoRollInteractions(args: {
             setCanvasCursor,
             getDefaultCanvasCursor,
             pointerSec,
+            rangeToolActive,
         ],
     );
 

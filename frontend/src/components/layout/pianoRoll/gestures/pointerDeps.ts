@@ -351,6 +351,8 @@ export type PointerDeps = {
     toolMode: string;
     /** 参数块选择是否激活（由 toolMode + selectToolMode 派生）。 */
     paramBlockToolActive: boolean;
+    /** 选择族的 range 子模式是否激活（见 isRangeToolActive）；块模式下恒 false。 */
+    rangeToolActive: boolean;
     updateSelectionUi: (next: ParamSelection | null) => void;
     valueToY: (param: ParamName, v: number, h: number) => number;
     vibratoAmplitudeAdjustKb: Keybinding;

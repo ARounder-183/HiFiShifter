@@ -68,7 +68,7 @@ import {
 } from "../paramBlockSelectionGesture";
 import { selectionForRangeDrag } from "../paramSelectionDrag";
 import type { ParamBlockCommandContext } from "../paramBlockCommandMenu";
-import { isBlockSelectionActive } from "../../../../features/session/toolMode";
+import { isBlockSelectionActive, isRangeToolActive } from "../../../../features/session/toolMode";
 import {
     captureParamBlockCreateCurve,
     enqueueParamBlockCreateCommit,
@@ -402,6 +402,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      * 都只认这个派生布尔值，避免再出现“工具层知道、手势层不知道”的分叉。
      */
     const paramBlockToolActive = isBlockSelectionActive(s.toolMode, s.selectToolMode);
+    /** 选择族 range 子模式；四点编辑 / 选区光标 / 边缘拉伸只属于它（见 isRangeToolActive）。 */
+    const rangeToolActive = isRangeToolActive(s.toolMode, s.selectToolMode);
 
     // 工程会话切换：强制视口总线按当前工程内容重绘一次（跨工程投影保留契约
     // 的强制点，见 utils/timelineViewportBus.invalidate 的说明）。
@@ -2567,6 +2569,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         pitchEnabled,
         toolMode: s.toolMode,
         paramBlockToolActive,
+        rangeToolActive,
         framePeriodMs: paramView?.framePeriodMs ?? 5,
         dynamicProjectSec,
         scrollLeftRef,
