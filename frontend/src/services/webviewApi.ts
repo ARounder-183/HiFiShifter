@@ -5,18 +5,6 @@
 // - 具体后端命令调用应收口到 `frontend/src/services/api/*` 分组模块
 // - 统一通过 `frontend/src/services/invoke.ts::invoke` 处理 Tauri/pywebview 兼容与错误包装
 
-import type {
-    ModelConfigResult,
-    PlaybackStateResult,
-    ParamFramesPayload,
-    ProcessAudioResult,
-    RuntimeInfo,
-    SynthesizeResult,
-    TrackSummaryResult,
-    TimelineResult,
-    WaveformPeaksSegmentPayload,
-} from "../types/api";
-
 import { coreApi, paramsApi, projectApi, recordingApi, timelineApi, waveformApi } from "./api";
 
 export const webApi = {
@@ -175,18 +163,3 @@ export const webApi = {
     setTransport: timelineApi.setTransport,
     setProjectLength: timelineApi.setProjectLength,
 };
-
-// 保留旧类型导入的“锚点”，以降低大范围改动时的冲突概率（不影响运行时）。
-const __webApiTypeAnchors = {
-    ModelConfigResult: null as unknown as ModelConfigResult,
-    PlaybackStateResult: null as unknown as PlaybackStateResult,
-    ParamFramesPayload: null as unknown as ParamFramesPayload,
-    ProcessAudioResult: null as unknown as ProcessAudioResult,
-    RuntimeInfo: null as unknown as RuntimeInfo,
-    SynthesizeResult: null as unknown as SynthesizeResult,
-    TrackSummaryResult: null as unknown as TrackSummaryResult,
-    TimelineResult: null as unknown as TimelineResult,
-    WaveformPeaksSegmentPayload: null as unknown as WaveformPeaksSegmentPayload,
-} as const;
-
-void __webApiTypeAnchors;

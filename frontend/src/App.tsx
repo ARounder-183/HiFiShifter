@@ -2195,24 +2195,25 @@ function AppInner() {
                 { changed?: SourceFileChange[] } | undefined;
             const rawChanges = normalizeSourceFileChanges(result?.changed ?? []);
 
-            setSourceFileChangedDialog((prev) => {
-                const changes = mergeLatestSourceFileChanges(prev.changes, rawChanges);
-                const knownClipIds = new Set(prev.changes.map((item) => item.clip_id));
-                for (const change of rawChanges) {
-                    if (!knownClipIds.has(change.clip_id)) {
-                        const existingInitial = sourceFileInitialChangesRef.current.some(
-                            (item) => item.clip_id === change.clip_id,
-                        );
-                        if (!existingInitial) {
-                            sourceFileInitialChangesRef.current = [
-                                ...sourceFileInitialChangesRef.current,
-                                { ...change, action: "pending" as const },
-                            ];
-                        }
-                    }
-                }
-                return { ...prev, open: true, changes };
-            });
+            // 【为什么副作用不在 setState updater 里】React（StrictMode 下尤甚）
+            // 可能对同一 update 双调 updater。初始变更集的登记是一次性副作用，
+            // 查重以 ref 自身为事实源，放到 updater 外一次完成。
+            const initialChanges = sourceFileInitialChangesRef.current;
+            const additions = rawChanges.filter(
+                (change) =>
+                    !initialChanges.some((item) => item.clip_id === change.clip_id),
+            );
+            if (additions.length > 0) {
+                sourceFileInitialChangesRef.current = [
+                    ...initialChanges,
+                    ...additions.map((change) => ({ ...change, action: "pending" as const })),
+                ];
+            }
+            setSourceFileChangedDialog((prev) => ({
+                ...prev,
+                open: true,
+                changes: mergeLatestSourceFileChanges(prev.changes, rawChanges),
+            }));
 
             markMissingSourceFilesUnavailable(rawChanges);
         } catch {

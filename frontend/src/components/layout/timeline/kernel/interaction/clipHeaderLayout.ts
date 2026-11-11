@@ -50,6 +50,8 @@ export const CLIP_HEADER_RIGHT_INSET_PX = 6;
 export const CLIP_HEADER_RATE_GAP_PX = 8;
 /** 名称与尾部标签之间的最小间隔。 */
 export const CLIP_HEADER_NAME_GAP_PX = 4;
+/** 速率徽标（行内编辑锚点）的固定宽度（CSS px）。 */
+export const CLIP_HEADER_RATE_BADGE_ANCHOR_WIDTH_PX = 72;
 
 const EPS = 1e-6;
 

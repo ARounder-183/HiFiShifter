@@ -6935,7 +6935,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         selectedParamBlockIdSet,
         valueToY,
         paramView,
-        themeMode,
+        // `themeMode` 不在此列：主题色已由 paramBlockSpecColors（其 useMemo
+        // 依赖 themeMode）承载，重复列入只会让主题切换多跑一次全量重算。
         bounds.min,
         bounds.max,
         editParam,

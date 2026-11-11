@@ -12,6 +12,7 @@
  * 失效（落点回退到播放头、预览消失）。因此本 hook 只接受
  * `TimelineViewportAccess`，由它内部区分「原生 scroller / 内核自绘滚动」。
  */
+import { createDebugLogger } from "../../../../utils/debugLog";
 import { useEffect, useRef } from "react";
 import type { AppDispatch } from "../../../../app/store";
 import type { RootState } from "../../../../app/store";
@@ -186,7 +187,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
         let disposed = false;
         let unlisten: null | (() => void) = null;
 
-        const debugDnd = localStorage.getItem("hifishifter.debugDnd") === "1";
+        const dndLog = createDebugLogger("hifishifter.debugDnd");
 
         async function setup() {
             try {
@@ -195,9 +196,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                 ).loadStandaloneWindowApi();
                 const win = mod.getCurrentWindow();
 
-                if (debugDnd) {
-                    console.log("[dnd] attaching tauri drag-drop listener");
-                }
+                dndLog.log("[dnd] attaching tauri drag-drop listener");
 
                 type TauriDragDropPayload = {
                     type?: string;
@@ -225,15 +224,13 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                     const type = String(payload?.type ?? payload?.event ?? "");
                     const paths: string[] = Array.isArray(payload?.paths) ? payload.paths : [];
 
-                    if (debugDnd) {
-                        console.log("[dnd] tauri event", {
-                            type,
-                            pathsCount: paths.length,
-                            hasPosition: Boolean(
-                                payload?.position ?? payload?.pos ?? payload?.cursorPosition,
-                            ),
-                        });
-                    }
+                    dndLog.log("[dnd] tauri event", {
+                        type,
+                        pathsCount: paths.length,
+                        hasPosition: Boolean(
+                            payload?.position ?? payload?.pos ?? payload?.cursorPosition,
+                        ),
+                    });
 
                     const bounds = viewport.getRect();
                     const pos = (payload?.position ?? payload?.pos ?? payload?.cursorPosition) as
@@ -369,8 +366,8 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                             /* 见上：降级为"没有目录" */
                         }
                         const partition = partitionDroppedPaths(paths, { directories });
-                        if (partition.rejectedPaths.length > 0 && debugDnd) {
-                            console.info(
+                        if (partition.rejectedPaths.length > 0) {
+                            dndLog.info(
                                 "[dnd] 已拒绝拖放（类型不在准入白名单）:",
                                 partition.rejectedPaths,
                             );
@@ -488,9 +485,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                     unlisten();
                 }
             } catch (err) {
-                if (debugDnd) {
-                    console.warn("Failed to attach Tauri drag-drop listener", err);
-                }
+                dndLog.warn("Failed to attach Tauri drag-drop listener", err);
             }
         }
 

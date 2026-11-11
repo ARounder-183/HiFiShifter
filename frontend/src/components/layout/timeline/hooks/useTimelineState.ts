@@ -825,6 +825,13 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     ]);
 
     // ── keyboard zoom layout effect ──────────────────────────
+    // TODO(dead-path): `scrollRef` 已无 JSX 挂载点（"渲染内核唯一路径"改造后
+    // `current` 恒为 null），本 effect 连同 `useTimelineEventHandlers.ts` 的非内核
+    // 写入分支、`trackIdFromClientY` / drop 的 scroller 兜底、
+    // `useTimelineViewportController.ts` 的 gutter 量测均为生产不可达。删除需要
+    // 同步改 6 个文件的参数类型与调用方，属独立清理轮次；本轮保留并登记
+    // （2026-11-11 全仓审查 C3）。功能路径本身正常：键盘缩放走
+    // `viewport.setZoomAndScroll` 的原子提交。
     useLayoutEffect(() => {
         const pending = keyboardZoomPendingRef.current;
         if (!pending) return;

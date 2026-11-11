@@ -75,21 +75,6 @@ export function resolveDragEdgeScroll(args: {
     });
 }
 
-/**
- * 判断某个手势种类是否应该在拖拽到边缘时自动滚屏。
- *
- * 【为什么要限定种类】只有"位置/长度随指针横向移动"的手势才需要滚屏：
- * `clip-drag`（移动）、`clip-trim`（改长度）、`clip-fade`（改淡变）、
- * `snap-offset-drag`（改吸附偏移）——它们的语义都与"更远的时间位置"有关。
- * `gain-drag`（增益只跟纵向有关）与 `crossfade-grip`（同轨相邻边缘，横向极短）
- * 不滚屏，否则会在用户只想调增益时把视口带走。
- *
- * 特殊说明：`box-select`（框选）在时间轴由右键触发，其边缘滚屏由框选自身处理，
- * 不在本函数范围内。
- *
- * @param kind 手势种类（与 `interaction/moveDispatch` 的联合一致）。
- * @returns 需要边缘自动滚屏时为 true。
- */
 /** 二维拖拽边缘步长；没有竖直边界时 dy=0。 */
 export function resolveDragEdgeScroll2D(args: {
     readonly clientX: number;
@@ -126,6 +111,21 @@ export function dragAutoScrollAxesForGesture(kind: string): {
     return shouldAutoScrollForGesture(kind) ? { x: true, y: true } : { x: false, y: false };
 }
 
+/**
+ * 判断某个手势种类是否应该在拖拽到边缘时自动滚屏。
+ *
+ * 【为什么要限定种类】只有"位置/长度随指针横向移动"的手势才需要滚屏：
+ * `clip-drag`（移动）、`clip-trim`（改长度）、`clip-fade`（改淡变）、
+ * `snap-offset-drag`（改吸附偏移）——它们的语义都与"更远的时间位置"有关。
+ * `gain-drag`（增益只跟纵向有关）与 `crossfade-grip`（同轨相邻边缘，横向极短）
+ * 不滚屏，否则会在用户只想调增益时把视口带走。
+ *
+ * 特殊说明：`box-select`（框选）在时间轴由右键触发，其边缘滚屏由框选自身处理，
+ * 不在本函数范围内。
+ *
+ * @param kind 手势种类（与 `interaction/moveDispatch` 的联合一致）。
+ * @returns 需要边缘自动滚屏时为 true。
+ */
 export function shouldAutoScrollForGesture(kind: string): boolean {
     return (
         kind === "clip-drag" ||

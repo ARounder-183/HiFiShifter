@@ -53,6 +53,7 @@ import {
 import { resolveClipSelectionModifiers } from "../../../../../features/keybindings/clipSelectionModifiers";
 import type { Keybinding } from "../../../../../features/keybindings/types";
 import { isPrimaryModifierDown } from "../../../../../utils/platform";
+import { WHEEL_LINE_HEIGHT_PX } from "../../../../../utils/pinchGesture";
 import { armRightDragContextMenuGuard } from "../../../../../utils/rightDragContextMenuGuard";
 
 import { getTimelineWheelAction, type ScrollbarZone } from "../../../wheelGesture";
@@ -83,7 +84,10 @@ import { noteFadeLinePointerDown } from "../../hooks/fadeLineClickGesture";
 import { effectiveFadeSec, hitClipFadeTarget } from "../interaction/fadeTargets";
 import type { FadeContextSide } from "../../FadeContextMenu";
 import { hitOverlapControl } from "../interaction/overlapControls";
-import { resolveClipHeaderLayout } from "../interaction/clipHeaderLayout";
+import {
+    resolveClipHeaderLayout,
+    CLIP_HEADER_RATE_BADGE_ANCHOR_WIDTH_PX,
+} from "../interaction/clipHeaderLayout";
 import { hitInactiveTakeLane } from "../../takeLanes";
 import { isPluginMode } from "../../../../../services/hostCapabilities";
 import { resolveHorizontalWheelZoom } from "../../runtime/timelineScrollRange";
@@ -2929,7 +2933,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             horizontalZoomRequested,
         });
 
-        const ctx = { lineHeightPx: 16, pageHeightPx: Math.max(1, rect.height) };
+        const ctx = { lineHeightPx: WHEEL_LINE_HEIGHT_PX, pageHeightPx: Math.max(1, rect.height) };
         const deltaY = normalizeWheelDelta(event.deltaY, event.deltaMode, ctx);
         const deltaX = normalizeWheelDelta(event.deltaX, event.deltaMode, ctx);
         const view = scroll.get();
@@ -6353,7 +6357,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 return {
                     contentLeftPx: clipLeftPx + headerLayout.gainLabelLeftPx,
                     contentTopPx: rowTopPx,
-                    widthPx: 72,
+                    widthPx: CLIP_HEADER_RATE_BADGE_ANCHOR_WIDTH_PX,
                 };
             }
             const headerLayout = resolveClipHeaderLayout({
@@ -6376,7 +6380,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             return {
                 contentLeftPx: clipLeftPx + headerLayout.rateLabelLeftPx,
                 contentTopPx: rowTopPx,
-                widthPx: 72,
+                widthPx: CLIP_HEADER_RATE_BADGE_ANCHOR_WIDTH_PX,
             };
         },
 

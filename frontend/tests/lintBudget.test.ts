@@ -14,8 +14,15 @@ import { readFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { expect, test } from "vitest";
 
-/** 预算本身：改这个数字要同时在下面的失败信息里说明理由。 */
-const WARNING_BUDGET = 91;
+/**
+ * 预算本身：改这个数字要同时在下面的失败信息里说明理由。
+ *
+ * 91 → 87（2026-11-11 全仓审查 C12）：Q8 的 ResizeObserver stale closure 修掉
+ * 一条 exhaustive-deps，C10 移除冗余的 themeMode 依赖又消一条；其余警告逐条
+ * triage 确认为刻意降级的 react-hooks 规则噪声（见 eslint.config.js:32-50）。
+ * 预算贴着实际值，任何新警告都会立刻红。
+ */
+const WARNING_BUDGET = 87;
 
 test("ESLint 警告不超过预算（npm run lint:budget）", () => {
     const scripts = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")).scripts;

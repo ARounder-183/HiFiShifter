@@ -141,8 +141,8 @@ async function waitForPyWebviewApi(timeoutMs: number): Promise<PyWebviewApi | nu
             if (done) return;
             done = true;
             if (typeof window !== "undefined") {
-                window.removeEventListener("pywebviewready", onReady as any);
-                document.removeEventListener("pywebviewready", onReady as any);
+                window.removeEventListener("pywebviewready", onReady as EventListener);
+                document.removeEventListener("pywebviewready", onReady as EventListener);
             }
             clearInterval(pollId);
             clearTimeout(timeoutId);
@@ -174,10 +174,10 @@ async function waitForPyWebviewApi(timeoutMs: number): Promise<PyWebviewApi | nu
         );
 
         if (typeof window !== "undefined") {
-            window.addEventListener("pywebviewready", onReady as any, {
+            window.addEventListener("pywebviewready", onReady as EventListener, {
                 once: true,
             });
-            document.addEventListener("pywebviewready", onReady as any, {
+            document.addEventListener("pywebviewready", onReady as EventListener, {
                 once: true,
             });
         }
