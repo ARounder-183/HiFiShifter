@@ -105,10 +105,7 @@ describe("valueEdgeScrollDeltaPx", () => {
     it("does not accelerate after the pointer leaves the viewport (max ratio 1)", () => {
         expect(VALUE_EDGE_SCROLL_MAX_RATIO).toBe(1);
         const edge = valueEdgeScrollDeltaPx({ ...view, ...PITCH, pointerPx: 600 });
-        expect(valueEdgeScrollDeltaPx({ ...view, ...PITCH, pointerPx: 5000 })).toBeCloseTo(
-            edge,
-            9,
-        );
+        expect(valueEdgeScrollDeltaPx({ ...view, ...PITCH, pointerPx: 5000 })).toBeCloseTo(edge, 9);
     });
 
     it("returns zero when the value axis cannot move", () => {
@@ -117,12 +114,8 @@ describe("valueEdgeScrollDeltaPx", () => {
     });
 
     it("returns zero for degenerate or non-finite geometry", () => {
-        expect(
-            valueEdgeScrollDeltaPx({ ...view, ...PITCH, pointerPx: Number.NaN }),
-        ).toBe(0);
-        expect(
-            valueEdgeScrollDeltaPx({ ...view, ...PITCH, pointerPx: 600, bottomPx: 0 }),
-        ).toBe(0);
+        expect(valueEdgeScrollDeltaPx({ ...view, ...PITCH, pointerPx: Number.NaN })).toBe(0);
+        expect(valueEdgeScrollDeltaPx({ ...view, ...PITCH, pointerPx: 600, bottomPx: 0 })).toBe(0);
         expect(
             valueEdgeScrollDeltaPx({ ...view, ...PITCH, pointerPx: 600, topPx: Number.NaN }),
         ).toBe(0);

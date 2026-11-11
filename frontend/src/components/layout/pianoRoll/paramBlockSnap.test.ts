@@ -155,8 +155,8 @@ it("pitch snapping never publishes a value guide", () => {
         (entry) => entry.surface === "pianoRoll",
     );
     expect(entries).toHaveLength(1);
-    expect(
-        entries.every((entry) => entry.markers.every((marker) => marker.axis === "time")),
-    ).toBe(true);
+    expect(entries.every((entry) => entry.markers.every((marker) => marker.axis === "time"))).toBe(
+        true,
+    );
     clearParamBlockSnapHighlight();
 });
