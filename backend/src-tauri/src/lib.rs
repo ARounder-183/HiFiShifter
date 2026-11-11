@@ -189,6 +189,8 @@ static TEST_ALLOCATOR: alloc_probe::CountingAllocator = alloc_probe::CountingAll
 #[cfg(target_os = "linux")]
 mod linux_clipboard;
 mod project_fragment;
+#[path = "import/reaper_pan.rs"]
+mod reaper_pan;
 #[path = "import/reaper_export.rs"]
 mod reaper_export;
 #[path = "import/reaper_import.rs"]

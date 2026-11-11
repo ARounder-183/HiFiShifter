@@ -667,7 +667,8 @@ fn build_take_pitch_envelope(
 
 /// 音量/声像参数线 → ENVSEG 轨道包络段（每个连续 clip 组一条段）。
 ///
-/// - VOLENV2 值 = 轨道推子 × 曲线（绝对量）；PANENV2 值 = 曲线值；
+/// - VOLENV2 值 = 轨道推子 × 曲线（绝对量）；
+/// - PANENV2 在写 REAPER 前翻符号（REAPER 与 HS 声像符号相反）；
 /// - 段范围 = 连续组跨度（gap ≤ 1 帧视为连续；无曲线数据的 clip 打断分组，
 ///   其范围不属于任何段 → REAPER 段外不生效，保持目标轨既有自动化）；
 /// - 段内相对坐标 + 端点强制（相对 0 / 相对 len）；QN 域由 bpm 换算。
@@ -756,7 +757,7 @@ fn build_envseg_for_key(
                             // VOLENV2 = 绝对量（推子 × 曲线倍率）。
                             EnvSegKey::Volume => (volume_factor * *v as f64)
                                 .clamp(0.0, f64::from(hifishifter_kernel::gain::GAIN_MAX)),
-                            EnvSegKey::Pan => (*v as f64).clamp(-1.0, 1.0),
+                            EnvSegKey::Pan => crate::reaper_pan::hifi_pan_to_reaper(*v as f64),
                         };
                         (t, value)
                     })
@@ -1823,6 +1824,92 @@ mod tests {
         assert!((seg.points[1][0] - 47.0).abs() < 1e-9);
         assert!((seg.points[0][7] - 90.0).abs() < 1e-9);
         assert!((seg.points[1][7] - 94.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pan_envelope_export_flips_sign_for_reaper() {
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(track_id),
+            Some("PanSign".to_string()),
+            Some(0.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".to_string()),
+        );
+        let mut pan = vec![0.0f32; 400];
+        for (i, value) in pan.iter_mut().enumerate() {
+            *value = -1.0 + 2.0 * (i as f32 / 399.0);
+        }
+        let mut curves_by_clip = BTreeMap::new();
+        curves_by_clip.insert(
+            clip_id.clone(),
+            ClipExportCurves {
+                frame_period_ms: 5.0,
+                pitch_offset: None,
+                volume: None,
+                pan: Some(pan),
+            },
+        );
+
+        let export =
+            build_reaper_clipboard(&timeline, &[clip_id], &curves_by_clip).expect("export");
+        let parsed = parse_for_test(&export.bytes);
+        let env = parsed.tracks[0]
+            .envelopes
+            .iter()
+            .find(|env| env.env_type == "PANENV2")
+            .expect("PANENV2");
+        assert!((env.points[0][1] - 1.0).abs() < 1e-6, "HS -1 → REAPER +1");
+        assert!(env.points[1][1] < -0.99, "HS +1 → REAPER -1，实际 {}", env.points[1][1]);
+    }
+
+    #[test]
+    fn pan_export_import_round_trip_preserves_hifi_values() {
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(track_id),
+            Some("PanRoundTrip".to_string()),
+            Some(0.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".to_string()),
+        );
+        let mut pan = vec![0.0f32; 400];
+        for (i, value) in pan.iter_mut().enumerate() {
+            *value = -0.75 + 1.5 * (i as f32 / 399.0);
+        }
+        let mut curves_by_clip = BTreeMap::new();
+        curves_by_clip.insert(
+            clip_id.clone(),
+            ClipExportCurves {
+                frame_period_ms: 5.0,
+                pitch_offset: None,
+                volume: None,
+                pan: Some(pan.clone()),
+            },
+        );
+
+        let export =
+            build_reaper_clipboard(&timeline, &[clip_id], &curves_by_clip).expect("export");
+        let parsed = parse_for_test(&export.bytes);
+        let result = crate::reaper_import::test_import_items_for_round_trip(parsed, 0.0)
+            .expect("re-import");
+        let params = result
+            .timeline
+            .params_by_root_track
+            .values()
+            .next()
+            .expect("params");
+        let imported = params.extra_curves.get("pan").expect("pan curve");
+        for (i, expected) in pan.iter().enumerate() {
+            assert!(
+                (imported[i] - expected).abs() < 1e-5,
+                "frame {i}: {} vs {}",
+                imported[i],
+                expected
+            );
+        }
     }
 
     #[test]
