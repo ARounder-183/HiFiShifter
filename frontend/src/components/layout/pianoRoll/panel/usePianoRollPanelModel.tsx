@@ -3176,7 +3176,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      */
     const blockPersistence = useParamBlockPersistence({
         rootTrackId,
-        // 块选择必然 visible（reducer 不变量），因此只看图层开关。
+        // 块层在画 = 块选择模式或常显设置开着；两者都由 isParamBlockLayerVisible 派生。
         enabled: paramBlocksLayerVisible,
         onCommitted: () => {
             dispatch(markProjectEdited());
