@@ -26,7 +26,9 @@ const CODE = stripComments(SOURCE);
 
 describe("BackgroundGrid 重绘去重", () => {
     it("★ 不再每次渲染都清空 lastDrawKeyRef", () => {
-        expect(CODE).not.toMatch(/useLayoutEffect\(\(\)\s*=>\s*\{\s*lastDrawKeyRef\.current\s*=\s*null;?\s*\}\)/);
+        expect(CODE).not.toMatch(
+            /useLayoutEffect\(\(\)\s*=>\s*\{\s*lastDrawKeyRef\.current\s*=\s*null;?\s*\}\)/,
+        );
     });
 
     it("★ svg 节点被重建时才强制失key", () => {

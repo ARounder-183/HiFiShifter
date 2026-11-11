@@ -32,8 +32,7 @@ export function createDebugLogger(flag: string): DebugLogger {
         const now = Date.now();
         if (now - lastCheck < FLAG_CHECK_INTERVAL_MS) return enabled;
         lastCheck = now;
-        enabled =
-            typeof window !== "undefined" && window.localStorage?.getItem(flag) === "1";
+        enabled = typeof window !== "undefined" && window.localStorage?.getItem(flag) === "1";
         return enabled;
     };
 

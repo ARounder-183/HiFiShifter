@@ -1893,7 +1893,10 @@ function AppInner() {
         void dispatch(loadDockSettings())
             .unwrap()
             .then((payload) => {
-                if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock")) {
+                if (
+                    import.meta.env.DEV &&
+                    new URLSearchParams(window.location.search).has("mock")
+                ) {
                     // mock 的设置对象没有 Disk 上的 dock 布局；但必须走真实的
                     // hydrate 路径，让 Dock 的默认工作区立刻可交互。
                     dispatch(hydrateDock({ settings: null, layout: null, mode: "standalone" }));
@@ -1910,7 +1913,10 @@ function AppInner() {
                 // 默认布局写回去覆盖磁盘内容。纯浏览器 mock 没有可恢复的磁盘布局，
                 // 必须显式 hydrate 一次出厂布局，否则 Dock 的工作区与参数编辑器
                 // 根本不会挂载 —— 表现为“界面看得见、下方全空、点击无反应”。
-                if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock")) {
+                if (
+                    import.meta.env.DEV &&
+                    new URLSearchParams(window.location.search).has("mock")
+                ) {
                     dispatch(hydrateDock({ settings: null, layout: null, mode: "standalone" }));
                     finalizeDockHydration(dispatch, store.getState);
                 }
@@ -2070,18 +2076,20 @@ function AppInner() {
                 const mod = await loadStandaloneWindowApi();
                 if (disposed) return;
                 const currentWindow = mod.getCurrentWindow();
-                unlisten = await currentWindow.onCloseRequested(createWindowCloseGuard({
-                    isDisposed: () => disposed,
-                    consumeAllowClose: () => {
-                        const allowed = allowWindowCloseRef.current;
-                        allowWindowCloseRef.current = false;
-                        return allowed;
-                    },
-                    isProjectDirty: () => store.getState().session.project.dirty,
-                    getProjectMeta: projectApi.getProjectMeta,
-                    promptSave: () => promptUnsavedAction("exit", closeWindowNow),
-                    closeWindow: closeWindowNow,
-                }));
+                unlisten = await currentWindow.onCloseRequested(
+                    createWindowCloseGuard({
+                        isDisposed: () => disposed,
+                        consumeAllowClose: () => {
+                            const allowed = allowWindowCloseRef.current;
+                            allowWindowCloseRef.current = false;
+                            return allowed;
+                        },
+                        isProjectDirty: () => store.getState().session.project.dirty,
+                        getProjectMeta: projectApi.getProjectMeta,
+                        promptSave: () => promptUnsavedAction("exit", closeWindowNow),
+                        closeWindow: closeWindowNow,
+                    }),
+                );
                 if (disposed) {
                     unlisten();
                     unlisten = null;
@@ -2200,8 +2208,7 @@ function AppInner() {
             // 查重以 ref 自身为事实源，放到 updater 外一次完成。
             const initialChanges = sourceFileInitialChangesRef.current;
             const additions = rawChanges.filter(
-                (change) =>
-                    !initialChanges.some((item) => item.clip_id === change.clip_id),
+                (change) => !initialChanges.some((item) => item.clip_id === change.clip_id),
             );
             if (additions.length > 0) {
                 sourceFileInitialChangesRef.current = [
