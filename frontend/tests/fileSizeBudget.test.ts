@@ -25,7 +25,8 @@ const LIMITS: Record<string, number> = {
     "../backend/src-tauri/src/commands.rs": 3898,
     "../backend/hifishifter-kernel/src/mixdown.rs": 3943,
     "../backend/hifishifter-capture/src/recorder.rs": 4705,
-    "src/components/layout/pianoRoll/panel/usePianoRollPanelModel.tsx": 7582,
+    // 2026-11 拆分：块 hover / 命令通道 / 渲染规格三块搬出后，预算同步下调。
+    "src/components/layout/pianoRoll/panel/usePianoRollPanelModel.tsx": 7250,
     "src/components/layout/timeline/kernel/host/timelineKernelHost.ts": 6453,
     "src/App.tsx": 4718,
 };

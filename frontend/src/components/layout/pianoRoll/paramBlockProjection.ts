@@ -386,31 +386,6 @@ export function sourceAtProjectedFrame(
         : projection.sourceWindowStartSec + localSec * rate;
 }
 
-/** 源域秒 → 工程帧（用于定位一个源点在某个周期里的出现位置）。 */
-export function projectFrameOfSource(
-    projection: ClipProjection,
-    sourceSec: number,
-    cycle: number,
-    framePeriodMs: number,
-): number {
-    const fp = Math.max(0.1, framePeriodMs);
-    const rate = Math.max(1e-9, projection.rate);
-    if (projection.loopEnabled && projection.loopCycleSec !== null) {
-        const cycleSec = projection.loopCycleSec;
-        const anchor = loopAnchor(projection);
-        const phase = projection.reversed
-            ? modEuclid(anchor - sourceSec, cycleSec)
-            : modEuclid(sourceSec - anchor, cycleSec);
-        return toFrame(projection.projectStartSec + phase / rate + cycle * (cycleSec / rate), fp);
-    }
-    return toFrame(
-        projection.reversed
-            ? projection.projectStartSec + (projection.sourceWindowEndSec - sourceSec) / rate
-            : projection.projectStartSec + (sourceSec - projection.sourceWindowStartSec) / rate,
-        fp,
-    );
-}
-
 /**
  * 把一个可能跨 Loop 周期边界的源域区间切成“每段都属于单一周期”的成员。
  *
@@ -562,18 +537,4 @@ export function toParamBlockSourceClip(clip: ClipInfo): ParamBlockSourceClip {
         gameBlockBaseline: clip.gameBlockBaseline,
         midiNoteData: clip.midiNoteData,
     };
-}
-
-/** 源域区间 → 工程秒区间（供旧 UI 命中/矩形继续工作）。 */
-export function projectTakeSpanToSeconds(
-    clip: ParamBlockSourceClip,
-    span: Pick<TakeSpan, "sourceStartSec" | "sourceEndSec" | "cycle">,
-    framePeriodMs: number,
-): Array<{ startSec: number; endSec: number; cycle: number }> {
-    const projection = projectionForClip(clip);
-    return projectTakeSpan(projection, span, framePeriodMs).map((interval) => ({
-        startSec: toSec(interval.startFrame, framePeriodMs),
-        endSec: toSec(interval.endFrameExclusive, framePeriodMs),
-        cycle: interval.cycle,
-    }));
 }

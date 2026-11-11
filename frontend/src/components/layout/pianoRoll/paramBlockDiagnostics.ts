@@ -35,8 +35,3 @@ export function reportParamBlockDiagnostic(diagnostic: ParamBlockDiagnostic): vo
         JSON.stringify(diagnostic),
     );
 }
-
-/** 仅测试使用：清空限频状态。 */
-export function resetParamBlockDiagnosticsForTests(): void {
-    lastReported.clear();
-}

@@ -2128,17 +2128,6 @@ export function splitProjectedBlock(
     return planSplitProjectedBlock(clips, edits, block, frame, framePeriodMs).edits;
 }
 
-export function resizeProjectedBlock(
-    clips: readonly ParamBlockSourceClip[],
-    edits: ParamBlockEditSet,
-    block: ProjectedParamBlock,
-    edge: "left" | "right",
-    targetFrame: number,
-    framePeriodMs: number,
-): ParamBlockEditSet {
-    return planResizeProjectedBlock(clips, edits, block, edge, targetFrame, framePeriodMs).edits;
-}
-
 function baseCoverKey(cover: UserParamBlock["baseCover"]): string | null {
     if (cover === undefined) return null;
     return `${cover.full}:${cover.spans

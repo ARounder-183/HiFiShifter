@@ -16,7 +16,6 @@ import {
     projectionForClip,
     sourceAtProjectedFrame,
     toFrame,
-    toSec,
     type ClipProjection,
     type ParamBlockSourceClip,
 } from "./paramBlockProjection";
@@ -754,12 +753,5 @@ export function composeParamBlockView(
                 (clip.midiNoteData?.length ?? 0) === 0
             );
         }),
-    };
-}
-
-export function viewBlockToSeconds(block: ProjectedParamBlock, framePeriodMs: number) {
-    return {
-        startSec: toSec(block.startFrame, framePeriodMs),
-        endSec: toSec(block.endFrameExclusive, framePeriodMs),
     };
 }

@@ -401,17 +401,6 @@ export function groupCommonValue(block: UserParamBlock): number | null {
     return leaves.every((child) => child.value === first) ? first : null;
 }
 
-export const EMPTY_PARAM_BLOCK_VIEW: ParamBlockView = {
-    schemaVersion: 1,
-    rootTrackId: "",
-    editRevision: 0,
-    layoutKey: "",
-    framePeriodMs: 5,
-    blocks: [],
-    orphanCount: 0,
-    analysisPending: false,
-};
-
 export function takeSpanKey(span: TakeSpan): string {
     return `${span.clipId}|${span.takeId}|${span.cycle}|${span.sourceStartSec.toFixed(6)}|${span.sourceEndSec.toFixed(6)}`;
 }

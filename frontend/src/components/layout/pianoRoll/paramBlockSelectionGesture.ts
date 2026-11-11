@@ -14,7 +14,6 @@ import {
 import {
     logicalBlocksOf,
     paramBlockIdsInSelection,
-    paramBlockLogicalFrameRanges,
     type ParamBlockFrameRange,
 } from "./paramBlockSelection";
 import { logicalBlockId } from "./paramBlockTypes";
@@ -300,14 +299,6 @@ export function resolveBlockAnchor(args: {
         }
     }
     return null;
-}
-
-/** 方便调用方把逻辑块 run 转成参数选区。 */
-export function selectionForLogicalBlock(
-    blocks: readonly FrameBlock[],
-    blockId: string,
-): ParamSelection | null {
-    return normalizeSelection(paramBlockLogicalFrameRanges(blocks, blockId));
 }
 
 export type { ParamBlockFrameRange };

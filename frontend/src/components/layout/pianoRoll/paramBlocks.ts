@@ -139,50 +139,6 @@ export function projectMidiNoteSpansToTimeline(clip: ParamBlockSourceClip): Arra
     return mergeSortedSpans(spans);
 }
 
-/** 源域区间 [start, end] → 工程秒；与 MIDI 投影共用窗口数学。 */
-export function projectSourceSpansToTimeline(clip: ParamBlockSourceClip): Array<{
-    startSec: number;
-    endSec: number;
-}> {
-    const spans = clip.syllableSpansSec ?? [];
-    if (spans.length === 0) return [];
-    /*
-     * 窗口写成闭区间显式值，避免调用方传 `endSec=0` 的旧语义（"到源末尾"）
-     * 被投影当成空窗口。这里只关系到可见裁剪，不改变源域音节本身。
-     */
-    const base: ParamBlockSourceClip = {
-        ...clip,
-        sourceStartSec: Math.max(0, finite(clip.sourceStartSec ?? 0, 0)),
-        sourceEndSec: (() => {
-            const start = Math.max(0, finite(clip.sourceStartSec ?? 0, 0));
-            const rate =
-                Number.isFinite(clip.playbackRate) && (clip.playbackRate as number) > 1e-6
-                    ? (clip.playbackRate as number)
-                    : 1;
-            const explicit = Number.isFinite(clip.sourceEndSec)
-                ? Math.max(0, clip.sourceEndSec as number)
-                : 0;
-            const needed = start + Math.max(0, finite(clip.lengthSec, 0)) * rate;
-            return explicit > start + 1e-9 ? Math.max(explicit, needed) : needed;
-        })(),
-    };
-    /*
-     * 【不能批量投影后 merge】第 N 个源域音节必须对应第 N 个结果区间。
-     * `projectMidiNoteSpansToTimeline` 会合并首尾相接的区间（正确的显示语义），
-     * 但那样会让后续 `sourceSyllableSpansSec[index]` 与块 index 错位。
-     * 这里逐段投影，保留一一对应；连续段的显示合并交给 UI 层。
-     */
-    return spans
-        .map(
-            ({ startSec, endSec }) =>
-                projectMidiNoteSpansToTimeline({
-                    ...base,
-                    midiNoteData: [{ startSec, endSec, note: 60 }],
-                })[0] ?? { startSec: NaN, endSec: NaN },
-        )
-        .filter((span) => Number.isFinite(span.startSec) && Number.isFinite(span.endSec));
-}
-
 function mergeSortedSpans(
     spans: Array<{ startSec: number; endSec: number }>,
 ): Array<{ startSec: number; endSec: number }> {
@@ -243,39 +199,6 @@ export interface ParamBlock {
     readonly transitionSec?: number;
     /** 实时拖动 / 过渡预览时显式保持连续中心；缺省吸附到半音行心。 */
     readonly displayCenterSnapToSemitone?: boolean;
-}
-
-/**
- * 参数块的可见矩形。
- *
- * 块高只由当前参数的一行像素高决定（1.2 行高），代表参数值决定纵向中心。
- * `topPx` 是绘制与命中的唯一纵向几何，避免两处各用中心减半高而漂移。
- */
-export interface ParamBlockRect {
-    readonly id: string;
-    readonly startSec: number;
-    readonly endSec: number;
-    /** 在本轨道组内的显示序号（从 1 起）；标签只展示这个，不伪造未取样的均值。 */
-    readonly ordinal: number;
-    /** 是否在已取数窗口内取样；未取样的块不画数值标签。 */
-    readonly sampled: boolean;
-    /** 块顶边（CSS px，视口坐标）；绘制 / 命中共用。 */
-    readonly topPx: number;
-    /** 块高（CSS px，视口坐标）。 */
-    readonly heightPx: number;
-    /** 块中心 y；与曲线 `valueToY(midi + 0.5)` 同口径。 */
-    readonly centerYPx: number;
-    /** 与像素同源的块代表值（供拖动锚点直接读取）。 */
-    readonly averageValue: number | null;
-    readonly selected: boolean;
-    readonly grouped: boolean;
-    /**
-     * 本次时间伸缩手势的预览，使用**手势起点**的代表值锁定纵向中心。
-     *
-     * 过渡曲线会在相接点附近改变 live 曲线的主簇；若宿主继续按新主簇
-     * 重算代表值，块会上下移动。这里只锁显示，不改变持久化高度锚点。
-     */
-    readonly displayCenterValue?: number | null;
 }
 
 /** 块边界命中结果：像素热区优先，避免窄块只能点中 1px 边线。 */
@@ -515,152 +438,6 @@ export function resolveParamBlockResizeTarget(args: {
     return args.edge === "left" ? plan.block.startSec : plan.block.endSec;
 }
 
-/** 块缩到最小宽度以下时应直接删除；预览 / 提交共用同一判定。 */
-export function shouldRemoveResizedParamBlock(args: {
-    readonly pointerSec: number;
-    readonly startSec: number;
-    readonly endSec: number;
-    readonly edge: "left" | "right";
-    readonly minBlockSec: number;
-}): boolean {
-    const minSec = Math.max(1e-6, finite(args.minBlockSec, MIN_AUTO_BLOCK_SEC));
-    if (args.edge === "right") return args.pointerSec <= args.startSec + minSec + 1e-9;
-    return args.pointerSec >= args.endSec - minSec - 1e-9;
-}
-
-/**
- * 块边缘延展时，相邻块被压缩后的**剩余可见区间**。
- *
- * 以前的逻辑把右边缘一起改到新起点：延展左块得到 `[0,1.5]`，右块却成了
- * `[1.5,2]`，用户直觉上会认为“后一个块被缩短了”，这是对的；但当左块只延长
- * 一点点、右块几乎是紧邻时，必须保证它仍有最小宽度。返回 null 表示压缩后
- * 不可见，应直接隐藏而不是生成零宽块。
- */
-export function compressedNeighborSpan(args: {
-    readonly edge: "left" | "right";
-    readonly neighborStartSec: number;
-    readonly neighborEndSec: number;
-    readonly resizedEdgeSec: number;
-    readonly minBlockSec: number;
-}): { readonly startSec: number; readonly endSec: number } | null {
-    const minSec = Math.max(1e-6, finite(args.minBlockSec, MIN_AUTO_BLOCK_SEC));
-    /*
-     * 右扩压缩右邻居**起点**，左扩压缩左邻居**终点**；另一侧始终不动。
-     * 预览必须和提交用同一份“邻居剩余区间”，否则拖动时看不到缩短，
-     * 松手后才突然跳/消失。
-     */
-    const sourceStart = Math.min(args.neighborStartSec, args.neighborEndSec);
-    const sourceEnd = Math.max(args.neighborStartSec, args.neighborEndSec);
-    // 邻居只剩最小宽度时仍应可见；只有完全退化才隐藏。
-    if (sourceEnd - sourceStart < minSec) return null;
-    if (args.edge === "right") {
-        const startSec = Math.min(sourceEnd - minSec, Math.max(args.resizedEdgeSec, sourceStart));
-        return { startSec, endSec: sourceEnd };
-    }
-    const endSec = Math.max(sourceStart + minSec, Math.min(args.resizedEdgeSec, sourceEnd));
-    return { startSec: sourceStart, endSec };
-}
-
-/**
- * 伸缩某一侧时需要逐个处理的块。
- *
- * 不再只取“紧贴着的第一个邻居”：一次拖动可能跨过空隙并连续覆盖多个块。
- * 同一根轨道组内的块都参与，按拖动方向由近到远排序；具体哪些块被碰到，
- * 由 `resolveParamBlockResizePlan` 根据目标边界决定。
- */
-export function paramBlockResizeCandidates<T extends ParamBlock>(
-    blocks: readonly T[],
-    block: T,
-    edge: "left" | "right",
-): T[] {
-    return blocks
-        .filter(
-            (candidate) =>
-                candidate.id !== block.id &&
-                candidate.rootTrackId === block.rootTrackId &&
-                (edge === "right"
-                    ? candidate.startSec >= block.endSec - 1e-6
-                    : candidate.endSec <= block.startSec + 1e-6),
-        )
-        .sort((a, b) => (edge === "right" ? a.startSec - b.startSec : b.endSec - a.endSec));
-}
-
-export interface ParamBlockResizeNeighborPlan {
-    readonly id: string;
-    readonly startSec: number;
-    readonly endSec: number;
-    /** 被拖块已经完整越过该块，松手时应删除它。 */
-    readonly remove: boolean;
-}
-
-export interface ParamBlockResizePlan {
-    /** 被拖块的新区间。 */
-    readonly block: { readonly startSec: number; readonly endSec: number };
-    /** 被部分缩短或完整覆盖的右侧 / 左侧块，按拖动方向排列。 */
-    readonly neighbors: readonly ParamBlockResizeNeighborPlan[];
-    /** 当前块已缩到最小宽度以下，松手时应删除。 */
-    readonly removeBlock: boolean;
-}
-
-/** 伸缩预览的一帧几何：每帧都从手势起点重新投影，不沿用上一帧结果。 */
-export interface ParamBlockResizeDisplay {
-    readonly id: string;
-    readonly startSec: number;
-    readonly endSec: number;
-    readonly selected: boolean;
-}
-
-/**
- * 把伸缩计划投影成**完整**的显示块列表。
- *
- * @param baseBlocks 手势起点的全部块几何（冻结快照），必须包含当前块与
- *   所有会被压缩的候选块。绝不能用上一帧的 live 列表：某帧块被移除后，
- *   后续再拉回来就找不到源块，预览会永久缺失直到松手。
- */
-export function projectParamBlockResizeDisplay(args: {
-    readonly baseBlocks: readonly {
-        readonly id: string;
-        readonly startSec: number;
-        readonly endSec: number;
-        readonly selected?: boolean;
-    }[];
-    readonly blockId: string;
-    readonly plan: ParamBlockResizePlan;
-}): ParamBlockResizeDisplay[] {
-    const neighborById = new Map(args.plan.neighbors.map((item) => [item.id, item]));
-    const out: ParamBlockResizeDisplay[] = [];
-    for (const block of args.baseBlocks) {
-        if (block.id === args.blockId) {
-            if (args.plan.removeBlock) continue;
-            out.push({
-                id: block.id,
-                startSec: args.plan.block.startSec,
-                endSec: args.plan.block.endSec,
-                selected: true,
-            });
-            continue;
-        }
-        const neighbor = neighborById.get(block.id);
-        if (neighbor !== undefined) {
-            if (neighbor.remove) continue;
-            out.push({
-                id: block.id,
-                startSec: neighbor.startSec,
-                endSec: neighbor.endSec,
-                selected: false,
-            });
-            continue;
-        }
-        out.push({
-            id: block.id,
-            startSec: block.startSec,
-            endSec: block.endSec,
-            selected: block.selected === true,
-        });
-    }
-    return out;
-}
-
 /**
  * 纵向块拖动提交后的显示交接是否结束。
  *
@@ -693,27 +470,6 @@ export type ParamBlockDragCommitReleaseState =
     "waiting-for-curve" | "waiting-for-paint" | "released";
 
 /**
- * 拖动交接的两阶段释放。
- *
- * 数据就绪时当前 React 渲染仍必须使用拖动快照；等这个快照完成一次绘制后，
- * 下一个绘制时机才撤下它并让正常派生接替。跳过 `waiting-for-paint` 会在一帧里
- * 先按旧主簇画回原位，再跳到提交位置，也就是用户看到的闪烁。
- */
-export function advanceParamBlockDragCommitRelease(args: {
-    readonly releaseState: ParamBlockDragCommitReleaseState;
-    readonly committed: boolean;
-    readonly startedAt: number;
-    readonly now: number;
-    readonly curveSettled: boolean;
-    readonly valuesApplied?: boolean;
-    readonly timeoutMs?: number;
-}): ParamBlockDragCommitReleaseState {
-    if (args.releaseState === "released") return "released";
-    if (args.releaseState === "waiting-for-paint") return "released";
-    return canReleaseParamBlockDragCommit(args) ? "waiting-for-paint" : "waiting-for-curve";
-}
-
-/**
  * 只有 active gesture / 等待提交交接的事务才能持有拖动快照。
  * 旧实现还在 paramViewKey === snapshotKey 时返回 true；撤销或 Clip 编辑后
  * 这个 key 可能保持不变，旧快照就会在无事务状态下继续覆盖 canonical。
@@ -728,22 +484,6 @@ export function shouldUseParamBlockDragSnapshotForRender(args: {
     void args.snapshotKey;
     void args.paramViewKey;
     return args.gestureActive || args.commitHeld;
-}
-
-/**
- * 纵向块拖动松手时锁存的**最终显示中心**。
- *
- * 普通绘制会把 pitch 中心吸附到最近半音行心；若交接锁存未吸附的 60.4，
- * 松手后就会先显示 60.4、再跳到 60。自由拖动 / Alt 缩放必须保持连续。
- */
-export function resolveParamBlockCommitDisplayCenter(args: {
-    readonly rawCenter: number | null;
-    readonly param: string;
-    readonly continuous: boolean;
-}): number | null {
-    if (args.rawCenter === null || !Number.isFinite(args.rawCenter)) return null;
-    if (args.param !== "pitch" || args.continuous) return args.rawCenter;
-    return Math.round(args.rawCenter);
 }
 
 /**
@@ -1044,6 +784,22 @@ export interface ParamBlockSplitInput {
     readonly clips: readonly ParamBlockSourceClip[];
 }
 
+export interface ParamBlockResizeNeighborPlan {
+    readonly id: string;
+    readonly startSec: number;
+    readonly endSec: number;
+    /** 被拖块已经完整越过该块，松手时应删除它。 */
+    readonly remove: boolean;
+}
+
+export interface ParamBlockResizePlan {
+    /** 被拖块的新区间。 */
+    readonly block: { readonly startSec: number; readonly endSec: number };
+    /** 被部分缩短或完整覆盖的右侧 / 左侧块，按拖动方向排列。 */
+    readonly neighbors: readonly ParamBlockResizeNeighborPlan[];
+    /** 当前块已缩到最小宽度以下，松手时应删除。 */
+    readonly removeBlock: boolean;
+}
 export interface ParamBlockResizeInput {
     readonly state: ParamBlockState;
     readonly block: ParamBlock;
@@ -1078,9 +834,7 @@ export interface ParamBlockCreateInput {
 
 /** 自动块的最小宽度（秒）。 */
 export const MIN_AUTO_BLOCK_SEC = 0.02;
-export const MOCK_SYLLABLE_SEC = 0.55;
 export const PARAM_BLOCK_ROW_HEIGHT_MULTIPLIER = 1.2;
-export const PARAM_BLOCK_TRANSITION_HANDLE_DOT_RADIUS_PX = 3.5;
 export const PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_X_PX = 0;
 export const PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX = 6;
 export const PARAM_BLOCK_TRANSITION_HANDLE_LINE_LENGTH_PX = 8;
@@ -1092,8 +846,6 @@ export function paramBlockTransitionHandleY(
 ): number {
     return Math.min(leftTopPx, rightTopPx ?? leftTopPx) - outsetY;
 }
-export const PARAM_BLOCK_TRANSITION_HANDLE_INSET_Y_PX = PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX;
-
 function finite(value: number, fallback: number): number {
     return Number.isFinite(value) ? value : fallback;
 }
@@ -1160,10 +912,6 @@ export function materializeParamBlocks(args: {
     );
 }
 
-export function blockBounds(block: ParamBlock): { startSec: number; endSec: number } {
-    return { startSec: block.startSec, endSec: block.endSec };
-}
-
 export function sortParamBlocksByTime<
     T extends { readonly startSec: number; readonly endSec: number },
 >(blocks: readonly T[]): T[] {
@@ -1175,22 +923,6 @@ export function blocksAreAdjacent(
     b: { readonly startSec: number; readonly endSec: number },
 ): boolean {
     return Math.abs(a.endSec - b.startSec) <= 1e-6;
-}
-
-export function adjacentParamBlocks(
-    blocks: readonly ParamBlock[],
-    block: ParamBlock,
-): { readonly left: ParamBlock | null; readonly right: ParamBlock | null } {
-    const sorted = sortParamBlocksByTime(blocks);
-    const index = sorted.findIndex((item) => item.id === block.id);
-    if (index < 0) return { left: null, right: null };
-    return {
-        left: index > 0 && blocksAreAdjacent(sorted[index - 1], block) ? sorted[index - 1] : null,
-        right:
-            index + 1 < sorted.length && blocksAreAdjacent(block, sorted[index + 1])
-                ? sorted[index + 1]
-                : null,
-    };
 }
 
 export function paramBlockTransitionHandles<
@@ -1228,19 +960,6 @@ export function paramBlockTransitionHandles<
     }
     void framePeriodMs;
     return out;
-}
-
-export function sortedParamBlockTransitionHandles<
-    T extends {
-        readonly id: string;
-        readonly startSec: number;
-        readonly endSec: number;
-        readonly transitionSec?: number;
-    },
->(blocks: readonly T[], framePeriodMs = 5) {
-    return paramBlockTransitionHandles(blocks, framePeriodMs).sort(
-        (a, b) => a.boundarySec - b.boundarySec,
-    );
 }
 
 function paramBlockRangesOverlap(
@@ -1576,106 +1295,6 @@ export function blocksFromViewForPanel(rootTrackId: string, view: ParamBlockView
     return view.blocks.map((block) =>
         paramBlockFromProjected(rootTrackId, block, view.framePeriodMs),
     );
-}
-
-export function layoutParamBlockRects(args: {
-    readonly blocks: readonly ParamBlock[];
-    readonly valueToY: (value: number) => number;
-    /** 参数名；只有 pitch 需要半键中心补偿（与曲线共用口径）。 */
-    readonly param?: string;
-    readonly viewportHeightPx: number;
-    readonly minValue?: number | null;
-    readonly maxValue?: number | null;
-    readonly selectedBlockIds: ReadonlySet<string>;
-    /** 当前参数窗口（秒）；只用于区分“样本完整”，不裁掉块本身。 */
-    readonly sampleStartSec?: number | null;
-    readonly sampleEndSec?: number | null;
-    /** 当前参数的一行（一个半音 / 一个值步）在视口中的像素高度。 */
-    readonly rowHeightPx?: number | null;
-    /** 当前参数窗口（帧域）；与块完全不相交时标记 `sampled=false`。 */
-    readonly windowStartFrame?: number | null;
-    readonly windowEndFrame?: number | null;
-    readonly framePeriodMs?: number | null;
-    /** 当前参数值域（给宿主与纯布局共用；缺省用传进来的 valueToY）。 */
-    readonly valueDomain?: {
-        readonly min: number;
-        readonly max: number;
-        readonly center: number;
-        readonly span: number;
-    } | null;
-}): ParamBlockRect[] {
-    const height = Math.max(1, finite(args.viewportHeightPx, 1));
-    const rowHeight = Number.isFinite(args.rowHeightPx)
-        ? Math.max(1, args.rowHeightPx as number)
-        : null;
-    const fixedHeight = Math.max(
-        1,
-        Math.min(height, (rowHeight ?? 16) * PARAM_BLOCK_ROW_HEIGHT_MULTIPLIER),
-    );
-    const rects: ParamBlockRect[] = [];
-    let ordinal = 0;
-    for (const block of args.blocks) {
-        if (
-            !Number.isFinite(block.startSec) ||
-            !Number.isFinite(block.endSec) ||
-            !(block.endSec > block.startSec)
-        ) {
-            continue;
-        }
-        /*
-         * 窗口只决定**样本是否完整**，不决定块是否存在。
-         * 块的时间投影始终由当前轴/Clip 真实区间给出；若拿旧窗口当裁剪器，
-         * 滚动或导入后会出现整批块凭空消失。
-         */
-        const sampled =
-            args.sampleStartSec == null ||
-            args.sampleEndSec == null ||
-            (block.endSec >= args.sampleStartSec - 1e-6 &&
-                block.startSec <= args.sampleEndSec + 1e-6);
-        if (block.averageValue === null || !Number.isFinite(block.averageValue)) {
-            continue;
-        }
-        /*
-         * 取数窗口只决定**样本是否完整**，不决定块是否存在于画面。
-         * 块的时间投影与曲线一样由当前轴决定；若用旧窗口裁掉整个块，滚动或
-         * 导入后会出现“整批块突然消失”，而它们的标题 / 选中态仍然有效。
-         * 纵向是否在视口内由下面的 top/height 判定。
-         */
-        const heightPx = fixedHeight;
-        /*
-         * 块中心走与曲线**完全相同**的 valueToY 口径。pitch 在进入投影前
-         * 加 0.5（N 键中心）；不能再在这里手算 normalized，否则半键补偿
-         * 会被漏掉或重复，纵向缩放后也会出现额外偏差。
-         */
-        const centerY = finite(
-            args.valueToY(
-                args.param === "pitch"
-                    ? paramBlockCenterValue("pitch", block.averageValue, {
-                          snapToSemitone: block.displayCenterSnapToSemitone !== false,
-                      })
-                    : block.averageValue,
-            ),
-            height / 2,
-        );
-        const topPx = centerY - heightPx / 2;
-        // 完全离开纵向视口：不生成几何，也不命中。
-        if (topPx + heightPx <= 0 || topPx >= height) continue;
-        ordinal += 1;
-        rects.push({
-            id: block.id,
-            startSec: block.startSec,
-            endSec: block.endSec,
-            ordinal,
-            sampled,
-            topPx,
-            heightPx,
-            centerYPx: centerY,
-            averageValue: block.averageValue,
-            selected: args.selectedBlockIds.has(block.id),
-            grouped: block.kind === "grouped",
-        });
-    }
-    return rects;
 }
 
 /**
@@ -2419,23 +2038,6 @@ export function nearestParamBlockByTime<
         }
     }
     return best;
-}
-
-/** 播放头严格位于块内部时返回该块；正好落在公共边界上返回 null。 */
-export function paramBlockContainingSec<
-    T extends {
-        readonly startSec: number;
-        readonly endSec: number;
-    },
->(blocks: readonly T[], sec: number): T | null {
-    if (!Number.isFinite(sec)) return null;
-    return (
-        blocks.find(
-            (block) =>
-                sec > Math.min(block.startSec, block.endSec) + 1e-9 &&
-                sec < Math.max(block.startSec, block.endSec) - 1e-9,
-        ) ?? null
-    );
 }
 
 /**
