@@ -255,6 +255,37 @@ describe("useParamBlockPersistence", () => {
         expect(probe.state.editSet.revision).toBe(9);
     });
 
+    it("forwards curve authority and rejects curve patches without it", async () => {
+        await render();
+        mocks.setParamBlockEdits.mockResolvedValue(reply(4));
+        await act(async () => {
+            await api.persistence?.commit(
+                probe.state,
+                true,
+                [{ param: "pitch", startFrame: 0, values: [60, 61] }],
+                {
+                    expectedCurveRevision: 12,
+                    expectedGeometryRevision: 3,
+                    expectedGeometrySignature: "sig",
+                },
+            );
+        });
+        const sent = mocks.setParamBlockEdits.mock.calls[0][0] as {
+            expectedCurveRevision?: number;
+            expectedGeometryRevision?: number;
+            expectedGeometrySignature?: string;
+        };
+        expect(sent.expectedCurveRevision).toBe(12);
+        expect(sent.expectedGeometryRevision).toBe(3);
+        expect(sent.expectedGeometrySignature).toBe("sig");
+
+        expect(() =>
+            api.persistence?.commit(probe.state, true, [
+                { param: "pitch", startFrame: 0, values: [60] },
+            ]),
+        ).toThrow("expectedCurveRevision");
+    });
+
     it("非冲突错误不重试", async () => {
         await render();
         mocks.setParamBlockEdits.mockRejectedValue(new Error("boom"));

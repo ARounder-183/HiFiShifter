@@ -98,6 +98,12 @@ export async function fetchFullResCurve(args: {
     paramView?: ParamViewSegment | null;
     onProgress?: (doneFrames: number, totalFrames: number) => void;
     withSentinel?: boolean;
+    /**
+     * 即使 pv 已以 stride=1 覆盖也强制回源。提交路径需要
+     * `authorityRevision` 做 CAS，pv 快路径不携带它；不强制时会把
+     * `undefined` 传给后端，必然触发 `Conflict: parameter curve changed`。
+     */
+    forceAuthority?: boolean;
 }): Promise<
     FrameCurve & {
         sentinel?: boolean[];
@@ -106,7 +112,7 @@ export async function fetchFullResCurve(args: {
         geometrySignature?: string;
     }
 > {
-    const { trackId, param, paramView, onProgress, withSentinel } = args;
+    const { trackId, param, paramView, onProgress, withSentinel, forceAuthority } = args;
     const startFrame = Math.max(0, Math.floor(args.startFrame));
     const endFrame = Math.max(startFrame, Math.floor(args.endFrame));
     const totalFrames = endFrame - startFrame + 1;
@@ -114,7 +120,7 @@ export async function fetchFullResCurve(args: {
     // 快路径：pv 已以 stride=1 覆盖，直接切片。带哨兵位图时同样可走 ——
     // pv 现在自带 edit_sentinel（见 ParamViewSegment.editSentinel），位图缺位
     // （旧状态 / 非 dyn）才回源取数。
-    const pvFastPath = paramView ?? null;
+    const pvFastPath = forceAuthority === true ? null : (paramView ?? null);
     if (pvCoversFullRes(pvFastPath, startFrame, endFrame)) {
         const pv = pvFastPath as ParamViewSegment;
         const offset = startFrame - pv.startFrame;

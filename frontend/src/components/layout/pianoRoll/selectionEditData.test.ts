@@ -1,4 +1,4 @@
-import { test, vi } from "vitest";
+import { expect, test, vi } from "vitest";
 
 vi.mock("../../../services/api", () => ({
     paramsApi: {
@@ -12,6 +12,7 @@ import {
     buildMultiRangeEditPlan,
     buildSelectionDragDense,
     expandStrideSampledDense,
+    fetchFullResCurve,
     pvCoversFullRes,
     selectionDragRange,
     uploadFullResCurveSegments,
@@ -357,4 +358,51 @@ test("components/layout/pianoRoll/selectionEditData.test.ts uploadFullResCurveSe
         segments: [{ startFrame: 0, values: [] }],
     });
     if (mockedSet.mock.calls.length !== 0) throw new Error("empty segments must not write");
+});
+
+test("fetchFullResCurve forceAuthority bypasses the pv fast path", async () => {
+    const mockedGet = vi.mocked(paramsApi.getParamFrames);
+    mockedGet.mockReset();
+    mockedGet.mockResolvedValue({
+        ok: true,
+        edit: [10, 11, 12],
+        edit_sentinel: [false, false, false],
+        authority_revision: 7,
+        geometry_revision: 2,
+        geometry_signature: "sig",
+    } as never);
+    const pv: ParamViewSegment = {
+        key: "k",
+        framePeriodMs: 5,
+        startFrame: 0,
+        stride: 1,
+        referenceKind: "source_curve",
+        orig: [1, 2, 3],
+        edit: [1, 2, 3],
+    };
+
+    mockedGet.mockClear();
+    const fast = await fetchFullResCurve({
+        trackId: "t1",
+        param: "pitch",
+        startFrame: 0,
+        endFrame: 2,
+        paramView: pv,
+    });
+    expect(mockedGet).not.toHaveBeenCalled();
+    expect(fast.authorityRevision).toBeUndefined();
+
+    const forced = await fetchFullResCurve({
+        trackId: "t1",
+        param: "pitch",
+        startFrame: 0,
+        endFrame: 2,
+        paramView: pv,
+        forceAuthority: true,
+    });
+    expect(mockedGet).toHaveBeenCalledTimes(1);
+    expect(forced.authorityRevision).toBe(7);
+    expect(forced.geometryRevision).toBe(2);
+    expect(forced.geometrySignature).toBe("sig");
+    expect(forced.values).toEqual([10, 11, 12]);
 });

@@ -10,6 +10,7 @@ import type { ParamSelection } from "../../paramSelection";
 import type { ParamViewSegment } from "../../types";
 import type { PointerDeps } from "../pointerDeps";
 import type { FullResWriteSegment } from "../../selectionEditData";
+import type { ParamCurveCommitAuthority } from "../../paramBlockCommitPolicy";
 import type { PointerEvent as ReactPointerEvent } from "react";
 
 type MorphDeps = Pick<
@@ -52,7 +53,10 @@ export interface ParamSelectionMorphArgs extends MorphDeps {
     /** 提交成功后的额外收尾（块工具用来清 pitch 块 value）。 */
     readonly onCommitted?: () => void;
     /** 块工具：曲线与清 value 在同一事务中提交。 */
-    readonly commitAmplitude?: (segments: readonly FullResWriteSegment[]) => Promise<void>;
+    readonly commitAmplitude?: (
+        segments: readonly FullResWriteSegment[],
+        authority: ParamCurveCommitAuthority,
+    ) => Promise<void>;
 }
 
 /** 开始一次右键幅度手势；返回值表示事件是否被消费。 */

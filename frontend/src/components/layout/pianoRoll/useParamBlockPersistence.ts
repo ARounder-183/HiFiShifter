@@ -18,6 +18,10 @@ import {
 } from "./paramBlockTypes";
 import type { ParamBlockState } from "./paramBlocks";
 import { trackParamBlockCommit, type ParamBlockCommitKind } from "./paramBlockCommitCoordinator";
+import {
+    assertCurveCommitAuthority,
+    type ParamCurveCommitAuthority,
+} from "./paramBlockCommitPolicy";
 
 /** 一次回读的权威结果：编辑集 + 帧周期。**没有几何** —— 几何永远是派生的。 */
 interface ParamBlockSnapshot {
@@ -152,7 +156,12 @@ export function useParamBlockPersistence(args: {
 
     /** 把手势 / 提交中的落地推到它们结束之后（只登记，不丢权威）。 */
     const deferLanding = useCallback((root: string): boolean => {
-        if ((pending.current.get(root) ?? 0) > 0) return true;
+        if ((pending.current.get(root) ?? 0) > 0) {
+            // 提交期间落地的回包不能直接丢弃：登记一次合并回读，等队列排空后
+            // 用最新权威重置镜像，否则下一次 CAS 基准会过期。
+            refetchPending.current.add(root);
+            return true;
+        }
         if (latest.current.deferReadback?.()) {
             refetchPending.current.add(root);
             return true;
@@ -233,7 +242,12 @@ export function useParamBlockPersistence(args: {
             ({ payload }) => {
                 if (disposed || payload?.rootTrackId !== root) return;
                 // 载荷可能来自更早的协议版本（键名 `layout`）；没有 view 就只补一次回读。
-                if ((pending.current.get(root) ?? 0) > 0) return;
+                if ((pending.current.get(root) ?? 0) > 0) {
+                    // 提交中的带外更新：先登记，队列排空后再回读。直接 return
+                    // 会让服务端代次前进而镜像停在旧值，下一次提交必被 CAS 拒绝。
+                    refetchPending.current.add(root);
+                    return;
+                }
                 const revision = payload.view?.editRevision;
                 const known = server.current.get(root)?.edits.revision;
                 if (revision !== undefined && known !== undefined && revision <= known) {
@@ -284,11 +298,15 @@ export function useParamBlockPersistence(args: {
                 startFrame: number;
                 values: readonly number[];
             }[] = [],
-            expectedCurveRevision?: number,
-            expectedGeometryRevision?: number,
-            expectedGeometrySignature?: string,
+            authority?: ParamCurveCommitAuthority | null,
             kind: ParamBlockCommitKind = "layout",
         ) => {
+            /*
+             * 有曲线补丁却没有权威 revision，后端必定返回 `Conflict: parameter curve
+             * changed`。把这条契约放在队列入口，任何新调用点在开发期就会炸出
+             * 明确堆栈，而不是变成用户看到的“参数块操作失败”。
+             */
+            assertCurveCommitAuthority({ hasPatches: curvePatches.length > 0, authority });
             const root = state.rootTrackId ?? latest.current.rootTrackId;
             const known = root === null ? undefined : server.current.get(root);
             /*
@@ -307,9 +325,9 @@ export function useParamBlockPersistence(args: {
                     edits: target.blocks,
                     checkpoint,
                     curvePatches,
-                    expectedCurveRevision,
-                    expectedGeometryRevision,
-                    expectedGeometrySignature,
+                    expectedCurveRevision: authority?.expectedCurveRevision,
+                    expectedGeometryRevision: authority?.expectedGeometryRevision,
+                    expectedGeometrySignature: authority?.expectedGeometrySignature,
                 });
                 const snapshot: ParamBlockSnapshot = {
                     edits: normalizeParamBlockEditSet(reply.edits ?? target),

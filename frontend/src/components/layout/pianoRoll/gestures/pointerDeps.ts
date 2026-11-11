@@ -19,6 +19,7 @@ import type { ScaleLike } from "../../../../utils/musicalScales";
 import type { PinchStepState } from "../../../../utils/pinchGesture";
 import type { TimelineAxis } from "../../renderKernel/timelineAxis";
 import type { FrameSpan, ParamSelection } from "../paramSelection";
+import type { ParamCurveCommitAuthority } from "../paramBlockCommitPolicy";
 import type { MultiRangeEditPiece } from "../selectionEditData";
 import type { EdgeScrollDriver } from "../kernel/edgeScrollDriver";
 import type {
@@ -205,6 +206,7 @@ export type PointerDeps = {
     }) => Promise<{
         sourceAt: (frame: number) => number;
         sentinelAt: (frame: number) => boolean | undefined;
+        authority: ParamCurveCommitAuthority;
     }>;
     findStretchSelectionEdge: (
         e: ReactPointerEvent<HTMLCanvasElement>,

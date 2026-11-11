@@ -23,6 +23,7 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 import type { ParamSelection } from "../../paramSelection";
 import type { PointerDeps } from "../pointerDeps";
 import { trackParamBlockCommit } from "../../paramBlockCommitCoordinator";
+import type { ParamCurveCommitAuthority } from "../../paramBlockCommitPolicy";
 
 /** `handleParamLineDrag` 作用域里的局部量。 */
 type ParamLineLocals = {
@@ -63,7 +64,10 @@ type Deps = Pick<
      * Optional atomic commit used by the block tool: curve patches and the
      * cleared pitch-block values go to the backend in one history step.
      */
-    readonly commitAmplitude?: (segments: readonly FullResWriteSegment[]) => Promise<void>;
+    readonly commitAmplitude?: (
+        segments: readonly FullResWriteSegment[],
+        authority: ParamCurveCommitAuthority,
+    ) => Promise<void>;
 } & ParamLineLocals;
 
 /**
@@ -378,7 +382,7 @@ export function handleRightDragMorph(deps: Deps, e: ReactPointerEvent<HTMLCanvas
                 try {
                     const segments = buildUploadSegments(editParam, pieces, commit.sentinelAt);
                     if (commitAmplitude !== undefined) {
-                        await commitAmplitude(segments);
+                        await commitAmplitude(segments, commit.authority);
                     } else {
                         await trackParamBlockCommit(
                             "amplitude",

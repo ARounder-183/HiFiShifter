@@ -76,6 +76,7 @@ import {
     planSelectionEditWindows,
     type MultiRangeEditPiece,
 } from "./selectionEditData";
+import type { ParamCurveCommitAuthority } from "./paramBlockCommitPolicy";
 import {
     frameRangeEndCut,
     frameRangeStartCut,
@@ -729,6 +730,7 @@ export function usePianoRollInteractions(args: {
         }): Promise<{
             sourceAt: (frame: number) => number;
             sentinelAt: (frame: number) => boolean | undefined;
+            authority: ParamCurveCommitAuthority;
         }> => {
             const windows = planSelectionEditWindows({
                 ranges: input.ranges,
@@ -744,9 +746,35 @@ export function usePianoRollInteractions(args: {
                         endFrame: window.endFrame,
                         paramView: input.paramView,
                         withSentinel: input.withSentinel,
+                        // 提交必须拿到权威 watermark；pv 快路径不携带 revision，
+                        // 传下去会让带曲线补丁的事务必被后端拒绝。
+                        forceAuthority: true,
                     }),
                 ),
             );
+            if (curves.length === 0) {
+                throw new Error("param block commit requires at least one curve window");
+            }
+            const authorityRevision = curves[0]?.authorityRevision;
+            if (authorityRevision === undefined) {
+                throw new Error("param block commit requires expectedCurveRevision");
+            }
+            for (const curve of curves) {
+                if (curve.authorityRevision !== authorityRevision) {
+                    throw new Error("Conflict: parameter curve changed during read");
+                }
+            }
+            const geometrySignature = curves[0]?.geometrySignature;
+            const geometryRevision = curves[0]?.geometryRevision;
+            for (const curve of curves) {
+                if (
+                    geometrySignature !== undefined
+                        ? curve.geometrySignature !== geometrySignature
+                        : curve.geometryRevision !== geometryRevision
+                ) {
+                    throw new Error("Conflict: parameter geometry changed during read");
+                }
+            }
             return {
                 sourceAt: (frame: number) => {
                     for (let i = 0; i < windows.length; i += 1) {
@@ -763,6 +791,13 @@ export function usePianoRollInteractions(args: {
                         return curves[i]?.sentinel?.[frame - window.startFrame];
                     }
                     return undefined;
+                },
+                authority: {
+                    expectedCurveRevision: authorityRevision,
+                    ...(geometryRevision === undefined ? {} : { expectedGeometryRevision: geometryRevision }),
+                    ...(geometrySignature === undefined
+                        ? {}
+                        : { expectedGeometrySignature: geometrySignature }),
                 },
             };
         },
@@ -2726,6 +2761,7 @@ export function usePianoRollInteractions(args: {
             readonly onContextMenu?: (x: number, y: number) => void;
             readonly commitAmplitude?: (
                 segments: readonly { startFrame: number; values: number[] }[],
+                authority: ParamCurveCommitAuthority,
             ) => Promise<void>;
         }): boolean => {
             const pv = paramViewRef.current;

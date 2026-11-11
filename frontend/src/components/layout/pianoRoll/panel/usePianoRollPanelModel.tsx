@@ -92,6 +92,8 @@ import {
 import { logicalBlockId, type ParamBlockView } from "../paramBlockTypes";
 import { resolveParamBlockGeometryClips } from "../paramBlockGeometryFreeze";
 import { fetchFullResCurve, readPvRange, uploadFullResCurveSegments } from "../selectionEditData";
+import type { ParamCurveCommitAuthority } from "../paramBlockCommitPolicy";
+import { markParamBlockPreviewOwnedRevision as markPreviewOwnedRevision } from "../paramBlockPreviewOwnership";
 import { startPointerGesture } from "../gestures/pointerGesture";
 import { armRightDragContextMenuGuard } from "../../../../utils/rightDragContextMenuGuard";
 import { normalizeCssColor } from "../colors";
@@ -2546,6 +2548,26 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      * paramView 刷新会在同一帧给出两套几何，正是块在两个位置快速闪烁的来源。
      */
     const paramBlockDragSnapshotRef = useRef<ParamBlockDragSnapshot | null>(null);
+
+    /**
+     * 把“本地提交产生的 edit revision”记到所有仍存活的视觉预览上。
+     *
+     * 创建 / 拉伸 / 过渡都会在 pointerup 时同时做两件事：推进本地 editSet
+     * revision，并保留预览直到权威曲线到达。若只标记其中一种 ref，epoch 检查会
+     * 把这次**自己的** revision 变化误判成外部结构编辑，提前撤下预览 —— 用户
+     * 看到参数线与块先回弹旧值、再跳到新值。统一入口避免再漏一条路径。
+     */
+    function markParamBlockPreviewOwnedRevision(revision: number): void {
+        markPreviewOwnedRevision(
+            {
+                visualTransaction: paramBlockVisualTransactionRef,
+                dragSnapshot: paramBlockDragSnapshotRef,
+                resize: paramBlockResizeRef,
+            },
+            revision,
+        );
+    }
+
     /** 块命中容差（CSS px）：触摸 / 笔比鼠标更容易漂，分别给不同容差。 */
     const paramBlockHitSlopPx = 4;
 
@@ -3231,6 +3253,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 startFrame: number;
                 values: readonly number[];
             }[] = [],
+            authority?: ParamCurveCommitAuthority | null,
         ): Promise<void> => {
             if (!rootTrackId) return;
             const state = paramBlockStateRef.current;
@@ -3244,9 +3267,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             });
             if (!edit.ok) throw new Error(edit.reason);
             setParamBlockState(edit.state);
-            const tx = paramBlockVisualTransactionRef.current;
-            if (tx !== null) tx.ownedEditRevision = edit.state.editSet.revision;
-            await blockPersistence.commit(edit.state, true, curvePatches);
+            markParamBlockPreviewOwnedRevision(edit.state.editSet.revision);
+            await blockPersistence.commit(edit.state, true, curvePatches, authority, "transition");
             bumpRefreshToken();
             invalidate();
         },
@@ -3266,7 +3288,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             if (widthSec <= 1e-6 && options?.restoreOriginal !== true) return;
             const framePeriodMs = paramViewRef.current?.framePeriodMs ?? 5;
             if (options?.restoreOriginal === true) {
-                await persistBlockTransition(left, right, 0);
                 const boundaryFrame = Math.round((right.startSec * 1000) / framePeriodMs);
                 const widthFrames = Math.max(1, Math.round((widthSec * 1000) / framePeriodMs));
                 const startFrame = Math.max(0, Math.floor((left.startSec * 1000) / framePeriodMs));
@@ -3276,28 +3297,52 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 );
                 const restoreStart = Math.max(startFrame, boundaryFrame - widthFrames);
                 const restoreEnd = Math.min(endFrame, boundaryFrame + widthFrames - 1);
-                const pv = paramViewRef.current;
-                const original = pv === null ? null : readPvRange(pv, restoreStart, restoreEnd);
-                if (original !== null && original.length > 0) {
-                    const restoreSegments = [{ startFrame: restoreStart, values: original }];
-                    await uploadFullResCurveSegments({
-                        trackId: rootTrackId,
-                        param: "pitch",
-                        segments: restoreSegments,
-                    });
-                    const pvNow = paramViewRef.current;
-                    if (pvNow !== null) {
-                        setParamView(
-                            applyFullResSegmentsToParamView({
-                                paramView: pvNow,
-                                segments: restoreSegments,
-                            }),
-                        );
-                    }
-                    onParamCommitSucceeded();
-                    bumpRefreshToken();
-                    invalidate();
+                /*
+                 * 撤销过渡必须写回**提交态**曲线，而不是当前 live 预览。
+                 * 用一次带 authority 的全分辨率读数作为恢复源，并把它与
+                 * width=0 的布局放回同一个事务：旧实现先单独 layout commit
+                 * 再 upload，既多一个撤销点，也可能在两者之间被并发写打断。
+                 */
+                const source = await fetchFullResCurve({
+                    trackId: rootTrackId,
+                    param: "pitch",
+                    startFrame: restoreStart,
+                    endFrame: restoreEnd,
+                    paramView: null,
+                    forceAuthority: true,
+                });
+                if (source.authorityRevision === undefined) {
+                    throw new Error("param block transition requires expectedCurveRevision");
                 }
+                const authority: ParamCurveCommitAuthority = {
+                    expectedCurveRevision: source.authorityRevision,
+                    ...(source.geometryRevision === undefined
+                        ? {}
+                        : { expectedGeometryRevision: source.geometryRevision }),
+                    ...(source.geometrySignature === undefined
+                        ? {}
+                        : { expectedGeometrySignature: source.geometrySignature }),
+                };
+                const restoreSegments = [{ startFrame: source.startFrame, values: source.values }];
+                await persistBlockTransition(
+                    left,
+                    right,
+                    0,
+                    restoreSegments.map((segment) => ({ ...segment, param: "pitch" })),
+                    authority,
+                );
+                const pvNow = paramViewRef.current;
+                if (pvNow !== null) {
+                    setParamView(
+                        applyFullResSegmentsToParamView({
+                            paramView: pvNow,
+                            segments: restoreSegments,
+                        }),
+                    );
+                }
+                onParamCommitSucceeded();
+                bumpRefreshToken();
+                invalidate();
                 return;
             }
 
@@ -3314,7 +3359,20 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 startFrame: Math.max(startFrame, boundaryFrame - widthFrames),
                 endFrame: Math.min(endFrame, boundaryFrame + widthFrames - 1),
                 paramView: paramBlockViewRef.current !== null ? null : paramViewRef.current,
+                forceAuthority: true,
             });
+            if (source.authorityRevision === undefined) {
+                throw new Error("param block transition requires expectedCurveRevision");
+            }
+            const authority: ParamCurveCommitAuthority = {
+                expectedCurveRevision: source.authorityRevision,
+                ...(source.geometryRevision === undefined
+                    ? {}
+                    : { expectedGeometryRevision: source.geometryRevision }),
+                ...(source.geometrySignature === undefined
+                    ? {}
+                    : { expectedGeometrySignature: source.geometrySignature }),
+            };
             const leftValue = left.averageValue ?? 60;
             const rightValue = right.averageValue ?? 60;
             const committedAt = (frame: number): number =>
@@ -3334,6 +3392,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 right,
                 widthSec,
                 segments.map((segment) => ({ ...segment, param: "pitch" })),
+                authority,
             );
         },
         [
@@ -3818,13 +3877,23 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                  * 最终编辑集（含 Pitch 块的逻辑中心）。
                  */
                 commitLineCurve: async (state, segments, revision, geometry, signature) => {
+                    const authority: ParamCurveCommitAuthority | undefined =
+                        revision === undefined
+                            ? undefined
+                            : {
+                                  expectedCurveRevision: revision,
+                                  ...(geometry === undefined
+                                      ? {}
+                                      : { expectedGeometryRevision: geometry }),
+                                  ...(signature === undefined
+                                      ? {}
+                                      : { expectedGeometrySignature: signature }),
+                              };
                     await blockPersistence.commit(
                         state,
                         true,
                         segments.map((segment) => ({ ...segment, param: editParam })),
-                        revision,
-                        geometry,
-                        signature,
+                        authority,
                         "drag",
                     );
                 },
@@ -4032,7 +4101,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         pointerId: hit.pointerId,
                         captureTarget: hit.captureTarget,
                         onContextMenu: (x, y) => setParamBlockContextMenu({ x, y }),
-                        commitAmplitude: async (segments) => {
+                        commitAmplitude: async (segments, authority) => {
                             /*
                              * One backend transaction for both the transformed
                              * curve and the cleared pitch centers. Splitting this
@@ -4049,9 +4118,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                 state,
                                 true,
                                 segments.map((segment) => ({ ...segment, param: editParam })),
-                                undefined,
-                                undefined,
-                                undefined,
+                                authority,
                                 "amplitude",
                             );
                         },
@@ -4986,10 +5053,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                     });
                                     if (created.ok) {
                                         setParamBlockState(created.state);
-                                        const tx = paramBlockVisualTransactionRef.current;
-                                        if (tx !== null) {
-                                            tx.ownedEditRevision = created.state.editSet.revision;
-                                        }
+                                        markParamBlockPreviewOwnedRevision(
+                                            created.state.editSet.revision,
+                                        );
                                     } else applyParamBlockEditRef.current?.(created);
                                     preserveCreatePreview = created.ok;
                                     const createHandoff = created.ok
@@ -5074,6 +5140,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                                             createLayoutBasis !== null
                                                                 ? null
                                                                 : curveBase,
+                                                        // 创建提交带 curve patches；即使
+                                                        // curveBase 覆盖全分辨率也必须回源拿
+                                                        // authority，否则后端必拒。
+                                                        forceAuthority: true,
                                                     });
                                                     const segments = [
                                                         {
@@ -5093,6 +5163,13 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                                         },
                                                     ];
                                                     if (createLayoutBasis !== null) {
+                                                        if (
+                                                            source.authorityRevision === undefined
+                                                        ) {
+                                                            throw new Error(
+                                                                "param block create requires expectedCurveRevision",
+                                                            );
+                                                        }
                                                         await blockPersistence.commit(
                                                             created.state,
                                                             true,
@@ -5100,9 +5177,25 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                                                 ...segment,
                                                                 param: editParam,
                                                             })),
-                                                            source.authorityRevision,
-                                                            source.geometryRevision,
-                                                            source.geometrySignature,
+                                                            {
+                                                                expectedCurveRevision:
+                                                                    source.authorityRevision,
+                                                                ...(source.geometryRevision ===
+                                                                undefined
+                                                                    ? {}
+                                                                    : {
+                                                                          expectedGeometryRevision:
+                                                                              source.geometryRevision,
+                                                                      }),
+                                                                ...(source.geometrySignature ===
+                                                                undefined
+                                                                    ? {}
+                                                                    : {
+                                                                          expectedGeometrySignature:
+                                                                              source.geometrySignature,
+                                                                      }),
+                                                            },
+                                                            "create",
                                                         );
                                                     } else {
                                                         await uploadFullResCurveSegments({
@@ -5135,6 +5228,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                                     if (ownsCreatePreview()) {
                                                         paramBlockCreateCommitRef.current = null;
                                                         paramBlockResizeRef.current = null;
+                                                        paramBlockVisualTransactionRef.current = null;
                                                         paramBlockInteractionCurveRef.current =
                                                             null;
                                                         const pvNow = paramViewRef.current;
@@ -5554,8 +5648,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                             const state = paramBlockStateRef.current;
                             const next: ParamBlockState = { ...state, editSet: plan.edits };
                             setParamBlockState(next);
-                            const tx = paramBlockVisualTransactionRef.current;
-                            if (tx !== null) tx.ownedEditRevision = next.editSet.revision;
+                            markParamBlockPreviewOwnedRevision(next.editSet.revision);
                             persistParamBlockEdits(next);
                             if (plan.removedIds.includes(gestureRef.blockId)) {
                                 paramBlockAnchorRef.current = null;
