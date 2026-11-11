@@ -57,14 +57,15 @@ game baseline                      playback_rate / reverse        参数块编�
 
 ## 选择与编辑作用域
 
+- **设计原则：参数块选择是选择工具族的对象级子模式，不是第三个顶级工具。** 工具族只有选择（range / block）与绘制（draw / line / vibrato）；`block = toolMode === "select" && selectToolMode === "block"`。参数块图层显隐是独立的视图轴，不随工具切换，也不属于任何工具按钮；关闭图层会把选择子模式收回 range。
 - 块选择没有独立状态：选区（selectionRef / selectionUi）是唯一真值，块高亮由「完整覆盖」派生。一个逻辑块的全部可见 run 都被选区覆盖，它才进入 selectedParamBlockIds。
 - 逻辑块身份是 userBlockId ?? id。多 run 用户块在点击、Ctrl 切换、Shift 范围、拖动、删除、编组、取消编组、归一化、恢复与菜单计数中都是一个单位；只有绘制 / 命中 / 过渡手柄看单个 run。
 - Ctrl / Cmd + 点击块：切换该逻辑块的成员资格。Shift + 点击块：从锚点到目标块按整块范围选择；Ctrl + Shift 退化为普通单选。Alt + 点击块：在点击位置分割（默认绑定，可在快捷键设置修改）；Ctrl+Alt 在块上回退为 Ctrl 选择。
 - 点击与拖动以二维 3px 死区区分。Shift 点击/拖动都从锚点到目标按整块范围选择，拖动直接使用该范围作为拖动集合；Ctrl 点击移除块后不会启动拖动。Alt 点击分割在水平或纵向拖动越过死区后自动取消，进入普通块拖动。
-- 块选择动作同时写入参数编辑器选区；切换工具不清空选区，块高亮只在块工具显示。块工具内的背景拖动会把碰到的逻辑块扩展为全部 run，保证高亮与 Delete / Group 的作用域一致。块工具 Ctrl/Cmd+A 只选择块实际覆盖的帧区间（多 run 全部纳入），块间空隙与轨道头尾不选；无块时清空。
+- 块选择动作同时写入参数编辑器选区；在 range / block 之间切换不清空选区，块高亮只在块子模式且图层可见时显示。块选择模式内的背景拖动会把碰到的逻辑块扩展为全部 run，保证高亮与 Delete / Group 的作用域一致。块选择模式 Ctrl/Cmd+A 只选择块实际覆盖的帧区间（多 run 全部纳入），块间空隙与轨道头尾不选；无块时清空。
 - 锚点只服务 Shift：普通点击、Ctrl 点击、Shift 点击都会更新锚点；背景拖动结束落在起点块；右键空白拖动追加后按「原锚点 → 选区首块 → 播放头块」回退；清空 / 根切换清空。
 - 组伸缩与删除递归保留 baseCover：组的基块所有权等于全部叶子 child 的 baseCover 并集；被缩掉 / 丢弃的 base 派生 child 生成墓碑，避免基块复活。组 resize 保持组 id；根块组按 child 生成多个 run，不填满空隙。
-- 右键块体拖动 = 幅度调整：复用选择工具的 `createSelectionAmplifier` / `transformSelectionByRightDrag`，上拖放大、下拖平滑，百分比浮窗与选择工具同源；右键块体单击 = 块菜单。右键空白拖动 = 追加参数选区；右键空白单击 = 块菜单。
+- 右键块体拖动 = 幅度调整：复用选择族的 `createSelectionAmplifier` / `transformSelectionByRightDrag`，上拖放大、下拖平滑，百分比浮窗与参数线选择同源；右键块体单击 = 块菜单。右键空白拖动 = 追加参数选区；右键空白单击 = 块菜单。块菜单顶部只有「参数块」子菜单，标准参数命令与参数线选择共用 `EditContextMenu` 的唯一描述表。
 - 新建块：`modifier.paramBlockCreate`（默认 Alt）在空白拖动 = 普通新建并平移原曲线；`modifier.paramBlockCreateFlat`（默认 Ctrl+Alt）在空白拖动 = 新建并把当前参数线拉平。pitch 拉平保留 0 未浊哨兵，非 pitch 全部填平。普通 Alt 不再隐式拉平。创建开始后补按 / 松开 Ctrl 会实时切换普通与平直形态，提交使用最后一次预览形态。
 - 分割：除播放头分割外，`modifier.paramBlockSplitAtClick`（默认 Alt）支持左键点击块内位置分割；点击与拖动以 3px 死区区分，拖动超过死区回到普通块拖动。Ctrl+Alt 在块上按 Ctrl 选择处理，不创建、不分割。分割完成后只选中右侧结果；分割点左侧的旧选中项取消，右侧既有选中项保留。
 - 多选纵向拖动：按逻辑块解析每个选中块的起点中心，再扇出到它的全部 run；未选中块不进入拖动成员，提交时也只写选中逻辑块的 `value`。
@@ -91,7 +92,7 @@ game baseline                      playback_rate / reverse        参数块编�
 - 内核：`backend/hifishifter-kernel/src/param_blocks/`
 - App：`backend/src-tauri/src/commands/param_blocks.rs`
 - 插件：`backend/hifishifter-plugin/src/editor/session.rs`
-- 前端：`frontend/src/components/layout/pianoRoll/paramBlock*.ts`
+- 前端：`frontend/src/components/layout/pianoRoll/paramBlock*.ts`（块命令表见 `paramBlockCommandMenu.ts`）
 - Golden fixture：`frontend/src/components/layout/pianoRoll/__fixtures__/paramBlockProjection.golden.json`
 
 ## 维护约束
