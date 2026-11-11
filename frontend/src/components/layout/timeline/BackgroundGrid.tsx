@@ -184,10 +184,8 @@ export const BackgroundGrid: React.FC<{
     });
 
     const lastDrawKeyRef = useRef<string | null>(null);
-
-    useLayoutEffect(() => {
-        lastDrawKeyRef.current = null;
-    });
+    /** 上次绘制的 svg 节点：DOM 被 React 重建时必须强制重绘（见 draw 内）。 */
+    const lastDrawSvgRef = useRef<SVGSVGElement | null>(null);
 
     const draw = useCallback(
         (nextScrollLeft?: number, nextViewportTopPx?: number) => {
@@ -195,6 +193,15 @@ export const BackgroundGrid: React.FC<{
             if (!svg) return;
             const paths = svg.querySelectorAll<SVGPathElement>("path");
             if (paths.length < 2) return;
+            // 【为什么不再每次渲染都清空 lastDrawKeyRef】此前有个无依赖的
+            // useLayoutEffect 逐渲染把键置 null，于是 drawKey 完全相同也会全量
+            // 重建上百刻度的 SVG path（参数编辑器 clip 拖拽逐帧触发）。
+            // drawKey 已覆盖全部影响绘制的输入，键变自然重绘；唯一需要强制
+            // 失key 的情形是 svg 节点被重建（新 DOM 的 path 是空的）。
+            if (lastDrawSvgRef.current !== svg) {
+                lastDrawSvgRef.current = svg;
+                lastDrawKeyRef.current = null;
+            }
 
             const latest = latestRef.current;
             const sl = Number.isFinite(nextScrollLeft)

@@ -342,6 +342,18 @@ export function useTimelineKernelSeekDrag({
     const kernelDropToNewTrackRef = React.useRef(false);
 
     /**
+     * copy 幽灵块的**上次已提交几何**：预览每帧都会重算同一组值，`setKernelGhost`
+     * 挂在面板级 state 上，逐帧提交新数组会重渲染整个 TimelinePanel。
+     * 与 `kernelDropToNewTrackRef` 同一手法：几何未变就不 setState。
+     */
+    const kernelGhostGeometryRef = React.useRef<Array<{
+        key: string;
+        leftPx: number;
+        widthPx: number;
+        trackId: string;
+    }> | null>(null);
+
+    /**
      * 内核手势的**交互锁**（`beginInteraction` / `endInteraction` 的成对封装）。
      *
      * 【为什么每个手势都必须持有】`sessionSlice` 在 `_interactionLockCount > 0`
@@ -572,6 +584,13 @@ export function useTimelineKernelSeekDrag({
                 // 把**累计位移**替换为吸附值，再以「目标累计 − 已应用累计」驱动增量
                 // （与旧实现 `useSlipDrag` 同一算法，只是位移正负号约定相反）。
                 const timelineSnap = sessionRef.current.timelineSnap;
+                // 【为什么每帧只建一次 id→clip 映射】slip 里锚 clip 与每个 participant
+                // 都要按 id 取**当前** Redux clip（`computeSlipWindow` 要求逐帧读当前
+                // 值，见 slipWindow.ts 的说明），逐次 `clips.find` 是每帧 O(n·m)。
+                // 一次 Map 构建把每帧降到 O(m+n)，语义完全不变。
+                const clipsById = new Map(
+                    sessionRef.current.clips.map((clip) => [clip.id, clip] as const),
+                );
                 // 【为什么 Slip 用未钳制位移】`args.deltaSec` 是**位置**位移（内核按
                 // "clip 不能从负时间开始"钳到 ≥0）；而 Slip 改的是 clip 内部的源窗口
                 // 偏移，合法域是任意符号任意大小（向左滑出媒体起点 = 前导静音）。
@@ -607,9 +626,7 @@ export function useTimelineKernelSeekDrag({
                             // 循环节命中：只高亮**真正对齐**的那一侧（媒体边界恰好
                             // 落在 Clip 起点 → 亮起点；落在终点 → 亮终点；len·r 恰为
                             // 整周期等两侧同时对齐才两缘同亮）。
-                            const anchorClip = sessionRef.current.clips.find(
-                                (item) => item.id === origin.clipId,
-                            );
+                            const anchorClip = clipsById.get(origin.clipId);
                             if (anchorClip !== undefined) {
                                 const aligned = slipBoundaryAlignedSides(anchor, snappedW);
                                 const clipStartSec = Math.max(0, Number(anchorClip.startSec) || 0);
@@ -645,9 +662,7 @@ export function useTimelineKernelSeekDrag({
                     sourceEndSec: number;
                 }> = [];
                 for (const participant of origin.participants) {
-                    const clip = sessionRef.current.clips.find(
-                        (item) => item.id === participant.clipId,
-                    );
+                    const clip = clipsById.get(participant.clipId);
                     if (clip === undefined) continue;
                     // ⚠️ **取反号**：`dApplied` 在「屏幕位移」域（内核约定正 = 向右拖），
                     // 而 `computeSlipWindow` 要的是「窗口平移量」域（正 = 源窗口向素材
@@ -756,14 +771,29 @@ export function useTimelineKernelSeekDrag({
             origin.lastDeltaStartSec = deltaStartSec;
             if (origin.copyMode) {
                 // copy：**原 clip 不动**，只更新 ghost（整组，内容坐标）。
-                setKernelGhost(
-                    origin.participants.map((participant, index) => ({
-                        key: participant.clipId,
-                        leftPx: moves[index].startSec * pxPerSec,
-                        widthPx: Math.max(1, participant.lengthSec * pxPerSec),
-                        trackId: moves[index].trackId,
-                    })),
-                );
+                // 只在几何真的变化时提交 state：⌘ 拖拽的每一帧都会走到这里，
+                // 无条件 setState 会让整个 TimelinePanel 逐帧重渲染。
+                const ghost = origin.participants.map((participant, index) => ({
+                    key: participant.clipId,
+                    leftPx: moves[index].startSec * pxPerSec,
+                    widthPx: Math.max(1, participant.lengthSec * pxPerSec),
+                    trackId: moves[index].trackId,
+                }));
+                const previous = kernelGhostGeometryRef.current;
+                const unchanged =
+                    previous !== null &&
+                    previous.length === ghost.length &&
+                    previous.every(
+                        (item, index) =>
+                            item.key === ghost[index].key &&
+                            item.leftPx === ghost[index].leftPx &&
+                            item.widthPx === ghost[index].widthPx &&
+                            item.trackId === ghost[index].trackId,
+                    );
+                if (!unchanged) {
+                    kernelGhostGeometryRef.current = ghost;
+                    setKernelGhost(ghost);
+                }
                 // 复制不移动原片：波纹跟随集恢复原位（覆盖「拖拽中途切到复制」的残留预览）。
                 applyRippleFollowerShift(dispatch, origin.rippleFollowers, 0);
                 return;
@@ -869,6 +899,7 @@ export function useTimelineKernelSeekDrag({
 
             if (origin.copyMode) {
                 setKernelGhost(null);
+                kernelGhostGeometryRef.current = null;
                 // 落点解析必须早于取消早退：取消路径同样要清掉「落到新轨」标记，
                 // 否则虚线新轨行会一直挂在画面上，且之后每一次普通移动都会被误读成
                 // 哨兵落点（`kernelDropToNewTrackRef` 的语义是"本次手势的落点"，
