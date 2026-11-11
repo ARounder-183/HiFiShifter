@@ -3635,12 +3635,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             clipsByTrack: hitClipsByTrack,
             headerHeightPx: CLIP_HEADER_HEIGHT,
         });
-        if (hit.kind !== "clip") return hit;
+        if (hit.kind !== "clip" || hit.region === "header") return hit;
 
         // ── 重叠区按位置改写（同轨 ≥ 2 个 clip 才有重叠）──
-        // 二分取到的是「最后一个 startSec <= sec」的 clip，在重叠区里永远是**后
-        // 一个**；前一个 clip 的右缘与淡出控件因此完全不可达。这里按旧实现
-        // `OverlapEditLayer` 的位置规则改写命中结果（见 overlapControls 文件头）。
+        // 通用命中取视觉最上层的短片段；重叠区还须提供双方的边缘与淡化控件。
+        // 按旧实现 `OverlapEditLayer` 的位置规则解析控件，但保留普通点击的前景目标。
         const track = hitTracks[hit.trackIndex];
         if (track === undefined) return hit;
         const trackClips = hitClipsByTrack.get(track.id) ?? [];
@@ -3683,6 +3682,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 laterClipId: overlap.laterClipId,
                 fadeIsLine: overlap.fadeIsLine,
                 fromOverlapRegion: true,
+                foregroundClip: hit.clip,
             };
         }
 
@@ -4011,8 +4011,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      */
     type KernelHit = ReturnType<typeof hitTest> & {
         readonly partnerClipId?: string;
-        /** 重叠区里**后一个** clip 的 id（普通左键的选中目标）。 */
+        /** 重叠区配对里后开始的 clip（淡化控件的配对信息）。 */
         readonly laterClipId?: string;
+        /** 普通左键仍选择绘制在最上层的片段，不受淡化控件归属影响。 */
+        readonly foregroundClip?: HitTestClip;
         /**
          * 淡变命中是否为包络线本体（`false` = 区域边缘竖线）。
          *
@@ -4161,30 +4163,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             !modifiers.metaKey &&
             !modifiers.shiftKey;
         /*
-         * 重叠区普通左键选中**后一个** clip（视觉上压在上面的那个），而不是
-         * 控件归属的 clip。控件归属仍用于右键淡变菜单与带修饰键的编辑。
+         * 重叠区普通左键选中视觉最上层的短片段；控件归属仍用于右键与修饰键编辑。
          */
-        const laterClip =
-            plainLeftOverlap && rawHit.laterClipId !== undefined
-                ? data().clips.find((clip) => clip.id === rawHit.laterClipId)
-                : undefined;
         const hitWithTarget =
-            plainLeftOverlap && laterClip !== undefined
+            plainLeftOverlap && rawHit.foregroundClip !== undefined
                 ? {
                       ...rawHit,
-                      clip: {
-                          ...rawHit.clip,
-                          id: laterClip.id,
-                          trackId: laterClip.trackId,
-                          startSec: laterClip.startSec,
-                          lengthSec: laterClip.lengthSec,
-                          muted: laterClip.muted,
-                          gain: clipItemGain(laterClip),
-                          playbackRate: laterClip.playbackRate,
-                          name: laterClip.name,
-                          groupId: laterClip.groupId,
-                          isMidiClip: laterClip.midiNoteCount != null,
-                      },
+                      clip: rawHit.foregroundClip,
+                      localX: (rawHit.sec - rawHit.foregroundClip.startSec) * scroll.get().pxPerSec,
                   }
                 : rawHit;
         const hit = downgradeOverlapHitForPlainLeftPress(hitWithTarget, modifiers);

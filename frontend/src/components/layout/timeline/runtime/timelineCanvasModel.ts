@@ -47,6 +47,7 @@ import {
     type TimelineAxis,
 } from "../../renderKernel/timelineAxis.js";
 import { isAwaitingHostAudio } from "../../../../features/ara/hostAudio.js";
+import { compareClipLayerOrder } from "../trackOverlap";
 
 type SparseRenderClip = {
     id: string;
@@ -163,6 +164,8 @@ export type TimelineCanvasClipModel = {
      * `drawTimelineCanvas` 却能读到它——类型与实际不符，补上声明。
      */
     leadingOverlapPx?: number;
+    /** 存在同轨重叠：绘制批次和 header 重绘必须遵循片段图层顺序。 */
+    hasOverlap?: boolean;
     /**
      * 本 clip 的 header 被**任何前序同轨 clip** 遮住的宽度（clip 内相对坐标）。
      *
@@ -678,6 +681,7 @@ export function buildSparseClipRenderModel(args: {
     // 否则重叠时只有“后绘制/选中的那个”有 DOM 边缘/淡入淡出手柄，较早 clip 的
     // 边缘（延长截短/拉伸/淡入淡出）完全不可达。配合 ClipItem 去掉会建立独立层叠
     // 上下文的 transform，交叉处两个 clip 的手柄都位于其它 clip body 之上、可被编辑。
+    const overlappingClipIds = new Set<string>();
     for (const trackClips of Object.values(args.visibleTrackClipsById)) {
         if (trackClips.length < 2) continue;
         // 排序后线性扫描（原实现是 O(n²) 全对比较）。
@@ -706,6 +710,8 @@ export function buildSparseClipRenderModel(args: {
                 if (Math.min(aEnd, bEnd) > bStart + 1e-9) {
                     overlayClipIds.add(a.id);
                     overlayClipIds.add(b.id);
+                    overlappingClipIds.add(a.id);
+                    overlappingClipIds.add(b.id);
                 }
             }
         }
@@ -719,16 +725,13 @@ export function buildSparseClipRenderModel(args: {
      * 是呈现层的独立不变量：哪怕将来又出现一次"同一个 item 两条 clip"，用户看到的
      * 也仍然是那条有波形的。
      *
-     * 【为什么是稳定分区而不是排序】同一层内的相对顺序承载了"后来的在上"这一既有
-     * 语义（重叠片段、粘贴到同一位置）。只把占位挑到最前面，其余保持原序。
+     * 有内容的片段按长度排序，短片段在前景；占位仍优先放在最底层。
      */
-    const paintOrder = <T extends { sourcePath?: string; midiNoteCount?: number }>(
-        clips: T[],
-    ): T[] => {
-        if (clips.length < 2) return clips;
-        const placeholders = clips.filter((clip) => isAwaitingHostAudio(clip));
-        if (placeholders.length === 0 || placeholders.length === clips.length) return clips;
-        return [...placeholders, ...clips.filter((clip) => !isAwaitingHostAudio(clip))];
+    const paintOrder = <T extends SparseRenderClip>(clips: T[]): T[] => {
+        const ordered = clips.slice().sort(compareClipLayerOrder);
+        const placeholders = ordered.filter((clip) => isAwaitingHostAudio(clip));
+        if (placeholders.length === 0 || placeholders.length === ordered.length) return ordered;
+        return [...placeholders, ...ordered.filter((clip) => !isAwaitingHostAudio(clip))];
     };
 
     const drawClips = args.visibleTracks.flatMap((track, visibleIndex) =>
@@ -769,6 +772,7 @@ export function buildSparseClipRenderModel(args: {
             trackColor: track.color,
             isRenaming: clip.id === args.renamingClipId,
             snapOffsetPx: secToSpanPx(args.axis, Number(clip.snapOffsetSec) || 0),
+            hasOverlap: overlappingClipIds.has(clip.id),
             leadingOverlapPx: secToSpanPx(
                 args.axis,
                 args.leadingOverlapSecByClipId?.[clip.id] ?? 0,

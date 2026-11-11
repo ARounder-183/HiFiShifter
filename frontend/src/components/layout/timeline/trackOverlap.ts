@@ -27,6 +27,17 @@
  */
 import type { ClipInfo } from "../../../features/session/sessionTypes";
 
+type LayerClip = Pick<ClipInfo, "id" | "startSec" | "lengthSec">;
+
+/** 绘制从底到顶：长片段先画，短片段后画；等长时保留后起点优先。 */
+export function compareClipLayerOrder(a: LayerClip, b: LayerClip): number {
+    const byLength = b.lengthSec - a.lengthSec;
+    if (Math.abs(byLength) > 1e-9) return byLength;
+    const byStart = a.startSec - b.startSec;
+    if (Math.abs(byStart) > 1e-9) return byStart;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
 /**
  * clip 渲染顺序比较：先按起始时间升序，起始时间相同再按 id 字典序。
  *
