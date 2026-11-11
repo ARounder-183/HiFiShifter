@@ -407,8 +407,14 @@ export function EditorArea({ m }: Props) {
                                         touchAction: "none",
                                     }}
                                     onPointerMove={(event) => {
+                                        /*
+                                         * 【顺序不可交换】块层在块模式下是**唯一**的指针所有者：
+                                         * 它决定光标、hover、以及读数。通用处理器按「是否贴近
+                                         * 参数线」另算一套，先跑它就会把块层刚设好的状态覆盖掉
+                                         * —— 这正是「拖块时读数显示的是指针处的旧曲线值」的成因。
+                                         */
+                                        if (onCanvasPointerMoveForBlocks(event)) return;
                                         interactions.onCanvasPointerMove(event);
-                                        onCanvasPointerMoveForBlocks(event);
                                     }}
                                     onPointerLeave={interactions.onCanvasPointerLeave}
                                     onPointerDown={interactions.onCanvasPointerDown}

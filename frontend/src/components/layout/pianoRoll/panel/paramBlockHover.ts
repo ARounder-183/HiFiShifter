@@ -34,6 +34,8 @@ export interface ParamBlockHoverDeps {
     readonly hoveredTransitionLeftIdRef: MutableRefObject<string | null>;
     /** 新建块手势进行中（光标是 crosshair 而不是 grabbing）。 */
     readonly createGestureActive: boolean;
+    /** 本工具的默认光标（空白处回到它，而不是留一个通用的 default）。 */
+    readonly getDefaultCanvasCursor: () => string;
     readonly setCanvasCursor: (cursor: string) => void;
     readonly invalidate: () => void;
 }
@@ -85,9 +87,28 @@ export function handleParamBlockHover(
         localY,
         slopPx: deps.paramBlockHitSlopPx,
     });
-    if (hit === null) return false;
+    if (hit === null) {
+        /*
+         * 空白：没有命中任何块 —— 光标回到本工具的默认值，但仍然**认领**这次移动，
+         * 否则通用处理器会把「贴近参数线选区」的 grab / ew-resize 光标画回来。
+         * 顺手清掉 hover：不写这一笔，块会一直带着上一次的高亮。
+         */
+        if (
+            deps.hoveredParamBlockIdRef.current !== null ||
+            deps.hoveredTransitionLeftIdRef.current !== null
+        ) {
+            deps.hoveredParamBlockIdRef.current = null;
+            deps.hoveredTransitionLeftIdRef.current = null;
+            deps.invalidate();
+        }
+        deps.setCanvasCursor(deps.getDefaultCanvasCursor());
+        return true;
+    }
     const block = deps.paramBlocksWithValues.find((item) => item.id === hit.id);
-    if (block === undefined) return false;
+    if (block === undefined) {
+        deps.setCanvasCursor(deps.getDefaultCanvasCursor());
+        return true;
+    }
     const edge = hitTestParamBlockEdges({
         blocks: framedHits.filter((rect) => edgeCandidateIds.has(rect.id)),
         clientX: localX,

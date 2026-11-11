@@ -154,6 +154,16 @@ export interface ParamBlockDragContext {
     readonly onParamCommitSucceeded: () => void;
     readonly bumpRefreshToken: () => void;
     readonly snapToggleHeldAt: (event: SnapModifiers) => boolean;
+    /** 「弹出展示参数」是否开启；关闭时块手势不发布任何读数。 */
+    readonly paramValuePopupEnabled: boolean;
+    /** 读数发布入口（面板的合帧 setState）。关闭浮窗时调用方可以不传。 */
+    readonly onParamValuePreviewChange?: (
+        next: {
+            readonly clientX: number;
+            readonly clientY: number;
+            readonly value: number;
+        } | null,
+    ) => void;
     /** 当前音高吸附总开关；与 snapToggleHeldAt 做 XOR 得到本次手势的有效吸附。 */
     /** Publishes/clears the horizontal pitch snap guide while the gesture runs. */
     readonly onError?: (error: unknown) => void;
@@ -227,6 +237,8 @@ export function beginParamBlockDrag(
         onParamCommitSucceeded,
         bumpRefreshToken,
         snapToggleHeldAt,
+        paramValuePopupEnabled,
+        onParamValuePreviewChange,
         onError,
         resolveValueDelta,
     } = context;
@@ -406,6 +418,30 @@ export function beginParamBlockDrag(
         args.pointerValue(clientY) - anchorPointerValue;
     const snapDeltaAt = (event: SnapModifiers, rawDelta: number) =>
         resolveValueDelta(dragAnchorValue, rawDelta, snapToggleHeldAt(event));
+    /**
+     * 把「块将被拖到的值」报给画布浮窗。
+     *
+     * 【为什么在 preview() 里发】preview() 是块手势唯一的「这一帧长什么样」出口：
+     * 它已经算出 lastDelta，块中心就是 projectParamBlockDragDisplayValue(...)。在别处
+     * 再算一遍就会出现「浮窗写 A、块画 B」——上一版的悬停读数正是这样来的。
+     *
+     * 【为什么不用 pointerValue(clientY)】指针可能抓在块的任意高度（块高 = 1.2 行高），
+     * 用它会让读数随抓取位置偏移；用户操作的对象是「块要落在哪个参数值上」。
+     */
+    const publishValuePreview = (): void => {
+        if (!paramValuePopupEnabled) return;
+        const value = projectParamBlockDragDisplayValue({
+            startValue: dragAnchorValue,
+            valueDelta: lastDelta,
+            param: editParam,
+            snapToSemitone: false,
+        });
+        if (value === null || !Number.isFinite(value)) {
+            onParamValuePreviewChange?.(null);
+            return;
+        }
+        onParamValuePreviewChange?.({ clientX: lastClientX, clientY: lastClientY, value });
+    };
     const preview = () => {
         if (rafId !== null) {
             cancelAnimationFrame(rafId);
@@ -499,6 +535,7 @@ export function beginParamBlockDrag(
             dragSnapshot.logicalCenters = logicalCenters;
         }
         invalidateParamBlockSpec();
+        publishValuePreview();
         requestWaveformRepaint();
     };
     const schedule = () => {
@@ -550,357 +587,374 @@ export function beginParamBlockDrag(
         reason: "up" | "cancel",
         releaseEvent: globalThis.PointerEvent | null = null,
     ) => {
-        if (rafId != null) {
-            cancelAnimationFrame(rafId);
-            rafId = null;
-        }
-        args.edgeScroll?.stop();
-        if (reason === "up") {
-            const release = resolveParamBlockDragRelease({
-                didDrag,
-                startClientY,
-                lastMoveClientY: lastClientY,
-                releaseClientY: releaseEvent?.clientY ?? lastClientY,
-                startClientX: args.clientX,
-                lastMoveClientX: lastClientX,
-                releaseClientX: releaseEvent?.clientX ?? lastClientX,
-            });
-            didDrag = release.didDrag;
-            lastClientY = release.clientY;
-            if (releaseEvent !== null) lastSnapToggleHeld = snapToggleHeldAt(releaseEvent);
-        }
-        if (reason === "cancel" || !didDrag) {
+        try {
+            if (rafId != null) {
+                cancelAnimationFrame(rafId);
+                rafId = null;
+            }
+            args.edgeScroll?.stop();
+            if (reason === "up") {
+                const release = resolveParamBlockDragRelease({
+                    didDrag,
+                    startClientY,
+                    lastMoveClientY: lastClientY,
+                    releaseClientY: releaseEvent?.clientY ?? lastClientY,
+                    startClientX: args.clientX,
+                    lastMoveClientX: lastClientX,
+                    releaseClientX: releaseEvent?.clientX ?? lastClientX,
+                });
+                didDrag = release.didDrag;
+                lastClientY = release.clientY;
+                if (releaseEvent !== null) lastSnapToggleHeld = snapToggleHeldAt(releaseEvent);
+            }
+            if (reason === "cancel" || !didDrag) {
+                /*
+                 * 点击（未拖动）必须在 rollback 早退之前回调：手势可能从未
+                 * activate（rollback === null），但 Shift 延迟选择仍然要落地。
+                 */
+                if (reason === "up" && !didDrag) args.onClickWithoutDrag?.(releaseEvent);
+                // A click has not acquired the visual transaction or the refresh guard.
+                if (rollback === null) return;
+                const previous = rollback.commit?.failed === true ? null : rollback;
+                paramBlockActiveGestureTokenRef.current = previous?.token ?? null;
+                paramBlockDragCommitRef.current = previous?.commit ?? null;
+                paramBlockDragSnapshotRef.current = previous?.snapshot ?? null;
+                paramBlockInteractionCurveRef.current = previous?.curve ?? null;
+                paramBlockDragActivityRef.current.pointerGestureToken = null;
+                resetLiveEditPreview(previous?.curve ?? paramViewRef.current ?? pv);
+                if (previous?.commit?.committed) onParamCommitSucceeded();
+                if (liveEditActiveRef) {
+                    liveEditActiveRef.current =
+                        paramBlockDragActivityRef.current.pendingCommits > 0;
+                }
+                bumpParamBlockStructure();
+                invalidateParamBlockSpec();
+                requestWaveformRepaint();
+                return;
+            }
             /*
-             * 点击（未拖动）必须在 rollback 早退之前回调：手势可能从未
-             * activate（rollback === null），但 Shift 延迟选择仍然要落地。
+             * 松手时不能再用可能延迟的 rAF 预览覆盖 live 曲线：直接按
+             * 最后一次指针位置同步落到 live，然后提交。
              */
-            if (reason === "up" && !didDrag) args.onClickWithoutDrag?.(releaseEvent);
-            // A click has not acquired the visual transaction or the refresh guard.
-            if (rollback === null) return;
-            const previous = rollback.commit?.failed === true ? null : rollback;
-            paramBlockActiveGestureTokenRef.current = previous?.token ?? null;
-            paramBlockDragCommitRef.current = previous?.commit ?? null;
-            paramBlockDragSnapshotRef.current = previous?.snapshot ?? null;
-            paramBlockInteractionCurveRef.current = previous?.curve ?? null;
-            paramBlockDragActivityRef.current.pointerGestureToken = null;
-            resetLiveEditPreview(previous?.curve ?? paramViewRef.current ?? pv);
-            if (previous?.commit?.committed) onParamCommitSucceeded();
-            if (liveEditActiveRef) {
-                liveEditActiveRef.current = paramBlockDragActivityRef.current.pendingCommits > 0;
+            lastDelta = resolveValueDelta(
+                dragAnchorValue,
+                valueDeltaAtClientY(lastClientY),
+                lastSnapToggleHeld,
+            );
+            /*
+             * 横向拖动越过死区后，纵向位移可能回到 0。此时没有任何帧值变化：
+             * 不能生成一个空撤销点，也不能把它当成点击去触发分割。
+             */
+            if (Math.abs(lastDelta) < 1e-9) {
+                if (rollback === null) return;
+                const previous = rollback.commit?.failed === true ? null : rollback;
+                paramBlockActiveGestureTokenRef.current = previous?.token ?? null;
+                paramBlockDragCommitRef.current = previous?.commit ?? null;
+                paramBlockDragSnapshotRef.current = previous?.snapshot ?? null;
+                paramBlockInteractionCurveRef.current = previous?.curve ?? null;
+                paramBlockDragActivityRef.current.pointerGestureToken = null;
+                resetLiveEditPreview(previous?.curve ?? paramViewRef.current ?? pv);
+                if (previous?.commit?.committed) onParamCommitSucceeded();
+                if (liveEditActiveRef) {
+                    liveEditActiveRef.current =
+                        paramBlockDragActivityRef.current.pendingCommits > 0;
+                }
+                bumpParamBlockStructure();
+                invalidateParamBlockSpec();
+                requestWaveformRepaint();
+                return;
             }
-            bumpParamBlockStructure();
-            invalidateParamBlockSpec();
-            requestWaveformRepaint();
-            return;
-        }
-        /*
-         * 松手时不能再用可能延迟的 rAF 预览覆盖 live 曲线：直接按
-         * 最后一次指针位置同步落到 live，然后提交。
-         */
-        lastDelta = resolveValueDelta(
-            dragAnchorValue,
-            valueDeltaAtClientY(lastClientY),
-            lastSnapToggleHeld,
-        );
-        /*
-         * 横向拖动越过死区后，纵向位移可能回到 0。此时没有任何帧值变化：
-         * 不能生成一个空撤销点，也不能把它当成点击去触发分割。
-         */
-        if (Math.abs(lastDelta) < 1e-9) {
-            if (rollback === null) return;
-            const previous = rollback.commit?.failed === true ? null : rollback;
-            paramBlockActiveGestureTokenRef.current = previous?.token ?? null;
-            paramBlockDragCommitRef.current = previous?.commit ?? null;
-            paramBlockDragSnapshotRef.current = previous?.snapshot ?? null;
-            paramBlockInteractionCurveRef.current = previous?.curve ?? null;
+            preview();
+            const finalSnapshot = paramBlockDragSnapshotRef.current;
+            const logicalCenters = new Map<string, number>(finalSnapshot?.logicalCenters ?? []);
+            const commitBlocks = dragBlocks;
+            const commitDelta = lastDelta;
+            /*
+             * 落点只由“按下时看到的块中心 + 本次指针位移”决定。
+             *
+             * 不能从降采样 live 曲线重新求主簇：用户看到的是按下时的
+             * 块中心，而提交会读取全分辨率曲线；两边各自求主簇会在低
+             * 缩放时得到不同结果，松手后块像被拉到远处。
+             */
+            const commitCenterBlockId = args.anchorBlockId;
+            const stateBeforeCommit = paramBlockStateRef.current;
+            let appliedCommitState: ParamBlockState | null = null;
+            const commitStartedAt = performance.now();
+            const handoff: ParamBlockDragCommit = {
+                blockId: commitCenterBlockId,
+                gestureToken,
+                key: pv.key,
+                startedAt: commitStartedAt,
+                startFrame: pv.startFrame,
+                stride: pv.stride,
+                authorityRevisionAtStart: paramAuthorityRevision,
+                authorityRequestSeqAtCommit: getAuthorityWatermark().issuedRequestSeq,
+                committed: false,
+                releaseState: "waiting-for-curve",
+            };
+            paramBlockDragCommitRef.current = handoff;
             paramBlockDragActivityRef.current.pointerGestureToken = null;
-            resetLiveEditPreview(previous?.curve ?? paramViewRef.current ?? pv);
-            if (previous?.commit?.committed) onParamCommitSucceeded();
-            if (liveEditActiveRef) {
-                liveEditActiveRef.current = paramBlockDragActivityRef.current.pendingCommits > 0;
-            }
-            bumpParamBlockStructure();
-            invalidateParamBlockSpec();
-            requestWaveformRepaint();
-            return;
-        }
-        preview();
-        const finalSnapshot = paramBlockDragSnapshotRef.current;
-        const logicalCenters = new Map<string, number>(finalSnapshot?.logicalCenters ?? []);
-        const commitBlocks = dragBlocks;
-        const commitDelta = lastDelta;
-        /*
-         * 落点只由“按下时看到的块中心 + 本次指针位移”决定。
-         *
-         * 不能从降采样 live 曲线重新求主簇：用户看到的是按下时的
-         * 块中心，而提交会读取全分辨率曲线；两边各自求主簇会在低
-         * 缩放时得到不同结果，松手后块像被拉到远处。
-         */
-        const commitCenterBlockId = args.anchorBlockId;
-        const stateBeforeCommit = paramBlockStateRef.current;
-        let appliedCommitState: ParamBlockState | null = null;
-        const commitStartedAt = performance.now();
-        const handoff: ParamBlockDragCommit = {
-            blockId: commitCenterBlockId,
-            gestureToken,
-            key: pv.key,
-            startedAt: commitStartedAt,
-            startFrame: pv.startFrame,
-            stride: pv.stride,
-            authorityRevisionAtStart: paramAuthorityRevision,
-            authorityRequestSeqAtCommit: getAuthorityWatermark().issuedRequestSeq,
-            committed: false,
-            releaseState: "waiting-for-curve",
-        };
-        paramBlockDragCommitRef.current = handoff;
-        paramBlockDragActivityRef.current.pointerGestureToken = null;
-        paramBlockDragActivityRef.current.pendingCommits += 1;
-        const commitEpoch = paramBlockEpoch;
-        const commitRun = paramBlockCommitQueueRef.current
-            .catch(() => undefined)
-            .then(async () => {
-                try {
-                    /*
-                     * 提交必须按**全分辨率**曲线计算，不能复用拖动时的 pv（低缩放下
-                     * 它是降采样的）。逐块取真实帧范围，再按同一帧切分合并成分段；
-                     * `sourceAt` 由取回的逐帧值提供，避免把台阶写进原始曲线。
-                     */
-                    const rawRanges = commitBlocks.flatMap((block) =>
-                        block.members.map((member) => {
-                            const span = paramBlockFrameSpan(
-                                member.startSec,
-                                member.endSec,
-                                framePeriodMs,
-                            );
-                            return {
-                                startFrame: span.startFrame,
-                                endFrame: span.endFrameExclusive - 1,
-                            };
-                        }),
-                    );
-                    /*
-                     * 一个 Loop 块可能有几十个 run；逐 member 取数会产生几十个
-                     * 并发 IPC。先合并重叠 / 相邻窗口，再每个窗口只取一次。
-                     * segments 仍按原 member 边界生成，合并不改变写回语义。
-                     */
-                    const ranges = mergeFrameWindows(rawRanges);
-                    const curves = await Promise.all(
-                        ranges.map((range) =>
-                            fetchFullResCurve({
-                                trackId: rootTrackId,
-                                param: editParam,
-                                startFrame: range.startFrame,
-                                endFrame: range.endFrame,
-                                paramView: null,
-                                forceAuthority: true,
+            paramBlockDragActivityRef.current.pendingCommits += 1;
+            const commitEpoch = paramBlockEpoch;
+            const commitRun = paramBlockCommitQueueRef.current
+                .catch(() => undefined)
+                .then(async () => {
+                    try {
+                        /*
+                         * 提交必须按**全分辨率**曲线计算，不能复用拖动时的 pv（低缩放下
+                         * 它是降采样的）。逐块取真实帧范围，再按同一帧切分合并成分段；
+                         * `sourceAt` 由取回的逐帧值提供，避免把台阶写进原始曲线。
+                         */
+                        const rawRanges = commitBlocks.flatMap((block) =>
+                            block.members.map((member) => {
+                                const span = paramBlockFrameSpan(
+                                    member.startSec,
+                                    member.endSec,
+                                    framePeriodMs,
+                                );
+                                return {
+                                    startFrame: span.startFrame,
+                                    endFrame: span.endFrameExclusive - 1,
+                                };
                             }),
-                        ),
-                    );
-                    if (
-                        getCurrentParamBlockEpoch !== undefined &&
-                        !sameParamBlockExternalEpoch(commitEpoch, getCurrentParamBlockEpoch())
-                    ) {
-                        throw new Error("Block drag commit cancelled: external history changed");
-                    }
-                    /*
-                     * Never turn a missing / short read into zeros. A backend
-                     * error or a truncated window must cancel the commit, not
-                     * write a silent gap into the curve.
-                     */
-                    for (let index = 0; index < ranges.length; index += 1) {
-                        const range = ranges[index];
-                        const curve = curves[index];
-                        const expected = range.endFrame - range.startFrame + 1;
+                        );
+                        /*
+                         * 一个 Loop 块可能有几十个 run；逐 member 取数会产生几十个
+                         * 并发 IPC。先合并重叠 / 相邻窗口，再每个窗口只取一次。
+                         * segments 仍按原 member 边界生成，合并不改变写回语义。
+                         */
+                        const ranges = mergeFrameWindows(rawRanges);
+                        const curves = await Promise.all(
+                            ranges.map((range) =>
+                                fetchFullResCurve({
+                                    trackId: rootTrackId,
+                                    param: editParam,
+                                    startFrame: range.startFrame,
+                                    endFrame: range.endFrame,
+                                    paramView: null,
+                                    forceAuthority: true,
+                                }),
+                            ),
+                        );
                         if (
-                            curve === undefined ||
-                            curve.startFrame !== range.startFrame ||
-                            curve.values.length !== expected
+                            getCurrentParamBlockEpoch !== undefined &&
+                            !sameParamBlockExternalEpoch(commitEpoch, getCurrentParamBlockEpoch())
                         ) {
                             throw new Error(
-                                "Block drag commit cancelled: incomplete full-resolution curve",
+                                "Block drag commit cancelled: external history changed",
                             );
                         }
-                    }
-                    const sourceAt = (frame: number): number => {
+                        /*
+                         * Never turn a missing / short read into zeros. A backend
+                         * error or a truncated window must cancel the commit, not
+                         * write a silent gap into the curve.
+                         */
                         for (let index = 0; index < ranges.length; index += 1) {
                             const range = ranges[index];
-                            if (frame < range.startFrame || frame > range.endFrame) {
-                                continue;
-                            }
-                            const value = curves[index]?.values[frame - range.startFrame];
-                            if (value === undefined || !Number.isFinite(value)) {
+                            const curve = curves[index];
+                            const expected = range.endFrame - range.startFrame + 1;
+                            if (
+                                curve === undefined ||
+                                curve.startFrame !== range.startFrame ||
+                                curve.values.length !== expected
+                            ) {
                                 throw new Error(
-                                    "Block drag commit cancelled: missing source frame",
+                                    "Block drag commit cancelled: incomplete full-resolution curve",
                                 );
                             }
-                            return value;
                         }
-                        throw new Error("Block drag commit cancelled: source frame outside ranges");
-                    };
-                    /*
-                     * MIDI-like semantics: the curve moves by the same
-                     * explicit delta as the block. Do not re-cluster the
-                     * full-resolution source here.
-                     */
-                    const fullResDelta = commitDelta;
-                    const windows = buildParamBlockDragSegments({
-                        fillEmptyPitch: curveOwned,
-                        blocks: commitBlocks,
-                        framePeriodMs,
-                        param: editParam,
-                        anchorValue: dragAnchorValue,
-                        valueDelta: fullResDelta,
-                        sourceAt,
-                    });
-                    const commitSegments = windows;
-                    if (commitSegments.length === 0)
-                        throw new Error("Block drag has no editable frames");
-                    if (liveEditActiveRef) liveEditActiveRef.current = true;
-                    /*
-                     * A structural edit may have landed while the full-res
-                     * reads were in flight. Never overwrite it with the
-                     * gesture's pre-commit snapshot.
-                     */
-                    if (
-                        stateBeforeCommit.editSet.revision !==
-                        paramBlockStateRef.current.editSet.revision
-                    ) {
-                        throw new Error(
-                            "Block drag commit cancelled: parameter blocks changed during read",
-                        );
-                    }
-                    /*
-                     * 【一次手势 = 一个历史步】Pitch 块的显示中心来自 `value`，
-                     * 曲线位移只改帧值；两者都要落盘，但必须落在**同一个事务**里。
-                     * 先把最终编辑集算出来，再连同曲线分段一起提交。
-                     */
-                    const commitState =
-                        editParam === "pitch"
-                            ? setParamBlockLogicalCenters({
-                                  state: paramBlockStateRef.current,
-                                  blocks: selectedBlocks,
-                                  centers: logicalCenters,
-                              })
-                            : paramBlockStateRef.current;
-                    if (commitState !== paramBlockStateRef.current) {
-                        // 本地先落位：块的显示中心立刻到位，不必等回包。
-                        appliedCommitState = commitState;
-                        // 单一写入者：只通过 hook 的 setState 更新；直接写 ref 会让
-                        // hook 的同一性短路吞掉 React 更新。
-                        setParamBlockState(commitState);
-                        const dragSnapshot = paramBlockDragSnapshotRef.current;
-                        if (dragSnapshot !== null) {
-                            dragSnapshot.ownedEditRevision = commitState.editSet.revision;
-                        }
-                    }
-                    if (context.commitLineCurve) {
-                        const revision = curves[0]?.authorityRevision;
-                        const geometry = curves[0]?.geometryRevision;
-                        const signature = curves[0]?.geometrySignature;
-                        if (
-                            curves.some(
-                                (curve) =>
-                                    curve.authorityRevision !== revision ||
-                                    (signature
-                                        ? curve.geometrySignature !== signature
-                                        : curve.geometryRevision !== geometry),
-                            )
-                        )
-                            throw new Error("Conflict: parameter curve changed during block read");
-                        await context.commitLineCurve(
-                            commitState,
-                            commitSegments,
-                            revision,
-                            geometry,
-                            signature,
-                        );
-                    } else
-                        await uploadFullResCurveSegments({
-                            trackId: rootTrackId,
+                        const sourceAt = (frame: number): number => {
+                            for (let index = 0; index < ranges.length; index += 1) {
+                                const range = ranges[index];
+                                if (frame < range.startFrame || frame > range.endFrame) {
+                                    continue;
+                                }
+                                const value = curves[index]?.values[frame - range.startFrame];
+                                if (value === undefined || !Number.isFinite(value)) {
+                                    throw new Error(
+                                        "Block drag commit cancelled: missing source frame",
+                                    );
+                                }
+                                return value;
+                            }
+                            throw new Error(
+                                "Block drag commit cancelled: source frame outside ranges",
+                            );
+                        };
+                        /*
+                         * MIDI-like semantics: the curve moves by the same
+                         * explicit delta as the block. Do not re-cluster the
+                         * full-resolution source here.
+                         */
+                        const fullResDelta = commitDelta;
+                        const windows = buildParamBlockDragSegments({
+                            fillEmptyPitch: curveOwned,
+                            blocks: commitBlocks,
+                            framePeriodMs,
                             param: editParam,
-                            segments: commitSegments,
+                            anchorValue: dragAnchorValue,
+                            valueDelta: fullResDelta,
+                            sourceAt,
                         });
-                    // Record completion even when a newer gesture owns the visual frame:
-                    // cancelling that gesture can restore this pending handoff.
-                    handoff.committedSegments = commitSegments.map((segment) => ({
-                        startFrame: segment.startFrame,
-                        values: segment.values.slice(),
-                    }));
-                    handoff.authorityRequestSeqAtCommit = getAuthorityWatermark().issuedRequestSeq;
-                    handoff.committed = true;
-                    if (
-                        ownsParamBlockGesture({
-                            activeGestureToken: paramBlockActiveGestureTokenRef.current,
-                            gestureToken,
-                        })
-                    )
-                        onParamCommitSucceeded();
-                } catch (error) {
-                    handoff.failed = true;
-                    console.error("[pianoRoll] block drag commit failed", error);
-                    onError?.(error);
-                    if (
-                        ownsParamBlockGesture({
-                            activeGestureToken: paramBlockActiveGestureTokenRef.current,
-                            gestureToken,
-                        })
-                    ) {
-                        // 曲线写失败时回滚本地 logicalCenters，但不能覆盖提交期间
-                        // 已经落地的第三方结构编辑。只允许回滚到本手势的起点或
-                        // 本手势自己刚应用的状态。
-                        const current = paramBlockStateRef.current;
-                        const canRollback =
-                            current === stateBeforeCommit ||
-                            (appliedCommitState !== null && current === appliedCommitState) ||
-                            canRollbackParamBlockDragCommit({
-                                currentRevision: current.editSet.revision,
-                                beforeRevision: stateBeforeCommit.editSet.revision,
-                                appliedRevision: appliedCommitState?.editSet.revision ?? null,
+                        const commitSegments = windows;
+                        if (commitSegments.length === 0)
+                            throw new Error("Block drag has no editable frames");
+                        if (liveEditActiveRef) liveEditActiveRef.current = true;
+                        /*
+                         * A structural edit may have landed while the full-res
+                         * reads were in flight. Never overwrite it with the
+                         * gesture's pre-commit snapshot.
+                         */
+                        if (
+                            stateBeforeCommit.editSet.revision !==
+                            paramBlockStateRef.current.editSet.revision
+                        ) {
+                            throw new Error(
+                                "Block drag commit cancelled: parameter blocks changed during read",
+                            );
+                        }
+                        /*
+                         * 【一次手势 = 一个历史步】Pitch 块的显示中心来自 `value`，
+                         * 曲线位移只改帧值；两者都要落盘，但必须落在**同一个事务**里。
+                         * 先把最终编辑集算出来，再连同曲线分段一起提交。
+                         */
+                        const commitState =
+                            editParam === "pitch"
+                                ? setParamBlockLogicalCenters({
+                                      state: paramBlockStateRef.current,
+                                      blocks: selectedBlocks,
+                                      centers: logicalCenters,
+                                  })
+                                : paramBlockStateRef.current;
+                        if (commitState !== paramBlockStateRef.current) {
+                            // 本地先落位：块的显示中心立刻到位，不必等回包。
+                            appliedCommitState = commitState;
+                            // 单一写入者：只通过 hook 的 setState 更新；直接写 ref 会让
+                            // hook 的同一性短路吞掉 React 更新。
+                            setParamBlockState(commitState);
+                            const dragSnapshot = paramBlockDragSnapshotRef.current;
+                            if (dragSnapshot !== null) {
+                                dragSnapshot.ownedEditRevision = commitState.editSet.revision;
+                            }
+                        }
+                        if (context.commitLineCurve) {
+                            const revision = curves[0]?.authorityRevision;
+                            const geometry = curves[0]?.geometryRevision;
+                            const signature = curves[0]?.geometrySignature;
+                            if (
+                                curves.some(
+                                    (curve) =>
+                                        curve.authorityRevision !== revision ||
+                                        (signature
+                                            ? curve.geometrySignature !== signature
+                                            : curve.geometryRevision !== geometry),
+                                )
+                            )
+                                throw new Error(
+                                    "Conflict: parameter curve changed during block read",
+                                );
+                            await context.commitLineCurve(
+                                commitState,
+                                commitSegments,
+                                revision,
+                                geometry,
+                                signature,
+                            );
+                        } else
+                            await uploadFullResCurveSegments({
+                                trackId: rootTrackId,
+                                param: editParam,
+                                segments: commitSegments,
                             });
-                        if (canRollback) setParamBlockState(stateBeforeCommit);
-                        const pvNow = paramViewRef.current;
-                        if (pvNow !== null) resetLiveEditPreview(pvNow);
-                        paramBlockDragCommitRef.current = null;
-                        paramBlockDragSnapshotRef.current = null;
-                        paramBlockInteractionCurveRef.current = null;
-                        paramBlockActiveGestureTokenRef.current = null;
-                        bumpParamBlockStructure();
+                        // Record completion even when a newer gesture owns the visual frame:
+                        // cancelling that gesture can restore this pending handoff.
+                        handoff.committedSegments = commitSegments.map((segment) => ({
+                            startFrame: segment.startFrame,
+                            values: segment.values.slice(),
+                        }));
+                        handoff.authorityRequestSeqAtCommit =
+                            getAuthorityWatermark().issuedRequestSeq;
+                        handoff.committed = true;
+                        if (
+                            ownsParamBlockGesture({
+                                activeGestureToken: paramBlockActiveGestureTokenRef.current,
+                                gestureToken,
+                            })
+                        )
+                            onParamCommitSucceeded();
+                    } catch (error) {
+                        handoff.failed = true;
+                        console.error("[pianoRoll] block drag commit failed", error);
+                        onError?.(error);
+                        if (
+                            ownsParamBlockGesture({
+                                activeGestureToken: paramBlockActiveGestureTokenRef.current,
+                                gestureToken,
+                            })
+                        ) {
+                            // 曲线写失败时回滚本地 logicalCenters，但不能覆盖提交期间
+                            // 已经落地的第三方结构编辑。只允许回滚到本手势的起点或
+                            // 本手势自己刚应用的状态。
+                            const current = paramBlockStateRef.current;
+                            const canRollback =
+                                current === stateBeforeCommit ||
+                                (appliedCommitState !== null && current === appliedCommitState) ||
+                                canRollbackParamBlockDragCommit({
+                                    currentRevision: current.editSet.revision,
+                                    beforeRevision: stateBeforeCommit.editSet.revision,
+                                    appliedRevision: appliedCommitState?.editSet.revision ?? null,
+                                });
+                            if (canRollback) setParamBlockState(stateBeforeCommit);
+                            const pvNow = paramViewRef.current;
+                            if (pvNow !== null) resetLiveEditPreview(pvNow);
+                            paramBlockDragCommitRef.current = null;
+                            paramBlockDragSnapshotRef.current = null;
+                            paramBlockInteractionCurveRef.current = null;
+                            paramBlockActiveGestureTokenRef.current = null;
+                            bumpParamBlockStructure();
+                        }
+                    } finally {
+                        const activity = paramBlockDragActivityRef.current;
+                        activity.pendingCommits -= 1;
+                        if (
+                            activity.pendingCommits === 0 &&
+                            activity.pointerGestureToken === null &&
+                            liveEditActiveRef
+                        ) {
+                            liveEditActiveRef.current = false;
+                        }
+                        /*
+                         * live-deferral 在 liveEditActive 为 true 时不会取数；
+                         * 必须在撤销保护后触发权威刷新。块快照只等这份权威数据，
+                         * 不再用本地回显骗自己“已经落盘”。
+                         */
+                        bumpRefreshToken();
+                        /*
+                         * 快照不能在这里立刻释放。留在 ref 中，由下一次绘制
+                         * 根据“提交完成 + 权威曲线窗口同步”统一收尾。
+                         */
+                        if (
+                            ownsParamBlockGesture({
+                                activeGestureToken: paramBlockActiveGestureTokenRef.current,
+                                gestureToken,
+                            })
+                        ) {
+                            invalidateParamBlockSpec();
+                        }
                     }
-                } finally {
-                    const activity = paramBlockDragActivityRef.current;
-                    activity.pendingCommits -= 1;
-                    if (
-                        activity.pendingCommits === 0 &&
-                        activity.pointerGestureToken === null &&
-                        liveEditActiveRef
-                    ) {
-                        liveEditActiveRef.current = false;
-                    }
-                    /*
-                     * live-deferral 在 liveEditActive 为 true 时不会取数；
-                     * 必须在撤销保护后触发权威刷新。块快照只等这份权威数据，
-                     * 不再用本地回显骗自己“已经落盘”。
-                     */
-                    bumpRefreshToken();
-                    /*
-                     * 快照不能在这里立刻释放。留在 ref 中，由下一次绘制
-                     * 根据“提交完成 + 权威曲线窗口同步”统一收尾。
-                     */
-                    if (
-                        ownsParamBlockGesture({
-                            activeGestureToken: paramBlockActiveGestureTokenRef.current,
-                            gestureToken,
-                        })
-                    ) {
-                        invalidateParamBlockSpec();
-                    }
-                }
-            });
-        paramBlockCommitQueueRef.current = trackParamBlockCommit(
-            "drag",
-            rootTrackId,
-            commitRun,
-        ).then(() => undefined);
+                });
+            paramBlockCommitQueueRef.current = trackParamBlockCommit(
+                "drag",
+                rootTrackId,
+                commitRun,
+            ).then(() => undefined);
+        } finally {
+            /*
+             * 读数属于本次手势：任何一条早退路径（点击 / 取消 / 空位移 / 提交）都必须
+             * 清掉，否则它会一直挂在指针旁，直到下一次 pointerup 才被全局监听器收走。
+             */
+            if (paramValuePopupEnabled) onParamValuePreviewChange?.(null);
+        }
     };
     gestureHandle = startPointerGesture({
         pointerId: args.pointerId,

@@ -2309,6 +2309,12 @@ export function usePianoRollInteractions(args: {
      */
     const refreshParamValuePreview = useCallback(() => {
         if (!paramValuePopupEnabled) return;
+        /*
+         * 块模式下读数归块手势（含块拖拽与新建）。悬停续显是给「键盘平移 / 撤销重做 /
+         * 远端写入」准备的：它按指针位置重算曲线值，在块拖拽期间会把块手势刚发的读数
+         * 按旧值盖回去。
+         */
+        if (paramBlockToolActive) return;
         if (!hoverPreviewNearCurveRef.current) return;
         if (strokeRef.current || panRef.current) return;
         const last = lastPointerClientRef.current;
@@ -2325,6 +2331,7 @@ export function usePianoRollInteractions(args: {
             value: point.value,
         });
     }, [
+        paramBlockToolActive,
         paramValuePopupEnabled,
         onParamValuePreviewChange,
         getCurvePointAtPointer,
@@ -2841,5 +2848,7 @@ export function usePianoRollInteractions(args: {
         onCanvasPointerDown,
         beginParamBlockMorph,
         refreshParamValuePreview,
+        /** 本工具的默认光标（块层的空白分支与通用处理器共用同一判据）。 */
+        getDefaultCanvasCursor,
     };
 }

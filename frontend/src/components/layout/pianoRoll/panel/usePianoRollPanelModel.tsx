@@ -257,6 +257,7 @@ import { buildToolIcons } from "./toolIcons";
 import { handleParamBlockHover } from "./paramBlockHover";
 import { useParamBlockEditOpChannel } from "./useParamBlockEditOpChannel";
 import { useParamBlockRenderSpec, type ParamBlockResizePreview } from "./useParamBlockRenderSpec";
+import { useParamValuePreviewPublisher } from "./useParamValuePreviewPublisher";
 import {
     runParamBlockMenuOp,
     type ParamBlockMenuOp,
@@ -745,21 +746,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         rectLeft: number;
         rectTop: number;
     } | null>(null);
-    // 浮窗更新合帧（见 onParamValuePreviewChange 处的说明）：pointermove 在高刷
-    // 设备上可达数百 Hz，逐事件 setState 会让整个面板以事件频率重渲。
-    const paramValuePreviewRafRef = useRef<number | null>(null);
-    const paramValuePreviewPendingRef = useRef<{
-        payload: { clientX: number; clientY: number; value: number; displayText?: string } | null;
-    } | null>(null);
-    useEffect(() => {
-        return () => {
-            if (paramValuePreviewRafRef.current != null) {
-                cancelAnimationFrame(paramValuePreviewRafRef.current);
-                paramValuePreviewRafRef.current = null;
-            }
-            paramValuePreviewPendingRef.current = null;
-        };
-    }, []);
+
     /**
      * 纵轴标尺的悬浮读数（`弹出展示参数` 在左轴上的形态）。
      *
@@ -2561,6 +2548,17 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     /** 块命中容差（CSS px）：触摸 / 笔比鼠标更容易漂，分别给不同容差。 */
     const paramBlockHitSlopPx = 4;
 
+    /**
+     * 参数值浮窗的唯一入口（合帧后 setState）。
+     *
+     * 【为什么提成具名常量】它同时喂给 usePianoRollInteractions（参数线 / 颤动 / 四点
+     * 编辑）与块手势（拖块 / 新建）。内联在 interactions 的入参对象里，块手势就只能
+     * 另写一份 setState —— 那会绕过合帧，并且出现两个写入者。
+     */
+    const publishParamValuePreview = useParamValuePreviewPublisher({
+        canvasRef,
+        setPreview: setParamValuePreview,
+    });
     const interactions = usePianoRollInteractions({
         dispatch,
         rootTrackId,
@@ -2670,40 +2668,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             setSnapGestureActive(active);
         }, []),
         paramValuePopupEnabled: s.showParamValuePopup,
-        onParamValuePreviewChange: useCallback(
-            (
-                next: {
-                    clientX: number;
-                    clientY: number;
-                    value: number;
-                    displayText?: string;
-                } | null,
-            ) => {
-                // 合帧提交：只记最新载荷、每渲染帧至多 setState 一次（与交互层
-                // 各手势的 schedulePreview 同一动机）。浮窗是纯读数 UI，滞后一帧
-                // 不可感知；不合帧时每次 move 的新对象都无法让 React 跳过重渲。
-                paramValuePreviewPendingRef.current = { payload: next };
-                if (paramValuePreviewRafRef.current != null) return;
-                paramValuePreviewRafRef.current = requestAnimationFrame(() => {
-                    paramValuePreviewRafRef.current = null;
-                    const pending = paramValuePreviewPendingRef.current;
-                    paramValuePreviewPendingRef.current = null;
-                    if (!pending) return;
-                    // 容器 rect 在这里（rAF 内、事件后）随读数同帧快照：
-                    // EditorArea 渲染期只消费数值，不再 getBoundingClientRect
-                    // （渲染期强制同步布局，hover 时每帧都付一次）。
-                    const rect = canvasRef.current?.getBoundingClientRect();
-                    setParamValuePreview(
-                        pending.payload && {
-                            ...pending.payload,
-                            rectLeft: rect?.left ?? 0,
-                            rectTop: rect?.top ?? 0,
-                        },
-                    );
-                });
-            },
-            [],
-        ),
+        onParamValuePreviewChange: publishParamValuePreview,
     });
     const beginParamBlockMorphRef = useRef(interactions.beginParamBlockMorph);
     beginParamBlockMorphRef.current = interactions.beginParamBlockMorph;
@@ -3767,6 +3732,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 paramAuthorityRevision,
                 onParamCommitSucceeded,
                 bumpRefreshToken,
+                paramValuePopupEnabled: s.showParamValuePopup,
+                onParamValuePreviewChange: publishParamValuePreview,
                 paintNow: () => hostRef.current?.paintNow(),
                 onError: (error) => {
                     publishParamBlockFeedback({
@@ -3820,7 +3787,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             paramBlocksWithValues,
             paramView,
             paramAuthorityRevision,
+            publishParamValuePreview,
             projectScaleAtSec,
+            s.showParamValuePopup,
             requestWaveformRepaint,
             resetLiveEditPreview,
             rootTrackId,
@@ -4722,6 +4691,17 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                             ),
                             value: createBlockValue,
                         };
+                        /*
+                         * 新建块也要报读数：这一笔把块定在什么值上，与画笔落笔同义。
+                         * 读数入口与拖块共用（同一个合帧 setState），不另写一份。
+                         */
+                        if (s.showParamValuePopup) {
+                            publishParamValuePreview({
+                                clientX: event.clientX,
+                                clientY: event.clientY,
+                                value: createBlockValue,
+                            });
+                        }
                         if (createBaseSpec !== null) {
                             const preview = projectParamBlockCreatePreviewFromBase({
                                 framePeriodMs: paramBlockStateRef.current.framePeriodMs,
@@ -4873,6 +4853,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         },
                         onEnd: (reason, event) => {
                             hit.edgeScroll?.stop();
+                            if (s.showParamValuePopup) publishParamValuePreview(null);
                             const activity = paramBlockDragActivityRef.current;
                             if (activity.pointerGestureToken === createToken)
                                 activity.pointerGestureToken = null;
@@ -6513,12 +6494,14 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     hoveredParamBlockIdRef,
                     hoveredTransitionLeftIdRef,
                     createGestureActive: paramBlockResizeRef.current?.blockId === "__create__",
+                    getDefaultCanvasCursor: interactions.getDefaultCanvasCursor,
                     setCanvasCursor,
                     invalidate,
                 },
                 event,
             ),
         [
+            interactions.getDefaultCanvasCursor,
             invalidate,
             paramBlockHitSlopPx,
             paramBlockToolActive,
