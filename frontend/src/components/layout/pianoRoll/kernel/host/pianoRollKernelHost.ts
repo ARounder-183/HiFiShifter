@@ -89,14 +89,15 @@ import {
     AXIS_TICK_LABEL_DESCENT_PX,
     AXIS_TICK_LABEL_FONT_SIZE_PX,
     axisTickLabelAnchorBounds,
-    createPianoRollGlyphs,
-    type PianoRollGlyphs,
     type TextRequest,
 } from "../glyph/pianoRollGlyphs";
 import { buildAxisMarkInstances, resolveAxisKind } from "../scene/axisMarkInstances";
 import { buildKeyboardInstances } from "../scene/keyboardInstances";
-import { createGlyphProgram, type GlyphProgram } from "../../../renderKernel/gl/glyphProgram";
 import type { GlyphQuad } from "../../../renderKernel/gl/glyphQuads";
+import {
+    createGlyphSurface,
+    type GlyphSurface,
+} from "./glyphSurface";
 import {
     createTimelineAxis,
     playheadLineLeftPx,
@@ -263,6 +264,11 @@ export interface PianoRollKernelHostArgs {
      * 让本文件仍可被单测以 `false` 覆盖纯滚动路径。
      */
     readonly glSceneEnabled?: boolean;
+    /** 测试注入口：按画布上下文创建独立字形表面。 */
+    readonly glyphSurfaceFactory?: (
+        gl: WebGL2RenderingContext,
+        dpr: number,
+    ) => GlyphSurface | null;
     /**
      * 水平同步偏移（CSS px）：内容层相对绘制区原点的右移量，缺省 0。
      *
@@ -729,32 +735,32 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         Number.isFinite(args.axisWidthPx) && (args.axisWidthPx as number) > 0
             ? (args.axisWidthPx as number)
             : 56;
-    // 字形层（Task 5）：与键盘共用同一块轴画布（文字画在键体/刻度线之上），
-    // 因此共用 `glAxisHandle` 的上下文，program 独立。
-    let glGlyphProgram: GlyphProgram | null = null;
-    let glGlyphs: PianoRollGlyphs | null = null;
+    // 字形层：主画布与轴画布各有一套 program / rasterizer / atlas 上传页。
+    // 轴文字只进轴 surface，块标签只进主 surface；共用一个 program 会把块标签
+    // 提交到轴上下文（表现为轴列白色噪点、块内无标签）。
     /**
      * 建当前字形图集时使用的 dpr。
      *
      * 字形位图与物理像素一一对应（`glyphRasterizer` 的显式契约：dpr 变化后必须整体
-     * 重建，否则旧图集会被采样成模糊字形）。绘制路径每帧比对本值，变化时丢弃重建。
+     * 重建，否则旧图集会被采样成模糊字形）。绘制路径每帧比对本值，变化时重建两套
+     * surface，避免轴文字与块标签出现半恢复状态。
      */
     let glyphAtlasDpr = readDevicePixelRatio();
-    if (glAxisHandle !== null) {
+    const glyphSurfaceFactory =
+        args.glyphSurfaceFactory ??
+        ((gl: WebGL2RenderingContext, dpr: number) => createGlyphSurface(gl, dpr));
+    const createSurfaceFor = (gl: WebGL2RenderingContext): GlyphSurface | null => {
         try {
-            glGlyphProgram = createGlyphProgram(glAxisHandle.gl);
-            glGlyphs = createPianoRollGlyphs({ dpr: glyphAtlasDpr });
-            if (glGlyphs === null) {
-                glGlyphProgram = null;
-            }
+            return glyphSurfaceFactory(gl, glyphAtlasDpr);
         } catch {
-            glGlyphProgram = null;
-            glGlyphs = null;
+            return null;
         }
-    }
-    /** 上一帧上传过的图集页（按页增量上传，避免每帧重传整张图集）。 */
-    const uploadedAtlasPages = new Set<number>();
-    /** 本帧待绘制的文字四边形。 */
+    };
+    let mainGlyphSurface: GlyphSurface | null =
+        glHandle !== null ? createSurfaceFor(glHandle.gl) : null;
+    let axisGlyphSurface: GlyphSurface | null =
+        glAxisHandle !== null ? createSurfaceFor(glAxisHandle.gl) : null;
+    /** 本帧待绘制的轴文字四边形。 */
     let glTextQuads: GlyphQuad[] = [];
 
     // 曲线层（阶段 3）：复用**主 GL 画布**（网格/键盘之上），program 独立。
@@ -1373,7 +1379,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             cornerRadiusPx: spec.cornerRadiusPx,
         });
         const items = scene.items;
-        glBlockTextQuads = glGlyphs !== null ? glGlyphs.build(scene.labels) : [];
+        glBlockTextQuads = mainGlyphSurface?.build(scene.labels) ?? [];
         if (items.length === 0 && scene.fills.length === 0) return;
         const needed =
             (items.length + scene.fills.length + scene.highlights.length + scene.handles.length) *
@@ -1428,18 +1434,8 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 }
             }
         }
-        if (glGlyphProgram !== null && glGlyphs !== null && glBlockTextQuads.length > 0) {
-            // 块标签可能与轴文字共用图集页；只上传本帧新增的页，避免每帧重传纹理。
-            for (const page of glGlyphs.consumeDirtyPages()) {
-                const pageData = glGlyphs.readPage(page);
-                if (pageData !== null) {
-                    glGlyphProgram.uploadAtlas(pageData, glGlyphs.atlasPageSizePx());
-                    uploadedAtlasPages.add(page);
-                }
-            }
-            if (uploadedAtlasPages.size > 0) {
-                glGlyphProgram.render(glBlockTextQuads, target, 0, 0);
-            }
+        if (mainGlyphSurface !== null && glBlockTextQuads.length > 0) {
+            mainGlyphSurface.render(glBlockTextQuads, target, 0, 0, glHandle.gl);
         }
     }
 
@@ -1844,22 +1840,8 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         }
 
         // ② 文字层
-        if (glGlyphProgram !== null && glGlyphs !== null && glTextQuads.length > 0) {
-            // 按页增量上传图集：只传本帧有变更的页，避免每帧重传整张图集。
-            // 特殊说明：`uploadAtlas` 只接受单页数据（program 内部持有单张纹理），
-            // 因此多页图集时以**最后一页**为准。本面板的字符集（约 150 个字形）
-            // 远小于单页容量，实际只会有第 0 页。
-            const dirty = glGlyphs.consumeDirtyPages();
-            for (const page of dirty) {
-                const data = glGlyphs.readPage(page);
-                if (data !== null) {
-                    glGlyphProgram.uploadAtlas(data, glGlyphs.atlasPageSizePx());
-                    uploadedAtlasPages.add(page);
-                }
-            }
-            if (uploadedAtlasPages.size > 0) {
-                glGlyphProgram.render(glTextQuads, target, 0, 0);
-            }
+        if (axisGlyphSurface !== null && glTextQuads.length > 0) {
+            axisGlyphSurface.render(glTextQuads, target, 0, 0, glAxisHandle.gl);
         }
     }
 
@@ -2234,10 +2216,13 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             const currentDpr = readDevicePixelRatio();
             if (currentDpr !== glyphAtlasDpr) {
                 glyphAtlasDpr = currentDpr;
-                glGlyphs?.dispose();
-                glGlyphs = createPianoRollGlyphs({ dpr: currentDpr });
-                uploadedAtlasPages.clear();
+                mainGlyphSurface?.dispose();
+                mainGlyphSurface = glHandle !== null ? createSurfaceFor(glHandle.gl) : null;
+                axisGlyphSurface?.dispose();
+                axisGlyphSurface =
+                    glAxisHandle !== null ? createSurfaceFor(glAxisHandle.gl) : null;
                 glTextQuads = [];
+                glBlockTextQuads = [];
                 lastKeyboardSignature = "";
             }
             const spec = data().grid;
@@ -2251,8 +2236,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                     rebuildAxisMarkGeometry(spec);
                 }
                 // 文字只随几何一起重建（位置由几何决定，几何没变则文字也没变）。
-                glTextQuads =
-                    glGlyphs !== null ? glGlyphs.build(collectAxisTextRequests(spec)) : [];
+                glTextQuads = axisGlyphSurface?.build(collectAxisTextRequests(spec)) ?? [];
             }
             drawGlKeyboard();
         }
@@ -2677,10 +2661,10 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             glHandle = null;
             glAxisProgram?.dispose();
             glAxisProgram = null;
-            glGlyphProgram?.dispose();
-            glGlyphProgram = null;
-            glGlyphs?.dispose();
-            glGlyphs = null;
+            mainGlyphSurface?.dispose();
+            mainGlyphSurface = null;
+            axisGlyphSurface?.dispose();
+            axisGlyphSurface = null;
             glAxisHandle = null;
             glOverlayProgram?.dispose();
             glOverlayProgram = null;
