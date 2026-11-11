@@ -270,8 +270,35 @@ describe("resolveEditOpRoute（编辑操作的表面兜底层）", () => {
     it("参数块选择子模式下 split 不再走 hifi:editOp；块动作有独立通道", () => {
         expect(resolveEditOpRoute("pianoRoll", "split", "block")).toBe("hifi:timelineEditOp");
         expect(resolveEditOpRoute("timeline", "split", "block")).toBe("hifi:timelineEditOp");
-        expect(resolveParamBlockEditChannel("pianoRoll", "block")).toBe("hifi:paramBlockEditOp");
-        expect(resolveParamBlockEditChannel("timeline", "block")).toBeNull();
+        /*
+         * 判据吃**两根轴**：block 是 selectToolMode 的取值，不是 ToolMode 的成员。
+         * 上一版这里传的是一个 "block" 字符串（把派生 scope 当 toolMode），于是
+         * 测试通过、真实调用永远为 null —— 这一格现在钉住真实的字段组合。
+         */
+        expect(
+            resolveParamBlockEditChannel("pianoRoll", {
+                toolMode: "select",
+                selectToolMode: "block",
+            }),
+        ).toBe("hifi:paramBlockEditOp");
+        expect(
+            resolveParamBlockEditChannel("pianoRoll", {
+                toolMode: "select",
+                selectToolMode: "range",
+            }),
+        ).toBeNull();
+        expect(
+            resolveParamBlockEditChannel("pianoRoll", {
+                toolMode: "draw",
+                selectToolMode: "block",
+            }),
+        ).toBeNull();
+        expect(
+            resolveParamBlockEditChannel("timeline", {
+                toolMode: "select",
+                selectToolMode: "block",
+            }),
+        ).toBeNull();
     });
 
     it("未收录的操作返回 null（调用方走各自固定通道）", () => {

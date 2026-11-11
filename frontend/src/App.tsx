@@ -2708,7 +2708,7 @@ function AppInner() {
             if (blockOp) {
                 const channel = resolveParamBlockEditChannel(
                     getActiveSurface(),
-                    store.getState().session.toolMode,
+                    store.getState().session,
                 );
                 if (channel) {
                     window.dispatchEvent(

@@ -259,6 +259,7 @@ import { useParamBlockEditOpChannel } from "./useParamBlockEditOpChannel";
 import { useParamBlockRenderSpec, type ParamBlockResizePreview } from "./useParamBlockRenderSpec";
 import { useParamValuePreviewPublisher } from "./useParamValuePreviewPublisher";
 import {
+    isParamBlockMenuOp,
     runParamBlockMenuOp,
     type ParamBlockMenuOp,
     type ParamBlockOpHandlers,
@@ -6896,48 +6897,21 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         return;
                 }
             }
-            switch (op) {
-                case "split":
-                    splitParamBlockAtPlayhead();
-                    break;
-                case "createFromSelection":
-                    createParamBlocksFromSelection();
-                    break;
-                case "group":
-                    groupSelectedParamBlocks();
-                    break;
-                case "ungroup":
-                    ungroupSelectedParamBlocks();
-                    break;
-                case "restoreGame":
-                    restoreGameParamBlocks();
-                    break;
-                case "restoreDeleted":
-                    restoreParamBlocks();
-                    break;
-                case "normalizePitch":
-                    normalizeSelectedParamBlockPitchRef.current?.();
-                    break;
-                case "delete":
-                    deleteSelectedParamBlocks();
-                    break;
-            }
+            /*
+             * 与键盘通道共用同一张 op 表（paramBlockEditOps）。这里**不再**写第二份
+             * switch —— 上一版两边各写一份，selectAll / deselect 只在键盘侧存在，
+             * 而键盘侧因为通道判据写错整条失效，于是「菜单能用、快捷键不行」。
+             */
+            if (isParamBlockMenuOp(op)) runParamBlockOp(op, { snapToggleHeld: false });
             setParamBlockContextMenu(null);
         },
         [
-            createParamBlocksFromSelection,
-            deleteSelectedParamBlocks,
-            groupSelectedParamBlocks,
             handleEditOp,
             handleExportMidiFromEditor,
             handleSaveAsPitchRef,
-            normalizeSelectedParamBlockPitchRef,
             openEditDialog,
             openVibratoDialog,
-            restoreGameParamBlocks,
-            restoreParamBlocks,
-            splitParamBlockAtPlayhead,
-            ungroupSelectedParamBlocks,
+            runParamBlockOp,
         ],
     );
 

@@ -25,6 +25,8 @@ import type { ActionId, Keybinding } from "./types";
 import { ACTION_META } from "./defaultKeybindings";
 import { matchesKeybinding } from "./keybindingMatch";
 import type { EditSurfaceId } from "../uiFocus/focusSurface";
+import { isBlockSelectionActive } from "../session/toolMode";
+import type { SelectToolMode, ToolMode } from "../session/sessionTypes";
 
 /** 全局快捷键路由关心的焦点域。 */
 export type KeybindingFocusDomain = "pianoRoll" | "timeline" | "trackHeader" | null;
@@ -192,13 +194,26 @@ export const PARAM_BLOCK_ACTION_TO_OP: Partial<Record<ActionId, ParamBlockEditOp
     "paramBlock.normalizePitch": "normalizePitch",
 };
 
+/**
+ * 块命令的事件通道。
+ *
+ * 【为什么吃两根轴而不是一个字符串】block 不是 ToolMode 的成员，它是
+ * `selectToolMode` 的取值。上一版签名是 `toolMode: string`，调用方传进来的是
+ * `session.toolMode`（永远不是 "block"），于是条件恒假、9 个块动作全部静默丢弃；
+ * 而 `string` 让这个错误在类型上完全合法。改成两根轴之后，唯一能通过编译的调用
+ * 方式就是把两个真实字段一起交进来。
+ *
+ * 【为什么用结构类型而不是 SessionState】本模块属于 keybindings 层，不应依赖
+ * session 切片；结构类型只要求它真正需要的两个字段。
+ */
 export function resolveParamBlockEditChannel(
     surface: EditSurfaceId | null,
-    toolMode: string,
+    tools: { readonly toolMode: ToolMode; readonly selectToolMode: SelectToolMode },
 ): "hifi:paramBlockEditOp" | null {
-    // 参数是派生 ToolScope；block 只可能来自选择族 + block 子模式。
-
-    return surface === "pianoRoll" && toolMode === "block" ? "hifi:paramBlockEditOp" : null;
+    if (surface !== "pianoRoll") return null;
+    return isBlockSelectionActive(tools.toolMode, tools.selectToolMode)
+        ? "hifi:paramBlockEditOp"
+        : null;
 }
 
 export const ACTION_TO_EDIT_OP: Partial<Record<ActionId, EditOp>> = {

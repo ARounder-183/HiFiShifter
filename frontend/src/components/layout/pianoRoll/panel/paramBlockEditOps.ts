@@ -43,6 +43,11 @@ export const PARAM_BLOCK_MENU_OPS: readonly ParamBlockMenuOp[] = [
     "normalizePitch",
 ];
 
+/** 收窄守卫：菜单回调拿到的是 `string`，只有表里登记的 op 才允许执行。 */
+export function isParamBlockMenuOp(op: string): op is ParamBlockMenuOp {
+    return (PARAM_BLOCK_MENU_OPS as readonly string[]).includes(op);
+}
+
 /**
  * 执行一个块命令。
  *
