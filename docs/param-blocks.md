@@ -57,12 +57,12 @@ game baseline                      playback_rate / reverse        参数块编�
 
 ## 选择与编辑作用域
 
-- **设计原则：参数块选择是选择工具族的对象级子模式，不是第三个顶级工具。** 工具族只有选择（range / block）与绘制（draw / line / vibrato）；`block = toolMode === "select" && selectToolMode === "block"`。参数块图层显隐是独立的视图轴，不随工具切换，也不属于任何工具按钮；关闭图层会把选择子模式收回 range。
+- **设计原则：参数块选择是选择工具族的对象级子模式，不是第三个顶级工具。** 工具族只有选择（range / block）与绘制（draw / line / vibrato）；`block = toolMode === "select" && selectToolMode === "block"`。块层**是否绘制**是**派生**的，不落状态：`isParamBlockLayerVisible({ alwaysShowParamBlocks, toolMode, selectToolMode })` 是唯一判据，语义是「常显设置 ∨ 块选择子模式」。工具栏的「永远显示参数块」是**功能设置**（默认关），它只写自己 —— 不随工具切换改变，也不会反向改工具 / 选择子模式（旧实现「关闭图层就把子模式收回 range」已删除）。
 - 块选择没有独立状态：选区（selectionRef / selectionUi）是唯一真值，块高亮由「完整覆盖」派生。一个逻辑块的全部可见 run 都被选区覆盖，它才进入 selectedParamBlockIds。
 - 逻辑块身份是 userBlockId ?? id。多 run 用户块在点击、Ctrl 切换、Shift 范围、拖动、删除、编组、取消编组、归一化、恢复与菜单计数中都是一个单位；只有绘制 / 命中 / 过渡手柄看单个 run。
 - Ctrl / Cmd + 点击块：切换该逻辑块的成员资格。Shift + 点击块：从锚点到目标块按整块范围选择；Ctrl + Shift 退化为普通单选。Alt + 点击块：在点击位置分割（默认绑定，可在快捷键设置修改）；Ctrl+Alt 在块上回退为 Ctrl 选择。
 - 点击与拖动以二维 3px 死区区分。Shift 点击/拖动都从锚点到目标按整块范围选择，拖动直接使用该范围作为拖动集合；Ctrl 点击移除块后不会启动拖动。Alt 点击分割在水平或纵向拖动越过死区后自动取消，进入普通块拖动。
-- 块选择动作同时写入参数编辑器选区；在 range / block 之间切换不清空选区，块高亮只在块子模式且图层可见时显示。块选择模式内的背景拖动会把碰到的逻辑块扩展为全部 run，保证高亮与 Delete / Group 的作用域一致。块选择模式 Ctrl/Cmd+A 只选择块实际覆盖的帧区间（多 run 全部纳入），块间空隙与轨道头尾不选；无块时清空。
+- 块选择动作同时写入参数编辑器选区；在 range / block 之间切换不清空选区，块高亮只在块子模式时显示 —— 选区本身跨工具保留（设计如此），但「选中」在画面上是一组**交互 affordance**（高亮填充、过渡手柄、可拖光标）。因此非块选择模式下即使常显开启，块层**只显示**：没有 hover 高亮、没有选中高亮、没有过渡手柄、点不动。块选择模式内的背景拖动会把碰到的逻辑块扩展为全部 run，保证高亮与 Delete / Group 的作用域一致。块选择模式 Ctrl/Cmd+A 只选择块实际覆盖的帧区间（多 run 全部纳入），块间空隙与轨道头尾不选；无块时清空。
 - 锚点只服务 Shift：普通点击、Ctrl 点击、Shift 点击都会更新锚点；背景拖动结束落在起点块；右键空白拖动追加后按「原锚点 → 选区首块 → 播放头块」回退；清空 / 根切换清空。
 - 组伸缩与删除递归保留 baseCover：组的基块所有权等于全部叶子 child 的 baseCover 并集；被缩掉 / 丢弃的 base 派生 child 生成墓碑，避免基块复活。组 resize 保持组 id；根块组按 child 生成多个 run，不填满空隙。
 - 右键块体拖动 = 幅度调整：复用选择族的 `createSelectionAmplifier` / `transformSelectionByRightDrag`，上拖放大、下拖平滑，百分比浮窗与参数线选择同源；右键块体单击 = 块菜单。右键空白拖动 = 追加参数选区；右键空白单击 = 块菜单。块菜单顶部只有「参数块」子菜单，标准参数命令与参数线选择共用 `EditContextMenu` 的唯一描述表。
@@ -82,6 +82,34 @@ game baseline                      playback_rate / reverse        参数块编�
 - **预览释放只有一条判据**（`paramBlockPreviewRelease`）：这次提交产生的权威已经可见。带曲线补丁的提交必须同时满足「曲线 revision 前进 ∧ 权威水位在提交之后确认 ∧ 当前窗口包含提交片段」；纯布局提交才退回几何相等。旧实现用「本地派生几何已经等于预览几何」判断，而 `setParamBlockState` 是同步提交 —— 那个条件在 pointerup 之后一次渲染就成立，于是预览被撤、曲线回旧值、块按旧曲线重新采样，用户看到「先回弹旧参数、再生效新参数」。超时（2s）之前必须先 `flushReadback()` 对账再撤，否则撤下的第一帧仍是旧曲线。
 - 新建 / 伸缩 / 过渡的预览事务在提交时记下「依据的权威水位」与「提交的曲线片段」（`authorityRevisionAtStart` / `authorityRequestSeqAtCommit` / `committedSegments`）；没有这三个字段就无法回答「权威有没有前进过」。
 
+## 参数块图层：常显设置
+
+- 工具栏上的按钮是「**永远显示参数块**」（`alwaysShowParamBlocks`，默认关），不是「当前图层可见吗」的指示灯。它的 `aria-pressed` 读设置值 —— 块选择模式下图层**总是**可见，与这个设置无关。
+- 六种组合（`isParamBlockLayerVisible`）：块选择模式 ⇒ 恒可见；选择族 range / 绘制族 ⇒ 只看设置。设置与工具**互不写入**：切工具不改设置，改设置不改工具。
+- 可见 ≠ 可交互：非块选择模式下块层只画，不产生 hover、选中高亮、过渡手柄与命中。
+- 代价：自动音节分析只在「块层真的在画」时跑（没有分析结果就没有块），所以常开图层意味着每次打开参数编辑器都会跑一次模型推理 —— 这也是它默认关闭的理由。
+
+## 指针优先级
+
+> 下面这段是**描述**，不是第二份实现。真实顺序写在 `onParamBlockPointerDown` 的 if 梯里；这里记下来，是为了让读代码的人先知道意图，而不是去照着某个「策略表」改（旧版 `paramBlockPointerPolicy.ts` 自称唯一真相，却零调用、且顺序已经和真实代码不一致，已删除）。
+
+1. 右键块体 → 幅度调整（右键块体单击 = 块菜单）。
+2. 右键空白 → 追加参数选区（单击 = 块菜单）。
+3. `Ctrl+Alt` 在块上 → 回退为 Ctrl 选择（不新建、不分割）。
+4. `Alt` 在块上 → 在点击处分割（越过 3px 死区后取消，回到普通块拖动）。
+5. 过渡手柄 → 左右拖动改交叉淡化宽度。
+6. 块边缘 → 左右拖动伸缩。
+7. 块体 → 选择 / 纵向拖动。
+8. 空白 + `Alt` / `Ctrl+Alt` → 新建块（普通 / 拉平）。
+9. 空白 → 框选。
+
+## 拖拽读数
+
+- 开启「弹出展示参数」后，块手势与参数线拖拽表现一致：拖拽过程中指针旁持续显示读数，松手立即消失。
+- 显示的是**块将被拖到的中心值**（`projectParamBlockDragDisplayValue(锚点起始值 + 位移)`），不是指针所在帧的曲线值 —— 指针可能抓在块的任意高度（块高 1.2 行高），用它会让读数随抓取位置偏移。多选一起拖时所有块位移相同，锚点即代表。
+- 空白处 `Alt` / `Ctrl+Alt` 拖动新建：显示新块的值（已按音高吸附 / 跟随音阶解析）。
+- 块边缘伸缩与过渡手柄拖动**不显示**读数：它们只改时间跨度 / 淡化宽度，值不变；显示一个静止的数字会让用户以为值被改了。
+- 一次手势只有一个读数所有者：块模式下块手势负责发布，通用指针处理器**不运行**（`EditorArea` 先问块层，块层认领即返回），悬停续显（`refreshParamValuePreview`）在块模式里退位。
 ## 值轴边缘滚动
 
 - 竖向边缘滚动的单位是**参数值**，不是 `scrollTop`：带宽 20px、满带 0.10 个视口/秒、软启动 `ratio²`、单帧上限 0.0025 个视口（只在 ≥25ms 的卡顿帧上生效，保证 60Hz 与 120Hz 手感一致）。滚动条自己的「值域中心 ↔ scrollTop」映射仍走 `verticalScrollMapping`，两者互不影响。
@@ -109,7 +137,12 @@ game baseline                      playback_rate / reverse        参数块编�
 - 内核：`backend/hifishifter-kernel/src/param_blocks/`
 - App：`backend/src-tauri/src/commands/param_blocks.rs`
 - 插件：`backend/hifishifter-plugin/src/editor/session.rs`
-- 前端：`frontend/src/components/layout/pianoRoll/paramBlock*.ts`（块命令表见 `paramBlockCommandMenu.ts`）
+- 前端：`frontend/src/components/layout/pianoRoll/paramBlock*.ts`
+  - 菜单描述：`paramBlockCommandMenu.ts`
+  - **命令执行表（唯一）**：`panel/paramBlockEditOps.ts` —— 键盘通道与右键菜单共用；新增块命令只改这里。
+  - 键盘通道：`panel/useParamBlockEditOpChannel.ts`（只把 stroke 折成 `snapToggleHeld`，不 switch op）。
+  - 渲染规格的唯一派生点：`panel/useParamBlockRenderSpec.ts`。
+  - 指针 hover / 光标：`panel/paramBlockHover.ts`。
 - Golden fixture：`frontend/src/components/layout/pianoRoll/__fixtures__/paramBlockProjection.golden.json`
 
 ## 维护约束
