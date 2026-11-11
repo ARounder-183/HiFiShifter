@@ -22,6 +22,7 @@ use crate::state::{AppState, SilenceRemovalAction, TimelineState};
 fn detect_options(p: &SilenceDetectOptionsPayload) -> crate::silence_detect::SilenceDetectOptions {
     crate::silence_detect::SilenceDetectOptions {
         use_peak: p.method == "peak",
+        use_note_blocks: p.method == "note_blocks",
         threshold_db: p.threshold_db,
         adaptive: p.adaptive,
         min_silence_ms: p.min_silence_ms.max(0.0),
@@ -33,10 +34,12 @@ fn detect_options(p: &SilenceDetectOptionsPayload) -> crate::silence_detect::Sil
 /// 待分析 Clip 的元数据快照（避免在解码期间持锁）。
 struct ClipMeta {
     clip_id: String,
+    clip: crate::state::Clip,
     clip_start_sec: f64,
     clip_length_sec: f64,
     /// (source_path, source_start, source_end, rate, reversed, loop)
     takes: Vec<(String, f64, f64, f64, bool, bool)>,
+    note_takes: Vec<crate::state::ClipTake>,
 }
 
 fn snapshot_clips(tl: &TimelineState, clip_ids: &[String], all_takes: bool) -> Vec<ClipMeta> {
@@ -49,6 +52,11 @@ fn snapshot_clips(tl: &TimelineState, clip_ids: &[String], all_takes: bool) -> V
             clip.clip_playback_rate as f64
         } else {
             1.0
+        };
+        let note_takes: Vec<crate::state::ClipTake> = if all_takes {
+            clip.takes.clone()
+        } else {
+            vec![clip.active_take().clone()]
         };
         let takes: Vec<&crate::state::ClipTake> = if all_takes {
             clip.takes.iter().collect()
@@ -79,9 +87,11 @@ fn snapshot_clips(tl: &TimelineState, clip_ids: &[String], all_takes: bool) -> V
         }
         metas.push(ClipMeta {
             clip_id: clip.id.clone(),
+            clip: clip.clone(),
             clip_start_sec: clip.start_sec,
             clip_length_sec: clip.length_sec,
             takes: take_rows,
+            note_takes,
         });
     }
     metas
@@ -129,22 +139,42 @@ fn analyze_clips(
         }
         let mut union: Vec<(f64, f64)> = Vec::new();
         let mut error: Option<String> = None;
-        for (path, ss, se, rate, reversed, loop_enabled) in &meta.takes {
-            match crate::silence_detect::analyze_take_silence(
-                path,
-                *ss,
-                *se,
-                *rate,
-                *reversed,
-                *loop_enabled,
-                meta.clip_start_sec,
-                meta.clip_length_sec,
-                &opts,
-            ) {
-                Ok(regions) => union = merge_region_lists(union, regions),
-                Err(msg) => {
-                    error = Some(msg);
-                    break;
+        if opts.use_note_blocks {
+            if meta.note_takes.is_empty() {
+                error = Some("note_blocks_empty".to_string());
+            } else {
+                for take in &meta.note_takes {
+                    match crate::silence_detect::analyze_note_block_silence(
+                        &meta.clip,
+                        take,
+                        &opts,
+                    ) {
+                        Ok(regions) => union = merge_region_lists(union, regions),
+                        Err(msg) => {
+                            error = Some(msg);
+                            break;
+                        }
+                    }
+                }
+            }
+        } else {
+            for (path, ss, se, rate, reversed, loop_enabled) in &meta.takes {
+                match crate::silence_detect::analyze_take_silence(
+                    path,
+                    *ss,
+                    *se,
+                    *rate,
+                    *reversed,
+                    *loop_enabled,
+                    meta.clip_start_sec,
+                    meta.clip_length_sec,
+                    &opts,
+                ) {
+                    Ok(regions) => union = merge_region_lists(union, regions),
+                    Err(msg) => {
+                        error = Some(msg);
+                        break;
+                    }
                 }
             }
         }

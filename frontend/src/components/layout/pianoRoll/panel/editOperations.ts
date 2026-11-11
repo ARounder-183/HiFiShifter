@@ -86,6 +86,7 @@ import {
     parseChildPitchOffsetParam,
 } from "../childPitchOffsetParams";
 import { buildChildOffsetPasteValues as buildChildOffsetPasteValuesHelper } from "../childPitchOffsetPaste";
+import { flipParamValue, supportsParamFlip } from "../paramFlip";
 import {
     readSystemClipboardObject,
     writeSystemClipboardObject,
@@ -864,6 +865,12 @@ export async function runEditOp(
                     },
                 },
             );
+            break;
+        }
+        case "flip": {
+            if (editParam === "pitch") return;
+            if (!supportsParamFlip(currentParamRange, currentParamDefaultValue)) return;
+            await runSelectionEdit((vals) => vals.map(flipParamValue));
             break;
         }
         case "setPitch": {

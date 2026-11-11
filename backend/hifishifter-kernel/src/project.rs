@@ -1,3 +1,6 @@
+use crate::unicode_path::{
+    normalize_relative_path, normalize_relative_path_nfd, normalize_text_nfc, normalize_text_nfd,
+};
 use crate::state::{SynthPipelineKind, TimelineState};
 use crate::time_stretch::UserStretchAlgorithm;
 use serde::{Deserialize, Serialize};
@@ -321,7 +324,7 @@ fn compute_relative_source_path(source_path: &Path, project_path: &Path) -> Opti
         return None;
     }
 
-    Some(rel_parts.join("/"))
+    Some(normalize_relative_path(&rel_parts.join("/")))
 }
 
 pub fn prepare_source_paths_for_save(mut tl: TimelineState, project_path: &Path) -> TimelineState {
@@ -337,7 +340,7 @@ pub fn prepare_source_paths_for_save(mut tl: TimelineState, project_path: &Path)
                     if p.is_absolute() {
                         take.source_path_relative = compute_relative_source_path(&p, project_path);
                     } else {
-                        take.source_path_relative = Some(trimmed.replace('\\', "/"));
+                        take.source_path_relative = Some(normalize_relative_path(trimmed));
                     }
                 }
             } else {
@@ -493,10 +496,17 @@ pub fn resolve_source_paths_on_open(
                 let p = crate::app_paths::remap_legacy_app_path(sp)
                     .unwrap_or_else(|| PathBuf::from(sp));
                 if p.is_absolute() {
+                    let p_text = p.to_string_lossy().to_string();
+                    let nfc = PathBuf::from(normalize_text_nfc(&p_text));
+                    let nfd = PathBuf::from(normalize_text_nfd(&p_text));
                     if p.exists() {
-                        resolved_absolute = Some(p.to_string_lossy().to_string());
+                        resolved_absolute = Some(p_text);
+                    } else if nfc.exists() {
+                        resolved_absolute = Some(nfc.to_string_lossy().to_string());
+                    } else if nfd.exists() {
+                        resolved_absolute = Some(nfd.to_string_lossy().to_string());
                     } else {
-                        missing_display_abs = Some(p.to_string_lossy().to_string());
+                        missing_display_abs = Some(p_text);
                     }
                 }
             }
@@ -504,8 +514,18 @@ pub fn resolve_source_paths_on_open(
             if resolved_absolute.is_none() {
                 if let Some(rel) = source_path_relative_raw.as_ref() {
                     let joined = dir.join(rel);
+                    let nfc_rel = normalize_relative_path(rel);
+                    let nfd_rel = normalize_relative_path_nfd(rel);
+                    let nfc_joined = dir.join(&nfc_rel);
+                    let nfd_joined = dir.join(&nfd_rel);
                     if joined.exists() {
                         resolved_absolute = Some(joined.to_string_lossy().to_string());
+                    } else if nfc_joined.exists() {
+                        resolved_absolute = Some(nfc_joined.to_string_lossy().to_string());
+                        take.source_path_relative = Some(nfc_rel);
+                    } else if nfd_joined.exists() {
+                        resolved_absolute = Some(nfd_joined.to_string_lossy().to_string());
+                        take.source_path_relative = Some(nfc_rel);
                     } else if missing_display_abs.is_none() {
                         missing_display_abs = Some(joined.to_string_lossy().to_string());
                     }
@@ -516,10 +536,20 @@ pub fn resolve_source_paths_on_open(
                 if let Some(sp) = source_path_raw.as_ref() {
                     let p = PathBuf::from(sp);
                     if !p.is_absolute() {
+                        let nfc_rel = normalize_relative_path(sp);
+                        let nfd_rel = normalize_relative_path_nfd(sp);
                         let joined = dir.join(p);
+                        let nfc_joined = dir.join(&nfc_rel);
+                        let nfd_joined = dir.join(&nfd_rel);
                         if joined.exists() {
                             resolved_absolute = Some(joined.to_string_lossy().to_string());
-                            take.source_path_relative = Some(sp.clone());
+                            take.source_path_relative = Some(nfc_rel);
+                        } else if nfc_joined.exists() {
+                            resolved_absolute = Some(nfc_joined.to_string_lossy().to_string());
+                            take.source_path_relative = Some(nfc_rel);
+                        } else if nfd_joined.exists() {
+                            resolved_absolute = Some(nfd_joined.to_string_lossy().to_string());
+                            take.source_path_relative = Some(nfc_rel);
                         } else if missing_display_abs.is_none() {
                             missing_display_abs = Some(joined.to_string_lossy().to_string());
                         }
@@ -797,6 +827,82 @@ mod tests {
         assert_eq!(
             prepared.clips[0].takes[0].source_path_relative.as_deref(),
             Some("song_media/import_abcd.wav")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_source_paths_matches_nfc_and_nfd_variants_without_directory_scan() {
+        let root = std::env::temp_dir().join(format!("hfs-unicode-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("ド.wav"), b"RIFF").unwrap();
+
+        let mut tl = timeline();
+        let track = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track),
+            Some("unicode".to_string()),
+            Some(0.0),
+            Some(1.0),
+            None,
+        );
+        let clip = tl.clips.iter_mut().find(|clip| clip.id == clip_id).unwrap();
+        let take = clip.takes.first_mut().unwrap();
+        take.source_path = None;
+        take.source_path_relative = Some("ト\u{3099}.wav".to_string());
+
+        let (resolved, missing) = resolve_source_paths_on_open(tl, &root.join("song.hshp"));
+        assert!(missing.is_empty(), "NFC/NFD 变体应当命中：{missing:?}");
+        assert!(resolved.clips[0].takes[0]
+            .source_path
+            .as_deref()
+            .unwrap_or_default()
+            .ends_with("ド.wav"));
+        assert_eq!(
+            resolved.clips[0].takes[0].source_path_relative.as_deref(),
+            Some("ド.wav")
+        );
+
+        // 不同名文件不自动匹配：没有目录扫描 / 指纹兜底。
+        std::fs::write(root.join("renamed.wav"), b"RIFF").unwrap();
+        let mut tl2 = timeline();
+        let track2 = tl2.add_track(Some("Track".to_string()), None, None);
+        let clip2 = tl2.add_clip(
+            Some(track2),
+            Some("missing".to_string()),
+            Some(0.0),
+            Some(1.0),
+            None,
+        );
+        let take2 = tl2.clips.iter_mut().find(|clip| clip.id == clip2).unwrap().takes.first_mut().unwrap();
+        take2.source_path = None;
+        take2.source_path_relative = Some("wrong.wav".to_string());
+        let (_, missing2) = resolve_source_paths_on_open(tl2, &root.join("song.hshp"));
+        assert_eq!(missing2.len(), 1, "不同名文件不得被自动猜测");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn save_prepares_nfc_relative_paths() {
+        let root = std::env::temp_dir().join(format!("hfs-unicode-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("media")).unwrap();
+        let media = root.join("media").join("ド.wav");
+        std::fs::write(&media, b"RIFF").unwrap();
+        let mut tl = timeline();
+        let track = tl.add_track(Some("Track".to_string()), None, None);
+        tl.add_clip(
+            Some(track),
+            Some("unicode".to_string()),
+            Some(0.0),
+            Some(1.0),
+            Some(media.display().to_string()),
+        );
+        let prepared = prepare_source_paths_for_save(tl, &root.join("song.hshp"));
+        assert_eq!(
+            prepared.clips[0].takes[0].source_path_relative.as_deref(),
+            Some("media/ド.wav")
         );
         let _ = std::fs::remove_dir_all(&root);
     }

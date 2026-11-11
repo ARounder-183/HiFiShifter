@@ -29,6 +29,8 @@ import type {
     RenderCacheSettings,
 } from "../../../services/api/settings";
 import type { ParamAxisUnits } from "../../../components/layout/pianoRoll/paramAxisUnits";
+import type { PanAxisDirections } from "../../../components/layout/pianoRoll/paramPan";
+import type { ProjectSaveFormat } from "../../../services/api/project";
 import type { CustomScalePreset } from "../../../utils/customScales";
 import type { BaselineMode, VibratoPreset } from "../../vibrato/vibratoTypes";
 
@@ -158,6 +160,13 @@ export interface SessionState {
      * 换算与解析见 `components/layout/pianoRoll/paramAxisUnits`。
      */
     paramAxisUnits: ParamAxisUnits;
+    /**
+     * 参数编辑器纵轴方向（参数 id → `"left-bottom"` | `"left-top"`）。
+     *
+     * 目前只有 pan 使用；缺项 = left-bottom。与 paramAxisUnits 同构，
+     * 合法性由 normalizePanAxisDirections 收口。
+     */
+    paramAxisDirections: PanAxisDirections;
     /** 参数编辑器（选择工具）拖动方向限制 */
     selectDragDirection: DragDirection;
     /** 参数编辑器（绘制工具）拖动方向限制 */
@@ -436,6 +445,12 @@ export interface SessionState {
          * "同一场播放里两条通道的先后"，晚到的旧读数会把光标拽回去。
          */
         lastTransportSeq: number;
+        /** 刚发起播放、尚未看到引擎首个“正在播放/等待渲染”采样。 */
+        playbackStartPending: boolean;
+        /** 本次播放的期望锚点（秒）；用于丢弃旧位置的采样。 */
+        playbackStartAnchorSec: number;
+        /** 起播窗口起点（performance.now，毫秒）。 */
+        playbackStartAtMs: number;
         gpuBackend: string;
     };
 
@@ -486,6 +501,8 @@ export interface SessionState {
     project: {
         name: string;
         path: string | null;
+        /** 上次“另存为”选择的格式（默认 hshp）。 */
+        lastSaveFormat: ProjectSaveFormat;
         dirty: boolean;
         recent: string[];
         notesMarkdown: string;
@@ -527,6 +544,7 @@ export interface SessionState {
      */
     saveVersionConflictDialog: {
         path: string;
+        format: ProjectSaveFormat;
         existingVersion: number;
         currentVersion: number;
         existingIsNewer: boolean;

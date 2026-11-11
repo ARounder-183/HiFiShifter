@@ -172,6 +172,8 @@ export interface UiSettings {
      * 缺项 / 未知键由前端 `normalizeParamAxisUnits` 过滤（见 sessionSlice）。
      */
     paramAxisUnits?: Record<string, string>;
+    paramAxisDirections?: Record<string, string>;
+    lastProjectSaveFormat?: "hshp" | "json" | "zip";
     lockParamLines?: boolean;
     metronomeEnabled?: boolean;
     metronomeGain?: number;

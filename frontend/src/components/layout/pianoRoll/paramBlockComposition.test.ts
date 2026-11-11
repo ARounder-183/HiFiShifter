@@ -74,6 +74,99 @@ describe("paramBlockComposition", () => {
         expect(merged.blocks[0]?.endFrameExclusive).toBe(200);
     });
 
+    it("orders crossing clips by start time and keeps the later clip's left-cut block", () => {
+        const a: ParamBlockSourceClip = {
+            id: "A",
+            trackId: "root",
+            startSec: 0,
+            lengthSec: 2,
+            sourceStartSec: 0,
+            sourceEndSec: 2,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: false,
+            syllableSpansSec: [
+                { startSec: 0, endSec: 0.5 },
+                { startSec: 0.5, endSec: 1 },
+            ],
+        };
+        const b: ParamBlockSourceClip = {
+            id: "B",
+            trackId: "root",
+            startSec: 0.2,
+            lengthSec: 1,
+            sourceStartSec: 0,
+            sourceEndSec: 1,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: false,
+            syllableSpansSec: [{ startSec: 0, endSec: 0.5 }],
+        };
+        const edits: ParamBlockEditSet = { schemaVersion: 2, revision: 0, blocks: [] };
+        const ab = composeParamBlockView("root", [a, b], edits, 5);
+        const ba = composeParamBlockView("root", [b, a], edits, 5);
+        const ranges = (view: typeof ab) =>
+            view.blocks.map((block) => [block.startFrame, block.endFrameExclusive]);
+        expect(ranges(ab)).toEqual([
+            [0, 40],
+            [40, 140],
+            [140, 200],
+        ]);
+        expect(ranges(ba)).toEqual(ranges(ab));
+        expect(ab.layoutKey).toBe(ba.layoutKey);
+        expect(ab.blocks.some((block) => block.startFrame === 40 && block.endFrameExclusive === 140)).toBe(true);
+        for (let i = 1; i < ab.blocks.length; i += 1) {
+            expect(ab.blocks[i - 1]!.endFrameExclusive).toBeLessThanOrEqual(ab.blocks[i]!.startFrame);
+        }
+    });
+
+    it("uses id as the tie-break for clips with the same start", () => {
+        const base = (id: string): ParamBlockSourceClip => ({
+            id,
+            trackId: "root",
+            startSec: 0,
+            lengthSec: 2,
+            sourceStartSec: 0,
+            sourceEndSec: 2,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: false,
+            syllableSpansSec: [{ startSec: 0, endSec: 1 }],
+        });
+        const edits: ParamBlockEditSet = { schemaVersion: 2, revision: 0, blocks: [] };
+        const ab = composeParamBlockView("root", [base("A"), base("B")], edits, 5);
+        const ba = composeParamBlockView("root", [base("B"), base("A")], edits, 5);
+        expect(ab.layoutKey).toBe(ba.layoutKey);
+        expect(ab.blocks.map((block) => block.members[0]?.clipId)).toEqual(
+            ba.blocks.map((block) => block.members[0]?.clipId),
+        );
+    });
+
+    it("keeps all three blocks non-overlapping under a three-way crossing", () => {
+        const mk = (id: string, startSec: number, lengthSec: number): ParamBlockSourceClip => ({
+            id,
+            trackId: "root",
+            startSec,
+            lengthSec,
+            sourceStartSec: 0,
+            sourceEndSec: lengthSec,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: false,
+            syllableSpansSec: [{ startSec: 0, endSec: lengthSec }],
+        });
+        const view = composeParamBlockView(
+            "root",
+            [mk("A", 0, 2), mk("B", 0.2, 1), mk("C", 0.4, 0.4)],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            5,
+        );
+        for (let i = 1; i < view.blocks.length; i += 1) {
+            expect(view.blocks[i - 1]!.endFrameExclusive).toBeLessThanOrEqual(view.blocks[i]!.startFrame);
+        }
+        expect(view.blocks.some((block) => block.startFrame === 80 && block.endFrameExclusive === 160)).toBe(true);
+    });
+
     it("hashes clip-level analysis and duration, but not the edit revision", () => {
         const base = composeParamBlockView(
             "root",

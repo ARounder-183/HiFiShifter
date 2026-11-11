@@ -244,6 +244,7 @@ export function applyTimelineState(
         state.project = {
             name: String(project.name ?? state.project.name ?? "Untitled"),
             path: project.path === undefined ? state.project.path : (project.path ?? null),
+            lastSaveFormat: state.project.lastSaveFormat,
             dirty: Boolean(project.dirty),
             recent: Array.isArray(project.recent) ? project.recent : state.project.recent,
             // 记事本：只有**该步本身是记事本编辑**时后端才会带回文本。

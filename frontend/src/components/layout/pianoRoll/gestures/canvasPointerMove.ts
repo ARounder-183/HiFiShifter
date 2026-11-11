@@ -13,6 +13,24 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 
 import type { PointerDeps } from "./pointerDeps";
 
+export interface HoverPreviewDeps {
+    readonly getCurveValueNearPointer: (
+        clientX: number,
+        clientY: number,
+        pointerType?: string | null,
+    ) => number | null;
+    readonly hoverPreviewNearCurveRef: { current: boolean };
+    readonly lastPointerClientRef: { current: { x: number; y: number } | null };
+    readonly onParamValuePreviewChange:
+        | ((value: {
+              clientX: number;
+              clientY: number;
+              value: number;
+          } | null) => void)
+        | undefined;
+    readonly paramValuePopupEnabled?: boolean;
+}
+
 /** 本回调需要的上下文。 */
 type Deps = Pick<
     PointerDeps,
@@ -42,6 +60,38 @@ type Deps = Pick<
     | "toolMode"
     | "rangeToolActive"
 >;
+
+/** 只更新曲线悬停读数；不碰光标、不碰选区 hover、不碰拖拽状态。 */
+export function updateHoverParamValuePreview(
+    deps: HoverPreviewDeps,
+    e: ReactPointerEvent<HTMLCanvasElement>,
+): void {
+    if (!deps.paramValuePopupEnabled) return;
+    const nearCurveValue = deps.getCurveValueNearPointer(
+        e.clientX,
+        e.clientY,
+        e.nativeEvent.pointerType,
+    );
+    deps.hoverPreviewNearCurveRef.current = nearCurveValue != null;
+    if (nearCurveValue == null) {
+        deps.onParamValuePreviewChange?.(null);
+        return;
+    }
+    deps.onParamValuePreviewChange?.({
+        clientX: e.clientX,
+        clientY: e.clientY,
+        value: nearCurveValue,
+    });
+}
+
+/** 块模式专用入口：记录最后指针位置，再更新悬停读数。 */
+export function handleCanvasHoverPreview(
+    deps: HoverPreviewDeps,
+    e: ReactPointerEvent<HTMLCanvasElement>,
+): void {
+    deps.lastPointerClientRef.current = { x: e.clientX, y: e.clientY };
+    updateHoverParamValuePreview(deps, e);
+}
 
 /** 画布指针移动（悬停预览 / 拖拽推进）。 */
 export function handleCanvasPointerMove(deps: Deps, e: ReactPointerEvent<HTMLCanvasElement>): void {
@@ -95,23 +145,16 @@ export function handleCanvasPointerMove(deps: Deps, e: ReactPointerEvent<HTMLCan
                 value: dragPreviewValue,
             });
         } else {
-            const nearCurveValue = getCurveValueNearPointer(
-                e.clientX,
-                e.clientY,
-                e.nativeEvent.pointerType,
+            updateHoverParamValuePreview(
+                {
+                    getCurveValueNearPointer,
+                    hoverPreviewNearCurveRef,
+                    lastPointerClientRef,
+                    onParamValuePreviewChange,
+                    paramValuePopupEnabled,
+                },
+                e,
             );
-            // 记录悬停激活状态：数据刷新（refreshParamValuePreview）
-            // 只续显已激活的浮窗。
-            hoverPreviewNearCurveRef.current = nearCurveValue != null;
-            if (nearCurveValue == null) {
-                onParamValuePreviewChange?.(null);
-            } else {
-                onParamValuePreviewChange?.({
-                    clientX: e.clientX,
-                    clientY: e.clientY,
-                    value: nearCurveValue,
-                });
-            }
         }
     }
 

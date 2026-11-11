@@ -57,6 +57,7 @@ export const webApi = {
     openProject: projectApi.openProject,
     saveProject: projectApi.saveProject,
     saveProjectAs: projectApi.saveProjectAs,
+    pickProjectSavePath: projectApi.pickProjectSavePath,
     saveProjectToPath: projectApi.saveProjectToPath,
     setProjectSaveUndoHistory: projectApi.setProjectSaveUndoHistory,
     setProjectBaseScale: projectApi.setProjectBaseScale,

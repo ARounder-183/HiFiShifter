@@ -221,12 +221,12 @@ export const playOriginal = createAsyncThunk<PlayOriginalResult, void>(
         // 执行）时，这次 seek 会把传输层拽回播放头 —— 音频"从头重新开始"，
         // 而后端的幂等 no-op 已无意义（seek 发生在它之前）。移除后，重复触发
         // 真正成为完全 no-op（后端幂等兜底），光标不再被拽回。
-        const result = await enqueueTransportCommand(() => webApi.playOriginal(0));
+        const result = await enqueueTransportCommand(() => webApi.playOriginal(anchorSec));
         return {
             ...result,
             clipId: null,
             anchorSec,
-            noop: false,
+            noop: Boolean(result.noop),
         };
     },
 );

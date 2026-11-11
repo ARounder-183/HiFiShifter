@@ -21,6 +21,7 @@ import {
 } from "./paramBlockProjection";
 import { flattenGroupChildren, groupCommonValue, groupLeafMembers } from "./paramBlockTypes";
 import { narrowBaseCoverToMembers } from "./paramBlockBaseCover";
+import { compareClipRenderOrder } from "../timeline/trackOverlap";
 import type {
     BaseCover,
     ParamBlockEditSet,
@@ -641,23 +642,26 @@ export function composeParamBlockView(
     framePeriodMs: number,
 ): ParamBlockView {
     const fp = Math.max(0.1, framePeriodMs);
+    // 参数块层级必须与时间轴视觉顺序一致：后开始的 Clip 在上层。只允许
+    // 复用 compareClipRenderOrder，禁止在这里另写一份 start/id 排序。
+    const orderedClips = [...clips].sort(compareClipRenderOrder);
     const candidates: Candidate[] = [];
-    for (const base of baseCandidates(clips, fp)) {
-        const covers = coverIntervalsForBase(base, clips, edits, fp);
+    for (const base of baseCandidates(orderedClips, fp)) {
+        const covers = coverIntervalsForBase(base, orderedClips, edits, fp);
         for (const [start, end] of subtract(base.start, base.end, covers)) {
             if (end <= start) continue;
             if (start === base.start && end === base.end) {
                 candidates.push(base);
                 continue;
             }
-            const piece = basePieceCandidate(base, start, end, clips, fp);
+            const piece = basePieceCandidate(base, start, end, orderedClips, fp);
             if (piece !== null) candidates.push(piece);
         }
     }
     let orphanCount = 0;
     for (const block of edits.blocks) {
         if (block.deleted) continue;
-        const projected = projectUserBlock(clips, block, fp);
+        const projected = projectUserBlock(orderedClips, block, fp);
         orphanCount += projected.orphan;
         candidates.push(...projected.candidates);
     }
@@ -677,7 +681,7 @@ export function composeParamBlockView(
             if (end <= start) return;
             const trimmed = start !== candidate.start || end !== candidate.end || pieces.length > 1;
             if (candidate.kind === "base" && trimmed) {
-                const piece = basePieceCandidate(candidate, start, end, clips, fp);
+                const piece = basePieceCandidate(candidate, start, end, orderedClips, fp);
                 if (piece !== null) {
                     accepted.push({ ...piece, id: `${piece.id}:${index}` });
                 }
@@ -736,11 +740,11 @@ export function composeParamBlockView(
         schemaVersion: 1,
         rootTrackId,
         editRevision: edits.revision,
-        layoutKey: `layout:${hash(`${rootTrackId}|${fp}|${clips.map(clipLayoutKey).join("|")}`)}`,
+        layoutKey: `layout:${hash(`${rootTrackId}|${fp}|${orderedClips.map(clipLayoutKey).join("|")}`)}`,
         framePeriodMs: fp,
         blocks,
         orphanCount,
-        analysisPending: clips.some((clip) => {
+        analysisPending: orderedClips.some((clip) => {
             const take =
                 clip.takes?.find((item) => item.id === clip.activeTakeId) ?? clip.takes?.[0];
             return (

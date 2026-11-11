@@ -36,6 +36,10 @@ pub enum EngineCommand {
     SeekSec {
         sec: f64,
     },
+    /// 从绝对秒开始播放时间线（seek + set_playing 原子化）。
+    PlayFrom {
+        sec: f64,
+    },
     SetPlaying {
         playing: bool,
         target: Option<String>,
@@ -45,6 +49,8 @@ pub enum EngineCommand {
         offset_sec: f64,
         target: String,
     },
+    /// 系统默认输出设备（或它的默认格式）发生变化；worker 自己重新查询 cpal。
+    DefaultOutputDeviceChanged,
     StretchReady {
         key: StretchKey,
     },

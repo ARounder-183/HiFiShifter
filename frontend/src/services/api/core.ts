@@ -285,8 +285,15 @@ export const coreApi = {
             error?: string;
         }>("quick_export_selected_clips", request),
 
+    /**
+     * 从**绝对**播放头位置开始播放。
+     * @param startSec 绝对秒数（不是相对当前播放头的偏移）。
+     */
     playOriginal: (startSec = 0) =>
-        invoke<{ ok: boolean; playing?: string; start_sec?: number }>("play_original", startSec),
+        invoke<{ ok: boolean; playing?: string; start_sec?: number; noop?: boolean }>(
+            "play_original",
+            startSec,
+        ),
 
     /** 引擎确在播放时返回精确停止位置（stopped_at_sec），否则为 null。 */
     stopAudio: () => invoke<{ ok: boolean; stopped_at_sec?: number | null }>("stop_audio"),

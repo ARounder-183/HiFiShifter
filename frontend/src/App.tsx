@@ -47,6 +47,7 @@ const PianoRollPanel = lazy(() =>
     })),
 );
 import { useAppDispatch, useAppSelector } from "./app/hooks";
+import { requestSaveProjectAsDialog } from "./components/layout/saveProjectAsDialogBus";
 import { webApi } from "./services/webviewApi";
 import { settingsApi } from "./services/api/settings";
 import { fileBrowserApi } from "./services/api/fileBrowser";
@@ -1712,9 +1713,11 @@ function AppInner() {
     const saveUnsavedAndContinue = useCallback(() => {
         void (async () => {
             try {
-                const result = (await dispatch(
-                    projectPath ? saveProjectRemote() : saveProjectAsRemote(),
-                ).unwrap()) as { canceled?: boolean; versionConflict?: boolean };
+                const result = (
+                    projectPath
+                        ? await dispatch(saveProjectRemote()).unwrap()
+                        : await dispatch(saveProjectAsRemote(undefined)).unwrap()
+                ) as { canceled?: boolean; versionConflict?: boolean };
                 // 取消 或 命中"目标版本不一致"确认框：暂不执行后续操作，
                 // 等待用户完成保存（继续保存成功后由后续入口继续，或重新操作）。
                 if (result?.canceled || result?.versionConflict) {
@@ -1765,16 +1768,21 @@ function AppInner() {
     // 用户选择"另存为"：关闭确认框并重新弹出另存为选择器。
     const saveAsFromVersionConflict = useCallback(() => {
         dispatch(closeSaveVersionConflictDialog());
-        void dispatch(saveProjectAsRemote());
-    }, [dispatch]);
+        requestSaveProjectAsDialog(saveVersionConflictDialog?.format);
+    }, [dispatch, saveVersionConflictDialog?.format]);
 
     // 用户确认"继续保存"：向已选路径执行强制覆盖保存。
     const continueForceSave = useCallback(() => {
         const path = saveVersionConflictDialog?.path;
         dispatch(closeSaveVersionConflictDialog());
         if (!path) return;
-        void dispatch(saveProjectToPathRemote(path));
-    }, [dispatch, saveVersionConflictDialog?.path]);
+        void dispatch(
+            saveProjectToPathRemote({
+                path,
+                format: saveVersionConflictDialog?.format,
+            }),
+        );
+    }, [dispatch, saveVersionConflictDialog?.path, saveVersionConflictDialog?.format]);
 
     const handleNewProject = useCallback(() => {
         runOrPromptUnsavedAction("switch", async () => {
@@ -2968,7 +2976,7 @@ function AppInner() {
                     void dispatch(saveProjectRemote());
                     break;
                 case "project.saveAs":
-                    void dispatch(saveProjectAsRemote());
+                    requestSaveProjectAsDialog();
                     break;
                 case "project.export":
                     window.dispatchEvent(

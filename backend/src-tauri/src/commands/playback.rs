@@ -266,16 +266,15 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
         log::info!("[play_original] called start_sec={start_sec}");
         // 在同一把锁的作用域内克隆时间线：分离读取时，并发 checkpoint
         // （先解锁后 bump 版本）会让旧 timeline 配上新版本号。
-        let timeline = match state.timeline.lock() {
+        let start_sec = start_sec.max(0.0);
+        let mut timeline = match state.timeline.lock() {
             Ok(g) => g.clone(),
             Err(p) => p.into_inner().clone(),
         };
         let bpm = timeline.bpm;
-        let playhead_sec = timeline.playhead_sec;
         if !(bpm.is_finite() && bpm > 0.0) {
             return serde_json::json!({"ok": false, "error": "invalid bpm"});
         }
-        let start_sec = playhead_sec.max(0.0) + start_sec.max(0.0);
 
         // ── 渲染需求评估（与后台预渲染开关无关）─────────────────────────────
         // 开关只决定渲染的**触发时机**：启用 = 编辑即渲染（播放时通常已就绪）；
@@ -317,7 +316,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                 }
             }
             log::warn!("[play_original] already playing — idempotent no-op (no restart)");
-            return serde_json::json!({"ok": true, "playing": "original", "start_sec": start_sec});
+            return serde_json::json!({"ok": true, "playing": "original", "start_sec": start_sec, "noop": true});
         }
 
         // ── 立即武装传输层 ─────────────────────────────────────────────────────
@@ -336,9 +335,15 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
         crate::synth_clip_cache::set_pad_suppressed_clips(
             clips_needing_render.iter().map(|info| info.clip.id.clone()),
         );
-        state.audio_engine.seek_sec(start_sec);
+        // 播放头不是撤销内容；no-op 路径不得写回。
+        timeline.playhead_sec = start_sec;
+        {
+            let mut guard = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            guard.playhead_sec = start_sec;
+        }
+        // 顺序必须是 update → play_from：先构建新快照，再原子置位。
         state.audio_engine.update_timeline(timeline);
-        state.audio_engine.set_playing(true, Some("original"));
+        state.audio_engine.play_from(start_sec);
         serde_json::json!({"ok": true, "playing": "original", "start_sec": start_sec})
     })
 }
@@ -1062,6 +1067,26 @@ fn render_single_clip(
         };
         let mut planes = Vec::with_capacity(channels_mono.len());
         for (ch_idx, ch_mono) in channels_mono.iter().enumerate() {
+            let model_samples = ((ch_mono.len() as f64) * 44_100.0 / out_rate.max(1) as f64).ceil() as usize;
+            let chunks = crate::hnsep_chunk::plan_chunks(model_samples);
+            let estimated_peak_bytes = chunks
+                .iter()
+                .map(|chunk| {
+                    crate::hnsep_resources::estimated_working_bytes(
+                        chunk.input_end - chunk.input_start,
+                        44_100,
+                    )
+                    .unwrap_or(u64::MAX)
+                })
+                .max()
+                .unwrap_or(0);
+            log::warn!(
+                "[hnsep] clip_len_sec={:.3} hnsep_chunks={} estimated_peak_bytes={} clip_id={} channel={ch_idx}",
+                clip.length_sec,
+                chunks.len(),
+                estimated_peak_bytes,
+                clip.id
+            );
             match crate::hnsep_onnx::infer_noise_mono(
                 &clip.id,
                 ch_mono,

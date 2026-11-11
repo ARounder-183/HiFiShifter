@@ -3,6 +3,9 @@ import type { StretchAlgorithmOption } from "./settings";
 
 import { invoke } from "../invoke";
 
+/** 工程保存格式：由应用内先选，原生对话框只负责路径。 */
+export type ProjectSaveFormat = "hshp" | "json" | "zip";
+
 /** 保存类命令的返回体：目标已存在版本不一致工程时携带冲突信号，其余字段未定形。 */
 type SaveProjectResult =
     | {
@@ -10,6 +13,7 @@ type SaveProjectResult =
           canceled: false;
           versionConflict: true;
           path: string;
+          format?: ProjectSaveFormat;
           existingVersion: number;
           currentVersion: number;
           existingIsNewer: boolean;
@@ -137,15 +141,33 @@ export const projectApi = {
     saveProject: (notesMarkdown?: string) =>
         invoke<SaveProjectResult>("save_project", notesMarkdown),
 
-    saveProjectAs: (notesMarkdown?: string) =>
-        invoke<SaveProjectResult>("save_project_as", notesMarkdown),
+    saveProjectAs: (notesMarkdown?: string, format?: ProjectSaveFormat) =>
+        invoke<SaveProjectResult>("save_project_as", notesMarkdown, format),
+
+    pickProjectSavePath: (format: ProjectSaveFormat, defaultName?: string) =>
+        invoke<{ ok: boolean; canceled?: boolean; path?: string; error?: string }>(
+            "pick_project_save_path",
+            format,
+            defaultName,
+        ),
 
     /**
      * 保存到指定路径；`force=true` 表示用户已在"版本不一致覆盖"对话框中确认。
      * 目标已存在版本不一致的工程文件（且未 force）时返回 versionConflict 信号。
      */
-    saveProjectToPath: (projectPath: string, notesMarkdown?: string, force?: boolean) =>
-        invoke<SaveProjectResult>("save_project_to_path", projectPath, notesMarkdown, force),
+    saveProjectToPath: (
+        projectPath: string,
+        notesMarkdown?: string,
+        force?: boolean,
+        format?: ProjectSaveFormat,
+    ) =>
+        invoke<SaveProjectResult>(
+            "save_project_to_path",
+            projectPath,
+            notesMarkdown,
+            force,
+            format,
+        ),
 
     getAutoBackupSettings: () => invoke<AutoBackupSettings>("get_auto_backup_settings"),
 

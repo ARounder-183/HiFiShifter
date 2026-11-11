@@ -3,6 +3,7 @@ import { createAsyncThunk } from "@reduxjs/toolkit";
 import { getPluginHost } from "../../../services/pluginHost";
 import type { TimelineState } from "../../../types/api";
 import { webApi } from "../../../services/webviewApi";
+import type { ProjectSaveFormat } from "../../../services/api/project";
 import { coreApi } from "../../../services/api/core";
 import type { SessionState } from "../sessionSlice";
 import { notifyHistoryJump } from "../historyJump";
@@ -22,6 +23,7 @@ export interface SaveVersionConflict {
     canceled: false;
     versionConflict: true;
     path: string;
+    format?: ProjectSaveFormat;
     existingVersion: number;
     currentVersion: number;
     existingIsNewer: boolean;
@@ -149,7 +151,10 @@ export const saveProjectRemote = createAsyncThunk(
 
         const res: SaveProjectResponse = hasPath
             ? await webApi.saveProject(notesMarkdown)
-            : await webApi.saveProjectAs(notesMarkdown);
+            : await webApi.saveProjectAs(
+                  notesMarkdown,
+                  state.session.project.lastSaveFormat,
+              );
         // 目标已存在版本不一致的工程文件：作为 fulfilled 返回，由 reducer 弹出确认框。
         if (res && (res as SaveVersionConflict).versionConflict) {
             return res as SaveVersionConflict;
@@ -163,10 +168,10 @@ export const saveProjectRemote = createAsyncThunk(
 
 export const saveProjectAsRemote = createAsyncThunk(
     "session/saveProjectAsRemote",
-    async (_, { rejectWithValue, getState }) => {
+    async (format: ProjectSaveFormat | undefined, { rejectWithValue, getState }) => {
         const state = getState() as { session: SessionState };
         const notesMarkdown = String(state?.session?.project?.notesMarkdown ?? "");
-        const res: SaveProjectResponse = await webApi.saveProjectAs(notesMarkdown);
+        const res: SaveProjectResponse = await webApi.saveProjectAs(notesMarkdown, format);
         if (res && (res as SaveVersionConflict).versionConflict) {
             return res as SaveVersionConflict;
         }
@@ -178,12 +183,28 @@ export const saveProjectAsRemote = createAsyncThunk(
 );
 
 /** 用户在"覆盖版本不一致工程文件"对话框中确认"继续保存"后的强制保存。 */
+type SaveProjectToPathArg =
+    | string
+    | {
+          readonly path: string;
+          readonly format?: ProjectSaveFormat;
+          readonly force?: boolean;
+      };
+
 export const saveProjectToPathRemote = createAsyncThunk(
     "session/saveProjectToPathRemote",
-    async (path: string, { rejectWithValue, getState }) => {
+    async (arg: SaveProjectToPathArg, { rejectWithValue, getState }) => {
         const state = getState() as { session: SessionState };
         const notesMarkdown = String(state?.session?.project?.notesMarkdown ?? "");
-        const res: SaveProjectResponse = await webApi.saveProjectToPath(path, notesMarkdown, true);
+        const path = typeof arg === "string" ? arg : arg.path;
+        const format = typeof arg === "string" ? undefined : arg.format;
+        const force = typeof arg === "string" ? true : (arg.force ?? true);
+        const res: SaveProjectResponse = await webApi.saveProjectToPath(
+            path,
+            notesMarkdown,
+            force,
+            format,
+        );
         if (!res || (res as { ok?: boolean }).ok === false) {
             return rejectWithValue((res as { error?: string })?.error ?? "save_project_failed");
         }

@@ -18,6 +18,7 @@ import {
 } from "../kernel/valueAxisEdgeScroller";
 import { EDGE_SCROLL_MAX_SPEED_PX_PER_SEC } from "../kernel/dragArithmetic";
 import { getDrawPreviewValue } from "../paramValuePreviewLogic";
+import { centerForPanDelta } from "../paramAxisProjection";
 import { timeToFrame } from "../utils";
 import { resolveClipSelectionModifiers } from "../../../../features/keybindings/clipSelectionModifiers";
 import type { StrokeMode } from "../types";
@@ -85,6 +86,7 @@ type CanvasPointerDownDeps = Pick<
     | "onParamValuePreviewChange"
     | "onPitchSnapGestureActiveChange"
     | "panRef"
+    | "paramAxisDirectionsRef"
     | "paramBlockToolActive"
     | "paramEditorSeekPlayheadEnabled"
     | "paramMultiSelectKb"
@@ -224,6 +226,7 @@ export function handleCanvasPointerDown(
         onParamValuePreviewChange,
         onPitchSnapGestureActiveChange,
         panRef,
+        paramAxisDirectionsRef,
         paramEditorSeekPlayheadEnabled,
         paramMultiSelectKb,
         paramRangeSelectKb,
@@ -366,7 +369,12 @@ export function handleCanvasPointerDown(
                 setPitchView(
                     clampViewport("pitch", {
                         span: pan.startView.span,
-                        center: pan.startView.center + deltaCenter,
+                        center: centerForPanDelta({
+                            param: editParam,
+                            directions: paramAxisDirectionsRef.current,
+                            center: pan.startView.center,
+                            deltaCenter,
+                        }),
                     }),
                 );
             } else {

@@ -30,6 +30,7 @@ import type {
 } from "../kernel/host/pianoRollKernelData";
 import type { PianoRollKernelHost } from "../kernel/host/pianoRollKernelHost";
 import type { ParamAxisUnit } from "../paramAxisUnits";
+import type { PanAxisDirections } from "../paramPan";
 import type { ParamClipboardData } from "../paramClipboardMapping";
 import type { FrameRange, ParamSelection } from "../paramSelection";
 import type { DetectedPitchCurve, ReferencePitchOverlay } from "../render";
@@ -75,6 +76,7 @@ export type ModelDeps = {
     paramEditorRef: RefObject<HTMLDivElement | null>;
     paramMorphOverlays: ParamMorphOverlay[] | null;
     paramView: ParamViewSegment | null;
+    paramAxisDirectionsRef: RefObject<PanAxisDirections>;
     paramViewRef: RefObject<ParamViewSegment | null>;
     paramViewsRef: RefObject<Record<string, ValueViewport>>;
     pitchDeltaToDegreeSteps: (basePitch: number, targetPitch: number, scale: ScaleLike) => number;
@@ -113,6 +115,7 @@ export type ModelDeps = {
     setSelectionUi: Dispatch<SetStateAction<ParamSelection | null>>;
     store: Store<RootState>;
     t: (key: MessageKey) => string;
+    tf: (key: string) => string;
     themeMode: ThemeMode;
     valueToY: (param: ParamName, v: number, h: number) => number;
     vibratoBaseline: BaselineMode;

@@ -152,6 +152,7 @@ import {
     type ParamBlockSpecColors,
 } from "../paramBlockRenderSpec";
 import {
+    adoptParamBlockVisualStructure,
     isParamBlockVisualEpochCurrent,
     sameParamBlockEpochLayout,
     type ParamBlockEpoch,
@@ -192,6 +193,13 @@ import { warnDev } from "../devWarn";
 import { backendDetail } from "../../../../services/invoke";
 import { makeLoudnessAmplitudeMap } from "../PianoRollWaveformSurface";
 import { formatDbReadout, resolveParamAxisUnit, supportsParamAxisUnit } from "../paramAxisUnits";
+import {
+    formatPanValue,
+    isPanParam,
+    resolvePanAxisDirection,
+    type PanAxisDirections,
+} from "../paramPan";
+import { supportsParamFlip } from "../paramFlip";
 import { useLoudnessCurves, type LoudnessSnapshot } from "../useLoudnessCurves";
 import { createLiveOverrideReader, type LiveOverrideReader } from "../liveLoudnessOverride";
 import { pianoRollViewportBus } from "../pianoRollViewportBus";
@@ -780,10 +788,20 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     const editParamAxisUnit = resolveParamAxisUnit(s.paramAxisUnits, editParam);
     /** 当前参数的左轴是否可切换展示单位（决定光标与角标）。 */
     const axisUnitToggleAvailable = supportsParamAxisUnit(editParam);
+    const editParamAxisDirection = resolvePanAxisDirection(s.paramAxisDirections, editParam);
+    const axisPanDirectionToggleAvailable = isPanParam(editParam);
+    const axisToggleAvailable = axisUnitToggleAvailable || axisPanDirectionToggleAvailable;
 
     const formatParamValuePreview = useCallback(
         (value: number): string => {
             if (!Number.isFinite(value)) return "";
+            if (isPanParam(editParam)) {
+                return formatPanValue(value, {
+                    left: tf("pan_left"),
+                    center: tf("pan_center"),
+                    right: tf("pan_right"),
+                });
+            }
             if (editParam === "pitch") {
                 const rounded = Math.round(value);
                 const pitchClass = ((rounded % 12) + 12) % 12;
@@ -808,7 +826,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             if (Math.abs(value) >= 10) return value.toFixed(2);
             return value.toFixed(3);
         },
-        [editParam, editParamAxisUnit],
+        [editParam, editParamAxisUnit, tf],
     );
 
     const currentDrawTool = s.drawToolMode;
@@ -1010,6 +1028,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     );
 
     const paramViewsRef = useRef<Record<string, ValueViewport>>({});
+    const paramAxisDirectionsRef = useRef<PanAxisDirections>(s.paramAxisDirections);
+    paramAxisDirectionsRef.current = s.paramAxisDirections;
     const setParamViewport = useCallback(
         (param: string, next: ValueViewport) => {
             // 同 `setPitchView`：竖轴的手势提交点，DOM 与 GL 必须同任务。
@@ -1614,6 +1634,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             clampViewport,
             editParam,
             editParamAxisUnit,
+            paramAxisDirectionsRef,
             effectiveProjectScale,
             fontFamily,
             getCurrentViewportForScrollbar,
@@ -1622,6 +1643,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             processorParamsRef,
             s,
             themeMode,
+            tf,
             valueToY,
         });
     }
@@ -1679,6 +1701,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         // 纵轴展示单位（倍率 / dB）：同样是 buildGridSpec 的输入，漏了就是
         // "点了切换但刻度纹丝不动"（签名不变 → GL 几何与文字都不重建）。
         editParamAxisUnit,
+        // pan 方向：只改刻度文字/投影，不改内部值；必须触发网格镜像重建。
+        editParamAxisDirection,
         // Tempo Map 分段音阶（缺陷 #6）：换 Tempo Map 会换分段。
         s.tempoMap,
     ]);
@@ -1696,7 +1720,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
 
     const valueToY = useCallback(
         (param: ParamName, v: number, h: number) =>
-            valueToYImpl({ paramViewsRef, pitchViewRef, processorParamsRef }, param, v, h),
+            valueToYImpl(
+                { paramAxisDirectionsRef, paramViewsRef, pitchViewRef, processorParamsRef },
+                param,
+                v,
+                h,
+            ),
         [processorParamsRef],
     );
 
@@ -1704,7 +1733,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
 
     const yToValue = useCallback(
         (param: ParamName, y: number, h: number) =>
-            yToValueImpl({ paramViewsRef, pitchViewRef, processorParamsRef }, param, y, h),
+            yToValueImpl(
+                { paramAxisDirectionsRef, paramViewsRef, pitchViewRef, processorParamsRef },
+                param,
+                y,
+                h,
+            ),
         [processorParamsRef],
     );
 
@@ -2390,6 +2424,14 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      */
     const paramBlockDragCommitRef = useRef<ParamBlockDragCommit | null>(null);
     const paramBlockDragCommitReleaseRafRef = useRef<number | null>(null);
+    /** 块手势是否进行中；只用于保护曲线悬停读数的所有权。 */
+    const isParamBlockGestureActive = useCallback(
+        () =>
+            paramBlockDragActivityRef.current.pointerGestureToken !== null ||
+            paramBlockDragActivityRef.current.pendingCommits > 0 ||
+            paramBlockResizeRef.current !== null,
+        [],
+    );
     /** Pointer activity and queued writes independently hold the refresh guard. */
     const paramBlockDragActivityRef = useRef<ParamBlockDragActivity>({
         pointerGestureToken: null,
@@ -2562,6 +2604,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         pitchEnabled,
         toolMode: s.toolMode,
         paramBlockToolActive,
+        isParamBlockGestureActive,
         rangeToolActive,
         framePeriodMs: paramView?.framePeriodMs ?? 5,
         dynamicProjectSec,
@@ -2578,6 +2621,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         setParamViewport,
         pitchViewRef,
         paramViewsRef,
+        paramAxisDirectionsRef,
         scrollerRef,
         canvasRef,
         viewSizeRef,
@@ -2707,6 +2751,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         syncScrollLeftRef,
         pitchViewRef,
         paramViewsRef,
+        paramAxisDirectionsRef,
+        editParamAxisDirection,
         processorParamsRef,
         processorParams,
         invalidate,
@@ -3231,6 +3277,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 const tx = paramBlockVisualTransactionRef.current;
                 if (tx === null) return;
                 tx.curveRevisionCommitted = curveRevision;
+            },
+            onLocalStructureCommitted: (edits) => {
+                paramBlockVisualTransactionRef.current = adoptParamBlockVisualStructure(
+                    paramBlockVisualTransactionRef.current,
+                    paramBlockStructureToken(edits),
+                );
             },
         });
 
@@ -4875,6 +4927,24 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                     });
                                     if (created.ok) {
                                         setParamBlockState(created.state);
+                                        const structureToken = paramBlockStructureToken(
+                                            created.state.editSet,
+                                        );
+                                        paramBlockVisualTransactionRef.current =
+                                            adoptParamBlockVisualStructure(
+                                                paramBlockVisualTransactionRef.current,
+                                                structureToken,
+                                            );
+                                        const resizing = paramBlockResizeRef.current;
+                                        if (
+                                            resizing?.createdBlockId === createId &&
+                                            resizing.epoch !== undefined
+                                        ) {
+                                            paramBlockResizeRef.current = {
+                                                ...resizing,
+                                                epoch: { ...resizing.epoch, structureToken },
+                                            };
+                                        }
                                     } else applyParamBlockEditRef.current?.(created);
                                     preserveCreatePreview = created.ok;
                                     /*
@@ -5405,6 +5475,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                             const state = paramBlockStateRef.current;
                             const next: ParamBlockState = { ...state, editSet: plan.edits };
                             setParamBlockState(next);
+                            paramBlockVisualTransactionRef.current =
+                                adoptParamBlockVisualStructure(
+                                    paramBlockVisualTransactionRef.current,
+                                    paramBlockStructureToken(next.editSet),
+                                );
                             persistParamBlockEdits(next);
                             if (plan.removedIds.includes(gestureRef.blockId)) {
                                 paramBlockAnchorRef.current = null;
@@ -6976,6 +7051,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         attachRulerPlayheadLine,
         attachVerticalScrollbarTrack,
         axisCanvasRef,
+        axisPanDirectionToggleAvailable,
+        axisToggleAvailable,
         axisUnitToggleAvailable,
         axisValuePreview,
         axisWrapRef,
@@ -6984,8 +7061,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         captureBandsRef,
         clipPeaks,
         contentWidth,
+        canFlipParam: supportsParamFlip(currentParamRange, currentParamDefaultValue),
         currentParamRange,
         dynamicProjectSec,
+        editParamAxisDirection,
         editParamAxisUnit,
         effectiveProjectScale,
         formatParamValuePreview,

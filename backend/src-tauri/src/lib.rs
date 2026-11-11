@@ -74,6 +74,8 @@ pub(crate) mod commands;
 #[path = "audio/hfspeaks_v2.rs"]
 mod hfspeaks_v2;
 mod launch_args;
+#[cfg(target_os = "macos")]
+mod macos_menu;
 mod link_bridge;
 mod recording;
 mod search;
@@ -92,7 +94,8 @@ pub use hifishifter_kernel::fade_curves;
 pub(crate) use hifishifter_kernel::{
     audio_utils, channel_decision, channel_mode, channel_policy, clip_rendering_state, config,
     dml_adapters, encode, formant_cache, gain, gpu_info, media, midi_import, mixdown, models,
-    notebook_assets, pitch_analysis, pitch_clip, pitch_editing, project, render_cache, render_key,
+    hnsep_chunk, hnsep_resources, note_blocks, notebook_assets, pitch_analysis, pitch_clip, pitch_editing, project, render_cache,
+    render_key,
     renderer, seam, stereo_detect, synth_clip_cache, temp_manager,
 };
 
@@ -360,11 +363,19 @@ pub fn run() {
     let mut context = tauri::generate_context!();
     apply_app_directories_override(&mut context.config_mut().app);
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.enable_macos_default_menu(false);
+    builder
         .manage(state::AppState::default())
         .manage(link_bridge::LinkBridge::default())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            {
+                let menu = macos_menu::build(app.handle())?;
+                app.set_menu(menu)?;
+            }
             // 模型位置由内核统一解析：优先共享模型库（与 ARA 插件共用同一份 152 MB），
             // 库里没有就从本 bundle 的副本建立（同卷硬链接，零额外字节），最后才退回
             // bundle 内的副本。此前这里直接登记 `resource_dir()/models`，于是"同时装
@@ -739,6 +750,7 @@ pub fn run() {
             commands::notebook_save_asset_as,
             commands::save_project,
             commands::save_project_as,
+            commands::pick_project_save_path,
             commands::save_project_to_path,
             commands::get_auto_backup_settings,
             commands::save_auto_backup_settings,

@@ -146,6 +146,14 @@ export interface PianoRollGridSpec {
      * 刻度纹丝不动"）。
      */
     readonly axisUnit?: "ratio" | "db";
+    /** pan 纵轴方向；只影响标签与投影，不改内部值。 */
+    readonly axisDirection?: "left-bottom" | "left-top";
+    /** pan 刻度文本（左/中/右），由当前语言提供。 */
+    readonly panLabels?: {
+        readonly left: string;
+        readonly center: string;
+        readonly right: string;
+    };
     /** 字体族（与 Canvas2D 路径共用同一个，避免两种模式字形不同）。 */
     readonly fontFamily?: string;
     /** 数值轴刻度标签颜色（`colors.tensionLabel`）。 */

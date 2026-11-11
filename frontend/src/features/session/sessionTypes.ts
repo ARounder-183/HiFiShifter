@@ -210,7 +210,7 @@ export interface TrackMeterInfo {
 }
 
 export interface SilenceDetectSettings {
-    method: "rms" | "peak";
+    method: "rms" | "peak" | "note_blocks";
     thresholdDb: number;
     adaptive: boolean;
     minSilenceMs: number;

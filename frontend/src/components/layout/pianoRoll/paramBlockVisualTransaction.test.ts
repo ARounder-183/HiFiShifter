@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { PianoRollParamBlockSpec } from "./kernel/host/pianoRollKernelData";
 import {
+    adoptParamBlockVisualStructure,
     isParamBlockVisualEpochCurrent,
     sameParamBlockEpochLayout,
     sameParamBlockExternalEpoch,
@@ -67,6 +68,37 @@ describe("paramBlockVisualTransaction", () => {
      * 旧实现比 revision 加 ownedEditRevision，而后者永远对不上服务端回包 ——
      * 于是自己提交的回包一落地就撤掉自己的预览（「先回弹」）。
      */
+    it("adopts only the structure token after a local create commit", () => {
+        const before = tx({ kind: "create" });
+        const adopted = adoptParamBlockVisualStructure(before, "structure-2");
+        expect(adopted).not.toBeNull();
+        if (adopted === null) return;
+        expect(adopted.epoch.structureToken).toBe("structure-2");
+        expect(adopted.epoch.layoutKey).toBe(before.epoch.layoutKey);
+        expect(adopted.epoch.externalHistoryToken).toBe(before.epoch.externalHistoryToken);
+        expect(adopted.epoch.param).toBe(before.epoch.param);
+        expect(adopted.epoch.framePeriodMs).toBe(before.epoch.framePeriodMs);
+        expect(adopted.spec).toBe(before.spec);
+        expect(adopted.kind).toBe("create");
+        expect(adopted.id).toBe(before.id);
+        expect(
+            isParamBlockVisualEpochCurrent({
+                epoch: adopted.epoch,
+                current: { ...epoch, structureToken: "structure-2" },
+            }),
+        ).toBe(true);
+        expect(
+            isParamBlockVisualEpochCurrent({
+                epoch: adopted.epoch,
+                current: { ...epoch, structureToken: "structure-3" },
+            }),
+        ).toBe(false);
+    });
+
+    it("returns null when there is no transaction", () => {
+        expect(adoptParamBlockVisualStructure(null, "structure-2")).toBeNull();
+    });
+
     it("★ 自己的值变更不失效，第三方结构变更立即失效", () => {
         expect(
             isParamBlockVisualEpochCurrent({

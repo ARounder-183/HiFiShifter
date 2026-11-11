@@ -67,6 +67,7 @@ export const initialState: SessionState = {
     showParamValuePopup: true,
     // 空映射 = 全部参数按倍率显示（历史行为）。
     paramAxisUnits: {},
+    paramAxisDirections: {},
     selectDragDirection: "y-only" as DragDirection,
     drawDragDirection: "free" as DrawDragDirection,
     lineVibratoDragDirection: "free" as DrawDragDirection,
@@ -173,6 +174,9 @@ export const initialState: SessionState = {
         positionAgeMs: null,
         transportSource: "stale",
         lastTransportSeq: 0,
+        playbackStartPending: false,
+        playbackStartAnchorSec: 0,
+        playbackStartAtMs: 0,
         gpuBackend: "",
     },
 
@@ -191,6 +195,7 @@ export const initialState: SessionState = {
     builtinVibratoPresetOrder: [],
     project: {
         name: "Untitled",
+        lastSaveFormat: "hshp",
         path: null,
         dirty: false,
         recent: [],

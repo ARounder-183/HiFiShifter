@@ -500,6 +500,15 @@ pub struct UiSettings {
     /// 这里加一份校验会让"支持哪些参数"这个业务知识在两处各写一遍。
     #[serde(default)]
     pub param_axis_units: std::collections::HashMap<String, String>,
+    /// 参数编辑器纵轴方向（参数 id → `"left-bottom"` / `"left-top"`）。
+    ///
+    /// 目前只有声像使用；取值合法性由前端 normalizePanAxisDirections 收口，
+    /// 后端只做透传存储（与 param_axis_units 同一约定）。
+    #[serde(default)]
+    pub param_axis_directions: std::collections::HashMap<String, String>,
+    /// 上次另存为选择的格式（`hshp` / `json` / `zip`）。
+    #[serde(default = "default_project_save_format")]
+    pub last_project_save_format: String,
     #[serde(default = "default_true")]
     pub lock_param_lines: bool,
 
@@ -1594,6 +1603,10 @@ impl Default for ExportSettings {
     }
 }
 
+fn default_project_save_format() -> String {
+    "hshp".to_string()
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1729,6 +1742,8 @@ impl Default for UiSettings {
             show_clipboard_preview: true,
             show_param_value_popup: true,
             param_axis_units: std::collections::HashMap::new(),
+            param_axis_directions: std::collections::HashMap::new(),
+            last_project_save_format: default_project_save_format(),
             lock_param_lines: true,
             metronome_enabled: false,
             metronome_gain: default_metronome_gain(),

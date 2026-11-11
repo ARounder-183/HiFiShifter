@@ -1,4 +1,5 @@
 import type { TimelineState } from "../../../../types/api";
+import type { ProjectSaveFormat } from "../../../../services/api/project";
 import type { GridSize } from "../../sessionTypes";
 import {
     saveProjectAsRemote,
@@ -37,6 +38,7 @@ export function registerProject(builder: ActionReducerMapBuilder<SessionState>) 
                 canceled?: boolean;
                 versionConflict?: boolean;
                 path?: string;
+                format?: ProjectSaveFormat;
                 existingVersion?: number;
                 currentVersion?: number;
                 existingIsNewer?: boolean;
@@ -47,6 +49,7 @@ export function registerProject(builder: ActionReducerMapBuilder<SessionState>) 
             if (payload?.versionConflict) {
                 state.saveVersionConflictDialog = {
                     path: payload.path as string,
+                    format: payload.format ?? "hshp",
                     existingVersion: Number(payload.existingVersion ?? 0),
                     currentVersion: Number(payload.currentVersion ?? 0),
                     existingIsNewer: Boolean(payload.existingIsNewer),
@@ -98,6 +101,7 @@ export function registerProject(builder: ActionReducerMapBuilder<SessionState>) 
                 canceled?: boolean;
                 versionConflict?: boolean;
                 path?: string;
+                format?: ProjectSaveFormat;
                 existingVersion?: number;
                 currentVersion?: number;
                 existingIsNewer?: boolean;
@@ -108,6 +112,7 @@ export function registerProject(builder: ActionReducerMapBuilder<SessionState>) 
             if (payload?.versionConflict) {
                 state.saveVersionConflictDialog = {
                     path: payload.path as string,
+                    format: payload.format ?? "hshp",
                     existingVersion: Number(payload.existingVersion ?? 0),
                     currentVersion: Number(payload.currentVersion ?? 0),
                     existingIsNewer: Boolean(payload.existingIsNewer),
@@ -159,6 +164,7 @@ export function registerProject(builder: ActionReducerMapBuilder<SessionState>) 
                 canceled?: boolean;
                 versionConflict?: boolean;
                 path?: string;
+                format?: ProjectSaveFormat;
                 existingVersion?: number;
                 currentVersion?: number;
                 existingIsNewer?: boolean;
@@ -170,6 +176,7 @@ export function registerProject(builder: ActionReducerMapBuilder<SessionState>) 
                 // 理论上 force 保存不会再冲突；兜底再次弹出确认框。
                 state.saveVersionConflictDialog = {
                     path: payload.path as string,
+                    format: payload.format ?? "hshp",
                     existingVersion: Number(payload.existingVersion ?? 0),
                     currentVersion: Number(payload.currentVersion ?? 0),
                     existingIsNewer: Boolean(payload.existingIsNewer),

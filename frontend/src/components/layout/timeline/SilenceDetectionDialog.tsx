@@ -14,6 +14,7 @@ import {
     type SilenceDetectSettings,
 } from "../../../features/session/sessionTypes";
 import type { ClipSilenceReport } from "../../../types/api";
+import { timelineApi } from "../../../services/api";
 import { AppSelect, AppSlider, AppSliderReadout } from "../../../ui";
 import { AppDialog } from "../../../ui/Dialog";
 import { AppField, AppForm } from "../../../ui/Field";
@@ -45,6 +46,7 @@ export const SilenceDetectionDialog: React.FC<{
     const [reports, setReports] = useState<ClipSilenceReport[]>([]);
     const [analyzing, setAnalyzing] = useState(false);
     const [applying, setApplying] = useState(false);
+    const [retryToken, setRetryToken] = useState(0);
     const debounceRef = useRef<number | null>(null);
 
     // 打开时用已记忆的参数初始化，并清掉上一次的预览报告。
@@ -94,7 +96,7 @@ export const SilenceDetectionDialog: React.FC<{
                 debounceRef.current = null;
             }
         };
-    }, [open, clipIds, options, dispatch]);
+    }, [open, clipIds, options, dispatch, retryToken]);
 
     const handleApply = async () => {
         if (applying) return;
@@ -154,15 +156,22 @@ export const SilenceDetectionDialog: React.FC<{
                             // 旧写法是 size="1"（24px）：对话框里也要紧凑
                             density="compact"
                             value={options.method}
-                            onValueChange={(v) => update({ method: v as "rms" | "peak" })}
+                            onValueChange={(v) =>
+                                update({
+                                    method: v as SilenceDetectSettings["method"],
+                                })
+                            }
                             options={[
                                 { value: "rms", label: tf("silence_method_rms") },
                                 { value: "peak", label: tf("silence_method_peak") },
+                                { value: "note_blocks", label: tf("silence_method_note_blocks") },
                             ]}
                         />
                     </AppField>
                 </div>
 
+                {options.method !== "note_blocks" ? (
+                    <>
                 <div
                     data-tooltip={resetHint}
                     onDoubleClick={() =>
@@ -200,6 +209,42 @@ export const SilenceDetectionDialog: React.FC<{
                     />
                     {tf("silence_adaptive")}
                 </label>
+                    </>
+                ) : (
+                    <Flex direction="column" gap="1" className="rounded border border-qt-border p-2">
+                        <span className="hs-type-muted">{tf("silence_note_blocks_source")}</span>
+                        {reports.some((r) => r.message === "note_blocks_not_ready") ? (
+                            <button
+                                type="button"
+                                className="text-left text-qt-xs text-qt-accent underline"
+                                onClick={() => {
+                                    const ids = [...new Set(
+                                        reports
+                                            .filter((r) => r.message === "note_blocks_not_ready")
+                                            .map((r) => r.clipId),
+                                    )];
+                                    void (async () => {
+                                        setAnalyzing(true);
+                                        try {
+                                            for (const id of ids) {
+                                                await timelineApi.analyzeClipSyllables(id);
+                                            }
+                                            setRetryToken((value) => value + 1);
+                                        } finally {
+                                            setAnalyzing(false);
+                                        }
+                                    })();
+                                }}
+                            >
+                                {analyzing
+                                    ? tf("silence_note_blocks_analyzing")
+                                    : tf("silence_note_blocks_need_analysis")}
+                            </button>
+                        ) : reports.some((r) => r.message === "note_blocks_empty") ? (
+                            <span className="hs-type-muted">{tf("silence_note_blocks_empty")}</span>
+                        ) : null}
+                    </Flex>
+                )}
 
                 {(
                     [
@@ -302,8 +347,12 @@ export const SilenceDetectionDialog: React.FC<{
                             <span key={id} className="hs-type-muted">
                                 {`· ${name}: `}
                                 {report && !report.ok
-                                    ? tf("silence_skipped") +
-                                      (report.message ? ` (${report.message})` : "")
+                                    ? report.message === "note_blocks_not_ready"
+                                        ? tf("silence_note_blocks_need_analysis")
+                                        : report.message === "note_blocks_empty"
+                                          ? tf("silence_note_blocks_empty")
+                                          : tf("silence_skipped") +
+                                            (report.message ? ` (${report.message})` : "")
                                     : regions > 0
                                       ? tf("silence_preview_clip")
                                             .replace("{n}", String(regions))

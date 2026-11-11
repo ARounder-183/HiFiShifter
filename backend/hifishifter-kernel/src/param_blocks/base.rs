@@ -8,6 +8,7 @@
 use super::projection::{normalize_loop_span, project_span, ClipProjection, ProjectedInterval};
 use super::types::{BlockLabel, TakeKey, TakeSpan};
 use crate::state::{Clip, ClipTake, TimelineState};
+use std::cmp::Ordering;
 
 #[derive(Clone, Debug)]
 pub struct BaseBlock {
@@ -32,50 +33,29 @@ fn stable_id(take: &ClipTake, clip: &Clip, span: &TakeSpan) -> String {
     format!("base:{}", blake3::hash(identity.as_bytes()).to_hex())
 }
 
+/// 参数块层级与时间轴视觉顺序一致：起点升序，同起点按 id 的码元序。
+pub(crate) fn clip_layer_order(a: &Clip, b: &Clip) -> Ordering {
+    let delta = a.start_sec - b.start_sec;
+    if delta.abs() > 1e-9 {
+        return a.start_sec.total_cmp(&b.start_sec);
+    }
+    a.id.cmp(&b.id)
+}
+
 fn source_spans(take: &ClipTake) -> Option<(Vec<(f64, f64)>, BlockLabel)> {
-    if let Some(analysis) = take
-        .syllable_analysis
-        .as_ref()
-        .filter(|analysis| !analysis.source_spans_sec.is_empty())
-    {
-        return Some((
-            analysis
-                .source_spans_sec
-                .iter()
-                .map(|span| (span.start_sec, span.end_sec))
-                .collect(),
-            BlockLabel::Syllable,
-        ));
-    }
-    if let Some(baseline) = take
-        .game_block_baseline
-        .as_ref()
-        .filter(|baseline| !baseline.source_spans_sec.is_empty())
-    {
-        return Some((
-            baseline
-                .source_spans_sec
-                .iter()
-                .map(|span| (span.start_sec, span.end_sec))
-                .collect(),
-            BlockLabel::GameBaseline,
-        ));
-    }
-    if let Some(notes) = take
-        .midi_note_data
-        .as_ref()
-        .filter(|notes| !notes.is_empty())
-    {
-        return Some((
-            notes
-                .iter()
-                .filter(|note| note.end_sec > note.start_sec)
-                .map(|note| (note.start_sec, note.end_sec))
-                .collect(),
-            BlockLabel::MidiNote,
-        ));
-    }
-    None
+    let (spans, source) = crate::note_blocks::source_note_spans(take)?;
+    let label = match source {
+        crate::note_blocks::NoteBlockSource::Syllable => BlockLabel::Syllable,
+        crate::note_blocks::NoteBlockSource::GameBaseline => BlockLabel::GameBaseline,
+        crate::note_blocks::NoteBlockSource::MidiNote => BlockLabel::MidiNote,
+    };
+    Some((
+        spans
+            .into_iter()
+            .map(|span| (span.start_sec, span.end_sec))
+            .collect(),
+        label,
+    ))
 }
 
 fn normalized_spans(mut spans: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
@@ -102,10 +82,13 @@ pub fn base_blocks_for_root(
     frame_period_ms: f64,
 ) -> Vec<BaseBlock> {
     let mut out = Vec::new();
-    for (z_order, clip) in timeline.clips.iter().enumerate() {
-        if timeline.resolve_root_track_id(&clip.track_id).as_deref() != Some(root_track_id) {
-            continue;
-        }
+    let mut clips: Vec<&Clip> = timeline
+        .clips
+        .iter()
+        .filter(|clip| timeline.resolve_root_track_id(&clip.track_id).as_deref() == Some(root_track_id))
+        .collect();
+    clips.sort_by(|a, b| clip_layer_order(a, b));
+    for (z_order, clip) in clips.into_iter().enumerate() {
         let take = if clip.takes.is_empty() {
             ClipTake::from_clip(clip)
         } else {

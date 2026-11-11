@@ -20,6 +20,7 @@ import type { PinchStepState } from "../../../../utils/pinchGesture";
 import type { TimelineAxis } from "../../renderKernel/timelineAxis";
 import type { FrameSpan, ParamSelection } from "../paramSelection";
 import type { ParamCurveCommitAuthority } from "../paramBlockCommitPolicy";
+import type { PanAxisDirections } from "../paramPan";
 import type { MultiRangeEditPiece } from "../selectionEditData";
 import type { EdgeScrollDriver } from "../kernel/edgeScrollDriver";
 import type {
@@ -304,6 +305,7 @@ export type PointerDeps = {
     paramRangeSelectKb: Keybinding;
     paramStretchKb: Keybinding;
     paramValuePopupEnabled: boolean | undefined;
+    paramAxisDirectionsRef: MutableRefObject<PanAxisDirections>;
     paramView: ParamViewSegment | null;
     paramViewRef: MutableRefObject<ParamViewSegment | null>;
     paramViewsRef: MutableRefObject<Record<string, ValueViewport>>;

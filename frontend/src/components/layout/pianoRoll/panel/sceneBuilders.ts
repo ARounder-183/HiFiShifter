@@ -31,6 +31,7 @@ import {
 import { clipboardPreviewSpans } from "../paramClipboardMapping";
 import { DYN_DEFAULT_VIEW, DYN_VALUE_MAX, isDynParam, VOLUME_DEFAULT_VIEW } from "../paramRanges";
 import { supportsParamAxisUnit } from "../paramAxisUnits";
+import { isPanParam, resolvePanAxisDirection } from "../paramPan";
 import { framesToTime } from "../utils";
 import { viewportEndSec, viewportStartSec } from "../../renderKernel/timelineAxis.js";
 import {
@@ -110,10 +111,12 @@ export function buildGridSpec(
         | "fontFamily"
         | "getCurrentViewportForScrollbar"
         | "getParamValueBoundsForScrollbar"
+        | "paramAxisDirectionsRef"
         | "prAxis"
         | "processorParamsRef"
         | "s"
         | "themeMode"
+        | "tf"
         | "valueToY"
     >,
 ): PianoRollGridSpec | null {
@@ -125,10 +128,12 @@ export function buildGridSpec(
         fontFamily,
         getCurrentViewportForScrollbar,
         getParamValueBoundsForScrollbar,
+        paramAxisDirectionsRef,
         prAxis,
         processorParamsRef,
         s,
         themeMode,
+        tf,
         valueToY,
     } = deps;
 
@@ -193,6 +198,19 @@ export function buildGridSpec(
         // 其余参数保持缺省 —— 签名里的 `axisUnit ?? ""` 因此不会给非切换参数
         // 附加一个无意义的常量。
         ...(supportsParamAxisUnit(editParam) ? { axisUnit: editParamAxisUnit } : {}),
+        ...(isPanParam(editParam)
+            ? {
+                  axisDirection: resolvePanAxisDirection(
+                      paramAxisDirectionsRef.current,
+                      editParam,
+                  ),
+                  panLabels: {
+                      left: tf("pan_left"),
+                      center: tf("pan_center"),
+                      right: tf("pan_right"),
+                  },
+              }
+            : {}),
         // 与传给 drawPianoRoll 的 fontFamily 同一个值（见 `drawPianoRoll` 的入参），
         // 保证两种渲染模式的字形完全一致。
         fontFamily,
@@ -254,12 +272,15 @@ export function buildGridSpec(
 }
 
 export function valueToY(
-    deps: Pick<ModelDeps, "paramViewsRef" | "pitchViewRef" | "processorParamsRef">,
+    deps: Pick<
+        ModelDeps,
+        "paramAxisDirectionsRef" | "paramViewsRef" | "pitchViewRef" | "processorParamsRef"
+    >,
     param: ParamName,
     v: number,
     h: number,
 ): number {
-    const { paramViewsRef, pitchViewRef, processorParamsRef } = deps;
+    const { paramAxisDirectionsRef, paramViewsRef, pitchViewRef, processorParamsRef } = deps;
 
     const H = Math.max(1, h);
     if (param === "pitch") {
@@ -308,7 +329,10 @@ export function valueToY(
     const span = clamp(view.span, 1e-6, absMax - absMin || 1);
     const min = clamp(view.center - span / 2, absMin, absMax - span);
     const t = (clamp(v, absMin, absMax) - min) / Math.max(1e-9, span);
-    return (1 - t) * H;
+    const inverted =
+        isPanParam(param) &&
+        resolvePanAxisDirection(paramAxisDirectionsRef.current, param) === "left-top";
+    return (inverted ? t : 1 - t) * H;
 }
 
 export function yToViewportT(y: number, h: number): number {
@@ -317,12 +341,15 @@ export function yToViewportT(y: number, h: number): number {
 }
 
 export function yToValue(
-    deps: Pick<ModelDeps, "paramViewsRef" | "pitchViewRef" | "processorParamsRef">,
+    deps: Pick<
+        ModelDeps,
+        "paramAxisDirectionsRef" | "paramViewsRef" | "pitchViewRef" | "processorParamsRef"
+    >,
     param: ParamName,
     y: number,
     h: number,
 ): number {
-    const { paramViewsRef, pitchViewRef, processorParamsRef } = deps;
+    const { paramAxisDirectionsRef, paramViewsRef, pitchViewRef, processorParamsRef } = deps;
 
     const H = Math.max(1, h);
     const t = 1 - clamp(y / H, 0, 1);
@@ -368,7 +395,10 @@ export function yToValue(
     };
     const span = clamp(view.span, 1e-6, absMax - absMin || 1);
     const min = clamp(view.center - span / 2, absMin, absMax - span);
-    return clamp(min + t * span, absMin, absMax);
+    const inverted =
+        isPanParam(param) &&
+        resolvePanAxisDirection(paramAxisDirectionsRef.current, param) === "left-top";
+    return clamp(min + (inverted ? 1 - t : t) * span, absMin, absMax);
 }
 
 export function clampViewport(

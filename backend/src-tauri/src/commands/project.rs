@@ -1,3 +1,4 @@
+use hifishifter_kernel::unicode_path::normalize_relative_path;
 use crate::project::{
     finalize_timeline_for_session, load_project_file, prepare_timeline_for_project_save,
     project_name_from_path, read_project_file_version, serialize_project_file_for_path,
@@ -16,6 +17,101 @@ use tauri::{Manager, State, Window};
 
 /// 归一化音阶键名。清单只有一份，在 `hifishifter_kernel::state::model` 里 ——
 /// 此前 App 与插件各抄了一份，改一处就会让两边接受的取值分叉。
+/// 工程保存格式。格式由用户在应用内显式选择；路径扩展名只做校验/补全。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectSaveFormat {
+    Hshp,
+    Json,
+    Zip,
+}
+
+impl ProjectSaveFormat {
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "hshp" | "hsp" => Some(Self::Hshp),
+            "json" => Some(Self::Json),
+            "zip" => Some(Self::Zip),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn from_path(path: &Path) -> Self {
+        match path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("json") => Self::Json,
+            Some("zip") => Self::Zip,
+            _ => Self::Hshp,
+        }
+    }
+
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Hshp => "hshp",
+            Self::Json => "json",
+            Self::Zip => "zip",
+        }
+    }
+
+    fn filter_name(self) -> &'static str {
+        match self {
+            Self::Hshp => "HiFiShifter Project",
+            Self::Json => "JSON Project",
+            Self::Zip => "Archive Zip",
+        }
+    }
+
+    fn extensions(self) -> &'static [&'static str] {
+        match self {
+            Self::Hshp => &["hshp", "hsp"],
+            Self::Json => &["json"],
+            Self::Zip => &["zip"],
+        }
+    }
+
+    fn matches_extension(self, ext: &str) -> bool {
+        match self {
+            Self::Hshp => ext.eq_ignore_ascii_case("hshp") || ext.eq_ignore_ascii_case("hsp"),
+            Self::Json => ext.eq_ignore_ascii_case("json"),
+            Self::Zip => ext.eq_ignore_ascii_case("zip"),
+        }
+    }
+}
+
+fn supported_project_extension(ext: &str) -> bool {
+    ["hshp", "hsp", "json", "zip"]
+        .iter()
+        .any(|value| ext.eq_ignore_ascii_case(value))
+}
+
+fn resolve_project_save_path(path: PathBuf, format: ProjectSaveFormat) -> Result<PathBuf, String> {
+    let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
+        return Ok(path.with_extension(format.extension()));
+    };
+    if format.matches_extension(ext) {
+        return Ok(path);
+    }
+    if supported_project_extension(ext) {
+        return Err("format_extension_mismatch".to_string());
+    }
+    Err("unsupported_project_extension".to_string())
+}
+
+fn serialize_project_file_for_format(
+    project_file: &ProjectFile,
+    format: ProjectSaveFormat,
+) -> Result<Vec<u8>, String> {
+    match format {
+        ProjectSaveFormat::Json => serde_json::to_vec(project_file).map_err(|e| e.to_string()),
+        ProjectSaveFormat::Hshp | ProjectSaveFormat::Zip => {
+            rmp_serde::to_vec_named(project_file).map_err(|e| e.to_string())
+        }
+    }
+}
+
 fn normalize_scale_key(raw: &str) -> String {
     hifishifter_kernel::state::model::normalize_scale_key(raw)
 }
@@ -478,7 +574,8 @@ fn build_project_file_snapshot(
 }
 
 fn unique_entry_path(desired: &str, used_paths: &mut std::collections::HashSet<String>) -> String {
-    let path = Path::new(desired);
+    let desired = normalize_relative_path(desired);
+    let path = Path::new(&desired);
     let parent = path
         .parent()
         .map(|p| p.to_string_lossy().replace('\\', "/"))
@@ -524,7 +621,7 @@ fn save_project_archive_to_zip_inner(
     zip_path: &Path,
 ) -> Result<crate::models::TimelineStatePayload, String> {
     let project_name = project_name_from_path(zip_path);
-    let project_entry_name = format!("{}.hshp", project_name);
+    let project_entry_name = normalize_relative_path(&format!("{}.hshp", project_name));
     let archive_project_virtual_path = PathBuf::from(&project_entry_name);
 
     // 归档前按正文引用清理未引用条目：附件字节内嵌在工程文件里，随内嵌的
@@ -594,13 +691,13 @@ fn save_project_archive_to_zip_inner(
                 .map(|p| p.to_string_lossy().replace('\\', "/"));
 
             let desired_entry_path = if let Some(rel) = relative_candidate {
-                rel
+                normalize_relative_path(&rel)
             } else {
                 let file_name = abs_path
                     .file_name()
                     .and_then(|v| v.to_str())
                     .unwrap_or("audio.wav");
-                format!("Archived/{}", file_name)
+                normalize_relative_path(&format!("Archived/{}", file_name))
             };
 
             let unique_entry = unique_entry_path(&desired_entry_path, &mut used_zip_paths);
@@ -633,10 +730,10 @@ fn save_project_archive_to_zip_inner(
     let bytes = serialize_project_file_for_path(&pf, Path::new(&project_entry_name))?;
     // 操作记录：与内嵌工程文件同级（`<工程名>.hshp-UNDO`），一并打进压缩包
     // （设置关闭 / 无历史时为 None，静默跳过）。
-    let undo_entry_name = format!(
+    let undo_entry_name = normalize_relative_path(&format!(
         "{project_entry_name}{}",
         crate::commands::undo_history_file::UNDO_FILE_SUFFIX
-    );
+    ));
     used_zip_paths.insert(undo_entry_name.clone());
     let undo_bytes = crate::commands::undo_history_file::serialize_undo_history(state);
 
@@ -851,8 +948,10 @@ pub(crate) fn save_project_to_path_inner(
     state: &AppState,
     window: &Window,
     project_path: String,
+    format: ProjectSaveFormat,
 ) -> Result<crate::models::TimelineStatePayload, String> {
-    let path = PathBuf::from(&project_path);
+    let path = resolve_project_save_path(PathBuf::from(&project_path), format)?;
+    let project_path = path.display().to_string();
     let name = project_name_from_path(&path);
     // 先把未保存会话的素材收进工程素材目录：这一步会改写 take.source_path，
     // 必须在任何"按路径生成相对路径"的步骤之前。
@@ -861,7 +960,7 @@ pub(crate) fn save_project_to_path_inner(
     // 否则登记表里还留着已被删掉的条目（字节内嵌在工程文件里，随之一起变大）。
     crate::commands::notebook::prepare_assets_for_save(state);
     let pf = build_project_file_snapshot(state, &path, &name);
-    let bytes = serialize_project_file_for_path(&pf, &path)?;
+    let bytes = serialize_project_file_for_format(&pf, format)?;
 
     let auto_backup_settings = load_auto_backup_settings(state);
     let rotated_backup =
@@ -1265,38 +1364,102 @@ pub(super) fn save_project(
         p.path.clone()
     };
     if let Some(path) = existing_path {
-        return save_project_to_path(state, window, path, None, None);
+        let format = ProjectSaveFormat::from_path(Path::new(&path));
+        return save_project_to_path(
+            state,
+            window,
+            path,
+            None,
+            None,
+            Some(format.extension().to_string()),
+        );
     }
     // No path yet -> Save As
-    save_project_as(state, window, None)
+    save_project_as(state, window, None, None)
+}
+
+fn default_project_save_name(state: &AppState) -> String {
+    let p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+    if p.name.trim().is_empty() {
+        "Untitled".to_string()
+    } else {
+        p.name.clone()
+    }
+}
+
+fn project_save_dialog(
+    format: ProjectSaveFormat,
+    default_name: &str,
+) -> rfd::FileDialog {
+    let stem = Path::new(default_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Untitled");
+    rfd::FileDialog::new()
+        .add_filter(format.filter_name(), format.extensions())
+        .set_file_name(format!("{}.{}", stem, format.extension()))
+}
+
+pub(super) fn pick_project_save_path(
+    state: State<'_, AppState>,
+    format: String,
+    default_name: Option<String>,
+) -> serde_json::Value {
+    let Some(format) = ProjectSaveFormat::parse(&format) else {
+        return serde_json::json!({"ok": false, "error": "unsupported_project_format"});
+    };
+    let default_name = default_name
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default_project_save_name(state.inner()));
+    match project_save_dialog(format, &default_name).save_file() {
+        None => serde_json::json!({"ok": true, "canceled": true}),
+        Some(path) => serde_json::json!({
+            "ok": true,
+            "canceled": false,
+            "path": path.display().to_string(),
+        }),
+    }
 }
 
 pub(super) fn save_project_as(
     state: State<'_, AppState>,
     window: Window,
+    format: Option<String>,
     notes_markdown: Option<String>,
 ) -> serde_json::Value {
     if let Some(notes_markdown) = notes_markdown {
         let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
         p.notes_markdown = notes_markdown;
     }
-    let default_name = {
-        let p = state.project.lock().unwrap_or_else(|e| e.into_inner());
-        if p.name.trim().is_empty() {
-            "Untitled".to_string()
-        } else {
-            p.name.clone()
-        }
+    let default_name = default_project_save_name(state.inner());
+    let picked = if let Some(format_raw) = format.as_deref() {
+        let Some(format) = ProjectSaveFormat::parse(format_raw) else {
+            return serde_json::json!({"ok": false, "error": "unsupported_project_format"});
+        };
+        project_save_dialog(format, &default_name).save_file()
+    } else {
+        // 兼容旧调用：没有显式格式时保留三过滤器对话框。
+        rfd::FileDialog::new()
+            .add_filter("HiFiShifter Project", &["hshp", "hsp"])
+            .add_filter("JSON Project", &["json"])
+            .add_filter("Archive Zip", &["zip"])
+            .set_file_name(format!("{}.hshp", default_name))
+            .save_file()
     };
-    let picked = rfd::FileDialog::new()
-        .add_filter("HiFiShifter Project", &["hshp", "hsp"])
-        .add_filter("JSON Project", &["json"])
-        .add_filter("Archive Zip", &["zip"])
-        .set_file_name(format!("{}.hshp", default_name))
-        .save_file();
     match picked {
         None => serde_json::json!({"ok": true, "canceled": true}),
-        Some(path) => save_project_to_path(state, window, path.display().to_string(), None, None),
+        Some(path) => {
+            let inferred = ProjectSaveFormat::from_path(&path);
+            let explicit = format.as_deref().and_then(ProjectSaveFormat::parse).unwrap_or(inferred);
+            save_project_to_path(
+                state,
+                window,
+                path.display().to_string(),
+                None,
+                None,
+                Some(explicit.extension().to_string()),
+            )
+        }
     }
 }
 
@@ -1333,14 +1496,26 @@ pub(super) fn save_project_to_path(
     project_path: String,
     notes_markdown: Option<String>,
     force: Option<bool>,
+    format: Option<String>,
 ) -> serde_json::Value {
     if let Some(notes_markdown) = notes_markdown {
         let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
         p.notes_markdown = notes_markdown;
     }
-    let path = PathBuf::from(&project_path);
+    let requested_format = match format.as_deref() {
+        Some(raw) => match ProjectSaveFormat::parse(raw) {
+            Some(format) => format,
+            None => return serde_json::json!({"ok": false, "error": "unsupported_project_format"}),
+        },
+        None => ProjectSaveFormat::from_path(Path::new(&project_path)),
+    };
+    let path = match resolve_project_save_path(PathBuf::from(&project_path), requested_format) {
+        Ok(path) => path,
+        Err(error) => return serde_json::json!({"ok": false, "error": error}),
+    };
+    let project_path = path.display().to_string();
 
-    if !force.unwrap_or(false) {
+    if requested_format != ProjectSaveFormat::Zip && !force.unwrap_or(false) {
         if let Some(existing_version) = detect_save_target_version_conflict(&path) {
             if existing_version != CURRENT_PROJECT_FILE_VERSION {
                 return serde_json::json!({
@@ -1348,6 +1523,7 @@ pub(super) fn save_project_to_path(
                     "canceled": false,
                     "versionConflict": true,
                     "path": project_path,
+                    "format": requested_format.extension(),
                     "existingVersion": existing_version,
                     "currentVersion": CURRENT_PROJECT_FILE_VERSION,
                     "existingIsNewer": existing_version > CURRENT_PROJECT_FILE_VERSION,
@@ -1356,7 +1532,7 @@ pub(super) fn save_project_to_path(
         }
     }
 
-    if is_zip_path(&path) {
+    if requested_format == ProjectSaveFormat::Zip {
         match save_project_archive_to_zip_inner(state.inner(), &path) {
             Ok(timeline) => {
                 // 操作记录随归档一起打包：写在压缩包内、与内嵌工程文件同级
@@ -1375,7 +1551,7 @@ pub(super) fn save_project_to_path(
         }
     }
 
-    match save_project_to_path_inner(state.inner(), &window, project_path.clone()) {
+    match save_project_to_path_inner(state.inner(), &window, project_path.clone(), requested_format) {
         Ok(timeline) => {
             // 工程写成功后带出操作记录（设置未开启 / 写入失败都静默）。
             let _ = crate::commands::undo_history_file::save_undo_history(state.inner(), &path);
@@ -1640,8 +1816,40 @@ pub(super) fn set_project_stretch_settings(
 
 #[cfg(test)]
 mod tests {
-    use super::save_project_archive_to_zip_inner;
+    use super::{resolve_project_save_path, save_project_archive_to_zip_inner, ProjectSaveFormat};
     use crate::state::{AppState, HistoryOp};
+
+    #[test]
+    fn explicit_save_format_validates_and_completes_extensions() {
+        let path = resolve_project_save_path(
+            std::path::PathBuf::from("example-project"),
+            ProjectSaveFormat::Json,
+        )
+        .expect("extension should be added");
+        assert_eq!(path.extension().and_then(|value| value.to_str()), Some("json"));
+
+        assert!(resolve_project_save_path(
+            std::path::PathBuf::from("example-project.hsp"),
+            ProjectSaveFormat::Hshp,
+        )
+        .is_ok());
+        assert_eq!(
+            resolve_project_save_path(
+                std::path::PathBuf::from("example-project.zip"),
+                ProjectSaveFormat::Json,
+            )
+            .expect_err("format/extension mismatch"),
+            "format_extension_mismatch"
+        );
+        assert_eq!(
+            resolve_project_save_path(
+                std::path::PathBuf::from("example-project.txt"),
+                ProjectSaveFormat::Hshp,
+            )
+            .expect_err("unsupported extension"),
+            "unsupported_project_extension"
+        );
+    }
 
     #[test]
     fn zip_archive_embeds_undo_history_next_to_the_project_file() {

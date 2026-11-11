@@ -16,13 +16,19 @@
  * 不写任何面板状态（只通过传入的 setter 写一个浮窗），因此是**纯输入接线**，
  * 可以整体搬走而不牵动任何其它功能。
  */
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import type { AppDispatch, RootState } from "../../../../app/store";
-import { persistUiSettings, toggleParamAxisUnit } from "../../../../features/session/sessionSlice";
+import {
+    persistUiSettings,
+    toggleParamAxisDirection,
+    toggleParamAxisUnit,
+} from "../../../../features/session/sessionSlice";
 import { pianoKeySound } from "../../../../utils/PianoKeySound";
 import { clamp } from "../../timeline";
 import { PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "../constants";
 import { supportsParamAxisUnit } from "../paramAxisUnits";
+import { isPanParam } from "../paramPan";
+import type { PanAxisDirection } from "../paramPan";
 import { midiToLabel } from "../utils";
 import type { ParamName, ValueViewport } from "../types";
 
@@ -34,6 +40,8 @@ type PianoRollAxisInputs = {
     s: AxisSession;
     /** 当前编辑的参数（决定轴是琴键列还是数值刻度）。 */
     editParam: ParamName;
+    /** pan 纵轴方向（切换后立即重算读数）。 */
+    axisDirection: PanAxisDirection;
     /** 左轴列的宿主元素（滚轮 / 点击 / 悬浮都挂在它上面）。 */
     axisWrapRef: { current: HTMLDivElement | null };
     /** 绘图区尺寸（y 投影的分母，**不是**轴列高度）。 */
@@ -62,6 +70,7 @@ type PianoRollAxisInputs = {
 export function usePianoRollAxisInteractions({
     s,
     editParam,
+    axisDirection,
     axisWrapRef,
     viewSizeRef,
     pitchViewRef,
@@ -174,11 +183,20 @@ export function usePianoRollAxisInteractions({
     useEffect(() => {
         const el = axisWrapRef.current;
         if (!el) return;
-        if (!supportsParamAxisUnit(editParam)) return;
+        const axisClickAction: "pan-direction" | "unit" | null = isPanParam(editParam)
+            ? "pan-direction"
+            : supportsParamAxisUnit(editParam)
+              ? "unit"
+              : null;
+        if (axisClickAction === null) return;
         const onClick = (e: MouseEvent) => {
             // 只认左键：中键留给内核的平移手势，右键留给上下文菜单。
             if (e.button !== 0) return;
-            dispatch(toggleParamAxisUnit(editParam));
+            if (axisClickAction === "pan-direction") {
+                dispatch(toggleParamAxisDirection(editParam));
+            } else {
+                dispatch(toggleParamAxisUnit(editParam));
+            }
             void dispatch(persistUiSettings());
         };
         el.addEventListener("click", onClick);
@@ -192,7 +210,19 @@ export function usePianoRollAxisInteractions({
     // - 钢琴卷帘（音高）：**只给音名**（E4 / D4），不给音分 —— 左轴本来就是按琴键
     //   分行画出来的，"E4+12" 并不指向某个键，反而会被误读成另一个音；
     // - 数值刻度（音量 / 动态 / 音分 / 张力…）：给该 y 处的参数值，其中音量 / 动态
-    //   按纵轴展示单位读数（切 dB 时就是 dB）。
+    //   按纵轴展示单位读数（切 dB 时就是 dB），pan 按左/中/右百分比读数。
+    //
+    // 【为什么格式化函数走 ref】单位/方向切换会让 formatParamValuePreview 或
+    // yToValue 的身份变化。若把它们放进监听 effect 的依赖，cleanup 会清空浮窗，
+    // 新 effect 又不会主动重算 —— 表现为"点一下轴，读数消失，必须再动鼠标"。
+    // 监听只依赖稳定项；格式化变化由下面的刷新 effect 用最后指针位置立即重算。
+    const lastPointerRef = useRef<{ clientX: number; clientY: number } | null>(null);
+    const pointerInsideRef = useRef(false);
+    const formatRef = useRef(formatParamValuePreview);
+    const yToValueRef = useRef(yToValue);
+    formatRef.current = formatParamValuePreview;
+    yToValueRef.current = yToValue;
+
     useEffect(() => {
         const el = axisWrapRef.current;
         if (!el) return;
@@ -210,9 +240,9 @@ export function usePianoRollAxisInteractions({
             const y = clamp(clientY - bounds.top, 0, h);
             if (editParam === "pitch") {
                 // 与琴键实例同一投影：向下取整到"这一行属于哪个键"。
-                return midiToLabel(Math.floor(yToValue("pitch", y, h)));
+                return midiToLabel(Math.floor(yToValueRef.current("pitch", y, h)));
             }
-            return formatParamValuePreview(yToValue(editParam, y, h));
+            return formatRef.current(yToValueRef.current(editParam, y, h));
         };
 
         // 读数合帧：pointermove 高频触发，且 describe 内含 getBoundingClientRect
@@ -241,30 +271,79 @@ export function usePianoRollAxisInteractions({
         };
 
         const onPointerMove = (e: PointerEvent) => {
+            lastPointerRef.current = { clientX: e.clientX, clientY: e.clientY };
+            pointerInsideRef.current = true;
+            const text = describe(e.clientY);
+            pending = text.length === 0 ? null : { clientX: e.clientX, clientY: e.clientY, text };
+            if (previewRafId == null) previewRafId = requestAnimationFrame(flushPreview);
+        };
+        const onPointerEnter = (e: PointerEvent) => {
+            lastPointerRef.current = { clientX: e.clientX, clientY: e.clientY };
+            pointerInsideRef.current = true;
             const text = describe(e.clientY);
             pending = text.length === 0 ? null : { clientX: e.clientX, clientY: e.clientY, text };
             if (previewRafId == null) previewRafId = requestAnimationFrame(flushPreview);
         };
         const onPointerLeave = () => {
+            pointerInsideRef.current = false;
+            lastPointerRef.current = null;
             pending = null;
             if (previewRafId == null) previewRafId = requestAnimationFrame(flushPreview);
         };
 
         el.addEventListener("pointermove", onPointerMove);
+        el.addEventListener("pointerenter", onPointerEnter);
         el.addEventListener("pointerleave", onPointerLeave);
         return () => {
             el.removeEventListener("pointermove", onPointerMove);
+            el.removeEventListener("pointerenter", onPointerEnter);
             el.removeEventListener("pointerleave", onPointerLeave);
             if (previewRafId != null) cancelAnimationFrame(previewRafId);
-            setAxisValuePreview(null);
+            // 不在这里无条件清空：格式化/方向变化导致的 effect 重建必须保留
+            // 当前读数，由下面的刷新 effect 立即按最后指针位置重算。
         };
+    }, [s.showParamValuePopup, editParam, axisWrapRef, setAxisValuePreview, viewSizeRef]);
+
+    // 格式化 / 单位 / 方向变化后，立即用最后指针位置重算当前读数。
+    // 不能等下一次 pointermove：用户点击轴后指针往往停在原地。
+    useEffect(() => {
+        if (!s.showParamValuePopup) {
+            setAxisValuePreview(null);
+            return;
+        }
+        const pointer = lastPointerRef.current;
+        if (!pointerInsideRef.current || pointer === null) {
+            setAxisValuePreview(null);
+            return;
+        }
+        const el = axisWrapRef.current;
+        if (!el) return;
+        const bounds = el.getBoundingClientRect();
+        const h = Math.max(1, viewSizeRef.current.h);
+        const y = clamp(pointer.clientY - bounds.top, 0, h);
+        const text =
+            editParam === "pitch"
+                ? midiToLabel(Math.floor(yToValueRef.current("pitch", y, h)))
+                : formatRef.current(yToValueRef.current(editParam, y, h));
+        if (text.length === 0) {
+            setAxisValuePreview(null);
+            return;
+        }
+        setAxisValuePreview({
+            clientX: pointer.clientX,
+            clientY: pointer.clientY,
+            text,
+            rectLeft: bounds.left,
+            rectTop: bounds.top,
+        });
     }, [
         s.showParamValuePopup,
         editParam,
-        yToValue,
+        axisDirection,
         formatParamValuePreview,
+        yToValue,
         axisWrapRef,
-        setAxisValuePreview,
         viewSizeRef,
+        setAxisValuePreview,
     ]);
 }

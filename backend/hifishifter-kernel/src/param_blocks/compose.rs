@@ -877,6 +877,62 @@ mod tests {
         assert_eq!(shifted.blocks[0].end_frame_exclusive, 400);
     }
 
+    fn crossing_timeline(reverse: bool) -> TimelineState {
+        let mut a = serde_json::json!({
+            "id":"A","track_id":"root","name":"A","start_sec":0.0,"length_sec":2.0,
+            "takes":[{"id":"take-a","source_path":"a.wav","source_start_sec":0.0,
+                "source_end_sec":2.0,
+                "syllable_analysis":{"algorithm":"test","algorithmVersion":1,"sourceDigest":"a",
+                    "sourceSpansSec":[{"startSec":0.0,"endSec":0.5},{"startSec":0.5,"endSec":1.0}]}}]
+        });
+        let mut b = serde_json::json!({
+            "id":"B","track_id":"root","name":"B","start_sec":0.2,"length_sec":1.0,
+            "takes":[{"id":"take-b","source_path":"b.wav","source_start_sec":0.0,
+                "source_end_sec":1.0,
+                "syllable_analysis":{"algorithm":"test","algorithmVersion":1,"sourceDigest":"b",
+                    "sourceSpansSec":[{"startSec":0.0,"endSec":0.5}]}}]
+        });
+        let clips = if reverse { vec![b.take(), a.take()] } else { vec![a.take(), b.take()] };
+        let mut timeline: TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"root","name":"Root","order":0}],
+            "clips": clips,
+            "project_sec":4,"bpm":120
+        })).unwrap();
+        for clip in &mut timeline.clips { clip.normalize_takes(); }
+        timeline
+    }
+
+    #[test]
+    fn crossing_clip_order_is_independent_of_storage_order() {
+        let ab = compose_param_block_view(
+            &crossing_timeline(false),
+            "root",
+            &ParamBlockEditSet::default(),
+            5.0,
+        )
+        .unwrap();
+        let ba = compose_param_block_view(
+            &crossing_timeline(true),
+            "root",
+            &ParamBlockEditSet::default(),
+            5.0,
+        )
+        .unwrap();
+        let ranges = |view: &ParamBlockView| {
+            view.blocks
+                .iter()
+                .map(|block| (block.start_frame, block.end_frame_exclusive))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ranges(&ab), vec![(0, 40), (40, 140), (140, 200)]);
+        assert_eq!(ranges(&ab), ranges(&ba));
+        assert_eq!(
+            super::super::layout::layout_key(&crossing_timeline(false), "root", 5.0),
+            super::super::layout::layout_key(&crossing_timeline(true), "root", 5.0)
+        );
+        assert!(validate_view(&ab).is_ok());
+    }
+
     #[test]
     fn deleted_tombstone_hides_base_without_showing_a_block() {
         let song = timeline(0.0, 0.0);

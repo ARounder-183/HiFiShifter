@@ -24,7 +24,6 @@ import {
     undoRemote,
     redoRemote,
     saveProjectRemote,
-    saveProjectAsRemote,
     setDefaultHifiganMelStretch,
     setDefaultStretchAlgorithm,
     setOrtEp,
@@ -72,6 +71,7 @@ import {
     resolvePasteRoute,
 } from "../../features/keybindings/focusRouting";
 import { IS_WINDOWS } from "../../utils/platform";
+import { isPanParam } from "./pianoRoll/paramPan";
 import { getActiveSurface } from "../../features/uiFocus/focusSurface";
 import { webApi } from "../../services/webviewApi";
 const KeybindingsDialog = lazy(() =>
@@ -81,6 +81,7 @@ import {
     TransposeCentsDialog,
     TransposeDegreesDialog,
     SetPitchDialog,
+    PanSetValueDialog,
     AverageDialog,
     SmoothDialog,
     QuantizeDialog,
@@ -91,6 +92,9 @@ const ExportAudioDialog = lazy(() =>
     import("./ExportAudioDialog").then((module) => ({ default: module.ExportAudioDialog })),
 );
 import { AutoBackupDialog } from "./AutoBackupDialog";
+import { SaveProjectAsDialog } from "./SaveProjectAsDialog";
+import { OPEN_SAVE_PROJECT_AS_EVENT } from "./saveProjectAsDialogBus";
+import type { ProjectSaveFormat } from "../../services/api/project";
 const RenderCacheDialog = lazy(() =>
     import("./RenderCacheDialog").then((module) => ({ default: module.RenderCacheDialog })),
 );
@@ -285,6 +289,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [transposeCentsOpen, setTransposeCentsOpen] = useState(false);
     const [transposeDegreesOpen, setTransposeDegreesOpen] = useState(false);
     const [setPitchOpen, setSetPitchOpen] = useState(false);
+    const [saveAsDialogOpen, setSaveAsDialogOpen] = useState(false);
+    const [saveAsInitialFormat, setSaveAsInitialFormat] = useState<
+        ProjectSaveFormat | undefined
+    >(undefined);
     const [averageOpen, setAverageOpen] = useState(false);
     const [smoothOpen, setSmoothOpen] = useState(false);
     const [vibratoDialogOpen, setVibratoDialogOpen] = useState(false);
@@ -303,6 +311,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     } | null>(null);
 
     const isPitchParam = s.editParam === "pitch";
+    const isPanParamActive = isPanParam(s.editParam);
     const isChildCentsParam = isChildPitchOffsetCentsParam(s.editParam);
     const isChildDegreesParam = isChildPitchOffsetDegreesParam(s.editParam);
     const setToDefaultValue =
@@ -402,6 +411,17 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
     const resolveScaleToken = (scaleValue: string) =>
         scaleValue === "__project__" ? "__project__" : scaleValue;
+
+    // 命令入口（菜单 / 快捷键 / 版本冲突）统一请求应用内格式选择。
+    useEffect(() => {
+        const handler = (event: Event) => {
+            const detail = (event as CustomEvent<{ format?: ProjectSaveFormat }>).detail;
+            setSaveAsInitialFormat(detail?.format);
+            setSaveAsDialogOpen(true);
+        };
+        window.addEventListener(OPEN_SAVE_PROJECT_AS_EVENT, handler);
+        return () => window.removeEventListener(OPEN_SAVE_PROJECT_AS_EVENT, handler);
+    }, []);
 
     // Listen for context menu → open dialog requests
     useEffect(() => {
@@ -723,7 +743,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 {shortcutLabel("project.save")}
                             </div>
                         </DropdownMenu.Item>
-                        <DropdownMenu.Item onSelect={() => void dispatch(saveProjectAsRemote())}>
+                        <DropdownMenu.Item
+                            onSelect={() => {
+                                setSaveAsInitialFormat(undefined);
+                                setSaveAsDialogOpen(true);
+                            }}
+                        >
                             {t("menu_save_project_as")}
                             <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                                 {shortcutLabel("project.saveAs")}
@@ -1870,6 +1895,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 />
             </AppDialog>
 
+            <SaveProjectAsDialog
+                open={saveAsDialogOpen}
+                onOpenChange={setSaveAsDialogOpen}
+                initialFormat={saveAsInitialFormat}
+            />
+
             {/* Edit operation dialogs */}
             <TransposeCentsDialog
                 open={transposeCentsOpen}
@@ -1897,20 +1928,35 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     })
                 }
             />
-            <SetPitchDialog
-                open={setPitchOpen}
-                onOpenChange={setSetPitchOpen}
-                titleText={isPitchParam ? tf("menu_set_pitch") : tf("menu_set_value")}
-                valueLabelText={setToValueLabel}
-                defaultValue={setToDefaultValue}
-                defaultSmoothness={s.edgeSmoothnessPercent}
-                onConfirm={(value, edgeSmoothnessPercent) =>
-                    dispatchEditOp("setPitch", {
-                        value,
-                        edgeSmoothnessPercent,
-                    })
-                }
-            />
+            {isPanParamActive ? (
+                <PanSetValueDialog
+                    open={setPitchOpen}
+                    onOpenChange={setSetPitchOpen}
+                    defaultValue={setToDefaultValue}
+                    defaultSmoothness={s.edgeSmoothnessPercent}
+                    onConfirm={(value, edgeSmoothnessPercent) =>
+                        dispatchEditOp("setPitch", {
+                            value,
+                            edgeSmoothnessPercent,
+                        })
+                    }
+                />
+            ) : (
+                <SetPitchDialog
+                    open={setPitchOpen}
+                    onOpenChange={setSetPitchOpen}
+                    titleText={isPitchParam ? tf("menu_set_pitch") : tf("menu_set_value")}
+                    valueLabelText={setToValueLabel}
+                    defaultValue={setToDefaultValue}
+                    defaultSmoothness={s.edgeSmoothnessPercent}
+                    onConfirm={(value, edgeSmoothnessPercent) =>
+                        dispatchEditOp("setPitch", {
+                            value,
+                            edgeSmoothnessPercent,
+                        })
+                    }
+                />
+            )}
             <AverageDialog
                 open={averageOpen}
                 onOpenChange={setAverageOpen}

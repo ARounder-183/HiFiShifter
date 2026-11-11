@@ -728,10 +728,11 @@ pub async fn save_project_as(
     app: tauri::AppHandle,
     window: Window,
     notes_markdown: Option<String>,
+    format: Option<String>,
 ) -> serde_json::Value {
     match tauri::async_runtime::spawn_blocking(move || {
         let state: State<'_, AppState> = app.state();
-        project::save_project_as(state, window, notes_markdown)
+        project::save_project_as(state, window, format, notes_markdown)
     })
     .await
     {
@@ -748,6 +749,20 @@ pub async fn save_project_as(
 ///
 /// zip 归档保存会逐一压缩复制全部引用媒体（可能数 GB），普通保存也有整段
 /// JSON 序列化 + 磁盘写入，必须在阻塞线程池执行，避免冻结 UI 主线程。
+/// 只打开原生保存对话框，格式由应用内先选定；返回路径，不写文件。
+#[tauri::command(rename_all = "camelCase")]
+pub fn pick_project_save_path(
+    state: State<'_, AppState>,
+    format: String,
+    default_name: Option<String>,
+) -> serde_json::Value {
+    common::guard_command(
+        "pick_project_save_path",
+        serde_json::json!({ "ok": false, "error": "panic in command: pick_project_save_path" }),
+        || project::pick_project_save_path(state, format, default_name),
+    )
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub async fn save_project_to_path(
     app: tauri::AppHandle,
@@ -755,10 +770,11 @@ pub async fn save_project_to_path(
     project_path: String,
     notes_markdown: Option<String>,
     force: Option<bool>,
+    format: Option<String>,
 ) -> serde_json::Value {
     match tauri::async_runtime::spawn_blocking(move || {
         let state: State<'_, AppState> = app.state();
-        project::save_project_to_path(state, window, project_path, notes_markdown, force)
+        project::save_project_to_path(state, window, project_path, notes_markdown, force, format)
     })
     .await
     {

@@ -1141,3 +1141,47 @@ test("features/session/sessionSlice.playheadGuard.test.ts a quiet stop swallows 
         throw new Error(`a user stop must still report the failure, got ${String(loud.error)}`);
     }
 });
+/** 起播窗口：播放命令刚发出时，引擎仍可能回旧位置；旧采样不得把光标拽回。 */
+test("features/session/sessionSlice.playheadGuard.test.ts playback start window discards stale pre-play samples", async () => {
+    const base = reducer(undefined, { type: "@@INIT" }) as any;
+    let state = { ...base, playheadSec: 50 };
+    state = reducer(state, playOriginal.pending("req", undefined));
+    state = reducer(
+        state,
+        playOriginal.fulfilled(
+            { ok: true, clipId: null, anchorSec: 50, noop: false },
+            "req",
+            undefined,
+        ),
+    );
+    const epoch = state._transportEpoch;
+    state = reducer(
+        state,
+        syncPlaybackState.fulfilled(
+            { ok: true, is_playing: false, target: "original", base_sec: 0, position_sec: 40, duration_sec: 200 },
+            "req",
+            { epoch, dispatchedAtMs: performance.now() },
+        ),
+    );
+    if (Math.abs(Number(state.playheadSec) - 50) > 1e-6) {
+        throw new Error("stale pre-play sample moved the playhead");
+    }
+    if (state.runtime.isPlaying !== true) {
+        throw new Error("stale pre-play sample cleared isPlaying");
+    }
+    state = reducer(
+        state,
+        syncPlaybackState.fulfilled(
+            { ok: true, is_playing: true, target: "original", base_sec: 0, position_sec: 50.02, duration_sec: 200 },
+            "req",
+            { epoch: state._transportEpoch, dispatchedAtMs: performance.now() },
+        ),
+    );
+    if (Math.abs(Number(state.playheadSec) - 50.02) > 0.05) {
+        throw new Error("first playing sample should advance the playhead");
+    }
+    if (state.runtime.playbackStartPending !== false) {
+        throw new Error("start window should close on the first playing sample");
+    }
+});
+

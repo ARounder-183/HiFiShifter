@@ -110,7 +110,7 @@ game baseline                      playback_rate / reverse        参数块编�
 - 显示的是**块将被拖到的中心值**（`projectParamBlockDragDisplayValue(锚点起始值 + 位移)`），不是指针所在帧的曲线值 —— 指针可能抓在块的任意高度（块高 1.2 行高），用它会让读数随抓取位置偏移。多选一起拖时所有块位移相同，锚点即代表。
 - 空白处 `Alt` / `Ctrl+Alt` 拖动新建：显示新块的值（已按音高吸附 / 跟随音阶解析）。
 - 块边缘伸缩与过渡手柄拖动**不显示**读数：它们只改时间跨度 / 淡化宽度，值不变；显示一个静止的数字会让用户以为值被改了。
-- 一次手势只有一个读数所有者：块模式下块手势负责发布，通用指针处理器**不运行**（`EditorArea` 先问块层，块层认领即返回），悬停续显（`refreshParamValuePreview`）在块模式里退位。
+- 一次手势只有一个读数所有者：块模式下块手势负责发布；无按键的普通悬停由独立的 `onCanvasHoverPreview` 更新曲线读数，不经过块层的 hover/光标判定。`refreshParamValuePreview` 只在**块手势进行中**（拖动 / 新建 / 伸缩）退位，普通悬停与数据刷新仍会续显。
 
 ## 值轴边缘滚动
 
@@ -155,6 +155,23 @@ game baseline                      playback_rate / reverse        参数块编�
   - 渲染规格的唯一派生点：`panel/useParamBlockRenderSpec.ts`。
   - 指针 hover / 光标：`panel/paramBlockHover.ts`。
 - Golden fixture：`frontend/src/components/layout/pianoRoll/__fixtures__/paramBlockProjection.golden.json`
+
+## 交叉 Clip 的块层级
+
+- 参数块层级与时间轴视觉顺序一致：Clip 按 `startSec` 升序，同起点按 id 的 UTF-16 码元序；后开始的 Clip 在上层。前端与 Rust 合成必须复用同一个比较器，禁止在合成器里另写数组下标排序。
+- 上层 base 块先占用时间区间，下层 base 被 `occupied + subtract` 切成仍可见的片段，不整体消失；最终 `ParamBlockView` 仍满足时间不重叠。
+- 用户块 / 编组块的优先级（3/4）高于 base，不受 Clip 层级影响。
+- 仅交换 clips 数组顺序不得改变 blocks 或 `layoutKey`。
+
+## 块标签的渲染上下文
+
+- 参数块标签只属于主画布：主画布与左侧轴画布各自持有独立的 `GlyphSurface`（program / rasterizer / atlas 上传页）。`GlyphProgram` 与创建它的 WebGL 上下文绑定，`GlRasterTarget` 只描述尺寸，不切换上下文。
+- 禁止把块标签的 glyph program 指向轴画布；那会把主画布坐标压缩进 56px 轴列，表现为轴列白色碎片、块内无标签。
+
+## 音符块来源
+
+- 参数块与静音检测共享 `note_blocks::source_note_spans` 的优先级：`syllable_analysis` → `game_block_baseline` → `midi_note_data`；空来源不伪造整段一块。
+- 静音检测的 `note_blocks` 方式只消费这份来源与 `projected_note_spans`，缺失分析时返回可操作错误，不重新启动 GAME 推理。
 
 ## 维护约束
 

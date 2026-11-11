@@ -29,6 +29,7 @@ import {
 } from "../../../../services/api/settings";
 import { SCALE_KEYS } from "../../../../utils/musicalScales";
 import { normalizeParamAxisUnits } from "../../../../components/layout/pianoRoll/paramAxisUnits";
+import { normalizePanAxisDirections } from "../../../../components/layout/pianoRoll/paramPan";
 import type { CustomScalePreset } from "../../../../utils/customScales";
 import { sanitizeCustomScalePreset } from "../../../../utils/customScales";
 import {
@@ -94,6 +95,9 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
                     // 整份替换这个子对象时必须显式带上它，否则"宿主受控"这条读数
                     // 会被一次设备刷新静默清成 false（轮询节奏随之退回 400 ms）。
                     hostAuthoritative: state.runtime.hostAuthoritative,
+                    playbackStartPending: state.runtime.playbackStartPending,
+                    playbackStartAnchorSec: state.runtime.playbackStartAnchorSec,
+                    playbackStartAtMs: state.runtime.playbackStartAtMs,
                     gpuBackend: payload.gpu_backend ?? "",
                 };
                 if (payload.timeline) {
@@ -244,6 +248,11 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
                 state.showParamValuePopup = Boolean(s.showParamValuePopup);
             // 纵轴单位映射：手改坏配置（未知参数 / 非法取值）在这里被过滤掉。
             state.paramAxisUnits = normalizeParamAxisUnits(s.paramAxisUnits);
+            state.paramAxisDirections = normalizePanAxisDirections(s.paramAxisDirections);
+            state.project.lastSaveFormat =
+                s.lastProjectSaveFormat === "json" || s.lastProjectSaveFormat === "zip"
+                    ? s.lastProjectSaveFormat
+                    : "hshp";
             if (s.scaleHighlightMode != null)
                 state.scaleHighlightMode = s.scaleHighlightMode === "always" ? "always" : "off";
             if (s.ignoreGrouping != null) state.ignoreGrouping = Boolean(s.ignoreGrouping);
@@ -274,7 +283,9 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
             }
             if (s.silenceDetectOptions != null) {
                 const o = s.silenceDetectOptions as Partial<SilenceDetectSettings>;
-                state.silenceDetectOptions = { ...state.silenceDetectOptions, ...o };
+                const method =
+                    o.method === "peak" || o.method === "note_blocks" ? o.method : "rms";
+                state.silenceDetectOptions = { ...state.silenceDetectOptions, ...o, method };
             }
             if (s.search != null) state.searchSettings = normalizeSearchSettings(s.search);
             /*

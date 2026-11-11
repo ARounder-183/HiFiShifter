@@ -115,6 +115,23 @@ export function isParamBlockVisualEpochCurrent(args: {
     );
 }
 
+/**
+ * 本地结构提交成功后，把事务 epoch 的结构令牌推进到“这次提交后的预期令牌”。
+ *
+ * 只替换 structureToken；layoutKey / externalHistoryToken / param / framePeriodMs
+ * 必须保持手势起点的值，否则会把提交期间发生的第三方布局/历史变化一起接受。
+ */
+export function adoptParamBlockVisualStructure(
+    tx: ParamBlockVisualTransaction | null,
+    structureToken: string,
+): ParamBlockVisualTransaction | null {
+    if (tx === null) return null;
+    return {
+        ...tx,
+        epoch: { ...tx.epoch, structureToken },
+    };
+}
+
 export function shouldUseParamBlockVisualTransaction(
     tx: ParamBlockVisualTransaction | null,
     currentEpoch: ParamBlockEpoch,

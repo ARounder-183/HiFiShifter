@@ -16,6 +16,7 @@ import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
 type Props = {
     m: Pick<
         PianoRollPanelModel,
+        | "canFlipParam"
         | "clipboardGuid"
         | "closeLeadingGap"
         | "ctxMenu"
@@ -80,6 +81,7 @@ type Props = {
 
 export function PanelOverlays({ m }: Props) {
     const {
+        canFlipParam,
         clipboardGuid,
         closeLeadingGap,
         ctxMenu,
@@ -205,6 +207,8 @@ export function PanelOverlays({ m }: Props) {
                     onSelectAll={() => void handleEditOp("selectAll")}
                     onDeselect={() => void handleEditOp("deselect")}
                     onInitialize={() => void handleEditOp("initialize")}
+                    canFlipParam={canFlipParam}
+                    onFlip={() => void handleEditOp("flip")}
                     onTransposeCents={() => openEditDialog("transposeCents")}
                     onTransposeDegrees={() => openEditDialog("transposeDegrees")}
                     onSetPitch={() => openEditDialog("setPitch")}

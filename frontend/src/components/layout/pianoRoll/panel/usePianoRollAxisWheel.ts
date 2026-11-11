@@ -20,6 +20,8 @@ import { clamp } from "../../timeline";
 import { PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "../constants";
 import type { ParamName, ValueViewport } from "../types";
 import { getParamEditorWheelAction } from "../wheelGesture";
+import { centerForPanDelta, centerForZoomAnchor, valueAtViewportT } from "../paramAxisProjection";
+import type { PanAxisDirections } from "../paramPan";
 
 type PianoRollAxisWheelInputs = {
     /** 左轴列的宿主元素（滚轮监听挂在这里）。 */
@@ -31,6 +33,8 @@ type PianoRollAxisWheelInputs = {
     pitchViewRef: { current: ValueViewport };
     /** 各参数视口（数值刻度的投影来源）。 */
     paramViewsRef: { current: Record<string, ValueViewport> };
+    /** pan 纵轴方向。 */
+    paramAxisDirectionsRef: { current: PanAxisDirections };
     /** 参数描述符（决定非音高参数的上下限）。 */
     processorParamsRef: { current: ProcessorParamDescriptor[] };
     setPitchView: (next: ValueViewport) => void;
@@ -57,6 +61,7 @@ export function usePianoRollAxisWheel({
     editParam,
     pitchViewRef,
     paramViewsRef,
+    paramAxisDirectionsRef,
     processorParamsRef,
     setPitchView,
     setParamViewport,
@@ -127,7 +132,12 @@ export function usePianoRollAxisWheel({
                     };
                     const next = clampViewport(editParam, {
                         span: cur.span,
-                        center: cur.center + delta * cur.span,
+                        center: centerForPanDelta({
+                            param: editParam,
+                            directions: paramAxisDirectionsRef.current,
+                            center: cur.center,
+                            deltaCenter: delta * cur.span,
+                        }),
                     });
                     setParamViewport(editParam, next);
                 }
@@ -198,7 +208,17 @@ export function usePianoRollAxisWheel({
                           };
                           const span = clamp(view.span, 1e-6, absMax - absMin || 1);
                           const min = clamp(view.center - span / 2, absMin, absMax - span);
-                          return clamp(min + (1 - t) * span, absMin, absMax);
+                          return clamp(
+                              valueAtViewportT({
+                                  param: editParam,
+                                  directions: paramAxisDirectionsRef.current,
+                                  t,
+                                  min,
+                                  span,
+                              }),
+                              absMin,
+                              absMax,
+                          );
                       })();
 
             const factor = e.deltaY < 0 ? 0.9 : 1.1;
@@ -219,7 +239,13 @@ export function usePianoRollAxisWheel({
                 const nextSpan = cur.span * factor;
                 const next = clampViewport(editParam, {
                     span: nextSpan,
-                    center: valueAtPointer - (0.5 - t) * nextSpan,
+                    center: centerForZoomAnchor({
+                        param: editParam,
+                        directions: paramAxisDirectionsRef.current,
+                        valueAtPointer,
+                        t,
+                        nextSpan,
+                    }),
                 });
                 setParamViewport(editParam, next);
             }
@@ -244,6 +270,7 @@ export function usePianoRollAxisWheel({
         axisWrapRef,
         clampViewport,
         paramViewsRef,
+        paramAxisDirectionsRef,
         pitchViewRef,
         processorParamsRef,
         scrollerRef,

@@ -33,6 +33,7 @@ import {
 } from "../../childPitchOffsetParams";
 import { isDynParam } from "../../paramRanges";
 import { formatDbLabel, supportsParamAxisUnit, type ParamAxisUnit } from "../../paramAxisUnits";
+import { formatPanAxisLabel, isPanParam, type PanTextLabels } from "../../paramPan";
 
 /** 数值轴刻度的种类。 */
 export type AxisKind = "cents" | "formantCents" | "degrees" | "level" | "fallback";
@@ -82,6 +83,8 @@ export interface AxisMarkArgs {
      * 数据本身，与读法无关，因此切单位不改变任何几何。
      */
     readonly axisUnit?: ParamAxisUnit;
+    /** pan 刻度文本（左/中/右）。 */
+    readonly panLabels?: PanTextLabels;
 }
 
 /**
@@ -216,7 +219,11 @@ export function formatAxisMarkLabel(
     value: number,
     param?: string,
     axisUnit?: ParamAxisUnit,
+    panLabels?: PanTextLabels,
 ): string {
+    if (param != null && isPanParam(param)) {
+        return formatPanAxisLabel(value, panLabels ?? { left: "L", center: "C", right: "R" });
+    }
     if (axisUnit === "db" && param != null && supportsParamAxisUnit(param)) {
         return formatDbLabel(value);
     }
@@ -271,7 +278,7 @@ export function resolveAxisKind(param: string): AxisKind {
 export function buildAxisMarkInstances(
     args: AxisMarkArgs,
 ): (AxisMarkInstance & { readonly lineOnly: boolean })[] {
-    const { kind, view, heightPx, axisWidthPx, dpr, valueToY, paramName, axisUnit } = args;
+    const { kind, view, heightPx, axisWidthPx, dpr, valueToY, paramName, axisUnit, panLabels } = args;
     if (!Number.isFinite(view.span) || !Number.isFinite(view.center)) return [];
     if (!Number.isFinite(heightPx) || !Number.isFinite(axisWidthPx)) return [];
     if (!Number.isFinite(dpr) || dpr <= 0) return [];
@@ -312,7 +319,7 @@ export function buildAxisMarkInstances(
         out.push({
             isStrong,
             value: v,
-            label: formatAxisMarkLabel(v, paramName, axisUnit),
+            label: formatAxisMarkLabel(v, paramName, axisUnit, panLabels),
             line: toLineRect(y, isStrong),
             lineOnly: false,
         });
@@ -332,7 +339,7 @@ export function buildAxisMarkInstances(
         out.push({
             isStrong: false,
             value: 0,
-            label: formatAxisMarkLabel(0, paramName, axisUnit),
+            label: formatAxisMarkLabel(0, paramName, axisUnit, panLabels),
             line: toLineRect(valueToY(0, heightPx), false),
             lineOnly: true,
         });

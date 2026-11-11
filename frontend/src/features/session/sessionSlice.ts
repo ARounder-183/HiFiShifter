@@ -40,6 +40,11 @@ import {
     resolveParamAxisUnit,
     supportsParamAxisUnit,
 } from "../../components/layout/pianoRoll/paramAxisUnits";
+import {
+    isPanParam,
+    nextPanAxisDirection,
+    resolvePanAxisDirection,
+} from "../../components/layout/pianoRoll/paramPan";
 import type { CustomScalePreset } from "../../utils/customScales";
 import { sanitizeCustomScalePreset } from "../../utils/customScales";
 import {
@@ -62,6 +67,7 @@ import type { TempoMap } from "../../utils/tempoMap";
 import { clampDenominator, normalizeTempoMap } from "../../utils/tempoMap";
 import { markProjectDirty } from "./sessionDirtyState";
 import type { ClipColor, StretchAlgorithmOption } from "./sessionSlice/types";
+import type { ProjectSaveFormat } from "../../services/api/project";
 import { resolveTrackIdForClipSelection } from "./selectionFocus";
 import { applyHistoryDepths } from "./sessionSlice/history";
 import { applyTimelineState } from "./sessionSlice/helpersTimeline";
@@ -801,6 +807,18 @@ const sessionSlice = createSlice({
             const next = nextParamAxisUnit(resolveParamAxisUnit(state.paramAxisUnits, param));
             state.paramAxisUnits = { ...state.paramAxisUnits, [param]: next };
         },
+        /** 切换 pan 纵轴方向；其它参数静默忽略。 */
+        setProjectLastSaveFormat(state, action: PayloadAction<ProjectSaveFormat>) {
+            state.project.lastSaveFormat = action.payload;
+        },
+        toggleParamAxisDirection(state, action: PayloadAction<string>) {
+            const param = action.payload;
+            if (!isPanParam(param)) return;
+            const next = nextPanAxisDirection(
+                resolvePanAxisDirection(state.paramAxisDirections, param),
+            );
+            state.paramAxisDirections = { ...state.paramAxisDirections, [param]: next };
+        },
         cycleDragDirection(state, action: PayloadAction<"select" | "draw" | "vibrato">) {
             if (action.payload === "select") {
                 const order: DragDirection[] = ["free", "x-only", "y-only"];
@@ -1293,6 +1311,8 @@ export const {
     toggleClipboardPreview,
     toggleParamValuePopup,
     toggleParamAxisUnit,
+    toggleParamAxisDirection,
+    setProjectLastSaveFormat,
     cycleDragDirection,
     setDragDirection,
     setEdgeSmoothnessPercent,

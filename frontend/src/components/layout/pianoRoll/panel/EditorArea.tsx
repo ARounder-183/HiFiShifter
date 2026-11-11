@@ -37,6 +37,8 @@ type Props = {
         | "attachRulerPlayheadLine"
         | "attachVerticalScrollbarTrack"
         | "axisCanvasRef"
+        | "axisPanDirectionToggleAvailable"
+        | "axisToggleAvailable"
         | "axisUnitToggleAvailable"
         | "axisValuePreview"
         | "axisWrapRef"
@@ -48,6 +50,7 @@ type Props = {
         | "currentParamRange"
         | "dynamicProjectSec"
         | "editParam"
+        | "editParamAxisDirection"
         | "editParamAxisUnit"
         | "effectiveProjectScale"
         | "formatParamValuePreview"
@@ -97,6 +100,8 @@ export function EditorArea({ m }: Props) {
         attachRulerPlayheadLine,
         attachVerticalScrollbarTrack,
         axisCanvasRef,
+        axisPanDirectionToggleAvailable,
+        axisToggleAvailable,
         axisUnitToggleAvailable,
         axisValuePreview,
         axisWrapRef,
@@ -108,6 +113,7 @@ export function EditorArea({ m }: Props) {
         currentParamRange,
         dynamicProjectSec,
         editParam,
+        editParamAxisDirection,
         editParamAxisUnit,
         effectiveProjectScale,
         formatParamValuePreview,
@@ -175,7 +181,7 @@ export function EditorArea({ m }: Props) {
                     style={{
                         width: AXIS_W,
                         flex: 1,
-                        cursor: axisUnitToggleAvailable ? "pointer" : undefined,
+                        cursor: axisToggleAvailable ? "pointer" : undefined,
                     }}
                 >
                     {/* 键盘轴 GL 层（阶段 2/3）：铺在 Canvas2D 轴画布**下面**
@@ -196,7 +202,18 @@ export function EditorArea({ m }: Props) {
                         是"点击可切换"的可见提示（整列光标为 pointer）。
                         刻意**不**挂 onClick —— 点击会冒泡到上面的轴列处理器，
                         再挂一个会切换两次（净效果为"点了没反应"）。 */}
-                    {axisUnitToggleAvailable ? (
+                    {axisPanDirectionToggleAvailable ? (
+                        <div
+                            className="absolute top-0 right-0 z-10 px-1 text-qt-3xs leading-[14px] text-qt-text-muted"
+                            aria-hidden
+                        >
+                            {tf(
+                                editParamAxisDirection === "left-top"
+                                    ? "param_axis_pan_left_top"
+                                    : "param_axis_pan_left_bottom",
+                            )}
+                        </div>
+                    ) : axisUnitToggleAvailable ? (
                         <div
                             className="absolute top-0 right-0 z-10 px-1 text-qt-3xs leading-[14px] text-qt-text-muted"
                             aria-hidden
@@ -408,13 +425,19 @@ export function EditorArea({ m }: Props) {
                                     }}
                                     onPointerMove={(event) => {
                                         /*
-                                         * 【顺序不可交换】块层在块模式下是**唯一**的指针所有者：
-                                         * 它决定光标、hover、以及读数。通用处理器按「是否贴近
-                                         * 参数线」另算一套，先跑它就会把块层刚设好的状态覆盖掉
-                                         * —— 这正是「拖块时读数显示的是指针处的旧曲线值」的成因。
+                                         * 块层先决定光标与块 hover；它返回 true 时通用处理器
+                                         * 不再运行（否则会把块层刚设好的光标/悬停覆盖掉）。
+                                         * 无按键的普通悬停仍要更新曲线读数——那是独立副作用，
+                                         * 不改变光标；有按键时块手势独占读数。
                                          */
-                                        if (onCanvasPointerMoveForBlocks(event)) return;
-                                        interactions.onCanvasPointerMove(event);
+                                        const blockClaimed = onCanvasPointerMoveForBlocks(event);
+                                        if (!blockClaimed) {
+                                            interactions.onCanvasPointerMove(event);
+                                            return;
+                                        }
+                                        if (event.buttons === 0) {
+                                            interactions.onCanvasHoverPreview(event);
+                                        }
                                     }}
                                     onPointerLeave={interactions.onCanvasPointerLeave}
                                     onPointerDown={interactions.onCanvasPointerDown}

@@ -251,6 +251,103 @@ export function SetPitchDialog({
     );
 }
 
+interface PanSetValueProps {
+    open: boolean;
+    onOpenChange: (open: boolean) => void;
+    defaultValue?: number;
+    defaultSmoothness?: number;
+    onConfirm?: (value: number, edgeSmoothnessPercent: number) => void;
+}
+
+/**
+ * 声像 Set Value 对话框：内部值仍是 -1..1，界面只暴露左/中/右 + 0..100%。
+ */
+export function PanSetValueDialog({
+    open,
+    onOpenChange,
+    defaultValue = 0,
+    defaultSmoothness = 0,
+    onConfirm,
+}: PanSetValueProps) {
+    const { tf } = useI18n();
+    const initial = Math.max(-1, Math.min(1, Number(defaultValue) || 0));
+    const [side, setSide] = useDialogDraft<"left" | "center" | "right">(open, () =>
+        initial < 0 ? "left" : initial > 0 ? "right" : "center",
+    );
+    const [percent, setPercent] = useDialogDraft(open, () =>
+        String(Math.round(Math.abs(initial) * 100)),
+    );
+    const [smoothness, setSmoothness] = useDialogDraft(open, () =>
+        String(Math.round(defaultSmoothness)),
+    );
+
+    return (
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tf("menu_set_value")}
+            size="sm"
+            actions={[
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "apply",
+                    label: tf("ok"),
+                    intent: "primary",
+                    onClick: () => {
+                        const amount = Math.max(0, Math.min(100, Number(percent) || 0)) / 100;
+                        const value = side === "left" ? -amount : side === "right" ? amount : 0;
+                        onConfirm?.(value, Math.max(0, Math.min(100, Number(smoothness) || 0)));
+                        onOpenChange(false);
+                    },
+                },
+            ]}
+        >
+            <AppForm>
+                <AppField label={tf("dlg_pan_side")}>
+                    <AppSelect
+                        value={side}
+                        onValueChange={(next) =>
+                            setSide(next === "left" || next === "right" ? next : "center")
+                        }
+                        options={[
+                            { value: "left", label: tf("pan_left") },
+                            { value: "center", label: tf("pan_center") },
+                            { value: "right", label: tf("pan_right") },
+                        ]}
+                    />
+                </AppField>
+                <AppField label={tf("dlg_pan_amount")}>
+                    <Flex align="center" gap="2">
+                        <AppSlider
+                            value={Math.round(Number(percent) || 0)}
+                            unit="percent"
+                            min={0}
+                            max={100}
+                            ariaLabel={tf("dlg_pan_amount")}
+                            disabled={side === "center"}
+                            onChange={(next) => setPercent(String(next))}
+                        />
+                        <AppSliderReadout>{Math.round(Number(percent) || 0)}%</AppSliderReadout>
+                    </Flex>
+                </AppField>
+                <AppField label={tf("edge_smoothness")}>
+                    <Flex align="center" gap="2">
+                        <AppSlider
+                            value={Math.round(Number(smoothness) || 0)}
+                            unit="percent"
+                            min={0}
+                            max={100}
+                            ariaLabel={tf("edge_smoothness")}
+                            onChange={(next) => setSmoothness(String(next))}
+                        />
+                        <AppSliderReadout>{Math.round(Number(smoothness) || 0)}%</AppSliderReadout>
+                    </Flex>
+                </AppField>
+            </AppForm>
+        </AppDialog>
+    );
+}
+
 interface AverageProps {
     open: boolean;
     onOpenChange: (open: boolean) => void;

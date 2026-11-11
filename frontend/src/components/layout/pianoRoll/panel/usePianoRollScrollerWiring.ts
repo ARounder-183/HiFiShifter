@@ -64,6 +64,8 @@ type PianoRollScrollerWiringInputs = {
     /** 值域视口与处理器参数。 */
     pitchViewRef: ModelDeps["pitchViewRef"];
     paramViewsRef: ModelDeps["paramViewsRef"];
+    paramAxisDirectionsRef: ModelDeps["paramAxisDirectionsRef"];
+    editParamAxisDirection: "left-bottom" | "left-top";
     processorParamsRef: ModelDeps["processorParamsRef"];
     processorParams: ProcessorParamDescriptor[];
     /** 标脏入口。 */
@@ -124,6 +126,8 @@ export function usePianoRollScrollerWiring({
     syncScrollLeftRef,
     pitchViewRef,
     paramViewsRef,
+    paramAxisDirectionsRef,
+    editParamAxisDirection,
     processorParamsRef,
     processorParams,
     invalidate,
@@ -284,6 +288,7 @@ export function usePianoRollScrollerWiring({
         editParam,
         pitchViewRef,
         paramViewsRef,
+        paramAxisDirectionsRef,
         processorParamsRef,
         setPitchView,
         setParamViewport,
@@ -301,6 +306,7 @@ export function usePianoRollScrollerWiring({
     usePianoRollAxisInteractions({
         s,
         editParam,
+        axisDirection: editParamAxisDirection,
         axisWrapRef,
         viewSizeRef,
         pitchViewRef,
