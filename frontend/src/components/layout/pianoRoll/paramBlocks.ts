@@ -75,6 +75,17 @@ export interface ParamBlock {
     readonly averageValue: number | null;
     /** 音高块显式保存的 MIDI 中心；其他参数必须从各自曲线派生位置。 */
     readonly manualValue?: number | null;
+    /** Read-only source note (single-member block); never persisted in edits. */
+    readonly sourceNote?: number | null;
+    /** Visible interval starts/ends inside its source span. */
+    readonly cutStart?: boolean;
+    readonly cutEnd?: boolean;
+    /** `clipId|takeId|cycle` identity for transition/contiguous pairing. */
+    readonly sourceKey?: string;
+    /** Explicit display-only fallback value (never written to the curve). */
+    readonly fallbackValue?: number | null;
+    /** Whether the displayed center came from a fallback. */
+    readonly centerPolicy?: "live" | "locked" | "fallback";
     /**
      * 块间圆滑宽度（秒）：向两侧各 blend 这么多秒，跨越相邻块边界做线性过渡。
      * 只对同一 Clip/Take 内**首尾相接**的块生效；缺省 0 = 硬切换。
@@ -738,6 +749,11 @@ function paramBlockFromProjected(
         endSec: toSecLocal(block.endFrameExclusive),
         averageValue: null,
         manualValue: block.value ?? null,
+        ...(block.sourceNote === undefined ? {} : { sourceNote: block.sourceNote }),
+        cutStart: block.cutStart === true,
+        cutEnd: block.cutEnd === true,
+        ...(block.sourceKey === undefined ? {} : { sourceKey: block.sourceKey }),
+
         transitionSec:
             block.transitionFrames === undefined
                 ? undefined
@@ -767,6 +783,29 @@ export function materializeParamBlocks(args: {
     );
 }
 
+/** Stable identity for value caches across geometry changes (trim/slip). */
+export function logicalBlockKey(block: {
+    readonly id: string;
+    readonly userBlockId?: string;
+    readonly members: readonly {
+        readonly clipId?: string;
+        readonly takeId?: string;
+        readonly syllableId?: string;
+        readonly cycle?: number;
+    }[];
+}): string {
+    const first = block.members[0];
+    if (first?.clipId !== undefined) {
+        return [
+            "take",
+            first.clipId,
+            first.takeId ?? "",
+            first.syllableId ?? "",
+            String(first.cycle ?? 0),
+        ].join("|");
+    }
+    return ["user", block.userBlockId ?? block.id].join("|");
+}
 export function sortParamBlocksByTime<
     T extends { readonly startSec: number; readonly endSec: number },
 >(blocks: readonly T[]): T[] {
@@ -786,6 +825,7 @@ export function paramBlockTransitionHandles<
         readonly startSec: number;
         readonly endSec: number;
         readonly transitionSec?: number;
+        readonly sourceKey?: string;
     },
 >(
     blocks: readonly T[],
@@ -804,6 +844,14 @@ export function paramBlockTransitionHandles<
         const left = sorted[index];
         const right = sorted[index + 1];
         if (!blocksAreAdjacent(left, right)) continue;
+        // Known, different sources never connect. Unknown keys (gesture
+        // previews that predate source identity) keep their legacy adjacency.
+        if (
+            left.sourceKey !== undefined &&
+            right.sourceKey !== undefined &&
+            left.sourceKey !== right.sourceKey
+        )
+            continue;
         out.push({
             leftId: left.id,
             rightId: right.id,

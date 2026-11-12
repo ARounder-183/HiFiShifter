@@ -741,7 +741,9 @@ mod tests {
             source_spans_sec: vec![crate::pitch_analysis::SyllableSpan {
                 start_sec: 0.1,
                 end_sec: 0.3,
+                midi_note: None,
             }],
+            analyzed_window_sec: [0.0, 0.0],
         });
         pf.timeline.clips.push(clip);
         pf.timeline.params_by_root_track.insert(

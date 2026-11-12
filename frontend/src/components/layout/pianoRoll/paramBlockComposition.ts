@@ -10,12 +10,14 @@
  */
 
 import {
+    audibleSourceWindow,
     baseSourceSpansForClip,
     normalizeLoopTakeSpans,
     projectTakeSpan,
     projectionForClip,
     sourceAtProjectedFrame,
     toFrame,
+    windowContained,
     type ClipProjection,
     type ParamBlockSourceClip,
 } from "./paramBlockProjection";
@@ -48,6 +50,10 @@ interface Candidate {
     readonly value?: number | null;
     readonly transitionWidthSec?: number;
     readonly rate: number;
+    readonly sourceNote?: number | null;
+    readonly cutStart?: boolean;
+    readonly cutEnd?: boolean;
+    readonly sourceKey?: string;
     readonly priority: number;
     readonly seq: number;
     readonly zOrder: number;
@@ -66,7 +72,13 @@ function hash(text: string): string {
 
 function memberOf(
     span: TakeSpan,
-    interval: { startFrame: number; endFrameExclusive: number; cycle: number },
+    interval: {
+        startFrame: number;
+        endFrameExclusive: number;
+        cycle: number;
+        cutStart: boolean;
+        cutEnd: boolean;
+    },
     projection: ClipProjection,
     framePeriodMs: number,
 ): ProjectedMember {
@@ -94,6 +106,8 @@ function memberOf(
         frameSourceEndSec,
         visibleSourceStartSec: Math.min(frameSourceStartSec, frameSourceEndSec),
         visibleSourceEndSec: Math.max(frameSourceStartSec, frameSourceEndSec),
+        cutStart: interval.cutStart,
+        cutEnd: interval.cutEnd,
     };
 }
 
@@ -106,7 +120,7 @@ function baseCandidates(
         const analysis = baseSourceSpansForClip(clip);
         if (analysis === null) return;
         const projection = projectionForClip(clip);
-        const normalized = analysis.spans
+        const sorted = analysis.spans
             .filter(
                 (span) =>
                     span.endSec > span.startSec &&
@@ -114,7 +128,18 @@ function baseCandidates(
                     Number.isFinite(span.endSec),
             )
             .slice()
-            .sort((a, b) => a.startSec - b.startSec);
+            .sort((a, b) => a.startSec - b.startSec || a.endSec - b.endSec);
+        const normalized: Array<{ startSec: number; endSec: number; note?: number | null }> = [];
+        for (const span of sorted) {
+            const last = normalized[normalized.length - 1];
+            const next = { ...span };
+            // Keep the earlier (left-cut) span and trim only the overlap from
+            // the later one. Dropping the narrower span hides the Clip edge.
+            if (last !== undefined && next.startSec < last.endSec - EPS) {
+                next.startSec = last.endSec;
+            }
+            if (next.endSec > next.startSec + EPS) normalized.push(next);
+        }
         normalized.forEach((span, index) => {
             const identity = `span:${projection.takeId}:${index}:${Math.round(span.startSec * 1000)}`;
             const baseSpan: TakeSpan = {
@@ -148,6 +173,10 @@ function baseCandidates(
                         members: [memberOf(intervalSpan, interval, projection, framePeriodMs)],
                         value: null,
                         rate: projection.rate,
+                        sourceNote: span.note ?? clip.syllableNotes?.[index] ?? null,
+                        cutStart: interval.cutStart,
+                        cutEnd: interval.cutEnd,
+                        sourceKey: `${clip.id}|${projection.takeId}|${interval.cycle}`,
                         priority: 1,
                         seq: 0,
                         zOrder,
@@ -250,6 +279,15 @@ function projectTakeMembers(
                 value,
                 transitionWidthSec,
                 rate: run.rate,
+                sourceKey:
+                    run.members.length === 1
+                        ? run.members[0].clipId +
+                          "|" +
+                          run.members[0].takeId +
+                          "|" +
+                          run.members[0].cycle
+                        : undefined,
+                sourceNote: null,
                 priority: manual ? 4 : 3,
                 seq: createdSeq,
                 zOrder: 0,
@@ -459,7 +497,12 @@ function coverIntervalsForBase(
                 ) {
                     continue;
                 }
-                if (cover.full && anchorMatches(baseSpan, span)) {
+                if (
+                    cover.full &&
+                    anchorMatches(baseSpan, span) &&
+                    span.sourceStartSec <= baseSpan.sourceStartSec + 1e-7 &&
+                    span.sourceEndSec >= baseSpan.sourceEndSec - 1e-7
+                ) {
                     return [[base.start, base.end]];
                 }
                 const clip = clips.find((item) => item.id === span.clipId);
@@ -534,7 +577,13 @@ function basePieceCandidate(
         members: [
             memberOf(
                 pieceSpan,
-                { startFrame: start, endFrameExclusive: end, cycle: pieceSpan.cycle },
+                {
+                    startFrame: start,
+                    endFrameExclusive: end,
+                    cycle: pieceSpan.cycle,
+                    cutStart: (base.cutStart ?? false) || (member.cutStart ?? false),
+                    cutEnd: (base.cutEnd ?? false) || (member.cutEnd ?? false),
+                },
                 projection,
                 framePeriodMs,
             ),
@@ -563,6 +612,8 @@ function trimMember(
         ...member,
         startFrame: start,
         endFrameExclusive: end,
+        cutStart: member.startFrame === start ? (member.cutStart ?? false) : true,
+        cutEnd: member.endFrameExclusive === end ? (member.cutEnd ?? false) : true,
         frameSourceStartSec,
         frameSourceEndSec,
         visibleSourceStartSec: Math.min(frameSourceStartSec, frameSourceEndSec),
@@ -604,6 +655,8 @@ function takeLayoutKey(take: NonNullable<ParamBlockSourceClip["takes"]>[number])
         take.durationFrames,
         take.sourceSampleRate,
         spanListKey(take.syllableSpansSec),
+        (take.syllableNotes ?? []).map((note) => (note === null ? "-" : note)).join(","),
+        take.syllableAnalysisWindowSec?.join("-") ?? "",
         spanListKey(take.gameBlockBaseline?.sourceSpansSec),
         noteListKey(take.midiNoteData),
     ].join(":");
@@ -629,6 +682,8 @@ function clipLayoutKey(clip: ParamBlockSourceClip): string {
         clip.loopPeriodSec,
         clip.contentDurationSec,
         spanListKey(clip.syllableSpansSec),
+        (clip.syllableNotes ?? []).map((note) => (note === null ? "-" : note)).join(","),
+        clip.syllableAnalysisWindowSec?.join("-") ?? "",
         spanListKey(clip.gameBlockBaseline?.sourceSpansSec),
         noteListKey(clip.midiNoteData),
         (clip.takes ?? []).map(takeLayoutKey).join(","),
@@ -713,6 +768,8 @@ export function composeParamBlockView(
         if (
             next !== undefined &&
             candidate.end === next.start &&
+            candidate.sourceKey !== undefined &&
+            candidate.sourceKey === next.sourceKey &&
             candidate.transitionWidthSec !== undefined
         ) {
             const width = Math.round(
@@ -733,6 +790,11 @@ export function composeParamBlockView(
             kind: candidate.kind,
             members: candidate.members,
             ...(candidate.value === undefined ? {} : { value: candidate.value }),
+            ...(candidate.sourceNote === undefined ? {} : { sourceNote: candidate.sourceNote }),
+            cutStart: candidate.cutStart === true || (candidate.members[0]?.cutStart ?? false),
+            cutEnd:
+                candidate.cutEnd === true ||
+                (candidate.members[candidate.members.length - 1]?.cutEnd ?? false),
             ...(candidate.baseCover === undefined ? {} : { baseCover: candidate.baseCover }),
         };
     });
@@ -747,15 +809,24 @@ export function composeParamBlockView(
         analysisPending: orderedClips.some((clip) => {
             const take =
                 clip.takes?.find((item) => item.id === clip.activeTakeId) ?? clip.takes?.[0];
-            return (
-                (clip.sourceStartSec !== undefined || clip.sourceEndSec !== undefined) &&
-                (take?.syllableSpansSec?.length ?? 0) === 0 &&
-                (clip.syllableSpansSec?.length ?? 0) === 0 &&
-                (take?.gameBlockBaseline?.sourceSpansSec?.length ?? 0) === 0 &&
-                (clip.gameBlockBaseline?.sourceSpansSec?.length ?? 0) === 0 &&
-                (take?.midiNoteData?.length ?? 0) === 0 &&
-                (clip.midiNoteData?.length ?? 0) === 0
-            );
+            const hasSpans =
+                (take?.syllableSpansSec?.length ?? 0) > 0 ||
+                (clip.syllableSpansSec?.length ?? 0) > 0 ||
+                (take?.gameBlockBaseline?.sourceSpansSec?.length ?? 0) > 0 ||
+                (clip.gameBlockBaseline?.sourceSpansSec?.length ?? 0) > 0 ||
+                (take?.midiNoteData?.length ?? 0) > 0 ||
+                (clip.midiNoteData?.length ?? 0) > 0;
+            if (
+                (clip.sourceStartSec === undefined && clip.sourceEndSec === undefined) ||
+                !hasSpans
+            ) {
+                return (
+                    (clip.sourceStartSec !== undefined || clip.sourceEndSec !== undefined) &&
+                    !hasSpans
+                );
+            }
+            const analyzed = take?.syllableAnalysisWindowSec ?? clip.syllableAnalysisWindowSec;
+            return !windowContained(audibleSourceWindow(projectionForClip(clip)), analyzed);
         }),
     };
 }

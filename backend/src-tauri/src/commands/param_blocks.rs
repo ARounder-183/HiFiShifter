@@ -229,12 +229,15 @@ mod tests {
                 SyllableSpan {
                     start_sec: 0.0,
                     end_sec: 0.5,
+                    midi_note: None,
                 },
                 SyllableSpan {
                     start_sec: 0.5,
                     end_sec: 1.0,
+                    midi_note: None,
                 },
             ],
+            analyzed_window_sec: [0.0, 0.0],
         }
     }
 

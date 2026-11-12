@@ -31,10 +31,74 @@ struct Candidate {
     transition_width_sec: Option<f64>,
     transition_frames: Option<u32>,
     rate: f64,
+    note: Option<f32>,
+    cut_start: bool,
+    cut_end: bool,
+    source_key: Option<String>,
     priority: u8,
     seq: u64,
     z_order: u32,
     base_cover: Option<BaseCover>,
+}
+
+fn member_source_key(member: &ProjectedMember) -> String {
+    format!("{}|{}|{}", member.clip_id, member.take_id, member.cycle)
+}
+
+fn first_member_source_key(members: &[ProjectedMember]) -> Option<String> {
+    members.first().map(member_source_key)
+}
+
+/// Find the source note with the largest overlap with this member's source span.
+fn source_note_for_member(timeline: &TimelineState, member: &ProjectedMember) -> Option<f32> {
+    let clip = timeline
+        .clips
+        .iter()
+        .find(|clip| clip.id == member.clip_id)?;
+    let take = clip.take(&member.take_id)?;
+    let mut spans: Vec<(f64, f64, Option<f32>)> = Vec::new();
+    if let Some(analysis) = &take.syllable_analysis {
+        spans.extend(
+            analysis
+                .source_spans_sec
+                .iter()
+                .map(|span| (span.start_sec, span.end_sec, span.midi_note)),
+        );
+    }
+    if spans.is_empty() {
+        if let Some(baseline) = &take.game_block_baseline {
+            spans.extend(
+                baseline
+                    .source_spans_sec
+                    .iter()
+                    .map(|span| (span.start_sec, span.end_sec, span.midi_note)),
+            );
+        }
+    }
+    if spans.is_empty() {
+        if let Some(notes) = &take.midi_note_data {
+            spans.extend(
+                notes
+                    .iter()
+                    .map(|note| (note.start_sec, note.end_sec, Some(note.note))),
+            );
+        }
+    }
+    let lo = member.visible_source_start_sec.min(member.source_start_sec);
+    let hi = member.visible_source_end_sec.max(member.source_end_sec);
+    let mut best: Option<(f64, f32)> = None;
+    for (start, end, note) in spans {
+        let overlap = end.min(hi) - start.max(lo);
+        if overlap <= 0.0 {
+            continue;
+        }
+        if let Some(pitch) = note {
+            if best.map_or(true, |(width, _)| overlap > width) {
+                best = Some((overlap, pitch));
+            }
+        }
+    }
+    best.map(|(_, pitch)| pitch)
 }
 
 fn interval_width(start: u32, end: u32) -> u32 {
@@ -47,6 +111,8 @@ fn member_from(
     end: u32,
     projection: &ClipProjection,
     frame_period_ms: f64,
+    cut_start: bool,
+    cut_end: bool,
 ) -> ProjectedMember {
     let frame_source_start_sec =
         source_at_projected_frame(projection, start, span.cycle, frame_period_ms)
@@ -68,6 +134,8 @@ fn member_from(
         frame_source_end_sec,
         visible_source_start_sec: frame_source_start_sec.min(frame_source_end_sec),
         visible_source_end_sec: frame_source_start_sec.max(frame_source_end_sec),
+        cut_start,
+        cut_end,
     }
 }
 
@@ -117,6 +185,8 @@ fn project_take_members(
                         interval.end_frame_exclusive,
                         &projection,
                         frame_period_ms,
+                        interval.cut_start,
+                        interval.cut_end,
                     ),
                     projection.effective_rate,
                 ));
@@ -159,6 +229,10 @@ fn project_take_members(
             transition_width_sec,
             transition_frames: None,
             rate,
+            note: None,
+            cut_start: false,
+            cut_end: false,
+            source_key: None,
             priority,
             seq: created_seq,
             z_order: 0,
@@ -225,6 +299,10 @@ fn project_group_block(
                     transition_width_sec,
                     transition_frames: None,
                     rate: 1.0,
+                    note: None,
+                    cut_start: false,
+                    cut_end: false,
+                    source_key: None,
                     priority,
                     seq: block.created_seq,
                     z_order: 0,
@@ -279,6 +357,10 @@ fn project_user_block(
                     transition_width_sec: block.transition_out_sec,
                     transition_frames: None,
                     rate: 1.0,
+                    note: None,
+                    cut_start: false,
+                    cut_end: false,
+                    source_key: None,
                     priority: if block.manual { 4 } else { 3 },
                     seq: block.created_seq,
                     z_order: 0,
@@ -337,6 +419,10 @@ pub fn project_single_user_block(
         kind: candidate.kind,
         members: candidate.members,
         value: candidate.value,
+        source_note: candidate.note,
+        source_key: candidate.source_key,
+        cut_start: candidate.cut_start,
+        cut_end: candidate.cut_end,
         base_cover: candidate.base_cover,
     }))
 }
@@ -376,6 +462,10 @@ pub fn project_logical_user_block(
         kind: first.kind,
         members,
         value: block.value,
+        source_note: first.note,
+        source_key: first.source_key.clone(),
+        cut_start: first.cut_start,
+        cut_end: first.cut_end,
         base_cover: block.base_cover.clone(),
     }))
 }
@@ -481,7 +571,11 @@ fn cover_intervals_for_base(
                 {
                     continue;
                 }
-                if cover.full && anchor_matches(base_span, span) {
+                if cover.full
+                    && anchor_matches(base_span, span)
+                    && span.source_start_sec <= base_span.source_start_sec + 1e-7
+                    && span.source_end_sec >= base_span.source_end_sec - 1e-7
+                {
                     return vec![(base.start, base.end)];
                 }
                 let Some(clip) = timeline.clips.iter().find(|clip| clip.id == span.clip_id) else {
@@ -571,6 +665,8 @@ fn base_piece_candidate(
         end,
         &projection,
         frame_period_ms,
+        piece.cut_start && start == base.start,
+        piece.cut_end && end == base.end,
     )];
     piece.base_cover = Some(BaseCover {
         spans: vec![piece_span],
@@ -640,8 +736,17 @@ pub fn compose_param_block_view(
                 interval.end_frame_exclusive,
                 &base.projection,
                 frame_period_ms,
+                interval.cut_start,
+                interval.cut_end,
             )],
             value: None,
+            note: base.note,
+            cut_start: interval.cut_start,
+            cut_end: interval.cut_end,
+            source_key: Some(format!(
+                "{}|{}|{}",
+                base.span.clip_id, base.span.take_id, interval.cycle
+            )),
             transition_width_sec: None,
             transition_frames: None,
             rate: base.rate,
@@ -730,13 +835,30 @@ pub fn compose_param_block_view(
     }
 
     accepted.sort_by_key(|candidate| (candidate.start, candidate.end, candidate.id.clone()));
+    for candidate in &mut accepted {
+        if candidate.source_key.is_none() {
+            candidate.source_key = first_member_source_key(&candidate.members);
+        }
+        if candidate.members.len() == 1 && !matches!(candidate.kind, ProjectedBlockKind::Grouped) {
+            candidate.note = source_note_for_member(timeline, &candidate.members[0]);
+        }
+        candidate.cut_start = candidate
+            .members
+            .first()
+            .is_some_and(|member| member.cut_start);
+        candidate.cut_end = candidate
+            .members
+            .last()
+            .is_some_and(|member| member.cut_end);
+    }
 
     // 过渡只作用于相邻块，宽度受本块与右块限制。
     for index in 0..accepted.len().saturating_sub(1) {
         let (left, right) = accepted.split_at_mut(index + 1);
         let prev = &mut left[index];
         let next = &right[0];
-        if prev.end != next.start {
+        if prev.end != next.start || prev.source_key.is_none() || prev.source_key != next.source_key
+        {
             continue;
         }
         let Some(width_sec) = prev.transition_width_sec else {
@@ -764,6 +886,10 @@ pub fn compose_param_block_view(
             kind: candidate.kind,
             members: candidate.members,
             value: candidate.value,
+            source_note: candidate.note,
+            source_key: candidate.source_key,
+            cut_start: candidate.cut_start,
+            cut_end: candidate.cut_end,
             base_cover: candidate.base_cover,
         })
         .collect();
@@ -795,7 +921,7 @@ mod tests {
                 "id":"clip","track_id":"root","name":"clip","start_sec":start_sec,"length_sec":2.0,
                 "takes":[{"id":"take","source_path":"a.wav","source_start_sec":source_start_sec,
                     "source_end_sec":source_start_sec + 2.0,
-                    "syllable_analysis":{"algorithm":"test","algorithmVersion":1,"sourceDigest":"d",
+                    "syllable_analysis":{"algorithm":"test","algorithmVersion":1,"sourceDigest":"d","analyzedWindowSec":[0.0,4.0],
                         "sourceSpansSec":[{"startSec":0.0,"endSec":0.5},{"startSec":0.5,"endSec":1.0}]}}]
             }],
             "project_sec":4,"bpm":120
@@ -843,6 +969,117 @@ mod tests {
     }
 
     #[test]
+    fn compose_keeps_the_left_cut_block_at_clip_start() {
+        let mut song = timeline(2.0, 1.0);
+        song.clips[0].takes[0].syllable_analysis =
+            Some(crate::pitch_analysis::TakeSyllableAnalysis {
+                algorithm: "test".into(),
+                algorithm_version: 1,
+                source_digest: "d".into(),
+                source_spans_sec: vec![crate::pitch_analysis::SyllableSpan {
+                    start_sec: 1.0,
+                    end_sec: 1.5,
+                    midi_note: Some(60.0),
+                }],
+                analyzed_window_sec: [1.0, 3.0],
+            });
+        let view =
+            compose_param_block_view(&song, "root", &ParamBlockEditSet::default(), 5.0).unwrap();
+        assert_eq!(view.blocks[0].start_frame, 400);
+        assert_eq!(view.blocks[0].end_frame_exclusive, 500);
+        assert_eq!(view.blocks[0].source_note, Some(60.0));
+    }
+
+    #[test]
+    fn overlapping_spans_trim_the_later_start_instead_of_dropping_it() {
+        let base = super::super::base::base_blocks_for_root(&timeline(0.0, 0.0), "root", 5.0);
+        assert_eq!(base.len(), 2);
+        let mut song = timeline(0.0, 0.0);
+        song.clips[0].takes[0].syllable_analysis =
+            Some(crate::pitch_analysis::TakeSyllableAnalysis {
+                algorithm: "test".into(),
+                algorithm_version: 1,
+                source_digest: "d".into(),
+                source_spans_sec: vec![
+                    crate::pitch_analysis::SyllableSpan {
+                        start_sec: 0.0,
+                        end_sec: 0.6,
+                        midi_note: None,
+                    },
+                    crate::pitch_analysis::SyllableSpan {
+                        start_sec: 0.4,
+                        end_sec: 0.9,
+                        midi_note: None,
+                    },
+                ],
+                analyzed_window_sec: [0.0, 2.0],
+            });
+        let normalized = super::super::base::base_blocks_for_root(&song, "root", 5.0);
+        assert_eq!(normalized.len(), 2);
+        assert_eq!(normalized[0].span.source_start_sec, 0.0);
+        assert_eq!(normalized[0].span.source_end_sec, 0.6);
+        assert_eq!(normalized[1].span.source_start_sec, 0.6);
+        assert_eq!(normalized[1].span.source_end_sec, 0.9);
+    }
+
+    #[test]
+    fn full_base_cover_only_suppresses_the_range_it_still_covers() {
+        let mut song = timeline(0.0, 0.0);
+        song.clips[0].takes[0].syllable_analysis =
+            Some(crate::pitch_analysis::TakeSyllableAnalysis {
+                algorithm: "test".into(),
+                algorithm_version: 1,
+                source_digest: "d".into(),
+                source_spans_sec: vec![crate::pitch_analysis::SyllableSpan {
+                    start_sec: 0.9,
+                    end_sec: 1.6,
+                    midi_note: None,
+                }],
+                analyzed_window_sec: [0.0, 2.0],
+            });
+        let edits = ParamBlockEditSet {
+            schema_version: 2,
+            revision: 1,
+            blocks: vec![UserParamBlock {
+                id: "partial".into(),
+                geometry: BlockGeometry::Take {
+                    members: vec![TakeSpan {
+                        clip_id: "clip".into(),
+                        take_id: "take".into(),
+                        cycle: 0,
+                        source_start_sec: 0.5,
+                        source_end_sec: 1.2,
+                        syllable_id: None,
+                        label: BlockLabel::Syllable,
+                    }],
+                },
+                deleted: false,
+                manual: false,
+                value: None,
+                transition_out_sec: None,
+                created_seq: 1,
+                base_cover: Some(BaseCover {
+                    spans: vec![TakeSpan {
+                        clip_id: "clip".into(),
+                        take_id: "take".into(),
+                        cycle: 0,
+                        source_start_sec: 0.5,
+                        source_end_sec: 1.2,
+                        syllable_id: None,
+                        label: BlockLabel::Syllable,
+                    }],
+                    full: true,
+                }),
+            }],
+        };
+        let view = compose_param_block_view(&song, "root", &edits, 5.0).unwrap();
+        assert!(view
+            .blocks
+            .iter()
+            .any(|block| block.kind == ProjectedBlockKind::Base && block.start_frame == 240));
+    }
+
+    #[test]
     fn base_blocks_follow_slip_and_merge_suppresses_base() {
         let song = timeline(0.0, 0.0);
         let base =
@@ -882,23 +1119,30 @@ mod tests {
             "id":"A","track_id":"root","name":"A","start_sec":0.0,"length_sec":2.0,
             "takes":[{"id":"take-a","source_path":"a.wav","source_start_sec":0.0,
                 "source_end_sec":2.0,
-                "syllable_analysis":{"algorithm":"test","algorithmVersion":1,"sourceDigest":"a",
+                "syllable_analysis":{"algorithm":"test","algorithmVersion":1,"sourceDigest":"a","analyzedWindowSec":[0.0,4.0],
                     "sourceSpansSec":[{"startSec":0.0,"endSec":0.5},{"startSec":0.5,"endSec":1.0}]}}]
         });
         let mut b = serde_json::json!({
             "id":"B","track_id":"root","name":"B","start_sec":0.2,"length_sec":1.0,
             "takes":[{"id":"take-b","source_path":"b.wav","source_start_sec":0.0,
                 "source_end_sec":1.0,
-                "syllable_analysis":{"algorithm":"test","algorithmVersion":1,"sourceDigest":"b",
+                "syllable_analysis":{"algorithm":"test","algorithmVersion":1,"sourceDigest":"b","analyzedWindowSec":[0.0,4.0],
                     "sourceSpansSec":[{"startSec":0.0,"endSec":0.5}]}}]
         });
-        let clips = if reverse { vec![b.take(), a.take()] } else { vec![a.take(), b.take()] };
+        let clips = if reverse {
+            vec![b.take(), a.take()]
+        } else {
+            vec![a.take(), b.take()]
+        };
         let mut timeline: TimelineState = serde_json::from_value(serde_json::json!({
             "tracks":[{"id":"root","name":"Root","order":0}],
             "clips": clips,
             "project_sec":4,"bpm":120
-        })).unwrap();
-        for clip in &mut timeline.clips { clip.normalize_takes(); }
+        }))
+        .unwrap();
+        for clip in &mut timeline.clips {
+            clip.normalize_takes();
+        }
         timeline
     }
 

@@ -599,11 +599,11 @@ pub fn normalize_events(events: Vec<GameNoteEvent>) -> Vec<GameNoteEvent> {
 ///
 /// 只保留浊音事件；显示层需要连续覆盖时由调用方决定是否补休止。这里不补，
 /// 因为静音不是音节，不能把休止伪装成参数块。
-pub fn voiced_spans(events: &[GameNoteEvent]) -> Vec<(f64, f64)> {
+pub fn voiced_spans(events: &[GameNoteEvent]) -> Vec<(f64, f64, f32)> {
     events
         .iter()
         .filter(|event| event.voiced)
-        .map(|event| (event.start_sec, event.end_sec))
+        .map(|event| (event.start_sec, event.end_sec, event.midi_note))
         .collect()
 }
 
@@ -617,7 +617,7 @@ pub fn syllable_spans_for_window(
     events: &[GameNoteEvent],
     window_start_sec: f64,
     window_end_sec: f64,
-) -> Vec<(f64, f64)> {
+) -> Vec<(f64, f64, f32)> {
     if !(window_start_sec.is_finite()
         && window_end_sec.is_finite()
         && window_end_sec > window_start_sec + 1e-9)
@@ -625,11 +625,13 @@ pub fn syllable_spans_for_window(
         return Vec::new();
     }
     let mut out = Vec::new();
-    for (start, end) in voiced_spans(events) {
-        let start = start.max(window_start_sec).min(window_end_sec);
-        let end = end.max(window_start_sec).min(window_end_sec);
+    for (source_start, source_end, note) in voiced_spans(events) {
+        let start = source_start.max(window_start_sec).min(window_end_sec);
+        let end = source_end.max(window_start_sec).min(window_end_sec);
+        // Clipping changes the geometry, not the note's identity. Keep the
+        // model's pitch even when only a sliver of the note is audible.
         if end > start + 1e-9 {
-            out.push((start, end));
+            out.push((start, end, note));
         }
     }
     out.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -871,7 +873,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             syllable_spans_for_window(&first, 0.0, 0.5),
-            vec![(0.0, 0.5)]
+            vec![(0.0, 0.5, 60.0)]
         );
         let mut second = cache
             .get_or_compute(cache_key(1), || {
@@ -881,7 +883,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             syllable_spans_for_window(&second, 1.0, 1.5),
-            vec![(1.0, 1.5)]
+            vec![(1.0, 1.5, 60.0)]
         );
         second.clear();
         assert_eq!(
@@ -1017,7 +1019,7 @@ mod tests {
         ];
         assert_eq!(
             syllable_spans_for_window(&events, 1.0, 2.0),
-            vec![(1.0, 1.5), (1.5, 2.0)]
+            vec![(1.0, 1.5, 62.0), (1.5, 2.0, 64.0)]
         );
     }
 
@@ -1054,7 +1056,7 @@ mod tests {
         assert!(events.iter().any(|event| event.voiced), "{events:?}");
         assert!(syllable_spans_for_window(&events, 0.0, 3.0)
             .iter()
-            .any(|(start, end)| *end > *start + 0.1));
+            .any(|(start, end, _)| *end > *start + 0.1));
         for _ in 0..35 {
             assert_eq!(
                 analyze_source_file(&wav_path, &dir, GameInferenceConfig::default())

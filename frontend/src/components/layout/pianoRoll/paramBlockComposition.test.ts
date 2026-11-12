@@ -453,4 +453,143 @@ describe("paramBlockComposition", () => {
         expect(view.blocks[0]?.startFrame).toBe(200);
         expect(view.blocks[0]?.endFrameExclusive).toBe(400);
     });
+
+    it("keeps a left-cut note at the Clip edge with its source note", () => {
+        const trimmed: ParamBlockSourceClip = {
+            id: "clip",
+            trackId: "root",
+            startSec: 0,
+            lengthSec: 1.4,
+            sourceStartSec: 0.3,
+            sourceEndSec: 1.7,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: false,
+            syllableSpansSec: [
+                { startSec: 0.2, endSec: 0.8, note: 60 },
+                { startSec: 0.9, endSec: 1.4, note: 62 },
+            ],
+            syllableAnalysisWindowSec: [0.2, 1.7],
+        };
+        const view = composeParamBlockView(
+            "root",
+            [trimmed],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            5,
+        );
+        expect(view.analysisPending).toBe(false);
+        expect(view.blocks[0]?.startFrame).toBe(0);
+        expect(view.blocks[0]?.endFrameExclusive).toBe(100);
+        expect(view.blocks[0]?.cutStart).toBe(true);
+        expect(view.blocks[0]?.sourceNote).toBe(60);
+    });
+
+    it("trims overlapping spans instead of dropping the earlier left-cut span", () => {
+        const overlapped: ParamBlockSourceClip = {
+            ...clip,
+            syllableSpansSec: [
+                { startSec: 0, endSec: 0.6, note: 60 },
+                { startSec: 0.4, endSec: 0.9, note: 62 },
+            ],
+        };
+        const view = composeParamBlockView(
+            "root",
+            [overlapped],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            5,
+        );
+        expect(view.blocks.map((block) => [block.startFrame, block.endFrameExclusive])).toEqual([
+            [0, 120],
+            [120, 180],
+        ]);
+    });
+
+    it("full cover only suppresses the base range it still geometrically covers", () => {
+        const base: ParamBlockSourceClip = {
+            ...clip,
+            syllableSpansSec: [{ startSec: 0.9, endSec: 1.6 }],
+        };
+        const edits: ParamBlockEditSet = {
+            schemaVersion: 2,
+            revision: 1,
+            blocks: [
+                {
+                    id: "partial",
+                    geometry: {
+                        kind: "take",
+                        members: [
+                            {
+                                clipId: "clip",
+                                takeId: "clip_take_1",
+                                cycle: 0,
+                                sourceStartSec: 0.5,
+                                sourceEndSec: 1.2,
+                                label: "syllable",
+                            },
+                        ],
+                    },
+                    createdSeq: 1,
+                    baseCover: {
+                        full: true,
+                        spans: [
+                            {
+                                clipId: "clip",
+                                takeId: "clip_take_1",
+                                cycle: 0,
+                                sourceStartSec: 0.5,
+                                sourceEndSec: 1.2,
+                                label: "syllable",
+                            },
+                        ],
+                    },
+                },
+            ],
+        };
+        const view = composeParamBlockView("root", [base], edits, 5);
+        expect(view.blocks.some((block) => block.kind === "base" && block.startFrame === 240)).toBe(
+            true,
+        );
+    });
+
+    it("crossing clips keep the upper block and expose lower remainders without holes", () => {
+        const lower: ParamBlockSourceClip = {
+            id: "A",
+            trackId: "root",
+            startSec: 0,
+            lengthSec: 2,
+            sourceStartSec: 0,
+            sourceEndSec: 2,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: false,
+            syllableSpansSec: [{ startSec: 0, endSec: 1 }],
+            syllableAnalysisWindowSec: [0, 2],
+        };
+        const upper: ParamBlockSourceClip = {
+            id: "B",
+            trackId: "root",
+            startSec: 0.2,
+            lengthSec: 0.6,
+            sourceStartSec: 0.7,
+            sourceEndSec: 1.3,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: false,
+            syllableSpansSec: [{ startSec: 0.4, endSec: 1.0 }],
+            syllableAnalysisWindowSec: [0.4, 1.3],
+        };
+        const view = composeParamBlockView(
+            "root",
+            [lower, upper],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            5,
+        );
+        const ranges = view.blocks.map((block) => [block.startFrame, block.endFrameExclusive]);
+        expect(ranges).toEqual([
+            [0, 40],
+            [40, 100],
+            [100, 200],
+        ]);
+        expect(view.blocks[1]?.cutStart).toBe(true);
+    });
 });

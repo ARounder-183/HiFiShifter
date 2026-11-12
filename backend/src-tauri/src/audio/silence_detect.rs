@@ -576,9 +576,18 @@ mod tests {
             algorithm: "test".into(),
             algorithm_version: 1,
             source_digest: "d".into(),
+            analyzed_window_sec: [0.0, 0.0],
             source_spans_sec: vec![
-                crate::pitch_analysis::SyllableSpan { start_sec: 0.0, end_sec: 1.0 },
-                crate::pitch_analysis::SyllableSpan { start_sec: 2.0, end_sec: 3.0 },
+                crate::pitch_analysis::SyllableSpan {
+                    start_sec: 0.0,
+                    end_sec: 1.0,
+                    midi_note: None,
+                },
+                crate::pitch_analysis::SyllableSpan {
+                    start_sec: 2.0,
+                    end_sec: 3.0,
+                    midi_note: None,
+                },
             ],
         });
         let take = take.clone();

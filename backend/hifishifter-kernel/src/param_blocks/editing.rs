@@ -2300,6 +2300,59 @@ pub fn restore_game_block_ranges(
 }
 
 #[cfg(test)]
+mod window_merge_tests {
+    use crate::param_blocks::types::GameBlockBaseline;
+
+    fn span(start: f64, end: f64) -> crate::pitch_analysis::SyllableSpan {
+        crate::pitch_analysis::SyllableSpan {
+            start_sec: start,
+            end_sec: end,
+            midi_note: Some(60.0),
+        }
+    }
+
+    #[test]
+    fn baseline_merge_widens_the_analyzed_window() {
+        let mut baseline = GameBlockBaseline {
+            revision: 1,
+            algorithm: crate::game_onnx::GAME_ALGORITHM.into(),
+            algorithm_version: crate::game_onnx::GAME_ALGORITHM_VERSION,
+            source_spans_sec: vec![span(0.9, 1.4)],
+            analyzed_window_sec: [0.9, 2.0],
+        };
+        baseline.merge_window(
+            crate::game_onnx::GAME_ALGORITHM,
+            crate::game_onnx::GAME_ALGORITHM_VERSION,
+            [0.3, 2.0],
+            &[span(0.3, 0.8), span(0.9, 1.4)],
+        );
+        assert_eq!(baseline.analyzed_window_sec, [0.3, 2.0]);
+        assert_eq!(baseline.source_spans_sec.len(), 2);
+        assert_eq!(baseline.source_spans_sec[0].start_sec, 0.3);
+        assert_eq!(baseline.source_spans_sec[1].start_sec, 0.9);
+    }
+
+    #[test]
+    fn algorithm_change_replaces_the_baseline() {
+        let mut baseline = GameBlockBaseline {
+            revision: 1,
+            algorithm: "old".into(),
+            algorithm_version: 1,
+            source_spans_sec: vec![span(0.9, 1.4)],
+            analyzed_window_sec: [0.9, 2.0],
+        };
+        baseline.merge_window(
+            crate::game_onnx::GAME_ALGORITHM,
+            crate::game_onnx::GAME_ALGORITHM_VERSION,
+            [0.3, 2.0],
+            &[span(0.3, 1.4)],
+        );
+        assert_eq!(baseline.source_spans_sec.len(), 1);
+        assert_eq!(baseline.analyzed_window_sec, [0.3, 2.0]);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::param_blocks::compose::compose_param_block_view;
@@ -2312,7 +2365,7 @@ mod tests {
             "clips":[{
                 "id":"clip","track_id":"root","name":"clip","start_sec":0.0,"length_sec":2.0,
                 "takes":[{"id":"take","source_path":"a.wav","source_start_sec":0.0,"source_end_sec":2.0,
-                    "syllable_analysis":{"algorithm":"test","algorithmVersion":1,"sourceDigest":"d",
+                    "syllable_analysis":{"algorithm":"test","algorithmVersion":1,"sourceDigest":"d","analyzedWindowSec":[0.0,4.0],
                         "sourceSpansSec":[{"startSec":0.0,"endSec":0.5},{"startSec":0.5,"endSec":1.0}]}}]
             }],
             "project_sec":4,"bpm":120
