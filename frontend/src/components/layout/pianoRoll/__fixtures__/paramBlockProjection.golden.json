@@ -460,15 +460,7 @@
                 "sourceStartSec": 0.999,
                 "sourceEndSec": 1.001
             },
-            "expected": [
-                {
-                    "cycle": 0,
-                    "startFrame": 200,
-                    "endFrameExclusive": 201,
-                    "cutStart": false,
-                    "cutEnd": true
-                }
-            ]
+            "expected": []
         },
         {
             "name": "span-outside-window",

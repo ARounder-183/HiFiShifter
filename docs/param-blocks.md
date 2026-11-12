@@ -46,7 +46,7 @@ game baseline                      playback_rate / reverse        参数块编�
   - 由 anchor 截断出的片段在工程时间轴上是不完整的边，投影结果为 `cut_start = true`（或倒放时对应的另一侧），渲染层据此画平边而不是圆角。
 - 所有区间半开 `[startFrame, endFrameExclusive)`；投影后裁剪到 Clip 可见窗口。
 - 编辑已有成员时不再调用全局 `inverse_project`：由成员的 `frameSource*` 局部仿射映射直接求源坐标，避免 Loop 回绕 / 周期边界 / 倒放跳到成员外。
-- 宽度小于 1 帧的 base 块丢弃；用户块 resize 至少保留 1 帧。
+- 与可听窗口交叠为正但取整后不足 1 帧的 base 块提升为 1 帧保留（`positive_interval_to_frames`）；落在 Clip 可见范围之外的残片（右缘取整越过 `visible_end`）丢弃，绝不画出 Clip 外的一帧。用户块 resize 至少保留 1 帧。
 
 ## 编辑语义
 

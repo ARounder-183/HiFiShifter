@@ -23,11 +23,16 @@ pub fn window_intersection(span: (f64, f64), window: (f64, f64)) -> Option<(f64,
 }
 
 /// A positive continuous intersection that rounded to zero frames is still one
-/// visible frame; it is not an absent block.
-pub fn positive_interval_to_frames(start: u32, end: u32) -> Option<(u32, u32)> {
+/// visible frame; it is not an absent block. The fabricated frame must stay
+/// inside the clip's visible range: a sliver at the very end rounds past
+/// `visible_end`, and emitting `[visible_end, visible_end + 1)` would both draw
+/// a block outside the clip and collide with the next clip's first block —
+/// `validate_view` then rejects the whole view. The loop path applies the same
+/// guard (`start < visible_end`).
+pub fn positive_interval_to_frames(start: u32, end: u32, visible_end: u32) -> Option<(u32, u32)> {
     (end > start)
         .then_some((start, end))
-        .or_else(|| (start < MAX_FRAME).then_some((start, start + 1)))
+        .or_else(|| (start < MAX_FRAME && start < visible_end).then_some((start, start + 1)))
 }
 
 /// Cut flags for a non-loop source/window intersection. Reverse playback swaps
@@ -180,23 +185,38 @@ impl ClipProjection {
     /// Analysis, projection and the UI gate must all use this single function.
     /// A loop Clip wraps through the whole media ring; a section loop whose
     /// anchor fits inside the media uses only its own cycle. Unknown media
-    /// duration falls back to the stored source window.
+    /// duration falls back to the stored source window. A reversed Take's ring
+    /// extends **downward** from its anchor (`source_at_projected_frame`,
+    /// `take_geometry::forward_source_window` and the audio wrap in
+    /// `mixdown::build_loop_tiled_segment` all agree on that), so its section
+    /// window is `[anchor - cycle, anchor]` — the forward arm's
+    /// `[anchor, anchor + cycle)` is media that never plays.
     pub fn audible_source_window(&self) -> (f64, f64) {
         let span = (self.project_length_sec.max(0.0) * self.effective_rate).max(0.0);
         let (start, end) = if self.loop_enabled {
             let anchor = self.loop_anchor();
             let cycle = self.loop_cycle_sec.unwrap_or(0.0);
             let media = self.media_duration_sec;
+            // The ring wraps once the cycle reaches beyond one side of the
+            // media: forward past the end, reversed below zero.
+            let wraps = |anchor: f64, cycle: f64, duration: f64| {
+                if self.reversed {
+                    anchor - cycle < -1e-9 || anchor > duration + 1e-9
+                } else {
+                    anchor + cycle > duration + 1e-9 || anchor < -1e-9
+                }
+            };
             let whole_ring = media.filter(|duration| {
-                *duration > 1e-9
-                    && (cycle >= *duration - 1e-9
-                        || anchor + cycle > *duration + 1e-9
-                        || anchor < -1e-9)
+                *duration > 1e-9 && (cycle >= *duration - 1e-9 || wraps(anchor, cycle, *duration))
             });
             if let Some(duration) = whole_ring {
                 (0.0, duration)
             } else if cycle > 1e-9 && anchor.is_finite() && anchor >= -1e-9 {
-                (anchor, anchor + cycle)
+                if self.reversed {
+                    (anchor - cycle, anchor)
+                } else {
+                    (anchor, anchor + cycle)
+                }
             } else {
                 (self.source_window_start_sec, self.source_window_end_sec)
             }
@@ -436,7 +456,7 @@ fn project_non_loop_interval(
     let end = projection
         .to_frame(a.max(b), frame_period_ms)
         .min(visible_end);
-    let Some((start, end)) = positive_interval_to_frames(start, end) else {
+    let Some((start, end)) = positive_interval_to_frames(start, end, visible_end) else {
         return Vec::new();
     };
     let (cut_start, cut_end) = cut_flags_for_intersection(
@@ -675,6 +695,24 @@ fn split_loop_piece(
     while let Some(current) = queue.pop() {
         guard = guard.saturating_add(1);
         if guard > 20_000 {
+            // 有界路径必须有读数：静默 break 会把队列里剩余的片段直接丢掉，
+            // 表现为"块少了一截"。只可能由退化输入触发（如 duration_sec≈1e-8
+            // 的损坏工程），与 [pitch:trim] / [hnsep] 的有界路径同一待遇。
+            // （param_blocks 声明在 lib.rs 的宏定义之前，文本作用域够不到
+            // log_warn_limited!，这里直接调用它包装的限流实现。）
+            crate::log_limiter::emit_limited(
+                log::Level::Warn,
+                file!(),
+                line!(),
+                format_args!(
+                    "[param_blocks] loop split hit the 20,000-piece guard: clip '{}' \
+                     dropped {} queued fragment(s); media={:.6}s anchor={:.6}s",
+                    projection.clip_id,
+                    queue.len() + 1,
+                    media,
+                    anchor
+                ),
+            );
             break;
         }
         let lo = current.span.source_start_sec;
@@ -843,6 +881,29 @@ mod tests {
     }
 
     #[test]
+    fn reversed_section_loop_window_descends_from_the_anchor() {
+        // 倒放的 section loop：锚点在窗口末端，环从锚点向下延伸 —— 与
+        // source_at_projected_frame / take_geometry / mixdown 三处消费方一致。
+        let section = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":4.0,
+            "reversed":true,"loop_enabled":true,"loop_period_sec":1.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.25,
+                "source_end_sec":1.25,"reversed":true,"loop_enabled":true,"duration_sec":4.0}]
+        }));
+        let projection = ClipProjection::from_clip(&section).unwrap();
+        assert_eq!(projection.audible_source_window(), (0.25, 1.25));
+        // 越过源起点的 cycle 回绕整圈媒体：环从锚点向下越过 0。
+        let wrapped = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":4.0,
+            "reversed":true,"loop_enabled":true,"loop_period_sec":2.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.0,
+                "source_end_sec":1.0,"reversed":true,"loop_enabled":true,"duration_sec":4.0}]
+        }));
+        let wrapped_projection = ClipProjection::from_clip(&wrapped).unwrap();
+        assert_eq!(wrapped_projection.audible_source_window(), (0.0, 4.0));
+    }
+
+    #[test]
     fn audible_window_follows_rate_and_direction() {
         let forward = clip(serde_json::json!({
             "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":2.0,
@@ -867,6 +928,27 @@ mod tests {
                 .unwrap()
                 .audible_source_window(),
             (2.0, 4.0)
+        );
+    }
+
+    #[test]
+    fn a_sub_frame_sliver_at_the_clip_end_stays_inside_the_clip() {
+        // 交叠 [2.9995, 3.0] 取整后两端都落在 Clip 的最后一帧上：非 Loop 路径
+        // 不得把它"提升"成 [visible_end, visible_end+1) —— 那会画出 Clip 之外的
+        // 一帧，并与相邻 Clip 的首个块在 validate_view 里撞车（loop 路径
+        // 早已用 start < visible_end 守住同一种情况）。
+        let edge = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":2.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":1.0,"source_end_sec":3.0}]
+        }));
+        let projection = ClipProjection::from_clip(&edge).unwrap();
+        assert!(project_span(&projection, &span(2.9995, 3.5), 5.0).is_empty());
+        // 左缘的亚帧残片仍然保留（fabricate 落在可见范围内）。
+        let sliver = project_span(&projection, &span(1.0, 1.0004), 5.0);
+        assert_eq!(sliver.len(), 1);
+        assert_eq!(
+            (sliver[0].start_frame, sliver[0].end_frame_exclusive),
+            (0, 1)
         );
     }
 

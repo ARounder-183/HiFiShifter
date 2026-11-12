@@ -142,13 +142,14 @@ export function windowIntersection(
     return end > start + SOURCE_EPS ? [start, end] : null;
 }
 
-/** A positive continuous intersection rounded to one frame is still visible. */
+/** A positive continuous intersection rounded to one frame is still visible. The fabricated frame must stay inside the clip's visible range — a sliver at the very end rounds past `visibleEnd`, and emitting `[visibleEnd, visibleEnd + 1)` would collide with the next clip's first block (mirrors `projection.rs`). */
 export function positiveIntervalToFrames(
     start: number,
     end: number,
+    visibleEnd: number,
 ): readonly [number, number] | null {
     if (end > start) return [start, end];
-    return start < MAX_FRAME ? [start, start + 1] : null;
+    return start < MAX_FRAME && start < visibleEnd ? [start, start + 1] : null;
 }
 
 /** Cut flags for a non-loop source/window intersection. */
@@ -359,7 +360,7 @@ export function baseSourceSpansForClip(clip: ParamBlockSourceClip): {
     return null;
 }
 
-/** Frontend mirror of Rust `ClipProjection::audible_source_window`. */
+/** Frontend mirror of Rust `ClipProjection::audible_source_window`. A reversed Take's ring extends **downward** from its anchor (`sourceAtProjectedFrame` / audio wrap all agree), so its section window is `[anchor - cycle, anchor]`. */
 export function audibleSourceWindow(projection: ClipProjection): {
     readonly startSec: number;
     readonly endSec: number;
@@ -371,16 +372,24 @@ export function audibleSourceWindow(projection: ClipProjection): {
         const cycle = projection.loopCycleSec;
         const anchor = loopAnchor(projection);
         const media = projection.mediaDurationSec;
-        const wholeRing =
-            media !== null &&
-            media > EPS &&
-            (cycle >= media - EPS || anchor + cycle > media + EPS || anchor < -EPS);
+        // The ring wraps once the cycle reaches beyond one side of the media:
+        // forward past the end, reversed below zero.
+        const wraps = (duration: number) =>
+            projection.reversed
+                ? anchor - cycle < -EPS || anchor > duration + EPS
+                : anchor + cycle > duration + EPS || anchor < -EPS;
+        const wholeRing = media !== null && media > EPS && (cycle >= media - EPS || wraps(media));
         if (wholeRing) {
             start = 0;
             end = media as number;
         } else if (cycle > EPS && Number.isFinite(anchor) && anchor >= -EPS) {
-            start = anchor;
-            end = anchor + cycle;
+            if (projection.reversed) {
+                start = anchor - cycle;
+                end = anchor;
+            } else {
+                start = anchor;
+                end = anchor + cycle;
+            }
         } else {
             start = projection.sourceWindowStartSec;
             end = projection.sourceWindowEndSec;
@@ -527,7 +536,7 @@ function projectNonLoopSpanPart<T extends ProjectableTakeSpan>(
     const b = project(endSec);
     const start = Math.max(visibleStart, toFrame(Math.min(a, b), framePeriodMs));
     const end = Math.min(visibleEnd, toFrame(Math.max(a, b), framePeriodMs));
-    const interval = positiveIntervalToFrames(start, end);
+    const interval = positiveIntervalToFrames(start, end, visibleEnd);
     if (interval === null) return [];
     const [cutStart, cutEnd] = cutFlagsForIntersection(
         [part.span.sourceStartSec, part.span.sourceEndSec],

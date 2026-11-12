@@ -49,8 +49,11 @@ describe("paramBlockProjection", () => {
     it("shares window intersection and one-frame frame algebra", () => {
         expect(windowIntersection([0.5, 1.001], [1, 3])).toEqual([1, 1.001]);
         expect(windowIntersection([0.5, 1], [1, 3])).toBeNull();
-        expect(positiveIntervalToFrames(40, 40)).toEqual([40, 41]);
-        expect(positiveIntervalToFrames(40, 42)).toEqual([40, 42]);
+        expect(positiveIntervalToFrames(40, 40, 200)).toEqual([40, 41]);
+        expect(positiveIntervalToFrames(40, 42, 200)).toEqual([40, 42]);
+        // 一帧的提升不得越过 Clip 可见范围的右缘（与 loop 路径同守卫）。
+        expect(positiveIntervalToFrames(200, 200, 200)).toBeNull();
+        expect(positiveIntervalToFrames(200, 201, 200)).toEqual([200, 201]);
         expect(cutFlagsForIntersection([0.6, 1.4], [1, 3], false)).toEqual([true, false]);
         expect(cutFlagsForIntersection([1.6, 2.4], [1, 2], true)).toEqual([true, false]);
         expect(analysisWindowStatus({ startSec: 1, endSec: 3 }, [1, 3], [1])).toBe("current");
