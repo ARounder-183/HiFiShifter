@@ -36,7 +36,9 @@ fn clip(
             start_sec: span.0,
             end_sec: span.1,
             midi_note: Some(span.2),
-            event_id: None,
+            event_id: Some(hifishifter_kernel::pitch_analysis::source_event_id(
+                span.0, span.1,
+            )),
         }],
         analyzed_window_sec: [0.0, 8.0],
     });

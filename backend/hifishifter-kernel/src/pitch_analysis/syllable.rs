@@ -787,6 +787,33 @@ mod tests {
     }
 
     #[test]
+    fn normalize_source_spans_assigns_stable_event_ids() {
+        let spans = normalize_source_spans(vec![
+            SyllableSpan {
+                start_sec: 0.2,
+                end_sec: 0.5,
+                midi_note: Some(62.0),
+                event_id: None,
+            },
+            SyllableSpan {
+                start_sec: 0.046,
+                end_sec: 0.252,
+                midi_note: Some(64.0),
+                event_id: None,
+            },
+        ]);
+        assert_eq!(spans[0].start_sec, 0.046);
+        assert_eq!(
+            spans[0].event_id.as_deref(),
+            Some("0.046000000:0.252000000")
+        );
+        assert_eq!(
+            spans[1].event_id.as_deref(),
+            Some("0.200000000:0.500000000")
+        );
+    }
+
+    #[test]
     fn full_source_spans_clip_into_the_audible_window_with_their_notes() {
         let clipped = clip_spans_to_window(
             &[

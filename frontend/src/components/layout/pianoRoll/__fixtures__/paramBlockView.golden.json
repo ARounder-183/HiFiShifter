@@ -36,9 +36,11 @@
                             "note": 64
                         }
                     ],
-                    "syllableAnalysisWindowSec": [0.6, 3]
+                    "syllableAnalysisWindowSec": [0.6, 3],
+                    "syllableEventIds": ["0.600000000:1.400000000"]
                 }
-            ]
+            ],
+            "syllableEventIds": ["0.600000000:1.400000000"]
         },
         {
             "id": "B",
@@ -75,9 +77,11 @@
                             "note": 62
                         }
                     ],
-                    "syllableAnalysisWindowSec": [1.18, 2.2]
+                    "syllableAnalysisWindowSec": [1.18, 2.2],
+                    "syllableEventIds": ["1.180000000:1.500000000"]
                 }
-            ]
+            ],
+            "syllableEventIds": ["1.180000000:1.500000000"]
         }
     ],
     "expected": [
@@ -88,7 +92,8 @@
             "cutStart": true,
             "cutEnd": false,
             "sourceKey": "A|take|0",
-            "sourceNote": 64
+            "sourceNote": 64,
+            "sourceEventId": "0.600000000:1.400000000"
         },
         {
             "startFrame": 100,
@@ -97,7 +102,8 @@
             "cutStart": true,
             "cutEnd": false,
             "sourceKey": "B|take|0",
-            "sourceNote": 62
+            "sourceNote": 62,
+            "sourceEventId": "1.180000000:1.500000000"
         }
     ]
 }

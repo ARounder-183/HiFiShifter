@@ -75,6 +75,7 @@ describe("paramBlockComposition", () => {
                 cutStart: block.cutStart,
                 cutEnd: block.cutEnd,
                 sourceKey: block.sourceKey,
+                sourceEventId: block.sourceEventId,
                 sourceNote: block.sourceNote,
             })),
         ).toEqual(viewFixture.expected);

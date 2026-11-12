@@ -66,6 +66,36 @@ describe("syllable spans v7 persistence", () => {
         ]);
     });
 
+    it("wire payload preserves explicit event ids and the GAME baseline", () => {
+        const take = wireTake({
+            syllable_spans_sec: [
+                [0.1, 0.6],
+                [0.6, 1.1],
+            ],
+            syllable_notes: [60, 62],
+            syllable_event_ids: ["event-1", "event-2"],
+            syllable_analysis_window_sec: [0, 2],
+            game_block_baseline: {
+                revision: 1,
+                algorithm: "game",
+                algorithm_version: 1,
+                source_spans_sec: [
+                    { start_sec: 0.1, end_sec: 0.6, event_id: "event-1" },
+                    { start_sec: 0.6, end_sec: 1.1, event_id: "event-2" },
+                ],
+                analyzed_window_sec: [0, 2],
+            },
+        });
+        const parsed = parseTimelineClipTake(take);
+        expect(parsed.syllableEventIds).toEqual(["event-1", "event-2"]);
+        expect(parsed.syllableSpansSec?.map((span) => span.eventId)).toEqual([
+            "event-1",
+            "event-2",
+        ]);
+        expect(parsed.gameBlockBaseline?.sourceSpansSec?.[0]?.eventId).toBe("event-1");
+        expect(parsed.gameBlockBaseline?.analyzedWindowSec).toEqual([0, 2]);
+    });
+
     it("音节区间不会从 Take 反向丢掉", () => {
         const take: ClipTakeInfo = {
             id: "take-a",

@@ -28,6 +28,7 @@ function clip(overrides: Partial<ParamBlockSourceClip> = {}): ParamBlockSourceCl
         loopEnabled: false,
         syllableSpansSec: [{ startSec: 0.6, endSec: 1.4, note: 64 }],
         syllableAnalysisWindowSec: [0.6, 3],
+        syllableEventIds: ["event-64"],
         ...overrides,
     } as ParamBlockSourceClip;
 }
@@ -95,6 +96,31 @@ describe("left-cut parameter block visibility", () => {
         expect(values[0]?.averageValue).toBe(64);
         expect(values[0]?.centerPolicy).toBe("fallback");
         expect(scene.fills.length).toBeGreaterThan(0);
+        expect(scene.items.length).toBeGreaterThan(0);
+    });
+
+    it("keeps a large left-cut block visible with a stale analysis window", () => {
+        const leftCut = clip({
+            startSec: 0.054,
+            lengthSec: 1.946,
+            sourceStartSec: 0.054,
+            sourceEndSec: 2,
+            syllableSpansSec: [
+                { startSec: 0.046, endSec: 0.252, note: 64, eventId: "event-64" },
+                { startSec: 0.266, endSec: 0.5, note: 62, eventId: "event-62" },
+            ],
+            syllableNotes: [64, 62],
+            syllableEventIds: ["event-64", "event-62"],
+            syllableAnalysisWindowSec: [0.08, 1.5],
+        });
+        const { view, values, scene } = sceneFor([leftCut]);
+        expect(view.blocks).toHaveLength(2);
+        expect(view.blocks[0]?.cutStart).toBe(true);
+        expect(view.blocks[0]?.sourceEventId).toBe("event-64");
+        expect(view.blocks[1]?.sourceEventId).toBe("event-62");
+        expect(view.analysisPending).toBe(true);
+        expect(values[0]?.averageValue).toBe(64);
+        expect(scene.fills).toHaveLength(2);
         expect(scene.items.length).toBeGreaterThan(0);
     });
 

@@ -285,6 +285,7 @@ export function useParamBlockRenderSpec(
                           cutStart: block.cutStart,
                           cutEnd: block.cutEnd,
                           sourceKey: block.sourceKey,
+                          sourceEventId: block.sourceEventId,
                           centerPolicy: block.centerPolicy ?? "live",
                       }))
                     : plan.viewAfter.blocks.map((block) => {

@@ -982,6 +982,33 @@ mod tests {
     }
 
     #[test]
+    fn full_source_voiced_spans_are_not_clipped_by_the_audible_window() {
+        let events = vec![
+            GameNoteEvent {
+                start_sec: 0.02,
+                end_sec: 0.30,
+                midi_note: 64.0,
+                voiced: true,
+            },
+            GameNoteEvent {
+                start_sec: 0.35,
+                end_sec: 0.50,
+                midi_note: 62.0,
+                voiced: true,
+            },
+        ];
+        let full = full_source_voiced_spans(&events);
+        assert_eq!(full[0], (0.02, 0.30, 64.0));
+        let visible = syllable_spans_for_window(&events, 0.054, 0.45);
+        assert_eq!(visible[0], (0.054, 0.30, 64.0));
+        assert_eq!(visible[1], (0.35, 0.45, 62.0));
+        assert_eq!(
+            full[0].0, 0.02,
+            "display clipping must not rewrite persisted identity"
+        );
+    }
+
+    #[test]
     fn split_waveform_never_exceeds_the_limit() {
         let samples = vec![0.01f32; GAME_MAX_CHUNK_SAMPLES * 2 + 10];
         let chunks = split_waveform(&samples);
