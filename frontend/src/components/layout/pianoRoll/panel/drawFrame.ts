@@ -31,6 +31,7 @@ type DrawFrameDeps = Pick<
     | "canvasRef"
     | "childPitchHardDisableReason"
     | "clipboardRef"
+    | "currentParamDefaultValue"
     | "detectedPitchCurves"
     | "editParam"
     | "fontFamily"
@@ -72,6 +73,7 @@ export function drawPianoRollFrame(deps: DrawFrameDeps): void {
         canvasRef,
         childPitchHardDisableReason,
         clipboardRef,
+        currentParamDefaultValue,
         detectedPitchCurves,
         editParam,
         fontFamily,
@@ -139,6 +141,7 @@ export function drawPianoRollFrame(deps: DrawFrameDeps): void {
         param: editParam,
         view: blockFrameView,
         blocks: kernelDataRef.current.paramBlocks ?? null,
+        currentParamDefaultValue,
         curves: (view) => buildCurveLayers(drawAxis, view),
     });
     kernelDataRef.current.paramEditorFrame = frame;

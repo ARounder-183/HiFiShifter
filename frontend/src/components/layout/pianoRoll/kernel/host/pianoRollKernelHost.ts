@@ -1261,27 +1261,33 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                         : Number.isFinite(block.fallbackValue)
                           ? (block.fallbackValue as number)
                           : null;
+                const boundsMidpoint =
+                    Number.isFinite(spec.valueMin) && Number.isFinite(spec.valueMax)
+                        ? (spec.valueMin + spec.valueMax) / 2
+                        : null;
+                // A derived view block must always get geometry. The midpoint is
+                // only a last-resort pixel position, never a curve value.
+                const liveCenter =
+                    liveView !== null && Number.isFinite(liveView.center) ? liveView.center : null;
                 const displayValue =
                     value ??
                     block.averageValue ??
                     fallbackValue ??
-                    (liveView !== null && Number.isFinite(liveView.center)
-                        ? liveView.center
-                        : null);
-                if (
-                    displayValue == null ||
-                    !Number.isFinite(displayValue) ||
-                    liveView == null ||
-                    !Number.isFinite(liveView.center) ||
-                    !Number.isFinite(liveView.span) ||
-                    liveView.span <= 1e-9
-                ) {
-                    return block;
-                }
+                    liveCenter ??
+                    boundsMidpoint ??
+                    0;
+                const geometryFallback =
+                    value == null &&
+                    block.averageValue == null &&
+                    fallbackValue === null &&
+                    (liveView === null ||
+                        !Number.isFinite(liveView.center) ||
+                        !Number.isFinite(liveView.span) ||
+                        liveView.span <= 1e-9);
                 const usedFallback =
                     (value === null || value === undefined) &&
                     (block.averageValue === null || block.averageValue === undefined) &&
-                    displayValue !== null;
+                    (fallbackValue !== null || geometryFallback);
                 /*
                  * 块中心的唯一投影口径：交给共用函数处理 pitch 的 +0.5，
                  * 再走与曲线同一个 valueToY。这里不能自己展开 normalized：
@@ -1365,10 +1371,18 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 (block.topPx ?? 0) + (block.heightPx ?? 0) > 0 &&
                 (block.topPx ?? 0) < viewportHeightPx,
         ) as typeof liveBlocks;
+        const defaultBlockHeightPx = blockRowHeightPx(
+            spec.valueToY ?? data().grid?.valueToY,
+            viewportHeightPx,
+            param,
+        );
         const drawableBlocks = liveBlocks.map((block) => ({
             ...block,
             topPx: block.topPx ?? 0,
-            heightPx: block.heightPx ?? 0,
+            heightPx:
+                Number.isFinite(block.heightPx) && (block.heightPx as number) > 0
+                    ? (block.heightPx as number)
+                    : defaultBlockHeightPx,
             fallback: block.centerPolicy === "fallback",
         }));
         const scene = buildParamBlockScene({

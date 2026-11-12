@@ -70,6 +70,7 @@ type PianoRollFrameAssemblyInputs = {
     viewSize: ModelDeps["viewSize"];
     // —— 当前参数与门禁 ——
     editParam: ModelDeps["editParam"];
+    currentParamDefaultValue: ModelDeps["currentParamDefaultValue"];
     pitchEnabled: ModelDeps["pitchEnabled"];
     pitchHardDisableReason: ModelDeps["pitchHardDisableReason"];
     childPitchHardDisableReason: ModelDeps["childPitchHardDisableReason"];
@@ -138,6 +139,7 @@ export function usePianoRollFrameAssembly({
     scrollLeft,
     viewSize,
     editParam,
+    currentParamDefaultValue,
     pitchEnabled,
     pitchHardDisableReason,
     childPitchHardDisableReason,
@@ -649,6 +651,7 @@ export function usePianoRollFrameAssembly({
             canvasRef,
             childPitchHardDisableReason,
             clipboardRef,
+            currentParamDefaultValue,
             detectedPitchCurves,
             editParam,
             fontFamily,

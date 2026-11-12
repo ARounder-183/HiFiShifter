@@ -368,6 +368,32 @@ describe("unvalued block fallback chain", () => {
         ).toBe(64);
     });
 
+    it("uses the nearest sample only for one-frame blocks", () => {
+        const samples = {
+            values: [64, 64],
+            startFrame: 10,
+            stride: 1,
+            framePeriodMs: 5,
+            isPitch: true,
+            param: "pitch",
+        };
+        expect(
+            resolveParamBlockFrameValue({
+                block: { startSec: 0.051, endSec: 0.055, averageValue: 58 },
+                samples,
+                param: "pitch",
+            }),
+        ).toBe(64);
+        expect(
+            resolveParamBlockFrameValue({
+                block: { startSec: 0.04, endSec: 0.045 },
+                samples: { ...samples, startFrame: 10, values: [64, 64] },
+                param: "pitch",
+                currentParamDefaultValue: 60,
+            }),
+        ).toBe(60);
+    });
+
     it("uses a same-source neighbor before the default value", () => {
         const neighbor: ParamBlock = {
             ...unvalued,
