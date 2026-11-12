@@ -7,6 +7,7 @@ use hifishifter_kernel::editor::{
     midi_import::MidiImportHost,
     ParamHost,
 };
+use hifishifter_kernel::param_blocks::projection::clip_audible_source_window as clip_audible_window;
 use hifishifter_kernel::state::*;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -296,10 +297,8 @@ struct SyllableAnalysisWorkerResult {
     analyzed: bool,
 }
 
-///
 /// 授权 PCM 的文件名含源身份与样本内容的哈希；临时父目录每个会话都会变化，
 /// 不能参与持久化身份。其他路径仍比较完整路径；此摘要不参与路径授权。
-use hifishifter_kernel::param_blocks::projection::clip_audible_source_window as clip_audible_window;
 pub(super) fn syllable_source_digest(
     source_path: &str,
     take: &hifishifter_kernel::state::ClipTake,
