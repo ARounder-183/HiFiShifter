@@ -109,7 +109,7 @@ import {
     WHEEL_ZOOM_OUT_FACTOR,
 } from "../../constants";
 import {
-    downgradeOverlapHitForPlainLeftPress,
+    resolveOverlapClickClipId,
     hitTest,
     type ClipHitRegion,
     type HitTestClip,
@@ -3121,6 +3121,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               startClientX: number;
               startClientY: number;
               clipId: string;
+              /** 单击的前景选中目标；拖拽仍使用 clipId 与原命中分区。 */
+              overlapClickClipId?: string;
               /** 命中分区：决定超过阈值后升级为拖拽（body/header）还是 trim（边缘）。 */
               region: ClipHitRegion;
               /** 按下时的内容坐标（用于换算拖拽位移）。 */
@@ -3944,6 +3946,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     ): number | null {
         if (gesture.region === "snap-offset-handle") return null;
         if (gesture.inactiveTakeId !== null) return null;
+        if (gesture.overlapClickClipId !== undefined) return secAt(event.clientX);
         if (gesture.region === "left-edge") return gesture.originStartSec;
         if (gesture.region === "right-edge") {
             return gesture.originStartSec + gesture.lengthSec;
@@ -4097,45 +4100,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     }
 
     function startPrimaryGesture(event: PointerEvent): void {
-        /*
-         * 左键的「无修饰键点击」优先归 clip 本体。
-         *
-         * 【为什么】重叠区里 `hitAt` 会按**位置**把命中改写为边缘 / 淡变包络，
-         * 这些控件在无修饰键单击时只改淡变长度或曲率 —— 用户实际感受到的是
-         * 「这段 clip 左键点不动，只能右键」。右键路径（`dispatchContextMenuAt`）
-         * 仍保留淡变专属菜单的优先级；左键只在**确实按住了编辑修饰键**时才让
-         * 控件接管，否则落到 clip 本体（选中 / 拖动）。
-         *
-         * 例外：header 控件（静音 / 链 / 共振峰 / 旋钮 / 徽标）仍是独立控件，
-         * 不能因为这条规则被吞进 clip 拖动。它们由 `resolveHeaderControl` 识别。
-         */
-        const rawHit = hitAt(event.clientX, event.clientY);
-        const modifiers = {
-            altKey: event.altKey,
-            ctrlKey: event.ctrlKey,
-            metaKey: event.metaKey,
-            shiftKey: event.shiftKey,
-        };
-        const plainLeftOverlap =
-            rawHit.kind === "clip" &&
-            rawHit.fromOverlapRegion === true &&
-            rawHit.region !== "header" &&
-            !modifiers.altKey &&
-            !modifiers.ctrlKey &&
-            !modifiers.metaKey &&
-            !modifiers.shiftKey;
-        /*
-         * 重叠区普通左键选中视觉最上层的短片段；控件归属仍用于右键与修饰键编辑。
-         */
-        const hitWithTarget =
-            plainLeftOverlap && rawHit.foregroundClip !== undefined
-                ? {
-                      ...rawHit,
-                      clip: rawHit.foregroundClip,
-                      localX: (rawHit.sec - rawHit.foregroundClip.startSec) * scroll.get().pxPerSec,
-                  }
-                : rawHit;
-        const hit = downgradeOverlapHitForPlainLeftPress(hitWithTarget, modifiers);
+        // 按下时不能把控件改成 body，否则超过阈值后只剩 clip 拖拽。
+        const hit = hitAt(event.clientX, event.clientY);
+        const overlapClickClipId = resolveOverlapClickClipId(hit, event);
         if (hit.kind === "clip" && interactions?.geometryReadOnly) {
             const intercepted = interactions.onClipPointerDownIntercept?.({
                 clipId: hit.clip.id,
@@ -4147,7 +4114,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             });
             if (!intercepted)
                 interactions.onSelectClip?.(
-                    hit.clip.id,
+                    overlapClickClipId ?? hit.clip.id,
                     event.ctrlKey || event.metaKey,
                     event.shiftKey,
                     event.clientX,
@@ -4360,6 +4327,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 startClientX: event.clientX,
                 startClientY: event.clientY,
                 clipId: hit.clip.id,
+                overlapClickClipId,
                 region: hit.region,
                 partnerClipId: hit.partnerClipId,
                 fromOverlapRegion: hit.fromOverlapRegion === true,
@@ -4401,7 +4369,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 selectionMods: resolveSelectionMods(event),
             };
             primeSelectionOnPress(
-                hit.clip.id,
+                overlapClickClipId ?? hit.clip.id,
                 hit.region,
                 gesture.kind === "pending-select" ? gesture.selectionMods : null,
                 event.clientX,
@@ -4650,6 +4618,18 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             const thresholdPx =
                 gesture.fromOverlapRegion === true ? OVERLAP_DRAG_THRESHOLD_PX : DRAG_THRESHOLD_PX;
             if (dx * dx + dy * dy < thresholdPx * thresholdPx) return;
+            if (
+                gesture.overlapClickClipId !== undefined &&
+                gesture.overlapClickClipId !== gesture.clipId
+            ) {
+                primeSelectionOnPress(
+                    gesture.clipId,
+                    gesture.region,
+                    gesture.selectionMods,
+                    gesture.startClientX,
+                    gesture.fromOverlapRegion === true,
+                );
+            }
             // 发生拖拽 → 双击待定记录失效：否则"拖拽后落点回位"（第二次按下
             // 恰好落在首次按下附近）会被误判成双击（旧实现同样在拖拽分支清空）。
             lastClipPress = null;
@@ -5390,7 +5370,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 // `clipRangeSelect`），且要与「物理 Alt 旁路 / 两键互斥」规则一致；
                 // 现读 `event.ctrlKey || event.metaKey` 既绕过绑定，也绕过互斥。
                 interactions?.onSelectClip?.(
-                    gesture.clipId,
+                    gesture.overlapClickClipId ?? gesture.clipId,
                     gesture.selectionMods.multiSelectToggleActive,
                     gesture.selectionMods.rangeSelectActive,
                     gesture.startClientX,

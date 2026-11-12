@@ -183,50 +183,35 @@ export interface HitTestArgs {
 }
 
 /**
- * 左键按下时的「重叠区控件降级」判定。
+ * 无修饰键单击重叠区时，选择视觉最上层的 clip。
  *
- * 【要解决的问题】重叠区的 `hitOverlapControl` 按位置把命中改写成淡变角 /
- * 交叉点抓手；这些控件在无修饰键单击时不改变选中，用户看到的是「左键点不中
- * clip，右键却能弹菜单」。右键需要保留淡变专属菜单，因此只在**左键按下**
- * 路径把无修饰键的重叠区命中降级为 clip 本体。
+ * 这里只解析单击的选中目标，不改命中分区或控件归属。按下时保留它作快照，
+ * 未超过拖拽阈值才用于选中；拖动仍编辑原来的边缘、淡化曲线或交叉点。
  *
- * 规则：
- * - 只在 `fromOverlapRegion` 命中上生效（普通淡变角 / 边缘的手感不变）；
- * - 任编辑修饰键（Alt / Ctrl / Cmd / Shift）按住时保留控件；
- * - header 命中不降级（header 控件有自己的消费语义）。
- *
- * @param hit 原始命中结果。
- * @param modifiers 按下时的修饰键快照。
- * @returns 应采用的命中结果；不降级时原样返回。
+ * header、非重叠控件和带修饰键的操作保留原目标，返回 undefined。
  */
-export function downgradeOverlapHitForPlainLeftPress<
-    T extends {
+export function resolveOverlapClickClipId(
+    hit: {
         readonly kind: string;
         readonly region?: ClipHitRegion;
         readonly fromOverlapRegion?: boolean;
         readonly clip?: { readonly id: string };
-        readonly laterClipId?: string;
+        readonly foregroundClip?: { readonly id: string };
     },
->(
-    hit: T,
     modifiers: {
         readonly altKey: boolean;
         readonly ctrlKey: boolean;
         readonly metaKey: boolean;
         readonly shiftKey: boolean;
     },
-): T {
-    if (hit.kind !== "clip") return hit;
-    if (hit.fromOverlapRegion !== true) return hit;
-    if (hit.region === "header") return hit;
-    if (modifiers.altKey || modifiers.ctrlKey || modifiers.metaKey || modifiers.shiftKey) {
-        return hit;
+): string | undefined {
+    if (hit.kind !== "clip" || hit.fromOverlapRegion !== true || hit.region === "header") {
+        return undefined;
     }
-    return {
-        ...hit,
-        region: "body" as const,
-        fromOverlapRegion: false,
-    } as T;
+    if (modifiers.altKey || modifiers.ctrlKey || modifiers.metaKey || modifiers.shiftKey) {
+        return undefined;
+    }
+    return hit.foregroundClip?.id ?? hit.clip?.id;
 }
 
 /**
