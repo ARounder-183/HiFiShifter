@@ -321,6 +321,10 @@ export function useParamBlockRenderSpec(
                                       block.id !== resizing.blockId),
                               grouped: block.kind === "grouped",
                               transitionSec: existing?.transitionSec,
+                              cutStart: block.cutStart,
+                              cutEnd: block.cutEnd,
+                              sourceKey: block.sourceKey,
+                              sourceEventId: block.sourceEventId,
                               centerPolicy: resized ? "locked" : "live",
                           };
                       });

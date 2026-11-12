@@ -414,7 +414,7 @@ describe("paramBlockComposition", () => {
         }
     });
 
-    it("keeps cycle>0 members when a loop span crosses the anchor", () => {
+    it("keeps both fragments of a loop span crossing the anchor in the same cycle", () => {
         const loopClip: ParamBlockSourceClip = {
             id: "loop",
             trackId: "root",
@@ -452,9 +452,93 @@ describe("paramBlockComposition", () => {
         };
         const view = composeParamBlockView("root", [loopClip], edits, 5);
         const user = view.blocks.filter((block) => block.userBlockId === "cross-anchor");
-        expect(user).toHaveLength(1);
-        expect(user[0]?.members.map((member) => member.cycle)).toEqual([0, 1]);
+        expect(user).toHaveLength(2);
+        expect(user.flatMap((block) => block.members.map((member) => member.cycle))).toEqual([
+            0, 0,
+        ]);
+        expect(user.map((block) => [block.startFrame, block.endFrameExclusive])).toEqual([
+            [0, 20],
+            [100, 120],
+        ]);
         expect(view.orphanCount).toBe(0);
+    });
+
+    it("keeps the first base block at the Clip edge after a loop left trim", () => {
+        const loopClip: ParamBlockSourceClip = {
+            id: "clip",
+            trackId: "root",
+            startSec: 0.3,
+            lengthSec: 3.7,
+            sourceStartSec: 0.3,
+            sourceEndSec: 4,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: true,
+            loopPeriodSec: 4,
+            contentDurationSec: 4,
+            syllableSpansSec: [{ startSec: 0.2, endSec: 0.6, note: 60 }],
+            syllableAnalysisWindowSec: [0, 4],
+        };
+        const view = composeParamBlockView(
+            "root",
+            [loopClip],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            5,
+        );
+        expect(view.blocks).toHaveLength(1);
+        expect(view.blocks[0]?.startFrame).toBe(60);
+        expect(view.blocks[0]?.endFrameExclusive).toBe(120);
+        expect(view.blocks[0]?.cutStart).toBe(true);
+        expect(view.blocks[0]?.sourceNote).toBe(60);
+    });
+
+    it("keeps the first user block at the Clip edge after a loop left trim", () => {
+        const loopClip: ParamBlockSourceClip = {
+            id: "clip",
+            trackId: "root",
+            startSec: 0.3,
+            lengthSec: 3.7,
+            sourceStartSec: 0.3,
+            sourceEndSec: 4,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: true,
+            loopPeriodSec: 4,
+            contentDurationSec: 4,
+            syllableSpansSec: [{ startSec: 0.2, endSec: 0.6, note: 60 }],
+            syllableAnalysisWindowSec: [0, 4],
+        };
+        const edits: ParamBlockEditSet = {
+            schemaVersion: 2,
+            revision: 1,
+            blocks: [
+                {
+                    id: "trimmed-user",
+                    geometry: {
+                        kind: "take",
+                        members: [
+                            {
+                                clipId: "clip",
+                                takeId: "clip_take_1",
+                                cycle: 0,
+                                sourceStartSec: 0.2,
+                                sourceEndSec: 0.6,
+                                label: "manual",
+                            },
+                        ],
+                    },
+                    manual: true,
+                    value: 60,
+                    createdSeq: 1,
+                },
+            ],
+        };
+        const view = composeParamBlockView("root", [loopClip], edits, 5);
+        const user = view.blocks.filter((block) => block.userBlockId === "trimmed-user");
+        expect(user).toHaveLength(1);
+        expect(user[0]?.startFrame).toBe(60);
+        expect(user[0]?.endFrameExclusive).toBe(120);
+        expect(user[0]?.cutStart).toBe(true);
     });
 
     it("moves a merged block when the Take source window slips", () => {

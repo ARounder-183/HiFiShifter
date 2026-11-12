@@ -18,7 +18,7 @@ fn projection_golden_matches_the_shared_fixture() {
             "name": "clip",
             "start_sec": clip["startSec"],
             "length_sec": clip["lengthSec"],
-            "loop_period_sec": clip["contentDurationSec"],
+            "loop_period_sec": clip["loopPeriodSec"].as_f64().or_else(|| clip["contentDurationSec"].as_f64()),
             "clip_playback_rate": clip["clipPlaybackRate"].as_f64().unwrap_or(1.0),
             "takes": [{
                 "id": "take",

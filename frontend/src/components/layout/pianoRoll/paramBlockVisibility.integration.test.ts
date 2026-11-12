@@ -124,6 +124,31 @@ describe("left-cut parameter block visibility", () => {
         expect(scene.items.length).toBeGreaterThan(0);
     });
 
+    it("draws the first Loop block at the Clip edge after a left trim", () => {
+        const looped = clip({
+            startSec: 0.3,
+            lengthSec: 3.7,
+            sourceStartSec: 0.3,
+            sourceEndSec: 4,
+            loopEnabled: true,
+            loopPeriodSec: 4,
+            contentDurationSec: 4,
+            syllableSpansSec: [{ startSec: 0.2, endSec: 0.6, note: 60, eventId: "event-loop" }],
+            syllableNotes: [60],
+            syllableEventIds: ["event-loop"],
+            syllableAnalysisWindowSec: [0, 4],
+        });
+        const { view, values, scene } = sceneFor([looped]);
+        expect(view.blocks).toHaveLength(1);
+        expect(view.blocks[0]?.startFrame).toBe(60);
+        expect(view.blocks[0]?.endFrameExclusive).toBe(120);
+        expect(view.blocks[0]?.cutStart).toBe(true);
+        expect(view.blocks[0]?.sourceEventId).toBe("event-loop");
+        expect(values[0]?.averageValue).toBe(60);
+        expect(scene.fills).toHaveLength(1);
+        expect(scene.items.length).toBeGreaterThan(0);
+    });
+
     it("draws a one-frame sub-frame intersection", () => {
         const { view, scene } = sceneFor([
             clip({ syllableSpansSec: [{ startSec: 0.5, endSec: 1.001, note: 64 }] }),

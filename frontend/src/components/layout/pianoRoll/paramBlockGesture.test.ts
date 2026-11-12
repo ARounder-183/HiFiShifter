@@ -239,17 +239,42 @@ describe("paramBlockGesture — loop / reverse", () => {
             ],
         };
         const view = composeParamBlockView("root", clips, edits, FRAME_MS);
-        expect(view.blocks).toHaveLength(1);
-        expect(view.blocks[0]!.members).toHaveLength(2);
-        for (const frame of [452, 454, 456]) {
+        /*
+         * 跨 anchor 的成员拆成**同一 cycle** 的两段：head 落在 Clip 左缘（0..7），
+         * tail 落在本周期末尾（441..454）。它们不再首尾相接，因此是两个 run，
+         * 而不是一个被误当成「连续两块」的假 run。
+         */
+        expect(view.blocks.map((block) => [block.startFrame, block.endFrameExclusive])).toEqual([
+            [0, 7],
+            [441, 454],
+        ]);
+        expect(view.blocks[0]!.cutStart).toBe(true);
+        expect(view.blocks[1]!.cutEnd).toBe(true);
+        expect(view.blocks.flatMap((block) => block.members.map((member) => member.cycle))).toEqual(
+            [0, 0],
+        );
+        for (const [blockId, frame] of [
+            ["u:0", 3],
+            ["u:1", 445],
+            ["u:1", 450],
+        ] as const) {
             const result = planParamBlockGesture({
                 clips,
                 edits,
                 framePeriodMs: FRAME_MS,
-                gesture: { kind: "split", blockId: "u", frame },
+                gesture: { kind: "split", blockId, frame },
             });
-            expect(result.ok, `frame ${frame}`).toBe(true);
+            expect(result.ok, `${blockId} frame ${frame}`).toBe(true);
         }
+        // 段外帧不可切：head 的右边界之外属于 tail，不是同一块。
+        expect(
+            planParamBlockGesture({
+                clips,
+                edits,
+                framePeriodMs: FRAME_MS,
+                gesture: { kind: "split", blockId: "u:0", frame: 100 },
+            }).ok,
+        ).toBe(false);
     });
 
     it("R8: reverse resize changes the correct source edge and never drops the block", () => {

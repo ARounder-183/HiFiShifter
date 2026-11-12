@@ -13,9 +13,10 @@ import {
     analysisWindowStatus,
     audibleSourceWindow,
     baseSourceSpansForClip,
-    normalizeLoopTakeSpans,
     projectTakeSpan,
+    projectTakeSpanPart,
     projectionForClip,
+    splitLoopTakeSpanParts,
     sourceAtProjectedFrame,
     sourceNoteEventId,
     toFrame,
@@ -162,15 +163,15 @@ function baseCandidates(
                 syllableId: identity,
                 label: analysis.label,
             };
-            const parts = normalizeLoopTakeSpans(projection, baseSpan);
+            const parts = splitLoopTakeSpanParts(projection, baseSpan);
             parts.forEach((part, partIndex) => {
                 const cycleSpan: TakeSpan = {
-                    ...part,
+                    ...part.span,
                     syllableId: parts.length > 1 ? `${identity}:part${partIndex}` : identity,
                 };
-                for (const interval of projectTakeSpan(
+                for (const interval of projectTakeSpanPart(
                     projection,
-                    cycleSpan,
+                    { ...part, span: cycleSpan },
                     framePeriodMs,
                     cycleSpan.cycle,
                 )) {
@@ -223,10 +224,10 @@ function projectTakeMembers(
             continue;
         }
         const projection = projectionForClip(clip);
-        const parts = normalizeLoopTakeSpans(projection, member);
+        const parts = splitLoopTakeSpanParts(projection, member);
         let matched = false;
         for (const part of parts) {
-            for (const interval of projectTakeSpan(projection, part, framePeriodMs)) {
+            for (const interval of projectTakeSpanPart(projection, part, framePeriodMs)) {
                 /*
                  * 用户成员是**周期特定**的：cycle=N 的成员只画第 N 个周期。
                  * 基块不同：一个 syllable span 在每个循环周期都出现，所以
@@ -234,12 +235,12 @@ function projectTakeMembers(
                  * 后续周期；用户块必须精确匹配，否则一个 cycle=0 的成员会
                  * 覆盖整段 Loop，后面的基块被错误吞掉。
                  */
-                if (interval.cycle !== part.cycle) continue;
+                if (interval.cycle !== part.span.cycle) continue;
                 matched = true;
                 projected.push({
                     start: interval.startFrame,
                     end: interval.endFrameExclusive,
-                    member: memberOf(part, interval, projection, framePeriodMs),
+                    member: memberOf(part.span, interval, projection, framePeriodMs),
                     rate: projection.rate,
                 });
             }

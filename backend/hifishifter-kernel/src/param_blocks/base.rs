@@ -5,7 +5,9 @@
 //! 关系：`compose` 消费本文件的 `BaseBlock`；本文件不写任何状态。
 //! 维护约束：没有分析结果的音频 Clip 绝不伪造“整段一块”。
 
-use super::projection::{normalize_loop_span, project_span, ClipProjection, ProjectedInterval};
+use super::projection::{
+    project_span_part, split_loop_span_parts, ClipProjection, ProjectedInterval,
+};
 use super::types::{BlockLabel, TakeKey, TakeSpan};
 use crate::state::{Clip, ClipTake, TimelineState};
 use std::cmp::Ordering;
@@ -126,7 +128,7 @@ pub fn base_blocks_for_root(
                 syllable_id: Some(identity.clone()),
                 label,
             };
-            let parts = normalize_loop_span(&projection, &base_span);
+            let parts = split_loop_span_parts(&projection, &base_span);
             let parts_len = parts.len();
             for (part_index, part) in parts.into_iter().enumerate() {
                 let syllable_id = if parts_len > 1 {
@@ -134,11 +136,11 @@ pub fn base_blocks_for_root(
                 } else {
                     Some(identity.clone())
                 };
-                for interval in project_span(&projection, &part, frame_period_ms) {
-                    if interval.cycle < part.cycle {
+                for interval in project_span_part(&projection, &part, frame_period_ms) {
+                    if interval.cycle < part.span.cycle {
                         continue;
                     }
-                    let mut cycle_span = part.clone();
+                    let mut cycle_span = part.span.clone();
                     cycle_span.cycle = interval.cycle;
                     cycle_span.syllable_id = syllable_id.clone();
                     out.push(BaseBlock {

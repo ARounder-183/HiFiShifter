@@ -7,7 +7,8 @@
 use super::base::{base_blocks_for_root, root_analysis_pending};
 use super::layout::layout_key;
 use super::projection::{
-    normalize_loop_span, project_span, source_at_projected_frame, ClipProjection,
+    project_span, project_span_part, source_at_projected_frame, split_loop_span_parts,
+    ClipProjection,
 };
 use super::types::{
     BaseCover, BlockGeometry, ParamBlockEditSet, ParamBlockView, ProjectedBlockKind,
@@ -166,14 +167,14 @@ fn project_take_members(
         };
         let projection = ClipProjection::from_clip_take(clip, take);
         let mut matched = false;
-        for part in normalize_loop_span(&projection, member) {
-            for interval in project_span(&projection, &part, frame_period_ms) {
+        for part in split_loop_span_parts(&projection, member) {
+            for interval in project_span_part(&projection, &part, frame_period_ms) {
                 /*
                  * 用户成员是周期特定的：cycle=N 只画第 N 个周期。基块
                  * 在 base_candidates 中用 < 收集后续周期；用户块若也用 <，
                  * 一个 cycle=0 成员会吞掉整段 Loop 后面的基块。
                  */
-                if interval.cycle != part.cycle {
+                if interval.cycle != part.span.cycle {
                     continue;
                 }
                 matched = true;
@@ -181,7 +182,7 @@ fn project_take_members(
                     interval.start_frame,
                     interval.end_frame_exclusive,
                     member_from(
-                        &part,
+                        &part.span,
                         interval.start_frame,
                         interval.end_frame_exclusive,
                         &projection,
@@ -1009,6 +1010,81 @@ mod tests {
         assert_eq!(view.blocks[0].start_frame, 400);
         assert_eq!(view.blocks[0].end_frame_exclusive, 500);
         assert_eq!(view.blocks[0].source_note, Some(60.0));
+    }
+
+    fn loop_left_trim_timeline() -> TimelineState {
+        let mut song = timeline(0.3, 0.3);
+        song.clips[0].length_sec = 3.7;
+        song.clips[0].loop_enabled = true;
+        song.clips[0].loop_period_sec = Some(4.0);
+        let take = &mut song.clips[0].takes[0];
+        take.source_end_sec = 4.0;
+        take.loop_enabled = true;
+        take.duration_sec = Some(4.0);
+        take.syllable_analysis = Some(crate::pitch_analysis::TakeSyllableAnalysis {
+            algorithm: "test".into(),
+            algorithm_version: 1,
+            source_digest: "d".into(),
+            source_spans_sec: vec![crate::pitch_analysis::SyllableSpan {
+                start_sec: 0.2,
+                end_sec: 0.6,
+                midi_note: Some(60.0),
+                event_id: Some(crate::pitch_analysis::source_event_id(0.2, 0.6).into()),
+            }],
+            analyzed_window_sec: [0.0, 4.0],
+        });
+        song
+    }
+
+    #[test]
+    fn loop_left_trim_keeps_base_block_at_clip_edge() {
+        let song = loop_left_trim_timeline();
+        let view =
+            compose_param_block_view(&song, "root", &ParamBlockEditSet::default(), 5.0).unwrap();
+        assert_eq!(view.blocks.len(), 1);
+        assert_eq!(view.blocks[0].start_frame, 60);
+        assert_eq!(view.blocks[0].end_frame_exclusive, 120);
+        assert!(view.blocks[0].cut_start);
+        assert_eq!(view.blocks[0].source_note, Some(60.0));
+    }
+
+    #[test]
+    fn loop_left_trim_keeps_user_block_at_clip_edge() {
+        let song = loop_left_trim_timeline();
+        let edits = ParamBlockEditSet {
+            schema_version: 2,
+            revision: 1,
+            blocks: vec![UserParamBlock {
+                id: "trimmed-user".into(),
+                geometry: BlockGeometry::Take {
+                    members: vec![TakeSpan {
+                        clip_id: "clip".into(),
+                        take_id: "take".into(),
+                        cycle: 0,
+                        source_start_sec: 0.2,
+                        source_end_sec: 0.6,
+                        syllable_id: None,
+                        label: BlockLabel::Manual,
+                    }],
+                },
+                deleted: false,
+                manual: true,
+                value: Some(60.0),
+                transition_out_sec: None,
+                created_seq: 1,
+                base_cover: None,
+            }],
+        };
+        let view = compose_param_block_view(&song, "root", &edits, 5.0).unwrap();
+        let user: Vec<_> = view
+            .blocks
+            .iter()
+            .filter(|block| block.user_block_id.as_deref() == Some("trimmed-user"))
+            .collect();
+        assert_eq!(user.len(), 1);
+        assert_eq!(user[0].start_frame, 60);
+        assert_eq!(user[0].end_frame_exclusive, 120);
+        assert!(user[0].cut_start);
     }
 
     #[test]

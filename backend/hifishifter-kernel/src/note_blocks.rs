@@ -7,7 +7,7 @@
 //!
 //! 这里只读，不触发分析、不解码音频，也不写 timeline。
 
-use crate::param_blocks::projection::{normalize_loop_span, project_span, ClipProjection};
+use crate::param_blocks::projection::{project_span_part, split_loop_span_parts, ClipProjection};
 use crate::param_blocks::types::{BlockLabel, TakeSpan};
 use crate::state::{Clip, ClipTake};
 
@@ -122,9 +122,9 @@ pub fn projected_note_spans(clip: &Clip, take: &ClipTake, frame_period_ms: f64) 
             syllable_id: None,
             label: BlockLabel::Syllable,
         };
-        for part in normalize_loop_span(&projection, &base) {
-            for interval in project_span(&projection, &part, frame_period_ms) {
-                if interval.cycle < part.cycle {
+        for part in split_loop_span_parts(&projection, &base) {
+            for interval in project_span_part(&projection, &part, frame_period_ms) {
+                if interval.cycle < part.span.cycle {
                     continue;
                 }
                 let start = interval.start_frame as f64 * frame_period_ms / 1000.0;
