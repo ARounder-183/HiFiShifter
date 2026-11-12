@@ -143,6 +143,35 @@ describe("buildClipPitchOverlays · 身份色", () => {
     });
 });
 
+describe("buildClipPitchOverlays · 重合深度", () => {
+    it("只算同一根轨道组内的 Clip", () => {
+        const overlays = buildClipPitchOverlays({
+            clips: [
+                clip({ id: "a" }),
+                // 另一条轨道上时间完全重叠的 Clip：画面上并不重叠，不得抬高 alpha。
+                clip({ id: "other", trackId: "elsewhere" }),
+            ],
+            curves: { a: flatCurve(60), other: flatCurve(70) },
+            groupTrackIds: ROOT,
+            focusClipId: null,
+        });
+        expect(overlays.map((overlay) => overlay.clipId)).toEqual(["a"]);
+        expect(overlays[0]!.overlapDepth).toBe(1);
+        expect(overlays[0]!.segments.every((segment) => segment.overlapDepth === 1)).toBe(true);
+    });
+
+    it("muted 的 Clip 不参与重合计算", () => {
+        const overlays = buildClipPitchOverlays({
+            clips: [clip({ id: "a" }), clip({ id: "b", startSec: 0.5, muted: true })],
+            curves: { a: flatCurve(60), b: flatCurve(70, 0.5) },
+            groupTrackIds: ROOT,
+            focusClipId: null,
+        });
+        expect(overlays).toHaveLength(1);
+        expect(overlays[0]!.overlapDepth).toBe(1);
+    });
+});
+
 describe("buildClipPitchOverlays · 曲线内容", () => {
     it("keeps the audio source overlay when a pitch reference clip covers it", () => {
         const overlays = buildClipPitchOverlays({

@@ -287,12 +287,17 @@ export function buildClipPitchOverlays(args: {
 
     if (eligible.length === 0) return [];
     const colorIndices = assignColorIndices(eligible);
+    // 重合只按**同一根轨道组**内的 Clip 计算：参数编辑器只画这一组，别的轨道上
+    // 时间重叠的 Clip 在画面上并不重叠，算进来会让这条线凭空变亮。
+    const groupClips = clips.filter(
+        (item) => groupTrackIds.has(item.trackId) && item.muted !== true,
+    );
 
     const overlays: ClipPitchOverlay[] = [];
     for (const item of eligible) {
         const { clip, zOrder, curve, startFrame, frameCount } = item;
         const frameSec = curve.framePeriodMs / 1000;
-        const { bands, maxDepth } = overlapBandsForClip(clip, clips);
+        const { bands, maxDepth } = overlapBandsForClip(clip, groupClips);
         const segments: ClipPitchOverlaySegment[] = [];
         let segmentStart = -1;
         let segmentDepth = 0;
