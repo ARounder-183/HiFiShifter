@@ -1005,10 +1005,9 @@ export function drawPianoRoll(args: {
                 if (values.length < 2) continue;
                 const points = projectClipPitchPoints({
                     values,
-                    curveStartSec: overlay.curveStartSec,
+                    startFrame: overlay.startFrame,
+                    frameCount: overlay.frameCount,
                     sampleStartIndex: segment.startIndex,
-                    clipStartSec: overlay.clipStartSec,
-                    clipEndSec: overlay.clipEndSec,
                     framePeriodMs: overlay.framePeriodMs,
                     axis,
                     valueToY: (value) => valueToY("pitch", value, h),

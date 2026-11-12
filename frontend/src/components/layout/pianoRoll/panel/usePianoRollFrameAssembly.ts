@@ -455,11 +455,13 @@ export function usePianoRollFrameAssembly({
             curves: s.clipPitchCurves,
             groupTrackIds,
             selectedClipIds,
+            projectFramePeriodMs: paramView?.framePeriodMs,
         });
     }, [
         clipPitchOverlayVisible,
         editParam,
         groupTrackIds,
+        paramView?.framePeriodMs,
         rootTrack,
         s.clipPitchCurves,
         s.clips,

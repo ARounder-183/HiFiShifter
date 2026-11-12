@@ -1,4 +1,5 @@
 import { strokeColorForClip } from "../timeline/runtime/midiPitchCurve";
+import { toFrame } from "./paramBlockProjection";
 
 /**
  * 参数编辑器 · Clip 源音高参考线（纯派生模型）。
@@ -9,6 +10,13 @@ import { strokeColorForClip } from "../timeline/runtime/midiPitchCurve";
  * - pv.orig 是单值合成线：重叠 Clip、音高参考块都会让不同来源在同一帧竞争，
  *   最终只留下一个值；
  * - 本模型保留每个 Clip 自己的曲线，用于重合、音高参考块覆盖和原始 F0 对照。
+ *
+ * 【帧基准：一律是工程帧，不是连续秒】
+ * 后端 emit 时曲线第 i 个采样对应工程帧 `round(clip.startSec * 1000 / fp) + i`
+ * （与 assemble_pitch_orig_from_cache 写入 pv.orig 的位置、与参数块投影
+ * toFrame() 完全同源）。本模型因此只保存 `startFrame`，绝不保存
+ * `curveStartSec` —— 按连续秒落笔会让每条 Clip 各偏一个亚帧相位（≤2.5 ms），
+ * 在放大到 0.5 s 视口时是 8~9 px 的可见错位，用户会以为是自己操作错了。
  *
  * 本文件不碰 React / DOM / GL；只负责把 Clip 几何、曲线、选中态和重合关系
  * 变成可绘制的分段描述符，供 sceneBuilders / render.ts 共用。
@@ -45,9 +53,10 @@ export interface ClipPitchOverlaySegment {
 
 export interface ClipPitchOverlay {
     readonly clipId: string;
-    readonly clipStartSec: number;
-    readonly clipEndSec: number;
-    readonly curveStartSec: number;
+    /** 曲线第 0 个采样所在的工程帧（= round(clip.startSec * 1000 / fp)）。 */
+    readonly startFrame: number;
+    /** 该 Clip 在工程帧网格上的帧数（= round(clip.lengthSec * 1000 / fp)）。 */
+    readonly frameCount: number;
     readonly framePeriodMs: number;
     readonly midiCurve: readonly number[];
     readonly kind: "sourceF0" | "midiReference";
@@ -74,16 +83,20 @@ function clipStart(clip: ClipPitchOverlayClip): number {
     return Math.max(0, Number.isFinite(clip.startSec) ? clip.startSec : 0);
 }
 
+function clipLength(clip: ClipPitchOverlayClip): number {
+    return Number.isFinite(clip.lengthSec) ? Math.max(0, clip.lengthSec) : 0;
+}
+
 function clipEnd(clip: ClipPitchOverlayClip): number {
-    const start = clipStart(clip);
-    const length = Number.isFinite(clip.lengthSec) ? Math.max(0, clip.lengthSec) : 0;
-    return start + length;
+    return clipStart(clip) + clipLength(clip);
 }
 
 /**
  * 计算一个 Clip 区间内所有「至少两个 Clip 同时存在」的区段，以及最大重合深度。
  *
  * 只使用 Clip 的工程区间；参数块是否被上层块覆盖与音频是否真的重合无关。
+ * 重合只是「提高 alpha」的判据，不是几何来源，因此继续用秒（与 Clip 字段同单位），
+ * 不引入第二次取整。
  */
 function overlapBandsForClip(
     clip: ClipPitchOverlayClip,
@@ -148,10 +161,10 @@ function depthAtSec(bands: readonly OverlapBand[], sec: number): number {
 /**
  * ClipPitchCurves → per-clip 参考线。
  *
- * 过滤规则与后端 emit 契约对齐：
- * - curveStartSec 必须等于当前 Clip.startSec（一个帧周期的容差）；
- * - 曲线长度必须覆盖 Clip 到终点，防止移动 / 分割后旧缓存画到新几何；
- * - 超出 Clip 的采样点丢弃；
+ * 过滤规则与后端 emit 契约对齐（全部按**工程帧**判断，与绘制位置同一把尺子）：
+ * - `round(curveStartSec·1000/fp)` 必须等于 `round(clip.startSec·1000/fp)`；
+ *   移动不足半帧时网格没变，曲线仍然有效；超过半帧立即作废；
+ * - 曲线帧数必须覆盖 Clip 的帧数，否则整条丢弃（不拉伸、不补零）；
  * - 有声段按 midi <= 0 / 非有限值断开；重合深度变化也断开，便于分段着色。
  */
 export function buildClipPitchOverlays(args: {
@@ -159,28 +172,37 @@ export function buildClipPitchOverlays(args: {
     readonly curves: Readonly<Record<string, ClipPitchCurveData>>;
     readonly groupTrackIds: ReadonlySet<string>;
     readonly selectedClipIds: ReadonlySet<string>;
+    /**
+     * 工程的帧周期（毫秒），来自参数视图。已知时必须与曲线自带的帧周期一致，
+     * 否则曲线会整体缩放。缺省（参数视图还没取到）时不做这项校验。
+     */
+    readonly projectFramePeriodMs?: number;
 }): ClipPitchOverlay[] {
-    const { clips, curves, groupTrackIds, selectedClipIds } = args;
+    const { clips, curves, groupTrackIds, selectedClipIds, projectFramePeriodMs } = args;
     const overlays: ClipPitchOverlay[] = [];
     clips.forEach((clip, zOrder) => {
         if (!groupTrackIds.has(clip.trackId) || clip.muted === true) return;
         const curve = curves[clip.id];
         if (curve === undefined || !Number.isFinite(curve.curveStartSec)) return;
-        const frameSec = Math.max(0.0001, curve.framePeriodMs / 1000);
-        const start = clipStart(clip);
-        const end = clipEnd(clip);
-        if (!(end > start + EPS) || curve.midiCurve.length < 2) return;
-        if (Math.abs(curve.curveStartSec - start) > frameSec + EPS) return;
+        const framePeriodMs = curve.framePeriodMs;
+        if (!Number.isFinite(framePeriodMs) || framePeriodMs <= 0) return;
+        // 曲线与工程不在同一个帧周期上 ⇒ 画出来必然整体缩放，宁可整条不画。
+        if (
+            projectFramePeriodMs != null &&
+            Number.isFinite(projectFramePeriodMs) &&
+            Math.abs(framePeriodMs - projectFramePeriodMs) > 0.1
+        ) {
+            return;
+        }
+        const frameSec = framePeriodMs / 1000;
 
-        const curveEnd = curve.curveStartSec + curve.midiCurve.length * frameSec;
-        if (curveEnd < end - frameSec - EPS) return;
-
-        const firstIndex = Math.max(0, Math.ceil((start - curve.curveStartSec) / frameSec - EPS));
-        const endIndexExclusive = Math.min(
-            curve.midiCurve.length,
-            Math.ceil((end - curve.curveStartSec) / frameSec - EPS),
-        );
-        if (endIndexExclusive - firstIndex < 2) return;
+        const startFrame = toFrame(clipStart(clip), framePeriodMs);
+        const frameCount = toFrame(clipLength(clip), framePeriodMs);
+        if (frameCount < 2) return;
+        // 旧缓存属于别的几何：起点落在另一个工程帧上就整条丢弃。
+        if (toFrame(curve.curveStartSec, framePeriodMs) !== startFrame) return;
+        // 曲线必须覆盖整个 Clip；短了说明是分割 / 拉伸前的旧数据。
+        if (curve.midiCurve.length < frameCount) return;
 
         const { bands, maxDepth } = overlapBandsForClip(clip, clips);
         const segments: ClipPitchOverlaySegment[] = [];
@@ -197,15 +219,14 @@ export function buildClipPitchOverlays(args: {
             segmentStart = -1;
             segmentDepth = 0;
         };
-        for (let index = firstIndex; index < endIndexExclusive; index += 1) {
+        for (let index = 0; index < frameCount; index += 1) {
             const value = curve.midiCurve[index];
-            const sampleSec = curve.curveStartSec + index * frameSec;
             const voiced = value != null && Number.isFinite(value) && value > 0;
             if (!voiced) {
                 flush(index);
                 continue;
             }
-            const depth = depthAtSec(bands, sampleSec);
+            const depth = depthAtSec(bands, (startFrame + index) * frameSec);
             if (segmentStart < 0) {
                 segmentStart = index;
                 segmentDepth = depth;
@@ -215,15 +236,14 @@ export function buildClipPitchOverlays(args: {
                 segmentDepth = depth;
             }
         }
-        flush(endIndexExclusive);
+        flush(frameCount);
         if (segments.length === 0) return;
 
         overlays.push({
             clipId: clip.id,
-            clipStartSec: start,
-            clipEndSec: end,
-            curveStartSec: curve.curveStartSec,
-            framePeriodMs: curve.framePeriodMs,
+            startFrame,
+            frameCount,
+            framePeriodMs,
             midiCurve: curve.midiCurve,
             kind:
                 clip.midiNoteData !== undefined && clip.midiNoteData.length > 0

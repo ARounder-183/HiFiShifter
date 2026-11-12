@@ -639,7 +639,9 @@ export function buildCurveLayers(
                 layers.push({
                     values,
                     param: "pitch",
-                    startFrame: 0,
+                    // 与 pv.orig / 参数块同一个工程帧网格：曲线的第 0 个采样落在
+                    // `round(clip.startSec·1000/fp)`，逐帧 +1。
+                    startFrame: overlay.startFrame,
                     stride: 1,
                     framePeriodMs: overlay.framePeriodMs,
                     lineWidthPx: visual.lineWidthPx,
@@ -648,10 +650,8 @@ export function buildCurveLayers(
                     rgba: [r, g, b, baseAlpha * visual.alpha],
                     dash: visual.dash,
                     projection: "clip",
-                    curveStartSec: overlay.curveStartSec,
+                    frameCount: overlay.frameCount,
                     curveSampleStartIndex: segment.startIndex,
-                    clipStartSec: overlay.clipStartSec,
-                    clipEndSec: overlay.clipEndSec,
                     valueToY: (v) => project("pitch", v),
                 });
             }
@@ -777,8 +777,8 @@ export function buildCurveLayers(
                     rgba: parseRgbaColor(normalizeCssColor(resolveClipboardPreviewColor(isDark))),
                     dash: toDashTuple(getFixedDashPattern(4, 4)),
                     projection: "clipboard",
-                    clipStartSec: span.startSec,
-                    clipEndSec: spanEndSec,
+                    clipboardStartSec: span.startSec,
+                    clipboardEndSec: spanEndSec,
                     clipRect: clip,
                     valueToY: (v) => project(editParam, v),
                 });

@@ -484,25 +484,20 @@ export interface PianoRollCurveLayer {
      * 投影模式，三者时间基准各不相同，混用会让曲线整体平移：
      * - `"curve"`：走 `drawCurveTimed` 的语义（`startFrame + i × stride`）；
      * - `"clipboard"`：剪贴板预览（从选区起点按**原始帧距**排布）；
-     * - `"clip"`：Clip 源音高参考线（从 curveStartSec 按原始帧距排布）。
+     * - `"clip"`：Clip 源音高参考线（从工程帧 `startFrame` 按原始帧距排布）。
      */
     readonly projection: "curve" | "clipboard" | "clip";
     /**
-     * 这条曲线**只在这段时间内有效**（秒）—— 越界帧不画。
+     * `projection === "clip"` 时所属 Clip 的工程帧数（右边界，**开区间**）。
      *
-     * - `projection === "clipboard"`：选区跨度；
-     * - `projection === "clip"`：所属 Clip 的 `[startSec, startSec + lengthSec)`。
+     * 越界帧不画。Clip 源音高曲线与 `pv.orig`、参数块同在工程帧网格上，
+     * 因此这里用帧数而不是秒 —— 用秒会让每条 Clip 各偏一个亚帧相位。
      */
-    readonly clipStartSec?: number;
+    readonly frameCount?: number;
+    /** `projection === "clipboard"` 时选区的起点（秒）。 */
+    readonly clipboardStartSec?: number;
     /** 同上，终点（秒，**开区间**）。 */
-    readonly clipEndSec?: number;
-    /**
-     * `projection === "clip"` 时曲线第 0 个采样对应的 timeline 绝对时间（秒）。
-     *
-     * Clip 源音高曲线来自后端推送的 clipPitchCurves，它自带绝对起始秒；
-     * 不能塞进 startFrame（会丢失绝对起点），也不能按 Clip 局部帧重新取模。
-     */
-    readonly curveStartSec?: number;
+    readonly clipboardEndSec?: number;
     /** `projection === "clip"` 时当前图层第一个值在完整曲线数组中的下标。 */
     readonly curveSampleStartIndex?: number;
     /** 裁剪区（视口坐标 CSS px）；缺省不裁剪。两个需要裁剪的曲线图层用选区矩形。 */

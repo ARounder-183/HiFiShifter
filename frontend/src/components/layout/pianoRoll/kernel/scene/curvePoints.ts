@@ -231,9 +231,14 @@ export function projectClipboardPreviewPoints(args: {
 /**
  * Clip 源音高参考线的单段投影。
  *
- * 与普通参数曲线不同，Clip 曲线自带 timeline 绝对起点 curveStartSec，且
- * 每一段只包含一段连续有声帧（无声帧由 clipPitchOverlay 提前切段）。这里只
- * 负责把一段采样按原始帧距投影到视口。
+ * 【时间基准是工程帧，不是连续秒】曲线第 i 个采样对应工程帧
+ * `startFrame + i`（`startFrame = round(clip.startSec·1000/fp)`）。这与
+ * `pv.orig`（整条工程的一维帧数组）、参数块投影（`toFrame`）、选区帧区间
+ * 是同一个坐标系；按 `curveStartSec + i·fp` 落笔会让每条 Clip 各偏一个
+ * 亚帧相位（≤2.5 ms），放大到 0.5 s 视口时就是 8~9 px 的可见错位。
+ *
+ * 每一段只包含一段连续有声帧（无声帧由 clipPitchOverlay 提前切段），这里
+ * 只负责把一段采样按原始帧距投影到视口。
  *
  * @param args 投影参数。
  * @returns 可见点序列；采样不足 2 点或非有限入参时为空数组。
@@ -241,14 +246,12 @@ export function projectClipboardPreviewPoints(args: {
 export function projectClipPitchPoints(args: {
     /** 当前段的有声 MIDI 值（已剔除无声帧）。 */
     readonly values: readonly number[];
-    /** 曲线第 0 个采样对应的 timeline 绝对秒。 */
-    readonly curveStartSec: number;
+    /** 曲线第 0 个采样所在的工程帧。 */
+    readonly startFrame: number;
+    /** 所属 Clip 的工程帧数（右边界，开区间）。 */
+    readonly frameCount: number;
     /** 当前段第一个值在完整曲线中的下标。 */
     readonly sampleStartIndex?: number;
-    /** 所属 Clip 的起点。 */
-    readonly clipStartSec: number;
-    /** 所属 Clip 的终点（开区间）。 */
-    readonly clipEndSec: number;
     /** WORLD 帧周期（毫秒）。 */
     readonly framePeriodMs: number;
     /** 统一投影。 */
@@ -258,29 +261,29 @@ export function projectClipPitchPoints(args: {
 }): CurvePoint[] {
     const {
         values,
-        curveStartSec,
+        startFrame,
+        frameCount,
         sampleStartIndex = 0,
-        clipStartSec,
-        clipEndSec,
         framePeriodMs,
         axis,
         valueToY,
     } = args;
     if (values.length < 2) return [];
-    if (!Number.isFinite(curveStartSec)) return [];
+    if (!Number.isFinite(startFrame) || !Number.isFinite(frameCount)) return [];
     const fp = Math.max(1e-6, framePeriodMs);
+    const endFrame = startFrame + frameCount;
     const rightLimitPx = axis.viewportWidthPx + 10;
     const leftLimitPx = -10;
     const out: CurvePoint[] = [];
     for (let i = 0; i < values.length; i += 1) {
+        const frame = startFrame + sampleStartIndex + i;
+        // 超出 Clip 的工程帧区间即停：Clip 之外不属于这条曲线。
+        if (frame >= endFrame) break;
         const midi = values[i];
-        const sampleSec = curveStartSec + ((sampleStartIndex + i) * fp) / 1000;
-        if (sampleSec < clipStartSec - 1e-9) continue;
-        if (sampleSec >= clipEndSec - 1e-9) break;
         if (midi == null || !Number.isFinite(midi)) continue;
         // 段内不应出现无声帧；出现时立即停止，绝不跨过它连线。
         if (midi <= 0) break;
-        const x = secToViewportPx(axis, sampleSec);
+        const x = secToViewportPx(axis, framesToTime(frame, fp));
         if (x > rightLimitPx) break;
         if (x < leftLimitPx) continue;
         const y = valueToY(midi + 0.5);

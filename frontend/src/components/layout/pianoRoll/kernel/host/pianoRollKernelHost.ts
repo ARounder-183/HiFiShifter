@@ -1510,23 +1510,22 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             // 每条图层用自己的投影（副参数值域与主参数不同，见 spec 说明）。
             const valueToY = layer.valueToY;
             // 三种投影的时间基准不同（见 `PianoRollCurveLayer.projection` 说明）：
-            // Clip 源音高参考线自带绝对起始秒，剪贴板预览锚定选区起点，其余按
-            // `startFrame + i × stride`。混用会造成平移。
+            // Clip 源音高参考线按工程帧 `startFrame + i`，剪贴板预览锚定选区起点，
+            // 其余按 `startFrame + i × stride`。混用会造成平移。
             //
             // 虚线相位（`dashPhasePx`）：只有 `"curve"` 投影（原始参数线是唯一
             // 的虚线用户）由投影给出锚在**数据**上的相位 —— 相位 = 首个可见点
             // 相对曲线起点的内容坐标距离，滚动时不变，虚线跟着内容走而不是在
             // 屏幕上原地重排（"蠕动"）。Clip / 剪贴板投影的子路径起点本身就是
-            // 数据锚定的（curveStartSec / selStartSec），无需补偿。
+            // 数据锚定的（startFrame / selStartSec），无需补偿。
             let points: CurvePoint[];
             let dashPhasePx = 0;
             if (layer.projection === "clip") {
                 points = projectClipPitchPoints({
                     values: layer.values,
-                    curveStartSec: layer.curveStartSec ?? 0,
+                    startFrame: layer.startFrame,
+                    frameCount: layer.frameCount ?? Number.POSITIVE_INFINITY,
                     sampleStartIndex: layer.curveSampleStartIndex ?? 0,
-                    clipStartSec: layer.clipStartSec ?? 0,
-                    clipEndSec: layer.clipEndSec ?? Number.POSITIVE_INFINITY,
                     framePeriodMs: layer.framePeriodMs,
                     axis,
                     valueToY,
@@ -1536,8 +1535,8 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                     values: layer.values,
                     param: layer.param,
                     framePeriodMs: layer.framePeriodMs,
-                    selStartSec: layer.clipStartSec ?? 0,
-                    selEndSec: layer.clipEndSec ?? 0,
+                    selStartSec: layer.clipboardStartSec ?? 0,
+                    selEndSec: layer.clipboardEndSec ?? 0,
                     axis,
                     valueToY,
                 });

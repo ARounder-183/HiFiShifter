@@ -534,13 +534,12 @@ describe("与剪贴板预览循环逐点等价", () => {
 describe("projectClipPitchPoints", () => {
     const axis = createTimelineAxis({ pxPerSec: 100, scrollLeftPx: 0, viewportWidthPx: 1000 });
     const valueToY = (v: number) => 100 - v;
-    const span = (clipStartSec: number, clipEndSec: number) => ({ clipStartSec, clipEndSec });
 
-    it("按 curveStartSec 锚定绝对时间，而不是从 Clip 相对 0 开始", () => {
+    it("按工程帧锚定：第 i 点落在 startFrame + i 上", () => {
         const points = projectClipPitchPoints({
             values: [60, 62, 64],
-            curveStartSec: 5,
-            ...span(5, 6),
+            startFrame: 500,
+            frameCount: 100,
             framePeriodMs: 10,
             axis,
             valueToY,
@@ -551,12 +550,26 @@ describe("projectClipPitchPoints", () => {
         expect(points[2]!.x).toBeCloseTo(502, 6);
     });
 
+    it("x 只由工程帧决定：等于 secToViewportPx(frame · fp)", () => {
+        const points = projectClipPitchPoints({
+            values: [60, 62, 64],
+            startFrame: 200,
+            frameCount: 50,
+            framePeriodMs: 5,
+            axis,
+            valueToY,
+        });
+        points.forEach((point, index) => {
+            expect(point.x).toBeCloseTo(secToViewportPx(axis, (200 + index) * 0.005), 9);
+        });
+    });
+
     it("从 sampleStartIndex 继续原始曲线帧距", () => {
         const points = projectClipPitchPoints({
             values: [62, 64],
-            curveStartSec: 0,
+            startFrame: 0,
             sampleStartIndex: 2,
-            ...span(0, 1),
+            frameCount: 100,
             framePeriodMs: 100,
             axis,
             valueToY,
@@ -564,7 +577,7 @@ describe("projectClipPitchPoints", () => {
         expect(points.map((point) => Math.round(point.x))).toEqual([20, 30]);
     });
 
-    it("只画 Clip 跨度内的点，并跳过左侧不可见部分", () => {
+    it("只画 Clip 帧区间内的点，并跳过左侧不可见部分", () => {
         const scrolled = createTimelineAxis({
             pxPerSec: 100,
             scrollLeftPx: 500,
@@ -572,8 +585,8 @@ describe("projectClipPitchPoints", () => {
         });
         const points = projectClipPitchPoints({
             values: new Array(20).fill(60),
-            curveStartSec: 4.9,
-            ...span(4.9, 6),
+            startFrame: 49,
+            frameCount: 200,
             framePeriodMs: 100,
             axis: scrolled,
             valueToY,
@@ -583,11 +596,23 @@ describe("projectClipPitchPoints", () => {
         expect(points.every((point) => point.x <= 1010)).toBe(true);
     });
 
+    it("超出 frameCount 即停，不画到 Clip 之外", () => {
+        const points = projectClipPitchPoints({
+            values: new Array(10).fill(60),
+            startFrame: 0,
+            frameCount: 3,
+            framePeriodMs: 100,
+            axis,
+            valueToY,
+        });
+        expect(points.map((point) => Math.round(point.x))).toEqual([0, 10, 20]);
+    });
+
     it("遇到无声帧/非有限值即停止，不把后方的点跨段连回来", () => {
         const points = projectClipPitchPoints({
             values: [60, 62, 0, 64, 66],
-            curveStartSec: 0,
-            ...span(0, 1),
+            startFrame: 0,
+            frameCount: 100,
             framePeriodMs: 100,
             axis,
             valueToY,
@@ -598,8 +623,8 @@ describe("projectClipPitchPoints", () => {
     it("pitch 加 0.5 偏移，与主曲线绘制同源", () => {
         const points = projectClipPitchPoints({
             values: [60, 62],
-            curveStartSec: 0,
-            ...span(0, 1),
+            startFrame: 0,
+            frameCount: 100,
             framePeriodMs: 100,
             axis,
             valueToY,

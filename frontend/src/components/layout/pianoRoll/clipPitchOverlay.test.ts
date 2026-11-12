@@ -20,6 +20,43 @@ function curve(values: number[], framePeriodMs = 100, curveStartSec = 0) {
 }
 
 describe("buildClipPitchOverlays", () => {
+    it("把 Clip 的起点与长度换算成工程帧", () => {
+        const overlays = buildClipPitchOverlays({
+            clips: [clip({ id: "a", startSec: 1.25, lengthSec: 2 })],
+            curves: { a: curve(new Array(20).fill(60), 100, 1.25) },
+            groupTrackIds: ROOT,
+            selectedClipIds: new Set(),
+        });
+        expect(overlays).toHaveLength(1);
+        expect(overlays[0]!.startFrame).toBe(13);
+        expect(overlays[0]!.frameCount).toBe(20);
+        expect(overlays[0]!.framePeriodMs).toBe(100);
+    });
+
+    it("亚帧相位不改变工程帧号（曲线仍属于这个 Clip）", () => {
+        // 1.0023 s / 5 ms = 200.46 → 工程帧 200；与 1.000 s 的 Clip 是同一帧。
+        const overlays = buildClipPitchOverlays({
+            clips: [clip({ id: "a", startSec: 1.0023, lengthSec: 0.2 })],
+            curves: { a: curve(new Array(40).fill(60), 5, 1.0023) },
+            groupTrackIds: ROOT,
+            selectedClipIds: new Set(),
+        });
+        expect(overlays).toHaveLength(1);
+        expect(overlays[0]!.startFrame).toBe(200);
+        expect(overlays[0]!.frameCount).toBe(40);
+    });
+
+    it("帧周期与工程不一致时整条丢弃", () => {
+        const overlays = buildClipPitchOverlays({
+            clips: [clip({ id: "a" })],
+            curves: { a: curve(new Array(10).fill(60), 10) },
+            groupTrackIds: ROOT,
+            selectedClipIds: new Set(),
+            projectFramePeriodMs: 5,
+        });
+        expect(overlays).toEqual([]);
+    });
+
     it("keeps two overlapping clips as distinct overlays and marks overlap depth", () => {
         const overlays = buildClipPitchOverlays({
             clips: [
@@ -71,7 +108,8 @@ describe("buildClipPitchOverlays", () => {
         ]);
     });
 
-    it("drops stale curves whose start or length does not match the clip", () => {
+    it("drops stale curves whose start frame or length does not match the clip", () => {
+        // 起点落在另一个工程帧上：旧缓存属于别的几何。
         expect(
             buildClipPitchOverlays({
                 clips: [clip({ id: "a" })],
@@ -80,6 +118,7 @@ describe("buildClipPitchOverlays", () => {
                 selectedClipIds: new Set(),
             }),
         ).toEqual([]);
+        // 曲线帧数不覆盖 Clip 帧数：不拉伸、不补零。
         expect(
             buildClipPitchOverlays({
                 clips: [clip({ id: "a" })],

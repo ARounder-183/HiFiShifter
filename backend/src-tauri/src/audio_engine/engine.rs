@@ -2055,11 +2055,14 @@ fn handle_play_file(s: &mut EngineWorkerState, path: PathBuf, offset_sec: f64, t
 
 // ─── 辅助函数 ───────────────────────────────────────────────────────────────
 
-/// 计算 MIDI 曲线第 0 帧对应的 timeline 绝对时间（秒）。
-/// - playback_rate == 1（全量传送）：curve_start_sec = start_sec - source_start_sec
-///   全量 MIDI 曲线的第 0 帧对应源音频第 0 秒在时间线上的绝对位置。
-/// - playback_rate != 1（截取+resample 后传送）：curve_start_sec = start_sec
-///   截取+resample 后的曲线直接对应 clip 的时间线位置。
+/// 计算曲线第 0 帧对应的 timeline 绝对时间（秒）。
+///
+/// 无论 playback_rate 是多少，emit 的都是「已按 clip 窗口截取 / 重采样」的曲线，
+/// 第 0 帧一律对应 clip 在时间线上的起点，因此这里恒为 `start_sec`。
+///
+/// 【与帧网格的关系】这个秒值是**未量化**的浮点起点；前端落笔时必须把它换算成
+/// 工程帧 `round(start_sec·1000/fp)`（与 `pv.orig`、参数块投影同一把尺子），
+/// 否则每条 Clip 会各偏一个亚帧相位（≤2.5 ms），放大后与原始音高线错开数像素。
 fn compute_pitch_curve_start_sec(clip: &crate::state::Clip) -> f64 {
     // 统一截取后传送：curve 起点 = clip 在时间线上的起始位置
     clip.start_sec.max(0.0)
