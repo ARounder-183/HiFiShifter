@@ -10,6 +10,10 @@ export function applyClipSyllableAnalysisReducer(
         sourcePath?: string;
         analyzed: boolean;
         sourceSpansSec: Array<{ startSec: number; endSec: number }>;
+        /** Parallel source notes; one entry per span. */
+        sourceNotes: Array<number | null>;
+        /** Source-domain window covered by this analysis. */
+        analyzedWindowSec: [number, number];
     }>,
 ) {
     const result = action.payload;
@@ -18,7 +22,13 @@ export function applyClipSyllableAnalysisReducer(
         !result.analyzed ||
         !Array.isArray(result.sourceSpansSec) ||
         result.sourceSpansSec.length === 0 ||
-        result.sourceSpansSec.length > 20000
+        result.sourceSpansSec.length > 20000 ||
+        !Array.isArray(result.sourceNotes) ||
+        result.sourceNotes.length !== result.sourceSpansSec.length ||
+        !Array.isArray(result.analyzedWindowSec) ||
+        result.analyzedWindowSec.length !== 2 ||
+        !result.analyzedWindowSec.every((value) => Number.isFinite(value)) ||
+        result.analyzedWindowSec[1] < result.analyzedWindowSec[0]
     )
         return;
     if (
@@ -28,6 +38,9 @@ export function applyClipSyllableAnalysisReducer(
                 !Number.isFinite(span.endSec) ||
                 span.endSec <= span.startSec ||
                 (index > 0 && span.startSec < spans[index - 1].endSec - 1e-9),
+        ) ||
+        result.sourceNotes.some(
+            (note) => note !== null && (typeof note !== "number" || !Number.isFinite(note)),
         )
     )
         return;
@@ -40,19 +53,33 @@ export function applyClipSyllableAnalysisReducer(
             (take.sourcePath ?? clip.sourcePath) !== result.sourcePath)
     )
         return;
+    const nextSpans = result.sourceSpansSec.map((span, index) => ({
+        startSec: span.startSec,
+        endSec: span.endSec,
+        note: result.sourceNotes[index] ?? null,
+    }));
+    const window: [number, number] = [result.analyzedWindowSec[0], result.analyzedWindowSec[1]];
     const previous = take.syllableSpansSec;
     if (
-        previous?.length === result.sourceSpansSec.length &&
+        previous?.length === nextSpans.length &&
         previous.every(
             (span, index) =>
-                span.startSec === result.sourceSpansSec[index].startSec &&
-                span.endSec === result.sourceSpansSec[index].endSec,
-        )
+                span.startSec === nextSpans[index].startSec &&
+                span.endSec === nextSpans[index].endSec &&
+                (span.note ?? null) === (nextSpans[index].note ?? null),
+        ) &&
+        take.syllableAnalysisWindowSec?.[0] === window[0] &&
+        take.syllableAnalysisWindowSec?.[1] === window[1]
     )
         return;
-    take.syllableSpansSec = result.sourceSpansSec;
-    if ((clip.activeTakeId ?? clip.takes?.[0]?.id) === take.id)
-        clip.syllableSpansSec = result.sourceSpansSec;
+    take.syllableSpansSec = nextSpans;
+    take.syllableNotes = [...result.sourceNotes];
+    take.syllableAnalysisWindowSec = window;
+    if ((clip.activeTakeId ?? clip.takes?.[0]?.id) === take.id) {
+        clip.syllableSpansSec = nextSpans;
+        clip.syllableNotes = [...result.sourceNotes];
+        clip.syllableAnalysisWindowSec = window;
+    }
     // A timeline request issued before this receipt may still contain
     // the old Take cache. Reject it without resetting any curve cache.
     state._pluginTimelineEpoch += 1;

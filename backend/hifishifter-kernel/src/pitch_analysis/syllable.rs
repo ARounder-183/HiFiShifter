@@ -29,6 +29,9 @@ pub const SYLLABLE_ALGORITHM_VERSION: u32 = 2;
 pub struct SyllableSpan {
     pub start_sec: f64,
     pub end_sec: f64,
+    /// Representative source MIDI note for this span (analysis-time truth).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub midi_note: Option<f32>,
 }
 
 /// Take 上持久化的音节分析结果。
@@ -38,11 +41,33 @@ pub struct TakeSyllableAnalysis {
     pub algorithm: String,
     pub algorithm_version: u32,
     /// 分析所依据的源媒体签名；文件内容或分析帧率变化时整体失效。
+    /// Only the source identity; window validity is expressed separately.
     pub source_digest: String,
     pub source_spans_sec: Vec<SyllableSpan>,
+    /// Source-domain window covered by this analysis. A narrower current
+    /// window is valid; a wider one must trigger reanalysis.
+    pub analyzed_window_sec: [f64; 2],
 }
 
 impl TakeSyllableAnalysis {
+    /// True when every position of the window was covered by this analysis.
+    /// Narrowing a Clip keeps the cached spans valid; extending it does not.
+    pub fn covers_window(&self, window: (f64, f64)) -> bool {
+        if !(window.0.is_finite() && window.1.is_finite() && window.1 >= window.0) {
+            return false;
+        }
+        let [start, end] = self.analyzed_window_sec;
+        start.is_finite()
+            && end.is_finite()
+            && end >= start
+            && window.0 >= start - 1e-6
+            && window.1 <= end + 1e-6
+    }
+
+    pub fn is_current_for_window(&self, source_digest: &str, window: (f64, f64)) -> bool {
+        self.is_current(source_digest) && self.covers_window(window)
+    }
+
     pub fn is_current(&self, source_digest: &str) -> bool {
         let supported = (self.algorithm == SYLLABLE_ALGORITHM
             && self.algorithm_version == SYLLABLE_ALGORITHM_VERSION)
@@ -209,6 +234,29 @@ pub fn estimate_syllable_spans(
         pieces.retain(|span| {
             span.end_sec > span.start_sec && span.end_sec.is_finite() && span.start_sec.is_finite()
         });
+        // A clipped block can have no voiced frames in its visible part. Keep
+        // the source note found from the full span so the view never needs to
+        // guess a vertical position from the viewport midpoint.
+        for span in &mut pieces {
+            let first = ((span.start_sec * fps).round() as usize).min(frames);
+            let last = ((span.end_sec * fps).round() as usize).min(frames);
+            let mut values: Vec<f32> = pitch[first..last.max(first)]
+                .iter()
+                .copied()
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .collect();
+            if values.is_empty() {
+                span.midi_note = None;
+                continue;
+            }
+            values.sort_by(f32::total_cmp);
+            let middle = values.len() / 2;
+            span.midi_note = Some(if values.len() % 2 == 0 {
+                (values[middle - 1] + values[middle]) * 0.5
+            } else {
+                values[middle]
+            });
+        }
         out.extend(pieces);
     }
     merge_touching_spans(out)
@@ -426,6 +474,7 @@ fn split_region(
         spans.push(SyllableSpan {
             start_sec: a,
             end_sec: b,
+            midi_note: None,
         });
     }
     spans
@@ -471,6 +520,7 @@ pub fn fill_spans_without_merging(
             (end > start + 1e-9).then_some(SyllableSpan {
                 start_sec: start,
                 end_sec: end,
+                midi_note: span.midi_note,
             })
         })
         .collect::<Vec<_>>();
@@ -482,6 +532,7 @@ pub fn fill_spans_without_merging(
             filled.push(SyllableSpan {
                 start_sec: cursor,
                 end_sec: span.start_sec,
+                midi_note: None,
             });
         }
         let start = span.start_sec.max(cursor);
@@ -489,6 +540,7 @@ pub fn fill_spans_without_merging(
             filled.push(SyllableSpan {
                 start_sec: start,
                 end_sec: span.end_sec,
+                midi_note: span.midi_note,
             });
             cursor = span.end_sec;
         }
@@ -497,6 +549,7 @@ pub fn fill_spans_without_merging(
         filled.push(SyllableSpan {
             start_sec: cursor,
             end_sec: window_end,
+            midi_note: None,
         });
     }
     filled
@@ -522,7 +575,9 @@ mod tests {
                 source_spans_sec: vec![SyllableSpan {
                     start_sec: 0.0,
                     end_sec: 1.0,
+                    midi_note: None,
                 }],
+                analyzed_window_sec: [0.0, 1.0],
             };
             assert!(analysis.is_current("same-pcm"), "{algorithm} was rejected");
             assert!(!analysis.is_current("changed-pcm"));
@@ -618,15 +673,52 @@ mod tests {
     }
 
     #[test]
+    fn analysis_window_must_contain_the_current_window() {
+        let analysis = TakeSyllableAnalysis {
+            algorithm: SYLLABLE_ALGORITHM.into(),
+            algorithm_version: SYLLABLE_ALGORITHM_VERSION,
+            source_digest: "same-pcm".into(),
+            source_spans_sec: vec![SyllableSpan {
+                start_sec: 0.9,
+                end_sec: 1.4,
+                midi_note: Some(64.0),
+            }],
+            analyzed_window_sec: [0.9, 2.0],
+        };
+        assert!(!analysis.is_current_for_window("same-pcm", (0.3, 2.0)));
+        assert!(analysis.is_current_for_window("same-pcm", (1.0, 1.8)));
+        assert!(!analysis.is_current_for_window("changed-pcm", (1.0, 1.8)));
+        let outside = TakeSyllableAnalysis {
+            analyzed_window_sec: [1.5, 2.0],
+            ..analysis
+        };
+        assert!(outside.is_current("same-pcm"));
+        assert!(!outside.is_current_for_window("same-pcm", (1.0, 1.8)));
+    }
+
+    #[test]
+    fn estimated_spans_keep_the_source_note_median() {
+        let fps = 200.0;
+        let frames = (fps * 1.0) as usize;
+        let level = vec![0.3f32; frames];
+        let pitch = vec![61.0f32; frames];
+        let spans = estimate_syllable_spans(&level, &pitch, 5.0, SyllableConfig::default());
+        assert!(!spans.is_empty());
+        assert!(spans.iter().all(|span| span.midi_note == Some(61.0)));
+    }
+
+    #[test]
     fn filling_preserves_adjacent_algorithm_boundaries() {
         let spans = vec![
             SyllableSpan {
                 start_sec: 0.5,
                 end_sec: 1.0,
+                midi_note: Some(60.0),
             },
             SyllableSpan {
                 start_sec: 1.0,
                 end_sec: 1.5,
+                midi_note: Some(62.0),
             },
         ];
         let filled = fill_spans_without_merging(&spans, 0.0, 2.0);

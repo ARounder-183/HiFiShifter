@@ -147,7 +147,20 @@ export function applyTimelineState(
             midiFillGaps: clip.midi_fill_gaps ?? false,
             syllableSpansSec: clip.takes
                 ?.find((take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id))
-                ?.syllable_spans_sec?.map(([startSec, endSec]) => ({ startSec, endSec })),
+                ?.syllable_spans_sec?.map(([startSec, endSec], index) => ({
+                    startSec,
+                    endSec,
+                    note:
+                        clip.takes?.find(
+                            (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
+                        )?.syllable_notes?.[index] ?? null,
+                })),
+            syllableNotes: clip.takes?.find(
+                (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
+            )?.syllable_notes,
+            syllableAnalysisWindowSec: (clip.takes?.find(
+                (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
+            )?.syllable_analysis_window_sec ?? null) as [number, number] | undefined,
             groupId: clip.group_id ?? undefined,
         };
 

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+    audibleSourceWindow,
     inverseProject,
     projectionForClip,
     projectTakeSpan,
@@ -20,6 +21,8 @@ interface GoldenCase {
         readonly cycle: number;
         readonly startFrame: number;
         readonly endFrameExclusive: number;
+        readonly cutStart: boolean;
+        readonly cutEnd: boolean;
     }>;
 }
 
@@ -37,6 +40,50 @@ describe("paramBlockProjection", () => {
             const actual = projectTakeSpan(projection, testCase.span, fixture.framePeriodMs);
             expect(actual, testCase.name).toEqual(testCase.expected);
         }
+    });
+
+    it("matches the Rust audible source window rules", () => {
+        const forward = projectionForClip({
+            id: "c",
+            trackId: "root",
+            startSec: 0,
+            lengthSec: 2,
+            sourceStartSec: 0.5,
+            sourceEndSec: 8,
+            playbackRate: 1,
+            clipPlaybackRate: 2,
+            reversed: false,
+            loopEnabled: false,
+        });
+        expect(audibleSourceWindow(forward)).toEqual({ startSec: 0.5, endSec: 4.5 });
+        const ring = projectionForClip({
+            id: "c",
+            trackId: "root",
+            startSec: 0,
+            lengthSec: 4,
+            sourceStartSec: 0,
+            sourceEndSec: 1,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: true,
+            loopPeriodSec: 1,
+            contentDurationSec: 1,
+        });
+        expect(audibleSourceWindow(ring)).toEqual({ startSec: 0, endSec: 1 });
+        const section = projectionForClip({
+            id: "c",
+            trackId: "root",
+            startSec: 0,
+            lengthSec: 4,
+            sourceStartSec: 0.25,
+            sourceEndSec: 1.25,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: true,
+            loopPeriodSec: 1,
+            contentDurationSec: 4,
+        });
+        expect(audibleSourceWindow(section)).toEqual({ startSec: 0.25, endSec: 1.25 });
     });
 
     it("starts loop projection at the requested cycle", () => {

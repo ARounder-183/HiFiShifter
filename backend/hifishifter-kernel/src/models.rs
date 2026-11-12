@@ -88,6 +88,12 @@ pub struct TimelineClipTake {
     /// 源域音节区间；前端据此派生参数块，不重复做时间映射。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub syllable_spans_sec: Option<Vec<[f64; 2]>>,
+    /// Parallel array of representative MIDI notes for `syllable_spans_sec`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub syllable_notes: Option<Vec<Option<f32>>>,
+    /// Source window actually covered by the persisted analysis.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub syllable_analysis_window_sec: Option<[f64; 2]>,
 }
 
 impl TimelineClipTake {
@@ -131,6 +137,16 @@ impl TimelineClipTake {
                     .map(|span| [span.start_sec, span.end_sec])
                     .collect()
             }),
+            syllable_notes: take.syllable_analysis.as_ref().map(|a| {
+                a.source_spans_sec
+                    .iter()
+                    .map(|span| span.midi_note)
+                    .collect()
+            }),
+            syllable_analysis_window_sec: take
+                .syllable_analysis
+                .as_ref()
+                .map(|a| a.analyzed_window_sec),
         }
     }
 }

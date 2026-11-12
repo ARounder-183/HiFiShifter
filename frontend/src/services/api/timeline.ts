@@ -150,6 +150,10 @@ export interface ClipSyllableAnalysisResult {
     takeId: string;
     /** 源域 [start, end]；空数组 = 尚无结果 / 回退整段。 */
     sourceSpansSec: Array<{ startSec: number; endSec: number }>;
+    /** Parallel array of source notes; one entry per span. */
+    sourceNotes: Array<number | null>;
+    /** Source-domain window covered by this analysis. */
+    analyzedWindowSec: [number, number];
     algorithm: string;
     algorithmVersion: number;
     analyzed: boolean;

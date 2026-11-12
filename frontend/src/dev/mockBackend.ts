@@ -201,6 +201,14 @@ const mockParamWrites = new Map<string, Map<number, number>>();
 
 /** mock 的 v7 音节块分析：按固定 0.55s 切片，仅浏览器实验用。 */
 const mockSyllableSpans = new Map<string, Array<{ startSec: number; endSec: number }>>();
+/** Mock analyses cover the whole source; avoids an infinite reanalysis loop. */
+const mockSyllableWindow = (clipId: string): [number, number] => {
+    const timeline = buildMockTimeline() as {
+        clips?: Array<{ id: string; duration_sec?: number; length_sec?: number }>;
+    };
+    const clip = timeline.clips?.find((item) => item.id === clipId);
+    return [0, Number(clip?.duration_sec ?? clip?.length_sec ?? 4) || 4];
+};
 
 /** mock 的参数块派生视图（root track → view）。 */
 const mockParamBlockViews = new Map<
@@ -429,6 +437,14 @@ function buildMockTimeline(): Record<string, unknown> {
                                                     ],
                                             )
                                       : undefined,
+                                  syllable_notes: mockSyllableSpans
+                                      .get(`${trackId}-clip-1`)
+                                      ?.map(() => null),
+                                  syllable_analysis_window_sec: mockSyllableSpans.has(
+                                      `${trackId}-clip-1`,
+                                  )
+                                      ? mockSyllableWindow(`${trackId}-clip-1`)
+                                      : undefined,
                               },
                               {
                                   id: `${trackId}-take-2`,
@@ -461,6 +477,14 @@ function buildMockTimeline(): Record<string, unknown> {
                                                         number,
                                                     ],
                                             )
+                                      : undefined,
+                                  syllable_notes: mockSyllableSpans
+                                      .get(`${trackId}-clip-${index + 1}`)
+                                      ?.map(() => null),
+                                  syllable_analysis_window_sec: mockSyllableSpans.has(
+                                      `${trackId}-clip-${index + 1}`,
+                                  )
+                                      ? mockSyllableWindow(`${trackId}-clip-${index + 1}`)
                                       : undefined,
                               },
                           ],
@@ -516,6 +540,8 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
                 clipId,
                 takeId: `${clipId}_take_1`,
                 sourceSpansSec: spans,
+                sourceNotes: spans.map(() => null),
+                analyzedWindowSec: mockSyllableWindow(clipId),
                 algorithm: "level_vad+pitch_stability+spectral_onset",
                 algorithmVersion: 1,
                 analyzed: spans.length > 0,
@@ -544,6 +570,8 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
                 clipId,
                 takeId: `${clipId}_take_1`,
                 sourceSpansSec: spans,
+                sourceNotes: spans.map(() => null),
+                analyzedWindowSec: mockSyllableWindow(clipId),
                 algorithm: "level_vad+pitch_stability+spectral_onset",
                 algorithmVersion: 1,
                 analyzed: spans.length > 0,

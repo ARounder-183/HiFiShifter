@@ -62,10 +62,15 @@ export function parseTimelineClipTake(take: TimelineClipTake): ClipTakeInfo {
             channel: n.channel ?? 0,
         })),
         midiFillGaps: take.midi_fill_gaps ?? false,
-        syllableSpansSec: take.syllable_spans_sec?.map(([startSec, endSec]) => ({
+        syllableSpansSec: take.syllable_spans_sec?.map(([startSec, endSec], index) => ({
             startSec,
             endSec,
+            note: take.syllable_notes?.[index] ?? null,
         })),
+        syllableNotes: Array.isArray(take.syllable_notes) ? take.syllable_notes : undefined,
+        syllableAnalysisWindowSec: Array.isArray(take.syllable_analysis_window_sec)
+            ? (take.syllable_analysis_window_sec as [number, number])
+            : undefined,
         // 宿主的非线性拉伸标记 / take 包络：插件不渲染，但前端要据此把分割/拖边显式
         // 置为只读（见 `clipHasNonlinearStretch` / `clipHasTakeEnvelope`）。
         stretchMarkers: Array.isArray(take.stretch_markers) ? take.stretch_markers : undefined,
@@ -99,6 +104,8 @@ export function parseClipTakes(clip: TimelineClip, flat: ClipInfo): ClipTakeInfo
             midiNoteData: flat.midiNoteData,
             midiFillGaps: flat.midiFillGaps ?? false,
             syllableSpansSec: flat.syllableSpansSec,
+            syllableNotes: flat.syllableNotes,
+            syllableAnalysisWindowSec: flat.syllableAnalysisWindowSec,
         },
     ];
 }
@@ -196,6 +203,8 @@ export function updateActiveTakeFromFlat(clip: ClipInfo): void {
     take.midiNoteData = clip.midiNoteData;
     take.midiFillGaps = clip.midiFillGaps;
     take.syllableSpansSec = clip.syllableSpansSec;
+    take.syllableNotes = clip.syllableNotes;
+    take.syllableAnalysisWindowSec = clip.syllableAnalysisWindowSec;
 }
 
 /**
@@ -242,6 +251,8 @@ export function applyActiveTakeToFlat(clip: ClipInfo, take: ClipTakeInfo): void 
     clip.midiNoteCount = take.midiNoteData?.length;
     clip.midiFillGaps = take.midiFillGaps ?? false;
     clip.syllableSpansSec = take.syllableSpansSec;
+    clip.syllableNotes = take.syllableNotes;
+    clip.syllableAnalysisWindowSec = take.syllableAnalysisWindowSec;
 }
 
 /**

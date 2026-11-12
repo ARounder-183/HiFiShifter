@@ -38,7 +38,10 @@ export interface ParamBlockSourceClip {
         readonly syllableSpansSec?: ReadonlyArray<{
             readonly startSec: number;
             readonly endSec: number;
+            readonly note?: number | null;
         }>;
+        readonly syllableNotes?: ReadonlyArray<number | null>;
+        readonly syllableAnalysisWindowSec?: readonly [number, number];
         readonly gameBlockBaseline?: {
             readonly sourceSpansSec?: ReadonlyArray<{
                 readonly startSec: number;
@@ -54,7 +57,10 @@ export interface ParamBlockSourceClip {
     readonly syllableSpansSec?: ReadonlyArray<{
         readonly startSec: number;
         readonly endSec: number;
+        readonly note?: number | null;
     }>;
+    readonly syllableNotes?: ReadonlyArray<number | null>;
+    readonly syllableAnalysisWindowSec?: readonly [number, number];
     readonly gameBlockBaseline?: {
         readonly sourceSpansSec?: ReadonlyArray<{
             readonly startSec: number;
@@ -72,6 +78,10 @@ export interface ProjectedInterval {
     readonly cycle: number;
     readonly startFrame: number;
     readonly endFrameExclusive: number;
+    /** The visible interval starts inside the source span (window/overlap cut). */
+    readonly cutStart: boolean;
+    /** The visible interval ends inside the source span (window/overlap cut). */
+    readonly cutEnd: boolean;
 }
 
 const EPS = 1e-9;
@@ -219,6 +229,58 @@ export function baseSourceSpansForClip(clip: ParamBlockSourceClip): {
     return null;
 }
 
+/** Frontend mirror of Rust `ClipProjection::audible_source_window`. */
+export function audibleSourceWindow(projection: ClipProjection): {
+    readonly startSec: number;
+    readonly endSec: number;
+} {
+    const span = Math.max(0, projection.projectLengthSec * projection.rate);
+    let start: number;
+    let end: number;
+    if (projection.loopEnabled && projection.loopCycleSec !== null) {
+        const cycle = projection.loopCycleSec;
+        const anchor = loopAnchor(projection);
+        const media = projection.mediaDurationSec;
+        const wholeRing =
+            media !== null &&
+            media > EPS &&
+            (cycle >= media - EPS || anchor + cycle > media + EPS || anchor < -EPS);
+        if (wholeRing) {
+            start = 0;
+            end = media as number;
+        } else if (cycle > EPS && Number.isFinite(anchor) && anchor >= -EPS) {
+            start = anchor;
+            end = anchor + cycle;
+        } else {
+            start = projection.sourceWindowStartSec;
+            end = projection.sourceWindowEndSec;
+        }
+    } else if (projection.reversed) {
+        start = projection.sourceWindowEndSec - span;
+        end = projection.sourceWindowEndSec;
+    } else {
+        start = projection.sourceWindowStartSec;
+        end = projection.sourceWindowStartSec + span;
+    }
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return { startSec: 0, endSec: 0 };
+    return { startSec: Math.min(start, end), endSec: Math.max(start, end) };
+}
+
+/** An analysis is current only when its window contains the audible window. */
+export function windowContained(
+    audible: { readonly startSec: number; readonly endSec: number },
+    analyzed: readonly [number, number] | null | undefined,
+): boolean {
+    return (
+        Array.isArray(analyzed) &&
+        analyzed.length === 2 &&
+        analyzed.every((value) => Number.isFinite(value)) &&
+        analyzed[1] >= analyzed[0] &&
+        audible.startSec >= analyzed[0] - 1e-6 &&
+        audible.endSec <= analyzed[1] + 1e-6
+    );
+}
+
 function loopAnchor(projection: ClipProjection): number {
     if (!projection.reversed) return projection.sourceWindowStartSec;
     const duration = projection.mediaDurationSec;
@@ -269,7 +331,14 @@ export function projectTakeSpan(
             );
             const start = Math.max(visibleStart, toFrame(startSec, fp));
             const end = Math.min(visibleEnd, toFrame(endSec, fp));
-            if (end > start) out.push({ cycle: index, startFrame: start, endFrameExclusive: end });
+            if (end > start)
+                out.push({
+                    cycle: index,
+                    startFrame: start,
+                    endFrameExclusive: end,
+                    cutStart: false,
+                    cutEnd: false,
+                });
         }
         return out;
     }
@@ -290,8 +359,19 @@ export function projectTakeSpan(
     const a = project(startSec);
     const b = project(endSec);
     const start = Math.max(visibleStart, toFrame(Math.min(a, b), fp));
-    const end = Math.min(visibleEnd, toFrame(Math.max(a, b), fp));
-    return end > start ? [{ cycle: 0, startFrame: start, endFrameExclusive: end }] : [];
+    let end = Math.min(visibleEnd, toFrame(Math.max(a, b), fp));
+    // A positive source/window intersection must always produce at least one
+    // visible frame; rounding both edges to the same frame is not an absence.
+    if (end <= start && endSec > startSec) end = Math.min(MAX_FRAME, start + 1);
+    const cutStart = projection.reversed
+        ? span.sourceEndSec > windowEnd + EPS
+        : span.sourceStartSec < windowStart - EPS;
+    const cutEnd = projection.reversed
+        ? span.sourceStartSec < windowStart - EPS
+        : span.sourceEndSec > windowEnd + EPS;
+    return end > start
+        ? [{ cycle: 0, startFrame: start, endFrameExclusive: end, cutStart, cutEnd }]
+        : [];
 }
 
 export function inverseProject(
@@ -510,10 +590,14 @@ export function toParamBlockSourceClip(clip: ClipInfo): ParamBlockSourceClip {
             durationFrames: take.durationFrames,
             sourceSampleRate: take.sourceSampleRate,
             syllableSpansSec: take.syllableSpansSec,
+            syllableNotes: take.syllableNotes,
+            syllableAnalysisWindowSec: take.syllableAnalysisWindowSec,
             gameBlockBaseline: take.gameBlockBaseline,
             midiNoteData: take.midiNoteData,
         })),
         syllableSpansSec: clip.syllableSpansSec,
+        syllableNotes: clip.syllableNotes,
+        syllableAnalysisWindowSec: clip.syllableAnalysisWindowSec,
         gameBlockBaseline: clip.gameBlockBaseline,
         midiNoteData: clip.midiNoteData,
     };

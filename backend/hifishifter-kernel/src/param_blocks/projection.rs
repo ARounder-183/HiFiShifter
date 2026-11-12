@@ -52,6 +52,10 @@ pub struct ProjectedInterval {
     pub cycle: u32,
     pub start_frame: u32,
     pub end_frame_exclusive: u32,
+    /// The visible interval starts inside its source span (window/overlap cut).
+    pub cut_start: bool,
+    /// The visible interval ends inside its source span (window/overlap cut).
+    pub cut_end: bool,
 }
 
 fn finite_positive(value: f64, fallback: f64) -> f64 {
@@ -119,6 +123,48 @@ impl ClipProjection {
         }
     }
 
+    /// The source-domain window that can currently be heard from this Take.
+    ///
+    /// Analysis, projection and the UI gate must all use this single function.
+    /// A loop Clip wraps through the whole media ring; a section loop whose
+    /// anchor fits inside the media uses only its own cycle. Unknown media
+    /// duration falls back to the stored source window.
+    pub fn audible_source_window(&self) -> (f64, f64) {
+        let span = (self.project_length_sec.max(0.0) * self.effective_rate).max(0.0);
+        let (start, end) = if self.loop_enabled {
+            let anchor = self.loop_anchor();
+            let cycle = self.loop_cycle_sec.unwrap_or(0.0);
+            let media = self.media_duration_sec;
+            let whole_ring = media.filter(|duration| {
+                *duration > 1e-9
+                    && (cycle >= *duration - 1e-9
+                        || anchor + cycle > *duration + 1e-9
+                        || anchor < -1e-9)
+            });
+            if let Some(duration) = whole_ring {
+                (0.0, duration)
+            } else if cycle > 1e-9 && anchor.is_finite() && anchor >= -1e-9 {
+                (anchor, anchor + cycle)
+            } else {
+                (self.source_window_start_sec, self.source_window_end_sec)
+            }
+        } else if self.reversed {
+            (
+                self.source_window_end_sec - span,
+                self.source_window_end_sec,
+            )
+        } else {
+            (
+                self.source_window_start_sec,
+                self.source_window_start_sec + span,
+            )
+        };
+        if !start.is_finite() || !end.is_finite() {
+            return (0.0, 0.0);
+        }
+        (start.min(end), start.max(end))
+    }
+
     pub fn frame_period_sec(&self, frame_period_ms: f64) -> f64 {
         frame_period_ms.max(0.1) / 1000.0
     }
@@ -176,6 +222,18 @@ impl ClipProjection {
     }
 }
 
+/// The authoritative audible source window for a Clip's active Take.
+/// Analysis, cache adoption and UI gates all call this function.
+pub fn clip_audible_source_window(clip: &crate::state::Clip) -> (f64, f64) {
+    if clip.takes.is_empty() {
+        let take = crate::state::ClipTake::from_clip(clip);
+        return ClipProjection::from_clip_take(clip, &take).audible_source_window();
+    }
+    ClipProjection::from_clip(clip)
+        .map(|projection| projection.audible_source_window())
+        .unwrap_or((0.0, 0.0))
+}
+
 pub fn project_span(
     projection: &ClipProjection,
     span: &TakeSpan,
@@ -222,6 +280,8 @@ pub fn project_span(
                     cycle,
                     start_frame: start,
                     end_frame_exclusive: end,
+                    cut_start: false,
+                    cut_end: false,
                 });
             }
             start_local += cycle_timeline_sec;
@@ -252,14 +312,37 @@ pub fn project_span(
     let start = projection
         .to_frame(a.min(b), frame_period_ms)
         .max(visible_start);
-    let end = projection
+    let mut end = projection
         .to_frame(a.max(b), frame_period_ms)
         .min(visible_end);
+    // A positive source/window intersection must produce a block. Rounding
+    // both ends to one frame is a sub-frame intersection, not an empty one.
+    if end <= start && end_sec > start_sec {
+        end = (start + 1).min(MAX_FRAME);
+    }
+    let mut cut_start = if projection.reversed {
+        span.source_end_sec > window_end + 1e-9
+    } else {
+        span.source_start_sec < window_start - 1e-9
+    };
+    let mut cut_end = if projection.reversed {
+        span.source_start_sec < window_start - 1e-9
+    } else {
+        span.source_end_sec > window_end + 1e-9
+    };
+    if projection.loop_enabled {
+        // Wrapping through the ring is normal; only the Clip length boundary
+        // is a cut, and that cut is expressed by the visible-frame clamp.
+        cut_start = false;
+        cut_end = false;
+    }
     if end > start {
         out.push(ProjectedInterval {
             cycle: 0,
             start_frame: start,
             end_frame_exclusive: end,
+            cut_start,
+            cut_end,
         });
     }
     out
@@ -483,6 +566,101 @@ mod tests {
             syllable_id: None,
             label: super::super::types::BlockLabel::Syllable,
         }
+    }
+
+    #[test]
+    fn project_span_keeps_one_frame_for_a_sub_frame_left_overlap() {
+        let clip = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":2.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":1.0,
+                "source_end_sec":3.0}]
+        }));
+        let projection = ClipProjection::from_clip(&clip).unwrap();
+        let intervals = project_span(&projection, &span(0.5, 1.001), 5.0);
+        assert_eq!(intervals.len(), 1);
+        assert_eq!(intervals[0].start_frame, 0);
+        assert_eq!(intervals[0].end_frame_exclusive, 1);
+        assert!(intervals[0].cut_start);
+    }
+
+    #[test]
+    fn project_span_marks_left_cut_forward_and_reverse() {
+        let forward = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":1.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":1.0,
+                "source_end_sec":2.0}]
+        }));
+        let interval = project_span(
+            &ClipProjection::from_clip(&forward).unwrap(),
+            &span(0.6, 1.4),
+            5.0,
+        )[0];
+        assert!(interval.cut_start);
+        assert!(!interval.cut_end);
+        let reverse = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":1.0,
+            "reversed":true,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.0,
+                "source_end_sec":2.0,"reversed":true}]
+        }));
+        let reversed = project_span(
+            &ClipProjection::from_clip(&reverse).unwrap(),
+            &span(1.6, 2.4),
+            5.0,
+        )[0];
+        assert!(reversed.cut_start);
+    }
+
+    #[test]
+    fn loop_analysis_window_is_the_audible_ring() {
+        let ring = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":4.0,
+            "loop_enabled":true,"loop_period_sec":1.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.0,
+                "source_end_sec":1.0,"loop_enabled":true,"duration_sec":1.0}]
+        }));
+        assert_eq!(
+            ClipProjection::from_clip(&ring)
+                .unwrap()
+                .audible_source_window(),
+            (0.0, 1.0)
+        );
+        let section = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":4.0,
+            "loop_enabled":true,"loop_period_sec":1.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.25,
+                "source_end_sec":1.25,"loop_enabled":true,"duration_sec":4.0}]
+        }));
+        let section_projection = ClipProjection::from_clip(&section).unwrap();
+        assert_eq!(section_projection.audible_source_window(), (0.25, 1.25));
+    }
+
+    #[test]
+    fn audible_window_follows_rate_and_direction() {
+        let forward = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":2.0,
+            "playback_rate":1.0,"clip_playback_rate":2.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.5,
+                "source_end_sec":8.0,"playback_rate":1.0}]
+        }));
+        assert_eq!(
+            ClipProjection::from_clip(&forward)
+                .unwrap()
+                .audible_source_window(),
+            (0.5, 4.5)
+        );
+        let reverse = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":2.0,
+            "reversed":true,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.0,
+                "source_end_sec":4.0,"reversed":true}]
+        }));
+        assert_eq!(
+            ClipProjection::from_clip(&reverse)
+                .unwrap()
+                .audible_source_window(),
+            (2.0, 4.0)
+        );
     }
 
     #[test]

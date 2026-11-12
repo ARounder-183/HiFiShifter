@@ -67,6 +67,10 @@ export interface TimelineClipTake {
     midi_fill_gaps?: boolean;
     /** 源域音节区间 [start_sec, end_sec]；缺省表示尚未分析。 */
     syllable_spans_sec?: Array<[number, number]>;
+    /** 与 syllable_spans_sec 平行的源音符（MIDI）；null 表示该段无音高。 */
+    syllable_notes?: Array<number | null>;
+    /** 本次分析实际覆盖的源域窗口 [start_sec, end_sec]。 */
+    syllable_analysis_window_sec?: [number, number] | null;
     /**
      * 宿主的非线性拉伸标记（REAPER stretch markers）。非空表示该 take 的源时间
      * 映射不是一条直线 —— 插件**不**渲染它，只用于把分割/拖边显式置为只读。
@@ -154,6 +158,8 @@ export interface TimelineClip {
     midi_fill_gaps?: boolean;
     /** 源域音节区间 [start_sec, end_sec]；缺省表示尚未分析。 */
     syllable_spans_sec?: Array<[number, number]>;
+    syllable_notes?: Array<number | null>;
+    syllable_analysis_window_sec?: [number, number] | null;
 }
 
 // ProjectMeta 保留导出：`selectClipRemote`（features/session/thunks）的导出

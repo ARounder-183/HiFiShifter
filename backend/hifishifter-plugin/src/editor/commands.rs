@@ -112,8 +112,10 @@ fn syllable_payload(
         "clipId": clip_id,
         "takeId": take_id,
         "sourceSpansSec": analysis.map(|a| a.source_spans_sec.iter().map(|s| {
-            json!({"startSec": s.start_sec, "endSec": s.end_sec})
+            json!({"startSec": s.start_sec, "endSec": s.end_sec, "midiNote": s.midi_note})
         }).collect::<Vec<_>>()).unwrap_or_default(),
+        "sourceNotes": analysis.map(|a| a.source_spans_sec.iter().map(|s| s.midi_note).collect::<Vec<_>>()).unwrap_or_default(),
+        "analyzedWindowSec": analysis.and_then(|a| a.analyzed_window_sec),
         "algorithm": analysis.map(|a| a.algorithm.clone()).unwrap_or_else(|| {
             hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM.to_string()
         }),
@@ -209,12 +211,11 @@ pub(crate) fn analyze_syllables(
                 window_end,
             )
             .into_iter()
-            .map(
-                |(start, end)| hifishifter_kernel::pitch_analysis::SyllableSpan {
-                    start_sec: start,
-                    end_sec: end,
-                },
-            )
+            .map(|span| hifishifter_kernel::pitch_analysis::SyllableSpan {
+                start_sec: span.0,
+                end_sec: span.1,
+                midi_note: Some(span.2),
+            })
             .collect::<Vec<_>>(),
             hifishifter_kernel::game_onnx::GAME_ALGORITHM,
             hifishifter_kernel::game_onnx::GAME_ALGORITHM_VERSION,
@@ -252,7 +253,10 @@ pub(crate) fn analyze_syllables(
         "sourceSpansSec": spans.iter().map(|span| json!({
             "startSec": span.start_sec,
             "endSec": span.end_sec,
+            "midiNote": span.midi_note,
         })).collect::<Vec<_>>(),
+        "sourceNotes": spans.iter().map(|span| span.midi_note).collect::<Vec<_>>(),
+        "analyzedWindowSec": [window_start, window_end],
         "algorithm": algorithm,
         "algorithmVersion": version,
         // 空 spans 代表“没检测到发声”，不是分析失败；actor 会保留旧缓存并回退。
@@ -371,7 +375,9 @@ mod lane_tests {
                     source_spans_sec: vec![hifishifter_kernel::pitch_analysis::SyllableSpan {
                         start_sec: 0.0,
                         end_sec: 0.001,
+                        midi_note: None,
                     }],
+                    analyzed_window_sec: [0.0, 0.0],
                 });
         }
         let payload = call(
@@ -1186,10 +1192,15 @@ pub(super) fn dispatch(
                 take,
                 timeline.frame_period_ms(),
             );
+            let window =
+                hifishifter_kernel::param_blocks::projection::ClipProjection::from_clip_take(
+                    clip, take,
+                )
+                .audible_source_window();
             let analysis = take
                 .syllable_analysis
                 .as_ref()
-                .filter(|analysis| analysis.is_current(&digest));
+                .filter(|analysis| analysis.is_current_for_window(&digest, window));
             return Ok(syllable_payload(clip_id, &take.id, analysis));
         }
         "analyze_clip_syllables" => {

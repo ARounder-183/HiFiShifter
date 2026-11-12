@@ -465,6 +465,17 @@ pub struct ProjectedParamBlock {
     pub members: Vec<ProjectedMember>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
+    /// Read-only source note for single-member blocks; never persisted in edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_note: Option<f32>,
+    /// `clipId|takeId|cycle` identity for cross-source adjacency checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_key: Option<String>,
+    /// Visible interval starts/ends inside its source span.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cut_start: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cut_end: bool,
     /// 基块候选的所有权覆盖；用户块为 None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_cover: Option<BaseCover>,
@@ -491,6 +502,10 @@ pub struct ProjectedMember {
     /// 可见区间覆盖的源域范围（source 顺序，供 BaseCover / 片段物化使用）。
     pub visible_source_start_sec: f64,
     pub visible_source_end_sec: f64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cut_start: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cut_end: bool,
 }
 
 /// 视图块的编辑能力标签。
@@ -520,6 +535,69 @@ pub struct GameBlockBaseline {
     pub algorithm: String,
     pub algorithm_version: u32,
     pub source_spans_sec: Vec<crate::pitch_analysis::SyllableSpan>,
+    /// Union of the source windows already represented by `source_spans_sec`.
+    pub analyzed_window_sec: [f64; 2],
+}
+
+impl GameBlockBaseline {
+    /// A reanalysis of a wider window extends the frozen baseline instead of
+    /// discarding spans that are still valid; an algorithm change replaces it.
+    pub fn merge_window(
+        &mut self,
+        algorithm: &str,
+        algorithm_version: u32,
+        window: [f64; 2],
+        spans: &[crate::pitch_analysis::SyllableSpan],
+    ) {
+        if self.algorithm != algorithm
+            || self.algorithm_version != algorithm_version
+            || self.source_spans_sec.is_empty()
+        {
+            self.algorithm = algorithm.to_owned();
+            self.algorithm_version = algorithm_version;
+            self.source_spans_sec = spans.to_vec();
+            self.analyzed_window_sec = window;
+            return;
+        }
+        let prior = self.analyzed_window_sec;
+        if window[0] >= prior[0] - 1e-6 && window[1] <= prior[1] + 1e-6 {
+            return;
+        }
+        for span in spans {
+            let duplicate = self.source_spans_sec.iter().any(|existing| {
+                (existing.start_sec - span.start_sec).abs() <= 1e-9
+                    && (existing.end_sec - span.end_sec).abs() <= 1e-9
+            });
+            if !duplicate {
+                self.source_spans_sec.push(span.clone());
+            }
+        }
+        self.source_spans_sec.sort_by(|a, b| {
+            a.start_sec
+                .total_cmp(&b.start_sec)
+                .then(a.end_sec.total_cmp(&b.end_sec))
+        });
+        self.analyzed_window_sec = [prior[0].min(window[0]), prior[1].max(window[1])];
+    }
+}
+
+/// Update the optional frozen baseline for one completed GAME analysis.
+/// Kept in the kernel so App and plugin share the same window-merge policy.
+pub fn merge_game_baseline(
+    baseline: &mut Option<GameBlockBaseline>,
+    algorithm: &str,
+    algorithm_version: u32,
+    window: [f64; 2],
+    spans: &[crate::pitch_analysis::SyllableSpan],
+) {
+    let entry = baseline.get_or_insert_with(|| GameBlockBaseline {
+        revision: 1,
+        algorithm: algorithm.to_owned(),
+        algorithm_version,
+        source_spans_sec: Vec::new(),
+        analyzed_window_sec: window,
+    });
+    entry.merge_window(algorithm, algorithm_version, window, spans);
 }
 
 #[cfg(test)]

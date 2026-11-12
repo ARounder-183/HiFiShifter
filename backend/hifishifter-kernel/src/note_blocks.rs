@@ -7,9 +7,7 @@
 //!
 //! 这里只读，不触发分析、不解码音频，也不写 timeline。
 
-use crate::param_blocks::projection::{
-    normalize_loop_span, project_span, ClipProjection,
-};
+use crate::param_blocks::projection::{normalize_loop_span, project_span, ClipProjection};
 use crate::param_blocks::types::{BlockLabel, TakeSpan};
 use crate::state::{Clip, ClipTake};
 
@@ -24,6 +22,9 @@ pub enum NoteBlockSource {
 pub struct NoteBlockSpan {
     pub start_sec: f64,
     pub end_sec: f64,
+    /// Representative MIDI note from the source analysis; MIDI notes carry it,
+    /// audio estimates may have none when the span has no voiced frames.
+    pub midi_note: Option<f32>,
 }
 
 /// 与 param_blocks/base.rs 完全相同的来源优先级。
@@ -40,6 +41,7 @@ pub fn source_note_spans(take: &ClipTake) -> Option<(Vec<NoteBlockSpan>, NoteBlo
                 .map(|span| NoteBlockSpan {
                     start_sec: span.start_sec,
                     end_sec: span.end_sec,
+                    midi_note: span.midi_note,
                 })
                 .collect(),
             NoteBlockSource::Syllable,
@@ -57,6 +59,7 @@ pub fn source_note_spans(take: &ClipTake) -> Option<(Vec<NoteBlockSpan>, NoteBlo
                 .map(|span| NoteBlockSpan {
                     start_sec: span.start_sec,
                     end_sec: span.end_sec,
+                    midi_note: span.midi_note,
                 })
                 .collect(),
             NoteBlockSource::GameBaseline,
@@ -74,6 +77,7 @@ pub fn source_note_spans(take: &ClipTake) -> Option<(Vec<NoteBlockSpan>, NoteBlo
                 .map(|note| NoteBlockSpan {
                     start_sec: note.start_sec,
                     end_sec: note.end_sec,
+                    midi_note: Some(note.note),
                 })
                 .collect(),
             NoteBlockSource::MidiNote,
@@ -83,11 +87,7 @@ pub fn source_note_spans(take: &ClipTake) -> Option<(Vec<NoteBlockSpan>, NoteBlo
 }
 
 /// 源域音符块 → 工程时间轴绝对秒（复用参数块投影）。
-pub fn projected_note_spans(
-    clip: &Clip,
-    take: &ClipTake,
-    frame_period_ms: f64,
-) -> Vec<(f64, f64)> {
+pub fn projected_note_spans(clip: &Clip, take: &ClipTake, frame_period_ms: f64) -> Vec<(f64, f64)> {
     let Some((spans, _source)) = source_note_spans(take) else {
         return Vec::new();
     };
@@ -137,8 +137,18 @@ mod tests {
             "clips":[],"bpm":120,"project_sec":4
         }))
         .unwrap();
-        let clip_id = timeline.add_clip(Some("root".into()), Some("clip".into()), Some(0.0), Some(1.0), None);
-        let clip = timeline.clips.iter_mut().find(|clip| clip.id == clip_id).unwrap();
+        let clip_id = timeline.add_clip(
+            Some("root".into()),
+            Some("clip".into()),
+            Some(0.0),
+            Some(1.0),
+            None,
+        );
+        let clip = timeline
+            .clips
+            .iter_mut()
+            .find(|clip| clip.id == clip_id)
+            .unwrap();
         let take = clip.takes.first_mut().unwrap();
         take.midi_note_data = Some(vec![crate::midi_import::MidiNoteEvent {
             start_sec: 0.0,
@@ -147,7 +157,10 @@ mod tests {
             velocity: 100,
             channel: 0,
         }]);
-        assert_eq!(source_note_spans(take).unwrap().1, NoteBlockSource::MidiNote);
+        assert_eq!(
+            source_note_spans(take).unwrap().1,
+            NoteBlockSource::MidiNote
+        );
         take.game_block_baseline = Some(crate::param_blocks::types::GameBlockBaseline {
             revision: 1,
             algorithm: "test".into(),
@@ -155,9 +168,14 @@ mod tests {
             source_spans_sec: vec![crate::pitch_analysis::SyllableSpan {
                 start_sec: 0.1,
                 end_sec: 0.2,
+                midi_note: None,
             }],
+            analyzed_window_sec: [0.0, 0.0],
         });
-        assert_eq!(source_note_spans(take).unwrap().1, NoteBlockSource::GameBaseline);
+        assert_eq!(
+            source_note_spans(take).unwrap().1,
+            NoteBlockSource::GameBaseline
+        );
         take.syllable_analysis = Some(crate::pitch_analysis::TakeSyllableAnalysis {
             algorithm: "test".into(),
             algorithm_version: 1,
@@ -165,8 +183,13 @@ mod tests {
             source_spans_sec: vec![crate::pitch_analysis::SyllableSpan {
                 start_sec: 0.2,
                 end_sec: 0.3,
+                midi_note: None,
             }],
+            analyzed_window_sec: [0.0, 0.0],
         });
-        assert_eq!(source_note_spans(take).unwrap().1, NoteBlockSource::Syllable);
+        assert_eq!(
+            source_note_spans(take).unwrap().1,
+            NoteBlockSource::Syllable
+        );
     }
 }

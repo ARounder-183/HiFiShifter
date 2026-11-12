@@ -53,7 +53,7 @@ function initial() {
     window.__HFS_PLUGIN_BOOTSTRAP__ = { version: 1, viewId: "metadata" };
     return reducer(undefined, fetchTimeline.fulfilled(timeline(), "init", undefined));
 }
-const result = {
+const result: Parameters<typeof applyClipSyllableAnalysis>[0] = {
     clipId: "a",
     takeId: "take-a",
     sourcePath: "a.wav",
@@ -62,6 +62,8 @@ const result = {
         { startSec: 0, endSec: 0.4 },
         { startSec: 0.4, endSec: 1 },
     ],
+    sourceNotes: [60, 62],
+    analyzedWindowSec: [0, 1],
 };
 afterEach(() => {
     delete window.__HFS_PLUGIN_BOOTSTRAP__;
@@ -70,8 +72,14 @@ afterEach(() => {
 test("GAME updates only its Take and block metadata without invalidating curves", () => {
     const before = initial();
     const after = reducer(before, applyClipSyllableAnalysis(result));
-    expect(after.clips[0].takes?.[0].syllableSpansSec).toEqual(result.sourceSpansSec);
-    expect(after.clips[0].syllableSpansSec).toEqual(result.sourceSpansSec);
+    expect(after.clips[0].takes?.[0].syllableSpansSec).toEqual([
+        { startSec: 0, endSec: 0.4, note: 60 },
+        { startSec: 0.4, endSec: 1, note: 62 },
+    ]);
+    expect(after.clips[0].syllableSpansSec).toEqual([
+        { startSec: 0, endSec: 0.4, note: 60 },
+        { startSec: 0.4, endSec: 1, note: 62 },
+    ]);
     expect(after.paramsEpoch).toBe(before.paramsEpoch);
     expect(after.clipPitchCurves).toBe(before.clipPitchCurves);
     expect(after.tracks).toBe(before.tracks);
@@ -84,7 +92,10 @@ test("a timeline response issued before GAME completion cannot remove its blocks
     state = reducer(state, fetchTimeline.pending("old", undefined));
     state = reducer(state, applyClipSyllableAnalysis(result));
     state = reducer(state, fetchTimeline.fulfilled(timeline(), "old", undefined));
-    expect(state.clips[0].syllableSpansSec).toEqual(result.sourceSpansSec);
+    expect(state.clips[0].syllableSpansSec).toEqual([
+        { startSec: 0, endSec: 0.4, note: 60 },
+        { startSec: 0.4, endSec: 1, note: 62 },
+    ]);
 });
 
 test("late, failed, or invalid GAME results cannot overwrite a different source", () => {
@@ -97,4 +108,27 @@ test("late, failed, or invalid GAME results cannot overwrite a different source"
         { ...result, sourceSpansSec: [{ startSec: 1, endSec: 0 }] },
     ])
         expect(reducer(state, applyClipSyllableAnalysis(changed))).toBe(state);
+});
+
+test("GAME commits the analyzed window and parallel source notes", () => {
+    const state = reducer(initial(), applyClipSyllableAnalysis(result));
+    expect(state.clips[0].takes?.[0].syllableAnalysisWindowSec).toEqual([0, 1]);
+    expect(state.clips[0].takes?.[0].syllableNotes).toEqual([60, 62]);
+    expect(state.clips[0].syllableSpansSec).toEqual([
+        { startSec: 0, endSec: 0.4, note: 60 },
+        { startSec: 0.4, endSec: 1, note: 62 },
+    ]);
+});
+
+test("a malformed analyzed window is rejected", () => {
+    const state = initial();
+    expect(
+        reducer(
+            state,
+            applyClipSyllableAnalysis({
+                ...result,
+                analyzedWindowSec: [1, 0],
+            }),
+        ),
+    ).toBe(state);
 });
