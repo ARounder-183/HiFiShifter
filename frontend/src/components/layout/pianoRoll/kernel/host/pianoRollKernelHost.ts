@@ -1083,7 +1083,6 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             paramName: spec.paramName,
             axisUnit: spec.axisUnit,
             axisDirection: spec.axisDirection,
-            panLabels: spec.panLabels,
             view,
             absMin: spec.absMin,
             absMax: spec.absMax,
@@ -1702,7 +1701,6 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             valueToY: spec.valueToY,
             paramName: spec.paramName,
             axisUnit: spec.axisUnit,
-            panLabels: spec.panLabels,
         });
         // 标签锚点的安全区间：值域两端映射到绘图区上下边缘，而 `middle` 基准的文字
         // 有一半在锚点外侧，不夹取就会让最上/最下那条刻度各缺半截（见
@@ -1773,7 +1771,6 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             valueToY: spec.valueToY,
             paramName: spec.paramName,
             axisUnit: spec.axisUnit,
-            panLabels: spec.panLabels,
         });
         // `lineOnly` 的项只画标签、没有配对的分隔线（见 axisMarkInstances 的说明）
         const lines = marks.filter((m) => !m.lineOnly);

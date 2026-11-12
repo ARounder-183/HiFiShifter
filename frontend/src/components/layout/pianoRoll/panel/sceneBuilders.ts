@@ -116,7 +116,6 @@ export function buildGridSpec(
         | "processorParamsRef"
         | "s"
         | "themeMode"
-        | "tf"
         | "valueToY"
     >,
 ): PianoRollGridSpec | null {
@@ -133,7 +132,6 @@ export function buildGridSpec(
         processorParamsRef,
         s,
         themeMode,
-        tf,
         valueToY,
     } = deps;
 
@@ -201,11 +199,6 @@ export function buildGridSpec(
         ...(isPanParam(editParam)
             ? {
                   axisDirection: resolvePanAxisDirection(paramAxisDirectionsRef.current, editParam),
-                  panLabels: {
-                      left: tf("pan_left"),
-                      center: tf("pan_center"),
-                      right: tf("pan_right"),
-                  },
               }
             : {}),
         // 与传给 drawPianoRoll 的 fontFamily 同一个值（见 `drawPianoRoll` 的入参），

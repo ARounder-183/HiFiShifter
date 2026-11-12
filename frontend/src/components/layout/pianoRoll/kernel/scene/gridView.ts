@@ -229,9 +229,6 @@ export interface KeyboardGeometrySignatureArgs {
     readonly axisUnit?: string | undefined;
     /** pan 纵轴方向；方向变化会重建刻度文字。 */
     readonly axisDirection?: string | undefined;
-    /** pan 刻度文本（左/中/右）。 */
-    readonly panLabels?:
-        { readonly left: string; readonly center: string; readonly right: string } | undefined;
     readonly view: LiveGridView;
     readonly absMin: number;
     readonly absMax: number;
@@ -284,7 +281,6 @@ export function keyboardGeometrySignature(args: KeyboardGeometrySignatureArgs): 
             // 展示单位（倍率 / dB）：只改标签文本，几何不变，因此必须显式入签名。
             args.axisUnit ?? "",
             args.axisDirection ?? "",
-            `${args.panLabels?.left ?? ""}/${args.panLabels?.center ?? ""}/${args.panLabels?.right ?? ""}`,
             args.view.center,
             args.view.span,
             args.absMin,

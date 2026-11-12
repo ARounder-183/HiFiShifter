@@ -239,6 +239,38 @@ describe("keyboardGeometrySignature（键盘 / 数值轴几何签名）", () => 
         expect(a).not.toBe(b);
     });
 
+    it("★ 声像轴的方向变化仍会重建刻度文字", () => {
+        // 方向（left-bottom / left-top）只改投影与刻度排布，但它必须留在签名里：
+        // 否则点轴角标翻转后几何不重建，刻度停在旧方向。
+        const base = {
+            ...metrics,
+            kind: "fallback" as const,
+            paramName: "pan",
+            view: resolveLiveGridView({ ...PITCH, scrollTop: 600 }),
+        };
+        const bottom = keyboardGeometrySignature({ ...base, axisDirection: "left-bottom" });
+        const top = keyboardGeometrySignature({ ...base, axisDirection: "left-top" });
+        expect(bottom).not.toBe(top);
+    });
+
+    it("声像轴签名不含语言文案（刻度改用语言无关字母）", () => {
+        // 回归守护：曾把 i18n 的 left/center/right 三个完整单词编进签名，切语言会
+        // 白白重建轴几何，且长词仍会挤占轴列。改为紧凑字母表后签名只由
+        // kind/paramName/axisUnit/axisDirection/view 决定。
+        const args = {
+            ...metrics,
+            kind: "fallback" as const,
+            paramName: "pan",
+            axisDirection: "left-bottom" as const,
+            view: resolveLiveGridView({ ...PITCH, scrollTop: 600 }),
+        };
+        expect(keyboardGeometrySignature(args)).toBe(keyboardGeometrySignature({ ...args }));
+        // 与其它 fallback 参数（同 kind）仍必须互异，否则切换参数时轴不重建。
+        expect(keyboardGeometrySignature({ ...args, paramName: "something_else" })).not.toBe(
+            keyboardGeometrySignature(args),
+        );
+    });
+
     it("键盘配色参与签名（切主题后键体颜色必须更新）", () => {
         const base = keyboardGeometrySignature({
             ...metrics,

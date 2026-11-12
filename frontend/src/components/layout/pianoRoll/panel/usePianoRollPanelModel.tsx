@@ -1606,7 +1606,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             processorParamsRef,
             s,
             themeMode,
-            tf,
             valueToY,
         });
     }
