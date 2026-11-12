@@ -3117,6 +3117,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               startClientX: number;
               startClientY: number;
               clipId: string;
+              /** 单击的前景选中目标；拖拽仍使用 clipId 与原命中分区。 */
+              overlapClickClipId?: string;
               /** 命中分区：决定超过阈值后升级为拖拽（body/header）还是 trim（边缘）。 */
               region: ClipHitRegion;
               /** 按下时的内容坐标（用于换算拖拽位移）。 */
@@ -3945,6 +3947,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     ): number | null {
         if (gesture.region === "snap-offset-handle") return null;
         if (gesture.inactiveTakeId !== null) return null;
+        if (gesture.overlapClickClipId !== undefined) return secAt(event.clientX);
         if (gesture.region === "left-edge") return gesture.originStartSec;
         if (gesture.region === "right-edge") {
             return gesture.originStartSec + gesture.lengthSec;
@@ -4099,19 +4102,27 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     function startPrimaryGesture(event: PointerEvent): void {
         /*
-         * 重叠区按下：控件归属与 body 前景分离。
+         * 重叠区按下：单击目标与拖拽控件归属分开。
          *
          * hitAt 的 clip 是控件归属（A 的淡出线仍是 A），foregroundClip 只是
-         * body 的视觉最上层。选择目标由 resolveOverlapPressTarget 统一给出：
-         * 控件命中选控件所属 Clip，纯 body 命中选前景 Clip。这样拖 A 的淡出线
-         * 不会移动 B，拖 B 的淡入线也不会移动 A。
+         * body 的视觉最上层。无修饰键的控件单击保留既有的「选前景」手感；
+         * 只有超过拖拽阈值才改选控件归属，并继续编辑原 region。这样既不会让
+         * A 的淡出线去拖 B，也不会把一次普通点击变成选中 A。
          *
          * header 控件（静音 / 链 / 共振峰 / 旋钮 / 徽标）仍由
          * resolveHeaderControl 单独识别，不进入重叠区解析。
          */
         const rawHit = hitAt(event.clientX, event.clientY);
-        const press = resolveOverlapPressTarget(rawHit);
+        const press = resolveOverlapPressTarget(rawHit, {
+            altKey: event.altKey,
+            ctrlKey: event.ctrlKey,
+            metaKey: event.metaKey,
+            shiftKey: event.shiftKey,
+        });
         const hit = press.hit;
+        const overlapClickClipId = press.plainControlClick
+            ? (press.selectionClipId ?? undefined)
+            : undefined;
         if (hit.kind === "clip" && interactions?.geometryReadOnly) {
             const intercepted = interactions.onClipPointerDownIntercept?.({
                 clipId: hit.clip.id,
@@ -4123,7 +4134,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             });
             if (!intercepted)
                 interactions.onSelectClip?.(
-                    hit.clip.id,
+                    overlapClickClipId ?? hit.clip.id,
                     event.ctrlKey || event.metaKey,
                     event.shiftKey,
                     event.clientX,
@@ -4336,6 +4347,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 startClientX: event.clientX,
                 startClientY: event.clientY,
                 clipId: hit.clip.id,
+                overlapClickClipId,
                 region: hit.region,
                 partnerClipId: hit.partnerClipId,
                 fromOverlapRegion: hit.fromOverlapRegion === true,
@@ -4377,7 +4389,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 selectionMods: resolveSelectionMods(event),
             };
             primeSelectionOnPress(
-                press.selectionClipId ?? hit.clip.id,
+                overlapClickClipId ?? hit.clip.id,
                 hit.region,
                 gesture.kind === "pending-select" ? gesture.selectionMods : null,
                 event.clientX,
@@ -4626,6 +4638,18 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             const thresholdPx =
                 gesture.fromOverlapRegion === true ? OVERLAP_DRAG_THRESHOLD_PX : DRAG_THRESHOLD_PX;
             if (dx * dx + dy * dy < thresholdPx * thresholdPx) return;
+            if (
+                gesture.overlapClickClipId !== undefined &&
+                gesture.overlapClickClipId !== gesture.clipId
+            ) {
+                primeSelectionOnPress(
+                    gesture.clipId,
+                    gesture.region,
+                    gesture.selectionMods,
+                    gesture.startClientX,
+                    gesture.fromOverlapRegion === true,
+                );
+            }
             // 发生拖拽 → 双击待定记录失效：否则"拖拽后落点回位"（第二次按下
             // 恰好落在首次按下附近）会被误判成双击（旧实现同样在拖拽分支清空）。
             lastClipPress = null;
@@ -5366,7 +5390,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 // `clipRangeSelect`），且要与「物理 Alt 旁路 / 两键互斥」规则一致；
                 // 现读 `event.ctrlKey || event.metaKey` 既绕过绑定，也绕过互斥。
                 interactions?.onSelectClip?.(
-                    gesture.clipId,
+                    gesture.overlapClickClipId ?? gesture.clipId,
                     gesture.selectionMods.multiSelectToggleActive,
                     gesture.selectionMods.rangeSelectActive,
                     gesture.startClientX,
