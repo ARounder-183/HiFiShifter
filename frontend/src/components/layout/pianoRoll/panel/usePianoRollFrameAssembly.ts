@@ -34,7 +34,8 @@ import type { PianoRollKernelHost } from "../kernel/host/pianoRollKernelHost";
 import type { ParamClipboardData } from "../paramClipboardMapping";
 import { clampParamWriteValue } from "../paramRanges";
 import type { FrameRange, ParamSelection } from "../paramSelection";
-import type { DetectedPitchCurve, ReferencePitchOverlay } from "../render";
+import type { ReferencePitchOverlay } from "../render";
+import { buildClipPitchOverlays } from "../clipPitchOverlay";
 import { buildReferencePitchStrokeColor } from "../referenceRootTracks";
 import type { ParamViewSegment, ValueViewport } from "../types";
 import { useClipsPeaksForPianoRoll } from "../useClipsPeaksForPianoRoll";
@@ -70,6 +71,7 @@ type PianoRollFrameAssemblyInputs = {
     viewSize: ModelDeps["viewSize"];
     // —— 当前参数与门禁 ——
     editParam: ModelDeps["editParam"];
+    clipPitchOverlayVisible: boolean;
     currentParamDefaultValue: ModelDeps["currentParamDefaultValue"];
     pitchEnabled: ModelDeps["pitchEnabled"];
     pitchHardDisableReason: ModelDeps["pitchHardDisableReason"];
@@ -139,6 +141,7 @@ export function usePianoRollFrameAssembly({
     scrollLeft,
     viewSize,
     editParam,
+    clipPitchOverlayVisible,
     currentParamDefaultValue,
     pitchEnabled,
     pitchHardDisableReason,
@@ -245,9 +248,6 @@ export function usePianoRollFrameAssembly({
     useEffect(() => {
         invalidate();
     }, [editParam, visibleSecondaryParamIds, themeMode, invalidate]);
-
-    // 检测音高曲线更新时触发重绘（必须在 detectedPitchCurves 声明之后 ?
-    // useEffect 已移 ?detectedPitchCurves useMemo 定义之后，见下方 ?
 
     const paramViewRef = useRef<import("../types").ParamViewSegment | null>(null);
     useEffect(() => {
@@ -442,30 +442,30 @@ export function usePianoRollFrameAssembly({
         [commitStrokeBase, getLatestLoudnessFetchSeq, liveEditActiveRef],
     );
 
-    // 从 store 中的 clipPitchCurves 转换为 DetectedPitchCurve[] 供 drawPianoRoll 使用。
-    // 仅在 pitch 模式下且轨道 Compose 开启时显示，其他情况下传空数组以避免不必要的计算。
-    const detectedPitchCurves = useMemo((): DetectedPitchCurve[] => {
-        if (editParam !== "pitch") return [];
+    // Clip 源音高参考线：从 session.clipPitchCurves 派生 per-clip 分段。
+    // 与 pv.orig 的根轨道单值合成线不同，它保留每个 Clip 自己的音高，因此在
+    // Clip 重合、音高参考块覆盖时仍有唯一信息。详情见 clipPitchOverlay.ts。
+    const clipPitchOverlays = useMemo(() => {
+        if (editParam !== "pitch" || !clipPitchOverlayVisible) return [];
         if (!rootTrack?.composeEnabled) return [];
-        return Object.entries(s.clipPitchCurves)
-            .filter(([clipId]) => {
-                // 只保留属于当前轨道组内的 clip，显示 root 及所有子轨道的 detected curve
-                const clip = s.clips.find((cl) => cl.id === clipId);
-                return clip && groupTrackIds.has(clip.trackId) && !clip.muted;
-            })
-            .map(([clipId, c]) => {
-                // 跨度取**当前**几何：缓存可能比 clip 长（见 `DetectedPitchCurve`）。
-                const clip = s.clips.find((cl) => cl.id === clipId);
-                const clipStartSec = clip?.startSec ?? c.curveStartSec;
-                return {
-                    curveStartSec: c.curveStartSec,
-                    midiCurve: c.midiCurve,
-                    framePeriodMs: c.framePeriodMs,
-                    clipStartSec,
-                    clipEndSec: clipStartSec + (clip?.lengthSec ?? 0),
-                };
-            });
-    }, [editParam, rootTrack, s.clipPitchCurves, s.clips, groupTrackIds]);
+        const selectedClipIds = new Set<string>(s.multiSelectedClipIds);
+        if (s.selectedClipId !== null) selectedClipIds.add(s.selectedClipId);
+        return buildClipPitchOverlays({
+            clips: s.clips,
+            curves: s.clipPitchCurves,
+            groupTrackIds,
+            selectedClipIds,
+        });
+    }, [
+        clipPitchOverlayVisible,
+        editParam,
+        groupTrackIds,
+        rootTrack,
+        s.clipPitchCurves,
+        s.clips,
+        s.multiSelectedClipIds,
+        s.selectedClipId,
+    ]);
 
     const referencePitchOverlays = useMemo((): ReferencePitchOverlay[] => {
         if (editParam !== "pitch") return [];
@@ -498,10 +498,10 @@ export function usePianoRollFrameAssembly({
         visibleReferenceRootTrackIds,
     ]);
 
-    // 检测音高曲线更新时触发重绘
+    // Clip 源音高参考线更新 / 开关切换时触发重绘。
     useEffect(() => {
         invalidate();
-    }, [detectedPitchCurves, invalidate]);
+    }, [clipPitchOverlays, invalidate]);
 
     useEffect(() => {
         invalidate();
@@ -538,7 +538,7 @@ export function usePianoRollFrameAssembly({
     /**
      * 组装曲线图层描述符（阶段 3：曲线 GL）。
      *
-     * 流程：按**绘制顺序**产出 7 类图层 —— 参考线 → 检测曲线 → 副参数 → 原始曲线
+     * 流程：按**绘制顺序**产出 7 类图层 —— 参考线 → Clip 源音高 → 副参数 → 原始曲线
      * → 编辑曲线 → 选区高亮 → 剪贴板预览（后者在上）。顺序与 `render.ts` 的
      * Canvas2D 调用顺序**逐项对应**，因为 GL 靠数组顺序决定层叠。
      *
@@ -565,7 +565,7 @@ export function usePianoRollFrameAssembly({
         return buildCurveLayersImpl(
             {
                 clipboardRef,
-                detectedPitchCurves,
+                clipPitchOverlays,
                 editParam,
                 liveEditOverrideRef,
                 paramView,
@@ -652,7 +652,7 @@ export function usePianoRollFrameAssembly({
             childPitchHardDisableReason,
             clipboardRef,
             currentParamDefaultValue,
-            detectedPitchCurves,
+            clipPitchOverlays,
             editParam,
             fontFamily,
             hostRef,
@@ -692,7 +692,7 @@ export function usePianoRollFrameAssembly({
         clearLiveEditOverride,
         commitStroke,
         onParamCommitSucceeded,
-        detectedPitchCurves,
+        clipPitchOverlays,
         referencePitchOverlays,
         buildCurveLayers,
         buildSelectionBandSpec,

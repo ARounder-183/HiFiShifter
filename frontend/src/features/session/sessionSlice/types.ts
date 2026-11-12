@@ -372,6 +372,12 @@ export interface SessionState {
 
     /**
      * 后端推送的 per-clip 音高检测结果（MIDI 曲线）。
+     *
+     * 同时服务两条只读链路：
+     * - 时间轴 MIDI 参考块在 midiNoteData 缺失时的回退；
+     * - 参数编辑器的 Clip 源音高参考线（重合 / 音高参考块覆盖时仍保留每个
+     *   Clip 自己的曲线，与根轨道合成的 pv.orig 不同）。
+     *
      * key: clip_id
      * value: { curveStartSec, midiCurve, framePeriodMs }
      */

@@ -71,9 +71,9 @@ import {
 import { resolveParamBlockFrameValue } from "../../paramBlockFrame";
 import { decimatePolylinePoints } from "../../../renderKernel/gl/polylineDecimation";
 import {
+    projectClipPitchPoints,
     projectClipboardPreviewPoints,
     projectCurvePoints,
-    projectDetectedCurvePoints,
     type CurvePoint,
 } from "../scene/curvePoints";
 import {
@@ -1510,21 +1510,21 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             // 每条图层用自己的投影（副参数值域与主参数不同，见 spec 说明）。
             const valueToY = layer.valueToY;
             // 三种投影的时间基准不同（见 `PianoRollCurveLayer.projection` 说明）：
-            // 检测曲线自带绝对起始秒且要跳无声帧，剪贴板预览锚定选区起点，
-            // 其余按 `startFrame + i × stride`。混用会造成平移或尖刺。
+            // Clip 源音高参考线自带绝对起始秒，剪贴板预览锚定选区起点，其余按
+            // `startFrame + i × stride`。混用会造成平移。
             //
             // 虚线相位（`dashPhasePx`）：只有 `"curve"` 投影（原始参数线是唯一
             // 的虚线用户）由投影给出锚在**数据**上的相位 —— 相位 = 首个可见点
             // 相对曲线起点的内容坐标距离，滚动时不变，虚线跟着内容走而不是在
-            // 屏幕上原地重排（"蠕动"）。检测/剪贴板投影的子路径起点本身就是
+            // 屏幕上原地重排（"蠕动"）。Clip / 剪贴板投影的子路径起点本身就是
             // 数据锚定的（curveStartSec / selStartSec），无需补偿。
             let points: CurvePoint[];
             let dashPhasePx = 0;
-            if (layer.projection === "detected") {
-                points = projectDetectedCurvePoints({
-                    midiCurve: layer.values,
+            if (layer.projection === "clip") {
+                points = projectClipPitchPoints({
+                    values: layer.values,
                     curveStartSec: layer.curveStartSec ?? 0,
-                    // 有效跨度 = 所属 clip 的跨度：越界帧与"起点不符"的过期缓存都不画。
+                    sampleStartIndex: layer.curveSampleStartIndex ?? 0,
                     clipStartSec: layer.clipStartSec ?? 0,
                     clipEndSec: layer.clipEndSec ?? Number.POSITIVE_INFINITY,
                     framePeriodMs: layer.framePeriodMs,

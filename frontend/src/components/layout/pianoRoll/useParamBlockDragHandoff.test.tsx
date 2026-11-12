@@ -113,7 +113,7 @@ async function harness() {
         buildCurveLayers(
             {
                 clipboardRef: { current: null },
-                detectedPitchCurves: [],
+                clipPitchOverlays: [],
                 editParam: "pitch",
                 liveEditOverrideRef: live.liveEditOverrideRef,
                 paramView,

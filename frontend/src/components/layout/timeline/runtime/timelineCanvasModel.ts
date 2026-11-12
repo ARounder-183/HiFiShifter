@@ -562,6 +562,9 @@ export function buildSparseClipRenderModel(args: {
     /**
      * 后端推送的 per-clip 音高曲线（Redux `session.clipPitchCurves`）。
      *
+     * **时间轴 MIDI 参考块的兜底数据源**；同一条数据也供参数编辑器的
+     * Clip 源音高参考线使用（那里不经过 pv.orig 的单值合成）。
+     *
      * **兜底数据源**：`clip.midiNoteData` 缺失时（后端 lite 轮询载荷会剥离
      * `midi_note_data`，见 `to_payload_lite`）由这里提供曲线。
      *

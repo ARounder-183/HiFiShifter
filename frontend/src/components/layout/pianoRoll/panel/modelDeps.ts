@@ -33,7 +33,8 @@ import type { ParamAxisUnit } from "../paramAxisUnits";
 import type { PanAxisDirections } from "../paramPan";
 import type { ParamClipboardData } from "../paramClipboardMapping";
 import type { FrameRange, ParamSelection } from "../paramSelection";
-import type { DetectedPitchCurve, ReferencePitchOverlay } from "../render";
+import type { ClipPitchOverlay } from "../clipPitchOverlay";
+import type { ReferencePitchOverlay } from "../render";
 import type { ParamMorphOverlay, ParamName, ParamViewSegment, ValueViewport } from "../types";
 import type { LiveEditOverride } from "../useLiveParamEditing";
 import type { Dispatch, RefObject, SetStateAction } from "react";
@@ -56,7 +57,7 @@ export type ModelDeps = {
     currentParamDefaultValue: number;
     currentParamQuantizeUnit: number;
     currentParamRange: { min: number; max: number } | undefined;
-    detectedPitchCurves: DetectedPitchCurve[];
+    clipPitchOverlays: ClipPitchOverlay[];
     dispatch: AppDispatch;
     editParam: string;
     editParamAxisUnit: ParamAxisUnit;

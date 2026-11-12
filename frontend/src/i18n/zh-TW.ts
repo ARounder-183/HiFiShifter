@@ -1340,6 +1340,8 @@ export const zhTW = {
     copy_playhead_time: "複製播放游標時間",
     sync_timeline_view: "同步時間軸檢視",
     sync_timeline_view_tooltip: "將參數編輯器的水平位置與縮放同步到時間軸",
+    clip_pitch_overlay: "Clip 音高",
+    clip_pitch_overlay_tooltip: "顯示每個 Clip 自己的音高曲線",
 
     // 工具模式
 

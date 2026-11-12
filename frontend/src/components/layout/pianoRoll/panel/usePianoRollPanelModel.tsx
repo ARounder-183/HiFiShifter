@@ -2244,6 +2244,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         waveformRepaintLoopRef.current?.invalidate();
     }, [loudnessGeometryWarp]);
 
+    // Clip 源音高参考线：纯 UI 开关（默认开，不写入工程）。
+    const [clipPitchOverlayVisible, setClipPitchOverlayVisible] = useState(true);
+    const toggleClipPitchOverlay = useCallback(() => setClipPitchOverlayVisible((v) => !v), []);
+
     // 帧装配（轴投影 → 峰值 → live 覆盖 → 曲线/选区图层 → `drawRef.current`）整块在
     // `usePianoRollFrameAssembly` 里（见该文件头）。调用点必须留在原位：`useClipsPeaksForPianoRoll`
     // 与 `useLiveParamEditing` 由它调用，状态槽与 effect 顺序取决于这个位置。
@@ -2259,7 +2263,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         clearLiveEditOverride,
         commitStroke,
         onParamCommitSucceeded,
-        detectedPitchCurves,
+        clipPitchOverlays,
         referencePitchOverlays,
         buildCurveLayers,
         buildSelectionBandSpec,
@@ -2275,6 +2279,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         scrollLeft,
         viewSize,
         editParam,
+        clipPitchOverlayVisible,
         currentParamDefaultValue,
         pitchEnabled,
         pitchHardDisableReason,
@@ -2831,13 +2836,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     // Pitch Snap 设置弹窗状态
     const [pitchSnapOpen, setPitchSnapOpen] = useState(false);
 
-    /**
-     * 块层是否应当绘制。**唯一派生点**在 isParamBlockLayerVisible。
-     *
-     * 【为什么面板里还要再算一次】面板需要的是「现在画不画」，不是设置值；把派生
-     * 放在这里而不是每个消费者各算，是因为下面有 7 处读它（宿主绘制、持久化开关、
-     * 自动分析、spec memo、drag snapshot、布局 effect、拖动快照）。
-     */
+    /** 块层是否绘制：唯一派生点是 isParamBlockLayerVisible；面板要的是「现在画不画」。 */
     const alwaysShowParamBlocks = s.alwaysShowParamBlocks;
     const paramBlocksLayerVisible = isParamBlockLayerVisible({
         alwaysShowParamBlocks,
@@ -6954,6 +6953,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         tf,
         timeDisplaySettingsOpen,
         toggleSecondaryParam,
+        toggleClipPitchOverlay,
+        clipPitchOverlayVisible,
         toggleAlwaysShowParamBlocks,
         alwaysShowParamBlocks,
         toolbarRowRef,
@@ -7086,7 +7087,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         buildSelectionBandSpec,
         childPitchHardDisableReason,
         clampViewport,
-        detectedPitchCurves,
+        clipPitchOverlays,
         fontFamily,
         getCurrentViewportForScrollbar,
         getParamValueBoundsForScrollbar,

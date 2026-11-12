@@ -1393,6 +1393,8 @@ export const jaJP = {
     copy_playhead_time: "再生ヘッド時間をコピー",
     sync_timeline_view: "タイムライン表示に同期",
     sync_timeline_view_tooltip: "パラメータエディタの水平位置とズームをタイムラインに同期します",
+    clip_pitch_overlay: "Clip ピッチ",
+    clip_pitch_overlay_tooltip: "各 Clip 自身のピッチ曲線を表示",
 
     // ツールモード
 

@@ -229,44 +229,25 @@ export function projectClipboardPreviewPoints(args: {
 }
 
 /**
- * 检测曲线（`clipPitchCurves`）的专用投影。
+ * Clip 源音高参考线的单段投影。
  *
- * 流程（与 `render.ts:972-1010` 的检测曲线循环逐行等价）：
- * 1. 时间基准是 `curveStartSec + (i × fp) / 1000`——**每帧按原始帧距排列**，
- *    没有 `startFrame` / `stride` 概念（曲线自带绝对起始秒）；
- * 2. `midi <= 0`（无声帧）**跳过**，前后有声点直接相连（保持连续性）；
- * 3. 超过右缘 `break`，早于左缘 `continue`；
- * 4. pitch 加 0.5 偏移，与其余曲线同源。
- *
- * 【为什么必须单独一个函数而不是复用 `projectCurvePoints`】
- * 那两处差异都会造成可见缺陷：
- * - **时间基准**：把 `startFrame: 0` 传进去会丢掉 `curveStartSec`，曲线整体平移
- *   到时间轴原点（`curveStartSec` 非 0 的 clip 全部错位）。
- * - **无声帧**：`projectCurvePoints` 保留所有点（对 `paramView` 是对的，那里的 0
- *   是合法值），但检测曲线的 0 表示"无音高"。照画会得到一条从上一个有声点直落
- *   到底部的**垂直尖刺**——GL 迁移后实际出现过（用户截图里粉/紫曲线的密集竖线）。
- *
- * 【为什么不加开关参数】两者的入参语义本就不同（一个收 `startFrame`/`stride`，
- * 一个收 `curveStartSec` 且无 stride）；合并后每个调用点都要传无关参数，而
- * `midi <= 0` 的语义只对检测曲线成立。分开后各自的可测契约更清晰。
+ * 与普通参数曲线不同，Clip 曲线自带 timeline 绝对起点 curveStartSec，且
+ * 每一段只包含一段连续有声帧（无声帧由 clipPitchOverlay 提前切段）。这里只
+ * 负责把一段采样按原始帧距投影到视口。
  *
  * @param args 投影参数。
- * @returns 可见的有声点序列；无有效点时为空的数组。
+ * @returns 可见点序列；采样不足 2 点或非有限入参时为空数组。
  */
-export function projectDetectedCurvePoints(args: {
-    /** MIDI 音高曲线（每帧一个值，`<= 0` 表示无声）。 */
-    readonly midiCurve: readonly number[];
-    /** 曲线第 0 帧对应的 timeline 绝对时间（秒）。 */
+export function projectClipPitchPoints(args: {
+    /** 当前段的有声 MIDI 值（已剔除无声帧）。 */
+    readonly values: readonly number[];
+    /** 曲线第 0 个采样对应的 timeline 绝对秒。 */
     readonly curveStartSec: number;
-    /**
-     * 所属 clip 的起点（秒）。
-     *
-     * 曲线只在 `[clipStartSec, clipEndSec)` 内有效：越界帧一律不画，起点与
-     * clip 起点不符则整条丢弃。两条判据合起来让"过期的长曲线"在结构上不可能
-     * 画到 clip 外面（用户报的"音高线残影"）。
-     */
+    /** 当前段第一个值在完整曲线中的下标。 */
+    readonly sampleStartIndex?: number;
+    /** 所属 Clip 的起点。 */
     readonly clipStartSec: number;
-    /** 所属 clip 的终点（秒，**开区间**）。 */
+    /** 所属 Clip 的终点（开区间）。 */
     readonly clipEndSec: number;
     /** WORLD 帧周期（毫秒）。 */
     readonly framePeriodMs: number;
@@ -275,46 +256,33 @@ export function projectDetectedCurvePoints(args: {
     /** 值 → 视口 y 的投影。 */
     readonly valueToY: (value: number) => number;
 }): CurvePoint[] {
-    const { midiCurve, curveStartSec, clipStartSec, clipEndSec, framePeriodMs, axis, valueToY } =
-        args;
-    if (midiCurve.length < 2) return [];
+    const {
+        values,
+        curveStartSec,
+        sampleStartIndex = 0,
+        clipStartSec,
+        clipEndSec,
+        framePeriodMs,
+        axis,
+        valueToY,
+    } = args;
+    if (values.length < 2) return [];
     if (!Number.isFinite(curveStartSec)) return [];
-
     const fp = Math.max(1e-6, framePeriodMs);
-    const clipOriginSec = Math.max(0, clipStartSec);
-    /*
-     * 【起点必须与 clip 对齐】后端推送的 `curve_start_sec` 恒等于
-     * `clip.start_sec`（见 `compute_pitch_curve_start_sec`）。不一致说明这条缓存
-     * 属于**别的几何**（分割 / 移动之前的那一份）：丢弃，而不是"修正"成 clip 起点 ——
-     * 数值是按旧起点排的，挪过去只会画出一条错误曲线。"缺线"好过"错线"。
-     */
-    if (Math.abs(curveStartSec - clipOriginSec) > fp / 1000) return [];
-
-    // 与旧实现一致：检测曲线按 **x** 判可见性（`x > w + 10` / `x < -10`），
-    // 不是按时间区间——因为它只有绝对秒、没有 `startFrame`，用时间判会多一次换算。
     const rightLimitPx = axis.viewportWidthPx + 10;
     const leftLimitPx = -10;
-
     const out: CurvePoint[] = [];
-    for (let i = 0; i < midiCurve.length; i += 1) {
-        const midi = midiCurve[i];
-        // 非有限值：跳过（与旧实现 `midi == null || !isFinite(midi)` 一致）
+    for (let i = 0; i < values.length; i += 1) {
+        const midi = values[i];
+        const sampleSec = curveStartSec + ((sampleStartIndex + i) * fp) / 1000;
+        if (sampleSec < clipStartSec - 1e-9) continue;
+        if (sampleSec >= clipEndSec - 1e-9) break;
         if (midi == null || !Number.isFinite(midi)) continue;
-
-        const frameSec = curveStartSec + (i * fp) / 1000;
-        /*
-         * 【越界帧不画】曲线可能比 clip 长（缓存是分割 / 拉伸之前的那一份）。参数
-         * 编辑器此前是唯一不裁剪这个数据的面板 —— 时间轴那条同源曲线一直裁着
-         * （见 `timelineCanvasModel.buildMidiPitchCurvePx`），所以残影只出现在这里。
-         */
-        if (frameSec < clipOriginSec - 1e-9 || frameSec >= clipEndSec - 1e-9) continue;
-        const x = secToViewportPx(axis, frameSec);
+        // 段内不应出现无声帧；出现时立即停止，绝不跨过它连线。
+        if (midi <= 0) break;
+        const x = secToViewportPx(axis, sampleSec);
         if (x > rightLimitPx) break;
         if (x < leftLimitPx) continue;
-
-        // 无声帧：跳过但保持连续性（旧实现的 `if (midi <= 0) continue`）
-        if (midi <= 0) continue;
-
         const y = valueToY(midi + 0.5);
         if (!Number.isFinite(y)) continue;
         out.push({ x, y });

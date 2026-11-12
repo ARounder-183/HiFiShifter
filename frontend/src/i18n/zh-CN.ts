@@ -1338,6 +1338,8 @@ export const zhCN = {
     copy_playhead_time: "复制播放光标时间",
     sync_timeline_view: "同步时间轴视图",
     sync_timeline_view_tooltip: "将参数编辑器的水平位置与缩放同步到时间轴",
+    clip_pitch_overlay: "Clip 音高",
+    clip_pitch_overlay_tooltip: "显示每个 Clip 自己的音高曲线",
 
     // Tool modes
 

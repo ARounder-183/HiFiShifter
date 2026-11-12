@@ -11,7 +11,7 @@
  */
 import { PitchSnapSettingsDialog } from "../../PitchSnapSettingsDialog";
 import { Flex, Box } from "@radix-ui/themes";
-import { Link2Icon, LinkBreak2Icon } from "@radix-ui/react-icons";
+import { EyeClosedIcon, EyeOpenIcon, Link2Icon, LinkBreak2Icon } from "@radix-ui/react-icons";
 import {
     setScaleHighlightMode,
     toggleLockParamLines,
@@ -67,6 +67,7 @@ export type Props = {
         | "drawToolMenuOpen"
         | "drawToolMenuRef"
         | "editParam"
+        | "clipPitchOverlayVisible"
         | "effectivePitchSnapVisual"
         | "enabledVibratoPresetList"
         | "gatedPillHideOrder"
@@ -121,6 +122,7 @@ export type Props = {
         | "tf"
         | "timeDisplaySettingsOpen"
         | "toggleSecondaryParam"
+        | "toggleClipPitchOverlay"
         | "toolbarRowRef"
         | "toolbarTier"
         | "updateVisibleReferenceRootTrackIds"
@@ -137,8 +139,12 @@ export function ParamToolbar({ m }: Props) {
     const {
         devicePixelRatio,
         dispatch,
+        editParam,
+        clipPitchOverlayVisible,
+        pitchEnabled,
         pitchSnapOpen,
         s,
+        toggleClipPitchOverlay,
         setPitchSnapOpen,
         setTimeDisplaySettingsOpen,
         t,
@@ -175,6 +181,18 @@ export function ParamToolbar({ m }: Props) {
                     }}
                     icon={s.paramEditorSyncTimeline ? <Link2Icon /> : <LinkBreak2Icon />}
                 />
+                {editParam === "pitch" && pitchEnabled ? (
+                    <AppIconButton
+                        active={clipPitchOverlayVisible}
+                        emphasis="accent"
+                        tooltip={tf("clip_pitch_overlay_tooltip")}
+                        aria-label={tf("clip_pitch_overlay")}
+                        aria-pressed={clipPitchOverlayVisible}
+                        tabIndex={-1}
+                        onClick={toggleClipPitchOverlay}
+                        icon={clipPitchOverlayVisible ? <EyeOpenIcon /> : <EyeClosedIcon />}
+                    />
+                ) : null}
                 {/* 第 1 级隐藏：面板身份已由 dock 标签 / 浮窗标题表达，
                     这里是重复提示，横向不足时最先让位。 */}
                 <ToolbarSlot hideAt={1} tier={toolbarTier}>

@@ -44,11 +44,8 @@ import {
 import type { ParamName, ParamViewSegment, ValueViewport } from "../types";
 import { resolveParamBlockFrameView } from "../paramBlockFrame";
 import { verticalScrollTopFromCenter } from "../verticalScrollMapping";
-import {
-    resolveClipboardPreviewColor,
-    resolveDetectedCurveColors,
-    resolveSecondaryCurveColor,
-} from "../colors";
+import { resolveClipboardPreviewColor, resolveSecondaryCurveColor } from "../colors";
+import { resolveClipPitchOverlayVisual } from "../clipPitchOverlay";
 import { resolveSecondaryOverlayValues } from "../secondaryOverlaySelection";
 import { getFixedDashPattern } from "../render";
 import type { PianoRollCurveLayer } from "../kernel/host/pianoRollKernelData";
@@ -553,7 +550,7 @@ export function buildCurveLayers(
     deps: Pick<
         ModelDeps,
         | "clipboardRef"
-        | "detectedPitchCurves"
+        | "clipPitchOverlays"
         | "editParam"
         | "liveEditOverrideRef"
         | "paramView"
@@ -577,7 +574,7 @@ export function buildCurveLayers(
 ): PianoRollCurveLayer[] {
     const {
         clipboardRef,
-        detectedPitchCurves,
+        clipPitchOverlays,
         editParam,
         liveEditOverrideRef,
         paramView,
@@ -624,35 +621,41 @@ export function buildCurveLayers(
         }
     }
 
-    // ── ② 检测曲线（pitch 模式，按 clip 循环调色）─────────────────
+    // ── ② Clip 源音高参考线（pitch 模式）────────────────────────
     //
-    // 投影模式必须是 `"detected"`（不是 `"curve"`）：
-    // - 检测曲线自带**绝对起始秒** `curveStartSec`，塞进 `startFrame` 会把它丢掉，
-    //   曲线整体平移到时间轴原点；
-    // - 检测曲线的 `midi <= 0` 表示**无声帧**，必须跳过，否则相邻有声点之间会
-    //   拉出一条贯穿底部的垂直尖刺（GL 迁移后实际出现过）。
-    // 两条语义都与 `drawCurveTimed` 不同，见 `projectDetectedCurvePoints` 说明。
+    // 每个有声音段单独一层：无声帧在 clipPitchOverlay 中已经切段，这里绝不
+    // 把前后有声点跨静音连起来。曲线使用 Clip 自己的颜色，并与 pv.orig 的
+    // 灰色合成线、pv.edit 的白色主线保持不同的视觉层级。
     if (editParam === "pitch") {
-        const palette = resolveDetectedCurveColors(isDark);
-        detectedPitchCurves.forEach((curve, ci) => {
-            if (!curve.midiCurve || curve.midiCurve.length < 2) return;
-            layers.push({
-                values: curve.midiCurve,
-                param: "pitch",
-                startFrame: 0,
-                stride: 1,
-                framePeriodMs: curve.framePeriodMs,
-                lineWidthPx: 2,
-                rgba: parseRgbaColor(normalizeCssColor(palette[ci % palette.length])),
-                dash: null,
-                projection: "detected",
-                curveStartSec: curve.curveStartSec,
-                // 有效跨度 = 所属 clip 的跨度（缓存可能比 clip 长，见 DetectedPitchCurve）。
-                clipStartSec: curve.clipStartSec,
-                clipEndSec: curve.clipEndSec,
-                valueToY: (v) => project("pitch", v),
-            });
-        });
+        for (const overlay of clipPitchOverlays) {
+            for (const segment of overlay.segments) {
+                const values = overlay.midiCurve.slice(
+                    segment.startIndex,
+                    segment.endIndexExclusive,
+                );
+                if (values.length < 2) continue;
+                const visual = resolveClipPitchOverlayVisual(overlay, segment.overlapDepth);
+                const [r, g, b, baseAlpha] = parseRgbaColor(normalizeCssColor(overlay.strokeColor));
+                layers.push({
+                    values,
+                    param: "pitch",
+                    startFrame: 0,
+                    stride: 1,
+                    framePeriodMs: overlay.framePeriodMs,
+                    lineWidthPx: visual.lineWidthPx,
+                    // Canvas2D 用 globalAlpha 乘在 clip 色自带的 alpha 上；GL 侧
+                    // 必须做同一乘法，否则两条渲染路径的深浅会不一致。
+                    rgba: [r, g, b, baseAlpha * visual.alpha],
+                    dash: visual.dash,
+                    projection: "clip",
+                    curveStartSec: overlay.curveStartSec,
+                    curveSampleStartIndex: segment.startIndex,
+                    clipStartSec: overlay.clipStartSec,
+                    clipEndSec: overlay.clipEndSec,
+                    valueToY: (v) => project("pitch", v),
+                });
+            }
+        }
     }
 
     // ── ③ 副参数曲线 ────────────────────────────────────────────

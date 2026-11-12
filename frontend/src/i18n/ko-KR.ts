@@ -1445,6 +1445,8 @@ export const koKR = {
     copy_playhead_time: "재생 헤드 시간 복사",
     sync_timeline_view: "타임라인 뷰 동기화",
     sync_timeline_view_tooltip: "파라미터 에디터의 가로 위치와 확대/축소를 타임라인에 동기화합니다",
+    clip_pitch_overlay: "Clip 피치",
+    clip_pitch_overlay_tooltip: "각 Clip의 고유 피치 곡선 표시",
 
     // 도구 모드
 

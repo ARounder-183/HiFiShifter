@@ -3,7 +3,7 @@
  *
  * 【主要内容】
  * 负责参数编辑器主画布上的 Canvas2D 绘制：非音高参数的刻度线、选区块、曲线图层
- * （参考线 / 检测曲线 / 副参数 / 原始与编辑曲线 / 选区高亮 / 剪贴板预览）、morph
+ * （参考线 / Clip 源音高 / 副参数 / 原始与编辑曲线 / 选区高亮 / 剪贴板预览）、morph
  * 手柄与中央提示文字。
  *
  * 【作用】本模块是**残留的 Canvas2D 路径**：网格、钢琴键盘几何、轴文字、轴画布、
@@ -43,7 +43,9 @@ import {
     isChildFormantOffsetCentsParam,
 } from "./childPitchOffsetParams";
 import { formatAxisMarkLabel } from "./kernel/scene/axisMarkInstances";
-import { projectDetectedCurvePoints } from "./kernel/scene/curvePoints";
+import { projectClipPitchPoints } from "./kernel/scene/curvePoints";
+import type { ClipPitchOverlay } from "./clipPitchOverlay";
+import { resolveClipPitchOverlayVisual } from "./clipPitchOverlay";
 import { isDynParam } from "./paramRanges";
 import { isSameMainCanvasSignature, type MainCanvasSignature } from "./mainCanvasSignature";
 
@@ -374,30 +376,6 @@ function drawParamMorphOverlay(args: {
     ctx.restore();
 }
 
-/**
- * per-clip 检测音高曲线（来自后端 clip_pitch_data 事件），
- * 在参数面板 pitch 视图中作为参考线渲染。
- */
-export interface DetectedPitchCurve {
-    /** MIDI 曲线第 0 帧对应的 timeline 绝对时间（秒），直接来自后端 */
-    curveStartSec: number;
-    /** MIDI 音高曲线，每帧一个值，0 表示无声 */
-    midiCurve: number[];
-    /** WORLD 帧周期（毫秒） */
-    framePeriodMs: number;
-    /**
-     * 所属 clip 的当前跨度（秒）。
-     *
-     * 【为什么必须在数据里】这份缓存只由 `clip_pitch_data` 事件刷新，可能比它所属的
-     * clip 更长（分割 / 拉伸之前的那一份）。绘制端只有拿到 clip 边界才能把它裁回去 ——
-     * 时间轴那条同源曲线一直是裁的（见 `timelineCanvasModel.buildMidiPitchCurvePx`），
-     * 参数编辑器此前没裁，于是过长的旧曲线被画到了 clip 外面（"音高线残影"）。
-     */
-    clipStartSec: number;
-    /** 所属 clip 的终点（秒，**开区间**）。 */
-    clipEndSec: number;
-}
-
 export interface ReferencePitchOverlay {
     rootTrackId: string;
     strokeColor: string;
@@ -432,8 +410,8 @@ export function drawPianoRoll(args: {
     playheadSec: number; // 播放头位置（秒）
     pitchAnalysisPending?: boolean;
     referencePitchOverlays?: ReferencePitchOverlay[];
-    /** 检测音高曲线列表，在 pitch 模式下渲染为参考线 */
-    detectedPitchCurves?: DetectedPitchCurve[];
+    /** Clip 源音高参考线；pitch 模式下按 Clip 颜色渲染。 */
+    clipPitchOverlays?: ClipPitchOverlay[];
     /** 是否为深色主题（默认 true） */
     isDark?: boolean;
     /** 剪贴板数据（按「剪贴板 → 目标选区」映射渲染虚线预览；断层处不画） */
@@ -486,7 +464,7 @@ export function drawPianoRoll(args: {
     /**
      * 跳过**曲线图层**（已由 GL 绘制）。
      *
-     * 特殊说明：跳过的范围与 `PianoRollCurveLayer` 一一对应——参考线、检测曲线、
+     * 特殊说明：跳过的范围与 `PianoRollCurveLayer` 一一对应——参考线、Clip 源音高、
      * 副参数、原始 / 编辑曲线、选区高亮、剪贴板预览。`paramMorphOverlays`（morph 手柄，
      * 含 `arc`）**不**在曲线层内，仍由本函数绘制；它是编辑态叠加物而非曲线本身。
      *
@@ -552,7 +530,7 @@ export function drawPianoRoll(args: {
         playheadSec,
         pitchAnalysisPending,
         referencePitchOverlays,
-        detectedPitchCurves,
+        clipPitchOverlays,
         isDark = true,
         clipboardPreview,
         paramMorphOverlays,
@@ -1015,66 +993,43 @@ export function drawPianoRoll(args: {
         });
     }
 
-    // 检测音高参考线：在 pitch 模式下，将后端推送的 per-clip 检测曲线渲染为半透明彩色参考线�?
-    // 渲染在用户编辑曲线下方，不干扰主曲线的视觉层次�?
-    if (
-        !skipCurves &&
-        editParam === "pitch" &&
-        detectedPitchCurves &&
-        detectedPitchCurves.length > 0
-    ) {
-        // �?clip 时循环颜色，增强区分�?
-        // 候选曲线色板：按主题给两套 —— 浅色主题提高不透明度并加深，
-        // 否则在白底上几乎隐形（旧版青绿在白底仅 ~1.4:1）。
-        // 橙黄一员改为玫红：琥珀色现在是编辑包络线的专属色相，避免混淆。
-        const DETECTED_COLORS = isDark
-            ? [
-                  "rgba(80, 220, 180, 0.56)", // 青绿
-                  "rgba(255, 110, 197, 0.60)", // 玫红
-                  "rgba(180, 120, 255, 0.56)", // 紫色
-                  "rgba(60, 180, 255, 0.56)", // 天蓝
-              ]
-            : [
-                  "rgba(0, 150, 118, 0.80)", // 青绿
-                  "rgba(214, 44, 140, 0.75)", // 玫红
-                  "rgba(124, 58, 237, 0.70)", // 紫色
-                  "rgba(2, 132, 199, 0.80)", // 天蓝
-              ];
-
-        for (let ci = 0; ci < detectedPitchCurves.length; ci++) {
-            const curve = detectedPitchCurves[ci];
-            if (!curve.midiCurve || curve.midiCurve.length < 2) continue;
-
-            /*
-             * 【与 GL 路径共用同一个投影】裁剪（clip 跨度 / 起点不符）、无声帧、越界
-             * 判据只有一份实现。此前这里是逐行复制的第二份，两份都**没有**按 clip
-             * 裁剪 —— 过长的旧曲线于是被画到 clip 外面（"音高线残影"）。
-             */
-            const points = projectDetectedCurvePoints({
-                midiCurve: curve.midiCurve,
-                curveStartSec: curve.curveStartSec,
-                clipStartSec: curve.clipStartSec,
-                clipEndSec: curve.clipEndSec,
-                framePeriodMs: curve.framePeriodMs,
-                axis,
-                valueToY: (value) => valueToY("pitch", value, h),
-            });
-            if (points.length < 2) continue;
-
-            ctx.save();
-            ctx.strokeStyle = DETECTED_COLORS[ci % DETECTED_COLORS.length];
-            ctx.lineWidth = 2;
-            ctx.setLineDash([]);
-            ctx.globalAlpha = 1;
-
-            ctx.beginPath();
-            for (let index = 0; index < points.length; index += 1) {
-                const point = points[index];
-                if (index === 0) ctx.moveTo(point.x, point.y);
-                else ctx.lineTo(point.x, point.y);
+    // Clip 源音高参考线：每个有声音段单独绘制。段已经由 clipPitchOverlay
+    // 切好，禁止在这里再跨静音把前后点连起来。
+    if (!skipCurves && editParam === "pitch" && clipPitchOverlays && clipPitchOverlays.length > 0) {
+        for (const overlay of clipPitchOverlays) {
+            for (const segment of overlay.segments) {
+                const values = overlay.midiCurve.slice(
+                    segment.startIndex,
+                    segment.endIndexExclusive,
+                );
+                if (values.length < 2) continue;
+                const points = projectClipPitchPoints({
+                    values,
+                    curveStartSec: overlay.curveStartSec,
+                    sampleStartIndex: segment.startIndex,
+                    clipStartSec: overlay.clipStartSec,
+                    clipEndSec: overlay.clipEndSec,
+                    framePeriodMs: overlay.framePeriodMs,
+                    axis,
+                    valueToY: (value) => valueToY("pitch", value, h),
+                });
+                if (points.length < 2) continue;
+                const visual = resolveClipPitchOverlayVisual(overlay, segment.overlapDepth);
+                ctx.save();
+                ctx.strokeStyle = overlay.strokeColor;
+                ctx.lineWidth = visual.lineWidthPx;
+                // 与 GL 侧同口径：clip 色自带 alpha × 图层 alpha。
+                ctx.globalAlpha = visual.alpha;
+                ctx.setLineDash(visual.dash === null ? [] : [...visual.dash]);
+                ctx.beginPath();
+                for (let index = 0; index < points.length; index += 1) {
+                    const point = points[index];
+                    if (index === 0) ctx.moveTo(point.x, point.y);
+                    else ctx.lineTo(point.x, point.y);
+                }
+                ctx.stroke();
+                ctx.restore();
             }
-            ctx.stroke();
-            ctx.restore();
         }
     }
 

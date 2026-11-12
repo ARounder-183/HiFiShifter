@@ -1514,6 +1514,8 @@ export const enUS = {
     sync_timeline_view: "Sync Timeline View",
     sync_timeline_view_tooltip:
         "Sync the parameter editor's horizontal position and zoom with the timeline",
+    clip_pitch_overlay: "Clip Pitch",
+    clip_pitch_overlay_tooltip: "Show each clip's own pitch curve",
 
     // Tool modes
 
