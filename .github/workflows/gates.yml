@@ -214,6 +214,17 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # 【诊断用，根因查明后删除】hifishifter_clap 的 lib 测试进程在 CI 上于全部
+      # 用例通过后的退出阶段以 0xc0000005 崩溃（本地无法复现）。WER LocalDumps
+      # 在崩溃瞬间抓 minidump，连同 exe/pdb 一起上传，供离线解栈。
+      - name: Enable WER local crash dumps (diagnostic)
+        run: |
+          $key = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps'
+          New-Item -Path $key -Force | Out-Null
+          Set-ItemProperty -Path $key -Name DumpFolder -Value 'D:\a\_temp\crashdumps' -Type ExpandString
+          Set-ItemProperty -Path $key -Name DumpType -Value 1 -Type DWord
+          Set-ItemProperty -Path $key -Name DumpCount -Value 5 -Type DWord
+
       - name: Download frontend artifact
         uses: actions/download-artifact@v8
         with:
@@ -267,6 +278,19 @@ jobs:
       # 竞态、快照发布与读者回收）全部是并发敏感的；串行跑得通不代表正确。
       - name: Run Rust gate (full)
         run: ./scripts/checks/run-rust-gates.ps1 -Profile full
+
+      # 【诊断用，根因查明后删除】退出阶段崩溃的 minidump + 匹配的 exe/pdb。
+      - name: Upload crash dumps (diagnostic)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-test-crashdumps
+          path: |
+            D:\a\_temp\crashdumps\
+            backend/target/debug/deps/hifishifter_clap-*.exe
+            backend/target/debug/deps/hifishifter_clap-*.pdb
+          if-no-files-found: ignore
+          retention-days: 7
 
   # ── 插件并发门禁（push develop 的快速反馈）─────────────────────────────
   #
