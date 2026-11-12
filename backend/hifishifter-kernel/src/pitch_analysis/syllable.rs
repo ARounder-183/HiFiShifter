@@ -77,43 +77,6 @@ pub struct TakeSyllableAnalysis {
     pub analyzed_window_sec: [f64; 2],
 }
 
-/// Display-only clipping of full-source VAD/analysis spans into an audible
-/// source window.
-///
-/// The result is view geometry, not an analysis cache: callers must not persist
-/// it, because trimming a Clip must not rewrite a note's identity.
-pub fn clip_spans_to_window(
-    spans: &[SyllableSpan],
-    window_start_sec: f64,
-    window_end_sec: f64,
-) -> Vec<SyllableSpan> {
-    if !(window_start_sec.is_finite()
-        && window_end_sec.is_finite()
-        && window_end_sec > window_start_sec + 1e-12)
-    {
-        return Vec::new();
-    }
-    let mut out: Vec<SyllableSpan> = spans
-        .iter()
-        .filter_map(|span| {
-            let start = span.start_sec.max(window_start_sec).min(window_end_sec);
-            let end = span.end_sec.max(window_start_sec).min(window_end_sec);
-            (end > start + 1e-12).then_some(SyllableSpan {
-                start_sec: start,
-                end_sec: end,
-                midi_note: span.midi_note,
-                event_id: span.event_id.clone(),
-            })
-        })
-        .collect();
-    out.sort_by(|a, b| {
-        a.start_sec
-            .total_cmp(&b.start_sec)
-            .then(a.end_sec.total_cmp(&b.end_sec))
-    });
-    out
-}
-
 /// A completed full-source analysis is usable only when its provenance window
 /// contains the current audible window and it has at least one note event.
 /// This controls whether another inference can be skipped; it never controls
@@ -814,29 +777,7 @@ mod tests {
     }
 
     #[test]
-    fn full_source_spans_clip_into_the_audible_window_with_their_notes() {
-        let clipped = clip_spans_to_window(
-            &[
-                SyllableSpan {
-                    start_sec: 0.2,
-                    end_sec: 0.8,
-                    midi_note: Some(60.0),
-                    event_id: Some(crate::pitch_analysis::source_event_id(0.2, 0.8)),
-                },
-                SyllableSpan {
-                    start_sec: 0.9,
-                    end_sec: 1.6,
-                    midi_note: Some(64.0),
-                    event_id: Some(crate::pitch_analysis::source_event_id(0.9, 1.6)),
-                },
-            ],
-            1.0,
-            3.0,
-        );
-        assert_eq!(clipped.len(), 1);
-        assert_eq!(clipped[0].start_sec, 1.0);
-        assert_eq!(clipped[0].end_sec, 1.6);
-        assert_eq!(clipped[0].midi_note, Some(64.0));
+    fn analysis_window_status_gates_cache_adoption_by_provenance() {
         assert_eq!(
             analysis_window_status([1.0, 3.0], (1.0, 3.0), true),
             "current"
