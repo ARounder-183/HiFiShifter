@@ -9,6 +9,46 @@ use super::types::TakeSpan;
 use crate::state::{Clip, ClipTake};
 
 pub const MAX_FRAME: u32 = 1_000_000;
+/// Shared tolerance for positive source-domain intersections.
+pub const SOURCE_EPS: f64 = 1e-12;
+/// Shared tolerance for finite window geometry.
+pub const WINDOW_EPS: f64 = 1e-9;
+
+/// A positive source/window intersection. Callers must not use a separate
+/// epsilon: a left-cut note must survive all the way to its projected frame.
+pub fn window_intersection(span: (f64, f64), window: (f64, f64)) -> Option<(f64, f64)> {
+    let start = span.0.max(window.0);
+    let end = span.1.min(window.1);
+    (end > start + SOURCE_EPS).then_some((start, end))
+}
+
+/// A positive continuous intersection that rounded to zero frames is still one
+/// visible frame; it is not an absent block.
+pub fn positive_interval_to_frames(start: u32, end: u32) -> Option<(u32, u32)> {
+    (end > start)
+        .then_some((start, end))
+        .or_else(|| (start < MAX_FRAME).then_some((start, start + 1)))
+}
+
+/// Cut flags for a non-loop source/window intersection. Reverse playback swaps
+/// the source edges; loop wrapping is handled by the projection's ring rules.
+pub fn cut_flags_for_intersection(
+    span: (f64, f64),
+    window: (f64, f64),
+    reversed: bool,
+) -> (bool, bool) {
+    if reversed {
+        (
+            span.1 > window.1 + WINDOW_EPS,
+            span.0 < window.0 - WINDOW_EPS,
+        )
+    } else {
+        (
+            span.0 < window.0 - WINDOW_EPS,
+            span.1 > window.1 + WINDOW_EPS,
+        )
+    }
+}
 
 /// 源时间映射扩展点。
 ///
@@ -302,49 +342,35 @@ pub fn project_span(
             projection.source_window_start_sec + projection.project_length_sec * rate,
         )
     };
-    let start_sec = span.source_start_sec.max(window_start);
-    let end_sec = span.source_end_sec.min(window_end);
-    if end_sec <= start_sec + 1e-12 {
+    let Some((start_sec, end_sec)) = window_intersection(
+        (span.source_start_sec, span.source_end_sec),
+        (window_start, window_end),
+    ) else {
         return out;
-    }
+    };
     let a = projection.project_non_loop(start_sec);
     let b = projection.project_non_loop(end_sec);
     let start = projection
         .to_frame(a.min(b), frame_period_ms)
         .max(visible_start);
-    let mut end = projection
+    let end = projection
         .to_frame(a.max(b), frame_period_ms)
         .min(visible_end);
-    // A positive source/window intersection must produce a block. Rounding
-    // both ends to one frame is a sub-frame intersection, not an empty one.
-    if end <= start && end_sec > start_sec {
-        end = (start + 1).min(MAX_FRAME);
-    }
-    let mut cut_start = if projection.reversed {
-        span.source_end_sec > window_end + 1e-9
-    } else {
-        span.source_start_sec < window_start - 1e-9
+    let Some((start, end)) = positive_interval_to_frames(start, end) else {
+        return out;
     };
-    let mut cut_end = if projection.reversed {
-        span.source_start_sec < window_start - 1e-9
-    } else {
-        span.source_end_sec > window_end + 1e-9
-    };
-    if projection.loop_enabled {
-        // Wrapping through the ring is normal; only the Clip length boundary
-        // is a cut, and that cut is expressed by the visible-frame clamp.
-        cut_start = false;
-        cut_end = false;
-    }
-    if end > start {
-        out.push(ProjectedInterval {
-            cycle: 0,
-            start_frame: start,
-            end_frame_exclusive: end,
-            cut_start,
-            cut_end,
-        });
-    }
+    let (cut_start, cut_end) = cut_flags_for_intersection(
+        (span.source_start_sec, span.source_end_sec),
+        (window_start, window_end),
+        projection.reversed,
+    );
+    out.push(ProjectedInterval {
+        cycle: 0,
+        start_frame: start,
+        end_frame_exclusive: end,
+        cut_start,
+        cut_end,
+    });
     out
 }
 

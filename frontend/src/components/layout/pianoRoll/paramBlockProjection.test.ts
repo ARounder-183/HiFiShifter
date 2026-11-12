@@ -1,11 +1,15 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+    analysisWindowStatus,
     audibleSourceWindow,
+    cutFlagsForIntersection,
     inverseProject,
     projectionForClip,
+    positiveIntervalToFrames,
     projectTakeSpan,
     sourceAtProjectedFrame,
+    windowIntersection,
     type ParamBlockSourceClip,
 } from "./paramBlockProjection";
 
@@ -40,6 +44,18 @@ describe("paramBlockProjection", () => {
             const actual = projectTakeSpan(projection, testCase.span, fixture.framePeriodMs);
             expect(actual, testCase.name).toEqual(testCase.expected);
         }
+    });
+
+    it("shares window intersection and one-frame frame algebra", () => {
+        expect(windowIntersection([0.5, 1.001], [1, 3])).toEqual([1, 1.001]);
+        expect(windowIntersection([0.5, 1], [1, 3])).toBeNull();
+        expect(positiveIntervalToFrames(40, 40)).toEqual([40, 41]);
+        expect(positiveIntervalToFrames(40, 42)).toEqual([40, 42]);
+        expect(cutFlagsForIntersection([0.6, 1.4], [1, 3], false)).toEqual([true, false]);
+        expect(cutFlagsForIntersection([1.6, 2.4], [1, 2], true)).toEqual([true, false]);
+        expect(analysisWindowStatus({ startSec: 1, endSec: 3 }, [1, 3], [1])).toBe("current");
+        expect(analysisWindowStatus({ startSec: 0.5, endSec: 3 }, [1, 3], [1])).toBe("stale");
+        expect(analysisWindowStatus({ startSec: 1, endSec: 3 }, [1, 3], [])).toBe("missing");
     });
 
     it("matches the Rust audible source window rules", () => {

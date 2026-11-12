@@ -353,6 +353,164 @@
                     "cutEnd": false
                 }
             ]
+        },
+        {
+            "name": "left-cut-rate",
+            "clip": {
+                "trackId": "root",
+                "playbackRate": 2,
+                "reversed": false,
+                "loopEnabled": false,
+                "contentDurationSec": 4,
+                "id": "c",
+                "startSec": 0,
+                "lengthSec": 1,
+                "sourceStartSec": 2,
+                "sourceEndSec": 4
+            },
+            "span": {
+                "cycle": 0,
+                "sourceStartSec": 1.6,
+                "sourceEndSec": 2.4
+            },
+            "expected": [
+                {
+                    "cutStart": true,
+                    "cutEnd": false,
+                    "cycle": 0,
+                    "startFrame": 0,
+                    "endFrameExclusive": 40
+                }
+            ]
+        },
+        {
+            "name": "right-cut-forward",
+            "clip": {
+                "trackId": "root",
+                "playbackRate": 1,
+                "reversed": false,
+                "loopEnabled": false,
+                "contentDurationSec": 2,
+                "id": "c",
+                "startSec": 0,
+                "lengthSec": 1,
+                "sourceStartSec": 0,
+                "sourceEndSec": 2
+            },
+            "span": {
+                "cycle": 0,
+                "sourceStartSec": 0.8,
+                "sourceEndSec": 1.4
+            },
+            "expected": [
+                {
+                    "cutStart": false,
+                    "cutEnd": true,
+                    "cycle": 0,
+                    "startFrame": 160,
+                    "endFrameExclusive": 200
+                }
+            ]
+        },
+        {
+            "name": "right-cut-reverse",
+            "clip": {
+                "trackId": "root",
+                "playbackRate": 1,
+                "reversed": true,
+                "loopEnabled": false,
+                "contentDurationSec": 2,
+                "id": "c",
+                "startSec": 0,
+                "lengthSec": 1,
+                "sourceStartSec": 0,
+                "sourceEndSec": 2
+            },
+            "span": {
+                "cycle": 0,
+                "sourceStartSec": 0.6,
+                "sourceEndSec": 1.4
+            },
+            "expected": [
+                {
+                    "cycle": 0,
+                    "startFrame": 120,
+                    "endFrameExclusive": 200,
+                    "cutStart": false,
+                    "cutEnd": true
+                }
+            ]
+        },
+        {
+            "name": "sub-frame-right-overlap",
+            "clip": {
+                "trackId": "root",
+                "playbackRate": 1,
+                "reversed": false,
+                "loopEnabled": false,
+                "contentDurationSec": 2,
+                "id": "c",
+                "startSec": 0,
+                "lengthSec": 1,
+                "sourceStartSec": 0,
+                "sourceEndSec": 2
+            },
+            "span": {
+                "cycle": 0,
+                "sourceStartSec": 0.999,
+                "sourceEndSec": 1.001
+            },
+            "expected": [
+                {
+                    "cycle": 0,
+                    "startFrame": 200,
+                    "endFrameExclusive": 201,
+                    "cutStart": false,
+                    "cutEnd": true
+                }
+            ]
+        },
+        {
+            "name": "span-outside-window",
+            "clip": {
+                "trackId": "root",
+                "playbackRate": 1,
+                "reversed": false,
+                "loopEnabled": false,
+                "contentDurationSec": 2,
+                "id": "c",
+                "startSec": 0,
+                "lengthSec": 1,
+                "sourceStartSec": 1,
+                "sourceEndSec": 2
+            },
+            "span": {
+                "cycle": 0,
+                "sourceStartSec": 0,
+                "sourceEndSec": 0.9
+            },
+            "expected": []
+        },
+        {
+            "name": "span-ends-at-window-start",
+            "clip": {
+                "trackId": "root",
+                "playbackRate": 1,
+                "reversed": false,
+                "loopEnabled": false,
+                "contentDurationSec": 2,
+                "id": "c",
+                "startSec": 0,
+                "lengthSec": 1,
+                "sourceStartSec": 1,
+                "sourceEndSec": 2
+            },
+            "span": {
+                "cycle": 0,
+                "sourceStartSec": 0.5,
+                "sourceEndSec": 1
+            },
+            "expected": []
         }
     ]
 }

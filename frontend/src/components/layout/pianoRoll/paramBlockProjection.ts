@@ -85,7 +85,50 @@ export interface ProjectedInterval {
 }
 
 const EPS = 1e-9;
+/** Shared tolerance for positive source-domain intersections. */
+const SOURCE_EPS = 1e-12;
 const MAX_FRAME = 1_000_000;
+
+/** A positive source/window intersection; never silently drops a left-cut note. */
+export function windowIntersection(
+    span: readonly [number, number],
+    window: readonly [number, number],
+): readonly [number, number] | null {
+    const start = Math.max(span[0], window[0]);
+    const end = Math.min(span[1], window[1]);
+    return end > start + SOURCE_EPS ? [start, end] : null;
+}
+
+/** A positive continuous intersection rounded to one frame is still visible. */
+export function positiveIntervalToFrames(
+    start: number,
+    end: number,
+): readonly [number, number] | null {
+    if (end > start) return [start, end];
+    return start < MAX_FRAME ? [start, start + 1] : null;
+}
+
+/** Cut flags for a non-loop source/window intersection. */
+export function cutFlagsForIntersection(
+    span: readonly [number, number],
+    window: readonly [number, number],
+    reversed: boolean,
+): readonly [boolean, boolean] {
+    return reversed
+        ? [span[1] > window[1] + EPS, span[0] < window[0] - EPS]
+        : [span[0] < window[0] - EPS, span[1] > window[1] + EPS];
+}
+
+/** Analysis status has one definition for reanalysis, diagnostics and compose. */
+export type AnalysisWindowStatus = "missing" | "stale" | "current";
+export function analysisWindowStatus(
+    audible: { readonly startSec: number; readonly endSec: number },
+    analyzed: readonly [number, number] | null | undefined,
+    spans: readonly unknown[] | null | undefined,
+): AnalysisWindowStatus {
+    if (!spans || spans.length === 0) return "missing";
+    return windowContained(audible, analyzed) ? "current" : "stale";
+}
 
 export function toFrame(sec: number, framePeriodMs: number): number {
     const value = Math.round((sec * 1000) / Math.max(0.1, framePeriodMs));
@@ -349,9 +392,12 @@ export function projectTakeSpan(
     const windowEnd = projection.reversed
         ? projection.sourceWindowEndSec
         : projection.sourceWindowStartSec + projection.projectLengthSec * rate;
-    const startSec = Math.max(span.sourceStartSec, windowStart);
-    const endSec = Math.min(span.sourceEndSec, windowEnd);
-    if (endSec <= startSec + EPS) return [];
+    const intersection = windowIntersection(
+        [span.sourceStartSec, span.sourceEndSec],
+        [windowStart, windowEnd],
+    );
+    if (intersection === null) return [];
+    const [startSec, endSec] = intersection;
     const project = (source: number) =>
         projection.reversed
             ? projection.projectStartSec + (projection.sourceWindowEndSec - source) / rate
@@ -359,19 +405,23 @@ export function projectTakeSpan(
     const a = project(startSec);
     const b = project(endSec);
     const start = Math.max(visibleStart, toFrame(Math.min(a, b), fp));
-    let end = Math.min(visibleEnd, toFrame(Math.max(a, b), fp));
-    // A positive source/window intersection must always produce at least one
-    // visible frame; rounding both edges to the same frame is not an absence.
-    if (end <= start && endSec > startSec) end = Math.min(MAX_FRAME, start + 1);
-    const cutStart = projection.reversed
-        ? span.sourceEndSec > windowEnd + EPS
-        : span.sourceStartSec < windowStart - EPS;
-    const cutEnd = projection.reversed
-        ? span.sourceStartSec < windowStart - EPS
-        : span.sourceEndSec > windowEnd + EPS;
-    return end > start
-        ? [{ cycle: 0, startFrame: start, endFrameExclusive: end, cutStart, cutEnd }]
-        : [];
+    const end = Math.min(visibleEnd, toFrame(Math.max(a, b), fp));
+    const interval = positiveIntervalToFrames(start, end);
+    if (interval === null) return [];
+    const [cutStart, cutEnd] = cutFlagsForIntersection(
+        [span.sourceStartSec, span.sourceEndSec],
+        [windowStart, windowEnd],
+        projection.reversed,
+    );
+    return [
+        {
+            cycle: 0,
+            startFrame: interval[0],
+            endFrameExclusive: interval[1],
+            cutStart,
+            cutEnd,
+        },
+    ];
 }
 
 export function inverseProject(
