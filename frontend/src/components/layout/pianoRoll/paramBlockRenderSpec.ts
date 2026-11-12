@@ -84,10 +84,10 @@ export function buildParamBlockRenderSpec(args: {
         if (!logicalOrdinals.has(id)) logicalOrdinals.set(id, logicalOrdinals.size + 1);
     }
     const handles = paramBlockTransitionHandles(sorted);
+    // Only known, equal source identities can be contiguous. Two unknown
+    // sources must never be treated as the same Clip/Take/cycle.
     const sameSource = (a: ParamBlockRenderBlock | undefined, b: ParamBlockRenderBlock) =>
-        a !== undefined &&
-        ((a.sourceKey === undefined && b.sourceKey === undefined) ||
-            (a.sourceKey !== undefined && a.sourceKey === b.sourceKey));
+        a?.sourceKey !== undefined && a.sourceKey === b.sourceKey;
     const handleByLeftId = new Map(handles.map((handle) => [handle.leftId, handle]));
     return {
         curveOwned: args.curveOwned ?? true,

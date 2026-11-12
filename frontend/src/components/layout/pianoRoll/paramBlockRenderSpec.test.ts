@@ -33,8 +33,8 @@ function build(blocks: readonly ParamBlockRenderBlock[]) {
 describe("buildParamBlockRenderSpec", () => {
     it("computes contiguous flags and transition handles from final geometry", () => {
         const spec = build([
-            block({ id: "a", startSec: 0, endSec: 1, transitionSec: 0.2 }),
-            block({ id: "b", startSec: 1, endSec: 2 }),
+            block({ id: "a", startSec: 0, endSec: 1, transitionSec: 0.2, sourceKey: "s|t|0" }),
+            block({ id: "b", startSec: 1, endSec: 2, sourceKey: "s|t|0" }),
         ]);
         expect(spec.blocks[0]).toMatchObject({
             contiguousEnd: true,

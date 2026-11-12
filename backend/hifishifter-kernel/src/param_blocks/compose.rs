@@ -643,15 +643,25 @@ fn base_piece_candidate(
     let a = source_at_projected_frame(&projection, start, member.cycle, frame_period_ms)?;
     let b = source_at_projected_frame(&projection, end, member.cycle, frame_period_ms)?;
     let (lo, hi) = (a.min(b), a.max(b));
-    if hi <= lo + 1e-12 {
-        return None;
+    // A positive frame interval is visible truth. Rounding may collapse the
+    // source coordinates; one frame is the smallest editable local interval.
+    let (source_start, mut source_end) = if hi > lo + 1e-12 {
+        (lo, hi)
+    } else {
+        (
+            lo,
+            lo + frame_period_ms.max(0.1) / 1000.0 * projection.effective_rate.max(1e-9),
+        )
+    };
+    if source_end <= source_start {
+        source_end = source_start + 1e-12;
     }
     let piece_span = TakeSpan {
         clip_id: member.clip_id.clone(),
         take_id: member.take_id.clone(),
         cycle: member.cycle,
-        source_start_sec: lo,
-        source_end_sec: hi,
+        source_start_sec: source_start,
+        source_end_sec: source_end,
         syllable_id: None,
         label: member.label.unwrap_or(base_span.label),
     };
@@ -698,6 +708,8 @@ fn trim_member(
     let a = source_at_projected_frame(&projection, start, member.cycle, frame_period_ms);
     let b = source_at_projected_frame(&projection, end, member.cycle, frame_period_ms);
     let mut next = member.clone();
+    next.cut_start = member.start_frame == start && member.cut_start;
+    next.cut_end = member.end_frame_exclusive == end && member.cut_end;
     next.start_frame = start;
     next.end_frame_exclusive = end;
     if let Some(a) = a {
@@ -1020,6 +1032,54 @@ mod tests {
         assert_eq!(normalized[0].span.source_end_sec, 0.6);
         assert_eq!(normalized[1].span.source_start_sec, 0.6);
         assert_eq!(normalized[1].span.source_end_sec, 0.9);
+    }
+
+    #[test]
+    fn one_frame_base_remainder_keeps_an_editable_source_interval() {
+        let mut timeline = timeline(0.0, 0.0);
+        timeline.clips[0].normalize_takes();
+        timeline.clips[0].takes[0].syllable_analysis =
+            Some(crate::pitch_analysis::TakeSyllableAnalysis {
+                algorithm: "test".into(),
+                algorithm_version: 1,
+                source_digest: "d".into(),
+                source_spans_sec: vec![crate::pitch_analysis::SyllableSpan {
+                    start_sec: 0.0,
+                    end_sec: 0.4,
+                    midi_note: Some(64.0),
+                }],
+                analyzed_window_sec: [0.0, 2.0],
+            });
+        let edits = ParamBlockEditSet {
+            schema_version: 2,
+            revision: 1,
+            blocks: vec![UserParamBlock {
+                id: "cover".into(),
+                geometry: BlockGeometry::Root {
+                    span: super::super::types::RootSpan {
+                        start_sec: 0.0,
+                        end_sec: 0.396,
+                    },
+                },
+                deleted: false,
+                manual: false,
+                value: None,
+                transition_out_sec: None,
+                created_seq: 1,
+                base_cover: None,
+            }],
+        };
+        let view = compose_param_block_view(&timeline, "root", &edits, 5.0).unwrap();
+        let remainder = view
+            .blocks
+            .iter()
+            .find(|block| {
+                block.kind == ProjectedBlockKind::Base
+                    && block.end_frame_exclusive - block.start_frame == 1
+            })
+            .expect("one-frame base remainder");
+        assert!(remainder.members[0].source_end_sec > remainder.members[0].source_start_sec);
+        assert_eq!(remainder.source_note, Some(64.0));
     }
 
     #[test]

@@ -844,14 +844,9 @@ export function paramBlockTransitionHandles<
         const left = sorted[index];
         const right = sorted[index + 1];
         if (!blocksAreAdjacent(left, right)) continue;
-        // Known, different sources never connect. Unknown keys (gesture
-        // previews that predate source identity) keep their legacy adjacency.
-        if (
-            left.sourceKey !== undefined &&
-            right.sourceKey !== undefined &&
-            left.sourceKey !== right.sourceKey
-        )
-            continue;
+        // Only known, equal source identities connect. Unknown previews stay
+        // separate instead of accidentally joining two crossing Clips.
+        if (left.sourceKey === undefined || left.sourceKey !== right.sourceKey) continue;
         out.push({
             leftId: left.id,
             rightId: right.id,
@@ -2138,6 +2133,22 @@ export function modeCenterOfValuesInSamples(
         if (!Number.isFinite(value)) continue;
         if (samples.isPitch && value <= 0) continue;
         values.push(value);
+    }
+    if (values.length === 0 && endFrame - startFrame <= stride) {
+        // Only a one-frame / sub-stride block borrows a nearest sample. A wide
+        // block with no samples in the fetched window must keep its own value.
+        const index = Math.max(
+            0,
+            Math.min(
+                samples.values.length - 1,
+                Math.round((startFrame - samples.startFrame) / stride),
+            ),
+        );
+        const value = Number(samples.values[index]);
+        const sampleFrame = samples.startFrame + index * stride;
+        if (sampleFrame >= startFrame && sampleFrame < endFrame) {
+            if (Number.isFinite(value) && !(samples.isPitch && value <= 0)) values.push(value);
+        }
     }
     return modeCenterOfValues(values, {
         param: samples.param,

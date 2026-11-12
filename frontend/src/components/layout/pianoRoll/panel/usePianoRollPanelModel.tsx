@@ -83,7 +83,11 @@ import { useParamBlockState } from "../useParamBlockState";
 import { useLatestRef, useLatestRefValue } from "../useLatestRef";
 import { trackParamBlockCommit } from "../paramBlockCommitCoordinator";
 import { composeParamBlockView } from "../paramBlockComposition";
-import { audibleSourceWindow, projectionForClip, windowContained } from "../paramBlockProjection";
+import {
+    analysisWindowStatus,
+    audibleSourceWindow,
+    projectionForClip,
+} from "../paramBlockProjection";
 import { planParamBlockGesture, type ParamBlockGesturePlan } from "../paramBlockGesture";
 import { reportParamBlockDiagnostic } from "../paramBlockDiagnostics";
 import { publishParamBlockWriteFailure } from "../paramBlockFeedback";
@@ -2131,16 +2135,13 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             const spans = activeTake?.syllableSpansSec ?? clip.syllableSpansSec;
             const analyzed =
                 activeTake?.syllableAnalysisWindowSec ?? clip.syllableAnalysisWindowSec;
-            // An analysis of a narrower window cannot describe a left-cut note
-            // that became audible after the Clip edge was dragged left.
-            if (
-                spans !== undefined &&
-                spans.length > 0 &&
-                windowContained(
-                    audibleSourceWindow(projectionForClip(toParamBlockSourceClip(clip))),
-                    analyzed,
-                )
-            ) {
+            // Stale windows keep visible spans and only trigger reanalysis.
+            const status = analysisWindowStatus(
+                audibleSourceWindow(projectionForClip(toParamBlockSourceClip(clip))),
+                analyzed,
+                spans,
+            );
+            if (spans !== undefined && (status === "current" || status === "stale")) {
                 byClip.set(clip.id, spans);
             }
         }
@@ -2152,7 +2153,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 clip.takes?.find((item) => item.id === clip.activeTakeId) ?? clip.takes?.[0];
             const analyzed = take?.syllableAnalysisWindowSec ?? clip.syllableAnalysisWindowSec;
             const audible = audibleSourceWindow(projectionForClip(toParamBlockSourceClip(clip)));
-            if (!windowContained(audible, analyzed)) {
+            const spans = take?.syllableSpansSec ?? clip.syllableSpansSec;
+            if (analysisWindowStatus(audible, analyzed, spans) !== "current") {
                 reportParamBlockDiagnostic({
                     code: "analysis_window_stale",
                     gesture: "layout",
@@ -2280,6 +2282,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         scrollLeft,
         viewSize,
         editParam,
+        currentParamDefaultValue,
         pitchEnabled,
         pitchHardDisableReason,
         childPitchHardDisableReason,

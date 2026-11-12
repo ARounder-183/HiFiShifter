@@ -551,6 +551,56 @@ describe("paramBlockComposition", () => {
         );
     });
 
+    it("exports a stable source key for every derived block", () => {
+        const single = composeParamBlockView(
+            "root",
+            [clip],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            5,
+        );
+        for (const block of single.blocks) {
+            expect(block.sourceKey).toMatch(/^clip\|/);
+        }
+        const crossing = composeParamBlockView(
+            "root",
+            [
+                { ...clip, id: "A" },
+                { ...clip, id: "B", startSec: 0.5, lengthSec: 1 },
+            ],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            5,
+        );
+        expect(crossing.blocks.every((block) => block.sourceKey !== undefined)).toBe(true);
+        expect(new Set(crossing.blocks.map((block) => block.sourceKey)).size).toBeGreaterThan(1);
+    });
+
+    it("keeps a one-frame base remainder with a positive edit window", () => {
+        const oneFrame: ParamBlockSourceClip = {
+            ...clip,
+            syllableSpansSec: [{ startSec: 0, endSec: 0.4, note: 64 }],
+        };
+        const edits: ParamBlockEditSet = {
+            schemaVersion: 2,
+            revision: 1,
+            blocks: [
+                {
+                    id: "cover",
+                    geometry: { kind: "root", span: { startSec: 0, endSec: 0.396 } },
+                    createdSeq: 1,
+                },
+            ],
+        };
+        const view = composeParamBlockView("root", [oneFrame], edits, 5);
+        expect(
+            view.blocks.some(
+                (block) =>
+                    block.kind === "base" &&
+                    block.endFrameExclusive - block.startFrame === 1 &&
+                    block.members[0]!.sourceEndSec > block.members[0]!.sourceStartSec,
+            ),
+        ).toBe(true);
+    });
+
     it("crossing clips keep the upper block and expose lower remainders without holes", () => {
         const lower: ParamBlockSourceClip = {
             id: "A",

@@ -10,6 +10,7 @@
  */
 
 import {
+    analysisWindowStatus,
     audibleSourceWindow,
     baseSourceSpansForClip,
     normalizeLoopTakeSpans,
@@ -17,7 +18,6 @@ import {
     projectionForClip,
     sourceAtProjectedFrame,
     toFrame,
-    windowContained,
     type ClipProjection,
     type ParamBlockSourceClip,
 } from "./paramBlockProjection";
@@ -37,6 +37,8 @@ import type {
 } from "./paramBlockTypes";
 
 const EPS = 1e-9;
+/** Source-domain intersections use the Rust parity tolerance. */
+const SOURCE_EPS = 1e-12;
 const ANCHOR_TOLERANCE_SEC = 0.005;
 const ANCHOR_OVERLAP_RATIO = 0.5;
 
@@ -68,6 +70,12 @@ function hash(text: string): string {
         right = Math.imul(right ^ text.charCodeAt(index), 0x85ebca6b);
     }
     return `${(left >>> 0).toString(16)}${(right >>> 0).toString(16)}`;
+}
+
+function candidateSourceKey(candidate: Candidate): string | undefined {
+    if (candidate.sourceKey !== undefined) return candidate.sourceKey;
+    const first = candidate.members[0];
+    return first === undefined ? undefined : `${first.clipId}|${first.takeId}|${first.cycle}`;
 }
 
 function memberOf(
@@ -560,13 +568,17 @@ function basePieceCandidate(
     if (a === null || b === null) return null;
     const lo = Math.min(a, b);
     const hi = Math.max(a, b);
-    if (!(hi > lo + EPS)) return null;
+    // A positive frame interval is visible truth. Frame rounding can collapse
+    // source coordinates; one frame of source width is the smallest editable
+    // local interval, never a reason to drop the block.
+    const [pieceStart, pieceEnd] =
+        hi > lo + SOURCE_EPS ? [lo, hi] : [lo, lo + (framePeriodMs / 1000) * projection.rate];
     const pieceSpan: TakeSpan = {
         clipId: member.clipId,
         takeId: member.takeId,
         cycle: member.cycle,
-        sourceStartSec: lo,
-        sourceEndSec: hi,
+        sourceStartSec: pieceStart,
+        sourceEndSec: pieceEnd,
         label: member.label ?? baseSpan.label,
     };
     return {
@@ -791,6 +803,9 @@ export function composeParamBlockView(
             members: candidate.members,
             ...(candidate.value === undefined ? {} : { value: candidate.value }),
             ...(candidate.sourceNote === undefined ? {} : { sourceNote: candidate.sourceNote }),
+            ...(candidateSourceKey(candidate) === undefined
+                ? {}
+                : { sourceKey: candidateSourceKey(candidate) }),
             cutStart: candidate.cutStart === true || (candidate.members[0]?.cutStart ?? false),
             cutEnd:
                 candidate.cutEnd === true ||
@@ -809,24 +824,23 @@ export function composeParamBlockView(
         analysisPending: orderedClips.some((clip) => {
             const take =
                 clip.takes?.find((item) => item.id === clip.activeTakeId) ?? clip.takes?.[0];
-            const hasSpans =
-                (take?.syllableSpansSec?.length ?? 0) > 0 ||
-                (clip.syllableSpansSec?.length ?? 0) > 0 ||
-                (take?.gameBlockBaseline?.sourceSpansSec?.length ?? 0) > 0 ||
-                (clip.gameBlockBaseline?.sourceSpansSec?.length ?? 0) > 0 ||
-                (take?.midiNoteData?.length ?? 0) > 0 ||
-                (clip.midiNoteData?.length ?? 0) > 0;
-            if (
-                (clip.sourceStartSec === undefined && clip.sourceEndSec === undefined) ||
-                !hasSpans
-            ) {
-                return (
-                    (clip.sourceStartSec !== undefined || clip.sourceEndSec !== undefined) &&
-                    !hasSpans
-                );
-            }
-            const analyzed = take?.syllableAnalysisWindowSec ?? clip.syllableAnalysisWindowSec;
-            return !windowContained(audibleSourceWindow(projectionForClip(clip)), analyzed);
+            const spans =
+                take?.syllableSpansSec ??
+                clip.syllableSpansSec ??
+                take?.gameBlockBaseline?.sourceSpansSec ??
+                clip.gameBlockBaseline?.sourceSpansSec ??
+                take?.midiNoteData ??
+                clip.midiNoteData;
+            const hasSource = clip.sourceStartSec !== undefined || clip.sourceEndSec !== undefined;
+            if (take?.midiNoteData?.length || clip.midiNoteData?.length) return false;
+            if (!hasSource) return false;
+            return (
+                analysisWindowStatus(
+                    audibleSourceWindow(projectionForClip(clip)),
+                    take?.syllableAnalysisWindowSec ?? clip.syllableAnalysisWindowSec,
+                    spans,
+                ) !== "current"
+            );
         }),
     };
 }
