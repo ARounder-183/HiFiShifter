@@ -90,10 +90,14 @@ MUST_RESOLVE_HOST=(
 )
 
 # 直接 NEEDED 里必须"落在包内"的条目（自有库 + Tauri 打包的 GTK）。
+#
+# 【为什么没有 libSoundTouchDLL.so】SoundTouch 已改为**运行期 dlopen**（libloading
+# 按名加载，见 kernel 的 soundtouch 模块头）：它不再出现在 DT_NEEDED，ldd 自然
+# 解析不到。它能否被找到由二进制的 DT_RUNPATH 保证（$ORIGIN/../lib/HiFiShifter），
+# 这一环在 cmd_verify 里单独断言；随包存在性由 REQUIRED_FILES 断言。
 MUST_RESOLVE_BUNDLE=(
     libgtk-3.so.0
     libgdk-3.so.0
-    libSoundTouchDLL.so
     libwebgpu_dawn.so
 )
 
@@ -265,6 +269,17 @@ cmd_verify() {
             printf 'ok    %s -> 包内\n' "$name"
         fi
     done
+
+    # SoundTouch 走运行期 dlopen（不在 NEEDED 里）：它能否在包内被找到，
+    # 唯一依赖是二进制自带的 RUNPATH。缺了它，运行期只会在开发目录里命中
+    # 构建产物，打包形态静音降级到 Signalsmith，用户看不出缺了什么。
+    if readelf -d "$appdir/usr/bin/HiFiShifter" 2>/dev/null \
+        | grep -q 'RUNPATH.*lib/HiFiShifter'; then
+        printf 'ok    DT_RUNPATH 含 lib/HiFiShifter（libSoundTouchDLL.so 的 dlopen 依据）\n'
+    else
+        printf 'FAIL  二进制缺少 $ORIGIN/../lib/HiFiShifter 的 RUNPATH，包内 libSoundTouchDLL.so 无法被 dlopen\n' >&2
+        failures=$((failures + 1))
+    fi
 
     if [ "$failures" -ne 0 ]; then
         die "$failures 项校验未通过"
