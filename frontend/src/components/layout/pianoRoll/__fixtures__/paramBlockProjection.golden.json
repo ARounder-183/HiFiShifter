@@ -743,6 +743,84 @@
                     "cutEnd": true
                 }
             ]
+        },
+        {
+            "name": "section-loop-anchor-crossing",
+            "clip": {
+                "id": "c",
+                "startSec": 0,
+                "lengthSec": 4,
+                "sourceStartSec": 0.25,
+                "sourceEndSec": 1.25,
+                "playbackRate": 1,
+                "reversed": false,
+                "loopEnabled": true,
+                "loopPeriodSec": 1,
+                "contentDurationSec": 4
+            },
+            "span": {
+                "sourceStartSec": 0.2,
+                "sourceEndSec": 0.4,
+                "cycle": 0
+            },
+            "expected": [
+                {
+                    "cycle": 0,
+                    "startFrame": 0,
+                    "endFrameExclusive": 30,
+                    "cutStart": true,
+                    "cutEnd": false
+                },
+                {
+                    "cycle": 0,
+                    "startFrame": 190,
+                    "endFrameExclusive": 200,
+                    "cutStart": false,
+                    "cutEnd": true
+                },
+                {
+                    "cycle": 1,
+                    "startFrame": 200,
+                    "endFrameExclusive": 230,
+                    "cutStart": true,
+                    "cutEnd": false
+                },
+                {
+                    "cycle": 1,
+                    "startFrame": 390,
+                    "endFrameExclusive": 400,
+                    "cutStart": false,
+                    "cutEnd": true
+                },
+                {
+                    "cycle": 2,
+                    "startFrame": 400,
+                    "endFrameExclusive": 430,
+                    "cutStart": true,
+                    "cutEnd": false
+                },
+                {
+                    "cycle": 2,
+                    "startFrame": 590,
+                    "endFrameExclusive": 600,
+                    "cutStart": false,
+                    "cutEnd": true
+                },
+                {
+                    "cycle": 3,
+                    "startFrame": 600,
+                    "endFrameExclusive": 630,
+                    "cutStart": true,
+                    "cutEnd": false
+                },
+                {
+                    "cycle": 3,
+                    "startFrame": 790,
+                    "endFrameExclusive": 800,
+                    "cutStart": false,
+                    "cutEnd": true
+                }
+            ]
         }
     ]
 }

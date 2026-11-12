@@ -1021,6 +1021,38 @@ mod tests {
     }
 
     #[test]
+    fn section_loop_anchor_crossing_uses_the_section_cycle() {
+        // SECTION 循环：周期 1s 小于媒体时长 4s，锚点仍按 source_start 起算。
+        let clip = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":4.0,
+            "loop_enabled":true,"loop_period_sec":1.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.25,
+                "source_end_sec":1.25,"loop_enabled":true,"duration_sec":4.0}]
+        }));
+        let projection = ClipProjection::from_clip(&clip).unwrap();
+        let intervals = project_span(&projection, &span(0.2, 0.4), 5.0);
+        let got: Vec<(u32, u32)> = intervals
+            .iter()
+            .map(|interval| (interval.start_frame, interval.end_frame_exclusive))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (0, 30),
+                (190, 200),
+                (200, 230),
+                (390, 400),
+                (400, 430),
+                (590, 600),
+                (600, 630),
+                (790, 800),
+            ]
+        );
+        assert!(intervals[0].cut_start);
+        assert!(intervals[1].cut_end);
+    }
+
+    #[test]
     fn reversed_loop_anchor_crossing_keeps_both_fragments() {
         let clip = clip(serde_json::json!({
             "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":2.0,
