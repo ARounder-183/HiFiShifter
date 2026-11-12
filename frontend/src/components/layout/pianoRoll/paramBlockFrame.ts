@@ -1,4 +1,5 @@
 import {
+    logicalBlockKey,
     averageParamValueInSpan,
     modeCenterOfValuesInSamples,
     projectParamBlockDragDisplayValue,
@@ -26,8 +27,27 @@ export function resolveParamBlockPanelValues(args: {
     >;
     /** Canonical blocks must never guess a center from the viewport. */
     readonly allowFallback?: boolean;
+    /** Parameter default; the last display-only fallback for unvalued blocks. */
+    readonly currentParamDefaultValue?: number | null;
 }): ParamBlock[] {
-    return args.blocks.map((block) => {
+    const nearestValue = (index: number): number | null => {
+        const block = args.blocks[index];
+        const center = (block.startSec + block.endSec) / 2;
+        let best: { distance: number; value: number } | null = null;
+        for (let other = 0; other < args.blocks.length; other += 1) {
+            if (other === index) continue;
+            const candidate = args.blocks[other];
+            if (candidate.sourceKey !== block.sourceKey || candidate.sourceKey === undefined)
+                continue;
+            const value = candidate.averageValue;
+            if (value === null || !Number.isFinite(value)) continue;
+            const distance = Math.abs((candidate.startSec + candidate.endSec) / 2 - center);
+            if (distance > 2) continue;
+            if (best === null || distance < best.distance) best = { distance, value };
+        }
+        return best?.value ?? null;
+    };
+    return args.blocks.map((block, index) => {
         // volume / dyn 的拖动落点同样写在 `value` 里；只对 pitch 生效会让块高
         // 在下一次曲线刷新时跳回主簇。auto 块没有持久化中心，保持 null。
         const manualValue =
@@ -46,26 +66,50 @@ export function resolveParamBlockPanelValues(args: {
                       isPitch: args.param === "pitch",
                       param: args.param,
                   });
-        const cached = args.previousValues?.get(block.id);
+        const key = logicalBlockKey(block);
+        const cached = args.previousValues?.get(key) ?? args.previousValues?.get(block.id);
+        // Geometry changes (trim/slip) are not a new logical block: reuse the
+        // last known value instead of hiding the block during a refresh.
         const previous =
-            cached !== undefined &&
-            Math.abs(cached.startSec - block.startSec) <= 1e-6 &&
-            Math.abs(cached.endSec - block.endSec) <= 1e-6
-                ? cached.value
-                : null;
+            cached !== undefined && Number.isFinite(cached.value) ? cached.value : null;
         const previewAverage =
             pv === null && args.param === "pitch" && Number.isFinite(block.averageValue)
                 ? block.averageValue
                 : null;
+        const sourceNote =
+            args.param === "pitch" && block.members.length === 1 && block.sourceNote != null
+                ? block.sourceNote
+                : null;
+        const neighbor = nearestValue(index);
+        const defaultValue =
+            typeof args.currentParamDefaultValue === "number" &&
+            Number.isFinite(args.currentParamDefaultValue)
+                ? args.currentParamDefaultValue
+                : null;
+        const derived =
+            manualValue ??
+            sampled ??
+            previous ??
+            previewAverage ??
+            sourceNote ??
+            neighbor ??
+            defaultValue;
+        const usedFallback =
+            manualValue === null &&
+            sampled === null &&
+            previous === null &&
+            previewAverage === null &&
+            derived !== null;
         return {
             ...block,
             manualValue,
             averageValue:
                 manualValue ??
                 sampled ??
-                (Number.isFinite(previous) ? previous : null) ??
+                previous ??
                 previewAverage ??
-                (args.allowFallback === true ? args.fallbackValue : null),
+                (args.allowFallback === true ? args.fallbackValue : derived),
+            ...(usedFallback ? { fallbackValue: derived, centerPolicy: "fallback" as const } : {}),
         };
     });
 }
@@ -117,7 +161,10 @@ export function resolveParamBlockFrameValue(args: {
         readonly logicalCenterValue?: number | null;
         readonly displayCenterValue?: number | null;
         /** Explicit center policy; locked previews must not fall back to curve sampling. */
-        readonly centerPolicy?: "live" | "locked";
+        readonly centerPolicy?: "live" | "locked" | "fallback";
+        readonly sourceNote?: number | null;
+        readonly fallbackValue?: number | null;
+        readonly members?: readonly unknown[];
         /** Center produced by the active block gesture, in the same frame as its curve. */
         readonly frameCenterValue?: number | null;
     };
@@ -129,6 +176,9 @@ export function resolveParamBlockFrameValue(args: {
         readonly isPitch: boolean;
         readonly param: string;
     } | null;
+    /** Fallback chains used by the host when no sampled value exists. */
+    readonly fallbackValue?: number | null;
+    readonly currentParamDefaultValue?: number | null;
 }): number | null {
     if (
         args.block.frameCenterValue !== null &&
@@ -182,7 +232,18 @@ export function resolveParamBlockFrameValue(args: {
         args.samples === null
             ? null
             : modeCenterOfValuesInSamples(args.block.startSec, args.block.endSec, args.samples);
-    return sampled ?? args.block.averageValue ?? null;
+    const param = args.param ?? args.samples?.param ?? "pitch";
+    const sourceNote =
+        param === "pitch" && args.block.members?.length === 1 && args.block.sourceNote != null
+            ? args.block.sourceNote
+            : null;
+    const fallback = args.block.fallbackValue ?? sourceNote ?? args.fallbackValue ?? null;
+    const defaultValue =
+        typeof args.currentParamDefaultValue === "number" &&
+        Number.isFinite(args.currentParamDefaultValue)
+            ? args.currentParamDefaultValue
+            : null;
+    return sampled ?? args.block.averageValue ?? fallback ?? defaultValue;
 }
 
 /**

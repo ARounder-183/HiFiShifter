@@ -1250,12 +1250,24 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                           curveOwned: spec.curveOwned,
                       });
                 /*
-                 * No midpoint fallback: a block without a sampled / cached /
-                 * manual center is skipped for this frame. Falling back to the
-                 * viewport middle put every unvalued block on the same line
-                 * (F#4 in the reported project).
+                 * A block in the derived view must always be drawn. Its own
+                 * source note, panel fallback or the live value center are
+                 * display-only fallbacks; never use the viewport midpoint and
+                 * never write a fallback into the parameter curve.
                  */
-                const displayValue = value ?? block.averageValue ?? null;
+                const fallbackValue =
+                    param === "pitch" && Number.isFinite(block.sourceNote)
+                        ? (block.sourceNote as number)
+                        : Number.isFinite(block.fallbackValue)
+                          ? (block.fallbackValue as number)
+                          : null;
+                const displayValue =
+                    value ??
+                    block.averageValue ??
+                    fallbackValue ??
+                    (liveView !== null && Number.isFinite(liveView.center)
+                        ? liveView.center
+                        : null);
                 if (
                     displayValue == null ||
                     !Number.isFinite(displayValue) ||
@@ -1266,6 +1278,10 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 ) {
                     return block;
                 }
+                const usedFallback =
+                    (value === null || value === undefined) &&
+                    (block.averageValue === null || block.averageValue === undefined) &&
+                    displayValue !== null;
                 /*
                  * 块中心的唯一投影口径：交给共用函数处理 pitch 的 +0.5，
                  * 再走与曲线同一个 valueToY。这里不能自己展开 normalized：
@@ -1336,6 +1352,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                     averageValue: displayValue,
                     heightPx: hitHeightPx,
                     topPx,
+                    ...(usedFallback ? { centerPolicy: "fallback" as const } : {}),
                 };
             });
         blockHitRects = hitRects;
@@ -1352,6 +1369,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             ...block,
             topPx: block.topPx ?? 0,
             heightPx: block.heightPx ?? 0,
+            fallback: block.centerPolicy === "fallback",
         }));
         const scene = buildParamBlockScene({
             axis: currentAxis(),

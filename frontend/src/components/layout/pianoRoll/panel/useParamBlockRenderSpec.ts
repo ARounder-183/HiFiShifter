@@ -280,7 +280,12 @@ export function useParamBlockRenderSpec(
                                   ?.selected === true,
                           grouped: block.kind === "grouped",
                           transitionSec: block.transitionSec,
-                          centerPolicy: "live",
+                          sourceNote: block.sourceNote,
+                          fallbackValue: block.fallbackValue,
+                          cutStart: block.cutStart,
+                          cutEnd: block.cutEnd,
+                          sourceKey: block.sourceKey,
+                          centerPolicy: block.centerPolicy ?? "live",
                       }))
                     : plan.viewAfter.blocks.map((block) => {
                           const fp = plan.viewAfter.framePeriodMs;
@@ -358,7 +363,12 @@ export function useParamBlockRenderSpec(
             selected: selectedIds.has(logicalBlockId(block)),
             grouped: block.kind === "grouped",
             transitionSec: block.transitionSec,
-            centerPolicy: "live",
+            sourceNote: block.sourceNote,
+            fallbackValue: block.fallbackValue,
+            cutStart: block.cutStart,
+            cutEnd: block.cutEnd,
+            sourceKey: block.sourceKey,
+            centerPolicy: block.centerPolicy ?? "live",
         }));
         return buildParamBlockRenderSpec({
             blocks,
