@@ -591,13 +591,13 @@ mod tests {
                     start_sec: 0.0,
                     end_sec: 1.0,
                     midi_note: None,
-                    event_id: Some(crate::pitch_analysis::source_event_id(0.0, 1.0).into()),
+                    event_id: Some(crate::pitch_analysis::source_event_id(0.0, 1.0)),
                 },
                 crate::pitch_analysis::SyllableSpan {
                     start_sec: 2.0,
                     end_sec: 3.0,
                     midi_note: None,
-                    event_id: Some(crate::pitch_analysis::source_event_id(2.0, 3.0).into()),
+                    event_id: Some(crate::pitch_analysis::source_event_id(2.0, 3.0)),
                 },
             ],
         });

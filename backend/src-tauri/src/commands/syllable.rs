@@ -423,7 +423,7 @@ mod tests {
         let clip = timeline().clips[0].clone();
         let empty = payload(&clip, "take", None, [0.0, 1.0]);
         assert_eq!(empty.source_notes.len(), empty.source_spans_sec.len());
-        assert_eq!(empty.analyzed, false);
+        assert!(!empty.analyzed);
         let analysis = TakeSyllableAnalysis {
             algorithm: "test".into(),
             algorithm_version: 1,
@@ -432,7 +432,7 @@ mod tests {
                 start_sec: 1.0,
                 end_sec: 1.4,
                 midi_note: Some(64.0),
-                event_id: Some(crate::pitch_analysis::source_event_id(1.0, 1.4).into()),
+                event_id: Some(crate::pitch_analysis::source_event_id(1.0, 1.4)),
             }],
             analyzed_window_sec: [1.0, 3.0],
         };
@@ -464,7 +464,7 @@ mod tests {
                 start_sec: 0.0,
                 end_sec: 1.0,
                 midi_note: None,
-                event_id: Some(crate::pitch_analysis::source_event_id(0.0, 1.0).into()),
+                event_id: Some(crate::pitch_analysis::source_event_id(0.0, 1.0)),
             }],
             analyzed_window_sec: [0.0, 0.0],
         };

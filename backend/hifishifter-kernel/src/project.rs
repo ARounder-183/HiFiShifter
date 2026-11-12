@@ -742,7 +742,7 @@ mod tests {
                 start_sec: 0.1,
                 end_sec: 0.3,
                 midi_note: None,
-                event_id: Some(crate::pitch_analysis::source_event_id(0.1, 0.3).into()),
+                event_id: Some(crate::pitch_analysis::source_event_id(0.1, 0.3)),
             }],
             analyzed_window_sec: [0.0, 0.0],
         });

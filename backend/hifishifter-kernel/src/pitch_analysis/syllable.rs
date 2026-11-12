@@ -334,7 +334,7 @@ pub fn estimate_syllable_spans(
             }
             values.sort_by(f32::total_cmp);
             let middle = values.len() / 2;
-            span.midi_note = Some(if values.len() % 2 == 0 {
+            span.midi_note = Some(if values.len().is_multiple_of(2) {
                 (values[middle - 1] + values[middle]) * 0.5
             } else {
                 values[middle]
@@ -664,7 +664,7 @@ mod tests {
                     start_sec: 0.0,
                     end_sec: 1.0,
                     midi_note: None,
-                    event_id: Some(crate::pitch_analysis::source_event_id(0.0, 1.0).into()),
+                    event_id: Some(crate::pitch_analysis::source_event_id(0.0, 1.0)),
                 }],
                 analyzed_window_sec: [0.0, 1.0],
             };
@@ -771,7 +771,7 @@ mod tests {
                 start_sec: 0.9,
                 end_sec: 1.4,
                 midi_note: Some(64.0),
-                event_id: Some(crate::pitch_analysis::source_event_id(0.9, 1.4).into()),
+                event_id: Some(crate::pitch_analysis::source_event_id(0.9, 1.4)),
             }],
             analyzed_window_sec: [0.9, 2.0],
         };
@@ -821,13 +821,13 @@ mod tests {
                     start_sec: 0.2,
                     end_sec: 0.8,
                     midi_note: Some(60.0),
-                    event_id: Some(crate::pitch_analysis::source_event_id(0.2, 0.8).into()),
+                    event_id: Some(crate::pitch_analysis::source_event_id(0.2, 0.8)),
                 },
                 SyllableSpan {
                     start_sec: 0.9,
                     end_sec: 1.6,
                     midi_note: Some(64.0),
-                    event_id: Some(crate::pitch_analysis::source_event_id(0.9, 1.6).into()),
+                    event_id: Some(crate::pitch_analysis::source_event_id(0.9, 1.6)),
                 },
             ],
             1.0,
@@ -869,13 +869,13 @@ mod tests {
                 start_sec: 0.5,
                 end_sec: 1.0,
                 midi_note: Some(60.0),
-                event_id: Some(crate::pitch_analysis::source_event_id(0.5, 1.0).into()),
+                event_id: Some(crate::pitch_analysis::source_event_id(0.5, 1.0)),
             },
             SyllableSpan {
                 start_sec: 1.0,
                 end_sec: 1.5,
                 midi_note: Some(62.0),
-                event_id: Some(crate::pitch_analysis::source_event_id(1.0, 1.5).into()),
+                event_id: Some(crate::pitch_analysis::source_event_id(1.0, 1.5)),
             },
         ];
         let filled = fill_spans_without_merging(&spans, 0.0, 2.0);

@@ -95,7 +95,7 @@ fn source_note_for_member(timeline: &TimelineState, member: &ProjectedMember) ->
             continue;
         }
         if let Some(pitch) = note {
-            if best.map_or(true, |(width, _)| overlap > width) {
+            if best.is_none_or(|(width, _)| overlap > width) {
                 best = Some((overlap, pitch));
             }
         }
@@ -1001,7 +1001,7 @@ mod tests {
                     start_sec: 1.0,
                     end_sec: 1.5,
                     midi_note: Some(60.0),
-                    event_id: Some(crate::pitch_analysis::source_event_id(1.0, 1.5).into()),
+                    event_id: Some(crate::pitch_analysis::source_event_id(1.0, 1.5)),
                 }],
                 analyzed_window_sec: [1.0, 3.0],
             });
@@ -1029,7 +1029,7 @@ mod tests {
                 start_sec: 0.2,
                 end_sec: 0.6,
                 midi_note: Some(60.0),
-                event_id: Some(crate::pitch_analysis::source_event_id(0.2, 0.6).into()),
+                event_id: Some(crate::pitch_analysis::source_event_id(0.2, 0.6)),
             }],
             analyzed_window_sec: [0.0, 4.0],
         });
@@ -1102,13 +1102,13 @@ mod tests {
                         start_sec: 0.0,
                         end_sec: 0.6,
                         midi_note: None,
-                        event_id: Some(crate::pitch_analysis::source_event_id(0.0, 0.6).into()),
+                        event_id: Some(crate::pitch_analysis::source_event_id(0.0, 0.6)),
                     },
                     crate::pitch_analysis::SyllableSpan {
                         start_sec: 0.4,
                         end_sec: 0.9,
                         midi_note: None,
-                        event_id: Some(crate::pitch_analysis::source_event_id(0.4, 0.9).into()),
+                        event_id: Some(crate::pitch_analysis::source_event_id(0.4, 0.9)),
                     },
                 ],
                 analyzed_window_sec: [0.0, 2.0],
@@ -1134,7 +1134,7 @@ mod tests {
                     start_sec: 0.0,
                     end_sec: 0.4,
                     midi_note: Some(64.0),
-                    event_id: Some(crate::pitch_analysis::source_event_id(0.0, 0.4).into()),
+                    event_id: Some(crate::pitch_analysis::source_event_id(0.0, 0.4)),
                 }],
                 analyzed_window_sec: [0.0, 2.0],
             });
@@ -1182,7 +1182,7 @@ mod tests {
                     start_sec: 0.9,
                     end_sec: 1.6,
                     midi_note: None,
-                    event_id: Some(crate::pitch_analysis::source_event_id(0.9, 1.6).into()),
+                    event_id: Some(crate::pitch_analysis::source_event_id(0.9, 1.6)),
                 }],
                 analyzed_window_sec: [0.0, 2.0],
             });
