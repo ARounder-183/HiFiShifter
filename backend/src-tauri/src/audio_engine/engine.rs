@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -386,24 +386,48 @@ impl AudioEngine {
                 }
             });
         }
-        spawn_default_output_watcher(tx.clone(), device_watch_shutdown.clone());
-
+        // watcher 的通道与关停标志要在 worker 线程里用，先把句柄带进闭包。
+        let tx_for_device_watch = tx.clone();
+        let device_watch_shutdown_for_thread = device_watch_shutdown.clone();
         thread::spawn(move || {
-            let (device, default_config) = match wait_for_output_device(
-                &rx,
-                &is_playing_thread,
-                &target_thread,
-                &worker_ready_thread,
-            ) {
+            // 【顺序】先等出一个真正能播的 stream，再拿它的身份启动 watcher。
+            // 反过来（watcher 先自己猜基线）会让两者基线不同步：worker 用了
+            // 另一个设备建流，而 watcher 认为"没变"，真正的切换永远被漏掉。
+            let startup = match wait_for_output_stream(&rx, &worker_ready_thread, |device, config| {
+                let channels = config.channels() as usize;
+                let sample_format = config.sample_format();
+                let stream_config: cpal::StreamConfig = config.into();
+                build_output_stream(OutputStreamArgs {
+                    device,
+                    config: stream_config,
+                    sample_format,
+                    channels,
+                    snapshot: snapshot_for_thread.clone(),
+                    is_playing: is_playing_thread.clone(),
+                    play_start_wait: play_start_wait_thread.clone(),
+                    position_frames: position_frames_thread.clone(),
+                    duration_frames: duration_frames_thread.clone(),
+                    meter_bus: meter_bus.clone(),
+                    metro: metro_for_cb.clone(),
+                    tx: tx_for_worker.clone(),
+                })
+            }) {
                 Some(value) => value,
                 None => return,
             };
 
-            // cpal 0.18 起 `SampleRate` 是 `u32` 的类型别名，不再是 newtype。
-            let mut sr = default_config.sample_rate();
-            let mut current_output = Some(OutputDeviceIdentity::from_device(&device, &default_config));
+            let mut stream = Some(startup.stream);
+            let mut sr = startup.sample_rate;
+            let mut current_output = Some(startup.identity.clone());
+            // 等待期缓冲下来的命令（按原序）在进入主循环后先处理。
+            let mut pending_commands: VecDeque<EngineCommand> = startup.buffered;
             sample_rate_thread.store(sr, Ordering::Relaxed);
             worker_ready_thread.store(true, Ordering::Release);
+            spawn_default_output_watcher(
+                tx_for_device_watch.clone(),
+                device_watch_shutdown_for_thread.clone(),
+                Some(startup.identity),
+            );
 
             // Re-initialize the shared snapshot to the actual output sample rate.
             //
@@ -420,7 +444,6 @@ impl AudioEngine {
             // `RenderedClipCache` **共享**同一批 PCM 的 `Arc`，多留几代并不复制音频。
             let mut retired_snapshots = RetirementKeeper::<Arc<EngineSnapshot>>::new(8);
             retired_snapshots.retire(snapshot_for_thread.swap(Arc::new(EngineSnapshot::empty(sr))));
-            let snapshot_for_cb = snapshot_for_thread.clone();
 
             // Async resource manager for decoded/resampled PCM.
             let resources = ResourceManager::new(tx_for_worker.clone());
@@ -566,55 +589,17 @@ impl AudioEngine {
                 });
             }
 
-            let channels = default_config.channels() as usize;
-            let sample_format = default_config.sample_format();
-            let config: cpal::StreamConfig = default_config.into();
-            let mut stream = Some(match build_output_stream(OutputStreamArgs {
-                device,
-                config,
-                sample_format,
-                channels,
-                snapshot: snapshot_for_cb.clone(),
-                is_playing: is_playing_thread.clone(),
-                play_start_wait: play_start_wait_thread.clone(),
-                position_frames: position_frames_thread.clone(),
-                duration_frames: duration_frames_thread.clone(),
-                meter_bus: meter_bus.clone(),
-                metro: metro_for_cb.clone(),
-            }) {
-                Ok(stream) => stream,
-                Err(error) => {
-                    log::error!("AudioEngine: {error}");
-                    drain_commands_without_output(
-                        rx,
-                        is_playing_thread,
-                        target_thread,
-                        worker_ready_thread,
-                    );
-                    return;
-                }
-            });
-
-            if let Some(stream_ref) = stream.as_ref() {
-                if let Err(e) = stream_ref.play() {
-                    log::error!("AudioEngine: stream.play failed: {e}");
-                    drain_commands_without_output(
-                        rx,
-                        is_playing_thread,
-                        target_thread,
-                        worker_ready_thread,
-                    );
-                    return;
-                }
-            }
-
             let mut last_timeline: Option<Arc<TimelineState>> = None;
             let mut last_play_file: Option<(PathBuf, f64, String)> = None;
             let mut app_handle_for_worker: Option<tauri::AppHandle> = app_handle;
             // 合并连发推送时被 try_recv 取出的下一条命令：渲染线程可能以远快
             // 于本线程消费的速度逐 clip 推送 RenderedClipsChanged，排水时取到
             // 的其他命令必须原序保留、下一轮优先处理（FIFO 语义不变）。
+            // 启动期缓冲下来的命令同样排在这个队列的前面。
             let mut stashed_cmd: Option<EngineCommand> = None;
+            // 设备重建失败后的重试时刻（见 `next_command`）。
+            let mut device_retry: Option<Instant> = None;
+            let mut device_retry_backoff = Duration::from_millis(250);
 
             loop {
                 // 宿主句柄改为**惰性**获取：worker 可能早于 Tauri setup 启动
@@ -627,10 +612,12 @@ impl AudioEngine {
                 }
                 let cmd = match stashed_cmd.take() {
                     Some(cmd) => cmd,
-                    None => match rx.recv() {
-                        Ok(EngineCommand::Shutdown) => break,
-                        Ok(cmd) => cmd,
-                        Err(_) => break,
+                    None => match pending_commands.pop_front() {
+                        Some(cmd) => cmd,
+                        None => match next_command(&rx, &mut device_retry) {
+                            Some(cmd) => cmd,
+                            None => break,
+                        },
                     },
                 };
                 // 合并连发的 RenderedClipsChanged：每条推送的处理都是一次全量
@@ -690,8 +677,8 @@ impl AudioEngine {
                     EngineCommand::Stop => handle_stop(&mut state),
                     EngineCommand::SeekSec { sec } => handle_seek_sec(&mut state, sec),
                     EngineCommand::PlayFrom { sec } => handle_play_from(&mut state, sec),
-                    EngineCommand::DefaultOutputDeviceChanged => {
-                        if let Err(error) = handle_default_output_device_changed(
+                    EngineCommand::DefaultOutputDeviceChanged { force } => {
+                        match handle_default_output_device_changed(
                             &mut state,
                             &mut stream,
                             &mut sr,
@@ -703,8 +690,28 @@ impl AudioEngine {
                             sample_rate_thread.clone(),
                             meter_bus.clone(),
                             metro_for_thread.clone(),
+                            &tx_for_worker,
+                            force,
                         ) {
-                            log::error!("AudioEngine: output device switch failed: {error}");
+                            Ok(()) => {
+                                // 成功：回到最短重试间隔，下次失败仍能快速恢复。
+                                device_retry = None;
+                                device_retry_backoff = Duration::from_millis(250);
+                            }
+                            Err(error) => {
+                                // 【失败必须可重试】旧实现只打一条日志就 return，
+                                // 此时旧 stream 已丢、新 stream 为 None、身份已提交
+                                // 成新设备 —— watcher 之后永远判"没变"，用户永久
+                                // 静音且无自愈路径。这里安排一次强制重试（指数退避
+                                // 上限 2s），期间所有命令照常处理。
+                                log::warn!(
+                                    "AudioEngine: output device switch failed: {error}; retrying in {:?}",
+                                    device_retry_backoff
+                                );
+                                device_retry = Some(Instant::now() + device_retry_backoff);
+                                device_retry_backoff =
+                                    (device_retry_backoff * 2).min(Duration::from_secs(2));
+                            }
                         }
                     }
                     EngineCommand::SetPlaying { playing, target } => {
@@ -893,51 +900,102 @@ impl AudioEngine {
 // ─── Worker 状态结构体 ────────────────────────────────────────────────────────
 
 /// 启动时无输出设备：保持命令通道存活并每秒重试，设备插入后直接返回。
-fn wait_for_output_device(
+/// 启动成功的产物：可播放的 stream + 它的采样率/身份 + 等待期缓冲的命令。
+struct StartupStream {
+    stream: cpal::Stream,
+    sample_rate: u32,
+    identity: OutputDeviceIdentity,
+    buffered: VecDeque<EngineCommand>,
+}
+
+/// 取下一条要处理的命令；设备重建的重试到点时**合成**一条强制重建命令。
+///
+/// 【为什么重试要合成命令，而不是在失败处 sleep】worker 是命令通道的唯一
+/// 消费者，阻塞在那里会连用户按下的 Stop 都收不到（表现为"卡住几秒才有反应"）。
+/// 用 `recv_timeout` 把等待让给通道：到期前到达的命令照常处理，到期后再重试。
+fn next_command(
     rx: &mpsc::Receiver<EngineCommand>,
-    is_playing: &AtomicBool,
-    target: &Mutex<Option<String>>,
-    worker_ready: &AtomicBool,
-) -> Option<(cpal::Device, cpal::SupportedStreamConfig)> {
-    worker_ready.store(true, Ordering::Release);
-    loop {
-        match rx.recv_timeout(Duration::from_millis(1000)) {
-            Ok(EngineCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => return None,
-            Ok(_) => {
-                is_playing.store(false, Ordering::Relaxed);
-                *target.lock().unwrap_or_else(|e| e.into_inner()) = None;
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+    device_retry: &mut Option<Instant>,
+) -> Option<EngineCommand> {
+    if let Some(at) = *device_retry {
+        let now = Instant::now();
+        if now >= at {
+            *device_retry = None;
+            return Some(EngineCommand::DefaultOutputDeviceChanged { force: true });
         }
-        let host = cpal::default_host();
-        if let Some(device) = host.default_output_device() {
-            if let Ok(config) = device.default_output_config() {
-                return Some((device, config));
+        match rx.recv_timeout(at - now) {
+            Ok(EngineCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+            Ok(cmd) => return Some(cmd),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                *device_retry = None;
+                return Some(EngineCommand::DefaultOutputDeviceChanged { force: true });
             }
         }
     }
+    match rx.recv() {
+        Ok(EngineCommand::Shutdown) | Err(_) => None,
+        Ok(cmd) => Some(cmd),
+    }
 }
 
-/// 无输出设备 / default_output_config 失败 / 输出流构建或播放失败的兜底：
-/// 继续接收命令并按“未播放”处理，绝不能让 worker 线程退出 —— rx 被 drop
-/// 后所有 `AudioEngine::xxx()` 的 `send` 会静默失败，播放/停止/seek/节拍器
-/// 全部无响应且无恢复路径（仅重启应用）。
-fn drain_commands_without_output(
-    rx: mpsc::Receiver<EngineCommand>,
-    is_playing: Arc<AtomicBool>,
-    target: Arc<Mutex<Option<String>>>,
-    worker_ready: Arc<AtomicBool>,
-) {
-    // 无输出路径 worker 就绪（等待采样率没有意义），别让调用方白等。
+/// 启动期：等到"设备 + 配置 + 可播放的 stream"三者齐备，期间命令全部缓冲。
+///
+/// 【为什么不是"等到设备就返回"】设备枚举成功不等于能建流：被独占、格式协商
+/// 失败、USB 瞬态都可能在 `build_output_stream` / `play` 这一步失败。旧实现
+/// 在那种情况下直接 `return`（线程结束、命令通道断开、整个音频子系统到重启
+/// 前不可用）。这里把"建流成功"也并进等待条件。
+///
+/// 【为什么命令必须缓冲而不是丢弃】冷启动时默认设备可能还没出现（HDMI 握手、
+/// 蓝牙连接），此时前端已经在发 `UpdateTimeline` / `PlayFrom`/`SeekSec`。
+/// 旧实现把它们统统吃掉并把 `is_playing` 复位，设备就绪后引擎既没有时间线也
+/// 不在播放位置 —— 用户按播放没声，再按一次才有声。
+fn wait_for_output_stream<F>(
+    rx: &mpsc::Receiver<EngineCommand>,
+    worker_ready: &AtomicBool,
+    mut build: F,
+) -> Option<StartupStream>
+where
+    F: FnMut(cpal::Device, cpal::SupportedStreamConfig) -> Result<cpal::Stream, String>,
+{
+    // 无输出路径也能"就绪"：调用方要等的是 worker 起来，而不是有声音。
     worker_ready.store(true, Ordering::Release);
+    let mut buffered: VecDeque<EngineCommand> = VecDeque::new();
+    let mut backoff = Duration::from_millis(250);
     loop {
-        match rx.recv() {
-            Ok(EngineCommand::Shutdown) | Err(_) => break,
-            Ok(_) => {
-                is_playing.store(false, Ordering::Relaxed);
-                *target.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let host = cpal::default_host();
+        if let Some(device) = host.default_output_device() {
+            if let Ok(config) = device.default_output_config() {
+                let sample_rate = config.sample_rate().max(1);
+                let identity = OutputDeviceIdentity::from_device(&device, &config);
+                match build(device, config) {
+                    Ok(stream) => match stream.play() {
+                        Ok(()) => {
+                            return Some(StartupStream {
+                                stream,
+                                sample_rate,
+                                identity,
+                                buffered,
+                            })
+                        }
+                        Err(error) => {
+                            log::error!("AudioEngine: stream.play failed: {error}; will retry")
+                        }
+                    },
+                    Err(error) => log::error!("AudioEngine: {error}; will retry"),
+                }
             }
         }
+        // 失败（或暂时没设备）：把等待时间让给命令通道，期间命令进缓冲，Shutdown 退出。
+        match rx.recv_timeout(backoff) {
+            Ok(EngineCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+            Ok(cmd) => {
+                if !matches!(cmd, EngineCommand::RenderedClipsChanged) {
+                    buffered.push_back(cmd);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        backoff = (backoff * 2).min(Duration::from_secs(2));
     }
 }
 
@@ -1046,6 +1104,46 @@ fn handle_play_from(s: &mut EngineWorkerState, sec: f64) {
     reset_track_meter_state(s.meter_state, s.meter_generation);
 }
 
+/// 采样率变化后必须整体失效的资源。
+///
+/// 【为什么必须全部清空，而不是"让它们自然过期"】
+/// - 解码/重采样缓存按 `(path, out_rate)` 索引：旧 sr 的条目永远命不中，只会
+///   白占预算；
+/// - 拉伸缓存同理（`StretchKey.out_rate`）；
+/// - 整 clip 渲染缓存按 `clip_id` 索引，但内容是**按输出采样率渲染的 PCM**，
+///   留着旧条目就会被当成命中 —— 播放出变速变调的结果。
+fn invalidate_sample_rate_bound_caches(s: &EngineWorkerState, old_sr: u32, new_sr: u32) {
+    if old_sr == new_sr {
+        return;
+    }
+    if let Ok(mut cache) = s.cache.lock() {
+        cache.clear();
+    }
+    if let Ok(mut cache) = s.stretch_cache.lock() {
+        cache.clear();
+    }
+    if let Ok(mut inflight) = s.stretch_inflight.lock() {
+        inflight.clear();
+    }
+    if let Ok(mut rendered) = hifishifter_kernel::synth_clip_cache::global_rendered_clip_cache().lock()
+    {
+        rendered.clear();
+    }
+    hifishifter_kernel::synth_clip_cache::clear_pending_rendered_keys();
+}
+
+/// 切换默认输出设备：**事务式** —— 新 stream 建好且播放成功之前，旧 stream 一直活着。
+///
+/// 【为什么必须事务式】旧实现先 `stream.take()` 丢掉旧流、再提交新采样率与
+/// 新身份、最后才建流。任何一步失败（USB 枚举瞬态、设备被独占、格式协商失败）
+/// 都会留下"旧流已丢、新流为 None、身份已指向新设备"的状态：watcher 之后恒判
+/// "没变"，没有任何自愈路径 —— 用户看到的是界面在播、声音永久消失。
+///
+/// 顺序（任何失败都保持现状并让调用方安排重试）：
+/// 1. 预构建新采样率下的快照（不发布）；
+/// 2. 预构建新 stream（旧 stream 仍在出声）；
+/// 3. 暂停旧流 → 播放新流；失败则恢复旧流并返回错误；
+/// 4. 全部成功后才提交原子量 / 快照 / 身份，并丢弃旧流。
 #[allow(clippy::too_many_arguments)]
 fn handle_default_output_device_changed(
     s: &mut EngineWorkerState,
@@ -1059,6 +1157,8 @@ fn handle_default_output_device_changed(
     sample_rate: Arc<AtomicU32>,
     meter_bus: Arc<TrackMeterBus>,
     metro: Arc<metronome::MetronomeRt>,
+    tx: &mpsc::Sender<EngineCommand>,
+    force: bool,
 ) -> Result<(), String> {
     let host = cpal::default_host();
     let device = host
@@ -1068,46 +1168,33 @@ fn handle_default_output_device_changed(
         .default_output_config()
         .map_err(|error| format!("default_output_config failed: {error}"))?;
     let identity = OutputDeviceIdentity::from_device(&device, &supported);
-    if !output_device_changed(current_output.as_ref(), Some(&identity)) {
+    // `force` 跳过身份判等：RT 侧流错误与失败重试都必须能重建，
+    // 即使新设备身份与旧值完全相同（回退到同一台设备是常态）。
+    if !force && !output_device_changed(current_output.as_ref(), Some(&identity)) {
         return Ok(());
     }
 
     let was_playing = is_playing.load(Ordering::Relaxed);
     let old_sr = (*sr).max(1);
-    let audible_sec = (s.base_frames.load(Ordering::Relaxed)
-        + s.position_frames.load(Ordering::Relaxed)) as f64
-        / old_sr as f64;
+    let old_base = s.base_frames.load(Ordering::Relaxed);
+    let old_position = s.position_frames.load(Ordering::Relaxed);
+    let audible_sec = (old_base + old_position) as f64 / old_sr as f64;
     let new_sr = supported.sample_rate().max(1);
 
+    // 1) 预构建快照（尚未发布）。
     let new_snapshot = if let Some(timeline) = s.last_timeline.as_ref() {
         build_snapshot(timeline, new_sr, s.cache, s.stretch_cache)
-    } else if let Some((path, offset, _target)) = s.last_play_file.as_ref() {
-        build_snapshot_for_file(path, new_sr, (*offset + audible_sec).max(0.0), s.cache)
+    } else if let Some((path, _offset, _target)) = s.last_play_file.as_ref() {
+        // 【偏移不能重复累加】`handle_play_file` 把 `base_frames` 设成
+        // `offset * sr`，因此 `audible_sec` 里已经包含 offset；这里再 `+offset`
+        // 就是 2×，表现为"切设备后预览位置跳到两倍处"。
+        build_snapshot_for_file(path, new_sr, audible_sec.max(0.0), s.cache)
     } else {
         EngineSnapshot::empty(new_sr)
     };
+    let new_duration_frames = new_snapshot.duration_frames;
 
-    // 先暂停并释放旧 stream，再把所有共享原子量与快照切到新采样率。
-    if let Some(old_stream) = stream.take() {
-        let _ = old_stream.pause();
-        drop(old_stream);
-    }
-    *sr = new_sr;
-    sample_rate.store(new_sr, Ordering::Relaxed);
-    s.base_frames.store(0, Ordering::Relaxed);
-    s.position_frames.store(
-        (audible_sec * new_sr as f64).round().max(0.0) as u64,
-        Ordering::Relaxed,
-    );
-    duration_frames.store(new_snapshot.duration_frames, Ordering::Relaxed);
-    s.retired_snapshots
-        .retire(s.snapshot.swap(Arc::new(new_snapshot)));
-    s.play_start_wait.store(false, Ordering::Relaxed);
-    if let Some((_, offset, _)) = s.last_play_file.as_mut() {
-        *offset = audible_sec;
-    }
-    *current_output = Some(identity);
-
+    // 2) 预构建 stream（旧 stream 未动）。
     let channels = supported.channels() as usize;
     let sample_format = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
@@ -1123,16 +1210,47 @@ fn handle_default_output_device_changed(
         duration_frames: duration_frames.clone(),
         meter_bus,
         metro,
+        tx: tx.clone(),
     })?;
-    if was_playing {
-        new_stream
-            .play()
-            .map_err(|error| format!("new output stream play failed: {error}"))?;
-        is_playing.store(true, Ordering::Relaxed);
-    } else {
-        is_playing.store(false, Ordering::Relaxed);
+
+    // 3) 切换播放：先停旧流；新流起不来就把它恢复，保持"切换失败等于没发生"。
+    if let Some(old_stream) = stream.as_ref() {
+        let _ = old_stream.pause();
     }
-    *stream = Some(new_stream);
+    if let Err(error) = new_stream.play() {
+        if let Some(old_stream) = stream.as_ref() {
+            let _ = old_stream.play();
+        }
+        return Err(format!("new output stream play failed: {error}"));
+    }
+
+    // 4) 提交。
+    let (new_base, new_position) =
+        super::device_watch::rescale_position_frames(old_base, old_position, old_sr, new_sr);
+    *sr = new_sr;
+    sample_rate.store(new_sr, Ordering::Relaxed);
+    s.base_frames.store(new_base, Ordering::Relaxed);
+    s.position_frames.store(new_position, Ordering::Relaxed);
+    duration_frames.store(new_duration_frames, Ordering::Relaxed);
+    s.retired_snapshots
+        .retire(s.snapshot.swap(Arc::new(new_snapshot)));
+    s.play_start_wait.store(false, Ordering::Relaxed);
+    if let Some((_, offset, _)) = s.last_play_file.as_mut() {
+        *offset = audible_sec.max(0.0);
+    }
+    *current_output = Some(identity);
+    if let Some(old_stream) = stream.replace(new_stream) {
+        let _ = old_stream.pause();
+        drop(old_stream);
+    }
+    is_playing.store(was_playing, Ordering::Relaxed);
+
+    // 5) 采样率变了：sr 绑定资源全部失效（节拍器响点表由命令层按新 sr 重建）。
+    invalidate_sample_rate_bound_caches(s, old_sr, new_sr);
+    // 整 clip 渲染结果被清空后必须重新渲染，否则本次播放会停在"等待渲染"。
+    if old_sr != new_sr {
+        crate::synth_clip_cache::clear_pad_suppressed_clips();
+    }
     Ok(())
 }
 

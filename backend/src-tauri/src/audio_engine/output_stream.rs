@@ -15,7 +15,7 @@ use super::mix::{
     render_callback_f32, render_callback_i16, render_callback_u16, RtFault,
     SnapshotTransitionState, TrackMeterBus, TrackMeterScratch, U16_SILENCE,
 };
-use super::types::EngineSnapshot;
+use super::types::{EngineCommand, EngineSnapshot};
 
 pub(crate) struct OutputStreamArgs {
     pub device: cpal::Device,
@@ -29,6 +29,12 @@ pub(crate) struct OutputStreamArgs {
     pub duration_frames: Arc<AtomicU64>,
     pub meter_bus: Arc<TrackMeterBus>,
     pub metro: Arc<MetronomeRt>,
+    /// 回传给 worker 的命令通道：RT 侧的 `err_fn` 用它请求**强制重建**流。
+    ///
+    /// 【为什么必须在流工厂里拿通道】流死掉这件事只有 cpal 的 err_fn 知道，
+    /// 而那里不持有任何引擎句柄。把它一路传进来比自己维护一张"已死流"表要
+    /// 可靠：错误发生的那一刻就发出重建请求，不依赖轮询或身份比对。
+    pub tx: std::sync::mpsc::Sender<EngineCommand>,
 }
 
 pub(crate) fn build_output_stream(args: OutputStreamArgs) -> Result<cpal::Stream, String> {
@@ -44,13 +50,21 @@ pub(crate) fn build_output_stream(args: OutputStreamArgs) -> Result<cpal::Stream
         duration_frames,
         meter_bus,
         metro,
+        tx,
     } = args;
 
     let mut scratch_mix: Vec<f32> = Vec::new();
     let mut scratch_mix_fade_from: Vec<f32> = Vec::new();
     let mut snapshot_transition = SnapshotTransitionState::default();
-    let err_fn = |bus: Arc<TrackMeterBus>| {
-        move |_err: cpal::Error| bus.record_rt_fault(RtFault::StreamError)
+    let err_fn = |bus: Arc<TrackMeterBus>, tx: std::sync::mpsc::Sender<EngineCommand>| {
+        move |_err: cpal::Error| {
+            bus.record_rt_fault(RtFault::StreamError);
+            // 【为什么在这里就发重建请求】流已死，但"设备身份"可能一点没变
+            // （例如被独占后回退到同一台设备的同一格式）。只靠 watcher 的
+            // 身份比对永远等不到重建，用户听到的是"一直在播、一直没有声"。
+            // `force: true` 跳过那次判等。
+            let _ = tx.send(EngineCommand::DefaultOutputDeviceChanged { force: true });
+        }
     };
 
     let stream = match sample_format {
@@ -88,7 +102,7 @@ pub(crate) fn build_output_stream(args: OutputStreamArgs) -> Result<cpal::Stream
                         play_start_wait.store(false, std::sync::atomic::Ordering::Relaxed);
                     }
                 },
-                err_fn(meter_bus_for_err),
+                err_fn(meter_bus_for_err, tx.clone()),
                 None,
             )
         }
@@ -126,7 +140,7 @@ pub(crate) fn build_output_stream(args: OutputStreamArgs) -> Result<cpal::Stream
                         play_start_wait.store(false, std::sync::atomic::Ordering::Relaxed);
                     }
                 },
-                err_fn(meter_bus_for_err),
+                err_fn(meter_bus_for_err, tx.clone()),
                 None,
             )
         }
@@ -164,7 +178,7 @@ pub(crate) fn build_output_stream(args: OutputStreamArgs) -> Result<cpal::Stream
                         play_start_wait.store(false, std::sync::atomic::Ordering::Relaxed);
                     }
                 },
-                err_fn(meter_bus_for_err),
+                err_fn(meter_bus_for_err, tx.clone()),
                 None,
             )
         }

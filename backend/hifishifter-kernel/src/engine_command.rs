@@ -50,7 +50,14 @@ pub enum EngineCommand {
         target: String,
     },
     /// 系统默认输出设备（或它的默认格式）发生变化；worker 自己重新查询 cpal。
-    DefaultOutputDeviceChanged,
+    ///
+    /// `force` = 跳过"身份没变就不重建"的判等，强制重建一次流。
+    /// RT 侧 `err_fn`（`RtFault::StreamError`）与切换失败后的重试都用它 ——
+    /// 设备被拔出后的回退设备可能与旧身份完全相同，按身份判等会永远不重建，
+    /// 表现为"界面在播、实际永久静音"。
+    DefaultOutputDeviceChanged {
+        force: bool,
+    },
     StretchReady {
         key: StretchKey,
     },
