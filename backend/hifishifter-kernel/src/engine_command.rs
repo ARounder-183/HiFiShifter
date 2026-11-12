@@ -37,8 +37,14 @@ pub enum EngineCommand {
         sec: f64,
     },
     /// 从绝对秒开始播放时间线（seek + set_playing 原子化）。
+    ///
+    /// `sec = None` 表示"从引擎**在命令序里的真实位置**起播"：位置在 worker
+    /// 应用完此前所有命令（SeekSec / UpdateTimeline…）之后才解析。IPC 线程
+    /// 直接读原子拿到的是未应用命令之前的旧值 —— 队列里还有 SeekSec 时，
+    /// 按旧值起播既覆盖掉那次 seek，又把光标拖回去。调用方负责确认当前
+    /// 会话目标是时间线（文件预览的 base 是文件域偏移，不含这个语义）。
     PlayFrom {
-        sec: f64,
+        sec: Option<f64>,
     },
     SetPlaying {
         playing: bool,

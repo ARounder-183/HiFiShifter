@@ -601,6 +601,8 @@ impl AudioEngine {
             // 设备重建失败后的重试时刻（见 `next_command`）。
             let mut device_retry: Option<Instant> = None;
             let mut device_retry_backoff = Duration::from_millis(250);
+            // 最近一次**成功**的强制重建时刻（风暴节流判据，见下方 force 分支）。
+            let mut last_forced_rebuild_ok: Option<Instant> = None;
 
             loop {
                 // 宿主句柄改为**惰性**获取：worker 可能早于 Tauri setup 启动
@@ -679,6 +681,29 @@ impl AudioEngine {
                     EngineCommand::SeekSec { sec } => handle_seek_sec(&mut state, sec),
                     EngineCommand::PlayFrom { sec } => handle_play_from(&mut state, sec),
                     EngineCommand::DefaultOutputDeviceChanged { force } => {
+                        // 【风暴节流】err_fn 对每一次流错误都发一条 force，而一次
+                        // 成功的重建并不证明故障结束 —— 驱动重协商会"建好又立刻
+                        // 坏"循环，每圈都是一次全量 build_snapshot + 流churn，退避
+                        // 却在每次成功时被复位成 250ms，形成无节流的热循环。
+                        // 判据只有一条：上一次成功的强制重建**存活满
+                        // STREAM_STORM_QUIET** 才算故障结束、退避才复位。
+                        // 风暴内到达的 force：已有排定重试就是冗余，丢弃；否则按
+                        // 当前退避排一次 —— 与失败重试共用同一节奏。
+                        if force
+                            && last_forced_rebuild_ok
+                                .is_some_and(|at| at.elapsed() < STREAM_STORM_QUIET)
+                        {
+                            if device_retry.is_none() {
+                                device_retry = Some(Instant::now() + device_retry_backoff);
+                                device_retry_backoff =
+                                    (device_retry_backoff * 2).min(Duration::from_secs(2));
+                                log::warn!(
+                                    "AudioEngine: repeated stream fault; forced rebuild deferred by {:?}",
+                                    device_retry_backoff
+                                );
+                            }
+                            continue;
+                        }
                         match handle_default_output_device_changed(
                             &mut state,
                             &mut stream,
@@ -698,6 +723,11 @@ impl AudioEngine {
                                 // 成功：回到最短重试间隔，下次失败仍能快速恢复。
                                 device_retry = None;
                                 device_retry_backoff = Duration::from_millis(250);
+                                // 强制重建的成功时间戳是风暴判据；非强制的
+                                // watcher 切换不改变风暴状态。
+                                if force {
+                                    last_forced_rebuild_ok = Some(Instant::now());
+                                }
                             }
                             Err(error) => {
                                 // 【失败必须可重试】旧实现只打一条日志就 return，
@@ -822,8 +852,16 @@ impl AudioEngine {
     }
 
     /// 原子地从绝对秒开始播放时间线。
-    pub fn play_from(&self, sec: f64) {
-        let _ = self.tx.send(EngineCommand::PlayFrom { sec });
+    /// 从引擎**在命令序里的真实位置**起播。
+    ///
+    /// 【为什么不用 position_sec() 的读数】那个读数绕过命令序：worker 队列里
+    /// 还没应用的 SeekSec / UpdateTimeline 对它不可见，按它起播会覆盖在途的
+    /// seek 并把光标拖回去。`PlayFrom { sec: None }` 让位置在 worker 应用完
+    /// 此前所有命令之后才解析 —— 起播点因此只来自引擎事实（见
+    /// `handle_play_from`，`Some` 分支由 worker 级测试覆盖）。
+    /// 调用方负责确认当前会话目标是时间线；文件预览的 base 是文件域偏移。
+    pub fn play_from_current(&self) {
+        let _ = self.tx.send(EngineCommand::PlayFrom { sec: None });
     }
 
     #[allow(dead_code)]
@@ -908,6 +946,13 @@ struct StartupStream {
     identity: OutputDeviceIdentity,
     buffered: VecDeque<EngineCommand>,
 }
+
+/// 一次成功的强制重建要"存活"多久才承认故障结束（风暴节流判据）。
+///
+/// 【为什么是 5 秒】驱动重协商风暴里，坏流会在重建后的几百毫秒内再次报错；
+/// 正常使用中一次重建之后 5 秒内又坏的场景几乎不存在。5 秒让风暴期的重建
+/// 节奏收敛到约 2s 上限的退避链，而不是每个错误一次全量重建。
+const STREAM_STORM_QUIET: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// 取下一条要处理的命令；设备重建的重试到点时**合成**一条强制重建命令。
 ///
@@ -1093,7 +1138,22 @@ fn handle_stop(s: &mut EngineWorkerState) {
 }
 
 /// 原子起播：写入绝对位置后立即置 playing，避免“is_playing=true 但位置还是旧值”的窗口。
-fn handle_play_from(s: &mut EngineWorkerState, sec: f64) {
+///
+/// `sec = None`（`PlayFromCurrent` 语义）在**这里**才解析位置：worker 已把
+/// 此前排队的 SeekSec / UpdateTimeline 全部应用完，`base + position` 就是
+/// 真实的起播点。IPC 线程直接读原子做不到这一点 —— 它读到的是命令序之外的
+/// 旧值。
+fn handle_play_from(s: &mut EngineWorkerState, sec: Option<f64>) {
+    let sec = match sec {
+        Some(sec) => sec,
+        None => {
+            let sr = s.sr.max(1) as f64;
+            s.base_frames
+                .load(Ordering::Relaxed)
+                .saturating_add(s.position_frames.load(Ordering::Relaxed)) as f64
+                / sr
+        }
+    };
     let sec = sec.max(0.0);
     let frame = (sec * s.sr as f64).round().max(0.0) as u64;
     s.base_frames.store(0, Ordering::Relaxed);
@@ -1117,20 +1177,21 @@ fn invalidate_sample_rate_bound_caches(s: &EngineWorkerState, old_sr: u32, new_s
     if old_sr == new_sr {
         return;
     }
-    if let Ok(mut cache) = s.cache.lock() {
-        cache.clear();
-    }
-    if let Ok(mut cache) = s.stretch_cache.lock() {
-        cache.clear();
-    }
-    if let Ok(mut inflight) = s.stretch_inflight.lock() {
-        inflight.clear();
-    }
-    if let Ok(mut rendered) =
-        hifishifter_kernel::synth_clip_cache::global_rendered_clip_cache().lock()
-    {
-        rendered.clear();
-    }
+    // 中毒锁也要清：跳过清理只会把旧采样率的 PCM 留在缓存里 —— 正是这条
+    // 函数要消灭的"切换设备后变速变调"。与全仓的 lock 约定一致。
+    s.cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    s.stretch_cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    s.stretch_inflight
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    hifishifter_kernel::synth_clip_cache::global_rendered_clip_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
     hifishifter_kernel::synth_clip_cache::clear_pending_rendered_keys();
 }
 
@@ -2624,7 +2685,7 @@ mod tests {
             meter_generation: &meter_generation,
         };
 
-        handle_play_from(&mut worker, 12.5);
+        handle_play_from(&mut worker, Some(12.5));
         let start_frame = worker.position_frames.load(Ordering::Relaxed);
         assert_eq!(start_frame, 600_000, "12.5s @ 48kHz");
         assert!(worker.is_playing.load(Ordering::Relaxed));
@@ -2649,7 +2710,7 @@ mod tests {
         );
 
         // 再播放：起播点必须就是刚才的停止点（无需任何前端锚点）。
-        handle_play_from(&mut worker, 700_000.0 / f64::from(sample_rate));
+        handle_play_from(&mut worker, Some(700_000.0 / f64::from(sample_rate)));
         assert_eq!(worker.position_frames.load(Ordering::Relaxed), 700_000);
     }
 

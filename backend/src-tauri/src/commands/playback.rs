@@ -260,12 +260,16 @@ fn root_pitch_assembly_pending(
     )
 }
 
-/// 起播点 = 引擎当前的绝对位置，**不接受**任何前端锚点。
+/// 起播点估计 = 引擎当前的绝对位置，**不接受**任何前端锚点。
 ///
 /// 【为什么必须只有一个来源】播放位置曾经有两个候选：引擎的
 /// `base_frames + position_frames` 与前端 Redux 的 `playheadSec`。后者是
 /// 30Hz 轮询外推的镜像（含 IPC 往返时延），把它传回来等于把误差固化进每次
 /// 起播；两者一旦分叉，用户看到的就是"按播放后光标先跳一下"。
+///
+/// 【为什么只是估计】这个读数绕过命令序：worker 队列里未应用的 SeekSec /
+/// UpdateTimeline 对它不可见。真正的起播点由 `play_from_current` 在 worker
+/// 侧按命令序解析；本函数的值只进日志 / 响应 / playhead 投影。
 ///
 /// 纯函数只为可测：非法值（NaN / 负）一律归零，避免把 NaN 写进帧计数。
 fn resolve_play_start_sec(engine_position_sec: f64) -> f64 {
@@ -281,9 +285,23 @@ pub(super) fn play_original(state: State<'_, AppState>) -> serde_json::Value {
         // 在同一把锁的作用域内克隆时间线：分离读取时，并发 checkpoint
         // （先解锁后 bump 版本）会让旧 timeline 配上新版本号。
         //
-        // 【起播点为引擎事实】引擎位置由 seek / 上一次停止 / 自然结束共同决定，
-        // 三者都已在引擎侧落定；这里只做一次合法性钳制。
-        let start_sec = resolve_play_start_sec(state.audio_engine.position_sec());
+        // 【起播点为引擎事实，但这里读到的只是估计】worker 队列里未应用的
+        // SeekSec / UpdateTimeline 对 IPC 线程的原子读不可见，所以 start_sec
+        // 只用于日志 / 响应 / playhead 投影；真正的起播位置由下面的
+        // `play_from_current` 在 worker 应用完此前所有命令之后解析。
+        //
+        // 【文件预览的位置不在时间线域】预览会话的 base 是文件内偏移，
+        // 直接采信会把 offset+elapsed 当成时间线绝对位置；且 handle_stop
+        // 对预览停止已归零，只有"预览仍在播"这一种情形需要在这里挡住。
+        let engine_position_sec = {
+            let pb = state.audio_engine.snapshot_state();
+            if pb.target.as_deref() == Some("original") {
+                state.audio_engine.position_sec()
+            } else {
+                0.0
+            }
+        };
+        let start_sec = resolve_play_start_sec(engine_position_sec);
         // 起播前对齐一次响点表：设备可能在停止期间换过采样率。
         ensure_metronome_schedule_matches_output(&state);
         // 常规路径打点：Info 级（release 默认 Warn，warn 会把每次播放都写进日志轮转）。
@@ -358,15 +376,17 @@ pub(super) fn play_original(state: State<'_, AppState>) -> serde_json::Value {
         );
         // 播放头不是撤销内容；no-op 路径不得写回。
         // 这里的写回只是**投影**（工程保存 / 快照读取看到的位置），不是起播决策
-        // —— 决策已经由上面的引擎位置做过。
+        // —— 决策由 worker 在 play_from_current 里按命令序解析。
         timeline.playhead_sec = start_sec;
         {
             let mut guard = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
             guard.playhead_sec = start_sec;
         }
-        // 顺序必须是 update → play_from：先构建新快照，再原子置位。
+        // 顺序必须是 update → play_from_current：先构建新快照，再原子置位。
+        // 起播点由 worker 在应用完 update（与本条命令之前的所有 seek）之后
+        // 就地解析 —— IPC 线程的 start_sec 只回答"大约从哪里开始"。
         state.audio_engine.update_timeline(timeline);
-        state.audio_engine.play_from(start_sec);
+        state.audio_engine.play_from_current();
         serde_json::json!({"ok": true, "playing": "original", "start_sec": start_sec})
     })
 }
