@@ -85,9 +85,10 @@ import { trackParamBlockCommit } from "../paramBlockCommitCoordinator";
 import { composeParamBlockView } from "../paramBlockComposition";
 import {
     analysisWindowStatus,
-    audibleSourceWindow,
     projectionForClip,
+    audibleSourceWindow,
 } from "../paramBlockProjection";
+import { paramBlockStaleAnalysisCandidates } from "../paramBlockAnalysisCandidate";
 import { planParamBlockGesture, type ParamBlockGesturePlan } from "../paramBlockGesture";
 import { reportParamBlockDiagnostic } from "../paramBlockDiagnostics";
 import { publishParamBlockWriteFailure } from "../paramBlockFeedback";
@@ -2133,17 +2134,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             const activeTake =
                 clip.takes?.find((take) => take.id === clip.activeTakeId) ?? clip.takes?.[0];
             const spans = activeTake?.syllableSpansSec ?? clip.syllableSpansSec;
-            const analyzed =
-                activeTake?.syllableAnalysisWindowSec ?? clip.syllableAnalysisWindowSec;
             // Stale windows keep visible spans and only trigger reanalysis.
-            const status = analysisWindowStatus(
-                audibleSourceWindow(projectionForClip(toParamBlockSourceClip(clip))),
-                analyzed,
-                spans,
-            );
-            if (spans !== undefined && (status === "current" || status === "stale")) {
-                byClip.set(clip.id, spans);
-            }
+            // Stale/missing analysis still draws intersecting full-source events.
+            if (spans?.length) byClip.set(clip.id, spans);
         }
         return byClip;
     }, [paramBlockClips]);
@@ -2152,8 +2145,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             const take =
                 clip.takes?.find((item) => item.id === clip.activeTakeId) ?? clip.takes?.[0];
             const analyzed = take?.syllableAnalysisWindowSec ?? clip.syllableAnalysisWindowSec;
-            const audible = audibleSourceWindow(projectionForClip(toParamBlockSourceClip(clip)));
             const spans = take?.syllableSpansSec ?? clip.syllableSpansSec;
+            const audible = audibleSourceWindow(projectionForClip(toParamBlockSourceClip(clip)));
             if (analysisWindowStatus(audible, analyzed, spans) !== "current") {
                 reportParamBlockDiagnostic({
                     code: "analysis_window_stale",
@@ -3139,7 +3132,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             autoAnalysisRootRef.current = null;
         };
     }, [paramBlocksLayerVisible, pitchEnabled, rootTrackId]);
-    /** A Clip whose window became stale must be eligible for one reanalysis. */
+    /** Geometry/window changes create a fresh request key; stale results stay visible. */
     useEffect(() => {
         const current = new Set(paramBlockSyllableSpans.keys());
         for (const clipId of analyzedClipIdsRef.current) {
@@ -3332,24 +3325,22 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
          * 携带 Compose 时直接不分析：块是音高编辑的一部分，不能为一个
          * 不参与合成的轨道凭空消耗模型推理。
          */
-        const audioClips =
-            blocksEnabled && pitchEnabled
-                ? paramBlockClips.filter(
-                      (clip) =>
-                          clip.trackId.length > 0 &&
-                          (clip.midiNoteData?.length ?? 0) === 0 &&
-                          !paramBlockSyllableSpans.has(clip.id) &&
-                          Boolean(clip.sourcePath) &&
-                          !autoAnalysisAttemptsRef.current.has(clip.id),
-                  )
-                : [];
-        for (const clip of audioClips) autoAnalysisAttemptsRef.current.add(clip.id);
+        const { clips: audioClips, keysByClipId: staleKeys } = paramBlockStaleAnalysisCandidates({
+            clips: blocksEnabled && pitchEnabled ? paramBlockClips : [],
+            rootTrackId,
+            framePeriodMs: paramBlockView?.framePeriodMs ?? 5,
+            attemptedKeys: autoAnalysisAttemptsRef.current,
+        });
+        for (const key of staleKeys.values()) autoAnalysisAttemptsRef.current.add(key);
         if (audioClips.length === 0) return;
         void autoAnalysisQueueRef.current
             .runBatch({
                 clips: audioClips,
                 shouldStart: () => autoAnalysisRootRef.current === rootTrackId,
-                onSkipped: (clip) => autoAnalysisAttemptsRef.current.delete(clip.id),
+                onSkipped: (clip) => {
+                    const key = staleKeys.get(clip.id);
+                    if (key !== undefined) autoAnalysisAttemptsRef.current.delete(key);
+                },
                 onStart: (clip) =>
                     publishBlockAnalysisProgress({
                         active: true,
@@ -3370,8 +3361,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             })
             .then((results) => {
                 if (autoAnalysisRootRef.current === rootTrackId) publishBlockAnalysisProgress(null);
-                for (const result of results)
-                    if (!result.analyzed) autoAnalysisAttemptsRef.current.delete(result.clipId);
+                for (const result of results) {
+                    if (!result.analyzed) {
+                        const key = staleKeys.get(result.clipId);
+                        if (key !== undefined) autoAnalysisAttemptsRef.current.delete(key);
+                    }
+                }
             });
         // eslint-disable-next-line react-hooks/exhaustive-deps -- blockPersistence 是稳定 facade；依赖其具体方法。
     }, [

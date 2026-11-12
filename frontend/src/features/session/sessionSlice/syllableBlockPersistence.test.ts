@@ -61,8 +61,8 @@ describe("syllable spans v7 persistence", () => {
             loopEnabled: false,
         } as never);
         expect(parsed[0].syllableSpansSec).toEqual([
-            { startSec: 0.1, endSec: 0.6, note: null },
-            { startSec: 0.6, endSec: 1.1, note: null },
+            { startSec: 0.1, endSec: 0.6, note: null, eventId: "0.100000000:0.600000000" },
+            { startSec: 0.6, endSec: 1.1, note: null, eventId: "0.600000000:1.100000000" },
         ]);
     });
 

@@ -17,6 +17,7 @@ import {
     projectTakeSpan,
     projectionForClip,
     sourceAtProjectedFrame,
+    sourceNoteEventId,
     toFrame,
     type ClipProjection,
     type ParamBlockSourceClip,
@@ -56,6 +57,7 @@ interface Candidate {
     readonly cutStart?: boolean;
     readonly cutEnd?: boolean;
     readonly sourceKey?: string;
+    readonly sourceEventId?: string;
     readonly priority: number;
     readonly seq: number;
     readonly zOrder: number;
@@ -149,7 +151,8 @@ function baseCandidates(
             if (next.endSec > next.startSec + EPS) normalized.push(next);
         }
         normalized.forEach((span, index) => {
-            const identity = `span:${projection.takeId}:${index}:${Math.round(span.startSec * 1000)}`;
+            const eventId = sourceNoteEventId(span);
+            const identity = `span:${projection.takeId}:${eventId}`;
             const baseSpan: TakeSpan = {
                 clipId: clip.id,
                 takeId: projection.takeId,
@@ -185,6 +188,7 @@ function baseCandidates(
                         cutStart: interval.cutStart,
                         cutEnd: interval.cutEnd,
                         sourceKey: `${clip.id}|${projection.takeId}|${interval.cycle}`,
+                        sourceEventId: eventId,
                         priority: 1,
                         seq: 0,
                         zOrder,
@@ -639,13 +643,20 @@ function spanListKey(
               readonly startSec: number;
               readonly endSec: number;
               readonly note?: number | null;
+              readonly eventId?: string;
           }[]
         | undefined,
 ): string {
     return (spans ?? [])
         .map(
             (span) =>
-                span.startSec.toFixed(6) + "-" + span.endSec.toFixed(6) + ":" + (span.note ?? "-"),
+                span.startSec.toFixed(6) +
+                "-" +
+                span.endSec.toFixed(6) +
+                ":" +
+                (span.note ?? "-") +
+                ":" +
+                (span.eventId ?? ""),
         )
         .join(";");
 }
@@ -677,6 +688,7 @@ function takeLayoutKey(take: NonNullable<ParamBlockSourceClip["takes"]>[number])
         take.sourceSampleRate,
         spanListKey(take.syllableSpansSec),
         (take.syllableNotes ?? []).map((note) => (note === null ? "-" : note)).join(","),
+        (take.syllableEventIds ?? []).join(","),
         take.syllableAnalysisWindowSec?.join("-") ?? "",
         spanListKey(take.gameBlockBaseline?.sourceSpansSec),
         take.gameBlockBaseline?.analyzedWindowSec?.join("-") ?? "",
@@ -705,6 +717,7 @@ function clipLayoutKey(clip: ParamBlockSourceClip): string {
         clip.contentDurationSec,
         spanListKey(clip.syllableSpansSec),
         (clip.syllableNotes ?? []).map((note) => (note === null ? "-" : note)).join(","),
+        (clip.syllableEventIds ?? []).join(","),
         clip.syllableAnalysisWindowSec?.join("-") ?? "",
         spanListKey(clip.gameBlockBaseline?.sourceSpansSec),
         clip.gameBlockBaseline?.analyzedWindowSec?.join("-") ?? "",
@@ -817,6 +830,9 @@ export function composeParamBlockView(
             ...(candidateSourceKey(candidate) === undefined
                 ? {}
                 : { sourceKey: candidateSourceKey(candidate) }),
+            ...(candidate.sourceEventId === undefined
+                ? {}
+                : { sourceEventId: candidate.sourceEventId }),
             cutStart: candidate.cutStart === true || (candidate.members[0]?.cutStart ?? false),
             cutEnd:
                 candidate.cutEnd === true ||

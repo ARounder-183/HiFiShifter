@@ -20,6 +20,8 @@ pub struct BaseBlock {
     pub projection: ClipProjection,
     /// Source note of the analyzed span (read-only view truth).
     pub note: Option<f32>,
+    /// Stable full-source note-event identity.
+    pub event_id: Option<String>,
 }
 
 fn stable_id(take: &ClipTake, clip: &Clip, span: &TakeSpan) -> String {
@@ -147,6 +149,7 @@ pub fn base_blocks_for_root(
                         rate: projection.effective_rate,
                         projection: projection.clone(),
                         note: normalized.midi_note,
+                        event_id: normalized.event_id.clone(),
                     });
                 }
             }

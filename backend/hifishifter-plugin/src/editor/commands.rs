@@ -106,6 +106,7 @@ fn syllable_payload(
     clip_id: &str,
     take_id: &str,
     analysis: Option<&hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis>,
+    window: (f64, f64),
 ) -> Value {
     json!({
         "ok": true,
@@ -115,7 +116,10 @@ fn syllable_payload(
             json!({"startSec": s.start_sec, "endSec": s.end_sec, "midiNote": s.midi_note})
         }).collect::<Vec<_>>()).unwrap_or_default(),
         "sourceNotes": analysis.map(|a| a.source_spans_sec.iter().map(|s| s.midi_note).collect::<Vec<_>>()).unwrap_or_default(),
-        "analyzedWindowSec": analysis.map(|a| a.analyzed_window_sec),
+        "analyzedWindowSec": analysis.map_or(
+            [window.0.min(window.1), window.0.max(window.1)],
+            |a| a.analyzed_window_sec
+        ),
         "algorithm": analysis.map(|a| a.algorithm.clone()).unwrap_or_else(|| {
             hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM.to_string()
         }),
@@ -215,18 +219,18 @@ pub(crate) fn analyze_syllables(
     });
     let (spans, algorithm, version) = match game {
         Some(Ok(events)) => (
-            hifishifter_kernel::game_onnx::syllable_spans_for_window(
-                &events,
-                window_start,
-                window_end,
-            )
-            .into_iter()
-            .map(|span| hifishifter_kernel::pitch_analysis::SyllableSpan {
-                start_sec: span.0,
-                end_sec: span.1,
-                midi_note: Some(span.2),
-            })
-            .collect::<Vec<_>>(),
+            hifishifter_kernel::game_onnx::full_source_voiced_spans(&events)
+                .into_iter()
+                .filter(|(start, end, _)| *end > window_start && *start < window_end)
+                .map(|span| hifishifter_kernel::pitch_analysis::SyllableSpan {
+                    start_sec: span.0,
+                    end_sec: span.1,
+                    midi_note: Some(span.2),
+                    event_id: Some(hifishifter_kernel::pitch_analysis::source_event_id(
+                        span.0, span.1,
+                    )),
+                })
+                .collect::<Vec<_>>(),
             hifishifter_kernel::game_onnx::GAME_ALGORITHM,
             hifishifter_kernel::game_onnx::GAME_ALGORITHM_VERSION,
         ),
@@ -296,9 +300,10 @@ fn vad_fallback_spans(
         request.source_window.0.min(request.source_window.1),
         request.source_window.0.max(request.source_window.1),
     );
-    Ok(hifishifter_kernel::pitch_analysis::clip_spans_to_window(
-        &spans, start, end,
-    ))
+    Ok(spans
+        .into_iter()
+        .filter(|span| span.end_sec > start && span.start_sec < end)
+        .collect())
 }
 #[cfg(test)]
 mod lane_tests {
@@ -393,6 +398,7 @@ mod lane_tests {
                         start_sec: 0.0,
                         end_sec: 0.001,
                         midi_note: None,
+                        event_id: None,
                     }],
                     analyzed_window_sec: [0.0, 0.0],
                 });
@@ -1218,7 +1224,7 @@ pub(super) fn dispatch(
                 .syllable_analysis
                 .as_ref()
                 .filter(|analysis| analysis.is_current_for_window(&digest, window));
-            return Ok(syllable_payload(clip_id, &take.id, analysis));
+            return Ok(syllable_payload(clip_id, &take.id, analysis, window));
         }
         "analyze_clip_syllables" => {
             // 不可达：`enqueue` 在慢车道分流处改投 `EnqueueSyllableAnalysis`，

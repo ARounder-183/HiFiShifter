@@ -154,13 +154,40 @@ export function applyTimelineState(
                         clip.takes?.find(
                             (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
                         )?.syllable_notes?.[index] ?? null,
+                    eventId:
+                        clip.takes?.find(
+                            (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
+                        )?.syllable_event_ids?.[index] ??
+                        `${startSec.toFixed(9)}:${endSec.toFixed(9)}`,
                 })),
             syllableNotes: clip.takes?.find(
                 (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
             )?.syllable_notes,
+            syllableEventIds: clip.takes?.find(
+                (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
+            )?.syllable_event_ids,
             syllableAnalysisWindowSec: (clip.takes?.find(
                 (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
             )?.syllable_analysis_window_sec ?? null) as [number, number] | undefined,
+            gameBlockBaseline: (() => {
+                const source = clip.takes?.find(
+                    (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
+                )?.game_block_baseline;
+                return source
+                    ? {
+                          revision: source.revision,
+                          algorithm: source.algorithm,
+                          algorithmVersion: source.algorithm_version,
+                          sourceSpansSec: source.source_spans_sec?.map((span) => ({
+                              startSec: span.start_sec,
+                              endSec: span.end_sec,
+                              note: span.midi_note ?? null,
+                              eventId: span.event_id,
+                          })),
+                          analyzedWindowSec: source.analyzed_window_sec,
+                      }
+                    : undefined;
+            })(),
             groupId: clip.group_id ?? undefined,
         };
 

@@ -13,6 +13,8 @@ export function applyClipSyllableAnalysisReducer(
         sourceSpansSec: Array<{ startSec: number; endSec: number }>;
         /** Parallel source notes; one entry per span. */
         sourceNotes: Array<number | null>;
+        /** Stable full-source event ids; one entry per span. */
+        sourceEventIds?: string[];
         /** Source-domain window covered by this analysis. */
         analyzedWindowSec: [number, number];
     }>,
@@ -50,8 +52,8 @@ export function applyClipSyllableAnalysisReducer(
                 !Number.isFinite(span.startSec) ||
                 !Number.isFinite(span.endSec) ||
                 span.endSec <= span.startSec ||
-                span.startSec < result.analyzedWindowSec[0] - 1e-6 ||
-                span.endSec > result.analyzedWindowSec[1] + 1e-6 ||
+                span.endSec <= result.analyzedWindowSec[0] + 1e-6 ||
+                span.startSec >= result.analyzedWindowSec[1] - 1e-6 ||
                 (index > 0 && span.startSec < spans[index - 1].endSec - 1e-9),
         ) ||
         result.sourceNotes.some(
@@ -76,7 +78,11 @@ export function applyClipSyllableAnalysisReducer(
         startSec: span.startSec,
         endSec: span.endSec,
         note: result.sourceNotes[index] ?? null,
+        eventId:
+            result.sourceEventIds?.[index] ??
+            `${span.startSec.toFixed(9)}:${span.endSec.toFixed(9)}`,
     }));
+    const nextEventIds = nextSpans.map((span) => span.eventId as string);
     const window: [number, number] = [result.analyzedWindowSec[0], result.analyzedWindowSec[1]];
     const previous = take.syllableSpansSec;
     if (
@@ -85,7 +91,8 @@ export function applyClipSyllableAnalysisReducer(
             (span, index) =>
                 span.startSec === nextSpans[index].startSec &&
                 span.endSec === nextSpans[index].endSec &&
-                (span.note ?? null) === (nextSpans[index].note ?? null),
+                (span.note ?? null) === (nextSpans[index].note ?? null) &&
+                (span.eventId ?? null) === (nextSpans[index].eventId ?? null),
         ) &&
         take.syllableAnalysisWindowSec?.[0] === window[0] &&
         take.syllableAnalysisWindowSec?.[1] === window[1]
@@ -93,10 +100,12 @@ export function applyClipSyllableAnalysisReducer(
         return;
     take.syllableSpansSec = nextSpans;
     take.syllableNotes = [...result.sourceNotes];
+    take.syllableEventIds = nextEventIds;
     take.syllableAnalysisWindowSec = window;
     if ((clip.activeTakeId ?? clip.takes?.[0]?.id) === take.id) {
         clip.syllableSpansSec = nextSpans;
         clip.syllableNotes = [...result.sourceNotes];
+        clip.syllableEventIds = nextEventIds;
         clip.syllableAnalysisWindowSec = window;
     }
     // A timeline request issued before this receipt may still contain

@@ -36,6 +36,7 @@ fn clip(
             start_sec: span.0,
             end_sec: span.1,
             midi_note: Some(span.2),
+            event_id: None,
         }],
         analyzed_window_sec: [0.0, 8.0],
     });

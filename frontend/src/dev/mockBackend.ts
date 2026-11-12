@@ -541,6 +541,9 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
                 takeId: `${clipId}_take_1`,
                 sourceSpansSec: spans,
                 sourceNotes: spans.map(() => null),
+                sourceEventIds: spans.map(
+                    (span) => `${span.startSec.toFixed(9)}:${span.endSec.toFixed(9)}`,
+                ),
                 analyzedWindowSec: mockSyllableWindow(clipId),
                 algorithm: "level_vad+pitch_stability+spectral_onset",
                 algorithmVersion: 1,
@@ -571,6 +574,9 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
                 takeId: `${clipId}_take_1`,
                 sourceSpansSec: spans,
                 sourceNotes: spans.map(() => null),
+                sourceEventIds: spans.map(
+                    (span) => `${span.startSec.toFixed(9)}:${span.endSec.toFixed(9)}`,
+                ),
                 analyzedWindowSec: mockSyllableWindow(clipId),
                 algorithm: "level_vad+pitch_stability+spectral_onset",
                 algorithmVersion: 1,

@@ -471,6 +471,9 @@ pub struct ProjectedParamBlock {
     /// `clipId|takeId|cycle` identity for cross-source adjacency checks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_key: Option<String>,
+    /// Stable full-source note-event identity; view-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_event_id: Option<String>,
     /// Visible interval starts/ends inside its source span.
     #[serde(default, skip_serializing_if = "is_false")]
     pub cut_start: bool,
@@ -564,19 +567,23 @@ impl GameBlockBaseline {
             return;
         }
         for span in spans {
+            let event_id = span.event_id.clone().unwrap_or_else(|| {
+                crate::pitch_analysis::source_event_id(span.start_sec, span.end_sec)
+            });
             let duplicate = self.source_spans_sec.iter().any(|existing| {
-                (existing.start_sec - span.start_sec).abs() <= 1e-9
-                    && (existing.end_sec - span.end_sec).abs() <= 1e-9
+                existing.event_id.as_deref() == Some(event_id.as_str())
+                    || ((existing.start_sec - span.start_sec).abs() <= 1e-9
+                        && (existing.end_sec - span.end_sec).abs() <= 1e-9)
             });
             if !duplicate {
-                self.source_spans_sec.push(span.clone());
+                let mut owned = span.clone();
+                owned.event_id = Some(event_id);
+                self.source_spans_sec.push(owned);
             }
         }
-        self.source_spans_sec.sort_by(|a, b| {
-            a.start_sec
-                .total_cmp(&b.start_sec)
-                .then(a.end_sec.total_cmp(&b.end_sec))
-        });
+        self.source_spans_sec = crate::pitch_analysis::normalize_source_spans(std::mem::take(
+            &mut self.source_spans_sec,
+        ));
         self.analyzed_window_sec = [prior[0].min(window[0]), prior[1].max(window[1])];
     }
 }

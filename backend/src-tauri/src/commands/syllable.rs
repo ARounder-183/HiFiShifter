@@ -230,14 +230,13 @@ fn analyze_clip_syllables_inner(
                 message: None,
             }));
             (
-                hifishifter_kernel::game_onnx::syllable_spans_for_window(
-                    &events,
-                    window.0.min(window.1),
-                    window.0.max(window.1),
-                )
-                .into_iter()
-                .map(|(start, end, note)| (start, end, Some(note)))
-                .collect(),
+                hifishifter_kernel::game_onnx::full_source_voiced_spans(&events)
+                    .into_iter()
+                    .filter(|(start, end, _)| {
+                        *end > window.0.min(window.1) && *start < window.0.max(window.1)
+                    })
+                    .map(|(start, end, note)| (start, end, Some(note)))
+                    .collect(),
                 hifishifter_kernel::game_onnx::GAME_ALGORITHM.to_string(),
                 hifishifter_kernel::game_onnx::GAME_ALGORITHM_VERSION,
             )
@@ -255,14 +254,19 @@ fn analyze_clip_syllables_inner(
             algorithm,
             algorithm_version: version,
             source_digest: digest.clone(),
-            source_spans_sec: spans
-                .into_iter()
-                .map(|span| hifishifter_kernel::pitch_analysis::SyllableSpan {
-                    start_sec: span.0,
-                    end_sec: span.1,
-                    midi_note: span.2,
-                })
-                .collect(),
+            source_spans_sec: hifishifter_kernel::pitch_analysis::normalize_source_spans(
+                spans
+                    .into_iter()
+                    .map(
+                        |(start, end, note)| hifishifter_kernel::pitch_analysis::SyllableSpan {
+                            start_sec: start,
+                            end_sec: end,
+                            midi_note: note,
+                            event_id: None,
+                        },
+                    )
+                    .collect(),
+            ),
             analyzed_window_sec: [window.0.min(window.1), window.0.max(window.1)],
         })
     };
@@ -384,11 +388,12 @@ fn fallback_vad_spans(
     let spans = if level.is_empty() {
         Vec::new()
     } else {
-        hifishifter_kernel::pitch_analysis::clip_spans_to_window(
-            &estimate_syllable_spans(&level, &pitch, fp, SyllableConfig::default()),
-            window.0.min(window.1),
-            window.0.max(window.1),
-        )
+        estimate_syllable_spans(&level, &pitch, fp, SyllableConfig::default())
+            .into_iter()
+            .filter(|span| {
+                span.end_sec > window.0.min(window.1) && span.start_sec < window.0.max(window.1)
+            })
+            .collect()
     };
     (
         spans
@@ -427,6 +432,7 @@ mod tests {
                 start_sec: 1.0,
                 end_sec: 1.4,
                 midi_note: Some(64.0),
+                event_id: Some(crate::pitch_analysis::source_event_id(1.0, 1.4).into()),
             }],
             analyzed_window_sec: [1.0, 3.0],
         };
@@ -458,6 +464,7 @@ mod tests {
                 start_sec: 0.0,
                 end_sec: 1.0,
                 midi_note: None,
+                event_id: Some(crate::pitch_analysis::source_event_id(0.0, 1.0).into()),
             }],
             analyzed_window_sec: [0.0, 0.0],
         };

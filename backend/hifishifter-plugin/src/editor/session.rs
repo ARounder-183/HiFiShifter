@@ -290,8 +290,7 @@ struct SyllableAnalysisWorkerResult {
     take_id: String,
     #[serde(default)]
     source_spans_sec: Vec<hifishifter_kernel::pitch_analysis::SyllableSpan>,
-    #[serde(default)]
-    analyzed_window_sec: Option<[f64; 2]>,
+    analyzed_window_sec: [f64; 2],
     algorithm: String,
     algorithm_version: u32,
     analyzed: bool,
@@ -3200,7 +3199,8 @@ impl EditorSession {
             .as_ref()
             .filter(|a| a.is_current_for_window(&source_digest, audible_window))
         {
-            let mut value = Self::syllable_reply(clip_id, &take.id, Some(analysis))?;
+            let mut value =
+                Self::syllable_reply(clip_id, &take.id, Some(analysis), audible_window)?;
             if let Some(root) = timeline.resolve_root_track_id(&clip.track_id) {
                 let edits = timeline
                     .params_by_root_track
@@ -3524,17 +3524,19 @@ impl EditorSession {
         if !parsed.analyzed || spans.is_empty() {
             // 分析没检出发声段时保留现有缓存；前端会按“无区间”回退整段。
             // 不把旧结果清空，避免一次 FCPE 缺席把已保存的块整片抹掉。
-            return Self::syllable_reply(&request.clip_id, &request.take_id, None);
+            return Self::syllable_reply(
+                &request.clip_id,
+                &request.take_id,
+                None,
+                request.source_window,
+            );
         }
         let analysis = hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis {
             algorithm: parsed.algorithm,
             algorithm_version: parsed.algorithm_version,
             source_digest: request.source_digest.clone(),
             source_spans_sec: spans,
-            analyzed_window_sec: parsed.analyzed_window_sec.unwrap_or([
-                request.source_window.0.min(request.source_window.1),
-                request.source_window.0.max(request.source_window.1),
-            ]),
+            analyzed_window_sec: parsed.analyzed_window_sec,
         };
         let mut timeline = self.timeline.lock_or_recover();
         let clip = timeline
@@ -3579,7 +3581,12 @@ impl EditorSession {
             .get_mut(&root)
             .unwrap()
             .param_block_view = Some(view.clone());
-        let mut reply = Self::syllable_reply(&request.clip_id, &request.take_id, Some(&analysis))?;
+        let mut reply = Self::syllable_reply(
+            &request.clip_id,
+            &request.take_id,
+            Some(&analysis),
+            request.source_window,
+        )?;
         reply["rootTrackId"] = json!(root);
         reply["blockLayout"] = json!(view);
         // Never take `document.edits` while holding `self.timeline`: workspace
@@ -3625,23 +3632,11 @@ impl EditorSession {
         clip_id: &str,
         take_id: &str,
         analysis: Option<&hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis>,
+        window: (f64, f64),
     ) -> Result<Value, String> {
-        Ok(json!({
-            "ok": true,
-            "clipId": clip_id,
-            "takeId": take_id,
-            "sourceSpansSec": analysis.map_or(Vec::new(), |a| a.source_spans_sec.iter()
-                .map(|s| json!({"startSec": s.start_sec, "endSec": s.end_sec, "midiNote": s.midi_note})).collect()),
-            "sourceNotes": analysis.map_or(Vec::new(), |a| a.source_spans_sec.iter().map(|s| s.midi_note).collect()),
-            "analyzedWindowSec": analysis.map(|a| a.analyzed_window_sec),
-            "algorithm": analysis.map(|a| a.algorithm.clone()).unwrap_or_else(|| {
-                hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM.to_string()
-            }),
-            "algorithmVersion": analysis
-                .map(|a| a.algorithm_version)
-                .unwrap_or(hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION),
-            "analyzed": analysis.is_some(),
-        }))
+        Ok(super::syllable_reply::syllable_reply_payload(
+            clip_id, take_id, analysis, window,
+        ))
     }
 
     /// mute只撤销播放分配，不撤销已经生成的显示波形；take更换/真实删除不沿旧缓存猜。
@@ -6021,6 +6016,7 @@ pub(crate) mod tests {
             "clipId": clip_id,
             "takeId": take_id,
             "sourceSpansSec": [{"startSec": 0.00002, "endSec": 0.00004}],
+            "analyzedWindowSec": [0.0, 4.0 / 44100.0],
             "algorithm": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM,
             "algorithmVersion": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
             "analyzed": true,
@@ -6118,6 +6114,7 @@ pub(crate) mod tests {
             "clipId": clip_id,
             "takeId": take_id,
             "sourceSpansSec": [{"startSec": 0.1, "endSec": 0.2}],
+            "analyzedWindowSec": [0.0, 1.0],
             "algorithm": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM,
             "algorithmVersion": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
             "analyzed": true,
@@ -7747,6 +7744,7 @@ pub(crate) mod tests {
                     start_sec: 0.0,
                     end_sec: 0.001,
                     midi_note: None,
+                    event_id: None,
                 }],
                 analyzed_window_sec: [0.0, 0.0],
             };
@@ -7766,7 +7764,8 @@ pub(crate) mod tests {
                 json!({
                     "clipId":clip.id,"takeId":take.id,
                     "algorithm":analysis.algorithm,"algorithmVersion":analysis.algorithm_version,
-                    "sourceSpansSec":[{"startSec":0.0,"endSec":4.0/44100.0}],"analyzed":true
+                    "sourceSpansSec":[{"startSec":0.0,"endSec":4.0/44100.0}],"analyzed":true,
+                    "analyzedWindowSec":[0.0,4.0/44100.0]
                 }),
             )
             .unwrap();
@@ -7903,6 +7902,7 @@ pub(crate) mod tests {
                     start_sec: 0.0,
                     end_sec: 0.1,
                     midi_note: None,
+                    event_id: None,
                 }],
                 analyzed_window_sec: [0.0, 0.0],
             },

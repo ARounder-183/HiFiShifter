@@ -33,6 +33,8 @@ export interface ParamBlockRenderBlock {
     readonly cutStart?: boolean;
     readonly cutEnd?: boolean;
     readonly sourceKey?: string;
+    /** Stable full-source note-event identity; view-only. */
+    readonly sourceEventId?: string;
 }
 
 export interface ParamBlockSpecColors {
@@ -78,11 +80,6 @@ export function buildParamBlockRenderSpec(args: {
     readonly curveOwned?: boolean;
 }): PianoRollParamBlockSpec {
     const sorted = sortParamBlockRenderBlocks(args.blocks);
-    const logicalOrdinals = new Map<string, number>();
-    for (const block of sorted) {
-        const id = block.userBlockId ?? block.id;
-        if (!logicalOrdinals.has(id)) logicalOrdinals.set(id, logicalOrdinals.size + 1);
-    }
     const handles = paramBlockTransitionHandles(sorted);
     // Only known, equal source identities can be contiguous. Two unknown
     // sources must never be treated as the same Clip/Take/cycle.
@@ -117,13 +114,7 @@ export function buildParamBlockRenderSpec(args: {
                               rightId: handle.rightId,
                               widthSec: handle.transitionSec,
                           },
-                label:
-                    block.label ??
-                    formatParamBlockLabel(
-                        block.averageValue,
-                        logicalOrdinals.get(block.userBlockId ?? block.id) ?? index + 1,
-                        args.param,
-                    ),
+                label: block.label ?? formatParamBlockLabel(block.averageValue, args.param),
                 centerPolicy: block.centerPolicy ?? "live",
             };
         }),

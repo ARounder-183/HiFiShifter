@@ -1,8 +1,8 @@
+use crate::state::{SynthPipelineKind, TimelineState};
+use crate::time_stretch::UserStretchAlgorithm;
 use crate::unicode_path::{
     normalize_relative_path, normalize_relative_path_nfd, normalize_text_nfc, normalize_text_nfd,
 };
-use crate::state::{SynthPipelineKind, TimelineState};
-use crate::time_stretch::UserStretchAlgorithm;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Component;
@@ -742,6 +742,7 @@ mod tests {
                 start_sec: 0.1,
                 end_sec: 0.3,
                 midi_note: None,
+                event_id: Some(crate::pitch_analysis::source_event_id(0.1, 0.3).into()),
             }],
             analyzed_window_sec: [0.0, 0.0],
         });
@@ -877,7 +878,14 @@ mod tests {
             Some(1.0),
             None,
         );
-        let take2 = tl2.clips.iter_mut().find(|clip| clip.id == clip2).unwrap().takes.first_mut().unwrap();
+        let take2 = tl2
+            .clips
+            .iter_mut()
+            .find(|clip| clip.id == clip2)
+            .unwrap()
+            .takes
+            .first_mut()
+            .unwrap();
         take2.source_path = None;
         take2.source_path_relative = Some("wrong.wav".to_string());
         let (_, missing2) = resolve_source_paths_on_open(tl2, &root.join("song.hshp"));

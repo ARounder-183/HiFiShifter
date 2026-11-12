@@ -27,6 +27,7 @@ pub(crate) mod resources;
 pub(crate) mod routing;
 pub mod session;
 pub(crate) mod slow_lane;
+mod syllable_reply;
 #[cfg(not(test))]
 mod temp_sweep;
 

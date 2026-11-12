@@ -361,15 +361,12 @@ pub(crate) fn analyze_note_block_silence(
     if clip_end - clip_start <= 1e-6 {
         return Ok(Vec::new());
     }
-    let mut sound: Vec<(f64, f64)> = crate::note_blocks::projected_note_spans(
-        clip,
-        take,
-        HOP_SEC * 1000.0,
-    )
-    .into_iter()
-    .map(|(start, end)| (start.max(clip_start), end.min(clip_end)))
-    .filter(|(start, end)| end > start)
-    .collect();
+    let mut sound: Vec<(f64, f64)> =
+        crate::note_blocks::projected_note_spans(clip, take, HOP_SEC * 1000.0)
+            .into_iter()
+            .map(|(start, end)| (start.max(clip_start), end.min(clip_end)))
+            .filter(|(start, end)| end > start)
+            .collect();
     sound.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
     let mut merged_sound: Vec<(f64, f64)> = Vec::new();
     for (start, end) in sound {
@@ -563,14 +560,26 @@ mod tests {
         let (s, e) = regions[0];
         assert!(s <= 0.05 && e >= 1.95, "({s}, {e})");
         let _ = std::fs::remove_file(&path);
-    }    #[test]
+    }
+    #[test]
     fn note_blocks_produce_silence_without_decoding_audio() {
         let mut timeline: crate::state::TimelineState = serde_json::from_value(serde_json::json!({
             "tracks":[{"id":"root","name":"Root","order":0}],
             "clips":[],"bpm":120,"project_sec":4
-        })).unwrap();
-        let clip_id = timeline.add_clip(Some("root".into()), Some("clip".into()), Some(0.0), Some(3.0), None);
-        let clip = timeline.clips.iter_mut().find(|clip| clip.id == clip_id).unwrap();
+        }))
+        .unwrap();
+        let clip_id = timeline.add_clip(
+            Some("root".into()),
+            Some("clip".into()),
+            Some(0.0),
+            Some(3.0),
+            None,
+        );
+        let clip = timeline
+            .clips
+            .iter_mut()
+            .find(|clip| clip.id == clip_id)
+            .unwrap();
         let take = clip.takes.first_mut().unwrap();
         take.syllable_analysis = Some(crate::pitch_analysis::TakeSyllableAnalysis {
             algorithm: "test".into(),
@@ -582,11 +591,13 @@ mod tests {
                     start_sec: 0.0,
                     end_sec: 1.0,
                     midi_note: None,
+                    event_id: Some(crate::pitch_analysis::source_event_id(0.0, 1.0).into()),
                 },
                 crate::pitch_analysis::SyllableSpan {
                     start_sec: 2.0,
                     end_sec: 3.0,
                     midi_note: None,
+                    event_id: Some(crate::pitch_analysis::source_event_id(2.0, 3.0).into()),
                 },
             ],
         });
@@ -609,5 +620,4 @@ mod tests {
             "note_blocks_not_ready"
         );
     }
-
 }

@@ -117,6 +117,8 @@ export interface ProjectedParamBlock {
     readonly sourceNote?: number | null;
     /** `clipId|takeId|cycle` identity for cross-source adjacency checks. */
     readonly sourceKey?: string;
+    /** Stable full-source note-event identity; never derived from visible geometry. */
+    readonly sourceEventId?: string;
     readonly cutStart?: boolean;
     readonly cutEnd?: boolean;
     /** 基块候选的所有权覆盖；用户块为 undefined。 */

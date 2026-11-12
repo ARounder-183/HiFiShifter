@@ -18,8 +18,8 @@ pub use schedule::maybe_schedule_pitch_orig;
 pub use dyn_analysis::{assemble_dyn_orig_for_engine, maybe_schedule_dyn_orig};
 pub use syllable::{
     analysis_window_status, clip_spans_to_window, estimate_syllable_spans,
-    fill_spans_without_merging, SyllableConfig, SyllableSpan, TakeSyllableAnalysis,
-    SYLLABLE_ALGORITHM, SYLLABLE_ALGORITHM_VERSION,
+    fill_spans_without_merging, normalize_source_spans, source_event_id, SyllableConfig,
+    SyllableSpan, TakeSyllableAnalysis, SYLLABLE_ALGORITHM, SYLLABLE_ALGORITHM_VERSION,
 };
 
 pub fn hz_to_midi(hz: f64) -> f32 {

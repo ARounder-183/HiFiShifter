@@ -266,6 +266,8 @@ export interface PianoRollParamBlockSpec {
         readonly cutStart?: boolean;
         readonly cutEnd?: boolean;
         readonly sourceKey?: string;
+        /** Stable full-source note-event identity; view-only. */
+        readonly sourceEventId?: string;
         /** 时间上是否与相邻块相接；相接处不画竖向分隔，连续块看起来是一整条。 */
         readonly contiguousStart?: boolean;
         readonly contiguousEnd?: boolean;

@@ -18,13 +18,15 @@ pub enum NoteBlockSource {
     MidiNote,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NoteBlockSpan {
     pub start_sec: f64,
     pub end_sec: f64,
     /// Representative MIDI note from the source analysis; MIDI notes carry it,
     /// audio estimates may have none when the span has no voiced frames.
     pub midi_note: Option<f32>,
+    /// Stable full-source event identity; independent of Clip trimming.
+    pub event_id: Option<String>,
 }
 
 /// 与 param_blocks/base.rs 完全相同的来源优先级。
@@ -42,6 +44,12 @@ pub fn source_note_spans(take: &ClipTake) -> Option<(Vec<NoteBlockSpan>, NoteBlo
                     start_sec: span.start_sec,
                     end_sec: span.end_sec,
                     midi_note: span.midi_note,
+                    event_id: span.event_id.clone().or_else(|| {
+                        Some(crate::pitch_analysis::source_event_id(
+                            span.start_sec,
+                            span.end_sec,
+                        ))
+                    }),
                 })
                 .collect(),
             NoteBlockSource::Syllable,
@@ -60,6 +68,12 @@ pub fn source_note_spans(take: &ClipTake) -> Option<(Vec<NoteBlockSpan>, NoteBlo
                     start_sec: span.start_sec,
                     end_sec: span.end_sec,
                     midi_note: span.midi_note,
+                    event_id: span.event_id.clone().or_else(|| {
+                        Some(crate::pitch_analysis::source_event_id(
+                            span.start_sec,
+                            span.end_sec,
+                        ))
+                    }),
                 })
                 .collect(),
             NoteBlockSource::GameBaseline,
@@ -78,6 +92,10 @@ pub fn source_note_spans(take: &ClipTake) -> Option<(Vec<NoteBlockSpan>, NoteBlo
                     start_sec: note.start_sec,
                     end_sec: note.end_sec,
                     midi_note: Some(note.note),
+                    event_id: Some(crate::pitch_analysis::source_event_id(
+                        note.start_sec,
+                        note.end_sec,
+                    )),
                 })
                 .collect(),
             NoteBlockSource::MidiNote,
@@ -169,6 +187,7 @@ mod tests {
                 start_sec: 0.1,
                 end_sec: 0.2,
                 midi_note: None,
+                event_id: Some(crate::pitch_analysis::source_event_id(0.1, 0.2).into()),
             }],
             analyzed_window_sec: [0.0, 0.0],
         });
@@ -184,6 +203,7 @@ mod tests {
                 start_sec: 0.2,
                 end_sec: 0.3,
                 midi_note: None,
+                event_id: Some(crate::pitch_analysis::source_event_id(0.2, 0.3).into()),
             }],
             analyzed_window_sec: [0.0, 0.0],
         });

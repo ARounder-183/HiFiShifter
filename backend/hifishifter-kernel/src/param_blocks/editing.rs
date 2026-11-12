@@ -2308,6 +2308,7 @@ mod window_merge_tests {
             start_sec: start,
             end_sec: end,
             midi_note: Some(60.0),
+            event_id: None,
         }
     }
 

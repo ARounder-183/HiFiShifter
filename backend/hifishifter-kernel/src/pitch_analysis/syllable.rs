@@ -32,6 +32,34 @@ pub struct SyllableSpan {
     /// Representative source MIDI note for this span (analysis-time truth).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub midi_note: Option<f32>,
+    /// Stable identity of the full-source note event. Two clipped views of the
+    /// same note must share this id; it is not a Clip window coordinate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+}
+
+/// Stable identity of a full-source note event. The id is derived from the
+/// full-source boundaries, never from a Clip's current audible window.
+pub fn source_event_id(start_sec: f64, end_sec: f64) -> String {
+    format!("{:.9}:{:.9}", start_sec, end_sec)
+}
+
+/// Fill missing event ids and sort full-source events deterministically.
+pub fn normalize_source_spans(mut spans: Vec<SyllableSpan>) -> Vec<SyllableSpan> {
+    spans.retain(|span| {
+        span.start_sec.is_finite() && span.end_sec.is_finite() && span.end_sec > span.start_sec
+    });
+    for span in &mut spans {
+        if span.event_id.is_none() {
+            span.event_id = Some(source_event_id(span.start_sec, span.end_sec));
+        }
+    }
+    spans.sort_by(|a, b| {
+        a.start_sec
+            .total_cmp(&b.start_sec)
+            .then(a.end_sec.total_cmp(&b.end_sec))
+    });
+    spans
 }
 
 /// Take 上持久化的音节分析结果。
@@ -49,11 +77,11 @@ pub struct TakeSyllableAnalysis {
     pub analyzed_window_sec: [f64; 2],
 }
 
-/// Clip full-source VAD/analysis spans into the audible source window.
+/// Display-only clipping of full-source VAD/analysis spans into an audible
+/// source window.
 ///
-/// VAD returns coordinates from frame zero of the whole media, while GAME
-/// callers already produce window-clipped events. Both must land in the same
-/// source-domain coordinate system before being persisted as syllable spans.
+/// The result is view geometry, not an analysis cache: callers must not persist
+/// it, because trimming a Clip must not rewrite a note's identity.
 pub fn clip_spans_to_window(
     spans: &[SyllableSpan],
     window_start_sec: f64,
@@ -74,6 +102,7 @@ pub fn clip_spans_to_window(
                 start_sec: start,
                 end_sec: end,
                 midi_note: span.midi_note,
+                event_id: span.event_id.clone(),
             })
         })
         .collect();
@@ -85,7 +114,10 @@ pub fn clip_spans_to_window(
     out
 }
 
-/// A completed analysis is usable only with a valid window and non-empty spans.
+/// A completed full-source analysis is usable only when its provenance window
+/// contains the current audible window and it has at least one note event.
+/// This controls whether another inference can be skipped; it never controls
+/// whether still-intersecting cached events are drawn.
 pub fn analysis_window_status(
     analyzed: [f64; 2],
     window: (f64, f64),
@@ -526,6 +558,7 @@ fn split_region(
             start_sec: a,
             end_sec: b,
             midi_note: None,
+            event_id: None,
         });
     }
     spans
@@ -572,6 +605,7 @@ pub fn fill_spans_without_merging(
                 start_sec: start,
                 end_sec: end,
                 midi_note: span.midi_note,
+                event_id: None,
             })
         })
         .collect::<Vec<_>>();
@@ -584,6 +618,7 @@ pub fn fill_spans_without_merging(
                 start_sec: cursor,
                 end_sec: span.start_sec,
                 midi_note: None,
+                event_id: None,
             });
         }
         let start = span.start_sec.max(cursor);
@@ -592,6 +627,7 @@ pub fn fill_spans_without_merging(
                 start_sec: start,
                 end_sec: span.end_sec,
                 midi_note: span.midi_note,
+                event_id: None,
             });
             cursor = span.end_sec;
         }
@@ -601,6 +637,7 @@ pub fn fill_spans_without_merging(
             start_sec: cursor,
             end_sec: window_end,
             midi_note: None,
+            event_id: None,
         });
     }
     filled
@@ -627,6 +664,7 @@ mod tests {
                     start_sec: 0.0,
                     end_sec: 1.0,
                     midi_note: None,
+                    event_id: Some(crate::pitch_analysis::source_event_id(0.0, 1.0).into()),
                 }],
                 analyzed_window_sec: [0.0, 1.0],
             };
@@ -733,6 +771,7 @@ mod tests {
                 start_sec: 0.9,
                 end_sec: 1.4,
                 midi_note: Some(64.0),
+                event_id: Some(crate::pitch_analysis::source_event_id(0.9, 1.4).into()),
             }],
             analyzed_window_sec: [0.9, 2.0],
         };
@@ -755,11 +794,13 @@ mod tests {
                     start_sec: 0.2,
                     end_sec: 0.8,
                     midi_note: Some(60.0),
+                    event_id: Some(crate::pitch_analysis::source_event_id(0.2, 0.8).into()),
                 },
                 SyllableSpan {
                     start_sec: 0.9,
                     end_sec: 1.6,
                     midi_note: Some(64.0),
+                    event_id: Some(crate::pitch_analysis::source_event_id(0.9, 1.6).into()),
                 },
             ],
             1.0,
@@ -801,11 +842,13 @@ mod tests {
                 start_sec: 0.5,
                 end_sec: 1.0,
                 midi_note: Some(60.0),
+                event_id: Some(crate::pitch_analysis::source_event_id(0.5, 1.0).into()),
             },
             SyllableSpan {
                 start_sec: 1.0,
                 end_sec: 1.5,
                 midi_note: Some(62.0),
+                event_id: Some(crate::pitch_analysis::source_event_id(1.0, 1.5).into()),
             },
         ];
         let filled = fill_spans_without_merging(&spans, 0.0, 2.0);

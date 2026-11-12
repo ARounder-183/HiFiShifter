@@ -998,11 +998,13 @@ mod tests {
                     start_sec: 0.1,
                     end_sec: 0.3,
                     midi_note: None,
+                    event_id: None,
                 },
                 hifishifter_kernel::pitch_analysis::SyllableSpan {
                     start_sec: 0.3,
                     end_sec: 0.6,
                     midi_note: None,
+                    event_id: None,
                 },
             ],
             analyzed_window_sec: [0.0, 0.0],

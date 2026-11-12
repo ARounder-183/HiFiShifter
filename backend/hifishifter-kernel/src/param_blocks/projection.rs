@@ -330,18 +330,9 @@ pub fn project_span(
         return out;
     }
 
-    // 非 Loop：区间先按当前消费窗口裁剪，再投影。
-    let (window_start, window_end) = if projection.reversed {
-        (
-            projection.source_window_end_sec - projection.project_length_sec * rate,
-            projection.source_window_end_sec,
-        )
-    } else {
-        (
-            projection.source_window_start_sec,
-            projection.source_window_start_sec + projection.project_length_sec * rate,
-        )
-    };
+    // The audible source window is the single source of truth for analysis,
+    // cache adoption and projection. Never recompute a second affine window.
+    let (window_start, window_end) = projection.audible_source_window();
     let Some((start_sec, end_sec)) = window_intersection(
         (span.source_start_sec, span.source_end_sec),
         (window_start, window_end),

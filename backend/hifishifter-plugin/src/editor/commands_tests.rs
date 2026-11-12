@@ -199,6 +199,7 @@ fn timeline_payload_omits_redundant_waveforms_and_preserves_all_block_sources() 
                     start_sec: 0.0,
                     end_sec: 0.1,
                     midi_note: None,
+                    event_id: None,
                 }],
                 analyzed_window_sec: [0.0, 0.0],
             });

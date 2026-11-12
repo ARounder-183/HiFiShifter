@@ -8,6 +8,22 @@
 import type { ClipInfo } from "../../../features/session/sessionTypes";
 import type { TakeSpan } from "./paramBlockTypes";
 
+export interface ParamBlockSourceNote {
+    readonly startSec: number;
+    readonly endSec: number;
+    readonly note?: number | null;
+    readonly eventId?: string;
+    readonly source: "syllable" | "gameBaseline" | "midiNote";
+}
+
+export function sourceNoteEventId(span: {
+    readonly startSec: number;
+    readonly endSec: number;
+    readonly eventId?: string;
+}): string {
+    return span.eventId ?? `${span.startSec.toFixed(9)}:${span.endSec.toFixed(9)}`;
+}
+
 export interface ParamBlockSourceClip {
     readonly id: string;
     readonly trackId: string;
@@ -39,14 +55,20 @@ export interface ParamBlockSourceClip {
             readonly startSec: number;
             readonly endSec: number;
             readonly note?: number | null;
+            readonly eventId?: string;
         }>;
         readonly syllableNotes?: ReadonlyArray<number | null>;
+        readonly syllableEventIds?: ReadonlyArray<string>;
         readonly syllableAnalysisWindowSec?: readonly [number, number];
         readonly gameBlockBaseline?: {
+            readonly revision?: number;
+            readonly algorithm?: string;
+            readonly algorithmVersion?: number;
             readonly sourceSpansSec?: ReadonlyArray<{
                 readonly startSec: number;
                 readonly endSec: number;
                 readonly note?: number | null;
+                readonly eventId?: string;
             }>;
             readonly analyzedWindowSec?: readonly [number, number];
         };
@@ -60,8 +82,10 @@ export interface ParamBlockSourceClip {
         readonly startSec: number;
         readonly endSec: number;
         readonly note?: number | null;
+        readonly eventId?: string;
     }>;
     readonly syllableNotes?: ReadonlyArray<number | null>;
+    readonly syllableEventIds?: ReadonlyArray<string>;
     readonly syllableAnalysisWindowSec?: readonly [number, number];
     readonly gameBlockBaseline?: {
         readonly sourceSpansSec?: ReadonlyArray<{
@@ -124,6 +148,30 @@ export function cutFlagsForIntersection(
 }
 
 /** Analysis status has one definition for reanalysis, diagnostics and compose. */
+export function paramBlockAnalysisRequestKey(args: {
+    readonly rootTrackId: string;
+    readonly clipId: string;
+    readonly activeTakeId?: string;
+    readonly sourceDigest?: string;
+    readonly algorithm?: string;
+    readonly algorithmVersion?: number;
+    readonly audible: { readonly startSec: number; readonly endSec: number };
+    readonly framePeriodMs: number;
+}): string {
+    const round = (value: number) => value.toFixed(6);
+    return [
+        args.rootTrackId,
+        args.clipId,
+        args.activeTakeId ?? "",
+        args.sourceDigest ?? "",
+        args.algorithm ?? "",
+        String(args.algorithmVersion ?? 0),
+        round(args.audible.startSec),
+        round(args.audible.endSec),
+        round(args.framePeriodMs),
+    ].join("|");
+}
+
 export type AnalysisWindowStatus = "missing" | "stale" | "current";
 export function analysisWindowStatus(
     audible: { readonly startSec: number; readonly endSec: number },
@@ -255,21 +303,41 @@ export function projectionForClip(clip: ParamBlockSourceClip): ClipProjection {
 
 /** 基块分析区间的统一回退链：音节分析 → GAME baseline → MIDI。 */
 export function baseSourceSpansForClip(clip: ParamBlockSourceClip): {
-    readonly spans: readonly { readonly startSec: number; readonly endSec: number }[];
+    readonly spans: readonly ParamBlockSourceNote[];
     readonly label: "syllable" | "gameBaseline" | "midiNote";
 } | null {
     const take = activeTake(clip);
     const syllable = firstSpanList(take?.syllableSpansSec, clip.syllableSpansSec);
-    if (syllable !== null) return { spans: syllable, label: "syllable" };
+    if (syllable !== null) {
+        const notes = take?.syllableEventIds ?? clip.syllableEventIds;
+        return {
+            spans: syllable.map((span, index) => ({
+                ...span,
+                eventId: span.eventId ?? notes?.[index],
+                source: "syllable",
+            })),
+            label: "syllable",
+        };
+    }
     const baseline = firstSpanList(
         take?.gameBlockBaseline?.sourceSpansSec,
         clip.gameBlockBaseline?.sourceSpansSec,
     );
-    if (baseline !== null) return { spans: baseline, label: "gameBaseline" };
+    if (baseline !== null) {
+        return {
+            spans: baseline.map((span) => ({ ...span, source: "gameBaseline" })),
+            label: "gameBaseline",
+        };
+    }
     const midi = firstSpanList(take?.midiNoteData, clip.midiNoteData);
     if (midi !== null) {
         return {
-            spans: midi.map((note) => ({ startSec: note.startSec, endSec: note.endSec })),
+            spans: midi.map((note) => ({
+                startSec: note.startSec,
+                endSec: note.endSec,
+                note: note.note,
+                source: "midiNote",
+            })),
             label: "midiNote",
         };
     }
@@ -390,12 +458,9 @@ export function projectTakeSpan(
         return out;
     }
     if (startCycle > 0) return [];
-    const windowStart = projection.reversed
-        ? projection.sourceWindowEndSec - projection.projectLengthSec * rate
-        : projection.sourceWindowStartSec;
-    const windowEnd = projection.reversed
-        ? projection.sourceWindowEndSec
-        : projection.sourceWindowStartSec + projection.projectLengthSec * rate;
+    // The audible source window is the single source of truth for analysis,
+    // cache adoption and projection. Never recompute a second affine window.
+    const { startSec: windowStart, endSec: windowEnd } = audibleSourceWindow(projection);
     const intersection = windowIntersection(
         [span.sourceStartSec, span.sourceEndSec],
         [windowStart, windowEnd],
@@ -645,12 +710,14 @@ export function toParamBlockSourceClip(clip: ClipInfo): ParamBlockSourceClip {
             sourceSampleRate: take.sourceSampleRate,
             syllableSpansSec: take.syllableSpansSec,
             syllableNotes: take.syllableNotes,
+            syllableEventIds: take.syllableEventIds,
             syllableAnalysisWindowSec: take.syllableAnalysisWindowSec,
             gameBlockBaseline: take.gameBlockBaseline,
             midiNoteData: take.midiNoteData,
         })),
         syllableSpansSec: clip.syllableSpansSec,
         syllableNotes: clip.syllableNotes,
+        syllableEventIds: clip.syllableEventIds,
         syllableAnalysisWindowSec: clip.syllableAnalysisWindowSec,
         gameBlockBaseline: clip.gameBlockBaseline,
         midiNoteData: clip.midiNoteData,

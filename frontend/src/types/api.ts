@@ -71,6 +71,21 @@ export interface TimelineClipTake {
     syllable_notes?: Array<number | null>;
     /** 本次分析实际覆盖的源域窗口 [start_sec, end_sec]。 */
     syllable_analysis_window_sec?: [number, number] | null;
+    /** Stable full-source event ids parallel to syllable_spans_sec. */
+    syllable_event_ids?: string[];
+    /** Frozen GAME full-source baseline. */
+    game_block_baseline?: {
+        revision?: number;
+        algorithm?: string;
+        algorithm_version?: number;
+        source_spans_sec?: Array<{
+            start_sec: number;
+            end_sec: number;
+            midi_note?: number | null;
+            event_id?: string;
+        }>;
+        analyzed_window_sec?: [number, number];
+    };
     /**
      * 宿主的非线性拉伸标记（REAPER stretch markers）。非空表示该 take 的源时间
      * 映射不是一条直线 —— 插件**不**渲染它，只用于把分割/拖边显式置为只读。
@@ -160,6 +175,21 @@ export interface TimelineClip {
     syllable_spans_sec?: Array<[number, number]>;
     syllable_notes?: Array<number | null>;
     syllable_analysis_window_sec?: [number, number] | null;
+    /** Stable full-source event ids parallel to syllable_spans_sec. */
+    syllable_event_ids?: string[];
+    /** Frozen GAME full-source baseline. */
+    game_block_baseline?: {
+        revision?: number;
+        algorithm?: string;
+        algorithm_version?: number;
+        source_spans_sec?: Array<{
+            start_sec: number;
+            end_sec: number;
+            midi_note?: number | null;
+            event_id?: string;
+        }>;
+        analyzed_window_sec?: [number, number];
+    };
 }
 
 // ProjectMeta 保留导出：`selectClipRemote`（features/session/thunks）的导出

@@ -82,6 +82,8 @@ export interface ParamBlock {
     readonly cutEnd?: boolean;
     /** `clipId|takeId|cycle` identity for transition/contiguous pairing. */
     readonly sourceKey?: string;
+    /** Stable full-source note-event identity; view-only. */
+    readonly sourceEventId?: string;
     /** Explicit display-only fallback value (never written to the curve). */
     readonly fallbackValue?: number | null;
     /** Whether the displayed center came from a fallback. */
@@ -753,6 +755,7 @@ function paramBlockFromProjected(
         cutStart: block.cutStart === true,
         cutEnd: block.cutEnd === true,
         ...(block.sourceKey === undefined ? {} : { sourceKey: block.sourceKey }),
+        ...(block.sourceEventId === undefined ? {} : { sourceEventId: block.sourceEventId }),
 
         transitionSec:
             block.transitionFrames === undefined
@@ -2010,9 +2013,13 @@ export function averageParamValueInSpan(args: {
             0,
             Math.min(args.values.length - 1, Math.round((startFrame - args.startFrame) / stride)),
         );
-        const value = Number(args.values[index]);
-        if (!Number.isFinite(value) || (args.isPitch && value <= 0)) return null;
-        samples.push(value);
+        const sampleFrame = args.startFrame + index * stride;
+        // Never borrow a sample outside the block; a missing value belongs to
+        // the display-only fallback chain, not to this sampled center.
+        if (sampleFrame >= startFrame && sampleFrame < endFrame) {
+            const value = Number(args.values[index]);
+            if (Number.isFinite(value) && !(args.isPitch && value <= 0)) samples.push(value);
+        }
     }
     return modeCenterOfValues(samples, {
         param: args.param,
@@ -2207,17 +2214,9 @@ export function projectParamBlockCenterY(args: {
 }
 
 /** 块的短标签：音高用音名，其余参数显示一位小数。 */
-export function formatParamBlockLabel(
-    value: number | null,
-    ordinal: number,
-    param: string,
-): string {
-    if (value === null || !Number.isFinite(value)) return `#${ordinal}`;
-    if (param === "pitch") {
-        const rounded = Math.round(value);
-        return `#${ordinal} ${midiLabel(rounded)}`;
-    }
-    return `#${ordinal} ${value.toFixed(1)}`;
+export function formatParamBlockLabel(value: number | null, param: string): string {
+    if (value === null || !Number.isFinite(value)) return "";
+    return param === "pitch" ? midiLabel(Math.round(value)) : value.toFixed(1);
 }
 
 /** 纯函数音名（避免 paramBlocks 在 node 单测里引入渲染模块）。 */

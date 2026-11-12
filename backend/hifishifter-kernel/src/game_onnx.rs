@@ -600,19 +600,26 @@ pub fn normalize_events(events: Vec<GameNoteEvent>) -> Vec<GameNoteEvent> {
 /// 只保留浊音事件；显示层需要连续覆盖时由调用方决定是否补休止。这里不补，
 /// 因为静音不是音节，不能把休止伪装成参数块。
 pub fn voiced_spans(events: &[GameNoteEvent]) -> Vec<(f64, f64, f32)> {
-    events
+    let mut spans: Vec<(f64, f64, f32)> = events
         .iter()
-        .filter(|event| event.voiced)
+        .filter(|event| event.voiced && event.end_sec.is_finite() && event.start_sec.is_finite())
         .map(|event| (event.start_sec, event.end_sec, event.midi_note))
-        .collect()
+        .collect();
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    spans
 }
 
-/// 把 GAME 音符事件投影成 Take 的音节区间。
+/// Full-source voiced note intervals. Persisted analysis and GAME baselines
+/// must consume this; a Clip's audible window is only a projection filter.
+pub fn full_source_voiced_spans(events: &[GameNoteEvent]) -> Vec<(f64, f64, f32)> {
+    voiced_spans(events)
+}
+
+/// Display-only projection of full-source GAME events into an audible window.
 ///
-/// 【为什么不做“整段补齐”】休止不是音节；把休止补成区间会让前端把停顿也画成
-/// 参数块，用户拖块时就会改到不该存在的区域。这里只保留模型判为浊音的区段，
-/// 并把边界夹到该 Take 的可见源窗口。若模型只返回一个跨整段的长音，也会被裁剪
-/// 到窗口，交由后续人工切开，而不是伪造额外边界。
+/// This helper must never be used to persist analysis spans or GAME baselines:
+/// clipping a note's source boundary destroys the identity that user edits,
+/// reanalysis merges and truncated blocks rely on.
 pub fn syllable_spans_for_window(
     events: &[GameNoteEvent],
     window_start_sec: f64,
@@ -620,16 +627,14 @@ pub fn syllable_spans_for_window(
 ) -> Vec<(f64, f64, f32)> {
     if !(window_start_sec.is_finite()
         && window_end_sec.is_finite()
-        && window_end_sec > window_start_sec + 1e-9)
+        && window_end_sec > window_start_sec + 1e-12)
     {
         return Vec::new();
     }
     let mut out = Vec::new();
-    for (source_start, source_end, note) in voiced_spans(events) {
+    for (source_start, source_end, note) in full_source_voiced_spans(events) {
         let start = source_start.max(window_start_sec).min(window_end_sec);
         let end = source_end.max(window_start_sec).min(window_end_sec);
-        // Clipping changes the geometry, not the note's identity. Keep the
-        // model's pitch even when only a sliver of the note is audible.
         if end > start + 1e-12 {
             out.push((start, end, note));
         }

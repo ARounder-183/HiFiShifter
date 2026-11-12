@@ -54,16 +54,16 @@ describe("buildParamBlockRenderSpec", () => {
         );
     });
 
-    it("sorts unordered input and gives every run of one logical block the same ordinal", () => {
+    it("sorts unordered input and labels logical runs without numbering", () => {
         const spec = build([
             block({ id: "b", startSec: 4, endSec: 5 }),
             block({ id: "a:1", userBlockId: "a", startSec: 2, endSec: 3, averageValue: 0.5 }),
             block({ id: "a:0", userBlockId: "a", startSec: 0, endSec: 1, averageValue: 0.5 }),
         ]);
         expect(spec.blocks.map((item) => item.id)).toEqual(["a:0", "a:1", "b"]);
-        expect(spec.blocks[0]?.label).toBe("#1 0.5");
-        expect(spec.blocks[1]?.label).toBe("#1 0.5");
-        expect(spec.blocks[2]?.label).toBe("#2 1.0");
+        expect(spec.blocks[0]?.label).toBe("0.5");
+        expect(spec.blocks[1]?.label).toBe("0.5");
+        expect(spec.blocks[2]?.label).toBe("1.0");
     });
 
     it("does not connect adjacent blocks from different Clip/Take sources", () => {
