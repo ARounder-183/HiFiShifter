@@ -50,9 +50,6 @@ export function registerTransport(builder: ActionReducerMapBuilder<SessionState>
     builder
         .addCase(playOriginal.pending, (state) => {
             setPending(state, "Playing original...");
-            state.runtime.playbackStartPending = true;
-            state.runtime.playbackStartAtMs = performance.now();
-            state.runtime.playbackStartAnchorSec = Number(state.playheadSec) || 0;
             // 播放操作开始即交接播放头所有权：在途播放轮询（采样于本次
             // 播放序列之前，可能携带停止间隙的 0 位置或旧播放位置）的
             // 迟到响应按乱序丢弃，防止光标被拽回旧位置/0。
@@ -72,7 +69,6 @@ export function registerTransport(builder: ActionReducerMapBuilder<SessionState>
             // 未调用后端）——不得重置任何传输状态（等待标志 / 位置报告 /
             // 纪元），否则会解除等待期的光标冻结并造成跳变。
             if (payload.noop) {
-                state.runtime.playbackStartPending = false;
                 return;
             }
             const ok = Boolean(payload.ok);
@@ -93,13 +89,6 @@ export function registerTransport(builder: ActionReducerMapBuilder<SessionState>
             // 典型光标跳变）。归零后 advancing 保持 false，光标原地等待
             // 首个轮询采样建立新锚点。
             state.runtime.playbackPositionSec = 0;
-            if (ok) {
-                state.runtime.playbackStartPending = true;
-                state.runtime.playbackStartAtMs = performance.now();
-                state.runtime.playbackStartAnchorSec = payload.anchorSec ?? state.playheadSec;
-            } else {
-                state.runtime.playbackStartPending = false;
-            }
             state.playbackClipId = ok ? (payload.clipId ?? null) : null;
             // Store the playhead position at which playback started,
             // so Play/Stop can restore it.
@@ -119,13 +108,11 @@ export function registerTransport(builder: ActionReducerMapBuilder<SessionState>
                   : "Play original failed";
         })
         .addCase(playOriginal.rejected, (state, action) => {
-            state.runtime.playbackStartPending = false;
             setRejected(state, action);
         })
 
         .addCase(stopAudioPlayback.pending, (state) => {
             setPending(state, "Stopping audio...");
-            state.runtime.playbackStartPending = false;
             // 捕获"翻转前"的真实播放状态供 thunk 判定 wasPlaying：
             // pending 先于 thunk 体运行，thunk 里读到的 runtime.isPlaying
             // 已被本 reducer 置 false；停止是否真的打断了播放（决定
@@ -301,24 +288,11 @@ function applyTransportSample(
     // 时引擎保持 is_playing=true 但位置冻结，等待渲染完成后自动
     // 开始/继续播放。旧后端不带此字段 → 视为 false。
     const nextWaitingForRender = nextIsPlaying && Boolean(payload.waiting_for_render);
-    const startPending = state.runtime.playbackStartPending;
-    const startAgeMs = sampledNowMs - state.runtime.playbackStartAtMs;
-    const expectedAnchor = state.runtime.playbackStartAnchorSec;
-    const sampleSec = Math.max(0, (payload.base_sec ?? 0) + nextPositionSec);
-    if (
-        startPending &&
-        !nextIsPlaying &&
-        !nextWaitingForRender &&
-        startAgeMs < 500 &&
-        Math.abs(sampleSec - expectedAnchor) > 0.05
-    ) {
-        return;
-    }
-    if (nextIsPlaying || nextWaitingForRender) {
-        state.runtime.playbackStartPending = false;
-    } else if (startAgeMs >= 500) {
-        state.runtime.playbackStartPending = false;
-    }
+    // 【不再有"起播窗口"】此前这里用一条 500ms / 0.05s 的规则丢弃"看起来
+    // 不像起播点"的采样，用来遮住"引擎从别处起播"的症状。起播点已收敛到
+    // 引擎的绝对位置，这类采样不再存在；保留那条规则只会把真实状态挡在外面
+    // （表现是"光标钉住、音频已经走了"）。停止态的陈旧读数仍由下方
+    // `frozenSec > EPS_SEC` 与 `stale` / `localWriteRecent` 三道闸门挡住。
     // 轮询节奏的唯一依据（见 `runtime.hostAuthoritative`）：它回答"这份位置
     // 是不是宿主给的"，与"谁认为在播"无关。
     state.runtime.hostAuthoritative = Boolean(payload.host_authoritative);

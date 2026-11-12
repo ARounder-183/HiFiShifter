@@ -174,9 +174,6 @@ export const initialState: SessionState = {
         positionAgeMs: null,
         transportSource: "stale",
         lastTransportSeq: 0,
-        playbackStartPending: false,
-        playbackStartAnchorSec: 0,
-        playbackStartAtMs: 0,
         gpuBackend: "",
     },
 

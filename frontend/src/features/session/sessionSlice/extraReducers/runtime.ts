@@ -95,9 +95,6 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
                     // 整份替换这个子对象时必须显式带上它，否则"宿主受控"这条读数
                     // 会被一次设备刷新静默清成 false（轮询节奏随之退回 400 ms）。
                     hostAuthoritative: state.runtime.hostAuthoritative,
-                    playbackStartPending: state.runtime.playbackStartPending,
-                    playbackStartAnchorSec: state.runtime.playbackStartAnchorSec,
-                    playbackStartAtMs: state.runtime.playbackStartAtMs,
                     gpuBackend: payload.gpu_backend ?? "",
                 };
                 if (payload.timeline) {

@@ -1141,60 +1141,75 @@ test("features/session/sessionSlice.playheadGuard.test.ts a quiet stop swallows 
         throw new Error(`a user stop must still report the failure, got ${String(loud.error)}`);
     }
 });
-/** 起播窗口：播放命令刚发出时，引擎仍可能回旧位置；旧采样不得把光标拽回。 */
-test("features/session/sessionSlice.playheadGuard.test.ts playback start window discards stale pre-play samples", async () => {
+/**
+ * 播放会话的位置序列：起播点由**引擎**回报，此后采样只允许单调前进。
+ *
+ * 【为什么要一条"序列"而不是单点断言】起播跳变的形态是"先回退、再前进"：
+ * 只看某一条采样是否被采纳，永远看不出这个形状。这里按真实顺序驱动
+ * `playOriginal.pending → fulfilled(引擎回报 anchorSec) → 连续 syncPlaybackState`，
+ * 并逐条断言光标不回退。
+ *
+ * 【它守的是什么】reducer 不再按"时间窗 + 锚点差"丢弃采样（那个窗口正是
+ * "光标钉住、音频已经走了"的来源）。因此这里刻意喂入一条**停在锚点**的采样
+ * （起播瞬间引擎尚未推进），它必须被正常采纳（光标停在锚点），而不是被当垃圾丢掉。
+ */
+test("features/session/sessionSlice.playheadGuard.test.ts playback advances monotonically from the engine-reported anchor", async () => {
     const base = reducer(undefined, { type: "@@INIT" }) as any;
-    let state = { ...base, playheadSec: 50 };
+    let state = { ...base, playheadSec: 3 };
     state = reducer(state, playOriginal.pending("req", undefined));
     state = reducer(
         state,
         playOriginal.fulfilled(
+            // 引擎实际起播点：与本地光标（3s）**不同**。以引擎为准。
             { ok: true, clipId: null, anchorSec: 50, noop: false },
             "req",
             undefined,
         ),
     );
-    const epoch = state._transportEpoch;
-    state = reducer(
-        state,
-        syncPlaybackState.fulfilled(
-            {
-                ok: true,
-                is_playing: false,
-                target: "original",
-                base_sec: 0,
-                position_sec: 40,
-                duration_sec: 200,
-            },
-            "req",
-            { epoch, dispatchedAtMs: performance.now() },
-        ),
-    );
+
+    const feed = (positionSec: number, isPlaying: boolean) => {
+        state = reducer(
+            state,
+            syncPlaybackState.fulfilled(
+                {
+                    ok: true,
+                    is_playing: isPlaying,
+                    target: "original",
+                    base_sec: 0,
+                    position_sec: positionSec,
+                    duration_sec: 200,
+                },
+                "req",
+                { epoch: state._transportEpoch, dispatchedAtMs: performance.now() },
+            ),
+        );
+    };
+
+    // 起播瞬间：引擎位于锚点、尚未推进。这条采样必须被采纳（光标=锚点）。
+    feed(50, false);
     if (Math.abs(Number(state.playheadSec) - 50) > 1e-6) {
-        throw new Error("stale pre-play sample moved the playhead");
+        throw new Error(
+            `the engine-reported anchor must win over the local mirror, got ${String(state.playheadSec)}`,
+        );
+    }
+    if (state.playbackAnchorSec !== 50) {
+        throw new Error("stop must be able to restore the engine-reported start point");
+    }
+
+    const samples = [50.03, 50.06, 50.09, 50.12];
+    let previous = Number(state.playheadSec);
+    for (const sec of samples) {
+        feed(sec, true);
+        const current = Number(state.playheadSec);
+        if (current + 1e-6 < previous) {
+            throw new Error(`playhead went backwards: ${previous} -> ${current}`);
+        }
+        previous = current;
+    }
+    if (Math.abs(previous - 50.12) > 0.05) {
+        throw new Error(`playhead should track the engine samples, got ${previous}`);
     }
     if (state.runtime.isPlaying !== true) {
-        throw new Error("stale pre-play sample cleared isPlaying");
-    }
-    state = reducer(
-        state,
-        syncPlaybackState.fulfilled(
-            {
-                ok: true,
-                is_playing: true,
-                target: "original",
-                base_sec: 0,
-                position_sec: 50.02,
-                duration_sec: 200,
-            },
-            "req",
-            { epoch: state._transportEpoch, dispatchedAtMs: performance.now() },
-        ),
-    );
-    if (Math.abs(Number(state.playheadSec) - 50.02) > 0.05) {
-        throw new Error("first playing sample should advance the playhead");
-    }
-    if (state.runtime.playbackStartPending !== false) {
-        throw new Error("start window should close on the first playing sample");
+        throw new Error("the engine is playing, so the mirror must say so");
     }
 });

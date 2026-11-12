@@ -558,9 +558,6 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "quick_export_selected_clips":
             return { request: args[0] };
 
-        case "play_original":
-            return { startSec: args[0] };
-
         case "set_metronome":
             return {
                 enabled: args[0],
@@ -1113,6 +1110,9 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "pick_directory",
     "pick_midi_output_path",
     "ping",
+    // 播放从**引擎当前位置**起播：命令本身不再携带起播点（起播点是引擎事实，
+    // 见 commands/playback.rs 的 resolve_play_start_sec），因此是无参命令。
+    "play_original",
     "redo_timeline",
     "run_vocoder_benchmark",
     "start_background_render",

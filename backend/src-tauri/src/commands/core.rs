@@ -96,6 +96,20 @@ pub(super) fn get_timeline_state_lite(
     payload
 }
 
+/// 把"这次 set_transport 是否携带定位意图"解析成显式的 seek 目标。
+///
+/// 【为什么单独成函数】这条判据曾经是一条无条件语句（`seek_sec(tl.playhead_sec)`），
+/// 于是"只改 BPM"也会把引擎拽回时间线里的陈旧播放头。把它抽出来之后，"没有意图
+/// 就不定位"这件事有了可断言的形式（见文件末尾的测试），而不是埋在命令体的一句
+/// 注释里。
+///
+/// 返回 `None` = 不定位；`Some(sec)` = 定位到该秒（负值钳到 0）。
+fn resolve_seek_intent(playhead_sec: Option<f64>) -> Option<f64> {
+    playhead_sec
+        .filter(|value| value.is_finite())
+        .map(|value| value.max(0.0))
+}
+
 pub(super) fn set_transport(
     state: State<'_, AppState>,
     playhead_sec: Option<f64>,
@@ -110,8 +124,16 @@ pub(super) fn set_transport(
     }
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     let prev_bpm = tl.bpm;
-    if let Some(v) = playhead_sec {
-        tl.playhead_sec = v.max(0.0);
+    // 只有**显式**给了 playhead_sec 才动引擎位置。
+    //
+    // 【为什么必须记下"这次有没有定位意图"】引擎位置是起播的唯一权威，而这
+    // 条命令还被用来"只改 BPM"（`updateTransportBpm`）与"只写回锚点"。
+    // 无条件 `seek_sec(tl.playhead_sec)` 会在这些路径上把引擎拽回一个**陈旧**
+    // 的播放头（时间线里的 playhead_sec 在播放期间并不前进），下一次播放就
+    // 从那个旧点起播 —— 这正是"改个 BPM 光标就跳回旧起点"的来源。
+    let seek_target = resolve_seek_intent(playhead_sec);
+    if let Some(sec) = seek_target {
+        tl.playhead_sec = sec;
     }
     if let Some(v) = bpm {
         if v.is_finite() && v > 0.0 {
@@ -130,8 +152,11 @@ pub(super) fn set_transport(
         }
     }
 
-    // Keep realtime engine transport aligned.
-    state.audio_engine.seek_sec(tl.playhead_sec);
+    // Keep realtime engine transport aligned **only** when this call carried an
+    // explicit seek intent. BPM-only updates must not move the transport.
+    if let Some(sec) = seek_target {
+        state.audio_engine.seek_sec(sec);
+    }
     let bpm_changed = (tl.bpm - prev_bpm).abs() > 1e-9;
     if bpm_changed {
         state.audio_engine.update_timeline(tl.clone());
@@ -161,4 +186,31 @@ pub(super) fn undo_timeline(state: State<'_, AppState>) -> crate::models::Timeli
 
 pub(super) fn redo_timeline(state: State<'_, AppState>) -> crate::models::TimelineStatePayload {
     state.redo_timeline()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_seek_intent;
+
+    /// 只改 BPM 时**不得**动引擎位置：这是"改个 BPM 光标就跳回旧起点"的直接根因。
+    #[test]
+    fn a_bpm_only_update_carries_no_seek_intent() {
+        assert_eq!(resolve_seek_intent(None), None);
+    }
+
+    /// 显式定位必须被采纳，且负值钳到 0（时间线没有负时间）。
+    #[test]
+    fn an_explicit_playhead_is_clamped_and_forwarded() {
+        assert_eq!(resolve_seek_intent(Some(12.5)), Some(12.5));
+        assert_eq!(resolve_seek_intent(Some(-3.0)), Some(0.0));
+        assert_eq!(resolve_seek_intent(Some(0.0)), Some(0.0));
+    }
+
+    /// 非法读数不得变成"定位到 NaN"（会让帧计数锁死在 0 或 UB 级行为差异）。
+    #[test]
+    fn a_non_finite_playhead_never_reaches_the_engine_as_nan() {
+        assert_eq!(resolve_seek_intent(Some(f64::NAN)), None);
+        assert_eq!(resolve_seek_intent(Some(f64::INFINITY)), None);
+        assert_eq!(resolve_seek_intent(Some(f64::NEG_INFINITY)), None);
+    }
 }

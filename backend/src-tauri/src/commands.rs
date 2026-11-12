@@ -2836,7 +2836,7 @@ pub fn set_metronome(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {
+pub fn play_original(state: State<'_, AppState>) -> serde_json::Value {
     {
         // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
         // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
@@ -2853,7 +2853,7 @@ pub fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::
                     .transport_lock
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                playback::play_original(state, start_sec)
+                playback::play_original(state)
             },
         )
     }

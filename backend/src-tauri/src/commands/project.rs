@@ -1098,6 +1098,9 @@ pub(super) fn new_project(
         }
         *tl = crate::state::TimelineState::default();
         state.audio_engine.update_timeline(tl.clone());
+        // 新工程从 0 起播：引擎位置不随 update_timeline 自动归零（那是"停止"
+        // 语义的一部分，已不再清零），必须显式定位。
+        state.audio_engine.seek_sec(0.0);
     }
     state.clear_history();
     {
@@ -1259,7 +1262,13 @@ pub(super) fn open_project(
             normalized_use_custom_scale,
             normalized_custom_scale.as_ref(),
         );
+        // 工程文件里的播放头是"打开后应该站的位置"：投影给引擎，使
+        // 「打开工程 → 直接播放」从可见光标起播（引擎是起播的唯一权威，
+        // 它不认识 timeline.playhead_sec）。顺序必须 update → seek：
+        // 两条命令在引擎 worker 的同一个队列里按序执行。
+        let start_sec = tl.playhead_sec.max(0.0);
         state.audio_engine.update_timeline(tl.clone());
+        state.audio_engine.seek_sec(start_sec);
     }
     // Tempo Map 存在时，工程基准拍号同步为 0 位置点的拍号（分子/分母）。
     let tempo_map_initial_signature = state

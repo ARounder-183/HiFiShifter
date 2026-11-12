@@ -796,6 +796,23 @@ impl AudioEngine {
         let _ = self.tx.send(EngineCommand::SeekSec { sec });
     }
 
+    /// 引擎当前的**绝对**播放位置（秒）。
+    ///
+    /// 【为什么它是唯一权威】播放位置本来有两个候选来源：引擎的
+    /// `base_frames + position_frames` 与前端 Redux 里的 `playheadSec`。后者
+    /// 由 30Hz 轮询外推得到（含 IPC 往返时延），与真实可听位置天然差一拍；
+    /// 把它再传回后端当起播锚点，等于把这份误差固化进每次播放。因此
+    /// `play_original` 一律读这里，前端不再参与起播决策。
+    ///
+    /// 时间线播放的 `base_frames` 恒为 0（位置一律用绝对帧表达），文件预览
+    /// 的 `base_frames` 才是 offset，两者相加即"当前听到的那一刻"。
+    pub fn position_sec(&self) -> f64 {
+        let sr = self.sample_rate.load(Ordering::Relaxed).max(1) as f64;
+        let base = self.base_frames.load(Ordering::Relaxed);
+        let pos = self.position_frames.load(Ordering::Relaxed);
+        (base.saturating_add(pos)) as f64 / sr
+    }
+
     /// 原子地从绝对秒开始播放时间线。
     pub fn play_from(&self, sec: f64) {
         let _ = self.tx.send(EngineCommand::PlayFrom { sec });
@@ -989,12 +1006,21 @@ fn handle_stop(s: &mut EngineWorkerState) {
     // 清除起点等待：等待中的用户停止立即生效，不再自动起播。
     s.play_start_wait.store(false, Ordering::Relaxed);
     *s.target.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    s.base_frames.store(0, Ordering::Relaxed);
-    // position_frames 一并归零：停止后 base+position 不再代表可听位置。
-    // 若保留旧值，停止后的杂散 get_playback_state 会让前端把
-    // runtime.playbackPositionSec 恢复成陈旧的已播放时长，
-    // 使下一次 stop 误判"曾处于播放中"并跳回锚点/0。
-    s.position_frames.store(0, Ordering::Relaxed);
+    // 【停止 ≠ 归零】`position_frames` 保留真实停止点，下一次 `play_original`
+    // 直接从这里起播。此前这里把位置清零，而自然结束（`advance_playback_position`）
+    // 冻结位置 —— 同一个"停止"在引擎里于是有了两种互斥状态：一种答得出真实
+    // 停止点，一种答 0。引擎因此不可能是可靠权威，前端只好另带一个锚点，
+    // 于是锚点与实际起播点继续分裂。
+    //
+    // 文件预览是唯一例外：它的位置是"文件内偏移 + 已播放"（`base_frames` 非 0），
+    // 停止后没有"下次从哪继续"的语义，归零更诚实。
+    if s.last_play_file.is_some() {
+        s.base_frames.store(0, Ordering::Relaxed);
+        s.position_frames.store(0, Ordering::Relaxed);
+    } else {
+        // 时间线播放：base 恒为 0（绝对帧口径），位置保持不动。
+        s.base_frames.store(0, Ordering::Relaxed);
+    }
     *s.last_play_file = None;
     idle_track_meter_state(s.meter_state, s.meter_generation);
     // ★ 起播等待期的垫音抑制随播放会话结束而清空：抑制集合表达的是"本次
@@ -2417,6 +2443,143 @@ mod tests {
             job.algorithm,
             crate::time_stretch::StretchAlgorithm::SignalsmithStretch
         ));
+    }
+
+    /// 停止必须保留真实停止点：引擎是"从哪里继续播放"的唯一权威。
+    ///
+    /// 【为什么这条是回归锚点】此前 `handle_stop` 把 `position_frames` 清零，而
+    /// 自然结束/自动暂停只把 `is_playing` 翻成 false、位置冻结 —— 同一个"停止"
+    /// 有两种互斥的引擎状态。于是"按 Stop 后再播放"只能靠前端另带锚点，
+    /// 锚点一错就整体错位（光标跳回旧起播点）。这里钉住两件事：
+    /// 1. Stop 之后 `position_frames` 仍等于停止点（`position_sec()` 可读）；
+    /// 2. `base_frames` 归零（时间线播放一律绝对帧）。
+    ///
+    /// 文件预览必须归零：它的位置是"文件内偏移 + 已播放"，没有"下次继续"语义。
+    #[test]
+    fn stop_preserves_the_real_stop_point_for_timeline_playback() {
+        let sample_rate = 48_000u32;
+        let (engine_tx, _engine_rx) = mpsc::channel::<EngineCommand>();
+        let (stretch_tx, _stretch_rx) = mpsc::channel();
+
+        let resources = ResourceManager::new(engine_tx.clone());
+        let cache = resources.cache().clone();
+        let stretch_cache = Arc::new(Mutex::new(ByteBudgetCache::new(8, u64::MAX)));
+        let stretch_inflight = Arc::new(Mutex::new(HashSet::new()));
+        let snapshot = Arc::new(ArcSwap::from_pointee(EngineSnapshot::empty(sample_rate)));
+        let is_playing = Arc::new(AtomicBool::new(false));
+        let play_start_wait = Arc::new(AtomicBool::new(false));
+        let target = Arc::new(Mutex::new(None));
+        let base_frames = Arc::new(AtomicU64::new(0));
+        let position_frames = Arc::new(AtomicU64::new(0));
+        let duration_frames = Arc::new(AtomicU64::new(0));
+        let meter_state = Arc::new(Mutex::new(HashMap::new()));
+        let meter_generation = Arc::new(AtomicU64::new(0));
+        let mut last_timeline = Some(Arc::new(make_plain_stretch_timeline()));
+        let mut last_play_file = None;
+        let mut retired_snapshots = RetirementKeeper::<Arc<EngineSnapshot>>::new(3);
+
+        let mut worker = EngineWorkerState {
+            sr: sample_rate,
+            is_playing: &is_playing,
+            play_start_wait: &play_start_wait,
+            target: &target,
+            base_frames: &base_frames,
+            position_frames: &position_frames,
+            duration_frames: &duration_frames,
+            snapshot: &snapshot,
+            cache: &cache,
+            stretch_cache: &stretch_cache,
+            stretch_inflight: &stretch_inflight,
+            stretch_tx: &stretch_tx,
+            resources: &resources,
+            tx: &engine_tx,
+            last_timeline: &mut last_timeline,
+            last_play_file: &mut last_play_file,
+            retired_snapshots: &mut retired_snapshots,
+            app_handle: None,
+            meter_state: &meter_state,
+            meter_generation: &meter_generation,
+        };
+
+        handle_play_from(&mut worker, 12.5);
+        let start_frame = worker.position_frames.load(Ordering::Relaxed);
+        assert_eq!(start_frame, 600_000, "12.5s @ 48kHz");
+        assert!(worker.is_playing.load(Ordering::Relaxed));
+
+        // 播放推进到停止点。
+        worker.position_frames.store(700_000, Ordering::Relaxed);
+        handle_stop(&mut worker);
+
+        assert!(!worker.is_playing.load(Ordering::Relaxed), "stop must pause");
+        assert_eq!(
+            worker.base_frames.load(Ordering::Relaxed),
+            0,
+            "timeline playback always reports absolute frames"
+        );
+        assert_eq!(
+            worker.position_frames.load(Ordering::Relaxed),
+            700_000,
+            "the stop point must survive so the next play resumes exactly there"
+        );
+
+        // 再播放：起播点必须就是刚才的停止点（无需任何前端锚点）。
+        handle_play_from(&mut worker, 700_000.0 / f64::from(sample_rate));
+        assert_eq!(worker.position_frames.load(Ordering::Relaxed), 700_000);
+    }
+
+    /// 文件预览的停止仍然归零：它的位置不是工程时间轴上的坐标。
+    #[test]
+    fn stop_resets_a_file_preview_position() {
+        let (engine_tx, _engine_rx) = mpsc::channel::<EngineCommand>();
+        let (stretch_tx, _stretch_rx) = mpsc::channel();
+        let resources = ResourceManager::new(engine_tx.clone());
+        let cache = resources.cache().clone();
+        let stretch_cache = Arc::new(Mutex::new(ByteBudgetCache::new(8, u64::MAX)));
+        let stretch_inflight = Arc::new(Mutex::new(HashSet::new()));
+        let snapshot = Arc::new(ArcSwap::from_pointee(EngineSnapshot::empty(44_100)));
+        let is_playing = Arc::new(AtomicBool::new(false));
+        let play_start_wait = Arc::new(AtomicBool::new(false));
+        let target = Arc::new(Mutex::new(None));
+        let base_frames = Arc::new(AtomicU64::new(44_100));
+        let position_frames = Arc::new(AtomicU64::new(22_050));
+        let duration_frames = Arc::new(AtomicU64::new(0));
+        let meter_state = Arc::new(Mutex::new(HashMap::new()));
+        let meter_generation = Arc::new(AtomicU64::new(0));
+        let mut last_timeline = None;
+        let mut last_play_file = Some((
+            PathBuf::from("E:/virtual/example-media.wav"),
+            1.0,
+            "file".to_string(),
+        ));
+        let mut retired_snapshots = RetirementKeeper::<Arc<EngineSnapshot>>::new(3);
+
+        let mut worker = EngineWorkerState {
+            sr: 44_100,
+            is_playing: &is_playing,
+            play_start_wait: &play_start_wait,
+            target: &target,
+            base_frames: &base_frames,
+            position_frames: &position_frames,
+            duration_frames: &duration_frames,
+            snapshot: &snapshot,
+            cache: &cache,
+            stretch_cache: &stretch_cache,
+            stretch_inflight: &stretch_inflight,
+            stretch_tx: &stretch_tx,
+            resources: &resources,
+            tx: &engine_tx,
+            last_timeline: &mut last_timeline,
+            last_play_file: &mut last_play_file,
+            retired_snapshots: &mut retired_snapshots,
+            app_handle: None,
+            meter_state: &meter_state,
+            meter_generation: &meter_generation,
+        };
+
+        handle_stop(&mut worker);
+        assert_eq!(worker.base_frames.load(Ordering::Relaxed), 0);
+        assert_eq!(worker.position_frames.load(Ordering::Relaxed), 0);
+        assert!(worker.last_play_file.is_none());
     }
 
     /// 渲染结果推送（`RenderedClipsChanged`）必须换入新快照 —— 这是"原地

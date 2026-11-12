@@ -445,12 +445,6 @@ export interface SessionState {
          * "同一场播放里两条通道的先后"，晚到的旧读数会把光标拽回去。
          */
         lastTransportSeq: number;
-        /** 刚发起播放、尚未看到引擎首个“正在播放/等待渲染”采样。 */
-        playbackStartPending: boolean;
-        /** 本次播放的期望锚点（秒）；用于丢弃旧位置的采样。 */
-        playbackStartAnchorSec: number;
-        /** 起播窗口起点（performance.now，毫秒）。 */
-        playbackStartAtMs: number;
         gpuBackend: string;
     };
 
