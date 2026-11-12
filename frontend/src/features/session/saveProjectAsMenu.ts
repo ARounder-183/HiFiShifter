@@ -6,7 +6,8 @@
  * 快捷键没反应"这一类静默分叉；新增一种格式时也必然漏改其中一处。
  *
  * 格式说明（`descKey`）与标签分开：说明要出现在子项的 tooltip 里（尤其
- * "zip 需解压后打开"是必须保留的教育信息），标签只写"另存为 XX"。
+ * "zip 需解压后打开"是必须保留的教育信息），标签统一采用完整动作句式：
+ * 与「导入外部工程」子菜单的"导入 XX 工程..."相仿，中文写"另存为 XX..."。
  */
 import type { MessageKey } from "../../i18n/messages";
 import type { ProjectSaveFormat } from "../../services/api/project";
