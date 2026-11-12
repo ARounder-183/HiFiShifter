@@ -65,6 +65,7 @@ export const initialState: SessionState = {
     paramEditorTimelineClickSelectTrackEnabled: true,
     showClipboardPreview: true,
     showParamValuePopup: true,
+    showClipPitchOverlay: true,
     // 空映射 = 全部参数按倍率显示（历史行为）。
     paramAxisUnits: {},
     paramAxisDirections: {},

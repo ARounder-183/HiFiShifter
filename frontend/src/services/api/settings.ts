@@ -165,6 +165,8 @@ export interface UiSettings {
     paramEditorSeekPlayhead?: boolean;
     showClipboardPreview: boolean;
     showParamValuePopup?: boolean;
+    /** 音高模式下是否绘制各 Clip 自己的源音高参考线（默认开）。 */
+    showClipPitchOverlay?: boolean;
     /**
      * 纵轴标尺的展示单位（参数 id → `"ratio"` | `"db"`）。
      *

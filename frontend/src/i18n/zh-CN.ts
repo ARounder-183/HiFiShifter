@@ -1338,8 +1338,6 @@ export const zhCN = {
     copy_playhead_time: "复制播放光标时间",
     sync_timeline_view: "同步时间轴视图",
     sync_timeline_view_tooltip: "将参数编辑器的水平位置与缩放同步到时间轴",
-    clip_pitch_overlay: "Clip 音高",
-    clip_pitch_overlay_tooltip: "显示每个 Clip 自己的音高曲线",
 
     // Tool modes
 
@@ -1369,6 +1367,7 @@ export const zhCN = {
     // 速度映射（变速/变拍/变音阶）
     tempo_map: "速度映射",
     menu_view_tempo_map: "速度映射",
+    menu_view_clip_pitch: "Clip 音高曲线",
     editor_route_unavailable: "编辑器没有连上宿主",
     editor_route_unavailable_hint: "导出诊断包可以看出原因",
     host_key_focus_failed: "没能把键盘交给宿主",

@@ -1340,8 +1340,6 @@ export const zhTW = {
     copy_playhead_time: "複製播放游標時間",
     sync_timeline_view: "同步時間軸檢視",
     sync_timeline_view_tooltip: "將參數編輯器的水平位置與縮放同步到時間軸",
-    clip_pitch_overlay: "Clip 音高",
-    clip_pitch_overlay_tooltip: "顯示每個 Clip 自己的音高曲線",
 
     // 工具模式
 
@@ -1371,6 +1369,7 @@ export const zhTW = {
     // 速度映射（變速/變拍/變音階）
     tempo_map: "速度映射",
     menu_view_tempo_map: "速度映射",
+    menu_view_clip_pitch: "Clip 音高曲線",
     editor_route_unavailable: "編輯器沒有連上宿主",
     editor_route_unavailable_hint: "匯出診斷包可以看出原因",
     host_key_focus_failed: "沒能把鍵盤交給宿主",

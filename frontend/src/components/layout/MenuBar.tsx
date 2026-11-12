@@ -36,6 +36,7 @@ import {
     toggleSyncEditsAcrossTakes,
     toggleClipboardPreview,
     toggleParamValuePopup,
+    toggleClipPitchOverlay,
     toggleTempoMapVisible,
     setProjectStretchSettingsRemote,
 } from "../../features/session/sessionSlice";
@@ -184,6 +185,7 @@ const selectMenuBarSession = (state: RootState) => {
         showAllTakes: session.showAllTakes,
         showClipboardPreview: session.showClipboardPreview,
         showParamValuePopup: session.showParamValuePopup,
+        showClipPitchOverlay: session.showClipPitchOverlay,
         syncEditsAcrossTakes: session.syncEditsAcrossTakes,
         tempoMap: session.tempoMap,
         tempoMapVisible: session.tempoMapVisible,
@@ -1080,6 +1082,14 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         }}
                     >
                         {withCheck(s.showParamValuePopup, t("param_value_popup"))}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                        onSelect={() => {
+                            dispatch(toggleClipPitchOverlay());
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        {withCheck(s.showClipPitchOverlay, t("menu_view_clip_pitch"))}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
 

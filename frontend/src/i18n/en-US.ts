@@ -1514,8 +1514,6 @@ export const enUS = {
     sync_timeline_view: "Sync Timeline View",
     sync_timeline_view_tooltip:
         "Sync the parameter editor's horizontal position and zoom with the timeline",
-    clip_pitch_overlay: "Clip Pitch",
-    clip_pitch_overlay_tooltip: "Show each clip's own pitch curve",
 
     // Tool modes
 
@@ -1545,6 +1543,7 @@ export const enUS = {
     // Tempo Map (tempo / time-signature / scale changes)
     tempo_map: "Tempo Map",
     menu_view_tempo_map: "Tempo Map",
+    menu_view_clip_pitch: "Clip Pitch Curves",
     editor_route_unavailable: "The editor is not connected to the host.",
     editor_route_unavailable_hint: "Exporting a diagnostics bundle shows the reason.",
     host_key_focus_failed: "Could not hand the keyboard to the host.",

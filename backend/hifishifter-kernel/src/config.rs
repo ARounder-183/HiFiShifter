@@ -491,6 +491,12 @@ pub struct UiSettings {
     pub show_clipboard_preview: bool,
     #[serde(default = "default_true")]
     pub show_param_value_popup: bool,
+    /// 音高模式下是否绘制各 Clip 自己的源音高参考线（视图菜单的显示开关）。
+    ///
+    /// 与 `pv.orig`（根轨道组的单值合成基线）互补：Clip 重合、音高参考块覆盖时，
+    /// 只有它还能表达「每个 Clip 原本的音高」。纯展示开关，不进工程。
+    #[serde(default = "default_true")]
+    pub show_clip_pitch_overlay: bool,
     /// 纵轴标尺的展示单位（参数 id → `"ratio"` / `"db"`）。
     ///
     /// 只对音量 / 动态这类线性幅值倍率参数有意义（`1× = 0 dB`）：同一个值既能读成
@@ -1741,6 +1747,7 @@ impl Default for UiSettings {
             param_editor_seek_playhead: true,
             show_clipboard_preview: true,
             show_param_value_popup: true,
+            show_clip_pitch_overlay: true,
             param_axis_units: std::collections::HashMap::new(),
             param_axis_directions: std::collections::HashMap::new(),
             last_project_save_format: default_project_save_format(),

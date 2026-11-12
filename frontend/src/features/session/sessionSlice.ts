@@ -795,6 +795,10 @@ const sessionSlice = createSlice({
         toggleParamValuePopup(state) {
             state.showParamValuePopup = !state.showParamValuePopup;
         },
+        /** 切换 Clip 源音高参考线图层（视图菜单的显示开关，默认开）。 */
+        toggleClipPitchOverlay(state) {
+            state.showClipPitchOverlay = !state.showClipPitchOverlay;
+        },
         /**
          * 切换某参数纵轴标尺的展示单位（倍率 ↔ dB）。
          *
@@ -1310,6 +1314,7 @@ export const {
     toggleParamEditorTimelineClickSelectTrack,
     toggleClipboardPreview,
     toggleParamValuePopup,
+    toggleClipPitchOverlay,
     toggleParamAxisUnit,
     toggleParamAxisDirection,
     setProjectLastSaveFormat,

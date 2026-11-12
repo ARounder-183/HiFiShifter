@@ -243,6 +243,8 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
             if (s.showClipboardPreview != null) state.showClipboardPreview = s.showClipboardPreview;
             if (s.showParamValuePopup != null)
                 state.showParamValuePopup = Boolean(s.showParamValuePopup);
+            if (s.showClipPitchOverlay != null)
+                state.showClipPitchOverlay = Boolean(s.showClipPitchOverlay);
             // 纵轴单位映射：手改坏配置（未知参数 / 非法取值）在这里被过滤掉。
             state.paramAxisUnits = normalizeParamAxisUnits(s.paramAxisUnits);
             state.paramAxisDirections = normalizePanAxisDirections(s.paramAxisDirections);

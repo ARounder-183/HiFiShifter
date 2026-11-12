@@ -153,6 +153,13 @@ export interface SessionState {
     /** 参数线附近显示参数值浮窗 */
     showParamValuePopup: boolean;
     /**
+     * 音高模式下是否绘制各 Clip 自己的源音高参考线。
+     *
+     * 与 `pv.orig`（根轨道组的单值合成基线）互补：Clip 重合、音高参考块覆盖时，
+     * 只有它还能表达「每个 Clip 原本的音高」。纯展示开关，不进工程、不进 undo。
+     */
+    showClipPitchOverlay: boolean;
+    /**
      * 纵轴标尺的展示单位（参数 id → `"ratio"` | `"db"`）。
      *
      * 只对音量 / 动态这类**线性幅值倍率**参数有意义（`1× = 0 dB`）：同一个值既能

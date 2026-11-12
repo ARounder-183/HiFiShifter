@@ -2244,10 +2244,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         waveformRepaintLoopRef.current?.invalidate();
     }, [loudnessGeometryWarp]);
 
-    // Clip 源音高参考线：纯 UI 开关（默认开，不写入工程）。
-    const [clipPitchOverlayVisible, setClipPitchOverlayVisible] = useState(true);
-    const toggleClipPitchOverlay = useCallback(() => setClipPitchOverlayVisible((v) => !v), []);
-
     // 帧装配（轴投影 → 峰值 → live 覆盖 → 曲线/选区图层 → `drawRef.current`）整块在
     // `usePianoRollFrameAssembly` 里（见该文件头）。调用点必须留在原位：`useClipsPeaksForPianoRoll`
     // 与 `useLiveParamEditing` 由它调用，状态槽与 effect 顺序取决于这个位置。
@@ -2279,7 +2275,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         scrollLeft,
         viewSize,
         editParam,
-        clipPitchOverlayVisible,
+        // 视图菜单的显示开关（持久化在 UI 设置里，不进工程）。
+        clipPitchOverlayVisible: s.showClipPitchOverlay,
         currentParamDefaultValue,
         pitchEnabled,
         pitchHardDisableReason,
@@ -6953,8 +6950,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         tf,
         timeDisplaySettingsOpen,
         toggleSecondaryParam,
-        toggleClipPitchOverlay,
-        clipPitchOverlayVisible,
         toggleAlwaysShowParamBlocks,
         alwaysShowParamBlocks,
         toolbarRowRef,
