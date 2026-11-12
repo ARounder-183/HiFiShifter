@@ -115,7 +115,7 @@ fn syllable_payload(
             json!({"startSec": s.start_sec, "endSec": s.end_sec, "midiNote": s.midi_note})
         }).collect::<Vec<_>>()).unwrap_or_default(),
         "sourceNotes": analysis.map(|a| a.source_spans_sec.iter().map(|s| s.midi_note).collect::<Vec<_>>()).unwrap_or_default(),
-        "analyzedWindowSec": analysis.and_then(|a| a.analyzed_window_sec),
+        "analyzedWindowSec": analysis.map(|a| a.analyzed_window_sec),
         "algorithm": analysis.map(|a| a.algorithm.clone()).unwrap_or_else(|| {
             hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM.to_string()
         }),

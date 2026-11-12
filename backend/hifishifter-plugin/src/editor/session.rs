@@ -4096,6 +4096,7 @@ impl EditorSession {
         let frame_period_ms = timeline.frame_period_ms();
         for clip in &mut timeline.clips {
             let canonical_id = clip.id.strip_prefix(&self.namespace).unwrap_or(&clip.id);
+            let window = clip_audible_window(clip);
             for take in &mut clip.takes {
                 let key = crate::state_channel::TakeSyllableKey {
                     clip_id: canonical_id.to_owned(),
@@ -4116,7 +4117,6 @@ impl EditorSession {
                     .unwrap_or_default();
                 let digest = syllable_source_digest(source, take, frame_period_ms);
                 // Persisted authority first; validate source identity and window.
-                let window = clip_audible_window(clip);
                 take.syllable_analysis = edits
                     .take_syllables
                     .get(&key)
