@@ -49,6 +49,57 @@ pub struct TakeSyllableAnalysis {
     pub analyzed_window_sec: [f64; 2],
 }
 
+/// Clip full-source VAD/analysis spans into the audible source window.
+///
+/// VAD returns coordinates from frame zero of the whole media, while GAME
+/// callers already produce window-clipped events. Both must land in the same
+/// source-domain coordinate system before being persisted as syllable spans.
+pub fn clip_spans_to_window(
+    spans: &[SyllableSpan],
+    window_start_sec: f64,
+    window_end_sec: f64,
+) -> Vec<SyllableSpan> {
+    if !(window_start_sec.is_finite()
+        && window_end_sec.is_finite()
+        && window_end_sec > window_start_sec + 1e-12)
+    {
+        return Vec::new();
+    }
+    let mut out: Vec<SyllableSpan> = spans
+        .iter()
+        .filter_map(|span| {
+            let start = span.start_sec.max(window_start_sec).min(window_end_sec);
+            let end = span.end_sec.max(window_start_sec).min(window_end_sec);
+            (end > start + 1e-12).then_some(SyllableSpan {
+                start_sec: start,
+                end_sec: end,
+                midi_note: span.midi_note,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.start_sec
+            .total_cmp(&b.start_sec)
+            .then(a.end_sec.total_cmp(&b.end_sec))
+    });
+    out
+}
+
+/// A completed analysis is usable only with a valid window and non-empty spans.
+pub fn analysis_window_status(
+    analyzed: [f64; 2],
+    window: (f64, f64),
+    has_spans: bool,
+) -> &'static str {
+    if !has_spans {
+        "missing"
+    } else if window.0 >= analyzed[0] - 1e-6 && window.1 <= analyzed[1] + 1e-6 {
+        "current"
+    } else {
+        "stale"
+    }
+}
+
 impl TakeSyllableAnalysis {
     /// True when every position of the window was covered by this analysis.
     /// Narrowing a Clip keeps the cached spans valid; extending it does not.
@@ -694,6 +745,42 @@ mod tests {
         };
         assert!(outside.is_current("same-pcm"));
         assert!(!outside.is_current_for_window("same-pcm", (1.0, 1.8)));
+    }
+
+    #[test]
+    fn full_source_spans_clip_into_the_audible_window_with_their_notes() {
+        let clipped = clip_spans_to_window(
+            &[
+                SyllableSpan {
+                    start_sec: 0.2,
+                    end_sec: 0.8,
+                    midi_note: Some(60.0),
+                },
+                SyllableSpan {
+                    start_sec: 0.9,
+                    end_sec: 1.6,
+                    midi_note: Some(64.0),
+                },
+            ],
+            1.0,
+            3.0,
+        );
+        assert_eq!(clipped.len(), 1);
+        assert_eq!(clipped[0].start_sec, 1.0);
+        assert_eq!(clipped[0].end_sec, 1.6);
+        assert_eq!(clipped[0].midi_note, Some(64.0));
+        assert_eq!(
+            analysis_window_status([1.0, 3.0], (1.0, 3.0), true),
+            "current"
+        );
+        assert_eq!(
+            analysis_window_status([1.0, 3.0], (0.5, 3.0), true),
+            "stale"
+        );
+        assert_eq!(
+            analysis_window_status([1.0, 3.0], (1.0, 3.0), false),
+            "missing"
+        );
     }
 
     #[test]

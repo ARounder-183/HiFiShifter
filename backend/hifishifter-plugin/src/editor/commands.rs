@@ -157,6 +157,11 @@ pub(crate) fn analyze_syllables(
             "clipId": request.clip_id,
             "takeId": request.take_id,
             "sourceSpansSec": [],
+            "sourceNotes": [],
+            "analyzedWindowSec": [
+                request.source_window.0.min(request.source_window.1),
+                request.source_window.0.max(request.source_window.1)
+            ],
             "algorithm": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM,
             "algorithmVersion": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
             "analyzed": false,
@@ -170,6 +175,11 @@ pub(crate) fn analyze_syllables(
             "clipId": request.clip_id,
             "takeId": request.take_id,
             "sourceSpansSec": [],
+            "sourceNotes": [],
+            "analyzedWindowSec": [
+                request.source_window.0.min(request.source_window.1),
+                request.source_window.0.max(request.source_window.1)
+            ],
             "algorithm": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM,
             "algorithmVersion": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
             "analyzed": false,
@@ -276,11 +286,18 @@ fn vad_fallback_spans(
         &|| false,
     )
     .ok_or("source_missing")?;
-    Ok(hifishifter_kernel::pitch_analysis::estimate_syllable_spans(
+    let spans = hifishifter_kernel::pitch_analysis::estimate_syllable_spans(
         &level,
         &pitch,
         request.frame_period_ms,
         hifishifter_kernel::pitch_analysis::SyllableConfig::default(),
+    );
+    let (start, end) = (
+        request.source_window.0.min(request.source_window.1),
+        request.source_window.0.max(request.source_window.1),
+    );
+    Ok(hifishifter_kernel::pitch_analysis::clip_spans_to_window(
+        &spans, start, end,
     ))
 }
 #[cfg(test)]

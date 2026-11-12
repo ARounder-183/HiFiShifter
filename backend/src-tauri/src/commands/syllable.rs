@@ -165,8 +165,7 @@ fn analyze_clip_syllables_inner(
     };
     let tl = tl_snapshot;
     let take = clip.active_take().clone();
-    let window =
-        hifishifter_kernel::param_blocks::projection::clip_audible_source_window(&clip);
+    let window = hifishifter_kernel::param_blocks::projection::clip_audible_source_window(&clip);
     let fp = tl.frame_period_ms().max(0.1);
     let digest = source_digest(&clip, fp);
     let root = tl.resolve_root_track_id(&clip.track_id).unwrap_or_default();
@@ -362,10 +361,15 @@ fn fallback_vad_spans(
     }));
     let (level, pitch) =
         crate::pitch_clip::analyze_clip_for_syllables(tl, clip, root, fp).unwrap_or_default();
+    let window = hifishifter_kernel::param_blocks::projection::clip_audible_source_window(clip);
     let spans = if level.is_empty() {
         Vec::new()
     } else {
-        estimate_syllable_spans(&level, &pitch, fp, SyllableConfig::default())
+        hifishifter_kernel::pitch_analysis::clip_spans_to_window(
+            &estimate_syllable_spans(&level, &pitch, fp, SyllableConfig::default()),
+            window.0.min(window.1),
+            window.0.max(window.1),
+        )
     };
     (
         spans
@@ -388,6 +392,28 @@ mod tests {
                 "takes":[{"id":"take","source_path":"a.wav","source_start_sec":0,"source_end_sec":1}]}],
             "project_sec":2,"bpm":120
         })).unwrap()
+    }
+
+    #[test]
+    fn strict_analysis_payload_always_has_a_window_and_parallel_notes() {
+        let clip = timeline().clips[0].clone();
+        let empty = payload(&clip, "take", None);
+        assert_eq!(empty.source_notes.len(), empty.source_spans_sec.len());
+        assert_eq!(empty.analyzed, false);
+        let analysis = TakeSyllableAnalysis {
+            algorithm: "test".into(),
+            algorithm_version: 1,
+            source_digest: "d".into(),
+            source_spans_sec: vec![hifishifter_kernel::pitch_analysis::SyllableSpan {
+                start_sec: 1.0,
+                end_sec: 1.4,
+                midi_note: Some(64.0),
+            }],
+            analyzed_window_sec: [1.0, 3.0],
+        };
+        let reply = payload(&clip, "take", Some(&analysis));
+        assert_eq!(reply.source_notes, vec![Some(64.0)]);
+        assert_eq!(reply.analyzed_window_sec, Some([1.0, 3.0]));
     }
 
     #[test]

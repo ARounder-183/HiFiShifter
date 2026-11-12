@@ -1,5 +1,6 @@
 import type { PayloadAction } from "@reduxjs/toolkit";
 import type { SessionState } from "./types";
+import { reportParamBlockDiagnostic } from "../../../components/layout/pianoRoll/paramBlockDiagnostics";
 
 /** GAME changes block metadata, never the parameter/audio revision. */
 export function applyClipSyllableAnalysisReducer(
@@ -17,6 +18,16 @@ export function applyClipSyllableAnalysisReducer(
     }>,
 ) {
     const result = action.payload;
+    const reject = (code: string) => {
+        reportParamBlockDiagnostic({
+            code,
+            gesture: "layout",
+            rootTrackId: null,
+            blockId: null,
+            frame: null,
+            detail: JSON.stringify({ clipId: result?.clipId, takeId: result?.takeId }),
+        });
+    };
     if (
         !result ||
         !result.analyzed ||
@@ -29,21 +40,27 @@ export function applyClipSyllableAnalysisReducer(
         result.analyzedWindowSec.length !== 2 ||
         !result.analyzedWindowSec.every((value) => Number.isFinite(value)) ||
         result.analyzedWindowSec[1] < result.analyzedWindowSec[0]
-    )
+    ) {
+        reject("analysis_payload_invalid");
         return;
+    }
     if (
         result.sourceSpansSec.some(
             (span, index, spans) =>
                 !Number.isFinite(span.startSec) ||
                 !Number.isFinite(span.endSec) ||
                 span.endSec <= span.startSec ||
+                span.startSec < result.analyzedWindowSec[0] - 1e-6 ||
+                span.endSec > result.analyzedWindowSec[1] + 1e-6 ||
                 (index > 0 && span.startSec < spans[index - 1].endSec - 1e-9),
         ) ||
         result.sourceNotes.some(
             (note) => note !== null && (typeof note !== "number" || !Number.isFinite(note)),
         )
-    )
+    ) {
+        reject("analysis_window_stale");
         return;
+    }
     const clip = state.clips.find((clip) => clip.id === result.clipId);
     const take = clip?.takes?.find((take) => take.id === result.takeId);
     if (
@@ -51,8 +68,10 @@ export function applyClipSyllableAnalysisReducer(
         !take ||
         (result.sourcePath !== undefined &&
             (take.sourcePath ?? clip.sourcePath) !== result.sourcePath)
-    )
+    ) {
+        reject("analysis_payload_stale");
         return;
+    }
     const nextSpans = result.sourceSpansSec.map((span, index) => ({
         startSec: span.startSec,
         endSec: span.endSec,

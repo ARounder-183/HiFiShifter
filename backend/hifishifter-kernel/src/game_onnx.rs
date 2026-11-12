@@ -630,7 +630,7 @@ pub fn syllable_spans_for_window(
         let end = source_end.max(window_start_sec).min(window_end_sec);
         // Clipping changes the geometry, not the note's identity. Keep the
         // model's pitch even when only a sliver of the note is audible.
-        if end > start + 1e-9 {
+        if end > start + 1e-12 {
             out.push((start, end, note));
         }
     }
