@@ -634,10 +634,19 @@ function trimMember(
 }
 
 function spanListKey(
-    spans: readonly { readonly startSec: number; readonly endSec: number }[] | undefined,
+    spans:
+        | readonly {
+              readonly startSec: number;
+              readonly endSec: number;
+              readonly note?: number | null;
+          }[]
+        | undefined,
 ): string {
     return (spans ?? [])
-        .map((span) => span.startSec.toFixed(6) + "-" + span.endSec.toFixed(6))
+        .map(
+            (span) =>
+                span.startSec.toFixed(6) + "-" + span.endSec.toFixed(6) + ":" + (span.note ?? "-"),
+        )
         .join(";");
 }
 
@@ -670,6 +679,7 @@ function takeLayoutKey(take: NonNullable<ParamBlockSourceClip["takes"]>[number])
         (take.syllableNotes ?? []).map((note) => (note === null ? "-" : note)).join(","),
         take.syllableAnalysisWindowSec?.join("-") ?? "",
         spanListKey(take.gameBlockBaseline?.sourceSpansSec),
+        take.gameBlockBaseline?.analyzedWindowSec?.join("-") ?? "",
         noteListKey(take.midiNoteData),
     ].join(":");
 }
@@ -697,6 +707,7 @@ function clipLayoutKey(clip: ParamBlockSourceClip): string {
         (clip.syllableNotes ?? []).map((note) => (note === null ? "-" : note)).join(","),
         clip.syllableAnalysisWindowSec?.join("-") ?? "",
         spanListKey(clip.gameBlockBaseline?.sourceSpansSec),
+        clip.gameBlockBaseline?.analyzedWindowSec?.join("-") ?? "",
         noteListKey(clip.midiNoteData),
         (clip.takes ?? []).map(takeLayoutKey).join(","),
     ].join(":");

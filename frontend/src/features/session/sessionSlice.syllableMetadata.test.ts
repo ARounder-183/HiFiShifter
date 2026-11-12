@@ -106,6 +106,9 @@ test("late, failed, or invalid GAME results cannot overwrite a different source"
         { ...result, analyzed: false },
         { ...result, sourceSpansSec: [] },
         { ...result, sourceSpansSec: [{ startSec: 1, endSec: 0 }] },
+        { ...result, sourceSpansSec: [{ startSec: -0.1, endSec: 0.1 }] },
+        { ...result, sourceSpansSec: [{ startSec: 0, endSec: 0.4 }], sourceNotes: [] },
+        { ...result, sourceNotes: [60, Number.NaN] },
     ])
         expect(reducer(state, applyClipSyllableAnalysis(changed))).toBe(state);
 });

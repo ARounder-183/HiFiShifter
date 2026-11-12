@@ -172,10 +172,11 @@ pub fn root_analysis_pending(timeline: &TimelineState, root_track_id: &str) -> b
                 .as_ref()
                 .is_none_or(|notes| notes.is_empty())
             && take.syllable_analysis.as_ref().is_none_or(|analysis| {
-                analysis.source_spans_sec.is_empty()
-                    || !analysis.covers_window(
-                        ClipProjection::from_clip_take(clip, &take).audible_source_window(),
-                    )
+                crate::pitch_analysis::analysis_window_status(
+                    analysis.analyzed_window_sec,
+                    ClipProjection::from_clip_take(clip, &take).audible_source_window(),
+                    !analysis.source_spans_sec.is_empty(),
+                ) != "current"
             })
     })
 }

@@ -46,7 +46,9 @@ export interface ParamBlockSourceClip {
             readonly sourceSpansSec?: ReadonlyArray<{
                 readonly startSec: number;
                 readonly endSec: number;
+                readonly note?: number | null;
             }>;
+            readonly analyzedWindowSec?: readonly [number, number];
         };
         readonly midiNoteData?: ReadonlyArray<{
             readonly startSec: number;
@@ -65,7 +67,9 @@ export interface ParamBlockSourceClip {
         readonly sourceSpansSec?: ReadonlyArray<{
             readonly startSec: number;
             readonly endSec: number;
+            readonly note?: number | null;
         }>;
+        readonly analyzedWindowSec?: readonly [number, number];
     };
     readonly midiNoteData?: ReadonlyArray<{
         readonly startSec: number;

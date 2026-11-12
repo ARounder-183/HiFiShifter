@@ -519,6 +519,20 @@ describe("cut edges and fallback display style", () => {
         label: "cut",
     };
 
+    it("keeps a subpixel one-frame block as at least one physical pixel", () => {
+        const scene = buildParamBlockScene({
+            axis,
+            viewportHeightPx: 400,
+            blocks: [{ ...base, startSec: 0.001, endSec: 0.0011 }],
+            borderRgba: rgba,
+            selectedRgba,
+            groupedRgba,
+            fillRgba: [0.4, 0.6, 0.8, 0.5],
+        });
+        expect(scene.fills.length).toBeGreaterThan(0);
+        expect(scene.items.length).toBeGreaterThan(0);
+    });
+
     it("draws a flat edge and an inner strip at a cut side", () => {
         const scene = buildParamBlockScene({
             axis,

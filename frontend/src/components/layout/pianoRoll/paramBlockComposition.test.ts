@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { composeParamBlockView } from "./paramBlockComposition";
 import type { ParamBlockSourceClip } from "./paramBlockProjection";
@@ -50,7 +51,35 @@ function mergedEdits(): ParamBlockEditSet {
     return { schemaVersion: 2, revision: 1, blocks: [block] };
 }
 
+const viewFixture = JSON.parse(
+    readFileSync(new URL("./__fixtures__/paramBlockView.golden.json", import.meta.url), "utf8"),
+) as {
+    readonly framePeriodMs: number;
+    readonly clips: readonly ParamBlockSourceClip[];
+    readonly expected: readonly Record<string, unknown>[];
+};
+
 describe("paramBlockComposition", () => {
+    it("matches the shared view identity fixture", () => {
+        const view = composeParamBlockView(
+            "root",
+            viewFixture.clips,
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            viewFixture.framePeriodMs,
+        );
+        expect(
+            view.blocks.map((block) => ({
+                startFrame: block.startFrame,
+                endFrameExclusive: block.endFrameExclusive,
+                kind: block.kind,
+                cutStart: block.cutStart,
+                cutEnd: block.cutEnd,
+                sourceKey: block.sourceKey,
+                sourceNote: block.sourceNote,
+            })),
+        ).toEqual(viewFixture.expected);
+    });
+
     it("derives base blocks from Take spans and suppresses them with a merged user block", () => {
         const base = composeParamBlockView(
             "root",

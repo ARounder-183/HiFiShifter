@@ -252,12 +252,14 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
         const endSec = Math.max(block.startSec, block.endSec);
         if (!Number.isFinite(startSec) || !Number.isFinite(endSec)) continue;
         const x0 = secToViewportPx(axis, startSec);
-        const x1 = secToViewportPx(axis, endSec);
+        const projectedX1 = secToViewportPx(axis, endSec);
         // Only a block completely outside the horizontal viewport is absent.
-        // A one-frame interval may project to less than one CSS pixel; the
-        // device-pixel snap below still gives it at least one physical pixel.
+        // A positive interval may project to less than one CSS pixel; snap to
+        // at least one physical pixel instead of dropping the derived block.
         if (!(endSec > startSec)) continue;
-        if (x1 < 0 || x0 > axis.viewportWidthPx) continue;
+        if (projectedX1 < 0 || x0 > axis.viewportWidthPx) continue;
+        const minPixelWidth = 1 / Math.max(1, dpr);
+        const x1 = Math.max(projectedX1, x0 + minPixelWidth);
         const rawTop = Number.isFinite(block.topPx) ? block.topPx : 0;
         const rawBottom = rawTop + Math.max(1, block.heightPx);
         if (rawBottom <= 0 || rawTop >= height) continue;

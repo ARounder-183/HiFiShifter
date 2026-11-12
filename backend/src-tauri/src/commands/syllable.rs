@@ -32,8 +32,7 @@ pub struct ClipSyllableAnalysisPayload {
     pub source_spans_sec: Vec<SyllableSpanPayload>,
     /// Parallel array of source notes (legacy readers only use `source_spans_sec`).
     pub source_notes: Vec<Option<f32>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub analyzed_window_sec: Option<[f64; 2]>,
+    pub analyzed_window_sec: [f64; 2],
     pub algorithm: String,
     pub algorithm_version: u32,
     pub analyzed: bool,
@@ -47,6 +46,7 @@ fn payload(
     clip: &crate::state::Clip,
     take_id: &str,
     analysis: Option<&TakeSyllableAnalysis>,
+    window: [f64; 2],
 ) -> ClipSyllableAnalysisPayload {
     let spans = analysis
         .map(|a| {
@@ -67,7 +67,7 @@ fn payload(
         source_notes: analysis
             .map(|a| a.source_spans_sec.iter().map(|s| s.midi_note).collect())
             .unwrap_or_default(),
-        analyzed_window_sec: analysis.map(|a| a.analyzed_window_sec),
+        analyzed_window_sec: analysis.map_or(window, |a| a.analyzed_window_sec),
         source_spans_sec: spans,
         algorithm: analysis
             .map(|a| a.algorithm.clone())
@@ -117,7 +117,7 @@ pub(super) fn get_clip_syllable_spans(
         .syllable_analysis
         .as_ref()
         .filter(|a| a.is_current_for_window(&digest, window));
-    Ok(payload(clip, &take.id, analysis))
+    Ok(payload(clip, &take.id, analysis, [window.0, window.1]))
 }
 
 /// 显式重分析：使用现有电平 / 音高缓存；F0 缺失时仍只靠电平估计。
@@ -173,7 +173,14 @@ fn analyze_clip_syllables_inner(
     // MIDI 内容已有精确音符边界；不要用音频估计覆盖它。
     if take.midi_note_data.as_ref().is_some_and(|n| !n.is_empty()) || clip.source_path.is_none() {
         set_syllable_analysis_progress(None);
-        return Ok(payload(&clip, &take.id, take.syllable_analysis.as_ref()));
+        let window =
+            hifishifter_kernel::param_blocks::projection::clip_audible_source_window(&clip);
+        return Ok(payload(
+            &clip,
+            &take.id,
+            take.syllable_analysis.as_ref(),
+            [window.0, window.1],
+        ));
     }
     /*
      * 幂等：时间线刷新可能在同一 Clip 上重复发起分析。已有当前缓存时
@@ -186,7 +193,12 @@ fn analyze_clip_syllables_inner(
     {
         if !analysis.source_spans_sec.is_empty() {
             set_syllable_analysis_progress(None);
-            return Ok(payload(&clip, &take.id, Some(analysis)));
+            return Ok(payload(
+                &clip,
+                &take.id,
+                Some(analysis),
+                [window.0, window.1],
+            ));
         }
     }
 
@@ -319,7 +331,14 @@ fn commit_analysis_metadata(
         take.syllable_analysis = Some(analysis);
     }
     let projected_clip = clip.clone();
-    let mut reply = payload(clip, take_id, clip.active_take().syllable_analysis.as_ref());
+    let reply_window =
+        hifishifter_kernel::param_blocks::projection::clip_audible_source_window(clip);
+    let mut reply = payload(
+        clip,
+        take_id,
+        clip.active_take().syllable_analysis.as_ref(),
+        [reply_window.0, reply_window.1],
+    );
     if let Some(root) = timeline.resolve_root_track_id(&projected_clip.track_id) {
         let edits = timeline
             .params_by_root_track
@@ -397,7 +416,7 @@ mod tests {
     #[test]
     fn strict_analysis_payload_always_has_a_window_and_parallel_notes() {
         let clip = timeline().clips[0].clone();
-        let empty = payload(&clip, "take", None);
+        let empty = payload(&clip, "take", None, [0.0, 1.0]);
         assert_eq!(empty.source_notes.len(), empty.source_spans_sec.len());
         assert_eq!(empty.analyzed, false);
         let analysis = TakeSyllableAnalysis {
@@ -411,9 +430,9 @@ mod tests {
             }],
             analyzed_window_sec: [1.0, 3.0],
         };
-        let reply = payload(&clip, "take", Some(&analysis));
+        let reply = payload(&clip, "take", Some(&analysis), [1.0, 3.0]);
         assert_eq!(reply.source_notes, vec![Some(64.0)]);
-        assert_eq!(reply.analyzed_window_sec, Some([1.0, 3.0]));
+        assert_eq!(reply.analyzed_window_sec, [1.0, 3.0]);
     }
 
     #[test]
