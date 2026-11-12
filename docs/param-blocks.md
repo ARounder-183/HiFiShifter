@@ -90,9 +90,13 @@ game baseline                      playback_rate / reverse        参数块编�
 - **音高视图有三层语义不同的线**，不得合并：
   - 灰色虚线 `pv.orig`：根轨道组的**单值合成**原始线（`assemble_pitch_orig_from_cache`）。重叠 Clip 与音高参考块在同一帧竞争后只留一个值。
   - 白色主线 `pv.edit`：当前编辑目标。
-  - 彩色细线（Clip 源音高参考线）：每个 Clip 自己的 `clipPitchCurves` 曲线，按 Clip 颜色稳定着色；重合段提高不透明度、选中 Clip 最后绘制。它只读、不参与编辑与渲染。
-- Clip 源音高参考线由 `clipPitchOverlay.ts` 统一派生：数据有效性（`curveStartSec` 对齐 Clip 起点、曲线长度覆盖 Clip）、`overlapDepth`、`kind`（`sourceF0` / `midiReference`）与**有声音段切分**都在那里完成。禁止在绘制层再把 `midi <= 0` 的前后点连成一条线（那会画出贯穿静音的假斜线）。
-- 该图层有独立开关（参数工具栏「Clip 音高」，默认开，仅 pitch 模式可见）。它不能替代 `pv.orig`：后者是渲染与编辑的基线；也不能把 `pv.orig` 改成多值曲线来“显示重合”。
+  - 彩色细线（Clip 源音高参考线）：每个 Clip 自己的 `clipPitchCurves` 曲线，按 **Clip 身份**稳定着色（见下）；重合段提高不透明度、焦点 Clip 最后绘制。它只读、不参与编辑与渲染。
+- Clip 源音高参考线由 `clipPitchOverlay.ts` 统一派生：数据有效性（`round(curveStartSec·1000/fp)` 必须等于 `round(clip.startSec·1000/fp)`、曲线帧数必须覆盖 Clip 帧数、帧周期必须与工程一致）、`overlapDepth`、`kind`（`sourceF0` / `midiReference`）与**有声音段切分**都在那里完成。禁止在绘制层再把 `midi <= 0` 的前后点连成一条线（那会画出贯穿静音的假斜线）。
+- **Clip 源音高曲线必须画在工程帧网格上**：第 i 个采样 = 工程帧 `round(clip.startSec·1000/fp) + i`，与 `pv.orig` 写入 `assemble_pitch_orig_from_cache` 的位置、与参数块投影 `toFrame()` 完全同源。按连续秒（`clip.startSec + i·fp`）落笔会让每条 Clip 各偏一个亚帧相位（≤2.5 ms）——放大到 0.5 s 视口时是 8~9 px 的可见错位，用户会以为自己操作错了。**这是本图层唯一的时间基准，不接受第二份换算。**
+- 上述取舍的代价：曲线相对**波形**最多偏半帧（2.5 ms）。这是既有事实——`pv.orig` 与参数块本来就有同样的偏移，波形只是参考背景。修完后「曲线 ↔ 基线 ↔ 参数块」三者内部自洽；不一致的只是波形。反方向（把 `pv.orig` 挪到精确秒）不可行：它是整条工程的一维帧数组，索引即帧号。
+- **颜色编码 Clip 身份，不跟随 `clip.color`**：新建 Clip 的默认色就是 `emerald`，跟它走等于所有曲线同色。身份色 = 8 色调色板 + `fnv1a(clipId) % 8`，再按重合邻接图贪心让位（重合的 Clip 必不同色，不重合的允许同色）。色值只在 `colors.ts` 按主题解析，模型层只带 `colorIndex`。透明度也只有一层（`resolveClipPitchOverlayVisual`），不得再写进色值。
+- 高亮只认**单一焦点**（`selectedClipId`），不认 `multiSelectedClipIds`：切分会把碎片累积进多选，让"选中"这个视觉通道失效（全部选中 = 全部没选中）。
+- 该图层有独立开关（**视图菜单**「Clip 音高曲线」，`showClipPitchOverlay`，默认开，持久化在 UI 设置里）。它不能替代 `pv.orig`：后者是渲染与编辑的基线；也不能把 `pv.orig` 改成多值曲线来“显示重合”。
 
 ## 参数块图层：常显设置
 
@@ -192,5 +196,6 @@ game baseline                      playback_rate / reverse        参数块编�
 - 任何新增持久化字段都不得是绝对工程帧。
 - Loop 源域片段**不得**在 `normalize_loop_span` 里把跨 anchor 的 head 写成 `cycle + 1`；投影层必须对未 normalize 的 span 也正确拆分，否则左裁越过音符起点后首个参数块会在投影阶段被丢弃。
 - 纯块边界编辑不得 bump 音频版本。
+- Clip 源音高曲线与 `pv.orig` 的**逐帧相等**是不变量（`pitch_clip.rs` 的 `rate_one_slice_matches_the_point_mapping_of_pv_orig` / `emitted_clip_curve_matches_the_composite_baseline`）。改动 `trim_and_resample_midi` 的切片或 `assemble_nonloop_pitch_from_window` 的窗口边界前先跑这两条。
 
 - 值轴手感常量只有一份：`kernel/valueAxisEdgeScroller.ts`（带宽 / 满带速度 / 软启动指数 / 单帧上限）。文档与代码冲突时以该文件为准。
