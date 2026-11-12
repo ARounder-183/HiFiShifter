@@ -158,6 +158,22 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
+      # 【为什么 Unix 也要准备 ARA / VST3 SDK】backend job 的 package.sh 除了 App 本体
+      # 还要产出 VST3 与 CLAP 两个插件产物，而 CLAP 外壳复用 hifishifter-plugin，
+      # 该 crate 的 ara2-bridge 启用了 vst3 companion feature；ara2-bridge-companion
+      # 的 build.rs 在缺 ARA_VST3_SDK_DIR 时当场 panic（"VST3 SDK v3.8.0_build_66 is
+      # required"）。Windows 由 install_deps_windows.ps1 走 prepare-plugin-sdks.ps1；
+      # Unix 这里与 clap.yml 用同一套命令（--stage=sdk + 三个环境变量），避免两份
+      # SDK pin 规则漂移。
+      - name: Prepare pinned ARA and VST3 SDKs (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          bash scripts/vst3/unix/build.sh --stage=sdk
+          echo "ARA_SDK_DIR=$GITHUB_WORKSPACE/third_party/sdk/ARA_SDK" >> "$GITHUB_ENV"
+          echo "ARA_VST3_SDK_DIR=$GITHUB_WORKSPACE/third_party/sdk/vst3sdk" >> "$GITHUB_ENV"
+          echo "HIFISHIFTER_CLAP_SDK_DIR=$GITHUB_WORKSPACE/third_party/sdk/clap" >> "$GITHUB_ENV"
+
       # ── System dependencies ───────────────────────────────────────────
 
       - name: Install system dependencies (Linux)
