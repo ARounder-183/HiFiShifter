@@ -257,10 +257,15 @@ export interface PianoRollParamBlockSpec {
          * `displayCenterValue` 已由手势锁定时同样传 false，避免二次取整。
          */
         readonly displayCenterSnapToSemitone?: boolean;
-        /** canonical = live（曲线反算）；手势预览 = locked（显式中心优先）。 */
-        readonly centerPolicy?: "live" | "locked";
+        /** canonical = live; gesture = locked; display-only fallback = fallback. */
+        readonly centerPolicy?: "live" | "locked" | "fallback";
         /** 本次手势锁定的块高（CSS px）；只用于时间伸缩预览，不写回数据。 */
         readonly displayHeightPx?: number | null;
+        readonly sourceNote?: number | null;
+        readonly fallbackValue?: number | null;
+        readonly cutStart?: boolean;
+        readonly cutEnd?: boolean;
+        readonly sourceKey?: string;
         /** 时间上是否与相邻块相接；相接处不画竖向分隔，连续块看起来是一整条。 */
         readonly contiguousStart?: boolean;
         readonly contiguousEnd?: boolean;

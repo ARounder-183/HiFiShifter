@@ -66,6 +66,38 @@ describe("buildParamBlockRenderSpec", () => {
         expect(spec.blocks[2]?.label).toBe("#2 1.0");
     });
 
+    it("does not connect adjacent blocks from different Clip/Take sources", () => {
+        const spec = build([
+            block({
+                id: "a",
+                startSec: 0,
+                endSec: 1,
+                transitionSec: 0.2,
+                sourceKey: "A|take|0",
+            }),
+            block({ id: "b", startSec: 1, endSec: 2, sourceKey: "B|take|0" }),
+        ]);
+        expect(spec.blocks[0]).toMatchObject({ contiguousEnd: false, transitionHandle: null });
+        expect(spec.blocks[1]).toMatchObject({ contiguousStart: false });
+    });
+
+    it("keeps adjacency for blocks from one source", () => {
+        const spec = build([
+            block({
+                id: "a",
+                startSec: 0,
+                endSec: 1,
+                transitionSec: 0.2,
+                sourceKey: "A|take|0",
+            }),
+            block({ id: "b", startSec: 1, endSec: 2, sourceKey: "A|take|0" }),
+        ]);
+        expect(spec.blocks[0]).toMatchObject({
+            contiguousEnd: true,
+            transitionHandle: { leftId: "a", rightId: "b" },
+        });
+    });
+
     it("selected only changes the presentation field, not geometry", () => {
         const spec = build([block({ id: "a", startSec: 0, endSec: 1, selected: true })]);
         expect(spec.blocks[0]?.selected).toBe(true);

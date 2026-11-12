@@ -505,3 +505,64 @@ describe("snapParamBlockRect / high-DPI borders", () => {
         expect(fill.h).toBeCloseTo((horizontal[1]?.y ?? 0) + 1 / dpr - fill.y, 9);
     });
 });
+
+describe("cut edges and fallback display style", () => {
+    const axis = createTimelineAxis({ pxPerSec: 100, scrollLeftPx: 0, viewportWidthPx: 800 });
+    const base = {
+        id: "cut",
+        startSec: 1,
+        endSec: 3,
+        topPx: 100,
+        heightPx: 40,
+        selected: false,
+        grouped: false,
+        label: "cut",
+    };
+
+    it("draws a flat edge and an inner strip at a cut side", () => {
+        const scene = buildParamBlockScene({
+            axis,
+            viewportHeightPx: 400,
+            blocks: [{ ...base, cutStart: true }],
+            borderRgba: rgba,
+            selectedRgba,
+            groupedRgba,
+            fillRgba: [0.4, 0.6, 0.8, 0.5],
+            cornerRadiusPx: 4,
+        });
+        expect(scene.fills[0]?.radius).toBe(0);
+        expect(
+            scene.highlights.some(
+                (item) => Math.abs(item.x - 100) < 1 && item.w <= 2 && item.h === 40,
+            ),
+        ).toBe(true);
+    });
+
+    it("keeps rounded corners for an ordinary block", () => {
+        const scene = buildParamBlockScene({
+            axis,
+            viewportHeightPx: 400,
+            blocks: [base],
+            borderRgba: rgba,
+            selectedRgba,
+            groupedRgba,
+            fillRgba: [0.4, 0.6, 0.8, 0.5],
+            cornerRadiusPx: 4,
+        });
+        expect(scene.fills[0]?.radius).toBe(4);
+    });
+
+    it("makes a fallback block hollow without removing its border", () => {
+        const scene = buildParamBlockScene({
+            axis,
+            viewportHeightPx: 400,
+            blocks: [{ ...base, fallback: true }],
+            borderRgba: rgba,
+            selectedRgba,
+            groupedRgba,
+            fillRgba: [0.4, 0.6, 0.8, 0.8],
+        });
+        expect(scene.fills[0]?.rgba[3]).toBeCloseTo(0.2);
+        expect(scene.items.length).toBeGreaterThan(4);
+    });
+});

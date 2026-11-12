@@ -26,8 +26,13 @@ export interface ParamBlockRenderBlock {
     readonly grouped: boolean;
     readonly label?: string;
     readonly transitionSec?: number;
-    /** canonical = live（按曲线反算）；手势预览 = locked（显式中心优先）。 */
-    readonly centerPolicy?: "live" | "locked";
+    /** canonical = live；手势预览 = locked；display-only fallback = fallback. */
+    readonly centerPolicy?: "live" | "locked" | "fallback";
+    readonly sourceNote?: number | null;
+    readonly fallbackValue?: number | null;
+    readonly cutStart?: boolean;
+    readonly cutEnd?: boolean;
+    readonly sourceKey?: string;
 }
 
 export interface ParamBlockSpecColors {
@@ -79,6 +84,10 @@ export function buildParamBlockRenderSpec(args: {
         if (!logicalOrdinals.has(id)) logicalOrdinals.set(id, logicalOrdinals.size + 1);
     }
     const handles = paramBlockTransitionHandles(sorted);
+    const sameSource = (a: ParamBlockRenderBlock | undefined, b: ParamBlockRenderBlock) =>
+        a !== undefined &&
+        ((a.sourceKey === undefined && b.sourceKey === undefined) ||
+            (a.sourceKey !== undefined && a.sourceKey === b.sourceKey));
     const handleByLeftId = new Map(handles.map((handle) => [handle.leftId, handle]));
     return {
         curveOwned: args.curveOwned ?? true,
@@ -95,8 +104,10 @@ export function buildParamBlockRenderSpec(args: {
                 topPx: block.topPx ?? 0,
                 heightPx: block.heightPx ?? 0,
                 contiguousStart:
-                    previous !== undefined && Math.abs(previous.endSec - block.startSec) < 1e-6,
-                contiguousEnd: next !== undefined && Math.abs(next.startSec - block.endSec) < 1e-6,
+                    sameSource(previous, block) &&
+                    Math.abs(previous!.endSec - block.startSec) < 1e-6,
+                contiguousEnd:
+                    sameSource(next, block) && Math.abs(next!.startSec - block.endSec) < 1e-6,
                 transitionHandle:
                     handle === undefined
                         ? null
