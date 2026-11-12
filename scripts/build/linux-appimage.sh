@@ -271,13 +271,14 @@ cmd_verify() {
     done
 
     # SoundTouch 走运行期 dlopen（不在 NEEDED 里）：它能否在包内被找到，
-    # 唯一依赖是二进制自带的 RUNPATH。缺了它，运行期只会在开发目录里命中
-    # 构建产物，打包形态静音降级到 Signalsmith，用户看不出缺了什么。
+    # 唯一依赖是二进制自带的 RUNPATH/RPATH。缺了它，运行期只会在开发目录里
+    # 命中构建产物，打包形态静音降级到 Signalsmith，用户看不出缺了什么。
     if readelf -d "$appdir/usr/bin/HiFiShifter" 2>/dev/null \
-        | grep -q 'RUNPATH.*lib/HiFiShifter'; then
+        | grep -iE '\(RUN?PATH\).*lib/HiFiShifter'; then
         printf 'ok    DT_RUNPATH 含 lib/HiFiShifter（libSoundTouchDLL.so 的 dlopen 依据）\n'
     else
-        printf 'FAIL  二进制缺少 $ORIGIN/../lib/HiFiShifter 的 RUNPATH，包内 libSoundTouchDLL.so 无法被 dlopen\n' >&2
+        printf 'FAIL  二进制的动态段里没有指向 lib/HiFiShifter 的 RUNPATH/RPATH，包内 libSoundTouchDLL.so 无法被 dlopen。实际动态段：\n' >&2
+        readelf -d "$appdir/usr/bin/HiFiShifter" 2>&1 | sed 's/^/      /' >&2
         failures=$((failures + 1))
     fi
 
