@@ -201,13 +201,20 @@ const mockParamWrites = new Map<string, Map<number, number>>();
 
 /** mock 的 v7 音节块分析：按固定 0.55s 切片，仅浏览器实验用。 */
 const mockSyllableSpans = new Map<string, Array<{ startSec: number; endSec: number }>>();
-/** Mock analyses cover the whole source; avoids an infinite reanalysis loop. */
+/**
+ * Mock analyses cover the whole source; avoids an infinite reanalysis loop.
+ *
+ * 窗口从 spans 派生：此前这里调用 `buildMockTimeline()` 反查 clip，而 timeline
+ * 又嵌入 `syllable_analysis_window_sec: mockSyllableWindow(...)`——一旦 spans
+ * 存在就互为调用，`RangeError: Maximum call stack size exceeded`。
+ * 未分析时返回 `[0, 0]`，与真实后端"未分析窗口为零"的口径一致。
+ */
 const mockSyllableWindow = (clipId: string): [number, number] => {
-    const timeline = buildMockTimeline() as {
-        clips?: Array<{ id: string; duration_sec?: number; length_sec?: number }>;
-    };
-    const clip = timeline.clips?.find((item) => item.id === clipId);
-    return [0, Number(clip?.duration_sec ?? clip?.length_sec ?? 4) || 4];
+    const spans = mockSyllableSpans.get(clipId);
+    if (!spans || spans.length === 0) {
+        return [0, 0];
+    }
+    return [0, spans[spans.length - 1].endSec];
 };
 
 /** mock 的参数块派生视图（root track → view）。 */

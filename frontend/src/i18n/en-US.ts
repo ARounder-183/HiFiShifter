@@ -997,6 +997,7 @@ export const enUS = {
     silence_method_note_blocks: "Note Blocks (GAME)",
     silence_note_blocks_need_analysis: "Needs note-block analysis",
     silence_note_blocks_analyzing: "Analyze and continue",
+    silence_note_blocks_failed: "Analysis failed; click to retry",
     silence_note_blocks_empty: "No note blocks found",
     silence_note_blocks_source: "Source: GAME / VAD / MIDI",
     silence_threshold: "Threshold (dBFS)",

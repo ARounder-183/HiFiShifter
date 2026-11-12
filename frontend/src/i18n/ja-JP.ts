@@ -866,6 +866,7 @@ export const jaJP = {
     silence_method_note_blocks: "ノートブロック（GAME）",
     silence_note_blocks_need_analysis: "ノートブロックの分析が必要です",
     silence_note_blocks_analyzing: "分析して続行",
+    silence_note_blocks_failed: "分析に失敗しました。クリックで再試行",
     silence_note_blocks_empty: "ノートブロックが見つかりません",
     silence_note_blocks_source: "ソース：GAME / VAD / MIDI",
     silence_threshold: "しきい値 (dBFS)",

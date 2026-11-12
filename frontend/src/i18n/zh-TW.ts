@@ -832,6 +832,7 @@ export const zhTW = {
     silence_method_note_blocks: "音符塊（GAME）",
     silence_note_blocks_need_analysis: "需要先分析音符塊",
     silence_note_blocks_analyzing: "分析並繼續",
+    silence_note_blocks_failed: "分析失敗，點擊重試",
     silence_note_blocks_empty: "沒有找到音符塊",
     silence_note_blocks_source: "來源：GAME / VAD / MIDI",
     silence_threshold: "閾值 (dBFS)",

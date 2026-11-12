@@ -831,6 +831,7 @@ export const zhCN = {
     silence_method_note_blocks: "音符块（GAME）",
     silence_note_blocks_need_analysis: "需要先分析音符块",
     silence_note_blocks_analyzing: "分析并继续",
+    silence_note_blocks_failed: "分析失败，点击重试",
     silence_note_blocks_empty: "没有找到音符块",
     silence_note_blocks_source: "来源：GAME / VAD / MIDI",
     silence_threshold: "阈值 (dBFS)",

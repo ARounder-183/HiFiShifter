@@ -45,6 +45,7 @@ export const SilenceDetectionDialog: React.FC<{
     const [options, setOptions] = useState<SilenceDetectSettings>(storedOptions);
     const [reports, setReports] = useState<ClipSilenceReport[]>([]);
     const [analyzing, setAnalyzing] = useState(false);
+    const [retryFailed, setRetryFailed] = useState(false);
     const [applying, setApplying] = useState(false);
     const [retryToken, setRetryToken] = useState(0);
     const debounceRef = useRef<number | null>(null);
@@ -54,6 +55,7 @@ export const SilenceDetectionDialog: React.FC<{
         if (open) {
             setOptions(storedOptions);
             setReports([]);
+            setRetryFailed(false);
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在打开瞬间用 store 种子化
     }, [open]);
@@ -235,11 +237,17 @@ export const SilenceDetectionDialog: React.FC<{
                                     ];
                                     void (async () => {
                                         setAnalyzing(true);
+                                        setRetryFailed(false);
                                         try {
                                             for (const id of ids) {
                                                 await timelineApi.analyzeClipSyllables(id);
                                             }
                                             setRetryToken((value) => value + 1);
+                                        } catch {
+                                            // 失败要落在界面上：吞掉异常只会有一个
+                                            // 全局 unhandledrejection 上报，按钮回弹、
+                                            // "需要分析"状态原样留着，用户不知道发生了什么。
+                                            setRetryFailed(true);
                                         } finally {
                                             setAnalyzing(false);
                                         }
@@ -248,7 +256,9 @@ export const SilenceDetectionDialog: React.FC<{
                             >
                                 {analyzing
                                     ? tf("silence_note_blocks_analyzing")
-                                    : tf("silence_note_blocks_need_analysis")}
+                                    : retryFailed
+                                      ? tf("silence_note_blocks_failed")
+                                      : tf("silence_note_blocks_need_analysis")}
                             </button>
                         ) : reports.some((r) => r.message === "note_blocks_empty") ? (
                             <span className="hs-type-muted">{tf("silence_note_blocks_empty")}</span>

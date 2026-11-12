@@ -928,6 +928,7 @@ export const koKR = {
     silence_method_note_blocks: "노트 블록(GAME)",
     silence_note_blocks_need_analysis: "노트 블록 분석이 필요합니다",
     silence_note_blocks_analyzing: "분석 후 계속",
+    silence_note_blocks_failed: "분석에 실패했습니다. 클릭하여 재시도",
     silence_note_blocks_empty: "노트 블록을 찾지 못했습니다",
     silence_note_blocks_source: "소스: GAME / VAD / MIDI",
     silence_threshold: "임계값 (dBFS)",
