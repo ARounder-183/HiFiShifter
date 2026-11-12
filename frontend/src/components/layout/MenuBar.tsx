@@ -51,6 +51,8 @@ import {
     subscribePianoRollSelection,
 } from "../../utils/pianoRollSelectionBus";
 import { computeInsertBelowPlacement } from "../../features/session/trackUtils";
+import { saveProjectAsFormat } from "../../features/session/thunks/projectThunks";
+import { SAVE_PROJECT_AS_FORMATS } from "../../features/session/saveProjectAsMenu";
 
 import {
     importAudioAtPosition,
@@ -92,9 +94,6 @@ const ExportAudioDialog = lazy(() =>
     import("./ExportAudioDialog").then((module) => ({ default: module.ExportAudioDialog })),
 );
 import { AutoBackupDialog } from "./AutoBackupDialog";
-import { SaveProjectAsDialog } from "./SaveProjectAsDialog";
-import { OPEN_SAVE_PROJECT_AS_EVENT } from "./saveProjectAsDialogBus";
-import type { ProjectSaveFormat } from "../../services/api/project";
 const RenderCacheDialog = lazy(() =>
     import("./RenderCacheDialog").then((module) => ({ default: module.RenderCacheDialog })),
 );
@@ -289,10 +288,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [transposeCentsOpen, setTransposeCentsOpen] = useState(false);
     const [transposeDegreesOpen, setTransposeDegreesOpen] = useState(false);
     const [setPitchOpen, setSetPitchOpen] = useState(false);
-    const [saveAsDialogOpen, setSaveAsDialogOpen] = useState(false);
-    const [saveAsInitialFormat, setSaveAsInitialFormat] = useState<ProjectSaveFormat | undefined>(
-        undefined,
-    );
     const [averageOpen, setAverageOpen] = useState(false);
     const [smoothOpen, setSmoothOpen] = useState(false);
     const [vibratoDialogOpen, setVibratoDialogOpen] = useState(false);
@@ -411,17 +406,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
     const resolveScaleToken = (scaleValue: string) =>
         scaleValue === "__project__" ? "__project__" : scaleValue;
-
-    // 命令入口（菜单 / 快捷键 / 版本冲突）统一请求应用内格式选择。
-    useEffect(() => {
-        const handler = (event: Event) => {
-            const detail = (event as CustomEvent<{ format?: ProjectSaveFormat }>).detail;
-            setSaveAsInitialFormat(detail?.format);
-            setSaveAsDialogOpen(true);
-        };
-        window.addEventListener(OPEN_SAVE_PROJECT_AS_EVENT, handler);
-        return () => window.removeEventListener(OPEN_SAVE_PROJECT_AS_EVENT, handler);
-    }, []);
 
     // Listen for context menu → open dialog requests
     useEffect(() => {
@@ -743,10 +727,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 {shortcutLabel("project.save")}
                             </div>
                         </DropdownMenu.Item>
+                        {/* 「另存为」：按上次格式**直接**存（选路径 → 写文件），
+                            不再先弹一层应用内格式选择。 */}
                         <DropdownMenu.Item
                             onSelect={() => {
-                                setSaveAsInitialFormat(undefined);
-                                setSaveAsDialogOpen(true);
+                                void dispatch(
+                                    saveProjectAsFormat(s.project.lastSaveFormat ?? "hshp"),
+                                );
                             }}
                         >
                             {t("menu_save_project_as")}
@@ -754,6 +741,31 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 {shortcutLabel("project.saveAs")}
                             </div>
                         </DropdownMenu.Item>
+                        {/* 指定格式另存：格式在菜单项里一次选定，原生对话框只带该格式的
+                            单一过滤器（macOS 的 NSSavePanel 没有"文件类型"下拉框，
+                            把格式留在对话框里等于让用户猜扩展名）。每项都挂
+                            data-tooltip：格式说明（尤其"zip 需解压后打开"）不能丢。 */}
+                        <DropdownMenu.Sub>
+                            <DropdownMenu.SubTrigger>
+                                {tf("menu_save_project_as_submenu")}
+                            </DropdownMenu.SubTrigger>
+                            <DropdownMenu.SubContent>
+                                {SAVE_PROJECT_AS_FORMATS.map((entry) => (
+                                    <DropdownMenu.Item
+                                        key={entry.format}
+                                        data-tooltip={tf(entry.descKey)}
+                                        onSelect={() => {
+                                            void dispatch(saveProjectAsFormat(entry.format));
+                                        }}
+                                    >
+                                        {tf(entry.labelKey)}
+                                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                            {shortcutLabel(entry.actionId)}
+                                        </div>
+                                    </DropdownMenu.Item>
+                                ))}
+                            </DropdownMenu.SubContent>
+                        </DropdownMenu.Sub>
 
                         <DropdownMenu.Separator />
 
@@ -1894,12 +1906,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     }}
                 />
             </AppDialog>
-
-            <SaveProjectAsDialog
-                open={saveAsDialogOpen}
-                onOpenChange={setSaveAsDialogOpen}
-                initialFormat={saveAsInitialFormat}
-            />
 
             {/* Edit operation dialogs */}
             <TransposeCentsDialog

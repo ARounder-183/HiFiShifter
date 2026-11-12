@@ -47,7 +47,12 @@ const PianoRollPanel = lazy(() =>
     })),
 );
 import { useAppDispatch, useAppSelector } from "./app/hooks";
-import { requestSaveProjectAsDialog } from "./components/layout/saveProjectAsDialogBus";
+import {
+    runSaveAsFormatAction,
+    saveProjectAsWithLastFormat,
+} from "./features/session/saveProjectCommands";
+import { useSaveProjectAsNotice } from "./features/session/useSaveProjectAsNotice";
+import { useSaveVersionConflictActions } from "./features/session/useSaveVersionConflictActions";
 import { webApi } from "./services/webviewApi";
 import { settingsApi } from "./services/api/settings";
 import { fileBrowserApi } from "./services/api/fileBrowser";
@@ -78,8 +83,6 @@ import {
     openReaperFromDialog,
     importAudioFromPath,
     saveProjectRemote,
-    saveProjectAsRemote,
-    saveProjectToPathRemote,
     setTrackMeters,
     setVslibAvailable,
     setPlaybackRenderingState,
@@ -1449,6 +1452,8 @@ function AppInner() {
         },
         [],
     );
+    // 另存为失败统一走状态栏提示（见 hook 内的说明）。
+    useSaveProjectAsNotice(showNotice);
     useEffect(() => {
         if (!renderCacheShowHitStats) return;
         let disposed = false;
@@ -1715,7 +1720,7 @@ function AppInner() {
                 const result = (await (
                     projectPath
                         ? dispatch(saveProjectRemote())
-                        : dispatch(saveProjectAsRemote(undefined))
+                        : saveProjectAsWithLastFormat(dispatch, store.getState)
                 ).unwrap()) as {
                     canceled?: boolean;
                     versionConflict?: boolean;
@@ -1761,23 +1766,11 @@ function AppInner() {
     }, []);
 
     // ── 保存/另存为目标存在版本不一致工程文件时的确认操作 ──
-    const cancelSaveVersionConflict = useCallback(() => {
-        dispatch(closeSaveVersionConflictDialog());
-    }, [dispatch]);
-
-    // 用户选择"另存为"：关闭确认框并重新弹出另存为选择器。
-    const saveAsFromVersionConflict = useCallback(() => {
-        dispatch(closeSaveVersionConflictDialog());
-        requestSaveProjectAsDialog(saveVersionConflictDialog?.format);
-    }, [dispatch, saveVersionConflictDialog?.format]);
-
-    // 用户确认"继续保存"：向已选路径执行强制覆盖保存。
-    const continueForceSave = useCallback(() => {
-        const path = saveVersionConflictDialog?.path;
-        dispatch(closeSaveVersionConflictDialog());
-        if (!path) return;
-        void dispatch(saveProjectToPathRemote({ path, format: saveVersionConflictDialog?.format }));
-    }, [dispatch, saveVersionConflictDialog?.path, saveVersionConflictDialog?.format]);
+    const {
+        cancel: cancelSaveVersionConflict,
+        saveAs: saveAsFromVersionConflict,
+        overwrite: continueForceSave,
+    } = useSaveVersionConflictActions(dispatch, saveVersionConflictDialog);
 
     const handleNewProject = useCallback(() => {
         runOrPromptUnsavedAction("switch", async () => {
@@ -2813,6 +2806,8 @@ function AppInner() {
                 }
                 return;
             }
+            // 三种「另存为指定格式」由同一张表驱动（与文件菜单子项共用映射）。
+            if (runSaveAsFormatAction(dispatch, actionId)) return;
             switch (actionId) {
                 case "playback.toggle":
                 case "playback.stop": {
@@ -2971,7 +2966,7 @@ function AppInner() {
                     void dispatch(saveProjectRemote());
                     break;
                 case "project.saveAs":
-                    requestSaveProjectAsDialog();
+                    void saveProjectAsWithLastFormat(dispatch, store.getState);
                     break;
                 case "project.export":
                     window.dispatchEvent(

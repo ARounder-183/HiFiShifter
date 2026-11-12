@@ -89,7 +89,7 @@ export {
     openReaperFromDialog,
     openReaperFromPath,
     saveProjectRemote,
-    saveProjectAsRemote,
+    saveProjectAsFormat,
     saveProjectToPathRemote,
     setProjectBaseScaleRemote,
     setProjectCustomScaleRemote,

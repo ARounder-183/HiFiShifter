@@ -2,7 +2,7 @@ import type { TimelineState } from "../../../../types/api";
 import type { ProjectSaveFormat } from "../../../../services/api/project";
 import type { GridSize } from "../../sessionTypes";
 import {
-    saveProjectAsRemote,
+    saveProjectAsFormat,
     saveProjectRemote,
     saveProjectToPathRemote,
     setProjectSaveUndoHistoryRemote,
@@ -95,7 +95,7 @@ export function registerProject(builder: ActionReducerMapBuilder<SessionState>) 
             state.status = "Save failed";
         })
 
-        .addCase(saveProjectAsRemote.fulfilled, (state, action) => {
+        .addCase(saveProjectAsFormat.fulfilled, (state, action) => {
             const payload = action.payload as {
                 ok?: boolean;
                 canceled?: boolean;

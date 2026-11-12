@@ -81,6 +81,11 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "project.open": [{ key: "o", ctrl: true, shift: true }],
     "project.save": [{ key: "s", ctrl: true }],
     "project.saveAs": [{ key: "s", ctrl: true, shift: true }],
+    // 三种格式的直存动作与「导入特定文件」同一范式：**默认不占键位**（格式选择
+    // 本身是低频决定，绑死默认键只会挤掉用户真正想要的组合），但可在此绑定。
+    "project.saveAsHshp": [{ key: "__none__" }],
+    "project.saveAsJson": [{ key: "__none__" }],
+    "project.saveAsZip": [{ key: "__none__" }],
     "project.export": [{ key: "e", ctrl: true }],
     "project.importMedia": [{ key: "o", ctrl: true }],
     "project.importMidi": [{ key: "__none__" }],
@@ -378,6 +383,9 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
     "project.open": { labelKey: "kb_project_open", group: "project" },
     "project.save": { labelKey: "kb_project_save", group: "project" },
     "project.saveAs": { labelKey: "kb_project_save_as", group: "project" },
+    "project.saveAsHshp": { labelKey: "kb_project_save_as_hshp", group: "project" },
+    "project.saveAsJson": { labelKey: "kb_project_save_as_json", group: "project" },
+    "project.saveAsZip": { labelKey: "kb_project_save_as_zip", group: "project" },
     "project.export": { labelKey: "kb_project_export", group: "project" },
     "project.importMedia": { labelKey: "kb_project_import_media", group: "project" },
     "project.importMidi": { labelKey: "kb_project_import_midi", group: "project" },

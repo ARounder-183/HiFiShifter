@@ -1409,6 +1409,19 @@ fn project_save_dialog(
         .set_file_name(format!("{}.{}", stem, format.extension()))
 }
 
+/// 解析「另存为」原生对话框应使用的格式。
+///
+/// 缺省（`None`）按 HiFiShifter 工程（`.hshp`）处理：路径选择只有一个过滤器，
+/// 预填的扩展名就是最终写入的格式。**不再**回退到"三个过滤器 + 让用户在原生
+/// 对话框里挑类型"的老路径 —— macOS 的 `NSSavePanel` 根本没有可选的"文件类型"
+/// ComboBox，那条路径在 macOS 上表现为"只能存成第一项"。
+fn resolve_save_dialog_format(raw: Option<&str>) -> Result<ProjectSaveFormat, ()> {
+    match raw {
+        None => Ok(ProjectSaveFormat::Hshp),
+        Some(value) => ProjectSaveFormat::parse(value).ok_or(()),
+    }
+}
+
 pub(super) fn pick_project_save_path(
     state: State<'_, AppState>,
     format: String,
@@ -1441,32 +1454,29 @@ pub(super) fn save_project_as(
         p.notes_markdown = notes_markdown;
     }
     let default_name = default_project_save_name(state.inner());
-    let picked = if let Some(format_raw) = format.as_deref() {
-        let Some(format) = ProjectSaveFormat::parse(format_raw) else {
-            return serde_json::json!({"ok": false, "error": "unsupported_project_format"});
-        };
-        project_save_dialog(format, &default_name).save_file()
-    } else {
-        // 兼容旧调用：没有显式格式时保留三过滤器对话框。
-        rfd::FileDialog::new()
-            .add_filter("HiFiShifter Project", &["hshp", "hsp"])
-            .add_filter("JSON Project", &["json"])
-            .add_filter("Archive Zip", &["zip"])
-            .set_file_name(format!("{}.hshp", default_name))
-            .save_file()
+    let Ok(format) = resolve_save_dialog_format(format.as_deref()) else {
+        return serde_json::json!({"ok": false, "error": "unsupported_project_format"});
     };
+    let picked = project_save_dialog(format, &default_name).save_file();
     match picked {
         None => serde_json::json!({"ok": true, "canceled": true}),
         Some(path) => {
-            let inferred = ProjectSaveFormat::from_path(&path);
-            let explicit = format.as_deref().and_then(ProjectSaveFormat::parse).unwrap_or(inferred);
+            // 用户在保存框里手改了扩展名：能识别的格式以路径为准，否则按已选格式补全。
+            let explicit = ProjectSaveFormat::from_path(&path);
+            let format = if explicit.matches_extension(
+                path.extension().and_then(|value| value.to_str()).unwrap_or(""),
+            ) {
+                explicit
+            } else {
+                format
+            };
             save_project_to_path(
                 state,
                 window,
                 path.display().to_string(),
                 None,
                 None,
-                Some(explicit.extension().to_string()),
+                Some(format.extension().to_string()),
             )
         }
     }
@@ -1825,7 +1835,10 @@ pub(super) fn set_project_stretch_settings(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_project_save_path, save_project_archive_to_zip_inner, ProjectSaveFormat};
+    use super::{
+        resolve_project_save_path, resolve_save_dialog_format, save_project_archive_to_zip_inner,
+        ProjectSaveFormat,
+    };
     use crate::state::{AppState, HistoryOp};
 
     #[test]
@@ -1858,6 +1871,23 @@ mod tests {
             .expect_err("unsupported extension"),
             "unsupported_project_extension"
         );
+    }
+
+    #[test]
+    fn a_missing_save_format_defaults_to_the_project_format() {
+        // 缺省格式必须给出**单一**过滤器（`.hshp`），而不是让原生对话框自己挑类型：
+        // macOS 的 NSSavePanel 没有"文件类型"下拉框，多过滤器只会让后两项不可达。
+        assert_eq!(resolve_save_dialog_format(None), Ok(ProjectSaveFormat::Hshp));
+        assert_eq!(
+            resolve_save_dialog_format(Some("json")),
+            Ok(ProjectSaveFormat::Json)
+        );
+        assert_eq!(
+            resolve_save_dialog_format(Some(" ZIP ")),
+            Ok(ProjectSaveFormat::Zip)
+        );
+        // 未知格式仍是硬错误，不能悄悄退化成 `.hshp`。
+        assert_eq!(resolve_save_dialog_format(Some("wav")), Err(()));
     }
 
     #[test]
