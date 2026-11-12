@@ -4,6 +4,12 @@ version = "0.2.0-beta"
 edition = "2021"
 publish = false
 description = "HiFiShifter 的离线音频内核：不依赖 Tauri，也不依赖音频设备"
+# 【为什么声明 links】Step 5 把构建出的 SoundTouch 动态库回写到
+# src-tauri/third_party/…（tauri.conf.json 的 macOS frameworks 按该相对路径打包）。
+# 两个 build script 默认并发，src-tauri 的 tauri_build 资源校验曾抢在回写之前，
+# mac 打包随机报 "Library not found"。links 让 cargo 保证内核 build script
+# 先于所有依赖方的 build script 完整跑完，回写因此必然发生在校验之前。
+links = "soundtouch"
 
 [dependencies]
 lru = "0.18"

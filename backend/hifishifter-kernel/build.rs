@@ -824,6 +824,11 @@ fn build_soundtouch() {
             );
         }
     }
+
+    // 回写完成的事实以 metadata 形式交给依赖方 build script（DEP_SOUNDTOUCH_*）。
+    // links 键保证本脚本先于它们的 build script 结束 —— mac 打包的资源校验
+    // （tauri.conf.json 的 frameworks）因此不再与本回写竞态。
+    println!("cargo:soundtouch_dll={}", lib_dst_resource.display());
 }
 
 /// Recursively search for a file by name under `dir`.
