@@ -55,9 +55,6 @@ mod tests {
     #[test]
     fn relative_paths_normalize_separators_and_segments() {
         assert_eq!(normalize_relative_path("A\\ド.wav"), "A/ド.wav");
-        assert_eq!(
-            normalize_relative_path_nfd("A/ド.wav"),
-            "A/ド.wav"
-        );
+        assert_eq!(normalize_relative_path_nfd("A/ド.wav"), "A/ド.wav");
     }
 }

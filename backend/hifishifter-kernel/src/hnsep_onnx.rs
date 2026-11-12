@@ -612,18 +612,12 @@ fn separate_chunked(
     let mut out = vec![0.0f32; model_audio.len()];
     let mut previous_core_end = 0usize;
     for (index, chunk) in chunks.iter().enumerate() {
-        crate::hnsep_resources::preflight(
-            chunk.input_end - chunk.input_start,
-            HNSEP_MODEL_SR,
-        )?;
+        crate::hnsep_resources::preflight(chunk.input_end - chunk.input_start, HNSEP_MODEL_SR)?;
         let input = &model_audio[chunk.input_start..chunk.input_end];
-        let harmonic = crate::hnsep_dsp::separate(
-            input,
-            HNSEP_N_FFT,
-            HNSEP_HOP,
-            window,
-            |mask_input| run_mask(session, mask_input),
-        )?;
+        let harmonic =
+            crate::hnsep_dsp::separate(input, HNSEP_N_FFT, HNSEP_HOP, window, |mask_input| {
+                run_mask(session, mask_input)
+            })?;
         let core_start = chunk.core_start - chunk.input_start;
         let core_end = chunk.core_end - chunk.input_start;
         if core_end > harmonic.len() {

@@ -1861,7 +1861,11 @@ mod tests {
             .find(|env| env.env_type == "PANENV2")
             .expect("PANENV2");
         assert!((env.points[0][1] - 1.0).abs() < 1e-6, "HS -1 → REAPER +1");
-        assert!(env.points[1][1] < -0.99, "HS +1 → REAPER -1，实际 {}", env.points[1][1]);
+        assert!(
+            env.points[1][1] < -0.99,
+            "HS +1 → REAPER -1，实际 {}",
+            env.points[1][1]
+        );
     }
 
     #[test]
@@ -1893,8 +1897,8 @@ mod tests {
         let export =
             build_reaper_clipboard(&timeline, &[clip_id], &curves_by_clip).expect("export");
         let parsed = parse_for_test(&export.bytes);
-        let result = crate::reaper_import::test_import_items_for_round_trip(parsed, 0.0)
-            .expect("re-import");
+        let result =
+            crate::reaper_import::test_import_items_for_round_trip(parsed, 0.0).expect("re-import");
         let params = result
             .timeline
             .params_by_root_track

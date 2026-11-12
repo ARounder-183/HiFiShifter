@@ -74,9 +74,9 @@ pub(crate) mod commands;
 #[path = "audio/hfspeaks_v2.rs"]
 mod hfspeaks_v2;
 mod launch_args;
+mod link_bridge;
 #[cfg(target_os = "macos")]
 mod macos_menu;
-mod link_bridge;
 mod recording;
 mod search;
 #[path = "audio/silence_detect.rs"]
@@ -93,10 +93,10 @@ mod silence_detect;
 pub use hifishifter_kernel::fade_curves;
 pub(crate) use hifishifter_kernel::{
     audio_utils, channel_decision, channel_mode, channel_policy, clip_rendering_state, config,
-    dml_adapters, encode, formant_cache, gain, gpu_info, media, midi_import, mixdown, models,
-    hnsep_chunk, hnsep_resources, note_blocks, notebook_assets, pitch_analysis, pitch_clip, pitch_editing, project, render_cache,
-    render_key,
-    renderer, seam, stereo_detect, synth_clip_cache, temp_manager,
+    dml_adapters, encode, formant_cache, gain, gpu_info, hnsep_chunk, hnsep_resources, media,
+    midi_import, mixdown, models, note_blocks, notebook_assets, pitch_analysis, pitch_clip,
+    pitch_editing, project, render_cache, render_key, renderer, seam, stereo_detect,
+    synth_clip_cache, temp_manager,
 };
 
 // 这几个的可见性跟着自己的 feature / target 走，不能放进上面那个统一的 `use`。
@@ -192,12 +192,12 @@ static TEST_ALLOCATOR: alloc_probe::CountingAllocator = alloc_probe::CountingAll
 #[cfg(target_os = "linux")]
 mod linux_clipboard;
 mod project_fragment;
-#[path = "import/reaper_pan.rs"]
-mod reaper_pan;
 #[path = "import/reaper_export.rs"]
 mod reaper_export;
 #[path = "import/reaper_import.rs"]
 mod reaper_import;
+#[path = "import/reaper_pan.rs"]
+mod reaper_pan;
 #[path = "import/reaper_parser.rs"]
 mod reaper_parser;
 // `soundtouch` / `sstretch` / `time_stretch` 已迁到 `hifishifter-kernel`。

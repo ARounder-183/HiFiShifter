@@ -105,10 +105,10 @@ pub(crate) mod playback;
 mod processor_caps;
 #[path = "commands/project.rs"]
 pub(crate) mod project;
-#[path = "commands/project_save_commands.rs"]
-pub(crate) mod project_save_commands;
 #[path = "commands/project_import.rs"]
 mod project_import;
+#[path = "commands/project_save_commands.rs"]
+pub(crate) mod project_save_commands;
 #[path = "commands/reaper.rs"]
 mod reaper;
 #[path = "commands/reaper_clipboard.rs"]

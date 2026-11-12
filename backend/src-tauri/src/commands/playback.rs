@@ -1090,7 +1090,8 @@ fn render_single_clip(
         };
         let mut planes = Vec::with_capacity(channels_mono.len());
         for (ch_idx, ch_mono) in channels_mono.iter().enumerate() {
-            let model_samples = ((ch_mono.len() as f64) * 44_100.0 / out_rate.max(1) as f64).ceil() as usize;
+            let model_samples =
+                ((ch_mono.len() as f64) * 44_100.0 / out_rate.max(1) as f64).ceil() as usize;
             let chunks = crate::hnsep_chunk::plan_chunks(model_samples);
             let estimated_peak_bytes = chunks
                 .iter()

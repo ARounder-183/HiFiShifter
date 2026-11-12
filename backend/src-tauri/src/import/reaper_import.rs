@@ -1750,7 +1750,6 @@ pub(crate) fn reaper_env_points(env: &ReaperEnvelope) -> Vec<(f64, f64, i32)> {
     points
 }
 
-
 /// 声像包络点：先走通用 reaper_env_points，再在 REAPER 边界翻符号。
 /// 只给 pan 使用；音量 / MUTE 等其它包络不得经过这里。
 fn reaper_pan_env_points(env: &ReaperEnvelope) -> Vec<(f64, f64, i32)> {

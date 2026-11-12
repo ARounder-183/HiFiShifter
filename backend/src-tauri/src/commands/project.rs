@@ -1,4 +1,3 @@
-use hifishifter_kernel::unicode_path::normalize_relative_path;
 use crate::project::{
     finalize_timeline_for_session, load_project_file, prepare_timeline_for_project_save,
     project_name_from_path, read_project_file_version, serialize_project_file_for_path,
@@ -10,6 +9,7 @@ use crate::time_stretch::{
     update_project_stretch_overrides, update_runtime_stretch_settings, UserStretchAlgorithm,
 };
 use chrono::Local;
+use hifishifter_kernel::unicode_path::normalize_relative_path;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -1396,10 +1396,7 @@ fn default_project_save_name(state: &AppState) -> String {
     }
 }
 
-fn project_save_dialog(
-    format: ProjectSaveFormat,
-    default_name: &str,
-) -> rfd::FileDialog {
+fn project_save_dialog(format: ProjectSaveFormat, default_name: &str) -> rfd::FileDialog {
     let stem = Path::new(default_name)
         .file_stem()
         .and_then(|value| value.to_str())
@@ -1464,7 +1461,9 @@ pub(super) fn save_project_as(
             // 用户在保存框里手改了扩展名：能识别的格式以路径为准，否则按已选格式补全。
             let explicit = ProjectSaveFormat::from_path(&path);
             let format = if explicit.matches_extension(
-                path.extension().and_then(|value| value.to_str()).unwrap_or(""),
+                path.extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or(""),
             ) {
                 explicit
             } else {
@@ -1570,7 +1569,12 @@ pub(super) fn save_project_to_path(
         }
     }
 
-    match save_project_to_path_inner(state.inner(), &window, project_path.clone(), requested_format) {
+    match save_project_to_path_inner(
+        state.inner(),
+        &window,
+        project_path.clone(),
+        requested_format,
+    ) {
         Ok(timeline) => {
             // 工程写成功后带出操作记录（设置未开启 / 写入失败都静默）。
             let _ = crate::commands::undo_history_file::save_undo_history(state.inner(), &path);
@@ -1848,7 +1852,10 @@ mod tests {
             ProjectSaveFormat::Json,
         )
         .expect("extension should be added");
-        assert_eq!(path.extension().and_then(|value| value.to_str()), Some("json"));
+        assert_eq!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("json")
+        );
 
         assert!(resolve_project_save_path(
             std::path::PathBuf::from("example-project.hsp"),
@@ -1877,7 +1884,10 @@ mod tests {
     fn a_missing_save_format_defaults_to_the_project_format() {
         // 缺省格式必须给出**单一**过滤器（`.hshp`），而不是让原生对话框自己挑类型：
         // macOS 的 NSSavePanel 没有"文件类型"下拉框，多过滤器只会让后两项不可达。
-        assert_eq!(resolve_save_dialog_format(None), Ok(ProjectSaveFormat::Hshp));
+        assert_eq!(
+            resolve_save_dialog_format(None),
+            Ok(ProjectSaveFormat::Hshp)
+        );
         assert_eq!(
             resolve_save_dialog_format(Some("json")),
             Ok(ProjectSaveFormat::Json)

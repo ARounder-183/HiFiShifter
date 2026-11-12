@@ -31,11 +31,11 @@ pub(crate) struct OutputDeviceIdentity {
 }
 
 impl OutputDeviceIdentity {
-    pub(crate) fn from_device(
-        device: &cpal::Device,
-        config: &cpal::SupportedStreamConfig,
-    ) -> Self {
-        let id = device.id().map(|value| value.to_string()).unwrap_or_default();
+    pub(crate) fn from_device(device: &cpal::Device, config: &cpal::SupportedStreamConfig) -> Self {
+        let id = device
+            .id()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
         let name = device
             .description()
             .map(|description| description.name().to_string())
@@ -243,7 +243,10 @@ mod tests {
     #[test]
     fn rescale_position_frames_follows_the_new_sample_rate() {
         // 44.1k 的 44100 帧 = 1s → 48k 的 48000 帧。
-        assert_eq!(rescale_position_frames(0, 44_100, 44_100, 48_000), (0, 48_000));
+        assert_eq!(
+            rescale_position_frames(0, 44_100, 44_100, 48_000),
+            (0, 48_000)
+        );
         // 0 位置恒为 0。
         assert_eq!(rescale_position_frames(0, 0, 44_100, 48_000), (0, 0));
         // 1 采样率的退化输入不得除零。
@@ -258,8 +261,14 @@ mod tests {
     #[test]
     fn detects_none_some_and_format_changes() {
         assert!(!output_device_changed(None, None));
-        assert!(output_device_changed(None, Some(&identity("a", "A", 44100))));
-        assert!(output_device_changed(Some(&identity("a", "A", 44100)), None));
+        assert!(output_device_changed(
+            None,
+            Some(&identity("a", "A", 44100))
+        ));
+        assert!(output_device_changed(
+            Some(&identity("a", "A", 44100)),
+            None
+        ));
         assert!(!output_device_changed(
             Some(&identity("a", "A", 44100)),
             Some(&identity("a", "A", 44100))

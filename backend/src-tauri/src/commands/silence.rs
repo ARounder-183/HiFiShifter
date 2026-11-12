@@ -144,11 +144,8 @@ fn analyze_clips(
                 error = Some("note_blocks_empty".to_string());
             } else {
                 for take in &meta.note_takes {
-                    match crate::silence_detect::analyze_note_block_silence(
-                        &meta.clip,
-                        take,
-                        &opts,
-                    ) {
+                    match crate::silence_detect::analyze_note_block_silence(&meta.clip, take, &opts)
+                    {
                         Ok(regions) => union = merge_region_lists(union, regions),
                         Err(msg) => {
                             error = Some(msg);

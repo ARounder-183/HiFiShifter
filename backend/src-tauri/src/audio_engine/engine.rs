@@ -27,10 +27,10 @@ const METER_STALL_FALLBACK: Duration = Duration::from_millis(150);
 /// 每槽 4 字节，取宽裕值让"死表"远离现实工程规模；越界时 meter 线程告警一次。
 const METER_BUS_CAPACITY: usize = 512;
 
-use super::metronome;
 use super::device_watch::{
     output_device_changed, spawn_default_output_watcher, OutputDeviceIdentity,
 };
+use super::metronome;
 use super::mix::TrackMeterBus;
 use super::output_stream::{build_output_stream, OutputStreamArgs};
 use super::resource_manager::ResourceManager;
@@ -393,28 +393,29 @@ impl AudioEngine {
             // 【顺序】先等出一个真正能播的 stream，再拿它的身份启动 watcher。
             // 反过来（watcher 先自己猜基线）会让两者基线不同步：worker 用了
             // 另一个设备建流，而 watcher 认为"没变"，真正的切换永远被漏掉。
-            let startup = match wait_for_output_stream(&rx, &worker_ready_thread, |device, config| {
-                let channels = config.channels() as usize;
-                let sample_format = config.sample_format();
-                let stream_config: cpal::StreamConfig = config.into();
-                build_output_stream(OutputStreamArgs {
-                    device,
-                    config: stream_config,
-                    sample_format,
-                    channels,
-                    snapshot: snapshot_for_thread.clone(),
-                    is_playing: is_playing_thread.clone(),
-                    play_start_wait: play_start_wait_thread.clone(),
-                    position_frames: position_frames_thread.clone(),
-                    duration_frames: duration_frames_thread.clone(),
-                    meter_bus: meter_bus.clone(),
-                    metro: metro_for_cb.clone(),
-                    tx: tx_for_worker.clone(),
-                })
-            }) {
-                Some(value) => value,
-                None => return,
-            };
+            let startup =
+                match wait_for_output_stream(&rx, &worker_ready_thread, |device, config| {
+                    let channels = config.channels() as usize;
+                    let sample_format = config.sample_format();
+                    let stream_config: cpal::StreamConfig = config.into();
+                    build_output_stream(OutputStreamArgs {
+                        device,
+                        config: stream_config,
+                        sample_format,
+                        channels,
+                        snapshot: snapshot_for_thread.clone(),
+                        is_playing: is_playing_thread.clone(),
+                        play_start_wait: play_start_wait_thread.clone(),
+                        position_frames: position_frames_thread.clone(),
+                        duration_frames: duration_frames_thread.clone(),
+                        meter_bus: meter_bus.clone(),
+                        metro: metro_for_cb.clone(),
+                        tx: tx_for_worker.clone(),
+                    })
+                }) {
+                    Some(value) => value,
+                    None => return,
+                };
 
             let mut stream = Some(startup.stream);
             let mut sr = startup.sample_rate;
@@ -1125,7 +1126,8 @@ fn invalidate_sample_rate_bound_caches(s: &EngineWorkerState, old_sr: u32, new_s
     if let Ok(mut inflight) = s.stretch_inflight.lock() {
         inflight.clear();
     }
-    if let Ok(mut rendered) = hifishifter_kernel::synth_clip_cache::global_rendered_clip_cache().lock()
+    if let Ok(mut rendered) =
+        hifishifter_kernel::synth_clip_cache::global_rendered_clip_cache().lock()
     {
         rendered.clear();
     }
@@ -2631,7 +2633,10 @@ mod tests {
         worker.position_frames.store(700_000, Ordering::Relaxed);
         handle_stop(&mut worker);
 
-        assert!(!worker.is_playing.load(Ordering::Relaxed), "stop must pause");
+        assert!(
+            !worker.is_playing.load(Ordering::Relaxed),
+            "stop must pause"
+        );
         assert_eq!(
             worker.base_frames.load(Ordering::Relaxed),
             0,

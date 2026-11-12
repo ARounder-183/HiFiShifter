@@ -5,9 +5,11 @@
 //! 的交叉淡化区。计划只负责几何，不执行推理。
 
 pub const HNSEP_CHUNK_ALIGN_SAMPLES: usize = 32 * 512;
-pub const HNSEP_CHUNK_CORE_SAMPLES: usize = (8 * 44_100 / HNSEP_CHUNK_ALIGN_SAMPLES) * HNSEP_CHUNK_ALIGN_SAMPLES;
-pub const HNSEP_CHUNK_CONTEXT_SAMPLES: usize =
-    ((2 * 44_100 + HNSEP_CHUNK_ALIGN_SAMPLES - 1) / HNSEP_CHUNK_ALIGN_SAMPLES) * HNSEP_CHUNK_ALIGN_SAMPLES;
+pub const HNSEP_CHUNK_CORE_SAMPLES: usize =
+    (8 * 44_100 / HNSEP_CHUNK_ALIGN_SAMPLES) * HNSEP_CHUNK_ALIGN_SAMPLES;
+pub const HNSEP_CHUNK_CONTEXT_SAMPLES: usize = ((2 * 44_100 + HNSEP_CHUNK_ALIGN_SAMPLES - 1)
+    / HNSEP_CHUNK_ALIGN_SAMPLES)
+    * HNSEP_CHUNK_ALIGN_SAMPLES;
 pub const HNSEP_CHUNK_CROSSFADE_SAMPLES: usize = HNSEP_CHUNK_ALIGN_SAMPLES;
 pub const HNSEP_FULL_MAX_SAMPLES: usize = 30 * 44_100;
 pub const HNSEP_CHUNK_MAX_COUNT: usize = 10_000;
@@ -68,7 +70,10 @@ mod tests {
             for chunk in &chunks {
                 assert!(chunk.core_end > chunk.core_start);
                 assert!(chunk.input_end > chunk.input_start);
-                assert!(chunk.input_end - chunk.input_start <= HNSEP_CHUNK_CORE_SAMPLES + 2 * HNSEP_CHUNK_CONTEXT_SAMPLES);
+                assert!(
+                    chunk.input_end - chunk.input_start
+                        <= HNSEP_CHUNK_CORE_SAMPLES + 2 * HNSEP_CHUNK_CONTEXT_SAMPLES
+                );
                 assert!(chunk.core_start <= covered, "core must not leave a hole");
                 covered = covered.max(chunk.core_end);
             }
@@ -86,6 +91,9 @@ mod tests {
     fn a_long_clip_is_split_into_many_bounded_windows() {
         let chunks = plan_chunks(44_100 * 227);
         assert!(chunks.len() > 20);
-        assert!(chunks.iter().all(|chunk| chunk.input_end - chunk.input_start <= 12 * 44_100 + HNSEP_CHUNK_ALIGN_SAMPLES * 2));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.input_end - chunk.input_start
+                <= 12 * 44_100 + HNSEP_CHUNK_ALIGN_SAMPLES * 2));
     }
 }

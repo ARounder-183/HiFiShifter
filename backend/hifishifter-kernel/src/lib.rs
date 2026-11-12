@@ -248,11 +248,11 @@ pub mod clip_rendering_state;
 pub mod config;
 pub mod folder_scan;
 pub mod media_paths;
-pub mod notebook_assets;
 pub mod note_blocks;
+pub mod notebook_assets;
 pub mod project;
-pub mod unicode_path;
 pub mod temp_manager;
+pub mod unicode_path;
 
 // ── 可选的原生声码器（闭源、仅 Windows）────────────────────────────────────
 #[cfg(all(feature = "vslib", target_os = "windows"))]
