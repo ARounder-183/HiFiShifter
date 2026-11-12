@@ -623,22 +623,22 @@ export function buildCurveLayers(
 
     // ── ② Clip 源音高参考线（pitch 模式）────────────────────────
     //
-    // 每个有声音段单独一层：无声帧在 clipPitchOverlay 中已经切段，这里绝不
-    // 把前后有声点跨静音连起来。曲线使用 Clip 自己的颜色，并与 pv.orig 的
-    // 灰色合成线、pv.edit 的白色主线保持不同的视觉层级。
+    // 每个**连续有声段**单独一层：无声帧在 clipPitchOverlay 中已经切段，这里
+    // 绝不把前后有声点跨静音连起来。除静音之外没有第二个切段理由 —— 每一刀
+    // 都会变成两条独立折线，两段之间不会连线（重合处"断一帧"就是这样来的）。
+    //
+    // 视觉参数每条 Clip 只解析一次：同一段曲线不得忽明忽暗（见
+    // `resolveClipPitchOverlayVisual` 的层级说明）。
     if (editParam === "pitch") {
         for (const overlay of clipPitchOverlays) {
-            for (const segment of overlay.segments) {
-                const values = overlay.midiCurve.slice(
-                    segment.startIndex,
-                    segment.endIndexExclusive,
-                );
+            const visual = resolveClipPitchOverlayVisual(overlay);
+            // 身份色只在这里按主题解析：模型层不碰主题，绘制层不碰哈希。
+            const [r, g, b] = parseRgbaColor(
+                normalizeCssColor(resolveClipPitchOverlayColor(overlay.colorIndex, isDark)),
+            );
+            for (const run of overlay.runs) {
+                const values = overlay.midiCurve.slice(run.startIndex, run.endIndexExclusive);
                 if (values.length < 2) continue;
-                const visual = resolveClipPitchOverlayVisual(overlay, segment.overlapDepth);
-                // 身份色只在这里按主题解析：模型层不碰主题，绘制层不碰哈希。
-                const [r, g, b] = parseRgbaColor(
-                    normalizeCssColor(resolveClipPitchOverlayColor(overlay.colorIndex, isDark)),
-                );
                 layers.push({
                     values,
                     param: "pitch",
@@ -654,7 +654,7 @@ export function buildCurveLayers(
                     dash: visual.dash,
                     projection: "clip",
                     frameCount: overlay.frameCount,
-                    curveSampleStartIndex: segment.startIndex,
+                    curveSampleStartIndex: run.startIndex,
                     valueToY: (v) => project("pitch", v),
                 });
             }

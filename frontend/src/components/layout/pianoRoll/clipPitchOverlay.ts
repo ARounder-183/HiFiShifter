@@ -23,11 +23,16 @@ import { toFrame } from "./paramBlockProjection";
  * `colorIndex`（稳定哈希 + 重合冲突消解），具体色值由 colors.ts 按主题解析 ——
  * 模型不碰主题，绘制侧不碰哈希。
  *
- * 本文件不碰 React / DOM / GL；只负责把 Clip 几何、曲线、焦点态和重合关系
- * 变成可绘制的分段描述符，供 sceneBuilders / render.ts 共用。
+ * 【只在"真的没有数据"处切段】
+ * 切段（`runs`）的唯一理由是 `midi <= 0`：该帧确实没有检测/参考值。重合深度
+ * 不参与几何 —— 旧实现按"重合带边界"切段，而边界是连续秒、采样点是量化帧，
+ * 切点几乎必然落在两个采样之间：绘制层把每段画成独立折线，于是重合处出现
+ * **一帧宽的洞**；若切出的段只有 1 个采样，还会被整段丢掉，曲线看起来晚一帧
+ * 开始。两种症状都出现在同一个 Clip 起点上，用户读到的是"两条曲线都在这里断了一小段"。
+ *
+ * 本文件不碰 React / DOM / GL；只负责把 Clip 几何、曲线、焦点态变成可绘制的
+ * 描述符，供 sceneBuilders / render.ts 共用。
  */
-
-const EPS = 1e-9;
 
 /** ClipInfo 中本模块需要的字段（保持结构类型，便于测试）。 */
 export interface ClipPitchOverlayClip {
@@ -47,13 +52,18 @@ export interface ClipPitchCurveData {
     readonly framePeriodMs: number;
 }
 
-export interface ClipPitchOverlaySegment {
+/**
+ * 一段**连续有声**帧。
+ *
+ * 只有 `midi <= 0`（或非有限值）才会把曲线切成两段：那是数据本身不存在的地方，
+ * 连过去就是一条贯穿静音的假斜线。除此之外不得有任何切分理由 —— 每一刀都会在
+ * 绘制层变成"两条独立折线"，两段之间不会连线。
+ */
+export interface ClipPitchOverlayRun {
     /** 曲线数组中的起始下标（含）。 */
     readonly startIndex: number;
     /** 曲线数组中的结束下标（不含）。 */
     readonly endIndexExclusive: number;
-    /** 该段同期的 Clip 重合深度；1 = 不重合，2 = 两条 Clip 重合。 */
-    readonly overlapDepth: number;
 }
 
 export interface ClipPitchOverlay {
@@ -69,21 +79,15 @@ export interface ClipPitchOverlay {
     readonly colorIndex: number;
     /** 是否是当前焦点的 Clip（时间轴上被选中的那一个）。 */
     readonly focused: boolean;
-    readonly overlapDepth: number;
     readonly zOrder: number;
-    readonly segments: readonly ClipPitchOverlaySegment[];
+    /** 连续有声段；段之间是真实的静音/无数据帧，绝不连线。 */
+    readonly runs: readonly ClipPitchOverlayRun[];
 }
 
 export interface ClipPitchOverlayVisual {
     readonly alpha: number;
     readonly lineWidthPx: number;
     readonly dash: readonly [number, number] | null;
-}
-
-interface OverlapBand {
-    readonly startSec: number;
-    readonly endSec: number;
-    readonly depth: number;
 }
 
 /** 通过有效性校验、真正会被绘制的 Clip。 */
@@ -103,10 +107,6 @@ function clipLength(clip: ClipPitchOverlayClip): number {
     return Number.isFinite(clip.lengthSec) ? Math.max(0, clip.lengthSec) : 0;
 }
 
-function clipEnd(clip: ClipPitchOverlayClip): number {
-    return clipStart(clip) + clipLength(clip);
-}
-
 /**
  * FNV-1a 32 位哈希。
  *
@@ -120,73 +120,6 @@ function hashClipId(text: string): number {
         hash = Math.imul(hash, 0x01000193) >>> 0;
     }
     return hash >>> 0;
-}
-
-/**
- * 计算一个 Clip 区间内所有「至少两个 Clip 同时存在」的区段，以及最大重合深度。
- *
- * 只使用 Clip 的工程区间；参数块是否被上层块覆盖与音频是否真的重合无关。
- * 重合只是「提高 alpha」的判据，不是几何来源，因此继续用秒（与 Clip 字段同单位），
- * 不引入第二次取整。
- */
-function overlapBandsForClip(
-    clip: ClipPitchOverlayClip,
-    clips: readonly ClipPitchOverlayClip[],
-): { bands: OverlapBand[]; maxDepth: number } {
-    const start = clipStart(clip);
-    const end = clipEnd(clip);
-    if (!(end > start + EPS)) return { bands: [], maxDepth: 1 };
-
-    const boundaries = new Set<number>([start, end]);
-    for (const other of clips) {
-        if (other.id === clip.id) continue;
-        const otherStart = clipStart(other);
-        const otherEnd = clipEnd(other);
-        const overlapStart = Math.max(start, otherStart);
-        const overlapEnd = Math.min(end, otherEnd);
-        if (overlapEnd > overlapStart + EPS) {
-            boundaries.add(overlapStart);
-            boundaries.add(overlapEnd);
-        }
-    }
-    const points = [...boundaries].sort((a, b) => a - b);
-    const bands: OverlapBand[] = [];
-    let maxDepth = 1;
-    for (let i = 0; i + 1 < points.length; i += 1) {
-        const from = points[i]!;
-        const to = points[i + 1]!;
-        if (!(to > from + EPS)) continue;
-        const mid = (from + to) / 2;
-        let depth = 1;
-        for (const other of clips) {
-            if (other.id === clip.id) continue;
-            if (clipStart(other) <= mid && clipEnd(other) > mid) depth += 1;
-        }
-        maxDepth = Math.max(maxDepth, depth);
-        if (depth >= 2) {
-            const last = bands[bands.length - 1];
-            if (last !== undefined && Math.abs(last.endSec - from) <= EPS) {
-                bands[bands.length - 1] = {
-                    startSec: last.startSec,
-                    endSec: to,
-                    depth: Math.max(last.depth, depth),
-                };
-            } else {
-                bands.push({ startSec: from, endSec: to, depth });
-            }
-        }
-    }
-    return { bands, maxDepth };
-}
-
-function depthAtSec(bands: readonly OverlapBand[], sec: number): number {
-    let depth = 1;
-    for (const band of bands) {
-        if (sec >= band.startSec - EPS && sec < band.endSec - EPS) {
-            depth = Math.max(depth, band.depth);
-        }
-    }
-    return depth;
 }
 
 /**
@@ -244,7 +177,7 @@ function assignColorIndices(items: readonly EligibleClip[]): Map<string, number>
  *   移动不足半帧时网格没变，曲线仍然有效；超过半帧立即作废；
  * - 曲线帧数必须覆盖 Clip 的帧数，否则整条丢弃（不拉伸、不补零）；
  * - 帧周期必须与工程一致，否则曲线会整体缩放（宁可少画不画错）；
- * - 有声段按 midi <= 0 / 非有限值断开；重合深度变化也断开，便于分段着色。
+ * - 有声段按 midi <= 0 / 非有限值断开；**除此之外不切段**（见 `runs` 说明）。
  */
 export function buildClipPitchOverlays(args: {
     readonly clips: readonly ClipPitchOverlayClip[];
@@ -287,30 +220,17 @@ export function buildClipPitchOverlays(args: {
 
     if (eligible.length === 0) return [];
     const colorIndices = assignColorIndices(eligible);
-    // 重合只按**同一根轨道组**内的 Clip 计算：参数编辑器只画这一组，别的轨道上
-    // 时间重叠的 Clip 在画面上并不重叠，算进来会让这条线凭空变亮。
-    const groupClips = clips.filter(
-        (item) => groupTrackIds.has(item.trackId) && item.muted !== true,
-    );
 
     const overlays: ClipPitchOverlay[] = [];
     for (const item of eligible) {
         const { clip, zOrder, curve, startFrame, frameCount } = item;
-        const frameSec = curve.framePeriodMs / 1000;
-        const { bands, maxDepth } = overlapBandsForClip(clip, groupClips);
-        const segments: ClipPitchOverlaySegment[] = [];
-        let segmentStart = -1;
-        let segmentDepth = 0;
+        const runs: ClipPitchOverlayRun[] = [];
+        let runStart = -1;
         const flush = (endExclusive: number) => {
-            if (segmentStart >= 0 && endExclusive - segmentStart >= 2) {
-                segments.push({
-                    startIndex: segmentStart,
-                    endIndexExclusive: endExclusive,
-                    overlapDepth: segmentDepth,
-                });
+            if (runStart >= 0 && endExclusive - runStart >= 2) {
+                runs.push({ startIndex: runStart, endIndexExclusive: endExclusive });
             }
-            segmentStart = -1;
-            segmentDepth = 0;
+            runStart = -1;
         };
         for (let index = 0; index < frameCount; index += 1) {
             const value = curve.midiCurve[index];
@@ -319,18 +239,10 @@ export function buildClipPitchOverlays(args: {
                 flush(index);
                 continue;
             }
-            const depth = depthAtSec(bands, (startFrame + index) * frameSec);
-            if (segmentStart < 0) {
-                segmentStart = index;
-                segmentDepth = depth;
-            } else if (depth !== segmentDepth) {
-                flush(index);
-                segmentStart = index;
-                segmentDepth = depth;
-            }
+            if (runStart < 0) runStart = index;
         }
         flush(frameCount);
-        if (segments.length === 0) continue;
+        if (runs.length === 0) continue;
 
         overlays.push({
             clipId: clip.id,
@@ -344,9 +256,8 @@ export function buildClipPitchOverlays(args: {
                     : "sourceF0",
             colorIndex: colorIndices.get(clip.id) ?? 0,
             focused: focusClipId === clip.id,
-            overlapDepth: maxDepth,
             zOrder,
-            segments,
+            runs,
         });
     }
 
@@ -366,28 +277,26 @@ export function buildClipPitchOverlays(args: {
  * 【alpha 只有这一层】色值 alpha 恒为 1，透明度全在这里决定 —— 旧实现把 0.85
  * 写进色值再乘一次，两层相乘既难推理也难调。
  *
- * 【焦点 vs 重合】焦点是"我正在编辑这个 Clip"，重合是"这里有多个 Clip 叠着"。
- * 两者都要提亮，但焦点永远更亮（并最后绘制）。
+ * 【这是一层**参考线**，不是主线】参数编辑器的强度顺序必须单调：
+ * `pv.edit`（0.92 / 2.6）> `pv.orig`（0.55 / 1.8）> 本图层（≤0.50 / ≤1.35）。
+ * 上一版焦点用 0.95 / 1.8 —— 与 `pv.orig` 同宽、比它还亮，用户的原话是
+ * "分不清主次"。这里把上限定成**折算亮度不超过 `pv.orig`**（见
+ * clipPitchOverlay.test.ts 的"视觉层级"用例），焦点只保留"比别的 Clip 稍亮稍粗"这一档。
+ *
+ * 【为什么不再按重合深度提亮】身份色已经回答"这条线属于哪个 Clip"，重合时
+ * 两条不同颜色的线同时出现本身就是信号；再叠一层明暗，同一条线会在同一段里
+ * 忽明忽暗，既和焦点高亮抢同一个视觉通道，也是上一轮"曲线在重合处断开"的
+ * 直接成因（切段点必然落在两个采样之间）。
+ *
+ * @param overlay 参考线描述符。
+ * @returns 视觉参数（alpha / 线宽 / 虚线图案）。
  */
-export function resolveClipPitchOverlayVisual(
-    overlay: ClipPitchOverlay,
-    overlapDepth: number,
-): ClipPitchOverlayVisual {
+export function resolveClipPitchOverlayVisual(overlay: ClipPitchOverlay): ClipPitchOverlayVisual {
     const reference = overlay.kind === "midiReference";
-    const alpha = overlay.focused
-        ? reference
-            ? 0.75
-            : 0.95
-        : overlapDepth >= 2
-          ? reference
-              ? 0.55
-              : 0.72
-          : reference
-            ? 0.38
-            : 0.5;
+    const alpha = reference ? (overlay.focused ? 0.38 : 0.24) : overlay.focused ? 0.5 : 0.34;
     return {
         alpha,
-        lineWidthPx: overlay.focused ? (reference ? 1.4 : 1.8) : reference ? 1.0 : 1.25,
+        lineWidthPx: reference ? (overlay.focused ? 1.1 : 0.9) : overlay.focused ? 1.35 : 1,
         dash: reference ? [2, 3] : null,
     };
 }

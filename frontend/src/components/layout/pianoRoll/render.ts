@@ -993,27 +993,25 @@ export function drawPianoRoll(args: {
         });
     }
 
-    // Clip 源音高参考线：每个有声音段单独绘制。段已经由 clipPitchOverlay
-    // 切好，禁止在这里再跨静音把前后点连起来。
+    // Clip 源音高参考线：每个**连续有声段**单独绘制。段已经由 clipPitchOverlay
+    // 切好（唯一理由是静音），禁止在这里再跨静音把前后点连起来；也禁止在这里
+    // 按别的理由再切一刀 —— 每段都是一条独立折线，切开就是可见的洞。
     if (!skipCurves && editParam === "pitch" && clipPitchOverlays && clipPitchOverlays.length > 0) {
         for (const overlay of clipPitchOverlays) {
-            for (const segment of overlay.segments) {
-                const values = overlay.midiCurve.slice(
-                    segment.startIndex,
-                    segment.endIndexExclusive,
-                );
+            const visual = resolveClipPitchOverlayVisual(overlay);
+            for (const run of overlay.runs) {
+                const values = overlay.midiCurve.slice(run.startIndex, run.endIndexExclusive);
                 if (values.length < 2) continue;
                 const points = projectClipPitchPoints({
                     values,
                     startFrame: overlay.startFrame,
                     frameCount: overlay.frameCount,
-                    sampleStartIndex: segment.startIndex,
+                    sampleStartIndex: run.startIndex,
                     framePeriodMs: overlay.framePeriodMs,
                     axis,
                     valueToY: (value) => valueToY("pitch", value, h),
                 });
                 if (points.length < 2) continue;
-                const visual = resolveClipPitchOverlayVisual(overlay, segment.overlapDepth);
                 ctx.save();
                 ctx.strokeStyle = resolveClipPitchOverlayColor(overlay.colorIndex, isDark);
                 ctx.lineWidth = visual.lineWidthPx;
