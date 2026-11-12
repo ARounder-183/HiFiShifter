@@ -55,7 +55,7 @@ import type {
     PianoRollGridSpec,
     PianoRollSelectionBandSpec,
 } from "../kernel/host/pianoRollKernelData";
-import { normalizeCssColor, resolvePianoRollColors } from "../colors";
+import { normalizeCssColor, resolveClipPitchOverlayColor, resolvePianoRollColors } from "../colors";
 import { parseRgbaColor } from "../../timeline/runtime/timelineClipGlRenderer";
 import { PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX, toDashTuple } from "./panelHelpers";
 import type { ModelDeps } from "./modelDeps";
@@ -635,7 +635,10 @@ export function buildCurveLayers(
                 );
                 if (values.length < 2) continue;
                 const visual = resolveClipPitchOverlayVisual(overlay, segment.overlapDepth);
-                const [r, g, b, baseAlpha] = parseRgbaColor(normalizeCssColor(overlay.strokeColor));
+                // 身份色只在这里按主题解析：模型层不碰主题，绘制层不碰哈希。
+                const [r, g, b] = parseRgbaColor(
+                    normalizeCssColor(resolveClipPitchOverlayColor(overlay.colorIndex, isDark)),
+                );
                 layers.push({
                     values,
                     param: "pitch",
@@ -645,9 +648,9 @@ export function buildCurveLayers(
                     stride: 1,
                     framePeriodMs: overlay.framePeriodMs,
                     lineWidthPx: visual.lineWidthPx,
-                    // Canvas2D 用 globalAlpha 乘在 clip 色自带的 alpha 上；GL 侧
-                    // 必须做同一乘法，否则两条渲染路径的深浅会不一致。
-                    rgba: [r, g, b, baseAlpha * visual.alpha],
+                    // 色值 alpha 恒为 1：透明度只由 visual.alpha 决定，GL 与
+                    // Canvas2D 两条路径因此天然同口径。
+                    rgba: [r, g, b, visual.alpha],
                     dash: visual.dash,
                     projection: "clip",
                     frameCount: overlay.frameCount,

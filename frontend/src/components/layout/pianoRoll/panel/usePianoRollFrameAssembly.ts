@@ -448,13 +448,13 @@ export function usePianoRollFrameAssembly({
     const clipPitchOverlays = useMemo(() => {
         if (editParam !== "pitch" || !clipPitchOverlayVisible) return [];
         if (!rootTrack?.composeEnabled) return [];
-        const selectedClipIds = new Set<string>(s.multiSelectedClipIds);
-        if (s.selectedClipId !== null) selectedClipIds.add(s.selectedClipId);
         return buildClipPitchOverlays({
             clips: s.clips,
             curves: s.clipPitchCurves,
             groupTrackIds,
-            selectedClipIds,
+            // 焦点只认**单选**的 Clip：多选是时间轴的概念（切一刀就有 3 个
+            // Clip「被选中」），让它决定曲线粗细等于让"选中"这个视觉通道失效。
+            focusClipId: s.selectedClipId,
             projectFramePeriodMs: paramView?.framePeriodMs,
         });
     }, [
@@ -465,7 +465,6 @@ export function usePianoRollFrameAssembly({
         rootTrack,
         s.clipPitchCurves,
         s.clips,
-        s.multiSelectedClipIds,
         s.selectedClipId,
     ]);
 

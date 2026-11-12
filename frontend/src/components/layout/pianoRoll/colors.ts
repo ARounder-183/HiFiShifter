@@ -310,6 +310,65 @@ export function resolveSecondaryCurveColor(
     return palette[index % palette.length];
 }
 
+/**
+ * Clip 源音高参考线的**身份调色板**。
+ *
+ * 【为什么不用 Clip 自己的颜色】`clip.color` 是装饰色：新建 Clip 的默认值就是
+ * `emerald`（后端 model.rs 与前端 helpersCore 三处一致），而调色板只有 5 个色名。
+ * 用户不改色 ⇒ 所有 Clip 同色 ⇒ 所有曲线同色，"这条线属于哪个 Clip"无从回答。
+ * 重合场景需要的是"任意两条同时可见的曲线都不同色"，5 个色名给不了。
+ *
+ * 【为什么是 8 色】重合深度实测很少超过 3，8 色足够；再往上加，色相间距就会
+ * 掉到 ΔE 20 以下，反而更难区分（见 colors.test.ts 的距离门禁）。
+ *
+ * 【为什么避开红 / 青蓝 / 琥珀】播放头（#f05a5a）、选区高亮（青蓝）、音阶高亮
+ * （琥珀）已经占住那几个色相；曲线撞上去会被误读成"这一段被选中/被高亮"。
+ *
+ * 【两套主题同色相、只差明度】切主题时"哪条线是哪个 Clip"不能重新洗牌。
+ */
+export const CLIP_PITCH_OVERLAY_COLOR_COUNT = 8;
+
+/** 深色主题下的 Clip 身份调色板（亮、低饱和，压在 #1f1f1f 上仍可读）。 */
+export const CLIP_PITCH_OVERLAY_COLORS_DARK: readonly string[] = [
+    "rgba(222, 141, 115, 1)",
+    "rgba(222, 222, 115, 1)",
+    "rgba(141, 222, 115, 1)",
+    "rgba(115, 222, 168, 1)",
+    "rgba(115, 204, 222, 1)",
+    "rgba(115, 124, 222, 1)",
+    "rgba(186, 115, 222, 1)",
+    "rgba(222, 115, 186, 1)",
+];
+
+/** 浅色主题下的 Clip 身份调色板（同色相、压暗，白底上仍可读）。 */
+export const CLIP_PITCH_OVERLAY_COLORS_LIGHT: readonly string[] = [
+    "rgba(188, 74, 36, 1)",
+    "rgba(188, 188, 36, 1)",
+    "rgba(74, 188, 36, 1)",
+    "rgba(36, 188, 112, 1)",
+    "rgba(36, 163, 188, 1)",
+    "rgba(36, 49, 188, 1)",
+    "rgba(138, 36, 188, 1)",
+    "rgba(188, 36, 138, 1)",
+];
+
+/**
+ * 取第 `index` 个 Clip 身份色。
+ *
+ * 特殊说明：色值 alpha 恒为 1 —— **透明度只由 `resolveClipPitchOverlayVisual`
+ * 决定**。旧实现把 0.85 写进色值、再乘一次图层 alpha，两层 alpha 相乘既难推理
+ * 也难调（现场排查时正是靠反解这个乘积才看清"三条线都走了选中分支"）。
+ *
+ * @param index 身份色序号（越界自动回绕）。
+ * @param isDark 是否深色主题。
+ */
+export function resolveClipPitchOverlayColor(index: number, isDark: boolean): string {
+    const palette = isDark ? CLIP_PITCH_OVERLAY_COLORS_DARK : CLIP_PITCH_OVERLAY_COLORS_LIGHT;
+    const size = palette.length;
+    const slot = ((Math.trunc(index) % size) + size) % size;
+    return palette[slot]!;
+}
+
 /** 剪贴板预览曲线的颜色（青蓝，用虚线+降不透明度与选区高亮区分）。 */
 export function resolveClipboardPreviewColor(isDark: boolean): string {
     return isDark ? "rgba(100, 200, 255, 0.55)" : "rgba(0, 116, 200, 0.60)";

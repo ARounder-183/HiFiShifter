@@ -23,7 +23,7 @@ import type { ParamMorphOverlay, ParamName, ParamViewSegment, ValueViewport } fr
 import type { ParamSelection } from "./paramSelection";
 import { frameRangeEndCut, frameRangeStartCut, selectionToFrameRanges } from "./paramSelection";
 import { clipboardPreviewSpans, type ParamClipboardData } from "./paramClipboardMapping";
-import { normalizeCssColor, resolvePianoRollColors } from "./colors";
+import { normalizeCssColor, resolveClipPitchOverlayColor, resolvePianoRollColors } from "./colors";
 import { clamp } from "../timeline";
 import { clearCanvasPhysical, rasterize } from "../renderKernel/canvasRaster";
 import {
@@ -1015,9 +1015,9 @@ export function drawPianoRoll(args: {
                 if (points.length < 2) continue;
                 const visual = resolveClipPitchOverlayVisual(overlay, segment.overlapDepth);
                 ctx.save();
-                ctx.strokeStyle = overlay.strokeColor;
+                ctx.strokeStyle = resolveClipPitchOverlayColor(overlay.colorIndex, isDark);
                 ctx.lineWidth = visual.lineWidthPx;
-                // 与 GL 侧同口径：clip 色自带 alpha × 图层 alpha。
+                // 与 GL 侧同口径：色值 alpha 恒为 1，透明度只由 visual.alpha 决定。
                 ctx.globalAlpha = visual.alpha;
                 ctx.setLineDash(visual.dash === null ? [] : [...visual.dash]);
                 ctx.beginPath();
