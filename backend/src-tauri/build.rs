@@ -14,12 +14,26 @@ mod product_version;
 /// 两条路径对应两种布局：
 ///   * 开发态 `target/release/` —— 二进制与两个 `.so` 同级，`$ORIGIN` 即可；
 ///   * AppImage —— 二进制在 `usr/bin/`，Tauri 把资源放在 `usr/lib/HiFiShifter/`。
+///
+/// macOS 同理：`build_soundtouch()` 搬进内核时，它携带的那段 apple rpath 只剩
+/// 内核自己的测试二进制能收到（同上，link-arg 不跨 crate 传播）。app 于是只剩
+/// tauri bundler 补的 `../Frameworks` 一条，dyld 找不到 `Resources/macos` 下的
+/// ORT dylib（`libwebgpu_dawn.dylib`），打包自检因此抓住。四条路径：
+///   * `../Frameworks` —— SoundTouch（bundle.macOS.frameworks）；
+///   * `../Resources` —— SoundTouch 回退（bundle.macOS.files）；
+///   * `../Resources/macos` —— ORT dylib（stage_ort_macos_dylibs 的暂存区）；
+///   * `@executable_path` —— 纯 cargo 运行（target/<triple>/release）。
 fn link_runtime_search_paths() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if matches!(target_os.as_str(), "linux" | "freebsd" | "android") {
         println!("cargo:rustc-link-arg=-Wl,--enable-new-dtags");
         println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
         println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/HiFiShifter");
+    } else if target_os == "macos" {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Resources");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Resources/macos");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path");
     }
 }
 
