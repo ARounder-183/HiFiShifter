@@ -77,6 +77,7 @@ export const persistUiSettings = createAsyncThunk(
             rippleMode: s.rippleMode,
             playheadZoom: s.playheadZoomEnabled,
             autoScroll: s.autoScrollEnabled,
+            autoScrollMode: s.autoScrollMode,
             paramEditorSeekPlayhead: s.paramEditorSeekPlayheadEnabled,
             showClipboardPreview: s.showClipboardPreview,
             showParamValuePopup: s.showParamValuePopup,

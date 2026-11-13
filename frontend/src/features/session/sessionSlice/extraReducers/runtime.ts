@@ -27,6 +27,7 @@ import {
     DEFAULT_PEN_INPUT_SETTINGS,
     DEFAULT_RENDER_CACHE_SETTINGS,
 } from "../../../../services/api/settings";
+import { normalizeAutoScrollMode } from "../../../../utils/autoFollowScroll";
 import { SCALE_KEYS } from "../../../../utils/musicalScales";
 import { normalizeParamAxisUnits } from "../../../../components/layout/pianoRoll/paramAxisUnits";
 import { normalizePanAxisDirections } from "../../../../components/layout/pianoRoll/paramPan";
@@ -233,6 +234,9 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
             }
             state.playheadZoomEnabled = s.playheadZoom;
             if (s.autoScroll != null) state.autoScrollEnabled = s.autoScroll;
+            // 自动滚屏模式：旧配置没有这一项、插件形态返回脏值、mock 返回 undefined，
+            // 全部回落"滚动式"（与升级前的行为逐值一致）。
+            state.autoScrollMode = normalizeAutoScrollMode(s.autoScrollMode);
             if (s.paramEditorSeekPlayhead != null)
                 state.paramEditorSeekPlayheadEnabled = Boolean(s.paramEditorSeekPlayhead);
             if (s.paramEditorTimelineClickSelectTrack != null) {

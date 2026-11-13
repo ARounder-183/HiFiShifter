@@ -258,6 +258,7 @@ const mockUiSettings: Record<string, unknown> = {
     pitchSnapScale: "C",
     playheadZoom: false,
     autoScroll: false,
+    autoScrollMode: "scroll",
     showClipboardPreview: true,
     showParamValuePopup: true,
     lockParamLines: true,

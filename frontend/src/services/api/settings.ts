@@ -6,6 +6,7 @@ import type { FolderImportOptions } from "../../features/fileBrowser/folderImpor
 import type { DockPersistedSettings } from "../../features/dock/dockSettings";
 import type { TimelineSnapSettings } from "../../features/session/sessionTypes";
 import type { VibratoPreset } from "../../features/vibrato/vibratoTypes";
+import type { AutoScrollMode } from "../../utils/autoFollowScroll";
 
 export type StretchAlgorithmOption = "linear" | "signalsmith" | "soundtouch";
 
@@ -162,6 +163,12 @@ export interface UiSettings {
     rippleMode?: "off" | "track" | "all";
     playheadZoom: boolean;
     autoScroll: boolean;
+    /**
+     * 自动滚屏模式：`scroll`（滚动式，实时跟随，默认）/ `page`（翻页式，越界翻一页）。
+     *
+     * 缺省（旧配置）与非法值都由前端 `normalizeAutoScrollMode` 回落 `scroll`。
+     */
+    autoScrollMode?: AutoScrollMode;
     paramEditorSeekPlayhead?: boolean;
     showClipboardPreview: boolean;
     showParamValuePopup?: boolean;

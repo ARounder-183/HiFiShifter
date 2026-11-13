@@ -7,6 +7,7 @@ import {
     DEFAULT_PEN_INPUT_SETTINGS,
     DEFAULT_RENDER_CACHE_SETTINGS,
 } from "../../../services/api/settings";
+import { DEFAULT_AUTO_SCROLL_MODE } from "../../../utils/autoFollowScroll";
 import { DEFAULT_VIBRATO_BASELINE } from "../../vibrato/vibratoPresets";
 import { DEFAULT_ACTIVE_VIBRATO_PRESET_ID } from "../../vibrato/systemPresets";
 import {
@@ -58,6 +59,7 @@ export const initialState: SessionState = {
     scaleHighlightMode: "off",
     playheadZoomEnabled: false,
     autoScrollEnabled: false,
+    autoScrollMode: DEFAULT_AUTO_SCROLL_MODE,
     ignoreGrouping: false,
     rippleMode: "off",
     disabledGroupIds: [],

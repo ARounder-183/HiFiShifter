@@ -32,6 +32,7 @@ import type { ParamAxisUnits } from "../../../components/layout/pianoRoll/paramA
 import type { PanAxisDirections } from "../../../components/layout/pianoRoll/paramPan";
 import type { ProjectSaveFormat } from "../../../services/api/project";
 import type { CustomScalePreset } from "../../../utils/customScales";
+import type { AutoScrollMode } from "../../../utils/autoFollowScroll";
 import type { BaselineMode, VibratoPreset } from "../../vibrato/vibratoTypes";
 
 export type { FadeCurveType } from "../sessionTypes";
@@ -133,6 +134,15 @@ export interface SessionState {
     playheadZoomEnabled: boolean;
     /** 自动滚动（播放时跟随播放头） */
     autoScrollEnabled: boolean;
+    /**
+     * 自动滚屏模式：
+     * - `scroll`：滚动式（实时跟随，默认）；
+     * - `page`：翻页式（光标越出可见范围才整页翻一次）。
+     *
+     * 与 `autoScrollEnabled` 是**两根正交的轴**：开关决定"要不要滚"，模式决定"怎么滚"。
+     * 取值语义与几何都在 `utils/autoFollowScroll`，这里只存一个枚举。
+     */
+    autoScrollMode: AutoScrollMode;
     /** 忽略编组（启用后编组同步编辑操作不生效） */
     ignoreGrouping: boolean;
     /**

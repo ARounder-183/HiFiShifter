@@ -84,6 +84,7 @@ import { clamp, normalizeClipColor } from "./sessionSlice/helpersCore";
 import { getClipRateMultiplier, updateActiveTakeFromFlat } from "./sessionSlice/helpersTakes";
 import { initialState } from "./sessionSlice/initialState";
 import { applyClipSyllableAnalysisReducer } from "./sessionSlice/syllableMetadata";
+import { setAutoScrollModeReducer, toggleAutoScrollReducer } from "./sessionSlice/autoScroll";
 import { registerRuntime } from "./sessionSlice/extraReducers/runtime";
 import { registerAudio } from "./sessionSlice/extraReducers/audio";
 import { registerTransport } from "./sessionSlice/extraReducers/transport";
@@ -748,9 +749,8 @@ const sessionSlice = createSlice({
             if (trackId === currentRootId) return;
             state.visibleReferenceRootTrackIds = [...state.visibleReferenceRootTrackIds, trackId];
         },
-        toggleAutoScroll(state) {
-            state.autoScrollEnabled = !state.autoScrollEnabled;
-        },
+        toggleAutoScroll: toggleAutoScrollReducer,
+        setAutoScrollMode: setAutoScrollModeReducer,
         toggleIgnoreGrouping(state) {
             state.ignoreGrouping = !state.ignoreGrouping;
         },
@@ -1305,6 +1305,7 @@ export const {
     setPitchSnapScale,
     togglePlayheadZoom,
     toggleAutoScroll,
+    setAutoScrollMode,
     toggleIgnoreGrouping,
     cycleRippleMode,
     setRippleMode,
