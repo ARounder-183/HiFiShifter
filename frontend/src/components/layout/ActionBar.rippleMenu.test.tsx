@@ -78,13 +78,15 @@ afterEach(() => {
  * 工具栏上的波纹按钮。
  *
  * 【为什么排除菜单里的那个】菜单项里也画同一枚图标（让"图标 ↔ 方向"的对应关系在
- * 菜单里就学会）；菜单本身也渲染在这个容器里，因此必须按"不在菜单壳内"过滤。
+ * 菜单里就学会）。菜单壳带 `data-hs-context-menu="1"`，锚点外壳只有无值的
+ * `data-hs-context-menu`（见 `ui/Menu.tsx` 的两个 data 标记分工），因此按
+ * "不在**已打开**的菜单里"过滤即可。
  */
 function rippleButton(): HTMLButtonElement {
     const button = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
         (entry) =>
             entry.querySelector("[data-hs-ripple-icon]") !== null &&
-            entry.closest("[data-hs-context-menu]") === null,
+            entry.closest('[data-hs-context-menu="1"]') === null,
     );
     expect(button, "波纹编辑按钮必须出现在工具栏里").toBeTruthy();
     return button as HTMLButtonElement;

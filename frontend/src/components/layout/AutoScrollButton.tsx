@@ -17,10 +17,11 @@
  * 【为什么把图标挂在菜单项上】用户是在菜单里做"图标 ↔ 模式"这个配对的；在选项旁边
  * 再画一次，选完回看按钮时不需要重新推断。
  */
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { Box } from "@radix-ui/themes";
 
 import { useI18n } from "../../i18n/I18nProvider";
-import { AppContextMenu, AppIconButton } from "../../ui";
+import { AppAnchoredMenu, AppIconButton } from "../../ui";
 import { AUTO_SCROLL_MODES, type AutoScrollMode } from "../../utils/autoFollowScroll";
 
 /** 滚动式：一个视口窗口 + 播放头 + 连续右移的箭头（"视图跟着光标走"）。 */
@@ -127,10 +128,13 @@ export function AutoScrollButton({
     onSelectMode: (mode: AutoScrollMode) => void;
 }) {
     const { tf } = useI18n();
-    const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+    const [menuOpen, setMenuOpen] = useState(false);
+    const anchorRef = useRef<HTMLDivElement | null>(null);
+    const menuRef = useRef<HTMLDivElement | null>(null);
 
     return (
-        <>
+        // 锚点外壳：菜单贴在这个盒子下方展开（与参数编辑器的工具菜单同一种弹出面）。
+        <Box ref={anchorRef} data-hs-context-menu>
             <AppIconButton
                 active={enabled}
                 // 激活时用主题强调色（与相邻开关同款；不带 color 时 Radix 回落强调色）
@@ -146,28 +150,24 @@ export function AutoScrollButton({
                 onClick={onToggle}
                 onContextMenu={(e) => {
                     e.preventDefault();
-                    setMenu({ x: e.clientX, y: e.clientY });
+                    setMenuOpen(true);
                 }}
                 icon={iconFor(mode)}
             />
-            {menu && (
-                <AppContextMenu
-                    x={menu.x}
-                    y={menu.y}
-                    ariaLabel={tf("auto_scroll")}
-                    onClose={() => setMenu(null)}
-                    items={AUTO_SCROLL_MODES.map((value) => ({
-                        key: `auto-scroll-mode-${value}`,
-                        label: tf(`auto_scroll_mode_${value}`),
-                        icon: iconFor(value),
-                        checked: mode === value,
-                        onSelect: () => {
-                            onSelectMode(value);
-                            setMenu(null);
-                        },
-                    }))}
-                />
-            )}
-        </>
+            <AppAnchoredMenu
+                open={menuOpen}
+                anchorRef={anchorRef}
+                menuRef={menuRef}
+                ariaLabel={tf("auto_scroll")}
+                onClose={() => setMenuOpen(false)}
+                items={AUTO_SCROLL_MODES.map((value) => ({
+                    key: `auto-scroll-mode-${value}`,
+                    label: tf(`auto_scroll_mode_${value}`),
+                    icon: iconFor(value),
+                    checked: mode === value,
+                    onSelect: () => onSelectMode(value),
+                }))}
+            />
+        </Box>
     );
 }
