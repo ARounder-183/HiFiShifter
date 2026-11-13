@@ -815,22 +815,21 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
               ? ("draw" as const)
               : ("vibrato" as const);
 
+    /* 绘制 / 选择两个手写菜单的关闭逻辑。音高吸附的菜单是声明式的（items + onClose），
+       关闭由 AppAnchoredMenu 接管 —— 同一个开关状态有两个写者只会让"谁关的"说不清。 */
     useEffect(() => {
-        if (!drawToolMenuOpen && !selectToolMenuOpen && !pitchSnapMenuOpen) return;
+        if (!drawToolMenuOpen && !selectToolMenuOpen) return;
         const onPointerDown = (e: PointerEvent) => {
             const target = e.target as Node | null;
             if (drawToolMenuRef.current?.contains(target)) return;
             if (selectToolMenuRef.current?.contains(target)) return;
-            if (pitchSnapMenuRef.current?.contains(target)) return;
             setDrawToolMenuOpen(false);
             setSelectToolMenuOpen(false);
-            setPitchSnapMenuOpen(false);
         };
         const onKeyDown = (e: KeyboardEvent) => {
             if (e.key === "Escape") {
                 setDrawToolMenuOpen(false);
                 setSelectToolMenuOpen(false);
-                setPitchSnapMenuOpen(false);
             }
         };
         window.addEventListener("pointerdown", onPointerDown, true);
@@ -839,7 +838,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             window.removeEventListener("pointerdown", onPointerDown, true);
             window.removeEventListener("keydown", onKeyDown, true);
         };
-    }, [drawToolMenuOpen, selectToolMenuOpen, pitchSnapMenuOpen]);
+    }, [drawToolMenuOpen, selectToolMenuOpen]);
 
     /** 量一次预设列表的最大高度（锚点 / 面板缺失时返回 null）。 */
     const measurePresetFlyoutMaxHeight = useCallback((): number | null => {
