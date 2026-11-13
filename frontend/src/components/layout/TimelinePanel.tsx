@@ -1955,6 +1955,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         visualPlayheadRef={visualPlayheadSecRef}
                         syncScrollLeft={syncScrollLeft}
                         autoScrollEnabled={s.autoScrollEnabled}
+                        autoScrollMode={s.autoScrollMode}
                         projectSec={dynamicProjectSec}
                         requestPlayheadRepaint={handleRequestPlayheadRepaint}
                     />

@@ -121,6 +121,7 @@ export type TimelineSessionSlice = Pick<
     RootState["session"],
     | "autoCrossfadeEnabled"
     | "autoScrollEnabled"
+    | "autoScrollMode"
     | "beats"
     | "bpm"
     | "clips"
@@ -340,6 +341,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             autoCrossfadeEnabled: state.session.autoCrossfadeEnabled,
             showAllTakes: state.session.showAllTakes,
             autoScrollEnabled: state.session.autoScrollEnabled,
+            autoScrollMode: state.session.autoScrollMode,
             beats: state.session.beats,
             bpm: state.session.bpm,
             clips: state.session.clips,
