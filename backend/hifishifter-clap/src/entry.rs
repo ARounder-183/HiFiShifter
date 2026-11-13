@@ -159,6 +159,7 @@ unsafe extern "C" fn entry_deinit() {
         // 把宽限期内仍攒在缓冲里的早期日志行落盘：缓冲只在「下一条记录到达」时落地，
         // 宿主不再打日志就退出的会话会把它整段丢掉。
         hifishifter_plugin::diagnostics::flush_pending();
+        hifishifter_plugin::diagnostics::write_session_footer("shutdown");
     })
 }
 

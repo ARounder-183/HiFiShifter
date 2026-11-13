@@ -247,20 +247,18 @@ pub(crate) fn log_line(message: &str) {
     log::info!("[{}] {message}", log_tag());
 }
 
-/// GUI 生命周期的诊断行：**必须是 WARN 级**。
+/// GUI 生命周期的诊断行：会话边界，归「中」档（Info）。
 ///
-/// 【为什么不能是 `log_line` 的 INFO】release 的默认级别是 `Warn`（理由见
-/// `diagnostics.rs`：宿主回调的打点会把用户磁盘写满）。而 GUI 这几行恰恰是
-/// "用户报一个空面板时唯一能拿到的东西" —— 一次真实的 Linux 报障里，日志里
-/// **一条 `[gui]` 都没有**，于是"到底有没有 attach""走的是哪个后端""页面有没有起来"
-/// 全部只能靠猜。这类行每次会话只有几条，用 WARN 换现场可诊断，代价可以忽略。
+/// 【为什么按语义分级】过去抬成 WARN 只因为「默认级别看不到 Info」，于是「低」档
+/// 每次启动都混进几条假故障。现在由用户选择的详细程度控制可见性：排障时切到
+/// 「中」，正常会话的「低」档只留真正的故障信号。
 pub(crate) fn gui_log_line(message: &str) {
-    log::warn!("[gui] {message}");
+    log::info!("[gui] {message}");
 }
 
 /// 模块入口的“我加载了”诊断行（**两种格式共用**）。
 ///
-/// 【为什么是 WARN 级】默认日志级别是 Warn，而这一行回答的是“宿主只是扫描了我”
+/// 这一行回答的是“宿主只是扫描了我”
 /// 还是“宿主真的在用我”：用户报“插件不见了”时，第一件要确认的就是模块有没有被
 /// 加载、加载的是哪个版本与哪个目标平台。CLAP 外壳此前一条模块级记录都没有，
 /// 于是同一句诊断在两个格式的日志里只能查到一半。
@@ -337,6 +335,7 @@ fn module_shutdown() -> bool {
     // 先收尾 GUI 与慢车道（共享实现），再把还攒在缓冲里的日志落盘。
     let result = shutdown_module();
     diagnostics::flush_pending();
+    diagnostics::write_session_footer("shutdown");
     result
 }
 

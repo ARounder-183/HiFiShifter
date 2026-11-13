@@ -5,6 +5,7 @@ pub(crate) mod connection;
 pub(crate) mod errors;
 mod events;
 mod formant;
+pub(crate) mod log_settings;
 mod source_files;
 // 宿主专属快捷键的让路策略（跨平台：Policy 无 cfg，原语按平台各一份）。
 pub(crate) mod host_key_relay;

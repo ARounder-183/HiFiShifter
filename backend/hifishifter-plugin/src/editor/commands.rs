@@ -1027,6 +1027,7 @@ pub(crate) fn startup_settings(command: &str) -> Option<Value> {
     match command {
         "get_ui_settings" => Some(json!(crate::settings_store::settings())),
         "ui_kv_dump" => Some(json!(crate::settings_store::frontend_prefs())),
+        "get_log_settings" => Some(super::log_settings::get_log_settings()),
         _ => None,
     }
 }
@@ -1039,6 +1040,9 @@ pub(super) fn dispatch(
 ) -> Result<Value, String> {
     if let Some(settings) = startup_settings(command) {
         return Ok(settings);
+    }
+    if command == "set_log_settings" {
+        return Ok(super::log_settings::set_log_settings(&input));
     }
     match command {
         "list_directory"

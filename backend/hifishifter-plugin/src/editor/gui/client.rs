@@ -83,6 +83,20 @@ fn host_reply_retry_backoff(attempt: u32) -> std::time::Duration {
 /// 【为什么是 Warn 而不是 Info】页面自己报的错是**故障信号**，而默认日志级别是
 /// Warn —— Info 级的限流诊断在本构建里一条都不会输出。
 pub fn log_frontend_error(args: &serde_json::Value) {
+    use hifishifter_kernel::log_policy;
+    use hifishifter_kernel::logfile::log_field;
+    let policy = log_policy::policy();
+    let requested = args["level"].as_str().unwrap_or("error");
+    let accepted = match requested {
+        "warn" => policy.frontend_accept.warn,
+        "info" => policy.frontend_accept.info,
+        "debug" => policy.frontend_accept.debug,
+        _ => policy.frontend_accept.error,
+    };
+    // 「无」档严格零产出：不格式化、不限流、不跨宿主日志后端。
+    if !accepted || !policy.file_enabled {
+        return;
+    }
     let message = args["message"].as_str().unwrap_or("");
     let detail = args["detail"].as_str().unwrap_or("");
     let key = format!(
@@ -90,11 +104,18 @@ pub fn log_frontend_error(args: &serde_json::Value) {
         truncate_key(message),
         truncate_key(detail)
     );
-    hifishifter_kernel::log_limiter::emit_limited_key(
-        log::Level::Warn,
-        &key,
-        format_args!("Embedded frontend: {args}"),
+    // G16：插件侧也要单行化 + 按档位截断（此前直接打印整条 JSON，可伪造日志行）。
+    let safe = log_field(
+        &format!("Embedded frontend: {message} | detail: {detail}"),
+        policy.detail_cap_chars,
     );
+    let level = match requested {
+        "warn" => log::Level::Warn,
+        "info" => log::Level::Info,
+        "debug" => log::Level::Debug,
+        _ => log::Level::Error,
+    };
+    hifishifter_kernel::log_limiter::emit_limited_key(level, &key, format_args!("{safe}"));
 }
 fn truncate_key(text: &str) -> String {
     const MAX: usize = 64;
@@ -1383,19 +1404,24 @@ fn relay_observable(action: &str) -> bool {
     matches!(action, "playback.toggle" | "playback.stop") || action.starts_with("transport.")
 }
 
-/// 让路的诊断日志。**必须是 WARN 级**。
+/// 让路的诊断日志：按语义分级（不再用 WARN 当「保证可见」的开关）。
 ///
-/// 【为什么不能用 `log_line`】那是 `log::info!`，而 release 的默认级别是 `Warn`
-/// （见 `lib.rs` 对 `gui_log_line` 的同一段说明）。这个功能的失败形态是「按了没反应」，
-/// 它**没有界面**（状态片装不下一句解释，所以上一轮把提示删掉了）—— 日志因此是它
-/// 唯一的证据。此前它走 info，于是现场日志里一条都没有，排查只能靠猜。
+/// 失败/拒绝是故障信号（低档可见）；成功与常规说明归「高」档。
 ///
 /// 【为什么要限流】投递本身已被状态机的 60 ms 硬间隔与「10 秒 20 次」限流，但**拒绝**
 /// 不受那两道闸约束（探针在飞、键不在表里、前台不是宿主…）。按文本分桶限流，稳态
 /// 最多 10 秒一行，既不刷屏也不掩盖节奏。
 fn log_relay(text: &str) {
+    let failure = text.contains("failed")
+        || text.contains("rejected")
+        || text.contains("refused")
+        || text.contains("denied");
     hifishifter_kernel::log_limiter::emit_limited_key(
-        log::Level::Warn,
+        if failure {
+            log::Level::Warn
+        } else {
+            log::Level::Debug
+        },
         &format!("relay:{text}"),
         format_args!("[relay] {text}"),
     );
@@ -1750,7 +1776,7 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
     let result = match request["command"].as_str() {
         // main.tsx awaits preferences before importing/mounting React. Do not put
         // that read behind session creation, PCM materialization, or inference.
-        Some(command @ ("ui_kv_dump" | "get_ui_settings")) =>
+        Some(command @ ("ui_kv_dump" | "get_ui_settings" | "get_log_settings")) =>
             Ok(crate::editor::commands::startup_settings(command).expect("startup settings command")),
         // 【为什么必须内联】启动探活发生在宿主重开工程的那一刻，而 `editor_session()`
         // 可能正在做模型加载 / actor 创建。探活只需要 owner 的原子读数，不能排在
@@ -1839,6 +1865,7 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
         }
         Some("ping") => Ok(serde_json::json!({"ok":true,"mode":"plugin","view_id":view_id,
             "connected":state.borrow().link.owner().is_ok()})),
+        Some("set_log_settings") => Ok(crate::editor::log_settings::set_log_settings(&request["args"])),
         Some("log_frontend_error") => {
             log_frontend_error(&request["args"]);
             Ok(serde_json::Value::Null)

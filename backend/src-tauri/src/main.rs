@@ -37,7 +37,7 @@ fn main() {
     // 日志初始化（stderr logger + panic hook + stderr→文件 tee）：
     // `--log-file=<path>` 指定文件，`--log-file=-` 显式关闭，
     // 缺省写入平台标准日志目录（详见 logging 模块文档）。
-    backend_lib::logging::init_logging(backend_lib::logging::choice_from_args(&args));
+    backend_lib::logging::init_logging(backend_lib::logging::choice_from_args(&args), &args);
 
     // 迁移发生在日志初始化之前，结局必须在这里补记（否则那段时间里发生的事
     // 在日志里完全不可见 —— 迁移恰恰是"用户数据动了位置"的大事）。

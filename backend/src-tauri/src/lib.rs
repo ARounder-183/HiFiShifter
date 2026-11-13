@@ -920,11 +920,15 @@ pub fn run() {
             commands::ui_kv_dump,
             commands::ui_kv_put,
             commands::ui_kv_delete,
+            commands::get_log_settings,
+            commands::set_log_settings,
         ])
         .build(context)
         .expect("error while building tauri application")
         .run(|app_handle, event| match event {
             tauri::RunEvent::Exit => {
+                // 会话尾：正常退出也要留一行，才能与"日志被截断"区分开。
+                crate::logging::write_session_footer("shutdown");
                 // 退出前把渲染缓存的待写队列（`onExit` / `manual` 模式以及在途
                 // 写入）排空；带超时，磁盘异常时也不能卡住退出流程。
                 if !crate::render_cache::flush_blocking(std::time::Duration::from_secs(3)) {

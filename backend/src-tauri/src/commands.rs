@@ -72,6 +72,8 @@ mod dialogs;
 mod file_browser;
 #[path = "commands/json_export.rs"]
 mod json_export;
+#[path = "commands/log_settings.rs"]
+mod log_settings;
 #[path = "commands/midi.rs"]
 mod midi;
 // MIDI 导出已搬进内核（`hifishifter_kernel::midi_export`）：整条链路是纯粹的
@@ -2933,6 +2935,26 @@ pub fn cancel_background_render(app: tauri::AppHandle) -> serde_json::Value {
     }
 }
 
+// ===================== log verbosity (Help menu) =====================
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_log_settings() -> serde_json::Value {
+    common::guard_command(
+        "get_log_settings",
+        serde_json::json!({ "ok": false, "error": "panic in command: get_log_settings" }),
+        log_settings::get_log_settings,
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_log_settings(verbosity: String) -> serde_json::Value {
+    common::guard_command(
+        "set_log_settings",
+        serde_json::json!({ "ok": false, "error": "panic in command: set_log_settings" }),
+        || log_settings::set_log_settings(verbosity),
+    )
+}
+
 // ===================== diagnostics =====================
 //
 // 诊断包导出涉及日志读取、zip 压缩与推理基准测试（可能数十秒），
@@ -3061,14 +3083,18 @@ pub fn export_vibrato_presets_json(json: String, default_file_name: String) -> s
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn log_frontend_error(message: String, detail: Option<String>) -> serde_json::Value {
+pub fn log_frontend_error(
+    message: String,
+    detail: Option<String>,
+    level: Option<String>,
+) -> serde_json::Value {
     {
         // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
         // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
         common::guard_command(
             "log_frontend_error",
             serde_json::json!({ "ok": false, "error": "panic in command: log_frontend_error" }),
-            || diagnostics::log_frontend_error(message, detail),
+            || diagnostics::log_frontend_error(message, detail, level),
         )
     }
 }

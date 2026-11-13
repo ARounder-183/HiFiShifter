@@ -23,7 +23,32 @@ pub(crate) struct PlaybackRenderingStateEvent {
     pub(crate) pass: Option<u64>,
 }
 
+/// 用户操作「面包屑」白名单：只记操作类型，绝不记工程内容或完整路径原文。
+/// 归「中」档（Info），一会话最多几十条。
+pub(crate) fn breadcrumb(command: &str) {
+    const BREADCRUMBS: &[&str] = &[
+        "open_project_dialog",
+        "save_project",
+        "save_project_as",
+        "import_audio_dialog",
+        "import_audio_advanced",
+        "export_audio_advanced",
+        "start_background_render",
+        "cancel_background_render",
+        "export_diagnostics",
+        "start_recording",
+        "stop_recording",
+        "clear_waveform_cache",
+        "set_ui_locale",
+        "set_log_settings",
+    ];
+    if BREADCRUMBS.contains(&command) {
+        log::info!("[ui] action={command}");
+    }
+}
+
 pub(crate) fn guard_command<T>(name: &str, fallback: T, f: impl FnOnce() -> T) -> T {
+    breadcrumb(name);
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(v) => v,
         Err(_) => {
