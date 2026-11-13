@@ -212,7 +212,7 @@ pub fn get_param_frames(
             },
         };
     }
-    if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
+    if crate::log_policy::probes_enabled() {
         log::warn!(
             "get_param_frames(track_id={}, param={}, start_frame={}, frame_count={}, stride={:?} binary={:?})",
             track_id, param, start_frame, frame_count, stride, binary
@@ -699,7 +699,7 @@ fn set_param_frames_legacy_body(
         }
     };
 
-    let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
+    let debug = crate::log_policy::probes_enabled();
     let extra_curve_default = if is_extra_curve {
         param_reference_value
     } else {

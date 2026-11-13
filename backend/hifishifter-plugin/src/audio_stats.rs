@@ -94,20 +94,13 @@ pub fn slow_block_stats() -> (u64, u64) {
     )
 }
 
-/// 输出写满审计是否开启（`HIFISHIFTER_BUFFER_AUDIT=1`）。
-///
-/// 【为什么用环境变量而不是设置项】它是排查工具，不是产品行为；用户永远不会打开它，
-/// 而我们要能在不改构建的情况下让用户跑一遍。读一次就缓存。
+/// 输出写满审计是否开启（由「帮助 → 日志详细程度」的「高」档驱动）。
 ///
 /// 【为什么两种格式共用这一份】审计的对象是**输出平面有没有被写满**，而输出平面
 /// 由共享的 `render_block` 写入 —— 外壳不同，漏写的分支却是同一批。
+/// 音频线程只写原子量，开关本身也在预热时读一次。
 pub fn buffer_audit_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("HIFISHIFTER_BUFFER_AUDIT")
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-    })
+    hifishifter_kernel::log_policy::probes_enabled()
 }
 
 #[cfg(test)]

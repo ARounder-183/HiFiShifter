@@ -417,7 +417,7 @@ struct EnterExit(&'static str);
 impl EnterExit {
     fn new(name: &'static str) -> Self {
         // 【为什么是 debug 而不是「Info + 限流」】限流器只服务 Warn/Error。
-        // 这一条曾经是 `emit_limited_key(Info, …)`，而默认日志级别是 Warn ——
+        // 这一条曾经是 `emit_limited_key(Info, …)`，在当时的默认级别下完全不可见 ——
         // 于是这条刻意加上的「宿主冻在哪」诊断**一条都不会输出**，却看起来还在。
         // 逐回调的进出是纯粹的跟踪信息：它由日志级别控制（`HIFISHIFTER_LOG=debug`
         // 打开），不需要也不应该再套一层限流。

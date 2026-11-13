@@ -2308,12 +2308,9 @@ fn probe_webgpu_ep_available() -> bool {
                     ort::ep::WebGPU::default().build()
                 };
                 match builder.with_execution_providers([wgpu]) {
-                    Ok(_) => {
-                        log::warn!("ort_session: probe_webgpu_ep — AVAILABLE");
-                        true
-                    }
+                    Ok(_) => true,
                     Err(e) => {
-                        log::warn!("ort_session: probe_webgpu_ep — NOT available: {e}");
+                        log::debug!("ort_session: probe_webgpu_ep — NOT available: {e}");
                         false
                     }
                 }
@@ -2344,12 +2341,9 @@ fn probe_coreml_ep_available() -> bool {
             Ok(builder) => {
                 let ep = build_coreml_ep(OrtSessionRole::Vocoder).build();
                 match builder.with_execution_providers([ep]) {
-                    Ok(_) => {
-                        log::warn!("ort_session: probe_coreml_ep - AVAILABLE");
-                        true
-                    }
+                    Ok(_) => true,
                     Err(e) => {
-                        log::warn!("ort_session: probe_coreml_ep - NOT available: {e}");
+                        log::debug!("ort_session: probe_coreml_ep - NOT available: {e}");
                         false
                     }
                 }

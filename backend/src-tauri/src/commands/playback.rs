@@ -304,7 +304,7 @@ pub(super) fn play_original(state: State<'_, AppState>) -> serde_json::Value {
         let start_sec = resolve_play_start_sec(engine_position_sec);
         // 起播前对齐一次响点表：设备可能在停止期间换过采样率。
         ensure_metronome_schedule_matches_output(&state);
-        // 常规路径打点：Info 级（release 默认 Warn，warn 会把每次播放都写进日志轮转）。
+        // 常规路径打点：Info 级（「中」档可见；用 Warn 会把每次播放都写进日志轮转）。
         log::info!("[play_original] called start_sec={start_sec} (engine position)");
         let mut timeline = match state.timeline.lock() {
             Ok(g) => g.clone(),
@@ -354,7 +354,6 @@ pub(super) fn play_original(state: State<'_, AppState>) -> serde_json::Value {
                     ensure_render_pass_running(app);
                 }
             }
-            log::warn!("[play_original] already playing — idempotent no-op (no restart)");
             return serde_json::json!({"ok": true, "playing": "original", "start_sec": start_sec, "noop": true});
         }
 
@@ -412,7 +411,7 @@ struct RenderedClipOutput {
 /// 典型来源是音高分析在 GPU / CPU EP 之间切换导致 `pitch_orig` 出现 ULP 级差异、
 /// 源文件因复制 / 同步而 mtime 变动。这是"整库静默失效"唯一可行的定位手段。
 ///
-/// 仅在 `HIFISHIFTER_RENDER_CACHE_LOG=1` 下调用：每个 miss 要多算若干次哈希
+/// 仅在 `the "high" log verbosity` 下调用：每个 miss 要多算若干次哈希
 /// （含曲线切片），不能进常规路径。
 fn log_render_key_drift(
     timeline: &crate::state::TimelineState,
@@ -445,7 +444,7 @@ fn collect_clips_needing_render(
     timeline: &crate::state::TimelineState,
     engine_sr: u32,
 ) -> Vec<ClipRenderInfo> {
-    let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
+    let debug = hifishifter_kernel::log_policy::probes_enabled();
     let mut out = Vec::new();
     let sr = if engine_sr > 0 { engine_sr } else { 44100 };
 
@@ -618,14 +617,14 @@ fn render_single_clip(
         .as_deref()
         .ok_or_else(|| "clip has no source_path".to_string())?;
 
-    let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
+    let debug = hifishifter_kernel::log_policy::probes_enabled();
 
     // 阶段日志：渲染进度永久卡 0% 时，日志要能直接指出卡在哪一步。
     //
     // 分级原则：**每渲染一个 clip 记一行**是默认级别的上限 —— `stage=begin` 恰好
     // 提供"当前在渲染谁"，卡住时最后一行就是卡住的那个 clip。更细的子阶段耗时
     //（解码 / 处理器 / HNSEP，且按声道扇出会重复）属于跟踪级信息，放到
-    // `HIFISHIFTER_DEBUG_COMMANDS=1` 下；异常慢的 clip 另有
+    // `the "high" log verbosity` 下；异常慢的 clip 另有
     // `[bg_render] clip N/M was slow` 告警兜底（见 `SLOW_CLIP_WARN_THRESHOLD`）。
     let stage_started = std::time::Instant::now();
     // 【为什么是 Info】每个渲染 clip 一行：按默认 Warn 级这会把用户日志轮转
@@ -1927,12 +1926,9 @@ fn render_background_pass(
     use std::sync::atomic::Ordering;
 
     {
-        let cache_log = std::env::var("HIFISHIFTER_RENDER_CACHE_LOG")
-            .ok()
-            .as_deref()
-            == Some("1");
+        let cache_log = hifishifter_kernel::log_policy::probes_enabled();
         // 逐 clip 跟踪日志的总开关（见下方 begin/done 处的说明）。
-        let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
+        let debug = hifishifter_kernel::log_policy::probes_enabled();
         let started_at = std::time::Instant::now();
         // 落盘准入计数基线：本轮结束时取差值，得到"这一轮里有多少产物通过
         // 准入、多少被拒以及为什么"。后台渲染会反复重启，用全局累计值当
@@ -1976,7 +1972,7 @@ fn render_background_pass(
             // 逐 clip 的 begin/done 是**跟踪级**日志：一轮 465 个 clip 就是 930 行，
             // 而它们承载的信息（处理了谁、花了多久）已由本轮汇总行
             //（`[bg_render] complete:`）与 `[bg_render][cache] DONE` 覆盖。因此默认
-            // 静默，只在 `HIFISHIFTER_DEBUG_COMMANDS=1` 下输出；真正值得打扰用户的
+            // 静默，只在 `the "high" log verbosity` 下输出；真正值得打扰用户的
             // 只有"某个 clip 卡了很久"，那一条在下方单独判定。
             if debug {
                 log::warn!(

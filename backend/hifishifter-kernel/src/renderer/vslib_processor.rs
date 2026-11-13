@@ -198,7 +198,7 @@ fn curve_at_abs_sec(curve: Option<&[f32]>, abs_sec: f64, frame_period_ms: f64) -
 
 #[cfg(feature = "vslib")]
 fn vslib_debug_enabled() -> bool {
-    std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1")
+    crate::log_policy::probes_enabled()
 }
 
 #[cfg(feature = "vslib")]

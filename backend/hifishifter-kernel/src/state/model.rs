@@ -3667,7 +3667,7 @@ impl TimelineState {
         if key_changed && entry.pitch_orig_key.is_some() {
             entry.pitch_orig_key = None;
 
-            if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
+            if crate::log_policy::probes_enabled() {
                 log::warn!(
                     "state: [INVALIDATE] Cleared stale pitch curves for root_track={} (key changed, user_modified={})",
                     root_track_id, entry.pitch_edit_user_modified
@@ -12241,7 +12241,7 @@ impl TimelineState {
 
         match import_info {
             Some(info) => {
-                if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
+                if crate::log_policy::probes_enabled() {
                     let mut max_amp = 0.0f32;
                     for &v in info.waveform_preview.iter() {
                         if v.is_finite() {
@@ -12270,7 +12270,7 @@ impl TimelineState {
                 waveform_preview = Some(info.waveform_preview);
             }
             None => {
-                if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
+                if crate::log_policy::probes_enabled() {
                     let exists = Path::new(audio_path).exists();
                     log::error!(
                         "import_audio_item: audio_info FAILED: path_exists={} path={}",
@@ -12298,7 +12298,7 @@ impl TimelineState {
         );
 
         // DEBUG: 打印导入clip时的关键参数
-        if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
+        if crate::log_policy::probes_enabled() {
             log::warn!(
                 "import_audio_item: clip created: clip_id={}, duration_frames={:?}, sample_rate={:?}, computed_length_sec={:.6}",
                 &clip_id[..8.min(clip_id.len())],

@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -88,7 +86,7 @@ pub fn global_formant_cache() -> &'static Mutex<FormantCache> {
 }
 
 pub fn formant_debug_enabled() -> bool {
-    std::env::var("HIFISHIFTER_DEBUG_FORMANT").ok().as_deref() == Some("1")
+    crate::log_policy::probes_enabled()
 }
 
 pub fn average_abs_diff(a: &[f32], b: &[f32]) -> f32 {
@@ -108,12 +106,8 @@ pub fn formant_debug_log(message: impl AsRef<str>) {
     if !formant_debug_enabled() {
         return;
     }
-    let line = format!("[formant] {}", message.as_ref());
-    log::warn!("{line}");
-    let log_path = std::env::temp_dir().join("hifishifter-formant-debug.log");
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
-        let _ = writeln!(file, "{line}");
-    }
+    // 只走统一日志通道（不再往 %TEMP% 写第二份不受级别/轮转约束的文件）。
+    log::debug!("[formant] {}", message.as_ref());
 }
 
 fn global_formant_rebuild_generations() -> &'static Mutex<HashMap<String, u64>> {

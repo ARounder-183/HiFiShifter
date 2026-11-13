@@ -155,7 +155,7 @@ pub fn invalidate_chunk_cache_for_clip(clip_id: &str) {
 }
 
 fn debug_enabled() -> bool {
-    std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1")
+    crate::log_policy::probes_enabled()
 }
 
 fn chunk_debug(msg: &str) {
@@ -247,7 +247,7 @@ impl HiFiGanRenderer {
         // 【为什么不是只判 `is_empty`】见 `pitch_curve_is_renderable`：全 0 的曲线
         // 会穿过去，渲出静音或（有分离时）只剩气声 —— 那正是真机报障的形状。
         if !crate::renderer::pitch_curve_is_renderable(clip_midi) {
-            if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
+            if crate::log_policy::probes_enabled() {
                 log::warn!(
                     "HiFiGanRenderer::render: clip_midi is not renderable (len={}, analysis \
                      missing or all-zero), skipping inference and returning original PCM",

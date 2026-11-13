@@ -477,7 +477,7 @@ impl RealtimeStretcher {
     pub fn new(sample_rate: u32, channels: usize, time_ratio: f64) -> Result<Self, String> {
         let inner =
             SoundTouchState::new(sample_rate, channels, time_ratio).map_err(|e| e.to_string())?;
-        if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
+        if crate::log_policy::probes_enabled() {
             if let Some(version) = version_string() {
                 log::warn!(
                     "[SoundTouch] Created realtime stretcher: sr={} ch={} ratio={:.6} version={}",

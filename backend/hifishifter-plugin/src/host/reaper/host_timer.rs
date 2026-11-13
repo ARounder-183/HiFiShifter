@@ -78,7 +78,7 @@ pub(super) fn acquire(register: PluginRegister) -> bool {
         // 约定是一个 `void(*)()`。注册失败时只是没有节拍，泵仍由视图回调驱动。
         let ok = unsafe { (register)(c"timer".as_ptr(), host_timer_tick as *mut c_void) };
         if ok == 0 {
-            // 【为什么是 WARN】`log_line` 是 `log::info!`，而默认级别是 Warn ——
+            // 【为什么是 WARN】"没有节拍"是真故障；常规说明走 Info，由用户档位控制 ——
             // 用它记"心跳失败"，用户在日志里只会看到"什么都没有"，与"心跳正常"同形。
             log::warn!(
                 "[reaper-host] the host refused the timer registration; \

@@ -1516,7 +1516,7 @@ pub fn is_available() -> bool {
     // 插件真实worker使用get_or_init路径加载；避免短查询结束时线程撞上进程/DLL退出。
     match confirmed_unavailable() {
         Some(e) => {
-            let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
+            let debug = crate::log_policy::probes_enabled();
             if debug && !LOGGED_UNAVAILABLE.swap(true, Ordering::Relaxed) {
                 log::warn!("nsf_hifigan_onnx: unavailable: {e}");
             }
@@ -2841,29 +2841,16 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
         .map(|n| n.get())
         .unwrap_or(0);
 
-    log::warn!("[benchmark] ========================================");
-    log::warn!(
-        "[benchmark] model={} frames={frames} audio_sec={audio_sec:.2}s runs={runs}",
+    // 【为什么只留一行摘要】完整环境明细（providers / NVML / DML adapters / 环境变量）
+    // 已经在诊断包的 benchmark.json 里结构化存在；逐行写回日志曾把一次基准测试
+    // 变成十几行 Warn，把启动现场从轮转件里挤出去。按语义分级后归「中」档。
+    log::info!(
+        "[benchmark] model={} frames={frames} runs={runs} cpu_cores={cpu_cores} ort={ort_build_info} providers={available_providers:?}",
         onnx_path
             .file_name()
             .map(|n| n.to_string_lossy())
             .unwrap_or_default()
     );
-    log::warn!(
-        "[benchmark] model_sr={} num_mels={} hop={} n_fft={}",
-        cfg.sampling_rate,
-        cfg.num_mels,
-        cfg.hop_size,
-        cfg.n_fft
-    );
-    log::warn!("[benchmark] cpu_cores={cpu_cores} ort={ort_build_info}");
-    log::warn!("[benchmark] providers={available_providers:?}");
-    log::warn!("[benchmark] dml_adapters={dml_adapters:?}");
-    log::warn!("[benchmark] gpu_devices(NVML)={gpu_devices:?}");
-    log::warn!("[benchmark] env HIFISHIFTER_ORT_EP={:?} HIFISHIFTER_HIFIGAN_ORT_EP={:?} HIFISHIFTER_DML_DEVICE_ID={:?}",
-        std::env::var("HIFISHIFTER_ORT_EP").ok(),
-        std::env::var("HIFISHIFTER_HIFIGAN_ORT_EP").ok(),
-        std::env::var("HIFISHIFTER_DML_DEVICE_ID").ok());
 
     // 1. Benchmark CPU
     let mut cpu_times = Vec::new();
@@ -2876,8 +2863,8 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
             crate::vocoder_ort_session::OrtSessionRole::Vocoder,
             Some("cpu"),
         )?;
-        log::warn!(
-            "[benchmark] CPU session created in {}ms",
+        log::debug!(
+            "[benchmark] $2 session created in {}ms",
             t_session.elapsed().as_millis()
         );
 
@@ -2909,8 +2896,8 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     cpu_times.sort_by(|a, b| a.total_cmp(b));
     let cpu_median = cpu_times[cpu_times.len() / 2];
     let cpu_rt_factor = audio_sec / (cpu_median / 1000.0);
-    log::warn!(
-        "[benchmark] CPU: total={}ms runs={:?} median={cpu_median:.1}ms rtf={cpu_rt_factor:.3}x",
+    log::debug!(
+        "[benchmark] $2: total={}ms runs={:?} median={cpu_median:.1}ms rtf={cpu_rt_factor:.3}x",
         t_cpu_total.elapsed().as_millis(),
         cpu_times
     );
@@ -2976,8 +2963,8 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
                     Some(id) => format!("#{id}"),
                     None => "(auto)".to_string(),
                 };
-                log::warn!(
-                    "[benchmark] DirectML session created in {}ms (ep=directml, device={device_desc})",
+                log::debug!(
+                    "[benchmark] $2 session created in {}ms (ep=directml, device={device_desc})",
                     dml_total.elapsed().as_millis()
                 );
                 let session = Arc::new(Mutex::new(built.session));
@@ -2990,8 +2977,8 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
                         // 实测跑通 ⇒ 撤销这台设备的禁用记账：用户不必重启应用，
                         // 渲染就能重新用上它。
                         crate::vocoder_ort_session::enable_directml(device);
-                        log::warn!(
-                            "[benchmark] DirectML(device={device_desc}): total={}ms runs={times:?} median={median:.1}ms rtf={rtf:.3}x",
+                        log::debug!(
+                            "[benchmark] $2(device={device_desc}): total={}ms runs={times:?} median={median:.1}ms rtf={rtf:.3}x",
                             dml_total.elapsed().as_millis()
                         );
                     }
@@ -3010,8 +2997,8 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
         }
     }
 
-    // Log diagnostic info for debugging
-    log::warn!(
+    // 结论归「中」档；细节留在 benchmark.json。
+    log::info!(
         "[benchmark] Providers: {:?} | GPU device_id: {} | GPU works: {} | DirectML provider present: {} | DirectML error: {:?}",
         available_providers,
         gpu_device_id,

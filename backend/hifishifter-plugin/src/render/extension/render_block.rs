@@ -56,7 +56,7 @@ impl ExtensionOwner {
         context: Option<crate::block_context::BlockContext>,
         evidence: Option<BlockEvidence>,
     ) -> RenderOutcome {
-        // 【写满审计】HIFISHIFTER_BUFFER_AUDIT=1 时先预填 NaN、返回前再扫一遍。
+        // 【写满审计】「高」档 时先预填 NaN、返回前再扫一遍。
         // 它必须在**所有**返回路径上生效，所以只能罩在仲裁函数外面：仲裁有六条早退，
         // 逐条插入既会漏，也会让"哪条分支没写满"重新变成靠人眼找。
         let auditing = crate::audio_stats::buffer_audit_enabled();

@@ -1896,32 +1896,6 @@ impl AudioSources for ModelHandle {
         }
         log::info!("[ara] audio_source samples_access enable={enable}");
         self.refresh_source_pcm(*state, host);
-        if enable && std::env::var_os("HIFISHIFTER_PLUGIN_PCM_PROBE").is_some() {
-            // 仅用于一次性宿主观测：比较原始源样本与 ARA 返回的源样本，判断倒放是否改源。
-            let result = (|| {
-                let source = self
-                    .document
-                    .audio_sources
-                    .get(*state)
-                    .ok_or(AraError::InvalidArgument("unknown source"))?;
-                let source_ref = host
-                    .current_audio_source()
-                    .ok_or(AraError::InvalidState("missing source scope"))?;
-                let channels = source.channel_count.max(1) as usize;
-                let mut reader = host.audio_reader::<f32>(source_ref, channels)?;
-                let mut samples = vec![vec![0.0_f32; 16]; channels];
-                let mut planes = samples
-                    .iter_mut()
-                    .map(Vec::as_mut_slice)
-                    .collect::<Vec<_>>();
-                reader.read(0, &mut planes)?;
-                log::info!("[ara] source PCM #{}: first16={:?}", state, samples[0]);
-                Ok::<(), AraError>(())
-            })();
-            if let Err(error) = result {
-                log::warn!("[ara] source PCM probe failed: {error:?}");
-            }
-        }
         Ok(())
     }
 }

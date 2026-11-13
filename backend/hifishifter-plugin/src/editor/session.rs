@@ -577,8 +577,6 @@ pub(crate) struct EditorSession {
     pending_reported: AtomicBool,
     render_task: Mutex<Option<RenderTask>>,
     closed: AtomicBool,
-    transport_probe: bool,
-    transport_probe_next: Mutex<Instant>,
     pub(super) suppress_history: AtomicBool,
     /// **上一次采纳过的**宿主编辑器视图选择（A5），用于与宿主的新选择比对。
     ///
@@ -1016,8 +1014,6 @@ impl EditorSession {
             render_task: Mutex::new(None),
             closed: AtomicBool::new(false),
             suppress_history: AtomicBool::new(false),
-            transport_probe: std::env::var_os("HIFISHIFTER_PLUGIN_TRANSPORT_PROBE").is_some(),
-            transport_probe_next: Mutex::new(Instant::now()),
             host_selection: Mutex::new(None),
             reload_requested: AtomicBool::new(false),
             initial_retry_at: Mutex::new(None),
@@ -1546,7 +1542,6 @@ impl EditorSession {
                     }
                     session.emit_state();
                 }
-                session.report_transport_probe();
                 if session.refresh_analysis() {
                     // 分析有新进展 ⇒ 之前失败的前提可能已消失，重新武装重试。
                     retry.rearm();
@@ -4042,22 +4037,6 @@ impl EditorSession {
         );
     }
 
-    /// 一次性时钟探针最多每秒写一条；只在命令actor线程调用，不在音频callback写文件。
-    pub(super) fn report_transport_probe(&self) {
-        if !self.transport_probe {
-            return;
-        }
-        let now = Instant::now();
-        let mut next = self.transport_probe_next.lock_or_recover();
-        if now < *next {
-            return;
-        }
-        *next = now + Duration::from_secs(1);
-        drop(next);
-        if let Some(clock) = self.document().map(|document| document.clock.clone()) {
-            log::info!("[ara] transport diagnostic {}", clock.diagnostics());
-        }
-    }
     /// Inventory uses document source IDs; analysis may only use the PCM files
     /// already materialized from authorized samples. Map identities back after
     /// every inventory projection, without opening any host media path.

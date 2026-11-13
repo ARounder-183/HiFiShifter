@@ -213,8 +213,7 @@ impl AudioEngine {
                 // 本线程**只做观测**（日志 / 电平发布）：等待的解除由渲染线程
                 // 推送 `RenderedClipsChanged` 驱动，不依赖此处的采样或判定，
                 // 因而没有任何观测窗口或时序竞态。
-                let debug_pending =
-                    std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
+                let debug_pending = hifishifter_kernel::log_policy::probes_enabled();
                 let mut last_bus_generation = u64::MAX;
                 let mut last_map_generation = u64::MAX;
                 let mut last_pending_log_sec = u64::MAX;

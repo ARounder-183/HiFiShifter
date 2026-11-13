@@ -94,7 +94,7 @@ fn ensure_ort_init() -> Result<(), String> {
 }
 
 fn debug_enabled() -> bool {
-    std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1")
+    crate::log_policy::probes_enabled()
 }
 
 fn env_path(name: &str) -> Option<PathBuf> {
