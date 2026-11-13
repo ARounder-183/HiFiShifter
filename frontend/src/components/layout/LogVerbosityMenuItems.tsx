@@ -1,11 +1,9 @@
 /**
  * 帮助菜单里的「日志详细程度」**子菜单**（唯一入口）。
  *
- * 【为什么收进子菜单】一级菜单里平铺 Label + 4 个单选项要占 6 行，把
- * 「打开日志文件夹 / 导出诊断信息 / 复制诊断摘要 / 关于」挤到很低的密度。
- * 项目自己的「选项 → 推理设备」已经给出范例：一级只显示一行带当前值的
- * `SubTrigger`，四个互斥档位与只读状态放进 `SubContent`。菜单项总数不变，
- * 仍没有对话框、设置面板或第二个入口。
+ * 【为什么收进子菜单】一级菜单里平铺四档会压低信息密度。这里与
+ * 「选项 → 推理设备」同形：一级只有一行带当前值的 `SubTrigger`，展开后
+ * **只有四个互斥档位**；不放重复的标题、当前值、说明或分隔线。
  *
  * 改动即写档；失败复用 MenuBar 既有的 setNotice / AppNoticeDialog，
  * 并把 RadioGroup 回滚到原档位。
@@ -59,14 +57,9 @@ export function LogVerbosityMenuItems({ onSaveFailed }: Props) {
     }, [apply]);
 
     const model = resolveLogVerbosityMenu(view);
-    // 【为什么用 selected 而不是 view.verbosity】点击后先乐观更新触发行；
-    // 覆盖态 / 日志不可用时 statusVars 为空，也不能退化成写死的"低"。
-    const levelText = t(logLevelLabelKey(selected));
-    const triggerText = tVars("menu_log_verbosity_current", { level: levelText });
-    const statusText =
-        model.statusKey === "menu_log_current"
-            ? tVars("menu_log_current", { level: t(logLevelLabelKey(model.checked)) })
-            : t(model.statusKey);
+    const triggerText = tVars("menu_log_verbosity", {
+        level: t(logLevelLabelKey(selected)),
+    });
 
     const onChange = (value: string) => {
         const next = value as LogVerbosity;
@@ -95,9 +88,6 @@ export function LogVerbosityMenuItems({ onSaveFailed }: Props) {
         <DropdownMenu.Sub>
             <DropdownMenu.SubTrigger disabled={busy}>{triggerText}</DropdownMenu.SubTrigger>
             <DropdownMenu.SubContent>
-                <DropdownMenu.Label>{tf("menu_log_verbosity")}</DropdownMenu.Label>
-                <DropdownMenu.Label>{statusText}</DropdownMenu.Label>
-                <DropdownMenu.Separator />
                 <DropdownMenu.RadioGroup value={selected} onValueChange={onChange}>
                     {model.options.map((option) => (
                         <DropdownMenu.RadioItem

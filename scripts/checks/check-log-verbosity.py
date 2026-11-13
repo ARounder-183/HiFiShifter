@@ -130,6 +130,37 @@ def main() -> int:
         if re.search(r'release (版|build|builds).{0,24}(默认|default).{0,16}info', text, re.I):
             violations.append(f'{doc.relative_to(ROOT).as_posix()}: stale "release default info" text')
 
+    # 帮助菜单的「复制诊断摘要」已按用户要求彻底移除；子菜单只保留四档，
+    # 不再有标题 Label / "当前：低" / 覆盖说明 / 健康状态 / 分隔线。
+    # 这类"死文案复活"不会让编译失败，却会重新把菜单压成低信息密度。
+    removed_identifiers = (
+        'menu_copy_diagnostics_summary',
+        'menu_copy_diagnostics_fallback',
+        'menu_copy_diagnostics_failed_detail',
+        'menu_copy_diagnostics_retry',
+        'menu_log_verbosity_current',
+        'menu_log_current',
+        'menu_log_overridden',
+        'menu_log_unavailable',
+        'handleCopyDiagnosticsSummary',
+        'diagnosticsSummary',
+    )
+    for path in frontend_sources():
+        text = path.read_text(encoding='utf-8')
+        for number, line in enumerate(text.splitlines(), 1):
+            for identifier in removed_identifiers:
+                if identifier in line:
+                    violations.append(
+                        f'{path.relative_to(ROOT).as_posix()}:{number}: removed log UI identifier: {identifier}'
+                    )
+    submenu = FRONTEND_SRC / 'components' / 'layout' / 'LogVerbosityMenuItems.tsx'
+    submenu_text = submenu.read_text(encoding='utf-8')
+    for forbidden in ('<DropdownMenu.Label', '<DropdownMenu.Separator', 'statusText'):
+        if forbidden in submenu_text:
+            violations.append(
+                f'{submenu.relative_to(ROOT).as_posix()}: low-density submenu element: {forbidden}'
+            )
+
     if violations:
         print('日志详细程度门禁失败：')
         for item in violations[:120]:

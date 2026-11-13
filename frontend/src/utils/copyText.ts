@@ -2,10 +2,9 @@
  * 把纯文本写进系统剪贴板。
  *
  * 【为什么优先原生通道】`navigator.clipboard.writeText` 需要 transient user
- * activation 与剪贴板权限。帮助菜单的「复制诊断摘要 / 复制路径 / 复制链接」先
- * 动态 import、再发若干 IPC，手势早已过期；Tauri 自定义协议与 WebView2 也不保证
- * 给权限。实测后果是复制**每次必失败**，界面却把它猜成"剪贴板正被占用，请重试"
- * —— 那是另一类故障（竞争），重试永远不会好。
+ * activation 与剪贴板权限。「复制路径 / 复制链接」排在动态 import + 若干 IPC
+ * 之后，手势早已过期；Tauri 自定义协议与 WebView2 也不保证给权限。原生通道
+ * 不需要手势，避免复制静默失败。
  *
  * `write_clipboard_text` 走 `hifishifter-clipboard` 的原生实现：无需手势，
  * Windows 下共用 `CLIPBOARD_LOCK` + 真实睡眠退避的 `OpenClipboard` 重试，

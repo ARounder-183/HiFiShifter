@@ -1,20 +1,20 @@
 //! 系统剪贴板命令：纯文本写入 + HiFiShifter 私有对象格式读写。
 //!
 //! 【为什么纯文本要单独一条命令】`write_system_clipboard_object` 写的是私有对象
-//! 格式 + 一句英文摘要，会把用户剪贴板换成应用内部载荷；而「复制诊断摘要」
-//! 「复制路径」「复制仓库链接」要的是能直接贴进 issue 的纯文本。两者共用
+//! 格式 + 一句英文摘要，会把用户剪贴板换成应用内部载荷；而「复制路径」
+//! 「复制仓库链接」要的是能直接贴进 issue 的纯文本。两者共用
 //! `hifishifter-clipboard` 的进程锁与争用退避，但格式语义不同。
 //!
 //! 【为什么走原生】`navigator.clipboard.writeText` 需要 transient user
-//! activation 与剪贴板权限；这些菜单动作先动态 import、再发若干 IPC，手势早已
-//! 过期，Tauri 的自定义协议也不保证权限。失败却被前端猜成"剪贴板被占用，请重试"
-//! —— 重试永远不会好。原生通道无需手势，外部短暂独占由共享层的退避吸收。
+//! activation 与剪贴板权限；菜单动作排在动态 import + 若干 IPC 之后，手势早已
+//! 过期，Tauri 的自定义协议也不保证权限。原生通道无需手势，外部短暂独占由
+//! 共享层的退避吸收。
 
 use serde_json::{json, Value};
 
 use super::common;
 
-/// 纯文本剪贴板写入：供「复制诊断摘要 / 复制路径 / 复制链接」共用。
+/// 纯文本剪贴板写入：供「复制路径 / 复制链接」共用。
 #[tauri::command(rename_all = "camelCase")]
 pub fn write_clipboard_text(text: String) -> Value {
     common::guard_command(

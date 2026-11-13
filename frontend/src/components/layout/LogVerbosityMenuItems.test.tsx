@@ -2,7 +2,7 @@
  * 帮助菜单四档单选项的渲染契约：4 个 menuitemradio + aria-checked。
  *
  * Radix 的 DropdownMenu 需要 Portal / DOM；这里用轻量的模块替身把 RadioGroup /
- * RadioItem / Label 映射成原生 role，避免为一条 UI 契约引入完整的浏览器交互栈。
+ * RadioItem 映射成原生 role，避免为一条 UI 契约引入完整的浏览器交互栈。
  */
 // @vitest-environment jsdom
 import { createRoot, type Root } from "react-dom/client";
@@ -30,12 +30,6 @@ vi.mock("../../i18n/I18nProvider", () => ({
 }));
 vi.mock("@radix-ui/themes", async () => {
     const React = await import("react");
-    const pass =
-        (role: string) =>
-        ({ children, ...rest }: { children?: React.ReactNode; disabled?: boolean }) =>
-            React.createElement("div", { role, ...rest }, children);
-    const Label = pass("presentation");
-    const Separator = () => React.createElement("div", { role: "separator" });
     const Sub = ({ children }: { children?: React.ReactNode }) =>
         React.createElement("div", { role: "group" }, children);
     const SubTrigger = ({
@@ -79,7 +73,7 @@ vi.mock("@radix-ui/themes", async () => {
             children,
         );
     return {
-        DropdownMenu: { Label, Separator, Sub, SubTrigger, SubContent, RadioGroup, RadioItem },
+        DropdownMenu: { Sub, SubTrigger, SubContent, RadioGroup, RadioItem },
     };
 });
 
@@ -155,6 +149,11 @@ test("the verbosity choices stay inside one submenu", async () => {
     await renderMenu();
     const triggers = container.querySelectorAll('[data-trigger="true"]');
     expect(triggers).toHaveLength(1);
-    expect(triggers[0].textContent).toContain("menu_log_verbosity_current");
+    expect(triggers[0].textContent).toContain("menu_log_verbosity");
+    expect(container.querySelectorAll('[role="presentation"]')).toHaveLength(0);
+    expect(container.querySelectorAll('[role="separator"]')).toHaveLength(0);
+    expect(
+        container.querySelectorAll('[role="menu"] > [role="group"] > [role="menuitemradio"]'),
+    ).toHaveLength(4);
     expect(container.querySelectorAll('[role="menu"] [role="menuitemradio"]')).toHaveLength(4);
 });

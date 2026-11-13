@@ -334,7 +334,7 @@ pub fn write_bytes(bytes: &[u8], text_summary: &str) -> Result<(), String> {
 
 /// 把**纯文本**写入系统剪贴板（`CF_UNICODETEXT`），替换整份逻辑剪贴板。
 ///
-/// 【为什么必须有原生纯文本通道】帮助菜单的「复制诊断摘要」「复制路径」以及
+/// 【为什么必须有原生纯文本通道】「复制路径」以及
 /// 「关于」里的复制链接，过去只能走 WebView 的 `navigator.clipboard`：那需要
 /// transient user activation 与剪贴板权限，而调用点排在动态 import + 若干 IPC
 /// 之后，手势早已过期；WebView2 的自定义协议还常直接不给权限。于是复制**必然**

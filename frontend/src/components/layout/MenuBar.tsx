@@ -124,7 +124,6 @@ import { openCaptureSettings } from "../../features/capture/captureSettingsBus";
 import { AppBusy, AppConfirmDialog, AppNoticeDialog } from "../../ui";
 import { copyTextToClipboard } from "../../utils/copyText";
 import { logFolderNotice } from "./logFolderNotice";
-import { diagnosticsSummary } from "./diagnosticsSummary";
 // import type { VibratoParams } from "../editDialogs/EditDialogs"; // 已移除无效导入
 
 interface MenuBarProps {
@@ -234,8 +233,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [notice, setNotice] = useState<{
         title: React.ReactNode;
         message: React.ReactNode;
-        /** 附加动作是「复制路径」还是「重试复制」；两者按钮文案不同。 */
-        copyAction?: "path" | "retry";
         /**
          * 设置后对话框多出一个「复制」动作。
          *
@@ -579,59 +576,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             setDiagnosticsExporting(false);
         }
     }, [tf]);
-
-    /**
-     * 复制诊断摘要：四行版本 / 宿主 / 日志状态 + 日志路径。
-     *
-     * 【为什么要这个】多数"把日志发给开发者"的场景只要这段纯文本，导出一个 zip
-     * 再想办法发出去太重；报障时又经常拿不到系统剪贴板（权限、远程桌面、剪贴板
-     * 管理器竞争）。成功给一句回执；**失败也必须把摘要本身交给用户**，可选中、
-     * 可再点一次「复制」，而不是只显示"剪贴板正被占用，请重试"。
-     *
-     * 数据来自三条只读命令，其中 `get_log_settings` 同时给出档位、路径与健康度；
-     * 刻意不再调用 `open_log_folder` —— 复制文字不该顺手打开资源管理器。
-     */
-    const handleCopyDiagnosticsSummary = useCallback(async () => {
-        try {
-            const [{ coreApi }, { getLogSettings }, { copyTextToClipboard }] = await Promise.all([
-                import("../../services/api/core"),
-                import("../../services/api/logSettings"),
-                import("../../utils/copyText"),
-            ]);
-            const [about, runtime, settings] = await Promise.all([
-                coreApi.getAboutInfo().catch(() => null),
-                coreApi.getRuntimeInfo().catch(() => null),
-                getLogSettings().catch(() => null),
-            ]);
-            const text = diagnosticsSummary(about, runtime, settings);
-            const ok = await copyTextToClipboard(text);
-            if (ok) {
-                setNotice({
-                    title: tf("menu_copy_diagnostics_summary"),
-                    message: t("about_copied"),
-                });
-                return;
-            }
-            setNotice({
-                title: tf("menu_copy_diagnostics_fallback"),
-                message: (
-                    <>
-                        <div>{tf("menu_copy_diagnostics_failed_detail")}</div>
-                        <pre
-                            data-hs-selectable="true"
-                            className="mt-2 whitespace-pre-wrap break-all font-mono"
-                        >
-                            {text}
-                        </pre>
-                    </>
-                ),
-                copyText: text,
-                copyAction: "retry",
-            });
-        } catch (e) {
-            setNotice({ title: tf("status_error_prefix"), message: String(e) });
-        }
-    }, [tf, t]);
 
     // 快捷键「导入媒体文件」→ 复用文件菜单的导入流程（多文件/多音轨选择）。
     useEffect(() => {
@@ -1619,7 +1563,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                     title: tf("menu_open_log_folder"),
                                     message: <span data-hs-selectable="true">{outcome.path}</span>,
                                     copyText: outcome.path,
-                                    copyAction: "path",
                                 });
                             } catch (e) {
                                 setNotice({
@@ -1639,10 +1582,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         onSelect={() => void handleExportDiagnostics()}
                     >
                         {tf("menu_export_diagnostics")}
-                    </DropdownMenu.Item>
-                    {/* 复制诊断摘要扩展到独立 App：不新增入口，只让既有菜单项在 App 里可见。 */}
-                    <DropdownMenu.Item onSelect={() => void handleCopyDiagnosticsSummary()}>
-                        {tf("menu_copy_diagnostics_summary")}
                     </DropdownMenu.Item>
                     {/* 日志详细程度的唯一入口：一级菜单只占一行，四档在子菜单里。 */}
                     <LogVerbosityMenuItems
@@ -1815,11 +1754,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         ? [
                               {
                                   id: "copy",
-                                  label: tf(
-                                      notice?.copyAction === "retry"
-                                          ? "menu_copy_diagnostics_retry"
-                                          : "menu_open_log_folder_copy_path",
-                                  ),
+                                  label: tf("menu_open_log_folder_copy_path"),
                                   onClick: () => {
                                       void copyTextToClipboard(notice.copyText ?? "").then((ok) => {
                                           if (ok) {

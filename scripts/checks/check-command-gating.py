@@ -114,9 +114,9 @@ def main() -> int:
             "A control that only rejects at runtime is worse than a disabled one."
         )
         return 1
-    # 复制一段纯文本不需要 transient user activation；WebView 剪贴板在菜单动作
-    # 经过动态 import + 若干 IPC 后必然失去手势，失败提示还会误导成"剪贴板被占用"。
-    # 两个宿主都必须保留原生通道，否则帮助菜单的复制类动作会静默退化成必失败。
+    # 「复制路径 / 复制链接」不需要 transient user activation；WebView 剪贴板
+    # 在菜单动作经过动态 import + 若干 IPC 后会失去手势。两个宿主都必须保留
+    # 原生纯文本通道，否则这两类复制动作会静默退化成必失败。
     clip = read(ROOT / "backend" / "hifishifter-clipboard" / "src" / "system_clipboard.rs")
     native = [
         "pub fn write_text(text: &str) -> Result<(), String>",

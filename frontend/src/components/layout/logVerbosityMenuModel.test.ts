@@ -1,4 +1,4 @@
-/** 帮助菜单四档单选项的纯模型契约。 */
+/** 帮助菜单四档单选项的纯模型契约：只保留菜单真正渲染的状态。 */
 import { expect, test } from "vitest";
 
 import type { LogSettingsView } from "../../services/api/logSettings";
@@ -43,21 +43,15 @@ test("the default low level is checked", () => {
 test("a startup override disables every radio item", () => {
     const model = resolveLogVerbosityMenu(view({ overridden: true, source: "env" }));
     expect(model.overridden).toBe(true);
-    expect(model.statusKey).toBe("menu_log_overridden");
     expect(model.options.every((o) => o.disabled)).toBe(true);
 });
 
-test("the status key follows logging health and the selected level", () => {
-    expect(resolveLogVerbosityMenu(view()).statusKey).toBe("menu_log_current");
-    expect(resolveLogVerbosityMenu(view({ verbosity: "off" })).statusVars).toEqual({
-        level: "menu_log_level_off",
-    });
-    expect(resolveLogVerbosityMenu(view({ loggingHealthy: false })).statusKey).toBe(
-        "menu_log_unavailable",
-    );
-    expect(resolveLogVerbosityMenu(view({ hostLoggerOwned: true })).statusKey).toBe(
-        "menu_log_unavailable",
-    );
+test("the model carries no status label or explanation", () => {
+    const model = resolveLogVerbosityMenu(view());
+    expect(Object.keys(model).sort()).toEqual(["checked", "options", "overridden"]);
+    expect(JSON.stringify(model)).not.toContain("menu_log_current");
+    expect(JSON.stringify(model)).not.toContain("menu_log_overridden");
+    expect(JSON.stringify(model)).not.toContain("menu_log_unavailable");
 });
 
 test("every level has a stable label key for the submenu trigger", () => {

@@ -1,9 +1,9 @@
 /**
  * `copyTextToClipboard` 的宿主分流契约。
  *
- * 回归背景：帮助菜单的复制动作经过动态 import + 若干 IPC 后，WebView 的
- * transient user activation 已过期，`navigator.clipboard.writeText` 必然拒绝；
- * 旧实现把它猜成"系统剪贴板正被占用，请重试"，用户重试一万次也不会好。
+ * 回归背景：菜单里的复制动作经过动态 import + 若干 IPC 后，WebView 的
+ * transient user activation 已过期，`navigator.clipboard.writeText` 可能拒绝；
+ * 因此复制路径 / 复制链接优先走不受手势限制的原生通道。
  */
 // @vitest-environment jsdom
 import { beforeEach, expect, test, vi } from "vitest";
