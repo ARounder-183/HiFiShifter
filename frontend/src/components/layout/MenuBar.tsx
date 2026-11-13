@@ -44,6 +44,7 @@ import type { TimeUnit } from "../../features/session/sessionTypes";
 import { TIME_UNITS, TIME_UNIT_CHOICES } from "./timeline/timeFormat";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
 import { SnapGridSettingsDialog } from "./SnapGridSettingsDialog";
+import { SplitTransitionSettingsDialog } from "./SplitTransitionSettingsDialog";
 import { DockLayoutMenus, DockLayoutDialogs } from "../dock/DockLayoutMenu";
 import { scaleChangesInRange, scaleLikeEquals } from "../../utils/tempoMap";
 import type { ScaleLike } from "../../utils/musicalScales";
@@ -221,6 +222,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [timeDisplaySettingsOpen, setTimeDisplaySettingsOpen] = useState(false);
     const [snapSettingsOpen, setSnapSettingsOpen] = useState(false);
     const [paramBlockSettingsOpen, setParamBlockSettingsOpen] = useState(false);
+    const [splitTransitionSettingsOpen, setSplitTransitionSettingsOpen] = useState(false);
     const [exportDialogOpen, setExportDialogOpen] = useState(false);
     const [autoBackupDialogOpen, setAutoBackupDialogOpen] = useState(false);
     const [recordingDialogOpen, setRecordingDialogOpen] = useState(false);
@@ -1489,6 +1491,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Item onSelect={() => setParamBlockSettingsOpen(true)}>
                         {tf("param_block_settings_title")}
                     </DropdownMenu.Item>
+                    {/* 分割过渡设置：与工具栏按钮的右键同一个对话框。
+                        放在「参数块设置」旁边是因为二者都是"编辑行为"类设置 —— 用户
+                        在找"分割之后发生什么"时不会先去工具栏右键猜一次。 */}
+                    <DropdownMenu.Item onSelect={() => setSplitTransitionSettingsOpen(true)}>
+                        {tf("split_transition_settings_title")}
+                    </DropdownMenu.Item>
 
                     {/* Search matching settings — 作用于全部搜索面，因此与
                         吸附/网格同级，而不是塞进某个面板自己的设置页。 */}
@@ -1649,6 +1657,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             />
 
             <SnapGridSettingsDialog open={snapSettingsOpen} onOpenChange={setSnapSettingsOpen} />
+            <SplitTransitionSettingsDialog
+                open={splitTransitionSettingsOpen}
+                onOpenChange={setSplitTransitionSettingsOpen}
+            />
             <ParamBlockSettingsDialog
                 open={paramBlockSettingsOpen}
                 onOpenChange={setParamBlockSettingsOpen}
