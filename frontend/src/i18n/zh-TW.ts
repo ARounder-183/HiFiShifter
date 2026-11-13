@@ -1232,7 +1232,7 @@ export const zhTW = {
     ripple_mode_off: "關閉",
     ripple_mode_track: "按軌道",
     ripple_mode_all: "全部軌道",
-    split_transition_tooltip: "分割過渡（右鍵開啟詳細設定）",
+    split_transition_tooltip: "分割過渡",
     split_transition_settings_title: "分割過渡設定",
     split_transition_settings_desc: "分割後自動在分割處加入淡入淡出，或透過延伸重疊減少 click 聲。",
     split_transition_mode: "類型",

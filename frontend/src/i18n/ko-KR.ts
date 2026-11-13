@@ -1333,7 +1333,7 @@ export const koKR = {
     ripple_mode_off: "끄기",
     ripple_mode_track: "트랙 단위",
     ripple_mode_all: "전체 트랙",
-    split_transition_tooltip: "분할 트랜지션 (우클릭하여 상세 설정)",
+    split_transition_tooltip: "분할 트랜지션",
     split_transition_settings_title: "분할 트랜지션 설정",
     split_transition_settings_desc:
         "분할 후 분할 지점에 자동으로 페이드 인/아웃을 추가하거나 오버랩 확장으로 클릭 노이즈를 줄입니다.",

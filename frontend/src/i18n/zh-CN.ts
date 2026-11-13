@@ -1230,7 +1230,7 @@ export const zhCN = {
     ripple_mode_off: "关闭",
     ripple_mode_track: "按轨道",
     ripple_mode_all: "全部轨道",
-    split_transition_tooltip: "分割过渡（右键打开详细设置）",
+    split_transition_tooltip: "分割过渡",
     split_transition_settings_title: "分割过渡设置",
     split_transition_settings_desc: "分割后自动在分割处添加淡入淡出，或通过延伸重叠减少 click 声。",
     split_transition_mode: "类型",

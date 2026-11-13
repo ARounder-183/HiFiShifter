@@ -1278,7 +1278,7 @@ export const jaJP = {
     ripple_mode_off: "オフ",
     ripple_mode_track: "トラック単位",
     ripple_mode_all: "全トラック",
-    split_transition_tooltip: "分割トランジション（右クリックで詳細設定）",
+    split_transition_tooltip: "分割トランジション",
     split_transition_settings_title: "分割トランジション設定",
     split_transition_settings_desc:
         "分割後に分割位置へ自動的にフェードイン/フェードアウトを追加するか、拡張オーバーラップでクリックノイズを低減します。",

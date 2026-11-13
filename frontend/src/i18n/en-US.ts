@@ -1401,7 +1401,7 @@ export const enUS = {
     ripple_mode_off: "Off",
     ripple_mode_track: "Per Track",
     ripple_mode_all: "All Tracks",
-    split_transition_tooltip: "Split Transition (right-click for settings)",
+    split_transition_tooltip: "Split Transition",
     split_transition_settings_title: "Split Transition Settings",
     split_transition_settings_desc:
         "After splitting, automatically add fades or an extended overlap at the split point to reduce clicks.",
