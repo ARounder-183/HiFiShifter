@@ -485,6 +485,13 @@ pub struct UiSettings {
     pub playhead_zoom: bool,
     #[serde(default)]
     pub auto_scroll: bool,
+    /// 自动滚屏模式：`"scroll"`（滚动式，实时跟随，默认）/ `"page"`（翻页式，越界翻一页）。
+    ///
+    /// 【为什么必须在这里有字段】`save_ui_settings` 是「读-改-写整个配置文件」：
+    /// 本结构缺字段时前端每次保存都会把它**静默丢弃** —— 用户选完模式重开就回到默认，
+    /// 而症状是"设置偶尔丢失"，极难复现（与 `search` / `file_browser` 同一条约束）。
+    #[serde(default = "default_auto_scroll_mode")]
+    pub auto_scroll_mode: String,
     #[serde(default = "default_true")]
     pub param_editor_seek_playhead: bool,
     #[serde(default = "default_true")]
@@ -1649,6 +1656,11 @@ fn default_ripple_mode() -> String {
     "off".to_string()
 }
 
+/// 自动滚屏模式的出厂值：滚动式（与引入翻页式之前的行为逐值一致）。
+fn default_auto_scroll_mode() -> String {
+    "scroll".to_string()
+}
+
 fn default_metronome_gain() -> f64 {
     0.5
 }
@@ -1744,6 +1756,7 @@ impl Default for UiSettings {
             param_blocks_visible: false,
             playhead_zoom: false,
             auto_scroll: false,
+            auto_scroll_mode: default_auto_scroll_mode(),
             param_editor_seek_playhead: true,
             show_clipboard_preview: true,
             show_param_value_popup: true,
@@ -1819,6 +1832,12 @@ impl Default for UiSettings {
 
 impl UiSettings {
     /// 规范化分割过渡相关设置，避免损坏/越界的持久化值影响编辑行为。
+    ///
+    /// 【历史命名】本函数早已不只是"分割过渡"：它是**整份 `UiSettings` 的规范化
+    /// 总入口**（`get_ui_settings` / `save_ui_settings` / `ui_settings_snapshot`
+    /// 三条读路径都调它），波纹模式、时间显示、时间轴吸附与自动滚屏模式都在这里
+    /// 收口。新增一个需要"读盘即清洗"的字段时，挂在函数末尾即可，不必去改那 6 个
+    /// 调用点；名字保留是因为重命名会把一次纯机械的改动扩散到整个 crate。
     pub fn normalize_split_transition(&mut self) {
         if !["fade", "overlap"].contains(&self.split_transition_mode.as_str()) {
             self.split_transition_mode = default_split_transition_mode();
@@ -1855,12 +1874,24 @@ impl UiSettings {
         self.normalize_time_display();
         self.timeline_snap.normalize();
         self.normalize_ripple_mode();
+        self.normalize_auto_scroll_mode();
     }
 
     /// 规范化波纹编辑模式，避免损坏/未知的持久化值影响编辑行为。
     pub fn normalize_ripple_mode(&mut self) {
         if !["off", "track", "all"].contains(&self.ripple_mode.as_str()) {
             self.ripple_mode = default_ripple_mode();
+        }
+    }
+
+    /// 规范化自动滚屏模式，避免损坏 / 未知的持久化值影响跟随行为。
+    ///
+    /// 前端也有一份归一化（`normalizeAutoScrollMode`）：两处职责不同 —— 这里守住
+    /// 磁盘与插件形态，那里守住水合进 Redux 的那一步。任何一侧缺失，脏值都会在
+    /// "保存一次再读回来"的往返里活下来。
+    pub fn normalize_auto_scroll_mode(&mut self) {
+        if !["scroll", "page"].contains(&self.auto_scroll_mode.as_str()) {
+            self.auto_scroll_mode = default_auto_scroll_mode();
         }
     }
 
@@ -2279,6 +2310,43 @@ mod tests {
         assert_eq!(migrate("exponential"), "lateSlight");
         assert_eq!(migrate("logarithmic"), "convexSlight");
         assert_eq!(migrate("bogus"), "keep");
+    }
+
+    #[test]
+    fn ui_settings_normalizes_auto_scroll_mode() {
+        let settings = UiSettings::default();
+        assert_eq!(settings.auto_scroll_mode, "scroll");
+
+        let mut bogus = UiSettings {
+            auto_scroll_mode: "teleport".to_string(),
+            ..UiSettings::default()
+        };
+        bogus.normalize_auto_scroll_mode();
+        assert_eq!(bogus.auto_scroll_mode, "scroll");
+
+        let mut page = UiSettings {
+            auto_scroll_mode: "page".to_string(),
+            ..UiSettings::default()
+        };
+        page.normalize_auto_scroll_mode();
+        assert_eq!(page.auto_scroll_mode, "page");
+    }
+
+    /// 旧配置（没有 autoScrollMode）必须能读；新值必须能原样回写。
+    #[test]
+    fn auto_scroll_mode_round_trips_and_tolerates_missing() {
+        let legacy: UiSettings = serde_json::from_value(serde_json::json!({ "autoScroll": true }))
+            .expect("旧配置必须能读");
+        assert_eq!(legacy.auto_scroll_mode, "scroll");
+        assert!(legacy.auto_scroll);
+
+        let page: UiSettings =
+            serde_json::from_value(serde_json::json!({ "autoScrollMode": "page" }))
+                .expect("新字段必须能读");
+        assert_eq!(page.auto_scroll_mode, "page");
+
+        let encoded = serde_json::to_value(&page).expect("serialize");
+        assert_eq!(encoded["autoScrollMode"], serde_json::json!("page"));
     }
 
     #[test]
