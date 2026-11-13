@@ -283,7 +283,7 @@ ONNX Runtime 바이너리는 ort crate의 `download-binaries` 기능으로 빌�
 고급 옵션:
 
 - 실행 인수 `--log-file=<path>`: 로그를 지정한 경로에 기록합니다. `--log-file=-` 은 파일 로그를 명시적으로 비활성화합니다.
-- **도움말 → 로그 상세 수준**(없음 / 낮음 / 중간 / 높음, 기본 낮음)이 기본 설정입니다. `HIFISHIFTER_LOG_VERBOSITY` / `--log-verbosity` 는 덮어쓰기용이며 기존 `HIFISHIFTER_LOG` 도 네 단계에 대응합니다.
+- **도움말 → 로그 상세 수준**은 하위 메뉴(없음 / 낮음 / 중간 / 높음, 기본 낮음)이며 1단계 메뉴에는 현재 수준만 표시됩니다. `HIFISHIFTER_LOG_VERBOSITY` / `--log-verbosity`는 덮어쓰기용이고 기존 `HIFISHIFTER_LOG`도 네 단계에 대응합니다. "진단 요약 복사"는 네이티브 클립보드를 사용하며 실패 시 선택 가능한 텍스트를 보여 줍니다.
 - 환경 변수 `HIFISHIFTER_LOG_DIR`: 기본 로그 디렉터리를 대체합니다.
 - 환경 변수 `HIFISHIFTER_GDK_BACKEND=x11|wayland`: AppImage 가 기본으로 강제하는 `x11` 을 덮어씁니다. Wayland 에서 화면이 흐리거나 IME 문제가 있으면 `wayland` 를 시도하세요.
 - 환경 변수 `HIFISHIFTER_SAFE_GL=1`: GPU 드라이버 문제로 창이 뜨지 않을 때 WebKit 컴포지터를 끄고 소프트웨어 렌더링으로 실행합니다(표시는 되지만 느립니다).

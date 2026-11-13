@@ -1032,6 +1032,21 @@ pub(crate) fn startup_settings(command: &str) -> Option<Value> {
     }
 }
 
+/// 纯文本剪贴板写入：UI 线程内联，无需宿主 PCM / EditorSession。
+/// 返回同形 `{ok,error}`，前端不必按宿主形态分支。
+pub(crate) fn startup_clipboard_text(input: &Value) -> Value {
+    let Some(text) = input["text"].as_str() else {
+        return json!({"ok":false,"error":"clipboard text required"});
+    };
+    if let Err(reason) = hifishifter_clipboard::system_clipboard::validate_clipboard_text(text) {
+        return json!({"ok":false,"error":reason});
+    }
+    match hifishifter_clipboard::system_clipboard::write_text(text) {
+        Ok(()) => json!({"ok":true}),
+        Err(error) => json!({"ok":false,"error":error}),
+    }
+}
+
 /// 仅actor线程调用。宿主PCM不可用/未知命令/平台能力缺失均明确报错。
 pub(super) fn dispatch(
     session: &EditorSession,
@@ -1345,6 +1360,8 @@ pub(super) fn dispatch(
                 None => json!({"ok":true,"available":false}),
             });
         }
+        // 纯文本剪贴板：与 UI 线程快速路径共用同一个结构化实现。
+        "write_clipboard_text" => return Ok(startup_clipboard_text(&input)),
         "write_system_clipboard_object" => {
             let payload = input["payload"]
                 .as_str()

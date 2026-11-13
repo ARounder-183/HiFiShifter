@@ -124,6 +124,7 @@ import { openCaptureSettings } from "../../features/capture/captureSettingsBus";
 import { AppBusy, AppConfirmDialog, AppNoticeDialog } from "../../ui";
 import { copyTextToClipboard } from "../../utils/copyText";
 import { logFolderNotice } from "./logFolderNotice";
+import { diagnosticsSummary } from "./diagnosticsSummary";
 // import type { VibratoParams } from "../editDialogs/EditDialogs"; // 已移除无效导入
 
 interface MenuBarProps {
@@ -233,6 +234,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [notice, setNotice] = useState<{
         title: React.ReactNode;
         message: React.ReactNode;
+        /** 附加动作是「复制路径」还是「重试复制」；两者按钮文案不同。 */
+        copyAction?: "path" | "retry";
         /**
          * 设置后对话框多出一个「复制」动作。
          *
@@ -578,36 +581,52 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     }, [tf]);
 
     /**
-     * 复制诊断摘要（纯文本，零依赖）。
+     * 复制诊断摘要：四行版本 / 宿主 / 日志状态 + 日志路径。
      *
-     * 【为什么要这个】多数"把日志发给开发者"的场景其实只要一段版本信息 + 日志路径，
-     * 为此导出一个 zip 再想办法发出去太重。这里只读**已经存在**的三条命令
-     * （`get_about_info` / `get_runtime_info` / `open_log_folder`），不新增后端通道。
+     * 【为什么要这个】多数"把日志发给开发者"的场景只要这段纯文本，导出一个 zip
+     * 再想办法发出去太重；报障时又经常拿不到系统剪贴板（权限、远程桌面、剪贴板
+     * 管理器竞争）。成功给一句回执；**失败也必须把摘要本身交给用户**，可选中、
+     * 可再点一次「复制」，而不是只显示"剪贴板正被占用，请重试"。
+     *
+     * 数据来自三条只读命令，其中 `get_log_settings` 同时给出档位、路径与健康度；
+     * 刻意不再调用 `open_log_folder` —— 复制文字不该顺手打开资源管理器。
      */
     const handleCopyDiagnosticsSummary = useCallback(async () => {
         try {
-            const [{ coreApi }, { openLogFolder }, { copyTextToClipboard }] = await Promise.all([
+            const [{ coreApi }, { getLogSettings }, { copyTextToClipboard }] = await Promise.all([
                 import("../../services/api/core"),
-                import("../../services/api/diagnostics"),
+                import("../../services/api/logSettings"),
                 import("../../utils/copyText"),
             ]);
-            const [about, runtime, log] = await Promise.all([
+            const [about, runtime, settings] = await Promise.all([
                 coreApi.getAboutInfo().catch(() => null),
                 coreApi.getRuntimeInfo().catch(() => null),
-                openLogFolder().catch(() => null),
+                getLogSettings().catch(() => null),
             ]);
-            const lines = [
-                `HiFiShifter ${about?.version ?? "unknown"}`,
-                `commit: ${about?.commit ?? about?.commitShort ?? "unknown"}${
-                    about?.dirty ? " (dirty)" : ""
-                }`,
-                `host: ${runtime?.device ?? "unknown"}`,
-                `log: ${log?.file ?? log?.path ?? "unavailable"}`,
-            ];
-            const ok = await copyTextToClipboard(lines.join("\n"));
+            const text = diagnosticsSummary(about, runtime, settings);
+            const ok = await copyTextToClipboard(text);
+            if (ok) {
+                setNotice({
+                    title: tf("menu_copy_diagnostics_summary"),
+                    message: t("about_copied"),
+                });
+                return;
+            }
             setNotice({
-                title: ok ? tf("menu_copy_diagnostics_summary") : tf("status_error_prefix"),
-                message: ok ? t("about_copied") : t("status_clipboard_copy_failed"),
+                title: tf("menu_copy_diagnostics_fallback"),
+                message: (
+                    <>
+                        <div>{tf("menu_copy_diagnostics_failed_detail")}</div>
+                        <pre
+                            data-hs-selectable="true"
+                            className="mt-2 whitespace-pre-wrap break-all font-mono"
+                        >
+                            {text}
+                        </pre>
+                    </>
+                ),
+                copyText: text,
+                copyAction: "retry",
             });
         } catch (e) {
             setNotice({ title: tf("status_error_prefix"), message: String(e) });
@@ -1600,6 +1619,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                     title: tf("menu_open_log_folder"),
                                     message: <span data-hs-selectable="true">{outcome.path}</span>,
                                     copyText: outcome.path,
+                                    copyAction: "path",
                                 });
                             } catch (e) {
                                 setNotice({
@@ -1624,8 +1644,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Item onSelect={() => void handleCopyDiagnosticsSummary()}>
                         {tf("menu_copy_diagnostics_summary")}
                     </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
-                    {/* 日志详细程度的唯一入口：帮助菜单里的四档单选项 + 一行只读状态。 */}
+                    {/* 日志详细程度的唯一入口：一级菜单只占一行，四档在子菜单里。 */}
                     <LogVerbosityMenuItems
                         onSaveFailed={(message) =>
                             setNotice({ title: tf("status_error_prefix"), message })
@@ -1796,7 +1815,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         ? [
                               {
                                   id: "copy",
-                                  label: tf("menu_open_log_folder_copy_path"),
+                                  label: tf(
+                                      notice?.copyAction === "retry"
+                                          ? "menu_copy_diagnostics_retry"
+                                          : "menu_open_log_folder_copy_path",
+                                  ),
                                   onClick: () => {
                                       void copyTextToClipboard(notice.copyText ?? "").then((ok) => {
                                           if (ok) {

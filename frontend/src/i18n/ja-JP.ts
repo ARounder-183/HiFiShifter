@@ -7,6 +7,7 @@ export const jaJP = {
     menu_options: "オプション",
     menu_help: "ヘルプ",
     menu_log_verbosity: "ログの詳細度",
+    menu_log_verbosity_current: "ログの詳細度：{level}",
     menu_log_level_off: "なし",
     menu_log_level_low: "低",
     menu_log_level_medium: "中",
@@ -582,9 +583,8 @@ export const jaJP = {
     status_export_separated_done: "トラック別エクスポート完了",
     status_export_separated_failed: "トラック別エクスポートに失敗しました",
     status_clipboard_copy_failed:
-        "コピーに失敗しました：システムクリップボードが使用中です。もう一度お試しください",
-    status_clipboard_cut_failed:
-        "カットに失敗しました：システムクリップボードが使用中です。もう一度お試しください",
+        "コピーに失敗しました：システムクリップボードにアクセスできません",
+    status_clipboard_cut_failed: "カットに失敗しました：システムクリップボードにアクセスできません",
     status_playing_original: "オリジナルを再生中",
     status_play_original_failed: "オリジナルの再生に失敗しました",
     status_stopping_audio: "オーディオを停止中...",
@@ -661,6 +661,11 @@ export const jaJP = {
     status_project_version_confirmation: "プロジェクトファイルのバージョン確認",
 
     menu_copy_diagnostics_summary: "診断サマリーをコピー",
+    menu_copy_diagnostics_fallback:
+        "クリップボードを利用できません。以下を選択してコピーしてください",
+    menu_copy_diagnostics_failed_detail:
+        "下の文字をコピーしてから、このダイアログを閉じてください。",
+    menu_copy_diagnostics_retry: "再試行",
     menu_open_log_folder: "ログフォルダーを開く",
     menu_export_diagnostics: "診断情報をエクスポート...",
     menu_open_log_folder_failed: "ログフォルダーを開けませんでした",

@@ -44,6 +44,11 @@ const LEVEL_LABEL_KEYS: Record<LogVerbosity, LogVerbosityMenuOption["labelKey"]>
     high: "menu_log_level_high",
 };
 
+/** 任一档位对应的本地化标签键（子菜单的一级触发行也用它）。 */
+export function logLevelLabelKey(level: LogVerbosity): LogVerbosityMenuOption["labelKey"] {
+    return LEVEL_LABEL_KEYS[level];
+}
+
 /** 把后端视图解析成菜单需要的全部状态；不碰 React、不碰 IPC。 */
 export function resolveLogVerbosityMenu(view: LogSettingsView | null): LogVerbosityMenuModel {
     const checked: LogVerbosity = view?.verbosity ?? "low";

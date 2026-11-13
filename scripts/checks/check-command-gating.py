@@ -114,6 +114,22 @@ def main() -> int:
             "A control that only rejects at runtime is worse than a disabled one."
         )
         return 1
+    # 复制一段纯文本不需要 transient user activation；WebView 剪贴板在菜单动作
+    # 经过动态 import + 若干 IPC 后必然失去手势，失败提示还会误导成"剪贴板被占用"。
+    # 两个宿主都必须保留原生通道，否则帮助菜单的复制类动作会静默退化成必失败。
+    clip = read(ROOT / "backend" / "hifishifter-clipboard" / "src" / "system_clipboard.rs")
+    native = [
+        "pub fn write_text(text: &str) -> Result<(), String>",
+        "pub fn validate_clipboard_text(text: &str) -> Result<(), &'static str>",
+    ]
+    for declaration in native:
+        if declaration not in clip:
+            print(f"check-command-gating: native clipboard API missing: {declaration}")
+            return 1
+    for host, source in (("app", read(APP_LIB)), ("plugin", read(PLUGIN_ACTOR))):
+        if "write_clipboard_text" not in source:
+            print(f"check-command-gating: {host} has no write_clipboard_text command")
+            return 1
     print("every frontend command is dispatched by the app or the plugin")
     return 0
 

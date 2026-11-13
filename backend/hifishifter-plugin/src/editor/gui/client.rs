@@ -1866,6 +1866,12 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
         Some("ping") => Ok(serde_json::json!({"ok":true,"mode":"plugin","view_id":view_id,
             "connected":state.borrow().link.owner().is_ok()})),
         Some("set_log_settings") => Ok(crate::editor::log_settings::set_log_settings(&request["args"])),
+        // 【为什么也内联】复制是用户手势驱动的一次性动作，必须立刻落到原生
+        // 剪贴板；排到 actor 队列后面会丢手势，Native WebView 也不再给权限。
+        Some("write_clipboard_text") => {
+            let result = crate::editor::commands::startup_clipboard_text(&request["args"]);
+            Ok(result)
+        }
         Some("log_frontend_error") => {
             log_frontend_error(&request["args"]);
             Ok(serde_json::Value::Null)

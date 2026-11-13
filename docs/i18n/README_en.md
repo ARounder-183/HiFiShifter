@@ -285,7 +285,7 @@ The app automatically writes its run log to the platform-standard log directory 
 Advanced options:
 
 - Launch flag `--log-file=<path>`: write the log to a specific path; `--log-file=-` disables file logging.
-- **Help > Log verbosity** (None / Low / Medium / High, default Low) is the primary control; `HIFISHIFTER_LOG_VERBOSITY` / `--log-verbosity` override it. Legacy `HIFISHIFTER_LOG` still maps to the four levels.
+- **Help > Log verbosity** is a submenu with four radio items (None / Low / Medium / High, default Low); the first-level menu shows only the current level. It is the primary control; `HIFISHIFTER_LOG_VERBOSITY` / `--log-verbosity` override it, and legacy `HIFISHIFTER_LOG` maps to the same four levels. "Copy Diagnostics Summary" uses the native clipboard and shows the selectable text if the clipboard is unavailable.
 - Environment variable `HIFISHIFTER_LOG_DIR`: override the default log directory.
 - Environment variable `HIFISHIFTER_GDK_BACKEND=x11|wayland`: overrides the `x11` default baked into the AppImage. On Wayland desktops with blurry scaling or IME trouble, try `wayland`.
 - Environment variable `HIFISHIFTER_SAFE_GL=1`: for broken GPU drivers. Disables the WebKit compositor and forces software rendering (the window appears, drawing is slower).

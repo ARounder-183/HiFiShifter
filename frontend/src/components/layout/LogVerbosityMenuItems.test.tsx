@@ -24,12 +24,39 @@ vi.mock("../../i18n/I18nProvider", () => ({
     useI18n: () => ({
         t: (key: string) => key,
         tf: (key: string) => key,
+        tVars: (key: string, vars: Record<string, string>) =>
+            key + ":" + Object.values(vars).join(","),
     }),
 }));
 vi.mock("@radix-ui/themes", async () => {
     const React = await import("react");
-    const Label = ({ children }: { children?: React.ReactNode }) =>
-        React.createElement("div", { role: "presentation" }, children);
+    const pass =
+        (role: string) =>
+        ({ children, ...rest }: { children?: React.ReactNode; disabled?: boolean }) =>
+            React.createElement("div", { role, ...rest }, children);
+    const Label = pass("presentation");
+    const Separator = () => React.createElement("div", { role: "separator" });
+    const Sub = ({ children }: { children?: React.ReactNode }) =>
+        React.createElement("div", { role: "group" }, children);
+    const SubTrigger = ({
+        children,
+        disabled,
+    }: {
+        children?: React.ReactNode;
+        disabled?: boolean;
+    }) =>
+        React.createElement(
+            "div",
+            {
+                role: "menuitem",
+                "aria-haspopup": "menu",
+                "aria-disabled": disabled,
+                "data-trigger": "true",
+            },
+            children,
+        );
+    const SubContent = ({ children }: { children?: React.ReactNode }) =>
+        React.createElement("div", { role: "menu" }, children);
     const RadioGroup = ({ children }: { children?: React.ReactNode }) =>
         React.createElement("div", { role: "group" }, children);
     const RadioItem = ({
@@ -51,7 +78,9 @@ vi.mock("@radix-ui/themes", async () => {
             },
             children,
         );
-    return { DropdownMenu: { Label, RadioGroup, RadioItem } };
+    return {
+        DropdownMenu: { Label, Separator, Sub, SubTrigger, SubContent, RadioGroup, RadioItem },
+    };
 });
 
 import { LogVerbosityMenuItems } from "./LogVerbosityMenuItems";
@@ -120,4 +149,12 @@ test("a startup override disables all four radio items", async () => {
     getLogSettings.mockResolvedValue({ ...VIEW, overridden: true, source: "env" });
     const items = await renderMenu();
     expect(items.every((item) => item.getAttribute("aria-disabled") === "true")).toBe(true);
+});
+
+test("the verbosity choices stay inside one submenu", async () => {
+    await renderMenu();
+    const triggers = container.querySelectorAll('[data-trigger="true"]');
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0].textContent).toContain("menu_log_verbosity_current");
+    expect(container.querySelectorAll('[role="menu"] [role="menuitemradio"]')).toHaveLength(4);
 });

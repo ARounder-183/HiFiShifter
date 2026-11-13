@@ -1,7 +1,9 @@
 // 命令门面（Facade）
 //
 // 约束：
-// - `#[tauri::command]` 只允许出现在本文件中（作为前端 invoke 的稳定入口）。
+// - `#[tauri::command]` 绝大多数留在本门面；确有领域拆分需要的模块
+//   （playback / project_save_commands / clipboard）自带属性，注册时写完整模块路径；
+//   `generate_handler!` 的名字仍是唯一对外契约。
 // - 具体实现按领域拆分在 `backend/src-tauri/src/commands/*.rs`，并通过本文件转发调用。
 // - 拆分模块中的函数请保持 `pub(super)` / `pub(crate)`，避免被当成公共 API 直接依赖。
 
@@ -60,6 +62,8 @@ pub async fn host_link_release(app: tauri::AppHandle) -> Result<serde_json::Valu
 mod cache;
 #[path = "commands/channel_scan.rs"]
 pub(crate) mod channel_scan;
+#[path = "commands/clipboard.rs"]
+pub(crate) mod clipboard;
 #[path = "commands/common.rs"]
 mod common;
 #[path = "commands/core.rs"]
@@ -2398,79 +2402,8 @@ pub fn clipboard_kind() -> serde_json::Value {
     }
 }
 
-// ===================== generic system object clipboard =====================
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn write_system_clipboard_object(
-    payload: String,
-    text_summary: Option<String>,
-) -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
-        common::guard_command(
-            "write_system_clipboard_object",
-            serde_json::json!({ "ok": false, "error": "panic in command: write_system_clipboard_object" }),
-            || {
-                let summary = text_summary
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or_else(|| {
-                        "HiFiShifter data copied. Paste in HiFiShifter.".to_string()
-                    });
-                // 单剪贴板纪律：本次写入替换整个逻辑剪贴板（时间轴 Clip 载荷随
-                // empty() 一并清除），最后复制的获胜。
-                match crate::system_clipboard::write_bytes(payload.as_bytes(), &summary) {
-                    Ok(()) => {
-                        // 记录缓存（clipboard_kind 探测与可用性轮询的快速路径）：
-                        // 参数线载荷占据槽位，时间轴可用性判定为不可用（counts 0）。
-                        if let Some(seq) = crate::system_clipboard::clipboard_seq_num() {
-                            crate::system_clipboard::write_clipboard_cache(
-                                crate::system_clipboard::ClipboardCacheEntry {
-                                    seq,
-                                    hifi_kind: Some("param".to_string()),
-                                    hifi_clip_count: 0,
-                                    hifi_track_count: 0,
-                                    hifi_source_project: None,
-                                    // write_contents 的 empty() 清除了 REAPERMedia。
-                                    reaper_available: false,
-                                },
-                            );
-                        }
-                        serde_json::json!({ "ok": true })
-                    }
-                    Err(error) => serde_json::json!({ "ok": false, "error": error }),
-                }
-            },
-        )
-    }
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn read_system_clipboard_object() -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
-        common::guard_command(
-            "read_system_clipboard_object",
-            serde_json::json!({ "ok": false, "error": "panic in command: read_system_clipboard_object" }),
-            || {
-                match crate::system_clipboard::read_bytes() {
-                    Ok(Some(bytes)) => match String::from_utf8(bytes) {
-                        Ok(text) => {
-                            serde_json::json!({ "ok": true, "available": true, "payload": text })
-                        }
-                        // 二进制载荷（如时间轴 MessagePack）对本读取方等价于
-                        // "没有可用的参数线数据"，由前端回退内部剪贴板。
-                        Err(_) => serde_json::json!({ "ok": true, "available": false }),
-                    },
-                    Ok(None) => serde_json::json!({ "ok": true, "available": false }),
-                    Err(error) => serde_json::json!({ "ok": false, "error": error }),
-                }
-            },
-        )
-    }
-}
-
+// 通用剪贴板命令住在 commands/clipboard.rs；注册走完整模块路径，
+// 与 project_save_commands 同一形态（见 lib.rs 的 generate_handler!）。
 #[tauri::command(rename_all = "camelCase")]
 pub fn set_timeline_tempo_map(
     state: State<'_, AppState>,

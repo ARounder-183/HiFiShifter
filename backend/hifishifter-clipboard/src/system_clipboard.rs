@@ -5,6 +5,10 @@
 //! platforms, so all structured copy/paste data is written through this
 //! module.
 //!
+//! Plain-text writes go through `write_text` on the same lock and retry path:
+//! WebView clipboard APIs need transient user activation that has already expired
+//! by the time a Help-menu action reaches the clipboard. See the Windows branch.
+//!
 //! The binary payload is stored in a platform-native private clipboard
 //! format.  The normal `text/plain` slot is deliberately *not* used for the
 //! binary payload: instead it receives a short human-readable summary such
@@ -44,6 +48,24 @@ pub const OBJECT_FORMAT: &str = "application/x-hifishifter-object";
 #[cfg(not(target_os = "linux"))]
 pub const REAPER_MEDIA_FORMAT: &str = "REAPERMedia";
 const TEXT_PREFIX: &str = "HIFISHIFTER_CLIPBOARD_V1:";
+
+/// Upper bound for a plain-text clipboard payload (1 MiB).
+///
+/// 【为什么在共享层校验】App 与插件都要拒绝空文本与异常大的载荷；各写一份
+/// 判断迟早分叉，前端拿到的 `error` 码也会随宿主变。校验不接触 OS 剪贴板，
+/// 因此可以在单元测试里直接断言。
+pub const MAX_CLIPBOARD_TEXT_BYTES: usize = 1024 * 1024;
+
+/// Validate a plain-text clipboard payload; `Err` is a stable machine-readable code.
+pub fn validate_clipboard_text(text: &str) -> Result<(), &'static str> {
+    if text.is_empty() {
+        return Err("empty clipboard text");
+    }
+    if text.len() > MAX_CLIPBOARD_TEXT_BYTES {
+        return Err("clipboard text too large");
+    }
+    Ok(())
+}
 
 /// Serializes every clipboard access in this process.  The Windows clipboard
 /// can only be opened by one thread at a time — even within the same process
@@ -310,6 +332,49 @@ pub fn write_bytes(bytes: &[u8], text_summary: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 把**纯文本**写入系统剪贴板（`CF_UNICODETEXT`），替换整份逻辑剪贴板。
+///
+/// 【为什么必须有原生纯文本通道】帮助菜单的「复制诊断摘要」「复制路径」以及
+/// 「关于」里的复制链接，过去只能走 WebView 的 `navigator.clipboard`：那需要
+/// transient user activation 与剪贴板权限，而调用点排在动态 import + 若干 IPC
+/// 之后，手势早已过期；WebView2 的自定义协议还常直接不给权限。于是复制**必然**
+/// 失败，界面却把原因猜成"剪贴板被占用，请重试"（重试永远不会好）。
+///
+/// 原生通道不需要用户手势；沿用 `CLIPBOARD_LOCK` + `open_clipboard_with_retry`
+/// 的真实退避，外部程序短暂独占剪贴板时最多约 800ms 后自动成功。整段
+/// open → empty → set 作为一个原子会话重试，避免中途失败后留下空剪贴板。
+#[cfg(target_os = "windows")]
+pub fn write_text(text: &str) -> Result<(), String> {
+    use clipboard_win::raw;
+
+    let _guard = CLIPBOARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut last_error: Option<String> = None;
+    for attempt in 0..WRITE_SESSION_ATTEMPTS {
+        let _clipboard = match open_clipboard_with_retry() {
+            Ok(clip) => clip,
+            Err(error) => {
+                last_error = Some(error);
+                sleep_backoff(attempt);
+                continue;
+            }
+        };
+        // set_string 自带 EmptyClipboard（DoClear），私有对象格式随之清除，
+        // 因此成功后必须让可用性缓存失效。
+        match raw::set_string(text) {
+            Ok(()) => {
+                invalidate_clipboard_cache();
+                return Ok(());
+            }
+            Err(error) => {
+                last_error = Some(format!("clipboard_write_text_failed: {error}"));
+                drop(_clipboard);
+                sleep_backoff(attempt);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "clipboard_open_failed".to_string()))
+}
+
 /// 只读、**无重试、不持进程锁**的剪贴板探测：现在有没有 HiFiShifter 数据。
 ///
 /// 【为什么必须是独立路径，而不是复用 `read_bytes`】`read_bytes` 是为"用户真的要
@@ -522,6 +587,23 @@ pub fn write_bytes(bytes: &[u8], text_summary: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
+pub fn write_text(text: &str) -> Result<(), String> {
+    use objc2_app_kit::NSPasteboard;
+    use objc2_foundation::NSString;
+
+    let _guard = CLIPBOARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let pasteboard = NSPasteboard::generalPasteboard();
+    let _ = pasteboard.clearContents();
+    let text_ns = NSString::from_str(text);
+    let text_type = NSString::from_str("public.utf8-plain-text");
+    if !pasteboard.setString_forType(&text_ns, &text_type) {
+        return Err("clipboard_write_text_failed".to_string());
+    }
+    invalidate_clipboard_cache();
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 pub fn write_bytes_with_reaper(
     bytes: &[u8],
     text_summary: &str,
@@ -560,14 +642,8 @@ pub fn read_bytes() -> Result<Option<Vec<u8>>, String> {
 // Linux
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "linux")]
-fn is_wayland_session() -> bool {
-    std::env::var("WAYLAND_DISPLAY").is_ok()
-        || std::env::var("XDG_SESSION_TYPE")
-            .map(|v| v.eq_ignore_ascii_case("wayland"))
-            .unwrap_or(false)
-}
-
+// Linux 的 Wayland/X11 判定统一使用 `linux_clipboard::is_wayland_session`：
+// 这里此前复制过一份，纯文本写入与对象读取各判一次，迟早分叉。
 #[cfg(target_os = "linux")]
 pub fn write_bytes(bytes: &[u8], text_summary: &str) -> Result<(), String> {
     let formats: Vec<(&str, &[u8])> = vec![
@@ -575,6 +651,28 @@ pub fn write_bytes(bytes: &[u8], text_summary: &str) -> Result<(), String> {
         ("UTF8_STRING", text_summary.as_bytes()),
         ("text/plain", text_summary.as_bytes()),
     ];
+    let result = crate::linux_clipboard::write_multi(&formats);
+    if result.is_ok() {
+        invalidate_clipboard_cache();
+    }
+    result
+}
+
+/// Linux：与 `write_bytes` 相同的 X11/Wayland 所有权会话，只发布纯文本 target。
+///
+/// 【为什么 Wayland 只发一个 target】`write_wayland_multi` 把 `text/plain` 与
+/// `UTF8_STRING` 都映射成 `MimeType::Text`；两个同名 MIME 源会让 `copy_multi`
+/// 直接失败。X11 没有这个限制，两个 target 都发，兼容老应用的 `UTF8_STRING` 请求。
+#[cfg(target_os = "linux")]
+pub fn write_text(text: &str) -> Result<(), String> {
+    let formats: Vec<(&str, &[u8])> = if crate::linux_clipboard::is_wayland_session() {
+        vec![("text/plain", text.as_bytes())]
+    } else {
+        vec![
+            ("UTF8_STRING", text.as_bytes()),
+            ("text/plain", text.as_bytes()),
+        ]
+    };
     let result = crate::linux_clipboard::write_multi(&formats);
     if result.is_ok() {
         invalidate_clipboard_cache();
@@ -617,7 +715,7 @@ pub fn read_bytes() -> Result<Option<Vec<u8>>, String> {
 
     let _guard = CLIPBOARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-    let is_wayland = is_wayland_session();
+    let is_wayland = crate::linux_clipboard::is_wayland_session();
 
     let custom = if is_wayland {
         Command::new("wl-paste")
@@ -661,6 +759,11 @@ pub fn write_bytes(_bytes: &[u8], _text_summary: &str) -> Result<(), String> {
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+pub fn write_text(_text: &str) -> Result<(), String> {
+    Err("clipboard_unsupported_platform".to_string())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub fn write_bytes_with_reaper(
     _bytes: &[u8],
     _text_summary: &str,
@@ -672,4 +775,24 @@ pub fn write_bytes_with_reaper(
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub fn read_bytes() -> Result<Option<Vec<u8>>, String> {
     Err("clipboard_unsupported_platform".to_string())
+}
+
+#[cfg(test)]
+mod text_validation_tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_payload_is_rejected_before_touching_the_clipboard() {
+        assert_eq!(validate_clipboard_text(""), Err("empty clipboard text"));
+    }
+
+    #[test]
+    fn the_size_cap_is_shared_by_both_hosts() {
+        let too_large = "x".repeat(MAX_CLIPBOARD_TEXT_BYTES + 1);
+        assert_eq!(
+            validate_clipboard_text(&too_large),
+            Err("clipboard text too large")
+        );
+        assert!(validate_clipboard_text("HiFiShifter 0.2.0\ncommit: abc").is_ok());
+    }
 }

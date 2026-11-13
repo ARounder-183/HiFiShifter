@@ -15,6 +15,7 @@ import { messages, type Locale } from "../src/i18n/messages";
 
 const KEYS = [
     "menu_log_verbosity",
+    "menu_log_verbosity_current",
     "menu_log_level_off",
     "menu_log_level_low",
     "menu_log_level_medium",
@@ -23,6 +24,9 @@ const KEYS = [
     "menu_log_overridden",
     "menu_log_unavailable",
     "menu_log_saved_failed",
+    "menu_copy_diagnostics_fallback",
+    "menu_copy_diagnostics_failed_detail",
+    "menu_copy_diagnostics_retry",
 ];
 
 test("all five catalogs contain the full menu_log key set", () => {
@@ -33,15 +37,26 @@ test("all five catalogs contain the full menu_log key set", () => {
     }
 });
 
-test("the current-level placeholder is identical in every catalog", () => {
+test("both current-level placeholders are identical in every catalog", () => {
     for (const [locale, dict] of Object.entries(messages) as [Locale, Record<string, string>][]) {
         expect(dict.menu_log_current, locale).toContain("{level}");
+        expect(dict.menu_log_verbosity_current, locale).toContain("{level}");
     }
 });
 
 test("the only UI entry is the Help menu component", () => {
     const menuBar = readFileSync(join(ROOT, "src/components/layout/MenuBar.tsx"), "utf8");
     expect(menuBar).toContain("<LogVerbosityMenuItems");
+    expect(menuBar).not.toContain(
+        "<DropdownMenu.Separator />\n                    {/* 日志详细程度",
+    );
+    const component = readFileSync(
+        join(ROOT, "src/components/layout/LogVerbosityMenuItems.tsx"),
+        "utf8",
+    );
+    expect(component).toContain("<DropdownMenu.Sub>");
+    expect(component).toContain("<DropdownMenu.SubTrigger");
+    expect(component).toContain("<DropdownMenu.SubContent>");
     const about = readFileSync(join(ROOT, "src/components/layout/AboutDialog.tsx"), "utf8");
     expect(about).not.toContain("LogVerbosity");
     const app = readFileSync(join(ROOT, "src/App.tsx"), "utf8");

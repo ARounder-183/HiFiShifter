@@ -282,7 +282,7 @@ ONNX Runtime 二進位檔案由 ort crate 在編譯時透過 `download-binaries`
 進階選項：
 
 - 啟動參數 `--log-file=<path>`：將日誌寫入指定路徑；`--log-file=-` 明確關閉檔案日誌。
-- **說明 → 日誌詳細程度**（無 / 低 / 中 / 高，預設低）為主要設定；`HIFISHIFTER_LOG_VERBOSITY` / `--log-verbosity` 用於覆寫，舊 `HIFISHIFTER_LOG` 仍對應四檔。
+- **說明 → 日誌詳細程度** 是子選單（無 / 低 / 中 / 高，預設低），一級選單只顯示目前檔位；`HIFISHIFTER_LOG_VERBOSITY` / `--log-verbosity` 用於覆寫，舊 `HIFISHIFTER_LOG` 仍對應四檔。「複製診斷摘要」走原生剪貼板，失敗時仍顯示可選取的文字。
 - 環境變數 `HIFISHIFTER_LOG_DIR`：覆蓋預設日誌目錄。
 - 環境變數 `HIFISHIFTER_GDK_BACKEND=x11|wayland`：覆蓋 AppImage 預設強制的 `x11`。Wayland 桌面若遇到縮放模糊／輸入法問題，可試試 `wayland`。
 - 環境變數 `HIFISHIFTER_SAFE_GL=1`：GPU 驅動有問題、介面起不來時使用，關閉 WebKit 合成器並強制軟體渲染（能出介面，繪製會變慢）。

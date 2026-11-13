@@ -627,6 +627,10 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "read_system_clipboard_object":
             return {};
 
+        // 纯文本剪贴板：位置参数 → Tauri 命名参数。
+        case "write_clipboard_text":
+            return { text: args[0] };
+
         case "write_system_clipboard_object":
             return {
                 payload: args[0],

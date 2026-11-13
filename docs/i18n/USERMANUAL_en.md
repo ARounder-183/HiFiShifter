@@ -131,6 +131,8 @@ The `Help` menu provides diagnostics and support entries:
 
 - `Open Log Folder`: Opens the folder containing the run log in the system file manager. See the [Logs and Troubleshooting](#9-logs-and-troubleshooting) section.
 - `Export Diagnostics...`: Lets you pick a save location, then generates a diagnostics package (system info + all logs + inference-device benchmark results) that you can attach to an issue.
+- `Copy Diagnostics Summary`: Copies the version, commit, host, log verbosity and log path as plain text; if the clipboard is unavailable, the dialog shows the selectable summary.
+- `Log verbosity`: A submenu with None / Low / Medium / High; the first-level menu shows the current level.
 - `About HiFiShifter`: Opens an About dialog showing the project introduction, the current version, and the project homepage link.
 
 ## 3. Track View
@@ -900,7 +902,7 @@ The AppImage does not bundle WebKit or the graphics stack, so a failed launch us
 Advanced options (not needed for regular use):
 
 - Launch flag `--log-file=<path>`: write the log to a specific path; `--log-file=-` disables file logging.
-- **Help > Log verbosity**: None / Low / Medium / High, default Low; changes apply immediately. "None" produces no output at all.
+- **Help > Log verbosity**: The first-level item shows the current level; open its submenu to choose None / Low / Medium / High (default Low). Changes apply immediately. "None" produces no output at all.
 - Environment variable `HIFISHIFTER_LOG_VERBOSITY=off|low|medium|high` or `--log-verbosity=<...>`: override the UI setting for troubleshooting.
 - Legacy `HIFISHIFTER_LOG=debug|trace|info|warn|error` maps to High / High / Medium / Low / Low.
 - Environment variable `HIFISHIFTER_LOG_DIR`: override the default log directory.

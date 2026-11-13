@@ -2,7 +2,7 @@
 import { expect, test } from "vitest";
 
 import type { LogSettingsView } from "../../services/api/logSettings";
-import { resolveLogVerbosityMenu } from "./logVerbosityMenuModel";
+import { logLevelLabelKey, resolveLogVerbosityMenu } from "./logVerbosityMenuModel";
 
 function view(patch: Partial<LogSettingsView> = {}): LogSettingsView {
     return {
@@ -58,4 +58,11 @@ test("the status key follows logging health and the selected level", () => {
     expect(resolveLogVerbosityMenu(view({ hostLoggerOwned: true })).statusKey).toBe(
         "menu_log_unavailable",
     );
+});
+
+test("every level has a stable label key for the submenu trigger", () => {
+    expect(logLevelLabelKey("off")).toBe("menu_log_level_off");
+    expect(logLevelLabelKey("low")).toBe("menu_log_level_low");
+    expect(logLevelLabelKey("medium")).toBe("menu_log_level_medium");
+    expect(logLevelLabelKey("high")).toBe("menu_log_level_high");
 });
