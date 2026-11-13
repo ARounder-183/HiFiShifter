@@ -94,7 +94,9 @@ export function AutoScrollPageIcon() {
             />
             {/* 跨页箭头 */}
             <path
-                d="M6.3 6.2L8.2 7.5L6.3 8.8"
+                // 顶点必须落在两页之间那道空隙的正中（5.8..9.2 的中心 = 7.5），
+                // 否则 200% 缩放下能看出它偏左半像素。
+                d="M6.55 6.2L8.45 7.5L6.55 8.8"
                 stroke="currentColor"
                 strokeWidth="1.2"
                 strokeLinecap="round"
