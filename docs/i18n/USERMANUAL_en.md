@@ -210,7 +210,7 @@ Track view toolbar buttons (from left to right):
 - `Snap`: When enabled, clip adjustments attempt to snap to the grid, other object edges, the playhead and other configured targets. Hold `Shift` to temporarily toggle snap.
 - `Ripple Editing (Auto Follow)`: When enabled, certain edits to clips on the track are automatically followed through (ripple). Left-click cycles through the three modes `Off`, `Per Track` and `All Tracks`; right-click lets you pick the mode directly.
 - `Zoom at Playhead`: When enabled, horizontal zoom always centers on the playhead, similar to Reaper / VEGAS Pro; when disabled, it centers on the mouse cursor.
-- `Auto Scroll`: When enabled, the view automatically scrolls horizontally during playback to follow the playhead.
+- `Auto Scroll`: When enabled, the view scrolls horizontally during playback to follow the playhead. Left-click toggles it; right-click chooses the scroll mode: `Continuous` (follows the playhead all the time) or `Page` (scrolls one full screen only when the playhead leaves the visible range, staying still in between). The mode is saved with your settings and restored on the next launch.
 - `Allow Param Editor to Move Playhead`: When disabled, clicking in the parameter editor will not move the playhead; only clicking the track view or the timecode area of the parameter editor moves the playhead.
 - `Allow Timeline Clicks to Switch Track`: Enabled by default. When enabled, clicking a clip or empty area in the timeline switches the current track, and the parameter editor follows the newly selected track. When disabled, only clicking a track header changes the current track.
 - `Ignore Grouping`: When enabled, edits to grouped audio clips will globally ignore group-linked editing.
