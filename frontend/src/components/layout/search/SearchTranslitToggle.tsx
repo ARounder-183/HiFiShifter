@@ -23,7 +23,7 @@
  * 不写出来，用户就得打开菜单才知道当前是哪一档。
  */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { useI18n } from "../../../i18n/I18nProvider";
 import {
@@ -33,7 +33,7 @@ import {
     type SearchMode,
     type SearchSettings,
 } from "../../../features/search/searchSettings";
-import { AppContextMenu, AppIconButton } from "../../../ui";
+import { AppAnchoredMenu, AppIconButton } from "../../../ui";
 import type { AppMenuItemSpec } from "../../../ui";
 
 const MODES: readonly SearchMode[] = ["off", "smart", "fuzzy"];
@@ -67,7 +67,9 @@ export function SearchTranslitToggle({
     onOpenSettings,
 }: SearchTranslitToggleProps) {
     const { t } = useI18n();
-    const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
+    const [menuOpen, setMenuOpen] = useState(false);
+    const anchorRef = useRef<HTMLSpanElement | null>(null);
+    const menuRef = useRef<HTMLDivElement | null>(null);
     const mode = effectiveSearchMode(settings);
     const tooltip = `${t("search_match_mode")}: ${
         regexActive ? t("search_regex_disables_translit") : t(SEARCH_MODE_LABEL_KEY[mode])
@@ -122,7 +124,8 @@ export function SearchTranslitToggle({
     ];
 
     return (
-        <>
+        // 锚点外壳：菜单贴在按钮下方展开（与工具栏上的其它"右键还有选项"的按钮同一种弹出面）。
+        <span ref={anchorRef} style={{ display: "inline-flex" }} data-hs-context-menu>
             <AppIconButton
                 icon="文A"
                 tooltip={tooltip}
@@ -133,20 +136,19 @@ export function SearchTranslitToggle({
                     // 右键不是「另一种点击」而是「打开这个控件的完整设置」。
                     event.preventDefault();
                     event.stopPropagation();
-                    setMenuAt({ x: event.clientX, y: event.clientY });
+                    setMenuOpen(true);
                 }}
                 className="search-translit-toggle"
                 style={{ fontSize: "var(--qt-fs-micro)", width: size, height: size }}
             />
-            {menuAt && (
-                <AppContextMenu
-                    x={menuAt.x}
-                    y={menuAt.y}
-                    ariaLabel={t("search_match_mode")}
-                    items={items}
-                    onClose={() => setMenuAt(null)}
-                />
-            )}
-        </>
+            <AppAnchoredMenu
+                open={menuOpen}
+                anchorRef={anchorRef}
+                menuRef={menuRef}
+                ariaLabel={t("search_match_mode")}
+                onClose={() => setMenuOpen(false)}
+                items={items}
+            />
+        </span>
     );
 }
