@@ -108,6 +108,7 @@ const BenchmarkDialog = lazy(() =>
     import("./BenchmarkDialog").then((module) => ({ default: module.BenchmarkDialog })),
 );
 import { AboutDialog } from "./AboutDialog";
+import { LogVerbosityMenuItems } from "./LogVerbosityMenuItems";
 
 import {
     isChildPitchOffsetCentsParam,
@@ -1619,11 +1620,17 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     >
                         {tf("menu_export_diagnostics")}
                     </DropdownMenu.Item>
-                    {isPluginMode() ? (
-                        <DropdownMenu.Item onSelect={() => void handleCopyDiagnosticsSummary()}>
-                            {tf("menu_copy_diagnostics_summary")}
-                        </DropdownMenu.Item>
-                    ) : null}
+                    {/* 复制诊断摘要扩展到独立 App：不新增入口，只让既有菜单项在 App 里可见。 */}
+                    <DropdownMenu.Item onSelect={() => void handleCopyDiagnosticsSummary()}>
+                        {tf("menu_copy_diagnostics_summary")}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator />
+                    {/* 日志详细程度的唯一入口：帮助菜单里的四档单选项 + 一行只读状态。 */}
+                    <LogVerbosityMenuItems
+                        onSaveFailed={(message) =>
+                            setNotice({ title: tf("status_error_prefix"), message })
+                        }
+                    />
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item onSelect={() => setAboutDialogOpen(true)}>
                         {t("menu_about")}

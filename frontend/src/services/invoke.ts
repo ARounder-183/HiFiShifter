@@ -5,6 +5,7 @@
 import { reportFrontendError } from "./frontendErrorLog";
 import { getPluginHost, PluginInvokeError } from "./pluginHost";
 import { markBackendTerminal, sessionTerminal } from "./sessionGate";
+import { frontendLog } from "./frontendLog";
 
 declare global {
     interface Window {
@@ -1023,6 +1024,10 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "host_key_owned_set":
             return { strokes: args[0] };
 
+        // 帮助菜单的四档日志详细程度：唯一的新增带参命令。
+        case "set_log_settings":
+            return { verbosity: args[0] };
+
         default:
             // 无参命令白名单：不携带参数的命令在此统一登记（invoke 时以空
             // args 对象调用，与无 args 调用在 Tauri 侧等价）。新命令若携带
@@ -1078,6 +1083,7 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "get_export_audio_defaults",
     "get_gpu_devices",
     "get_history_state",
+    "get_log_settings",
     "get_onnx_diagnostic",
     "get_onnx_status",
     "get_pitch_analysis_progress",
@@ -1186,7 +1192,7 @@ export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> 
             try {
                 return await tauriInvoke<T>(method);
             } catch (err) {
-                console.error("Tauri invoke failed", { method, err });
+                frontendLog("error", "Tauri invoke failed", { method, err });
                 reportFrontendError(`Invoke failed: ${method}`, err);
                 const cause = err instanceof Error ? err : new Error(String(err));
                 throw new BackendInvokeError({
@@ -1200,7 +1206,7 @@ export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> 
         try {
             return await tauriInvoke<T>(method, invokeArgs);
         } catch (err) {
-            console.error("Tauri invoke failed", { method, invokeArgs, err });
+            frontendLog("error", "Tauri invoke failed", { method, invokeArgs, err });
             reportFrontendError(`Invoke failed: ${method}`, err);
             const cause = err instanceof Error ? err : new Error(String(err));
             throw new BackendInvokeError({
@@ -1225,7 +1231,7 @@ export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> 
     try {
         return (await api[method](...args)) as T;
     } catch (err) {
-        console.error("pywebview api call failed", { method, args, err });
+        frontendLog("error", "pywebview api call failed", { method, args, err });
         // 与 Tauri 分支同口径：失败也上报前端诊断日志（pywebview 模式下
         // BackendInvokeError 只剩 message，原始 cause 不落盘就丢了）。
         reportFrontendError(`Invoke failed: ${method}`, err);

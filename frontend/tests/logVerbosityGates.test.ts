@@ -1,0 +1,66 @@
+/**
+ * 日志详细程度的源码合同：五语键集合、默认档位、唯一入口、命令数量。
+ */
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+// vitest 的工作目录可能是仓库根也可能是 frontend/；用 __dirname 反推才稳定。
+const ROOT = join(HERE, "..");
+const REPO = join(ROOT, "..");
+import { expect, test } from "vitest";
+
+import { messages, type Locale } from "../src/i18n/messages";
+
+const KEYS = [
+    "menu_log_verbosity",
+    "menu_log_level_off",
+    "menu_log_level_low",
+    "menu_log_level_medium",
+    "menu_log_level_high",
+    "menu_log_current",
+    "menu_log_overridden",
+    "menu_log_unavailable",
+    "menu_log_saved_failed",
+];
+
+test("all five catalogs contain the full menu_log key set", () => {
+    for (const [locale, dict] of Object.entries(messages) as [Locale, Record<string, string>][]) {
+        for (const key of KEYS) {
+            expect(dict[key], locale + "." + key).toBeTruthy();
+        }
+    }
+});
+
+test("the current-level placeholder is identical in every catalog", () => {
+    for (const [locale, dict] of Object.entries(messages) as [Locale, Record<string, string>][]) {
+        expect(dict.menu_log_current, locale).toContain("{level}");
+    }
+});
+
+test("the only UI entry is the Help menu component", () => {
+    const menuBar = readFileSync(join(ROOT, "src/components/layout/MenuBar.tsx"), "utf8");
+    expect(menuBar).toContain("<LogVerbosityMenuItems");
+    const about = readFileSync(join(ROOT, "src/components/layout/AboutDialog.tsx"), "utf8");
+    expect(about).not.toContain("LogVerbosity");
+    const app = readFileSync(join(ROOT, "src/App.tsx"), "utf8");
+    expect(app).not.toContain("hs:open-about-dialog");
+});
+
+test("log_settings.json has exactly one filename constant in Rust", () => {
+    const source = readFileSync(
+        join(REPO, "backend/hifishifter-kernel/src/log_settings.rs"),
+        "utf8",
+    );
+    expect((source.match(/"log_settings[.]json"/g) ?? []).length).toBe(1);
+    expect((source.match(/pub const LOG_SETTINGS_FILE_NAME/g) ?? []).length).toBe(1);
+});
+
+test("the frontend exposes exactly two log settings commands", () => {
+    const api = readFileSync(join(ROOT, "src/services/api/logSettings.ts"), "utf8");
+    expect(api).toContain('invoke("get_log_settings")');
+    expect(api).toContain('invoke("set_log_settings"');
+    expect(api).not.toContain("clear_history_logs");
+    expect(api).not.toContain("read_log_tail");
+});

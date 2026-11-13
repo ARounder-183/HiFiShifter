@@ -12,9 +12,11 @@
  * （`import.meta.env` 与 `await import` 已在既有代码里使用）。
  */
 
-import { installGlobalErrorReporting } from "./services/frontendErrorLog";
+import { installGlobalErrorReporting, installFrontendLogPolicy } from "./services/frontendErrorLog";
 import { hydrateUiStorage, installUiStorageFlushHooks } from "./services/uiStorage";
 
+// 日志策略先就位：Off 档下连错误监听器都不许跨 IPC 上报。
+void installFrontendLogPolicy();
 // 全局兜底：未捕获异常 / 未处理的 Promise rejection 回传到后端统一日志。
 installGlobalErrorReporting();
 
