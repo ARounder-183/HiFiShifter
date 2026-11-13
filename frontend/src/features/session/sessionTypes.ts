@@ -31,6 +31,16 @@ export type PitchSnapUnit = "semitone" | "scale";
 export type ScaleHighlightMode = "always" | "off";
 export type DragDirection = "free" | "x-only" | "y-only";
 export type DrawDragDirection = "free" | "x-only";
+
+/**
+ * 拖动方向的**作用域**：三个工具各存一份方向（`select` / `draw` / `vibrato`）。
+ *
+ * 【为什么不是 `ToolMode`】直线与颤音共用同一份方向（`lineVibratoDragDirection`）：
+ * 它们是同一条"起点 → 终点"手势，拆成两份只会让"在直线下调过、切到颤音又不算"
+ * 成为新的困惑。因此这里没有 `line`。
+ */
+export const DRAG_DIRECTION_TOOLS = ["select", "draw", "vibrato"] as const;
+export type DragDirectionTool = (typeof DRAG_DIRECTION_TOOLS)[number];
 export type FadeCurveType = "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
 
 /**

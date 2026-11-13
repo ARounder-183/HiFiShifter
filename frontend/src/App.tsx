@@ -96,6 +96,7 @@ import {
     persistUiSettings,
 } from "./features/session/sessionSlice";
 import { resolveTransportShortcutCommand } from "./features/session/transportShortcuts";
+import { resolveDragDirectionTool } from "./features/session/dragDirection";
 import * as toolModeThunks from "./features/session/thunks/toolModeThunks";
 import { useI18n } from "./i18n/I18nProvider";
 import { useClipPitchDataListener } from "./hooks/useClipPitchDataListener";
@@ -3070,15 +3071,10 @@ function AppInner() {
                     break;
                 }
                 case "pianoRoll.cycleDragDirection": {
-                    // 与工具栏方向按钮同源；直线/颤音共用 vibrato 档（同一手势）。
+                    // 与工具栏方向按钮同源（`resolveDragDirectionTool`：直线 / 颤音共用
+                    // vibrato 档，它们是同一条"起点 → 终点"手势）。
                     const ss = store.getState().session;
-                    const tool =
-                        ss.toolMode === "select"
-                            ? ("select" as const)
-                            : ss.drawToolMode === "draw"
-                              ? ("draw" as const)
-                              : ("vibrato" as const);
-                    dispatch(cycleDragDirection(tool));
+                    dispatch(cycleDragDirection(resolveDragDirectionTool(ss)));
                     void dispatch(persistUiSettings());
                     break;
                 }

@@ -17,6 +17,10 @@ import {
     setPlayheadSec,
     setParamSelectionActive,
 } from "../../../../features/session/sessionSlice";
+import {
+    resolveDragDirection,
+    resolveDragDirectionTool,
+} from "../../../../features/session/dragDirection";
 import { resolveRootTrackId } from "../../../../features/session/trackUtils";
 import {
     buildPitchAlgoOptions,
@@ -800,20 +804,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             : currentDrawTool === "line"
               ? tf("line_draw_tool")
               : tf("draw_tool");
-    const activeDragDirection =
-        s.toolMode === "select"
-            ? s.selectDragDirection
-            : currentDrawTool === "draw"
-              ? s.drawDragDirection
-              : s.lineVibratoDragDirection;
-    // 直线与颤音共用同一份拖动方向（`lineVibratoDragDirection`）—— 它们是同一个
-    // "起点 → 终点"手势，拆成两份只会让"在直线下调过、切到颤音又不算"成为新的困惑。
-    const activeDragDirectionTool =
-        s.toolMode === "select"
-            ? ("select" as const)
-            : currentDrawTool === "draw"
-              ? ("draw" as const)
-              : ("vibrato" as const);
+    // 当前工具用哪份方向字段、生效的是哪个方向：由 `features/session/dragDirection`
+    // 统一解析（工具栏按钮与手势层读同一份，测试也不必再抄一遍三目）。
+    const activeDragDirection = resolveDragDirection(s);
+    const activeDragDirectionTool = resolveDragDirectionTool(s);
 
     /* 绘制 / 选择两个手写菜单的关闭逻辑。音高吸附的菜单是声明式的（items + onClose），
        关闭由 AppAnchoredMenu 接管 —— 同一个开关状态有两个写者只会让"谁关的"说不清。 */

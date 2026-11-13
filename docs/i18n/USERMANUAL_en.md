@@ -628,7 +628,7 @@ Select a Pitch Reference Clip and choose `Update Pitch` from the context menu to
 Additional convenient features of the parameter editor:
 
 - `Scale Highlight`: Located in the toolbar. Highlights the piano-roll key rows that belong to the project's base scale, making it easy to see the relationship between pitch and mode.
-- `Drag Direction`: Located in the toolbar. Controls the movement direction when left-dragging a parameter curve (`Free` / `X Only` / `Y Only`); equivalent to pressing `D` during a drag.
+- `Drag Direction`: Located in the toolbar. Controls the movement direction when left-dragging a parameter curve (`Free` / `X Only` / `Y Only`): left-click cycles through them, right-click picks one directly. The button is highlighted on `X Only` / `Y Only` and dimmed on `Free`. Pressing `D` (or the right button) during a drag does the same as a left-click. The draw, line and vibrato tools offer only `Free` / `X Only`: their horizontal motion is time itself, so a vertical-only constraint would mean nothing.
 - `Clipboard Preview`: Located in the `View` menu. After copying parameter curve data with the Select tool, the clipboard curve data is previewed live in the selection area for easier paste positioning.
 - `Popup Param Values`: Located in the `View` menu. Shows the parameter value when the mouse is near the curve or while drawing/editing.
 - `Lock Param Lines`: Located in the toolbar. Controls whether dragging an audio clip on the track also moves its corresponding parameter curves. All parameter editing in HiFiShifter is track-based; if not locked, edited curves will not follow the clip.

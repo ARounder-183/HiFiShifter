@@ -1,7 +1,5 @@
 import type { TimelineState } from "../../../../types/api";
 import type {
-    DragDirection,
-    DrawDragDirection,
     PitchSnapUnit,
     TimelineSnapSettings,
     TimeUnit,
@@ -29,6 +27,7 @@ import {
 } from "../../../../services/api/settings";
 import { normalizeAutoScrollMode } from "../../../../utils/autoFollowScroll";
 import { hydrateRippleState } from "../../rippleMode";
+import { isDragDirectionForTool } from "../../dragDirection";
 import { SCALE_KEYS } from "../../../../utils/musicalScales";
 import { normalizeParamAxisUnits } from "../../../../components/layout/pianoRoll/paramAxisUnits";
 import { normalizePanAxisDirections } from "../../../../components/layout/pianoRoll/paramPan";
@@ -357,17 +356,19 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
                     ...s.penInput,
                 };
             }
+            // 拖动方向：三份字段共用同一份模式表（`isDragDirectionForTool`），
+            // 不再各写一遍白名单字面量。
             const selectDir = s.selectDragDirection;
-            if (selectDir != null && ["free", "x-only", "y-only"].includes(selectDir)) {
-                state.selectDragDirection = selectDir as DragDirection;
+            if (isDragDirectionForTool("select", selectDir)) {
+                state.selectDragDirection = selectDir;
             }
             const drawDir = s.drawDragDirection;
-            if (drawDir != null && ["free", "x-only"].includes(drawDir)) {
-                state.drawDragDirection = drawDir as DrawDragDirection;
+            if (isDragDirectionForTool("draw", drawDir)) {
+                state.drawDragDirection = drawDir;
             }
             const lineVibratoDir = s.lineVibratoDragDirection;
-            if (lineVibratoDir != null && ["free", "x-only"].includes(lineVibratoDir)) {
-                state.lineVibratoDragDirection = lineVibratoDir as DrawDragDirection;
+            if (isDragDirectionForTool("vibrato", lineVibratoDir)) {
+                state.lineVibratoDragDirection = lineVibratoDir;
             }
             const smoothness = s.smoothnessPercent ?? s.edgeSmoothnessPercent;
             if (smoothness != null) {

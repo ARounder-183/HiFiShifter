@@ -9,6 +9,7 @@ import {
 } from "../../../services/api/settings";
 import { DEFAULT_AUTO_SCROLL_MODE } from "../../../utils/autoFollowScroll";
 import { DEFAULT_RIPPLE_SCOPE } from "../rippleMode";
+import { DEFAULT_DRAG_DIRECTION_BY_TOOL } from "../dragDirection";
 import { DEFAULT_VIBRATO_BASELINE } from "../../vibrato/vibratoPresets";
 import { DEFAULT_ACTIVE_VIBRATO_PRESET_ID } from "../../vibrato/systemPresets";
 import {
@@ -18,7 +19,6 @@ import {
 } from "./settings";
 import { createDefaultTimelineSnapSettings } from "./settings";
 import { SILENCE_DETECT_DEFAULTS } from "../sessionTypes";
-import type { DragDirection, DrawDragDirection } from "../sessionTypes";
 import type { SessionState } from "./types";
 
 export const initialState: SessionState = {
@@ -73,9 +73,9 @@ export const initialState: SessionState = {
     // 空映射 = 全部参数按倍率显示（历史行为）。
     paramAxisUnits: {},
     paramAxisDirections: {},
-    selectDragDirection: "y-only" as DragDirection,
-    drawDragDirection: "free" as DrawDragDirection,
-    lineVibratoDragDirection: "free" as DrawDragDirection,
+    selectDragDirection: DEFAULT_DRAG_DIRECTION_BY_TOOL.select,
+    drawDragDirection: DEFAULT_DRAG_DIRECTION_BY_TOOL.draw,
+    lineVibratoDragDirection: DEFAULT_DRAG_DIRECTION_BY_TOOL.vibrato,
     edgeSmoothnessPercent: 0,
     lockParamLinesEnabled: true,
     metronomeEnabled: false,

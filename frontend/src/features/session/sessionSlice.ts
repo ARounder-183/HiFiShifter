@@ -4,8 +4,6 @@ import { isPluginMode } from "../../services/hostCapabilities";
 import type { HistoryRecordSummary, TimelineState } from "../../types/api";
 import type {
     ClipFormantAnalysisState,
-    DragDirection,
-    DrawDragDirection,
     EditParam,
     GridSize,
     PitchSnapUnit,
@@ -86,6 +84,7 @@ import { initialState } from "./sessionSlice/initialState";
 import { applyClipSyllableAnalysisReducer } from "./sessionSlice/syllableMetadata";
 import { setAutoScrollModeReducer, toggleAutoScrollReducer } from "./sessionSlice/autoScroll";
 import { setRippleScopeReducer, toggleRippleEnabledReducer } from "./sessionSlice/ripple";
+import { cycleDragDirectionReducer, setDragDirectionReducer } from "./sessionSlice/dragDirection";
 import { registerRuntime } from "./sessionSlice/extraReducers/runtime";
 import { registerAudio } from "./sessionSlice/extraReducers/audio";
 import { registerTransport } from "./sessionSlice/extraReducers/transport";
@@ -812,46 +811,10 @@ const sessionSlice = createSlice({
             );
             state.paramAxisDirections = { ...state.paramAxisDirections, [param]: next };
         },
-        cycleDragDirection(state, action: PayloadAction<"select" | "draw" | "vibrato">) {
-            if (action.payload === "select") {
-                const order: DragDirection[] = ["free", "x-only", "y-only"];
-                const idx = order.indexOf(state.selectDragDirection);
-                state.selectDragDirection = order[(idx + 1) % order.length];
-                return;
-            }
-            const order: DrawDragDirection[] = ["free", "x-only"];
-            if (action.payload === "draw") {
-                const idx = order.indexOf(state.drawDragDirection);
-                state.drawDragDirection = order[(idx + 1) % order.length];
-                return;
-            }
-            const idx = order.indexOf(state.lineVibratoDragDirection);
-            state.lineVibratoDragDirection = order[(idx + 1) % order.length];
-        },
-        setDragDirection(
-            state,
-            action: PayloadAction<{
-                tool: "select" | "draw" | "vibrato";
-                direction: DragDirection | DrawDragDirection;
-            }>,
-        ) {
-            const { tool, direction } = action.payload;
-            if (tool === "select") {
-                if (["free", "x-only", "y-only"].includes(direction)) {
-                    state.selectDragDirection = direction as DragDirection;
-                }
-                return;
-            }
-            if (tool === "draw") {
-                if (["free", "x-only"].includes(direction)) {
-                    state.drawDragDirection = direction as DrawDragDirection;
-                }
-                return;
-            }
-            if (["free", "x-only"].includes(direction)) {
-                state.lineVibratoDragDirection = direction as DrawDragDirection;
-            }
-        },
+        /* 拖动方向的循环 / 直设住在 `./sessionSlice/dragDirection`：每个工具的可用
+           方向集不同，规则与"为什么没有开关"一并写在那里。 */
+        cycleDragDirection: cycleDragDirectionReducer,
+        setDragDirection: setDragDirectionReducer,
         setEdgeSmoothnessPercent(state, action: PayloadAction<number>) {
             state.edgeSmoothnessPercent = clamp(Number(action.payload) || 0, 0, 100);
         },
