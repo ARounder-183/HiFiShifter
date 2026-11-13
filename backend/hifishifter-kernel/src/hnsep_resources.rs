@@ -8,7 +8,7 @@ const SAFETY_BYTES: u64 = 512 * 1024 * 1024;
 
 /// 原模型dec1_2的Concat同时保留65+32输入与97输出；按完整对齐谱帧估计峰值。
 /// 加入复数STFT/掩码等工作域及固定模型开销。新模型仍需重新实测，不能把它当通用上界。
-pub(crate) fn estimated_working_bytes(frames: usize, sample_rate: u32) -> Result<u64, String> {
+pub fn estimated_working_bytes(frames: usize, sample_rate: u32) -> Result<u64, String> {
     if sample_rate == 0 {
         return Err("HNSEP资源预检：采样率无效".into());
     }
@@ -101,6 +101,12 @@ fn parse_linux_available(text: &str) -> Result<u64, String> {
 mod tests {
     use super::*;
     /// 估计严格使用整段谱帧，不按HiFiGAN神经块低估HNSEP；缺内存明确拒绝。
+    #[test]
+    fn twelve_second_chunk_stays_well_below_two_gib() {
+        let chunk = estimated_working_bytes(12 * 44_100, 44_100).unwrap();
+        assert!(chunk < 2 * 1024 * 1024 * 1024, "chunk estimate {chunk}");
+    }
+
     #[test]
     fn full_length_resource_estimate_rejects_small_ram_without_duration_cap() {
         let short = estimated_working_bytes(44100, 44100).unwrap();

@@ -33,6 +33,7 @@ import {
 } from "../../childPitchOffsetParams";
 import { isDynParam } from "../../paramRanges";
 import { formatDbLabel, supportsParamAxisUnit, type ParamAxisUnit } from "../../paramAxisUnits";
+import { formatPanAxisCompactLabel, isPanParam } from "../../paramPan";
 
 /** 数值轴刻度的种类。 */
 export type AxisKind = "cents" | "formantCents" | "degrees" | "level" | "fallback";
@@ -217,6 +218,11 @@ export function formatAxisMarkLabel(
     param?: string,
     axisUnit?: ParamAxisUnit,
 ): string {
+    if (param != null && isPanParam(param)) {
+        // 声像轴用语言无关的紧凑字母表（`L`/`C`/`R`）：轴列窄、刻度密，完整单词会互相
+        // 挤占。完整词只出现在 ToolTip / 拖拽读数 / Set Value 那三条通道（见 paramPan）。
+        return formatPanAxisCompactLabel(value);
+    }
     if (axisUnit === "db" && param != null && supportsParamAxisUnit(param)) {
         return formatDbLabel(value);
     }

@@ -30,6 +30,7 @@ import {
     snapOffsetHandleXPx,
 } from "../../constants";
 import { compareClipLayerOrder } from "../../trackOverlap";
+import { inwardEdgeWidthPx } from "./edgeGeometry";
 
 /**
  * 左右边缘（裁短 / 延长 / 拉伸）的命中宽度（CSS px）。
@@ -183,38 +184,6 @@ export interface HitTestArgs {
 }
 
 /**
- * 无修饰键单击重叠区时，选择视觉最上层的 clip。
- *
- * 这里只解析单击的选中目标，不改命中分区或控件归属。按下时保留它作快照，
- * 未超过拖拽阈值才用于选中；拖动仍编辑原来的边缘、淡化曲线或交叉点。
- *
- * header、非重叠控件和带修饰键的操作保留原目标，返回 undefined。
- */
-export function resolveOverlapClickClipId(
-    hit: {
-        readonly kind: string;
-        readonly region?: ClipHitRegion;
-        readonly fromOverlapRegion?: boolean;
-        readonly clip?: { readonly id: string };
-        readonly foregroundClip?: { readonly id: string };
-    },
-    modifiers: {
-        readonly altKey: boolean;
-        readonly ctrlKey: boolean;
-        readonly metaKey: boolean;
-        readonly shiftKey: boolean;
-    },
-): string | undefined {
-    if (hit.kind !== "clip" || hit.fromOverlapRegion !== true || hit.region === "header") {
-        return undefined;
-    }
-    if (modifiers.altKey || modifiers.ctrlKey || modifiers.metaKey || modifiers.shiftKey) {
-        return undefined;
-    }
-    return hit.foregroundClip?.id ?? hit.clip?.id;
-}
-
-/**
  * 在轨道内查找覆盖 `sec` 的最上层 clip。
  *
  * 规则：二分定位「最后一个 startSec <= sec」，从它向前依次校验半开区间。
@@ -293,7 +262,7 @@ export function hitTest(args: HitTestArgs): HitResult {
     const rawEdgeWidthPx = Number.isFinite(args.edgeWidthPx)
         ? Math.max(0, args.edgeWidthPx as number)
         : EDGE_WIDTH_PX;
-    const edgeWidthPx = Math.min(rawEdgeWidthPx, clipWidthPx / 3);
+    const edgeWidthPx = inwardEdgeWidthPx(clipWidthPx, rawEdgeWidthPx);
 
     // 淡变角与 trim 边缘在水平方向重叠，靠**竖直方向**切分：
     //   y ∈ [header, header + reserve)   → 角部**横帽**（宽 22）→ 淡变

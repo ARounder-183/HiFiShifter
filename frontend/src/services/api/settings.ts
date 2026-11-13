@@ -165,6 +165,8 @@ export interface UiSettings {
     paramEditorSeekPlayhead?: boolean;
     showClipboardPreview: boolean;
     showParamValuePopup?: boolean;
+    /** 音高模式下是否绘制各 Clip 自己的源音高参考线（默认开）。 */
+    showClipPitchOverlay?: boolean;
     /**
      * 纵轴标尺的展示单位（参数 id → `"ratio"` | `"db"`）。
      *
@@ -172,6 +174,8 @@ export interface UiSettings {
      * 缺项 / 未知键由前端 `normalizeParamAxisUnits` 过滤（见 sessionSlice）。
      */
     paramAxisUnits?: Record<string, string>;
+    paramAxisDirections?: Record<string, string>;
+    lastProjectSaveFormat?: "hshp" | "json" | "zip";
     lockParamLines?: boolean;
     metronomeEnabled?: boolean;
     metronomeGain?: number;

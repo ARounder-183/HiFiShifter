@@ -38,10 +38,15 @@ game baseline                      playback_rate / reverse        参数块编�
 
 - 非 Loop 正放：`project = clip.start + (source - windowStart) / rate`。
 - 非 Loop 倒放：以 `windowEnd` 镜像。
-- Loop：按源域周期 `D` 取模，每周期一个 `ProjectedInterval`；跨周期/跨 anchor 的源域区间先用 `normalize_loop_span` 切成单一周期片段。
+- Loop：按源域周期 `D` 取模，每周期一个 `ProjectedInterval`。
+  - `TakeSpan.cycle` 是**相对当前 loop anchor** 的循环序号，不是源域属性；anchor 随 Clip 左裁一起前进。
+  - 跨 anchor 的源域区间拆成 head（`[anchor, hi)`，落在**本周期开头**）与 tail（`[lo, anchor)`，落在**本周期末尾**），两段属于**同一个 cycle**。只有真正跨过一个完整周期（`width > D`）才递增 cycle。
+  - `split_loop_span_parts`（Rust）/ `splitLoopTakeSpanParts`（TS）是唯一拆分点：它同时处理 anchor 缝、媒体回绕与超宽区间，并给出与时间轴方向一致的 `cut_start`/`cut_end`。
+  - `normalize_loop_span` 只负责持久化/编辑层的“单周期片段”规整；`project_span` **必须自己调用拆分**，不能假设调用方已经 normalize（golden 与编辑原语会直接传原始 span）。
+  - 由 anchor 截断出的片段在工程时间轴上是不完整的边，投影结果为 `cut_start = true`（或倒放时对应的另一侧），渲染层据此画平边而不是圆角。
 - 所有区间半开 `[startFrame, endFrameExclusive)`；投影后裁剪到 Clip 可见窗口。
 - 编辑已有成员时不再调用全局 `inverse_project`：由成员的 `frameSource*` 局部仿射映射直接求源坐标，避免 Loop 回绕 / 周期边界 / 倒放跳到成员外。
-- 宽度小于 1 帧的 base 块丢弃；用户块 resize 至少保留 1 帧。
+- 与可听窗口交叠为正但取整后不足 1 帧的 base 块提升为 1 帧保留（`positive_interval_to_frames`）；落在 Clip 可见范围之外的残片（右缘取整越过 `visible_end`）丢弃，绝不画出 Clip 外的一帧。用户块 resize 至少保留 1 帧。
 
 ## 编辑语义
 
@@ -82,6 +87,19 @@ game baseline                      playback_rate / reverse        参数块编�
 - **预览释放只有一条判据**（`paramBlockPreviewRelease`）：这次提交产生的权威已经可见。带曲线补丁的提交必须同时满足「已落地的权威曲线代次 ≥ 提交回包里的新代次 ∧ 权威水位在提交之后确认 ∧ 当前窗口包含提交片段」；纯布局提交才退回几何相等。旧实现用「本地派生几何已经等于预览几何」判断，而 `setParamBlockState` 是同步提交 —— 那个条件在 pointerup 之后一次渲染就成立，于是预览被撤、曲线回旧值、块按旧曲线重新采样，用户看到「先回弹旧参数、再生效新参数」。超时（2s）之前必须先 `flushReadback()` 对账再撤，否则撤下的第一帧仍是旧曲线。
 - **权威代次只有一个单位**：后端 `param_curve_revision`（`ParamAuthoritySnapshot.curveRevision`）。旧实现同时存在「本地取数计数器」与「后端代次」两个数，过渡手柄存前者、比后者，判据几乎永远为假 —— 每次拖完过渡手柄都要等满 2s 超时才释放预览。提交回包里的新代次（`curveRevisionCommitted`）是唯一证据：没有它就不放行，本地计数器再大也没用。
 - 新建 / 伸缩 / 过渡的预览事务在提交时记下「依据的曲线代次」「提交时的权威水位」与「提交的曲线片段」（`curveRevisionAtStart` / `authorityRequestSeqAtCommit` / `committedSegments`），提交成功后补上回包里的新代次（`curveRevisionCommitted`）；没有这四个字段就无法回答「权威有没有前进过」。
+- **音高视图有三层语义不同的线**，不得合并：
+  - 灰色虚线 `pv.orig`：根轨道组的**单值合成**原始线（`assemble_pitch_orig_from_cache`）。重叠 Clip 与音高参考块在同一帧竞争后只留一个值。
+  - 白色主线 `pv.edit`：当前编辑目标。
+  - 彩色细线（Clip 源音高参考线）：每个 Clip 自己的 `clipPitchCurves` 曲线，按 **Clip 身份**稳定着色（见下）；焦点 Clip 最后绘制。它只读、不参与编辑与渲染。
+  - **强度顺序必须单调**：`pv.edit`（0.92 / 2.6px）> `pv.orig`（0.55 / 1.8px）> Clip 参考线（≤0.50 / ≤1.35px）。参考线的折算亮度不得超过 `pv.orig` —— 上一版焦点用 0.95 / 1.8px，与基线同宽、比基线还亮，用户的原话是「分不清主次」。
+- Clip 源音高参考线由 `clipPitchOverlay.ts` 统一派生：数据有效性（`round(curveStartSec·1000/fp)` 必须等于 `round(clip.startSec·1000/fp)`、曲线帧数必须覆盖 Clip 帧数、帧周期必须与工程一致）、`kind`（`sourceF0` / `midiReference`）与**有声音段切分**（`runs`）都在那里完成。禁止在绘制层再把 `midi <= 0` 的前后点连成一条线（那会画出贯穿静音的假斜线）。
+- **切段只有一个理由：该帧没有数据（`midi <= 0`）**。每一刀在绘制层都会变成两条**独立折线**，两段之间不会连线；而切点一旦落在两个采样之间（重合带边界是连续秒、采样点是量化帧，几乎必然如此），画面上就是一帧宽的洞。旧实现还按「重合深度变化」切段：前一条曲线在重合处断一帧，后一条的首段只有 1 个采样被 `>= 2` 判据整段丢掉（曲线晚一帧开始）—— 两者同时出现在后一条 Clip 的起点上，用户读到的是「两条曲线都在这里断了一小段」。
+- **重合不改变不透明度**：身份色已经回答「这条线属于哪个 Clip」，重合时两条不同颜色的线同时出现本身就是信号。再叠一层明暗会让同一条线在同一段里忽明忽暗，既和焦点高亮抢同一个视觉通道，也是上面那个切段 bug 的直接成因。
+- **Clip 源音高曲线必须画在工程帧网格上**：第 i 个采样 = 工程帧 `round(clip.startSec·1000/fp) + i`，与 `pv.orig` 写入 `assemble_pitch_orig_from_cache` 的位置、与参数块投影 `toFrame()` 完全同源。按连续秒（`clip.startSec + i·fp`）落笔会让每条 Clip 各偏一个亚帧相位（≤2.5 ms）——放大到 0.5 s 视口时是 8~9 px 的可见错位，用户会以为自己操作错了。**这是本图层唯一的时间基准，不接受第二份换算。**
+- 上述取舍的代价：曲线相对**波形**最多偏半帧（2.5 ms）。这是既有事实——`pv.orig` 与参数块本来就有同样的偏移，波形只是参考背景。修完后「曲线 ↔ 基线 ↔ 参数块」三者内部自洽；不一致的只是波形。反方向（把 `pv.orig` 挪到精确秒）不可行：它是整条工程的一维帧数组，索引即帧号。
+- **颜色编码 Clip 身份，不跟随 `clip.color`**：新建 Clip 的默认色就是 `emerald`，跟它走等于所有曲线同色。身份色 = 8 色调色板 + `fnv1a(clipId) % 8`，再按重合邻接图贪心让位（重合的 Clip 必不同色，不重合的允许同色）。色值只在 `colors.ts` 按主题解析，模型层只带 `colorIndex`。透明度也只有一层（`resolveClipPitchOverlayVisual`），不得再写进色值。
+- 高亮只认**单一焦点**（`selectedClipId`），不认 `multiSelectedClipIds`：切分会把碎片累积进多选，让"选中"这个视觉通道失效（全部选中 = 全部没选中）。焦点的唯一表现是「比别的 Clip 稍亮 + 稍粗」一档，且上限被上一条的不变式钉死。
+- 该图层有独立开关（**视图菜单**「Clip 音高曲线」，`showClipPitchOverlay`，默认开，持久化在 UI 设置里）。它不能替代 `pv.orig`：后者是渲染与编辑的基线；也不能把 `pv.orig` 改成多值曲线来“显示重合”。
 
 ## 参数块图层：常显设置
 
@@ -110,7 +128,7 @@ game baseline                      playback_rate / reverse        参数块编�
 - 显示的是**块将被拖到的中心值**（`projectParamBlockDragDisplayValue(锚点起始值 + 位移)`），不是指针所在帧的曲线值 —— 指针可能抓在块的任意高度（块高 1.2 行高），用它会让读数随抓取位置偏移。多选一起拖时所有块位移相同，锚点即代表。
 - 空白处 `Alt` / `Ctrl+Alt` 拖动新建：显示新块的值（已按音高吸附 / 跟随音阶解析）。
 - 块边缘伸缩与过渡手柄拖动**不显示**读数：它们只改时间跨度 / 淡化宽度，值不变；显示一个静止的数字会让用户以为值被改了。
-- 一次手势只有一个读数所有者：块模式下块手势负责发布，通用指针处理器**不运行**（`EditorArea` 先问块层，块层认领即返回），悬停续显（`refreshParamValuePreview`）在块模式里退位。
+- 一次手势只有一个读数所有者：块模式下块手势负责发布；无按键的普通悬停由独立的 `onCanvasHoverPreview` 更新曲线读数，不经过块层的 hover/光标判定。`refreshParamValuePreview` 只在**块手势进行中**（拖动 / 新建 / 伸缩）退位，普通悬停与数据刷新仍会续显。
 
 ## 值轴边缘滚动
 
@@ -156,12 +174,31 @@ game baseline                      playback_rate / reverse        参数块编�
   - 指针 hover / 光标：`panel/paramBlockHover.ts`。
 - Golden fixture：`frontend/src/components/layout/pianoRoll/__fixtures__/paramBlockProjection.golden.json`
 
+## 交叉 Clip 的块层级
+
+- 参数块层级与时间轴视觉顺序一致：Clip 按 `startSec` 升序，同起点按 id 的 UTF-16 码元序；后开始的 Clip 在上层。前端与 Rust 合成必须复用同一个比较器，禁止在合成器里另写数组下标排序。
+- 上层 base 块先占用时间区间，下层 base 被 `occupied + subtract` 切成仍可见的片段，不整体消失；最终 `ParamBlockView` 仍满足时间不重叠。
+- 用户块 / 编组块的优先级（3/4）高于 base，不受 Clip 层级影响。
+- 仅交换 clips 数组顺序不得改变 blocks 或 `layoutKey`。
+
+## 块标签的渲染上下文
+
+- 参数块标签只属于主画布：主画布与左侧轴画布各自持有独立的 `GlyphSurface`（program / rasterizer / atlas 上传页）。`GlyphProgram` 与创建它的 WebGL 上下文绑定，`GlRasterTarget` 只描述尺寸，不切换上下文。
+- 禁止把块标签的 glyph program 指向轴画布；那会把主画布坐标压缩进 56px 轴列，表现为轴列白色碎片、块内无标签。
+
+## 音符块来源
+
+- 参数块与静音检测共享 `note_blocks::source_note_spans` 的优先级：`syllable_analysis` → `game_block_baseline` → `midi_note_data`；空来源不伪造整段一块。
+- 静音检测的 `note_blocks` 方式只消费这份来源与 `projected_note_spans`，缺失分析时返回可操作错误，不重新启动 GAME 推理。
+
 ## 维护约束
 
 - 投影公式只允许在 `param_blocks/projection.rs` 出现一份；前端 `paramBlockProjection.ts` 是预览端口，必须用 golden fixture 对拍。
 - 任何新增块编辑都必须经过 `place_user_block`；分割/伸缩必须走 `split_block` / `resize_block`（前端 `paramBlockGesture.ts`）这一份计划。
 - 基块可见性只由“剩余帧区间”决定；禁止恢复 `suppressed_by_user` 的二元抑制。
 - 任何新增持久化字段都不得是绝对工程帧。
+- Loop 源域片段**不得**在 `normalize_loop_span` 里把跨 anchor 的 head 写成 `cycle + 1`；投影层必须对未 normalize 的 span 也正确拆分，否则左裁越过音符起点后首个参数块会在投影阶段被丢弃。
 - 纯块边界编辑不得 bump 音频版本。
+- Clip 源音高曲线与 `pv.orig` 的**逐帧相等**是不变量（`pitch_clip.rs` 的 `rate_one_slice_matches_the_point_mapping_of_pv_orig` / `emitted_clip_curve_matches_the_composite_baseline`）。改动 `trim_and_resample_midi` 的切片或 `assemble_nonloop_pitch_from_window` 的窗口边界前先跑这两条。
 
 - 值轴手感常量只有一份：`kernel/valueAxisEdgeScroller.ts`（带宽 / 满带速度 / 软启动指数 / 单帧上限）。文档与代码冲突时以该文件为准。

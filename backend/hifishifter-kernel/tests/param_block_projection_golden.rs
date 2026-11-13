@@ -18,13 +18,14 @@ fn projection_golden_matches_the_shared_fixture() {
             "name": "clip",
             "start_sec": clip["startSec"],
             "length_sec": clip["lengthSec"],
-            "loop_period_sec": clip["contentDurationSec"],
+            "loop_period_sec": clip["loopPeriodSec"].as_f64().or_else(|| clip["contentDurationSec"].as_f64()),
+            "clip_playback_rate": clip["clipPlaybackRate"].as_f64().unwrap_or(1.0),
             "takes": [{
                 "id": "take",
                 "source_path": "a.wav",
                 "source_start_sec": clip["sourceStartSec"],
                 "source_end_sec": clip["sourceEndSec"],
-                "playback_rate": clip["playbackRate"],
+                "playback_rate": clip["playbackRate"].as_f64().unwrap_or(1.0),
                 "reversed": clip["reversed"],
                 "loop_enabled": clip["loopEnabled"],
                 "duration_sec": clip["contentDurationSec"],
@@ -54,6 +55,18 @@ fn projection_golden_matches_the_shared_fixture() {
             assert_eq!(
                 actual.end_frame_exclusive,
                 expected["endFrameExclusive"].as_u64().unwrap() as u32
+            );
+            assert_eq!(
+                actual.cut_start,
+                expected["cutStart"].as_bool().unwrap_or(false),
+                "{} cut_start",
+                case["name"]
+            );
+            assert_eq!(
+                actual.cut_end,
+                expected["cutEnd"].as_bool().unwrap_or(false),
+                "{} cut_end",
+                case["name"]
             );
         }
     }

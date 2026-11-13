@@ -14,6 +14,7 @@ import {
     type SilenceDetectSettings,
 } from "../../../features/session/sessionTypes";
 import type { ClipSilenceReport } from "../../../types/api";
+import { timelineApi } from "../../../services/api";
 import { AppSelect, AppSlider, AppSliderReadout } from "../../../ui";
 import { AppDialog } from "../../../ui/Dialog";
 import { AppField, AppForm } from "../../../ui/Field";
@@ -44,7 +45,9 @@ export const SilenceDetectionDialog: React.FC<{
     const [options, setOptions] = useState<SilenceDetectSettings>(storedOptions);
     const [reports, setReports] = useState<ClipSilenceReport[]>([]);
     const [analyzing, setAnalyzing] = useState(false);
+    const [retryFailed, setRetryFailed] = useState(false);
     const [applying, setApplying] = useState(false);
+    const [retryToken, setRetryToken] = useState(0);
     const debounceRef = useRef<number | null>(null);
 
     // 打开时用已记忆的参数初始化，并清掉上一次的预览报告。
@@ -52,6 +55,7 @@ export const SilenceDetectionDialog: React.FC<{
         if (open) {
             setOptions(storedOptions);
             setReports([]);
+            setRetryFailed(false);
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在打开瞬间用 store 种子化
     }, [open]);
@@ -94,7 +98,7 @@ export const SilenceDetectionDialog: React.FC<{
                 debounceRef.current = null;
             }
         };
-    }, [open, clipIds, options, dispatch]);
+    }, [open, clipIds, options, dispatch, retryToken]);
 
     const handleApply = async () => {
         if (applying) return;
@@ -154,52 +158,113 @@ export const SilenceDetectionDialog: React.FC<{
                             // 旧写法是 size="1"（24px）：对话框里也要紧凑
                             density="compact"
                             value={options.method}
-                            onValueChange={(v) => update({ method: v as "rms" | "peak" })}
+                            onValueChange={(v) =>
+                                update({
+                                    method: v as SilenceDetectSettings["method"],
+                                })
+                            }
                             options={[
                                 { value: "rms", label: tf("silence_method_rms") },
                                 { value: "peak", label: tf("silence_method_peak") },
+                                { value: "note_blocks", label: tf("silence_method_note_blocks") },
                             ]}
                         />
                     </AppField>
                 </div>
 
-                <div
-                    data-tooltip={resetHint}
-                    onDoubleClick={() =>
-                        update({ thresholdDb: SILENCE_DETECT_DEFAULTS.thresholdDb })
-                    }
-                >
-                    <AppField label={tf("silence_threshold")}>
-                        <Flex align="center" gap="2">
-                            <AppSlider
-                                value={options.thresholdDb}
-                                unit="levelDb"
-                                min={-96}
-                                max={-6}
-                                disabled={options.adaptive}
-                                ariaLabel={tf("silence_threshold")}
-                                onChange={(next) => update({ thresholdDb: next })}
-                            />
-                            <AppSliderReadout>
-                                {options.adaptive
-                                    ? tf("silence_adaptive_short")
-                                    : `${Math.round(options.thresholdDb)} dB`}
-                            </AppSliderReadout>
-                        </Flex>
-                    </AppField>
-                </div>
+                {options.method !== "note_blocks" ? (
+                    <>
+                        <div
+                            data-tooltip={resetHint}
+                            onDoubleClick={() =>
+                                update({ thresholdDb: SILENCE_DETECT_DEFAULTS.thresholdDb })
+                            }
+                        >
+                            <AppField label={tf("silence_threshold")}>
+                                <Flex align="center" gap="2">
+                                    <AppSlider
+                                        value={options.thresholdDb}
+                                        unit="levelDb"
+                                        min={-96}
+                                        max={-6}
+                                        disabled={options.adaptive}
+                                        ariaLabel={tf("silence_threshold")}
+                                        onChange={(next) => update({ thresholdDb: next })}
+                                    />
+                                    <AppSliderReadout>
+                                        {options.adaptive
+                                            ? tf("silence_adaptive_short")
+                                            : `${Math.round(options.thresholdDb)} dB`}
+                                    </AppSliderReadout>
+                                </Flex>
+                            </AppField>
+                        </div>
 
-                <label
-                    className="flex items-center gap-2 text-qt-sm"
-                    data-tooltip={resetHint}
-                    onDoubleClick={() => update({ adaptive: SILENCE_DETECT_DEFAULTS.adaptive })}
-                >
-                    <Checkbox
-                        checked={options.adaptive}
-                        onCheckedChange={(v) => update({ adaptive: v === true })}
-                    />
-                    {tf("silence_adaptive")}
-                </label>
+                        <label
+                            className="flex items-center gap-2 text-qt-sm"
+                            data-tooltip={resetHint}
+                            onDoubleClick={() =>
+                                update({ adaptive: SILENCE_DETECT_DEFAULTS.adaptive })
+                            }
+                        >
+                            <Checkbox
+                                checked={options.adaptive}
+                                onCheckedChange={(v) => update({ adaptive: v === true })}
+                            />
+                            {tf("silence_adaptive")}
+                        </label>
+                    </>
+                ) : (
+                    <Flex
+                        direction="column"
+                        gap="1"
+                        className="rounded border border-qt-border p-2"
+                    >
+                        <span className="hs-type-muted">{tf("silence_note_blocks_source")}</span>
+                        {reports.some((r) => r.message === "note_blocks_not_ready") ? (
+                            <button
+                                type="button"
+                                className="text-left text-qt-xs text-qt-accent underline"
+                                onClick={() => {
+                                    const ids = [
+                                        ...new Set(
+                                            reports
+                                                .filter(
+                                                    (r) => r.message === "note_blocks_not_ready",
+                                                )
+                                                .map((r) => r.clipId),
+                                        ),
+                                    ];
+                                    void (async () => {
+                                        setAnalyzing(true);
+                                        setRetryFailed(false);
+                                        try {
+                                            for (const id of ids) {
+                                                await timelineApi.analyzeClipSyllables(id);
+                                            }
+                                            setRetryToken((value) => value + 1);
+                                        } catch {
+                                            // 失败要落在界面上：吞掉异常只会有一个
+                                            // 全局 unhandledrejection 上报，按钮回弹、
+                                            // "需要分析"状态原样留着，用户不知道发生了什么。
+                                            setRetryFailed(true);
+                                        } finally {
+                                            setAnalyzing(false);
+                                        }
+                                    })();
+                                }}
+                            >
+                                {analyzing
+                                    ? tf("silence_note_blocks_analyzing")
+                                    : retryFailed
+                                      ? tf("silence_note_blocks_failed")
+                                      : tf("silence_note_blocks_need_analysis")}
+                            </button>
+                        ) : reports.some((r) => r.message === "note_blocks_empty") ? (
+                            <span className="hs-type-muted">{tf("silence_note_blocks_empty")}</span>
+                        ) : null}
+                    </Flex>
+                )}
 
                 {(
                     [
@@ -302,8 +367,12 @@ export const SilenceDetectionDialog: React.FC<{
                             <span key={id} className="hs-type-muted">
                                 {`· ${name}: `}
                                 {report && !report.ok
-                                    ? tf("silence_skipped") +
-                                      (report.message ? ` (${report.message})` : "")
+                                    ? report.message === "note_blocks_not_ready"
+                                        ? tf("silence_note_blocks_need_analysis")
+                                        : report.message === "note_blocks_empty"
+                                          ? tf("silence_note_blocks_empty")
+                                          : tf("silence_skipped") +
+                                            (report.message ? ` (${report.message})` : "")
                                     : regions > 0
                                       ? tf("silence_preview_clip")
                                             .replace("{n}", String(regions))

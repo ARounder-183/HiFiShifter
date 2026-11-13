@@ -75,6 +75,8 @@ pub(crate) mod commands;
 mod hfspeaks_v2;
 mod launch_args;
 mod link_bridge;
+#[cfg(target_os = "macos")]
+mod macos_menu;
 mod recording;
 mod search;
 #[path = "audio/silence_detect.rs"]
@@ -91,9 +93,10 @@ mod silence_detect;
 pub use hifishifter_kernel::fade_curves;
 pub(crate) use hifishifter_kernel::{
     audio_utils, channel_decision, channel_mode, channel_policy, clip_rendering_state, config,
-    dml_adapters, encode, formant_cache, gain, gpu_info, media, midi_import, mixdown, models,
-    notebook_assets, pitch_analysis, pitch_clip, pitch_editing, project, render_cache, render_key,
-    renderer, seam, stereo_detect, synth_clip_cache, temp_manager,
+    dml_adapters, encode, formant_cache, gain, gpu_info, hnsep_chunk, hnsep_resources, media,
+    midi_import, mixdown, models, note_blocks, notebook_assets, pitch_analysis, pitch_clip,
+    pitch_editing, project, render_cache, render_key, renderer, seam, stereo_detect,
+    synth_clip_cache, temp_manager,
 };
 
 // 这几个的可见性跟着自己的 feature / target 走，不能放进上面那个统一的 `use`。
@@ -193,6 +196,8 @@ mod project_fragment;
 mod reaper_export;
 #[path = "import/reaper_import.rs"]
 mod reaper_import;
+#[path = "import/reaper_pan.rs"]
+mod reaper_pan;
 #[path = "import/reaper_parser.rs"]
 mod reaper_parser;
 // `soundtouch` / `sstretch` / `time_stretch` 已迁到 `hifishifter-kernel`。
@@ -358,11 +363,19 @@ pub fn run() {
     let mut context = tauri::generate_context!();
     apply_app_directories_override(&mut context.config_mut().app);
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.enable_macos_default_menu(false);
+    builder
         .manage(state::AppState::default())
         .manage(link_bridge::LinkBridge::default())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            {
+                let menu = macos_menu::build(app.handle())?;
+                app.set_menu(menu)?;
+            }
             // 模型位置由内核统一解析：优先共享模型库（与 ARA 插件共用同一份 152 MB），
             // 库里没有就从本 bundle 的副本建立（同卷硬链接，零额外字节），最后才退回
             // bundle 内的副本。此前这里直接登记 `resource_dir()/models`，于是"同时装
@@ -736,8 +749,9 @@ pub fn run() {
             commands::notebook_export_document,
             commands::notebook_save_asset_as,
             commands::save_project,
-            commands::save_project_as,
-            commands::save_project_to_path,
+            commands::project_save_commands::save_project_as,
+            commands::project_save_commands::pick_project_save_path,
+            commands::project_save_commands::save_project_to_path,
             commands::get_auto_backup_settings,
             commands::save_auto_backup_settings,
             commands::run_timed_auto_backup,

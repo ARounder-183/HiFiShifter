@@ -5,9 +5,12 @@
 //! 关系：`compose` 消费本文件的 `BaseBlock`；本文件不写任何状态。
 //! 维护约束：没有分析结果的音频 Clip 绝不伪造“整段一块”。
 
-use super::projection::{normalize_loop_span, project_span, ClipProjection, ProjectedInterval};
+use super::projection::{
+    project_span_part, split_loop_span_parts, ClipProjection, ProjectedInterval,
+};
 use super::types::{BlockLabel, TakeKey, TakeSpan};
 use crate::state::{Clip, ClipTake, TimelineState};
+use std::cmp::Ordering;
 
 #[derive(Clone, Debug)]
 pub struct BaseBlock {
@@ -17,6 +20,10 @@ pub struct BaseBlock {
     pub projected: Vec<ProjectedInterval>,
     pub rate: f64,
     pub projection: ClipProjection,
+    /// Source note of the analyzed span (read-only view truth).
+    pub note: Option<f32>,
+    /// Stable full-source note-event identity.
+    pub event_id: Option<String>,
 }
 
 fn stable_id(take: &ClipTake, clip: &Clip, span: &TakeSpan) -> String {
@@ -32,65 +39,48 @@ fn stable_id(take: &ClipTake, clip: &Clip, span: &TakeSpan) -> String {
     format!("base:{}", blake3::hash(identity.as_bytes()).to_hex())
 }
 
-fn source_spans(take: &ClipTake) -> Option<(Vec<(f64, f64)>, BlockLabel)> {
-    if let Some(analysis) = take
-        .syllable_analysis
-        .as_ref()
-        .filter(|analysis| !analysis.source_spans_sec.is_empty())
-    {
-        return Some((
-            analysis
-                .source_spans_sec
-                .iter()
-                .map(|span| (span.start_sec, span.end_sec))
-                .collect(),
-            BlockLabel::Syllable,
-        ));
+/// 参数块层级与时间轴视觉顺序一致：起点升序，同起点按 id 的码元序。
+pub(crate) fn clip_layer_order(a: &Clip, b: &Clip) -> Ordering {
+    let delta = a.start_sec - b.start_sec;
+    if delta.abs() > 1e-9 {
+        return a.start_sec.total_cmp(&b.start_sec);
     }
-    if let Some(baseline) = take
-        .game_block_baseline
-        .as_ref()
-        .filter(|baseline| !baseline.source_spans_sec.is_empty())
-    {
-        return Some((
-            baseline
-                .source_spans_sec
-                .iter()
-                .map(|span| (span.start_sec, span.end_sec))
-                .collect(),
-            BlockLabel::GameBaseline,
-        ));
-    }
-    if let Some(notes) = take
-        .midi_note_data
-        .as_ref()
-        .filter(|notes| !notes.is_empty())
-    {
-        return Some((
-            notes
-                .iter()
-                .filter(|note| note.end_sec > note.start_sec)
-                .map(|note| (note.start_sec, note.end_sec))
-                .collect(),
-            BlockLabel::MidiNote,
-        ));
-    }
-    None
+    a.id.cmp(&b.id)
 }
 
-fn normalized_spans(mut spans: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
-    spans.retain(|(start, end)| start.is_finite() && end.is_finite() && *end > *start);
-    spans.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
-    let mut out: Vec<(f64, f64)> = Vec::new();
-    for (start, end) in spans {
-        match out.last_mut() {
-            Some(last) if start < last.1 - 1e-9 => {
-                // 重叠：保留更宽者；等宽时保留先出现者。
-                if end - start > last.1 - last.0 {
-                    *last = (start, end);
-                }
+fn source_spans(take: &ClipTake) -> Option<(Vec<crate::note_blocks::NoteBlockSpan>, BlockLabel)> {
+    let (spans, source) = crate::note_blocks::source_note_spans(take)?;
+    let label = match source {
+        crate::note_blocks::NoteBlockSource::Syllable => BlockLabel::Syllable,
+        crate::note_blocks::NoteBlockSource::GameBaseline => BlockLabel::GameBaseline,
+        crate::note_blocks::NoteBlockSource::MidiNote => BlockLabel::MidiNote,
+    };
+    Some((spans, label))
+}
+
+fn normalized_spans(
+    mut spans: Vec<crate::note_blocks::NoteBlockSpan>,
+) -> Vec<crate::note_blocks::NoteBlockSpan> {
+    spans.retain(|span| {
+        span.start_sec.is_finite() && span.end_sec.is_finite() && span.end_sec > span.start_sec
+    });
+    spans.sort_by(|a, b| {
+        a.start_sec
+            .total_cmp(&b.start_sec)
+            .then(a.end_sec.total_cmp(&b.end_sec))
+    });
+    let mut out: Vec<crate::note_blocks::NoteBlockSpan> = Vec::new();
+    for mut span in spans {
+        if let Some(last) = out.last() {
+            // Keep the earlier (left-cut) span; trim only the overlap from the
+            // later one. Replacing the earlier span with a wider one drops the
+            // very block whose visible part starts at the Clip edge.
+            if span.start_sec < last.end_sec - 1e-9 {
+                span.start_sec = last.end_sec;
             }
-            _ => out.push((start, end)),
+        }
+        if span.end_sec > span.start_sec + 1e-9 {
+            out.push(span);
         }
     }
     out
@@ -102,10 +92,15 @@ pub fn base_blocks_for_root(
     frame_period_ms: f64,
 ) -> Vec<BaseBlock> {
     let mut out = Vec::new();
-    for (z_order, clip) in timeline.clips.iter().enumerate() {
-        if timeline.resolve_root_track_id(&clip.track_id).as_deref() != Some(root_track_id) {
-            continue;
-        }
+    let mut clips: Vec<&Clip> = timeline
+        .clips
+        .iter()
+        .filter(|clip| {
+            timeline.resolve_root_track_id(&clip.track_id).as_deref() == Some(root_track_id)
+        })
+        .collect();
+    clips.sort_by(|a, b| clip_layer_order(a, b));
+    for (z_order, clip) in clips.into_iter().enumerate() {
         let take = if clip.takes.is_empty() {
             ClipTake::from_clip(clip)
         } else {
@@ -115,7 +110,8 @@ pub fn base_blocks_for_root(
             continue;
         };
         let projection = ClipProjection::from_clip_take(clip, &take);
-        for (index, (start_sec, end_sec)) in normalized_spans(spans).into_iter().enumerate() {
+        for (index, normalized) in normalized_spans(spans).into_iter().enumerate() {
+            let (start_sec, end_sec) = (normalized.start_sec, normalized.end_sec);
             let identity = format!(
                 "span:{}:{}:{:08}",
                 take.id,
@@ -132,7 +128,7 @@ pub fn base_blocks_for_root(
                 syllable_id: Some(identity.clone()),
                 label,
             };
-            let parts = normalize_loop_span(&projection, &base_span);
+            let parts = split_loop_span_parts(&projection, &base_span);
             let parts_len = parts.len();
             for (part_index, part) in parts.into_iter().enumerate() {
                 let syllable_id = if parts_len > 1 {
@@ -140,11 +136,11 @@ pub fn base_blocks_for_root(
                 } else {
                     Some(identity.clone())
                 };
-                for interval in project_span(&projection, &part, frame_period_ms) {
-                    if interval.cycle < part.cycle {
+                for interval in project_span_part(&projection, &part, frame_period_ms) {
+                    if interval.cycle < part.span.cycle {
                         continue;
                     }
-                    let mut cycle_span = part.clone();
+                    let mut cycle_span = part.span.clone();
                     cycle_span.cycle = interval.cycle;
                     cycle_span.syllable_id = syllable_id.clone();
                     out.push(BaseBlock {
@@ -154,6 +150,8 @@ pub fn base_blocks_for_root(
                         projected: vec![interval],
                         rate: projection.effective_rate,
                         projection: projection.clone(),
+                        note: normalized.midi_note,
+                        event_id: normalized.event_id.clone(),
                     });
                 }
             }
@@ -178,10 +176,13 @@ pub fn root_analysis_pending(timeline: &TimelineState, root_track_id: &str) -> b
                 .midi_note_data
                 .as_ref()
                 .is_none_or(|notes| notes.is_empty())
-            && take
-                .syllable_analysis
-                .as_ref()
-                .is_none_or(|analysis| analysis.source_spans_sec.is_empty())
+            && take.syllable_analysis.as_ref().is_none_or(|analysis| {
+                crate::pitch_analysis::analysis_window_status(
+                    analysis.analyzed_window_sec,
+                    ClipProjection::from_clip_take(clip, &take).audible_source_window(),
+                    !analysis.source_spans_sec.is_empty(),
+                ) != "current"
+            })
     })
 }
 

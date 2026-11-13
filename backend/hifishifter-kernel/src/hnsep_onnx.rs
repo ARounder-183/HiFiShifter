@@ -34,6 +34,7 @@
 //! 尾部 8.1% 变成纯静音。
 //! 回归测试：`hnsep_dsp::e2e_hnsep::stems_are_resampled_back_to_the_output_rate`。
 
+use crate::hnsep_chunk::{plan_chunks, HNSEP_FULL_MAX_SAMPLES};
 use lru::LruCache;
 use ort::session::Session;
 use ort::value::Tensor;
@@ -576,6 +577,76 @@ pub fn infer_noise_mono(
     .map(|(_, noise)| noise)
 }
 
+fn run_mask(session: &SeparatorSession, mask_input: &[f32]) -> Result<Vec<f32>, String> {
+    let sep_frames = mask_input.len() / 2 / (HNSEP_N_FFT / 2 + 1);
+    let spec_tensor = Tensor::from_array((
+        [1usize, 2, HNSEP_N_FFT / 2 + 1, sep_frames],
+        mask_input.to_vec().into_boxed_slice(),
+    ))
+    .map_err(|e| format!("build hnsep spec tensor failed: {e}"))?;
+    let mut session_guard = session.runtime.lock().unwrap_or_else(|e| e.into_inner());
+    INFERENCE_RUNS.fetch_add(1, Ordering::Relaxed);
+    let outputs = session_guard
+        .run(ort::inputs![spec_tensor])
+        .map_err(|e| format!("hnsep ort run failed: {e}"))?;
+    let output = outputs
+        .into_iter()
+        .next()
+        .ok_or_else(|| "hnsep ort returned no output".to_string())?;
+    let (_, mask_tensor) = output
+        .1
+        .try_extract_tensor::<f32>()
+        .map_err(|e| format!("hnsep mask output extract failed: {e}"))?;
+    Ok(mask_tensor.to_vec())
+}
+
+fn separate_chunked(
+    model_audio: &[f32],
+    window: &[f64],
+    session: &SeparatorSession,
+) -> Result<Vec<f32>, String> {
+    let chunks = plan_chunks(model_audio.len());
+    if chunks.is_empty() {
+        return Err("hnsep: chunk plan rejected input length".to_string());
+    }
+    let mut out = vec![0.0f32; model_audio.len()];
+    let mut previous_core_end = 0usize;
+    for (index, chunk) in chunks.iter().enumerate() {
+        crate::hnsep_resources::preflight(chunk.input_end - chunk.input_start, HNSEP_MODEL_SR)?;
+        let input = &model_audio[chunk.input_start..chunk.input_end];
+        let harmonic =
+            crate::hnsep_dsp::separate(input, HNSEP_N_FFT, HNSEP_HOP, window, |mask_input| {
+                run_mask(session, mask_input)
+            })?;
+        let core_start = chunk.core_start - chunk.input_start;
+        let core_end = chunk.core_end - chunk.input_start;
+        if core_end > harmonic.len() {
+            return Err(format!("hnsep chunk {index} returned short output"));
+        }
+        let core = &harmonic[core_start..core_end];
+        if index == 0 {
+            out[..chunk.core_end].copy_from_slice(core);
+        } else {
+            let overlap_start = chunk.core_start;
+            let overlap_end = previous_core_end.min(chunk.core_end);
+            let overlap_len = overlap_end.saturating_sub(overlap_start);
+            for offset in 0..overlap_len {
+                let alpha = (offset as f32 + 1.0) / (overlap_len as f32 + 1.0);
+                let index = overlap_start + offset;
+                out[index] = out[index] * (1.0 - alpha) + core[offset] * alpha;
+            }
+            let copy_start = overlap_end.saturating_sub(chunk.core_start);
+            out[overlap_end..chunk.core_end].copy_from_slice(&core[copy_start..]);
+        }
+        previous_core_end = chunk.core_end;
+    }
+    // 计划已保证覆盖完整；最后一段之外的样本保持 0 只会出现在异常计划中。
+    if previous_core_end != model_audio.len() {
+        return Err("hnsep: chunk plan did not cover the whole input".to_string());
+    }
+    Ok(out)
+}
+
 /// 整段分离保持原DSP语义；完整内容缓存与single-flight都在worker，绝不切块HNSEP。
 pub fn infer_harmonic_noise_mono(
     _clip_id: &str,
@@ -619,8 +690,8 @@ pub fn infer_harmonic_noise_mono(
         }
     }
 
-    // 成功cache命中无需再分配整段工作区；miss先核对系统资源，不等ORT把机器内存耗尽。
-    crate::hnsep_resources::preflight(audio_len, sample_rate)?;
+    // 成功cache命中无需再分配整段工作区；短 Clip 走整段路径，长 Clip 在
+    // separate_chunked 内按块做资源预检。
     let model_audio = if sample_rate == HNSEP_MODEL_SR {
         audio_mono.to_vec()
     } else {
@@ -632,36 +703,24 @@ pub fn infer_harmonic_noise_mono(
     // 模型只做 mask；STFT/ISTFT 在 Rust 侧（`hnsep_dsp`）。这与 OpenUtau 的
     // `Hnsep.cs` 一致，也是让 GPU 有可加速算子的前提（见模块头说明）。
     let window = crate::hnsep_dsp::periodic_hann(HNSEP_N_FFT);
-    let harmonic = crate::hnsep_dsp::separate(
-        &model_audio,
-        HNSEP_N_FFT,
-        HNSEP_HOP,
-        &window,
-        |mask_input| {
-            let sep_frames = mask_input.len() / 2 / (HNSEP_N_FFT / 2 + 1);
-            let spec_tensor = Tensor::from_array((
-                [1usize, 2, HNSEP_N_FFT / 2 + 1, sep_frames],
-                mask_input.to_vec().into_boxed_slice(),
-            ))
-            .map_err(|e| format!("build hnsep spec tensor failed: {e}"))?;
-
-            let mut session_guard = session.runtime.lock().unwrap_or_else(|e| e.into_inner());
-            INFERENCE_RUNS.fetch_add(1, Ordering::Relaxed);
-            let outputs = session_guard
-                .run(ort::inputs![spec_tensor])
-                .map_err(|e| format!("hnsep ort run failed: {e}"))?;
-            // 先取出拥有所有权的 output，再借用其中的张量（否则临时值提前释放）。
-            let output = outputs
-                .into_iter()
-                .next()
-                .ok_or_else(|| "hnsep ort returned no output".to_string())?;
-            let (_, mask_tensor) = output
-                .1
-                .try_extract_tensor::<f32>()
-                .map_err(|e| format!("hnsep mask output extract failed: {e}"))?;
-            Ok(mask_tensor.to_vec())
-        },
-    )?;
+    let harmonic = if model_audio.len() > HNSEP_FULL_MAX_SAMPLES {
+        log::warn!(
+            "[hnsep] long clip: {} samples -> bounded chunks (core={}s context={}s)",
+            model_audio.len(),
+            crate::hnsep_chunk::HNSEP_CHUNK_CORE_SAMPLES as f64 / HNSEP_MODEL_SR as f64,
+            crate::hnsep_chunk::HNSEP_CHUNK_CONTEXT_SAMPLES as f64 / HNSEP_MODEL_SR as f64,
+        );
+        separate_chunked(&model_audio, &window, session.as_ref())?
+    } else {
+        crate::hnsep_resources::preflight(audio_len, sample_rate)?;
+        crate::hnsep_dsp::separate(
+            &model_audio,
+            HNSEP_N_FFT,
+            HNSEP_HOP,
+            &window,
+            |mask_input| run_mask(session.as_ref(), mask_input),
+        )?
+    };
 
     // 噪声 = 原信号 − 谐波（在**模型采样率**下相减，与波形域模型的定义一致）。
     // 必须在重采样回输出采样率**之前**做：此处 model_audio 与 harmonic 同域同长，

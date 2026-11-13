@@ -89,6 +89,8 @@ export interface ProjectedMember {
     /** 可见区间覆盖的源域范围（source 顺序，供 BaseCover / 片段物化使用）。 */
     readonly visibleSourceStartSec: number;
     readonly visibleSourceEndSec: number;
+    readonly cutStart?: boolean;
+    readonly cutEnd?: boolean;
 }
 
 /**
@@ -111,6 +113,14 @@ export interface ProjectedParamBlock {
     readonly kind: ProjectedBlockKind;
     readonly members: readonly ProjectedMember[];
     readonly value?: number | null;
+    /** Read-only source MIDI note for a single-member block. */
+    readonly sourceNote?: number | null;
+    /** `clipId|takeId|cycle` identity for cross-source adjacency checks. */
+    readonly sourceKey?: string;
+    /** Stable full-source note-event identity; never derived from visible geometry. */
+    readonly sourceEventId?: string;
+    readonly cutStart?: boolean;
+    readonly cutEnd?: boolean;
     /** 基块候选的所有权覆盖；用户块为 undefined。 */
     readonly baseCover?: BaseCover;
 }

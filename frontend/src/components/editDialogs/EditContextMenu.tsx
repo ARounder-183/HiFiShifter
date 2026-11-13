@@ -19,6 +19,9 @@ interface EditContextMenuProps {
     onSelectAll?: () => void;
     onDeselect?: () => void;
     onInitialize?: () => void;
+    /** 当前参数关于 0 对称时可翻转。 */
+    canFlipParam?: boolean;
+    onFlip?: () => void;
     onTransposeCents?: () => void;
     onTransposeDegrees?: () => void;
     onSetPitch?: () => void;
@@ -63,6 +66,8 @@ export function EditContextMenu({
     onSelectAll,
     onDeselect,
     onInitialize,
+    canFlipParam = false,
+    onFlip,
     onTransposeCents,
     onTransposeDegrees,
     onSetPitch,
@@ -145,6 +150,16 @@ export function EditContextMenu({
             separatorBefore: true,
             onSelect: () => onInitialize?.(),
         },
+        ...(canFlipParam && onFlip
+            ? ([
+                  {
+                      key: "flip",
+                      label: tf("menu_flip"),
+                      separatorBefore: true,
+                      onSelect: onFlip,
+                  },
+              ] satisfies AppMenuItemSpec[])
+            : []),
         ...(isPitchParam
             ? ([
                   {

@@ -30,9 +30,11 @@ import type {
 } from "../kernel/host/pianoRollKernelData";
 import type { PianoRollKernelHost } from "../kernel/host/pianoRollKernelHost";
 import type { ParamAxisUnit } from "../paramAxisUnits";
+import type { PanAxisDirections } from "../paramPan";
 import type { ParamClipboardData } from "../paramClipboardMapping";
 import type { FrameRange, ParamSelection } from "../paramSelection";
-import type { DetectedPitchCurve, ReferencePitchOverlay } from "../render";
+import type { ClipPitchOverlay } from "../clipPitchOverlay";
+import type { ReferencePitchOverlay } from "../render";
 import type { ParamMorphOverlay, ParamName, ParamViewSegment, ValueViewport } from "../types";
 import type { LiveEditOverride } from "../useLiveParamEditing";
 import type { Dispatch, RefObject, SetStateAction } from "react";
@@ -55,7 +57,7 @@ export type ModelDeps = {
     currentParamDefaultValue: number;
     currentParamQuantizeUnit: number;
     currentParamRange: { min: number; max: number } | undefined;
-    detectedPitchCurves: DetectedPitchCurve[];
+    clipPitchOverlays: ClipPitchOverlay[];
     dispatch: AppDispatch;
     editParam: string;
     editParamAxisUnit: ParamAxisUnit;
@@ -75,6 +77,7 @@ export type ModelDeps = {
     paramEditorRef: RefObject<HTMLDivElement | null>;
     paramMorphOverlays: ParamMorphOverlay[] | null;
     paramView: ParamViewSegment | null;
+    paramAxisDirectionsRef: RefObject<PanAxisDirections>;
     paramViewRef: RefObject<ParamViewSegment | null>;
     paramViewsRef: RefObject<Record<string, ValueViewport>>;
     pitchDeltaToDegreeSteps: (basePitch: number, targetPitch: number, scale: ScaleLike) => number;
@@ -113,6 +116,7 @@ export type ModelDeps = {
     setSelectionUi: Dispatch<SetStateAction<ParamSelection | null>>;
     store: Store<RootState>;
     t: (key: MessageKey) => string;
+    tf: (key: string) => string;
     themeMode: ThemeMode;
     valueToY: (param: ParamName, v: number, h: number) => number;
     vibratoBaseline: BaselineMode;

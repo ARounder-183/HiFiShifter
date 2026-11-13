@@ -760,12 +760,17 @@ mod tests {
                 hifishifter_kernel::pitch_analysis::SyllableSpan {
                     start_sec: 0.1,
                     end_sec: 0.3,
+                    midi_note: None,
+                    event_id: None,
                 },
                 hifishifter_kernel::pitch_analysis::SyllableSpan {
                     start_sec: 0.3,
                     end_sec: 0.6,
+                    midi_note: None,
+                    event_id: None,
                 },
             ],
+            analyzed_window_sec: [0.0, 0.0],
         };
         let take: hifishifter_kernel::state::ClipTake = serde_json::from_value(serde_json::json!({
         "id": "take",
@@ -886,7 +891,10 @@ mod tests {
                 source_spans_sec: vec![hifishifter_kernel::pitch_analysis::SyllableSpan {
                     start_sec: 0.0,
                     end_sec: 0.5,
+                    midi_note: None,
+                    event_id: None,
                 }],
+                analyzed_window_sec: [0.0, 0.0],
             },
         );
         payload.bind_to_namespace("hfs-ui-1234-2-");

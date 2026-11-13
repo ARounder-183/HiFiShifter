@@ -9,6 +9,51 @@ use super::types::TakeSpan;
 use crate::state::{Clip, ClipTake};
 
 pub const MAX_FRAME: u32 = 1_000_000;
+/// Shared tolerance for positive source-domain intersections.
+pub const SOURCE_EPS: f64 = 1e-12;
+/// Shared tolerance for finite window geometry.
+pub const WINDOW_EPS: f64 = 1e-9;
+
+/// A positive source/window intersection. Callers must not use a separate
+/// epsilon: a left-cut note must survive all the way to its projected frame.
+pub fn window_intersection(span: (f64, f64), window: (f64, f64)) -> Option<(f64, f64)> {
+    let start = span.0.max(window.0);
+    let end = span.1.min(window.1);
+    (end > start + SOURCE_EPS).then_some((start, end))
+}
+
+/// A positive continuous intersection that rounded to zero frames is still one
+/// visible frame; it is not an absent block. The fabricated frame must stay
+/// inside the clip's visible range: a sliver at the very end rounds past
+/// `visible_end`, and emitting `[visible_end, visible_end + 1)` would both draw
+/// a block outside the clip and collide with the next clip's first block —
+/// `validate_view` then rejects the whole view. The loop path applies the same
+/// guard (`start < visible_end`).
+pub fn positive_interval_to_frames(start: u32, end: u32, visible_end: u32) -> Option<(u32, u32)> {
+    (end > start)
+        .then_some((start, end))
+        .or_else(|| (start < MAX_FRAME && start < visible_end).then_some((start, start + 1)))
+}
+
+/// Cut flags for a non-loop source/window intersection. Reverse playback swaps
+/// the source edges; loop wrapping is handled by the projection's ring rules.
+pub fn cut_flags_for_intersection(
+    span: (f64, f64),
+    window: (f64, f64),
+    reversed: bool,
+) -> (bool, bool) {
+    if reversed {
+        (
+            span.1 > window.1 + WINDOW_EPS,
+            span.0 < window.0 - WINDOW_EPS,
+        )
+    } else {
+        (
+            span.0 < window.0 - WINDOW_EPS,
+            span.1 > window.1 + WINDOW_EPS,
+        )
+    }
+}
 
 /// 源时间映射扩展点。
 ///
@@ -52,6 +97,22 @@ pub struct ProjectedInterval {
     pub cycle: u32,
     pub start_frame: u32,
     pub end_frame_exclusive: u32,
+    /// The visible interval starts inside its source span (window/overlap cut).
+    pub cut_start: bool,
+    /// The visible interval ends inside its source span (window/overlap cut).
+    pub cut_end: bool,
+}
+
+/// A source-domain fragment that belongs to a single Loop cycle.
+///
+/// The cut flags are expressed in timeline orientation: cut_start describes
+/// the left edge of the fragment as the user sees it. Reverse playback
+/// therefore swaps which source edge maps to which flag.
+#[derive(Clone, Debug)]
+pub struct LoopSpanPart {
+    pub span: TakeSpan,
+    pub cut_start: bool,
+    pub cut_end: bool,
 }
 
 fn finite_positive(value: f64, fallback: f64) -> f64 {
@@ -119,6 +180,63 @@ impl ClipProjection {
         }
     }
 
+    /// The source-domain window that can currently be heard from this Take.
+    ///
+    /// Analysis, projection and the UI gate must all use this single function.
+    /// A loop Clip wraps through the whole media ring; a section loop whose
+    /// anchor fits inside the media uses only its own cycle. Unknown media
+    /// duration falls back to the stored source window. A reversed Take's ring
+    /// extends **downward** from its anchor (`source_at_projected_frame`,
+    /// `take_geometry::forward_source_window` and the audio wrap in
+    /// `mixdown::build_loop_tiled_segment` all agree on that), so its section
+    /// window is `[anchor - cycle, anchor]` — the forward arm's
+    /// `[anchor, anchor + cycle)` is media that never plays.
+    pub fn audible_source_window(&self) -> (f64, f64) {
+        let span = (self.project_length_sec.max(0.0) * self.effective_rate).max(0.0);
+        let (start, end) = if self.loop_enabled {
+            let anchor = self.loop_anchor();
+            let cycle = self.loop_cycle_sec.unwrap_or(0.0);
+            let media = self.media_duration_sec;
+            // The ring wraps once the cycle reaches beyond one side of the
+            // media: forward past the end, reversed below zero.
+            let wraps = |anchor: f64, cycle: f64, duration: f64| {
+                if self.reversed {
+                    anchor - cycle < -1e-9 || anchor > duration + 1e-9
+                } else {
+                    anchor + cycle > duration + 1e-9 || anchor < -1e-9
+                }
+            };
+            let whole_ring = media.filter(|duration| {
+                *duration > 1e-9 && (cycle >= *duration - 1e-9 || wraps(anchor, cycle, *duration))
+            });
+            if let Some(duration) = whole_ring {
+                (0.0, duration)
+            } else if cycle > 1e-9 && anchor.is_finite() && anchor >= -1e-9 {
+                if self.reversed {
+                    (anchor - cycle, anchor)
+                } else {
+                    (anchor, anchor + cycle)
+                }
+            } else {
+                (self.source_window_start_sec, self.source_window_end_sec)
+            }
+        } else if self.reversed {
+            (
+                self.source_window_end_sec - span,
+                self.source_window_end_sec,
+            )
+        } else {
+            (
+                self.source_window_start_sec,
+                self.source_window_start_sec + span,
+            )
+        };
+        if !start.is_finite() || !end.is_finite() {
+            return (0.0, 0.0);
+        }
+        (start.min(end), start.max(end))
+    }
+
     pub fn frame_period_sec(&self, frame_period_ms: f64) -> f64 {
         frame_period_ms.max(0.1) / 1000.0
     }
@@ -176,6 +294,18 @@ impl ClipProjection {
     }
 }
 
+/// The authoritative audible source window for a Clip's active Take.
+/// Analysis, cache adoption and UI gates all call this function.
+pub fn clip_audible_source_window(clip: &crate::state::Clip) -> (f64, f64) {
+    if clip.takes.is_empty() {
+        let take = crate::state::ClipTake::from_clip(clip);
+        return ClipProjection::from_clip_take(clip, &take).audible_source_window();
+    }
+    ClipProjection::from_clip(clip)
+        .map(|projection| projection.audible_source_window())
+        .unwrap_or((0.0, 0.0))
+}
+
 pub fn project_span(
     projection: &ClipProjection,
     span: &TakeSpan,
@@ -186,67 +316,138 @@ pub fn project_span(
     if visible_end <= visible_start {
         return Vec::new();
     }
-    let rate = projection.effective_rate.max(1e-9);
     let mut out = Vec::new();
     if projection.loop_enabled {
-        let Some(cycle_sec) = projection.loop_cycle_sec.filter(|value| *value > 1e-9) else {
-            return out;
-        };
-        let anchor = projection.loop_anchor();
-        let phase = if projection.reversed {
-            (anchor - span.source_end_sec).rem_euclid(cycle_sec)
-        } else {
-            (span.source_start_sec - anchor).rem_euclid(cycle_sec)
-        };
-        // 一个成员只能覆盖它所在周期的剩余部分；跨周期必须先 normalize_loop_span。
-        let length_sec = ((span.source_end_sec - span.source_start_sec) / rate)
-            .min(((cycle_sec - phase) / rate).max(0.0))
-            .max(0.0);
-        let cycle_timeline_sec = cycle_sec / rate;
-        if cycle_timeline_sec <= 1e-9 {
-            return out;
+        // A TakeSpan may arrive unnormalized (the golden test and editing
+        // primitives call project_span directly). Splitting is therefore part
+        // of projection, not something callers may skip.
+        let parts = split_loop_span_parts(projection, span);
+        for part in parts {
+            out.extend(project_span_part(projection, &part, frame_period_ms));
         }
-        let clip_start = projection.project_start_sec;
-        let mut start_local = phase / rate;
-        let mut cycle = 0u32;
-        // 最多 20000 个周期；异常输入不能变成无限循环。
-        while start_local < projection.project_length_sec - 1e-9 && out.len() < 20_000 {
-            let start_sec = clip_start + start_local;
-            let end_sec = (start_sec + length_sec).min(clip_start + projection.project_length_sec);
-            let start = projection.to_frame(start_sec.max(clip_start), frame_period_ms);
-            let end = projection.to_frame(end_sec, frame_period_ms);
-            let start = start.max(visible_start);
-            let end = end.min(visible_end);
-            if end > start {
-                out.push(ProjectedInterval {
-                    cycle,
-                    start_frame: start,
-                    end_frame_exclusive: end,
-                });
-            }
-            start_local += cycle_timeline_sec;
-            cycle = cycle.saturating_add(1);
-        }
+        out.sort_by_key(|interval| {
+            (
+                interval.start_frame,
+                interval.end_frame_exclusive,
+                interval.cycle,
+            )
+        });
         return out;
     }
 
-    // 非 Loop：区间先按当前消费窗口裁剪，再投影。
-    let (window_start, window_end) = if projection.reversed {
-        (
-            projection.source_window_end_sec - projection.project_length_sec * rate,
-            projection.source_window_end_sec,
-        )
-    } else {
-        (
-            projection.source_window_start_sec,
-            projection.source_window_start_sec + projection.project_length_sec * rate,
-        )
-    };
-    let start_sec = span.source_start_sec.max(window_start);
-    let end_sec = span.source_end_sec.min(window_end);
-    if end_sec <= start_sec + 1e-12 {
-        return out;
+    out.extend(project_non_loop_interval(
+        projection,
+        span,
+        frame_period_ms,
+        visible_start,
+        visible_end,
+    ));
+    out
+}
+
+/// Project one already-normalized Loop fragment. The fragment cycle is the
+/// first cycle in which it appears; later cycles repeat at the same phase.
+pub fn project_span_part(
+    projection: &ClipProjection,
+    part: &LoopSpanPart,
+    frame_period_ms: f64,
+) -> Vec<ProjectedInterval> {
+    let frame_period_ms = frame_period_ms.max(0.1);
+    let (visible_start, visible_end) = projection.visible_frames(frame_period_ms);
+    if visible_end <= visible_start {
+        return Vec::new();
     }
+    if !projection.loop_enabled {
+        let mut intervals = project_non_loop_interval(
+            projection,
+            &part.span,
+            frame_period_ms,
+            visible_start,
+            visible_end,
+        );
+        for interval in &mut intervals {
+            interval.cut_start |= part.cut_start;
+            interval.cut_end |= part.cut_end;
+        }
+        return intervals;
+    }
+    let Some(cycle_sec) = projection.loop_cycle_sec.filter(|value| *value > 1e-9) else {
+        return Vec::new();
+    };
+    let rate = projection.effective_rate.max(1e-9);
+    let cycle_timeline_sec = cycle_sec / rate;
+    if cycle_timeline_sec <= 1e-9 {
+        return Vec::new();
+    }
+    let anchor = projection.loop_anchor();
+    let phase = if projection.reversed {
+        (anchor - part.span.source_end_sec).rem_euclid(cycle_sec)
+    } else {
+        (part.span.source_start_sec - anchor).rem_euclid(cycle_sec)
+    };
+    let width_sec = (part.span.source_end_sec - part.span.source_start_sec).max(0.0);
+    let length_sec = (width_sec / rate)
+        .min(((cycle_sec - phase) / rate).max(0.0))
+        .max(0.0);
+    if length_sec <= SOURCE_EPS {
+        return Vec::new();
+    }
+    let clip_start = projection.project_start_sec;
+    let clip_end = clip_start + projection.project_length_sec;
+    let mut out = Vec::new();
+    let mut cycle = part.span.cycle;
+    let mut start_local = phase / rate + cycle_timeline_sec * part.span.cycle as f64;
+    // At most 20,000 cycles; malformed input must not become an infinite loop.
+    while start_local < projection.project_length_sec - WINDOW_EPS && out.len() < 20_000 {
+        let raw_start_sec = clip_start + start_local;
+        let raw_end_sec = raw_start_sec + length_sec;
+        let start = projection
+            .to_frame(raw_start_sec, frame_period_ms)
+            .max(visible_start);
+        let mut end = projection
+            .to_frame(raw_end_sec, frame_period_ms)
+            .min(visible_end);
+        // Rounding may collapse a positive source interval to zero frames.
+        // A visible block still deserves one frame of pointer target.
+        if end <= start
+            && raw_end_sec > raw_start_sec + SOURCE_EPS
+            && raw_start_sec < clip_end - WINDOW_EPS
+            && raw_end_sec > clip_start + WINDOW_EPS
+            && start < visible_end
+        {
+            end = start.saturating_add(1).min(visible_end);
+        }
+        if end > start {
+            out.push(ProjectedInterval {
+                cycle,
+                start_frame: start,
+                end_frame_exclusive: end,
+                cut_start: part.cut_start || raw_start_sec < clip_start - WINDOW_EPS,
+                cut_end: part.cut_end || raw_end_sec > clip_end + WINDOW_EPS,
+            });
+        }
+        start_local += cycle_timeline_sec;
+        cycle = cycle.saturating_add(1);
+    }
+    out
+}
+
+fn project_non_loop_interval(
+    projection: &ClipProjection,
+    span: &TakeSpan,
+    frame_period_ms: f64,
+    visible_start: u32,
+    visible_end: u32,
+) -> Vec<ProjectedInterval> {
+    // The audible source window is the single source of truth for analysis,
+    // cache adoption and projection. Never recompute a second affine window.
+    let (window_start, window_end) = projection.audible_source_window();
+    let Some((start_sec, end_sec)) = window_intersection(
+        (span.source_start_sec, span.source_end_sec),
+        (window_start, window_end),
+    ) else {
+        return Vec::new();
+    };
     let a = projection.project_non_loop(start_sec);
     let b = projection.project_non_loop(end_sec);
     let start = projection
@@ -255,14 +456,21 @@ pub fn project_span(
     let end = projection
         .to_frame(a.max(b), frame_period_ms)
         .min(visible_end);
-    if end > start {
-        out.push(ProjectedInterval {
-            cycle: 0,
-            start_frame: start,
-            end_frame_exclusive: end,
-        });
-    }
-    out
+    let Some((start, end)) = positive_interval_to_frames(start, end, visible_end) else {
+        return Vec::new();
+    };
+    let (cut_start, cut_end) = cut_flags_for_intersection(
+        (span.source_start_sec, span.source_end_sec),
+        (window_start, window_end),
+        projection.reversed,
+    );
+    vec![ProjectedInterval {
+        cycle: 0,
+        start_frame: start,
+        end_frame_exclusive: end,
+        cut_start,
+        cut_end,
+    }]
 }
 
 /// 工程帧 → 源域秒。`cycle` 只对 Loop 有意义；非 Loop 传 0。
@@ -363,92 +571,212 @@ pub fn source_at_projected_frame(
 
 /// 把一个可能跨 Loop 周期边界的源域区间切成“每段都属于单一周期”的成员。
 pub fn normalize_loop_span(projection: &ClipProjection, span: &TakeSpan) -> Vec<TakeSpan> {
+    split_loop_span_parts(projection, span)
+        .into_iter()
+        .map(|part| part.span)
+        .collect()
+}
+
+fn mark_low_edge_cut(part: &mut LoopSpanPart, reversed: bool) {
+    if reversed {
+        part.cut_end = true;
+    } else {
+        part.cut_start = true;
+    }
+}
+
+fn mark_high_edge_cut(part: &mut LoopSpanPart, reversed: bool) {
+    if reversed {
+        part.cut_start = true;
+    } else {
+        part.cut_end = true;
+    }
+}
+
+/// Split any TakeSpan into fragments that each live inside one Loop cycle.
+///
+/// This is the single source of truth for Loop fragmentation. It handles the
+/// anchor seam (head and tail belong to the same cycle), media wrap-around,
+/// and pathological spans wider than one cycle (deterministic chunking).
+///
+/// cut_start / cut_end are timeline-oriented: they describe the left and right
+/// visible edges. Reverse playback swaps the source edges that map to those
+/// flags.
+pub fn split_loop_span_parts(projection: &ClipProjection, span: &TakeSpan) -> Vec<LoopSpanPart> {
     if !projection.loop_enabled {
-        return vec![span.clone()];
+        return vec![LoopSpanPart {
+            span: span.clone(),
+            cut_start: false,
+            cut_end: false,
+        }];
     }
     let Some(cycle_sec) = projection.loop_cycle_sec.filter(|value| *value > 1e-9) else {
-        return vec![span.clone()];
+        return vec![LoopSpanPart {
+            span: span.clone(),
+            cut_start: false,
+            cut_end: false,
+        }];
     };
-    let media = projection.media_duration_sec.unwrap_or(cycle_sec);
-    let anchor = projection.loop_anchor();
-    let width = span.source_end_sec - span.source_start_sec;
-    if width <= 1e-12 {
+    if !span.source_start_sec.is_finite() || !span.source_end_sec.is_finite() {
         return Vec::new();
     }
-    if width > cycle_sec + 1e-9 {
-        let mut out = Vec::new();
+    let width = span.source_end_sec - span.source_start_sec;
+    if width <= SOURCE_EPS {
+        return Vec::new();
+    }
+    let media = projection
+        .media_duration_sec
+        .filter(|value| value.is_finite() && *value > WINDOW_EPS)
+        .unwrap_or(cycle_sec);
+    let anchor = projection.loop_anchor();
+    let mut out = Vec::new();
+    if width > cycle_sec + WINDOW_EPS {
         let mut start = span.source_start_sec;
         let mut cycle = span.cycle;
-        while start < span.source_end_sec - 1e-9 {
+        let mut index = 0u32;
+        while start < span.source_end_sec - SOURCE_EPS && index < 20_000 {
             let end = (start + cycle_sec).min(span.source_end_sec);
-            let mut part = span.clone();
-            part.cycle = cycle;
-            part.source_start_sec = start;
-            part.source_end_sec = end;
-            out.extend(normalize_loop_span(projection, &part));
+            let last = end >= span.source_end_sec - SOURCE_EPS;
+            let (cut_start, cut_end) = if projection.reversed {
+                (!last, index > 0)
+            } else {
+                (index > 0, !last)
+            };
+            let mut chunk = span.clone();
+            chunk.cycle = cycle;
+            chunk.source_start_sec = start;
+            chunk.source_end_sec = end;
+            out.extend(split_loop_piece(
+                projection,
+                LoopSpanPart {
+                    span: chunk,
+                    cut_start,
+                    cut_end,
+                },
+                media,
+                anchor,
+            ));
             start = end;
             cycle = cycle.saturating_add(1);
+            index = index.saturating_add(1);
         }
-        return out;
-    }
-    let mut wrapped: Vec<(f64, f64)> = Vec::new();
-    let (lo, hi) = (span.source_start_sec, span.source_end_sec);
-    if lo < -1e-9 {
-        if hi <= 1e-9 {
-            wrapped.push((media + lo, media + hi));
-        } else {
-            wrapped.push((media + lo, media));
-            wrapped.push((0.0, hi));
-        }
-    } else if lo >= media - 1e-9 {
-        wrapped.push((lo - media, hi - media));
-    } else if hi > media + 1e-9 {
-        wrapped.push((lo, media));
-        wrapped.push((0.0, hi - media));
     } else {
-        wrapped.push((lo, hi));
+        out.extend(split_loop_piece(
+            projection,
+            LoopSpanPart {
+                span: span.clone(),
+                cut_start: false,
+                cut_end: false,
+            },
+            media,
+            anchor,
+        ));
+    }
+    out.sort_by(|a, b| {
+        a.span
+            .source_start_sec
+            .total_cmp(&b.span.source_start_sec)
+            .then(a.span.source_end_sec.total_cmp(&b.span.source_end_sec))
+            .then(a.span.cycle.cmp(&b.span.cycle))
+    });
+    out
+}
+
+fn split_loop_piece(
+    projection: &ClipProjection,
+    part: LoopSpanPart,
+    media: f64,
+    anchor: f64,
+) -> Vec<LoopSpanPart> {
+    let reversed = projection.reversed;
+    let mut queue = vec![part];
+    let mut wrapped = Vec::new();
+    let mut guard = 0usize;
+    while let Some(current) = queue.pop() {
+        guard = guard.saturating_add(1);
+        if guard > 20_000 {
+            // 有界路径必须有读数：静默 break 会把队列里剩余的片段直接丢掉，
+            // 表现为"块少了一截"。只可能由退化输入触发（如 duration_sec≈1e-8
+            // 的损坏工程），与 [pitch:trim] / [hnsep] 的有界路径同一待遇。
+            // （param_blocks 声明在 lib.rs 的宏定义之前，文本作用域够不到
+            // log_warn_limited!，这里直接调用它包装的限流实现。）
+            crate::log_limiter::emit_limited(
+                log::Level::Warn,
+                file!(),
+                line!(),
+                format_args!(
+                    "[param_blocks] loop split hit the 20,000-piece guard: clip '{}' \
+                     dropped {} queued fragment(s); media={:.6}s anchor={:.6}s",
+                    projection.clip_id,
+                    queue.len() + 1,
+                    media,
+                    anchor
+                ),
+            );
+            break;
+        }
+        let lo = current.span.source_start_sec;
+        let hi = current.span.source_end_sec;
+        if hi <= lo + SOURCE_EPS {
+            continue;
+        }
+        if lo < -WINDOW_EPS {
+            if hi <= WINDOW_EPS {
+                let mut shifted = current;
+                shifted.span.source_start_sec = media + lo;
+                shifted.span.source_end_sec = media + hi;
+                queue.push(shifted);
+            } else {
+                let mut tail = current.clone();
+                tail.span.source_start_sec = media + lo;
+                tail.span.source_end_sec = media;
+                mark_high_edge_cut(&mut tail, reversed);
+                let mut head = current;
+                head.span.source_start_sec = 0.0;
+                head.span.source_end_sec = hi;
+                mark_low_edge_cut(&mut head, reversed);
+                queue.push(tail);
+                queue.push(head);
+            }
+        } else if lo >= media - WINDOW_EPS {
+            let mut shifted = current;
+            shifted.span.source_start_sec = lo - media;
+            shifted.span.source_end_sec = hi - media;
+            queue.push(shifted);
+        } else if hi > media + WINDOW_EPS {
+            let mut tail = current.clone();
+            tail.span.source_end_sec = media;
+            mark_high_edge_cut(&mut tail, reversed);
+            let mut head = current;
+            head.span.source_start_sec = 0.0;
+            head.span.source_end_sec = hi - media;
+            mark_low_edge_cut(&mut head, reversed);
+            queue.push(tail);
+            queue.push(head);
+        } else {
+            wrapped.push(current);
+        }
     }
     let mut out = Vec::new();
-    for (lo, hi) in wrapped {
-        if projection.reversed {
-            if lo < anchor - 1e-9 && hi > anchor + 1e-9 {
-                let mut first = span.clone();
-                first.cycle = span.cycle;
-                first.source_start_sec = anchor;
-                first.source_end_sec = hi;
-                let mut second = span.clone();
-                second.cycle = span.cycle;
-                second.source_start_sec = lo;
-                second.source_end_sec = anchor;
-                out.push(first);
-                out.push(second);
-            } else {
-                let mut part = span.clone();
-                part.cycle = span.cycle;
-                part.source_start_sec = lo;
-                part.source_end_sec = hi;
-                out.push(part);
-            }
-        } else if lo < anchor - 1e-9 && hi > anchor + 1e-9 {
-            let mut first = span.clone();
-            first.cycle = span.cycle;
-            first.source_start_sec = lo;
-            first.source_end_sec = anchor;
-            let mut second = span.clone();
-            second.cycle = span.cycle.saturating_add(1);
-            second.source_start_sec = anchor;
-            second.source_end_sec = hi;
-            out.push(first);
-            out.push(second);
+    for piece in wrapped {
+        let lo = piece.span.source_start_sec;
+        let hi = piece.span.source_end_sec;
+        if lo < anchor - WINDOW_EPS && hi > anchor + WINDOW_EPS {
+            // Forward: [lo, anchor] is the tail at the end of this very cycle,
+            // [anchor, hi] is the head at its start. Reverse mirrors the flags
+            // but keeps both fragments in the same cycle.
+            let mut left = piece.clone();
+            left.span.source_end_sec = anchor;
+            mark_high_edge_cut(&mut left, reversed);
+            let mut right = piece;
+            right.span.source_start_sec = anchor;
+            mark_low_edge_cut(&mut right, reversed);
+            out.push(left);
+            out.push(right);
         } else {
-            let mut part = span.clone();
-            part.cycle = span.cycle;
-            part.source_start_sec = lo;
-            part.source_end_sec = hi;
-            out.push(part);
+            out.push(piece);
         }
     }
-    out.retain(|part| part.source_end_sec > part.source_start_sec + 1e-12);
     out
 }
 
@@ -483,6 +811,145 @@ mod tests {
             syllable_id: None,
             label: super::super::types::BlockLabel::Syllable,
         }
+    }
+
+    #[test]
+    fn project_span_keeps_one_frame_for_a_sub_frame_left_overlap() {
+        let clip = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":2.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":1.0,
+                "source_end_sec":3.0}]
+        }));
+        let projection = ClipProjection::from_clip(&clip).unwrap();
+        let intervals = project_span(&projection, &span(0.5, 1.001), 5.0);
+        assert_eq!(intervals.len(), 1);
+        assert_eq!(intervals[0].start_frame, 0);
+        assert_eq!(intervals[0].end_frame_exclusive, 1);
+        assert!(intervals[0].cut_start);
+    }
+
+    #[test]
+    fn project_span_marks_left_cut_forward_and_reverse() {
+        let forward = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":1.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":1.0,
+                "source_end_sec":2.0}]
+        }));
+        let interval = project_span(
+            &ClipProjection::from_clip(&forward).unwrap(),
+            &span(0.6, 1.4),
+            5.0,
+        )[0];
+        assert!(interval.cut_start);
+        assert!(!interval.cut_end);
+        let reverse = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":1.0,
+            "reversed":true,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.0,
+                "source_end_sec":2.0,"reversed":true}]
+        }));
+        let reversed = project_span(
+            &ClipProjection::from_clip(&reverse).unwrap(),
+            &span(1.6, 2.4),
+            5.0,
+        )[0];
+        assert!(reversed.cut_start);
+    }
+
+    #[test]
+    fn loop_analysis_window_is_the_audible_ring() {
+        let ring = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":4.0,
+            "loop_enabled":true,"loop_period_sec":1.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.0,
+                "source_end_sec":1.0,"loop_enabled":true,"duration_sec":1.0}]
+        }));
+        assert_eq!(
+            ClipProjection::from_clip(&ring)
+                .unwrap()
+                .audible_source_window(),
+            (0.0, 1.0)
+        );
+        let section = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":4.0,
+            "loop_enabled":true,"loop_period_sec":1.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.25,
+                "source_end_sec":1.25,"loop_enabled":true,"duration_sec":4.0}]
+        }));
+        let section_projection = ClipProjection::from_clip(&section).unwrap();
+        assert_eq!(section_projection.audible_source_window(), (0.25, 1.25));
+    }
+
+    #[test]
+    fn reversed_section_loop_window_descends_from_the_anchor() {
+        // 倒放的 section loop：锚点在窗口末端，环从锚点向下延伸 —— 与
+        // source_at_projected_frame / take_geometry / mixdown 三处消费方一致。
+        let section = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":4.0,
+            "reversed":true,"loop_enabled":true,"loop_period_sec":1.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.25,
+                "source_end_sec":1.25,"reversed":true,"loop_enabled":true,"duration_sec":4.0}]
+        }));
+        let projection = ClipProjection::from_clip(&section).unwrap();
+        assert_eq!(projection.audible_source_window(), (0.25, 1.25));
+        // 越过源起点的 cycle 回绕整圈媒体：环从锚点向下越过 0。
+        let wrapped = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":4.0,
+            "reversed":true,"loop_enabled":true,"loop_period_sec":2.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.0,
+                "source_end_sec":1.0,"reversed":true,"loop_enabled":true,"duration_sec":4.0}]
+        }));
+        let wrapped_projection = ClipProjection::from_clip(&wrapped).unwrap();
+        assert_eq!(wrapped_projection.audible_source_window(), (0.0, 4.0));
+    }
+
+    #[test]
+    fn audible_window_follows_rate_and_direction() {
+        let forward = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":2.0,
+            "playback_rate":1.0,"clip_playback_rate":2.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.5,
+                "source_end_sec":8.0,"playback_rate":1.0}]
+        }));
+        assert_eq!(
+            ClipProjection::from_clip(&forward)
+                .unwrap()
+                .audible_source_window(),
+            (0.5, 4.5)
+        );
+        let reverse = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":2.0,
+            "reversed":true,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.0,
+                "source_end_sec":4.0,"reversed":true}]
+        }));
+        assert_eq!(
+            ClipProjection::from_clip(&reverse)
+                .unwrap()
+                .audible_source_window(),
+            (2.0, 4.0)
+        );
+    }
+
+    #[test]
+    fn a_sub_frame_sliver_at_the_clip_end_stays_inside_the_clip() {
+        // 交叠 [2.9995, 3.0] 取整后两端都落在 Clip 的最后一帧上：非 Loop 路径
+        // 不得把它"提升"成 [visible_end, visible_end+1) —— 那会画出 Clip 之外的
+        // 一帧，并与相邻 Clip 的首个块在 validate_view 里撞车（loop 路径
+        // 早已用 start < visible_end 守住同一种情况）。
+        let edge = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":2.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":1.0,"source_end_sec":3.0}]
+        }));
+        let projection = ClipProjection::from_clip(&edge).unwrap();
+        assert!(project_span(&projection, &span(2.9995, 3.5), 5.0).is_empty());
+        // 左缘的亚帧残片仍然保留（fabricate 落在可见范围内）。
+        let sliver = project_span(&projection, &span(1.0, 1.0004), 5.0);
+        assert_eq!(sliver.len(), 1);
+        assert_eq!(
+            (sliver[0].start_frame, sliver[0].end_frame_exclusive),
+            (0, 1)
+        );
     }
 
     #[test]
@@ -541,6 +1008,181 @@ mod tests {
                 "frame {frame} -> {source}"
             );
         }
+    }
+
+    #[test]
+    fn loop_anchor_crossing_keeps_head_in_current_cycle() {
+        let clip = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":8.0,
+            "loop_enabled":true,"loop_period_sec":2.27,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.266,
+                "source_end_sec":2.27,"loop_enabled":true,"duration_sec":2.27}]
+        }));
+        let projection = ClipProjection::from_clip(&clip).unwrap();
+        let intervals = project_span(&projection, &span(0.2, 0.4), 5.0);
+        let got: Vec<(u32, u32, bool, bool)> = intervals
+            .iter()
+            .map(|interval| {
+                (
+                    interval.start_frame,
+                    interval.end_frame_exclusive,
+                    interval.cut_start,
+                    interval.cut_end,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (0, 27, true, false),
+                (441, 454, false, true),
+                (454, 481, true, false),
+                (895, 908, false, true),
+                (908, 935, true, false),
+                (1349, 1362, false, true),
+                (1362, 1389, true, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn loop_left_trim_short_clip_keeps_first_note() {
+        let clip = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.3,"length_sec":3.7,
+            "loop_enabled":true,"loop_period_sec":4.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.3,
+                "source_end_sec":4.0,"loop_enabled":true,"duration_sec":4.0}]
+        }));
+        let projection = ClipProjection::from_clip(&clip).unwrap();
+        let intervals = project_span(&projection, &span(0.2, 0.6), 5.0);
+        assert_eq!(intervals.len(), 1);
+        assert_eq!(intervals[0].start_frame, 60);
+        assert_eq!(intervals[0].end_frame_exclusive, 120);
+        assert!(intervals[0].cut_start);
+        assert!(!intervals[0].cut_end);
+    }
+
+    #[test]
+    fn loop_anchor_at_exact_span_edges_does_not_split() {
+        let clip = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":4.0,
+            "loop_enabled":true,"loop_period_sec":4.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.3,
+                "source_end_sec":4.0,"loop_enabled":true,"duration_sec":4.0}]
+        }));
+        let projection = ClipProjection::from_clip(&clip).unwrap();
+        let start = project_span(&projection, &span(0.3, 0.6), 5.0);
+        assert_eq!(start.len(), 1);
+        assert_eq!(
+            (start[0].start_frame, start[0].end_frame_exclusive),
+            (0, 60)
+        );
+        assert!(!start[0].cut_start && !start[0].cut_end);
+        let end = project_span(&projection, &span(0.2, 0.3), 5.0);
+        assert_eq!(end.len(), 1);
+        assert_eq!((end[0].start_frame, end[0].end_frame_exclusive), (780, 800));
+        assert!(!end[0].cut_start && !end[0].cut_end);
+    }
+
+    #[test]
+    fn loop_sub_frame_head_survives_as_one_frame() {
+        let clip = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":1.0,
+            "loop_enabled":true,"loop_period_sec":4.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.3,
+                "source_end_sec":4.0,"loop_enabled":true,"duration_sec":4.0}]
+        }));
+        let projection = ClipProjection::from_clip(&clip).unwrap();
+        let intervals = project_span(&projection, &span(0.2999, 0.3002), 5.0);
+        assert_eq!(intervals.len(), 1);
+        assert_eq!(
+            (intervals[0].start_frame, intervals[0].end_frame_exclusive),
+            (0, 1)
+        );
+        assert!(intervals[0].cut_start);
+    }
+
+    #[test]
+    fn section_loop_anchor_crossing_uses_the_section_cycle() {
+        // SECTION 循环：周期 1s 小于媒体时长 4s，锚点仍按 source_start 起算。
+        let clip = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":4.0,
+            "loop_enabled":true,"loop_period_sec":1.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.25,
+                "source_end_sec":1.25,"loop_enabled":true,"duration_sec":4.0}]
+        }));
+        let projection = ClipProjection::from_clip(&clip).unwrap();
+        let intervals = project_span(&projection, &span(0.2, 0.4), 5.0);
+        let got: Vec<(u32, u32)> = intervals
+            .iter()
+            .map(|interval| (interval.start_frame, interval.end_frame_exclusive))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (0, 30),
+                (190, 200),
+                (200, 230),
+                (390, 400),
+                (400, 430),
+                (590, 600),
+                (600, 630),
+                (790, 800),
+            ]
+        );
+        assert!(intervals[0].cut_start);
+        assert!(intervals[1].cut_end);
+    }
+
+    #[test]
+    fn reversed_loop_anchor_crossing_keeps_both_fragments() {
+        let clip = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":2.0,
+            "reversed":true,"loop_enabled":true,"loop_period_sec":1.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.25,
+                "source_end_sec":1.25,"reversed":true,"loop_enabled":true,
+                "duration_sec":4.0}]
+        }));
+        let projection = ClipProjection::from_clip(&clip).unwrap();
+        let intervals = project_span(&projection, &span(1.0, 1.5), 5.0);
+        let got: Vec<(u32, u32, bool, bool)> = intervals
+            .iter()
+            .map(|interval| {
+                (
+                    interval.start_frame,
+                    interval.end_frame_exclusive,
+                    interval.cut_start,
+                    interval.cut_end,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (0, 50, true, false),
+                (150, 200, false, true),
+                (200, 250, true, false),
+                (350, 400, false, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn project_span_starts_at_the_span_cycle_for_user_members() {
+        let clip = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":4.0,
+            "loop_enabled":true,"loop_period_sec":1.0,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.0,
+                "source_end_sec":1.0,"loop_enabled":true,"duration_sec":1.0}]
+        }));
+        let projection = ClipProjection::from_clip(&clip).unwrap();
+        let mut member = span(0.2, 0.4);
+        member.cycle = 2;
+        let intervals = project_span(&projection, &member, 5.0);
+        assert_eq!(intervals.len(), 2);
+        assert_eq!(intervals[0].cycle, 2);
+        assert_eq!(intervals[0].start_frame, 440);
+        assert_eq!(intervals[1].cycle, 3);
     }
 
     #[test]

@@ -36,6 +36,16 @@ pub enum EngineCommand {
     SeekSec {
         sec: f64,
     },
+    /// 从绝对秒开始播放时间线（seek + set_playing 原子化）。
+    ///
+    /// `sec = None` 表示"从引擎**在命令序里的真实位置**起播"：位置在 worker
+    /// 应用完此前所有命令（SeekSec / UpdateTimeline…）之后才解析。IPC 线程
+    /// 直接读原子拿到的是未应用命令之前的旧值 —— 队列里还有 SeekSec 时，
+    /// 按旧值起播既覆盖掉那次 seek，又把光标拖回去。调用方负责确认当前
+    /// 会话目标是时间线（文件预览的 base 是文件域偏移，不含这个语义）。
+    PlayFrom {
+        sec: Option<f64>,
+    },
     SetPlaying {
         playing: bool,
         target: Option<String>,
@@ -44,6 +54,15 @@ pub enum EngineCommand {
         path: PathBuf,
         offset_sec: f64,
         target: String,
+    },
+    /// 系统默认输出设备（或它的默认格式）发生变化；worker 自己重新查询 cpal。
+    ///
+    /// `force` = 跳过"身份没变就不重建"的判等，强制重建一次流。
+    /// RT 侧 `err_fn`（`RtFault::StreamError`）与切换失败后的重试都用它 ——
+    /// 设备被拔出后的回退设备可能与旧身份完全相同，按身份判等会永远不重建，
+    /// 表现为"界面在播、实际永久静音"。
+    DefaultOutputDeviceChanged {
+        force: bool,
     },
     StretchReady {
         key: StretchKey,

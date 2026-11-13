@@ -50,6 +50,11 @@ export interface ParamBlockRectInput {
     } | null;
     /** 块内平均参数文字；缺省不画。 */
     readonly label?: string;
+    /** The visible interval starts/ends inside its source span. */
+    readonly cutStart?: boolean;
+    readonly cutEnd?: boolean;
+    /** Display-only fallback value: hollow/dashed, never a persisted center. */
+    readonly fallback?: boolean;
 }
 
 export interface ParamBlockInstanceArgs {
@@ -247,9 +252,14 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
         const endSec = Math.max(block.startSec, block.endSec);
         if (!Number.isFinite(startSec) || !Number.isFinite(endSec)) continue;
         const x0 = secToViewportPx(axis, startSec);
-        const x1 = secToViewportPx(axis, endSec);
-        if (!(x1 - x0 > 1e-9)) continue;
-        if (x1 <= 0 || x0 >= axis.viewportWidthPx) continue;
+        const projectedX1 = secToViewportPx(axis, endSec);
+        // Only a block completely outside the horizontal viewport is absent.
+        // A positive interval may project to less than one CSS pixel; snap to
+        // at least one physical pixel instead of dropping the derived block.
+        if (!(endSec > startSec)) continue;
+        if (projectedX1 < 0 || x0 > axis.viewportWidthPx) continue;
+        const minPixelWidth = 1 / Math.max(1, dpr);
+        const x1 = Math.max(projectedX1, x0 + minPixelWidth);
         const rawTop = Number.isFinite(block.topPx) ? block.topPx : 0;
         const rawBottom = rawTop + Math.max(1, block.heightPx);
         if (rawBottom <= 0 || rawTop >= height) continue;
@@ -266,11 +276,21 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
         if (snapped === null) continue;
         const { left, right, top, bottom, width: visibleWidth, height: h } = snapped;
         const rgba = block.selected ? args.selectedRgba : args.borderRgba;
-        const fillRgba = block.selected
+        const fallback = block.fallback === true;
+        const baseFillRgba = block.selected
             ? (args.selectedFillRgba ?? args.fillRgba)
             : block.grouped
               ? (args.groupedFillRgba ?? args.fillRgba)
               : args.fillRgba;
+        const fillRgba =
+            fallback && baseFillRgba !== undefined
+                ? ([
+                      baseFillRgba[0],
+                      baseFillRgba[1],
+                      baseFillRgba[2],
+                      baseFillRgba[3] * 0.25,
+                  ] as Rgba)
+                : baseFillRgba;
         const fillWidth = visibleWidth;
         // 块相交；只在被视口截断的那一侧画边线，不能在上/下边缘伪造一条块顶。
         const clipTop = rawTop < 0;
@@ -282,15 +302,50 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
                 w: fillWidth,
                 h,
                 rgba: fillRgba,
-                radius: Math.max(
-                    0,
-                    Math.min(
-                        args.cornerRadiusPx ?? DEFAULT_CORNER_RADIUS_PX,
-                        visibleWidth / 2,
-                        h / 2,
-                    ),
-                ),
+                // A cut side is flat: the source block continues outside the
+                // visible Clip. Rounded corners there would look like an end.
+                radius:
+                    block.cutStart === true || block.cutEnd === true
+                        ? 0
+                        : Math.max(
+                              0,
+                              Math.min(
+                                  args.cornerRadiusPx ?? DEFAULT_CORNER_RADIUS_PX,
+                                  visibleWidth / 2,
+                                  h / 2,
+                              ),
+                          ),
             });
+        }
+        const cutStripRgba: Rgba = [rgba[0], rgba[1], rgba[2], Math.min(1, rgba[3] * 0.45)];
+        const stripWidth = Math.min(2, Math.max(borderPx, visibleWidth / 4));
+        if (block.cutStart === true) {
+            highlights.push({ x: left, y: top, w: stripWidth, h, rgba: cutStripRgba, radius: 0 });
+        }
+        if (block.cutEnd === true) {
+            highlights.push({
+                x: Math.max(left, right - stripWidth),
+                y: top,
+                w: stripWidth,
+                h,
+                rgba: cutStripRgba,
+                radius: 0,
+            });
+        }
+        if (fallback) {
+            // Hollow/dashed look: thin inner bars on top and bottom instead of
+            // a solid fill. It is a display state only; dragging writes a real
+            // curve value and the fallback style disappears on the next frame.
+            for (const y of [top, Math.max(top, bottom - borderPx)]) {
+                items.push({
+                    x: left + borderPx,
+                    y,
+                    w: Math.max(0, fillWidth - borderPx * 2),
+                    h: borderPx,
+                    rgba: [...cutStripRgba] as Rgba,
+                    value: -3,
+                });
+            }
         }
         /*
          * 每个块都必须有左右边界，即使它与相邻音节时间相接。相接关系只影响

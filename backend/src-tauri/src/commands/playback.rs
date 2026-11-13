@@ -260,22 +260,60 @@ fn root_pitch_assembly_pending(
     )
 }
 
-pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {
+/// 起播点估计 = 引擎当前的绝对位置，**不接受**任何前端锚点。
+///
+/// 【为什么必须只有一个来源】播放位置曾经有两个候选：引擎的
+/// `base_frames + position_frames` 与前端 Redux 的 `playheadSec`。后者是
+/// 30Hz 轮询外推的镜像（含 IPC 往返时延），把它传回来等于把误差固化进每次
+/// 起播；两者一旦分叉，用户看到的就是"按播放后光标先跳一下"。
+///
+/// 【为什么只是估计】这个读数绕过命令序：worker 队列里未应用的 SeekSec /
+/// UpdateTimeline 对它不可见。真正的起播点由 `play_from_current` 在 worker
+/// 侧按命令序解析；本函数的值只进日志 / 响应 / playhead 投影。
+///
+/// 纯函数只为可测：非法值（NaN / 负）一律归零，避免把 NaN 写进帧计数。
+fn resolve_play_start_sec(engine_position_sec: f64) -> f64 {
+    if engine_position_sec.is_finite() {
+        engine_position_sec.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+pub(super) fn play_original(state: State<'_, AppState>) -> serde_json::Value {
     guard_json_command("play_original", || {
-        // 常规路径打点：Info 级（release 默认 Warn，warn 会把每次播放都写进日志轮转）。
-        log::info!("[play_original] called start_sec={start_sec}");
         // 在同一把锁的作用域内克隆时间线：分离读取时，并发 checkpoint
         // （先解锁后 bump 版本）会让旧 timeline 配上新版本号。
-        let timeline = match state.timeline.lock() {
+        //
+        // 【起播点为引擎事实，但这里读到的只是估计】worker 队列里未应用的
+        // SeekSec / UpdateTimeline 对 IPC 线程的原子读不可见，所以 start_sec
+        // 只用于日志 / 响应 / playhead 投影；真正的起播位置由下面的
+        // `play_from_current` 在 worker 应用完此前所有命令之后解析。
+        //
+        // 【文件预览的位置不在时间线域】预览会话的 base 是文件内偏移，
+        // 直接采信会把 offset+elapsed 当成时间线绝对位置；且 handle_stop
+        // 对预览停止已归零，只有"预览仍在播"这一种情形需要在这里挡住。
+        let engine_position_sec = {
+            let pb = state.audio_engine.snapshot_state();
+            if pb.target.as_deref() == Some("original") {
+                state.audio_engine.position_sec()
+            } else {
+                0.0
+            }
+        };
+        let start_sec = resolve_play_start_sec(engine_position_sec);
+        // 起播前对齐一次响点表：设备可能在停止期间换过采样率。
+        ensure_metronome_schedule_matches_output(&state);
+        // 常规路径打点：Info 级（release 默认 Warn，warn 会把每次播放都写进日志轮转）。
+        log::info!("[play_original] called start_sec={start_sec} (engine position)");
+        let mut timeline = match state.timeline.lock() {
             Ok(g) => g.clone(),
             Err(p) => p.into_inner().clone(),
         };
         let bpm = timeline.bpm;
-        let playhead_sec = timeline.playhead_sec;
         if !(bpm.is_finite() && bpm > 0.0) {
             return serde_json::json!({"ok": false, "error": "invalid bpm"});
         }
-        let start_sec = playhead_sec.max(0.0) + start_sec.max(0.0);
 
         // ── 渲染需求评估（与后台预渲染开关无关）─────────────────────────────
         // 开关只决定渲染的**触发时机**：启用 = 编辑即渲染（播放时通常已就绪）；
@@ -317,7 +355,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                 }
             }
             log::warn!("[play_original] already playing — idempotent no-op (no restart)");
-            return serde_json::json!({"ok": true, "playing": "original", "start_sec": start_sec});
+            return serde_json::json!({"ok": true, "playing": "original", "start_sec": start_sec, "noop": true});
         }
 
         // ── 立即武装传输层 ─────────────────────────────────────────────────────
@@ -336,9 +374,19 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
         crate::synth_clip_cache::set_pad_suppressed_clips(
             clips_needing_render.iter().map(|info| info.clip.id.clone()),
         );
-        state.audio_engine.seek_sec(start_sec);
+        // 播放头不是撤销内容；no-op 路径不得写回。
+        // 这里的写回只是**投影**（工程保存 / 快照读取看到的位置），不是起播决策
+        // —— 决策由 worker 在 play_from_current 里按命令序解析。
+        timeline.playhead_sec = start_sec;
+        {
+            let mut guard = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            guard.playhead_sec = start_sec;
+        }
+        // 顺序必须是 update → play_from_current：先构建新快照，再原子置位。
+        // 起播点由 worker 在应用完 update（与本条命令之前的所有 seek）之后
+        // 就地解析 —— IPC 线程的 start_sec 只回答"大约从哪里开始"。
         state.audio_engine.update_timeline(timeline);
-        state.audio_engine.set_playing(true, Some("original"));
+        state.audio_engine.play_from_current();
         serde_json::json!({"ok": true, "playing": "original", "start_sec": start_sec})
     })
 }
@@ -1062,6 +1110,27 @@ fn render_single_clip(
         };
         let mut planes = Vec::with_capacity(channels_mono.len());
         for (ch_idx, ch_mono) in channels_mono.iter().enumerate() {
+            let model_samples =
+                ((ch_mono.len() as f64) * 44_100.0 / out_rate.max(1) as f64).ceil() as usize;
+            let chunks = crate::hnsep_chunk::plan_chunks(model_samples);
+            let estimated_peak_bytes = chunks
+                .iter()
+                .map(|chunk| {
+                    crate::hnsep_resources::estimated_working_bytes(
+                        chunk.input_end - chunk.input_start,
+                        44_100,
+                    )
+                    .unwrap_or(u64::MAX)
+                })
+                .max()
+                .unwrap_or(0);
+            log::warn!(
+                "[hnsep] clip_len_sec={:.3} hnsep_chunks={} estimated_peak_bytes={} clip_id={} channel={ch_idx}",
+                clip.length_sec,
+                chunks.len(),
+                estimated_peak_bytes,
+                clip.id
+            );
             match crate::hnsep_onnx::infer_noise_mono(
                 &clip.id,
                 ch_mono,
@@ -1185,7 +1254,13 @@ pub(super) fn stop_audio(state: State<'_, AppState>) -> serde_json::Value {
     //    冻结点（最后一次轮询采样略滞后）；停在"播放起始位置"的旧字段不动，
     //    编辑回灌快照也不会把光标拉回。
     let pb = state.audio_engine.snapshot_state();
-    let audible_sec = if pb.is_playing || pb.position_sec > 1e-9 {
+    // 【判据里的 `target` 不能少】引擎现在**保留**停止点（停止不等于归零，
+    // 见 engine.rs 的 handle_stop），因此"position > 0"不再等价于"本次播放
+    // 有可听位置"：一次已经停过的传输会一直停在那个位置。再多按一次 Stop
+    // （或录音收尾的 stop）若照旧回写，就会把播放头改写成陈旧值。
+    // `target` 只在播放会话期间是 Some：用户 stop 之后它被清空，而音频回调
+    // 自动暂停（等待渲染）时它仍是 Some —— 两类"停"因此可以区分。
+    let audible_sec = if pb.is_playing || (pb.target.is_some() && pb.position_sec > 1e-9) {
         Some(pb.base_sec + pb.position_sec)
     } else {
         None
@@ -1201,6 +1276,9 @@ pub(super) fn stop_audio(state: State<'_, AppState>) -> serde_json::Value {
 }
 
 pub(super) fn get_playback_state(state: State<'_, AppState>) -> PlaybackStatePayload {
+    // 设备切换可能改变输出采样率：响点表按旧 sr 展平时每个响点都会偏。
+    // 轮询是最便宜的对齐点（一次原子比较；失配才重建）。
+    ensure_metronome_schedule_matches_output(&state);
     let pb = state.audio_engine.snapshot_state();
     PlaybackStatePayload {
         ok: true,
@@ -1260,6 +1338,27 @@ pub(super) fn sync_metronome_config(state: &State<'_, AppState>) {
 ///
 /// 调用时机：播放启动（保证与实际出声内容一致）、Tempo Map / 网格 /
 /// 拍号 / Swing / 节拍器设置变化。响点表构建为毫秒级，无需后台线程。
+/// 最近一次构建节拍器响点表时所用的**输出采样率**。
+///
+/// 【为什么需要它】响点表是输出采样率域的（`MetronomeClick.frame`）。设备切换
+/// 可能把 44.1k 换成 48k，此时旧表的每个响点都落在错误的位置上（偏快约 8.8%）。
+/// 记录"表是按哪个 sr 算的"，就能在轮询里用一次原子比较发现失配并重建。
+static METRONOME_SCHEDULE_SR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// 采样率变化后自愈：响点表与当前输出采样率不一致就重建一次。
+///
+/// 调用点是 `get_playback_state`（30Hz 轮询）与 `play_original`：前者保证
+/// "设备切完最多一个轮询周期就对齐"，后者保证"按下播放那一刻一定是对的"。
+/// 正常情况下只有一次比较（原子 load + 整数比较），失配才会真正重建。
+pub(super) fn ensure_metronome_schedule_matches_output(state: &State<'_, AppState>) {
+    let current = state.audio_engine.sample_rate_hz();
+    let built = METRONOME_SCHEDULE_SR.load(std::sync::atomic::Ordering::Relaxed);
+    if built == current {
+        return;
+    }
+    refresh_metronome_schedule(state);
+}
+
 pub(super) fn refresh_metronome_schedule(state: &State<'_, AppState>) {
     let (bpm, tempo_map, project_sec) = {
         let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
@@ -1305,6 +1404,11 @@ pub(super) fn refresh_metronome_schedule(state: &State<'_, AppState>) {
     state
         .audio_engine
         .set_metronome_schedule(std::sync::Arc::new(clicks));
+    // 记下这次构建所用的输出采样率（见 ensure_metronome_schedule_matches_output）。
+    METRONOME_SCHEDULE_SR.store(
+        state.audio_engine.sample_rate_hz(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 /// 设置节拍器（前端节拍器按钮 / 设置菜单 / 音量滑杆滚轮细调）。
@@ -2554,9 +2658,23 @@ pub(super) fn cancel_background_render(app: Option<&tauri::AppHandle>) -> serde_
 mod tests {
     use super::{
         bg_render_restart_request_is_stale, clip_work_is_complete, render_priority_key,
-        render_request_debounce_remaining_ms, should_follow_up_render, BG_RENDER_DEBOUNCE_MS,
-        BG_RENDER_RESTART_QUIET_WINDOW_MS,
+        render_request_debounce_remaining_ms, resolve_play_start_sec, should_follow_up_render,
+        BG_RENDER_DEBOUNCE_MS, BG_RENDER_RESTART_QUIET_WINDOW_MS,
     };
+
+    /// 起播点就是引擎位置，且必须被钳成合法秒数。
+    ///
+    /// 【为什么这条是回归锚点】第一轮把前端 Redux 镜像当作起播点传进来，
+    /// 于是"引擎在 50s、镜像还在 3s"时播放会从 3s 开始。现在起播点只有一个
+    /// 来源（引擎），这里只需保证不把 NaN/负数写进帧计数。
+    #[test]
+    fn the_play_start_point_comes_from_the_engine_and_is_sanitised() {
+        assert_eq!(resolve_play_start_sec(12.5), 12.5);
+        assert_eq!(resolve_play_start_sec(0.0), 0.0);
+        assert_eq!(resolve_play_start_sec(-4.0), 0.0);
+        assert_eq!(resolve_play_start_sec(f64::NAN), 0.0);
+        assert_eq!(resolve_play_start_sec(f64::INFINITY), 0.0);
+    }
 
     /// 过滤决策核心：只有"键已登记 **且** 条目在缓存中"才被剔除。
     ///

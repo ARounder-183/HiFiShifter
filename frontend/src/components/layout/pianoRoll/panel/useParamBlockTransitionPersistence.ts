@@ -63,6 +63,8 @@ export function useParamBlockTransitionPersistence(args: {
     }) => void;
     /** 提交成功后把回包里的新曲线代次写到事务上（预览释放的唯一证据）。 */
     readonly stampCurveCommitted: (curveRevision: number | undefined) => void;
+    /** 本地结构提交后立即推进视觉事务的 structureToken。 */
+    readonly onLocalStructureCommitted?: (edits: ParamBlockState["editSet"]) => void;
 }): {
     persistBlockTransition: (
         left: ParamBlock,
@@ -91,6 +93,7 @@ export function useParamBlockTransitionPersistence(args: {
         invalidate,
         stampCurveCommit,
         stampCurveCommitted,
+        onLocalStructureCommitted,
     } = args;
 
     /**
@@ -138,6 +141,7 @@ export function useParamBlockTransitionPersistence(args: {
                      * 单一写入者：只通过 hook 的 setState 更新。
                      */
                     setParamBlockState(edit.state);
+                    onLocalStructureCommitted?.(edit.state.editSet);
                     if (!withCurve) {
                         return { state: edit.state, checkpoint: true, patches: [] };
                     }
@@ -210,6 +214,7 @@ export function useParamBlockTransitionPersistence(args: {
             rootTrackId,
             setParamBlockState,
             stampCurveCommit,
+            onLocalStructureCommitted,
         ],
     );
 

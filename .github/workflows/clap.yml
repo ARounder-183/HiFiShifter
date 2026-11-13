@@ -28,6 +28,18 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+      # 【为什么 Unix 也要装 GTK/WebKit】CLAP 外壳复用 hifishifter-plugin，而后者
+      # 在 Linux 上的内嵌编辑器走 wry/gtk3：glib-sys 的 build.rs 用 pkg-config 找
+      # glib-2.0.pc，缺了它编译在 build script 阶段就以
+      # "Package glib-2.0 was not found" 失败。清单与 vst3-unix.yml 保持一致，
+      # 免得两条插件流水线各自漂移。
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config libxcb1-dev libssl-dev python3 file \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -98,6 +110,15 @@ jobs:
           ZIP=$(ls frontend-dist | grep -E "\.zip$" || true)
           if [ -z "$ZIP" ]; then echo "No zip artifact found in frontend-dist"; ls -la frontend-dist; exit 1; fi
           unzip frontend-dist/$ZIP -d frontend
+      # Windows 侧必须与 Unix 侧一样把 artifact 解到 frontend/dist：
+      # build.ps1 直接读 frontend/dist，缺了这一步会在拷贝资源时失败。
+      - name: Extract frontend dist (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem -Path frontend-dist -Filter *.zip | Select-Object -First 1
+          if (-not $zip) { Write-Host "No zip artifact found in frontend-dist"; Get-ChildItem frontend-dist; exit 1 }
+          Expand-Archive -Path $zip.FullName -DestinationPath frontend -Force
       - name: Build CLAP (Unix)
         if: runner.os != 'Windows'
         run: bash scripts/clap/unix/build.sh --reuse-frontend

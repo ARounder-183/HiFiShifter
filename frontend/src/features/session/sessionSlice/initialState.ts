@@ -65,8 +65,10 @@ export const initialState: SessionState = {
     paramEditorTimelineClickSelectTrackEnabled: true,
     showClipboardPreview: true,
     showParamValuePopup: true,
+    showClipPitchOverlay: true,
     // 空映射 = 全部参数按倍率显示（历史行为）。
     paramAxisUnits: {},
+    paramAxisDirections: {},
     selectDragDirection: "y-only" as DragDirection,
     drawDragDirection: "free" as DrawDragDirection,
     lineVibratoDragDirection: "free" as DrawDragDirection,
@@ -191,6 +193,7 @@ export const initialState: SessionState = {
     builtinVibratoPresetOrder: [],
     project: {
         name: "Untitled",
+        lastSaveFormat: "hshp",
         path: null,
         dirty: false,
         recent: [],

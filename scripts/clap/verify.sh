@@ -85,7 +85,12 @@ fi
 printf "\n3) 动态依赖\n"
 ESCAPED=()
 if [ "$HOST_OS" = "linux" ]; then
-    LINKAGE="$(ldd "$MODULE" 2>&1 || true)"
+    # 【为什么要清掉 LD_LIBRARY_PATH】本检查回答的是"用户机上能否解析"：用户没有
+    # 构建树的搜索路径，依赖只能靠模块自带的 $ORIGIN rpath 与同目录的随包副本。
+    # CI 任务级的 LD_LIBRARY_PATH（linuxdeploy / 打包步需要它，指向
+    # backend/target/dist）优先级高于 DT_RUNPATH，会把 libwebgpu_dawn.so 劫持到
+    # 构建树 —— 判据因此被编译环境污染，模块旁边明明有也会被误报成"包外部"。
+    LINKAGE="$(env -u LD_LIBRARY_PATH ldd "$MODULE" 2>&1 || true)"
     if printf "%s" "$LINKAGE" | grep -q "not found"; then
         bad "有依赖解析不到："
         printf "%s\n" "$LINKAGE" | grep "not found" | sed "s/^/    /"
@@ -156,7 +161,8 @@ trap 'rm -rf "$PROBE_DIR"' EXIT
 EXTRA_LIBS=""
 [ "$HOST_OS" = "linux" ] && EXTRA_LIBS="-ldl"
 if cc -O1 -Wall -o "$PROBE_DIR/probe" "$SCRIPT_DIR/probe.c" $EXTRA_LIBS 2>"$PROBE_DIR/cc.log"; then
-    if "$PROBE_DIR/probe" "$MODULE" >"$PROBE_DIR/out.log" 2>&1; then
+    # 与上面同理：黑盒加载是打包形态的事实核查，不带编译树的搜索路径。
+    if env -u LD_LIBRARY_PATH "$PROBE_DIR/probe" "$MODULE" >"$PROBE_DIR/out.log" 2>&1; then
         ok "模块可加载，工厂与实例可用"
         sed "s/^/    /" "$PROBE_DIR/out.log"
         grep -q "plugin_id=com.hifishifter.clap" "$PROBE_DIR/out.log" || bad "描述符 id 不是 com.hifishifter.clap"

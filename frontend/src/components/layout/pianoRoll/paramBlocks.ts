@@ -75,6 +75,19 @@ export interface ParamBlock {
     readonly averageValue: number | null;
     /** 音高块显式保存的 MIDI 中心；其他参数必须从各自曲线派生位置。 */
     readonly manualValue?: number | null;
+    /** Read-only source note (single-member block); never persisted in edits. */
+    readonly sourceNote?: number | null;
+    /** Visible interval starts/ends inside its source span. */
+    readonly cutStart?: boolean;
+    readonly cutEnd?: boolean;
+    /** `clipId|takeId|cycle` identity for transition/contiguous pairing. */
+    readonly sourceKey?: string;
+    /** Stable full-source note-event identity; view-only. */
+    readonly sourceEventId?: string;
+    /** Explicit display-only fallback value (never written to the curve). */
+    readonly fallbackValue?: number | null;
+    /** Whether the displayed center came from a fallback. */
+    readonly centerPolicy?: "live" | "locked" | "fallback";
     /**
      * 块间圆滑宽度（秒）：向两侧各 blend 这么多秒，跨越相邻块边界做线性过渡。
      * 只对同一 Clip/Take 内**首尾相接**的块生效；缺省 0 = 硬切换。
@@ -738,6 +751,12 @@ function paramBlockFromProjected(
         endSec: toSecLocal(block.endFrameExclusive),
         averageValue: null,
         manualValue: block.value ?? null,
+        ...(block.sourceNote === undefined ? {} : { sourceNote: block.sourceNote }),
+        cutStart: block.cutStart === true,
+        cutEnd: block.cutEnd === true,
+        ...(block.sourceKey === undefined ? {} : { sourceKey: block.sourceKey }),
+        ...(block.sourceEventId === undefined ? {} : { sourceEventId: block.sourceEventId }),
+
         transitionSec:
             block.transitionFrames === undefined
                 ? undefined
@@ -767,6 +786,29 @@ export function materializeParamBlocks(args: {
     );
 }
 
+/** Stable identity for value caches across geometry changes (trim/slip). */
+export function logicalBlockKey(block: {
+    readonly id: string;
+    readonly userBlockId?: string;
+    readonly members: readonly {
+        readonly clipId?: string;
+        readonly takeId?: string;
+        readonly syllableId?: string;
+        readonly cycle?: number;
+    }[];
+}): string {
+    const first = block.members[0];
+    if (first?.clipId !== undefined) {
+        return [
+            "take",
+            first.clipId,
+            first.takeId ?? "",
+            first.syllableId ?? "",
+            String(first.cycle ?? 0),
+        ].join("|");
+    }
+    return ["user", block.userBlockId ?? block.id].join("|");
+}
 export function sortParamBlocksByTime<
     T extends { readonly startSec: number; readonly endSec: number },
 >(blocks: readonly T[]): T[] {
@@ -786,6 +828,7 @@ export function paramBlockTransitionHandles<
         readonly startSec: number;
         readonly endSec: number;
         readonly transitionSec?: number;
+        readonly sourceKey?: string;
     },
 >(
     blocks: readonly T[],
@@ -804,6 +847,9 @@ export function paramBlockTransitionHandles<
         const left = sorted[index];
         const right = sorted[index + 1];
         if (!blocksAreAdjacent(left, right)) continue;
+        // Only known, equal source identities connect. Unknown previews stay
+        // separate instead of accidentally joining two crossing Clips.
+        if (left.sourceKey === undefined || left.sourceKey !== right.sourceKey) continue;
         out.push({
             leftId: left.id,
             rightId: right.id,
@@ -1967,9 +2013,13 @@ export function averageParamValueInSpan(args: {
             0,
             Math.min(args.values.length - 1, Math.round((startFrame - args.startFrame) / stride)),
         );
-        const value = Number(args.values[index]);
-        if (!Number.isFinite(value) || (args.isPitch && value <= 0)) return null;
-        samples.push(value);
+        const sampleFrame = args.startFrame + index * stride;
+        // Never borrow a sample outside the block; a missing value belongs to
+        // the display-only fallback chain, not to this sampled center.
+        if (sampleFrame >= startFrame && sampleFrame < endFrame) {
+            const value = Number(args.values[index]);
+            if (Number.isFinite(value) && !(args.isPitch && value <= 0)) samples.push(value);
+        }
     }
     return modeCenterOfValues(samples, {
         param: args.param,
@@ -2091,6 +2141,22 @@ export function modeCenterOfValuesInSamples(
         if (samples.isPitch && value <= 0) continue;
         values.push(value);
     }
+    if (values.length === 0 && endFrame - startFrame <= stride) {
+        // Only a one-frame / sub-stride block borrows a nearest sample. A wide
+        // block with no samples in the fetched window must keep its own value.
+        const index = Math.max(
+            0,
+            Math.min(
+                samples.values.length - 1,
+                Math.round((startFrame - samples.startFrame) / stride),
+            ),
+        );
+        const value = Number(samples.values[index]);
+        const sampleFrame = samples.startFrame + index * stride;
+        if (sampleFrame >= startFrame && sampleFrame < endFrame) {
+            if (Number.isFinite(value) && !(samples.isPitch && value <= 0)) values.push(value);
+        }
+    }
     return modeCenterOfValues(values, {
         param: samples.param,
         isPitch: samples.isPitch,
@@ -2148,17 +2214,9 @@ export function projectParamBlockCenterY(args: {
 }
 
 /** 块的短标签：音高用音名，其余参数显示一位小数。 */
-export function formatParamBlockLabel(
-    value: number | null,
-    ordinal: number,
-    param: string,
-): string {
-    if (value === null || !Number.isFinite(value)) return `#${ordinal}`;
-    if (param === "pitch") {
-        const rounded = Math.round(value);
-        return `#${ordinal} ${midiLabel(rounded)}`;
-    }
-    return `#${ordinal} ${value.toFixed(1)}`;
+export function formatParamBlockLabel(value: number | null, param: string): string {
+    if (value === null || !Number.isFinite(value)) return "";
+    return param === "pitch" ? midiLabel(Math.round(value)) : value.toFixed(1);
 }
 
 /** 纯函数音名（避免 paramBlocks 在 node 单测里引入渲染模块）。 */

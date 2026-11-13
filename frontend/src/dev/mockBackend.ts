@@ -201,6 +201,21 @@ const mockParamWrites = new Map<string, Map<number, number>>();
 
 /** mock 的 v7 音节块分析：按固定 0.55s 切片，仅浏览器实验用。 */
 const mockSyllableSpans = new Map<string, Array<{ startSec: number; endSec: number }>>();
+/**
+ * Mock analyses cover the whole source; avoids an infinite reanalysis loop.
+ *
+ * 窗口从 spans 派生：此前这里调用 `buildMockTimeline()` 反查 clip，而 timeline
+ * 又嵌入 `syllable_analysis_window_sec: mockSyllableWindow(...)`——一旦 spans
+ * 存在就互为调用，`RangeError: Maximum call stack size exceeded`。
+ * 未分析时返回 `[0, 0]`，与真实后端"未分析窗口为零"的口径一致。
+ */
+const mockSyllableWindow = (clipId: string): [number, number] => {
+    const spans = mockSyllableSpans.get(clipId);
+    if (!spans || spans.length === 0) {
+        return [0, 0];
+    }
+    return [0, spans[spans.length - 1].endSec];
+};
 
 /** mock 的参数块派生视图（root track → view）。 */
 const mockParamBlockViews = new Map<
@@ -429,6 +444,14 @@ function buildMockTimeline(): Record<string, unknown> {
                                                     ],
                                             )
                                       : undefined,
+                                  syllable_notes: mockSyllableSpans
+                                      .get(`${trackId}-clip-1`)
+                                      ?.map(() => null),
+                                  syllable_analysis_window_sec: mockSyllableSpans.has(
+                                      `${trackId}-clip-1`,
+                                  )
+                                      ? mockSyllableWindow(`${trackId}-clip-1`)
+                                      : undefined,
                               },
                               {
                                   id: `${trackId}-take-2`,
@@ -461,6 +484,14 @@ function buildMockTimeline(): Record<string, unknown> {
                                                         number,
                                                     ],
                                             )
+                                      : undefined,
+                                  syllable_notes: mockSyllableSpans
+                                      .get(`${trackId}-clip-${index + 1}`)
+                                      ?.map(() => null),
+                                  syllable_analysis_window_sec: mockSyllableSpans.has(
+                                      `${trackId}-clip-${index + 1}`,
+                                  )
+                                      ? mockSyllableWindow(`${trackId}-clip-${index + 1}`)
                                       : undefined,
                               },
                           ],
@@ -516,6 +547,11 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
                 clipId,
                 takeId: `${clipId}_take_1`,
                 sourceSpansSec: spans,
+                sourceNotes: spans.map(() => null),
+                sourceEventIds: spans.map(
+                    (span) => `${span.startSec.toFixed(9)}:${span.endSec.toFixed(9)}`,
+                ),
+                analyzedWindowSec: mockSyllableWindow(clipId),
                 algorithm: "level_vad+pitch_stability+spectral_onset",
                 algorithmVersion: 1,
                 analyzed: spans.length > 0,
@@ -544,6 +580,11 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
                 clipId,
                 takeId: `${clipId}_take_1`,
                 sourceSpansSec: spans,
+                sourceNotes: spans.map(() => null),
+                sourceEventIds: spans.map(
+                    (span) => `${span.startSec.toFixed(9)}:${span.endSec.toFixed(9)}`,
+                ),
+                analyzedWindowSec: mockSyllableWindow(clipId),
                 algorithm: "level_vad+pitch_stability+spectral_onset",
                 algorithmVersion: 1,
                 analyzed: spans.length > 0,

@@ -59,7 +59,7 @@ export function compareClipLayerOrder(a: LayerClip, b: LayerClip): number {
  * @param b 参与比较的 clip
  * @returns 负数表示 a 在前，正数表示 b 在前，0 表示两者等价
  */
-function compareClipRenderOrder(a: ClipInfo, b: ClipInfo): number {
+export function compareClipRenderOrder(a: LayerClip, b: LayerClip): number {
     const d = (a.startSec ?? 0) - (b.startSec ?? 0);
     if (Math.abs(d) > 1e-9) return d;
     const idA = String(a.id);

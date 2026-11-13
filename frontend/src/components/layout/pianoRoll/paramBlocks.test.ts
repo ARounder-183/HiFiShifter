@@ -437,7 +437,7 @@ describe("block value sampling on a strided param view", () => {
         expect(average).toBe(25);
     });
 
-    it("falls back to the nearest sample when the block is shorter than the stride", () => {
+    it("never borrows a sample outside a short block", () => {
         const average = averageParamValueInSpan({
             startSec: 0.006,
             endSec: 0.008,
@@ -448,8 +448,20 @@ describe("block value sampling on a strided param view", () => {
             isPitch: false,
             param: "volume",
         });
-        // No sample falls strictly inside frames 1..1; use the nearest grid
-        // sample (frame 2 -> value 20) instead of leaving the block height-less.
+        expect(average).toBeNull();
+    });
+
+    it("uses an in-block nearest sample when the block is shorter than the stride", () => {
+        const average = averageParamValueInSpan({
+            startSec: 0.01,
+            endSec: 0.012,
+            values: view.values,
+            startFrame: view.startFrame,
+            stride: view.stride,
+            framePeriodMs: view.framePeriodMs,
+            isPitch: false,
+            param: "volume",
+        });
         expect(average).toBe(20);
     });
 

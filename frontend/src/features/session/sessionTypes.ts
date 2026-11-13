@@ -210,7 +210,7 @@ export interface TrackMeterInfo {
 }
 
 export interface SilenceDetectSettings {
-    method: "rms" | "peak";
+    method: "rms" | "peak" | "note_blocks";
     thresholdDb: number;
     adaptive: boolean;
     minSilenceMs: number;
@@ -258,11 +258,30 @@ export interface ClipTakeInfo {
     midiNoteData?: MidiNoteEvent[];
     midiFillGaps?: boolean;
     /** 源域音节区间；显示时再按裁切 / 速率 / 倒放 / Loop 投影。 */
-    syllableSpansSec?: Array<{ startSec: number; endSec: number }>;
-    /** GAME 分段基线（源域快照）；音节分析为空时作为基块来源。 */
+    syllableSpansSec?: Array<{
+        startSec: number;
+        endSec: number;
+        note?: number | null;
+        eventId?: string;
+    }>;
+    /** 与音节区间平行的代表 MIDI 音符。 */
+    syllableNotes?: Array<number | null>;
+    /** 全源事件身份；不随 Clip 裁切变化。 */
+    syllableEventIds?: string[];
+    /** 分析实际覆盖的源窗口。 */
+    syllableAnalysisWindowSec?: [number, number];
+    /** GAME 全源分段基线；音节分析为空时作为基块来源。 */
     gameBlockBaseline?: {
         revision?: number;
-        sourceSpansSec?: Array<{ startSec: number; endSec: number }>;
+        algorithm?: string;
+        algorithmVersion?: number;
+        sourceSpansSec?: Array<{
+            startSec: number;
+            endSec: number;
+            note?: number | null;
+            eventId?: string;
+        }>;
+        analyzedWindowSec?: [number, number];
     };
     /**
      * 宿主的非线性拉伸标记（REAPER stretch markers）。非空 ⇒ 该 take 的源时间映射
@@ -356,11 +375,27 @@ export interface ClipInfo {
     midiNoteData?: MidiNoteEvent[];
     midiFillGaps?: boolean;
     /** 当前 Take 的源域音节区间（主投影字段的镜像）。 */
-    syllableSpansSec?: Array<{ startSec: number; endSec: number }>;
-    /** 当前 Take 的 GAME 分段基线（主投影字段的镜像）。 */
+    syllableSpansSec?: Array<{
+        startSec: number;
+        endSec: number;
+        note?: number | null;
+        eventId?: string;
+    }>;
+    syllableNotes?: Array<number | null>;
+    syllableEventIds?: string[];
+    syllableAnalysisWindowSec?: [number, number];
+    /** 当前 Take 的 GAME 全源分段基线（主投影字段的镜像）。 */
     gameBlockBaseline?: {
         revision?: number;
-        sourceSpansSec?: Array<{ startSec: number; endSec: number }>;
+        algorithm?: string;
+        algorithmVersion?: number;
+        sourceSpansSec?: Array<{
+            startSec: number;
+            endSec: number;
+            note?: number | null;
+            eventId?: string;
+        }>;
+        analyzedWindowSec?: [number, number];
     };
 }
 

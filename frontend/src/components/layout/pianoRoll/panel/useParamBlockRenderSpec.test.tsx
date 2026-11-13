@@ -123,4 +123,38 @@ describe("useParamBlockRenderSpec", () => {
         await render(inputs, 1);
         expect(seen.spec).not.toBe(first);
     });
+
+    it("★ a block without a sampled value still enters the spec with a fallback", async () => {
+        const inputs: Omit<ParamBlockRenderSpecInput, "structureTick"> = {
+            ...stableInputs(),
+            canonicalBlocks: [
+                {
+                    id: "cut",
+                    rootTrackId: "root",
+                    kind: "auto",
+                    startSec: 0,
+                    endSec: 1,
+                    averageValue: null,
+                    members: [{ clipId: "clip", startSec: 0, endSec: 1 }],
+                    sourceNote: 64,
+                    fallbackValue: 64,
+                    centerPolicy: "fallback",
+                    cutStart: true,
+                    sourceKey: "clip|take|0",
+                },
+            ],
+        };
+        const host = document.createElement("div");
+        document.body.append(host);
+        root = createRoot(host);
+        await render(inputs, 0);
+        expect(seen.spec?.blocks).toHaveLength(1);
+        expect(seen.spec?.blocks[0]).toMatchObject({
+            id: "cut",
+            centerPolicy: "fallback",
+            fallbackValue: 64,
+            cutStart: true,
+            sourceKey: "clip|take|0",
+        });
+    });
 });

@@ -270,6 +270,8 @@ describe("param block visual frame", () => {
                 previousValues: new Map([["note", { value: 0.75, startSec: 0, endSec: 0.02 }]]),
             })[0].averageValue,
         ).toBe(0.75);
+        // A trimmed/slipped block keeps its logical identity: reusing the last
+        // value is required so a left-cut block never disappears on refresh.
         expect(
             resolveParamBlockPanelValues({
                 blocks: [block],
@@ -278,7 +280,7 @@ describe("param block visual frame", () => {
                 fallbackValue: 1,
                 previousValues: new Map([["note", { value: 0.75, startSec: 0.1, endSec: 0.12 }]]),
             })[0].averageValue,
-        ).toBeNull();
+        ).toBe(0.75);
     });
 });
 
@@ -332,4 +334,95 @@ it("locked centerPolicy never falls back to curve sampling", () => {
             },
         }),
     ).toBe(61);
+});
+
+describe("unvalued block fallback chain", () => {
+    const unvalued: ParamBlock = {
+        id: "cut",
+        rootTrackId: "track",
+        kind: "auto",
+        startSec: 0,
+        endSec: 0.02,
+        members: [{ clipId: "clip", startSec: 0, endSec: 0.02 }],
+        averageValue: null,
+        sourceNote: 64,
+        sourceKey: "clip|take|0",
+        cutStart: true,
+    };
+
+    it("uses the source note for pitch and never returns null", () => {
+        const [block] = resolveParamBlockPanelValues({
+            blocks: [unvalued],
+            param: "pitch",
+            paramView: null,
+            fallbackValue: 0,
+        });
+        expect(block.averageValue).toBe(64);
+        expect(block.centerPolicy).toBe("fallback");
+        expect(
+            resolveParamBlockFrameValue({
+                block: { ...block, members: [{}], sourceNote: 64 },
+                samples: null,
+                param: "pitch",
+            }),
+        ).toBe(64);
+    });
+
+    it("uses the nearest sample only for one-frame blocks", () => {
+        const samples = {
+            values: [64, 64],
+            startFrame: 10,
+            stride: 1,
+            framePeriodMs: 5,
+            isPitch: true,
+            param: "pitch",
+        };
+        expect(
+            resolveParamBlockFrameValue({
+                block: { startSec: 0.051, endSec: 0.055, averageValue: 58 },
+                samples,
+                param: "pitch",
+            }),
+        ).toBe(64);
+        expect(
+            resolveParamBlockFrameValue({
+                block: { startSec: 0.04, endSec: 0.045 },
+                samples: { ...samples, startFrame: 10, values: [64, 64] },
+                param: "pitch",
+                currentParamDefaultValue: 60,
+            }),
+        ).toBe(60);
+    });
+
+    it("uses a same-source neighbor before the default value", () => {
+        const neighbor: ParamBlock = {
+            ...unvalued,
+            id: "neighbor",
+            startSec: 0.5,
+            endSec: 0.6,
+            averageValue: 61,
+            sourceNote: null,
+        };
+        const [block] = resolveParamBlockPanelValues({
+            blocks: [{ ...unvalued, sourceNote: null }, neighbor],
+            param: "volume",
+            paramView: null,
+            fallbackValue: 0,
+            currentParamDefaultValue: 1,
+        });
+        expect(block.averageValue).toBe(61);
+        expect(block.centerPolicy).toBe("fallback");
+    });
+
+    it("falls back to the parameter default when nothing else is available", () => {
+        const [block] = resolveParamBlockPanelValues({
+            blocks: [{ ...unvalued, sourceNote: null }],
+            param: "tension",
+            paramView: null,
+            fallbackValue: 0,
+            currentParamDefaultValue: 20,
+        });
+        expect(block.averageValue).toBe(20);
+        expect(block.centerPolicy).toBe("fallback");
+    });
 });

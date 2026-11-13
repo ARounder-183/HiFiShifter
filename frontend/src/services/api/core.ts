@@ -285,8 +285,17 @@ export const coreApi = {
             error?: string;
         }>("quick_export_selected_clips", request),
 
-    playOriginal: (startSec = 0) =>
-        invoke<{ ok: boolean; playing?: string; start_sec?: number }>("play_original", startSec),
+    /**
+     * 从**引擎当前播放位置**开始播放（无参）。
+     *
+     * 【为什么不再接收起播点】起播点只有一个权威：引擎的绝对位置。前端把
+     * Redux 镜像传回来会把轮询外推误差固化进每次播放 —— 那正是"按播放后光标
+     * 先跳一下"的来源。定位请走 `setTransport({ playheadSec })`。
+     */
+    playOriginal: () =>
+        invoke<{ ok: boolean; playing?: string; start_sec?: number; noop?: boolean }>(
+            "play_original",
+        ),
 
     /** 引擎确在播放时返回精确停止位置（stopped_at_sec），否则为 null。 */
     stopAudio: () => invoke<{ ok: boolean; stopped_at_sec?: number | null }>("stop_audio"),

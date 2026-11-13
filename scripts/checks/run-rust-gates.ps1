@@ -121,9 +121,19 @@ function Get-CargoCommand([string]$kind, [int]$Threads = 0) {
             }
 
             if ($pluginRun -and $threads -le 1) {
-                # 先跑"除插件以外的一切"（含内核），再按模块把插件拆开。
+                # 【为什么 CLAP 不进 --workspace】Cargo 的 feature 按构建图取并集：
+                # src-tauri 用 kernel 默认 features（含 vslib），与 CLAP 同跑一次
+                # --workspace 时 kernel 会带上 vslib 编译，#[link(name="vslib_x64")]
+                # 于是渗进 hifishifter_clap.dll 的导入表 —— clap_exports 那条
+                # "单文件插件不许导入非系统 DLL" 的用例就会红，而 CLAP 自己的
+                # Cargo.toml 明明写了 default-features = false。单独 -p 解析时
+                # 依赖图里没有 src-tauri，产物才是发布形态。判据不变，只把检查
+                # 对象换成与产物同形的那一份。
+                $clapExclude = ' --exclude hifishifter-clap'
+                # 先跑"除插件与 CLAP 以外的一切"（含内核），再按模块把插件拆开。
                 if (!$Package) {
-                    Write-Output "$prefix cargo test --locked --manifest-path $manifest --workspace --exclude hifishifter-plugin -- --test-threads=1$skips"
+                    Write-Output "$prefix cargo test --locked --manifest-path $manifest --workspace --exclude hifishifter-plugin$clapExclude -- --test-threads=1$skips"
+                    Write-Output "$prefix cargo test --locked --manifest-path $manifest -p hifishifter-clap -- --test-threads=1$skips"
                 }
                 # 【为什么先 --no-run 一次】按模块拆进程时，每条 cargo test 都会重新
                 # 评估 build script；macOS arm64 上实测第二个 chunk 会卡在 cmake 上十分钟。
@@ -139,8 +149,17 @@ function Get-CargoCommand([string]$kind, [int]$Threads = 0) {
             else {
                 $target = if ($Package) { "-p $Package" } else { '--workspace' }
                 $exclude = ''
-                if (!$Package -and $threads -gt 1) { $exclude = ' --exclude hifishifter-plugin' }
-                Write-Output "$prefix cargo test --locked --manifest-path $manifest $target$exclude -- --test-threads=$threads$skips"
+                # 并发档专属跳过：App 的 measure_peak_alloc 计数器是**进程级**的，
+                # 别的测试在同一进程里分配就会串进峰值。该用例自己的注释写明
+                # "必须串行"，串行档已经完整跑过，这里只跳过并发复跑；kernel 的
+                # pitch_memory 同类用例本来就 #[ignore]，无需再跳。
+                $concurrentSkips = ''
+                if (!$Package -and $threads -gt 1) {
+                    # 同上：并发复跑也不能把 src-tauri 的 vslib 并进 CLAP 的导入表。
+                    $exclude = ' --exclude hifishifter-plugin --exclude hifishifter-clap'
+                    $concurrentSkips = ' --skip mixing_a_faded_clip_on_the_audio_thread_does_not_allocate'
+                }
+                Write-Output "$prefix cargo test --locked --manifest-path $manifest $target$exclude -- --test-threads=$threads$skips$concurrentSkips"
             }
         }
     }

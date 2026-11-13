@@ -280,7 +280,13 @@ export function useParamBlockRenderSpec(
                                   ?.selected === true,
                           grouped: block.kind === "grouped",
                           transitionSec: block.transitionSec,
-                          centerPolicy: "live",
+                          sourceNote: block.sourceNote,
+                          fallbackValue: block.fallbackValue,
+                          cutStart: block.cutStart,
+                          cutEnd: block.cutEnd,
+                          sourceKey: block.sourceKey,
+                          sourceEventId: block.sourceEventId,
+                          centerPolicy: block.centerPolicy ?? "live",
                       }))
                     : plan.viewAfter.blocks.map((block) => {
                           const fp = plan.viewAfter.framePeriodMs;
@@ -315,6 +321,10 @@ export function useParamBlockRenderSpec(
                                       block.id !== resizing.blockId),
                               grouped: block.kind === "grouped",
                               transitionSec: existing?.transitionSec,
+                              cutStart: block.cutStart,
+                              cutEnd: block.cutEnd,
+                              sourceKey: block.sourceKey,
+                              sourceEventId: block.sourceEventId,
                               centerPolicy: resized ? "locked" : "live",
                           };
                       });
@@ -358,7 +368,12 @@ export function useParamBlockRenderSpec(
             selected: selectedIds.has(logicalBlockId(block)),
             grouped: block.kind === "grouped",
             transitionSec: block.transitionSec,
-            centerPolicy: "live",
+            sourceNote: block.sourceNote,
+            fallbackValue: block.fallbackValue,
+            cutStart: block.cutStart,
+            cutEnd: block.cutEnd,
+            sourceKey: block.sourceKey,
+            centerPolicy: block.centerPolicy ?? "live",
         }));
         return buildParamBlockRenderSpec({
             blocks,

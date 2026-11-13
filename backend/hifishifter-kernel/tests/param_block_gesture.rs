@@ -31,7 +31,7 @@ fn loop_clip() -> serde_json::Value {
         "loop_enabled":true,"loop_period_sec":2.27,
         "takes":[{"id":"take","source_path":"a.wav","source_start_sec":0.266,
             "source_end_sec":2.27,"loop_enabled":true,"duration_sec":2.27,
-            "syllable_analysis":{"algorithm":"test","algorithmVersion":1,"sourceDigest":"d",
+            "syllable_analysis":{"algorithm":"test","algorithmVersion":1,"sourceDigest":"d","analyzedWindowSec":[0.0,4.0],
                 "sourceSpansSec":[{"startSec":0.046,"endSec":0.252}]}}]
     }])
 }
@@ -79,7 +79,7 @@ fn reverse_resize_changes_the_correct_source_edge() {
         "id":"clip","track_id":"root","name":"clip","start_sec":0.0,"length_sec":2.0,
         "takes":[{"id":"take","source_path":"a.wav","source_start_sec":0.0,
             "source_end_sec":2.0,"reversed":true,
-            "syllable_analysis":{"algorithm":"test","algorithmVersion":1,"sourceDigest":"d",
+            "syllable_analysis":{"algorithm":"test","algorithmVersion":1,"sourceDigest":"d","analyzedWindowSec":[0.0,4.0],
                 "sourceSpansSec":[{"startSec":0.2,"endSec":0.6}]}}]
     }]));
     let base = compose_param_block_view(&timeline, "root", &empty(), 5.0).unwrap();
@@ -257,7 +257,7 @@ fn base_underlay_keeps_remainders_and_manual_delete_restores_base() {
     let timeline = timeline(serde_json::json!([{
         "id":"clip","track_id":"root","name":"clip","start_sec":0.0,"length_sec":2.0,
         "takes":[{"id":"take","source_path":"a.wav","source_start_sec":0.0,"source_end_sec":2.0,
-            "syllable_analysis":{"algorithm":"test","algorithmVersion":1,"sourceDigest":"d",
+            "syllable_analysis":{"algorithm":"test","algorithmVersion":1,"sourceDigest":"d","analyzedWindowSec":[0.0,4.0],
                 "sourceSpansSec":[{"startSec":0.0,"endSec":1.0}]}}]
     }]));
     let base = compose_param_block_view(&timeline, "root", &empty(), 5.0).unwrap();
@@ -336,7 +336,7 @@ fn restore_game_trims_only_the_requested_range() {
     let timeline = timeline(serde_json::json!([{
         "id":"clip","track_id":"root","name":"clip","start_sec":0.0,"length_sec":2.0,
         "takes":[{"id":"take","source_path":"a.wav","source_start_sec":0.0,"source_end_sec":2.0,
-            "game_block_baseline":{"revision":1,"algorithm":"game","algorithmVersion":1,
+            "game_block_baseline":{"revision":1,"algorithm":"game","algorithmVersion":1,"analyzedWindowSec":[0.0,4.0],
                 "sourceSpansSec":[{"startSec":0.0,"endSec":1.0}]}}]
     }]));
     let edits = ParamBlockEditSet {

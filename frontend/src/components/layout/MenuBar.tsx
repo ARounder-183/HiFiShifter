@@ -24,7 +24,6 @@ import {
     undoRemote,
     redoRemote,
     saveProjectRemote,
-    saveProjectAsRemote,
     setDefaultHifiganMelStretch,
     setDefaultStretchAlgorithm,
     setOrtEp,
@@ -37,6 +36,7 @@ import {
     toggleSyncEditsAcrossTakes,
     toggleClipboardPreview,
     toggleParamValuePopup,
+    toggleClipPitchOverlay,
     toggleTempoMapVisible,
     setProjectStretchSettingsRemote,
 } from "../../features/session/sessionSlice";
@@ -52,6 +52,8 @@ import {
     subscribePianoRollSelection,
 } from "../../utils/pianoRollSelectionBus";
 import { computeInsertBelowPlacement } from "../../features/session/trackUtils";
+import { saveProjectAsFormat } from "../../features/session/thunks/projectThunks";
+import { SAVE_PROJECT_AS_FORMATS } from "../../features/session/saveProjectAsMenu";
 
 import {
     importAudioAtPosition,
@@ -72,6 +74,7 @@ import {
     resolvePasteRoute,
 } from "../../features/keybindings/focusRouting";
 import { IS_WINDOWS } from "../../utils/platform";
+import { isPanParam } from "./pianoRoll/paramPan";
 import { getActiveSurface } from "../../features/uiFocus/focusSurface";
 import { webApi } from "../../services/webviewApi";
 const KeybindingsDialog = lazy(() =>
@@ -81,6 +84,7 @@ import {
     TransposeCentsDialog,
     TransposeDegreesDialog,
     SetPitchDialog,
+    PanSetValueDialog,
     AverageDialog,
     SmoothDialog,
     QuantizeDialog,
@@ -181,6 +185,7 @@ const selectMenuBarSession = (state: RootState) => {
         showAllTakes: session.showAllTakes,
         showClipboardPreview: session.showClipboardPreview,
         showParamValuePopup: session.showParamValuePopup,
+        showClipPitchOverlay: session.showClipPitchOverlay,
         syncEditsAcrossTakes: session.syncEditsAcrossTakes,
         tempoMap: session.tempoMap,
         tempoMapVisible: session.tempoMapVisible,
@@ -303,6 +308,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     } | null>(null);
 
     const isPitchParam = s.editParam === "pitch";
+    const isPanParamActive = isPanParam(s.editParam);
     const isChildCentsParam = isChildPitchOffsetCentsParam(s.editParam);
     const isChildDegreesParam = isChildPitchOffsetDegreesParam(s.editParam);
     const setToDefaultValue =
@@ -723,12 +729,45 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 {shortcutLabel("project.save")}
                             </div>
                         </DropdownMenu.Item>
-                        <DropdownMenu.Item onSelect={() => void dispatch(saveProjectAsRemote())}>
+                        {/* 「另存为」：按上次格式**直接**存（选路径 → 写文件），
+                            不再先弹一层应用内格式选择。 */}
+                        <DropdownMenu.Item
+                            onSelect={() => {
+                                void dispatch(
+                                    saveProjectAsFormat(s.project.lastSaveFormat ?? "hshp"),
+                                );
+                            }}
+                        >
                             {t("menu_save_project_as")}
                             <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                                 {shortcutLabel("project.saveAs")}
                             </div>
                         </DropdownMenu.Item>
+                        {/* 指定格式另存：格式在菜单项里一次选定，原生对话框只带该格式的
+                            单一过滤器（macOS 的 NSSavePanel 没有"文件类型"下拉框，
+                            把格式留在对话框里等于让用户猜扩展名）。每项都挂
+                            data-tooltip：格式说明（尤其"zip 需解压后打开"）不能丢。 */}
+                        <DropdownMenu.Sub>
+                            <DropdownMenu.SubTrigger>
+                                {tf("menu_save_project_as_submenu")}
+                            </DropdownMenu.SubTrigger>
+                            <DropdownMenu.SubContent>
+                                {SAVE_PROJECT_AS_FORMATS.map((entry) => (
+                                    <DropdownMenu.Item
+                                        key={entry.format}
+                                        data-tooltip={tf(entry.descKey)}
+                                        onSelect={() => {
+                                            void dispatch(saveProjectAsFormat(entry.format));
+                                        }}
+                                    >
+                                        {tf(entry.labelKey)}
+                                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                            {shortcutLabel(entry.actionId)}
+                                        </div>
+                                    </DropdownMenu.Item>
+                                ))}
+                            </DropdownMenu.SubContent>
+                        </DropdownMenu.Sub>
 
                         <DropdownMenu.Separator />
 
@@ -1043,6 +1082,14 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         }}
                     >
                         {withCheck(s.showParamValuePopup, t("param_value_popup"))}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                        onSelect={() => {
+                            dispatch(toggleClipPitchOverlay());
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        {withCheck(s.showClipPitchOverlay, t("menu_view_clip_pitch"))}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
 
@@ -1897,20 +1944,35 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     })
                 }
             />
-            <SetPitchDialog
-                open={setPitchOpen}
-                onOpenChange={setSetPitchOpen}
-                titleText={isPitchParam ? tf("menu_set_pitch") : tf("menu_set_value")}
-                valueLabelText={setToValueLabel}
-                defaultValue={setToDefaultValue}
-                defaultSmoothness={s.edgeSmoothnessPercent}
-                onConfirm={(value, edgeSmoothnessPercent) =>
-                    dispatchEditOp("setPitch", {
-                        value,
-                        edgeSmoothnessPercent,
-                    })
-                }
-            />
+            {isPanParamActive ? (
+                <PanSetValueDialog
+                    open={setPitchOpen}
+                    onOpenChange={setSetPitchOpen}
+                    defaultValue={setToDefaultValue}
+                    defaultSmoothness={s.edgeSmoothnessPercent}
+                    onConfirm={(value, edgeSmoothnessPercent) =>
+                        dispatchEditOp("setPitch", {
+                            value,
+                            edgeSmoothnessPercent,
+                        })
+                    }
+                />
+            ) : (
+                <SetPitchDialog
+                    open={setPitchOpen}
+                    onOpenChange={setSetPitchOpen}
+                    titleText={isPitchParam ? tf("menu_set_pitch") : tf("menu_set_value")}
+                    valueLabelText={setToValueLabel}
+                    defaultValue={setToDefaultValue}
+                    defaultSmoothness={s.edgeSmoothnessPercent}
+                    onConfirm={(value, edgeSmoothnessPercent) =>
+                        dispatchEditOp("setPitch", {
+                            value,
+                            edgeSmoothnessPercent,
+                        })
+                    }
+                />
+            )}
             <AverageDialog
                 open={averageOpen}
                 onOpenChange={setAverageOpen}

@@ -107,6 +107,8 @@ mod processor_caps;
 pub(crate) mod project;
 #[path = "commands/project_import.rs"]
 mod project_import;
+#[path = "commands/project_save_commands.rs"]
+pub(crate) mod project_save_commands;
 #[path = "commands/reaper.rs"]
 mod reaper;
 #[path = "commands/reaper_clipboard.rs"]
@@ -717,56 +719,6 @@ pub fn notebook_save_asset_as(
             serde_json::json!({ "ok": false, "error": "panic in command: notebook_save_asset_as" }),
             || notebook::save_asset_as(state, asset_id, suggested_name),
         )
-    }
-}
-
-/// 「另存为」：rfd 对话框（阻塞等待用户选择）+ 选定路径后的完整落盘，
-/// 后者可能包含数 GB 媒体的 zip 压缩 —— 与 `save_project` 同样必须在阻塞
-/// 线程池执行（见其注释）。
-#[tauri::command(rename_all = "camelCase")]
-pub async fn save_project_as(
-    app: tauri::AppHandle,
-    window: Window,
-    notes_markdown: Option<String>,
-) -> serde_json::Value {
-    match tauri::async_runtime::spawn_blocking(move || {
-        let state: State<'_, AppState> = app.state();
-        project::save_project_as(state, window, notes_markdown)
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => serde_json::json!({
-            "ok": false,
-            "error": format!("Failed to join save-as task: {error}"),
-        }),
-    }
-}
-
-/// 保存到指定路径（带版本冲突检测）；force=true 表示用户已在冲突对话框中
-/// 确认"继续保存"。
-///
-/// zip 归档保存会逐一压缩复制全部引用媒体（可能数 GB），普通保存也有整段
-/// JSON 序列化 + 磁盘写入，必须在阻塞线程池执行，避免冻结 UI 主线程。
-#[tauri::command(rename_all = "camelCase")]
-pub async fn save_project_to_path(
-    app: tauri::AppHandle,
-    window: Window,
-    project_path: String,
-    notes_markdown: Option<String>,
-    force: Option<bool>,
-) -> serde_json::Value {
-    match tauri::async_runtime::spawn_blocking(move || {
-        let state: State<'_, AppState> = app.state();
-        project::save_project_to_path(state, window, project_path, notes_markdown, force)
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => serde_json::json!({
-            "ok": false,
-            "error": format!("Failed to join save task: {error}"),
-        }),
     }
 }
 
@@ -2884,7 +2836,7 @@ pub fn set_metronome(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {
+pub fn play_original(state: State<'_, AppState>) -> serde_json::Value {
     {
         // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
         // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
@@ -2901,7 +2853,7 @@ pub fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::
                     .transport_lock
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                playback::play_original(state, start_sec)
+                playback::play_original(state)
             },
         )
     }

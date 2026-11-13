@@ -14,6 +14,7 @@ import { MAX_PX_PER_SEC, MIN_PX_PER_SEC, clamp } from "../../timeline";
 import { resolveHorizontalWheelZoom } from "../../timeline/runtime/timelineScrollRange";
 import { resolveTimelineMinPxPerSec } from "../../timeline/runtime/timelineZoomBounds";
 import { getParamEditorWheelAction, getVibratoDragWheelTarget } from "../wheelGesture";
+import { centerForPanDelta, centerForZoomAnchor } from "../paramAxisProjection";
 import type { Keybinding } from "../../../../features/keybindings/types";
 import type { ScrollbarZone } from "../wheelGesture";
 
@@ -33,6 +34,7 @@ type Deps = Pick<
     | "horizontalZoomKb"
     | "invalidate"
     | "onHorizontalZoom"
+    | "paramAxisDirectionsRef"
     | "paramViewsRef"
     | "pitchViewRef"
     | "playheadZoomEnabled"
@@ -74,6 +76,7 @@ export function handleScrollerWheel(
         horizontalZoomKb,
         invalidate,
         onHorizontalZoom,
+        paramAxisDirectionsRef,
         paramViewsRef,
         pitchViewRef,
         playheadZoomEnabled,
@@ -228,7 +231,12 @@ export function handleScrollerWheel(
             };
             const next = clampViewport(editParam, {
                 span: cur.span,
-                center: cur.center + delta * cur.span,
+                center: centerForPanDelta({
+                    param: editParam,
+                    directions: paramAxisDirectionsRef.current,
+                    center: cur.center,
+                    deltaCenter: delta * cur.span,
+                }),
             });
             setParamViewport(editParam, next);
         }
@@ -303,7 +311,13 @@ export function handleScrollerWheel(
             const nextSpan = cur.span * factor;
             const next = clampViewport(editParam, {
                 span: nextSpan,
-                center: valueAtPointer - (0.5 - t) * nextSpan,
+                center: centerForZoomAnchor({
+                    param: editParam,
+                    directions: paramAxisDirectionsRef.current,
+                    valueAtPointer,
+                    t,
+                    nextSpan,
+                }),
             });
             setParamViewport(editParam, next);
         }

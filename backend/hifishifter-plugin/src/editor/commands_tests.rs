@@ -198,7 +198,10 @@ fn timeline_payload_omits_redundant_waveforms_and_preserves_all_block_sources() 
                 source_spans_sec: vec![hifishifter_kernel::pitch_analysis::SyllableSpan {
                     start_sec: 0.0,
                     end_sec: 0.1,
+                    midi_note: None,
+                    event_id: None,
                 }],
+                analyzed_window_sec: [0.0, 0.0],
             });
         timeline.clips = (0..256)
             .map(|index| {

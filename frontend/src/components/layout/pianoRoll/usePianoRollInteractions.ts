@@ -112,7 +112,7 @@ import { createTimelineAxis, secToViewportPx } from "../renderKernel/timelineAxi
 import { handleCanvasPointerDown } from "./gestures/canvasPointerDown";
 import type { CanvasCursor } from "./gestures/pointerSupport";
 import { handleScrollerWheel } from "./gestures/scrollerWheel";
-import { handleCanvasPointerMove } from "./gestures/canvasPointerMove";
+import { handleCanvasHoverPreview, handleCanvasPointerMove } from "./gestures/canvasPointerMove";
 import { handleRulerPointerDown } from "./gestures/rulerPointerDown";
 import { handleScrollerKeyDown } from "./gestures/scrollerKeyDown";
 
@@ -124,6 +124,8 @@ export function usePianoRollInteractions(args: {
     toolMode: string;
     /** 参数块选择是否激活；由 panel 的 toolMode + selectToolMode 派生。 */
     paramBlockToolActive: boolean;
+    /** 块手势（拖动 / 新建 / 伸缩）是否正在进行；只用于保护读数所有权。 */
+    isParamBlockGestureActive: () => boolean;
     /**
      * 选择族的 **range** 子模式是否激活（`isRangeToolActive` 的派生结果）。
      *
@@ -179,6 +181,8 @@ export function usePianoRollInteractions(args: {
     setParamViewport: (param: string, next: ValueViewport) => void;
     pitchViewRef: MutableRefObject<ValueViewport>;
     paramViewsRef: MutableRefObject<Record<string, ValueViewport>>;
+    /** pan 纵轴方向（投影/缩放/中键平移共用）。 */
+    paramAxisDirectionsRef: MutableRefObject<Record<string, "left-bottom" | "left-top">>;
     scrollerRef: MutableRefObject<HTMLDivElement | null>;
     canvasRef: MutableRefObject<HTMLCanvasElement | null>;
     viewSizeRef: MutableRefObject<{ w: number; h: number }>;
@@ -459,6 +463,7 @@ export function usePianoRollInteractions(args: {
         pitchEnabled,
         toolMode,
         paramBlockToolActive,
+        isParamBlockGestureActive,
         rangeToolActive,
         framePeriodMs,
         scrollLeftRef,
@@ -473,6 +478,7 @@ export function usePianoRollInteractions(args: {
         setParamViewport,
         pitchViewRef,
         paramViewsRef,
+        paramAxisDirectionsRef,
         scrollerRef,
         canvasRef,
         viewSizeRef,
@@ -2072,6 +2078,7 @@ export function usePianoRollInteractions(args: {
                     invalidate,
                     onHorizontalZoom,
                     paramViewsRef,
+                    paramAxisDirectionsRef,
                     pitchViewRef,
                     playheadZoomEnabled,
                     prVerticalZoomKb,
@@ -2104,6 +2111,7 @@ export function usePianoRollInteractions(args: {
             yToValue,
             pitchViewRef,
             paramViewsRef,
+            paramAxisDirectionsRef,
             clampViewport,
             setPitchView,
             setParamViewport,
@@ -2323,7 +2331,7 @@ export function usePianoRollInteractions(args: {
          * 远端写入」准备的：它按指针位置重算曲线值，在块拖拽期间会把块手势刚发的读数
          * 按旧值盖回去。
          */
-        if (paramBlockToolActive) return;
+        if (isParamBlockGestureActive()) return;
         if (!hoverPreviewNearCurveRef.current) return;
         if (strokeRef.current || panRef.current) return;
         const last = lastPointerClientRef.current;
@@ -2340,7 +2348,7 @@ export function usePianoRollInteractions(args: {
             value: point.value,
         });
     }, [
-        paramBlockToolActive,
+        isParamBlockGestureActive,
         paramValuePopupEnabled,
         onParamValuePreviewChange,
         getCurvePointAtPointer,
@@ -2588,6 +2596,7 @@ export function usePianoRollInteractions(args: {
                     onParamValuePreviewChange,
                     onPitchSnapGestureActiveChange,
                     panRef,
+                    paramAxisDirectionsRef,
                     paramEditorSeekPlayheadEnabled,
                     paramMultiSelectKb,
                     paramRangeSelectKb,
@@ -2657,6 +2666,7 @@ export function usePianoRollInteractions(args: {
             panRef,
             pitchViewRef,
             paramViewsRef,
+            paramAxisDirectionsRef,
             syncScrollLeft,
             clampViewport,
             getCurrentViewportForScrollbar,
@@ -2847,6 +2857,21 @@ export function usePianoRollInteractions(args: {
         ],
     );
 
+    const onCanvasHoverPreview = useCallback(
+        (e: ReactPointerEvent<HTMLCanvasElement>) =>
+            handleCanvasHoverPreview(
+                {
+                    getCurveValueNearPointer,
+                    hoverPreviewNearCurveRef,
+                    lastPointerClientRef,
+                    onParamValuePreviewChange,
+                    paramValuePopupEnabled,
+                },
+                e,
+            ),
+        [getCurveValueNearPointer, onParamValuePreviewChange, paramValuePopupEnabled],
+    );
+
     return {
         onRulerMouseDown,
         onScrollerAuxClick,
@@ -2855,6 +2880,7 @@ export function usePianoRollInteractions(args: {
         onScrollerKeyDown,
         onScrollerWheelNative,
         onCanvasPointerMove,
+        onCanvasHoverPreview,
         onCanvasPointerLeave,
         onCanvasPointerDown,
         beginParamBlockMorph,

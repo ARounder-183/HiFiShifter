@@ -29,6 +29,7 @@ import {
 } from "../../../../services/api/settings";
 import { SCALE_KEYS } from "../../../../utils/musicalScales";
 import { normalizeParamAxisUnits } from "../../../../components/layout/pianoRoll/paramAxisUnits";
+import { normalizePanAxisDirections } from "../../../../components/layout/pianoRoll/paramPan";
 import type { CustomScalePreset } from "../../../../utils/customScales";
 import { sanitizeCustomScalePreset } from "../../../../utils/customScales";
 import {
@@ -242,8 +243,15 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
             if (s.showClipboardPreview != null) state.showClipboardPreview = s.showClipboardPreview;
             if (s.showParamValuePopup != null)
                 state.showParamValuePopup = Boolean(s.showParamValuePopup);
+            if (s.showClipPitchOverlay != null)
+                state.showClipPitchOverlay = Boolean(s.showClipPitchOverlay);
             // 纵轴单位映射：手改坏配置（未知参数 / 非法取值）在这里被过滤掉。
             state.paramAxisUnits = normalizeParamAxisUnits(s.paramAxisUnits);
+            state.paramAxisDirections = normalizePanAxisDirections(s.paramAxisDirections);
+            state.project.lastSaveFormat =
+                s.lastProjectSaveFormat === "json" || s.lastProjectSaveFormat === "zip"
+                    ? s.lastProjectSaveFormat
+                    : "hshp";
             if (s.scaleHighlightMode != null)
                 state.scaleHighlightMode = s.scaleHighlightMode === "always" ? "always" : "off";
             if (s.ignoreGrouping != null) state.ignoreGrouping = Boolean(s.ignoreGrouping);
@@ -274,7 +282,8 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
             }
             if (s.silenceDetectOptions != null) {
                 const o = s.silenceDetectOptions as Partial<SilenceDetectSettings>;
-                state.silenceDetectOptions = { ...state.silenceDetectOptions, ...o };
+                const method = o.method === "peak" || o.method === "note_blocks" ? o.method : "rms";
+                state.silenceDetectOptions = { ...state.silenceDetectOptions, ...o, method };
             }
             if (s.search != null) state.searchSettings = normalizeSearchSettings(s.search);
             /*

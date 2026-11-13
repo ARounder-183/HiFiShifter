@@ -91,6 +91,18 @@ pub use hifishifter_plugin_core::sync;
 mod test_allocator;
 #[cfg(test)]
 mod test_host;
+/// 【为什么测试二进制要在进入 main 之前关掉异步预热】见 `settings_store::
+/// apply_to_process` 的注释：libtest 的退出没有收尾钩子，预热线程在"建 ONNX
+/// 会话"中途被拆掉时，整个测试二进制以 `0xC0000005`（Windows）/ SIGSEGV（Linux）
+/// 退出 —— 即使每条用例都通过。`settings_store` 里那份只覆盖调用了设置下发
+/// 路径的用例；这一份经 `ctor` 在 CRT 初始化时执行，对**全部分块**生效。
+#[cfg(test)]
+mod test_prewarm_guard {
+    #[ctor::ctor(unsafe)]
+    fn disarm_async_session_prewarm() {
+        hifishifter_kernel::vocoder_ort_session::set_async_session_prewarm(false);
+    }
+}
 mod vst3;
 
 use std::ffi::c_void;

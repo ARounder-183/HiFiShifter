@@ -8,6 +8,22 @@
 import type { ClipInfo } from "../../../features/session/sessionTypes";
 import type { TakeSpan } from "./paramBlockTypes";
 
+export interface ParamBlockSourceNote {
+    readonly startSec: number;
+    readonly endSec: number;
+    readonly note?: number | null;
+    readonly eventId?: string;
+    readonly source: "syllable" | "gameBaseline" | "midiNote";
+}
+
+export function sourceNoteEventId(span: {
+    readonly startSec: number;
+    readonly endSec: number;
+    readonly eventId?: string;
+}): string {
+    return span.eventId ?? `${span.startSec.toFixed(9)}:${span.endSec.toFixed(9)}`;
+}
+
 export interface ParamBlockSourceClip {
     readonly id: string;
     readonly trackId: string;
@@ -38,12 +54,23 @@ export interface ParamBlockSourceClip {
         readonly syllableSpansSec?: ReadonlyArray<{
             readonly startSec: number;
             readonly endSec: number;
+            readonly note?: number | null;
+            readonly eventId?: string;
         }>;
+        readonly syllableNotes?: ReadonlyArray<number | null>;
+        readonly syllableEventIds?: ReadonlyArray<string>;
+        readonly syllableAnalysisWindowSec?: readonly [number, number];
         readonly gameBlockBaseline?: {
+            readonly revision?: number;
+            readonly algorithm?: string;
+            readonly algorithmVersion?: number;
             readonly sourceSpansSec?: ReadonlyArray<{
                 readonly startSec: number;
                 readonly endSec: number;
+                readonly note?: number | null;
+                readonly eventId?: string;
             }>;
+            readonly analyzedWindowSec?: readonly [number, number];
         };
         readonly midiNoteData?: ReadonlyArray<{
             readonly startSec: number;
@@ -54,12 +81,19 @@ export interface ParamBlockSourceClip {
     readonly syllableSpansSec?: ReadonlyArray<{
         readonly startSec: number;
         readonly endSec: number;
+        readonly note?: number | null;
+        readonly eventId?: string;
     }>;
+    readonly syllableNotes?: ReadonlyArray<number | null>;
+    readonly syllableEventIds?: ReadonlyArray<string>;
+    readonly syllableAnalysisWindowSec?: readonly [number, number];
     readonly gameBlockBaseline?: {
         readonly sourceSpansSec?: ReadonlyArray<{
             readonly startSec: number;
             readonly endSec: number;
+            readonly note?: number | null;
         }>;
+        readonly analyzedWindowSec?: readonly [number, number];
     };
     readonly midiNoteData?: ReadonlyArray<{
         readonly startSec: number;
@@ -72,10 +106,97 @@ export interface ProjectedInterval {
     readonly cycle: number;
     readonly startFrame: number;
     readonly endFrameExclusive: number;
+    /** The visible interval starts inside the source span (window/overlap cut). */
+    readonly cutStart: boolean;
+    /** The visible interval ends inside the source span (window/overlap cut). */
+    readonly cutEnd: boolean;
+}
+
+/** Minimal source geometry accepted by the projection port. */
+export type ProjectableTakeSpan = Pick<TakeSpan, "sourceStartSec" | "sourceEndSec" | "cycle">;
+
+/**
+ * A source-domain fragment that belongs to a single Loop cycle.
+ *
+ * cutStart / cutEnd are timeline-oriented: they describe the left and right
+ * visible edges. Reverse playback swaps which source edge maps to which flag.
+ */
+export interface LoopSpanPart<T extends ProjectableTakeSpan = TakeSpan> {
+    readonly span: T;
+    readonly cutStart: boolean;
+    readonly cutEnd: boolean;
 }
 
 const EPS = 1e-9;
+/** Shared tolerance for positive source-domain intersections. */
+const SOURCE_EPS = 1e-12;
 const MAX_FRAME = 1_000_000;
+
+/** A positive source/window intersection; never silently drops a left-cut note. */
+export function windowIntersection(
+    span: readonly [number, number],
+    window: readonly [number, number],
+): readonly [number, number] | null {
+    const start = Math.max(span[0], window[0]);
+    const end = Math.min(span[1], window[1]);
+    return end > start + SOURCE_EPS ? [start, end] : null;
+}
+
+/** A positive continuous intersection rounded to one frame is still visible. The fabricated frame must stay inside the clip's visible range — a sliver at the very end rounds past `visibleEnd`, and emitting `[visibleEnd, visibleEnd + 1)` would collide with the next clip's first block (mirrors `projection.rs`). */
+export function positiveIntervalToFrames(
+    start: number,
+    end: number,
+    visibleEnd: number,
+): readonly [number, number] | null {
+    if (end > start) return [start, end];
+    return start < MAX_FRAME && start < visibleEnd ? [start, start + 1] : null;
+}
+
+/** Cut flags for a non-loop source/window intersection. */
+export function cutFlagsForIntersection(
+    span: readonly [number, number],
+    window: readonly [number, number],
+    reversed: boolean,
+): readonly [boolean, boolean] {
+    return reversed
+        ? [span[1] > window[1] + EPS, span[0] < window[0] - EPS]
+        : [span[0] < window[0] - EPS, span[1] > window[1] + EPS];
+}
+
+/** Analysis status has one definition for reanalysis, diagnostics and compose. */
+export function paramBlockAnalysisRequestKey(args: {
+    readonly rootTrackId: string;
+    readonly clipId: string;
+    readonly activeTakeId?: string;
+    readonly sourceDigest?: string;
+    readonly algorithm?: string;
+    readonly algorithmVersion?: number;
+    readonly audible: { readonly startSec: number; readonly endSec: number };
+    readonly framePeriodMs: number;
+}): string {
+    const round = (value: number) => value.toFixed(6);
+    return [
+        args.rootTrackId,
+        args.clipId,
+        args.activeTakeId ?? "",
+        args.sourceDigest ?? "",
+        args.algorithm ?? "",
+        String(args.algorithmVersion ?? 0),
+        round(args.audible.startSec),
+        round(args.audible.endSec),
+        round(args.framePeriodMs),
+    ].join("|");
+}
+
+export type AnalysisWindowStatus = "missing" | "stale" | "current";
+export function analysisWindowStatus(
+    audible: { readonly startSec: number; readonly endSec: number },
+    analyzed: readonly [number, number] | null | undefined,
+    spans: readonly unknown[] | null | undefined,
+): AnalysisWindowStatus {
+    if (!spans || spans.length === 0) return "missing";
+    return windowContained(audible, analyzed) ? "current" : "stale";
+}
 
 export function toFrame(sec: number, framePeriodMs: number): number {
     const value = Math.round((sec * 1000) / Math.max(0.1, framePeriodMs));
@@ -198,25 +319,105 @@ export function projectionForClip(clip: ParamBlockSourceClip): ClipProjection {
 
 /** 基块分析区间的统一回退链：音节分析 → GAME baseline → MIDI。 */
 export function baseSourceSpansForClip(clip: ParamBlockSourceClip): {
-    readonly spans: readonly { readonly startSec: number; readonly endSec: number }[];
+    readonly spans: readonly ParamBlockSourceNote[];
     readonly label: "syllable" | "gameBaseline" | "midiNote";
 } | null {
     const take = activeTake(clip);
     const syllable = firstSpanList(take?.syllableSpansSec, clip.syllableSpansSec);
-    if (syllable !== null) return { spans: syllable, label: "syllable" };
+    if (syllable !== null) {
+        const notes = take?.syllableEventIds ?? clip.syllableEventIds;
+        return {
+            spans: syllable.map((span, index) => ({
+                ...span,
+                eventId: span.eventId ?? notes?.[index],
+                source: "syllable",
+            })),
+            label: "syllable",
+        };
+    }
     const baseline = firstSpanList(
         take?.gameBlockBaseline?.sourceSpansSec,
         clip.gameBlockBaseline?.sourceSpansSec,
     );
-    if (baseline !== null) return { spans: baseline, label: "gameBaseline" };
+    if (baseline !== null) {
+        return {
+            spans: baseline.map((span) => ({ ...span, source: "gameBaseline" })),
+            label: "gameBaseline",
+        };
+    }
     const midi = firstSpanList(take?.midiNoteData, clip.midiNoteData);
     if (midi !== null) {
         return {
-            spans: midi.map((note) => ({ startSec: note.startSec, endSec: note.endSec })),
+            spans: midi.map((note) => ({
+                startSec: note.startSec,
+                endSec: note.endSec,
+                note: note.note,
+                source: "midiNote",
+            })),
             label: "midiNote",
         };
     }
     return null;
+}
+
+/** Frontend mirror of Rust `ClipProjection::audible_source_window`. A reversed Take's ring extends **downward** from its anchor (`sourceAtProjectedFrame` / audio wrap all agree), so its section window is `[anchor - cycle, anchor]`. */
+export function audibleSourceWindow(projection: ClipProjection): {
+    readonly startSec: number;
+    readonly endSec: number;
+} {
+    const span = Math.max(0, projection.projectLengthSec * projection.rate);
+    let start: number;
+    let end: number;
+    if (projection.loopEnabled && projection.loopCycleSec !== null) {
+        const cycle = projection.loopCycleSec;
+        const anchor = loopAnchor(projection);
+        const media = projection.mediaDurationSec;
+        // The ring wraps once the cycle reaches beyond one side of the media:
+        // forward past the end, reversed below zero.
+        const wraps = (duration: number) =>
+            projection.reversed
+                ? anchor - cycle < -EPS || anchor > duration + EPS
+                : anchor + cycle > duration + EPS || anchor < -EPS;
+        const wholeRing = media !== null && media > EPS && (cycle >= media - EPS || wraps(media));
+        if (wholeRing) {
+            start = 0;
+            end = media as number;
+        } else if (cycle > EPS && Number.isFinite(anchor) && anchor >= -EPS) {
+            if (projection.reversed) {
+                start = anchor - cycle;
+                end = anchor;
+            } else {
+                start = anchor;
+                end = anchor + cycle;
+            }
+        } else {
+            start = projection.sourceWindowStartSec;
+            end = projection.sourceWindowEndSec;
+        }
+    } else if (projection.reversed) {
+        start = projection.sourceWindowEndSec - span;
+        end = projection.sourceWindowEndSec;
+    } else {
+        start = projection.sourceWindowStartSec;
+        end = projection.sourceWindowStartSec + span;
+    }
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return { startSec: 0, endSec: 0 };
+    return { startSec: Math.min(start, end), endSec: Math.max(start, end) };
+}
+
+/** An analysis is current only when its window contains the audible window. */
+export function windowContained(
+    audible: { readonly startSec: number; readonly endSec: number },
+    analyzed: readonly [number, number] | null | undefined,
+): boolean {
+    return (
+        Array.isArray(analyzed) &&
+        analyzed.length === 2 &&
+        analyzed.every((value) => Number.isFinite(value)) &&
+        analyzed[1] >= analyzed[0] &&
+        audible.startSec >= analyzed[0] - 1e-6 &&
+        audible.endSec <= analyzed[1] + 1e-6
+    );
 }
 
 function loopAnchor(projection: ClipProjection): number {
@@ -229,69 +430,128 @@ function loopAnchor(projection: ClipProjection): number {
 
 export function projectTakeSpan(
     projection: ClipProjection,
-    span: Pick<TakeSpan, "sourceStartSec" | "sourceEndSec" | "cycle">,
+    span: ProjectableTakeSpan,
     framePeriodMs: number,
-    fromCycle = 0,
+    fromCycle = span.cycle,
 ): ProjectedInterval[] {
-    const startCycle = Number.isFinite(fromCycle) ? Math.max(0, Math.floor(fromCycle)) : 0;
+    const parts = splitLoopTakeSpanParts(projection, span);
+    if (parts.length === 0) return [];
+    const out: ProjectedInterval[] = [];
+    for (const part of parts) {
+        out.push(...projectTakeSpanPart(projection, part, framePeriodMs, fromCycle));
+    }
+    if (projection.loopEnabled) {
+        out.sort(
+            (a, b) =>
+                a.startFrame - b.startFrame ||
+                a.endFrameExclusive - b.endFrameExclusive ||
+                a.cycle - b.cycle,
+        );
+    }
+    return out;
+}
+
+export function projectTakeSpanPart<T extends ProjectableTakeSpan>(
+    projection: ClipProjection,
+    part: LoopSpanPart<T>,
+    framePeriodMs: number,
+    fromCycle = part.span.cycle,
+): ProjectedInterval[] {
     const fp = Math.max(0.1, framePeriodMs);
     const visibleStart = toFrame(projection.projectStartSec, fp);
     const visibleEnd = toFrame(projection.projectStartSec + projection.projectLengthSec, fp);
     if (visibleEnd <= visibleStart) return [];
     const rate = Math.max(1e-9, projection.rate);
-    const out: ProjectedInterval[] = [];
     if (projection.loopEnabled && projection.loopCycleSec !== null) {
-        const cycle = projection.loopCycleSec;
+        const cycleSec = projection.loopCycleSec;
         const anchor = loopAnchor(projection);
         const phase = projection.reversed
-            ? modEuclid(anchor - span.sourceEndSec, cycle)
-            : modEuclid(span.sourceStartSec - anchor, cycle);
-        /*
-         * 一个成员只能覆盖它所在周期的剩余部分；跨周期必须由
-         * `normalizeLoopTakeSpans` 先切成多个成员。否则 endSec 会越过周期边界，
-         * 把“下一周期的开头”画成本周期的尾巴。
-         */
-        const lengthSec = Math.min(
-            (span.sourceEndSec - span.sourceStartSec) / rate,
-            (cycle - phase) / rate,
-        );
-        const cycleTimeline = cycle / rate;
+            ? modEuclid(anchor - part.span.sourceEndSec, cycleSec)
+            : modEuclid(part.span.sourceStartSec - anchor, cycleSec);
+        const widthSec = Math.max(0, part.span.sourceEndSec - part.span.sourceStartSec);
+        const lengthSec = Math.min(widthSec / rate, Math.max(0, (cycleSec - phase) / rate));
+        if (!(lengthSec > SOURCE_EPS)) return [];
+        const cycleTimeline = cycleSec / rate;
         if (cycleTimeline <= EPS) return [];
-        for (
-            let startLocal = phase / rate + startCycle * cycleTimeline, index = startCycle;
-            startLocal < projection.projectLengthSec - EPS && index < 20000;
-            startLocal += cycleTimeline, index += 1
-        ) {
-            const startSec = projection.projectStartSec + startLocal;
-            const endSec = Math.min(
-                startSec + lengthSec,
-                projection.projectStartSec + projection.projectLengthSec,
-            );
-            const start = Math.max(visibleStart, toFrame(startSec, fp));
-            const end = Math.min(visibleEnd, toFrame(endSec, fp));
-            if (end > start) out.push({ cycle: index, startFrame: start, endFrameExclusive: end });
+        const clipStart = projection.projectStartSec;
+        const clipEnd = clipStart + projection.projectLengthSec;
+        const startCycle = Number.isFinite(fromCycle) ? Math.max(0, Math.floor(fromCycle)) : 0;
+        const out: ProjectedInterval[] = [];
+        let cycle = startCycle;
+        let startLocal = phase / rate + startCycle * cycleTimeline;
+        while (startLocal < projection.projectLengthSec - EPS && out.length < 20_000) {
+            const rawStartSec = clipStart + startLocal;
+            const rawEndSec = rawStartSec + lengthSec;
+            const start = Math.max(visibleStart, toFrame(rawStartSec, fp));
+            let end = Math.min(visibleEnd, toFrame(rawEndSec, fp));
+            // Rounding may collapse a positive source interval to zero frames.
+            // A visible block still deserves one frame of pointer target.
+            if (
+                end <= start &&
+                rawEndSec > rawStartSec + SOURCE_EPS &&
+                rawStartSec < clipEnd - EPS &&
+                rawEndSec > clipStart + EPS &&
+                start < visibleEnd
+            ) {
+                end = Math.min(visibleEnd, start + 1);
+            }
+            if (end > start) {
+                out.push({
+                    cycle,
+                    startFrame: start,
+                    endFrameExclusive: end,
+                    cutStart: part.cutStart || rawStartSec < clipStart - EPS,
+                    cutEnd: part.cutEnd || rawEndSec > clipEnd + EPS,
+                });
+            }
+            startLocal += cycleTimeline;
+            cycle += 1;
         }
         return out;
     }
-    if (startCycle > 0) return [];
-    const windowStart = projection.reversed
-        ? projection.sourceWindowEndSec - projection.projectLengthSec * rate
-        : projection.sourceWindowStartSec;
-    const windowEnd = projection.reversed
-        ? projection.sourceWindowEndSec
-        : projection.sourceWindowStartSec + projection.projectLengthSec * rate;
-    const startSec = Math.max(span.sourceStartSec, windowStart);
-    const endSec = Math.min(span.sourceEndSec, windowEnd);
-    if (endSec <= startSec + EPS) return [];
+    return projectNonLoopSpanPart(projection, part, fp, visibleStart, visibleEnd);
+}
+
+function projectNonLoopSpanPart<T extends ProjectableTakeSpan>(
+    projection: ClipProjection,
+    part: LoopSpanPart<T>,
+    framePeriodMs: number,
+    visibleStart: number,
+    visibleEnd: number,
+): ProjectedInterval[] {
+    const { startSec: windowStart, endSec: windowEnd } = audibleSourceWindow(projection);
+    const intersection = windowIntersection(
+        [part.span.sourceStartSec, part.span.sourceEndSec],
+        [windowStart, windowEnd],
+    );
+    if (intersection === null) return [];
+    const [startSec, endSec] = intersection;
     const project = (source: number) =>
         projection.reversed
-            ? projection.projectStartSec + (projection.sourceWindowEndSec - source) / rate
-            : projection.projectStartSec + (source - projection.sourceWindowStartSec) / rate;
+            ? projection.projectStartSec +
+              (projection.sourceWindowEndSec - source) / projection.rate
+            : projection.projectStartSec +
+              (source - projection.sourceWindowStartSec) / projection.rate;
     const a = project(startSec);
     const b = project(endSec);
-    const start = Math.max(visibleStart, toFrame(Math.min(a, b), fp));
-    const end = Math.min(visibleEnd, toFrame(Math.max(a, b), fp));
-    return end > start ? [{ cycle: 0, startFrame: start, endFrameExclusive: end }] : [];
+    const start = Math.max(visibleStart, toFrame(Math.min(a, b), framePeriodMs));
+    const end = Math.min(visibleEnd, toFrame(Math.max(a, b), framePeriodMs));
+    const interval = positiveIntervalToFrames(start, end, visibleEnd);
+    if (interval === null) return [];
+    const [cutStart, cutEnd] = cutFlagsForIntersection(
+        [part.span.sourceStartSec, part.span.sourceEndSec],
+        [windowStart, windowEnd],
+        projection.reversed,
+    );
+    return [
+        {
+            cycle: 0,
+            startFrame: interval[0],
+            endFrameExclusive: interval[1],
+            cutStart: part.cutStart || cutStart,
+            cutEnd: part.cutEnd || cutEnd,
+        },
+    ];
 }
 
 export function inverseProject(
@@ -389,92 +649,187 @@ export function sourceAtProjectedFrame(
 /**
  * 把一个可能跨 Loop 周期边界的源域区间切成“每段都属于单一周期”的成员。
  *
- * 边界有两类：
- * 1. **anchor**：正放时越过 anchor 的部分属于下一个周期；倒放时属于同一周期
- *    的尾部（方向相反）。
- * 2. **mediaDuration**：越过媒体末尾的部分回绕到 0，仍属于同一周期。
- *
- * 返回顺序不保证工程顺序；调用方应按投影起点排序（见 `orderTakeSpansByProjection`）。
+ * 这是 Loop 拆分的唯一实现：normalize 只负责持久化，projectTakeSpan 自己
+ * 也要调用它，因此未 normalize 的 span 同样能正确跨 anchor。
  */
 export function normalizeLoopTakeSpans(projection: ClipProjection, span: TakeSpan): TakeSpan[] {
-    if (!projection.loopEnabled || projection.loopCycleSec === null) return [span];
+    return splitLoopTakeSpanParts(projection, span).map((part) => part.span);
+}
+
+interface MutableLoopPart<T extends ProjectableTakeSpan> {
+    span: T;
+    cutStart: boolean;
+    cutEnd: boolean;
+}
+
+function markLowEdgeCut<T extends ProjectableTakeSpan>(
+    part: MutableLoopPart<T>,
+    reversed: boolean,
+): void {
+    if (reversed) part.cutEnd = true;
+    else part.cutStart = true;
+}
+
+function markHighEdgeCut<T extends ProjectableTakeSpan>(
+    part: MutableLoopPart<T>,
+    reversed: boolean,
+): void {
+    if (reversed) part.cutStart = true;
+    else part.cutEnd = true;
+}
+
+/**
+ * Split any TakeSpan into fragments that each live inside one Loop cycle.
+ *
+ * This handles the anchor seam (head and tail belong to the same cycle), media
+ * wrap-around, and pathological spans wider than one cycle. cutStart/cutEnd
+ * are timeline-oriented and therefore swap source edges under reverse playback.
+ */
+export function splitLoopTakeSpanParts<T extends ProjectableTakeSpan>(
+    projection: ClipProjection,
+    span: T,
+): LoopSpanPart<T>[] {
+    if (!projection.loopEnabled || projection.loopCycleSec === null) {
+        return [{ span, cutStart: false, cutEnd: false }];
+    }
+    if (!Number.isFinite(span.sourceStartSec) || !Number.isFinite(span.sourceEndSec)) {
+        return [];
+    }
     const cycleSec = projection.loopCycleSec;
-    const media = projection.mediaDurationSec ?? cycleSec;
-    const anchor = loopAnchor(projection);
     const width = span.sourceEndSec - span.sourceStartSec;
-    if (!(width > EPS)) return [];
+    if (!(width > SOURCE_EPS)) return [];
+    const media =
+        projection.mediaDurationSec !== null && projection.mediaDurationSec > EPS
+            ? projection.mediaDurationSec
+            : cycleSec;
+    const anchor = loopAnchor(projection);
+    const out: LoopSpanPart<T>[] = [];
     if (width > cycleSec + EPS) {
-        /*
-         * 超过一个完整周期的区间无法用单个成员表达；按周期宽度切块并递增周期。
-         * 正常分析/创建不会产生这种输入，这里只做确定性兜底，绝不静默截断。
-         */
-        const out: TakeSpan[] = [];
         let start = span.sourceStartSec;
         let cycle = span.cycle;
-        while (start < span.sourceEndSec - EPS) {
+        let index = 0;
+        while (start < span.sourceEndSec - SOURCE_EPS && index < 20_000) {
             const end = Math.min(start + cycleSec, span.sourceEndSec);
+            const last = end >= span.sourceEndSec - SOURCE_EPS;
+            const [cutStart, cutEnd] = projection.reversed
+                ? [!last, index > 0]
+                : [index > 0, !last];
+            const chunk = {
+                ...span,
+                sourceStartSec: start,
+                sourceEndSec: end,
+                cycle,
+            } as T;
             out.push(
-                ...normalizeLoopTakeSpans(projection, {
-                    ...span,
-                    cycle,
-                    sourceStartSec: start,
-                    sourceEndSec: end,
-                }),
+                ...splitLoopPiece(projection, { span: chunk, cutStart, cutEnd }, media, anchor),
             );
             start = end;
             cycle += 1;
+            index += 1;
         }
-        return out;
+    } else {
+        out.push(
+            ...splitLoopPiece(projection, { span, cutStart: false, cutEnd: false }, media, anchor),
+        );
     }
-    const wrapMedia = (lo: number, hi: number): Array<[number, number]> => {
-        if (hi <= lo + EPS) return [];
+    out.sort(
+        (a, b) =>
+            a.span.sourceStartSec - b.span.sourceStartSec ||
+            a.span.sourceEndSec - b.span.sourceEndSec ||
+            a.span.cycle - b.span.cycle,
+    );
+    return out;
+}
+
+function splitLoopPiece<T extends ProjectableTakeSpan>(
+    projection: ClipProjection,
+    part: MutableLoopPart<T>,
+    media: number,
+    anchor: number,
+): LoopSpanPart<T>[] {
+    const reversed = projection.reversed;
+    const queue: MutableLoopPart<T>[] = [part];
+    const wrapped: MutableLoopPart<T>[] = [];
+    let guard = 0;
+    while (queue.length > 0) {
+        guard += 1;
+        if (guard > 20_000) break;
+        const current = queue.pop()!;
+        const lo = current.span.sourceStartSec;
+        const hi = current.span.sourceEndSec;
+        if (hi <= lo + SOURCE_EPS) continue;
         if (lo < -EPS) {
-            if (hi <= EPS) return [[media + lo, media + hi]];
-            return [
-                [media + lo, media],
-                [0, hi],
-            ];
-        }
-        if (lo >= media - EPS) {
-            return [[lo - media, hi - media]];
-        }
-        if (hi > media + EPS) {
-            return [
-                [lo, media],
-                [0, hi - media],
-            ];
-        }
-        return [[lo, hi]];
-    };
-    const out: TakeSpan[] = [];
-    for (const [lo, hi] of wrapMedia(span.sourceStartSec, span.sourceEndSec)) {
-        if (projection.reversed) {
-            /*
-             * 倒放：源域随时间**下降**。越过 anchor 的区间不换周期：
-             * [anchor, hi] 在本周期开头，[lo, anchor] 在本周期末尾。
-             */
-            if (lo < anchor - EPS && hi > anchor + EPS) {
-                out.push({ ...span, cycle: span.cycle, sourceStartSec: anchor, sourceEndSec: hi });
-                out.push({ ...span, cycle: span.cycle, sourceStartSec: lo, sourceEndSec: anchor });
+            if (hi <= EPS) {
+                queue.push({
+                    ...current,
+                    span: {
+                        ...current.span,
+                        sourceStartSec: media + lo,
+                        sourceEndSec: media + hi,
+                    } as T,
+                });
             } else {
-                out.push({ ...span, cycle: span.cycle, sourceStartSec: lo, sourceEndSec: hi });
+                const tail: MutableLoopPart<T> = {
+                    ...current,
+                    span: { ...current.span, sourceStartSec: media + lo, sourceEndSec: media } as T,
+                };
+                markHighEdgeCut(tail, reversed);
+                const head: MutableLoopPart<T> = {
+                    ...current,
+                    span: { ...current.span, sourceStartSec: 0, sourceEndSec: hi } as T,
+                };
+                markLowEdgeCut(head, reversed);
+                queue.push(tail, head);
             }
-        } else if (lo < anchor - EPS && hi > anchor + EPS) {
-            /*
-             * 正放：越过 anchor 的部分在**下一个**周期开头。
-             */
-            out.push({ ...span, cycle: span.cycle, sourceStartSec: lo, sourceEndSec: anchor });
-            out.push({
-                ...span,
-                cycle: span.cycle + 1,
-                sourceStartSec: anchor,
-                sourceEndSec: hi,
+        } else if (lo >= media - EPS) {
+            queue.push({
+                ...current,
+                span: {
+                    ...current.span,
+                    sourceStartSec: lo - media,
+                    sourceEndSec: hi - media,
+                } as T,
             });
+        } else if (hi > media + EPS) {
+            const tail: MutableLoopPart<T> = {
+                ...current,
+                span: { ...current.span, sourceEndSec: media } as T,
+            };
+            markHighEdgeCut(tail, reversed);
+            const head: MutableLoopPart<T> = {
+                ...current,
+                span: { ...current.span, sourceStartSec: 0, sourceEndSec: hi - media } as T,
+            };
+            markLowEdgeCut(head, reversed);
+            queue.push(tail, head);
         } else {
-            out.push({ ...span, cycle: span.cycle, sourceStartSec: lo, sourceEndSec: hi });
+            wrapped.push(current);
         }
     }
-    return out.filter((item) => item.sourceEndSec > item.sourceStartSec + EPS);
+    const out: LoopSpanPart<T>[] = [];
+    for (const piece of wrapped) {
+        const lo = piece.span.sourceStartSec;
+        const hi = piece.span.sourceEndSec;
+        if (lo < anchor - EPS && hi > anchor + EPS) {
+            // Forward: [lo, anchor] is the tail at the end of this very cycle,
+            // [anchor, hi] is the head at its start. Reverse mirrors the flags
+            // but keeps both fragments in the same cycle.
+            const left: MutableLoopPart<T> = {
+                ...piece,
+                span: { ...piece.span, sourceEndSec: anchor } as T,
+            };
+            markHighEdgeCut(left, reversed);
+            const right: MutableLoopPart<T> = {
+                ...piece,
+                span: { ...piece.span, sourceStartSec: anchor } as T,
+            };
+            markLowEdgeCut(right, reversed);
+            out.push(left, right);
+        } else {
+            out.push(piece);
+        }
+    }
+    return out;
 }
 
 /**
@@ -510,10 +865,16 @@ export function toParamBlockSourceClip(clip: ClipInfo): ParamBlockSourceClip {
             durationFrames: take.durationFrames,
             sourceSampleRate: take.sourceSampleRate,
             syllableSpansSec: take.syllableSpansSec,
+            syllableNotes: take.syllableNotes,
+            syllableEventIds: take.syllableEventIds,
+            syllableAnalysisWindowSec: take.syllableAnalysisWindowSec,
             gameBlockBaseline: take.gameBlockBaseline,
             midiNoteData: take.midiNoteData,
         })),
         syllableSpansSec: clip.syllableSpansSec,
+        syllableNotes: clip.syllableNotes,
+        syllableEventIds: clip.syllableEventIds,
+        syllableAnalysisWindowSec: clip.syllableAnalysisWindowSec,
         gameBlockBaseline: clip.gameBlockBaseline,
         midiNoteData: clip.midiNoteData,
     };

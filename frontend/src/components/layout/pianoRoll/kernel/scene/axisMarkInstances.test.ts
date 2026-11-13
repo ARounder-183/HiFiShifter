@@ -234,6 +234,53 @@ describe("formatAxisMarkLabel", () => {
         const without = formatAxisMarkLabel(7);
         expect(withParam).not.toBe(without);
     });
+
+    it("声像用语言无关的紧凑字母表（端点只给字母，中间值给字母 + 百分比）", () => {
+        // 完整单词（en-US 的 Left100 / Center / Right100）在 56px 宽的轴列里会互相
+        // 挤占，小值域下刻度变密后尤其明显；字母表把最长标签压到 4 字符。
+        expect(formatAxisMarkLabel(-1, "pan")).toBe("L");
+        expect(formatAxisMarkLabel(-0.5, "pan")).toBe("L50");
+        expect(formatAxisMarkLabel(0, "pan")).toBe("C");
+        expect(formatAxisMarkLabel(0.5, "pan")).toBe("R50");
+        expect(formatAxisMarkLabel(1, "pan")).toBe("R");
+        expect(formatAxisMarkLabel(0.25, "pan")).toBe("R25");
+    });
+
+    it("声像的 dB 单位请求不生效（pan 不支持 dB，仍是字母表）", () => {
+        // pan 与 volume/dyn 共用"数值轴"的几何路径，但单位切换只对支持 dB 的参数
+        // 开放；这里钉住"多传一个 axisUnit 也不会把 pan 读数换成 dB"。
+        expect(formatAxisMarkLabel(0.5, "pan", "db")).toBe("R50");
+    });
+
+    it("声像轴在小值域下刻度数受控且不出现 R0 / L0", () => {
+        // 声像的参数范围是 -1..1，走 fallback 的 nice step（target 4）：
+        // span=0.2 → 步长 0.05 → -0.1/-0.05/0/0.05/0.1。刻度数必须受控，
+        // 且不能出现四舍五入到 0% 却仍标注方向的“R0”。
+        const marks = buildAxisMarkInstances({
+            ...baseArgs,
+            kind: "fallback",
+            view: { center: 0, span: 0.2 },
+            paramName: "pan",
+        });
+        expect(marks.length).toBeGreaterThan(0);
+        expect(marks.length).toBeLessThanOrEqual(9);
+        for (const m of marks) {
+            expect(m.label).not.toBe("L0");
+            expect(m.label).not.toBe("R0");
+            expect(m.label.length).toBeLessThanOrEqual(4);
+        }
+        expect(marks.map((m) => m.label)).toEqual(["L10", "L5", "C", "R5", "R10"]);
+    });
+
+    it("声像轴默认值域用端点字母而不是 L100 / R100", () => {
+        const marks = buildAxisMarkInstances({
+            ...baseArgs,
+            kind: "fallback",
+            view: { center: 0, span: 2 },
+            paramName: "pan",
+        });
+        expect(marks.map((m) => m.label)).toEqual(["L", "L50", "C", "R50", "R"]);
+    });
 });
 
 /**

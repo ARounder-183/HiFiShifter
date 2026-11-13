@@ -107,7 +107,9 @@ export function registerTransport(builder: ActionReducerMapBuilder<SessionState>
                   ? "Playing original"
                   : "Play original failed";
         })
-        .addCase(playOriginal.rejected, setRejected)
+        .addCase(playOriginal.rejected, (state, action) => {
+            setRejected(state, action);
+        })
 
         .addCase(stopAudioPlayback.pending, (state) => {
             setPending(state, "Stopping audio...");
@@ -286,6 +288,11 @@ function applyTransportSample(
     // 时引擎保持 is_playing=true 但位置冻结，等待渲染完成后自动
     // 开始/继续播放。旧后端不带此字段 → 视为 false。
     const nextWaitingForRender = nextIsPlaying && Boolean(payload.waiting_for_render);
+    // 【不再有"起播窗口"】此前这里用一条 500ms / 0.05s 的规则丢弃"看起来
+    // 不像起播点"的采样，用来遮住"引擎从别处起播"的症状。起播点已收敛到
+    // 引擎的绝对位置，这类采样不再存在；保留那条规则只会把真实状态挡在外面
+    // （表现是"光标钉住、音频已经走了"）。停止态的陈旧读数仍由下方
+    // `frozenSec > EPS_SEC` 与 `stale` / `localWriteRecent` 三道闸门挡住。
     // 轮询节奏的唯一依据（见 `runtime.hostAuthoritative`）：它回答"这份位置
     // 是不是宿主给的"，与"谁认为在播"无关。
     state.runtime.hostAuthoritative = Boolean(payload.host_authoritative);

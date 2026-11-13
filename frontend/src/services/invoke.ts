@@ -558,9 +558,6 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "quick_export_selected_clips":
             return { request: args[0] };
 
-        case "play_original":
-            return { startSec: args[0] };
-
         case "set_metronome":
             return {
                 enabled: args[0],
@@ -633,13 +630,23 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             };
 
         case "save_project_as":
-            return args[0] === undefined ? undefined : { notesMarkdown: args[0] };
+            return {
+                ...(args[0] !== undefined ? { notesMarkdown: args[0] } : {}),
+                ...(args[1] !== undefined ? { format: args[1] } : {}),
+            };
+
+        case "pick_project_save_path":
+            return {
+                format: args[0],
+                ...(args[1] !== undefined ? { defaultName: args[1] } : {}),
+            };
 
         case "save_project_to_path":
             return {
                 projectPath: args[0],
                 ...(args[1] !== undefined ? { notesMarkdown: args[1] } : {}),
                 ...(args[2] !== undefined ? { force: args[2] } : {}),
+                ...(args[3] !== undefined ? { format: args[3] } : {}),
             };
 
         case "import_vocalshifter_project":
@@ -1103,6 +1110,9 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "pick_directory",
     "pick_midi_output_path",
     "ping",
+    // 播放从**引擎当前位置**起播：命令本身不再携带起播点（起播点是引擎事实，
+    // 见 commands/playback.rs 的 resolve_play_start_sec），因此是无参命令。
+    "play_original",
     "redo_timeline",
     "run_vocoder_benchmark",
     "start_background_render",

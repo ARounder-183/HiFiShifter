@@ -31,6 +31,7 @@ import {
 import { clipboardPreviewSpans } from "../paramClipboardMapping";
 import { DYN_DEFAULT_VIEW, DYN_VALUE_MAX, isDynParam, VOLUME_DEFAULT_VIEW } from "../paramRanges";
 import { supportsParamAxisUnit } from "../paramAxisUnits";
+import { isPanParam, resolvePanAxisDirection } from "../paramPan";
 import { framesToTime } from "../utils";
 import { viewportEndSec, viewportStartSec } from "../../renderKernel/timelineAxis.js";
 import {
@@ -43,11 +44,8 @@ import {
 import type { ParamName, ParamViewSegment, ValueViewport } from "../types";
 import { resolveParamBlockFrameView } from "../paramBlockFrame";
 import { verticalScrollTopFromCenter } from "../verticalScrollMapping";
-import {
-    resolveClipboardPreviewColor,
-    resolveDetectedCurveColors,
-    resolveSecondaryCurveColor,
-} from "../colors";
+import { resolveClipboardPreviewColor, resolveSecondaryCurveColor } from "../colors";
+import { resolveClipPitchOverlayVisual } from "../clipPitchOverlay";
 import { resolveSecondaryOverlayValues } from "../secondaryOverlaySelection";
 import { getFixedDashPattern } from "../render";
 import type { PianoRollCurveLayer } from "../kernel/host/pianoRollKernelData";
@@ -57,7 +55,7 @@ import type {
     PianoRollGridSpec,
     PianoRollSelectionBandSpec,
 } from "../kernel/host/pianoRollKernelData";
-import { normalizeCssColor, resolvePianoRollColors } from "../colors";
+import { normalizeCssColor, resolveClipPitchOverlayColor, resolvePianoRollColors } from "../colors";
 import { parseRgbaColor } from "../../timeline/runtime/timelineClipGlRenderer";
 import { PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX, toDashTuple } from "./panelHelpers";
 import type { ModelDeps } from "./modelDeps";
@@ -110,6 +108,7 @@ export function buildGridSpec(
         | "fontFamily"
         | "getCurrentViewportForScrollbar"
         | "getParamValueBoundsForScrollbar"
+        | "paramAxisDirectionsRef"
         | "prAxis"
         | "processorParamsRef"
         | "s"
@@ -125,6 +124,7 @@ export function buildGridSpec(
         fontFamily,
         getCurrentViewportForScrollbar,
         getParamValueBoundsForScrollbar,
+        paramAxisDirectionsRef,
         prAxis,
         processorParamsRef,
         s,
@@ -193,6 +193,11 @@ export function buildGridSpec(
         // 其余参数保持缺省 —— 签名里的 `axisUnit ?? ""` 因此不会给非切换参数
         // 附加一个无意义的常量。
         ...(supportsParamAxisUnit(editParam) ? { axisUnit: editParamAxisUnit } : {}),
+        ...(isPanParam(editParam)
+            ? {
+                  axisDirection: resolvePanAxisDirection(paramAxisDirectionsRef.current, editParam),
+              }
+            : {}),
         // 与传给 drawPianoRoll 的 fontFamily 同一个值（见 `drawPianoRoll` 的入参），
         // 保证两种渲染模式的字形完全一致。
         fontFamily,
@@ -254,12 +259,15 @@ export function buildGridSpec(
 }
 
 export function valueToY(
-    deps: Pick<ModelDeps, "paramViewsRef" | "pitchViewRef" | "processorParamsRef">,
+    deps: Pick<
+        ModelDeps,
+        "paramAxisDirectionsRef" | "paramViewsRef" | "pitchViewRef" | "processorParamsRef"
+    >,
     param: ParamName,
     v: number,
     h: number,
 ): number {
-    const { paramViewsRef, pitchViewRef, processorParamsRef } = deps;
+    const { paramAxisDirectionsRef, paramViewsRef, pitchViewRef, processorParamsRef } = deps;
 
     const H = Math.max(1, h);
     if (param === "pitch") {
@@ -308,7 +316,10 @@ export function valueToY(
     const span = clamp(view.span, 1e-6, absMax - absMin || 1);
     const min = clamp(view.center - span / 2, absMin, absMax - span);
     const t = (clamp(v, absMin, absMax) - min) / Math.max(1e-9, span);
-    return (1 - t) * H;
+    const inverted =
+        isPanParam(param) &&
+        resolvePanAxisDirection(paramAxisDirectionsRef.current, param) === "left-top";
+    return (inverted ? t : 1 - t) * H;
 }
 
 export function yToViewportT(y: number, h: number): number {
@@ -317,12 +328,15 @@ export function yToViewportT(y: number, h: number): number {
 }
 
 export function yToValue(
-    deps: Pick<ModelDeps, "paramViewsRef" | "pitchViewRef" | "processorParamsRef">,
+    deps: Pick<
+        ModelDeps,
+        "paramAxisDirectionsRef" | "paramViewsRef" | "pitchViewRef" | "processorParamsRef"
+    >,
     param: ParamName,
     y: number,
     h: number,
 ): number {
-    const { paramViewsRef, pitchViewRef, processorParamsRef } = deps;
+    const { paramAxisDirectionsRef, paramViewsRef, pitchViewRef, processorParamsRef } = deps;
 
     const H = Math.max(1, h);
     const t = 1 - clamp(y / H, 0, 1);
@@ -368,7 +382,10 @@ export function yToValue(
     };
     const span = clamp(view.span, 1e-6, absMax - absMin || 1);
     const min = clamp(view.center - span / 2, absMin, absMax - span);
-    return clamp(min + t * span, absMin, absMax);
+    const inverted =
+        isPanParam(param) &&
+        resolvePanAxisDirection(paramAxisDirectionsRef.current, param) === "left-top";
+    return clamp(min + (inverted ? 1 - t : t) * span, absMin, absMax);
 }
 
 export function clampViewport(
@@ -533,7 +550,7 @@ export function buildCurveLayers(
     deps: Pick<
         ModelDeps,
         | "clipboardRef"
-        | "detectedPitchCurves"
+        | "clipPitchOverlays"
         | "editParam"
         | "liveEditOverrideRef"
         | "paramView"
@@ -557,7 +574,7 @@ export function buildCurveLayers(
 ): PianoRollCurveLayer[] {
     const {
         clipboardRef,
-        detectedPitchCurves,
+        clipPitchOverlays,
         editParam,
         liveEditOverrideRef,
         paramView,
@@ -604,35 +621,44 @@ export function buildCurveLayers(
         }
     }
 
-    // ── ② 检测曲线（pitch 模式，按 clip 循环调色）─────────────────
+    // ── ② Clip 源音高参考线（pitch 模式）────────────────────────
     //
-    // 投影模式必须是 `"detected"`（不是 `"curve"`）：
-    // - 检测曲线自带**绝对起始秒** `curveStartSec`，塞进 `startFrame` 会把它丢掉，
-    //   曲线整体平移到时间轴原点；
-    // - 检测曲线的 `midi <= 0` 表示**无声帧**，必须跳过，否则相邻有声点之间会
-    //   拉出一条贯穿底部的垂直尖刺（GL 迁移后实际出现过）。
-    // 两条语义都与 `drawCurveTimed` 不同，见 `projectDetectedCurvePoints` 说明。
+    // 每个**连续有声段**单独一层：无声帧在 clipPitchOverlay 中已经切段，这里
+    // 绝不把前后有声点跨静音连起来。除静音之外没有第二个切段理由 —— 每一刀
+    // 都会变成两条独立折线，两段之间不会连线（重合处"断一帧"就是这样来的）。
+    //
+    // 视觉参数每条 Clip 只解析一次：同一段曲线不得忽明忽暗（见
+    // `resolveClipPitchOverlayVisual` 的层级说明）。
     if (editParam === "pitch") {
-        const palette = resolveDetectedCurveColors(isDark);
-        detectedPitchCurves.forEach((curve, ci) => {
-            if (!curve.midiCurve || curve.midiCurve.length < 2) return;
-            layers.push({
-                values: curve.midiCurve,
-                param: "pitch",
-                startFrame: 0,
-                stride: 1,
-                framePeriodMs: curve.framePeriodMs,
-                lineWidthPx: 2,
-                rgba: parseRgbaColor(normalizeCssColor(palette[ci % palette.length])),
-                dash: null,
-                projection: "detected",
-                curveStartSec: curve.curveStartSec,
-                // 有效跨度 = 所属 clip 的跨度（缓存可能比 clip 长，见 DetectedPitchCurve）。
-                clipStartSec: curve.clipStartSec,
-                clipEndSec: curve.clipEndSec,
-                valueToY: (v) => project("pitch", v),
-            });
-        });
+        for (const overlay of clipPitchOverlays) {
+            const visual = resolveClipPitchOverlayVisual(overlay);
+            // 身份色只在这里按主题解析：模型层不碰主题，绘制层不碰哈希。
+            const [r, g, b] = parseRgbaColor(
+                normalizeCssColor(resolveClipPitchOverlayColor(overlay.colorIndex, isDark)),
+            );
+            for (const run of overlay.runs) {
+                const values = overlay.midiCurve.slice(run.startIndex, run.endIndexExclusive);
+                if (values.length < 2) continue;
+                layers.push({
+                    values,
+                    param: "pitch",
+                    // 与 pv.orig / 参数块同一个工程帧网格：曲线的第 0 个采样落在
+                    // `round(clip.startSec·1000/fp)`，逐帧 +1。
+                    startFrame: overlay.startFrame,
+                    stride: 1,
+                    framePeriodMs: overlay.framePeriodMs,
+                    lineWidthPx: visual.lineWidthPx,
+                    // 色值 alpha 恒为 1：透明度只由 visual.alpha 决定，GL 与
+                    // Canvas2D 两条路径因此天然同口径。
+                    rgba: [r, g, b, visual.alpha],
+                    dash: visual.dash,
+                    projection: "clip",
+                    frameCount: overlay.frameCount,
+                    curveSampleStartIndex: run.startIndex,
+                    valueToY: (v) => project("pitch", v),
+                });
+            }
+        }
     }
 
     // ── ③ 副参数曲线 ────────────────────────────────────────────
@@ -754,8 +780,8 @@ export function buildCurveLayers(
                     rgba: parseRgbaColor(normalizeCssColor(resolveClipboardPreviewColor(isDark))),
                     dash: toDashTuple(getFixedDashPattern(4, 4)),
                     projection: "clipboard",
-                    clipStartSec: span.startSec,
-                    clipEndSec: spanEndSec,
+                    clipboardStartSec: span.startSec,
+                    clipboardEndSec: spanEndSec,
                     clipRect: clip,
                     valueToY: (v) => project(editParam, v),
                 });

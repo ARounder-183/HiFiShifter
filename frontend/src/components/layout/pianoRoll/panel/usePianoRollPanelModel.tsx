@@ -83,6 +83,12 @@ import { useParamBlockState } from "../useParamBlockState";
 import { useLatestRef, useLatestRefValue } from "../useLatestRef";
 import { trackParamBlockCommit } from "../paramBlockCommitCoordinator";
 import { composeParamBlockView } from "../paramBlockComposition";
+import {
+    analysisWindowStatus,
+    projectionForClip,
+    audibleSourceWindow,
+} from "../paramBlockProjection";
+import { paramBlockStaleAnalysisCandidates } from "../paramBlockAnalysisCandidate";
 import { planParamBlockGesture, type ParamBlockGesturePlan } from "../paramBlockGesture";
 import { reportParamBlockDiagnostic } from "../paramBlockDiagnostics";
 import { publishParamBlockWriteFailure } from "../paramBlockFeedback";
@@ -117,6 +123,7 @@ import {
     hitTestParamBlocks,
     hitTestParamBlocksAtPoint,
     materializeParamBlocks,
+    logicalBlockKey,
     blocksFromViewForPanel,
     groupParamBlocks,
     applyFullResSegmentsToParamView,
@@ -152,6 +159,8 @@ import {
     type ParamBlockSpecColors,
 } from "../paramBlockRenderSpec";
 import {
+    adoptParamBlockVisualStructureAfterCreate,
+    adoptParamBlockVisualStructureAfterEdits,
     isParamBlockVisualEpochCurrent,
     sameParamBlockEpochLayout,
     type ParamBlockEpoch,
@@ -191,7 +200,9 @@ import { publishParamBlockFeedback } from "../paramBlockFeedback";
 import { warnDev } from "../devWarn";
 import { backendDetail } from "../../../../services/invoke";
 import { makeLoudnessAmplitudeMap } from "../PianoRollWaveformSurface";
-import { formatDbReadout, resolveParamAxisUnit, supportsParamAxisUnit } from "../paramAxisUnits";
+import { resolveParamAxisUnit, supportsParamAxisUnit } from "../paramAxisUnits";
+import { isPanParam, resolvePanAxisDirection, type PanAxisDirections } from "../paramPan";
+import { supportsParamFlip } from "../paramFlip";
 import { useLoudnessCurves, type LoudnessSnapshot } from "../useLoudnessCurves";
 import { createLiveOverrideReader, type LiveOverrideReader } from "../liveLoudnessOverride";
 import { pianoRollViewportBus } from "../pianoRollViewportBus";
@@ -224,7 +235,6 @@ import {
     buildChildPitchOffsetCentsParam,
     buildChildPitchOffsetDegreesParam,
     buildChildFormantOffsetCentsParam,
-    childPitchOffsetValueToDisplay,
     isChildPitchOffsetCentsParam,
     isChildPitchOffsetDegreesParam,
     isChildFormantOffsetCentsParam,
@@ -252,7 +262,6 @@ import type {
     PianoRollParamBlockSpec,
 } from "../kernel/host/pianoRollKernelData";
 import { resolvePanelRenderViewport } from "../kernel/viewportSource";
-import { NOTE_NAMES_SHARP } from "./panelHelpers";
 import { usePianoRollParamGates } from "./usePianoRollParamGates";
 import { usePianoRollScrollerWiring } from "./usePianoRollScrollerWiring";
 import { usePianoRollSelectionActions } from "./usePianoRollSelectionActions";
@@ -276,15 +285,15 @@ import { useMidiImport } from "./useMidiImport";
 import {
     pitchDeltaToDegreeSteps,
     buildGridSpec as buildGridSpecImpl,
-    valueToY as valueToYImpl,
     yToViewportT as yToViewportTImpl,
-    yToValue as yToValueImpl,
     clampViewport as clampViewportImpl,
     getParamValueBoundsForScrollbar as getParamValueBoundsForScrollbarImpl,
     getCurrentViewportForScrollbar as getCurrentViewportForScrollbarImpl,
     syncVerticalScrollbarForViewport as syncVerticalScrollbarForViewportImpl,
 } from "./sceneBuilders";
 import { usePianoRollViewport } from "./usePianoRollViewport";
+import { usePianoRollProjection } from "./usePianoRollProjection";
+import { useParamValueFormatter } from "./useParamValueFormatter";
 import { useProcessorParams } from "./useProcessorParams";
 
 /**
@@ -399,12 +408,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     }, []);
     const { t, tf, tVars } = useI18n();
     const s = useAppSelector((state: RootState) => state.session, pianoRollSessionEqual);
-    /**
-     * 参数块选择是否激活。
-     *
-     * block 不是 ToolMode，而是选择族的对象级子模式；所有块手势、光标与菜单
-     * 都只认这个派生布尔值，避免再出现“工具层知道、手势层不知道”的分叉。
-     */
+    /** Block selection is a select-family submode, not a third ToolMode. */
     const paramBlockToolActive = isBlockSelectionActive(s.toolMode, s.selectToolMode);
     /** 选择族 range 子模式；四点编辑 / 选区光标 / 边缘拉伸只属于它（见 isRangeToolActive）。 */
     const rangeToolActive = isRangeToolActive(s.toolMode, s.selectToolMode);
@@ -780,36 +784,15 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     const editParamAxisUnit = resolveParamAxisUnit(s.paramAxisUnits, editParam);
     /** 当前参数的左轴是否可切换展示单位（决定光标与角标）。 */
     const axisUnitToggleAvailable = supportsParamAxisUnit(editParam);
+    const editParamAxisDirection = resolvePanAxisDirection(s.paramAxisDirections, editParam);
+    const axisPanDirectionToggleAvailable = isPanParam(editParam);
+    const axisToggleAvailable = axisUnitToggleAvailable || axisPanDirectionToggleAvailable;
 
-    const formatParamValuePreview = useCallback(
-        (value: number): string => {
-            if (!Number.isFinite(value)) return "";
-            if (editParam === "pitch") {
-                const rounded = Math.round(value);
-                const pitchClass = ((rounded % 12) + 12) % 12;
-                const octave = Math.floor(rounded / 12) - 1;
-                const noteName = `${NOTE_NAMES_SHARP[pitchClass]}${octave}`;
-                const cents = Math.round((value - rounded) * 100);
-                const signedCents = cents >= 0 ? `+${cents}` : `${cents}`;
-                return `${noteName}${signedCents}`;
-            }
-            if (isChildPitchOffsetDegreesParam(editParam)) {
-                const display = childPitchOffsetValueToDisplay(editParam, value);
-                if (Math.abs(display) >= 100) return display.toFixed(1);
-                if (Math.abs(display) >= 10) return display.toFixed(2);
-                return display.toFixed(3);
-            }
-            // 音量 / 动态切到 dB 读法：1× = 0 dB（见 paramAxisUnits）。带 `dB` 后缀
-            // 与倍率读数区分——浮窗有空间写清楚单位，用户才不会把 −6 误读成倍率。
-            if (editParamAxisUnit === "db" && supportsParamAxisUnit(editParam)) {
-                return formatDbReadout(value);
-            }
-            if (Math.abs(value) >= 100) return value.toFixed(1);
-            if (Math.abs(value) >= 10) return value.toFixed(2);
-            return value.toFixed(3);
-        },
-        [editParam, editParamAxisUnit],
-    );
+    const formatParamValuePreview = useParamValueFormatter({
+        editParam,
+        axisUnit: editParamAxisUnit,
+        tf,
+    });
 
     const currentDrawTool = s.drawToolMode;
     const selectToolButtonTitle =
@@ -1010,6 +993,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     );
 
     const paramViewsRef = useRef<Record<string, ValueViewport>>({});
+    const paramAxisDirectionsRef = useRef<PanAxisDirections>(s.paramAxisDirections);
+    paramAxisDirectionsRef.current = s.paramAxisDirections;
     const setParamViewport = useCallback(
         (param: string, next: ValueViewport) => {
             // 同 `setPitchView`：竖轴的手势提交点，DOM 与 GL 必须同任务。
@@ -1614,6 +1599,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             clampViewport,
             editParam,
             editParamAxisUnit,
+            paramAxisDirectionsRef,
             effectiveProjectScale,
             fontFamily,
             getCurrentViewportForScrollbar,
@@ -1679,6 +1665,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         // 纵轴展示单位（倍率 / dB）：同样是 buildGridSpec 的输入，漏了就是
         // "点了切换但刻度纹丝不动"（签名不变 → GL 几何与文字都不重建）。
         editParamAxisUnit,
+        // pan 方向：只改刻度文字/投影，不改内部值；必须触发网格镜像重建。
+        editParamAxisDirection,
         // Tempo Map 分段音阶（缺陷 #6）：换 Tempo Map 会换分段。
         s.tempoMap,
     ]);
@@ -1694,19 +1682,13 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     // 的自愈互相打架：内核刚写镜像，循环又把镜像读回来当作"权威"重发一次。内核自己
     // 每帧提交、且镜像由内核回写，故该职责整体消失。
 
-    const valueToY = useCallback(
-        (param: ParamName, v: number, h: number) =>
-            valueToYImpl({ paramViewsRef, pitchViewRef, processorParamsRef }, param, v, h),
-        [processorParamsRef],
-    );
-
+    const { valueToY, yToValue } = usePianoRollProjection({
+        paramAxisDirectionsRef,
+        paramViewsRef,
+        pitchViewRef,
+        processorParamsRef,
+    });
     const yToViewportT = yToViewportTImpl;
-
-    const yToValue = useCallback(
-        (param: ParamName, y: number, h: number) =>
-            yToValueImpl({ paramViewsRef, pitchViewRef, processorParamsRef }, param, y, h),
-        [processorParamsRef],
-    );
 
     function clampViewport(param: ParamName, v: ValueViewport): ValueViewport {
         return clampViewportImpl({ processorParamsRef }, param, v);
@@ -1723,24 +1705,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         );
     }
 
-    /**
-     * 把值域视口同步到竖向滚动位置（值域 → 像素）。
-     *
-     * 流程：钳制视口 → 更新内核数据镜像的值域 → 把 `center` 交给滚动载体。
-     *
-     * 特殊说明 1：滚动载体是内核宿主。像素域恒为 0..1600，映射由
-     * `verticalScrollTopFromCenter` 单一来源保证。宿主内部自带去重，故无需在这里
-     * 再判一次差值。宿主尚未创建时（挂载期）退回原生 scroller，语义一致。
-     *
-     * 特殊说明 2（**必须先刷新镜像的 span**）：竖向缩放（钢琴键区 alt/ctrl+滚轮）
-     * 只改 `span`，而视口存在 **ref** 里——ref 变更不触发 React 渲染，于是「内核数据
-     * 镜像」那个 effect 不会重跑，内核读到的 `valueDomain.span` 仍是旧值。此时
-     * `setValueCenter` 会按**旧 span** 反算像素位置，结果完全错位（实测：缩放后
-     * nativeTop 直接掉到 0 且再也动不了）。因此这里在提交前就地刷新镜像。
-     *
-     * @param param 参数名（决定值域边界）。
-     * @param view 目标值域视口。
-     */
+    /** 值域视口 → 竖向滚动位置；提交前先刷新镜像 span（竖向缩放只改 ref，不触发镜像 effect）。 */
     function syncVerticalScrollbarForViewport(param: ParamName, view: ValueViewport): void {
         return syncVerticalScrollbarForViewportImpl(
             {
@@ -2159,37 +2124,47 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         if (rootTrackId === null) return [];
         return s.clips.filter((clip) => clip.trackId === rootTrackId);
     }, [rootTrackId, s.clips, trackClips]);
-    /**
-     * 块来源的统一音节区间。
-     *
-     * 时间线刷新可能先更新 active Take 上的缓存，而顶层 `syllableSpansSec` 还是
-     * 旧值；块派生若只读顶层，就会在分析成功后反而得到“尚未分析”并全部隐藏。
-     */
+    /** Block spans whose analyzed window still contains the audible window. */
     const paramBlockSyllableSpans = useMemo(() => {
-        const byClip = new Map<string, { startSec: number; endSec: number }[]>();
+        const byClip = new Map<
+            string,
+            Array<{ startSec: number; endSec: number; note?: number | null }>
+        >();
         for (const clip of paramBlockClips) {
             const activeTake =
                 clip.takes?.find((take) => take.id === clip.activeTakeId) ?? clip.takes?.[0];
             const spans = activeTake?.syllableSpansSec ?? clip.syllableSpansSec;
-            if (spans !== undefined && spans.length > 0) {
-                byClip.set(clip.id, spans);
-            }
+            // Stale windows keep visible spans and only trigger reanalysis.
+            // Stale/missing analysis still draws intersecting full-source events.
+            if (spans?.length) byClip.set(clip.id, spans);
         }
         return byClip;
     }, [paramBlockClips]);
+    useEffect(() => {
+        for (const clip of paramBlockClips) {
+            const take =
+                clip.takes?.find((item) => item.id === clip.activeTakeId) ?? clip.takes?.[0];
+            const analyzed = take?.syllableAnalysisWindowSec ?? clip.syllableAnalysisWindowSec;
+            const spans = take?.syllableSpansSec ?? clip.syllableSpansSec;
+            const audible = audibleSourceWindow(projectionForClip(toParamBlockSourceClip(clip)));
+            if (analysisWindowStatus(audible, analyzed, spans) !== "current") {
+                reportParamBlockDiagnostic({
+                    code: "analysis_window_stale",
+                    gesture: "layout",
+                    rootTrackId,
+                    blockId: null,
+                    frame: null,
+                    detail: JSON.stringify({
+                        clipId: clip.id,
+                        window: [audible.startSec, audible.endSec],
+                        analyzed,
+                    }),
+                });
+            }
+        }
+    }, [paramBlockClips, rootTrackId]);
 
-    /**
-     * 拖拽期间的响度时域映射：把「快照所依据的几何」与当前几何的差分，应用到基线 /
-     * 曲线（见 `loudnessGeometryWarp` 的文件头）。
-     *
-     * 【为什么只取本轨道组的 clip】原声基线是**按根轨道组**组装的；别的轨道组的
-     * clip 与本组基线无关，把它们的映射算进来会错误地搬移本组曲线。`trackClips`
-     * 已按 `groupTrackIds` 过滤，正好是基线的参与集合。
-     *
-     * 【为什么在渲染期判定收尾】`warpSettled` 只依赖"当前快照的溯源键"这一个事实，
-     * 因此它翻转的那次渲染**就是**新快照生效的那次渲染：映射在同一次提交里变成
-     * `null`，`pianoRollAmplitudeMap` 也在同一次提交里换新 —— 不存在中间帧。
-     */
+    /** Drag-time loudness warp from the frozen geometry to the current one. */
     const loudnessSnapshotKey = loudnessSnapshot?.baselineKey ?? null;
     // 非收尾期：基准跟随最新快照。拖拽期间后端几何被冻结，期间落地的快照同样是
     // "按下之前"的几何，对它可以安全地继续套用映射（不 re-base 会让映射平白失效）。
@@ -2284,7 +2259,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         clearLiveEditOverride,
         commitStroke,
         onParamCommitSucceeded,
-        detectedPitchCurves,
+        clipPitchOverlays,
         referencePitchOverlays,
         buildCurveLayers,
         buildSelectionBandSpec,
@@ -2300,6 +2275,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         scrollLeft,
         viewSize,
         editParam,
+        // 视图菜单的显示开关（持久化在 UI 设置里，不进工程）。
+        clipPitchOverlayVisible: s.showClipPitchOverlay,
+        currentParamDefaultValue,
         pitchEnabled,
         pitchHardDisableReason,
         childPitchHardDisableReason,
@@ -2390,6 +2368,14 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      */
     const paramBlockDragCommitRef = useRef<ParamBlockDragCommit | null>(null);
     const paramBlockDragCommitReleaseRafRef = useRef<number | null>(null);
+    /** 块手势是否进行中；只用于保护曲线悬停读数的所有权。 */
+    const isParamBlockGestureActive = useCallback(
+        () =>
+            paramBlockDragActivityRef.current.pointerGestureToken !== null ||
+            paramBlockDragActivityRef.current.pendingCommits > 0 ||
+            paramBlockResizeRef.current !== null,
+        [],
+    );
     /** Pointer activity and queued writes independently hold the refresh guard. */
     const paramBlockDragActivityRef = useRef<ParamBlockDragActivity>({
         pointerGestureToken: null,
@@ -2562,6 +2548,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         pitchEnabled,
         toolMode: s.toolMode,
         paramBlockToolActive,
+        isParamBlockGestureActive,
         rangeToolActive,
         framePeriodMs: paramView?.framePeriodMs ?? 5,
         dynamicProjectSec,
@@ -2578,6 +2565,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         setParamViewport,
         pitchViewRef,
         paramViewsRef,
+        paramAxisDirectionsRef,
         scrollerRef,
         canvasRef,
         viewSizeRef,
@@ -2707,6 +2695,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         syncScrollLeftRef,
         pitchViewRef,
         paramViewsRef,
+        paramAxisDirectionsRef,
+        editParamAxisDirection,
         processorParamsRef,
         processorParams,
         invalidate,
@@ -2843,13 +2833,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     // Pitch Snap 设置弹窗状态
     const [pitchSnapOpen, setPitchSnapOpen] = useState(false);
 
-    /**
-     * 块层是否应当绘制。**唯一派生点**在 isParamBlockLayerVisible。
-     *
-     * 【为什么面板里还要再算一次】面板需要的是「现在画不画」，不是设置值；把派生
-     * 放在这里而不是每个消费者各算，是因为下面有 7 处读它（宿主绘制、持久化开关、
-     * 自动分析、spec memo、drag snapshot、布局 effect、拖动快照）。
-     */
+    /** 块层是否绘制：唯一派生点是 isParamBlockLayerVisible；面板要的是「现在画不画」。 */
     const alwaysShowParamBlocks = s.alwaysShowParamBlocks;
     const paramBlocksLayerVisible = isParamBlockLayerVisible({
         alwaysShowParamBlocks,
@@ -2966,12 +2950,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         ],
     );
     const paramBlockEpochRef = useLatestRef(paramBlockEpoch);
-    /** 与派生视图同源的 clip 快照；编辑函数按它把源域区间拆开 / 合并。 */
+    /** Clip snapshot used by editing functions to split/merge source spans. */
     const paramBlockSourceClipsRef = useRef(paramBlockSourceClips);
     useLayoutEffect(() => {
         paramBlockSourceClipsRef.current = paramBlockSourceClips;
     }, [paramBlockSourceClips]);
-    /** Compose the live edit set instead of reading a possibly stale view ref. */
+    /** Recompose from the live edit set, never a stale view ref. */
     const composeParamBlockViewNow = useCallback((): ParamBlockView | null => {
         if (rootTrackId === null) return null;
         const state = paramBlockStateRef.current;
@@ -3131,7 +3115,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         dispatch(toggleAlwaysShowParamBlocksAction());
         void dispatch(persistUiSettings());
     }, [dispatch]);
-    /** 每个 Clip 在本面板会话内的自动分析尝试（只拦自动路径，手动重分析不受影响）。 */
+    /** Per-session auto-analysis attempts; manual refresh is never blocked. */
     const autoAnalysisAttemptsRef = useRef<Set<string>>(new Set());
     /** 上一轮"有音节区间"的 Clip 集合；用于发现分析结果被意外清空。 */
     const analyzedClipIdsRef = useRef<Set<string>>(new Set());
@@ -3144,18 +3128,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             autoAnalysisRootRef.current = null;
         };
     }, [paramBlocksLayerVisible, pitchEnabled, rootTrackId]);
-    /*
-     * 【安全网】某条 Clip "曾经有音节区间、现在没有" = 分析结果被某条路径清掉了
-     * （撤销跨过分析完成点曾经是主要来源）。把自动分析的"已尝试"记录删掉，让它
-     * 重跑一次 —— 否则块会整片消失而且永远不会自己回来。
-     *
-     * 后端已修好（撤销时按素材身份搬运分析），所以正常路径下这里一次都不触发；
-     * 代价只在真的丢了的时候才付（一次模型推理）。
-     *
-     * 【为什么必须排在分析 effect 之前】effect 按声明顺序执行：先删记录、再判
-     * "要不要分析"，同一次提交里就能补上。反过来的话 ref 变更不会触发渲染，
-     * 分析要等到下一次无关的重渲染才会重试。
-     */
+    /** Geometry/window changes create a fresh request key; stale results stay visible. */
     useEffect(() => {
         const current = new Set(paramBlockSyllableSpans.keys());
         for (const clipId of analyzedClipIdsRef.current) {
@@ -3231,6 +3204,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 const tx = paramBlockVisualTransactionRef.current;
                 if (tx === null) return;
                 tx.curveRevisionCommitted = curveRevision;
+            },
+            onLocalStructureCommitted: (edits) => {
+                paramBlockVisualTransactionRef.current = adoptParamBlockVisualStructureAfterEdits(
+                    paramBlockVisualTransactionRef.current,
+                    edits,
+                );
             },
         });
 
@@ -3342,24 +3321,22 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
          * 携带 Compose 时直接不分析：块是音高编辑的一部分，不能为一个
          * 不参与合成的轨道凭空消耗模型推理。
          */
-        const audioClips =
-            blocksEnabled && pitchEnabled
-                ? paramBlockClips.filter(
-                      (clip) =>
-                          clip.trackId.length > 0 &&
-                          (clip.midiNoteData?.length ?? 0) === 0 &&
-                          !paramBlockSyllableSpans.has(clip.id) &&
-                          Boolean(clip.sourcePath) &&
-                          !autoAnalysisAttemptsRef.current.has(clip.id),
-                  )
-                : [];
-        for (const clip of audioClips) autoAnalysisAttemptsRef.current.add(clip.id);
+        const { clips: audioClips, keysByClipId: staleKeys } = paramBlockStaleAnalysisCandidates({
+            clips: blocksEnabled && pitchEnabled ? paramBlockClips : [],
+            rootTrackId,
+            framePeriodMs: paramBlockView?.framePeriodMs ?? 5,
+            attemptedKeys: autoAnalysisAttemptsRef.current,
+        });
+        for (const key of staleKeys.values()) autoAnalysisAttemptsRef.current.add(key);
         if (audioClips.length === 0) return;
         void autoAnalysisQueueRef.current
             .runBatch({
                 clips: audioClips,
                 shouldStart: () => autoAnalysisRootRef.current === rootTrackId,
-                onSkipped: (clip) => autoAnalysisAttemptsRef.current.delete(clip.id),
+                onSkipped: (clip) => {
+                    const key = staleKeys.get(clip.id);
+                    if (key !== undefined) autoAnalysisAttemptsRef.current.delete(key);
+                },
                 onStart: (clip) =>
                     publishBlockAnalysisProgress({
                         active: true,
@@ -3380,8 +3357,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             })
             .then((results) => {
                 if (autoAnalysisRootRef.current === rootTrackId) publishBlockAnalysisProgress(null);
-                for (const result of results)
-                    if (!result.analyzed) autoAnalysisAttemptsRef.current.delete(result.clipId);
+                for (const result of results) {
+                    if (!result.analyzed) {
+                        const key = staleKeys.get(result.clipId);
+                        if (key !== undefined) autoAnalysisAttemptsRef.current.delete(key);
+                    }
+                }
             });
         // eslint-disable-next-line react-hooks/exhaustive-deps -- blockPersistence 是稳定 facade；依赖其具体方法。
     }, [
@@ -3412,10 +3393,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         // eslint-disable-next-line react-hooks/exhaustive-deps -- blockPersistence 是稳定 facade；只读其 persist 方法。
         [blockPersistence.persist],
     );
-    /*
-     * 面板块 = 派生视图 + 当前参数曲线。视图随 clip 变化自动重算，所以 Clip
-     * 拖动期间块会平滑跟随，不需要任何"本地重投影"或回读补丁。
-     */
+    /** Panel blocks = derived view + current parameter curve. */
     const paramBlocksForPanel = useMemo(
         () => materializeParamBlocks({ rootTrackId: rootTrackId ?? "", view: paramBlockView }),
         [rootTrackId, paramBlockView],
@@ -3431,11 +3409,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             paramBlockValueCacheKeyRef.current === cacheKey
                 ? paramBlockValueCacheRef.current
                 : undefined;
-        /*
-         * canonical 块绝不猜测中心：没有采样、没有缓存、也没有手动值时保持
-         * `averageValue === null`，由宿主跳过绘制。值域中点只允许显式 opt-in
-         * 的预览分支使用（见 `resolveParamBlockPanelValues`）。
-         */
+        // Fallbacks are display-only; never borrow the viewport midpoint.
         return resolveParamBlockPanelValues({
             blocks: paramBlocksForPanel,
             param: editParam,
@@ -3443,11 +3417,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             fallbackValue: 0,
             previousValues,
             allowFallback: false,
+            currentParamDefaultValue,
         });
-    }, [editParam, paramBlocksForPanel, paramView, rootTrackId]);
+    }, [currentParamDefaultValue, editParam, paramBlocksForPanel, paramView, rootTrackId]);
     useLayoutEffect(() => {
         const cacheKey = `${rootTrackId ?? ""}|${editParam}`;
-        const currentIds = new Set(paramBlocksForPanel.map((block) => block.id));
+        const currentIds = new Set(paramBlocksForPanel.map((block) => logicalBlockKey(block)));
         const next = new Map<string, ParamBlockCachedValue>();
         if (paramBlockValueCacheKeyRef.current === cacheKey) {
             for (const [id, cached] of paramBlockValueCacheRef.current) {
@@ -3462,7 +3437,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 block.averageValue !== null &&
                 Number.isFinite(block.averageValue)
             ) {
-                next.set(block.id, {
+                next.set(logicalBlockKey(block), {
                     value: block.averageValue,
                     startSec: block.startSec,
                     endSec: block.endSec,
@@ -4875,6 +4850,13 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                     });
                                     if (created.ok) {
                                         setParamBlockState(created.state);
+                                        paramBlockVisualTransactionRef.current =
+                                            adoptParamBlockVisualStructureAfterCreate(
+                                                paramBlockVisualTransactionRef.current,
+                                                created.state.editSet,
+                                                createId,
+                                                paramBlockResizeRef,
+                                            );
                                     } else applyParamBlockEditRef.current?.(created);
                                     preserveCreatePreview = created.ok;
                                     /*
@@ -5405,6 +5387,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                             const state = paramBlockStateRef.current;
                             const next: ParamBlockState = { ...state, editSet: plan.edits };
                             setParamBlockState(next);
+                            paramBlockVisualTransactionRef.current =
+                                adoptParamBlockVisualStructureAfterEdits(
+                                    paramBlockVisualTransactionRef.current,
+                                    next.editSet,
+                                );
                             persistParamBlockEdits(next);
                             if (plan.removedIds.includes(gestureRef.blockId)) {
                                 paramBlockAnchorRef.current = null;
@@ -6976,6 +6963,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         attachRulerPlayheadLine,
         attachVerticalScrollbarTrack,
         axisCanvasRef,
+        axisPanDirectionToggleAvailable,
+        axisToggleAvailable,
         axisUnitToggleAvailable,
         axisValuePreview,
         axisWrapRef,
@@ -6984,8 +6973,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         captureBandsRef,
         clipPeaks,
         contentWidth,
+        canFlipParam: supportsParamFlip(currentParamRange, currentParamDefaultValue),
         currentParamRange,
         dynamicProjectSec,
+        editParamAxisDirection,
         editParamAxisUnit,
         effectiveProjectScale,
         formatParamValuePreview,
@@ -7091,7 +7082,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         buildSelectionBandSpec,
         childPitchHardDisableReason,
         clampViewport,
-        detectedPitchCurves,
+        clipPitchOverlays,
         fontFamily,
         getCurrentViewportForScrollbar,
         getParamValueBoundsForScrollbar,

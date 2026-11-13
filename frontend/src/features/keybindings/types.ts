@@ -38,7 +38,10 @@ export type ActionId =
     | "project.new" // 新建工程
     | "project.open" // 打开工程
     | "project.save" // 保存
-    | "project.saveAs" // 另存为
+    | "project.saveAs" // 另存为（按上次格式）
+    | "project.saveAsHshp" // 另存为 HiFiShifter 工程（默认无绑定）
+    | "project.saveAsJson" // 另存为 JSON 工程（默认无绑定）
+    | "project.saveAsZip" // 另存为归档压缩包（默认无绑定）
     | "project.export" // 导出音频
     | "project.importMedia" // 导入媒体文件
     | "project.importMidi" // 导入 MIDI

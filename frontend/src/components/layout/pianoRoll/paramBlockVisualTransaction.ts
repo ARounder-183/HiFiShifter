@@ -8,6 +8,8 @@
  * `paramBlockStructureToken`.
  */
 import type { PianoRollParamBlockSpec } from "./kernel/host/pianoRollKernelData";
+import { paramBlockStructureToken } from "./paramBlockStructureToken";
+import type { ParamBlockEditSet } from "./paramBlockTypes";
 
 export interface ParamBlockEpoch {
     readonly rootTrackId: string | null;
@@ -113,6 +115,49 @@ export function isParamBlockVisualEpochCurrent(args: {
         sameParamBlockEpochLayout(args.epoch, args.current) &&
         args.epoch.structureToken === args.current.structureToken
     );
+}
+
+/**
+ * 本地结构提交成功后，把事务 epoch 的结构令牌推进到“这次提交后的预期令牌”。
+ *
+ * 只替换 structureToken；layoutKey / externalHistoryToken / param / framePeriodMs
+ * 必须保持手势起点的值，否则会把提交期间发生的第三方布局/历史变化一起接受。
+ */
+export function adoptParamBlockVisualStructure(
+    tx: ParamBlockVisualTransaction | null,
+    structureToken: string,
+): ParamBlockVisualTransaction | null {
+    if (tx === null) return null;
+    return {
+        ...tx,
+        epoch: { ...tx.epoch, structureToken },
+    };
+}
+
+/** 本地结构提交后推进事务与新建预览的 structureToken。 */
+export function adoptParamBlockVisualStructureAfterCreate(
+    tx: ParamBlockVisualTransaction | null,
+    edits: ParamBlockEditSet,
+    createId: string,
+    resizeRef: {
+        current: { createdBlockId?: string; epoch?: ParamBlockEpoch } | null;
+    },
+): ParamBlockVisualTransaction | null {
+    const structureToken = paramBlockStructureToken(edits);
+    const next = adoptParamBlockVisualStructure(tx, structureToken);
+    const resizing = resizeRef.current;
+    if (resizing?.createdBlockId === createId && resizing.epoch !== undefined) {
+        resizeRef.current = { ...resizing, epoch: { ...resizing.epoch, structureToken } };
+    }
+    return next;
+}
+
+/** 本地 resize / transition 提交后只推进 structureToken。 */
+export function adoptParamBlockVisualStructureAfterEdits(
+    tx: ParamBlockVisualTransaction | null,
+    edits: ParamBlockEditSet,
+): ParamBlockVisualTransaction | null {
+    return adoptParamBlockVisualStructure(tx, paramBlockStructureToken(edits));
 }
 
 export function shouldUseParamBlockVisualTransaction(

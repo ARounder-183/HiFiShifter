@@ -40,6 +40,11 @@ import {
     resolveParamAxisUnit,
     supportsParamAxisUnit,
 } from "../../components/layout/pianoRoll/paramAxisUnits";
+import {
+    isPanParam,
+    nextPanAxisDirection,
+    resolvePanAxisDirection,
+} from "../../components/layout/pianoRoll/paramPan";
 import type { CustomScalePreset } from "../../utils/customScales";
 import { sanitizeCustomScalePreset } from "../../utils/customScales";
 import {
@@ -62,6 +67,7 @@ import type { TempoMap } from "../../utils/tempoMap";
 import { clampDenominator, normalizeTempoMap } from "../../utils/tempoMap";
 import { markProjectDirty } from "./sessionDirtyState";
 import type { ClipColor, StretchAlgorithmOption } from "./sessionSlice/types";
+import type { ProjectSaveFormat } from "../../services/api/project";
 import { resolveTrackIdForClipSelection } from "./selectionFocus";
 import { applyHistoryDepths } from "./sessionSlice/history";
 import { applyTimelineState } from "./sessionSlice/helpersTimeline";
@@ -118,7 +124,7 @@ export {
     openReaperFromDialog,
     openReaperFromPath,
     saveProjectRemote,
-    saveProjectAsRemote,
+    saveProjectAsFormat,
     saveProjectToPathRemote,
     setProjectBaseScaleRemote,
     setProjectCustomScaleRemote,
@@ -789,6 +795,10 @@ const sessionSlice = createSlice({
         toggleParamValuePopup(state) {
             state.showParamValuePopup = !state.showParamValuePopup;
         },
+        /** 切换 Clip 源音高参考线图层（视图菜单的显示开关，默认开）。 */
+        toggleClipPitchOverlay(state) {
+            state.showClipPitchOverlay = !state.showClipPitchOverlay;
+        },
         /**
          * 切换某参数纵轴标尺的展示单位（倍率 ↔ dB）。
          *
@@ -800,6 +810,18 @@ const sessionSlice = createSlice({
             if (!supportsParamAxisUnit(param)) return;
             const next = nextParamAxisUnit(resolveParamAxisUnit(state.paramAxisUnits, param));
             state.paramAxisUnits = { ...state.paramAxisUnits, [param]: next };
+        },
+        /** 切换 pan 纵轴方向；其它参数静默忽略。 */
+        setProjectLastSaveFormat(state, action: PayloadAction<ProjectSaveFormat>) {
+            state.project.lastSaveFormat = action.payload;
+        },
+        toggleParamAxisDirection(state, action: PayloadAction<string>) {
+            const param = action.payload;
+            if (!isPanParam(param)) return;
+            const next = nextPanAxisDirection(
+                resolvePanAxisDirection(state.paramAxisDirections, param),
+            );
+            state.paramAxisDirections = { ...state.paramAxisDirections, [param]: next };
         },
         cycleDragDirection(state, action: PayloadAction<"select" | "draw" | "vibrato">) {
             if (action.payload === "select") {
@@ -1292,7 +1314,10 @@ export const {
     toggleParamEditorTimelineClickSelectTrack,
     toggleClipboardPreview,
     toggleParamValuePopup,
+    toggleClipPitchOverlay,
     toggleParamAxisUnit,
+    toggleParamAxisDirection,
+    setProjectLastSaveFormat,
     cycleDragDirection,
     setDragDirection,
     setEdgeSmoothnessPercent,

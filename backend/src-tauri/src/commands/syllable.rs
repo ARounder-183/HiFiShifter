@@ -1,7 +1,7 @@
 //! Clip 音节块的查询与按需重分析。
 
 use crate::state::AppState;
-use hifishifter_kernel::param_blocks::source_digest;
+use hifishifter_kernel::param_blocks::{merge_game_baseline, source_digest};
 use hifishifter_kernel::pitch_analysis::syllable::{
     estimate_syllable_spans, SyllableConfig, TakeSyllableAnalysis, SYLLABLE_ALGORITHM,
     SYLLABLE_ALGORITHM_VERSION,
@@ -18,6 +18,8 @@ use tauri::{Emitter, Manager};
 pub struct SyllableSpanPayload {
     pub start_sec: f64,
     pub end_sec: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub midi_note: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -28,6 +30,9 @@ pub struct ClipSyllableAnalysisPayload {
     pub take_id: String,
     /// 分析所得源域区间；为空表示回退整段一个块。
     pub source_spans_sec: Vec<SyllableSpanPayload>,
+    /// Parallel array of source notes (legacy readers only use `source_spans_sec`).
+    pub source_notes: Vec<Option<f32>>,
+    pub analyzed_window_sec: [f64; 2],
     pub algorithm: String,
     pub algorithm_version: u32,
     pub analyzed: bool,
@@ -41,6 +46,7 @@ fn payload(
     clip: &crate::state::Clip,
     take_id: &str,
     analysis: Option<&TakeSyllableAnalysis>,
+    window: [f64; 2],
 ) -> ClipSyllableAnalysisPayload {
     let spans = analysis
         .map(|a| {
@@ -49,6 +55,7 @@ fn payload(
                 .map(|s| SyllableSpanPayload {
                     start_sec: s.start_sec,
                     end_sec: s.end_sec,
+                    midi_note: s.midi_note,
                 })
                 .collect()
         })
@@ -57,6 +64,10 @@ fn payload(
         ok: true,
         clip_id: clip.id.clone(),
         take_id: take_id.to_string(),
+        source_notes: analysis
+            .map(|a| a.source_spans_sec.iter().map(|s| s.midi_note).collect())
+            .unwrap_or_default(),
+        analyzed_window_sec: analysis.map_or(window, |a| a.analyzed_window_sec),
         source_spans_sec: spans,
         algorithm: analysis
             .map(|a| a.algorithm.clone())
@@ -101,11 +112,12 @@ pub(super) fn get_clip_syllable_spans(
     let take = clip.active_take();
     let fp = tl.frame_period_ms();
     let digest = source_digest(clip, fp);
+    let window = hifishifter_kernel::param_blocks::projection::clip_audible_source_window(clip);
     let analysis = take
         .syllable_analysis
         .as_ref()
-        .filter(|a| a.is_current(&digest));
-    Ok(payload(clip, &take.id, analysis))
+        .filter(|a| a.is_current_for_window(&digest, window));
+    Ok(payload(clip, &take.id, analysis, [window.0, window.1]))
 }
 
 /// 显式重分析：使用现有电平 / 音高缓存；F0 缺失时仍只靠电平估计。
@@ -153,6 +165,7 @@ fn analyze_clip_syllables_inner(
     };
     let tl = tl_snapshot;
     let take = clip.active_take().clone();
+    let window = hifishifter_kernel::param_blocks::projection::clip_audible_source_window(&clip);
     let fp = tl.frame_period_ms().max(0.1);
     let digest = source_digest(&clip, fp);
     let root = tl.resolve_root_track_id(&clip.track_id).unwrap_or_default();
@@ -160,7 +173,14 @@ fn analyze_clip_syllables_inner(
     // MIDI 内容已有精确音符边界；不要用音频估计覆盖它。
     if take.midi_note_data.as_ref().is_some_and(|n| !n.is_empty()) || clip.source_path.is_none() {
         set_syllable_analysis_progress(None);
-        return Ok(payload(&clip, &take.id, take.syllable_analysis.as_ref()));
+        let window =
+            hifishifter_kernel::param_blocks::projection::clip_audible_source_window(&clip);
+        return Ok(payload(
+            &clip,
+            &take.id,
+            take.syllable_analysis.as_ref(),
+            [window.0, window.1],
+        ));
     }
     /*
      * 幂等：时间线刷新可能在同一 Clip 上重复发起分析。已有当前缓存时
@@ -169,15 +189,19 @@ fn analyze_clip_syllables_inner(
     if let Some(analysis) = take
         .syllable_analysis
         .as_ref()
-        .filter(|a| a.is_current(&digest))
+        .filter(|a| a.is_current_for_window(&digest, window))
     {
         if !analysis.source_spans_sec.is_empty() {
             set_syllable_analysis_progress(None);
-            return Ok(payload(&clip, &take.id, Some(analysis)));
+            return Ok(payload(
+                &clip,
+                &take.id,
+                Some(analysis),
+                [window.0, window.1],
+            ));
         }
     }
 
-    let window = hifishifter_kernel::state::clip_playback_window_sec(&clip);
     set_syllable_analysis_progress(Some(SyllableAnalysisProgress {
         active: true,
         clip_id: clip.id.clone(),
@@ -206,11 +230,13 @@ fn analyze_clip_syllables_inner(
                 message: None,
             }));
             (
-                hifishifter_kernel::game_onnx::syllable_spans_for_window(
-                    &events,
-                    window.0.min(window.1),
-                    window.0.max(window.1),
-                ),
+                hifishifter_kernel::game_onnx::full_source_voiced_spans(&events)
+                    .into_iter()
+                    .filter(|(start, end, _)| {
+                        *end > window.0.min(window.1) && *start < window.0.max(window.1)
+                    })
+                    .map(|(start, end, note)| (start, end, Some(note)))
+                    .collect(),
                 hifishifter_kernel::game_onnx::GAME_ALGORITHM.to_string(),
                 hifishifter_kernel::game_onnx::GAME_ALGORITHM_VERSION,
             )
@@ -228,20 +254,27 @@ fn analyze_clip_syllables_inner(
             algorithm,
             algorithm_version: version,
             source_digest: digest.clone(),
-            source_spans_sec: spans
-                .into_iter()
-                .map(
-                    |(start_sec, end_sec)| hifishifter_kernel::pitch_analysis::SyllableSpan {
-                        start_sec,
-                        end_sec,
-                    },
-                )
-                .collect(),
+            source_spans_sec: hifishifter_kernel::pitch_analysis::normalize_source_spans(
+                spans
+                    .into_iter()
+                    .map(
+                        |(start, end, note)| hifishifter_kernel::pitch_analysis::SyllableSpan {
+                            start_sec: start,
+                            end_sec: end,
+                            midi_note: note,
+                            event_id: None,
+                        },
+                    )
+                    .collect(),
+            ),
+            analyzed_window_sec: [window.0.min(window.1), window.0.max(window.1)],
         })
     };
     let result = {
         let mut guard = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-        commit_analysis_metadata(&mut guard, &clip.id, &take.id, &digest, fp, analysis)
+        commit_analysis_metadata(
+            &mut guard, &clip.id, &take.id, &digest, fp, window, analysis,
+        )
     };
     set_syllable_analysis_progress(None);
     let reply = result?;
@@ -269,6 +302,7 @@ fn commit_analysis_metadata(
     take_id: &str,
     digest: &str,
     frame_period_ms: f64,
+    window: (f64, f64),
     analysis: Option<TakeSyllableAnalysis>,
 ) -> Result<ClipSyllableAnalysisPayload, String> {
     let clip = timeline
@@ -286,22 +320,29 @@ fn commit_analysis_metadata(
         .ok_or("stale syllable analysis result: take removed")?;
     // An empty detector result must not wipe a previously completed cache.
     if let Some(analysis) = analysis {
-        // GAME 第一次成功时冻结源域基线；“还原 GAME 分段”从它生成用户块，
-        // 后续重分析不会破坏还原结果。
-        if analysis.algorithm == hifishifter_kernel::game_onnx::GAME_ALGORITHM
-            && take.game_block_baseline.is_none()
-        {
-            take.game_block_baseline = Some(hifishifter_kernel::param_blocks::GameBlockBaseline {
-                revision: 1,
-                algorithm: analysis.algorithm.clone(),
-                algorithm_version: analysis.algorithm_version,
-                source_spans_sec: analysis.source_spans_sec.clone(),
-            });
+        // The baseline is a source-domain snapshot: widening the analyzed
+        // window appends only the newly discovered spans, preserving user
+        // "restore GAME segmentation" results across reanalysis.
+        if analysis.algorithm == hifishifter_kernel::game_onnx::GAME_ALGORITHM {
+            merge_game_baseline(
+                &mut take.game_block_baseline,
+                &analysis.algorithm,
+                analysis.algorithm_version,
+                [window.0.min(window.1), window.0.max(window.1)],
+                &analysis.source_spans_sec,
+            );
         }
         take.syllable_analysis = Some(analysis);
     }
     let projected_clip = clip.clone();
-    let mut reply = payload(clip, take_id, clip.active_take().syllable_analysis.as_ref());
+    let reply_window =
+        hifishifter_kernel::param_blocks::projection::clip_audible_source_window(clip);
+    let mut reply = payload(
+        clip,
+        take_id,
+        clip.active_take().syllable_analysis.as_ref(),
+        [reply_window.0, reply_window.1],
+    );
     if let Some(root) = timeline.resolve_root_track_id(&projected_clip.track_id) {
         let edits = timeline
             .params_by_root_track
@@ -331,7 +372,7 @@ fn fallback_vad_spans(
     clip: &crate::state::Clip,
     root: &str,
     fp: f64,
-) -> (Vec<(f64, f64)>, String, u32) {
+) -> (Vec<(f64, f64, Option<f32>)>, String, u32) {
     set_syllable_analysis_progress(Some(SyllableAnalysisProgress {
         active: true,
         clip_id: clip.id.clone(),
@@ -343,15 +384,21 @@ fn fallback_vad_spans(
     }));
     let (level, pitch) =
         crate::pitch_clip::analyze_clip_for_syllables(tl, clip, root, fp).unwrap_or_default();
+    let window = hifishifter_kernel::param_blocks::projection::clip_audible_source_window(clip);
     let spans = if level.is_empty() {
         Vec::new()
     } else {
         estimate_syllable_spans(&level, &pitch, fp, SyllableConfig::default())
+            .into_iter()
+            .filter(|span| {
+                span.end_sec > window.0.min(window.1) && span.start_sec < window.0.max(window.1)
+            })
+            .collect()
     };
     (
         spans
             .into_iter()
-            .map(|span| (span.start_sec, span.end_sec))
+            .map(|span| (span.start_sec, span.end_sec, span.midi_note))
             .collect(),
         SYLLABLE_ALGORITHM.to_string(),
         SYLLABLE_ALGORITHM_VERSION,
@@ -369,6 +416,29 @@ mod tests {
                 "takes":[{"id":"take","source_path":"a.wav","source_start_sec":0,"source_end_sec":1}]}],
             "project_sec":2,"bpm":120
         })).unwrap()
+    }
+
+    #[test]
+    fn strict_analysis_payload_always_has_a_window_and_parallel_notes() {
+        let clip = timeline().clips[0].clone();
+        let empty = payload(&clip, "take", None, [0.0, 1.0]);
+        assert_eq!(empty.source_notes.len(), empty.source_spans_sec.len());
+        assert!(!empty.analyzed);
+        let analysis = TakeSyllableAnalysis {
+            algorithm: "test".into(),
+            algorithm_version: 1,
+            source_digest: "d".into(),
+            source_spans_sec: vec![hifishifter_kernel::pitch_analysis::SyllableSpan {
+                start_sec: 1.0,
+                end_sec: 1.4,
+                midi_note: Some(64.0),
+                event_id: Some(crate::pitch_analysis::source_event_id(1.0, 1.4)),
+            }],
+            analyzed_window_sec: [1.0, 3.0],
+        };
+        let reply = payload(&clip, "take", Some(&analysis), [1.0, 3.0]);
+        assert_eq!(reply.source_notes, vec![Some(64.0)]);
+        assert_eq!(reply.analyzed_window_sec, [1.0, 3.0]);
     }
 
     #[test]
@@ -393,22 +463,38 @@ mod tests {
             source_spans_sec: vec![hifishifter_kernel::pitch_analysis::SyllableSpan {
                 start_sec: 0.0,
                 end_sec: 1.0,
+                midi_note: None,
+                event_id: Some(crate::pitch_analysis::source_event_id(0.0, 1.0)),
             }],
+            analyzed_window_sec: [0.0, 0.0],
         };
-        let reply =
-            commit_analysis_metadata(&mut live, "clip", "take", &digest, 5.0, Some(analysis))
-                .unwrap();
+        let reply = commit_analysis_metadata(
+            &mut live,
+            "clip",
+            "take",
+            &digest,
+            5.0,
+            (0.0, 1.0),
+            Some(analysis),
+        )
+        .unwrap();
         assert!(reply.analyzed);
         assert_eq!(live.clips.len(), 2);
         assert_eq!(live.clips[0].name, "Edited during inference");
         assert_eq!(live.clips[0].start_sec, 0.25);
         assert_eq!(live.params_by_root_track["root"].pitch_edit[0], 67.0);
-        assert!(
-            !commit_analysis_metadata(&mut live, "clip", "take", &digest, 5.0, None)
-                .unwrap()
-                .source_spans_sec
-                .is_empty()
-        );
+        assert!(!commit_analysis_metadata(
+            &mut live,
+            "clip",
+            "take",
+            &digest,
+            5.0,
+            (0.0, 1.0),
+            None,
+        )
+        .unwrap()
+        .source_spans_sec
+        .is_empty());
     }
 
     #[test]
@@ -417,11 +503,26 @@ mod tests {
         live.clips[0].normalize_takes();
         let digest = source_digest(&live.clips[0], 5.0);
         live.clips[0].source_path = Some("changed.wav".into());
-        assert!(commit_analysis_metadata(&mut live, "clip", "take", &digest, 5.0, None).is_err());
+        assert!(commit_analysis_metadata(
+            &mut live,
+            "clip",
+            "take",
+            &digest,
+            5.0,
+            (0.0, 1.0),
+            None
+        )
+        .is_err());
         live.clips[0].source_path = Some("a.wav".into());
-        assert!(
-            commit_analysis_metadata(&mut live, "clip", "removed-take", &digest, 5.0, None)
-                .is_err()
-        );
+        assert!(commit_analysis_metadata(
+            &mut live,
+            "clip",
+            "removed-take",
+            &digest,
+            5.0,
+            (0.0, 1.0),
+            None,
+        )
+        .is_err());
     }
 }

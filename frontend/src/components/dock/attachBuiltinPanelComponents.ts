@@ -9,11 +9,11 @@
  * 本模块只在**渲染入口**调用：主窗口 `App.tsx` 与独立窗口 `detachedMain.tsx`。
  * 独立窗口是另一个 JS 上下文，必须自己装配一次。
  *
- * 【为什么只有这三个面板】它们是自包含的（不接收外部 props），因此可以走注册
- * 中心的 `component` 通道。时间轴与参数编辑器需要 `App.tsx` 提供的约 40 个
- * props，只能走 `setPanelRenderer`（见 `panelRenderer.ts` 的说明）。
+ * 文件浏览器 / 记事本 / 撤销历史是自包含的；参数编辑器额外有一个只接
+ * `formId` 的卫星包装（`PianoRollPanel` 的状态来自 Redux）。时间轴需要
+ * `App.tsx` 提供的约 40 个 props，仍只能走 `setPanelRenderer`。
  */
-import { lazy } from "react";
+import { createElement, lazy } from "react";
 
 import { setPanelComponent } from "../../features/dock/panelRegistry";
 import { FileBrowserPanel } from "../layout/FileBrowserPanel";
@@ -29,7 +29,21 @@ const NotebookPanel = lazy(() =>
         default: module.NotebookPanel,
     })),
 );
-import { PANEL_FILE_BROWSER, PANEL_NOTEBOOK, PANEL_UNDO_HISTORY } from "./registerBuiltinPanels";
+import {
+    PANEL_FILE_BROWSER,
+    PANEL_NOTEBOOK,
+    PANEL_PARAM_EDITOR,
+    PANEL_UNDO_HISTORY,
+} from "./registerBuiltinPanels";
+
+const PianoRollPanel = lazy(() =>
+    import("../layout/PianoRollPanel").then((module) => ({ default: module.PianoRollPanel })),
+);
+
+/** 卫星窗口里的参数编辑器：只接 formId，与主窗口的 renderer 保持同一组件。 */
+function DetachedPianoRollPanel({ formId }: { formId: string }) {
+    return createElement(PianoRollPanel, { dockFormId: formId });
+}
 
 let attached = false;
 
@@ -38,6 +52,7 @@ export function attachBuiltinPanelComponents(): void {
     if (attached) return;
     attached = true;
     setPanelComponent(PANEL_FILE_BROWSER, FileBrowserPanel);
+    setPanelComponent(PANEL_PARAM_EDITOR, DetachedPianoRollPanel);
     setPanelComponent(PANEL_NOTEBOOK, NotebookPanel);
     setPanelComponent(PANEL_UNDO_HISTORY, UndoHistoryPanel);
 }

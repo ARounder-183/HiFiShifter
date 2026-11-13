@@ -7,6 +7,7 @@ use hifishifter_kernel::editor::{
     midi_import::MidiImportHost,
     ParamHost,
 };
+use hifishifter_kernel::param_blocks::projection::clip_audible_source_window as clip_audible_window;
 use hifishifter_kernel::state::*;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -238,11 +239,7 @@ enum Job {
     Close,
 }
 
-/// 一次音节分析的**不可变快照**。
-///
-/// 【为什么要在入队前冻结】worker 不许持有 `&EditorSession`，也不能在会话锁内
-/// 解码音频。actor 只取计算需要的 owned 数据；工作线程算完后，提交闸再拿这里的
-/// 身份与当前时间线比对 —— 只有完全一致才允许写回。
+/// Immutable snapshot of one analysis request; the actor validates identity on commit.
 pub(crate) struct SyllableAnalysisRequest {
     pub clip_id: String,
     pub take_id: String,
@@ -250,7 +247,7 @@ pub(crate) struct SyllableAnalysisRequest {
     pub source_digest: String,
     pub frame_period_ms: f64,
     pub root_track_id: String,
-    /// 会话内可见的源域窗口。分析结果在这里裁齐并补间隙。
+    /// Audible source window for this analysis request.
     pub source_window: (f64, f64),
     /// worker 用的 owned 时间线快照；只包含该 Clip 的几何与源。
     pub snapshot: TimelineState,
@@ -276,10 +273,7 @@ pub(crate) struct SyllableAnalysisCompletion {
     pub result: Result<Value, String>,
 }
 
-/// 在途分析的目标视图。
-///
-/// 【为什么同键只保留一个 sink】前端会因重载/重试重复发同一条命令。相同
-/// Clip/Take 不应并发解码两次；后到的请求挂到同一条任务上，完成时一并回执。
+/// One in-flight analysis per Clip/Take; duplicate requests share its sink.
 struct SyllableAnalysisWaiter {
     id: u64,
     sink: UiSink,
@@ -297,13 +291,12 @@ struct SyllableAnalysisWorkerResult {
     take_id: String,
     #[serde(default)]
     source_spans_sec: Vec<hifishifter_kernel::pitch_analysis::SyllableSpan>,
+    analyzed_window_sec: [f64; 2],
     algorithm: String,
     algorithm_version: u32,
     analyzed: bool,
 }
 
-/// 音节分析结果的身份摘要。
-///
 /// 授权 PCM 的文件名含源身份与样本内容的哈希；临时父目录每个会话都会变化，
 /// 不能参与持久化身份。其他路径仍比较完整路径；此摘要不参与路径授权。
 pub(super) fn syllable_source_digest(
@@ -2812,10 +2805,10 @@ impl EditorSession {
                 track.muted = old.muted;
                 track.solo = old.solo;
             }
-            // Capture rebuilds its Takes from the recording inventory too. Keep
-            // completed analysis only while the authorized source still matches.
+            // Rebuilt Takes keep only source/window-current analysis.
             let frame_period_ms = timeline.frame_period_ms();
             for clip in &mut timeline.clips {
+                let window = clip_audible_window(clip);
                 for take in &mut clip.takes {
                     let source = take
                         .source_path
@@ -2832,7 +2825,7 @@ impl EditorSession {
                             .and_then(|old| old.syllable_analysis.as_ref())
                     });
                     take.syllable_analysis = cached
-                        .filter(|analysis| analysis.is_current(&digest))
+                        .filter(|a| a.is_current_for_window(&digest, window))
                         .cloned();
                 }
             }
@@ -3199,12 +3192,14 @@ impl EditorSession {
         self.check_source(&source_path)?;
         let frame_period_ms = timeline.frame_period_ms().max(0.1);
         let source_digest = syllable_source_digest(&source_path, take, frame_period_ms);
+        let audible_window = clip_audible_window(clip);
         if let Some(analysis) = take
             .syllable_analysis
             .as_ref()
-            .filter(|analysis| analysis.is_current(&source_digest))
+            .filter(|a| a.is_current_for_window(&source_digest, audible_window))
         {
-            let mut value = Self::syllable_reply(clip_id, &take.id, Some(analysis))?;
+            let mut value =
+                Self::syllable_reply(clip_id, &take.id, Some(analysis), audible_window)?;
             if let Some(root) = timeline.resolve_root_track_id(&clip.track_id) {
                 let edits = timeline
                     .params_by_root_track
@@ -3256,7 +3251,7 @@ impl EditorSession {
                 }
             }
         }
-        let (window_start, window_end) = hifishifter_kernel::state::clip_playback_window_sec(clip);
+        let (window_start, window_end) = audible_window;
         let mut snapshot = TimelineState::default();
         snapshot.bpm = timeline.bpm;
         snapshot.project_sec = timeline.project_sec;
@@ -3274,10 +3269,7 @@ impl EditorSession {
             root_track_id: timeline
                 .resolve_root_track_id(&clip.track_id)
                 .unwrap_or_default(),
-            source_window: (
-                window_start.min(window_end).max(0.0),
-                window_start.max(window_end),
-            ),
+            source_window: (window_start.min(window_end), window_start.max(window_end)),
             snapshot,
         };
         self.syllable_flights.lock_or_recover().insert(
@@ -3531,19 +3523,19 @@ impl EditorSession {
         if !parsed.analyzed || spans.is_empty() {
             // 分析没检出发声段时保留现有缓存；前端会按“无区间”回退整段。
             // 不把旧结果清空，避免一次 FCPE 缺席把已保存的块整片抹掉。
-            return Self::syllable_reply(&request.clip_id, &request.take_id, None);
+            return Self::syllable_reply(
+                &request.clip_id,
+                &request.take_id,
+                None,
+                request.source_window,
+            );
         }
         let analysis = hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis {
             algorithm: parsed.algorithm,
             algorithm_version: parsed.algorithm_version,
             source_digest: request.source_digest.clone(),
-            source_spans_sec: spans
-                .into_iter()
-                .map(|span| hifishifter_kernel::pitch_analysis::SyllableSpan {
-                    start_sec: span.start_sec,
-                    end_sec: span.end_sec,
-                })
-                .collect(),
+            source_spans_sec: spans,
+            analyzed_window_sec: parsed.analyzed_window_sec,
         };
         let mut timeline = self.timeline.lock_or_recover();
         let clip = timeline
@@ -3556,15 +3548,15 @@ impl EditorSession {
             .iter_mut()
             .find(|take| take.id == request.take_id)
             .ok_or("stale syllable analysis result: take removed")?;
-        if analysis.algorithm == hifishifter_kernel::game_onnx::GAME_ALGORITHM
-            && take.game_block_baseline.is_none()
-        {
-            take.game_block_baseline = Some(hifishifter_kernel::param_blocks::GameBlockBaseline {
-                revision: 1,
-                algorithm: analysis.algorithm.clone(),
-                algorithm_version: analysis.algorithm_version,
-                source_spans_sec: analysis.source_spans_sec.clone(),
-            });
+        if analysis.algorithm == hifishifter_kernel::game_onnx::GAME_ALGORITHM {
+            let (a, b) = (request.source_window.0, request.source_window.1);
+            hifishifter_kernel::param_blocks::merge_game_baseline(
+                &mut take.game_block_baseline,
+                &analysis.algorithm,
+                analysis.algorithm_version,
+                [a.min(b), a.max(b)],
+                &analysis.source_spans_sec,
+            );
         }
         take.syllable_analysis = Some(analysis.clone());
         let current_clip = clip.clone();
@@ -3588,7 +3580,12 @@ impl EditorSession {
             .get_mut(&root)
             .unwrap()
             .param_block_view = Some(view.clone());
-        let mut reply = Self::syllable_reply(&request.clip_id, &request.take_id, Some(&analysis))?;
+        let mut reply = Self::syllable_reply(
+            &request.clip_id,
+            &request.take_id,
+            Some(&analysis),
+            request.source_window,
+        )?;
         reply["rootTrackId"] = json!(root);
         reply["blockLayout"] = json!(view);
         // Never take `document.edits` while holding `self.timeline`: workspace
@@ -3634,22 +3631,11 @@ impl EditorSession {
         clip_id: &str,
         take_id: &str,
         analysis: Option<&hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis>,
+        window: (f64, f64),
     ) -> Result<Value, String> {
-        Ok(json!({
-            "ok": true,
-            "clipId": clip_id,
-            "takeId": take_id,
-            "sourceSpansSec": analysis.map(|a| a.source_spans_sec.iter().map(|s| {
-                json!({"startSec": s.start_sec, "endSec": s.end_sec})
-            }).collect::<Vec<_>>()).unwrap_or_default(),
-            "algorithm": analysis.map(|a| a.algorithm.clone()).unwrap_or_else(|| {
-                hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM.to_string()
-            }),
-            "algorithmVersion": analysis
-                .map(|a| a.algorithm_version)
-                .unwrap_or(hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION),
-            "analyzed": analysis.is_some(),
-        }))
+        Ok(super::syllable_reply::syllable_reply_payload(
+            clip_id, take_id, analysis, window,
+        ))
     }
 
     /// mute只撤销播放分配，不撤销已经生成的显示波形；take更换/真实删除不沿旧缓存猜。
@@ -4104,6 +4090,7 @@ impl EditorSession {
         let frame_period_ms = timeline.frame_period_ms();
         for clip in &mut timeline.clips {
             let canonical_id = clip.id.strip_prefix(&self.namespace).unwrap_or(&clip.id);
+            let window = clip_audible_window(clip);
             for take in &mut clip.takes {
                 let key = crate::state_channel::TakeSyllableKey {
                     clip_id: canonical_id.to_owned(),
@@ -4123,15 +4110,13 @@ impl EditorSession {
                     .or(clip.source_path.as_deref())
                     .unwrap_or_default();
                 let digest = syllable_source_digest(source, take, frame_period_ms);
-                // Prefer persisted authority; accept the old current-session key
-                // as a fallback. Validate inherited Take caches as well: host
-                // geometry can keep a Take ID while replacing its PCM content.
+                // Persisted authority first; validate source identity and window.
                 take.syllable_analysis = edits
                     .take_syllables
                     .get(&key)
                     .or_else(|| edits.take_syllables.get(&legacy))
                     .or(take.syllable_analysis.as_ref())
-                    .filter(|analysis| analysis.is_current(&digest))
+                    .filter(|a| a.is_current_for_window(&digest, window))
                     .cloned();
             }
         }
@@ -6030,6 +6015,7 @@ pub(crate) mod tests {
             "clipId": clip_id,
             "takeId": take_id,
             "sourceSpansSec": [{"startSec": 0.00002, "endSec": 0.00004}],
+            "analyzedWindowSec": [0.0, 4.0 / 44100.0],
             "algorithm": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM,
             "algorithmVersion": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
             "analyzed": true,
@@ -6127,6 +6113,7 @@ pub(crate) mod tests {
             "clipId": clip_id,
             "takeId": take_id,
             "sourceSpansSec": [{"startSec": 0.1, "endSec": 0.2}],
+            "analyzedWindowSec": [0.0, 1.0],
             "algorithm": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM,
             "algorithmVersion": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
             "analyzed": true,
@@ -7755,7 +7742,10 @@ pub(crate) mod tests {
                 source_spans_sec: vec![hifishifter_kernel::pitch_analysis::SyllableSpan {
                     start_sec: 0.0,
                     end_sec: 0.001,
+                    midi_note: None,
+                    event_id: None,
                 }],
+                analyzed_window_sec: [0.0, 0.0],
             };
             let request = SyllableAnalysisRequest {
                 clip_id: clip.id.clone(),
@@ -7773,7 +7763,8 @@ pub(crate) mod tests {
                 json!({
                     "clipId":clip.id,"takeId":take.id,
                     "algorithm":analysis.algorithm,"algorithmVersion":analysis.algorithm_version,
-                    "sourceSpansSec":[{"startSec":0.0,"endSec":4.0/44100.0}],"analyzed":true
+                    "sourceSpansSec":[{"startSec":0.0,"endSec":4.0/44100.0}],"analyzed":true,
+                    "analyzedWindowSec":[0.0,4.0/44100.0]
                 }),
             )
             .unwrap();
@@ -7909,7 +7900,10 @@ pub(crate) mod tests {
                 source_spans_sec: vec![hifishifter_kernel::pitch_analysis::SyllableSpan {
                     start_sec: 0.0,
                     end_sec: 0.1,
+                    midi_note: None,
+                    event_id: None,
                 }],
+                analyzed_window_sec: [0.0, 0.0],
             },
         );
         let after = document.workspace_projection().unwrap();

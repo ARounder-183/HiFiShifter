@@ -609,7 +609,11 @@ fn convert_reaper_items_to_existing_tracks(
             let Some(key) = kind else {
                 continue;
             };
-            let mut points = reaper_env_points(env);
+            let mut points = if key == "pan" {
+                reaper_pan_env_points(env)
+            } else {
+                reaper_env_points(env)
+            };
             if points.is_empty() {
                 continue;
             }
@@ -1039,7 +1043,14 @@ fn convert_reaper_data(
             );
         }
         if let Some(env) = pan_env {
-            overwrite_accum_span(accum, "pan", &reaper_env_points(env), 0.0, project_end, 0.0);
+            overwrite_accum_span(
+                accum,
+                "pan",
+                &reaper_pan_env_points(env),
+                0.0,
+                project_end,
+                0.0,
+            );
         }
         if let Some(env) = gate_env {
             overwrite_accum_span(
@@ -1108,6 +1119,7 @@ fn convert_reaper_data(
     }
 
     // REAPER 轨道 pan（VOLPAN 第二个值）导入为共通声像曲线；
+    // REAPER 声像符号与 HiFiShifter 相反，因此在此边界翻一次符号。
     // 音量（VOLPAN 第一个值）已经作为 Track.volume 导入，无需重复。
     // PANENV2 激活时取代声像钮 → 静态 pan 常量曲线被抑制（上面已由
     // 包络覆写写入动态 pan 曲线）。
@@ -1115,7 +1127,9 @@ fn convert_reaper_data(
         if track_pan_envs[i].is_some() {
             continue;
         }
-        let pan = reaper_track.vol_pan.get(1).copied().unwrap_or(0.0);
+        let pan = crate::reaper_pan::reaper_pan_to_hifi(
+            reaper_track.vol_pan.get(1).copied().unwrap_or(0.0),
+        );
         if !(pan.is_finite() && pan.abs() > 1e-9) {
             continue;
         }
@@ -1133,7 +1147,7 @@ fn convert_reaper_data(
             .entry("pan".to_string())
             .or_insert_with(|| vec![0.0f32; total_frames]);
         pan_curve.resize(total_frames, 0.0);
-        pan_curve.fill(pan.clamp(-1.0, 1.0) as f32);
+        pan_curve.fill(pan as f32);
     }
 
     let mut timeline = TimelineState {
@@ -1736,6 +1750,15 @@ pub(crate) fn reaper_env_points(env: &ReaperEnvelope) -> Vec<(f64, f64, i32)> {
     points
 }
 
+/// 声像包络点：先走通用 reaper_env_points，再在 REAPER 边界翻符号。
+/// 只给 pan 使用；音量 / MUTE 等其它包络不得经过这里。
+fn reaper_pan_env_points(env: &ReaperEnvelope) -> Vec<(f64, f64, i32)> {
+    reaper_env_points(env)
+        .into_iter()
+        .map(|(t, v, s)| (t, crate::reaper_pan::reaper_pan_to_hifi(v), s))
+        .collect()
+}
+
 /// REAPER 包络采样：shape=1（方波）阶梯保持；其它形状线性近似；
 /// 首点前 / 末点后按 REAPER hold 语义延续首/末点值。
 ///
@@ -1859,7 +1882,7 @@ fn write_take_envelope_frames(
 
     let (vol_points, pan_points, gate_points) = (
         vol_env.map(reaper_env_points),
-        pan_env.map(reaper_env_points),
+        pan_env.map(reaper_pan_env_points),
         mute_env.map(reaper_env_points),
     );
     if let Some(points) = vol_points.as_ref().filter(|p| !p.is_empty()) {
@@ -2824,8 +2847,9 @@ mod tests {
             .push(env("PANENV", vec![(0.0, -1.0), (2.0, 1.0)]));
 
         let (_, _, curves, _) = run_process_item(&item);
-        assert!((curve_value_at(&curves, "pan", 0) + 1.0).abs() < 1e-6);
-        assert!((curve_value_at(&curves, "pan", 400) - 1.0).abs() < 1e-6);
+        // PANENV 输入 -1 → +1（REAPER 语义）→ HS 曲线 +1 → -1。
+        assert!((curve_value_at(&curves, "pan", 0) - 1.0).abs() < 1e-6);
+        assert!((curve_value_at(&curves, "pan", 400) + 1.0).abs() < 1e-6);
     }
 
     // ─── 轨道包络（.rpp / TRACK 块）→ 曲线 ───
@@ -2835,7 +2859,7 @@ mod tests {
         // 轨道：VOLPAN [0.5, 0.8] + VOLENV2 (2.0 → 1.0) + PANENV2 (0.5)
         // + MUTEENV 方波门控（1s..3s 静音）。
         // - VOLENV2 绝对语义 → Track.volume 中性化为 1.0（推子被取代）；
-        // - PANENV2 取代声像钮 → 静态 0.8 抑制，曲线 = 0.5；
+        // - PANENV2 取代声像钮 → 静态 0.8 抑制，曲线 = -0.5（REAPER 0.5 → HS -0.5）；
         // - MUTEENV 乘入门控。
         let mut data = ReaperData::default();
         data.is_track_data = true;
@@ -2875,8 +2899,8 @@ mod tests {
         // 音量：包络绝对值（非推子 0.5 的乘积）；末端 = 包络末值 1.0。
         assert!((volume[0] - 2.0).abs() < 1e-3);
         assert!((volume[(4.0 / fp) as usize] - 1.0).abs() < 1e-3);
-        // 声像：PANENV2 抑制静态 0.8。
-        assert!((pan[0] - 0.5).abs() < 1e-3);
+        // 声像：PANENV2 抑制静态 0.8；REAPER 0.5 在 HS 中是 -0.5。
+        assert!((pan[0] + 0.5).abs() < 1e-3);
         // MUTEENV 方波：t∈[1s,3s) 门控 0；t=3s 起恢复。
         // t=3s 处音量包络本身为 1.25（2→1 线性），门控恢复后 = 1.25。
         assert!((volume[(1.0 / fp) as usize] - 0.0).abs() < 1e-3);

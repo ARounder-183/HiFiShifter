@@ -7,7 +7,8 @@
  *
  * 【返回值的语义】true = 本次移动由块层认领。调用方（EditorArea）在 true 时**不再**
  * 调用通用的 onCanvasPointerMove —— 否则通用处理器会用「是否贴近参数线」重新算一遍
- * 光标与读数，把块层刚设好的状态覆盖掉。
+ * 光标与块 hover，把块层刚设好的状态覆盖掉。无按键的曲线读数由独立的
+ * onCanvasHoverPreview 更新，不属于本函数的职责；有按键时块手势独占读数。
  */
 import type { MutableRefObject, PointerEvent as ReactPointerEvent, RefObject } from "react";
 import { viewportPxToSec } from "../../renderKernel/timelineAxis.js";

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -27,11 +27,12 @@ const METER_STALL_FALLBACK: Duration = Duration::from_millis(150);
 /// 每槽 4 字节，取宽裕值让"死表"远离现实工程规模；越界时 meter 线程告警一次。
 const METER_BUS_CAPACITY: usize = 512;
 
-use super::metronome;
-use super::mix::{
-    render_callback_f32, render_callback_i16, render_callback_u16, RtFault,
-    SnapshotTransitionState, TrackMeterBus, TrackMeterScratch, U16_SILENCE,
+use super::device_watch::{
+    output_device_changed, spawn_default_output_watcher, OutputDeviceIdentity,
 };
+use super::metronome;
+use super::mix::TrackMeterBus;
+use super::output_stream::{build_output_stream, OutputStreamArgs};
 use super::resource_manager::ResourceManager;
 use super::snapshot::{
     build_snapshot, build_snapshot_for_file, schedule_stretch_jobs, source_bounds_frames,
@@ -108,6 +109,8 @@ pub struct AudioEngine {
     worker_ready: Arc<AtomicBool>,
     /// Shutdown flag shared with the meter thread.
     meter_shutdown: Arc<AtomicBool>,
+    /// Shutdown flag for the default-output watcher.
+    device_watch_shutdown: Arc<AtomicBool>,
 }
 
 impl Clone for AudioEngine {
@@ -124,6 +127,7 @@ impl Clone for AudioEngine {
             sample_rate: self.sample_rate.clone(),
             worker_ready: self.worker_ready.clone(),
             meter_shutdown: self.meter_shutdown.clone(),
+            device_watch_shutdown: self.device_watch_shutdown.clone(),
         }
     }
 }
@@ -164,6 +168,7 @@ impl AudioEngine {
         let meter_app_handle = Arc::new(Mutex::new(app_handle.clone()));
         let meter_shutdown = Arc::new(AtomicBool::new(false));
         let meter_shutdown_for_thread = meter_shutdown.clone();
+        let device_watch_shutdown = Arc::new(AtomicBool::new(false));
         // Lock-free per-track peak handoff between the audio callback and the
         // meter thread (see mix::TrackMeterBus). 槽位数即电平表可覆盖的轨道上限：
         // 超出容量的轨道混音与播放完全正常，但电平表恒为 0（静默失效），因此容量
@@ -381,40 +386,49 @@ impl AudioEngine {
                 }
             });
         }
+        // watcher 的通道与关停标志要在 worker 线程里用，先把句柄带进闭包。
+        let tx_for_device_watch = tx.clone();
+        let device_watch_shutdown_for_thread = device_watch_shutdown.clone();
         thread::spawn(move || {
-            let host = cpal::default_host();
-            let device = match host.default_output_device() {
-                Some(d) => d,
-                None => {
-                    log::warn!("AudioEngine: no default output device");
-                    drain_commands_without_output(
-                        rx,
-                        is_playing_thread,
-                        target_thread,
-                        worker_ready_thread,
-                    );
-                    return;
-                }
-            };
+            // 【顺序】先等出一个真正能播的 stream，再拿它的身份启动 watcher。
+            // 反过来（watcher 先自己猜基线）会让两者基线不同步：worker 用了
+            // 另一个设备建流，而 watcher 认为"没变"，真正的切换永远被漏掉。
+            let startup =
+                match wait_for_output_stream(&rx, &worker_ready_thread, |device, config| {
+                    let channels = config.channels() as usize;
+                    let sample_format = config.sample_format();
+                    let stream_config: cpal::StreamConfig = config.into();
+                    build_output_stream(OutputStreamArgs {
+                        device,
+                        config: stream_config,
+                        sample_format,
+                        channels,
+                        snapshot: snapshot_for_thread.clone(),
+                        is_playing: is_playing_thread.clone(),
+                        play_start_wait: play_start_wait_thread.clone(),
+                        position_frames: position_frames_thread.clone(),
+                        duration_frames: duration_frames_thread.clone(),
+                        meter_bus: meter_bus.clone(),
+                        metro: metro_for_cb.clone(),
+                        tx: tx_for_worker.clone(),
+                    })
+                }) {
+                    Some(value) => value,
+                    None => return,
+                };
 
-            let default_config = match device.default_output_config() {
-                Ok(c) => c,
-                Err(e) => {
-                    log::error!("AudioEngine: default_output_config failed: {e}");
-                    drain_commands_without_output(
-                        rx,
-                        is_playing_thread,
-                        target_thread,
-                        worker_ready_thread,
-                    );
-                    return;
-                }
-            };
-
-            // cpal 0.18 起 `SampleRate` 是 `u32` 的类型别名，不再是 newtype。
-            let sr = default_config.sample_rate();
+            let mut stream = Some(startup.stream);
+            let mut sr = startup.sample_rate;
+            let mut current_output = Some(startup.identity.clone());
+            // 等待期缓冲下来的命令（按原序）在进入主循环后先处理。
+            let mut pending_commands: VecDeque<EngineCommand> = startup.buffered;
             sample_rate_thread.store(sr, Ordering::Relaxed);
             worker_ready_thread.store(true, Ordering::Release);
+            spawn_default_output_watcher(
+                tx_for_device_watch.clone(),
+                device_watch_shutdown_for_thread.clone(),
+                Some(startup.identity),
+            );
 
             // Re-initialize the shared snapshot to the actual output sample rate.
             //
@@ -431,7 +445,6 @@ impl AudioEngine {
             // `RenderedClipCache` **共享**同一批 PCM 的 `Arc`，多留几代并不复制音频。
             let mut retired_snapshots = RetirementKeeper::<Arc<EngineSnapshot>>::new(8);
             retired_snapshots.retire(snapshot_for_thread.swap(Arc::new(EngineSnapshot::empty(sr))));
-            let snapshot_for_cb = snapshot_for_thread.clone();
 
             // Async resource manager for decoded/resampled PCM.
             let resources = ResourceManager::new(tx_for_worker.clone());
@@ -577,197 +590,19 @@ impl AudioEngine {
                 });
             }
 
-            // Helper to (re)build snapshot from timeline.
-            let channels = default_config.channels() as usize;
-            let sample_format = default_config.sample_format();
-            let config: cpal::StreamConfig = default_config.into();
-
-            let mut scratch_mix: Vec<f32> = Vec::new();
-            let mut scratch_mix_fade_from: Vec<f32> = Vec::new();
-            let mut snapshot_transition = SnapshotTransitionState::default();
-            let meter_bus_for_cb = meter_bus.clone();
-
-            // Clone atomics for the audio callback to avoid moving the originals.
-            let is_playing_cb = is_playing_thread.clone();
-            let play_start_wait_cb = play_start_wait_thread.clone();
-            let position_frames_cb = position_frames_thread.clone();
-            let duration_frames_cb = duration_frames_thread.clone();
-            // cpal 的流错误回调可能在**音频线程**上执行，因此这里只登记故障码，
-            // 日志由 meter 线程输出（见 `mix::RtFault`）。
-            //
-            // 【为什么每个分支各写一份】原实现是一个不捕获任何东西的闭包，因而
-            // 是 `Copy`，可以同时交给三个 `build_output_stream` 分支。一旦它捕获
-            // 了 `meter_bus` 就不再是 `Copy`，必须逐分支构造。
-            let err_fn = |bus: Arc<TrackMeterBus>| {
-                // cpal 0.18 移除了 `StreamError`，错误回调统一收 `cpal::Error`。
-                move |_err: cpal::Error| bus.record_rt_fault(RtFault::StreamError)
-            };
-
-            let stream = match sample_format {
-                cpal::SampleFormat::F32 => {
-                    let meter_bus = meter_bus_for_cb.clone();
-                    let mut meter_scratch = TrackMeterScratch::default();
-                    let metro = metro_for_cb.clone();
-                    let mut metro_voices = metronome::MetronomeVoices::default();
-                    device
-                        .build_output_stream(
-                            config,
-                            move |data: &mut [f32], _| {
-                                let r =
-                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                        render_callback_f32(
-                                            data,
-                                            channels,
-                                            &snapshot_for_cb,
-                                            is_playing_cb.as_ref(),
-                                            play_start_wait_cb.as_ref(),
-                                            position_frames_cb.as_ref(),
-                                            duration_frames_cb.as_ref(),
-                                            &mut scratch_mix,
-                                            &mut scratch_mix_fade_from,
-                                            &mut snapshot_transition,
-                                            &mut meter_scratch,
-                                            &meter_bus,
-                                            metro.as_ref(),
-                                            &mut metro_voices,
-                                        );
-                                    }));
-                                if r.is_err() {
-                                    meter_bus.record_rt_fault(RtFault::PanicF32);
-                                    data.fill(0.0);
-                                    is_playing_cb.store(false, Ordering::Relaxed);
-                                    // panic 若恰发生在"原地等待渲染"期间（mix 已置位
-                                    // play_start_wait），不清它会让快照持续上报
-                                    // waiting_for_render=true + is_playing=false 的矛盾
-                                    // 组合，前端据此冻结光标直到下次 stop/play。
-                                    play_start_wait_cb.store(false, Ordering::Relaxed);
-                                }
-                            },
-                            err_fn(meter_bus_for_cb.clone()),
-                            None,
-                        )
-                        .ok()
-                }
-                cpal::SampleFormat::I16 => {
-                    let meter_bus = meter_bus_for_cb.clone();
-                    let mut meter_scratch = TrackMeterScratch::default();
-                    let metro = metro_for_cb.clone();
-                    let mut metro_voices = metronome::MetronomeVoices::default();
-                    device
-                        .build_output_stream(
-                            config,
-                            move |data: &mut [i16], _| {
-                                let r =
-                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                        render_callback_i16(
-                                            data,
-                                            channels,
-                                            &snapshot_for_cb,
-                                            is_playing_cb.as_ref(),
-                                            play_start_wait_cb.as_ref(),
-                                            position_frames_cb.as_ref(),
-                                            duration_frames_cb.as_ref(),
-                                            &mut scratch_mix,
-                                            &mut scratch_mix_fade_from,
-                                            &mut snapshot_transition,
-                                            &mut meter_scratch,
-                                            &meter_bus,
-                                            metro.as_ref(),
-                                            &mut metro_voices,
-                                        );
-                                    }));
-                                if r.is_err() {
-                                    meter_bus.record_rt_fault(RtFault::PanicI16);
-                                    data.fill(0);
-                                    is_playing_cb.store(false, Ordering::Relaxed);
-                                    // panic 若恰发生在"原地等待渲染"期间（mix 已置位
-                                    // play_start_wait），不清它会让快照持续上报
-                                    // waiting_for_render=true + is_playing=false 的矛盾
-                                    // 组合，前端据此冻结光标直到下次 stop/play。
-                                    play_start_wait_cb.store(false, Ordering::Relaxed);
-                                }
-                            },
-                            err_fn(meter_bus_for_cb.clone()),
-                            None,
-                        )
-                        .ok()
-                }
-                cpal::SampleFormat::U16 => {
-                    let meter_bus = meter_bus_for_cb.clone();
-                    let mut meter_scratch = TrackMeterScratch::default();
-                    let metro = metro_for_cb.clone();
-                    let mut metro_voices = metronome::MetronomeVoices::default();
-                    device
-                        .build_output_stream(
-                            config,
-                            move |data: &mut [u16], _| {
-                                let r =
-                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                        render_callback_u16(
-                                            data,
-                                            channels,
-                                            &snapshot_for_cb,
-                                            is_playing_cb.as_ref(),
-                                            play_start_wait_cb.as_ref(),
-                                            position_frames_cb.as_ref(),
-                                            duration_frames_cb.as_ref(),
-                                            &mut scratch_mix,
-                                            &mut scratch_mix_fade_from,
-                                            &mut snapshot_transition,
-                                            &mut meter_scratch,
-                                            &meter_bus,
-                                            metro.as_ref(),
-                                            &mut metro_voices,
-                                        );
-                                    }));
-                                if r.is_err() {
-                                    meter_bus.record_rt_fault(RtFault::PanicU16);
-                                    data.fill(U16_SILENCE);
-                                    is_playing_cb.store(false, Ordering::Relaxed);
-                                    // panic 若恰发生在"原地等待渲染"期间（mix 已置位
-                                    // play_start_wait），不清它会让快照持续上报
-                                    // waiting_for_render=true + is_playing=false 的矛盾
-                                    // 组合，前端据此冻结光标直到下次 stop/play。
-                                    play_start_wait_cb.store(false, Ordering::Relaxed);
-                                }
-                            },
-                            err_fn(meter_bus_for_cb.clone()),
-                            None,
-                        )
-                        .ok()
-                }
-                _ => None,
-            };
-
-            let Some(stream) = stream else {
-                log::error!("AudioEngine: failed to build output stream");
-                drain_commands_without_output(
-                    rx,
-                    is_playing_thread,
-                    target_thread,
-                    worker_ready_thread,
-                );
-                return;
-            };
-
-            if let Err(e) = stream.play() {
-                log::error!("AudioEngine: stream.play failed: {e}");
-                drain_commands_without_output(
-                    rx,
-                    is_playing_thread,
-                    target_thread,
-                    worker_ready_thread,
-                );
-                return;
-            }
-
             let mut last_timeline: Option<Arc<TimelineState>> = None;
             let mut last_play_file: Option<(PathBuf, f64, String)> = None;
             let mut app_handle_for_worker: Option<tauri::AppHandle> = app_handle;
             // 合并连发推送时被 try_recv 取出的下一条命令：渲染线程可能以远快
             // 于本线程消费的速度逐 clip 推送 RenderedClipsChanged，排水时取到
             // 的其他命令必须原序保留、下一轮优先处理（FIFO 语义不变）。
+            // 启动期缓冲下来的命令同样排在这个队列的前面。
             let mut stashed_cmd: Option<EngineCommand> = None;
+            // 设备重建失败后的重试时刻（见 `next_command`）。
+            let mut device_retry: Option<Instant> = None;
+            let mut device_retry_backoff = Duration::from_millis(250);
+            // 最近一次**成功**的强制重建时刻（风暴节流判据，见下方 force 分支）。
+            let mut last_forced_rebuild_ok: Option<Instant> = None;
 
             loop {
                 // 宿主句柄改为**惰性**获取：worker 可能早于 Tauri setup 启动
@@ -780,10 +615,12 @@ impl AudioEngine {
                 }
                 let cmd = match stashed_cmd.take() {
                     Some(cmd) => cmd,
-                    None => match rx.recv() {
-                        Ok(EngineCommand::Shutdown) => break,
-                        Ok(cmd) => cmd,
-                        Err(_) => break,
+                    None => match pending_commands.pop_front() {
+                        Some(cmd) => cmd,
+                        None => match next_command(&rx, &mut device_retry) {
+                            Some(cmd) => cmd,
+                            None => break,
+                        },
                     },
                 };
                 // 合并连发的 RenderedClipsChanged：每条推送的处理都是一次全量
@@ -842,6 +679,72 @@ impl AudioEngine {
                     }
                     EngineCommand::Stop => handle_stop(&mut state),
                     EngineCommand::SeekSec { sec } => handle_seek_sec(&mut state, sec),
+                    EngineCommand::PlayFrom { sec } => handle_play_from(&mut state, sec),
+                    EngineCommand::DefaultOutputDeviceChanged { force } => {
+                        // 【风暴节流】err_fn 对每一次流错误都发一条 force，而一次
+                        // 成功的重建并不证明故障结束 —— 驱动重协商会"建好又立刻
+                        // 坏"循环，每圈都是一次全量 build_snapshot + 流churn，退避
+                        // 却在每次成功时被复位成 250ms，形成无节流的热循环。
+                        // 判据只有一条：上一次成功的强制重建**存活满
+                        // STREAM_STORM_QUIET** 才算故障结束、退避才复位。
+                        // 风暴内到达的 force：已有排定重试就是冗余，丢弃；否则按
+                        // 当前退避排一次 —— 与失败重试共用同一节奏。
+                        if force
+                            && last_forced_rebuild_ok
+                                .is_some_and(|at| at.elapsed() < STREAM_STORM_QUIET)
+                        {
+                            if device_retry.is_none() {
+                                device_retry = Some(Instant::now() + device_retry_backoff);
+                                device_retry_backoff =
+                                    (device_retry_backoff * 2).min(Duration::from_secs(2));
+                                log::warn!(
+                                    "AudioEngine: repeated stream fault; forced rebuild deferred by {:?}",
+                                    device_retry_backoff
+                                );
+                            }
+                            continue;
+                        }
+                        match handle_default_output_device_changed(
+                            &mut state,
+                            &mut stream,
+                            &mut sr,
+                            &mut current_output,
+                            is_playing_thread.clone(),
+                            play_start_wait_thread.clone(),
+                            position_frames_thread.clone(),
+                            duration_frames_thread.clone(),
+                            sample_rate_thread.clone(),
+                            meter_bus.clone(),
+                            metro_for_thread.clone(),
+                            &tx_for_worker,
+                            force,
+                        ) {
+                            Ok(()) => {
+                                // 成功：回到最短重试间隔，下次失败仍能快速恢复。
+                                device_retry = None;
+                                device_retry_backoff = Duration::from_millis(250);
+                                // 强制重建的成功时间戳是风暴判据；非强制的
+                                // watcher 切换不改变风暴状态。
+                                if force {
+                                    last_forced_rebuild_ok = Some(Instant::now());
+                                }
+                            }
+                            Err(error) => {
+                                // 【失败必须可重试】旧实现只打一条日志就 return，
+                                // 此时旧 stream 已丢、新 stream 为 None、身份已提交
+                                // 成新设备 —— watcher 之后永远判"没变"，用户永久
+                                // 静音且无自愈路径。这里安排一次强制重试（指数退避
+                                // 上限 2s），期间所有命令照常处理。
+                                log::warn!(
+                                    "AudioEngine: output device switch failed: {error}; retrying in {:?}",
+                                    device_retry_backoff
+                                );
+                                device_retry = Some(Instant::now() + device_retry_backoff);
+                                device_retry_backoff =
+                                    (device_retry_backoff * 2).min(Duration::from_secs(2));
+                            }
+                        }
+                    }
                     EngineCommand::SetPlaying { playing, target } => {
                         handle_set_playing(&mut state, playing, target)
                     }
@@ -889,6 +792,7 @@ impl AudioEngine {
             sample_rate,
             worker_ready,
             meter_shutdown,
+            device_watch_shutdown,
         }
     }
 
@@ -907,6 +811,7 @@ impl AudioEngine {
     }
 
     pub fn shutdown(&self) {
+        self.device_watch_shutdown.store(true, Ordering::Relaxed);
         self.meter_shutdown.store(true, Ordering::Relaxed);
         let _ = self.tx.send(EngineCommand::Shutdown);
     }
@@ -929,6 +834,37 @@ impl AudioEngine {
         let _ = self.tx.send(EngineCommand::SeekSec { sec });
     }
 
+    /// 引擎当前的**绝对**播放位置（秒）。
+    ///
+    /// 【为什么它是唯一权威】播放位置本来有两个候选来源：引擎的
+    /// `base_frames + position_frames` 与前端 Redux 里的 `playheadSec`。后者
+    /// 由 30Hz 轮询外推得到（含 IPC 往返时延），与真实可听位置天然差一拍；
+    /// 把它再传回后端当起播锚点，等于把这份误差固化进每次播放。因此
+    /// `play_original` 一律读这里，前端不再参与起播决策。
+    ///
+    /// 时间线播放的 `base_frames` 恒为 0（位置一律用绝对帧表达），文件预览
+    /// 的 `base_frames` 才是 offset，两者相加即"当前听到的那一刻"。
+    pub fn position_sec(&self) -> f64 {
+        let sr = self.sample_rate.load(Ordering::Relaxed).max(1) as f64;
+        let base = self.base_frames.load(Ordering::Relaxed);
+        let pos = self.position_frames.load(Ordering::Relaxed);
+        (base.saturating_add(pos)) as f64 / sr
+    }
+
+    /// 原子地从绝对秒开始播放时间线。
+    /// 从引擎**在命令序里的真实位置**起播。
+    ///
+    /// 【为什么不用 position_sec() 的读数】那个读数绕过命令序：worker 队列里
+    /// 还没应用的 SeekSec / UpdateTimeline 对它不可见，按它起播会覆盖在途的
+    /// seek 并把光标拖回去。`PlayFrom { sec: None }` 让位置在 worker 应用完
+    /// 此前所有命令之后才解析 —— 起播点因此只来自引擎事实（见
+    /// `handle_play_from`，`Some` 分支由 worker 级测试覆盖）。
+    /// 调用方负责确认当前会话目标是时间线；文件预览的 base 是文件域偏移。
+    pub fn play_from_current(&self) {
+        let _ = self.tx.send(EngineCommand::PlayFrom { sec: None });
+    }
+
+    #[allow(dead_code)]
     pub fn set_playing(&self, playing: bool, target: Option<&str>) {
         let _ = self.tx.send(EngineCommand::SetPlaying {
             playing,
@@ -1002,26 +938,110 @@ impl AudioEngine {
 
 // ─── Worker 状态结构体 ────────────────────────────────────────────────────────
 
-/// 无输出设备 / default_output_config 失败 / 输出流构建或播放失败的兜底：
-/// 继续接收命令并按“未播放”处理，绝不能让 worker 线程退出 —— rx 被 drop
-/// 后所有 `AudioEngine::xxx()` 的 `send` 会静默失败，播放/停止/seek/节拍器
-/// 全部无响应且无恢复路径（仅重启应用）。
-fn drain_commands_without_output(
-    rx: mpsc::Receiver<EngineCommand>,
-    is_playing: Arc<AtomicBool>,
-    target: Arc<Mutex<Option<String>>>,
-    worker_ready: Arc<AtomicBool>,
-) {
-    // 无输出路径 worker 就绪（等待采样率没有意义），别让调用方白等。
-    worker_ready.store(true, Ordering::Release);
-    loop {
-        match rx.recv() {
-            Ok(EngineCommand::Shutdown) | Err(_) => break,
-            Ok(_) => {
-                is_playing.store(false, Ordering::Relaxed);
-                *target.lock().unwrap_or_else(|e| e.into_inner()) = None;
+/// 启动时无输出设备：保持命令通道存活并每秒重试，设备插入后直接返回。
+/// 启动成功的产物：可播放的 stream + 它的采样率/身份 + 等待期缓冲的命令。
+struct StartupStream {
+    stream: cpal::Stream,
+    sample_rate: u32,
+    identity: OutputDeviceIdentity,
+    buffered: VecDeque<EngineCommand>,
+}
+
+/// 一次成功的强制重建要"存活"多久才承认故障结束（风暴节流判据）。
+///
+/// 【为什么是 5 秒】驱动重协商风暴里，坏流会在重建后的几百毫秒内再次报错；
+/// 正常使用中一次重建之后 5 秒内又坏的场景几乎不存在。5 秒让风暴期的重建
+/// 节奏收敛到约 2s 上限的退避链，而不是每个错误一次全量重建。
+const STREAM_STORM_QUIET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 取下一条要处理的命令；设备重建的重试到点时**合成**一条强制重建命令。
+///
+/// 【为什么重试要合成命令，而不是在失败处 sleep】worker 是命令通道的唯一
+/// 消费者，阻塞在那里会连用户按下的 Stop 都收不到（表现为"卡住几秒才有反应"）。
+/// 用 `recv_timeout` 把等待让给通道：到期前到达的命令照常处理，到期后再重试。
+fn next_command(
+    rx: &mpsc::Receiver<EngineCommand>,
+    device_retry: &mut Option<Instant>,
+) -> Option<EngineCommand> {
+    if let Some(at) = *device_retry {
+        let now = Instant::now();
+        if now >= at {
+            *device_retry = None;
+            return Some(EngineCommand::DefaultOutputDeviceChanged { force: true });
+        }
+        match rx.recv_timeout(at - now) {
+            Ok(EngineCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+            Ok(cmd) => return Some(cmd),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                *device_retry = None;
+                return Some(EngineCommand::DefaultOutputDeviceChanged { force: true });
             }
         }
+    }
+    match rx.recv() {
+        Ok(EngineCommand::Shutdown) | Err(_) => None,
+        Ok(cmd) => Some(cmd),
+    }
+}
+
+/// 启动期：等到"设备 + 配置 + 可播放的 stream"三者齐备，期间命令全部缓冲。
+///
+/// 【为什么不是"等到设备就返回"】设备枚举成功不等于能建流：被独占、格式协商
+/// 失败、USB 瞬态都可能在 `build_output_stream` / `play` 这一步失败。旧实现
+/// 在那种情况下直接 `return`（线程结束、命令通道断开、整个音频子系统到重启
+/// 前不可用）。这里把"建流成功"也并进等待条件。
+///
+/// 【为什么命令必须缓冲而不是丢弃】冷启动时默认设备可能还没出现（HDMI 握手、
+/// 蓝牙连接），此时前端已经在发 `UpdateTimeline` / `PlayFrom`/`SeekSec`。
+/// 旧实现把它们统统吃掉并把 `is_playing` 复位，设备就绪后引擎既没有时间线也
+/// 不在播放位置 —— 用户按播放没声，再按一次才有声。
+fn wait_for_output_stream<F>(
+    rx: &mpsc::Receiver<EngineCommand>,
+    worker_ready: &AtomicBool,
+    mut build: F,
+) -> Option<StartupStream>
+where
+    F: FnMut(cpal::Device, cpal::SupportedStreamConfig) -> Result<cpal::Stream, String>,
+{
+    // 无输出路径也能"就绪"：调用方要等的是 worker 起来，而不是有声音。
+    worker_ready.store(true, Ordering::Release);
+    let mut buffered: VecDeque<EngineCommand> = VecDeque::new();
+    let mut backoff = Duration::from_millis(250);
+    loop {
+        let host = cpal::default_host();
+        if let Some(device) = host.default_output_device() {
+            if let Ok(config) = device.default_output_config() {
+                let sample_rate = config.sample_rate().max(1);
+                let identity = OutputDeviceIdentity::from_device(&device, &config);
+                match build(device, config) {
+                    Ok(stream) => match stream.play() {
+                        Ok(()) => {
+                            return Some(StartupStream {
+                                stream,
+                                sample_rate,
+                                identity,
+                                buffered,
+                            })
+                        }
+                        Err(error) => {
+                            log::error!("AudioEngine: stream.play failed: {error}; will retry")
+                        }
+                    },
+                    Err(error) => log::error!("AudioEngine: {error}; will retry"),
+                }
+            }
+        }
+        // 失败（或暂时没设备）：把等待时间让给命令通道，期间命令进缓冲，Shutdown 退出。
+        match rx.recv_timeout(backoff) {
+            Ok(EngineCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+            Ok(cmd) => {
+                if !matches!(cmd, EngineCommand::RenderedClipsChanged) {
+                    buffered.push_back(cmd);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        backoff = (backoff * 2).min(Duration::from_secs(2));
     }
 }
 
@@ -1090,12 +1110,21 @@ fn handle_stop(s: &mut EngineWorkerState) {
     // 清除起点等待：等待中的用户停止立即生效，不再自动起播。
     s.play_start_wait.store(false, Ordering::Relaxed);
     *s.target.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    s.base_frames.store(0, Ordering::Relaxed);
-    // position_frames 一并归零：停止后 base+position 不再代表可听位置。
-    // 若保留旧值，停止后的杂散 get_playback_state 会让前端把
-    // runtime.playbackPositionSec 恢复成陈旧的已播放时长，
-    // 使下一次 stop 误判"曾处于播放中"并跳回锚点/0。
-    s.position_frames.store(0, Ordering::Relaxed);
+    // 【停止 ≠ 归零】`position_frames` 保留真实停止点，下一次 `play_original`
+    // 直接从这里起播。此前这里把位置清零，而自然结束（`advance_playback_position`）
+    // 冻结位置 —— 同一个"停止"在引擎里于是有了两种互斥状态：一种答得出真实
+    // 停止点，一种答 0。引擎因此不可能是可靠权威，前端只好另带一个锚点，
+    // 于是锚点与实际起播点继续分裂。
+    //
+    // 文件预览是唯一例外：它的位置是"文件内偏移 + 已播放"（`base_frames` 非 0），
+    // 停止后没有"下次从哪继续"的语义，归零更诚实。
+    if s.last_play_file.is_some() {
+        s.base_frames.store(0, Ordering::Relaxed);
+        s.position_frames.store(0, Ordering::Relaxed);
+    } else {
+        // 时间线播放：base 恒为 0（绝对帧口径），位置保持不动。
+        s.base_frames.store(0, Ordering::Relaxed);
+    }
     *s.last_play_file = None;
     idle_track_meter_state(s.meter_state, s.meter_generation);
     // ★ 起播等待期的垫音抑制随播放会话结束而清空：抑制集合表达的是"本次
@@ -1106,6 +1135,186 @@ fn handle_stop(s: &mut EngineWorkerState) {
     // ★ 不再在停止时清空 pending_rendered_keys：key 在渲染失效处按需移除
     //（见 invalidate_clip_all_caches），始终与缓存条目一致；清空只会让下一次
     // 播放的首个快照把已渲染 clip 判为未渲染 —— 无谓的"起播即静音等待"。
+}
+
+/// 原子起播：写入绝对位置后立即置 playing，避免“is_playing=true 但位置还是旧值”的窗口。
+///
+/// `sec = None`（`PlayFromCurrent` 语义）在**这里**才解析位置：worker 已把
+/// 此前排队的 SeekSec / UpdateTimeline 全部应用完，`base + position` 就是
+/// 真实的起播点。IPC 线程直接读原子做不到这一点 —— 它读到的是命令序之外的
+/// 旧值。
+fn handle_play_from(s: &mut EngineWorkerState, sec: Option<f64>) {
+    let sec = match sec {
+        Some(sec) => sec,
+        None => {
+            let sr = s.sr.max(1) as f64;
+            s.base_frames
+                .load(Ordering::Relaxed)
+                .saturating_add(s.position_frames.load(Ordering::Relaxed)) as f64
+                / sr
+        }
+    };
+    let sec = sec.max(0.0);
+    let frame = (sec * s.sr as f64).round().max(0.0) as u64;
+    s.base_frames.store(0, Ordering::Relaxed);
+    s.position_frames.store(frame, Ordering::Relaxed);
+    s.is_playing.store(true, Ordering::Relaxed);
+    s.play_start_wait.store(false, Ordering::Relaxed);
+    *s.target.lock().unwrap_or_else(|e| e.into_inner()) = Some("original".to_string());
+    *s.last_play_file = None;
+    reset_track_meter_state(s.meter_state, s.meter_generation);
+}
+
+/// 采样率变化后必须整体失效的资源。
+///
+/// 【为什么必须全部清空，而不是"让它们自然过期"】
+/// - 解码/重采样缓存按 `(path, out_rate)` 索引：旧 sr 的条目永远命不中，只会
+///   白占预算；
+/// - 拉伸缓存同理（`StretchKey.out_rate`）；
+/// - 整 clip 渲染缓存按 `clip_id` 索引，但内容是**按输出采样率渲染的 PCM**，
+///   留着旧条目就会被当成命中 —— 播放出变速变调的结果。
+fn invalidate_sample_rate_bound_caches(s: &EngineWorkerState, old_sr: u32, new_sr: u32) {
+    if old_sr == new_sr {
+        return;
+    }
+    // 中毒锁也要清：跳过清理只会把旧采样率的 PCM 留在缓存里 —— 正是这条
+    // 函数要消灭的"切换设备后变速变调"。与全仓的 lock 约定一致。
+    s.cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    s.stretch_cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    s.stretch_inflight
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    hifishifter_kernel::synth_clip_cache::global_rendered_clip_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    hifishifter_kernel::synth_clip_cache::clear_pending_rendered_keys();
+}
+
+/// 切换默认输出设备：**事务式** —— 新 stream 建好且播放成功之前，旧 stream 一直活着。
+///
+/// 【为什么必须事务式】旧实现先 `stream.take()` 丢掉旧流、再提交新采样率与
+/// 新身份、最后才建流。任何一步失败（USB 枚举瞬态、设备被独占、格式协商失败）
+/// 都会留下"旧流已丢、新流为 None、身份已指向新设备"的状态：watcher 之后恒判
+/// "没变"，没有任何自愈路径 —— 用户看到的是界面在播、声音永久消失。
+///
+/// 顺序（任何失败都保持现状并让调用方安排重试）：
+/// 1. 预构建新采样率下的快照（不发布）；
+/// 2. 预构建新 stream（旧 stream 仍在出声）；
+/// 3. 暂停旧流 → 播放新流；失败则恢复旧流并返回错误；
+/// 4. 全部成功后才提交原子量 / 快照 / 身份，并丢弃旧流。
+#[allow(clippy::too_many_arguments)]
+fn handle_default_output_device_changed(
+    s: &mut EngineWorkerState,
+    stream: &mut Option<cpal::Stream>,
+    sr: &mut u32,
+    current_output: &mut Option<OutputDeviceIdentity>,
+    is_playing: Arc<AtomicBool>,
+    play_start_wait: Arc<AtomicBool>,
+    position_frames: Arc<AtomicU64>,
+    duration_frames: Arc<AtomicU64>,
+    sample_rate: Arc<AtomicU32>,
+    meter_bus: Arc<TrackMeterBus>,
+    metro: Arc<metronome::MetronomeRt>,
+    tx: &mpsc::Sender<EngineCommand>,
+    force: bool,
+) -> Result<(), String> {
+    let host = cpal::default_host();
+    let device = host
+        .default_output_device()
+        .ok_or_else(|| "no default output device".to_string())?;
+    let supported = device
+        .default_output_config()
+        .map_err(|error| format!("default_output_config failed: {error}"))?;
+    let identity = OutputDeviceIdentity::from_device(&device, &supported);
+    // `force` 跳过身份判等：RT 侧流错误与失败重试都必须能重建，
+    // 即使新设备身份与旧值完全相同（回退到同一台设备是常态）。
+    if !force && !output_device_changed(current_output.as_ref(), Some(&identity)) {
+        return Ok(());
+    }
+
+    let was_playing = is_playing.load(Ordering::Relaxed);
+    let old_sr = (*sr).max(1);
+    let old_base = s.base_frames.load(Ordering::Relaxed);
+    let old_position = s.position_frames.load(Ordering::Relaxed);
+    let audible_sec = (old_base + old_position) as f64 / old_sr as f64;
+    let new_sr = supported.sample_rate().max(1);
+
+    // 1) 预构建快照（尚未发布）。
+    let new_snapshot = if let Some(timeline) = s.last_timeline.as_ref() {
+        build_snapshot(timeline, new_sr, s.cache, s.stretch_cache)
+    } else if let Some((path, _offset, _target)) = s.last_play_file.as_ref() {
+        // 【偏移不能重复累加】`handle_play_file` 把 `base_frames` 设成
+        // `offset * sr`，因此 `audible_sec` 里已经包含 offset；这里再 `+offset`
+        // 就是 2×，表现为"切设备后预览位置跳到两倍处"。
+        build_snapshot_for_file(path, new_sr, audible_sec.max(0.0), s.cache)
+    } else {
+        EngineSnapshot::empty(new_sr)
+    };
+    let new_duration_frames = new_snapshot.duration_frames;
+
+    // 2) 预构建 stream（旧 stream 未动）。
+    let channels = supported.channels() as usize;
+    let sample_format = supported.sample_format();
+    let config: cpal::StreamConfig = supported.into();
+    let new_stream = build_output_stream(OutputStreamArgs {
+        device,
+        config,
+        sample_format,
+        channels,
+        snapshot: s.snapshot.clone(),
+        is_playing: is_playing.clone(),
+        play_start_wait: play_start_wait.clone(),
+        position_frames: position_frames.clone(),
+        duration_frames: duration_frames.clone(),
+        meter_bus,
+        metro,
+        tx: tx.clone(),
+    })?;
+
+    // 3) 切换播放：先停旧流；新流起不来就把它恢复，保持"切换失败等于没发生"。
+    if let Some(old_stream) = stream.as_ref() {
+        let _ = old_stream.pause();
+    }
+    if let Err(error) = new_stream.play() {
+        if let Some(old_stream) = stream.as_ref() {
+            let _ = old_stream.play();
+        }
+        return Err(format!("new output stream play failed: {error}"));
+    }
+
+    // 4) 提交。
+    let (new_base, new_position) =
+        super::device_watch::rescale_position_frames(old_base, old_position, old_sr, new_sr);
+    *sr = new_sr;
+    sample_rate.store(new_sr, Ordering::Relaxed);
+    s.base_frames.store(new_base, Ordering::Relaxed);
+    s.position_frames.store(new_position, Ordering::Relaxed);
+    duration_frames.store(new_duration_frames, Ordering::Relaxed);
+    s.retired_snapshots
+        .retire(s.snapshot.swap(Arc::new(new_snapshot)));
+    s.play_start_wait.store(false, Ordering::Relaxed);
+    if let Some((_, offset, _)) = s.last_play_file.as_mut() {
+        *offset = audible_sec.max(0.0);
+    }
+    *current_output = Some(identity);
+    if let Some(old_stream) = stream.replace(new_stream) {
+        let _ = old_stream.pause();
+        drop(old_stream);
+    }
+    is_playing.store(was_playing, Ordering::Relaxed);
+
+    // 5) 采样率变了：sr 绑定资源全部失效（节拍器响点表由命令层按新 sr 重建）。
+    invalidate_sample_rate_bound_caches(s, old_sr, new_sr);
+    // 整 clip 渲染结果被清空后必须重新渲染，否则本次播放会停在"等待渲染"。
+    if old_sr != new_sr {
+        crate::synth_clip_cache::clear_pad_suppressed_clips();
+    }
+    Ok(())
 }
 
 fn handle_seek_sec(s: &mut EngineWorkerState, sec: f64) {
@@ -1909,11 +2118,14 @@ fn handle_play_file(s: &mut EngineWorkerState, path: PathBuf, offset_sec: f64, t
 
 // ─── 辅助函数 ───────────────────────────────────────────────────────────────
 
-/// 计算 MIDI 曲线第 0 帧对应的 timeline 绝对时间（秒）。
-/// - playback_rate == 1（全量传送）：curve_start_sec = start_sec - source_start_sec
-///   全量 MIDI 曲线的第 0 帧对应源音频第 0 秒在时间线上的绝对位置。
-/// - playback_rate != 1（截取+resample 后传送）：curve_start_sec = start_sec
-///   截取+resample 后的曲线直接对应 clip 的时间线位置。
+/// 计算曲线第 0 帧对应的 timeline 绝对时间（秒）。
+///
+/// 无论 playback_rate 是多少，emit 的都是「已按 clip 窗口截取 / 重采样」的曲线，
+/// 第 0 帧一律对应 clip 在时间线上的起点，因此这里恒为 `start_sec`。
+///
+/// 【与帧网格的关系】这个秒值是**未量化**的浮点起点；前端落笔时必须把它换算成
+/// 工程帧 `round(start_sec·1000/fp)`（与 `pv.orig`、参数块投影同一把尺子），
+/// 否则每条 Clip 会各偏一个亚帧相位（≤2.5 ms），放大后与原始音高线错开数像素。
 fn compute_pitch_curve_start_sec(clip: &crate::state::Clip) -> f64 {
     // 统一截取后传送：curve 起点 = clip 在时间线上的起始位置
     clip.start_sec.max(0.0)
@@ -2415,6 +2627,146 @@ mod tests {
             job.algorithm,
             crate::time_stretch::StretchAlgorithm::SignalsmithStretch
         ));
+    }
+
+    /// 停止必须保留真实停止点：引擎是"从哪里继续播放"的唯一权威。
+    ///
+    /// 【为什么这条是回归锚点】此前 `handle_stop` 把 `position_frames` 清零，而
+    /// 自然结束/自动暂停只把 `is_playing` 翻成 false、位置冻结 —— 同一个"停止"
+    /// 有两种互斥的引擎状态。于是"按 Stop 后再播放"只能靠前端另带锚点，
+    /// 锚点一错就整体错位（光标跳回旧起播点）。这里钉住两件事：
+    /// 1. Stop 之后 `position_frames` 仍等于停止点（`position_sec()` 可读）；
+    /// 2. `base_frames` 归零（时间线播放一律绝对帧）。
+    ///
+    /// 文件预览必须归零：它的位置是"文件内偏移 + 已播放"，没有"下次继续"语义。
+    #[test]
+    fn stop_preserves_the_real_stop_point_for_timeline_playback() {
+        let sample_rate = 48_000u32;
+        let (engine_tx, _engine_rx) = mpsc::channel::<EngineCommand>();
+        let (stretch_tx, _stretch_rx) = mpsc::channel();
+
+        let resources = ResourceManager::new(engine_tx.clone());
+        let cache = resources.cache().clone();
+        let stretch_cache = Arc::new(Mutex::new(ByteBudgetCache::new(8, u64::MAX)));
+        let stretch_inflight = Arc::new(Mutex::new(HashSet::new()));
+        let snapshot = Arc::new(ArcSwap::from_pointee(EngineSnapshot::empty(sample_rate)));
+        let is_playing = Arc::new(AtomicBool::new(false));
+        let play_start_wait = Arc::new(AtomicBool::new(false));
+        let target = Arc::new(Mutex::new(None));
+        let base_frames = Arc::new(AtomicU64::new(0));
+        let position_frames = Arc::new(AtomicU64::new(0));
+        let duration_frames = Arc::new(AtomicU64::new(0));
+        let meter_state = Arc::new(Mutex::new(HashMap::new()));
+        let meter_generation = Arc::new(AtomicU64::new(0));
+        let mut last_timeline = Some(Arc::new(make_plain_stretch_timeline()));
+        let mut last_play_file = None;
+        let mut retired_snapshots = RetirementKeeper::<Arc<EngineSnapshot>>::new(3);
+
+        let mut worker = EngineWorkerState {
+            sr: sample_rate,
+            is_playing: &is_playing,
+            play_start_wait: &play_start_wait,
+            target: &target,
+            base_frames: &base_frames,
+            position_frames: &position_frames,
+            duration_frames: &duration_frames,
+            snapshot: &snapshot,
+            cache: &cache,
+            stretch_cache: &stretch_cache,
+            stretch_inflight: &stretch_inflight,
+            stretch_tx: &stretch_tx,
+            resources: &resources,
+            tx: &engine_tx,
+            last_timeline: &mut last_timeline,
+            last_play_file: &mut last_play_file,
+            retired_snapshots: &mut retired_snapshots,
+            app_handle: None,
+            meter_state: &meter_state,
+            meter_generation: &meter_generation,
+        };
+
+        handle_play_from(&mut worker, Some(12.5));
+        let start_frame = worker.position_frames.load(Ordering::Relaxed);
+        assert_eq!(start_frame, 600_000, "12.5s @ 48kHz");
+        assert!(worker.is_playing.load(Ordering::Relaxed));
+
+        // 播放推进到停止点。
+        worker.position_frames.store(700_000, Ordering::Relaxed);
+        handle_stop(&mut worker);
+
+        assert!(
+            !worker.is_playing.load(Ordering::Relaxed),
+            "stop must pause"
+        );
+        assert_eq!(
+            worker.base_frames.load(Ordering::Relaxed),
+            0,
+            "timeline playback always reports absolute frames"
+        );
+        assert_eq!(
+            worker.position_frames.load(Ordering::Relaxed),
+            700_000,
+            "the stop point must survive so the next play resumes exactly there"
+        );
+
+        // 再播放：起播点必须就是刚才的停止点（无需任何前端锚点）。
+        handle_play_from(&mut worker, Some(700_000.0 / f64::from(sample_rate)));
+        assert_eq!(worker.position_frames.load(Ordering::Relaxed), 700_000);
+    }
+
+    /// 文件预览的停止仍然归零：它的位置不是工程时间轴上的坐标。
+    #[test]
+    fn stop_resets_a_file_preview_position() {
+        let (engine_tx, _engine_rx) = mpsc::channel::<EngineCommand>();
+        let (stretch_tx, _stretch_rx) = mpsc::channel();
+        let resources = ResourceManager::new(engine_tx.clone());
+        let cache = resources.cache().clone();
+        let stretch_cache = Arc::new(Mutex::new(ByteBudgetCache::new(8, u64::MAX)));
+        let stretch_inflight = Arc::new(Mutex::new(HashSet::new()));
+        let snapshot = Arc::new(ArcSwap::from_pointee(EngineSnapshot::empty(44_100)));
+        let is_playing = Arc::new(AtomicBool::new(false));
+        let play_start_wait = Arc::new(AtomicBool::new(false));
+        let target = Arc::new(Mutex::new(None));
+        let base_frames = Arc::new(AtomicU64::new(44_100));
+        let position_frames = Arc::new(AtomicU64::new(22_050));
+        let duration_frames = Arc::new(AtomicU64::new(0));
+        let meter_state = Arc::new(Mutex::new(HashMap::new()));
+        let meter_generation = Arc::new(AtomicU64::new(0));
+        let mut last_timeline = None;
+        let mut last_play_file = Some((
+            PathBuf::from("E:/virtual/example-media.wav"),
+            1.0,
+            "file".to_string(),
+        ));
+        let mut retired_snapshots = RetirementKeeper::<Arc<EngineSnapshot>>::new(3);
+
+        let mut worker = EngineWorkerState {
+            sr: 44_100,
+            is_playing: &is_playing,
+            play_start_wait: &play_start_wait,
+            target: &target,
+            base_frames: &base_frames,
+            position_frames: &position_frames,
+            duration_frames: &duration_frames,
+            snapshot: &snapshot,
+            cache: &cache,
+            stretch_cache: &stretch_cache,
+            stretch_inflight: &stretch_inflight,
+            stretch_tx: &stretch_tx,
+            resources: &resources,
+            tx: &engine_tx,
+            last_timeline: &mut last_timeline,
+            last_play_file: &mut last_play_file,
+            retired_snapshots: &mut retired_snapshots,
+            app_handle: None,
+            meter_state: &meter_state,
+            meter_generation: &meter_generation,
+        };
+
+        handle_stop(&mut worker);
+        assert_eq!(worker.base_frames.load(Ordering::Relaxed), 0);
+        assert_eq!(worker.position_frames.load(Ordering::Relaxed), 0);
+        assert!(worker.last_play_file.is_none());
     }
 
     /// 渲染结果推送（`RenderedClipsChanged`）必须换入新快照 —— 这是"原地

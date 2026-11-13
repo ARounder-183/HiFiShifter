@@ -2300,6 +2300,60 @@ pub fn restore_game_block_ranges(
 }
 
 #[cfg(test)]
+mod window_merge_tests {
+    use crate::param_blocks::types::GameBlockBaseline;
+
+    fn span(start: f64, end: f64) -> crate::pitch_analysis::SyllableSpan {
+        crate::pitch_analysis::SyllableSpan {
+            start_sec: start,
+            end_sec: end,
+            midi_note: Some(60.0),
+            event_id: None,
+        }
+    }
+
+    #[test]
+    fn baseline_merge_widens_the_analyzed_window() {
+        let mut baseline = GameBlockBaseline {
+            revision: 1,
+            algorithm: crate::game_onnx::GAME_ALGORITHM.into(),
+            algorithm_version: crate::game_onnx::GAME_ALGORITHM_VERSION,
+            source_spans_sec: vec![span(0.9, 1.4)],
+            analyzed_window_sec: [0.9, 2.0],
+        };
+        baseline.merge_window(
+            crate::game_onnx::GAME_ALGORITHM,
+            crate::game_onnx::GAME_ALGORITHM_VERSION,
+            [0.3, 2.0],
+            &[span(0.3, 0.8), span(0.9, 1.4)],
+        );
+        assert_eq!(baseline.analyzed_window_sec, [0.3, 2.0]);
+        assert_eq!(baseline.source_spans_sec.len(), 2);
+        assert_eq!(baseline.source_spans_sec[0].start_sec, 0.3);
+        assert_eq!(baseline.source_spans_sec[1].start_sec, 0.9);
+    }
+
+    #[test]
+    fn algorithm_change_replaces_the_baseline() {
+        let mut baseline = GameBlockBaseline {
+            revision: 1,
+            algorithm: "old".into(),
+            algorithm_version: 1,
+            source_spans_sec: vec![span(0.9, 1.4)],
+            analyzed_window_sec: [0.9, 2.0],
+        };
+        baseline.merge_window(
+            crate::game_onnx::GAME_ALGORITHM,
+            crate::game_onnx::GAME_ALGORITHM_VERSION,
+            [0.3, 2.0],
+            &[span(0.3, 1.4)],
+        );
+        assert_eq!(baseline.source_spans_sec.len(), 1);
+        assert_eq!(baseline.analyzed_window_sec, [0.3, 2.0]);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::param_blocks::compose::compose_param_block_view;
@@ -2312,7 +2366,7 @@ mod tests {
             "clips":[{
                 "id":"clip","track_id":"root","name":"clip","start_sec":0.0,"length_sec":2.0,
                 "takes":[{"id":"take","source_path":"a.wav","source_start_sec":0.0,"source_end_sec":2.0,
-                    "syllable_analysis":{"algorithm":"test","algorithmVersion":1,"sourceDigest":"d",
+                    "syllable_analysis":{"algorithm":"test","algorithmVersion":1,"sourceDigest":"d","analyzedWindowSec":[0.0,4.0],
                         "sourceSpansSec":[{"startSec":0.0,"endSec":0.5},{"startSec":0.5,"endSec":1.0}]}}]
             }],
             "project_sec":4,"bpm":120
@@ -2362,7 +2416,12 @@ mod tests {
         // 基块衬底下，resize 后视图包含左半、右半、右侧基块余段三块。
         assert_eq!(snapshots.len(), 3);
         let deleted_view = compose_param_block_view(&timeline, "root", &deleted, 5.0).unwrap();
-        assert!(deleted_view.blocks.is_empty());
+        // 基块衬底仍会显示（用户删掉的是自己的编辑，不是原始曲线）；只要求
+        // 视图里不再有任何用户块。与下面 split 视图的过滤判据保持同一口径。
+        assert!(deleted_view
+            .blocks
+            .iter()
+            .all(|block| block.kind == ProjectedBlockKind::Base));
         let restored = restore_deleted_blocks(&deleted, &snapshots).unwrap();
         let restored_view = compose_param_block_view(&timeline, "root", &restored, 5.0).unwrap();
         assert_eq!(restored_view.blocks.len(), 3);
@@ -2618,25 +2677,10 @@ mod tests {
         let timeline = timeline();
         let edits = gap_member_edits();
         let view = compose_param_block_view(&timeline, "root", &edits, 5.0).unwrap();
-        assert_eq!(view.blocks.len(), 1);
-        assert_eq!(
-            (
-                view.blocks[0].start_frame,
-                view.blocks[0].end_frame_exclusive
-            ),
-            (0, 200)
-        );
-        // 多成员 run 不是可逆编组：它照样可以切分。
-        assert_eq!(
-            view.blocks[0].kind,
-            crate::param_blocks::ProjectedBlockKind::User
-        );
-
-        // 帧 100 落在缝里。
-        let split = split_block(&timeline, &edits, &view.blocks[0].id, 100, 5.0).unwrap();
-        let split_view = compose_param_block_view(&timeline, "root", &split, 5.0).unwrap();
-        // 基块衬底会在 1 帧缝里露出基块余段；用户块仍应恰好是两块。
-        let user_blocks: Vec<_> = split_view
+        // 两个 member 之间的缝会露出一格基块衬底：视图是
+        // [user 0..100, base 100..101, user 101..200]，不再是"合并成一块"。
+        // 与下面 split_view 的判据一致，只数用户块。
+        let user_blocks: Vec<_> = view
             .blocks
             .iter()
             .filter(|block| block.kind != ProjectedBlockKind::Base)
@@ -2644,6 +2688,26 @@ mod tests {
         assert_eq!(user_blocks.len(), 2);
         assert_eq!(user_blocks[0].start_frame, 0);
         assert_eq!(user_blocks[1].end_frame_exclusive, 200);
+        // 多成员 run 不是可逆编组：它照样可以切分。
+        assert!(user_blocks
+            .iter()
+            .all(|block| block.kind == ProjectedBlockKind::User));
+
+        // 旧实现把两个 member 并成一块、缝里（帧 100）也能切；现在缝由一格
+        // base 衬底覆盖，两侧各是一个用户块，切点必须落在用户块内部。取左半
+        // 的帧 50，仍守住"多成员块切一刀之后还能再切"这条回归。
+        let split = split_block(&timeline, &edits, &user_blocks[0].id, 50, 5.0).unwrap();
+        let split_view = compose_param_block_view(&timeline, "root", &split, 5.0).unwrap();
+        // 切完左半：0..50、50..100 两块，加上缝里的 base 与右半 101..200，
+        // 用户块共三块。
+        let user_blocks: Vec<_> = split_view
+            .blocks
+            .iter()
+            .filter(|block| block.kind != ProjectedBlockKind::Base)
+            .collect();
+        assert_eq!(user_blocks.len(), 3);
+        assert_eq!(user_blocks[0].start_frame, 0);
+        assert_eq!(user_blocks[2].end_frame_exclusive, 200);
 
         // 切完的右半仍然可以再切（回归"多成员块切一刀之后就切不动了"）。
         let right_user = split_view
@@ -2661,7 +2725,7 @@ mod tests {
                 .iter()
                 .filter(|block| block.kind != ProjectedBlockKind::Base)
                 .count(),
-            3
+            4
         );
     }
 

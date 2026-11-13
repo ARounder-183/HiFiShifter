@@ -183,6 +183,13 @@ export const syncPlaybackState = createAsyncThunk(
 export type PlayOriginalResult = {
     ok: boolean;
     clipId: string | null;
+    /**
+     * 引擎**实际**起播位置（=`play_original` 回执里的 `start_sec`）。
+     *
+     * 【这是一份报告，不是输入】起播点完全由引擎决定（`position_frames`），前端
+     * 不再把它传回后端。保留该字段是因为 Stop 的"回到本次起播点"语义要用它 ——
+     * 而且用引擎回报的值比用本地镜像更准。
+     */
     anchorSec: number;
     noop?: boolean;
     host_request?: boolean;
@@ -202,7 +209,6 @@ export const playOriginal = createAsyncThunk<PlayOriginalResult, void>(
     "session/playOriginal",
     async (_, { getState }) => {
         const state = getState() as { session: SessionState };
-        const anchorSec = state.session.playheadSec;
 
         // ★ 已在播放（含"渲染中原地等待"）→ 完全 no-op：不 seek、不调用后端。
         // 下方 set_transport 会把引擎传输层拉回播放头；任何重复触发（播放按钮 +
@@ -212,21 +218,29 @@ export const playOriginal = createAsyncThunk<PlayOriginalResult, void>(
         // noop 标记让 fulfilled reducer 跳过对新播放会话的状态重置（等待标志/
         // 位置报告/纪元），保持等待期的光标冻结不被破坏。
         if (state.session.runtime.isPlaying) {
-            return { ok: true, clipId: null, anchorSec, noop: true };
+            return {
+                ok: true,
+                clipId: null,
+                anchorSec: state.session.playheadSec,
+                noop: true,
+            };
         }
 
-        // ★ 不再前置 set_transport：后端 `play_original` 自身就按引擎时间线的
-        // 播放头 seek（等价且原子），前置的 set_transport 是**多余的独立 seek**：
-        // 当引擎其实已在播放（前端镜像误判为未播放、或 thunk 早于镜像修正而
-        // 执行）时，这次 seek 会把传输层拽回播放头 —— 音频"从头重新开始"，
-        // 而后端的幂等 no-op 已无意义（seek 发生在它之前）。移除后，重复触发
-        // 真正成为完全 no-op（后端幂等兜底），光标不再被拽回。
-        const result = await enqueueTransportCommand(() => webApi.playOriginal(0));
+        // ★ 起播点由引擎决定：这里**不传**任何锚点，也不前置 `set_transport`。
+        // 前置 seek 会在"引擎其实已在播放、前端镜像还没修正"时把传输层拽回旧
+        // 位置（音频从头重来），而后端的幂等 no-op 已经来不及生效 —— seek 在它之前。
+        const result = await enqueueTransportCommand(() => webApi.playOriginal());
+        // 回执里的 start_sec 是引擎实际起播点；拿不到（插件形态 / 旧后端）时退回
+        // 本地光标，仅用于 Stop 的锚点恢复，不参与起播决策。
+        const anchorSec =
+            typeof result.start_sec === "number" && Number.isFinite(result.start_sec)
+                ? result.start_sec
+                : state.session.playheadSec;
         return {
             ...result,
             clipId: null,
             anchorSec,
-            noop: false,
+            noop: Boolean(result.noop),
         };
     },
 );

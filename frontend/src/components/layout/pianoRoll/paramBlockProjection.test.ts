@@ -1,10 +1,15 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+    analysisWindowStatus,
+    audibleSourceWindow,
+    cutFlagsForIntersection,
     inverseProject,
     projectionForClip,
+    positiveIntervalToFrames,
     projectTakeSpan,
     sourceAtProjectedFrame,
+    windowIntersection,
     type ParamBlockSourceClip,
 } from "./paramBlockProjection";
 
@@ -20,6 +25,8 @@ interface GoldenCase {
         readonly cycle: number;
         readonly startFrame: number;
         readonly endFrameExclusive: number;
+        readonly cutStart: boolean;
+        readonly cutEnd: boolean;
     }>;
 }
 
@@ -37,6 +44,65 @@ describe("paramBlockProjection", () => {
             const actual = projectTakeSpan(projection, testCase.span, fixture.framePeriodMs);
             expect(actual, testCase.name).toEqual(testCase.expected);
         }
+    });
+
+    it("shares window intersection and one-frame frame algebra", () => {
+        expect(windowIntersection([0.5, 1.001], [1, 3])).toEqual([1, 1.001]);
+        expect(windowIntersection([0.5, 1], [1, 3])).toBeNull();
+        expect(positiveIntervalToFrames(40, 40, 200)).toEqual([40, 41]);
+        expect(positiveIntervalToFrames(40, 42, 200)).toEqual([40, 42]);
+        // 一帧的提升不得越过 Clip 可见范围的右缘（与 loop 路径同守卫）。
+        expect(positiveIntervalToFrames(200, 200, 200)).toBeNull();
+        expect(positiveIntervalToFrames(200, 201, 200)).toEqual([200, 201]);
+        expect(cutFlagsForIntersection([0.6, 1.4], [1, 3], false)).toEqual([true, false]);
+        expect(cutFlagsForIntersection([1.6, 2.4], [1, 2], true)).toEqual([true, false]);
+        expect(analysisWindowStatus({ startSec: 1, endSec: 3 }, [1, 3], [1])).toBe("current");
+        expect(analysisWindowStatus({ startSec: 0.5, endSec: 3 }, [1, 3], [1])).toBe("stale");
+        expect(analysisWindowStatus({ startSec: 1, endSec: 3 }, [1, 3], [])).toBe("missing");
+    });
+
+    it("matches the Rust audible source window rules", () => {
+        const forward = projectionForClip({
+            id: "c",
+            trackId: "root",
+            startSec: 0,
+            lengthSec: 2,
+            sourceStartSec: 0.5,
+            sourceEndSec: 8,
+            playbackRate: 1,
+            clipPlaybackRate: 2,
+            reversed: false,
+            loopEnabled: false,
+        });
+        expect(audibleSourceWindow(forward)).toEqual({ startSec: 0.5, endSec: 4.5 });
+        const ring = projectionForClip({
+            id: "c",
+            trackId: "root",
+            startSec: 0,
+            lengthSec: 4,
+            sourceStartSec: 0,
+            sourceEndSec: 1,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: true,
+            loopPeriodSec: 1,
+            contentDurationSec: 1,
+        });
+        expect(audibleSourceWindow(ring)).toEqual({ startSec: 0, endSec: 1 });
+        const section = projectionForClip({
+            id: "c",
+            trackId: "root",
+            startSec: 0,
+            lengthSec: 4,
+            sourceStartSec: 0.25,
+            sourceEndSec: 1.25,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: true,
+            loopPeriodSec: 1,
+            contentDurationSec: 4,
+        });
+        expect(audibleSourceWindow(section)).toEqual({ startSec: 0.25, endSec: 1.25 });
     });
 
     it("starts loop projection at the requested cycle", () => {

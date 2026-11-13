@@ -88,7 +88,7 @@ function extractBackendHandlers(source: string): string[] {
     const block = source.match(/generate_handler!\[([\s\S]*?)\]/);
     const commands = new Set<string>();
     if (block) {
-        for (const match of block[1].matchAll(/commands::([a-z_0-9]+)/g)) {
+        for (const match of block[1].matchAll(/commands::(?:[a-z_0-9]+::)*([a-z_0-9]+)/g)) {
             commands.add(match[1]);
         }
     }

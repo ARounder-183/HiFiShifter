@@ -10,17 +10,22 @@
  */
 
 import {
+    analysisWindowStatus,
+    audibleSourceWindow,
     baseSourceSpansForClip,
-    normalizeLoopTakeSpans,
     projectTakeSpan,
+    projectTakeSpanPart,
     projectionForClip,
+    splitLoopTakeSpanParts,
     sourceAtProjectedFrame,
+    sourceNoteEventId,
     toFrame,
     type ClipProjection,
     type ParamBlockSourceClip,
 } from "./paramBlockProjection";
 import { flattenGroupChildren, groupCommonValue, groupLeafMembers } from "./paramBlockTypes";
 import { narrowBaseCoverToMembers } from "./paramBlockBaseCover";
+import { compareClipRenderOrder } from "../timeline/trackOverlap";
 import type {
     BaseCover,
     ParamBlockEditSet,
@@ -34,6 +39,8 @@ import type {
 } from "./paramBlockTypes";
 
 const EPS = 1e-9;
+/** Source-domain intersections use the Rust parity tolerance. */
+const SOURCE_EPS = 1e-12;
 const ANCHOR_TOLERANCE_SEC = 0.005;
 const ANCHOR_OVERLAP_RATIO = 0.5;
 
@@ -47,6 +54,11 @@ interface Candidate {
     readonly value?: number | null;
     readonly transitionWidthSec?: number;
     readonly rate: number;
+    readonly sourceNote?: number | null;
+    readonly cutStart?: boolean;
+    readonly cutEnd?: boolean;
+    readonly sourceKey?: string;
+    readonly sourceEventId?: string;
     readonly priority: number;
     readonly seq: number;
     readonly zOrder: number;
@@ -63,9 +75,21 @@ function hash(text: string): string {
     return `${(left >>> 0).toString(16)}${(right >>> 0).toString(16)}`;
 }
 
+function candidateSourceKey(candidate: Candidate): string | undefined {
+    if (candidate.sourceKey !== undefined) return candidate.sourceKey;
+    const first = candidate.members[0];
+    return first === undefined ? undefined : `${first.clipId}|${first.takeId}|${first.cycle}`;
+}
+
 function memberOf(
     span: TakeSpan,
-    interval: { startFrame: number; endFrameExclusive: number; cycle: number },
+    interval: {
+        startFrame: number;
+        endFrameExclusive: number;
+        cycle: number;
+        cutStart: boolean;
+        cutEnd: boolean;
+    },
     projection: ClipProjection,
     framePeriodMs: number,
 ): ProjectedMember {
@@ -93,6 +117,8 @@ function memberOf(
         frameSourceEndSec,
         visibleSourceStartSec: Math.min(frameSourceStartSec, frameSourceEndSec),
         visibleSourceEndSec: Math.max(frameSourceStartSec, frameSourceEndSec),
+        cutStart: interval.cutStart,
+        cutEnd: interval.cutEnd,
     };
 }
 
@@ -105,7 +131,7 @@ function baseCandidates(
         const analysis = baseSourceSpansForClip(clip);
         if (analysis === null) return;
         const projection = projectionForClip(clip);
-        const normalized = analysis.spans
+        const sorted = analysis.spans
             .filter(
                 (span) =>
                     span.endSec > span.startSec &&
@@ -113,9 +139,21 @@ function baseCandidates(
                     Number.isFinite(span.endSec),
             )
             .slice()
-            .sort((a, b) => a.startSec - b.startSec);
+            .sort((a, b) => a.startSec - b.startSec || a.endSec - b.endSec);
+        const normalized: Array<{ startSec: number; endSec: number; note?: number | null }> = [];
+        for (const span of sorted) {
+            const last = normalized[normalized.length - 1];
+            const next = { ...span };
+            // Keep the earlier (left-cut) span and trim only the overlap from
+            // the later one. Dropping the narrower span hides the Clip edge.
+            if (last !== undefined && next.startSec < last.endSec - EPS) {
+                next.startSec = last.endSec;
+            }
+            if (next.endSec > next.startSec + EPS) normalized.push(next);
+        }
         normalized.forEach((span, index) => {
-            const identity = `span:${projection.takeId}:${index}:${Math.round(span.startSec * 1000)}`;
+            const eventId = sourceNoteEventId(span);
+            const identity = `span:${projection.takeId}:${eventId}`;
             const baseSpan: TakeSpan = {
                 clipId: clip.id,
                 takeId: projection.takeId,
@@ -125,15 +163,15 @@ function baseCandidates(
                 syllableId: identity,
                 label: analysis.label,
             };
-            const parts = normalizeLoopTakeSpans(projection, baseSpan);
+            const parts = splitLoopTakeSpanParts(projection, baseSpan);
             parts.forEach((part, partIndex) => {
                 const cycleSpan: TakeSpan = {
-                    ...part,
+                    ...part.span,
                     syllableId: parts.length > 1 ? `${identity}:part${partIndex}` : identity,
                 };
-                for (const interval of projectTakeSpan(
+                for (const interval of projectTakeSpanPart(
                     projection,
-                    cycleSpan,
+                    { ...part, span: cycleSpan },
                     framePeriodMs,
                     cycleSpan.cycle,
                 )) {
@@ -147,6 +185,11 @@ function baseCandidates(
                         members: [memberOf(intervalSpan, interval, projection, framePeriodMs)],
                         value: null,
                         rate: projection.rate,
+                        sourceNote: span.note ?? clip.syllableNotes?.[index] ?? null,
+                        cutStart: interval.cutStart,
+                        cutEnd: interval.cutEnd,
+                        sourceKey: `${clip.id}|${projection.takeId}|${interval.cycle}`,
+                        sourceEventId: eventId,
                         priority: 1,
                         seq: 0,
                         zOrder,
@@ -181,10 +224,10 @@ function projectTakeMembers(
             continue;
         }
         const projection = projectionForClip(clip);
-        const parts = normalizeLoopTakeSpans(projection, member);
+        const parts = splitLoopTakeSpanParts(projection, member);
         let matched = false;
         for (const part of parts) {
-            for (const interval of projectTakeSpan(projection, part, framePeriodMs)) {
+            for (const interval of projectTakeSpanPart(projection, part, framePeriodMs)) {
                 /*
                  * 用户成员是**周期特定**的：cycle=N 的成员只画第 N 个周期。
                  * 基块不同：一个 syllable span 在每个循环周期都出现，所以
@@ -192,12 +235,12 @@ function projectTakeMembers(
                  * 后续周期；用户块必须精确匹配，否则一个 cycle=0 的成员会
                  * 覆盖整段 Loop，后面的基块被错误吞掉。
                  */
-                if (interval.cycle !== part.cycle) continue;
+                if (interval.cycle !== part.span.cycle) continue;
                 matched = true;
                 projected.push({
                     start: interval.startFrame,
                     end: interval.endFrameExclusive,
-                    member: memberOf(part, interval, projection, framePeriodMs),
+                    member: memberOf(part.span, interval, projection, framePeriodMs),
                     rate: projection.rate,
                 });
             }
@@ -249,6 +292,15 @@ function projectTakeMembers(
                 value,
                 transitionWidthSec,
                 rate: run.rate,
+                sourceKey:
+                    run.members.length === 1
+                        ? run.members[0].clipId +
+                          "|" +
+                          run.members[0].takeId +
+                          "|" +
+                          run.members[0].cycle
+                        : undefined,
+                sourceNote: null,
                 priority: manual ? 4 : 3,
                 seq: createdSeq,
                 zOrder: 0,
@@ -458,7 +510,12 @@ function coverIntervalsForBase(
                 ) {
                     continue;
                 }
-                if (cover.full && anchorMatches(baseSpan, span)) {
+                if (
+                    cover.full &&
+                    anchorMatches(baseSpan, span) &&
+                    span.sourceStartSec <= baseSpan.sourceStartSec + 1e-7 &&
+                    span.sourceEndSec >= baseSpan.sourceEndSec - 1e-7
+                ) {
                     return [[base.start, base.end]];
                 }
                 const clip = clips.find((item) => item.id === span.clipId);
@@ -516,13 +573,17 @@ function basePieceCandidate(
     if (a === null || b === null) return null;
     const lo = Math.min(a, b);
     const hi = Math.max(a, b);
-    if (!(hi > lo + EPS)) return null;
+    // A positive frame interval is visible truth. Frame rounding can collapse
+    // source coordinates; one frame of source width is the smallest editable
+    // local interval, never a reason to drop the block.
+    const [pieceStart, pieceEnd] =
+        hi > lo + SOURCE_EPS ? [lo, hi] : [lo, lo + (framePeriodMs / 1000) * projection.rate];
     const pieceSpan: TakeSpan = {
         clipId: member.clipId,
         takeId: member.takeId,
         cycle: member.cycle,
-        sourceStartSec: lo,
-        sourceEndSec: hi,
+        sourceStartSec: pieceStart,
+        sourceEndSec: pieceEnd,
         label: member.label ?? baseSpan.label,
     };
     return {
@@ -533,7 +594,13 @@ function basePieceCandidate(
         members: [
             memberOf(
                 pieceSpan,
-                { startFrame: start, endFrameExclusive: end, cycle: pieceSpan.cycle },
+                {
+                    startFrame: start,
+                    endFrameExclusive: end,
+                    cycle: pieceSpan.cycle,
+                    cutStart: (base.cutStart ?? false) || (member.cutStart ?? false),
+                    cutEnd: (base.cutEnd ?? false) || (member.cutEnd ?? false),
+                },
                 projection,
                 framePeriodMs,
             ),
@@ -562,6 +629,8 @@ function trimMember(
         ...member,
         startFrame: start,
         endFrameExclusive: end,
+        cutStart: member.startFrame === start ? (member.cutStart ?? false) : true,
+        cutEnd: member.endFrameExclusive === end ? (member.cutEnd ?? false) : true,
         frameSourceStartSec,
         frameSourceEndSec,
         visibleSourceStartSec: Math.min(frameSourceStartSec, frameSourceEndSec),
@@ -570,10 +639,26 @@ function trimMember(
 }
 
 function spanListKey(
-    spans: readonly { readonly startSec: number; readonly endSec: number }[] | undefined,
+    spans:
+        | readonly {
+              readonly startSec: number;
+              readonly endSec: number;
+              readonly note?: number | null;
+              readonly eventId?: string;
+          }[]
+        | undefined,
 ): string {
     return (spans ?? [])
-        .map((span) => span.startSec.toFixed(6) + "-" + span.endSec.toFixed(6))
+        .map(
+            (span) =>
+                span.startSec.toFixed(6) +
+                "-" +
+                span.endSec.toFixed(6) +
+                ":" +
+                (span.note ?? "-") +
+                ":" +
+                (span.eventId ?? ""),
+        )
         .join(";");
 }
 
@@ -603,7 +688,11 @@ function takeLayoutKey(take: NonNullable<ParamBlockSourceClip["takes"]>[number])
         take.durationFrames,
         take.sourceSampleRate,
         spanListKey(take.syllableSpansSec),
+        (take.syllableNotes ?? []).map((note) => (note === null ? "-" : note)).join(","),
+        (take.syllableEventIds ?? []).join(","),
+        take.syllableAnalysisWindowSec?.join("-") ?? "",
         spanListKey(take.gameBlockBaseline?.sourceSpansSec),
+        take.gameBlockBaseline?.analyzedWindowSec?.join("-") ?? "",
         noteListKey(take.midiNoteData),
     ].join(":");
 }
@@ -628,7 +717,11 @@ function clipLayoutKey(clip: ParamBlockSourceClip): string {
         clip.loopPeriodSec,
         clip.contentDurationSec,
         spanListKey(clip.syllableSpansSec),
+        (clip.syllableNotes ?? []).map((note) => (note === null ? "-" : note)).join(","),
+        (clip.syllableEventIds ?? []).join(","),
+        clip.syllableAnalysisWindowSec?.join("-") ?? "",
         spanListKey(clip.gameBlockBaseline?.sourceSpansSec),
+        clip.gameBlockBaseline?.analyzedWindowSec?.join("-") ?? "",
         noteListKey(clip.midiNoteData),
         (clip.takes ?? []).map(takeLayoutKey).join(","),
     ].join(":");
@@ -641,23 +734,26 @@ export function composeParamBlockView(
     framePeriodMs: number,
 ): ParamBlockView {
     const fp = Math.max(0.1, framePeriodMs);
+    // 参数块层级必须与时间轴视觉顺序一致：后开始的 Clip 在上层。只允许
+    // 复用 compareClipRenderOrder，禁止在这里另写一份 start/id 排序。
+    const orderedClips = [...clips].sort(compareClipRenderOrder);
     const candidates: Candidate[] = [];
-    for (const base of baseCandidates(clips, fp)) {
-        const covers = coverIntervalsForBase(base, clips, edits, fp);
+    for (const base of baseCandidates(orderedClips, fp)) {
+        const covers = coverIntervalsForBase(base, orderedClips, edits, fp);
         for (const [start, end] of subtract(base.start, base.end, covers)) {
             if (end <= start) continue;
             if (start === base.start && end === base.end) {
                 candidates.push(base);
                 continue;
             }
-            const piece = basePieceCandidate(base, start, end, clips, fp);
+            const piece = basePieceCandidate(base, start, end, orderedClips, fp);
             if (piece !== null) candidates.push(piece);
         }
     }
     let orphanCount = 0;
     for (const block of edits.blocks) {
         if (block.deleted) continue;
-        const projected = projectUserBlock(clips, block, fp);
+        const projected = projectUserBlock(orderedClips, block, fp);
         orphanCount += projected.orphan;
         candidates.push(...projected.candidates);
     }
@@ -677,7 +773,7 @@ export function composeParamBlockView(
             if (end <= start) return;
             const trimmed = start !== candidate.start || end !== candidate.end || pieces.length > 1;
             if (candidate.kind === "base" && trimmed) {
-                const piece = basePieceCandidate(candidate, start, end, clips, fp);
+                const piece = basePieceCandidate(candidate, start, end, orderedClips, fp);
                 if (piece !== null) {
                     accepted.push({ ...piece, id: `${piece.id}:${index}` });
                 }
@@ -709,6 +805,8 @@ export function composeParamBlockView(
         if (
             next !== undefined &&
             candidate.end === next.start &&
+            candidate.sourceKey !== undefined &&
+            candidate.sourceKey === next.sourceKey &&
             candidate.transitionWidthSec !== undefined
         ) {
             const width = Math.round(
@@ -729,6 +827,17 @@ export function composeParamBlockView(
             kind: candidate.kind,
             members: candidate.members,
             ...(candidate.value === undefined ? {} : { value: candidate.value }),
+            ...(candidate.sourceNote === undefined ? {} : { sourceNote: candidate.sourceNote }),
+            ...(candidateSourceKey(candidate) === undefined
+                ? {}
+                : { sourceKey: candidateSourceKey(candidate) }),
+            ...(candidate.sourceEventId === undefined
+                ? {}
+                : { sourceEventId: candidate.sourceEventId }),
+            cutStart: candidate.cutStart === true || (candidate.members[0]?.cutStart ?? false),
+            cutEnd:
+                candidate.cutEnd === true ||
+                (candidate.members[candidate.members.length - 1]?.cutEnd ?? false),
             ...(candidate.baseCover === undefined ? {} : { baseCover: candidate.baseCover }),
         };
     });
@@ -736,21 +845,29 @@ export function composeParamBlockView(
         schemaVersion: 1,
         rootTrackId,
         editRevision: edits.revision,
-        layoutKey: `layout:${hash(`${rootTrackId}|${fp}|${clips.map(clipLayoutKey).join("|")}`)}`,
+        layoutKey: `layout:${hash(`${rootTrackId}|${fp}|${orderedClips.map(clipLayoutKey).join("|")}`)}`,
         framePeriodMs: fp,
         blocks,
         orphanCount,
-        analysisPending: clips.some((clip) => {
+        analysisPending: orderedClips.some((clip) => {
             const take =
                 clip.takes?.find((item) => item.id === clip.activeTakeId) ?? clip.takes?.[0];
+            const spans =
+                take?.syllableSpansSec ??
+                clip.syllableSpansSec ??
+                take?.gameBlockBaseline?.sourceSpansSec ??
+                clip.gameBlockBaseline?.sourceSpansSec ??
+                take?.midiNoteData ??
+                clip.midiNoteData;
+            const hasSource = clip.sourceStartSec !== undefined || clip.sourceEndSec !== undefined;
+            if (take?.midiNoteData?.length || clip.midiNoteData?.length) return false;
+            if (!hasSource) return false;
             return (
-                (clip.sourceStartSec !== undefined || clip.sourceEndSec !== undefined) &&
-                (take?.syllableSpansSec?.length ?? 0) === 0 &&
-                (clip.syllableSpansSec?.length ?? 0) === 0 &&
-                (take?.gameBlockBaseline?.sourceSpansSec?.length ?? 0) === 0 &&
-                (clip.gameBlockBaseline?.sourceSpansSec?.length ?? 0) === 0 &&
-                (take?.midiNoteData?.length ?? 0) === 0 &&
-                (clip.midiNoteData?.length ?? 0) === 0
+                analysisWindowStatus(
+                    audibleSourceWindow(projectionForClip(clip)),
+                    take?.syllableAnalysisWindowSec ?? clip.syllableAnalysisWindowSec,
+                    spans,
+                ) !== "current"
             );
         }),
     };

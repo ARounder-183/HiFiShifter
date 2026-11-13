@@ -71,9 +71,9 @@ import {
 import { resolveParamBlockFrameValue } from "../../paramBlockFrame";
 import { decimatePolylinePoints } from "../../../renderKernel/gl/polylineDecimation";
 import {
+    projectClipPitchPoints,
     projectClipboardPreviewPoints,
     projectCurvePoints,
-    projectDetectedCurvePoints,
     type CurvePoint,
 } from "../scene/curvePoints";
 import {
@@ -89,14 +89,12 @@ import {
     AXIS_TICK_LABEL_DESCENT_PX,
     AXIS_TICK_LABEL_FONT_SIZE_PX,
     axisTickLabelAnchorBounds,
-    createPianoRollGlyphs,
-    type PianoRollGlyphs,
     type TextRequest,
 } from "../glyph/pianoRollGlyphs";
 import { buildAxisMarkInstances, resolveAxisKind } from "../scene/axisMarkInstances";
 import { buildKeyboardInstances } from "../scene/keyboardInstances";
-import { createGlyphProgram, type GlyphProgram } from "../../../renderKernel/gl/glyphProgram";
 import type { GlyphQuad } from "../../../renderKernel/gl/glyphQuads";
+import { createGlyphSurface, type GlyphSurface } from "./glyphSurface";
 import {
     createTimelineAxis,
     playheadLineLeftPx,
@@ -263,6 +261,8 @@ export interface PianoRollKernelHostArgs {
      * 让本文件仍可被单测以 `false` 覆盖纯滚动路径。
      */
     readonly glSceneEnabled?: boolean;
+    /** 测试注入口：按画布上下文创建独立字形表面。 */
+    readonly glyphSurfaceFactory?: (gl: WebGL2RenderingContext, dpr: number) => GlyphSurface | null;
     /**
      * 水平同步偏移（CSS px）：内容层相对绘制区原点的右移量，缺省 0。
      *
@@ -729,32 +729,32 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         Number.isFinite(args.axisWidthPx) && (args.axisWidthPx as number) > 0
             ? (args.axisWidthPx as number)
             : 56;
-    // 字形层（Task 5）：与键盘共用同一块轴画布（文字画在键体/刻度线之上），
-    // 因此共用 `glAxisHandle` 的上下文，program 独立。
-    let glGlyphProgram: GlyphProgram | null = null;
-    let glGlyphs: PianoRollGlyphs | null = null;
+    // 字形层：主画布与轴画布各有一套 program / rasterizer / atlas 上传页。
+    // 轴文字只进轴 surface，块标签只进主 surface；共用一个 program 会把块标签
+    // 提交到轴上下文（表现为轴列白色噪点、块内无标签）。
     /**
      * 建当前字形图集时使用的 dpr。
      *
      * 字形位图与物理像素一一对应（`glyphRasterizer` 的显式契约：dpr 变化后必须整体
-     * 重建，否则旧图集会被采样成模糊字形）。绘制路径每帧比对本值，变化时丢弃重建。
+     * 重建，否则旧图集会被采样成模糊字形）。绘制路径每帧比对本值，变化时重建两套
+     * surface，避免轴文字与块标签出现半恢复状态。
      */
     let glyphAtlasDpr = readDevicePixelRatio();
-    if (glAxisHandle !== null) {
+    const glyphSurfaceFactory =
+        args.glyphSurfaceFactory ??
+        ((gl: WebGL2RenderingContext, dpr: number) => createGlyphSurface(gl, dpr));
+    const createSurfaceFor = (gl: WebGL2RenderingContext): GlyphSurface | null => {
         try {
-            glGlyphProgram = createGlyphProgram(glAxisHandle.gl);
-            glGlyphs = createPianoRollGlyphs({ dpr: glyphAtlasDpr });
-            if (glGlyphs === null) {
-                glGlyphProgram = null;
-            }
+            return glyphSurfaceFactory(gl, glyphAtlasDpr);
         } catch {
-            glGlyphProgram = null;
-            glGlyphs = null;
+            return null;
         }
-    }
-    /** 上一帧上传过的图集页（按页增量上传，避免每帧重传整张图集）。 */
-    const uploadedAtlasPages = new Set<number>();
-    /** 本帧待绘制的文字四边形。 */
+    };
+    let mainGlyphSurface: GlyphSurface | null =
+        glHandle !== null ? createSurfaceFor(glHandle.gl) : null;
+    let axisGlyphSurface: GlyphSurface | null =
+        glAxisHandle !== null ? createSurfaceFor(glAxisHandle.gl) : null;
+    /** 本帧待绘制的轴文字四边形。 */
     let glTextQuads: GlyphQuad[] = [];
 
     // 曲线层（阶段 3）：复用**主 GL 画布**（网格/键盘之上），program 独立。
@@ -1082,6 +1082,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             kind: spec.kind,
             paramName: spec.paramName,
             axisUnit: spec.axisUnit,
+            axisDirection: spec.axisDirection,
             view,
             absMin: spec.absMin,
             absMax: spec.absMax,
@@ -1249,22 +1250,44 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                           curveOwned: spec.curveOwned,
                       });
                 /*
-                 * No midpoint fallback: a block without a sampled / cached /
-                 * manual center is skipped for this frame. Falling back to the
-                 * viewport middle put every unvalued block on the same line
-                 * (F#4 in the reported project).
+                 * A block in the derived view must always be drawn. Its own
+                 * source note, panel fallback or the live value center are
+                 * display-only fallbacks; never use the viewport midpoint and
+                 * never write a fallback into the parameter curve.
                  */
-                const displayValue = value ?? block.averageValue ?? null;
-                if (
-                    displayValue == null ||
-                    !Number.isFinite(displayValue) ||
-                    liveView == null ||
-                    !Number.isFinite(liveView.center) ||
-                    !Number.isFinite(liveView.span) ||
-                    liveView.span <= 1e-9
-                ) {
-                    return block;
-                }
+                const fallbackValue =
+                    param === "pitch" && Number.isFinite(block.sourceNote)
+                        ? (block.sourceNote as number)
+                        : Number.isFinite(block.fallbackValue)
+                          ? (block.fallbackValue as number)
+                          : null;
+                const boundsMidpoint =
+                    Number.isFinite(spec.valueMin) && Number.isFinite(spec.valueMax)
+                        ? (spec.valueMin + spec.valueMax) / 2
+                        : null;
+                // A derived view block must always get geometry. The midpoint is
+                // only a last-resort pixel position, never a curve value.
+                const liveCenter =
+                    liveView !== null && Number.isFinite(liveView.center) ? liveView.center : null;
+                const displayValue =
+                    value ??
+                    block.averageValue ??
+                    fallbackValue ??
+                    liveCenter ??
+                    boundsMidpoint ??
+                    0;
+                const geometryFallback =
+                    value == null &&
+                    block.averageValue == null &&
+                    fallbackValue === null &&
+                    (liveView === null ||
+                        !Number.isFinite(liveView.center) ||
+                        !Number.isFinite(liveView.span) ||
+                        liveView.span <= 1e-9);
+                const usedFallback =
+                    (value === null || value === undefined) &&
+                    (block.averageValue === null || block.averageValue === undefined) &&
+                    (fallbackValue !== null || geometryFallback);
                 /*
                  * 块中心的唯一投影口径：交给共用函数处理 pitch 的 +0.5，
                  * 再走与曲线同一个 valueToY。这里不能自己展开 normalized：
@@ -1335,6 +1358,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                     averageValue: displayValue,
                     heightPx: hitHeightPx,
                     topPx,
+                    ...(usedFallback ? { centerPolicy: "fallback" as const } : {}),
                 };
             });
         blockHitRects = hitRects;
@@ -1347,10 +1371,19 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 (block.topPx ?? 0) + (block.heightPx ?? 0) > 0 &&
                 (block.topPx ?? 0) < viewportHeightPx,
         ) as typeof liveBlocks;
+        const defaultBlockHeightPx = blockRowHeightPx(
+            spec.valueToY ?? data().grid?.valueToY,
+            viewportHeightPx,
+            param,
+        );
         const drawableBlocks = liveBlocks.map((block) => ({
             ...block,
             topPx: block.topPx ?? 0,
-            heightPx: block.heightPx ?? 0,
+            heightPx:
+                Number.isFinite(block.heightPx) && (block.heightPx as number) > 0
+                    ? (block.heightPx as number)
+                    : defaultBlockHeightPx,
+            fallback: block.centerPolicy === "fallback",
         }));
         const scene = buildParamBlockScene({
             axis: currentAxis(),
@@ -1373,7 +1406,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             cornerRadiusPx: spec.cornerRadiusPx,
         });
         const items = scene.items;
-        glBlockTextQuads = glGlyphs !== null ? glGlyphs.build(scene.labels) : [];
+        glBlockTextQuads = mainGlyphSurface?.build(scene.labels) ?? [];
         if (items.length === 0 && scene.fills.length === 0) return;
         const needed =
             (items.length + scene.fills.length + scene.highlights.length + scene.handles.length) *
@@ -1428,18 +1461,8 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 }
             }
         }
-        if (glGlyphProgram !== null && glGlyphs !== null && glBlockTextQuads.length > 0) {
-            // 块标签可能与轴文字共用图集页；只上传本帧新增的页，避免每帧重传纹理。
-            for (const page of glGlyphs.consumeDirtyPages()) {
-                const pageData = glGlyphs.readPage(page);
-                if (pageData !== null) {
-                    glGlyphProgram.uploadAtlas(pageData, glGlyphs.atlasPageSizePx());
-                    uploadedAtlasPages.add(page);
-                }
-            }
-            if (uploadedAtlasPages.size > 0) {
-                glGlyphProgram.render(glBlockTextQuads, target, 0, 0);
-            }
+        if (mainGlyphSurface !== null && glBlockTextQuads.length > 0) {
+            mainGlyphSurface.render(glBlockTextQuads, target, 0, 0, glHandle.gl);
         }
     }
 
@@ -1487,23 +1510,22 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             // 每条图层用自己的投影（副参数值域与主参数不同，见 spec 说明）。
             const valueToY = layer.valueToY;
             // 三种投影的时间基准不同（见 `PianoRollCurveLayer.projection` 说明）：
-            // 检测曲线自带绝对起始秒且要跳无声帧，剪贴板预览锚定选区起点，
-            // 其余按 `startFrame + i × stride`。混用会造成平移或尖刺。
+            // Clip 源音高参考线按工程帧 `startFrame + i`，剪贴板预览锚定选区起点，
+            // 其余按 `startFrame + i × stride`。混用会造成平移。
             //
             // 虚线相位（`dashPhasePx`）：只有 `"curve"` 投影（原始参数线是唯一
             // 的虚线用户）由投影给出锚在**数据**上的相位 —— 相位 = 首个可见点
             // 相对曲线起点的内容坐标距离，滚动时不变，虚线跟着内容走而不是在
-            // 屏幕上原地重排（"蠕动"）。检测/剪贴板投影的子路径起点本身就是
-            // 数据锚定的（curveStartSec / selStartSec），无需补偿。
+            // 屏幕上原地重排（"蠕动"）。Clip / 剪贴板投影的子路径起点本身就是
+            // 数据锚定的（startFrame / selStartSec），无需补偿。
             let points: CurvePoint[];
             let dashPhasePx = 0;
-            if (layer.projection === "detected") {
-                points = projectDetectedCurvePoints({
-                    midiCurve: layer.values,
-                    curveStartSec: layer.curveStartSec ?? 0,
-                    // 有效跨度 = 所属 clip 的跨度：越界帧与"起点不符"的过期缓存都不画。
-                    clipStartSec: layer.clipStartSec ?? 0,
-                    clipEndSec: layer.clipEndSec ?? Number.POSITIVE_INFINITY,
+            if (layer.projection === "clip") {
+                points = projectClipPitchPoints({
+                    values: layer.values,
+                    startFrame: layer.startFrame,
+                    frameCount: layer.frameCount ?? Number.POSITIVE_INFINITY,
+                    sampleStartIndex: layer.curveSampleStartIndex ?? 0,
                     framePeriodMs: layer.framePeriodMs,
                     axis,
                     valueToY,
@@ -1513,8 +1535,8 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                     values: layer.values,
                     param: layer.param,
                     framePeriodMs: layer.framePeriodMs,
-                    selStartSec: layer.clipStartSec ?? 0,
-                    selEndSec: layer.clipEndSec ?? 0,
+                    selStartSec: layer.clipboardStartSec ?? 0,
+                    selEndSec: layer.clipboardEndSec ?? 0,
                     axis,
                     valueToY,
                 });
@@ -1844,22 +1866,8 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         }
 
         // ② 文字层
-        if (glGlyphProgram !== null && glGlyphs !== null && glTextQuads.length > 0) {
-            // 按页增量上传图集：只传本帧有变更的页，避免每帧重传整张图集。
-            // 特殊说明：`uploadAtlas` 只接受单页数据（program 内部持有单张纹理），
-            // 因此多页图集时以**最后一页**为准。本面板的字符集（约 150 个字形）
-            // 远小于单页容量，实际只会有第 0 页。
-            const dirty = glGlyphs.consumeDirtyPages();
-            for (const page of dirty) {
-                const data = glGlyphs.readPage(page);
-                if (data !== null) {
-                    glGlyphProgram.uploadAtlas(data, glGlyphs.atlasPageSizePx());
-                    uploadedAtlasPages.add(page);
-                }
-            }
-            if (uploadedAtlasPages.size > 0) {
-                glGlyphProgram.render(glTextQuads, target, 0, 0);
-            }
+        if (axisGlyphSurface !== null && glTextQuads.length > 0) {
+            axisGlyphSurface.render(glTextQuads, target, 0, 0, glAxisHandle.gl);
         }
     }
 
@@ -2234,10 +2242,12 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             const currentDpr = readDevicePixelRatio();
             if (currentDpr !== glyphAtlasDpr) {
                 glyphAtlasDpr = currentDpr;
-                glGlyphs?.dispose();
-                glGlyphs = createPianoRollGlyphs({ dpr: currentDpr });
-                uploadedAtlasPages.clear();
+                mainGlyphSurface?.dispose();
+                mainGlyphSurface = glHandle !== null ? createSurfaceFor(glHandle.gl) : null;
+                axisGlyphSurface?.dispose();
+                axisGlyphSurface = glAxisHandle !== null ? createSurfaceFor(glAxisHandle.gl) : null;
                 glTextQuads = [];
+                glBlockTextQuads = [];
                 lastKeyboardSignature = "";
             }
             const spec = data().grid;
@@ -2251,8 +2261,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                     rebuildAxisMarkGeometry(spec);
                 }
                 // 文字只随几何一起重建（位置由几何决定，几何没变则文字也没变）。
-                glTextQuads =
-                    glGlyphs !== null ? glGlyphs.build(collectAxisTextRequests(spec)) : [];
+                glTextQuads = axisGlyphSurface?.build(collectAxisTextRequests(spec)) ?? [];
             }
             drawGlKeyboard();
         }
@@ -2677,10 +2686,10 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             glHandle = null;
             glAxisProgram?.dispose();
             glAxisProgram = null;
-            glGlyphProgram?.dispose();
-            glGlyphProgram = null;
-            glGlyphs?.dispose();
-            glGlyphs = null;
+            mainGlyphSurface?.dispose();
+            mainGlyphSurface = null;
+            axisGlyphSurface?.dispose();
+            axisGlyphSurface = null;
             glAxisHandle = null;
             glOverlayProgram?.dispose();
             glOverlayProgram = null;

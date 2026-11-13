@@ -26,8 +26,15 @@ export interface ParamBlockRenderBlock {
     readonly grouped: boolean;
     readonly label?: string;
     readonly transitionSec?: number;
-    /** canonical = live（按曲线反算）；手势预览 = locked（显式中心优先）。 */
-    readonly centerPolicy?: "live" | "locked";
+    /** canonical = live；手势预览 = locked；display-only fallback = fallback. */
+    readonly centerPolicy?: "live" | "locked" | "fallback";
+    readonly sourceNote?: number | null;
+    readonly fallbackValue?: number | null;
+    readonly cutStart?: boolean;
+    readonly cutEnd?: boolean;
+    readonly sourceKey?: string;
+    /** Stable full-source note-event identity; view-only. */
+    readonly sourceEventId?: string;
 }
 
 export interface ParamBlockSpecColors {
@@ -73,12 +80,11 @@ export function buildParamBlockRenderSpec(args: {
     readonly curveOwned?: boolean;
 }): PianoRollParamBlockSpec {
     const sorted = sortParamBlockRenderBlocks(args.blocks);
-    const logicalOrdinals = new Map<string, number>();
-    for (const block of sorted) {
-        const id = block.userBlockId ?? block.id;
-        if (!logicalOrdinals.has(id)) logicalOrdinals.set(id, logicalOrdinals.size + 1);
-    }
     const handles = paramBlockTransitionHandles(sorted);
+    // Only known, equal source identities can be contiguous. Two unknown
+    // sources must never be treated as the same Clip/Take/cycle.
+    const sameSource = (a: ParamBlockRenderBlock | undefined, b: ParamBlockRenderBlock) =>
+        a?.sourceKey !== undefined && a.sourceKey === b.sourceKey;
     const handleByLeftId = new Map(handles.map((handle) => [handle.leftId, handle]));
     return {
         curveOwned: args.curveOwned ?? true,
@@ -95,8 +101,10 @@ export function buildParamBlockRenderSpec(args: {
                 topPx: block.topPx ?? 0,
                 heightPx: block.heightPx ?? 0,
                 contiguousStart:
-                    previous !== undefined && Math.abs(previous.endSec - block.startSec) < 1e-6,
-                contiguousEnd: next !== undefined && Math.abs(next.startSec - block.endSec) < 1e-6,
+                    sameSource(previous, block) &&
+                    Math.abs(previous!.endSec - block.startSec) < 1e-6,
+                contiguousEnd:
+                    sameSource(next, block) && Math.abs(next!.startSec - block.endSec) < 1e-6,
                 transitionHandle:
                     handle === undefined
                         ? null
@@ -106,13 +114,7 @@ export function buildParamBlockRenderSpec(args: {
                               rightId: handle.rightId,
                               widthSec: handle.transitionSec,
                           },
-                label:
-                    block.label ??
-                    formatParamBlockLabel(
-                        block.averageValue,
-                        logicalOrdinals.get(block.userBlockId ?? block.id) ?? index + 1,
-                        args.param,
-                    ),
+                label: block.label ?? formatParamBlockLabel(block.averageValue, args.param),
                 centerPolicy: block.centerPolicy ?? "live",
             };
         }),

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveOverlapClickClipId, hitTest, type HitTestArgs, type HitTestClip } from "./hitTest";
+import { hitTest, type HitTestArgs, type HitTestClip } from "./hitTest";
 
 /** 构造命中参数：2 条轨道，轨道 A 上三个 clip（含首尾相接）。 */
 function makeArgs(overrides: Partial<HitTestArgs> = {}): HitTestArgs {
@@ -412,65 +412,6 @@ describe("hitTest · clip 内局部坐标", () => {
         if (result.kind !== "clip") return;
         expect(result.localX).toBeCloseTo(100, 5);
         expect(result.localY).toBeCloseTo(15, 5);
-    });
-});
-
-describe("resolveOverlapClickClipId", () => {
-    const overlapping = {
-        kind: "clip",
-        clip: { id: "later" },
-        region: "fade-in-corner",
-        fromOverlapRegion: true,
-        foregroundClip: { id: "short" },
-        laterClipId: "later",
-    } as const;
-    const noModifiers = { altKey: false, ctrlKey: false, metaKey: false, shiftKey: false };
-
-    it.each([
-        "fade-in-corner",
-        "fade-out-corner",
-        "crossfade-grip",
-        "left-edge",
-        "right-edge",
-    ] as const)("单击 %s 选前景短片段，但不改拖拽分区与控件归属", (region) => {
-        const hit = { ...overlapping, region };
-        expect(resolveOverlapClickClipId(hit, noModifiers)).toBe("short");
-        expect(hit.region).toBe(region);
-        expect(hit.clip.id).toBe("later");
-        expect(hit.fromOverlapRegion).toBe(true);
-    });
-
-    it("任一编辑修饰键 → 保留控件语义（边缘 / 淡化 / 参数选区）", () => {
-        for (const key of ["altKey", "ctrlKey", "metaKey", "shiftKey"] as const) {
-            const out = resolveOverlapClickClipId(overlapping, {
-                ...noModifiers,
-                [key]: true,
-            });
-            expect(out).toBeUndefined();
-        }
-    });
-
-    it("header 命中不降级（header 控件有自己的消费语义）", () => {
-        const out = resolveOverlapClickClipId({ ...overlapping, region: "header" }, noModifiers);
-        expect(out).toBeUndefined();
-    });
-
-    it("非重叠区命中不受影响（普通淡变角手感不变）", () => {
-        const out = resolveOverlapClickClipId(
-            { ...overlapping, fromOverlapRegion: false },
-            noModifiers,
-        );
-        expect(out).toBeUndefined();
-    });
-
-    it("没有前景信息时回落到控件所属片段", () => {
-        expect(
-            resolveOverlapClickClipId({ ...overlapping, foregroundClip: undefined }, noModifiers),
-        ).toBe("later");
-    });
-
-    it("空白没有单击片段目标", () => {
-        expect(resolveOverlapClickClipId({ kind: "empty" }, noModifiers)).toBeUndefined();
     });
 });
 

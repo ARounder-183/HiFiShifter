@@ -84,6 +84,7 @@ import { noteFadeLinePointerDown } from "../../hooks/fadeLineClickGesture";
 import { effectiveFadeSec, hitClipFadeTarget } from "../interaction/fadeTargets";
 import type { FadeContextSide } from "../../FadeContextMenu";
 import { hitOverlapControl } from "../interaction/overlapControls";
+import { resolveOverlapPressTarget } from "../interaction/overlapPress";
 import {
     resolveClipHeaderLayout,
     CLIP_HEADER_RATE_BADGE_ANCHOR_WIDTH_PX,
@@ -108,12 +109,7 @@ import {
     WHEEL_ZOOM_IN_FACTOR,
     WHEEL_ZOOM_OUT_FACTOR,
 } from "../../constants";
-import {
-    resolveOverlapClickClipId,
-    hitTest,
-    type ClipHitRegion,
-    type HitTestClip,
-} from "../interaction/hitTest";
+import { hitTest, type ClipHitRegion, type HitTestClip } from "../interaction/hitTest";
 import type { SeekGesturePhase } from "../interaction/seekGesture";
 import {
     resolveDragDelta,
@@ -3600,6 +3596,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             headerHeightPx: CLIP_HEADER_HEIGHT,
         });
         if (hit.kind !== "clip" || hit.region === "header") return hit;
+        // SnapOffset 手柄的层级高于重叠区的边缘/淡变控件；重叠解析不能抢走
+        // 重叠区左下角的 ◣ 握把。
+        if (hit.region === "snap-offset-handle") return hit;
 
         // ── 重叠区按位置改写（同轨 ≥ 2 个 clip 才有重叠）──
         // 通用命中取视觉最上层的短片段；重叠区还须提供双方的边缘与淡化控件。
@@ -3634,6 +3633,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 说明：淡变命中（`kind === "fade"`）映射到既有角部区域，复用同一条
             // `clip-fade` 手势——包络线拖拽与角部拖拽在旧实现里是同一个语义（调长度），
             // 只是抓取位置不同。
+            // clip 是控件归属，foregroundClip 是 body 前景；二者不能合并。
+            // 把 clip 换成 foregroundClip 会让 A 的淡出线去拖 B。
             return {
                 kind: "clip",
                 clip: target,
@@ -4100,9 +4101,28 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     }
 
     function startPrimaryGesture(event: PointerEvent): void {
-        // 按下时不能把控件改成 body，否则超过阈值后只剩 clip 拖拽。
-        const hit = hitAt(event.clientX, event.clientY);
-        const overlapClickClipId = resolveOverlapClickClipId(hit, event);
+        /*
+         * 重叠区按下：单击目标与拖拽控件归属分开。
+         *
+         * hitAt 的 clip 是控件归属（A 的淡出线仍是 A），foregroundClip 只是
+         * body 的视觉最上层。无修饰键的控件单击保留既有的「选前景」手感；
+         * 只有超过拖拽阈值才改选控件归属，并继续编辑原 region。这样既不会让
+         * A 的淡出线去拖 B，也不会把一次普通点击变成选中 A。
+         *
+         * header 控件（静音 / 链 / 共振峰 / 旋钮 / 徽标）仍由
+         * resolveHeaderControl 单独识别，不进入重叠区解析。
+         */
+        const rawHit = hitAt(event.clientX, event.clientY);
+        const press = resolveOverlapPressTarget(rawHit, {
+            altKey: event.altKey,
+            ctrlKey: event.ctrlKey,
+            metaKey: event.metaKey,
+            shiftKey: event.shiftKey,
+        });
+        const hit = press.hit;
+        const overlapClickClipId = press.plainControlClick
+            ? (press.selectionClipId ?? undefined)
+            : undefined;
         if (hit.kind === "clip" && interactions?.geometryReadOnly) {
             const intercepted = interactions.onClipPointerDownIntercept?.({
                 clipId: hit.clip.id,

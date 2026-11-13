@@ -4,6 +4,7 @@
 //! 关系：`compose` 把结果写进 `ParamBlockView.layout_key`；缓存与前端冲突检测共用。
 //! 维护约束：键必须覆盖所有会改变投影结果的输入，但不能包含 edit revision。
 
+use super::base::clip_layer_order;
 use crate::state::TimelineState;
 
 /// 视图缓存：只有布局键或编辑 revision 变化才重新 compose。
@@ -25,10 +26,15 @@ pub fn layout_key(timeline: &TimelineState, root_track_id: &str, frame_period_ms
     hasher.update(b"param_blocks_layout_v1");
     hasher.update(&((frame_period_ms.max(0.1) * 1000.0).round() as u32).to_le_bytes());
     hasher.update(root_track_id.as_bytes());
-    for clip in &timeline.clips {
-        if timeline.resolve_root_track_id(&clip.track_id).as_deref() != Some(root_track_id) {
-            continue;
-        }
+    let mut clips: Vec<&crate::state::Clip> = timeline
+        .clips
+        .iter()
+        .filter(|clip| {
+            timeline.resolve_root_track_id(&clip.track_id).as_deref() == Some(root_track_id)
+        })
+        .collect();
+    clips.sort_by(|a, b| clip_layer_order(a, b));
+    for clip in clips {
         hasher.update(clip.id.as_bytes());
         hasher.update(&clip.start_sec.to_le_bytes());
         hasher.update(&clip.length_sec.to_le_bytes());
@@ -53,16 +59,24 @@ pub fn layout_key(timeline: &TimelineState, root_track_id: &str, frame_period_ms
             hasher.update(analysis.algorithm.as_bytes());
             hasher.update(&analysis.algorithm_version.to_le_bytes());
             hasher.update(analysis.source_digest.as_bytes());
+            let window = analysis.analyzed_window_sec;
+            hasher.update(&window[0].to_le_bytes());
+            hasher.update(&window[1].to_le_bytes());
             for span in &analysis.source_spans_sec {
                 hasher.update(&span.start_sec.to_le_bytes());
                 hasher.update(&span.end_sec.to_le_bytes());
+                hasher.update(&span.midi_note.unwrap_or(f32::NAN).to_le_bytes());
             }
         }
         if let Some(baseline) = &take.game_block_baseline {
             hasher.update(&baseline.revision.to_le_bytes());
+            let window = baseline.analyzed_window_sec;
+            hasher.update(&window[0].to_le_bytes());
+            hasher.update(&window[1].to_le_bytes());
             for span in &baseline.source_spans_sec {
                 hasher.update(&span.start_sec.to_le_bytes());
                 hasher.update(&span.end_sec.to_le_bytes());
+                hasher.update(&span.midi_note.unwrap_or(f32::NAN).to_le_bytes());
             }
         }
         if let Some(notes) = &take.midi_note_data {

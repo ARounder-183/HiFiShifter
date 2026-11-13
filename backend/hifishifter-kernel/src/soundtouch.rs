@@ -31,7 +31,8 @@ type Handle = *mut c_void;
 //
 // 【为什么只接受绝对路径】裸文件名会走 OS 默认搜索顺序（CWD 与 PATH 排在 System32
 // 之前），用户从下载目录打开工程时同目录同名 DLL 会被抢先加载（CWE-426/427，与
-// gpu_info.rs 的 NVML 同一条纪律）。候选只来自显式环境变量或本模块自身所在目录。
+// gpu_info.rs 的 NVML 同一条纪律）。候选只来自显式环境变量，或本模块自身所在目录
+// 下的各**打包布局**（见 PACK_LAYOUT_DIRS：NSIS / AppImage / .app / 单文件 CLAP）。
 type FnCreate = unsafe extern "C" fn() -> Handle;
 type FnVoidHandle = unsafe extern "C" fn(Handle);
 type FnGetVersion = unsafe extern "C" fn() -> *const c_char;
@@ -79,6 +80,37 @@ macro_rules! sym {
     };
 }
 
+/// 每种**打包布局**里这份动态库所在的位置（相对二进制所在目录）。
+///
+/// 运行期按名 dlopen 会先走 OS 搜索顺序（CWD / PATH 优先于系统目录 ——
+/// CWE-426/427），所以绝对路径候选必须覆盖全部部署形态；rpath 在这里帮不上忙
+/// （AppImage 的 linuxdeploy 会用 patchelf 整段替换 RUNPATH，macOS 的 .app 也不
+/// 依赖它）。缺一项的表现不是崩溃而是 `is_available() = false` 的静音降级，
+/// 用户只会觉得"变调质感变了"。
+const PACK_LAYOUT_DIRS: &[&str] = &[
+    // 与二进制同级：Windows NSIS / 便携包（build.rs Step 4 也拷到 target/<profile>/），
+    // 以及 Linux AppImage（build.yml 把库复制到 usr/bin/）。
+    ".",
+    // 单文件 CLAP 的私有资源目录：将来若要随插件分发这份 DLL 放这里，
+    // 不往公共 CLAP 根里塞通用名（会和其它插件的同名 DLL 冲突）。
+    "HiFiShifter-resources",
+    // Linux AppImage 的 REQUIRED_FILES 布局：usr/bin/../lib/HiFiShifter/。
+    "../lib/HiFiShifter",
+    // macOS .app：tauri bundle.macOS.frameworks / bundle.macOS.files /
+    // stage_ort_macos_dylibs 的暂存区，三者都挂在 Contents 下。
+    "../Frameworks",
+    "../Resources",
+    "../Resources/macos",
+];
+
+/// 二进制（或承载本代码的模块）所在目录下的每个打包布局候选的绝对路径。
+fn pack_layout_candidates(module_dir: &Path, name: &str) -> Vec<PathBuf> {
+    PACK_LAYOUT_DIRS
+        .iter()
+        .map(|dir| module_dir.join(dir).join(name))
+        .collect()
+}
+
 fn load_api() -> Option<Api> {
     let name = runtime_library_name();
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -86,10 +118,7 @@ fn load_api() -> Option<Api> {
         candidates.push(PathBuf::from(path));
     }
     if let Some(dir) = module_dir() {
-        candidates.push(dir.join(name));
-        // 单文件 CLAP 的私有资源目录：将来若要随插件分发这份 DLL 放这里，
-        // 不往公共 CLAP 根里塞通用名（会和其它插件的同名 DLL 冲突）。
-        candidates.push(dir.join("HiFiShifter-resources").join(name));
+        candidates.extend(pack_layout_candidates(&dir, name));
     }
     let mut loaded = None;
     for path in &candidates {
@@ -636,6 +665,37 @@ mod tests {
         let handle = unsafe { super::ffi::soundtouch_createInstance() };
         if !first {
             assert!(handle.is_null(), "DLL 不可用时不得凭空造出句柄");
+        }
+    }
+
+    /// 打包布局候选必须覆盖每一种随包部署形态。
+    ///
+    /// 【为什么逐项钉死】缺一项的表现是打包形态下的静音降级（`is_available()`
+    /// 变 false、time_stretch 落到 Signalsmith），没有任何崩溃或日志能暴露它；
+    /// CI 的产物门禁（AppImage / .app 自检）断言的是**文件在哪**，这一条断言的是
+    /// **加载器往哪找** —— 两份清单必须互为镜像。
+    #[test]
+    fn pack_layout_candidates_cover_every_bundled_location() {
+        let dir = std::path::Path::new("/app/bin");
+        let name = super::runtime_library_name();
+        // Path::join('.') 会保留 "/./"，比较前归一掉，Windows 的 '\' 也统一成 '/'。
+        let normalize = |path: &str| path.replace('\\', "/").replace("/./", "/");
+        let joined: Vec<String> = super::pack_layout_candidates(dir, name)
+            .iter()
+            .map(|path| normalize(&path.to_string_lossy()))
+            .collect();
+        for expected in [
+            format!("/app/bin/{name}"), // 与二进制同级（NSIS / 便携包 / AppImage 的 usr/bin）
+            format!("/app/bin/HiFiShifter-resources/{name}"), // 单文件 CLAP 的私有资源目录
+            format!("/app/bin/../lib/HiFiShifter/{name}"), // Linux AppImage 的 REQUIRED_FILES 布局
+            format!("/app/bin/../Frameworks/{name}"), // macOS bundle.macOS.frameworks
+            format!("/app/bin/../Resources/{name}"), // macOS bundle.macOS.files
+            format!("/app/bin/../Resources/macos/{name}"), // macOS ORT dylib 暂存区
+        ] {
+            assert!(
+                joined.contains(&expected),
+                "候选里缺 {expected}：{joined:?}"
+            );
         }
     }
 }

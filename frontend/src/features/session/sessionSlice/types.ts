@@ -29,6 +29,8 @@ import type {
     RenderCacheSettings,
 } from "../../../services/api/settings";
 import type { ParamAxisUnits } from "../../../components/layout/pianoRoll/paramAxisUnits";
+import type { PanAxisDirections } from "../../../components/layout/pianoRoll/paramPan";
+import type { ProjectSaveFormat } from "../../../services/api/project";
 import type { CustomScalePreset } from "../../../utils/customScales";
 import type { BaselineMode, VibratoPreset } from "../../vibrato/vibratoTypes";
 
@@ -151,6 +153,13 @@ export interface SessionState {
     /** 参数线附近显示参数值浮窗 */
     showParamValuePopup: boolean;
     /**
+     * 音高模式下是否绘制各 Clip 自己的源音高参考线。
+     *
+     * 与 `pv.orig`（根轨道组的单值合成基线）互补：Clip 重合、音高参考块覆盖时，
+     * 只有它还能表达「每个 Clip 原本的音高」。纯展示开关，不进工程、不进 undo。
+     */
+    showClipPitchOverlay: boolean;
+    /**
      * 纵轴标尺的展示单位（参数 id → `"ratio"` | `"db"`）。
      *
      * 只对音量 / 动态这类**线性幅值倍率**参数有意义（`1× = 0 dB`）：同一个值既能
@@ -158,6 +167,13 @@ export interface SessionState {
      * 换算与解析见 `components/layout/pianoRoll/paramAxisUnits`。
      */
     paramAxisUnits: ParamAxisUnits;
+    /**
+     * 参数编辑器纵轴方向（参数 id → `"left-bottom"` | `"left-top"`）。
+     *
+     * 目前只有 pan 使用；缺项 = left-bottom。与 paramAxisUnits 同构，
+     * 合法性由 normalizePanAxisDirections 收口。
+     */
+    paramAxisDirections: PanAxisDirections;
     /** 参数编辑器（选择工具）拖动方向限制 */
     selectDragDirection: DragDirection;
     /** 参数编辑器（绘制工具）拖动方向限制 */
@@ -363,6 +379,12 @@ export interface SessionState {
 
     /**
      * 后端推送的 per-clip 音高检测结果（MIDI 曲线）。
+     *
+     * 同时服务两条只读链路：
+     * - 时间轴 MIDI 参考块在 midiNoteData 缺失时的回退；
+     * - 参数编辑器的 Clip 源音高参考线（重合 / 音高参考块覆盖时仍保留每个
+     *   Clip 自己的曲线，与根轨道合成的 pv.orig 不同）。
+     *
      * key: clip_id
      * value: { curveStartSec, midiCurve, framePeriodMs }
      */
@@ -486,6 +508,8 @@ export interface SessionState {
     project: {
         name: string;
         path: string | null;
+        /** 上次“另存为”选择的格式（默认 hshp）。 */
+        lastSaveFormat: ProjectSaveFormat;
         dirty: boolean;
         recent: string[];
         notesMarkdown: string;
@@ -527,6 +551,7 @@ export interface SessionState {
      */
     saveVersionConflictDialog: {
         path: string;
+        format: ProjectSaveFormat;
         existingVersion: number;
         currentVersion: number;
         existingIsNewer: boolean;

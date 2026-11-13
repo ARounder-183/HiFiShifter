@@ -547,6 +547,15 @@ pub(crate) mod tests {
                 .is_err(),
             "关闭的视图不该收到回执"
         );
+        // 【为什么不直接断言】worker 线程的启动与排队受整机负载影响：并发门禁
+        // 下 200 ms 内可能还没跑完，固定窗口会把"暂时还在途"误报成"计数泄漏"。
+        // 轮询到清零（有上限）才既守住不变量，又不受调度抖动影响。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while lane.snapshot()["inFlight"].as_u64() != Some(0)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         assert_eq!(lane.snapshot()["inFlight"], 0, "回执后必须清零在途计数");
     }
 

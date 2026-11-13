@@ -52,5 +52,7 @@ serde_json = "1"
 # 渲染依赖，就意味着又长出了一份第二实现（这正是本轮审查删掉的那一类分叉）。
 
 [dev-dependencies]
+# 测试二进制在进入 main 前关闭 ONNX 异步预热（见 src/lib.rs 的 test_prewarm_guard）。
+ctor = "1.0.13"
 ara2-bridge-companion = { version = "0.3.0", features = ["clap"] }
 ara2-bridge-sys = "0.3.0"

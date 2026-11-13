@@ -166,9 +166,10 @@ pub mod formant_cache;
 pub mod formant_morph;
 pub mod glottal_rd;
 pub mod growl;
+pub mod hnsep_chunk;
 pub mod hnsep_dsp;
 #[cfg(feature = "onnx")]
-mod hnsep_resources;
+pub mod hnsep_resources;
 pub mod host_pcm_cache;
 pub mod rd_tension;
 pub mod world_vocoder;
@@ -247,9 +248,11 @@ pub mod clip_rendering_state;
 pub mod config;
 pub mod folder_scan;
 pub mod media_paths;
+pub mod note_blocks;
 pub mod notebook_assets;
 pub mod project;
 pub mod temp_manager;
+pub mod unicode_path;
 
 // ── 可选的原生声码器（闭源、仅 Windows）────────────────────────────────────
 #[cfg(all(feature = "vslib", target_os = "windows"))]
