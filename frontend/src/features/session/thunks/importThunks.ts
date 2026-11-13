@@ -961,7 +961,8 @@ export const importFolderAtPosition = createAsyncThunk(
 
         dispatch(checkpointHistory());
         // 进度：逐个文件导入，含上千个文件的目录会有肉眼可见的等待。低于阈值时不显示，
-        // 免得为一次 200ms 的操作闪一下状态栏。走总线而不是 Redux —— 见其文件头。
+        // 免得为一次 200ms 的操作闪一下状态栏。状态放在 interaction 切片，
+        // 独立窗口的进度才能经 detachBridge 复制到主窗口状态栏。
         const totalFiles = specs.reduce((count, spec) => count + spec.files.length, 0);
         let processed = 0;
         const reportProgress = (active: boolean) =>

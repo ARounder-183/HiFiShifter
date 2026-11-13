@@ -265,19 +265,16 @@ impl AppState {
         guard.take()
     }
 
-    /// 如果 pending 恰好是这条路径则取走并返回 true；用于避免 macOS 同时经
-    /// argv 与 Apple Event 送来同一文件时打开两次。
+    /// pending 是否恰好是这条路径。用于避免 macOS 同时经 argv 与 Apple Event
+    /// 送来同一文件时打开两次；这里**只读不取走**——消费权仍归前端 consume，
+    /// 否则「mark ready 之后、consume 之前」的 Opened 会把路径吃掉。
     #[cfg(target_os = "macos")]
-    pub fn take_pending_startup_project_path_if_matches(&self, path: &str) -> bool {
-        let mut guard = self
+    pub fn pending_startup_project_path_matches(&self, path: &str) -> bool {
+        let guard = self
             .pending_startup_project_path
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if guard.as_deref() != Some(path) {
-            return false;
-        }
-        *guard = None;
-        true
+        guard.as_deref() == Some(path)
     }
 
     /// 标记前端监听已就绪（由 mark_frontend_ready 命令调用）。

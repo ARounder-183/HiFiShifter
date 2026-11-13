@@ -965,7 +965,7 @@ pub fn run() {
                 };
                 let path = path.to_string_lossy().into_owned();
                 if state.is_frontend_ready() {
-                    if state.take_pending_startup_project_path_if_matches(&path) {
+                    if state.pending_startup_project_path_matches(&path) {
                         log::info!(
                             "[open] same path already queued; frontend consume will handle it"
                         );
