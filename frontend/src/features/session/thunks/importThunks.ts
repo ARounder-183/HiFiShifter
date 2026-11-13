@@ -19,11 +19,11 @@ import { computeAutoCrossfadeFromPayload } from "../../../components/layout/time
 import { computeClipNormalizationGain } from "../clipNormalization";
 import { trackNameForMedia } from "../mediaTrackName";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
-import { appStatusProgressBus } from "../../../utils/appStatusProgressBus";
 import { isPluginMode } from "../../../services/hostCapabilities";
 import { getPluginHost } from "../../../services/pluginHost";
 import { reportFrontendError } from "../../../services/frontendErrorLog";
 import type { TimelineResult } from "../../../types/api";
+import { setFolderImportProgress } from "../interactionSlice";
 
 /**
  * finally 里收尾 undo 组：主结果（成功返回或 rejectWithValue）已经定了，
@@ -965,11 +965,13 @@ export const importFolderAtPosition = createAsyncThunk(
         const totalFiles = specs.reduce((count, spec) => count + spec.files.length, 0);
         let processed = 0;
         const reportProgress = (active: boolean) =>
-            appStatusProgressBus.setFolderImport({
-                active: active && totalFiles >= FOLDER_IMPORT_PROGRESS_THRESHOLD,
-                done: processed,
-                total: totalFiles,
-            });
+            dispatch(
+                setFolderImportProgress({
+                    active: active && totalFiles >= FOLDER_IMPORT_PROGRESS_THRESHOLD,
+                    done: processed,
+                    total: totalFiles,
+                }),
+            );
         reportProgress(true);
         // 取消闸门：用户在本循环进行中撤销 / 跳转历史 / 打开别的工程时，下一轮就退出。
         const importGen = currentImportGeneration();

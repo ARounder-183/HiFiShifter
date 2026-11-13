@@ -144,6 +144,23 @@ export const paramsApi = {
         checkpoint?: boolean,
     ) => invoke<{ ok: boolean }>("stretch_track_linked_params", trackId, mappings, checkpoint),
 
+    /**
+     * 按 clip id 读取源音高曲线。
+     *
+     * 独立窗口的 session 快照不含 clipPitchCurves；参数编辑器晚打开时通过这里
+     * 补一次，避免“显示 Clip 音高参考线”永久空白。
+     */
+    getClipPitchData: (clipIds: string[]) =>
+        invoke<{
+            ok: boolean;
+            payloads?: Array<{
+                clip_id: string;
+                curve_start_sec: number;
+                midi_curve: number[];
+                frame_period_ms: number;
+            }>;
+        }>("get_clip_pitch_data", clipIds),
+
     getStaticParam: (trackId: string, param: string) =>
         invoke<StaticParamValuePayload>("get_static_param", trackId, param),
 

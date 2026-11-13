@@ -185,6 +185,7 @@ export const zhTW = {
 
     panel_editor: "編輯器",
     panel_unavailable: "面板無法使用",
+    detached_shortcut_unavailable: "該快速鍵在獨立視窗中不可用",
     panel_timeline: "時間軸",
     panel_io: "輸入輸出",
 
@@ -1303,8 +1304,6 @@ export const zhTW = {
     pan_left: "左",
     pan_center: "中",
     pan_right: "右",
-    param_axis_pan_left_bottom: "L↓",
-    param_axis_pan_left_top: "L↑",
     menu_flip: "翻轉",
     dlg_pan_side: "方向",
     dlg_pan_amount: "幅度",

@@ -196,6 +196,7 @@ export const jaJP = {
 
     panel_editor: "エディタ",
     panel_unavailable: "パネルを利用できません",
+    detached_shortcut_unavailable: "このショートカットは分離ウィンドウでは使用できません",
     panel_timeline: "タイムライン",
     panel_io: "入出力",
 
@@ -1354,8 +1355,6 @@ export const jaJP = {
     pan_left: "左",
     pan_center: "中央",
     pan_right: "右",
-    param_axis_pan_left_bottom: "L↓",
-    param_axis_pan_left_top: "L↑",
     menu_flip: "反転",
     dlg_pan_side: "方向",
     dlg_pan_amount: "量",

@@ -5,16 +5,18 @@
  * `param_blocks/projection.rs` 与 golden fixture。
  */
 
-import type { ClipInfo } from "../../../features/session/sessionTypes";
+import {
+    toClipSourceGeometry,
+    type ClipSourceGeometry,
+    type ClipSourceNoteSpan,
+} from "../../../features/session/clipGeometryTypes";
 import type { TakeSpan } from "./paramBlockTypes";
 
-export interface ParamBlockSourceNote {
-    readonly startSec: number;
-    readonly endSec: number;
-    readonly note?: number | null;
-    readonly eventId?: string;
-    readonly source: "syllable" | "gameBaseline" | "midiNote";
-}
+/** 源域音符/音节片段（兼容旧名）。 */
+export type ParamBlockSourceNote = ClipSourceNoteSpan;
+
+/** 参数块合成使用的 Clip 源几何（与时间轴手势快照共用同一字段口径）。 */
+export type ParamBlockSourceClip = ClipSourceGeometry;
 
 export function sourceNoteEventId(span: {
     readonly startSec: number;
@@ -22,84 +24,6 @@ export function sourceNoteEventId(span: {
     readonly eventId?: string;
 }): string {
     return span.eventId ?? `${span.startSec.toFixed(9)}:${span.endSec.toFixed(9)}`;
-}
-
-export interface ParamBlockSourceClip {
-    readonly id: string;
-    readonly trackId: string;
-    readonly startSec: number;
-    readonly lengthSec: number;
-    readonly sourceStartSec?: number;
-    readonly sourceEndSec?: number;
-    readonly playbackRate?: number;
-    /** Clip 级播放倍率；与 take.playbackRate 相乘得到有效速率。 */
-    readonly clipPlaybackRate?: number;
-    readonly reversed?: boolean;
-    readonly loopEnabled?: boolean;
-    /** 宿主给出的 Loop 周期（秒）；优先于媒体时长。 */
-    readonly loopPeriodSec?: number | null;
-    /** 源媒体总时长（秒）；Loop 回绕周期的兜底。 */
-    readonly contentDurationSec?: number | null;
-    readonly activeTakeId?: string;
-    readonly takes?: ReadonlyArray<{
-        readonly id: string;
-        readonly sourceStartSec: number;
-        readonly sourceEndSec: number;
-        readonly playbackRate: number;
-        readonly reversed: boolean;
-        readonly loopEnabled: boolean;
-        readonly durationSec?: number;
-        readonly durationFrames?: number;
-        readonly sourceSampleRate?: number;
-        readonly syllableSpansSec?: ReadonlyArray<{
-            readonly startSec: number;
-            readonly endSec: number;
-            readonly note?: number | null;
-            readonly eventId?: string;
-        }>;
-        readonly syllableNotes?: ReadonlyArray<number | null>;
-        readonly syllableEventIds?: ReadonlyArray<string>;
-        readonly syllableAnalysisWindowSec?: readonly [number, number];
-        readonly gameBlockBaseline?: {
-            readonly revision?: number;
-            readonly algorithm?: string;
-            readonly algorithmVersion?: number;
-            readonly sourceSpansSec?: ReadonlyArray<{
-                readonly startSec: number;
-                readonly endSec: number;
-                readonly note?: number | null;
-                readonly eventId?: string;
-            }>;
-            readonly analyzedWindowSec?: readonly [number, number];
-        };
-        readonly midiNoteData?: ReadonlyArray<{
-            readonly startSec: number;
-            readonly endSec: number;
-            readonly note: number;
-        }>;
-    }>;
-    readonly syllableSpansSec?: ReadonlyArray<{
-        readonly startSec: number;
-        readonly endSec: number;
-        readonly note?: number | null;
-        readonly eventId?: string;
-    }>;
-    readonly syllableNotes?: ReadonlyArray<number | null>;
-    readonly syllableEventIds?: ReadonlyArray<string>;
-    readonly syllableAnalysisWindowSec?: readonly [number, number];
-    readonly gameBlockBaseline?: {
-        readonly sourceSpansSec?: ReadonlyArray<{
-            readonly startSec: number;
-            readonly endSec: number;
-            readonly note?: number | null;
-        }>;
-        readonly analyzedWindowSec?: readonly [number, number];
-    };
-    readonly midiNoteData?: ReadonlyArray<{
-        readonly startSec: number;
-        readonly endSec: number;
-        readonly note: number;
-    }>;
 }
 
 export interface ProjectedInterval {
@@ -833,49 +757,11 @@ function splitLoopPiece<T extends ProjectableTakeSpan>(
 }
 
 /**
- * 会话里的 `ClipInfo` → 源域投影输入。
+ * 会话里的 ClipInfo → 源域投影输入。
  *
- * 它描述的是"源域模型需要 Clip 的哪几个字段"，与持久化无关，所以住在投影模块
- * 而不是某个 hook 里：任何要合成视图的调用方都必须用**同一份**映射，否则
- * "合成用的 clips"与"编辑用的 clips"会悄悄分叉。
+ * 字段映射的唯一实现在 clipGeometryTypes.toClipSourceGeometry：时间轴手势快照
+ * 与参数块合成因此使用同一份投影，不会出现「快照里有、块合成里没有」。
  */
-export function toParamBlockSourceClip(clip: ClipInfo): ParamBlockSourceClip {
-    return {
-        id: clip.id,
-        trackId: clip.trackId,
-        startSec: clip.startSec,
-        lengthSec: clip.lengthSec,
-        sourceStartSec: clip.sourceStartSec,
-        sourceEndSec: clip.sourceEndSec,
-        playbackRate: clip.playbackRate,
-        clipPlaybackRate: clip.clipPlaybackRate,
-        reversed: clip.reversed,
-        loopEnabled: clip.loopEnabled,
-        loopPeriodSec: clip.loopPeriodSec ?? null,
-        contentDurationSec: clip.durationSec ?? null,
-        activeTakeId: clip.activeTakeId,
-        takes: clip.takes?.map((take) => ({
-            id: take.id,
-            sourceStartSec: take.sourceStartSec,
-            sourceEndSec: take.sourceEndSec,
-            playbackRate: take.playbackRate,
-            reversed: take.reversed,
-            loopEnabled: take.loopEnabled,
-            durationSec: take.durationSec,
-            durationFrames: take.durationFrames,
-            sourceSampleRate: take.sourceSampleRate,
-            syllableSpansSec: take.syllableSpansSec,
-            syllableNotes: take.syllableNotes,
-            syllableEventIds: take.syllableEventIds,
-            syllableAnalysisWindowSec: take.syllableAnalysisWindowSec,
-            gameBlockBaseline: take.gameBlockBaseline,
-            midiNoteData: take.midiNoteData,
-        })),
-        syllableSpansSec: clip.syllableSpansSec,
-        syllableNotes: clip.syllableNotes,
-        syllableEventIds: clip.syllableEventIds,
-        syllableAnalysisWindowSec: clip.syllableAnalysisWindowSec,
-        gameBlockBaseline: clip.gameBlockBaseline,
-        midiNoteData: clip.midiNoteData,
-    };
+export function toParamBlockSourceClip(clip: ClipSourceGeometry): ParamBlockSourceClip {
+    return toClipSourceGeometry(clip);
 }

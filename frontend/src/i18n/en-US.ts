@@ -335,6 +335,7 @@ export const enUS = {
 
     panel_editor: "Editor",
     panel_unavailable: "Panel unavailable",
+    detached_shortcut_unavailable: "This shortcut is not available in a detached window",
     panel_timeline: "Timeline",
     panel_io: "I/O",
 
@@ -1475,8 +1476,6 @@ export const enUS = {
     pan_left: "Left",
     pan_center: "Center",
     pan_right: "Right",
-    param_axis_pan_left_bottom: "L↓",
-    param_axis_pan_left_top: "L↑",
     menu_flip: "Flip",
     dlg_pan_side: "Side",
     dlg_pan_amount: "Amount",

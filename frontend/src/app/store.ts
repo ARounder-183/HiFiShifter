@@ -7,6 +7,11 @@ import keybindingsReducer, {
 } from "../features/keybindings/keybindingsSlice";
 import notebookReducer from "../features/notebook/notebookSlice";
 import recordingReducer from "../features/recording/recordingSlice";
+import interactionReducer, { setLoudnessFetchHeld } from "../features/session/interactionSlice";
+import {
+    installLoudnessFetchGateDispatcher,
+    syncLoudnessFetchGate,
+} from "../features/session/loudnessFetchGate";
 import {
     BRIDGE_SNAPSHOT_ACTION,
     createStoreBridgeMiddleware,
@@ -24,6 +29,9 @@ const rootReducer = combineReducers({
     keybindings: keybindingsReducer,
     notebook: notebookReducer,
     recording: recordingReducer,
+    // 跨窗口瞬态交互状态（手势快照 / 提交闸门 / 选区 / 加载 / 活动编辑窗口）。
+    // 它是 detachBridge 动作复制的一部分，不是独立 IPC 协议。
+    interaction: interactionReducer,
 });
 
 export type RootState = ReturnType<typeof rootReducer>;
@@ -105,12 +113,20 @@ export function createAppStore() {
                         // 数据来自后端 IPC 的 JSON，天生可序列化，豁免不损失什么。
                         "fileBrowser.entries",
                         "fileBrowser.searchResults",
+                        // 手势快照含一次全量 clip 源几何投影；拖拽期间高频 action
+                        // 不应每次深走它。数据来自纯 JSON 投影，序列化安全。
+                        "interaction",
                     ],
                     ignoredActions: [BRIDGE_SNAPSHOT_ACTION],
                 },
                 // 同一组路径也要豁免不可变性检查：它同样是 dev 下的**每 action 深走**。
                 immutableCheck: {
-                    ignoredPaths: ["session", "fileBrowser.entries", "fileBrowser.searchResults"],
+                    ignoredPaths: [
+                        "session",
+                        "interaction",
+                        "fileBrowser.entries",
+                        "fileBrowser.searchResults",
+                    ],
                 },
                 // 注意：此前豁免的 "session.timeline" 并不存在于 SessionState
                 // （状态是 tracks/clips 等平铺字段），属死配置，已移除。
@@ -119,8 +135,18 @@ export function createAppStore() {
                 .concat(createStoreBridgeMiddleware(satellite ? "satellite" : "main")),
     });
 
+    // 闸门 facade 与 interaction.loudnessFetchHeld 的唯一同步点。
+    // 必须放在 installBridge 之前：快照应用后订阅器会立即把卫星窗口的缓存对齐。
+    const unsubscribeLoudnessGate = store.subscribe(() => {
+        syncLoudnessFetchGate(store.getState().interaction.loudnessFetchHeld);
+    });
+    syncLoudnessFetchGate(store.getState().interaction.loudnessFetchHeld);
+    installLoudnessFetchGateDispatcher((held) => {
+        store.dispatch(setLoudnessFetchHeld(held));
+    });
+
     // 接线跨窗口状态桥。主窗口应答快照请求，卫星窗口请求并应用快照。
-    const teardown = installBridge({
+    const teardownBridge = installBridge({
         role: satellite ? "satellite" : "main",
         getState: () => store.getState(),
         dispatch: (action) => store.dispatch(action as never),
@@ -136,7 +162,14 @@ export function createAppStore() {
         },
     });
 
-    return { store, teardown };
+    return {
+        store,
+        teardown: () => {
+            unsubscribeLoudnessGate();
+            installLoudnessFetchGateDispatcher(null);
+            teardownBridge();
+        },
+    };
 }
 
 /** 主窗口的全局 store（各模块直接 import 它，因此必须保持单例）。 */

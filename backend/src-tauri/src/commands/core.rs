@@ -24,6 +24,12 @@ pub(super) fn consume_startup_project_path(state: State<'_, AppState>) -> serde_
     serde_json::json!({ "ok": true, "path": path })
 }
 
+/// 前端已注册好 hs:external-project-open 监听；此前的 Opened 路径留在 pending。
+pub(super) fn mark_frontend_ready(state: State<'_, AppState>) -> serde_json::Value {
+    state.mark_frontend_ready();
+    serde_json::json!({ "ok": true })
+}
+
 pub(super) fn set_ui_locale(state: State<'_, AppState>, locale: String) -> serde_json::Value {
     let locale = locale.trim();
     let lower = locale.to_lowercase();

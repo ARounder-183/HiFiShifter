@@ -31,7 +31,10 @@ const CODE = stripComments(SOURCE);
 function bodyOf(name: string): string {
     const start = CODE.indexOf(`const ${name} = React.useCallback(`);
     expect(start, `找不到 ${name}`).toBeGreaterThanOrEqual(0);
-    const open = CODE.indexOf("{", start);
+    // 参数可能带对象类型（如 options?: { capturesClipGeometry?: boolean }），
+    // 不能取回调签名里的第一个 { —— 必须从 => 之后找函数体。
+    const arrow = CODE.indexOf("=>", start);
+    const open = CODE.indexOf("{", arrow);
     let depth = 0;
     for (let at = open; at < CODE.length; at += 1) {
         if (CODE[at] === "{") depth += 1;
@@ -54,6 +57,15 @@ describe("内核手势交互锁：重叠手势不得提前释放", () => {
         expect(body).toContain("kernelGestureInteractionDepthRef.current += 1");
         expect(body).toContain("kernelGestureInteractionDepthRef.current > 1");
         expect(body).toContain("dispatch(beginInteraction())");
+    });
+
+    it("★ 几何预览先于 beginInteraction 派发，且纯 seek 可显式关闭", () => {
+        const body = bodyOf("beginKernelGestureInteraction");
+        expect(body).toContain("buildClipGeometryPreview(sessionRef.current.clips)");
+        expect(body).toContain("options?.capturesClipGeometry !== false");
+        expect(body.indexOf("buildClipGeometryPreview")).toBeLessThan(
+            body.indexOf("dispatch(beginInteraction())"),
+        );
     });
 
     it("★ end 每个手势都出账，只在 1→0 派发 endInteraction", () => {

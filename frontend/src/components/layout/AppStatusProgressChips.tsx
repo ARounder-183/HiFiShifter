@@ -15,6 +15,7 @@ import { useSyncExternalStore } from "react";
 
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppSelector } from "../../app/hooks";
+import { selectFolderImportProgress } from "../../features/session/interactionSlice";
 import { AppStatusChip } from "../../ui";
 import { appStatusProgressBus } from "../../utils/appStatusProgressBus";
 
@@ -26,6 +27,7 @@ export function AppStatusProgressChips() {
         appStatusProgressBus.getSnapshot,
     );
     const renderingActive = useAppSelector((state) => state.session.playbackRenderingActive);
+    const folderImport = useAppSelector(selectFolderImportProgress);
 
     return (
         <>
@@ -46,12 +48,10 @@ export function AppStatusProgressChips() {
                         : ""}
                 </AppStatusChip>
             ) : null}
-            {status.folderImport.active ? (
+            {folderImport.active ? (
                 <AppStatusChip tone="accent">
                     {t("status_importing_folder")}
-                    {status.folderImport.total > 0
-                        ? ` ${status.folderImport.done}/${status.folderImport.total}`
-                        : ""}
+                    {folderImport.total > 0 ? ` ${folderImport.done}/${folderImport.total}` : ""}
                 </AppStatusChip>
             ) : null}
             {renderingActive ? (

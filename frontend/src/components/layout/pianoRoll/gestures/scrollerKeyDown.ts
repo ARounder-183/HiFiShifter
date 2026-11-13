@@ -12,6 +12,7 @@ import { matchesAnyKeybinding } from "../../../../features/keybindings/useKeybin
 import type { ActionId, Keybinding } from "../../../../features/keybindings/types";
 import type { KeyboardEvent } from "react";
 
+import { emitWindowEvent } from "../../../../features/dock/windowEventBridge";
 import type { PointerDeps } from "./pointerDeps";
 
 /** 本回调需要的上下文。 */
@@ -68,9 +69,16 @@ export function handleScrollerKeyDown(deps: Deps, e: KeyboardEvent<HTMLDivElemen
                 e.preventDefault();
                 // 需要弹窗的操作 → 派发 openEditDialog 事件打开对话框
                 if (dialogOps.has(op)) {
-                    window.dispatchEvent(
-                        new CustomEvent("hifi:openEditDialog", { detail: { dialog: op } }),
-                    );
+                    if (op === "addVibrato") {
+                        // 颤音窗口的宿主在本面板（要读当前选区），卫星窗口必须本地打开。
+                        window.dispatchEvent(
+                            new CustomEvent("hifi:openEditDialog", { detail: { dialog: op } }),
+                        );
+                    } else {
+                        // 其它编辑器对话框由主窗口 MenuBar 承载；从卫星窗口请求时
+                        // 必须跨窗口送达，否则按快捷键毫无反应。
+                        emitWindowEvent("main", "hifi:openEditDialog", { dialog: op });
+                    }
                 } else {
                     onEditAction(op);
                 }

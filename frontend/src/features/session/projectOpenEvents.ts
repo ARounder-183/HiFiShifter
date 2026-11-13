@@ -2,6 +2,9 @@
 //
 // 用于在组件间传递外部文件触发的动作请求（打开工程/导入工程/导入音频/导入 MIDI）。
 
+import { detectExternalPathAction } from "../../components/layout/timeline/dnd";
+import { emitWindowEvent } from "../dock/windowEventBridge";
+
 export const OPEN_PROJECT_PATH_EVENT = "hifi:open-project-path";
 
 /** 「打开导入工程对话框」请求（`App.tsx` 监听并弹出 `ImportProjectDialog`）。 */
@@ -40,31 +43,37 @@ export function emitOpenProjectPath(path: string) {
 export function emitExternalFileAction(kind: ExternalFileActionKind, path: string) {
     const normalized = String(path ?? "").trim();
     if (!normalized) return;
-    window.dispatchEvent(
-        new CustomEvent<ExternalFileActionDetail>(OPEN_PROJECT_PATH_EVENT, {
-            detail: { kind, path: normalized },
-        }),
-    );
+    emitWindowEvent("main", OPEN_PROJECT_PATH_EVENT, {
+        kind,
+        path: normalized,
+    } satisfies ExternalFileActionDetail);
 }
 
 /** 请求打开「导入工程」对话框（携带路径）。 */
 export function emitImportProjectPick(path: string) {
     const normalized = String(path ?? "").trim();
     if (!normalized) return;
-    window.dispatchEvent(
-        new CustomEvent<{ path: string }>(IMPORT_PROJECT_PICK_EVENT, {
-            detail: { path: normalized },
-        }),
-    );
+    emitWindowEvent("main", IMPORT_PROJECT_PICK_EVENT, { path: normalized });
 }
 
 /** 请求打开「导入 MIDI」对话框（携带路径与可选落点 / 目标轨道）。 */
 export function emitImportMidiRequest(detail: ImportMidiRequestDetail) {
     const normalized = String(detail.path ?? "").trim();
     if (!normalized) return;
-    window.dispatchEvent(
-        new CustomEvent<ImportMidiRequestDetail>(IMPORT_MIDI_PATH_EVENT, {
-            detail: { ...detail, path: normalized },
-        }),
-    );
+    emitWindowEvent("main", IMPORT_MIDI_PATH_EVENT, {
+        ...detail,
+        path: normalized,
+    } satisfies ImportMidiRequestDetail);
+}
+
+/**
+ * 判定路径对应的外部文件动作种类。
+ *
+ * 与拖放共用 detectExternalPathAction：准入判据只有一份，MIDI / 文件夹路径
+ * 在这一通道没有对应动作，显式排除（它们有自己的对话框/导入流程）。
+ */
+export function detectExternalActionKindFromPath(path: string): ExternalFileActionKind | null {
+    const kind = detectExternalPathAction(path);
+    if (kind === null || kind === "importMidi" || kind === "importFolder") return null;
+    return kind;
 }

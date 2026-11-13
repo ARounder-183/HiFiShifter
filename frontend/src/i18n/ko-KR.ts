@@ -264,6 +264,7 @@ export const koKR = {
 
     panel_editor: "에디터",
     panel_unavailable: "패널을 사용할 수 없음",
+    detached_shortcut_unavailable: "이 단축키는 분리된 창에서 사용할 수 없습니다",
     panel_timeline: "타임라인",
     panel_io: "입출력",
 
@@ -1406,8 +1407,6 @@ export const koKR = {
     pan_left: "왼쪽",
     pan_center: "가운데",
     pan_right: "오른쪽",
-    param_axis_pan_left_bottom: "L↓",
-    param_axis_pan_left_top: "L↑",
     menu_flip: "뒤집기",
     dlg_pan_side: "방향",
     dlg_pan_amount: "크기",

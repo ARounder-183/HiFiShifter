@@ -417,6 +417,32 @@ jobs:
           fi
         shell: bash
 
+      - name: Verify macOS document associations
+        if: runner.os == 'macOS' && success() && steps.tauri-release-dir.outputs.release-dir != ''
+        working-directory: backend/src-tauri
+        run: |
+          set -euxo pipefail
+          APP_DIR="${GITHUB_WORKSPACE}/${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/macos/HiFiShifter.app"
+          PLIST="$APP_DIR/Contents/Info.plist"
+          test -f "$PLIST"
+          echo "=== CFBundleDocumentTypes ==="
+          /usr/libexec/PlistBuddy -c "Print :CFBundleDocumentTypes" "$PLIST"
+          echo "=== UTExportedTypeDeclarations ==="
+          /usr/libexec/PlistBuddy -c "Print :UTExportedTypeDeclarations" "$PLIST"
+          # Finder 的“设为默认程序”依赖 CFBundleDocumentTypes 的扩展名，以及
+          # LSItemContentTypes 指向我们导出的 UTI；两者缺一都会退回“空白工程”。
+          for ext in hshp hsp hshp-bak hsp-bak; do
+            /usr/libexec/PlistBuddy -c "Print :CFBundleDocumentTypes" "$PLIST" | grep -q "$ext" \
+              || { echo "ERROR: $ext missing from CFBundleDocumentTypes" >&2; exit 1; }
+          done
+          /usr/libexec/PlistBuddy -c "Print :CFBundleDocumentTypes" "$PLIST" \
+            | grep -q "com.arounder.hifishifter.project" \
+            || { echo "ERROR: project UTI missing from LSItemContentTypes" >&2; exit 1; }
+          /usr/libexec/PlistBuddy -c "Print :UTExportedTypeDeclarations" "$PLIST" \
+            | grep -q "com.arounder.hifishifter.project" \
+            || { echo "ERROR: exported project UTI missing" >&2; exit 1; }
+        shell: bash
+
       - name: Dump macOS bundle diagnostics on failure
         if: runner.os == 'macOS' && failure()
         working-directory: backend/src-tauri

@@ -338,6 +338,9 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "get_clip_linked_params":
             return { clipId: args[0] };
 
+        case "get_clip_pitch_data":
+            return { clipIds: args[0] };
+
         case "analyze_clip_formants":
         case "get_clip_syllable_spans":
         case "analyze_clip_syllables":
@@ -1044,6 +1047,8 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "capture_stop",
     "capture_cancel",
     "capture_clear",
+    // 前端就绪握手（无参）。
+    "mark_frontend_ready",
     "plugin_get_apply_state",
     "plugin_health",
     // 插件形态的 UI 就绪信号（无参，见 mount.tsx；后端 client.rs 的

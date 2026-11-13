@@ -145,7 +145,7 @@ HiFiShifter의 구조화된 복사/붙여넣기는 시스템 클립보드에 저
 
 자주 사용하는 단축키:
 
-> **macOS 사용자**: 아래의 `Ctrl`은 `Command (⌘)`, `Alt`는 `Option (⌥)`에 해당합니다.
+> **macOS 사용자**: 아래의 `Ctrl`은 `Command (⌘)`, `Alt`는 `Option (⌥)`에 해당합니다. macOS의 Delete 키는 `⌫`이며, 기본 Delete / Backspace 단축키는 `⌫`로 동작합니다(`Fn+Delete`는 앞쪽 삭제).
 
 - `스페이스바`: 재생 / 일시 정지 (재생 시작점으로 돌아가지 않음)
 - `Enter`: 재생 / 정지 (재생 시작점으로 돌아감)

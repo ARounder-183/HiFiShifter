@@ -184,6 +184,7 @@ export const zhCN = {
 
     panel_editor: "编辑器",
     panel_unavailable: "面板不可用",
+    detached_shortcut_unavailable: "该快捷键在独立窗口中不可用",
     panel_timeline: "时间轴",
     panel_io: "输入输出",
 
@@ -1301,8 +1302,6 @@ export const zhCN = {
     pan_left: "左",
     pan_center: "中",
     pan_right: "右",
-    param_axis_pan_left_bottom: "L↓",
-    param_axis_pan_left_top: "L↑",
     menu_flip: "翻转",
     dlg_pan_side: "方向",
     dlg_pan_amount: "幅度",

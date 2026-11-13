@@ -184,7 +184,16 @@ import {
     resolvePasteRoute,
     type EditOpChannel,
 } from "./features/keybindings/focusRouting";
-import { installFocusSurfaceTracking, getActiveSurface } from "./features/uiFocus/focusSurface";
+import {
+    installFocusSurfaceTracking,
+    getActiveSurface,
+    type EditSurfaceId,
+} from "./features/uiFocus/focusSurface";
+import {
+    installWindowEventBridge,
+    KEYBINDING_ACTION_EVENT,
+} from "./features/dock/windowEventBridge";
+import { setActiveEditorWindow } from "./features/session/interactionSlice";
 import {
     classifyHostKeyRelay,
     collectOwnedStrokes,
@@ -214,11 +223,12 @@ import {
     IMPORT_MIDI_PATH_EVENT,
     IMPORT_PROJECT_PICK_EVENT,
     OPEN_PROJECT_PATH_EVENT,
+    detectExternalActionKindFromPath,
     type ExternalFileActionDetail,
     type ExternalFileActionKind,
     type ImportMidiRequestDetail,
 } from "./features/session/projectOpenEvents";
-import { detectExternalPathAction } from "./components/layout/timeline/dnd";
+import { useExternalProjectOpen } from "./features/session/useExternalProjectOpen";
 import type { MessageKey } from "./i18n/messages";
 import { useAutoBackupScheduler } from "./hooks/useAutoBackupScheduler";
 import { useClipFormantStatusListener } from "./hooks/useClipFormantStatusListener";
@@ -544,28 +554,6 @@ function mergeLatestSourceFileChanges(
     }
 
     return merged;
-}
-
-/**
- * 判定路径对应的外部文件动作种类。
- *
- * 【为什么不再内联一份正则】这里原先重写了与 `timeline/dnd` 完全相同的四组正则，
- * 而且**漏掉 MIDI**——于是从启动参数 / 外部文件事件进来的 `.mid` 文件会被判为
- * `null` 而被静默丢弃，与拖放路径的行为不一致（同一文件两种命运）。
- * 现在直接复用 `detectExternalPathAction`：准入判据只剩一份，不可能再分叉。
- *
- * @param path 文件路径。
- * @returns 动作种类；非受支持类型时为 null。
- */
-function detectExternalActionKindFromPath(path: string): ExternalFileActionKind | null {
-    const kind = detectExternalPathAction(path);
-    // `importMidi` 不属于本事件通道的动作集合（`ExternalFileActionKind` 没有它）：
-    // MIDI 走"导入 MIDI clip"的独立流程，而不是"打开/导入工程"。这里显式排除，
-    // 而不是用类型断言硬转——否则 MIDI 路径会被当成工程打开。
-    // `importFolder` 同理：目录导入有自己的入口（拖放 / 右键菜单 → 选项对话框），
-    // 而这条通道只带一个路径，表达不了落点与导入选项。
-    if (kind === null || kind === "importMidi" || kind === "importFolder") return null;
-    return kind;
 }
 
 function AppInner() {
@@ -1853,6 +1841,10 @@ function AppInner() {
         runOrPromptUnsavedAction("exit", closeWindowNow);
     }, [closeWindowNow, runOrPromptUnsavedAction]);
 
+    // macOS LaunchServices / 启动参数的统一入口：先注册 Tauri 监听，再报告
+    // 前端就绪，最后消费 pending 路径（详见 useExternalProjectOpen 的时序说明）。
+    useExternalProjectOpen(handleExternalFileAction);
+
     const handleAutoBackupSettingsSaved = useCallback((settings: AutoBackupSettings) => {
         const interval = Number(settings.timedBackupIntervalSec);
         setAutoBackupSettings({
@@ -1964,35 +1956,6 @@ function AppInner() {
 
         return () => clearTimeout(timer);
     }, [paramsEpoch, autoBackgroundRender]);
-
-    // consume 语义只应执行一次：依赖 handleExternalFileAction（其随
-    // projectDirty 翻转而重建）会让该 effect 在首次编辑后重复发起 IPC。
-    const consumeStartupProjectPathRef = useRef(handleExternalFileAction);
-    useEffect(() => {
-        consumeStartupProjectPathRef.current = handleExternalFileAction;
-    }, [handleExternalFileAction]);
-
-    useEffect(() => {
-        let canceled = false;
-
-        async function consumeStartupProjectPath() {
-            try {
-                const result = await projectApi.consumeStartupProjectPath();
-                const startupPath = String(result?.path ?? "").trim();
-                const kind = detectExternalActionKindFromPath(startupPath);
-                if (!canceled && startupPath && kind) {
-                    consumeStartupProjectPathRef.current(kind, startupPath);
-                }
-            } catch {
-                // no-op
-            }
-        }
-
-        void consumeStartupProjectPath();
-        return () => {
-            canceled = true;
-        };
-    }, []);
 
     useEffect(() => {
         function onOpenProjectPath(event: Event) {
@@ -2665,8 +2628,11 @@ function AppInner() {
 
     // 统一快捷键处理（通过 keybindings 模块管理，用户可自定义）
     const handleKeybindingAction = useCallback(
-        (actionId: ActionId, stroke: HostKeyStroke) => {
-            if (!pluginAllowsAction(actionId, getActiveSurface())) {
+        (actionId: ActionId, stroke: HostKeyStroke, surfaceOverride?: EditSurfaceId | null) => {
+            // 独立窗口交回的快捷键带 sourceSurface：不能再用主窗口自己的 getActiveSurface，
+            // 否则会把卫星参数编辑器的操作误路由到主窗口时间轴。
+            const activeSurface = surfaceOverride ?? getActiveSurface();
+            if (!pluginAllowsAction(actionId, activeSurface)) {
                 // 【为什么不再静默】快捷键被拒此前是彻底的 no-op：菜单项上有 tooltip 说明，
                 // 键盘却没有任何可以挂说明的表面 —— 用户按了没反应，只能当成 bug。
                 // 状态栏是现成的短时效提示位（渲染缓存统计 / 自动声道折叠都在用它），
@@ -2678,7 +2644,7 @@ function AppInner() {
                 // 能还的就还给宿主，还成了就什么都不说。
                 const relay = classifyHostKeyRelay(
                     actionId,
-                    getActiveSurface(),
+                    activeSurface,
                     stroke,
                     hostKeyRelayEnv(),
                 );
@@ -2688,12 +2654,12 @@ function AppInner() {
                         // 其余情况按设计保持沉默 —— 让路成没成的证据在 `[relay]`
                         // 诊断日志与诊断包读数里（提示事件已随 17d6f2cf 删除）。
                         if (outcome !== "unsupported") return;
-                        const text = capabilityDeniedText(actionId, getActiveSurface());
+                        const text = capabilityDeniedText(actionId, activeSurface);
                         if (text) showNotice(text, 4000, "warning");
                     });
                     return false;
                 }
-                const deniedText = capabilityDeniedText(actionId, getActiveSurface());
+                const deniedText = capabilityDeniedText(actionId, activeSurface);
                 if (deniedText) showNotice(deniedText, 4000, "warning");
                 return false;
             }
@@ -2703,7 +2669,7 @@ function AppInner() {
             const blockOp = PARAM_BLOCK_ACTION_TO_OP[actionId];
             if (blockOp) {
                 const channel = resolveParamBlockEditChannel(
-                    getActiveSurface(),
+                    activeSurface,
                     store.getState().session,
                 );
                 if (channel) {
@@ -2756,7 +2722,7 @@ function AppInner() {
                         } catch {
                             // 探测失败不阻塞粘贴。
                         }
-                        channel = resolvePasteRoute(kind, getActiveSurface());
+                        channel = resolvePasteRoute(kind, activeSurface);
                         if (pluginAllowsEditChannel(channel, "paste")) {
                             window.dispatchEvent(
                                 new CustomEvent(channel, { detail: { op: "paste" } }),
@@ -2772,7 +2738,7 @@ function AppInner() {
                     // 侧）仲裁；皆空 → 无操作。
                     const session = store.getState().session;
                     const channel = resolveCopyCutRoute({
-                        surface: getActiveSurface(),
+                        surface: activeSurface,
                         clipSelectionActive:
                             session.multiSelectedClipIds.length > 0 || !!session.selectedClipId,
                         paramSelectionActive: session.paramSelectionActive,
@@ -2797,7 +2763,7 @@ function AppInner() {
                     return;
                 }
                 const channel = resolveEditOpRoute(
-                    getActiveSurface(),
+                    activeSurface,
                     editOp,
                     store.getState().session.toolMode,
                 );
@@ -2900,8 +2866,7 @@ function AppInner() {
                         const hasUndoableStep = store.getState().session.historyUndoDepth > 0;
                         void dispatch(
                             undoRemote({
-                                parametersOnly:
-                                    isPluginMode() && getActiveSurface() === "pianoRoll",
+                                parametersOnly: isPluginMode() && activeSurface === "pianoRoll",
                             }),
                         );
                         return hasUndoableStep;
@@ -2920,8 +2885,7 @@ function AppInner() {
                         const hasRedoableStep = store.getState().session.historyRedoDepth > 0;
                         void dispatch(
                             redoRemote({
-                                parametersOnly:
-                                    isPluginMode() && getActiveSurface() === "pianoRoll",
+                                parametersOnly: isPluginMode() && activeSurface === "pianoRoll",
                             }),
                         );
                         return hasRedoableStep;
@@ -3466,6 +3430,28 @@ function AppInner() {
 
     useKeybindings(handleKeybindingAction);
 
+    // 独立窗口的全局快捷键没有在主窗口按下的焦点，卫星只负责识别，执行交回这里。
+    // 事件 detail 带 sourceWindow/surface，保证编辑目标仍按卫星窗口的实际焦点裁决。
+    useEffect(() => {
+        const onDetachedShortcut = (event: Event) => {
+            const detail = (
+                event as CustomEvent<{
+                    actionId?: ActionId;
+                    stroke?: HostKeyStroke;
+                    surface?: EditSurfaceId | null;
+                }>
+            ).detail;
+            if (!detail?.actionId || !detail.stroke) return;
+            handleKeybindingAction(detail.actionId, detail.stroke, detail.surface ?? null);
+        };
+        window.addEventListener(KEYBINDING_ACTION_EVENT, onDetachedShortcut as EventListener);
+        return () =>
+            window.removeEventListener(
+                KEYBINDING_ACTION_EVENT,
+                onDetachedShortcut as EventListener,
+            );
+    }, [handleKeybindingAction]);
+
     /*
      * 宿主专属快捷键：把"插件自己占用"的按键集合推给原生。
      *
@@ -3658,7 +3644,14 @@ function AppInner() {
     // 为编辑快捷键（复制/剪切/粘贴等）的归属裁决提供单一事实源 —— 捕获
     // 阶段位于传播链最前端，子元素的 preventDefault / stopPropagation 均
     // 无法逃过解析（时间轴正是靠 preventDefault 自管焦点的）。
-    useEffect(() => installFocusSurfaceTracking(), []);
+    useEffect(() => installWindowEventBridge(), []);
+    useEffect(
+        () =>
+            installFocusSurfaceTracking(() => {
+                dispatch(setActiveEditorWindow("main"));
+            }),
+        [dispatch],
+    );
 
     /*
      * 会话闸门快照：后端编辑会话是否已进入**终态**（文档已关闭 / 宿主从未绑定 ARA）。

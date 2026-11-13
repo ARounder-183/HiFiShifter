@@ -74,7 +74,13 @@ export function matchesKeybinding(e: MinimalKeyboardEvent, kb: Keybinding): bool
     const key = normalizeEventKey(e);
     const physical = physicalKeyFromEvent(e);
     const backquoteAlias = kb.key === "~" && physical === "`";
-    if (key !== kb.key && physical !== kb.key && !backquoteAlias) return false;
+    // macOS 的主 Delete（⌫）在 WebKit 中报 key=backspace / code=backspace；
+    // 语义上它是用户按下的 Delete，必须能命中 delete 绑定。只做单向等价：
+    // Fn+Delete 报 key=delete，不能反过来命中只绑 Backspace 的动作。
+    const macDeleteAlias = IS_MAC && key === "backspace" && kb.key === "delete";
+    if (key !== kb.key && physical !== kb.key && !backquoteAlias && !macDeleteAlias) {
+        return false;
+    }
 
     const modKey = IS_MAC ? e.metaKey : e.ctrlKey;
     const wantCtrl = Boolean(kb.ctrl);

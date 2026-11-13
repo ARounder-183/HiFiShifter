@@ -31,3 +31,29 @@ pub(super) fn get_syllable_analysis_progress(
 ) -> Option<crate::pitch_analysis::SyllableAnalysisProgress> {
     crate::pitch_analysis::syllable_analysis_progress()
 }
+
+/// 按需读取 per-clip 源音高曲线（独立窗口的 Clip 音高参考线懒加载）。
+///
+/// 主窗口在分析完成后通过 clip_pitch_data 事件把曲线写进 session；卫星窗口
+/// 晚打开时事件已经发生、快照又刻意剔除大数组，因此只能显式向这里要一次。
+pub(super) fn get_clip_pitch_data(
+    state: tauri::State<'_, AppState>,
+    clip_ids: Vec<String>,
+) -> serde_json::Value {
+    let timeline = match state.timeline.lock() {
+        Ok(guard) => guard,
+        Err(error) => {
+            return serde_json::json!({ "ok": false, "error": format!("lock_failed: {error}") })
+        }
+    };
+    let mut payloads = Vec::new();
+    for clip_id in clip_ids {
+        let Some(clip) = timeline.clips.iter().find(|clip| clip.id == clip_id) else {
+            continue;
+        };
+        if let Some(payload) = crate::audio_engine::build_clip_pitch_data_payload(&timeline, clip) {
+            payloads.push(payload);
+        }
+    }
+    serde_json::json!({ "ok": true, "payloads": payloads })
+}

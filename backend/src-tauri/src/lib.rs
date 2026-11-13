@@ -270,6 +270,8 @@ pub mod kernel {
     pub use crate::time_stretch::{time_stretch_interleaved, StretchAlgorithm};
 }
 
+#[cfg(target_os = "macos")]
+use tauri::Emitter;
 use tauri::Manager;
 
 // 模型路径的登记处已迁到 `hifishifter-kernel`：声码器与 FCPE 在内核侧，
@@ -396,7 +398,11 @@ pub fn run() {
             // 从进程启动参数中解析工程路径（双击文件关联场景）。
             let startup_project_path =
                 launch_args::extract_project_path_from_args(std::env::args_os());
-            state.set_pending_startup_project_path(startup_project_path);
+            // 只在 argv 真的给出路径时覆盖：macOS 的 RunEvent::Opened 可能早于
+            // setup 到达，此时 pending 已经由 run 回调写入，不能被 None 擦掉。
+            if startup_project_path.is_some() {
+                state.set_pending_startup_project_path(startup_project_path);
+            }
 
             // Expose app handle for background workers.
             let _ = state.app_handle.set(app.handle().clone());
@@ -708,6 +714,7 @@ pub fn run() {
             commands::host_link_release,
             commands::ping,
             commands::get_about_info,
+            commands::get_clip_pitch_data,
             commands::analyze_clip_formants,
             commands::get_clip_syllable_spans,
             commands::analyze_clip_syllables,
@@ -716,6 +723,7 @@ pub fn run() {
             commands::restore_game_param_blocks,
             commands::get_runtime_info,
             commands::consume_startup_project_path,
+            commands::mark_frontend_ready,
             commands::set_ui_locale,
             commands::get_timeline_state,
             commands::get_timeline_state_lite,
@@ -915,8 +923,8 @@ pub fn run() {
         ])
         .build(context)
         .expect("error while building tauri application")
-        .run(|app_handle, event| {
-            if let tauri::RunEvent::Exit = event {
+        .run(|app_handle, event| match event {
+            tauri::RunEvent::Exit => {
                 // 退出前把渲染缓存的待写队列（`onExit` / `manual` 模式以及在途
                 // 写入）排空；带超时，磁盘异常时也不能卡住退出流程。
                 if !crate::render_cache::flush_blocking(std::time::Duration::from_secs(3)) {
@@ -935,6 +943,48 @@ pub fn run() {
                 crate::fcpe_onnx::drop_shared_session();
                 crate::hnsep_onnx::drop_shared_session();
             }
+            // macOS：Finder 双击 / 右键用 HiFiShifter 打开走 LaunchServices
+            // Apple Event，而不是进程 argv。必须在这里接住，否则应用已运行时
+            // 打开第二个工程完全没有反应；冷启动时则要排队等前端监听就绪。
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Opened { urls } => {
+                let state = app_handle.state::<state::AppState>();
+                log::info!("[open] received {} LaunchServices URL(s)", urls.len());
+                let supported_count = urls
+                    .iter()
+                    .filter(|url| launch_args::path_from_open_url(url).is_some())
+                    .count();
+                if supported_count > 1 {
+                    log::warn!(
+                        "[open] multiple supported files; opening only the first of {supported_count}"
+                    );
+                }
+                let Some(path) = launch_args::pick_supported_open_url(&urls) else {
+                    log::warn!("[open] no supported project/media path in Opened event");
+                    return;
+                };
+                let path = path.to_string_lossy().into_owned();
+                if state.is_frontend_ready() {
+                    if state.take_pending_startup_project_path_if_matches(&path) {
+                        log::info!(
+                            "[open] same path already queued; frontend consume will handle it"
+                        );
+                        return;
+                    }
+                    let payload = serde_json::json!({ "path": path });
+                    match app_handle.emit("hs:external-project-open", payload) {
+                        Ok(()) => log::info!("[open] emitted hs:external-project-open"),
+                        Err(error) => {
+                            log::error!("[open] failed to emit external project event: {error}");
+                            state.set_pending_startup_project_path(Some(path));
+                        }
+                    }
+                } else {
+                    log::info!("[open] frontend not ready; queued pending startup path");
+                    state.set_pending_startup_project_path(Some(path));
+                }
+            }
+            _ => {}
         });
 }
 

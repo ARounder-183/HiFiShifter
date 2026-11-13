@@ -2135,12 +2135,10 @@ fn compute_pitch_curve_start_sec(clip: &crate::state::Clip) -> f64 {
 /// 从全量缓存中读取 MIDI 曲线，根据 playback_rate 决定是否做 source range 截取 + resample。
 /// - rate==1：全量传送，curveStartSec = start_sec - source_start_sec，前端 ctx.clip() 裁剪
 /// - rate!=1：source range 截取 → resample 到 clip timeline 长度，curveStartSec = start_sec
-fn emit_clip_pitch_data_for_clip(
-    app: &tauri::AppHandle,
+pub(crate) fn build_clip_pitch_data_payload(
     tl: &crate::state::TimelineState,
     clip: &crate::state::Clip,
-) {
-    use tauri::Emitter;
+) -> Option<ClipPitchDataPayload> {
     let frame_period_ms = 5.0f64;
     let root = tl.resolve_root_track_id(&clip.track_id).unwrap_or_default();
 
@@ -2277,20 +2275,18 @@ fn emit_clip_pitch_data_for_clip(
             frame_period_ms,
             midi_curve.len() as f64 * frame_period_ms / 1000.0,
         );
-        let payload = ClipPitchDataPayload {
+        return Some(ClipPitchDataPayload {
             clip_id: clip.id.clone(),
             curve_start_sec,
             midi_curve,
             frame_period_ms,
-        };
-        let _ = app.emit("clip_pitch_data", payload);
-        return;
+        });
     }
 
     // ── 音频 clip 路径：从 FCPE 缓存获取音高曲线 ──
     let Some(cached_midi) = get_clip_pitch_midi_global(tl, clip, &root, frame_period_ms) else {
         debug_eprintln!("[pitch:emit] clip_id={} → cache miss, skipping", clip.id);
-        return;
+        return None;
     };
 
     debug_eprintln!(
@@ -2333,13 +2329,23 @@ fn emit_clip_pitch_data_for_clip(
         midi_curve.len() as f64 * frame_period_ms / 1000.0,
     );
 
-    let payload = ClipPitchDataPayload {
+    Some(ClipPitchDataPayload {
         clip_id: clip.id.clone(),
         curve_start_sec,
         midi_curve,
         frame_period_ms,
-    };
-    let _ = app.emit("clip_pitch_data", payload);
+    })
+}
+
+fn emit_clip_pitch_data_for_clip(
+    app: &tauri::AppHandle,
+    tl: &crate::state::TimelineState,
+    clip: &crate::state::Clip,
+) {
+    use tauri::Emitter;
+    if let Some(payload) = build_clip_pitch_data_payload(tl, clip) {
+        let _ = app.emit("clip_pitch_data", payload);
+    }
 }
 
 /// 判断 clip 的 pitch 分析相关参数是否发生变化。

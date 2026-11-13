@@ -161,6 +161,12 @@ export function formatKeybinding(kb: Keybinding, noneLabel?: string): string {
 }
 
 function prettifyKey(key: string): string {
+    // macOS 没有名为 "Backspace" 的键帽：物理主 Delete 就是 ⌫（Backspace
+    // 事件），Fn+Delete 也是前向删除。两者都显示同一个符号，避免设置界面
+    // 出现 "Delete / Backspace" 的伪区分。
+    if (IS_MAC && (key.toLowerCase() === "delete" || key.toLowerCase() === "backspace")) {
+        return "⌫";
+    }
     const map: Record<string, string> = {
         space: "Space",
         delete: "Delete",
@@ -244,9 +250,15 @@ export function formatKeybindingList(
     bindings: readonly Keybinding[] | undefined,
     noneLabel?: string,
 ): string {
-    const parts = (bindings ?? []).filter((binding) => !isNoneBinding(binding));
-    if (parts.length === 0) return noneLabel ?? "—";
-    return parts.map((binding) => formatKeybinding(binding)).join(KEYBINDING_LIST_SEPARATOR);
+    const text = (bindings ?? [])
+        .filter((binding) => !isNoneBinding(binding))
+        .map((binding) => formatKeybinding(binding));
+    // 平台展示可能把两个不同绑定折叠成同一个字符串（macOS 的 Delete /
+    // Backspace 都是 ⌫）。配置本身仍保留两个槽位，但一行文本不应显示
+    // 「⌫;⌫」这种无意义重复。
+    const unique = [...new Set(text)];
+    if (unique.length === 0) return noneLabel ?? "—";
+    return unique.join(KEYBINDING_LIST_SEPARATOR);
 }
 
 // ─── Slice ───────────────────────────────────────────────────────

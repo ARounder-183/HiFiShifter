@@ -163,6 +163,10 @@ const TYPEAHEAD_OWNED_KEYS = new Set([
  * 其余组合（Ctrl+S、Ctrl+Z、Ctrl+Shift+S、Shift+T、Shift+V…）照常走全局。
  */
 function isOwnedByTypeAhead(e: KeyboardEvent, key: string): boolean {
+    // macOS Finder 的「移到废纸篓」是 ⌘+⌫：文件列表自己实现删除，必须在全局
+    // 分发器之前认领。若按下面的通用规则把 meta 一律让给全局，track.delete
+    // （ctrl 字段在 macOS 映射到 meta）会把它截走并误删轨道。
+    if (e.metaKey && !e.ctrlKey && !e.altKey && key === "backspace") return true;
     if (e.altKey || e.metaKey) return false;
     // 只有**真正未修饰**的按键才是"打字跳转"。Shift+字母会产出可打印字符
     // （Shift+T → "T"），但它属于"带修饰"的一类：全局绑定里的 Shift+T/Shift+V

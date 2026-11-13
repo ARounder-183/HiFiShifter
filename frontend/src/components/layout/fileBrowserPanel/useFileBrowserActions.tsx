@@ -36,6 +36,7 @@ import { type AppMenuItemSpec } from "../../../ui";
 import { copyTextToClipboard } from "../../../utils/copyText";
 import { takePanelFocus } from "../fileBrowserPanelFocus";
 import { TYPE_AHEAD_RESET_MS, nextTypeAhead } from "../fileBrowserKeyboardNav";
+import { resolveFileBrowserDeleteAction } from "./fileBrowserDeleteKey";
 import type { FileBrowserListing } from "./useFileBrowserListing";
 import type { FileBrowserSelection } from "./useFileBrowserSelection";
 
@@ -171,10 +172,24 @@ export function useFileBrowserActions(
                     return;
                 }
             }
-            if (!mod && !event.altKey && (event.key === "Backspace" || event.key === "F5")) {
+            // Delete / Backspace 的平台语义收口在纯函数里：macOS 的 ⌘+⌫ 删除、
+            // 普通 ⌫ 返回上级；Windows/Linux 仍为 Delete 删除、Backspace 上级。
+            const deleteAction = resolveFileBrowserDeleteAction(event.nativeEvent);
+            if (deleteAction === "delete") {
                 event.preventDefault();
-                if (event.key === "Backspace") handleParentDir();
-                else handleRefresh();
+                if (selectedPaths.size > 0 && !isComputerLevel) {
+                    setDeleteRequest(Array.from(selectedPaths));
+                }
+                return;
+            }
+            if (deleteAction === "parent") {
+                event.preventDefault();
+                handleParentDir();
+                return;
+            }
+            if (!mod && !event.altKey && event.key === "F5") {
+                event.preventDefault();
+                handleRefresh();
                 return;
             }
 
@@ -211,11 +226,6 @@ export function useFileBrowserActions(
             if (event.key === "F2" && activeEntry && !isComputerLevel) {
                 event.preventDefault();
                 setEditing({ kind: "rename", path: activeEntry.path, initial: activeEntry.name });
-                return;
-            }
-            if (event.key === "Delete" && selectedPaths.size > 0 && !isComputerLevel) {
-                event.preventDefault();
-                setDeleteRequest(Array.from(selectedPaths));
                 return;
             }
             if (event.key === "Escape") {

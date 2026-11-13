@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useAppDispatch, useAppSelector, useAppStore } from "../../../../app/hooks";
+import { emitWindowEvent } from "../../../../features/dock/windowEventBridge";
 import type { RootState } from "../../../../app/store";
 import { useI18n } from "../../../../i18n/I18nProvider";
 import {
@@ -17,7 +18,6 @@ import {
     setParamSelectionActive,
 } from "../../../../features/session/sessionSlice";
 import { resolveRootTrackId } from "../../../../features/session/trackUtils";
-import type { ClipInfo } from "../../../../features/session/sessionTypes";
 import {
     buildPitchAlgoOptions,
     resolveEffectivePitchAlgo,
@@ -40,7 +40,6 @@ import { useNonPassiveWheel } from "../../../../utils/useNonPassiveWheel";
 import type { ScaleLike } from "../../../../utils/musicalScales";
 import { clamp } from "../../timeline";
 import { effectiveScaleAtSec } from "../../../../utils/tempoMap";
-import { publishPianoRollSelection } from "../../../../utils/pianoRollSelectionBus";
 import { resolveTimelineScrollRange } from "../../timeline/runtime/timelineScrollRange";
 import { TOOLBAR_MAX_TIER } from "../toolbarOverflow";
 import { useToolbarOverflowTier } from "../useToolbarOverflowTier";
@@ -99,11 +98,7 @@ import {
     reportParamBlockWriteFailure,
 } from "./paramBlockFailureReporting";
 import type { ParamBlockWritePreparation } from "../paramBlockWritePlan";
-import {
-    toFrame,
-    toParamBlockSourceClip,
-    type ParamBlockSourceClip,
-} from "../paramBlockProjection";
+import { toFrame, toParamBlockSourceClip } from "../paramBlockProjection";
 import { logicalBlockId, type ParamBlockView } from "../paramBlockTypes";
 import { resolveParamBlockGeometryClips } from "../paramBlockGeometryFreeze";
 import { fetchFullResCurve, readPvRange } from "../selectionEditData";
@@ -208,12 +203,6 @@ import { createLiveOverrideReader, type LiveOverrideReader } from "../liveLoudne
 import { pianoRollViewportBus } from "../pianoRollViewportBus";
 import { pianoRollInteractionViewportBus } from "../pianoRollInteractionViewportBus";
 import { createLoudnessGeometryWarp, type LoudnessGeometryWarp } from "../loudnessGeometryWarp";
-import {
-    getClipGeometryPreviewClips,
-    getClipGeometryPreviewOrigin,
-    subscribeClipGeometryPreview,
-    type ClipGeometrySnapshot,
-} from "../../timeline/clipGeometryPreviewBus";
 import { createRenderLoop, type RenderLoop } from "../../renderKernel/renderLoop.js";
 import {
     createTimelineAxis,
@@ -252,7 +241,14 @@ import {
     selectKeybindings,
     selectMergedKeybindings,
 } from "../../../../features/keybindings/keybindingsSlice";
-import { clearPianoRollLoading, setPianoRollLoading } from "../../../../utils/pianoRollStatusBus";
+import {
+    clearPianoRollLoading,
+    selectClipGeometryPreview,
+    selectClipGeometryPreviewClips,
+    setPianoRollLoading,
+    setPianoRollSelection,
+} from "../../../../features/session/interactionSlice";
+import type { ClipGeometrySnapshot } from "../../../../features/session/clipGeometryTypes";
 import { parseCustomScaleToken } from "../../../../utils/scaleSelection";
 import { type PianoRollKernelHost } from "../kernel/host/pianoRollKernelHost";
 import type { EdgeScrollDriver } from "../kernel/edgeScrollDriver";
@@ -280,6 +276,7 @@ import {
 import { usePianoRollEditCommands } from "./usePianoRollEditCommands";
 import { usePianoRollEditSession } from "./usePianoRollEditSession";
 import { usePianoRollFrameAssembly } from "./usePianoRollFrameAssembly";
+import { useClipPitchHydration } from "./useClipPitchHydration";
 import { usePianoRollScrollKernel } from "./usePianoRollScrollKernel";
 import { useMidiImport } from "./useMidiImport";
 import {
@@ -782,11 +779,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      * 置会出现"刻度写 −6、浮窗写 0.501"的自相矛盾读数。
      */
     const editParamAxisUnit = resolveParamAxisUnit(s.paramAxisUnits, editParam);
-    /** 当前参数的左轴是否可切换展示单位（决定光标与角标）。 */
+    /** 当前参数的左轴是否可切换展示单位（决定光标与点击切换提示）。 */
     const axisUnitToggleAvailable = supportsParamAxisUnit(editParam);
     const editParamAxisDirection = resolvePanAxisDirection(s.paramAxisDirections, editParam);
-    const axisPanDirectionToggleAvailable = isPanParam(editParam);
-    const axisToggleAvailable = axisUnitToggleAvailable || axisPanDirectionToggleAvailable;
+    // 声像参数没有单位角标，但整列轴仍可点击切换 L/R 方向；方向变化本身由
+    // 刻度字母上下互换表达，不再额外渲染文字指示。
+    const axisToggleAvailable = axisUnitToggleAvailable || isPanParam(editParam);
 
     const formatParamValuePreview = useParamValueFormatter({
         editParam,
@@ -1845,16 +1843,23 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     const loudnessWaveformRevisionRef = useRef(0);
 
     /**
-     * 时间轴几何手势的「按下时几何」快照（见 `clipGeometryPreviewBus`）。
+     * 时间轴几何手势的「按下时几何」快照。
      *
-     * 【为什么用 state 而不是 ref】手势起止是**离散**事件（每只手势各一次），
-     * 而它决定波形的乘数从哪儿来 —— 必须触发一次重渲染，让幅度映射挂上/撤下
-     * 几何映射。手势内部的逐帧变化不走 state（走 `loudnessWarpRef` + LUT 的
-     * 映射身份比较），否则整块面板会以指针频率重渲染。
+     * 状态住在 Redux interaction 切片：内置窗口与独立窗口读同一个 source of
+     * truth，卫星窗口不再依赖自己的模块级总线实例。选择器只订阅 origin，
+     * 不订阅整片 interaction，避免加载状态等变化带动整块面板重渲染。
+     */
+    const clipGeometryPreview = useAppSelector(selectClipGeometryPreview);
+    /**
+     * 本地保留的手势起点快照。
+     *
+     * interaction 里的 preview 在 end 时立刻变 null，但映射必须保留到权威快照
+     * 追上（warpSettled）才能撤下 —— 否则松手瞬间会闪回旧基线。因此这里只把
+     * begin 的值搬进本地 state，end 后保留；warpSettled 那一次渲染再清空。
      */
     const [clipGeometryPreviewOrigin, setClipGeometryPreviewOrigin] = useState<
         readonly ClipGeometrySnapshot[] | null
-    >(() => getClipGeometryPreviewOrigin());
+    >(null);
 
     /**
      * 收尾期的「基线溯源基准」：手势结束**之前**最后落地的那份快照的溯源键。
@@ -1875,25 +1880,32 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     /** 手势是否已结束、正在等权威快照追上。 */
     const warpSettlingRef = useRef(false);
 
+    /**
+     * 手势结束边沿：`origin` 从非 null 变 null 时进入「等权威快照追上」态。
+     *
+     * 【为什么不在结束回调里直接撤映射】提交之后、权威快照回来之前，映射仍是
+     * 把基线搬到新位置的唯一正确来源；立即撤下会闪回旧基线。撤下交给
+     * `warpSettled`（渲染期判定，与快照落地同批）。
+     *
+     * 【初次挂载 null → null 不置 settling】否则新开的卫星窗口会误以为刚结束
+     * 一场手势，把第一份合法快照当成「已追上」。
+     */
+    const hadClipGeometryPreviewRef = useRef(false);
+    /** 手势结束边沿需要一个额外的渲染来让 warpSettled 读到 settling=true。 */
+    const [, bumpWarpSettlingRender] = useState(0);
     useEffect(() => {
-        setClipGeometryPreviewOrigin(getClipGeometryPreviewOrigin());
-        warpSettlingRef.current = false;
-        return subscribeClipGeometryPreview(() => {
-            const origin = getClipGeometryPreviewOrigin();
-            if (origin !== null) {
-                warpSettlingRef.current = false;
-                setClipGeometryPreviewOrigin(origin);
-                return;
-            }
-            // 手势结束：**不在这里**撤下映射。提交之后、权威快照回来之前，映射仍是
-            // 把基线搬到新位置的唯一正确来源（后端此刻正在算的正是同一件事）。
-            // 撤下交给 `warpSettled`（渲染期判定，与快照落地同批）。
-            //
-            // 【取消手势为什么同样安全】取消会把 Redux 几何还原成按下时的值，
-            // 差分随之退化为空 ⇒ 映射为 `null`，撤不撤在画面上没有区别。
+        const active = clipGeometryPreview !== null;
+        if (active) {
+            warpSettlingRef.current = false;
+            setClipGeometryPreviewOrigin(clipGeometryPreview.origin);
+        } else if (hadClipGeometryPreviewRef.current) {
             warpSettlingRef.current = true;
-        });
-    }, []);
+            // ref 本身不触发渲染；强制一次，让同一帧的 loudnessGeometryWarp 看到
+            // 「手势已结束、等待权威快照」的状态。
+            bumpWarpSettlingRender((value) => value + 1);
+        }
+        hadClipGeometryPreviewRef.current = active;
+    }, [clipGeometryPreview]);
 
     /**
      * 当前生效的几何映射（渲染期同步的 ref 镜像，见文件内既有的同款模式）。
@@ -2079,26 +2091,29 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         specifiedBpm,
     } = useMidiImport({ dispatch, paramEditorRef, refreshNow, s, selectionRef, store });
 
-    // 将当前选区发布到总线，供 MenuBar 等判断“工程音阶”是否受 Tempo Map 影响。
+    // 将当前选区发布到 interaction 切片，供主窗口 MenuBar 判断“工程音阶”是否
+    // 受 Tempo Map 影响。独立窗口里的参数编辑器发布后经 detachBridge 复制到主窗口。
     // 多选区发布**包围区间**（首段起点 → 末段终点）：该提示只关心"选区覆盖的
     // 时间跨度里有没有音阶变化点"，包围区间是它的保守上界。
     useEffect(() => {
         const sel = selectionUi;
         const bounding = selectionBoundingSpan(sel);
         if (!bounding) {
-            publishPianoRollSelection(null);
+            dispatch(setPianoRollSelection(null));
             return;
         }
         // 选区已经是帧制：直接发布，不再有任何换算（此前要经 `secPerBeat` 转一道）。
-        publishPianoRollSelection({
-            startFrame: Math.max(0, bounding.startFrame),
-            frameCount: Math.max(1, bounding.frameCount),
-            framePeriodMs: paramView?.framePeriodMs ?? 5,
-        });
+        dispatch(
+            setPianoRollSelection({
+                startFrame: Math.max(0, bounding.startFrame),
+                frameCount: Math.max(1, bounding.frameCount),
+                framePeriodMs: paramView?.framePeriodMs ?? 5,
+            }),
+        );
         return () => {
-            publishPianoRollSelection(null);
+            dispatch(setPianoRollSelection(null));
         };
-    }, [selectionUi, paramView?.framePeriodMs]);
+    }, [dispatch, selectionUi, paramView?.framePeriodMs]);
 
     // 获取当前 track 下的所 ?clips，用 ?per-clip 波形叠加绘制
     // 获取轨道组内所有 clips（包含 root 轨道及所有子轨道的 clip）
@@ -2124,6 +2139,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         if (rootTrackId === null) return [];
         return s.clips.filter((clip) => clip.trackId === rootTrackId);
     }, [rootTrackId, s.clips, trackClips]);
+    useClipPitchHydration({ dispatch, editParam, session: s, clips: paramBlockClips });
+
     /** Block spans whose analyzed window still contains the audible window. */
     const paramBlockSyllableSpans = useMemo(() => {
         const byClip = new Map<
@@ -2204,12 +2221,13 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         warpSettled,
     ]);
 
-    // 收尾完成 ⇒ 可以安全丢掉基准几何：此时映射已是 `null`，且下一次手势会发布新的。
+    // 收尾完成 ⇒ 清掉本地收尾标记。手势快照本身由 interaction.end 统一清空，
+    // 这里不再持有第二份可写的 origin 状态（否则独立窗口会各自清各自的副本）。
     useEffect(() => {
-        if (!warpSettled || clipGeometryPreviewOrigin === null) return;
+        if (!warpSettled) return;
         warpSettlingRef.current = false;
         setClipGeometryPreviewOrigin(null);
-    }, [warpSettled, clipGeometryPreviewOrigin]);
+    }, [warpSettled]);
 
     /**
      * 映射变化 ⇒ **渲染期**推进修订号。
@@ -2718,22 +2736,23 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         setAxisValuePreview,
     });
 
-    // 同步数据加载状态到状态栏。
-    //
-    // 走**外部 store** 而非 Context：这个 boolean 只服务状态栏一处显示，而它随每次
-    // 取数（水平缩放 / 滚动 / 编辑提交）翻转 —— 曾经它住在包裹整个 AppInner 的
-    // Context 里，于是每次翻转都重渲染整棵应用树，把正在进行的绘制笔画打断。
-    // 现在只有状态栏那个小组件会重渲染（见 pianoRollStatusBus）。
+    // 同步数据加载状态到 interaction 切片。状态栏只订阅该字段的派生子集，
+    // 不会因整片 interaction 变化而重渲染；独立窗口的发布经桥复制到主窗口。
     //
     // 按**窗体 id** 记账：参数编辑器可以多开，共用一个 boolean 会让一个实例卸载时
     // 抹掉另一个实例的状态。
     const loadingPublisherId = dockFormId ?? "param-editor";
     useEffect(() => {
-        setPianoRollLoading(loadingPublisherId, isLoading);
-    }, [isLoading, loadingPublisherId]);
+        dispatch(setPianoRollLoading({ publisherId: loadingPublisherId, loading: isLoading }));
+    }, [dispatch, isLoading, loadingPublisherId]);
 
     // 卸载时注销（否则本实例的最后状态会永远粘住，状态栏再也不会收起）。
-    useEffect(() => () => clearPianoRollLoading(loadingPublisherId), [loadingPublisherId]);
+    useEffect(
+        () => () => {
+            dispatch(clearPianoRollLoading(loadingPublisherId));
+        },
+        [dispatch, loadingPublisherId],
+    );
 
     // 编辑命令（全选、命令分发、剪贴板键盘与外部同步接线）整块在
     // `usePianoRollEditCommands` 里（见该文件头）。
@@ -2804,13 +2823,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         onParamEditApplied: clearStaleBlockCentersAfterParamEdit,
     });
 
-    // Dispatch helper: context menu dialog ops → open MenuBar dialogs
+    // Dispatch helper: context menu dialog ops → open MenuBar dialogs.
+    // 独立窗口没有 MenuBar；对话框宿主在主窗口，因此以 main 为目标经桥发送。
     const openEditDialog = useCallback((dialog: string) => {
-        window.dispatchEvent(
-            new CustomEvent("hifi:openEditDialog", {
-                detail: { dialog },
-            }),
-        );
+        emitWindowEvent("main", "hifi:openEditDialog", { dialog });
     }, []);
 
     // 以选区为作用域的动作（提取/套用颤音、另存为音高参考、导出 MIDI）整块在
@@ -2884,24 +2900,15 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      * Redux 乐观更新、参数线要等落库才重取 —— 不冻结就会出现"块跟着 Clip 走、
      * 线原地不动"（块从曲线上滑走）。
      *
-     * 快照来自 `clipGeometryPreviewBus`：它在**任何乐观写入之前**建立（交互锁却
-     * 要等到首个位移帧才 +1，读 `s.clips` 会漏掉第一帧的位移）。松手后发布方
-     * 清空快照，块层在下一帧就跟上权威几何 —— 与 Clip 图层换新同步，只有一次跳变。
+     * 快照来自 interaction.clipGeometryPreview：它在**任何乐观写入之前**建立，
+     * 并经 detachBridge 复制到独立窗口；松手后由 end action 统一清空，块层在
+     * 下一帧跟上权威几何 —— 与 Clip 图层换新同步，只有一次跳变。
      */
-    const [frozenGestureClips, setFrozenGestureClips] = useState<
-        readonly ParamBlockSourceClip[] | null
-    >(null);
+    const frozenGestureClips = useAppSelector(selectClipGeometryPreviewClips);
     useEffect(() => {
-        const sync = () => {
-            const clips = getClipGeometryPreviewClips<ClipInfo>();
-            setFrozenGestureClips(clips === null ? null : clips.map(toParamBlockSourceClip));
-            // 块层换了一份几何 ⇒ 必须重绘（宿主不会因为 state 变化自己提交帧）。
-            invalidate();
-        };
-        // 订阅不补发当前状态（见总线的说明），所以先同步一次再订阅。
-        sync();
-        return subscribeClipGeometryPreview(sync);
-    }, [invalidate]);
+        // 块层换了一份几何 ⇒ 必须重绘（宿主不会因为状态变化自己提交帧）。
+        invalidate();
+    }, [frozenGestureClips, invalidate]);
     const paramBlockSourceClips = useMemo(
         () => resolveParamBlockGeometryClips(paramBlockSourceClipsLive, frozenGestureClips),
         [paramBlockSourceClipsLive, frozenGestureClips],
@@ -6963,7 +6970,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         attachRulerPlayheadLine,
         attachVerticalScrollbarTrack,
         axisCanvasRef,
-        axisPanDirectionToggleAvailable,
         axisToggleAvailable,
         axisUnitToggleAvailable,
         axisValuePreview,

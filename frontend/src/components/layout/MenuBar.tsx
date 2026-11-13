@@ -47,10 +47,7 @@ import { SnapGridSettingsDialog } from "./SnapGridSettingsDialog";
 import { DockLayoutMenus, DockLayoutDialogs } from "../dock/DockLayoutMenu";
 import { scaleChangesInRange, scaleLikeEquals } from "../../utils/tempoMap";
 import type { ScaleLike } from "../../utils/musicalScales";
-import {
-    getPianoRollSelection,
-    subscribePianoRollSelection,
-} from "../../utils/pianoRollSelectionBus";
+import { selectPianoRollSelection } from "../../features/session/interactionSlice";
 import { computeInsertBelowPlacement } from "../../features/session/trackUtils";
 import { saveProjectAsFormat } from "../../features/session/thunks/projectThunks";
 import { SAVE_PROJECT_AS_FORMATS } from "../../features/session/saveProjectAsMenu";
@@ -77,6 +74,7 @@ import { IS_WINDOWS } from "../../utils/platform";
 import { isPanParam } from "./pianoRoll/paramPan";
 import { getActiveSurface } from "../../features/uiFocus/focusSurface";
 import { webApi } from "../../services/webviewApi";
+import { emitWindowEvent } from "../../features/dock/windowEventBridge";
 const KeybindingsDialog = lazy(() =>
     import("./KeybindingsDialog").then((module) => ({ default: module.KeybindingsDialog })),
 );
@@ -349,18 +347,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
     // ── “工程音阶”选项受 Tempo Map 影响的提示 ─────────────────────────
     // 读取参数编辑器当前选区（帧范围）判断是否跨过音阶变化点；
-    // 无选区时按整个工程判断（存在音阶变化点即提示）。
-    const [selectionVersion, setSelectionVersion] = useState(0);
-    useEffect(
-        () =>
-            subscribePianoRollSelection(() => {
-                setSelectionVersion((v) => v + 1);
-            }),
-        [],
-    );
+    // 无选区时按整个工程判断（存在音阶变化点即提示）。选区住在 interaction
+    // 切片：独立窗口面板发布后，主窗口的 MenuBar 也能读到。
+    const pianoRollSelection = useAppSelector(selectPianoRollSelection);
     const tempoMapScaleHint = useMemo(() => {
         if (!s.tempoMap) return null;
-        const sel = getPianoRollSelection();
+        const sel = pianoRollSelection;
         const startSec = sel ? (sel.startFrame * sel.framePeriodMs) / 1000 : 0;
         const endSec = sel
             ? ((sel.startFrame + Math.max(0, sel.frameCount)) * sel.framePeriodMs) / 1000
@@ -378,8 +370,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             return null;
         }
         return tf("project_scale_tempo_map_hint");
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [s.tempoMap, s.projectSec, s.project, tf, selectionVersion]);
+    }, [s.tempoMap, s.projectSec, s.project, tf, pianoRollSelection]);
     // 标签与括号提示的拼接（含空格/全角括号的语系差异）交给词典模板。
     const projectScaleLabelWithHint = tempoMapScaleHint
         ? tVars("project_scale_label_with_tempo_hint", {
@@ -473,7 +464,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     selectionContext: s.selectionContext,
                 });
                 if (channel) {
-                    window.dispatchEvent(new CustomEvent(channel, { detail: { op, ...data } }));
+                    emitWindowEvent(
+                        channel === "hifi:timelineEditOp" ? "main" : "activeEditor",
+                        channel,
+                        { op, ...data },
+                    );
                 }
                 return;
             }
@@ -487,13 +482,20 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     }
                     const channel = resolvePasteRoute(kind, getActiveSurface());
                     if (channel) {
-                        window.dispatchEvent(new CustomEvent(channel, { detail: { op, ...data } }));
+                        emitWindowEvent(
+                            channel === "hifi:timelineEditOp" ? "main" : "activeEditor",
+                            channel,
+                            { op, ...data },
+                        );
                     }
                 })();
                 return;
             }
             const channel = resolveEditOpRoute(getActiveSurface(), op, s.toolMode) ?? "hifi:editOp";
-            window.dispatchEvent(new CustomEvent(channel, { detail: { op, ...data } }));
+            emitWindowEvent(channel === "hifi:timelineEditOp" ? "main" : "activeEditor", channel, {
+                op,
+                ...data,
+            });
         },
         [s],
     );

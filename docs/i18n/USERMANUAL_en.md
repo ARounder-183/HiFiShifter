@@ -145,7 +145,7 @@ If you move the pointer over a scrollbar at the edge of the view and then scroll
 
 Common shortcuts:
 
-> **macOS users**: `Ctrl` below corresponds to `Command (⌘)` and `Alt` to `Option (⌥)`.
+> **macOS users**: `Ctrl` below corresponds to `Command (⌘)` and `Alt` to `Option (⌥)`. The macOS Delete key is `⌫`; default Delete / Backspace shortcuts use `⌫` (`Fn+Delete` is forward delete).
 
 - `Space`: Play / Pause (does not return to start)
 - `Enter`: Play / Stop (returns to start)

@@ -37,7 +37,6 @@ type Props = {
         | "attachRulerPlayheadLine"
         | "attachVerticalScrollbarTrack"
         | "axisCanvasRef"
-        | "axisPanDirectionToggleAvailable"
         | "axisToggleAvailable"
         | "axisUnitToggleAvailable"
         | "axisValuePreview"
@@ -50,7 +49,6 @@ type Props = {
         | "currentParamRange"
         | "dynamicProjectSec"
         | "editParam"
-        | "editParamAxisDirection"
         | "editParamAxisUnit"
         | "effectiveProjectScale"
         | "formatParamValuePreview"
@@ -100,7 +98,6 @@ export function EditorArea({ m }: Props) {
         attachRulerPlayheadLine,
         attachVerticalScrollbarTrack,
         axisCanvasRef,
-        axisPanDirectionToggleAvailable,
         axisToggleAvailable,
         axisUnitToggleAvailable,
         axisValuePreview,
@@ -113,7 +110,6 @@ export function EditorArea({ m }: Props) {
         currentParamRange,
         dynamicProjectSec,
         editParam,
-        editParamAxisDirection,
         editParamAxisUnit,
         effectiveProjectScale,
         formatParamValuePreview,
@@ -202,18 +198,7 @@ export function EditorArea({ m }: Props) {
                         是"点击可切换"的可见提示（整列光标为 pointer）。
                         刻意**不**挂 onClick —— 点击会冒泡到上面的轴列处理器，
                         再挂一个会切换两次（净效果为"点了没反应"）。 */}
-                    {axisPanDirectionToggleAvailable ? (
-                        <div
-                            className="absolute top-0 right-0 z-10 px-1 text-qt-3xs leading-[14px] text-qt-text-muted"
-                            aria-hidden
-                        >
-                            {tf(
-                                editParamAxisDirection === "left-top"
-                                    ? "param_axis_pan_left_top"
-                                    : "param_axis_pan_left_bottom",
-                            )}
-                        </div>
-                    ) : axisUnitToggleAvailable ? (
+                    {axisUnitToggleAvailable ? (
                         <div
                             className="absolute top-0 right-0 z-10 px-1 text-qt-3xs leading-[14px] text-qt-text-muted"
                             aria-hidden

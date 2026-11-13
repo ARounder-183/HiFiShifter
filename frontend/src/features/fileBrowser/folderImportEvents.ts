@@ -8,6 +8,8 @@
  * 分叉（三个副本 = 三套默认值、三种关闭时机）。
  */
 
+import { emitWindowEvent } from "../dock/windowEventBridge";
+
 export const FOLDER_IMPORT_REQUEST_EVENT = "hifi:folder-import-request";
 
 export interface FolderImportRequestDetail {
@@ -40,9 +42,10 @@ export interface FolderImportRequestDetail {
 export function emitFolderImportRequest(detail: FolderImportRequestDetail): void {
     const dirs = detail.dirs.filter((dir) => dir.trim().length > 0);
     if (dirs.length === 0) return;
-    window.dispatchEvent(
-        new CustomEvent<FolderImportRequestDetail>(FOLDER_IMPORT_REQUEST_EVENT, {
-            detail: { ...detail, dirs },
-        }),
-    );
+    // 目录导入的宿主（FolderImportHost）只在主窗口挂载：独立窗口的文件浏览器
+    // 必须把请求送到 main，否则右键「导入文件夹」在卫星窗口里静默无反应。
+    emitWindowEvent("main", FOLDER_IMPORT_REQUEST_EVENT, {
+        ...detail,
+        dirs,
+    } satisfies FolderImportRequestDetail);
 }

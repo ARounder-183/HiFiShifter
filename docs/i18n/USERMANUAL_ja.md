@@ -145,7 +145,7 @@ HiFiShifter の構造化コピー＆ペーストはシステムクリップボ�
 
 よく使うショートカット：
 
-> **macOS ユーザー**：以下の `Ctrl` は `Command (⌘)`、`Alt` は `Option (⌥)` に対応します。
+> **macOS ユーザー**：以下の `Ctrl` は `Command (⌘)`、`Alt` は `Option (⌥)` に対応します。macOS の Delete キーは `⌫` で、既定の Delete / Backspace ショートカットは `⌫` として動作します（`Fn+Delete` は前方削除）。
 
 - `スペース`：再生 / 一時停止（再生開始位置に戻らない）
 - `Enter`：再生 / 停止（再生開始位置に戻る）

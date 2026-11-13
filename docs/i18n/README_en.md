@@ -72,7 +72,7 @@ For detailed operations on the track and parameter panels (fade editing, snap se
 
 ## Keyboard shortcuts
 
-> All shortcuts can be customized in-app under `Options → Keyboard Shortcuts...`; the table below lists the defaults. On macOS, `Ctrl` corresponds to `⌘` and `Alt` to `⌥`.
+> All shortcuts can be customized in-app under `Options → Keyboard Shortcuts...`; the table below lists the defaults. On macOS, `Ctrl` corresponds to `⌘` and `Alt` to `⌥`. The macOS Delete key is `⌫`; default Delete / Backspace shortcuts use `⌫` (`Fn+Delete` is forward delete).
 
 | Action | Shortcut / Mouse |
 | :----------------------------------- | :----------------------------------------------------------- |

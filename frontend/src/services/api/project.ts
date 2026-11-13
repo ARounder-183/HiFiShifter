@@ -31,6 +31,13 @@ export const projectApi = {
     consumeStartupProjectPath: () =>
         invoke<{ ok: boolean; path?: string | null }>("consume_startup_project_path"),
 
+    /**
+     * 告诉 Rust：前端已经注册好 hs:external-project-open 监听。
+     * 只有 ready 之后，macOS LaunchServices 的 Opened 事件才直接 emit；
+     * 此前的路径会留在 pending，等 consume 一次性取走，避免冷启动竞态。
+     */
+    markFrontendReady: () => invoke<{ ok: boolean }>("mark_frontend_ready"),
+
     // Project meta
     getProjectMeta: () =>
         invoke<{

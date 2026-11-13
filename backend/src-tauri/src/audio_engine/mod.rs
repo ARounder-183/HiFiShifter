@@ -16,6 +16,7 @@ pub(crate) mod snapshot;
 pub(crate) mod types;
 pub(crate) use hifishifter_kernel::util;
 
+pub(crate) use engine::build_clip_pitch_data_payload;
 pub use engine::AudioEngine;
 #[allow(unused_imports)]
 pub use types::AudioEngineStateSnapshot;

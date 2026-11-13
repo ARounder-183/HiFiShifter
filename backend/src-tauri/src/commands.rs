@@ -194,6 +194,17 @@ pub fn consume_startup_project_path(state: State<'_, AppState>) -> serde_json::V
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn mark_frontend_ready(state: State<'_, AppState>) -> serde_json::Value {
+    {
+        common::guard_command(
+            "mark_frontend_ready",
+            serde_json::json!({ "ok": false, "error": "panic in command: mark_frontend_ready" }),
+            || core::mark_frontend_ready(state),
+        )
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn set_ui_locale(state: State<'_, AppState>, locale: String) -> serde_json::Value {
     {
         // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
@@ -3063,6 +3074,17 @@ pub fn log_frontend_error(message: String, detail: Option<String>) -> serde_json
 }
 
 // ===================== pitch_progress =====================
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_clip_pitch_data(state: State<'_, AppState>, clip_ids: Vec<String>) -> serde_json::Value {
+    {
+        common::guard_command(
+            "get_clip_pitch_data",
+            serde_json::json!({ "ok": false, "error": "panic in command: get_clip_pitch_data" }),
+            || pitch_progress::get_clip_pitch_data(state, clip_ids),
+        )
+    }
+}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_pitch_analysis_progress(

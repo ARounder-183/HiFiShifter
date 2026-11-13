@@ -143,6 +143,13 @@ pub struct AppState {
     /// 启动参数传入的待打开工程路径（一次性消费）。
     pub pending_startup_project_path: Mutex<Option<String>>,
 
+    /// 前端是否已经注册好外部打开事件监听。
+    ///
+    /// macOS 的 LaunchServices 通过 RunEvent::Opened 送达路径；冷启动时它可能
+    /// 早于前端 mount。前端先 listen、再调用 mark_frontend_ready，之后 Rust 才
+    /// 直接 emit；此前的路径一律留在 pending。
+    pub frontend_ready: std::sync::atomic::AtomicBool,
+
     /// 本次运行的「未保存导入会话」id（惰性生成一次）。
     ///
     /// 【为什么以"进程"为边界】未保存工程的导入素材需要一个家，而"这次运行"就是
@@ -197,6 +204,7 @@ impl AppState {
             recording_starting: std::sync::atomic::AtomicBool::new(false),
             config_dir: OnceLock::new(),
             pending_startup_project_path: Mutex::new(None),
+            frontend_ready: std::sync::atomic::AtomicBool::new(false),
             import_session: OnceLock::new(),
         }
     }
@@ -255,6 +263,35 @@ impl AppState {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         guard.take()
+    }
+
+    /// 如果 pending 恰好是这条路径则取走并返回 true；用于避免 macOS 同时经
+    /// argv 与 Apple Event 送来同一文件时打开两次。
+    #[cfg(target_os = "macos")]
+    pub fn take_pending_startup_project_path_if_matches(&self, path: &str) -> bool {
+        let mut guard = self
+            .pending_startup_project_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if guard.as_deref() != Some(path) {
+            return false;
+        }
+        *guard = None;
+        true
+    }
+
+    /// 标记前端监听已就绪（由 mark_frontend_ready 命令调用）。
+    pub fn mark_frontend_ready(&self) {
+        self.frontend_ready
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// 前端是否已就绪。使用 Acquire/Release，保证 emit 之前写入的 pending
+    /// 与就绪判定有明确先后关系。
+    #[cfg(target_os = "macos")]
+    pub fn is_frontend_ready(&self) -> bool {
+        self.frontend_ready
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// 使指定源路径的波形峰值缓存失效（内存缓存 + inflight 标记）。

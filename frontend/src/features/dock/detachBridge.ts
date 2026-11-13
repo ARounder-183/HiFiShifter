@@ -201,7 +201,8 @@ function hasLiveSatellites(getState: () => unknown): boolean {
  * 每 clip 数百到上千个浮点）与静音预览段，一个真实工程的快照轻易到几 MB ——
  * 跨窗口事件传这么大的 JSON 又慢又容易被序列化问题绊倒。独立窗口的纯 DOM
  * 面板不需要这些大数组；参数编辑器通过 `useClipsPeaksForPianoRoll` 的
- * `batchPreload()` 从后端按需取波形 peaks。整份 `JSON.stringify`
+ * `batchPreload()` 从后端按需取波形 peaks，Clip 源音高曲线也通过
+ * `get_clip_pitch_data` 懒取。整份 `JSON.stringify`
  * 一旦抛错，主窗口此前会静默不应答，卫星就永久停在占位符上（用户报告的
  * "完全没实现"）。请求方每 500ms 重试一次，投影不彻底会把大快照的代价变成
  * 周期性的。
@@ -227,7 +228,8 @@ export function projectSnapshot(state: unknown): unknown {
     const projectedSession: Record<string, unknown> = {
         ...sessionRecord,
         clips: projectedClips,
-        // 检测音高曲线（每 clip 一条大数组）：卫星面板不消费，整表置空。
+        // 检测音高曲线（每 clip 一条大数组）：卫星窗口由参数编辑器按需调用
+        // get_clip_pitch_data 懒取；快照里不带，避免每次拆窗都复制数 MB。
         clipPitchCurves: {},
         // 静音预览段：同样只有主窗口的轨道区消费。
         silencePreviewSegments: null,

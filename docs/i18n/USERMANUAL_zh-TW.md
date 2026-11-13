@@ -145,7 +145,7 @@ HiFiShifter 的結構化複製貼上是保存在系統剪貼簿中的，因此�
 
 常用快捷鍵一覽：
 
-> **macOS 使用者**：下文中的 `Ctrl` 皆對應 `Command (⌘)`，`Alt` 對應 `Option (⌥)`。
+> **macOS 使用者**：下文中的 `Ctrl` 皆對應 `Command (⌘)`，`Alt` 對應 `Option (⌥)`。macOS 的 Delete 鍵是 `⌫`，預設 Delete / Backspace 快速鍵按 `⌫` 使用（`Fn+Delete` 為向前刪除）。
 
 - `空格鍵`：播放/暫停（不返回播放起始點）
 - `Enter`：播放/停止（返回播放起始點）
