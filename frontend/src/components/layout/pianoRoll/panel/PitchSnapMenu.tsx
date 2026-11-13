@@ -159,6 +159,7 @@ export function PitchSnapMenu({ m }: Props) {
                 >
                     <button
                         type="button"
+                        role="menuitem"
                         className="hs-menu__item"
                         onClick={() => {
                             dispatch(setPitchSnapUnit("semitone"));
@@ -186,6 +187,7 @@ export function PitchSnapMenu({ m }: Props) {
                     </button>
                     <button
                         type="button"
+                        role="menuitem"
                         className="hs-menu__item"
                         onClick={() => {
                             dispatch(setPitchSnapUnit("scale"));
@@ -214,6 +216,7 @@ export function PitchSnapMenu({ m }: Props) {
                     <div className="hs-menu__separator" role="separator" />
                     <button
                         type="button"
+                        role="menuitem"
                         className="hs-menu__item"
                         onClick={() => {
                             setPitchSnapMenuOpen(false);

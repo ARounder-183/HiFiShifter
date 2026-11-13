@@ -94,6 +94,7 @@ export function SelectToolMenu({ m }: Props) {
                         <button
                             key={item.mode}
                             type="button"
+                            role="menuitem"
                             className="hs-menu__item"
                             onClick={() => {
                                 void dispatch(setSelectToolModePersistent(item.mode));

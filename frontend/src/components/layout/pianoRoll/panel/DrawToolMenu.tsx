@@ -135,6 +135,7 @@ export function DrawToolMenu({ m }: Props) {
                         <button
                             key={item.mode}
                             type="button"
+                            role="menuitem"
                             className="hs-menu__item"
                             onClick={() => {
                                 void dispatch(setToolModePersistent(item.mode));
@@ -195,6 +196,7 @@ export function DrawToolMenu({ m }: Props) {
                             <button
                                 key={preset.id}
                                 type="button"
+                                role="menuitem"
                                 className="hs-menu__item"
                                 onClick={() => {
                                     // 选中「直线」预设 = 切到直线工具 ——
@@ -231,6 +233,7 @@ export function DrawToolMenu({ m }: Props) {
                     <Box className="hs-menu__separator shrink-0" />
                     <button
                         type="button"
+                        role="menuitem"
                         className="hs-menu__item shrink-0"
                         onClick={() => {
                             setDrawToolMenuOpen(false);
