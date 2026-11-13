@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { I18nProvider } from "../../i18n/I18nProvider";
+import { messages } from "../../i18n/messages";
 import { AppThemeProvider } from "../../theme/AppThemeProvider";
 import { AutoScrollButton } from "./AutoScrollButton";
 import type { AutoScrollMode } from "../../utils/autoFollowScroll";
@@ -101,17 +102,35 @@ test("图标随模式切换（不是只换 tooltip）", async () => {
     expect(container.querySelector('[data-hs-auto-scroll-icon="continuous"]')).toBeNull();
 });
 
-test("tooltip / aria-label 随模式变化，且带上功能名", async () => {
-    const scrollButton = await render({ enabled: false, mode: "scroll" });
-    const scrollLabel = scrollButton.getAttribute("aria-label");
-    expect(scrollLabel).toContain("Auto Scroll");
-    expect(scrollLabel).toContain("Continuous");
+test("tooltip / aria-label 随模式变化，且格式只是「功能名：模式名」", async () => {
+    /*
+     * 【为什么要钉"格式"而不只是"包含"】悬停气泡是一句**标签**，不是说明书：
+     * 它只需要回答"这是什么控件、当前什么模式"。曾经这里写着"持续跟随播放头。
+     * 右键选模式。"——那是文档，不是标签；把功能名与模式名挖掉之后剩下的必须是
+     * 纯分隔符，这一条比"包含某些词"更能防住文案重新膨胀。
+     */
+    const dict = messages["en-US"] as unknown as Record<string, string>;
+    const labels: string[] = [];
 
-    const pageButton = await render({ enabled: false, mode: "page" });
-    const pageLabel = pageButton.getAttribute("aria-label");
-    expect(pageLabel).toContain("Auto Scroll");
-    expect(pageLabel).toContain("Page");
-    expect(pageLabel).not.toBe(scrollLabel);
+    for (const mode of ["scroll", "page"] as const) {
+        const button = await render({ enabled: false, mode });
+        const label = button.getAttribute("aria-label") ?? "";
+        labels.push(label);
+
+        // 功能名与模式名都在（缺一个，读屏用户就不知道这是什么 / 当前是什么）。
+        expect(label, `${mode}: 必须带功能名`).toContain(dict.auto_scroll);
+        expect(label, `${mode}: 必须带模式名`).toContain(dict[`auto_scroll_mode_${mode}`]);
+
+        // 挖掉两者之后只剩分隔符 —— 任何解释性文字都会在这里现形。
+        const rest = label
+            .replace(dict.auto_scroll, "")
+            .replace(dict[`auto_scroll_mode_${mode}`], "");
+        expect(rest.trim(), `${mode}: 气泡里只剩「功能名：模式名」，实际是「${label}」`).toMatch(
+            /^[:：\s]*$/,
+        );
+    }
+
+    expect(labels[0]).not.toBe(labels[1]);
 });
 
 test("左键点击触发开关，不打开菜单", async () => {
