@@ -1,3 +1,4 @@
+import { frontendLog } from "./frontendLog";
 // 原GUI的原生插件通信：不伪造Tauri，不让命令/事件串到其它FX实例。
 export type HostEvent<T> = { event: string; id: number; payload: T };
 export type PluginBootstrap = {
@@ -304,7 +305,7 @@ export function createPluginHost(
                 try {
                     handler(notification);
                 } catch (error) {
-                    console.error("Plugin event handler failed", error);
+                    frontendLog("error", "Plugin event handler failed", error);
                 }
             }
             return;
@@ -416,7 +417,8 @@ export function getPluginHost(): PluginHostBridge | null {
         // 分支本身就在 invoke 的入口处 —— console 足以留下诊断线索。
         if (!reportedMissingPort) {
             reportedMissingPort = true;
-            console.error(
+            frontendLog(
+                "error",
                 "[pluginHost] Plugin bootstrap present but native message port unavailable; " +
                     "falling back to non-plugin invoke paths",
             );

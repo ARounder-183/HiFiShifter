@@ -35,6 +35,7 @@ import type {
     ParamBlockWritePlan,
     ParamBlockWritePreparation,
 } from "./paramBlockWritePlan";
+import { frontendLog } from "../../../services/frontendLog";
 
 export type { ParamBlockCurvePatch, ParamBlockWritePlan, ParamBlockWritePreparation };
 
@@ -153,7 +154,12 @@ export function useParamBlockPersistence(args: {
     const publishReadError = useCallback((error: unknown) => {
         const failure = classifyParamBlockFailure(error);
         if (latest.current.onReadError) latest.current.onReadError(failure);
-        else console.warn("[pianoRoll] param block read failed:", failure.detail ?? failure.code);
+        else
+            frontendLog(
+                "warn",
+                "[pianoRoll] param block read failed:",
+                failure.detail ?? failure.code,
+            );
     }, []);
 
     const publishWriteError = useCallback((error: unknown) => {
@@ -202,7 +208,8 @@ export function useParamBlockPersistence(args: {
     const adoptSnapshot = useCallback((root: string, reply: ParamBlockReply) => {
         const normalized = normalizeParamBlockEditSetWithDiagnostics(reply.edits);
         if (normalized.diagnostics.length > 0) {
-            console.warn(
+            frontendLog(
+                "warn",
                 "[pianoRoll] dropped malformed parameter blocks:",
                 normalized.diagnostics.join(", "),
             );

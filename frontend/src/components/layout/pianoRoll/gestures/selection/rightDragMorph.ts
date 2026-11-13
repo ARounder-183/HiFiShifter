@@ -24,6 +24,7 @@ import type { ParamSelection } from "../../paramSelection";
 import type { PointerDeps } from "../pointerDeps";
 import { trackParamBlockCommit } from "../../paramBlockCommitCoordinator";
 import type { ParamCurveCommitAuthority } from "../../paramBlockCommitPolicy";
+import { frontendLog } from "../../../../../services/frontendLog";
 
 /** `handleParamLineDrag` 作用域里的局部量。 */
 type ParamLineLocals = {
@@ -166,7 +167,7 @@ export function handleRightDragMorph(deps: Deps, e: ReactPointerEvent<HTMLCanvas
         .catch((err) => {
             // 取数失败只影响预览保真度：保持 pv 近似值，
             // 提交路径会再次尝试并有自己的失败处理。
-            console.error("[pianoRoll] full-res curve fetch failed", err);
+            frontendLog("error", "[pianoRoll] full-res curve fetch failed", err);
         });
 
     // 每段自己的残差放大器：趋势按该段值数组引用缓存，
@@ -395,7 +396,7 @@ export function handleRightDragMorph(deps: Deps, e: ReactPointerEvent<HTMLCanvas
                         );
                     }
                 } catch (err) {
-                    console.error("[pianoRoll] right-drag upload failed", err);
+                    frontendLog("error", "[pianoRoll] right-drag upload failed", err);
                 } finally {
                     if (liveEditActiveRef) {
                         liveEditActiveRef.current = false;
@@ -404,7 +405,7 @@ export function handleRightDragMorph(deps: Deps, e: ReactPointerEvent<HTMLCanvas
                 }
             })();
         } catch (err) {
-            console.error("[pianoRoll] right-drag commit failed", err);
+            frontendLog("error", "[pianoRoll] right-drag commit failed", err);
             liveEditOverrideRef.current = null;
             if (liveEditActiveRef) {
                 liveEditActiveRef.current = false;

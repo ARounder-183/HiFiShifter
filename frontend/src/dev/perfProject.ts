@@ -34,6 +34,7 @@ import { waveformMipmapStore } from "../utils/waveformMipmapStore";
 import { startFrameProfiler, stopFrameProfiler } from "./frameProfiler";
 import { PERF_GL_CLIP_BODIES_KEY } from "../components/layout/timeline/runtime/timelineClipGlRenderer.js";
 import { createSyntheticPeakSource, type SyntheticPeakSource } from "../waveform/perfFixtures";
+import { frontendLog } from "../services/frontendLog";
 
 /** 合成源路径前缀：被本模块短路、绝不打到后端。 */
 export const PERF_SOURCE_PREFIX = "hs-perf://";
@@ -345,7 +346,7 @@ function parseScaleSpec(raw: string): PerfProjectOptions | null {
 /** 生成工程并回写摘要，供全局入口与悬浮面板共用。 */
 function generateAndReport(options: PerfProjectOptions): PerfProjectSummary {
     const summary = generatePerfProject(options);
-    console.info("[perf] synthetic project generated", summary);
+    frontendLog("debug", "[perf] synthetic project generated", summary);
     return summary;
 }
 

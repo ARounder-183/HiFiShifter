@@ -29,6 +29,7 @@ import type { FrameSpan, ParamSelection } from "../../paramSelection";
 import type { ParamViewSegment } from "../../types";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { PointerDeps } from "../pointerDeps";
+import { frontendLog } from "../../../../../services/frontendLog";
 
 /** `handleParamLineDrag` 作用域里的局部量。 */
 type ParamLineLocals = {
@@ -609,7 +610,7 @@ export function handleParamLineNearDrag(
                             );
                             uploaded = true;
                         } catch (err) {
-                            console.error("[pianoRoll] select-drag upload failed", err);
+                            frontendLog("error", "[pianoRoll] select-drag upload failed", err);
                         } finally {
                             if (liveEditActiveRef) liveEditActiveRef.current = false;
                             bumpRefreshToken();
@@ -622,7 +623,7 @@ export function handleParamLineNearDrag(
                     })();
                 }
             } catch (err) {
-                console.error("[pianoRoll] select-drag commit failed", err);
+                frontendLog("error", "[pianoRoll] select-drag commit failed", err);
                 liveEditOverrideRef.current = null;
                 if (liveEditActiveRef) liveEditActiveRef.current = false;
             }

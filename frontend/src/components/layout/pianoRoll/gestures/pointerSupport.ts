@@ -13,6 +13,7 @@ import type { ParamViewSegment } from "../types";
 import type { ParamSelection } from "../paramSelection";
 import { paramsApi } from "../../../../services/api/params";
 import { isPluginMode } from "../../../../services/hostCapabilities";
+import { frontendLog } from "../../../../services/frontendLog";
 
 export type CanvasCursor = "default" | "crosshair" | "grab" | "grabbing" | "ew-resize";
 
@@ -72,7 +73,7 @@ export async function recordGestureParamSelectionStep(args: {
     try {
         await paramsApi.recordParamSelectionStep(toPairs(args.before), toPairs(args.after));
     } catch (err) {
-        console.warn("[pianoRoll] record param selection step failed", err);
+        frontendLog("warn", "[pianoRoll] record param selection step failed", err);
     }
 }
 

@@ -24,6 +24,7 @@ import {
 } from "../../features/dock/panelRegistry";
 import type { DockPanelProps } from "../../features/dock/panelRegistry";
 import type { DockForm } from "../../features/dock/dockTypes";
+import { frontendLog } from "../../services/frontendLog";
 
 /** 一个窗体的挂载点。 */
 function PanelMount({ form }: { form: DockForm }) {
@@ -122,7 +123,7 @@ class PanelErrorBoundary extends Component<
     }
 
     componentDidCatch(error: Error) {
-        console.error(`[dock] panel "${this.props.panelId}" crashed`, error);
+        frontendLog("error", `[dock] panel "${this.props.panelId}" crashed`, error);
     }
 
     render() {

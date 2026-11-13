@@ -34,6 +34,7 @@ import {
 import { isDynParam } from "../paramRanges";
 import type { ParamName, ValueViewport } from "../types";
 import { getParamToolbarRank } from "./panelHelpers";
+import { frontendLog } from "../../../../services/frontendLog";
 
 /** 根轨道（决定用哪一套参数描述符）。 */
 type RootTrack = RootState["session"]["tracks"][number] | null;
@@ -251,7 +252,7 @@ export function useProcessorParams({
             } catch (err) {
                 // 静态参数调整是滑块 onValueChange 的 fire-and-forget 调用，
                 // IPC 失败必须兜底，否则 unhandledrejection 且滑块值不一致。
-                console.error("[setStaticParam] failed:", err);
+                frontendLog("error", "[setStaticParam] failed:", err);
             }
         },
         [rootTrackId],

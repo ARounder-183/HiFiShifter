@@ -52,7 +52,7 @@ import { isSameMainCanvasSignature, type MainCanvasSignature } from "./mainCanva
 // 调试开关缓存：drawCurveTimed 每帧会被调用多次（主曲线 / 编辑线 / 选区叠加 /
 // 诊断输出统一走 debugLog.ts：开关探测节流、生产构建恒关闭，绘制热路径不再
 // 各自维护一份 localStorage 缓存。
-const pianoRollDebug = createDebugLogger("hifishifter.debugPianoRoll");
+const pianoRollDebug = createDebugLogger("pianoRoll");
 
 /**
  * 返回视觉上固定像素长度的虚线参数，避免随 dpr/缩放产生样式漂移。

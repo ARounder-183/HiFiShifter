@@ -15,6 +15,7 @@ import type { ComponentType, LazyExoticComponent } from "react";
 import type { MessageKey } from "../../i18n/messages";
 
 import type { DockPlacement } from "./dockTypes";
+import { frontendLog } from "../../services/frontendLog";
 
 /** 面板组件收到的 props。 */
 export interface DockPanelProps {
@@ -164,7 +165,7 @@ let version = 0;
 /** 注册一个面板。重复 id 直接覆盖并告警（热更新时会重放注册）。 */
 export function registerPanel(definition: PanelDefinition): void {
     if (registry.has(definition.id)) {
-        console.warn(`[dock] panel "${definition.id}" registered twice; replacing`);
+        frontendLog("warn", `[dock] panel "${definition.id}" registered twice; replacing`);
     }
     registry.set(definition.id, definition);
     version += 1;
@@ -194,7 +195,7 @@ export function getPanelRegistryVersion(): number {
 export function setPanelComponent(panelId: string, component: ComponentType<DockPanelProps>): void {
     const current = registry.get(panelId);
     if (!current) {
-        console.warn(`[dock] setPanelComponent: panel "${panelId}" is not registered`);
+        frontendLog("warn", `[dock] setPanelComponent: panel "${panelId}" is not registered`);
         return;
     }
     registry.set(panelId, { ...current, component });

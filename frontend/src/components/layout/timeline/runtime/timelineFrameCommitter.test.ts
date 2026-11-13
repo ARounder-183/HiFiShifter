@@ -15,7 +15,9 @@
  * 提供投影与相等性比较。
  */
 
-import { test } from "vitest";
+import { test, vi } from "vitest";
+
+import * as frontendLog from "../../../../services/frontendLog";
 
 import { LAYER_ORDER, createTimelineFrameCommitter } from "./timelineFrameCommitter.js";
 import { createTimelineAxis, type TimelineAxis } from "../../renderKernel/timelineAxis.js";
@@ -95,9 +97,10 @@ test("components/layout/timeline/runtime/timelineFrameCommitter.test.ts scripted
     {
         const order: string[] = [];
         const committer = createTimelineFrameCommitter(base);
-        const originalError = console.error;
         const errors: unknown[] = [];
-        console.error = (...args: unknown[]) => errors.push(args);
+        const errorSpy = vi
+            .spyOn(frontendLog, "frontendLog")
+            .mockImplementation((...args: unknown[]) => errors.push(args));
         try {
             committer.register(
                 {
@@ -114,7 +117,7 @@ test("components/layout/timeline/runtime/timelineFrameCommitter.test.ts scripted
             );
             committer.commit(createTimelineAxis({ pxPerSec: 400 }));
         } finally {
-            console.error = originalError;
+            errorSpy.mockRestore();
         }
         assertEqual(order.join(">"), "after", "later layers still paint");
         assertEqual(errors.length, 1, "failure is reported once");

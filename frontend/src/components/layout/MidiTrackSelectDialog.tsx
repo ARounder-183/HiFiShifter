@@ -6,6 +6,7 @@ import { AppButton, AppNumberField } from "../../ui";
 import { AppDialog, type AppDialogAction } from "../../ui/Dialog";
 import { AppForm, AppSwitchRow } from "../../ui/Field";
 import { canImportMidiAsClip } from "../../services/hostCapabilities";
+import { frontendLog } from "../../services/frontendLog";
 
 /** MIDI 轨道信息（与后端返回结构对齐） */
 interface MidiTrackInfo {
@@ -247,7 +248,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                     }
                 })
                 .catch((err) => {
-                    console.error("[midi_import_ui] load_tracks:error", err);
+                    frontendLog("error", "[midi_import_ui] load_tracks:error", err);
                     setError(tf("midi_import_failed"));
                     setTracks([]);
                     setInitialBpm(null);
@@ -286,7 +287,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                     }
                 })
                 .catch((err) => {
-                    console.error("[midi_import_ui] loadTracksFromClipboard:error", err);
+                    frontendLog("error", "[midi_import_ui] loadTracksFromClipboard:error", err);
                     setError(tf("midi_clipboard_read_failed"));
                     setTracks([]);
                     setInitialBpm(null);
@@ -514,7 +515,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                 setError(knownErrors[errKey] ?? errKey);
             }
         } catch (err) {
-            console.error("[midi_import_ui] import:error", err);
+            frontendLog("error", "[midi_import_ui] import:error", err);
             setError(tf("midi_import_failed"));
         } finally {
             setImporting(false);

@@ -1,4 +1,5 @@
 import type { SnapCandidateKind, SnapResult } from "./timelineSnapping";
+import { frontendLog } from "../services/frontendLog";
 
 /**
  * Surface-independent snap guide bus.
@@ -166,7 +167,7 @@ export function publishSingleTargetSnapHighlight(args: {
     }
     const candidateSec = args.result.candidate.sec;
     if (!Number.isFinite(candidateSec)) {
-        console.warn("[snapGuide] ignored non-finite snap candidate", candidateSec);
+        frontendLog("warn", "[snapGuide] ignored non-finite snap candidate", candidateSec);
         clearSnapHighlights(args.group);
         return;
     }

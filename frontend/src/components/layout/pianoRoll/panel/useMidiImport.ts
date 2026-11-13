@@ -23,6 +23,7 @@ import { selectionToFrameRanges, type ParamSelection } from "../paramSelection";
 import { settingsApi } from "../../../../services/api/settings";
 
 import type { ModelDeps } from "./modelDeps";
+import { frontendLog } from "../../../../services/frontendLog";
 
 /** 导入对话框需要的模型输入（字段清单由 AST 扫描得出）。 */
 type MidiImportDeps = Pick<
@@ -279,7 +280,8 @@ export function useMidiImport(deps: MidiImportDeps) {
                 unlisten = fn;
             })
             .catch((err) => {
-                console.warn(
+                frontendLog(
+                    "warn",
                     "[param-editor-midi-drop] Failed to attach Tauri drag-drop listener",
                     err,
                 );

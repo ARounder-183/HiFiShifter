@@ -34,6 +34,7 @@ import { AppButton, type AppButtonIntent } from "./Button";
 import { cx } from "./cx";
 import { translateOutsideReact } from "../i18n/I18nProvider";
 import { acquireShortcutSuppression, releaseShortcutSuppression } from "./shortcutScope";
+import { frontendLog } from "../services/frontendLog";
 
 /**
  * 对话框宽度档位。四档取代历史上的 14 个字面量。
@@ -315,7 +316,7 @@ export function AppDialog({
             // pending 复位、对话框停在原地、失败原因只进控制台。统一兜底：记录、
             // 保持对话框打开（不自动关闭）让用户能重试或取消，并给出**内联**错误
             // 提示（见页脚上方的 role="alert" 条）——只进控制台等于对用户静默失败。
-            console.error("[AppDialog] action failed:", action.id, err);
+            frontendLog("error", `[AppDialog] action failed: ${action.id}`, err);
             const detail = err instanceof Error ? err.message : String(err);
             setActionError(detail ? `${actionFailedLabel}: ${detail}` : actionFailedLabel);
         } finally {

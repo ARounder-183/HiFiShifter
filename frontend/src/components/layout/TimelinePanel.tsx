@@ -115,6 +115,7 @@ import { resolveQuickExportClipIds } from "./timeline/quickExportSelection";
 import { type ClipFormantMorph } from "../../features/session/sessionTypes";
 import { ClipFormantToolWindow } from "./timeline/clip/ClipFormantToolWindow";
 import { timelineViewportBus } from "../../utils/timelineViewportBus";
+import { frontendLog } from "../../services/frontendLog";
 
 export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     midiClipDialogOpen,
@@ -248,7 +249,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * @param reason 失败原因（来自内核创建的 catch）。
      */
     const handleKernelUnavailable = React.useCallback((reason: string) => {
-        console.warn(`[TimelinePanel] 时间轴内核不可用（${reason}），当前没有回退渲染路径`);
+        frontendLog("warn", `[TimelinePanel] 时间轴内核不可用（${reason}），当前没有回退渲染路径`);
         setKernelUnavailableReason(reason);
     }, []);
 

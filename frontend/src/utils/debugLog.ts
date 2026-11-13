@@ -1,24 +1,15 @@
 /**
  * 通用诊断日志通道（与 `waveformDebug.ts` 同一取舍）。
  *
- * 【为什么要收口】散落的 `console.log` 即使被 localStorage 开关守卫，仍是生产包
- * 里的活代码；每处各写一份开关读取与 `if` 判断，容易漏守卫或读错键名。这里把
- * "按开关名探测 + 节流缓存"做成唯一实现，调用方只声明自己用哪个开关。
- *
- * 【为什么开关探测要节流】诊断钩子可能挂在高频路径上，逐次同步读 localStorage
- * 会拖慢热路径（部分平台还会触发存储访问警告）。与 waveformDebug 一致：开关
- * 变化最多 2 秒后生效，足够用于排查。
+ * 【为什么收口到前端统一通道】散落的 `console.log` 即使被 localStorage 开关守卫，
+ * 仍是生产包里的活代码；而 localStorage 开关与用户选择的日志档位毫无关系 ——
+ * 「无」档下它们照样输出，"高"档下的内容也进不了文件日志。现在全部经
+ * `frontendLog("debug", ...)`：只有「高」档才回传，Off 档本地短路。
  */
-const FLAG_CHECK_INTERVAL_MS = 2000;
-
-/**
- * 生产构建里 debug logger 必须是恒关闭的空实现：dev 开关只服务于开发期排查，
- * 不该把 localStorage 读取与 console 调用留在发行包里。
- */
-const PRODUCTION_LOGGING = import.meta.env.DEV;
+import { frontendLog, getFrontendLogPolicy, type FrontendLevel } from "../services/frontendLog";
 
 export interface DebugLogger {
-    /** 当前开关是否开启（节流后的读数）。 */
+    /** 当前档位是否接收 debug 级（由后端策略广播驱动）。 */
     readonly enabled: boolean;
     log(...args: unknown[]): void;
     info(...args: unknown[]): void;
@@ -26,36 +17,33 @@ export interface DebugLogger {
 }
 
 /**
- * 创建一个受 localStorage 开关控制的诊断 logger。
+ * 创建一个按日志详细程度过滤的诊断 logger。
  *
- * @param flag localStorage 键名，例如 `"hifishifter.debugDnd"`；值为 `"1"` 时开启。
+ * `flag` 只作为消息前缀保留（既有调用点按开关名区分诊断族），**不再**读取
+ * localStorage —— 那三个独立开关已收编到「高」档。
  */
 export function createDebugLogger(flag: string): DebugLogger {
-    let enabled = false;
-    let lastCheck = 0;
-
-    const isEnabled = (): boolean => {
-        const now = Date.now();
-        if (now - lastCheck < FLAG_CHECK_INTERVAL_MS) return enabled;
-        lastCheck = now;
-        enabled =
-            PRODUCTION_LOGGING &&
-            typeof window !== "undefined" &&
-            window.localStorage?.getItem(flag) === "1";
-        return enabled;
+    const emit = (level: FrontendLevel, args: unknown[]): void => {
+        const message = args
+            .map((arg) => (typeof arg === "string" ? arg : safeStringify(arg)))
+            .join(" ");
+        frontendLog(level, `[${flag}] ${message}`);
     };
-
-    const emit = (level: "log" | "info" | "warn", args: unknown[]): void => {
-        if (!isEnabled()) return;
-        console[level](...args);
-    };
-
     return {
         get enabled() {
-            return isEnabled();
+            return getFrontendLogPolicy().accept.debug;
         },
-        log: (...args) => emit("log", args),
-        info: (...args) => emit("info", args),
-        warn: (...args) => emit("warn", args),
+        log: (...args) => emit("debug", args),
+        info: (...args) => emit("debug", args),
+        warn: (...args) => emit("debug", args),
     };
+}
+
+function safeStringify(value: unknown): string {
+    if (value instanceof Error) return value.stack || value.message;
+    try {
+        return JSON.stringify(value) ?? String(value);
+    } catch {
+        return String(value);
+    }
 }

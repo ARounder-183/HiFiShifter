@@ -87,6 +87,7 @@ import {
     projectionForClip,
     audibleSourceWindow,
 } from "../paramBlockProjection";
+import { frontendLog } from "../../../../services/frontendLog";
 import { paramBlockStaleAnalysisCandidates } from "../paramBlockAnalysisCandidate";
 import { planParamBlockGesture, type ParamBlockGesturePlan } from "../paramBlockGesture";
 import { reportParamBlockDiagnostic } from "../paramBlockDiagnostics";
@@ -292,11 +293,7 @@ import { usePianoRollViewport } from "./usePianoRollViewport";
 import { usePianoRollProjection } from "./usePianoRollProjection";
 import { useParamValueFormatter } from "./useParamValueFormatter";
 import { useProcessorParams } from "./useProcessorParams";
-
-/**
- * 空选中集合的**共享实例**：非块模式下用它替代真实选区，避免每次渲染换引用
- * 让 `paramBlockSpec` 的 memo 白跑一次。集合从不被写入，因此可以安全共享。
- */
+/** 空选中集合的共享实例：避免每次渲染换引用让 `paramBlockSpec` 的 memo 白跑一次。 */
 const EMPTY_BLOCK_ID_SET: ReadonlySet<string> = new Set<string>();
 /**
  * 高频会话字段：它们由 `PianoRollPlayheadBridge` 单独订阅，面板主体不因它们重渲染。
@@ -4397,7 +4394,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                               targetWidth,
                                           );
                                 void transitionCommit.catch((error) => {
-                                    console.error("[pianoRoll] transition commit failed", error);
+                                    frontendLog(
+                                        "error",
+                                        "[pianoRoll] transition commit failed",
+                                        error,
+                                    );
                                     reportParamBlockWriteFailure({
                                         error,
                                         gesture: "transition",
@@ -4970,7 +4971,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                                 onParamCommitSucceeded();
                                             })
                                             .catch((error) => {
-                                                console.error(
+                                                frontendLog(
+                                                    "error",
                                                     "[pianoRoll] create block commit failed",
                                                     error,
                                                 );
@@ -6163,7 +6165,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 dispatch(markProjectEdited());
             })
             .catch((error) => {
-                console.error("[pianoRoll] restore blocks failed", error);
+                frontendLog("error", "[pianoRoll] restore blocks failed", error);
                 /* 这条命令不走块写入队列（整段还原由后端直接落盘），所以由这里上报。 */
                 publishParamBlockWriteFailure({
                     failure: "transport",
@@ -6249,7 +6251,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 bumpRefreshToken();
                 clearStaleBlockCentersAfterParamEdit("normalizePitch");
             } catch (error) {
-                console.error("[pianoRoll] normalize block pitch failed", error);
+                frontendLog("error", "[pianoRoll] normalize block pitch failed", error);
                 reportParamBlockWriteFailure({ error, gesture: "normalize", rootTrackId });
             }
         },
@@ -7120,6 +7122,5 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         paramEditorRef,
     };
 }
-
 /** 模型对象的类型：由实现推出，视图层据此声明 `Pick<>`。 */
 export type PianoRollPanelModel = ReturnType<typeof usePianoRollPanelModel>;

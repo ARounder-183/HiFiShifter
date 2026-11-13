@@ -115,6 +115,7 @@ import { handleScrollerWheel } from "./gestures/scrollerWheel";
 import { handleCanvasHoverPreview, handleCanvasPointerMove } from "./gestures/canvasPointerMove";
 import { handleRulerPointerDown } from "./gestures/rulerPointerDown";
 import { handleScrollerKeyDown } from "./gestures/scrollerKeyDown";
+import { frontendLog } from "../../../services/frontendLog";
 
 export function usePianoRollInteractions(args: {
     dispatch: AppDispatch;
@@ -1196,7 +1197,7 @@ export function usePianoRollInteractions(args: {
             } catch (err) {
                 // 绘制后的自动平滑是增强步骤：失败只跳过平滑与视图同步，
                 // 不产生 unhandledrejection（主提交 commitStroke 已自兜底）。
-                console.error("[applyPostStrokeSmoothing] failed:", err);
+                frontendLog("error", "[applyPostStrokeSmoothing] failed:", err);
                 return;
             }
 

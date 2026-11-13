@@ -28,6 +28,7 @@ import type {
     ParamBlockWritePlan,
     ParamBlockWriteResult,
 } from "./paramBlockWritePlan";
+import { frontendLog } from "../../../services/frontendLog";
 
 type Ref<T> = { current: T };
 type LiveEditing = ReturnType<typeof useLiveParamEditing>;
@@ -957,7 +958,7 @@ export function beginParamBlockDrag(
                 })
                 .catch((error) => {
                     handoff.failed = true;
-                    console.error("[pianoRoll] block drag commit failed", error);
+                    frontendLog("error", "[pianoRoll] block drag commit failed", error);
                     onError?.(error);
                     if (
                         ownsParamBlockGesture({

@@ -94,6 +94,7 @@ import {
 import { SELECTION_SCOPE_EXEMPT_OPS, clipTimeRangeToFrameBounds } from "./panelHelpers";
 
 import type { ModelDeps } from "./modelDeps";
+import { frontendLog } from "../../../../services/frontendLog";
 
 /** 执行一条编辑命令所需的全部捕获值（字段清单由 AST 扫描得出）。 */
 type EditOpDeps = Pick<
@@ -731,7 +732,7 @@ export async function runEditOp(
                         segments: convertedWrites,
                     });
                 } catch (err) {
-                    console.error("[pianoRoll] paste (converted) failed", err);
+                    frontendLog("error", "[pianoRoll] paste (converted) failed", err);
                 } finally {
                     // 无论成败都重新取数：失败时把上面乐观写入的曲线纠正回后端真值
                     // （与拖拽提交路径同一纪律）。
@@ -753,7 +754,7 @@ export async function runEditOp(
                     segments: pasteWrites,
                 });
             } catch (err) {
-                console.error("[pianoRoll] paste failed", err);
+                frontendLog("error", "[pianoRoll] paste failed", err);
             } finally {
                 // 同拖拽提交路径：失败时用重新取数把乐观写入的曲线纠正回来。
                 bumpRefreshToken();

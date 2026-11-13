@@ -13,9 +13,10 @@ import { createLiveEditDeferral } from "./liveEditDeferral";
 import type { LiveEditDeferral } from "./liveEditDeferral";
 import { resolveParamFetchWindow } from "./paramFetchWindow";
 import { framesToTime } from "./utils";
+import { frontendLog, getFrontendLogPolicy } from "../../../services/frontendLog";
 const paramFramePeriodCache = new Map<string, number>();
 
-const pianoRollDebug = createDebugLogger("hifishifter.debugPianoRoll");
+const pianoRollDebug = createDebugLogger("pianoRoll");
 
 /**
  * 「参数曲线取数中」提示的静默窗口（毫秒）。
@@ -444,15 +445,11 @@ export function usePianoRollData(args: {
     }, [referenceRootTrackIds]);
 
     function computeVisibleRequest() {
-        const debug =
-            typeof window !== "undefined" &&
-            window.localStorage?.getItem("hifishifter.debugPianoRoll") === "1";
-
+        // 「高」档驱动：不再读 localStorage 独立开关。
+        const debug = getFrontendLogPolicy().accept.debug;
         const trackId = rootTrackId;
         if (!trackId) {
-            if (debug) {
-                console.debug("[PianoRollData] no rootTrackId; skip fetch");
-            }
+            frontendLog("debug", "[PianoRollData] no rootTrackId; skip fetch");
             return null;
         }
 
@@ -778,7 +775,7 @@ export function usePianoRollData(args: {
                     if (!res?.ok) {
                         if (liveEditDeferral.defer()) return;
                         if (debug) {
-                            console.debug("[PianoRollData] paramFrames not ok", {
+                            frontendLog("debug", "[PianoRollData] paramFrames not ok", {
                                 trackId,
                                 editParam,
                                 paramKey,
@@ -1027,7 +1024,7 @@ export function usePianoRollData(args: {
                     }
                 }
             } else if (shouldFetchParam && debug) {
-                console.debug("[PianoRollData] refreshNow paramFrames not ok", {
+                frontendLog("debug", "[PianoRollData] refreshNow paramFrames not ok", {
                     trackId,
                     editParam,
                     paramKey,

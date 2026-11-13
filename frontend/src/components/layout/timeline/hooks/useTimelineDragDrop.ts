@@ -187,7 +187,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
         let disposed = false;
         let unlisten: null | (() => void) = null;
 
-        const dndLog = createDebugLogger("hifishifter.debugDnd");
+        const dndLog = createDebugLogger("dnd");
 
         async function setup() {
             try {

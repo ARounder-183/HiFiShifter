@@ -5,6 +5,7 @@ import { isPluginMode, playheadIsHostOwned } from "../../../services/hostCapabil
 
 import { setMetronomeConfig, persistUiSettings } from "../sessionSlice";
 import type { SessionState } from "../sessionSlice";
+import { frontendLog } from "../../../services/frontendLog";
 
 /**
  * 更新节拍器配置并即时应用到引擎：
@@ -50,7 +51,7 @@ export const updateMetronome = createAsyncThunk(
         try {
             await run;
         } catch (err) {
-            console.error("[metronome] engine sync failed", err);
+            frontendLog("error", "[metronome] engine sync failed", err);
         }
         if (metronomePersistTimer != null) clearTimeout(metronomePersistTimer);
         metronomePersistTimer = setTimeout(() => {
