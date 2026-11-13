@@ -29,6 +29,7 @@ import { listPanels } from "../features/dock/panelRegistry";
 import { registerBuiltinPanels } from "../components/dock/registerBuiltinPanels";
 import { THEME_MODE_SETTINGS } from "../theme/themeTypes";
 import type { RippleMode } from "../features/session/ripplePreview";
+import { AUTO_SCROLL_MODES, type AutoScrollMode } from "../utils/autoFollowScroll";
 
 const CATALOG_KEYS = new Set(Object.keys(enUS));
 
@@ -126,6 +127,15 @@ describe("键引用完整性", () => {
                 values: ["off", "track", "all"] satisfies readonly RippleMode[],
                 note: "ActionBar 的波纹模式提示",
             },
+            auto_scroll_mode_: {
+                // 取值域与 AUTO_SCROLL_MODES 绑定：多一个模式就多一个键。
+                values: AUTO_SCROLL_MODES satisfies readonly AutoScrollMode[],
+                note: "ActionBar 的自动滚屏模式名",
+            },
+            auto_scroll_tooltip_: {
+                values: AUTO_SCROLL_MODES satisfies readonly AutoScrollMode[],
+                note: "ActionBar 的自动滚屏模式提示",
+            },
         };
 
         // 发现：`t(\`prefix_${var}\`)` 形态（排除本文件自身 —— 门禁不该扫自己）。
@@ -196,6 +206,8 @@ describe("键引用完整性", () => {
             "history_op_",
             "theme_",
             "ripple_tooltip_",
+            "auto_scroll_mode_",
+            "auto_scroll_tooltip_",
             "recording_error_",
             "installer_",
         ];
