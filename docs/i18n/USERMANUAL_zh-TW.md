@@ -875,7 +875,9 @@ AppImage 不自帶 WebKit 與圖形堆疊，遇到起不來時請依下列順序
 進階選項（一般使用者無需使用）：
 
 - 啟動參數 `--log-file=<path>`：把日誌寫入指定路徑；`--log-file=-` 明確關閉檔案日誌。
-- 環境變數 `HIFISHIFTER_LOG=debug`（或 `trace` / `info` / `warn` / `error`）：調整日誌詳細程度，release 版預設為 `info`。
+- **說明 → 日誌詳細程度**：無 / 低 / 中 / 高四檔，預設「低」，變更立即生效。「無」不產生任何輸出。
+- 環境變數 `HIFISHIFTER_LOG_VERBOSITY=off|low|medium|high` 或 `--log-verbosity=<...>`：覆寫 UI 設定。
+- 舊環境變數 `HIFISHIFTER_LOG=debug|trace|info|warn|error` 對應 高 / 高 / 中 / 低 / 低。
 - 環境變數 `HIFISHIFTER_LOG_DIR`：覆蓋預設日誌目錄。
 - 環境變數 `HIFISHIFTER_GDK_BACKEND=x11|wayland`：覆蓋 AppImage 預設強制的 `x11`。
 - 環境變數 `HIFISHIFTER_SAFE_GL=1`：關閉 WebKit 合成器並強制軟體渲染（GPU 驅動異常時的應急開關）。

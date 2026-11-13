@@ -26,6 +26,9 @@ Invoke-Gate 'FFI panic-guard gate' { python scripts/checks/check-ffi-guards.py }
 # 代码看起来有诊断，实际一条都不输出。
 Invoke-Gate 'Log level gate' { python scripts/checks/check-log-levels.py }
 
+# 四档日志详细程度：禁止遗留环境变量 / 生产 console.* / 过时的默认级别注释回归。
+Invoke-Gate 'Log verbosity gate' { python scripts/checks/check-log-verbosity.py }
+
 # 前端 invoke.ts 的 switch 是前端能发出的全部方法名。其中任何一个若两边后端都不派发，
 # 症状是"控件能点、点了没反应" —— 静默失效，且不会有编译错误。
 Invoke-Gate 'Command gating gate' { python scripts/checks/check-command-gating.py }

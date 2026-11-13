@@ -878,7 +878,9 @@ AppImage 는 WebKit 과 그래픽 스택을 포함하지 않으므로, 실행 �
 고급 옵션(일반적인 사용에는 불필요):
 
 - 실행 인수 `--log-file=<path>`: 로그를 지정한 경로에 기록합니다. `--log-file=-` 은 파일 로그를 명시적으로 비활성화합니다.
-- 환경 변수 `HIFISHIFTER_LOG=debug` (또는 `trace` / `info` / `warn` / `error`): 로그 상세 수준을 조정합니다. release 빌드의 기본값은 `info`입니다.
+- **도움말 → 로그 상세 수준**: 없음 / 낮음 / 중간 / 높음(기본값 낮음). 변경은 즉시 적용되며 「없음」은 아무것도 출력하지 않습니다.
+- 환경 변수 `HIFISHIFTER_LOG_VERBOSITY=off|low|medium|high` 또는 `--log-verbosity=<...>`: UI 설정을 덮어씁니다.
+- 기존 `HIFISHIFTER_LOG=debug|trace|info|warn|error` 는 높음 / 높음 / 중간 / 낮음 / 낮음 에 대응합니다.
 - 환경 변수 `HIFISHIFTER_LOG_DIR`: 기본 로그 디렉터리를 대체합니다.
 - 환경 변수 `HIFISHIFTER_GDK_BACKEND=x11|wayland`: AppImage 가 기본으로 강제하는 `x11` 을 덮어씁니다.
 - 환경 변수 `HIFISHIFTER_SAFE_GL=1`: WebKit 컴포지터를 끄고 소프트웨어 렌더링을 강제합니다(GPU 드라이버 이상 시 응급 조치).

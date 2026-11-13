@@ -878,7 +878,9 @@ AppImage は WebKit とグラフィックススタックを同梱していない
 詳細オプション（通常の使用では不要）：
 
 - 起動引数 `--log-file=<path>`：ログを指定パスに書き込みます。`--log-file=-` でファイルログを明示的に無効化します。
-- 環境変数 `HIFISHIFTER_LOG=debug`（`trace` / `info` / `warn` / `error`）：ログの詳細度を調整します。release 版の既定は `info` です。
+- **ヘルプ → ログの詳細度**：なし / 低 / 中 / 高の 4 段階（既定は「低」）。変更は即時反映され、「なし」は一切出力しません。
+- 環境変数 `HIFISHIFTER_LOG_VERBOSITY=off|low|medium|high` または `--log-verbosity=<...>`：UI 設定を上書きします。
+- 旧環境変数 `HIFISHIFTER_LOG=debug|trace|info|warn|error` は 高 / 高 / 中 / 低 / 低 に対応します。
 - 環境変数 `HIFISHIFTER_LOG_DIR`：既定のログディレクトリを上書きします。
 - 環境変数 `HIFISHIFTER_GDK_BACKEND=x11|wayland`：AppImage が既定で強制する `x11` を上書きします。
 - 環境変数 `HIFISHIFTER_SAFE_GL=1`：WebKit のコンポジターを無効化し、ソフトウェア描画を強制します（GPU ドライバー不調時の緊急手段）。

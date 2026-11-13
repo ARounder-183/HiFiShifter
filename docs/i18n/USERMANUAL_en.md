@@ -900,7 +900,9 @@ The AppImage does not bundle WebKit or the graphics stack, so a failed launch us
 Advanced options (not needed for regular use):
 
 - Launch flag `--log-file=<path>`: write the log to a specific path; `--log-file=-` disables file logging.
-- Environment variable `HIFISHIFTER_LOG=debug` (or `trace` / `info` / `warn` / `error`): adjust log verbosity; release builds default to `info`.
+- **Help > Log verbosity**: None / Low / Medium / High, default Low; changes apply immediately. "None" produces no output at all.
+- Environment variable `HIFISHIFTER_LOG_VERBOSITY=off|low|medium|high` or `--log-verbosity=<...>`: override the UI setting for troubleshooting.
+- Legacy `HIFISHIFTER_LOG=debug|trace|info|warn|error` maps to High / High / Medium / Low / Low.
 - Environment variable `HIFISHIFTER_LOG_DIR`: override the default log directory.
 - Environment variable `HIFISHIFTER_GDK_BACKEND=x11|wayland`: overrides the `x11` the AppImage forces by default.
 - Environment variable `HIFISHIFTER_SAFE_GL=1`: disables the WebKit compositor and forces software rendering (emergency switch for broken GPU drivers).

@@ -235,7 +235,7 @@ int main(int argc, char **argv) {
     char probe_log_path[1100];
     snprintf(probe_log_path, sizeof probe_log_path, "%s/plugin-iid-probe.log", workdir);
     setenv("HIFISHIFTER_PLUGIN_LOG", probe_log_path, 1);
-    setenv("HIFISHIFTER_LOG", "info", 1);
+    setenv("HIFISHIFTER_LOG_VERBOSITY", "medium", 1);
 
     void *module = dlopen(module_path, RTLD_NOW | RTLD_LOCAL);
     if (!module) {

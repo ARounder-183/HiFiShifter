@@ -900,7 +900,9 @@ AppImage 不自带 WebKit 与图形栈，遇到起不来时按下面顺序排查
 高级选项（一般用户无需使用）：
 
 - 启动参数 `--log-file=<path>`：把日志写到指定路径；`--log-file=-` 显式关闭文件日志。
-- 环境变量 `HIFISHIFTER_LOG=debug`（或 `trace` / `info` / `warn` / `error`）：调整日志详细程度，release 版默认为 `info`。
+- **帮助 → 日志详细程度**：无 / 低 / 中 / 高四档，默认「低」，改动立即生效。「无」严格不产生任何日志。
+- 环境变量 `HIFISHIFTER_LOG_VERBOSITY=off|low|medium|high` 或启动参数 `--log-verbosity=<...>`：排障时覆盖 UI 设置。
+- 兼容旧环境变量 `HIFISHIFTER_LOG=debug`（或 `trace` / `info` / `warn` / `error`）：映射为高 / 高 / 中 / 低 / 低。
 - 环境变量 `HIFISHIFTER_LOG_DIR`：覆盖默认日志目录。
 - 环境变量 `HIFISHIFTER_GDK_BACKEND=x11|wayland`：覆盖 AppImage 默认强制的 `x11`。
 - 环境变量 `HIFISHIFTER_SAFE_GL=1`：关闭 WebKit 合成器并强制软件渲染（GPU 驱动异常时的应急开关）。

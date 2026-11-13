@@ -283,7 +283,7 @@ ONNX Runtimeのバイナリは、ort crateの `download-binaries` 機能によ�
 詳細オプション：
 
 - 起動引数 `--log-file=<path>`：ログを指定パスに書き込みます。`--log-file=-` でファイルログを明示的に無効化。
-- 環境変数 `HIFISHIFTER_LOG=debug`（`trace` / `info` / `warn` / `error`）：ログの詳細度を調整。
+- **ヘルプ → ログの詳細度**（なし / 低 / 中 / 高、既定は低）が主の設定です。`HIFISHIFTER_LOG_VERBOSITY` / `--log-verbosity` は上書き用、旧 `HIFISHIFTER_LOG` も四段階に対応します。
 - 環境変数 `HIFISHIFTER_LOG_DIR`：既定のログディレクトリを上書き。
 - 環境変数 `HIFISHIFTER_GDK_BACKEND=x11|wayland`：AppImage が既定で強制する `x11` を上書き。Wayland でぼやける／IME が不調な場合は `wayland` を試してください。
 - 環境変数 `HIFISHIFTER_SAFE_GL=1`：GPU ドライバに問題があり起動しない場合に、WebKit のコンポジターを止めてソフトウェア描画にします（表示は可能、描画は低速）。
