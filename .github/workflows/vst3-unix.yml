@@ -234,10 +234,23 @@ jobs:
           # 限时又会让真正的挂死一直等到 job 的 timeout-minutes。GNU 分支用 timeout，
           # macOS 分支用 python3 起一个新进程组、超时后整组 kill —— 子 cargo 进程
           # 也在组里，不会被留成孤儿。
-          if command -v timeout >/dev/null 2>&1; then
-            timeout 3300 pwsh -NoProfile -File scripts/checks/run-rust-gates.ps1 -Only test -Package hifishifter-plugin -Platform unix
-          else
-            python3 -c '
+          #
+          # 【为什么信号类退出有一次判据性重放】插件测试二进制偶发在**全部用例
+          # 通过之后**的进程退出阶段被信号打死（Linux SIGSEGV / Windows
+          # 0xC0000005）：libtest 没有收尾钩子，ORT 的全局环境与后台线程在卸载期
+          # 竞态。settings_store.rs 与 backtrace-plugin-test-crash.sh 都记载了同一
+          # 签名；它只在负载下的 runner 上偶发，本地与 gates 的同命令连续多轮不
+          # 复现。判据公开且严格：只有"信号类退出（139 = 128+SIGSEGV，
+          # 134 = 128+SIGABRT；124 限时杀进程不在其列）+ 日志里没有任何
+          # FAILED / error / panicked"才重放**一次**；真实断言失败、编译错误、
+          # 用例挂死一律直接失败。重放不是掩盖，是把"退出期竞态"与"用例失败"
+          # 分开（docs/ci.md 禁止的是无判据重跑）。
+          run_gates() {
+            if command -v timeout >/dev/null 2>&1; then
+              timeout 3300 pwsh -NoProfile -File scripts/checks/run-rust-gates.ps1 \
+                -Only test -Package hifishifter-plugin -Platform unix
+            else
+              python3 -c '
           import os, signal, subprocess, sys
           p = subprocess.Popen(sys.argv[1:], start_new_session=True)
           try:
@@ -245,8 +258,25 @@ jobs:
           except subprocess.TimeoutExpired:
               os.killpg(p.pid, signal.SIGKILL)
               sys.exit(124)
-          ' pwsh -NoProfile -File scripts/checks/run-rust-gates.ps1 -Only test -Package hifishifter-plugin -Platform unix
+          ' pwsh -NoProfile -File scripts/checks/run-rust-gates.ps1 \
+                -Only test -Package hifishifter-plugin -Platform unix
+            fi
+          }
+          log="$(mktemp)"
+          if run_gates 2>&1 | tee "$log"; then
+            exit 0
           fi
+          status=${PIPESTATUS[0]}
+          case "$status" in
+            139|134)
+              if ! grep -qE 'test result: FAILED|error\[|error:|panicked at' "$log"; then
+                echo "::warning::插件测试进程在全部用例通过后的卸载期崩了（exit $status，ORT teardown 竞态）；按判据重放一次"
+                run_gates
+                exit $?
+              fi
+              ;;
+          esac
+          exit "$status"
 
       # 【为什么要有这一步】测试进程被信号打死时，cargo 只留下一句
       # "signal: 11, SIGSEGV"，连是哪个用例都没说 —— 而"哪一段崩的"决定了排查方向
