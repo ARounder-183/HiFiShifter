@@ -83,6 +83,8 @@ test("图标随模式切换（不是只换 tooltip）", async () => {
     await render({ enabled: false, mode: "scroll" });
     expect(container.querySelector('[data-hs-auto-scroll-icon="continuous"]')).toBeTruthy();
     expect(container.querySelector('[data-hs-auto-scroll-icon="page"]')).toBeNull();
+    // 右下角小三角：告诉用户"右键还有模式可选"（与参数编辑器的工具族按钮同一个记号）。
+    expect(container.querySelector("[data-hs-menu-caret]")).toBeTruthy();
 
     await act(async () => {
         root.render(
@@ -153,8 +155,8 @@ test("右键打开模式菜单：标题 + 两个单选项，当前项打勾", as
 
     const menu = document.body.querySelector('[data-hs-context-menu="1"]');
     expect(menu, "右键必须打开菜单").toBeTruthy();
-    // 标题行：不是可选条目，用弱化小标题渲染。
-    expect(menu!.querySelector(".hs-menu__label")?.textContent).toBe("Auto Scroll");
+    // 菜单里**没有**标题行：只有选项（点开就能选，不需要先读一遍"这是谁的菜单"）。
+    expect(menu!.querySelector(".hs-menu__label")).toBeNull();
 
     const items = Array.from(menu!.querySelectorAll<HTMLElement>("[role=menuitemcheckbox]"));
     expect(items).toHaveLength(2);

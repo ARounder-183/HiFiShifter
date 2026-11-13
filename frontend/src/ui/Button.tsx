@@ -21,7 +21,7 @@
  * `AppButton`，就自动跟随主题与尺寸体系；若坚持自造按钮，则消费
  * `--qt-*` 令牌同样能继承主题（见 `src/index.css` 的度量令牌块）。
  */
-import { Button, IconButton } from "@radix-ui/themes";
+import { Box, Button, IconButton } from "@radix-ui/themes";
 import { cloneElement, isValidElement, type ComponentPropsWithoutRef, type ReactNode } from "react";
 
 import { cx } from "./cx";
@@ -168,6 +168,19 @@ export interface AppIconButtonProps extends Omit<
      * （实测 `rgb(91,91,214)` → `rgb(111,109,120)`），而原语没有表达强调色的途径。
      */
     emphasis?: "neutral" | "accent";
+    /**
+     * 右下角小三角：提示"这枚按钮还有右键菜单"。
+     *
+     * 【为什么由原语承担】它是**交互协议**的一部分（"右键还有东西"），不是某一枚
+     * 按钮的装饰。此前只有参数编辑器的工具族按钮画它（`ToolFamilyButton` 里内联的
+     * 一段 Box + SVG），于是同一句提示在两个工具栏里长得不一样。收进原语之后，
+     * "有右键菜单的图标按钮"只需要声明 `menuCaret`，形状与位置不可能再分叉。
+     *
+     * 【为什么是角落的实心三角】24px 的图标按钮里没有第二个位置放文字，而"右下角
+     * 的实心三角"是桌面软件里"此处可展开"的通用记号；它压在按钮圆角内缘，不与
+     * 图标本体抢视觉重量（`opacity: 0.7`、6px 见方）。
+     */
+    menuCaret?: boolean;
 }
 
 /**
@@ -184,6 +197,7 @@ export function AppIconButton({
     intent = "default",
     emphasis = "neutral",
     size = "md",
+    menuCaret = false,
     className,
     ...rest
 }: AppIconButtonProps) {
@@ -203,7 +217,41 @@ export function AppIconButton({
             className={cx("app-icon-button", className)}
             {...rest}
         >
-            {withIconSize(icon, size)}
+            {menuCaret ? (
+                // 15×15 的相对容器：图标居中，三角贴在右下角（右/下各外扩 1px，
+                // 落在按钮自身的留白里，不改变图标本体的包围盒）。
+                <Box style={{ position: "relative", width: 15, height: 15 }}>
+                    <Box
+                        style={{
+                            position: "absolute",
+                            inset: 0,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                        }}
+                    >
+                        {withIconSize(icon, size)}
+                    </Box>
+                    <Box
+                        data-hs-menu-caret="1"
+                        aria-hidden="true"
+                        style={{
+                            position: "absolute",
+                            right: -1,
+                            bottom: -1,
+                            width: 6,
+                            height: 6,
+                            opacity: 0.7,
+                        }}
+                    >
+                        <svg width="6" height="6" viewBox="0 0 6 6" fill="none">
+                            <path d="M0 6L6 0V6Z" fill="currentColor" />
+                        </svg>
+                    </Box>
+                </Box>
+            ) : (
+                withIconSize(icon, size)
+            )}
         </IconButton>
     );
 }

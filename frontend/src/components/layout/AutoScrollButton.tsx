@@ -141,6 +141,8 @@ export function AutoScrollButton({
                 // 写在用户手册里，不塞进气泡。
                 tooltip={tf(`auto_scroll_tooltip_${mode}`)}
                 tabIndex={-1}
+                // 右下角小三角：提示"右键还有模式可选"（与参数编辑器的工具族按钮同一个记号）。
+                menuCaret
                 onClick={onToggle}
                 onContextMenu={(e) => {
                     e.preventDefault();
@@ -154,20 +156,16 @@ export function AutoScrollButton({
                     y={menu.y}
                     ariaLabel={tf("auto_scroll")}
                     onClose={() => setMenu(null)}
-                    items={[
-                        // 标题行：菜单是"自动滚屏"的上下文，先说是谁的菜单再列选项。
-                        { key: "auto-scroll-heading", heading: true, label: tf("auto_scroll") },
-                        ...AUTO_SCROLL_MODES.map((value) => ({
-                            key: `auto-scroll-mode-${value}`,
-                            label: tf(`auto_scroll_mode_${value}`),
-                            icon: iconFor(value),
-                            checked: mode === value,
-                            onSelect: () => {
-                                onSelectMode(value);
-                                setMenu(null);
-                            },
-                        })),
-                    ]}
+                    items={AUTO_SCROLL_MODES.map((value) => ({
+                        key: `auto-scroll-mode-${value}`,
+                        label: tf(`auto_scroll_mode_${value}`),
+                        icon: iconFor(value),
+                        checked: mode === value,
+                        onSelect: () => {
+                            onSelectMode(value);
+                            setMenu(null);
+                        },
+                    }))}
                 />
             )}
         </>

@@ -46,7 +46,8 @@ test("工具族按钮渲染图标、tooltip 与小三角", async () => {
     const button = host.querySelector<HTMLButtonElement>('[aria-label="选择工具"]');
     expect(button).not.toBeNull();
     expect(button?.getAttribute("aria-pressed")).toBe("true");
-    expect(host.querySelector('[data-testid="tool-family-caret"]')).not.toBeNull();
+    // 小三角现在由 `AppIconButton.menuCaret` 统一画（与主工具栏的两个按钮同源）。
+    expect(host.querySelector("[data-hs-menu-caret]")).not.toBeNull();
 });
 
 test("左键与右键分别回调", async () => {
