@@ -2917,47 +2917,10 @@ fn load_config(config_dir: &Path) -> AppConfig {
     }
 }
 
-/// 把临时文件原子地替换为目标文件。
-///
-/// 【为什么不能直接 `fs::rename`】Windows 上 rename 拒绝覆盖已存在的目标，因此
-/// 原先的写法必须先 `remove_file` 再 rename —— 那中间的窗口里**目标文件是不存在
-/// 的**。两个进程同时保存（独立 App 与 REAPER 里的插件现在共用这一个文件）时，
-/// 恰好落在窗口里的那次读取会拿不到任何配置，等于用户设置被清空。删除也不原子：
-/// 删掉之后 rename 失败（磁盘满、被杀进程）就只剩 `.bak` 能救。
-///
-/// `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` 是同一卷内的原子替换，正是这里要的语义。
-/// 非 Windows 平台的 `fs::rename` 本身就是原子替换，保持原样。
-fn replace_file_atomically(tmp: &Path, target: &Path) -> std::io::Result<()> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        use windows::core::PCWSTR;
-        use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING};
+use crate::util::replace_file_atomically;
 
-        let wide =
-            |path: &Path| -> Vec<u16> { path.as_os_str().encode_wide().chain(Some(0)).collect() };
-        let tmp_wide = wide(tmp);
-        let target_wide = wide(target);
-        // SAFETY: 两个缓冲区都是 NUL 结尾的宽字符串，且在本调用期间存活。
-        let moved = unsafe {
-            MoveFileExW(
-                PCWSTR(tmp_wide.as_ptr()),
-                PCWSTR(target_wide.as_ptr()),
-                MOVEFILE_REPLACE_EXISTING,
-            )
-        };
-        if moved.is_ok() {
-            return Ok(());
-        }
-        // 目标不存在时 MOVEFILE_REPLACE_EXISTING 也可用，但仍回退一次 rename：
-        // 某些网络/可移动卷上的 MoveFileEx 会失败，而那里的 rename 通常可行。
-        fs::rename(tmp, target)
-    }
-    #[cfg(not(windows))]
-    {
-        fs::rename(tmp, target)
-    }
-}
+// `app_config.json` 的原子写与 `log_settings.json` 共用同一份实现：Windows 的
+// `MoveFileExW` 语义只有一处，两个写盘点不会各自漂移。
 
 /// 配置文件的读-改-写串行化锁（进程内）。
 ///
