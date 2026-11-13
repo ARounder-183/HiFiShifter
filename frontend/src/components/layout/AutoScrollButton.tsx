@@ -135,8 +135,10 @@ export function AutoScrollButton({
                 active={enabled}
                 // 激活时用主题强调色（与相邻开关同款；不带 color 时 Radix 回落强调色）
                 emphasis="accent"
-                // tooltip 同时是 aria-label：它必须自带"自动滚屏 + 当前模式"的完整语义，
-                // 不能只写模式名 —— 否则读屏用户听到的是一枚无名按钮。
+                // tooltip 同时是 aria-label，格式固定为「功能名：模式名」（"自动滚屏：翻页式"）。
+                // 它必须自带这两件事 —— 只写模式名的话，读屏用户听到的是一枚无名按钮；
+                // 但也不该更长：悬停气泡是一句**标签**，不是说明书。"右键选模式"的说明
+                // 写在用户手册里，不塞进气泡。
                 tooltip={tf(`auto_scroll_tooltip_${mode}`)}
                 tabIndex={-1}
                 onClick={onToggle}

@@ -1406,10 +1406,8 @@ export const koKR = {
     auto_scroll: "자동 스크롤",
     auto_scroll_mode_scroll: "연속 스크롤",
     auto_scroll_mode_page: "페이지 단위",
-    auto_scroll_tooltip_scroll:
-        "자동 스크롤: 연속 스크롤. 재생 헤드를 따라갑니다. 오른쪽 클릭으로 모드 선택.",
-    auto_scroll_tooltip_page:
-        "자동 스크롤: 페이지 단위. 화면 밖이면 한 화면씩. 오른쪽 클릭으로 모드 선택.",
+    auto_scroll_tooltip_scroll: "자동 스크롤: 연속 스크롤",
+    auto_scroll_tooltip_page: "자동 스크롤: 페이지 단위",
     param_editor_timeline_click_select_track: "타임라인 클릭으로 트랙 전환",
     clipboard_preview: "클립보드 미리보기",
     param_value_popup: "파라미터 값 팝업",

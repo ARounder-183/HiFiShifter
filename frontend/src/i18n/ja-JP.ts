@@ -1353,10 +1353,8 @@ export const jaJP = {
     auto_scroll: "自動スクロール",
     auto_scroll_mode_scroll: "連続スクロール",
     auto_scroll_mode_page: "ページ送り",
-    auto_scroll_tooltip_scroll:
-        "自動スクロール：連続スクロール。再生ヘッドを追従。右クリックでモード選択。",
-    auto_scroll_tooltip_page:
-        "自動スクロール：ページ送り。画面外に出たら1画面送る。右クリックでモード選択。",
+    auto_scroll_tooltip_scroll: "自動スクロール：連続スクロール",
+    auto_scroll_tooltip_page: "自動スクロール：ページ送り",
     param_editor_timeline_click_select_track: "タイムラインクリックでトラックを切り替える",
     clipboard_preview: "クリップボードプレビュー",
     param_value_popup: "パラメータ値ポップアップ",

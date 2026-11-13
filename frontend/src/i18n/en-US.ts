@@ -1475,10 +1475,8 @@ export const enUS = {
     auto_scroll: "Auto Scroll",
     auto_scroll_mode_scroll: "Continuous",
     auto_scroll_mode_page: "Page",
-    auto_scroll_tooltip_scroll:
-        "Auto Scroll: Continuous. Follows the playhead. Right-click for modes.",
-    auto_scroll_tooltip_page:
-        "Auto Scroll: Page. Jumps one screen at the edge. Right-click for modes.",
+    auto_scroll_tooltip_scroll: "Auto Scroll: Continuous",
+    auto_scroll_tooltip_page: "Auto Scroll: Page",
     param_editor_timeline_click_select_track: "Allow Timeline Clicks to Switch Track",
     clipboard_preview: "Clipboard Preview",
     param_value_popup: "Popup Param Values",
