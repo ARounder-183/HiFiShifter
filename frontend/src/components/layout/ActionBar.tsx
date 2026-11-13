@@ -3,14 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import { isPluginMode, canControlHostTransport } from "../../services/hostCapabilities";
 import { createPortal } from "react-dom";
 import { Flex, Select, TextField, Button, IconButton, Box } from "@radix-ui/themes";
-import {
-    CheckIcon,
-    DoubleArrowRightIcon,
-    PauseIcon,
-    Pencil1Icon,
-    PlayIcon,
-    StopIcon,
-} from "@radix-ui/react-icons";
+import { CheckIcon, PauseIcon, Pencil1Icon, PlayIcon, StopIcon } from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { shallowEqual } from "react-redux";
 import type { RootState } from "../../app/store";
@@ -19,6 +12,7 @@ import { CaptureControl } from "../../features/capture/CaptureControl";
 import { PitchSnapSettingsDialog } from "./PitchSnapSettingsDialog";
 import { SnapGridSettingsDialog } from "./SnapGridSettingsDialog";
 import { SplitTransitionSettingsDialog } from "./SplitTransitionSettingsDialog";
+import { AutoScrollButton } from "./AutoScrollButton";
 import { CustomScaleDialog } from "./CustomScaleDialog";
 import { AppContextMenu } from "../../ui/Menu";
 import { AppToolbarGroup } from "../../ui/Toolbar";
@@ -37,6 +31,7 @@ import {
     toggleSnap,
     togglePlayheadZoom,
     toggleAutoScroll,
+    setAutoScrollMode,
     toggleIgnoreGrouping,
     cycleRippleMode,
     setRippleMode,
@@ -169,6 +164,7 @@ const selectActionBarSession = (state: RootState) => {
         historyUndoDepth: session.historyUndoDepth,
         autoCrossfadeEnabled: session.autoCrossfadeEnabled,
         autoScrollEnabled: session.autoScrollEnabled,
+        autoScrollMode: session.autoScrollMode,
         beats: session.beats,
         bpm: session.bpm,
         grid: session.grid,
@@ -1809,18 +1805,22 @@ export function ActionBar() {
                         }
                     />
 
-                    {/* Auto Scroll (horizontal arrows) */}
-                    <AppIconButton
-                        active={s.autoScrollEnabled}
-                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
-                        emphasis="accent"
-                        tooltip={tf("auto_scroll")}
-                        tabIndex={-1}
-                        onClick={() => {
+                    {/* 自动滚屏：左键开关，右键选择模式（滚动式 / 翻页式） */}
+                    <AutoScrollButton
+                        enabled={s.autoScrollEnabled}
+                        mode={s.autoScrollMode}
+                        onToggle={() => {
                             dispatch(toggleAutoScroll());
                             void dispatch(persistUiSettings());
                         }}
-                        icon={<DoubleArrowRightIcon width="15" height="15" />}
+                        onSelectMode={(mode) => {
+                            dispatch(setAutoScrollMode(mode));
+                            // 选模式 = 立即生效：模式是"要怎么滚"的声明，只有滚着才有意义。
+                            // 用当前渲染里的 s.autoScrollEnabled 判定即可 —— 本回调由
+                            // 这一次点击同步触发，不存在跨帧的陈旧读。
+                            if (!s.autoScrollEnabled) dispatch(toggleAutoScroll());
+                            void dispatch(persistUiSettings());
+                        }}
                     />
                 </AppToolbarGroup>
                 <AppToolbarGroup>
