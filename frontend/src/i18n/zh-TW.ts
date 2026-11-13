@@ -1853,9 +1853,9 @@ export const zhTW = {
     recording_auto_stop_selection: "播放到選取音訊塊末尾自動停止",
     recording_path_template: "輸出路徑範本",
     recording_save_settings: "儲存設定",
-    recording_tooltip_start: "開始錄音（右鍵開啟快速設定）",
-    recording_tooltip_stop: "停止錄音（右鍵開啟快速設定）",
-    recording_tooltip_cancel_countdown: "取消錄音倒數（右鍵開啟快速設定）",
+    recording_tooltip_start: "開始錄音",
+    recording_tooltip_stop: "停止錄音",
+    recording_tooltip_cancel_countdown: "取消錄音倒數",
     recording_context_settings: "錄音設定...",
 
     kb_recording_toggle: "開始/停止錄音",

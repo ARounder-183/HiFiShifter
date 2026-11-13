@@ -1912,10 +1912,9 @@ export const jaJP = {
     recording_auto_stop_selection: "選択クリップの末尾で自動停止",
     recording_path_template: "出力パステンプレート",
     recording_save_settings: "設定を保存",
-    recording_tooltip_start: "録音を開始（右クリックでクイック設定）",
-    recording_tooltip_stop: "録音を停止（右クリックでクイック設定）",
-    recording_tooltip_cancel_countdown:
-        "録音カウントダウンをキャンセル（右クリックでクイック設定）",
+    recording_tooltip_start: "録音を開始",
+    recording_tooltip_stop: "録音を停止",
+    recording_tooltip_cancel_countdown: "録音カウントダウンをキャンセル",
     recording_context_settings: "録音設定...",
 
     kb_recording_toggle: "録音の開始/停止",

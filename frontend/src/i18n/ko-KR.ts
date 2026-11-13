@@ -1887,9 +1887,9 @@ export const koKR = {
     recording_auto_stop_selection: "선택 클립 끝에서 자동 정지",
     recording_path_template: "출력 경로 템플릿",
     recording_save_settings: "설정 저장",
-    recording_tooltip_start: "녹음 시작(마우스 오른쪽 클릭으로 빠른 설정)",
-    recording_tooltip_stop: "녹음 중지(마우스 오른쪽 클릭으로 빠른 설정)",
-    recording_tooltip_cancel_countdown: "녹음 카운트다운 취소(마우스 오른쪽 클릭으로 빠른 설정)",
+    recording_tooltip_start: "녹음 시작",
+    recording_tooltip_stop: "녹음 중지",
+    recording_tooltip_cancel_countdown: "녹음 카운트다운 취소",
     recording_context_settings: "녹음 설정...",
 
     kb_recording_toggle: "녹음 시작/중지",

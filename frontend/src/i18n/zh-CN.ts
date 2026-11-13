@@ -1850,9 +1850,9 @@ export const zhCN = {
     recording_auto_stop_selection: "播放到选中音频块末尾自动停止",
     recording_path_template: "输出路径模板",
     recording_save_settings: "保存设置",
-    recording_tooltip_start: "开始录音（右键打开快捷设置）",
-    recording_tooltip_stop: "停止录音（右键打开快捷设置）",
-    recording_tooltip_cancel_countdown: "取消录音倒计时（右键打开快捷设置）",
+    recording_tooltip_start: "开始录音",
+    recording_tooltip_stop: "停止录音",
+    recording_tooltip_cancel_countdown: "取消录音倒计时",
     recording_context_settings: "录音设置...",
 
     kb_recording_toggle: "开始/停止录音",
