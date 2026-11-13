@@ -207,6 +207,16 @@ jobs:
           pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\setup\install_deps_windows.ps1 -SkipFrontend
         shell: pwsh
 
+      # 【为什么 Windows 也要准备 pin 过的 ARA / VST3 SDK】build.ps1 的"插件引擎与
+      # CLAP 模块"那一步会编译 ara2-bridge-companion，它的 build.rs 要求
+      # ARA_VST3_SDK_DIR 指向可读的 VST3 SDK 3.8.0 检出；install_deps_windows.ps1
+      # 只装工具链，不取 SDK。此前 Windows backend 腿从未走完（gates 先挡住），
+      # 这一环一直没被触发。与 gates.yml 的 Windows 腿用同一条准备命令。
+      - name: Prepare pinned ARA and VST3 SDKs (Windows)
+        if: runner.os == 'Windows'
+        run: ./scripts/setup/prepare-plugin-sdks.ps1
+        shell: pwsh
+
       # ── 模型权重 ───────────────────────────────────────────────────────
       #
       # 权重（约 200 MB）不在仓库里：checkout 因此从 200 MB 起步变成几 MB。以清单
@@ -662,11 +672,15 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.artifact-name-nonwindows.outputs.artifact-name }}-plugins
+          # 【为什么是 -plugins 不是 _plugins】package.sh 的命名字面量就是
+          # `HiFiShifter_v<版本>_<os>-<arch>-plugins.<ext>`（平台标签用连字符），
+          # 此前写成 `*_plugins.*` 永远匹配不到产物 —— backend 腿第一次真正跑完
+          # 打包后才暴露：tar 明明生成了 225M，上传步骤却报 "No files were found"。
           path: |
-            dist/HiFiShifter_*_plugins.tar.gz
-            dist/HiFiShifter_*_plugins.tar.gz.sha256
-            dist/HiFiShifter_*_plugins.pkg
-            dist/HiFiShifter_*_plugins.pkg.sha256
+            dist/HiFiShifter_*-plugins.tar.gz
+            dist/HiFiShifter_*-plugins.tar.gz.sha256
+            dist/HiFiShifter_*-plugins.pkg
+            dist/HiFiShifter_*-plugins.pkg.sha256
           if-no-files-found: error
 
       - name: Upload DMG (macOS)
