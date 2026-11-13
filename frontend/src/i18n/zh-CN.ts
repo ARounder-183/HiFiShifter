@@ -1222,12 +1222,8 @@ export const zhCN = {
     sync_edits_across_takes: "同步编辑所有 Take",
     options_show_all_takes: "显示所有 Take (如果空间足够)",
     common_ripple: "波纹编辑（自动跟进）",
-    ripple_tooltip_off: "波纹编辑（自动跟进）：关闭。左键开启（按轨道跟进）；右键选择模式。",
-    ripple_tooltip_track:
-        "波纹编辑（自动跟进）：仅被编辑的轨道上的后续音频块一起跟进。左键切换到“全部轨道”；右键选择模式。",
-    ripple_tooltip_all:
-        "波纹编辑（自动跟进）：所有轨道上位于编辑点之后的音频块一起跟进。左键关闭；右键选择模式。",
-    ripple_mode_off: "关闭",
+    ripple_tooltip_track: "波纹编辑：按轨道",
+    ripple_tooltip_all: "波纹编辑：全部轨道",
     ripple_mode_track: "按轨道",
     ripple_mode_all: "全部轨道",
     split_transition_tooltip: "分割过渡",

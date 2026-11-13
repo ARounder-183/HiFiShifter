@@ -1324,13 +1324,8 @@ export const koKR = {
     sync_edits_across_takes: "모든 테이크에 편집 동기화",
     options_show_all_takes: "모든 테이크 표시(공간이 충분할 때)",
     common_ripple: "리플 편집 (자동 추적)",
-    ripple_tooltip_off:
-        "리플 편집 (자동 추적): 꺼짐. 왼쪽 클릭으로 켜기 (트랙 단위); 오른쪽 클릭으로 모드 선택.",
-    ripple_tooltip_track:
-        "리플 편집 (자동 추적): 편집한 트랙의 뒤따르는 클립만 함께 이동. 왼쪽 클릭으로 '전체 트랙' 전환; 오른쪽 클릭으로 모드 선택.",
-    ripple_tooltip_all:
-        "리플 편집 (자동 추적): 편집 지점 이후의 모든 트랙 클립이 함께 이동. 왼쪽 클릭으로 끄기; 오른쪽 클릭으로 모드 선택.",
-    ripple_mode_off: "끄기",
+    ripple_tooltip_track: "리플 편집: 트랙 단위",
+    ripple_tooltip_all: "리플 편집: 전체 트랙",
     ripple_mode_track: "트랙 단위",
     ripple_mode_all: "전체 트랙",
     split_transition_tooltip: "분할 트랜지션",

@@ -640,10 +640,22 @@ pub struct UiSettings {
     pub builtin_vibrato_preset_order: Vec<String>,
     #[serde(default)]
     pub ignore_grouping: bool,
-    /// 波纹编辑（自动跟进）模式：off / track / all（对应 REAPER 的 Ripple Editing）。
-    /// - `off`：关闭（默认）。
-    /// - `track`：仅被编辑的轨道上的后续剪辑一起跟进。
-    /// - `all`：所有轨道上位于编辑点之后的剪辑一起跟进。
+    /// 波纹编辑（自动跟进）总开关。
+    ///
+    /// 【为什么是 `Option<bool>` 而不是 `bool`】它是"这个键在文件里根本不存在"的
+    /// 显式表达 —— 那正是旧配置的形状。旧版把开关与方向压成了一个三值字符串
+    /// `rippleMode`（off / track / all）。若这里用 `#[serde(default)] bool`，
+    /// "用户关掉了它"与"没有这个键"就混成一件事：旧配置里 `rippleMode: "track"`
+    /// （用户是**开着**的）会被读成关闭，升级后用户会发现"我什么都没改，波纹编辑
+    /// 却关了"。`None` 专表示后者，由 `normalize_ripple_mode` 推断成 `Some`，
+    /// 此后永远是 `Some`。
+    #[serde(default)]
+    pub ripple_enabled: Option<bool>,
+    /// 波纹编辑方向：`track`（仅被编辑轨道，默认）/ `all`（全部轨道）。
+    ///
+    /// 【与旧版的区别】这里曾是三值（含 `off`），开关与方向压在一起；
+    /// `normalize_ripple_mode` 会把旧值迁移过来（`off` → 关闭 + 按轨道）。
+    /// 引擎读的是"开关 × 方向"的折算结果，见 `commands/timeline.rs::ripple_settings`。
     #[serde(default = "default_ripple_mode")]
     pub ripple_mode: String,
 
@@ -1652,8 +1664,13 @@ fn default_hifigan_mel_stretch() -> bool {
     true
 }
 
+/// 波纹编辑的出厂**方向**：按轨道。
+///
+/// 【为什么不是"全部轨道"】旧版三值循环里"关闭"的下一个状态就是"按轨道"，用户打开
+/// 开关时期待的就是这个最小作用范围；"全部轨道"会一次推动所有轨道，属于需要显式
+/// 选择的更大动作，不该是默认。
 fn default_ripple_mode() -> String {
-    "off".to_string()
+    "track".to_string()
 }
 
 /// 自动滚屏模式的出厂值：滚动式（与引入翻页式之前的行为逐值一致）。
@@ -1795,6 +1812,7 @@ impl Default for UiSettings {
             disabled_vibrato_preset_ids: Vec::new(),
             builtin_vibrato_preset_order: Vec::new(),
             ignore_grouping: false,
+            ripple_enabled: Some(false),
             ripple_mode: default_ripple_mode(),
 
             midi_import_position: default_midi_import_position(),
@@ -1877,11 +1895,30 @@ impl UiSettings {
         self.normalize_auto_scroll_mode();
     }
 
-    /// 规范化波纹编辑模式，避免损坏/未知的持久化值影响编辑行为。
+    /// 规范化波纹编辑设置，并把旧版的三值编码迁移成"开关 + 方向"。
+    ///
+    /// 【迁移规则】
+    /// - 没有 `rippleEnabled` 且 `rippleMode` 是 `track` / `all` → 开关为**开**，
+    ///   方向照旧（旧编码里这两个值就代表开着）；
+    /// - 没有 `rippleEnabled` 且 `rippleMode` 是 `off` / 未知值 → 开关为关，
+    ///   方向回到默认；
+    /// - 已有 `rippleEnabled` → 开关照旧，方向只做值域清洗（未知值 → 默认方向，
+    ///   并把开关落到关 —— 手改坏的配置不该让波纹编辑意外开启）。
     pub fn normalize_ripple_mode(&mut self) {
-        if !["off", "track", "all"].contains(&self.ripple_mode.as_str()) {
-            self.ripple_mode = default_ripple_mode();
-        }
+        let legacy_scope = match self.ripple_mode.as_str() {
+            "track" => Some("track"),
+            "all" => Some("all"),
+            _ => None,
+        };
+        self.ripple_enabled = Some(match self.ripple_enabled {
+            // 没有这一项 = 旧配置：三值编码里的 "off" 就是关闭。
+            None => legacy_scope.is_some(),
+            Some(enabled) => enabled && legacy_scope.is_some(),
+        });
+        self.ripple_mode = match legacy_scope {
+            Some(scope) => scope.to_string(),
+            None => default_ripple_mode(),
+        };
     }
 
     /// 规范化自动滚屏模式，避免损坏 / 未知的持久化值影响跟随行为。
@@ -2352,21 +2389,63 @@ mod tests {
     #[test]
     fn ui_settings_normalizes_ripple_mode() {
         let settings = UiSettings::default();
-        assert_eq!(settings.ripple_mode, "off");
+        assert_eq!(settings.ripple_enabled, Some(false));
+        assert_eq!(settings.ripple_mode, "track");
 
+        // 未知方向：方向回默认，开关落到关（手改坏的配置不该让波纹编辑意外开启）。
         let mut bogus = UiSettings {
             ripple_mode: "sideways".to_string(),
+            ripple_enabled: Some(true),
             ..UiSettings::default()
         };
         bogus.normalize_ripple_mode();
-        assert_eq!(bogus.ripple_mode, "off");
+        assert_eq!(bogus.ripple_enabled, Some(false));
+        assert_eq!(bogus.ripple_mode, "track");
 
-        let mut track_mode = UiSettings {
-            ripple_mode: "track".to_string(),
+        // 合法方向原样保留，开关照旧。
+        let mut all_mode = UiSettings {
+            ripple_mode: "all".to_string(),
+            ripple_enabled: Some(true),
             ..UiSettings::default()
         };
-        track_mode.normalize_ripple_mode();
-        assert_eq!(track_mode.ripple_mode, "track");
+        all_mode.normalize_ripple_mode();
+        assert_eq!(all_mode.ripple_enabled, Some(true));
+        assert_eq!(all_mode.ripple_mode, "all");
+    }
+
+    /// 旧配置（只有一个三值 `rippleMode`）必须被迁移成"开关 + 方向"，
+    /// 且**不能**把用户的"开着"读成"关着"。
+    #[test]
+    fn legacy_ripple_mode_migrates_to_enabled_plus_scope() {
+        let migrate = |value: &str| {
+            let mut settings: UiSettings =
+                serde_json::from_value(serde_json::json!({ "rippleMode": value }))
+                    .expect("旧配置必须能读");
+            assert!(settings.ripple_enabled.is_none(), "旧配置里不该有 rippleEnabled");
+            settings.normalize_ripple_mode();
+            (settings.ripple_enabled, settings.ripple_mode)
+        };
+        assert_eq!(migrate("off"), (Some(false), "track".to_string()));
+        assert_eq!(migrate("track"), (Some(true), "track".to_string()));
+        assert_eq!(migrate("all"), (Some(true), "all".to_string()));
+        // 手改坏的值：关掉，方向回默认。
+        assert_eq!(migrate("sideways"), (Some(false), "track".to_string()));
+    }
+
+    /// 新配置：关闭时仍要记住方向（重启后打开开关不该被重置成"按轨道"）。
+    #[test]
+    fn new_ripple_settings_keep_scope_while_disabled() {
+        let mut settings: UiSettings =
+            serde_json::from_value(serde_json::json!({ "rippleEnabled": false, "rippleMode": "all" }))
+                .expect("新配置必须能读");
+        settings.normalize_ripple_mode();
+        assert_eq!(settings.ripple_enabled, Some(false));
+        assert_eq!(settings.ripple_mode, "all");
+
+        // 回写时 rippleEnabled 必须是布尔值而不是 null。
+        let encoded = serde_json::to_value(&settings).expect("serialize");
+        assert_eq!(encoded["rippleEnabled"], serde_json::json!(false));
+        assert_eq!(encoded["rippleMode"], serde_json::json!("all"));
     }
 
     // ── 窗口状态：清洗 / 合并 / 显示器交集校验 ────────────────────────────────

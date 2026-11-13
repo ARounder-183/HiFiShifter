@@ -33,6 +33,7 @@ import type { PanAxisDirections } from "../../../components/layout/pianoRoll/par
 import type { ProjectSaveFormat } from "../../../services/api/project";
 import type { CustomScalePreset } from "../../../utils/customScales";
 import type { AutoScrollMode } from "../../../utils/autoFollowScroll";
+import type { RippleScope } from "../rippleMode";
 import type { BaselineMode, VibratoPreset } from "../../vibrato/vibratoTypes";
 
 export type { FadeCurveType } from "../sessionTypes";
@@ -146,12 +147,21 @@ export interface SessionState {
     /** 忽略编组（启用后编组同步编辑操作不生效） */
     ignoreGrouping: boolean;
     /**
-     * 波纹编辑（自动跟进）模式：
-     * - `"off"`：关闭（默认）。
-     * - `"track"`：仅被编辑的轨道上的后续剪辑一起跟进。
-     * - `"all"`：所有轨道上位于编辑点之后的剪辑一起跟进。
+     * 波纹编辑（自动跟进）总开关。
+     *
+     * 与 `rippleScope` 是**两根正交的轴**（与相邻的"自动滚屏"同构）：开关决定
+     * "要不要跟进"，方向决定"跟进谁"。旧版把两者压成三值的 `rippleMode`，于是
+     * 左键只能在三档之间循环 —— 从"全部轨道"关掉要先绕到"按轨道"。
      */
-    rippleMode: "off" | "track" | "all";
+    rippleEnabled: boolean;
+    /**
+     * 波纹编辑方向（开关打开时才有意义）：
+     * - `"track"`：仅被编辑的轨道上的后续剪辑一起跟进（默认）。
+     * - `"all"`：所有轨道上位于编辑点之后的剪辑一起跟进。
+     *
+     * 关闭时仍然保留 —— 用户下次打开开关应当回到他上次选的方向，而不是被重置。
+     */
+    rippleScope: RippleScope;
     /** 被禁用的编组 ID 列表（禁用后该编组内同步编辑不生效） */
     disabledGroupIds: string[];
     /** 允许参数编辑器点击时调整播放头 */

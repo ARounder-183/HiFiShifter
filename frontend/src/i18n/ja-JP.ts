@@ -1269,13 +1269,8 @@ export const jaJP = {
     sync_edits_across_takes: "すべてのテイクに編集を同期",
     options_show_all_takes: "すべてのテイクを表示（余裕がある場合）",
     common_ripple: "リップル編集（オートフォロー）",
-    ripple_tooltip_off:
-        "リップル編集（オートフォロー）：オフ。左クリックで有効化（トラック単位）；右クリックでモード選択。",
-    ripple_tooltip_track:
-        "リップル編集（オートフォロー）：編集したトラック上の後続クリップだけが追従します。左クリックで「全トラック」へ切替；右クリックでモード選択。",
-    ripple_tooltip_all:
-        "リップル編集（オートフォロー）：編集位置より後ろの全トラックのクリップが追従します。左クリックでオフ；右クリックでモード選択。",
-    ripple_mode_off: "オフ",
+    ripple_tooltip_track: "リップル編集：トラック単位",
+    ripple_tooltip_all: "リップル編集：全トラック",
     ripple_mode_track: "トラック単位",
     ripple_mode_all: "全トラック",
     split_transition_tooltip: "分割トランジション",

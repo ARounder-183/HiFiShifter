@@ -1224,12 +1224,8 @@ export const zhTW = {
     sync_edits_across_takes: "同步編輯所有 Take",
     options_show_all_takes: "顯示所有 Take (如果空間足夠)",
     common_ripple: "波紋編輯（自動跟進）",
-    ripple_tooltip_off: "波紋編輯（自動跟進）：關閉。左鍵開啟（按軌道跟進）；右鍵選擇模式。",
-    ripple_tooltip_track:
-        "波紋編輯（自動跟進）：僅被編輯的軌道上的後續音訊塊一起跟進。左鍵切換到「全部軌道」；右鍵選擇模式。",
-    ripple_tooltip_all:
-        "波紋編輯（自動跟進）：所有軌道上位於編輯點之後的音訊塊一起跟進。左鍵關閉；右鍵選擇模式。",
-    ripple_mode_off: "關閉",
+    ripple_tooltip_track: "波紋編輯：按軌道",
+    ripple_tooltip_all: "波紋編輯：全部軌道",
     ripple_mode_track: "按軌道",
     ripple_mode_all: "全部軌道",
     split_transition_tooltip: "分割過渡",

@@ -85,6 +85,7 @@ import { getClipRateMultiplier, updateActiveTakeFromFlat } from "./sessionSlice/
 import { initialState } from "./sessionSlice/initialState";
 import { applyClipSyllableAnalysisReducer } from "./sessionSlice/syllableMetadata";
 import { setAutoScrollModeReducer, toggleAutoScrollReducer } from "./sessionSlice/autoScroll";
+import { setRippleScopeReducer, toggleRippleEnabledReducer } from "./sessionSlice/ripple";
 import { registerRuntime } from "./sessionSlice/extraReducers/runtime";
 import { registerAudio } from "./sessionSlice/extraReducers/audio";
 import { registerTransport } from "./sessionSlice/extraReducers/transport";
@@ -754,20 +755,8 @@ const sessionSlice = createSlice({
         toggleIgnoreGrouping(state) {
             state.ignoreGrouping = !state.ignoreGrouping;
         },
-        /** 循环波纹编辑模式：off → track → all → off（对应 REAPER 波纹编辑按钮的三态切换）。 */
-        cycleRippleMode(state) {
-            state.rippleMode =
-                state.rippleMode === "off" ? "track" : state.rippleMode === "track" ? "all" : "off";
-        },
-        setRippleMode(state, action: PayloadAction<"off" | "track" | "all">) {
-            if (
-                action.payload === "off" ||
-                action.payload === "track" ||
-                action.payload === "all"
-            ) {
-                state.rippleMode = action.payload;
-            }
-        },
+        toggleRippleEnabled: toggleRippleEnabledReducer,
+        setRippleScope: setRippleScopeReducer,
         toggleGroupDisabledLocal(state, action: PayloadAction<string>) {
             const idx = state.disabledGroupIds.indexOf(action.payload);
             if (idx >= 0) {
@@ -1307,8 +1296,8 @@ export const {
     toggleAutoScroll,
     setAutoScrollMode,
     toggleIgnoreGrouping,
-    cycleRippleMode,
-    setRippleMode,
+    toggleRippleEnabled,
+    setRippleScope,
     toggleAlwaysShowParamBlocks,
     setAlwaysShowParamBlocks,
     toggleParamEditorSeekPlayhead,

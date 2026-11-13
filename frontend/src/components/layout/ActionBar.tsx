@@ -13,6 +13,7 @@ import { PitchSnapSettingsDialog } from "./PitchSnapSettingsDialog";
 import { SnapGridSettingsDialog } from "./SnapGridSettingsDialog";
 import { SplitTransitionSettingsDialog } from "./SplitTransitionSettingsDialog";
 import { AutoScrollButton } from "./AutoScrollButton";
+import { RIPPLE_SCOPES, type RippleScope } from "../../features/session/rippleMode";
 import { CustomScaleDialog } from "./CustomScaleDialog";
 import { AppContextMenu } from "../../ui/Menu";
 import { AppToolbarGroup } from "../../ui/Toolbar";
@@ -33,8 +34,8 @@ import {
     toggleAutoScroll,
     setAutoScrollMode,
     toggleIgnoreGrouping,
-    cycleRippleMode,
-    setRippleMode,
+    toggleRippleEnabled,
+    setRippleScope,
     toggleParamEditorSeekPlayhead,
     toggleParamEditorTimelineClickSelectTrack,
     persistUiSettings,
@@ -180,7 +181,8 @@ const selectActionBarSession = (state: RootState) => {
         playheadSec: session.playheadSec,
         playheadZoomEnabled: session.playheadZoomEnabled,
         project: session.project,
-        rippleMode: session.rippleMode,
+        rippleEnabled: session.rippleEnabled,
+        rippleScope: session.rippleScope,
         snapEnabled: session.snapEnabled,
         splitTransitionEnabled: session.splitTransitionEnabled,
         tempoMap: session.tempoMap,
@@ -1746,15 +1748,18 @@ export function ActionBar() {
                         }
                     />
 
-                    {/* Ripple Edit (Auto Follow) */}
-                    <RippleModeButton
-                        mode={s.rippleMode}
-                        onCycle={() => {
-                            dispatch(cycleRippleMode());
+                    {/* 波纹编辑：左键开关，右键选择方向（按轨道 / 全部轨道） */}
+                    <RippleButton
+                        enabled={s.rippleEnabled}
+                        scope={s.rippleScope}
+                        onToggle={() => {
+                            dispatch(toggleRippleEnabled());
                             void dispatch(persistUiSettings());
                         }}
-                        onSelect={(next) => {
-                            dispatch(setRippleMode(next));
+                        onSelectScope={(next) => {
+                            dispatch(setRippleScope(next));
+                            // 选方向 = 立即生效：方向是"要跟进谁"的声明，只有开着才有意义。
+                            if (!s.rippleEnabled) dispatch(toggleRippleEnabled());
                             void dispatch(persistUiSettings());
                         }}
                     />
@@ -2007,8 +2012,15 @@ export function ActionBar() {
 
 // ── 波纹编辑（自动跟进）按钮 ──────────────────────────────────────
 
-/** 波纹编辑图标：一组“被向前推的剪辑块”+ 右侧箭头，表达后续剪辑自动跟进。
- *  `multiTrack` 为 true（全部轨道模式）时显示两行剪辑块，否则显示单行（按轨道模式）。
+/**
+ * 波纹编辑图标：一组“被向前推的剪辑块”+ 右侧箭头，表达后续剪辑自动跟进。
+ *
+ * `multiTrack` 为 true（全部轨道方向）时显示两行剪辑块，否则显示单行（按轨道方向）。
+ * 按钮与菜单项共用它 —— 方向与图形的对应关系必须在两处是同一条，否则会出现
+ * "按钮画两行、菜单写着按轨道"这种自相矛盾。
+ *
+ * `data-hs-ripple-icon` 让"当前画的是哪个方向"成为可断言的文本事实（组件测试直接读它，
+ * 而不是比对整段 SVG 字符串）。
  */
 function RippleIcon({ multiTrack }: { multiTrack: boolean }) {
     const rows = multiTrack ? [2.9, 6.9] : [4.9];
@@ -2019,6 +2031,8 @@ function RippleIcon({ multiTrack }: { multiTrack: boolean }) {
             viewBox="0 0 15 15"
             fill="none"
             xmlns="http://www.w3.org/2000/svg"
+            aria-hidden="true"
+            data-hs-ripple-icon={multiTrack ? "all" : "track"}
         >
             {rows.map((y) => (
                 <g key={y}>
@@ -2060,51 +2074,57 @@ function RippleIcon({ multiTrack }: { multiTrack: boolean }) {
     );
 }
 
-/** 波纹模式选择菜单（右键打开），与 Snap / 分割过渡的右键菜单行为一致。 */
-function RippleModeMenu({
+/**
+ * 波纹方向选择菜单（右键打开），与 Snap / 分割过渡的右键菜单行为一致。
+ *
+ * 【为什么只有两项】"关闭"不是一种方向 —— 它是开关的关闭态（左键）。旧版把它塞进
+ * 同一个三值循环，于是"从全部轨道关掉"要先绕到"按轨道"，而菜单里还多出一个与开关
+ * 重复的选项。
+ */
+function RippleScopeMenu({
     x,
     y,
-    mode,
+    scope,
     onChange,
     onClose,
 }: {
     x: number;
     y: number;
-    mode: "off" | "track" | "all";
-    onChange: (mode: "off" | "track" | "all") => void;
+    scope: RippleScope;
+    onChange: (scope: RippleScope) => void;
     onClose: () => void;
 }) {
     const { tf } = useI18n();
-    const options: Array<{ value: "off" | "track" | "all"; label: string }> = [
-        { value: "off", label: tf("ripple_mode_off") as string },
-        { value: "track", label: tf("ripple_mode_track") as string },
-        { value: "all", label: tf("ripple_mode_all") as string },
-    ];
 
     return (
         <AppContextMenu
             x={x}
             y={y}
+            ariaLabel={tf("common_ripple")}
             onClose={onClose}
-            items={options.map((opt) => ({
-                key: opt.value,
-                label: opt.label,
-                checked: mode === opt.value,
-                onSelect: () => onChange(opt.value),
+            items={RIPPLE_SCOPES.map((value) => ({
+                key: `ripple-scope-${value}`,
+                label: tf(`ripple_mode_${value}`),
+                // 图标随项展示：单行 = 按轨道，双行 = 全部轨道，与按钮同源。
+                icon: <RippleIcon multiTrack={value === "all"} />,
+                checked: scope === value,
+                onSelect: () => onChange(value),
             }))}
         />
     );
 }
 
-/** 波纹编辑工具栏按钮：左键三态循环切换，右键打开模式菜单。 */
-function RippleModeButton({
-    mode,
-    onCycle,
-    onSelect,
+/** 波纹编辑工具栏按钮：左键开关，右键选择方向（按轨道 / 全部轨道）。 */
+function RippleButton({
+    enabled,
+    scope,
+    onToggle,
+    onSelectScope,
 }: {
-    mode: "off" | "track" | "all";
-    onCycle: () => void;
-    onSelect: (mode: "off" | "track" | "all") => void;
+    enabled: boolean;
+    scope: RippleScope;
+    onToggle: () => void;
+    onSelectScope: (scope: RippleScope) => void;
 }) {
     const { tf } = useI18n();
     const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
@@ -2112,25 +2132,29 @@ function RippleModeButton({
     return (
         <>
             <AppIconButton
-                active={mode !== "off"}
-                // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                active={enabled}
+                // 激活时用主题强调色（与相邻开关同款；不带 color 时 Radix 回落强调色）
                 emphasis="accent"
-                tooltip={(tf(`ripple_tooltip_${mode}`) as string) ?? tf("common_ripple")}
+                // 与"自动滚屏"同一格式：功能名：方向名。它同时是 aria-label，
+                // 所以必须自带功能名 —— 只写方向名的话读屏用户听到的是一枚无名按钮。
+                tooltip={tf(`ripple_tooltip_${scope}`)}
                 tabIndex={-1}
-                onClick={onCycle}
+                // 右下角小三角：提示"右键还有方向可选"（与自动滚屏 / 工具族按钮同一个记号）。
+                menuCaret
+                onClick={onToggle}
                 onContextMenu={(e) => {
                     e.preventDefault();
                     setMenu({ x: e.clientX, y: e.clientY });
                 }}
-                icon={<RippleIcon multiTrack={mode === "all"} />}
+                icon={<RippleIcon multiTrack={scope === "all"} />}
             />
             {menu && (
-                <RippleModeMenu
+                <RippleScopeMenu
                     x={menu.x}
                     y={menu.y}
-                    mode={mode}
+                    scope={scope}
                     onChange={(next) => {
-                        onSelect(next);
+                        onSelectScope(next);
                         setMenu(null);
                     }}
                     onClose={() => setMenu(null)}

@@ -8,6 +8,7 @@ import {
     DEFAULT_RENDER_CACHE_SETTINGS,
 } from "../../../services/api/settings";
 import { DEFAULT_AUTO_SCROLL_MODE } from "../../../utils/autoFollowScroll";
+import { DEFAULT_RIPPLE_SCOPE } from "../rippleMode";
 import { DEFAULT_VIBRATO_BASELINE } from "../../vibrato/vibratoPresets";
 import { DEFAULT_ACTIVE_VIBRATO_PRESET_ID } from "../../vibrato/systemPresets";
 import {
@@ -61,7 +62,8 @@ export const initialState: SessionState = {
     autoScrollEnabled: false,
     autoScrollMode: DEFAULT_AUTO_SCROLL_MODE,
     ignoreGrouping: false,
-    rippleMode: "off",
+    rippleEnabled: false,
+    rippleScope: DEFAULT_RIPPLE_SCOPE,
     disabledGroupIds: [],
     paramEditorSeekPlayheadEnabled: true,
     paramEditorTimelineClickSelectTrackEnabled: true,

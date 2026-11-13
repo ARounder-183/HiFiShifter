@@ -74,7 +74,10 @@ export const persistUiSettings = createAsyncThunk(
             alwaysShowParamBlocks: s.alwaysShowParamBlocks,
             scaleHighlightMode: s.scaleHighlightMode,
             ignoreGrouping: s.ignoreGrouping,
-            rippleMode: s.rippleMode,
+            rippleEnabled: s.rippleEnabled,
+            // 磁盘上仍然写"方向"而不是"生效模式"：关闭时也要记住用户上次选的方向，
+            // 否则重启后打开开关会莫名其妙回到"按轨道"。
+            rippleMode: s.rippleScope,
             playheadZoom: s.playheadZoomEnabled,
             autoScroll: s.autoScrollEnabled,
             autoScrollMode: s.autoScrollMode,

@@ -487,10 +487,9 @@ export function useTimelineKernelSeekDrag({
                 });
                 if (participants.length === 0) return;
                 const rippleFollowers = buildRippleFollowers(
-                    session.clips,
+                    session,
                     new Set(participants.map((item) => item.clipId)),
                     Math.min(...participants.map((item) => item.startSec)),
-                    session.rippleMode,
                     new Set(participants.map((item) => item.trackId)),
                 );
                 const editedXfadeClipIds = Array.from(

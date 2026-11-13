@@ -7,6 +7,7 @@ import type { DockPersistedSettings } from "../../features/dock/dockSettings";
 import type { TimelineSnapSettings } from "../../features/session/sessionTypes";
 import type { VibratoPreset } from "../../features/vibrato/vibratoTypes";
 import type { AutoScrollMode } from "../../utils/autoFollowScroll";
+import type { RippleScope } from "../../features/session/rippleMode";
 
 export type StretchAlgorithmOption = "linear" | "signalsmith" | "soundtouch";
 
@@ -159,8 +160,20 @@ export interface UiSettings {
     alwaysShowParamBlocks?: boolean;
     scaleHighlightMode?: string;
     ignoreGrouping?: boolean;
-    /** 波纹编辑（自动跟进）模式：off / track / all（对应 REAPER Ripple Editing）。 */
-    rippleMode?: "off" | "track" | "all";
+    /**
+     * 波纹编辑（自动跟进）总开关。
+     *
+     * 缺省 = 旧配置（没有这一项）：由 `hydrateRippleState` 依据 `rippleMode` 的旧三值
+     * 编码推断，见 `features/session/rippleMode`。
+     */
+    rippleEnabled?: boolean;
+    /**
+     * 波纹编辑方向：`track`（按轨道）/ `all`（全部轨道）。
+     *
+     * 【为什么磁盘上还可能是 `"off"`】旧版本把开关与方向压成了三值字符串；后端
+     * `normalize_ripple_mode` 会把 `"off"` 迁移成"关闭 + 按轨道"，前端水合也认它。
+     */
+    rippleMode?: RippleScope | "off";
     playheadZoom: boolean;
     autoScroll: boolean;
     /**

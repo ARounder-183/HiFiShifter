@@ -1392,13 +1392,8 @@ export const enUS = {
     sync_edits_across_takes: "Sync Edits Across Takes",
     options_show_all_takes: "Show all takes (when room)",
     common_ripple: "Ripple Editing (Auto Follow)",
-    ripple_tooltip_off:
-        "Ripple Editing (Auto Follow): Off. Left-click to enable (per track); right-click to choose mode.",
-    ripple_tooltip_track:
-        "Ripple Editing (Auto Follow): Only clips on the edited track move along. Left-click for All Tracks; right-click to choose mode.",
-    ripple_tooltip_all:
-        "Ripple Editing (Auto Follow): Clips after the edit on all tracks move along. Left-click to turn off; right-click to choose mode.",
-    ripple_mode_off: "Off",
+    ripple_tooltip_track: "Ripple Editing: Per Track",
+    ripple_tooltip_all: "Ripple Editing: All Tracks",
     ripple_mode_track: "Per Track",
     ripple_mode_all: "All Tracks",
     split_transition_tooltip: "Split Transition",

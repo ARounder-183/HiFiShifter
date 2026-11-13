@@ -28,6 +28,7 @@ import {
     DEFAULT_RENDER_CACHE_SETTINGS,
 } from "../../../../services/api/settings";
 import { normalizeAutoScrollMode } from "../../../../utils/autoFollowScroll";
+import { hydrateRippleState } from "../../rippleMode";
 import { SCALE_KEYS } from "../../../../utils/musicalScales";
 import { normalizeParamAxisUnits } from "../../../../components/layout/pianoRoll/paramAxisUnits";
 import { normalizePanAxisDirections } from "../../../../components/layout/pianoRoll/paramPan";
@@ -259,12 +260,12 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
             if (s.scaleHighlightMode != null)
                 state.scaleHighlightMode = s.scaleHighlightMode === "always" ? "always" : "off";
             if (s.ignoreGrouping != null) state.ignoreGrouping = Boolean(s.ignoreGrouping);
-            const loadedRippleMode = s.rippleMode;
-            if (loadedRippleMode === "track" || loadedRippleMode === "all") {
-                state.rippleMode = loadedRippleMode;
-            } else {
-                state.rippleMode = "off";
-            }
+            // 波纹编辑：开关与方向是两根轴，而旧配置里只有一个三值字符串
+            // （off / track / all）—— 由 hydrateRippleState 统一折算。它同时守住
+            // 插件形态与 mock 返回的脏值：认不出旧编码就会把老用户的"开着"读成"关着"。
+            const ripple = hydrateRippleState(s);
+            state.rippleEnabled = ripple.enabled;
+            state.rippleScope = ripple.scope;
             if (s.lockParamLines != null) state.lockParamLinesEnabled = Boolean(s.lockParamLines);
             if (s.metronomeEnabled != null) state.metronomeEnabled = Boolean(s.metronomeEnabled);
             if (s.metronomeGain != null) {

@@ -259,6 +259,8 @@ const mockUiSettings: Record<string, unknown> = {
     playheadZoom: false,
     autoScroll: false,
     autoScrollMode: "scroll",
+    rippleEnabled: false,
+    rippleMode: "track",
     showClipboardPreview: true,
     showParamValuePopup: true,
     lockParamLines: true,

@@ -28,7 +28,7 @@ import { enUS } from "./en-US";
 import { listPanels } from "../features/dock/panelRegistry";
 import { registerBuiltinPanels } from "../components/dock/registerBuiltinPanels";
 import { THEME_MODE_SETTINGS } from "../theme/themeTypes";
-import type { RippleMode } from "../features/session/ripplePreview";
+import { RIPPLE_SCOPES, type RippleScope } from "../features/session/rippleMode";
 import { AUTO_SCROLL_MODES, type AutoScrollMode } from "../utils/autoFollowScroll";
 
 const CATALOG_KEYS = new Set(Object.keys(enUS));
@@ -123,9 +123,13 @@ describe("键引用完整性", () => {
                 note: "MenuBar / 外观设置的主题模式标签",
             },
             ripple_tooltip_: {
-                // 取值域与 `RippleMode` 绑定：多一个模式就多一个键。
-                values: ["off", "track", "all"] satisfies readonly RippleMode[],
-                note: "ActionBar 的波纹模式提示",
+                // 取值域与 RIPPLE_SCOPES 绑定：多一个方向就多一个键。
+                values: RIPPLE_SCOPES satisfies readonly RippleScope[],
+                note: "ActionBar 的波纹方向提示",
+            },
+            ripple_mode_: {
+                values: RIPPLE_SCOPES satisfies readonly RippleScope[],
+                note: "ActionBar 的波纹方向名",
             },
             auto_scroll_mode_: {
                 // 取值域与 AUTO_SCROLL_MODES 绑定：多一个模式就多一个键。
@@ -206,6 +210,7 @@ describe("键引用完整性", () => {
             "history_op_",
             "theme_",
             "ripple_tooltip_",
+            "ripple_mode_",
             "auto_scroll_mode_",
             "auto_scroll_tooltip_",
             "recording_error_",
