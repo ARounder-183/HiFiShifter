@@ -109,7 +109,7 @@ pub(super) fn import_midi_to_pitch(
 
 /// 导入 MIDI 文件为时间线上的 MIDI clip（无音频源）。
 ///
-/// 创建一���特殊的 clip，其中 `source_path` 为 None，`midi_note_data` 包含
+/// 创建一个特殊的 clip，其中 `source_path` 为 None，`midi_note_data` 包含
 /// 从 MIDI 文件提取的音符事件。clip 的长度由 MIDI 中最后一个音符的结束时间决定。
 ///
 /// 返回完整的 timeline state payload，以便前端更新 Redux store。

@@ -1031,7 +1031,7 @@ export function drawPianoRoll(args: {
     }
 
     // Curves
-    // 副参数曲线（半透明、细线，绘制在主参数曲线下方�?
+    // 副参数曲线（半透明、细线，绘制在主参数曲线下方。
     if (!skipCurves && showSecondaryParam && secondaryParamIds.length > 0) {
         // 副参数曲线调色板：按主题给两套（浅色主题加深加浓，否则在白底上发飘）；
         // 琥珀成员换成玫红 —— 琥珀是编辑包络线的专属色相，避免撞色。

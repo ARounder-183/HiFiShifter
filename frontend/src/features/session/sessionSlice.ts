@@ -1113,7 +1113,7 @@ const sessionSlice = createSlice({
                 }
             }
         },
-        /** 乐观更新 clip 颜色（立即反映到 UI，后端确认前先行生效�?*/
+        /** 乐观更新 clip 颜色（立即反映到 UI，后端确认前先行生效）。*/
         optimisticUpdateClipColor(
             state,
             action: PayloadAction<{ clipId: string; color: ClipColor }>,
