@@ -13,6 +13,7 @@ use crate::reaper_parser::{
 use crate::state::{
     Clip, PitchAnalysisAlgo, TempoPointData, TimelineState, Track, TrackParamsState,
 };
+use hifishifter_kernel::take_geometry::ForwardWindow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
@@ -341,12 +342,27 @@ fn build_audio_clip_take(
     // 一次上界，而退化时本来就没超上界），因此是死代码。退化只在"宿主报了越界
     // 镜像读数"或"正放 Loop 锚点被钳到段末端"时出现，见
     // `hifishifter_kernel::take_geometry` 的边界测试。
-    let window = take_geometry(take, item.length, duration_sec, item_reversed, item_loop)
-        .forward_source_window()
-        // 【为什么这里可以 `expect`】.rpp 给出了方向，媒体时长来自**已解码的文件**
-        // （调用方保证），于是轴必然存在。这是本仓库里唯一"两个输入都在手"的路径 ——
-        // 它也因此是本方案的对拍基准。
-        .expect("an imported take always has a direction and a decoded media duration");
+    let geometry = take_geometry(take, item.length, duration_sec, item_reversed, item_loop);
+    let window = match geometry.forward_source_window() {
+        Some(window) => window,
+        None => {
+            // 【None 是合法输入，不是不变式破坏】倒放 take 的媒体时长**并不总是可得**
+            // ——源文件缺失 / 头解析失败时上面只记 skipped_files 就继续，duration_sec
+            // 保持 None，于是镜像轴（max_bound）不存在，倒放锚点解不出窗口。此前这里
+            // `expect`，一次这样的导入会让整条命令以 panic 收场（guard_command 兜住
+            // 不崩进程，但整个工程导入失败）。按内核契约降级：**保留宿主镜像坐标并
+            // 留读数** —— 窗口退回 [SOFFS, SOFFS + 消耗量]（与正向未知时长时内核
+            // 内部的退化同形），reversed 读数原样保留，不编造镜像轴。
+            ForwardWindow::new(
+                take.s_offs.max(0.0),
+                take.s_offs.max(0.0) + geometry.consumed_sec(),
+            )
+            // item 长度为 NaN 等退化输入连这个窗口也给不出：按"无内容"处理
+            // （该 take 渲染为静音）。0..0 恒构成窗口，expect 承载的只是
+            // "逻辑上不可达"。
+            .unwrap_or_else(|| ForwardWindow::new(0.0, 0.0).expect("0..0 is always a window"))
+        }
+    };
     let (source_start, source_end) = (window.start(), window.end());
 
     let name = if take.name.trim().is_empty() {
@@ -1564,9 +1580,21 @@ fn process_item(
         // 无 stretch markers：使用 take 的 play_rate。窗口同样由共享解算给出
         // （见 `take_geometry`），两条导入路径不可能再分叉。
         let effective_rate = play_rate;
-        let window = take_geometry(take, item_length, duration_sec, item_reversed, item_loop)
-            .forward_source_window()
-            .expect("an imported take always has a direction and a decoded media duration");
+        let geometry = take_geometry(take, item_length, duration_sec, item_reversed, item_loop);
+        let window = match geometry.forward_source_window() {
+            Some(window) => window,
+            None => {
+                // 与 build_audio_clip_take 的降级同一契约：倒放 + 媒体时长读不到
+                // （源文件缺失 / 头解析失败只记 skipped）时镜像轴不存在，按内核
+                // 契约"保留宿主镜像坐标并留读数"退回 [SOFFS, SOFFS + 消耗量]，
+                // 不编造镜像轴（此前 `expect` 会让整条导入命令 panic）。
+                ForwardWindow::new(
+                    take.s_offs.max(0.0),
+                    take.s_offs.max(0.0) + geometry.consumed_sec(),
+                )
+                .unwrap_or_else(|| ForwardWindow::new(0.0, 0.0).expect("0..0 is always a window"))
+            }
+        };
         let (source_start, source_end) = (window.start(), window.end());
         // 构造全部 take（default + 显式 TAKE 块），active take 由选择规则决定。
         let mut hs_takes: Vec<crate::state::ClipTake> = Vec::new();

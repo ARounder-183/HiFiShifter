@@ -51,13 +51,39 @@ set -euo pipefail
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SELF_DIR/../.." && pwd)
 
+normalize_arch() {
+    case "${ARCH:-$(uname -m)}" in
+        x86_64 | amd64) printf 'x86_64\n' ;;
+        aarch64 | arm64) printf 'aarch64\n' ;;
+        *) die "不支持的架构：${ARCH:-$(uname -m)}" ;;
+    esac
+}
+
 # 必须随包提供、缺一不可的文件（相对 AppDir）。
-REQUIRED_FILES=(
-    "usr/bin/HiFiShifter"
-    "usr/lib/HiFiShifter/libSoundTouchDLL.so"
-    "usr/lib/HiFiShifter/libwebgpu_dawn.so"
-    "usr/lib/HiFiShifter/models/models.json"
-)
+#
+# 【libwebgpu_dawn.so 为什么按架构区分】Linux ARM64 的 ort 刻意不带 webgpu
+# feature（没有预编译的 dawn，见 backend/src-tauri/Cargo.toml 的 target 分支；
+# scripts/plugin/unix/lib.sh 的 HFS_ARCH=arm64 分支是同一结论）——产物里既不会
+# 存在也不会 NEEDED dawn。无条件列进来会让 linux-arm64 发布腿在 verify 的
+# "文件存在" 与 "NEEDED 解析" 两处必挂，且 CI 的 if:failure() 兜底会把没过
+# 校验的 AppImage 照样上传。
+case "$(normalize_arch)" in
+    aarch64)
+        REQUIRED_FILES=(
+            "usr/bin/HiFiShifter"
+            "usr/lib/HiFiShifter/libSoundTouchDLL.so"
+            "usr/lib/HiFiShifter/models/models.json"
+        )
+        ;;
+    *)
+        REQUIRED_FILES=(
+            "usr/bin/HiFiShifter"
+            "usr/lib/HiFiShifter/libSoundTouchDLL.so"
+            "usr/lib/HiFiShifter/libwebgpu_dawn.so"
+            "usr/lib/HiFiShifter/models/models.json"
+        )
+        ;;
+esac
 
 # 必须由宿主提供、包内一份都不许留的库（glob，作用于 usr/lib 与 usr/lib64 顶层）。
 #
@@ -97,11 +123,24 @@ MUST_RESOLVE_HOST=(
 # 整段替换 RUNPATH）。随包存在性由 REQUIRED_FILES 断言，加载器的候选清单由
 # kernel 的 pack_layout_candidates_cover_every_bundled_location 单测钉死 ——
 # 两份清单必须互为镜像。
-MUST_RESOLVE_BUNDLE=(
-    libgtk-3.so.0
-    libgdk-3.so.0
-    libwebgpu_dawn.so
-)
+#
+# 【libwebgpu_dawn.so 为什么按架构区分】同上方 REQUIRED_FILES 的说明：
+# ARM64 Linux 没有 dawn，NEEDED 断言在该平台上必须跳过它。
+case "$(normalize_arch)" in
+    aarch64)
+        MUST_RESOLVE_BUNDLE=(
+            libgtk-3.so.0
+            libgdk-3.so.0
+        )
+        ;;
+    *)
+        MUST_RESOLVE_BUNDLE=(
+            libgtk-3.so.0
+            libgdk-3.so.0
+            libwebgpu_dawn.so
+        )
+        ;;
+esac
 
 usage() {
     cat <<'EOF'
@@ -125,14 +164,6 @@ note() {
 
 require_dir() {
     [ -d "$1" ] || die "不是目录：$1"
-}
-
-normalize_arch() {
-    case "${ARCH:-$(uname -m)}" in
-        x86_64 | amd64) printf 'x86_64\n' ;;
-        aarch64 | arm64) printf 'aarch64\n' ;;
-        *) die "不支持的架构：${ARCH:-$(uname -m)}" ;;
-    esac
 }
 
 # 找一个可用的 appimagetool：先看 PATH，再看缓存，最后下载。

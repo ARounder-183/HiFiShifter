@@ -34,7 +34,20 @@ import {
 } from "../../../utils/gainDb";
 import { formatCursorTime } from "./timeFormat";
 import type { TimeFormatContext } from "./timeFormat";
-import { MAX_ROW_HEIGHT, MIN_ROW_HEIGHT, TRACK_ADD_ROW_HEIGHT } from "./constants";
+import {
+    MAX_ROW_HEIGHT,
+    MIN_ROW_HEIGHT,
+    TRACK_ADD_ROW_HEIGHT,
+    WHEEL_ZOOM_IN_FACTOR,
+    WHEEL_ZOOM_OUT_FACTOR,
+} from "./constants";
+import {
+    createWheelZoomAccumulator,
+    resolveWheelZoomStep,
+    type WheelZoomAccumulator,
+} from "./kernel/input/wheelZoomIntent";
+import { normalizeWheelDelta } from "./kernel/input/normalizeWheel";
+import { WHEEL_LINE_HEIGHT_PX } from "../../../utils/pinchGesture";
 import { advanceFineAxisDrag, type FineAxisDragState } from "../../../utils/fineAxisDrag";
 import { shouldSuppressHoverSideEffects } from "../../../utils/penInput";
 import { AppTooltipBubble } from "../../AppTooltip";
@@ -482,6 +495,18 @@ const TrackListInner: React.FC<TrackListProps> = ({
         nextRowHeight: number;
         nextScrollTop: number;
     } | null>(null);
+    // 纵向缩放的「主轴 + 死区」累积器（组件生命周期内持续有效）。
+    //
+    // 【为什么不能用 `deltaY < 0 ? in : out`】该写法把 `deltaY = 0`（纯横向手势 /
+    // 纵向噪声归零）判成缩小，且对 precision touchpad 的变号小幅增量逐事件翻转
+    // 方向 —— 内核侧（timelineKernelHost 的 onWheel）已按 Windows 实测（行高
+    // 88 → 80 → 88 → 80 往复）改为带死区的累积判定；轨道头这块画布左邻的同一条
+    // Ctrl+滚轮缩放路径必须走同一判定，否则同一手势两半 UI 缩放手感不同。
+    const wheelZoomAccumulatorRef = useRef<WheelZoomAccumulator | null>(null);
+    if (wheelZoomAccumulatorRef.current === null) {
+        wheelZoomAccumulatorRef.current = createWheelZoomAccumulator();
+    }
+    const wheelZoomAccumulator = wheelZoomAccumulatorRef.current;
     const panRef = useRef<{
         pointerId: number | null;
         startY: number;
@@ -1012,10 +1037,24 @@ const TrackListInner: React.FC<TrackListProps> = ({
 
             if (verticalZoomRequested && setRowHeight) {
                 e.preventDefault();
-                const factor = e.deltaY < 0 ? 1.1 : 0.9;
+                const bounds = el.getBoundingClientRect();
+                // 与内核同一判定：死区累积 + 主轴方向，方向为 0（噪声）不触发。
+                // 增量先按 deltaMode 归一（Firefox 的 line/page 量纲不同），与
+                // timelineKernelHost.onWheel 同一套换算。
+                const wheelDeltaContext = {
+                    lineHeightPx: WHEEL_LINE_HEIGHT_PX,
+                    pageHeightPx: Math.max(1, bounds.height),
+                };
+                const zoomStep = resolveWheelZoomStep({
+                    accumulator: wheelZoomAccumulator,
+                    deltaX: normalizeWheelDelta(e.deltaX, e.deltaMode, wheelDeltaContext),
+                    deltaY: normalizeWheelDelta(e.deltaY, e.deltaMode, wheelDeltaContext),
+                });
+                if (zoomStep.direction === 0) return;
+                const factor =
+                    zoomStep.direction < 0 ? WHEEL_ZOOM_IN_FACTOR : WHEEL_ZOOM_OUT_FACTOR;
                 const baseRowHeight =
                     pendingVerticalZoomRef.current?.nextRowHeight ?? rowHeightRef.current;
-                const bounds = el.getBoundingClientRect();
                 const pointerY = Math.max(
                     0,
                     Math.min(Math.max(1, bounds.height), e.clientY - bounds.top),

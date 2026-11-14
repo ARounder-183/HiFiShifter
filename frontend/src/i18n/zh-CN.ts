@@ -1666,7 +1666,6 @@ export const zhCN = {
     appearance_font_search_placeholder: "搜索字体...",
     appearance_font_no_results: "未找到匹配字体",
     appearance_font_count: "已检测到 {count} 个字体",
-    appearance_reset: "重置",
     appearance_font_restore_default: "还原默认字体",
     appearance_apply: "应用",
     appearance_import_theme: "导入...",

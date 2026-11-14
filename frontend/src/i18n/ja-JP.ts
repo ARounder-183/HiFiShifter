@@ -1722,7 +1722,6 @@ export const jaJP = {
     appearance_font_search_placeholder: "フォント検索...",
     appearance_font_no_results: "一致するフォントが見つかりません",
     appearance_font_count: "{count} フォントを検出",
-    appearance_reset: "リセット",
     appearance_font_restore_default: "既定フォントに戻す",
     appearance_apply: "適用",
     appearance_import_theme: "インポート...",

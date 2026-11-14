@@ -562,7 +562,7 @@ function onPointerUp(event: PointerEvent): void {
         // 2) 按住修饰键 → 停靠；落空则回弹（什么都不做）。
         if (dockIntent) {
             if (!target) return;
-            commitDock(active.formId, target, active.mode, state.floatRect);
+            commitDock(active, target, active.mode, x, y, state.floatRect);
             return;
         }
         // 3) 拖出标签条 → 浮动，落在指针处。
@@ -582,7 +582,7 @@ function onPointerUp(event: PointerEvent): void {
 
     // 浮动窗体
     if (dockIntent && target) {
-        commitDock(active.formId, target, active.mode, state.floatRect);
+        commitDock(active, target, active.mode, x, y, state.floatRect);
         return;
     }
     const geometry = state.floatRect ?? active.floatStart;
@@ -608,23 +608,32 @@ function onPointerUp(event: PointerEvent): void {
  * "与另一枚浮窗组合成面板"。
  */
 function commitDock(
-    formId: string,
+    active: DragSession,
     target: DockDropTargetState,
     mode: "tab" | "float",
+    /** 松手时的指针视口坐标（浮出中间态按它落位，与"拖出即浮动"同口径）。 */
+    dropX: number,
+    dropY: number,
     /** 松手瞬间的"幽灵"矩形（指针处的浮窗预览）：组合时源窗体以它为准。 */
     pendingFloatRect?: DockRect | null,
 ): void {
+    const formId = active.formId;
     // ── 浮窗组合目标：拖到另一枚浮窗上 → 组合成面板 / 停入它的树 ──
     if (target.floatFormId) {
         if (mode === "tab") {
-            // 源还是停靠态：先按指针位置浮出（尺寸用记住的浮窗尺寸），再组合。
+            // 源还是停靠态：先按指针落点浮出（尺寸用记住的浮窗尺寸），再组合。
             // 两步在同一次事件里派发，中间态不可见。
-            const active = session;
+            //
+            // 【几何必须来自入参】本函数只在 onPointerUp 清掉拖拽会话
+            // （`session = null` / `endDockDrag()`）之后运行 —— 读模块级
+            // `session` 与拖拽 store 拿到的必然是 null，旧实现因此把该浮窗
+            // 记住的浮出几何覆盖成 0,0 420×320 回退值，之后再次浮出时
+            // "记住尺寸"的语义（见 beginTabDrag 的注释）就丢了。
             const geometry = {
-                x: Math.round(getDockDragState()?.pointerX ?? 0),
-                y: Math.round(getDockDragState()?.pointerY ?? 0),
-                w: active?.sourceSize.w ?? 420,
-                h: active?.sourceSize.h ?? 320,
+                x: Math.round(dropX - active.offsetX),
+                y: Math.round(dropY - active.offsetY),
+                w: active.sourceSize.w,
+                h: active.sourceSize.h,
             };
             store.dispatch(floatForm({ formId, geometry }));
         }

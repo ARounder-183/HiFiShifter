@@ -175,7 +175,6 @@ export const koKR = {
     appearance_font_search_placeholder: "글꼴 검색...",
     appearance_font_no_results: "일치하는 글꼴 없음",
     appearance_font_count: "{count}개 글꼴 감지됨",
-    appearance_reset: "초기화",
     appearance_font_restore_default: "기본 글꼴로 복원",
     appearance_apply: "적용",
     appearance_import_theme: "가져오기...",

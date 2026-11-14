@@ -644,14 +644,24 @@ export async function runEditOp(
                         values,
                     });
                 }
-                // 第一个真正写入的段打撤销点
-                await paramsApi.restoreParamFrames(
-                    rootTrackId,
-                    editParam,
-                    range.startFrame,
-                    range.frameCount,
-                    !restoredAny,
-                );
+                // 第一个真正写入的段打撤销点：只在后端确认写入成功后才算
+                // "消费过撤销点"，否则后面各段都带 checkpoint=false 写入，
+                // 整次剪切一个撤销步都没有（对齐 uploadFullResCurveSegments
+                // 只在确认成功后才清 isFirstChunk 的做法）。
+                // 传输层抛错（invoke 会 throw）同样只跳过该段，不中断后续段。
+                try {
+                    const restore = await paramsApi.restoreParamFrames(
+                        rootTrackId,
+                        editParam,
+                        range.startFrame,
+                        range.frameCount,
+                        !restoredAny,
+                    );
+                    if (!restore?.ok) continue;
+                } catch (err) {
+                    frontendLog("error", "[pianoRoll] cut restore failed", err);
+                    continue;
+                }
                 restoredAny = true;
             }
             if (segments.length > 0) {

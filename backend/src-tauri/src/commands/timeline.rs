@@ -142,6 +142,11 @@ fn import_audio_bytes_error(message: &str) -> crate::models::TimelineStatePayloa
     payload
 }
 
+/// `import_audio_bytes` 解码后的字节上限（1 GiB）。
+/// `MAX_IMPORT_AUDIO_BASE64_LEN` 是对应的 base64 文本长度上限（见 import_audio_bytes）。
+const MAX_IMPORT_AUDIO_BYTES: usize = 1024 * 1024 * 1024;
+const MAX_IMPORT_AUDIO_BASE64_LEN: usize = MAX_IMPORT_AUDIO_BYTES / 3 * 4 + 4;
+
 /// 导入素材的落点：工程素材目录 / 未保存会话目录（见 `hifishifter_kernel::media_paths`）。
 ///
 /// 【为什么不用临时目录】拖放导入走 `import_audio_bytes`：浏览器只给字节流，
@@ -212,6 +217,13 @@ pub(super) fn import_audio_bytes(
             track_id,
             start_sec
         );
+    }
+    // 长度先看，门禁在分配之前：与 notebook 模块的 `MAX_ASSET_BASE64_LEN` 同一理由，
+    // base64 解码会立刻分配 3/4 的输入长度。合法的拖放音频可达数百 MB，上限给到
+    // 解码后 1 GiB —— 超过它必然不是拖放误传，而是异常载荷（跑飞的渲染进程 /
+    // 被篡改的 IPC 调用），不能让它决定本进程的内存分配。
+    if base64_data.len() > MAX_IMPORT_AUDIO_BASE64_LEN {
+        return import_audio_bytes_error("import_audio_too_large");
     }
     let engine = base64::engine::general_purpose::STANDARD;
     // 解码/写盘失败必须显式报错返回：静默降级会让用户拿到一个时长为 0、

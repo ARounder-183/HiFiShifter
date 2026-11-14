@@ -1173,9 +1173,24 @@ export function usePianoRollInteractions(args: {
             if (!Number.isFinite(minF) || maxF < minF) return;
 
             const smoothCount = maxF - minF + 1;
-            const res = await paramsApi.getParamFrames(trackId, editParam, minF, smoothCount, 1);
-            if (!res?.ok) return;
-            const payload = res as ParamFramesPayload;
+            let payload: ParamFramesPayload;
+            try {
+                const res = await paramsApi.getParamFrames(
+                    trackId,
+                    editParam,
+                    minF,
+                    smoothCount,
+                    1,
+                );
+                if (!res?.ok) return;
+                payload = res as ParamFramesPayload;
+            } catch (err) {
+                // 与下方 setParamFrames 同一兜底：绘制后的自动平滑是增强步骤，
+                // 读帧的 IPC 失败同样只跳过平滑，不产生 unhandledrejection
+                // （主提交 commitStroke 已自兜底）。
+                frontendLog("error", "[applyPostStrokeSmoothing] failed:", err);
+                return;
+            }
             const vals = (payload.edit ?? []).map((v) => Number(v) || 0);
             if (vals.length === 0) return;
             const fpMs = Number(payload.frame_period_ms) || 5;

@@ -50,10 +50,36 @@ function parseClipboardObject(raw: string): ClipClipboardObject | ParamClipboard
     if (record.kind === "param") {
         return parseParamClipboardPayload(parsed);
     }
-    if (record.kind === "clip" && Array.isArray(record.templates)) {
-        return parsed as ClipClipboardObject;
+    if (record.kind === "clip" && isClipClipboardTemplates(record.templates)) {
+        // 槽位里可能躺着旧版本/外部进程写入的残缺载荷：templates 元素缺关键字段
+        // 就按"没有可粘贴的本类数据"处理（与文件头的解析纪律一致），而不是让
+        // 粘贴路径拿到 NaN 坐标/无名 clip。
+        return {
+            ...(parsed as Omit<ClipClipboardObject, "templates">),
+            templates: record.templates,
+        };
     }
     return null;
+}
+
+/**
+ * Clip 模板元素的最小形状校验：只盯粘贴路径**必用**的标量字段
+ * （`trackId`/`name`/`startSec`/`lengthSec`，见 `ClipTemplate` 的必填面），
+ * 其余可选字段交给消费方按 `Partial<ClipInfo>` 宽容处理。
+ */
+function isClipClipboardTemplates(value: unknown): value is ClipTemplate[] {
+    if (!Array.isArray(value)) return false;
+    return value.every(
+        (template): template is ClipTemplate =>
+            !!template &&
+            typeof template === "object" &&
+            typeof (template as ClipTemplate).trackId === "string" &&
+            typeof (template as ClipTemplate).name === "string" &&
+            typeof (template as ClipTemplate).startSec === "number" &&
+            Number.isFinite((template as ClipTemplate).startSec) &&
+            typeof (template as ClipTemplate).lengthSec === "number" &&
+            Number.isFinite((template as ClipTemplate).lengthSec),
+    );
 }
 
 function clipboardSummary(payload: SystemClipboardObject): string {

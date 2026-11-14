@@ -442,7 +442,17 @@ function Get-WebView2Bootstrapper {
     $cache = Join-Path $dist '_cache'
     New-Item -ItemType Directory -Force $cache | Out-Null
     $target = Join-Path $cache 'MicrosoftEdgeWebview2Setup.exe'
-    if (Test-Path $target) { return $target }
+    if (Test-Path $target) {
+        # 缓存命中同样要做体积极值校验：上次下载中途断掉会留下半截文件
+        #（-OutFile 不清理），无条件信任缓存等于把损坏的 bootstrapper 打进安装包。
+        $cachedSize = (Get-Item $target).Length
+        if ($cachedSize -lt 1MB) {
+            Remove-Item $target -Force
+            Write-Host "缓存的 WebView2 bootstrapper 不完整（只有 $cachedSize 字节），已删除并重新下载。" -ForegroundColor Yellow
+        } else {
+            return $target
+        }
+    }
     Write-Host '下载 WebView2 bootstrapper（约 1.7 MB）...' -ForegroundColor Cyan
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $target -UseBasicParsing

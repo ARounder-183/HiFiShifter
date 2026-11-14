@@ -46,6 +46,19 @@ export function loadAppearance(): AppearanceSettings {
             if (!THEME_MODE_SETTINGS.includes(settings.mode)) {
                 settings.mode = DEFAULT_APPEARANCE.mode;
             }
+            // accent / gray / radius 与 mode 同一批直喂 `<Theme>` 的取值，必须同样
+            // 过白名单：手改坏的存储值会生成一条没有 CSS 规则支撑的 Radix 类，
+            // 主题无声劣化。导入路径（importThemeFromJson）对这三项已有同样的
+            // 校验 —— 运行时存储路径不能是唯一漏网的入口。
+            if (!isValidAccentColor(settings.accentColor)) {
+                settings.accentColor = DEFAULT_APPEARANCE.accentColor;
+            }
+            if (!isValidGrayColor(settings.grayColor)) {
+                settings.grayColor = DEFAULT_APPEARANCE.grayColor;
+            }
+            if (!isValidRadius(settings.radius)) {
+                settings.radius = DEFAULT_APPEARANCE.radius;
+            }
             return settings;
         }
     } catch {

@@ -1669,7 +1669,6 @@ export const zhTW = {
     appearance_font_search_placeholder: "搜尋字型...",
     appearance_font_no_results: "找不到符合的字型",
     appearance_font_count: "已偵測到 {count} 個字型",
-    appearance_reset: "重設",
     appearance_font_restore_default: "還原預設字型",
     appearance_apply: "套用",
     appearance_import_theme: "匯入...",

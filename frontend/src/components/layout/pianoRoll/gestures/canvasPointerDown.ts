@@ -477,8 +477,16 @@ export function handleCanvasPointerDown(
                 ) {
                     const startX = e.clientX;
                     const startY = e.clientY;
+                    const pressPointerId = e.pointerId;
+                    // pointerup 与 pointercancel 都必须注销：pointercancel（触摸被打断 /
+                    // 掌压）不会触发 pointerup，监听器若残留，之后**任意**一次落点相近
+                    // 的抬笔都会把播放头拖回这次按下时的位置（幽灵 seek）。pointerId
+                    // 与 cancel 类型守卫与文件内其它 coalesced-up 检查同一口径。
                     const seekOnUp = (up: globalThis.PointerEvent) => {
                         window.removeEventListener("pointerup", seekOnUp, true);
+                        window.removeEventListener("pointercancel", seekOnUp, true);
+                        if (up.pointerId !== pressPointerId) return;
+                        if (up.type === "pointercancel") return;
                         if (Math.hypot(up.clientX - startX, up.clientY - startY) < 4) {
                             const sec = pointerSec(e.clientX);
                             dispatch(setPlayheadSec(sec));
@@ -486,6 +494,7 @@ export function handleCanvasPointerDown(
                         }
                     };
                     window.addEventListener("pointerup", seekOnUp, true);
+                    window.addEventListener("pointercancel", seekOnUp, true);
                 }
                 if (e.button === 2) {
                     e.preventDefault();

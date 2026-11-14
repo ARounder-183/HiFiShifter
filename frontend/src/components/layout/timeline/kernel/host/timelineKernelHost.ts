@@ -45,6 +45,7 @@
 
 import { PANEL_REATTACHED_EVENT } from "../../../../dock/useDockSlot";
 import { clipItemGain } from "../../clipGain";
+import { createElementValueWriter, shouldWrite } from "./timelineDomWriteGuards";
 import type { ClipInfo, TrackInfo } from "../../../../../features/session/sessionTypes";
 import {
     isModifierActive,
@@ -1501,63 +1502,6 @@ function resolveThemeRgba(name: string, fallback: string): Rgba {
     const parsed = parseRgbaColor(normalizeCssColor(raw));
     themeRgbaCache.set(raw, parsed);
     return parsed;
-}
-
-/**
- * 判断 DOM 写入值是否需要提交（值去重）。
- *
- * 【为什么用取反写法】去重变量以 `NaN` 表示「从未写入」，而 `NaN > eps` 恒为
- * **false**：直接写 `Math.abs(next - prev) > eps` 会把**首次**写入判定为
- * 「无需写入」而跳过，表现为标尺 / 播放头 / 细节层在第一次交互前完全不动
- * （后续也永远追不上，因为 `last` 一直是 NaN）。取反写法让 NaN 走「需要写入」分支。
- *
- * @param next 本次要写入的值。
- * @param previous 上一次写入的值（NaN = 从未写入）。
- * @param epsilon 视为「无变化」的最大差值。
- * @returns 需要写入时为 true。
- */
-function shouldWrite(next: number, previous: number, epsilon = 0.01): boolean {
-    return !(Math.abs(next - previous) <= epsilon);
-}
-
-/**
- * 「元素身份 + 值」双键去重的 DOM 写入器。
- *
- * 【为什么不能只按值去重】被同步的图层 / 滚动容器可能在宿主创建之后被 React
- * 重建（面板停靠重排会搬动 DOM、标尺随视图出现）。若元素被重建而值未变，纯值
- * 去重会判定「不必写」—— 新元素就停在静态位置（例如吸附高亮整层没有 transform、
- * 轨道头容器 scrollTop 仍是 0），直到值下一次变化为止。键加入元素身份后，元素一换
- * 就无条件写一次。与 `createPlayheadElementWriter` 同一契约，这里按值类型泛化。
- *
- * @param equals 值的相等判定（缺省 `Object.is`）。
- * @returns `(slot, element, value, apply)`；element 为 null 时丢弃该槽位，
- *          元素回来时无条件写一次。
- */
-function createElementValueWriter<T>(
-    equals: (a: T, b: T) => boolean = Object.is,
-): (
-    slot: string,
-    element: HTMLElement | null,
-    value: T,
-    apply: (target: HTMLElement, value: T) => void,
-) => void {
-    const slots = new Map<string, { element: HTMLElement; value: T }>();
-    return (slot, element, value, apply) => {
-        if (element === null) {
-            slots.delete(slot);
-            return;
-        }
-        const previous = slots.get(slot);
-        if (
-            previous !== undefined &&
-            previous.element === element &&
-            equals(previous.value, value)
-        ) {
-            return;
-        }
-        slots.set(slot, { element, value });
-        apply(element, value);
-    };
 }
 
 /**
@@ -3202,6 +3146,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               lengthSec: number;
               lastDeltaSec: number;
               lastFadeSec: number;
+              /**
+               * 上一次预览的指针 Y（视口坐标）。
+               *
+               * 【为什么必须参与去重】按住 `modifier.fadeCurvatureDrag`（默认 Alt）时
+               * 曲率由**指针 Y** 决定、X 完全不参与；只按 X 去重会让纵向拖动**只在 X
+               * 恰好变化的那几帧**才派发预览，手感就是"一顿一顿"（与
+               * `crossfade-grip` 的同款修复一致）。
+               */
+              lastClientY: number;
           }
         | {
               kind: "crossfade-grip";
@@ -4132,13 +4085,17 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 modifiers: dragModifiersOf(event),
                 container,
             });
-            if (!intercepted)
+            if (!intercepted) {
+                // 修饰键走统一解析（可改绑 / 互斥 / 物理 Alt 旁路），与其它
+                // onSelectClip 调用点同一契约；写死 Ctrl/Shift 会绕过用户的改绑。
+                const selectionMods = resolveSelectionMods(event);
                 interactions.onSelectClip?.(
                     overlapClickClipId ?? hit.clip.id,
-                    event.ctrlKey || event.metaKey,
-                    event.shiftKey,
+                    selectionMods.multiSelectToggleActive,
+                    selectionMods.rangeSelectActive,
                     event.clientX,
                 );
+            }
             return;
         }
         if (hit.kind === "clip") {
@@ -4701,6 +4658,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     lengthSec: gesture.lengthSec,
                     lastDeltaSec: Number.NaN,
                     lastFadeSec: gesture.originFadeSec,
+                    lastClientY: Number.NaN,
                 };
                 applyFadePreview(event);
                 return;
@@ -4932,9 +4890,21 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             currentSec: gesture.originFadeSec,
             lengthSec: gesture.lengthSec,
         });
-        if (result.deltaSec === gesture.lastDeltaSec) return;
+        // 【去重键必须把「曲率模式」算进来】按 `modifier.fadeCurvatureDrag`（默认 Alt）
+        // 拖拽时改的是**曲率**：求解输入是指针的 **Y**，X 不参与。只按 X 去重会让纵向
+        // 拖动只在 X 恰好变化的那几帧才派发预览——与 `crossfade-grip` 的同款修复。
+        const kb = data().keybindings;
+        const curvatureMode =
+            kb.fadeCurvatureDrag !== null && isModifierActive(kb.fadeCurvatureDrag, event);
+        if (
+            result.deltaSec === gesture.lastDeltaSec &&
+            (!curvatureMode || event.clientY === gesture.lastClientY)
+        ) {
+            return;
+        }
         gesture.lastDeltaSec = result.deltaSec;
         gesture.lastFadeSec = result.fadeSec;
+        gesture.lastClientY = event.clientY;
         const fadeClipId = gesture.clipId;
         interactions?.onFadePreview?.({
             clipId: fadeClipId,
@@ -5784,6 +5754,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     vScrollbarThumb.addEventListener("pointerdown", onVDown);
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
+    // pointercancel 与 pointerup 同收尾：数位笔抬笔 / 触摸被打断时若不解除
+    // dragAxis，后续**无按键**的指针移动会继续滚动视图（与中键平移、主手势
+    // 路径的 cancel 处理同一纪律）。
+    window.addEventListener("pointercancel", onPointerUp);
 
     /**
      * 造一个「点击轨道翻页」的按下处理器。
@@ -6105,8 +6079,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             const visible = entry.isIntersecting && entry.intersectionRatio > 0;
             if (visible && !wasVisible) {
                 // 刚回到可见：重新量一次尺寸、广播给各图层，并整帧重绘。
-                viewportWidthPx = Math.max(1, container.clientWidth || 1);
-                viewportHeightPx = Math.max(1, container.clientHeight || 1);
+                // 【唯一量测来源】与上方初始化、ResizeObserver 同口径
+                // （getBoundingClientRect 的分数值）；RO 在 CSS 尺寸未变时不会重发，
+                // 这里若用整数的 clientWidth，分数容器会让各图层错一个设备像素。
+                viewportWidthPx = Math.max(1, container.getBoundingClientRect().width);
+                viewportHeightPx = Math.max(1, container.getBoundingClientRect().height);
                 onViewportWidthChange?.(viewportWidthPx);
                 onViewportSizeChange?.(viewportWidthPx, viewportHeightPx);
                 scroll.reclamp();
@@ -6121,8 +6098,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     // 面板宿主被停靠层搬回来时整帧重绘（见 `useDockSlot` 的广播注释）。
     const onPanelReattached = () => {
-        viewportWidthPx = Math.max(1, container.clientWidth || 1);
-        viewportHeightPx = Math.max(1, container.clientHeight || 1);
+        // 与上方「唯一量测来源」同口径：getBoundingClientRect（见 IntersectionObserver 分支的说明）。
+        viewportWidthPx = Math.max(1, container.getBoundingClientRect().width);
+        viewportHeightPx = Math.max(1, container.getBoundingClientRect().height);
         onViewportWidthChange?.(viewportWidthPx);
         onViewportSizeChange?.(viewportWidthPx, viewportHeightPx);
         scroll.reclamp();
@@ -6423,6 +6401,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             vScrollbarTrack?.removeEventListener("pointerdown", onVTrackDown);
             window.removeEventListener("pointermove", onPointerMove);
             window.removeEventListener("pointerup", onPointerUp);
+            window.removeEventListener("pointercancel", onPointerUp);
             window.removeEventListener("pointermove", onPanPointerMove);
             window.removeEventListener("pointerup", endPan);
             window.removeEventListener("pointercancel", endPan);

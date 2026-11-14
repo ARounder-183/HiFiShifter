@@ -113,13 +113,21 @@ pub fn save_undo_history(state: &AppState, project_path: &Path) -> bool {
     let Some(target) = undo_file_path_for(project_path) else {
         return false;
     };
-    match fs::write(&target, bytes) {
+    // 原子写：先写临时文件再整体替换，与本仓其余持久化路径（app_config.json、
+    // capture 伴生文件、host-link 工作区）同一模式。直接 `fs::write` 目标的话，
+    // 进程被杀会留下半截文件 —— 而它名字上已是完整的，读取侧会把它当
+    // "无历史"静默吞掉，用户的撤销资产就此丢失且没有任何日志。
+    let tmp = target.with_extension("hfs-undo.tmp");
+    let result = fs::write(&tmp, bytes)
+        .and_then(|()| hifishifter_kernel::util::replace_file_atomically(&tmp, &target));
+    match result {
         Ok(()) => true,
         Err(error) => {
             log::warn!(
                 "[undo-history] write failed ({}): {error}",
                 target.display()
             );
+            let _ = fs::remove_file(&tmp);
             false
         }
     }

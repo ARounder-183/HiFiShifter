@@ -357,6 +357,11 @@ export function ActionBar() {
     /** 用户正在输入时置位，阻止显示值变化覆写输入草稿。 */
     const [bpmDirty, setBpmDirty] = useState(false);
 
+    /** 拍号分子输入草稿 —— 与 BPM 同一套手感：输入中不回写，失焦/回车提交。 */
+    const [beatsText, setBeatsText] = useState(() => String(Math.round(s.beats || 4)));
+    /** 用户正在输入时置位，阻止显示值变化覆写输入草稿。 */
+    const [beatsDirty, setBeatsDirty] = useState(false);
+
     // Tempo Map 存在时，BPM 显示为播放头位置的生效速度。
     const displayBpm = useMemo(() => {
         if (s.tempoMap && s.tempoMap.points.length > 0) {
@@ -460,6 +465,12 @@ export function ActionBar() {
     const displayBpmText = formatBpmValue(displayBpm);
     if (!bpmDirty && displayBpmText !== bpmText) {
         setBpmText(displayBpmText);
+    }
+    // 拍号分子同理：store 值（含播放期间 ~30 Hz 的 transport 轮询触发的重渲染）
+    // 不得覆写正在输入的草稿，否则受控输入会把用户键入的中间值顶回去。
+    const displayBeatsText = String(Math.round(displayBeats));
+    if (!beatsDirty && displayBeatsText !== beatsText) {
+        setBeatsText(displayBeatsText);
     }
 
     /**
@@ -604,6 +615,43 @@ export function ActionBar() {
         dispatch(setBpm(clamped));
         void dispatch(updateTransportBpm(clamped));
         setBpmText(formatBpmValue(clamped));
+    }
+
+    /**
+     * 拍号分子输入的提交（失焦/回车），返回提交后的有效值。
+     *
+     * 【为什么返回值】滚轮调值以"提交后的值"为基准（见下方 onWheel），
+     * 草稿未提交时先走这里再步进，避免滚轮与草稿分叉。
+     */
+    function commitBeats(nextText?: string): number {
+        const raw = (nextText ?? beatsText).trim();
+        const next = Number(raw);
+        setBeatsDirty(false);
+        if (!Number.isFinite(next)) {
+            setBeatsText(String(Math.round(displayBeats)));
+            return Math.round(displayBeats);
+        }
+        // 与旧 onChange 同一口径：本地先钳制，避免把离谱值发给后端。
+        const clamped = Math.min(32, Math.max(1, Math.round(next)));
+        setBeatsText(String(clamped));
+        if (clamped === Math.round(displayBeats)) return clamped;
+        if (s.tempoMap && s.tempoMap.points.length > 0) {
+            updateTempoPointAtPlayhead({
+                timeSignature: {
+                    numerator: clamped,
+                    denominator: displayDenominator,
+                },
+            });
+            return clamped;
+        }
+        void dispatch(
+            setProjectTimelineSettingsRemote({
+                beatsPerBar: clamped,
+                timeSignatureDenominator: displayDenominator,
+                gridSize: s.grid,
+            }),
+        );
+        return clamped;
     }
 
     function formatRecordingTime(seconds: number): string {
@@ -851,47 +899,36 @@ export function ActionBar() {
                             <TextField.Root
                                 size="1"
                                 type="number"
-                                value={String(displayBeats)}
+                                value={beatsText}
                                 data-tooltip={
                                     s.tempoMap && s.tempoMap.points.length > 0
                                         ? tf("tempo_map_actionbar_tip")
                                         : undefined
                                 }
                                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
-                                    const raw = e.target.value.trim();
-                                    const parsed = Number(raw);
-                                    if (!Number.isFinite(parsed)) return;
-                                    // Clamp locally to avoid sending huge values to backend
-                                    const clamped = Math.min(32, Math.max(1, Math.round(parsed)));
-                                    // 与显示值比较（Tempo Map 下为播放头位置生效值）。
-                                    if (clamped === Math.round(displayBeats)) return;
-                                    if (s.tempoMap && s.tempoMap.points.length > 0) {
-                                        updateTempoPointAtPlayhead({
-                                            timeSignature: {
-                                                numerator: clamped,
-                                                denominator: displayDenominator,
-                                            },
-                                        });
-                                        return;
+                                    setBeatsDirty(true);
+                                    setBeatsText(e.target.value);
+                                }}
+                                onBlur={() => commitBeats()}
+                                onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+                                    if (e.key === "Enter") {
+                                        e.preventDefault();
+                                        commitBeats();
+                                        (e.currentTarget as HTMLInputElement).blur();
+                                    } else if (e.key === "Escape") {
+                                        e.preventDefault();
+                                        setBeatsDirty(false);
+                                        setBeatsText(String(Math.round(displayBeats)));
+                                        (e.currentTarget as HTMLInputElement).blur();
                                     }
-                                    void dispatch(
-                                        setProjectTimelineSettingsRemote({
-                                            beatsPerBar: clamped,
-                                            timeSignatureDenominator: displayDenominator,
-                                            gridSize: s.grid,
-                                        }),
-                                    );
                                 }}
                                 onWheel={(e: React.WheelEvent<HTMLInputElement>) => {
                                     e.preventDefault();
                                     e.stopPropagation();
                                     const direction = e.deltaY < 0 ? 1 : -1;
-                                    // 基础值取播放头位置的生效值（Tempo Map 下为最近变化点），
-                                    // 与 BPM / 基准音阶一致。
-                                    const current = Math.max(
-                                        1,
-                                        Math.min(32, Math.round(displayBeats)),
-                                    );
+                                    // 输入草稿先提交：滚轮以提交后的值为基准步进，
+                                    // 草稿与 store 不会分叉（与 BPM 字段同一纪律）。
+                                    const current = Math.max(1, Math.min(32, commitBeats()));
                                     const next = Math.max(1, Math.min(32, current + direction));
                                     if (next === current) return;
                                     if (s.tempoMap && s.tempoMap.points.length > 0) {

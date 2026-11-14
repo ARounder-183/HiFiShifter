@@ -1,5 +1,5 @@
 import { clamp } from "../../../timeline";
-import { startPointerGesture, type PointerGesture } from "../pointerGesture";
+import { startPointerGesture, type GestureEndReason, type PointerGesture } from "../pointerGesture";
 import { isDynParam } from "../../paramRanges";
 import {
     frameBoundLeftFromPointer,
@@ -371,13 +371,29 @@ export function handleStretchSelectionEdge(
         }
     };
 
-    const onEnd = () => {
+    const onEnd = (reason: GestureEndReason) => {
         edgeScroll.stop();
         disposeFineAdjustedPointerState(finePointerState);
         // 取消挂起的预览帧：松手后的提交路径负责重建。
         if (previewRafId != null) {
             cancelAnimationFrame(previewRafId);
             previewRafId = null;
+        }
+        // OS 取消（pointercancel / 失焦登记的 cancel）：手势不可信 —— **回滚**
+        // 而不是把半截拉伸写进后端，与自由绘制 / 块拖拽 / 选区平移的 cancel
+        // 分支同一语义。预览已把选区改写过（runPreviewStep 重建 selectionRef）
+        // 并写了 live 覆盖层，必须一并还原；不能再消费挂起的游标。
+        if (reason === "cancel") {
+            liveEditOverrideRef.current = null;
+            if (liveEditActiveRef) {
+                liveEditActiveRef.current = false;
+            }
+            selectionRef.current = stretchBaseSelection;
+            updateSelectionUi(stretchBaseSelection);
+            requestWaveformRepaint();
+            setCanvasCursor("default");
+            invalidate();
+            return;
         }
         // 提交前先同步消费挂起的游标：边界标量（stretchStartBound /
         // stretchEndBound）只在 runPreviewStep 里更新，若松手与越过

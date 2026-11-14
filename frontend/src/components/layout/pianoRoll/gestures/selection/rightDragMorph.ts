@@ -303,6 +303,19 @@ export function handleRightDragMorph(deps: Deps, e: ReactPointerEvent<HTMLCanvas
             return;
         }
 
+        // OS 取消（pointercancel / 失焦登记的 cancel）：手势不可信 —— **回滚**
+        // 而不是把半截变形写进后端，与自由绘制 / 块拖拽 / 选区平移的 cancel
+        // 分支同一语义。右键变形不改选区，只需丢弃 live 覆盖层。
+        if (reason === "cancel") {
+            liveEditOverrideRef.current = null;
+            if (liveEditActiveRef) {
+                liveEditActiveRef.current = false;
+            }
+            setCanvasCursor("grab");
+            invalidate();
+            return;
+        }
+
         // 释放后按下的 contextmenu 一律吞掉（右键拖拽
         // 的收尾手势）；先注册再走后续早退分支，避免
         // 异常退出时弹出原生菜单。

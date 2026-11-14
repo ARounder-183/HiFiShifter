@@ -336,24 +336,23 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
         (e: React.KeyboardEvent<HTMLInputElement>) => {
             if (matchKey(e, keybindings["quickSearch.navigate.down"])) {
                 e.preventDefault();
-                setSelectedIndex((prev) => {
-                    const next = Math.min(prev + 1, sortedResults.length - 1);
-                    const entry = sortedResults[next];
-                    if (entry && isAudioFile(entry)) {
-                        playPreview(entry.path);
-                    }
-                    return next;
-                });
+                // 【updater 必须纯】预览是有副作用的调用：StrictMode 下 updater 会被
+                // 调用两次（并发渲染也可能重放），副作用放进 updater 会双触发。
+                // 先算好 next，副作用在 setState 之外执行。
+                const next = Math.min(selectedIndex + 1, sortedResults.length - 1);
+                const entry = sortedResults[next];
+                if (entry && isAudioFile(entry)) {
+                    playPreview(entry.path);
+                }
+                setSelectedIndex(next);
             } else if (matchKey(e, keybindings["quickSearch.navigate.up"])) {
                 e.preventDefault();
-                setSelectedIndex((prev) => {
-                    const next = Math.max(prev - 1, 0);
-                    const entry = sortedResults[next];
-                    if (entry && isAudioFile(entry)) {
-                        playPreview(entry.path);
-                    }
-                    return next;
-                });
+                const next = Math.max(selectedIndex - 1, 0);
+                const entry = sortedResults[next];
+                if (entry && isAudioFile(entry)) {
+                    playPreview(entry.path);
+                }
+                setSelectedIndex(next);
             } else if (matchKey(e, keybindings["quickSearch.preview"])) {
                 // 预览试听（仅当有结果时）
                 if (sortedResults.length > 0) {

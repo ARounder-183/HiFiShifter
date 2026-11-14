@@ -1844,7 +1844,6 @@ export const enUS = {
     appearance_font_search_placeholder: "Search fonts...",
     appearance_font_no_results: "No matching fonts found",
     appearance_font_count: "{count} fonts detected",
-    appearance_reset: "Reset",
     appearance_font_restore_default: "Restore Default Font",
     appearance_apply: "Apply",
     appearance_import_theme: "Import...",

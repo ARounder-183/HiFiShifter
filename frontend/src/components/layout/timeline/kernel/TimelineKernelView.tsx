@@ -811,11 +811,16 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         if (inlineEdit == null) return;
         const host = localHostRef.current;
         if (host == null) return;
-        const anchor = host.getClipHeaderAnchor(inlineEdit.clipId, inlineEdit.field);
-        if (anchor == null) return;
+        if (host.getClipHeaderAnchor(inlineEdit.clipId, inlineEdit.field) == null) return;
         const reposition = (axis: TimelineAxis): void => {
             const el = inlineEditorRef.current;
             if (el == null) return;
+            // 【每次绘制都重取锚点，不能用挂载时捕获的那份】锚点的 contentLeftPx 含
+            // `pxPerSec` 换算：编辑期间滚轮缩放（内核容器内的 wheel 缩放可达）会让
+            // 捕获值整体漂移，输入框就不再跟着 clip 走。宿主按数据镜像现算
+            // （O(轨道查找)），每次绘制重取的成本可忽略；clip 中途消失则保持原位。
+            const anchor = host.getClipHeaderAnchor(inlineEdit.clipId, inlineEdit.field);
+            if (anchor == null) return;
             // 宽度与位置一起写：把宽度留给 React state 会让「挂载」与「拿到宽度」
             // 分成两次渲染，切换编辑目标时出现"状态已更新但浮层没出现"的空档。
             el.style.width = `${anchor.widthPx}px`;

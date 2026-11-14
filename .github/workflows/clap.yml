@@ -132,4 +132,6 @@ jobs:
           path: |
             dist/clap/**
             dist/HiFiShifter_*clap*
-          if-no-files-found: warn
+          # 本 job 的唯一交付物就是这份产物：glob 与脚本输出布局漂移时必须当场红，
+          # 不能 warn 后带着空产物绿灯（build.yml 的上传全部用 error，同一纪律）。
+          if-no-files-found: error

@@ -462,6 +462,15 @@ export function AppContextMenu({
             // （表现为输入一个空格反而触发了某条菜单并关掉整窗）。
             if (event.defaultPrevented) return;
             if (ownsArrowKeys(document.activeElement)) return;
+            // 焦点已经坐进**另一层菜单表面**（嵌套子面板用真实 DOM 焦点导航并
+            // 自己处理激活）：本层的 activeIndex 还停在触发项上 —— 不让路的
+            // 话，Enter 会被当成"再点一次触发项"，把刚展开的子菜单关回去，
+            // 子菜单项从此无法用键盘激活（键盘用户只能用鼠标开子菜单）。
+            const focused = document.activeElement;
+            if (focused instanceof HTMLElement) {
+                const surface = focused.closest<HTMLElement>('[data-hs-context-menu="1"]');
+                if (surface !== null && surface !== ref.current) return;
+            }
             const index = activeIndex;
             if (index < 0) return;
             const item = items[index];
@@ -999,19 +1008,41 @@ export function AppAnchoredMenu({
         const el = menuRef.current;
         const anchor = anchorRef.current;
         if (!el || !anchor) return;
-        const anchorRect = anchor.getBoundingClientRect();
-        const rect = el.getBoundingClientRect();
-        setPosition({
-            left: clampAxisPosition(anchorRect.left, rect.width, window.innerWidth, 0, EDGE_GAP),
-            top: clampAxisPosition(
-                anchorRect.bottom + ANCHORED_MENU_GAP_PX,
-                rect.height,
-                window.innerHeight,
-                0,
-                EDGE_GAP,
-            ),
-        });
-    }, [open, anchorRef, menuRef]);
+        const reclamp = () => {
+            const anchorRect = anchor.getBoundingClientRect();
+            const rect = el.getBoundingClientRect();
+            const next = {
+                left: clampAxisPosition(
+                    anchorRect.left,
+                    rect.width,
+                    window.innerWidth,
+                    0,
+                    EDGE_GAP,
+                ),
+                top: clampAxisPosition(
+                    anchorRect.bottom + ANCHORED_MENU_GAP_PX,
+                    rect.height,
+                    window.innerHeight,
+                    0,
+                    EDGE_GAP,
+                ),
+            };
+            // 值不变就不落新对象：调用方的 items 数组常是逐渲染重建的（如录音菜单），
+            // items 进依赖后重夹紧会跟着每次渲染跑；无守卫的 setPosition 会反过来
+            // 再触发渲染，形成"渲染 → 重夹 → 渲染"的循环。
+            setPosition((prev) => (prev.left === next.left && prev.top === next.top ? prev : next));
+        };
+        reclamp();
+        /*
+         * 打开期间**内容**与**视口**都可能变：录音菜单在打开的同一拍里异步枚举
+         * 设备/应用，列表落地的瞬间 items 变长 —— 原先只在 open 翻真时测一次，
+         * 菜单底部可能顶出视口。items 本身（而非 length）进依赖，覆盖"标签变长
+         * 换行 → 菜单变高"这类条数不变但几何变了的情况；resize 重夹与
+         * AppContextMenu 同一理由（窗口缩小后菜单不得整张跑出屏幕）。
+         */
+        window.addEventListener("resize", reclamp);
+        return () => window.removeEventListener("resize", reclamp);
+    }, [open, anchorRef, menuRef, items]);
 
     if (!open) return null;
 

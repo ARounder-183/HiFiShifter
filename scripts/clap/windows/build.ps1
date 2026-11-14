@@ -9,6 +9,11 @@ $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\.."))
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\.."))
 Push-Location (Join-Path $root "backend")
 try { cargo build -p hifishifter-clap --release --locked } finally { Pop-Location }
+# PowerShell 不因原生命令的非零退出而抛错（$ErrorActionPreference 只管 cmdlet）；
+# 不检查 $LASTEXITCODE 的话，编译失败时下面的 Copy-Item 会把**上一次构建的旧
+# hifishifter_clap.dll** 静默打包成"新"插件（verify.ps1 对任何有效旧构建都放行）
+# —— 与 build.ps1 的 Assert-Ok 纪律同一理由。
+if ($LASTEXITCODE -ne 0) { throw "cargo build -p hifishifter-clap failed (exit $LASTEXITCODE)" }
 $module = Join-Path $root "backend\target\release\hifishifter_clap.dll"
 $outDir = Join-Path $root "dist\clap"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null

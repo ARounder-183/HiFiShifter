@@ -5,6 +5,7 @@ import {
     GAIN_MAX_DB,
     GAIN_MAX_LINEAR,
     GAIN_MIN_DB,
+    GAIN_TAPER_FLOOR_DB,
     clampGain,
     formatGainDbLabel,
     formatGainDbValue,
@@ -32,6 +33,10 @@ test("utils/gainDb.test.ts scripted checks", () => {
     near(gainKnobAngleDeg(0), 0, "0 dB 的指示线竖直向上");
     near(gainKnobAngleDeg(GAIN_MAX_DB), 135, "上界偏转 +135°");
     near(gainKnobAngleDeg(GAIN_MIN_DB), -135, "下界偏转 −135°");
+    // 负值按锥度铺满下半程（−60..0 ⇒ −135°..0°），不是恒停在弧底。
+    near(gainKnobAngleDeg(-6), -13.5, "−6 dB 指示线按 −60..0 锥度落在 −13.5°");
+    near(gainKnobAngleDeg(GAIN_TAPER_FLOOR_DB), -135, "锥度下界恰好铺满到弧底");
+    near(gainKnobAngleDeg(GAIN_MIN_DB + 1), -135, "低于锥度下界（如手输 −149）停在弧底");
 
     // ── 拖拽手感：全程行程与值域无关，且与旧实现（96px）一致 ───────────
     // 从 0 dB 往上推 48px 恰好到顶（旧实现 ±12dB @ 0.25dB/px 也是 48px 到顶）。
@@ -50,6 +55,23 @@ test("utils/gainDb.test.ts scripted checks", () => {
     // 越界钳制。
     near(gainDbFromKnobTravel(0, 10_000), GAIN_MAX_DB, "推到天上去也只到上界");
     near(gainDbFromKnobTravel(0, -10_000), 0, "推到地下只到静音（棘齿）");
+
+    // ── 负值起点：归一化行程必须从**锥度下界**起算 ────────────────────
+    // （回归：曾把 −GAIN_TAPER_FLOOR_DB（+60）写进 max，导致任何负起点都被算成
+    // 行程顶 u=1，轻拖一下就把全部选中 clip 的增益顶到 +24 dB。）
+    near(gainDbFromKnobTravel(-6, 0), -6, "负起点原位不动必须返回原值", 1e-3);
+    // −6 dB 在下半程的位置：u = −6/60 = −0.1；上推 48px → u = 0.9 → +21.67 dB。
+    near(gainDbFromKnobTravel(-6, 48), 0.9 * GAIN_MAX_DB, "−6 dB 上推 48px 到 u=0.9", 1e-3);
+    // 下拉不越过棘齿时仍沿锥度走：u = −0.1 − 42/48 = −0.975 → −58.5 dB。
+    near(gainDbFromKnobTravel(-6, -42), -58.5, "−6 dB 下拉 42px 落在锥度上", 1e-3);
+    near(gainDbFromKnobTravel(-6, -48), 0, "−6 dB 下拉 48px 越过棘齿落静音");
+    // 低于锥度下界的起点按弧底算：第一像素上拉应落在弧底区（−58.75 dB），
+    // 而不是被旧 bug 顶到行程顶（+24 dB）；零位移则按棘齿语义落静音。
+    near(gainDbFromKnobTravel(-140, 1), -58.75, "低于锥度下界的起点按弧底算（第一像素上拉）", 1e-3);
+    near(gainDbFromKnobTravel(-140, -1), 0, "弧底再往下只落静音（棘齿）");
+    // 往返一致：从负起点推上去再拉回来。
+    const down = gainDbFromKnobTravel(-6, 10);
+    near(gainDbFromKnobTravel(down, -10), -6, "负起点的同段位移往返必须回到原点", 1e-3);
 
     // ── 展示文本：REAPER 口径（−150 以下才是 −inf）─────────────────────
     near(GAIN_MIN_DB, GAIN_DISPLAY_FLOOR_DB, "显示下界是 −150 dB");

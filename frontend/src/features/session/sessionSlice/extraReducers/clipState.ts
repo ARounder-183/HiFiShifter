@@ -304,6 +304,9 @@ export function registerClipState(builder: ActionReducerMapBuilder<SessionState>
             const takes = clip.takes ?? [];
             const take = takes.find((entry) => entry.id === action.meta.arg.takeId);
             if (!take) return;
+            // 失败回滚快照：UI 与音频引擎不得长期分裂（与 cycleClipTakes 同一
+            // 纪律，见 helpersTakes 的说明）。
+            captureTakeRollback(state, [action.meta.arg.clipId]);
             if (take.reversed !== action.meta.arg.reversed) {
                 flipTakeSourceWindowForDirection(take, clip.lengthSec, clip.clipPlaybackRate ?? 1);
             }
@@ -314,17 +317,26 @@ export function registerClipState(builder: ActionReducerMapBuilder<SessionState>
         })
         .addCase(setClipTakeReversedRemote.fulfilled, (state, action) => {
             // 过期守卫：见 setClipActiveTakeRemote.fulfilled。
-            if (takeRequestIsStale(state, action.meta.requestId)) return;
+            if (takeRequestIsStale(state, action.meta.requestId)) {
+                clearTakeRollback([action.meta.arg.clipId]);
+                return;
+            }
             const payload = action.payload as { ok?: boolean } & TimelineState;
             if (!payload.ok) {
+                restoreTakeRollback(state, [action.meta.arg.clipId]);
                 state.error = "Take reverse rejected";
                 state.status = "Failed";
                 return;
             }
+            clearTakeRollback([action.meta.arg.clipId]);
             applyTimelineStatePreservingPlayhead(state, payload);
         })
         .addCase(setClipTakeReversedRemote.rejected, (state, action) => {
-            if (takeRequestIsStale(state, action.meta.requestId)) return;
+            if (takeRequestIsStale(state, action.meta.requestId)) {
+                clearTakeRollback([action.meta.arg.clipId]);
+                return;
+            }
+            restoreTakeRollback(state, [action.meta.arg.clipId]);
             setRejected(state, action);
         })
 
@@ -337,6 +349,8 @@ export function registerClipState(builder: ActionReducerMapBuilder<SessionState>
             const takes = clip.takes ?? [];
             const take = takes.find((entry) => entry.id === action.meta.arg.takeId);
             if (!take) return;
+            // 失败回滚快照：与 reversed 同一纪律。
+            captureTakeRollback(state, [action.meta.arg.clipId]);
             take.channelMode = normalizeChannelMode(action.meta.arg.channelMode);
             if (take.id === clip.activeTakeId) {
                 applyActiveTakeToFlat(clip, take);
@@ -344,17 +358,26 @@ export function registerClipState(builder: ActionReducerMapBuilder<SessionState>
         })
         .addCase(setClipTakeChannelModeRemote.fulfilled, (state, action) => {
             // 过期守卫：见 setClipActiveTakeRemote.fulfilled。
-            if (takeRequestIsStale(state, action.meta.requestId)) return;
+            if (takeRequestIsStale(state, action.meta.requestId)) {
+                clearTakeRollback([action.meta.arg.clipId]);
+                return;
+            }
             const payload = action.payload as { ok?: boolean } & TimelineState;
             if (!payload.ok) {
+                restoreTakeRollback(state, [action.meta.arg.clipId]);
                 state.error = "Take channel mode rejected";
                 state.status = "Failed";
                 return;
             }
+            clearTakeRollback([action.meta.arg.clipId]);
             applyTimelineStatePreservingPlayhead(state, payload);
         })
         .addCase(setClipTakeChannelModeRemote.rejected, (state, action) => {
-            if (takeRequestIsStale(state, action.meta.requestId)) return;
+            if (takeRequestIsStale(state, action.meta.requestId)) {
+                clearTakeRollback([action.meta.arg.clipId]);
+                return;
+            }
+            restoreTakeRollback(state, [action.meta.arg.clipId]);
             setRejected(state, action);
         })
 
