@@ -117,7 +117,11 @@ pub fn save_undo_history(state: &AppState, project_path: &Path) -> bool {
     // capture 伴生文件、host-link 工作区）同一模式。直接 `fs::write` 目标的话，
     // 进程被杀会留下半截文件 —— 而它名字上已是完整的，读取侧会把它当
     // "无历史"静默吞掉，用户的撤销资产就此丢失且没有任何日志。
-    let tmp = target.with_extension("hfs-undo.tmp");
+    // 临时名必须逐工程唯一：两个同 stem 的工程同时保存不能共用一个 .tmp，
+    // 也不能用 with_extension 改掉工程名里的点（foo.bar.hshp-UNDO → foo.bar.tmp）。
+    let mut tmp_name = target.as_os_str().to_os_string();
+    tmp_name.push(format!(".hfs-undo-{}.tmp", std::process::id()));
+    let tmp = PathBuf::from(tmp_name);
     let result = fs::write(&tmp, bytes)
         .and_then(|()| hifishifter_kernel::util::replace_file_atomically(&tmp, &target));
     match result {

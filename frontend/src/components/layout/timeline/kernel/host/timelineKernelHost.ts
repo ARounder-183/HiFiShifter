@@ -5694,6 +5694,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     // ── 输入：滚动条拖拽 ─────────────────────────────────────────────
     let dragAxis: "x" | "y" | null = null;
+    let dragPointerId: number | null = null;
     let dragStartPointer = 0;
     let dragStartScroll = 0;
 
@@ -5706,6 +5707,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             event.preventDefault();
             event.stopPropagation();
             dragAxis = axis;
+            dragPointerId = event.pointerId;
             dragStartPointer = axis === "x" ? event.clientX : event.clientY;
             dragStartScroll = axis === "x" ? scroll.get().scrollLeft : scroll.get().scrollTop;
             (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
@@ -5740,12 +5742,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     }
 
     function onPointerMove(event: PointerEvent): void {
-        if (dragAxis === null) return;
+        if (dragAxis === null || event.pointerId !== dragPointerId) return;
         applyThumbDrag((dragAxis === "x" ? event.clientX : event.clientY) - dragStartPointer);
     }
 
-    function onPointerUp(): void {
+    function onPointerUp(event: PointerEvent): void {
+        // 只收起手的那枚指针：另一根手指 / 另一支笔的 pointercancel 不能把
+        // 正在拖滚动条的这本手势半路取消（与 pointerup 同一份判据）。
+        if (event.pointerId !== dragPointerId) return;
         dragAxis = null;
+        dragPointerId = null;
     }
 
     const onHDown = makeThumbPointerDown("x");

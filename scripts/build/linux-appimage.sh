@@ -51,13 +51,23 @@ set -euo pipefail
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SELF_DIR/../.." && pwd)
 
+die() {
+    printf 'error: %s\n' "$*" >&2
+    exit 1
+}
+
+HFS_APP_ARCH=""
 normalize_arch() {
+    # 【为什么写进变量而不是 stdout】顶层数组会调用两次本函数；非法 ARCH 时若在
+    # 命令替换的子 shell 里 die，外层只看到一次失败却会继续跑 usage，且报错重复。
+    # 这里在**当前 shell**解析一次并直接退出，后面统一复用这份结果。
     case "${ARCH:-$(uname -m)}" in
-        x86_64 | amd64) printf 'x86_64\n' ;;
-        aarch64 | arm64) printf 'aarch64\n' ;;
+        x86_64 | amd64) HFS_APP_ARCH=x86_64 ;;
+        aarch64 | arm64) HFS_APP_ARCH=aarch64 ;;
         *) die "不支持的架构：${ARCH:-$(uname -m)}" ;;
     esac
 }
+normalize_arch
 
 # 必须随包提供、缺一不可的文件（相对 AppDir）。
 #
@@ -67,7 +77,7 @@ normalize_arch() {
 # 存在也不会 NEEDED dawn。无条件列进来会让 linux-arm64 发布腿在 verify 的
 # "文件存在" 与 "NEEDED 解析" 两处必挂，且 CI 的 if:failure() 兜底会把没过
 # 校验的 AppImage 照样上传。
-case "$(normalize_arch)" in
+case "$HFS_APP_ARCH" in
     aarch64)
         REQUIRED_FILES=(
             "usr/bin/HiFiShifter"
@@ -126,7 +136,7 @@ MUST_RESOLVE_HOST=(
 #
 # 【libwebgpu_dawn.so 为什么按架构区分】同上方 REQUIRED_FILES 的说明：
 # ARM64 Linux 没有 dawn，NEEDED 断言在该平台上必须跳过它。
-case "$(normalize_arch)" in
+case "$HFS_APP_ARCH" in
     aarch64)
         MUST_RESOLVE_BUNDLE=(
             libgtk-3.so.0
@@ -151,11 +161,6 @@ usage() {
   linux-appimage.sh repack  <AppDir> [out]  用 appimagetool 重新生成 AppImage
   linux-appimage.sh smoke   <AppImage>      在 xvfb 下启动，要求出现启动日志且没有 abort
 EOF
-}
-
-die() {
-    printf 'error: %s\n' "$*" >&2
-    exit 1
 }
 
 note() {
@@ -322,12 +327,12 @@ cmd_repack() {
             local version product
             version=$(jq -r '.version' "$REPO_ROOT/backend/src-tauri/tauri.conf.json")
             product=$(jq -r '.productName' "$REPO_ROOT/backend/src-tauri/tauri.conf.json")
-            output="$(dirname "$appdir")/${product// /_}_${version}_$(normalize_arch).AppImage"
+            output="$(dirname "$appdir")/${product// /_}_${version}_${HFS_APP_ARCH}.AppImage"
         fi
     fi
 
     local arch tool
-    arch=$(normalize_arch)
+    arch="$HFS_APP_ARCH"
     tool=$(ensure_appimagetool "$arch")
 
     rm -f -- "$output"

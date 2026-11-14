@@ -41,7 +41,19 @@ export function loadAppearance(): AppearanceSettings {
         const raw = readUiValue(APPEARANCE_KEY);
         if (raw) {
             const parsed = JSON.parse(raw) as Partial<AppearanceSettings>;
+            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+                return { ...DEFAULT_APPEARANCE };
+            }
             const settings = { ...DEFAULT_APPEARANCE, ...parsed };
+            if (typeof settings.fontFamily !== "string" || settings.fontFamily.length > 512) {
+                settings.fontFamily = DEFAULT_APPEARANCE.fontFamily;
+            }
+            if (
+                settings.activeCustomThemeId !== null &&
+                typeof settings.activeCustomThemeId !== "string"
+            ) {
+                settings.activeCustomThemeId = DEFAULT_APPEARANCE.activeCustomThemeId;
+            }
             // mode 只接受合法值（旧数据 dark/light 仍有效；脏数据回退默认）。
             if (!THEME_MODE_SETTINGS.includes(settings.mode)) {
                 settings.mode = DEFAULT_APPEARANCE.mode;

@@ -279,7 +279,9 @@ export function createPluginHost(
                 if (!pending.delete(id)) return;
                 if (isBackgroundRequest(slot.command)) activeBackground -= 1;
                 slot.reject(new Error("Plugin command timed out: " + slot.command));
-                pump();
+                // bridge 已关闭时不再 pump：dispose 已清空所有队列，重入只会
+                // 在关闭后的发送路径上制造无意义的 reject / 原生消息。
+                if (!closed) pump();
             }, commandTimeoutMs(slot.command));
             try {
                 const message = {

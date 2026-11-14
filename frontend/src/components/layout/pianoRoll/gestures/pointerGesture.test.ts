@@ -58,6 +58,18 @@ test("取消收尾带 cancel 原因，让调用方回滚而不是提交", () => 
     expect(onEnd.mock.calls[0][0]).toBe("cancel");
 });
 
+test("其它指针的松手 / 取消不得结束当前手势", () => {
+    const onEnd = vi.fn();
+    const gesture = startPointerGesture({ pointerId: 1, onMove: vi.fn(), onEnd });
+    window.dispatchEvent(pointerEvent("pointerup", 2));
+    window.dispatchEvent(pointerEvent("pointercancel", 2));
+    expect(gesture.active).toBe(true);
+    expect(onEnd).not.toHaveBeenCalled();
+    window.dispatchEvent(pointerEvent("pointerup", 1));
+    expect(onEnd).toHaveBeenCalledTimes(1);
+    expect(onEnd.mock.calls[0][0]).toBe("up");
+});
+
 test("主动收尾是幂等的（三条收尾路径会竞争）", () => {
     const onEnd = vi.fn();
     const gesture = startPointerGesture({ pointerId: 1, onMove: vi.fn(), onEnd });

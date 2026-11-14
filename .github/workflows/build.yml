@@ -542,8 +542,16 @@ jobs:
             echo "ERROR: 解析不到 Tauri 产物目录，无法打包" >&2
             exit 1
           fi
+          # 按 cargo target 而非 runner 的 uname 选打包判据：ARM64 腿是否带
+          # libwebgpu_dawn.so 取决于 Rust 目标，不能让运行器架构替它做决定。
+          case "${{ matrix.cargo_target }}" in
+            aarch64-unknown-linux-gnu) HFS_APP_ARCH=aarch64 ;;
+            x86_64-unknown-linux-gnu) HFS_APP_ARCH=x86_64 ;;
+            *) echo "ERROR: 未知的 Linux 打包目标 ${{ matrix.cargo_target }}" >&2; exit 1 ;;
+          esac
           # 剪裁（桌面栈交还宿主）→ 断言（该有的有、不该有的没有）→ 重打包 → 冒烟。
-          HIFISHIFTER_SMOKE_REQUIRED=1 bash scripts/build/linux-appimage.sh package "$RELEASE_DIR"
+          ARCH="$HFS_APP_ARCH" HIFISHIFTER_SMOKE_REQUIRED=1 \
+            bash scripts/build/linux-appimage.sh package "$RELEASE_DIR"
         shell: bash
 
       # 便携包由 build.ps1 直接产出（自包含：模型全量随包），YAML 不再重复铺目录。

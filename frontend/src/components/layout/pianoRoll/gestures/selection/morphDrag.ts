@@ -163,6 +163,16 @@ export function handleMorphPointerDown(
             clientY: number;
             value: number;
         } | null = null;
+        /** 按下时的控制线：取消时必须恢复，否则下一次拖动从半截形状开始。 */
+        const overlaysAtPress = existingMorph.map((overlay) => ({
+            ...overlay,
+            points: overlay.points.map((point) => ({ ...point })),
+        }));
+        /** 预览会就地改写 paramView.edit；取消时用它把曲线还原成按下前的值。 */
+        const viewAtPress: ParamViewSegment = {
+            ...pvForMorph,
+            edit: pvForMorph.edit.slice(),
+        };
         const flushPreview = () => {
             previewRafId = null;
             if (pendingOverlays != null) {
@@ -249,9 +259,17 @@ export function handleMorphPointerDown(
                     cancelAnimationFrame(previewRafId);
                     previewRafId = null;
                 }
+                pendingOverlays = null;
+                pendingPopup = null;
                 liveEditOverrideRef.current = null;
                 if (liveEditActiveRef) liveEditActiveRef.current = false;
+                // 取消不能只清 live 覆盖层：onMove 已把 morphOverlayRef 改成
+                // 拖动后的控制线，下一次按下会接着这条半截形状继续形变。
+                morphOverlayRef.current = overlaysAtPress;
+                setMorphOverlay(overlaysAtPress);
+                setParamView(viewAtPress);
                 bumpRefreshToken();
+                if (paramValuePopupEnabled) onParamValuePreviewChange?.(null);
                 setCanvasCursor("default");
                 return;
             }

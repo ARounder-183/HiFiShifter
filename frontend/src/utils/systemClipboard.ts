@@ -38,7 +38,7 @@ export interface ClipClipboardObject {
 
 export type SystemClipboardObject = ClipClipboardObject | ParamClipboardPayload;
 
-function parseClipboardObject(raw: string): ClipClipboardObject | ParamClipboardData | null {
+export function parseClipboardObject(raw: string): ClipClipboardObject | ParamClipboardData | null {
     let parsed: unknown;
     try {
         parsed = JSON.parse(raw);
@@ -53,33 +53,67 @@ function parseClipboardObject(raw: string): ClipClipboardObject | ParamClipboard
     if (record.kind === "clip" && isClipClipboardTemplates(record.templates)) {
         // 槽位里可能躺着旧版本/外部进程写入的残缺载荷：templates 元素缺关键字段
         // 就按"没有可粘贴的本类数据"处理（与文件头的解析纪律一致），而不是让
-        // 粘贴路径拿到 NaN 坐标/无名 clip。
+        // 粘贴路径拿到 NaN 坐标/无名 clip。只保留本类载荷的字段，不把外部
+        // 对象上的任意键原样透传进程序状态。
+        const groupIds = (parsed as { groupIds?: unknown }).groupIds;
         return {
-            ...(parsed as Omit<ClipClipboardObject, "templates">),
+            version: 1,
+            kind: "clip",
             templates: record.templates,
+            ...(Array.isArray(groupIds) && groupIds.every((id) => typeof id === "string")
+                ? { groupIds: groupIds as string[] }
+                : {}),
         };
     }
     return null;
 }
 
 /**
- * Clip 模板元素的最小形状校验：只盯粘贴路径**必用**的标量字段
- * （`trackId`/`name`/`startSec`/`lengthSec`，见 `ClipTemplate` 的必填面），
- * 其余可选字段交给消费方按 `Partial<ClipInfo>` 宽容处理。
+ * Clip 模板元素的最小形状校验：粘贴路径必用的标量字段必须存在且为有限数
+ * （`trackId`/`name`/`startSec`/`lengthSec`，见 `ClipTemplate` 的必填面）。
+ * 可选数值字段同样按类型过滤：外部载荷里的 NaN / Infinity / 字符串会把
+ * 几何、速率与声道模式带进 reducer，表现为坏 clip 而没有任何解析错误。
  */
+const CLIP_TEMPLATE_OPTIONAL_NUMBER_KEYS = [
+    "gain",
+    "durationSec",
+    "durationFrames",
+    "sourceSampleRate",
+    "sourceChannels",
+    "sourceStartSec",
+    "sourceEndSec",
+    "playbackRate",
+    "clipPlaybackRate",
+    "midiNoteCount",
+    "channelMode",
+] as const satisfies readonly (keyof ClipTemplate)[];
+
 function isClipClipboardTemplates(value: unknown): value is ClipTemplate[] {
     if (!Array.isArray(value)) return false;
-    return value.every(
-        (template): template is ClipTemplate =>
-            !!template &&
-            typeof template === "object" &&
-            typeof (template as ClipTemplate).trackId === "string" &&
-            typeof (template as ClipTemplate).name === "string" &&
-            typeof (template as ClipTemplate).startSec === "number" &&
-            Number.isFinite((template as ClipTemplate).startSec) &&
-            typeof (template as ClipTemplate).lengthSec === "number" &&
-            Number.isFinite((template as ClipTemplate).lengthSec),
-    );
+    return value.every((template): template is ClipTemplate => {
+        if (!template || typeof template !== "object" || Array.isArray(template)) return false;
+        const candidate = template as Record<string, unknown>;
+        if (
+            typeof candidate.trackId !== "string" ||
+            typeof candidate.name !== "string" ||
+            typeof candidate.startSec !== "number" ||
+            !Number.isFinite(candidate.startSec) ||
+            typeof candidate.lengthSec !== "number" ||
+            !Number.isFinite(candidate.lengthSec)
+        ) {
+            return false;
+        }
+        for (const key of CLIP_TEMPLATE_OPTIONAL_NUMBER_KEYS) {
+            const optional = candidate[key];
+            if (
+                optional !== undefined &&
+                (typeof optional !== "number" || !Number.isFinite(optional))
+            ) {
+                return false;
+            }
+        }
+        return true;
+    });
 }
 
 function clipboardSummary(payload: SystemClipboardObject): string {

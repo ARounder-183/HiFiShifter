@@ -420,6 +420,14 @@ export function AppContextMenu({
             if (event.key !== "Escape" && ownsArrowKeys(document.activeElement)) {
                 return;
             }
+            // 焦点已在另一层菜单表面时，方向键 / Home / End 也属于那一层。
+            // 父层若继续按过期的 activeIndex 移动，会出现两处高亮；子菜单键盘
+            // 用户因此无法稳定走到目标项。Escape 仍由所有打开的层一起关闭。
+            const focused = document.activeElement;
+            if (event.key !== "Escape" && focused instanceof HTMLElement) {
+                const surface = focused.closest<HTMLElement>('[data-hs-context-menu="1"]');
+                if (surface !== null && surface !== ref.current) return;
+            }
             switch (event.key) {
                 case "Escape":
                     event.preventDefault();
@@ -1041,8 +1049,15 @@ export function AppAnchoredMenu({
          * AppContextMenu 同一理由（窗口缩小后菜单不得整张跑出屏幕）。
          */
         window.addEventListener("resize", reclamp);
-        return () => window.removeEventListener("resize", reclamp);
-    }, [open, anchorRef, menuRef, items]);
+        // 内容是异步枚举 / 本地化文案换行时，bounding rect 也会变；用元素的
+        // 真实尺寸变化再夹一次，而不是把每次渲染重建的 items 数组塞进依赖。
+        const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(reclamp);
+        observer?.observe(el);
+        return () => {
+            window.removeEventListener("resize", reclamp);
+            observer?.disconnect();
+        };
+    }, [open, anchorRef, menuRef]);
 
     if (!open) return null;
 

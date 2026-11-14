@@ -618,10 +618,11 @@ export function ActionBar() {
     }
 
     /**
-     * 拍号分子输入的提交（失焦/回车），返回提交后的有效值。
+     * 拍号分子输入的提交（失焦 / 回车 / 滚轮）。
      *
-     * 【为什么返回值】滚轮调值以"提交后的值"为基准（见下方 onWheel），
-     * 草稿未提交时先走这里再步进，避免滚轮与草稿分叉。
+     * 返回提交后的有效值，让滚轮以同一份基准步进，草稿与 store 不分叉。
+     * 滚轮走下面的 `useNonPassiveWheel`：React 的 `onWheel` 是 passive 监听，
+     * `preventDefault()` 不会阻止 ActionBar 自己的横向滚动。
      */
     function commitBeats(nextText?: string): number {
         const raw = (nextText ?? beatsText).trim();
@@ -653,6 +654,32 @@ export function ActionBar() {
         );
         return clamped;
     }
+
+    const attachBeatsWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const direction = e.deltaY < 0 ? 1 : -1;
+        // 输入草稿先提交：滚轮以提交后的值为基准步进，草稿与 store 不会分叉。
+        const current = Math.max(1, Math.min(32, commitBeats()));
+        const next = Math.max(1, Math.min(32, current + direction));
+        if (next === current) return;
+        if (s.tempoMap && s.tempoMap.points.length > 0) {
+            updateTempoPointAtPlayhead({
+                timeSignature: {
+                    numerator: next,
+                    denominator: displayDenominator,
+                },
+            });
+            return;
+        }
+        void dispatch(
+            setProjectTimelineSettingsRemote({
+                beatsPerBar: next,
+                timeSignatureDenominator: displayDenominator,
+                gridSize: s.grid,
+            }),
+        );
+    });
 
     function formatRecordingTime(seconds: number): string {
         const total = Math.max(0, Math.floor(seconds));
@@ -897,6 +924,7 @@ export function ActionBar() {
                         <span className="hs-type-muted">{t("time_signature")}:</span>
                         <Flex align="center" gap="1">
                             <TextField.Root
+                                ref={attachBeatsWheel}
                                 size="1"
                                 type="number"
                                 value={beatsText}
@@ -921,32 +949,6 @@ export function ActionBar() {
                                         setBeatsText(String(Math.round(displayBeats)));
                                         (e.currentTarget as HTMLInputElement).blur();
                                     }
-                                }}
-                                onWheel={(e: React.WheelEvent<HTMLInputElement>) => {
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    const direction = e.deltaY < 0 ? 1 : -1;
-                                    // 输入草稿先提交：滚轮以提交后的值为基准步进，
-                                    // 草稿与 store 不会分叉（与 BPM 字段同一纪律）。
-                                    const current = Math.max(1, Math.min(32, commitBeats()));
-                                    const next = Math.max(1, Math.min(32, current + direction));
-                                    if (next === current) return;
-                                    if (s.tempoMap && s.tempoMap.points.length > 0) {
-                                        updateTempoPointAtPlayhead({
-                                            timeSignature: {
-                                                numerator: next,
-                                                denominator: displayDenominator,
-                                            },
-                                        });
-                                        return;
-                                    }
-                                    void dispatch(
-                                        setProjectTimelineSettingsRemote({
-                                            beatsPerBar: next,
-                                            timeSignatureDenominator: displayDenominator,
-                                            gridSize: s.grid,
-                                        }),
-                                    );
                                 }}
                                 style={{
                                     width: 42,

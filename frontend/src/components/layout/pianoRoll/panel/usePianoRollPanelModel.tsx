@@ -5261,18 +5261,15 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     });
                 let activateResize = false;
                 let lastResizeEvent: globalThis.PointerEvent | null = null;
-                // 预览重算 rAF 合帧（模式见 gesturePreviewRaf）：applyResizeAt 每次都跑
-                // planParamBlockGesture（内含两轮 composeParamBlockView）+ 渲染规格构建，
-                // 逐事件执行在长工程上明显卡顿。首个越过死区的 move 立即执行，避免
-                // "先等一帧才出结果"的起步延迟（与 paramBlockDrag 一致）。
+                // 预览重算 rAF 合帧：planParamBlockGesture + 渲染规格是 O(数据量)，
+                // 逐事件重算在长工程上明显卡顿；首个越死区的 move 仍立即执行以保证起步手感。
                 let resizePendingImmediate = true;
                 const resizeReplay = createRafCoalescedReplay(() => {
                     const source = lastResizeEvent;
                     // PointerEvent 结构上满足 applyResizeAt 的入参形状，直接传。
                     if (source !== null) applyResizeAt(source);
                 });
-                const scheduleResize = resizeReplay.schedule;
-                const flushResize = resizeReplay.flush;
+                const { schedule: scheduleResize, flush: flushResize } = resizeReplay;
                 const applyResizeAt = (event: {
                     clientX: number;
                     ctrlKey: boolean;
@@ -5355,6 +5352,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         hit.edgeScroll?.track(event.clientX, event.clientY, (clientX) => {
                             const source = lastResizeEvent;
                             if (source === null) return;
+                            // 边缘滚动的回放已经用当前事件画过一次；刷新它挂起的
+                            // 合帧状态，免得提交时再拿旧的 lastResizeEvent 重放。
+                            resizeReplay.cancel();
                             applyResizeAt({
                                 clientX,
                                 ctrlKey: source.ctrlKey,

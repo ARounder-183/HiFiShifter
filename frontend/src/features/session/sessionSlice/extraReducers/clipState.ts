@@ -306,7 +306,7 @@ export function registerClipState(builder: ActionReducerMapBuilder<SessionState>
             if (!take) return;
             // 失败回滚快照：UI 与音频引擎不得长期分裂（与 cycleClipTakes 同一
             // 纪律，见 helpersTakes 的说明）。
-            captureTakeRollback(state, [action.meta.arg.clipId]);
+            captureTakeRollback(state, [action.meta.arg.clipId], action.meta.arg.takeId);
             if (take.reversed !== action.meta.arg.reversed) {
                 flipTakeSourceWindowForDirection(take, clip.lengthSec, clip.clipPlaybackRate ?? 1);
             }
@@ -350,7 +350,7 @@ export function registerClipState(builder: ActionReducerMapBuilder<SessionState>
             const take = takes.find((entry) => entry.id === action.meta.arg.takeId);
             if (!take) return;
             // 失败回滚快照：与 reversed 同一纪律。
-            captureTakeRollback(state, [action.meta.arg.clipId]);
+            captureTakeRollback(state, [action.meta.arg.clipId], action.meta.arg.takeId);
             take.channelMode = normalizeChannelMode(action.meta.arg.channelMode);
             if (take.id === clip.activeTakeId) {
                 applyActiveTakeToFlat(clip, take);

@@ -13,26 +13,31 @@ export function createRafCoalescedReplay(replay: () => void): {
     cancel: () => void;
 } {
     let rafId: number | null = null;
+    let hasPendingReplay = false;
+    const runPending = () => {
+        rafId = null;
+        if (!hasPendingReplay) return;
+        hasPendingReplay = false;
+        replay();
+    };
     return {
         schedule() {
+            // 每次 schedule 都更新"待回放"标记：调用方在 rAF 回调之外也可能
+            // 写入新的输入（如边缘滚动回调），提交时要用**最后一份**。
+            hasPendingReplay = true;
             if (rafId != null) return;
-            rafId = requestAnimationFrame(() => {
-                rafId = null;
-                replay();
-            });
+            rafId = requestAnimationFrame(runPending);
         },
         flush() {
-            if (rafId != null) {
-                cancelAnimationFrame(rafId);
-                rafId = null;
-            }
-            replay();
+            if (rafId != null) cancelAnimationFrame(rafId);
+            // 没有挂起帧时不要重放：正常松手前的最后一次 move 已经显示过，
+            // 无条件 replay 会在提交路径上再跑一遍 O(数据量) 的重算。
+            runPending();
         },
         cancel() {
-            if (rafId != null) {
-                cancelAnimationFrame(rafId);
-                rafId = null;
-            }
+            if (rafId != null) cancelAnimationFrame(rafId);
+            rafId = null;
+            hasPendingReplay = false;
         },
     };
 }
