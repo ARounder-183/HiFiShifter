@@ -30,7 +30,12 @@ function Get-RepoText($relative) {
 
 # 统一的外部工具调用：工具没装时给一句可行动的话（而不是一条原生报错），退出码检查
 # 也搬到这里 —— 此前每个调用点各写一遍 `if ($LASTEXITCODE)`，漏一处就是静默通过。
-function Invoke-Tool([string]$tool, [string[]]$arguments) {
+#
+# 【为什么 -RequireOutput】Windows 上 `python` 可能是 Microsoft Store 的 App Execution
+# Alias：命令存在、退出 0、却什么也不打印（只弹应用商店）。此时 `$output` 为空，
+# `Test-Invariant` 的 `($output | Select-Object -Last 1)` 得到 $null，界面照样打 [OK]，
+# 所有 python 判据全部"空通过"。校验型脚本必须留下结论行，没有输出即视为失败。
+function Invoke-Tool([string]$tool, [string[]]$arguments, [switch]$RequireOutput) {
     $command = Get-Command $tool -ErrorAction SilentlyContinue
     if (!$command) {
         throw "找不到 $tool（见 scripts/setup/install_deps_windows.ps1 / install_deps_macos.sh / install_deps_linux.sh）"
@@ -38,6 +43,9 @@ function Invoke-Tool([string]$tool, [string[]]$arguments) {
     $output = & $command.Source @arguments 2>&1
     if ($LASTEXITCODE) {
         throw "$tool 失败（退出码 $LASTEXITCODE）：$($output -join ' | ')"
+    }
+    if ($RequireOutput -and !($output | Where-Object { "$_".Trim() })) {
+        throw "$tool 没有输出结论（可能是 Microsoft Store 的 python 别名，没真正执行脚本）"
     }
     $output
 }
@@ -49,7 +57,7 @@ Write-Host 'Product consistency checks' -ForegroundColor Cyan
 # 写入与校验共用 scripts/release/version.py，按清单里的 occurrences 逐处比对：
 # package-lock 的第二处、Cargo.lock 的两条都算数。
 Test-Invariant '产品版本在全部来源中一致' {
-    $output = Invoke-Tool 'python' @((Join-Path $root 'scripts/release/version.py'), '--check')
+    $output = Invoke-Tool 'python' @((Join-Path $root 'scripts/release/version.py'), '--check') -RequireOutput
     ($output | Where-Object { $_ } | Select-Object -Last 1)
 }
 
@@ -57,7 +65,7 @@ Test-Invariant '产品版本在全部来源中一致' {
 # 权重不在干净 clone 里时，--check-manifest 会打印"检查跳过"并返回 0 —— 那是正常状态，
 # 不是回归（清单与权重的对账只在取到权重之后才可能）。
 Test-Invariant '模型清单与真实模型文件一致' {
-    $output = Invoke-Tool 'python' @((Join-Path $root 'scripts/setup/fetch-models.py'), '--check-manifest')
+    $output = Invoke-Tool 'python' @((Join-Path $root 'scripts/setup/fetch-models.py'), '--check-manifest') -RequireOutput
     ($output | Where-Object { $_ } | Select-Object -Last 1)
 }
 
@@ -173,7 +181,7 @@ Test-Invariant '工作流条件用单引号字符串' {
 # 前端 invoke.ts 的 switch 是前端能发出的全部方法名。其中任何一个若两边后端都不派发，
 # 症状是"控件能点、点了没反应"——静默失效，且不会有编译错误。
 Test-Invariant '前端 invoke 面都有后端命令承接' {
-    $output = Invoke-Tool 'python' @((Join-Path $root 'scripts/checks/check-command-gating.py'))
+    $output = Invoke-Tool 'python' @((Join-Path $root 'scripts/checks/check-command-gating.py')) -RequireOutput
     ($output | Select-Object -First 1)
 }
 

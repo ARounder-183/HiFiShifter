@@ -12,7 +12,11 @@ sudo apt-get update -y || true
 
 # Core packages used by native crates
 # Also install libfuse2 and fuse so AppImages can run in CI (provides libfuse.so.2)
-sudo apt-get install -y pkg-config cmake libglib2.0-dev libgirepository1.0-dev gobject-introspection libssl-dev build-essential libgtk-3-dev libgdk-pixbuf2.0-dev libasound2-dev libfuse2 fuse || true
+# 【为什么这一组不许 || true】其余安装都是"尽力而为的兼容探测"（不同发行版包名
+# 不同、AppImage 运行时工具可选）。但 cmake / pkg-config / build-essential / glib /
+# ssl / gtk / alsa 是**编译期硬依赖**：装不上却继续跑，失败会推迟到几十分钟后的
+# Rust build script，报一个和依赖毫无关系的错误。核心组失败必须当场停。
+sudo apt-get install -y pkg-config cmake libglib2.0-dev libgirepository1.0-dev gobject-introspection libssl-dev build-essential libgtk-3-dev libgdk-pixbuf2.0-dev libasound2-dev libfuse2 fuse
 
 # Additional dev packages commonly required by linuxdeploy and the GTK/GStreamer plugins
 # (helps Tauri's bundler find webkit/gstreamer and related girs at build time)
@@ -59,6 +63,10 @@ if ! PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1 pkg-config --modversion webkit2gtk-4.1 >/d
   ls -la /usr/lib/*/pkgconfig | grep webkit || true
   ls -la /usr/lib*/pkgconfig | grep webkit || true
   echo "[install_deps_linux] Showing pkg-config search path: $PKG_CONFIG_PATH"
+  # Tauri 的 build script 一定要 webkit2gtk-4.1；缺了它后面必挂，而且报错在
+  # 几分钟后的 cmake 里。这里带着上面打印的诊断信息直接失败，定位快得多。
+  echo "[install_deps_linux] FATAL: webkit2gtk-4.1 is required but unavailable" >&2
+  exit 1
 fi
 
 echo "[install_deps_linux] Ensure Node is available and new enough for the frontend"

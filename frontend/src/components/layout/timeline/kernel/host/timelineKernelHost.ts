@@ -6423,6 +6423,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 平移中途卸载：光标 / 选择态是写在 body 上的全局状态，必须复原。
             endPan();
             detailCanvas.remove();
+            // 这两个属性写在**调用方**的容器上（见创建时的 tooltip 锚点说明），
+            // 不属于内核自建的 DOM。重挂载（StrictMode / HMR / 面板重建）会复用
+            // 同一个容器，残留的空 `data-tooltip` 会让 AppTooltip 的 closest 命中
+            // 一个已无内容注册的死锚点。dispose 必须把自己加的标记一并撤掉。
+            container.removeAttribute("data-tooltip");
+            container.removeAttribute("data-hs-fade-tooltip-anchor");
             sdfBox.dispose();
             glCanvas.dispose();
         },

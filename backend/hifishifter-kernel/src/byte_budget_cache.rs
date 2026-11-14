@@ -85,6 +85,11 @@ impl<K: Eq + std::hash::Hash + Clone, V> ByteBudgetCache<K, V> {
         // 触及条目容量上限时是被 LRU 逐出的其他条目。两种情况的权重都必须
         // 从累计值中扣除 —— `put` 会静默丢弃该条目，导致"幽灵字节"不断
         // 累积，最终预算检查把整个缓存清空（历史 bug，见回归测试）。
+        // 记住刚插入的键：`push` 把它置于 MRU 端，下面从 LRU 端找牺牲品时，
+        // 若所有更老的条目都被 pin 住，未 pin 的**新条目**会成为唯一候选并被
+        // 立即逐出 —— 与"绝不逐出刚插入的条目"这条不变量直接冲突（超长 PCM
+        // 因此每次 update_timeline 都全量重解码）。缓存是软上限，宁可超预算。
+        let inserted_key = key.clone();
         let displaced = self.inner.push(key, (value, weight_bytes));
         if let Some((_, (_, displaced_weight))) = displaced {
             self.total_bytes = self.total_bytes.saturating_sub(displaced_weight);
@@ -108,7 +113,10 @@ impl<K: Eq + std::hash::Hash + Clone, V> ByteBudgetCache<K, V> {
                 self.inner
                     .iter()
                     .rev() // 从 LRU 端开始找
-                    .find(|(k, (v, _))| !matches!(pinned, Some(is_pinned) if is_pinned(k, v)))
+                    .find(|(k, (v, _))| {
+                        // 跳过刚插入的条目（见上方说明）与所有在用条目。
+                        **k != inserted_key && !matches!(pinned, Some(is_pinned) if is_pinned(k, v))
+                    })
                     .map(|(k, _)| k.clone())
             };
             let Some(victim) = victim else {
@@ -253,6 +261,26 @@ mod tests {
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.get(&1), Some(&1));
         assert_eq!(cache.total_bytes(), 1000);
+    }
+
+    #[test]
+    fn just_inserted_entry_survives_when_all_others_are_pinned() {
+        struct Item {
+            pinned: bool,
+        }
+        // 老条目全被 pin 住；新条目未 pin 且超预算。旧实现从 LRU 端找牺牲品时
+        // 会一路跳过所有老条目，最后选中刚插入的 MRU 键并 pop 掉 —— 插入即自逐出。
+        // 缓存是软上限，正确行为是保留新条目（短暂超预算）。
+        let mut cache: ByteBudgetCache<u64, Item> =
+            ByteBudgetCache::new(8, 250).with_pin(|_, v| v.pinned);
+        cache.insert(1, Item { pinned: true }, 100);
+        cache.insert(2, Item { pinned: true }, 100);
+        cache.insert(3, Item { pinned: false }, 100); // 300 > 250
+
+        assert!(cache.get(&3).is_some(), "刚插入的条目不得被逐出");
+        assert!(cache.get(&1).is_some(), "被 pin 的老条目仍在");
+        assert!(cache.get(&2).is_some(), "被 pin 的老条目仍在");
+        assert_eq!(cache.total_bytes(), 300);
     }
 
     #[test]

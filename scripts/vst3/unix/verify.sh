@@ -24,6 +24,20 @@ ok()   { printf "  \033[32m✓\033[0m %s\n" "$*"; }
 bad()  { printf "  \033[31m✗\033[0m %s\n" "$*"; FAILED=1; }
 note() { printf "    %s\n" "$*"; }
 
+# 插件入口一旦死锁（dlopen / GetPluginFactory / 宿主握手），探针会永远不返回，
+# 把整条打包流水线挂到 job 超时。Windows 的 verify.ps1 明确要求"死锁必须在这里
+# 失败，而不是挂住 CI"；Unix 侧用 coreutils 的 timeout 保持同一纪律。
+readonly PROBE_TIMEOUT_SEC="${HFS_PROBE_TIMEOUT_SEC:-30}"
+run_probe() {
+    timeout "$PROBE_TIMEOUT_SEC" "$@"
+    local rc=$?
+    if [ "$rc" -eq 124 ]; then
+        bad "探针 $PROBE_TIMEOUT_SEC 秒未返回（插件入口很可能死锁）"
+        return 1
+    fi
+    return "$rc"
+}
+
 [ -d "$BUNDLE" ] || { printf "bundle 不存在：%s\n" "$BUNDLE" >&2; exit 2; }
 
 case "$(uname -s)" in
@@ -34,6 +48,7 @@ esac
 case "$(uname -m)" in
     x86_64|amd64) HOST_ARCH="x86_64" ;;
     arm64|aarch64) HOST_ARCH="arm64" ;;
+    *) printf "不支持的架构：%s\n" "$(uname -m)" >&2; exit 2 ;;
 esac
 
 if [ "$HOST_OS" = "linux" ]; then
@@ -142,7 +157,7 @@ EXTRA_LIBS=""
 [ "$HOST_OS" = "linux" ] && EXTRA_LIBS="-ldl"
     if cc -O1 -Wall -o "$PROBE_DIR/probe" "$SCRIPT_DIR/probe.c" $EXTRA_LIBS 2>"$PROBE_DIR/cc.log"; then
         # 与上面同理：黑盒加载是打包形态的事实核查，不带编译树的搜索路径。
-        if env -u LD_LIBRARY_PATH "$PROBE_DIR/probe" "$MODULE" >"$PROBE_DIR/out.log" 2>&1; then
+        if run_probe env -u LD_LIBRARY_PATH "$PROBE_DIR/probe" "$MODULE" >"$PROBE_DIR/out.log" 2>&1; then
         ok "模块可加载，工厂可用"
         sed "s/^/    /" "$PROBE_DIR/out.log"
     else
@@ -268,7 +283,7 @@ printf "\n8) 宿主握手（原生扩展 + IID 布局）\n"
 if [ "$HOST_OS" = "linux" ]; then
     if cc -O1 -Wall -o "$PROBE_DIR/host_iid" "$SCRIPT_DIR/host_iid_probe.c" -ldl \
         2>"$PROBE_DIR/host_iid-cc.log"; then
-        if "$PROBE_DIR/host_iid" "$MODULE" "$PROBE_DIR/handshake" >"$PROBE_DIR/host_iid.log" 2>&1; then
+        if run_probe "$PROBE_DIR/host_iid" "$MODULE" "$PROBE_DIR/handshake" >"$PROBE_DIR/host_iid.log" 2>&1; then
             ok "插件按本平台布局拿到了宿主的原生扩展"
             sed "s/^/    /" "$PROBE_DIR/host_iid.log"
         else

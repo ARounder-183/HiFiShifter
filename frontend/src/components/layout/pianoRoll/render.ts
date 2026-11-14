@@ -144,11 +144,25 @@ export function arcLengthPrefixPx(args: {
  * 区分，`null ↔ object` 与 `object ↔ object` 两种转换都能正确失效。
  */
 const mainCanvasCache = new WeakMap<HTMLCanvasElement, MainCanvasSignature>();
+/** 上次绘制时的 backing store 尺寸；尺寸变化即代表内容已被浏览器丢弃。 */
+const mainCanvasBacking = new WeakMap<HTMLCanvasElement, { width: number; height: number }>();
 
-/** 为数值轴选择"好看"的刻度步长 */
+/**
+ * 为数值轴选择"好看"的刻度步长。
+ *
+ * 【为什么必须挡住 0 / 非有限值】`span = vMax - vMin` 为 0（参数全平、或初始
+ * 视口尚未量化）时 `roughStep = 0` → `log10(0) = -Infinity` → `mag = 0` →
+ * `normalized = NaN` → 返回 NaN。调用处的 `for (let m = ...; m <= ...; m += NaN)`
+ * 会变成永不终止或永不进入的循环，整帧渲染卡死。返回一个有限的正步长即可，
+ * 刻度标签由 `valueToY` 自然落在同一位置。
+ */
 function niceAxisStep(range: number, targetCount: number): number {
-    const roughStep = range / targetCount;
+    if (!Number.isFinite(range) || !Number.isFinite(targetCount)) return 1;
+    const safeRange = Math.max(1e-6, Math.abs(range));
+    const safeCount = Math.max(1, Math.abs(targetCount));
+    const roughStep = safeRange / safeCount;
     const mag = Math.pow(10, Math.floor(Math.log10(roughStep)));
+    if (!Number.isFinite(mag) || mag <= 0) return 1;
     const normalized = roughStep / mag;
     let nice: number;
     if (normalized < 1.5) nice = 1;
@@ -408,7 +422,6 @@ export function drawPianoRoll(args: {
     /** 每帧时长（毫秒）。仅用于帧↔秒换算（选区数据以帧为单位），不参与投影。 */
     framePeriodMs: number;
     playheadSec: number; // 播放头位置（秒）
-    pitchAnalysisPending?: boolean;
     referencePitchOverlays?: ReferencePitchOverlay[];
     /** Clip 源音高参考线；pitch 模式下按 Clip 颜色渲染。 */
     clipPitchOverlays?: ClipPitchOverlay[];
@@ -528,7 +541,6 @@ export function drawPianoRoll(args: {
         axis,
         framePeriodMs,
         playheadSec,
-        pitchAnalysisPending,
         referencePitchOverlays,
         clipPitchOverlays,
         isDark = true,
@@ -817,10 +829,23 @@ export function drawPianoRoll(args: {
     // 缓存按**画布元素**登记（面板重建画布 / StrictMode 双挂载会换元素）。
     // 比较按 `Object.is` 逐项进行——对象 / 数组项比引用，绝不字符串化（见
     // `mainCanvasSignature.ts` 对缺陷 #4 的说明）。
-    if (mainContentSignature !== undefined) {
+    //
+    // 【为什么还要比对 backing store 尺寸】dock 重挂 / WebGL 上下文丢失 / 画布
+    // 尺寸重置都会清空 backing store，而**画布元素本身可能还是同一个**（WeakMap
+    // 键不变）、内容签名也完全相同。只比签名就会在 return 处跳过清屏与重绘，
+    // 主画布永久空白，直到下次滚动/缩放。尺寸为 0 也说明 backing store 尚未就绪。
+    const backingReady =
+        canvas.width > 0 &&
+        canvas.height > 0 &&
+        canvas.width === mainCanvasBacking.get(canvas)?.width &&
+        canvas.height === mainCanvasBacking.get(canvas)?.height;
+    if (mainContentSignature !== undefined && backingReady) {
         if (isSameMainCanvasSignature(mainContentSignature, mainCanvasCache.get(canvas))) return;
+    }
+    if (mainContentSignature !== undefined) {
         mainCanvasCache.set(canvas, mainContentSignature);
     }
+    mainCanvasBacking.set(canvas, { width: canvas.width, height: canvas.height });
 
     const { w, h } = viewSize;
     // 统一光栅化契约：此前这里用 Math.floor，而波形面用 Math.round，两者在
@@ -955,12 +980,12 @@ export function drawPianoRoll(args: {
     // 【已知并接受的限制（与其余 skip* 图层一致）】WebGL2 运行期失败时选区块无人
     // 绘制，与本文件中键盘 / 网格 / 播放头 / 曲线的既有约定相同（见设计文档 §2.4）。
 
-    // 若音高分析进行中，跳过曲线绘制（进度条已显示状态）
-    if (pitchAnalysisPending) {
-        return;
-    }
-
     // 【阶段 3】曲线归 GL 时整段跳过（见 skipCurves 说明）。
+    //
+    // 【为什么删掉了 `pitchAnalysisPending` 早退】它原本位于主画布缓存 set
+    // **之后**却让这一帧什么也不画：一旦将来有调用方传 true，缓存会记下
+    // "已画过"的签名，签名不变时曲线永久不再出现。而唯一调用方从未传过它
+    // （恒 undefined），是纯死分支；删除比把它挪到缓存前更彻底。
     if (
         !skipCurves &&
         editParam === "pitch" &&

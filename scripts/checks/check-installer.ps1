@@ -38,6 +38,19 @@ function Assert-That($name, [scriptblock]$body) {
     }
 }
 
+# 【为什么不用 Start-Process -Wait】安装 / 重装 / 卸载一旦卡在 UAC 或安装器
+# 内部死锁，`-Wait` 会一直挂到 job 级超时，日志里什么线索都没有。这里显式
+# 等有限时间、超时杀掉并抛出可定位的错误（与 vst3/windows/verify.ps1 的
+# 加载探针同一纪律）。
+function Invoke-InstallerProcess([string]$path, [string[]]$arguments, [int]$timeoutSeconds = 180) {
+    $proc = Start-Process -FilePath $path -ArgumentList $arguments -WindowStyle Hidden -PassThru
+    if (!$proc.WaitForExit($timeoutSeconds * 1000)) {
+        $proc.Kill()
+        throw "$path 在 $timeoutSeconds 秒内未返回（UAC / 安装器死锁），已终止"
+    }
+    return $proc
+}
+
 function Get-Makensis {
     $cmd = (Get-Command makensis -ErrorAction SilentlyContinue).Source
     if ($cmd) { return $cmd }
@@ -279,7 +292,7 @@ if (Test-Path (Join-Path $env:APPDATA 'HiFiShifterTest')) {
 
 try {
     Write-Host '  安装（静默）...' -ForegroundColor DarkGray
-    $proc = Start-Process -FilePath $testInstaller -ArgumentList '/S' -WindowStyle Hidden -Wait -PassThru
+    $proc = Invoke-InstallerProcess $testInstaller @('/S')
     if ($proc.ExitCode -ne 0) { throw "安装器退出码 $($proc.ExitCode)" }
 
     Assert-That 'ARP 注册了卸载项' {
@@ -375,7 +388,7 @@ try {
     # 幂等：再装一次不该重写模型（判定在安装器的 HfsVerifyModels 里；这里验
     # "还能装成功、模型仍在"）。
     Assert-That '重装（幂等）' {
-        $again = Start-Process -FilePath $testInstaller -ArgumentList '/S' -WindowStyle Hidden -Wait -PassThru
+        $again = Invoke-InstallerProcess $testInstaller @('/S')
         if ($again.ExitCode -ne 0) { throw "重装退出码 $($again.ExitCode)" }
         if (!(Test-Path (Join-Path $modelDir 'models.json'))) { throw '重装后模型库不见了' }
         'ok'
@@ -397,7 +410,7 @@ try {
     Set-Content -LiteralPath $modelMarker -Value 'keep'
     $uninstaller = Join-Path $installDir 'uninstall.exe'
     if (!(Test-Path $uninstaller)) { throw '缺少 uninstall.exe' }
-    Start-Process -FilePath $uninstaller -ArgumentList '/S' -WindowStyle Hidden -Wait | Out-Null
+    Invoke-InstallerProcess $uninstaller @('/S') | Out-Null
     # 卸载器把自己复制到临时目录再运行，退出码在 -Wait 下并不可靠；用目录与注册表判定。
     Start-Sleep -Seconds 3
 

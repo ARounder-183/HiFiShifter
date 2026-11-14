@@ -448,11 +448,14 @@ export class Canvas2dWaveformRenderer implements WaveformSurfaceRenderer {
     private readonly backCanvas = document.createElement("canvas");
     private readonly canvas: HTMLCanvasElement;
     /**
-     * 最近一次 `render()` 的顶点引用，供 `repaint()` 重放。
+     * 最近一次 `render()` 的顶点**自有副本**，供 `repaint()` 重放。
      *
-     * 生命周期约束：顶点**借用** `WaveformSurface` 的缓冲槽，只有在其未被
-     * 覆写时才有效。调用方保证 `repaint()` 与上一次 `render()` 之间不会重建
-     * 几何（那会覆写缓冲），因此这里持有的引用始终有效。
+     * 【为什么不持有借用引用】此前这里直接存 `geometry.vertices`（借用
+     * `WaveformSurface.vertexSinkRef`），并靠注释要求调用方保证 render 与 repaint
+     * 之间不重建几何。但 WebGL2 运行期失败回退 Canvas2D、上下文丢失重建等路径
+     * 会覆写同一个缓冲后直接调 `repaint()`：那时 repaint 会用全新几何配旧原点，
+     * 或读到被清零的数据，画面静默错乱。改为自有缓冲（容量不变时零分配），
+     * 正确性不再依赖跨模块时序约定。
      */
     private lastVertices: Float32Array | null = null;
 
@@ -468,7 +471,11 @@ export class Canvas2dWaveformRenderer implements WaveformSurfaceRenderer {
         originXPx: number,
         originYPx: number,
     ): void {
-        this.lastVertices = geometry.vertices;
+        const incoming = geometry.vertices;
+        if (this.lastVertices === null || this.lastVertices.length !== incoming.length) {
+            this.lastVertices = new Float32Array(incoming.length);
+        }
+        this.lastVertices.set(incoming);
         this.paint(widthPx, heightPx, dpr, originXPx, originYPx);
     }
 

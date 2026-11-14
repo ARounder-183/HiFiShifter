@@ -63,6 +63,7 @@ export const CaptureRangeLayer: React.FC<{
     const dpr = useDevicePixelRatio();
     const capture = useCaptureBands();
 
+    const captureActive = capture !== null;
     const bands = capture?.bands ?? [];
     const lastIndex = bands.length - 1;
     const lastBand = lastIndex >= 0 ? bands[lastIndex] : null;
@@ -76,7 +77,10 @@ export const CaptureRangeLayer: React.FC<{
     const lastEndSec = lastBand?.endSec ?? null;
     const leadSec = capture?.leadSec ?? 0.3;
     React.useEffect(() => {
-        if (!(pxPerSec > 0)) return undefined;
+        // 【没有录制会话时不启动逐帧循环】`capture === null` 时本组件返回 null，
+        // 但 effect 仍在跑：空闲状态下每秒 60 次读视觉播放头总线，白白占用主线程
+        // 与电量，直到组件卸载（时间轴常驻，等于整个会话都在空转）。
+        if (!captureActive || !(pxPerSec > 0)) return undefined;
         let frame = 0;
         const tick = () => {
             const visual = readVisualPlayheadSec();
@@ -99,9 +103,9 @@ export const CaptureRangeLayer: React.FC<{
         };
         frame = requestAnimationFrame(tick);
         return () => cancelAnimationFrame(frame);
-    }, [pxPerSec, dpr, lastStartSec, lastEndSec, leadSec]);
+    }, [captureActive, pxPerSec, dpr, lastStartSec, lastEndSec, leadSec]);
 
-    if (capture === null) return null;
+    if (!captureActive) return null;
     if (!(pxPerSec > 0)) return null;
 
     const rowIndex = captureRowIndex(tracks);

@@ -38,6 +38,16 @@ interface Props {
 export const KernelUnavailableNotice: React.FC<Props> = ({ reason }) => {
     const { tf } = useI18n();
     const [copied, setCopied] = React.useState(false);
+    // 「已复制」2 秒后复位。定时器句柄必须留存并在卸载时清掉：本界面会随内核
+    // 恢复（上下文 restored）整棵卸载，未清理的 setTimeout 会对已卸载的组件
+    // setState，React 19 下不再静默忽略而是打警告。
+    const copiedTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    React.useEffect(
+        () => () => {
+            if (copiedTimerRef.current !== null) clearTimeout(copiedTimerRef.current);
+        },
+        [],
+    );
 
     /**
      * 复制诊断信息到剪贴板。
@@ -76,7 +86,11 @@ export const KernelUnavailableNotice: React.FC<Props> = ({ reason }) => {
             }
         }
         setCopied(true);
-        window.setTimeout(() => setCopied(false), 2000);
+        if (copiedTimerRef.current !== null) clearTimeout(copiedTimerRef.current);
+        copiedTimerRef.current = window.setTimeout(() => {
+            copiedTimerRef.current = null;
+            setCopied(false);
+        }, 2000);
     }, [reason]);
 
     return (

@@ -61,6 +61,21 @@ fn delta_u28(t: u64) -> midly::num::u28 {
     midly::num::u28::new(t.min(0x0FFF_FFFF) as u32)
 }
 
+/// BPM → MIDI `us_per_beat`（u24 范围）。
+///
+/// 【为什么统一在这里钳制】Tempo Map 的 bpm 可以来自用户导入的工程；一个极大但
+/// 有限的 bpm 会让 `60_000_000 / bpm` 得到 0，写出非法的 0 us/beat tempo 事件
+/// （宿主解析时除零）。钳到项目支持的 10..960、并保证结果至少为 1。
+fn tempo_us_per_beat(bpm: f64) -> u32 {
+    let safe_bpm = if bpm.is_finite() {
+        bpm.clamp(10.0, 960.0)
+    } else {
+        120.0
+    };
+    let micros = (60_000_000.0 / safe_bpm).round() as u32;
+    micros.clamp(1, 16_777_215)
+}
+
 // ── 通道分配 ──────────────────────────────────────────────────────────────────
 
 fn assign_channels(track_count: usize) -> Vec<u8> {
@@ -524,12 +539,12 @@ fn make_conductor_track(
     let Some(map) = timeline.tempo_map.as_ref() else {
         // 与 TempoTickConverter::new 的钳制保持一致（10-960）。
         let fallback_bpm = fallback_bpm.clamp(10.0, 960.0);
-        let tempo_us_per_beat = (60_000_000.0 / fallback_bpm.max(1.0)).round() as u32;
+        let initial_tempo_us = tempo_us_per_beat(fallback_bpm);
         let (sharps_flats, major_minor) = scale_to_key_signature(fallback_base_scale);
         push_meta(
             &mut events,
             0,
-            MetaMessage::Tempo(midly::num::u24::new(tempo_us_per_beat.min(16_777_215))),
+            MetaMessage::Tempo(midly::num::u24::new(initial_tempo_us)),
         );
         push_meta(
             &mut events,
@@ -551,11 +566,11 @@ fn make_conductor_track(
     // 0 位置点：初始速度 / 拍号 / 调号。
     let first = &map[0];
     let (first_num, first_den) = crate::state::TimelineState::effective_time_signature_at(map, 0);
-    let tempo_us_per_beat = (60_000_000.0 / first.bpm.max(1.0)).round() as u32;
+    let initial_tempo_us = tempo_us_per_beat(first.bpm);
     push_meta(
         &mut events,
         0,
-        MetaMessage::Tempo(midly::num::u24::new(tempo_us_per_beat.min(16_777_215))),
+        MetaMessage::Tempo(midly::num::u24::new(initial_tempo_us)),
     );
     push_meta(
         &mut events,
@@ -589,11 +604,11 @@ fn make_conductor_track(
     for (index, point) in map.iter().enumerate().skip(1) {
         let tick = converter.sec_to_ticks(point.position_sec);
         if (point.bpm - prev_bpm).abs() > 1e-9 {
-            let us = (60_000_000.0 / point.bpm.max(1.0)).round() as u32;
+            let us = tempo_us_per_beat(point.bpm);
             push_meta(
                 &mut events,
                 tick,
-                MetaMessage::Tempo(midly::num::u24::new(us.min(16_777_215))),
+                MetaMessage::Tempo(midly::num::u24::new(us)),
             );
             prev_bpm = point.bpm;
         }

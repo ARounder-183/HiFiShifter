@@ -313,7 +313,20 @@ def install_game_from_official_zip(archive: Path) -> None:
 
 
 def fetch_official_game() -> None:
-    if all((MODELS_DIR / "GAME" / name).is_file() for name in GAME_FILES):
+    # 【为什么不能只看"文件存在"】上一次下载被截断、或用户手工换了同名 ONNX，
+    # 六个文件都在，但推理输出是错的/全零。以前 `--fetch-game` 在这里直接
+    # return，哈希校验只在**主下载路径**末尾跑，于是这个入口永远验不到。
+    # 先按清单校验，损坏就重新下载；清单里没登记 GAME 时退回存在性判断。
+    manifest = load_manifest()
+    game_entries = [
+        entry for entry in manifest["files"] if entry["path"].startswith(OPTIONAL_MODEL_PREFIXES)
+    ]
+    if game_entries and all((MODELS_DIR / "GAME" / name).is_file() for name in GAME_FILES):
+        if not verify_optional_game_hashes(manifest):
+            print("GAME 模型已存在且校验通过，跳过下载")
+            return
+        print("GAME 模型校验失败，重新下载", file=sys.stderr)
+    elif all((MODELS_DIR / "GAME" / name).is_file() for name in GAME_FILES):
         print("GAME 模型已存在，跳过下载")
         return
     with tempfile.TemporaryDirectory(prefix="hfs-game-dl-") as tmp:
@@ -323,10 +336,24 @@ def fetch_official_game() -> None:
 
 
 def download(url: str, destination: Path) -> None:
+    """下载到 `destination`，先写 .part 再原子替换。
+
+    【为什么必须 timeout】150 MB 的模型下载在连接挂起时会永久阻塞 CI（没有
+    timeout 的 urlopen 会一直等 TCP 保活）。【为什么写 .part】中途失败 / Ctrl-C
+    会在目标路径留下一个截断的 zip，下一次运行看到"文件已存在"就跳过，症状是
+    "安装成功但推理全零"。
+    """
     print(f"下载 {url}")
     request = urllib.request.Request(url, headers={"User-Agent": "hifishifter-fetch-models"})
-    with urllib.request.urlopen(request) as response, destination.open("wb") as handle:
-        shutil.copyfileobj(response, handle)
+    part = destination.with_name(destination.name + ".part")
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response, part.open("wb") as handle:
+            shutil.copyfileobj(response, handle)
+            handle.flush()
+        part.replace(destination)
+    finally:
+        if part.exists():
+            part.unlink()
 
 
 def format_mib(size: int) -> str:

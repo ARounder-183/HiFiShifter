@@ -45,6 +45,17 @@ import {
     resolveClipHeaderLayout,
 } from "../kernel/interaction/clipHeaderLayout.js";
 
+/**
+ * GL 实例数据的模块级复用缓冲。
+ *
+ * 【为什么放在函数外】`drawTimelineCanvas` 每帧（拖拽时更频繁）被调用一次；
+ * 缓冲若声明在函数体内，每次调用都会 `new Float32Array(0)` 起步、按需再分配
+ * 一次 `needed * 2`，注释里的"跨帧复用/稳态零分配"根本不成立——稳态下每帧
+ * 都产生一个待回收的大数组。渲染是同步的、`glBodies.render` 在 `flushBatch`
+ * 内完成上传，之后缓冲即可被下一帧覆盖，因此模块级单例是安全的。
+ */
+let glInstanceBuffer = new Float32Array(0);
+
 /** 自适应细分产出的一段折线（端点按 `t0` 升序排列）。 */
 export interface FadeCurveSampleSegment {
     readonly t0: number;
@@ -1112,14 +1123,7 @@ export function drawTimelineCanvas(
 
     const pending: PreparedClip[] = [];
 
-    /**
-     * GL 实例数据的复用缓冲。
-     *
-     * 容量按需倍增、跨帧复用（稳态零分配），与波形 P2a 的顶点缓冲池同一
-     * 思路：数据上传 GPU 后 CPU 侧即不再需要。
-     */
-    let glInstanceBuffer = new Float32Array(0);
-
+    // GL 实例缓冲见模块级 `glInstanceBuffer`：容量按需倍增、跨帧复用（稳态零分配）。
     function flushBatch(): void {
         if (pending.length === 0) return;
 

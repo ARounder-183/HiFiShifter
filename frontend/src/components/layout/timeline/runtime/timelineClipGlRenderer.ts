@@ -55,7 +55,7 @@ import { rasterize } from "../../renderKernel/canvasRaster.js";
 export const PERF_GL_CLIP_BODIES_KEY = "hifishifter.glClipBodies";
 
 // ── 实例数据布局 ─────────────────────────────────────────────────────
-// 每实例 24 个 float。之所以存 RGBA 而不是字符串，是为了让 CPU 侧只做纯数值
+// 每实例 25 个 float。之所以存 RGBA 而不是字符串，是为了让 CPU 侧只做纯数值
 // 写入——颜色解析在 `buildClipBodyInstance` 里一次性完成。
 
 /**
@@ -90,6 +90,15 @@ export const CLIP_INSTANCE_FLOATS = 25;
 export const INSTANCE_MODE_BOX = 0;
 export const INSTANCE_MODE_FLAT = 1;
 
+/**
+ * 实例缓冲只接受有限数：NaN/Infinity 会让顶点着色器算出 NaN 坐标，整批实例
+ * 一起消失（GPU 不报错、控制台也没有线索）。上游几何来自时间轴投影，极端
+ * 缩放 / 损坏的时间值理论上可能产生非有限数，这里统一兜底。
+ */
+function finiteOr(value: number, fallback: number): number {
+    return Number.isFinite(value) ? value : fallback;
+}
+
 const OFF_X = 0;
 const OFF_Y = 1;
 const OFF_W = 2;
@@ -112,6 +121,11 @@ const OFF_MODE = 24;
  * `rgba(...)` 生成 header/body/描边/分隔缝色）；解析不出来时回退到不透明的
  * 洋红——故意用刺眼的颜色，让"漏解析"在真机上立刻可见而不是悄悄变透明。
  *
+ * 【为什么逐项验 `Number.isFinite`】上面的宽松字符类 `[-\d.]+` 会接受
+ * `"1.2.3"` / `"--"` 这类串，`Number()` 得到 NaN；NaN 一旦写进实例缓冲，
+ * 着色器里的 SDF 全线变 NaN，整块 clip 静默消失（且 `discard` 分支也救不回）。
+ * 非法数值一律回退洋红，与"正则不匹配"同一处理。
+ *
  * @param css 颜色字符串。
  * @returns 归一化后的 [r, g, b, a]。
  */
@@ -119,13 +133,13 @@ export function parseRgbaColor(css: string): [number, number, number, number] {
     const match =
         /rgba?\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)(?:\s*,\s*([-\d.]+))?\s*\)/.exec(css);
     if (!match) return [1, 0, 1, 1];
+    const r = Number(match[1]);
+    const g = Number(match[2]);
+    const b = Number(match[3]);
+    const a = match[4] == null ? 1 : Number(match[4]);
+    if (![r, g, b, a].every(Number.isFinite)) return [1, 0, 1, 1];
     const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
-    return [
-        clamp01(Number(match[1]) / 255),
-        clamp01(Number(match[2]) / 255),
-        clamp01(Number(match[3]) / 255),
-        clamp01(match[4] == null ? 1 : Number(match[4])),
-    ];
+    return [clamp01(r / 255), clamp01(g / 255), clamp01(b / 255), clamp01(a)];
 }
 
 /** `buildTimelineClipVisualStyle` 的返回类型（避免引入额外依赖）。 */
@@ -175,19 +189,21 @@ export function buildClipBodyInstance(
     seamColorCss: string | null,
 ): void {
     const base = index * CLIP_INSTANCE_FLOATS;
-    const w = Math.max(1, clip.widthPx);
-    const h = Math.max(1, clip.heightPx);
-    const headerH = Math.max(1, Math.min(clip.heightPx, clip.headerHeightPx));
+    const widthPx = finiteOr(clip.widthPx, 1);
+    const heightPx = finiteOr(clip.heightPx, 1);
+    const w = Math.max(1, widthPx);
+    const h = Math.max(1, heightPx);
+    const headerH = Math.max(1, Math.min(heightPx, finiteOr(clip.headerHeightPx, 1)));
     const radius = Math.max(0, Math.min(CLIP_CORNER_RADIUS_PX_GL, w / 2, h / 2));
-    const overlapPx = Math.max(0, Math.min(w - 1, clip.leadingOverlapPx ?? 0));
-    const alpha = style.mutedAlpha;
+    const overlapPx = Math.max(0, Math.min(w - 1, finiteOr(clip.leadingOverlapPx ?? 0, 0)));
+    const alpha = finiteOr(style.mutedAlpha, 1);
 
     const body = parseRgbaColor(style.bodyFill);
     const header = parseRgbaColor(style.headerFill);
     const border = parseRgbaColor(style.borderStroke);
 
-    out[base + OFF_X] = clip.leftPx;
-    out[base + OFF_Y] = clip.topPx;
+    out[base + OFF_X] = finiteOr(clip.leftPx, 0);
+    out[base + OFF_Y] = finiteOr(clip.topPx, 0);
     out[base + OFF_W] = w;
     out[base + OFF_H] = h;
     out[base + OFF_RADIUS] = radius;
@@ -208,7 +224,7 @@ export function buildClipBodyInstance(
     out[base + OFF_BORDER_RGBA + 2] = border[2];
     out[base + OFF_BORDER_RGBA + 3] = border[3] * alpha;
 
-    out[base + OFF_BORDER_WIDTH] = style.borderLineWidth;
+    out[base + OFF_BORDER_WIDTH] = Math.max(0, finiteOr(style.borderLineWidth, 0));
     // 前导重叠区：>0.5 时该段按 0.55 倍 alpha 绘制（与 Canvas2D 一致）。
     out[base + OFF_OVERLAP_PX] = overlapPx > 0.5 ? overlapPx : 0;
 
@@ -255,10 +271,10 @@ export function buildGuideInstance(
     const base = index * CLIP_INSTANCE_FLOATS;
     const color = parseRgbaColor(colorCss);
 
-    out[base + OFF_X] = x;
-    out[base + OFF_Y] = y;
-    out[base + OFF_W] = w;
-    out[base + OFF_H] = h;
+    out[base + OFF_X] = finiteOr(x, 0);
+    out[base + OFF_Y] = finiteOr(y, 0);
+    out[base + OFF_W] = Math.max(0, finiteOr(w, 0));
+    out[base + OFF_H] = Math.max(0, finiteOr(h, 0));
     out[base + OFF_RADIUS] = 0;
     out[base + OFF_HEADER_H] = 0;
 
@@ -383,8 +399,12 @@ float roundedBoxSdf(vec2 p, vec2 b, float r) {
 
 void main() {
     // 平面矩形：直接输出颜色（四边形本身就是精确矩形，无需 SDF / 分区）。
+    // 【必须预乘 alpha】上下文是 premultipliedAlpha:true + blendFunc(ONE,
+    // ONE_MINUS_SRC_ALPHA)（见本文件 draw() 与 glContext.ts），与 renderKernel 的
+    // glyph / sdf-box / polyline program 同一约定。直出非预乘 rgba 会让 alpha<1
+    // 的分界线、静音 clip 整体偏亮（rgb 少了 *a）。
     if (v_mode > 0.5) {
-        outColor = v_borderColor;
+        outColor = vec4(v_borderColor.rgb * v_borderColor.a, v_borderColor.a);
         return;
     }
 
@@ -418,9 +438,12 @@ void main() {
         base.rgb = mix(base.rgb, v_seamColor, seam);
     }
 
-    // 描边叠加（预乘 alpha 的混合方式与 Canvas2D 的 source-over 对齐）。
-    outColor = vec4(mix(base.rgb, v_borderColor.rgb, inBorder * v_borderColor.a),
-                    max(base.a, inBorder * v_borderColor.a));
+    // 描边叠加（source-over），再按上下文约定输出预乘 alpha 的颜色。
+    // 与 sdfBoxProgram / glyphProgram 一致：blendFunc(ONE, ONE_MINUS_SRC_ALPHA)
+    // 要求 src.rgb 已乘 src.a，否则半透明区域会被当成不透明色直接累加。
+    vec4 color = vec4(mix(base.rgb, v_borderColor.rgb, inBorder * v_borderColor.a),
+                      max(base.a, inBorder * v_borderColor.a));
+    outColor = vec4(color.rgb * color.a, color.a);
 }`;
 
 function compile(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {

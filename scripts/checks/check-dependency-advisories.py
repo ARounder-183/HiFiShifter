@@ -174,10 +174,16 @@ def main() -> int:
     unexpected: list[tuple[str, str, list[str]]] = []
     for (name, version), vulns in sorted(hits.items()):
         ids = [vuln.get("id", "?") for vuln in vulns]
-        if any((name, vuln_id) in allowed for vuln_id in ids):
-            accepted.append((name, version, ids))
-        else:
-            unexpected.append((name, version, ids))
+        # 【按 ID 逐个裁决，不能整包一刀切】allowlist 的键是 (package, id)。
+        # 旧写法 `any(一条 id 被允许 -> 整包 accepted)` 会让同一个包上新披露的
+        # 公告被那条旧豁免一起吞掉 —— 安全门禁于是长期全绿，而真正需要评审的
+        # 新漏洞连日志都不出现。分别收集：允许的进 accepted，其余进 unexpected。
+        allowed_ids = [vuln_id for vuln_id in ids if (name, vuln_id) in allowed]
+        unallowed_ids = [vuln_id for vuln_id in ids if (name, vuln_id) not in allowed]
+        if allowed_ids:
+            accepted.append((name, version, allowed_ids))
+        if unallowed_ids:
+            unexpected.append((name, version, unallowed_ids))
 
     for name, version, ids in accepted:
         if args.verbose:

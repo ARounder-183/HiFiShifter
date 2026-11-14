@@ -5,6 +5,36 @@ use crate::vocalshifter_clipboard::ClipboardFileKind;
 use super::core::get_timeline_state_from_ref;
 use super::param_selection_window::{ParamSelectionWindow, SelectionFrameRange};
 
+/// 计算"剪贴板最小时间 → 选区首帧"的帧偏移。
+///
+/// 【为什么不能裸 `as isize`】剪贴板文件是用户可控输入：`time_sec` 哪怕通过了
+/// `is_finite`，`1e300 * 1000 / frame_period_ms` 仍会溢出成 inf，`.round() as isize`
+/// 饱和到 `isize::MAX`；`sel_start - min_frame` 再下溢，结果是每个点都被静默
+/// 丢弃、命令却返回 `{"ok": true, "updated": 0}`。这里对换算结果再做一次有限性
+/// 与范围检查，非法时按 0 帧处理（等价于"不对齐选区"，而非整批丢弃）。
+fn clipboard_offset_frames(
+    points: &[crate::vocalshifter_clipboard::ClipboardPitchPoint],
+    frame_period_ms: f64,
+    sel_start: usize,
+) -> isize {
+    let min_time = points
+        .iter()
+        .filter(|p| p.time_sec.is_finite() && p.time_sec >= 0.0)
+        .map(|p| p.time_sec)
+        .fold(f64::MAX, f64::min);
+    let min_frame = if min_time < f64::MAX && frame_period_ms > 0.0 {
+        let raw = (min_time * 1000.0) / frame_period_ms;
+        if raw.is_finite() && raw >= 0.0 && raw <= isize::MAX as f64 {
+            raw.round() as isize
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+    (sel_start as isize).saturating_sub(min_frame)
+}
+
 pub(super) fn paste_vocalshifter_clipboard(
     state: &AppState,
     selection_ranges: Option<Vec<SelectionFrameRange>>,
@@ -93,21 +123,7 @@ fn paste_clb_pitch_data(
 
     // 若有选区约束，计算剪贴板数据中最小时间作为偏移基准
     let offset_frames = match window.origin() {
-        Some(sel_start) => {
-            // 找到剪贴板中最小的 time_sec 作为基准
-            let min_time = points
-                .iter()
-                .filter(|p| p.time_sec.is_finite() && p.time_sec >= 0.0)
-                .map(|p| p.time_sec)
-                .fold(f64::MAX, f64::min);
-            let min_frame = if min_time < f64::MAX {
-                ((min_time * 1000.0) / frame_period_ms).round() as isize
-            } else {
-                0
-            };
-            // 偏移量 = 选区首段起始帧 - 剪贴板最小帧
-            sel_start as isize - min_frame
-        }
+        Some(sel_start) => clipboard_offset_frames(&points, frame_period_ms, sel_start),
         None => 0isize,
     };
 
@@ -261,19 +277,7 @@ fn paste_clb_vslib_param(
 
     // 帧偏移计算（选区首段起点为基准；无选区约束时即为整体粘贴）
     let offset_frames = match window.origin() {
-        Some(sel_start) => {
-            let min_time = points
-                .iter()
-                .filter(|p| p.time_sec.is_finite() && p.time_sec >= 0.0)
-                .map(|p| p.time_sec)
-                .fold(f64::MAX, f64::min);
-            let min_frame = if min_time < f64::MAX {
-                ((min_time * 1000.0) / frame_period_ms).round() as isize
-            } else {
-                0
-            };
-            sel_start as isize - min_frame
-        }
+        Some(sel_start) => clipboard_offset_frames(points, frame_period_ms, sel_start),
         None => 0isize,
     };
 

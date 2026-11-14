@@ -208,10 +208,21 @@ export function usePianoRollViewport({
         const RETRY_FRAMES = 120;
         /** 低频轮询间隔（ms）。 */
         const RETRY_INTERVAL_MS = 500;
+        /**
+         * 低频轮询的**总次数上限**。
+         *
+         * 【为什么必须封顶】面板被收起 / 停靠到别的标签时视口元素根本不存在，
+         * `measureOffset()` 永远返回 null；旧的 `setInterval` 会一直跑到 effect
+         * 重跑为止，2Hz 的 querySelector + getBoundingClientRect 白烧整个会话。
+         * 停掉之后由布局变化（本 effect 的 deps）或 ResizeObserver 重新拉起，
+         * 不会因为放弃轮询而永久失去同步。
+         */
+        const RETRY_POLLS = 120;
 
         let observer: ResizeObserver | null = null;
         let frame: number | null = null;
         let retryTimer: ReturnType<typeof setInterval> | null = null;
+        let pollAttempts = 0;
         let stopped = false;
 
         const stopRetry = () => {
@@ -268,7 +279,9 @@ export function usePianoRollViewport({
         };
 
         const scheduleRetry = () => {
-            if (stopped || frame !== null || retryTimer !== null) return;
+            // 轮询总次数已用尽：不再排任何重试（布局变化会重跑本 effect）。
+            if (stopped || pollAttempts >= RETRY_POLLS) return;
+            if (frame !== null || retryTimer !== null) return;
             let attempts = 0;
             const tick = () => {
                 frame = null;
@@ -281,7 +294,17 @@ export function usePianoRollViewport({
                 observeViewports();
                 attempts += 1;
                 if (attempts >= RETRY_FRAMES) {
-                    retryTimer = setInterval(measureAndApply, RETRY_INTERVAL_MS);
+                    retryTimer = setInterval(() => {
+                        if (stopped) return;
+                        pollAttempts += 1;
+                        measureAndApply();
+                        // 用尽后停表：measureAndApply 里的 scheduleRetry 已被
+                        // pollAttempts 闸门挡住，这里再显式清一次防止空转。
+                        if (pollAttempts >= RETRY_POLLS && retryTimer !== null) {
+                            clearInterval(retryTimer);
+                            retryTimer = null;
+                        }
+                    }, RETRY_INTERVAL_MS);
                 } else {
                     frame = requestAnimationFrame(tick);
                 }

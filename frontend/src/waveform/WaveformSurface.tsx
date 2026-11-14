@@ -117,6 +117,12 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
     const webglRendererRef = React.useRef<WebGl2WaveformRenderer | null>(null);
     const fallbackRendererRef = React.useRef<Canvas2dWaveformRenderer | null>(null);
     const rafRef = React.useRef<number | null>(null);
+    /**
+     * 是否仍挂载。已出队但正在执行的 rAF、或 dispose 之后到达的 viewport paint
+     * 仍会调 draw()，而那时 renderer 已被置 null —— 必须在这里挡住，否则解引用
+     * 已释放的 renderer（StrictMode 双挂载 / dock 重挂时最容易撞上）。
+     */
+    const mountedRef = React.useRef(true);
     const drawRef = React.useRef<() => void>(() => {});
     const rootRef = React.useRef<HTMLDivElement | null>(null);
     /**
@@ -148,9 +154,10 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
     propsRef.current = props;
 
     const invalidate = React.useCallback(() => {
-        if (rafRef.current != null) return;
+        if (!mountedRef.current || rafRef.current != null) return;
         rafRef.current = requestAnimationFrame(() => {
             rafRef.current = null;
+            if (!mountedRef.current) return;
             drawRef.current();
         });
     }, []);
@@ -167,6 +174,7 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             cancelAnimationFrame(rafRef.current);
             rafRef.current = null;
         }
+        if (!mountedRef.current) return;
         drawRef.current();
     }, []);
 
@@ -608,12 +616,17 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         return source.register({ name: "waveform", paint: apply }, LAYER_ORDER.waveform);
     }, [props.viewportSource, drawNowAndCancelScheduled]);
 
-    React.useEffect(
-        () => () => {
-            if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
-        },
-        [],
-    );
+    React.useEffect(() => {
+        // StrictMode 双挂载：cleanup 置 false 后第二次挂载必须重新置 true。
+        mountedRef.current = true;
+        return () => {
+            mountedRef.current = false;
+            if (rafRef.current != null) {
+                cancelAnimationFrame(rafRef.current);
+                rafRef.current = null;
+            }
+        };
+    }, []);
 
     const commonStyle: React.CSSProperties = {
         position: "absolute",

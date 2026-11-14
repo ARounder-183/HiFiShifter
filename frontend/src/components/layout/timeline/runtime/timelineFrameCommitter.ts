@@ -78,6 +78,16 @@ export function createTimelineFrameCommitter(initial: TimelineAxis): TimelineFra
     const layers: Array<{ layer: TimelineLayer; order: number; seq: number }> = [];
     let lastCommitted: TimelineAxis = initial;
     let seq = 0;
+    /**
+     * 上一轮 paint 抛错的图层。
+     *
+     * 【为什么必须单独记】`lastCommitted` 在派发**之前**就更新（保证同帧内
+     * 重入提交被去重）。若某层 paint 抛错而投影随后不再变化，所有后续 commit
+     * 都会在第一行 `axisEquals` 处返回 —— 该层再也不会收到 paint，永久停在
+     * 空白/旧内容。记下失败层后，下一次提交（哪怕投影相同）也强制补画它们，
+     * 成功后才移出集合：既自愈，又不打断正常层的去重。
+     */
+    const failedLayers = new Set<TimelineLayer>();
 
     return {
         register(layer, order) {
@@ -86,6 +96,8 @@ export function createTimelineFrameCommitter(initial: TimelineAxis): TimelineFra
             return () => {
                 const index = layers.indexOf(entry);
                 if (index >= 0) layers.splice(index, 1);
+                // 注销的图层不必再补画，否则失败集会把已销毁的图层留到下次提交。
+                failedLayers.delete(layer);
             };
         },
 
@@ -103,7 +115,9 @@ export function createTimelineFrameCommitter(initial: TimelineAxis): TimelineFra
          * @param options.force 忽略去重强制重绘（例如画布尺寸变化但投影未变）。
          */
         commit(axis, options) {
-            if (!options?.force && axisEquals(lastCommitted, axis)) return;
+            const sameAsLast = axisEquals(lastCommitted, axis);
+            // 有失败层待补画时，即使投影没变也要走一轮（否则它们永远等不到 paint）。
+            if (!options?.force && sameAsLast && failedLayers.size === 0) return;
             lastCommitted = axis;
             // 每次都排序会有开销，但图层数量是个位数且提交频率远低于逐帧，
             // 相比维护有序数组的插入成本更划算。
@@ -118,12 +132,16 @@ export function createTimelineFrameCommitter(initial: TimelineAxis): TimelineFra
                 | undefined;
             const commitStart = profiler ? performance.now() : 0;
             for (const entry of ordered) {
+                // 投影未变且本层上一轮成功：跳过，保住去重语义（其余层照常按需重画）。
+                if (!options?.force && sameAsLast && !failedLayers.has(entry.layer)) continue;
                 try {
                     const paintStart = profiler ? performance.now() : 0;
                     entry.layer.paint(axis);
+                    failedLayers.delete(entry.layer);
                     if (profiler)
                         profiler.recordLayer(entry.layer.name, performance.now() - paintStart);
                 } catch (error) {
+                    failedLayers.add(entry.layer);
                     frontendLog(
                         "error",
                         `[timelineFrame] layer "${entry.layer.name}" paint failed`,

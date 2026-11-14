@@ -57,12 +57,16 @@ export function useParamValuePreviewPublisher(args: {
                  * 时每帧都付一次）。
                  */
                 const rect = canvasRef.current?.getBoundingClientRect();
+                // 画布已卸载 / 面板已收起时拿不到定位基准：用 (0,0) 兜底会让
+                // 浮窗在视口左上角闪一帧。此时直接清掉预览才是正确语义。
                 setPreview(
-                    pending.payload && {
-                        ...pending.payload,
-                        rectLeft: rect?.left ?? 0,
-                        rectTop: rect?.top ?? 0,
-                    },
+                    pending.payload && rect
+                        ? {
+                              ...pending.payload,
+                              rectLeft: rect.left,
+                              rectTop: rect.top,
+                          }
+                        : null,
                 );
             });
         },
