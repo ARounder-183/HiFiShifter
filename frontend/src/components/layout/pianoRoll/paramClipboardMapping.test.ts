@@ -444,3 +444,35 @@ test("components/layout/pianoRoll/paramClipboardMapping.test.ts scripted checks"
         );
     }
 });
+
+// 外来剪贴板载荷：非有限数与伪造的帧几何不得污染曲线或选区。
+test("non-finite clipboard values and geometry fall back to safe defaults", async () => {
+    function assertJson(actual: unknown, expected: unknown, label: string): void {
+        if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+            throw new Error(label + ": " + JSON.stringify(actual));
+        }
+    }
+    const parsed = parseParamClipboardPayload({
+        version: 2,
+        kind: "param",
+        param: "pitch",
+        framePeriodMs: Number.POSITIVE_INFINITY,
+        segments: [
+            {
+                startFrame: Number.POSITIVE_INFINITY,
+                values: [1, Number.POSITIVE_INFINITY, Number.NaN, "12x"],
+            },
+        ],
+    });
+    assertJson(
+        parsed,
+        {
+            param: "pitch",
+            framePeriodMs: 5,
+            segments: [{ startFrame: 0, values: [1, 0, 0, 0] }],
+        },
+        "finite payload",
+    );
+    const derived = pasteTargetSelectionFromClipboard({ clipboard: parsed, anchorFrame: 10 });
+    assertJson(derived, [{ startFrame: 10, frameCount: 4 }], "finite paste target");
+});

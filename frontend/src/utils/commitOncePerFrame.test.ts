@@ -44,7 +44,6 @@ describe("createFrameCommitter（帧合并提交）", () => {
             frames.scheduler,
         );
 
-        committer.schedule(1);
         committer.schedule(2);
         committer.schedule(3);
         expect(committed).toEqual([]);
@@ -159,5 +158,33 @@ describe("createFrameCommitter（帧合并提交）", () => {
         expect(committer.isPending()).toBe(true);
         frames.tick();
         expect(committed).toEqual([null]);
+    });
+    it("★ cancel 后已派发的旧帧回调不得提交新一轮挂起值", () => {
+        // cancelAnimationFrame 可能撤不下已经投递的回调；自定义调度器故意保留它。
+        const retained = new Map<number, () => void>();
+        let handle = 1;
+        const scheduler: FrameScheduler = {
+            request(callback) {
+                retained.set(handle, callback);
+                return handle++;
+            },
+            cancel(id) {
+                retained.delete(id);
+            },
+        };
+        const committed: number[] = [];
+        const committer = createFrameCommitter<number>((value) => committed.push(value), scheduler);
+
+        committer.schedule(1);
+        // 先取出旧回调，再模拟它逃过 cancel 并在新帧之前到达。
+        const staleCallback = [...retained.values()][0];
+        retained.clear();
+        committer.cancel();
+        committer.schedule(2);
+        staleCallback();
+        expect(committed).toEqual([]);
+        const currentCallback = [...retained.values()].at(-1)!;
+        currentCallback();
+        expect(committed).toEqual([2]);
     });
 });

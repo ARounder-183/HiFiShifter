@@ -5746,12 +5746,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         applyThumbDrag((dragAxis === "x" ? event.clientX : event.clientY) - dragStartPointer);
     }
 
+    function endThumbDrag(): void {
+        dragAxis = null;
+        dragPointerId = null;
+    }
+
     function onPointerUp(event: PointerEvent): void {
         // 只收起手的那枚指针：另一根手指 / 另一支笔的 pointercancel 不能把
         // 正在拖滚动条的这本手势半路取消（与 pointerup 同一份判据）。
         if (event.pointerId !== dragPointerId) return;
-        dragAxis = null;
-        dragPointerId = null;
+        endThumbDrag();
     }
 
     const onHDown = makeThumbPointerDown("x");
@@ -5979,6 +5983,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * `finalizeActiveGesture` 跳过 seek 提交（见该参数说明）。
      */
     function onWindowBlur(): void {
+        // 自绘滚动条的 thumb 拖拽同样收不到失焦后的 pointerup：不在这里清掉,
+        // 重新聚焦后无按键的悬停移动会继续滚动画布。
+        endThumbDrag();
         // 中键平移也必须收尾：window 失焦后 pointerup 不会派发到本窗口，
         // 悬挂的 panPointerId 会在重新聚焦后让"悬停移动"继续平移（没有按键
         // 却在滚动），grabbing 光标 / 禁选中也会一直挂着 —— 与其他手势统一

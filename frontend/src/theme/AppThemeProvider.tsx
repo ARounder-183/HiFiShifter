@@ -28,8 +28,15 @@ import type {
     QtColorToken,
     ThemeModeSetting,
 } from "./themeTypes";
-import { QT_COLOR_TOKENS } from "./themeTypes";
-import { loadAppearance, saveAppearance, loadCustomThemes } from "./themeStorage";
+import {
+    DEFAULT_APPEARANCE,
+    QT_COLOR_TOKENS,
+    RADIX_ACCENT_COLORS,
+    RADIX_GRAY_COLORS,
+    RADIX_RADIUS_OPTIONS,
+    THEME_MODE_SETTINGS,
+} from "./themeTypes";
+import { isValidCssColor, loadAppearance, saveAppearance, loadCustomThemes } from "./themeStorage";
 
 /** 实际渲染用的主题模式（由设置解析而来；auto 已解析为当前系统偏好）。 */
 export type ThemeMode = "dark" | "light";
@@ -235,29 +242,60 @@ export function AppThemeProvider({ children }: PropsWithChildren) {
                 if (!settingsRaw && !colorsRaw) return;
 
                 if (settingsRaw) {
-                    const settings = JSON.parse(settingsRaw) as Pick<
-                        AppearanceSettings,
-                        "mode" | "accentColor" | "grayColor" | "radius" | "fontFamily"
-                    >;
+                    const raw: unknown = JSON.parse(settingsRaw);
+                    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+                        throw new Error("invalid appearance preview");
+                    }
+                    const candidate = raw as Record<string, unknown>;
+                    // 预览由外观面板写入，但 localStorage 是共享的外部输入：
+                    // 坏值若直喂 <Theme> 会产生无 CSS 规则支撑的属性值，
+                    // 超长 fontFamily 还能拖慢每次样式重算。
+                    const mode = THEME_MODE_SETTINGS.includes(
+                        candidate.mode as (typeof THEME_MODE_SETTINGS)[number],
+                    )
+                        ? (candidate.mode as AppearanceSettings["mode"])
+                        : DEFAULT_APPEARANCE.mode;
+                    const accentColor = RADIX_ACCENT_COLORS.includes(
+                        candidate.accentColor as (typeof RADIX_ACCENT_COLORS)[number],
+                    )
+                        ? (candidate.accentColor as AppearanceSettings["accentColor"])
+                        : DEFAULT_APPEARANCE.accentColor;
+                    const grayColor = RADIX_GRAY_COLORS.includes(
+                        candidate.grayColor as (typeof RADIX_GRAY_COLORS)[number],
+                    )
+                        ? (candidate.grayColor as AppearanceSettings["grayColor"])
+                        : DEFAULT_APPEARANCE.grayColor;
+                    const radius = RADIX_RADIUS_OPTIONS.includes(
+                        candidate.radius as (typeof RADIX_RADIUS_OPTIONS)[number],
+                    )
+                        ? (candidate.radius as AppearanceSettings["radius"])
+                        : DEFAULT_APPEARANCE.radius;
+                    const fontFamily =
+                        typeof candidate.fontFamily === "string" &&
+                        candidate.fontFamily.length <= 512
+                            ? candidate.fontFamily
+                            : DEFAULT_APPEARANCE.fontFamily;
                     setAppearance((prev) => ({
                         ...prev,
-                        mode: settings.mode,
-                        accentColor: settings.accentColor,
-                        grayColor: settings.grayColor,
-                        radius: settings.radius,
-                        fontFamily: settings.fontFamily,
+                        mode,
+                        accentColor,
+                        grayColor,
+                        radius,
+                        fontFamily,
                         activeCustomThemeId: null,
                     }));
                 }
 
                 const root = document.documentElement;
-                const colors = colorsRaw
-                    ? (JSON.parse(colorsRaw) as Partial<Record<QtColorToken, string>>)
-                    : {};
+                const colorInput: unknown = colorsRaw ? JSON.parse(colorsRaw) : {};
+                const colors =
+                    colorInput && typeof colorInput === "object" && !Array.isArray(colorInput)
+                        ? (colorInput as Record<string, unknown>)
+                        : {};
                 for (const token of QT_COLOR_TOKENS) {
                     const val = colors[token];
-                    if (val) {
-                        root.style.setProperty(`--${token}`, val);
+                    if (isValidCssColor(val)) {
+                        root.style.setProperty(`--${token as QtColorToken}`, val.trim());
                     } else {
                         root.style.removeProperty(`--${token}`);
                     }

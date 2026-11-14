@@ -76,3 +76,23 @@ for (const thunk of [
         );
     });
 }
+
+test("importMultipleAudioFilesAtPosition：部分失败写进五语汇总状态", () => {
+    const before = createState();
+    const after = reducer(
+        before,
+        importMultipleAudioFilesAtPosition.fulfilled(
+            {
+                ok: true,
+                attempted: 3,
+                failedFiles: ["broken.wav"],
+                imported: undefined,
+                newClipIds: [],
+                playheadSec: 0,
+            },
+            "req",
+            {} as never,
+        ),
+    );
+    expect((after as { status?: string }).status).toBe("Folder import: 2 imported, 1 failed");
+});

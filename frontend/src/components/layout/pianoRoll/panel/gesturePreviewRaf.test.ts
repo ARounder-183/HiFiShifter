@@ -57,3 +57,30 @@ test("rAF 已执行后 flush 不重放，cancel 丢弃挂起帧", () => {
         vi.unstubAllGlobals();
     }
 });
+
+test("cancel 后已进入回调队列的旧 rAF 不重放，也不撤销新帧", () => {
+    const callbacks = new Map<number, FrameRequestCallback>();
+    let nextId = 1;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+        const id = nextId++;
+        callbacks.set(id, callback);
+        return id;
+    });
+    vi.stubGlobal("cancelAnimationFrame", () => {
+        // 故意不删除：模拟浏览器已经把回调投递到任务队列时的竞态。
+    });
+    const replay = vi.fn();
+    try {
+        const coalesced = createRafCoalescedReplay(replay);
+        coalesced.schedule();
+        const stale = [...callbacks.values()][0];
+        coalesced.cancel();
+        coalesced.schedule();
+        stale(0);
+        expect(replay).not.toHaveBeenCalled();
+        coalesced.flush();
+        expect(replay).toHaveBeenCalledTimes(1);
+    } finally {
+        vi.unstubAllGlobals();
+    }
+});

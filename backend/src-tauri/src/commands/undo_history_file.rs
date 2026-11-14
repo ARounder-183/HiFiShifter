@@ -12,6 +12,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -119,8 +120,17 @@ pub fn save_undo_history(state: &AppState, project_path: &Path) -> bool {
     // "无历史"静默吞掉，用户的撤销资产就此丢失且没有任何日志。
     // 临时名必须逐工程唯一：两个同 stem 的工程同时保存不能共用一个 .tmp，
     // 也不能用 with_extension 改掉工程名里的点（foo.bar.hshp-UNDO → foo.bar.tmp）。
+    // 同一进程也可能并发保存两个工程（自动保存与手动保存、两个编辑器窗口）。
+    // 进程 id + 目标路径仍可能撞上同一条命令的重入，因此再加一个进程内递增序号；
+    // 临时名同时保留完整工程名，绝不用 with_extension 截断含点的文件名。
+    static NEXT_TMP_ID: AtomicU64 = AtomicU64::new(0);
+    let sequence = NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed);
     let mut tmp_name = target.as_os_str().to_os_string();
-    tmp_name.push(format!(".hfs-undo-{}.tmp", std::process::id()));
+    tmp_name.push(format!(
+        ".hfs-undo-{}-{sequence}-{}.tmp",
+        std::process::id(),
+        crate::state::now_unix_ms()
+    ));
     let tmp = PathBuf::from(tmp_name);
     let result = fs::write(&tmp, bytes)
         .and_then(|()| hifishifter_kernel::util::replace_file_atomically(&tmp, &target));
@@ -375,6 +385,44 @@ mod tests {
         assert!(super::serialize_undo_history(&state).is_some());
     }
 
+    /// 同一进程的自动保存与手动保存可能并发：临时名必须逐次唯一。
+    #[test]
+    fn concurrent_saves_use_distinct_temp_paths() {
+        use crate::state::{AppState, HistoryOp};
+
+        let dir = temp_dir("concurrent_temp_names");
+        let project = dir.join("project.hshp");
+        let state = AppState::default();
+        {
+            let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            state.checkpoint_timeline(&tl, HistoryOp::AddClip);
+        }
+        state.set_project_save_undo_history(true);
+
+        std::thread::scope(|scope| {
+            let writers: Vec<_> = (0..4)
+                .map(|_| {
+                    let project = &project;
+                    let state = &state;
+                    scope.spawn(move || super::save_undo_history(state, project))
+                })
+                .collect();
+            for writer in writers {
+                assert!(writer.join().expect("save thread"));
+            }
+        });
+        assert!(super::undo_file_path_for(&project).unwrap().is_file());
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".hfs-undo-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "atomic replace must not leave temp files"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test]
     fn undo_file_name_keeps_extension_and_uppercases_suffix() {
         let project = PathBuf::from("/tmp/projects/1.hshp");

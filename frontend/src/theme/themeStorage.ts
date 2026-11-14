@@ -104,17 +104,41 @@ export function saveAppearance(settings: AppearanceSettings): void {
 
 /* ─────────── 自定义主题列表 ─────────── */
 
-/** 读取自定义主题列表 */
+/** 读取自定义主题列表（外部 / 手改存储值时按导入路径的同一白名单清洗）。 */
 export function loadCustomThemes(): CustomTheme[] {
     try {
         const raw = readUiValue(CUSTOM_THEMES_KEY);
-        if (raw) {
-            return JSON.parse(raw) as CustomTheme[];
-        }
+        if (!raw) return [];
+        const parsed: unknown = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return [];
+        return parsed.flatMap((entry): CustomTheme[] => {
+            if (!entry || typeof entry !== "object") return [];
+            const record = entry as Record<string, unknown>;
+            if (
+                typeof record.id !== "string" ||
+                typeof record.name !== "string" ||
+                (record.base !== "dark" && record.base !== "light")
+            ) {
+                return [];
+            }
+            return [
+                {
+                    id: record.id,
+                    name: record.name,
+                    base: record.base,
+                    colors: sanitizeImportedColors(record.colors),
+                    waveformColors: sanitizeWaveformColors(record.waveformColors),
+                    accentColor: isValidAccentColor(record.accentColor)
+                        ? record.accentColor
+                        : undefined,
+                    grayColor: isValidGrayColor(record.grayColor) ? record.grayColor : undefined,
+                    radius: isValidRadius(record.radius) ? record.radius : undefined,
+                },
+            ];
+        });
     } catch {
-        // fallthrough
+        return [];
     }
-    return [];
 }
 
 /** 保存自定义主题列表（持久化失败只记录告警，见 saveAppearance）。 */
@@ -156,8 +180,8 @@ const CSS_COLOR_RE =
 
 const KNOWN_COLOR_TOKENS = new Set<string>(QT_COLOR_TOKENS);
 
-/** 单个颜色值是否为可安全写入 CSS 变量的形态。 */
-function isValidCssColor(v: unknown): v is string {
+/** 单个颜色值是否为可安全写入 CSS 变量的形态（导入、运行时预览共用）。 */
+export function isValidCssColor(v: unknown): v is string {
     return typeof v === "string" && CSS_COLOR_RE.test(v.trim()) && v.trim().length <= 64;
 }
 
@@ -216,25 +240,28 @@ export function importThemeFromJson(json: string): {
     radius?: RadixRadius;
 } | null {
     try {
-        const parsed = JSON.parse(json);
+        const parsed: unknown = JSON.parse(json);
         if (
             parsed &&
             typeof parsed === "object" &&
-            typeof parsed.name === "string" &&
-            (parsed.base === "dark" || parsed.base === "light") &&
-            typeof parsed.colors === "object"
+            !Array.isArray(parsed) &&
+            typeof (parsed as { name?: unknown }).name === "string" &&
+            ((parsed as { base?: unknown }).base === "dark" ||
+                (parsed as { base?: unknown }).base === "light") &&
+            typeof (parsed as { colors?: unknown }).colors === "object"
         ) {
+            const record = parsed as Record<string, unknown>;
             const theme: CustomTheme = {
-                id: parsed.id ?? crypto.randomUUID(),
-                name: parsed.name,
-                base: parsed.base,
-                colors: sanitizeImportedColors(parsed.colors),
-                waveformColors: sanitizeWaveformColors(parsed.waveformColors),
-                accentColor: isValidAccentColor(parsed.accentColor)
-                    ? parsed.accentColor
+                id: typeof record.id === "string" && record.id ? record.id : crypto.randomUUID(),
+                name: record.name as string,
+                base: record.base as "dark" | "light",
+                colors: sanitizeImportedColors(record.colors),
+                waveformColors: sanitizeWaveformColors(record.waveformColors),
+                accentColor: isValidAccentColor(record.accentColor)
+                    ? record.accentColor
                     : undefined,
-                grayColor: isValidGrayColor(parsed.grayColor) ? parsed.grayColor : undefined,
-                radius: isValidRadius(parsed.radius) ? parsed.radius : undefined,
+                grayColor: isValidGrayColor(record.grayColor) ? record.grayColor : undefined,
+                radius: isValidRadius(record.radius) ? record.radius : undefined,
             };
             return {
                 theme,

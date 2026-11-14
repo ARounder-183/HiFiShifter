@@ -353,6 +353,11 @@ export function ActionBar() {
         return Number.isFinite(normalized) ? String(normalized) : "120";
     }
 
+    /** 拍号分子与后端 / Tempo Map 共用的合法区间。 */
+    function clampBeats(value: number): number {
+        return Math.min(32, Math.max(1, Math.round(value)));
+    }
+
     const [bpmText, setBpmText] = useState(() => formatBpmValue(s.bpm || 120));
     /** 用户正在输入时置位，阻止显示值变化覆写输入草稿。 */
     const [bpmDirty, setBpmDirty] = useState(false);
@@ -545,10 +550,53 @@ export function ActionBar() {
     );
     useEffect(() => {
         return () => {
-            // 卸载前落地最后一次滚轮值：否则"最后一格"永远到不了 store。
-            bpmCommitRef.flush();
+            // 卸载即手势结束：挂起帧不该在组件销毁后继续向 store 发命令。
+            bpmCommitRef.cancel();
         };
     }, [bpmCommitRef]);
+
+    /**
+     * 拍号分子滚轮的**落地提交**（每帧最多一次）。
+     *
+     * 与 BPM 同一纪律：一次滚轮手势可能带来几十个事件，逐事件各发一条
+     * `set_project_timeline_settings` 会让线程池、撤销组和整棵订阅树跟着
+     * 重算几十次。这里只在帧边界提交最终值，输入文本仍逐事件更新。
+     */
+    const applyBeatsCommit = useCallback(
+        (value: number) => {
+            if (s.tempoMap && s.tempoMap.points.length > 0) {
+                updateTempoPointAtPlayhead({
+                    timeSignature: { numerator: value, denominator: displayDenominator },
+                });
+                return;
+            }
+            void dispatch(
+                setProjectTimelineSettingsRemote({
+                    beatsPerBar: value,
+                    timeSignatureDenominator: displayDenominator,
+                    gridSize: s.grid,
+                }),
+            );
+        },
+        [s.tempoMap, s.grid, displayDenominator, dispatch, updateTempoPointAtPlayhead],
+    );
+    /** 提交体经 ref 现读：原生 wheel 回调只创建一次，闭包捕获会用到旧设置。 */
+    const applyBeatsCommitRef = useRef(applyBeatsCommit);
+    useEffect(() => {
+        applyBeatsCommitRef.current = applyBeatsCommit;
+    }, [applyBeatsCommit]);
+    const [beatsCommitRef] = useState(() =>
+        createFrameCommitter<number>((value) => applyBeatsCommitRef.current(value)),
+    );
+    useEffect(() => {
+        return () => beatsCommitRef.cancel();
+    }, [beatsCommitRef]);
+    /** 同一手势内的当前值；React state 在高频 wheel 之间尚未刷新。 */
+    const wheelBeatsBaseRef = useRef<number | null>(null);
+    const wheelBeatsAtRef = useRef(0);
+    /** Escape 会主动 blur；那一次 blur 不得把刚丢弃的草稿又提交回去。 */
+    const skipBpmBlurCommitRef = useRef(false);
+    const skipBeatsBlurCommitRef = useRef(false);
 
     /**
      * 滚轮累积的起点。
@@ -568,7 +616,7 @@ export function ActionBar() {
      * 或 `useRangeWheelGuard`）：滚轮调值会同时滚动祖先容器，产生第二路视觉位移，
      * 并触发浏览器干预告警。
      */
-    const attachBpmWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
+    const attachBpmWheel = useNonPassiveWheel<HTMLElement>((e) => {
         // 【必须调用】换成非被动原生监听的意义正是让这两句生效：滚轮调值不得同时
         // 滚动祖先容器（ActionBar 自己是 overflow-x-auto），也不得被其它滚轮逻辑
         // 顺带处理。曾经在改写监听方式时把它们一起删掉，结果滚轮既改 BPM 又滚动
@@ -599,7 +647,9 @@ export function ActionBar() {
         const raw = (nextText ?? bpmText).trim();
         const next = Number(raw);
         setBpmDirty(false);
-        // 键盘/失焦提交结束当前滚轮手势：下一次滚轮从新值重新累积。
+        // 取消尚未落地的帧提交：否则失焦 / 回车与 rAF 会发两条同样的命令。
+        bpmCommitRef.cancel();
+        // 键盘 / 失焦提交结束当前滚轮手势：下一次滚轮从新值重新累积。
         wheelBpmBaseRef.current = null;
         if (!Number.isFinite(next)) {
             setBpmText(formatBpmValue(displayBpm));
@@ -607,13 +657,7 @@ export function ActionBar() {
         }
         // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
         const clamped = clampBpm(next);
-        if (s.tempoMap && s.tempoMap.points.length > 0) {
-            updateTempoPointAtPlayhead({ bpm: clamped });
-            setBpmText(formatBpmValue(clamped));
-            return;
-        }
-        dispatch(setBpm(clamped));
-        void dispatch(updateTransportBpm(clamped));
+        applyBpmCommitRef.current(clamped);
         setBpmText(formatBpmValue(clamped));
     }
 
@@ -628,57 +672,39 @@ export function ActionBar() {
         const raw = (nextText ?? beatsText).trim();
         const next = Number(raw);
         setBeatsDirty(false);
-        if (!Number.isFinite(next)) {
-            setBeatsText(String(Math.round(displayBeats)));
-            return Math.round(displayBeats);
-        }
-        // 与旧 onChange 同一口径：本地先钳制，避免把离谱值发给后端。
-        const clamped = Math.min(32, Math.max(1, Math.round(next)));
+        const fallback = clampBeats(displayBeats);
+        const clamped = Number.isFinite(next) ? clampBeats(next) : fallback;
+        // 取消尚未落地的帧提交：显式提交只发一次，且始终用最终值。
+        beatsCommitRef.cancel();
+        wheelBeatsBaseRef.current = null;
         setBeatsText(String(clamped));
-        if (clamped === Math.round(displayBeats)) return clamped;
-        if (s.tempoMap && s.tempoMap.points.length > 0) {
-            updateTempoPointAtPlayhead({
-                timeSignature: {
-                    numerator: clamped,
-                    denominator: displayDenominator,
-                },
-            });
-            return clamped;
-        }
-        void dispatch(
-            setProjectTimelineSettingsRemote({
-                beatsPerBar: clamped,
-                timeSignatureDenominator: displayDenominator,
-                gridSize: s.grid,
-            }),
-        );
+        if (clamped !== fallback) applyBeatsCommitRef.current(clamped);
         return clamped;
     }
 
-    const attachBeatsWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
+    const attachBeatsWheel = useNonPassiveWheel<HTMLElement>((e) => {
         e.preventDefault();
         e.stopPropagation();
-        const direction = e.deltaY < 0 ? 1 : -1;
-        // 输入草稿先提交：滚轮以提交后的值为基准步进，草稿与 store 不会分叉。
-        const current = Math.max(1, Math.min(32, commitBeats()));
-        const next = Math.max(1, Math.min(32, current + direction));
-        if (next === current) return;
-        if (s.tempoMap && s.tempoMap.points.length > 0) {
-            updateTempoPointAtPlayhead({
-                timeSignature: {
-                    numerator: next,
-                    denominator: displayDenominator,
-                },
-            });
-            return;
+        if (!Number.isFinite(e.deltaY) || e.deltaY === 0) return;
+        const now = performance.now();
+        // 与 BPM 同一套手势累加器：同一帧内的多次 wheel 不能都从旧的
+        // beatsText 起步，否则连续滚动只前进一格。
+        if (wheelBeatsBaseRef.current === null || now - wheelBeatsAtRef.current > 200) {
+            const draft = Number(beatsText);
+            wheelBeatsBaseRef.current = Number.isFinite(draft)
+                ? clampBeats(draft)
+                : clampBeats(displayBeats);
         }
-        void dispatch(
-            setProjectTimelineSettingsRemote({
-                beatsPerBar: next,
-                timeSignatureDenominator: displayDenominator,
-                gridSize: s.grid,
-            }),
+        wheelBeatsAtRef.current = now;
+        const direction = e.deltaY < 0 ? 1 : -1;
+        const next = clampBeats(
+            (wheelBeatsBaseRef.current ?? clampBeats(displayBeats)) + direction,
         );
+        if (next === wheelBeatsBaseRef.current) return;
+        wheelBeatsBaseRef.current = next;
+        setBeatsText(String(next));
+        setBeatsDirty(false);
+        beatsCommitRef.schedule(next);
     });
 
     function formatRecordingTime(seconds: number): string {
@@ -897,14 +923,24 @@ export function ActionBar() {
                                 setBpmDirty(true);
                                 setBpmText(e.target.value);
                             }}
-                            onBlur={() => commitBpm()}
+                            onBlur={() => {
+                                if (skipBpmBlurCommitRef.current) {
+                                    skipBpmBlurCommitRef.current = false;
+                                    return;
+                                }
+                                commitBpm();
+                            }}
                             onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
                                 if (e.key === "Enter") {
                                     e.preventDefault();
                                     commitBpm();
+                                    skipBpmBlurCommitRef.current = true;
                                     (e.currentTarget as HTMLInputElement).blur();
                                 } else if (e.key === "Escape") {
                                     e.preventDefault();
+                                    bpmCommitRef.cancel();
+                                    wheelBpmBaseRef.current = null;
+                                    skipBpmBlurCommitRef.current = true;
                                     setBpmDirty(false);
                                     setBpmText(formatBpmValue(displayBpm));
                                     (e.currentTarget as HTMLInputElement).blur();
@@ -937,16 +973,26 @@ export function ActionBar() {
                                     setBeatsDirty(true);
                                     setBeatsText(e.target.value);
                                 }}
-                                onBlur={() => commitBeats()}
+                                onBlur={() => {
+                                    if (skipBeatsBlurCommitRef.current) {
+                                        skipBeatsBlurCommitRef.current = false;
+                                        return;
+                                    }
+                                    commitBeats();
+                                }}
                                 onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
                                     if (e.key === "Enter") {
                                         e.preventDefault();
                                         commitBeats();
+                                        skipBeatsBlurCommitRef.current = true;
                                         (e.currentTarget as HTMLInputElement).blur();
                                     } else if (e.key === "Escape") {
                                         e.preventDefault();
+                                        beatsCommitRef.cancel();
+                                        wheelBeatsBaseRef.current = null;
+                                        skipBeatsBlurCommitRef.current = true;
                                         setBeatsDirty(false);
-                                        setBeatsText(String(Math.round(displayBeats)));
+                                        setBeatsText(String(clampBeats(displayBeats)));
                                         (e.currentTarget as HTMLInputElement).blur();
                                     }
                                 }}

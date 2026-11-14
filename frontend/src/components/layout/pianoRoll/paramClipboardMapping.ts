@@ -77,11 +77,26 @@ export type ParamClipboardPayload = ParamClipboardPayloadV2 | ParamClipboardPayl
 
 function sanitizeValues(raw: unknown): number[] {
     if (!Array.isArray(raw)) return [];
+    // JSON 不能表示 NaN / Infinity，但宿主注入的载荷或未来版本的调用方仍可能
+    // 把非有限数带进来。Number(value) || 0 会放过 Infinity —— 写回曲线后它会
+    // 污染渲染与后端状态。数值载荷统一按有限数校验，非法样本按既有语义归零。
     const out = new Array<number>(raw.length);
     for (let i = 0; i < raw.length; i += 1) {
-        out[i] = Number(raw[i]) || 0;
+        const value = Number(raw[i]);
+        out[i] = Number.isFinite(value) ? value : 0;
     }
     return out;
+}
+
+/** 段偏移与帧周期都参与时间映射，非有限值会让 slice / 落盘区间整体失效。 */
+function finitePositiveOr(value: unknown, fallback: number): number {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function finiteFrameOffset(value: unknown): number {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? Math.max(0, Math.round(parsed)) : 0;
 }
 
 /** 剪贴板覆盖的总帧数（各段值长度之和，不含断层）。 */
@@ -115,14 +130,14 @@ export function normalizeClipboardData(
     for (const segment of data.segments ?? []) {
         const values = sanitizeValues(segment.values);
         if (values.length === 0) continue;
-        const startFrame = Math.max(0, Math.round(Number(segment.startFrame) || 0));
+        const startFrame = finiteFrameOffset(segment.startFrame);
         segments.push({ startFrame, values });
     }
     if (segments.length === 0) return null;
     segments.sort((a, b) => a.startFrame - b.startFrame);
     return {
         param: data.param,
-        framePeriodMs: Math.max(1e-6, Number(data.framePeriodMs) || 5),
+        framePeriodMs: finitePositiveOr(data.framePeriodMs, 5),
         segments,
     };
 }
@@ -134,7 +149,7 @@ export function toParamClipboardPayload(data: ParamClipboardData): ParamClipboar
         version: PARAM_CLIPBOARD_VERSION,
         kind: "param",
         param: data.param,
-        framePeriodMs: normalized?.framePeriodMs ?? Math.max(1e-6, Number(data.framePeriodMs) || 5),
+        framePeriodMs: normalized?.framePeriodMs ?? finitePositiveOr(data.framePeriodMs, 5),
         segments: normalized?.segments ?? [],
     };
 }
@@ -149,7 +164,7 @@ export function parseParamClipboardPayload(value: unknown): ParamClipboardData |
     if (raw.kind !== "param") return null;
     const param = typeof raw.param === "string" ? raw.param : "";
     if (!param) return null;
-    const framePeriodMs = Math.max(1e-6, Number(raw.framePeriodMs) || 5);
+    const framePeriodMs = finitePositiveOr(raw.framePeriodMs, 5);
 
     if (raw.version === 1 && Array.isArray(raw.values)) {
         const values = sanitizeValues(raw.values);
@@ -163,7 +178,7 @@ export function parseParamClipboardPayload(value: unknown): ParamClipboardData |
         if (!entry || typeof entry !== "object") continue;
         const seg = entry as Record<string, unknown>;
         segments.push({
-            startFrame: Math.max(0, Math.round(Number(seg.startFrame) || 0)),
+            startFrame: finiteFrameOffset(seg.startFrame),
             values: sanitizeValues(seg.values),
         });
     }

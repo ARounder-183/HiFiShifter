@@ -1153,7 +1153,10 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
         // 读到"跳转后"的新代际，继续把媒体写进刚被撤销的时间线。
         const importGen = currentImportGeneration();
         let lastResult: unknown = null;
-        let failedFiles = 0;
+        // 与 importFolderAtPosition.fulfilled 的汇总契约一致：failedFiles 是
+        // **文件名数组**，状态栏靠 length 求失败数。这里必须用 File.name，
+        // 才能在部分文件解码失败时给出可核对的清单，也不让数字伪装成数组。
+        const failedFiles: string[] = [];
         let attempted = 0;
         let accumulatedClipIds: string[] = [];
         for (const file of files) {
@@ -1169,7 +1172,7 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
                 // 单个文件解码/读取失败只跳过该文件（与 importMultipleAudioAtPosition
                 // 跨时循环的失败语义一致）：中止整个批次会把已导入的 clip 报成
                 // "导入失败"，而它们其实已经在时间线上。
-                failedFiles += 1;
+                failedFiles.push(file.name);
                 continue;
             }
         }

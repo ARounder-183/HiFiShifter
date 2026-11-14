@@ -377,6 +377,21 @@ export function registerAudio(builder: ActionReducerMapBuilder<SessionState>) {
                 // 合成错误码：让状态栏走红色 error 通道（原版失败只写灰色 status）
                 state.error = "import_audio_failed";
             }
+            // 无路径的多文件导入复用目录导入的五语汇总模板；failedFiles 是
+            // 文件名数组，状态栏以 length 求失败数。
+            const summary = action.payload as {
+                attempted?: number;
+                failedFiles?: string[];
+            };
+            if (
+                ok &&
+                typeof summary.attempted === "number" &&
+                Array.isArray(summary.failedFiles) &&
+                summary.attempted > 0
+            ) {
+                const failed = summary.failedFiles.length;
+                state.status = `Folder import: ${summary.attempted - failed} imported, ${failed} failed`;
+            }
             if (ok && payload.imported && payload.imported.tracks) {
                 applyTimelineStatePreservingPitchVisuals(state, payload.imported);
                 // 导入定位光标：thunk 以独立字段带回的导入起始位置。
