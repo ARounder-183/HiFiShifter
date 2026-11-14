@@ -609,6 +609,8 @@ jobs:
               if ($j.package -and $j.package.version) { $ver = $j.package.version }
               elseif ($j.version) { $ver = $j.version }
             } catch { throw "无法从 ${conf} 读取版本号（缺失或 JSON 损坏）：$_" }
+          } else {
+            throw "无法从 ${conf} 读取版本号（文件缺失）"
           }
           $prodSafe = ($prod -replace '["\\/:*?<>|]', '') -replace '\s+', '_'
           $verSafe = ($ver -replace '["\\/:*?<>|]', '') -replace '^v', ''
@@ -630,6 +632,8 @@ jobs:
               if ($j.package -and $j.package.version) { $ver = $j.package.version }
               elseif ($j.version) { $ver = $j.version }
             } catch { throw "无法从 ${conf} 读取版本号（缺失或 JSON 损坏）：$_" }
+          } else {
+            throw "无法从 ${conf} 读取版本号（文件缺失）"
           }
           $prodSafe = ($prod -replace '["\\/:*?<>|]', '') -replace '\s+', '_'
           $verSafe = ($ver -replace '["\\/:*?<>|]', '') -replace '^v', ''
@@ -656,6 +660,8 @@ jobs:
               if ($j.package -and $j.package.version) { $ver = $j.package.version }
               elseif ($j.version) { $ver = $j.version }
             } catch { throw "无法从 ${conf} 读取版本号（缺失或 JSON 损坏）：$_" }
+          } else {
+            throw "无法从 ${conf} 读取版本号（文件缺失）"
           }
           $prodSafe = ($prod -replace '["\\/:*?<>|]', '') -replace '\s+', '_'
           $verSafe = ($ver -replace '["\\/:*?<>|]', '') -replace '^v', ''

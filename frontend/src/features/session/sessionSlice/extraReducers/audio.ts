@@ -328,14 +328,17 @@ export function registerAudio(builder: ActionReducerMapBuilder<SessionState>) {
                 attempted?: number;
                 failedFiles?: string[];
             };
+            const attempted = summary.attempted;
             if (
                 ok &&
-                typeof summary.attempted === "number" &&
-                summary.failedFiles &&
-                summary.attempted > 0
+                typeof attempted === "number" &&
+                Number.isSafeInteger(attempted) &&
+                Array.isArray(summary.failedFiles) &&
+                attempted > 0
             ) {
                 const failed = summary.failedFiles.length;
-                state.status = `Folder import: ${summary.attempted - failed} imported, ${failed} failed`;
+                const imported = Math.max(0, attempted - failed);
+                state.status = `Folder import: ${imported} imported, ${failed} failed`;
             }
             if (ok && payload.imported && payload.imported.tracks) {
                 applyTimelineStatePreservingPitchVisuals(state, payload.imported);
@@ -383,14 +386,17 @@ export function registerAudio(builder: ActionReducerMapBuilder<SessionState>) {
                 attempted?: number;
                 failedFiles?: string[];
             };
+            const attempted = summary.attempted;
             if (
                 ok &&
-                typeof summary.attempted === "number" &&
+                typeof attempted === "number" &&
+                Number.isSafeInteger(attempted) &&
                 Array.isArray(summary.failedFiles) &&
-                summary.attempted > 0
+                attempted > 0
             ) {
                 const failed = summary.failedFiles.length;
-                state.status = `Folder import: ${summary.attempted - failed} imported, ${failed} failed`;
+                const imported = Math.max(0, attempted - failed);
+                state.status = `Folder import: ${imported} imported, ${failed} failed`;
             }
             if (ok && payload.imported && payload.imported.tracks) {
                 applyTimelineStatePreservingPitchVisuals(state, payload.imported);

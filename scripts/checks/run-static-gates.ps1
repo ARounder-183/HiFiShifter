@@ -41,6 +41,10 @@ Invoke-Gate 'Product consistency gate' { & (Join-Path $PSScriptRoot 'check-produ
 # "找不到 backend\src-tauri\resources\models\models.json" 处失败。
 Invoke-Gate 'Env script scope gate' { & (Join-Path $PSScriptRoot 'check-env-scripts.ps1') }
 
+# 源码注释里的半截 UTF-8 字节不会让任何编译器报错，但会把中文注释变成乱码，
+# 且此后每次 diff 都带着它。第三方树沿用上游原始编码，不在本门禁管辖内。
+Invoke-Gate 'Source UTF-8 gate' { python scripts/checks/check-utf8.py }
+
 # SoundTouch 构建生成器与缓存自愈。
 Invoke-Gate 'SoundTouch generator gate' { python scripts/checks/check-soundtouch-generator.py }
 

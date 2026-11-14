@@ -331,6 +331,14 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
         [],
     );
 
+    /*
+     * 结果集缩短（换查询 / 换排序 / 过滤后）时把光标夹回有效区间；否则
+     * aria-activedescendant 会指向不存在的选项，回车也没有可确认的条目。
+     * 键盘处理与渲染共用这份派生值，渲染期就地校正 state（React 的派生状态模式）。
+     */
+    const boundedSelectedIndex = Math.min(selectedIndex, Math.max(0, sortedResults.length - 1));
+    if (boundedSelectedIndex !== selectedIndex) setSelectedIndex(boundedSelectedIndex);
+
     // 键盘事件处理
     const handleKeyDown = useCallback(
         (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -338,33 +346,35 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                 e.preventDefault();
                 // 【updater 必须纯】预览是有副作用的调用：StrictMode 下 updater 会被
                 // 调用两次（并发渲染也可能重放），副作用放进 updater 会双触发。
-                // 先算好 next，副作用在 setState 之外执行。
-                const next = Math.min(selectedIndex + 1, sortedResults.length - 1);
+                // 先算好 next，副作用在 setState 之外执行。无结果时不要预览第 0 项，
+                // 也不要把选中项写成 -1（结果回来后会指向不存在的 DOM）。
+                if (sortedResults.length === 0) return;
+                const next = Math.min(boundedSelectedIndex + 1, sortedResults.length - 1);
                 const entry = sortedResults[next];
-                if (entry && isAudioFile(entry)) {
+                if (next !== boundedSelectedIndex && entry && isAudioFile(entry)) {
                     playPreview(entry.path);
                 }
                 setSelectedIndex(next);
             } else if (matchKey(e, keybindings["quickSearch.navigate.up"])) {
                 e.preventDefault();
-                const next = Math.max(selectedIndex - 1, 0);
+                if (sortedResults.length === 0) return;
+                const next = Math.max(boundedSelectedIndex - 1, 0);
                 const entry = sortedResults[next];
-                if (entry && isAudioFile(entry)) {
+                if (next !== boundedSelectedIndex && entry && isAudioFile(entry)) {
                     playPreview(entry.path);
                 }
                 setSelectedIndex(next);
             } else if (matchKey(e, keybindings["quickSearch.preview"])) {
                 // 预览试听（仅当有结果时）
-                if (sortedResults.length > 0) {
+                const entry = sortedResults[boundedSelectedIndex];
+                if (entry) {
                     e.preventDefault();
-                    const entry = sortedResults[selectedIndex];
-                    if (entry) handlePreview(entry);
+                    handlePreview(entry);
                 }
             } else if (matchKey(e, keybindings["quickSearch.confirm"])) {
                 e.preventDefault();
-                if (sortedResults.length > 0 && sortedResults[selectedIndex]) {
-                    handleConfirm(sortedResults[selectedIndex]);
-                }
+                const entry = sortedResults[boundedSelectedIndex];
+                if (entry) handleConfirm(entry);
             } else if (matchKey(e, keybindings["quickSearch.close"])) {
                 e.preventDefault();
                 stopPreview();
@@ -373,7 +383,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
         },
         [
             sortedResults,
-            selectedIndex,
+            boundedSelectedIndex,
             handlePreview,
             handleConfirm,
             onClose,
@@ -388,9 +398,9 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
     useEffect(() => {
         if (!listRef.current) return;
         const items = listRef.current.querySelectorAll("[data-qs-item]");
-        const activeItem = items[selectedIndex] as HTMLElement | undefined;
+        const activeItem = items[boundedSelectedIndex] as HTMLElement | undefined;
         activeItem?.scrollIntoView({ block: "nearest" });
-    }, [selectedIndex]);
+    }, [boundedSelectedIndex]);
 
     // 清理 debounce
     useEffect(
@@ -412,7 +422,9 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
     const hasResults = !noFolder && query.trim() !== "" && !loading && sortedResults.length > 0;
     // 键盘选中项的 aria-activedescendant 指针（无结果时不挂，避免指向不存在的 id）。
     const activeDescendantId =
-        hasResults && sortedResults[selectedIndex] ? optionId(selectedIndex) : undefined;
+        hasResults && sortedResults[boundedSelectedIndex]
+            ? optionId(boundedSelectedIndex)
+            : undefined;
 
     return (
         <>
@@ -566,10 +578,10 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                                     data-qs-item
                                     id={optionId(index)}
                                     role="option"
-                                    aria-selected={index === selectedIndex}
+                                    aria-selected={index === boundedSelectedIndex}
                                     className={[
                                         "flex items-center gap-1.5 px-2 py-[4px] cursor-pointer text-qt-xs",
-                                        index === selectedIndex
+                                        index === boundedSelectedIndex
                                             ? "bg-[color-mix(in_oklab,var(--qt-highlight)_25%,transparent)]"
                                             : "hover:bg-[color-mix(in_oklab,var(--qt-highlight)_10%,transparent)]",
                                         previewingPath === entry.path

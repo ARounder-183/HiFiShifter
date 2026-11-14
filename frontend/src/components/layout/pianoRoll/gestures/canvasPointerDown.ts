@@ -483,9 +483,11 @@ export function handleCanvasPointerDown(
                     // 的抬笔都会把播放头拖回这次按下时的位置（幽灵 seek）。pointerId
                     // 与 cancel 类型守卫与文件内其它 coalesced-up 检查同一口径。
                     const seekOnUp = (up: globalThis.PointerEvent) => {
+                        // 先判身份再注销：另一根手指 / 另一支笔的抬笔或取消若先到，
+                        // 不能把本指针真正的松手监听摘掉（否则单击 seek 静默丢失）。
+                        if (up.pointerId !== pressPointerId) return;
                         window.removeEventListener("pointerup", seekOnUp, true);
                         window.removeEventListener("pointercancel", seekOnUp, true);
-                        if (up.pointerId !== pressPointerId) return;
                         if (up.type === "pointercancel") return;
                         if (Math.hypot(up.clientX - startX, up.clientY - startY) < 4) {
                             const sec = pointerSec(e.clientX);

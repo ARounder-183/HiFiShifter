@@ -51,6 +51,54 @@ describe("parseClipboardObject", () => {
         expect((parsed as { groupIds?: string[] } | null)?.groupIds).toBeUndefined();
     });
 
+    test("空 templates 不是可粘贴载荷，外来字段按白名单清洗", () => {
+        expect(parseClipboardObject(JSON.stringify({ kind: "clip", templates: [] }))).toBeNull();
+        const parsed = parseClipboardObject(
+            JSON.stringify({
+                kind: "clip",
+                templates: [
+                    {
+                        ...template,
+                        lengthSec: 0,
+                    },
+                ],
+            }),
+        );
+        expect(parsed).toBeNull();
+
+        const cleaned = parseClipboardObject(
+            JSON.stringify({
+                kind: "clip",
+                templates: [
+                    {
+                        ...template,
+                        muted: "yes",
+                        gain: 2,
+                        color: "not-a-color",
+                        waveformPreview: [0.1, 0.2],
+                        injected: { prototype: "bad" },
+                    },
+                ],
+            }),
+        ) as { templates: Record<string, unknown>[] } | null;
+        expect(cleaned).not.toBeNull();
+        expect(cleaned!.templates[0].gain).toBe(2);
+        expect(cleaned!.templates[0].waveformPreview).toEqual([0.1, 0.2]);
+        expect(cleaned!.templates[0].muted).toBeUndefined();
+        expect(cleaned!.templates[0].color).toBeUndefined();
+        expect(cleaned!.templates[0].injected).toBeUndefined();
+        expect(
+            (
+                parseClipboardObject(
+                    JSON.stringify({
+                        kind: "clip",
+                        templates: [{ ...template, loopPeriodSec: null }],
+                    }),
+                ) as { templates: Record<string, unknown>[] } | null
+            )?.templates[0].loopPeriodSec,
+        ).toBeNull();
+    });
+
     test("参数线载荷仍走原有归一路径", () => {
         const parsed = parseClipboardObject(
             JSON.stringify({

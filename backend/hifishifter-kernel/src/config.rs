@@ -3288,13 +3288,16 @@ pub fn update_ui_settings_with(
     config_dir: &Path,
     f: impl FnOnce(UiSettings) -> UiSettings,
 ) -> UiSettings {
-    let mut result = None;
+    let mut result: Option<UiSettings> = None;
     update_config(config_dir, |cfg| {
         let next = f(cfg.ui.clone());
         cfg.ui = next.clone();
         result = Some(next);
     });
-    result.unwrap_or_else(|| load_ui_settings(config_dir))
+    // update_config 的闭包一定被调用一次，因此 result 必为 Some。兜底显式失败
+    // 而不是退回 load_ui_settings：后者会把本次补丁整个丢掉，却仍向前端回
+    // `ok: true`（用户看到"保存成功"但值没变），比报错更难排查。
+    result.expect("update_config must invoke its update closure")
 }
 
 /// 从 config dir 读取导出设置。

@@ -234,86 +234,84 @@ export function AppThemeProvider({ children }: PropsWithChildren) {
     document.documentElement.style.setProperty("--default-font-family", fontFamily);
     document.body.style.fontFamily = fontFamily;
 
-    useEffect(() => {
-        const applyPreviewFromStorage = () => {
-            try {
-                const settingsRaw = localStorage.getItem(PREVIEW_SETTINGS_KEY);
-                const colorsRaw = localStorage.getItem(PREVIEW_COLORS_KEY);
-                if (!settingsRaw && !colorsRaw) return;
+    const applyPreviewFromStorage = useCallback(() => {
+        try {
+            const settingsRaw = localStorage.getItem(PREVIEW_SETTINGS_KEY);
+            const colorsRaw = localStorage.getItem(PREVIEW_COLORS_KEY);
+            if (!settingsRaw && !colorsRaw) return;
 
-                if (settingsRaw) {
-                    const raw: unknown = JSON.parse(settingsRaw);
-                    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-                        throw new Error("invalid appearance preview");
-                    }
-                    const candidate = raw as Record<string, unknown>;
-                    // 预览由外观面板写入，但 localStorage 是共享的外部输入：
-                    // 坏值若直喂 <Theme> 会产生无 CSS 规则支撑的属性值，
-                    // 超长 fontFamily 还能拖慢每次样式重算。
-                    const mode = THEME_MODE_SETTINGS.includes(
-                        candidate.mode as (typeof THEME_MODE_SETTINGS)[number],
-                    )
-                        ? (candidate.mode as AppearanceSettings["mode"])
-                        : DEFAULT_APPEARANCE.mode;
-                    const accentColor = RADIX_ACCENT_COLORS.includes(
-                        candidate.accentColor as (typeof RADIX_ACCENT_COLORS)[number],
-                    )
-                        ? (candidate.accentColor as AppearanceSettings["accentColor"])
-                        : DEFAULT_APPEARANCE.accentColor;
-                    const grayColor = RADIX_GRAY_COLORS.includes(
-                        candidate.grayColor as (typeof RADIX_GRAY_COLORS)[number],
-                    )
-                        ? (candidate.grayColor as AppearanceSettings["grayColor"])
-                        : DEFAULT_APPEARANCE.grayColor;
-                    const radius = RADIX_RADIUS_OPTIONS.includes(
-                        candidate.radius as (typeof RADIX_RADIUS_OPTIONS)[number],
-                    )
-                        ? (candidate.radius as AppearanceSettings["radius"])
-                        : DEFAULT_APPEARANCE.radius;
-                    const fontFamily =
-                        typeof candidate.fontFamily === "string" &&
-                        candidate.fontFamily.length <= 512
-                            ? candidate.fontFamily
-                            : DEFAULT_APPEARANCE.fontFamily;
-                    setAppearance((prev) => ({
-                        ...prev,
-                        mode,
-                        accentColor,
-                        grayColor,
-                        radius,
-                        fontFamily,
-                        activeCustomThemeId: null,
-                    }));
+            if (settingsRaw) {
+                const raw: unknown = JSON.parse(settingsRaw);
+                if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+                    throw new Error("invalid appearance preview");
                 }
-
-                const root = document.documentElement;
-                const colorInput: unknown = colorsRaw ? JSON.parse(colorsRaw) : {};
-                const colors =
-                    colorInput && typeof colorInput === "object" && !Array.isArray(colorInput)
-                        ? (colorInput as Record<string, unknown>)
-                        : {};
-                for (const token of QT_COLOR_TOKENS) {
-                    const val = colors[token];
-                    if (isValidCssColor(val)) {
-                        root.style.setProperty(`--${token as QtColorToken}`, val.trim());
-                    } else {
-                        root.style.removeProperty(`--${token}`);
-                    }
-                }
-            } catch {
-                // ignore malformed preview payload
+                const candidate = raw as Record<string, unknown>;
+                // 预览由外观面板写入，但 localStorage 是共享的外部输入：
+                // 坏值若直喂 <Theme> 会产生无 CSS 规则支撑的属性值，
+                // 超长 fontFamily 还能拖慢每次样式重算。
+                const mode = THEME_MODE_SETTINGS.includes(
+                    candidate.mode as (typeof THEME_MODE_SETTINGS)[number],
+                )
+                    ? (candidate.mode as AppearanceSettings["mode"])
+                    : DEFAULT_APPEARANCE.mode;
+                const accentColor = RADIX_ACCENT_COLORS.includes(
+                    candidate.accentColor as (typeof RADIX_ACCENT_COLORS)[number],
+                )
+                    ? (candidate.accentColor as AppearanceSettings["accentColor"])
+                    : DEFAULT_APPEARANCE.accentColor;
+                const grayColor = RADIX_GRAY_COLORS.includes(
+                    candidate.grayColor as (typeof RADIX_GRAY_COLORS)[number],
+                )
+                    ? (candidate.grayColor as AppearanceSettings["grayColor"])
+                    : DEFAULT_APPEARANCE.grayColor;
+                const radius = RADIX_RADIUS_OPTIONS.includes(
+                    candidate.radius as (typeof RADIX_RADIUS_OPTIONS)[number],
+                )
+                    ? (candidate.radius as AppearanceSettings["radius"])
+                    : DEFAULT_APPEARANCE.radius;
+                const fontFamily =
+                    typeof candidate.fontFamily === "string" && candidate.fontFamily.length <= 512
+                        ? candidate.fontFamily
+                        : DEFAULT_APPEARANCE.fontFamily;
+                setAppearance((prev) => ({
+                    ...prev,
+                    mode,
+                    accentColor,
+                    grayColor,
+                    radius,
+                    fontFamily,
+                    activeCustomThemeId: null,
+                }));
             }
-        };
 
+            const root = document.documentElement;
+            const colorInput: unknown = colorsRaw ? JSON.parse(colorsRaw) : {};
+            const colors =
+                colorInput && typeof colorInput === "object" && !Array.isArray(colorInput)
+                    ? (colorInput as Record<string, unknown>)
+                    : {};
+            for (const token of QT_COLOR_TOKENS) {
+                const val = colors[token];
+                if (isValidCssColor(val)) {
+                    root.style.setProperty(`--${token as QtColorToken}`, val.trim());
+                } else {
+                    root.style.removeProperty(`--${token}`);
+                }
+            }
+        } catch {
+            // ignore malformed preview payload
+        }
+    }, []);
+
+    useEffect(() => {
         const onStorage = (e: StorageEvent) => {
             if (e.key === PREVIEW_SETTINGS_KEY || e.key === PREVIEW_COLORS_KEY) {
                 applyPreviewFromStorage();
             }
         };
-
         window.addEventListener("storage", onStorage);
         return () => window.removeEventListener("storage", onStorage);
-    }, []);
+    }, [applyPreviewFromStorage]);
 
     /* ── 初始化时保存快照（用于第一次打开设置对话框） ── */
     useEffect(() => {
@@ -322,8 +320,14 @@ export function AppThemeProvider({ children }: PropsWithChildren) {
 
         // 初始化时应用自定义主题颜色
         applyCustomThemeColors(appearance.activeCustomThemeId);
+        // storage 事件**不会**在写入它的同一文档里派发，而预览值会持久化
+        // （见 AppearanceSettingsPanel 的注释）：冷启动若不主动读一次，上次会话
+        // 遗留的预览会与已保存主题分叉，且跨窗口只在另一窗口改动时才同步。
+        // 必须排在 applyCustomThemeColors **之后**：它会重写 `--qt-*`，反过来
+        // 就会被自定义主题的颜色覆盖掉（React 按声明顺序冲刷 effect）。
+        applyPreviewFromStorage();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+    }, [applyPreviewFromStorage]);
 
     /* ── 保存快照（每当 appearance 稳定保存后更新快照供下次使用） ── */
     // 注意：只有通过 applySettings 才会真正保存到 localStorage
