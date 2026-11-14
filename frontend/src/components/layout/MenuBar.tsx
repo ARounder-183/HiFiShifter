@@ -1547,6 +1547,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <span>{t("menu_help")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
+                    {/* 日志详细程度的唯一入口：一级菜单只占一行，四档在子菜单里。 */}
+                    <LogVerbosityMenuItems
+                        onSaveFailed={(message) =>
+                            setNotice({ title: tf("status_error_prefix"), message })
+                        }
+                    />
                     <DropdownMenu.Item
                         onSelect={async () => {
                             const { openLogFolder } =
@@ -1591,12 +1597,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     >
                         {tf("menu_export_diagnostics")}
                     </DropdownMenu.Item>
-                    {/* 日志详细程度的唯一入口：一级菜单只占一行，四档在子菜单里。 */}
-                    <LogVerbosityMenuItems
-                        onSaveFailed={(message) =>
-                            setNotice({ title: tf("status_error_prefix"), message })
-                        }
-                    />
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item onSelect={() => setAboutDialogOpen(true)}>
                         {t("menu_about")}

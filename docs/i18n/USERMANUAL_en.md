@@ -129,9 +129,9 @@ The `Options` menu allows you to modify various settings of HiFiShifter:
 
 The `Help` menu provides diagnostics and support entries:
 
+- `Log verbosity`: A submenu containing only None / Low / Medium / High; the first-level menu shows the current level.
 - `Open Log Folder`: Opens the folder containing the run log in the system file manager. See the [Logs and Troubleshooting](#9-logs-and-troubleshooting) section.
 - `Export Diagnostics...`: Lets you pick a save location, then generates a diagnostics package (system info + all logs + inference-device benchmark results) that you can attach to an issue.
-- `Log verbosity`: A submenu containing only None / Low / Medium / High; the first-level menu shows the current level.
 - `About HiFiShifter`: Opens an About dialog showing the project introduction, the current version, and the project homepage link.
 
 ## 3. Track View
