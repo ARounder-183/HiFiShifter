@@ -16,6 +16,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
+#[path = "session_link_edits.rs"]
+mod link_edits;
+
 /// 自动渲染连续失败多少次后**停止重试**，把错误稳定地交给状态栏。
 ///
 /// 【为什么必须有上限】此前失败路径只设一个 150 ms / 1 s 的 `deadline`，下一轮又
@@ -1120,6 +1123,20 @@ impl EditorSession {
                     .iter()
                     .any(|take| take.syllable_analysis.is_some())
             })
+    }
+
+    /// Stable-id prefix used by the current editor session's timeline.
+    pub(crate) fn link_namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    /// Applies the two user-owned shapes from a Capture host-link edit.
+    pub(crate) fn apply_link_edits(
+        &self,
+        params: &std::collections::BTreeMap<String, TrackParamsState>,
+        tracks: &[Track],
+    ) -> Result<(), String> {
+        link_edits::apply(self, params, tracks)
     }
 
     /// 把界面时间线还原成**音频权威**形态，供 Capture 渲染使用。

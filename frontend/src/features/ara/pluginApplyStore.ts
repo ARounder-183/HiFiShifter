@@ -11,6 +11,8 @@
  * 判断"变了没有"，因此 `publish` 会在内容相同时**保留旧引用** —— 250 ms 一次的
  * 轮询里绝大多数回调其实什么都没变，不比较就等于每 250 ms 白重渲染一次。
  */
+import { useSyncExternalStore } from "react";
+
 import { listen } from "../../services/hostEvents";
 import { invoke, invokeErrorCode, invokeErrorKind } from "../../services/invoke";
 
@@ -155,6 +157,15 @@ export function subscribePluginApply(listener: () => void): () => void {
 
 export function getPluginApplySnapshot(): PluginApplySnapshot {
     return snapshot;
+}
+
+/** React subscription for callers that need the live plug-in mode. */
+export function usePluginApplySnapshot(): PluginApplySnapshot {
+    return useSyncExternalStore(
+        subscribePluginApply,
+        getPluginApplySnapshot,
+        getPluginApplySnapshot,
+    );
 }
 
 /** 仅供测试重置模块级状态。 */
@@ -317,4 +328,9 @@ export async function reloadPluginHost(
             sessionCode: invokeErrorCode(error),
         });
     }
+}
+
+/** Test-only: publish a host-mode snapshot without invoking the backend. */
+export function publishPluginApplyStateForTests(state: PluginApplyState | null): void {
+    publish({ ...snapshot, state });
 }

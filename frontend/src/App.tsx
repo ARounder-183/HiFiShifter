@@ -16,7 +16,7 @@ import { HostLinkPanel } from "./features/hostLink/HostLinkPanel";
 import { HostAudioNotice } from "./features/ara/HostAudioNotice";
 import { useSyllableAnalysisEvents } from "./features/session/useSyllableAnalysisEvents";
 import { PluginApplyStatus } from "./features/ara/PluginApplyStatus";
-import { HostLinkExportControl } from "./features/hostLink/HostLinkExportControl";
+import { CaptureHostLinkExportControl } from "./features/hostLink/HostLinkExportControl";
 import { getPluginApplySnapshot, subscribePluginApply } from "./features/ara/pluginApplyStore";
 import { listen as listenHostEvent } from "./services/hostEvents";
 import {
@@ -4681,7 +4681,7 @@ function AppInner() {
                           App 里打开它编辑。它同样是一段状态读数 + 一个动作，归状态栏
                           （见 `HostLinkExportControl` 的文件头）。
                         */}
-                        <HostLinkExportControl />
+                        <CaptureHostLinkExportControl />
                     </>
                 ) : null}
             </Flex>
