@@ -31,7 +31,56 @@ HiFiShifter 的独立 App 可作为本机 MCP 服务，供 Agent 读取和编辑
 - 使用官方 Rust SDK `rmcp`。协议回归覆盖 `2025-11-25` 初始化式调用和 `2026-07-28` 每请求元数据调用。
 - MCP 入口只在独立 App 中显示；VST3/ARA/CLAP 不启用这条独立工程写入通道。
 
-## 2. 工具一览
+## 2. 本地素材标注与对齐模型
+
+这些模型**不内置到 MCP 服务，也不通过 MCP 下载或运行**。Agent 使用本地外部 CLI/Skill 处理素材库，再把得到的时间、音素、音高和音色元数据整理成导入计划；App MCP 只负责把计划中的 clip、轨道路由和参数写入当前可视工程。
+
+推荐的首版本地组合：
+
+| 模型或工具 | 用途 | 获取与本地约定 |
+| --- | --- | --- |
+| **HubertFA v0.0.7 ONNX** | 中日歌声音素强制对齐；输出音素起止、元音起点和边界置信度 | 需要完整模型目录，不能只放一个 `model.onnx`。发布压缩包 SHA-256：`48bd6dbcc293e47cc6cbcc556baf575e3d91d61d0ac88ddeccd6098f8f346fa2` |
+| **FCPE ONNX** | 逐帧 F0、有声掩码和中位音高，用于调音与选样 | App 已有资源：`backend/src-tauri/resources/models/fcpe/fcpe.onnx`；当前清单 SHA-256：`013B507ACD406DE122B61EE497300AC6BE082511101BC2136B886E48D9737E5D` |
+| **openSMILE eGeMAPSv02** | 提取音色、唱腔和相邻音色连续性特征 | 本地 Python worker 使用；不是音素对齐模型的替代品 |
+| **SOFA / MFA** | HFA 失败时的中文或日文对齐回退或交叉检查 | 可选本地回退，不默认随 App 或 MCP 打包 |
+| **emotion2vec+ base** | 情感软分布或 embedding，作为低权重选样线索 | 可选；不是歌声音素边界模型 |
+
+HubertFA 目录至少包含：
+
+```text
+model.onnx
+VERSION
+vocab.json
+config.json
+japanese_dict_full.txt
+ds-zh-pinyin-lite.txt
+```
+
+加载前要检查 `VERSION` 与 adapter 约定的一致性和词典覆盖率。文件名提供读音候选；如果词典外词或文件名存在歧义，结果必须标成 `needs_review`，不能根据当前歌曲旋律猜一个读音后自动导入。
+
+标注流程应把以下字段写入素材索引：
+
+```json
+{
+  "asset_id": "asset-...",
+  "content_sha256": "...",
+  "relative_path": "a/ka.wav",
+  "reading": "ka",
+  "phones": ["k", "a"],
+  "phone_spans_sec": [[0.055791, 0.069803], [0.069803, 0.418452]],
+  "vowel_onset_sec": 0.069803,
+  "vowel_end_sec": 0.418452,
+  "stable_vowel_regions_sec": [[0.1195, 0.3505]],
+  "f0_median_midi": 61.02,
+  "voiced_mask_artifact": "f0/asset-....npz",
+  "style_artifact": "features/asset-....npz",
+  "annotation_status": "auto_ready"
+}
+```
+
+导入 App 时，`source_start_sec`、`source_end_sec` 和切分点都使用**原文件时间**。重采样或模型工作副本的坐标不能直接写入工程；必须保留反向映射。App 最终仍用自身轨道设置进行拉伸和 HiFi-GAN 调音。
+
+## 3. 工具一览
 
 工具的 JSON Schema 是可执行契约。以下参数例子是 **`tools/call.arguments`**，不包含客户端 SDK 包装的 JSON-RPC 字段。
 
@@ -53,7 +102,7 @@ HiFiShifter 的独立 App 可作为本机 MCP 服务，供 Agent 读取和编辑
 
 当前代码的调音算法/Compose 属于轨道，合成通常按根轨生效；拉伸 override 属于工程并继承 App 默认。`hfs_settings` 会明确返回 `scope=project/app`，不能把它当作某个 clip 的独立拉伸算法。
 
-## 3. 推荐流程
+## 4. 推荐流程
 
 1. `hfs_get_context` 获取 `revision`。
 2. `hfs_get_edit_capabilities` 找到目标轨道和参数、合法值范围及依赖。
@@ -70,7 +119,7 @@ HiFiShifter 的独立 App 可作为本机 MCP 服务，供 Agent 读取和编辑
 
 收到 `REVISION_CONFLICT` 时重新读取相关状态，重新计算操作并使用新 key；不要无条件覆盖人工编辑。GUI 正在持有撤销分组时可能返回 `EDITOR_BUSY`。
 
-## 4. 轨道、素材与批处理
+## 5. 轨道、素材与批处理
 
 下面的例子创建一条轨道并开启合成，算法沿用 App 默认：
 
@@ -144,7 +193,7 @@ Agent 可以在一批操作中导入同源的两段 clip，分别设置源窗/�
 
 当前 MCP 提供这些可组合编辑原语，不替外部 CLI 自动检测稳定元音、选择同音版本或解析 UST。
 
-## 5. 参数曲线、调音与参数块
+## 6. 参数曲线、调音与参数块
 
 查询区间曲线：
 
@@ -220,7 +269,7 @@ Compose 和分离开关等门禁会在能力工具中给出 `disabled_reason`。
 
 任意曲线形状可通过 `write_curve` 精确写入。当前命名 transform 不包含单独的平滑/颤音/量化算法工具；外部 Agent/CLI 可计算样本后批量写入，不应假设尚未提供的工具已经存在。
 
-## 6. 视图、播放、渲染与保存
+## 7. 视图、播放、渲染与保存
 
 选中轨道并切到音高面板：
 
@@ -253,7 +302,7 @@ Compose 和分离开关等门禁会在能力工具中给出 `disabled_reason`。
 
 工程副本可用 App 正常打开，继续查看素材、轨道设置和曲线；预览音频不替代工程文件。
 
-## 7. 拉伸设置与错误处理
+## 8. 拉伸设置与错误处理
 
 读取 `hfs_settings`：`{"change":{"action":"read"}}`。
 
@@ -284,7 +333,7 @@ Compose 和分离开关等门禁会在能力工具中给出 `disabled_reason`。
 
 领域失败用 MCP `isError=true` 和结构化 `ok=false/code/message` 返回。工具参数不匹配由 SDK 返回协议/参数错误。不要仅凭 HTTP 200 或“听到原声”判断编辑和调音已经完成。
 
-## 8. 当前实现边界
+## 9. 当前实现边界
 
 - MCP 直接操作当前 App，不托管素材分析模型，不自动解析 UST 或替 Agent 挑选版本。
 - 不提供任意 shell、任意 Tauri 调用、任意全工程 JSON 覆盖或源文件删除能力。
