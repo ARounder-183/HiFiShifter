@@ -290,6 +290,8 @@ export function createStoreBridgeMiddleware(role: BridgeRole): Middleware {
     const origin = role === "main" ? "main" : resolveWindowLabel();
     let pending: UnknownAction[] = [];
     let flushHandle: number | null = null;
+    /** 当前挂起的句柄属于哪个句柄空间（rAF 与 setTimeout 不能交叉取消）。 */
+    let flushHandleIsRaf = false;
     let lastFlushAtMs = 0;
     let send: ((event: string, payload?: unknown) => Promise<void>) | null = null;
     let ready = false;
@@ -312,17 +314,44 @@ export function createStoreBridgeMiddleware(role: BridgeRole): Middleware {
         });
     };
 
+    /**
+     * 取消挂起的冲刷。
+     *
+     * 【为什么要区分句柄种类】rAF 与 setTimeout 的句柄来自两个不同的句柄空间，
+     * 不能交叉取消；错把 rAF 句柄喂给 clearTimeout 在 Chromium 里不报错也不生效，
+     * 属于"看起来清了其实没清"的静默错误。
+     */
+    const cancelFlushHandle = () => {
+        if (flushHandle === null) return;
+        if (flushHandleIsRaf) cancelAnimationFrame(flushHandle);
+        else clearTimeout(flushHandle);
+        flushHandle = null;
+    };
+
     const scheduleFlush = () => {
-        if (flushHandle !== null) return;
-        const sinceLastFlush = Date.now() - lastFlushAtMs;
         const backlogTooBig = pending.length >= MAX_PENDING_ACTIONS;
-        const overdue = sinceLastFlush >= MAX_FLUSH_DELAY_MS;
+        const overdue = Date.now() - lastFlushAtMs >= MAX_FLUSH_DELAY_MS;
+        if (flushHandle !== null) {
+            // 【逃生通道】挂起的是 rAF 而主窗口被遮挡/最小化时，WebView2 会整段停发
+            // rAF —— 此时 `flushHandle` 永远不会自然清空，上面的提前返回让队列超限
+            // 与"距上次冲刷过久"两个判据**永远够不到** setTimeout 兜底，动作以每秒
+            // 数十条的速度无限堆积，回前台时一次性巨型 IPC（兜底本来防的就是这个
+            // 场景）。因此一旦超限/过期且挂起的是 rAF，就显式取消它，改走不受后台
+            // 节流约束的 setTimeout 路径。
+            if (flushHandleIsRaf && (backlogTooBig || overdue)) {
+                cancelFlushHandle();
+            } else {
+                return;
+            }
+        }
         if (typeof requestAnimationFrame === "function" && !backlogTooBig && !overdue) {
             flushHandle = requestAnimationFrame(flush);
+            flushHandleIsRaf = true;
         } else {
             // rAF 不可用 / 队列超限 / 距上次冲刷过久：setTimeout 不受后台节流约束
             //（Chromium 的后台计时器最低 1s，也远好于无限堆积）。
             flushHandle = setTimeout(flush, backlogTooBig || overdue ? 0 : 16) as unknown as number;
+            flushHandleIsRaf = false;
         }
     };
 
