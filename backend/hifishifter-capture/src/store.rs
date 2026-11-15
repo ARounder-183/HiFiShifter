@@ -109,7 +109,7 @@ pub struct CaptureTake {
     ///
     /// 【为什么不留一份时间线】投影是**跨全部 take** 的，单 take 的时间线没有任何
     /// 消费者；而它和 `sources`（每段 PCM 的副本）一起，会让一次录制在内存里存两份
-    /// PCM。投影与源表都在读取时按需构造（`with_projection` + `sources_for`）。
+    /// PCM。投影与源表都在读取时按需构造（`with_projection` + `ProjectionCache`）。
     pub summary: timeline::TimelineSummary,
     /// 本次录制因前导静音扩展段首的帧数（诊断）。
     ///
@@ -2723,6 +2723,8 @@ mod tests {
         let (session, session_sources) = store.session_timeline();
         assert_eq!(session.clips.len(), 1);
         assert_eq!(session_sources.len(), 1);
+        // 状态栏读的是同一份投影摘要：2 圈必须显示成 1 个 Clip。
+        assert_eq!(store.material_summary().expect("有素材").clips, 1);
 
         // 原始磁带：长度 = 区域长度，前 40 帧来自第二圈、其余来自第一圈。
         let raw = store.raw_tape().expect("有素材就有原始带");
