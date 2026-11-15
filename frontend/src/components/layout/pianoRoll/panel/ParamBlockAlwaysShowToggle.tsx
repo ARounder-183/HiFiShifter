@@ -7,12 +7,12 @@
  *
  * 【图标为什么不是眼睛】眼睛在本产品里已经表示「副参数叠加」「预设启用」，与参数块
  * 无关。这里用**堆叠的横向分段条**：参数块就是「参数线上被切成一段一段的横条」，
- * 与选择族菜单里的块工具图标（单个圆角矩形 + 两条竖分隔）同族但**不同形**，
- * 全仓无重复（图标清单见 docs/param-blocks.md）。
+ * 与选择族菜单里的块工具图标（单个圆角矩形 + 两条竖分隔）同族但**不同形**；
+ * 三条在常显开启时实心、关闭时空心，与按钮的 `aria-pressed` 同源。
  */
 import { AppIconButton } from "../../../../ui";
 import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
-import { paramBlocksAlwaysShowIcon } from "./toolIcons";
+import { buildParamBlocksAlwaysShowIcon } from "./toolIcons";
 
 type Props = {
     m: Pick<PianoRollPanelModel, "alwaysShowParamBlocks" | "toggleAlwaysShowParamBlocks" | "tf">;
@@ -42,7 +42,7 @@ export function ParamBlockAlwaysShowToggle({ m }: Props) {
             aria-pressed={alwaysShowParamBlocks}
             tabIndex={-1}
             onClick={toggleAlwaysShowParamBlocks}
-            icon={paramBlocksAlwaysShowIcon}
+            icon={buildParamBlocksAlwaysShowIcon(alwaysShowParamBlocks)}
         />
     );
 }

@@ -12,6 +12,13 @@
 import { CursorArrowIcon, Pencil1Icon } from "@radix-ui/react-icons";
 import type { DrawToolMode, SelectToolMode } from "../../../../features/session/sessionTypes";
 
+/** 三条分段条的几何：两种状态共用，保证切换时轮廓不跳、宽度不漂移。 */
+const PARAM_BLOCK_ALWAYS_SHOW_BARS = [
+    { x: 1.6, y: 2.9, width: 11.0 },
+    { x: 1.6, y: 6.25, width: 8.8 },
+    { x: 1.6, y: 9.6, width: 11.6 },
+] as const;
+
 /**
  * 「永远显示参数块」的图标：三条**堆叠的横向分段条**。
  *
@@ -19,14 +26,39 @@ import type { DrawToolMode, SelectToolMode } from "../../../../features/session/
  * 图标库里没有这个语义（RowsIcon 是四条通栏细线，读起来像文本行 / 汉堡菜单）；
  * 手绘可以引用同一套形状语言，同时保证**不与任何现有图标重复**。
  * 三个条的宽度不等（11.0 / 8.8 / 11.6）是有意的：等宽会读成「列表」。
+ *
+ * 【激活态画在图标里】实心 = 常显设置开启、空心 = 关闭，与按钮的 `aria-pressed`
+ * 同源。按钮自己还会切 solid / ghost，所以这里只让三条的填充换形式，不另加斜杠、
+ * 眼睛等第三套状态语言。两种状态共用同一份几何，切换时不会位移。
  */
-export const paramBlocksAlwaysShowIcon = (
-    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
-        <rect x="1.6" y="2.9" width="11.0" height="2.5" rx="1.0" fill="currentColor" />
-        <rect x="1.6" y="6.25" width="8.8" height="2.5" rx="1.0" fill="currentColor" />
-        <rect x="1.6" y="9.6" width="11.6" height="2.5" rx="1.0" fill="currentColor" />
-    </svg>
-);
+export function buildParamBlocksAlwaysShowIcon(alwaysShow: boolean) {
+    const fill = alwaysShow ? "currentColor" : "none";
+    const stroke = alwaysShow ? undefined : "currentColor";
+    return (
+        <svg
+            width="15"
+            height="15"
+            viewBox="0 0 15 15"
+            fill="none"
+            data-hs-param-blocks-always-show-icon={alwaysShow ? "solid" : "outline"}
+            aria-hidden="true"
+        >
+            {PARAM_BLOCK_ALWAYS_SHOW_BARS.map((bar) => (
+                <rect
+                    key={bar.y}
+                    x={bar.x}
+                    y={bar.y}
+                    width={bar.width}
+                    height="2.5"
+                    rx="1.0"
+                    fill={fill}
+                    stroke={stroke}
+                    strokeWidth={stroke ? "1.1" : undefined}
+                />
+            ))}
+        </svg>
+    );
+}
 
 /**
  * 生成工具栏要用的图标。
