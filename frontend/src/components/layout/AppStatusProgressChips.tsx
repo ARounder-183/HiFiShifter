@@ -65,7 +65,9 @@ export function AppStatusProgressChips() {
                     tooltip={render.pluginMode ? t("plugin_render_background_hint") : undefined}
                 >
                     {t("common_rendering")}
-                    {render.progress != null ? ` ${Math.round(render.progress * 100)}%` : ""}
+                    {render.progress != null && render.progress > 0
+                        ? ` ${Math.round(render.progress * 100)}%`
+                        : ""}
                 </AppStatusChip>
             ) : null}
         </>
