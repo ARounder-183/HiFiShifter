@@ -1351,7 +1351,7 @@ fn cycle_region_returns_the_loop_region_in_project_samples() {
     };
     // 120 BPM：4 拍 = 2 s = 96 000 帧；8 拍循环 = 4 s = 192 000 帧。
     assert_eq!(
-        owner.cycle_region(&context, 48_000.0, 96_000),
+        owner.cycle_region(context, 48_000.0, 96_000),
         Some((0, 192_000))
     );
 }

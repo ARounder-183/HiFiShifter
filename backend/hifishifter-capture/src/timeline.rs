@@ -89,7 +89,9 @@ pub struct ProjectionTake<'a> {
 /// 静音判定）对两种段一视同仁。
 pub enum TapeSegment<'a> {
     Borrowed(&'a Segment),
-    Owned(Segment),
+    // 【为什么 Box】`Segment` 含两条 Vec、覆盖表与预算凭证（约 288 字节）；
+    // 直接内联会让每个 `TapeSegment` 都占那么大，而绝大多数段是借用。
+    Owned(Box<Segment>),
 }
 
 impl std::ops::Deref for TapeSegment<'_> {
@@ -521,7 +523,7 @@ fn build_tapes_with<'a>(
         tapes.push(Tape {
             take,
             sample_rate,
-            segments: vec![TapeSegment::Owned(segment)],
+            segments: vec![TapeSegment::Owned(Box::new(segment))],
             offsets: vec![0],
             orders: vec![order],
             active: vec![true],
@@ -612,7 +614,7 @@ fn compose_loop_cluster(
             if start >= end {
                 continue;
             }
-            for channel in 0..channels {
+            for (channel, plane) in planes.iter_mut().enumerate().take(channels) {
                 // 单声道段复制到两个输出平面（与 `raw_tape` 的展开一致）。
                 let Some(source) = segment
                     .planes
@@ -623,8 +625,7 @@ fn compose_loop_cluster(
                 };
                 let len = end - start;
                 if source.len() >= range.end {
-                    planes[channel][start..end]
-                        .copy_from_slice(&source[range.start..range.start + len]);
+                    plane[start..end].copy_from_slice(&source[range.start..range.start + len]);
                 }
             }
             covered.push(start..end);

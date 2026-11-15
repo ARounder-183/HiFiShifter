@@ -1467,11 +1467,13 @@ impl ExtensionOwner {
         let (Some(tempo), Some(music)) = (time.tempo, time.music) else {
             return None;
         };
-        if !(tempo > 0.0) {
+        // 【为什么不用 `!(tempo > 0.0)`】Clippy 的 `neg_cmp_op_on_partial_ord`
+        // 会在 `f64` 上拒绝否定比较；这里要同时挡住 0、负值与 NaN。
+        if !tempo.is_finite() || tempo <= 0.0 {
             return None;
         }
         let loop_beats = time.cycle_end_music - time.cycle_start_music;
-        if !(loop_beats > 0.0) {
+        if !loop_beats.is_finite() || loop_beats <= 0.0 {
             return None;
         }
         let beats = music - time.cycle_start_music;

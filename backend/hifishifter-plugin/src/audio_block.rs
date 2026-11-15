@@ -533,19 +533,20 @@ mod tests {
         let mut input_pointers = [shared.as_mut_ptr(), std::ptr::null_mut()];
         let mut output_pointers = [shared.as_mut_ptr(), separate.as_mut_ptr()];
         let mut silence = 0_u64;
-        let mut block = AudioBlock {
-            frames: 2,
-            mode: 0,
-            // SAFETY: 第一个输入平面 2 帧有效；第二个为空（inactive）。
-            input: unsafe { InputBus::new(input_pointers.as_mut_ptr(), 2) },
-            output: OutputBus::new(&mut output_pointers, &mut silence),
-            in_place: false,
-        };
-        assert_eq!(block.poison_outputs(), 1);
-        assert_eq!(shared, [0.1, 0.2], "共享平面必须保持原样");
-        assert_eq!(block.count_unwritten().aliased, 1);
-        assert_eq!(block.count_unwritten().unwritten, 2, "只有非别名平面被预填");
-        drop(block);
+        {
+            let mut block = AudioBlock {
+                frames: 2,
+                mode: 0,
+                // SAFETY: 第一个输入平面 2 帧有效；第二个为空（inactive）。
+                input: unsafe { InputBus::new(input_pointers.as_mut_ptr(), 2) },
+                output: OutputBus::new(&mut output_pointers, &mut silence),
+                in_place: false,
+            };
+            assert_eq!(block.poison_outputs(), 1);
+            assert_eq!(shared, [0.1, 0.2], "共享平面必须保持原样");
+            assert_eq!(block.count_unwritten().aliased, 1);
+            assert_eq!(block.count_unwritten().unwritten, 2, "只有非别名平面被预填");
+        }
         assert!(
             separate.iter().all(|sample| sample.is_nan()),
             "非别名平面必须仍被预填成哨兵"
