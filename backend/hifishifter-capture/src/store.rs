@@ -795,6 +795,10 @@ impl CaptureStore {
 
     /// 构建一次完整投影（时间线 + 源 PCM + 内容指纹）。
     fn build_projection_cache(&self) -> ProjectionCache {
+        // 【先读代次再取 takes 锁】删除/恢复会在释放 takes 锁之后推进代次；
+        // 若构建完再读，可能把"旧快照"标成"新代次"而让缓存永久命中旧内容。
+        // 先读的代价只是偶尔多重建一次，方向是安全的。
+        let revision = self.revision.load(Ordering::Acquire);
         let takes = self.takes.lock_or_recover();
         let input: Vec<ProjectionTake<'_>> = takes
             .iter()
@@ -811,7 +815,7 @@ impl CaptureStore {
         let sources = timeline::sources_from_tapes(&tapes);
         let fingerprints = timeline::fingerprints_from_tapes(&tapes);
         ProjectionCache {
-            revision: self.revision.load(Ordering::Acquire),
+            revision,
             timeline,
             summary,
             sources,
