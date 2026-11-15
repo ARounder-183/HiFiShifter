@@ -4,6 +4,318 @@ HiFiShifter 的独立 App 可作为本机 MCP 服务，供 Agent 读取和编辑
 
 本页是 Agent 的操作契约，描述当前 App MCP 的实现、调用顺序、参数规则和失败处理。素材标注、模型下载和外部选样 CLI 不属于 App MCP；它们可以离线生成计划，但最终工程修改必须通过这里列出的 MCP 工具完成。
 
+## 0. 完整工作流
+
+这里描述的不是“Agent 直接猜歌名并导入音频”，而是两段明确分工的流水线：
+
+1. **素材准备阶段**：扫描本地音源库，基于文件名与词典得到读音，用本地模型完成音素对齐、F0、音色和音质标注，输出可检索的素材索引。
+2. **编排阶段**：解析 UST、按读音查找候选、按整句连续性选样、生成音源窗口和元音伸缩计划。
+3. **工程写入阶段**：通过 App MCP 把计划写成当前 App 中可见的轨道、clip、Tempo Map、淡化和调音曲线。
+4. **人工验收阶段**：在人能看到的同一工程里试听、替换、调整和撤销，最后保存 `.hshp`。
+
+```mermaid
+flowchart LR
+    A[本地音源库] --> B[扫描、哈希与文件名解析]
+    B --> C[语言 / 读音 / 词典检查]
+    C --> D[HubertFA 音素对齐]
+    C --> E[FCPE / 声学特征]
+    D --> F[稳定元音区与边界质检]
+    E --> F
+    F --> G[library.jsonl + analysis artifacts]
+    U[UST] --> V[编码、tick、Tempo、歌词解析]
+    V --> W[score.json]
+    G --> X[候选过滤与整句选样]
+    W --> X
+    X --> Y[plan.json / bundle.json]
+    Y --> Z[App MCP]
+    Z --> APP[当前可视工程]
+    APP --> H[人工试听、调整、撤销、保存]
+```
+
+### 0.1 目录与职责边界
+
+推荐把外部运行目录与 App 工程分开：
+
+```text
+agent-work/
+  library.jsonl                 素材索引，每行一个音源版本
+  annotations/                  HFA 等对齐器的原始及规范化结果
+  regions.jsonl                 元音、辅音、稳定区和尾部区域
+  f0/                           F0 数组与 voiced mask
+  features/                     音色、唱腔、可选情感特征
+  score.json                    UST 标准化结果
+  plan.json                     候选、选择理由与放置几何
+  bundle/
+    bundle.json                 路径、哈希、模型版本和校验清单
+```
+
+App MCP 不读取模型缓存，不执行 Python，不解析 UST，也不负责下载模型。它只接受已经校验过的音频路径和编辑参数。外部 CLI/Skill 可以独立运行；App 未启动时仍能完成素材准备，App 启动后再提交工程修改。
+
+当前仓库交付的是 App MCP 本体。外部 `hfs-agent` 扫描、标注、选样和 bundle 命令目前属于本地原型/参考契约，不应因本文出现这些命令就误认为它们已经随 App 安装包发布。
+
+### 0.2 第一步：扫描和打标素材库
+
+扫描阶段必须先建立稳定身份，再做任何模型处理：
+
+1. 递归枚举支持的音频文件，但排除缓存目录、模型目录和明确的连续音测试目录。
+2. 对每个文件计算内容 SHA-256，读取采样率、声道、位深、时长和可解码性。
+3. 用显式命名模板解析语言、读音、版本号、音高别名和标签；同一内容的多个文件名保留为多个 alias，不能覆盖原文件。
+4. 按读音建立 `variant_group_id`。读音相同但内容哈希不同，属于不同候选版本。
+5. `a`、`shi` 这类短文件名可能同时属于中文和日文，语言由素材库配置决定，不能只靠字符串猜。
+6. `wa (10)` 的 `10` 可能是版本号，`h0` 的 `0` 也可能是版本；没有匹配模板的项进入 `needs_review`。
+7. 纯辅音、鼻音、促音、复合元音、长元音、CV/VCV 等类别要分别记录。纯辅音不能自动当作可拉长的稳定元音。
+
+文件名只提供读音候选。模型输出验证的是“给定读音后，语音是否在该文件中的哪里”，不能证明文件名本身正确。
+
+### 0.3 第二步：本地模型标注
+
+推荐的首版分析顺序如下：
+
+1. **词典和 G2P 检查**
+   日文假名/罗马字与 `japanese_dict_full` 对齐，中文拼音与 `ds-zh-pinyin-lite` 对齐。任何 OOV、歧义读音或转写失败，都进入 `needs_review`，不能静默删除音素。
+2. **HubertFA v0.0.7 ONNX 强制对齐**
+   对每个已知读音生成 wav/lab 输入，取得逐音素 `[start,end)`、元音起点和边界置信度。模型工作副本的输出必须映射回原文件时间。
+3. **边界质检**
+   用能量/VAD 和 F0 有声区交叉检查。HFA 的静音位置、尾部截断和浊辅音起点不可盲信；HFA 只提供候选边界，不能用来推断源文件开头必须保留多少 preroll。
+4. **FCPE 音高和有声音检测**
+   生成逐帧 F0 与 `voiced_mask`，再在稳定元音内取中位音高、分位范围、有声比例和八度跳变风险。
+5. **稳定元音区**
+   从元音 phone 中扣除起音和尾部过渡，并结合 F0、能量和频谱变化求安全伸缩区。没有稳定区时返回 `no_safe_split`，不能硬选中心点。
+6. **音色与唱腔特征**
+   对稳定元音提取 openSMILE eGeMAPSv02、MFCC 和谱特征；emotion2vec+ 只作为可选低权重辅助。特征缺失必须保留 `null + reason`。
+7. **状态落盘**
+   每个素材至少带 `auto_ready`、`needs_review`、`manual_verified` 或 `unusable`。`auto_ready` 表示通过规则，不等于人工真值。
+
+本地模型文件不随 MCP 服务暴露。HubertFA 使用完整模型目录，至少要有 `model.onnx`、`VERSION`、`vocab.json`、`config.json`、`japanese_dict_full.txt` 和 `ds-zh-pinyin-lite.txt`；App 的 FCPE 资源位于 `backend/src-tauri/resources/models/fcpe/fcpe.onnx`。模型、词典、预处理和 schema 版本都必须进入缓存键和 bundle 清单。
+
+建议的素材索引字段如下；具体 schema 和完整字段集由外部 CLI 版本固定：
+
+```json
+{
+  "asset_id": "asset-...",
+  "content_sha256": "...",
+  "media_root_id": "voicebank-01",
+  "relative_path": "a/ka.wav",
+  "language": "ja",
+  "reading": "ka",
+  "variant_group_id": "ja:ka",
+  "category": "cv",
+  "phones": [
+    { "label": "k", "start_sec": 0.055791, "end_sec": 0.069803 },
+    { "label": "a", "start_sec": 0.069803, "end_sec": 0.418452 }
+  ],
+  "vowel_onset_sec": 0.069803,
+  "vowel_end_sec": 0.418452,
+  "stable_vowel_regions_sec": [[0.1195, 0.3505]],
+  "f0_median_midi": 61.02,
+  "voiced_mask_artifact": "f0/asset-....npz",
+  "style_artifact": "features/asset-....npz",
+  "annotation_status": "auto_ready"
+}
+```
+
+### 0.4 第三步：解析 UST 并确定目标
+
+先识别编码（UTF-8、UTF-8 BOM、CP932、GB18030），再解析 `Tempo`、`NoteNum`、`Lyric`、`Length`、UST 2.0 的 `Delta/Duration`、休止和局部变速。
+
+必须区分：
+
+- `slot_end`：该音符占用的时间槽终点。
+- `sound_end`：实际发声终点；UST 2.0 中 `Duration < Length` 时两者不同。
+- `start_until_next`：下一音符开始时间；用于决定当前元音最多能保留多久。
+
+输出统一 `score.json`。`start_sec`、`duration_sec` 都由 tick 到秒的 tempo 映射计算，不能按固定 120 BPM 处理。歌词转读音若存在多解，保留候选并要求人工确认。
+
+### 0.5 第四步：选择素材并生成计划
+
+每个目标音符按以下顺序查候选：
+
+1. 同语言、同读音、同上下文类别的整音版本。
+2. 同读音但录音 session 或唱腔不同的版本。
+3. **元音优先的自由组合**：先在库中寻找目标元音最合适、音高和时长最接近的素材；再从同辅音素材中选择起音。元音和辅音可来自不同 take。
+4. 若辅音或元音缺失，才尝试从相近音素重建；不能把相似读音当精确匹配。
+5. 没有合法候选时输出 gap 和需人工选择的候选，不得为了填满而选极端变调或极端拉伸。
+
+候选评分至少包含：
+
+- 目标 MIDI 与源中位音高的差；建议先设明确上限。
+- 目标元音时长与源稳定元音可用长度的倍率。
+- 对齐置信度、稳定元音长度、尾音截断和 OOV。
+- 与前后音的 eGeMAPS 音色距离和可选情感距离。
+- 同一素材在短窗口内被重复使用的次数。
+- 辅音长度是否足够；辅音和元音的来源是否为同一 take。
+
+规划器在 phrase 内做 beam/Viterbi 搜索，并输出完整 Top-K 路径和每个音符的解释。接近目标的候选排在前面；但排序结果不能绕过硬性约束。
+
+### 0.6 第五步：生成音源窗口和 App 编辑计划
+
+计划中同时保存源域和工程域：
+
+- `source_start_sec`、`source_end_sec`：原文件的绝对秒。
+- `start_sec`、`length_sec`：App 工程中的绝对秒和时长。
+- `playback_rate`：由元音源长度和目标时长计算。
+- `composition`：`same_take_cv_split`、`cross_take:k+o`、`vowel_only`、`standalone_n` 等。
+
+目标元音线为 `A`，交叉淡化工程时长为 `F`，左/右源段时长分别为 `Lsrc`、`Rsrc`，目标音符时长为 `D`：
+
+```text
+左段起点 = A + F - Lsrc
+左段 fade-out = F
+右段起点 = A
+右段工程时长 = D
+右段 playback_rate = Rsrc / D
+右段 fade-in = F
+```
+
+同一连续乐句中，后一个辅音开始前可以缩短前一个元音，避免浊辅音和前一稳定元音长时间重叠。句间休止必须保留；不要用交叉淡化或滑音跨过真实休止。
+
+调音计划不在外部预渲染音频。计划只指定目标 MIDI、目标区间和曲线模式；App 根据根轨的有效算法（默认 HiFi-GAN）执行：
+
+- `shift_to_note`：保留源音高轮廓，整体平移到目标。
+- `flatten_to_note`：只对有可靠有声音帧拉平。
+- `write_curve`：需要自定义滑音、颤音或逐帧曲线时由 Agent 显式写入。
+
+### 0.7 第六步：生成并校验 bundle
+
+在发任何 MCP 写入前，bundle 校验器应确认：
+
+- 所有素材路径存在，内容哈希与索引一致。
+- 所有源窗口在文件范围内，左右片段确实覆盖目标发音。
+- 目标时间递增、无负时长，clip 交叉区使用工程秒而非源秒。
+- 所需模型、词典和对齐 revision 完整；缺失模型不应生成“成功”计划。
+- 选样结果中没有 OOV、无稳定元音、极端转调或不可解释的跨 take 拼接被误标为 `auto_ready`。
+- 计划 JSON、score、library 和分析制品的哈希一致。
+
+参考命令流程如下。命令名表达的是外部 CLI 应提供的接口，当前 App 安装包不包含这个 CLI：
+
+```powershell
+hfs-agent doctor --json
+hfs-agent library scan E:/voicebank --config naming.yaml --out work/library.jsonl --json
+hfs-agent library annotate work/library.jsonl --profile zh-ja-personal --resume --json
+hfs-agent review report work/library.jsonl --out work/review --json
+
+hfs-agent score import song.ust --encoding auto --out work/score.json --json
+hfs-agent plan build `
+  --library work/library.jsonl `
+  --score work/score.json `
+  --policy continuity `
+  --top-k 8 `
+  --out work/plan.json `
+  --json
+hfs-agent plan explain work/plan.json --note n0012 --json
+hfs-agent plan bundle `
+  --library work/library.jsonl `
+  --score work/score.json `
+  --plan work/plan.json `
+  --out work/bundle `
+  --json
+```
+
+`doctor` 应验证 HFA 目录、FCPE、词典、运行时和模型哈希；`library annotate` 使用内容哈希和模型 revision 做缓存；`plan bundle` 失败时必须返回结构化错误，不能留下可被误用为完整的半成品 bundle。
+
+### 0.8 第七步：连接 App MCP
+
+1. 启动独立 App，打开目标工程。
+2. 打开 **选项 → Agent MCP**，点击“启用”。
+3. 使用固定地址 `http://127.0.0.1:39393/mcp`。
+4. 依次调用 `hfs_get_context` 和 `hfs_get_edit_capabilities`。
+5. 读取当前轨道、clip、Tempo Map、有效算法和参数范围。
+6. 如果需要在现有工程上 A/B，创建新轨或将旧实验轨静音；不要覆盖人工已有内容。
+
+本机服务免鉴权，只监听回环地址。端口被占用时返回明确错误，不自动更换端口。
+
+### 0.9 第八步：通过 MCP 写入 App
+
+推荐的一次成功执行顺序：
+
+1. `hfs_get_context` 取得当前 `revision`、实际 BPM、渲染算法和 GUI 同步状态。
+2. `hfs_get_edit_capabilities` 取得目标轨道/根轨、参数 ID、单位和限制。
+3. `hfs_query` 读取当前 clips、Tempo Map、曲线和参数块；不要盲写。
+4. 用 `hfs_edit` 提交原子批次：建轨/选轨、设置 Tempo Map、导入 clip、设置 fade、写音高和参数块。
+5. 每个批次都带最新 `expected_revision` 和唯一 `idempotency_key`。同一重试必须复用相同 key 和完全相同的内容。
+6. 写入成功后等待 `hfs_query(kind=render)`：`Pending`/`Rendering` 不能当作完成；只有 `Ready` 或明确 `NotRequired` 才可交付。
+7. 用 `hfs_editor_view` 选中新建轨道、目标 clip 和音高面板，让人在同一工程里直接查看。
+8. 用 `hfs_transport` 播放或定位；人工试听后继续用 MCP 或 GUI 修改。
+9. 用 `hfs_save_project` 输出可重新打开的 `.hshp`；该接口当前保存 snapshot copy，不切换原工程路径，也不复制媒体。
+
+示例写入批次的结构：
+
+```json
+{
+  "expected_revision": "<最新 revision>",
+  "idempotency_key": "phrase-01-placement-v1",
+  "label": "Place phrase 01",
+  "operations": [
+    {
+      "kind": "create_track",
+      "client_id": "lead",
+      "name": "Lead"
+    },
+    {
+      "kind": "patch_track",
+      "track_id": "lead",
+      "patch": { "compose_enabled": true }
+    },
+    {
+      "kind": "set_tempo",
+      "points": [
+        { "position_sec": 0.0, "bpm": 174.0, "numerator": 4, "denominator": 4 }
+      ]
+    },
+    {
+      "kind": "import_clip",
+      "client_id": "n01_onset",
+      "track_id": "lead",
+      "path": "E:/voicebank/i/ki.wav",
+      "start_sec": 1.37131,
+      "source_start_sec": 0.055791,
+      "length_sec": 0.073812,
+      "playback_rate": 1.0
+    },
+    {
+      "kind": "import_clip",
+      "client_id": "n01_vowel",
+      "track_id": "lead",
+      "path": "E:/voicebank/i/ki.wav",
+      "start_sec": 1.37931,
+      "source_start_sec": 0.069803,
+      "length_sec": 0.215518,
+      "playback_rate": 1.0
+    },
+    {
+      "kind": "patch_clip",
+      "clip_id": "n01_onset",
+      "patch": { "fade_out_sec": 0.02 }
+    },
+    {
+      "kind": "patch_clip",
+      "clip_id": "n01_vowel",
+      "patch": { "fade_in_sec": 0.02 }
+    }
+  ]
+}
+```
+
+上面的坐标只是说明：真实值必须来自 bundle；不能把示例文件的读音、时长或路径复用给别的音源。
+
+### 0.10 第九步：人工试听和收口
+
+Agent 完成“提交 + 渲染 Ready”后仍需人工验收：
+
+1. 逐句检查辅音是否清楚、元音起音是否落在对应音符线、长音是否有断裂。
+2. 检查相邻素材的唱腔和音色切换；必要时保留同一版本的候选或替换整句。
+3. 检查长音是否需要交叉淡化、重复段或人工缩短；不要用一个 clip 无限拉伸。
+4. 检查音高：优先保留自然源轮廓；需要稳定音准时使用 flatten，需要保留起伏时使用 shift，并明确句内滑音区间。
+5. 检查渲染状态和最终保存的工程文件，不只检查原始试听。
+
+如果任一步失败，错误要靠结构化 code 回传到 Agent，而不是只打印模糊日志。常见恢复方式：
+
+- `REVISION_CONFLICT`：重新读取工程，重新规划，并使用新的 idempotency key。
+- `ANALYSIS_PENDING` / `PITCH_UNAVAILABLE`：等待 App 分析或修复素材，不能填零曲线。
+- `PARAM_DISABLED`：按能力工具给出的门禁先启用依赖。
+- 模型缺失/词典 OOV：返回素材准备错误，不生成可写入工程的成功 bundle。
+- 端口被占用：提示固定端口被占用，不换随机端口，也不静默启动第二个服务。
+
 ## 1. 启用与连接
 
 1. 启动独立 App，打开需要编辑的工程。
@@ -39,7 +351,7 @@ HiFiShifter 的独立 App 可作为本机 MCP 服务，供 Agent 读取和编辑
 
 | 模型或工具 | 用途 | 获取与本地约定 |
 | --- | --- | --- |
-| **HubertFA v0.0.7 ONNX** | 中日歌声音素强制对齐；输出音素起止、元音起点和边界置信度 | 需要完整模型目录，不能只放一个 `model.onnx`。发布压缩包 SHA-256：`48bd6dbcc293e47cc6cbcc556baf575e3d91d61d0ac88ddeccd6098f8f346fa2` |
+| **HubertFA v0.0.7 ONNX** | 中日歌声音素强制对齐；输出音素起止、元音起点和边界置信度 | 需要完整模型目录，不能只放一个 `model.onnx`。发布压缩包 SHA-256：`48bd6dbcc293e47cc6cbcc556baf575e3d91d61d0ac88ddeccd6098f8f346fa2`；解包后的 `model.onnx` SHA-256：`4722c13e1d5c1d740ec69c9121f5ec37a88d534aba7637bafb480208be170183` |
 | **FCPE ONNX** | 逐帧 F0、有声掩码和中位音高，用于调音与选样 | App 已有资源：`backend/src-tauri/resources/models/fcpe/fcpe.onnx`；当前清单 SHA-256：`013B507ACD406DE122B61EE497300AC6BE082511101BC2136B886E48D9737E5D` |
 | **openSMILE eGeMAPSv02** | 提取音色、唱腔和相邻音色连续性特征 | 本地 Python worker 使用；不是音素对齐模型的替代品 |
 | **SOFA / MFA** | HFA 失败时的中文或日文对齐回退或交叉检查 | 可选本地回退，不默认随 App 或 MCP 打包 |
