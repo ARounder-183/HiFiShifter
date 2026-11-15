@@ -8,6 +8,7 @@
 #   .\scripts\build\build.ps1 -Target Plugin      # 只出 VST3 bundle
 #   .\scripts\build\build.ps1 -Target Installer   # 只重打安装器（复用 dist\_stage）
 #   .\scripts\build\build.ps1 -SkipFrontend       # frontend\dist 已是最新
+#   .\scripts\build\build.ps1 -SkipVerify         # CI 只构建：跳过插件的黑盒自检
 #   .\scripts\build\build.ps1 -Configuration Debug   # debug 产物，不打包
 #
 # 【为什么 Windows 只有一个安装器】独立 App 与 VST3 插件的用户是同一批人，而它们要用的
@@ -19,6 +20,8 @@
 param(
     [ValidateSet('All', 'App', 'Plugin', 'Clap', 'Installer')][string]$Target = 'All',
     [switch]$SkipFrontend,
+    # CI 只构建时跳过插件的黑盒自检（其中 CLAP 自检会跑 cargo test ABI oracle）。
+    [switch]$SkipVerify,
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release',
     # 离线 / 受控环境可以显式指定已下载好的 WebView2 bootstrapper（见 Get-WebView2Bootstrapper）。
     [string]$WebView2Bootstrapper = ''
@@ -254,8 +257,8 @@ if ($Target -eq 'All' -or $Target -eq 'Plugin') {
     if (!$resolvedObjects.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unexpected loader cleanup path' }
     Remove-Item -LiteralPath $resolvedObjects -Recurse -Force
 
-    # 编译成功不等于能被宿主加载。打包前跑一次黑盒门禁，别让加载不了的产物进安装器。
-    & .\scripts\vst3\windows\verify.ps1 -BundleDirectory $bundle
+    # 编译成功不等于能被宿主加载。本地构建默认跑一次黑盒门禁；CI 只构建时跳过。
+    if (!$SkipVerify) { & .\scripts\vst3\windows\verify.ps1 -BundleDirectory $bundle }
 }
 
 if ($Configuration -eq 'Debug') {
@@ -293,7 +296,7 @@ if ($Target -eq 'All' -or $Target -eq 'Plugin' -or $Target -eq 'Clap') {
     # 运行期可选加载的 SoundTouchDLL.dll —— 绝不留下 WebView2 用户数据。
     Remove-Item -LiteralPath (Join-Path $clapRes 'webview') -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host "CLAP 资源已组装：$clapRes" -ForegroundColor Green
-    & .\scripts\clap\windows\verify.ps1 -ModulePath (Join-Path $dist 'HiFiShifter.clap')
+    if (!$SkipVerify) { & .\scripts\clap\windows\verify.ps1 -ModulePath (Join-Path $dist 'HiFiShifter.clap') }
 }
 
 # ── 安装器暂存 ──────────────────────────────────────────────────────────────

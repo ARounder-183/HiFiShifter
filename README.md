@@ -246,7 +246,7 @@ cargo tauri build --bundles appimage -- --no-default-features --features onnx
 .\build.bat -Target Installer
 ```
 
-AppImage 的打包内容由 `scripts/build/linux-appimage.sh` 统一决定，CI 与本地共用同一份逻辑：先把 WebKitGTK / GStreamer / GL / Wayland 这些**必须由宿主提供**的库从包里剪掉，再用 `ldd` 断言可执行文件确实解析到宿主的副本，然后重新打包并做一次无头启动冒烟。需要单独复用某一步时：`bash scripts/build/linux-appimage.sh package <Tauri 产物目录>`（或 `verify <AppDir>` 只做断言）。
+AppImage 的打包内容由 `scripts/build/linux-appimage.sh` 统一决定，本地与构建流水线共用同一份逻辑：先把 WebKitGTK / GStreamer / GL / Wayland 这些**必须由宿主提供**的库从包里剪掉，再用 `ldd` 断言可执行文件确实解析到宿主的副本，然后重新打包。本地默认还会做一次无头启动冒烟；CI 只构建，通过 `HIFISHIFTER_SKIP_SMOKE=1` 跳过冒烟。需要单独复用某一步时：`bash scripts/build/linux-appimage.sh package <Tauri 产物目录>`（或 `verify <AppDir>` 只做断言）。
 
 双击 `build.bat` 就是一次完整构建（合并安装器 + 便携包）；参数见 `scripts/build/build.ps1`。
 

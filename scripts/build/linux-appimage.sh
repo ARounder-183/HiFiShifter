@@ -44,7 +44,8 @@ set -euo pipefail
 #   linux-appimage.sh smoke   <AppImage>         # 只冒烟
 #
 # 环境变量：
-#   HIFISHIFTER_SMOKE_REQUIRED=1    没有 xvfb-run 时视为失败（CI 用）
+#   HIFISHIFTER_SKIP_SMOKE=1        跳过冒烟（CI 只构建时用）
+#   HIFISHIFTER_SMOKE_REQUIRED=1    没有 xvfb-run 时视为失败
 #   HIFISHIFTER_SMOKE_TIMEOUT=45    冒烟超时秒数
 #   ARCH=x86_64|aarch64             appimagetool 的目标架构（默认 uname -m）
 
@@ -345,6 +346,10 @@ cmd_repack() {
 # ── smoke ─────────────────────────────────────────────────────────────
 
 cmd_smoke() {
+    if [ "${HIFISHIFTER_SKIP_SMOKE:-0}" = "1" ]; then
+        printf '跳过冒烟（HIFISHIFTER_SKIP_SMOKE=1）\n'
+        return 0
+    fi
     local appimage="$1"
     [ -f "$appimage" ] || die "找不到 AppImage：$appimage"
 

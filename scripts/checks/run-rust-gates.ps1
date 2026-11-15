@@ -66,7 +66,7 @@ function Get-CargoCommand([string]$kind, [int]$Threads = 0) {
     # 【为什么每一条 cargo 命令前面都要先设环境】ara2-bridge 的 build.rs 在缺少
     # ARA_SDK_DIR / ARA_VST3_SDK_DIR 时会直接 panic。这两个变量的唯一来源是
     # scripts/env/sdk-env.ps1；不在这里设，失败就发生在"编译到一半、由 build script
-    # 抛出"，看起来像源码坏了。CI 的 plugin-gates 第一次真跑插件单测时就是这样红的。
+    # 抛出"，看起来像源码坏了。CI 的旧插件单测 job 第一次真跑时就是这样红的。
     $msvc = Join-Path $root 'scripts\env\msvc-env.ps1'
     $sdkEnv = Join-Path $root 'scripts/env/sdk-env.ps1'
     $sdkRoot = Join-Path $root 'third_party/sdk'
