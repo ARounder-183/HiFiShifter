@@ -579,6 +579,12 @@ pub(crate) struct EditorSession {
     /// 本段 pending 是否已经报过 —— 每段只报一次，避免把诊断变成刷屏。
     pending_reported: AtomicBool,
     render_task: Mutex<Option<RenderTask>>,
+    /// 本次渲染的进度（0..1）；`f64::NAN` = 当前没有可报告的进度。
+    ///
+    /// 【为什么是原子量】写它的是 DSP 线程的进度回调，读它的是 250 ms 轮询的状态
+    /// 快照；两者之间不能加锁（进度回调在渲染热路径上）。NaN 用 bit 表示，
+    /// `state()` 再决定要不要把它变成 `null`。
+    render_progress_bits: AtomicU64,
     closed: AtomicBool,
     pub(super) suppress_history: AtomicBool,
     /// **上一次采纳过的**宿主编辑器视图选择（A5），用于与宿主的新选择比对。
@@ -1015,6 +1021,7 @@ impl EditorSession {
             pending_since: Mutex::new(None),
             pending_reported: AtomicBool::new(false),
             render_task: Mutex::new(None),
+            render_progress_bits: AtomicU64::new(f64::NAN.to_bits()),
             closed: AtomicBool::new(false),
             suppress_history: AtomicBool::new(false),
             host_selection: Mutex::new(None),
@@ -1825,6 +1832,10 @@ impl EditorSession {
         };
         let current = task.take().unwrap();
         drop(task);
+        // 【任务结束后必须回到"没有进度"】否则下一次渲染开始前，快照会带着上一轮
+        // 的 100% 显示成"渲染中 100%"。
+        self.render_progress_bits
+            .store(f64::NAN.to_bits(), Ordering::Release);
         let cancelled = current.cancel.load(Ordering::Acquire);
         let _ = current.worker.join();
         Some((current.generation, current.ticket, cancelled, result))
@@ -1936,11 +1947,18 @@ impl EditorSession {
                 return;
             }
             progress_last.store(value.to_bits(), Ordering::Release);
+            // 【快照与事件同源】进度事件会丢（`try_send`），快照每 250 ms 读这里，
+            // 于是"事件丢了就永远看不到百分比"不再可能。
+            progress_session
+                .render_progress_bits
+                .store(value.to_bits(), Ordering::Release);
             progress_session.emit(
                 "playback_rendering_state",
                 json!({"active":true,"progress":value,"target":"background"}),
             );
         });
+        self.render_progress_bits
+            .store(0.0_f64.to_bits(), Ordering::Release);
         self.emit(
             "playback_rendering_state",
             json!({"active":true,"progress":0.0,"target":"background"}),
@@ -1990,6 +2008,8 @@ impl EditorSession {
         let cancel = Arc::new(AtomicBool::new(false));
         let current = self.clone();
         let job_cancel = cancel.clone();
+        self.render_progress_bits
+            .store(0.0_f64.to_bits(), Ordering::Release);
         self.emit(
             "playback_rendering_state",
             json!({"active":true,"progress":0.0,"target":"background"}),
@@ -4426,6 +4446,14 @@ impl EditorSession {
         let host_error = states.into_iter().find_map(|state| state.1);
         let analysis_pending = self.requires_analysis(&self.timeline.lock_or_recover());
         let rendering = self.render_task.lock_or_recover().is_some();
+        // 【进度只在有任务时报告】任务结束后原子量被置回 NaN；渲染中但还没收到第一个
+        // 进度回调时是 0.0。两者都如实进快照，前端不需要再从会丢的事件里猜。
+        let render_progress = if rendering {
+            let value = f64::from_bits(self.render_progress_bits.load(Ordering::Acquire));
+            value.is_finite().then_some(value)
+        } else {
+            None
+        };
         // 「你听到的是不是旧版本」：有任务在跑，**而且**音频线程此刻没有可服务的快照。
         //
         // 【为什么与 `rendering` 分开】后者回答"后台在忙吗"，用户问的是"我听到的是不是
@@ -4492,6 +4520,8 @@ impl EditorSession {
             // 只靠 `playback_rendering_state` 事件流。事件用 `try_send`（队列满即丢），
             // 丢一个 `active:false` 就会让片永久亮着；快照每 250 ms 重读一次，自愈。
             "rendering_active":rendering,
+            // 本次渲染的进度（0..1 或 null）。快照是权威通道：事件只做快速更新。
+            "render_progress":render_progress,
             // 状态栏的「渲染中」读这一个（见上面 `audible_stale` 的说明）。
             "render_audible_stale":audible_stale,
             // 【唯一驱动状态栏文案的字段】见上面 `audible_state` 的说明。
@@ -5201,6 +5231,55 @@ pub(crate) mod tests {
             editor.render_task.lock_or_recover().is_none(),
             "关闭完成前必须回收DSP任务"
         );
+    }
+
+    /// **状态快照必须同时报告"在渲染"与进度。**
+    ///
+    /// 【为什么这是状态栏修复的后端契约】`playback_rendering_state` 事件用
+    /// `try_send`，队列满就丢；丢一个 `active:true` 后状态栏就再也不会亮。
+    /// 快照是自愈通道，因此它必须自己带 `rendering_active` 与 `render_progress`。
+    #[test]
+    fn render_state_reports_active_and_progress() {
+        let (model, owner, _identity) = fixture();
+        let document = model.session();
+        let editor = owner.editor_session().unwrap();
+        let (release, wait) = mpsc::channel();
+        let (started, ready) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let job = RenderTask::spawn(
+            editor.submitted.load(Ordering::Acquire),
+            editor.generation.load(Ordering::Acquire),
+            cancel,
+            move || {
+                started.send(()).unwrap();
+                wait.recv_timeout(Duration::from_secs(3))
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            },
+        )
+        .unwrap();
+        ready.recv_timeout(ACTOR_REPLY_TIMEOUT).unwrap();
+        {
+            let mut active = editor.render_task.lock_or_recover();
+            *active = Some(job);
+            editor
+                .render_progress_bits
+                .store(0.5_f64.to_bits(), Ordering::Release);
+        }
+        let state = editor.state();
+        assert_eq!(state["rendering_active"], true);
+        assert_eq!(state["render_progress"], 0.5);
+        // 任务结束后进度必须回到 null（下一次渲染不能继承 100%）。
+        release.send(()).unwrap();
+        let deadline = Instant::now() + ACTOR_REPLY_TIMEOUT;
+        while editor.complete_render().is_none() {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        let state = editor.state();
+        assert_eq!(state["rendering_active"], false);
+        assert!(state["render_progress"].is_null());
+        document.close();
     }
 
     /// 完成结果与计算线程独立，取消位始终保留，不能把被新编辑取代的成功计算标成已应用。
