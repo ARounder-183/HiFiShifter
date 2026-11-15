@@ -137,7 +137,13 @@ jobs:
           set -euo pipefail
           ZIP=$(ls frontend-dist | grep -E "\.zip$" || true)
           if [ -z "$ZIP" ]; then echo "No zip artifact found in frontend-dist"; ls -la frontend-dist; exit 1; fi
-          unzip -o frontend-dist/$ZIP -d .
+          # 【为什么解到 frontend/ 而不是 "."】artifact 的条目以 `dist/` 开头
+          # （gates.yml 在 frontend 目录里打包）。解到仓库根会把产物落进
+          # `$GITHUB_WORKSPACE/dist` —— 那是本工作流自己的构建产物目录，
+          # 等于把门禁建好的前端白白丢弃；build.sh 又没拿 `--skip-frontend`，
+          # 于是四个平台各自再完整跑一遍 npm ci + build，"共享一份前端产物"
+          # 的注释形同虚设。与 build.yml / clap.yml 的解法对齐（-d frontend）。
+          unzip -o frontend-dist/$ZIP -d frontend
 
       # 桥接脚本是**手写的 JS**，语法错的表现是插件窗口一片空白。
       # 一条 `node --check` 就能把它挡在合并之前。
@@ -170,7 +176,9 @@ jobs:
       # CARGO_BUILD_JOBS=2 —— 误判，并发度不是原因。真正修掉的是
       # scripts/vst3/unix/build.sh 的 sync_submodule，以及失败时按 error 行回放现场。
       - name: Build, verify and package
-        run: bash scripts/vst3/unix/build.sh
+        # 前端产物来自 gates.yml 的 artifact（上面已解到 frontend/dist）：
+        # --skip-frontend 让 build.sh 复用它，四条腿不再各自重跑 npm 构建。
+        run: bash scripts/vst3/unix/build.sh --skip-frontend
 
       # hfs-gui 的 clippy 门禁：它是 workspace 外的交付物，build.sh 只证明"能编
       # 译"，`-D warnings` 才拦得住退化。依赖上面装好的 GTK/WebKitGTK；只在
@@ -263,6 +271,11 @@ jobs:
             fi
           }
           log="$(mktemp)"
+          # 【为什么显式声明 shell: bash】GitHub 对未声明 shell 的 run 步骤用
+          # `bash -e {0}` —— **不带 pipefail**。没有它，`run_gates | tee` 的流水线
+          # 状态是 tee 的（恒为 0），`if` 永远走 exit 0：任何真实的测试失败都被
+          # 这一步吞成绿灯，下面的信号退出重放判据与失败诊断步骤也成了死代码。
+          # 显式 `shell: bash` 时 GitHub 才会加 `-o pipefail`（2026-11-13 引入的缺陷）。
           if run_gates 2>&1 | tee "$log"; then
             exit 0
           fi
@@ -277,6 +290,7 @@ jobs:
               ;;
           esac
           exit "$status"
+        shell: bash
 
       # 【为什么要有这一步】测试进程被信号打死时，cargo 只留下一句
       # "signal: 11, SIGSEGV"，连是哪个用例都没说 —— 而"哪一段崩的"决定了排查方向

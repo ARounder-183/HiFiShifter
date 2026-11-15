@@ -465,7 +465,10 @@ if ($Target -eq 'All' -or $Target -eq 'App') { Write-AppPayload }
 if ($Target -eq 'All' -or $Target -eq 'Plugin') { Write-Vst3Stage }
 if ($Target -eq 'All' -or $Target -eq 'Plugin' -or $Target -eq 'Clap') { Write-ClapStage }
 
-if ($Target -ne 'Installer') {
+# 模型 / 许可只进安装器暂存区：单一目标的产物（App 可执行文件 / VST3 bundle /
+# CLAP 文件）不消费它们。此前它们对 -Target App/Plugin/Clap 也无条件执行，
+# 白白拷贝几百 MB，更重要的是让下面的"安装器段"看起来对所有目标都成立。
+if ($Target -eq 'All') {
     Write-ModelsStage
     Write-LicenseStage
     Write-ModelsVerifyInclude
@@ -479,17 +482,70 @@ if ($Target -eq 'Installer') {
     }
 }
 
-# 【打安装器之前的最后一道：暂存区的插件载荷必须就是 target 里那一份字节】
-# 这条判据专门覆盖"只重建了某一种格式"的用法：哪怕只跑 -Target Clap，只要 target 里
-# 存在引擎，就在这里比对一次 —— 顺序缺陷不会再以"安装包带着上一版引擎"的形式溜过去。
-# （-Target Installer 有意复用既有暂存区，那时 target 可能为空，比对自动跳过。）
-foreach ($payload in @(
-    @{ Built = (Join-Path $built 'hifishifter_plugin.dll'); Staged = (Join-Path $stage 'vst3\Contents\x86_64-win\HiFiShifterEngine.dll') },
-    @{ Built = (Join-Path $built 'hifishifter_clap.dll'); Staged = (Join-Path $stage 'HiFiShifter.clap') }
-)) {
-    if (Test-Path -LiteralPath $payload.Built) {
-        Assert-SameBytes $payload.Built $payload.Staged
+# 【为什么安装器段必须按目标门控】文件头承诺 -Target App "不打安装器"、-Target
+# Plugin / Clap 同理，但此前字节比对与 makensis 对**所有**目标无条件执行：单一目标
+# 没有组装完整载荷（-Target App 没有 vst3\、-Target Clap 没有 app\），暂存区里留下
+# 的旧文件让字节比对当场 throw，或 makensis 拿着不存在的目录报 NSIS 编译错 ——
+# 两个文档承诺的入口实际一跑就红。只有 All / Installer 真的产安装器。
+if ($Target -eq 'All' -or $Target -eq 'Installer') {
+    # 【打安装器之前的最后一道：暂存区的插件载荷必须就是 target 里那一份字节】
+    # 这条判据专门覆盖"只重建了某一种格式"的用法：哪怕只跑 -Target Clap，只要 target 里
+    # 存在引擎，就在这里比对一次 —— 顺序缺陷不会再以"安装包带着上一版引擎"的形式溜过去。
+    # （-Target Installer 有意复用既有暂存区，那时 target 可能为空，比对自动跳过。）
+    foreach ($payload in @(
+        @{ Built = (Join-Path $built 'hifishifter_plugin.dll'); Staged = (Join-Path $stage 'vst3\Contents\x86_64-win\HiFiShifterEngine.dll') },
+        @{ Built = (Join-Path $built 'hifishifter_clap.dll'); Staged = (Join-Path $stage 'HiFiShifter.clap') }
+    )) {
+        if (Test-Path -LiteralPath $payload.Built) {
+            Assert-SameBytes $payload.Built $payload.Staged
+        }
     }
+
+    # ── 安装器 ──────────────────────────────────────────────────────────────────
+    $makensis = (Get-Command makensis -ErrorAction SilentlyContinue).Source
+    if (!$makensis) {
+        # 【为什么不读 `ProgramFiles(x86)` 环境变量】它在部分宿主里根本不存在，而
+        # `msvc-env.ps1` 导入 vcvars 环境时会把空值写回（.NET 把空值当"删除"），于是
+        # 构建尾部会以一个和 NSIS 毫无关系的报错失败："无法将自变量绑定到参数 'Path'"。
+        # 目录只能问系统 API（与 `scripts/env/msvc-env.ps1` 的 `Get-ProgramFilesRoots` 同源）。
+        foreach ($kind in 'ProgramFilesX86', 'ProgramFiles') {
+            $base = [Environment]::GetFolderPath($kind)
+            if (!$base) { continue }
+            $candidate = Join-Path $base 'NSIS\makensis.exe'
+            if (Test-Path -LiteralPath $candidate) { $makensis = $candidate; break }
+        }
+    }
+    if (!$makensis) {
+        throw '找不到 makensis：先跑 scripts\setup\install_deps_windows.ps1（Windows 只交付这一个安装器，缺它等于没有产物）'
+    }
+
+    # 安装器文案由五语词表生成；先重新生成一次，漏翻译在这里就失败。
+    node (Join-Path $PSScriptRoot '..\release\build-installer-strings.mjs')
+    Assert-Ok '安装器文案生成'
+
+    $bootstrapper = Get-WebView2Bootstrapper
+    $setup = Join-Path $dist ('HiFiShifter_v' + $version + '_windows-' + $arch + '-setup.exe')
+    Remove-Item $setup -Force -ErrorAction SilentlyContinue
+
+    # 每一个路径都以 /D 传入，脚本里不出现任何相对路径猜测（值带引号：路径里可能有空格）。
+    & $makensis /INPUTCHARSET UTF8 `
+        "/DAPP_DIR=$(Join-Path $stage 'app')" `
+        "/DVST3_DIR=$(Join-Path $stage 'vst3')" `
+        "/DCLAP_FILE=$(Join-Path $stage 'HiFiShifter.clap')" `
+        "/DCLAP_RES_DIR=$(Join-Path $stage 'HiFiShifter-resources')" `
+        "/DMODELS_DIR=$(Join-Path $stage 'models')" `
+        "/DMODELS_VERSION=$modelsVersion" `
+        "/DMODELS_VERIFY=$(Join-Path $stage 'models-verify.nsh')" `
+        "/DHFS_LICENSE=$(Join-Path $stage 'LICENSE')" `
+        "/DHFS_LICENSE_PAGE=$(Join-Path $stage 'license-page.txt')" `
+        "/DHFS_LICENSES=$(Join-Path $stage 'licenses')" `
+        "/DOUTPUT_FILE=$setup" `
+        "/DAPP_VERSION=$version" `
+        "/DWEBVIEW2_BOOTSTRAPPER=$bootstrapper" `
+        "/DHFS_ICON=$(Join-Path $root 'backend\src-tauri\icons\icon.ico')" `
+        (Join-Path $PSScriptRoot '..\release\merged-installer.nsi')
+    Assert-Ok '安装器编译'
+    Write-Host "安装器：$setup" -ForegroundColor Green
 }
 
 # ── 安装器 ──────────────────────────────────────────────────────────────────

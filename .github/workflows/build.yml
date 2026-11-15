@@ -75,7 +75,6 @@ jobs:
       # clippy 告警因此在 CI 里完全不可见，其中 15 条是死代码/未使用导入。
       # 安静由 `setup-rust-toolchain` 的 `rustflags: ''` 负责（见下方 Setup 步骤），
       # 它只取消"把警告升级为错误"，不再屏蔽警告本身。
-      HIFISHIFTER_SKIP_CARGO_CHECK: "1"
       HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
       HIFISHIFTER_WEBKIT_ABI: "4.1"
       APPIMAGE_EXTRACT_AND_RUN: "1"

@@ -21,6 +21,17 @@ on:
         required: false
         default: all
   workflow_dispatch:
+    # 【为什么要在这里重复一遍 inputs】workflow_call 的 inputs 不会出现在手动
+    # 触发上：dispatch 运行读到的 `inputs.scope` 是 null，于是除 static 之外
+    # 每一个带 `if: inputs.scope == 'all' || …` 的 job 全部跳过 —— 手动跑一次
+    # "Gates" 得到的是一条只查了静态约定的绿灯，而页面上看不出它降级了。
+    # 与 workflow_call 保持同一组取值。
+    inputs:
+      scope:
+        description: 'all = 全量门禁；frontend = 只出 frontend-dist；plugin = 静态 + 插件并发门禁'
+        required: false
+        default: all
+        type: string
 
 permissions:
   contents: read
@@ -137,8 +148,9 @@ jobs:
       # 【为什么要跳过前端构建】src-tauri 的 build.rs 在 frontend/dist 缺失时会自己跑
       # npm build；这里 dist 是 frontend job 的 artifact，已经解好了。不设这个开关，
       # 每个 Rust job 都要再构建一遍前端，失败时还会伪装成"clippy 失败"。
+      # （只设这一个开关：HIFISHIFTER_SKIP_CARGO_CHECK 曾与它成对出现，但 build.rs
+      # 从未读过它，2026-11-15 全仓审查时确认没有任何消费者，已删除。）
       HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
-      HIFISHIFTER_SKIP_CARGO_CHECK: "1"
       # 【为什么清空 bundle.resources】tauri-build 在 build.rs 里校验清单里的每个文件，
       # 而那份清单是**打包用**的：150 MB 模型、cmake 产出的 SoundTouchDLL、ort 解包的
       # DirectML.dll —— 干净检出上一个都没有，于是 clippy / cargo test 死在 build script
@@ -205,7 +217,6 @@ jobs:
       HIFISHIFTER_ORT_EP: cpu
       # frontend/dist 来自 artifact；不设这个开关，build.rs 会再跑一遍 npm build。
       HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
-      HIFISHIFTER_SKIP_CARGO_CHECK: "1"
       # 同上：门禁不打包，清空资源清单，免得 build.rs 去校验还不存在的模型与 DLL。
       TAURI_CONFIG: '{"bundle":{"resources":[]}}'
     defaults:
@@ -262,11 +273,15 @@ jobs:
         shell: bash
 
 
-      # full：额外跑 no-default-features 的 clippy 与一次并发测试复跑。
+      # full：额外跑一次并发测试复跑（full 档在 test 里加的那一段）。
       # --test-threads=1 掩盖并发问题，而本仓最容易出事的地方（重算与自动应用的版本
       # 竞态、快照发布与读者回收）全部是并发敏感的；串行跑得通不代表正确。
+      #
+      # 【为什么 -Only test】fmt 与 clippy 各有专属 job 在跑（rust-fmt、rust-clippy，
+      # 后者已经是 full 档）；这里不带 -Only 会让它们在本 job 里再跑一整遍 ——
+      # Windows 上冷缓存就是几十分钟的重复编译，没有多验出任何东西。
       - name: Run Rust gate (full)
-        run: ./scripts/checks/run-rust-gates.ps1 -Profile full
+        run: ./scripts/checks/run-rust-gates.ps1 -Only test -Profile full
 
   # ── 插件并发门禁（push develop 的快速反馈）─────────────────────────────
   #

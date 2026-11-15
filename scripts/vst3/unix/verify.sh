@@ -27,9 +27,35 @@ note() { printf "    %s\n" "$*"; }
 # 插件入口一旦死锁（dlopen / GetPluginFactory / 宿主握手），探针会永远不返回，
 # 把整条打包流水线挂到 job 超时。Windows 的 verify.ps1 明确要求"死锁必须在这里
 # 失败，而不是挂住 CI"；Unix 侧用 coreutils 的 timeout 保持同一纪律。
+#
+# 【为什么要有 python3 兜底】macOS runner 没有 GNU coreutils，`timeout` 这个命令
+# 根本不存在（vst3-unix.yml 的测试步骤就为此修过一次）。没有兜底时 rc=127，
+# 探针被当成"加载失败"，而日志是空的 —— 包明明是好的，流水线却红了。
+# python3 在两条 CI 腿上都可用（Linux 工作流显式安装、macOS 预装）：用新进程组
+# 限时杀，退出语义与 GNU timeout 对齐（超时 124、子进程被信号打死 128+n）。
 readonly PROBE_TIMEOUT_SEC="${HFS_PROBE_TIMEOUT_SEC:-30}"
 run_probe() {
-    timeout "$PROBE_TIMEOUT_SEC" "$@"
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$PROBE_TIMEOUT_SEC" "$@"
+        local rc=$?
+        if [ "$rc" -eq 124 ]; then
+            bad "探针 $PROBE_TIMEOUT_SEC 秒未返回（插件入口很可能死锁）"
+            return 1
+        fi
+        return "$rc"
+    fi
+    python3 -c '
+import os, signal, subprocess, sys
+sec = int(sys.argv[1])
+p = subprocess.Popen(sys.argv[2:], start_new_session=True)
+try:
+    rc = p.wait(timeout=sec)
+except subprocess.TimeoutExpired:
+    os.killpg(p.pid, signal.SIGKILL)
+    p.wait()
+    sys.exit(124)
+sys.exit(128 - rc if rc < 0 else rc)
+' "$PROBE_TIMEOUT_SEC" "$@"
     local rc=$?
     if [ "$rc" -eq 124 ]; then
         bad "探针 $PROBE_TIMEOUT_SEC 秒未返回（插件入口很可能死锁）"
