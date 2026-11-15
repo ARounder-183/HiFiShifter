@@ -106,18 +106,17 @@ fn smoke_test_timeout(ep_name: &str) -> std::time::Duration {
     }
 }
 
-/// 各 EP 的会话创建（commit）超时。
+/// DirectML 的会话创建（commit）超时。
 ///
 /// ORT 的 `commit_from_file` 没有超时 API，而实测设备切换后重建 DirectML
 /// 会话时 commit 本身也会挂起（不只是烟测阶段）。超时后放弃本次创建并让
 /// 调用方回退，避免一个挂起的 commit 永久持有全局单飞锁。
-/// CoreML 的首次模型编译（无语料缓存时）可能数十秒，保持宽松。
-fn creation_timeout(ep_name: &str) -> std::time::Duration {
-    if ep_name == "CoreML" {
-        std::time::Duration::from_secs(120)
-    } else {
-        SMOKE_TEST_TIMEOUT
-    }
+///
+/// CoreML 是 macOS 的 GPU 后端，不走这条路径；它的首次推理超时由
+/// [`smoke_test_timeout`] 单独放宽到 60 秒。
+#[cfg(target_os = "windows")]
+fn dml_creation_timeout() -> std::time::Duration {
+    SMOKE_TEST_TIMEOUT
 }
 
 /// Set once a CoreML smoke test times out or fails hard.  The CoreML EP is
@@ -1347,6 +1346,9 @@ fn build_session_inner(
     ep_override: Option<&str>,
     bypass_disable_latch: bool,
 ) -> Result<(Session, String, Option<i32>), String> {
+    // 非 Windows 没有 DirectML 闩锁；参数保留是为了让调用点与 Windows 同形。
+    #[cfg(not(target_os = "windows"))]
+    let _ = bypass_disable_latch;
     ensure_ort_backend();
     let choice = if cpu_only_mode() {
         // Explicit overrides (the benchmark passes its EP as an argument)
@@ -1521,6 +1523,9 @@ fn smoke_test_gpu_session(
     // DirectML 设备序号：超时时要按设备记账（`None` = 非 DirectML 会话）。
     dml_device: Option<i32>,
 ) -> Result<Session, String> {
+    // 非 Windows 没有 DirectML，占位参数仅保持调用签名一致。
+    #[cfg(not(target_os = "windows"))]
+    let _ = dml_device;
     use ort::value::{Tensor, ValueType};
 
     // 分步日志：烟测若卡住（历史上曾永久持有全局构建锁 → 渲染永久卡 0%），
@@ -1820,7 +1825,7 @@ fn build_dml_session_inner(
     // （内部持有裸指针，无法在主线程配置后移交）—— 因此配置必须与创建同在
     // 辅助线程内。实测设备切换后重建 DML 会话时 commit 会挂起；没有超时兜底
     // 就会永久持有全局单飞锁，渲染进度永久卡在 0%。
-    let timeout = creation_timeout("DirectML");
+    let timeout = dml_creation_timeout();
     let path = onnx_path.to_path_buf();
     let choice_owned = choice.to_string();
     let (tx, rx) = std::sync::mpsc::channel();

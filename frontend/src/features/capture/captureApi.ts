@@ -10,7 +10,6 @@
  * 形态，且它的代价只是一个整数读取（后端 `capture_status` 不取渲染锁）。
  */
 import { invoke } from "../../services/invoke";
-import type { MessageKey } from "../../i18n/messages";
 
 /** 录制中的读数。 */
 export interface CaptureRecording {
@@ -198,20 +197,6 @@ export const captureApi = {
 };
 
 /** 后端错误的可读文本；与 `hostLinkError` 同一套解包口径。 */
-/**
- * 语言无关的分类：宿主正在通过 ARA 供音，Capture 不适用。
- *
- * 【为什么分类在后端、文案在前端】与 `hostLinkApi` 同一条纪律：后端只给稳定的分类串，
- * 文案按 catalog 本地化。这里因此不解析后端的中文/英文句子。
- */
-const CAPTURE_NOT_APPLICABLE_ARA = "capture_not_applicable_ara";
-
-/** 后端分类 → 本地化文案；其余错误原样透传（由调用方按既有分支处理）。 */
-export function captureErrorText(error: unknown, t: (key: MessageKey) => string): string {
-    const raw = captureError(error);
-    return raw.includes(CAPTURE_NOT_APPLICABLE_ARA) ? t(CAPTURE_NOT_APPLICABLE_ARA) : raw;
-}
-
 export function captureError(error: unknown): string {
     if (error instanceof Error)
         return error.cause !== undefined ? captureError(error.cause) : error.message;

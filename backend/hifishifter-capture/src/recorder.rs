@@ -232,6 +232,12 @@ pub struct Segment {
     /// 【为什么跟着段走】一个 pass 可能被容量切成多段；投影需要把它们认成同一圈，
     /// 才能把“最后一圈原子替换整圈”落在同一组里。它不影响音频，只影响投影分组。
     pub loop_start: Option<i64>,
+    /// 本段所属循环区域的工程终点（`None` = 非循环段 / 宿主没给终点）。
+    ///
+    /// 【为什么必须与起点成对】只按起点分组会把"用户改了循环长度后在同一位置录的
+    /// 两次"误合成一个区域；终点是区域身份的一部分。旧 sidecar 没有它时按起点分组、
+    /// 组内取 `max(span.end)` 作为回退终点。
+    pub loop_end: Option<i64>,
     /// 本段属于哪一次传输 pass（诊断 + 新 pass 隔离）。
     pub pass_id: u64,
     /// 本段的内容身份（由 promote 在非音频线程写入；音频线程只用 None）。
@@ -734,6 +740,11 @@ pub struct BlockContext {
     pub cycle_wrap: bool,
     /// 循环起点（工程采样域；`None` = 宿主没给可用的 cycle 元数据）。
     pub cycle_start: Option<i64>,
+    /// 循环区域终点（工程采样域；`None` = 宿主没给可用的 cycle 元数据）。
+    ///
+    /// 【为什么要终点】循环身份 = `(loop_start, loop_end)`：只按起点分组会把
+    /// 用户改了循环长度后在同一位置录的两次误合成一个区域。
+    pub cycle_end: Option<i64>,
     /// 本块开始了一个新的 pass（回卷、位置后退或新传输 epoch）。
     pub new_pass: bool,
     /// 本块是否有权推进位置/写捕获。kPlaying=0 且不在起点窗口时恒为 false。
@@ -825,6 +836,7 @@ impl BlockContext {
             recording_rising: false,
             cycle_wrap: false,
             cycle_start: None,
+            cycle_end: None,
             new_pass: false,
             transport_active: flow,
             start_window: flow,
@@ -1116,6 +1128,8 @@ pub struct Capture {
     block_seq: u64,
     /// 当前 pass 的循环起点；容量切段时由后续段继承。
     current_loop_start: Option<i64>,
+    /// 当前 pass 的循环终点；与起点一起构成区域身份，容量切段时继承。
+    current_loop_end: Option<i64>,
     /// 当前流上一块**实际写入**的区间；用于识别同一区间的重复投递。
     last_written: Option<(i64, usize)>,
     /// 本次捕获的峰值（各段峰值的最大值）。
@@ -1213,6 +1227,7 @@ impl Default for Capture {
             elected_silent_frames: 0,
             block_seq: 0,
             current_loop_start: None,
+            current_loop_end: None,
             last_written: None,
             peak: [0.0; 2],
             started: false,
@@ -1323,6 +1338,10 @@ impl Capture {
         self.window_anchor = None;
         self.window_pending_frames = 0;
         self.window_rolled = false;
+        // 【为什么必须清】新 pass 的循环身份只由新 pass 的元数据/回卷决定；
+        // 继承上一遍会把两次不同的循环录制并进同一个区域。
+        self.current_loop_start = None;
+        self.current_loop_end = None;
         // 【上一遍的候选块必须整批作废】它们的位置属于上一遍；新 epoch 里一旦
         // 被 commit_pending 提升，就会在新 take 开头凭空多出一段旧位置的素材。
         // 只清 ready/key/stream，保留预分配缓冲（音频线程不能分配）。
@@ -1643,11 +1662,19 @@ impl Capture {
         // 循环 pass 的元数据：新一圈开始时记下 cycle start；同一 pass 的容量切段
         // 继续继承它。没有 cycle 元数据时保持 None（投影会按相同起点隐式分组）。
         if ctx.part > 0 {
+            // 循环切分的第二段继承第一段的区域身份；宿主在这一段不一定重复给元数据。
             if ctx.cycle_start.is_some() {
                 self.current_loop_start = ctx.cycle_start;
             }
+            if ctx.cycle_end.is_some() {
+                self.current_loop_end = ctx.cycle_end;
+            }
         } else if ctx.new_pass || self.active.is_none() || ctx.cycle_wrap {
+            // 新一圈以宿主本块给的元数据为准；没有元数据时两者都是 `None`，
+            // 随后由 `write_block` 的回卷推断补上（见
+            // `note_loop_identity_from_backward_jump`）。
             self.current_loop_start = ctx.cycle_start;
+            self.current_loop_end = ctx.cycle_end;
         }
         // 【kPlaying=0 且不在有界起点窗口】位置必须冻结，捕获一个样本都不写。
         // 这是“停播后光标继续走”“反复起播串成上一遍”两条问题的共同闸门。
@@ -2254,6 +2281,7 @@ impl Capture {
             return false;
         }
         pending.loop_start = self.current_loop_start;
+        pending.loop_end = self.current_loop_end;
         self.sample_rate = pending.sample_rate;
         self.channels = pending.planes.len().clamp(1, 2) as u8;
         // 【记账终点先按**内容**算】前导静音只扩展段的覆盖范围，不推进播放记账：
@@ -2384,6 +2412,33 @@ impl Capture {
         self.peak[0] = self.peak[0].max(peak[0]);
         self.peak[1] = self.peak[1].max(peak[1]);
         true
+    }
+
+    /// 本块起点是否落在当前循环区域 `[loop_start, loop_end)` 内。
+    fn position_inside_current_loop(&self, start: i64) -> bool {
+        match (self.current_loop_start, self.current_loop_end) {
+            (Some(loop_start), Some(loop_end)) => start >= loop_start && start < loop_end,
+            _ => false,
+        }
+    }
+
+    /// 无 cycle 元数据时，用"回卷到已存在段的起点"推断循环区域。
+    ///
+    /// 【为什么只认 `origin == start`】循环回卷的特征是**回到同一圈的开头**；
+    /// 跳到区间中部的任意位置是用户 seek，不是新一圈。命中时把覆盖该起点的段
+    /// 的 `[origin, span().end)` 作为区域身份 —— 它是我们已经录过的真实几何，
+    /// 不是猜出来的循环长度。
+    fn note_loop_identity_from_backward_jump(&mut self, start: i64) {
+        let covering = self
+            .sealed
+            .iter()
+            .chain(self.active.iter())
+            .find(|segment| segment.origin == start && segment.span().end > start)
+            .map(|segment| (segment.origin, segment.span().end));
+        if let Some((loop_start, loop_end)) = covering {
+            self.current_loop_start = Some(loop_start);
+            self.current_loop_end = Some(loop_end);
+        }
     }
 
     /// 回卷/向后跳跃时裁掉 active 末尾的“悬挂尾巴”。
@@ -2575,6 +2630,9 @@ impl Capture {
         if let Some(loop_start) = self.current_loop_start {
             self.current_loop_start = Some(loop_start.saturating_add(shift));
         }
+        if let Some(loop_end) = self.current_loop_end {
+            self.current_loop_end = Some(loop_end.saturating_add(shift));
+        }
         self.captured_frames = self.captured_frames.saturating_sub(dropped_total);
         self.rebases = self.rebases.saturating_add(1);
         self.rebased_frames = self.rebased_frames.saturating_add(shift.unsigned_abs());
@@ -2677,6 +2735,7 @@ impl Capture {
         self.last_written = None;
         self.window_anchor = None;
         self.current_loop_start = self.current_loop_start.filter(|start| *start >= limit);
+        self.current_loop_end = self.current_loop_end.filter(|end| *end > limit);
         let active_end = self
             .active
             .as_ref()
@@ -2718,6 +2777,7 @@ impl Capture {
         spare.pass_id = self.pass_id;
         spare.loss = SegmentLoss::None;
         spare.loop_start = self.current_loop_start;
+        spare.loop_end = self.current_loop_end;
         spare.filled = 0;
         spare.peak = [0.0; 2];
         spare.closed = ClosedReason::Full;
@@ -2772,6 +2832,7 @@ impl Capture {
                 spare.pass_id = self.pass_id;
                 spare.loss = SegmentLoss::None;
                 spare.loop_start = self.current_loop_start;
+                spare.loop_end = self.current_loop_end;
                 spare.filled = 0;
                 spare.peak = [0.0; 2];
                 spare.closed = ClosedReason::Full;
@@ -3038,6 +3099,21 @@ impl Capture {
                 }
             }
         };
+        // 【没有 cycle 元数据时的保守回卷推断】宿主不给 `cycleStartMusic` 时，
+        // 回卷到**某个已存在段的起点**是"这是同一循环区域的又一遍"的唯一可核对
+        // 证据。只认这一个形状：跳到别处（包括回退到新位置）一律不推断，保持多 Clip。
+        //
+        // 【为什么已经有身份时还要复核】上一圈推断出的区域可能已经结束；用户随后
+        // 回退到区域之外的某个位置，不能继续继承旧区域，否则会把两次无关的录制
+        // 并进同一个循环组。
+        if matches!(loss, SegmentLoss::Backward) {
+            if self.current_loop_start.is_none() {
+                self.note_loop_identity_from_backward_jump(start);
+            } else if !self.position_inside_current_loop(start) {
+                self.current_loop_start = None;
+                self.current_loop_end = None;
+            }
+        }
         // 正向跳跃（seek 到别处）退出当前循环 pass：后续段不能继承 loop_start，
         // 否则投影会把一段非循环内容误并进循环组。
         //
@@ -3052,6 +3128,7 @@ impl Capture {
         };
         if matches!(loss, SegmentLoss::Gap { .. }) && !small_gap {
             self.current_loop_start = None;
+            self.current_loop_end = None;
         }
 
         // 段满或跳跃 ⇒ 换段。跳跃必须换段，否则一个段里会含两段不相邻的工程时间。
@@ -3103,6 +3180,7 @@ impl Capture {
             spare.pass_id = self.pass_id;
             spare.loss = loss;
             spare.loop_start = self.current_loop_start;
+            spare.loop_end = self.current_loop_end;
             spare.filled = 0;
             spare.peak = [0.0; 2];
             spare.closed = ClosedReason::Full;
@@ -3365,6 +3443,7 @@ mod tests {
             filled: 0,
             loss: SegmentLoss::First,
             loop_start: None,
+            loop_end: None,
             pass_id: 0,
             source_key: None,
             peak: [0.0; 2],
@@ -3434,6 +3513,7 @@ mod tests {
             recording_rising: false,
             cycle_wrap: false,
             cycle_start: None,
+            cycle_end: None,
             new_pass: false,
             transport_active: flow || playing,
             start_window: flow,
@@ -4268,6 +4348,44 @@ mod tests {
         assert_eq!(sealed[1].origin, 0, "新一圈从回卷点开始");
     }
 
+    /// **每一圈的所有段都带着循环区域终点。**
+    ///
+    /// 【为什么终点必须跟着段走】投影按 `(loop_start, loop_end)` 分组；只记起点
+    /// 会把用户改了循环长度后在同一位置录的两次误合成一个区域。容量切段时后续段
+    /// 继承同一份身份，所以每一段都要有终点。
+    #[test]
+    fn a_loop_pass_records_loop_end_on_every_segment() {
+        let mut capture = started(64, 2);
+        for (index, start) in [0_i64, 4].into_iter().enumerate() {
+            let (_, view) = block(start, 4, 48_000.0);
+            let mut context = ctx(ProcessStream::Realtime, true, false, true);
+            context.cycle_start = Some(0);
+            context.cycle_end = Some(8);
+            context.new_pass = index == 0;
+            assert_eq!(
+                capture.on_block_with_context(view, context),
+                CaptureOutcome::Captured
+            );
+        }
+        // 第二圈：回卷到同一区域起点。
+        let (_, view) = block(0, 4, 48_000.0);
+        let mut context = ctx(ProcessStream::Realtime, true, false, true);
+        context.cycle_start = Some(0);
+        context.cycle_end = Some(8);
+        context.cycle_wrap = true;
+        context.new_pass = true;
+        assert_eq!(
+            capture.on_block_with_context(view, context),
+            CaptureOutcome::Captured
+        );
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert!(sealed.len() >= 2, "两圈必须各自成段");
+        for segment in &sealed {
+            assert_eq!(segment.loop_start, Some(0));
+            assert_eq!(segment.loop_end, Some(8), "每一段都必须带区域终点");
+        }
+    }
+
     /// 停播时同一区间的重复投递仍然必须跳过（与上一条互为反例）。
     #[test]
     fn a_repeat_without_live_audio_is_still_skipped() {
@@ -4285,6 +4403,50 @@ mod tests {
             CaptureOutcome::Repeated,
             "没有音频流动的证据时，落在段内部的同一区间就是重复"
         );
+    }
+
+    /// **没有 cycle 元数据时，回卷到已存在段的起点就是同一循环区域的证据。**
+    ///
+    /// 【为什么只认"已存在段的起点"】那是唯一可核对的几何：我们知道那段音频从
+    /// 这里开始、到哪里结束。回到区间中部的任意位置是用户 seek，不能据此猜循环。
+    #[test]
+    fn a_backward_jump_to_an_existing_origin_marks_a_loop_region() {
+        let mut capture = started(64, 2);
+        let (_, view) = block(100, 8, 48_000.0);
+        assert_eq!(
+            capture.on_block_with_context(view, ctx(ProcessStream::Realtime, true, false, true)),
+            CaptureOutcome::Captured
+        );
+        let (_, view) = block(100, 4, 48_000.0);
+        assert_eq!(
+            capture.on_block_with_context(view, ctx(ProcessStream::Realtime, true, false, true)),
+            CaptureOutcome::Captured
+        );
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 2);
+        assert_eq!(sealed[1].origin, 100);
+        assert_eq!(sealed[1].loop_start, Some(100));
+        assert_eq!(sealed[1].loop_end, Some(108));
+    }
+
+    /// **回卷到新位置不是循环，不得凭空造出一个区域。**
+    #[test]
+    fn a_backward_jump_to_a_new_position_does_not_claim_a_loop() {
+        let mut capture = started(64, 2);
+        let (_, view) = block(100, 8, 48_000.0);
+        assert_eq!(
+            capture.on_block_with_context(view, ctx(ProcessStream::Realtime, true, false, true)),
+            CaptureOutcome::Captured
+        );
+        let (_, view) = block(50, 4, 48_000.0);
+        assert_eq!(
+            capture.on_block_with_context(view, ctx(ProcessStream::Realtime, true, false, true)),
+            CaptureOutcome::Captured
+        );
+        let sealed = capture.finish(ClosedReason::Stopped);
+        assert_eq!(sealed.len(), 2);
+        assert_eq!(sealed[1].loop_start, None);
+        assert_eq!(sealed[1].loop_end, None);
     }
 
     /// **起播窗口结束时的小缺口不得清掉循环身份。**

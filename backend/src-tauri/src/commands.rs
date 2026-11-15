@@ -3738,15 +3738,13 @@ pub async fn export_pitch_to_midi(
         let state: State<'_, AppState> = app.state();
         // 快照时间线：短锁克隆后**立即释放**。导出可能触发 FCPE 音高分析（长素材
         // 可达数分钟），在锁内跑完会冻结所有命令与 UI 轮询。
-        let timeline = match state.timeline.lock() {
-            Ok(guard) => guard.clone(),
-            Err(e) => {
-                return serde_json::json!({
-                    "ok": false,
-                    "error": format!("lock_failed: {e}"),
-                })
-            }
-        };
+        // 毒化恢复与本仓其余锁访问同一策略（见 hifishifter-plugin-core/src/sync.rs
+        // 的说明）：一次 panic 不应让这条命令此后永久失败。
+        let timeline = state
+            .timeline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         midi_export::export_pitch_to_midi(&timeline, request)
     })
     .await

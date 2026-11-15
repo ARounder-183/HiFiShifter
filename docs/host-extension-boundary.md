@@ -227,9 +227,13 @@ MultitrackStudio）的 CLAP ARA 仍需逐个真机验收。
   互相覆盖；`process` 在未 `activate` / 未 `start_processing` / 并发进入时明确拒绝。
 - **窗口与资源**：`clap.gui` 把宿主给的父窗口交给共享视图栈（`editor::gui::create_view`），
   子 HWND 与 WebView2 由 `gui/windows.rs` 创建 —— 与 VST3 的 `attached` 走同一个函数；
-  Windows 产物把 `frontend/` 与 `models.json` 装到模块同级的
-  `HiFiShifter-resources`（`ResourceLayout::Sibling`），安装器与自检都断言
-  `plugin.html` 落地。此前只装 `.clap` 单文件，宿主扫描得到插件却只会给空白窗口。
+  Windows **安装器版**把 `frontend/` 与 `models.json` 装到
+  `%ProgramData%\HiFiShifter\plugin-resources`：公共 CLAP 目录
+  （`C:\Program Files\Common Files\CLAP`）是全机共享的插件目录，规范里只该出现
+  `.clap` 文件本身，多一个通用名的兄弟目录既不符合布局约定，也和别人的插件混在一起。
+  手动拷贝 / 便携包仍是模块同级的 `HiFiShifter-resources`（`ResourceLayout::Sibling`，
+  自包含），运行时按「同级 → 全机共享」解析；安装器与自检都断言 `plugin.html` 落地。
+  此前只装 `.clap` 单文件，宿主扫描得到插件却只会给空白窗口。
 - **日志落盘只有一套**：VST3 与 CLAP 共用 `hifishifter-plugin::diagnostics`
   （目录、行格式、会话头、8 MiB 轮转、级别、panic hook 全部来自
   `kernel::logfile`）。文件名是 `plugin-<format>-<host>.log`，例如

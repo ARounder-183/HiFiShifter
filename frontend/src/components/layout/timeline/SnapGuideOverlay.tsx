@@ -57,7 +57,17 @@ export const SnapGuideOverlay: React.FC<SnapGuideOverlayProps> = ({
     darkMode,
     dpr,
 }) => {
-    if (entries.length === 0 || layerWidth <= 0 || layerHeight <= 0) return null;
+    // 尺寸必须显式验有限：`NaN <= 0` 为 false，NaN 宽度会一路写进 inline style
+    // （`width: NaNpx`），而所有子投影都按它归一化，整层吸附线错位却不报错。
+    if (
+        entries.length === 0 ||
+        !finite(layerWidth) ||
+        !finite(layerHeight) ||
+        layerWidth <= 0 ||
+        layerHeight <= 0
+    ) {
+        return null;
+    }
 
     return (
         <div
@@ -139,6 +149,9 @@ const SnapEntry: React.FC<{
             const idx = rowLayout.rowIndexById.get(marker.trackId);
             if (idx == null) continue;
             const x = projectTimeX(marker.position);
+            // 与上方 lineXs 循环同一纪律：投影结果非有限时跳过，否则
+            // Math.round(NaN) 会让所有 accent 挤进同一个 key，并写出 left:NaNpx。
+            if (!finite(x)) continue;
             const key = Math.round(x * dpr) + ":" + marker.trackId;
             if (accentSeen.has(key)) continue;
             accentSeen.add(key);

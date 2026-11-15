@@ -115,8 +115,14 @@ export function startPointerGesture(options: PointerGestureOptions): PointerGest
     /** 面板登记的收尾入口。**引用必须恒定**，见模块头。 */
     const endFromFocus = () => end("cancel");
 
-    const onPointerUp = (event: Event) => end("up", event as globalThis.PointerEvent);
-    const onPointerCancel = (event: Event) => end("cancel", event as globalThis.PointerEvent);
+    /** 多指 / 数位笔的其它 pointerId 不得结束本手势；与 onPointerMove 同一判据。 */
+    const endForPointer = (reason: GestureEndReason, event: globalThis.PointerEvent): void => {
+        if (event.pointerId !== pointerId) return;
+        end(reason, event);
+    };
+    const onPointerUp = (event: Event) => endForPointer("up", event as globalThis.PointerEvent);
+    const onPointerCancel = (event: Event) =>
+        endForPointer("cancel", event as globalThis.PointerEvent);
 
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);

@@ -11,6 +11,12 @@
 ; 所以这里自己写一份：页面、组件、目录、模型段、卸载段都在眼前，构建脚本用 /D 把
 ; 每一个路径传进来（脚本里不出现任何相对路径猜测）。
 ;
+; 【覆盖安装】.onInit 若发现本机已有安装，把 $INSTDIR 设回旧版目录，并让用户在
+; 选项页决定是否删除共享模型库/缓存；点下"安装"后由**本安装器自己**移除上一版
+; （删目录 / 插件 / 卸载项 / 快捷方式），绝不执行旧版 uninstall.exe —— 那个 exe 属于
+; 上一版，它在 /S 下是否真的静默（语言选择框、宿主占用提示）不由我们决定，执行它
+; 就等于在安装过程中额外弹出一个"HiFiShifter 卸载"窗口。
+;
 ; 【文案】不在这里：全部来自 $(HFS_*)，取值由
 ; scripts/release/build-installer-strings.mjs 从五语词表抽出。要改文案请改词表。
 ;
@@ -136,6 +142,10 @@ ${StrTrimNewLines}
   ; （用户漫游目录）就不虚拟化，门禁才能真实验证模型闭环。
   !define HFS_MODEL_ROOT "$APPDATA\HiFiShifterTest\models"
   !define HFS_MODEL_ROOT_CONTEXT current
+  ; 【CLAP 资源放哪】CLAP 的公共插件目录（Common Files\CLAP）按规范只放 .clap 文件本身，
+  ; 资源目录不能摆在那里（见下面 CLAP 段）。测试模式同样用当前用户目录，避免 UAC 虚拟化。
+  !define HFS_CLAP_RES_DIR "$LOCALAPPDATA\HiFiShifterInstallerTest\CLAPResources"
+  !define HFS_CLAP_RES_CONTEXT current
 !else
   InstallDir "$PROGRAMFILES64\HiFiShifter"
   RequestExecutionLevel admin
@@ -147,6 +157,10 @@ ${StrTrimNewLines}
   ; 发布安装器是 admin，写 %ProgramData% 不虚拟化；all 上下文的 $APPDATA 正是它。
   !define HFS_MODEL_ROOT "$APPDATA\HiFiShifter\models"
   !define HFS_MODEL_ROOT_CONTEXT all
+  ; 发布安装器：插件资源与共享模型库同一个全机根（%ProgramData%\HiFiShifter），
+  ; 公共 CLAP 目录里因此只剩 HiFiShifter.clap 一个条目。
+  !define HFS_CLAP_RES_DIR "$APPDATA\HiFiShifter\plugin-resources"
+  !define HFS_CLAP_RES_CONTEXT all
   !define HFS_HOST_GUARD
 !endif
 
@@ -176,6 +190,13 @@ ShowInstDetails show
 ; 安装器与卸载器的页面都必须在语言声明之前（MUI 在加载第一个语言时插入界面函数，
 ; 那一刻它要知道有没有卸载器）。
 !insertmacro MUI_PAGE_WELCOME
+; 【为什么覆盖安装要有独立一页】重装同一个产品时，先移除旧版再装才不会留下
+; 新旧混杂的目录。这一页与卸载选项页一致：可分别选择是否删除共享模型库
+; （默认勾选）和缓存/日志（默认不勾），**它就是用户的唯一一次确认**，不再另弹
+; "要卸载吗？"。真正的移除发生在 INSTFILES 页的 PRE 回调，由安装器自己在进程内
+; 完成（不执行旧版 uninstall.exe），用户中途取消时旧版仍完好无损。
+; 没检测到旧版时这一页在 Create 回调里 Abort，向导完全不受影响。
+Page custom HfsReinstallPageCreate HfsReinstallPageLeave
 
 ; 【为什么许可页看的不是随包的那份 LICENSE】NSIS 的 LicenseData 在**编译期**把文件读成
 ; UTF-16 存进安装器：文件带 BOM 才按 UTF-8 解码，不带就按**编译所在机器的 ANSI 代码页**
@@ -185,43 +206,83 @@ ShowInstDetails show
 ; 逐字节相同的那份，负责装进用户磁盘。
 !insertmacro MUI_PAGE_LICENSE "${HFS_LICENSE_PAGE}"
 !define MUI_PAGE_CUSTOMFUNCTION_SHOW HfsComponentsPageShow
-; ── 组件页布局：把树加宽、描述框改成底部通栏 ─────────────────────────
-; 【为什么在运行时改】MUI2 自带的 IDD_SELCOM 把描述框放在右侧，树只剩 147px，
-; 中文组件名被截断（用户实测截图）；换 SMALLDESC 又会把树压到 5 行、底部两项
-; 被裁掉。页面 SHOW 时用 Win32 MoveWindow 重排：纯 NSIS、无自定义 UI 资源、
-; 无二进制文件、构建脚本不用改。实测子对话框客户区 450x210，下面的坐标严格
-; 落在其中；控件 ID 与 MUI2 的 GetDlgItem 一致（1006/1022/1023/1032/1042/1043）。
+; ── 组件页布局：按客户区尺寸重排，文字行给足高度 ────────────────────
+;
+; 【为什么必须改】MUI2 自带的 IDD_SELCOM 把树挤在左半边（147px），中文组件名
+; 被截断；此前用硬编码 434x210 的 MoveWindow 重排又把「选定安装的组件」
+; 「所需空间」压成 10px 高，字被裁掉，描述标题还与所需空间挤在同一行。
+; 固定像素在 125% DPI 下也会失配，所以这里全部按**真实客户区**计算。
+;
+; 【为什么不换 SMALLDESC / 自定义 UI 资源】SMALLDESC 会把树压到 5 行，
+; 底部两个组件直接看不见；改 .exe 里的对话框模板则要维护二进制资源。
+; 控件 ID 与 MUI2 的 GetDlgItem 一致（1006/1022/1023/1032/1042/1043）：
+;   说明(28) → 列表标签(14) → 组件树(剩余高的大头) →
+;   所需空间(独立一行 14) → 组件描述标题(独立一行 14) → 描述通栏(30~48)
+; 「安装类型」下拉框(1017)与其标签(1021)本安装器不用，隐藏以腾出整行宽度。
+; 14px 来自默认 8pt 字体的实测行高，10px 正是旧版把字裁掉的原因。
 Function HfsComponentsPageShow
   FindWindow $0 "#32770" "" $HWNDPARENT
   ${If} $0 == 0
     Return
   ${EndIf}
-  ; 顶部说明 → 组件列表标签 → 树（全宽、7 行）→ 所需空间 + 描述标题 → 描述通栏
+  ; $R0 = 左右各留 8px 后的内容宽度；$R1 = 去掉上下边距后的可用高度。
+  System::Call 'user32::GetClientRect(p $0, @r1)'
+  System::Call '*$1(i,i,i.r2,i.r3)'
+  IntOp $R0 $2 - 16
+  IntOp $R1 $3 - 6
+  ; 固定占用：说明 28 + 标签 14 + 所需空间 14 + 描述标题 14 + 五行间隔 10 = 80。
+  IntOp $R2 $R1 - 80      ; 树 + 描述框可以分的总高度
+  IntOp $R4 $R2 / 5       ; 描述框先取 20%
+  ${If} $R4 < 30
+    StrCpy $R4 30
+  ${EndIf}
+  ${If} $R4 > 48
+    StrCpy $R4 48
+  ${EndIf}
+  IntOp $R3 $R2 - $R4     ; 其余全给组件树（450x228 客户区下约 112px / 7 行）
+  ${If} $R3 < 70
+    StrCpy $R3 70
+    IntOp $R4 $R2 - $R3
+  ${EndIf}
+
   GetDlgItem $1 $0 1006
-  System::Call 'user32::MoveWindow(p $1, i 8, i 2, i 434, i 24, i 1)'
+  System::Call 'user32::MoveWindow(p $1, i 8, i 2, i $R0, i 28, i 1)'
+  ; 安装类型下拉与标签：本安装器没有 InstType，隐藏后标签行不会被它挤窄。
+  GetDlgItem $1 $0 1017
+  System::Call 'user32::ShowWindow(p $1, i 0)'
+  GetDlgItem $1 $0 1021
+  System::Call 'user32::ShowWindow(p $1, i 0)'
   GetDlgItem $1 $0 1022
-  System::Call 'user32::MoveWindow(p $1, i 8, i 28, i 434, i 10, i 1)'
+  System::Call 'user32::MoveWindow(p $1, i 8, i 32, i $R0, i 14, i 1)'
   GetDlgItem $1 $0 1032
-  System::Call 'user32::MoveWindow(p $1, i 8, i 40, i 434, i 118, i 1)'
+  System::Call 'user32::MoveWindow(p $1, i 8, i 48, i $R0, i $R3, i 1)'
+
+  IntOp $R5 48 + $R3
+  IntOp $R5 $R5 + 2
+  ; 所需空间单独占一行，不再和「组件描述」标题并排。
   GetDlgItem $1 $0 1023
-  System::Call 'user32::MoveWindow(p $1, i 8, i 162, i 110, i 10, i 1)'
+  System::Call 'user32::MoveWindow(p $1, i 8, i $R5, i $R0, i 14, i 1)'
+  IntOp $R5 $R5 + 16
   GetDlgItem $1 $0 1042
-  System::Call 'user32::MoveWindow(p $1, i 122, i 162, i 320, i 10, i 1)'
+  System::Call 'user32::MoveWindow(p $1, i 8, i $R5, i $R0, i 14, i 1)'
+  IntOp $R5 $R5 + 14
   GetDlgItem $1 $0 1043
-  System::Call 'user32::MoveWindow(p $1, i 8, i 174, i 434, i 34, i 1)'
+  System::Call 'user32::MoveWindow(p $1, i 8, i $R5, i $R0, i $R4, i 1)'
 FunctionEnd
 
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
 Page custom HfsVst3Page HfsVst3PageLeave
 Page custom HfsClapPage HfsClapPageLeave
+!define MUI_PAGE_CUSTOMFUNCTION_PRE HfsInstFilesPagePre
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
 ; 【为什么用 UninstPage custom 而不是 MUI 的组件页】卸载器只需要两个可勾选项，
 ; 复用安装侧的组件页会带来整套 section 索引与组件页布局回调；两复选框的自定义页
-; 更轻，而且 un.onInit 里的默认值在静默卸载时不经页面直接生效。
+; 更轻，而且 un.onInit 里的默认值在静默卸载时不经页面直接生效；覆盖安装
+; 还会通过 /DeleteModels= /DeleteCache= 把安装器选项页的选择传进来。
 UninstPage custom un.HfsUninstallOptionsCreate un.HfsUninstallOptionsLeave
 !insertmacro MUI_UNPAGE_INSTFILES
 
@@ -242,17 +303,32 @@ Var HfsVst3Dir
 Var HfsClapDialog
 Var HfsClapInput
 Var HfsClapDir
+; 插件资源目录（安装时登记，卸载时按它删）：新版在 %ProgramData%，与共享模型库同根。
+Var HfsClapResDir
 Var HfsIsRepair
 Var HfsModelRoot
 Var HfsVerifyRoot
 Var HfsListFile
-; 卸载选项页：两个复选框的状态（1 = 清理）。un.onInit 默认置 0 —— 静默卸载
-; 不走选项页，因此默认是"都保留"；只有用户在选项页主动勾选才会清理。
+; 卸载选项页：两个复选框的状态（1 = 清理）。un.onInit 把「删除模型」置 1、
+; 「清理缓存」置 0；静默卸载不走选项页，因此这两个值直接生效。
 Var HfsUnOptModels
 Var HfsUnOptCache
 Var HfsUnChkModels
 Var HfsUnChkCache
 Var HfsUnOtherInstall
+; 覆盖安装：旧版安装目录、旧版登记过的模型库根、两项清理选择、是否确实检测到旧版。
+; 【刻意不保存 uninstall.exe 路径】覆盖安装不执行旧版卸载器（见 HfsRemovePreviousInstall），
+; 存下来只会有"顺手 ExecWait 一下"的诱惑 —— 那正是会弹第二个窗口的写法。
+Var HfsOldInstallDir
+; 【为什么还要记旧模型根】共享库的落点随安装器版本变过（Tauri 时期在安装目录里，
+; 现在在 %ProgramData%）。只按本版常量删/留，就会留下旧版的一份 150 MB 幽灵副本。
+Var HfsOldModelRoot
+Var HfsReinstallRemoveModels
+Var HfsReinstallRemoveCache
+Var HfsHasPrevious
+Var HfsReinstallChkModels
+Var HfsReinstallChkCache
+Var HfsReinstallDialog
 
 ; ── VST3 目录页 ─────────────────────────────────────────────────────────
 ; 【为什么单独一页】App 与插件装在两个完全不同的地方（Program Files 与
@@ -487,7 +563,9 @@ Function HfsEnsureWebView2
   ReadRegStr $0 HKCU "Software\Microsoft\EdgeUpdate\Clients\${WEBVIEW2_GUID}" "pv"
   ${If} $0 == ""
   ${OrIf} $0 == "0.0.0.0"
-    MessageBox MB_OK|MB_ICONSTOP "$(HFS_WEBVIEW2_INSTALL_FAILED)"
+    ${IfNot} ${Silent}
+      MessageBox MB_OK|MB_ICONSTOP "$(HFS_WEBVIEW2_INSTALL_FAILED)" /SD IDOK
+    ${EndIf}
   ${EndIf}
 FunctionEnd
 
@@ -663,7 +741,370 @@ Function HfsModelsGc
   Delete "$HfsListFile"
 FunctionEnd
 
-; ── 初始化 ──────────────────────────────────────────────────────────────
+; ── 覆盖安装：读回旧版安装位置，就地移除上一版 ─────────────────────────
+;
+; 【为什么不再执行旧版 uninstall.exe】那个 exe 是**上一版**编译出来的二进制，它在 /S
+; 下到底会不会显示界面，不由本脚本决定：Tauri 时期的卸载器在 un.onInit 里
+; !insertmacro MUI_UNGETLANGUAGE，静默模式照样弹出语言选择框；它的"宿主仍占用插件"
+; 提示是不带 /SD 的 MessageBox，/S 下也照常显示。于是用户点下"安装"之后，桌面上会
+; 突然多出一个标题为"HiFiShifter 卸载"的窗口 —— 这正是要彻底消灭的东西。子进程的
+; UI 既改不了也拦不住，唯一可靠的做法是**不执行它**：卸载该做的事由本安装器自己
+; 在进程内完成（见 HfsRemovePreviousInstall）。覆盖安装路径上因此不再有第二个窗口，
+; 也不再有第二个卸载器进程。
+Function HfsDetectPreviousInstall
+  StrCpy $HfsHasPrevious 0
+  StrCpy $HfsOldInstallDir ""
+  ; 与卸载选项页同一组默认值：删模型=1、清缓存=0。
+  ; 两个开关让静默/无人值守升级能表达选择；交互安装由选项页覆盖。
+  StrCpy $HfsReinstallRemoveModels 1
+  StrCpy $HfsReinstallRemoveCache 0
+  ${StrStr} $0 $CMDLINE "/DeleteModels=0"
+  ${If} $0 != ""
+    StrCpy $HfsReinstallRemoveModels 0
+  ${EndIf}
+  ${StrStr} $0 $CMDLINE "/DeleteModels=1"
+  ${If} $0 != ""
+    StrCpy $HfsReinstallRemoveModels 1
+  ${EndIf}
+  ${StrStr} $0 $CMDLINE "/DeleteCache=0"
+  ${If} $0 != ""
+    StrCpy $HfsReinstallRemoveCache 0
+  ${EndIf}
+  ${StrStr} $0 $CMDLINE "/DeleteCache=1"
+  ${If} $0 != ""
+    StrCpy $HfsReinstallRemoveCache 1
+  ${EndIf}
+  ${If} $HfsIsRepair == 0
+    ReadRegStr $HfsOldInstallDir ${HFS_ARP_ROOT} "${ARP_KEY}" "InstallLocation"
+    ; 旧版把共享库写在哪儿，只能问它自己留下的记录；读不到才退回本版常量。
+    ReadRegStr $HfsOldModelRoot ${HFS_ARP_ROOT} "${ARP_KEY}" "ModelRoot"
+    ${If} $HfsOldInstallDir != ""
+      ; 【为什么以 HiFiShifter.exe 为准，而不是以存在卸载项为准】InstallLocation 可能是
+      ; 用户手工改过的路径，也可能是上一次安装失败留下的空目录。目录里真的有主程序
+      ; 才算"上一版还在"，否则按全新安装处理。
+      ${If} ${FileExists} "$HfsOldInstallDir\HiFiShifter.exe"
+        StrCpy $HfsHasPrevious 1
+        ; 【为什么先设目录再移除】MUI 的目录页在 .onInit 之后才创建，此时改 $INSTDIR
+        ; 就是"尝试设为旧版同一路径"；用户仍可在目录页里改回别处。
+        StrCpy $INSTDIR "$HfsOldInstallDir"
+        ; 【为什么这里不弹确认框】紧随其后的「覆盖安装选项」页就是用户确认：用户已经
+        ; 在那里选过是否删除模型/缓存，再弹一次"要卸载吗？"只会多出一个窗口。
+      ${Else}
+        ; 只剩注册表残项：清掉，本次按全新安装处理，否则用户会永远卡在"无法卸载上一版"。
+        DeleteRegKey ${HFS_ARP_ROOT} "${ARP_KEY}"
+        StrCpy $HfsOldInstallDir ""
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+  ; ARP 键不存在时 ReadRegStr/DeleteRegKey 会置位全局错误标志；后面的 Rename/
+  ; ${If} ${Errors} 会误判成模型库发布失败。函数返回前清掉，不要泄漏给安装段。
+  ClearErrors
+FunctionEnd
+
+; 覆盖安装的"卸载"：全部在本进程内完成，不启动任何子进程。
+;
+; 需要做的事与卸载段一致：
+;   1. 旧版 App 目录（整个目录都属于本产品，与卸载段的 RMDir /r "$INSTDIR" 同一判据）；
+;   2. 旧版登记过的 VST3 / CLAP 产物（只删本产品自己的子目录，公共插件目录不能整删）；
+;   3. ARP 卸载项、旧插件安装器遗留项、开始菜单与桌面快捷方式；
+;   4. 用户在选项页勾选的共享模型库与可再生成缓存（沿用原有两段清理）。
+;
+; 【为什么不 kill 进程】静默升级时强杀正在运行的 App 会丢用户没保存的工程。改成
+; "发现主程序仍在运行就明确失败"，与 Tauri 安装器的行为一致：让用户先关掉它。
+; 【为什么先判文件再整目录删】InstallLocation 来自本产品的 ARP 写入，但用户也可能
+; 手工改注册表。目录里必须真的有本产品产物，才允许 RMDir /r。
+Function HfsRemovePreviousInstall
+  ${If} $HfsHasPrevious != 1
+    Return
+  ${EndIf}
+  ${If} $HfsOldInstallDir == ""
+    Return
+  ${EndIf}
+
+  Call HfsAppRunning
+  ${If} $0 == 1
+    ${IfNot} ${Silent}
+      MessageBox MB_OK|MB_ICONSTOP "$(HFS_ERR_APP_RUNNING)" /SD IDOK
+    ${EndIf}
+    SetErrorLevel 3
+    Quit
+  ${EndIf}
+
+  DetailPrint "$(HFS_REINSTALL_UNINSTALLING)"
+  ; 先记下旧版登记的插件目录：新版可能被用户指到别处，只删新位置会把旧插件留在原地。
+  ReadRegStr $R5 ${HFS_ARP_ROOT} "${ARP_KEY}" "Vst3Dir"
+  ReadRegStr $R6 ${HFS_ARP_ROOT} "${ARP_KEY}" "ClapDir"
+  ; 插件资源目录同样按旧版登记值清：旧版摆在 CLAP 目录同级，新版在全机共享目录。
+  ReadRegStr $R8 ${HFS_ARP_ROOT} "${ARP_KEY}" "ClapResDir"
+
+  ; 逐个判断而不是 If + OrIf：LogicLib 的 FileExists 条件是跳转式宏，
+  ; 与 OrIf 混用容易生成错误的分支，这里用显式标志位最稳。
+  StrCpy $R7 0
+  ${If} ${FileExists} "$HfsOldInstallDir\HiFiShifter.exe"
+    StrCpy $R7 1
+  ${EndIf}
+  ${If} ${FileExists} "$HfsOldInstallDir\uninstall.exe"
+    StrCpy $R7 1
+  ${EndIf}
+  ${If} $R7 == 1
+    RMDir /r "$HfsOldInstallDir"
+  ${EndIf}
+
+  ; 只删本产品自己的 VST3 子目录与 CLAP 模块 + 资源目录：$R5/$R6 是公共插件目录，
+  ; 里面还有别人的插件，整删等于毁别人的安装。
+  ${If} $R5 != ""
+    RMDir /r "$R5\${VST3_SUBDIR}"
+  ${EndIf}
+  ${If} $R6 != ""
+    Delete "$R6\${CLAP_FILENAME}"
+    RMDir /r "$R6\${CLAP_RESOURCES}"
+  ${EndIf}
+  ${If} $R8 != ""
+    RMDir /r "$R8"
+  ${EndIf}
+
+  DeleteRegKey ${HFS_ARP_ROOT} "${ARP_KEY}"
+  DeleteRegKey HKLM "${LEGACY_VST3_ARP_KEY}"
+  DeleteRegKey HKCU "${LEGACY_VST3_ARP_KEY}"
+
+  SetShellVarContext all
+  RMDir /r "$SMPROGRAMS\HiFiShifter"
+  Delete "$DESKTOP\HiFiShifter.lnk"
+  SetShellVarContext current
+
+  ; 删不掉说明 exe 还被锁着（DAW 或用户手动打开）：此时继续装只会得到一个新旧混杂的
+  ; 目录，宁可明确失败让用户先关掉占用者。
+  ${If} ${FileExists} "$HfsOldInstallDir\HiFiShifter.exe"
+    ${IfNot} ${Silent}
+      MessageBox MB_OK|MB_ICONSTOP|MB_DEFBUTTON1 "$(HFS_REINSTALL_FAILED)" /SD IDOK
+    ${EndIf}
+    SetErrorLevel 2
+    Quit
+  ${EndIf}
+
+  ; $HfsModelRoot 在 .onInit 已按发布/测试模式展开；模型段稍后会重新写入。
+  ${If} $HfsReinstallRemoveModels == 1
+    ; 旧版可能把共享库写在另一个根（版本差异）：同一份选择必须对它一起生效，
+    ; 否则"删了模型"之后磁盘上还躺着一份 150 MB。
+    Call HfsPurgeLegacyModelRoot
+    FindFirst $R3 $R4 "$HfsModelRoot\*"
+    StrCmp $R4 "" hfs_prev_models_done
+    hfs_prev_models_loop:
+    StrCmp $R4 "." hfs_prev_models_next
+    StrCmp $R4 ".." hfs_prev_models_next
+    ${If} ${FileExists} "$HfsModelRoot\$R4\*"
+      RMDir /r "$HfsModelRoot\$R4"
+    ${Else}
+      Delete "$HfsModelRoot\$R4"
+    ${EndIf}
+    hfs_prev_models_next:
+    ClearErrors
+    FindNext $R3 $R4
+    IfErrors hfs_prev_models_done
+    StrCmp $R4 "" hfs_prev_models_done hfs_prev_models_loop
+    hfs_prev_models_done:
+    FindClose $R3
+    RMDir /r "$HfsModelRoot"
+    RMDir "$HfsModelRoot\.."
+  ${Else}
+    ; 用户选择保留：若上一版把库写在别的根，把它并进本版根 —— 否则"保留"只是留下
+    ; 一份新版根本不会去读的副本，用户既没省下磁盘，也没省下重新解包的时间。
+    Call HfsAdoptLegacyModelRoot
+  ${EndIf}
+  ${If} $HfsReinstallRemoveCache == 1
+    Call HfsSweepDisposableDirs
+  ${EndIf}
+FunctionEnd
+
+; 旧根里是不是真有本产品的模型库（版本目录里有 models.json）。
+; 【为什么要判】ARP 里的 ModelRoot 理论上由本安装器写入，但用户可能手工改注册表、
+; 或从别处导入一份卸载项。没有这条判据，一个被改坏的路径会被整目录 RMDir /r。
+; 入：$R0 = 根目录。出：$R7 = 1 表示是本产品的模型库。
+Function HfsLibraryHasVersions
+  StrCpy $R7 0
+  FindFirst $R3 $R4 "$R0\*"
+  StrCmp $R4 "" hfs_lib_scan_end
+  hfs_lib_scan_loop:
+  StrCmp $R4 "." hfs_lib_scan_next
+  StrCmp $R4 ".." hfs_lib_scan_next
+  ${If} ${FileExists} "$R0\$R4\models.json"
+    StrCpy $R7 1
+    Goto hfs_lib_scan_end
+  ${EndIf}
+  hfs_lib_scan_next:
+  ClearErrors
+  FindNext $R3 $R4
+  IfErrors hfs_lib_scan_end
+  StrCmp $R4 "" hfs_lib_scan_end hfs_lib_scan_loop
+  hfs_lib_scan_end:
+  FindClose $R3
+FunctionEnd
+
+; 「删除模型」时把上一版登记过的模型根一并清掉。
+Function HfsPurgeLegacyModelRoot
+  ${If} $HfsOldModelRoot == ""
+    Return
+  ${EndIf}
+  ${If} $HfsOldModelRoot == $HfsModelRoot
+    Return
+  ${EndIf}
+  ${IfNot} ${FileExists} "$HfsOldModelRoot\*"
+    Return
+  ${EndIf}
+  StrCpy $R0 "$HfsOldModelRoot"
+  Call HfsLibraryHasVersions
+  ${If} $R7 != 1
+    Return
+  ${EndIf}
+  DetailPrint "Removing the previous model library: $HfsOldModelRoot"
+  RMDir /r "$HfsOldModelRoot"
+FunctionEnd
+
+; 「保留模型」时把上一版登记过的模型根并入本版根。
+;
+; 【为什么是搬而不是留】运行时只认一个根（shared_store_dir）。留在旧根里的副本不会被
+; 读到，等于白占 150 MB；搬过来之后 HfsVerifyModels 能命中，连解包都省了。
+Function HfsAdoptLegacyModelRoot
+  ${If} $HfsOldModelRoot == ""
+    Return
+  ${EndIf}
+  ${If} $HfsOldModelRoot == $HfsModelRoot
+    Return
+  ${EndIf}
+  ${IfNot} ${FileExists} "$HfsOldModelRoot\*"
+    Return
+  ${EndIf}
+  StrCpy $R0 "$HfsOldModelRoot"
+  Call HfsLibraryHasVersions
+  ${If} $R7 != 1
+    Return
+  ${EndIf}
+  CreateDirectory "$HfsModelRoot"
+  FindFirst $R3 $R4 "$HfsOldModelRoot\*"
+  StrCmp $R4 "" hfs_adopt_done
+  hfs_adopt_loop:
+  StrCmp $R4 "." hfs_adopt_next
+  StrCmp $R4 ".." hfs_adopt_next
+  ${If} ${FileExists} "$HfsOldModelRoot\$R4\models.json"
+    ${IfNot} ${FileExists} "$HfsModelRoot\$R4\models.json"
+      DetailPrint "Moving the previous model library into place: $R4"
+      ClearErrors
+      Rename "$HfsOldModelRoot\$R4" "$HfsModelRoot\$R4"
+      ${If} ${Errors}
+        ; 跨卷时 Rename 会失败：robocopy /MOVE 走同一件事，nsExec 保证没有窗口。
+        nsExec::ExecToStack '"$SYSDIR\robocopy.exe" "$HfsOldModelRoot\$R4" "$HfsModelRoot\$R4" /E /MOVE /NFL /NDL /NJH /NJS /NP'
+        Pop $0
+        Pop $1
+      ${EndIf}
+    ${Else}
+      ; 新根已经有同一版本：旧的那份是重复副本，删掉才是"不重复占 150 MB"。
+      RMDir /r "$HfsOldModelRoot\$R4"
+    ${EndIf}
+  ${Else}
+    ; 版本目录的残留（*.staging / *.publishing / 半截目录）：不并进去，直接清。
+    RMDir /r "$HfsOldModelRoot\$R4"
+  ${EndIf}
+  hfs_adopt_next:
+  ClearErrors
+  FindNext $R3 $R4
+  IfErrors hfs_adopt_done
+  StrCmp $R4 "" hfs_adopt_done hfs_adopt_loop
+  hfs_adopt_done:
+  FindClose $R3
+  ; 只在旧根真的空了时才删得掉；删不掉说明里面还有别人的东西，留着。
+  RMDir "$HfsOldModelRoot"
+FunctionEnd
+
+; 静默安装没有页面，在 .onInit 里直接移除；交互安装留到用户点下"安装"之后。
+; 清 $HfsHasPrevious 防止 .onInit 与 INSTFILES 的 PRE 各跑一次。
+Function HfsRemovePreviousInstallIfAny
+  ${If} $HfsHasPrevious == 1
+    Call HfsRemovePreviousInstall
+    StrCpy $HfsHasPrevious 0
+  ${EndIf}
+FunctionEnd
+
+; 【为什么与卸载选项页保持一致】覆盖安装本质上就是"卸载旧版 + 安装新版"，
+; 用户能清理的东西也应当完全一样：共享模型库（默认勾选）与缓存/日志（默认
+; 不勾）。两项文案直接复用 $(HFS_UNINSTALL_OPT_*)，不另造一套词表。
+Function HfsReinstallPageCreate
+  ${If} $HfsHasPrevious != 1
+    Abort
+  ${EndIf}
+  !insertmacro MUI_HEADER_TEXT "$(HFS_REINSTALL_OPTIONS_TITLE)" "$(HFS_REINSTALL_OPTIONS_SUBTITLE)"
+  nsDialogs::Create 1018
+  Pop $HfsReinstallDialog
+  ${If} $HfsReinstallDialog == error
+    Abort
+  ${EndIf}
+  ${NSD_CreateLabel} 0 0 100% 24u "$(HFS_REINSTALL_OPTIONS_TOP)"
+  Pop $0
+  ${NSD_CreateCheckbox} 0 30u 100% 12u "$(HFS_UNINSTALL_OPT_MODELS)"
+  Pop $HfsReinstallChkModels
+  ${NSD_CreateLabel} 12u 44u 88% 20u "$(HFS_UNINSTALL_OPT_MODELS_DESC)"
+  Pop $0
+  ${NSD_CreateCheckbox} 0 72u 100% 12u "$(HFS_UNINSTALL_OPT_CACHE)"
+  Pop $HfsReinstallChkCache
+  ${NSD_CreateLabel} 12u 86u 88% 20u "$(HFS_UNINSTALL_OPT_CACHE_DESC)"
+  Pop $0
+  ${If} $HfsReinstallRemoveModels == 1
+    ${NSD_Check} $HfsReinstallChkModels
+  ${EndIf}
+  ${If} $HfsReinstallRemoveCache == 1
+    ${NSD_Check} $HfsReinstallChkCache
+  ${EndIf}
+  nsDialogs::Show
+FunctionEnd
+
+Function HfsReinstallPageLeave
+  ${NSD_GetState} $HfsReinstallChkModels $HfsReinstallRemoveModels
+  ${NSD_GetState} $HfsReinstallChkCache $HfsReinstallRemoveCache
+FunctionEnd
+
+; 【为什么在 INSTFILES 的 PRE 里移除】走到这一页说明用户已经点下"安装"，此前任何一页
+; 按取消都不会动旧版。
+Function HfsInstFilesPagePre
+  Call HfsRemovePreviousInstallIfAny
+FunctionEnd
+; 覆盖安装专用的派生物清理：与 un.HfsSweepDisposableDirs 的白名单逐字一致。
+; 卸载器那一份带 un. 前缀，安装器不能 Call，因此这里放一份安装器版本。
+Function HfsSweepDisposableDirs
+  SetShellVarContext current
+  StrCpy $R0 "$LOCALAPPDATA\HiFiShifter"
+  ${IfNot} ${FileExists} "$R0\*"
+    Return
+  ${EndIf}
+  ${If} ${FileExists} "$R0\cache\*"
+    RMDir /r "$R0\cache"
+  ${EndIf}
+  ${If} ${FileExists} "$R0\logs\*"
+    RMDir /r "$R0\logs"
+  ${EndIf}
+  ${If} ${FileExists} "$R0\EBWebView\*"
+    RMDir /r "$R0\EBWebView"
+  ${EndIf}
+  ${If} ${FileExists} "$R0\webview\*"
+    RMDir /r "$R0\webview"
+  ${EndIf}
+  ${If} ${FileExists} "$R0\pcm\*"
+    RMDir /r "$R0\pcm"
+  ${EndIf}
+  ${If} ${FileExists} "$R0\capture\*"
+    RMDir /r "$R0\capture"
+  ${EndIf}
+  ${If} ${FileExists} "$R0\transfer\*"
+    RMDir /r "$R0\transfer"
+  ${EndIf}
+  ${If} ${FileExists} "$R0\links\*"
+    RMDir /r "$R0\links"
+  ${EndIf}
+  ${If} ${FileExists} "$R0\plugin-content-v1\*"
+    RMDir /r "$R0\plugin-content-v1"
+  ${EndIf}
+  ; 目录空了才删根；删不掉说明还有用户数据要留。
+  RMDir "$R0"
+FunctionEnd
+
 Function .onInit
   ${IfNot} ${RunningX64}
     ; 唯一一条无法本地化的提示：此时还不知道用户选了哪种语言。
@@ -680,6 +1121,7 @@ Function .onInit
   ; CLAP 目录因此是空串，File 会落到当前目录（VirtualStore）而不是目标目录。
   StrCpy $HfsClapDir "${HFS_DEFAULT_CLAP_DIR}"
 
+  StrCpy $HfsIsRepair 0
   ; /repair：只做校验与补齐，不弹任何页面（文件是幂等覆盖，模型段自己会跳过）。
   ${StrStr} $0 $CMDLINE "/repair"
   ${If} $0 != ""
@@ -687,27 +1129,56 @@ Function .onInit
     SetSilent silent
   ${EndIf}
 
-  ; 语言选择：MUI 会把选择记在注册表里，下次直接沿用。
+  ; 语言选择：MUI 会把选择记在注册表里，下次直接沿用。必须在覆盖安装选项页
+  ; 之前完成 —— 那一页的五语文案靠 $(HFS_REINSTALL_*) 取值。
   !insertmacro MUI_LANGDLL_DISPLAY
+
+  ; 语言确定之后再检测旧版：静默安装没有页面，当场移除上一版；交互安装先走
+  ; 覆盖安装选项页（用户在这里做唯一一次确认），到 INSTFILES 页才真正移除。
+  ; 两条路径都**不启动**旧版卸载器，因此正式安装过程中不会再有第二个卸载窗口。
+  Call HfsDetectPreviousInstall
+  ${If} ${Silent}
+    Call HfsRemovePreviousInstallIfAny
+  ${EndIf}
+
   !ifdef HFS_HOST_GUARD
     Call HfsHostRunning
     ${If} $0 == 1
-      MessageBox MB_OK|MB_ICONSTOP "$(HFS_ERR_HOST_OPEN)"
+      ${IfNot} ${Silent}
+        MessageBox MB_OK|MB_ICONSTOP "$(HFS_ERR_HOST_OPEN)" /SD IDOK
+      ${EndIf}
       Abort
     ${EndIf}
   !endif
 FunctionEnd
 
 Function un.onInit
-  ; 【为什么默认都不勾选】卸载只是移除程序，不该抹掉还能用的东西：
-  ; - 渲染缓存删了会让"卸载重装原版本"排障时首开变慢，运行时本就有
-  ;   temp_sweep / clear_render_cache 按年龄回收，磁盘清理不需要卸载器代劳；
-  ; - 日志是定位"上次为什么没工作"的唯一线索，删掉等于毁掉证据；
-  ; - 模型库保留后，重装同版本可直接复用，装新版时 HfsModelsGc 自己会 GC。
-  ; 用户想做一次"干净卸载"时，在选项页主动勾选即可。静默卸载（/S）不走选项页，
-  ; 这两个 0 直接生效 —— 于是 CI/门禁也是"保留一切"，符合最小惊讶原则。
-  StrCpy $HfsUnOptModels 0
+  ; 【为什么「删除模型」默认勾选】150 MB 的共享模型库只由本产品写入；默认删掉
+  ; 才不会在"我已经卸载了"之后继续占着磁盘。想保留（例如打算立刻重装同版本）
+  ; 的用户在选项页取消勾选即可。缓存与日志仍默认保留：缓存运行时会自行回收，
+  ; 日志是定位上次故障的唯一线索，"干净卸载"不该顺手毁掉证据。
+  ;
+  ; 静默卸载（/S）不走选项页，这里的默认值直接生效。覆盖安装会带
+  ; /DeleteModels= 与 /DeleteCache=，把用户在**安装器**选项页里的选择原样带过来
+  ; （卸载器自己的选项页在 /S 下不显示）。
+  StrCpy $HfsUnOptModels 1
   StrCpy $HfsUnOptCache 0
+  ${UnStrStr} $0 $CMDLINE "/DeleteModels=0"
+  ${If} $0 != ""
+    StrCpy $HfsUnOptModels 0
+  ${EndIf}
+  ${UnStrStr} $0 $CMDLINE "/DeleteModels=1"
+  ${If} $0 != ""
+    StrCpy $HfsUnOptModels 1
+  ${EndIf}
+  ${UnStrStr} $0 $CMDLINE "/DeleteCache=0"
+  ${If} $0 != ""
+    StrCpy $HfsUnOptCache 0
+  ${EndIf}
+  ${UnStrStr} $0 $CMDLINE "/DeleteCache=1"
+  ${If} $0 != ""
+    StrCpy $HfsUnOptCache 1
+  ${EndIf}
   SetRegView 64
   ; 【为什么不能直接用 $INSTDIR】卸载器会把自己复制到临时目录再运行，并传入 _?=
   ; —— 那个值是**卸载器所在目录**，不是可信来源。从安装时写下的 InstallLocation
@@ -724,11 +1195,27 @@ Function un.onInit
   ${If} $HfsClapDir == ""
     StrCpy $HfsClapDir "${HFS_DEFAULT_CLAP_DIR}"
   ${EndIf}
+  ; 插件资源目录同理：安装时写下的才是权威值（旧版可能摆在 CLAP 目录里）。
+  ReadRegStr $HfsClapResDir ${HFS_ARP_ROOT} "${ARP_KEY}" "ClapResDir"
+  ${If} $HfsClapResDir == ""
+    SetShellVarContext ${HFS_CLAP_RES_CONTEXT}
+    StrCpy $HfsClapResDir "${HFS_CLAP_RES_DIR}"
+    SetShellVarContext current
+  ${EndIf}
+  ; 【为什么模型库根也从卸载项读】共享库的落点随安装器版本变过。拿本版常量去删，
+  ; 遇到旧版写在别处的那一份就是"卸载了，模型还在"。读安装时写下的值才是权威；
+  ; 老版本没写过这个值时才退回本版常量。
+  ReadRegStr $HfsModelRoot ${HFS_ARP_ROOT} "${ARP_KEY}" "ModelRoot"
+  ${If} $HfsModelRoot == ""
+    ; $HfsModelRoot 已在 un.onInit 从卸载项读回（缺省才用本版常量），这里不再重算。
+  ${EndIf}
 
   !ifdef HFS_HOST_GUARD
     Call un.HfsHostRunning
     ${If} $0 == 1
-      MessageBox MB_OK|MB_ICONSTOP "$(HFS_UNINSTALL_HOST_OPEN)"
+      ${IfNot} ${Silent}
+        MessageBox MB_OK|MB_ICONSTOP "$(HFS_UNINSTALL_HOST_OPEN)" /SD IDOK
+      ${EndIf}
       Abort
     ${EndIf}
   !endif
@@ -751,13 +1238,17 @@ Section "$(HFS_COMPONENT_APP)"
   !ifdef HFS_HOST_GUARD
     Call HfsHostRunning
     ${If} $0 == 1
-      MessageBox MB_OK|MB_ICONSTOP "$(HFS_ERR_HOST_OPEN)"
+      ${IfNot} ${Silent}
+        MessageBox MB_OK|MB_ICONSTOP "$(HFS_ERR_HOST_OPEN)" /SD IDOK
+      ${EndIf}
       Abort
     ${EndIf}
   !endif
   Call HfsAppRunning
   ${If} $0 == 1
-    MessageBox MB_OK|MB_ICONSTOP "$(HFS_ERR_APP_RUNNING)"
+    ${IfNot} ${Silent}
+      MessageBox MB_OK|MB_ICONSTOP "$(HFS_ERR_APP_RUNNING)" /SD IDOK
+    ${EndIf}
     Abort
   ${EndIf}
 
@@ -805,6 +1296,9 @@ Section "$(HFS_COMPONENT_APP)"
   WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "Vst3Dir" "$HfsVst3Dir"
   WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "ClapDir" "$HfsClapDir"
+  ; 【为什么把模型库根写进卸载项】共享库的落点不是永久常量：换了目录布局之后，卸载器
+  ; 与下一次覆盖安装都必须能问出"上一版把 150 MB 放在哪"，而不是拿本版常量去猜。
+  WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "ModelRoot" "$HfsModelRoot"
   ; 不带 _?=：让卸载器按默认行为把自己复制到临时目录再运行，从而能删掉自身。
   WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "UninstallString" '"${UNINSTALLER}"'
   WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "QuietUninstallString" '"${UNINSTALLER}" /S'
@@ -833,7 +1327,9 @@ Section "$(HFS_COMPONENT_MODELS)"
   Call HfsVerifyModels
   ${If} $0 != 1
     RMDir /r "$HfsModelRoot\${MODELS_VERSION}.staging"
-    MessageBox MB_OK|MB_ICONSTOP "$(HFS_MODELS_VERIFY_FAILED)"
+    ${IfNot} ${Silent}
+      MessageBox MB_OK|MB_ICONSTOP "$(HFS_MODELS_VERIFY_FAILED)" /SD IDOK
+    ${EndIf}
     Abort
   ${EndIf}
   ; 【为什么必须先切走 SetOutPath】NSIS 的 SetOutPath 会 SetCurrentDirectory；
@@ -842,9 +1338,14 @@ Section "$(HFS_COMPONENT_MODELS)"
   ; 运行时却读不到权重（实测 RenameError=1）。先切回 $INSTDIR 再改名。
   SetOutPath "$INSTDIR"
   RMDir /r "$HfsModelRoot\${MODELS_VERSION}"
+  ; RMDir 删除不存在的目录、以及前面 ARP 查询失败都会置位全局错误标志；
+  ; Rename 成功时不会清掉它。只让 Rename 自己的结果决定下面的 ${If} ${Errors}。
+  ClearErrors
   Rename "$HfsModelRoot\${MODELS_VERSION}.staging" "$HfsModelRoot\${MODELS_VERSION}"
   ${If} ${Errors}
-    MessageBox MB_OK|MB_ICONSTOP "$(HFS_MODELS_VERIFY_FAILED)"
+    ${IfNot} ${Silent}
+      MessageBox MB_OK|MB_ICONSTOP "$(HFS_MODELS_VERIFY_FAILED)" /SD IDOK
+    ${EndIf}
     Abort
   ${EndIf}
   hfs_models_done:
@@ -877,7 +1378,9 @@ Section "$(HFS_COMPONENT_VST3)"
   !ifdef HFS_HOST_GUARD
     Call HfsHostRunning
     ${If} $0 == 1
-      MessageBox MB_OK|MB_ICONSTOP "$(HFS_ERR_HOST_OPEN)"
+      ${IfNot} ${Silent}
+        MessageBox MB_OK|MB_ICONSTOP "$(HFS_ERR_HOST_OPEN)" /SD IDOK
+      ${EndIf}
       Abort
     ${EndIf}
   !endif
@@ -920,14 +1423,23 @@ Section "$(HFS_COMPONENT_VST3)"
   DeleteRegKey HKCU "${LEGACY_VST3_ARP_KEY}"
 SectionEnd
 Section "$(HFS_COMPONENT_CLAP)"
+  ; 【为什么公共 CLAP 目录里只放 .clap 一个文件】%COMMONFILES%\CLAP 是全机共享的插件
+  ; 目录：规范里那里只该出现插件二进制本身，别人的插件也在这里。把前端与 models.json
+  ; 摆成一个通用名的兄弟目录，用户看到的是"一个插件 + 一个不知道谁的文件夹"，删起来
+  ; 也不敢动。资源改放 %ProgramData%\HiFiShifter\plugin-resources（与共享模型库同一个
+  ; 根），运行时按「模块同级 → 全机共享」的顺序解析（见 resource_root.rs）。
   SetOutPath "$HfsClapDir"
   Delete "$HfsClapDir\${CLAP_FILENAME}"
   File "/oname=${CLAP_FILENAME}" "${CLAP_FILE}"
-  ; 单文件 CLAP 的前端与模型清单必须与模块同级。只装 .clap 时插件能扫描到，
-  ; frontend_dir() 却找不到 plugin.html —— 窗口就是一块空白。
-  SetOutPath "$HfsClapDir\${CLAP_RESOURCES}"
+  ; 升级自旧版：把当年摆在 CLAP 目录里的资源目录清掉。否则两份资源并存，而"同级优先"
+  ; 会让旧的那份一直被读到 —— 新版前端永远不生效。
+  RMDir /r "$HfsClapDir\${CLAP_RESOURCES}"
+  SetShellVarContext ${HFS_CLAP_RES_CONTEXT}
+  SetOutPath "${HFS_CLAP_RES_DIR}"
   File /r "${CLAP_RES_DIR}\*.*"
+  SetShellVarContext current
   WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "ClapDir" "$HfsClapDir"
+  WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "ClapResDir" "${HFS_CLAP_RES_DIR}"
 SectionEnd
 SectionGroupEnd
 
@@ -949,7 +1461,7 @@ SectionGroupEnd
 
 
 ; ── 卸载选项页 ─────────────────────────────────────────────────────────
-; 两个复选框默认都不勾选（un.onInit 置 0），用户想清理时主动勾上：
+; 「清理共享模型库」默认勾选（un.onInit 置 1），「清理缓存与日志」默认不勾：
 ;   - 清理共享模型库（约 150 MB，所有安装共用）
 ;   - 清理缓存与日志（波形/渲染缓存、日志、WebView 数据、临时文件）
 ; 无论怎么勾，设置与未保存工程始终保留；若还有别的 HiFiShifter 安装，
@@ -992,7 +1504,9 @@ Section "Uninstall"
   RMDir /r "$HfsVst3Dir\${VST3_SUBDIR}"
   Delete "$HfsClapDir\${CLAP_FILENAME}"
   ; 只删本产品的资源目录：$HfsClapDir 是公共 CLAP 目录，里面有别人的插件。
+  ; 两种布局都要清：旧版摆在模块同级，新版在全机共享目录（安装时登记在 ClapResDir）。
   RMDir /r "$HfsClapDir\${CLAP_RESOURCES}"
+  RMDir /r "$HfsClapResDir"
   ; App 目录整个属于本产品（与 Tauri 安装器的行为一致）。
   RMDir /r "$INSTDIR"
 
@@ -1059,7 +1573,7 @@ Section "Uninstall"
   ${ElseIf} $HfsUnOtherInstall == 1
     DetailPrint "Another HiFiShifter installation is still present; shared data was kept."
   ${Else}
-    DetailPrint "Kept the shared model library and cached data as requested."
+    DetailPrint "Kept cached data as requested."
   ${EndIf}
 SectionEnd
 

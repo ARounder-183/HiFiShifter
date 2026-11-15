@@ -123,6 +123,18 @@ test("an unchanged poll keeps the same snapshot reference", async () => {
     unsubscribe();
 });
 
+test("the polled snapshot carries the render progress, not only the event", async () => {
+    // 事件用 try_send（队列满即丢）：丢一次 active:true 就再也不会亮，丢一次
+    // 进度就再也看不到百分比。轮询快照必须自己带 rendering_active 与 render_progress。
+    invokeMock.mockResolvedValue(
+        readyState({ rendering_active: true, render_progress: 0.42, render_audible_stale: false }),
+    );
+    stop = startPluginApplyPolling(async () => undefined);
+    await flush();
+    expect(getPluginApplySnapshot().state?.rendering_active).toBe(true);
+    expect(getPluginApplySnapshot().state?.render_progress).toBe(0.42);
+});
+
 test("a pushed state event updates the snapshot without waiting for the next poll", async () => {
     invokeMock.mockResolvedValue(readyState());
     stop = startPluginApplyPolling(async () => undefined);

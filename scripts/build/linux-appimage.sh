@@ -44,20 +44,57 @@ set -euo pipefail
 #   linux-appimage.sh smoke   <AppImage>         # 只冒烟
 #
 # 环境变量：
-#   HIFISHIFTER_SMOKE_REQUIRED=1    没有 xvfb-run 时视为失败（CI 用）
+#   HIFISHIFTER_SKIP_SMOKE=1        跳过冒烟（CI 只构建时用）
+#   HIFISHIFTER_SMOKE_REQUIRED=1    没有 xvfb-run 时视为失败
 #   HIFISHIFTER_SMOKE_TIMEOUT=45    冒烟超时秒数
 #   ARCH=x86_64|aarch64             appimagetool 的目标架构（默认 uname -m）
 
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SELF_DIR/../.." && pwd)
 
+die() {
+    printf 'error: %s\n' "$*" >&2
+    exit 1
+}
+
+HFS_APP_ARCH=""
+normalize_arch() {
+    # 【为什么写进变量而不是 stdout】顶层数组会调用两次本函数；非法 ARCH 时若在
+    # 命令替换的子 shell 里 die，外层只看到一次失败却会继续跑 usage，且报错重复。
+    # 这里在**当前 shell**解析一次并直接退出，后面统一复用这份结果。
+    case "${ARCH:-$(uname -m)}" in
+        x86_64 | amd64) HFS_APP_ARCH=x86_64 ;;
+        aarch64 | arm64) HFS_APP_ARCH=aarch64 ;;
+        *) die "不支持的架构：${ARCH:-$(uname -m)}" ;;
+    esac
+}
+normalize_arch
+
 # 必须随包提供、缺一不可的文件（相对 AppDir）。
-REQUIRED_FILES=(
-    "usr/bin/HiFiShifter"
-    "usr/lib/HiFiShifter/libSoundTouchDLL.so"
-    "usr/lib/HiFiShifter/libwebgpu_dawn.so"
-    "usr/lib/HiFiShifter/models/models.json"
-)
+#
+# 【libwebgpu_dawn.so 为什么按架构区分】Linux ARM64 的 ort 刻意不带 webgpu
+# feature（没有预编译的 dawn，见 backend/src-tauri/Cargo.toml 的 target 分支；
+# scripts/plugin/unix/lib.sh 的 HFS_ARCH=arm64 分支是同一结论）——产物里既不会
+# 存在也不会 NEEDED dawn。无条件列进来会让 linux-arm64 发布腿在 verify 的
+# "文件存在" 与 "NEEDED 解析" 两处必挂，且 CI 的 if:failure() 兜底会把没过
+# 校验的 AppImage 照样上传。
+case "$HFS_APP_ARCH" in
+    aarch64)
+        REQUIRED_FILES=(
+            "usr/bin/HiFiShifter"
+            "usr/lib/HiFiShifter/libSoundTouchDLL.so"
+            "usr/lib/HiFiShifter/models/models.json"
+        )
+        ;;
+    *)
+        REQUIRED_FILES=(
+            "usr/bin/HiFiShifter"
+            "usr/lib/HiFiShifter/libSoundTouchDLL.so"
+            "usr/lib/HiFiShifter/libwebgpu_dawn.so"
+            "usr/lib/HiFiShifter/models/models.json"
+        )
+        ;;
+esac
 
 # 必须由宿主提供、包内一份都不许留的库（glob，作用于 usr/lib 与 usr/lib64 顶层）。
 #
@@ -97,11 +134,24 @@ MUST_RESOLVE_HOST=(
 # 整段替换 RUNPATH）。随包存在性由 REQUIRED_FILES 断言，加载器的候选清单由
 # kernel 的 pack_layout_candidates_cover_every_bundled_location 单测钉死 ——
 # 两份清单必须互为镜像。
-MUST_RESOLVE_BUNDLE=(
-    libgtk-3.so.0
-    libgdk-3.so.0
-    libwebgpu_dawn.so
-)
+#
+# 【libwebgpu_dawn.so 为什么按架构区分】同上方 REQUIRED_FILES 的说明：
+# ARM64 Linux 没有 dawn，NEEDED 断言在该平台上必须跳过它。
+case "$HFS_APP_ARCH" in
+    aarch64)
+        MUST_RESOLVE_BUNDLE=(
+            libgtk-3.so.0
+            libgdk-3.so.0
+        )
+        ;;
+    *)
+        MUST_RESOLVE_BUNDLE=(
+            libgtk-3.so.0
+            libgdk-3.so.0
+            libwebgpu_dawn.so
+        )
+        ;;
+esac
 
 usage() {
     cat <<'EOF'
@@ -114,25 +164,12 @@ usage() {
 EOF
 }
 
-die() {
-    printf 'error: %s\n' "$*" >&2
-    exit 1
-}
-
 note() {
     printf '\n=== %s ===\n' "$*"
 }
 
 require_dir() {
     [ -d "$1" ] || die "不是目录：$1"
-}
-
-normalize_arch() {
-    case "${ARCH:-$(uname -m)}" in
-        x86_64 | amd64) printf 'x86_64\n' ;;
-        aarch64 | arm64) printf 'aarch64\n' ;;
-        *) die "不支持的架构：${ARCH:-$(uname -m)}" ;;
-    esac
 }
 
 # 找一个可用的 appimagetool：先看 PATH，再看缓存，最后下载。
@@ -291,12 +328,12 @@ cmd_repack() {
             local version product
             version=$(jq -r '.version' "$REPO_ROOT/backend/src-tauri/tauri.conf.json")
             product=$(jq -r '.productName' "$REPO_ROOT/backend/src-tauri/tauri.conf.json")
-            output="$(dirname "$appdir")/${product// /_}_${version}_$(normalize_arch).AppImage"
+            output="$(dirname "$appdir")/${product// /_}_${version}_${HFS_APP_ARCH}.AppImage"
         fi
     fi
 
     local arch tool
-    arch=$(normalize_arch)
+    arch="$HFS_APP_ARCH"
     tool=$(ensure_appimagetool "$arch")
 
     rm -f -- "$output"
@@ -309,6 +346,10 @@ cmd_repack() {
 # ── smoke ─────────────────────────────────────────────────────────────
 
 cmd_smoke() {
+    if [ "${HIFISHIFTER_SKIP_SMOKE:-0}" = "1" ]; then
+        printf '跳过冒烟（HIFISHIFTER_SKIP_SMOKE=1）\n'
+        return 0
+    fi
     local appimage="$1"
     [ -f "$appimage" ] || die "找不到 AppImage：$appimage"
 

@@ -440,7 +440,9 @@ export const BackgroundGrid: React.FC<{
 
     // 注册为统一帧提交的图层：滚动 / 缩放时由提交器按固定顺序调用，无需调用
     // 方记得单独通知网格（历史上漏通知会造成网格与 Clip/波形分层）。
-    useEffect(() => {
+    // 【必须用 layout effect】提交器可能在父级的 layout 阶段就发出一次 commit；
+    // passive useEffect 那时还没注册，网格会漏掉这一帧（与上方 draw 同理由）。
+    useLayoutEffect(() => {
         const bus = viewportBus;
         if (!bus || layerOrder == null) return;
         return bus.register(

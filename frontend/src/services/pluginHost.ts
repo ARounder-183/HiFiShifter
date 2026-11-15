@@ -168,6 +168,15 @@ const COMMAND_TIMEOUT_MS: Readonly<Record<string, number>> = {
     analyze_clip_syllables: 15 * 60_000,
     // 导出诊断包要读模型摘要 + 打包日志，大工程上远超 30 s。
     export_diagnostics: 5 * 60_000,
+    // 导出族（插件里经 canExportAudio 放行）走的是与播放同一条渲染数学，
+    // 整段离线渲染在大工程上远超 30 s，且都有用户可见的进度界面。
+    export_audio_advanced: 15 * 60_000,
+    quick_export_selected_clips: 15 * 60_000,
+    save_synthesized: 15 * 60_000,
+    // 静音检测/切除要对整段 PCM 跑分析（切除还要再渲染与改剪），长 clip 同样
+    // 远超 30 s；对话框里有检测进度，属于可见进度的慢车道。
+    analyze_clip_silence: 5 * 60_000,
+    remove_clip_silence: 5 * 60_000,
 };
 
 /** 默认等待上限（毫秒）。 */
@@ -270,7 +279,9 @@ export function createPluginHost(
                 if (!pending.delete(id)) return;
                 if (isBackgroundRequest(slot.command)) activeBackground -= 1;
                 slot.reject(new Error("Plugin command timed out: " + slot.command));
-                pump();
+                // bridge 已关闭时不再 pump：dispose 已清空所有队列，重入只会
+                // 在关闭后的发送路径上制造无意义的 reject / 原生消息。
+                if (!closed) pump();
             }, commandTimeoutMs(slot.command));
             try {
                 const message = {

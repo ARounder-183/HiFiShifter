@@ -1,5 +1,6 @@
 name: CLAP plug-in
 
+# CI 只做构建：工作流不跑测试；产物的黑盒自检在本地执行。
 on:
   pull_request:
   push:
@@ -7,14 +8,11 @@ on:
   workflow_dispatch:
 
 jobs:
-  gates:
-    uses: ./.github/workflows/gates.yml
-    with:
-      scope: frontend
-    secrets: inherit
+  frontend:
+    uses: ./.github/workflows/frontend-build.yml
 
   build:
-    needs: gates
+    needs: frontend
     strategy:
       fail-fast: false
       matrix:
@@ -96,8 +94,8 @@ jobs:
           python scripts/setup/fetch-models.py
           python scripts/setup/fetch-models.py --fetch-game
         shell: bash
-      # 前端产物来自 gates.yml 的 frontend job。CLAP 的包与 VST3 同构地带一份
-      # frontend/ 与 models.json：少了它，自检里的"窗口空白"判据就成了空跑。
+      # 前端产物来自 frontend-build.yml。CLAP 的包与 VST3 同构地带一份
+      # frontend/ 与 models.json：少了它，插件窗口在宿主里就是一片空白。
       - name: Download frontend artifact
         uses: actions/download-artifact@v8
         with:
@@ -119,17 +117,20 @@ jobs:
           $zip = Get-ChildItem -Path frontend-dist -Filter *.zip | Select-Object -First 1
           if (-not $zip) { Write-Host "No zip artifact found in frontend-dist"; Get-ChildItem frontend-dist; exit 1 }
           Expand-Archive -Path $zip.FullName -DestinationPath frontend -Force
+      # CI 只构建：跳过产物的黑盒自检（其中包含 cargo test ABI oracle）。
       - name: Build CLAP (Unix)
         if: runner.os != 'Windows'
-        run: bash scripts/clap/unix/build.sh --reuse-frontend
+        run: bash scripts/clap/unix/build.sh --reuse-frontend --no-verify
       - name: Build CLAP (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: pwsh scripts/clap/windows/build.ps1
+        run: pwsh scripts/clap/windows/build.ps1 -SkipVerify
       - uses: actions/upload-artifact@v7
         with:
           name: clap-${{ matrix.platform }}
           path: |
             dist/clap/**
             dist/HiFiShifter_*clap*
-          if-no-files-found: warn
+          # 本 job 的唯一交付物就是这份产物：glob 与脚本输出布局漂移时必须当场红，
+          # 不能 warn 后带着空产物绿灯（build.yml 的上传全部用 error，同一纪律）。
+          if-no-files-found: error

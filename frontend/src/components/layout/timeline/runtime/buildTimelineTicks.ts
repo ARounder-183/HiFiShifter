@@ -496,7 +496,18 @@ export function buildTimelineTicks(args: {
         let lastForcedPx: number | null = null;
         for (const point of tempoMap.points) {
             const px = secToContentPx(axis, point.positionSec);
-            if (lastForcedPx !== null && px - lastForcedPx < spacingPx - 1e-9) continue;
+            // 【为什么取 max(spacingPx, RULER_LABEL_HIDDEN_GAP_PX)】§5 的让位阈值是
+            // 固定的 26px，而 `spacingPx` 自身的下限是 24 —— 用户把标签间距压到
+            // 24~25px 且变化点密到这一档时，两个**都带强制标记**的标签会小于 26px：
+            // §5 里"左侧强制则让右侧"的分支对 forced→forced 不生效，落到通用让位
+            // 分支就会把 §4 刚强制打开的左侧变化点标签关掉，自相矛盾。让强制标签
+            // 的间距下限直接钉在让位阈值上，这个状态在源头就不可能出现。
+            if (
+                lastForcedPx !== null &&
+                px - lastForcedPx < Math.max(spacingPx, RULER_LABEL_HIDDEN_GAP_PX) - 1e-9
+            ) {
+                continue;
+            }
             lastForcedPx = px;
             const key = Math.round(point.positionSec * 1e6);
             const index =

@@ -123,6 +123,47 @@ test("components/layout/timeline/runtime/timelineFrameCommitter.test.ts scripted
         assertEqual(errors.length, 1, "failure is reported once");
     }
 
+    // ── 4b. 失败层在投影不变的下一次提交里被补画 ──────────────────────
+    // 旧实现把 lastCommitted 写在派发之前：paint 抛错的层被去重永久跳过，
+    // 即使后续反复提交同一投影也再不会重绘（画面永久空白/陈旧）。
+    {
+        const committer = createTimelineFrameCommitter(base);
+        let shouldFail = true;
+        let failedCalls = 0;
+        let healthyCalls = 0;
+        const axis = createTimelineAxis({ pxPerSec: 401, viewportWidthPx: 800 });
+        const errorSpy = vi.spyOn(frontendLog, "frontendLog").mockImplementation(() => undefined);
+        try {
+            committer.register(
+                {
+                    name: "flaky",
+                    paint: () => {
+                        failedCalls += 1;
+                        if (shouldFail) throw new Error("transient failure");
+                    },
+                },
+                LAYER_ORDER.clipBody,
+            );
+            committer.register(
+                { name: "healthy", paint: () => (healthyCalls += 1) },
+                LAYER_ORDER.waveform,
+            );
+            committer.commit(axis);
+            assertEqual(failedCalls, 1, "first attempt ran");
+            assertEqual(healthyCalls, 1, "healthy layer painted once");
+            shouldFail = false;
+            // 投影完全相同：正常层应被去重，失败层仍必须补画。
+            committer.commit(createTimelineAxis({ pxPerSec: 401, viewportWidthPx: 800 }));
+            assertEqual(failedCalls, 2, "failed layer retried on identical projection");
+            assertEqual(healthyCalls, 1, "healthy layer stays deduplicated");
+            // 补画成功后回到稳态，不再无谓重绘。
+            committer.commit(createTimelineAxis({ pxPerSec: 401, viewportWidthPx: 800 }));
+            assertEqual(failedCalls, 2, "no retry after success");
+        } finally {
+            errorSpy.mockRestore();
+        }
+    }
+
     // ── 5. 注销后不再参与绘制 ───────────────────────────────────────
     {
         let calls = 0;

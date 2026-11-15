@@ -457,39 +457,6 @@ export function effectiveTimeSignatureAt(map: TempoMap, index: number): TempoTim
     return effectiveTimeSignatures(map)[safeIndex];
 }
 
-/** 某绝对秒位置生效的拍号；无 Tempo Map 时退化为工程基准值。 */
-export function timeSignatureAtSec(
-    map: TempoMap | null,
-    sec: number,
-    fallback: { beatsPerBar: number; denominator?: number },
-): TempoTimeSignature {
-    if (!map || map.points.length === 0) {
-        return {
-            numerator: clampNumerator(fallback.beatsPerBar || 4),
-            denominator: clampDenominator(fallback.denominator ?? 4),
-        };
-    }
-    return effectiveTimeSignatureAt(map, pointIndexAtSec(map, sec));
-}
-
-/**
- * 查询某个变化点“之前”生效的拍号（用于“跟随之前的拍号”文案与解析）：
- * 0 位置初始点之前的拍号即工程基准记录；其它位置返回其前一个点的生效拍号。
- */
-export function previousTimeSignatureAtSec(
-    map: TempoMap | null,
-    positionSec: number,
-    fallback: { beatsPerBar: number; denominator?: number },
-): TempoTimeSignature {
-    if (positionSec <= 1e-9) {
-        return {
-            numerator: clampNumerator(fallback.beatsPerBar || 4),
-            denominator: clampDenominator(fallback.denominator ?? 4),
-        };
-    }
-    return timeSignatureAtSec(map, positionSec - 1e-6, fallback);
-}
-
 export function tempoAtSec(
     map: TempoMap | null,
     sec: number,
@@ -1135,52 +1102,6 @@ export function createTempoPointAt(
     const existing =
         map.points.find((p) => Math.abs(p.positionSec - point.positionSec) < 1e-6) ?? point;
     return { map: nextMap, point: existing, created: false };
-}
-
-/**
- * 时间轴上产生 Tempo Map 数据时同步的“工程基准值”：
- * 始终取 0 位置点的 BPM / 每小节拍数 / 拍号分母，保证删除 Tempo Map 后工程回退一致。
- */
-export function tempoMapFallbackValues(
-    map: TempoMap | null,
-    fallback: { bpm: number; beatsPerBar: number; denominator?: number },
-): { bpm: number; beatsPerBar: number; denominator: number } {
-    if (map && map.points.length > 0) {
-        const first = map.points[0];
-        const sig = first.timeSignature ?? { numerator: 4, denominator: 4 };
-        return {
-            bpm: first.bpm,
-            beatsPerBar: sig.numerator,
-            denominator: sig.denominator,
-        };
-    }
-    return {
-        bpm: fallback.bpm,
-        beatsPerBar: fallback.beatsPerBar,
-        denominator: clampDenominator(fallback.denominator ?? 4),
-    };
-}
-
-/** 将 map 中 0 位置点的 BPM/拍号替换为给定工程值（保持其他点不变）。 */
-export function withProjectFallbackValues(
-    map: TempoMap | null,
-    fallback: { bpm: number; beatsPerBar: number; denominator?: number },
-): TempoMap | null {
-    if (!map || map.points.length === 0) return map;
-    const first = map.points[0];
-    return {
-        points: [
-            {
-                ...first,
-                bpm: clampBpm(fallback.bpm),
-                timeSignature: {
-                    numerator: clampNumerator(fallback.beatsPerBar || 4),
-                    denominator: clampDenominator(fallback.denominator ?? 4),
-                },
-            },
-            ...map.points.slice(1),
-        ],
-    };
 }
 
 // ────────────────────────────────────────────────────────────────────────────

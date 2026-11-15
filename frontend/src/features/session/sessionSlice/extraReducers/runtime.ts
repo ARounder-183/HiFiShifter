@@ -150,7 +150,9 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
 
         .addCase(loadUiSettings.fulfilled, (state, action) => {
             const s = action.payload;
-            state.autoCrossfadeEnabled = s.autoCrossfade;
+            // 配置文件是**运行时不可信输入**（旧版本后端可能不带这一项）：
+            // 与相邻字段的守卫同口径 —— 缺省时保留状态里的默认值，不写 undefined。
+            if (s.autoCrossfade != null) state.autoCrossfadeEnabled = Boolean(s.autoCrossfade);
             state.showAllTakes = Boolean(s.showAllTakes ?? true);
             state.syncEditsAcrossTakes = Boolean(s.syncEditsAcrossTakes ?? true);
             state.loopNewClipsEnabled = s.loopNewClips ?? true;
@@ -206,7 +208,7 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
             if (s.paramEditorSyncTimeline != null) {
                 state.paramEditorSyncTimeline = Boolean(s.paramEditorSyncTimeline);
             }
-            state.pitchSnapEnabled = s.pitchSnap;
+            if (s.pitchSnap != null) state.pitchSnapEnabled = Boolean(s.pitchSnap);
             // Validate pitchSnapUnit
             const validUnits: PitchSnapUnit[] = ["semitone", "scale"];
             state.pitchSnapUnit = validUnits.includes(s.pitchSnapUnit as PitchSnapUnit)
@@ -232,7 +234,7 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
             if (s.alwaysShowParamBlocks != null) {
                 state.alwaysShowParamBlocks = Boolean(s.alwaysShowParamBlocks);
             }
-            state.playheadZoomEnabled = s.playheadZoom;
+            if (s.playheadZoom != null) state.playheadZoomEnabled = Boolean(s.playheadZoom);
             if (s.autoScroll != null) state.autoScrollEnabled = s.autoScroll;
             // 自动滚屏模式：旧配置没有这一项、插件形态返回脏值、mock 返回 undefined，
             // 全部回落"滚动式"（与升级前的行为逐值一致）。

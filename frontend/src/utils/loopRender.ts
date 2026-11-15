@@ -99,28 +99,6 @@ export function resolvePlaybackWindowSec(clip: {
 }
 
 /**
- * 非 Loop Clip 消费方向的**前导静音**（时间线秒）：正放看窗口起点越过
- * 媒体起点；倒放看窗口终点越过媒体末端。Loop 恒为 0。
- *
- * 与后端 clip_leading_silence_sec 逐字段一致：源域差值须除以 rate 换算为
- * 时间线秒（拉伸/压缩下静音时长随速率缩放）。
- */
-export function resolveLeadingSilenceSec(
-    clip: Parameters<typeof resolvePlaybackWindowSec>[0],
-    mediaTotalSec: number | null,
-): number {
-    if (clip.loopEnabled) return 0;
-    const rate =
-        Number.isFinite(clip.playbackRate) && clip.playbackRate > 1e-6 ? clip.playbackRate : 1;
-    if (clip.reversed) {
-        if (!(mediaTotalSec != null && mediaTotalSec > 0)) return 0;
-        const end = Number(clip.sourceEndSec) || 0;
-        return Math.max(0, end - mediaTotalSec) / rate;
-    }
-    return Math.max(0, -resolvePlaybackWindowSec(clip).winStartSec) / rate;
-}
-
-/**
  * 解析 Loop 回绕使用的**媒体总时长**（秒）。
  *
  * 统一取值顺序：`durationFrames / sourceSampleRate`（精确）优先，

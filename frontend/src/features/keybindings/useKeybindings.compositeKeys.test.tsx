@@ -295,6 +295,29 @@ test("列表里打字不被全局单键绑定截走（`d` 不再切参数拖拽�
     expect(result.defaultPrevented).toBe(false);
 });
 
+test("常驻 type-ahead 列表的 listbox 不会永久抢走 Space / Enter", async () => {
+    /*
+     * 文件浏览器面板是常驻的：它的列表容器声明 `role="listbox"`，但它不是
+     * "打开着的弹出表面"。分发器若只按 selector 判断存在性，这个 listbox 会让
+     * Space / Enter 永远走不到全局绑定 —— 默认的播放/停止快捷键完全失效。
+     */
+    await mount();
+    const { list } = buildTypeAheadList();
+    const listbox = document.createElement("div");
+    listbox.setAttribute("role", "listbox");
+    list.append(listbox);
+    // 模拟"鼠标点过某个按钮后"焦点落在按钮上：空格必须是播放，而不是按钮激活。
+    const button = document.createElement("button");
+    button.type = "button";
+    document.body.append(button);
+    button.focus();
+
+    press(button, " ");
+    press(button, "Enter");
+
+    expect(fired).toEqual(["playback.toggle", "playback.stop"]);
+});
+
 test("列表里 Enter / Space / Backspace / Delete / Escape 都归列表自己", async () => {
     await mount();
     const { row } = buildTypeAheadList();
@@ -306,6 +329,20 @@ test("列表里 Enter / Space / Backspace / Delete / Escape 都归列表自己",
         expect(fired, `${key} 被全局绑定截走了`).toEqual([]);
         expect(result.defaultPrevented, `${key} 被消费了`).toBe(false);
     }
+});
+
+test("焦点在 type-ahead 面板工具条按钮上时，Space / Enter 走全局播放", async () => {
+    await mount();
+    const { list } = buildTypeAheadList();
+    const button = document.createElement("button");
+    button.type = "button";
+    list.append(button);
+    button.focus();
+
+    press(button, " ");
+    press(button, "Enter");
+
+    expect(fired).toEqual(["playback.toggle", "playback.stop"]);
 });
 
 test("列表里 Ctrl+A / Ctrl+C / Ctrl+Shift+N 归列表自己", async () => {

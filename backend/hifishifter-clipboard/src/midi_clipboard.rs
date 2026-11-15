@@ -50,10 +50,11 @@ pub fn read_standard_midi_file() -> Result<Vec<u8>, String> {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
 
-    let pasteboard = unsafe { NSPasteboard::generalPasteboard() };
+    let pasteboard = NSPasteboard::generalPasteboard();
     let pb_type = NSString::from_str(STANDARD_MIDI_FILE_FORMAT);
 
-    let data = unsafe { pasteboard.dataForType(&pb_type) }
+    let data = pasteboard
+        .dataForType(&pb_type)
         .ok_or_else(|| "midi_clipboard_empty".to_string())?;
 
     let len = data.length();

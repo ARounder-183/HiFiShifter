@@ -57,6 +57,39 @@ test("aria-pressed 跟随设置值，而不是图层是否可见", async () => {
     expect(on?.getAttribute("aria-pressed")).toBe("true");
 });
 
+test("图标随常显设置切换实心 / 空心", async () => {
+    await render(false);
+    const outline = host.querySelector<SVGSVGElement>(
+        '[data-hs-param-blocks-always-show-icon="outline"]',
+    );
+    expect(outline, "关闭时应渲染空心图标").not.toBeNull();
+    const outlineBars = Array.from(outline!.querySelectorAll("rect"));
+    expect(outlineBars).toHaveLength(3);
+    for (const bar of outlineBars) {
+        expect(bar.getAttribute("fill")).toBe("none");
+        expect(bar.getAttribute("stroke")).toBe("currentColor");
+        // 细描边：1.1px 曾让空心条看起来像带粗框的实心块。
+        expect(bar.getAttribute("stroke-width")).toBe("0.8");
+    }
+
+    await render(true);
+    const solid = host.querySelector<SVGSVGElement>(
+        '[data-hs-param-blocks-always-show-icon="solid"]',
+    );
+    expect(solid, "开启时应渲染实心图标").not.toBeNull();
+    expect(host.querySelector('[data-hs-param-blocks-always-show-icon="outline"]')).toBeNull();
+    const solidBars = Array.from(solid!.querySelectorAll("rect"));
+    expect(solidBars).toHaveLength(3);
+    for (const bar of solidBars) {
+        expect(bar.getAttribute("fill")).toBe("currentColor");
+        expect(bar.hasAttribute("stroke")).toBe(false);
+    }
+    // 同一份几何：切换只换填充形式，不让三条分段条发生位移或宽度漂移。
+    expect(solidBars.map((bar) => bar.getAttribute("width"))).toEqual(
+        outlineBars.map((bar) => bar.getAttribute("width")),
+    );
+});
+
 test("文案只有一句，不随状态切换", async () => {
     await render(false);
     expect(host.querySelectorAll('[aria-label="永远显示参数块"]').length).toBe(1);

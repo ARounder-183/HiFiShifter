@@ -8,10 +8,17 @@
 //!
 //! # 覆盖规则：后来的胜出
 //!
-//! 段按 `(take, 带内偏移)` 排序后依次铺开；每铺一段，就把它覆盖到的已有区间**剪掉**。
-//! 那个排序键就是**录制顺序**：take 号随每次录制递增，带内偏移在一趟连续录制里递增。
+//! 段按**录制顺序**（take 号与 take 内段序）排序后依次铺开；每铺一段，就把它覆盖到的
+//! 已有区间**剪掉**。take 号随每次录制递增，段序在一趟连续录制里递增。
 //! 于是"第 2 圈覆盖第 1 圈"与"补录的那一句覆盖它盖住的部分"都是同一个规则的自然结果，
 //! 不需要为循环或补录写任何特例。
+//!
+//! # 循环区域：先合成，再后来者胜出
+//!
+//! 同一个 `(loop_start, loop_end)` 里、工程时间上**互相重叠**的多圈录制，先按
+//! 录制顺序合成一份 PCM（后一圈覆盖它实际录到的帧，没录到的保留前一圈），再作为
+//! 一个整体参与覆盖。不同区域、或同区域但互不重叠的两段，仍然是两个 Clip ——
+//! "用户在前边录一段、后边录一段"不能被误合成一段。
 //!
 //! # 素材带（[`Tape`]）—— 段是容器，带才是内容
 //!
@@ -44,7 +51,7 @@
 //! 各自独立换算（段起点、段长、段内偏移），不合到一起算 —— 合起来写会掩盖
 //! "用了哪个率"这个唯一重要的问题。
 
-use crate::recorder::Segment;
+use crate::recorder::{ClosedReason, Segment, SegmentLoss, COVERAGE_SLOTS};
 use crate::types::CaptureTape;
 use hifishifter_kernel::state::TimelineState;
 use serde_json::json;
@@ -74,20 +81,64 @@ const CAPTURE_EDGE_FADE_SEC: f64 = 0.002;
 pub struct ProjectionTake<'a> {
     pub id: u64,
     pub segments: &'a [Segment],
+    /// 本 take 的内容指纹（BLAKE3 前 8 字节）。
+    ///
+    /// 【为什么由调用方给】内容哈希在 `promote` 时已经算过一次（`content_hash`）；
+    /// 投影再扫一遍全部 PCM 是纯浪费。`None` 只出现在测试夹具 / 旧路径里，
+    /// `build_tapes` 会对拼接平面回退计算。
+    pub content_fingerprint: Option<u64>,
+}
+
+/// 素材带上的一段：借用原始段，或持有投影合成出来的段。
+///
+/// 【为什么需要 `Owned`】循环合成产生一份**新的** PCM，它的生命周期属于
+/// `Tape`，不能伪装成输入切片的 `'a`。`Deref` 让所有读取点（拼接、覆盖、
+/// 静音判定）对两种段一视同仁。
+pub enum TapeSegment<'a> {
+    Borrowed(&'a Segment),
+    // 【为什么 Box】`Segment` 含两条 Vec、覆盖表与预算凭证（约 288 字节）；
+    // 直接内联会让每个 `TapeSegment` 都占那么大，而绝大多数段是借用。
+    Owned(Box<Segment>),
+}
+
+impl std::ops::Deref for TapeSegment<'_> {
+    type Target = Segment;
+
+    fn deref(&self) -> &Segment {
+        match self {
+            Self::Borrowed(segment) => segment,
+            Self::Owned(segment) => segment,
+        }
+    }
 }
 
 /// 一个 take 的**素材带**：它的段按录制顺序首尾相接（见模块头）。
+///
+/// 【为什么普通带也保留被合成消费的段】`offsets` 与既有 Clip 的源窗口都以
+/// "带内绝对帧"为坐标系。把消费掉的段从 `segments` 里删掉会让后面所有段的
+/// 偏移前移 —— 用户已有的选择/编辑会错位到别的音频上。它们留在带里、
+/// `active = false`，只是不再产生 Piece。
 pub struct Tape<'a> {
-    /// 录制序号（take 号）。
+    /// 录制序号（take 号；合成带取区域内**最大**的 take，作为 PCM 缓存代次）。
     pub take: u64,
     /// 本带的采样率。同一 take 内必然一致 —— 捕获在采样率变化时停止。
     pub sample_rate: u32,
     /// 参与本带的段（**已剔除**含 NaN/Inf 的那些）。
-    segments: Vec<&'a Segment>,
+    segments: Vec<TapeSegment<'a>>,
     /// 每段在带上的起点（帧），与 `segments` 同序。
     offsets: Vec<usize>,
+    /// 每段的**录制顺序**（全局单调）。`resolve` 用它排序，而不是 tape 下标。
+    orders: Vec<u64>,
+    /// 本段是否仍产生 Piece（false = 已被循环合成段取代）。
+    active: Vec<bool>,
     /// 带的总帧数。
     frames: usize,
+    /// 本带的内容身份（`sources_for` / Clip 的 `content_id`）。
+    source_key: String,
+    /// `Some` = 这是一条循环合成带。
+    loop_region: Option<(i64, i64)>,
+    /// 本带 PCM 的内容指纹（BLAKE3 前 8 字节）。
+    content_fingerprint: u64,
 }
 
 impl<'a> Tape<'a> {
@@ -96,12 +147,40 @@ impl<'a> Tape<'a> {
         self.frames
     }
 
-    /// 内容身份：优先取 promote 写入的内容哈希；旧档/测试夹具退回 take 号。
+    /// 内容身份。
     pub fn source_key(&self) -> String {
-        self.segments
-            .first()
-            .and_then(|segment| segment.source_key.clone())
-            .unwrap_or_else(|| source_id(self.take))
+        self.source_key.clone()
+    }
+
+    /// 本带是否还有会产出 Piece 的段。
+    pub fn has_active(&self) -> bool {
+        self.active.iter().any(|active| *active)
+    }
+
+    /// 本带是否是循环合成带。
+    pub fn is_composite(&self) -> bool {
+        self.loop_region.is_some()
+    }
+
+    /// 本带内容指纹。
+    pub fn content_fingerprint(&self) -> u64 {
+        self.content_fingerprint
+    }
+
+    /// 本带上 `offset` 处 Piece 的稳定 id。
+    ///
+    /// 【为什么合成带用循环区域起点】一个循环区域只生成一个 Clip；新增一圈不会
+    /// 让用户已有的选择/编辑错位。普通带继续用 `(take, 带内偏移)`。
+    ///
+    /// 【为什么 offset > 0 时加后缀】后录的非循环内容可能把合成带切成两片；
+    /// 只按区域起点命名会让两片拿到同一个 id。第一片保持稳定键，后续片带上
+    /// 带内偏移（它们本来就是被裁出来的新片）。
+    pub fn clip_id(&self, offset: usize) -> String {
+        match self.loop_region {
+            Some((start, _)) if offset == 0 => format!("capture-loop-clip-{start}"),
+            Some((start, _)) => format!("capture-loop-clip-{start}-{offset}"),
+            None => clip_id(self.take, offset),
+        }
     }
 
     /// 把带上 `[offset, offset + frames)` 这一段切成"每段一段"的切片。
@@ -112,16 +191,17 @@ impl<'a> Tape<'a> {
         &self,
         offset: usize,
         frames: usize,
-    ) -> impl Iterator<Item = (&'a Segment, usize, usize)> + '_ {
+    ) -> impl Iterator<Item = (&Segment, usize, usize)> + '_ {
         let end = offset.saturating_add(frames);
         self.segments
             .iter()
             .zip(&self.offsets)
             .filter_map(move |(segment, base)| {
                 let base = *base;
+                let segment: &Segment = segment;
                 let lo = offset.max(base);
                 let hi = end.min(base + segment.filled);
-                (lo < hi).then_some((*segment, lo - base, hi - base))
+                (lo < hi).then_some((segment, lo - base, hi - base))
             })
     }
 
@@ -137,20 +217,21 @@ impl<'a> Tape<'a> {
         &self,
         offset: usize,
         frames: usize,
-    ) -> impl Iterator<Item = (&'a Segment, usize, usize, usize)> + '_ {
+    ) -> impl Iterator<Item = (&Segment, usize, usize, usize)> + '_ {
         let end = offset.saturating_add(frames);
         self.segments
             .iter()
             .zip(&self.offsets)
             .filter_map(move |(segment, base)| {
                 let base = *base;
+                let segment: &Segment = segment;
                 let lo = offset.max(base);
                 let hi = end.min(base + segment.filled);
                 // 【为什么把 `base` 一起交出去】`lo` / `hi` 是**段内**下标，而调用方
                 // 需要的是"这一帧在磁带上的绝对位置"。不给 `base`，调用方就只能用
                 // "已经写了多少帧"去推 —— 而那个量在覆盖表有洞时**不再等于位置**：
                 // 每出现一个洞，洞之后的全部内容都会左移一个洞长（实测 0.4~0.7 s）。
-                (lo < hi).then_some((*segment, base, lo - base, hi - base))
+                (lo < hi).then_some((segment, base, lo - base, hi - base))
             })
             .flat_map(move |(segment, base, lo, hi)| {
                 // 与 `covered_ranges` 同一口径：**只认我们真的拷过样本的帧**。
@@ -170,6 +251,7 @@ impl<'a> Tape<'a> {
                     .collect::<Vec<_>>()
             })
     }
+
     /// 带上哪些帧是**真的从宿主样本里拷过来的**（带内帧域，升序、不重叠）。
     ///
     /// 【为什么需要它】`raw_tape` 一直把覆盖如实发布给播放侧（洞的位置回退宿主原声），
@@ -183,25 +265,13 @@ impl<'a> Tape<'a> {
     pub fn covered_ranges(&self) -> Vec<Range<usize>> {
         let mut covered: Vec<Range<usize>> = Vec::new();
         for (segment, base) in self.segments.iter().zip(&self.offsets) {
+            let segment: &Segment = segment;
             let limit = *base + segment.filled;
-            // 【T-A1-1】覆盖只回答一个问题："这一段样本，我们从宿主块里拷过吗"。
-            //
-            // 【为什么不再叠一张"位置可信度"表】round 23 曾经加过一张 `trusted`，
-            // 把"位置由我们按块长推进"（起播窗口）判成"不属于我们"。而那是**合法记账**：
-            // 宿主在窗口里钉住 `projectTimeSamples`、却已经按块长送来时间上相邻的样本，
-            // 我们接着数下去的位置与宿主恢复后给出的读数一致到块级（实测偏移 0.658 s，
-            // 一直被 `POSITION_DRIFT_TOLERANCE_SEC` 接受）。把那段标成"不是我们的"，
-            // 等于把一段真实录音声明成洞 —— 播放侧于是回退宿主原声（前 0.658 s 不受
-            // 参数线影响），并在边界处做一次源切换（那一下"咔"）。
-            //
-            // 【真正的"不属于我们"是什么形状】是"根本没写"：桥接、丢块、回卷裁缝都
-            // 不登记 coverage。所以一张表就够了。
             let samples = segment_ranges(
                 &segment.coverage,
                 segment.coverage_len,
                 segment.coverage_overrun,
                 segment.filled,
-                // `coverage` 的旧语义：没有记录 = 整段都算录到。
             );
             for range in samples {
                 let start = (*base + range.start).min(limit);
@@ -241,8 +311,10 @@ impl<'a> Tape<'a> {
             .unwrap_or(0);
         let mut planes = vec![vec![0.0_f32; self.frames]; channels];
         for (segment, base) in self.segments.iter().zip(&self.offsets) {
+            let segment: &Segment = segment;
             for (channel, plane) in segment.planes.iter().enumerate() {
-                planes[channel][*base..*base + segment.filled].copy_from_slice(plane);
+                planes[channel][*base..*base + segment.filled]
+                    .copy_from_slice(&plane[..segment.filled]);
             }
         }
         planes
@@ -287,40 +359,432 @@ fn push_merged(covered: &mut Vec<Range<usize>>, range: Range<usize>) {
     }
 }
 
+/// 一个 take 里一段有效段的投影元数据。
+#[derive(Clone, Copy)]
+struct SegmentMeta<'a> {
+    take: u64,
+    index: usize,
+    /// 全局录制顺序（`(take, index)` 单调递增）。
+    order: u64,
+    segment: &'a Segment,
+}
+
 /// 由全部 take 建出素材带，并报出被剔除的段数。
 ///
 /// 【为什么剔除段而不是整条 take】含 NaN/Inf 的段不能进渲染，但同一次录制里的其余段
 /// 是好的 —— 让一段坏音频抹掉整次录制，与 `render/input.rs` 的既有纪律（逐条降级）不符。
 pub fn build_tapes<'a>(takes: &[ProjectionTake<'a>]) -> (Vec<Tape<'a>>, usize) {
-    let mut dropped = 0usize;
-    let mut tapes = Vec::with_capacity(takes.len());
+    build_tapes_with(takes, |bytes| crate::budget::global_budget().reserve(bytes))
+}
+
+/// 带预算注入的 `build_tapes`（测试用它验证"预算不足 ⇒ 退回多 Clip"）。
+fn build_tapes_with<'a>(
+    takes: &[ProjectionTake<'a>],
+    mut reserve: impl FnMut(usize) -> Option<crate::budget::Reservation>,
+) -> (Vec<Tape<'a>>, usize) {
+    let mut dropped = 0_usize;
+    // ── 1. 展开：每个 take 的每个有效段变成一条元数据 ─────────────────────
+    let mut metas: Vec<SegmentMeta<'a>> = Vec::new();
     for take in takes {
-        let mut segments = Vec::with_capacity(take.segments.len());
-        let mut offsets = Vec::with_capacity(take.segments.len());
-        let mut frames = 0usize;
-        let mut sample_rate = 0u32;
-        for segment in take.segments {
+        for (index, segment) in take.segments.iter().enumerate() {
             if segment.span().is_empty() || segment.has_nonfinite() {
                 dropped += 1;
                 continue;
             }
-            offsets.push(frames);
-            frames += segment.filled;
-            sample_rate = sample_rate.max(segment.sample_rate);
-            segments.push(segment);
+            metas.push(SegmentMeta {
+                take: take.id,
+                index,
+                order: 0,
+                segment,
+            });
         }
-        if segments.is_empty() {
+    }
+    // 【为什么按 (take, index) 排序而不是输入顺序】take 号随每次录制递增，index 是
+    // take 内的录制顺序；两者合起来就是"谁录得晚"。输入 Vec 的顺序只是存储顺序，
+    // 恢复清单时不一定等于录制顺序。
+    metas.sort_by_key(|meta| (meta.take, meta.index));
+    for (order, meta) in metas.iter_mut().enumerate() {
+        meta.order = order as u64;
+    }
+
+    // ── 2. 分组：只对有循环身份的段，按 (loop_start, loop_end) 分组 ────────
+    let mut groups: std::collections::BTreeMap<(i64, Option<i64>), Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (index, meta) in metas.iter().enumerate() {
+        if let Some(loop_start) = meta.segment.loop_start {
+            groups
+                .entry((loop_start, meta.segment.loop_end))
+                .or_default()
+                .push(index);
+        }
+    }
+
+    // ── 3/4. 聚簇 + 合成 ──────────────────────────────────────────────────
+    let mut consumed = vec![false; metas.len()];
+    let mut composites: Vec<(u64, u64, Segment, u64)> = Vec::new();
+    for ((loop_start, loop_end), indices) in groups {
+        let mut ordered = indices;
+        ordered.sort_by_key(|index| metas[*index].order);
+        // 旧 sidecar 没有 loop_end：组内最大段尾就是能确认的区域终点。
+        let region_end = loop_end.unwrap_or_else(|| {
+            ordered
+                .iter()
+                .map(|index| metas[*index].segment.span().end)
+                .max()
+                .unwrap_or(loop_start)
+        });
+        if region_end <= loop_start {
             continue;
         }
+        for cluster in cluster_metas(&metas, &ordered) {
+            // 【为什么不合成单段 cluster】单段没有覆盖关系要解决；保持原段可以让
+            // 既有 Clip id、源窗口与偏移完全不变。
+            if cluster.len() <= 1 {
+                continue;
+            }
+            let Some((segment, fingerprint)) =
+                compose_loop_cluster(&metas, &cluster, loop_start, region_end, &mut reserve)
+            else {
+                // 【可降级】预算不足时不消费这些段、不生成合成带，继续用现有
+                // resolve 生成多个 Clip。用户至少能听到/看到全部素材。
+                log::warn!(
+                    "[capture] loop region {loop_start}..{region_end}: composition budget unavailable; \
+                     keeping the per-pass clips instead"
+                );
+                continue;
+            };
+            for index in &cluster {
+                consumed[*index] = true;
+            }
+            let order = cluster
+                .iter()
+                .map(|index| metas[*index].order)
+                .max()
+                .unwrap_or(0);
+            // 【合成带的 take 取区域内最大的 take 号】`CapturePcm.version` 用它做
+            // 缓存代次；新增一圈必须让版本前进，否则下游可能复用旧 PCM。
+            let take = cluster
+                .iter()
+                .map(|index| metas[*index].take)
+                .max()
+                .unwrap_or(0);
+            composites.push((take, order, segment, fingerprint));
+        }
+    }
+
+    // ── 5. 建带：每个 take 一条普通带（含 inactive 段），每个 cluster 一条合成带 ─
+    let mut tapes: Vec<Tape<'a>> = Vec::new();
+    let mut take_fingerprints: std::collections::HashMap<u64, Option<u64>> =
+        std::collections::HashMap::new();
+    for take in takes {
+        take_fingerprints
+            .entry(take.id)
+            .or_insert(take.content_fingerprint);
+    }
+    for take in takes {
+        let indices: Vec<usize> = metas
+            .iter()
+            .enumerate()
+            .filter(|(_, meta)| meta.take == take.id)
+            .map(|(index, _)| index)
+            .collect();
+        if indices.is_empty() {
+            continue;
+        }
+        let mut segments = Vec::with_capacity(indices.len());
+        let mut offsets = Vec::with_capacity(indices.len());
+        let mut orders = Vec::with_capacity(indices.len());
+        let mut active = Vec::with_capacity(indices.len());
+        let mut frames = 0usize;
+        let mut sample_rate = 0u32;
+        for index in indices {
+            let meta = &metas[index];
+            offsets.push(frames);
+            frames = frames.saturating_add(meta.segment.filled);
+            orders.push(meta.order);
+            active.push(!consumed[index]);
+            sample_rate = sample_rate.max(meta.segment.sample_rate);
+            segments.push(TapeSegment::Borrowed(meta.segment));
+        }
+        let content_fingerprint = take_fingerprints
+            .get(&take.id)
+            .copied()
+            .flatten()
+            .unwrap_or_else(|| content_fingerprint_of_segments(&segments, sample_rate, frames));
         tapes.push(Tape {
             take: take.id,
             sample_rate,
             segments,
             offsets,
+            orders,
+            active,
             frames,
+            source_key: source_id(take.id),
+            loop_region: None,
+            content_fingerprint,
+        });
+    }
+    for (take, order, segment, fingerprint) in composites {
+        let sample_rate = segment.sample_rate;
+        let frames = segment.filled;
+        // 【先取身份再移动段】`segment` 是 `Owned` 段，移进 `TapeSegment` 之后
+        // 就不能再读它的字段；区域身份必须在移动前落成局部变量。
+        let loop_region = (
+            segment.loop_start.unwrap_or(0),
+            segment.loop_end.unwrap_or(0),
+        );
+        let source_key = loop_source_id(loop_region.0, loop_region.1);
+        tapes.push(Tape {
+            take,
+            sample_rate,
+            segments: vec![TapeSegment::Owned(Box::new(segment))],
+            offsets: vec![0],
+            orders: vec![order],
+            active: vec![true],
+            frames,
+            source_key,
+            loop_region: Some(loop_region),
+            content_fingerprint: fingerprint,
         });
     }
     (tapes, dropped)
+}
+
+/// 把一组按录制顺序排好的段聚成"工程时间上互相重叠"的 cluster。
+///
+/// 【为什么要求**重叠**而不是相邻】"只录了循环的前 10 秒和后 10 秒"是两次独立的
+/// 补录，必须保持两个 Clip；只有后一圈真正盖住前一圈的一部分时，才需要合成
+/// （后圈覆盖它走到的帧、前圈保留其余部分）。
+fn cluster_metas(metas: &[SegmentMeta<'_>], ordered: &[usize]) -> Vec<Vec<usize>> {
+    let mut clusters: Vec<Vec<usize>> = Vec::new();
+    let mut cluster_end = i64::MIN;
+    for &index in ordered {
+        let span = metas[index].segment.span();
+        if let Some(last) = clusters.last_mut() {
+            if span.start < cluster_end {
+                last.push(index);
+                cluster_end = cluster_end.max(span.end);
+                continue;
+            }
+        }
+        clusters.push(vec![index]);
+        cluster_end = span.end;
+    }
+    clusters
+}
+
+/// 把一个 cluster 合成一份 PCM。
+///
+/// 【语义】后一圈只覆盖它**实际录到**的帧，没覆盖到的帧保留前一圈；coverage 是
+/// 各圈真实覆盖区间的并集（洞不宣称）。返回 `(合成段, 内容指纹)`。
+fn compose_loop_cluster(
+    metas: &[SegmentMeta<'_>],
+    cluster: &[usize],
+    loop_start: i64,
+    loop_end: i64,
+    reserve: &mut impl FnMut(usize) -> Option<crate::budget::Reservation>,
+) -> Option<(Segment, u64)> {
+    let origin = cluster
+        .iter()
+        .map(|index| metas[*index].segment.span().start)
+        .min()?;
+    let end = cluster
+        .iter()
+        .map(|index| metas[*index].segment.span().end)
+        .max()?;
+    let filled = usize::try_from(end.checked_sub(origin)?).ok()?;
+    if filled == 0 {
+        return None;
+    }
+    let channels = cluster
+        .iter()
+        .map(|index| metas[*index].segment.planes.len())
+        .max()
+        .unwrap_or(0)
+        .clamp(1, 2);
+    let bytes = filled
+        .checked_mul(channels)?
+        .checked_mul(std::mem::size_of::<f32>())?;
+    let reservation = reserve(bytes)?;
+    let sample_rate = cluster
+        .iter()
+        .map(|index| metas[*index].segment.sample_rate)
+        .max()
+        .unwrap_or(0);
+    let mut planes = vec![vec![0.0_f32; filled]; channels];
+    let mut covered: Vec<Range<usize>> = Vec::new();
+    // 【必须按录制顺序从旧到新】后一圈覆盖前一圈；反过来会把第一圈写在最上面。
+    for &index in cluster {
+        let segment = metas[index].segment;
+        let offset = usize::try_from(segment.origin.checked_sub(origin)?).ok()?;
+        for range in segment_ranges(
+            &segment.coverage,
+            segment.coverage_len,
+            segment.coverage_overrun,
+            segment.filled,
+        ) {
+            let start = offset.checked_add(range.start)?;
+            let end = offset.checked_add(range.end)?.min(filled);
+            if start >= end {
+                continue;
+            }
+            let mut copied = false;
+            for (channel, plane) in planes.iter_mut().enumerate().take(channels) {
+                // 单声道段复制到两个输出平面（与 `raw_tape` 的展开一致）。
+                let Some(source) = segment
+                    .planes
+                    .get(channel)
+                    .or_else(|| segment.planes.first())
+                else {
+                    continue;
+                };
+                let len = end - start;
+                if source.len() >= range.end {
+                    plane[start..end].copy_from_slice(&source[range.start..range.start + len]);
+                    copied = true;
+                }
+            }
+            // 【只宣称真的拷到的帧】平面比声明短是畸形数据；把没拷到的区间
+            // 记进 coverage 会让播放侧把零当成"我们录到的静音"。
+            if copied {
+                covered.push(start..end);
+            }
+        }
+    }
+    // 覆盖区间按坐标排序后再合并 —— 后一圈可能先写 0..40、前一圈再补 40..100，
+    // 到达顺序不是坐标顺序；`push_merged` 只接受升序输入。
+    covered.sort_by_key(|range| range.start);
+    let mut merged: Vec<Range<usize>> = Vec::new();
+    for range in covered {
+        push_merged(&mut merged, range);
+    }
+    let mut coverage = std::array::from_fn(|_| 0..0);
+    let mut coverage_len = 0_usize;
+    let mut coverage_overrun = false;
+    for range in merged {
+        if coverage_len >= COVERAGE_SLOTS {
+            // 槽位用尽：语义退化为"整段都算录到"（与 Segment::coverage 的既有约定一致）。
+            coverage_overrun = true;
+            coverage_len = 0;
+            break;
+        }
+        coverage[coverage_len] = range;
+        coverage_len += 1;
+    }
+    let mut peak = [0.0_f32; 2];
+    for (channel, plane) in planes.iter().enumerate() {
+        peak[channel.min(1)] = plane.iter().fold(0.0_f32, |acc, value| {
+            if value.is_finite() {
+                acc.max(value.abs())
+            } else {
+                acc
+            }
+        });
+    }
+    let fingerprint = content_fingerprint_of_planes(&planes, sample_rate);
+    Some((
+        Segment {
+            origin,
+            sample_rate,
+            planes,
+            filled,
+            loss: SegmentLoss::First,
+            loop_start: Some(loop_start),
+            loop_end: Some(loop_end),
+            pass_id: 0,
+            source_key: Some(loop_source_id(loop_start, loop_end)),
+            peak,
+            closed: ClosedReason::Stopped,
+            coverage,
+            coverage_len,
+            coverage_overrun,
+            _reservation: Some(reservation),
+        },
+        fingerprint,
+    ))
+}
+
+/// 对一组带（普通 + 合成）计算内容指纹（BLAKE3 前 8 字节）。
+///
+/// 【为什么不是 `content_hash(segments)`】后者按段哈希，而一条带的内容是"段按
+/// 顺序拼接"。同内容换一种段划分应当命中同一份分析缓存，所以哈希的是拼接后的
+/// 平面。
+fn content_fingerprint_of_segments(
+    segments: &[TapeSegment<'_>],
+    sample_rate: u32,
+    frames: usize,
+) -> u64 {
+    let channels = segments
+        .iter()
+        .map(|segment| segment.planes.len())
+        .max()
+        .unwrap_or(0);
+    let mut planes = vec![vec![0.0_f32; frames]; channels];
+    let mut base = 0usize;
+    for segment in segments {
+        for (channel, plane) in segment.planes.iter().enumerate() {
+            planes[channel][base..base + segment.filled].copy_from_slice(&plane[..segment.filled]);
+        }
+        base += segment.filled;
+    }
+    content_fingerprint_of_planes(&planes, sample_rate)
+}
+
+/// 平面的内容指纹（采样率 + 声道 + 帧数 + 逐样本 bit）。
+fn content_fingerprint_of_planes(planes: &[Vec<f32>], sample_rate: u32) -> u64 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"hfs-capture-tape-v1");
+    hasher.update(&sample_rate.to_le_bytes());
+    hasher.update(&(planes.len() as u32).to_le_bytes());
+    hasher.update(&(planes.first().map(Vec::len).unwrap_or(0) as u64).to_le_bytes());
+    for plane in planes {
+        for sample in plane {
+            hasher.update(&sample.to_le_bytes());
+        }
+    }
+    let digest = hasher.finalize();
+    u64::from_le_bytes(digest.as_bytes()[..8].try_into().expect("8 bytes"))
+}
+
+/// 循环合成带的源 id（稳定身份 = 区域起点 + 终点）。
+pub fn loop_source_id(loop_start: i64, loop_end: i64) -> String {
+    format!("capture://loop/{loop_start}/{loop_end}")
+}
+
+/// 由素材带构造源 PCM 表（渲染与波形共用）。
+///
+/// 【为什么过滤 `has_active`】被循环合成完全消费的普通带不再被任何 Clip 引用；
+/// 把它也发布出去只会让下游多持有一份永远不会被读的 PCM。
+pub fn sources_from_tapes(
+    tapes: &[Tape<'_>],
+) -> std::collections::HashMap<String, std::sync::Arc<crate::types::CapturePcm>> {
+    tapes
+        .iter()
+        .filter(|tape| tape.has_active())
+        .map(|tape| {
+            (
+                tape.source_key(),
+                std::sync::Arc::new(crate::types::CapturePcm {
+                    // 【T-S1-1：覆盖跟着源一起走】`concat_planes` 把"我们没拿到样本"
+                    // 的帧写成数字零；不带覆盖的话，下游无法把那段零与"用户真的安静"
+                    // 分开，于是它按满幅输出、盖掉宿主原声 —— 洞的两侧各是一次硬切。
+                    covered: tape.covered_ranges(),
+                    sample_rate: tape.sample_rate,
+                    planes: tape.concat_planes(),
+                    version: tape.take,
+                    _reservation: None,
+                }),
+            )
+        })
+        .collect()
+}
+
+/// 内容 id → 分析指纹。合成源的内容变化必须让缓存键变化。
+pub fn fingerprints_from_tapes(tapes: &[Tape<'_>]) -> std::collections::HashMap<String, u64> {
+    tapes
+        .iter()
+        .map(|tape| (tape.source_key(), tape.content_fingerprint()))
+        .collect()
 }
 
 /// 工程区间的帧数。
@@ -340,22 +804,30 @@ struct Piece {
     tape: usize,
     /// 该区间起点在带内的帧偏移。
     offset: usize,
+    /// 录制顺序（`resolve` 的唯一排序键）。
+    ///
+    /// 【为什么不用 `(tape, offset)`】普通带可能同时含有循环段之前和之后的
+    /// 非循环段，而合成带的下标排在它们后面；只看 tape 下标会让合成带错误地
+    /// 压过更晚录的非循环段。`order` 是段级的录制顺序，跨带可比。
+    order: u64,
 }
 
 /// 把全部素材带里的段变成"待铺开的片"。
 ///
-/// 【为什么不再先切成 pass】pass 只服务"最后一圈原子替换整圈"那条规则，而那条规则
-/// 正是"循环录制只剩开头一小段"的直接成因（完整的一圈被后到的半圈整段删除）。
-/// 循环的语义应当与普通补录一致：**逐样本按录制顺序后来者胜出，没被覆盖的部分保留**
-/// —— 那正是 [`resolve`] 已经实现的东西。少一层推断，就少一处会吞掉用户素材的地方。
+/// 【为什么跳过 `active = false`】它们已经被循环合成段取代；再铺一遍会让同一段
+/// 音频以两个身份同时出现在时间线上。
 fn pieces_from_tapes(tapes: &[Tape<'_>]) -> Vec<Piece> {
     let mut seeds = Vec::new();
     for (tape_index, tape) in tapes.iter().enumerate() {
         for (index, segment) in tape.segments.iter().enumerate() {
+            if !tape.active[index] {
+                continue;
+            }
             if let Some(piece) = clamp_piece(Piece {
                 span: segment.span(),
                 tape: tape_index,
                 offset: tape.offsets[index],
+                order: tape.orders[index],
             }) {
                 seeds.push(piece);
             }
@@ -382,10 +854,16 @@ pub struct TimelineSummary {
     pub dropped_segments: usize,
     /// 带循环身份的段数（宿主给了 cycle 元数据，或捕获侧识别出回卷）。
     ///
-    /// 【为什么它是诊断而不是投影规则】循环身份**不参与**覆盖判定（覆盖只看录制
-    /// 顺序，见 [`resolved_pieces`]）。留着它是为了让"这段素材是循环录出来的"在
-    /// 状态栏与诊断包里可读 —— 排查"为什么循环录制少了一段"时需要它。
+    /// 【它是诊断读数】循环身份参与**分组与合成**（同一区域的重叠圈合成一份 PCM），
+    /// 但最终的覆盖关系仍由录制顺序决定（见 [`resolved_pieces`]）。这个数回答
+    /// "这段素材有几段是循环录出来的"，排查"为什么循环录制少了一段"时需要它。
     pub loop_passes: usize,
+    /// 循环合成区域的个数（一个区域一个合成 Clip 的候选）。
+    ///
+    /// 【为什么与 `loop_passes` 分开】前者回答"有几段是循环录出来的"（诊断），
+    /// 后者回答"有几份合成源"（投影结果）。一个区域可能有很多圈，也可能因为
+    /// 预算不足而没有合成。
+    pub loop_regions: usize,
 }
 
 /// 把**全部** take 的段投影成一条时间线。`bpm` 由调用方给出（宿主 tempo 未知时用默认值）。
@@ -398,13 +876,28 @@ pub struct TimelineSummary {
 /// 其余段是好的，用户要能听见它们。丢弃并计数，与 `render/input.rs` 的既有纪律一致。
 pub fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState, TimelineSummary) {
     let (tapes, dropped_segments) = build_tapes(takes);
+    project_tapes(&tapes, dropped_segments, bpm)
+}
+
+/// 由**已经建好的**素材带投影时间线。
+///
+/// 【为什么单独暴露】`CaptureStore` 要在一趟投影里同时得到时间线、源 PCM 与
+/// 内容指纹；让它们各自调用 `project` 就会把循环合成（可能几十 MB）重复做几遍。
+pub fn project_tapes(
+    tapes: &[Tape<'_>],
+    dropped_segments: usize,
+    bpm: f64,
+) -> (TimelineState, TimelineSummary) {
     let mut summary = TimelineSummary {
         dropped_segments,
+        // 只数普通带里的原始段：合成段也带 `loop_start`，再数一遍就是双倍。
         loop_passes: tapes
             .iter()
+            .filter(|tape| !tape.is_composite())
             .flat_map(|tape| tape.segments.iter())
             .filter(|segment| segment.loop_start.is_some())
             .count(),
+        loop_regions: tapes.iter().filter(|tape| tape.is_composite()).count(),
         ..TimelineSummary::default()
     };
 
@@ -447,7 +940,7 @@ pub fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState, Timeli
     };
     timeline.tracks.push(capture_track);
 
-    let pieces = resolved_pieces(&tapes);
+    let pieces = resolved_pieces(tapes);
 
     let mut index = 0_usize;
     for piece in pieces {
@@ -471,7 +964,7 @@ pub fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState, Timeli
         let length_sec = frames as f64 / rate;
         let source_start_sec = piece.offset as f64 / rate;
         let source_end_sec = (piece.offset + frames) as f64 / rate;
-        let id = clip_id(tape.take, piece.offset);
+        let id = tape.clip_id(piece.offset);
         // 【为什么名字里是时长而不是起点】片段在时间轴上的**位置**已经画出来了，
         // 名字里再写一遍等于浪费一列宽度；用户从名字里想读到的是"这一段有多长"。
         // 索引仍然回答"这是第几片"，它与位置无关，因此保留。
@@ -514,9 +1007,10 @@ pub fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState, Timeli
             "id": format!("{id}_take_1"),
             "name": name,
             "source_path": source,
-            // 【跨会话稳定的内容身份】`source` 是 `capture://{take}`；而会话侧还会把
-            // 素材路径重写成**会话私有**的物化路径（`hfs-ui-{pid}-{N}-`）。分析缓存的
-            // 键读这一项，于是同一份音频在重开窗口之后仍然命中同一份分析结果。
+            // 【内容身份 = 源键 + 指纹】`source` 是 `capture://{take}` 或
+            // `capture://loop/{start}/{end}`；会话侧会把素材路径重写成**会话私有**的
+            // 物化路径（`hfs-ui-{pid}-{N}-`），而分析缓存读的是 `content_id` 对应的
+            // `content_fingerprints`（PCM 哈希）。源键稳定、指纹随内容变化，两者缺一不可。
             "content_id": source,
             "source_start_sec": source_start_sec,
             "source_end_sec": source_end_sec,
@@ -662,7 +1156,11 @@ pub struct LeadIn {
 
 /// 量一次录制的前导（见 [`LeadIn`]）。**纯读**。
 pub fn lead_in(segments: &[Segment]) -> LeadIn {
-    let takes = [ProjectionTake { id: 0, segments }];
+    let takes = [ProjectionTake {
+        id: 0,
+        segments,
+        content_fingerprint: None,
+    }];
     let (tapes, _) = build_tapes(&takes);
     let Some(tape) = tapes.first() else {
         return LeadIn::default();
@@ -702,6 +1200,7 @@ pub fn build(segments: &[Segment], take_id: u64, bpm: f64) -> (TimelineState, Ti
         &[ProjectionTake {
             id: take_id,
             segments,
+            content_fingerprint: None,
         }],
         bpm,
     )
@@ -805,11 +1304,14 @@ fn clamp_piece(piece: Piece) -> Option<Piece> {
 
 /// 按"后来的胜出"把片铺成互不相交的区间。
 fn resolve(mut seeds: Vec<Piece>) -> Vec<Piece> {
-    // 【排序键是录制顺序 `(take, 带内偏移)` 而不是工程位置】"后来者胜出"里的"后来"
-    // 指的是**录制顺序**，而 take 号与带内偏移正是录制顺序（带是段按录制顺序拼起来的）。
-    // 按位置排序会把规则弄反：位置靠前但录得晚的片会先被铺下，再被位置靠后但录得早的片
-    // 覆盖 —— 于是循环录制的**最后一圈反而输给第一圈**，补录的一句也会输给它替换掉的那一句。
-    seeds.sort_by_key(|piece| (piece.tape, piece.offset));
+    // 【排序键是段级录制顺序 `order` 而不是工程位置】"后来者胜出"里的"后来"
+    // 指的是**录制顺序**。按位置排序会把规则弄反：位置靠前但录得晚的片会先被铺下，
+    // 再被位置靠后但录得早的片覆盖 —— 于是循环录制的**最后一圈反而输给第一圈**，
+    // 补录的一句也会输给它替换掉的那一句。
+    //
+    // 【为什么不是 `(tape, offset)`】普通带可能同时含有循环段之前和之后的非循环段，
+    // 而合成带的下标排在它们后面；只看 tape 下标会让合成带错误地压过更晚录的段。
+    seeds.sort_by_key(|piece| piece.order);
     let mut pieces: Vec<Piece> = Vec::new();
     for seed in seeds {
         let span = seed.span.clone();
@@ -886,6 +1388,7 @@ mod tests {
             filled: values.len(),
             loss: SegmentLoss::First,
             loop_start: None,
+            loop_end: None,
             pass_id: 0,
             source_key: None,
             peak: [0.0; 2],
@@ -897,10 +1400,14 @@ mod tests {
         }
     }
 
-    /// 带循环起点的段（模拟 capture 在回卷时写下的 `loop_start`）。
-    fn segment_loop(origin: i64, values: &[f32], loop_start: i64) -> Segment {
+    /// 带循环区域的段（模拟 capture 在回卷时写下的 `loop_start` / `loop_end`）。
+    ///
+    /// 【为什么区域终点要显式给】一圈可能只录了区域的前 40 帧；区域终点仍是宿主
+    /// 给的 100，而不是段长。用段长推导会让"部分第二圈"变成另一个区域。
+    fn segment_loop(origin: i64, values: &[f32], loop_start: i64, loop_end: i64) -> Segment {
         Segment {
             loop_start: Some(loop_start),
+            loop_end: Some(loop_end),
             ..segment(origin, values)
         }
     }
@@ -930,6 +1437,7 @@ mod tests {
         let (tapes, dropped) = build_tapes(&[ProjectionTake {
             id: 1,
             segments: &segments,
+            content_fingerprint: None,
         }]);
         assert_eq!(dropped, 0);
         assert_eq!(
@@ -960,6 +1468,7 @@ mod tests {
         let (tapes, _) = build_tapes(&[ProjectionTake {
             id: 1,
             segments: &segments,
+            content_fingerprint: None,
         }]);
         assert_eq!(
             tapes[0].covered_ranges(),
@@ -978,6 +1487,7 @@ mod tests {
         let (tapes, _) = build_tapes(&[ProjectionTake {
             id: 1,
             segments: &segments,
+            content_fingerprint: None,
         }]);
         assert_eq!(tapes[0].covered_ranges(), vec![0..100]);
     }
@@ -1005,6 +1515,7 @@ mod tests {
         let (tapes, _) = build_tapes(&[ProjectionTake {
             id: 1,
             segments: &segments,
+            content_fingerprint: None,
         }]);
         assert_eq!(tapes[0].covered_ranges(), vec![0..100]);
     }
@@ -1023,6 +1534,7 @@ mod tests {
         let (tapes, _) = build_tapes(&[ProjectionTake {
             id: 1,
             segments: &segments,
+            content_fingerprint: None,
         }]);
         assert_eq!(
             tapes[0].covered_ranges(),
@@ -1136,10 +1648,12 @@ mod tests {
                 ProjectionTake {
                     id: 1,
                     segments: &first,
+                    content_fingerprint: None,
                 },
                 ProjectionTake {
                     id: 2,
                     segments: &second,
+                    content_fingerprint: None,
                 },
             ],
             120.0,
@@ -1281,10 +1795,12 @@ mod tests {
                 ProjectionTake {
                     id: 42,
                     segments: &segments,
+                    content_fingerprint: None,
                 },
                 ProjectionTake {
                     id: 43,
                     segments: &overlay,
+                    content_fingerprint: None,
                 },
             ],
             120.0,
@@ -1330,6 +1846,7 @@ mod tests {
         let snapshot = raw_tape(&[ProjectionTake {
             id: 1,
             segments: &[segment],
+            content_fingerprint: None,
         }])
         .expect("有段就有原始磁带");
         assert_eq!(snapshot.sample_rate, 1000);
@@ -1354,10 +1871,12 @@ mod tests {
             ProjectionTake {
                 id: 1,
                 segments: &first,
+                content_fingerprint: None,
             },
             ProjectionTake {
                 id: 2,
                 segments: &second,
+                content_fingerprint: None,
             },
         ];
         let snapshot = raw_tape(&takes).expect("有段就有原始磁带");
@@ -1423,6 +1942,7 @@ mod tests {
         let raw = raw_tape(&[ProjectionTake {
             id: 11,
             segments: &segments,
+            content_fingerprint: None,
         }])
         .expect("非空素材必须生成原始带");
         assert_eq!(raw.origin_sample, 0);
@@ -1441,6 +1961,7 @@ mod tests {
         assert!(raw_tape(&[ProjectionTake {
             id: 12,
             segments: &segments,
+            content_fingerprint: None,
         }])
         .is_none());
     }
@@ -1492,60 +2013,181 @@ mod tests {
         assert_eq!(timeline.clips[0].source_end_sec, 2.5);
     }
 
-    /// **完整的第一圈不得被后到的半圈整段删除。**
+    /// **完整一圈 + 部分第二圈 ⇒ 一个合成 Clip。**
     ///
-    /// 【为什么这是本轮最重要的循环回归】用户报障：FL Studio 里循环录制，从头播到尾、
-    /// 宿主回卷、用户随即停止 —— 结果"只有开头一小段被录下来"。根因是旧规则让**最新**
-    /// 的一圈（也就是停止时正在录的那半圈）替换整组，把完整的第一圈整段删掉。
-    ///
-    /// 正确的语义与普通补录一致：后来的圈覆盖**它走到的那一段**，没走到的部分保留。
-    /// 于是完整的一圈仍然是完整的一圈，只是开头被第二圈重录了一遍。
+    /// 【为什么这是 FL Studio 报障的回归】旧投影按"最后一圈原子替换整圈"处理，
+    /// 结果只剩第二圈开头 1.9 s；用户看到两个 Clip，且第一圈尾部被整段删掉。
+    /// 新语义：后一圈只覆盖它实际录到的帧，没覆盖到的帧保留前一圈 —— 于是
+    /// 时间线上只有一个 Clip，内容 = 第二圈开头 + 第一圈其余部分。
     #[test]
-    fn a_complete_loop_pass_survives_a_later_partial_one() {
+    fn a_full_loop_pass_and_a_partial_second_pass_become_one_clip() {
         let segments = vec![
-            segment_loop(0, &[1.0; 100], 0),
-            segment_loop(0, &[2.0; 40], 0),
+            segment_loop(0, &[1.0; 100], 0, 100),
+            segment_loop(0, &[2.0; 40], 0, 100),
         ];
         let (timeline, summary) = one(1, &segments);
-        assert_eq!(summary.covered_frames, 100, "素材范围必须是完整的第一圈");
-        assert_eq!(summary.spanned_frames, 100);
-        // 第一圈的 [0,40) 被第二圈覆盖，[40,100) 保留 —— 两段不相邻的源窗。
+        assert_eq!(summary.clips, 1);
+        assert_eq!(summary.loop_regions, 1);
+        assert_eq!(timeline.clips.len(), 1);
+        let clip = &timeline.clips[0];
+        assert_eq!(clip.id, "capture-loop-clip-0");
+        assert!((clip.length_sec - 0.1).abs() < 1e-9);
+        assert!((clip.source_start_sec - 0.0).abs() < 1e-9);
+        assert!((clip.source_end_sec - 0.1).abs() < 1e-9);
+        assert_eq!(
+            clip.active_take().source_path.as_deref(),
+            Some("capture://loop/0/100")
+        );
+        // 合成 PCM：前 40 帧来自第二圈，后 60 帧保留第一圈。
+        let raw = raw_tape(&[ProjectionTake {
+            id: 1,
+            segments: &segments,
+            content_fingerprint: None,
+        }])
+        .expect("合成素材必须生成原始带");
+        assert_eq!(&raw.left[..40], &[2.0; 40]);
+        assert_eq!(&raw.left[40..], &[1.0; 60]);
+    }
+
+    /// **同一循环区域里两段互不重叠的录制仍是两个 Clip。**
+    #[test]
+    fn two_disjoint_regions_inside_the_same_loop_stay_two_clips() {
+        let segments = vec![
+            segment_loop(0, &[1.0; 40], 0, 100),
+            segment_loop(60, &[2.0; 40], 0, 100),
+        ];
+        let (timeline, summary) = one(1, &segments);
+        assert_eq!(summary.clips, 2, "只相邻不重叠的段不是同一次循环");
         assert_eq!(timeline.clips.len(), 2);
-        assert!((timeline.clips[0].start_sec - 0.0).abs() < 1e-9);
-        assert!((timeline.clips[0].length_sec - 0.04).abs() < 1e-9);
-        assert!(
-            (timeline.clips[0].active_take().source_start_sec - 0.1).abs() < 1e-9,
-            "开头来自第二圈（带内偏移 100 帧）"
+        assert_eq!(summary.loop_regions, 0, "没有重叠就没有合成源");
+    }
+
+    /// **真正的 seek（循环区域之外）保持独立 Clip。**
+    #[test]
+    fn a_genuine_seek_outside_the_loop_stays_a_separate_clip() {
+        let segments = vec![
+            segment_loop(0, &[1.0; 100], 0, 100),
+            segment(200, &[2.0; 50]),
+        ];
+        let (timeline, summary) = one(1, &segments);
+        assert_eq!(summary.clips, 2);
+        assert_eq!(timeline.clips.len(), 2);
+        assert!((timeline.clips[1].start_sec - 0.2).abs() < 1e-9);
+    }
+
+    /// **跨 take 的循环圈也合成一个 Clip。**
+    #[test]
+    fn cross_take_loop_passes_compose_into_one_clip() {
+        let first = vec![segment_loop(0, &[1.0; 100], 0, 100)];
+        let second = vec![segment_loop(0, &[2.0; 40], 0, 100)];
+        let (timeline, summary) = project(
+            &[
+                ProjectionTake {
+                    id: 1,
+                    segments: &first,
+                    content_fingerprint: None,
+                },
+                ProjectionTake {
+                    id: 2,
+                    segments: &second,
+                    content_fingerprint: None,
+                },
+            ],
+            120.0,
         );
-        assert!((timeline.clips[1].start_sec - 0.04).abs() < 1e-9);
-        assert!((timeline.clips[1].length_sec - 0.06).abs() < 1e-9);
-        assert!(
-            (timeline.clips[1].active_take().source_start_sec - 0.04).abs() < 1e-9,
-            "尾部必须来自第一圈，而不是被删掉"
+        assert_eq!(summary.clips, 1);
+        assert_eq!(timeline.clips.len(), 1);
+        assert_eq!(
+            timeline.clips[0].active_take().source_path.as_deref(),
+            Some("capture://loop/0/100")
         );
+        let raw = raw_tape(&[
+            ProjectionTake {
+                id: 1,
+                segments: &first,
+                content_fingerprint: None,
+            },
+            ProjectionTake {
+                id: 2,
+                segments: &second,
+                content_fingerprint: None,
+            },
+        ])
+        .expect("合成素材必须生成原始带");
+        assert_eq!(&raw.left[..40], &[2.0; 40]);
+        assert_eq!(&raw.left[40..], &[1.0; 60]);
+    }
+
+    /// **后一圈的洞保留前一圈内容，且合成 coverage 不宣称洞。**
+    #[test]
+    fn a_hole_in_the_later_pass_does_not_erase_the_earlier_pass() {
+        let first = segment_loop(0, &[1.0; 100], 0, 100);
+        let mut second = segment_loop(0, &[2.0; 100], 0, 100);
+        // 第二圈只真的录到 0..40 与 60..100；40..60 是洞（丢块/桥接）。
+        second.coverage[0] = 0..40;
+        second.coverage[1] = 60..100;
+        second.coverage_len = 2;
+        let segments = [first, second];
+        let raw = raw_tape(&[ProjectionTake {
+            id: 1,
+            segments: &segments,
+            content_fingerprint: None,
+        }])
+        .expect("合成素材必须生成原始带");
+        assert_eq!(&raw.left[..40], &[2.0; 40]);
+        assert_eq!(&raw.left[40..60], &[1.0; 20], "洞必须保留前一圈");
+        assert_eq!(&raw.left[60..], &[2.0; 40]);
+    }
+
+    /// **预算不足时退回多 Clip，不丢素材。**
+    #[test]
+    fn an_unavailable_composition_budget_falls_back_to_per_pass_clips() {
+        let segments = vec![
+            segment_loop(0, &[1.0; 100], 0, 100),
+            segment_loop(0, &[2.0; 40], 0, 100),
+        ];
+        let takes = [ProjectionTake {
+            id: 1,
+            segments: &segments,
+            content_fingerprint: None,
+        }];
+        // 预算注入为"永远拿不到额度"：合成必须降级，而不是 panic 或丢段。
+        let (tapes, _) = build_tapes_with(&takes, |_| None);
+        assert!(tapes.iter().all(|tape| !tape.is_composite()));
+        let (timeline, summary) = project_tapes(&tapes, 0, 120.0);
+        assert_eq!(summary.clips, 2, "降级后仍保留两圈各自的内容");
+        assert_eq!(timeline.clips.len(), 2);
+        assert_eq!(summary.loop_regions, 0);
     }
 
     /// **两圈完整循环：只留下最后一圈，仍然是一个 clip。**
     #[test]
     fn two_complete_loop_passes_leave_one_clip() {
         let segments = vec![
-            segment_loop(0, &[1.0; 100], 0),
-            segment_loop(0, &[2.0; 100], 0),
+            segment_loop(0, &[1.0; 100], 0, 100),
+            segment_loop(0, &[2.0; 100], 0, 100),
         ];
         let (timeline, summary) = one(1, &segments);
         assert_eq!(summary.clips, 1);
         assert!((timeline.clips[0].length_sec - 0.1).abs() < 1e-9);
         let take = timeline.clips[0].active_take();
         assert!(
-            (take.source_start_sec - 0.1).abs() < 1e-9,
-            "内容必须来自第二圈（带内偏移 100 帧），而不是第一圈"
+            (take.source_start_sec - 0.0).abs() < 1e-9,
+            "合成源从区域起点开始，而不是第二圈的带内偏移"
+        );
+        assert_eq!(
+            take.source_path.as_deref(),
+            Some("capture://loop/0/100"),
+            "两圈完整循环必须是一个合成源"
         );
     }
 
-    /// **没有 cycle 元数据时，行为与有元数据完全一致。**
+    /// **没有循环身份的普通补录保持多 Clip。**
     ///
-    /// 【为什么必须一致】投影不再按 `loop_start` 分组（那条推断正是问题三的成因），
-    /// 所以有没有宿主元数据都只能由"录制顺序 + 覆盖范围"决定。
+    /// 【为什么不是"循环"】这两段的 `loop_start` 都是 `None`：投影无法区分
+    /// "用户回到同一处重录"与"用户只补了开头"，而把任意重叠都合成会吞掉真实的
+    /// 多段录制。捕获侧在**观测到回卷**时才会写循环身份（见
+    /// `Capture::note_loop_identity_from_backward_jump`）；有身份的重叠才走合成。
     #[test]
     fn an_implicit_loop_pass_merges_by_coverage_not_by_metadata() {
         let segments = vec![segment(0, &[1.0; 100]), segment(0, &[2.0; 40])];
@@ -1563,17 +2205,22 @@ mod tests {
     /// 解释；要整体丢弃旧 take，应该用 take 管理显式删除。
     #[test]
     fn a_new_take_replaces_only_the_range_it_covers() {
-        let first = vec![segment_loop(0, &[1.0; 100], 0)];
-        let second = vec![segment_loop(0, &[2.0; 40], 0)];
+        // 【为什么用普通段】本条测的是跨 take 的"只覆盖实际范围"；循环身份会让
+        // 两段进入合成路径，那是 `cross_take_loop_passes_compose_into_one_clip`
+        // 的契约。去掉循环身份，语义才回到本条要钉的补录规则。
+        let first = vec![segment(0, &[1.0; 100])];
+        let second = vec![segment(0, &[2.0; 40])];
         let (timeline, summary) = project(
             &[
                 ProjectionTake {
                     id: 1,
                     segments: &first,
+                    content_fingerprint: None,
                 },
                 ProjectionTake {
                     id: 2,
                     segments: &second,
+                    content_fingerprint: None,
                 },
             ],
             120.0,

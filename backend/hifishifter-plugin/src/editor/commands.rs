@@ -1116,7 +1116,7 @@ pub(super) fn dispatch(
         "host_link_export" => {
             let owner = session
                 .capture_owner()
-                .ok_or("host link needs this instance to be bound to a host document")?;
+                .ok_or("host link is only available in Capture mode")?;
             return crate::render::link::start_export(owner);
         }
         "host_link_status" => return Ok(crate::render::link::status()),

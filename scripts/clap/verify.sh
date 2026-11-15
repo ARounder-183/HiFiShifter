@@ -22,6 +22,41 @@ ok()   { printf "  \033[32m✓\033[0m %s\n" "$*"; }
 bad()  { printf "  \033[31m✗\033[0m %s\n" "$*"; FAILED=1; }
 note() { printf "    %s\n" "$*"; }
 
+# 与 vst3/unix/verify.sh 同一纪律：插件入口死锁必须在这里失败，不能把流水线挂死。
+# 同一纪律也包括同一份兜底：macOS runner 没有 GNU coreutils 的 `timeout`（rc=127），
+# python3 在两条 CI 腿上都可用，用新进程组限时杀并对齐 timeout 的退出语义
+# （超时 124、子进程被信号打死 128+n）。逐条理由见 vst3/unix/verify.sh 的 run_probe。
+readonly PROBE_TIMEOUT_SEC="${HFS_PROBE_TIMEOUT_SEC:-30}"
+run_probe() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$PROBE_TIMEOUT_SEC" "$@"
+        local rc=$?
+        if [ "$rc" -eq 124 ]; then
+            bad "探针 $PROBE_TIMEOUT_SEC 秒未返回（插件入口很可能死锁）"
+            return 1
+        fi
+        return "$rc"
+    fi
+    python3 -c '
+import os, signal, subprocess, sys
+sec = int(sys.argv[1])
+p = subprocess.Popen(sys.argv[2:], start_new_session=True)
+try:
+    rc = p.wait(timeout=sec)
+except subprocess.TimeoutExpired:
+    os.killpg(p.pid, signal.SIGKILL)
+    p.wait()
+    sys.exit(124)
+sys.exit(128 - rc if rc < 0 else rc)
+' "$PROBE_TIMEOUT_SEC" "$@"
+    local rc=$?
+    if [ "$rc" -eq 124 ]; then
+        bad "探针 $PROBE_TIMEOUT_SEC 秒未返回（插件入口很可能死锁）"
+        return 1
+    fi
+    return "$rc"
+}
+
 [ -e "$TARGET" ] || { printf "产物不存在：%s\n" "$TARGET" >&2; exit 2; }
 
 case "$(uname -s)" in
@@ -162,7 +197,7 @@ EXTRA_LIBS=""
 [ "$HOST_OS" = "linux" ] && EXTRA_LIBS="-ldl"
 if cc -O1 -Wall -o "$PROBE_DIR/probe" "$SCRIPT_DIR/probe.c" $EXTRA_LIBS 2>"$PROBE_DIR/cc.log"; then
     # 与上面同理：黑盒加载是打包形态的事实核查，不带编译树的搜索路径。
-    if env -u LD_LIBRARY_PATH "$PROBE_DIR/probe" "$MODULE" >"$PROBE_DIR/out.log" 2>&1; then
+    if run_probe env -u LD_LIBRARY_PATH "$PROBE_DIR/probe" "$MODULE" >"$PROBE_DIR/out.log" 2>&1; then
         ok "模块可加载，工厂与实例可用"
         sed "s/^/    /" "$PROBE_DIR/out.log"
         grep -q "plugin_id=com.hifishifter.clap" "$PROBE_DIR/out.log" || bad "描述符 id 不是 com.hifishifter.clap"

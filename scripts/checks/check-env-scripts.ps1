@@ -13,28 +13,24 @@ $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $probe = Join-Path ([IO.Path]::GetTempPath()) ('hfs-env-scope-' + [Guid]::NewGuid().ToString('N') + '.ps1')
 $names = @('root', 'lines', 'dump', 'vcvars', 'dist', 'profile', 'stage', 'candidate', 'found')
+# 哨兵与校验循环都必须从 $names 生成：此前两处各硬编码一份，$names 本身从未被读
+# —— 往 $names 里加新哨兵名不会生效，门禁会悄悄少测一个变量。
+# （@() 里各语句换行分隔：管道输出的元素会被摊平进数组，逗号分隔则会把嵌套
+# 数组留成单个元素 —— WriteAllLines 会把它拼成一行。）
 $body = @(
-    ('$' + 'root = "SENTINEL-root"'),
-    ('$' + 'lines = "SENTINEL-lines"'),
-    ('$' + 'dump = "SENTINEL-dump"'),
-    ('$' + 'vcvars = "SENTINEL-vcvars"'),
-    ('$' + 'dist = "SENTINEL-dist"'),
-    ('$' + 'profile = "SENTINEL-profile"'),
-    ('$' + 'stage = "SENTINEL-stage"'),
-    ('$' + 'candidate = "SENTINEL-candidate"'),
-    ('$' + 'found = "SENTINEL-found"'),
+    $names | ForEach-Object { ('$' + $_ + ' = "SENTINEL-' + $_ + '"') }
     # 清掉"已导入 MSVC"的证据，让导入器的真实分支跑一遍（否则它早退，测不到泄漏）。
-    '$env:INCLUDE = ""',
-    '$env:LIB = ""',
-    '$env:LIBPATH = ""',
-    '$env:VSCMD_VER = ""',
-    ('$ErrorActionPreference = "Stop"'),
-    ('. "' + (Join-Path $root 'scripts\env\msvc-env.ps1') + '"'),
-    ('. "' + (Join-Path $root 'scripts\env\sdk-env.ps1') + '"'),
-    'Set-SdkEnvironment',
-    'foreach ($name in "root","lines","dump","vcvars","dist","profile","stage","candidate","found") {',
-    '  $value = Get-Variable -Name $name -ValueOnly -ErrorAction SilentlyContinue',
-    '  Write-Output ($name + "=" + $value)',
+    '$env:INCLUDE = ""'
+    '$env:LIB = ""'
+    '$env:LIBPATH = ""'
+    '$env:VSCMD_VER = ""'
+    ('$ErrorActionPreference = "Stop"')
+    ('. "' + (Join-Path $root 'scripts\env\msvc-env.ps1') + '"')
+    ('. "' + (Join-Path $root 'scripts\env\sdk-env.ps1') + '"')
+    'Set-SdkEnvironment'
+    ('foreach ($name in ' + (($names | ForEach-Object { '"' + $_ + '"' }) -join ',') + ') {')
+    '  $value = Get-Variable -Name $name -ValueOnly -ErrorAction SilentlyContinue'
+    '  Write-Output ($name + "=" + $value)'
     '}'
 )
 [IO.File]::WriteAllLines($probe, $body, [Text.Encoding]::UTF8)

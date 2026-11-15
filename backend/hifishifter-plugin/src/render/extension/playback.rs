@@ -1232,7 +1232,9 @@ impl ExtensionOwner {
             self.rt_last_read_position.store(0, Ordering::Release);
         }
         let split = self.block_split(context, block.frames, rate, stream_block.position);
-        let cycle_start = self.cycle_start_position(context, rate, stream_block.position);
+        let (cycle_start, cycle_end) = self
+            .cycle_region(context, rate, stream_block.position)
+            .map_or((None, None), |(start, end)| (Some(start), Some(end)));
         let allow_output = self.allow_output_for(
             stream,
             &block,
@@ -1268,6 +1270,7 @@ impl ExtensionOwner {
                     recording_rising,
                     cycle_wrap: stream_block.cycle_wrap,
                     cycle_start,
+                    cycle_end,
                     new_pass: stream_block.new_pass,
                     transport_active: stream_block.transport_active,
                     start_window: stream_block.start_window,
@@ -1440,16 +1443,22 @@ impl ExtensionOwner {
             .is_some_and(|evidence| evidence.position_trusted)
     }
 
-    /// 循环起点在工程采样域中的位置（`None` = 元数据不足）。
+    /// 循环区域在工程采样域中的 `[start, end)`（`None` = 元数据不足）。
     ///
-    /// 只用于把同一圈的多个段标记成同一组；不参与音频定位（音频定位由
-    /// `block_split` 的逐段位置负责）。
-    pub(super) fn cycle_start_position(
+    /// 【为什么返回整个区域而不只是起点】循环身份 = `(loop_start, loop_end)`：
+    /// 只按起点分组会把"用户改了循环长度后在同一位置录的两次"误合成一个区域。
+    /// 终点同时是投影合成时的区域长度来源，两处各算一次长度必然漂移。
+    ///
+    /// 【为什么用音乐时间算】`ProcessContext` 不提供"循环终点对应的采样位置"，
+    /// 但给了 `projectTimeMusic` / `cycleStartMusic` / `cycleEndMusic` / `tempo`。
+    /// 三者有效时，`(music − cycleStartMusic) × 60/tempo × rate` 就是本块起点到
+    /// 循环起点的帧数；`(cycleEnd − cycleStart) × 60/tempo × rate` 是区域长度。
+    pub(super) fn cycle_region(
         &self,
         context: impl Into<crate::block_context::BlockContext>,
         rate: f64,
         position: i64,
-    ) -> Option<i64> {
+    ) -> Option<(i64, i64)> {
         let context = context.into();
         let time = StreamTime::from_context(&context);
         if !time.cycle_active || !time.cycle_valid {
@@ -1458,9 +1467,21 @@ impl ExtensionOwner {
         let (Some(tempo), Some(music)) = (time.tempo, time.music) else {
             return None;
         };
+        // 【为什么不用 `!(tempo > 0.0)`】Clippy 的 `neg_cmp_op_on_partial_ord`
+        // 会在 `f64` 上拒绝否定比较；这里要同时挡住 0、负值与 NaN。
+        if !tempo.is_finite() || tempo <= 0.0 {
+            return None;
+        }
+        let loop_beats = time.cycle_end_music - time.cycle_start_music;
+        if !loop_beats.is_finite() || loop_beats <= 0.0 {
+            return None;
+        }
         let beats = music - time.cycle_start_music;
-        let frames = (beats * 60.0 / tempo * rate).round() as i64;
-        Some(position.saturating_sub(frames).max(0))
+        let start = position
+            .saturating_sub((beats * 60.0 / tempo * rate).round() as i64)
+            .max(0);
+        let end = start.saturating_add((loop_beats * 60.0 / tempo * rate).round() as i64);
+        (end > start).then_some((start, end))
     }
 
     /// 计算循环边界切分。只有在 cycle 元数据完整、且本块确实横跨 loop 终点时才切。
@@ -1496,7 +1517,12 @@ impl ExtensionOwner {
         if to_end <= 0.0 || to_end >= frames as f64 {
             return BlockSplit::whole(position, frames);
         }
-        let length = (loop_beats * 60.0 / tempo * rate).round() as i64;
+        // 【为什么长度从 `cycle_region` 取】区域起点与终点是同一个计算；
+        // 这里再乘一遍 `loop_beats` 就是第二份真相，迟早与捕获身份漂移。
+        let Some((region_start, region_end)) = self.cycle_region(context, rate, position) else {
+            return BlockSplit::whole(position, frames);
+        };
+        let length = region_end - region_start;
         if length <= 0 {
             return BlockSplit::whole(position, frames);
         }

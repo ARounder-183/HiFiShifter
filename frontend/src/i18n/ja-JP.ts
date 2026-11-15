@@ -1722,7 +1722,6 @@ export const jaJP = {
     appearance_font_search_placeholder: "フォント検索...",
     appearance_font_no_results: "一致するフォントが見つかりません",
     appearance_font_count: "{count} フォントを検出",
-    appearance_reset: "リセット",
     appearance_font_restore_default: "既定フォントに戻す",
     appearance_apply: "適用",
     appearance_import_theme: "インポート...",
@@ -2346,6 +2345,8 @@ export const jaJP = {
     plugin_apply_analyzing_hint:
         "この工程は素材の長さに比例して数秒から数分かかります。解析中は生録音を再生します。",
     plugin_apply_rendering: "合成中...",
+    plugin_render_background_hint:
+        "バックグラウンドで新しいバージョンを生成中です。現在聞こえているのは前のバージョンです。",
     plugin_daw_controlled_reason:
         "ホストが制御します。ファイル、クリップのジオメトリ、テンポ、拍子、再生はホスト側で操作してください",
     cap_reason_host_owns: "この操作はホストが担当します（プラグインは引き受けません）",
@@ -2411,4 +2412,9 @@ export const jaJP = {
     installer_uninstall_opt_cache_desc:
         "波形/レンダリング キャッシュ、ログ、WebView データ、一時ファイル。",
     installer_repair_done: "修復が完了しました。",
+    installer_reinstall_options_title: "旧バージョンのアンインストール",
+    installer_reinstall_options_subtitle: "インストール前に共有モデルを削除するか選択してください。",
+    installer_reinstall_options_top: "HiFiShifter の旧バージョンが見つかりました。先にアンインストールし、新しいバージョンは同じフォルダーにインストールします。",
+    installer_reinstall_uninstalling: "旧バージョンをアンインストール中...",
+    installer_reinstall_failed: "旧バージョンをアンインストールできませんでした。手動でアンインストールしてから再試行してください。",
 } as const;

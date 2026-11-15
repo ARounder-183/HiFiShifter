@@ -11,6 +11,8 @@
  * 判断"变了没有"，因此 `publish` 会在内容相同时**保留旧引用** —— 250 ms 一次的
  * 轮询里绝大多数回调其实什么都没变，不比较就等于每 250 ms 白重渲染一次。
  */
+import { useSyncExternalStore } from "react";
+
 import { listen } from "../../services/hostEvents";
 import { invoke, invokeErrorCode, invokeErrorKind } from "../../services/invoke";
 
@@ -31,6 +33,14 @@ export interface PluginApplyState {
      * **永久亮着**。轮询快照每 250 ms 重读一次，是这条 UI 状态的自愈来源。
      */
     rendering_active?: boolean;
+    /**
+     * 本次渲染的进度（0..1）；`null` / 缺省 = 没有可报告的进度。
+     *
+     * 【为什么放在快照里】进度此前只走 `playback_rendering_state` 事件，而该事件
+     * 队列满即丢 —— 丢一次就再也看不到百分比。250 ms 轮询把进度一起带回来，
+     * 状态栏因此能从"渲染中"自愈到"渲染中 42%"。
+     */
+    render_progress?: number | null;
     /**
      * 「你听到的是不是旧版本」（后端 `render_audible_stale`）。
      *
@@ -122,6 +132,7 @@ function sameState(a: PluginApplyState | null, b: PluginApplyState | null): bool
         a.connected === b.connected &&
         a.ready === b.ready &&
         a.rendering_active === b.rendering_active &&
+        a.render_progress === b.render_progress &&
         a.render_audible_stale === b.render_audible_stale &&
         a.analysis_pending === b.analysis_pending &&
         // 【为什么必须在比较表里】`publish` 在"内容相同"时保留旧引用，订阅者因此
@@ -155,6 +166,15 @@ export function subscribePluginApply(listener: () => void): () => void {
 
 export function getPluginApplySnapshot(): PluginApplySnapshot {
     return snapshot;
+}
+
+/** React subscription for callers that need the live plug-in mode. */
+export function usePluginApplySnapshot(): PluginApplySnapshot {
+    return useSyncExternalStore(
+        subscribePluginApply,
+        getPluginApplySnapshot,
+        getPluginApplySnapshot,
+    );
 }
 
 /** 仅供测试重置模块级状态。 */
@@ -317,4 +337,9 @@ export async function reloadPluginHost(
             sessionCode: invokeErrorCode(error),
         });
     }
+}
+
+/** Test-only: publish a host-mode snapshot without invoking the backend. */
+export function publishPluginApplyStateForTests(state: PluginApplyState | null): void {
+    publish({ ...snapshot, state });
 }

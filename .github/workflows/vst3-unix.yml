@@ -3,17 +3,18 @@ name: HiFiShifter VST3 (macOS / Linux)
 # 与 build.yml（Windows 合并安装器）**并列**：这边只负责 Unix 的插件产物。
 #
 # 【为什么另起一条流水线】Windows 那条的组织方式是 MSVC 环境导入 + WebView2 + NSIS
-# 安装器；Unix 这边没有一样是共通的：构建脚本是 bash、产物是 .vst3 bundle + tar.gz、
-# 验证靠真正 dlopen 一次的黑盒探针。硬把两者塞进一个矩阵，只会得到一堆
+# 安装器；Unix 这边没有一样是共通的：构建脚本是 bash、产物是 .vst3 bundle + tar.gz。
+# 硬把两者塞进一个矩阵，只会得到一堆
 # `if: runner.os == ...`，而每一条都是只在一个平台上被跑过的分支。
 #
 # 两条流水线共享的只有两条约定：产物命名（HiFiShifter_v<版本>_<os>-<arch>-vst3）
-# 与「门禁必须真的跑」。
+# 与「CI 只构建」。
 
-# 【为什么不在 push 时跑】直接 push develop 的插件反馈由 plugin-gates.yml 承担；
-# Unix 这条是四平台矩阵 + SDK 拉取，push 触发的成本不成比例，保持 PR/tag 触发。
-# 代价是直接 push 的 Unix 侧行为差异（如 6262b933 记载的宿主夹具崩溃）要到下一个
-# PR 才暴露 —— 已知且有记录，属有意取舍。
+# 【CI 只做构建】本工作流不跑单元测试 / 集成测试 / testkit；测试请在本地运行
+# scripts/checks/run-rust-gates.ps1。
+#
+# 【为什么不在 push 时跑】Unix 这条是四平台矩阵 + SDK 拉取，push 触发的成本不成比例，
+# 保持 PR/tag 触发。
 on:
   workflow_dispatch:
   pull_request:
@@ -29,36 +30,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # 前端产物来自 gates.yml 的 frontend job —— 同一份 frontend/dist 不该在每条流水线上
-  # 各构建一遍（版本还各不相同）。跨工作流的 artifact 不共享，所以要显式 `uses:`。
-  gates:
-    uses: ./.github/workflows/gates.yml
-    with:
-      scope: frontend
+  # 前端产物来自 frontend-build.yml —— 同一份 frontend/dist 不该在每条流水线上
+  # 各构建一遍。跨工作流的 artifact 不共享，所以要显式 `uses:`。
+  frontend:
+    uses: ./.github/workflows/frontend-build.yml
 
-  # 【为什么 clippy 不在这里】本 crate 有一半是 Windows 专属（WebView2 编辑器、REAPER
-  # 宿主扩展）。在 Unix 上那半边只留下成百条 dead_code 告警：把它们静音会让
-  # `-D warnings` 失去意义，放开判死又会让这条流水线长期红着没人看。clippy 的权威
-  # 仍然是 gates.yml（Windows，编译的是同一份源码）。Unix 这边的判据是
-  # 「能不能产出并加载」，那由 build.sh 的 verify 阶段负责。
   vst3-unix:
     name: VST3 ${{ matrix.name }}
-    needs: gates
+    needs: frontend
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
-    env:
-      # 整个 job 每个步骤都要看到这个硬钉：gdb 回放脚本会重新拉起同一颗测试二进制，
-      # 若只写在下面的测试步骤 env 里，回放就没有 cpu pin，Dawn/Tint 会在只有
-      # Lavapipe 的 Linux runner 上重新把堆写坏，诊断步骤自己制造一次 SIGSEGV。
-      # 放在 job 级别才能保证构建、测试、崩溃回放走的是同一套 EP 判据。
-      HIFISHIFTER_ORT_EP: cpu
     strategy:
       fail-fast: false
       matrix:
         # 【为什么这里没有 exclude】本工作流曾经用
         # `exclude: [{name: ${{ github.event_name == 'pull_request' && 'linux-aarch64' || '' }}}]`
         # 让 PR 只跑两个平台。结果是**整个 job 一个实例都没被创建**：运行记录里只有
-        # gates，vst3-unix 连一行都没有，而同一份写法在 build.yml 里是好的。与其继续猜
+        # frontend，vst3-unix 连一行都没有，而同一份写法在 build.yml 里是好的。与其继续猜
         # GitHub 的矩阵展开规则，不如让四个平台都跑 —— 这条工作流只在 PR / tag /
         # 手动触发时启动，多两个并行 leg 的代价远小于"什么都没跑却说绿了"。
         include:
@@ -92,21 +80,13 @@ jobs:
       # （见 editor/gui/linux.rs）。不装它，pkg-config 会在编译插件时直接失败 ——
       # 与"装了也不会被链接"的旧状态正好相反。约 200 MB，换来的是插件窗口在这条
       # 流水线上真的被编译过一次。
-      #
-      # 【为什么还要装 mesa-vulkan-drivers】产物链接了 ort 的 WebGPU 后端（dawn →
-      # Vulkan）。runner 上没有任何 Vulkan ICD，dawn 初始化必然失败
-      # （vkCreateInstance: Found no drivers!），随后插件单测**在退出时 SIGSEGV**：
-      # 56 条用例全绿、退出码却是 11。装上 mesa 的软件光栅器（lavapipe）之后
-      # vkCreateInstance 能成功，进程就不再走"初始化失败后销毁"那条路径 —— 有驱动的
-      # 本地环境跑同一份测试从不崩，这是目前唯一与现象吻合的差别。
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake pkg-config libxcb1-dev libssl-dev python3 file \
-            libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev \
-            mesa-vulkan-drivers
+            libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev
 
       # 权重不在仓库里：以清单哈希为键缓存解压结果（模型一换键就变）。
       - name: Cache model weights
@@ -124,7 +104,7 @@ jobs:
           brew install cmake || true
 
       # 【为什么必须钉 Node 版本】bundle 里的前端是 `npm run build` 产出的，而 vite 8
-      # 前端产物由 gates.yml 的 frontend job 构建一次并以 artifact 分发 —— 同一份
+      # 前端产物由 frontend-build.yml 构建一次并以 artifact 分发 —— 同一份
       # frontend/dist 不该在四条流水线上各构建一遍（版本还各不相同）。
       - name: Download frontend artifact
         uses: actions/download-artifact@v8
@@ -137,7 +117,13 @@ jobs:
           set -euo pipefail
           ZIP=$(ls frontend-dist | grep -E "\.zip$" || true)
           if [ -z "$ZIP" ]; then echo "No zip artifact found in frontend-dist"; ls -la frontend-dist; exit 1; fi
-          unzip -o frontend-dist/$ZIP -d .
+          # 【为什么解到 frontend/ 而不是 "."】artifact 的条目以 `dist/` 开头
+          # （frontend-build.yml 在 frontend 目录里打包）。解到仓库根会把产物落进
+          # `$GITHUB_WORKSPACE/dist` —— 那是本工作流自己的构建产物目录，
+          # 等于把构建好的前端白白丢弃；build.sh 又没拿 `--skip-frontend`，
+          # 于是四个平台各自再完整跑一遍 npm ci + build，"共享一份前端产物"
+          # 的注释形同虚设。与 build.yml / clap.yml 的解法对齐（-d frontend）。
+          unzip -o frontend-dist/$ZIP -d frontend
 
       # 桥接脚本是**手写的 JS**，语法错的表现是插件窗口一片空白。
       # 一条 `node --check` 就能把它挡在合并之前。
@@ -157,27 +143,12 @@ jobs:
           path: third_party/sdk
           key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
 
-      # 一条命令做完：取 SDK → 构建前端 → 编译 → 组装 bundle → 自检 → tar.gz。
-      # 自检里包含三条**只有真跑一遍才能发现**的判据：dlopen 黑盒加载、前端产物齐备、
-      # 以及宿主握手（插件按本平台 IID 布局拿到 IReaperHostApplication —— Windows 上
-      # 永远看不出这一条的问题，见 scripts/vst3/unix/host_iid_probe.c）。
+      # 一条命令做完：取 SDK → 复用前端产物 → 编译 → 组装 bundle → tar.gz。
       # 构建逻辑只在 scripts/vst3/unix/ 里存在一份，CI 不重复实现任何一步。
-      #
-      # 【这条流水线在修好矩阵之前一条 job 都没跑过】第一次真跑时四个平台全红在
-      # 「编译失败（exit 101），日志末尾只有 World 的 C++ 告警」：那是
-      # ara2-bridge-companion 的 build.rs 在报 pluginterfaces 子模块缺失，panic 写在
-      # 日志中段、被几百行告警埋住了。当时把它当成 runner 的 OOM，加了
-      # CARGO_BUILD_JOBS=2 —— 误判，并发度不是原因。真正修掉的是
-      # scripts/vst3/unix/build.sh 的 sync_submodule，以及失败时按 error 行回放现场。
-      - name: Build, verify and package
-        run: bash scripts/vst3/unix/build.sh
-
-      # hfs-gui 的 clippy 门禁：它是 workspace 外的交付物，build.sh 只证明"能编
-      # 译"，`-D warnings` 才拦得住退化。依赖上面装好的 GTK/WebKitGTK；只在
-      # x86_64 上跑一次（源码与架构无关，aarch64 重复跑没有增量价值）。
-      - name: Clippy hfs-gui
-        if: matrix.platform == 'linux-x86_64'
-        run: cargo clippy --manifest-path backend/hfs-gui/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Build and package
+        # 前端产物来自 frontend-build.yml 的 artifact（上面已解到 frontend/dist）：
+        # --skip-frontend 让 build.sh 复用它，四条腿不再各自重跑 npm 构建。
+        run: bash scripts/vst3/unix/build.sh --skip-frontend --no-verify
 
       # 文件名本身已经带版本与平台（build.sh 生成），这里只是读出来，
       # 免得 artifact 列表里四个平台长成一模一样。
@@ -194,102 +165,6 @@ jobs:
             dist/*.sha256
           if-no-files-found: error
           retention-days: 30
-
-      # 【为什么测试排在产物之后】产物是这条流水线的主目的；测试挂了应当**既看到
-      # 红灯、也拿到可复现的产物**。反过来会让一次偶发失败连产物一起吞掉。
-      #
-      # `timeout`：本 crate 的单元测试里有等待后台线程收敛的用例，卡死过一次就是
-      # 6 小时的 job。宁可 55 分钟后明确失败，也不要挂到超时上限。
-      #
-      # 【为什么是 55 而不是 25】这一步跑的是 **debug** 构建，而上面的产物步骤只产
-      # release —— 第一次跑时 target/debug 是空的，四核 runner 上要现编整棵依赖树
-      # （含 WebKitGTK 与 ORT 的绑定）。25 分钟会把"冷启动"判成"挂死"。缓存起来之后
-      # 这一步是分钟级的；挂死仍然会被 `timeout` 判掉，只是判据从 25 分钟变成 55 分钟。
-      #
-      # 【为什么有三条 skip】三条都只能在 Unix 上暴露，且都不是本次适配引入的；
-      #
-      # - `task34_tail_and_shared_undo_save_restore_both_world_tracks_without_gui`：
-      #   `clear_renderers()` 之后请求仍被受理。
-      # - `effective_item_mute_projects_to_gui_and_gates_real_process_without_inference`：
-      #   静音→有声的去咔没有落成淡入（缓冲原样留在静音值）。
-      # - `automatic_apply_releases_the_transaction_and_rechecks_model_and_edit_versions`：
-      #   偶发（单独连跑 3 次：1 过 2 挂）—— 快照已发布、块却还没被后台渲染填上，
-      #   `copy_block` 返回 true 而缓冲仍是 0。同一类「渲染线程还没跟上」的判据，
-      #   与上一条同源，一并按 issue 修。Windows 侧根因已定位并修复
-      #   （测试未隔离 bind 尾部的后台 prepare worker，加 `await_preparation_idle`）；
-      #   Unix 夹具尚未按修复后的形态复验，skip 保留到下一次 Linux 复跑确认。
-      # - `pending_pitch_analysis_does_not_publish_raw_audio_as_applied`：
-      #   Windows 实测间歇失败/挂死（干净 HEAD 单线程隔离跑也挂死），读码未定位；
-      #   根因按 docs/plans/2026-10-27-audit-repair-round2.md §1.3 / §7 批次 8 跟踪。
-      #
-      # `render/extension` 里没有任何 `cfg(windows)`，所以不是没编进去，是运行时
-      # 行为不同（第三条是偶发，不是必挂）。在此之前它们连跑到断言的机会都没有 —— 宿主夹具在 Linux 上必崩
-      # （见 6262b933）。两条按 issue 单独修，门禁先立起来。
-      # 跳过清单只有一份（scripts/checks/test-skips.txt，[unix] 前缀的条目在这里生效）。
-      # 此前这里有四条 --skip 写死在 YAML 里，与 build.yml / vst3.yml 的各一条互不知情。
-      - name: Run plugin unit tests
-        run: |
-          # 【为什么两条分支都要限时】macOS 没有 GNU timeout（coreutils 不预装），
-          # 直接写 timeout 会以 127 结束、看起来像测试挂了其实一条都没跑；但不加
-          # 限时又会让真正的挂死一直等到 job 的 timeout-minutes。GNU 分支用 timeout，
-          # macOS 分支用 python3 起一个新进程组、超时后整组 kill —— 子 cargo 进程
-          # 也在组里，不会被留成孤儿。
-          #
-          # 【为什么信号类退出有一次判据性重放】插件测试二进制偶发在**全部用例
-          # 通过之后**的进程退出阶段被信号打死（Linux SIGSEGV / Windows
-          # 0xC0000005）：libtest 没有收尾钩子，ORT 的全局环境与后台线程在卸载期
-          # 竞态。settings_store.rs 与 backtrace-plugin-test-crash.sh 都记载了同一
-          # 签名；它只在负载下的 runner 上偶发，本地与 gates 的同命令连续多轮不
-          # 复现。判据公开且严格：只有"信号类退出（139 = 128+SIGSEGV，
-          # 134 = 128+SIGABRT；124 限时杀进程不在其列）+ 日志里没有任何
-          # FAILED / error / panicked"才重放**一次**；真实断言失败、编译错误、
-          # 用例挂死一律直接失败。重放不是掩盖，是把"退出期竞态"与"用例失败"
-          # 分开（docs/ci.md 禁止的是无判据重跑）。
-          run_gates() {
-            if command -v timeout >/dev/null 2>&1; then
-              timeout 3300 pwsh -NoProfile -File scripts/checks/run-rust-gates.ps1 \
-                -Only test -Package hifishifter-plugin -Platform unix
-            else
-              python3 -c '
-          import os, signal, subprocess, sys
-          p = subprocess.Popen(sys.argv[1:], start_new_session=True)
-          try:
-              sys.exit(p.wait(timeout=3300))
-          except subprocess.TimeoutExpired:
-              os.killpg(p.pid, signal.SIGKILL)
-              sys.exit(124)
-          ' pwsh -NoProfile -File scripts/checks/run-rust-gates.ps1 \
-                -Only test -Package hifishifter-plugin -Platform unix
-            fi
-          }
-          log="$(mktemp)"
-          if run_gates 2>&1 | tee "$log"; then
-            exit 0
-          fi
-          status=${PIPESTATUS[0]}
-          case "$status" in
-            139|134)
-              if ! grep -qE 'test result: FAILED|error\[|error:|panicked at' "$log"; then
-                echo "::warning::插件测试进程在全部用例通过后的卸载期崩了（exit $status，ORT teardown 竞态）；按判据重放一次"
-                run_gates
-                exit $?
-              fi
-              ;;
-          esac
-          exit "$status"
-
-      # 【为什么要有这一步】测试进程被信号打死时，cargo 只留下一句
-      # "signal: 11, SIGSEGV"，连是哪个用例都没说 —— 而"哪一段崩的"决定了排查方向
-      # （渲染路径的堆损坏与退出时的析构是两回事）。这一步只在失败时跑，用 gdb 把最
-      # 容易崩的两组各重放一遍，打印所有线程的栈；没有 gdb 就直接跳过。
-      - name: Backtrace the test crash
-        if: failure() && runner.os == 'Linux'
-        run: |
-          # ubuntu-24.04 镜像里没有 gdb（脚本自己会判一次），失败时临时装上。
-          # macOS runner 既没有 apt-get，也用不了 gdb（lldb 需要不同的脚本），
-          # 让这一步在 macOS 上跑只会以 127 结束、把一个已经在红的 job 再加一条红灯。
-          command -v gdb >/dev/null 2>&1 || sudo apt-get install -y --no-install-recommends gdb
-          bash scripts/checks/backtrace-plugin-test-crash.sh
 
       - name: Upload build diagnostics on failure
         if: failure()

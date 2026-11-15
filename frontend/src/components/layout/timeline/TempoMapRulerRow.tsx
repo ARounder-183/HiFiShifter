@@ -236,11 +236,13 @@ function TempoPointDialog({
     );
 
     useEffect(() => {
-        if (!open) return;
-        requestAnimationFrame(() => {
+        if (!open) return undefined;
+        const frame = requestAnimationFrame(() => {
             if (focus === "tempo") bpmRef.current?.select();
             else if (focus === "timeSignature") numRef.current?.select();
         });
+        // 对话框可能在 rAF 落地前就关闭/卸载：取消它，别对已卸载的输入框 select()。
+        return () => cancelAnimationFrame(frame);
     }, [open, focus]);
 
     // 滚轮调值必须挂非被动原生监听：React root 上的 wheel 监听是 passive 的，

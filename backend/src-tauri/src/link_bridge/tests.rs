@@ -96,7 +96,7 @@ fn fixture(tag: &str, with_audio: bool) -> (Workspace, LinkManifest, Option<Audi
 fn importing_adopts_the_workspace_audio_instead_of_copying_it() {
     let (workspace, manifest, audio) = fixture("adopt", true);
     let audio = audio.unwrap();
-    let prepared = prepare_import(&manifest, &workspace).unwrap();
+    let prepared = prepare_import(&manifest, &workspace, u64::MAX).unwrap();
     assert!(prepared.report.is_clean(), "{:?}", prepared.report);
     assert_eq!(prepared.timeline.clips.len(), 1);
 
@@ -125,7 +125,7 @@ fn importing_adopts_the_workspace_audio_instead_of_copying_it() {
 #[test]
 fn a_clip_whose_audio_is_missing_is_dropped_with_a_named_reason() {
     let (workspace, manifest, _) = fixture("partial", false);
-    let prepared = prepare_import(&manifest, &workspace).unwrap();
+    let prepared = prepare_import(&manifest, &workspace, u64::MAX).unwrap();
     assert!(prepared.timeline.clips.is_empty());
     assert_eq!(prepared.report.dropped_clips.len(), 1);
     let rejection = &prepared.report.dropped_clips[0];
@@ -167,8 +167,53 @@ fn tampered_audio_fails_the_import() {
         buffer.into_inner()
     };
     std::fs::write(&path, fake).unwrap();
-    let error = prepare_import(&manifest, &workspace).unwrap_err();
+    let error = prepare_import(&manifest, &workspace, u64::MAX).unwrap_err();
     assert!(error.contains("does not match its digest"), "{error}");
+    let _ = std::fs::remove_dir_all(workspace.root());
+}
+
+/// 体量预算在**读取前**生效：单个源超限时一个字节都不进内存。
+///
+/// 回归：预算检查原本发生在全部读完之后 —— 把 `sources[].file` 指向巨型文件的
+/// 恶意/损坏清单，能在任何校验发生之前把内存吃光。这里用一个小预算让合法的
+/// 小文件也"超限"，钉住拒绝发生在读取之前（错误消息带的是文件大小，不是解码后的
+/// 内容描述）。
+#[test]
+fn a_source_over_the_byte_budget_is_refused_before_reading() {
+    let (workspace, manifest, _) = fixture("budget", true);
+    // 夹具的 WAV 约 90 字节：预算 8 字节必然超限，且与内容是否合法无关。
+    let error = prepare_import(&manifest, &workspace, 8).unwrap_err();
+    assert!(error.contains("over the 8 byte limit"), "{error}");
+    let _ = std::fs::remove_dir_all(workspace.root());
+}
+
+/// 累计预算在循环里生效：多个各自合法的源加起来超限时，导入立即失败。
+#[test]
+fn cumulative_audio_bytes_over_the_budget_fail_the_import() {
+    let (workspace, mut manifest, _) = fixture("cumulative", true);
+    let source = manifest.sources[0].clone();
+    // 同一份合法素材重复登记四次（键相同，摘要因此仍然成立）：单独看都在预算内
+    // （文件 100 字节 ≤ 预算 100），解码后每份 32 字节（4 帧 × 2 声道 × f32），
+    // 累计到第四份超过 100 字节的预算 —— 拒绝必须来自累计判据，而不是单源判据。
+    for _ in 0..3 {
+        manifest.sources.push(source.clone());
+    }
+    let error = prepare_import(&manifest, &workspace, 100).unwrap_err();
+    assert!(
+        error.contains("exceeds the 100 byte budget"),
+        "拒绝必须来自累计预算：{error}"
+    );
+    let _ = std::fs::remove_dir_all(workspace.root());
+}
+
+/// 清单声明的字节数与真实文件不符 ⇒ 读取前拒绝（文件被替换/截断的廉价信号）。
+#[test]
+fn a_declared_size_mismatch_refuses_the_read() {
+    let (workspace, mut manifest, _) = fixture("declared", true);
+    let declared = manifest.sources[0].bytes.unwrap();
+    manifest.sources[0].bytes = Some(declared + 1);
+    let error = prepare_import(&manifest, &workspace, u64::MAX).unwrap_err();
+    assert!(error.contains("declares"), "{error}");
     let _ = std::fs::remove_dir_all(workspace.root());
 }
 

@@ -956,25 +956,4 @@ impl ExtensionOwner {
         }
         .encode())
     }
-
-    /// 文档级的宿主时间线（**不**按实例收窄）。
-    ///
-    /// 【为什么与 `assigned_timeline` 分开】后者把 clip 收窄到本实例被分配的 region，
-    /// 因为渲染必须只碰自己的那一份。而导出与几何判据要的是**整个文档**：
-    /// 用户的心智模型是「这个工程」，不是「这个插件窗口」。
-    pub(super) fn document_timeline(
-        &self,
-        document: &super::document::DocumentSession,
-    ) -> Result<hifishifter_kernel::state::TimelineState, String> {
-        let mut timeline = document
-            .timeline
-            .lock_or_recover()
-            .clone()
-            .ok_or("host timeline unavailable")?;
-        if let Some(tempo) = document.clock.tempo() {
-            timeline.bpm = tempo;
-        }
-        document.project_plugin_musical_context_locked(&mut timeline);
-        Ok(timeline)
-    }
 }

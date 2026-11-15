@@ -92,7 +92,11 @@ async function importHostBatch(args: {
             }
         }
     } finally {
-        await webApi.endUndoGroup();
+        // 【不能 await】主循环的失败才是要上报的主结果；end_undo_group 若在此刻
+        // 拒绝（终端会话 / IPC 断开），await 会把它顶到调用方，把真正的失败原因
+        // 换成收尾噪声 —— 与本文件 `endUndoGroupQuietly` 的语义对齐（其余 thunk
+        // 全部走它，只有这一处漏了）。
+        endUndoGroupQuietly();
     }
     return args.cancelled()
         ? { ok: true, canceled: true, newClipIds }
@@ -702,11 +706,14 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
         // Create a single undo checkpoint for the entire batch
         dispatch(checkpointHistory());
 
-        await webApi.beginUndoGroup("import_media");
-        // 取消闸门：本批可能是目录导入委托过来的长循环（见 importCancellation）。
+        // 取消闸门的代际必须**先**捕获（与 importAudioAtPosition /
+        // importAudioFileAtPosition 等兄弟 thunk 同一口径）：若历史跳转在下面
+        // beginUndoGroup 的往返期间发生，事后取的代际已是跳转后的新值 —— 导入
+        // 不会被判定为已取消，从而把媒体写进刚刚被撤销掉的时间线上。
         const importGen = currentImportGeneration();
         // 登记这次导入：历史跳转前会等它收尾（见 registerImportRun）。
         const importRun = registerImportRun();
+        await webApi.beginUndoGroup("import_media");
         try {
             const beforeClipIds = new Set(
                 (getState() as { session: SessionState }).session.clips.map((c) => c.id),
@@ -1145,20 +1152,45 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
         //
         // 现在退化成逐个委派：真有一天多文件从别的入口进来，行为也仍然是"每个文件
         // 各导入一个 clip"，只是落点与错误处理只有单文件那一处实现。
+        // 取消闸门要在第一批 await 之前捕获：每个被委派的单文件 thunk 各自
+        // 读代际，若历史跳转发生在首次 beginUndoGroup 的往返里，后面的文件会
+        // 读到"跳转后"的新代际，继续把媒体写进刚被撤销的时间线。
+        const importGen = currentImportGeneration();
         let lastResult: unknown = null;
+        // 与 importFolderAtPosition.fulfilled 的汇总契约一致：failedFiles 是
+        // **文件名数组**，状态栏靠 length 求失败数。这里必须用 File.name，
+        // 才能在部分文件解码失败时给出可核对的清单，也不让数字伪装成数组。
+        const failedFiles: string[] = [];
+        let attempted = 0;
         let accumulatedClipIds: string[] = [];
         for (const file of files) {
-            const result = (await dispatch(
-                importAudioFileAtPosition({ file, trackId: payload.trackId, startSec }),
-            ).unwrap()) as { imported?: unknown; newClipIds?: string[] };
-            lastResult = result.imported ?? null;
-            accumulatedClipIds = accumulatedClipIds.concat(result.newClipIds ?? []);
+            if (isImportCancelled(importGen)) break;
+            attempted += 1;
+            try {
+                const result = (await dispatch(
+                    importAudioFileAtPosition({ file, trackId: payload.trackId, startSec }),
+                ).unwrap()) as { imported?: unknown; newClipIds?: string[] };
+                lastResult = result.imported ?? null;
+                accumulatedClipIds = accumulatedClipIds.concat(result.newClipIds ?? []);
+            } catch {
+                // 单个文件解码/读取失败只跳过该文件（与 importMultipleAudioAtPosition
+                // 跨时循环的失败语义一致）：中止整个批次会把已导入的 clip 报成
+                // "导入失败"，而它们其实已经在时间线上。
+                failedFiles.push(file.name);
+                continue;
+            }
+        }
+        // 历史跳转已在途：回报取消而不带时间线快照（带回去会把撤销画面画回来）。
+        if (isImportCancelled(importGen)) {
+            return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
         }
         return {
             ok: true,
             imported: lastResult,
             newClipIds: accumulatedClipIds,
             playheadSec: startSec,
+            failedFiles,
+            attempted,
         };
     },
 );

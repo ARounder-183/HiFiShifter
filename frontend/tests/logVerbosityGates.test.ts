@@ -75,6 +75,27 @@ test("the only UI entry is one lean Help submenu", () => {
     expect(app).not.toContain("hs:open-about-dialog");
 });
 
+test("the Help menu lists verbosity, log folder and diagnostics in that order", () => {
+    const menuBar = readFileSync(join(ROOT, "src/components/layout/MenuBar.tsx"), "utf8");
+    const help = menuBar.slice(menuBar.indexOf("{/* Help Menu */}"));
+    const content = help.slice(0, help.indexOf("</DropdownMenu.Content>"));
+    const verbosity = content.indexOf("<LogVerbosityMenuItems");
+    const openFolder = content.indexOf('{tf("menu_open_log_folder")}');
+    const exportDiagnostics = content.indexOf('{tf("menu_export_diagnostics")}');
+    expect(verbosity, "verbosity submenu must be present in the Help menu").toBeGreaterThanOrEqual(
+        0,
+    );
+    expect(openFolder, "open log folder must be present in the Help menu").toBeGreaterThanOrEqual(
+        0,
+    );
+    expect(
+        exportDiagnostics,
+        "export diagnostics must be present in the Help menu",
+    ).toBeGreaterThanOrEqual(0);
+    expect(verbosity).toBeLessThan(openFolder);
+    expect(openFolder).toBeLessThan(exportDiagnostics);
+});
+
 test("log_settings.json has exactly one filename constant in Rust", () => {
     const source = readFileSync(
         join(REPO, "backend/hifishifter-kernel/src/log_settings.rs"),

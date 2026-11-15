@@ -29,6 +29,8 @@ use hifishifter_kernel::logfile::{self, RotatingLog};
 const LOG_FILE_NAME: &str = "hifishifter.log";
 
 /// stderr 管道缓冲（字节），避免 ORT 初始化等密集输出在 tee 线程启动前阻塞主线程。
+/// Unix 的 `pipe(2)` 由内核管理缓冲，不需要这个参数。
+#[cfg(windows)]
 const PIPE_BUFFER_BYTES: usize = 1024 * 1024;
 
 static LOG_FILE_PATH: OnceLock<PathBuf> = OnceLock::new();
@@ -360,7 +362,7 @@ fn spawn_stderr_tee(log_path: PathBuf, policy: LogPolicy) -> bool {
 
 /// 把 stderr 重定向进管道并启动 tee 线程；返回 tee 是否成功启动。
 #[cfg(unix)]
-fn spawn_stderr_tee(log_path: PathBuf) -> bool {
+fn spawn_stderr_tee(log_path: PathBuf, policy: LogPolicy) -> bool {
     use std::os::fd::FromRawFd;
 
     // Save the original stderr so the tee thread can still echo to console.
@@ -384,7 +386,7 @@ fn spawn_stderr_tee(log_path: PathBuf) -> bool {
     let console = unsafe { std::fs::File::from_raw_fd(saved) };
     std::thread::Builder::new()
         .name("stderr-log-tee".to_string())
-        .spawn(move || tee_loop(BufReader::new(reader), console, log_path))
+        .spawn(move || tee_loop(BufReader::new(reader), console, log_path, policy))
         .is_ok()
 }
 

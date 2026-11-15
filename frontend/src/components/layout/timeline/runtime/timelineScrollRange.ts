@@ -148,25 +148,3 @@ export function resolveHorizontalWheelZoom(args: {
         nextScrollLeft: clampNumber(nextScrollLeft, minScroll, range.maxScrollLeft),
     };
 }
-
-/**
- * Resolve the placement for a viewport-sized canvas that renders local
- * coordinates. The wrapper is inside scrolled content, so it must follow the
- * native scroll offset; the canvas model still consumes the exact requested
- * scroll to avoid losing the fractional zoom anchor.
- */
-export function resolveCanvasViewportOffset(args: {
-    requestedScrollLeft: number;
-    actualScrollLeft: number;
-    viewportWidth: number;
-}): { leftPx: number; localScrollLeftPx: number } {
-    const actual = Number.isFinite(args.actualScrollLeft)
-        ? args.actualScrollLeft
-        : args.requestedScrollLeft;
-    const requested = Number.isFinite(args.requestedScrollLeft) ? args.requestedScrollLeft : actual;
-    const leftPx = Math.max(0, actual);
-    return {
-        leftPx,
-        localScrollLeftPx: requested,
-    };
-}

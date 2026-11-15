@@ -962,11 +962,10 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
 
     // ── 统一刻度源（标尺刻度 + 背景网格线）────────────────────────
     // 网格与标尺消费同一份 tick，标尺只渲染其中 showLabel 的部分，因此标尺
-    // 刻度天然是网格线的子集，两者不可能错位（此前两者各用一套步长选择：
-    // 网格走 resolveGridLineSamplingPlan、标尺走 buildRulerTicks，Tempo Map
-    // 下 beat 与像素非线性，必然分叉）。
+    // 刻度天然是网格线的子集，两者不可能错位。
     // 刻度窗口量化：见 `rulerScrollLeft` 的注释。
-    // 步长必须**小于**下游消费者的缓冲（标尺为 max(320, viewportWidth*0.5)），
+    // 步长必须**小于**下游消费者的窗口缓冲（共享公式见
+    // `tickWindow.ts` 的 `tickWindowBufferPx`），
     // 这样即使按量化的位置生成刻度，视口也始终被完整覆盖。
     // 从量化锚点起、按「视口 + 一个步长」取刻度：锚点 ≤ scrollLeft <
     // 锚点 + 步长，因此覆盖区间必然包含真实视口 [scrollLeft, scrollLeft +

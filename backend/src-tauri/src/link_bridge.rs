@@ -140,7 +140,7 @@ pub(crate) fn open(
     };
 
     // 准入策略由**来源**决定，`prepare_import` 内部按 `source_kind` 取用。
-    let prepared = prepare_import(&manifest, &workspace)?;
+    let prepared = prepare_import(&manifest, &workspace, MAX_HOST_PCM_BYTES as u64)?;
     if !prepared.report.is_clean() {
         // 用户报障时最需要的一行事实：跳过了什么、为什么。
         log::warn!("[host-link] import degraded: {}", prepared.report.summary());
@@ -243,19 +243,39 @@ fn prefix_for(source_kind: SourceKind) -> &'static str {
 fn prepare_import(
     manifest: &LinkManifest,
     workspace: &Workspace,
+    max_bytes: u64,
 ) -> Result<PreparedImport, String> {
     let mut timeline: TimelineState = serde_json::from_value(manifest.timeline.clone())
         .map_err(|error| format!("decode host timeline: {error}"))?;
     let mut report = SanitizeReport::default();
 
-    // 1) 有音频的素材：读进来并**逐字节校验摘要**（工作区侧的 `read_audio` 负责）。
-    //    摘要不符是明确失败，绝不"凑合读" —— 否则会把别的音频当成用户的编辑存进工程。
+    // 1) 有音频的素材：读进来并**逐字节校验摘要**（工作区侧的 `read_audio_bounded`
+    //    负责）。摘要不符是明确失败，绝不"凑合读" —— 否则会把别的音频当成用户的
+    //    编辑存进工程。
+    //
+    // 【为什么每个源带体量上限 + 循环里累计】预算检查（`sanitize_host_timeline` 的
+    // `max_bytes`）原本发生在**全部读完之后**：一份把 `sources[].file` 指向巨型文件
+    // 的恶意/损坏清单，能在任何校验发生之前把整个文件读进内存再解码成 f32 平面，
+    // 且逐源累计、上不封顶。现在读取前先按文件大小挡掉单源超限，循环里再按已解码
+    // 的字节数挡掉累计超限 —— 预算从此在读取路径上生效，而不是事后审计。
     let mut pending: Vec<(String, u32, Vec<Vec<f32>>)> = Vec::new();
+    let mut decoded_bytes: u64 = 0;
     for entry in &manifest.sources {
         if !entry.state.requires_file() {
             continue;
         }
-        let audio = workspace.read_audio(entry)?;
+        let audio = workspace.read_audio_bounded(entry, max_bytes)?;
+        decoded_bytes += audio
+            .planes
+            .iter()
+            .map(|plane| plane.len() as u64 * 4)
+            .sum::<u64>();
+        if decoded_bytes > max_bytes {
+            return Err(format!(
+                "imported audio exceeds the {max_bytes} byte budget at source {}",
+                entry.key
+            ));
+        }
         pending.push((entry.key.clone(), audio.sample_rate, audio.planes));
     }
     let known: std::collections::HashSet<&str> =

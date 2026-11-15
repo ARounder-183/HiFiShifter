@@ -1844,7 +1844,6 @@ export const enUS = {
     appearance_font_search_placeholder: "Search fonts...",
     appearance_font_no_results: "No matching fonts found",
     appearance_font_count: "{count} fonts detected",
-    appearance_reset: "Reset",
     appearance_font_restore_default: "Restore Default Font",
     appearance_apply: "Apply",
     appearance_import_theme: "Import...",
@@ -2330,6 +2329,8 @@ export const enUS = {
     plugin_apply_analyzing_hint:
         "This step runs with the length of the material; seconds to minutes. The raw take plays meanwhile.",
     plugin_apply_rendering: "Synthesising...",
+    plugin_render_background_hint:
+        "A new version is rendering in the background; you are still hearing the previous one.",
     plugin_daw_controlled_reason:
         "Controlled by the host; manage files, clip geometry, tempo, meter and playback in the host",
     cap_reason_host_owns: "The host owns this step; the plug-in does not take it over",
@@ -2397,4 +2398,9 @@ export const enUS = {
     installer_uninstall_opt_cache_desc:
         "Waveform/render caches, logs, WebView data and temporary files.",
     installer_repair_done: "Repair complete.",
+    installer_reinstall_options_title: "Remove the previous version",
+    installer_reinstall_options_subtitle: "Choose whether to delete shared model files before installing.",
+    installer_reinstall_options_top: "A previous version of HiFiShifter was found. It will be uninstalled first. The new version will use the same install folder.",
+    installer_reinstall_uninstalling: "Uninstalling the previous version...",
+    installer_reinstall_failed: "Could not uninstall the previous version. Uninstall it manually and try again.",
 } as const;

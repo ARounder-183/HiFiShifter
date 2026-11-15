@@ -9,6 +9,7 @@
  */
 import { seekPlayhead, setPlayheadSec } from "../../../../features/session/sessionSlice";
 import { isLegacyMouseEventFromStylus } from "../../../../utils/penInput";
+import { registerDragAbort } from "../../../../utils/gestureFocusGuard";
 import { clamp } from "../../timeline";
 import { secFromViewportClientX } from "../seekPlayheadMapping";
 import type { MouseEvent as ReactMouseEvent } from "react";
@@ -72,7 +73,17 @@ export function handleRulerPointerDown(deps: Deps, e: ReactMouseEvent<HTMLDivEle
         }
     };
 
-    const onEnd = (ev: MouseEvent) => {
+    let ended = false;
+    /**
+     * 事件无关的收尾：窗口失焦 / 页面隐藏时由 gestureFocusGuard 调用。
+     * Chromium 在窗口外松开鼠标不会派发 mouseup，若不注册，三个 window 监听
+     * 会一直挂着，之后任何 mousemove 都在偷偷改播放头。
+     */
+    let unregisterAbort: (() => void) | null = null;
+    const finish = (commit: boolean, clientX: number) => {
+        if (ended) return;
+        ended = true;
+        if (unregisterAbort !== null) unregisterAbort();
         window.removeEventListener("mousemove", onMove, true);
         window.removeEventListener("mouseup", onEnd, true);
         window.removeEventListener("mouseleave", onEnd, true);
@@ -80,10 +91,15 @@ export function handleRulerPointerDown(deps: Deps, e: ReactMouseEvent<HTMLDivEle
             cancelAnimationFrame(rafId);
             rafId = null;
         }
-        if (!moved) return;
-        lastSec = updateAt(ev.clientX, true);
-        void dispatch(seekPlayhead(lastSec));
+        if (commit && moved) {
+            lastSec = updateAt(clientX, true);
+            void dispatch(seekPlayhead(lastSec));
+        }
     };
+
+    const onEnd = (ev: MouseEvent) => finish(true, ev.clientX);
+    // 失焦时不提交最后一次 seek：指针已经不在窗口里，坐标不可信；但必须摘监听。
+    unregisterAbort = registerDragAbort(() => finish(false, 0));
 
     window.addEventListener("mousemove", onMove, true);
     window.addEventListener("mouseup", onEnd, true);

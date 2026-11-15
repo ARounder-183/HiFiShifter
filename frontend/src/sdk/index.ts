@@ -30,6 +30,9 @@
  */
 
 // ── 面板注册（扩展的核心入口）────────────────────────────────────────
+// 【resetPanelRegistryForTests 不在此列】凡 `*ForTests` 都不进对外契约：
+// 第三方没有"重置注册表"的合理用途，而一旦导出就成了必须永久保持行为的
+// 公共表面（见上方"稳定性承诺"）。仓内测试直接从内部路径 import。
 export {
     registerPanel,
     setPanelComponent,
@@ -38,7 +41,6 @@ export {
     isPanelRegistered,
     getPanelRegistryVersion,
     subscribePanels,
-    resetPanelRegistryForTests,
     type DockPanelLifecycle,
     type DockPanelProps,
     type PanelDefinition,
@@ -53,7 +55,6 @@ export {
     registerCommand,
     registerPanelTabMenuItem,
     registerToolbarItem,
-    resetContributionsForTests,
     subscribeContributions,
     usePanelTabMenuItems,
     useToolbarItems,
@@ -111,11 +112,8 @@ export {
 
 // ── 本地化 ──────────────────────────────────────────────────────────
 export { useI18n, translateOutsideReact } from "../i18n/I18nProvider";
-export {
-    registerExtensionMessages,
-    resetExtensionMessagesForTests,
-    subscribeExtensionMessages,
-} from "../i18n/extensionMessages";
+// resetExtensionMessagesForTests 同上：测试辅助不进对外契约。
+export { registerExtensionMessages, subscribeExtensionMessages } from "../i18n/extensionMessages";
 export type { Locale } from "../i18n/messages";
 
 // ── 错误上报（扩展崩溃也应进同一份日志）────────────────────────────

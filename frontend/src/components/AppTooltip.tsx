@@ -358,6 +358,21 @@ export function AppTooltipProvider({
                 return;
             }
             for (const mutation of mutations) {
+                if (mutation.type === "childList" && mutation.removedNodes.length > 0) {
+                    // 富内容注册表的剪枝：发布方只负责"发布"，不负责"撤销"——
+                    // 元素从 DOM 移除（如删除带旗标的 tempo 点）后，注册表里的
+                    // Element 键与 ReactNode 内容就成了强引用的孤儿，持续累积。
+                    // 观察器恰好已经看着整棵树，这里顺带回收。
+                    // 【 isConnected 而非"被移除即删"】同一帧内的"摘下再挂回"
+                    // （reparent）在回调触发时已重新连上，不能误删其注册内容。
+                    for (const node of mutation.removedNodes) {
+                        if (!(node instanceof Element) || node.isConnected) continue;
+                        customContentByElement.delete(node);
+                        for (const child of node.querySelectorAll("[data-hs-rich-tooltip]")) {
+                            customContentByElement.delete(child);
+                        }
+                    }
+                }
                 if (
                     mutation.type === "attributes" &&
                     mutation.attributeName === "data-tooltip" &&

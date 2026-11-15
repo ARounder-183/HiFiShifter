@@ -366,6 +366,10 @@ pub struct ExtensionOwner {
     buffer_audit_channels: AtomicU32,
     buffer_audit_frames: AtomicU32,
     buffer_audit_unwritten: AtomicU64,
+    /// 因与输入平面共享内存而被跳过的输出平面数（见 `AudioBlock::poison_outputs`）。
+    buffer_audit_aliased: AtomicU32,
+    /// 本块输入与输出是否是同一份总线（in-place 宿主）。
+    buffer_audit_in_place: AtomicBool,
     buffer_audit_active: AtomicBool,
     last_buffer_diag: Mutex<Option<String>>,
     repeats_suppressed: AtomicU64,

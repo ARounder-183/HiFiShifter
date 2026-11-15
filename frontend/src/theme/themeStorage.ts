@@ -41,10 +41,35 @@ export function loadAppearance(): AppearanceSettings {
         const raw = readUiValue(APPEARANCE_KEY);
         if (raw) {
             const parsed = JSON.parse(raw) as Partial<AppearanceSettings>;
+            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+                return { ...DEFAULT_APPEARANCE };
+            }
             const settings = { ...DEFAULT_APPEARANCE, ...parsed };
+            if (typeof settings.fontFamily !== "string" || settings.fontFamily.length > 512) {
+                settings.fontFamily = DEFAULT_APPEARANCE.fontFamily;
+            }
+            if (
+                settings.activeCustomThemeId !== null &&
+                typeof settings.activeCustomThemeId !== "string"
+            ) {
+                settings.activeCustomThemeId = DEFAULT_APPEARANCE.activeCustomThemeId;
+            }
             // mode 只接受合法值（旧数据 dark/light 仍有效；脏数据回退默认）。
             if (!THEME_MODE_SETTINGS.includes(settings.mode)) {
                 settings.mode = DEFAULT_APPEARANCE.mode;
+            }
+            // accent / gray / radius 与 mode 同一批直喂 `<Theme>` 的取值，必须同样
+            // 过白名单：手改坏的存储值会生成一条没有 CSS 规则支撑的 Radix 类，
+            // 主题无声劣化。导入路径（importThemeFromJson）对这三项已有同样的
+            // 校验 —— 运行时存储路径不能是唯一漏网的入口。
+            if (!isValidAccentColor(settings.accentColor)) {
+                settings.accentColor = DEFAULT_APPEARANCE.accentColor;
+            }
+            if (!isValidGrayColor(settings.grayColor)) {
+                settings.grayColor = DEFAULT_APPEARANCE.grayColor;
+            }
+            if (!isValidRadius(settings.radius)) {
+                settings.radius = DEFAULT_APPEARANCE.radius;
             }
             return settings;
         }
@@ -79,17 +104,41 @@ export function saveAppearance(settings: AppearanceSettings): void {
 
 /* ─────────── 自定义主题列表 ─────────── */
 
-/** 读取自定义主题列表 */
+/** 读取自定义主题列表（外部 / 手改存储值时按导入路径的同一白名单清洗）。 */
 export function loadCustomThemes(): CustomTheme[] {
     try {
         const raw = readUiValue(CUSTOM_THEMES_KEY);
-        if (raw) {
-            return JSON.parse(raw) as CustomTheme[];
-        }
+        if (!raw) return [];
+        const parsed: unknown = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return [];
+        return parsed.flatMap((entry): CustomTheme[] => {
+            if (!entry || typeof entry !== "object") return [];
+            const record = entry as Record<string, unknown>;
+            if (
+                typeof record.id !== "string" ||
+                typeof record.name !== "string" ||
+                (record.base !== "dark" && record.base !== "light")
+            ) {
+                return [];
+            }
+            return [
+                {
+                    id: record.id,
+                    name: record.name,
+                    base: record.base,
+                    colors: sanitizeImportedColors(record.colors),
+                    waveformColors: sanitizeWaveformColors(record.waveformColors),
+                    accentColor: isValidAccentColor(record.accentColor)
+                        ? record.accentColor
+                        : undefined,
+                    grayColor: isValidGrayColor(record.grayColor) ? record.grayColor : undefined,
+                    radius: isValidRadius(record.radius) ? record.radius : undefined,
+                },
+            ];
+        });
     } catch {
-        // fallthrough
+        return [];
     }
-    return [];
 }
 
 /** 保存自定义主题列表（持久化失败只记录告警，见 saveAppearance）。 */
@@ -131,8 +180,8 @@ const CSS_COLOR_RE =
 
 const KNOWN_COLOR_TOKENS = new Set<string>(QT_COLOR_TOKENS);
 
-/** 单个颜色值是否为可安全写入 CSS 变量的形态。 */
-function isValidCssColor(v: unknown): v is string {
+/** 单个颜色值是否为可安全写入 CSS 变量的形态（导入、运行时预览共用）。 */
+export function isValidCssColor(v: unknown): v is string {
     return typeof v === "string" && CSS_COLOR_RE.test(v.trim()) && v.trim().length <= 64;
 }
 
@@ -191,25 +240,28 @@ export function importThemeFromJson(json: string): {
     radius?: RadixRadius;
 } | null {
     try {
-        const parsed = JSON.parse(json);
+        const parsed: unknown = JSON.parse(json);
         if (
             parsed &&
             typeof parsed === "object" &&
-            typeof parsed.name === "string" &&
-            (parsed.base === "dark" || parsed.base === "light") &&
-            typeof parsed.colors === "object"
+            !Array.isArray(parsed) &&
+            typeof (parsed as { name?: unknown }).name === "string" &&
+            ((parsed as { base?: unknown }).base === "dark" ||
+                (parsed as { base?: unknown }).base === "light") &&
+            typeof (parsed as { colors?: unknown }).colors === "object"
         ) {
+            const record = parsed as Record<string, unknown>;
             const theme: CustomTheme = {
-                id: parsed.id ?? crypto.randomUUID(),
-                name: parsed.name,
-                base: parsed.base,
-                colors: sanitizeImportedColors(parsed.colors),
-                waveformColors: sanitizeWaveformColors(parsed.waveformColors),
-                accentColor: isValidAccentColor(parsed.accentColor)
-                    ? parsed.accentColor
+                id: typeof record.id === "string" && record.id ? record.id : crypto.randomUUID(),
+                name: record.name as string,
+                base: record.base as "dark" | "light",
+                colors: sanitizeImportedColors(record.colors),
+                waveformColors: sanitizeWaveformColors(record.waveformColors),
+                accentColor: isValidAccentColor(record.accentColor)
+                    ? record.accentColor
                     : undefined,
-                grayColor: isValidGrayColor(parsed.grayColor) ? parsed.grayColor : undefined,
-                radius: isValidRadius(parsed.radius) ? parsed.radius : undefined,
+                grayColor: isValidGrayColor(record.grayColor) ? record.grayColor : undefined,
+                radius: isValidRadius(record.radius) ? record.radius : undefined,
             };
             return {
                 theme,

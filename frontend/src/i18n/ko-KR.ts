@@ -175,7 +175,6 @@ export const koKR = {
     appearance_font_search_placeholder: "글꼴 검색...",
     appearance_font_no_results: "일치하는 글꼴 없음",
     appearance_font_count: "{count}개 글꼴 감지됨",
-    appearance_reset: "초기화",
     appearance_font_restore_default: "기본 글꼴로 복원",
     appearance_apply: "적용",
     appearance_import_theme: "가져오기...",
@@ -2315,6 +2314,8 @@ export const koKR = {
     plugin_apply_analyzing_hint:
         "이 단계는 소재 길이에 따라 몇 초에서 몇 분 걸립니다. 분석 중에는 원본 녹음을 재생합니다.",
     plugin_apply_rendering: "합성 중...",
+    plugin_render_background_hint:
+        "백그라운드에서 새 버전을 생성 중입니다. 지금 들리는 것은 이전 버전입니다.",
     plugin_daw_controlled_reason:
         "호스트가 제어합니다. 파일, 클립 지오메트리, 템포, 박자, 재생은 호스트에서 조작하세요",
     cap_reason_host_owns: "이 단계는 호스트가 담당합니다(플러그인이 넘겨받지 않습니다)",
@@ -2377,4 +2378,9 @@ export const koKR = {
     installer_uninstall_opt_cache: "캐시 및 로그 삭제",
     installer_uninstall_opt_cache_desc: "파형/렌더 캐시, 로그, WebView 데이터 및 임시 파일.",
     installer_repair_done: "복구가 완료되었습니다.",
+    installer_reinstall_options_title: "이전 버전 제거",
+    installer_reinstall_options_subtitle: "설치 전에 공유 모델 파일을 삭제할지 선택하세요.",
+    installer_reinstall_options_top: "이전 버전의 HiFiShifter가 있습니다. 새 버전을 설치하기 전에 먼저 제거하며 같은 설치 폴더를 사용합니다.",
+    installer_reinstall_uninstalling: "이전 버전을 제거하는 중...",
+    installer_reinstall_failed: "이전 버전을 제거하지 못했습니다. 직접 제거한 뒤 다시 시도하세요.",
 } as const;

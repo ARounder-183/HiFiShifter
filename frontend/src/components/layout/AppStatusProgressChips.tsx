@@ -16,6 +16,7 @@ import { useSyncExternalStore } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppSelector } from "../../app/hooks";
 import { selectFolderImportProgress } from "../../features/session/interactionSlice";
+import { useRenderStatus } from "../../features/ara/useRenderStatus";
 import { AppStatusChip } from "../../ui";
 import { appStatusProgressBus } from "../../utils/appStatusProgressBus";
 
@@ -26,7 +27,7 @@ export function AppStatusProgressChips() {
         appStatusProgressBus.getSnapshot,
         appStatusProgressBus.getSnapshot,
     );
-    const renderingActive = useAppSelector((state) => state.session.playbackRenderingActive);
+    const render = useRenderStatus();
     const folderImport = useAppSelector(selectFolderImportProgress);
 
     return (
@@ -54,11 +55,22 @@ export function AppStatusProgressChips() {
                     {folderImport.total > 0 ? ` ${folderImport.done}/${folderImport.total}` : ""}
                 </AppStatusChip>
             ) : null}
-            {renderingActive ? (
-                <AppStatusChip tone="accent">
+            {/* 【stale 时左侧不显示】右侧 PluginApplyStatus 已经在说"正在合成
+                xx%"，同一件事在两处重复会把状态栏撑成一条跑道。stale=false 但
+                rendering_active=true 时左侧用强调色说明"后台在刷新，当前听到的
+                仍是旧版（或当前版本）" —— 这正是此前完全缺失的那一档。 */}
+            {render.active && (!render.pluginMode || !render.stale) ? (
+                <AppStatusChip
+                    // 【必须跟随强调色】状态片是「本插件正在工作」的提示，颜色语义与
+                    // 拉伸 / 波形分析 / 导入完全一致：用户自定义的强调色。此前这里
+                    // 在 stale=false 时切到 neutral，用户看到的是一片灰 —— 既不像
+                    // 同一套状态提示，也丢掉了"跟随强调色"的既有约定。
+                    tone="accent"
+                    tooltip={render.pluginMode ? t("plugin_render_background_hint") : undefined}
+                >
                     {t("common_rendering")}
-                    {status.renderingProgress != null
-                        ? ` ${Math.round(status.renderingProgress * 100)}%`
+                    {render.progress != null && render.progress > 0
+                        ? ` ${Math.round(render.progress * 100)}%`
                         : ""}
                 </AppStatusChip>
             ) : null}

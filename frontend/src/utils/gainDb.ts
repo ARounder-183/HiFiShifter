@@ -122,7 +122,7 @@ export function gainKnobAngleDeg(db: number): number {
     const value = clampGainDb(db);
     if (value >= 0) return (value / GAIN_MAX_DB) * KNOB_MAX_ANGLE_DEG;
     // 低于锥度下界（例如手输 −140）一律停在 −135°：读数仍是真实值，只是指针到底了。
-    return (Math.max(value, -GAIN_TAPER_FLOOR_DB) / GAIN_TAPER_FLOOR_DB) * KNOB_MAX_ANGLE_DEG;
+    return (Math.max(value, GAIN_TAPER_FLOOR_DB) / -GAIN_TAPER_FLOOR_DB) * KNOB_MAX_ANGLE_DEG;
 }
 
 /**
@@ -166,7 +166,7 @@ export function gainDbFromKnobTravel(startDb: number, deltaPx: number): number {
     const startU =
         start >= 0
             ? start / GAIN_MAX_DB
-            : Math.max(start, -GAIN_TAPER_FLOOR_DB) / -GAIN_TAPER_FLOOR_DB;
+            : Math.max(start, GAIN_TAPER_FLOOR_DB) / -GAIN_TAPER_FLOOR_DB;
     const travel = startU + deltaPx / KNOB_HALF_TRAVEL_PX;
     // 棘齿：行程**最后那 1px** 直接落 0（线性）= −inf。判据用严格小于，
     // 让刚好推到边界时仍读到 −60 dB（同一个位置不能既算"到底"又算"−60"）。

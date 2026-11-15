@@ -16,6 +16,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
+#[path = "session_link_edits.rs"]
+mod link_edits;
+
 /// 自动渲染连续失败多少次后**停止重试**，把错误稳定地交给状态栏。
 ///
 /// 【为什么必须有上限】此前失败路径只设一个 150 ms / 1 s 的 `deadline`，下一轮又
@@ -516,8 +519,10 @@ pub(crate) struct EditorSession {
     ///   "画完参数线不生效"）。
     /// - `publish_timeline` 覆盖"时间线被发布"，也就是渲染实际读的那份数据。
     ///
-    /// 取并集是**故意的**：多推进一次最多多排一次渲染（幂等、且 actor 一次只跑一个），
-    /// 而漏推进就是一次静默的"改了不生效"。错法不对称，所以选安全的那一侧。
+    /// 取并集是**故意的**：漏推进就是一次静默的"改了不生效"，而多推进一次只是多排
+    /// 一次渲染 —— 但"多推进"必须只来自**真实内容变化**：`publish_timeline_derived`
+    /// 会在一轮渲染的入口被调用，若它在内容没变时也推进版本，就会变成"渲染结束 →
+    /// 版本又变 → 下一轮再渲染"的自激循环（用户看到状态栏永远在「渲染中」）。
     timeline_revision: AtomicU64,
     /// 【B4 归因】渲染版本是**谁**推进的，分成三档。
     ///
@@ -576,6 +581,12 @@ pub(crate) struct EditorSession {
     /// 本段 pending 是否已经报过 —— 每段只报一次，避免把诊断变成刷屏。
     pending_reported: AtomicBool,
     render_task: Mutex<Option<RenderTask>>,
+    /// 本次渲染的进度（0..1）；`f64::NAN` = 当前没有可报告的进度。
+    ///
+    /// 【为什么是原子量】写它的是 DSP 线程的进度回调，读它的是 250 ms 轮询的状态
+    /// 快照；两者之间不能加锁（进度回调在渲染热路径上）。NaN 用 bit 表示，
+    /// `state()` 再决定要不要把它变成 `null`。
+    render_progress_bits: AtomicU64,
     closed: AtomicBool,
     pub(super) suppress_history: AtomicBool,
     /// **上一次采纳过的**宿主编辑器视图选择（A5），用于与宿主的新选择比对。
@@ -1012,6 +1023,7 @@ impl EditorSession {
             pending_since: Mutex::new(None),
             pending_reported: AtomicBool::new(false),
             render_task: Mutex::new(None),
+            render_progress_bits: AtomicU64::new(f64::NAN.to_bits()),
             closed: AtomicBool::new(false),
             suppress_history: AtomicBool::new(false),
             host_selection: Mutex::new(None),
@@ -1120,6 +1132,20 @@ impl EditorSession {
                     .iter()
                     .any(|take| take.syllable_analysis.is_some())
             })
+    }
+
+    /// Stable-id prefix used by the current editor session's timeline.
+    pub(crate) fn link_namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    /// Applies the two user-owned shapes from a Capture host-link edit.
+    pub(crate) fn apply_link_edits(
+        &self,
+        params: &std::collections::BTreeMap<String, TrackParamsState>,
+        tracks: &[Track],
+    ) -> Result<(), String> {
+        link_edits::apply(self, params, tracks)
     }
 
     /// 把界面时间线还原成**音频权威**形态，供 Capture 渲染使用。
@@ -1808,6 +1834,10 @@ impl EditorSession {
         };
         let current = task.take().unwrap();
         drop(task);
+        // 【任务结束后必须回到"没有进度"】否则下一次渲染开始前，快照会带着上一轮
+        // 的 100% 显示成"渲染中 100%"。
+        self.render_progress_bits
+            .store(f64::NAN.to_bits(), Ordering::Release);
         let cancelled = current.cancel.load(Ordering::Acquire);
         let _ = current.worker.join();
         Some((current.generation, current.ticket, cancelled, result))
@@ -1919,11 +1949,18 @@ impl EditorSession {
                 return;
             }
             progress_last.store(value.to_bits(), Ordering::Release);
+            // 【快照与事件同源】进度事件会丢（`try_send`），快照每 250 ms 读这里，
+            // 于是"事件丢了就永远看不到百分比"不再可能。
+            progress_session
+                .render_progress_bits
+                .store(value.to_bits(), Ordering::Release);
             progress_session.emit(
                 "playback_rendering_state",
                 json!({"active":true,"progress":value,"target":"background"}),
             );
         });
+        self.render_progress_bits
+            .store(0.0_f64.to_bits(), Ordering::Release);
         self.emit(
             "playback_rendering_state",
             json!({"active":true,"progress":0.0,"target":"background"}),
@@ -1973,6 +2010,8 @@ impl EditorSession {
         let cancel = Arc::new(AtomicBool::new(false));
         let current = self.clone();
         let job_cancel = cancel.clone();
+        self.render_progress_bits
+            .store(0.0_f64.to_bits(), Ordering::Release);
         self.emit(
             "playback_rendering_state",
             json!({"active":true,"progress":0.0,"target":"background"}),
@@ -2184,18 +2223,25 @@ impl EditorSession {
                     .with_layout(layout.clone()),
             );
         }
-        // 分析刚刚补齐（缓存从"部分命中"变成"全命中"）也要让显示与渲染重读一次：
-        // 基线的重建是懒的，没有这个信号就要等到下一次滚动/编辑才刷新。
-        if params
-            .values()
-            .any(|next| next.pitch_orig_key.is_some() || next.dyn_orig_key.is_some())
-        {
-            changed = true;
-        }
+        self.note_analysis_baseline_published(changed);
+    }
+
+    /// 基线发布收尾：**只有真的发布了新基线才刷新显示；绝不在此排渲染**。
+    ///
+    /// 【为什么稳态必须是彻底 no-op】`complete_cached_analysis` 被渲染入口
+    /// `prepare_apply` 和每次 `get_timeline_state` 的 `ensure_loaded` 反复调用。
+    /// 旧实现只要"任意根有分析键"就把 `changed` 置真：既无条件 `render_requested.store(true)`
+    /// 又无条件 `refresh_display_from_document()`。前者是"渲染刚结束又被排回来"的
+    /// 自激循环（REAPER 空闲时状态栏一直闪「渲染中」）；后者每次都重新合成一遍
+    /// workspace 视图，可能因派生读数抖动而反复推进内容指纹。
+    ///
+    /// 稳态下 `publish_baseline` 返回 false ⇒ 没有任何新工作，这里什么都不做。
+    /// 真正的新基线走 `refresh_display_from_document` → `publish_timeline_derived`，
+    /// 由后者按内容指纹推进版本并排渲染 —— 全链路只有这一处决定"要不要重算"。
+    fn note_analysis_baseline_published(&self, changed: bool) {
         if changed {
             self.revision_bumps_analysis.fetch_add(1, Ordering::Relaxed);
             self.refresh_display_from_document();
-            self.render_requested.store(true, Ordering::Release);
         }
     }
 
@@ -2258,9 +2304,14 @@ impl EditorSession {
     }
 
     /// 派生发布：只让 GUI / 渲染看到新数组，**绝不**把它当成用户编辑提交。
+    ///
+    /// 【为什么只有**真的变了**才推进版本】本函数会被渲染入口在每一轮
+    /// `complete_cached_analysis` 里调用；而 Capture 的渲染版本闸读
+    /// `timeline_revision`。若在这里无条件推进，一次渲染刚结束就又把版本推高一格，
+    /// 下一轮准备立刻判定"输入变了"并重渲染 —— 自激循环，状态栏会永远显示「渲染中」。
+    /// 内容没变时连 `revision_bumps_publish` 也不该涨：它存在的意义正是把这种
+    /// "内部路径每轮都在推进版本"从健康状态里区分出来（见 `log_revision_bumps`）。
     fn publish_timeline_derived(&self) {
-        self.revision_bumps_publish.fetch_add(1, Ordering::Relaxed);
-        self.timeline_revision.fetch_add(1, Ordering::AcqRel);
         let (clip_count, mut fingerprint) = {
             use std::hash::{Hash, Hasher};
             let timeline = self.timeline.lock_or_recover();
@@ -2285,12 +2336,20 @@ impl EditorSession {
                 .load(Ordering::Acquire)
                 .rotate_left(31);
         }
-        let mut previous = self.derived_audio_fingerprint.lock_or_recover();
-        if *previous != Some(fingerprint) {
-            *previous = Some(fingerprint);
+        let changed = {
+            let mut previous = self.derived_audio_fingerprint.lock_or_recover();
+            if *previous == Some(fingerprint) {
+                false
+            } else {
+                *previous = Some(fingerprint);
+                true
+            }
+        };
+        if changed {
+            self.revision_bumps_publish.fetch_add(1, Ordering::Relaxed);
+            self.timeline_revision.fetch_add(1, Ordering::AcqRel);
             self.render_requested.store(true, Ordering::Release);
         }
-        drop(previous);
         self.notify_timeline();
     }
 
@@ -4409,6 +4468,14 @@ impl EditorSession {
         let host_error = states.into_iter().find_map(|state| state.1);
         let analysis_pending = self.requires_analysis(&self.timeline.lock_or_recover());
         let rendering = self.render_task.lock_or_recover().is_some();
+        // 【进度只在有任务时报告】任务结束后原子量被置回 NaN；渲染中但还没收到第一个
+        // 进度回调时是 0.0。两者都如实进快照，前端不需要再从会丢的事件里猜。
+        let render_progress = if rendering {
+            let value = f64::from_bits(self.render_progress_bits.load(Ordering::Acquire));
+            value.is_finite().then_some(value)
+        } else {
+            None
+        };
         // 「你听到的是不是旧版本」：有任务在跑，**而且**音频线程此刻没有可服务的快照。
         //
         // 【为什么与 `rendering` 分开】后者回答"后台在忙吗"，用户问的是"我听到的是不是
@@ -4475,6 +4542,8 @@ impl EditorSession {
             // 只靠 `playback_rendering_state` 事件流。事件用 `try_send`（队列满即丢），
             // 丢一个 `active:false` 就会让片永久亮着；快照每 250 ms 重读一次，自愈。
             "rendering_active":rendering,
+            // 本次渲染的进度（0..1 或 null）。快照是权威通道：事件只做快速更新。
+            "render_progress":render_progress,
             // 状态栏的「渲染中」读这一个（见上面 `audible_stale` 的说明）。
             "render_audible_stale":audible_stale,
             // 【唯一驱动状态栏文案的字段】见上面 `audible_state` 的说明。
@@ -5186,6 +5255,55 @@ pub(crate) mod tests {
         );
     }
 
+    /// **状态快照必须同时报告"在渲染"与进度。**
+    ///
+    /// 【为什么这是状态栏修复的后端契约】`playback_rendering_state` 事件用
+    /// `try_send`，队列满就丢；丢一个 `active:true` 后状态栏就再也不会亮。
+    /// 快照是自愈通道，因此它必须自己带 `rendering_active` 与 `render_progress`。
+    #[test]
+    fn render_state_reports_active_and_progress() {
+        let (model, owner, _identity) = fixture();
+        let document = model.session();
+        let editor = owner.editor_session().unwrap();
+        let (release, wait) = mpsc::channel();
+        let (started, ready) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let job = RenderTask::spawn(
+            editor.submitted.load(Ordering::Acquire),
+            editor.generation.load(Ordering::Acquire),
+            cancel,
+            move || {
+                started.send(()).unwrap();
+                wait.recv_timeout(Duration::from_secs(3))
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            },
+        )
+        .unwrap();
+        ready.recv_timeout(ACTOR_REPLY_TIMEOUT).unwrap();
+        {
+            let mut active = editor.render_task.lock_or_recover();
+            *active = Some(job);
+            editor
+                .render_progress_bits
+                .store(0.5_f64.to_bits(), Ordering::Release);
+        }
+        let state = editor.state();
+        assert_eq!(state["rendering_active"], true);
+        assert_eq!(state["render_progress"], 0.5);
+        // 任务结束后进度必须回到 null（下一次渲染不能继承 100%）。
+        release.send(()).unwrap();
+        let deadline = Instant::now() + ACTOR_REPLY_TIMEOUT;
+        while editor.complete_render().is_none() {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        let state = editor.state();
+        assert_eq!(state["rendering_active"], false);
+        assert!(state["render_progress"].is_null());
+        document.close();
+    }
+
     /// 完成结果与计算线程独立，取消位始终保留，不能把被新编辑取代的成功计算标成已应用。
     #[test]
     fn async_dsp_completion_retains_ticket_generation_and_cancellation() {
@@ -5410,6 +5528,43 @@ pub(crate) mod tests {
             owner.capture_render_input(true).unwrap().unwrap().1,
             before,
             "参数写入必须推进渲染版本"
+        );
+        session.close();
+    }
+
+    /// **不变量：派生发布不是"每轮都算一次版本推进"。**
+    ///
+    /// 【为什么这是回归】Capture 的 `capture_prepare_job` 在每一轮渲染开头都会
+    /// `complete_cached_analysis`，而后者对 Capture 无条件调用本函数。若这里无条件
+    /// 推进 `timeline_revision`，渲染版本就会在每次渲染结束时再前进一格 —— 下一轮
+    /// 准备必然判定"输入变了"，于是无限重渲染，状态栏一直显示「渲染中」。
+    /// 这条测试直接钉住"内容没变 ⇒ 版本不动；内容变了 ⇒ 版本前进"。
+    #[test]
+    fn a_derived_publish_only_advances_the_render_revision_when_content_changes() {
+        let owner = capture_owner_with_a_take();
+        let session = owner.editor_session().unwrap();
+        session.ensure_loaded(true).unwrap();
+        // 第一次建立指纹基线；它允许推进一次。
+        session.publish_timeline_derived();
+        let before = session.timeline_revision();
+        session.publish_timeline_derived();
+        assert_eq!(
+            session.timeline_revision(),
+            before,
+            "同一份内容重复发布不得推进渲染版本"
+        );
+        {
+            let mut timeline = session.timeline.lock_or_recover();
+            timeline.bpm = if timeline.bpm.is_finite() && timeline.bpm > 0.0 {
+                timeline.bpm + 1.0
+            } else {
+                120.0
+            };
+        }
+        session.publish_timeline_derived();
+        assert!(
+            session.timeline_revision() > before,
+            "内容真的变了，渲染版本必须前进"
         );
         session.close();
     }
@@ -5895,6 +6050,37 @@ pub(crate) mod tests {
         assert!(frames["edit"].is_array(), "{frames}");
         drop(event_receiver);
         document.close();
+    }
+
+    /// **不变量：基线没变时，重复的分析完成回调是彻底 no-op。**
+    ///
+    /// 【为什么这是回归】旧实现把"任意根有分析键"当成 `changed = true` 并在收尾
+    /// `render_requested.store(true)`；而该收尾被渲染入口 `prepare_apply`、每次
+    /// `get_timeline_state` 的 `ensure_loaded` 反复调用，于是"渲染刚结束又被排回来"
+    /// 自激循环，REAPER 空闲时状态栏也一直闪「渲染中」。
+    /// 稳态（`changed = false`）下，版本计数、显示刷新、渲染请求都必须原地不动。
+    #[test]
+    fn an_unchanged_analysis_baseline_is_a_complete_no_op() {
+        let (model, owner, _identity) = fixture();
+        let editor = owner.editor_session().unwrap();
+        wait_for_source_files(&editor);
+        editor.render_requested.store(false, Ordering::Release);
+        let bumps = editor.revision_bumps_analysis.load(Ordering::Relaxed);
+        // changed = false（没有新基线）—— 稳态下旧实现会把"有分析键"当成
+        // changed 并在这里无条件 store(true) / 刷新显示。现在必须是彻底 no-op。
+        editor.note_analysis_baseline_published(false);
+        editor.note_analysis_baseline_published(false);
+        assert!(
+            !editor.render_requested.load(Ordering::Acquire),
+            "基线没变时不得请求渲染"
+        );
+        assert_eq!(
+            editor.revision_bumps_analysis.load(Ordering::Relaxed),
+            bumps,
+            "基线没变时不得推进分析版本计数"
+        );
+        editor.close();
+        model.session().close();
     }
 
     #[test]
