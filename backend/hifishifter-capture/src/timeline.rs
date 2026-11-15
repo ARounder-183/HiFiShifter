@@ -119,7 +119,7 @@ impl std::ops::Deref for TapeSegment<'_> {
 /// 偏移前移 —— 用户已有的选择/编辑会错位到别的音频上。它们留在带里、
 /// `active = false`，只是不再产生 Piece。
 pub struct Tape<'a> {
-    /// 录制序号（take 号；合成带取区域内第一段的 take）。
+    /// 录制序号（take 号；合成带取区域内**最大**的 take，作为 PCM 缓存代次）。
     pub take: u64,
     /// 本带的采样率。同一 take 内必然一致 —— 捕获在采样率变化时停止。
     pub sample_rate: u32,
@@ -448,7 +448,8 @@ fn build_tapes_with<'a>(
                 // 【可降级】预算不足时不消费这些段、不生成合成带，继续用现有
                 // resolve 生成多个 Clip。用户至少能听到/看到全部素材。
                 log::warn!(
-                    "[capture] loop region {loop_start}..{region_end}: composition budget                      unavailable; keeping the per-pass clips instead"
+                    "[capture] loop region {loop_start}..{region_end}: composition budget unavailable; \
+                     keeping the per-pass clips instead"
                 );
                 continue;
             };
@@ -460,7 +461,13 @@ fn build_tapes_with<'a>(
                 .map(|index| metas[*index].order)
                 .max()
                 .unwrap_or(0);
-            let take = metas[cluster[0]].take;
+            // 【合成带的 take 取区域内最大的 take 号】`CapturePcm.version` 用它做
+            // 缓存代次；新增一圈必须让版本前进，否则下游可能复用旧 PCM。
+            let take = cluster
+                .iter()
+                .map(|index| metas[*index].take)
+                .max()
+                .unwrap_or(0);
             composites.push((take, order, segment, fingerprint));
         }
     }
@@ -1000,9 +1007,10 @@ pub fn project_tapes(
             "id": format!("{id}_take_1"),
             "name": name,
             "source_path": source,
-            // 【跨会话稳定的内容身份】`source` 是 `capture://{take}`；而会话侧还会把
-            // 素材路径重写成**会话私有**的物化路径（`hfs-ui-{pid}-{N}-`）。分析缓存的
-            // 键读这一项，于是同一份音频在重开窗口之后仍然命中同一份分析结果。
+            // 【内容身份 = 源键 + 指纹】`source` 是 `capture://{take}` 或
+            // `capture://loop/{start}/{end}`；会话侧会把素材路径重写成**会话私有**的
+            // 物化路径（`hfs-ui-{pid}-{N}-`），而分析缓存读的是 `content_id` 对应的
+            // `content_fingerprints`（PCM 哈希）。源键稳定、指纹随内容变化，两者缺一不可。
             "content_id": source,
             "source_start_sec": source_start_sec,
             "source_end_sec": source_end_sec,
