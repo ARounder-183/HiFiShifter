@@ -68,6 +68,8 @@ test("图标随常显设置切换实心 / 空心", async () => {
     for (const bar of outlineBars) {
         expect(bar.getAttribute("fill")).toBe("none");
         expect(bar.getAttribute("stroke")).toBe("currentColor");
+        // 细描边：1.1px 曾让空心条看起来像带粗框的实心块。
+        expect(bar.getAttribute("stroke-width")).toBe("0.8");
     }
 
     await render(true);

@@ -30,6 +30,7 @@ const PARAM_BLOCK_ALWAYS_SHOW_BARS = [
  * 【激活态画在图标里】实心 = 常显设置开启、空心 = 关闭，与按钮的 `aria-pressed`
  * 同源。按钮自己还会切 solid / ghost，所以这里只让三条的填充换形式，不另加斜杠、
  * 眼睛等第三套状态语言。两种状态共用同一份几何，切换时不会位移。
+ * 空心态用 0.8px 细描边：1.1px 的轮廓在 15px 图标里几乎把三条糊成实心。
  */
 export function buildParamBlocksAlwaysShowIcon(alwaysShow: boolean) {
     const fill = alwaysShow ? "currentColor" : "none";
@@ -53,7 +54,7 @@ export function buildParamBlocksAlwaysShowIcon(alwaysShow: boolean) {
                     rx="1.0"
                     fill={fill}
                     stroke={stroke}
-                    strokeWidth={stroke ? "1.1" : undefined}
+                    strokeWidth={stroke ? "0.8" : undefined}
                 />
             ))}
         </svg>
