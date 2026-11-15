@@ -77,11 +77,12 @@ pub(super) fn read_reaper_clipboard() -> Result<Vec<u8>, String> {
     use objc2_app_kit::NSPasteboard;
     use objc2_foundation::NSString;
 
-    let pasteboard = unsafe { NSPasteboard::generalPasteboard() };
+    let pasteboard = NSPasteboard::generalPasteboard();
     let pb_type = NSString::from_str("REAPERMedia");
 
-    let data =
-        unsafe { pasteboard.dataForType(&pb_type) }.ok_or_else(|| "clipboard_empty".to_string())?;
+    let data = pasteboard
+        .dataForType(&pb_type)
+        .ok_or_else(|| "clipboard_empty".to_string())?;
 
     let len = data.length();
     if len == 0 {
