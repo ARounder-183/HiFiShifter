@@ -192,14 +192,28 @@ export function useBrowserDefaultGuards(): void {
         }
 
         function altKeyDown(e: KeyboardEvent) {
-            if (e.key !== "Alt") isModifierRef.current = true;
+            // 新的一次 Alt 按下即重置"被当作修饰键用过"：旗标的生命周期必须钉在
+            // 单次 Alt 按下-松开区间内，跨 chord 残留会把下一次"单击 Alt"误判成
+            // 修饰键用法（见 altKeyUp）。
+            if (e.key === "Alt") {
+                isModifierRef.current = false;
+            } else {
+                isModifierRef.current = true;
+            }
         }
 
         function altKeyUp(e: KeyboardEvent) {
-            if (e.key === "Alt" && !isModifierRef.current) {
-                e.preventDefault();
+            if (e.key === "Alt") {
+                // 只在 Alt 自己的 keyup 上做判定并复位。此前在【每个】keyup 末尾
+                // 复位，于是 Alt+A 按常见顺序（先松 A、后松 Alt）松开时，A 的
+                // keyup 抢先把旗标清掉，Alt keyup 把"当过修饰键"误判成"单击"。
+                if (!isModifierRef.current) {
+                    e.preventDefault();
+                }
+                isModifierRef.current = false;
             }
-            isModifierRef.current = false;
+            // 非 Alt 键的 keyup 不碰旗标：它既可能是 Alt chord 的一员（先松成员、
+            // 后松 Alt），也可能是普通输入 —— 都不该提前结束本次 chord 的判定。
         }
 
         window.addEventListener("keydown", altKeyDown, true);

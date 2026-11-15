@@ -26,7 +26,6 @@ import { store } from "./app/store";
 import { getDockDragState } from "./features/dock/dockDragStore";
 import { isFileBrowserDragActive } from "./features/fileBrowser/fileBrowserDragStore";
 import { AppTooltipProvider } from "./components/AppTooltip";
-import { GlobalGestureServices } from "./components/GlobalGestureServices";
 import { AppRootErrorBoundary } from "./components/AppRootErrorBoundary";
 import { fadeToolTipSuppress } from "./components/layout/timeline/FadeContextMenu";
 import { I18nProvider } from "./i18n/I18nProvider";
@@ -68,7 +67,6 @@ export async function mountApp(): Promise<void> {
                                 isFileBrowserDragActive()
                             }
                         >
-                            <GlobalGestureServices />
                             {/*
                               根级错误边界：兜住面板子树之外抛出的渲染异常。
                               没有它时，任何非面板位置抛错都会卸载整棵树、留下空白窗口。

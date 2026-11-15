@@ -92,7 +92,11 @@ async function importHostBatch(args: {
             }
         }
     } finally {
-        await webApi.endUndoGroup();
+        // 【不能 await】主循环的失败才是要上报的主结果；end_undo_group 若在此刻
+        // 拒绝（终端会话 / IPC 断开），await 会把它顶到调用方，把真正的失败原因
+        // 换成收尾噪声 —— 与本文件 `endUndoGroupQuietly` 的语义对齐（其余 thunk
+        // 全部走它，只有这一处漏了）。
+        endUndoGroupQuietly();
     }
     return args.cancelled()
         ? { ok: true, canceled: true, newClipIds }
