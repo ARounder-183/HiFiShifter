@@ -75,6 +75,7 @@ pub(crate) mod commands;
 mod hfspeaks_v2;
 mod launch_args;
 mod link_bridge;
+mod mcp;
 mod recording;
 mod search;
 #[path = "audio/silence_detect.rs"]
@@ -361,6 +362,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(state::AppState::default())
         .manage(link_bridge::LinkBridge::default())
+        .manage(mcp::McpControl::default())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // 模型位置由内核统一解析：优先共享模型库（与 ARA 插件共用同一份 152 MB），
@@ -899,11 +901,17 @@ pub fn run() {
             commands::ui_kv_dump,
             commands::ui_kv_put,
             commands::ui_kv_delete,
+            commands::get_mcp_status,
+            commands::set_mcp_enabled,
+            commands::get_mcp_view,
+            commands::acknowledge_mcp_view,
+            commands::reply_mcp_view,
         ])
         .build(context)
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
+                app_handle.state::<mcp::McpControl>().stop();
                 // 退出前把渲染缓存的待写队列（`onExit` / `manual` 模式以及在途
                 // 写入）排空；带超时，磁盘异常时也不能卡住退出流程。
                 if !crate::render_cache::flush_blocking(std::time::Duration::from_secs(3)) {

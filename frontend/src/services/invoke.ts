@@ -251,6 +251,13 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 ...(args[3] !== undefined ? { startSec: args[3] } : {}),
             };
 
+        case "set_mcp_enabled":
+            return { enabled: args[0] };
+        case "acknowledge_mcp_view":
+            return { revision: args[0] };
+        case "reply_mcp_view":
+            return { requestId: args[0], result: args[1] };
+
         case "add_track":
             return {
                 name: args[0],
@@ -1057,6 +1064,8 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "consume_startup_project_path",
     "create_host_track",
     "get_about_info",
+    "get_mcp_status",
+    "get_mcp_view",
     "get_project_meta",
     "get_auto_backup_settings",
     "get_dml_adapters",

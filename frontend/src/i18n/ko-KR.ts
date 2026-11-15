@@ -1,4 +1,14 @@
 export const koKR = {
+    mcp_title: "Agent MCP",
+    mcp_description:
+        "에이전트가 현재 프로젝트를 편집하도록 허용합니다. 로컬 연결만 허용하며 서비스를 끄거나 앱을 종료하면 연결이 만료됩니다.",
+    mcp_enable: "사용",
+    mcp_disable: "중지",
+    mcp_copy_config: "연결 설정 복사",
+    mcp_enabled: "이 세션에서 사용 중",
+    mcp_disabled: "사용 안 함",
+    mcp_copied: "설정 복사됨",
+    mcp_config_label: "MCP 클라이언트 설정",
     menu_file: "파일",
     menu_edit: "편집",
     menu_view: "보기",

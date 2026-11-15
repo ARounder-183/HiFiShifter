@@ -1025,7 +1025,24 @@ impl AppState {
         target: usize,
         intent: HistoryJumpIntent,
     ) -> TimelineStatePayload {
+        self.set_history_position_guarded(target, intent, None)
+    }
+
+    /// MCP validates its revision while holding the same timeline lock used by GUI edits.
+    pub(crate) fn set_history_position_guarded(
+        &self,
+        target: usize,
+        intent: HistoryJumpIntent,
+        expected: Option<(&str, &str)>,
+    ) -> TimelineStatePayload {
         let mut tl = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        if expected.is_some_and(|(revision, instance)| {
+            crate::mcp::revision_for_history(self, &tl, instance) != revision
+        }) {
+            let mut payload = tl.to_payload();
+            payload.ok = false;
+            return payload;
+        }
         let mut h = self
             .timeline_history
             .lock()

@@ -1,4 +1,14 @@
 export const enUS = {
+    mcp_title: "Agent MCP",
+    mcp_description:
+        "Enable agents to edit the open project. Connections are local to this computer and expire when disabled or the App closes.",
+    mcp_enable: "Enable",
+    mcp_disable: "Disable",
+    mcp_copy_config: "Copy connection configuration",
+    mcp_enabled: "Enabled for this session",
+    mcp_disabled: "Disabled",
+    mcp_copied: "Configuration copied",
+    mcp_config_label: "MCP client configuration",
     menu_file: "File",
     menu_edit: "Edit",
     menu_view: "View",

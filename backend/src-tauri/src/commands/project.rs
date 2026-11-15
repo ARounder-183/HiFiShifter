@@ -399,7 +399,7 @@ fn pinned_stretch_settings(
     )
 }
 
-fn build_project_file_snapshot(
+pub(crate) fn build_project_file_snapshot(
     state: &AppState,
     project_path: &Path,
     project_name: &str,

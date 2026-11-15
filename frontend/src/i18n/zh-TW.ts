@@ -1,5 +1,14 @@
 // 繁體中文 (Traditional Chinese) 翻譯檔
 export const zhTW = {
+    mcp_title: "Agent MCP",
+    mcp_description: "允許 Agent 編輯目前工程。僅接受本機連線；關閉服務或退出 App 後連線失效。",
+    mcp_enable: "啟用",
+    mcp_disable: "關閉",
+    mcp_copy_config: "複製連線設定",
+    mcp_enabled: "本次執行已啟用",
+    mcp_disabled: "未啟用",
+    mcp_copied: "已複製連線設定",
+    mcp_config_label: "MCP 用戶端設定",
     menu_file: "檔案",
     menu_edit: "編輯",
     menu_view: "檢視",

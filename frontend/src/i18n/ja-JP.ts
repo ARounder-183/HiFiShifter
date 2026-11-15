@@ -1,4 +1,14 @@
 export const jaJP = {
+    mcp_title: "Agent MCP",
+    mcp_description:
+        "エージェントによる現在のプロジェクトの編集を許可します。接続はこのコンピューター内に限定され、無効化またはアプリの終了で切断されます。",
+    mcp_enable: "有効化",
+    mcp_disable: "無効化",
+    mcp_copy_config: "接続設定をコピー",
+    mcp_enabled: "このセッションで有効",
+    mcp_disabled: "無効",
+    mcp_copied: "設定をコピーしました",
+    mcp_config_label: "MCP クライアント設定",
     menu_file: "ファイル",
     menu_edit: "編集",
     menu_view: "表示",

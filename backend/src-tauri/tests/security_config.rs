@@ -136,6 +136,46 @@ fn the_dev_config_never_reaches_a_build() {
     );
 }
 
+/// A release Cargo profile can still be a Tauri development build. Both packaging
+/// entry points must query the binary's actual frontend mode, not infer it from
+/// its filename, profile, successful compilation or installer extraction.
+#[test]
+fn packaging_checks_the_executables_actual_frontend_mode() {
+    let root = repo_root();
+    for relative in [
+        "scripts/build/build.ps1",
+        "scripts/checks/check-installer.ps1",
+    ] {
+        let script = read(&root.join(relative));
+        assert!(
+            script.contains("check-app-build.ps1"),
+            "{relative} must verify the App's embedded frontend"
+        );
+    }
+    let checker = read(&root.join("scripts/checks/check-app-build.ps1"));
+    for required in [
+        "--print-build-info",
+        "ui_source",
+        "embedded",
+        "custom_protocol",
+        "debug_assertions",
+    ] {
+        assert!(
+            checker.contains(required),
+            "App build check must verify {required}"
+        );
+    }
+    let main = read(&root.join("backend/src-tauri/src/main.rs"));
+    assert!(
+        main.contains("tauri::is_dev()"),
+        "report Tauri's real mode rather than Cargo's optimization profile"
+    );
+    assert!(
+        main.find("--print-build-info") < main.find("ensure_layout_v2()"),
+        "build probes must not migrate user profiles or create a GUI"
+    );
+}
+
 /// 递归收集 `dir` 下所有"提到了开发配置"的文件（相对仓库根的路径）。
 ///
 /// 只看脚本、工作流与 Rust 源码：文档里提到它是正常的（本仓的审查记录就写着它的来历）。

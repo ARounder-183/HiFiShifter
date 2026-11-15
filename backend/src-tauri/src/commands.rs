@@ -141,6 +141,43 @@ mod waveform;
 use crate::state::AppState;
 use tauri::{Manager, State, Window};
 
+#[tauri::command]
+pub fn get_mcp_status(app: tauri::AppHandle) -> serde_json::Value {
+    common::guard_json_command("get_mcp_status", || {
+        app.state::<crate::mcp::McpControl>().status()
+    })
+}
+
+#[tauri::command]
+pub fn set_mcp_enabled(app: tauri::AppHandle, enabled: bool) -> serde_json::Value {
+    common::guard_json_command("set_mcp_enabled", || crate::mcp::set_enabled(&app, enabled))
+}
+
+#[tauri::command]
+pub async fn get_mcp_view(app: tauri::AppHandle) -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(move || crate::mcp::refresh_view(&app))
+        .await
+        .unwrap_or_else(|error| serde_json::json!({"ok":false,"message":error.to_string()}))
+}
+
+#[tauri::command]
+pub fn acknowledge_mcp_view(app: tauri::AppHandle, revision: String) -> serde_json::Value {
+    common::guard_json_command("acknowledge_mcp_view", || {
+        crate::mcp::acknowledge_view(&app, revision)
+    })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn reply_mcp_view(
+    app: tauri::AppHandle,
+    request_id: String,
+    result: serde_json::Value,
+) -> serde_json::Value {
+    common::guard_json_command("reply_mcp_view", || {
+        crate::mcp::reply_view(&app, request_id, result)
+    })
+}
+
 // This is used by the window close handler (crate-internal), not a tauri command.
 // pub(crate) use project::save_project_to_path_inner;
 

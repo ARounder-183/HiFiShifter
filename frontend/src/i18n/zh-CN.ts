@@ -1,4 +1,13 @@
 export const zhCN = {
+    mcp_title: "Agent MCP",
+    mcp_description: "允许 Agent 编辑当前工程。仅接受本机连接；关闭服务或退出 App 后连接失效。",
+    mcp_enable: "启用",
+    mcp_disable: "关闭",
+    mcp_copy_config: "复制连接配置",
+    mcp_enabled: "本次运行已启用",
+    mcp_disabled: "未启用",
+    mcp_copied: "已复制连接配置",
+    mcp_config_label: "MCP 客户端配置",
     menu_file: "文件",
     menu_edit: "编辑",
     menu_view: "视图",

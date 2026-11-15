@@ -64,6 +64,10 @@ function Remove-GateDirectory([string]$path) {
 
 Write-Host 'Installer gate' -ForegroundColor Cyan
 
+# A successful installer extraction cannot prove that the App has an offline UI.
+# Reject binaries accidentally built without Tauri's custom-protocol feature.
+& (Join-Path $root 'scripts\checks\check-app-build.ps1') -ExecutablePath (Join-Path $stage 'app\HiFiShifter.exe')
+
 if (!$ReleaseInstallerPath) {
     $found = @(Get-ChildItem (Join-Path $root 'dist') -Filter '*-setup.exe' -ErrorAction SilentlyContinue)
     if ($found.Count -eq 0) { throw 'dist 下没有安装器：先跑 scripts\build\build.ps1 -Target All' }
@@ -285,6 +289,10 @@ try {
     Assert-That 'ARP 注册了卸载项' {
         if (!(Test-Path $arpKey)) { throw "缺少注册表键 $arpKey" }
         (Get-ItemProperty $arpKey).DisplayVersion
+    }
+
+    Assert-That '安装后的 App 使用内置前端，不依赖 localhost 开发服务器' {
+        & (Join-Path $root 'scripts\checks\check-app-build.ps1') -ExecutablePath (Join-Path $installDir 'HiFiShifter.exe')
     }
 
     Assert-That '文件关联指向安装的主程序' {

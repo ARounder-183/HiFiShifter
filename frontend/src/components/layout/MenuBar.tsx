@@ -101,6 +101,9 @@ import { ChannelImportDialog } from "./ChannelImportDialog";
 import { PenInputDialog } from "./PenInputDialog";
 import { SearchSettingsDialog } from "./SearchSettingsDialog";
 import { ParamBlockSettingsDialog } from "./ParamBlockSettingsDialog";
+const McpDialog = lazy(() =>
+    import("./McpDialog").then((module) => ({ default: module.McpDialog })),
+);
 import { RecordingSettingsDialog } from "./RecordingSettingsDialog";
 const BenchmarkDialog = lazy(() =>
     import("./BenchmarkDialog").then((module) => ({ default: module.BenchmarkDialog })),
@@ -217,6 +220,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [timeDisplaySettingsOpen, setTimeDisplaySettingsOpen] = useState(false);
     const [snapSettingsOpen, setSnapSettingsOpen] = useState(false);
     const [paramBlockSettingsOpen, setParamBlockSettingsOpen] = useState(false);
+    const [mcpDialogOpen, setMcpDialogOpen] = useState(false);
     const [exportDialogOpen, setExportDialogOpen] = useState(false);
     const [autoBackupDialogOpen, setAutoBackupDialogOpen] = useState(false);
     const [recordingDialogOpen, setRecordingDialogOpen] = useState(false);
@@ -1470,6 +1474,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Separator />
 
                     {/* Snap/Grid Settings — above Keyboard Shortcuts */}
+                    {!isPluginMode() && (
+                        <DropdownMenu.Item onSelect={() => setMcpDialogOpen(true)}>
+                            {t("mcp_title")}
+                        </DropdownMenu.Item>
+                    )}
                     <DropdownMenu.Item onSelect={() => setSnapSettingsOpen(true)}>
                         {tf("snap_grid_settings_title")}
                     </DropdownMenu.Item>
@@ -1666,6 +1675,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             {renderCacheDialogOpen ? (
                 <Suspense fallback={null}>
                     <RenderCacheDialog open onOpenChange={setRenderCacheDialogOpen} />
+                </Suspense>
+            ) : null}
+            {mcpDialogOpen ? (
+                <Suspense fallback={null}>
+                    <McpDialog open onOpenChange={setMcpDialogOpen} />
                 </Suspense>
             ) : null}
 

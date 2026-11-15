@@ -21,6 +21,24 @@ fn sanitize_gtk_modules_for_appimage() {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    // Packaging probes the actual Tauri mode without creating a WebView, loading
+    // models, migrating a profile or relying on the Cargo profile name.
+    if args.iter().any(|arg| arg == "--print-build-info") {
+        println!(
+            "{}",
+            serde_json::json!({
+                "product": "HiFiShifter",
+                "version": env!("CARGO_PKG_VERSION"),
+                "ui_source": if tauri::is_dev() { "dev_server" } else { "embedded" },
+                "custom_protocol": !tauri::is_dev(),
+                "debug_assertions": cfg!(debug_assertions),
+            "mcp_authentication": "none",
+            })
+        );
+        return;
+    }
+
     #[cfg(target_os = "linux")]
     sanitize_gtk_modules_for_appimage();
 
@@ -31,8 +49,6 @@ fn main() {
     // 就绝不合并"，所以日志目录一旦先被建出来，旧日志目录就会被判成冲突、永久
     // 搬不过来。这是整个启动链上唯一能保证顺序的位置。
     let layout = backend_lib::app_paths_migrate::ensure_layout_v2();
-
-    let args: Vec<String> = std::env::args().collect();
 
     // 日志初始化（stderr logger + panic hook + stderr→文件 tee）：
     // `--log-file=<path>` 指定文件，`--log-file=-` 显式关闭，

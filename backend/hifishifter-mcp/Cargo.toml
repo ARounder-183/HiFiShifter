@@ -1,0 +1,18 @@
+[package]
+name = "hifishifter-mcp"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "HiFiShifter MCP transport and typed editor contract (no GUI/audio dependencies)"
+
+[dependencies]
+axum = "0.8.9"
+rmcp = { version = "3.9.0", features = ["server", "transport-streamable-http-server"] }
+schemars = "1.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["net", "rt-multi-thread", "sync", "time", "macros"] }
+tokio-util = "0.7"
+
+[dev-dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["json"] }

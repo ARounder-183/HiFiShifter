@@ -18,6 +18,7 @@ members = [
     "hifishifter-capture",
     "hifishifter-host-link",
     "hifishifter-clipboard",
+    "hifishifter-mcp",
 ]
 # 打补丁的第三方 crate 不进 workspace（它有自己的构建语义，也不该被
 # `cargo test --workspace` 拉进来）。testkit 同理：它是独立工作区根，

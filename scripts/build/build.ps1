@@ -303,6 +303,7 @@ if ($Target -eq 'All' -or $Target -eq 'Plugin' -or $Target -eq 'Clap') {
 # app\ / vst3\ / models\ / LICENSE / license-page.txt / licenses\ / models-verify.nsh，全部由本脚本产出。
 
 function Write-AppPayload {
+    & (Join-Path $root 'scripts\checks\check-app-build.ps1') -ExecutablePath (Join-Path $built 'HiFiShifter.exe')
     $app = Join-Path $stage 'app'
     Reset-Directory $app
     Copy-Item "$built\HiFiShifter.exe" $app

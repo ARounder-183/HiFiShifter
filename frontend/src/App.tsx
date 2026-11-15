@@ -97,6 +97,7 @@ import { resolveTransportShortcutCommand } from "./features/session/transportSho
 import { useI18n } from "./i18n/I18nProvider";
 import { useClipPitchDataListener } from "./hooks/useClipPitchDataListener";
 import { useHistoryStateListener } from "./hooks/useHistoryStateListener";
+import { useMcpProjectEvents } from "./hooks/useMcpProjectEvents";
 import { useBrowserDefaultGuards } from "./hooks/useBrowserDefaultGuards";
 import { PitchAnalysisProvider } from "./contexts/PitchAnalysisContext";
 import { PitchAnalysisStatusChip } from "./components/layout/PitchAnalysisStatusChip";
@@ -899,6 +900,7 @@ function AppInner() {
     useRecordingListener();
     // 撤销/重做可用性（栈深度）镜像：菜单置灰与快捷键前置判断都读它
     useHistoryStateListener();
+    useMcpProjectEvents();
 
     // 浏览器默认行为守卫（Ctrl+F/P/G、页面缩放、右键菜单、文本选取、中键、
     // 触控板捏合）：抽到 useBrowserDefaultGuards，主窗口与独立窗口共用同一套
