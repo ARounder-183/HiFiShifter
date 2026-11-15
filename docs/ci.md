@@ -1,9 +1,9 @@
 # CI 流水线
 
 构建流水线**只负责构建与打包**，不运行任何测试：单元测试、集成测试、testkit、
-安装器闭环（装 → 查 → 重装 → 卸载）与 AppImage 冒烟均已从工作流中移除。另有一条
-独立的依赖漏洞扫描（`security.yml`），它不参与构建，也不是测试。需要跑测试时请在
-本地直接调用 `scripts/checks/` 下的脚本。
+安装器闭环（装 → 查 → 重装 → 卸载）与 AppImage 冒烟均已从工作流中移除。依赖漏洞
+扫描也不再由 CI 承担，只在本地按需运行。需要跑测试时请在本地直接调用
+`scripts/checks/` 下的脚本。
 
 ## 工作流
 
@@ -13,7 +13,6 @@
 | `build.yml`          | PR、`v*` tag、手动    | 六平台 App 产物；Windows x64 出一个合并安装器 + 便携包；Unix 出插件包 | 安装器 / DMG / AppImage / 便携包 / 插件 `tar.gz`·`pkg` |
 | `vst3-unix.yml`      | PR、`v*` tag、手动    | Linux/macOS 的 VST3 bundle                                            | `*.tar.gz` + `*.sha256`                                |
 | `clap.yml`           | PR、`v*` tag、手动    | Linux/macOS/Windows 的 CLAP 模块                                      | `HiFiShifter.clap` / bundle                            |
-| `security.yml`       | 每周 + 依赖变更       | 依赖漏洞扫描（OSV + npm audit），不是测试                             | 无                                                     |
 
 ## 构建脚本与自检
 
@@ -27,7 +26,8 @@
   - `scripts/build/unix/package.sh --no-verify`
   - `linux-appimage.sh` 通过 `HIFISHIFTER_SKIP_SMOKE=1` 跳过启动冒烟。
 - 想在本地复现 CI 的构建步骤，去掉上述开关即可；想在本地跑 Rust 测试，使用
-  `pwsh scripts/checks/run-rust-gates.ps1`。
+  `pwsh scripts/checks/run-rust-gates.ps1`。依赖漏洞扫描可手动运行
+  `python3 scripts/checks/check-dependency-advisories.py --verbose`。
 
 ## 前端产物
 
