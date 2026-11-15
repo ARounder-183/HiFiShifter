@@ -1721,3 +1721,50 @@ fn interleaved_prefetch_and_realtime_capture_the_whole_first_window() {
         clip.length_sec
     );
 }
+
+/// **VEGAS 形状：1 帧、in-place、直通 + 高详细度审计，输出必须保持有限。**
+///
+/// 【为什么这是 +inf dB 的边界回归】现场日志里 VEGAS 的首块是 1 帧直通
+/// （kind=6），`[buf] audit` 报 `unwritten=2`。根因不是漏写，而是审计先把
+/// 与输入共享的输出平面写成 NaN，直通分支在 `source == target` 时跳过了复制 ——
+/// 宿主电平计于是把 NaN 显示成 +inf dB。本用例把那条链路原样摆出来：同一个
+/// `AudioBusBuffers` 同时当输入与输出，审计打开，样本必须逐位不变且有限。
+#[test]
+fn in_place_passthrough_is_not_poisoned_by_high_verbosity_audit() {
+    let mut processor = Processor::create().unwrap();
+    let mut left = [0.25_f32];
+    let mut right = [-0.5_f32];
+    let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+    let mut bus = AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 0,
+        channel_buffers: planes.as_mut_ptr(),
+    };
+    let mut context = crate::audio_abi::ProcessContext {
+        state: crate::audio_abi::PROCESS_CONTEXT_PLAYING,
+        sample_rate: 48_000.0,
+        project_time_samples: 0,
+        ..Default::default()
+    };
+    let mut data = ProcessData {
+        process_mode: 0,
+        num_samples: 1,
+        num_inputs: 1,
+        num_outputs: 1,
+        inputs: &raw mut bus,
+        outputs: &raw mut bus,
+        process_context: &raw mut context,
+        ..Default::default()
+    };
+    // 审计只在本线程打开：并行用例不会因此被点亮。
+    let _audit = crate::audio_stats::test_support::enable_buffer_audit();
+    let result =
+        unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
+    assert_eq!(result, K_RESULT_OK);
+    assert_eq!(left, [0.25], "直通输出必须逐位等于输入");
+    assert_eq!(right, [-0.5]);
+    assert!(
+        left[0].is_finite() && right[0].is_finite(),
+        "审计绝不能把宿主输入毒化成 NaN（电平计会显示 +inf dB）"
+    );
+}

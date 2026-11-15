@@ -100,7 +100,42 @@ pub fn slow_block_stats() -> (u64, u64) {
 /// 由共享的 `render_block` 写入 —— 外壳不同，漏写的分支却是同一批。
 /// 音频线程只写原子量，开关本身也在预热时读一次。
 pub fn buffer_audit_enabled() -> bool {
+    // 【测试为什么需要一个覆盖开关】「高」档由用户配置驱动，而进程级配置在并行
+    // 测试里既不好改、也不该改：一条用例打开审计会把同进程的其它用例一起点亮。
+    // 这个 thread-local 只影响当前测试线程，Drop 时自动恢复。
+    #[cfg(test)]
+    if let Some(value) = test_support::override_value() {
+        return value;
+    }
     hifishifter_kernel::log_policy::probes_enabled()
+}
+
+/// 测试专用的审计开关覆盖（线程局部；生产构建里整块不存在）。
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::cell::Cell;
+
+    thread_local! {
+        static OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    /// 让当前测试线程把写满审计当作已开启；Drop 时恢复原值。
+    pub(crate) struct BufferAuditGuard;
+
+    impl Drop for BufferAuditGuard {
+        fn drop(&mut self) {
+            OVERRIDE.with(|value| value.set(None));
+        }
+    }
+
+    pub(crate) fn enable_buffer_audit() -> BufferAuditGuard {
+        OVERRIDE.with(|value| value.set(Some(true)));
+        BufferAuditGuard
+    }
+
+    pub(crate) fn override_value() -> Option<bool> {
+        OVERRIDE.with(Cell::get)
+    }
 }
 
 #[cfg(test)]

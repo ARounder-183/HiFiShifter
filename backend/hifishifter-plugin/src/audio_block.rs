@@ -62,6 +62,21 @@ impl<'a> OutputBus<'a> {
     }
 }
 
+/// 一次**输出写满审计**的读数。
+///
+/// 【为什么把三个数放在一起】它们回答同一个问题："这一块有没有哪一帧根本没被写过，
+/// 以及哪些平面因为与输入共享内存而**不能**被预填"。拆成三个返回值会让调用方
+/// 在日志行里重新拼装，拼错顺序不会报错，只会让现场读到一个错误的诊断。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BufferAudit {
+    /// 声明过的最大声道数（含别名平面）。
+    pub channels: usize,
+    /// 仍是 NaN 的帧数（只统计非别名平面）。
+    pub unwritten: usize,
+    /// 因与输入平面重叠而被跳过的平面数。
+    pub aliased: usize,
+}
+
 /// 一块音频的**输入平面**。
 ///
 /// 【为什么按值持有指针数组地址而不是引用】见文件头：in-place 宿主下它与
@@ -195,7 +210,44 @@ impl<'a> AudioBlock<'a> {
         }
     }
 
-    /// 把输出平面预填成 NaN（「高」档 的审计哨兵）。
+    /// 第 `channel` 个输出平面是否与**任一输入平面**共享内存。
+    ///
+    /// 【为什么必须逐平面判断，而不是只看 `in_place`】`in_place` 是总线级别的
+    /// 事实（输入与输出是同一份 `AudioBusBuffers`），但宿主也可以只让**部分**
+    /// 声道共用平面，或把左右平面互换。诊断要写的是"输出"，而任何与输入重叠的
+    /// 输出平面写下去都会改到宿主喂给我们的样本 —— 那正是 VEGAS 直通输出 +inf dB
+    /// 的成因：审计先把共享平面写成 NaN，直通再"原样"读回来，宿主电平计把 NaN
+    /// 显示成 +inf。
+    ///
+    /// 【为什么比较字节区间而不是指针相等】宿主可以合法地给出两个起始地址不同、
+    /// 但内存范围重叠的平面（部分别名）。只比相等会漏掉那一种，而它同样会被写坏。
+    fn output_plane_aliases_input(&self, channel: usize) -> bool {
+        let frames = self.frames;
+        if frames == 0 {
+            return false;
+        }
+        let output = self.output.pointer(channel);
+        if output.is_null() {
+            return false;
+        }
+        let bytes = frames.saturating_mul(std::mem::size_of::<f32>());
+        let output_start = output as usize;
+        let output_end = output_start.saturating_add(bytes);
+        // 【为什么遍历声明的全部输入声道，而不是只遍历 `channels()`】多声道总线
+        // 只处理前两个，但第 3..N 个输出平面如果与**任何**输入平面重叠，写它同样
+        // 会改到宿主的内存。诊断不碰任何输入内存是更简单、也更安全的边界。
+        (0..self.input.num_channels).any(|input_channel| {
+            let input = self.input.pointer(input_channel);
+            if input.is_null() {
+                return false;
+            }
+            let input_start = input as usize;
+            let input_end = input_start.saturating_add(bytes);
+            output_start < input_end && input_start < output_end
+        })
+    }
+
+    /// 把输出平面预填成 NaN（「高」档 的审计哨兵），返回被跳过的**别名平面**数。
     ///
     /// 【为什么需要它】"输出缓冲残留"是用户提过的方向之一：若某条分支只写了一半，
     /// 宿主会把上一次的内容（in-place 时甚至是**输入原声**）当作这一次的输出播出去。
@@ -203,13 +255,22 @@ impl<'a> AudioBlock<'a> {
     /// 运算产生的值（NaN），回调返回后再扫一遍，任何仍是 NaN 的帧就是漏写 ——
     /// 一次播放就能读到"有没有漏、漏在哪一档"。
     ///
+    /// 【为什么别名平面必须跳过】in-place 宿主下输出平面**就是**输入平面。预填
+    /// 等于把输入写成 NaN；而直通分支在 `source == target` 时没有第二份原始输入
+    /// 可写，只能把 NaN 原样留给宿主。诊断可以暴露 bug，绝不能改变被诊断的行为。
+    ///
     /// 【为什么放在中立层】漏写的分支属于**输出仲裁**（`render_block`），与外壳无关；
     /// 两个格式必须被同一把尺子量。
-    pub fn poison_outputs(&mut self) {
+    pub fn poison_outputs(&mut self) -> usize {
         let frames = self.frames;
+        let mut aliased = 0_usize;
         for channel in 0..self.output.num_channels {
             let plane = self.output.pointer(channel);
             if plane.is_null() {
+                continue;
+            }
+            if self.output_plane_aliases_input(channel) {
+                aliased += 1;
                 continue;
             }
             for index in 0..frames {
@@ -217,23 +278,33 @@ impl<'a> AudioBlock<'a> {
                 unsafe { *plane.add(index) = f32::NAN };
             }
         }
+        aliased
     }
 
-    /// 扫一遍输出平面：返回 `(声明过的最大声道数, 仍是 NaN 的帧数)`。
+    /// 扫一遍输出平面：返回声明过的最大声道数、仍是 NaN 的帧数、被跳过的别名平面数。
     ///
     /// 【为什么按声道累计而不是只数总帧】"第 3、4 声道整块没写"与"两个声道各漏一半"
     /// 在听感上是两件事（前者是环绕声道的残留，后者是块内撕裂），只有分声道读数能把
     /// 它们分开。
-    pub fn count_unwritten(&self) -> (usize, usize) {
+    ///
+    /// 【为什么别名平面不计入 unwritten】它们本来就不该被预填（见
+    /// [`Self::poison_outputs`]）。把宿主原样直通的平面报成"漏写"，等于每次
+    /// in-place 播放都留下一条假警报，真正的漏写反而被淹没。
+    pub fn count_unwritten(&self) -> BufferAudit {
         let frames = self.frames;
         let mut unwritten = 0_usize;
         let mut channels = 0_usize;
+        let mut aliased = 0_usize;
         for channel in 0..self.output.num_channels {
             let plane = self.output.pointer(channel);
             if plane.is_null() {
                 continue;
             }
             channels = channels.max(channel + 1);
+            if self.output_plane_aliases_input(channel) {
+                aliased += 1;
+                continue;
+            }
             for index in 0..frames {
                 // SAFETY: 非空平面至少有 `frames` 个可读样本。
                 if unsafe { *plane.add(index) }.is_nan() {
@@ -241,7 +312,45 @@ impl<'a> AudioBlock<'a> {
                 }
             }
         }
-        (channels, unwritten)
+        BufferAudit {
+            channels,
+            unwritten,
+            aliased,
+        }
+    }
+
+    /// 把非别名输出平面里的非有限样本清成 0，返回清洗的样本数。
+    ///
+    /// 【为什么只在审计发现漏写时调用】正常路径的输出全是有限数；这个函数是
+    /// **最后一道保险**：诊断可以暴露 bug，但绝不能让宿主收到 NaN —— VEGAS 的
+    /// 电平计把 NaN 显示成 +inf dB，用户看到的是"音频爆炸"，而真正的原因只是
+    /// 一次诊断预填。
+    ///
+    /// 【为什么别名平面也不清洗】它们属于输入；写它们同样会改变宿主喂进来的样本。
+    /// 如果那里本来就有 NaN，那是宿主的输入，不是本插件能修的事实。
+    pub fn sanitize_non_finite_outputs(&mut self) -> usize {
+        let frames = self.frames;
+        let mut scrubbed = 0_usize;
+        for channel in 0..self.output.num_channels {
+            let plane = self.output.pointer(channel);
+            if plane.is_null() {
+                continue;
+            }
+            if self.output_plane_aliases_input(channel) {
+                continue;
+            }
+            for index in 0..frames {
+                // SAFETY: 非空平面至少有 `frames` 个可读可写样本。
+                unsafe {
+                    let sample = plane.add(index);
+                    if !(*sample).is_finite() {
+                        *sample = 0.0;
+                        scrubbed += 1;
+                    }
+                }
+            }
+        }
+        scrubbed
     }
 
     /// 把输入原样搬到输出（纯 editor 角色、未知进程形态的降级）。
@@ -329,5 +438,117 @@ impl<'a> AudioBlock<'a> {
         });
         self.output.set_silence_flags(silence);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 把左右两个平面同时当输入与输出：这是 VEGAS 的 in-place 形状。
+    fn in_place_block<'a>(
+        left: &'a mut [f32],
+        right: &'a mut [f32],
+        output_pointers: &'a mut [*mut f32; 2],
+        silence: &'a mut u64,
+    ) -> AudioBlock<'a> {
+        output_pointers[0] = left.as_mut_ptr();
+        output_pointers[1] = right.as_mut_ptr();
+        let input_pointers = output_pointers as *const *mut f32;
+        AudioBlock {
+            frames: left.len(),
+            mode: 0,
+            // SAFETY: 指针数组在本用例的作用域内有效，且两个平面各有 frames 帧。
+            input: unsafe { InputBus::new(input_pointers, 2) },
+            output: OutputBus::new(output_pointers, silence),
+            in_place: true,
+        }
+    }
+
+    /// **别名平面不得被审计哨兵毒化。**
+    ///
+    /// 【为什么这是 VEGAS +inf dB 的单元级回归】in-place 宿主下输出平面就是输入
+    /// 平面；`poison_outputs` 写 NaN 等于把宿主喂进来的样本改坏。直通分支在
+    /// `source == target` 时不会重写，NaN 于是原样回到宿主，电平计显示 +inf dB。
+    #[test]
+    fn poison_outputs_skips_planes_that_alias_input() {
+        let mut left = [0.25_f32, -0.5];
+        let mut right = [0.75_f32, 0.125];
+        let mut pointers = [std::ptr::null_mut(); 2];
+        let mut silence = 0_u64;
+        {
+            let mut block = in_place_block(&mut left, &mut right, &mut pointers, &mut silence);
+            assert_eq!(block.poison_outputs(), 2, "两个平面都是别名，必须全部跳过");
+            assert_eq!(block.count_unwritten().unwritten, 0);
+            assert_eq!(block.count_unwritten().aliased, 2);
+        }
+        assert_eq!(left, [0.25, -0.5], "输入样本必须逐位不变");
+        assert_eq!(right, [0.75, 0.125]);
+        assert!(left
+            .iter()
+            .chain(right.iter())
+            .all(|sample| sample.is_finite()));
+    }
+
+    /// **非别名输出仍然必须被审计到。**
+    ///
+    /// 【为什么与上一条互为反例】别名安全不能退化成"审计什么都不做"：输出与输入
+    /// 是不同缓冲时，漏写的平面必须继续报出来，否则高详细度档就失去了意义。
+    #[test]
+    fn poison_outputs_still_marks_unwritten_non_aliased_planes() {
+        let input_left = [0.1_f32, 0.2, 0.3];
+        let input_right = [0.4_f32, 0.5, 0.6];
+        let mut input_pointers = [
+            input_left.as_ptr() as *mut f32,
+            input_right.as_ptr() as *mut f32,
+        ];
+        let mut output_left = [9.0_f32; 3];
+        let mut output_right = [9.0_f32; 3];
+        let mut output_pointers = [output_left.as_mut_ptr(), output_right.as_mut_ptr()];
+        let mut silence = 0_u64;
+        let mut block = AudioBlock {
+            frames: 3,
+            mode: 0,
+            // SAFETY: 输入平面在 block 存活期间有效，各 3 帧。
+            input: unsafe { InputBus::new(input_pointers.as_mut_ptr(), 2) },
+            output: OutputBus::new(&mut output_pointers, &mut silence),
+            in_place: false,
+        };
+        assert_eq!(block.poison_outputs(), 0);
+        let audit = block.count_unwritten();
+        assert_eq!(audit.channels, 2);
+        assert_eq!(audit.aliased, 0);
+        assert_eq!(audit.unwritten, 6, "两声道各 3 帧都还没写");
+        assert_eq!(block.sanitize_non_finite_outputs(), 6);
+        assert_eq!(block.count_unwritten().unwritten, 0, "清洗之后不得再有 NaN");
+        assert_eq!(output_left, [0.0; 3]);
+        assert_eq!(output_right, [0.0; 3]);
+    }
+
+    /// 部分别名：只跳过重叠的平面，其余照常预填。
+    #[test]
+    fn poison_outputs_only_skips_the_overlapping_plane() {
+        let mut shared = [0.1_f32, 0.2];
+        let mut separate = [9.0_f32, 9.0];
+        let mut input_pointers = [shared.as_mut_ptr(), std::ptr::null_mut()];
+        let mut output_pointers = [shared.as_mut_ptr(), separate.as_mut_ptr()];
+        let mut silence = 0_u64;
+        let mut block = AudioBlock {
+            frames: 2,
+            mode: 0,
+            // SAFETY: 第一个输入平面 2 帧有效；第二个为空（inactive）。
+            input: unsafe { InputBus::new(input_pointers.as_mut_ptr(), 2) },
+            output: OutputBus::new(&mut output_pointers, &mut silence),
+            in_place: false,
+        };
+        assert_eq!(block.poison_outputs(), 1);
+        assert_eq!(shared, [0.1, 0.2], "共享平面必须保持原样");
+        assert_eq!(block.count_unwritten().aliased, 1);
+        assert_eq!(block.count_unwritten().unwritten, 2, "只有非别名平面被预填");
+        drop(block);
+        assert!(
+            separate.iter().all(|sample| sample.is_nan()),
+            "非别名平面必须仍被预填成哨兵"
+        );
     }
 }
