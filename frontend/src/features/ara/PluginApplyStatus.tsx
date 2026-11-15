@@ -98,7 +98,10 @@ export function PluginApplyStatus({
         Number.isFinite(state.render_progress)
             ? Math.max(0, Math.min(1, state.render_progress))
             : null;
-    const progressSuffix = renderProgress != null ? ` ${Math.round(renderProgress * 100)}%` : "";
+    // 【0 不显示百分比】Capture 渲染没有进度回调，后端会一直报 0；把 0%
+    // 显示出来会让用户以为"卡在 0 不动"。有真实进度时才有百分比。
+    const progressSuffix =
+        renderProgress != null && renderProgress > 0 ? ` ${Math.round(renderProgress * 100)}%` : "";
     const label = terminal
         ? terminalLabel
         : audibleState === "preparing"
