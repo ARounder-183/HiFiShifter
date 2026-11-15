@@ -110,6 +110,25 @@ test("插件模式下快照的 rendering_active / render_progress 驱动渲染�
     expect(text()).toContain("42%");
 });
 
+test("渲染中片跟随用户自定义的强调色，而不是灰色", async () => {
+    (window as { __HFS_PLUGIN_BOOTSTRAP__?: unknown }).__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "test",
+    };
+    publishPluginApplyStateForTests(
+        pluginState({ rendering_active: true, render_progress: 0.42, render_audible_stale: false }),
+    );
+    await render();
+    const chip = Array.from(container.querySelectorAll("span")).find((element) =>
+        element.textContent?.includes(enUS.common_rendering),
+    );
+    expect(chip).toBeTruthy();
+    // 状态片的颜色令牌必须仍是 accent 档；写成 neutral 会让所有「渲染中 / 分析中 /
+    // 导入中」提示里唯独这一片变灰，与用户设置的强调色脱节。
+    expect(chip?.style.background).toContain("--accent-3");
+    expect(chip?.style.color).toContain("--accent-11");
+});
+
 test("stale 时左侧不显示，避免与右侧「正在合成」重复", async () => {
     (window as { __HFS_PLUGIN_BOOTSTRAP__?: unknown }).__HFS_PLUGIN_BOOTSTRAP__ = {
         version: 1,

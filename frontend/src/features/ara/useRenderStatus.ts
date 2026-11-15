@@ -8,7 +8,7 @@
  *   `render_progress` / `render_audible_stale`）。
  *
  * 把"读哪一份"收在一处，状态片组件就不必同时知道两条通道；两条通道的语义
- * （stale 只影响色调、不影响是否显示）也只需要在这里解释一次。
+ * （stale 决定左侧片是否让位给右侧的「正在合成」，不改变状态片的强调色）也只需要在这里解释一次。
  */
 import { useSyncExternalStore } from "react";
 
