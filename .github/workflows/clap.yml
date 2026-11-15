@@ -125,12 +125,25 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: pwsh scripts/clap/windows/build.ps1 -SkipVerify
-      - uses: actions/upload-artifact@v7
+      - name: Upload CLAP (Unix)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v7
         with:
           name: clap-${{ matrix.platform }}
+          # 只传压缩包：dist/clap/** 是同一份 bundle 的原始目录，再传一遍
+          # 会让 artifact 里出现两份完整的 200 MB 权重。
           path: |
-            dist/clap/**
-            dist/HiFiShifter_*clap*
+            dist/HiFiShifter_*clap*.tar.gz
+            dist/HiFiShifter_*clap*.tar.gz.sha256
           # 本 job 的唯一交付物就是这份产物：glob 与脚本输出布局漂移时必须当场红，
           # 不能 warn 后带着空产物绿灯（build.yml 的上传全部用 error，同一纪律）。
+          if-no-files-found: error
+
+      - name: Upload CLAP (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: clap-${{ matrix.platform }}
+          # Windows 的 CLAP 是单文件模块，资源目录跟着模块走；没有 tar.gz。
+          path: dist/clap/**
           if-no-files-found: error
