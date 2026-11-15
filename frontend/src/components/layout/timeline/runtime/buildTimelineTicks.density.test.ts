@@ -291,4 +291,52 @@ describe("标尺标签间距上限（密度）", () => {
         }
         expect(compared).toBeGreaterThan(0);
     });
+
+    it("★ spacing 压到下限时，先出现的强制变化点标签不得被 §5 隐藏", () => {
+        // 回归：§4 给强制标签的间距下限是 `spacingPx`（下限 24），而 §5 的让位阈值是
+        // 固定的 26 —— 两个都带强制标记的标签落在 24~26px 之间时，"左侧强制则让
+        // 右侧"的分支对 forced→forced 不生效，落入通用让位分支把左侧变化点标签
+        // 关掉，与 §4"变化点是时间地标、必须带标签"自相矛盾。修复是让 §4 的强制
+        // 间距直接钉在让位阈值上。
+        // 构造：bpm=120（每拍 0.5s）、1/8 网格（每格 0.25s）、pps=100 → 相邻两格
+        // 恰好 25px，落在 [24, 26) 区间内；两个变化点相距一个格子。
+        const twoAdjacentPoints: TempoMap = {
+            points: [
+                {
+                    id: "p0",
+                    positionSec: 0,
+                    bpm: 120,
+                    timeSignature: { numerator: 4, denominator: 4 },
+                    scale: null,
+                },
+                {
+                    id: "p1",
+                    positionSec: 0.25,
+                    bpm: 120,
+                    timeSignature: { numerator: 4, denominator: 4 },
+                    scale: null,
+                },
+            ],
+        };
+        const { axis } = createTickAxis({
+            pxPerSec: 100,
+            scrollLeftPx: 0,
+            viewportWidthPx: 900,
+        });
+        const ticks = buildTimelineTicks({
+            axis,
+            bpm: 120,
+            beatsPerBar: 4,
+            grid: "1/8",
+            primaryUnit: "barBeats",
+            secondaryUnit: "clock",
+            minLabelSpacingPx: 24,
+            minGridSpacingPx: 8,
+            swingPercent: 0,
+            tempoMap: twoAdjacentPoints,
+        });
+        const firstChangePoint = ticks.find((tick) => Math.round(tick.sec * 1e6) === 0);
+        expect(firstChangePoint, "t=0 处必须存在网格刻度").toBeDefined();
+        expect(firstChangePoint?.showLabel, "§4 强制的变化点标签被 §5 隐藏").toBe(true);
+    });
 });

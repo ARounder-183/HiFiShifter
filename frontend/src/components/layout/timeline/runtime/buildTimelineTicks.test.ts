@@ -322,4 +322,89 @@ test("components/layout/timeline/runtime/buildTimelineTicks.test.ts scripted che
             }
         }
     }
+
+    // ── 8. Tempo Map 变化点后重新对齐（自 buildRulerTicks 迁移）──────
+    // 旧标尺管线（buildRulerTicks）删除前，这两组断言钉住它的输出；统一管线
+    // 的分段折算必须给出逐字节相同的标签文本，故在此继承。
+    {
+        // 空工程 120bpm 4/4，在 7.25s 插入变化点（同 BPM）：变化点后按段起点
+        // 重新对齐（不得沿用旧均匀网格位置 7.5/8.0/8.5）。
+        const map = {
+            points: [
+                {
+                    id: "p0",
+                    positionSec: 0,
+                    bpm: 120,
+                    timeSignature: { numerator: 4, denominator: 4 },
+                    scale: null,
+                },
+                {
+                    id: "p1",
+                    positionSec: 7.25,
+                    bpm: 120,
+                    timeSignature: { numerator: 4, denominator: 4 },
+                    scale: null,
+                },
+            ],
+        } as unknown as TempoMap;
+        const axis = createTimelineAxis({ pxPerSec: 480, viewportWidthPx: 4000 });
+        const ticks = buildTimelineTicks({
+            axis,
+            bpm: 120,
+            beatsPerBar: 4,
+            grid: "1/4",
+            primaryUnit: "barBeats",
+            secondaryUnit: "none",
+            minLabelSpacingPx: 90,
+            tempoMap: map,
+        });
+        const secs = ticks.map((tick) => tick.sec);
+        for (const bad of [7.5, 8.0, 8.5]) {
+            assertTrue(
+                !secs.some((sec) => Math.abs(sec - bad) < 1e-9),
+                `tempo ruler: stale old-grid tick at ${bad}`,
+            );
+        }
+        const at725 = ticks.find((tick) => Math.abs(tick.sec - 7.25) < 1e-9);
+        assertEqual(at725?.primaryLabel, "5.1", "tempo ruler: segment start label");
+        assertEqual(at725?.isBarStart, true, "tempo ruler: segment start is bar");
+        assertTrue(at725?.showLabel === true, "tempo ruler: segment start carries label");
+        const at775 = ticks.find((tick) => Math.abs(tick.sec - 7.75) < 1e-9);
+        assertEqual(at775?.primaryLabel, "5.2", "tempo ruler: next beat at 7.75");
+        assertEqual(at775?.isBarStart, false, "tempo ruler: beat tick not bar");
+        const at925 = ticks.find((tick) => Math.abs(tick.sec - 9.25) < 1e-9);
+        assertEqual(at925?.primaryLabel, "6.1", "tempo ruler: next bar at 9.25");
+        assertEqual(at925?.isBarStart, true, "tempo ruler: bar tick flagged");
+    }
+    {
+        // 0s 起 3/4（每小节 1.5s @120），3s 处变化点"跟随之前的拍号" → 继续
+        // 3/4 对齐：4.5s 必须仍是小节起点。
+        const map = {
+            points: [
+                {
+                    id: "p0",
+                    positionSec: 0,
+                    bpm: 120,
+                    timeSignature: { numerator: 3, denominator: 4 },
+                    scale: null,
+                },
+                { id: "p1", positionSec: 3, bpm: 120, timeSignature: null, scale: null },
+            ],
+        } as unknown as TempoMap;
+        const axis = createTimelineAxis({ pxPerSec: 480, viewportWidthPx: 4000 });
+        const ticks = buildTimelineTicks({
+            axis,
+            bpm: 120,
+            beatsPerBar: 4,
+            grid: "1/4",
+            primaryUnit: "barBeats",
+            secondaryUnit: "none",
+            minLabelSpacingPx: 90,
+            tempoMap: map,
+        });
+        const at45 = ticks.find((tick) => Math.abs(tick.sec - 4.5) < 1e-9);
+        assertEqual(at45?.primaryLabel, "4.1", "tempo ruler follow-sig: 3/4 bar continues");
+        assertEqual(at45?.isBarStart, true, "tempo ruler follow-sig: bar tick flagged");
+        assertTrue(at45?.showLabel === true, "tempo ruler follow-sig: bar carries label");
+    }
 });

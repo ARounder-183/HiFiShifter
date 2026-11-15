@@ -2,7 +2,6 @@ import { test } from "vitest";
 
 import {
     resolveHorizontalWheelZoom,
-    resolveCanvasViewportOffset,
     resolvePlayheadZoomScrollLeft,
     resolveTimelineScrollRange,
 } from "./timelineScrollRange.ts";
@@ -26,29 +25,6 @@ test("components/layout/timeline/runtime/timelineScrollRange.test.ts scripted ch
         if (actual !== expected) {
             throw new Error(`${label}: expected ${expected}, received ${actual}`);
         }
-    }
-
-    // A viewport-sized canvas renders local coordinates (world - requested
-    // scroll). Its wrapper lives inside the scrolled content, so the wrapper must
-    // be placed at the actual native scroll offset. Using only the rounding
-    // residual leaves the whole canvas near content x=0 and clips appear to jump
-    // out of view after zooming.
-    {
-        const result = resolveCanvasViewportOffset({
-            requestedScrollLeft: 2456.789,
-            actualScrollLeft: 2456,
-            viewportWidth: 987.654,
-        });
-        assertNear(
-            result.leftPx,
-            2456,
-            "canvas wrapper follows native scroll position beyond one viewport",
-        );
-        assertNear(
-            result.localScrollLeftPx,
-            2456.789,
-            "canvas keeps the exact requested local scroll position",
-        );
     }
 
     // 工程小于视口：右侧允许滚到工程右端，左侧不允许越过工程起点
