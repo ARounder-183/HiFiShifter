@@ -1,7 +1,9 @@
 //! 按插件格式解析资源根（D9）。
 //!
-//! VST3 / macOS CLAP / AU 是 bundle（`Contents/Resources`），Linux/Windows CLAP 是单文件
-//! （同级 `HiFiShifter-resources`）。模型目录统一再交给 `model_store`，本模块只回答路径。
+//! VST3 / macOS CLAP / AU 是 bundle（`Contents/Resources`），Linux CLAP 是单文件
+//! （同级 `HiFiShifter-resources`）。Windows 安装器版是**例外**：CLAP 公共插件目录
+//! 只放 `.clap` 一个文件，资源改放全机共享目录（`%PROGRAMDATA%\HiFiShifter\plugin-resources`），
+//! 见 `shared_plugin_resources`。模型目录统一再交给 `model_store`，本模块只回答路径。
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -117,12 +119,50 @@ pub fn resources_dir_for(module_path: &Path, layout: ResourceLayout) -> Result<P
     }
 }
 
+/// Windows 安装器把插件资源写到哪儿。
+///
+/// 【为什么不在 CLAP 目录里】`C:\Program Files\Common Files\CLAP` 是**全机共享**的插件
+/// 目录，规范里只应该出现 `.clap` 文件本身；别人的插件也装在这里。把我们自己的
+/// `frontend/` 与 `models.json` 摆在旁边，用户看到的是一堆看不出归属的文件，删除时
+/// 也无从判断该不该动。放这里之后，CLAP 目录里只有 `HiFiShifter.clap` 一个条目。
+///
+/// 【为什么仍然先看同级目录】手动拷贝与便携包是自包含的（`HiFiShifter.clap` +
+/// 同级 `HiFiShifter-resources`），那份必须优先，否则用户把整套拷到别处就跑不起来。
+/// 共享目录只是安装器版的兜底。
+#[cfg(windows)]
+fn shared_plugin_resources_at(programdata: &Path) -> PathBuf {
+    programdata
+        .join(crate::CLASS_NAME)
+        .join("plugin-resources")
+}
+
+#[cfg(windows)]
+fn shared_plugin_resources() -> Option<PathBuf> {
+    Some(shared_plugin_resources_at(Path::new(
+        &std::env::var_os("PROGRAMDATA")?,
+    )))
+}
+
 /// 当前进程登记后的资源根。
+///
+/// 顺序：同级 `<stem>-resources`（bundle / 便携 / 手动拷贝）> Windows 全机共享目录。
 pub fn resources_dir() -> Result<PathBuf, String> {
     let module = MODULE_PATH
         .get()
         .ok_or_else(|| "module path is not registered".to_string())?;
-    resources_dir_for(module, layout())
+    let sibling = resources_dir_for(module, layout())?;
+    if crate::has_frontend_entry(&sibling) {
+        return Ok(sibling);
+    }
+    #[cfg(windows)]
+    {
+        if let Some(shared) = shared_plugin_resources() {
+            if crate::has_frontend_entry(&shared) {
+                return Ok(shared);
+            }
+        }
+    }
+    Ok(sibling)
 }
 
 #[cfg(test)]
@@ -163,6 +203,26 @@ mod tests {
     fn relative_editor_asset_override_is_rejected() {
         let error = editor_override(Path::new("frontend/dist")).unwrap_err();
         assert!(error.contains("absolute"), "{error}");
+    }
+
+    /// 安装器版：CLAP 目录里只有 `.clap`，资源落在全机共享目录。
+    /// 这条路径必须与安装器的 `HFS_CLAP_RES_DIR` 逐字一致，否则插件窗口一片空白。
+    #[cfg(windows)]
+    #[test]
+    fn the_shared_plugin_resources_dir_matches_the_installer_layout() {
+        let dir = shared_plugin_resources_at(Path::new("C:/ProgramData"));
+        assert_eq!(
+            dir,
+            Path::new("C:/ProgramData/HiFiShifter/plugin-resources")
+        );
+    }
+
+    /// 同级目录优先：便携包 / 手动拷贝是自包含的，不能被共享目录抢走。
+    #[test]
+    fn a_sibling_resources_dir_wins_over_the_shared_one() {
+        let module = Path::new("/plug/HiFiShifter.clap");
+        let sibling = resources_dir_for(module, ResourceLayout::Sibling).unwrap();
+        assert_eq!(sibling, Path::new("/plug/HiFiShifter-resources"));
     }
 
     #[test]

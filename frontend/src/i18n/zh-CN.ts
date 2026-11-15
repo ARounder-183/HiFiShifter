@@ -2313,4 +2313,9 @@ export const zhCN = {
     installer_uninstall_opt_cache: "清理缓存与日志",
     installer_uninstall_opt_cache_desc: "波形/渲染缓存、日志、WebView 数据与临时文件。",
     installer_repair_done: "修复完成。",
+    installer_reinstall_options_title: "卸载旧版本",
+    installer_reinstall_options_subtitle: "选择安装前是否删除共享模型文件。",
+    installer_reinstall_options_top: "检测到已安装的 HiFiShifter。安装新版本前将先卸载旧版本，并沿用原来的安装目录。",
+    installer_reinstall_uninstalling: "正在卸载旧版本...",
+    installer_reinstall_failed: "卸载旧版本失败，请先手动卸载后重试。",
 } as const;

@@ -102,9 +102,64 @@ Test-Invariant '随包许可清单齐全（LICENSE + licenses\ 目录）' {
 
 # 这几条都是"手改回去就静默丢一个用户可见能力"的地方：没有卸载项、重复安装堆积资产、
 # 模型又回到 bundle 里各存一份。
+# 覆盖安装**绝不允许**再执行旧版卸载器：旧版 uninstall.exe 是上一版编译出来的二进制，
+# 它在 /S 下是否真的静默不由本脚本决定（Tauri 卸载器会弹语言选择框、宿主占用提示是
+# 不带 /SD 的 MessageBox）。执行它 = 用户安装过程中额外看到一个"HiFiShifter 卸载"窗口。
+# 卸载动作必须由本安装器在进程内完成（HfsRemovePreviousInstall），覆盖安装路径上不能
+# 出现任何子进程窗口。
+Test-Invariant '覆盖安装不执行旧版卸载器（没有第二个卸载窗口）' {
+    $nsi = Get-RepoText 'scripts/release/merged-installer.nsi'
+    # 只看非注释行：注释里提到 ExecWait 是在解释"为什么不能这么做"。
+    $code = @(($nsi -split "`n") | Where-Object { $_ -notmatch '^\s*;' })
+    $launchers = @($code | Where-Object { $_ -match '^\s*(ExecWait|ExecShell|Exec)\b.*(uninstall|Uninstaller)' })
+    if ($launchers.Count) {
+        throw "merged-installer.nsi 仍在启动旧版卸载器：$($launchers[0].Trim())"
+    }
+    foreach ($forbidden in 'HfsOldUninstaller', 'HfsParseUninstallString') {
+        if ($nsi -match $forbidden) { throw "merged-installer.nsi 仍在引用 $forbidden" }
+    }
+    # 共享模型库的落点会随安装器版本变：根必须写进卸载项、卸载器必须读回来，
+    # 否则"卸载了模型还在"或"保留的模型新版根本不读"。
+    if ($nsi -notmatch '"ModelRoot"') {
+        throw 'merged-installer.nsi 没有把共享模型库根写进卸载项（ModelRoot）'
+    }
+    if ($nsi -notmatch 'ReadRegStr \$HfsModelRoot') {
+        throw 'merged-installer.nsi 的卸载器没有从卸载项读回共享模型库根'
+    }
+    if ($nsi -notmatch 'Function HfsRemovePreviousInstall') {
+        throw 'merged-installer.nsi 缺少进程内移除上一版的 HfsRemovePreviousInstall'
+    }
+    if ($nsi -match 'HFS_REINSTALL_CONFIRM|MB_YESNO') {
+        throw 'merged-installer.nsi 仍在覆盖安装选项页之外弹确认框'
+    }
+    # 静默安装/卸载里任何 MessageBox 都必须有 /SD 默认值，否则 NSIS 会停在一个
+    # 看不见的对话框上，表现成"安装器/卸载器卡住"。
+    $boxes = @(($nsi -split "`n") | Where-Object { $_ -match '^\s*MessageBox' })
+    $unguarded = @($boxes | Where-Object { $_ -notmatch '/SD' })
+    if ($unguarded.Count) { throw "merged-installer.nsi 有 $($unguarded.Count) 个 MessageBox 缺 /SD" }
+    '进程内移除、无确认框、所有 MessageBox 有 /SD'
+}
+
+# CLAP 的公共插件目录（Common Files\CLAP）是全机共享的：规范里只该出现 .clap 文件本身。
+# 把 frontend/ 与 models.json 摆成通用名的兄弟目录，用户分不清归属、删也不敢删，
+# 而且和别人的插件混在同一个目录里。资源必须落在产品自己的共享目录。
+Test-Invariant 'CLAP 公共目录里只放插件模块' {
+    $nsi = Get-RepoText 'scripts/release/merged-installer.nsi'
+    if ($nsi -notmatch 'HFS_CLAP_RES_DIR') {
+        throw 'merged-installer.nsi 没有把插件资源指到产品自己的目录（HFS_CLAP_RES_DIR）'
+    }
+    if ($nsi -match 'SetOutPath "\$HfsClapDir\\\$\{CLAP_RESOURCES\}"') {
+        throw 'merged-installer.nsi 仍把资源装进公共 CLAP 目录'
+    }
+    if ($nsi -notmatch 'RMDir /r "\$HfsClapDir\\\$\{CLAP_RESOURCES\}"') {
+        throw 'merged-installer.nsi 升级时没有清掉旧版留在公共 CLAP 目录里的资源文件夹'
+    }
+    'only HiFiShifter.clap in Common Files\CLAP'
+}
+
 Test-Invariant '合并安装器注册卸载项、清理受管目录、模型走共享库' {
     $nsi = Get-RepoText 'scripts/release/merged-installer.nsi'
-    foreach ($required in 'WriteUninstaller', 'UninstallString', 'InstallLocation', 'MODELS_VERSION', 'APP_VERSION', 'FILEASSOC_PROGID', 'Software\Classes') {
+    foreach ($required in 'WriteUninstaller', 'UninstallString', 'InstallLocation', 'ModelRoot', 'MODELS_VERSION', 'APP_VERSION', 'FILEASSOC_PROGID', 'Software\Classes') {
         if ($nsi -notmatch [regex]::Escape($required)) { throw "merged-installer.nsi 缺少 $required" }
     }
     if ($nsi -notmatch 'RMDir /r .*Resources\\frontend') {

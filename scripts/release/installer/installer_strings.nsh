@@ -5,7 +5,7 @@
 ; 会因与本文件不一致而失败。
 
 ; 语言：en-US→English、zh-CN→SimpChinese、zh-TW→TradChinese、ja-JP→Japanese、ko-KR→Korean
-; 词条：43 条 × 5 种语言
+; 词条：48 条 × 5 种语言
 
 ; installer_app_dir_text
 LangString HFS_APP_DIR_TEXT ${LANG_ENGLISH} "Choose the app install folder."
@@ -223,6 +223,41 @@ LangString HFS_PUBLISHER ${LANG_SIMPCHINESE} "ARounder"
 LangString HFS_PUBLISHER ${LANG_TRADCHINESE} "ARounder"
 LangString HFS_PUBLISHER ${LANG_JAPANESE} "ARounder"
 LangString HFS_PUBLISHER ${LANG_KOREAN} "ARounder"
+
+; installer_reinstall_failed
+LangString HFS_REINSTALL_FAILED ${LANG_ENGLISH} "Could not uninstall the previous version. Uninstall it manually and try again."
+LangString HFS_REINSTALL_FAILED ${LANG_SIMPCHINESE} "卸载旧版本失败，请先手动卸载后重试。"
+LangString HFS_REINSTALL_FAILED ${LANG_TRADCHINESE} "卸載舊版本失敗，請先手動卸載後重試。"
+LangString HFS_REINSTALL_FAILED ${LANG_JAPANESE} "旧バージョンをアンインストールできませんでした。手動でアンインストールしてから再試行してください。"
+LangString HFS_REINSTALL_FAILED ${LANG_KOREAN} "이전 버전을 제거하지 못했습니다. 직접 제거한 뒤 다시 시도하세요."
+
+; installer_reinstall_options_subtitle
+LangString HFS_REINSTALL_OPTIONS_SUBTITLE ${LANG_ENGLISH} "Choose whether to delete shared model files before installing."
+LangString HFS_REINSTALL_OPTIONS_SUBTITLE ${LANG_SIMPCHINESE} "选择安装前是否删除共享模型文件。"
+LangString HFS_REINSTALL_OPTIONS_SUBTITLE ${LANG_TRADCHINESE} "選擇安裝前是否刪除共用模型檔案。"
+LangString HFS_REINSTALL_OPTIONS_SUBTITLE ${LANG_JAPANESE} "インストール前に共有モデルを削除するか選択してください。"
+LangString HFS_REINSTALL_OPTIONS_SUBTITLE ${LANG_KOREAN} "설치 전에 공유 모델 파일을 삭제할지 선택하세요."
+
+; installer_reinstall_options_title
+LangString HFS_REINSTALL_OPTIONS_TITLE ${LANG_ENGLISH} "Remove the previous version"
+LangString HFS_REINSTALL_OPTIONS_TITLE ${LANG_SIMPCHINESE} "卸载旧版本"
+LangString HFS_REINSTALL_OPTIONS_TITLE ${LANG_TRADCHINESE} "卸載舊版本"
+LangString HFS_REINSTALL_OPTIONS_TITLE ${LANG_JAPANESE} "旧バージョンのアンインストール"
+LangString HFS_REINSTALL_OPTIONS_TITLE ${LANG_KOREAN} "이전 버전 제거"
+
+; installer_reinstall_options_top
+LangString HFS_REINSTALL_OPTIONS_TOP ${LANG_ENGLISH} "A previous version of HiFiShifter was found. It will be uninstalled first. The new version will use the same install folder."
+LangString HFS_REINSTALL_OPTIONS_TOP ${LANG_SIMPCHINESE} "检测到已安装的 HiFiShifter。安装新版本前将先卸载旧版本，并沿用原来的安装目录。"
+LangString HFS_REINSTALL_OPTIONS_TOP ${LANG_TRADCHINESE} "偵測到已安裝的 HiFiShifter。安裝新版本前會先卸載舊版本，並沿用原來的安裝目錄。"
+LangString HFS_REINSTALL_OPTIONS_TOP ${LANG_JAPANESE} "HiFiShifter の旧バージョンが見つかりました。先にアンインストールし、新しいバージョンは同じフォルダーにインストールします。"
+LangString HFS_REINSTALL_OPTIONS_TOP ${LANG_KOREAN} "이전 버전의 HiFiShifter가 있습니다. 새 버전을 설치하기 전에 먼저 제거하며 같은 설치 폴더를 사용합니다."
+
+; installer_reinstall_uninstalling
+LangString HFS_REINSTALL_UNINSTALLING ${LANG_ENGLISH} "Uninstalling the previous version..."
+LangString HFS_REINSTALL_UNINSTALLING ${LANG_SIMPCHINESE} "正在卸载旧版本..."
+LangString HFS_REINSTALL_UNINSTALLING ${LANG_TRADCHINESE} "正在卸載舊版本..."
+LangString HFS_REINSTALL_UNINSTALLING ${LANG_JAPANESE} "旧バージョンをアンインストール中..."
+LangString HFS_REINSTALL_UNINSTALLING ${LANG_KOREAN} "이전 버전을 제거하는 중..."
 
 ; installer_repair_done
 LangString HFS_REPAIR_DONE ${LANG_ENGLISH} "Repair complete."
