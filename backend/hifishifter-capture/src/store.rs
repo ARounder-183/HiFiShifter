@@ -289,6 +289,19 @@ pub struct CaptureStatus {
 ///
 /// 【为什么是实例级而不是进程级】同一文档上可能有两个实例，一个在录、一个在放。
 /// 共享状态会让它们互相覆盖。
+/// 一次投影的完整产物（按素材代次缓存）。
+///
+/// 【为什么缓存整份】循环合成可能要复制几十 MB PCM；状态栏每 250 ms 读一次
+/// `material_summary`，渲染准备还要读时间线 + 源表 + 指纹。各自重建一次就是
+/// 同一份合成在几毫秒内做四遍。素材代次（`revision`）是唯一失效键。
+struct ProjectionCache {
+    revision: u64,
+    timeline: TimelineState,
+    summary: timeline::TimelineSummary,
+    sources: HashMap<String, Arc<CapturePcm>>,
+    fingerprints: HashMap<String, u64>,
+}
+
 pub struct CaptureStore {
     /// 音频线程只读这一个原子就能早退。
     armed: AtomicBool,
@@ -308,6 +321,8 @@ pub struct CaptureStore {
     /// **绝不阻塞**。非音频线程持有它做补缓冲/收段/promote。
     capture: Mutex<Capture>,
     takes: Mutex<Vec<CaptureTake>>,
+    /// 按素材代次缓存的投影产物（见 `ProjectionCache`）。
+    projection_cache: Mutex<Option<ProjectionCache>>,
     /// 上一次恢复时**读不出来**的 take（见 [`MissingCapture`]）。
     ///
     /// 只在 `restore_manifest` 里写；界面据此给出"这些音频不在本地"的提示。
@@ -399,6 +414,7 @@ impl Default for CaptureStore {
             recording_active: AtomicBool::new(false),
             capture: Mutex::new(Capture::default()),
             takes: Mutex::new(Vec::new()),
+            projection_cache: Mutex::new(None),
             missing: Mutex::new(Vec::new()),
             next_take_id: AtomicU64::new(1),
             material_present: AtomicBool::new(false),
@@ -541,6 +557,19 @@ pub fn content_id_for_hash(hash: &[u8; 32]) -> String {
         let _ = write!(&mut hex, "{byte:02x}");
     }
     format!("capture://blake3:{hex}")
+}
+
+/// 一个 take 的内容指纹（内容哈希前 8 字节）。
+///
+/// 【为什么与 `content_id` 分开】`content_id` 是"这份素材叫什么"（本次投影的源键），
+/// 指纹是"这份 PCM 是什么"（分析缓存键）。合成源没有 sidecar 哈希，由投影在
+/// 合成完成后对平面计算；普通源直接用 promote 时已经算好的这一份。
+fn content_fingerprint_of_take(take: &CaptureTake) -> u64 {
+    u64::from_le_bytes(
+        take.content_hash[..8]
+            .try_into()
+            .expect("content hash is 32 bytes"),
+    )
 }
 
 fn parse_content_hash(value: &str) -> Option<[u8; 32]> {
@@ -740,9 +769,54 @@ impl CaptureStore {
             .map(|take| ProjectionTake {
                 id: take.id,
                 segments: &take.segments,
+                content_fingerprint: Some(content_fingerprint_of_take(take)),
             })
             .collect();
         f(&input)
+    }
+
+    /// 读取按素材代次缓存的投影产物；缓存未命中时构建一次。
+    ///
+    /// 【为什么不在持锁时回调】`build_projection_cache` 要取 `takes` 锁；缓存锁
+    /// 只在读/写那一瞬持有，避免"缓存 → takes"与"takes → 缓存"两把锁交叉。
+    fn with_projection_cache<T>(&self, f: impl FnOnce(&ProjectionCache) -> T) -> T {
+        let revision = self.revision.load(Ordering::Acquire);
+        {
+            let cached = self.projection_cache.lock_or_recover();
+            if let Some(cache) = cached.as_ref().filter(|cache| cache.revision == revision) {
+                return f(cache);
+            }
+        }
+        let built = self.build_projection_cache();
+        let result = f(&built);
+        *self.projection_cache.lock_or_recover() = Some(built);
+        result
+    }
+
+    /// 构建一次完整投影（时间线 + 源 PCM + 内容指纹）。
+    fn build_projection_cache(&self) -> ProjectionCache {
+        let takes = self.takes.lock_or_recover();
+        let input: Vec<ProjectionTake<'_>> = takes
+            .iter()
+            .map(|take| ProjectionTake {
+                id: take.id,
+                segments: &take.segments,
+                content_fingerprint: Some(content_fingerprint_of_take(take)),
+            })
+            .collect();
+        // 【只 build 一次】时间线、源表与指纹都从同一份 `tapes` 派生；循环合成
+        // （可能几十 MB 的复制）因此只发生一次。
+        let (tapes, dropped) = timeline::build_tapes(&input);
+        let (timeline, summary) = timeline::project_tapes(&tapes, dropped, 120.0);
+        let sources = timeline::sources_from_tapes(&tapes);
+        let fingerprints = timeline::fingerprints_from_tapes(&tapes);
+        ProjectionCache {
+            revision: self.revision.load(Ordering::Acquire),
+            timeline,
+            summary,
+            sources,
+            fingerprints,
+        }
     }
 
     /// 记录本块的样本精度（`ProcessData::symbolic_sample_size`）。
@@ -1627,33 +1701,29 @@ impl CaptureStore {
     /// 【为什么片段数取投影而不是逐 take 相加】用户看到的是投影后的时间线：被补录盖住
     /// 的部分已经不在那里了。逐 take 相加会报出一个用户看不见的数字。
     pub fn material_summary(&self) -> Option<MaterialSummary> {
-        let takes = self.takes.lock_or_recover();
-        if takes.iter().all(|take| take.segments.is_empty()) {
-            return None;
-        }
-        let captured_frames: u64 = takes
-            .iter()
-            .flat_map(|take| take.segments.iter())
-            .map(|segment| segment.filled as u64)
-            .sum();
-        let sample_rate = takes
-            .iter()
-            .flat_map(|take| take.segments.iter())
-            .map(|segment| segment.sample_rate)
-            .max()
-            .unwrap_or(0);
-        let pre_roll_frames = takes
-            .iter()
-            .map(|take| take.pre_roll_frames)
-            .fold(0_u64, u64::saturating_add);
-        let input: Vec<ProjectionTake<'_>> = takes
-            .iter()
-            .map(|take| ProjectionTake {
-                id: take.id,
-                segments: &take.segments,
-            })
-            .collect();
-        let (_, summary) = timeline::project(&input, 120.0);
+        let (captured_frames, sample_rate, pre_roll_frames) = {
+            let takes = self.takes.lock_or_recover();
+            if takes.iter().all(|take| take.segments.is_empty()) {
+                return None;
+            }
+            let captured_frames: u64 = takes
+                .iter()
+                .flat_map(|take| take.segments.iter())
+                .map(|segment| segment.filled as u64)
+                .sum();
+            let sample_rate = takes
+                .iter()
+                .flat_map(|take| take.segments.iter())
+                .map(|segment| segment.sample_rate)
+                .max()
+                .unwrap_or(0);
+            let pre_roll_frames = takes
+                .iter()
+                .map(|take| take.pre_roll_frames)
+                .fold(0_u64, u64::saturating_add);
+            (captured_frames, sample_rate, pre_roll_frames)
+        };
+        let summary = self.with_projection_cache(|cache| cache.summary.clone());
         Some(MaterialSummary {
             clips: summary.clips,
             captured_frames,
@@ -1800,16 +1870,15 @@ impl CaptureStore {
     /// 会话时间线里的用户曲线合进来）；这个"只用捕获存储几何"的版本供测试与诊断验证
     /// 投影本身。
     pub fn render_input(&self) -> Option<CaptureRenderInput> {
-        self.with_projection(|input| {
-            let (timeline, _) = timeline::project(input, 120.0);
-            if timeline.clips.is_empty() {
-                return None;
-            }
-            // T14：覆盖起点必须落在**最早被捕获的段起点**上；晚于它就说明前导静音
-            // 在投影阶段被丢掉了，播放会在那个位置发生一次源切换。
-            note_coverage_start_gap(input, &timeline);
-            Some((timeline.clone(), regions_for(&timeline), sources_for(input)))
-        })
+        let (timeline, sources) =
+            self.with_projection_cache(|cache| (cache.timeline.clone(), cache.sources.clone()));
+        if timeline.clips.is_empty() {
+            return None;
+        }
+        // T14：覆盖起点必须落在**最早被捕获的段起点**上；晚于它就说明前导静音
+        // 在投影阶段被丢掉了，播放会在那个位置发生一次源切换。
+        self.with_projection(|input| note_coverage_start_gap(input, &timeline));
+        Some((timeline.clone(), regions_for(&timeline), sources))
     }
 
     /// 会话用的时间线 + 素材（**不**构造渲染区域）。
@@ -1818,10 +1887,7 @@ impl CaptureStore {
     /// 是"界面该显示什么"。还没有素材（用户还没录）时编辑器必须拿到一条**空的**
     /// 时间线，而不是 `None` —— 否则界面停在"没有时间线"，而不是"还没有内容，请录制"。
     pub fn session_timeline(&self) -> (TimelineState, HashMap<String, Arc<CapturePcm>>) {
-        self.with_projection(|input| {
-            let (timeline, _) = timeline::project(input, 120.0);
-            (timeline, sources_for(input))
-        })
+        self.with_projection_cache(|cache| (cache.timeline.clone(), cache.sources.clone()))
     }
 
     /// 用**给定的**时间线构造渲染区域。
@@ -1837,20 +1903,12 @@ impl CaptureStore {
 
     /// 全部素材的源 PCM 表（按源 id 索引）。
     pub fn material_sources(&self) -> HashMap<String, Arc<CapturePcm>> {
-        self.with_projection(sources_for)
+        self.with_projection_cache(|cache| cache.sources.clone())
     }
 
     /// 内容 id -> 稳定的分析指纹（取 BLAKE3 前 8 字节）。
     pub fn content_fingerprints(&self) -> HashMap<String, u64> {
-        self.takes
-            .lock_or_recover()
-            .iter()
-            .map(|take| {
-                let bytes = &take.content_hash[..8];
-                let stamp = u64::from_le_bytes(bytes.try_into().expect("8 bytes"));
-                (take.content_id.clone(), stamp)
-            })
-            .collect()
+        self.with_projection_cache(|cache| cache.fingerprints.clone())
     }
 
     /// 素材的**未处理** PCM，做成一份可直接发布的快照（"原始磁带"）。
@@ -2067,6 +2125,7 @@ fn allocate_spare(capacity: usize, channels: u8) -> Option<Segment> {
         filled: 0,
         loss: crate::recorder::SegmentLoss::First,
         loop_start: None,
+        loop_end: None,
         pass_id: 0,
         source_key: None,
         peak: [0.0; 2],
@@ -2090,34 +2149,6 @@ pub type CaptureRenderInput = (
     Vec<crate::types::CaptureRegion>,
     HashMap<String, Arc<CapturePcm>>,
 );
-
-/// 一份源与一个连续源窗 —— 段一份源会让跨段片段无法表达。源域因此是**素材带**：
-/// 段按录制顺序首尾相接，带内偏移就是源窗的坐标系。
-///
-/// 【为什么在这里拼而不是让每个消费方各拼一遍】源表是渲染与波形的共同输入，
-/// 而"带 = 段的顺序拼接"这条规则只能有一处实现 —— 两处实现必然漂移，
-/// 表现为"听到的与看到的不是同一段音频"。
-fn sources_for(takes: &[ProjectionTake<'_>]) -> HashMap<String, Arc<CapturePcm>> {
-    let (tapes, _) = timeline::build_tapes(takes);
-    tapes
-        .iter()
-        .map(|tape| {
-            (
-                tape.source_key(),
-                Arc::new(CapturePcm {
-                    // 【T-S1-1：覆盖跟着源一起走】`concat_planes` 把"我们没拿到样本"
-                    // 的帧写成数字零；不带覆盖的话，下游无法把那段零与"用户真的安静"
-                    // 分开，于是它按满幅输出、盖掉宿主原声 —— 洞的两侧各是一次硬切。
-                    covered: tape.covered_ranges(),
-                    sample_rate: tape.sample_rate,
-                    planes: tape.concat_planes(),
-                    version: tape.take,
-                    _reservation: None,
-                }),
-            )
-        })
-        .collect()
-}
 
 /// 一次录制的覆盖形状：`(区间数, 洞数)`。
 ///
@@ -2622,6 +2653,7 @@ mod tests {
             filled: 512,
             loss: crate::recorder::SegmentLoss::First,
             loop_start: None,
+            loop_end: None,
             pass_id: 0,
             source_key: None,
             peak: [0.4; 2],
@@ -2631,6 +2663,122 @@ mod tests {
             coverage_overrun: false,
             _reservation: None,
         }
+    }
+
+    /// 一个带循环区域身份的段（模拟 capture 在回卷时写下的几何）。
+    fn loop_segment(origin: i64, values: &[f32], loop_start: i64, loop_end: i64) -> Segment {
+        Segment {
+            origin,
+            sample_rate: 48_000,
+            planes: vec![values.to_vec(), values.to_vec()],
+            filled: values.len(),
+            loss: crate::recorder::SegmentLoss::First,
+            loop_start: Some(loop_start),
+            loop_end: Some(loop_end),
+            pass_id: 0,
+            source_key: None,
+            peak: [0.0; 2],
+            closed: ClosedReason::Stopped,
+            coverage: std::array::from_fn(|_| 0..0),
+            coverage_len: 0,
+            coverage_overrun: false,
+            _reservation: None,
+        }
+    }
+
+    fn take_with(id: u64, segments: Vec<Segment>) -> CaptureTake {
+        let content_hash = sidecar::content_hash(&segments);
+        CaptureTake {
+            id,
+            epoch: 1,
+            sample_rate: 48_000,
+            content_id: content_id_for_hash(&content_hash),
+            content_hash,
+            summary: timeline::TimelineSummary::default(),
+            segments,
+            pre_roll_frames: 0,
+            sidecar: None,
+        }
+    }
+
+    /// **FL 形状：两圈循环在 store 层只产生 1 个 Clip 与 1 份合成源。**
+    #[test]
+    fn a_loop_recording_exposes_one_clip_and_one_composite_source() {
+        let store = store();
+        *store.takes.lock_or_recover() = vec![take_with(
+            1,
+            vec![
+                loop_segment(0, &[1.0; 100], 0, 100),
+                loop_segment(0, &[2.0; 40], 0, 100),
+            ],
+        )];
+        store.bump_revision();
+
+        let (timeline, regions, sources) = store.render_input().expect("有素材");
+        assert_eq!(timeline.clips.len(), 1, "同一个循环区域只应有一个 Clip");
+        assert_eq!(regions.len(), 1);
+        assert_eq!(sources.len(), 1, "被合成消费的普通带不应再发布");
+        assert!(sources.contains_key("capture://loop/0/100"));
+
+        let (session, session_sources) = store.session_timeline();
+        assert_eq!(session.clips.len(), 1);
+        assert_eq!(session_sources.len(), 1);
+
+        // 原始磁带：长度 = 区域长度，前 40 帧来自第二圈、其余来自第一圈。
+        let raw = store.raw_tape().expect("有素材就有原始带");
+        assert_eq!(raw.left.len(), 100);
+        assert_eq!(&raw.left[..40], &[2.0; 40]);
+        assert_eq!(&raw.left[40..], &[1.0; 60]);
+    }
+
+    /// **合成源的内容指纹必须随新一圈变化，否则分析缓存会命中旧结果。**
+    #[test]
+    fn a_new_loop_pass_changes_the_composite_source_fingerprint() {
+        let store = store();
+        // 两圈完整的第一版：已经形成合成源（单段不会合成）。
+        *store.takes.lock_or_recover() = vec![take_with(
+            1,
+            vec![
+                loop_segment(0, &[1.0; 100], 0, 100),
+                loop_segment(0, &[1.0; 100], 0, 100),
+            ],
+        )];
+        store.bump_revision();
+        let before = store
+            .content_fingerprints()
+            .get("capture://loop/0/100")
+            .copied()
+            .expect("合成源必须有指纹");
+
+        // 再录一圈：同一区域、只录了开头 40 帧，但内容不同（2.0）。
+        store
+            .takes
+            .lock_or_recover()
+            .push(take_with(2, vec![loop_segment(0, &[2.0; 40], 0, 100)]));
+        store.bump_revision();
+        let after = store
+            .content_fingerprints()
+            .get("capture://loop/0/100")
+            .copied()
+            .expect("合成源必须有指纹");
+        assert_ne!(before, after, "合成 PCM 变了，缓存键必须变");
+    }
+
+    /// **普通 take 的指纹只由内容决定，跨 take 号复用。**
+    #[test]
+    fn the_content_fingerprint_of_a_plain_take_is_content_addressed() {
+        let first = take_with(1, vec![captured_segment()]);
+        let second = take_with(99, vec![captured_segment()]);
+        let first_stamp = content_fingerprint_of_take(&first);
+        let second_stamp = content_fingerprint_of_take(&second);
+        assert_eq!(
+            first_stamp, second_stamp,
+            "同内容不同 take 号必须命中同一指纹"
+        );
+        let mut changed = captured_segment();
+        changed.planes[0][0] = 0.9;
+        let changed_stamp = content_fingerprint_of_take(&take_with(1, vec![changed]));
+        assert_ne!(first_stamp, changed_stamp);
     }
 
     /// **重启后录音仍在**：清单指向 sidecar，恢复后能直接渲染。
