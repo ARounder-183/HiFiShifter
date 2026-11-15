@@ -1360,65 +1360,73 @@ function AppInner() {
         // （此前自动浮出的理由是"用户不知道要先播放再录制"，而那件事现在由控件自己的
         // tooltip 与状态说明承担 —— 它就在用户要点的地方。）
 
+        const syncPluginRenderState = () => {
+            const state = getPluginApplySnapshot().state;
+            if (!state) return;
+            const active = state.rendering_active === true;
+            const stale = state.render_audible_stale === true;
+            // 【进度也以快照为准】事件只是快速更新；轮询每 250 ms 会把当前进度
+            // 带回来。`rendering_active` 从 false → true 时清掉上一轮的高水位，
+            // 否则新一轮的 0% 会被旧的 100% 挡住。
+            if (!active) {
+                renderProgressRef.current = 0;
+                appStatusProgressBus.setRenderingProgress(null);
+            } else {
+                if (!backgroundRenderActiveRef.current) renderProgressRef.current = 0;
+                const raw = state.render_progress;
+                const progress =
+                    typeof raw === "number" && Number.isFinite(raw)
+                        ? Math.max(0, Math.min(1, raw))
+                        : null;
+                if (progress != null && progress >= renderProgressRef.current) {
+                    renderProgressRef.current = progress;
+                    appStatusProgressBus.setRenderingProgress(progress);
+                }
+            }
+            // 【双向同步：快照既负责点亮，也负责熄灭】
+            // 事件用 `try_send`（队列满即丢）：丢一个 active:true 就再也不会亮，
+            // 丢一个 active:false 就会永久亮着。快照每 250 ms 重读一次，两个
+            // 方向都必须由它兜底。
+            if (active) {
+                if (backgroundRenderActiveRef.current) return;
+                backgroundRenderActiveRef.current = true;
+                originalRenderActiveRef.current = false;
+                dispatch(
+                    setPlaybackRenderingState({
+                        active: true,
+                        target: "background",
+                        blocking: false,
+                    }),
+                );
+                return;
+            }
+            // 【stale 时不熄灭】此时右侧 PluginApplyStatus 正在显示"正在合成"，
+            // 左侧那片由它单点承担；事件/快照的 active:false 只说明任务刚结束，
+            // 而 audible_state 仍可能是 stale。
+            if (!stale) {
+                if (!originalRenderActiveRef.current && !backgroundRenderActiveRef.current) {
+                    return;
+                }
+                originalRenderActiveRef.current = false;
+                backgroundRenderActiveRef.current = false;
+                dispatch(
+                    setPlaybackRenderingState({
+                        active: false,
+                        target: "background",
+                        blocking: false,
+                    }),
+                );
+            }
+        };
         const unsubscribeApply = isPluginMode()
-            ? subscribePluginApply(() => {
-                  const state = getPluginApplySnapshot().state;
-                  if (!state) return;
-                  const active = state.rendering_active === true;
-                  const stale = state.render_audible_stale === true;
-                  // 【进度也以快照为准】事件只是快速更新；轮询每 250 ms 会把当前进度
-                  // 带回来。`rendering_active` 从 false → true 时清掉上一轮的高水位，
-                  // 否则新一轮的 0% 会被旧的 100% 挡住。
-                  if (!active) {
-                      renderProgressRef.current = 0;
-                      appStatusProgressBus.setRenderingProgress(null);
-                  } else {
-                      if (!backgroundRenderActiveRef.current) renderProgressRef.current = 0;
-                      const raw = state.render_progress;
-                      const progress =
-                          typeof raw === "number" && Number.isFinite(raw)
-                              ? Math.max(0, Math.min(1, raw))
-                              : null;
-                      if (progress != null && progress >= renderProgressRef.current) {
-                          renderProgressRef.current = progress;
-                          appStatusProgressBus.setRenderingProgress(progress);
-                      }
-                  }
-                  // 【双向同步：快照既负责点亮，也负责熄灭】
-                  // 事件用 `try_send`（队列满即丢）：丢一个 active:true 就再也不会亮，
-                  // 丢一个 active:false 就会永久亮着。快照每 250 ms 重读一次，两个
-                  // 方向都必须由它兜底。
-                  if (active) {
-                      if (backgroundRenderActiveRef.current) return;
-                      backgroundRenderActiveRef.current = true;
-                      originalRenderActiveRef.current = false;
-                      dispatch(
-                          setPlaybackRenderingState({
-                              active: true,
-                              target: "background",
-                              blocking: false,
-                          }),
-                      );
-                      return;
-                  }
-                  // 【stale 时不熄灭】此时右侧 PluginApplyStatus 正在显示"正在合成"，
-                  // 左侧那片由它单点承担；事件/快照的 active:false 只说明任务刚结束，
-                  // 而 audible_state 仍可能是 stale。
-                  if (!stale) {
-                      if (!originalRenderActiveRef.current && !backgroundRenderActiveRef.current) {
-                          return;
-                      }
-                      originalRenderActiveRef.current = false;
-                      backgroundRenderActiveRef.current = false;
-                      dispatch(
-                          setPlaybackRenderingState({
-                              active: false,
-                              target: "background",
-                              blocking: false,
-                          }),
-                      );
-                  }
-              })
+            ? (() => {
+                  const off = subscribePluginApply(syncPluginRenderState);
+                  // 【订阅时先同步一次】快照可能在本组件挂载前就已经是 active:true，
+                  // 而 `publish` 只在内容变化时通知；不主动读一次，事件丢包后
+                  // 状态栏会一直等到下一次内容变化才亮。
+                  syncPluginRenderState();
+                  return off;
+              })()
             : null;
 
         return () => {
