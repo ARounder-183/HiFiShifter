@@ -621,6 +621,7 @@ fn compose_loop_cluster(
             if start >= end {
                 continue;
             }
+            let mut copied = false;
             for (channel, plane) in planes.iter_mut().enumerate().take(channels) {
                 // 单声道段复制到两个输出平面（与 `raw_tape` 的展开一致）。
                 let Some(source) = segment
@@ -633,9 +634,14 @@ fn compose_loop_cluster(
                 let len = end - start;
                 if source.len() >= range.end {
                     plane[start..end].copy_from_slice(&source[range.start..range.start + len]);
+                    copied = true;
                 }
             }
-            covered.push(start..end);
+            // 【只宣称真的拷到的帧】平面比声明短是畸形数据；把没拷到的区间
+            // 记进 coverage 会让播放侧把零当成"我们录到的静音"。
+            if copied {
+                covered.push(start..end);
+            }
         }
     }
     // 覆盖区间按坐标排序后再合并 —— 后一圈可能先写 0..40、前一圈再补 40..100，
