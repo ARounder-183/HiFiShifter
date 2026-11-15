@@ -218,6 +218,25 @@ impl Workspace {
     /// （临时目录清理、用户操作）。没有摘要校验，「读到别的音频」是静默的，
     /// 而且会被当成用户的编辑存进工程 —— 那是最难排查的一类故障。
     pub fn read_audio(&self, entry: &SourceEntry) -> Result<LoadedAudio, String> {
+        self.read_audio_bounded(entry, u64::MAX)
+    }
+
+    /// 带体量上限的读取：导入侧把 PCM 内存预算传进来，超限的文件**一个字节都不进内存**。
+    ///
+    /// 【为什么必须在读取前】清单是不可信输入（工作区可能来自下载的 zip），`file`
+    /// 指向的文件完全可能是任意大小 —— 此前的实现是先 `fs::read` 整个文件再解码成
+    /// f32 平面，字节预算（[`crate::MAX_HOST_PCM_BYTES`] 同族）要到**全部读完之后**
+    /// 才在准入层生效。一个把 `sources[].file` 指向巨型文件的恶意/损坏清单就能在
+    /// 任何校验发生之前把进程内存吃光。stat 出来的文件大小是最便宜的防线。
+    ///
+    /// 【为什么先比清单声明的字节数】`bytes` 是生产者写下的文件大小；不一致说明
+    /// 文件被替换/截断（摘要校验稍后也会抓住它，但那要读完整个文件才知道）。
+    /// 先比大小，把"必然失败"的读取省掉。
+    pub fn read_audio_bounded(
+        &self,
+        entry: &SourceEntry,
+        max_bytes: u64,
+    ) -> Result<LoadedAudio, String> {
         let file = entry
             .file
             .as_deref()
@@ -228,6 +247,23 @@ impl Workspace {
                 entry.key
             ));
         };
+        let file_len = std::fs::metadata(&path)
+            .map_err(|error| format!("cannot stat {}: {error}", path.display()))?
+            .len();
+        if let Some(expected) = entry.bytes {
+            if file_len != expected {
+                return Err(format!(
+                    "audio at {} is {file_len} bytes but its manifest entry declares {expected}; refusing to read it",
+                    path.display()
+                ));
+            }
+        }
+        if file_len > max_bytes {
+            return Err(format!(
+                "audio at {} is {file_len} bytes, over the {max_bytes} byte limit; refusing to read it",
+                path.display()
+            ));
+        }
         let bytes = std::fs::read(&path)
             .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
         let loaded = decode_wav(&bytes)

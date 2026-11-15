@@ -393,6 +393,22 @@ fn resolve_timed_backup_output_path(
     Ok((output_path, fallback_used))
 }
 
+/// 写临时文件并**刷到盘**；改名交给调用方（有的要先轮转 `.old` 再改名）。
+///
+/// 【为什么必须 sync_all】改名只是元数据操作：数据没刷到盘就改名，断电后可能留下
+/// 一个空（或截断）的新文件 —— 而工程文件是用户的唯一资产，`.old` 回滚只在
+/// "目标不存在"时才触发（见 `restore_rotated_project_backup`），空文件不在它的
+/// 恢复范围内。与 host-link 工作区的 `write_bytes_atomic`（`workspace.rs`）同一纪律。
+fn write_tmp_file_fsynced(tmp_path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file =
+        fs::File::create(tmp_path).map_err(|e| format!("Failed to write {:?}: {}", tmp_path, e))?;
+    file.write_all(bytes)
+        .map_err(|e| format!("Failed to write {:?}: {}", tmp_path, e))?;
+    file.sync_all()
+        .map_err(|e| format!("Failed to flush {:?}: {}", tmp_path, e))?;
+    Ok(())
+}
+
 fn atomic_write_project_snapshot_to_path(
     state: &AppState,
     output_path: &Path,
@@ -432,8 +448,7 @@ fn atomic_write_project_snapshot_to_path(
         }
     };
 
-    fs::write(&tmp_path, &bytes)
-        .map_err(|e| format!("Failed to write temporary backup {:?}: {}", tmp_path, e))?;
+    write_tmp_file_fsynced(&tmp_path, &bytes)?;
 
     let had_existing_output = output_path.exists();
     if had_existing_output {
@@ -973,7 +988,7 @@ pub(crate) fn save_project_to_path_inner(
     // 使用原子保存，防止程序崩溃或断电导致工程文件损坏
     let tmp_path = path.with_extension("tmp_save");
     let write_result: Result<(), String> = (|| {
-        fs::write(&tmp_path, &bytes).map_err(|e| e.to_string())?;
+        write_tmp_file_fsynced(&tmp_path, &bytes)?;
         fs::rename(&tmp_path, &path).map_err(|e| {
             let _ = fs::remove_file(&tmp_path);
             e.to_string()
