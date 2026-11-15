@@ -781,7 +781,7 @@ REAPER は ARA プラグインを**トラック単位**で管理します。プ�
 プラグインには FCPE、HNSEP、HiFiGAN などのモデルが必要です（現在合計約 200 MB）。統合インストーラーはモデルをプラットフォーム共有ライブラリ（Windows `%ProgramData%\HiFiShifter\models\<モデルバージョン>`、macOS `/Library/Application Support/HiFiShifter/models/<モデルバージョン>`、Linux `$XDG_DATA_HOME/HiFiShifter/models/<モデルバージョン>` または `/usr/local/share/HiFiShifter/models/<モデルバージョン>`）にインストールし、スタンドアロン版とすべてのプラグインが同じものを読みます —— この 200 MB は重複しません。手動コピー版はモデルを自前で持ち、共有ライブラリに依存しません。
 
 - モデルバージョンはモデルの内容から導出されます：アップグレードすると新しいバージョンは新しいディレクトリに配置され、同じバージョンの再インストールはスキップされます。
-- プラグインをアンインストールしても共有モデルライブラリは**削除されません**（スタンドアロン版も使用しているため）。本当に消したい場合は `%ProgramData%\HiFiShifter\models` を手動で削除してください。
+- プラグインをアンインストールしても共有モデルライブラリは**削除されません**（スタンドアロン版も使用しているため）。本当に消したい場合は、各プラットフォームの共有モデルディレクトリを手動で削除してください。
 - 環境変数 `HIFISHIFTER_MODELS_DIR` でモデルディレクトリを指定でき、共有ライブラリより優先されます。
 
 ### プラグインモードでの役割分担
@@ -862,7 +862,7 @@ HiFiShifter は実行ログを自動的に OS 標準のログディレクトリ�
 | 設定 | `%APPDATA%\HiFiShifter` | `~/Library/Application Support/HiFiShifter` | `$XDG_CONFIG_HOME/HiFiShifter`（既定 `~/.config/HiFiShifter`） |
 | キャッシュ（波形 / レンダー） | `%LOCALAPPDATA%\HiFiShifter\cache` | `~/Library/Caches/HiFiShifter` | `$XDG_CACHE_HOME/HiFiShifter`（既定 `~/.cache/HiFiShifter`） |
 | 未保存セッションの取り込み素材 | `%LOCALAPPDATA%\HiFiShifter\unsaved\<セッション>` | `~/Library/Application Support/HiFiShifter/unsaved/<セッション>` | `$XDG_DATA_HOME/HiFiShifter/unsaved/<セッション>` |
-| 共有モデルライブラリ（Windows のみ・インストーラーが書き込み） | `%PROGRAMDATA%\HiFiShifter\models\<バージョン>` | — | — |
+| 共有モデルライブラリ（インストーラーが書き込み） | `%PROGRAMDATA%\HiFiShifter\models\<バージョン>` | `/Library/Application Support/HiFiShifter/models/<バージョン>` | `$XDG_DATA_HOME/HiFiShifter/models/<バージョン>` または `/usr/local/share/HiFiShifter/models/<バージョン>` |
 
 - 保存済みプロジェクトの取り込み素材は、プロジェクトファイルの隣の `<プロジェクト名>_media` ディレクトリに入ります。プロジェクトごとコピーしてください。
 - 旧バージョンから更新した場合、初回起動時に旧 `com.arounder.hifishifter` ディレクトリが新しい場所へ移動されます。新旧が同時に存在する場合は**統合しません**（どちらもそのまま残します）。ログに 1 行記録されます。

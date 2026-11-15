@@ -781,7 +781,7 @@ REAPER는 ARA 플러그인을 **트랙 단위**로 관리합니다. 플러그인
 플러그인에는 FCPE, HNSEP, HiFiGAN 등의 모델이 필요합니다(현재 총 약 200 MB). 통합 설치 프로그램은 모델을 플랫폼 공유 라이브러리(Windows `%ProgramData%\HiFiShifter\models\<모델 버전>`, macOS `/Library/Application Support/HiFiShifter/models/<모델 버전>`, Linux `$XDG_DATA_HOME/HiFiShifter/models/<모델 버전>` 또는 `/usr/local/share/HiFiShifter/models/<모델 버전>`)에 설치하며, 독립 실행형 앱과 모든 플러그인이 같은 것을 읽습니다 —— 이 200 MB는 중복되지 않습니다. 수동 복사 버전은 자체적으로 모델을 포함하며 공유 라이브러리에 의존하지 않습니다.
 
 - 모델 버전은 모델 내용에서 파생됩니다: 업그레이드하면 새 버전이 새 디렉터리에 배치되고, 같은 버전의 재설치는 건너뜁니다.
-- 플러그인을 제거해도 공유 모델 라이브러리는 **삭제되지 않습니다**(독립 실행형 앱도 사용하기 때문입니다). 정말 지우고 싶다면 `%ProgramData%\HiFiShifter\models`를 직접 삭제하세요.
+- 플러그인을 제거해도 공유 모델 라이브러리는 **삭제되지 않습니다**(독립 실행형 앱도 사용하기 때문입니다). 정말 지우고 싶다면 각 플랫폼의 공유 모델 디렉터리를 직접 삭제하세요.
 - 환경 변수 `HIFISHIFTER_MODELS_DIR`로 모델 디렉터리를 지정할 수 있으며, 공유 라이브러리보다 우선합니다.
 
 ### 플러그인 모드에서의 역할 분담
