@@ -134,6 +134,12 @@ function ownsTypeAhead(target: EventTarget | null): boolean {
     return el.closest(TYPEAHEAD_OWNER_SELECTOR) !== null;
 }
 
+/** 焦点是否在 type-ahead 列表/行本身（而不是面板工具条按钮等外围控件）。 */
+function isTypeAheadListTarget(target: EventTarget | null): boolean {
+    const el = target as HTMLElement | null;
+    return !!el?.closest?.('[role="listbox"], [role="option"]');
+}
+
 /**
  * 「输入式快速跳转」表面自己拥有的**非打印**按键。
  *
@@ -146,7 +152,8 @@ function ownsTypeAhead(target: EventTarget | null): boolean {
  * 只列"面板自己实现了语义"的键。没列到的（Ctrl+S 保存、Ctrl+Z 撤销…）继续走全局 ——
  * 面板没有对应动作，让它们失效反而是新问题。
  *
- * 可打印字符（含空格）不在此表：由 `e.key.length === 1` 统一覆盖。
+ * 可打印字符不在此表：由 `e.key.length === 1` 统一覆盖。空格 / Enter 仅在
+ * 列表/行获得焦点时才归面板（见 `isOwnedByTypeAhead`）。
  */
 const TYPEAHEAD_OWNED_KEYS = new Set([
     "enter", // 打开 / 进入目录
@@ -158,7 +165,8 @@ const TYPEAHEAD_OWNED_KEYS = new Set([
 /**
  * 该按键是否归"输入式快速跳转"表面所有。
  *
- * 未修饰时：可打印字符（打字跳转，空格也在内）+ 上表。
+ * 未修饰时：可打印字符（打字跳转）+ 上表；Space / Enter 只有焦点在
+ * `role="listbox"` / `role="option"` 上时才归面板（工具条按钮不算）。
  * 带修饰时：**只让出面板实现了的那三个组合**（全选 / 复制路径 / 新建文件夹），
  * 其余组合（Ctrl+S、Ctrl+Z、Ctrl+Shift+S、Shift+T、Shift+V…）照常走全局。
  */
@@ -172,8 +180,15 @@ function isOwnedByTypeAhead(e: KeyboardEvent, key: string): boolean {
     // （Shift+T → "T"），但它属于"带修饰"的一类：全局绑定里的 Shift+T/Shift+V
     // 不能被面板截走。若面板没有对应绑定，事件仍会照常流到面板（这里只决定
     // 全局分发器是否提前让路），因此大小写不敏感的 type-ahead 不受影响。
-    if (!e.ctrlKey && !e.shiftKey && !e.altKey)
+    if (!e.ctrlKey && !e.shiftKey && !e.altKey) {
+        // Space / Enter 只有在列表/行本身获得焦点时才归文件浏览器（试听/打开）；
+        // 焦点在工具条按钮等外围控件上时，它们必须回落到全局播放/暂停，
+        // 否则浏览器会把空格当成按钮激活。
+        if ((key === "space" || key === "enter") && !isTypeAheadListTarget(e.target)) {
+            return false;
+        }
         return e.key.length === 1 || TYPEAHEAD_OWNED_KEYS.has(key);
+    }
     const letter = e.key.toLowerCase();
     if (letter === "a" || letter === "c") return !e.shiftKey;
     return letter === "n" && e.shiftKey;
@@ -187,7 +202,20 @@ function isOwnedByTypeAhead(e: KeyboardEvent, key: string): boolean {
  * 类：菜单开着，方向键却去 seek 了，菜单里一项都动不了（实测确认过）。
  */
 function hasOpenPopupSurface(): boolean {
-    return document.querySelector(POPUP_SURFACE_SELECTOR) !== null;
+    /*
+     * 【为什么排除 type-ahead 列表】文件浏览器是常驻面板：列表容器声明了
+     *  `role="listbox"`，但它是**持久控件**而不是打开着的弹出层。只按 selector
+     * 判断存在性会让这个列表永久占用 Enter / Space —— 默认的播放/停止快捷键整条
+     * 失效，点过按钮后空格还会退化成浏览器原生按钮激活。文件列表自己的键盘归属
+     * 由 `ownsTypeAhead` 处理，这里必须放行。
+     */
+    return Array.from(document.querySelectorAll(POPUP_SURFACE_SELECTOR)).some(
+        (surface) =>
+            !(
+                surface.getAttribute("role") === "listbox" &&
+                surface.closest(TYPEAHEAD_OWNER_SELECTOR) !== null
+            ),
+    );
 }
 
 /**
