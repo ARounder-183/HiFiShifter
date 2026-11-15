@@ -88,6 +88,7 @@ import {
     reorderTargetIndex,
 } from "../dragReorder";
 import type { PresetGroup, VibratoDialogProps } from "./types";
+import { frontendLog } from "../../../services/frontendLog";
 
 const selectVibratoDialogSession = (state: RootState) => {
     const session = state.session;
@@ -298,10 +299,13 @@ export function useVibratoDialogModel({
     );
 
     /** 按给定草稿重新拟合纵轴。 */
-    const fitPreviewAxis = useCallback((preset: VibratoPreset | null) => {
-        if (!preset) return;
-        setPreviewHalfCents(fitPreviewRangeCents(buildVibratoPreview(preset).peakCents));
-    }, []);
+    const fitPreviewAxis = useCallback(
+        (preset: VibratoPreset | null) => {
+            if (!preset) return;
+            setPreviewHalfCents(fitPreviewRangeCents(buildVibratoPreview(preset).peakCents));
+        },
+        [setPreviewHalfCents],
+    );
 
     const isBuiltin = Boolean(draft?.builtin);
     /** 正在编辑的这条是否就是当前使用的（编辑器顶部的按钮据此显示状态）。 */
@@ -334,7 +338,7 @@ export function useVibratoDialogModel({
                  * 同路：清掉 loading、`original` 置 null，落到既有的空占位提示。
                  */
                 if (cancelled) return;
-                console.error("[VibratoDialog] load selection frames failed", err);
+                frontendLog("error", "[VibratoDialog] load selection frames failed", err);
                 setOriginal(null);
                 setOriginalLoading(false);
             });
@@ -920,7 +924,7 @@ export function useVibratoDialogModel({
             // 宿主提取走 IPC（读参数帧），失败此前会变成 unhandled rejection：
             // 按钮复位、对话框停在原地、错误只进控制台。与"提取到空结果"同路
             // 反馈给用户（行内提示，不弹窗）。
-            console.error("[VibratoDialog] extract from selection failed", err);
+            frontendLog("error", "[VibratoDialog] extract from selection failed", err);
             setIoNotice({ text: t("vibrato_extract_failed"), danger: true });
             return;
         }

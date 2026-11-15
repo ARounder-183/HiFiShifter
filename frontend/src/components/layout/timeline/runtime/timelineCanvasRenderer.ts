@@ -297,6 +297,7 @@ export function drawTimelineCanvas(
             snapOffsetPx?: number;
             /** 前导重叠区宽度（像素，从左缘起算）。>0 时上 clip 在该区域半透。 */
             leadingOverlapPx?: number;
+            hasOverlap?: boolean;
             /** header 被任何前序同轨 Clip 遮挡的宽度（像素，从左缘起算）。 */
             coveredUntilPx?: number;
             /** header 尾部被后序同轨 Clip 覆盖的宽度（clip 内相对坐标）。 */
@@ -750,7 +751,7 @@ export function drawTimelineCanvas(
             strokes,
             // 屏障：前导重叠会盖住前一个 clip；编组外圈描边会伸出自身矩形
             // 2px 盖住邻居。二者都必须先提交此前已排入的批次。
-            barrier: overlapForBodyPx > 0.5 || isGroupActive,
+            barrier: clip.hasOverlap === true || overlapForBodyPx > 0.5 || isGroupActive,
         };
     }
 
@@ -1279,11 +1280,19 @@ export function drawTimelineCanvas(
      * Clip 的后续批次盖住，因此 header 背景和内容必须最后统一落笔。
      */
     const overlapHeaderItems: PreparedClip[] = [];
+    const outlineItems: PreparedClip[] = [];
 
     for (const clip of args.clips) {
         const item = prepareClip(clip);
-        if (item.trailingHeaderOverlapPx > 0.5 || item.leadingOverlapPx > 0.5) {
+        if (clip.hasOverlap || item.trailingHeaderOverlapPx > 0.5 || item.leadingOverlapPx > 0.5) {
             overlapHeaderItems.push(item);
+        }
+        if (
+            args.groupOutlineOverGl === true &&
+            item.useGl &&
+            (clip.selected || clip.hovered || item.isGroupActive)
+        ) {
+            outlineItems.push(item);
         }
         if (item.barrier) flushBatch();
         pending.push(item);
@@ -1341,6 +1350,12 @@ export function drawTimelineCanvas(
      * 每个 Clip 只在自己的可见 header 段内落笔：后序 Clip 覆盖前序尾部时，
      * 前序 Clip 的 header 不会越过重叠起点。
      */
+    // 主体按长度叠放，header 独立沿用时间顺序：后开始的片段占重叠区。
+    overlapHeaderItems.sort((a, b) => {
+        const byStart = a.left - b.left;
+        if (Math.abs(byStart) > 1e-9) return byStart;
+        return a.clip.id < b.clip.id ? -1 : a.clip.id > b.clip.id ? 1 : 0;
+    });
     for (const item of overlapHeaderItems) {
         const { style } = item;
         const visibleHeaderWidth = Math.max(0, item.width - item.trailingHeaderOverlapPx);
@@ -1358,7 +1373,7 @@ export function drawTimelineCanvas(
         ctx.fillStyle = style.headerFill;
         ctx.fillRect(item.left, item.top, visibleHeaderWidth, item.headerHeight);
         ctx.globalAlpha = 1;
-        drawClipDetails(item);
+        drawClipHeader(item);
         ctx.restore();
     }
     if (silenceOverlays.length > 0) {
@@ -1450,6 +1465,33 @@ export function drawTimelineCanvas(
             ctx.globalAlpha = 1;
             drawLoopMarkers(ctx, marker.xs, marker.height, marker.color);
             ctx.restore();
+        }
+        ctx.restore();
+    }
+
+    // GL 描边位于波形之下，选中/悬停的边框须在细节层最后补画。
+    for (const item of outlineItems) {
+        ctx.save();
+        ctx.globalAlpha = 1;
+        if (item.trailingHeaderOverlapPx > 0.5) {
+            // 主体边框保留整段；header 边框不能穿过后一个片段的控件条。
+            ctx.beginPath();
+            ctx.rect(item.left - 2, item.bodyTop, item.width + 4, item.bodyHeight + 2);
+            ctx.rect(
+                item.left - 2,
+                item.top - 2,
+                Math.max(0, item.width - item.trailingHeaderOverlapPx) + 2,
+                item.headerHeight + 2,
+            );
+            ctx.clip();
+        }
+        for (const op of item.strokes) {
+            if (op.w <= 0 || op.h <= 0) continue;
+            ctx.strokeStyle = op.style;
+            ctx.lineWidth = op.lineWidth;
+            ctx.beginPath();
+            ctx.roundRect(op.x, op.y, op.w, op.h, op.radii);
+            ctx.stroke();
         }
         ctx.restore();
     }

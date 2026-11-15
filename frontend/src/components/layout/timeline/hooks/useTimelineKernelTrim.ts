@@ -348,10 +348,9 @@ export function useTimelineKernelTrim({
                     // 波纹跟随集：与旧实现 `useEditDrag` 同一套快照规则（原点取
                     // 参与者最早起点、作用轨道取参与者所在轨道）。
                     rippleFollowers: buildRippleFollowers(
-                        session.clips,
+                        session,
                         new Set(xfadeClipIds),
                         Math.min(...participants.map((item) => item.startSec)),
-                        session.rippleMode,
                         new Set(participants.map((item) => item.trackId)),
                     ),
                     // Alt 按住 = 拉伸（与旧实现 `modifier.clipStretch` 同源）。

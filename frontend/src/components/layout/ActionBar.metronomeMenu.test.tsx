@@ -154,3 +154,17 @@ test("wheel steps the metronome volume by 5 percent, and by 1 with the fine modi
     await nextFrame();
     expect(store.getState().session.metronomeGain).toBeCloseTo(0.56, 6);
 });
+
+test("the metronome menu renders inside the theme scope (Radix tokens reach it)", async () => {
+    await openMetronomeMenu();
+    const menu = document.body.querySelector('[data-hs-context-menu="1"]');
+    expect(menu, "metronome menu must be open").toBeTruthy();
+    /*
+     * Radix Themes 把整套组件令牌（`--accent-9`、`--gray-a5`…）定义在
+     * `.radix-themes` 元素上。弹出面若挂到 `document.body`，滑块轨道与滑块头
+     * 的背景色整条失效（计算成 transparent）—— 用户看到的就是"菜单里有一行空着、
+     * 只剩 60% 读数"。这条断言钉住"菜单在主题作用域内"。
+     */
+    expect(menu!.closest(".radix-themes"), "菜单必须挂在 .radix-themes 内").not.toBeNull();
+    expect(menu!.querySelector(".hs-slider-box"), "音量滑块必须渲染出来").toBeTruthy();
+});

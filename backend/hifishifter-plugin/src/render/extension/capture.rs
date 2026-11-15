@@ -538,12 +538,12 @@ impl ExtensionOwner {
     /// 【为什么量 `max_step` 而不是别的】"咔"在波形上就是相邻样本的一次大跳变。
     /// 峰值、RMS、过零率都看不见它 —— 一个 20 ms 的音乐片段可以峰值不变而中间
     /// 跳一下。相邻差分是唯一直接对应听感的读数。
-    /// 逐块"咔"账本是否开启（`HIFISHIFTER_CLICK_AUDIT=1`，默认关闭）。
+    /// 逐块"咔"账本是否开启（由「高」档驱动，默认关闭）。
     ///
     /// 【为什么必须可关】`record_click_sample` 每块都要把整个输出缓冲扫一遍
     /// （两声道 × 块长），并且每次都在写 `[click]` 行。现场日志里 `[click]` 占了
     /// 9801/26617 行 —— 一个诊断工具的成本高到会改变被观测的行为，它就不再是诊断。
-    /// 与 `HIFISHIFTER_BUFFER_AUDIT` 同一套开关纪律：读一次就缓存，默认关闭。
+    /// 与输出写满审计共用同一份策略读数，默认关闭。
     /// 预热音频线程会读取的一次性开关（组件创建时调用，避免首块分配）。
     ///
     /// 【为什么公开】两个格式的实例创建都要调它（VST3 在组件构造、CLAP 在
@@ -556,12 +556,7 @@ impl ExtensionOwner {
     }
 
     fn click_audit_enabled() -> bool {
-        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ENABLED.get_or_init(|| {
-            std::env::var("HIFISHIFTER_CLICK_AUDIT")
-                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-        })
+        hifishifter_kernel::log_policy::probes_enabled()
     }
 
     pub(super) fn record_click_sample(

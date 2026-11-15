@@ -39,8 +39,8 @@ function keyEvent(
 }
 
 describe("keybindingMatch — 物理键位匹配（Shift 上档字符归位）", () => {
-    it("~ 默认切换块编辑与音高绘制，并命中 Shift+Backquote", () => {
-        expect(DEFAULT_KEYBINDINGS["mode.toggleBlockEdit"]).toEqual([
+    it("~ 默认切换参数块选择，并命中 Shift+Backquote", () => {
+        expect(DEFAULT_KEYBINDINGS["mode.toggleBlockSelection"]).toEqual([
             { key: "`" },
             { key: "`", shift: true },
         ]);
@@ -115,7 +115,7 @@ for (const key of ["Process", "Unidentified", "`", "~"]) {
         it(`physical Backquote works with ${key}, shift=${shift}`, () => {
             const event = keyEvent(key, { code: "Backquote", shift });
             expect(
-                DEFAULT_KEYBINDINGS["mode.toggleBlockEdit"].some((binding) =>
+                DEFAULT_KEYBINDINGS["mode.toggleBlockSelection"].some((binding) =>
                     matchesKeybinding(event, binding),
                 ),
             ).toBe(true);

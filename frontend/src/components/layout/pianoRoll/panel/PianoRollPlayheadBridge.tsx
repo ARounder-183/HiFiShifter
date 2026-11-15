@@ -10,7 +10,7 @@ import { useAppSelector } from "../../../../app/hooks";
 import { publishVisualPlayheadSec } from "../../../../features/capture/visualPlayheadBus";
 import { isTransportAdvancing } from "../../../../features/session/selectors/transport";
 import { useVisualPlayhead } from "../../../../hooks/useVisualPlayhead";
-import { computeAutoFollowScrollLeft } from "../../../../utils/autoFollowScroll";
+import { resolveAutoScrollTarget } from "../../../../utils/autoFollowScroll";
 import type { PianoRollKernelHost } from "../kernel/host/pianoRollKernelHost";
 
 interface PianoRollPlayheadBridgeProps {
@@ -29,6 +29,9 @@ interface PianoRollPlayheadBridgeProps {
  *
  * 同步到时间轴时，滚动位置由时间轴那边统一发布；本组件只负责把共享视觉时钟
  * 推给参数编辑器内核，避免两个面板各自跑一条时钟造成光标相对滚动抽动。
+ *
+ * 自动滚屏有**两种模式**（滚动式 / 翻页式），分派在 `resolveAutoScrollTarget` 里；
+ * 本组件只负责把结果写进宿主。同步开启时不在这里滚 —— 滚动由时间轴统一发布。
  */
 export const PianoRollPlayheadBridge = React.memo(function PianoRollPlayheadBridge({
     visualPlayheadSecRef,
@@ -48,6 +51,7 @@ export const PianoRollPlayheadBridge = React.memo(function PianoRollPlayheadBrid
             transportSource: state.session.runtime.transportSource,
             playbackWaitingForRender: state.session.runtime.playbackWaitingForRender,
             autoScrollEnabled: state.session.autoScrollEnabled,
+            autoScrollMode: state.session.autoScrollMode,
             paramEditorSyncTimeline: state.session.paramEditorSyncTimeline,
         }),
         shallowEqual,
@@ -79,13 +83,17 @@ export const PianoRollPlayheadBridge = React.memo(function PianoRollPlayheadBrid
                     if (viewportWidth > 0) {
                         const currentScroll =
                             host?.getViewport().scrollLeft ?? scroller?.scrollLeft ?? 0;
-                        const next = computeAutoFollowScrollLeft({
+                        // 与时间轴同一个入口：滚动式每帧追、翻页式越界才整页翻。
+                        // null = 本帧不滚（页内静止 / 已到位 / 被工程右端钳住）。
+                        const next = resolveAutoScrollTarget({
+                            mode: transport.autoScrollMode,
                             playheadSec: visualPlayheadSec,
                             pxPerSec: pxPerSecRef.current,
                             viewportWidth,
+                            scrollLeft: currentScroll,
                             contentWidth,
                         });
-                        if (Math.abs(currentScroll - next) > 0.5) {
+                        if (next !== null) {
                             if (host !== null) {
                                 // 内核写入会经滚动订阅标脏；不在这里同步整帧重绘，
                                 // 让本帧的绘制预算留给时间轴与浏览器合成。
@@ -112,6 +120,7 @@ export const PianoRollPlayheadBridge = React.memo(function PianoRollPlayheadBrid
                 pxPerSecRef,
                 scrollerRef,
                 transport.autoScrollEnabled,
+                transport.autoScrollMode,
                 transport.isPlaying,
                 transport.paramEditorSyncTimeline,
             ],

@@ -6,6 +6,27 @@ import tseslint from "typescript-eslint";
 import eslintConfigPrettier from "eslint-config-prettier";
 import { defineConfig, globalIgnores } from "eslint/config";
 
+/**
+ * 本仓没有启用 React Compiler（vite.config.ts / package.json 都没有
+ * babel-plugin-react-compiler）。eslint-plugin-react-hooks 7.x 的
+ * `flat.recommended` 却把整套编译器规则（refs / immutability /
+ * set-state-in-effect / preserve-manual-memoization / purity / ...）都带进来，
+ * 对"渲染期同步 ref 镜像""打开对话框时播种草稿"这类本项目刻意的、
+ * 编译器之外的模式产生噪声。
+ *
+ * 因此这里显式只启用经典的两条规则：rules-of-hooks 与 exhaustive-deps。
+ * exhaustive-deps 的既有告警已经逐处补齐依赖修到 0；若将来真的接入 React
+ * Compiler，必须先把 reactHooks.configs.flat.recommended 加回来并清零其告警
+ * （由 tests/reactCompilerGates.test.ts 钉住）。
+ */
+const classicReactHooks = {
+    plugins: { "react-hooks": reactHooks },
+    rules: {
+        "react-hooks/rules-of-hooks": "error",
+        "react-hooks/exhaustive-deps": "error",
+    },
+};
+
 export default defineConfig([
     globalIgnores(["dist"]),
     {
@@ -13,7 +34,7 @@ export default defineConfig([
         extends: [
             js.configs.recommended,
             tseslint.configs.recommended,
-            reactHooks.configs.flat.recommended,
+            classicReactHooks,
             reactRefresh.configs.vite,
         ],
         languageOptions: {
@@ -29,25 +50,6 @@ export default defineConfig([
                     caughtErrorsIgnorePattern: "^_",
                 },
             ],
-            // React Compiler 系规则对"渲染期直接同步的 ref 镜像"（pxPerSecRef、
-            // paramEditorSyncTimelineRef 等，见 useTimelineState 425 行注释）会整体
-            // 报错。这是本代码库刻意的取值新鲜度模式：读取方都在事件回调里，渲染期
-            // 同步保证 emit 拿到的是本次提交的最新值；改成 effect 镜像会滞后一帧
-            // 提交。降为 warn 保留可见性，不作为 CI 阻塞。
-            "react-hooks/refs": "warn",
-            "react-hooks/immutability": "warn",
-            // react-hooks 7.1 把下面两条提升为 recommended 里的 error：
-            //   set-state-in-effect          命中"对话框打开时从 props/ref 初始化
-            //                                本地状态"这一惯例（35 处，如
-            //                                ExportAudioDialog 的 customEndSec、
-            //                                AutoBackupDialog 的 notice 复位）。
-            //                                这是常见且非错误的写法，改成 key /
-            //                                派生状态是一次独立的 UI 重构。
-            //   preserve-manual-memoization  React Compiler 无法保留既有手动 memo
-            //                                的诊断（13 处），同样需要专门的清理轮次。
-            // 两者降为 warn：信号留在 lint 输出里可见，但不阻塞 CI。
-            "react-hooks/set-state-in-effect": "warn",
-            "react-hooks/preserve-manual-memoization": "warn",
         },
     },
     {

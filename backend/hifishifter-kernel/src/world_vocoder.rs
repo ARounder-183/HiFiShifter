@@ -699,7 +699,7 @@ fn vocode_with_f0(
     // NOTE: This is not a low-pass on the control curve; it is voiced/unvoiced gating.
     let mut out = y;
     if !voiced.is_empty() {
-        let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
+        let debug = crate::log_policy::probes_enabled();
         if debug {
             let voiced_n = voiced.iter().filter(|&&b| b).count();
             let ratio = (voiced_n as f64) / (voiced.len().max(1) as f64);

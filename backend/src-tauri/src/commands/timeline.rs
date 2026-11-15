@@ -204,7 +204,7 @@ pub(super) fn import_audio_bytes(
     track_id: Option<Option<String>>,
     start_sec: Option<f64>,
 ) -> crate::models::TimelineStatePayload {
-    if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
+    if hifishifter_kernel::log_policy::probes_enabled() {
         log::warn!(
             "import_audio_bytes(file_name={}, base64_len={}, track_id={:?}, start_sec={:?})",
             file_name,
@@ -318,7 +318,7 @@ pub(super) fn import_audio_item(
     start_sec: Option<f64>,
     media_audio_stream_index: Option<usize>,
 ) -> crate::models::TimelineStatePayload {
-    if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
+    if hifishifter_kernel::log_policy::probes_enabled() {
         log::warn!(
             "import_audio_item(audio_path={}, track_id={:?}, start_sec={:?}, stream={:?})",
             audio_path,
@@ -1913,6 +1913,7 @@ pub(super) fn add_clip_take_from_media(
         midi_note_data: None,
         midi_fill_gaps: false,
         syllable_analysis: None,
+        game_block_baseline: None,
         stretch_markers: Vec::new(),
         envelopes: None,
     };
@@ -1990,6 +1991,7 @@ pub(super) fn import_media_files_as_takes(
             midi_note_data: None,
             midi_fill_gaps: false,
             syllable_analysis: None,
+            game_block_baseline: None,
             stretch_markers: Vec::new(),
             envelopes: None,
         };
@@ -2509,10 +2511,15 @@ pub(super) fn close_track_gaps(
 /// 被调用，直接读盘会在全局锁内做慢 IO。
 fn ripple_settings(state: &State<'_, AppState>) -> (crate::state::RippleMode, bool) {
     let settings = state.ui_settings_snapshot();
-    (
-        crate::state::RippleMode::from_persisted(&settings.ripple_mode),
-        settings.lock_param_lines,
-    )
+    // 开关与方向是两根轴：关闭时无论方向是什么都折算成 Off。`ripple_enabled` 在
+    // normalize 之后总是 `Some`，`unwrap_or(false)` 只是给"未规范化"的调用路径兜底
+    // （宁可波纹不生效，也不要在配置半读成功时意外推动整轨）。
+    let mode = if settings.ripple_enabled.unwrap_or(false) {
+        crate::state::RippleMode::from_persisted(&settings.ripple_mode)
+    } else {
+        crate::state::RippleMode::Off
+    };
+    (mode, settings.lock_param_lines)
 }
 
 fn split_transition_options(state: &State<'_, AppState>) -> SplitTransitionOptions {

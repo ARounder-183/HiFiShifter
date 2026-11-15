@@ -70,11 +70,20 @@ export function updateActiveSurfaceFrom(target: EventTarget | null): void {
 
 /**
  * 安装全局 pointerdown / focusin（均捕获阶段）监听，驱动 activeSurface。
- * App 一次性调用；返回清理函数。
+ *
+ * @param onActiveSurface 可选：每次落点属于某个编辑表面时回调。App / 独立窗口
+ *   用它把「最近活动编辑窗口」写进 interaction 切片，供跨窗口命令路由使用。
  */
-export function installFocusSurfaceTracking(): () => void {
-    const onPointerDown = (e: PointerEvent) => updateActiveSurfaceFrom(e.target);
-    const onFocusIn = (e: FocusEvent) => updateActiveSurfaceFrom(e.target);
+export function installFocusSurfaceTracking(
+    onActiveSurface?: (surface: EditSurfaceId) => void,
+): () => void {
+    const track = (target: EventTarget | null) => {
+        updateActiveSurfaceFrom(target);
+        const surface = resolveSurfaceFromTarget(target);
+        if (surface !== null) onActiveSurface?.(surface);
+    };
+    const onPointerDown = (e: PointerEvent) => track(e.target);
+    const onFocusIn = (e: FocusEvent) => track(e.target);
     document.addEventListener("pointerdown", onPointerDown, true);
     document.addEventListener("focusin", onFocusIn, true);
     return () => {

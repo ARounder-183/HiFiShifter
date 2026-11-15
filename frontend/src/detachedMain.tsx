@@ -22,7 +22,8 @@ import { AppRootErrorBoundary } from "./components/AppRootErrorBoundary";
 import { BrowserDefaultGuards } from "./hooks/BrowserDefaultGuards";
 import { I18nProvider } from "./i18n/I18nProvider";
 import { AppThemeProvider } from "./theme/AppThemeProvider";
-import { installGlobalErrorReporting } from "./services/frontendErrorLog";
+import { installGlobalErrorReporting, installFrontendLogPolicy } from "./services/frontendErrorLog";
+import { installWindowEventBridge } from "./features/dock/windowEventBridge";
 
 /*
  * 全局兜底：独立窗口是另一个 JS 上下文，主入口的 `installGlobalErrorReporting()`
@@ -30,7 +31,14 @@ import { installGlobalErrorReporting } from "./services/frontendErrorLog";
  * 永远不会回传后端日志，与主窗口的契约静默分叉。`AppRootErrorBoundary` 只能兜住
  * 渲染期错误，异步链路仍需这层监听。
  */
+/* 策略副本独立于主窗口：卫星窗口是另一个 JS 上下文。 */
+void installFrontendLogPolicy();
 installGlobalErrorReporting();
+/*
+ * 跨窗口 UI 命令桥：文件浏览器打开/导入请求要以 main 为目标，主窗口的编辑
+ * 命令也要能以本卫星窗口为目标。必须在 React 挂载前注册，避免极早的事件丢失。
+ */
+installWindowEventBridge();
 
 /*
  * 【为什么这里不做偏好 hydrate】独立窗口与主窗口同源，共用同一份 `localStorage`；

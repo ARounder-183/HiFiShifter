@@ -58,11 +58,17 @@ function fireAll(): void {
 
 function ensureListeners(): void {
     if (listenersAttached) return;
-    listenersAttached = true;
     // 通过 globalThis 解析（而非直接引用 window/document）：node 测试环境
     // 没有全局 window，本模块仍可注册、由测试桩驱动触发。
-    targetWindow()?.addEventListener("blur", fireAll);
-    targetDocument()?.addEventListener("visibilitychange", () => {
+    // 【为什么目标缺失时不能置位】纯 node 首调（window/document 都还没有）时
+    // 若把 listenersAttached 写死为 true，之后即使进入浏览器也不会补挂
+    // blur / visibilitychange —— 手势失焦收尾永久失效。留到下次调用重试。
+    const win = targetWindow();
+    const doc = targetDocument();
+    if (win === null || doc === null) return;
+    listenersAttached = true;
+    win.addEventListener("blur", fireAll);
+    doc.addEventListener("visibilitychange", () => {
         // Alt+Tab 通常只触发 blur；最小化/遮挡到不可见才触发 visibilitychange。
         if (targetDocument()?.visibilityState !== "visible") {
             fireAll();

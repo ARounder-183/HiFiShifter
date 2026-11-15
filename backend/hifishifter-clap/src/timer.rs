@@ -79,7 +79,7 @@ pub unsafe fn acquire(plugin: *const clap_plugin_t) -> bool {
         return true;
     }
     let Some(support) = support(instance.host) else {
-        // 【为什么是 WARN】默认日志级别是 Warn；用 info 记"没有节拍"会让现场与"一切正常"
+        // 【为什么是 WARN】"没有节拍"是真故障；常规说明按语义分级，由用户档位控制。
         // 长得一样，而这正是"播放头不跟随"最难自查的形态。
         log::warn!(
             "[clap] host has no clap.timer-support; falling back to clap_host.request_callback"

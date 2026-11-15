@@ -1,7 +1,7 @@
 # 独立app与插件共用的原生剪贴板传输；不依赖Tauri、设备或音频内核。
 [package]
 name = "hifishifter-clipboard"
-version = "0.1.0"
+version = "0.2.0-beta"
 edition = "2021"
 publish = false
 [dependencies]

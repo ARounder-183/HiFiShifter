@@ -43,6 +43,7 @@ import {
     WebGl2WaveformRenderer,
     type WaveformSurfaceRenderer,
 } from "./surfaceRenderer";
+import { frontendLog } from "../services/frontendLog";
 
 export interface WaveformSurfaceProps {
     rows: readonly WaveformSceneRow[];
@@ -431,7 +432,11 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
                 commitCache(webglRendererRef.current);
                 return;
             } catch (error) {
-                console.warn("[WaveformSurface] WebGL2 render failed; using Canvas 2D", error);
+                frontendLog(
+                    "warn",
+                    "[WaveformSurface] WebGL2 render failed; using Canvas 2D",
+                    error,
+                );
                 setRendererKind("canvas2d");
             }
         }
@@ -515,7 +520,7 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             webglRendererRef.current = new WebGl2WaveformRenderer(webglCanvas);
             setRendererKind("webgl2");
         } catch (error) {
-            console.warn("[WaveformSurface] WebGL2 unavailable; using Canvas 2D", error);
+            frontendLog("warn", "[WaveformSurface] WebGL2 unavailable; using Canvas 2D", error);
             setRendererKind("canvas2d");
         }
         invalidate();

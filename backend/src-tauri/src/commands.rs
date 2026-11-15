@@ -1,7 +1,9 @@
 // 命令门面（Facade）
 //
 // 约束：
-// - `#[tauri::command]` 只允许出现在本文件中（作为前端 invoke 的稳定入口）。
+// - `#[tauri::command]` 绝大多数留在本门面；确有领域拆分需要的模块
+//   （playback / project_save_commands / clipboard）自带属性，注册时写完整模块路径；
+//   `generate_handler!` 的名字仍是唯一对外契约。
 // - 具体实现按领域拆分在 `backend/src-tauri/src/commands/*.rs`，并通过本文件转发调用。
 // - 拆分模块中的函数请保持 `pub(super)` / `pub(crate)`，避免被当成公共 API 直接依赖。
 
@@ -60,6 +62,8 @@ pub async fn host_link_release(app: tauri::AppHandle) -> Result<serde_json::Valu
 mod cache;
 #[path = "commands/channel_scan.rs"]
 pub(crate) mod channel_scan;
+#[path = "commands/clipboard.rs"]
+pub(crate) mod clipboard;
 #[path = "commands/common.rs"]
 mod common;
 #[path = "commands/core.rs"]
@@ -72,6 +76,8 @@ mod dialogs;
 mod file_browser;
 #[path = "commands/json_export.rs"]
 mod json_export;
+#[path = "commands/log_settings.rs"]
+mod log_settings;
 #[path = "commands/midi.rs"]
 mod midi;
 // MIDI 导出已搬进内核（`hifishifter_kernel::midi_export`）：整条链路是纯粹的
@@ -85,8 +91,8 @@ mod formant;
 mod notebook;
 #[path = "commands/onnx_status.rs"]
 mod onnx_status;
-#[path = "commands/param_line_blocks.rs"]
-mod param_line_blocks;
+#[path = "commands/param_blocks.rs"]
+mod param_blocks;
 #[path = "commands/syllable.rs"]
 mod syllable;
 // 多选区帧窗口已搬进内核（`hifishifter_kernel::editor::selection`）：MIDI 导入在
@@ -107,6 +113,8 @@ mod processor_caps;
 pub(crate) mod project;
 #[path = "commands/project_import.rs"]
 mod project_import;
+#[path = "commands/project_save_commands.rs"]
+pub(crate) mod project_save_commands;
 #[path = "commands/reaper.rs"]
 mod reaper;
 #[path = "commands/reaper_clipboard.rs"]
@@ -198,7 +206,7 @@ pub fn ping() -> serde_json::Value {
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_runtime_info(state: State<'_, AppState>) -> crate::models::RuntimeInfoPayload {
-    core::get_runtime_info(state)
+    common::guarded("get_runtime_info", || core::get_runtime_info(state))
 }
 
 /// 关于对话框数据（版本 / commit / 仓库链接）。
@@ -224,6 +232,17 @@ pub fn consume_startup_project_path(state: State<'_, AppState>) -> serde_json::V
             "consume_startup_project_path",
             serde_json::json!({ "ok": false, "error": "panic in command: consume_startup_project_path" }),
             || core::consume_startup_project_path(state),
+        )
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn mark_frontend_ready(state: State<'_, AppState>) -> serde_json::Value {
+    {
+        common::guard_command(
+            "mark_frontend_ready",
+            serde_json::json!({ "ok": false, "error": "panic in command: mark_frontend_ready" }),
+            || core::mark_frontend_ready(state),
         )
     }
 }
@@ -458,7 +477,7 @@ pub fn close_window(window: Window) -> serde_json::Value {
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_project_meta(state: State<'_, AppState>) -> crate::models::ProjectMetaPayload {
-    project::get_project_meta(state)
+    common::guarded("get_project_meta", || project::get_project_meta(state))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -757,59 +776,11 @@ pub fn notebook_save_asset_as(
     }
 }
 
-/// 「另存为」：rfd 对话框（阻塞等待用户选择）+ 选定路径后的完整落盘，
-/// 后者可能包含数 GB 媒体的 zip 压缩 —— 与 `save_project` 同样必须在阻塞
-/// 线程池执行（见其注释）。
-#[tauri::command(rename_all = "camelCase")]
-pub async fn save_project_as(
-    app: tauri::AppHandle,
-    window: Window,
-    notes_markdown: Option<String>,
-) -> serde_json::Value {
-    match tauri::async_runtime::spawn_blocking(move || {
-        let state: State<'_, AppState> = app.state();
-        project::save_project_as(state, window, notes_markdown)
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => serde_json::json!({
-            "ok": false,
-            "error": format!("Failed to join save-as task: {error}"),
-        }),
-    }
-}
-
-/// 保存到指定路径（带版本冲突检测）；force=true 表示用户已在冲突对话框中
-/// 确认"继续保存"。
-///
-/// zip 归档保存会逐一压缩复制全部引用媒体（可能数 GB），普通保存也有整段
-/// JSON 序列化 + 磁盘写入，必须在阻塞线程池执行，避免冻结 UI 主线程。
-#[tauri::command(rename_all = "camelCase")]
-pub async fn save_project_to_path(
-    app: tauri::AppHandle,
-    window: Window,
-    project_path: String,
-    notes_markdown: Option<String>,
-    force: Option<bool>,
-) -> serde_json::Value {
-    match tauri::async_runtime::spawn_blocking(move || {
-        let state: State<'_, AppState> = app.state();
-        project::save_project_to_path(state, window, project_path, notes_markdown, force)
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => serde_json::json!({
-            "ok": false,
-            "error": format!("Failed to join save task: {error}"),
-        }),
-    }
-}
-
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_auto_backup_settings(state: State<'_, AppState>) -> crate::config::AutoBackupSettings {
-    project::get_auto_backup_settings(state)
+    common::guarded("get_auto_backup_settings", || {
+        project::get_auto_backup_settings(state)
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -848,7 +819,9 @@ pub fn run_timed_auto_backup(
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_recording_settings(state: State<'_, AppState>) -> crate::config::RecordingSettings {
-    recording::get_recording_settings(state)
+    common::guarded("get_recording_settings", || {
+        recording::get_recording_settings(state)
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -932,7 +905,9 @@ pub async fn stop_recording(app: tauri::AppHandle) -> serde_json::Value {
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_recording_state(state: State<'_, AppState>) -> crate::recording::RecordingStatePayload {
-    recording::get_recording_state(state)
+    common::guarded("get_recording_state", || {
+        recording::get_recording_state(state)
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1254,45 +1229,58 @@ pub async fn analyze_clip_formants(
 // ===================== clip syllable analysis =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_param_line_blocks(
+pub fn get_param_block_view(
     state: State<'_, AppState>,
     root_track_id: String,
 ) -> Result<serde_json::Value, String> {
     common::guard_command(
-        "get_param_line_blocks",
-        Err("panic in get_param_line_blocks".into()),
-        || param_line_blocks::get(&state, &root_track_id),
+        "get_param_block_view",
+        Err("panic in get_param_block_view".into()),
+        || param_blocks::get(&state, &root_track_id),
     )
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn set_param_line_blocks(
+#[allow(clippy::too_many_arguments)]
+pub fn set_param_block_edits(
     state: State<'_, AppState>,
     root_track_id: String,
-    expected_revision: u64,
-    blocks: Vec<hifishifter_kernel::param_line_blocks::ParamLineBlock>,
-    game_baseline: Option<Vec<hifishifter_kernel::param_line_blocks::ParamLineBlock>>,
+    expected_edit_revision: u64,
+    edits: Vec<hifishifter_kernel::param_blocks::UserParamBlock>,
     checkpoint: Option<bool>,
-    curve_patches: Option<Vec<hifishifter_kernel::param_line_blocks::ParamLineCurvePatch>>,
+    curve_patches: Option<Vec<hifishifter_kernel::param_blocks::ParamBlockCurvePatch>>,
     expected_curve_revision: Option<u64>,
     expected_geometry_signature: Option<String>,
 ) -> Result<serde_json::Value, String> {
     common::guard_command(
-        "set_param_line_blocks",
-        Err("panic in set_param_line_blocks".into()),
+        "set_param_block_edits",
+        Err("panic in set_param_block_edits".into()),
         || {
-            param_line_blocks::set(
+            param_blocks::set(
                 &state,
                 root_track_id,
-                expected_revision,
-                blocks,
-                game_baseline,
+                expected_edit_revision,
+                edits,
                 checkpoint.unwrap_or(true),
                 curve_patches.unwrap_or_default(),
                 expected_curve_revision,
                 expected_geometry_signature,
             )
         },
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn restore_game_param_blocks(
+    state: State<'_, AppState>,
+    root_track_id: String,
+    ranges: Vec<hifishifter_kernel::editor::SelectionFrameRange>,
+    checkpoint: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    common::guard_command(
+        "restore_game_param_blocks",
+        Err("panic in restore_game_param_blocks".into()),
+        || param_blocks::restore_game(&state, root_track_id, ranges, checkpoint.unwrap_or(true)),
     )
 }
 
@@ -1319,41 +1307,6 @@ pub async fn analyze_clip_syllables(
     })
     .await
     .map_err(|e| format!("syllable analysis worker failed: {e}"))?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn get_param_block_merges(
-    state: State<'_, AppState>,
-    root_track_id: String,
-) -> serde_json::Value {
-    common::guard_json_command(
-        "get_param_block_merges",
-        || match syllable::get_param_block_merges(state, root_track_id) {
-            Ok((records, interval_edits)) => {
-                serde_json::json!({ "ok": true, "records": records, "intervalEdits": interval_edits })
-            }
-            Err(error) => serde_json::json!({ "ok": false, "error": error }),
-        },
-    )
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn set_param_block_merges(
-    state: State<'_, AppState>,
-    root_track_id: String,
-    records: Vec<syllable::ParamBlockMergeRecordPayload>,
-    interval_edits: Option<Vec<syllable::ParamBlockIntervalEditPayload>>,
-    checkpoint: Option<bool>,
-) -> serde_json::Value {
-    common::guard_json_command("set_param_block_merges", || {
-        syllable::set_param_block_merges(
-            state,
-            root_track_id,
-            records,
-            interval_edits.unwrap_or_default(),
-            checkpoint,
-        )
-    })
 }
 
 // ===================== waveform v2 (二进制 mipmap) =====================
@@ -2182,7 +2135,9 @@ pub fn replace_clip_source(
 pub fn check_source_files_changed(
     state: State<'_, AppState>,
 ) -> crate::models::CheckSourceFilesChangedPayload {
-    timeline::check_source_files_changed(state)
+    common::guarded("check_source_files_changed", || {
+        timeline::check_source_files_changed(state)
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2484,79 +2439,8 @@ pub fn clipboard_kind() -> serde_json::Value {
     }
 }
 
-// ===================== generic system object clipboard =====================
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn write_system_clipboard_object(
-    payload: String,
-    text_summary: Option<String>,
-) -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
-        common::guard_command(
-            "write_system_clipboard_object",
-            serde_json::json!({ "ok": false, "error": "panic in command: write_system_clipboard_object" }),
-            || {
-                let summary = text_summary
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or_else(|| {
-                        "HiFiShifter data copied. Paste in HiFiShifter.".to_string()
-                    });
-                // 单剪贴板纪律：本次写入替换整个逻辑剪贴板（时间轴 Clip 载荷随
-                // empty() 一并清除），最后复制的获胜。
-                match crate::system_clipboard::write_bytes(payload.as_bytes(), &summary) {
-                    Ok(()) => {
-                        // 记录缓存（clipboard_kind 探测与可用性轮询的快速路径）：
-                        // 参数线载荷占据槽位，时间轴可用性判定为不可用（counts 0）。
-                        if let Some(seq) = crate::system_clipboard::clipboard_seq_num() {
-                            crate::system_clipboard::write_clipboard_cache(
-                                crate::system_clipboard::ClipboardCacheEntry {
-                                    seq,
-                                    hifi_kind: Some("param".to_string()),
-                                    hifi_clip_count: 0,
-                                    hifi_track_count: 0,
-                                    hifi_source_project: None,
-                                    // write_contents 的 empty() 清除了 REAPERMedia。
-                                    reaper_available: false,
-                                },
-                            );
-                        }
-                        serde_json::json!({ "ok": true })
-                    }
-                    Err(error) => serde_json::json!({ "ok": false, "error": error }),
-                }
-            },
-        )
-    }
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn read_system_clipboard_object() -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
-        common::guard_command(
-            "read_system_clipboard_object",
-            serde_json::json!({ "ok": false, "error": "panic in command: read_system_clipboard_object" }),
-            || {
-                match crate::system_clipboard::read_bytes() {
-                    Ok(Some(bytes)) => match String::from_utf8(bytes) {
-                        Ok(text) => {
-                            serde_json::json!({ "ok": true, "available": true, "payload": text })
-                        }
-                        // 二进制载荷（如时间轴 MessagePack）对本读取方等价于
-                        // "没有可用的参数线数据"，由前端回退内部剪贴板。
-                        Err(_) => serde_json::json!({ "ok": true, "available": false }),
-                    },
-                    Ok(None) => serde_json::json!({ "ok": true, "available": false }),
-                    Err(error) => serde_json::json!({ "ok": false, "error": error }),
-                }
-            },
-        )
-    }
-}
-
+// 通用剪贴板命令住在 commands/clipboard.rs；注册走完整模块路径，
+// 与 project_save_commands 同一形态（见 lib.rs 的 generate_handler!）。
 #[tauri::command(rename_all = "camelCase")]
 pub fn set_timeline_tempo_map(
     state: State<'_, AppState>,
@@ -2586,16 +2470,18 @@ pub fn get_param_frames(
     binary: Option<bool>,
     with_sentinel: Option<bool>,
 ) -> crate::models::ParamFramesPayload {
-    params::get_param_frames(
-        state,
-        track_id,
-        param,
-        start_frame,
-        frame_count,
-        stride,
-        binary,
-        with_sentinel,
-    )
+    common::guarded("get_param_frames", || {
+        params::get_param_frames(
+            state,
+            track_id,
+            param,
+            start_frame,
+            frame_count,
+            stride,
+            binary,
+            with_sentinel,
+        )
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2689,7 +2575,9 @@ pub fn get_static_param(
     track_id: String,
     param: String,
 ) -> crate::models::StaticParamValuePayload {
-    params::get_static_param(state, track_id, param)
+    common::guarded("get_static_param", || {
+        params::get_static_param(state, track_id, param)
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2733,7 +2621,7 @@ pub fn stretch_track_linked_params(
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn load_default_model(state: State<'_, AppState>) -> crate::models::ModelConfigPayload {
-    synth::load_default_model(state)
+    common::guarded("load_default_model", || synth::load_default_model(state))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2741,7 +2629,7 @@ pub fn load_model(
     state: State<'_, AppState>,
     model_dir: String,
 ) -> crate::models::ModelConfigPayload {
-    synth::load_model(state, model_dir)
+    common::guarded("load_model", || synth::load_model(state, model_dir))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2757,12 +2645,31 @@ pub fn set_pitch_shift(semitones: f64) -> serde_json::Value {
     }
 }
 
+// 神经合成本身耗时可达分钟级：与 synthesize 同理放到阻塞线程池，避免同步命令
+// 冻结整个 UI；spawn_blocking 的任务边界同时把 panic 收成 JoinError（不会越过
+// WebView IPC 线程的 FFI 边界 abort App）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn process_audio(
-    state: State<'_, AppState>,
+pub async fn process_audio(
+    app: tauri::AppHandle,
     audio_path: String,
 ) -> crate::models::ProcessAudioPayload {
-    synth::process_audio(state, audio_path)
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        synth::process_audio(state, audio_path)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            log::error!("process_audio: join task failed: {error}");
+            crate::models::ProcessAudioPayload {
+                ok: false,
+                audio: None,
+                feature: None,
+                timeline: None,
+            }
+        }
+    }
 }
 
 // 整段 mixdown 渲染耗时可达分钟级，必须放到阻塞线程池执行；
@@ -2855,7 +2762,9 @@ pub fn cancel_export_audio() -> serde_json::Value {
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_export_audio_defaults(state: State<'_, AppState>) -> synth::ExportAudioDefaultsPayload {
-    synth::get_export_audio_defaults(state)
+    common::guarded("get_export_audio_defaults", || {
+        synth::get_export_audio_defaults(state)
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2863,7 +2772,9 @@ pub fn preview_export_audio_plan(
     state: State<'_, AppState>,
     request: synth::ExportAudioRequest,
 ) -> synth::ExportAudioPlanPayload {
-    synth::preview_export_audio_plan(state, request)
+    common::guarded("preview_export_audio_plan", || {
+        synth::preview_export_audio_plan(state, request)
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2908,7 +2819,7 @@ pub fn set_metronome(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {
+pub fn play_original(state: State<'_, AppState>) -> serde_json::Value {
     {
         // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
         // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
@@ -2925,7 +2836,7 @@ pub fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::
                     .transport_lock
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                playback::play_original(state, start_sec)
+                playback::play_original(state)
             },
         )
     }
@@ -2953,14 +2864,16 @@ pub fn stop_audio(state: State<'_, AppState>) -> serde_json::Value {
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_playback_state(state: State<'_, AppState>) -> crate::models::PlaybackStatePayload {
-    // 与播放/停止同一把锁：保证轮询读到的 (is_playing, base, position) 是
-    // 某个传输命令完成后的完整状态，而不是 stop+play 交错的中间态。
-    let _transport_order = state
-        .inner()
-        .transport_lock
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    playback::get_playback_state(state)
+    common::guarded("get_playback_state", || {
+        // 与播放/停止同一把锁：保证轮询读到的 (is_playing, base, position) 是
+        // 某个传输命令完成后的完整状态，而不是 stop+play 交错的中间态。
+        let _transport_order = state
+            .inner()
+            .transport_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        playback::get_playback_state(state)
+    })
 }
 
 /// 后台预渲染：编辑操作后立即在后台开始渲染，无需等待播放。
@@ -2990,6 +2903,26 @@ pub fn cancel_background_render(app: tauri::AppHandle) -> serde_json::Value {
             || playback::cancel_background_render(Some(&app)),
         )
     }
+}
+
+// ===================== log verbosity (Help menu) =====================
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_log_settings() -> serde_json::Value {
+    common::guard_command(
+        "get_log_settings",
+        serde_json::json!({ "ok": false, "error": "panic in command: get_log_settings" }),
+        log_settings::get_log_settings,
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_log_settings(verbosity: String) -> serde_json::Value {
+    common::guard_command(
+        "set_log_settings",
+        serde_json::json!({ "ok": false, "error": "panic in command: set_log_settings" }),
+        || log_settings::set_log_settings(verbosity),
+    )
 }
 
 // ===================== diagnostics =====================
@@ -3120,19 +3053,34 @@ pub fn export_vibrato_presets_json(json: String, default_file_name: String) -> s
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn log_frontend_error(message: String, detail: Option<String>) -> serde_json::Value {
+pub fn log_frontend_error(
+    message: String,
+    detail: Option<String>,
+    level: Option<String>,
+) -> serde_json::Value {
     {
         // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
         // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
         common::guard_command(
             "log_frontend_error",
             serde_json::json!({ "ok": false, "error": "panic in command: log_frontend_error" }),
-            || diagnostics::log_frontend_error(message, detail),
+            || diagnostics::log_frontend_error(message, detail, level),
         )
     }
 }
 
 // ===================== pitch_progress =====================
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_clip_pitch_data(state: State<'_, AppState>, clip_ids: Vec<String>) -> serde_json::Value {
+    {
+        common::guard_command(
+            "get_clip_pitch_data",
+            serde_json::json!({ "ok": false, "error": "panic in command: get_clip_pitch_data" }),
+            || pitch_progress::get_clip_pitch_data(state, clip_ids),
+        )
+    }
+}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_pitch_analysis_progress(
@@ -3160,18 +3108,20 @@ pub fn get_syllable_analysis_progress() -> Option<crate::pitch_analysis::Syllabl
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_onnx_status() -> onnx_status::OnnxStatusPayload {
-    onnx_status::get_onnx_status()
+    common::guarded("get_onnx_status", onnx_status::get_onnx_status)
 }
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_onnx_diagnostic() -> crate::nsf_hifigan_onnx::OnnxDiagnosticInfo {
-    onnx_status::get_onnx_diagnostic_info()
+    common::guarded("get_onnx_diagnostic", || {
+        onnx_status::get_onnx_diagnostic_info()
+    })
 }
 
 /// vslib 是否可用 —— 供前端算法列表按能力过滤（不可用时隐藏 vslib）。
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_vslib_status() -> vslib_status::VslibStatusPayload {
-    vslib_status::get_vslib_status()
+    common::guarded("get_vslib_status", vslib_status::get_vslib_status)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -3444,7 +3394,9 @@ pub fn transliterate(
     texts: Vec<String>,
     options: Option<crate::search::SearchOptions>,
 ) -> Vec<crate::search::TranslitResult> {
-    crate::search::transliterate_batch(&texts, &options.unwrap_or_default())
+    common::guarded("transliterate", || {
+        crate::search::transliterate_batch(&texts, &options.unwrap_or_default())
+    })
 }
 
 // ===================== vocalshifter =====================
@@ -3648,7 +3600,9 @@ pub fn reveal_export_paths(app: tauri::AppHandle, paths: Vec<String>) -> serde_j
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_processor_params(algo: String) -> Vec<processor_caps::ParamDescriptorDto> {
-    processor_caps::get_processor_params(algo)
+    common::guarded("get_processor_params", || {
+        processor_caps::get_processor_params(algo)
+    })
 }
 
 // ===================== midi =====================
@@ -3893,7 +3847,7 @@ pub async fn save_ui_settings(
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn ui_kv_dump(state: State<'_, AppState>) -> std::collections::BTreeMap<String, String> {
-    ui_settings::ui_kv_dump(state)
+    common::guarded("ui_kv_dump", || ui_settings::ui_kv_dump(state))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -3901,7 +3855,7 @@ pub fn ui_kv_put(
     state: State<'_, AppState>,
     patch: std::collections::BTreeMap<String, String>,
 ) -> std::collections::BTreeMap<String, String> {
-    ui_settings::ui_kv_put(state, patch)
+    common::guarded("ui_kv_put", || ui_settings::ui_kv_put(state, patch))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -3909,5 +3863,5 @@ pub fn ui_kv_delete(
     state: State<'_, AppState>,
     keys: Vec<String>,
 ) -> std::collections::BTreeMap<String, String> {
-    ui_settings::ui_kv_delete(state, keys)
+    common::guarded("ui_kv_delete", || ui_settings::ui_kv_delete(state, keys))
 }

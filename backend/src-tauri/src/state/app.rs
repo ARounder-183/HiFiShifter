@@ -143,6 +143,13 @@ pub struct AppState {
     /// 启动参数传入的待打开工程路径（一次性消费）。
     pub pending_startup_project_path: Mutex<Option<String>>,
 
+    /// 前端是否已经注册好外部打开事件监听。
+    ///
+    /// macOS 的 LaunchServices 通过 RunEvent::Opened 送达路径；冷启动时它可能
+    /// 早于前端 mount。前端先 listen、再调用 mark_frontend_ready，之后 Rust 才
+    /// 直接 emit；此前的路径一律留在 pending。
+    pub frontend_ready: std::sync::atomic::AtomicBool,
+
     /// 本次运行的「未保存导入会话」id（惰性生成一次）。
     ///
     /// 【为什么以"进程"为边界】未保存工程的导入素材需要一个家，而"这次运行"就是
@@ -197,6 +204,7 @@ impl AppState {
             recording_starting: std::sync::atomic::AtomicBool::new(false),
             config_dir: OnceLock::new(),
             pending_startup_project_path: Mutex::new(None),
+            frontend_ready: std::sync::atomic::AtomicBool::new(false),
             import_session: OnceLock::new(),
         }
     }
@@ -255,6 +263,32 @@ impl AppState {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         guard.take()
+    }
+
+    /// pending 是否恰好是这条路径。用于避免 macOS 同时经 argv 与 Apple Event
+    /// 送来同一文件时打开两次；这里**只读不取走**——消费权仍归前端 consume，
+    /// 否则「mark ready 之后、consume 之前」的 Opened 会把路径吃掉。
+    #[cfg(target_os = "macos")]
+    pub fn pending_startup_project_path_matches(&self, path: &str) -> bool {
+        let guard = self
+            .pending_startup_project_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.as_deref() == Some(path)
+    }
+
+    /// 标记前端监听已就绪（由 mark_frontend_ready 命令调用）。
+    pub fn mark_frontend_ready(&self) {
+        self.frontend_ready
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// 前端是否已就绪。使用 Acquire/Release，保证 emit 之前写入的 pending
+    /// 与就绪判定有明确先后关系。
+    #[cfg(target_os = "macos")]
+    pub fn is_frontend_ready(&self) -> bool {
+        self.frontend_ready
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// 使指定源路径的波形峰值缓存失效（内存缓存 + inflight 标记）。
@@ -756,7 +790,7 @@ impl AppState {
                     .lock()
                     .unwrap_or_else(|error| error.into_inner()),
                 snapshot,
-                HistoryOp::ParamBlockMerge.key().into(),
+                HistoryOp::ParamBlockEdit.key().into(),
                 || self.current_notes_markdown(),
             );
             self.emit_history_state();
@@ -1079,27 +1113,66 @@ impl AppState {
             payload.redo_depth = Some(redo_depth);
             return payload;
         };
-        let layout_only =
-            hifishifter_kernel::param_line_blocks::timeline_equal_except_blocks(&tl, &next_state);
+        /*
+         * 【撤销不得删除分析结果】音节分析是素材派生物，不是用户意图 —— 它按
+         * 设计不进撤销栈（见 `commands::syllable::commit_analysis_metadata`）。
+         * 但历史快照存的是整份 `TimelineState`，其中包含
+         * `clip.takes[].syllable_analysis`，也就是块的全部源域来源。于是一次
+         * 跨过"分析完成点"的撤销会把分析一起回退：`compose` 找不到任何
+         * source span，该 Clip 的 base 块整片消失，而前端已记下"这条 Clip 分析
+         * 过了"，不会自己补回来。
+         */
+        carry_analysis_forward(&tl, &mut next_state, tl.frame_period_ms());
         // Undo restores content, but transport revisions must remain monotonic.
-        for (root, params) in &tl.params_by_root_track {
-            if let Some(current) = &params.param_line_blocks {
-                if !next_state.tracks.iter().any(|track| track.id == *root) {
-                    continue;
-                }
-                let entry = next_state
-                    .params_by_root_track
-                    .entry(root.clone())
-                    .or_default();
-                let restored = entry.param_line_blocks.get_or_insert_with(|| {
-                    hifishifter_kernel::param_line_blocks::ParamLineBlockSet {
-                        frame_period_ms: current.frame_period_ms,
-                        ..Default::default()
-                    }
-                });
-                restored.revision = restored.revision.max(current.revision).saturating_add(1);
+        /*
+         * 【必须取两侧根集合的并集】旧实现只遍历"当前在线编辑集非空"的根：
+         * - 当前为空、目标非空（撤销一次“删除全部块”）时，目标根的 revision
+         *   不会被抬高，前端单调闸会把回包当成陈旧数据丢掉，重做看起来没反应；
+         * - 当前非空、目标为空时，目标根也不会被抬高。
+         * 只要任一侧存在这个根，就要把 revision 抬到两侧最大值 +1。
+         */
+        let roots: std::collections::BTreeSet<String> = tl
+            .params_by_root_track
+            .keys()
+            .chain(next_state.params_by_root_track.keys())
+            .cloned()
+            .collect();
+        for root in roots.iter() {
+            if !next_state.tracks.iter().any(|track| track.id == *root) {
+                continue;
             }
+            let target_rev = next_state
+                .params_by_root_track
+                .get(root)
+                .map(|params| params.param_block_edits.revision)
+                .unwrap_or(0);
+            let live_rev = tl
+                .params_by_root_track
+                .get(root)
+                .map(|params| params.param_block_edits.revision)
+                .unwrap_or(0);
+            let entry = next_state
+                .params_by_root_track
+                .entry(root.clone())
+                .or_default();
+            entry.param_block_edits.revision = entry
+                .param_block_edits
+                .revision
+                .max(target_rev)
+                .max(live_rev)
+                .saturating_add(1);
         }
+        /*
+         * 【派生缓存不得随快照恢复】`param_block_view` 是纯派生缓存，只对产生
+         * 它的那一刻有效。上面的循环只覆盖"在线编辑集非空且轨道还在"的根，
+         * 其余根会把快照里那份过期视图原样带回来 —— 撤销之后前端就照着旧几何
+         * 画块。缓存一律清空，让下一次读取重新合成。
+         */
+        for params in next_state.params_by_root_track.values_mut() {
+            params.param_block_view = None;
+        }
+        let layout_only =
+            hifishifter_kernel::param_blocks::timeline_equal_except_blocks(&tl, &next_state);
         let scale_before = tl.render_scale_signature();
         *tl = next_state;
         h.position = target;
@@ -1284,6 +1357,47 @@ impl AppState {
     }
 }
 
+/// 撤销 / 重做不得删除分析结果：它是素材的派生物，不是用户意图。
+///
+/// 历史快照存的是整份 `TimelineState`，其中包含 `clip.takes[].syllable_analysis`
+/// —— 块的全部源域来源。而音节分析**不进撤销栈**（见
+/// `commands::syllable::commit_analysis_metadata`），于是"记录里还没有分析、
+/// 实时时间线已经有了"这个中间态会让一次撤销把分析一起回退。
+///
+/// 这里在覆盖前把仍然**属于同一素材**的分析搬进恢复快照。判据是
+/// `source_digest`（路径 / 指纹 / 大小 / 时长 / 采样率 / 帧周期）：它不含源
+/// 窗口，所以 Slip / Trim 不会让分析失效，只有替换素材才会 —— 撤销一次
+/// "替换素材"绝不能把新素材的分段贴到旧素材上。
+fn carry_analysis_forward(
+    live: &TimelineState,
+    restored: &mut TimelineState,
+    frame_period_ms: f64,
+) {
+    for clip in &mut restored.clips {
+        let Some(live_clip) = live.clips.iter().find(|item| item.id == clip.id) else {
+            continue;
+        };
+        let digest = hifishifter_kernel::param_blocks::source_digest(clip, frame_period_ms);
+        for take in &mut clip.takes {
+            let Some(live_take) = live_clip.takes.iter().find(|item| item.id == take.id) else {
+                continue;
+            };
+            let Some(analysis) = live_take.syllable_analysis.clone() else {
+                continue;
+            };
+            if analysis.source_digest != digest {
+                continue;
+            }
+            take.syllable_analysis = Some(analysis);
+            // 「还原 GAME 分段」的来源。它没有摘要可校验，只能跟着**已验证**的
+            // 分析一起搬：丢了就再也还原不回去。
+            if take.game_block_baseline.is_none() {
+                take.game_block_baseline = live_take.game_block_baseline.clone();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1379,6 +1493,76 @@ mod tests {
         assert!(payload.ok);
         assert_eq!(payload.notes_markdown, Some("Hello, world!".to_string()));
         assert_eq!(state.current_notes_value(), "Hello, world!");
+    }
+
+    /// 撤销回到“空编辑集”时也必须抬高 revision，否则前端单调闸会把回包丢掉。
+    #[test]
+    fn undo_and_redo_bump_revision_across_empty_edit_sets() {
+        let state = AppState::default();
+        let root = {
+            let mut timeline = state.timeline.lock().unwrap();
+            timeline.add_track(None, None, None);
+            timeline.tracks[0].id.clone()
+        };
+        // 第 1 步：空编辑集。
+        {
+            let timeline = state.timeline.lock().unwrap();
+            state.checkpoint_timeline(&timeline, HistoryOp::ParamCurve);
+        }
+        // 第 2 步：非空编辑集，revision = 7。
+        {
+            let mut timeline = state.timeline.lock().unwrap();
+            let params = timeline
+                .params_by_root_track
+                .entry(root.clone())
+                .or_default();
+            params.param_block_edits.revision = 7;
+            params.param_block_edits.blocks =
+                vec![hifishifter_kernel::param_blocks::UserParamBlock {
+                    id: "root".into(),
+                    geometry: hifishifter_kernel::param_blocks::BlockGeometry::Root {
+                        span: hifishifter_kernel::param_blocks::RootSpan {
+                            start_sec: 0.0,
+                            end_sec: 1.0,
+                        },
+                    },
+                    deleted: false,
+                    manual: true,
+                    value: Some(60.0),
+                    transition_out_sec: None,
+                    created_seq: 1,
+                    base_cover: None,
+                }];
+            state.checkpoint_timeline(&timeline, HistoryOp::ParamCurve);
+        }
+        let undo = state.undo_timeline();
+        assert!(undo.ok);
+        let undo_revision = {
+            let timeline = state.timeline.lock().unwrap();
+            timeline
+                .params_by_root_track
+                .get(&root)
+                .map(|params| params.param_block_edits.revision)
+                .unwrap_or(0)
+        };
+        assert!(
+            undo_revision > 7,
+            "撤销到空编辑集也必须抬高 revision：{undo_revision}"
+        );
+        let redo = state.redo_timeline();
+        assert!(redo.ok);
+        let redo_revision = {
+            let timeline = state.timeline.lock().unwrap();
+            timeline
+                .params_by_root_track
+                .get(&root)
+                .map(|params| params.param_block_edits.revision)
+                .unwrap_or(0)
+        };
+        assert!(
+            redo_revision > undo_revision,
+            "重做必须继续抬高 revision：{redo_revision} <= {undo_revision}"
+        );
     }
 
     /// 「边缘拉伸」的选区快照：随**产生它的那一步**记录，撤销/重做/跳转由载荷带回；

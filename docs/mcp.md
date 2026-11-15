@@ -172,6 +172,27 @@ Agent 可以在一批操作中导入同源的两段 clip，分别设置源窗/�
 | `transform_curve` | 指定工程秒区间，应用 set/ramp/shift/shift_to_note/flatten_to_note |
 | `set_param_blocks` | 以查询得到的 schema 替换根轨参数块布局；与曲线写入可放在同一事务 |
 
+参数块使用当前 App 的 `ParamBlockEditSet` v2 契约。先查询：
+
+```json
+{
+  "kind": "param_blocks",
+  "track_id": "<根轨或子轨 ID>"
+}
+```
+
+返回的 `layout` 是可写权威，核心结构为：
+
+```json
+{
+  "schemaVersion": 2,
+  "revision": 3,
+  "blocks": []
+}
+```
+
+`view` 是由当前时间线与 `layout` 派生出的只读显示结果，不能作为写回值。修改时提交完整 `layout`；`revision` 必须来自最近一次查询，MCP 会在事务中生成下一 revision。块中的 Take 成员使用源域时间，不能写成固定的工程绝对帧，具体字段以 `hfs_query(kind=param_blocks)` 的实时返回为准。
+
 例如，把 2.0–2.4 秒的有声音高拉平到 C4：
 
 ```json

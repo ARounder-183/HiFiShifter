@@ -47,6 +47,12 @@ const PianoRollPanel = lazy(() =>
     })),
 );
 import { useAppDispatch, useAppSelector } from "./app/hooks";
+import {
+    runSaveAsFormatAction,
+    saveProjectAsWithLastFormat,
+} from "./features/session/saveProjectCommands";
+import { useSaveProjectAsNotice } from "./features/session/useSaveProjectAsNotice";
+import { useSaveVersionConflictActions } from "./features/session/useSaveVersionConflictActions";
 import { webApi } from "./services/webviewApi";
 import { settingsApi } from "./services/api/settings";
 import { fileBrowserApi } from "./services/api/fileBrowser";
@@ -77,11 +83,7 @@ import {
     openReaperFromDialog,
     importAudioFromPath,
     saveProjectRemote,
-    saveProjectAsRemote,
-    saveProjectToPathRemote,
     setTrackMeters,
-    setToolModePersistent,
-    toggleParamBlockEditPersistent,
     setVslibAvailable,
     setPlaybackRenderingState,
     checkpointHistory,
@@ -94,6 +96,8 @@ import {
     persistUiSettings,
 } from "./features/session/sessionSlice";
 import { resolveTransportShortcutCommand } from "./features/session/transportShortcuts";
+import { resolveDragDirectionTool } from "./features/session/dragDirection";
+import * as toolModeThunks from "./features/session/thunks/toolModeThunks";
 import { useI18n } from "./i18n/I18nProvider";
 import { useClipPitchDataListener } from "./hooks/useClipPitchDataListener";
 import { useHistoryStateListener } from "./hooks/useHistoryStateListener";
@@ -104,6 +108,7 @@ import { PitchAnalysisStatusChip } from "./components/layout/PitchAnalysisStatus
 import { ParamDataLoadingChip } from "./components/layout/ParamDataLoadingChip";
 import { AppStatusProgressChips } from "./components/layout/AppStatusProgressChips";
 import { ParamBlockAnalysisStatus } from "./components/layout/pianoRoll/panel/ParamBlockAnalysisStatus";
+import { ParamBlockFeedbackChip } from "./components/layout/pianoRoll/panel/ParamBlockFeedbackChip";
 import { appStatusProgressBus } from "./utils/appStatusProgressBus";
 const FileBrowserPanel = lazy(() =>
     import("./components/layout/FileBrowserPanel").then((module) => ({
@@ -163,6 +168,8 @@ const NotebookErrorBoundary = lazy(() =>
 );
 import { ImportProjectDialog } from "./components/layout/ImportProjectDialog";
 import { AppDialog } from "./ui/Dialog";
+import { useFrameCommitter, useWheelStepAccumulator } from "./ui/useFrameCommit";
+import { useNonPassiveWheel } from "./utils/useNonPassiveWheel";
 import { AppStatusChip } from "./ui";
 import type { AppStatusTone } from "./ui/StatusChip";
 import { QuickSearchPopup } from "./components/layout/QuickSearchPopup";
@@ -172,12 +179,23 @@ import { selectMergedKeybindings } from "./features/keybindings/keybindingsSlice
 import { beginHoldRepeat } from "./features/keybindings/holdRepeat";
 import {
     ACTION_TO_EDIT_OP,
+    PARAM_BLOCK_ACTION_TO_OP,
     resolveCopyCutRoute,
     resolveEditOpRoute,
+    resolveParamBlockEditChannel,
     resolvePasteRoute,
     type EditOpChannel,
 } from "./features/keybindings/focusRouting";
-import { installFocusSurfaceTracking, getActiveSurface } from "./features/uiFocus/focusSurface";
+import {
+    installFocusSurfaceTracking,
+    getActiveSurface,
+    type EditSurfaceId,
+} from "./features/uiFocus/focusSurface";
+import {
+    installWindowEventBridge,
+    KEYBINDING_ACTION_EVENT,
+} from "./features/dock/windowEventBridge";
+import { setActiveEditorWindow } from "./features/session/interactionSlice";
 import {
     classifyHostKeyRelay,
     collectOwnedStrokes,
@@ -207,11 +225,12 @@ import {
     IMPORT_MIDI_PATH_EVENT,
     IMPORT_PROJECT_PICK_EVENT,
     OPEN_PROJECT_PATH_EVENT,
+    detectExternalActionKindFromPath,
     type ExternalFileActionDetail,
     type ExternalFileActionKind,
     type ImportMidiRequestDetail,
 } from "./features/session/projectOpenEvents";
-import { detectExternalPathAction } from "./components/layout/timeline/dnd";
+import { useExternalProjectOpen } from "./features/session/useExternalProjectOpen";
 import type { MessageKey } from "./i18n/messages";
 import { useAutoBackupScheduler } from "./hooks/useAutoBackupScheduler";
 import { useClipFormantStatusListener } from "./hooks/useClipFormantStatusListener";
@@ -418,40 +437,39 @@ interface WheelSelectProps {
 }
 
 /**
- * 支持滚轮调整选项的下拉框。
- * 监听原生 wheel 事件（非 passive），滚动时切换选项并阻止默认滚动传播，
- * 避免其所在的可滚动网格列表被一并滚动。
+ * 支持滚轮调整选项的下拉框（原生 `<select>` 外观，Qt 风格的表单行用它）。
+ *
+ * 【为什么不再手写滚轮监听】`ui/Select.tsx` 是滚轮换项能力的**唯一**实现所在地，
+ * `ui/useFrameCommit.ts` 记录了真实事故："滚轮每格一次提交 → 同步 Tauri 命令打满
+ * UI 线程 → Windows 判定未响应（5s 消息泵饥饿）"。这里的旧实现逐格立即提交、
+ * 也没有手势累积，是能力层之外的第二份实现。现在复用同一套
+ * `useNonPassiveWheel` + `useFrameCommitter` + `useWheelStepAccumulator`：
+ * 每帧最多提交一次，连续 N 格一次走到位，同时保留原生 select 的排版。
  */
 function WheelSelect({ value, onValueChange, disabled, className, children }: WheelSelectProps) {
-    const selectRef = useRef<HTMLSelectElement | null>(null);
-
-    useEffect(() => {
-        const select = selectRef.current;
-        if (!select || disabled) return;
-
-        const handleWheel = (event: WheelEvent) => {
-            event.preventDefault();
-            event.stopPropagation();
-            const total = select.options.length;
-            if (total === 0) return;
-            const current = select.selectedIndex;
-            const step = event.deltaY > 0 ? 1 : -1;
-            const next = Math.max(0, Math.min(total - 1, current + step));
-            if (next !== current) {
-                const nextValue = select.options[next]?.value;
-                if (nextValue !== undefined) {
-                    onValueChange(nextValue);
-                }
-            }
-        };
-
-        select.addEventListener("wheel", handleWheel, { passive: false });
-        return () => select.removeEventListener("wheel", handleWheel);
-    }, [value, disabled, onValueChange]);
+    const committer = useFrameCommitter(onValueChange);
+    const accumulator = useWheelStepAccumulator<string>();
+    const setWheelTarget = useNonPassiveWheel<HTMLSelectElement>((event) => {
+        if (disabled) return;
+        const select = event.currentTarget as HTMLSelectElement | null;
+        if (!select) return;
+        const values = Array.from(select.options, (option) => option.value);
+        if (values.length <= 1 || !Number.isFinite(event.deltaY) || event.deltaY === 0) return;
+        // 先接管这次滚轮（阻止祖先滚动），再算值 —— 算不出下一格时也不该滚动容器。
+        event.preventDefault();
+        event.stopPropagation();
+        const next = accumulator.advance(value, (base) => {
+            const from = values.indexOf(base);
+            if (from < 0) return base;
+            const direction = event.deltaY > 0 ? 1 : -1;
+            return values[from + direction] ?? base;
+        });
+        if (next !== value) committer.schedule(next);
+    });
 
     return (
         <select
-            ref={selectRef}
+            ref={setWheelTarget}
             value={value}
             disabled={disabled}
             className={className}
@@ -538,28 +556,6 @@ function mergeLatestSourceFileChanges(
     }
 
     return merged;
-}
-
-/**
- * 判定路径对应的外部文件动作种类。
- *
- * 【为什么不再内联一份正则】这里原先重写了与 `timeline/dnd` 完全相同的四组正则，
- * 而且**漏掉 MIDI**——于是从启动参数 / 外部文件事件进来的 `.mid` 文件会被判为
- * `null` 而被静默丢弃，与拖放路径的行为不一致（同一文件两种命运）。
- * 现在直接复用 `detectExternalPathAction`：准入判据只剩一份，不可能再分叉。
- *
- * @param path 文件路径。
- * @returns 动作种类；非受支持类型时为 null。
- */
-function detectExternalActionKindFromPath(path: string): ExternalFileActionKind | null {
-    const kind = detectExternalPathAction(path);
-    // `importMidi` 不属于本事件通道的动作集合（`ExternalFileActionKind` 没有它）：
-    // MIDI 走"导入 MIDI clip"的独立流程，而不是"打开/导入工程"。这里显式排除，
-    // 而不是用类型断言硬转——否则 MIDI 路径会被当成工程打开。
-    // `importFolder` 同理：目录导入有自己的入口（拖放 / 右键菜单 → 选项对话框），
-    // 而这条通道只带一个路径，表达不了落点与导入选项。
-    if (kind === null || kind === "importMidi" || kind === "importFolder") return null;
-    return kind;
 }
 
 function AppInner() {
@@ -1329,6 +1325,10 @@ function AppInner() {
                         // 当前传输纪元与派发时刻，与 30Hz 轮询响应共享乱序丢弃
                         // 与时延外推。
                         if (!active && wasActiveForTarget) {
+                            // 200ms 内出现多次 active→inactive 跃迁时只保留最后一次
+                            // 调度：旧句柄不清会照常 fire，多派发一次同步（且卸载时
+                            // 只能清掉最后那个句柄）。
+                            if (deferredSyncTimer) clearTimeout(deferredSyncTimer);
                             deferredSyncTimer = setTimeout(() => {
                                 deferredSyncTimer = null;
                                 dispatch(
@@ -1443,6 +1443,8 @@ function AppInner() {
         },
         [],
     );
+    // 另存为失败统一走状态栏提示（见 hook 内的说明）。
+    useSaveProjectAsNotice(showNotice);
     useEffect(() => {
         if (!renderCacheShowHitStats) return;
         let disposed = false;
@@ -1703,15 +1705,17 @@ function AppInner() {
     const discardUnsavedAndContinue = useCallback(() => {
         void executePendingUnsavedAction().catch(() => {});
     }, [executePendingUnsavedAction]);
-
     const saveUnsavedAndContinue = useCallback(() => {
         void (async () => {
             try {
-                const result = (await dispatch(
-                    projectPath ? saveProjectRemote() : saveProjectAsRemote(),
-                ).unwrap()) as { canceled?: boolean; versionConflict?: boolean };
-                // 取消 或 命中"目标版本不一致"确认框：暂不执行后续操作，
-                // 等待用户完成保存（继续保存成功后由后续入口继续，或重新操作）。
+                const result = (await (
+                    projectPath
+                        ? dispatch(saveProjectRemote())
+                        : saveProjectAsWithLastFormat(dispatch, store.getState)
+                ).unwrap()) as {
+                    canceled?: boolean;
+                    versionConflict?: boolean;
+                };
                 if (result?.canceled || result?.versionConflict) {
                     return;
                 }
@@ -1753,23 +1757,11 @@ function AppInner() {
     }, []);
 
     // ── 保存/另存为目标存在版本不一致工程文件时的确认操作 ──
-    const cancelSaveVersionConflict = useCallback(() => {
-        dispatch(closeSaveVersionConflictDialog());
-    }, [dispatch]);
-
-    // 用户选择"另存为"：关闭确认框并重新弹出另存为选择器。
-    const saveAsFromVersionConflict = useCallback(() => {
-        dispatch(closeSaveVersionConflictDialog());
-        void dispatch(saveProjectAsRemote());
-    }, [dispatch]);
-
-    // 用户确认"继续保存"：向已选路径执行强制覆盖保存。
-    const continueForceSave = useCallback(() => {
-        const path = saveVersionConflictDialog?.path;
-        dispatch(closeSaveVersionConflictDialog());
-        if (!path) return;
-        void dispatch(saveProjectToPathRemote(path));
-    }, [dispatch, saveVersionConflictDialog?.path]);
+    const {
+        cancel: cancelSaveVersionConflict,
+        saveAs: saveAsFromVersionConflict,
+        overwrite: continueForceSave,
+    } = useSaveVersionConflictActions(dispatch, saveVersionConflictDialog);
 
     const handleNewProject = useCallback(() => {
         runOrPromptUnsavedAction("switch", async () => {
@@ -1852,6 +1844,10 @@ function AppInner() {
         runOrPromptUnsavedAction("exit", closeWindowNow);
     }, [closeWindowNow, runOrPromptUnsavedAction]);
 
+    // macOS LaunchServices / 启动参数的统一入口：先注册 Tauri 监听，再报告
+    // 前端就绪，最后消费 pending 路径（详见 useExternalProjectOpen 的时序说明）。
+    useExternalProjectOpen(handleExternalFileAction);
+
     const handleAutoBackupSettingsSaved = useCallback((settings: AutoBackupSettings) => {
         const interval = Number(settings.timedBackupIntervalSec);
         setAutoBackupSettings({
@@ -1887,7 +1883,10 @@ function AppInner() {
         void dispatch(loadDockSettings())
             .unwrap()
             .then((payload) => {
-                if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock")) {
+                if (
+                    import.meta.env.DEV &&
+                    new URLSearchParams(window.location.search).has("mock")
+                ) {
                     // mock 的设置对象没有 Disk 上的 dock 布局；但必须走真实的
                     // hydrate 路径，让 Dock 的默认工作区立刻可交互。
                     dispatch(hydrateDock({ settings: null, layout: null, mode: "standalone" }));
@@ -1904,7 +1903,10 @@ function AppInner() {
                 // 默认布局写回去覆盖磁盘内容。纯浏览器 mock 没有可恢复的磁盘布局，
                 // 必须显式 hydrate 一次出厂布局，否则 Dock 的工作区与参数编辑器
                 // 根本不会挂载 —— 表现为“界面看得见、下方全空、点击无反应”。
-                if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock")) {
+                if (
+                    import.meta.env.DEV &&
+                    new URLSearchParams(window.location.search).has("mock")
+                ) {
                     dispatch(hydrateDock({ settings: null, layout: null, mode: "standalone" }));
                     finalizeDockHydration(dispatch, store.getState);
                 }
@@ -1957,35 +1959,6 @@ function AppInner() {
 
         return () => clearTimeout(timer);
     }, [paramsEpoch, autoBackgroundRender]);
-
-    // consume 语义只应执行一次：依赖 handleExternalFileAction（其随
-    // projectDirty 翻转而重建）会让该 effect 在首次编辑后重复发起 IPC。
-    const consumeStartupProjectPathRef = useRef(handleExternalFileAction);
-    useEffect(() => {
-        consumeStartupProjectPathRef.current = handleExternalFileAction;
-    }, [handleExternalFileAction]);
-
-    useEffect(() => {
-        let canceled = false;
-
-        async function consumeStartupProjectPath() {
-            try {
-                const result = await projectApi.consumeStartupProjectPath();
-                const startupPath = String(result?.path ?? "").trim();
-                const kind = detectExternalActionKindFromPath(startupPath);
-                if (!canceled && startupPath && kind) {
-                    consumeStartupProjectPathRef.current(kind, startupPath);
-                }
-            } catch {
-                // no-op
-            }
-        }
-
-        void consumeStartupProjectPath();
-        return () => {
-            canceled = true;
-        };
-    }, []);
 
     useEffect(() => {
         function onOpenProjectPath(event: Event) {
@@ -2064,18 +2037,20 @@ function AppInner() {
                 const mod = await loadStandaloneWindowApi();
                 if (disposed) return;
                 const currentWindow = mod.getCurrentWindow();
-                unlisten = await currentWindow.onCloseRequested(createWindowCloseGuard({
-                    isDisposed: () => disposed,
-                    consumeAllowClose: () => {
-                        const allowed = allowWindowCloseRef.current;
-                        allowWindowCloseRef.current = false;
-                        return allowed;
-                    },
-                    isProjectDirty: () => store.getState().session.project.dirty,
-                    getProjectMeta: projectApi.getProjectMeta,
-                    promptSave: () => promptUnsavedAction("exit", closeWindowNow),
-                    closeWindow: closeWindowNow,
-                }));
+                unlisten = await currentWindow.onCloseRequested(
+                    createWindowCloseGuard({
+                        isDisposed: () => disposed,
+                        consumeAllowClose: () => {
+                            const allowed = allowWindowCloseRef.current;
+                            allowWindowCloseRef.current = false;
+                            return allowed;
+                        },
+                        isProjectDirty: () => store.getState().session.project.dirty,
+                        getProjectMeta: projectApi.getProjectMeta,
+                        promptSave: () => promptUnsavedAction("exit", closeWindowNow),
+                        closeWindow: closeWindowNow,
+                    }),
+                );
                 if (disposed) {
                     unlisten();
                     unlisten = null;
@@ -2189,24 +2164,24 @@ function AppInner() {
                 { changed?: SourceFileChange[] } | undefined;
             const rawChanges = normalizeSourceFileChanges(result?.changed ?? []);
 
-            setSourceFileChangedDialog((prev) => {
-                const changes = mergeLatestSourceFileChanges(prev.changes, rawChanges);
-                const knownClipIds = new Set(prev.changes.map((item) => item.clip_id));
-                for (const change of rawChanges) {
-                    if (!knownClipIds.has(change.clip_id)) {
-                        const existingInitial = sourceFileInitialChangesRef.current.some(
-                            (item) => item.clip_id === change.clip_id,
-                        );
-                        if (!existingInitial) {
-                            sourceFileInitialChangesRef.current = [
-                                ...sourceFileInitialChangesRef.current,
-                                { ...change, action: "pending" as const },
-                            ];
-                        }
-                    }
-                }
-                return { ...prev, open: true, changes };
-            });
+            // 【为什么副作用不在 setState updater 里】React（StrictMode 下尤甚）
+            // 可能对同一 update 双调 updater。初始变更集的登记是一次性副作用，
+            // 查重以 ref 自身为事实源，放到 updater 外一次完成。
+            const initialChanges = sourceFileInitialChangesRef.current;
+            const additions = rawChanges.filter(
+                (change) => !initialChanges.some((item) => item.clip_id === change.clip_id),
+            );
+            if (additions.length > 0) {
+                sourceFileInitialChangesRef.current = [
+                    ...initialChanges,
+                    ...additions.map((change) => ({ ...change, action: "pending" as const })),
+                ];
+            }
+            setSourceFileChangedDialog((prev) => ({
+                ...prev,
+                open: true,
+                changes: mergeLatestSourceFileChanges(prev.changes, rawChanges),
+            }));
 
             markMissingSourceFilesUnavailable(rawChanges);
         } catch {
@@ -2377,7 +2352,15 @@ function AppInner() {
                 "{name}",
                 item.clip_name || item.source_path,
             );
-            const picked = await coreApi.openAudioDialogForSource(item.source_path, dialogTitle);
+            // 对话框 IPC 失败时保持原状态：调用方是 `void`（点击 / 批量按钮），
+            // 未捕获的 rejection 会进全局 unhandledrejection，被当作疑似崩溃
+            // 刷进诊断日志。与 searchSourceFileReplacements 的对话框口径一致。
+            let picked: { ok: boolean; canceled?: boolean; path?: string } | undefined;
+            try {
+                picked = await coreApi.openAudioDialogForSource(item.source_path, dialogTitle);
+            } catch {
+                return;
+            }
             if (!picked?.ok || picked.canceled || !picked.path) {
                 // 取消时保留原状态（含“已忽略 / 已重新加载 / 已替换”）。
                 return;
@@ -2648,8 +2631,11 @@ function AppInner() {
 
     // 统一快捷键处理（通过 keybindings 模块管理，用户可自定义）
     const handleKeybindingAction = useCallback(
-        (actionId: ActionId, stroke: HostKeyStroke) => {
-            if (!pluginAllowsAction(actionId, getActiveSurface())) {
+        (actionId: ActionId, stroke: HostKeyStroke, surfaceOverride?: EditSurfaceId | null) => {
+            // 独立窗口交回的快捷键带 sourceSurface：不能再用主窗口自己的 getActiveSurface，
+            // 否则会把卫星参数编辑器的操作误路由到主窗口时间轴。
+            const activeSurface = surfaceOverride ?? getActiveSurface();
+            if (!pluginAllowsAction(actionId, activeSurface)) {
                 // 【为什么不再静默】快捷键被拒此前是彻底的 no-op：菜单项上有 tooltip 说明，
                 // 键盘却没有任何可以挂说明的表面 —— 用户按了没反应，只能当成 bug。
                 // 状态栏是现成的短时效提示位（渲染缓存统计 / 自动声道折叠都在用它），
@@ -2661,7 +2647,7 @@ function AppInner() {
                 // 能还的就还给宿主，还成了就什么都不说。
                 const relay = classifyHostKeyRelay(
                     actionId,
-                    getActiveSurface(),
+                    activeSurface,
                     stroke,
                     hostKeyRelayEnv(),
                 );
@@ -2671,14 +2657,30 @@ function AppInner() {
                         // 其余情况按设计保持沉默 —— 让路成没成的证据在 `[relay]`
                         // 诊断日志与诊断包读数里（提示事件已随 17d6f2cf 删除）。
                         if (outcome !== "unsupported") return;
-                        const text = capabilityDeniedText(actionId, getActiveSurface());
+                        const text = capabilityDeniedText(actionId, activeSurface);
                         if (text) showNotice(text, 4000, "warning");
                     });
                     return false;
                 }
-                const deniedText = capabilityDeniedText(actionId, getActiveSurface());
+                const deniedText = capabilityDeniedText(actionId, activeSurface);
                 if (deniedText) showNotice(deniedText, 4000, "warning");
                 return false;
+            }
+            // ── 参数块动作通道 ──
+            // 块动作拥有独立的 ActionId 与 paramEditorBlock 作用域；这里只负责
+            // 在正确的活动表面/工具下派发，具体编辑由面板消费。
+            const blockOp = PARAM_BLOCK_ACTION_TO_OP[actionId];
+            if (blockOp) {
+                const channel = resolveParamBlockEditChannel(
+                    activeSurface,
+                    store.getState().session,
+                );
+                if (channel) {
+                    window.dispatchEvent(
+                        new CustomEvent(channel, { detail: { op: blockOp, stroke } }),
+                    );
+                }
+                return;
             }
             // ── 编辑操作统一路由 ──
             // clip.* 与 pianoRoll.* 的同义绑定（Ctrl+C/X/V）归一为同一编辑 op
@@ -2723,7 +2725,7 @@ function AppInner() {
                         } catch {
                             // 探测失败不阻塞粘贴。
                         }
-                        channel = resolvePasteRoute(kind, getActiveSurface());
+                        channel = resolvePasteRoute(kind, activeSurface);
                         if (pluginAllowsEditChannel(channel, "paste")) {
                             window.dispatchEvent(
                                 new CustomEvent(channel, { detail: { op: "paste" } }),
@@ -2739,7 +2741,7 @@ function AppInner() {
                     // 侧）仲裁；皆空 → 无操作。
                     const session = store.getState().session;
                     const channel = resolveCopyCutRoute({
-                        surface: getActiveSurface(),
+                        surface: activeSurface,
                         clipSelectionActive:
                             session.multiSelectedClipIds.length > 0 || !!session.selectedClipId,
                         paramSelectionActive: session.paramSelectionActive,
@@ -2764,7 +2766,7 @@ function AppInner() {
                     return;
                 }
                 const channel = resolveEditOpRoute(
-                    getActiveSurface(),
+                    activeSurface,
                     editOp,
                     store.getState().session.toolMode,
                 );
@@ -2773,6 +2775,8 @@ function AppInner() {
                 }
                 return;
             }
+            // 三种「另存为指定格式」由同一张表驱动（与文件菜单子项共用映射）。
+            if (runSaveAsFormatAction(dispatch, actionId)) return;
             switch (actionId) {
                 case "playback.toggle":
                 case "playback.stop": {
@@ -2865,8 +2869,7 @@ function AppInner() {
                         const hasUndoableStep = store.getState().session.historyUndoDepth > 0;
                         void dispatch(
                             undoRemote({
-                                parametersOnly:
-                                    isPluginMode() && getActiveSurface() === "pianoRoll",
+                                parametersOnly: isPluginMode() && activeSurface === "pianoRoll",
                             }),
                         );
                         return hasUndoableStep;
@@ -2885,8 +2888,7 @@ function AppInner() {
                         const hasRedoableStep = store.getState().session.historyRedoDepth > 0;
                         void dispatch(
                             redoRemote({
-                                parametersOnly:
-                                    isPluginMode() && getActiveSurface() === "pianoRoll",
+                                parametersOnly: isPluginMode() && activeSurface === "pianoRoll",
                             }),
                         );
                         return hasRedoableStep;
@@ -2931,7 +2933,7 @@ function AppInner() {
                     void dispatch(saveProjectRemote());
                     break;
                 case "project.saveAs":
-                    void dispatch(saveProjectAsRemote());
+                    void saveProjectAsWithLastFormat(dispatch, store.getState);
                     break;
                 case "project.export":
                     window.dispatchEvent(
@@ -2957,29 +2959,30 @@ function AppInner() {
                     void dispatch(openVocalShifterFromDialog());
                     break;
                 case "mode.toggle": {
+                    // 工具族切换：选择族 ↔ 上次的绘制族成员。选择族子模式
+                    // （range / block）留在 `selectToolMode` 里，由 Tab 回来时恢复。
                     const cur = runtimeRef.current.toolMode;
-                    if (cur === "select" || cur === "block") {
-                        void dispatch(setToolModePersistent(runtimeRef.current.drawToolMode));
-                    } else {
-                        void dispatch(setToolModePersistent("select"));
-                    }
+                    const next = cur === "select" ? runtimeRef.current.drawToolMode : "select";
+                    void dispatch(toolModeThunks.setToolModePersistent(next));
                     break;
                 }
                 case "mode.selectTool":
-                    void dispatch(setToolModePersistent("select"));
+                    // F7 是参数线选择的直达键：不只是进入选择族，还要强制 range。
+                    void dispatch(toolModeThunks.setSelectToolModePersistent("range"));
                     break;
-                case "mode.toggleBlockEdit": {
-                    void dispatch(toggleParamBlockEditPersistent());
+                case "mode.toggleBlockSelection": {
+                    // `~` 只管理选择族子模式；从绘制族进入时直达 block。
+                    void dispatch(toolModeThunks.toggleSelectToolModePersistent());
                     break;
                 }
                 case "mode.drawTool":
-                    void dispatch(setToolModePersistent("draw"));
+                    void dispatch(toolModeThunks.setToolModePersistent("draw"));
                     break;
                 case "mode.lineTool":
-                    void dispatch(setToolModePersistent("line"));
+                    void dispatch(toolModeThunks.setToolModePersistent("line"));
                     break;
                 case "mode.vibratoTool":
-                    void dispatch(setToolModePersistent("vibrato"));
+                    void dispatch(toolModeThunks.setToolModePersistent("vibrato"));
                     break;
                 case "quickSearch.open":
                     setQuickSearchOpen(true);
@@ -3070,19 +3073,10 @@ function AppInner() {
                     break;
                 }
                 case "pianoRoll.cycleDragDirection": {
-                    // 循环切换当前活动工具的拖动方向（与工具栏方向按钮同源）。
-                    // 左键拖拽参数线期间按下同一键时，参数编辑器内的本地监听会
-                    // 同步切换本次拖拽的方向 —— 触控板用户的「右键切换」替代。
+                    // 与工具栏方向按钮同源（`resolveDragDirectionTool`：直线 / 颤音共用
+                    // vibrato 档，它们是同一条"起点 → 终点"手势）。
                     const ss = store.getState().session;
-                    // 直线与颤音共用同一份拖动方向（同一个"起点 → 终点"手势），
-                    // 因此两者都归到 `"vibrato"` 这一路。
-                    const tool =
-                        ss.toolMode === "select" || ss.toolMode === "block"
-                            ? ("select" as const)
-                            : ss.drawToolMode === "draw"
-                              ? ("draw" as const)
-                              : ("vibrato" as const);
-                    dispatch(cycleDragDirection(tool));
+                    dispatch(cycleDragDirection(resolveDragDirectionTool(ss)));
                     void dispatch(persistUiSettings());
                     break;
                 }
@@ -3434,6 +3428,28 @@ function AppInner() {
 
     useKeybindings(handleKeybindingAction);
 
+    // 独立窗口的全局快捷键没有在主窗口按下的焦点，卫星只负责识别，执行交回这里。
+    // 事件 detail 带 sourceWindow/surface，保证编辑目标仍按卫星窗口的实际焦点裁决。
+    useEffect(() => {
+        const onDetachedShortcut = (event: Event) => {
+            const detail = (
+                event as CustomEvent<{
+                    actionId?: ActionId;
+                    stroke?: HostKeyStroke;
+                    surface?: EditSurfaceId | null;
+                }>
+            ).detail;
+            if (!detail?.actionId || !detail.stroke) return;
+            handleKeybindingAction(detail.actionId, detail.stroke, detail.surface ?? null);
+        };
+        window.addEventListener(KEYBINDING_ACTION_EVENT, onDetachedShortcut as EventListener);
+        return () =>
+            window.removeEventListener(
+                KEYBINDING_ACTION_EVENT,
+                onDetachedShortcut as EventListener,
+            );
+    }, [handleKeybindingAction]);
+
     /*
      * 宿主专属快捷键：把"插件自己占用"的按键集合推给原生。
      *
@@ -3626,7 +3642,14 @@ function AppInner() {
     // 为编辑快捷键（复制/剪切/粘贴等）的归属裁决提供单一事实源 —— 捕获
     // 阶段位于传播链最前端，子元素的 preventDefault / stopPropagation 均
     // 无法逃过解析（时间轴正是靠 preventDefault 自管焦点的）。
-    useEffect(() => installFocusSurfaceTracking(), []);
+    useEffect(() => installWindowEventBridge(), []);
+    useEffect(
+        () =>
+            installFocusSurfaceTracking(() => {
+                dispatch(setActiveEditorWindow("main"));
+            }),
+        [dispatch],
+    );
 
     /*
      * 会话闸门快照：后端编辑会话是否已进入**终态**（文档已关闭 / 宿主从未绑定 ARA）。
@@ -4621,6 +4644,8 @@ function AppInner() {
                     <PitchAnalysisStatusChip />
                     {/* 音符块（GAME / VAD）分析：与音高进度同一状态栏槽位。 */}
                     <ParamBlockAnalysisStatus enabled />
+                    {/* 参数块编辑反馈：错误 / 拒绝 / 需要用户处置的提示统一走状态栏。 */}
+                    <ParamBlockFeedbackChip />
                     {/* 参数曲线取数提示：**独立订阅**外部 store，不参与本组件重渲染
                         （见 ParamDataLoadingChip 的说明）。 */}
                     <ParamDataLoadingChip />

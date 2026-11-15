@@ -16,7 +16,6 @@
 
 import DOMPurify from "dompurify";
 import TurndownService from "turndown";
-// @ts-expect-error 该包没有类型声明
 import { gfm } from "turndown-plugin-gfm";
 
 let service: TurndownService | null = null;

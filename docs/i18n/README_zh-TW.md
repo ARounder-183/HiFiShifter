@@ -72,7 +72,7 @@ HiFiShifter 大致分為上部的軌道面板和下部的參數面板：軌道�
 
 ## 常用快捷鍵速查
 
-> 快捷鍵均可在應用內 `選項 → 鍵盤快捷鍵...` 中自訂，下表為預設值；macOS 上 `Ctrl` 對應 `⌘`、`Alt` 對應 `⌥`。
+> 快捷鍵均可在應用內 `選項 → 鍵盤快捷鍵...` 中自訂，下表為預設值；macOS 上 `Ctrl` 對應 `⌘`、`Alt` 對應 `⌥`。macOS 的 Delete 鍵是 `⌫`，預設 Delete / Backspace 快速鍵按 `⌫` 使用（`Fn+Delete` 為向前刪除）。
 
 | 操作                           | 快捷鍵 / 滑鼠                                                |
 | :----------------------------- | :----------------------------------------------------------- |
@@ -282,7 +282,7 @@ ONNX Runtime 二進位檔案由 ort crate 在編譯時透過 `download-binaries`
 進階選項：
 
 - 啟動參數 `--log-file=<path>`：將日誌寫入指定路徑；`--log-file=-` 明確關閉檔案日誌。
-- 環境變數 `HIFISHIFTER_LOG=debug`（或 `trace` / `info` / `warn` / `error`）：調整日誌詳細程度。
+- **說明 → 日誌詳細程度** 子選單只有四個單選項（無 / 低 / 中 / 高，預設低），一級選單只顯示一行目前檔位；`HIFISHIFTER_LOG_VERBOSITY` / `--log-verbosity` 用於覆寫，舊 `HIFISHIFTER_LOG` 仍對應四檔。
 - 環境變數 `HIFISHIFTER_LOG_DIR`：覆蓋預設日誌目錄。
 - 環境變數 `HIFISHIFTER_GDK_BACKEND=x11|wayland`：覆蓋 AppImage 預設強制的 `x11`。Wayland 桌面若遇到縮放模糊／輸入法問題，可試試 `wayland`。
 - 環境變數 `HIFISHIFTER_SAFE_GL=1`：GPU 驅動有問題、介面起不來時使用，關閉 WebKit 合成器並強制軟體渲染（能出介面，繪製會變慢）。

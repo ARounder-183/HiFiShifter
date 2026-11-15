@@ -19,6 +19,7 @@
  */
 
 import { axisEquals, type TimelineAxis } from "../../renderKernel/timelineAxis.js";
+import { frontendLog } from "../../../../services/frontendLog";
 
 /** 一个可参与统一帧提交的图层。 */
 export interface TimelineLayer {
@@ -123,7 +124,8 @@ export function createTimelineFrameCommitter(initial: TimelineAxis): TimelineFra
                     if (profiler)
                         profiler.recordLayer(entry.layer.name, performance.now() - paintStart);
                 } catch (error) {
-                    console.error(
+                    frontendLog(
+                        "error",
                         `[timelineFrame] layer "${entry.layer.name}" paint failed`,
                         error,
                     );

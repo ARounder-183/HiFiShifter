@@ -5,28 +5,42 @@
  * 两者共用同一条拖拽与调参代码路径 —— 差别只在起手预设固定与否。
  */
 export type DrawToolMode = "draw" | "line" | "vibrato";
-export type ToolModeGroup = "select" | "draw" | "block";
-/**
- * 参数编辑器的工具。
- *
- * `block` 是块编辑（mock）：它不写参数曲线，而是把点击解释为选块 / 多选。
- * 【为什么不复用 `select`】选区工具在空白处拖拽会建参数选区；块工具必须把
- * 同一次拖拽留给块层，不能悄悄改曲线选区。
- */
-export type ToolMode = "select" | DrawToolMode | "block";
+
+/** 选择工具族的子模式：参数线范围选择 / 参数块选择。 */
+export type SelectToolMode = "range" | "block";
 
 /**
- * 工具手势状态的**运行时常量**（与 `ToolMode` 同源）。
+ * 参数编辑器的**工具族成员**。
+ *
+ * 工具只有两族：选择（`select`）与绘制（`draw` / `line` / `vibrato`）。
+ * `block` 不是第三族，而是选择族的对象级子模式，由 `selectToolMode` 表达；
+ * 是否处于块选择由 `toolMode === "select" && selectToolMode === "block"` 派生。
+ */
+export type ToolMode = "select" | DrawToolMode;
+
+/**
+ * 工具 / 子模式的**运行时常量**（与类型同源）。
  *
  * 【为什么要有它】持久化设置是外部输入，读取时必须按白名单校验。把名单写死成
  * 第二份字面量，加一种工具时就会漏改一处；从类型推导出常量则改不动。
  */
-export const TOOL_MODES = ["select", "draw", "line", "vibrato", "block"] as const;
 export const DRAW_TOOL_MODES = ["draw", "line", "vibrato"] as const;
+export const SELECT_TOOL_MODES = ["range", "block"] as const;
+export const TOOL_MODES = ["select", ...DRAW_TOOL_MODES] as const;
 export type PitchSnapUnit = "semitone" | "scale";
 export type ScaleHighlightMode = "always" | "off";
 export type DragDirection = "free" | "x-only" | "y-only";
 export type DrawDragDirection = "free" | "x-only";
+
+/**
+ * 拖动方向的**作用域**：三个工具各存一份方向（`select` / `draw` / `vibrato`）。
+ *
+ * 【为什么不是 `ToolMode`】直线与颤音共用同一份方向（`lineVibratoDragDirection`）：
+ * 它们是同一条"起点 → 终点"手势，拆成两份只会让"在直线下调过、切到颤音又不算"
+ * 成为新的困惑。因此这里没有 `line`。
+ */
+export const DRAG_DIRECTION_TOOLS = ["select", "draw", "vibrato"] as const;
+export type DragDirectionTool = (typeof DRAG_DIRECTION_TOOLS)[number];
 export type FadeCurveType = "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
 
 /**
@@ -206,7 +220,7 @@ export interface TrackMeterInfo {
 }
 
 export interface SilenceDetectSettings {
-    method: "rms" | "peak";
+    method: "rms" | "peak" | "note_blocks";
     thresholdDb: number;
     adaptive: boolean;
     minSilenceMs: number;
@@ -254,7 +268,31 @@ export interface ClipTakeInfo {
     midiNoteData?: MidiNoteEvent[];
     midiFillGaps?: boolean;
     /** 源域音节区间；显示时再按裁切 / 速率 / 倒放 / Loop 投影。 */
-    syllableSpansSec?: Array<{ startSec: number; endSec: number }>;
+    syllableSpansSec?: Array<{
+        startSec: number;
+        endSec: number;
+        note?: number | null;
+        eventId?: string;
+    }>;
+    /** 与音节区间平行的代表 MIDI 音符。 */
+    syllableNotes?: Array<number | null>;
+    /** 全源事件身份；不随 Clip 裁切变化。 */
+    syllableEventIds?: string[];
+    /** 分析实际覆盖的源窗口。 */
+    syllableAnalysisWindowSec?: [number, number];
+    /** GAME 全源分段基线；音节分析为空时作为基块来源。 */
+    gameBlockBaseline?: {
+        revision?: number;
+        algorithm?: string;
+        algorithmVersion?: number;
+        sourceSpansSec?: Array<{
+            startSec: number;
+            endSec: number;
+            note?: number | null;
+            eventId?: string;
+        }>;
+        analyzedWindowSec?: [number, number];
+    };
     /**
      * 宿主的非线性拉伸标记（REAPER stretch markers）。非空 ⇒ 该 take 的源时间映射
      * 不是直线，插件不渲染它（见 `clipHasNonlinearStretch`）。
@@ -298,6 +336,8 @@ export interface ClipInfo {
     sourceChannels?: number;
     /** Loop（循环源）：延伸超出源媒体区间时按周期回绕产生循环内容。 */
     loopEnabled: boolean;
+    /** 宿主给出的 Loop 周期（秒）；缺省按媒体时长推断。 */
+    loopPeriodSec?: number | null;
     /**
      * 宿主媒体状态（仅插件模式；见 `features/ara/hostAudio.hostMediaState`）。
      * 缺省 = 独立 App 或旧后端，按 `sourcePath` 推断。
@@ -345,7 +385,28 @@ export interface ClipInfo {
     midiNoteData?: MidiNoteEvent[];
     midiFillGaps?: boolean;
     /** 当前 Take 的源域音节区间（主投影字段的镜像）。 */
-    syllableSpansSec?: Array<{ startSec: number; endSec: number }>;
+    syllableSpansSec?: Array<{
+        startSec: number;
+        endSec: number;
+        note?: number | null;
+        eventId?: string;
+    }>;
+    syllableNotes?: Array<number | null>;
+    syllableEventIds?: string[];
+    syllableAnalysisWindowSec?: [number, number];
+    /** 当前 Take 的 GAME 全源分段基线（主投影字段的镜像）。 */
+    gameBlockBaseline?: {
+        revision?: number;
+        algorithm?: string;
+        algorithmVersion?: number;
+        sourceSpansSec?: Array<{
+            startSec: number;
+            endSec: number;
+            note?: number | null;
+            eventId?: string;
+        }>;
+        analyzedWindowSec?: [number, number];
+    };
 }
 
 export interface ClipFormantMorph {

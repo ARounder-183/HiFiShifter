@@ -50,6 +50,9 @@ static HOST: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 /// 【为什么是函数指针】diagnostics::set_host_sink 收的是格式无关的 fn；
 /// 这里做一次级别映射，CLAP 的 severity 常量不会渗进共享层。
 fn forward_to_host(level: log::Level, line: &str) {
+    if !hifishifter_kernel::log_policy::policy().host_sink {
+        return;
+    }
     let host = HOST.load(Ordering::Acquire);
     if host.is_null() {
         return;

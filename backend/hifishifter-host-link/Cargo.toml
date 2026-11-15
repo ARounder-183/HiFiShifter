@@ -2,7 +2,7 @@
 # 与 GUI/插件共享契约，不依赖 Tauri、音频设备、内核，也不依赖任何平台 API。
 [package]
 name = "hifishifter-host-link"
-version = "0.1.0"
+version = "0.2.0-beta"
 edition = "2021"
 publish = false
 

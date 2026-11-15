@@ -13,6 +13,7 @@
  */
 
 import { cancelActiveImportsAndDrain } from "./thunks/importCancellation";
+import { drainParamBlockCommits } from "../../components/layout/pianoRoll/paramBlockCommitCoordinator";
 
 /** 历史位置被整体改变时广播的事件名。 */
 export const HISTORY_JUMP_EVENT = "hifi:history-jump";
@@ -26,5 +27,11 @@ export const HISTORY_JUMP_EVENT = "hifi:history-jump";
  */
 export async function notifyHistoryJump(): Promise<void> {
     await cancelActiveImportsAndDrain();
+    /*
+     * A block commit is an independent backend command. Drain it before the
+     * undo/redo command so a delayed pointer-up write cannot land afterwards
+     * and resurrect the state the user just undid.
+     */
+    await drainParamBlockCommits();
     window.dispatchEvent(new CustomEvent(HISTORY_JUMP_EVENT));
 }

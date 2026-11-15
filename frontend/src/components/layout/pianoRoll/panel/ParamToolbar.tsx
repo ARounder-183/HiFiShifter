@@ -11,11 +11,10 @@
  */
 import { PitchSnapSettingsDialog } from "../../PitchSnapSettingsDialog";
 import { Flex, Box } from "@radix-ui/themes";
-import { CursorArrowIcon, Link2Icon, LinkBreak2Icon } from "@radix-ui/react-icons";
+import { Link2Icon, LinkBreak2Icon } from "@radix-ui/react-icons";
 import {
     setScaleHighlightMode,
     toggleLockParamLines,
-    setToolModePersistent,
     persistUiSettings,
     setParamEditorSyncTimeline,
 } from "../../../../features/session/sessionSlice";
@@ -25,7 +24,8 @@ import { AppIconButton } from "../../../../ui";
 import { ToolbarSlot } from "./toolbarParts";
 import { ParamButtons } from "./ParamButtons";
 import { DrawToolMenu } from "./DrawToolMenu";
-import { BlockToolMenu } from "./BlockToolMenu";
+import { SelectToolMenu } from "./SelectToolMenu";
+import { ParamBlockAlwaysShowToggle } from "./ParamBlockAlwaysShowToggle";
 import { PitchSnapMenu } from "./PitchSnapMenu";
 import { DragDirectionButton } from "./DragDirectionButton";
 import { ReferenceTrackGroup } from "./ReferenceTrackGroup";
@@ -54,8 +54,10 @@ export type Props = {
         | "childPitchOffsetCentsParam"
         | "childPitchOffsetDegreesParam"
         | "composeEnabled"
+        | "blockSelectionKb"
         | "currentDrawTool"
         | "currentDrawToolIcon"
+        | "currentSelectToolIcon"
         | "cycleDragDirectionKb"
         | "devicePixelRatio"
         | "dispatch"
@@ -102,24 +104,17 @@ export type Props = {
         | "separationEnabled"
         | "separationSwitchAnchorParamId"
         | "setDrawToolMenuOpen"
-        | "deleteSelectedParamBlocks"
-        | "restoreParamBlocks"
-        | "canDeleteSelectedParamBlocks"
-        | "canRestoreDeletedParamBlocks"
         | "setHoveredReferenceRootTrackId"
         | "setPitchSnapMenuOpen"
-        | "paramBlocksVisible"
-        | "paramBlockToolActive"
-        | "paramBlockMessage"
-        | "selectedParamBlockCount"
-        | "canMergeSelectedParamBlocks"
-        | "canUnmergeSelectedParamBlocks"
-        | "mergeOverlapsActive"
-        | "toggleMergeOverlaps"
-        | "mergeAllOverlappingParamBlocks"
-        | "toggleParamBlocksVisible"
-        | "mergeSelectedParamBlocks"
-        | "unmergeSelectedParamBlocks"
+        | "paramBlockToolIcon"
+        | "alwaysShowParamBlocks"
+        | "selectToolButtonTitle"
+        | "selectToolKb"
+        | "selectToolMenuAnchorRef"
+        | "selectToolMenuOpen"
+        | "selectToolMenuRef"
+        | "setSelectToolMenuOpen"
+        | "toggleAlwaysShowParamBlocks"
         | "setPitchSnapOpen"
         | "setTimeDisplaySettingsOpen"
         | "t"
@@ -195,19 +190,10 @@ export function ParamToolbar({ m }: Props) {
                     停在 120px（用户报告"平滑度滑块无法缩小"）。置 0 后收缩按 base 分摊：
                     按钮（min-content = 24px）保持不动，滑块与标签先让位。 */}
                 <Flex gap="1" align="center" style={{ marginLeft: 8, minWidth: 0 }}>
-                    <AppIconButton
-                        active={s.toolModeGroup === "select"}
-                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
-                        emphasis="accent"
-                        tooltip={t("common_select")}
-                        tabIndex={-1}
-                        onClick={() => void dispatch(setToolModePersistent("select"))}
-                        icon={<CursorArrowIcon />}
-                    />
-                    {/* 锚点外壳：菜单本身挂到 `document.body`（见 AppAnchoredMenu），
-                        这里只负责提供"菜单该贴在哪"的矩形。 */}
+                    {/* 两个工具族各占一个 24px 槽位；菜单本体挂到 document.body，
+                        这里的锚点外壳只负责提供"菜单该贴在哪"的矩形。 */}
+                    <SelectToolMenu m={m} />
                     <DrawToolMenu m={m} />
-                    <BlockToolMenu m={m} />
                     <Box
                         style={{
                             // 竖分隔线：宽度取整数个物理像素，任意缩放下粗细恒定
@@ -328,6 +314,7 @@ export function ParamToolbar({ m }: Props) {
                             </svg>
                         }
                     />
+                    <ParamBlockAlwaysShowToggle m={m} />
                     <SmoothingSlider m={m} />
                 </Flex>
             </Flex>

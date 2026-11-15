@@ -1,255 +1,289 @@
 /**
- * 参数编辑器内核 · 拖拽边缘自动滚屏驱动
+ * 参数编辑器内核 · 拖拽边缘自动滚屏驱动。
  *
  * 【主要内容】
- * `createEdgeScrollDriver()`：把「指针停在视口边缘」变成**持续的**滚动，并在滚动
- * 之后回调调用方，让它按滚动后的投影重算笔画 / 选区。
+ * 1. 时钟：本帧时长按「距**上一帧**」计算，离开触发带即复位；
+ * 2. rAF 循环：指针停在边缘不动也持续滚，离开带 / 到边界 / 松手即停；
+ * 3. 分派：把「指针位置 + 边界 + 帧时长」交给每个轴的 `apply`。
  *
- * 【为什么需要它（而不是在 pointermove 里滚一下就算）】
- * 1. **指针停住时也要滚**。`pointermove` 只在指针**移动**时派发；用户把笔画拖到
- *    视口边缘后往往会停在那里等视图滚过来 —— 只靠事件驱动，此刻滚动会完全停止，
- *    而这正是绘制类工具最需要它的时候（笔画断了就只能松手重画，一条连续曲线被
- *    切成两段，还多打一个撤销点）。
- * 2. **滚动后必须重算**。`scrollLeft` 变了，同一个 `clientX` 对应的帧号也随之改变。
- *    不回调重算，画面上的笔画就会在滚动处跳变（视图过去了、线没跟上）。
- * 3. **速度必须与帧率 / 事件频率解耦**。见 `shared/edgeAutoScroll` 的模块头说明：
- *    按事件计步的旧实现在高轮询率鼠标上快一个数量级。
+ * 【它不做什么】
+ * - 不知道单位（px 还是参数值）—— 那是 `EdgeScrollAxis` 的事；
+ * - 不知道工具、不知道参数块、不写 React state；
+ * - 不自己算速度、带宽、软启动（`edgeScrollAxis` / `valueAxisEdgeScroller` 的事）。
  *
- * 【为什么可以单测】宿主能力（取边界、读写滚动位置、上界、时间源、rAF）全部由
- * 调用方注入，本模块不直接碰 DOM。因此"停在边缘持续滚"、"松手后不再滚"、
- * "滚动量被上界钳住"这些**只能靠手拖复现**的行为都有用例钉住。
+ * 【为什么时钟必须「距上一帧」而不是「距上一次 step」】
+ * 旧实现在 `step()` 里推进时钟。指针离开触发带时驱动**不排帧**，于是
+ * `lastStepAtMs` 停在最后一次真正滚动的那一刻；指针重新进带的第一帧会拿到
+ * 「带外空闲时长」（最多 200ms，被 `GESTURE_GAP_RESET_MS` 截断），一次补一大段。
+ * 用户来回蹭边缘时看到的"每蹭一次跳一下"就是它。现在的规则是：
+ * - 时钟只在带内推进；
+ * - 离开带 ⇒ `lastFrameAtMs = null`；
+ * - 复位后的第一帧 `frameMs = 0`（位移恒为 0），第二帧才是真实帧时长。
+ * 代价是每次进带晚一帧起步（约 16ms），换来的是一条**连续**的速度曲线。
  *
- * 【与其他模块的关系】
- * - 依赖：`shared/edgeAutoScroll`（纯几何）。
- * - 上游：`usePianoRollInteractions` 的绘制类分支（freehand / line / vibrato）
- *   与选择工具分支。
- * - 下游：宿主回调把新的 `scrollLeft` 采纳进渲染内核（面板的 `syncScrollLeft`）。
+ * 【为什么帧时长每帧只算一次】
+ * `frameMsFor` 会推进 `lastFrameAtMs`。若每个轴各调一次，第二个轴永远拿到 0
+ * —— 症状是"只有横向会滚、竖向怎么拖都不动"，或反之（取决于轴顺序）。
+ *
+ * 【为什么时钟之外还需要 `ticking`：帧令牌的两个职责】
+ * `rafId` 同时表达两件事：「已经排了一帧」与「这一帧正在执行」。旧实现在
+ * `tick()` **入口**就把它置空，只完成了前者；于是任何在 `apply()` 内部发生的
+ * 重入 `track()` 都会把「正在执行」误读成「空闲」，再排一帧，而 `tick()` 末尾
+ * 又排一帧 —— 每帧**净增一个无人取消的孤儿回调**，且没有上界。
+ *
+ * 生产代码里这条重入是**必然发生**的：值轴的 `apply` → 提交值域视口 → 发布
+ * 交互视口 → 订阅者合成 `pointermove` → 手势 `onMove` → 同一个驱动的 `track()`。
+ * （Task 1 同时把那条广播改成微任务合帧，见 `pianoRollInteractionViewportBus`；
+ * 但驱动本身必须自己站得住 —— 任何轴、任何调用方都可能重入。）
+ *
+ * 症状：拖得越久越卡。第 N 帧要跑 N 次 `tick()`，每次至少两回 `getBounds()`
+ * （= `getBoundingClientRect()`，强制同步布局）⇒ O(N²)。
+ *
+ * 现在的规则（**不变式**，改代码前先读这三条）：
+ * - **I-1** `rafId !== null` ⟺ **恰好一个**待执行帧；执行期间（`ticking`）不接受
+ *   新的排帧请求，唯一的排帧入口是 `schedule()`。
+ * - **I-2** 一帧只取一次 `getBounds()`，两轴与带内判定共用同一份矩形。
+ * - **I-3** `stop()` 递增取消代次；`tick()` 收尾时若代次已变就不再续帧 ——
+ *   这样「在 `apply()` 内部被 stop()」也不会留下一帧。
+ *
+ * 【违反边界的症状】
+ * - 时钟按 step 计：来回蹭边缘时视图一跳一跳；
+ * - 帧时长每轴各算一次：只有一个轴生效；
+ * - 到达边界后仍排帧：松手前 CPU 空转、每帧标脏重绘；
+ * - `tick()` 入口提前清 `rafId` 却不设 `ticking`：拖得越久越卡（见上）。
  */
+import type { EdgeScrollBounds } from "../../shared/edgeAutoScroll";
+import {
+    EDGE_SCROLL_MAX_AXIS_FRAME_MS,
+    resolveEdgeScrollRatio,
+    type EdgeScrollAxis,
+} from "./edgeScrollAxis";
 
-import { resolveEdgeScrollDeltaPx, type EdgeScrollBounds } from "../../shared/edgeAutoScroll";
-import { EDGE_SCROLL_MAX_SPEED_PX_PER_SEC } from "./dragArithmetic";
-
-/** 判定"确实滚动了"的最小像素量：低于它视为没动（避免浮点抖动触发重算）。 */
-const MIN_STEP_PX = 0.01;
-
-/**
- * 两次滚动之间超过这个间隔就视为**新手势**，按默认帧时长（1/60 秒）起步。
- *
- * 【为什么需要】驱动是长生命周期对象（跨手势复用），指针停着不动的间隙会被算成
- * 一个巨大的"本帧时长"。纯函数虽然把时长夹到 100ms，但 100ms × 最大速度仍是一步
- * 上百像素的跳变 —— 新手势第一下就跳一下，比不滚还糟。
- */
-const GESTURE_GAP_RESET_MS = 200;
-
-/** 默认帧时长（60Hz）：新手势第一步用它。 */
-const DEFAULT_FRAME_MS = 1000 / 60;
-
-/** 指针与视口的横向边界。 */
 export type { EdgeScrollBounds };
 
-/** 驱动所需的外部能力（全部注入，便于单测）。 */
 export interface EdgeScrollDriverOptions {
-    /** 视口左右边界；容器尚未挂载时返回 `null`（本帧不滚）。 */
     getBounds: () => EdgeScrollBounds | null;
-    /** 当前原生滚动位置。 */
-    getScrollLeft: () => number;
-    /** 写入原生滚动位置（调用方同时负责采纳进渲染内核）。 */
-    setScrollLeft: (next: number) => void;
-    /** 滚动位置上界（每次滚动前重新求值：缩放 / 工程长度 / 同步偏移都会变）。 */
-    getMaxScrollLeft: () => number;
-    /**
-     * 滚动位置**下界**。
-     *
-     * 【为什么不能假定是 0】开启"同步到时间轴"时，参数编辑器的绘制域是
-     * `[-偏移, 内容宽 − 偏移]` —— 左侧那片预留的对齐留白就是**负区间**，是用户可以
-     * 滚到的合法位置。把它当成越界并按 0 钳制，会与内核自己的下界（−偏移）打架：
-     * 每帧写 0、内核回写 −偏移，视图在两个位置之间往复 —— 即"闪现"而非滚动。
-     */
-    getMinScrollLeft: () => number;
-    /**
-     * 本帧确实滚动了。
-     *
-     * 【为什么带 clientX】调用方要用**同一个指针位置**重新投影：视图滚了，指针
-     * 屏幕坐标没变，但它对应的帧号变了 —— 绘制类工具据此补一笔 / 重算端点。
-     */
-    onScrolled?: (clientX: number) => void;
-    /** 最大滚屏速度（CSS px/秒）。默认取参数编辑器的常量（见 `dragArithmetic`）。 */
-    maxSpeedPxPerSec?: number;
-    /** 时间源（毫秒）。默认 `performance.now`。 */
+    /** 本驱动负责的轴。每个轴自带单位、可滚性与手感。 */
+    readonly axes: readonly EdgeScrollAxis[];
+    /** 本帧确实滚动了。带指针位置，供调用方按同一位置重算。 */
+    onScrolled?: (clientX: number, clientY?: number) => void;
     now?: () => number;
-    /** 请求下一帧。默认 `requestAnimationFrame`。 */
     requestFrame?: (cb: () => void) => number;
-    /** 取消挂起帧。默认 `cancelAnimationFrame`。 */
     cancelFrame?: (id: number) => void;
 }
 
-/** 拖拽期间的边缘自动滚屏驱动。 */
 export interface EdgeScrollDriver {
-    /**
-     * 按给定指针位置滚**一帧**，返回本帧是否真的滚动了。
-     *
-     * 选择工具用它（指针到哪选到哪，停在边缘不动没有意义，因此由 pointermove
-     * 事件驱动即可）。时钟是共享的：连续调用按真实间隔累计，速度与事件频率无关。
-     */
-    step: (clientX: number) => boolean;
-    /**
-     * 记录指针位置并维持 rAF 循环 —— 指针停在边缘不动时也继续滚。
-     *
-     * 绘制类工具用它（笔画必须跟着视图继续延伸）。
-     */
-    track: (clientX: number) => void;
-    /**
-     * 停止 rAF 循环并复位时钟。
-     *
-     * **手势收尾（pointerup / pointercancel / blur）必须调用**，否则松手后视图会
-     * 一直滚下去。幂等。
-     */
+    step: (
+        clientX: number,
+        clientY?: number,
+        onScrolled?: (clientX: number, clientY?: number) => void,
+    ) => boolean;
+    track: (
+        clientX: number,
+        clientY?: number,
+        onScrolled?: (clientX: number, clientY?: number) => void,
+    ) => void;
     stop: () => void;
-    /** 是否正在持续滚动（供断言与调试）。 */
+    /** 是否有待执行帧或正处在某一帧的执行中。 */
     isRunning: () => boolean;
 }
 
-/**
- * 创建驱动。
- *
- * 生命周期约定：**每个手势一个**（时钟随构造复位，新手势第一步因此必然按 1/60 秒
- * 起步），手势收尾调 `stop()`。跨手势复用会让两次拖拽之间的空闲被算进"本帧时长"，
- * 新手势第一下就跳一大步。
- */
 export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeScrollDriver {
     const now = options.now ?? (() => performance.now());
     const requestFrame = options.requestFrame ?? ((cb: () => void) => requestAnimationFrame(cb));
     const cancelFrame = options.cancelFrame ?? ((id: number) => cancelAnimationFrame(id));
 
+    /** 唯一的帧令牌：`!== null` ⟺ 恰好一个待执行帧（I-1）。 */
     let rafId: number | null = null;
-    /** 最后一次已知的指针 x（rAF 循环每帧用它重新求步长）。 */
-    let lastClientX: number | null = null;
-    /** 上一次滚动发生的时刻；`null` 表示尚未滚过（或已被 stop 复位）。 */
-    let lastStepAtMs: number | null = null;
+    /** 本帧回调正在执行。执行期间 `track()` 不得排帧（见模块头 I-1）。 */
+    let ticking = false;
     /**
-     * 上一次 `step` 是否**被滚动边界挡住**（指针还在边缘带内，但没有可滚余量）。
-     *
-     * 与"指针不在边缘带内"是两回事：前者意味着"继续排帧也没用"，后者意味着
-     * "用户已经离开边缘"。rAF 循环据此停下 —— 否则停在边界按住不动时，每帧都会
-     * 白读一次 `getBoundingClientRect` / `clientWidth`（强制布局），却什么都不做。
+     * 取消代次。`stop()` 递增它；`tick()` 在入口记下自己的代次，收尾时若代次
+     * 已变就不再续帧（I-3）。
      */
-    let blockedAtLimit = false;
-    const maxSpeedPxPerSec = options.maxSpeedPxPerSec ?? EDGE_SCROLL_MAX_SPEED_PX_PER_SEC;
+    let generation = 0;
+    let lastClientX: number | null = null;
+    let lastClientY: number | null = null;
+    /** 上一帧的时间戳；`null` = 时钟已复位（指针不在带内 / 手势刚开始）。 */
+    let lastFrameAtMs: number | null = null;
+    /** 最近一帧的时长，供 `tick` 判断「复位帧」是否需要继续排帧。 */
+    let lastFrameMs = 0;
+    let trackedOnScrolled: ((clientX: number, clientY?: number) => void) | undefined;
 
-    /** 本帧应使用的时长：新手势 / 长间隔按 1/60 秒起步，否则用真实间隔。 */
-    const frameMsFor = (atMs: number): number => {
-        if (lastStepAtMs === null) return DEFAULT_FRAME_MS;
-        const elapsed = atMs - lastStepAtMs;
-        if (!Number.isFinite(elapsed) || elapsed <= 0 || elapsed > GESTURE_GAP_RESET_MS) {
-            return DEFAULT_FRAME_MS;
+    /**
+     * 本帧时长：距**上一帧**，不是距上一次 step。
+     *
+     * 复位后的第一帧返回 0（本帧不滚），让「带外空闲」永远不会被折算成位移。
+     */
+    const frameMsFor = (atMs: number, maxFrameMs: number): number => {
+        if (lastFrameAtMs === null) {
+            lastFrameAtMs = atMs;
+            return 0;
         }
-        return elapsed;
+        const elapsed = atMs - lastFrameAtMs;
+        lastFrameAtMs = atMs;
+        if (!Number.isFinite(elapsed) || elapsed <= 0) return 0;
+        return Math.min(elapsed, maxFrameMs);
     };
 
-    const step = (clientX: number): boolean => {
+    /** 某个轴的指针坐标与边界；竖直轴缺边界时返回 null。 */
+    const axisPointer = (
+        axis: EdgeScrollAxis,
+        clientX: number,
+        clientY: number | null,
+        bounds: EdgeScrollBounds,
+    ): { pointerPx: number; minPx: number; maxPx: number } | null => {
+        if (axis.id === "x") {
+            return { pointerPx: clientX, minPx: bounds.left, maxPx: bounds.right };
+        }
+        if (clientY === null || bounds.top === undefined || bounds.bottom === undefined)
+            return null;
+        return { pointerPx: clientY, minPx: bounds.top, maxPx: bounds.bottom };
+    };
+
+    const axisRatio = (
+        axis: EdgeScrollAxis,
+        clientX: number,
+        clientY: number | null,
+        bounds: EdgeScrollBounds,
+    ): number => {
+        const geometry = axisPointer(axis, clientX, clientY, bounds);
+        if (geometry === null) return 0;
+        return resolveEdgeScrollRatio({ ...geometry, policy: axis.policy });
+    };
+
+    const emitScrolled = (
+        clientX: number,
+        clientY: number | null,
+        callback: ((clientX: number, clientY?: number) => void) | undefined,
+    ): void => {
+        const fn = callback ?? options.onScrolled;
+        if (fn === undefined) return;
+        if (clientY === null) fn(clientX);
+        else fn(clientX, clientY);
+    };
+
+    const step = (
+        clientX: number,
+        clientY?: number,
+        onScrolled?: (clientX: number, clientY?: number) => void,
+        boundsIn?: EdgeScrollBounds | null,
+    ): boolean => {
         lastClientX = clientX;
-        const bounds = options.getBounds();
-        if (!bounds) {
-            blockedAtLimit = false;
-            return false;
+        if (clientY !== undefined) lastClientY = clientY;
+        // I-2：`tick()` 传进来的矩形与带内判定共用；独立调用时才自己取。
+        const bounds = boundsIn === undefined ? options.getBounds() : boundsIn;
+        if (!bounds) return false;
+        // ★ 每帧只算一次：frameMsFor 会推进时钟，两个轴各调一次会让第二个轴拿到 0。
+        const frameMs = frameMsFor(now(), EDGE_SCROLL_MAX_AXIS_FRAME_MS);
+        lastFrameMs = frameMs;
+        let moved = false;
+        for (const axis of options.axes) {
+            if (!axis.canScroll()) continue;
+            const ratio = axisRatio(axis, clientX, lastClientY, bounds);
+            if (ratio === 0) continue;
+            const axisFrameMs = Math.min(frameMs, axis.maxFrameMs ?? EDGE_SCROLL_MAX_AXIS_FRAME_MS);
+            if (axis.apply(ratio, axisFrameMs)) moved = true;
         }
-
-        const atMs = now();
-        const frameMs = frameMsFor(atMs);
-        const deltaPx = resolveEdgeScrollDeltaPx({
-            clientX,
-            leftPx: bounds.left,
-            rightPx: bounds.right,
-            frameMs,
-            maxSpeedPxPerSec,
-        });
-        // 记账放在位置写入之前：即使这一帧没有位移，间隔也必须被消费掉 ——
-        // 否则下一步会把这段时间又算一遍。
-        lastStepAtMs = atMs;
-        if (Math.abs(deltaPx) < MIN_STEP_PX) {
-            // 指针不在边缘带内：没有"滚动意图"，不算被边界挡住。
-            blockedAtLimit = false;
-            return false;
-        }
-
-        const current = options.getScrollLeft();
-        // 上界由调用方给出；下界同样必须由调用方给出 ——
-        //
-        // ★ 下界**未必是 0**：参数编辑器开启"同步到时间轴"时，绘制域是
-        // `[−偏移, 内容宽 − 偏移]`（左侧预留的对齐留白就是负区间，是用户可以滚到的
-        // 合法位置）。此前这里把下界写死成 0，于是每次向左滚都被夹回 0，而内核随后
-        // 又按自己的下界（−偏移）回写 —— 视图在两个位置之间往复，表现为**闪现**
-        // 而不是滚动。
-        const max = options.getMaxScrollLeft();
-        const min = options.getMinScrollLeft();
-        // 退化保护：上界小于下界（视口比内容还宽等）时，按下界落定而不是产生区间反转。
-        const next = min >= max ? min : Math.min(max, Math.max(min, current + deltaPx));
-        if (Math.abs(next - current) < MIN_STEP_PX) {
-            blockedAtLimit = true;
-            return false;
-        }
-
-        blockedAtLimit = false;
-        options.setScrollLeft(next);
-        options.onScrolled?.(clientX);
-        return true;
+        if (moved) emitScrolled(clientX, lastClientY, onScrolled);
+        return moved;
     };
 
-    /** 指针是否仍落在边缘带内（决定 rAF 循环要不要继续）。 */
-    const pointerInBand = (clientX: number): boolean => {
-        const bounds = options.getBounds();
+    /** 指针是否落在**任一可滚轴**的触发带内。 */
+    const pointerInBand = (
+        clientX: number,
+        clientY: number | null,
+        boundsIn?: EdgeScrollBounds | null,
+    ): boolean => {
+        const bounds = boundsIn === undefined ? options.getBounds() : boundsIn;
         if (!bounds) return false;
-        return (
-            resolveEdgeScrollDeltaPx({
-                clientX,
-                leftPx: bounds.left,
-                rightPx: bounds.right,
-                frameMs: DEFAULT_FRAME_MS,
-                maxSpeedPxPerSec,
-            }) !== 0
+        return options.axes.some(
+            (axis) => axis.canScroll() && axisRatio(axis, clientX, clientY, bounds) !== 0,
         );
     };
 
-    const tick = () => {
-        rafId = null;
-        const clientX = lastClientX;
-        if (clientX === null) return;
-        step(clientX);
-        // 两种情况都结束循环：
-        // - 指针已离开边缘带 → 用户不再要求滚动；
-        // - 指针仍在带内但已被滚动边界挡住 → 再排帧也没有位移，只会白读布局。
-        //   （边界在笔画期间是固定的：取数窗口的换入被 `liveEditDeferral` 推迟到
-        //   pointer-up，工程长度也不会在手势中途变化。）
-        if (pointerInBand(clientX) && !blockedAtLimit) {
-            rafId = requestFrame(tick);
-        }
+    /**
+     * 唯一的排帧入口（I-1）。
+     *
+     * 两个提前返回都是**不变式**，不是优化：`rafId !== null` 说明已经有一帧在
+     * 队列里；`ticking` 说明我们正站在那一帧里面，它的收尾会自己续帧。
+     */
+    const schedule = (): void => {
+        if (rafId !== null || ticking) return;
+        rafId = requestFrame(tick);
     };
 
-    const track = (clientX: number): void => {
-        lastClientX = clientX;
-        // 只记录位置并保证循环在跑：**真正的滚动在 rAF 回调里做**（每帧至多一次
-        // 位置写入 + 重绘）。绘制类工具本身就把指针事件合帧到每渲染帧一次，这里
-        // 逐事件写 `scrollLeft` 会在高采样率数位笔下变成几百次/秒的无谓开销，
-        // 与那条路径的既有设计相悖。代价是首次滚动最多晚一帧（≤16ms），无感。
-        if (rafId === null && pointerInBand(clientX)) {
-            rafId = requestFrame(tick);
+    function tick(): void {
+        rafId = null; // 本帧已被消费
+        ticking = true; // 但仍在执行：任何重入的 track() 都不得排帧
+        const myGeneration = generation;
+        let keep = false;
+        try {
+            const clientX = lastClientX;
+            if (clientX !== null) {
+                // I-2：一帧只取一次边界。getBoundingClientRect() 是强制同步布局，
+                // 旧实现每帧取两次，在重入泄漏下被放大成 O(N²)。
+                const bounds = options.getBounds();
+                const moved = step(clientX, lastClientY ?? undefined, trackedOnScrolled, bounds);
+                /*
+                 * 用**最新**指针位置判定带内：`apply()` 期间可能有重入的 track()
+                 * 把指针挪走（手势合成的 pointermove 就是这条路），此时本帧就该收尾。
+                 */
+                const latestX = lastClientX;
+                if (latestX === null || !pointerInBand(latestX, lastClientY, bounds)) {
+                    // ★ 离开带 ⇒ 复位时钟。否则下一次进带的第一帧会拿到整段带外空闲。
+                    lastFrameAtMs = null;
+                } else if (moved || lastFrameMs === 0) {
+                    // 复位帧（frameMs = 0）不会有位移，但必须继续排帧，否则循环在第一帧就停了。
+                    keep = true;
+                }
+            }
+        } finally {
+            ticking = false;
+            if (keep && myGeneration === generation) schedule();
         }
+    }
+
+    const track = (
+        clientX: number,
+        clientY?: number,
+        onScrolled?: (clientX: number, clientY?: number) => void,
+    ): void => {
+        lastClientX = clientX;
+        if (clientY !== undefined) lastClientY = clientY;
+        trackedOnScrolled = onScrolled;
+        if (!pointerInBand(clientX, lastClientY)) {
+            // ★ 离开带 ⇒ 复位时钟并取消挂起帧（与 tick 同一规则，两处都必须做）。
+            // 不取消的话，指针移出边缘后仍会多跑一帧才停 —— 那一帧的 frameMs 是
+            // 真实帧时长，于是"离开边缘的瞬间"会补一段本不该有的位移。
+            lastFrameAtMs = null;
+            if (rafId !== null) {
+                cancelFrame(rafId);
+                rafId = null;
+            }
+            return;
+        }
+        schedule();
     };
 
     const stop = (): void => {
+        // I-3：让正在执行的那一帧收尾时知道「我已经被取消了」。
+        generation += 1;
         if (rafId !== null) {
             cancelFrame(rafId);
             rafId = null;
         }
         lastClientX = null;
-        lastStepAtMs = null;
-        blockedAtLimit = false;
+        lastClientY = null;
+        lastFrameAtMs = null;
+        lastFrameMs = 0;
+        trackedOnScrolled = undefined;
     };
 
     return {
         step,
         track,
         stop,
-        isRunning: () => rafId !== null,
+        isRunning: () => rafId !== null || ticking,
     };
 }

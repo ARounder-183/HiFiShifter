@@ -6,6 +6,7 @@ import {
     buildLoopBoundaryHighlightEntry,
     clearSnapHighlights,
     getSnapHighlightSnapshot,
+    publishClipOriginSnapHighlight,
     publishSnapHighlights,
     subscribeSnapHighlight,
 } from "./snapHighlight";
@@ -52,7 +53,7 @@ test("utils/snapHighlight.test.ts scripted checks", async () => {
     assertEqual(stored.markers[0].role, "target", "first marker is target");
     assertEqual(stored.markers[0].trackId, null, "grid target is full-height");
     assertEqual(stored.markers[1].role, "source", "second marker is source");
-    assertEqual(stored.markers[1].sec, 2, "source defaults to snapped sec");
+    assertEqual(stored.markers[1].position, 2, "source defaults to snapped sec");
     assertEqual(stored.markers[1].trackId, "t1", "source trackId");
 
     // ── 同组发布整组替换 ──
@@ -103,12 +104,42 @@ test("utils/snapHighlight.test.ts scripted checks", async () => {
         clipId: "c2",
     });
     assertEqual(
-        loopEntry2.markers.map((m) => m.sec),
+        loopEntry2.markers.map((m) => m.position),
         [5, 7],
         "loop two secs preserved",
     );
 
     unsubscribe();
+
+    // ── Clip 起点水平吸附线 ──
+    publishClipOriginSnapHighlight({ sec: 2.5, trackId: "t2", clipId: "c2" });
+    const originEntry = getSnapHighlightSnapshot().entries.find(
+        (entry) => entry.id === SNAP_HIGHLIGHT_GROUP + "\u0000clip-origin",
+    );
+    assertTrue(originEntry !== undefined, "origin entry published");
+    assertEqual(originEntry?.kind, "origin", "origin entry kind");
+    assertEqual(originEntry?.markers[0].axis, "time", "origin target axis");
+    assertEqual(originEntry?.markers[0].trackId, null, "origin target is full-height");
+    assertEqual(originEntry?.markers[0].position, 2.5, "origin target position");
+    assertEqual(originEntry?.markers[1].trackId, "t2", "origin source track");
+    assertEqual(originEntry?.markers[1].position, 2.5, "origin source position");
+
+    publishClipOriginSnapHighlight({ sec: 3, trackId: "t2", clipId: "c2" });
+    assertEqual(
+        getSnapHighlightSnapshot().entries.filter((entry) =>
+            entry.id.startsWith(SNAP_HIGHLIGHT_GROUP + "\u0000clip-origin"),
+        ).length,
+        1,
+        "origin group replaced, not accumulated",
+    );
+    clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+    assertEqual(
+        getSnapHighlightSnapshot().entries.filter((entry) =>
+            entry.id.startsWith(SNAP_HIGHLIGHT_GROUP + "\u0000clip-origin"),
+        ).length,
+        0,
+        "origin group cleared",
+    );
 
     void checks;
 });

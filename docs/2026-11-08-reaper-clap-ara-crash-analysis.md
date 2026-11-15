@@ -54,6 +54,8 @@
 | B | CLAP，无音频，强制 `HIFISHIFTER_ORT_EP=cpu` | `exit=0` |
 | C | CLAP，**有**音频 item | **`-1073741819` (0xC0000005)** |
 | D | CLAP，有音频，强制 CPU EP | **`-1073741819`** |
+> 注：日志重设计后 `HIFISHIFTER_LOG=error/warn` 等价为「低」档；下表保留历史分析原文。
+
 | E | CLAP，有音频，`HIFISHIFTER_LOG=error` | **`-1073741819`** |
 | F | CLAP，有音频，日志全关 | **`-1073741819`** |
 | G | **VST3**，有音频 | `exit=0` |

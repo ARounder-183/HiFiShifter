@@ -2001,9 +2001,8 @@ impl DocumentSession {
         // 指纹相同"成立，不会造成每轮重载。
         let mut audio_params = timeline.params_by_root_track;
         for params in audio_params.values_mut() {
-            params.param_line_blocks = None;
-            params.param_block_merges.clear();
-            params.param_block_interval_edits.clear();
+            params.param_block_edits = Default::default();
+            params.param_block_view = None;
         }
         audio_params.retain(|_, params| {
             !params.is_empty_project_data()
@@ -2928,14 +2927,11 @@ impl DocumentSession {
     }
 
     /// 用历史快照整体替换权威，然后失效派生视图。
-    pub(crate) fn replace_authority_with_blocks(
+    pub(crate) fn replace_authority_with_edits(
         &self,
         mut authority: hifishifter_kernel::editor::param_authority::ParamAuthority,
-        blocks: Option<
-            std::collections::BTreeMap<
-                String,
-                hifishifter_kernel::param_line_blocks::ParamLineBlockSet,
-            >,
+        block_edits: Option<
+            std::collections::BTreeMap<String, hifishifter_kernel::param_blocks::ParamBlockEditSet>,
         >,
     ) -> Result<bool, String> {
         let _transaction = self.transaction.lock_or_recover();
@@ -2949,20 +2945,20 @@ impl DocumentSession {
             edits.revision = edits.revision.saturating_add(1);
             self.render_epoch.fetch_add(1, Ordering::AcqRel);
         }
-        if let Some(mut blocks) = blocks {
-            for (root, current) in &edits.param_line_blocks {
-                let target = blocks.entry(root.clone()).or_insert_with(|| {
-                    hifishifter_kernel::param_line_blocks::ParamLineBlockSet {
-                        frame_period_ms: current.frame_period_ms,
+        if let Some(mut block_edits) = block_edits {
+            for (root, current) in &edits.param_block_edits {
+                let target = block_edits.entry(root.clone()).or_insert_with(|| {
+                    hifishifter_kernel::param_blocks::ParamBlockEditSet {
+                        revision: current.revision,
                         ..Default::default()
                     }
                 });
                 target.revision = current.revision.saturating_add(1);
             }
-            for layout in blocks.values() {
-                layout.validate()?;
+            for value in block_edits.values() {
+                value.validate()?;
             }
-            edits.param_line_blocks = blocks;
+            edits.param_block_edits = block_edits;
         }
         self.materialize_views_locked(&mut edits, &mut host);
         drop(edits);
@@ -3086,7 +3082,18 @@ impl DocumentSession {
             &baseline,
             self.ui_geometry_revision.load(Ordering::Acquire),
         );
-        view.params.param_line_blocks = edits.param_line_blocks.get(root).cloned();
+        view.params.param_block_edits = edits
+            .param_block_edits
+            .get(root)
+            .cloned()
+            .unwrap_or_default();
+        view.params.param_block_view = hifishifter_kernel::param_blocks::compose_param_block_view(
+            timeline,
+            root,
+            &view.params.param_block_edits,
+            fp,
+        )
+        .ok();
         view
     }
 
@@ -3370,35 +3377,32 @@ impl DocumentSession {
         found
     }
 
-    /// 权威写：区间替换 + 显式 present 位图。绝不读取/写回整条显示数组。
+    /// 权威写：块编辑集替换 + 显式曲线补丁。绝不读取/写回整条显示数组。
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn commit_param_line_edit(
+    pub(crate) fn commit_param_block_edits(
         &self,
         root: &str,
         expected: u64,
-        layout: hifishifter_kernel::param_line_blocks::ParamLineBlockSet,
-        patches: &[hifishifter_kernel::param_line_blocks::ParamLineCurvePatch],
+        blocks: Vec<hifishifter_kernel::param_blocks::UserParamBlock>,
+        patches: &[hifishifter_kernel::param_blocks::ParamBlockCurvePatch],
         expected_curve: Option<u64>,
         expected_geometry: Option<u64>,
         expected_signature: Option<&str>,
         before_commit: impl FnOnce(),
     ) -> Result<u64, String> {
-        hifishifter_kernel::param_line_blocks::validate_curve_patches(patches)?;
-        layout.validate()?;
+        hifishifter_kernel::param_blocks::validate_curve_patches(patches)?;
         let _transaction = self.transaction.lock_or_recover();
         let host = self.workspace_timeline_locked()?;
         if !host.tracks.iter().any(|track| track.id == root) {
             return Err("unknown root parameter line".into());
         }
         let edits = self.edits.lock_or_recover();
-        if edits
-            .param_line_blocks
+        let current = edits
+            .param_block_edits
             .get(root)
-            .map_or(0, |layout| layout.revision)
-            != expected
-        {
-            return Err("Conflict: parameter blocks changed".into());
-        }
+            .cloned()
+            .unwrap_or_default();
+        let next_edits = current.replace(expected, blocks)?;
         if !patches.is_empty() && expected_curve != Some(edits.authority.revision) {
             return Err("Conflict: parameter curve changed".into());
         }
@@ -3439,16 +3443,14 @@ impl DocumentSession {
             }
         }
         let changed = next.authority.revision != edits.authority.revision;
-        next.param_line_blocks.insert(root.to_owned(), layout);
-        if changed {
-            next.revision = next.revision.saturating_add(1);
-            if next.tracks.is_empty() {
-                next.tracks = host.tracks.clone();
-            }
-            for target in std::iter::once(root).chain(children.iter().map(String::as_str)) {
-                let view = self.compose_param_view_with(&host, &next, target);
-                next.params.insert(target.to_owned(), view.params);
-            }
+        next.param_block_edits.insert(root.to_owned(), next_edits);
+        next.revision = next.revision.saturating_add(1);
+        if next.tracks.is_empty() {
+            next.tracks = host.tracks.clone();
+        }
+        for target in std::iter::once(root).chain(children.iter().map(String::as_str)) {
+            let view = self.compose_param_view_with(&host, &next, target);
+            next.params.insert(target.to_owned(), view.params);
         }
         let revision = next.authority.revision;
         drop(edits);
@@ -3758,14 +3760,6 @@ impl DocumentSession {
             journal.observe_only(frame);
             return Ok(Default::default());
         }
-        let crops =
-            hifishifter_kernel::param_line_blocks::geometry::crop_windows(journal.entries(), frame);
-        let mut layouts = edits.param_line_blocks.clone();
-        let blocks_changed = hifishifter_kernel::param_line_blocks::geometry::apply_geometry(
-            &mut layouts,
-            &deltas,
-            &crops,
-        )?;
         let report = match apply_geometry_transaction(&mut edits.authority, &deltas) {
             Ok(report) => report,
             Err(error) => {
@@ -3777,8 +3771,7 @@ impl DocumentSession {
                 return Err(error);
             }
         };
-        edits.param_line_blocks = layouts;
-        if report.affected_runs > 0 || blocks_changed {
+        if report.affected_runs > 0 {
             // 只推进编辑代次。派生显示由调用方在自己的时间线上重新合成
             // （`materialize_views_locked` 会整份替换 `edits.params`，而这里拿到的
             // `timeline` 可能是另一份宿主视图 —— 用它覆盖会把在线权威的根 id
@@ -3868,12 +3861,12 @@ impl DocumentSession {
             .collect::<std::collections::BTreeSet<_>>();
         partial.authority.retain_roots(&keep);
         partial
-            .param_line_blocks
+            .param_block_edits
             .retain(|root, _| keep.contains(root));
         if !document_data {
             // 文档级状态没被选中 ⇒ 载荷里不带它，恢复端因此不会覆盖它。
             partial.params.clear();
-            partial.param_line_blocks.clear();
+            partial.param_block_edits.clear();
             partial.tracks.clear();
             partial.bindings.clear();
             partial.fades.clear();
@@ -4457,11 +4450,9 @@ impl DocumentSession {
             }
         }
         merged.validate_take_syllables()?;
-        for (root, blocks) in &restored.param_line_blocks {
-            if authoritative || !merged.param_line_blocks.contains_key(root) {
-                merged
-                    .param_line_blocks
-                    .insert(root.clone(), blocks.clone());
+        for (root, edits) in &restored.param_block_edits {
+            if authoritative || !merged.param_block_edits.contains_key(root) {
+                merged.param_block_edits.insert(root.clone(), edits.clone());
             }
         }
         if kept_live_roots > 0 {

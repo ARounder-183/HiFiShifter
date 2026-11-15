@@ -90,10 +90,16 @@ MUST_RESOLVE_HOST=(
 )
 
 # 直接 NEEDED 里必须"落在包内"的条目（自有库 + Tauri 打包的 GTK）。
+#
+# 【为什么没有 libSoundTouchDLL.so】SoundTouch 已改为**运行期 dlopen**（libloading
+# 按绝对路径加载，见 kernel soundtouch.rs 的 pack_layout_candidates）：它不在
+# DT_NEEDED 里，ldd 自然解析不到；rpath 也帮不上忙（linuxdeploy 会用 patchelf
+# 整段替换 RUNPATH）。随包存在性由 REQUIRED_FILES 断言，加载器的候选清单由
+# kernel 的 pack_layout_candidates_cover_every_bundled_location 单测钉死 ——
+# 两份清单必须互为镜像。
 MUST_RESOLVE_BUNDLE=(
     libgtk-3.so.0
     libgdk-3.so.0
-    libSoundTouchDLL.so
     libwebgpu_dawn.so
 )
 

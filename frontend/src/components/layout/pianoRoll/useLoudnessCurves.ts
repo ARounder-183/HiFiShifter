@@ -37,7 +37,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { paramsApi } from "../../../services/api";
 import type { ParamFramesPayload } from "../../../types/api";
-import { isLoudnessFetchHeld } from "../timeline/loudnessFetchGate";
+import { isLoudnessFetchHeld } from "../../../features/session/loudnessFetchGate";
 import { isDynParam, VOLUME_PARAM_ID } from "./paramRanges";
 
 /** 快照全工程点数上限：40k 点 ≈ 单曲线 160KB（binary 解码后），超出按 stride 降采样。 */

@@ -478,16 +478,32 @@ pub struct UiSettings {
     /// 新建参数块时是否同步归一化该段音高（默认关闭）。
     #[serde(default)]
     pub param_block_follow_pitch: bool,
+    /// 参数块图层可见性（本地记忆，默认关闭）。
+    #[serde(default)]
+    pub param_blocks_visible: bool,
     #[serde(default)]
     pub playhead_zoom: bool,
     #[serde(default)]
     pub auto_scroll: bool,
+    /// 自动滚屏模式：`"scroll"`（滚动式，实时跟随，默认）/ `"page"`（翻页式，越界翻一页）。
+    ///
+    /// 【为什么必须在这里有字段】`save_ui_settings` 是「读-改-写整个配置文件」：
+    /// 本结构缺字段时前端每次保存都会把它**静默丢弃** —— 用户选完模式重开就回到默认，
+    /// 而症状是"设置偶尔丢失"，极难复现（与 `search` / `file_browser` 同一条约束）。
+    #[serde(default = "default_auto_scroll_mode")]
+    pub auto_scroll_mode: String,
     #[serde(default = "default_true")]
     pub param_editor_seek_playhead: bool,
     #[serde(default = "default_true")]
     pub show_clipboard_preview: bool,
     #[serde(default = "default_true")]
     pub show_param_value_popup: bool,
+    /// 音高模式下是否绘制各 Clip 自己的源音高参考线（视图菜单的显示开关）。
+    ///
+    /// 与 `pv.orig`（根轨道组的单值合成基线）互补：Clip 重合、音高参考块覆盖时，
+    /// 只有它还能表达「每个 Clip 原本的音高」。纯展示开关，不进工程。
+    #[serde(default = "default_true")]
+    pub show_clip_pitch_overlay: bool,
     /// 纵轴标尺的展示单位（参数 id → `"ratio"` / `"db"`）。
     ///
     /// 只对音量 / 动态这类线性幅值倍率参数有意义（`1× = 0 dB`）：同一个值既能读成
@@ -497,6 +513,15 @@ pub struct UiSettings {
     /// 这里加一份校验会让"支持哪些参数"这个业务知识在两处各写一遍。
     #[serde(default)]
     pub param_axis_units: std::collections::HashMap<String, String>,
+    /// 参数编辑器纵轴方向（参数 id → `"left-bottom"` / `"left-top"`）。
+    ///
+    /// 目前只有声像使用；取值合法性由前端 normalizePanAxisDirections 收口，
+    /// 后端只做透传存储（与 param_axis_units 同一约定）。
+    #[serde(default)]
+    pub param_axis_directions: std::collections::HashMap<String, String>,
+    /// 上次另存为选择的格式（`hshp` / `json` / `zip`）。
+    #[serde(default = "default_project_save_format")]
+    pub last_project_save_format: String,
     #[serde(default = "default_true")]
     pub lock_param_lines: bool,
 
@@ -579,6 +604,12 @@ pub struct UiSettings {
     /// 与拖动方向同属"本地记忆"，因此不需要配置迁移。
     #[serde(default)]
     pub param_editor_tool: Option<String>,
+    /// 参数编辑器选择族子模式：`range` / `block`。`None` = range。
+    ///
+    /// block 不是独立工具族，而是选择工具的对象级子模式；旧配置没有这一项时
+    /// 前端按 range 回落，不需要迁移。
+    #[serde(default)]
+    pub param_editor_selection_mode: Option<String>,
     #[serde(default, alias = "edgeSmoothnessPercent")]
     pub smoothness_percent: u32,
     #[serde(default = "default_scale_highlight_mode")]
@@ -609,10 +640,22 @@ pub struct UiSettings {
     pub builtin_vibrato_preset_order: Vec<String>,
     #[serde(default)]
     pub ignore_grouping: bool,
-    /// 波纹编辑（自动跟进）模式：off / track / all（对应 REAPER 的 Ripple Editing）。
-    /// - `off`：关闭（默认）。
-    /// - `track`：仅被编辑的轨道上的后续剪辑一起跟进。
-    /// - `all`：所有轨道上位于编辑点之后的剪辑一起跟进。
+    /// 波纹编辑（自动跟进）总开关。
+    ///
+    /// 【为什么是 `Option<bool>` 而不是 `bool`】它是"这个键在文件里根本不存在"的
+    /// 显式表达 —— 那正是旧配置的形状。旧版把开关与方向压成了一个三值字符串
+    /// `rippleMode`（off / track / all）。若这里用 `#[serde(default)] bool`，
+    /// "用户关掉了它"与"没有这个键"就混成一件事：旧配置里 `rippleMode: "track"`
+    /// （用户是**开着**的）会被读成关闭，升级后用户会发现"我什么都没改，波纹编辑
+    /// 却关了"。`None` 专表示后者，由 `normalize_ripple_mode` 推断成 `Some`，
+    /// 此后永远是 `Some`。
+    #[serde(default)]
+    pub ripple_enabled: Option<bool>,
+    /// 波纹编辑方向：`track`（仅被编辑轨道，默认）/ `all`（全部轨道）。
+    ///
+    /// 【与旧版的区别】这里曾是三值（含 `off`），开关与方向压在一起；
+    /// `normalize_ripple_mode` 会把旧值迁移过来（`off` → 关闭 + 按轨道）。
+    /// 引擎读的是"开关 × 方向"的折算结果，见 `commands/timeline.rs::ripple_settings`。
     #[serde(default = "default_ripple_mode")]
     pub ripple_mode: String,
 
@@ -1585,6 +1628,10 @@ impl Default for ExportSettings {
     }
 }
 
+fn default_project_save_format() -> String {
+    "hshp".to_string()
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1617,8 +1664,18 @@ fn default_hifigan_mel_stretch() -> bool {
     true
 }
 
+/// 波纹编辑的出厂**方向**：按轨道。
+///
+/// 【为什么不是"全部轨道"】旧版三值循环里"关闭"的下一个状态就是"按轨道"，用户打开
+/// 开关时期待的就是这个最小作用范围；"全部轨道"会一次推动所有轨道，属于需要显式
+/// 选择的更大动作，不该是默认。
 fn default_ripple_mode() -> String {
-    "off".to_string()
+    "track".to_string()
+}
+
+/// 自动滚屏模式的出厂值：滚动式（与引入翻页式之前的行为逐值一致）。
+fn default_auto_scroll_mode() -> String {
+    "scroll".to_string()
 }
 
 fn default_metronome_gain() -> f64 {
@@ -1713,12 +1770,17 @@ impl Default for UiSettings {
             pitch_snap_tolerance_cents: 0,
             pitch_snap_scale: default_pitch_snap_scale(),
             param_block_follow_pitch: false,
+            param_blocks_visible: false,
             playhead_zoom: false,
             auto_scroll: false,
+            auto_scroll_mode: default_auto_scroll_mode(),
             param_editor_seek_playhead: true,
             show_clipboard_preview: true,
             show_param_value_popup: true,
+            show_clip_pitch_overlay: true,
             param_axis_units: std::collections::HashMap::new(),
+            param_axis_directions: std::collections::HashMap::new(),
+            last_project_save_format: default_project_save_format(),
             lock_param_lines: true,
             metronome_enabled: false,
             metronome_gain: default_metronome_gain(),
@@ -1740,6 +1802,7 @@ impl Default for UiSettings {
             draw_drag_direction: default_draw_drag_direction(),
             line_vibrato_drag_direction: default_draw_drag_direction(),
             param_editor_tool: None,
+            param_editor_selection_mode: None,
             smoothness_percent: 0,
             scale_highlight_mode: default_scale_highlight_mode(),
             custom_scale_presets: Vec::new(),
@@ -1749,6 +1812,7 @@ impl Default for UiSettings {
             disabled_vibrato_preset_ids: Vec::new(),
             builtin_vibrato_preset_order: Vec::new(),
             ignore_grouping: false,
+            ripple_enabled: Some(false),
             ripple_mode: default_ripple_mode(),
 
             midi_import_position: default_midi_import_position(),
@@ -1786,6 +1850,12 @@ impl Default for UiSettings {
 
 impl UiSettings {
     /// 规范化分割过渡相关设置，避免损坏/越界的持久化值影响编辑行为。
+    ///
+    /// 【历史命名】本函数早已不只是"分割过渡"：它是**整份 `UiSettings` 的规范化
+    /// 总入口**（`get_ui_settings` / `save_ui_settings` / `ui_settings_snapshot`
+    /// 三条读路径都调它），波纹模式、时间显示、时间轴吸附与自动滚屏模式都在这里
+    /// 收口。新增一个需要"读盘即清洗"的字段时，挂在函数末尾即可，不必去改那 6 个
+    /// 调用点；名字保留是因为重命名会把一次纯机械的改动扩散到整个 crate。
     pub fn normalize_split_transition(&mut self) {
         if !["fade", "overlap"].contains(&self.split_transition_mode.as_str()) {
             self.split_transition_mode = default_split_transition_mode();
@@ -1822,12 +1892,43 @@ impl UiSettings {
         self.normalize_time_display();
         self.timeline_snap.normalize();
         self.normalize_ripple_mode();
+        self.normalize_auto_scroll_mode();
     }
 
-    /// 规范化波纹编辑模式，避免损坏/未知的持久化值影响编辑行为。
+    /// 规范化波纹编辑设置，并把旧版的三值编码迁移成"开关 + 方向"。
+    ///
+    /// 【迁移规则】
+    /// - 没有 `rippleEnabled` 且 `rippleMode` 是 `track` / `all` → 开关为**开**，
+    ///   方向照旧（旧编码里这两个值就代表开着）；
+    /// - 没有 `rippleEnabled` 且 `rippleMode` 是 `off` / 未知值 → 开关为关，
+    ///   方向回到默认；
+    /// - 已有 `rippleEnabled` → 开关照旧，方向只做值域清洗（未知值 → 默认方向，
+    ///   并把开关落到关 —— 手改坏的配置不该让波纹编辑意外开启）。
     pub fn normalize_ripple_mode(&mut self) {
-        if !["off", "track", "all"].contains(&self.ripple_mode.as_str()) {
-            self.ripple_mode = default_ripple_mode();
+        let legacy_scope = match self.ripple_mode.as_str() {
+            "track" => Some("track"),
+            "all" => Some("all"),
+            _ => None,
+        };
+        self.ripple_enabled = Some(match self.ripple_enabled {
+            // 没有这一项 = 旧配置：三值编码里的 "off" 就是关闭。
+            None => legacy_scope.is_some(),
+            Some(enabled) => enabled && legacy_scope.is_some(),
+        });
+        self.ripple_mode = match legacy_scope {
+            Some(scope) => scope.to_string(),
+            None => default_ripple_mode(),
+        };
+    }
+
+    /// 规范化自动滚屏模式，避免损坏 / 未知的持久化值影响跟随行为。
+    ///
+    /// 前端也有一份归一化（`normalizeAutoScrollMode`）：两处职责不同 —— 这里守住
+    /// 磁盘与插件形态，那里守住水合进 Redux 的那一步。任何一侧缺失，脏值都会在
+    /// "保存一次再读回来"的往返里活下来。
+    pub fn normalize_auto_scroll_mode(&mut self) {
+        if !["scroll", "page"].contains(&self.auto_scroll_mode.as_str()) {
+            self.auto_scroll_mode = default_auto_scroll_mode();
         }
     }
 
@@ -2249,23 +2350,102 @@ mod tests {
     }
 
     #[test]
-    fn ui_settings_normalizes_ripple_mode() {
+    fn ui_settings_normalizes_auto_scroll_mode() {
         let settings = UiSettings::default();
-        assert_eq!(settings.ripple_mode, "off");
+        assert_eq!(settings.auto_scroll_mode, "scroll");
 
         let mut bogus = UiSettings {
+            auto_scroll_mode: "teleport".to_string(),
+            ..UiSettings::default()
+        };
+        bogus.normalize_auto_scroll_mode();
+        assert_eq!(bogus.auto_scroll_mode, "scroll");
+
+        let mut page = UiSettings {
+            auto_scroll_mode: "page".to_string(),
+            ..UiSettings::default()
+        };
+        page.normalize_auto_scroll_mode();
+        assert_eq!(page.auto_scroll_mode, "page");
+    }
+
+    /// 旧配置（没有 autoScrollMode）必须能读；新值必须能原样回写。
+    #[test]
+    fn auto_scroll_mode_round_trips_and_tolerates_missing() {
+        let legacy: UiSettings = serde_json::from_value(serde_json::json!({ "autoScroll": true }))
+            .expect("旧配置必须能读");
+        assert_eq!(legacy.auto_scroll_mode, "scroll");
+        assert!(legacy.auto_scroll);
+
+        let page: UiSettings =
+            serde_json::from_value(serde_json::json!({ "autoScrollMode": "page" }))
+                .expect("新字段必须能读");
+        assert_eq!(page.auto_scroll_mode, "page");
+
+        let encoded = serde_json::to_value(&page).expect("serialize");
+        assert_eq!(encoded["autoScrollMode"], serde_json::json!("page"));
+    }
+
+    #[test]
+    fn ui_settings_normalizes_ripple_mode() {
+        let settings = UiSettings::default();
+        assert_eq!(settings.ripple_enabled, Some(false));
+        assert_eq!(settings.ripple_mode, "track");
+
+        // 未知方向：方向回默认，开关落到关（手改坏的配置不该让波纹编辑意外开启）。
+        let mut bogus = UiSettings {
             ripple_mode: "sideways".to_string(),
+            ripple_enabled: Some(true),
             ..UiSettings::default()
         };
         bogus.normalize_ripple_mode();
-        assert_eq!(bogus.ripple_mode, "off");
+        assert_eq!(bogus.ripple_enabled, Some(false));
+        assert_eq!(bogus.ripple_mode, "track");
 
-        let mut track_mode = UiSettings {
-            ripple_mode: "track".to_string(),
+        // 合法方向原样保留，开关照旧。
+        let mut all_mode = UiSettings {
+            ripple_mode: "all".to_string(),
+            ripple_enabled: Some(true),
             ..UiSettings::default()
         };
-        track_mode.normalize_ripple_mode();
-        assert_eq!(track_mode.ripple_mode, "track");
+        all_mode.normalize_ripple_mode();
+        assert_eq!(all_mode.ripple_enabled, Some(true));
+        assert_eq!(all_mode.ripple_mode, "all");
+    }
+
+    /// 旧配置（只有一个三值 `rippleMode`）必须被迁移成"开关 + 方向"，
+    /// 且**不能**把用户的"开着"读成"关着"。
+    #[test]
+    fn legacy_ripple_mode_migrates_to_enabled_plus_scope() {
+        let migrate = |value: &str| {
+            let mut settings: UiSettings =
+                serde_json::from_value(serde_json::json!({ "rippleMode": value }))
+                    .expect("旧配置必须能读");
+            assert!(settings.ripple_enabled.is_none(), "旧配置里不该有 rippleEnabled");
+            settings.normalize_ripple_mode();
+            (settings.ripple_enabled, settings.ripple_mode)
+        };
+        assert_eq!(migrate("off"), (Some(false), "track".to_string()));
+        assert_eq!(migrate("track"), (Some(true), "track".to_string()));
+        assert_eq!(migrate("all"), (Some(true), "all".to_string()));
+        // 手改坏的值：关掉，方向回默认。
+        assert_eq!(migrate("sideways"), (Some(false), "track".to_string()));
+    }
+
+    /// 新配置：关闭时仍要记住方向（重启后打开开关不该被重置成"按轨道"）。
+    #[test]
+    fn new_ripple_settings_keep_scope_while_disabled() {
+        let mut settings: UiSettings =
+            serde_json::from_value(serde_json::json!({ "rippleEnabled": false, "rippleMode": "all" }))
+                .expect("新配置必须能读");
+        settings.normalize_ripple_mode();
+        assert_eq!(settings.ripple_enabled, Some(false));
+        assert_eq!(settings.ripple_mode, "all");
+
+        // 回写时 rippleEnabled 必须是布尔值而不是 null。
+        let encoded = serde_json::to_value(&settings).expect("serialize");
+        assert_eq!(encoded["rippleEnabled"], serde_json::json!(false));
+        assert_eq!(encoded["rippleMode"], serde_json::json!("all"));
     }
 
     // ── 窗口状态：清洗 / 合并 / 显示器交集校验 ────────────────────────────────
@@ -2884,47 +3064,10 @@ fn load_config(config_dir: &Path) -> AppConfig {
     }
 }
 
-/// 把临时文件原子地替换为目标文件。
-///
-/// 【为什么不能直接 `fs::rename`】Windows 上 rename 拒绝覆盖已存在的目标，因此
-/// 原先的写法必须先 `remove_file` 再 rename —— 那中间的窗口里**目标文件是不存在
-/// 的**。两个进程同时保存（独立 App 与 REAPER 里的插件现在共用这一个文件）时，
-/// 恰好落在窗口里的那次读取会拿不到任何配置，等于用户设置被清空。删除也不原子：
-/// 删掉之后 rename 失败（磁盘满、被杀进程）就只剩 `.bak` 能救。
-///
-/// `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` 是同一卷内的原子替换，正是这里要的语义。
-/// 非 Windows 平台的 `fs::rename` 本身就是原子替换，保持原样。
-fn replace_file_atomically(tmp: &Path, target: &Path) -> std::io::Result<()> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        use windows::core::PCWSTR;
-        use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING};
+use crate::util::replace_file_atomically;
 
-        let wide =
-            |path: &Path| -> Vec<u16> { path.as_os_str().encode_wide().chain(Some(0)).collect() };
-        let tmp_wide = wide(tmp);
-        let target_wide = wide(target);
-        // SAFETY: 两个缓冲区都是 NUL 结尾的宽字符串，且在本调用期间存活。
-        let moved = unsafe {
-            MoveFileExW(
-                PCWSTR(tmp_wide.as_ptr()),
-                PCWSTR(target_wide.as_ptr()),
-                MOVEFILE_REPLACE_EXISTING,
-            )
-        };
-        if moved.is_ok() {
-            return Ok(());
-        }
-        // 目标不存在时 MOVEFILE_REPLACE_EXISTING 也可用，但仍回退一次 rename：
-        // 某些网络/可移动卷上的 MoveFileEx 会失败，而那里的 rename 通常可行。
-        fs::rename(tmp, target)
-    }
-    #[cfg(not(windows))]
-    {
-        fs::rename(tmp, target)
-    }
-}
+// `app_config.json` 的原子写与 `log_settings.json` 共用同一份实现：Windows 的
+// `MoveFileExW` 语义只有一处，两个写盘点不会各自漂移。
 
 /// 配置文件的读-改-写串行化锁（进程内）。
 ///

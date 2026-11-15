@@ -1596,8 +1596,23 @@ pub fn trim_and_resample_midi(
     // 从全量曲线中截取 source range 区间
     let src_start_frame = ((src_start * 1000.0) / fp).round().max(0.0) as usize;
 
-    // 根据 source_end_sec 计算结束帧
-    let src_end_frame = ((source_end_sec * 1000.0) / fp).round().max(0.0) as usize;
+    // 时间线侧的目标帧数（输出长度）：先算出来，切片右端要用它对齐。
+    let target_frames = ((clip_timeline_len_sec * 1000.0) / fp).round().max(1.0) as usize;
+
+    // 切片右端。
+    //
+    // 【rate≈1 时必须正好是 target_frames 帧】消费窗口在源域上就是
+    // `[src_start, src_start + len·rate)`，rate = 1 时正好是 target_frames 帧。
+    // 若改用 `round(source_end_sec / fp)` 求终点，两端小数部分跨过 0.5 的方向
+    // 相反时会得到 target_frames ± 1，随后 `resample_curve_linear` 把**整条
+    // 曲线**线性缩放一帧 —— 曲线相对 pv.orig（逐帧点映射）沿 Clip 逐渐漂移，
+    // 越到 Clip 末尾偏得越多（5 ms，放大后肉眼可见）。音频本身就是逐帧点映射的，
+    // 对齐音频才是正确解。
+    let src_end_frame = if !loop_enabled && (rate - 1.0).abs() <= 1e-6 {
+        src_start_frame.saturating_add(target_frames)
+    } else {
+        ((source_end_sec * 1000.0) / fp).round().max(0.0) as usize
+    };
     let src_end_frame = src_end_frame.min(full_midi.len());
 
     // ── Loop（循环源）：对整个媒体文件做模运算回绕 ────────────────────────────
@@ -1701,8 +1716,7 @@ pub fn trim_and_resample_midi(
 
     let trimmed = &full_midi[src_start_frame..src_end_frame];
 
-    // 按 1/playback_rate 重采样到 clip timeline 长度
-    let target_frames = ((clip_timeline_len_sec * 1000.0) / fp).round().max(1.0) as usize;
+    // 按 1/playback_rate 重采样到 clip timeline 长度（target_frames 已在上方算出）
 
     // 媒体时长未知：退化为窗口回绕，保证仍有内容可显示。
     // 倒放从窗口末端向下遍历（与音频方向一致），不能忽略 reversed。
@@ -1806,15 +1820,18 @@ pub fn assemble_nonloop_pitch_from_window(
     // 历史：音高路径靠调用方的 `window_crosses_media` 预判掩盖了大部分场景，
     // 但只要窗口终点超过缓存长度且曲线比 win_end 短就会触发；DYN 的电平曲线
     // 长度与音高帧数未必逐帧一致，因此这条路径被高频命中。
-    let win_end_frame = ((win_end_sec * 1000.0) / fp)
-        .round()
-        .clamp(0.0, full_midi.len() as f64) as i64;
+    //
+    // 【上界必须是**未取整**的窗口终点】消费窗口是 `[win_start, win_end)`，输出
+    // 第 target−1 个采样对应的源坐标仍然 < win_end；若先 `round(win_end)` 再比较，
+    // 小数部分 < 0.5 时会把**最后一个合法采样**判成越界而清零 —— 表现是 Clip
+    // 末尾缺一帧（5 ms，放大后约 17 px），正好落在用户盯着看的尾部。
+    let win_end_limit = ((win_end_sec * 1000.0) / fp).min(full_midi.len() as f64);
     // 消费方向：时间线帧 i 直接对应源坐标 win_start + i·rate（消费自窗口
     // 起点开始）；窗口起点在媒体起点之前的部分自然落为前导静音。
     for (i, slot) in out.iter_mut().enumerate() {
         let src_f = win_start_frame_f + i as f64 * rate;
         let idx = src_f.round() as i64;
-        if idx < 0 || idx >= win_end_frame {
+        if idx < 0 || (idx as f64) >= win_end_limit {
             continue; // 媒体域外 → 静音
         }
         *slot = full_midi[idx as usize];
@@ -1862,8 +1879,8 @@ mod tests {
         analyze_whole_source, assemble_nonloop_pitch_from_window, build_clip_pitch_key,
         cached_pitch_bytes, clip_pitch_cache_budget_bytes, clip_pitch_cache_entry_limit,
         clip_pitch_cache_max_entries, compute_frame_levels, dyn_needs_level_analysis,
-        dyn_panel_open_roots, global_cache, trim_and_resample_midi, CachedClipPitch,
-        UNBOUNDED_ENTRY_CAPACITY,
+        dyn_panel_open_roots, global_cache, store_clip_pitch_cache, trim_and_resample_midi,
+        CachedClipPitch, UNBOUNDED_ENTRY_CAPACITY,
     };
     use crate::state::{Clip, TimelineState};
 
@@ -2109,6 +2126,117 @@ mod tests {
             let expected = if i < 100 { 2.0 } else { 0.0 };
             assert!((v - expected).abs() < 1e-6, "帧 {i}");
         }
+    }
+
+    /// **emit 的曲线必须与 `pv.orig` 的逐帧点映射一致。**
+    ///
+    /// 回归护栏：`trim_and_resample_midi` 在 rate≈1 时曾按 `round(se/fp)` 切右端，
+    /// 得到 `target_frames ± 1` 帧的切片，随后 `resample_curve_linear` 把**整条
+    /// 曲线**线性缩放一帧 —— 曲线相对 `pv.orig`（`assemble_nonloop_pitch_from_window`
+    /// 的逐帧点映射）沿 Clip 逐渐漂移，越到末尾偏得越多。放大到 0.5 s 视口时是
+    /// 肉眼可见的 8~10 px 错位，用户只会怀疑自己操作错了。
+    ///
+    /// 覆盖 0 ~ 4.9 ms 的亚帧相位 × 多种非整帧长度：约有四分之一的组合在修复前
+    /// 会差一帧，因此这组用例不是"看起来严格"，而是真的能抓住回归。
+    #[test]
+    fn rate_one_slice_matches_the_point_mapping_of_pv_orig() {
+        let fp = 5.0f64;
+        // 斜坡曲线：任何平移 / 缩放都会改变取值，逐帧相等才有意义。
+        let full: Vec<f32> = (0..4000).map(|i| 40.0 + (i as f32) * 0.01).collect();
+        let lengths_ms = [102.0f64, 250.0, 500.0, 1007.0, 1234.5, 2000.0];
+        let mut checked = 0usize;
+        for phase_idx in 0..50 {
+            let phase_ms = phase_idx as f64 / 10.0;
+            let start_sec = 1.0 + phase_ms / 1000.0;
+            for len_ms in lengths_ms {
+                let len_sec = len_ms / 1000.0;
+                let target_frames = ((len_sec * 1000.0) / fp).round().max(1.0) as usize;
+                let emitted = trim_and_resample_midi(
+                    &full,
+                    fp,
+                    start_sec,
+                    start_sec + len_sec,
+                    1.0,
+                    len_sec,
+                    false,
+                    None,
+                    false,
+                );
+                assert_eq!(
+                    emitted.len(),
+                    target_frames,
+                    "phase={phase_ms}ms len={len_ms}ms: 输出帧数必须等于时间线帧数"
+                );
+                let composite = assemble_nonloop_pitch_from_window(
+                    &full,
+                    fp,
+                    start_sec,
+                    start_sec + len_sec,
+                    1.0,
+                    target_frames,
+                );
+                assert_eq!(
+                    emitted, composite,
+                    "phase={phase_ms}ms len={len_ms}ms: emit 与 pv.orig 的点映射不一致"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 300);
+    }
+
+    /// **根不变量：Clip 源音高曲线与 `pv.orig` 在同一条 Clip 上逐帧相等。**
+    ///
+    /// 上面那条钉的是共享原语，这条钉的是真正的两个消费者：
+    /// - `emit_clip_pitch_data_for_clip` → `trim_and_resample_midi`；
+    /// - `assemble_pitch_orig_from_cache` → `assemble_nonloop_pitch_from_window`。
+    ///
+    /// 参数编辑器里两条线画在同一个工程帧网格上，所以"逐帧相等"就等于"逐像素重合"。
+    #[test]
+    fn emitted_clip_curve_matches_the_composite_baseline() {
+        use crate::pitch_analysis::schedule::assemble_pitch_orig_from_cache;
+
+        let fp = 5.0f64;
+        let full: Vec<f32> = (0..4000).map(|i| 40.0 + (i as f32) * 0.01).collect();
+
+        let mut tl = crate::state::TimelineState::default();
+        tl.project_sec = 10.0;
+        let root = tl.add_track(Some("root".to_string()), None, None);
+
+        // 1.0005 s（亚帧相位 0.5 ms）+ 0.102 s（非整帧长度）——修复前这一组会
+        // 切出 21 帧再压回 20 帧，整条曲线被缩放 1 帧。
+        let mut clip: crate::state::Clip = serde_json::from_value(serde_json::json!({
+            "id": "clip-emit-vs-composite",
+            "track_id": root,
+            "name": "clip-emit-vs-composite",
+            "start_sec": 1.0005,
+            "length_sec": 0.102,
+            "source_path": "D:/virtual/emit-vs-composite.wav",
+        }))
+        .expect("clip fixture");
+        clip.source_start_sec = 1.0;
+        clip.source_end_sec = 3.0;
+        tl.clips.push(clip.clone());
+
+        let key = build_clip_pitch_key(&tl, &clip, &root, fp)
+            .expect("pitch key")
+            .key;
+        store_clip_pitch_cache(CachedClipPitch {
+            key,
+            midi: full.clone(),
+            level: Vec::new(),
+        });
+
+        let (composite, _, _) = assemble_pitch_orig_from_cache(&tl, &root).expect("composite");
+        let emitted = trim_and_resample_midi(&full, fp, 1.0, 3.0, 1.0, 0.102, false, None, false);
+        let start_frame = ((1.0005f64 * 1000.0) / fp).round() as usize;
+        assert_eq!(start_frame, 200);
+        assert_eq!(emitted.len(), 20);
+        assert_eq!(
+            &composite[start_frame..start_frame + emitted.len()],
+            &emitted[..],
+            "Clip 源音高曲线与 pv.orig 在同一 Clip 上必须逐帧相等"
+        );
     }
 
     /// 动态（DYN）的电平分析**不得**依赖 `compose_enabled`。

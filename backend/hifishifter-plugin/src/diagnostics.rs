@@ -17,7 +17,8 @@
 //! 覆盖顺序：`HIFISHIFTER_PLUGIN_LOG`（精确落点，一个**文件**路径）>
 //! `HIFISHIFTER_LOG_DIR`（与 App 同名同义的**目录**）> 平台默认。
 
-use hifishifter_kernel::logfile::RotatingLog;
+use hifishifter_kernel::log_policy::{self, LogPolicy};
+use hifishifter_kernel::logfile::{self, RotatingLog};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Once, OnceLock};
 
@@ -108,18 +109,19 @@ impl log::Log for FileLogger {
     }
 
     fn log(&self, record: &log::Record<'_>) {
-        if !self.enabled(record.metadata()) {
+        if !self.enabled(record.metadata()) || !log_policy::file_enabled() {
+            // 「无」档：不缓冲、不建文件、不转发 HOST_SINK。
             return;
         }
-        let line = hifishifter_kernel::logfile::format_record(
-            record.level(),
-            record.target(),
-            &record.args().to_string(),
-        );
+        let policy = log_policy::policy();
+        let message = logfile::log_field(&record.args().to_string(), policy.detail_cap_chars);
+        let line = logfile::format_record(record.level(), record.target(), &message);
         // 【先交宿主，再写文件】宿主面板是实时的，文件是事后取证的；两路都无条件走，
         // 互不阻塞对方的判断。
-        if let Some(sink) = HOST_SINK.get() {
-            sink(record.level(), &line);
+        if policy.host_sink {
+            if let Some(sink) = HOST_SINK.get() {
+                sink(record.level(), &line);
+            }
         }
         let mut guard = WRITER.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_none() {
@@ -140,7 +142,7 @@ impl log::Log for FileLogger {
             // 整段缓冲会随进程一起消失。用 `starts_with` 而不是 `contains`：CLAP 的
             // `[clap][gui] ...` 只是普通视图日志，不该绕过缓冲、在 unknown 文件里
             // 留下半段会话。
-            let urgent = record.args().to_string().starts_with("[gui] ");
+            let urgent = message.starts_with("[gui] ");
             if !timed_out && !explicit && !urgent {
                 let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
                 if pending.len() < MAX_PENDING_LINES {
@@ -150,7 +152,7 @@ impl log::Log for FileLogger {
                     return;
                 }
             }
-            match open_writer() {
+            match open_writer_with_policy(&policy) {
                 Ok(mut writer) => {
                     drain_pending_into(&mut writer);
                     *guard = Some(writer);
@@ -162,11 +164,15 @@ impl log::Log for FileLogger {
             }
         }
         if let Some(writer) = guard.as_mut() {
-            let _ = writer.write_line(&line);
+            if writer.write_line(&line).is_err() {
+                log_policy::mark_unhealthy("plugin log write failed");
+            }
         }
     }
 
-    fn flush(&self) {}
+    fn flush(&self) {
+        flush_writer();
+    }
 }
 
 /// 精确文件落点（`HIFISHIFTER_PLUGIN_LOG`，探针用）。设了它就完全固定，
@@ -216,15 +222,49 @@ fn log_path() -> PathBuf {
     dir.join(file)
 }
 
-/// 按当前路径开一个写入器（会话头由 `RotatingLog::open` 写）。
-fn open_writer() -> Result<RotatingLog, String> {
+/// 按当前路径与策略开一个写入器（会话头由 `RotatingLog::open_with_policy` 写）。
+fn open_writer_with_policy(policy: &LogPolicy) -> Result<RotatingLog, String> {
+    if !policy.file_enabled {
+        return Err("log verbosity is off".into());
+    }
     let path = log_path();
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let writer = RotatingLog::open(path, &product(), crate::VERSION).map_err(|e| e.to_string())?;
+    let writer = RotatingLog::open_with_policy(
+        path,
+        &product(),
+        crate::VERSION,
+        policy.max_file_bytes,
+        policy.max_files,
+        policy.max_single_line_chars,
+    )
+    .map_err(|e| e.to_string())?;
     *LOG_PATH.lock().unwrap_or_else(|e| e.into_inner()) = Some(writer.path().to_path_buf());
     Ok(writer)
+}
+
+/// 强制落盘（诊断包导出 / 会话尾 / panic / 帮助菜单读取之前）。
+pub fn flush_writer_for_diagnostics() {
+    flush_writer();
+}
+
+fn flush_writer() {
+    let mut guard = WRITER.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(writer) = guard.as_mut() {
+        let _ = writer.flush_now();
+    }
+}
+
+/// 写会话尾（`entry_deinit` / `ExitDll` / panic hook）。
+pub fn write_session_footer(reason: &str) {
+    if !log_policy::file_enabled() {
+        return;
+    }
+    let mut guard = WRITER.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(writer) = guard.as_mut() {
+        let _ = writer.write_session_footer(reason);
+    }
 }
 
 /// 把攒下的日志行补写进刚打开的写入器。
@@ -245,9 +285,13 @@ fn drain_pending_into(writer: &mut RotatingLog) {
 /// 会把整段缓冲**随退出一起丢掉** —— 而那段恰恰是最需要的东西。卸载入口调一次，
 /// 成本是一行 `write`。
 pub fn flush_pending() {
+    if !log_policy::file_enabled() {
+        return;
+    }
+    flush_writer();
     let mut guard = WRITER.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
-        let Ok(mut writer) = open_writer() else {
+        let Ok(mut writer) = open_writer_with_policy(&log_policy::policy()) else {
             return;
         };
         drain_pending_into(&mut writer);
@@ -255,7 +299,7 @@ pub fn flush_pending() {
         return;
     }
     if let Some(writer) = guard.as_mut() {
-        let _ = writer.write_line(""); // 触发一次落盘（write_line 内部按行写）
+        let _ = writer.flush_now();
     }
 }
 
@@ -270,7 +314,7 @@ pub fn flush_pending() {
 /// **只有会话头、没有内容**的空会话 —— 用户看到的就是"日志被反复截断"。同一个
 /// 名字重复到达时直接返回；`unknown` 不落名，等真名来。
 pub fn note_host_application(name: &str) {
-    if name.is_empty() || name.eq_ignore_ascii_case("unknown") {
+    if name.is_empty() || name.eq_ignore_ascii_case("unknown") || !log_policy::file_enabled() {
         return;
     }
     // 【为什么先取 WRITER 再比对】宿主名与写入器都是同一份会话状态：只有
@@ -284,7 +328,7 @@ pub fn note_host_application(name: &str) {
         }
         *current = Some(name.to_owned());
     }
-    match open_writer() {
+    match open_writer_with_policy(&log_policy::policy()) {
         Ok(mut writer) => {
             drain_pending_into(&mut writer);
             *guard = Some(writer);
@@ -321,48 +365,30 @@ pub fn log_file() -> PathBuf {
     log_path()
 }
 
-/// 日志级别：release 默认 `Warn`，debug 默认 `Info`，`HIFISHIFTER_LOG` 可覆盖。
+/// 安装一次进程级日志器；宿主已有日志器时**明确回报**，不再静默丢全部日志。
 ///
-/// 【为什么 release 不能默认 Info】插件跑在宿主进程里，日志落在用户磁盘上。此前
-/// 无条件设成 `Info`，而宿主回调的节奏（每次重算、每次清单刷新、每次几何查询）都会
-/// 打点 —— 实测一次 40 分钟的会话写满 3 个 8 MiB 轮转件。那些点对开发者有用、对
-/// 用户只是磁盘占用与 I/O。需要时用 `HIFISHIFTER_LOG=info`（或 `debug`/`trace`）
-/// 打开，排查现场的第一步就是它。
-///
-/// 取值与 `log` crate 的过滤名一致：`off`/`error`/`warn`/`info`/`debug`/`trace`。
-fn log_level_from_env() -> log::LevelFilter {
-    if let Ok(value) = std::env::var("HIFISHIFTER_LOG") {
-        if let Ok(level) = value
-            .trim()
-            .to_ascii_lowercase()
-            .parse::<log::LevelFilter>()
-        {
-            return level;
-        }
-    }
-    if cfg!(debug_assertions) {
-        log::LevelFilter::Info
-    } else {
-        log::LevelFilter::Warn
-    }
-}
-
-/// 安装一次进程级日志器；宿主已有日志器时保留宿主的实现。
+/// 【为什么策略在 set_logger 之前读】文件日志可能根本装不上（宿主已装全局
+/// logger），但四个档位、会话头与「无」档的零产出语义仍必须由同一份策略决定。
 pub fn init() {
     INIT.call_once(|| {
-        if log::set_logger(&LOGGER).is_ok() {
-            log::set_max_level(log_level_from_env());
+        let policy = log_policy::load_initial(&[]);
+        if log::set_logger(&LOGGER).is_err() {
+            // G5：宿主已装 logger 时，文件日志与级别控制全部失效且过去没有任何提示。
+            log_policy::mark_host_logger_owned();
+            eprintln!(
+                "hifishifter: host already installed a global logger; file logging unavailable (HIFISHIFTER_PLUGIN_LOG can pin a fallback path)"
+            );
         }
         let _ = STARTED.set(std::time::Instant::now());
-        // 目录不存在就创建：用户第一次打开 Help 菜单之前，日志文件必须已经可写。
-        let dir = log_path();
-        if let Some(dir) = dir.parent() {
-            let _ = std::fs::create_dir_all(dir);
+        // 「无」档不创建目录；其余档位保持既有"第一次打开 Help 菜单之前可写"的语义。
+        if policy.file_enabled {
+            let dir = log_path();
+            if let Some(dir) = dir.parent() {
+                if let Err(error) = std::fs::create_dir_all(dir) {
+                    log_policy::mark_unhealthy(&format!("create plugin log dir failed: {error}"));
+                }
+            }
         }
-        // 【为什么这里不直接开文件】宿主名（`IHostApplication::getName`）要到
-        // `setActive` 之后才有，而按宿主分文件要求文件名里带它。此处只把 logger 装上：
-        // 早期日志行先进内存缓冲，`note_host_application` 到达时再一次性落到
-        // `plugin-<format>-<host>.log`（见该函数与 `FileLogger::log` 的说明）。
         install_panic_hook();
     });
 }
@@ -387,22 +413,29 @@ fn install_panic_hook() {
         };
         // 走 log 门面会经过宿主可能已装配的后端；同时直接写一行到日志文件，
         // 因为 panic 之后宿主未必还有机会处理日志。
-        let line = hifishifter_kernel::logfile::format_record(
+        let text = format!("PANIC: thread '{name}' panicked at {location}: {payload}");
+        let line = logfile::format_record(
             log::Level::Error,
             "hifishifter_plugin::panic",
-            &format!("PANIC: thread '{name}' panicked at {location}: {payload}"),
+            &logfile::log_field(&text, 4000),
         );
-        if let Some(sink) = HOST_SINK.get() {
-            sink(log::Level::Error, &line);
+        if log_policy::policy().host_sink {
+            if let Some(sink) = HOST_SINK.get() {
+                sink(log::Level::Error, &line);
+            }
         }
         {
             // 【为什么用 `try_lock` 而不是 `lock`】本 hook 会在**任意线程**的 panic 上跑，
             // 包括"panic 正发生在 `FileLogger::log` 里、`WRITER` 已被持有"这种情况 ——
             // 那时 `lock` 会自锁死。拿不到就放弃写这一行（`previous(info)` 仍会执行，
             // 宿主/标准错误仍能看到 panic），绝不让日志把 panic 变成死锁。
-            if let Ok(mut guard) = WRITER.try_lock() {
-                if let Some(writer) = guard.as_mut() {
-                    let _ = writer.write_line(&line);
+            if log_policy::file_enabled() {
+                if let Ok(mut guard) = WRITER.try_lock() {
+                    if let Some(writer) = guard.as_mut() {
+                        let _ = writer.write_line(&line);
+                        let _ = writer.flush_now();
+                        let _ = writer.write_session_footer("panic");
+                    }
                 }
             }
         }
@@ -413,6 +446,30 @@ fn install_panic_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 「无」档必须同时关掉文件、宿主转发与内存缓冲。
+    #[test]
+    fn off_does_not_enable_any_output_channel() {
+        let policy = log_policy::LogVerbosity::Off.policy();
+        assert!(!policy.file_enabled);
+        assert!(!policy.host_sink);
+        assert!(!policy.probes);
+        assert!(open_writer_with_policy(&policy).is_err());
+    }
+
+    /// 宿主抢先装了全局 logger 时必须能被 UI 明确回报，而不是静默丢日志。
+    #[test]
+    fn host_logger_owned_is_reported() {
+        log_policy::reset_for_tests();
+        assert!(!log_policy::host_logger_owned());
+        log_policy::mark_host_logger_owned();
+        assert!(log_policy::host_logger_owned());
+        assert!(!log_policy::logging_healthy());
+        assert!(log_policy::last_error()
+            .unwrap_or_default()
+            .contains("global logger"));
+        log_policy::reset_for_tests();
+    }
 
     /// 文件名必须同时带格式与宿主 —— 这是"日志不再混在一起"的契约。
     #[test]

@@ -19,11 +19,11 @@ import { computeAutoCrossfadeFromPayload } from "../../../components/layout/time
 import { computeClipNormalizationGain } from "../clipNormalization";
 import { trackNameForMedia } from "../mediaTrackName";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
-import { appStatusProgressBus } from "../../../utils/appStatusProgressBus";
 import { isPluginMode } from "../../../services/hostCapabilities";
 import { getPluginHost } from "../../../services/pluginHost";
 import { reportFrontendError } from "../../../services/frontendErrorLog";
 import type { TimelineResult } from "../../../types/api";
+import { setFolderImportProgress } from "../interactionSlice";
 
 /**
  * finally 里收尾 undo 组：主结果（成功返回或 rejectWithValue）已经定了，
@@ -961,15 +961,18 @@ export const importFolderAtPosition = createAsyncThunk(
 
         dispatch(checkpointHistory());
         // 进度：逐个文件导入，含上千个文件的目录会有肉眼可见的等待。低于阈值时不显示，
-        // 免得为一次 200ms 的操作闪一下状态栏。走总线而不是 Redux —— 见其文件头。
+        // 免得为一次 200ms 的操作闪一下状态栏。状态放在 interaction 切片，
+        // 独立窗口的进度才能经 detachBridge 复制到主窗口状态栏。
         const totalFiles = specs.reduce((count, spec) => count + spec.files.length, 0);
         let processed = 0;
         const reportProgress = (active: boolean) =>
-            appStatusProgressBus.setFolderImport({
-                active: active && totalFiles >= FOLDER_IMPORT_PROGRESS_THRESHOLD,
-                done: processed,
-                total: totalFiles,
-            });
+            dispatch(
+                setFolderImportProgress({
+                    active: active && totalFiles >= FOLDER_IMPORT_PROGRESS_THRESHOLD,
+                    done: processed,
+                    total: totalFiles,
+                }),
+            );
         reportProgress(true);
         // 取消闸门：用户在本循环进行中撤销 / 跳转历史 / 打开别的工程时，下一轮就退出。
         const importGen = currentImportGeneration();

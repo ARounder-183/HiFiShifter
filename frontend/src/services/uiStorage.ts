@@ -13,9 +13,9 @@
  * `localStorage`，之后所有同步读取照旧；写入则同时落 `localStorage`（同步缓存）
  * 与后端（耐久 + 共享）。
  *
- * 【为什么只同步列在白名单里的键】`localStorage` 里还有一堆调试开关
- * （`hifishifter.debugDnd` / `frameProfiler` / `perfProject`…）。它们属于本地、
- * 本次调试，不该跟着用户配置走。
+ * 【为什么只同步列在白名单里的键】`localStorage` 里还有一堆本地诊断/性能键，
+ * 它们属于本次调试，不该跟着用户配置走；日志诊断已改由「帮助 → 日志详细程度」
+ * 的档位驱动，不再依赖任何 localStorage 开关。
  *
  * 【为什么本模块不 import `hostCapabilities`】它间接依赖 i18n 提供者（React 组件
  * 链），而本模块会被 `keybindingStorage` 这类**叶子模块**引用 —— 那些模块的 node
@@ -24,6 +24,7 @@
  */
 
 import { isPluginMode } from "./hostDetect";
+import { frontendLog } from "./frontendLog";
 
 /** 前端偏好的键前缀；与后端 `frontendPrefs` 的键名约定一致。 */
 const PREFIX = "hifishifter.";
@@ -220,7 +221,7 @@ export async function flushUiStorage(): Promise<void> {
         if (Object.keys(patch).length > 0) await active.put(patch);
         if (keys.length > 0) await active.remove(keys);
     } catch (error) {
-        console.warn("Persisting UI preferences failed", error);
+        frontendLog("warn", "Persisting UI preferences failed", error);
     }
 }
 
@@ -276,7 +277,7 @@ export async function hydrateUiStorage(): Promise<void> {
     try {
         remote = (await active.dump()) ?? {};
     } catch (error) {
-        console.warn("Loading UI preferences failed; using the local cache", error);
+        frontendLog("warn", "Loading UI preferences failed; using the local cache", error);
         return;
     }
 
@@ -295,7 +296,7 @@ export async function hydrateUiStorage(): Promise<void> {
         try {
             await active.put(migration);
         } catch (error) {
-            console.warn("Migrating local UI preferences failed", error);
+            frontendLog("warn", "Migrating local UI preferences failed", error);
         }
     }
 }

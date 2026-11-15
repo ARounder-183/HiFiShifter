@@ -9,6 +9,7 @@
  * 5. 后端不可用时静默降级，不抛错 —— 界面起不来比设置丢更糟。
  */
 // @vitest-environment jsdom
+import * as frontendLog from "./frontendLog";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
     PERSISTED_UI_KEYS,
@@ -150,7 +151,7 @@ describe("后端同步", () => {
     });
 
     test("后端失败只告警，不向调用方抛出", async () => {
-        const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+        const warn = vi.spyOn(frontendLog, "frontendLog").mockImplementation(() => undefined);
         setUiStorageTransportForTest({
             async dump() {
                 return {};
@@ -165,7 +166,7 @@ describe("后端同步", () => {
 
         writeUiValue(LOCALE_KEY, "ja-JP");
         await expect(flushUiStorage()).resolves.toBeUndefined();
-        expect(warn).toHaveBeenCalled();
+        expect(warn).toHaveBeenCalledWith("warn", expect.any(String), expect.anything());
         warn.mockRestore();
     });
 });
@@ -239,10 +240,10 @@ describe("白名单", () => {
         }
     });
 
-    test("调试开关不在白名单里", () => {
+    test("本地诊断开关不在白名单里（日志诊断改由帮助菜单档位驱动）", () => {
         for (const key of [
-            "hifishifter.debugDnd",
-            "hifishifter.debugPianoRoll",
+            "hifishifter.frameProfiler",
+            "hifishifter.perfProject",
             "hifishifter.frameProfiler",
             "hifishifter.perfProject",
         ]) {

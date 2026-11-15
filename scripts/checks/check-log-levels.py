@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""限流日志只允许 Warn / Error。
+"""限流日志允许 Warn / Error / Debug，禁止 Info。
 
-【为什么要这条门禁】限流器（`hifishifter_kernel::log_limiter`）解决的是「同一条故障
-在一秒钟里被打印五百次」。它按 10 秒窗口抑制，并把被压掉的条数在下一条前汇总 ——
-信息不丢，只丢重复。
+【为什么要放宽到 Debug】用户现在可以在「帮助 → 日志详细程度」里选四档
+（无 / 低 / 中 / 高，默认低）。逐回调、逐块的跟踪点按语义归 Debug，
+只在「高」档输出；但它们仍必须限流，否则一次排障会话就能把 8 MiB × 5
+的轮转额度刷满。过去"限流只允许 Warn/Error"的规则建立在
+"默认级别是 Warn"之上 —— 那句话已经不成立，四档由用户选择。
 
-但把它用在 Info / Debug 上会制造一个**静默的黑洞**：默认日志级别是 Warn，于是
-`emit_limited_key(Info, …)` 一条都不会输出，而代码看起来仍然「有诊断」。这个坑
-真实发生过：命令到达日志、前端错误上报、视图回调的进出打点，三处都用 Info + 限流，
-于是一整轮排查都建立在「这些日志不存在」之上，而结论是反的。
+【为什么仍然禁止 Info + 限流】Info 是会话叙事（打开工程、开始渲染、档位
+变更），一会话最多几十条，套上限流只会在窗口内静默吞掉关键面包屑。
 
 规则：
-  * 故障信号 → `Warn` / `Error` + 限流（永不消失，只是不重复）；
-  * 正常路径的跟踪信息 → 直接 `log::info!` / `log::debug!`，由日志级别控制，
-    不限流（不限流就不会静默消失）。
+  * 故障信号 → Warn / Error + 限流；
+  * 高频跟踪 → Debug + 限流（「高」档才输出）；
+  * 会话叙事 → 直接 log::info!，不限流。
 
 退出码：0 = 合规，1 = 发现违规。
 """
@@ -24,18 +24,15 @@ import pathlib
 import re
 import sys
 
-# Windows 的 stdout 跟随 ANSI 代码页（英文系统是 cp1252、中文系统是 GBK），打印中文会
-# UnicodeEncodeError 打死进程 —— 真正的结论一条都进不了日志，红的是编码而不是规则。
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 ROOT = pathlib.Path(__file__).resolve().parents[2] / 'backend'
 SKIP_DIRS = {'target', 'third_party', 'node_modules'}
 
-# `emit_limited(` / `emit_limited_key(` 之后 260 个字符内出现的 `log::Level::X`。
 CALL = re.compile(r'emit_limited(?:_key)?\s*\(')
 LEVEL = re.compile(r'log::Level::(\w+)')
-ALLOWED = {'Warn', 'Error'}
+ALLOWED = {'Warn', 'Error', 'Debug'}
 
 
 def sources() -> list[pathlib.Path]:
@@ -61,12 +58,11 @@ def main() -> int:
             violations.append(f'{relative}:{line}: throttled log at Level::{level.group(1)}')
 
     if violations:
-        print('限流日志只允许 Warn/Error（见本脚本头部）：')
+        print('限流日志只允许 Warn / Error / Debug（见本脚本头部）：')
         for violation in violations:
             print('  ' + violation)
         print()
-        print('Info/Debug 的跟踪信息请直接用 log::info! / log::debug! —— 它们由日志级别')
-        print('控制，不需要限流；套上限流只会在默认级别下变成静默黑洞。')
+        print('Info 是会话叙事，请直接用 log::info! 且不要限流。')
         return 1
 
     print(f'log levels ok ({len(sources())} files scanned)')

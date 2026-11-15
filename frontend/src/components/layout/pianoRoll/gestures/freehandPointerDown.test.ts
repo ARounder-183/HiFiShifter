@@ -275,7 +275,7 @@ test("边缘滚屏驱动被跟踪，松手后停止", () => {
     press(h.deps);
 
     move(150, 110);
-    expect(h.edgeScroll.track).toHaveBeenCalledWith(150);
+    expect(h.edgeScroll.track).toHaveBeenCalledWith(150, 110);
 
     up();
     expect(h.edgeScroll.stop).toHaveBeenCalledTimes(1);

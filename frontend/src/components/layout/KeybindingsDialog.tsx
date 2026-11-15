@@ -114,7 +114,7 @@ interface KeybindingsDialogProps {
 
 export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOpenChange }) => {
     const dispatch = useAppDispatch();
-    const { tf, plural } = useI18n();
+    const { tf, plural, shortcut } = useI18n();
     const keybindings = useAppSelector(selectMergedKeybindings);
     const overrides = useAppSelector((s) => s.keybindings.overrides);
 
@@ -364,8 +364,8 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
      * 字面匹配，功能不中断。
      */
     const translitTexts = useMemo(
-        () => ALL_ACTION_IDS.map((id) => tf(ACTION_META[id].labelKey)),
-        [tf],
+        () => ALL_ACTION_IDS.map((id) => shortcut(ACTION_META[id].labelKey)),
+        [shortcut],
     );
     const translitIndex = useTranslitIndex(translitTexts, searchSettings);
 
@@ -537,7 +537,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
             return (
                 <KeybindingsActionRow
                     key={actionId}
-                    label={tf(meta.labelKey)}
+                    label={shortcut(meta.labelKey)}
                     meta={meta}
                     bindings={currentBindings}
                     defaultBindings={defaultBindings}
@@ -580,7 +580,16 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                 />
             );
         },
-        [keybindings, recording, dispatch, tf, noneLabel, pressKeyLabel, pressModifierLabel],
+        [
+            keybindings,
+            recording,
+            dispatch,
+            tf,
+            shortcut,
+            noneLabel,
+            pressKeyLabel,
+            pressModifierLabel,
+        ],
     );
 
     const hasQuery = query.trim().length > 0;
@@ -769,10 +778,23 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                             >
                                 {tf(GROUP_LABEL_KEYS[group])}：
                                 <strong>
-                                    {ids.map((id) => tf(ACTION_META[id].labelKey)).join("、")}
+                                    {ids.map((id) => shortcut(ACTION_META[id].labelKey)).join("、")}
                                 </strong>
                             </span>
                         ))}
+                        {conflict.actionId.startsWith("modifier.paramBlockCreate") &&
+                        conflict.conflictWith.some(
+                            (id) =>
+                                id === "modifier.paramMultiSelect" ||
+                                id === "modifier.paramBlockCreate",
+                        ) ? (
+                            <span
+                                className="hs-type-body"
+                                style={{ color: "var(--qt-danger-text)" }}
+                            >
+                                {tf("kb_conflict_param_block_create_hint")}
+                            </span>
+                        ) : null}
                     </Flex>
                     <Button size="1" color="red" variant="soft" onClick={handleConfirmConflict}>
                         {tf("kb_conflict_override")}

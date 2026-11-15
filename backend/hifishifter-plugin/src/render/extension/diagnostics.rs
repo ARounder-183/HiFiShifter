@@ -14,7 +14,7 @@ impl ExtensionOwner {
             .store(value.max(0), Ordering::Release);
     }
 
-    /// 记一次**输出写满审计**（`HIFISHIFTER_BUFFER_AUDIT=1` 时由 vst3 层调用）。
+    /// 记一次**输出写满审计**（「高」档 时由 vst3 层调用）。
     ///
     /// 【它回答什么】"这一块有没有哪一帧根本没被写过"。立体声下每条分支都写满整块，
     /// 所以这个数应当恒为 0；非零只有三种来源：>2 声道的总线（`pass_through` 只写前

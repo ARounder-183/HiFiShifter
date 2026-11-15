@@ -111,7 +111,7 @@ export function usePianoRollViewport({
     /** 标尺交互用的实时滚动位置；与内核绘制同源，stable 引用避免 TimeRuler 重渲。 */
     const getScrollLeftLive = useCallback(
         () => hostRef.current?.getViewport().scrollLeft ?? scrollLeftRef.current,
-        [],
+        [hostRef, scrollLeftRef],
     );
     const pxPerBeatRef = useRef(pxPerBeat);
     const pxPerSecRef = useRef(pxPerSec);
@@ -323,7 +323,7 @@ export function usePianoRollViewport({
         return subscribeCapture(() => {
             hostRef.current?.invalidatePlayhead();
         });
-    }, []);
+    }, [hostRef]);
 
     useEffect(() => {
         const timer = setTimeout(() => {

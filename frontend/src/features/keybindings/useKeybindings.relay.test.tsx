@@ -113,7 +113,7 @@ test("IME Backquote triggers once, repeats and editable targets keep normal beha
     await mount();
     press({ key: "Process", code: "Backquote", isComposing: true, keyCode: 229 });
     press({ key: "Process", code: "Backquote", isComposing: true, keyCode: 229, repeat: true });
-    expect(fired.map((item) => item.action)).toEqual(["mode.toggleBlockEdit"]);
+    expect(fired.map((item) => item.action)).toEqual(["mode.toggleBlockSelection"]);
     press({ key: "Process", code: "Backquote", isComposing: true, shiftKey: true });
     expect(fired).toHaveLength(2);
     for (const tag of ["input", "textarea", "div"]) {

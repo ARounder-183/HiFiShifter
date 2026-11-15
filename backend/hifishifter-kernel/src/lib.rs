@@ -72,10 +72,12 @@ pub mod engine_command;
 pub mod events;
 pub mod host;
 pub mod log_limiter;
+pub mod log_policy;
+pub mod log_settings;
 pub mod logfile;
 pub mod model_paths;
 pub mod model_store;
-pub mod param_line_blocks;
+pub mod param_blocks;
 pub mod rt_retirement;
 pub mod ui_settings_apply;
 pub mod util;
@@ -84,8 +86,8 @@ pub mod util;
 // `crate::nsf_hifigan_model_dir()` 这类调用，挂到根上就不必改那些调用点。
 pub use model_paths::{fcpe_onnx_path, game_model_dir, hnsep_model_dir, nsf_hifigan_model_dir};
 
-/// 热路径调试日志：经 `log::debug!` 走统一日志管线，release 默认 Info 级别下
-/// 不产生格式化开销；需要诊断时用 `HIFISHIFTER_LOG=debug` 临时打开。
+/// 热路径调试日志：经 `log::debug!` 走统一日志管线；只有用户选择「高」档时
+/// 才产生格式化开销（默认「低」档不会输出）。
 ///
 /// 【为什么内核也要有这份】这些宏原先定义在 app 的 crate 根，而调用点遍布内核模块
 /// （渲染器、音高分析、缓存）。宏是文本作用域的，模块搬走后必须跟着搬 —— 或者像
@@ -166,9 +168,10 @@ pub mod formant_cache;
 pub mod formant_morph;
 pub mod glottal_rd;
 pub mod growl;
+pub mod hnsep_chunk;
 pub mod hnsep_dsp;
 #[cfg(feature = "onnx")]
-mod hnsep_resources;
+pub mod hnsep_resources;
 pub mod host_pcm_cache;
 pub mod rd_tension;
 pub mod world_vocoder;
@@ -247,9 +250,11 @@ pub mod clip_rendering_state;
 pub mod config;
 pub mod folder_scan;
 pub mod media_paths;
+pub mod note_blocks;
 pub mod notebook_assets;
 pub mod project;
 pub mod temp_manager;
+pub mod unicode_path;
 
 // ── 可选的原生声码器（闭源、仅 Windows）────────────────────────────────────
 #[cfg(all(feature = "vslib", target_os = "windows"))]

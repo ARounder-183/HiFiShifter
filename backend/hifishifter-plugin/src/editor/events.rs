@@ -19,6 +19,11 @@ fn should_route(event: &str, text: &str, namespace: &str, session_count: usize) 
             | "pitch_orig_analysis_progress"
             | "dyn_orig_updated"
     );
+    // 日志策略是进程级事实，不属于任何文档命名空间：改档必须送达**每个**活着的
+    // 编辑器实例，否则另一个窗口的 `frontendLog` 会继续按旧档回传（G7/G9）。
+    if event == "hs:log-settings-changed" {
+        return true;
+    }
     (is_analysis_event && session_count == 1) || text.contains(namespace)
 }
 
@@ -85,6 +90,16 @@ mod tests {
     }
 
     /// 普通事件仍按命名空间分流；多会话时不能靠"唯一会话"兜底跨工程广播。
+    #[test]
+    fn a_log_policy_change_reaches_every_session() {
+        assert!(should_route(
+            "hs:log-settings-changed",
+            r#"{"verbosity":"off"}"#,
+            "hfs-ui-1234-1-",
+            3
+        ));
+    }
+
     #[test]
     fn ordinary_events_and_multi_session_stay_scoped() {
         let payload = r#"{"rootTrackId":"capture-track"}"#;

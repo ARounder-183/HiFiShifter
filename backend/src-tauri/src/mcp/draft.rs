@@ -680,19 +680,17 @@ pub(super) fn apply(
                 let root = tl
                     .resolve_root_track_id(&id)
                     .ok_or_else(|| invalid("invalid root"))?;
-                let next: hifishifter_kernel::param_line_blocks::ParamLineBlockSet =
+                let requested: hifishifter_kernel::param_blocks::ParamBlockEditSet =
                     serde_json::from_value(layout.clone()).map_err(|e| invalid(e.to_string()))?;
-                next.validate().map_err(invalid)?;
-                if (next.frame_period_ms - tl.frame_period_ms()).abs() > 1e-9 {
-                    return Err(invalid(
-                        "parameter block frame period does not match project",
-                    ));
-                }
+                requested.validate().map_err(invalid)?;
                 let entry = tl.params_by_root_track.entry(root).or_default();
-                let revision = entry.param_line_blocks.as_ref().map_or(0, |b| b.revision);
-                let mut next = next;
-                next.revision = revision.saturating_add(1);
-                entry.param_line_blocks = Some(next);
+                if requested.revision != entry.param_block_edits.revision {
+                    return Err(invalid("parameter block edit revision changed"));
+                }
+                let mut next = requested;
+                next.revision = entry.param_block_edits.revision.saturating_add(1);
+                entry.param_block_edits = next;
+                entry.param_block_view = None;
             }
         }
     }

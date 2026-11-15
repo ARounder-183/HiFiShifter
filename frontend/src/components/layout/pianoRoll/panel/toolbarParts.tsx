@@ -99,15 +99,6 @@ export const ToolbarSlot: React.FC<{
 export type ParamToolbarPillProps = {
     /** 参数按钮上的简短标签（如 PIT / 共振峰） */
     label: string;
-    /**
-     * 标签段的图形形态。
-     *
-     * 参数药丸用文字；块工具用横向双栏图标（与旧块工具按钮同一图形）。
-     * 两者仍共用同一套“眼睛 / 主体 / 下拉”结构与命中语义。
-     */
-    labelKind?: "text" | "block-icon";
-    /** `block-icon` 的完整名称：图形本身没有可读文字，供无障碍树识别。 */
-    labelAriaLabel?: string;
     /** 完整参数名（ToolTip） */
     labelTooltip?: string;
     /** 是否为主参数（激活）：整个药丸整体高亮（统一用全局强调色） */
@@ -137,9 +128,10 @@ export type ParamToolbarPillProps = {
 };
 
 /**
- * 参数编辑器工具栏的“参数分组药丸”：眼睛 → 参数名 → 子参数下拉。
- * 各片段共享一块连续背景；激活参数统一铺全局强调色（--accent-9），
- * 片段间用细分隔线区分；悬停时只高亮当前片段，提示其独立可点击。
+ * 参数编辑器工具栏的**参数分组药丸**：眼睛 → 参数名 → 子参数下拉。
+ * 它只服务参数组，不再服务任何工具；选择族与绘制族由独立的 24px
+ * `ToolFamilyButton` 表达。各片段共享一块连续背景；激活参数统一铺全局
+ * 强调色（--accent-9），片段间用细分隔线区分；悬停时只高亮当前片段。
  *
  * `disabled` 只作用于**标签片段**（选中该参数），不影响眼睛片段：
  * 被门禁的参数曲线仍需保持可见（用户要能看到自己画过什么），
@@ -147,8 +139,6 @@ export type ParamToolbarPillProps = {
  */
 export const ParamToolbarPill: React.FC<ParamToolbarPillProps> = ({
     label,
-    labelKind = "text",
-    labelAriaLabel,
     labelTooltip,
     active,
     onSelect,
@@ -190,37 +180,19 @@ export const ParamToolbarPill: React.FC<ParamToolbarPillProps> = ({
                 tabIndex={disabled ? -1 : undefined}
                 className={
                     disabled
-                        ? `param-pill__seg param-pill__seg--label param-pill__seg--${labelKind} param-pill__seg--disabled`
-                        : `param-pill__seg param-pill__seg--label param-pill__seg--${labelKind}`
+                        ? "param-pill__seg param-pill__seg--label param-pill__seg--disabled"
+                        : "param-pill__seg param-pill__seg--label"
                 }
                 data-tooltip={disabled ? (disabledTooltip ?? labelTooltip) : labelTooltip}
-                aria-label={labelAriaLabel}
                 aria-disabled={disabled || undefined}
                 onClick={disabled ? undefined : onSelect}
             >
-                {labelKind === "block-icon" ? <BlockLabelIcon /> : label}
+                {label}
             </button>
             {dropdown}
         </div>
     );
 };
-
-/** 块工具的中间段图标：横向分栏，与旧 `ColumnsIcon` 的视觉保持连续。 */
-const BlockLabelIcon: React.FC = () => (
-    <svg width="14" height="14" viewBox="0 0 15 15" fill="none" aria-hidden="true">
-        <rect
-            x="1.5"
-            y="3.5"
-            width="12"
-            height="8"
-            rx="1.5"
-            stroke="currentColor"
-            strokeWidth="1.2"
-        />
-        <path d="M5.75 4V11" stroke="currentColor" strokeWidth="1.2" />
-        <path d="M9.25 4V11" stroke="currentColor" strokeWidth="1.2" />
-    </svg>
-);
 
 /**
  * 「一个药丸 + 下拉切换两个参数」的通用按钮。

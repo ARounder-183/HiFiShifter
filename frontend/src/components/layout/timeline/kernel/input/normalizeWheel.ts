@@ -22,6 +22,8 @@
  *   便于单测直接传字面量。
  */
 
+import { WHEEL_LINE_HEIGHT_PX } from "../../../../../utils/pinchGesture";
+
 /** `DOM_DELTA_PIXEL`：增量已是像素。 */
 const DOM_DELTA_PIXEL = 0;
 /** `DOM_DELTA_LINE`：增量以行为单位。 */
@@ -30,12 +32,10 @@ const DOM_DELTA_LINE = 1;
 const DOM_DELTA_PAGE = 2;
 
 /**
- * 行高回退值（CSS px）。
- *
- * 用于调用方未提供有效行高时：宁可退化为「一行 ≈ 16px」这一浏览器常规行高，
- * 也不要因换算系数为 0 / NaN 让滚轮完全失效。
+ * 行高回退值（CSS px）：与捏合 / 内核 wheel 监听共用 `WHEEL_LINE_HEIGHT_PX`。
+ * 调用方未提供有效行高时用它，避免换算系数为 0 / NaN 让滚轮完全失效。
  */
-const DEFAULT_LINE_HEIGHT_PX = 16;
+const DEFAULT_LINE_HEIGHT_PX = WHEEL_LINE_HEIGHT_PX;
 
 /**
  * 页高回退值（CSS px）。

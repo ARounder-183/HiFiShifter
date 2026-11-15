@@ -352,6 +352,13 @@ fn wait(slot: &Slot) -> Result<(), HostThreadError> {
             // 被通知唤醒：重新判状态，不把"醒来"当成"超时"。
             continue;
         }
+        // 【为什么以单调钟复核】Condvar 在 Windows 上按毫秒截断等待时长，
+        // WAIT_TIMEOUT 可能比 remaining 提前 ≤1ms 返回；据此直接放弃会让
+        // scoped 比 HOST_THREAD_TIMEOUT 早返回（scoped_times_out_when_nobody_pumps
+        // 断言 elapsed ≥ 超时，CI 上偶发踩中）。没到点就回去继续等。
+        if Instant::now() < deadline {
+            continue;
+        }
         match &*state {
             SlotState::Done => return Ok(()),
             // 到点且任务还没开始 —— 现在放弃是安全的：它被取出时会看到这个状态并直接返回。

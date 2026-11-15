@@ -34,71 +34,60 @@ test("rapid creation snapshots the visible curve, so previous edits do not sprin
     expect(view.edit).toEqual([60, 60, 60, 60, 60, 60, 60, 60]);
     expect(captureParamBlockCreateCurve({ ...view, key: "other" }, first)?.edit).toEqual(view.edit);
 });
-test("full-resolution reads wait for preceding writes, and a completion cannot release a new pointer", async () => {
-    const queue = { current: Promise.resolve() };
+
+/*
+ * 【串行化去哪了】新建块的读-写串行化已经收口到
+ * `useParamBlockPersistence.commitPlan`（一个根一条队列，见那边的
+ * 「两个 plan 严格串行」用例）。这里只剩**手势侧**的两件事：
+ * `pendingCommits` 记账与 `onSettled`。
+ */
+test("a completion cannot release a new pointer, and pendingCommits is balanced", async () => {
     const activity = { current: { pointerGestureToken: null as number | null, pendingCommits: 0 } };
     const live = { current: false };
     const pending = gate();
-    const revisions: number[] = [];
-    let revision = 0;
     const settled: boolean[] = [];
     const common = {
-        queue,
         activity,
         liveActive: live,
         onSettled: () => settled.push(live.current),
     };
     const first = enqueueParamBlockCreateCommit({
         ...common,
-        work: async () => {
-            revisions.push(revision);
-            await pending.promise;
-            revision++;
-        },
+        run: () => pending.promise,
     });
     const second = enqueueParamBlockCreateCommit({
         ...common,
-        work: async () => {
-            revisions.push(revision);
-            revision++;
-        },
+        run: async () => undefined,
     });
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(revisions).toEqual([0]);
     expect(activity.current.pendingCommits).toBe(2);
     expect(live.current).toBe(true);
+    await second;
+    // 第二个已经结束，但指针手势仍在：liveEdit 必须保持开启。
     activity.current.pointerGestureToken = 3;
     pending.release();
-    await Promise.all([first, second]);
-    expect(revisions).toEqual([0, 1]);
+    await first;
     expect(settled).toEqual([true, true]);
     expect(live.current).toBe(true);
     activity.current.pointerGestureToken = null;
-    await enqueueParamBlockCreateCommit({
-        ...common,
-        work: async () => {
-            revision++;
-        },
-    });
+    await enqueueParamBlockCreateCommit({ ...common, run: async () => undefined });
     expect(activity.current.pendingCommits).toBe(0);
     expect(live.current).toBe(false);
 });
-test("a failed earlier write releases its reservation and does not strand later creations", async () => {
-    const queue = { current: Promise.resolve() };
+
+test("a failed creation releases its reservation and does not strand later ones", async () => {
     const activity = { current: { pointerGestureToken: null, pendingCommits: 0 } };
     const live = { current: false };
     let saved = false;
-    const args = { queue, activity, liveActive: live, onSettled: () => {} };
+    const args = { activity, liveActive: live, onSettled: () => {} };
     const first = enqueueParamBlockCreateCommit({
         ...args,
-        work: async () => {
+        run: async () => {
             throw new Error("rejected");
         },
     });
     const second = enqueueParamBlockCreateCommit({
         ...args,
-        work: async () => {
+        run: async () => {
             saved = true;
         },
     });

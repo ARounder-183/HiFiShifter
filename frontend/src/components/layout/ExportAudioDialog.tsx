@@ -48,6 +48,7 @@ import {
 } from "../../ui";
 import { AppDialog } from "../../ui/Dialog";
 import { AppField, AppForm, AppSwitchRow } from "../../ui/Field";
+import { frontendLog } from "../../services/frontendLog";
 
 interface ExportAudioDialogProps {
     open: boolean;
@@ -653,7 +654,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                         };
 
                         if (debugExportProgress) {
-                            console.debug("[export-progress] event", {
+                            frontendLog("debug", "[export-progress] event", {
                                 ...nextProgress,
                                 atMs: Math.round(performance.now()),
                             });

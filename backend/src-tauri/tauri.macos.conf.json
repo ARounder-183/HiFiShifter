@@ -3,6 +3,27 @@
         "resources": {
             "resources/macos": "macos",
             "resources/models/nsf_hifigan/pc_nsf_hifigan_coreml.onnx": "models/nsf_hifigan/pc_nsf_hifigan_coreml.onnx"
-        }
+        },
+        "fileAssociations": [
+            {
+                "ext": [
+                    "hshp",
+                    "hsp",
+                    "hshp-bak",
+                    "hsp-bak"
+                ],
+                "name": "HiFiShifter Project",
+                "description": "HiFiShifter Project",
+                "role": "Editor",
+                "rank": "Owner",
+                "mimeType": "application/x-hifishifter-project",
+                "exportedType": {
+                    "identifier": "com.arounder.hifishifter.project",
+                    "conformsTo": [
+                        "public.data"
+                    ]
+                }
+            }
+        ]
     }
 }

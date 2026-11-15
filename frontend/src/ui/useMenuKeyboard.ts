@@ -19,8 +19,16 @@
 import { useEffect } from "react";
 import type { RefObject } from "react";
 
-/** 可导航的项：真实禁用（`disabled`）的项不参与，与鼠标行为一致。 */
-const ITEM_SELECTOR = '[role="menuitem"]:not([disabled])';
+/**
+ * 可导航的项：真实禁用（`disabled`）的项不参与，与鼠标行为一致。
+ *
+ * 【为什么三种角色都要收】勾选态让 `AppContextMenu` 把项渲染成
+ * `menuitemcheckbox`（`aria-checked` 只允许挂在这两个角色上）。只认
+ * `menuitem` 的话，"选项菜单里全是勾选项"的那类菜单方向键一格都不动 ——
+ * 而这恰恰是工具栏菜单的常态。
+ */
+const ITEM_SELECTOR =
+    '[role="menuitem"]:not([disabled]), [role="menuitemcheckbox"]:not([disabled]), [role="menuitemradio"]:not([disabled])';
 
 /**
  * 本层菜单的项。
@@ -77,6 +85,10 @@ function shouldRespond(container: HTMLElement, focused: Element | null): boolean
 export function ownsArrowKeys(element: Element | null): boolean {
     if (!(element instanceof HTMLElement)) return false;
     if (element.isContentEditable) return true;
+    // 【为什么还要认角色】Radix 的滑块头是 `<span role="slider">`（不是 `<input>`），
+    // 它用上下键调值；漏掉它，菜单的方向键会把滑块的上下键抢走 —— 节拍器音量条
+    // 一旦放进菜单就会"键盘调不动"。数字输入同理（`spinbutton`）。
+    if (element.closest('[role="slider"], [role="spinbutton"]')) return true;
     return ["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName);
 }
 

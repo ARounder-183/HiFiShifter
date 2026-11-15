@@ -35,6 +35,8 @@ pub(super) fn write_package(
     system_info: &serde_json::Value,
     settings: &serde_json::Value,
 ) -> Result<(), String> {
+    // 打包前强制落盘：缓冲写之后最后几行可能还在用户态内存里。
+    crate::diagnostics::flush_writer_for_diagnostics();
     let file = std::fs::File::create(out).map_err(|e| format!("create zip failed: {e}"))?;
     let mut zip = zip::ZipWriter::new(file);
     let options = zip::write::SimpleFileOptions::default()
@@ -49,6 +51,10 @@ pub(super) fn write_package(
     let mut info_value = system_info.clone();
     if let Some(object) = info_value.as_object_mut() {
         object.insert(
+            "logPolicy".to_owned(),
+            hifishifter_kernel::log_policy::diagnostics_json(),
+        );
+        object.insert(
             "araDiscovery".to_owned(),
             crate::diagnostics::ara_discovery_json(),
         );
@@ -57,6 +63,19 @@ pub(super) fn write_package(
         .map_err(|e| format!("serialize system_info failed: {e}"))?;
     zip.write_all(info.as_bytes())
         .map_err(|e| format!("write system_info failed: {e}"))?;
+
+    zip.start_file("log_policy.json", options)
+        .map_err(|e| format!("zip add log_policy failed: {e}"))?;
+    let policy_json =
+        serde_json::to_string_pretty(&hifishifter_kernel::log_policy::diagnostics_json())
+            .map_err(|e| format!("serialize log_policy failed: {e}"))?;
+    zip.write_all(policy_json.as_bytes())
+        .map_err(|e| format!("write log_policy failed: {e}"))?;
+
+    zip.start_file("policy_changes.jsonl", options)
+        .map_err(|e| format!("zip add policy_changes failed: {e}"))?;
+    zip.write_all(hifishifter_kernel::log_policy::diagnostics_changes_jsonl().as_bytes())
+        .map_err(|e| format!("write policy_changes failed: {e}"))?;
 
     zip.start_file("settings.json", options)
         .map_err(|e| format!("zip add settings failed: {e}"))?;
@@ -150,6 +169,11 @@ mod tests {
         names.sort();
         assert!(names.contains(&"system_info.json".to_owned()), "{names:?}");
         assert!(names.contains(&"settings.json".to_owned()), "{names:?}");
+        assert!(names.contains(&"log_policy.json".to_owned()), "{names:?}");
+        assert!(
+            names.contains(&"policy_changes.jsonl".to_owned()),
+            "{names:?}"
+        );
 
         let mut info = String::new();
         std::io::Read::read_to_string(&mut archive.by_name("system_info.json").unwrap(), &mut info)

@@ -349,6 +349,57 @@ describe("drawTimelineCanvas 合批", () => {
         expect(withOverlap).toBeGreaterThan(plain);
     });
 
+    it("GL 模式下在波形上方补画选中短片段的完整边框", async () => {
+        const { drawTimelineCanvas } = await load();
+        drawTimelineCanvas(ctx as unknown as CanvasRenderingContext2D, {
+            width: 600,
+            height: 90,
+            clips: [
+                clip({ id: "long", widthPx: 500, hasOverlap: true }),
+                clip({ id: "short", leftPx: 100, widthPx: 200, selected: true, hasOverlap: true }),
+            ],
+            fontFamily: "sans-serif",
+            darkMode: true,
+            glBodies: { render() {} },
+            groupOutlineOverGl: true,
+        });
+        expect(ctx.strokeCalls).toContainEqual(
+            expect.objectContaining({
+                lineWidth: 2,
+                batched: false,
+                rects: [expect.objectContaining({ x: 100.5, y: 0.5, w: 199, h: 89 })],
+            }),
+        );
+        expect(ctx.opSequence[ctx.opSequence.length - 1]).toBe("stroke");
+    });
+
+    it("主体长片段先画，但重叠区 header 仍由后开始的片段占据", async () => {
+        const { drawTimelineCanvas } = await load();
+        drawTimelineCanvas(ctx as unknown as CanvasRenderingContext2D, {
+            width: 2200,
+            height: 90,
+            clips: [
+                clip({ id: "later", name: "Later", leftPx: 500, widthPx: 1500, hasOverlap: true }),
+                clip({
+                    id: "earlier",
+                    name: "Earlier",
+                    widthPx: 600,
+                    hasOverlap: true,
+                    trailingHeaderOverlapPx: 100,
+                }),
+            ],
+            fontFamily: "sans-serif",
+            darkMode: true,
+            glBodies: { render() {} },
+        });
+        expect(
+            ctx.fillTexts
+                .filter((item) => item.text === "Earlier" || item.text === "Later")
+                .slice(-2)
+                .map((item) => item.text),
+        ).toEqual(["Earlier", "Later"]);
+    });
+
     it("后一个 Clip 的 header 不因前导重叠被压暗", async () => {
         const { drawTimelineCanvas } = await load();
         drawTimelineCanvas(ctx as unknown as CanvasRenderingContext2D, {

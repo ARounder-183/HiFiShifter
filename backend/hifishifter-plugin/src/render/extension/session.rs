@@ -780,7 +780,7 @@ impl ExtensionOwner {
                 Ok(host) => {
                     let allowed: BTreeSet<_> = host.tracks.iter().map(|t| t.id.clone()).collect();
                     local.params.retain(|id, _| allowed.contains(id));
-                    local.param_line_blocks.retain(|id, _| allowed.contains(id));
+                    local.param_block_edits.retain(|id, _| allowed.contains(id));
                     local.tracks.retain(|t| allowed.contains(&t.id));
                     let clips = host
                         .clips

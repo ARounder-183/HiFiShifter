@@ -7,6 +7,7 @@ use hifishifter_kernel::editor::{
     midi_import::MidiImportHost,
     ParamHost,
 };
+use hifishifter_kernel::param_blocks::projection::clip_audible_source_window as clip_audible_window;
 use hifishifter_kernel::state::*;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -238,11 +239,7 @@ enum Job {
     Close,
 }
 
-/// 一次音节分析的**不可变快照**。
-///
-/// 【为什么要在入队前冻结】worker 不许持有 `&EditorSession`，也不能在会话锁内
-/// 解码音频。actor 只取计算需要的 owned 数据；工作线程算完后，提交闸再拿这里的
-/// 身份与当前时间线比对 —— 只有完全一致才允许写回。
+/// Immutable snapshot of one analysis request; the actor validates identity on commit.
 pub(crate) struct SyllableAnalysisRequest {
     pub clip_id: String,
     pub take_id: String,
@@ -250,7 +247,7 @@ pub(crate) struct SyllableAnalysisRequest {
     pub source_digest: String,
     pub frame_period_ms: f64,
     pub root_track_id: String,
-    /// 会话内可见的源域窗口。分析结果在这里裁齐并补间隙。
+    /// Audible source window for this analysis request.
     pub source_window: (f64, f64),
     /// worker 用的 owned 时间线快照；只包含该 Clip 的几何与源。
     pub snapshot: TimelineState,
@@ -276,10 +273,7 @@ pub(crate) struct SyllableAnalysisCompletion {
     pub result: Result<Value, String>,
 }
 
-/// 在途分析的目标视图。
-///
-/// 【为什么同键只保留一个 sink】前端会因重载/重试重复发同一条命令。相同
-/// Clip/Take 不应并发解码两次；后到的请求挂到同一条任务上，完成时一并回执。
+/// One in-flight analysis per Clip/Take; duplicate requests share its sink.
 struct SyllableAnalysisWaiter {
     id: u64,
     sink: UiSink,
@@ -297,13 +291,12 @@ struct SyllableAnalysisWorkerResult {
     take_id: String,
     #[serde(default)]
     source_spans_sec: Vec<hifishifter_kernel::pitch_analysis::SyllableSpan>,
+    analyzed_window_sec: [f64; 2],
     algorithm: String,
     algorithm_version: u32,
     analyzed: bool,
 }
 
-/// 音节分析结果的身份摘要。
-///
 /// 授权 PCM 的文件名含源身份与样本内容的哈希；临时父目录每个会话都会变化，
 /// 不能参与持久化身份。其他路径仍比较完整路径；此摘要不参与路径授权。
 pub(super) fn syllable_source_digest(
@@ -330,17 +323,6 @@ pub(super) fn syllable_source_digest(
     hasher.finalize().to_hex().to_string()
 }
 
-/// 把算法检测到的有声区间裁到当前 Clip 的可见源窗口，并补齐间隙。
-///
-/// 【为什么块必须连续铺满】用户要求“重叠的块必须合并、连续块不出现人为间隙”。
-/// 算法只返回发声段；静音若被留空，前端会回退成“整段一个块”，反而把停顿也
-/// 覆盖进去。这里以可见窗口为边界，把检测区间裁剪、排序、合并，然后补满间隙。
-fn fill_visible_source_window(
-    spans: &[hifishifter_kernel::pitch_analysis::SyllableSpan],
-    window: (f64, f64),
-) -> Vec<hifishifter_kernel::pitch_analysis::SyllableSpan> {
-    hifishifter_kernel::pitch_analysis::fill_spans_without_merging(spans, window.0, window.1)
-}
 /// 单个可取消DSP任务；编辑actor只收结果，计算线程不改GUI历史或参数权威。
 struct RenderTask {
     ticket: u64,
@@ -485,13 +467,10 @@ pub(crate) struct EditorSession {
             hifishifter_kernel::editor::param_authority::ParamAuthority,
         >,
     >,
-    block_layout_history: Mutex<
+    block_edit_history: Mutex<
         std::collections::BTreeMap<
             usize,
-            std::collections::BTreeMap<
-                String,
-                hifishifter_kernel::param_line_blocks::ParamLineBlockSet,
-            >,
+            std::collections::BTreeMap<String, hifishifter_kernel::param_blocks::ParamBlockEditSet>,
         >,
     >,
     pub(super) project: Mutex<ProjectState>,
@@ -598,8 +577,6 @@ pub(crate) struct EditorSession {
     pending_reported: AtomicBool,
     render_task: Mutex<Option<RenderTask>>,
     closed: AtomicBool,
-    transport_probe: bool,
-    transport_probe_next: Mutex<Instant>,
     pub(super) suppress_history: AtomicBool,
     /// **上一次采纳过的**宿主编辑器视图选择（A5），用于与宿主的新选择比对。
     ///
@@ -664,67 +641,87 @@ impl EditorSession {
         format!("{}{native}", self.namespace)
     }
 
-    pub(super) fn param_line_block_payload(&self, root: &str) -> Result<Value, String> {
-        use hifishifter_kernel::param_line_blocks::ParamLineBlockSet;
-        let (frame_period_ms, local) = {
-            let timeline = self.timeline.lock_or_recover();
-            if !timeline.tracks.iter().any(|track| track.id == root) {
-                return Err("unknown root parameter line".into());
-            }
-            (
-                timeline.frame_period_ms(),
-                timeline
-                    .params_by_root_track
-                    .get(root)
-                    .and_then(|params| params.param_line_blocks.clone()),
-            )
-        };
-        let stored = if let Some(document) = self.document() {
-            let native = root.strip_prefix(&self.namespace).unwrap_or(root);
+    pub(super) fn param_block_view_payload(&self, root: &str) -> Result<Value, String> {
+        // 【锁序】先取时间线快照并释放，再读文档编辑集；绝不在持时间线锁时取 edits。
+        let timeline = self.timeline.lock_or_recover().clone();
+        if !timeline.tracks.iter().any(|track| track.id == root) {
+            return Err("unknown root parameter line".into());
+        }
+        let native = root.strip_prefix(&self.namespace).unwrap_or(root);
+        let edits = if let Some(document) = self.document() {
             document
                 .edits
                 .lock_or_recover()
-                .param_line_blocks
+                .param_block_edits
                 .get(native)
                 .cloned()
+                .unwrap_or_default()
         } else {
-            local
+            timeline
+                .params_by_root_track
+                .get(root)
+                .map(|params| params.param_block_edits.clone())
+                .unwrap_or_default()
         };
-        let layout = stored.clone().unwrap_or(ParamLineBlockSet {
-            frame_period_ms,
-            ..Default::default()
-        });
-        Ok(
-            json!({"ok":true,"initialized":stored.is_some(),"layout":layout,"curveRevision":self.authority_revision()}),
-        )
+        let view = hifishifter_kernel::param_blocks::compose_param_block_view(
+            &timeline,
+            root,
+            &edits,
+            timeline.frame_period_ms(),
+        )?;
+        Ok(json!({
+            "ok": true,
+            "editRevision": view.edit_revision,
+            "layoutKey": view.layout_key,
+            "framePeriodMs": view.frame_period_ms,
+            "blocks": view.blocks,
+            "orphanCount": view.orphan_count,
+            "analysisPending": view.analysis_pending,
+            "curveRevision": self.authority_revision(),
+            "edits": edits,
+        }))
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn set_param_line_blocks(
+    pub(super) fn set_param_block_edits(
         &self,
         root: &str,
         expected: u64,
-        blocks: Vec<hifishifter_kernel::param_line_blocks::ParamLineBlock>,
-        baseline: Option<Vec<hifishifter_kernel::param_line_blocks::ParamLineBlock>>,
+        blocks: Vec<hifishifter_kernel::param_blocks::UserParamBlock>,
         checkpoint: bool,
-        patches: Vec<hifishifter_kernel::param_line_blocks::ParamLineCurvePatch>,
+        patches: Vec<hifishifter_kernel::param_blocks::ParamBlockCurvePatch>,
         expected_curve: Option<u64>,
         expected_geometry: Option<u64>,
         expected_signature: Option<&str>,
     ) -> Result<Value, String> {
-        use hifishifter_kernel::param_line_blocks::ParamLineBlockSet;
-        let current: ParamLineBlockSet =
-            serde_json::from_value(self.param_line_block_payload(root)?["layout"].clone())
-                .map_err(|error| error.to_string())?;
-        let next = current.replace_with_baseline(expected, blocks, baseline)?;
-        hifishifter_kernel::param_line_blocks::validate_curve_patches(&patches)?;
-        let checkpoint = checkpoint && (next != current || !patches.is_empty());
-        let curve_revision = if let Some(document) = self.document() {
+        let current: hifishifter_kernel::param_blocks::ParamBlockEditSet = {
+            let timeline = self.timeline.lock_or_recover().clone();
             let native = root.strip_prefix(&self.namespace).unwrap_or(root);
-            document.commit_param_line_edit(
+            if let Some(document) = self.document() {
+                document
+                    .edits
+                    .lock_or_recover()
+                    .param_block_edits
+                    .get(native)
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                timeline
+                    .params_by_root_track
+                    .get(root)
+                    .map(|params| params.param_block_edits.clone())
+                    .unwrap_or_default()
+            }
+        };
+        let next = current.replace(expected, blocks)?;
+        hifishifter_kernel::param_blocks::validate_curve_patches(&patches)?;
+        let checkpoint = checkpoint && (next.blocks != current.blocks || !patches.is_empty());
+        let _curve_revision = if let Some(document) = self.document() {
+            let native = root.strip_prefix(&self.namespace).unwrap_or(root);
+            document.commit_param_block_edits(
                 native,
                 expected,
-                next.clone(),
+                next.blocks.clone(),
                 &patches,
                 expected_curve,
                 expected_geometry,
@@ -742,11 +739,10 @@ impl EditorSession {
             {
                 return Err("Conflict: parameter curve changed".into());
             }
-            let candidate = hifishifter_kernel::param_line_blocks::apply_curve_patches(
-                &timeline, root, &patches,
-            )?;
+            let candidate =
+                hifishifter_kernel::param_blocks::apply_curve_patches(&timeline, root, &patches)?;
             if checkpoint {
-                self.checkpoint_timeline(&timeline, HistoryOp::ParamBlockMerge);
+                self.checkpoint_timeline(&timeline, HistoryOp::ParamBlockEdit);
             }
             *timeline = candidate;
             if !patches.is_empty() {
@@ -761,7 +757,7 @@ impl EditorSession {
                 .params_by_root_track
                 .get_mut(root)
                 .unwrap()
-                .param_line_blocks = Some(next.clone());
+                .param_block_edits = next.clone();
         }
         if patches.is_empty() {
             self.mark_metadata_dirty();
@@ -775,12 +771,58 @@ impl EditorSession {
         }
         self.note_authority_step();
         self.emit("history_state", super::commands::history_state(self));
+        let view = self.param_block_view_payload(root)?;
         self.emit(
-            "param_line_blocks_updated",
-            json!({"rootTrackId":root,"layout":next}),
+            "param_block_view_updated",
+            json!({"rootTrackId":root,"view":view}),
         );
-        Ok(json!({"ok":true,"initialized":true,"layout":next,"curveRevision":curve_revision}))
+        Ok(view)
     }
+    pub(super) fn restore_game_param_block_ranges(
+        &self,
+        root: &str,
+        ranges: &[(u32, u32)],
+        checkpoint: bool,
+    ) -> Result<Value, String> {
+        let (current, timeline) = {
+            let timeline = self.timeline.lock_or_recover().clone();
+            let native = root.strip_prefix(&self.namespace).unwrap_or(root);
+            let current = if let Some(document) = self.document() {
+                document
+                    .edits
+                    .lock_or_recover()
+                    .param_block_edits
+                    .get(native)
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                timeline
+                    .params_by_root_track
+                    .get(root)
+                    .map(|params| params.param_block_edits.clone())
+                    .unwrap_or_default()
+            };
+            (current, timeline)
+        };
+        let next = hifishifter_kernel::param_blocks::editing::restore_game_block_ranges(
+            &timeline,
+            root,
+            &current,
+            ranges,
+            timeline.frame_period_ms(),
+        )?;
+        self.set_param_block_edits(
+            root,
+            current.revision,
+            next.blocks,
+            checkpoint,
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+    }
+
     pub(super) fn move_private_track(
         &self,
         id: &str,
@@ -923,7 +965,7 @@ impl EditorSession {
             param_intents: Mutex::new(Vec::new()),
             history: Mutex::new(Default::default()),
             authority_history: Mutex::new(std::collections::BTreeMap::new()),
-            block_layout_history: Mutex::new(std::collections::BTreeMap::new()),
+            block_edit_history: Mutex::new(std::collections::BTreeMap::new()),
             project: Mutex::new(initial_project),
             loaded: Mutex::new(Default::default()),
             // 渲染用的 PCM 暂存同样搬出 `%TEMP%`：磁盘清理在会话进行中删掉这些
@@ -972,8 +1014,6 @@ impl EditorSession {
             render_task: Mutex::new(None),
             closed: AtomicBool::new(false),
             suppress_history: AtomicBool::new(false),
-            transport_probe: std::env::var_os("HIFISHIFTER_PLUGIN_TRANSPORT_PROBE").is_some(),
-            transport_probe_next: Mutex::new(Instant::now()),
             host_selection: Mutex::new(None),
             reload_requested: AtomicBool::new(false),
             initial_retry_at: Mutex::new(None),
@@ -1502,7 +1542,6 @@ impl EditorSession {
                     }
                     session.emit_state();
                 }
-                session.report_transport_probe();
                 if session.refresh_analysis() {
                     // 分析有新进展 ⇒ 之前失败的前提可能已消失，重新武装重试。
                     retry.rearm();
@@ -2761,10 +2800,10 @@ impl EditorSession {
                 track.muted = old.muted;
                 track.solo = old.solo;
             }
-            // Capture rebuilds its Takes from the recording inventory too. Keep
-            // completed analysis only while the authorized source still matches.
+            // Rebuilt Takes keep only source/window-current analysis.
             let frame_period_ms = timeline.frame_period_ms();
             for clip in &mut timeline.clips {
+                let window = clip_audible_window(clip);
                 for take in &mut clip.takes {
                     let source = take
                         .source_path
@@ -2781,7 +2820,7 @@ impl EditorSession {
                             .and_then(|old| old.syllable_analysis.as_ref())
                     });
                     take.syllable_analysis = cached
-                        .filter(|analysis| analysis.is_current(&digest))
+                        .filter(|a| a.is_current_for_window(&digest, window))
                         .cloned();
                 }
             }
@@ -3148,20 +3187,28 @@ impl EditorSession {
         self.check_source(&source_path)?;
         let frame_period_ms = timeline.frame_period_ms().max(0.1);
         let source_digest = syllable_source_digest(&source_path, take, frame_period_ms);
+        let audible_window = clip_audible_window(clip);
         if let Some(analysis) = take
             .syllable_analysis
             .as_ref()
-            .filter(|analysis| analysis.is_current(&source_digest))
+            .filter(|a| a.is_current_for_window(&source_digest, audible_window))
         {
-            let mut value = Self::syllable_reply(clip_id, &take.id, Some(analysis))?;
+            let mut value =
+                Self::syllable_reply(clip_id, &take.id, Some(analysis), audible_window)?;
             if let Some(root) = timeline.resolve_root_track_id(&clip.track_id) {
-                if let Some(layout) = timeline
+                let edits = timeline
                     .params_by_root_track
                     .get(&root)
-                    .and_then(|params| params.param_line_blocks.as_ref())
-                {
+                    .map(|params| params.param_block_edits.clone())
+                    .unwrap_or_default();
+                if let Ok(view) = hifishifter_kernel::param_blocks::compose_param_block_view(
+                    &timeline,
+                    &root,
+                    &edits,
+                    timeline.frame_period_ms(),
+                ) {
                     value["rootTrackId"] = json!(root);
-                    value["blockLayout"] = json!(layout);
+                    value["blockLayout"] = json!(view);
                 }
             }
             sink.response(
@@ -3199,7 +3246,7 @@ impl EditorSession {
                 }
             }
         }
-        let (window_start, window_end) = hifishifter_kernel::state::clip_playback_window_sec(clip);
+        let (window_start, window_end) = audible_window;
         let mut snapshot = TimelineState::default();
         snapshot.bpm = timeline.bpm;
         snapshot.project_sec = timeline.project_sec;
@@ -3217,10 +3264,7 @@ impl EditorSession {
             root_track_id: timeline
                 .resolve_root_track_id(&clip.track_id)
                 .unwrap_or_default(),
-            source_window: (
-                window_start.min(window_end).max(0.0),
-                window_start.max(window_end),
-            ),
+            source_window: (window_start.min(window_end), window_start.max(window_end)),
             snapshot,
         };
         self.syllable_flights.lock_or_recover().insert(
@@ -3470,34 +3514,23 @@ impl EditorSession {
         if digest != request.source_digest {
             return Err("stale syllable analysis result: source digest changed".into());
         }
-        let unified = {
-            let timeline = self.timeline.lock_or_recover();
-            timeline
-                .params_by_root_track
-                .get(&request.root_track_id)
-                .is_some_and(|params| params.param_line_blocks.is_some())
-        };
-        let spans = if unified {
-            parsed.source_spans_sec.clone()
-        } else {
-            fill_visible_source_window(&parsed.source_spans_sec, request.source_window)
-        };
+        let spans = parsed.source_spans_sec.clone();
         if !parsed.analyzed || spans.is_empty() {
             // 分析没检出发声段时保留现有缓存；前端会按“无区间”回退整段。
             // 不把旧结果清空，避免一次 FCPE 缺席把已保存的块整片抹掉。
-            return Self::syllable_reply(&request.clip_id, &request.take_id, None);
+            return Self::syllable_reply(
+                &request.clip_id,
+                &request.take_id,
+                None,
+                request.source_window,
+            );
         }
         let analysis = hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis {
             algorithm: parsed.algorithm,
             algorithm_version: parsed.algorithm_version,
             source_digest: request.source_digest.clone(),
-            source_spans_sec: spans
-                .into_iter()
-                .map(|span| hifishifter_kernel::pitch_analysis::SyllableSpan {
-                    start_sec: span.start_sec,
-                    end_sec: span.end_sec,
-                })
-                .collect(),
+            source_spans_sec: spans,
+            analyzed_window_sec: parsed.analyzed_window_sec,
         };
         let mut timeline = self.timeline.lock_or_recover();
         let clip = timeline
@@ -3510,28 +3543,46 @@ impl EditorSession {
             .iter_mut()
             .find(|take| take.id == request.take_id)
             .ok_or("stale syllable analysis result: take removed")?;
+        if analysis.algorithm == hifishifter_kernel::game_onnx::GAME_ALGORITHM {
+            let (a, b) = (request.source_window.0, request.source_window.1);
+            hifishifter_kernel::param_blocks::merge_game_baseline(
+                &mut take.game_block_baseline,
+                &analysis.algorithm,
+                analysis.algorithm_version,
+                [a.min(b), a.max(b)],
+                &analysis.source_spans_sec,
+            );
+        }
         take.syllable_analysis = Some(analysis.clone());
         let current_clip = clip.clone();
         let root = timeline
             .resolve_root_track_id(&current_clip.track_id)
             .unwrap_or_else(|| request.root_track_id.clone());
-        let mut block_layout = None;
-        if let Some(entry) = timeline.params_by_root_track.get_mut(&root) {
-            if let Some(layout) = entry.param_line_blocks.as_ref() {
-                let next = layout.apply_analysis(
-                    &current_clip,
-                    &analysis.source_digest,
-                    &analysis.source_spans_sec,
-                )?;
-                entry.param_line_blocks = Some(next.clone());
-                block_layout = Some(next);
-            }
-        }
-        let mut reply = Self::syllable_reply(&request.clip_id, &request.take_id, Some(&analysis))?;
-        if let Some(layout) = &block_layout {
-            reply["rootTrackId"] = json!(root);
-            reply["blockLayout"] = json!(layout);
-        }
+        let edits = timeline
+            .params_by_root_track
+            .get(&root)
+            .map(|params| params.param_block_edits.clone())
+            .unwrap_or_default();
+        let view = hifishifter_kernel::param_blocks::compose_param_block_view(
+            &timeline,
+            &root,
+            &edits,
+            request.frame_period_ms,
+        )?;
+        timeline.ensure_params_for_root(&root);
+        timeline
+            .params_by_root_track
+            .get_mut(&root)
+            .unwrap()
+            .param_block_view = Some(view.clone());
+        let mut reply = Self::syllable_reply(
+            &request.clip_id,
+            &request.take_id,
+            Some(&analysis),
+            request.source_window,
+        )?;
+        reply["rootTrackId"] = json!(root);
+        reply["blockLayout"] = json!(view);
         // Never take `document.edits` while holding `self.timeline`: workspace
         // projection uses edits -> timeline order. Keep the same lock order here
         // and update only the committed Take after releasing the timeline.
@@ -3553,14 +3604,6 @@ impl EditorSession {
                 },
                 analysis.clone(),
             );
-            if let Some(layout) = &block_layout {
-                edits.param_line_blocks.insert(
-                    root.strip_prefix(&self.namespace)
-                        .unwrap_or(&root)
-                        .to_owned(),
-                    layout.clone(),
-                );
-            }
         }
         // Syllable boundaries are metadata: publish them without invalidating
         // the entire project's audio render after every completed Clip.
@@ -3569,10 +3612,11 @@ impl EditorSession {
         let mut event = reply.clone();
         event["sourcePath"] = json!(request.source_path);
         self.emit("clip_syllables_updated", event);
-        if let Some(layout) = block_layout {
+        let view = reply["blockLayout"].clone();
+        if !view.is_null() {
             self.emit(
-                "param_line_blocks_updated",
-                json!({"rootTrackId":root,"layout":layout}),
+                "param_block_view_updated",
+                json!({"rootTrackId":root,"view":view}),
             );
         }
         Ok(reply)
@@ -3582,22 +3626,11 @@ impl EditorSession {
         clip_id: &str,
         take_id: &str,
         analysis: Option<&hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis>,
+        window: (f64, f64),
     ) -> Result<Value, String> {
-        Ok(json!({
-            "ok": true,
-            "clipId": clip_id,
-            "takeId": take_id,
-            "sourceSpansSec": analysis.map(|a| a.source_spans_sec.iter().map(|s| {
-                json!({"startSec": s.start_sec, "endSec": s.end_sec})
-            }).collect::<Vec<_>>()).unwrap_or_default(),
-            "algorithm": analysis.map(|a| a.algorithm.clone()).unwrap_or_else(|| {
-                hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM.to_string()
-            }),
-            "algorithmVersion": analysis
-                .map(|a| a.algorithm_version)
-                .unwrap_or(hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION),
-            "analyzed": analysis.is_some(),
-        }))
+        Ok(super::syllable_reply::syllable_reply_payload(
+            clip_id, take_id, analysis, window,
+        ))
     }
 
     /// mute只撤销播放分配，不撤销已经生成的显示波形；take更换/真实删除不沿旧缓存猜。
@@ -4004,22 +4037,6 @@ impl EditorSession {
         );
     }
 
-    /// 一次性时钟探针最多每秒写一条；只在命令actor线程调用，不在音频callback写文件。
-    pub(super) fn report_transport_probe(&self) {
-        if !self.transport_probe {
-            return;
-        }
-        let now = Instant::now();
-        let mut next = self.transport_probe_next.lock_or_recover();
-        if now < *next {
-            return;
-        }
-        *next = now + Duration::from_secs(1);
-        drop(next);
-        if let Some(clock) = self.document().map(|document| document.clock.clone()) {
-            log::info!("[ara] transport diagnostic {}", clock.diagnostics());
-        }
-    }
     /// Inventory uses document source IDs; analysis may only use the PCM files
     /// already materialized from authorized samples. Map identities back after
     /// every inventory projection, without opening any host media path.
@@ -4052,6 +4069,7 @@ impl EditorSession {
         let frame_period_ms = timeline.frame_period_ms();
         for clip in &mut timeline.clips {
             let canonical_id = clip.id.strip_prefix(&self.namespace).unwrap_or(&clip.id);
+            let window = clip_audible_window(clip);
             for take in &mut clip.takes {
                 let key = crate::state_channel::TakeSyllableKey {
                     clip_id: canonical_id.to_owned(),
@@ -4071,15 +4089,13 @@ impl EditorSession {
                     .or(clip.source_path.as_deref())
                     .unwrap_or_default();
                 let digest = syllable_source_digest(source, take, frame_period_ms);
-                // Prefer persisted authority; accept the old current-session key
-                // as a fallback. Validate inherited Take caches as well: host
-                // geometry can keep a Take ID while replacing its PCM content.
+                // Persisted authority first; validate source identity and window.
                 take.syllable_analysis = edits
                     .take_syllables
                     .get(&key)
                     .or_else(|| edits.take_syllables.get(&legacy))
                     .or(take.syllable_analysis.as_ref())
-                    .filter(|analysis| analysis.is_current(&digest))
+                    .filter(|a| a.is_current_for_window(&digest, window))
                     .cloned();
             }
         }
@@ -4583,8 +4599,8 @@ impl EditorSession {
         steps.retain(|index, _| *index + 100 >= keep_from);
         drop(steps);
         if let Some(document) = self.document() {
-            let blocks = document.edits.lock_or_recover().param_line_blocks.clone();
-            let mut layouts = self.block_layout_history.lock_or_recover();
+            let blocks = document.edits.lock_or_recover().param_block_edits.clone();
+            let mut layouts = self.block_edit_history.lock_or_recover();
             layouts.insert(previous, blocks.clone());
             layouts.insert(next, blocks);
             layouts.retain(|index, _| *index + 100 >= keep_from);
@@ -4600,8 +4616,8 @@ impl EditorSession {
             .lock_or_recover()
             .insert(position, authority);
         if let Some(document) = self.document() {
-            let blocks = document.edits.lock_or_recover().param_line_blocks.clone();
-            self.block_layout_history
+            let blocks = document.edits.lock_or_recover().param_block_edits.clone();
+            self.block_edit_history
                 .lock_or_recover()
                 .insert(position, blocks);
         }
@@ -4616,11 +4632,11 @@ impl EditorSession {
         let authority = authority?;
         let document = self.document()?;
         let blocks = self
-            .block_layout_history
+            .block_edit_history
             .lock_or_recover()
             .get(&target)
             .cloned();
-        match document.replace_authority_with_blocks(authority, blocks) {
+        match document.replace_authority_with_edits(authority, blocks) {
             Ok(curve_changed) => {
                 self.refresh_display_from_document();
                 if curve_changed {
@@ -4628,12 +4644,16 @@ impl EditorSession {
                 } else {
                     self.mark_metadata_dirty();
                 }
-                let layouts = document.edits.lock_or_recover().param_line_blocks.clone();
-                for (root, layout) in layouts {
-                    self.emit(
-                        "param_line_blocks_updated",
-                        json!({"rootTrackId":format!("{}{root}",self.namespace),"layout":layout}),
-                    );
+                let layouts = document.edits.lock_or_recover().param_block_edits.clone();
+                for root in layouts.keys() {
+                    if let Ok(view) =
+                        self.param_block_view_payload(&format!("{}{root}", self.namespace))
+                    {
+                        self.emit(
+                            "param_block_view_updated",
+                            json!({"rootTrackId":format!("{}{root}",self.namespace),"view":view}),
+                        );
+                    }
                 }
                 Some(curve_changed)
             }
@@ -5974,6 +5994,7 @@ pub(crate) mod tests {
             "clipId": clip_id,
             "takeId": take_id,
             "sourceSpansSec": [{"startSec": 0.00002, "endSec": 0.00004}],
+            "analyzedWindowSec": [0.0, 4.0 / 44100.0],
             "algorithm": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM,
             "algorithmVersion": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
             "analyzed": true,
@@ -5996,11 +6017,11 @@ pub(crate) mod tests {
             .expect("分析结果必须写回 active take");
         assert_eq!(
             analysis.source_spans_sec.len(),
-            3,
-            "检测段 + 首尾静音间隙必须被补成连续块"
+            1,
+            "分析结果只保留检测段；静音间隙不再伪造为块"
         );
-        assert!((analysis.source_spans_sec[0].start_sec - 0.0).abs() < 1e-9);
-        assert!((analysis.source_spans_sec[2].end_sec - 4.0 / 44100.0).abs() < 1e-9);
+        assert!((analysis.source_spans_sec[0].start_sec - 0.00002).abs() < 1e-9);
+        assert!((analysis.source_spans_sec[0].end_sec - 0.00004).abs() < 1e-9);
         assert_eq!(analysis.source_digest, digest);
         drop(timeline);
         assert_eq!(
@@ -6021,7 +6042,7 @@ pub(crate) mod tests {
         )
         .expect("查询已提交缓存");
         assert_eq!(query["analyzed"], true);
-        assert_eq!(query["sourceSpansSec"].as_array().unwrap().len(), 3);
+        assert_eq!(query["sourceSpansSec"].as_array().unwrap().len(), 1);
         assert_eq!(
             editor.history.lock_or_recover().records.len(),
             history_before,
@@ -6036,7 +6057,7 @@ pub(crate) mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            3
+            1
         );
         document.ready.store(true, Ordering::Release);
         editor.close();
@@ -6071,6 +6092,7 @@ pub(crate) mod tests {
             "clipId": clip_id,
             "takeId": take_id,
             "sourceSpansSec": [{"startSec": 0.1, "endSec": 0.2}],
+            "analyzedWindowSec": [0.0, 1.0],
             "algorithm": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM,
             "algorithmVersion": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
             "analyzed": true,
@@ -7699,7 +7721,10 @@ pub(crate) mod tests {
                 source_spans_sec: vec![hifishifter_kernel::pitch_analysis::SyllableSpan {
                     start_sec: 0.0,
                     end_sec: 0.001,
+                    midi_note: None,
+                    event_id: None,
                 }],
+                analyzed_window_sec: [0.0, 0.0],
             };
             let request = SyllableAnalysisRequest {
                 clip_id: clip.id.clone(),
@@ -7717,7 +7742,8 @@ pub(crate) mod tests {
                 json!({
                     "clipId":clip.id,"takeId":take.id,
                     "algorithm":analysis.algorithm,"algorithmVersion":analysis.algorithm_version,
-                    "sourceSpansSec":[{"startSec":0.0,"endSec":4.0/44100.0}],"analyzed":true
+                    "sourceSpansSec":[{"startSec":0.0,"endSec":4.0/44100.0}],"analyzed":true,
+                    "analyzedWindowSec":[0.0,4.0/44100.0]
                 }),
             )
             .unwrap();
@@ -7853,7 +7879,10 @@ pub(crate) mod tests {
                 source_spans_sec: vec![hifishifter_kernel::pitch_analysis::SyllableSpan {
                     start_sec: 0.0,
                     end_sec: 0.1,
+                    midi_note: None,
+                    event_id: None,
                 }],
+                analyzed_window_sec: [0.0, 0.0],
             },
         );
         let after = document.workspace_projection().unwrap();

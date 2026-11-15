@@ -1896,32 +1896,6 @@ impl AudioSources for ModelHandle {
         }
         log::info!("[ara] audio_source samples_access enable={enable}");
         self.refresh_source_pcm(*state, host);
-        if enable && std::env::var_os("HIFISHIFTER_PLUGIN_PCM_PROBE").is_some() {
-            // 仅用于一次性宿主观测：比较原始源样本与 ARA 返回的源样本，判断倒放是否改源。
-            let result = (|| {
-                let source = self
-                    .document
-                    .audio_sources
-                    .get(*state)
-                    .ok_or(AraError::InvalidArgument("unknown source"))?;
-                let source_ref = host
-                    .current_audio_source()
-                    .ok_or(AraError::InvalidState("missing source scope"))?;
-                let channels = source.channel_count.max(1) as usize;
-                let mut reader = host.audio_reader::<f32>(source_ref, channels)?;
-                let mut samples = vec![vec![0.0_f32; 16]; channels];
-                let mut planes = samples
-                    .iter_mut()
-                    .map(Vec::as_mut_slice)
-                    .collect::<Vec<_>>();
-                reader.read(0, &mut planes)?;
-                log::info!("[ara] source PCM #{}: first16={:?}", state, samples[0]);
-                Ok::<(), AraError>(())
-            })();
-            if let Err(error) = result {
-                log::warn!("[ara] source PCM probe failed: {error:?}");
-            }
-        }
         Ok(())
     }
 }
@@ -2769,10 +2743,12 @@ mod tests {
             &pitch[10..20],
             &[60., 60.5, 61., 61.5, 62., 62.5, 63., 63.5, 64., 64.]
         );
-        // 旧位置只剩**原始曲线**（57）—— 用户画的那条（60）必须已经跟着 clip 走了。
-        assert_eq!(pitch[0], 57., "旧位置不能继续遗留编辑");
-        // 窗口终点那一格（0.5 s）不属于这条 clip：既不能被搬走，也不能被清成 0。
-        assert_eq!(pitch[5], 57., "窗口之外的第一格必须留在原位");
+        // 0 是"这一帧没有用户目标"的唯一哨兵（见 param_authority::RootBaseline::display）：
+        // 原始曲线留在 pitch_orig，显示层不再复制基线进 pitch_edit。旧位置既没有编辑
+        // run，就必须是 0；用户画的那条（60）已经跟着 clip 搬到 [10..20]。
+        assert_eq!(pitch[0], 0., "旧位置不能继续遗留编辑");
+        // 窗口终点那一格（0.5 s）不属于这条 clip：既不能被搬走，也不能凭空生成编辑。
+        assert_eq!(pitch[5], 0., "窗口之外的第一格必须留在原位");
     }
     use super::*;
     use ara2_bridge::core::{RegionSequenceKind, Registry};

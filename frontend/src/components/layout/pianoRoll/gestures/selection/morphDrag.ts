@@ -11,6 +11,7 @@ import {
 import type { ParamMorphOverlay, ParamViewSegment } from "../../types";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { PointerDeps } from "../pointerDeps";
+import { frontendLog } from "../../../../../services/frontendLog";
 
 /** `handleSelectPointerDown` 作用域里的局部量。 */
 type SelectLocals = {
@@ -299,7 +300,7 @@ export function handleMorphPointerDown(
                     // 提交之后取的响度快照到达再撤下（消除松手闪屏）。
                     onParamCommitSucceeded();
                 } catch (err) {
-                    console.error("[pianoRoll] morph upload failed", err);
+                    frontendLog("error", "[pianoRoll] morph upload failed", err);
                     // IPC 失败必须撤下覆盖层，否则冻结的预览值会一直
                     // 盖在真实曲线上。
                     liveEditOverrideRef.current = null;

@@ -17,6 +17,7 @@ type SelectLocals = {
 type Deps = Pick<
     PointerDeps,
     | "clearActivePointerGestureEnd"
+    | "edgeScroll"
     | "invalidate"
     | "onContextMenu"
     | "selectionRef"
@@ -39,6 +40,7 @@ export function handleSelectionPanDrag(
 ): boolean {
     const {
         clearActivePointerGestureEnd,
+        edgeScroll,
         invalidate,
         maxSelectableFrame,
         onContextMenu,
@@ -96,7 +98,14 @@ export function handleSelectionPanDrag(
         // 死区内不平移：右键**点击**（含手抖）不得挪动选区，只有
         // 越过死区才算"拖拽"（与多选追加 / 框选同一套语义）。
         if (!didDrag) return;
-        const frame = selectionFrameFromClientX(ev.clientX, true);
+        applyPan(ev.clientX);
+        edgeScroll.track(ev.clientX, ev.clientY, (clientX) => {
+            applyPan(clientX);
+        });
+    };
+    const applyPan = (clientX: number) => {
+        if (!didDrag) return;
+        const frame = selectionFrameFromClientX(clientX, false);
         // 位移夹到"平移后被搬动那一段仍在 [0, 工程末端] 内"——
         // 段的长度不变，只让它停在两端（见 clampSelectionShift）。
         // 基准点永远是**按下时**的帧：死区内不累计偏移，越过死区后
@@ -124,6 +133,7 @@ export function handleSelectionPanDrag(
         invalidate();
     };
     const onEnd = (reason: "up" | "cancel", ev: globalThis.PointerEvent | null) => {
+        edgeScroll.stop();
         // 【为什么取消也要走这里】取消时没有"右键点击"语义（没有可信的指针位置），
         // 因此不打开菜单；其余收尾（重绘）两种原因相同。
         if (!didDrag && reason === "up") {

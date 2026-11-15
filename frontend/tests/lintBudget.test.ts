@@ -14,8 +14,20 @@ import { readFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { expect, test } from "vitest";
 
-/** 预算本身：改这个数字要同时在下面的失败信息里说明理由。 */
-const WARNING_BUDGET = 91;
+/**
+ * 预算本身：改这个数字要同时在下面的失败信息里说明理由。
+ *
+ * 91 → 87 → 0（2026-11-11 全仓审查 / 修复轮次）：
+ * - 17 条 exhaustive-deps 与 3 条 preserve-manual-memoization 已逐处补齐依赖 /
+ *   改为稳定读取容器直接修复；
+ * - 3 条 immutability 与外观面板的初始化 setState 已改为惰性初值直接修复；
+ * - 其余 63 条来自 eslint-plugin-react-hooks 7.x 的 React Compiler 专属规则。
+ *   本仓没有 babel-plugin-react-compiler，启用整套编译器规则属于配置错配；
+ *   eslint.config.js 改为只启用经典 rules-of-hooks + exhaustive-deps，
+ *   tests/reactCompilerGates.test.ts 钉住"接入 Compiler 时必须恢复规则集"。
+ * 预算贴着 0，任何新警告都会立刻红。
+ */
+const WARNING_BUDGET = 0;
 
 test("ESLint 警告不超过预算（npm run lint:budget）", () => {
     const scripts = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")).scripts;

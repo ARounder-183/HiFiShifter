@@ -1,14 +1,13 @@
 // Session 同步 reducers。拆自 sessionSlice，按原顺序汇总。
-import { createSlice, createAsyncThunk, type PayloadAction } from "@reduxjs/toolkit";
+import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import { isPluginMode } from "../../services/hostCapabilities";
 import type { HistoryRecordSummary, TimelineState } from "../../types/api";
 import type {
     ClipFormantAnalysisState,
-    DragDirection,
-    DrawDragDirection,
     EditParam,
     GridSize,
     PitchSnapUnit,
+    SelectToolMode,
     SplitTransitionCurveType,
     TimelineSnapSettings,
     TimeUnit,
@@ -28,7 +27,6 @@ import {
     type FolderImportOptions,
 } from "../fileBrowser/folderImportOptions";
 import { clampGain } from "../../utils/gainDb";
-import { persistUiSettings } from "./thunks/runtimeThunks";
 import {
     type ChannelImportPolicy,
     type PenInputSettings,
@@ -40,6 +38,11 @@ import {
     resolveParamAxisUnit,
     supportsParamAxisUnit,
 } from "../../components/layout/pianoRoll/paramAxisUnits";
+import {
+    isPanParam,
+    nextPanAxisDirection,
+    resolvePanAxisDirection,
+} from "../../components/layout/pianoRoll/paramPan";
 import type { CustomScalePreset } from "../../utils/customScales";
 import { sanitizeCustomScalePreset } from "../../utils/customScales";
 import {
@@ -61,13 +64,15 @@ import type { BaselineMode, VibratoPreset } from "../../features/vibrato/vibrato
 import type { TempoMap } from "../../utils/tempoMap";
 import { clampDenominator, normalizeTempoMap } from "../../utils/tempoMap";
 import { markProjectDirty } from "./sessionDirtyState";
-import { toggleParamBlockEditingTool } from "../../components/layout/pianoRoll/paramBlockMarquee";
-import type { ClipColor, SessionState, StretchAlgorithmOption } from "./sessionSlice/types";
+import type { ClipColor, StretchAlgorithmOption } from "./sessionSlice/types";
+import type { ProjectSaveFormat } from "../../services/api/project";
 import { resolveTrackIdForClipSelection } from "./selectionFocus";
 import { applyHistoryDepths } from "./sessionSlice/history";
 import { applyTimelineState } from "./sessionSlice/helpersTimeline";
 import { intentPlayheadSec } from "./sessionSlice/playheadIntent";
 import {
+    applyAlwaysShowParamBlocks,
+    applySelectToolMode,
     applyToolMode,
     normalizeTimelineSnapSettings,
     VALID_TIME_UNITS,
@@ -77,6 +82,9 @@ import { clamp, normalizeClipColor } from "./sessionSlice/helpersCore";
 import { getClipRateMultiplier, updateActiveTakeFromFlat } from "./sessionSlice/helpersTakes";
 import { initialState } from "./sessionSlice/initialState";
 import { applyClipSyllableAnalysisReducer } from "./sessionSlice/syllableMetadata";
+import { setAutoScrollModeReducer, toggleAutoScrollReducer } from "./sessionSlice/autoScroll";
+import { setRippleScopeReducer, toggleRippleEnabledReducer } from "./sessionSlice/ripple";
+import { cycleDragDirectionReducer, setDragDirectionReducer } from "./sessionSlice/dragDirection";
 import { registerRuntime } from "./sessionSlice/extraReducers/runtime";
 import { registerAudio } from "./sessionSlice/extraReducers/audio";
 import { registerTransport } from "./sessionSlice/extraReducers/transport";
@@ -96,12 +104,11 @@ export type {
     DrawDragDirection,
     EditParam,
     GridSize,
+    SelectToolMode,
     ToolMode,
-    ToolModeGroup,
     TrackInfo,
 } from "./sessionTypes";
 export type { ParamSelectionSnapshot, SessionState } from "./sessionSlice/types";
-
 export {
     undoRemote,
     redoRemote,
@@ -118,14 +125,13 @@ export {
     openReaperFromDialog,
     openReaperFromPath,
     saveProjectRemote,
-    saveProjectAsRemote,
+    saveProjectAsFormat,
     saveProjectToPathRemote,
     setProjectBaseScaleRemote,
     setProjectCustomScaleRemote,
     setProjectStretchSettingsRemote,
     setProjectTimelineSettingsRemote,
 } from "./thunks/projectThunks";
-
 export {
     fetchTimeline,
     seekPlayhead,
@@ -134,7 +140,6 @@ export {
     playOriginal,
     stopAudioPlayback,
 } from "./thunks/transportThunks";
-
 export {
     addTrackRemote,
     createHostTrackRemote,
@@ -177,9 +182,7 @@ export {
     glueClipsRemote,
     selectClipRemote,
 } from "./thunks/timelineThunks";
-
 export { setTrackStateRemote, removeSelectedClipRemote } from "./thunks/trackThunks";
-
 export {
     refreshRuntime,
     clearWaveformCacheRemote,
@@ -187,7 +190,6 @@ export {
     loadUiSettings,
     persistUiSettings,
 } from "./thunks/runtimeThunks";
-
 export { updateMetronome } from "./thunks/transportThunks";
 export { loadModel, loadDefaultModel } from "./thunks/modelThunks";
 
@@ -213,7 +215,10 @@ export {
     importMultipleAudioFilesAtPosition,
 } from "./thunks/importThunks";
 
-export { createDefaultTimelineSnapSettings } from "./sessionSlice/settings";
+export {
+    createDefaultTimelineSnapSettings,
+    isParamBlockLayerVisible,
+} from "./sessionSlice/settings";
 
 const sessionSlice = createSlice({
     name: "session",
@@ -304,6 +309,10 @@ const sessionSlice = createSlice({
             // 不入 undo 历史（否则 Ctrl+Z 会先回退一次"不存在的内容变更"），
             // 也不标记 project.dirty（否则仅切工具就会触发"未保存"退出确认）。
             applyToolMode(state, action.payload);
+        },
+        /** 选择族子模式：参数线 range ↔ 参数块 block（进入 block 自动显示图层）。 */
+        setSelectToolMode(state, action: PayloadAction<SelectToolMode>) {
+            applySelectToolMode(state, action.payload);
         },
         setEditParam(state, action: PayloadAction<EditParam>) {
             state.editParam = action.payload;
@@ -740,26 +749,13 @@ const sessionSlice = createSlice({
             if (trackId === currentRootId) return;
             state.visibleReferenceRootTrackIds = [...state.visibleReferenceRootTrackIds, trackId];
         },
-        toggleAutoScroll(state) {
-            state.autoScrollEnabled = !state.autoScrollEnabled;
-        },
+        toggleAutoScroll: toggleAutoScrollReducer,
+        setAutoScrollMode: setAutoScrollModeReducer,
         toggleIgnoreGrouping(state) {
             state.ignoreGrouping = !state.ignoreGrouping;
         },
-        /** 循环波纹编辑模式：off → track → all → off（对应 REAPER 波纹编辑按钮的三态切换）。 */
-        cycleRippleMode(state) {
-            state.rippleMode =
-                state.rippleMode === "off" ? "track" : state.rippleMode === "track" ? "all" : "off";
-        },
-        setRippleMode(state, action: PayloadAction<"off" | "track" | "all">) {
-            if (
-                action.payload === "off" ||
-                action.payload === "track" ||
-                action.payload === "all"
-            ) {
-                state.rippleMode = action.payload;
-            }
-        },
+        toggleRippleEnabled: toggleRippleEnabledReducer,
+        setRippleScope: setRippleScopeReducer,
         toggleGroupDisabledLocal(state, action: PayloadAction<string>) {
             const idx = state.disabledGroupIds.indexOf(action.payload);
             if (idx >= 0) {
@@ -767,6 +763,12 @@ const sessionSlice = createSlice({
             } else {
                 state.disabledGroupIds.push(action.payload);
             }
+        },
+        toggleAlwaysShowParamBlocks(state) {
+            applyAlwaysShowParamBlocks(state, !state.alwaysShowParamBlocks);
+        },
+        setAlwaysShowParamBlocks(state, action: PayloadAction<boolean>) {
+            applyAlwaysShowParamBlocks(state, action.payload);
         },
         toggleParamEditorSeekPlayhead(state) {
             state.paramEditorSeekPlayheadEnabled = !state.paramEditorSeekPlayheadEnabled;
@@ -781,6 +783,10 @@ const sessionSlice = createSlice({
         toggleParamValuePopup(state) {
             state.showParamValuePopup = !state.showParamValuePopup;
         },
+        /** 切换 Clip 源音高参考线图层（视图菜单的显示开关，默认开）。 */
+        toggleClipPitchOverlay(state) {
+            state.showClipPitchOverlay = !state.showClipPitchOverlay;
+        },
         /**
          * 切换某参数纵轴标尺的展示单位（倍率 ↔ dB）。
          *
@@ -793,46 +799,22 @@ const sessionSlice = createSlice({
             const next = nextParamAxisUnit(resolveParamAxisUnit(state.paramAxisUnits, param));
             state.paramAxisUnits = { ...state.paramAxisUnits, [param]: next };
         },
-        cycleDragDirection(state, action: PayloadAction<"select" | "draw" | "vibrato">) {
-            if (action.payload === "select") {
-                const order: DragDirection[] = ["free", "x-only", "y-only"];
-                const idx = order.indexOf(state.selectDragDirection);
-                state.selectDragDirection = order[(idx + 1) % order.length];
-                return;
-            }
-            const order: DrawDragDirection[] = ["free", "x-only"];
-            if (action.payload === "draw") {
-                const idx = order.indexOf(state.drawDragDirection);
-                state.drawDragDirection = order[(idx + 1) % order.length];
-                return;
-            }
-            const idx = order.indexOf(state.lineVibratoDragDirection);
-            state.lineVibratoDragDirection = order[(idx + 1) % order.length];
+        /** 切换 pan 纵轴方向；其它参数静默忽略。 */
+        setProjectLastSaveFormat(state, action: PayloadAction<ProjectSaveFormat>) {
+            state.project.lastSaveFormat = action.payload;
         },
-        setDragDirection(
-            state,
-            action: PayloadAction<{
-                tool: "select" | "draw" | "vibrato";
-                direction: DragDirection | DrawDragDirection;
-            }>,
-        ) {
-            const { tool, direction } = action.payload;
-            if (tool === "select") {
-                if (["free", "x-only", "y-only"].includes(direction)) {
-                    state.selectDragDirection = direction as DragDirection;
-                }
-                return;
-            }
-            if (tool === "draw") {
-                if (["free", "x-only"].includes(direction)) {
-                    state.drawDragDirection = direction as DrawDragDirection;
-                }
-                return;
-            }
-            if (["free", "x-only"].includes(direction)) {
-                state.lineVibratoDragDirection = direction as DrawDragDirection;
-            }
+        toggleParamAxisDirection(state, action: PayloadAction<string>) {
+            const param = action.payload;
+            if (!isPanParam(param)) return;
+            const next = nextPanAxisDirection(
+                resolvePanAxisDirection(state.paramAxisDirections, param),
+            );
+            state.paramAxisDirections = { ...state.paramAxisDirections, [param]: next };
         },
+        /* 拖动方向的循环 / 直设住在 `./sessionSlice/dragDirection`：每个工具的可用
+           方向集不同，规则与"为什么没有开关"一并写在那里。 */
+        cycleDragDirection: cycleDragDirectionReducer,
+        setDragDirection: setDragDirectionReducer,
         setEdgeSmoothnessPercent(state, action: PayloadAction<number>) {
             state.edgeSmoothnessPercent = clamp(Number(action.payload) || 0, 0, 100);
         },
@@ -1245,6 +1227,7 @@ export const {
     markProjectEdited,
     applyTimelinePayload,
     setToolMode,
+    setSelectToolMode,
     setEditParam,
     setBpm,
     setBeats,
@@ -1274,14 +1257,20 @@ export const {
     setPitchSnapScale,
     togglePlayheadZoom,
     toggleAutoScroll,
+    setAutoScrollMode,
     toggleIgnoreGrouping,
-    cycleRippleMode,
-    setRippleMode,
+    toggleRippleEnabled,
+    setRippleScope,
+    toggleAlwaysShowParamBlocks,
+    setAlwaysShowParamBlocks,
     toggleParamEditorSeekPlayhead,
     toggleParamEditorTimelineClickSelectTrack,
     toggleClipboardPreview,
     toggleParamValuePopup,
+    toggleClipPitchOverlay,
     toggleParamAxisUnit,
+    toggleParamAxisDirection,
+    setProjectLastSaveFormat,
     cycleDragDirection,
     setDragDirection,
     setEdgeSmoothnessPercent,
@@ -1357,41 +1346,5 @@ export const {
     closeClipFormantToolWindow,
     bumpParamsEpoch,
 } = sessionSlice.actions;
-
-/**
- * 切换参数编辑器工具并落盘。
- *
- * 【为什么要一个专门的入口】`setToolMode` 在 App 与参数编辑器面板里共有 8 个
- * dispatch 点。逐个补一句 `persistUiSettings()`，等于埋 8 个"以后新增入口时忘了
- * 补"的坑；工具选择是低频动作（一次点击或一次按键），立即写一次盘的代价可以忽略。
- *
- * 【已经在这个工具上时直接返回】这让"声明式地断言工具"变成免费操作：拖拽中的
- * 预设轮转每次都要确保自己落在正确的工具上（见 `applyVibratoChoice`），若每次都
- * 写一遍盘，一次轮转就会产生两次设置写入。跳过重复项之后，只有真的换了工具才落盘。
- *
- * 【为什么里面要转型】`persistUiSettings` 自己是个 thunk，而 `createAsyncThunk`
- * 默认的 `dispatch` 只认 plain action —— 与 `importThunks` 的
- * `dispatch as unknown as TrackDispatch` 是同一手法。
- */
-export const setToolModePersistent = createAsyncThunk<ToolMode, ToolMode>(
-    "session/setToolModePersistent",
-    (mode, { dispatch, getState }) => {
-        // 读的是**派发前**的状态：派发之后它必然等于 `mode`，那样判断永远为真。
-        if ((getState() as { session: SessionState }).session.toolMode === mode) return mode;
-        dispatch(setToolMode(mode));
-        (dispatch as unknown as (action: unknown) => void)(persistUiSettings());
-        return mode;
-    },
-);
-
-export const toggleParamBlockEditPersistent = createAsyncThunk<ToolMode, void>(
-    "session/toggleParamBlockEditPersistent",
-    (_, { dispatch, getState }) => {
-        const { toolMode } = (getState() as { session: SessionState }).session;
-        const next = toggleParamBlockEditingTool(toolMode);
-        (dispatch as unknown as (action: unknown) => void)(setToolModePersistent(next));
-        return next;
-    },
-);
 
 export default sessionSlice.reducer;

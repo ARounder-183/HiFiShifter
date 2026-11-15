@@ -35,7 +35,7 @@ import {
     holdLoudnessFetch,
     isLoudnessFetchHeld,
     releaseLoudnessFetch,
-} from "../timeline/loudnessFetchGate";
+} from "../../../features/session/loudnessFetchGate";
 import { useLoudnessCurves, type LoudnessSnapshot } from "./useLoudnessCurves";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

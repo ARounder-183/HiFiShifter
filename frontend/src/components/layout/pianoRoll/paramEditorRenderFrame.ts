@@ -14,6 +14,7 @@ export interface ParamEditorRenderFrame {
     readonly curves: readonly PianoRollCurveLayer[];
     readonly samples: PianoRollParamBlockSamples | null;
     readonly baseSamples: PianoRollParamBlockSamples | null;
+    readonly currentParamDefaultValue?: number | null;
 }
 const previewViews = new WeakMap<ParamViewSegment, ParamViewSegment>();
 function composePreview(view: ParamViewSegment | null): ParamViewSegment | null {
@@ -59,6 +60,7 @@ export function createParamEditorRenderFrame(args: {
     param: string;
     view: ParamViewSegment | null;
     blocks: PianoRollParamBlockSpec | null;
+    currentParamDefaultValue?: number | null;
     curves:
         | readonly PianoRollCurveLayer[]
         | ((view: ParamViewSegment | null) => readonly PianoRollCurveLayer[]);
@@ -90,6 +92,7 @@ export function createParamEditorRenderFrame(args: {
         curves: typeof args.curves === "function" ? args.curves(view) : args.curves,
         samples: samples(view),
         baseSamples: samples(view?.preview?.base ?? view),
+        currentParamDefaultValue: args.currentParamDefaultValue,
     };
 }
 
@@ -118,5 +121,7 @@ export function resolveParamEditorBlockValue(
         param: frame.param,
         curveOwned: frame.blocks?.curveOwned,
         samples: preview && !affected ? frame.baseSamples : frame.samples,
+        fallbackValue: block.fallbackValue,
+        currentParamDefaultValue: frame.currentParamDefaultValue,
     });
 }

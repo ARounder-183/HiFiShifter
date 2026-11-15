@@ -4,6 +4,20 @@
             "resources/models/nsf_hifigan/pc_nsf_hifigan.onnx": "models/nsf_hifigan/pc_nsf_hifigan.onnx",
             "third_party/soundtouch-static/soundtouch/libSoundTouchDLL.so": "libSoundTouchDLL.so",
             "resources/linux/libwebgpu_dawn.so": "libwebgpu_dawn.so"
-        }
+        },
+        "fileAssociations": [
+            {
+                "ext": [
+                    "hshp",
+                    "hsp",
+                    "hshp-bak",
+                    "hsp-bak"
+                ],
+                "name": "HiFiShifter Project",
+                "description": "HiFiShifter Project",
+                "role": "Editor",
+                "mimeType": "application/x-hifishifter-project"
+            }
+        ]
     }
 }

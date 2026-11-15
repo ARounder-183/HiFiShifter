@@ -98,7 +98,7 @@ export interface WarpClipGeometry {
     readonly midiNoteData?: ReadonlyArray<{ endSec: number }> | null;
 }
 
-/** 手势开始时的几何快照条目（与 `clipGeometryPreviewBus` 的快照同形）。 */
+/** 手势开始时的几何快照条目（与 `ClipGeometrySnapshot` 同形）。 */
 export interface WarpClipOrigin {
     readonly clipId: string;
     readonly startSec: number;

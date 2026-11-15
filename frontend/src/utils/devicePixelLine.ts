@@ -65,3 +65,15 @@ export function verticalHairlineGeometry(
     const leftDevice = Math.round(x * ratio - physical / 2);
     return { left: leftDevice / ratio, width: physical / ratio };
 }
+
+/** Horizontal counterpart of {@link verticalHairlineGeometry}. */
+export function horizontalHairlineGeometry(
+    y: number,
+    physicalHeightPx: number,
+    dpr: number,
+): { top: number; height: number } {
+    const ratio = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+    const physical = Math.max(1, Math.round((physicalHeightPx > 0 ? physicalHeightPx : 1) * ratio));
+    const topDevice = Math.round(y * ratio - physical / 2);
+    return { top: topDevice / ratio, height: physical / ratio };
+}

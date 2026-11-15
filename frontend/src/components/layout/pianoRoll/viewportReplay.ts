@@ -60,6 +60,11 @@ export interface ViewportProjection {
     scrollLeftPx: number;
     pxPerSec: number;
     viewportWidthPx: number;
+    /** 以下字段来自交互视口总线；旧调用只传水平投影时保持可选。 */
+    viewportHeightPx?: number;
+    param?: string;
+    valueCenter?: number;
+    valueSpan?: number;
 }
 
 export interface ViewportReplayInput {
@@ -73,6 +78,13 @@ export interface ViewportReplayInput {
     pressedButtons: number;
     /** 最近一次指针移动；`null` = 还没有任何位置可重放。 */
     lastMove: PointerMoveSnapshot | null;
+    /** 此刻的修饰键（keydown/keyup 后立即更新，不取旧 pointermove 快照）。 */
+    currentModifiers?: {
+        shiftKey: boolean;
+        ctrlKey: boolean;
+        altKey: boolean;
+        metaKey: boolean;
+    };
 }
 
 /** 不重放的原因（调用方据此决定要不要打开发告警）。 */
@@ -116,7 +128,11 @@ export function isSameViewportProjection(
         previous !== null &&
         previous.scrollLeftPx === next.scrollLeftPx &&
         previous.pxPerSec === next.pxPerSec &&
-        previous.viewportWidthPx === next.viewportWidthPx
+        previous.viewportWidthPx === next.viewportWidthPx &&
+        previous.viewportHeightPx === next.viewportHeightPx &&
+        previous.param === next.param &&
+        previous.valueCenter === next.valueCenter &&
+        previous.valueSpan === next.valueSpan
     );
 }
 
@@ -155,10 +171,10 @@ export function resolveViewportReplay(input: ViewportReplayInput): ViewportRepla
             // ★ 按键状态取"此刻"，**不取** `last.buttons`（见模块头说明的坑 1）。
             buttons: input.pressedButtons,
             button: -1,
-            shiftKey: last.shiftKey,
-            ctrlKey: last.ctrlKey,
-            altKey: last.altKey,
-            metaKey: last.metaKey,
+            shiftKey: input.currentModifiers?.shiftKey ?? last.shiftKey,
+            ctrlKey: input.currentModifiers?.ctrlKey ?? last.ctrlKey,
+            altKey: input.currentModifiers?.altKey ?? last.altKey,
+            metaKey: input.currentModifiers?.metaKey ?? last.metaKey,
         },
     };
 }

@@ -62,10 +62,34 @@ export function parseTimelineClipTake(take: TimelineClipTake): ClipTakeInfo {
             channel: n.channel ?? 0,
         })),
         midiFillGaps: take.midi_fill_gaps ?? false,
-        syllableSpansSec: take.syllable_spans_sec?.map(([startSec, endSec]) => ({
+        syllableSpansSec: take.syllable_spans_sec?.map(([startSec, endSec], index) => ({
             startSec,
             endSec,
+            note: take.syllable_notes?.[index] ?? null,
+            eventId:
+                take.syllable_event_ids?.[index] ?? `${startSec.toFixed(9)}:${endSec.toFixed(9)}`,
         })),
+        syllableNotes: Array.isArray(take.syllable_notes) ? take.syllable_notes : undefined,
+        syllableEventIds: Array.isArray(take.syllable_event_ids)
+            ? take.syllable_event_ids
+            : undefined,
+        syllableAnalysisWindowSec: Array.isArray(take.syllable_analysis_window_sec)
+            ? (take.syllable_analysis_window_sec as [number, number])
+            : undefined,
+        gameBlockBaseline: take.game_block_baseline
+            ? {
+                  revision: take.game_block_baseline.revision,
+                  algorithm: take.game_block_baseline.algorithm,
+                  algorithmVersion: take.game_block_baseline.algorithm_version,
+                  sourceSpansSec: take.game_block_baseline.source_spans_sec?.map((span) => ({
+                      startSec: span.start_sec,
+                      endSec: span.end_sec,
+                      note: span.midi_note ?? null,
+                      eventId: span.event_id,
+                  })),
+                  analyzedWindowSec: take.game_block_baseline.analyzed_window_sec,
+              }
+            : undefined,
         // 宿主的非线性拉伸标记 / take 包络：插件不渲染，但前端要据此把分割/拖边显式
         // 置为只读（见 `clipHasNonlinearStretch` / `clipHasTakeEnvelope`）。
         stretchMarkers: Array.isArray(take.stretch_markers) ? take.stretch_markers : undefined,
@@ -99,6 +123,8 @@ export function parseClipTakes(clip: TimelineClip, flat: ClipInfo): ClipTakeInfo
             midiNoteData: flat.midiNoteData,
             midiFillGaps: flat.midiFillGaps ?? false,
             syllableSpansSec: flat.syllableSpansSec,
+            syllableNotes: flat.syllableNotes,
+            syllableAnalysisWindowSec: flat.syllableAnalysisWindowSec,
         },
     ];
 }
@@ -195,7 +221,12 @@ export function updateActiveTakeFromFlat(clip: ClipInfo): void {
     take.loopEnabled = clip.loopEnabled;
     take.midiNoteData = clip.midiNoteData;
     take.midiFillGaps = clip.midiFillGaps;
-    take.syllableSpansSec = clip.syllableSpansSec;
+    if (clip.syllableSpansSec !== undefined) take.syllableSpansSec = clip.syllableSpansSec;
+    if (clip.syllableNotes !== undefined) take.syllableNotes = clip.syllableNotes;
+    if (clip.syllableEventIds !== undefined) take.syllableEventIds = clip.syllableEventIds;
+    if (clip.syllableAnalysisWindowSec !== undefined)
+        take.syllableAnalysisWindowSec = clip.syllableAnalysisWindowSec;
+    if (clip.gameBlockBaseline !== undefined) take.gameBlockBaseline = clip.gameBlockBaseline;
 }
 
 /**
@@ -241,7 +272,12 @@ export function applyActiveTakeToFlat(clip: ClipInfo, take: ClipTakeInfo): void 
     clip.midiNoteData = take.midiNoteData;
     clip.midiNoteCount = take.midiNoteData?.length;
     clip.midiFillGaps = take.midiFillGaps ?? false;
-    clip.syllableSpansSec = take.syllableSpansSec;
+    if (take.syllableSpansSec !== undefined) clip.syllableSpansSec = take.syllableSpansSec;
+    if (take.syllableNotes !== undefined) clip.syllableNotes = take.syllableNotes;
+    if (take.syllableEventIds !== undefined) clip.syllableEventIds = take.syllableEventIds;
+    if (take.syllableAnalysisWindowSec !== undefined)
+        clip.syllableAnalysisWindowSec = take.syllableAnalysisWindowSec;
+    if (take.gameBlockBaseline !== undefined) clip.gameBlockBaseline = take.gameBlockBaseline;
 }
 
 /**

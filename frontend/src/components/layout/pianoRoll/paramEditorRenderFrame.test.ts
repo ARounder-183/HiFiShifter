@@ -15,14 +15,14 @@ const view: ParamViewSegment = {
     edit: [60, 60, 60, 60, 66, 66, 66, 66],
 };
 const blocks = [
-    { id: "created", startSec: 0, endSec: 0.01, averageValue: 60, selected: true, merged: false },
+    { id: "created", startSec: 0, endSec: 0.01, averageValue: 60, selected: true, grouped: false },
     {
         id: "unrelated",
         startSec: 0.02,
         endSec: 0.04,
         averageValue: 66,
         selected: false,
-        merged: false,
+        grouped: false,
     },
 ];
 const spec: PianoRollParamBlockSpec = {
@@ -33,7 +33,7 @@ const spec: PianoRollParamBlockSpec = {
     valueMax: 127,
     borderRgba: [1, 1, 1, 1],
     selectedRgba: [1, 1, 1, 1],
-    mergedRgba: [1, 1, 1, 1],
+    groupedRgba: [1, 1, 1, 1],
 };
 function preview() {
     return {

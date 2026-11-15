@@ -22,7 +22,14 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { PLAYHEAD_COLOR_TOKEN, resolvePianoRollColors } from "./colors";
+import {
+    CLIP_PITCH_OVERLAY_COLORS_DARK,
+    CLIP_PITCH_OVERLAY_COLORS_LIGHT,
+    CLIP_PITCH_OVERLAY_COLOR_COUNT,
+    PLAYHEAD_COLOR_TOKEN,
+    resolveClipPitchOverlayColor,
+    resolvePianoRollColors,
+} from "./colors";
 import { getBuiltinThemeColors } from "../../../theme/defaultThemes";
 
 /** 解析 `#rrggbb` 为 0..255 的三通道。 */
@@ -122,5 +129,123 @@ describe("播放头颜色同源（画布 ↔ 标尺）", () => {
         expect(PLAYHEAD_COLOR_TOKEN).toBe("var(--qt-playhead)");
         expect(getBuiltinThemeColors("dark")["qt-playhead"]).toBeDefined();
         expect(getBuiltinThemeColors("light")["qt-playhead"]).toBeDefined();
+    });
+});
+
+/**
+ * sRGB → CIELAB（D65）。
+ *
+ * 只为本文件的距离门禁服务：ΔE 在 Lab 下才与"看起来差多少"大致成正比，
+ * 直接在 RGB 里比欧氏距离会把亮色之间的差异严重高估。
+ */
+function toLab(rgb: readonly number[]): [number, number, number] {
+    const linear = (channel: number) => {
+        const value = channel / 255;
+        return value <= 0.04045 ? value / 12.92 : Math.pow((value + 0.055) / 1.055, 2.4);
+    };
+    const [r, g, b] = [linear(rgb[0]), linear(rgb[1]), linear(rgb[2])];
+    const x = (r * 0.4124564 + g * 0.3575761 + b * 0.1804375) / 0.95047;
+    const y = r * 0.2126729 + g * 0.7151522 + b * 0.072175;
+    const z = (r * 0.0193339 + g * 0.119192 + b * 0.9503041) / 1.08883;
+    const f = (t: number) => (t > 216 / 24389 ? Math.cbrt(t) : (841 / 108) * t + 4 / 29);
+    const [fx, fy, fz] = [f(x), f(y), f(z)];
+    return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)];
+}
+
+/** CIE76 色差。 */
+function deltaE(
+    a: readonly [number, number, number],
+    b: readonly [number, number, number],
+): number {
+    return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+}
+
+/**
+ * Clip 身份调色板 · 可区分性与语义色距离。
+ *
+ * 【为什么必须是一条会失败的测试】"这条曲线和那条曲线颜色一样"是用户最先看到的
+ * 现象，却完全不会被类型检查抓到 —— 上一版就是因为所有 Clip 默认 emerald、
+ * 调色板又只有 5 个色名，于是所有曲线同色，用户根本分不清哪条线属于哪个 Clip。
+ * 把"两两可分"与"不撞语义色"写成 ΔE 断言，后续调色才不可能悄悄退化。
+ */
+describe("Clip 身份调色板", () => {
+    /** 与语义色（编辑白 / 基线灰 / 选区青蓝 / 音阶琥珀 / 播放头红）的最小允许 ΔE。 */
+    const SEMANTIC: ReadonlyArray<{ name: string; rgb: [number, number, number]; min: number }> = [
+        { name: "编辑主线（白）", rgb: [255, 255, 255], min: 34 },
+        { name: "合成基线（灰）", rgb: [200, 200, 200], min: 27 },
+        { name: "选区高亮（青蓝）", rgb: [100, 200, 255], min: 20 },
+        { name: "音阶高亮（琥珀）", rgb: [255, 200, 80], min: 25 },
+        { name: "播放头（红）", rgb: [240, 90, 90], min: 22 },
+    ];
+
+    for (const [label, palette] of [
+        ["深色主题", CLIP_PITCH_OVERLAY_COLORS_DARK],
+        ["浅色主题", CLIP_PITCH_OVERLAY_COLORS_LIGHT],
+    ] as const) {
+        it(`${label}：任意两色 ΔE ≥ 24（两两可分）`, () => {
+            const labs = palette.map((css) => toLab(parseCssColor(css)));
+            const tooClose: string[] = [];
+            for (let i = 0; i < labs.length; i += 1) {
+                for (let j = i + 1; j < labs.length; j += 1) {
+                    const distance = deltaE(labs[i]!, labs[j]!);
+                    if (distance < 24) {
+                        tooClose.push(`${palette[i]} ↔ ${palette[j]} = ${distance.toFixed(1)}`);
+                    }
+                }
+            }
+            expect(tooClose).toEqual([]);
+        });
+
+        it(`${label}：与语义色保持距离（不会被误读成选中 / 高亮 / 播放头）`, () => {
+            const violations: string[] = [];
+            palette.forEach((css) => {
+                const lab = toLab(parseCssColor(css));
+                for (const semantic of SEMANTIC) {
+                    const distance = deltaE(lab, toLab(semantic.rgb));
+                    if (distance < semantic.min) {
+                        violations.push(
+                            `${css} 距「${semantic.name}」只有 ${distance.toFixed(1)}（需 ≥ ${semantic.min}）`,
+                        );
+                    }
+                }
+            });
+            expect(violations).toEqual([]);
+        });
+    }
+
+    it("两套主题同色相、只差明度（切主题不重新洗牌）", () => {
+        expect(CLIP_PITCH_OVERLAY_COLORS_LIGHT).toHaveLength(CLIP_PITCH_OVERLAY_COLORS_DARK.length);
+        expect(CLIP_PITCH_OVERLAY_COLORS_DARK).toHaveLength(CLIP_PITCH_OVERLAY_COLOR_COUNT);
+        const hue = (rgb: readonly number[]) => {
+            const [r, g, b] = rgb;
+            const max = Math.max(r, g, b);
+            const min = Math.min(r, g, b);
+            if (max === min) return 0;
+            const d = max - min;
+            let h: number;
+            if (max === r) h = ((g - b) / d) % 6;
+            else if (max === g) h = (b - r) / d + 2;
+            else h = (r - g) / d + 4;
+            return (((h * 60) % 360) + 360) % 360;
+        };
+        CLIP_PITCH_OVERLAY_COLORS_DARK.forEach((css, index) => {
+            const darkHue = hue(parseCssColor(css));
+            const lightHue = hue(parseCssColor(CLIP_PITCH_OVERLAY_COLORS_LIGHT[index]!));
+            const diff = Math.abs(darkHue - lightHue);
+            expect(Math.min(diff, 360 - diff)).toBeLessThanOrEqual(6);
+        });
+    });
+
+    it("越界索引自动回绕，且色值 alpha 恒为 1", () => {
+        expect(resolveClipPitchOverlayColor(0, true)).toBe(CLIP_PITCH_OVERLAY_COLORS_DARK[0]);
+        expect(resolveClipPitchOverlayColor(CLIP_PITCH_OVERLAY_COLOR_COUNT, true)).toBe(
+            CLIP_PITCH_OVERLAY_COLORS_DARK[0],
+        );
+        expect(resolveClipPitchOverlayColor(-1, true)).toBe(
+            CLIP_PITCH_OVERLAY_COLORS_DARK[CLIP_PITCH_OVERLAY_COLOR_COUNT - 1],
+        );
+        for (const palette of [CLIP_PITCH_OVERLAY_COLORS_DARK, CLIP_PITCH_OVERLAY_COLORS_LIGHT]) {
+            for (const css of palette) expect(parseCssColor(css)[3]).toBe(1);
+        }
     });
 });

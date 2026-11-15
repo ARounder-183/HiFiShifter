@@ -201,40 +201,30 @@ const mockParamWrites = new Map<string, Map<number, number>>();
 
 /** mock 的 v7 音节块分析：按固定 0.55s 切片，仅浏览器实验用。 */
 const mockSyllableSpans = new Map<string, Array<{ startSec: number; endSec: number }>>();
+/**
+ * Mock analyses cover the whole source; avoids an infinite reanalysis loop.
+ *
+ * 窗口从 spans 派生：此前这里调用 `buildMockTimeline()` 反查 clip，而 timeline
+ * 又嵌入 `syllable_analysis_window_sec: mockSyllableWindow(...)`——一旦 spans
+ * 存在就互为调用，`RangeError: Maximum call stack size exceeded`。
+ * 未分析时返回 `[0, 0]`，与真实后端"未分析窗口为零"的口径一致。
+ */
+const mockSyllableWindow = (clipId: string): [number, number] => {
+    const spans = mockSyllableSpans.get(clipId);
+    if (!spans || spans.length === 0) {
+        return [0, 0];
+    }
+    return [0, spans[spans.length - 1].endSec];
+};
 
-/** mock 的 v7 手动合并记录（root track → 记录）。 */
-const mockParamBlockMerges = new Map<
+/** mock 的参数块派生视图（root track → view）。 */
+const mockParamBlockViews = new Map<
     string,
-    Array<{
-        mergedGroupId: string;
-        memberRefs: Array<{
-            clipId: string;
-            takeId: string;
-            syllableId: string;
-            startSec: number;
-            endSec: number;
-        }>;
-    }>
->();
-
-/** mock 的 v7 手动切分 / 伸缩记录（root track → 记录）。 */
-const mockParamBlockEdits = new Map<
-    string,
-    Array<{
-        editId: string;
-        memberRefs: Array<{
-            clipId: string;
-            takeId: string;
-            syllableId: string;
-            sourceStartSec: number;
-            sourceEndSec: number;
-        }>;
-        startSec: number;
-        endSec: number;
-        memberStartSec?: number;
-        memberEndSec?: number;
-        blockIds?: string[];
-    }>
+    {
+        editRevision: number;
+        blocks: unknown[];
+        edits: { schemaVersion: 2; revision: number; blocks: unknown[] };
+    }
 >();
 
 function mockParamWriteKey(trackId: string, param: string): string {
@@ -268,6 +258,9 @@ const mockUiSettings: Record<string, unknown> = {
     pitchSnapScale: "C",
     playheadZoom: false,
     autoScroll: false,
+    autoScrollMode: "scroll",
+    rippleEnabled: false,
+    rippleMode: "track",
     showClipboardPreview: true,
     showParamValuePopup: true,
     lockParamLines: true,
@@ -454,6 +447,14 @@ function buildMockTimeline(): Record<string, unknown> {
                                                     ],
                                             )
                                       : undefined,
+                                  syllable_notes: mockSyllableSpans
+                                      .get(`${trackId}-clip-1`)
+                                      ?.map(() => null),
+                                  syllable_analysis_window_sec: mockSyllableSpans.has(
+                                      `${trackId}-clip-1`,
+                                  )
+                                      ? mockSyllableWindow(`${trackId}-clip-1`)
+                                      : undefined,
                               },
                               {
                                   id: `${trackId}-take-2`,
@@ -486,6 +487,14 @@ function buildMockTimeline(): Record<string, unknown> {
                                                         number,
                                                     ],
                                             )
+                                      : undefined,
+                                  syllable_notes: mockSyllableSpans
+                                      .get(`${trackId}-clip-${index + 1}`)
+                                      ?.map(() => null),
+                                  syllable_analysis_window_sec: mockSyllableSpans.has(
+                                      `${trackId}-clip-${index + 1}`,
+                                  )
+                                      ? mockSyllableWindow(`${trackId}-clip-${index + 1}`)
                                       : undefined,
                               },
                           ],
@@ -541,6 +550,11 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
                 clipId,
                 takeId: `${clipId}_take_1`,
                 sourceSpansSec: spans,
+                sourceNotes: spans.map(() => null),
+                sourceEventIds: spans.map(
+                    (span) => `${span.startSec.toFixed(9)}:${span.endSec.toFixed(9)}`,
+                ),
+                analyzedWindowSec: mockSyllableWindow(clipId),
                 algorithm: "level_vad+pitch_stability+spectral_onset",
                 algorithmVersion: 1,
                 analyzed: spans.length > 0,
@@ -569,26 +583,86 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
                 clipId,
                 takeId: `${clipId}_take_1`,
                 sourceSpansSec: spans,
+                sourceNotes: spans.map(() => null),
+                sourceEventIds: spans.map(
+                    (span) => `${span.startSec.toFixed(9)}:${span.endSec.toFixed(9)}`,
+                ),
+                analyzedWindowSec: mockSyllableWindow(clipId),
                 algorithm: "level_vad+pitch_stability+spectral_onset",
                 algorithmVersion: 1,
                 analyzed: spans.length > 0,
             };
         },
-        get_param_block_merges: (...args: unknown[]) => ({
-            ok: true,
-            records: mockParamBlockMerges.get(String(args[0] ?? "")) ?? [],
-            intervalEdits: mockParamBlockEdits.get(String(args[0] ?? "")) ?? [],
-        }),
-        set_param_block_merges: (...args: unknown[]) => {
-            mockParamBlockMerges.set(
-                String(args[0] ?? ""),
-                Array.isArray(args[1]) ? (args[1] as never[]) : [],
-            );
-            mockParamBlockEdits.set(
-                String(args[0] ?? ""),
-                Array.isArray(args[2]) ? (args[2] as never[]) : [],
-            );
-            return { ok: true };
+        get_param_block_view: (...args: unknown[]) => {
+            const root = String(args[0] ?? "");
+            const stored = mockParamBlockViews.get(root) ?? {
+                editRevision: 0,
+                blocks: [],
+                edits: { schemaVersion: 2, revision: 0, blocks: [] },
+            };
+            return {
+                ok: true,
+                editRevision: stored.editRevision,
+                layoutKey: "",
+                framePeriodMs: 5,
+                blocks: stored.blocks,
+                orphanCount: 0,
+                analysisPending: false,
+                curveRevision: 0,
+                edits: stored.edits,
+            };
+        },
+        set_param_block_edits: (...args: unknown[]) => {
+            const input = (args[0] ?? {}) as {
+                rootTrackId?: string;
+                expectedEditRevision?: number;
+                edits?: unknown[];
+            };
+            const root = String(input.rootTrackId ?? "");
+            const current = mockParamBlockViews.get(root);
+            const expected = input.expectedEditRevision ?? 0;
+            if (current && current.editRevision !== expected) {
+                throw new Error("Conflict: parameter block edits changed");
+            }
+            const edits = {
+                schemaVersion: 2 as const,
+                revision: expected + 1,
+                blocks: Array.isArray(input.edits) ? input.edits : [],
+            };
+            mockParamBlockViews.set(root, { editRevision: edits.revision, blocks: [], edits });
+            return {
+                ok: true,
+                editRevision: edits.revision,
+                layoutKey: "",
+                framePeriodMs: 5,
+                blocks: [],
+                orphanCount: 0,
+                analysisPending: false,
+                curveRevision: 0,
+                edits,
+            };
+        },
+        restore_game_param_blocks: (...args: unknown[]) => {
+            const input = (args[0] ?? {}) as { rootTrackId?: string };
+            const root = String(input.rootTrackId ?? "");
+            const current = mockParamBlockViews.get(root);
+            const edits = {
+                schemaVersion: 2 as const,
+                revision: (current?.editRevision ?? 0) + 1,
+                blocks: [],
+            };
+            mockParamBlockViews.set(root, { editRevision: edits.revision, blocks: [], edits });
+            return {
+                ok: true,
+                editRevision: edits.revision,
+                layoutKey: "",
+                framePeriodMs: 5,
+                blocks: [],
+                orphanCount: 0,
+                analysisPending: false,
+                curveRevision: 0,
+                edits,
+            };
         },
         ping: () => ({ ok: true }),
         get_runtime_info: () => ({

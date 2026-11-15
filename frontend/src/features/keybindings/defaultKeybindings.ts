@@ -9,10 +9,10 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     // 模式切换
     "mode.toggle": [{ key: "tab" }],
     "mode.selectTool": [{ key: "f7" }],
-    "mode.toggleBlockEdit": [{ key: "`" }, { key: "`", shift: true }],
+    "mode.toggleBlockSelection": [{ key: "`" }, { key: "`", shift: true }],
     "mode.drawTool": [{ key: "f8" }],
-    // 直线与颤音是两种工具（直线 ≡ 颤音 + 直线预设），因此各占一个键；
-    // F7→F10 与工具栏右键菜单里的排列顺序一致。
+    // F7 是选择族的参数线直达键；F8–F10 是绘制族三种工具。
+    // `~` 负责选择族内部的 range ↔ block，Tab 负责两个工具族之间切换。
     "mode.lineTool": [{ key: "f9" }],
     "mode.vibratoTool": [{ key: "f10" }],
 
@@ -81,6 +81,11 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "project.open": [{ key: "o", ctrl: true, shift: true }],
     "project.save": [{ key: "s", ctrl: true }],
     "project.saveAs": [{ key: "s", ctrl: true, shift: true }],
+    // 三种格式的直存动作与「导入特定文件」同一范式：**默认不占键位**（格式选择
+    // 本身是低频决定，绑死默认键只会挤掉用户真正想要的组合），但可在此绑定。
+    "project.saveAsHshp": [{ key: "__none__" }],
+    "project.saveAsJson": [{ key: "__none__" }],
+    "project.saveAsZip": [{ key: "__none__" }],
     "project.export": [{ key: "e", ctrl: true }],
     "project.importMedia": [{ key: "o", ctrl: true }],
     "project.importMidi": [{ key: "__none__" }],
@@ -146,6 +151,17 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     // 期间按下同一键可即时切换本次拖拽的方向 —— 触控板用户无法在按住左键
     // 的同时按下右键，这条键位是「右键拖拽中切换方向」的等价替代。
     "pianoRoll.cycleDragDirection": [{ key: "d" }],
+
+    // 参数块操作（仅在参数编辑器 + 参数块选择模式下激活）
+    "paramBlock.split": [{ key: "s" }],
+    "paramBlock.delete": [{ key: "delete" }, { key: "backspace" }],
+    "paramBlock.group": [{ key: "g" }],
+    "paramBlock.ungroup": [{ key: "u" }],
+    "paramBlock.selectAll": [{ key: "a", ctrl: true }],
+    "paramBlock.deselect": [{ key: "__none__" }],
+    "paramBlock.restoreGame": [{ key: "__none__" }],
+    "paramBlock.restoreDeleted": [{ key: "__none__" }],
+    "paramBlock.normalizePitch": [{ key: "__none__" }],
 
     // 修饰键行为
     // 多选切换默认为主修饰键（Windows: Ctrl / macOS: ⌘），对齐文件管理器
@@ -233,6 +249,13 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     // （与时间轴 ⌘/Ctrl + 点击的多选切换同源语义）。默认主修饰键，macOS 上
     // 由 ctrl 字段自动映射为 ⌘（见 platform.ts）。
     "modifier.paramMultiSelect": [{ key: "control", modifierOnly: true, ctrl: true }],
+    // 参数块范围选择：与 Clip 的 Shift 点击同义，从上次点击的锚点扩展到目标块。
+    "modifier.paramRangeSelect": [{ key: "shift", modifierOnly: true, shift: true }],
+    // 参数块选择模式：点击与拖拽是两种可区分手势，因此 Alt 可以同时承担
+    // 「块上点击分割」与「空白拖拽新建」；Ctrl+Alt 在空白处额外表示拉平新建。
+    "modifier.paramBlockSplitAtClick": [{ key: "alt", modifierOnly: true, alt: true }],
+    "modifier.paramBlockCreate": [{ key: "alt", modifierOnly: true, alt: true }],
+    "modifier.paramBlockCreateFlat": [{ key: "alt", modifierOnly: true, ctrl: true, alt: true }],
     "modifier.paramFineAdjust": [{ key: "control", modifierOnly: true, ctrl: true }],
     "modifier.vibratoAmplitudeAdjust": [{ key: "__none__", modifierOnly: true }],
     "modifier.vibratoFrequencyAdjust": [{ key: "alt", modifierOnly: true, alt: true }],
@@ -256,8 +279,8 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
 export const ACTION_META: Record<ActionId, ActionMeta> = {
     "mode.toggle": { labelKey: "kb_mode_toggle", group: "mode" },
     "mode.selectTool": { labelKey: "kb_mode_select_tool", group: "mode" },
-    "mode.toggleBlockEdit": {
-        labelKey: "kb_mode_toggle_block_edit",
+    "mode.toggleBlockSelection": {
+        labelKey: "kb_mode_toggle_block_selection",
         group: "mode",
     },
     "mode.drawTool": { labelKey: "kb_mode_draw_tool", group: "mode" },
@@ -360,6 +383,9 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
     "project.open": { labelKey: "kb_project_open", group: "project" },
     "project.save": { labelKey: "kb_project_save", group: "project" },
     "project.saveAs": { labelKey: "kb_project_save_as", group: "project" },
+    "project.saveAsHshp": { labelKey: "kb_project_save_as_hshp", group: "project" },
+    "project.saveAsJson": { labelKey: "kb_project_save_as_json", group: "project" },
+    "project.saveAsZip": { labelKey: "kb_project_save_as_zip", group: "project" },
     "project.export": { labelKey: "kb_project_export", group: "project" },
     "project.importMedia": { labelKey: "kb_project_import_media", group: "project" },
     "project.importMidi": { labelKey: "kb_project_import_midi", group: "project" },
@@ -504,6 +530,53 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         group: "pianoRoll",
     },
 
+    // ── 参数块操作 ─────────────────────────────────────────────
+    "paramBlock.split": {
+        labelKey: "kb_param_block_split",
+        group: "paramBlock",
+        scopedContext: "paramEditorBlock",
+    },
+    "paramBlock.delete": {
+        labelKey: "kb_param_block_delete",
+        group: "paramBlock",
+        scopedContext: "paramEditorBlock",
+    },
+    "paramBlock.group": {
+        labelKey: "kb_param_block_group",
+        group: "paramBlock",
+        scopedContext: "paramEditorBlock",
+    },
+    "paramBlock.ungroup": {
+        labelKey: "kb_param_block_ungroup",
+        group: "paramBlock",
+        scopedContext: "paramEditorBlock",
+    },
+    "paramBlock.selectAll": {
+        labelKey: "kb_param_block_select_all",
+        group: "paramBlock",
+        scopedContext: "paramEditorBlock",
+    },
+    "paramBlock.deselect": {
+        labelKey: "kb_param_block_deselect",
+        group: "paramBlock",
+        scopedContext: "paramEditorBlock",
+    },
+    "paramBlock.restoreGame": {
+        labelKey: "kb_param_block_restore_game",
+        group: "paramBlock",
+        scopedContext: "paramEditorBlock",
+    },
+    "paramBlock.restoreDeleted": {
+        labelKey: "kb_param_block_restore_deleted",
+        group: "paramBlock",
+        scopedContext: "paramEditorBlock",
+    },
+    "paramBlock.normalizePitch": {
+        labelKey: "kb_param_block_normalize_pitch",
+        group: "paramBlock",
+        scopedContext: "paramEditorBlock",
+    },
+
     // ── 修饰键 · 音频块选择与拖拽（时间轴） ────────────────────
     "modifier.clipMultiSelectToggle": {
         labelKey: "kb_modifier_clip_multi_select_toggle",
@@ -588,6 +661,34 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         //   按键时多选会完全失效。
         // 与之不同目标的场景（时间轴 clip.select、滚轮场景）不列入，避免误报。
         conflictScenes: ["roll.select", "roll.paramDrag", "roll.paramEdge"],
+    },
+    "modifier.paramRangeSelect": {
+        labelKey: "kb_modifier_param_range_select",
+        group: "modParam",
+        modifierOperationType: "click",
+        // 块选择与参数选区框选是同一场景；与 clipNoSnap 的 drag 语义不冲突。
+        conflictScenes: ["roll.select"],
+    },
+    "modifier.paramBlockSplitAtClick": {
+        labelKey: "kb_modifier_param_block_split_at_click",
+        group: "modParam",
+        modifierOperationType: "click",
+        // 与 Shift 范围选择、Ctrl 多选同处块选择场景；同一修饰键的
+        // click 与 drag 绑定不互相冲突（Alt 同时用于新建就是靠这一点）。
+        conflictScenes: ["roll.select"],
+    },
+    "modifier.paramBlockCreate": {
+        labelKey: "kb_modifier_param_block_create",
+        group: "modParam",
+        modifierOperationType: "drag",
+        // 创建只发生在空白处；与 Ctrl 多选的空白拖拽共享同一场景。
+        conflictScenes: ["roll.select"],
+    },
+    "modifier.paramBlockCreateFlat": {
+        labelKey: "kb_modifier_param_block_create_flat",
+        group: "modParam",
+        modifierOperationType: "drag",
+        conflictScenes: ["roll.select"],
     },
     // 参数编辑器：拖动参数选区边缘 = 拉伸选区。与时间轴的 `modifier.clipStretch`
     // **分离**（此前共用同一个 action，改一处会同时改另一处）。默认同为 Alt，
@@ -763,6 +864,7 @@ export const GROUP_LABEL_KEYS: Record<ActionMeta["group"], string> = {
     clip: "kb_group_clip",
     pianoRoll: "kb_group_pianoroll",
     paramEditor: "kb_group_param_editor",
+    paramBlock: "kb_group_param_block",
     quickSearch: "kb_group_quick_search",
     layout: "kb_group_layout",
     host: "kb_group_host",
@@ -792,6 +894,7 @@ export const GROUP_NAV_LABEL_KEYS: Partial<Record<ActionMeta["group"], string>> 
     project: "kb_group_project_nav",
     clip: "kb_group_clip_nav",
     paramEditor: "kb_group_param_editor_nav",
+    paramBlock: "kb_group_param_block_nav",
     modClip: "kb_group_mod_clip_nav",
     modFade: "kb_group_mod_fade_nav",
     modParam: "kb_group_mod_param_nav",
@@ -812,6 +915,7 @@ export const ACTION_GROUP_ORDER: ActionMeta["group"][] = [
     "clip",
     "pianoRoll",
     "paramEditor",
+    "paramBlock",
     "quickSearch",
     "layout",
     "host",

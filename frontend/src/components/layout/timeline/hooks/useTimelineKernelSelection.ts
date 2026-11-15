@@ -384,7 +384,7 @@ export function useTimelineKernelSelection({
             setRateEditorClipId(clipId);
             setRateEditorPosition({ x: screenX, y: screenY });
         },
-        [],
+        [setRateEditorClipId, setRateEditorPosition],
     );
 
     /**

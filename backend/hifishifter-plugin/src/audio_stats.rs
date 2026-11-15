@@ -47,6 +47,33 @@ pub fn panic_count() -> u64 {
     AUDIO_PANIC_COUNT.load(Ordering::Relaxed)
 }
 
+/// 音频回调里被拒绝的块数（状态非法 / 并发调用），按原因分开记。
+///
+/// 【为什么是计数而不是日志】宿主在错误状态下会**逐块**反复调 process；每个块
+/// 打一条 `log::error!` 就会在音频线程上抢文件日志锁（见
+/// `realtime_callbacks_do_not_enter_the_file_logger`）。VST3 的同等路径也是零日志、
+/// 只写原子量，两种格式因此共用这里的进程级读数。
+static AUDIO_INVALID_STATE_COUNT: AtomicU64 = AtomicU64::new(0);
+static AUDIO_CONCURRENT_PROCESS_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// 记一次"实例未处于 active/processing 状态"的拒绝（**音频线程**：一次原子加）。
+pub fn note_invalid_state_rejection() {
+    AUDIO_INVALID_STATE_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// 记一次"同一实例并发 process"的拒绝（**音频线程**：一次原子加）。
+pub fn note_concurrent_process_rejection() {
+    AUDIO_CONCURRENT_PROCESS_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// 被拒绝的块数：`(状态非法, 并发调用)`（诊断用）。
+pub fn rejection_stats() -> (u64, u64) {
+    (
+        AUDIO_INVALID_STATE_COUNT.load(Ordering::Relaxed),
+        AUDIO_CONCURRENT_PROCESS_COUNT.load(Ordering::Relaxed),
+    )
+}
+
 /// 记一次块耗时：超阈值才碰原子量。
 pub fn note_block_elapsed(elapsed: Duration) {
     if elapsed < AUDIO_SLOW_BLOCK {
@@ -67,20 +94,13 @@ pub fn slow_block_stats() -> (u64, u64) {
     )
 }
 
-/// 输出写满审计是否开启（`HIFISHIFTER_BUFFER_AUDIT=1`）。
-///
-/// 【为什么用环境变量而不是设置项】它是排查工具，不是产品行为；用户永远不会打开它，
-/// 而我们要能在不改构建的情况下让用户跑一遍。读一次就缓存。
+/// 输出写满审计是否开启（由「帮助 → 日志详细程度」的「高」档驱动）。
 ///
 /// 【为什么两种格式共用这一份】审计的对象是**输出平面有没有被写满**，而输出平面
 /// 由共享的 `render_block` 写入 —— 外壳不同，漏写的分支却是同一批。
+/// 音频线程只写原子量，开关本身也在预热时读一次。
 pub fn buffer_audit_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("HIFISHIFTER_BUFFER_AUDIT")
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-    })
+    hifishifter_kernel::log_policy::probes_enabled()
 }
 
 #[cfg(test)]
@@ -106,5 +126,17 @@ mod tests {
         note_panic();
         note_panic();
         assert_eq!(panic_count(), before + 2);
+    }
+
+    /// 两类拒绝计数互相独立、只增不减：音频线程的拒绝不能靠日志核对。
+    #[test]
+    fn rejections_are_counted_per_reason() {
+        let (invalid_before, concurrent_before) = rejection_stats();
+        note_invalid_state_rejection();
+        note_invalid_state_rejection();
+        note_concurrent_process_rejection();
+        let (invalid, concurrent) = rejection_stats();
+        assert_eq!(invalid, invalid_before + 2);
+        assert_eq!(concurrent, concurrent_before + 1);
     }
 }

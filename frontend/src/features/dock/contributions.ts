@@ -20,6 +20,7 @@
  */
 import { useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
+import { frontendLog } from "../../services/frontendLog";
 
 /** 贡献点种类。 */
 export type ContributionKind = "toolbarItem" | "panelTabMenuItem" | "command";
@@ -99,7 +100,7 @@ function notify(): void {
 function register<T extends { id: string }>(kind: ContributionKind, item: T): () => void {
     const registry = registries[kind];
     if (registry.items.has(item.id)) {
-        console.warn(`[contrib] ${kind} "${item.id}" registered twice; replacing`);
+        frontendLog("warn", `[contrib] ${kind} "${item.id}" registered twice; replacing`);
     }
     registry.items.set(item.id, item);
     notify();

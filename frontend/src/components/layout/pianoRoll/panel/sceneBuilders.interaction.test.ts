@@ -23,7 +23,7 @@ function layersWith(interaction: ParamViewSegment | null, frameView?: ParamViewS
     return buildCurveLayers(
         {
             clipboardRef: { current: null },
-            detectedPitchCurves: [],
+            clipPitchOverlays: [],
             editParam: "pitch",
             liveEditOverrideRef: { current: null },
             paramView: canonical,

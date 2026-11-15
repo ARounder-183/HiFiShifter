@@ -1,0 +1,109 @@
+{
+    "framePeriodMs": 5,
+    "clips": [
+        {
+            "id": "A",
+            "trackId": "root",
+            "startSec": 0,
+            "lengthSec": 2,
+            "sourceStartSec": 1,
+            "sourceEndSec": 3,
+            "playbackRate": 1,
+            "reversed": false,
+            "loopEnabled": false,
+            "contentDurationSec": 3,
+            "syllableSpansSec": [
+                {
+                    "startSec": 0.6,
+                    "endSec": 1.4,
+                    "note": 64
+                }
+            ],
+            "syllableAnalysisWindowSec": [0.6, 3],
+            "activeTakeId": "take",
+            "takes": [
+                {
+                    "id": "take",
+                    "sourceStartSec": 1,
+                    "sourceEndSec": 3,
+                    "playbackRate": 1,
+                    "reversed": false,
+                    "loopEnabled": false,
+                    "syllableSpansSec": [
+                        {
+                            "startSec": 0.6,
+                            "endSec": 1.4,
+                            "note": 64
+                        }
+                    ],
+                    "syllableAnalysisWindowSec": [0.6, 3],
+                    "syllableEventIds": ["0.600000000:1.400000000"]
+                }
+            ],
+            "syllableEventIds": ["0.600000000:1.400000000"]
+        },
+        {
+            "id": "B",
+            "trackId": "root",
+            "startSec": 0.5,
+            "lengthSec": 1,
+            "sourceStartSec": 1.2,
+            "sourceEndSec": 2.2,
+            "playbackRate": 1,
+            "reversed": false,
+            "loopEnabled": false,
+            "contentDurationSec": 2.2,
+            "syllableSpansSec": [
+                {
+                    "startSec": 1.18,
+                    "endSec": 1.5,
+                    "note": 62
+                }
+            ],
+            "syllableAnalysisWindowSec": [1.18, 2.2],
+            "activeTakeId": "take",
+            "takes": [
+                {
+                    "id": "take",
+                    "sourceStartSec": 1.2,
+                    "sourceEndSec": 2.2,
+                    "playbackRate": 1,
+                    "reversed": false,
+                    "loopEnabled": false,
+                    "syllableSpansSec": [
+                        {
+                            "startSec": 1.18,
+                            "endSec": 1.5,
+                            "note": 62
+                        }
+                    ],
+                    "syllableAnalysisWindowSec": [1.18, 2.2],
+                    "syllableEventIds": ["1.180000000:1.500000000"]
+                }
+            ],
+            "syllableEventIds": ["1.180000000:1.500000000"]
+        }
+    ],
+    "expected": [
+        {
+            "startFrame": 0,
+            "endFrameExclusive": 80,
+            "kind": "base",
+            "cutStart": true,
+            "cutEnd": false,
+            "sourceKey": "A|take|0",
+            "sourceNote": 64,
+            "sourceEventId": "0.600000000:1.400000000"
+        },
+        {
+            "startFrame": 100,
+            "endFrameExclusive": 160,
+            "kind": "base",
+            "cutStart": true,
+            "cutEnd": false,
+            "sourceKey": "B|take|0",
+            "sourceNote": 62,
+            "sourceEventId": "1.180000000:1.500000000"
+        }
+    ]
+}

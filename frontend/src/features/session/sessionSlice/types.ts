@@ -10,6 +10,7 @@ import type {
     EditParam,
     GridSize,
     PitchSnapUnit,
+    SelectToolMode,
     SplitTransitionCurveType,
     TimelineSnapSettings,
     TimeUnit,
@@ -17,7 +18,6 @@ import type {
     SilenceDetectSettings,
     TrackMeterInfo,
     ToolMode,
-    ToolModeGroup,
     TrackInfo,
 } from "../sessionTypes";
 import type { SearchSettings } from "../../search/searchSettings";
@@ -29,7 +29,11 @@ import type {
     RenderCacheSettings,
 } from "../../../services/api/settings";
 import type { ParamAxisUnits } from "../../../components/layout/pianoRoll/paramAxisUnits";
+import type { PanAxisDirections } from "../../../components/layout/pianoRoll/paramPan";
+import type { ProjectSaveFormat } from "../../../services/api/project";
 import type { CustomScalePreset } from "../../../utils/customScales";
+import type { AutoScrollMode } from "../../../utils/autoFollowScroll";
+import type { RippleScope } from "../rippleMode";
 import type { BaselineMode, VibratoPreset } from "../../vibrato/vibratoTypes";
 
 export type { FadeCurveType } from "../sessionTypes";
@@ -42,7 +46,7 @@ export type {
     EditParam,
     GridSize,
     ToolMode,
-    ToolModeGroup,
+    SelectToolMode,
     TrackInfo,
 };
 
@@ -66,7 +70,8 @@ export type ParamSelectionSnapshot = Array<{ startFrame: number; frameCount: num
 
 export interface SessionState {
     toolMode: ToolMode;
-    toolModeGroup: ToolModeGroup;
+    /** 选择族的当前 / 上次子模式；block 只在选择族激活时参与派生。 */
+    selectToolMode: SelectToolMode;
     drawToolMode: DrawToolMode;
     editParam: EditParam;
     bpm: number;
@@ -115,21 +120,48 @@ export interface SessionState {
     pitchSnapScale: import("../../../utils/musicalScales").ScaleKey;
     /** 新建块后把音高按原曲线形状归一化到音阶。 */
     paramBlockFollowPitch: boolean;
+    /**
+     * 参数块图层是否**始终**显示（功能设置，随 UiSettings 落盘，默认关）。
+     *
+     * 【为什么不是「当前是否可见」】可见性是 alwaysShowParamBlocks 与
+     * isBlockSelectionActive(...) 的派生结果。把它存成状态就会出现三个写入者
+     * （用户 / 进块模式 / 水合），并且必须靠「关图层就收回 range」来维持自洽 ——
+     * 一个视图开关反向改工具状态。见 isParamBlockLayerVisible。
+     */
+    alwaysShowParamBlocks: boolean;
     /** 音阶高亮模式：始终 / 关闭 */
     scaleHighlightMode: "always" | "off";
     /** 播放头缩放 */
     playheadZoomEnabled: boolean;
     /** 自动滚动（播放时跟随播放头） */
     autoScrollEnabled: boolean;
+    /**
+     * 自动滚屏模式：
+     * - `scroll`：滚动式（实时跟随，默认）；
+     * - `page`：翻页式（光标越出可见范围才整页翻一次）。
+     *
+     * 与 `autoScrollEnabled` 是**两根正交的轴**：开关决定"要不要滚"，模式决定"怎么滚"。
+     * 取值语义与几何都在 `utils/autoFollowScroll`，这里只存一个枚举。
+     */
+    autoScrollMode: AutoScrollMode;
     /** 忽略编组（启用后编组同步编辑操作不生效） */
     ignoreGrouping: boolean;
     /**
-     * 波纹编辑（自动跟进）模式：
-     * - `"off"`：关闭（默认）。
-     * - `"track"`：仅被编辑的轨道上的后续剪辑一起跟进。
-     * - `"all"`：所有轨道上位于编辑点之后的剪辑一起跟进。
+     * 波纹编辑（自动跟进）总开关。
+     *
+     * 与 `rippleScope` 是**两根正交的轴**（与相邻的"自动滚屏"同构）：开关决定
+     * "要不要跟进"，方向决定"跟进谁"。旧版把两者压成三值的 `rippleMode`，于是
+     * 左键只能在三档之间循环 —— 从"全部轨道"关掉要先绕到"按轨道"。
      */
-    rippleMode: "off" | "track" | "all";
+    rippleEnabled: boolean;
+    /**
+     * 波纹编辑方向（开关打开时才有意义）：
+     * - `"track"`：仅被编辑的轨道上的后续剪辑一起跟进（默认）。
+     * - `"all"`：所有轨道上位于编辑点之后的剪辑一起跟进。
+     *
+     * 关闭时仍然保留 —— 用户下次打开开关应当回到他上次选的方向，而不是被重置。
+     */
+    rippleScope: RippleScope;
     /** 被禁用的编组 ID 列表（禁用后该编组内同步编辑不生效） */
     disabledGroupIds: string[];
     /** 允许参数编辑器点击时调整播放头 */
@@ -141,6 +173,13 @@ export interface SessionState {
     /** 参数线附近显示参数值浮窗 */
     showParamValuePopup: boolean;
     /**
+     * 音高模式下是否绘制各 Clip 自己的源音高参考线。
+     *
+     * 与 `pv.orig`（根轨道组的单值合成基线）互补：Clip 重合、音高参考块覆盖时，
+     * 只有它还能表达「每个 Clip 原本的音高」。纯展示开关，不进工程、不进 undo。
+     */
+    showClipPitchOverlay: boolean;
+    /**
      * 纵轴标尺的展示单位（参数 id → `"ratio"` | `"db"`）。
      *
      * 只对音量 / 动态这类**线性幅值倍率**参数有意义（`1× = 0 dB`）：同一个值既能
@@ -148,6 +187,13 @@ export interface SessionState {
      * 换算与解析见 `components/layout/pianoRoll/paramAxisUnits`。
      */
     paramAxisUnits: ParamAxisUnits;
+    /**
+     * 参数编辑器纵轴方向（参数 id → `"left-bottom"` | `"left-top"`）。
+     *
+     * 目前只有 pan 使用；缺项 = left-bottom。与 paramAxisUnits 同构，
+     * 合法性由 normalizePanAxisDirections 收口。
+     */
+    paramAxisDirections: PanAxisDirections;
     /** 参数编辑器（选择工具）拖动方向限制 */
     selectDragDirection: DragDirection;
     /** 参数编辑器（绘制工具）拖动方向限制 */
@@ -353,6 +399,12 @@ export interface SessionState {
 
     /**
      * 后端推送的 per-clip 音高检测结果（MIDI 曲线）。
+     *
+     * 同时服务两条只读链路：
+     * - 时间轴 MIDI 参考块在 midiNoteData 缺失时的回退；
+     * - 参数编辑器的 Clip 源音高参考线（重合 / 音高参考块覆盖时仍保留每个
+     *   Clip 自己的曲线，与根轨道合成的 pv.orig 不同）。
+     *
      * key: clip_id
      * value: { curveStartSec, midiCurve, framePeriodMs }
      */
@@ -476,6 +528,8 @@ export interface SessionState {
     project: {
         name: string;
         path: string | null;
+        /** 上次“另存为”选择的格式（默认 hshp）。 */
+        lastSaveFormat: ProjectSaveFormat;
         dirty: boolean;
         recent: string[];
         notesMarkdown: string;
@@ -517,6 +571,7 @@ export interface SessionState {
      */
     saveVersionConflictDialog: {
         path: string;
+        format: ProjectSaveFormat;
         existingVersion: number;
         currentVersion: number;
         existingIsNewer: boolean;

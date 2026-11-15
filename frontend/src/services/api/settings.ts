@@ -6,6 +6,8 @@ import type { FolderImportOptions } from "../../features/fileBrowser/folderImpor
 import type { DockPersistedSettings } from "../../features/dock/dockSettings";
 import type { TimelineSnapSettings } from "../../features/session/sessionTypes";
 import type { VibratoPreset } from "../../features/vibrato/vibratoTypes";
+import type { AutoScrollMode } from "../../utils/autoFollowScroll";
+import type { RippleScope } from "../../features/session/rippleMode";
 
 export type StretchAlgorithmOption = "linear" | "signalsmith" | "soundtouch";
 
@@ -154,15 +156,37 @@ export interface UiSettings {
     pitchSnapToleranceCents?: number;
     /** 新建块后是否把该段音高按曲线形状归一化到音阶。 */
     paramBlockFollowPitch?: boolean;
+    /** 参数块图层是否始终显示（功能设置，默认关）。 */
+    alwaysShowParamBlocks?: boolean;
     scaleHighlightMode?: string;
     ignoreGrouping?: boolean;
-    /** 波纹编辑（自动跟进）模式：off / track / all（对应 REAPER Ripple Editing）。 */
-    rippleMode?: "off" | "track" | "all";
+    /**
+     * 波纹编辑（自动跟进）总开关。
+     *
+     * 缺省 = 旧配置（没有这一项）：由 `hydrateRippleState` 依据 `rippleMode` 的旧三值
+     * 编码推断，见 `features/session/rippleMode`。
+     */
+    rippleEnabled?: boolean;
+    /**
+     * 波纹编辑方向：`track`（按轨道）/ `all`（全部轨道）。
+     *
+     * 【为什么磁盘上还可能是 `"off"`】旧版本把开关与方向压成了三值字符串；后端
+     * `normalize_ripple_mode` 会把 `"off"` 迁移成"关闭 + 按轨道"，前端水合也认它。
+     */
+    rippleMode?: RippleScope | "off";
     playheadZoom: boolean;
     autoScroll: boolean;
+    /**
+     * 自动滚屏模式：`scroll`（滚动式，实时跟随，默认）/ `page`（翻页式，越界翻一页）。
+     *
+     * 缺省（旧配置）与非法值都由前端 `normalizeAutoScrollMode` 回落 `scroll`。
+     */
+    autoScrollMode?: AutoScrollMode;
     paramEditorSeekPlayhead?: boolean;
     showClipboardPreview: boolean;
     showParamValuePopup?: boolean;
+    /** 音高模式下是否绘制各 Clip 自己的源音高参考线（默认开）。 */
+    showClipPitchOverlay?: boolean;
     /**
      * 纵轴标尺的展示单位（参数 id → `"ratio"` | `"db"`）。
      *
@@ -170,6 +194,8 @@ export interface UiSettings {
      * 缺项 / 未知键由前端 `normalizeParamAxisUnits` 过滤（见 sessionSlice）。
      */
     paramAxisUnits?: Record<string, string>;
+    paramAxisDirections?: Record<string, string>;
+    lastProjectSaveFormat?: "hshp" | "json" | "zip";
     lockParamLines?: boolean;
     metronomeEnabled?: boolean;
     metronomeGain?: number;
@@ -217,6 +243,8 @@ export interface UiSettings {
      * （含旧配置里没有这一项）在读取时回落出厂默认（绘制工具），因此不需要迁移。
      */
     paramEditorTool?: string;
+    /** 选择族子模式：range / block；缺省 / 非法值按 range。 */
+    paramEditorSelectionMode?: string;
     smoothnessPercent?: number;
     /** 旧版边缘平滑字段名（读取兼容）。 */
     edgeSmoothnessPercent?: number;

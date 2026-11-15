@@ -85,6 +85,8 @@ export function registerBuiltinPanels(): void {
         preferMain: true,
         // 参数编辑器天然支持多实例：同时看不同片段的音高/音量曲线是常见需求。
         singleton: false,
+        // 高级 opt-in：参数编辑器基本自包含，允许拆到原生独立窗口；默认仍是进程内浮窗。
+        detachable: true,
         defaultWidth: 1000,
         defaultHeight: 320,
         minHeight: 150,

@@ -24,7 +24,6 @@ import {
     undoRemote,
     redoRemote,
     saveProjectRemote,
-    saveProjectAsRemote,
     setDefaultHifiganMelStretch,
     setDefaultStretchAlgorithm,
     setOrtEp,
@@ -37,6 +36,7 @@ import {
     toggleSyncEditsAcrossTakes,
     toggleClipboardPreview,
     toggleParamValuePopup,
+    toggleClipPitchOverlay,
     toggleTempoMapVisible,
     setProjectStretchSettingsRemote,
 } from "../../features/session/sessionSlice";
@@ -44,14 +44,14 @@ import type { TimeUnit } from "../../features/session/sessionTypes";
 import { TIME_UNITS, TIME_UNIT_CHOICES } from "./timeline/timeFormat";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
 import { SnapGridSettingsDialog } from "./SnapGridSettingsDialog";
+import { SplitTransitionSettingsDialog } from "./SplitTransitionSettingsDialog";
 import { DockLayoutMenus, DockLayoutDialogs } from "../dock/DockLayoutMenu";
 import { scaleChangesInRange, scaleLikeEquals } from "../../utils/tempoMap";
 import type { ScaleLike } from "../../utils/musicalScales";
-import {
-    getPianoRollSelection,
-    subscribePianoRollSelection,
-} from "../../utils/pianoRollSelectionBus";
+import { selectPianoRollSelection } from "../../features/session/interactionSlice";
 import { computeInsertBelowPlacement } from "../../features/session/trackUtils";
+import { saveProjectAsFormat } from "../../features/session/thunks/projectThunks";
+import { SAVE_PROJECT_AS_FORMATS } from "../../features/session/saveProjectAsMenu";
 
 import {
     importAudioAtPosition,
@@ -72,8 +72,10 @@ import {
     resolvePasteRoute,
 } from "../../features/keybindings/focusRouting";
 import { IS_WINDOWS } from "../../utils/platform";
+import { isPanParam } from "./pianoRoll/paramPan";
 import { getActiveSurface } from "../../features/uiFocus/focusSurface";
 import { webApi } from "../../services/webviewApi";
+import { emitWindowEvent } from "../../features/dock/windowEventBridge";
 const KeybindingsDialog = lazy(() =>
     import("./KeybindingsDialog").then((module) => ({ default: module.KeybindingsDialog })),
 );
@@ -81,6 +83,7 @@ import {
     TransposeCentsDialog,
     TransposeDegreesDialog,
     SetPitchDialog,
+    PanSetValueDialog,
     AverageDialog,
     SmoothDialog,
     QuantizeDialog,
@@ -109,6 +112,7 @@ const BenchmarkDialog = lazy(() =>
     import("./BenchmarkDialog").then((module) => ({ default: module.BenchmarkDialog })),
 );
 import { AboutDialog } from "./AboutDialog";
+import { LogVerbosityMenuItems } from "./LogVerbosityMenuItems";
 
 import {
     isChildPitchOffsetCentsParam,
@@ -184,6 +188,7 @@ const selectMenuBarSession = (state: RootState) => {
         showAllTakes: session.showAllTakes,
         showClipboardPreview: session.showClipboardPreview,
         showParamValuePopup: session.showParamValuePopup,
+        showClipPitchOverlay: session.showClipPitchOverlay,
         syncEditsAcrossTakes: session.syncEditsAcrossTakes,
         tempoMap: session.tempoMap,
         tempoMapVisible: session.tempoMapVisible,
@@ -221,6 +226,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [snapSettingsOpen, setSnapSettingsOpen] = useState(false);
     const [paramBlockSettingsOpen, setParamBlockSettingsOpen] = useState(false);
     const [mcpDialogOpen, setMcpDialogOpen] = useState(false);
+    const [splitTransitionSettingsOpen, setSplitTransitionSettingsOpen] = useState(false);
     const [exportDialogOpen, setExportDialogOpen] = useState(false);
     const [autoBackupDialogOpen, setAutoBackupDialogOpen] = useState(false);
     const [recordingDialogOpen, setRecordingDialogOpen] = useState(false);
@@ -307,6 +313,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     } | null>(null);
 
     const isPitchParam = s.editParam === "pitch";
+    const isPanParamActive = isPanParam(s.editParam);
     const isChildCentsParam = isChildPitchOffsetCentsParam(s.editParam);
     const isChildDegreesParam = isChildPitchOffsetDegreesParam(s.editParam);
     const setToDefaultValue =
@@ -347,18 +354,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
     // ── “工程音阶”选项受 Tempo Map 影响的提示 ─────────────────────────
     // 读取参数编辑器当前选区（帧范围）判断是否跨过音阶变化点；
-    // 无选区时按整个工程判断（存在音阶变化点即提示）。
-    const [selectionVersion, setSelectionVersion] = useState(0);
-    useEffect(
-        () =>
-            subscribePianoRollSelection(() => {
-                setSelectionVersion((v) => v + 1);
-            }),
-        [],
-    );
+    // 无选区时按整个工程判断（存在音阶变化点即提示）。选区住在 interaction
+    // 切片：独立窗口面板发布后，主窗口的 MenuBar 也能读到。
+    const pianoRollSelection = useAppSelector(selectPianoRollSelection);
     const tempoMapScaleHint = useMemo(() => {
         if (!s.tempoMap) return null;
-        const sel = getPianoRollSelection();
+        const sel = pianoRollSelection;
         const startSec = sel ? (sel.startFrame * sel.framePeriodMs) / 1000 : 0;
         const endSec = sel
             ? ((sel.startFrame + Math.max(0, sel.frameCount)) * sel.framePeriodMs) / 1000
@@ -376,8 +377,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             return null;
         }
         return tf("project_scale_tempo_map_hint");
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [s.tempoMap, s.projectSec, s.project, tf, selectionVersion]);
+    }, [s.tempoMap, s.projectSec, s.project, tf, pianoRollSelection]);
     // 标签与括号提示的拼接（含空格/全角括号的语系差异）交给词典模板。
     const projectScaleLabelWithHint = tempoMapScaleHint
         ? tVars("project_scale_label_with_tempo_hint", {
@@ -471,7 +471,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     selectionContext: s.selectionContext,
                 });
                 if (channel) {
-                    window.dispatchEvent(new CustomEvent(channel, { detail: { op, ...data } }));
+                    emitWindowEvent(
+                        channel === "hifi:timelineEditOp" ? "main" : "activeEditor",
+                        channel,
+                        { op, ...data },
+                    );
                 }
                 return;
             }
@@ -485,13 +489,20 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     }
                     const channel = resolvePasteRoute(kind, getActiveSurface());
                     if (channel) {
-                        window.dispatchEvent(new CustomEvent(channel, { detail: { op, ...data } }));
+                        emitWindowEvent(
+                            channel === "hifi:timelineEditOp" ? "main" : "activeEditor",
+                            channel,
+                            { op, ...data },
+                        );
                     }
                 })();
                 return;
             }
             const channel = resolveEditOpRoute(getActiveSurface(), op, s.toolMode) ?? "hifi:editOp";
-            window.dispatchEvent(new CustomEvent(channel, { detail: { op, ...data } }));
+            emitWindowEvent(channel === "hifi:timelineEditOp" ? "main" : "activeEditor", channel, {
+                op,
+                ...data,
+            });
         },
         [s],
     );
@@ -571,43 +582,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             setDiagnosticsExporting(false);
         }
     }, [tf]);
-
-    /**
-     * 复制诊断摘要（纯文本，零依赖）。
-     *
-     * 【为什么要这个】多数"把日志发给开发者"的场景其实只要一段版本信息 + 日志路径，
-     * 为此导出一个 zip 再想办法发出去太重。这里只读**已经存在**的三条命令
-     * （`get_about_info` / `get_runtime_info` / `open_log_folder`），不新增后端通道。
-     */
-    const handleCopyDiagnosticsSummary = useCallback(async () => {
-        try {
-            const [{ coreApi }, { openLogFolder }, { copyTextToClipboard }] = await Promise.all([
-                import("../../services/api/core"),
-                import("../../services/api/diagnostics"),
-                import("../../utils/copyText"),
-            ]);
-            const [about, runtime, log] = await Promise.all([
-                coreApi.getAboutInfo().catch(() => null),
-                coreApi.getRuntimeInfo().catch(() => null),
-                openLogFolder().catch(() => null),
-            ]);
-            const lines = [
-                `HiFiShifter ${about?.version ?? "unknown"}`,
-                `commit: ${about?.commit ?? about?.commitShort ?? "unknown"}${
-                    about?.dirty ? " (dirty)" : ""
-                }`,
-                `host: ${runtime?.device ?? "unknown"}`,
-                `log: ${log?.file ?? log?.path ?? "unavailable"}`,
-            ];
-            const ok = await copyTextToClipboard(lines.join("\n"));
-            setNotice({
-                title: ok ? tf("menu_copy_diagnostics_summary") : tf("status_error_prefix"),
-                message: ok ? t("about_copied") : t("status_clipboard_copy_failed"),
-            });
-        } catch (e) {
-            setNotice({ title: tf("status_error_prefix"), message: String(e) });
-        }
-    }, [tf, t]);
 
     // 快捷键「导入媒体文件」→ 复用文件菜单的导入流程（多文件/多音轨选择）。
     useEffect(() => {
@@ -727,12 +701,45 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 {shortcutLabel("project.save")}
                             </div>
                         </DropdownMenu.Item>
-                        <DropdownMenu.Item onSelect={() => void dispatch(saveProjectAsRemote())}>
+                        {/* 「另存为」：按上次格式**直接**存（选路径 → 写文件），
+                            不再先弹一层应用内格式选择。 */}
+                        <DropdownMenu.Item
+                            onSelect={() => {
+                                void dispatch(
+                                    saveProjectAsFormat(s.project.lastSaveFormat ?? "hshp"),
+                                );
+                            }}
+                        >
                             {t("menu_save_project_as")}
                             <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                                 {shortcutLabel("project.saveAs")}
                             </div>
                         </DropdownMenu.Item>
+                        {/* 指定格式另存：格式在菜单项里一次选定，原生对话框只带该格式的
+                            单一过滤器（macOS 的 NSSavePanel 没有"文件类型"下拉框，
+                            把格式留在对话框里等于让用户猜扩展名）。每项都挂
+                            data-tooltip：格式说明（尤其"zip 需解压后打开"）不能丢。 */}
+                        <DropdownMenu.Sub>
+                            <DropdownMenu.SubTrigger>
+                                {tf("menu_save_project_as_submenu")}
+                            </DropdownMenu.SubTrigger>
+                            <DropdownMenu.SubContent>
+                                {SAVE_PROJECT_AS_FORMATS.map((entry) => (
+                                    <DropdownMenu.Item
+                                        key={entry.format}
+                                        data-tooltip={tf(entry.descKey)}
+                                        onSelect={() => {
+                                            void dispatch(saveProjectAsFormat(entry.format));
+                                        }}
+                                    >
+                                        {tf(entry.labelKey)}
+                                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                            {shortcutLabel(entry.actionId)}
+                                        </div>
+                                    </DropdownMenu.Item>
+                                ))}
+                            </DropdownMenu.SubContent>
+                        </DropdownMenu.Sub>
 
                         <DropdownMenu.Separator />
 
@@ -1047,6 +1054,14 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         }}
                     >
                         {withCheck(s.showParamValuePopup, t("param_value_popup"))}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                        onSelect={() => {
+                            dispatch(toggleClipPitchOverlay());
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        {withCheck(s.showClipPitchOverlay, t("menu_view_clip_pitch"))}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
 
@@ -1485,6 +1500,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Item onSelect={() => setParamBlockSettingsOpen(true)}>
                         {tf("param_block_settings_title")}
                     </DropdownMenu.Item>
+                    {/* 分割过渡设置：与工具栏按钮的右键同一个对话框。
+                        放在「参数块设置」旁边是因为二者都是"编辑行为"类设置 —— 用户
+                        在找"分割之后发生什么"时不会先去工具栏右键猜一次。 */}
+                    <DropdownMenu.Item onSelect={() => setSplitTransitionSettingsOpen(true)}>
+                        {tf("split_transition_settings_title")}
+                    </DropdownMenu.Item>
 
                     {/* Search matching settings — 作用于全部搜索面，因此与
                         吸附/网格同级，而不是塞进某个面板自己的设置页。 */}
@@ -1579,11 +1600,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     >
                         {tf("menu_export_diagnostics")}
                     </DropdownMenu.Item>
-                    {isPluginMode() ? (
-                        <DropdownMenu.Item onSelect={() => void handleCopyDiagnosticsSummary()}>
-                            {tf("menu_copy_diagnostics_summary")}
-                        </DropdownMenu.Item>
-                    ) : null}
+                    {/* 日志详细程度的唯一入口：一级菜单只占一行，四档在子菜单里。 */}
+                    <LogVerbosityMenuItems
+                        onSaveFailed={(message) =>
+                            setNotice({ title: tf("status_error_prefix"), message })
+                        }
+                    />
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item onSelect={() => setAboutDialogOpen(true)}>
                         {t("menu_about")}
@@ -1644,6 +1666,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             />
 
             <SnapGridSettingsDialog open={snapSettingsOpen} onOpenChange={setSnapSettingsOpen} />
+            <SplitTransitionSettingsDialog
+                open={splitTransitionSettingsOpen}
+                onOpenChange={setSplitTransitionSettingsOpen}
+            />
             <ParamBlockSettingsDialog
                 open={paramBlockSettingsOpen}
                 onOpenChange={setParamBlockSettingsOpen}
@@ -1911,20 +1937,35 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     })
                 }
             />
-            <SetPitchDialog
-                open={setPitchOpen}
-                onOpenChange={setSetPitchOpen}
-                titleText={isPitchParam ? tf("menu_set_pitch") : tf("menu_set_value")}
-                valueLabelText={setToValueLabel}
-                defaultValue={setToDefaultValue}
-                defaultSmoothness={s.edgeSmoothnessPercent}
-                onConfirm={(value, edgeSmoothnessPercent) =>
-                    dispatchEditOp("setPitch", {
-                        value,
-                        edgeSmoothnessPercent,
-                    })
-                }
-            />
+            {isPanParamActive ? (
+                <PanSetValueDialog
+                    open={setPitchOpen}
+                    onOpenChange={setSetPitchOpen}
+                    defaultValue={setToDefaultValue}
+                    defaultSmoothness={s.edgeSmoothnessPercent}
+                    onConfirm={(value, edgeSmoothnessPercent) =>
+                        dispatchEditOp("setPitch", {
+                            value,
+                            edgeSmoothnessPercent,
+                        })
+                    }
+                />
+            ) : (
+                <SetPitchDialog
+                    open={setPitchOpen}
+                    onOpenChange={setSetPitchOpen}
+                    titleText={isPitchParam ? tf("menu_set_pitch") : tf("menu_set_value")}
+                    valueLabelText={setToValueLabel}
+                    defaultValue={setToDefaultValue}
+                    defaultSmoothness={s.edgeSmoothnessPercent}
+                    onConfirm={(value, edgeSmoothnessPercent) =>
+                        dispatchEditOp("setPitch", {
+                            value,
+                            edgeSmoothnessPercent,
+                        })
+                    }
+                />
+            )}
             <AverageDialog
                 open={averageOpen}
                 onOpenChange={setAverageOpen}

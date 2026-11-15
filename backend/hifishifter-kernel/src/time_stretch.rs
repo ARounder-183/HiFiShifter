@@ -334,7 +334,7 @@ pub fn time_stretch_interleaved(
                     out
                 }
                 Err(e) => {
-                    if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
+                    if crate::log_policy::probes_enabled() {
                         log::error!("time_stretch: SignalsmithStretch failed, falling back: {e}");
                     }
                     linear_time_stretch_interleaved(input, channels, out_frames)
@@ -402,8 +402,7 @@ pub fn time_stretch_interleaved(
                         out
                     }
                     Err(e) => {
-                        if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1")
-                        {
+                        if crate::log_policy::probes_enabled() {
                             log::error!("time_stretch: SoundTouch failed, falling back: {e}");
                         }
                         linear_time_stretch_interleaved(input, channels, out_frames)

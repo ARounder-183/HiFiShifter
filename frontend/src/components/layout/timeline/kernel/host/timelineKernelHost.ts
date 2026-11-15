@@ -53,7 +53,9 @@ import {
 import { resolveClipSelectionModifiers } from "../../../../../features/keybindings/clipSelectionModifiers";
 import type { Keybinding } from "../../../../../features/keybindings/types";
 import { isPrimaryModifierDown } from "../../../../../utils/platform";
+import { WHEEL_LINE_HEIGHT_PX } from "../../../../../utils/pinchGesture";
 import { armRightDragContextMenuGuard } from "../../../../../utils/rightDragContextMenuGuard";
+
 import { getTimelineWheelAction, type ScrollbarZone } from "../../../wheelGesture";
 import { buildTimelineTicks, type TimelineTick } from "../../runtime/buildTimelineTicks";
 import { createTickAxis } from "../../runtime/tickAxis";
@@ -82,7 +84,11 @@ import { noteFadeLinePointerDown } from "../../hooks/fadeLineClickGesture";
 import { effectiveFadeSec, hitClipFadeTarget } from "../interaction/fadeTargets";
 import type { FadeContextSide } from "../../FadeContextMenu";
 import { hitOverlapControl } from "../interaction/overlapControls";
-import { resolveClipHeaderLayout } from "../interaction/clipHeaderLayout";
+import { resolveOverlapPressTarget } from "../interaction/overlapPress";
+import {
+    resolveClipHeaderLayout,
+    CLIP_HEADER_RATE_BADGE_ANCHOR_WIDTH_PX,
+} from "../interaction/clipHeaderLayout";
 import { hitInactiveTakeLane } from "../../takeLanes";
 import { isPluginMode } from "../../../../../services/hostCapabilities";
 import { resolveHorizontalWheelZoom } from "../../runtime/timelineScrollRange";
@@ -103,18 +109,11 @@ import {
     WHEEL_ZOOM_IN_FACTOR,
     WHEEL_ZOOM_OUT_FACTOR,
 } from "../../constants";
-import {
-    downgradeOverlapHitForPlainLeftPress,
-    hitTest,
-    type ClipHitRegion,
-    type HitTestClip,
-} from "../interaction/hitTest";
+import { hitTest, type ClipHitRegion, type HitTestClip } from "../interaction/hitTest";
 import type { SeekGesturePhase } from "../interaction/seekGesture";
 import {
-    isContentYBelowTracks,
     resolveDragDelta,
     resolveFadeDrag,
-    resolveTargetTrackIndex,
     resolveTrimEdge,
     type FadeSide,
     type TrimEdge,
@@ -125,10 +124,6 @@ import { clipIntersectsBox, resolveBoxBounds, type BoxBounds } from "../interact
 // 逐帧手势分派表：穷尽性由 `moveDispatch.test.ts` 守住（漏分支曾是
 // 「吸附偏移手柄拖一下就冻结」的根因，手写 if 链没有任何编译期保障）。
 import { resolveMoveDispatch } from "../interaction/moveDispatch";
-import {
-    computeTimelineTrackDragLock,
-    computeTimelineTrackDragLockThresholdPx,
-} from "../../runtime/timelineTrackDragLock";
 import { createGlCanvas } from "../../../renderKernel/gl/glContext";
 import { CLIP_INSTANCE_FLOATS, writeFlatInstance } from "../../../renderKernel/gl/instanceLayout";
 import { createSdfBoxProgram } from "../../../renderKernel/gl/sdfBoxProgram";
@@ -155,7 +150,7 @@ import {
 } from "../input/verticalZoomSettle";
 // 拖拽边缘自动滚屏：内核自绘滚动没有浏览器兜底，缺了它 clip 拖到视口边缘就再也
 // 无法继续右移（设计文档早已承诺、此前未实现）。
-import { resolveDragEdgeScroll, shouldAutoScrollForGesture } from "../input/dragAutoScroll";
+import { dragAutoScrollAxesForGesture, resolveDragEdgeScroll2D } from "../input/dragAutoScroll";
 // 缩放方向判定：**不能只看 deltaY 的符号**（`deltaY = 0` 会被判成缩小、变号噪声会
 // 逐事件翻转方向 → Windows 上表现为剧烈抖动）。见该模块文件头与回归测试。
 import {
@@ -1637,45 +1632,6 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     boxSelectEl.style.backgroundColor = "rgba(59, 130, 246, 0.12)";
     container.appendChild(boxSelectEl);
 
-    // ── 竖直换轨锁定反馈（行高亮 + 徽标）────────────────────────────
-    //
-    // 【为什么由宿主自持】锁定的**行为**（水平位移钳零）发生在内核的手势数学里
-    // （见 `applyDragPreview`），而旧实现把状态放在 React（`useClipDrag` 的
-    // `verticalTrackLockTrackId`）再经 `TrackLane` props 渲染——内核模式下
-    // `TrackLane` 不挂载。行为与反馈同源放在宿主，避免"钳了位移却没有任何提示"。
-    //
-    // 【为什么是 DOM 而不是 GL 行填充】徽标是**文字**，而内核的 GL 管线没有文字
-    // 能力（文字全部走 Canvas2D 细节层）。整块用 DOM 后，行高亮与徽标共享同一个
-    // 定位来源（行号 × 行高 − 滚动量），不会出现"框和字对不齐"。
-    //
-    // 配色与旧实现 `TrackLane` 逐值一致（浅蓝行底 + 内描边 + 胶囊徽标）。
-    const verticalLockEl = document.createElement("div");
-    verticalLockEl.style.position = "absolute";
-    verticalLockEl.style.pointerEvents = "none";
-    verticalLockEl.style.display = "none";
-    verticalLockEl.style.zIndex = "14";
-    verticalLockEl.style.backgroundColor = "rgba(112, 192, 255, 0.08)";
-    verticalLockEl.style.boxShadow =
-        "inset 0 0 0 1px rgba(112, 192, 255, 0.72), inset 0 0 0 9999px rgba(112, 192, 255, 0.04)";
-    const verticalLockBadgeEl = document.createElement("div");
-    verticalLockBadgeEl.style.position = "absolute";
-    verticalLockBadgeEl.style.right = "8px";
-    verticalLockBadgeEl.style.top = "4px";
-    verticalLockBadgeEl.style.padding = "1px 8px";
-    verticalLockBadgeEl.style.borderRadius = "var(--qt-radius-sm)";
-    verticalLockBadgeEl.style.fontSize = "10px";
-    verticalLockBadgeEl.style.fontWeight = "600";
-    verticalLockBadgeEl.style.letterSpacing = "0.08em";
-    verticalLockBadgeEl.style.textTransform = "uppercase";
-    verticalLockBadgeEl.style.whiteSpace = "nowrap";
-    verticalLockBadgeEl.style.color = "rgba(235, 246, 255, 0.96)";
-    verticalLockBadgeEl.style.backgroundColor = "rgba(41, 117, 173, 0.88)";
-    verticalLockBadgeEl.style.boxShadow = "0 0 0 1px rgba(164, 217, 255, 0.38)";
-    // 徽标文案与旧实现一致（该字符串在旧实现里也是硬编码英文，未走 i18n）。
-    verticalLockBadgeEl.textContent = "Vertical Lock";
-    verticalLockEl.appendChild(verticalLockBadgeEl);
-    container.appendChild(verticalLockEl);
-
     // ── 淡变浮标：把内核容器本身注册为 AppTooltip 的载体 ──────────────
     //
     // 【为什么用容器而不是新建锚点元素】AppTooltipProvider 按**指针下的 DOM 元素**
@@ -2973,7 +2929,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             horizontalZoomRequested,
         });
 
-        const ctx = { lineHeightPx: 16, pageHeightPx: Math.max(1, rect.height) };
+        const ctx = { lineHeightPx: WHEEL_LINE_HEIGHT_PX, pageHeightPx: Math.max(1, rect.height) };
         const deltaY = normalizeWheelDelta(event.deltaY, event.deltaMode, ctx);
         const deltaX = normalizeWheelDelta(event.deltaX, event.deltaMode, ctx);
         const view = scroll.get();
@@ -3161,6 +3117,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               startClientX: number;
               startClientY: number;
               clipId: string;
+              /** 单击的前景选中目标；拖拽仍使用 clipId 与原命中分区。 */
+              overlapClickClipId?: string;
               /** 命中分区：决定超过阈值后升级为拖拽（body/header）还是 trim（边缘）。 */
               region: ClipHitRegion;
               /** 按下时的内容坐标（用于换算拖拽位移）。 */
@@ -3331,7 +3289,6 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               /** 见 `pending-select.startPxPerSec`。 */
               startPxPerSec: number;
               startContentY: number;
-              /** 按下时的指针视口 x：竖直换轨锁定按**水平位移**判定（原始像素，非内容坐标）。 */
               startClientX: number;
               originStartSec: number;
               originTrackId: string;
@@ -3480,7 +3437,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      */
     function tickDragAutoScroll(): void {
         dragAutoScrollFrame = null;
-        if (!shouldAutoScrollForGesture(gesture.kind)) {
+        const axes = dragAutoScrollAxesForGesture(gesture.kind);
+        if (!axes.x && !axes.y) {
             stopDragAutoScroll();
             return;
         }
@@ -3493,17 +3451,26 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             return;
         }
         const rect = container.getBoundingClientRect();
-        const deltaPx = resolveDragEdgeScroll({
+        const { dx, dy } = resolveDragEdgeScroll2D({
             clientX: event.clientX,
+            clientY: event.clientY,
             leftPx: rect.left,
             rightPx: rect.right,
+            topPx: rect.top,
+            bottomPx: rect.bottom,
             frameMs,
         });
-        if (Math.abs(deltaPx) > 0.01) {
-            const view = scroll.get();
-            scroll.setScrollLeft(view.scrollLeft + deltaPx);
-            replayGesturePreviewAtLastPointer();
+        let moved = false;
+        const view = scroll.get();
+        if (axes.x && Math.abs(dx) > 0.01) {
+            scroll.setScrollLeft(view.scrollLeft + dx);
+            moved = true;
         }
+        if (axes.y && Math.abs(dy) > 0.01 && scroll.maxScrollTop() > 0) {
+            scroll.setScrollTop(view.scrollTop + dy);
+            moved = true;
+        }
+        if (moved) replayGesturePreviewAtLastPointer();
         dragAutoScrollFrame = requestAnimationFrame(tickDragAutoScroll);
     }
 
@@ -3517,7 +3484,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         // `replayGesturePreviewAtLastPointer`），因此**每个**手势都需要它，
         // 而不只是需要自动滚屏的那些。
         dragAutoScrollEvent = event;
-        if (!shouldAutoScrollForGesture(gesture.kind)) return;
+        const axes = dragAutoScrollAxesForGesture(gesture.kind);
+        if (!axes.x && !axes.y) return;
         if (dragAutoScrollFrame !== null) return;
         dragAutoScrollLastTs = 0;
         dragAutoScrollFrame = requestAnimationFrame(tickDragAutoScroll);
@@ -3552,14 +3520,6 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     /** 框选阈值（CSS px）：与旧实现 `TIMELINE_SELECTION_DRAG_THRESHOLD_PX` 一致。 */
     const BOX_SELECT_THRESHOLD_PX = 5;
-
-    /**
-     * 竖直换轨锁定当前高亮的轨道 id（null = 未锁定）。
-     *
-     * 宿主自持而不是每帧从 React 读：它是手势内部的瞬态，且反馈（高亮层）也由宿主
-     * 直接写 DOM——两者同源才不会出现"位移钳零了但高亮还停在上一行"。
-     */
-    let lastVerticalLockTrackId: string | null = null;
 
     /**
      * 上一次发布的淡变浮标身份（去重键；空串 = 当前无浮标）。
@@ -3635,12 +3595,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             clipsByTrack: hitClipsByTrack,
             headerHeightPx: CLIP_HEADER_HEIGHT,
         });
-        if (hit.kind !== "clip") return hit;
+        if (hit.kind !== "clip" || hit.region === "header") return hit;
+        // SnapOffset 手柄的层级高于重叠区的边缘/淡变控件；重叠解析不能抢走
+        // 重叠区左下角的 ◣ 握把。
+        if (hit.region === "snap-offset-handle") return hit;
 
         // ── 重叠区按位置改写（同轨 ≥ 2 个 clip 才有重叠）──
-        // 二分取到的是「最后一个 startSec <= sec」的 clip，在重叠区里永远是**后
-        // 一个**；前一个 clip 的右缘与淡出控件因此完全不可达。这里按旧实现
-        // `OverlapEditLayer` 的位置规则改写命中结果（见 overlapControls 文件头）。
+        // 通用命中取视觉最上层的短片段；重叠区还须提供双方的边缘与淡化控件。
+        // 按旧实现 `OverlapEditLayer` 的位置规则解析控件，但保留普通点击的前景目标。
         const track = hitTracks[hit.trackIndex];
         if (track === undefined) return hit;
         const trackClips = hitClipsByTrack.get(track.id) ?? [];
@@ -3671,6 +3633,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 说明：淡变命中（`kind === "fade"`）映射到既有角部区域，复用同一条
             // `clip-fade` 手势——包络线拖拽与角部拖拽在旧实现里是同一个语义（调长度），
             // 只是抓取位置不同。
+            // clip 是控件归属，foregroundClip 是 body 前景；二者不能合并。
+            // 把 clip 换成 foregroundClip 会让 A 的淡出线去拖 B。
             return {
                 kind: "clip",
                 clip: target,
@@ -3683,6 +3647,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 laterClipId: overlap.laterClipId,
                 fadeIsLine: overlap.fadeIsLine,
                 fromOverlapRegion: true,
+                foregroundClip: hit.clip,
             };
         }
 
@@ -3982,6 +3947,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     ): number | null {
         if (gesture.region === "snap-offset-handle") return null;
         if (gesture.inactiveTakeId !== null) return null;
+        if (gesture.overlapClickClipId !== undefined) return secAt(event.clientX);
         if (gesture.region === "left-edge") return gesture.originStartSec;
         if (gesture.region === "right-edge") {
             return gesture.originStartSec + gesture.lengthSec;
@@ -4011,8 +3977,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      */
     type KernelHit = ReturnType<typeof hitTest> & {
         readonly partnerClipId?: string;
-        /** 重叠区里**后一个** clip 的 id（普通左键的选中目标）。 */
+        /** 重叠区配对里后开始的 clip（淡化控件的配对信息）。 */
         readonly laterClipId?: string;
+        /** 普通左键仍选择绘制在最上层的片段，不受淡化控件归属影响。 */
+        readonly foregroundClip?: HitTestClip;
         /**
          * 淡变命中是否为包络线本体（`false` = 区域边缘竖线）。
          *
@@ -4134,60 +4102,27 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     function startPrimaryGesture(event: PointerEvent): void {
         /*
-         * 左键的「无修饰键点击」优先归 clip 本体。
+         * 重叠区按下：单击目标与拖拽控件归属分开。
          *
-         * 【为什么】重叠区里 `hitAt` 会按**位置**把命中改写为边缘 / 淡变包络，
-         * 这些控件在无修饰键单击时只改淡变长度或曲率 —— 用户实际感受到的是
-         * 「这段 clip 左键点不动，只能右键」。右键路径（`dispatchContextMenuAt`）
-         * 仍保留淡变专属菜单的优先级；左键只在**确实按住了编辑修饰键**时才让
-         * 控件接管，否则落到 clip 本体（选中 / 拖动）。
+         * hitAt 的 clip 是控件归属（A 的淡出线仍是 A），foregroundClip 只是
+         * body 的视觉最上层。无修饰键的控件单击保留既有的「选前景」手感；
+         * 只有超过拖拽阈值才改选控件归属，并继续编辑原 region。这样既不会让
+         * A 的淡出线去拖 B，也不会把一次普通点击变成选中 A。
          *
-         * 例外：header 控件（静音 / 链 / 共振峰 / 旋钮 / 徽标）仍是独立控件，
-         * 不能因为这条规则被吞进 clip 拖动。它们由 `resolveHeaderControl` 识别。
+         * header 控件（静音 / 链 / 共振峰 / 旋钮 / 徽标）仍由
+         * resolveHeaderControl 单独识别，不进入重叠区解析。
          */
         const rawHit = hitAt(event.clientX, event.clientY);
-        const modifiers = {
+        const press = resolveOverlapPressTarget(rawHit, {
             altKey: event.altKey,
             ctrlKey: event.ctrlKey,
             metaKey: event.metaKey,
             shiftKey: event.shiftKey,
-        };
-        const plainLeftOverlap =
-            rawHit.kind === "clip" &&
-            rawHit.fromOverlapRegion === true &&
-            rawHit.region !== "header" &&
-            !modifiers.altKey &&
-            !modifiers.ctrlKey &&
-            !modifiers.metaKey &&
-            !modifiers.shiftKey;
-        /*
-         * 重叠区普通左键选中**后一个** clip（视觉上压在上面的那个），而不是
-         * 控件归属的 clip。控件归属仍用于右键淡变菜单与带修饰键的编辑。
-         */
-        const laterClip =
-            plainLeftOverlap && rawHit.laterClipId !== undefined
-                ? data().clips.find((clip) => clip.id === rawHit.laterClipId)
-                : undefined;
-        const hitWithTarget =
-            plainLeftOverlap && laterClip !== undefined
-                ? {
-                      ...rawHit,
-                      clip: {
-                          ...rawHit.clip,
-                          id: laterClip.id,
-                          trackId: laterClip.trackId,
-                          startSec: laterClip.startSec,
-                          lengthSec: laterClip.lengthSec,
-                          muted: laterClip.muted,
-                          gain: clipItemGain(laterClip),
-                          playbackRate: laterClip.playbackRate,
-                          name: laterClip.name,
-                          groupId: laterClip.groupId,
-                          isMidiClip: laterClip.midiNoteCount != null,
-                      },
-                  }
-                : rawHit;
-        const hit = downgradeOverlapHitForPlainLeftPress(hitWithTarget, modifiers);
+        });
+        const hit = press.hit;
+        const overlapClickClipId = press.plainControlClick
+            ? (press.selectionClipId ?? undefined)
+            : undefined;
         if (hit.kind === "clip" && interactions?.geometryReadOnly) {
             const intercepted = interactions.onClipPointerDownIntercept?.({
                 clipId: hit.clip.id,
@@ -4199,7 +4134,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             });
             if (!intercepted)
                 interactions.onSelectClip?.(
-                    hit.clip.id,
+                    overlapClickClipId ?? hit.clip.id,
                     event.ctrlKey || event.metaKey,
                     event.shiftKey,
                     event.clientX,
@@ -4412,6 +4347,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 startClientX: event.clientX,
                 startClientY: event.clientY,
                 clipId: hit.clip.id,
+                overlapClickClipId,
                 region: hit.region,
                 partnerClipId: hit.partnerClipId,
                 fromOverlapRegion: hit.fromOverlapRegion === true,
@@ -4453,7 +4389,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 selectionMods: resolveSelectionMods(event),
             };
             primeSelectionOnPress(
-                hit.clip.id,
+                overlapClickClipId ?? hit.clip.id,
                 hit.region,
                 gesture.kind === "pending-select" ? gesture.selectionMods : null,
                 event.clientX,
@@ -4702,6 +4638,18 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             const thresholdPx =
                 gesture.fromOverlapRegion === true ? OVERLAP_DRAG_THRESHOLD_PX : DRAG_THRESHOLD_PX;
             if (dx * dx + dy * dy < thresholdPx * thresholdPx) return;
+            if (
+                gesture.overlapClickClipId !== undefined &&
+                gesture.overlapClickClipId !== gesture.clipId
+            ) {
+                primeSelectionOnPress(
+                    gesture.clipId,
+                    gesture.region,
+                    gesture.selectionMods,
+                    gesture.startClientX,
+                    gesture.fromOverlapRegion === true,
+                );
+            }
             // 发生拖拽 → 双击待定记录失效：否则"拖拽后落点回位"（第二次按下
             // 恰好落在首次按下附近）会被误判成双击（旧实现同样在拖拽分支清空）。
             lastClipPress = null;
@@ -4774,6 +4722,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 applyTrimPreview(event);
                 return;
             }
+            const originTrackId = gesture.originTrackId;
             gesture = {
                 kind: "clip-drag",
                 clipId: gesture.clipId,
@@ -4782,11 +4731,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 startContentY: gesture.startContentY,
                 startClientX: gesture.startClientX,
                 originStartSec: gesture.originStartSec,
-                originTrackId: gesture.originTrackId,
+                originTrackId,
                 lengthSec: gesture.lengthSec,
                 lastDeltaSec: 0,
                 lastRawDeltaSec: 0,
-                lastTargetTrackId: gesture.originTrackId,
+                lastTargetTrackId: originTrackId,
             };
             applyDragPreview(event);
             return;
@@ -5075,7 +5024,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * 计算并派发一次拖拽预览（拖拽期间每帧调用）。
      *
      * 流程：内容坐标位移 → `resolveDragDelta`（时间位移，仅下界 0）→
-     * `resolveTargetTrackIndex`（落点轨道）→ 与上次值比较去重 → 回调。
+     * 指针行解析落点轨道 → 与上次值比较去重 → 回调。
      *
      * 特殊说明：去重是必要的——调用方每次预览都写 Redux，而 Redux 变更会触发
      * 内核重建几何；不去重时指针静止也会持续重建。
@@ -5156,38 +5105,22 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 自指边界，会让自动扩展永不触发，表现为"向右拖有隐形边界"）。
             // 工程时长增长交给面板的 moveClipStart 与后端 ensure_project_end_sec。
         });
-        const trackIndex = resolveTargetTrackIndex(contentY, view.rowHeight, d.tracks.length);
-        // 拖到**最后一条轨道之下** → 哨兵（`NEW_TRACK_SENTINEL`）：面板据此建新轨并
-        // 落库（旧实现 `trackIdFromClientY` 返回 null 表达同一件事）。不区分的话
-        // `resolveTargetTrackIndex` 会把落点钳回最后一行，用户的"往下拖出新轨"意图
-        // 被静默吞掉。
-        const belowTracks = isContentYBelowTracks(contentY, view.rowHeight, d.tracks.length);
-        const targetTrackId = belowTracks
-            ? NEW_TRACK_SENTINEL
-            : trackIndex >= 0
-              ? (d.tracks[trackIndex]?.id ?? gesture.originTrackId)
-              : gesture.originTrackId;
-
-        // ── 竖直换轨锁定 ──
-        // 指针换了轨道、但水平方向几乎没有移动时，用户意图是**纯竖直换轨**而不是
-        // 同时横向挪动（手抖）。此时把水平位移钳零，并高亮目标行作为反馈。
-        // 判定与阈值都走旧实现的纯函数（`computeTimelineTrackDragLock`）：阈值随
-        // 缩放变化（24–32px），各写一份必然分叉。
-        const trackLock = computeTimelineTrackDragLock({
-            initialTrackId: gesture.originTrackId,
-            hoveredTrackId: targetTrackId,
-            horizontalDeltaPx: Math.abs(event.clientX - gesture.startClientX),
-            thresholdPx: computeTimelineTrackDragLockThresholdPx(view.pxPerSec),
-        });
-        const lockedTrackId = trackLock.locked ? trackLock.lockedTrackId : null;
-        if (lockedTrackId !== lastVerticalLockTrackId) {
-            lastVerticalLockTrackId = lockedTrackId;
-            updateVerticalLockOverlay();
-        }
-        const effectiveDeltaSec = trackLock.locked ? 0 : delta.deltaSec;
-        // 未钳制位移与 `effectiveDeltaSec` 同步受竖直换轨锁定（语义一致：锁定期间
-        // 水平方向"没有发生移动"）。Slip 消费它，见 `onDragPreview.rawDeltaSec`。
-        const effectiveRawDeltaSec = trackLock.locked ? 0 : delta.rawDeltaSec;
+        /*
+         * Target row follows the pointer exactly. There is no row snap and no
+         * row highlight: vertical movement only chooses the destination track,
+         * while horizontal alignment is owned by the panel's drag-origin snap.
+         */
+        const rowHeight = Math.max(1, view.rowHeight);
+        const rowIndex = Math.min(
+            d.tracks.length,
+            Math.max(0, Math.floor(Math.max(0, contentY) / rowHeight)),
+        );
+        const targetTrackId =
+            rowIndex >= d.tracks.length
+                ? NEW_TRACK_SENTINEL
+                : (d.tracks[rowIndex]?.id ?? gesture.lastTargetTrackId);
+        const effectiveDeltaSec = delta.deltaSec;
+        const effectiveRawDeltaSec = delta.rawDeltaSec;
 
         if (
             effectiveDeltaSec === gesture.lastDeltaSec &&
@@ -5206,43 +5139,6 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             targetTrackId,
             modifiers: dragModifiersOf(event),
         });
-    }
-
-    /**
-     * 把竖直换轨锁定的高亮行同步到 DOM（行底 + 徽标）。
-     *
-     * 流程：锁定行为 null → 隐藏；否则按 `行号 × 行高 − scrollTop` 定位，宽度取
-     * 视口宽度（行高亮横跨整个轨道区，与旧实现的行底色一致）。
-     *
-     * 特殊说明：只在标脏的那一帧调用（调用方已做值去重）——它每帧最多触发一次，
-     * 且只写 4 个样式属性，不构成滚动热路径的负担。
-     *
-     * @returns 无返回值。
-     */
-    function updateVerticalLockOverlay(): void {
-        const trackId = lastVerticalLockTrackId;
-        if (trackId === null) {
-            if (verticalLockEl.style.display !== "none") verticalLockEl.style.display = "none";
-            return;
-        }
-        const d = data();
-        const index = d.tracks.findIndex((track) => track.id === trackId);
-        if (index < 0) {
-            verticalLockEl.style.display = "none";
-            return;
-        }
-        const view = scroll.get();
-        const rowHeight = Math.max(1, view.rowHeight);
-        const top = index * rowHeight - view.scrollTop;
-        verticalLockEl.style.display = "block";
-        verticalLockEl.style.left = "0px";
-        verticalLockEl.style.top = `${top}px`;
-        verticalLockEl.style.width = `${viewportWidthPx}px`;
-        verticalLockEl.style.height = `${rowHeight}px`;
-        // 行高亮只在行"真正可见"时才有意义：滚出视口后隐藏，避免它叠在别的行上
-        // （DOM 不会像 canvas 那样自动裁剪到容器）。
-        const visible = top + rowHeight > 0 && top < viewportHeightPx;
-        verticalLockEl.style.visibility = visible ? "visible" : "hidden";
     }
 
     /**
@@ -5373,7 +5269,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 pendingContextMenu = null;
                 if (boxActive) {
                     suppressNextContextMenu = true;
-                } else if (!cancelled) {
+                } else if (!cancelled && !synthetic) {
                     // 未拖动的右键单击：吞掉菜单（本平台上 contextmenu 在松手**之后**
                     // 触发，此时 pendingContextMenu 还未设置——见 onContextMenu 的
                     // 事件顺序），改为单块并入 / 挖掉。命中按**松开时**的指针位置
@@ -5494,7 +5390,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 // `clipRangeSelect`），且要与「物理 Alt 旁路 / 两键互斥」规则一致；
                 // 现读 `event.ctrlKey || event.metaKey` 既绕过绑定，也绕过互斥。
                 interactions?.onSelectClip?.(
-                    gesture.clipId,
+                    gesture.overlapClickClipId ?? gesture.clipId,
                     gesture.selectionMods.multiSelectToggleActive,
                     gesture.selectionMods.rangeSelectActive,
                     gesture.startClientX,
@@ -5529,12 +5425,6 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 手势结束立即停掉边缘自动滚屏：不停会让视口在松手后继续滑动，
             // 且循环每帧都会读到已失效的手势状态。
             stopDragAutoScroll();
-            // 竖直换轨锁定的高亮属于**手势期间**的反馈：手势一结束就必须消失，
-            // 否则会有一条蓝色行底/徽标永久留在画面上（旧实现靠 state 归零清除）。
-            if (lastVerticalLockTrackId !== null) {
-                lastVerticalLockTrackId = null;
-                updateVerticalLockOverlay();
-            }
             // 交回悬停逻辑（下一次 pointermove 会按命中分区重设）。
             container.style.cursor = "";
         }
@@ -6009,11 +5899,6 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 cancelled: true,
                 modifiers: mods,
             });
-            // 取消同样要收起竖直换轨锁定的高亮（见 `onGesturePointerUp`）。
-            if (lastVerticalLockTrackId !== null) {
-                lastVerticalLockTrackId = null;
-                updateVerticalLockOverlay();
-            }
             gesture = { kind: "none" };
             return true;
         }
@@ -6458,7 +6343,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 return {
                     contentLeftPx: clipLeftPx + headerLayout.gainLabelLeftPx,
                     contentTopPx: rowTopPx,
-                    widthPx: 72,
+                    widthPx: CLIP_HEADER_RATE_BADGE_ANCHOR_WIDTH_PX,
                 };
             }
             const headerLayout = resolveClipHeaderLayout({
@@ -6481,7 +6366,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             return {
                 contentLeftPx: clipLeftPx + headerLayout.rateLabelLeftPx,
                 contentTopPx: rowTopPx,
-                widthPx: 72,
+                widthPx: CLIP_HEADER_RATE_BADGE_ANCHOR_WIDTH_PX,
             };
         },
 
@@ -6527,7 +6412,6 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             container.removeEventListener("pointermove", updateHoverCursor);
             container.removeEventListener("pointerleave", onPointerLeave);
             boxSelectEl.remove();
-            verticalLockEl.remove();
             window.removeEventListener("pointermove", onGesturePointerMove);
             window.removeEventListener("pointerup", onGesturePointerUp);
             window.removeEventListener("pointercancel", onGesturePointerCancel);

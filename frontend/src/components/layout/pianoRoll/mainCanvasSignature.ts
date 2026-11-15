@@ -18,7 +18,7 @@
  *
  * 顺带修掉的同类塌缩项：`paramMorphOverlay`（morph 手柄拖拽同样静默失效，实测
  * 3 点 → 9 点签名相同）、`paramViewsRef.current`、`liveEditOverrideRef.current`、
- * `detectedPitchCurves`、`referencePitchOverlays`、`secondaryParamViews`。
+ * `clipPitchOverlays`、`referencePitchOverlays`、`secondaryParamViews`。
  *
  * 独立成模块的另一个原因：**本工程 vitest 跑在 node 环境且不允许 import `.tsx`**
  * （会经 barrel 间接引入 Redux / localStorage 而崩溃），放在面板里就等于不可测。

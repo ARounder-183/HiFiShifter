@@ -72,7 +72,7 @@ For detailed operations on the track and parameter panels (fade editing, snap se
 
 ## Keyboard shortcuts
 
-> All shortcuts can be customized in-app under `Options → Keyboard Shortcuts...`; the table below lists the defaults. On macOS, `Ctrl` corresponds to `⌘` and `Alt` to `⌥`.
+> All shortcuts can be customized in-app under `Options → Keyboard Shortcuts...`; the table below lists the defaults. On macOS, `Ctrl` corresponds to `⌘` and `Alt` to `⌥`. The macOS Delete key is `⌫`; default Delete / Backspace shortcuts use `⌫` (`Fn+Delete` is forward delete).
 
 | Action | Shortcut / Mouse |
 | :----------------------------------- | :----------------------------------------------------------- |
@@ -285,7 +285,7 @@ The app automatically writes its run log to the platform-standard log directory 
 Advanced options:
 
 - Launch flag `--log-file=<path>`: write the log to a specific path; `--log-file=-` disables file logging.
-- Environment variable `HIFISHIFTER_LOG=debug` (or `trace` / `info` / `warn` / `error`): adjust log verbosity.
+- **Help > Log verbosity** is a submenu with only four radio items (None / Low / Medium / High, default Low); the first-level menu shows one line with the current level. It is the primary control; `HIFISHIFTER_LOG_VERBOSITY` / `--log-verbosity` override it, and legacy `HIFISHIFTER_LOG` maps to the same four levels.
 - Environment variable `HIFISHIFTER_LOG_DIR`: override the default log directory.
 - Environment variable `HIFISHIFTER_GDK_BACKEND=x11|wayland`: overrides the `x11` default baked into the AppImage. On Wayland desktops with blurry scaling or IME trouble, try `wayland`.
 - Environment variable `HIFISHIFTER_SAFE_GL=1`: for broken GPU drivers. Disables the WebKit compositor and forces software rendering (the window appears, drawing is slower).

@@ -168,7 +168,7 @@ export function useTimelineViewportController({
                 setScrollLeftState(next);
             }
         },
-        [syncScrollLeft, pxPerSec, setPxPerSec, setScrollLeftState, kernelHostRef],
+        [syncScrollLeft, pxPerSec, setPxPerSec, setScrollLeftState],
     );
 
     /**

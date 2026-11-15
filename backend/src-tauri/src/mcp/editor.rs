@@ -218,9 +218,16 @@ fn run(app: &tauri::AppHandle, request: EditorRequest) -> Result<Value, Failure>
                     let layout = snapshot
                         .params_by_root_track
                         .get(&root)
-                        .and_then(|p| p.param_line_blocks.clone())
+                        .map(|p| p.param_block_edits.clone())
                         .unwrap_or_default();
-                    json!({"root_track_id":root,"layout":layout})
+                    let view = hifishifter_kernel::param_blocks::compose_param_block_view(
+                        &snapshot,
+                        &root,
+                        &layout,
+                        snapshot.frame_period_ms(),
+                    )
+                    .map_err(|error| Failure::new("PARAM_BLOCK_INVALID", error))?;
+                    json!({"root_track_id":root,"layout":layout,"view":view})
                 }
                 QueryKind::Settings => settings(&state),
                 QueryKind::Playback => encode(crate::commands::get_playback_state(app.state()))?,
@@ -411,7 +418,14 @@ fn run(app: &tauri::AppHandle, request: EditorRequest) -> Result<Value, Failure>
             }
             let result = match request.action {
                 TransportAction::Play => {
-                    crate::commands::play_original(app.state(), request.position_sec.unwrap_or(0.0))
+                    if let Some(position) = request.position_sec {
+                        let seeked =
+                            crate::commands::set_transport(app.state(), Some(position), None);
+                        if seeked.get("ok").and_then(Value::as_bool) == Some(false) {
+                            return Ok(seeked);
+                        }
+                    }
+                    crate::commands::play_original(app.state())
                 }
                 TransportAction::Stop => crate::commands::stop_audio(app.state()),
                 TransportAction::Seek => {

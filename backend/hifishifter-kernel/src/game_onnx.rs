@@ -599,37 +599,44 @@ pub fn normalize_events(events: Vec<GameNoteEvent>) -> Vec<GameNoteEvent> {
 ///
 /// 只保留浊音事件；显示层需要连续覆盖时由调用方决定是否补休止。这里不补，
 /// 因为静音不是音节，不能把休止伪装成参数块。
-pub fn voiced_spans(events: &[GameNoteEvent]) -> Vec<(f64, f64)> {
-    events
+pub fn voiced_spans(events: &[GameNoteEvent]) -> Vec<(f64, f64, f32)> {
+    let mut spans: Vec<(f64, f64, f32)> = events
         .iter()
-        .filter(|event| event.voiced)
-        .map(|event| (event.start_sec, event.end_sec))
-        .collect()
+        .filter(|event| event.voiced && event.end_sec.is_finite() && event.start_sec.is_finite())
+        .map(|event| (event.start_sec, event.end_sec, event.midi_note))
+        .collect();
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    spans
 }
 
-/// 把 GAME 音符事件投影成 Take 的音节区间。
+/// Full-source voiced note intervals. Persisted analysis and GAME baselines
+/// must consume this; a Clip's audible window is only a projection filter.
+pub fn full_source_voiced_spans(events: &[GameNoteEvent]) -> Vec<(f64, f64, f32)> {
+    voiced_spans(events)
+}
+
+/// Display-only projection of full-source GAME events into an audible window.
 ///
-/// 【为什么不做“整段补齐”】休止不是音节；把休止补成区间会让前端把停顿也画成
-/// 参数块，用户拖块时就会改到不该存在的区域。这里只保留模型判为浊音的区段，
-/// 并把边界夹到该 Take 的可见源窗口。若模型只返回一个跨整段的长音，也会被裁剪
-/// 到窗口，交由后续人工切开，而不是伪造额外边界。
+/// This helper must never be used to persist analysis spans or GAME baselines:
+/// clipping a note's source boundary destroys the identity that user edits,
+/// reanalysis merges and truncated blocks rely on.
 pub fn syllable_spans_for_window(
     events: &[GameNoteEvent],
     window_start_sec: f64,
     window_end_sec: f64,
-) -> Vec<(f64, f64)> {
+) -> Vec<(f64, f64, f32)> {
     if !(window_start_sec.is_finite()
         && window_end_sec.is_finite()
-        && window_end_sec > window_start_sec + 1e-9)
+        && window_end_sec > window_start_sec + 1e-12)
     {
         return Vec::new();
     }
     let mut out = Vec::new();
-    for (start, end) in voiced_spans(events) {
-        let start = start.max(window_start_sec).min(window_end_sec);
-        let end = end.max(window_start_sec).min(window_end_sec);
-        if end > start + 1e-9 {
-            out.push((start, end));
+    for (source_start, source_end, note) in full_source_voiced_spans(events) {
+        let start = source_start.max(window_start_sec).min(window_end_sec);
+        let end = source_end.max(window_start_sec).min(window_end_sec);
+        if end > start + 1e-12 {
+            out.push((start, end, note));
         }
     }
     out.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -871,7 +878,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             syllable_spans_for_window(&first, 0.0, 0.5),
-            vec![(0.0, 0.5)]
+            vec![(0.0, 0.5, 60.0)]
         );
         let mut second = cache
             .get_or_compute(cache_key(1), || {
@@ -881,7 +888,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             syllable_spans_for_window(&second, 1.0, 1.5),
-            vec![(1.0, 1.5)]
+            vec![(1.0, 1.5, 60.0)]
         );
         second.clear();
         assert_eq!(
@@ -975,6 +982,33 @@ mod tests {
     }
 
     #[test]
+    fn full_source_voiced_spans_are_not_clipped_by_the_audible_window() {
+        let events = vec![
+            GameNoteEvent {
+                start_sec: 0.02,
+                end_sec: 0.30,
+                midi_note: 64.0,
+                voiced: true,
+            },
+            GameNoteEvent {
+                start_sec: 0.35,
+                end_sec: 0.50,
+                midi_note: 62.0,
+                voiced: true,
+            },
+        ];
+        let full = full_source_voiced_spans(&events);
+        assert_eq!(full[0], (0.02, 0.30, 64.0));
+        let visible = syllable_spans_for_window(&events, 0.054, 0.45);
+        assert_eq!(visible[0], (0.054, 0.30, 64.0));
+        assert_eq!(visible[1], (0.35, 0.45, 62.0));
+        assert_eq!(
+            full[0].0, 0.02,
+            "display clipping must not rewrite persisted identity"
+        );
+    }
+
+    #[test]
     fn split_waveform_never_exceeds_the_limit() {
         let samples = vec![0.01f32; GAME_MAX_CHUNK_SAMPLES * 2 + 10];
         let chunks = split_waveform(&samples);
@@ -1017,7 +1051,7 @@ mod tests {
         ];
         assert_eq!(
             syllable_spans_for_window(&events, 1.0, 2.0),
-            vec![(1.0, 1.5), (1.5, 2.0)]
+            vec![(1.0, 1.5, 62.0), (1.5, 2.0, 64.0)]
         );
     }
 
@@ -1054,7 +1088,7 @@ mod tests {
         assert!(events.iter().any(|event| event.voiced), "{events:?}");
         assert!(syllable_spans_for_window(&events, 0.0, 3.0)
             .iter()
-            .any(|(start, end)| *end > *start + 0.1));
+            .any(|(start, end, _)| *end > *start + 0.1));
         for _ in 0..35 {
             assert_eq!(
                 analyze_source_file(&wav_path, &dir, GameInferenceConfig::default())

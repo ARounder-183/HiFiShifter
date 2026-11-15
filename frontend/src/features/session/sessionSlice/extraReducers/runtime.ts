@@ -1,7 +1,5 @@
 import type { TimelineState } from "../../../../types/api";
 import type {
-    DragDirection,
-    DrawDragDirection,
     PitchSnapUnit,
     TimelineSnapSettings,
     TimeUnit,
@@ -27,8 +25,12 @@ import {
     DEFAULT_PEN_INPUT_SETTINGS,
     DEFAULT_RENDER_CACHE_SETTINGS,
 } from "../../../../services/api/settings";
+import { normalizeAutoScrollMode } from "../../../../utils/autoFollowScroll";
+import { hydrateRippleState } from "../../rippleMode";
+import { isDragDirectionForTool } from "../../dragDirection";
 import { SCALE_KEYS } from "../../../../utils/musicalScales";
 import { normalizeParamAxisUnits } from "../../../../components/layout/pianoRoll/paramAxisUnits";
+import { normalizePanAxisDirections } from "../../../../components/layout/pianoRoll/paramPan";
 import type { CustomScalePreset } from "../../../../utils/customScales";
 import { sanitizeCustomScalePreset } from "../../../../utils/customScales";
 import {
@@ -46,6 +48,7 @@ import {
     normalizeTimelineSnapSettings,
     createDefaultTimelineSnapSettings,
     applyToolMode,
+    normalizeSelectToolMode,
 } from "../settings";
 import { setPending, setRejected } from "./shared";
 import type { ActionReducerMapBuilder } from "@reduxjs/toolkit";
@@ -226,8 +229,14 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
             if (s.paramBlockFollowPitch != null) {
                 state.paramBlockFollowPitch = Boolean(s.paramBlockFollowPitch);
             }
+            if (s.alwaysShowParamBlocks != null) {
+                state.alwaysShowParamBlocks = Boolean(s.alwaysShowParamBlocks);
+            }
             state.playheadZoomEnabled = s.playheadZoom;
             if (s.autoScroll != null) state.autoScrollEnabled = s.autoScroll;
+            // 自动滚屏模式：旧配置没有这一项、插件形态返回脏值、mock 返回 undefined，
+            // 全部回落"滚动式"（与升级前的行为逐值一致）。
+            state.autoScrollMode = normalizeAutoScrollMode(s.autoScrollMode);
             if (s.paramEditorSeekPlayhead != null)
                 state.paramEditorSeekPlayheadEnabled = Boolean(s.paramEditorSeekPlayhead);
             if (s.paramEditorTimelineClickSelectTrack != null) {
@@ -238,17 +247,24 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
             if (s.showClipboardPreview != null) state.showClipboardPreview = s.showClipboardPreview;
             if (s.showParamValuePopup != null)
                 state.showParamValuePopup = Boolean(s.showParamValuePopup);
+            if (s.showClipPitchOverlay != null)
+                state.showClipPitchOverlay = Boolean(s.showClipPitchOverlay);
             // 纵轴单位映射：手改坏配置（未知参数 / 非法取值）在这里被过滤掉。
             state.paramAxisUnits = normalizeParamAxisUnits(s.paramAxisUnits);
+            state.paramAxisDirections = normalizePanAxisDirections(s.paramAxisDirections);
+            state.project.lastSaveFormat =
+                s.lastProjectSaveFormat === "json" || s.lastProjectSaveFormat === "zip"
+                    ? s.lastProjectSaveFormat
+                    : "hshp";
             if (s.scaleHighlightMode != null)
                 state.scaleHighlightMode = s.scaleHighlightMode === "always" ? "always" : "off";
             if (s.ignoreGrouping != null) state.ignoreGrouping = Boolean(s.ignoreGrouping);
-            const loadedRippleMode = s.rippleMode;
-            if (loadedRippleMode === "track" || loadedRippleMode === "all") {
-                state.rippleMode = loadedRippleMode;
-            } else {
-                state.rippleMode = "off";
-            }
+            // 波纹编辑：开关与方向是两根轴，而旧配置里只有一个三值字符串
+            // （off / track / all）—— 由 hydrateRippleState 统一折算。它同时守住
+            // 插件形态与 mock 返回的脏值：认不出旧编码就会把老用户的"开着"读成"关着"。
+            const ripple = hydrateRippleState(s);
+            state.rippleEnabled = ripple.enabled;
+            state.rippleScope = ripple.scope;
             if (s.lockParamLines != null) state.lockParamLinesEnabled = Boolean(s.lockParamLines);
             if (s.metronomeEnabled != null) state.metronomeEnabled = Boolean(s.metronomeEnabled);
             if (s.metronomeGain != null) {
@@ -270,7 +286,8 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
             }
             if (s.silenceDetectOptions != null) {
                 const o = s.silenceDetectOptions as Partial<SilenceDetectSettings>;
-                state.silenceDetectOptions = { ...state.silenceDetectOptions, ...o };
+                const method = o.method === "peak" || o.method === "note_blocks" ? o.method : "rms";
+                state.silenceDetectOptions = { ...state.silenceDetectOptions, ...o, method };
             }
             if (s.search != null) state.searchSettings = normalizeSearchSettings(s.search);
             /*
@@ -339,17 +356,19 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
                     ...s.penInput,
                 };
             }
+            // 拖动方向：三份字段共用同一份模式表（`isDragDirectionForTool`），
+            // 不再各写一遍白名单字面量。
             const selectDir = s.selectDragDirection;
-            if (selectDir != null && ["free", "x-only", "y-only"].includes(selectDir)) {
-                state.selectDragDirection = selectDir as DragDirection;
+            if (isDragDirectionForTool("select", selectDir)) {
+                state.selectDragDirection = selectDir;
             }
             const drawDir = s.drawDragDirection;
-            if (drawDir != null && ["free", "x-only"].includes(drawDir)) {
-                state.drawDragDirection = drawDir as DrawDragDirection;
+            if (isDragDirectionForTool("draw", drawDir)) {
+                state.drawDragDirection = drawDir;
             }
             const lineVibratoDir = s.lineVibratoDragDirection;
-            if (lineVibratoDir != null && ["free", "x-only"].includes(lineVibratoDir)) {
-                state.lineVibratoDragDirection = lineVibratoDir as DrawDragDirection;
+            if (isDragDirectionForTool("vibrato", lineVibratoDir)) {
+                state.lineVibratoDragDirection = lineVibratoDir;
             }
             const smoothness = s.smoothnessPercent ?? s.edgeSmoothnessPercent;
             if (smoothness != null) {
@@ -394,9 +413,14 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
                     (id: unknown): id is string => typeof id === "string" && id.length > 0,
                 );
             }
-            // 上次使用的工具：只认已知取值（手改配置里的野值一律忽略，回落默认）。
-            // 放在最后：`applyToolMode` 会一并派生 `toolModeGroup` / `drawToolMode`，
-            // 后面不该再有分支去改这三个字段。
+            // 上次使用的选择族子模式：非法 / 缺项一律 range。
+            // 只恢复**工具身份**：块图层是否可见由 isParamBlockLayerVisible 派生，
+            // 水合不再代写任何设置 —— 旧实现在这里把图层强制打开，于是「上次是
+            // 块模式」会永久留下一个用户没开过的图层开关。
+            state.selectToolMode = normalizeSelectToolMode(s.paramEditorSelectionMode);
+            // 上次使用的工具族：只认四个合法成员（旧配置里的 `"block"` 是未知值，
+            // 回落出厂默认的绘制工具）。放在最后：`applyToolMode` 还会同步
+            // `drawToolMode`。
             if (
                 typeof s.paramEditorTool === "string" &&
                 (TOOL_MODES as readonly string[]).includes(s.paramEditorTool)

@@ -20,7 +20,15 @@
  * 跨窗口消失了，事件也就没有存在理由。
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import React, {
+    useCallback,
+    useEffect,
+    useLayoutEffect,
+    useMemo,
+    useRef,
+    useState,
+    type ChangeEvent,
+} from "react";
 import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import { AppFileInput } from "../../ui/FileInput";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -501,12 +509,14 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
      */
     const openedWithRef = useRef<AppearanceSettings | null>(null);
     const themeRef = useRef(theme);
+    const draftDirtyBox = useRef({ value: false });
     useEffect(() => {
         themeRef.current = theme;
     }, [theme]);
 
     useEffect(() => {
-        // 只在挂载时抓一次：这是"打开面板前的样子"。
+        const draftState = draftDirtyBox.current;
+        const openedState = openedWithRef;
         const current = themeRef.current;
         openedWithRef.current = {
             mode: current.modeSetting,
@@ -519,15 +529,15 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
         return () => {
             // 卸载 = 关闭（浮动窗的 X、菜单开关、布局重置都会走到这里）。
             // 草稿未应用就回滚，否则预览会被当成用户的选择留下来。
-            if (!draftDirtyRef.current) return;
-            draftDirtyRef.current = false;
-            const opened = openedWithRef.current;
-            if (opened) themeRef.current.applySettings(opened);
+            if (!draftState.value) return;
+            draftState.value = false;
+            const opened = openedState.current;
+            if (opened) current.applySettings(opened);
             localStorage.removeItem(PREVIEW_SETTINGS_KEY);
             localStorage.removeItem(PREVIEW_COLORS_KEY);
             void broadcastAppearanceToSatellites();
         };
-    }, []);
+    }, [draftDirtyBox, openedWithRef, themeRef]);
 
     /* ── Tab ── */
     const [activeTab, setActiveTab] = useState<SettingsTab>("theme");
@@ -548,13 +558,25 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
     const [radius, setRadius] = useState<RadixRadius>(theme.radius);
     const [fontFamily, setFontFamily] = useState(theme.fontFamily);
 
-    const [customThemes, setCustomThemes] = useState<CustomTheme[]>([]);
+    const [initialThemeDraft] = useState(() => {
+        const themes = loadCustomThemes();
+        const active = themes.find((ct) => ct.id === theme.activeCustomThemeId);
+        return {
+            themes,
+            colors: active?.colors ?? {},
+            waveform: active?.waveformColors,
+            name: active?.name ?? "",
+        };
+    });
+    const [customThemes, setCustomThemes] = useState<CustomTheme[]>(initialThemeDraft.themes);
     const [activeThemeId, setActiveThemeId] = useState<string | null>(theme.activeCustomThemeId);
-    const [editColors, setEditColors] = useState<Partial<Record<QtColorToken, string>>>({});
-    const [editWaveform, setEditWaveform] = useState<{ fill: string; stroke: string } | undefined>(
-        undefined,
+    const [editColors, setEditColors] = useState<Partial<Record<QtColorToken, string>>>(
+        initialThemeDraft.colors,
     );
-    const [editThemeName, setEditThemeName] = useState("");
+    const [editWaveform, setEditWaveform] = useState<{ fill: string; stroke: string } | undefined>(
+        initialThemeDraft.waveform,
+    );
+    const [editThemeName, setEditThemeName] = useState(initialThemeDraft.name);
     const [activePaletteGroup, setActivePaletteGroup] = useState(PALETTE_GROUPS[0].labelKey);
 
     const [fontSearch, setFontSearch] = useState("");
@@ -566,26 +588,14 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
      * 选择/导入）置位，focus / storage 同步据此跳过对编辑态的覆盖。
      * 应用（handleApply）会落盘并关闭窗口，无需复位。
      */
-    const draftDirtyRef = useRef(false);
     const markDraftDirty = useCallback(() => {
-        draftDirtyRef.current = true;
-    }, []);
+        draftDirtyBox.current.value = true;
+    }, [draftDirtyBox]);
 
     /* ── 初始化 ── */
-    useEffect(() => {
-        const themes = loadCustomThemes();
-        setCustomThemes(themes);
-
-        const active = themes.find((ct) => ct.id === theme.activeCustomThemeId);
-        if (active) {
-            setEditColors(active.colors);
-            setEditWaveform(active.waveformColors);
-            setEditThemeName(active.name);
-        }
-
+    useLayoutEffect(() => {
         systemFonts.detect();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+    }, [systemFonts]);
 
     useEffect(() => {
         const syncFromStorage = () => {
@@ -593,7 +603,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
             // 时，focus / storage / appearance-applied 同步一律跳过：否则在
             // 编辑过程中点一下主窗口再切回来（或收到外部应用事件），全部
             // 草稿会被 localStorage 旧值静默覆盖。
-            if (draftDirtyRef.current) return;
+            if (draftDirtyBox.current.value) return;
             const latest = loadAppearance();
             theme.applySettings(latest);
             setAccentColor(latest.accentColor);
@@ -720,7 +730,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
          * 所有用户编辑都在改 state 之前先 `markDraftDirty()`，因此以它为闸门：
          * 首次挂载（干净）被跳过，任何真实编辑照旧预览 + 落盘。
          */
-        if (!draftDirtyRef.current) return;
+        if (!draftDirtyBox.current.value) return;
         localStorage.setItem(
             PREVIEW_SETTINGS_KEY,
             JSON.stringify({
@@ -797,7 +807,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
         localStorage.removeItem(PREVIEW_SETTINGS_KEY);
         localStorage.removeItem(PREVIEW_COLORS_KEY);
         // 草稿已应用：卸载时的回滚逻辑据此跳过。
-        draftDirtyRef.current = false;
+        draftDirtyBox.current.value = false;
 
         /*
          * 拆到独立窗口的面板不共享主题（另一个 JS 上下文），必须显式通知。
@@ -833,7 +843,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
         localStorage.removeItem(PREVIEW_SETTINGS_KEY);
         localStorage.removeItem(PREVIEW_COLORS_KEY);
         // 清掉草稿标记：卸载时的回滚逻辑据此跳过（这里已经回滚过了）。
-        draftDirtyRef.current = false;
+        draftDirtyBox.current.value = false;
         // 回滚也改变了外观 —— 卫星窗口同样要跟上。
         void broadcastAppearanceToSatellites();
         onRequestClose();

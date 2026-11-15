@@ -19,9 +19,10 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
-use hifishifter_kernel::logfile::RotatingLog;
+use hifishifter_kernel::log_policy::{self, LogPolicy};
+use hifishifter_kernel::logfile::{self, RotatingLog};
 
 /// App 的日志文件名。**与插件的 `plugin.log` 不同**，这是有意的：两个形态的日志
 /// 现在落在同一个目录里，文件名不同才不会互相覆盖，轮转也各按自己的文件名进行。
@@ -31,6 +32,33 @@ const LOG_FILE_NAME: &str = "hifishifter.log";
 const PIPE_BUFFER_BYTES: usize = 1024 * 1024;
 
 static LOG_FILE_PATH: OnceLock<PathBuf> = OnceLock::new();
+/// tee 线程的写入器。诊断包导出 / 会话尾 / panic 都要能强制 flush 它。
+static TEE_WRITER: OnceLock<Arc<Mutex<Option<RotatingLog>>>> = OnceLock::new();
+
+fn tee_writer() -> &'static Arc<Mutex<Option<RotatingLog>>> {
+    TEE_WRITER.get_or_init(|| Arc::new(Mutex::new(None)))
+}
+
+/// 强制把 tee 的缓冲落盘（诊断包导出、进程退出、panic 之前）。
+pub fn flush_logs() -> std::io::Result<()> {
+    let mut guard = tee_writer().lock().unwrap_or_else(|e| e.into_inner());
+    match guard.as_mut() {
+        Some(writer) => writer.flush_now(),
+        None => Ok(()),
+    }
+}
+
+/// 写会话尾（`RunEvent::Exit` 与 panic hook 共用）。
+pub fn write_session_footer(reason: &str) {
+    if !log_policy::file_enabled() {
+        return;
+    }
+    if let Ok(mut guard) = tee_writer().lock() {
+        if let Some(writer) = guard.as_mut() {
+            let _ = writer.write_session_footer(reason);
+        }
+    }
+}
 
 /// 当前日志文件路径（未启用文件日志时为 `None`）。
 pub fn log_file() -> Option<&'static Path> {
@@ -47,8 +75,36 @@ pub fn log_dir() -> Option<&'static Path> {
 pub fn log_files() -> Vec<PathBuf> {
     LOG_FILE_PATH
         .get()
-        .map(|current| hifishifter_kernel::logfile::rotated_files(current))
+        .map(|current| {
+            let policy = log_policy::policy();
+            hifishifter_kernel::logfile::rotated_files_with_limit(current, policy.max_files)
+        })
         .unwrap_or_default()
+}
+
+/// 日志文件清单与占用（帮助菜单的只读状态行、诊断包共用）。
+pub fn log_file_stats() -> (Vec<(String, u64, String)>, u64) {
+    let mut files = Vec::new();
+    let mut total = 0_u64;
+    for path in log_files() {
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let modified = meta
+            .modified()
+            .ok()
+            .map(|time| {
+                let dt: chrono::DateTime<chrono::Local> = time.into();
+                dt.format(logfile::TIMESTAMP_FORMAT).to_string()
+            })
+            .unwrap_or_default();
+        total = total.saturating_add(meta.len());
+        files.push((name.to_owned(), meta.len(), modified));
+    }
+    (files, total)
 }
 
 /// `--log-file` 参数的解析结果。
@@ -83,42 +139,57 @@ pub fn choice_from_args(args: &[String]) -> LogFileChoice {
     LogFileChoice::Default
 }
 
-/// 初始化日志系统：安装 stderr logger 与 panic hook，并按 `choice` 启动
-/// stderr → 日志文件的 tee 线程。
-pub fn init_logging(choice: LogFileChoice) {
+/// 初始化日志系统：先装载用户选择的档位，再安装 stderr logger / panic hook，
+/// 并按 `choice` 启动 stderr → 日志文件的 tee 线程。
+///
+/// 【为什么必须先 load_initial】级别在 `main.rs:40` 就定死，Tauri setup 与前端
+/// `get_ui_settings` 都还没发生；策略文件一定要在装 logger 之前读。
+/// 【为什么「无」档不 dup2】`dup2` 是进程级且不可逆；一旦重定向，第三方 stderr
+/// 就被管道接管。Off 档要求**严格零产出**，所以从一开始就不接管、不建目录、不建线程。
+pub fn init_logging(choice: LogFileChoice, args: &[String]) {
+    let policy = log_policy::load_initial(args);
     install_stderr_logger();
     install_panic_hook();
 
+    if !policy.file_enabled {
+        // 「无」：不创建日志目录、不打开/追加任何文件、不启动 tee。
+        // 既有历史文件保留，但一个字节都不新增。
+        return;
+    }
+
     let log_path = match choice {
-        // `--log-file=-`：用户显式关闭文件日志，属正常路径，静默返回 ——
-        // 不得落入下方“默认目录未解析”的警告分支（那会误导用户以为出错）。
+        // `--log-file=-`：用户显式关闭文件日志，属正常路径，静默返回。
         LogFileChoice::Disabled => return,
         LogFileChoice::Explicit(path) => Some(path),
         LogFileChoice::Default => default_log_file_path(),
     };
     let Some(log_path) = log_path else {
-        log::warn!("file logging unavailable (default log dir unresolved)");
+        log_policy::mark_unhealthy("default log dir unresolved");
         return;
     };
 
     if let Some(parent) = log_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            log_policy::mark_unhealthy(&format!("create log dir failed: {error}"));
+        }
     }
     let _ = LOG_FILE_PATH.set(log_path.clone());
 
-    if spawn_stderr_tee(log_path.clone()) {
+    if spawn_stderr_tee(log_path.clone(), policy.clone()) {
         log::info!(
-            "HiFiShifter v{} ({} {}) starting; log file: {}",
+            "HiFiShifter v{} ({} {}) starting; session={} verbosity={} source={} log file: {}",
             crate::build_info::display_version(),
             std::env::consts::OS,
             std::env::consts::ARCH,
+            log_policy::session_id(),
+            policy.verbosity.as_str(),
+            log_policy::source().as_str(),
             log_path.display()
         );
     } else {
-        log::warn!(
-            "failed to open log file, continuing console-only: {}",
-            log_path.display()
-        );
+        let reason = format!("failed to open log file: {}", log_path.display());
+        log_policy::mark_unhealthy(&reason);
+        log::warn!("{reason}, continuing console-only");
     }
 }
 
@@ -157,7 +228,7 @@ impl log::Log for StderrLogger {
     }
 
     fn log(&self, record: &log::Record) {
-        if !self.enabled(record.metadata()) {
+        if !self.enabled(record.metadata()) || !log_policy::file_enabled() {
             return;
         }
         if is_demoted(record.metadata().target(), record.level()) {
@@ -184,31 +255,11 @@ impl log::Log for StderrLogger {
     }
 }
 
-/// 日志级别：环境变量 `HIFISHIFTER_LOG`（error|warn|info|debug|trace）优先，
-/// 缺省 debug 构建为 Debug、release 构建为 Info。
-fn max_level_from_env() -> log::LevelFilter {
-    if let Ok(value) = std::env::var("HIFISHIFTER_LOG") {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "off" => return log::LevelFilter::Off,
-            "error" => return log::LevelFilter::Error,
-            "warn" => return log::LevelFilter::Warn,
-            "info" => return log::LevelFilter::Info,
-            "debug" => return log::LevelFilter::Debug,
-            "trace" => return log::LevelFilter::Trace,
-            _ => {}
-        }
-    }
-    if cfg!(debug_assertions) {
-        log::LevelFilter::Debug
-    } else {
-        log::LevelFilter::Info
-    }
-}
-
+/// 安装 stderr logger；级别来自内核策略的**唯一**事实来源。
 fn install_stderr_logger() {
-    let level = max_level_from_env();
+    // 级别由 `log_policy::load_initial` / `apply` 统一设置（本模块不碰
+    // `set_max_level`）；这里只装门面实现。
     let _ = log::set_boxed_logger(Box::new(StderrLogger));
-    log::set_max_level(level);
 }
 
 // ── panic hook ──────────────────────────────────────────────────────
@@ -222,8 +273,10 @@ fn install_panic_hook() {
         let backtrace = std::backtrace::Backtrace::force_capture();
         log::error!("PANIC: thread '{thread_name}' panicked at {location}: {payload}\n{backtrace}");
         // `panic = "abort"` 下 hook 返回后进程立即中止；短暂等待让 tee 线程
-        // 把上面的错误行从管道落盘。
+        // 把上面的错误行从管道落盘。缓冲写之后必须先 flush 再等待。
         std::thread::sleep(std::time::Duration::from_millis(150));
+        let _ = flush_logs();
+        write_session_footer("panic");
     }));
 }
 
@@ -270,7 +323,7 @@ fn level_filter_of(level: log::Level) -> log::LevelFilter {
 
 /// 把 stderr 重定向进管道并启动 tee 线程；返回 tee 是否成功启动。
 #[cfg(windows)]
-fn spawn_stderr_tee(log_path: PathBuf) -> bool {
+fn spawn_stderr_tee(log_path: PathBuf, policy: LogPolicy) -> bool {
     use std::os::windows::io::FromRawHandle;
 
     // Save the original stderr so the tee thread can still echo to console.
@@ -301,7 +354,7 @@ fn spawn_stderr_tee(log_path: PathBuf) -> bool {
     let console = unsafe { std::fs::File::from_raw_handle(console_handle as *mut _) };
     std::thread::Builder::new()
         .name("stderr-log-tee".to_string())
-        .spawn(move || tee_loop(BufReader::new(reader), console, log_path))
+        .spawn(move || tee_loop(BufReader::new(reader), console, log_path, policy))
         .is_ok()
 }
 
@@ -340,34 +393,92 @@ fn spawn_stderr_tee(log_path: PathBuf) -> bool {
 /// 【为什么时间戳在**这里**补，而不是在 logger 里】tee 捕获的不只是 `log` 门面的
 /// 输出，还有第三方库（ORT / vslib / cpal）直接写 stderr 的行 —— 那些行没有级别、
 /// 没有 target，唯一的共同处理就是补时间戳。格式与轮转都来自内核共享实现。
-fn tee_loop(mut reader: BufReader<std::fs::File>, mut console: std::fs::File, log_path: PathBuf) {
-    let mut writer = match RotatingLog::open(log_path, "HiFiShifter", crate::build_info::version())
-    {
-        Ok(w) => w,
-        Err(_) => return,
+fn tee_loop(
+    mut reader: BufReader<std::fs::File>,
+    mut console: std::fs::File,
+    log_path: PathBuf,
+    policy: LogPolicy,
+) {
+    let writer = match RotatingLog::open_with_policy(
+        log_path,
+        "HiFiShifter",
+        crate::build_info::version(),
+        policy.max_file_bytes,
+        policy.max_files,
+        policy.max_single_line_chars,
+    ) {
+        Ok(writer) => writer,
+        Err(error) => {
+            log_policy::mark_unhealthy(&format!("open log file failed: {error}"));
+            return;
+        }
     };
+    // 写入器归进程级出口持有：诊断包导出 / 会话尾 / panic 才能强制 flush 缓冲。
+    *tee_writer().lock().unwrap_or_else(|e| e.into_inner()) = Some(writer);
 
     let mut line_buf = String::new();
+    let mut since_flush = std::time::Instant::now();
     loop {
         line_buf.clear();
         match reader.read_line(&mut line_buf) {
             Ok(0) => break,
             Ok(_) => {
+                // 运行时热切换到「无」：不再写文件、也不再回显控制台，但管道
+                // 必须继续被读走，否则第三方 stderr 会把宿主阻塞住（R2）。
+                if !log_policy::file_enabled() {
+                    continue;
+                }
                 let body = line_buf.trim_end_matches(['\n', '\r']);
-                let stamped = hifishifter_kernel::logfile::stamp(body);
-                let _ = writer.write_line(&stamped);
-                let _ = console.write_all(stamped.as_bytes());
-                let _ = console.write_all(b"\n");
-                let _ = console.flush();
+                let stamped = logfile::stamp(body);
+                let failed = {
+                    let mut guard = tee_writer().lock().unwrap_or_else(|e| e.into_inner());
+                    match guard.as_mut() {
+                        Some(writer) => writer.write_line(&stamped).is_err(),
+                        None => true,
+                    }
+                };
+                if failed {
+                    log_policy::mark_unhealthy("writing to the log file failed");
+                    break;
+                }
+                // 低/中档只回显 Warn/Error 行，高档全量；第三方 stderr 原文也按档收敛。
+                let echo = policy.verbosity != log_policy::LogVerbosity::Low
+                    || body.starts_with("[WARN ]")
+                    || body.starts_with("[ERROR]");
+                if echo {
+                    let _ = console.write_all(stamped.as_bytes());
+                    let _ = console.write_all(b"\n");
+                    let _ = console.flush();
+                }
+                // 200 ms 兜底：低流量会话也不能把最后几行一直留在用户态缓冲里。
+                if since_flush.elapsed() >= std::time::Duration::from_millis(200) {
+                    if flush_logs().is_err() {
+                        log_policy::mark_unhealthy("flushing the log file failed");
+                        break;
+                    }
+                    since_flush = std::time::Instant::now();
+                }
             }
             Err(_) => break,
         }
     }
+    write_session_footer("stderr-tee-exit");
+    // 释放写入器（Drop 会 flush），后续诊断包只读磁盘上的文件。
+    *tee_writer().lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn off_disables_file_and_tee() {
+        let policy = log_policy::LogVerbosity::Off.policy();
+        assert!(!policy.file_enabled);
+        assert!(!policy.stderr_tee);
+        assert!(!policy.host_sink);
+        assert_eq!(policy.level_filter, log::LevelFilter::Off);
+    }
 
     #[test]
     fn third_party_info_is_demoted() {

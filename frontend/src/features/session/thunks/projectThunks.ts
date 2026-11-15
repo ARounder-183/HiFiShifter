@@ -3,9 +3,12 @@ import { createAsyncThunk } from "@reduxjs/toolkit";
 import { getPluginHost } from "../../../services/pluginHost";
 import type { TimelineState } from "../../../types/api";
 import { webApi } from "../../../services/webviewApi";
+import type { ProjectSaveFormat } from "../../../services/api/project";
 import { coreApi } from "../../../services/api/core";
 import type { SessionState } from "../sessionSlice";
+import { persistUiSettings, setProjectLastSaveFormat } from "../sessionSlice";
 import { notifyHistoryJump } from "../historyJump";
+import { publishSaveProjectAsFailure } from "../saveProjectAsNotice";
 
 export interface ProjectVersionConfirmation {
     ok: true;
@@ -22,6 +25,7 @@ export interface SaveVersionConflict {
     canceled: false;
     versionConflict: true;
     path: string;
+    format?: ProjectSaveFormat;
     existingVersion: number;
     currentVersion: number;
     existingIsNewer: boolean;
@@ -142,14 +146,20 @@ export const openProjectFromPathForced = createAsyncThunk(
 
 export const saveProjectRemote = createAsyncThunk(
     "session/saveProjectRemote",
-    async (_, { rejectWithValue, getState }) => {
+    async (_, { dispatch, rejectWithValue, getState }) => {
         const state = getState() as { session: SessionState };
         const hasPath = Boolean(state?.session?.project?.path);
         const notesMarkdown = String(state?.session?.project?.notesMarkdown ?? "");
 
-        const res: SaveProjectResponse = hasPath
-            ? await webApi.saveProject(notesMarkdown)
-            : await webApi.saveProjectAs(notesMarkdown);
+        if (!hasPath) {
+            // 还没有工程路径（新工程首次保存）：走「按上次格式直接另存」，
+            // 绝不再回退到"格式为空 → 原生对话框里自己挑类型"的老路径。
+            return (await dispatch(
+                saveProjectAsFormat(state.session.project.lastSaveFormat ?? "hshp"),
+            ).unwrap()) as SaveProjectResponse;
+        }
+
+        const res: SaveProjectResponse = await webApi.saveProject(notesMarkdown);
         // 目标已存在版本不一致的工程文件：作为 fulfilled 返回，由 reducer 弹出确认框。
         if (res && (res as SaveVersionConflict).versionConflict) {
             return res as SaveVersionConflict;
@@ -161,29 +171,74 @@ export const saveProjectRemote = createAsyncThunk(
     },
 );
 
-export const saveProjectAsRemote = createAsyncThunk(
-    "session/saveProjectAsRemote",
-    async (_, { rejectWithValue, getState }) => {
+/**
+ * 按指定格式直接另存：记住上次格式 → 单一过滤器选路径 → 写文件。
+ *
+ * 【为什么是「选路径」而不是「选格式」】格式在调用点就已经定了（菜单子项 / 快捷键
+ * / 上次格式），原生对话框只负责路径。macOS 的 NSSavePanel 不提供可选的文件类型
+ * ComboBox，把格式选择留在原生对话框里等于让用户去猜扩展名；放在菜单子项里则
+ * 一次点击直达、并且每种格式都能绑一个快捷键。
+ *
+ * 【失败提示】错误码统一发布到 `saveProjectAsFailure` 总线，由状态栏翻译成可读文案；
+ * 调用点不需要各自 catch（键盘通道尤其容易漏）。
+ */
+export const saveProjectAsFormat = createAsyncThunk(
+    "session/saveProjectAsFormat",
+    async (format: ProjectSaveFormat, { dispatch, getState, rejectWithValue }) => {
+        // 先记住格式：即使这次被取消，下次 `project.saveAs` / 首次保存仍用同一格式。
+        dispatch(setProjectLastSaveFormat(format));
+        void dispatch(persistUiSettings());
         const state = getState() as { session: SessionState };
-        const notesMarkdown = String(state?.session?.project?.notesMarkdown ?? "");
-        const res: SaveProjectResponse = await webApi.saveProjectAs(notesMarkdown);
-        if (res && (res as SaveVersionConflict).versionConflict) {
-            return res as SaveVersionConflict;
+        const defaultName = String(state?.session?.project?.name ?? "").trim() || "Untitled";
+        const picked = await webApi.pickProjectSavePath(format, defaultName);
+        if (!picked?.ok) {
+            const code = picked?.error ?? "save_project_as_failed";
+            publishSaveProjectAsFailure(code);
+            return rejectWithValue(code);
         }
-        if (!res || (res as { ok?: boolean }).ok === false) {
-            return rejectWithValue((res as { error?: string })?.error ?? "save_project_as_failed");
+        if (picked.canceled || !picked.path) {
+            return { ok: true, canceled: true } as const;
         }
-        return res;
+        try {
+            return (await dispatch(
+                saveProjectToPathRemote({ path: picked.path, format, force: false }),
+            ).unwrap()) as SaveProjectResponse;
+        } catch (reason) {
+            const code = typeof reason === "string" ? reason : "save_project_as_failed";
+            publishSaveProjectAsFailure(code);
+            return rejectWithValue(code);
+        }
     },
 );
 
 /** 用户在"覆盖版本不一致工程文件"对话框中确认"继续保存"后的强制保存。 */
+type SaveProjectToPathArg =
+    | string
+    | {
+          readonly path: string;
+          readonly format?: ProjectSaveFormat;
+          readonly force?: boolean;
+      };
+
 export const saveProjectToPathRemote = createAsyncThunk(
     "session/saveProjectToPathRemote",
-    async (path: string, { rejectWithValue, getState }) => {
+    async (arg: SaveProjectToPathArg, { rejectWithValue, getState }) => {
         const state = getState() as { session: SessionState };
         const notesMarkdown = String(state?.session?.project?.notesMarkdown ?? "");
-        const res: SaveProjectResponse = await webApi.saveProjectToPath(path, notesMarkdown, true);
+        const path = typeof arg === "string" ? arg : arg.path;
+        const format = typeof arg === "string" ? undefined : arg.format;
+        const force = typeof arg === "string" ? true : (arg.force ?? true);
+        const res: SaveProjectResponse = await webApi.saveProjectToPath(
+            path,
+            notesMarkdown,
+            force,
+            format,
+        );
+        // 版本冲突在协议里是 `ok: false`，但它**不是失败**：目标已存在且版本不同，
+        // 需要由 reducer 弹出确认框。先于通用失败分支返回，否则确认链路永远走不到。
+        if (res && (res as SaveVersionConflict).versionConflict) {
+            return res as SaveVersionConflict;
+        }
         if (!res || (res as { ok?: boolean }).ok === false) {
             return rejectWithValue((res as { error?: string })?.error ?? "save_project_failed");
         }

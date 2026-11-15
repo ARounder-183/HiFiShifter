@@ -7,6 +7,9 @@ import {
     DEFAULT_PEN_INPUT_SETTINGS,
     DEFAULT_RENDER_CACHE_SETTINGS,
 } from "../../../services/api/settings";
+import { DEFAULT_AUTO_SCROLL_MODE } from "../../../utils/autoFollowScroll";
+import { DEFAULT_RIPPLE_SCOPE } from "../rippleMode";
+import { DEFAULT_DRAG_DIRECTION_BY_TOOL } from "../dragDirection";
 import { DEFAULT_VIBRATO_BASELINE } from "../../vibrato/vibratoPresets";
 import { DEFAULT_ACTIVE_VIBRATO_PRESET_ID } from "../../vibrato/systemPresets";
 import {
@@ -16,12 +19,11 @@ import {
 } from "./settings";
 import { createDefaultTimelineSnapSettings } from "./settings";
 import { SILENCE_DETECT_DEFAULTS } from "../sessionTypes";
-import type { DragDirection, DrawDragDirection } from "../sessionTypes";
 import type { SessionState } from "./types";
 
 export const initialState: SessionState = {
     toolMode: "draw",
-    toolModeGroup: "draw",
+    selectToolMode: "range",
     drawToolMode: "draw",
     editParam: "pitch",
     bpm: 120,
@@ -54,21 +56,26 @@ export const initialState: SessionState = {
     pitchSnapScale: "C",
     pitchSnapToleranceCents: 0,
     paramBlockFollowPitch: false,
+    alwaysShowParamBlocks: false,
     scaleHighlightMode: "off",
     playheadZoomEnabled: false,
     autoScrollEnabled: false,
+    autoScrollMode: DEFAULT_AUTO_SCROLL_MODE,
     ignoreGrouping: false,
-    rippleMode: "off",
+    rippleEnabled: false,
+    rippleScope: DEFAULT_RIPPLE_SCOPE,
     disabledGroupIds: [],
     paramEditorSeekPlayheadEnabled: true,
     paramEditorTimelineClickSelectTrackEnabled: true,
     showClipboardPreview: true,
     showParamValuePopup: true,
+    showClipPitchOverlay: true,
     // 空映射 = 全部参数按倍率显示（历史行为）。
     paramAxisUnits: {},
-    selectDragDirection: "y-only" as DragDirection,
-    drawDragDirection: "free" as DrawDragDirection,
-    lineVibratoDragDirection: "free" as DrawDragDirection,
+    paramAxisDirections: {},
+    selectDragDirection: DEFAULT_DRAG_DIRECTION_BY_TOOL.select,
+    drawDragDirection: DEFAULT_DRAG_DIRECTION_BY_TOOL.draw,
+    lineVibratoDragDirection: DEFAULT_DRAG_DIRECTION_BY_TOOL.vibrato,
     edgeSmoothnessPercent: 0,
     lockParamLinesEnabled: true,
     metronomeEnabled: false,
@@ -190,6 +197,7 @@ export const initialState: SessionState = {
     builtinVibratoPresetOrder: [],
     project: {
         name: "Untitled",
+        lastSaveFormat: "hshp",
         path: null,
         dirty: false,
         recent: [],

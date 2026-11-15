@@ -26,6 +26,9 @@ Invoke-Gate 'FFI panic-guard gate' { python scripts/checks/check-ffi-guards.py }
 # 代码看起来有诊断，实际一条都不输出。
 Invoke-Gate 'Log level gate' { python scripts/checks/check-log-levels.py }
 
+# 四档日志详细程度：禁止遗留环境变量 / 生产 console.* / 过时的默认级别注释回归。
+Invoke-Gate 'Log verbosity gate' { python scripts/checks/check-log-verbosity.py }
+
 # 前端 invoke.ts 的 switch 是前端能发出的全部方法名。其中任何一个若两边后端都不派发，
 # 症状是"控件能点、点了没反应" —— 静默失效，且不会有编译错误。
 Invoke-Gate 'Command gating gate' { python scripts/checks/check-command-gating.py }
@@ -37,5 +40,11 @@ Invoke-Gate 'Product consistency gate' { & (Join-Path $PSScriptRoot 'check-produ
 # 把构建脚本的 `$root`（仓库根）改写成了 Visual Studio 安装目录，构建在
 # "找不到 backend\src-tauri\resources\models\models.json" 处失败。
 Invoke-Gate 'Env script scope gate' { & (Join-Path $PSScriptRoot 'check-env-scripts.ps1') }
+
+# SoundTouch 构建生成器与缓存自愈。
+Invoke-Gate 'SoundTouch generator gate' { python scripts/checks/check-soundtouch-generator.py }
+
+# 跳过清单里的测试名仍须在 Rust 源码中可解析。
+Invoke-Gate 'Test skip gate' { python scripts/checks/check-test-skips.py }
 
 Write-Host 'All static gates passed.' -ForegroundColor Green

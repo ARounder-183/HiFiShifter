@@ -16,12 +16,16 @@
  *   `all` 模式：所有轨道；`off`：无；
  * - 只取**初始起点 >= 波纹原点**（被编辑剪辑的最早起点）的后续剪辑；
  * - 平移量 = 右缘位移（对移动为 drag 位移量，对右缘重设为长度变化量）。
+ *
+ * 【为什么入口收 `session` 而不是"剪辑数组 + 模式"】生效模式是"开关 × 方向"折算
+ * 出来的（见 `./rippleMode`）。让调用方各自折算，就等于把同一个公式抄到两个手势
+ * 文件里 —— 抄错一格，预览与提交就会各按各的语义推。收整个会话切片后，折算只在
+ * 本函数里发生一次。
  */
 import type { AppDispatch } from "../../app/store";
 import { moveClipsStartBulk } from "./sessionSlice";
 import type { SessionState } from "./sessionSlice";
-
-export type RippleMode = "off" | "track" | "all";
+import { resolveRippleMode } from "./rippleMode";
 
 /** clipId → 该 clip 在本次拖拽开始时的初始起点（秒）。 */
 export type RippleFollowerMap = Record<string, number>;
@@ -32,15 +36,15 @@ export type RippleFollowerMap = Record<string, number>;
  * @returns 空对象 = 波纹关闭或没有跟随对象。
  */
 export function buildRippleFollowers(
-    clips: SessionState["clips"],
+    session: Pick<SessionState, "clips" | "rippleEnabled" | "rippleScope">,
     editedIds: ReadonlySet<string>,
     origin: number,
-    rippleMode: RippleMode,
     editedTracks: ReadonlySet<string>,
 ): RippleFollowerMap {
+    const rippleMode = resolveRippleMode(session.rippleEnabled, session.rippleScope);
     if (rippleMode === "off") return {};
     const followers: RippleFollowerMap = {};
-    for (const clip of clips) {
+    for (const clip of session.clips) {
         if (editedIds.has(clip.id)) continue;
         if (rippleMode === "track" && !editedTracks.has(clip.trackId)) continue;
         const start = Number(clip.startSec ?? 0);

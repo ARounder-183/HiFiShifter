@@ -3,7 +3,8 @@ import { useAppDispatch } from "../../app/hooks";
 import { listen } from "../../services/hostEvents";
 import { applyClipSyllableAnalysis } from "./sessionSlice";
 
-/** Shared by App, plugin and detached windows; metadata never reloads curves. */
+/** Mounted once in the main App/plugin shell; detached windows receive the
+ * resulting session action through detachBridge (avoiding duplicate dispatch). */
 export function useSyllableAnalysisEvents() {
     const dispatch = useAppDispatch();
     useEffect(() => {

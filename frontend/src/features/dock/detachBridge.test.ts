@@ -225,6 +225,19 @@ describe("快照投影（detachBridge 的重载荷裁剪）", () => {
         expect(projected.fileBrowser).toEqual({ root: "/x" });
     });
 
+    it("interaction 切片随快照保留（手势 / 选区 / 闸门跨窗口）", () => {
+        const state = {
+            session: { clips: [] },
+            interaction: {
+                clipGeometryPreview: null,
+                loudnessFetchHeld: true,
+                pianoRollSelection: { startFrame: 1, frameCount: 2, framePeriodMs: 5 },
+            },
+        };
+        const projected = projectSnapshot(state) as { interaction: unknown };
+        expect(projected.interaction).toEqual(state.interaction);
+    });
+
     it("结构异常时不抛错（投影是尽力而为）", () => {
         expect(projectSnapshot(null)).toBeNull();
         expect(projectSnapshot({ session: null })).toEqual({ session: null });

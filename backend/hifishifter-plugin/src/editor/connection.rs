@@ -428,7 +428,7 @@ impl ConnectionState {
         };
         if peer.0 == 0 {
             // 【为什么是 Warn】这是「编辑器为什么没连上」的第一现场。此前的记录走
-            // `log_line`（INFO），而 release 的默认级别是 Warn —— 写在 INFO 里等于没写，
+            // 按语义分级：真正的故障写 Warn，常规生命周期写 Info（由用户档位控制）。
             // 于是「宿主没 connect」与「宿主拒绝消息」在用户日志里完全同形。
             log::warn!("[gui] editor route: no peer connection; the route message was not sent");
             return K_RESULT_FALSE;

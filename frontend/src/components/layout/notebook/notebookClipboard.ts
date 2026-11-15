@@ -15,6 +15,7 @@
 
 import type { Editor } from "@tiptap/core";
 
+import { emitWindowEvent } from "../../../features/dock/windowEventBridge";
 import { getActiveSurface } from "../../../features/uiFocus/focusSurface";
 import { resolvePasteRoute } from "../../../features/keybindings/focusRouting";
 import { notebookApi, type ClipboardPayloadSummary } from "../../../services/api/notebook";
@@ -492,7 +493,7 @@ export async function restoreClipPayload(assetId: string): Promise<RestoreResult
     // 内部缓存并回读槽位（恢复的是参数线载荷时，剪贴板预览要立刻显示它），
     // 而不是继续沿用"本面板上次复制了什么"。派发在写入成功之后，消费者回读
     // 时槽位里已经是新内容。
-    window.dispatchEvent(new CustomEvent("hifi:clipboardReplaced"));
+    emitWindowEvent("all", "hifi:clipboardReplaced", {});
     const probe = await webApi.clipboardKind();
     return { ok: true, kind: probe.kind ?? undefined };
 }

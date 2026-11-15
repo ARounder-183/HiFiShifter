@@ -27,6 +27,7 @@ import {
     wfDiag_poolRegister,
     wfDiag_setMipmapSizeFn,
 } from "./waveformDebug";
+import { frontendLog } from "../services/frontendLog";
 
 // ============== 常量 ==============
 
@@ -857,7 +858,8 @@ class WaveformMipmapStoreImpl {
                     }
                 }
             } catch (err) {
-                console.warn(
+                frontendLog(
+                    "warn",
                     "[WaveformMipmapStore] batchPreload failed, falling back to individual preload:",
                     err,
                 );

@@ -55,8 +55,9 @@ function mount(
                 new MouseEvent("contextmenu", { bubbles: true, clientX: 40, clientY: 40 }),
             );
         });
-        // 只在本次挂载的容器里找：菜单不是 portal，就在按钮旁边。
-        const menu = container.querySelector('[data-hs-context-menu="1"]');
+        // 菜单是**锚定弹出面**：它 portal 到主题作用域（`.radix-themes`，测试里退化成
+        // body），因此不能在 `container` 里找。`beforeEach` 已清空 body，每次挂载只有一个。
+        const menu = document.body.querySelector('[data-hs-context-menu="1"]');
         expect(menu, "右键未打开菜单").not.toBeNull();
         const items = Array.from(menu!.querySelectorAll<HTMLButtonElement>("button"));
         const byLabel = (label: string) => {

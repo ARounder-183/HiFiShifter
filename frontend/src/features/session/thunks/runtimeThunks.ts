@@ -71,15 +71,23 @@ export const persistUiSettings = createAsyncThunk(
             pitchSnapScale: s.pitchSnapScale,
             pitchSnapToleranceCents: s.pitchSnapToleranceCents,
             paramBlockFollowPitch: s.paramBlockFollowPitch,
+            alwaysShowParamBlocks: s.alwaysShowParamBlocks,
             scaleHighlightMode: s.scaleHighlightMode,
             ignoreGrouping: s.ignoreGrouping,
-            rippleMode: s.rippleMode,
+            rippleEnabled: s.rippleEnabled,
+            // 磁盘上仍然写"方向"而不是"生效模式"：关闭时也要记住用户上次选的方向，
+            // 否则重启后打开开关会莫名其妙回到"按轨道"。
+            rippleMode: s.rippleScope,
             playheadZoom: s.playheadZoomEnabled,
             autoScroll: s.autoScrollEnabled,
+            autoScrollMode: s.autoScrollMode,
             paramEditorSeekPlayhead: s.paramEditorSeekPlayheadEnabled,
             showClipboardPreview: s.showClipboardPreview,
             showParamValuePopup: s.showParamValuePopup,
+            showClipPitchOverlay: s.showClipPitchOverlay,
             paramAxisUnits: s.paramAxisUnits,
+            paramAxisDirections: s.paramAxisDirections,
+            lastProjectSaveFormat: s.project.lastSaveFormat,
             lockParamLines: s.lockParamLinesEnabled,
             metronomeEnabled: s.metronomeEnabled,
             metronomeGain: s.metronomeGain,
@@ -106,9 +114,11 @@ export const persistUiSettings = createAsyncThunk(
             drawDragDirection: s.drawDragDirection,
 
             lineVibratoDragDirection: s.lineVibratoDragDirection,
-            // 参数编辑器上次使用的工具（`select` / `draw` / `line` / `vibrato`）。
-            // 与拖动方向同属"本地记忆"，因此和它们写在一起。
+            // 参数编辑器上次使用的工具族（`select` / `draw` / `line` / `vibrato`；
+            // 不含 block，块是选择族子模式）。与拖动方向同属"本地记忆"。
             paramEditorTool: s.toolMode,
+            // 选择族当前 / 上次子模式；与工具族分开存，Tab 才能恢复上次的 range/block。
+            paramEditorSelectionMode: s.selectToolMode,
             smoothnessPercent: s.edgeSmoothnessPercent,
             customScalePresets: s.customScalePresets,
             // `null` 在线上格式里表示"没设过"，因此转成 `undefined` 让字段整个

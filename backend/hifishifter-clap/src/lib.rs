@@ -37,6 +37,18 @@ pub mod render_ext;
 pub mod state;
 pub mod timer;
 
+/// 【为什么测试二进制要在进入 main 之前关掉异步预热】预热线程在"建 ONNX 会话"
+/// 中途被进程退出拆掉时，测试二进制以 `0xC0000005` 退出 —— 即使每条用例都通过
+/// （plugin crate 里 `settings_store` 的注释记载了同一签名；本 crate 的测试没有
+/// 设置下发路径可挂靠，因此用 `ctor` 在 CRT 初始化时执行进程级兜底）。
+#[cfg(test)]
+mod test_prewarm_guard {
+    #[ctor::ctor(unsafe)]
+    fn disarm_async_session_prewarm() {
+        hifishifter_kernel::vocoder_ort_session::set_async_session_prewarm(false);
+    }
+}
+
 pub use entry::{instance, instance_mut, Instance};
 
 /// 黑盒探针读取的构建身份（CLAP 1.1.9 / 产品版本 / 目标）。

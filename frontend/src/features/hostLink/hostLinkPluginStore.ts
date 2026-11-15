@@ -42,7 +42,22 @@ const EMPTY: HostLinkPluginSnapshot = {
 let snapshot: HostLinkPluginSnapshot = EMPTY;
 const listeners = new Set<() => void>();
 
+/**
+ * 上次发布快照的序列化形式：内容相同就保留旧引用，订阅者不该因为"又轮询了
+ * 一次"（750ms 一轮）而空重渲染。
+ *
+ * 【为什么是序列化比较而不是字段枚举】`hostLinkPluginApi.status()` 每轮经 IPC
+ * 反序列化出**全新对象**，引用永不相等；`HostLinkExportStatus` 还带嵌套的
+ * `audio` / `lastEdit` / `diagnostics`，逐字段枚举迟早漏一个（漏掉 = 界面停在
+ * 旧读数）。与 `captureStore` / `pluginApplyStore` 同一取舍：一次 stringify 的
+ * 开销远低于一次状态栏（及打开的详情对话框）重渲染。
+ */
+let lastSnapshotJson = JSON.stringify(EMPTY);
+
 function publish(next: HostLinkPluginSnapshot): void {
+    const nextJson = JSON.stringify(next);
+    if (nextJson === lastSnapshotJson) return;
+    lastSnapshotJson = nextJson;
     snapshot = next;
     for (const listener of listeners) listener();
 }
@@ -76,6 +91,7 @@ export function resetHostLinkPluginStoreForTests(): void {
     backoffMs = POLL_MS;
     inFlight = false;
     snapshot = EMPTY;
+    lastSnapshotJson = JSON.stringify(EMPTY);
     listeners.clear();
 }
 

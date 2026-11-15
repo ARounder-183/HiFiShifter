@@ -1212,7 +1212,10 @@ fn task34_component_state_restore_is_scoped_by_the_real_assignment() {
         let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         // 【单一版本】组件状态只有一个代际（`EditState::STATE_VERSION`），内容不再
         // 决定版本号 —— 此前那个"没有曲线 ⇒ 2 / 有曲线 ⇒ 3"的阶梯与全部迁移一起删掉了。
-        assert_eq!(saved["version"].as_u64(), Some(2));
+        assert_eq!(
+            saved["version"].as_u64(),
+            Some(crate::state_channel::EditState::STATE_VERSION)
+        );
         assert_eq!(saved["edits"]["tracks"].as_array().unwrap().len(), 1);
         assert_eq!(saved["edits"]["tracks"][0]["id"], id);
         assert_eq!(saved["edits"]["bindings"].as_object().unwrap().len(), 1);

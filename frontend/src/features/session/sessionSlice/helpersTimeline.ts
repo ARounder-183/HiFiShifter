@@ -147,7 +147,47 @@ export function applyTimelineState(
             midiFillGaps: clip.midi_fill_gaps ?? false,
             syllableSpansSec: clip.takes
                 ?.find((take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id))
-                ?.syllable_spans_sec?.map(([startSec, endSec]) => ({ startSec, endSec })),
+                ?.syllable_spans_sec?.map(([startSec, endSec], index) => ({
+                    startSec,
+                    endSec,
+                    note:
+                        clip.takes?.find(
+                            (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
+                        )?.syllable_notes?.[index] ?? null,
+                    eventId:
+                        clip.takes?.find(
+                            (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
+                        )?.syllable_event_ids?.[index] ??
+                        `${startSec.toFixed(9)}:${endSec.toFixed(9)}`,
+                })),
+            syllableNotes: clip.takes?.find(
+                (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
+            )?.syllable_notes,
+            syllableEventIds: clip.takes?.find(
+                (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
+            )?.syllable_event_ids,
+            syllableAnalysisWindowSec: (clip.takes?.find(
+                (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
+            )?.syllable_analysis_window_sec ?? null) as [number, number] | undefined,
+            gameBlockBaseline: (() => {
+                const source = clip.takes?.find(
+                    (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
+                )?.game_block_baseline;
+                return source
+                    ? {
+                          revision: source.revision,
+                          algorithm: source.algorithm,
+                          algorithmVersion: source.algorithm_version,
+                          sourceSpansSec: source.source_spans_sec?.map((span) => ({
+                              startSec: span.start_sec,
+                              endSec: span.end_sec,
+                              note: span.midi_note ?? null,
+                              eventId: span.event_id,
+                          })),
+                          analyzedWindowSec: source.analyzed_window_sec,
+                      }
+                    : undefined;
+            })(),
             groupId: clip.group_id ?? undefined,
         };
 
@@ -244,6 +284,7 @@ export function applyTimelineState(
         state.project = {
             name: String(project.name ?? state.project.name ?? "Untitled"),
             path: project.path === undefined ? state.project.path : (project.path ?? null),
+            lastSaveFormat: state.project.lastSaveFormat,
             dirty: Boolean(project.dirty),
             recent: Array.isArray(project.recent) ? project.recent : state.project.recent,
             // 记事本：只有**该步本身是记事本编辑**时后端才会带回文本。

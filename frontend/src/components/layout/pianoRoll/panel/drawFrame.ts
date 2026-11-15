@@ -31,7 +31,8 @@ type DrawFrameDeps = Pick<
     | "canvasRef"
     | "childPitchHardDisableReason"
     | "clipboardRef"
-    | "detectedPitchCurves"
+    | "currentParamDefaultValue"
+    | "clipPitchOverlays"
     | "editParam"
     | "fontFamily"
     | "hostRef"
@@ -72,7 +73,8 @@ export function drawPianoRollFrame(deps: DrawFrameDeps): void {
         canvasRef,
         childPitchHardDisableReason,
         clipboardRef,
-        detectedPitchCurves,
+        currentParamDefaultValue,
+        clipPitchOverlays,
         editParam,
         fontFamily,
         hostRef,
@@ -139,6 +141,7 @@ export function drawPianoRollFrame(deps: DrawFrameDeps): void {
         param: editParam,
         view: blockFrameView,
         blocks: kernelDataRef.current.paramBlocks ?? null,
+        currentParamDefaultValue,
         curves: (view) => buildCurveLayers(drawAxis, view),
     });
     kernelDataRef.current.paramEditorFrame = frame;
@@ -204,7 +207,7 @@ export function drawPianoRollFrame(deps: DrawFrameDeps): void {
      * 主画布的内容签名（阶段 2 Task 6）。
      *
      * 【必须包含什么】主画布上绘制的**全部输入**：
-     * - 绘图资源：各条曲线数据、参考线、检测曲线、副参数视口、morph 叠加、
+     * - 绘图资源：各条曲线数据、参考线、Clip 源音高、副参数视口、morph 叠加、
      *   剪贴板预览、选区块、live 编辑覆盖、中央提示文字 `overlayText`；
      * - 视口：`viewSize`、`pxPerSec`、`scrollLeft`、`dpr`（滚动/缩放会改变投影）；
      * - 主题与字体（颜色解析与文字宽度都会影响像素结果）。
@@ -250,7 +253,7 @@ export function drawPianoRollFrame(deps: DrawFrameDeps): void {
         paramView?.framePeriodMs ?? 5,
         // 数据与几何（按引用比较）。刻意与传给 drawPianoRoll 的字段一一对应，
         // 避免"签名里写了 A、实际喂给绘制的是 B"这种漂移。
-        detectedPitchCurves,
+        clipPitchOverlays,
         referencePitchOverlays,
         secondaryParamViews,
         visibleSecondaryParamIds,
@@ -296,7 +299,7 @@ export function drawPianoRollFrame(deps: DrawFrameDeps): void {
         // 的 DOM 插值播放头节奏不一致、短暂错位）。
         playheadSec: visualPlayheadSecRef.current,
         referencePitchOverlays,
-        detectedPitchCurves,
+        clipPitchOverlays,
         isDark: themeMode === "dark",
         // ── 下列五个 `skip*` 恒为 true：这些图层**只有 GL 一个绘制者** ──────
         //

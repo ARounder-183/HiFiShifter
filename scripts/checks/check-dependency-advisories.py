@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import date
 import pathlib
 import sys
 import time
@@ -130,10 +131,16 @@ def _post_with_retry(payload: bytes) -> dict:
 
 def load_allowlist() -> list[dict]:
     entries = json.loads(ALLOWLIST.read_text(encoding="utf-8"))
+    today = date.today().isoformat()
     for entry in entries:
-        for field in ("package", "id", "reason"):
+        for field in ("package", "id", "reason", "expires", "tracking"):
             if not entry.get(field):
                 raise SystemExit(f"advisory-allowlist.json: entry missing '{field}': {entry}")
+        if entry["expires"] < today:
+            raise SystemExit(
+                f"advisory-allowlist.json: waiver for {entry['package']} / {entry['id']} "
+                f"expired on {entry['expires']}; {entry['tracking']}"
+            )
     return entries
 
 

@@ -21,6 +21,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// 覆盖日志目录的环境变量（两个宿主同名同义）。
 pub use crate::app_paths::LOG_DIR_ENV;
@@ -31,6 +32,10 @@ pub const MAX_LOG_FILE_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_ROTATED_LOGS: usize = 3;
 /// 每写入多少行检查一次轮转（避免每行都做一次 `metadata` 系统调用）。
 pub const ROTATION_CHECK_INTERVAL: u64 = 256;
+/// 默认单行上限（按**字符**计）。可由 `RotatingLog::open_with_policy` 覆盖。
+pub const DEFAULT_MAX_LINE_CHARS: usize = 4096;
+/// 缓冲写阈值：累积到这个字节数就落一次盘（详见 `RotatingLog` 的说明）。
+pub const FLUSH_THRESHOLD_BYTES: usize = 64 * 1024;
 
 /// 时间戳格式：**带日期**。
 ///
@@ -65,6 +70,86 @@ pub fn session_banner(product: &str, version: &str) -> String {
         crate::build_info::display_version(version),
         std::env::consts::OS,
         std::env::consts::ARCH,
+        now_timestamp()
+    )
+}
+
+/// 本次会话的短标识（8 位十六进制）。
+///
+/// 【为什么不用完整 UUID】会话头/尾要在用户贴出来的日志里一眼能对照；8 位十六进制
+/// 在单个用户目录里足够区分，又不会把每一行都撑长。进程级只生成一次。
+pub fn short_session_id() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let seed = NEXT.fetch_add(1, Ordering::Relaxed)
+        ^ std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0)
+        ^ (std::process::id() as u64) << 17;
+    // xorshift64* 的一步混合：只为生成可读的短 id，不用于安全用途。
+    let mixed = seed
+        .wrapping_mul(0x2545_F491_4F6C_DD1D)
+        .rotate_left(29)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    format!("{mixed:08x}")
+}
+
+/// 把任意文本压成**单行、有字符上限**的日志字段。
+///
+/// 【为什么连换行也要转义】日志按行读、按行 grep：一条带 `\n` 的 message 能凭空
+/// 伪造出整条假日志（log injection，CWE-117）。两个宿主与策略自证行共用这一份实现。
+pub fn log_field(text: &str, max_chars: usize) -> String {
+    let mut out = String::with_capacity(text.len().min(max_chars.saturating_mul(2)));
+    let mut truncated = false;
+    for (index, ch) in text.chars().enumerate() {
+        if index >= max_chars {
+            truncated = true;
+            break;
+        }
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch.is_control() => {}
+            ch => out.push(ch),
+        }
+    }
+    if truncated {
+        out.push_str("…(truncated)");
+    }
+    out
+}
+
+/// 带策略自证的会话头（旧 `session_banner` 保持同形，见其单测）。
+///
+/// 追加的 `session / verbosity / source / policy / file` 段回答排障第一问：
+/// "这一段沉默是哪次会话、哪一档"。
+pub fn session_banner_with_policy(
+    product: &str,
+    version: &str,
+    session_id: &str,
+    verbosity: &str,
+    source: &str,
+    file_name: &str,
+) -> String {
+    let base = session_banner(product, version);
+    let base = base.strip_suffix("====").unwrap_or(&base);
+    format!(
+        "{base} | session={session_id} | verbosity={verbosity} | source={source} | policy={} | file={file_name} ====",
+        crate::log_policy::POLICY_VERSION
+    )
+}
+
+/// 会话尾：正常退出与 panic 都写它，用户才能区分"日志被截断"和"会话结束了"。
+pub fn session_footer(
+    session_id: &str,
+    reason: &str,
+    lines: u64,
+    rotations: u64,
+    verbosity: &str,
+) -> String {
+    format!(
+        "==== HiFiShifter session {session_id} ended at {} | reason={reason} | lines={lines} | rotations={rotations} | verbosity={verbosity} ====",
         now_timestamp()
     )
 }
@@ -111,8 +196,13 @@ pub fn rotated_path(path: &Path, index: usize) -> PathBuf {
 
 /// 当前日志文件及历史轮转（当前在前；仅返回存在的文件）。供诊断包导出使用。
 pub fn rotated_files(current: &Path) -> Vec<PathBuf> {
+    rotated_files_with_limit(current, MAX_ROTATED_LOGS)
+}
+
+/// 按策略给定的历史份数枚举轮转件（高档保留更多上下文）。
+pub fn rotated_files_with_limit(current: &Path, max_files: usize) -> Vec<PathBuf> {
     let mut files = vec![current.to_path_buf()];
-    for index in 1..=MAX_ROTATED_LOGS {
+    for index in 1..=max_files {
         let rotated = rotated_path(current, index);
         if rotated.exists() {
             files.push(rotated);
@@ -121,25 +211,101 @@ pub fn rotated_files(current: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// 追加写入的日志文件，带按大小轮转。
+/// 追加写入的日志文件，带按大小轮转、单行截断与缓冲写。
 ///
 /// 【为什么两个宿主共用它】轮转策略（上限、份数、检查间隔、命名）是"日志"这件事的
 /// 一部分，不是宿主的能力差异。分开写必然分叉 —— 插件此前就完全没有轮转。
+///
+/// 【为什么改缓冲写】旧实现每行 `file.flush()`，高频打点下是逐行系统调用；实测
+/// 40 分钟能写满 3 个 8 MiB 轮转件，把启动现场冲掉。现在累积 64 KiB 或显式
+/// `flush_now()` 才落盘：会话头/尾、panic、诊断包导出前必须强制 flush。
 pub struct RotatingLog {
     path: PathBuf,
     /// 会话头所需的产品标识与版本号；轮转后重建同形的头时要用。
     product: String,
     version: String,
+    /// 策略自证所需的会话信息；轮转后重建同形的头时要用。
+    session_id: String,
+    verbosity: String,
+    source: String,
     file: std::fs::File,
+    /// 待落盘字节（会话头/尾也计入，但直接 flush）。
+    buffer: Vec<u8>,
     bytes_written: u64,
     lines_since_check: u64,
+    lines_written: u64,
+    rotations: u64,
+    max_bytes: u64,
+    max_files: usize,
+    max_line_chars: usize,
 }
 
 impl RotatingLog {
     /// 打开日志文件（必要时先轮转），并写入会话头。
+    ///
+    /// 旧签名保留：默认容量/份数/单行上限，且会话头**保持原样**（行格式单测钉死）。
     pub fn open(path: PathBuf, product: &str, version: &str) -> std::io::Result<Self> {
-        let banner = session_banner(product, version);
-        let file = Self::open_with_rotation(&path, &banner)?;
+        Self::open_inner(
+            path,
+            product,
+            version,
+            MAX_LOG_FILE_BYTES,
+            MAX_ROTATED_LOGS,
+            DEFAULT_MAX_LINE_CHARS,
+            false,
+        )
+    }
+
+    /// 按 `LogPolicy` 的容量/份数/单行上限打开，并写带策略自证的会话头。
+    pub fn open_with_policy(
+        path: PathBuf,
+        product: &str,
+        version: &str,
+        max_bytes: u64,
+        max_files: usize,
+        max_line_chars: usize,
+    ) -> std::io::Result<Self> {
+        Self::open_inner(
+            path,
+            product,
+            version,
+            max_bytes,
+            max_files,
+            max_line_chars,
+            true,
+        )
+    }
+
+    fn open_inner(
+        path: PathBuf,
+        product: &str,
+        version: &str,
+        max_bytes: u64,
+        max_files: usize,
+        max_line_chars: usize,
+        with_policy: bool,
+    ) -> std::io::Result<Self> {
+        let session_id = crate::log_policy::session_id().to_owned();
+        let verbosity = crate::log_policy::current().as_str().to_owned();
+        let source = crate::log_policy::source().as_str().to_owned();
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("hifishifter.log")
+            .to_owned();
+        let banner = if with_policy {
+            session_banner_with_policy(
+                product,
+                version,
+                &session_id,
+                &verbosity,
+                &source,
+                &file_name,
+            )
+        } else {
+            session_banner(product, version)
+        };
+        let file = Self::open_with_rotation(&path, &banner, max_bytes, max_files)?;
         // 追加模式下文件可能已接近上限（上次会话遗留）：按真实长度初始化计数，
         // 否则本轮要再写满一个 MAX 才会触发轮转，文件可超出上限近一倍。
         let bytes_written = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -147,19 +313,33 @@ impl RotatingLog {
             path,
             product: product.to_string(),
             version: version.to_string(),
+            session_id,
+            verbosity,
+            source,
             file,
+            buffer: Vec::with_capacity(FLUSH_THRESHOLD_BYTES),
             bytes_written,
             lines_since_check: 0,
+            lines_written: 0,
+            rotations: 0,
+            max_bytes,
+            max_files,
+            max_line_chars,
         })
     }
 
     /// 打开（必要时先轮转）并写入会话头。
-    fn open_with_rotation(path: &Path, banner: &str) -> std::io::Result<std::fs::File> {
+    fn open_with_rotation(
+        path: &Path,
+        banner: &str,
+        max_bytes: u64,
+        max_files: usize,
+    ) -> std::io::Result<std::fs::File> {
         if std::fs::metadata(path)
-            .map(|m| m.len() >= MAX_LOG_FILE_BYTES)
+            .map(|m| m.len() >= max_bytes)
             .unwrap_or(false)
         {
-            Self::shift_files(path);
+            Self::shift_files(path, max_files);
         }
         let mut file = std::fs::OpenOptions::new()
             .create(true)
@@ -171,8 +351,8 @@ impl RotatingLog {
     }
 
     /// 把历史文件整体后移一位，超出份数的删除。
-    fn shift_files(path: &Path) {
-        for index in (1..MAX_ROTATED_LOGS).rev() {
+    fn shift_files(path: &Path, max_files: usize) {
+        for index in (1..max_files).rev() {
             let from = rotated_path(path, index);
             if !from.exists() {
                 continue;
@@ -188,30 +368,89 @@ impl RotatingLog {
         }
     }
 
-    /// 写入一行（自动补换行）。轮转检查按 [`ROTATION_CHECK_INTERVAL`] 摊销。
+    /// 写入一行（自动补换行、按字符截断、缓冲写）。轮转检查按
+    /// [`ROTATION_CHECK_INTERVAL`] 摊销。
     pub fn write_line(&mut self, line: &str) -> std::io::Result<()> {
-        self.file.write_all(line.as_bytes())?;
-        if !line.ends_with('\n') {
-            self.file.write_all(b"\n")?;
+        let single = log_field(line, self.max_line_chars);
+        self.buffer.extend_from_slice(single.as_bytes());
+        if !single.ends_with('\n') {
+            self.buffer.push(b'\n');
         }
-        self.file.flush()?;
-        self.bytes_written += line.len() as u64 + 1;
+        self.bytes_written += single.len() as u64 + 1;
         self.lines_since_check += 1;
-        if self.lines_since_check >= ROTATION_CHECK_INTERVAL
-            && self.bytes_written >= MAX_LOG_FILE_BYTES
+        self.lines_written += 1;
+        if self.buffer.len() >= FLUSH_THRESHOLD_BYTES {
+            self.flush_now()?;
+        }
+        if self.lines_since_check >= ROTATION_CHECK_INTERVAL && self.bytes_written >= self.max_bytes
         {
+            self.flush_now()?;
             self.lines_since_check = 0;
-            let banner = session_banner(&self.product, &self.version);
-            self.file = Self::open_with_rotation(&self.path, &banner)?;
+            let file_name = self
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("hifishifter.log");
+            let banner = session_banner_with_policy(
+                &self.product,
+                &self.version,
+                &self.session_id,
+                &self.verbosity,
+                &self.source,
+                file_name,
+            );
+            self.file =
+                Self::open_with_rotation(&self.path, &banner, self.max_bytes, self.max_files)?;
             // 轮转后是新文件（仅含会话头），同样按真实长度重置计数。
             self.bytes_written = self.file.metadata().map(|m| m.len()).unwrap_or(0);
+            self.rotations += 1;
         }
         Ok(())
+    }
+
+    /// 立刻把缓冲落盘。会话头/尾、panic、诊断包导出、进程退出前必须调用。
+    pub fn flush_now(&mut self) -> std::io::Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        self.file.write_all(&self.buffer)?;
+        self.file.flush()?;
+        self.buffer.clear();
+        Ok(())
+    }
+
+    /// 写一行会话尾并强制落盘（供 `RunEvent::Exit` / `entry_deinit` / panic hook）。
+    pub fn write_session_footer(&mut self, reason: &str) -> std::io::Result<()> {
+        let footer = session_footer(
+            &self.session_id,
+            reason,
+            self.lines_written,
+            self.rotations,
+            crate::log_policy::current().as_str(),
+        );
+        self.write_line(&footer)?;
+        self.flush_now()
     }
 
     /// 当前日志文件路径。
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// 本会话写入的行数（会话尾与诊断包用）。
+    pub fn lines_written(&self) -> u64 {
+        self.lines_written
+    }
+
+    /// 本会话发生的轮转次数。
+    pub fn rotations(&self) -> u64 {
+        self.rotations
+    }
+}
+
+impl Drop for RotatingLog {
+    fn drop(&mut self) {
+        let _ = self.flush_now();
     }
 }
 
@@ -295,6 +534,98 @@ mod tests {
             "日志目录应以产品目录名命名：{}",
             dir.display()
         );
+    }
+
+    /// 单行化：一条前端/插件消息永远只占一行，且按**字符**截断。
+    #[test]
+    fn a_log_field_never_spans_more_than_one_line() {
+        let field = log_field("boom\n[frontend] forged entry\r\nnext\u{7}", 512);
+        assert!(!field.contains('\n'), "{field}");
+        assert!(!field.contains('\r'), "{field}");
+        assert!(!field.contains('\u{7}'), "{field}");
+        assert!(field.contains("\\n[frontend] forged entry"), "{field}");
+    }
+
+    #[test]
+    fn truncation_counts_characters_not_bytes() {
+        let long = "安".repeat(12);
+        let field = log_field(&long, 5);
+        assert!(field.ends_with("…(truncated)"), "{field}");
+        assert_eq!(field.matches('安').count(), 5);
+    }
+
+    /// 带策略的会话头与会话尾必须能按 session id 对照。
+    #[test]
+    fn the_policy_banner_and_footer_share_the_session() {
+        let banner = session_banner_with_policy(
+            "HiFiShifter",
+            "1.2.3",
+            "abcd1234",
+            "low",
+            "persisted",
+            "hifishifter.log",
+        );
+        assert!(banner.contains("session=abcd1234"), "{banner}");
+        assert!(banner.contains("verbosity=low"), "{banner}");
+        assert!(banner.contains("source=persisted"), "{banner}");
+        assert!(banner.ends_with("===="), "{banner}");
+        let footer = session_footer("abcd1234", "shutdown", 12, 1, "medium");
+        assert!(footer.contains("session abcd1234 ended"), "{footer}");
+        assert!(footer.contains("reason=shutdown"), "{footer}");
+        assert!(footer.contains("lines=12"), "{footer}");
+        assert!(footer.contains("verbosity=medium"), "{footer}");
+    }
+
+    /// 缓冲写不得丢内容：flush_now 后文件里必须能读到那一行。
+    #[test]
+    fn buffered_lines_are_readable_after_flush() {
+        let dir = std::env::temp_dir().join(format!(
+            "hfs-log-buffer-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("buffered.log");
+        let mut log = RotatingLog::open(path.clone(), "HiFiShifter", "1.2.3").unwrap();
+        log.write_line("first buffered line").unwrap();
+        log.flush_now().unwrap();
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("first buffered line"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 超长单行必须截断（防止一条前端 JSON 把整个轮转额度吃掉）。
+    #[test]
+    fn a_single_line_is_capped_by_the_policy() {
+        let dir = std::env::temp_dir().join(format!(
+            "hfs-log-cap-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("capped.log");
+        let mut log = RotatingLog::open_with_policy(
+            path.clone(),
+            "HiFiShifter",
+            "1.2.3",
+            8 * 1024 * 1024,
+            3,
+            32,
+        )
+        .unwrap();
+        log.write_line(&"x".repeat(200)).unwrap();
+        log.flush_now().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let body = text.lines().last().unwrap_or_default();
+        assert!(body.contains("…(truncated)"), "{body}");
+        assert!(
+            body.chars().count() <= 32 + "…(truncated)".chars().count(),
+            "{body}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 轮转把历史整体后移，并写新的会话头。

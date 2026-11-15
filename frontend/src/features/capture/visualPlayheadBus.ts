@@ -12,7 +12,7 @@
  * 【为什么不是订阅 store】store 里的 `playheadSec` 是**采样值**（约 20~50 Hz 且带往返
  * 时延），不是插值值。用它画带子右缘仍然会一顿一顿，只是从 5 Hz 变成 20 Hz。
  *
- * 与 `clipGeometryPreviewBus` 同一形态：模块级单值 + 显式发布，不进 React 状态，
+ * 同窗口高频信号：模块级单值 + 显式发布，不进 React 状态（跨窗口状态见 interaction 切片），
  * 因为它的消费者是 rAF 回调而不是渲染。
  */
 

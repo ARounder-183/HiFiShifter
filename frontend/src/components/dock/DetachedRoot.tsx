@@ -20,24 +20,54 @@
  * 主窗口"，等状态就位再挂载面板 —— 面板的首次渲染就是完整状态。
  */
 
-import { Suspense, useCallback, useEffect, useMemo } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 
-import { useAppSelector } from "../../app/hooks";
+import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { translateOutsideReact } from "../../i18n/I18nProvider";
 import { getPanel } from "../../features/dock/panelRegistry";
-import { satelliteFormId, subscribeRemoteAppearance } from "../../features/dock/detachBridge";
+import {
+    resolveWindowLabel,
+    satelliteFormId,
+    subscribeRemoteAppearance,
+} from "../../features/dock/detachBridge";
 import { collectSubtreeRootIds } from "../../features/dock/dockPanel";
 import { isPanelForm, rootOfForm } from "../../features/dock/dockTree";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import type { AppearanceSettings } from "../../theme/themeTypes";
 import { DockSubRoot } from "./DockSubRoot";
 import { DockPanelHosts } from "./DockPanelHosts";
-import { useSyllableAnalysisEvents } from "../../features/session/useSyllableAnalysisEvents";
+import { installFocusSurfaceTracking } from "../../features/uiFocus/focusSurface";
+import { useKeybindings } from "../../features/keybindings/useKeybindings";
+import { useDetachedKeybindingAction } from "../../features/keybindings/useDetachedKeybindingAction";
+import { setActiveEditorWindow } from "../../features/session/interactionSlice";
 import "./dock.css";
 
 export function DetachedRoot() {
-    useSyllableAnalysisEvents();
+    const dispatch = useAppDispatch();
+    // 独立窗口的焦点表面跟踪：主窗口的 installFocusSurfaceTracking 不会执行到
+    // 这里。发布本窗口标签后，主窗口 MenuBar 的编辑命令才能定向到卫星。
+    useEffect(() => {
+        const dispose = installFocusSurfaceTracking(() => {
+            dispatch(setActiveEditorWindow(resolveWindowLabel()));
+        });
+        dispatch(setActiveEditorWindow(resolveWindowLabel()));
+        return () => {
+            dispose();
+            dispatch(setActiveEditorWindow(null));
+        };
+    }, [dispatch]);
     const formId = satelliteFormId();
+    const [shortcutUnavailable, setShortcutUnavailable] = useState(false);
+    useKeybindings(
+        useDetachedKeybindingAction({
+            onUnavailable: () => setShortcutUnavailable(true),
+        }),
+    );
+    useEffect(() => {
+        if (!shortcutUnavailable) return;
+        const timer = window.setTimeout(() => setShortcutUnavailable(false), 2500);
+        return () => window.clearTimeout(timer);
+    }, [shortcutUnavailable]);
     const form = useAppSelector((state) =>
         formId ? (state.dock.layout.forms[formId] ?? null) : null,
     );
@@ -105,10 +135,15 @@ export function DetachedRoot() {
 
     return (
         <div
-            className="h-screen w-screen overflow-hidden bg-qt-window text-qt-text"
+            className="relative h-screen w-screen overflow-hidden bg-qt-window text-qt-text"
             onDragOver={onDragOver}
             data-detached-form={formId ?? undefined}
         >
+            {shortcutUnavailable ? (
+                <div className="pointer-events-none absolute bottom-3 left-1/2 z-50 -translate-x-1/2 rounded bg-qt-panel px-3 py-1.5 text-qt-xs text-qt-text shadow">
+                    {translateOutsideReact("detached_shortcut_unavailable")}
+                </div>
+            ) : null}
             {/*
              * 三态（普通窗体）：面板未注册（找不到 panelId）→ 显示"不可用"而不是
              * 空白；已注册 → 渲染；快照未到（无 formId）→ 显示"正在连接"。

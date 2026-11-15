@@ -85,6 +85,7 @@ pub(super) fn export_diagnostics(
         out.display()
     );
 
+    let _ = crate::logging::flush_logs();
     let settings = build_settings_info(&state, frontend_settings);
     let result = write_base_zip(&out, &build_system_info(&state), &settings)
         .and_then(|()| append_benchmark(&out));
@@ -133,6 +134,8 @@ fn build_system_info(state: &State<'_, AppState>) -> serde_json::Value {
         "gpuDevices": super::onnx_status::get_gpu_devices(),
         "dmlAdapters": super::onnx_status::get_dml_adapters(),
         "memory": build_memory_info(),
+        "logVerbosity": hifishifter_kernel::log_policy::current().as_str(),
+        "sessionId": hifishifter_kernel::log_policy::session_id(),
     })
 }
 
@@ -193,6 +196,20 @@ fn write_base_zip(
         .map_err(|e| format!("serialize system_info failed: {e}"))?;
     zip.write_all(info.as_bytes())
         .map_err(|e| format!("write system_info failed: {e}"))?;
+
+    // 生效的日志策略与变更历史：排障时能判断"日志里为什么没有某类行"。
+    zip.start_file("log_policy.json", crate::zip_util::options_now())
+        .map_err(|e| format!("zip add log_policy failed: {e}"))?;
+    let policy_json =
+        serde_json::to_string_pretty(&hifishifter_kernel::log_policy::diagnostics_json())
+            .map_err(|e| format!("serialize log_policy failed: {e}"))?;
+    zip.write_all(policy_json.as_bytes())
+        .map_err(|e| format!("write log_policy failed: {e}"))?;
+
+    zip.start_file("policy_changes.jsonl", crate::zip_util::options_now())
+        .map_err(|e| format!("zip add policy_changes failed: {e}"))?;
+    zip.write_all(hifishifter_kernel::log_policy::diagnostics_changes_jsonl().as_bytes())
+        .map_err(|e| format!("write policy_changes failed: {e}"))?;
 
     zip.start_file("settings.json", crate::zip_util::options_now())
         .map_err(|e| format!("zip add settings failed: {e}"))?;
@@ -263,44 +280,42 @@ fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
 
 // ===================== log_frontend_error =====================
 
-/// 把任意文本压成**单行、有字符上限**的日志字段。
-///
-/// 【为什么连换行也要转义】日志按行读、按行 grep：一条带 `\n` 的 message 能凭空
-/// 伪造出整条假日志（log injection，CWE-117），例如让诊断包看起来像"某个更早的
-/// 严重错误发生过"。转义成字面量 `\n` 既保住内容，又把它钉在同一行里。
-fn log_field(text: &str, max_chars: usize) -> String {
-    let mut out = String::with_capacity(text.len().min(max_chars * 2));
-    let mut truncated = false;
-    for (index, ch) in text.chars().enumerate() {
-        if index >= max_chars {
-            truncated = true;
-            break;
-        }
-        match ch {
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            // 其余控制字符没有可读形式，直接丢弃（保留它们只会让日志更难读）。
-            ch if ch.is_control() => {}
-            ch => out.push(ch),
-        }
-    }
-    if truncated {
-        out.push_str("…(truncated)");
-    }
-    out
-}
+// 单行化与按字符截断已提升到 `kernel::logfile::log_field`：App 与插件共用同一份
+// CWE-117 防护，且长度上限由用户选择的档位决定。
+use hifishifter_kernel::logfile::log_field;
 
 /// 前端错误回传入口：写入统一日志文件，便于和后端日志按时间轴对齐。
-pub(super) fn log_frontend_error(message: String, detail: Option<String>) -> serde_json::Value {
+pub(super) fn log_frontend_error(
+    message: String,
+    detail: Option<String>,
+    level: Option<String>,
+) -> serde_json::Value {
+    let policy = hifishifter_kernel::log_policy::policy();
+    let requested = level.as_deref().unwrap_or("error");
+    let accepted = match requested {
+        "warn" => policy.frontend_accept.warn,
+        "info" => policy.frontend_accept.info,
+        "debug" => policy.frontend_accept.debug,
+        _ => policy.frontend_accept.error,
+    };
+    if !accepted || !policy.file_enabled {
+        // 「无」档严格零产出：命令本身是只读的，不写日志。
+        return serde_json::json!({ "ok": true, "suppressed": true });
+    }
     let message = log_field(message.trim(), FRONTEND_MESSAGE_MAX_CHARS);
     let detail = detail
         .map(|d| d.trim().to_string())
         .filter(|d| !d.is_empty())
-        .map(|d| log_field(&d, FRONTEND_DETAIL_MAX_CHARS));
-    match detail {
-        Some(detail) => log::error!("[frontend] {message} | detail: {detail}"),
-        None => log::error!("[frontend] {message}"),
+        .map(|d| log_field(&d, policy.detail_cap_chars.min(FRONTEND_DETAIL_MAX_CHARS)));
+    let line = match detail {
+        Some(detail) => format!("[frontend] {message} | detail: {detail}"),
+        None => format!("[frontend] {message}"),
+    };
+    match requested {
+        "warn" => log::warn!("{line}"),
+        "info" => log::info!("{line}"),
+        "debug" => log::debug!("{line}"),
+        _ => log::error!("{line}"),
     }
     serde_json::json!({ "ok": true })
 }

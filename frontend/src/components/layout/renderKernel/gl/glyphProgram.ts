@@ -6,6 +6,8 @@
  * 展开并减去视口原点；片元着色器用纹理 alpha 作为覆盖度、乘以实例颜色输出**预乘**
  * 结果（与 sdf-box program 的混合方式一致）。
  *
+ * program 与创建它的 WebGL 上下文绑定；`GlRasterTarget` 只描述尺寸，不切换上下文。
+ *
  * 【作用】
  * 全部文字（clip 名、增益 / 速率、badge 标签、标尺刻度、轨道头文字）由本 program
  * 一次 draw call 绘制。滚动帧只需更新 `u_viewOrigin`——与块面、网格一致，

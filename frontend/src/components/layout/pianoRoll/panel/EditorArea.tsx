@@ -13,6 +13,7 @@ import { timeRulerHeightPx } from "../../timeline/rulerHeight";
 import { TempoMapCornerButton } from "../../timeline/TempoMapCornerButton";
 import { AXIS_W, PARAM_EDITOR_BOTTOM_BAR_PX } from "../constants";
 import { PianoRollWaveformSurface } from "../PianoRollWaveformSurface";
+import { PianoRollSnapGuideLayer } from "./PianoRollSnapGuideLayer";
 import { pianoRollViewportBus } from "../pianoRollViewportBus";
 import { pointerOverlayStyle } from "../../pointerOverlayStyle";
 import { VibratoPresetGlyph } from "../../vibrato/VibratoPresetGlyph";
@@ -36,6 +37,7 @@ type Props = {
         | "attachRulerPlayheadLine"
         | "attachVerticalScrollbarTrack"
         | "axisCanvasRef"
+        | "axisToggleAvailable"
         | "axisUnitToggleAvailable"
         | "axisValuePreview"
         | "axisWrapRef"
@@ -68,7 +70,6 @@ type Props = {
         | "onCanvasPointerMoveForBlocks"
         | "paddedContentWidth"
         | "paramValuePreview"
-        | "paramBlockError"
         | "pianoRollAmplitudeMap"
         | "prTickAxis"
         | "pxPerBeat"
@@ -97,6 +98,7 @@ export function EditorArea({ m }: Props) {
         attachRulerPlayheadLine,
         attachVerticalScrollbarTrack,
         axisCanvasRef,
+        axisToggleAvailable,
         axisUnitToggleAvailable,
         axisValuePreview,
         axisWrapRef,
@@ -175,7 +177,7 @@ export function EditorArea({ m }: Props) {
                     style={{
                         width: AXIS_W,
                         flex: 1,
-                        cursor: axisUnitToggleAvailable ? "pointer" : undefined,
+                        cursor: axisToggleAvailable ? "pointer" : undefined,
                     }}
                 >
                     {/* 键盘轴 GL 层（阶段 2/3）：铺在 Canvas2D 轴画布**下面**
@@ -407,8 +409,20 @@ export function EditorArea({ m }: Props) {
                                         touchAction: "none",
                                     }}
                                     onPointerMove={(event) => {
-                                        interactions.onCanvasPointerMove(event);
-                                        onCanvasPointerMoveForBlocks(event);
+                                        /*
+                                         * 块层先决定光标与块 hover；它返回 true 时通用处理器
+                                         * 不再运行（否则会把块层刚设好的光标/悬停覆盖掉）。
+                                         * 无按键的普通悬停仍要更新曲线读数——那是独立副作用，
+                                         * 不改变光标；有按键时块手势独占读数。
+                                         */
+                                        const blockClaimed = onCanvasPointerMoveForBlocks(event);
+                                        if (!blockClaimed) {
+                                            interactions.onCanvasPointerMove(event);
+                                            return;
+                                        }
+                                        if (event.buttons === 0) {
+                                            interactions.onCanvasHoverPreview(event);
+                                        }
                                     }}
                                     onPointerLeave={interactions.onCanvasPointerLeave}
                                     onPointerDown={interactions.onCanvasPointerDown}
@@ -426,14 +440,13 @@ export function EditorArea({ m }: Props) {
                                     className="absolute inset-0 pointer-events-none"
                                     aria-hidden
                                 />
-                                {m.paramBlockError ? (
-                                    <div
-                                        role="alert"
-                                        className="absolute left-2 top-2 z-30 max-w-md rounded bg-qt-panel px-2 py-1 text-qt-sm text-qt-text"
-                                    >
-                                        {m.paramBlockError}
-                                    </div>
-                                ) : null}
+
+                                {/* 参数编辑器吸附引导：只画时间轴竖线；
+                                    音高/参数吸附只量化，不渲染 value 轴高亮线。 */}
+                                <PianoRollSnapGuideLayer
+                                    viewWidth={viewSize.w}
+                                    viewHeight={viewSize.h}
+                                />
 
                                 {/* 指针旁的实时读数：**参数值 + 颤音拖拽状态合成一个
                                     气泡**。两者曾经各弹一个，颤音那个还压在值上面，

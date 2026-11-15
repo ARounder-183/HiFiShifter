@@ -6,6 +6,7 @@
  * 但在这之前**没有任何 action 能写入**。也就是说这条存储通道只有读的一半，
  * 面板拿到的永远是空对象。这个测试锁定写的一半，以及"装配组件不破坏元数据"。
  */
+import * as frontendLog from "../../services/frontendLog";
 import { configureStore } from "@reduxjs/toolkit";
 import { describe, expect, test, vi } from "vitest";
 
@@ -127,9 +128,9 @@ describe("面板组件装配", () => {
 
     test("对未注册的面板装配组件会告警但不抛错", () => {
         resetPanelRegistryForTests();
-        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        const warn = vi.spyOn(frontendLog, "frontendLog").mockImplementation(() => {});
         expect(() => setPanelComponent("nope", () => null)).not.toThrow();
-        expect(warn).toHaveBeenCalled();
+        expect(warn).toHaveBeenCalledWith("warn", expect.any(String));
         warn.mockRestore();
     });
 

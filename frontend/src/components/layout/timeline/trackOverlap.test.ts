@@ -8,13 +8,31 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { computeLeadingOverlapSecByClipId } from "./trackOverlap";
+import { compareClipLayerOrder, computeLeadingOverlapSecByClipId } from "./trackOverlap";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
 
 /** 造一个测试用 clip（只填本函数用到的字段）。 */
 function clip(id: string, startSec: number, lengthSec: number): ClipInfo {
     return { id, startSec, lengthSec } as ClipInfo;
 }
+
+describe("clip layer order", () => {
+    it("短片段即使起点更早，也绘制在较晚开始的长片段上方", () => {
+        const clips = [clip("short", 1, 2), clip("long", 2, 10)];
+        expect(
+            clips
+                .slice()
+                .sort(compareClipLayerOrder)
+                .map((item) => item.id),
+        ).toEqual(["long", "short"]);
+        expect(clips.map((item) => item.id)).toEqual(["short", "long"]);
+    });
+
+    it("等长时按起点和 id 保持确定的图层顺序", () => {
+        const clips = [clip("c", 2, 4), clip("b", 1, 4), clip("a", 1, 4)];
+        expect(clips.sort(compareClipLayerOrder).map((item) => item.id)).toEqual(["a", "b", "c"]);
+    });
+});
 
 describe("computeLeadingOverlapSecByClipId", () => {
     it("单个 clip 无重叠", () => {

@@ -227,6 +227,8 @@ export interface KeyboardGeometrySignatureArgs {
      * 表现为"点了切换但刻度还是旧单位"。
      */
     readonly axisUnit?: string | undefined;
+    /** pan 纵轴方向；方向变化会重建刻度文字。 */
+    readonly axisDirection?: string | undefined;
     readonly view: LiveGridView;
     readonly absMin: number;
     readonly absMax: number;
@@ -278,6 +280,7 @@ export function keyboardGeometrySignature(args: KeyboardGeometrySignatureArgs): 
             args.paramName ?? "",
             // 展示单位（倍率 / dB）：只改标签文本，几何不变，因此必须显式入签名。
             args.axisUnit ?? "",
+            args.axisDirection ?? "",
             args.view.center,
             args.view.span,
             args.absMin,

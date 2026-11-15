@@ -1,4 +1,19 @@
-// 播放头桥接：逐帧写视觉播放头并请求内核重绘。
+/**
+ * 时间轴的播放头桥接：逐帧写视觉播放头、按当前自动滚屏模式跟随滚动、并请求内核重绘。
+ *
+ * 【主要内容】把共享视觉时钟（`useVisualPlayhead`）的每帧结果落到三处：捕获带右缘
+ * 读的 `visualPlayheadRef`、时间轴视口（自动滚屏）、轨道区播放头（经内核重绘）。
+ *
+ * 【作用】播放期间的高频通路必须绕开 React：本组件只返回 null，因此 60Hz 的
+ * `onFrame` 不会让时间轴面板重渲染。
+ *
+ * 【与其他模块的关系】
+ * - 自动滚屏的几何与模式判定在 `utils/autoFollowScroll`（`resolveAutoScrollTarget`）；
+ *   本组件只负责把结果写进 `TimelineViewportAccess` 并广播实际生效值。
+ * - 视口真值在 `ScrollKernel`（内核模式）或原生 scroller（挂载期兜底），见 `viewport`。
+ * - 与参数编辑器那条同构：`PianoRollPlayheadBridge`。两者共用同一个入口函数，
+ *   因此"滚动式 / 翻页式"的语义不可能在两个面板之间漂移。
+ */
 import React from "react";
 import { useAppSelector } from "../../../app/hooks";
 import { shallowEqual } from "react-redux";
@@ -6,7 +21,7 @@ import { type TimelineViewportAccess } from "./hooks/timelineViewportAccess";
 import { useVisualPlayhead } from "../../../hooks/useVisualPlayhead";
 import { isTransportAdvancing } from "../../../features/session/selectors/transport";
 import { publishVisualPlayheadSec } from "../../../features/capture/visualPlayheadBus";
-import { computeAutoFollowScrollLeft } from "../../../utils/autoFollowScroll";
+import { resolveAutoScrollTarget, type AutoScrollMode } from "../../../utils/autoFollowScroll";
 
 export const TimelineTransportBridge = React.memo(function TimelineTransportBridge(props: {
     pxPerSecRef: React.MutableRefObject<number>;
@@ -22,6 +37,8 @@ export const TimelineTransportBridge = React.memo(function TimelineTransportBrid
     visualPlayheadRef: React.MutableRefObject<number>;
     syncScrollLeft: (next: number) => void;
     autoScrollEnabled: boolean;
+    /** 自动滚屏模式（滚动式 / 翻页式）。语义见 `utils/autoFollowScroll`。 */
+    autoScrollMode: AutoScrollMode;
     projectSec: number;
     /** 请求时间轴内核重绘播放头（见 kernelHost.invalidatePlayhead 的说明）。 */
     requestPlayheadRepaint: () => void;
@@ -32,6 +49,7 @@ export const TimelineTransportBridge = React.memo(function TimelineTransportBrid
         visualPlayheadRef,
         syncScrollLeft,
         autoScrollEnabled,
+        autoScrollMode,
         projectSec,
         requestPlayheadRepaint,
     } = props;
@@ -87,14 +105,23 @@ export const TimelineTransportBridge = React.memo(function TimelineTransportBrid
                 // 视觉插值）重写播放头位置 —— 若先定位播放头再滚动，播放头每帧
                 // 会在"视觉位置"与"同步位置"之间跳动（自动滚屏抽搐的根因）。
                 // 滚动先行、播放头定位收尾，最终写入获胜。
+                //
+                // 【模式分派在纯函数里】滚动式 = 每帧追到"光标左缘 12px"；翻页式 =
+                // 只在光标越出当前页时整页翻一次。两条语义共用同一个"要不要写"的
+                // 容差，见 resolveAutoScrollTarget。
                 if (autoScrollEnabled && transport.isPlaying) {
-                    const next = computeAutoFollowScrollLeft({
+                    const next = resolveAutoScrollTarget({
+                        mode: autoScrollMode,
                         playheadSec: visualPlayheadSec,
                         pxPerSec: pxPerSecRef.current,
                         viewportWidth: viewport.getViewportWidth(),
+                        scrollLeft: viewport.getScrollLeft(),
                         contentWidth: projectSec * pxPerSecRef.current,
                     });
-                    if (Math.abs(viewport.getScrollLeft() - next) > 0.5) {
+                    // null = 本帧不滚（滚动式：已到位；翻页式：光标仍在页内，或已被
+                    // 工程右端钳住）。翻页式的"页内静止"就落在这一个分支上 ——
+                    // 零写入、零广播、零 React 提交。
+                    if (next !== null) {
                         // 写后回读实际生效值再广播：跟随滚动接近工程右端时请求值
                         // 可能被载体钳制，跟随视口的图层必须与真实视口同源。
                         syncScrollLeft(viewport.setScrollLeft(next));
@@ -123,6 +150,7 @@ export const TimelineTransportBridge = React.memo(function TimelineTransportBrid
             },
             [
                 autoScrollEnabled,
+                autoScrollMode,
                 pxPerSecRef,
                 viewport,
                 syncScrollLeft,

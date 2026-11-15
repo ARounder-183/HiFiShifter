@@ -33,6 +33,8 @@ interface HarnessInputs {
     setSelectionUi: (selection: ParamSelection | null) => void;
     invalidate: () => void;
     clipboardRef: { current: unknown };
+    paramBlockToolActive?: boolean;
+    paramBlockSelectAllRanges?: () => ParamSelection | null;
 }
 
 function Harness({
@@ -46,6 +48,7 @@ function Harness({
 }) {
     usePianoRollEditCommands({
         ...inputs,
+        paramBlockToolActive: inputs.paramBlockToolActive ?? false,
         s: { toolMode } as unknown as SessionState,
         handleEditActionRef,
         openVibratoDialog: () => {},
@@ -98,5 +101,43 @@ test("工具切回 select 后，deselect 读到的是当下的工具模式", asy
 
     expect(selectionRef.current).toBeNull();
     expect(setSelectionUi).toHaveBeenCalledWith(null);
+    expect(invalidate).toHaveBeenCalled();
+});
+
+test("block 子模式全选调用块覆盖区间，而不是整条曲线", async () => {
+    const setSelectionUi = vi.fn();
+    const invalidate = vi.fn();
+    const selectionRef: { current: ParamSelection | null } = { current: null };
+    const handleEditActionRef: { current: (op: string) => void } = { current: () => {} };
+    const ranges = [{ startFrame: 12, frameCount: 24 }];
+    const inputs: HarnessInputs = {
+        rootTrackId: "root-1",
+        selectionRef,
+        setSelectionUi,
+        invalidate,
+        clipboardRef: { current: null },
+        paramBlockToolActive: true,
+        paramBlockSelectAllRanges: () => ranges,
+    };
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    mounted.push(async () => {
+        await act(async () => root.unmount());
+        host.remove();
+    });
+
+    await act(async () => {
+        root.render(
+            <Harness toolMode="select" inputs={inputs} handleEditActionRef={handleEditActionRef} />,
+        );
+    });
+    await act(async () => {
+        handleEditActionRef.current("selectAll");
+    });
+
+    expect(selectionRef.current).toEqual(ranges);
+    expect(setSelectionUi).toHaveBeenCalledWith(ranges);
     expect(invalidate).toHaveBeenCalled();
 });

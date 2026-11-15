@@ -4,9 +4,3 @@ coverage
 .build-tmp
 *.log
 package-lock.json
-# Rust / wasm 构建产物：内容由 cargo 生成，格式不受本仓库 Prettier 管理。
-wasm/*/target
-# wasm-bindgen 产物同样由工具链生成，不能手工格式化回写。
-src/wasm/timeline-kernel
-# 该入口在合并前已存在格式差异，且不参与本分支改动；本分支不借机重排它。
-src/App.tsx

@@ -146,6 +146,8 @@ export interface PianoRollGridSpec {
      * 刻度纹丝不动"）。
      */
     readonly axisUnit?: "ratio" | "db";
+    /** pan 纵轴方向；只影响标签与投影，不改内部值。 */
+    readonly axisDirection?: "left-bottom" | "left-top";
     /** 字体族（与 Canvas2D 路径共用同一个，避免两种模式字形不同）。 */
     readonly fontFamily?: string;
     /** 数值轴刻度标签颜色（`colors.tensionLabel`）。 */
@@ -191,7 +193,7 @@ export interface PianoRollSelectionBandSpec {
 }
 
 /**
- * 参数块场景输入（第一版 mock）。
+ * 参数块场景输入。
  *
  * 块由面板按当前根轨道组 + 当前参数曲线派生，宿主只负责把时间区间与块高投影成
  * 矩形。它与选区块分开：选区块是参数编辑操作的作用域；块是音节级的可视化与
@@ -255,13 +257,22 @@ export interface PianoRollParamBlockSpec {
          * `displayCenterValue` 已由手势锁定时同样传 false，避免二次取整。
          */
         readonly displayCenterSnapToSemitone?: boolean;
+        /** canonical = live; gesture = locked; display-only fallback = fallback. */
+        readonly centerPolicy?: "live" | "locked" | "fallback";
         /** 本次手势锁定的块高（CSS px）；只用于时间伸缩预览，不写回数据。 */
         readonly displayHeightPx?: number | null;
+        readonly sourceNote?: number | null;
+        readonly fallbackValue?: number | null;
+        readonly cutStart?: boolean;
+        readonly cutEnd?: boolean;
+        readonly sourceKey?: string;
+        /** Stable full-source note-event identity; view-only. */
+        readonly sourceEventId?: string;
         /** 时间上是否与相邻块相接；相接处不画竖向分隔，连续块看起来是一整条。 */
         readonly contiguousStart?: boolean;
         readonly contiguousEnd?: boolean;
         readonly selected: boolean;
-        readonly merged: boolean;
+        readonly grouped: boolean;
         /** 相接块边界上的圆滑手柄；只对有邻居的块出现。 */
         readonly transitionHandle?: {
             readonly leftId: string;
@@ -274,13 +285,13 @@ export interface PianoRollParamBlockSpec {
     }[];
     readonly borderRgba: readonly [number, number, number, number];
     readonly selectedRgba: readonly [number, number, number, number];
-    readonly mergedRgba: readonly [number, number, number, number];
+    readonly groupedRgba: readonly [number, number, number, number];
     readonly labelRgba?: readonly [number, number, number, number];
     readonly selectedLabelRgba?: readonly [number, number, number, number];
     /** 块的圆角填充；缺省不画填充（只画边框）。 */
     readonly fillRgba?: readonly [number, number, number, number];
     readonly selectedFillRgba?: readonly [number, number, number, number];
-    readonly mergedFillRgba?: readonly [number, number, number, number];
+    readonly groupedFillRgba?: readonly [number, number, number, number];
     readonly topHighlightRgba?: readonly [number, number, number, number];
     /** 顶部高光厚度（CSS px）。 */
     readonly topHighlightPx?: number;
@@ -470,25 +481,25 @@ export interface PianoRollCurveLayer {
      */
     readonly dash?: readonly [number, number] | null;
     /**
-     * 投影模式，三者时间基准各不相同，混用会让曲线整体平移或长出尖刺：
+     * 投影模式，三者时间基准各不相同，混用会让曲线整体平移：
      * - `"curve"`：走 `drawCurveTimed` 的语义（`startFrame + i × stride`）；
      * - `"clipboard"`：剪贴板预览（从选区起点按**原始帧距**排布）；
-     * - `"detected"`：检测曲线（从 `curveStartSec` 按原始帧距排布，
-     *   **并跳过 `midi <= 0` 的无声帧**）。
+     * - `"clip"`：Clip 源音高参考线（从工程帧 `startFrame` 按原始帧距排布）。
      */
-    readonly projection: "curve" | "clipboard" | "detected";
-    /** `projection === "clipboard"` 时的选区起点（秒）。 */
-    readonly clipStartSec?: number;
-    /** `projection === "clipboard"` 时的选区终点（秒）。 */
-    readonly clipEndSec?: number;
+    readonly projection: "curve" | "clipboard" | "clip";
     /**
-     * `projection === "detected"` 时曲线第 0 帧对应的 timeline 绝对时间（秒）。
+     * `projection === "clip"` 时所属 Clip 的工程帧数（右边界，**开区间**）。
      *
-     * 【为什么检测曲线不复用 `startFrame`】检测曲线来自后端推送的
-     * `clipPitchCurves`，它自带**绝对起始秒**（`curveStartSec`），没有帧号概念。
-     * 塞进 `startFrame` 需要先乘除帧周期，徒增一次换算与一处口径。
+     * 越界帧不画。Clip 源音高曲线与 `pv.orig`、参数块同在工程帧网格上，
+     * 因此这里用帧数而不是秒 —— 用秒会让每条 Clip 各偏一个亚帧相位。
      */
-    readonly curveStartSec?: number;
+    readonly frameCount?: number;
+    /** `projection === "clipboard"` 时选区的起点（秒）。 */
+    readonly clipboardStartSec?: number;
+    /** 同上，终点（秒，**开区间**）。 */
+    readonly clipboardEndSec?: number;
+    /** `projection === "clip"` 时当前图层第一个值在完整曲线数组中的下标。 */
+    readonly curveSampleStartIndex?: number;
     /** 裁剪区（视口坐标 CSS px）；缺省不裁剪。两个需要裁剪的曲线图层用选区矩形。 */
     readonly clipRect?: {
         readonly x: number;

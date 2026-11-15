@@ -31,7 +31,7 @@ pub fn get_root_mix_waveform_peaks_segment(
     columns: usize,
 ) -> WaveformPeaksSegmentPayload {
     guard_waveform_command("get_root_mix_waveform_peaks_segment", || {
-        if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
+        if crate::log_policy::probes_enabled() {
             log::warn!(
                 "get_root_mix_waveform_peaks_segment(track_id={}, start_sec={:.3}, duration_sec={:.3}, columns={})",
                 track_id, start_sec, duration_sec, columns
@@ -176,7 +176,7 @@ pub fn get_track_mix_waveform_peaks_segment(
     columns: usize,
 ) -> WaveformPeaksSegmentPayload {
     guard_waveform_command("get_track_mix_waveform_peaks_segment", || {
-        if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
+        if crate::log_policy::probes_enabled() {
             log::warn!(
                 "get_track_mix_waveform_peaks_segment(track_id={}, start_sec={:.3}, duration_sec={:.3}, columns={})",
                 track_id, start_sec, duration_sec, columns

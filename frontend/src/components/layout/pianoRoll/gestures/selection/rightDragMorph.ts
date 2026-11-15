@@ -9,6 +9,7 @@ import {
     fetchFullResCurve,
     readPvRange,
     uploadFullResCurveSegments,
+    type FullResWriteSegment,
 } from "../../selectionEditData";
 import {
     createSelectionAmplifier,
@@ -21,6 +22,9 @@ import type { ParamViewSegment } from "../../types";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { ParamSelection } from "../../paramSelection";
 import type { PointerDeps } from "../pointerDeps";
+import { trackParamBlockCommit } from "../../paramBlockCommitCoordinator";
+import type { ParamCurveCommitAuthority } from "../../paramBlockCommitPolicy";
+import { frontendLog } from "../../../../../services/frontendLog";
 
 /** `handleParamLineDrag` 作用域里的局部量。 */
 type ParamLineLocals = {
@@ -56,8 +60,16 @@ type Deps = Pick<
     | "setActivePointerGestureEnd"
     | "setCanvasCursor"
     | "setParamView"
-> &
-    ParamLineLocals;
+> & {
+    /**
+     * Optional atomic commit used by the block selection mode: curve patches and the
+     * cleared pitch-block values go to the backend in one history step.
+     */
+    readonly commitAmplitude?: (
+        segments: readonly FullResWriteSegment[],
+        authority: ParamCurveCommitAuthority,
+    ) => Promise<void>;
+} & ParamLineLocals;
 
 /**
  * 处理参数线上的右键拖动（百分比形变）。
@@ -95,6 +107,7 @@ export function handleRightDragMorph(deps: Deps, e: ReactPointerEvent<HTMLCanvas
         setActivePointerGestureEnd,
         setCanvasCursor,
         setParamView,
+        commitAmplitude,
     } = deps;
 
     e.preventDefault();
@@ -154,7 +167,7 @@ export function handleRightDragMorph(deps: Deps, e: ReactPointerEvent<HTMLCanvas
         .catch((err) => {
             // 取数失败只影响预览保真度：保持 pv 近似值，
             // 提交路径会再次尝试并有自己的失败处理。
-            console.error("[pianoRoll] full-res curve fetch failed", err);
+            frontendLog("error", "[pianoRoll] full-res curve fetch failed", err);
         });
 
     // 每段自己的残差放大器：趋势按该段值数组引用缓存，
@@ -368,13 +381,22 @@ export function handleRightDragMorph(deps: Deps, e: ReactPointerEvent<HTMLCanvas
             // 上传失败同样复位 liveEdit（finally），不让覆盖层冻结。
             void (async () => {
                 try {
-                    await uploadFullResCurveSegments({
-                        trackId: rootTrackId,
-                        param: editParam,
-                        segments: buildUploadSegments(editParam, pieces, commit.sentinelAt),
-                    });
+                    const segments = buildUploadSegments(editParam, pieces, commit.sentinelAt);
+                    if (commitAmplitude !== undefined) {
+                        await commitAmplitude(segments, commit.authority);
+                    } else {
+                        await trackParamBlockCommit(
+                            "amplitude",
+                            rootTrackId,
+                            uploadFullResCurveSegments({
+                                trackId: rootTrackId,
+                                param: editParam,
+                                segments,
+                            }),
+                        );
+                    }
                 } catch (err) {
-                    console.error("[pianoRoll] right-drag upload failed", err);
+                    frontendLog("error", "[pianoRoll] right-drag upload failed", err);
                 } finally {
                     if (liveEditActiveRef) {
                         liveEditActiveRef.current = false;
@@ -383,7 +405,7 @@ export function handleRightDragMorph(deps: Deps, e: ReactPointerEvent<HTMLCanvas
                 }
             })();
         } catch (err) {
-            console.error("[pianoRoll] right-drag commit failed", err);
+            frontendLog("error", "[pianoRoll] right-drag commit failed", err);
             liveEditOverrideRef.current = null;
             if (liveEditActiveRef) {
                 liveEditActiveRef.current = false;

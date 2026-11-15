@@ -16,6 +16,8 @@ use std::path::Path;
 pub(crate) struct SilenceDetectOptions {
     /// true = 按帧内最大绝对值（Peak）判定；false = 按 RMS（推荐）。
     pub(crate) use_peak: bool,
+    /// true = 使用 GAME/参数块同一份音符块来源，不解码音频。
+    pub(crate) use_note_blocks: bool,
     /// 阈值 dBFS（−96…−6）。
     pub(crate) threshold_db: f64,
     /// 自适应阈值：忽略 `threshold_db`，按全片电平分布估计噪底 + 6 dB。
@@ -32,6 +34,7 @@ impl Default for SilenceDetectOptions {
     fn default() -> Self {
         Self {
             use_peak: false,
+            use_note_blocks: false,
             threshold_db: -50.0,
             adaptive: false,
             min_silence_ms: 120.0,
@@ -340,6 +343,65 @@ pub(crate) fn analyze_take_silence(
     Ok(merged)
 }
 
+/// 音符块方式：静音 = Clip 可见区间 − 投影后的发声块。
+///
+/// 只消费 Take 上已有的 syllable_analysis / game_block_baseline /
+/// midi_note_data；缺失时返回可操作错误，绝不把整段当静音，也绝不在这里
+/// 触发 GAME 推理。
+pub(crate) fn analyze_note_block_silence(
+    clip: &crate::state::Clip,
+    take: &crate::state::ClipTake,
+    options: &SilenceDetectOptions,
+) -> Result<Vec<(f64, f64)>, String> {
+    if crate::note_blocks::source_note_spans(take).is_none() {
+        return Err("note_blocks_not_ready".to_string());
+    }
+    let clip_start = clip.start_sec.max(0.0);
+    let clip_end = clip_start + clip.length_sec.max(0.0);
+    if clip_end - clip_start <= 1e-6 {
+        return Ok(Vec::new());
+    }
+    let mut sound: Vec<(f64, f64)> =
+        crate::note_blocks::projected_note_spans(clip, take, HOP_SEC * 1000.0)
+            .into_iter()
+            .map(|(start, end)| (start.max(clip_start), end.min(clip_end)))
+            .filter(|(start, end)| end > start)
+            .collect();
+    sound.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    let mut merged_sound: Vec<(f64, f64)> = Vec::new();
+    for (start, end) in sound {
+        match merged_sound.last_mut() {
+            Some(last) if start <= last.1 + 1e-4 => last.1 = last.1.max(end),
+            _ => merged_sound.push((start, end)),
+        }
+    }
+    let min_sound = (options.min_sound_ms / 1000.0).max(0.0);
+    if min_sound > 0.0 {
+        merged_sound.retain(|(start, end)| end - start >= min_sound);
+    }
+    let mut silence = Vec::new();
+    let mut cursor = clip_start;
+    for (start, end) in merged_sound {
+        if start > cursor + 1e-4 {
+            silence.push((cursor, start));
+        }
+        cursor = cursor.max(end);
+    }
+    if cursor < clip_end - 1e-4 {
+        silence.push((cursor, clip_end));
+    }
+    let min_silence = (options.min_silence_ms / 1000.0).max(0.0);
+    let pad = (options.padding_ms / 1000.0).max(0.0);
+    Ok(silence
+        .into_iter()
+        .filter_map(|(start, end)| {
+            let start = start + pad;
+            let end = end - pad;
+            (end - start > 1e-4 && end - start >= min_silence).then_some((start, end))
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +447,7 @@ mod tests {
     fn opts() -> SilenceDetectOptions {
         SilenceDetectOptions {
             use_peak: false,
+            use_note_blocks: false,
             threshold_db: -50.0,
             adaptive: false,
             min_silence_ms: 100.0,
@@ -497,5 +560,64 @@ mod tests {
         let (s, e) = regions[0];
         assert!(s <= 0.05 && e >= 1.95, "({s}, {e})");
         let _ = std::fs::remove_file(&path);
+    }
+    #[test]
+    fn note_blocks_produce_silence_without_decoding_audio() {
+        let mut timeline: crate::state::TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"root","name":"Root","order":0}],
+            "clips":[],"bpm":120,"project_sec":4
+        }))
+        .unwrap();
+        let clip_id = timeline.add_clip(
+            Some("root".into()),
+            Some("clip".into()),
+            Some(0.0),
+            Some(3.0),
+            None,
+        );
+        let clip = timeline
+            .clips
+            .iter_mut()
+            .find(|clip| clip.id == clip_id)
+            .unwrap();
+        let take = clip.takes.first_mut().unwrap();
+        take.syllable_analysis = Some(crate::pitch_analysis::TakeSyllableAnalysis {
+            algorithm: "test".into(),
+            algorithm_version: 1,
+            source_digest: "d".into(),
+            analyzed_window_sec: [0.0, 0.0],
+            source_spans_sec: vec![
+                crate::pitch_analysis::SyllableSpan {
+                    start_sec: 0.0,
+                    end_sec: 1.0,
+                    midi_note: None,
+                    event_id: Some(crate::pitch_analysis::source_event_id(0.0, 1.0)),
+                },
+                crate::pitch_analysis::SyllableSpan {
+                    start_sec: 2.0,
+                    end_sec: 3.0,
+                    midi_note: None,
+                    event_id: Some(crate::pitch_analysis::source_event_id(2.0, 3.0)),
+                },
+            ],
+        });
+        let take = take.clone();
+        let options = SilenceDetectOptions {
+            use_note_blocks: true,
+            min_silence_ms: 0.0,
+            padding_ms: 0.0,
+            ..SilenceDetectOptions::default()
+        };
+        let regions = analyze_note_block_silence(clip, &take, &options).unwrap();
+        assert_eq!(regions.len(), 1);
+        assert!((regions[0].0 - 1.0).abs() < 1e-6);
+        assert!((regions[0].1 - 2.0).abs() < 1e-6);
+
+        let mut take_without_analysis = take.clone();
+        take_without_analysis.syllable_analysis = None;
+        assert_eq!(
+            analyze_note_block_silence(clip, &take_without_analysis, &options).unwrap_err(),
+            "note_blocks_not_ready"
+        );
     }
 }

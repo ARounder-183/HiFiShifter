@@ -1,8 +1,10 @@
 // 已迁到 `hifishifter-kernel`。再导出，`crate::audio_engine::byte_budget_cache::…`
 // 与模块内 `super::byte_budget_cache::…` 的路径都保持不变。
 pub(crate) use hifishifter_kernel::byte_budget_cache;
+mod device_watch;
 mod engine;
 mod io;
+mod output_stream;
 // `pub(crate)`：`renderer::chain` 的一致性测试需要跨模块调用
 // `sample_automation_curve`，以钉住"预览与导出的曲线越界语义一致"。
 pub(crate) mod mix;
@@ -14,6 +16,7 @@ pub(crate) mod snapshot;
 pub(crate) mod types;
 pub(crate) use hifishifter_kernel::util;
 
+pub(crate) use engine::build_clip_pitch_data_payload;
 pub use engine::AudioEngine;
 #[allow(unused_imports)]
 pub use types::AudioEngineStateSnapshot;

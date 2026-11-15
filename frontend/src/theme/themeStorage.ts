@@ -24,6 +24,7 @@ import {
     RADIX_RADIUS_OPTIONS,
     THEME_MODE_SETTINGS,
 } from "./themeTypes";
+import { frontendLog } from "../services/frontendLog";
 
 /* ─────────── Storage Keys ─────────── */
 
@@ -72,7 +73,7 @@ export function saveAppearance(settings: AppearanceSettings): void {
         // 同步旧版 key（兼容其他可能直接读取的代码）
         writeUiValue(LEGACY_THEME_KEY, settings.mode);
     } catch (err) {
-        console.warn("[theme] failed to persist appearance settings", err);
+        frontendLog("warn", "[theme] failed to persist appearance settings", err);
     }
 }
 
@@ -96,7 +97,7 @@ export function saveCustomThemes(themes: CustomTheme[]): void {
     try {
         writeUiValue(CUSTOM_THEMES_KEY, JSON.stringify(themes));
     } catch (err) {
-        console.warn("[theme] failed to persist custom themes", err);
+        frontendLog("warn", "[theme] failed to persist custom themes", err);
     }
 }
 

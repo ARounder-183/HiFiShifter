@@ -333,3 +333,24 @@ test("build 复用 typecheck 的命令，且不再嵌套 npm", () => {
     // 报 "Unknown env config" —— 仓库脚本不该制造这种父子 npm。
     expect(scripts.build, "build 又嵌套了 npm").not.toMatch(/\bnpm run\b/);
 });
+
+/*
+ * 体积预算必须挂在唯一的前端门禁入口上。此前 `check:bundle` 只存在于
+ * package.json，CI 与 `npm test` 都没有调用它；758 kB 的 CSS 与 800 kB 上限
+ * 之间只剩 7.5% 余量，却没有任何流水线会阻止它继续长大。
+ */
+test("前端门禁入口调用体积预算", () => {
+    const gate = readFileSync(
+        join(process.cwd(), "../scripts/checks/run-frontend-gates.sh"),
+        "utf8",
+    );
+    expect(gate, "run-frontend-gates.sh 必须在生产构建之后执行体积预算").toContain(
+        "npm --prefix frontend run check:bundle",
+    );
+    const buildIndex = gate.indexOf("npm --prefix frontend run build");
+    const bundleIndex = gate.indexOf("npm --prefix frontend run check:bundle");
+    expect(
+        bundleIndex,
+        "体积预算必须排在 vite build 之后（dist 还不存在时无法测量）",
+    ).toBeGreaterThan(buildIndex);
+});

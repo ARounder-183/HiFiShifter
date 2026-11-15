@@ -1,16 +1,8 @@
 // hs-interaction-exempt: 主工具栏是紧凑 chrome（size 1、内联底色、BPM 有手势累加器），能力层原语是表单尺寸；本文件的滚轮与精细调整接线已完备（BPM/节拍器音量/三个下拉均有），故刻意保留。
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { isPluginMode, canControlHostTransport } from "../../services/hostCapabilities";
-import { createPortal } from "react-dom";
 import { Flex, Select, TextField, Button, IconButton, Box } from "@radix-ui/themes";
-import {
-    CheckIcon,
-    DoubleArrowRightIcon,
-    PauseIcon,
-    Pencil1Icon,
-    PlayIcon,
-    StopIcon,
-} from "@radix-ui/react-icons";
+import { CheckIcon, PauseIcon, Pencil1Icon, PlayIcon, StopIcon } from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { shallowEqual } from "react-redux";
 import type { RootState } from "../../app/store";
@@ -19,8 +11,10 @@ import { CaptureControl } from "../../features/capture/CaptureControl";
 import { PitchSnapSettingsDialog } from "./PitchSnapSettingsDialog";
 import { SnapGridSettingsDialog } from "./SnapGridSettingsDialog";
 import { SplitTransitionSettingsDialog } from "./SplitTransitionSettingsDialog";
+import { AutoScrollButton } from "./AutoScrollButton";
+import { RIPPLE_SCOPES, type RippleScope } from "../../features/session/rippleMode";
 import { CustomScaleDialog } from "./CustomScaleDialog";
-import { AppContextMenu } from "../../ui/Menu";
+import { AppAnchoredMenu } from "../../ui/Menu";
 import { AppToolbarGroup } from "../../ui/Toolbar";
 import { useDevicePixelRatio } from "../../hooks/useDevicePixelRatio";
 import { wholeDevicePxLength } from "../../utils/devicePixelLine";
@@ -37,9 +31,10 @@ import {
     toggleSnap,
     togglePlayheadZoom,
     toggleAutoScroll,
+    setAutoScrollMode,
     toggleIgnoreGrouping,
-    cycleRippleMode,
-    setRippleMode,
+    toggleRippleEnabled,
+    setRippleScope,
     toggleParamEditorSeekPlayhead,
     toggleParamEditorTimelineClickSelectTrack,
     persistUiSettings,
@@ -169,6 +164,7 @@ const selectActionBarSession = (state: RootState) => {
         historyUndoDepth: session.historyUndoDepth,
         autoCrossfadeEnabled: session.autoCrossfadeEnabled,
         autoScrollEnabled: session.autoScrollEnabled,
+        autoScrollMode: session.autoScrollMode,
         beats: session.beats,
         bpm: session.bpm,
         grid: session.grid,
@@ -184,7 +180,8 @@ const selectActionBarSession = (state: RootState) => {
         playheadSec: session.playheadSec,
         playheadZoomEnabled: session.playheadZoomEnabled,
         project: session.project,
-        rippleMode: session.rippleMode,
+        rippleEnabled: session.rippleEnabled,
+        rippleScope: session.rippleScope,
         snapEnabled: session.snapEnabled,
         splitTransitionEnabled: session.splitTransitionEnabled,
         tempoMap: session.tempoMap,
@@ -219,8 +216,19 @@ export function ActionBar() {
     const [splitTransitionOpen, setSplitTransitionOpen] = useState(false);
     const [customScaleOpen, setCustomScaleOpen] = useState(false);
     const [recordingSettingsOpen, setRecordingSettingsOpen] = useState(false);
-    const [recordingMenuPos, setRecordingMenuPos] = useState<{ x: number; y: number } | null>(null);
-    const [metronomeMenuPos, setMetronomeMenuPos] = useState<{ x: number; y: number } | null>(null);
+    /*
+     * 工具栏弹出菜单：**全部**是"锚在按钮下方的菜单"（`AppAnchoredMenu`），
+     * 与参数编辑器的选择/绘制工具菜单同一种表面。
+     *
+     * 【为什么不再按指针坐标弹】同一排按钮上的右键菜单，有的贴按钮、有的飘在光标
+     * 处，用户学到的"右键会从哪里弹出"就是错的。锚定在按钮下方之后，菜单属于
+     * 那枚按钮，与它是不是贴着屏幕右缘无关（夹紧由原语做）。
+     */
+    const [recordingMenuOpen, setRecordingMenuOpen] = useState(false);
+    const recordingMenuAnchorRef = useRef<HTMLDivElement | null>(null);
+    const recordingMenuRef = useRef<HTMLDivElement | null>(null);
+    const [metronomeMenuOpen, setMetronomeMenuOpen] = useState(false);
+    const metronomeMenuAnchorRef = useRef<HTMLDivElement | null>(null);
     const metronomeMenuRef = useRef<HTMLDivElement | null>(null);
     // 「操作记录」面板：右键撤销/重做按钮打开。它是**可停靠面板**，显隐由停靠
     // 布局决定（不再是本组件的局部 state），因此它能被拖到任意位置、与其他面板
@@ -281,24 +289,6 @@ export function ActionBar() {
         snapGestureActive && snapToggleHeld,
     );
 
-    useEffect(() => {
-        if (!metronomeMenuPos) return;
-        const onPointerDown = (e: PointerEvent) => {
-            const target = e.target as Node | null;
-            if (metronomeMenuRef.current?.contains(target)) return;
-            setMetronomeMenuPos(null);
-        };
-        const onKeyDown = (e: KeyboardEvent) => {
-            if (e.key === "Escape") setMetronomeMenuPos(null);
-        };
-        window.addEventListener("pointerdown", onPointerDown, true);
-        window.addEventListener("keydown", onKeyDown, true);
-        return () => {
-            window.removeEventListener("pointerdown", onPointerDown, true);
-            window.removeEventListener("keydown", onKeyDown, true);
-        };
-    }, [metronomeMenuPos]);
-
     const recordingSourceLabel = (() => {
         switch (recording.settings.captureMode) {
             case "loopback":
@@ -354,7 +344,7 @@ export function ActionBar() {
         } catch {
             // 快速设置失败时保持菜单关闭；详细错误仍可在录音设置对话框中查看。
         } finally {
-            setRecordingMenuPos(null);
+            setRecordingMenuOpen(false);
         }
     }
 
@@ -538,7 +528,7 @@ export function ActionBar() {
     useEffect(() => {
         applyBpmCommitRef.current = applyBpmCommit;
     }, [applyBpmCommit]);
-    // eslint-disable-next-line react-hooks/refs -- 初始化只读 ref 的当前值；后续提交都在事件回调里
+
     const [bpmCommitRef] = useState(() =>
         createFrameCommitter<number>((value) => applyBpmCommitRef.current(value)),
     );
@@ -667,7 +657,11 @@ export function ActionBar() {
                  * 一个永远按不动的按钮只会把界面挤满（用户反馈）。
                  */}
                 {!isPluginMode() && (
-                    <Box style={{ position: "relative" }} data-hs-context-menu>
+                    <Box
+                        ref={metronomeMenuAnchorRef}
+                        style={{ position: "relative" }}
+                        data-hs-context-menu
+                    >
                         <AppIconButton
                             active={s.metronomeEnabled}
                             // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
@@ -681,137 +675,132 @@ export function ActionBar() {
                             }}
                             onContextMenu={(event) => {
                                 event.preventDefault();
-                                setMetronomeMenuPos({ x: event.clientX, y: event.clientY });
+                                setMetronomeMenuOpen(true);
                             }}
                         />
-                        {metronomeMenuPos &&
-                            createPortal(
-                                <div
-                                    ref={metronomeMenuRef}
-                                    data-hs-context-menu="1"
-                                    className="hs-menu hs-menu--no-scroll"
-                                    style={{ left: metronomeMenuPos.x, top: metronomeMenuPos.y }}
+                        <AppAnchoredMenu
+                            open={metronomeMenuOpen}
+                            anchorRef={metronomeMenuAnchorRef}
+                            menuRef={metronomeMenuRef}
+                            ariaLabel={t("action_metronome")}
+                            onClose={() => setMetronomeMenuOpen(false)}
+                            className="hs-menu--no-scroll"
+                        >
+                            <div className="hs-menu__label">{t("metronome_volume")}</div>
+                            <div className="hs-menu__body flex items-center gap-2">
+                                {/*
+                                 * 用 `AppSlider` 而不是裸 `<input type="range">`：滚轮步进
+                                 * （粗 5% / 精细修饰键 1%）与"滚轮不带动祖先滚动"都由原语
+                                 * 内建，`percent` 单位语义给出的正是这两个步长。
+                                 *
+                                 * 这里**不需要** `onPointerDown` 阻止冒泡：菜单的"点外面
+                                 * 关闭"由 `AppAnchoredMenu` 在文档捕获阶段处理，且先判
+                                 * `contains(target)` 直接放行菜单内部的指针事件。
+                                 *
+                                 * 拖动期间逐帧 dispatch：节拍器音量必须**边拖边听得见**，
+                                 * 而增益只经 `webApi.setMetronome` 到达引擎。调用链本身是
+                                 * 串行的（`metronomeInvokeChain`），因此不会并发压垮 IPC。
+                                 */}
+                                <AppSlider
+                                    value={Math.round(s.metronomeGain * 100)}
+                                    unit="percent"
+                                    min={0}
+                                    max={100}
+                                    ariaLabel={t("metronome_volume")}
+                                    onChange={(next) => {
+                                        void dispatch(
+                                            updateMetronome({ metronomeGain: next / 100 }),
+                                        );
+                                    }}
+                                />
+                                <AppSliderReadout>
+                                    {Math.round(s.metronomeGain * 100)}%
+                                </AppSliderReadout>
+                            </div>
+                            <div className="hs-menu__separator" role="separator" />
+                            <div className="hs-menu__label">{t("metronome_mode")}</div>
+                            {(
+                                [
+                                    ["grid", "metronome_mode_grid"],
+                                    ["beat", "metronome_mode_beat"],
+                                    ["bar", "metronome_mode_bar"],
+                                ] as const
+                            ).map(([mode, key]) => (
+                                <button
+                                    key={mode}
+                                    type="button"
+                                    role="menuitem"
+                                    className="hs-menu__item"
+                                    onClick={() => {
+                                        void dispatch(updateMetronome({ metronomeMode: mode }));
+                                        setMetronomeMenuOpen(false);
+                                    }}
+                                    onPointerDown={(e) => e.stopPropagation()}
                                 >
-                                    <div className="hs-menu__label">{t("metronome_volume")}</div>
-                                    <div className="hs-menu__body flex items-center gap-2">
-                                        {/*
-                                         * 用 `AppSlider` 而不是裸 `<input type="range">`：滚轮步进
-                                         * （粗 5% / 精细修饰键 1%）与"滚轮不带动祖先滚动"都由原语
-                                         * 内建，`percent` 单位语义给出的正是这两个步长。
-                                         *
-                                         * 这里**不需要** `onPointerDown` 阻止冒泡：菜单的"点外面
-                                         * 关闭"监听在 window 捕获阶段，且已经先判 `contains(target)`
-                                         * 直接放行菜单内部的指针事件（见上方 effect）。
-                                         *
-                                         * 拖动期间逐帧 dispatch：节拍器音量必须**边拖边听得见**，
-                                         * 而增益只经 `webApi.setMetronome` 到达引擎。调用链本身是
-                                         * 串行的（`metronomeInvokeChain`），因此不会并发压垮 IPC。
-                                         */}
-                                        <AppSlider
-                                            value={Math.round(s.metronomeGain * 100)}
-                                            unit="percent"
-                                            min={0}
-                                            max={100}
-                                            ariaLabel={t("metronome_volume")}
-                                            onChange={(next) => {
-                                                void dispatch(
-                                                    updateMetronome({ metronomeGain: next / 100 }),
-                                                );
-                                            }}
-                                        />
-                                        <AppSliderReadout>
-                                            {Math.round(s.metronomeGain * 100)}%
-                                        </AppSliderReadout>
-                                    </div>
-                                    <div className="hs-menu__separator" role="separator" />
-                                    <div className="hs-menu__label">{t("metronome_mode")}</div>
-                                    {(
-                                        [
-                                            ["grid", "metronome_mode_grid"],
-                                            ["beat", "metronome_mode_beat"],
-                                            ["bar", "metronome_mode_bar"],
-                                        ] as const
-                                    ).map(([mode, key]) => (
-                                        <button
-                                            key={mode}
-                                            type="button"
-                                            className="hs-menu__item"
-                                            onClick={() => {
-                                                void dispatch(
-                                                    updateMetronome({ metronomeMode: mode }),
-                                                );
-                                                setMetronomeMenuPos(null);
-                                            }}
-                                            onPointerDown={(e) => e.stopPropagation()}
-                                        >
-                                            <span className="hs-menu__label-text">{t(key)}</span>
-                                            <span className="hs-menu__trail">
-                                                {s.metronomeMode === mode ? (
-                                                    <span className="hs-menu__check">
-                                                        <CheckIcon />
-                                                    </span>
-                                                ) : null}
+                                    <span className="hs-menu__label-text">{t(key)}</span>
+                                    <span className="hs-menu__trail">
+                                        {s.metronomeMode === mode ? (
+                                            <span className="hs-menu__check">
+                                                <CheckIcon />
                                             </span>
-                                        </button>
-                                    ))}
-                                    <div className="hs-menu__separator" role="separator" />
-                                    <div className="hs-menu__label">{t("metronome_sound")}</div>
-                                    {(
-                                        [
-                                            ["click", "metronome_sound_click"],
-                                            ["woodblock", "metronome_sound_woodblock"],
-                                            ["beep", "metronome_sound_beep"],
-                                        ] as const
-                                    ).map(([sound, key]) => (
-                                        <button
-                                            key={sound}
-                                            type="button"
-                                            className="hs-menu__item"
-                                            onClick={() => {
-                                                void dispatch(
-                                                    updateMetronome({ metronomeSound: sound }),
-                                                );
-                                                setMetronomeMenuPos(null);
-                                            }}
-                                            onPointerDown={(e) => e.stopPropagation()}
-                                        >
-                                            <span className="hs-menu__label-text">{t(key)}</span>
-                                            <span className="hs-menu__trail">
-                                                {s.metronomeSound === sound ? (
-                                                    <span className="hs-menu__check">
-                                                        <CheckIcon />
-                                                    </span>
-                                                ) : null}
+                                        ) : null}
+                                    </span>
+                                </button>
+                            ))}
+                            <div className="hs-menu__separator" role="separator" />
+                            <div className="hs-menu__label">{t("metronome_sound")}</div>
+                            {(
+                                [
+                                    ["click", "metronome_sound_click"],
+                                    ["woodblock", "metronome_sound_woodblock"],
+                                    ["beep", "metronome_sound_beep"],
+                                ] as const
+                            ).map(([sound, key]) => (
+                                <button
+                                    key={sound}
+                                    type="button"
+                                    role="menuitem"
+                                    className="hs-menu__item"
+                                    onClick={() => {
+                                        void dispatch(updateMetronome({ metronomeSound: sound }));
+                                        setMetronomeMenuOpen(false);
+                                    }}
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                >
+                                    <span className="hs-menu__label-text">{t(key)}</span>
+                                    <span className="hs-menu__trail">
+                                        {s.metronomeSound === sound ? (
+                                            <span className="hs-menu__check">
+                                                <CheckIcon />
                                             </span>
-                                        </button>
-                                    ))}
-                                    <div className="hs-menu__separator" role="separator" />
-                                    <button
-                                        type="button"
-                                        className="hs-menu__item"
-                                        onClick={() => {
-                                            void dispatch(
-                                                updateMetronome({
-                                                    metronomeAccent: !s.metronomeAccent,
-                                                }),
-                                            );
-                                        }}
-                                        onPointerDown={(e) => e.stopPropagation()}
-                                    >
-                                        <span className="hs-menu__label-text">
-                                            {t("metronome_accent")}
+                                        ) : null}
+                                    </span>
+                                </button>
+                            ))}
+                            <div className="hs-menu__separator" role="separator" />
+                            <button
+                                type="button"
+                                role="menuitem"
+                                className="hs-menu__item"
+                                onClick={() => {
+                                    void dispatch(
+                                        updateMetronome({
+                                            metronomeAccent: !s.metronomeAccent,
+                                        }),
+                                    );
+                                }}
+                                onPointerDown={(e) => e.stopPropagation()}
+                            >
+                                <span className="hs-menu__label-text">{t("metronome_accent")}</span>
+                                <span className="hs-menu__trail">
+                                    {s.metronomeAccent ? (
+                                        <span className="hs-menu__check">
+                                            <CheckIcon />
                                         </span>
-                                        <span className="hs-menu__trail">
-                                            {s.metronomeAccent ? (
-                                                <span className="hs-menu__check">
-                                                    <CheckIcon />
-                                                </span>
-                                            ) : null}
-                                        </span>
-                                    </button>
-                                </div>,
-                                document.body,
-                            )}
+                                    ) : null}
+                                </span>
+                            </button>
+                        </AppAnchoredMenu>
                     </Box>
                 )}
                 {/* BPM 与拍号是**宿主权威读数**，插件里改不了。
@@ -1257,7 +1246,11 @@ export function ActionBar() {
                             {isPlaying ? <PauseIcon /> : <PlayIcon />}
                         </IconButton>
                         {!isPluginMode() && (
-                            <Box style={{ position: "relative" }} data-hs-context-menu>
+                            <Box
+                                ref={recordingMenuAnchorRef}
+                                style={{ position: "relative" }}
+                                data-hs-context-menu
+                            >
                                 <IconButton
                                     size="1"
                                     /* 录音语义色：待机态就用 soft 红点（旧版待机是灰色 ghost 点，
@@ -1278,7 +1271,7 @@ export function ActionBar() {
                                     onContextMenu={(event) => {
                                         event.preventDefault();
                                         if (isPluginMode()) return;
-                                        setRecordingMenuPos({ x: event.clientX, y: event.clientY });
+                                        setRecordingMenuOpen(true);
                                         void dispatch(loadRecordingSettings());
                                         // 每次打开菜单都强制重新枚举设备/应用，
                                         // 避免展示上次加载的过时列表（设备热插拔、应用退出等）。
@@ -1306,187 +1299,172 @@ export function ActionBar() {
                                         </svg>
                                     )}
                                 </IconButton>
-                                {recordingMenuPos && (
-                                    <AppContextMenu
-                                        x={recordingMenuPos.x}
-                                        y={recordingMenuPos.y}
-                                        ariaLabel={tf("recording_source_mode")}
-                                        onClose={() => setRecordingMenuPos(null)}
-                                        items={[
-                                            {
-                                                key: "mode-heading",
-                                                heading: true,
-                                                label: tf("recording_source_mode"),
-                                            },
-                                            {
-                                                key: "mode-device",
-                                                label: tf("recording_mode_device"),
-                                                checked:
-                                                    recording.settings.captureMode === "device",
-                                                onSelect: () =>
-                                                    void applyRecordingSettings({
-                                                        captureMode: "device",
-                                                    }),
-                                            },
-                                            {
-                                                key: "mode-loopback",
-                                                label: tf("recording_mode_loopback"),
-                                                checked:
-                                                    recording.settings.captureMode === "loopback",
-                                                onSelect: () =>
-                                                    void applyRecordingSettings({
-                                                        captureMode: "loopback",
-                                                    }),
-                                            },
-                                            {
-                                                key: "mode-application",
-                                                label: tf("recording_mode_application"),
-                                                checked:
-                                                    recording.settings.captureMode ===
-                                                    "application",
-                                                onSelect: () =>
-                                                    void applyRecordingSettings({
-                                                        captureMode: "application",
-                                                    }),
-                                            },
-                                            {
-                                                key: "source-heading",
-                                                heading: true,
-                                                separatorBefore: true,
-                                                label: tf(
-                                                    recording.settings.captureMode === "application"
-                                                        ? "recording_application"
-                                                        : "recording_device",
-                                                ),
-                                            },
-                                            ...(recording.settings.captureMode === "device"
-                                                ? [
-                                                      {
-                                                          key: "device-default",
-                                                          label: tf("recording_device_default"),
+                                <AppAnchoredMenu
+                                    open={recordingMenuOpen}
+                                    anchorRef={recordingMenuAnchorRef}
+                                    menuRef={recordingMenuRef}
+                                    ariaLabel={tf("recording_source_mode")}
+                                    onClose={() => setRecordingMenuOpen(false)}
+                                    items={[
+                                        {
+                                            key: "mode-heading",
+                                            heading: true,
+                                            label: tf("recording_source_mode"),
+                                        },
+                                        {
+                                            key: "mode-device",
+                                            label: tf("recording_mode_device"),
+                                            checked: recording.settings.captureMode === "device",
+                                            onSelect: () =>
+                                                void applyRecordingSettings({
+                                                    captureMode: "device",
+                                                }),
+                                        },
+                                        {
+                                            key: "mode-loopback",
+                                            label: tf("recording_mode_loopback"),
+                                            checked: recording.settings.captureMode === "loopback",
+                                            onSelect: () =>
+                                                void applyRecordingSettings({
+                                                    captureMode: "loopback",
+                                                }),
+                                        },
+                                        {
+                                            key: "mode-application",
+                                            label: tf("recording_mode_application"),
+                                            checked:
+                                                recording.settings.captureMode === "application",
+                                            onSelect: () =>
+                                                void applyRecordingSettings({
+                                                    captureMode: "application",
+                                                }),
+                                        },
+                                        {
+                                            key: "source-heading",
+                                            heading: true,
+                                            separatorBefore: true,
+                                            label: tf(
+                                                recording.settings.captureMode === "application"
+                                                    ? "recording_application"
+                                                    : "recording_device",
+                                            ),
+                                        },
+                                        ...(recording.settings.captureMode === "device"
+                                            ? [
+                                                  {
+                                                      key: "device-default",
+                                                      label: tf("recording_device_default"),
+                                                      checked:
+                                                          recording.settings.sourceDevice ===
+                                                          "default",
+                                                      onSelect: () =>
+                                                          void applyRecordingSettings({
+                                                              sourceDevice: "default",
+                                                          }),
+                                                  },
+                                                  ...recording.devices
+                                                      .filter(
+                                                          (device) =>
+                                                              !device.isLoopback &&
+                                                              device.id !== "default",
+                                                      )
+                                                      .map((device) => ({
+                                                          key: device.id,
+                                                          label: device.name,
                                                           checked:
                                                               recording.settings.sourceDevice ===
-                                                              "default",
+                                                              device.id,
                                                           onSelect: () =>
                                                               void applyRecordingSettings({
-                                                                  sourceDevice: "default",
+                                                                  sourceDevice: device.id,
                                                               }),
-                                                      },
-                                                      ...recording.devices
-                                                          .filter(
-                                                              (device) =>
-                                                                  !device.isLoopback &&
-                                                                  device.id !== "default",
-                                                          )
-                                                          .map((device) => ({
-                                                              key: device.id,
-                                                              label: device.name,
-                                                              checked:
-                                                                  recording.settings
-                                                                      .sourceDevice === device.id,
-                                                              onSelect: () =>
-                                                                  void applyRecordingSettings({
-                                                                      sourceDevice: device.id,
-                                                                  }),
-                                                          })),
-                                                  ]
-                                                : recording.settings.captureMode === "loopback"
-                                                  ? [
-                                                        {
-                                                            key: "loopback-default",
-                                                            label: tf("recording_loopback_default"),
+                                                      })),
+                                              ]
+                                            : recording.settings.captureMode === "loopback"
+                                              ? [
+                                                    {
+                                                        key: "loopback-default",
+                                                        label: tf("recording_loopback_default"),
+                                                        checked:
+                                                            recording.settings.loopbackDevice ===
+                                                            "default",
+                                                        onSelect: () =>
+                                                            void applyRecordingSettings({
+                                                                loopbackDevice: "default",
+                                                            }),
+                                                    },
+                                                    ...recording.devices
+                                                        .filter(
+                                                            (device) =>
+                                                                device.isLoopback &&
+                                                                device.id !== "loopback:default",
+                                                        )
+                                                        .map((device) => ({
+                                                            key: device.id,
+                                                            label: device.name,
                                                             checked:
                                                                 recording.settings
-                                                                    .loopbackDevice === "default",
+                                                                    .loopbackDevice === device.id,
                                                             onSelect: () =>
                                                                 void applyRecordingSettings({
-                                                                    loopbackDevice: "default",
-                                                                }),
-                                                        },
-                                                        ...recording.devices
-                                                            .filter(
-                                                                (device) =>
-                                                                    device.isLoopback &&
-                                                                    device.id !==
-                                                                        "loopback:default",
-                                                            )
-                                                            .map((device) => ({
-                                                                key: device.id,
-                                                                label: device.name,
-                                                                checked:
-                                                                    recording.settings
-                                                                        .loopbackDevice ===
-                                                                    device.id,
-                                                                onSelect: () =>
-                                                                    void applyRecordingSettings({
-                                                                        loopbackDevice: device.id,
-                                                                    }),
-                                                            })),
-                                                    ]
-                                                  : [
-                                                        ...(recording.settings.captureAppId &&
-                                                        !recording.apps.some(
-                                                            (app) =>
-                                                                app.id ===
-                                                                recording.settings.captureAppId,
-                                                        )
-                                                            ? [
-                                                                  {
-                                                                      key: recording.settings
-                                                                          .captureAppId,
-                                                                      label:
-                                                                          recording.settings
-                                                                              .captureAppName ||
-                                                                          recording.settings
-                                                                              .captureAppId,
-                                                                      checked: true,
-                                                                      onSelect: () =>
-                                                                          void applyRecordingSettings(
-                                                                              {
-                                                                                  captureAppId:
-                                                                                      recording
-                                                                                          .settings
-                                                                                          .captureAppId,
-                                                                                  captureAppName:
-                                                                                      recording
-                                                                                          .settings
-                                                                                          .captureAppName,
-                                                                                  captureAppProcess:
-                                                                                      recording
-                                                                                          .settings
-                                                                                          .captureAppProcess,
-                                                                              },
-                                                                          ),
-                                                                  },
-                                                              ]
-                                                            : []),
-                                                        ...recording.apps.map((app) => ({
-                                                            key: app.id,
-                                                            label: app.name,
-                                                            checked:
-                                                                recording.settings.captureAppId ===
-                                                                app.id,
-                                                            onSelect: () =>
-                                                                void applyRecordingSettings({
-                                                                    captureAppId: app.id,
-                                                                    captureAppName: app.name,
-                                                                    captureAppProcess:
-                                                                        app.processName,
+                                                                    loopbackDevice: device.id,
                                                                 }),
                                                         })),
-                                                    ]),
-                                            {
-                                                key: "settings",
-                                                label: tf("recording_context_settings"),
-                                                separatorBefore: true,
-                                                onSelect: () => {
-                                                    setRecordingMenuPos(null);
-                                                    setRecordingSettingsOpen(true);
-                                                },
-                                            },
-                                        ]}
-                                    />
-                                )}
+                                                ]
+                                              : [
+                                                    ...(recording.settings.captureAppId &&
+                                                    !recording.apps.some(
+                                                        (app) =>
+                                                            app.id ===
+                                                            recording.settings.captureAppId,
+                                                    )
+                                                        ? [
+                                                              {
+                                                                  key: recording.settings
+                                                                      .captureAppId,
+                                                                  label:
+                                                                      recording.settings
+                                                                          .captureAppName ||
+                                                                      recording.settings
+                                                                          .captureAppId,
+                                                                  checked: true,
+                                                                  onSelect: () =>
+                                                                      void applyRecordingSettings({
+                                                                          captureAppId:
+                                                                              recording.settings
+                                                                                  .captureAppId,
+                                                                          captureAppName:
+                                                                              recording.settings
+                                                                                  .captureAppName,
+                                                                          captureAppProcess:
+                                                                              recording.settings
+                                                                                  .captureAppProcess,
+                                                                      }),
+                                                              },
+                                                          ]
+                                                        : []),
+                                                    ...recording.apps.map((app) => ({
+                                                        key: app.id,
+                                                        label: app.name,
+                                                        checked:
+                                                            recording.settings.captureAppId ===
+                                                            app.id,
+                                                        onSelect: () =>
+                                                            void applyRecordingSettings({
+                                                                captureAppId: app.id,
+                                                                captureAppName: app.name,
+                                                                captureAppProcess: app.processName,
+                                                            }),
+                                                    })),
+                                                ]),
+                                        {
+                                            key: "settings",
+                                            label: tf("recording_context_settings"),
+                                            separatorBefore: true,
+                                            onSelect: () => setRecordingSettingsOpen(true),
+                                        },
+                                    ]}
+                                />
                             </Box>
                         )}
                         {recording.active || recording.countdownRemaining > 0 ? (
@@ -1750,15 +1728,18 @@ export function ActionBar() {
                         }
                     />
 
-                    {/* Ripple Edit (Auto Follow) */}
-                    <RippleModeButton
-                        mode={s.rippleMode}
-                        onCycle={() => {
-                            dispatch(cycleRippleMode());
+                    {/* 波纹编辑：左键开关，右键选择方向（按轨道 / 全部轨道） */}
+                    <RippleButton
+                        enabled={s.rippleEnabled}
+                        scope={s.rippleScope}
+                        onToggle={() => {
+                            dispatch(toggleRippleEnabled());
                             void dispatch(persistUiSettings());
                         }}
-                        onSelect={(next) => {
-                            dispatch(setRippleMode(next));
+                        onSelectScope={(next) => {
+                            dispatch(setRippleScope(next));
+                            // 选方向 = 立即生效：方向是"要跟进谁"的声明，只有开着才有意义。
+                            if (!s.rippleEnabled) dispatch(toggleRippleEnabled());
                             void dispatch(persistUiSettings());
                         }}
                     />
@@ -1809,18 +1790,22 @@ export function ActionBar() {
                         }
                     />
 
-                    {/* Auto Scroll (horizontal arrows) */}
-                    <AppIconButton
-                        active={s.autoScrollEnabled}
-                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
-                        emphasis="accent"
-                        tooltip={tf("auto_scroll")}
-                        tabIndex={-1}
-                        onClick={() => {
+                    {/* 自动滚屏：左键开关，右键选择模式（滚动式 / 翻页式） */}
+                    <AutoScrollButton
+                        enabled={s.autoScrollEnabled}
+                        mode={s.autoScrollMode}
+                        onToggle={() => {
                             dispatch(toggleAutoScroll());
                             void dispatch(persistUiSettings());
                         }}
-                        icon={<DoubleArrowRightIcon width="15" height="15" />}
+                        onSelectMode={(mode) => {
+                            dispatch(setAutoScrollMode(mode));
+                            // 选模式 = 立即生效：模式是"要怎么滚"的声明，只有滚着才有意义。
+                            // 用当前渲染里的 s.autoScrollEnabled 判定即可 —— 本回调由
+                            // 这一次点击同步触发，不存在跨帧的陈旧读。
+                            if (!s.autoScrollEnabled) dispatch(toggleAutoScroll());
+                            void dispatch(persistUiSettings());
+                        }}
                     />
                 </AppToolbarGroup>
                 <AppToolbarGroup>
@@ -2007,8 +1992,15 @@ export function ActionBar() {
 
 // ── 波纹编辑（自动跟进）按钮 ──────────────────────────────────────
 
-/** 波纹编辑图标：一组“被向前推的剪辑块”+ 右侧箭头，表达后续剪辑自动跟进。
- *  `multiTrack` 为 true（全部轨道模式）时显示两行剪辑块，否则显示单行（按轨道模式）。
+/**
+ * 波纹编辑图标：一组“被向前推的剪辑块”+ 右侧箭头，表达后续剪辑自动跟进。
+ *
+ * `multiTrack` 为 true（全部轨道方向）时显示两行剪辑块，否则显示单行（按轨道方向）。
+ * 按钮与菜单项共用它 —— 方向与图形的对应关系必须在两处是同一条，否则会出现
+ * "按钮画两行、菜单写着按轨道"这种自相矛盾。
+ *
+ * `data-hs-ripple-icon` 让"当前画的是哪个方向"成为可断言的文本事实（组件测试直接读它，
+ * 而不是比对整段 SVG 字符串）。
  */
 function RippleIcon({ multiTrack }: { multiTrack: boolean }) {
     const rows = multiTrack ? [2.9, 6.9] : [4.9];
@@ -2019,6 +2011,8 @@ function RippleIcon({ multiTrack }: { multiTrack: boolean }) {
             viewBox="0 0 15 15"
             fill="none"
             xmlns="http://www.w3.org/2000/svg"
+            aria-hidden="true"
+            data-hs-ripple-icon={multiTrack ? "all" : "track"}
         >
             {rows.map((y) => (
                 <g key={y}>
@@ -2060,82 +2054,64 @@ function RippleIcon({ multiTrack }: { multiTrack: boolean }) {
     );
 }
 
-/** 波纹模式选择菜单（右键打开），与 Snap / 分割过渡的右键菜单行为一致。 */
-function RippleModeMenu({
-    x,
-    y,
-    mode,
-    onChange,
-    onClose,
+/**
+ * 波纹编辑工具栏按钮：左键开关，右键在**按钮下方**展开方向菜单（按轨道 / 全部轨道）。
+ *
+ * 【为什么菜单只有两项】"关闭"不是一种方向 —— 它是开关的关闭态（左键）。旧版把它
+ * 塞进同一个三值循环，于是"从全部轨道关掉"要先绕到"按轨道"，而菜单里还多出一个与
+ * 开关重复的选项。
+ */
+function RippleButton({
+    enabled,
+    scope,
+    onToggle,
+    onSelectScope,
 }: {
-    x: number;
-    y: number;
-    mode: "off" | "track" | "all";
-    onChange: (mode: "off" | "track" | "all") => void;
-    onClose: () => void;
+    enabled: boolean;
+    scope: RippleScope;
+    onToggle: () => void;
+    onSelectScope: (scope: RippleScope) => void;
 }) {
     const { tf } = useI18n();
-    const options: Array<{ value: "off" | "track" | "all"; label: string }> = [
-        { value: "off", label: tf("ripple_mode_off") as string },
-        { value: "track", label: tf("ripple_mode_track") as string },
-        { value: "all", label: tf("ripple_mode_all") as string },
-    ];
+    const [menuOpen, setMenuOpen] = useState(false);
+    const anchorRef = useRef<HTMLDivElement | null>(null);
+    const menuRef = useRef<HTMLDivElement | null>(null);
 
     return (
-        <AppContextMenu
-            x={x}
-            y={y}
-            onClose={onClose}
-            items={options.map((opt) => ({
-                key: opt.value,
-                label: opt.label,
-                checked: mode === opt.value,
-                onSelect: () => onChange(opt.value),
-            }))}
-        />
-    );
-}
-
-/** 波纹编辑工具栏按钮：左键三态循环切换，右键打开模式菜单。 */
-function RippleModeButton({
-    mode,
-    onCycle,
-    onSelect,
-}: {
-    mode: "off" | "track" | "all";
-    onCycle: () => void;
-    onSelect: (mode: "off" | "track" | "all") => void;
-}) {
-    const { tf } = useI18n();
-    const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-
-    return (
-        <>
+        // 锚点外壳：菜单贴在这个盒子下方展开（与参数编辑器的工具菜单同一种弹出面）。
+        <Box ref={anchorRef} data-hs-context-menu>
             <AppIconButton
-                active={mode !== "off"}
-                // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                active={enabled}
+                // 激活时用主题强调色（与相邻开关同款；不带 color 时 Radix 回落强调色）
                 emphasis="accent"
-                tooltip={(tf(`ripple_tooltip_${mode}`) as string) ?? tf("common_ripple")}
+                // 与"自动滚屏"同一格式：功能名：方向名。它同时是 aria-label，
+                // 所以必须自带功能名 —— 只写方向名的话读屏用户听到的是一枚无名按钮。
+                tooltip={tf(`ripple_tooltip_${scope}`)}
                 tabIndex={-1}
-                onClick={onCycle}
+                // 右下角小三角：提示"右键还有方向可选"（与自动滚屏 / 工具族按钮同一个记号）。
+                menuCaret
+                onClick={onToggle}
                 onContextMenu={(e) => {
                     e.preventDefault();
-                    setMenu({ x: e.clientX, y: e.clientY });
+                    setMenuOpen(true);
                 }}
-                icon={<RippleIcon multiTrack={mode === "all"} />}
+                icon={<RippleIcon multiTrack={scope === "all"} />}
             />
-            {menu && (
-                <RippleModeMenu
-                    x={menu.x}
-                    y={menu.y}
-                    mode={mode}
-                    onChange={(next) => {
-                        onSelect(next);
-                        setMenu(null);
-                    }}
-                    onClose={() => setMenu(null)}
-                />
-            )}
-        </>
+            <AppAnchoredMenu
+                open={menuOpen}
+                anchorRef={anchorRef}
+                menuRef={menuRef}
+                ariaLabel={tf("common_ripple")}
+                onClose={() => setMenuOpen(false)}
+                items={RIPPLE_SCOPES.map((value) => ({
+                    key: `ripple-scope-${value}`,
+                    label: tf(`ripple_mode_${value}`),
+                    // 图标随项展示：单行 = 按轨道，双行 = 全部轨道，与按钮同源。
+                    icon: <RippleIcon multiTrack={value === "all"} />,
+                    checked: scope === value,
+                    onSelect: () => onSelectScope(value),
+                }))}
+            />
+        </Box>
     );
 }
