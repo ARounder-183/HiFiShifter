@@ -859,7 +859,7 @@ HiFiShifter 會自動把執行日誌寫入系統標準日誌目錄，無需任�
 | 設定 | `%APPDATA%\HiFiShifter` | `~/Library/Application Support/HiFiShifter` | `$XDG_CONFIG_HOME/HiFiShifter`（預設 `~/.config/HiFiShifter`） |
 | 快取（波形 / 整段算圖） | `%LOCALAPPDATA%\HiFiShifter\cache` | `~/Library/Caches/HiFiShifter` | `$XDG_CACHE_HOME/HiFiShifter`（預設 `~/.cache/HiFiShifter`） |
 | 未儲存工作階段的匯入素材 | `%LOCALAPPDATA%\HiFiShifter\unsaved\<工作階段>` | `~/Library/Application Support/HiFiShifter/unsaved/<工作階段>` | `$XDG_DATA_HOME/HiFiShifter/unsaved/<工作階段>` |
-| 共用模型庫（僅 Windows，由安裝程式寫入） | `%PROGRAMDATA%\HiFiShifter\models\<版本>` | — | — |
+| 共用模型庫（由安裝程式寫入） | `%PROGRAMDATA%\HiFiShifter\models\<版本>` | `/Library/Application Support/HiFiShifter/models/<版本>` | `$XDG_DATA_HOME/HiFiShifter/models/<版本>` 或 `/usr/local/share/HiFiShifter/models/<版本>` |
 
 - 已儲存工程的匯入素材放在工程檔旁的 `<工程名>_media` 目錄裡，連同工程一起拷走即可。
 - 從舊版升級時，首次啟動會自動把原本的 `com.arounder.hifishifter` 目錄搬到新位置；若新舊目錄同時存在則**不合併**（兩邊原樣保留），並在日誌留下一行說明。

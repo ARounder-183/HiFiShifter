@@ -862,7 +862,7 @@ HiFiShifter는 실행 로그를 OS 표준 로그 디렉터리에 자동으로 �
 | 설정 | `%APPDATA%\HiFiShifter` | `~/Library/Application Support/HiFiShifter` | `$XDG_CONFIG_HOME/HiFiShifter`(기본 `~/.config/HiFiShifter`) |
 | 캐시(파형 / 렌더) | `%LOCALAPPDATA%\HiFiShifter\cache` | `~/Library/Caches/HiFiShifter` | `$XDG_CACHE_HOME/HiFiShifter`(기본 `~/.cache/HiFiShifter`) |
 | 저장되지 않은 세션의 가져온 미디어 | `%LOCALAPPDATA%\HiFiShifter\unsaved\<세션>` | `~/Library/Application Support/HiFiShifter/unsaved/<세션>` | `$XDG_DATA_HOME/HiFiShifter/unsaved/<세션>` |
-| 공유 모델 라이브러리(Windows 전용, 설치 프로그램이 기록) | `%PROGRAMDATA%\HiFiShifter\models\<버전>` | — | — |
+| 공유 모델 라이브러리(설치 프로그램이 기록) | `%PROGRAMDATA%\HiFiShifter\models\<버전>` | `/Library/Application Support/HiFiShifter/models/<버전>` | `$XDG_DATA_HOME/HiFiShifter/models/<버전>` 또는 `/usr/local/share/HiFiShifter/models/<버전>` |
 
 - 저장된 프로젝트의 가져온 미디어는 프로젝트 파일 옆의 `<프로젝트 이름>_media` 디렉터리에 들어갑니다. 프로젝트와 함께 복사하면 됩니다.
 - 이전 버전에서 업그레이드하면 첫 실행 시 기존 `com.arounder.hifishifter` 디렉터리가 새 위치로 이동합니다. 옛 디렉터리와 새 디렉터리가 동시에 존재하면 **병합하지 않고**(양쪽 모두 그대로 둡니다) 로그에 한 줄 남깁니다.
