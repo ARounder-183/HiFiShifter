@@ -14,7 +14,7 @@
 //!
 //! ```text
 //! magic     8 字节  "HFSXFERC"
-//! version   u32     = 2
+//! version   u32     = 3
 //! hash      32 字节 BLAKE3（采样内容 + 采样率 + 声道 + 帧数；take_id 不参与）
 //! segments  u32
 //! 每段:
@@ -23,6 +23,7 @@
 //!   channels u32
 //!   frames   u64
 //!   loop     i64    循环起点（`i64::MIN` = 非循环段）
+//!   loop_end i64    循环终点（v3+；`i64::MIN` = 非循环段 / 未知）
 //!   coverage u32 个 (start u32, end u32) —— 段内**真正拷到宿主样本**的帧区间
 //!   samples  frames × channels × f32（小端，平面顺序）
 //! digest    32 字节 BLAKE3（覆盖以上全部内容）
@@ -65,8 +66,8 @@ use std::path::{Path, PathBuf};
 /// 【为什么仍然占满 8 字节】`MAGIC.len()` 参与最小长度判据，8 是齐整字长，
 /// 且 `&[u8; 8]` 与旧类型一致 —— 改动面最小。
 const MAGIC: &[u8; 8] = b"HFSXFERC";
-/// 载荷版本：v2 增加内容身份哈希。
-const VERSION: u32 = 2;
+/// 载荷版本：v3 增加循环区域终点。
+const VERSION: u32 = 3;
 /// v1 是重置后的第一版（无内容哈希）；只读兼容，用来读早期构建留下的文件。
 const LEGACY_VERSION: u32 = 1;
 /// 尾部摘要长度。
@@ -178,6 +179,7 @@ pub fn write_with_hash(
         payload.extend_from_slice(&channels.to_le_bytes());
         payload.extend_from_slice(&(segment.filled as u64).to_le_bytes());
         payload.extend_from_slice(&segment.loop_start.unwrap_or(i64::MIN).to_le_bytes());
+        payload.extend_from_slice(&segment.loop_end.unwrap_or(i64::MIN).to_le_bytes());
         // 覆盖区间。槽位用尽时写 0 个区间 —— 读回来就是"整段都算录到"。
         // 见 `Segment::coverage` 的说明：那四类零都是"我们没拿到样本"，不是"录到静音"。
         let ranges = if segment.coverage_overrun {
@@ -251,9 +253,9 @@ pub fn read_with_hash(path: &Path) -> Result<(Vec<Segment>, [u8; 32]), String> {
         ));
     }
     let version = cursor.u32()?;
-    if version != VERSION && version != LEGACY_VERSION {
+    if !(LEGACY_VERSION..=VERSION).contains(&version) {
         return Err(format!(
-            "{}: capture sidecar version {version}, this build writes {VERSION} \
+            "{}: capture sidecar version {version}, this build reads {LEGACY_VERSION}..={VERSION} \
              (stale file from a pre-reset build?); delete it or re-capture",
             path.display()
         ));
@@ -277,6 +279,14 @@ pub fn read_with_hash(path: &Path) -> Result<(Vec<Segment>, [u8; 32]), String> {
         let frames = cursor.u64()?;
         let raw_loop = cursor.i64()?;
         let loop_start = (raw_loop != i64::MIN).then_some(raw_loop);
+        // v3 起写入循环终点；v2 及更早没有这一项，读成 `None`（投影会按起点
+        // 分组并用组内最大段尾作为区域终点的回退）。
+        let loop_end = if version >= 3 {
+            let raw_loop_end = cursor.i64()?;
+            (raw_loop_end != i64::MIN).then_some(raw_loop_end)
+        } else {
+            None
+        };
         // 覆盖区间：按声明长度读，越界就是文件损坏。
         // 槽位用尽 ⇒ 整段都算录到（宁可少过滤，也不能分配）。
         let mut coverage = std::array::from_fn(|_| 0_usize..0_usize);
@@ -333,6 +343,7 @@ pub fn read_with_hash(path: &Path) -> Result<(Vec<Segment>, [u8; 32]), String> {
             // 谎报 `None`（"连续"）会让界面显示一条不存在的连续性保证。
             loss: SegmentLoss::First,
             loop_start,
+            loop_end,
             pass_id: 0,
             source_key: None,
             peak: [0.0; 2],
@@ -414,6 +425,7 @@ mod tests {
             filled: values.len(),
             loss: SegmentLoss::First,
             loop_start: None,
+            loop_end: None,
             pass_id: 0,
             source_key: None,
             peak: [0.0; 2],
@@ -569,11 +581,69 @@ mod tests {
         let dir = temp_dir();
         let mut looped = segment(0, &[0.1, 0.2]);
         looped.loop_start = Some(9_600);
+        looped.loop_end = Some(19_200);
         let plain = segment(4, &[0.3]);
         let path = write(&dir, 4, &[looped, plain]).unwrap();
         let restored = read(&path).unwrap();
         assert_eq!(restored[0].loop_start, Some(9_600));
+        assert_eq!(restored[0].loop_end, Some(19_200));
         assert_eq!(restored[1].loop_start, None);
+        assert_eq!(restored[1].loop_end, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **循环区域终点必须原样往返。**
+    ///
+    /// 【为什么必须与起点一起测】投影按 `(loop_start, loop_end)` 分组；只往返
+    /// 起点会让"同一位置、不同循环长度"的两次录制重新变成同一个区域。
+    #[test]
+    fn sidecar_round_trips_loop_end() {
+        let dir = temp_dir();
+        let mut looped = segment(0, &[0.1, 0.2]);
+        looped.loop_start = Some(9_600);
+        looped.loop_end = Some(19_200);
+        let plain = segment(4, &[0.3]);
+        let path = write(&dir, 8, &[looped, plain]).unwrap();
+        let restored = read(&path).unwrap();
+        assert_eq!(restored[0].loop_start, Some(9_600));
+        assert_eq!(restored[0].loop_end, Some(19_200));
+        assert_eq!(restored[1].loop_start, None);
+        assert_eq!(restored[1].loop_end, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **v2 sidecar（没有 `loop_end` 字段）仍然能读。**
+    ///
+    /// 【为什么必须保留这条兼容】v2 是本次改动之前构建写出的格式；用户的旧工程
+    /// 里已经有这些文件。读不出来等于"打开旧工程录音全没了"。v2 的 `loop_end`
+    /// 按 `None` 处理，投影退化为按起点分组、组内最大段尾作区域终点。
+    #[test]
+    fn sidecar_v2_still_reads_with_loop_end_none() {
+        let dir = temp_dir();
+        let path = dir.join("v2.hfscap");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(MAGIC);
+        payload.extend_from_slice(&2_u32.to_le_bytes());
+        let content = [7_u8; 32];
+        payload.extend_from_slice(&content);
+        payload.extend_from_slice(&1_u32.to_le_bytes());
+        // 段：origin=0, rate=48000, channels=1, frames=2, loop_start=9600
+        payload.extend_from_slice(&0_i64.to_le_bytes());
+        payload.extend_from_slice(&48_000_u32.to_le_bytes());
+        payload.extend_from_slice(&1_u32.to_le_bytes());
+        payload.extend_from_slice(&2_u64.to_le_bytes());
+        payload.extend_from_slice(&9_600_i64.to_le_bytes());
+        payload.extend_from_slice(&0_u32.to_le_bytes()); // coverage 区间数
+        payload.extend_from_slice(&0.25_f32.to_le_bytes());
+        payload.extend_from_slice(&(-0.5_f32).to_le_bytes());
+        let digest = blake3::hash(&payload);
+        payload.extend_from_slice(digest.as_bytes());
+        std::fs::write(&path, payload).unwrap();
+        let restored = read(&path).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].loop_start, Some(9_600));
+        assert_eq!(restored[0].loop_end, None, "v2 没有区域终点");
+        assert_eq!(restored[0].planes[0], vec![0.25, -0.5]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
