@@ -519,8 +519,10 @@ pub(crate) struct EditorSession {
     ///   "画完参数线不生效"）。
     /// - `publish_timeline` 覆盖"时间线被发布"，也就是渲染实际读的那份数据。
     ///
-    /// 取并集是**故意的**：多推进一次最多多排一次渲染（幂等、且 actor 一次只跑一个），
-    /// 而漏推进就是一次静默的"改了不生效"。错法不对称，所以选安全的那一侧。
+    /// 取并集是**故意的**：漏推进就是一次静默的"改了不生效"，而多推进一次只是多排
+    /// 一次渲染 —— 但"多推进"必须只来自**真实内容变化**：`publish_timeline_derived`
+    /// 会在一轮渲染的入口被调用，若它在内容没变时也推进版本，就会变成"渲染结束 →
+    /// 版本又变 → 下一轮再渲染"的自激循环（用户看到状态栏永远在「渲染中」）。
     timeline_revision: AtomicU64,
     /// 【B4 归因】渲染版本是**谁**推进的，分成三档。
     ///
@@ -2221,18 +2223,25 @@ impl EditorSession {
                     .with_layout(layout.clone()),
             );
         }
-        // 分析刚刚补齐（缓存从"部分命中"变成"全命中"）也要让显示与渲染重读一次：
-        // 基线的重建是懒的，没有这个信号就要等到下一次滚动/编辑才刷新。
-        if params
-            .values()
-            .any(|next| next.pitch_orig_key.is_some() || next.dyn_orig_key.is_some())
-        {
-            changed = true;
-        }
+        self.note_analysis_baseline_published(changed);
+    }
+
+    /// 基线发布收尾：**只有真的发布了新基线才刷新显示；绝不在此排渲染**。
+    ///
+    /// 【为什么稳态必须是彻底 no-op】`complete_cached_analysis` 被渲染入口
+    /// `prepare_apply` 和每次 `get_timeline_state` 的 `ensure_loaded` 反复调用。
+    /// 旧实现只要"任意根有分析键"就把 `changed` 置真：既无条件 `render_requested.store(true)`
+    /// 又无条件 `refresh_display_from_document()`。前者是"渲染刚结束又被排回来"的
+    /// 自激循环（REAPER 空闲时状态栏一直闪「渲染中」）；后者每次都重新合成一遍
+    /// workspace 视图，可能因派生读数抖动而反复推进内容指纹。
+    ///
+    /// 稳态下 `publish_baseline` 返回 false ⇒ 没有任何新工作，这里什么都不做。
+    /// 真正的新基线走 `refresh_display_from_document` → `publish_timeline_derived`，
+    /// 由后者按内容指纹推进版本并排渲染 —— 全链路只有这一处决定"要不要重算"。
+    fn note_analysis_baseline_published(&self, changed: bool) {
         if changed {
             self.revision_bumps_analysis.fetch_add(1, Ordering::Relaxed);
             self.refresh_display_from_document();
-            self.render_requested.store(true, Ordering::Release);
         }
     }
 
@@ -2295,9 +2304,14 @@ impl EditorSession {
     }
 
     /// 派生发布：只让 GUI / 渲染看到新数组，**绝不**把它当成用户编辑提交。
+    ///
+    /// 【为什么只有**真的变了**才推进版本】本函数会被渲染入口在每一轮
+    /// `complete_cached_analysis` 里调用；而 Capture 的渲染版本闸读
+    /// `timeline_revision`。若在这里无条件推进，一次渲染刚结束就又把版本推高一格，
+    /// 下一轮准备立刻判定"输入变了"并重渲染 —— 自激循环，状态栏会永远显示「渲染中」。
+    /// 内容没变时连 `revision_bumps_publish` 也不该涨：它存在的意义正是把这种
+    /// "内部路径每轮都在推进版本"从健康状态里区分出来（见 `log_revision_bumps`）。
     fn publish_timeline_derived(&self) {
-        self.revision_bumps_publish.fetch_add(1, Ordering::Relaxed);
-        self.timeline_revision.fetch_add(1, Ordering::AcqRel);
         let (clip_count, mut fingerprint) = {
             use std::hash::{Hash, Hasher};
             let timeline = self.timeline.lock_or_recover();
@@ -2322,12 +2336,20 @@ impl EditorSession {
                 .load(Ordering::Acquire)
                 .rotate_left(31);
         }
-        let mut previous = self.derived_audio_fingerprint.lock_or_recover();
-        if *previous != Some(fingerprint) {
-            *previous = Some(fingerprint);
+        let changed = {
+            let mut previous = self.derived_audio_fingerprint.lock_or_recover();
+            if *previous == Some(fingerprint) {
+                false
+            } else {
+                *previous = Some(fingerprint);
+                true
+            }
+        };
+        if changed {
+            self.revision_bumps_publish.fetch_add(1, Ordering::Relaxed);
+            self.timeline_revision.fetch_add(1, Ordering::AcqRel);
             self.render_requested.store(true, Ordering::Release);
         }
-        drop(previous);
         self.notify_timeline();
     }
 
@@ -5510,6 +5532,43 @@ pub(crate) mod tests {
         session.close();
     }
 
+    /// **不变量：派生发布不是"每轮都算一次版本推进"。**
+    ///
+    /// 【为什么这是回归】Capture 的 `capture_prepare_job` 在每一轮渲染开头都会
+    /// `complete_cached_analysis`，而后者对 Capture 无条件调用本函数。若这里无条件
+    /// 推进 `timeline_revision`，渲染版本就会在每次渲染结束时再前进一格 —— 下一轮
+    /// 准备必然判定"输入变了"，于是无限重渲染，状态栏一直显示「渲染中」。
+    /// 这条测试直接钉住"内容没变 ⇒ 版本不动；内容变了 ⇒ 版本前进"。
+    #[test]
+    fn a_derived_publish_only_advances_the_render_revision_when_content_changes() {
+        let owner = capture_owner_with_a_take();
+        let session = owner.editor_session().unwrap();
+        session.ensure_loaded(true).unwrap();
+        // 第一次建立指纹基线；它允许推进一次。
+        session.publish_timeline_derived();
+        let before = session.timeline_revision();
+        session.publish_timeline_derived();
+        assert_eq!(
+            session.timeline_revision(),
+            before,
+            "同一份内容重复发布不得推进渲染版本"
+        );
+        {
+            let mut timeline = session.timeline.lock_or_recover();
+            timeline.bpm = if timeline.bpm.is_finite() && timeline.bpm > 0.0 {
+                timeline.bpm + 1.0
+            } else {
+                120.0
+            };
+        }
+        session.publish_timeline_derived();
+        assert!(
+            session.timeline_revision() > before,
+            "内容真的变了，渲染版本必须前进"
+        );
+        session.close();
+    }
+
     /// **诊断**：素材长度 → "画一条线"到"输出是处理结果"要多久。
     ///
     /// 【为什么值得留着】它回答的是 `ANALYSIS_PENDING_CEILING` 那个 60 秒到底合不合理：
@@ -5991,6 +6050,37 @@ pub(crate) mod tests {
         assert!(frames["edit"].is_array(), "{frames}");
         drop(event_receiver);
         document.close();
+    }
+
+    /// **不变量：基线没变时，重复的分析完成回调是彻底 no-op。**
+    ///
+    /// 【为什么这是回归】旧实现把"任意根有分析键"当成 `changed = true` 并在收尾
+    /// `render_requested.store(true)`；而该收尾被渲染入口 `prepare_apply`、每次
+    /// `get_timeline_state` 的 `ensure_loaded` 反复调用，于是"渲染刚结束又被排回来"
+    /// 自激循环，REAPER 空闲时状态栏也一直闪「渲染中」。
+    /// 稳态（`changed = false`）下，版本计数、显示刷新、渲染请求都必须原地不动。
+    #[test]
+    fn an_unchanged_analysis_baseline_is_a_complete_no_op() {
+        let (model, owner, _identity) = fixture();
+        let editor = owner.editor_session().unwrap();
+        wait_for_source_files(&editor);
+        editor.render_requested.store(false, Ordering::Release);
+        let bumps = editor.revision_bumps_analysis.load(Ordering::Relaxed);
+        // changed = false（没有新基线）—— 稳态下旧实现会把"有分析键"当成
+        // changed 并在这里无条件 store(true) / 刷新显示。现在必须是彻底 no-op。
+        editor.note_analysis_baseline_published(false);
+        editor.note_analysis_baseline_published(false);
+        assert!(
+            !editor.render_requested.load(Ordering::Acquire),
+            "基线没变时不得请求渲染"
+        );
+        assert_eq!(
+            editor.revision_bumps_analysis.load(Ordering::Relaxed),
+            bumps,
+            "基线没变时不得推进分析版本计数"
+        );
+        editor.close();
+        model.session().close();
     }
 
     #[test]
