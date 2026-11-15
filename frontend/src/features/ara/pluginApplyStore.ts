@@ -34,6 +34,14 @@ export interface PluginApplyState {
      */
     rendering_active?: boolean;
     /**
+     * 本次渲染的进度（0..1）；`null` / 缺省 = 没有可报告的进度。
+     *
+     * 【为什么放在快照里】进度此前只走 `playback_rendering_state` 事件，而该事件
+     * 队列满即丢 —— 丢一次就再也看不到百分比。250 ms 轮询把进度一起带回来，
+     * 状态栏因此能从"渲染中"自愈到"渲染中 42%"。
+     */
+    render_progress?: number | null;
+    /**
      * 「你听到的是不是旧版本」（后端 `render_audible_stale`）。
      *
      * 【为什么与 `rendering_active` 分开】后者回答「后台在忙吗」，用户问的是「我听到的
@@ -124,6 +132,7 @@ function sameState(a: PluginApplyState | null, b: PluginApplyState | null): bool
         a.connected === b.connected &&
         a.ready === b.ready &&
         a.rendering_active === b.rendering_active &&
+        a.render_progress === b.render_progress &&
         a.render_audible_stale === b.render_audible_stale &&
         a.analysis_pending === b.analysis_pending &&
         // 【为什么必须在比较表里】`publish` 在"内容相同"时保留旧引用，订阅者因此

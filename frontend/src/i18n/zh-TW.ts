@@ -2262,6 +2262,7 @@ export const zhTW = {
     plugin_apply_analyzing: "正在分析音高...",
     plugin_apply_analyzing_hint: "這一步要按素材長度跑，通常幾秒到幾分鐘。分析期間先播原始錄音。",
     plugin_apply_rendering: "正在合成...",
+    plugin_render_background_hint: "後台正在產生新版本；目前聽到的仍是上一版。",
     plugin_daw_controlled_reason: "由宿主控制；請在宿主中操作檔案、片段幾何、速度、拍號與播放",
     cap_reason_host_owns: "這一步由宿主完成，外掛不接管",
     cap_reason_unsupported_by_host: "目前宿主沒有提供這個介面",

@@ -90,12 +90,21 @@ export function PluginApplyStatus({
      * 「有没有可服务的输出」仍然只有 `ready` 能回答。它是兜底，不是主判据。
      */
     const audibleState = state?.audible_state;
+    // 【进度只在 stale 时显示】此时用户听到的确实是旧版，"正在合成 42%"是
+    // 对"还要等多久"最直接的回答；stale=false 的刷新由左侧中性片承担。
+    const renderProgress =
+        state?.rendering_active &&
+        typeof state.render_progress === "number" &&
+        Number.isFinite(state.render_progress)
+            ? Math.max(0, Math.min(1, state.render_progress))
+            : null;
+    const progressSuffix = renderProgress != null ? ` ${Math.round(renderProgress * 100)}%` : "";
     const label = terminal
         ? terminalLabel
         : audibleState === "preparing"
           ? t("plugin_apply_waiting_host")
           : audibleState === "stale"
-            ? t("plugin_apply_rendering")
+            ? `${t("plugin_apply_rendering")}${progressSuffix}`
             : audibleState === "awaiting-analysis"
               ? t("plugin_apply_analyzing")
               : audibleState === "current"

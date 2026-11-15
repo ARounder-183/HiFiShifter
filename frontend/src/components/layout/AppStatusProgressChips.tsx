@@ -16,6 +16,7 @@ import { useSyncExternalStore } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppSelector } from "../../app/hooks";
 import { selectFolderImportProgress } from "../../features/session/interactionSlice";
+import { useRenderStatus } from "../../features/ara/useRenderStatus";
 import { AppStatusChip } from "../../ui";
 import { appStatusProgressBus } from "../../utils/appStatusProgressBus";
 
@@ -26,7 +27,7 @@ export function AppStatusProgressChips() {
         appStatusProgressBus.getSnapshot,
         appStatusProgressBus.getSnapshot,
     );
-    const renderingActive = useAppSelector((state) => state.session.playbackRenderingActive);
+    const render = useRenderStatus();
     const folderImport = useAppSelector(selectFolderImportProgress);
 
     return (
@@ -54,12 +55,17 @@ export function AppStatusProgressChips() {
                     {folderImport.total > 0 ? ` ${folderImport.done}/${folderImport.total}` : ""}
                 </AppStatusChip>
             ) : null}
-            {renderingActive ? (
-                <AppStatusChip tone="accent">
+            {/* 【stale 时左侧不显示】右侧 PluginApplyStatus 已经在说"正在合成
+                xx%"，同一件事在两处重复会把状态栏撑成一条跑道。stale=false 但
+                rendering_active=true 时左侧用中性色说明"后台在刷新，当前听到的
+                仍是旧版（或当前版本）" —— 这正是此前完全缺失的那一档。 */}
+            {render.active && (!render.pluginMode || !render.stale) ? (
+                <AppStatusChip
+                    tone={render.stale ? "accent" : "neutral"}
+                    tooltip={render.pluginMode ? t("plugin_render_background_hint") : undefined}
+                >
                     {t("common_rendering")}
-                    {status.renderingProgress != null
-                        ? ` ${Math.round(status.renderingProgress * 100)}%`
-                        : ""}
+                    {render.progress != null ? ` ${Math.round(render.progress * 100)}%` : ""}
                 </AppStatusChip>
             ) : null}
         </>

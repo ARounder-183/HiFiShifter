@@ -2329,6 +2329,8 @@ export const enUS = {
     plugin_apply_analyzing_hint:
         "This step runs with the length of the material; seconds to minutes. The raw take plays meanwhile.",
     plugin_apply_rendering: "Synthesising...",
+    plugin_render_background_hint:
+        "A new version is rendering in the background; you are still hearing the previous one.",
     plugin_daw_controlled_reason:
         "Controlled by the host; manage files, clip geometry, tempo, meter and playback in the host",
     cap_reason_host_owns: "The host owns this step; the plug-in does not take it over",
