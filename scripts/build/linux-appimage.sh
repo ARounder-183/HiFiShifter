@@ -47,6 +47,8 @@ set -euo pipefail
 #   HIFISHIFTER_SKIP_SMOKE=1        跳过冒烟（CI 只构建时用）
 #   HIFISHIFTER_SMOKE_REQUIRED=1    没有 xvfb-run 时视为失败
 #   HIFISHIFTER_SMOKE_TIMEOUT=45    冒烟超时秒数
+#   HIFISHIFTER_EXTERNAL_MODELS=1   去掉 AppImage 内的权重，只留 models.json（三合一包用）
+#   HIFISHIFTER_SMOKE_MODELS_DIR=DIR 外部模型目录；配合 external models 给冒烟用
 #   ARCH=x86_64|aarch64             appimagetool 的目标架构（默认 uname -m）
 
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -229,6 +231,21 @@ cmd_prune() {
     fi
 }
 
+# ── strip models ──────────────────────────────────────────────────────
+
+# 三合一包把权重放在安装目录的 models/<version>，AppImage 只保留清单。
+# AppImage 是只读 squashfs，运行时无法从里面把权重"共享"给插件；如果继续
+# 把权重留在 AppImage，安装后同一份权重会同时存在于 AppImage 与共享库。
+cmd_strip_models() {
+    local appdir="$1" models
+    require_dir "$appdir"
+    models="$appdir/usr/lib/HiFiShifter/models"
+    require_dir "$models"
+    [ -f "$models/models.json" ] || die "缺少模型清单：$models/models.json"
+    find "$models" -mindepth 1 -maxdepth 1 ! -name 'models.json' -exec rm -rf {} +
+    printf 'external models: %s（只保留 models.json）\n' "$models"
+}
+
 # ── verify ────────────────────────────────────────────────────────────
 
 # 从 ldd 输出里取某个 soname 的解析路径（取不到则为空）。
@@ -369,8 +386,12 @@ cmd_smoke() {
     # 复用同一个目录时每次都要重新核对全部文件（几万行 "file size matches"），
     # 既拖慢冒烟也把真正的启动日志埋掉。
     workdir=$(mktemp -d)
+    local -a smoke_env=(TMPDIR="$workdir" APPIMAGE_EXTRACT_AND_RUN=1)
+    if [ -n "${HIFISHIFTER_SMOKE_MODELS_DIR:-}" ]; then
+        smoke_env+=("HIFISHIFTER_MODELS_DIR=$HIFISHIFTER_SMOKE_MODELS_DIR")
+    fi
     set +e
-    TMPDIR="$workdir" APPIMAGE_EXTRACT_AND_RUN=1 timeout "${HIFISHIFTER_SMOKE_TIMEOUT:-45}" \
+    env "${smoke_env[@]}" timeout "${HIFISHIFTER_SMOKE_TIMEOUT:-45}" \
         "${runner[@]}" "$appimage" >"$log" 2>&1
     rc=$?
     set -e
@@ -424,6 +445,11 @@ cmd_package() {
     note "prune"
     cmd_prune "$appdir"
 
+    if [ "${HIFISHIFTER_EXTERNAL_MODELS:-0}" = "1" ]; then
+        note "strip models"
+        cmd_strip_models "$appdir"
+    fi
+
     note "verify"
     cmd_verify "$appdir"
 
@@ -431,6 +457,10 @@ cmd_package() {
     cmd_repack "$appdir"
 
     note "smoke"
+    # 三合一 AppImage 不带权重；默认拿构建树里的完整模型给冒烟用。
+    if [ "${HIFISHIFTER_EXTERNAL_MODELS:-0}" = "1" ] && [ -z "${HIFISHIFTER_SMOKE_MODELS_DIR:-}" ]; then
+        HIFISHIFTER_SMOKE_MODELS_DIR="$REPO_ROOT/backend/src-tauri/resources/models"
+    fi
     cmd_smoke "$(find "$(dirname "$appdir")" -maxdepth 1 -name '*.AppImage' -print -quit)"
 }
 

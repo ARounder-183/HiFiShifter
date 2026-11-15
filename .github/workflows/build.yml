@@ -284,11 +284,9 @@ jobs:
           HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
         with:
           projectPath: backend/src-tauri
-          # Request the .app bundle explicitly: when only the DMG is requested,
-          # tauri-bundler deletes the intermediate .app from bundle/macos right
-          # after creating the DMG ("Cleaning ...HiFiShifter.app"), which leaves
-          # nothing on disk for the bundle verification step to inspect.
-          args: --bundles app,dmg ${{ matrix.cargo_extra }}
+          # Unified macOS pkg 需要保留 .app 作为 pkg 载荷；DMG 已不再单独产出。
+          # 只请求 app，避免 tauri-bundler 在生成 DMG 后清理中间产物。
+          args: --bundles app ${{ matrix.cargo_extra }}
 
       - name: Set LD_LIBRARY_PATH for linuxdeploy (Linux)
         if: runner.os == 'Linux'
@@ -338,8 +336,7 @@ jobs:
           APP_DIR="${GITHUB_WORKSPACE}/${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/macos/HiFiShifter.app"
           if [ ! -d "$APP_DIR" ]; then
             echo "ERROR: $APP_DIR not found." >&2
-            echo "When only the DMG is requested, tauri-bundler removes the intermediate .app" >&2
-            echo "after creating the DMG. Build with --bundles app,dmg so the .app is kept." >&2
+            echo "macOS 统一 pkg 需要 .app 载荷；请用 --bundles app 构建并保留 bundle/macos。" >&2
             ls -la "$(dirname "$APP_DIR")" 2>/dev/null || true
             exit 1
           fi
@@ -512,6 +509,8 @@ jobs:
         working-directory: ${{ github.workspace }}
         env:
           RELEASE_DIR: ${{ github.workspace }}/${{ steps.tauri-release-dir.outputs.release-dir }}
+          # 三合一包把权重放到安装目录的共享库；AppImage 只保留 models.json。
+          HIFISHIFTER_EXTERNAL_MODELS: "1"
           # CI 只构建：跳过启动 AppImage 的冒烟测试；本地脚本默认仍会冒烟。
           HIFISHIFTER_SKIP_SMOKE: "1"
         run: |
@@ -536,21 +535,15 @@ jobs:
 
       # ── LICENSE alongside artifacts ──────────────────────────────────
 
-      # Place LICENSE and the licenses/ folder next to the DMG/AppImage and the
-      # Windows installer so the uploaded artifacts ship with them. The portable
-      # directory already includes both (staged above).
-      - name: Stage LICENSE next to bundles/installer
-        if: steps.tauri-release-dir.outputs.release-dir != ''
+      # Windows 安装器在上传前把 LICENSE 放到 NSIS 目录；macOS pkg / Linux tar
+      # 已经把许可打进各自的安装包，不再额外铺一份。
+      - name: Stage LICENSE next to Windows installer
+        if: runner.os == 'Windows' && steps.tauri-release-dir.outputs.release-dir != ''
         shell: bash
         run: |
           set -euo pipefail
           RELEASE_DIR="${GITHUB_WORKSPACE}/${{ steps.tauri-release-dir.outputs.release-dir }}"
-          case "${{ runner.os }}" in
-            Windows) COPY_TARGET="$RELEASE_DIR/bundle/nsis" ;;
-            macOS)   COPY_TARGET="$RELEASE_DIR/bundle/dmg" ;;
-            Linux)   COPY_TARGET="$RELEASE_DIR/bundle/appimage" ;;
-            *)       echo "Unsupported runner OS: ${{ runner.os }}"; exit 1 ;;
-          esac
+          COPY_TARGET="$RELEASE_DIR/bundle/nsis"
           if [ ! -d "$COPY_TARGET" ]; then
             echo "WARNING: bundle dir not found, LICENSE not staged: $COPY_TARGET" >&2
             exit 0
@@ -564,12 +557,23 @@ jobs:
       # 【为什么和 App 在同一条腿里出】App 与插件共用文档格式、模型清单版本与前端
       # 产物；同一次构建里产出两种产物，版本不可能错配。格式自己的构建仍由
       # vst3-unix.yml 与 clap.yml 承担 —— 它们只回答"能不能产出"，不负责分发。
-      - name: Package plug-ins (Unix)
+      - name: Package unified installer (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          bash scripts/build/unix/package.sh --profile dist --reuse-frontend --no-verify
+          RELEASE_DIR="${GITHUB_WORKSPACE}/${{ steps.tauri-release-dir.outputs.release-dir }}"
+          APP_ARGS=()
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            APP_BUNDLE="$RELEASE_DIR/bundle/macos/HiFiShifter.app"
+            [ -d "$APP_BUNDLE" ] || { echo "ERROR: 找不到 macOS App：$APP_BUNDLE" >&2; exit 1; }
+            APP_ARGS+=(--app-bundle "$APP_BUNDLE")
+          else
+            APPIMAGE="$(find "$RELEASE_DIR/bundle/appimage" -maxdepth 1 -name '*.AppImage' -print -quit)"
+            [ -f "$APPIMAGE" ] || { echo "ERROR: 找不到 Linux AppImage：$RELEASE_DIR/bundle/appimage" >&2; exit 1; }
+            APP_ARGS+=(--appimage "$APPIMAGE")
+          fi
+          bash scripts/build/unix/package.sh --profile dist --reuse-frontend --no-verify "${APP_ARGS[@]}"
 
       # ── Artifact naming ───────────────────────────────────────────────
 
@@ -592,7 +596,7 @@ jobs:
           }
           $prodSafe = ($prod -replace '["\\/:*?<>|]', '') -replace '\s+', '_'
           $verSafe = ($ver -replace '["\\/:*?<>|]', '') -replace '^v', ''
-          $artifactName = "${prodSafe}_v${verSafe}_${{ matrix.name }}-bundles"
+          $artifactName = "${prodSafe}_v${verSafe}_${{ matrix.name }}-unified"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "artifact-name=$artifactName"
         shell: pwsh
 
@@ -685,40 +689,15 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload plug-in package (Unix)
+      - name: Upload unified package (Unix)
         if: runner.os != 'Windows'
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.artifact-name-nonwindows.outputs.artifact-name }}-plugins
-          # 【为什么是 -plugins 不是 _plugins】package.sh 的命名字面量就是
-          # `HiFiShifter_v<版本>_<os>-<arch>-plugins.<ext>`（平台标签用连字符），
-          # 此前写成 `*_plugins.*` 永远匹配不到产物 —— backend 腿第一次真正跑完
-          # 打包后才暴露：tar 明明生成了 225M，上传步骤却报 "No files were found"。
-          path: |
-            dist/HiFiShifter_*-plugins.tar.gz
-            dist/HiFiShifter_*-plugins.tar.gz.sha256
-            dist/HiFiShifter_*-plugins.pkg
-            dist/HiFiShifter_*-plugins.pkg.sha256
-          if-no-files-found: error
-
-      - name: Upload DMG (macOS)
-        if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v7
-        with:
           name: ${{ steps.artifact-name-nonwindows.outputs.artifact-name }}
-          path: |
-            ${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/dmg/*.dmg
-            ${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/dmg/LICENSE
-          if-no-files-found: error
-
-      - name: Upload AppImage (Linux)
-        if: runner.os == 'Linux' && !cancelled()
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ steps.artifact-name-nonwindows.outputs.artifact-name }}
-          path: |
-            ${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/appimage/*.AppImage
-            ${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/appimage/LICENSE
+          # package.sh 的命名字面量是
+          # `HiFiShifter_v<版本>_<os>-<arch>-unified.{pkg,tar.gz}`。
+          # 一个 artifact 只装一个安装器；两平台各一条腿，不会混。
+          path: dist/HiFiShifter_*-${{ matrix.name }}-unified.*
           if-no-files-found: error
 
       - name: Dump diagnostics on failure (Linux)

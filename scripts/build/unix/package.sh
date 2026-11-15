@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# Unix 插件分发入口：一次编译 → 每个 OS 一个用户可安装的产物。
+# Unix 分发入口：一次编译 → 每个 OS 一个用户可安装的产物。
 #
-#     scripts/build/unix/package.sh                    # VST3 + CLAP → tar.gz / pkg
-#     scripts/build/unix/package.sh --formats=vst3     # 只出 VST3
+#     scripts/build/unix/package.sh                    # 只出插件包（VST3 + CLAP）
+#     scripts/build/unix/package.sh --formats=vst3     # 只出 VST3 插件包
 #     scripts/build/unix/package.sh --reuse-frontend   # 复用 frontend/dist
+#     scripts/build/unix/package.sh --appimage=...     # Linux 三合一（AppImage + 插件 + 模型库）
+#     scripts/build/unix/package.sh --app-bundle=...   # macOS 三合一（App + 插件 + 模型库）
 #
 # 【为什么构建分开、分发统一】两个格式的**构建**是两件不同的事：不同的 crate、不同的
 # bundle 布局、不同的入口符号、不同的黑盒探针。把它们塞进一个脚本，得到的是
@@ -15,9 +17,14 @@
 # 所以：格式脚本各自构建（scripts/<fmt>/unix/build.sh），这里只做三件事 ——
 # 编译一次前端、按格式调用、把结果装进同一个产物。
 #
+# 三合一模式（传 --appimage / --app-bundle）会把 App、VST3、CLAP 与共享模型库
+# 装进同一个安装器；bundle 里只保留 models.json，权重只在上层 models/<version>
+# 存一份。不传这两个参数时保持原来的纯插件包行为。
+#
 # 产物：
-#   Linux   dist/HiFiShifter_v<版本>_<os>-<arch>-plugins.tar.gz（含 install.sh）
-#   macOS   dist/HiFiShifter_v<版本>_<os>-<arch>-plugins.pkg（装到 /Library/Audio/Plug-Ins）
+#   Linux   dist/HiFiShifter_v<版本>_<os>-<arch>-unified.tar.gz（含 install.sh）
+#   macOS   dist/HiFiShifter_v<版本>_<os>-<arch>-unified.pkg（装到 /Applications 与 /Library）
+#   插件包   dist/HiFiShifter_v<版本>_<os>-<arch>-plugins.tar.gz / .pkg
 #
 # 签名与公证：设置 HIFISHIFTER_CODESIGN_IDENTITY 后，macOS 用 Developer ID 签名，
 # 并可用 HIFISHIFTER_NOTARY_PROFILE 走 notarytool 公证 + stapler 装订。默认 ad-hoc
@@ -28,6 +35,7 @@ set -euo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd -- "$SCRIPT_DIR/../../.." && pwd)"
 readonly FRONTEND_DIST="$REPO_ROOT/frontend/dist"
+readonly MODELS_SRC="$REPO_ROOT/backend/src-tauri/resources/models"
 
 # shellcheck source=../../plugin/unix/lib.sh
 . "$REPO_ROOT/scripts/plugin/unix/lib.sh"
@@ -38,6 +46,8 @@ OUT_DIR="$REPO_ROOT/dist"
 REUSE_FRONTEND=0
 SKIP_VERIFY=0
 MERGE_ARCH=""
+APPIMAGE=""
+APP_BUNDLE=""
 
 log()  { printf '[package] %s\n' "$*"; }
 step() { printf '\n[package] ── %s\n' "$*"; }
@@ -53,6 +63,8 @@ usage() {
   --reuse-frontend      复用已有 frontend/dist（要求它已存在）
   --no-verify           跳过格式自检（只在探针跑不了的机器上用）
   --merge-arch=DIR      把另一个架构的 dist 合并成 universal（需要 lipo，仅 macOS）
+  --appimage=FILE       Linux 三合一：把已有 AppImage 一起装进 tar.gz
+  --app-bundle=DIR      macOS 三合一：把已有 .app 一起装进 pkg
   -h, --help
 USAGE
 }
@@ -72,6 +84,10 @@ while [ $# -gt 0 ]; do
         --no-verify)      SKIP_VERIFY=1; shift ;;
         --merge-arch=*)   MERGE_ARCH="${1#*=}"; shift ;;
         --merge-arch)     [ $# -ge 2 ] || die "--merge-arch 需要值"; MERGE_ARCH="$2"; shift 2 ;;
+        --appimage=*)     APPIMAGE="${1#*=}"; shift ;;
+        --appimage)       [ $# -ge 2 ] || die "--appimage 需要值"; APPIMAGE="$2"; shift 2 ;;
+        --app-bundle=*)   APP_BUNDLE="${1#*=}"; shift ;;
+        --app-bundle)     [ $# -ge 2 ] || die "--app-bundle 需要值"; APP_BUNDLE="$2"; shift 2 ;;
         -h|--help)        usage; exit 0 ;;
         *)                die "未知参数：$1（--help 看用法）" ;;
     esac
@@ -79,10 +95,12 @@ done
 
 hfs_detect_platform
 PRODUCT_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$REPO_ROOT/backend/src-tauri/tauri.conf.json")"
-readonly PRODUCT_VERSION
+MODEL_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$MODELS_SRC/models.json")"
+readonly PRODUCT_VERSION MODEL_VERSION
 ARTIFACT_BASE="$OUT_DIR/HiFiShifter_v${PRODUCT_VERSION}_${HFS_TAG}-plugins"
+UNIFIED_BASE="$OUT_DIR/HiFiShifter_v${PRODUCT_VERSION}_${HFS_TAG}-unified"
 
-log "平台 ${HFS_TAG}｜版本 ${PRODUCT_VERSION}｜格式 ${FORMATS}｜profile $PROFILE"
+log "平台 ${HFS_TAG}｜版本 ${PRODUCT_VERSION}｜模型 ${MODEL_VERSION}｜格式 ${FORMATS}｜profile $PROFILE"
 
 wants() {
     case ",$FORMATS," in
@@ -138,7 +156,7 @@ verify_format() {
 
 # ── 阶段 3：合并 universal（可选，仅 macOS）─────────────────────────────────
 #
-# 【为什么是可选项】App 侧目前是按架构分别发 DMG 的，插件单独做 universal 会得到
+# 【为什么是可选项】App 侧目前按架构分别发统一 pkg，插件单独做 universal 会得到
 # "universal 插件 + 分架构 App"的错配。真正要 universal 时，两边的 CI 腿都产出
 # dist/，这里用 --merge-arch 指过去即可。
 merge_arch() {
@@ -161,7 +179,7 @@ merge_arch() {
 }
 
 # ── 阶段 4：组装分发产物 ────────────────────────────────────────────────────
-package_linux() {
+package_linux_plugins() {
     local stage="$OUT_DIR/stage-plugins" entries=()
     step "打包 Linux 插件包"
     rm -rf "$stage"
@@ -177,9 +195,9 @@ package_linux() {
         cp -R "$OUT_DIR/clap/HiFiShifter-resources" "$stage/"
         entries+=("HiFiShifter.clap" "HiFiShifter-resources")
     fi
-    # 两个格式带的是同一份 152 MB 权重。暂存目录里用硬链接让它们共享 inode，
-    # tar 就会把第二份存成硬链接条目 —— 压缩包从 314 MB 回到 160 MB 左右。
-    # 解包后仍是两份（cp -R 会断开硬链接），磁盘占用与"各自自包含"的语义都不变。
+    # 纯插件模式仍保持"各自自包含"：暂存目录里用硬链接让两个格式共享 inode，
+    # tar 就会把第二份存成硬链接条目。三合一模式则把权重提到顶层 models/，
+    # 由 install.sh 写入共享库，不在这里做硬链接。
     if wants vst3 && wants clap; then
         rm -rf "$stage/HiFiShifter-resources/models"
         cp -al "$stage/HiFiShifter.vst3/Contents/Resources/models" "$stage/HiFiShifter-resources/models"
@@ -195,8 +213,8 @@ package_linux() {
     rm -rf "$stage"
 }
 
-package_macos() {
-    local root="$OUT_DIR/pkgroot" numeric identity
+package_macos_plugins() {
+    local root="$OUT_DIR/pkgroot-plugins" numeric
     step "打包 macOS 插件 pkg"
     command -v pkgbuild >/dev/null 2>&1 || die "缺少 pkgbuild（需要 Xcode 命令行工具）"
     rm -rf "$root"
@@ -215,18 +233,25 @@ package_macos() {
         --install-location / --ownership recommended "$ARTIFACT_BASE.pkg" >/dev/null \
         || die "pkgbuild 失败"
     rm -rf "$root"
+    sign_macos_pkg "$ARTIFACT_BASE.pkg"
+}
 
+# 给 pkg 做 Developer ID 签名（可选公证）并写 sha256。两种 pkg 共用这一份，
+# 避免统一包与纯插件包在签名/校验上的口径分叉。
+sign_macos_pkg() {
+    local pkg="$1" identity digest
     identity="${HIFISHIFTER_CODESIGN_IDENTITY:--}"
     if [ "$identity" != "-" ]; then
-        productsign --sign "$identity" "$ARTIFACT_BASE.pkg" "$ARTIFACT_BASE.signed.pkg" >/dev/null \
+        rm -f "$pkg.signed"
+        productsign --sign "$identity" "$pkg" "$pkg.signed" >/dev/null \
             || die "productsign 失败"
-        mv -f "$ARTIFACT_BASE.signed.pkg" "$ARTIFACT_BASE.pkg"
+        mv -f "$pkg.signed" "$pkg"
         log "pkg 已用 $identity 签名"
         if [ -n "${HIFISHIFTER_NOTARY_PROFILE:-}" ]; then
             step "公证（notarytool）"
-            xcrun notarytool submit "$ARTIFACT_BASE.pkg" \
+            xcrun notarytool submit "$pkg" \
                 --keychain-profile "$HIFISHIFTER_NOTARY_PROFILE" --wait || die "公证失败"
-            xcrun stapler staple "$ARTIFACT_BASE.pkg" || die "stapler 装订失败"
+            xcrun stapler staple "$pkg" || die "stapler 装订失败"
             log "已公证并装订"
         else
             log "未设置 HIFISHIFTER_NOTARY_PROFILE：跳过公证（用户首次加载会被 Gatekeeper 拦）"
@@ -234,22 +259,128 @@ package_macos() {
     else
         log "ad-hoc 签名：仅够 CI 自检，分发前必须换成 Developer ID"
     fi
-    local digest
-    digest="$(hfs_sha256 "$ARTIFACT_BASE.pkg")"
-    printf '%s  %s\n' "$digest" "$(basename "$ARTIFACT_BASE.pkg")" >"$ARTIFACT_BASE.pkg.sha256"
-    log "产物 $(du -h "$ARTIFACT_BASE.pkg" | cut -f1)：$ARTIFACT_BASE.pkg"
+    digest="$(hfs_sha256 "$pkg")"
+    printf '%s  %s\n' "$digest" "$(basename "$pkg")" >"$pkg.sha256"
+    log "产物 $(du -h "$pkg" | cut -f1)：$pkg"
+}
+
+# Linux 三合一：AppImage + VST3 + CLAP + 一份共享模型 + install.sh。
+# 所有 bundle 只保留 models.json；权重在顶层 models/<version>，由 install.sh
+# 安装到 XDG 数据目录（--system 时到 /usr/local/share/HiFiShifter）。
+package_linux_unified() {
+    local stage="$OUT_DIR/stage-unified" entries=(
+        "HiFiShifter.AppImage" "models" "install.sh" "LICENSE" "licenses"
+    )
+    step "打包 Linux 三合一安装包"
+    [ -f "$APPIMAGE" ] || die "--appimage 指向的文件不存在：$APPIMAGE"
+    rm -rf "$stage"
+    mkdir -p "$stage"
+    cp -f "$APPIMAGE" "$stage/HiFiShifter.AppImage"
+    chmod +x "$stage/HiFiShifter.AppImage"
+
+    if wants vst3; then
+        [ -d "$OUT_DIR/HiFiShifter.vst3" ] || die "缺少 $OUT_DIR/HiFiShifter.vst3"
+        cp -R "$OUT_DIR/HiFiShifter.vst3" "$stage/"
+        hfs_strip_models_to_manifest "$stage/HiFiShifter.vst3/Contents/Resources/models"
+        entries+=("HiFiShifter.vst3")
+    fi
+    if wants clap; then
+        [ -f "$OUT_DIR/clap/HiFiShifter.clap" ] || die "缺少 $OUT_DIR/clap/HiFiShifter.clap"
+        cp "$OUT_DIR/clap/HiFiShifter.clap" "$stage/"
+        cp -R "$OUT_DIR/clap/HiFiShifter-resources" "$stage/"
+        hfs_strip_models_to_manifest "$stage/HiFiShifter-resources/models"
+        entries+=("HiFiShifter.clap" "HiFiShifter-resources")
+    fi
+
+    mkdir -p "$stage/models/$MODEL_VERSION"
+    cp -R "$MODELS_SRC/." "$stage/models/$MODEL_VERSION/"
+    [ -f "$stage/models/$MODEL_VERSION/models.json" ] \
+        || die "共享模型目录里没有 models.json"
+
+    cp "$REPO_ROOT/scripts/plugin/unix/install.sh" "$stage/install.sh"
+    chmod +x "$stage/install.sh"
+    hfs_stage_licenses "$stage" "$REPO_ROOT"
+    hfs_tarball "$UNIFIED_BASE.tar.gz" "$stage" "${entries[@]}"
+    rm -rf "$stage"
+}
+
+# macOS 三合一：/Applications/HiFiShifter.app + VST3 + CLAP + 一份共享模型。
+# pkg 的安装根是 /，所以目录结构与真实系统一致；App 与插件 bundle 只留
+# models.json，权重在 /Library/Application Support/HiFiShifter/models/<version>。
+package_macos_unified() {
+    local root="$OUT_DIR/pkgroot-unified" numeric app
+    step "打包 macOS 三合一 pkg"
+    command -v pkgbuild >/dev/null 2>&1 || die "缺少 pkgbuild（需要 Xcode 命令行工具）"
+    [ -d "$APP_BUNDLE" ] || die "--app-bundle 指向的目录不存在：$APP_BUNDLE"
+    [ "$(basename "$APP_BUNDLE")" = "HiFiShifter.app" ] \
+        || die "--app-bundle 必须是 HiFiShifter.app：$APP_BUNDLE"
+
+    rm -rf "$root"
+    mkdir -p "$root/Applications" \
+             "$root/Library/Audio/Plug-Ins/VST3" \
+             "$root/Library/Audio/Plug-Ins/CLAP" \
+             "$root/Library/Application Support/HiFiShifter/models/$MODEL_VERSION"
+
+    cp -R "$APP_BUNDLE" "$root/Applications/"
+    app="$root/Applications/HiFiShifter.app"
+    hfs_strip_models_to_manifest "$app/Contents/Resources/models"
+    hfs_sign_bundle "$app" "$app/Contents/MacOS/HiFiShifter"
+
+    if wants vst3; then
+        [ -d "$OUT_DIR/HiFiShifter.vst3" ] || die "缺少 $OUT_DIR/HiFiShifter.vst3"
+        cp -R "$OUT_DIR/HiFiShifter.vst3" "$root/Library/Audio/Plug-Ins/VST3/"
+        hfs_strip_models_to_manifest \
+            "$root/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3/Contents/Resources/models"
+        hfs_sign_bundle \
+            "$root/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3" \
+            "$root/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3/Contents/MacOS/HiFiShifter"
+    fi
+    if wants clap; then
+        [ -d "$OUT_DIR/clap/HiFiShifter.clap" ] || die "缺少 $OUT_DIR/clap/HiFiShifter.clap"
+        cp -R "$OUT_DIR/clap/HiFiShifter.clap" "$root/Library/Audio/Plug-Ins/CLAP/"
+        hfs_strip_models_to_manifest \
+            "$root/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap/Contents/Resources/models"
+        hfs_sign_bundle \
+            "$root/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap" \
+            "$root/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap/Contents/MacOS/HiFiShifter"
+    fi
+
+    cp -R "$MODELS_SRC/." "$root/Library/Application Support/HiFiShifter/models/$MODEL_VERSION/"
+    cp -f "$REPO_ROOT/LICENSE" "$root/Library/Application Support/HiFiShifter/LICENSE"
+    cp -R "$REPO_ROOT/licenses" "$root/Library/Application Support/HiFiShifter/licenses"
+
+    numeric="$(hfs_numeric_version "$PRODUCT_VERSION")"
+    rm -f "$UNIFIED_BASE.pkg"
+    pkgbuild --root "$root" --identifier com.hifishifter.unified --version "$numeric" \
+        --install-location / --ownership recommended "$UNIFIED_BASE.pkg" >/dev/null \
+        || die "pkgbuild 失败"
+    rm -rf "$root"
+    sign_macos_pkg "$UNIFIED_BASE.pkg"
 }
 
 # ── 入口 ─────────────────────────────────────────────────────────────────────
+if [ -n "$APPIMAGE" ] && [ "$HFS_OS" != "linux" ]; then
+    die "--appimage 只在 Linux 上有意义"
+fi
+if [ -n "$APP_BUNDLE" ] && [ "$HFS_OS" != "macos" ]; then
+    die "--app-bundle 只在 macOS 上有意义"
+fi
+if [ -n "$APPIMAGE" ] && [ ! -f "$APPIMAGE" ]; then
+    die "--appimage 指向的文件不存在：$APPIMAGE"
+fi
+if [ -n "$APP_BUNDLE" ] && [ ! -d "$APP_BUNDLE" ]; then
+    die "--app-bundle 指向的目录不存在：$APP_BUNDLE"
+fi
+
 stage_frontend
 if wants vst3; then build_format vst3; verify_format vst3; fi
 if wants clap; then build_format clap; verify_format clap; fi
 if [ -n "$MERGE_ARCH" ]; then merge_arch "$MERGE_ARCH"; fi
 
 if [ "$HFS_OS" = "linux" ]; then
-    package_linux
+    if [ -n "$APPIMAGE" ]; then package_linux_unified; else package_linux_plugins; fi
 else
-    package_macos
+    if [ -n "$APP_BUNDLE" ]; then package_macos_unified; else package_macos_plugins; fi
 fi
 
 log "完成"

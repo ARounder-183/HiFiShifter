@@ -1,4 +1,4 @@
-//! 全部**用户级**目录的唯一计算点：独立 App 与 VST3/ARA 插件都调它。
+//! 用户级目录与共享模型库的唯一计算点：独立 App 与 VST3/CLAP 插件都调它。
 //!
 //! 【为什么必须有这一处】"用户数据放哪儿"此前分散在三处：App 用 Tauri 的
 //! `app_config_dir()` / `app_cache_dir()` / `app_log_dir()`，插件自己拼
@@ -15,7 +15,7 @@
 //! | 缓存 | `%LOCALAPPDATA%\HiFiShifter\cache` | `~/Library/Caches/HiFiShifter` | `$XDG_CACHE_HOME/HiFiShifter` |
 //! | 日志 | `%LOCALAPPDATA%\HiFiShifter\logs` | `~/Library/Logs/HiFiShifter` | `$XDG_STATE_HOME/HiFiShifter/logs` |
 //! | WebView profile | `%LOCALAPPDATA%\HiFiShifter\EBWebView` | 跟随 Tauri 默认 | 跟随 Tauri 默认 |
-//! | 共享模型库 | `%PROGRAMDATA%\HiFiShifter\models\<版本>` | 无 | 无 |
+//! | 共享模型库 | `%PROGRAMDATA%\HiFiShifter\models\<版本>` | `/Library/Application Support/HiFiShifter/models/<版本>`（统一 pkg） | `$XDG_DATA_HOME/HiFiShifter/models/<版本>` 或 `/usr/local/share/HiFiShifter/models/<版本>`（统一包） |
 //!
 //! 【为什么目录名是 `HiFiShifter` 而不是 identifier】`com.arounder.hifishifter` 是
 //! **身份**（安装器、签名、更新源、WebView 数据目录归属），它对用户不可见；而用户
@@ -194,32 +194,68 @@ pub fn log_dir() -> Option<PathBuf> {
     }
 }
 
-/// **全机共享**数据目录（只有 Windows 有）。
+/// **共享**数据根目录的候选列表，按优先级排列。
 ///
-/// 【为什么共享模型库必须落到这里】安装器以管理员身份运行。若它把 152 MB 模型写进
-/// `%LOCALAPPDATA%`，在"标准用户 + 输入管理员密码"这种提权方式下写的就是**管理员**
-/// 的配置目录，而真正运行插件的是标准用户 —— 插件找不到模型，且失败方式只是"推理
-/// 不可用"，极难归因。`%PROGRAMDATA%` 没有这个问题：谁提权都能写对位置，所有用户
-/// 都读得到，且默认允许普通用户创建子目录（运行时发布模型因此也不需要提权）。
+/// 模型库不是"每用户缓存"，而是安装器写入的一份只读载荷：独立 App 与所有插件
+/// 都从同一份读取。不同安装形态能写的位置不同，因此这里返回候选而不是单个路径；
+/// 运行时按顺序挑选第一个完整可用的模型库。
 ///
-/// 【为什么非 Windows 是 None】Linux/macOS 交付的是 AppImage / DMG 里的自包含
-/// bundle：没有能"拥有"共享库的安装器，用户目录下的所谓共享库只是一个**全机唯一
-/// 用户**的私人副本。历史实现让它在非 Windows 退回本地数据目录，结果每个用户首启
-/// 就多写 152 MB 到可被系统清理的目录里（AppImage 还是只读挂载，硬链接必然失败）。
-/// 现在直接返回 None —— 调用方退回 bundle，两个形态各自自包含。
-pub fn shared_data_dir() -> Option<PathBuf> {
+/// - Windows：`%PROGRAMDATA%\HiFiShifter`（合并安装器独占写入）。
+/// - macOS：`/Library/Application Support/HiFiShifter`（统一 pkg 写入）；再加
+///   一个用户级路径，供不经过 pkg 的手动安装兜底。
+/// - Linux：`$XDG_DATA_HOME/HiFiShifter`（用户级统一包默认写入）；再依次尝试
+///   `/usr/local/share/HiFiShifter` 与 `/usr/share/HiFiShifter`，供
+///   `install.sh --system` 或发行版包管理器安装。
+///
+/// 【为什么 Windows 只给一个】合并安装器以管理员身份运行，`%PROGRAMDATA%` 对标准
+/// 用户可读、对提权安装可写。把模型写进 `%LOCALAPPDATA%` 会在"标准用户 + 管理员
+/// 密码"提权时落到管理员的配置目录，真正运行插件的标准用户反而读不到。
+pub fn shared_data_dirs() -> Vec<PathBuf> {
     #[cfg(windows)]
     {
-        Some(
-            std::env::var_os("PROGRAMDATA")
-                .map(PathBuf::from)?
-                .join(PRODUCT_DIR),
-        )
+        // PROGRAMDATA 在正常 Windows 上一定存在；极简测试环境可能没有环境块，
+        // 此时按系统盘约定退回 C:\ProgramData，避免共享库路径直接消失。
+        let base = std::env::var_os("PROGRAMDATA")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("SystemDrive")
+                    .map(|drive| PathBuf::from(drive).join("ProgramData"))
+            })
+            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+        vec![base.join(PRODUCT_DIR)]
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     {
-        None
+        let mut dirs = vec![PathBuf::from("/Library")
+            .join("Application Support")
+            .join(PRODUCT_DIR)];
+        if let Some(home) = home_dir() {
+            dirs.push(
+                home.join("Library")
+                    .join("Application Support")
+                    .join(PRODUCT_DIR),
+            );
+        }
+        dirs
     }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut dirs = Vec::new();
+        if let Some(base) = xdg_base("XDG_DATA_HOME", ".local/share") {
+            dirs.push(base.join(PRODUCT_DIR));
+        }
+        dirs.push(PathBuf::from("/usr/local/share").join(PRODUCT_DIR));
+        dirs.push(PathBuf::from("/usr/share").join(PRODUCT_DIR));
+        dirs
+    }
+}
+
+/// **共享**数据根目录的首选位置。
+///
+/// 保留这个单值入口给只需要一个位置的调用方；模型解析应使用
+/// [`shared_data_dirs`] 逐个尝试，避免用户级与系统级安装形态互相遮蔽。
+pub fn shared_data_dir() -> Option<PathBuf> {
+    shared_data_dirs().into_iter().next()
 }
 
 /// 本地数据目录下的一个子目录；解析不出来时退回系统临时目录。
@@ -235,7 +271,7 @@ pub fn local_data_subdir(name: &str) -> PathBuf {
     }
 }
 
-/// 共享数据目录下的一个子目录；**非 Windows 或不可用时为 None**。
+/// 共享数据目录下的一个子目录；无法确定共享根目录时为 `None`。
 pub fn shared_data_subdir(name: &str) -> Option<PathBuf> {
     Some(shared_data_dir()?.join(name))
 }
@@ -511,17 +547,31 @@ mod tests {
         }
     }
 
-    /// 共享模型库只在 Windows 存在；其余平台上必须明确"没有"，而不是悄悄退回
-    /// 用户目录（那会让每个 Linux/macOS 用户首启多写 152 MB 到可被清理的目录）。
+    /// 三个平台都必须有明确的共享库落点；Windows 只有一个，Unix 允许用户级
+    /// 与系统级共存。
     #[test]
-    fn the_shared_store_only_exists_on_windows() {
-        if cfg!(windows) {
-            let dir = shared_data_dir().expect("windows has a shared data dir");
-            assert!(dir.ends_with(PRODUCT_DIR), "{dir:?}");
-        } else {
-            assert!(shared_data_dir().is_none());
-            assert!(shared_data_subdir("models").is_none());
-        }
+    fn every_installer_platform_has_a_shared_store_root() {
+        let dirs = shared_data_dirs();
+        assert!(!dirs.is_empty());
+        assert!(dirs.iter().all(|dir| dir.ends_with(PRODUCT_DIR)));
+
+        #[cfg(windows)]
+        assert_eq!(dirs.len(), 1);
+
+        #[cfg(target_os = "macos")]
+        assert!(
+            dirs[0].starts_with("/Library"),
+            "macOS 的首选共享库应来自统一 pkg 的 /Library 落点：{:?}",
+            dirs[0]
+        );
+
+        #[cfg(all(unix, not(target_os = "macos")))]
+        assert!(
+            dirs.iter().any(|dir| dir.ends_with(PRODUCT_DIR)),
+            "Linux 缺少共享库候选：{dirs:?}"
+        );
+
+        assert!(shared_data_subdir("models").is_some());
     }
 
     /// 旧根的映射必须把子路径整段带过去，且缓存被**拆到**缓存根。

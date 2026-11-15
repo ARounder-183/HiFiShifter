@@ -18,12 +18,12 @@
 | 位置 | 谁写 | 谁读 |
 | --- | --- | --- |
 | `backend/src-tauri/resources/models/`（工作树） | `scripts/setup/fetch-models.py` | 构建脚本、`--write-manifest` |
-| App / VST3 bundle 里的 `models/models.json` | `build.ps1`、`vst3/unix/build.sh`（只拷清单） | 运行时 `model_store`，用来判断共享库能不能用 |
-| 共享模型库 `%PROGRAMDATA%\HiFiShifter\models\<version>`（仅 Windows） | 合并安装器（独占写） | App 与插件（只读） |
-| macOS / Linux bundle 的 `Contents/Resources/models/` | 构建（自包含，权重随包） | 运行时直接读 |
+| App / VST3 / CLAP bundle 里的 `models/models.json` | `build.ps1`、Unix 统一打包脚本（只留清单） | 运行时 `model_store`，用来判断共享库能不能用 |
+| 共享模型库（Windows `%PROGRAMDATA%\HiFiShifter\models\<version>`；macOS `/Library/Application Support/HiFiShifter/models/<version>`；Linux `$XDG_DATA_HOME/HiFiShifter/models/<version>`） | 各平台统一安装器（独占写） | App 与插件（只读） |
+| 纯插件包 / 便携版的 `Contents/Resources/models/` | 构建（自包含，权重随包） | 运行时直接读 |
 | release 资产 `models-<version>.zip` | 人，按本文 | `fetch-models.py`、镜像 |
 
-权重为什么不在仓库里、Windows 为什么有共享库而其它平台没有，见
+权重为什么不在仓库里、三个平台各自的共享库落点，见
 [`ci.md`](ci.md) 与 `backend/hifishifter-kernel/src/model_store.rs` 的文件头。
 
 ## 发布一个新版本
@@ -178,7 +178,7 @@ CI 替你跑同一件事的另一半：`build.yml` 的每个 job 都在编译前
 | 手改 `models.json` | `--package` 拒绝打包（版本号与内容重算值不符）。绕过的话更糟：运行时 `looks_complete` 只比字节数，"看起来装了、推理全错" |
 | 覆盖已发布 tag 的资产 | 同一个版本号对应两份字节。CI 的缓存键（`hashFiles(models.json)`）不变，会继续用旧权重；用户下到的也可能是旧的 |
 | 用"压缩为 zip"生成资产 | 时间戳与条目顺序不定 → 每次 sha256 都不同，发布物失去身份 |
-| 把权重提交回 git | checkout 从 150 MB 起步（一次 PR 十几次），且缓存键与内容无关 |
+| 把权重提交回 git | checkout 从 200 MB 起步（一次 PR 十几次），且缓存键与内容无关 |
 | 把 CoreML 变体打进资产 | Windows/Linux 白装 56 MB 用不上的权重；版本号还会取决于"构建环境里编没编过 macOS 目标"（`--package` 因此把它列入已知构建产物） |
 | 删除旧版本的 release | 老 App 与老的 CI 提交再也取不到对应版本。资产是内容寻址的，旧 tag 必须永久保留 |
 

@@ -11,13 +11,13 @@ HiFiShifter 是一款圖形化人聲編輯與合成工具。它支援多軌道�
 - Windows 版本提供的是 NSIS 安裝包版（`installer`）和可攜版壓縮包（`portable`）這兩版。對於一般使用者，直接選擇安裝包版並安裝即可。  
   如果你是 Windows 使用者，且不知道 `x86_64` 與 `arm64` 有什麼區別，請選擇 `x86_64` 版本。只有你清楚地了解 `arm64` 是什麼，並且你確實擁有一台 Windows ARM 裝置，則可以下載使用 `arm64` 版。
 
-- macOS 版本提供的是未經過簽名的 dmg 安裝包。因為暫未簽名，安裝時需要經過一個比較複雜的步驟來允許安裝。  
+- macOS 版本提供的是未經過簽名的三合一 `pkg` 安裝包：一次裝上 `/Applications/HiFiShifter.app`、VST3/CLAP 外掛與共享模型庫。因為暫未簽名，安裝時需要經過一個比較複雜的步驟來允許安裝。  
   M 晶片的 macOS 使用者請安裝 `arm64` 版本。只有較老的 Intel 使用者需要安裝 `x86_64` 版本。  
   如果按兩下 dmg 安裝後提示檔案已損毀，按以下步驟操作：
     1. 終端機輸入 `xattr -cr /Applications/HiFiShifter.app`；
     2. 透過系統設定允許執行 `系統設定` -> `隱私權與安全性` -> 點選 `仍要打開`。
 
-- Linux 版本提供的是 AppImage 程式包。AppImage 程式包需要在檔案的 `屬性 -> 權限` 中，勾選 `允許將檔案作為程式執行`，之後便可以直接執行。執行前請確認系統已提供 **WebKitGTK 4.1**（見下方「關於 WebView 的說明」），它是 AppImage 唯一需要系統額外提供的大型相依套件。
+- Linux 版本提供的是三合一 `.tar.gz`，內含 AppImage、VST3/CLAP 外掛、共享模型庫與 `install.sh`。解壓後執行 `./install.sh` 裝進目前使用者，或 `sudo ./install.sh --system` 裝到系統。執行前請確認系統已提供 **WebKitGTK 4.1**（見下方「關於 WebView 的說明」），它是 AppImage 唯一需要系統額外提供的大型相依套件。
 
 **關於 GPU 加速**：HiFiShifter 為各平台提供了多種 GPU 加速方案：
 
@@ -37,7 +37,7 @@ HiFiShifter 是一款圖形化人聲編輯與合成工具。它支援多軌道�
 
 在 Windows 上，HiFiShifter 已停用 WebView2 自帶的瀏覽器快捷鍵（如 `Ctrl + F`、`Ctrl + P`、`F5` 以及 `Ctrl` 搭配 `+` / `-` 的頁面縮放），因此這些按鍵會正常交給 HiFiShifter 處理，不會打斷你的編輯操作。
 
-**關於外掛**：除獨立 App 外，HiFiShifter 還提供 VST3 與 CLAP 兩種外掛形態，可以把同一套編輯介面直接開在 REAPER 的專案裡。在 REAPER 裡請用 VST3 形態接入 ARA；CLAP 形態可作為一般插入效果器。目前外掛為 Windows x64 版本，且只針對 REAPER 驗證過；安裝與使用見 [VST3 ARA 外掛與 CLAP 外掛](#八vst3-ara-外掛與-clap-外掛reaper)章節。
+**關於外掛**：除獨立 App 外，HiFiShifter 還提供 VST3 與 CLAP 兩種外掛形態，可以把同一套編輯介面直接開在 REAPER 的專案裡。在 REAPER 裡請用 VST3 形態接入 ARA；CLAP 形態可作為一般插入效果器。三個平台的三合一安裝包都包含 VST3 與 CLAP 外掛；目前主要針對 REAPER 驗證。安裝與使用見 [VST3 ARA 外掛與 CLAP 外掛](#八vst3-ara-外掛與-clap-外掛reaper)章節。
 
 ## 二、選單
 
@@ -746,7 +746,7 @@ App**，編輯結果隨 REAPER 專案一起儲存。
 因此本外掛只對依 ARA SDK 定稿協定實作的 CLAP 宿主提供 ARA。在 REAPER 裡需要 ARA 時，
 請使用 VST3 形態。
 
-目前外掛為 Windows x64 版本，且只針對 REAPER 驗證過；Linux / macOS 暫無外掛交付。
+三個平台的三合一安裝包都包含 VST3 與 CLAP 外掛；目前主要針對 REAPER 驗證。
 
 ### 安裝與接入
 
@@ -775,10 +775,10 @@ REAPER 按**軌道**管理 ARA 外掛：它只會把外掛所在**那一條軌�
 
 ### 模型檔案與共享
 
-外掛需要 FCPE、HNSEP 與 HiFiGAN 三個模型（合計約 150 MB）。安裝程式把模型裝進**全機共享庫**（`%ProgramData%\HiFiShifter\models\<模型版本>`），獨立 App 讀的是同一份 —— 同時使用外掛與獨立 App 不會重複佔用這 150 MB。手動複製的版本自帶一份模型，不依賴共享庫。
+外掛需要 FCPE、HNSEP 與 HiFiGAN 等模型（目前合計約 200 MB）。三合一安裝程式把模型裝進平台共享庫（Windows `%ProgramData%\HiFiShifter\models\<模型版本>`；macOS `/Library/Application Support/HiFiShifter/models/<模型版本>`；Linux `$XDG_DATA_HOME/HiFiShifter/models/<模型版本>` 或 `/usr/local/share/HiFiShifter/models/<模型版本>`），獨立 App 與所有外掛讀同一份 —— 不會重複佔用這 200 MB。手動複製的純外掛包自帶一份模型，不依賴共享庫。
 
 - 模型版本由模型內容派生：升級後新版本落在新目錄，同版本的重複安裝會被跳過。
-- 解除安裝外掛**不會**刪除共享模型庫（獨立 App 也在用）。確實需要清理時，手動刪除 `%ProgramData%\HiFiShifter\models`。
+- 解除安裝外掛**不會**刪除共享模型庫（獨立 App 也在用）。確實需要清理時，手動刪除對應平台的共享模型目錄。
 - 用環境變數 `HIFISHIFTER_MODELS_DIR` 可以指定模型目錄，優先於共享庫。
 
 ### 外掛模式下的分工

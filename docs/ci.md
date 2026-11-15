@@ -10,9 +10,9 @@
 | 工作流                | 触发                  | 职责                                                                  | 产物                                                   |
 | --------------------- | --------------------- | --------------------------------------------------------------------- | ------------------------------------------------------ |
 | `frontend-build.yml` | 被调用 / 手动         | 构建前端 `dist`（typecheck + vite build），供各产物流水线复用        | `frontend-dist`                                        |
-| `build.yml`          | PR、`v*` tag、手动    | 六平台 App 产物；Windows x64 出一个合并安装器 + 便携包；Unix 出插件包 | 安装器 / DMG / AppImage / 便携包 / 插件 `tar.gz`·`pkg` |
-| `vst3-unix.yml`      | PR、`v*` tag、手动    | Linux/macOS 的 VST3 bundle                                            | `*.tar.gz` + `*.sha256`                                |
-| `clap.yml`           | PR、`v*` tag、手动    | Linux/macOS/Windows 的 CLAP 模块                                      | `HiFiShifter.clap` / bundle                            |
+| `build.yml`          | PR、`v*` tag、手动    | 六平台产物；Windows x64 出一个合并安装器 + 便携包；macOS/Linux 出「App + 插件 + 共享模型库」三合一包 | Windows 安装器 / 便携包；macOS `.pkg`；Linux `.tar.gz` |
+| `vst3-unix.yml`      | PR、`v*` tag、手动    | Linux/macOS 的 VST3 bundle（构建验证，不是最终分发入口）              | `*.tar.gz` + `*.sha256`                                |
+| `clap.yml`           | PR、`v*` tag、手动    | Linux/macOS/Windows 的 CLAP 模块（构建验证，不是最终分发入口）        | `HiFiShifter.clap` / bundle                            |
 
 ## 构建脚本与自检
 

@@ -11,13 +11,13 @@ HiFiShifter 是一款图形化人声编辑与合成工具。它支持多轨道�
 - Windows 版本提供的是 NSIS 安装包版（`installer`）和便携版压缩包（`portable`）这两版。对于一般用户，直接选择安装包版并安装即可。  
   如果你是 Windows 用户，且不知道 `x86_64` 与 `arm64` 有什么区别，请选择 `x86_64` 版本。只有你清楚地了解 `arm64` 是什么，并且你确实拥有一台 Windows ARM 设备，则可以下载使用 `arm64` 版。
 
-- macOS 版本提供的是未经过签名的 dmg 安装包。因为暂未签名，安装时需要经过一个比较复杂的步骤来允许安装。  
+- macOS 版本提供的是未经过签名的三合一 `pkg` 安装包：一次装上 `/Applications/HiFiShifter.app`、VST3/CLAP 插件与共享模型库。因为暂未签名，安装时需要经过一个比较复杂的步骤来允许安装。  
   M 芯片的 macOS 用户请安装 `arm64` 版本。只有较老的 Intel 用户需要安装 `x86_64` 版本。  
-  如果双击 dmg 安装后提示文件已损坏，按以下步骤操作：
+  如果安装后提示文件已损坏，按以下步骤操作：
     1. 终端输入 `xattr -cr /Applications/HiFiShifter.app`；
     2. 通过系统设置允许运行 `系统设置` -> `隐私与安全性` -> 点击 `仍要打开`。
 
-- Linux 版本提供的是 AppImage 程序包。AppImage 程序包需要在文件的 `属性 -> 权限` 中，勾选 `允许将文件作为程序运行`，之后便可以直接运行。运行前请确认系统已提供 **WebKitGTK 4.1**（见下方「关于 WebView 的说明」），它是 AppImage 唯一需要宿主额外提供的大型依赖。
+- Linux 版本提供的是三合一 `.tar.gz`，内含 AppImage、VST3/CLAP 插件、共享模型库与 `install.sh`。解压后执行 `./install.sh` 装进当前用户（`~/.local`、`~/.vst3`、`~/.clap`），或执行 `sudo ./install.sh --system` 装到系统目录（`/opt`、`/usr/lib/vst3`、`/usr/lib/clap`）。运行前请确认系统已提供 **WebKitGTK 4.1**（见下方「关于 WebView 的说明」），它是 AppImage 唯一需要宿主额外提供的大型依赖。
 
 **关于 GPU 加速**：HiFiShifter 为各平台提供了多种 GPU 加速方案：
 
@@ -37,7 +37,7 @@ HiFiShifter 是一款图形化人声编辑与合成工具。它支持多轨道�
 
 在 Windows 上，HiFiShifter 已关闭 WebView2 自带的浏览器快捷键（如 `Ctrl + F`、`Ctrl + P`、`F5` 以及 `Ctrl` 配合 `+` / `-` 的页面缩放），因此这些按键会正常交给 HiFiShifter 处理，不会打断你的编辑操作。
 
-**关于插件**：除独立 App 外，HiFiShifter 还提供 VST3 与 CLAP 两种插件形态，可以把同一套编辑界面直接开在 REAPER 的工程里。在 REAPER 里请用 VST3 形态接入 ARA；CLAP 形态可用作普通插入效果器。目前插件为 Windows x64 版本，且只针对 REAPER 验证过；安装与使用见 [VST3 ARA 插件与 CLAP 插件](#八vst3-ara-插件与-clap-插件reaper)章节。
+**关于插件**：除独立 App 外，HiFiShifter 还提供 VST3 与 CLAP 两种插件形态，可以把同一套编辑界面直接开在 REAPER 的工程里。在 REAPER 里请用 VST3 形态接入 ARA；CLAP 形态可用作普通插入效果器。三个平台的三合一安装包都包含 VST3 与 CLAP 插件；目前主要针对 REAPER 验证。安装与使用见 [VST3 ARA 插件与 CLAP 插件](#八vst3-ara-插件与-clap-插件reaper)章节。
 
 ## 二、菜单
 
@@ -771,16 +771,16 @@ App**，编辑结果随 REAPER 工程一起保存。
 因此本插件只对按 ARA SDK 定稿协议实现的 CLAP 宿主提供 ARA。在 REAPER 里需要 ARA 时，
 请使用 VST3 形态。
 
-目前插件为 Windows x64 版本，且只针对 REAPER 验证过；Linux / macOS 暂无插件交付。
+三个平台的三合一安装包都包含 VST3 与 CLAP 插件；目前主要针对 REAPER 验证。
 
 ### 安装与接入
 
 插件有两种装法，任选其一：
 
-- **安装器（推荐）**：运行 `HiFiShifter_v<版本>_windows-x86_64-setup.exe`。**一个安装包同时装上独立 App、VST3/ARA 与 CLAP 插件**：向导跟随系统界面语言，可以分别选择 App 与 VST3 两个目录；模型只装一遍（全机共享库，见[模型文件与共享](#模型文件与共享)），并在 Windows 的「程序和功能 / 已安装的应用」里注册**一个**卸载项。安装器会先确认 REAPER 与 HiFiShifter 均已退出。
-- **手动拷贝**：关闭 REAPER，把**整个** `HiFiShifter.vst3` 文件夹放入一个 VST3 目录（例如 `C:\Program Files\Common Files\VST3`），或把它的父目录加入 REAPER 的 VST 扫描路径。不要只复制文件夹里的单个文件 —— 界面、模型与运行依赖都在这个文件夹里。这种装法不写注册表，卸载时手动删除该文件夹即可。
+- **三合一安装包（推荐）**：Windows 运行 `HiFiShifter_v<版本>_windows-x86_64-setup.exe`；macOS 运行 `HiFiShifter_v<版本>_macos-<架构>-unified.pkg`；Linux 解压 `HiFiShifter_v<版本>_linux-<架构>-unified.tar.gz` 后执行 `./install.sh`（或 `sudo ./install.sh --system`）。**一个安装包同时装上独立 App、VST3/ARA 与 CLAP 插件**；模型只装一遍（共享库，见[模型文件与共享](#模型文件与共享)）。Windows 安装器会先确认 REAPER 与 HiFiShifter 均已退出。
+- **手动拷贝**：关闭 REAPER，把**整个** `HiFiShifter.vst3` 文件夹放入一个 VST3 目录（例如 Windows 的 `C:\Program Files\Common Files\VST3`，macOS 的 `~/Library/Audio/Plug-Ins/VST3`，Linux 的 `~/.vst3`），或把它的父目录加入 REAPER 的 VST 扫描路径。不要只复制文件夹里的单个文件 —— 界面与运行依赖都在这个文件夹里。手动拷贝版需要单独准备模型（或把 `HIFISHIFTER_MODELS_DIR` 指向模型目录）。
 
-两种装法都需要已安装 WebView2 运行时与 VC++ x64 运行库。
+Windows 需要已安装 WebView2 运行时与 VC++ x64 运行库；macOS 与 Linux 的依赖见[安装](#一安装)章节。
 
 接入步骤（两种装法相同）：
 
@@ -800,10 +800,10 @@ REAPER 按**轨道**管理 ARA 插件：它只会把插件所在**那一条轨�
 
 ### 模型文件与共享
 
-插件需要 FCPE、HNSEP 与 HiFiGAN 三个模型（合计约 150 MB）。安装器把模型装进**全机共享库**（`%ProgramData%\HiFiShifter\models\<模型版本>`），独立 App 读的是同一份 —— 同时使用插件与独立 App 不会重复占用这 150 MB。手动拷贝的版本自带一份模型，不依赖共享库。
+插件需要 FCPE、HNSEP 与 HiFiGAN 等模型（当前合计约 200 MB）。三合一安装器把模型装进平台共享库（Windows `%ProgramData%\HiFiShifter\models\<模型版本>`；macOS `/Library/Application Support/HiFiShifter/models/<模型版本>`；Linux `$XDG_DATA_HOME/HiFiShifter/models/<模型版本>` 或 `/usr/local/share/HiFiShifter/models/<模型版本>`），独立 App 与所有插件读的是同一份 —— 不会重复占用这 200 MB。手动拷贝的纯插件包自带一份模型，不依赖共享库。
 
 - 模型版本由模型内容派生：升级后新版本落在新目录，同版本的重复安装会被跳过。
-- 卸载插件**不会**删除共享模型库（独立 App 也在用）。确实需要清理时，手动删除 `%ProgramData%\HiFiShifter\models`。
+- 卸载插件**不会**删除共享模型库（独立 App 也在用）。确实需要清理时，手动删除对应平台的共享模型目录。
 - 用环境变量 `HIFISHIFTER_MODELS_DIR` 可以指定模型目录，优先于共享库。
 
 ### 插件模式下的分工
@@ -884,7 +884,7 @@ HiFiShifter 会自动把运行日志写入系统标准日志目录，无需任�
 | 设置                                   | `%APPDATA%\HiFiShifter`                     | `~/Library/Application Support/HiFiShifter`                | `$XDG_CONFIG_HOME/HiFiShifter`（缺省 `~/.config/HiFiShifter`） |
 | 缓存（波形 / 整段渲染）                | `%LOCALAPPDATA%\HiFiShifter\cache`          | `~/Library/Caches/HiFiShifter`                             | `$XDG_CACHE_HOME/HiFiShifter`（缺省 `~/.cache/HiFiShifter`）   |
 | 未保存会话的导入素材                   | `%LOCALAPPDATA%\HiFiShifter\unsaved\<会话>` | `~/Library/Application Support/HiFiShifter/unsaved/<会话>` | `$XDG_DATA_HOME/HiFiShifter/unsaved/<会话>`                    |
-| 共享模型库（仅 Windows，由安装器写入） | `%PROGRAMDATA%\HiFiShifter\models\<版本>`   | —                                                          | —                                                              |
+| 共享模型库（由安装器写入） | `%PROGRAMDATA%\HiFiShifter\models\<版本>`   | `/Library/Application Support/HiFiShifter/models/<版本>` | `$XDG_DATA_HOME/HiFiShifter/models/<版本>` 或 `/usr/local/share/HiFiShifter/models/<版本>` |
 
 - 已保存工程的导入素材放在工程文件旁边的 `<工程名>_media` 目录里，随工程一起拷走即可。
 - 从旧版本升级时，首次启动会自动把原来的 `com.arounder.hifishifter` 目录搬到新位置；若新旧目录同时存在则**不合并**（两边原样保留），并在日志里记一条说明。

@@ -11,13 +11,13 @@ Download the HiFiShifter installer corresponding to your operating system and ar
 - For Windows, NSIS installer (`installer`) and portable zip (`portable`) are provided. General users can directly use the installer.  
   If you are a Windows user and do not know the difference between `x86_64` and `arm64`, choose `x86_64`. Only if you clearly understand `arm64` and have a Windows ARM device, you may download the `arm64` version.
 
-- For macOS, an unsigned dmg installer is provided. Since it is not signed, installation requires a few extra steps to allow the app to run.  
+- For macOS, an unsigned unified `pkg` installer is provided: one package installs `/Applications/HiFiShifter.app`, the VST3/CLAP plug-ins, and the shared model library. Since it is not signed, installation requires a few extra steps to allow the app to run.  
   macOS users with M-series chips should install the `arm64` version. Only older Intel users need the `x86_64` version.  
-  If you see a "file is damaged" error after double-clicking the dmg, follow these steps:
+  If you see a "file is damaged" error after installation, follow these steps:
     1. Run `xattr -cr /Applications/HiFiShifter.app` in Terminal;
     2. Allow the app to run via `System Settings` -> `Privacy & Security` -> click `Open Anyway`.
 
-- For Linux, an AppImage package is provided. You need to go to file `Properties -> Permissions` and check `Allow executing file as program`, then you can run it directly. Before launching, make sure the system provides **WebKitGTK 4.1** (see "About WebView" below) — it is the only large dependency the AppImage expects from the host.
+- For Linux, a unified `.tar.gz` is provided containing the AppImage, VST3/CLAP plug-ins, the shared model library, and `install.sh`. Extract it and run `./install.sh` to install for the current user (`~/.local`, `~/.vst3`, `~/.clap`), or `sudo ./install.sh --system` for system-wide installation (`/opt`, `/usr/lib/vst3`, `/usr/lib/clap`). Before launching, make sure the system provides **WebKitGTK 4.1** (see "About WebView" below) — it is the only large dependency the AppImage expects from the host.
 
 **About GPU Acceleration**: HiFiShifter provides multiple GPU acceleration options across platforms:
 
@@ -37,7 +37,7 @@ In the menu `Options → Inference Device`, you can select `Auto`, `CPU`, or `GP
 
 On Windows, HiFiShifter disables the browser shortcuts that WebView2 normally intercepts (such as `Ctrl + F`, `Ctrl + P`, `F5`, and `Ctrl` with `+` / `-` for page zoom), so those key combinations reach HiFiShifter normally and never interrupt your editing.
 
-**About the plug-ins**: Besides the standalone app, HiFiShifter is also available as VST3 and CLAP plug-ins, which opens the same editing interface directly inside a REAPER project. In REAPER, use the VST3 form for ARA; the CLAP form works as an ordinary insert effect. The plugin is currently a Windows x64 build and has only been verified against REAPER; see the [VST3 ARA Plug-in and CLAP Plug-in](#8-vst3-ara-plug-in-and-clap-plug-in-reaper) chapter for installation and usage.
+**About the plug-ins**: Besides the standalone app, HiFiShifter is also available as VST3 and CLAP plug-ins, which opens the same editing interface directly inside a REAPER project. In REAPER, use the VST3 form for ARA; the CLAP form works as an ordinary insert effect. The unified installers for all three platforms include the VST3 and CLAP plug-ins; they are currently verified primarily against REAPER. See the [VST3 ARA Plug-in and CLAP Plug-in](#8-vst3-ara-plug-in-and-clap-plug-in-reaper) chapter for installation and usage.
 
 ## 2. Menu
 
@@ -771,14 +771,14 @@ inside REAPER's own code as soon as the timeline contains audio; this is unrelat
 plug-in. The plug-in therefore offers ARA only to CLAP hosts that implement the finalized
 ARA SDK protocol. If you need ARA in REAPER, use the VST3 form.
 
-The plugin is currently a Windows x64 build and has only been verified against REAPER; there is no plugin delivery for Linux / macOS yet.
+The unified installers for all three platforms include the VST3 and CLAP plug-ins; they are currently verified primarily against REAPER.
 
 ### Installation and Connection
 
 There are two ways to install the plugin; pick either one:
 
-- **Installer (recommended)**: run `HiFiShifter_v<version>_windows-x86_64-setup.exe`. **One package installs the standalone app, the VST3/ARA plug-in and the CLAP plug-in**: the wizard follows the system UI language, lets you pick the app and VST3 directories separately, writes the models once (machine-wide shared library, see [Model Files and Sharing](#model-files-and-sharing)), and registers a **single** uninstall entry under Windows "Programs and Features / Installed apps". The installer first confirms that REAPER and HiFiShifter have exited.
-- **Manual copy**: close REAPER and put the **entire** `HiFiShifter.vst3` folder into a VST3 directory (for example `C:\Program Files\Common Files\VST3`), or add its parent directory to REAPER's VST scan path. Do not copy only the individual files inside the folder — the interface, models and runtime dependencies all live in that folder. This approach writes nothing to the registry; to uninstall, just delete the folder.
+- **Unified installer (recommended)**: on Windows run `HiFiShifter_v<version>_windows-x86_64-setup.exe`; on macOS run `HiFiShifter_v<version>_macos-<arch>-unified.pkg`; on Linux extract `HiFiShifter_v<version>_linux-<arch>-unified.tar.gz` and run `./install.sh` (or `sudo ./install.sh --system`). **One package installs the standalone app, the VST3/ARA and CLAP plug-ins**; the models are installed only once (shared library, see [Model Files and Sharing](#model-files-and-sharing)). The Windows installer first verifies that REAPER and HiFiShifter are closed.
+- **Manual copy**: close REAPER and copy the **entire** `HiFiShifter.vst3` folder into a VST3 directory (for example `C:\Program Files\Common Files\VST3` on Windows, `~/Library/Audio/Plug-Ins/VST3` on macOS, or `~/.vst3` on Linux), or add its parent directory to REAPER's VST scan path. Do not copy only a single file from the folder — the UI and runtime dependencies live inside the bundle. A manual copy needs its own model files (or `HIFISHIFTER_MODELS_DIR` pointing at a model directory).
 
 Both ways require the WebView2 runtime and the VC++ x64 runtime to be installed.
 
@@ -800,10 +800,10 @@ REAPER manages ARA plug-ins **per track**: it only hands the plug-in the audio o
 
 ### Model Files and Sharing
 
-The plugin needs three models — FCPE, HNSEP and HiFiGAN (about 150 MB in total). The installer puts the models into the **machine-wide shared library** (`%ProgramData%\HiFiShifter\models\<model version>`), which the standalone app reads as well — using both the plugin and the standalone app does not duplicate the 150 MB. The manual-copy version carries its own copy of the models and does not depend on the shared library.
+The plug-in needs FCPE, HNSEP, HiFiGAN, and related models (about 200 MB in total at present). The unified installer puts them into the platform shared library (Windows `%ProgramData%\HiFiShifter\models\<model version>`; macOS `/Library/Application Support/HiFiShifter/models/<model version>`; Linux `$XDG_DATA_HOME/HiFiShifter/models/<model version>` or `/usr/local/share/HiFiShifter/models/<model version>`), which the standalone app and every plug-in read — the 200 MB is not duplicated. A manual-copy plug-in bundle carries its own models and does not depend on the shared library.
 
 - The model version is derived from the model content: an upgrade lands in a new directory, and reinstalling the same version is skipped.
-- Uninstalling the plugin does **not** delete the shared model library (the standalone app uses it too). If you really want it gone, delete `%ProgramData%\HiFiShifter\models` by hand.
+- Uninstalling the plugin does **not** delete the shared model library (the standalone app uses it too). If you really want it gone, delete the shared model directory for your platform by hand.
 - The environment variable `HIFISHIFTER_MODELS_DIR` overrides the model directory and takes precedence over the shared library.
 
 ### Division of Labor in Plugin Mode
@@ -884,7 +884,7 @@ Besides the logs, the user data lives here (the standalone app and the plug-in s
 | Settings                                                      | `%APPDATA%\HiFiShifter`                        | `~/Library/Application Support/HiFiShifter`                   | `$XDG_CONFIG_HOME/HiFiShifter` (default `~/.config/HiFiShifter`) |
 | Caches (waveform / render)                                    | `%LOCALAPPDATA%\HiFiShifter\cache`             | `~/Library/Caches/HiFiShifter`                                | `$XDG_CACHE_HOME/HiFiShifter` (default `~/.cache/HiFiShifter`)   |
 | Imported media of unsaved sessions                            | `%LOCALAPPDATA%\HiFiShifter\unsaved\<session>` | `~/Library/Application Support/HiFiShifter/unsaved/<session>` | `$XDG_DATA_HOME/HiFiShifter/unsaved/<session>`                   |
-| Shared model library (Windows only, written by the installer) | `%PROGRAMDATA%\HiFiShifter\models\<version>`   | —                                                             | —                                                                |
+| Shared model library (written by the installer) | `%PROGRAMDATA%\HiFiShifter\models\<version>` | `/Library/Application Support/HiFiShifter/models/<version>` | `$XDG_DATA_HOME/HiFiShifter/models/<version>` or `/usr/local/share/HiFiShifter/models/<version>` |
 
 - Imported media of a saved project lives in a `<project name>_media` folder next to the project file; copy the project together with that folder.
 - When upgrading from an older version, the first launch moves the old `com.arounder.hifishifter` directories to the new locations. If both the old and the new directory exist, they are **not merged** (both are left untouched) and a note is written to the log.
