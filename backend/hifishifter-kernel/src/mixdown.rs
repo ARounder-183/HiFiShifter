@@ -1118,6 +1118,71 @@ fn decode_cache_key(path: &str) -> String {
     path.to_string()
 }
 
+/// 混音段缓冲：owned PCM 或共享的缓存条目。
+///
+/// 【为什么不是恒 `Vec<f32>`】共振峰缓存（`formant_cache`）命中时返回
+/// `Arc<Vec<f32>>`；后续只读的路径（时间拉伸输入、混音循环、渲染缓存回填）
+/// 直接共享即可 —— 旧实现无条件 `.clone()`，每个命中 clip 都白付一次
+/// 整段立体声 PCM 的深拷贝。只有真正要可变（pitch edit、气声混入）时才
+/// `into_owned()` 物化。
+enum SegmentBuf {
+    Owned(Vec<f32>),
+    Shared(Arc<Vec<f32>>),
+}
+
+impl SegmentBuf {
+    fn as_slice(&self) -> &[f32] {
+        match self {
+            SegmentBuf::Owned(v) => v,
+            SegmentBuf::Shared(a) => a,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// 可变访问：共享条目先物化为 owned。
+    ///
+    /// 【为什么必须物化而不是就地改】`Shared` 的 Arc 与共振峰缓存共享同一块
+    /// 缓冲，就地修改会毒化缓存条目；`try_unwrap` 成功（缓存已逐出、只此一份）
+    /// 时才允许零拷贝就地改。
+    fn as_mut(&mut self) -> &mut Vec<f32> {
+        match self {
+            SegmentBuf::Owned(v) => v,
+            SegmentBuf::Shared(a) => {
+                let owned =
+                    Arc::try_unwrap(std::mem::take(a)).unwrap_or_else(|a| a.as_ref().clone());
+                *self = SegmentBuf::Owned(owned);
+                match self {
+                    SegmentBuf::Owned(v) => v,
+                    SegmentBuf::Shared(_) => unreachable!("just materialized above"),
+                }
+            }
+        }
+    }
+
+    /// 物化为 owned：唯一持有共享缓冲时零拷贝，否则退回深拷贝。
+    fn into_owned(self) -> Vec<f32> {
+        match self {
+            SegmentBuf::Owned(v) => v,
+            SegmentBuf::Shared(a) => Arc::try_unwrap(a).unwrap_or_else(|a| a.as_ref().clone()),
+        }
+    }
+
+    /// 供渲染缓存回填：共享时直接克隆 Arc，避免再拷贝整段 PCM。
+    fn to_shared(&self) -> Arc<Vec<f32>> {
+        match self {
+            SegmentBuf::Owned(v) => Arc::new(v.clone()),
+            SegmentBuf::Shared(a) => Arc::clone(a),
+        }
+    }
+}
+
 fn render_mixdown_internal(
     timeline: &TimelineState,
     opts: MixdownOptions,
@@ -1492,16 +1557,19 @@ fn render_mixdown_internal(
             in_channels,
             clip.take_channel_mode(),
         );
-        let mut segment = segment;
+        let mut segment = SegmentBuf::Owned(segment);
 
         if let Some(params) = clip
             .formant_morph
             .as_ref()
             .filter(|params| params.enabled && sources.is_some())
         {
-            segment = crate::formant_morph::apply_formant_morph_interleaved(
-                &segment, out_rate, 2, params,
-            )?;
+            segment = SegmentBuf::Owned(crate::formant_morph::apply_formant_morph_interleaved(
+                segment.as_slice(),
+                out_rate,
+                2,
+                params,
+            )?);
         }
         if let Some(params) = clip
             .formant_morph
@@ -1545,10 +1613,15 @@ fn render_mixdown_internal(
                 params,
             );
             match crate::formant_cache::get_or_compute_formant_audio(
-                key, &segment, out_rate, params,
+                key,
+                segment.as_slice(),
+                out_rate,
+                params,
             ) {
                 Ok(entry) => {
-                    segment = entry.pcm_stereo.as_ref().clone();
+                    // 共享缓存条目，不深拷贝：后续只读路径直接用 Arc；
+                    // 真要可变时（apply_pitch_edit）才 into_owned 物化。
+                    segment = SegmentBuf::Shared(Arc::clone(&entry.pcm_stereo));
                 }
                 Err(err) => {
                     if debug {
@@ -1578,7 +1651,13 @@ fn render_mixdown_internal(
         {
             let seg_frames_in = segment.len() / 2;
             let target_frames = ((seg_frames_in as f64) / playback_rate).round().max(2.0) as usize;
-            segment = time_stretch_interleaved(&segment, 2, out_rate, target_frames, opts.stretch);
+            segment = SegmentBuf::Owned(time_stretch_interleaved(
+                segment.as_slice(),
+                2,
+                out_rate,
+                target_frames,
+                opts.stretch,
+            ));
         }
 
         // Loop（循环源）：整文件回绕已在片段构建阶段完成（见上方 build_loop_tiled_segment），
@@ -1655,7 +1734,7 @@ fn render_mixdown_internal(
 
         if opts.apply_pitch_edit {
             let seg_start_sec = clip_start_sec + pre_silence_sec + loop_seg_local_start_sec;
-            let mut seg = segment;
+            let mut seg = segment.into_owned();
             let mut rendered_ok = false;
             let mut used_cache = false;
 
@@ -1720,7 +1799,7 @@ fn render_mixdown_internal(
                     }
                 }
             }
-            segment = seg;
+            segment = SegmentBuf::Owned(seg);
 
             // 【气声层混入】仅在使用缓存时做：未命中时链内已经按 breath_gain 混好，
             // 再混一次会重复。公式与播放侧逐字一致：
@@ -1729,7 +1808,8 @@ fn render_mixdown_internal(
             // 曲线采样边界上与监听出现亚采样级分歧。
             if let Some(stem) = breath_stem.as_ref() {
                 let clip_start_frame = (clip_start_sec * out_rate as f64).round() as u64;
-                for frame in 0..(segment.len() / 2) {
+                let seg_slice = segment.as_mut();
+                for frame in 0..(seg_slice.len() / 2) {
                     let idx = frame * 2;
                     if idx + 1 >= stem.len() {
                         break;
@@ -1741,8 +1821,8 @@ fn render_mixdown_internal(
                         breath_frame_period_ms,
                         1.0,
                     );
-                    segment[idx] += stem[idx] * gain;
-                    segment[idx + 1] += stem[idx + 1] * gain;
+                    seg_slice[idx] += stem[idx] * gain;
+                    seg_slice[idx + 1] += stem[idx + 1] * gain;
                 }
             }
 
@@ -1757,7 +1837,7 @@ fn render_mixdown_internal(
                     crate::render_cache::store_rendered(
                         key,
                         &crate::synth_clip_cache::RenderedClipCacheEntry {
-                            pcm_stereo: Arc::new(segment.clone()),
+                            pcm_stereo: segment.to_shared(),
                             breath_noise_stereo: None,
                             frames: (segment.len() / 2) as u64,
                             sample_rate: out_rate,
@@ -1845,6 +1925,9 @@ fn render_mixdown_internal(
         };
 
         let seg_frames = segment.len() / 2;
+        // 混音循环里逐帧读 `segment`：先解出切片与总长，避免热循环内反复 match。
+        let seg_buf = segment.as_slice();
+        let seg_buf_len = seg_buf.len();
         // `clip_total_frames` 已在上方（clip 几何处）定义 —— 复用门禁与这里必须是同一个值。
         let pre_silence_frames = (pre_silence_sec * out_rate as f64).round().max(0.0) as usize;
 
@@ -1955,7 +2038,7 @@ fn render_mixdown_internal(
 
             // 内容耗尽：fade 激活时保持末帧按淡出增益继续衰减（E 处及其后
             // 增益从 ~1 平滑走到 0）；不激活时维持“越界静音”语义。
-            let seg_avail = si + 1 < segment.len();
+            let seg_avail = si + 1 < seg_buf_len;
             if !seg_avail {
                 if fade_out_frames > 0
                     && local_in_clip >= fade_zone_start
@@ -2003,8 +2086,8 @@ fn render_mixdown_internal(
                 }
                 continue;
             }
-            last_l = segment[si];
-            last_r = segment[si + 1];
+            last_l = seg_buf[si];
+            last_r = seg_buf[si + 1];
             has_last = true;
 
             // 只有真存在曲线时才计算
