@@ -587,6 +587,16 @@ pub(crate) mod tests {
                 .is_err(),
             "提交型任务只能交回一次"
         );
-        assert_eq!(lane.snapshot()["inFlight"], 0);
+        // 【为什么轮询而不是直接断言】commit 回执先于 worker 的在途计数清零
+        // 到达是正常时序：清零发生在 worker 线程收尾时，整机负载下晚几毫秒
+        // 不违反不变量。固定窗口把"暂时还在途"误报成计数泄漏（门禁实测
+        // 偶发红）—— 与上一条用例同款轮询到清零（有上限）。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while lane.snapshot()["inFlight"].as_u64() != Some(0)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(lane.snapshot()["inFlight"], 0, "回执后必须清零在途计数");
     }
 }
