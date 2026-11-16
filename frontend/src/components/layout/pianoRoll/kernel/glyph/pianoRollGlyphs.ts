@@ -49,8 +49,16 @@ import { buildGlyphQuads, type GlyphQuad } from "../../../renderKernel/gl/glyphQ
 /** 图集单页边长（物理像素）。 */
 export const PIANO_ROLL_ATLAS_PAGE_SIZE_PX = 2048;
 
-/** 图集最大页数。 */
-export const PIANO_ROLL_ATLAS_MAX_PAGES = 2;
+/**
+ * 图集最大页数。
+ *
+ * 【为什么必须是 1】`gl/glyphProgram` 只持有**一张**纹理，`glyphSurface.render`
+ * 会把每个脏页整页 `texImage2D` 进同一张纹理 —— 多页时"最后上传的页覆盖先前的"，
+ * 页 0 的四边形采样到页 1 的像素，全部文字乱码。1 页时 `allocate` 满了返回 null，
+ * 管线只跳过**新增**字形（既有文字照常渲染）—— 这是文档化的优雅降级，而不是
+ * 全局损坏。页容量 ~2048² 对轴刻度/音符名/块标签的字形集绰绰有余。
+ */
+export const PIANO_ROLL_ATLAS_MAX_PAGES = 1;
 
 /**
  * 以 `middle` 基准绘制一行文字时，字形槽位在锚点**下方**延伸的高度（CSS px）。
