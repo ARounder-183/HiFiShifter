@@ -714,7 +714,10 @@ mod tests {
         let normalized = path.to_string_lossy().replace('\\', "/");
         assert_eq!(
             normalized,
-            format!("C:/ProgramData/HiFiShifter/plugin-resources/{}", super::runtime_library_name())
+            format!(
+                "C:/ProgramData/HiFiShifter/plugin-resources/{}",
+                super::runtime_library_name()
+            )
         );
     }
 

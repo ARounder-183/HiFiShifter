@@ -131,16 +131,14 @@ pub fn resources_dir_for(module_path: &Path, layout: ResourceLayout) -> Result<P
 /// 共享目录只是安装器版的兜底。
 #[cfg(windows)]
 fn shared_plugin_resources_at(programdata: &Path) -> PathBuf {
-    programdata
-        .join(crate::CLASS_NAME)
-        .join("plugin-resources")
+    programdata.join(crate::CLASS_NAME).join("plugin-resources")
 }
 
 #[cfg(windows)]
 fn shared_plugin_resources() -> Option<PathBuf> {
-    Some(shared_plugin_resources_at(Path::new(
-        &std::env::var_os("PROGRAMDATA")?,
-    )))
+    Some(shared_plugin_resources_at(Path::new(&std::env::var_os(
+        "PROGRAMDATA",
+    )?)))
 }
 
 /// 当前进程登记后的资源根。
