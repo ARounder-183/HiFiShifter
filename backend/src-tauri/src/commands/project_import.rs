@@ -96,7 +96,7 @@ pub(super) fn import_project(
         imported_project_name
     };
 
-    let fragment = build_project_fragment(timeline, source_name.clone());
+    let mut fragment = build_project_fragment(timeline, source_name.clone());
     if fragment.timeline.tracks.is_empty() && fragment.timeline.clips.is_empty() {
         if !imported_notes.trim().is_empty() {
             let mut project = state.project.lock().unwrap_or_else(|e| e.into_inner());
@@ -126,6 +126,16 @@ pub(super) fn import_project(
         return json;
     }
 
+    // 【锁外补元数据】populate_clip_file_metadata 对每个 clip 的每个 take 做
+    // exists()/fs::metadata/指纹（2×64KB 读）/声道头探测 —— 网络盘或冷缓存上
+    // 可能极慢。旧实现在全局 timeline 锁内逐 created id 查找回填，会把所有
+    // 命令与 30Hz 的 UI 轮询卡在磁盘 IO 上。merge_project_fragment 对 fragment
+    // 的每个 clip 都是 `source_clip.clone()` 原样成新 clip（见其 created_clip_ids
+    // 的构建），所以在合并前对 fragment 一次性回填，结果与旧实现一致。
+    for clip in &mut fragment.timeline.clips {
+        crate::state::TimelineState::populate_clip_file_metadata(clip);
+    }
+
     let (merge_result, scale_signature_before, tempo_map_imported, tempo_map_skipped) = {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         state.checkpoint_timeline(&tl, crate::state::HistoryOp::ImportProject);
@@ -149,11 +159,9 @@ pub(super) fn import_project(
             Err(error) => return serde_json::json!({"ok": false, "error": error}),
         };
 
-        for clip_id in &merge.created_clip_ids {
-            if let Some(clip) = tl.clips.iter_mut().find(|clip| clip.id == *clip_id) {
-                crate::state::TimelineState::populate_clip_file_metadata(clip);
-            }
-        }
+        // 新 clip 的文件元数据已在锁外（上方）回填进 fragment，合并时随
+        // `source_clip.clone()` 带入；这里不再逐 id 查找回填 —— 那会把
+        // 慢速磁盘 IO 塞进全局锁。
 
         let affected_roots: std::collections::HashSet<String> = merge
             .created_clip_ids
