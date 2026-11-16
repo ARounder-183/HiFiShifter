@@ -545,6 +545,15 @@ fn build_mel_from_waveform(
     if hop == 0 || n_fft == 0 || win_size == 0 || n_mels == 0 {
         return Err("fcpe mel config invalid".to_string());
     }
+    // win_size 与 n_fft 来自两个独立的环境变量，必须交叉校验：
+    // win_size > n_fft 时下方 `fft_buf[i]`（0..win_size 覆盖到 n_fft 之外）
+    // 与 `fft_buf[win_size..]` 都会直接越界 panic —— 环境变量是用户可配的
+    // 输入，这里必须把它变成一条可恢复的 Err。
+    if win_size > n_fft {
+        return Err(format!(
+            "fcpe mel config invalid: HIFISHIFTER_FCPE_WIN_SIZE ({win_size}) must not exceed HIFISHIFTER_FCPE_N_FFT ({n_fft})"
+        ));
+    }
 
     let y = crate::mel_utils::linear_resample_mono(waveform, in_sr, target_sr);
     let pad_left = ((win_size as isize - hop as isize) / 2).max(0) as usize;
