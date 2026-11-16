@@ -701,7 +701,6 @@ mod tests {
     /// 变 false、time_stretch 落到 Signalsmith），没有任何崩溃或日志能暴露它；
     /// CI 的产物门禁（AppImage / .app 自检）断言的是**文件在哪**，这一条断言的是
     /// **加载器往哪找** —— 两份清单必须互为镜像。
-    #[test]
     /// 安装器版 CLAP 的 SoundTouch 落在全机共享资源目录，路径必须与安装器的
     /// `HFS_CLAP_RES_DIR` 一致。
     #[cfg(target_os = "windows")]
