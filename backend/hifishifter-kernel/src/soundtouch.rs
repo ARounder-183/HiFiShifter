@@ -650,7 +650,16 @@ pub fn try_time_stretch_interleaved_realtime(
             break;
         }
     }
-    Ok(normalize_output_len(out, channels, out_frames_hint))
+    // hint == 0 时与离线入口同款回退：按时间比从输入帧数推算目标长度。
+    // （离线入口在 629 行有这条回退；现在所有调用方都保证 hint >= 2，
+    // 但两份入口的契约应当一致 —— 下一个调用方不该踩进"静默输出空"的坑。）
+    let in_frames = input_interleaved.len() / channels.max(1);
+    let target_frames = if out_frames_hint > 0 {
+        out_frames_hint
+    } else {
+        ((in_frames as f64) * time_ratio).round().max(1.0) as usize
+    };
+    Ok(normalize_output_len(out, channels, target_frames))
 }
 
 #[cfg(test)]
