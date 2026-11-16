@@ -1,6 +1,6 @@
 //! 锁定SDK的IConnectionPoint/IHostApplication/IMessage ABI；消息允许宿主放置代理。
 use hifishifter_plugin::vst3_abi::{
-    iid_matches, UnknownVtbl, TResult, K_INVALID_ARGUMENT, K_NOT_IMPLEMENTED, K_NO_INTERFACE,
+    iid_matches, TResult, UnknownVtbl, K_INVALID_ARGUMENT, K_NOT_IMPLEMENTED, K_NO_INTERFACE,
     K_RESULT_FALSE, K_RESULT_OK,
 };
 use std::ffi::{c_char, c_void, CStr};
@@ -119,7 +119,8 @@ unsafe fn record_host_name(host: *mut c_void) {
 ///
 /// 编排（收集 → 解析 → 登记 → 切日志）只有 `host_identity::resolve_and_record` 一份；
 /// 重复调用的幂等语义（Cubase 迟到的名字）也钉在那里。
-pub(crate) fn resolve_and_record_host_identity() -> hifishifter_plugin::host_identity::HostIdentity {
+pub(crate) fn resolve_and_record_host_identity() -> hifishifter_plugin::host_identity::HostIdentity
+{
     // 收集 → 解析 → 登记 → 切日志的编排只有共享层那一份（`host_identity::
     // resolve_and_record`）；这里只负责把 VST3 专属的证据（`IHostApplication::getName`
     // 的读数）追加到进程证据上。CLAP 没有对应接口，走的是不带追加的便捷入口。

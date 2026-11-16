@@ -93,12 +93,12 @@ pub mod startup;
 pub mod state_channel;
 pub mod state_stream;
 pub use hifishifter_plugin_core::sync;
-/// VST3 的 ABI 词汇（见模块文档：为什么它允许住在共享层）。
-pub mod vst3_abi;
 #[cfg(any(test, feature = "test-support"))]
 mod test_allocator;
 #[cfg(any(test, feature = "test-support"))]
 mod test_host;
+/// VST3 的 ABI 词汇（见模块文档：为什么它允许住在共享层）。
+pub mod vst3_abi;
 
 /// 共享测试夹具的**唯一**对外出口（`test-support` 特性；产品构建整块不存在）。
 ///
@@ -137,7 +137,6 @@ mod test_prewarm_guard {
         hifishifter_kernel::vocoder_ort_session::set_async_session_prewarm(false);
     }
 }
-
 
 /// VST3 类名。**必须与 ARA 工厂的 plugInName 一致** —— ARA 的 VST3 配对规则要求如此。
 pub use hifishifter_plugin_core::CLASS_NAME;

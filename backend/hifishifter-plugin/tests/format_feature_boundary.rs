@@ -46,7 +46,11 @@ fn feature_tree(package: &str) -> String {
 #[test]
 fn the_implementation_layer_enables_no_format_feature() {
     let tree = feature_tree("hifishifter-plugin");
-    for forbidden in ["feature \"vst3\"", "feature \"clap\"", "feature \"audio-unit-v2\""] {
+    for forbidden in [
+        "feature \"vst3\"",
+        "feature \"clap\"",
+        "feature \"audio-unit-v2\"",
+    ] {
         assert!(
             !tree.contains(forbidden),
             "hifishifter-plugin 的依赖图把 ara2-bridge 的格式特性 {forbidden} 拉了进来：\

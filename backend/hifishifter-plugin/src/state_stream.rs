@@ -17,6 +17,11 @@ struct StreamVtbl {
 }
 
 /// 宿主拥有有效IBStream，生命周期覆盖调用；空旧state合法。
+///
+/// # Safety
+/// `stream` 必须指向宿主本次 `getState`/`setState` 回调给出的有效 `IBStream`
+/// 实例（其 vtable 与锁定 SDK 的 `IBStream` 逐槽一致），且只在本次调用内使用；
+/// 宿主保证回调期间可读/可写。
 pub unsafe fn read_state(stream: *mut c_void) -> Result<Vec<u8>, String> {
     if stream.is_null() {
         return Err("null state stream".into());
@@ -68,6 +73,10 @@ pub unsafe fn read_state(stream: *mut c_void) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 /// 宿主拥有有效可写IBStream；全部字节完成前不报告成功。
+///
+/// # Safety
+/// `stream` 必须指向宿主本次 `setState` 回调给出的可写 `IBStream` 实例，
+/// 且只在本次调用内使用。
 pub unsafe fn write_state(stream: *mut c_void, bytes: &[u8]) -> Result<(), String> {
     if stream.is_null() || bytes.len() > hifishifter_host_link::MAX_COMPONENT_STATE {
         return Err("invalid state stream/length".into());

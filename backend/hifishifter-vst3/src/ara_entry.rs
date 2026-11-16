@@ -4,11 +4,11 @@
 //! [`hifishifter_plugin::ara::binder::AraBinder`] —— CLAP 外壳调的是**同一个方法**。本文件只剩 VST3 的
 //! COM 外壳：把 shim 的三个回调转成对 binder 的调用，并持有唯一的 owning COM 引用。
 
-use hifishifter_plugin::ara::binder::AraBinder;
-use hifishifter_plugin::render::extension::ExtensionOwner;
 use ara2_bridge::companion::vst3::ffi::*;
 use ara2_bridge::companion::{CompanionFactory, CompanionRoles};
 use ara2_bridge::core::AraError;
+use hifishifter_plugin::ara::binder::AraBinder;
+use hifishifter_plugin::render::extension::ExtensionOwner;
 use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr::NonNull;

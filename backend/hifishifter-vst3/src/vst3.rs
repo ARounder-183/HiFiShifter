@@ -20,16 +20,16 @@ use hifishifter_plugin::render::extension::ExtensionOwner;
 // `vst3_abi`：`host/reaper`、`editor/routing`、`editor/gui/linux` 等共享代码也消费
 // 它，而依赖方向（壳 → 共享层）决定了词汇不能住在本模块。本模块只保留工厂 /
 // 组件 / 处理器 / 控制器的实现与自己的类 ID、接口 IID。
-use hifishifter_plugin::vst3_abi::{
-    iid_matches, uid_guid, UnknownVtbl, TResult, Tuid, K_INVALID_ARGUMENT, K_NO_INTERFACE,
-    K_NOT_IMPLEMENTED, K_RESULT_FALSE, K_RESULT_OK,
-};
 use ara2_bridge::companion::vst3::ffi::{
     ara2_vst3_interface_id, ara2_vst3_main_factory_category, Ara2Vst3InterfaceId,
     Ara2Vst3InterfaceKind, ARA2_VST3_OK,
 };
 use ara2_bridge::companion::vst3::Vst3MainFactoryAdapter;
 use ara2_bridge::companion::CompanionRoles;
+use hifishifter_plugin::vst3_abi::{
+    iid_matches, uid_guid, TResult, Tuid, UnknownVtbl, K_INVALID_ARGUMENT, K_NOT_IMPLEMENTED,
+    K_NO_INTERFACE, K_RESULT_FALSE, K_RESULT_OK,
+};
 use std::ffi::{c_char, c_void};
 use std::mem::offset_of;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -695,7 +695,9 @@ unsafe extern "system" fn factory_create_instance(
                         .is_some_and(|words| unsafe { iid_matches(iid as *const u8, words) });
                 if !supported {
                     // `adapter` 在此 drop：消耗它唯一的 COM 引用，宿主拿不到对象。
-                    hifishifter_plugin::log_line("factory createInstance ARA main factory: unsupported iid");
+                    hifishifter_plugin::log_line(
+                        "factory createInstance ARA main factory: unsupported iid",
+                    );
                     return K_NO_INTERFACE;
                 }
                 // 【为什么记这一行】创建 ARA 主工厂是宿主**明确要走 ARA 路径**的第一个
@@ -970,7 +972,9 @@ unsafe extern "system" fn component_query_interface(
             // 查一次并缓存，因此这里必须**先于**通用未命中日志返回，否则日志会把它
             // 记成"宿主查了个我们不认识的接口"。
             if unsafe { iid_matches(iid, IID_IPROCESS_CONTEXT_REQUIREMENTS) } {
-                hifishifter_plugin::log_line("component queryInterface hit IProcessContextRequirements");
+                hifishifter_plugin::log_line(
+                    "component queryInterface hit IProcessContextRequirements",
+                );
                 unsafe {
                     processor_add_ref(processor);
                     *obj = std::ptr::addr_of_mut!((*processor).context_requirements_vtbl).cast();
@@ -1263,8 +1267,7 @@ unsafe extern "system" fn component_set_active(this: *mut c_void, state: i8) -> 
                 // 表现为"等待宿主音频"。这里用组件持有的 `IHostApplication` 引用
                 // 在**当前**线程重建一次；失败只降级为 ARA-only，不会比现状更糟。
                 let host = unsafe { (*processor).connection.host_raw() };
-                if !host.is_null() && owner.native_adapter_unavailable()
-                {
+                if !host.is_null() && owner.native_adapter_unavailable() {
                     unsafe { owner.rebind_host_adapter(host) };
                 }
                 // 【为什么记这一行】`setActive` 是 ARA 绑定窗口的关闭点：契约规定
@@ -1528,7 +1531,9 @@ unsafe extern "system" fn audio_setup_processing(
             // `PlaybackSnapshot::copy_block` 的线性重采样出音。**低于 44.1k 时是降采样**，线性
             // 插值没有抗混叠滤波 ⇒ 有明显镜像，所以单独记一条警告 —— 可诊断的降级优于静默消失。
             // 真正按宿主率渲染内部快照（消除这次降采样）是独立一期工作。
-            if !hifishifter_plugin::render::extension::SUPPORTED_SAMPLE_RATE.contains(&setup.sample_rate) {
+            if !hifishifter_plugin::render::extension::SUPPORTED_SAMPLE_RATE
+                .contains(&setup.sample_rate)
+            {
                 hifishifter_plugin::log_line(&format!(
                     "[vst3] setupProcessing refused: sampleRate={} is outside 8000..=384000",
                     setup.sample_rate
@@ -1645,7 +1650,10 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
     //
     // 只跳过 `InvalidArgument`（data 本身非法）：那种情况下连字段读取都不该做。
     let mut evidence = None;
-    if !matches!(shape, Err(hifishifter_plugin::audio_abi::BufferError::InvalidArgument)) {
+    if !matches!(
+        shape,
+        Err(hifishifter_plugin::audio_abi::BufferError::InvalidArgument)
+    ) {
         // SAFETY: 宿主持有 Processor；data 的字段布局由 `validate` 的调用契约保证。
         let probe = unsafe { &mut *data.cast::<hifishifter_plugin::audio_abi::ProcessData>() };
         // SAFETY: this 是存活的音频接口子对象。
@@ -1664,7 +1672,7 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             let block = hifishifter_plugin::block_context::BlockContext::from_vst3(context);
             // 【观察顺序：离线 pass → 捕获 → 宿主采样】三步的顺序与依赖写在
             // `observe_input_block` 里（CLAP 走的是同一个方法），外壳不再复述。
-            evidence = owner.capture_observe(probe, block);
+            evidence = unsafe { owner.capture_observe(probe, block) };
         }
     }
     match shape {
@@ -1684,12 +1692,13 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                 None
             } else {
                 // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
-                Some(hifishifter_plugin::block_context::BlockContext::from_vst3(unsafe {
-                    &*data.process_context
-                }))
+                Some(hifishifter_plugin::block_context::BlockContext::from_vst3(
+                    unsafe { &*data.process_context },
+                ))
             };
             // SAFETY: validate 已确认输出总线非空、非空平面至少含 num_samples 帧。
-            let Some(mut block) = (unsafe { hifishifter_plugin::audio_abi::block_from_vst3(data) }) else {
+            let Some(mut block) = (unsafe { hifishifter_plugin::audio_abi::block_from_vst3(data) })
+            else {
                 return K_RESULT_OK;
             };
             // SAFETY: 与 `block_from_vst3` 同一份宿主缓冲，且只在本次回调内使用。
@@ -2185,11 +2194,8 @@ unsafe extern "system" fn edit_controller_set_component_handler(
                 return K_INVALID_ARGUMENT;
             }
             let controller = unsafe { &*(this as *const EditController) };
-            if controller
-                .editor_link
-                .set_component_handler(handler)
-                .is_err()
-            {
+            // SAFETY: handler 由宿主在 setComponentHandler 契约下传入，本次调用期间可读。
+            if unsafe { controller.editor_link.set_component_handler(handler) }.is_err() {
                 return K_RESULT_FALSE;
             }
             hifishifter_plugin::log_line(&format!(
@@ -2421,7 +2427,9 @@ unsafe extern "system" fn pc_connect(this: *mut c_void, other: *mut c_void) -> T
             let result = unsafe { processor.connection.connect(other) };
             if result == K_RESULT_OK {
                 let sent = processor.connection.send(Some(processor.route.token()));
-                hifishifter_plugin::log_line(&format!("processor connection route sent result={sent}"));
+                hifishifter_plugin::log_line(&format!(
+                    "processor connection route sent result={sent}"
+                ));
             }
             result
         })
@@ -2525,11 +2533,15 @@ unsafe extern "system" fn cc_notify(this: *mut c_void, message: *mut c_void) -> 
                 Ok(crate::connection::Message::Route { pid, token }) => {
                     match controller.editor_link.bind(pid, &token) {
                         Ok(()) => {
-                            hifishifter_plugin::log_line("controller editor route bound to actual processor");
+                            hifishifter_plugin::log_line(
+                                "controller editor route bound to actual processor",
+                            );
                             K_RESULT_OK
                         }
                         Err(error) => {
-                            hifishifter_plugin::log_line(&format!("controller editor route rejected: {error}"));
+                            hifishifter_plugin::log_line(&format!(
+                                "controller editor route rejected: {error}"
+                            ));
                             K_RESULT_FALSE
                         }
                     }
@@ -2579,17 +2591,17 @@ pub fn new_main_factory_adapter() -> Option<Vst3MainFactoryAdapter> {
 }
 
 #[cfg(test)]
+mod ara_entry_tests;
+#[cfg(test)]
 mod audio_boundary_tests;
+#[cfg(test)]
+mod class_id_tests;
 #[cfg(test)]
 mod context_requirements_tests;
 #[cfg(test)]
 mod factory_declaration_tests;
 #[cfg(test)]
 mod host_handshake_tests;
-#[cfg(test)]
-mod ara_entry_tests;
-#[cfg(test)]
-mod class_id_tests;
 #[cfg(test)]
 mod lifetime_tests;
 #[cfg(test)]

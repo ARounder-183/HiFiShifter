@@ -39,8 +39,8 @@
 
 pub mod ara_entry;
 pub mod connection;
-pub mod vst3;
 pub mod view;
+pub mod vst3;
 
 use std::ffi::c_void;
 

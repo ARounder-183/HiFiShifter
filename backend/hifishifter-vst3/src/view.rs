@@ -1,6 +1,6 @@
 //! 按锁定iplugview.h实现的原生VST3视图ABI；只操作自有子窗口。
 use hifishifter_plugin::vst3_abi::{
-    iid_matches, UnknownVtbl, TResult, K_INVALID_ARGUMENT, K_NO_INTERFACE, K_RESULT_FALSE,
+    iid_matches, TResult, UnknownVtbl, K_INVALID_ARGUMENT, K_NO_INTERFACE, K_RESULT_FALSE,
     K_RESULT_OK,
 };
 use std::ffi::{c_char, c_void, CStr};
@@ -285,7 +285,12 @@ unsafe extern "system" fn attached(
             // 【Unavailable 是"结论"，不是错误】宿主拿不到 GUI 时看到的是空面板 +
             // 日志里一行可搜到的原因；`attached` 必须如实返回失败，否则宿主会以为
             // 面板里有一个能用的编辑器（见方案 §3.4）。
-            Ok(host) if matches!(host.fidelity(), hifishifter_plugin::editor::gui::GuiFidelity::Unavailable(_)) => {
+            Ok(host)
+                if matches!(
+                    host.fidelity(),
+                    hifishifter_plugin::editor::gui::GuiFidelity::Unavailable(_)
+                ) =>
+            {
                 let reason = host.fidelity().as_str();
                 drop(state);
                 drop(host);
@@ -296,10 +301,16 @@ unsafe extern "system" fn attached(
                 let fidelity = host.fidelity();
                 state.native = Some(host);
                 drop(state);
-                hifishifter_plugin::gui_log_line(&format!("editor view attached ({})", fidelity.as_str()));
+                hifishifter_plugin::gui_log_line(&format!(
+                    "editor view attached ({})",
+                    fidelity.as_str()
+                ));
                 // 【为什么要单独一行】"浮窗"是一种**有损**的降级：泵不在宿主线程上，
                 // 宿主 Undo 的合并粒度会变粗。用户报"撤销一次退两步"时这行是关键线索。
-                if matches!(fidelity, hifishifter_plugin::editor::gui::GuiFidelity::FloatingWindow) {
+                if matches!(
+                    fidelity,
+                    hifishifter_plugin::editor::gui::GuiFidelity::FloatingWindow
+                ) {
                     hifishifter_plugin::gui_log_line(
                         "running on a private GUI thread; host undo coalescing degraded",
                     );

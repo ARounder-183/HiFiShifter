@@ -222,9 +222,9 @@ fn host_entry_reference_keeps_the_extension_owner_alive() {
 /// 真COM组件、真实route租约与native entry同时持有；释放入口不能牵连同文档/另一文档actor。
 #[test]
 fn task34_real_processor_release_revokes_routes_without_retaining_document() {
-    use hifishifter_plugin::editor::EditorLink;
-    use hifishifter_plugin::editor::session::{UiRequest, UiSink};
     use ara2_bridge::{core::ApiGeneration, plugin::ExtensionRoles};
+    use hifishifter_plugin::editor::session::{UiRequest, UiSink};
+    use hifishifter_plugin::editor::EditorLink;
     use std::sync::{atomic::AtomicBool, mpsc};
     let model = hifishifter_plugin::ara::model::ModelHandle::new();
     let document = model.session();
@@ -354,9 +354,9 @@ fn task34_real_processor_release_revokes_routes_without_retaining_document() {
 /// 实际IComponent getState/setState经过IBStream ABI；短读写也必须保存共享actor最新值的组件范围。
 #[test]
 fn task34_real_component_state_stream_flushes_and_saves_only_its_scope() {
-    use hifishifter_plugin::editor::EditorLink;
-    use hifishifter_plugin::editor::session::{UiRequest, UiSink};
     use ara2_bridge::{core::ApiGeneration, plugin::ExtensionRoles};
+    use hifishifter_plugin::editor::session::{UiRequest, UiSink};
+    use hifishifter_plugin::editor::EditorLink;
     use std::sync::{atomic::AtomicBool, mpsc};
     #[repr(C)]
     struct Stream {

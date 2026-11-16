@@ -190,12 +190,13 @@ pub fn is_vegas_family() -> bool {
 ///
 /// 【为什么绝不用于分支】按宿主名分支会让"没见过的宿主"退化成不可用；一切差异都应由
 /// 能力探测（`BootstrapFlags` / `NativeHost::from_context` 的 Option bundle）决定。
-static HOST_APPLICATION_NAME: std::sync::Mutex<Option<String>> =
-    std::sync::Mutex::new(None);
+static HOST_APPLICATION_NAME: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// 登记宿主自报的应用名（VST3 外壳在 `IHostApplication` 握手成功后调用）。
 pub fn note_host_application_name(name: &str) {
-    *HOST_APPLICATION_NAME.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.to_owned());
+    *HOST_APPLICATION_NAME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(name.to_owned());
 }
 
 /// 读回宿主自报的应用名（未识别为 `None`）。只读，供证据链与诊断输出。

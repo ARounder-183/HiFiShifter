@@ -14,7 +14,8 @@ use hifishifter_plugin::sync::MutexExt;
 fn with_a_playback_sibling(
     model: &hifishifter_plugin::ara::model::ModelHandle,
 ) -> std::sync::Arc<hifishifter_plugin::render::extension::ExtensionOwner> {
-    let owner = std::sync::Arc::new(hifishifter_plugin::render::extension::ExtensionOwner::default());
+    let owner =
+        std::sync::Arc::new(hifishifter_plugin::render::extension::ExtensionOwner::default());
     owner
         .bind_to_document(
             model.session(),
@@ -1346,7 +1347,12 @@ fn a_recorded_take_is_rendered_and_published_through_the_snapshot_reader() {
     };
     // SAFETY: bus 的形状与长度由本用例保证；publisher 由 owner 保留。
     let ready = unsafe {
-        owner.snapshots[1].copy_block(0, 48_000, &mut hifishifter_plugin::audio_abi::output_bus(&mut bus), 64)
+        owner.snapshots[1].copy_block(
+            0,
+            48_000,
+            &mut hifishifter_plugin::audio_abi::output_bus(&mut bus),
+            64,
+        )
     };
     assert!(ready, "录制之后必须有一份可读的快照");
     // 【为什么不比对具体样本值】这条通路下游是内核的合成（可能含神经网络声码器），

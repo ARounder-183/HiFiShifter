@@ -276,7 +276,7 @@ MultitrackStudio）的 CLAP ARA 仍需逐个真机验收。
   `get_waveform_mipmap_binary` / `batch_get_waveform_mipmap` 由共享会话按 `WFPK` v2 协议
   从捕获 PCM 编码（分块 min/max，三级除数 16/512/4096）并按源缓存 —— 与 VST3 同一个函数。
 - **捕获运行时是共享的**：`recorder` / `sidecar` / `store` / `timeline` / `transport`
-  从 VST3 crate 搬进 `backend/hifishifter-capture/`（纯机械搬迁 + 中性类型转换），VST3 与
+  从（当时的）VST3 crate 搬进 `backend/hifishifter-capture/`（纯机械搬迁 + 中性类型转换），VST3 与
   CLAP 两个外壳都只是它的适配层：VST3 把 `ProcessContext` 变成 `InputBlock`，CLAP 把
   `clap_event_transport_t` 变成同一个形状。因此 "CLAP 能录" 与 "VST3 能录" 是同一条
   代码路径 —— 不是一份为 CLAP 重写的简化版。
@@ -333,6 +333,7 @@ REAPER 7.85 / Windows x64 的 CLAP 扫描、实例化与 Capture 形态已由隔
 | 编辑器链路心跳 | `EditController::new` → `register_heartbeat` | `EditorLink::for_owner` → 同一个 `register_heartbeat` | `live_links()` → `host_tick`（私有状态通知 / 宿主 Undo 收口） |
 | 总线 / 端口名 | `BusInfo::name` | `clap_audio_port_info_t::name` | `hifishifter_plugin_core::MAIN_BUS_NAME` |
 | 模块加载诊断 | `GetPluginFactory` / `InitDll` | `clap_entry.init` | `hifishifter_plugin::log_module_loaded` |
+| 模块入口与导出表 | `hifishifter-vst3` 壳（恰好 3 个符号） | `hifishifter-clap` 壳（恰好 1 个符号） | 各壳自持入口；`clap_exports` 钉死 VST3 符号缺席、`vst3_exports` 钉死入口齐全 |
 
 ### 第二轮审查（2026-11 上旬）：又收敛掉的九处
 
@@ -463,12 +464,16 @@ companion 的 `clap` feature 只挂在 `[dev-dependencies]`：它是纯 checked-
 归属规则：
 
 - `fade`（校验 `hifishifter_kernel::fade_curves` 的形状接受域）与
-  `host_identity`（Windows ToolHelp 进程探测 / VST3 宿主名证据）是 **VST3 专属**，
-  留在 `hifishifter-plugin`；core 曾把它们连同 WebView2 / Windows API / ONNX /
-  SoundTouch 一起机械复制进来，结果一个只做字节转发的 CLAP 外壳也要链接整个推理内核。
+  `host_identity`（Windows ToolHelp 进程探测 / 宿主名证据链）住在 `hifishifter-plugin`
+  （共享实现层）——它们被两种格式的路径共同消费；core 曾把它们连同 WebView2 /
+  Windows API / ONNX / SoundTouch 一起机械复制进来，结果一个只做字节转发的 CLAP
+  外壳也要链接整个推理内核。**VST3 专属的东西只有两处**：ABI 词汇（`vst3_abi`，
+  被 REAPER 原生扩展等共享代码消费而被迫留在共享层，见其模块文档）与壳体本身
+  （`backend/hifishifter-vst3/`）。
 - 格式 crate 不得因为「core 有了」就继承宿主专属依赖。新增格式时先问"这个模块是否
-  被至少一个非 VST3 格式消费"，答不出就留在 VST3。`no_tauri_in_dependency_tree.rs`
-  与 `cargo tree -p <格式>` 是这条边界的判据。
+  被至少一个非 VST3 格式消费"，答不出就归 `hifishifter-vst3` 壳。
+  `no_tauri_in_dependency_tree.rs`（含 `hifishifter-vst3`）与
+  `format_feature_boundary.rs` 是这条边界的判据。
 
 ---
 
@@ -503,3 +508,5 @@ companion 的 `clap` feature 只挂在 `[dev-dependencies]`：它是纯 checked-
 | 丢失字段登记 | `backend/hifishifter-plugin/src/ara/mapping.rs`（`LOST_FIELDS`） |
 | 渲染事实 | `backend/hifishifter-plugin/src/host/geometry.rs` |
 | CLAP 外壳 | `backend/hifishifter-clap/` |
+| VST3 外壳 | `backend/hifishifter-vst3/`（模块入口、工厂/组件/处理器、IPlugView、IConnectionPoint、ARA COM 入口） |
+| VST3 ABI 词汇 | `backend/hifishifter-plugin/src/vst3_abi.rs` |

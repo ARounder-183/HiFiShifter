@@ -5,12 +5,12 @@
 //! 复位）仍由共享层 `ara/binder.rs` 的用例覆盖。
 
 use super::*;
+use crate::ara_entry::HostEntry;
 use ara2_bridge::companion::vst3::ffi::{ara2_vst3_plugin_entry_bind, ARA2_VST3_OK};
-use ara2_bridge::core::ApiGeneration;
 use ara2_bridge::companion::{CompanionFactory, CompanionRoles};
+use ara2_bridge::core::ApiGeneration;
 use ara2_bridge::plugin::{FactoryBuilder, PluginBuilder};
 use ara2_bridge::sys::*;
-use crate::ara_entry::HostEntry;
 
 /// 真实空文档绑定也必须收到销毁；不依赖 first region assignment 猜 document。
 #[test]
@@ -35,7 +35,10 @@ fn bound_native_entry_is_tombstoned_by_actual_document_teardown() {
     ));
     factory
         .entry()
-        .initialize(ApiGeneration::V2Final, hifishifter_plugin::test_support::assert_address())
+        .initialize(
+            ApiGeneration::V2Final,
+            hifishifter_plugin::test_support::assert_address(),
+        )
         .unwrap();
     let mut fixture = hifishifter_plugin::test_support::HostFixture::new(vec![]);
     let host = fixture.instance();
@@ -53,9 +56,10 @@ fn bound_native_entry_is_tombstoned_by_actual_document_teardown() {
     assert!(!raw.is_null());
     // SAFETY: 原生工厂返回完整 packed 实例。
     let controller = unsafe { raw.read_unaligned() };
-    let document =
-        hifishifter_plugin::render::document::DocumentSession::lookup(controller.documentControllerRef as usize)
-            .unwrap();
+    let document = hifishifter_plugin::render::document::DocumentSession::lookup(
+        controller.documentControllerRef as usize,
+    )
+    .unwrap();
     // SAFETY: test factory backing 已保留到进程结束。
     let association = unsafe { CompanionFactory::from_raw("bound", &*factory.as_raw()) }.unwrap();
     let owner = Arc::new(ExtensionOwner::default());
@@ -84,8 +88,7 @@ fn bound_native_entry_is_tombstoned_by_actual_document_teardown() {
     assert!(probe.controller_alive());
     let identity = Box::new(0_u8);
     let key = (&*identity as *const u8) as u64;
-    hifishifter_plugin::test_support::register_region_owner(key, document.id, 0)
-        .unwrap();
+    hifishifter_plugin::test_support::register_region_owner(key, document.id, 0).unwrap();
     // SAFETY: extension 与 controller 保留；region 仅作为不透明身份。
     unsafe {
         let extension = extension_raw
@@ -154,7 +157,10 @@ fn a_reopened_document_rebinds_through_a_reset_companion() {
     ));
     factory
         .entry()
-        .initialize(ApiGeneration::V2Final, hifishifter_plugin::test_support::assert_address())
+        .initialize(
+            ApiGeneration::V2Final,
+            hifishifter_plugin::test_support::assert_address(),
+        )
         .unwrap();
     let mut fixture = hifishifter_plugin::test_support::HostFixture::new(vec![]);
     let host = fixture.instance();

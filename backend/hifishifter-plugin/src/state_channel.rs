@@ -20,12 +20,10 @@ pub type TrackBindings = BTreeMap<String, Vec<(String, String)>>;
 pub const STATE_VERSION: u64 = EditState::STATE_VERSION;
 
 pub fn empty_state_payload() -> Vec<u8> {
-    EditState::default()
-        .encode()
-        .unwrap_or_else(|error| {
-            log::warn!("[state] empty state payload failed to encode: {error}");
-            Vec::new()
-        })
+    EditState::default().encode().unwrap_or_else(|error| {
+        log::warn!("[state] empty state payload failed to encode: {error}");
+        Vec::new()
+    })
 }
 
 /// 插件自有、宿主表达不到的**逐片段**属性。

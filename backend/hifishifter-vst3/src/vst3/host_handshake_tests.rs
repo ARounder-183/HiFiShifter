@@ -116,7 +116,10 @@ fn every_host_generation_in_our_range_yields_a_real_controller() {
         let factory = probe_factory();
         factory
             .entry()
-            .initialize(generation, hifishifter_plugin::test_support::assert_address())
+            .initialize(
+                generation,
+                hifishifter_plugin::test_support::assert_address(),
+            )
             .unwrap_or_else(|error| {
                 panic!("{generation:?} 被拒了：{error} —— 宿主拿不到文档控制器，会拿着 null 继续写")
             });

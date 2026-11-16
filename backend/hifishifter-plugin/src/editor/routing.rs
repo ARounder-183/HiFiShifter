@@ -2,7 +2,7 @@
 use crate::render::extension::ExtensionOwner;
 // `IComponentHandler2` 是 VST3 宿主独有的接口；词汇来自共享层的 `vst3_abi`
 // （REAPER 原生扩展同理，见该模块文档）。
-use crate::vst3_abi::{platform_iid, UnknownVtbl, TResult, K_RESULT_OK};
+use crate::vst3_abi::{platform_iid, TResult, UnknownVtbl, K_RESULT_OK};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -195,7 +195,12 @@ impl EditorLink {
     ///
     /// 【为什么 pub】CLAP 没有对应宿主接口；只有 `hifishifter-vst3` 调它。
     /// 词汇（IID / `platform_iid`）来自共享层 [`crate::vst3_abi`]。
-    pub fn set_component_handler(&self, handler: *mut c_void) -> Result<(), String> {
+    ///
+    /// # Safety
+    /// `handler` 必须指向一个存活的 `IComponentHandler`（宿主在
+    /// `IEditController::setComponentHandler` 契约下传入），且本次调用期间可读；
+    /// 本函数只做 `queryInterface` 与引用计数，不保存裸指针本身。
+    pub unsafe fn set_component_handler(&self, handler: *mut c_void) -> Result<(), String> {
         let next = if handler.is_null() {
             0
         } else {
@@ -653,14 +658,16 @@ mod tests {
         });
         let pointer = (&*handler as *const FakeHandler) as *mut c_void;
         let link = EditorLink::default();
-        link.set_component_handler(pointer).unwrap();
+        // SAFETY: pointer 指向本测试构造的 FakeHandler，本次调用期间存活。
+        unsafe { link.set_component_handler(pointer) }.unwrap();
         link.mark_dirty();
         assert_eq!(handler.dirty.load(Ordering::Acquire), 0);
         link.flush_dirty();
         assert_eq!(handler.dirty.load(Ordering::Acquire), 1);
         link.flush_dirty();
         assert_eq!(handler.dirty.load(Ordering::Acquire), 1);
-        let _ = link.set_component_handler(std::ptr::null_mut());
+        // SAFETY: null 是显式清除路径。
+        let _ = unsafe { link.set_component_handler(std::ptr::null_mut()) };
         assert!(handler.refs.load(Ordering::Acquire) >= 1);
         drop(link);
         drop(handler);
