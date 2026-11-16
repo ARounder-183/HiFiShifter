@@ -2413,8 +2413,11 @@ export const jaJP = {
         "波形/レンダリング キャッシュ、ログ、WebView データ、一時ファイル。",
     installer_repair_done: "修復が完了しました。",
     installer_reinstall_options_title: "旧バージョンのアンインストール",
-    installer_reinstall_options_subtitle: "インストール前に共有モデルを削除するか選択してください。",
-    installer_reinstall_options_top: "HiFiShifter の旧バージョンが見つかりました。先にアンインストールし、新しいバージョンは同じフォルダーにインストールします。",
+    installer_reinstall_options_subtitle:
+        "インストール前に共有モデルを削除するか選択してください。",
+    installer_reinstall_options_top:
+        "HiFiShifter の旧バージョンが見つかりました。先にアンインストールし、新しいバージョンは同じフォルダーにインストールします。",
     installer_reinstall_uninstalling: "旧バージョンをアンインストール中...",
-    installer_reinstall_failed: "旧バージョンをアンインストールできませんでした。手動でアンインストールしてから再試行してください。",
+    installer_reinstall_failed:
+        "旧バージョンをアンインストールできませんでした。手動でアンインストールしてから再試行してください。",
 } as const;

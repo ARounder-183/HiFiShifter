@@ -2319,7 +2319,8 @@ export const zhTW = {
     installer_repair_done: "修復完成。",
     installer_reinstall_options_title: "卸載舊版本",
     installer_reinstall_options_subtitle: "選擇安裝前是否刪除共用模型檔案。",
-    installer_reinstall_options_top: "偵測到已安裝的 HiFiShifter。安裝新版本前會先卸載舊版本，並沿用原來的安裝目錄。",
+    installer_reinstall_options_top:
+        "偵測到已安裝的 HiFiShifter。安裝新版本前會先卸載舊版本，並沿用原來的安裝目錄。",
     installer_reinstall_uninstalling: "正在卸載舊版本...",
     installer_reinstall_failed: "卸載舊版本失敗，請先手動卸載後重試。",
 } as const;

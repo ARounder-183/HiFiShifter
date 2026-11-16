@@ -2399,8 +2399,11 @@ export const enUS = {
         "Waveform/render caches, logs, WebView data and temporary files.",
     installer_repair_done: "Repair complete.",
     installer_reinstall_options_title: "Remove the previous version",
-    installer_reinstall_options_subtitle: "Choose whether to delete shared model files before installing.",
-    installer_reinstall_options_top: "A previous version of HiFiShifter was found. It will be uninstalled first. The new version will use the same install folder.",
+    installer_reinstall_options_subtitle:
+        "Choose whether to delete shared model files before installing.",
+    installer_reinstall_options_top:
+        "A previous version of HiFiShifter was found. It will be uninstalled first. The new version will use the same install folder.",
     installer_reinstall_uninstalling: "Uninstalling the previous version...",
-    installer_reinstall_failed: "Could not uninstall the previous version. Uninstall it manually and try again.",
+    installer_reinstall_failed:
+        "Could not uninstall the previous version. Uninstall it manually and try again.",
 } as const;

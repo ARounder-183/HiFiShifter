@@ -2380,7 +2380,8 @@ export const koKR = {
     installer_repair_done: "복구가 완료되었습니다.",
     installer_reinstall_options_title: "이전 버전 제거",
     installer_reinstall_options_subtitle: "설치 전에 공유 모델 파일을 삭제할지 선택하세요.",
-    installer_reinstall_options_top: "이전 버전의 HiFiShifter가 있습니다. 새 버전을 설치하기 전에 먼저 제거하며 같은 설치 폴더를 사용합니다.",
+    installer_reinstall_options_top:
+        "이전 버전의 HiFiShifter가 있습니다. 새 버전을 설치하기 전에 먼저 제거하며 같은 설치 폴더를 사용합니다.",
     installer_reinstall_uninstalling: "이전 버전을 제거하는 중...",
     installer_reinstall_failed: "이전 버전을 제거하지 못했습니다. 직접 제거한 뒤 다시 시도하세요.",
 } as const;
