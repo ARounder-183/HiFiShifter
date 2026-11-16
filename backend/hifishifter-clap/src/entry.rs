@@ -575,6 +575,24 @@ mod panic_injection {
 /// （`audio_stats::note_panic`），**不打日志**——音频线程不能写文件、不能抢日志锁
 /// （`realtime_callbacks_do_not_enter_the_file_logger`）。内层 body 不再包
 /// `guard_ffi`：它内部自己 catch，外面这一层就永远看不到 panic，计数会恒为 0。
+/// `in_process` 重入标志的 RAII 守卫。
+///
+/// 【为什么必须 RAII】内层 body 的 panic 会越过这里向外层 `catch_unwind`
+/// 传播（这是设计：`audio_stats::note_panic` 的计数依赖它）。旧实现只在
+/// 正常路径 `store(false)` —— 一次 panic 就让标志永远停在 true，之后每一块
+/// 都被当成"并发调用"拒绝，实例静音到销毁重建，且没有任何诊断能区分
+/// "panic 过一次"和"真的在并发"。Drop 在 unwind 时也会执行，把这条路径
+/// 堵死。
+struct InProcessGuard<'a> {
+    flag: &'a std::sync::atomic::AtomicBool,
+}
+
+impl Drop for InProcessGuard<'_> {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
+}
+
 unsafe extern "C" fn plugin_process(
     plugin: *const clap_plugin_t,
     process: *const clap_process_t,
@@ -596,8 +614,6 @@ unsafe extern "C" fn plugin_process(
 }
 
 unsafe fn plugin_process_body(plugin: *const clap_plugin_t, process: *const clap_process_t) -> i32 {
-    #[cfg(test)]
-    panic_injection::maybe_panic();
     if process.is_null() {
         return CLAP_PROCESS_ERROR;
     }
@@ -615,6 +631,14 @@ unsafe fn plugin_process_body(plugin: *const clap_plugin_t, process: *const clap
         hifishifter_plugin::audio_stats::note_concurrent_process_rejection();
         return CLAP_PROCESS_ERROR;
     }
+    // 守卫从 swap 之后接管：正常返回与 panic 都会清标志。
+    let _in_process_guard = InProcessGuard {
+        flag: &instance.in_process,
+    };
+    // 测试注入点必须在 swap(true) 之后：panic 才会穿过守卫的 Drop 向外传播，
+    // 回归测试才能真正覆盖"panic 后标志被清"这条路径。
+    #[cfg(test)]
+    panic_injection::maybe_panic();
     let result = (|| {
         let Some(process) = (unsafe { process.as_ref() }) else {
             return CLAP_PROCESS_ERROR;
@@ -637,7 +661,6 @@ unsafe fn plugin_process_body(plugin: *const clap_plugin_t, process: *const clap
             RenderOutcome::NotReady => CLAP_PROCESS_ERROR,
         }
     })();
-    instance.in_process.store(false, Ordering::Release);
     result
 }
 
@@ -807,6 +830,13 @@ mod tests {
             "the outer catch_unwind must see the panic and count it"
         );
         assert_eq!(REALTIME_LOGS.with(std::cell::Cell::get), 0);
+        // panic 越过了 body 的正常返回路径：in_process 重入标志必须已被 RAII
+        // 守卫清掉。旧实现把它留在 true —— 之后的每一块都被当成"并发调用"
+        // 拒绝，实例静音到销毁重建。
+        assert!(
+            !unsafe { (*instance).in_process.load(Ordering::Acquire) },
+            "the re-entrancy flag must be cleared even when the body panics"
+        );
         unsafe {
             stop_processing(ptr);
             plugin_deactivate(ptr);
