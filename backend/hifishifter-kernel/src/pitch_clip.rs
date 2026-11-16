@@ -1771,7 +1771,10 @@ pub fn trim_and_resample_midi(
             );
         }
     }
-    log::warn!(
+    // 【为什么不是 warn】这条是逐 clip、逐渲染趟都触发的追踪探针，不是异常：
+    // 走 warn 会让默认日志级别下每次渲染都格式化 8 个值并刷屏。上面的 CLAMP /
+    // MISMATCH 才是真异常（保留 warn）；这条降为热路径调试日志。
+    debug_eprintln!(
         "[pitch:trim] src_start={:.3}s src_end={:.3}s rate={:.2} tl_len={:.3}s \
          full_midi_len={} trimmed=[{}..{}]={} → target_frames={}",
         source_start_sec,
