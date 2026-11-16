@@ -126,10 +126,24 @@ fn shared_plugin_resource_candidate_at(programdata: &Path, name: &str) -> PathBu
 }
 
 #[cfg(target_os = "windows")]
-fn shared_plugin_resource_candidates(name: &str) -> Vec<PathBuf> {
+fn shared_programdata_root() -> PathBuf {
+    // 与 app_paths::shared_data_dirs() 和 plugin_core::resource_root 同一套兜底：
+    // PROGRAMDATA 缺失时按 SystemDrive:\ProgramData，最后才是 C:\ProgramData。
+    // 这里漏一条候选的表现是安装版 CLAP 静默降级到 Signalsmith，不会报错。
     std::env::var_os("PROGRAMDATA")
-        .map(|base| vec![shared_plugin_resource_candidate_at(Path::new(&base), name)])
-        .unwrap_or_default()
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("SystemDrive").map(|drive| PathBuf::from(drive).join("ProgramData"))
+        })
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+}
+
+#[cfg(target_os = "windows")]
+fn shared_plugin_resource_candidates(name: &str) -> Vec<PathBuf> {
+    vec![shared_plugin_resource_candidate_at(
+        &shared_programdata_root(),
+        name,
+    )]
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -717,6 +731,19 @@ mod tests {
                 "C:/ProgramData/HiFiShifter/plugin-resources/{}",
                 super::runtime_library_name()
             )
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn shared_programdata_root_falls_back_to_system_drive() {
+        let root = super::shared_programdata_root();
+        assert!(root.is_absolute(), "{root:?}");
+        assert!(
+            root.to_string_lossy()
+                .to_ascii_lowercase()
+                .ends_with("programdata"),
+            "{root:?}"
         );
     }
 
