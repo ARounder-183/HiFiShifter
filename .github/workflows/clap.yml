@@ -26,7 +26,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
-      # 【为什么 Unix 也要装 GTK/WebKit】CLAP 外壳复用 hifishifter-plugin，而后者
+      # 【为什么 Unix 也要装 GTK/WebKit】CLAP 外壳复用 hifishifter-plugin（实现层），而后者
       # 在 Linux 上的内嵌编辑器走 wry/gtk3：glib-sys 的 build.rs 用 pkg-config 找
       # glib-2.0.pc，缺了它编译在 build script 阶段就以
       # "Package glib-2.0 was not found" 失败。清单与 vst3-unix.yml 保持一致，
@@ -57,19 +57,15 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/setup/prepare-plugin-sdks.ps1
-      # 【为什么 Unix 也要准备 ARA / VST3 SDK】CLAP 外壳复用 hifishifter-plugin，
-      # 而该 crate 的 ara2-bridge 同时启用了 vst3 companion feature；Cargo 的 feature
-      # 是构建图并集，ara2-bridge-companion 的 build.rs 因此会读 ARA_SDK_DIR 与
-      # ARA_VST3_SDK_DIR。只准备 CLAP 头文件时，编译在 build script 阶段以
-      # "VST3 SDK v3.8.0_build_66 is required" 失败。VST3 流水线已经有同一套 pin 校验，
-      # 这里直接复用它的 sdk 阶段，避免两份规则漂移。
-      - name: Prepare pinned ARA and VST3 SDKs (Unix)
+      # 【为什么只需要 CLAP SDK】壳提取（docs/plans/2026-11-17-vst3-shell-extraction-plan.md）
+      # 之后，共享层只用 ara2-bridge 的裸 companion 特性（纯 Rust，无 SDK 检出），
+      # CLAP companion 也是纯 Rust —— CLAP 外壳的构建不再需要 ARA / VST3 SDK。
+      # CLAP 头文件仍然要钉住：clap_layout 的 ABI oracle 用它编原生基准
+      # （HIFISHIFTER_CLAP_SDK_DIR）。
+      - name: Prepare pinned CLAP SDK (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          bash scripts/vst3/unix/build.sh --stage=sdk
-          echo "ARA_SDK_DIR=$GITHUB_WORKSPACE/third_party/sdk/ARA_SDK" >> "$GITHUB_ENV"
-          echo "ARA_VST3_SDK_DIR=$GITHUB_WORKSPACE/third_party/sdk/vst3sdk" >> "$GITHUB_ENV"
           echo "HIFISHIFTER_CLAP_SDK_DIR=$GITHUB_WORKSPACE/third_party/sdk/clap" >> "$GITHUB_ENV"
 
       # 【为什么按 commit 取而不是按分支】pin 的是 commit，分支 tip 早就走远了；

@@ -106,14 +106,14 @@ function Reset-Directory([string]$path) {
 }
 
 # 【哪些 DLL 不属于独立 App 的运行时载荷】`backend\target\<profile>` 里同时躺着
-# 三种格式的产物：独立 App、VST3 引擎（`hifishifter_plugin.dll`）与 CLAP 模块
+# 三种格式的产物：独立 App、VST3 引擎（`hifishifter_vst3.dll`）与 CLAP 模块
 # （`hifishifter_clap.dll`），以及 App crate 自己编出的 `backend_lib.dll`。
 # 它们与通用运行时 DLL 混在同一个目录，于是 `Get-ChildItem *.dll` 一把抓会把这些
 # 既非运行时、也非 App 所需的模块一并塞进安装包与便携包。插件只经由两条专门通路
 # 分发：VST3 bundle（见 Write-Vst3Stage）与 CLAP 目录（见 Write-ClapStage）；
 # App 载荷与它们没有任何交集。
 $pluginModuleDlls = @(
-    'hifishifter_plugin.dll',
+    'hifishifter_vst3.dll',
     'hifishifter_clap.dll',
     'backend_lib.dll'
 )
@@ -195,18 +195,17 @@ if ($Target -eq 'All' -or $Target -eq 'App') {
 
 # ── 插件引擎与 CLAP 模块：一次编译，两处组装 ────────────────────────────────
 #
-# 【为什么两种格式必须在**同一次** cargo 调用里编完，再分别组装载荷】
-# `hifishifter-clap` 依赖 `hifishifter-plugin`，而 cargo 会把同一次调用里
-# `ara2-bridge` 的 feature 合并成 `vst3 + clap`。于是"先组装 VST3、再编译 CLAP"
-# 会让 CLAP 那一步在同一个 target 目录里把 `hifishifter_plugin.dll` 原样重写一遍：
-# 内容等价，但安装包里的引擎从此不再由"组装它的那次构建"产出 —— 事后比对哈希、
-# 追溯来源都对不上。并成一次调用之后，两个产物来自同一个构建计划，顺序不再影响结果；
-# 这也是 `hifishifter-clap` 的 Cargo.toml 里"必须与 VST3/App 使用同一份 feature"
-# 那句话唯一可靠的落法。
+# 【为什么两个壳必须在**同一次** cargo 调用里编完，再分别组装载荷】
+# 两个壳共享同一个 target 目录；同一次调用里 `ara2-bridge` 的 feature 取并集
+# （`vst3 + clap`，这是契约内的并集 —— 见 format_feature_boundary 的说明）。
+# 拆成两次调用时，第二次会带着不同的特性计划重编依赖树，两个产物就可能来自
+# 不同的构建计划 —— 事后比对哈希、追溯来源都对不上。并成一次调用之后，顺序不再
+# 影响结果；`hifishifter-plugin`（rlib-only）与 `hifishifter-kernel` 的 feature
+# 也因此只解析一次，CLAP/VST3 仍编出同一份内核代码。
 if ($Target -eq 'All' -or $Target -eq 'Plugin' -or $Target -eq 'Clap') {
     $pluginBuild = @(
         'build', '--manifest-path', 'backend\Cargo.toml',
-        '-p', 'hifishifter-plugin', '-p', 'hifishifter-clap'
+        '-p', 'hifishifter-vst3', '-p', 'hifishifter-clap'
     )
     if ($Configuration -eq 'Release') { $pluginBuild += '--release' }
     cargo @pluginBuild
@@ -228,8 +227,8 @@ if ($Target -eq 'All' -or $Target -eq 'Plugin') {
     Reset-Directory "$resources\frontend"
     Reset-Directory "$resources\models"
 
-    Copy-Item "$built\hifishifter_plugin.dll" "$module\HiFiShifterEngine.dll"
-    Assert-SameBytes "$built\hifishifter_plugin.dll" "$module\HiFiShifterEngine.dll"
+    Copy-Item "$built\hifishifter_vst3.dll" "$module\HiFiShifterEngine.dll"
+    Assert-SameBytes "$built\hifishifter_vst3.dll" "$module\HiFiShifterEngine.dll"
     # DLL 白名单刻意不含 vslib：它是独立 App 的闭源运行时，插件不分发。
     foreach ($dll in 'onnxruntime.dll', 'DirectML.dll', 'SoundTouchDLL.dll') {
         if (Test-Path "$built\$dll") { Copy-Item "$built\$dll" $module }
@@ -345,7 +344,7 @@ function Write-Vst3Stage {
     Copy-Item $winModule (Join-Path $vst3 'Contents\x86_64-win') -Recurse
     Copy-Item $resources (Join-Path $vst3 'Contents\Resources') -Recurse
     # 安装器打进去的就是这两个目录里的一切：载荷边界上再比一次字节。
-    Assert-SameBytes "$built\hifishifter_plugin.dll" (Join-Path $vst3 'Contents\x86_64-win\HiFiShifterEngine.dll')
+    Assert-SameBytes "$built\hifishifter_vst3.dll" (Join-Path $vst3 'Contents\x86_64-win\HiFiShifterEngine.dll')
 
     # 兜底：暂存区里只允许出现 x86_64-win 这一个架构目录。若将来新增别的本平台架构，
     # 要在这里显式加入白名单，而不是把 Copy-Item * 放回来。
@@ -496,7 +495,7 @@ if ($Target -eq 'All' -or $Target -eq 'Installer') {
     # 存在引擎，就在这里比对一次 —— 顺序缺陷不会再以"安装包带着上一版引擎"的形式溜过去。
     # （-Target Installer 有意复用既有暂存区，那时 target 可能为空，比对自动跳过。）
     foreach ($payload in @(
-        @{ Built = (Join-Path $built 'hifishifter_plugin.dll'); Staged = (Join-Path $stage 'vst3\Contents\x86_64-win\HiFiShifterEngine.dll') },
+        @{ Built = (Join-Path $built 'hifishifter_vst3.dll'); Staged = (Join-Path $stage 'vst3\Contents\x86_64-win\HiFiShifterEngine.dll') },
         @{ Built = (Join-Path $built 'hifishifter_clap.dll'); Staged = (Join-Path $stage 'HiFiShifter.clap') }
     )) {
         if (Test-Path -LiteralPath $payload.Built) {

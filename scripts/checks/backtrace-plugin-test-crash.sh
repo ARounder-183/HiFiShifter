@@ -23,7 +23,7 @@ if ! command -v gdb >/dev/null 2>&1; then
     exit 0
 fi
 
-BIN="$(ls -t "$TARGET_DIR"/debug/deps/hifishifter_plugin-* 2>/dev/null | grep -v '\.d$' | head -1 || true)"
+BIN="$(ls -t "$TARGET_DIR"/debug/deps/hifishifter_vst3-* 2>/dev/null | grep -v '\.d$' | head -1 || true)"
 if [ -z "$BIN" ]; then
     echo "没有测试二进制：跳过（先跑一遍 cargo test --no-run）"
     exit 0

@@ -83,12 +83,12 @@ if [ "$HFS_OS" = "linux" ]; then
     MODULE_SUBDIR="Contents/${HFS_PLATFORM_ARCH}-linux"
     MODULE_FILE="$API_NAME.so"
     RUNTIME_LIB_SUBDIR="$MODULE_SUBDIR"
-    CARGO_LIB="libhifishifter_plugin.so"
+    CARGO_LIB="libhifishifter_vst3.so"
 else
     MODULE_SUBDIR="Contents/MacOS"
     MODULE_FILE="$API_NAME"
     RUNTIME_LIB_SUBDIR="Contents/Frameworks"
-    CARGO_LIB="libhifishifter_plugin.dylib"
+    CARGO_LIB="libhifishifter_vst3.dylib"
 fi
 readonly MODULE_SUBDIR MODULE_FILE RUNTIME_LIB_SUBDIR CARGO_LIB
 readonly BUNDLE_TAG="$HFS_TAG"
@@ -255,7 +255,7 @@ ensure_toolchain() {
 }
 
 stage_build() {
-    step "编译 hifishifter-plugin（profile=${PROFILE}）"
+    step "编译 hifishifter-vst3（profile=${PROFILE}）"
     command -v cargo >/dev/null 2>&1 || die "缺少 cargo"
     ensure_toolchain
     log "$(rustc -V 2>/dev/null || echo 'rustc 版本未知')"
@@ -268,7 +268,7 @@ stage_build() {
     # 【为什么把退出码单独取出来】被信号打死时 cargo 来不及写 error 行，退出码是唯一线索。
     local status=0
     CARGO_TERM_COLOR=never cargo build --manifest-path "$BACKEND_DIR/Cargo.toml" \
-        -p hifishifter-plugin --profile "$PROFILE" --locked >"$CARGO_LOG" 2>&1 || status=$?
+        -p hifishifter-vst3 --profile "$PROFILE" --locked >"$CARGO_LOG" 2>&1 || status=$?
     if [ "$status" -ne 0 ]; then
         hfs_report_build_failure "$CARGO_LOG" "$status"
         die "编译失败（exit ${status}），完整日志：$CARGO_LOG"

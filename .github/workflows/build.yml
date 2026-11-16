@@ -146,12 +146,13 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       # 【为什么 Unix 也要准备 ARA / VST3 SDK】backend job 的 package.sh 除了 App 本体
-      # 还要产出 VST3 与 CLAP 两个插件产物，而 CLAP 外壳复用 hifishifter-plugin，
-      # 该 crate 的 ara2-bridge 启用了 vst3 companion feature；ara2-bridge-companion
-      # 的 build.rs 在缺 ARA_VST3_SDK_DIR 时当场 panic（"VST3 SDK v3.8.0_build_66 is
-      # required"）。Windows 由 install_deps_windows.ps1 走 prepare-plugin-sdks.ps1；
-      # Unix 这里与 clap.yml 用同一套命令（--stage=sdk + 三个环境变量），避免两份
-      # SDK pin 规则漂移。
+      # 还要产出 VST3 与 CLAP 两个插件产物：VST3 外壳（hifishifter-vst3）启用
+      # ara2-bridge 的 vst3 companion（C++ shim），其 build.rs 在缺 ARA_VST3_SDK_DIR
+      # 时当场 panic（"VST3 SDK v3.8.0_build_66 is required"）。CLAP 外壳在壳提取
+      # （docs/plans/2026-11-17-vst3-shell-extraction-plan.md）之后只用裸 companion +
+      # clap 特性（纯 Rust），已不再需要这两个 SDK —— 但同一次构建里 VST3 壳仍需要。
+      # Windows 由 install_deps_windows.ps1 走 prepare-plugin-sdks.ps1；Unix 这里保持
+      # 同一套命令（--stage=sdk + 三个环境变量），避免两份 SDK pin 规则漂移。
       - name: Prepare pinned ARA and VST3 SDKs (Unix)
         if: runner.os != 'Windows'
         shell: bash
