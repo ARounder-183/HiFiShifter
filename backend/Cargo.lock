@@ -141,8 +141,6 @@ checksum = "fb5dfbc6d8d2675589ccbe4d0fd61df2419075625f8c1a62325e718e2b0049f9"
 [[package]]
 name = "ara2-bridge"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d3730f199944c74cc0eda10b15659de6f2c824216829cc758765752495a6069"
 dependencies = [
  "ara2-bridge-companion",
  "ara2-bridge-core",
