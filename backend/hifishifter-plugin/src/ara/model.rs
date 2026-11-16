@@ -304,7 +304,7 @@ impl ModelHandle {
         head_tail.install(entries)
     }
     /// 借出本模型的文档生命周期，供工厂身份通知及 renderer 绑定使用。
-    pub(crate) fn session(&self) -> Arc<DocumentSession> {
+    pub fn session(&self) -> Arc<DocumentSession> {
         self.session.clone()
     }
 

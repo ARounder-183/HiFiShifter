@@ -50,7 +50,7 @@ impl ExtensionOwner {
     /// # Safety
     /// `block` 的平面由宿主提供，非空平面至少含 `frames` 帧；本函数只在本回调内使用
     /// 它们，不保留任何指针。
-    pub(crate) unsafe fn render_block(
+    pub unsafe fn render_block(
         &self,
         block: &mut crate::audio_block::AudioBlock<'_>,
         context: Option<crate::block_context::BlockContext>,
@@ -350,7 +350,7 @@ impl ExtensionOwner {
     /// 此前这三步各写一份：VST3 在外壳里顺序调用，CLAP 只走了其中一部分 ——
     /// 于是 CLAP 的离线导出永远拿不到本地起点（offline_pass_active 恒假 ⇒
     /// 离线准备不要求用户曲线 ⇒ 产物里是"没处理"的声音），而且从未记过精度。
-    pub(crate) fn observe_input_block(
+    pub fn observe_input_block(
         &self,
         mut input: crate::capture::recorder::InputBlock<'_>,
         context: crate::block_context::BlockContext,

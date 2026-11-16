@@ -199,7 +199,7 @@ impl ExtensionOwner {
     }
 
     /// 块级诊断的 JSON（非音频线程）。`trace_limit` 控制环形记录条数。
-    pub(crate) fn block_diagnostics_json(&self, trace_limit: usize) -> serde_json::Value {
+    pub fn block_diagnostics_json(&self, trace_limit: usize) -> serde_json::Value {
         let capture = self.capture.capture_diagnostics().map(|capture| {
             serde_json::json!({
                 "preroll_frames_dropped": capture.preroll_frames_dropped,

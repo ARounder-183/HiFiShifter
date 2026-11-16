@@ -54,7 +54,7 @@ fn controller_instance_arrives_with_exactly_one_host_reference() {
 #[test]
 fn task38a_initialize_owns_a_short_component_reference_before_querying_host() {
     let component = create_component();
-    let host = crate::host::MockHost::new();
+    let host = hifishifter_plugin::test_support::MockHost::new();
     let observed = Arc::new(AtomicI32::new(0));
     let count = observed.clone();
     let raw = component as usize;
@@ -83,7 +83,7 @@ fn task38a_initialize_owns_a_short_component_reference_before_querying_host() {
 fn task38a_initialize_reentrant_terminate_is_rejected_and_does_not_reinstall_host() {
     for terminate in [true, false] {
         let component = create_component();
-        let host = crate::host::MockHost::new();
+        let host = hifishifter_plugin::test_support::MockHost::new();
         let raw = component as usize;
         let owner = unsafe { Arc::downgrade(&(*component.cast::<Processor>()).extension_owner) };
         *host.hook.borrow_mut() = Some((
@@ -114,7 +114,7 @@ fn task38a_initialize_reentrant_terminate_is_rejected_and_does_not_reinstall_hos
 #[test]
 fn task38a_initialize_survives_reentrant_final_release_and_drops_its_short_reference() {
     let component = create_component();
-    let host = crate::host::MockHost::new();
+    let host = hifishifter_plugin::test_support::MockHost::new();
     let raw = component as usize;
     let weak = unsafe { Arc::downgrade(&(*component.cast::<Processor>()).extension_owner) };
     let during = weak.clone();
@@ -143,7 +143,7 @@ fn task38a_initialize_survives_reentrant_final_release_and_drops_its_short_refer
 #[test]
 fn task38a_initialize_of_a_closed_component_does_not_call_host() {
     let component = create_component();
-    let host = crate::host::MockHost::new();
+    let host = hifishifter_plugin::test_support::MockHost::new();
     unsafe {
         component_terminate(component);
     }
@@ -160,7 +160,7 @@ fn task38a_initialize_of_a_closed_component_does_not_call_host() {
 #[test]
 fn task38a_initialize_reentry_during_host_application_qi_releases_the_returned_host_reference() {
     let component = create_component();
-    let host = crate::host::MockHost::new();
+    let host = hifishifter_plugin::test_support::MockHost::new();
     host.enable_connection_host();
     let raw = component as usize;
     *host.hook.borrow_mut() = Some((
@@ -222,16 +222,14 @@ fn host_entry_reference_keeps_the_extension_owner_alive() {
 /// 真COM组件、真实route租约与native entry同时持有；释放入口不能牵连同文档/另一文档actor。
 #[test]
 fn task34_real_processor_release_revokes_routes_without_retaining_document() {
-    use crate::editor::{
-        routing::EditorLink,
-        session::{UiRequest, UiSink},
-    };
+    use hifishifter_plugin::editor::EditorLink;
+    use hifishifter_plugin::editor::session::{UiRequest, UiSink};
     use ara2_bridge::{core::ApiGeneration, plugin::ExtensionRoles};
     use std::sync::{atomic::AtomicBool, mpsc};
-    let model = crate::ara::model::ModelHandle::new();
+    let model = hifishifter_plugin::ara::model::ModelHandle::new();
     let document = model.session();
     let weak_document = Arc::downgrade(&document);
-    let other_model = crate::ara::model::ModelHandle::new();
+    let other_model = hifishifter_plugin::ara::model::ModelHandle::new();
     let other_document = other_model.session();
     let components = [create_component(), create_component(), create_component()];
     let mut links = Vec::new();
@@ -356,10 +354,8 @@ fn task34_real_processor_release_revokes_routes_without_retaining_document() {
 /// 实际IComponent getState/setState经过IBStream ABI；短读写也必须保存共享actor最新值的组件范围。
 #[test]
 fn task34_real_component_state_stream_flushes_and_saves_only_its_scope() {
-    use crate::editor::{
-        routing::EditorLink,
-        session::{UiRequest, UiSink},
-    };
+    use hifishifter_plugin::editor::EditorLink;
+    use hifishifter_plugin::editor::session::{UiRequest, UiSink};
     use ara2_bridge::{core::ApiGeneration, plugin::ExtensionRoles};
     use std::sync::{atomic::AtomicBool, mpsc};
     #[repr(C)]
@@ -424,7 +420,7 @@ fn task34_real_component_state_stream_flushes_and_saves_only_its_scope() {
         seek: 0,
         tell: 0,
     };
-    let (model, old_owners, ids) = crate::editor::session::tests::workspace_fixture();
+    let (model, old_owners, ids) = hifishifter_plugin::editor::session::tests::workspace_fixture();
     let document = model.session();
     for owner in old_owners {
         owner.stop_editor();
@@ -504,7 +500,7 @@ fn task34_real_component_state_stream_flushes_and_saves_only_its_scope() {
         // 权威参数按稳定宿主身份存档（v7）；仍须证明IBStream仅保存当前组件范围。
         assert_eq!(
             saved["version"].as_u64(),
-            Some(crate::state_channel::EditState::STATE_VERSION)
+            Some(hifishifter_plugin::state_channel::STATE_VERSION)
         );
         assert_eq!(saved["edits"]["tracks"].as_array().unwrap().len(), 1);
         assert_eq!(saved["edits"]["tracks"][0]["id"], id);
@@ -547,8 +543,8 @@ fn task34_real_component_state_stream_flushes_and_saves_only_its_scope() {
 /// 看到"参数没了、日志里一行错都没有" —— 界面上的 `restore_unresolved` 横幅永远不会出现。
 #[test]
 fn a_controller_channel_restore_failure_is_recorded_in_the_shared_status() {
-    let owner = Arc::new(crate::render::extension::ExtensionOwner::default());
-    let link = crate::editor::routing::EditorLink::for_owner(&owner).unwrap();
+    let owner = Arc::new(hifishifter_plugin::render::extension::ExtensionOwner::default());
+    let link = hifishifter_plugin::editor::EditorLink::for_owner(&owner).unwrap();
     let controller = EditController {
         vtbl: &EDIT_CONTROLLER_VTBL,
         refcount: AtomicI32::new(1),

@@ -1,29 +1,36 @@
-//! HiFiShifter 的 VST3 / ARA 插件适配层。
+//! HiFiShifter 插件的**格式无关实现层**。
 //!
-//! 【两种加载方式，同一份代码】宿主支持 ARA 时，本插件以 ARA2 形式挂在 DAW 里，
-//! 时间线内容随 DAW 走；宿主**不**支持 ARA 时，它仍然是一个常规 VST3 插件，
-//! 主要靠 [`capture`]（捕获）通路工作 —— 所以本 crate 与它的日志/诊断措辞都不该
+//! 【本 crate 是谁】VST3（`hifishifter-vst3`）与 CLAP（`hifishifter-clap`）外壳共同
+//! 链接的那一份实现：ARA 文档模型、渲染调度、编辑器视图栈、捕获命令、宿主适配与
+//! 诊断日志。外壳只做各自格式的 ABI 翻译（把宿主给的时间与缓冲在边界转换一次），
+//! 语义只有这里的一份。本 crate 是 **rlib**，不产出任何可被宿主加载的二进制；
+//! 模块入口（`GetPluginFactory` / `clap_entry`）住在各自的外壳 crate 里。
+//!
+//! 【两种加载方式，同一份代码】宿主支持 ARA 时，插件以 ARA2 形式挂在 DAW 里，
+//! 时间线内容随 DAW 走；宿主**不**支持 ARA 时，它仍然是一个常规插入效果器，
+//! 主要靠捕获通路工作 —— 所以本 crate 与它的日志/诊断措辞都不该
 //! 把"插件"等同于"ARA 插件"。
 //!
 //! 目标（设计文档 §5.1）：**复用本体已经存在的离线内核**，而不是另写一套渲染。
 //!
-//! 本 crate 目前只有两块：
-//! - [`ara`]：ARA 文档模型 → `TimelineState` 的映射（探针 Task 3 的产品化版本）；
-//! - [`render`]：把 `TimelineState` 交给本体内核离线渲染的薄封装。
-//!
-//! 边界：不做设备I/O，不依赖Tauri IPC/app runtime。二期增加原生WebView2内嵌原GUI，
-//! 不接管宿主消息循环；A5-v2禁止Tauri/wry/app/cpal，由依赖树守卫钉住。
+//! 边界：不做设备I/O，不依赖Tauri IPC/app runtime。内嵌编辑器是原生 WebView2
+//! 视图栈，不接管宿主消息循环；A5-v2 禁止 Tauri/wry/app/cpal，由依赖树守卫钉住。
 //!
 //! # 结构
 //!
-//! - [`vst3`]：手写的最小 VST3 模块 ABI（工厂 + 组件 + 处理器 + 最小编辑控制器）。
-//!   三条 ABI 硬事实写在它的文件头，都是探针期用崩溃换来的。
+//! - [`vst3_abi`]：VST3 的 ABI **词汇**（类型 / 结果码 / TUID 布局 / `FUnknown`
+//!   前缀）。它是 VST3 ABI 允许出现在共享层的唯一位置，理由见其模块文档。
 //! - [`runtime`]：进程级的 ARA 工厂与 companion 关联。
 //! - [`ara`]：宿主模型回调的累积（`model`）与 `ARA → TimelineState` 的映射（`mapping`）。
 //! - [`render`]：把 `TimelineState` 交给内核离线渲染的薄封装。
+//! - [`editor`]：内嵌编辑器（共享视图栈 + 命令分发）。
+//! - [`host`]：宿主后端选择与 REAPER 原生扩展。
 //!
-//! 【为什么 VST3 外壳要手写】`ara2-bridge` 给的是 ARA↔VST3 的**桥**，不是可加载模块。
-//! 模块入口（`GetPluginFactory` / `InitDll` / `ExitDll`）与最小组件必须自备。
+//! 【为什么这里没有 VST3 工厂】VST3 的模块 ABI（入口符号、工厂、组件、处理器、
+//! `IPlugView`、`IConnectionPoint`）整体住在 `hifishifter-vst3` 外壳 crate；
+//! 让它留在本 crate 的历史原因是"VST3 先实现"，后果是每个其他外壳的产物都会
+//! 链接并导出 VST3 的入口符号（2026-11-17 实测 `HiFiShifter.clap` 导出 4 个符号）。
+//! 拆分设计见 `docs/plans/2026-11-17-vst3-shell-extraction-plan.md`。
 
 // ── clippy 策略 ─────────────────────────────────────────────────────────────
 //
@@ -49,12 +56,12 @@
     // 测试等待循环用 `while <不变量>` 表达"轮询到满足为止"，超时由循环体内的
     // deadline 断言负责；改写成 `loop` 会把停止条件藏得更深。
     clippy::while_immutable_condition,
-    // 【为什么允许 private_interfaces】本 crate 同时是 VST3 的 cdylib 与 CLAP 外壳的
-    // rlib：`ExtensionOwner` / `DocumentSession` 必须 `pub`，兄弟外壳才能把 ARA 绑定
+    // 【为什么允许 private_interfaces】本 crate 是两个格式外壳（VST3 / CLAP）共同的
+    // rlib：`ExtensionOwner` / `DocumentSession` 必须 `pub`，外壳才能把 ARA 绑定
     // 转给**同一份**实现；而它们的公开方法签名里会带出本 crate 内部的协作类型
     // （快照发布器、区域键……）。那些类型不属于对外契约，也不该为了消一条 lint 被
     // 提升成 `pub` —— 那会把实现细节变成别人可以依赖的 API。真正的边界由
-    // `hifishifter-clap` 只调用少数几个方法这一事实约束。
+    // 外壳只调用少数几个方法这一事实约束。
     private_interfaces,
     // `let mut x = X::default(); x.a = 1;` 与结构体更新语法等价；后者在字段多、
     // 默认值集中定义时更难读（要来回对照 Default 实现）。
@@ -62,8 +69,7 @@
 )]
 
 pub mod ara;
-mod ara_entry;
-mod audio_abi;
+pub mod audio_abi;
 
 pub use audio_abi::BufferError;
 pub mod audio_block;
@@ -83,14 +89,42 @@ pub use hifishifter_plugin_core::plugin_log_name;
 pub mod render;
 pub mod runtime;
 mod settings_store;
-mod startup;
-mod state_channel;
-mod state_stream;
+pub mod startup;
+pub mod state_channel;
+pub mod state_stream;
 pub use hifishifter_plugin_core::sync;
-#[cfg(test)]
+/// VST3 的 ABI 词汇（见模块文档：为什么它允许住在共享层）。
+pub mod vst3_abi;
+#[cfg(any(test, feature = "test-support"))]
 mod test_allocator;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod test_host;
+
+/// 共享测试夹具的**唯一**对外出口（`test-support` 特性；产品构建整块不存在）。
+///
+/// 【为什么存在】格式外壳（`hifishifter-vst3`）的黑盒测试要驱动共享渲染/编辑面，
+/// 而 rlib 依赖的 `#[cfg(test)]` 模块对消费者不可见。外壳在自己的
+/// `[dev-dependencies]` 里启用 `test-support`；产品构建判据由
+/// `format_feature_boundary` 钉住（树里不得出现该特性）。
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    pub use crate::host::MockHost;
+    pub use crate::test_allocator::{begin, end};
+    pub use crate::test_host::{assert_address, HostFixture};
+
+    /// 在进程级 region 注册表里登记一条测试身份（`region_owners().register` 的壳侧包装）。
+    ///
+    /// 【为什么不直接公开 `region_owners`】注册表类型与其错误类型是实现细节；
+    /// 外壳测试只需要"登记一条"这一个动作。
+    pub fn register_region_owner(key: u64, document: u64, slot: usize) -> Result<(), String> {
+        use crate::sync::MutexExt;
+        crate::render::ownership::region_owners()
+            .lock_or_recover()
+            .register(key, document, slot)
+            .map_err(|error| format!("{error:?}"))
+    }
+}
+
 /// 【为什么测试二进制要在进入 main 之前关掉异步预热】见 `settings_store::
 /// apply_to_process` 的注释：libtest 的退出没有收尾钩子，预热线程在"建 ONNX
 /// 会话"中途被拆掉时，整个测试二进制以 `0xC0000005`（Windows）/ SIGSEGV（Linux）
@@ -103,9 +137,7 @@ mod test_prewarm_guard {
         hifishifter_kernel::vocoder_ort_session::set_async_session_prewarm(false);
     }
 }
-mod vst3;
 
-use std::ffi::c_void;
 
 /// VST3 类名。**必须与 ARA 工厂的 plugInName 一致** —— ARA 的 VST3 配对规则要求如此。
 pub use hifishifter_plugin_core::CLASS_NAME;
@@ -134,14 +166,26 @@ pub use hifishifter_plugin_core::FACTORY_ID;
 pub(crate) fn plugin_form_label(
     owner: Option<&crate::render::extension::ExtensionOwner>,
 ) -> &'static str {
-    // 【为什么按标签选】同一份共享代码同时跑在两种外壳里，把 "VST3" 写死会让 CLAP
+    // 【为什么按标签选】同一份共享代码同时跑在多种外壳里，把 "VST3" 写死会让其他
     // 会话的「关于」与诊断包自称 VST3 —— 用户照着截图报障时，第一句话就是错的。
+    // 【为什么显式匹配每一个标签】`(_, _)` 兜底会把未来新增的格式（au…）静默标成
+    // VST3；新增标签时编译器在这里逼一次显式决策。
     let capture = owner.is_some_and(|owner| !owner.is_ara_bound());
     match (log_tag(), capture) {
         ("clap", true) => "CLAP plug-in (capture)",
         ("clap", false) => "CLAP / ARA plug-in",
-        (_, true) => "VST3 plug-in (capture)",
-        (_, false) => "VST3 / ARA plug-in",
+        ("vst3", true) => "VST3 plug-in (capture)",
+        ("vst3", false) => "VST3 / ARA plug-in",
+        (other, _) => {
+            log::warn!(
+                "[plugin] unknown log tag {other:?}; the about/diagnostic label falls back to generic wording"
+            );
+            if capture {
+                "plug-in (capture)"
+            } else {
+                "plug-in"
+            }
+        }
     }
 }
 
@@ -185,7 +229,7 @@ pub fn log_product() -> String {
 /// 而日志文件名 `plugin-<format>-<host>.log` 里的宿主段正是由它决定的 —— 不调就等于每次
 /// CLAP 报障都只能拿到 `plugin-clap-unknown.log`。
 pub fn resolve_host_identity() {
-    crate::editor::connection::resolve_and_record_host_identity();
+    crate::host_identity::resolve_and_record_host_identity();
 }
 
 /// 用户级目录的一次性布局迁移（**每个宿主进程只跑一次**）。
@@ -224,26 +268,15 @@ pub fn initialize_resources() {
     crate::editor::resources::initialize_models();
 }
 
-/// VST3 bundle 形态的模块初始化：先登记资源根，再跑进程级初始化。
-fn ensure_layout_v2_once() {
-    // 【为什么资源布局在这里登记】VST3 的模块是 bundle（`Contents/Resources`），
-    // 而资源根的唯一实现 `resource_root` 需要知道"本模块在哪、是哪种形态"。
-    // 这里与 `set_product_version` 同属"进程级、只登记一次"的事实，放在同一处。
-    // CLAP 在它自己的 `entry_init` 里登记 Sibling 形态（见 `hifishifter-clap`）。
-    if let Ok(module) = crate::editor::resources::module_path() {
-        let _ = hifishifter_plugin_core::resource_root::set_layout(
-            hifishifter_plugin_core::resource_root::ResourceLayout::BundleContents,
-        );
-        let _ = hifishifter_plugin_core::resource_root::set_module_path(module);
-    }
-    initialize_process_state();
-}
-
 /// 写一行诊断信息。
 ///
 /// 【为什么不用 `println!`】插件跑在宿主进程里，stdout 通常无处可去。`log` 会走宿主
 /// 已装配的日志后端；宿主没装时它是静默丢弃，不会因为"日志写不出去"影响编曲。
-pub(crate) fn log_line(message: &str) {
+///
+/// 【为什么 pub】格式外壳的诊断行也走这里：`[<tag>]` 前缀来自 [`log_tag`]，是格式
+/// 身份唯一的登记点。壳自带一份会绕过登记 —— 那正是历史上 `[vst3] ARA factory
+/// built` 出现在 CLAP 日志里的根因。
+pub fn log_line(message: &str) {
     log::info!("[{}] {message}", log_tag());
 }
 
@@ -252,7 +285,7 @@ pub(crate) fn log_line(message: &str) {
 /// 【为什么按语义分级】过去抬成 WARN 只因为「默认级别看不到 Info」，于是「低」档
 /// 每次启动都混进几条假故障。现在由用户选择的详细程度控制可见性：排障时切到
 /// 「中」，正常会话的「低」档只留真正的故障信号。
-pub(crate) fn gui_log_line(message: &str) {
+pub fn gui_log_line(message: &str) {
     log::info!("[gui] {message}");
 }
 
@@ -280,63 +313,6 @@ pub fn log_module_loaded() {
 /// 拦下的 panic 统一记入日志（带 payload 文本），诊断有据可查。
 pub(crate) fn guard_ffi<R>(fallback: R, f: impl FnOnce() -> R) -> R {
     hifishifter_plugin_core::guard_ffi(fallback, f)
-}
-
-/// VST3 模块入口：返回 `IPluginFactory*`。
-///
-/// 【为什么先 `runtime()`】工厂查询可能早于任何组件创建；先把 ARA 工厂建好，
-/// 后面 VST3 侧查 `IPlugInEntryPoint` 时才有东西可给。
-#[no_mangle]
-pub extern "system" fn GetPluginFactory() -> *mut c_void {
-    crate::guard_ffi(std::ptr::null_mut(), || {
-        // 【为什么显式登记】格式标签是日志文件名与会话头的唯一来源；VST3 虽是默认
-        // 值，显式登记能让"两个格式走同一套逻辑"这件事在入口处可见、且不会被将来
-        // 的默认值改动悄悄破坏。
-        crate::set_log_tag("vst3");
-        crate::ensure_layout_v2_once();
-        diagnostics::init();
-        // 【为什么在工厂入口打一行】宿主扫描插件也会走到这里。有了这一行，日志就能
-        // 区分"宿主只是扫描了我"与"宿主真的在用我" —— 前者之后再没有任何行是正常的。
-        crate::log_module_loaded();
-        // 【为什么把 IID 布局写进日志】它是"插件能不能和宿主说上话"的前置条件，却完全
-        // 不可见：发错布局的失败形态是宿主回一个 null 指针，日志里只剩一行
-        // `available=false`。把它钉在会话头附近，排查时第一眼就能排除一整类猜测。
-        crate::log_line(&format!(
-            "iid layout: {} ({})",
-            crate::vst3::iid_layout(),
-            std::env::consts::OS
-        ));
-        editor::resources::initialize_models();
-        let _ = runtime::runtime();
-        vst3::get_plugin_factory()
-    })
-}
-
-/// 模块级初始化：三个平台的入口做的是同一件事，所以只有这一份实现。
-///
-/// 【为什么失败也要返回 `true`】让宿主把类列出来，原因记在日志里。返回 `false` 会让
-/// 宿主直接跳过插件 —— 那就什么信息都拿不到了。探针期实测过这个取舍。
-/// panic 除外：`guard_ffi` 已把 panic 原文记进日志，此时模块状态未知，宁可让宿主
-/// 跳过也不要带着坏 runtime 插进 N 个轨道。
-fn module_initialize() -> bool {
-    crate::guard_ffi(false, || {
-        crate::set_log_tag("vst3");
-        crate::ensure_layout_v2_once();
-        diagnostics::init();
-        crate::log_module_loaded();
-        editor::resources::initialize_models();
-        let _ = runtime::runtime();
-        true
-    })
-}
-
-/// 模块级卸载：宿主在最后一次释放模块前的清理点。
-fn module_shutdown() -> bool {
-    // 先收尾 GUI 与慢车道（共享实现），再把还攒在缓冲里的日志落盘。
-    let result = shutdown_module();
-    diagnostics::flush_pending();
-    diagnostics::write_session_footer("shutdown");
-    result
 }
 
 /// 模块卸载的**唯一**实现：两个格式的模块入口都调它。
@@ -368,58 +344,4 @@ pub fn shutdown_module() -> bool {
         }
         editors
     })
-}
-
-/// VST3 模块初始化入口（Windows：REAPER 在 `LoadLibrary` 之后显式调用）。
-#[no_mangle]
-pub extern "system" fn InitDll() -> bool {
-    crate::guard_ffi(false, module_initialize)
-}
-
-/// VST3 模块卸载入口（Windows）。
-#[no_mangle]
-pub extern "system" fn ExitDll() -> bool {
-    crate::guard_ffi(false, module_shutdown)
-}
-
-// ── Unix 模块入口 ───────────────────────────────────────────────────────────
-//
-// 【为什么需要它们】VST3 的模块 ABI 不是"有 `GetPluginFactory` 就行"：Windows 的
-// 约定是 `InitDll`/`ExitDll`，Linux 是 `ModuleEntry`/`ModuleExit`，macOS 是
-// `bundleEntry`/`bundleExit`（且必须先有 `Contents/Info.plist`，宿主靠 CFBundle
-// 找本模块的二进制）。宿主查不到入口符号时**不会报错**，表现是"这个插件 0 个类" ——
-// 与符号拼错完全同一个症状，所以三组入口都显式导出，不赌宿主的宽容度。
-//
-// 【为什么 macOS 的参数是 `*mut c_void`】签名里的 `CFBundleRef` 就是一个指针；
-// 本模块不需要读它（不查 CFBundle 元数据），声明成裸指针即可，省掉对
-// CoreFoundation 的链接依赖。
-
-/// Linux 模块入口。SDK 会在 `dlopen` 之后调用它（参数是模块句柄，本模块不用）。
-#[cfg(unix)]
-#[no_mangle]
-pub extern "C" fn ModuleEntry(_module: *mut c_void) -> bool {
-    // 【为什么守卫写在**入口**而不是只写在它调用的函数里】panic 越过 extern 边界
-    // 是 abort；把它放在边界上，才不依赖"每个被调者都记得包一层"。
-    crate::guard_ffi(false, module_initialize)
-}
-
-/// Linux 模块卸载入口。
-#[cfg(unix)]
-#[no_mangle]
-pub extern "C" fn ModuleExit() -> bool {
-    crate::guard_ffi(false, module_shutdown)
-}
-
-/// macOS bundle 入口（`CFBundleRef` 以裸指针传入）。
-#[cfg(target_os = "macos")]
-#[no_mangle]
-pub extern "C" fn bundleEntry(_bundle: *mut c_void) -> bool {
-    crate::guard_ffi(false, module_initialize)
-}
-
-/// macOS bundle 卸载入口。
-#[cfg(target_os = "macos")]
-#[no_mangle]
-pub extern "C" fn bundleExit() -> bool {
-    crate::guard_ffi(false, module_shutdown)
 }

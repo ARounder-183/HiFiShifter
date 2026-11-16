@@ -34,12 +34,12 @@ fn realtime_callbacks_do_not_enter_the_file_logger() {
     let mut left = [1.0_f32; 2];
     let mut right = [1.0_f32; 2];
     let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
-    let mut bus = crate::audio_abi::AudioBusBuffers {
+    let mut bus = hifishifter_plugin::audio_abi::AudioBusBuffers {
         num_channels: 2,
         silence_flags: 0,
         channel_buffers: planes.as_mut_ptr(),
     };
-    let mut data = crate::audio_abi::ProcessData {
+    let mut data = hifishifter_plugin::audio_abi::ProcessData {
         num_samples: 2,
         num_outputs: 1,
         outputs: &raw mut bus,

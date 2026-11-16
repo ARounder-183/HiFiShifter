@@ -190,7 +190,7 @@ fn render_retry_action(streak: u32) -> RenderAction {
 }
 
 #[derive(Clone)]
-pub(crate) struct UiSink {
+pub struct UiSink {
     pub view_id: String,
     pub reply: mpsc::Sender<Value>,
     pub events: mpsc::SyncSender<Value>,
@@ -209,7 +209,7 @@ impl UiSink {
         }
     }
 }
-pub(crate) struct UiRequest {
+pub struct UiRequest {
     pub id: u64,
     pub command: String,
     pub args: Value,
@@ -444,7 +444,7 @@ impl Default for PlayheadGaps {
     }
 }
 
-pub(crate) struct EditorSession {
+pub struct EditorSession {
     /// 时间线/参数来源（[`SessionBacking`]）。
     ///
     /// 【为什么不拆成两个字段】两者互斥，而且几乎每个使用点都要先回答"我有没有文档"。
@@ -4969,8 +4969,15 @@ impl MidiImportHost for EditorSession {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+// 【为什么不是 `#[cfg(test)]`】`workspace_fixture` 也被格式外壳的测试
+// （`hifishifter-vst3`）使用；`test-support` 特性让它在产品构建里依然不存在，
+// 同时对外壳的测试构建可见。判据见 format_feature_boundary。
+#[cfg(any(test, feature = "test-support"))]
+// 【为什么条件 allow】`test-support` 特性单独编译（外壳的测试构建）时，本模块的
+// `#[test]` 入口不会运行，辅助夹具于是全部"从未使用"。测试构建（`cfg(test)`）下
+// 不需要这条豁免，保持缺陷类告警的灵敏度。
+#[cfg_attr(not(test), allow(dead_code))]
+pub mod tests {
     use super::*;
 
     /// 等后台投影线程"追上来"的上限。
@@ -6329,7 +6336,7 @@ pub(crate) mod tests {
     }
 
     /// 两真实组件使用同源的不同区域，测试原actor而不是拼接UI快照。
-    pub(crate) fn workspace_fixture() -> (ModelHandle, Vec<Arc<ExtensionOwner>>, Vec<Box<u8>>) {
+    pub fn workspace_fixture() -> (ModelHandle, Vec<Arc<ExtensionOwner>>, Vec<Box<u8>>) {
         let (model, a, first) = fixture();
         let document = model.session();
         {

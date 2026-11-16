@@ -1,7 +1,7 @@
 //! 锁定SDK的IConnectionPoint/IHostApplication/IMessage ABI；消息允许宿主放置代理。
-use crate::vst3::{
-    iid_matches, TResult, K_INVALID_ARGUMENT, K_NOT_IMPLEMENTED, K_NO_INTERFACE, K_RESULT_FALSE,
-    K_RESULT_OK,
+use hifishifter_plugin::vst3_abi::{
+    iid_matches, UnknownVtbl, TResult, K_INVALID_ARGUMENT, K_NOT_IMPLEMENTED, K_NO_INTERFACE,
+    K_RESULT_FALSE, K_RESULT_OK,
 };
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::Mutex;
@@ -9,12 +9,6 @@ pub(crate) const IID_CONNECTION: [u32; 4] = [0x70A4156F, 0x6E6E4026, 0x989148BF,
 const IID_MESSAGE: [u32; 4] = [0x936F033B, 0xC6C047DB, 0xBB0882F8, 0x13C1E613];
 const ROUTE_ID: &CStr = c"HiFiShifter.Editor.Route.v1";
 const REQUEST_ID: &CStr = c"HiFiShifter.Editor.RequestRoute.v1";
-#[repr(C)]
-pub(crate) struct UnknownVtbl {
-    pub query: unsafe extern "system" fn(*mut c_void, *const u8, *mut *mut c_void) -> TResult,
-    pub add: unsafe extern "system" fn(*mut c_void) -> u32,
-    pub release: unsafe extern "system" fn(*mut c_void) -> u32,
-}
 #[repr(C)]
 pub(crate) struct ConnectionVtbl {
     pub base: UnknownVtbl,
@@ -86,18 +80,13 @@ impl Drop for Owned {
     }
 }
 
-/// 宿主应用名（`IHostApplication::getName`）。
+/// 读回宿主应用名（未识别为 `None`）。
 ///
-/// 【为什么单独存一份】报障时最需要的一条信息是"你在哪个宿主里"——而这份信息此前只有
-/// 一个**声明过却从未调用**的 vtable 槽位（`HostVtbl::name`）。存下来供诊断包读取。
-///
-/// 【为什么绝不用于分支】按宿主名分支会让"没见过的宿主"退化成不可用；一切差异都应由
-/// 能力探测（`BootstrapFlags` / `NativeHost::from_context` 的 Option bundle）决定。
-static HOST_NAME: Mutex<Option<String>> = Mutex::new(None);
-
-/// 读回宿主应用名（未识别为 `None`）。只读，供诊断输出。
+/// 【为什么是共享层的转发】`IHostApplication::getName` 的读数是进程级事实：ARA 绑定
+/// 路径（共享层 `render/extension/binding.rs`）也读它。存储与证据链都在
+/// `hifishifter_plugin::host_identity`；本外壳只负责在握手成功时**写入**。
 pub(crate) fn host_application_name() -> Option<String> {
-    HOST_NAME.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    hifishifter_plugin::host_identity::host_application_name()
 }
 
 /// 调用 `IHostApplication::getName` 并记录；失败/空名一律静默（诊断信息不是硬依赖）。
@@ -118,36 +107,30 @@ unsafe fn record_host_name(host: *mut c_void) {
     let Some(name) = decode_string128(&buffer) else {
         return;
     };
-    *HOST_NAME.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.clone());
-    crate::log_line(&format!("host application (vst3 name): {name}"));
+    hifishifter_plugin::host_identity::note_host_application_name(&name);
+    hifishifter_plugin::log_line(&format!("host application (vst3 name): {name}"));
     // 宿主名不是「问一次」就能得到的：包装器进程（sfvstwrap / fruity-wrapper）会冒充
     // 宿主，Cubase 加载期只给 unknown。真正的判定在 `host_identity` 里，靠证据链
     // （环境变量 / ARA 名 / 进程映像 / 祖先链 / VST3 名）取第一个能认出的。
     resolve_and_record_host_identity();
 }
 
-/// 收集全部证据、定出宿主、把日志切到 `plugin-<format>-<host>.log`。
+/// VST3 侧的宿主身份解析入口：在进程证据之上追加 `IHostApplication::getName` 读数。
 ///
-/// 【为什么可以重复调用】Cubase 在加载期只给 unknown，真正使用时的名字更晚才到。
-/// 第一次拿不到就留 unknown，后续调用（首次 process）再解析一次；一旦得到非 unknown
-/// 的结果就不再重算 —— 否则日志文件名会来回跳。
-pub(crate) fn resolve_and_record_host_identity() -> crate::host_identity::HostIdentity {
-    let mut evidence = crate::host_identity::process_evidence();
+/// 编排（收集 → 解析 → 登记 → 切日志）只有 `host_identity::resolve_and_record` 一份；
+/// 重复调用的幂等语义（Cubase 迟到的名字）也钉在那里。
+pub(crate) fn resolve_and_record_host_identity() -> hifishifter_plugin::host_identity::HostIdentity {
+    // 收集 → 解析 → 登记 → 切日志的编排只有共享层那一份（`host_identity::
+    // resolve_and_record`）；这里只负责把 VST3 专属的证据（`IHostApplication::getName`
+    // 的读数）追加到进程证据上。CLAP 没有对应接口，走的是不带追加的便捷入口。
+    let mut evidence = hifishifter_plugin::host_identity::process_evidence();
     if let Some(name) = host_application_name() {
-        evidence.push(crate::host_identity::Evidence {
-            source: crate::host_identity::EvidenceSource::Vst3Name,
+        evidence.push(hifishifter_plugin::host_identity::Evidence {
+            source: hifishifter_plugin::host_identity::EvidenceSource::Vst3Name,
             name,
         });
     }
-    let identity = crate::host_identity::resolve_identity(&evidence);
-    crate::host_identity::note_identity(&identity);
-    crate::log_line(&identity.describe());
-    if identity.display != "unknown" {
-        // 日志按宿主分文件：拿到名字的这一刻把日志切过去
-        //（此前攒下的行会一起补写进去，见 `diagnostics::note_host_application`）。
-        crate::diagnostics::note_host_application(&identity.display);
-    }
-    identity
+    hifishifter_plugin::host_identity::resolve_and_record(&evidence)
 }
 
 /// 装 `IHostApplication::getName` 结果的缓冲。
@@ -548,7 +531,7 @@ unsafe extern "system" fn message_query(
     iid: *const u8,
     out: *mut *mut c_void,
 ) -> TResult {
-    crate::guard_ffi(K_RESULT_FALSE, || {
+    hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
         if out.is_null() || iid.is_null() || this.is_null() {
             return K_INVALID_ARGUMENT;
         }
@@ -571,7 +554,7 @@ unsafe extern "system" fn message_query(
 }
 
 unsafe extern "system" fn message_add_ref(this: *mut c_void) -> u32 {
-    crate::guard_ffi(0, || {
+    hifishifter_plugin_core::guard_ffi(0, || {
         // SAFETY: this 是仍然存活的消息对象。
         unsafe {
             (*this.cast::<OwnedMessage>())
@@ -583,7 +566,7 @@ unsafe extern "system" fn message_add_ref(this: *mut c_void) -> u32 {
 }
 
 unsafe extern "system" fn message_release(this: *mut c_void) -> u32 {
-    crate::guard_ffi(0, || unsafe { release_message(this) })
+    hifishifter_plugin_core::guard_ffi(0, || unsafe { release_message(this) })
 }
 
 /// 递减消息的引用计数；归零时连同属性表一起释放。
@@ -610,7 +593,7 @@ unsafe fn release_message(this: *mut c_void) -> u32 {
 }
 
 unsafe extern "system" fn message_id(this: *mut c_void) -> *const c_char {
-    crate::guard_ffi(std::ptr::null(), || {
+    hifishifter_plugin_core::guard_ffi(std::ptr::null(), || {
         // SAFETY: this 是仍然存活的消息对象。
         unsafe { (*this.cast::<OwnedMessage>()).id }
     })
@@ -622,11 +605,11 @@ unsafe extern "system" fn message_id(this: *mut c_void) -> *const c_char {
 unsafe extern "system" fn message_set_id(_this: *mut c_void, _id: *const c_char) {
     // 空操作也要带守卫：thread-model §1.1 的合同是「每个宿主可调入口自带 panic
     // 遏制」，不因为函数体平凡而豁免。
-    crate::guard_ffi((), || {})
+    hifishifter_plugin_core::guard_ffi((), || {})
 }
 
 unsafe extern "system" fn message_attributes(this: *mut c_void) -> *mut c_void {
-    crate::guard_ffi(std::ptr::null_mut(), || {
+    hifishifter_plugin_core::guard_ffi(std::ptr::null_mut(), || {
         if this.is_null() {
             return std::ptr::null_mut();
         }
@@ -650,7 +633,7 @@ unsafe extern "system" fn attributes_query(
     iid: *const u8,
     out: *mut *mut c_void,
 ) -> TResult {
-    crate::guard_ffi(K_RESULT_FALSE, || {
+    hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
         if out.is_null() || iid.is_null() || this.is_null() {
             return K_INVALID_ARGUMENT;
         }
@@ -672,7 +655,7 @@ unsafe extern "system" fn attributes_query(
 }
 
 unsafe extern "system" fn attributes_add_ref(this: *mut c_void) -> u32 {
-    crate::guard_ffi(0, || {
+    hifishifter_plugin_core::guard_ffi(0, || {
         // SAFETY: this 是仍然存活的属性表。
         unsafe {
             (*this.cast::<OwnedAttributes>())
@@ -684,7 +667,7 @@ unsafe extern "system" fn attributes_add_ref(this: *mut c_void) -> u32 {
 }
 
 unsafe extern "system" fn attributes_release(this: *mut c_void) -> u32 {
-    crate::guard_ffi(0, || unsafe { release_attributes(this) })
+    hifishifter_plugin_core::guard_ffi(0, || unsafe { release_attributes(this) })
 }
 
 /// # Safety
@@ -729,7 +712,7 @@ unsafe extern "system" fn attributes_set_int(
     key: *const c_char,
     value: i64,
 ) -> TResult {
-    crate::guard_ffi(K_RESULT_FALSE, || {
+    hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
         if this.is_null() || key.is_null() {
             return K_INVALID_ARGUMENT;
         }
@@ -748,7 +731,7 @@ unsafe extern "system" fn attributes_get_int(
     key: *const c_char,
     value: *mut i64,
 ) -> TResult {
-    crate::guard_ffi(K_RESULT_FALSE, || {
+    hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
         if this.is_null() || key.is_null() || value.is_null() {
             return K_INVALID_ARGUMENT;
         }
@@ -769,7 +752,7 @@ unsafe extern "system" fn attributes_set_string(
     key: *const c_char,
     value: *const u16,
 ) -> TResult {
-    crate::guard_ffi(K_RESULT_FALSE, || {
+    hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
         if this.is_null() || key.is_null() {
             return K_INVALID_ARGUMENT;
         }
@@ -794,7 +777,7 @@ unsafe extern "system" fn attributes_get_string(
     buffer: *mut u16,
     size_in_bytes: u32,
 ) -> TResult {
-    crate::guard_ffi(K_RESULT_FALSE, || {
+    hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
         if this.is_null() || key.is_null() || buffer.is_null() {
             return K_INVALID_ARGUMENT;
         }
@@ -825,7 +808,7 @@ unsafe extern "system" fn attributes_set_float(
     _key: *const c_char,
     _value: f64,
 ) -> TResult {
-    crate::guard_ffi(K_NOT_IMPLEMENTED, || K_NOT_IMPLEMENTED)
+    hifishifter_plugin_core::guard_ffi(K_NOT_IMPLEMENTED, || K_NOT_IMPLEMENTED)
 }
 
 unsafe extern "system" fn attributes_get_float(
@@ -833,7 +816,7 @@ unsafe extern "system" fn attributes_get_float(
     _key: *const c_char,
     _value: *mut f64,
 ) -> TResult {
-    crate::guard_ffi(K_NOT_IMPLEMENTED, || K_NOT_IMPLEMENTED)
+    hifishifter_plugin_core::guard_ffi(K_NOT_IMPLEMENTED, || K_NOT_IMPLEMENTED)
 }
 
 unsafe extern "system" fn attributes_set_binary(
@@ -842,7 +825,7 @@ unsafe extern "system" fn attributes_set_binary(
     _data: *const c_void,
     _size: u32,
 ) -> TResult {
-    crate::guard_ffi(K_NOT_IMPLEMENTED, || K_NOT_IMPLEMENTED)
+    hifishifter_plugin_core::guard_ffi(K_NOT_IMPLEMENTED, || K_NOT_IMPLEMENTED)
 }
 
 unsafe extern "system" fn attributes_get_binary(
@@ -851,7 +834,7 @@ unsafe extern "system" fn attributes_get_binary(
     _data: *mut *const c_void,
     _size: *mut u32,
 ) -> TResult {
-    crate::guard_ffi(K_NOT_IMPLEMENTED, || K_NOT_IMPLEMENTED)
+    hifishifter_plugin_core::guard_ffi(K_NOT_IMPLEMENTED, || K_NOT_IMPLEMENTED)
 }
 
 /// `Vst::IAttributeList` 的 IID。

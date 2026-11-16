@@ -137,9 +137,9 @@ impl ExtensionOwner {
             self.roles.load(Ordering::Acquire)
         );
     }
-    /// 文档关闭后重绑到另一份文档的次数（诊断；测试断言用）。
-    #[cfg(test)]
-    pub(crate) fn rebind_generation_count(&self) -> u64 {
+    /// 文档关闭后重绑到另一份文档的次数（诊断；测试断言用，含 test-support 下的外壳测试）。
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn rebind_generation_count(&self) -> u64 {
         self.rebind_generation.load(Ordering::Acquire)
     }
     /// 本实例的创建序号（越小越早）；诊断时用来指认实例。
@@ -155,7 +155,7 @@ impl ExtensionOwner {
         self.roles.load(Ordering::Acquire)
     }
     /// 记录 `setupProcessing` 声明的采样率（Hz）。非有限/非正数忽略（保持未声明）。
-    pub(crate) fn set_setup_sample_rate(&self, rate: f64) {
+    pub fn set_setup_sample_rate(&self, rate: f64) {
         let hz = rate.round();
         if hz.is_finite() && hz > 0.0 && hz <= f64::from(i32::MAX) {
             self.setup_sample_rate.store(hz as i32, Ordering::Release);
@@ -171,7 +171,7 @@ impl ExtensionOwner {
     }
     /// 记录 `setBusArrangements` 协商出的扬声器编排（`kMono` = 1 / `kStereo` = 3），
     /// 打包为 `(输入 << 32) | 输出`。
-    pub(crate) fn set_bus_arrangements(&self, inputs: u64, outputs: u64) {
+    pub fn set_bus_arrangements(&self, inputs: u64, outputs: u64) {
         self.bus_arrangement
             .store((inputs << 32) | (outputs & 0xffff_ffff), Ordering::Release);
     }
@@ -180,7 +180,7 @@ impl ExtensionOwner {
     /// 声道数 = 掩码置位数（`count_ones`）：kMono=1 ⇒ 1，kStereo=3 ⇒ 2，
     /// 5.1=63 ⇒ 6。尚未协商（`0`）时按默认 `kStereo`(3) 报告 —— 与
     /// `component_get_bus_info` 声明的 2 声道一致，不与宿主协商结果矛盾。
-    pub(crate) fn bus_arrangement(&self, direction: i32) -> u64 {
+    pub fn bus_arrangement(&self, direction: i32) -> u64 {
         let packed = self.bus_arrangement.load(Ordering::Acquire);
         if packed == 0 {
             return 3;
@@ -224,7 +224,7 @@ impl ExtensionOwner {
         }
     }
     /// 最终输出前的有效item静音门；与编辑器内轨道mute不同，不从输入是否全零猜静音。
-    pub(crate) fn host_item_muted(&self) -> bool {
+    pub fn host_item_muted(&self) -> bool {
         self.host_item_muted.load(Ordering::Acquire)
     }
     /// editor-only必须透传；未绑定角色不在这里虚构为editor，保留原未绑定安全行为。
@@ -302,7 +302,7 @@ impl ExtensionOwner {
     /// （那是 `ARA_NOT_BOUND` 的语义），而 Capture 的编辑界面**必须**能用 ——
     /// 否则"录进来由插件处理"无从发生：用户改不了音高，也就没有处理可言。
     /// 两个分支产出同一个类型，因此命令分发、历史、参数、分析全部共用。
-    pub(crate) fn editor_session(
+    pub fn editor_session(
         self: &Arc<Self>,
     ) -> Result<Arc<crate::editor::session::EditorSession>, String> {
         if !self.is_bound() && !self.bound_once.load(Ordering::Acquire) {
@@ -462,7 +462,7 @@ impl ExtensionOwner {
     /// 渲染"，它被 `report_playback_ownership` 与诊断用于回答"文档上还有没有人在渲染"。
     /// Capture 实例**不在任何 ARA 文档上**，把它算进去会让那两处以为文档有播放实例。
     /// 这里另立一个"要不要出音"的判据，只在渲染准入点使用。
-    pub(crate) fn renders(&self) -> bool {
+    pub fn renders(&self) -> bool {
         if self.is_bound() {
             return !self.is_editor_only();
         }

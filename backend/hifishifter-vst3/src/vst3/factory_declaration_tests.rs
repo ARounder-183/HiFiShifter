@@ -95,7 +95,7 @@ fn every_class_info_entry_agrees_on_the_same_declaration() {
 /// 变成测试期就能看见的失败。
 #[test]
 fn the_processor_class_name_matches_the_ara_factory_plug_in_name() {
-    let runtime = crate::runtime::runtime().expect("进程级 ARA 运行时必须可建");
+    let runtime = hifishifter_plugin::runtime::runtime().expect("进程级 ARA 运行时必须可建");
     // SAFETY: 工厂泄漏到进程结束，指针在整个用例期间有效。
     let factory = unsafe { &*runtime.factory.factory_raw() };
     // SAFETY: `plugInName` 是工厂持有的 NUL 结尾 C 字符串。
@@ -171,7 +171,7 @@ fn plugin_factory3_is_queryable() {
 /// 把同一件事再钉一遍（请求每一代都必须拿到真实控制器）。
 #[test]
 fn the_advertised_ara_generation_range_covers_hosts_and_stays_honest() {
-    let runtime = crate::runtime::runtime().expect("进程级 ARA 运行时必须可建");
+    let runtime = hifishifter_plugin::runtime::runtime().expect("进程级 ARA 运行时必须可建");
     // `ARAFactory` 是**紧凑（packed）**结构（ARA SDK 在 Windows 上按 1 字节对齐生成），
     // 因此不能直接对字段取引用（E0793）。整份拷出来再读，与库的 `raw_copy` 同一手法。
     // SAFETY: 工厂泄漏到进程结束，指针在整个用例期间有效；read_unaligned 接受任意对齐。

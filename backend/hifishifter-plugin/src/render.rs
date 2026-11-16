@@ -20,7 +20,7 @@ pub(crate) mod input;
 pub(crate) mod link;
 pub(crate) mod ownership;
 pub(crate) mod preparation;
-pub(crate) mod snapshot;
+pub mod snapshot;
 pub(crate) mod source;
 pub(crate) mod source_reads;
 pub(crate) mod transport;

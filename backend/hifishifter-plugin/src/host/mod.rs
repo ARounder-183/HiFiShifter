@@ -11,8 +11,8 @@ pub(crate) mod reaper;
 
 // 中立门面：通用层（`editor/`、`render/`）只经这里访问宿主原生执行层，不直接命名
 // `reaper`。REAPER 专有的 API / 类型字符串 / 键名全部封在 `reaper/` 内。
-#[cfg(test)]
-pub(crate) use reaper::MockHost;
+#[cfg(any(test, feature = "test-support"))]
+pub use reaper::MockHost;
 pub(crate) use reaper::{
     clipboard, host_edit, host_split, undo, HostClipTarget, HostTrackTarget, NativeHost, UiItem,
     UiTrack,

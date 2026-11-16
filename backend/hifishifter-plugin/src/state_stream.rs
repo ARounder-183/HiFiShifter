@@ -1,4 +1,8 @@
 //! 对照锁定SDK IBStream的组件state读写，短读写必须循环，不允许损坏state伪成功。
+//!
+//! 【为什么 pub】IBStream 的形状（vtable 槽位、短读循环、长度前缀）是 VST3 与 CLAP
+//! 共有的宿主契约（CLAP 的 `clap_istream_t` 同形）：两个外壳都调这里，状态字节层面
+//! 只有这一份实现。
 use std::ffi::c_void;
 
 #[repr(C)]
@@ -13,7 +17,7 @@ struct StreamVtbl {
 }
 
 /// 宿主拥有有效IBStream，生命周期覆盖调用；空旧state合法。
-pub(crate) unsafe fn read_state(stream: *mut c_void) -> Result<Vec<u8>, String> {
+pub unsafe fn read_state(stream: *mut c_void) -> Result<Vec<u8>, String> {
     if stream.is_null() {
         return Err("null state stream".into());
     }
@@ -64,7 +68,7 @@ pub(crate) unsafe fn read_state(stream: *mut c_void) -> Result<Vec<u8>, String> 
     Ok(bytes)
 }
 /// 宿主拥有有效可写IBStream；全部字节完成前不报告成功。
-pub(crate) unsafe fn write_state(stream: *mut c_void, bytes: &[u8]) -> Result<(), String> {
+pub unsafe fn write_state(stream: *mut c_void, bytes: &[u8]) -> Result<(), String> {
     if stream.is_null() || bytes.len() > hifishifter_host_link::MAX_COMPONENT_STATE {
         return Err("invalid state stream/length".into());
     }

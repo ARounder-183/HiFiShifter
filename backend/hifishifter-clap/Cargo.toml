@@ -37,7 +37,11 @@ hifishifter-capture = { path = "../hifishifter-capture" }
 hifishifter-plugin = { path = "../hifishifter-plugin" }
 # ARA 2 的 CLAP 伴生适配器：entry 级工厂表与实例级扩展的**结构体与回调形状**由它给出，
 # 绑定逻辑则走 hifishifter-plugin 的共享 binder（见 src/ara.rs 的说明）。
-ara2-bridge = { version = "0.3.0", features = ["clap"] }
+# 【为什么显式写全三个特性】`clap` 是本外壳的格式特性；`plugin`/`companion` 与共享层
+# 的声明字面一致（见 ../hifishifter-plugin/Cargo.toml 的 ara2-bridge 注释）。CLAP 的
+# companion 是纯 Rust —— 本外壳的构建**不需要任何 SDK 检出**（CLAP SDK 头文件只有
+# 布局 oracle 测试用）。
+ara2-bridge = { version = "0.3.0", features = ["plugin", "companion", "clap"] }
 # 时间线载荷与 VST3 同形（同一个 TimelineState），只用到 serde 类型。
 # 【为什么显式写 features】这一份必须与 hifishifter-plugin 内部对 kernel 的声明
 # **字面相同**（见 ../hifishifter-plugin/Cargo.toml）。用 kernel 的 default 会多带

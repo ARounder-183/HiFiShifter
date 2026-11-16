@@ -42,7 +42,7 @@ impl ExtensionOwner {
     /// 需要宿主扩展的操作都从这里取、并显式处理 `None`，让"这一步依赖原生扩展"写在
     /// 调用点上，而不是藏在字段类型里。`NativeHost` 自身不带品牌：它只是一组宿主扩展
     /// API 的适配器，当前实现是 REAPER，但通用层从不命名具体宿主。
-    pub(crate) fn native_host(&self) -> Option<Arc<crate::host::NativeHost>> {
+    pub fn native_host(&self) -> Option<Arc<crate::host::NativeHost>> {
         self.host
             .lock_or_recover()
             .clone()
@@ -213,7 +213,7 @@ impl ExtensionOwner {
     /// 宿主复用处理器实例重开工程时，重绑后 `native_host()` 永远是 `None`，
     /// 于是不枚举 item、不填 `region_items`、界面停在"等待宿主音频"。
     /// 文档关闭必须走 [`Self::stop_editor_for_document`]。
-    pub(crate) fn stop_editor(&self) {
+    pub fn stop_editor(&self) {
         self.stop_editor_inner(false);
     }
 
@@ -357,8 +357,8 @@ impl ExtensionOwner {
     }
     /// 组件释放/文档关闭前结束后台服务，避免DLL卸载后线程仍执行插件代码。
     /// 未绑定时暂存组件state；绑定后所有处理器读取同一文档的参数权威。
-    // 组件state访问器保留，供未绑定路径读取。
-    #[cfg(test)]
+    // 组件state访问器保留，供未绑定路径读取（含 test-support 下的外壳测试）。
+    #[cfg(any(test, feature = "test-support"))]
     pub fn edit_state(&self) -> Arc<Mutex<crate::state_channel::EditState>> {
         self.document
             .lock_or_recover()

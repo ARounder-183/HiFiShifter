@@ -14,7 +14,16 @@
 //! `ara2-bridge-companion` 的 C++ 适配器，避免重复实现引用计数语义。
 
 use crate::ara_entry::HostEntry;
-use crate::render::extension::ExtensionOwner;
+use hifishifter_plugin::audio_abi::ProcessSetup;
+use hifishifter_plugin::render::extension::ExtensionOwner;
+// ABI 词汇（TResult / K_* / TUID 布局 / iid_matches）的唯一来源是共享层的
+// `vst3_abi`：`host/reaper`、`editor/routing`、`editor/gui/linux` 等共享代码也消费
+// 它，而依赖方向（壳 → 共享层）决定了词汇不能住在本模块。本模块只保留工厂 /
+// 组件 / 处理器 / 控制器的实现与自己的类 ID、接口 IID。
+use hifishifter_plugin::vst3_abi::{
+    iid_matches, uid_guid, UnknownVtbl, TResult, Tuid, K_INVALID_ARGUMENT, K_NO_INTERFACE,
+    K_NOT_IMPLEMENTED, K_RESULT_FALSE, K_RESULT_OK,
+};
 use ara2_bridge::companion::vst3::ffi::{
     ara2_vst3_interface_id, ara2_vst3_main_factory_category, Ara2Vst3InterfaceId,
     Ara2Vst3InterfaceKind, ARA2_VST3_OK,
@@ -26,21 +35,6 @@ use std::mem::offset_of;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
-/// VST3 `tresult`（HRESULT 风格）。
-pub type TResult = i32;
-/// VST3 16 字节接口/类标识。
-pub type Tuid = [u8; 16];
-
-/// `kResultOk`。
-pub const K_RESULT_OK: TResult = 0;
-/// `kResultFalse`。
-pub const K_RESULT_FALSE: TResult = 1;
-/// `kNotImplemented`。
-pub const K_NOT_IMPLEMENTED: TResult = 0x8000_4001u32 as i32;
-/// `kNoInterface`。
-pub const K_NO_INTERFACE: TResult = 0x8000_4002u32 as i32;
-/// `kInvalidArgument`。
-pub const K_INVALID_ARGUMENT: TResult = 0x8007_0057u32 as i32;
 /// `PClassInfo::kManyInstances`。
 const K_MANY_INSTANCES: i32 = 0x7FFF_FFFF;
 
@@ -62,112 +56,6 @@ const FACTORY_CID: Tuid = uid_guid([0x9C3A_4F19, 0x1E8B, 0x4D02, 0xB7A1_3C6E]);
 
 /// `Component Controller Class`（`kVstComponentControllerClass`）。
 const COMPONENT_CONTROLLER_CLASS: &str = "Component Controller Class";
-
-/// 从 `DECLARE_CLASS_IID` 的四个 32 位字构造 TUID（Windows VST3 布局）。
-///
-/// 这是实测结果，不是推断：Windows 上 VST3 SDK 的 `fplatform.h` 把 `COM_COMPATIBLE`
-/// 定义为 1，其 `INLINE_UID` 展开等价于标准 GUID 内存布局 ——
-/// 第 1 个字小端、第 2 个字拆成两个 u16 各自小端、第 3/4 个字大端。
-/// 依据：REAPER 请求 `IPluginFactory2` 时传出的字节
-/// `50B607004BF20B4CA464EDB9F00B2ABB`，正是
-/// `{0007B650-F24B-4C0B-A464-EDB9F00B2ABB}` 的 GUID 布局。
-pub(crate) const fn uid_guid(words: [u32; 4]) -> Tuid {
-    let [l1, l2, l3, l4] = words;
-    [
-        (l1 & 0xFF) as u8,
-        ((l1 >> 8) & 0xFF) as u8,
-        ((l1 >> 16) & 0xFF) as u8,
-        ((l1 >> 24) & 0xFF) as u8,
-        ((l2 >> 16) & 0xFF) as u8,
-        ((l2 >> 24) & 0xFF) as u8,
-        (l2 & 0xFF) as u8,
-        ((l2 >> 8) & 0xFF) as u8,
-        ((l3 >> 24) & 0xFF) as u8,
-        ((l3 >> 16) & 0xFF) as u8,
-        ((l3 >> 8) & 0xFF) as u8,
-        (l3 & 0xFF) as u8,
-        ((l4 >> 24) & 0xFF) as u8,
-        ((l4 >> 16) & 0xFF) as u8,
-        ((l4 >> 8) & 0xFF) as u8,
-        (l4 & 0xFF) as u8,
-    ]
-}
-
-/// `COM_COMPATIBLE=0` 时的布局：每个字大端展开。
-///
-/// 【为什么不是"备用"而是"另一半平台的主布局"】Linux / macOS 的 VST3 就是按它比较
-/// IID 的（见 `platform_iid`）。此前它只被 `iid_matches` 用来"收"，从未被用来"发"。
-pub(crate) const fn uid_be(words: [u32; 4]) -> Tuid {
-    let [l1, l2, l3, l4] = words;
-    [
-        ((l1 >> 24) & 0xFF) as u8,
-        ((l1 >> 16) & 0xFF) as u8,
-        ((l1 >> 8) & 0xFF) as u8,
-        (l1 & 0xFF) as u8,
-        ((l2 >> 24) & 0xFF) as u8,
-        ((l2 >> 16) & 0xFF) as u8,
-        ((l2 >> 8) & 0xFF) as u8,
-        (l2 & 0xFF) as u8,
-        ((l3 >> 24) & 0xFF) as u8,
-        ((l3 >> 16) & 0xFF) as u8,
-        ((l3 >> 8) & 0xFF) as u8,
-        (l3 & 0xFF) as u8,
-        ((l4 >> 24) & 0xFF) as u8,
-        ((l4 >> 16) & 0xFF) as u8,
-        ((l4 >> 8) & 0xFF) as u8,
-        (l4 & 0xFF) as u8,
-    ]
-}
-
-/// 发给宿主的 IID 字节：跟着平台的 `COM_COMPATIBLE` 走。
-///
-/// 【为什么必须分平台，而不是"两种都发一遍"】`queryInterface` 是**逐字节**比较，
-/// 而 `INLINE_UID`（`pluginterfaces/base/funknown.h:36-60`）按 `COM_COMPATIBLE`
-/// 展开成两种布局：
-///
-/// * Windows（`fplatform.h:78`，`COM_COMPATIBLE 1`）—— COM/GUID 布局，即 `uid_guid`；
-/// * Linux / macOS（`fplatform.h:158` / `:226`，`COM_COMPATIBLE 0`）—— **每字大端**，
-///   即 `uid_be`。
-///
-/// 此前全部"插件 → 宿主"的查询都发的是 `uid_guid`。宿主的常量里根本没有那一串，
-/// 于是**一次都没命中过**，而失败形态是"回一个 null 指针"——不崩、不报错，只有一行
-/// `available=false`。实测（Linux REAPER）：`IReaperHostApplication` 拿不到 ⇒ ARA
-/// 认领不到宿主 item；`IHostApplication` 拿不到 ⇒ 编辑器与处理器断链；
-/// `IComponentHandler2` 拿不到 ⇒ 工程永不标脏。判据：REAPER 的二进制里那六个 IID
-/// 只有大端那一串，且 `scripts/vst3/unix/host_iid_probe.c` 的握手探针能稳定复现。
-///
-/// 【为什么不在类型层面禁掉 `uid_guid`】类 ID（`PROCESSOR_CID` 等）是我们自己造的
-/// 16 字节身份，宿主只做"原样保存、原样回传"，两种布局都自洽；它们**不能**跟着平台变
-/// （已经写进用户工程）。所以这里只约束"发给宿主去比较的接口 IID"。
-pub(crate) const fn platform_iid(words: [u32; 4]) -> Tuid {
-    if cfg!(windows) {
-        uid_guid(words)
-    } else {
-        uid_be(words)
-    }
-}
-
-/// 另一种布局的同一个 IID：**只**给"宿主可能是别人转发的"兜底用。
-///
-/// 【为什么保留它】Wine / CrossOver / 各类 wrapper 进程转发 VST3 调用时，转发层可能
-/// 按它自己那一套布局比较 IID。`NativeHost::from_context` 因此会再试一次另一种布局，
-/// 命中时大声记一行 —— 那种情况必须看得见，不能被"反正能跑"掩盖。
-pub(crate) const fn alternate_iid(words: [u32; 4]) -> Tuid {
-    if cfg!(windows) {
-        uid_be(words)
-    } else {
-        uid_guid(words)
-    }
-}
-
-/// 本构建把 IID 编成哪种布局（日志用：让人一眼看出产物是按哪边编的）。
-pub(crate) const fn iid_layout() -> &'static str {
-    if cfg!(windows) {
-        "com-guid"
-    } else {
-        "big-endian"
-    }
-}
 
 const IID_FUNKNOWN: [u32; 4] = [0x0000_0000, 0x0000_0000, 0xC000_0000, 0x0000_0046];
 const IID_IPLUGIN_BASE: [u32; 4] = [0x2288_8DDB, 0x156E_45AE, 0x8358_B348, 0x0819_0625];
@@ -193,20 +81,6 @@ const IID_IEDIT_CONTROLLER: [u32; 4] = [0xDCD7_BBE3, 0x7742_448D, 0xA874_AACC, 0
 /// 3.7 之前的 SDK 会无条件发全量，所以旧行为在旧宿主上"碰巧能用"。
 const IID_IPROCESS_CONTEXT_REQUIREMENTS: [u32; 4] =
     [0x2A654303, 0xEF764E3D, 0x95B5FE83, 0x730EF6D0];
-
-/// 判断宿主传入的 16 字节 IID 是否等于给定接口（四个 32 位字）。
-///
-/// 同时接受 GUID 布局与逐字大端布局：Windows 实测是前者，但换一种宿主构建方式
-/// 就可能变成后者。接受两种可以避免"因为字节序猜错而误判为 ABI 不兼容"，
-/// 对探针而言多接受的错误匹配没有实际风险。
-pub(crate) unsafe fn iid_matches(iid: *const u8, words: [u32; 4]) -> bool {
-    if iid.is_null() {
-        return false;
-    }
-    // SAFETY: 调用方保证 iid 指向一个可读的 16 字节 TUID。
-    let actual = unsafe { std::slice::from_raw_parts(iid, 16) };
-    actual == uid_guid(words) || actual == uid_be(words)
-}
 
 /// 把 16 字节标识转成十六进制，便于在日志里核对宿主实际请求的 IID。
 fn hex16(bytes: &[u8]) -> String {
@@ -405,7 +279,7 @@ fn class_declaration(index: i32) -> Option<ClassDeclaration> {
     Some(ClassDeclaration {
         cid,
         category,
-        name: crate::CLASS_NAME,
+        name: hifishifter_plugin::CLASS_NAME,
         class_flags,
         sub_categories,
         vendor: VENDOR,
@@ -442,18 +316,8 @@ pub struct RoutingInfo {
     pub channel: i32,
 }
 
-/// `Vst::ProcessSetup`。
-#[repr(C)]
-pub struct ProcessSetup {
-    /// `Vst::ProcessModes`。
-    pub process_mode: i32,
-    /// `Vst::SymbolicSampleSizes`。
-    pub symbolic_sample_size: i32,
-    /// 单块最大样本数。
-    pub max_samples_per_block: i32,
-    /// 采样率。
-    pub sample_rate: f64,
-}
+// `Vst::ProcessSetup` 与其余缓冲/时间结构镜像同住 `audio_abi`：布局基准
+// （`expected_layout`）逐项枚举它，壳只消费。
 
 /// 把 UTF-8 字符串按 NUL 补齐写入定长 `c_char` 缓冲。
 fn copy_str<const N: usize>(dst: &mut [c_char; N], src: &str) {
@@ -552,7 +416,7 @@ unsafe extern "system" fn factory_query_interface(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_NO_INTERFACE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_NO_INTERFACE, || {
+        hifishifter_plugin_core::guard_ffi(K_NO_INTERFACE, || {
             if obj.is_null() {
                 return K_INVALID_ARGUMENT;
             }
@@ -579,7 +443,7 @@ unsafe extern "system" fn factory_query_interface(
             unsafe { (*factory).refcount.fetch_add(1, Ordering::AcqRel) };
             // SAFETY: 输出槽非空。
             unsafe { *obj = this };
-            crate::log_line(&format!("factory queryInterface hit {name}"));
+            hifishifter_plugin::log_line(&format!("factory queryInterface hit {name}"));
             K_RESULT_OK
         })
     }
@@ -589,7 +453,7 @@ unsafe extern "system" fn factory_add_ref(this: *mut c_void) -> u32 {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0, || {
+        hifishifter_plugin_core::guard_ffi(0, || {
             let factory = this as *const PluginFactoryObj;
             // SAFETY: this 是形如 PluginFactoryObj 的常驻单例。
             unsafe { (*factory).refcount.fetch_add(1, Ordering::AcqRel) as u32 + 1 }
@@ -601,7 +465,7 @@ unsafe extern "system" fn factory_release(this: *mut c_void) -> u32 {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0, || {
+        hifishifter_plugin_core::guard_ffi(0, || {
             let factory = this as *const PluginFactoryObj;
             // SAFETY: this 是形如 PluginFactoryObj 的常驻单例；探针不销毁它。
             let previous = unsafe { (*factory).refcount.fetch_sub(1, Ordering::AcqRel) };
@@ -617,7 +481,7 @@ unsafe extern "system" fn factory_get_factory_info(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             if info.is_null() {
                 return K_INVALID_ARGUMENT;
             }
@@ -637,9 +501,9 @@ unsafe extern "system" fn factory_count_classes(_this: *mut c_void) -> i32 {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0, || {
+        hifishifter_plugin_core::guard_ffi(0, || {
             // 0: 音频处理器组件，1: ARA 主工厂类，2: 编辑器控制器。
-            crate::log_line("factory countClasses -> 3");
+            hifishifter_plugin::log_line("factory countClasses -> 3");
             3
         })
     }
@@ -671,13 +535,13 @@ unsafe extern "system" fn factory_get_class_info(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             if info.is_null() || !(0..=2).contains(&index) {
                 return K_INVALID_ARGUMENT;
             }
             // SAFETY: info 是宿主提供的可写 PClassInfo。
             unsafe { fill_class_info(info, index) };
-            crate::log_line(&format!("factory getClassInfo({index}) ok"));
+            hifishifter_plugin::log_line(&format!("factory getClassInfo({index}) ok"));
             K_RESULT_OK
         })
     }
@@ -691,7 +555,7 @@ unsafe extern "system" fn factory_get_class_info2(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             if info.is_null() || !(0..=2).contains(&index) {
                 return K_INVALID_ARGUMENT;
             }
@@ -733,7 +597,7 @@ unsafe extern "system" fn factory_get_class_info_unicode(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             if info.is_null() || !(0..=2).contains(&index) {
                 return K_INVALID_ARGUMENT;
             }
@@ -753,7 +617,7 @@ unsafe extern "system" fn factory_get_class_info_unicode(
             copy_wide_str(&mut info.vendor, declaration.vendor);
             copy_wide_str(&mut info.version, declaration.version);
             copy_wide_str(&mut info.sdk_version, declaration.sdk_version);
-            crate::log_line(&format!("factory getClassInfoUnicode({index}) ok"));
+            hifishifter_plugin::log_line(&format!("factory getClassInfoUnicode({index}) ok"));
             K_RESULT_OK
         })
     }
@@ -766,7 +630,7 @@ unsafe extern "system" fn factory_set_host_context(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || K_RESULT_OK)
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || K_RESULT_OK)
     }
 }
 
@@ -779,7 +643,7 @@ unsafe extern "system" fn factory_create_instance(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             if obj.is_null() {
                 return K_INVALID_ARGUMENT;
             }
@@ -790,7 +654,7 @@ unsafe extern "system" fn factory_create_instance(
             }
             // SAFETY: cid 指向宿主从 getClassInfo 拿到的 16 字节 TUID。
             let cid = unsafe { std::slice::from_raw_parts(cid as *const u8, 16) };
-            crate::log_line(&format!(
+            hifishifter_plugin::log_line(&format!(
                 "factory createInstance cid={} iid={}",
                 hex16(cid),
                 unsafe { hex_iid(iid as *const u8) }
@@ -831,13 +695,13 @@ unsafe extern "system" fn factory_create_instance(
                         .is_some_and(|words| unsafe { iid_matches(iid as *const u8, words) });
                 if !supported {
                     // `adapter` 在此 drop：消耗它唯一的 COM 引用，宿主拿不到对象。
-                    crate::log_line("factory createInstance ARA main factory: unsupported iid");
+                    hifishifter_plugin::log_line("factory createInstance ARA main factory: unsupported iid");
                     return K_NO_INTERFACE;
                 }
                 // 【为什么记这一行】创建 ARA 主工厂是宿主**明确要走 ARA 路径**的第一个
                 // 信号（Cubase 实测：加载前创建了它两次）。把它与"之后是否真的绑定了
                 // 文档控制器"放在同一条时间线上，一眼就能看出宿主走到哪一步停住。
-                crate::log_line("factory createInstance ARA main factory");
+                hifishifter_plugin::log_line("factory createInstance ARA main factory");
                 let raw = adapter.as_raw();
                 // 交付成功：把适配器泄漏给宿主管理引用计数，直到最终 release。
                 std::mem::forget(adapter);
@@ -883,7 +747,7 @@ static FACTORY_VTBL: PluginFactoryVtbl = PluginFactoryVtbl {
 
 /// 返回进程级单例工厂指针（每次调用增加一个引用，符合 VST3 约定）。
 pub fn get_plugin_factory() -> *mut c_void {
-    crate::log_line("GetPluginFactory called");
+    hifishifter_plugin::log_line("GetPluginFactory called");
     FACTORY.refcount.fetch_add(1, Ordering::AcqRel);
     &FACTORY as *const PluginFactoryObj as *mut c_void
 }
@@ -972,7 +836,7 @@ pub struct AudioProcessorVtbl {
 /// 由 `base_from_context_requirements` 反解回 `Processor`。
 #[repr(C)]
 pub struct ProcessContextRequirementsVtbl {
-    pub base: crate::editor::connection::UnknownVtbl,
+    pub base: UnknownVtbl,
     /// `IProcessContextRequirements::getProcessContextRequirements`。
     pub get_process_context_requirements: unsafe extern "system" fn(*mut c_void) -> u32,
 }
@@ -990,8 +854,8 @@ struct Processor {
     entry: Option<HostEntry>,
     extension_owner: Arc<ExtensionOwner>,
     active: AtomicI32,
-    connection_vtbl: *const crate::editor::connection::ConnectionVtbl,
-    connection: crate::editor::connection::ConnectionState,
+    connection_vtbl: *const crate::connection::ConnectionVtbl,
+    connection: crate::connection::ConnectionState,
     /// `IProcessContextRequirements` 子对象（见该 vtbl 的说明）。
     ///
     /// 【为什么每个实例一份而不是共享静态】子对象身份必须与拥有者一一对应：
@@ -999,23 +863,23 @@ struct Processor {
     /// 要能被反解回**正确的那个** `Processor`。共享一个静态对象会让两个实例
     /// 拿到同一个地址。
     context_requirements_vtbl: *const ProcessContextRequirementsVtbl,
-    route: crate::editor::routing::RouteLease,
+    route: hifishifter_plugin::editor::RouteLease,
 }
 
 impl Processor {
     /// 建立处理器：为每个实例单独建一个 companion 处理器绑定 + ARA 入口适配器，
     /// 这样多个实例不会互相抢同一次绑定。
     fn create() -> Option<Box<Processor>> {
-        let runtime = crate::runtime::runtime()?;
+        let runtime = hifishifter_plugin::runtime::runtime()?;
         // 【音频线程零分配】这两个开关用环境变量初始化（会分配 String）。
         // 在组件创建时（宿主 UI 线程）预热，音频回调第一次进入时就不再分配。
-        let _ = crate::audio_stats::buffer_audit_enabled();
+        let _ = hifishifter_plugin::audio_stats::buffer_audit_enabled();
         // 【宿主身份必须在 create 解析一次】initialize 不一定会被调用，getName 也
         // 可能返回 unknown；预览判定不能挂在一个只在 initialize 写的诊断字段上。
-        crate::editor::connection::resolve_and_record_host_identity();
+        crate::connection::resolve_and_record_host_identity();
         let extension_owner = Arc::new(ExtensionOwner::default());
         extension_owner.warm_audio_caches();
-        let route = crate::editor::routing::RouteLease::new(&extension_owner);
+        let route = hifishifter_plugin::editor::RouteLease::new(&extension_owner);
         // 【为什么把 factory/roles 交给 HostEntry】companion 的 "already bound" 是
         // 处理器级的：宿主重开工程会复用同一个 `Processor`，而上一份文档关闭后
         // 这个一次性标志仍然为真。`HostEntry` 必须在同一个位置重建一个等价绑定，
@@ -1023,7 +887,7 @@ impl Processor {
         let entry = HostEntry::new(
             runtime.companion.clone(),
             CompanionRoles::all(),
-            crate::CLASS_NAME,
+            hifishifter_plugin::CLASS_NAME,
             extension_owner.clone(),
         )
         .ok()?;
@@ -1088,14 +952,14 @@ unsafe extern "system" fn component_query_interface(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_NO_INTERFACE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_NO_INTERFACE, || {
+        hifishifter_plugin_core::guard_ffi(K_NO_INTERFACE, || {
             if obj.is_null() {
                 return K_INVALID_ARGUMENT;
             }
             // SAFETY: obj 是宿主提供的输出槽。
             unsafe { *obj = std::ptr::null_mut() };
             let processor = this as *mut Processor;
-            if unsafe { crate::editor::connection::is_connection(iid) } {
+            if unsafe { crate::connection::is_connection(iid) } {
                 unsafe {
                     processor_add_ref(processor);
                     *obj = std::ptr::addr_of_mut!((*processor).connection_vtbl).cast();
@@ -1106,7 +970,7 @@ unsafe extern "system" fn component_query_interface(
             // 查一次并缓存，因此这里必须**先于**通用未命中日志返回，否则日志会把它
             // 记成"宿主查了个我们不认识的接口"。
             if unsafe { iid_matches(iid, IID_IPROCESS_CONTEXT_REQUIREMENTS) } {
-                crate::log_line("component queryInterface hit IProcessContextRequirements");
+                hifishifter_plugin::log_line("component queryInterface hit IProcessContextRequirements");
                 unsafe {
                     processor_add_ref(processor);
                     *obj = std::ptr::addr_of_mut!((*processor).context_requirements_vtbl).cast();
@@ -1119,7 +983,7 @@ unsafe extern "system" fn component_query_interface(
                 || unsafe { iid_matches(iid, IID_ICOMPONENT) }
             {
                 if unsafe { iid_matches(iid, IID_ICOMPONENT) } {
-                    crate::log_line("component queryInterface hit IComponent");
+                    hifishifter_plugin::log_line("component queryInterface hit IComponent");
                 }
                 // SAFETY: processor 是活动对象。
                 unsafe { processor_add_ref(processor) };
@@ -1128,7 +992,7 @@ unsafe extern "system" fn component_query_interface(
                 return K_RESULT_OK;
             }
             if unsafe { iid_matches(iid, IID_IAUDIO_PROCESSOR) } {
-                crate::log_line("component queryInterface hit IAudioProcessor");
+                hifishifter_plugin::log_line("component queryInterface hit IAudioProcessor");
                 // SAFETY: processor 是活动对象。
                 unsafe { processor_add_ref(processor) };
                 // SAFETY: 输出槽非空。
@@ -1156,7 +1020,7 @@ unsafe extern "system" fn component_query_interface(
                         };
                         if unsafe { iid_matches(iid, words) } {
                             if let Ok(interface) = entry.query_interface(kind) {
-                                crate::log_line(&format!(
+                                hifishifter_plugin::log_line(&format!(
                                     "component queryInterface ARA hit iid={}",
                                     unsafe { hex_iid(iid) }
                                 ));
@@ -1178,7 +1042,7 @@ unsafe extern "system" fn component_add_ref(this: *mut c_void) -> u32 {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0, || {
+        hifishifter_plugin_core::guard_ffi(0, || {
             // SAFETY: this 是组件接口指针（对象基址）。
             unsafe { processor_add_ref(this as *mut Processor) }
         })
@@ -1189,7 +1053,7 @@ unsafe extern "system" fn component_release(this: *mut c_void) -> u32 {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0, || {
+        hifishifter_plugin_core::guard_ffi(0, || {
             // SAFETY: this 是组件接口指针（对象基址）。
             unsafe { processor_release(this as *mut Processor) }
         })
@@ -1200,7 +1064,7 @@ unsafe extern "system" fn component_initialize(this: *mut c_void, context: *mut 
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             // QI/GetApi可重入释放宿主组件引用；短引用只保活本次调用的插件存储，不保活project/take。
             struct CallReference(*mut c_void);
             impl Drop for CallReference {
@@ -1215,7 +1079,7 @@ unsafe extern "system" fn component_initialize(this: *mut c_void, context: *mut 
             }
             let _call_reference = CallReference(this);
             let owner = unsafe { (*this.cast::<Processor>()).extension_owner.clone() };
-            owner.startup_stage(crate::startup::Stage::Component);
+            owner.startup_stage(hifishifter_plugin::startup::Stage::Component);
             if owner.is_closed() {
                 return K_RESULT_FALSE;
             }
@@ -1243,7 +1107,7 @@ unsafe extern "system" fn component_initialize(this: *mut c_void, context: *mut 
             unsafe {
                 (*this.cast::<Processor>()).connection.record_host_name();
             }
-            crate::log_line("IComponent::initialize");
+            hifishifter_plugin::log_line("IComponent::initialize");
             K_RESULT_OK
         })
     }
@@ -1253,13 +1117,13 @@ unsafe extern "system" fn component_terminate(this: *mut c_void) -> TResult {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             unsafe {
                 let processor = &*(this as *mut Processor);
                 processor.connection.close();
                 processor.extension_owner.component_terminated();
             }
-            crate::log_line("IComponent::terminate");
+            hifishifter_plugin::log_line("IComponent::terminate");
             K_RESULT_OK
         })
     }
@@ -1272,14 +1136,14 @@ unsafe extern "system" fn component_get_controller_class_id(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             if class_id.is_null() {
                 return K_INVALID_ARGUMENT;
             }
             // 探针提供一个最小编辑器控制器：REAPER 需要它才能完成 ARA 插入。
             // SAFETY: class_id 是宿主提供的可写 TUID。
             unsafe { std::ptr::copy_nonoverlapping(CONTROLLER_CID.as_ptr(), class_id, 16) };
-            crate::log_line("IComponent::getControllerClassId -> controller class id");
+            hifishifter_plugin::log_line("IComponent::getControllerClassId -> controller class id");
             K_RESULT_OK
         })
     }
@@ -1289,7 +1153,7 @@ unsafe extern "system" fn component_set_io_mode(_this: *mut c_void, _mode: i32) 
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || K_RESULT_OK)
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || K_RESULT_OK)
     }
 }
 
@@ -1301,7 +1165,7 @@ unsafe extern "system" fn component_get_bus_count(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0, || if media_type == 0 { 1 } else { 0 })
+        hifishifter_plugin_core::guard_ffi(0, || if media_type == 0 { 1 } else { 0 })
     }
 }
 
@@ -1315,7 +1179,7 @@ unsafe extern "system" fn component_get_bus_info(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             if bus.is_null() || media_type != 0 || index != 0 {
                 return K_INVALID_ARGUMENT;
             }
@@ -1363,7 +1227,7 @@ unsafe extern "system" fn component_get_routing_info(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
     }
 }
 
@@ -1377,7 +1241,7 @@ unsafe extern "system" fn component_activate_bus(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || K_RESULT_OK)
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || K_RESULT_OK)
     }
 }
 
@@ -1385,7 +1249,7 @@ unsafe extern "system" fn component_set_active(this: *mut c_void, state: i8) -> 
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             let processor = this as *mut Processor;
             // SAFETY: processor 是活动对象。
             unsafe { (*processor).active.store(state as i32, Ordering::SeqCst) };
@@ -1399,8 +1263,7 @@ unsafe extern "system" fn component_set_active(this: *mut c_void, state: i8) -> 
                 // 表现为"等待宿主音频"。这里用组件持有的 `IHostApplication` 引用
                 // 在**当前**线程重建一次；失败只降级为 ARA-only，不会比现状更糟。
                 let host = unsafe { (*processor).connection.host_raw() };
-                if !host.is_null()
-                    && (owner.native_host().is_none() || owner.host_adapter_thread_mismatch())
+                if !host.is_null() && owner.native_adapter_unavailable()
                 {
                     unsafe { owner.rebind_host_adapter(host) };
                 }
@@ -1412,13 +1275,13 @@ unsafe extern "system" fn component_set_active(this: *mut c_void, state: i8) -> 
                 // 激活序列（恢复挂起预览 / 清上一遍几何 / 主动重同步）由共享生命周期入口给出：
                 // CLAP 的 activate 调的是同一个方法。
                 owner.component_activated();
-                crate::log_line(&format!(
+                hifishifter_plugin::log_line(&format!(
                     "IComponent::setActive({state}): ara_bound={}",
                     owner.is_ara_bound()
                 ));
             } else {
                 owner.component_deactivated();
-                crate::log_line(&format!("IComponent::setActive({state})"));
+                hifishifter_plugin::log_line(&format!("IComponent::setActive({state})"));
             }
             K_RESULT_OK
         })
@@ -1433,7 +1296,7 @@ unsafe extern "system" fn component_set_state(this: *mut c_void, state: *mut c_v
     // 或者在重开工程时把插件标成"状态损坏"。一份读不出来的旧存档只该丢掉那份
     // 编辑，不该让整份工程加载失败。
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let bytes = match unsafe { crate::state_stream::read_state(state) } {
+        let bytes = match unsafe { hifishifter_plugin::state_stream::read_state(state) } {
             Ok(bytes) => bytes,
             Err(error) => {
                 log::warn!("[state] component setState ignored: unreadable stream: {error}");
@@ -1470,7 +1333,7 @@ unsafe extern "system" fn component_get_state(this: *mut c_void, state: *mut c_v
             log::error!("[state] component getState degraded to an empty payload: {error}");
             Vec::new()
         });
-        unsafe { crate::state_stream::write_state(state, &bytes) }
+        unsafe { hifishifter_plugin::state_stream::write_state(state, &bytes) }
     }));
     if matches!(outcome, Ok(Ok(()))) {
         K_RESULT_OK
@@ -1487,7 +1350,7 @@ unsafe extern "system" fn audio_query_interface(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_NO_INTERFACE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_NO_INTERFACE, || {
+        hifishifter_plugin_core::guard_ffi(K_NO_INTERFACE, || {
             // SAFETY: this 是 IAudioProcessor 子对象指针。
             let base = unsafe { base_from_audio(this) } as *mut c_void;
             // SAFETY: 转发到基址查询。
@@ -1500,7 +1363,7 @@ unsafe extern "system" fn audio_add_ref(this: *mut c_void) -> u32 {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0, || {
+        hifishifter_plugin_core::guard_ffi(0, || {
             // SAFETY: this 是 IAudioProcessor 子对象指针。
             unsafe { processor_add_ref(base_from_audio(this)) }
         })
@@ -1511,7 +1374,7 @@ unsafe extern "system" fn audio_release(this: *mut c_void) -> u32 {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0, || {
+        hifishifter_plugin_core::guard_ffi(0, || {
             // SAFETY: this 是 IAudioProcessor 子对象指针。
             unsafe { processor_release(base_from_audio(this)) }
         })
@@ -1528,7 +1391,7 @@ unsafe extern "system" fn audio_set_bus_arrangements(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             // 【为什么 0 也算不支持】宿主提出"这条总线不要了"时，正确的回答是
             // `kResultFalse`（"我做不到动态增减总线"），宿主于是沿用我们声明的 1 进 1 出。
             // 假装接受会让 `getBusCount` 与 `getBusInfo` 互相矛盾 —— 对宿主撒谎。
@@ -1564,7 +1427,7 @@ unsafe extern "system" fn audio_get_bus_arrangement(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             if this.is_null() || arrangement.is_null() {
                 return K_INVALID_ARGUMENT;
             }
@@ -1585,7 +1448,7 @@ unsafe extern "system" fn audio_can_process_sample_size(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             if symbolic_sample_size == 0 {
                 K_RESULT_OK
             } else {
@@ -1599,7 +1462,7 @@ unsafe extern "system" fn audio_get_latency_samples(_this: *mut c_void) -> u32 {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0, || 0)
+        hifishifter_plugin_core::guard_ffi(0, || 0)
     }
 }
 
@@ -1610,7 +1473,7 @@ unsafe extern "system" fn audio_setup_processing(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             if this.is_null() || setup.is_null() {
                 return K_INVALID_ARGUMENT;
             }
@@ -1627,7 +1490,7 @@ unsafe extern "system" fn audio_setup_processing(
             let owner = unsafe { &(*base_from_audio(this)).extension_owner };
             // setupProcessing 是宿主 UI 线程上的确定时刻；在这里再解析一次身份，
             // 让包装器/祖先链证据在第一次 process 之前就位（幂等）。
-            crate::editor::connection::resolve_and_record_host_identity();
+            crate::connection::resolve_and_record_host_identity();
             // 【为什么这里不再写 process mode】它由 owner.setup_processing 一处落定
             // （CLAP 的 activate 调的是同一个方法）。两个写入点必然漂移：VST3 曾经
             // 写 1（kPrefetch），而 CLAP 连写都不写。
@@ -1665,8 +1528,8 @@ unsafe extern "system" fn audio_setup_processing(
             // `PlaybackSnapshot::copy_block` 的线性重采样出音。**低于 44.1k 时是降采样**，线性
             // 插值没有抗混叠滤波 ⇒ 有明显镜像，所以单独记一条警告 —— 可诊断的降级优于静默消失。
             // 真正按宿主率渲染内部快照（消除这次降采样）是独立一期工作。
-            if !crate::render::extension::SUPPORTED_SAMPLE_RATE.contains(&setup.sample_rate) {
-                crate::log_line(&format!(
+            if !hifishifter_plugin::render::extension::SUPPORTED_SAMPLE_RATE.contains(&setup.sample_rate) {
+                hifishifter_plugin::log_line(&format!(
                     "[vst3] setupProcessing refused: sampleRate={} is outside 8000..=384000",
                     setup.sample_rate
                 ));
@@ -1681,7 +1544,7 @@ unsafe extern "system" fn audio_setup_processing(
                 } else {
                     ""
                 };
-                crate::log_line(&format!(
+                hifishifter_plugin::log_line(&format!(
                 "[vst3] sampleRate={} is not natively rendered; output will be linearly resampled \
                  from the internal 44.1/48k snapshots.{aliasing}",
                 setup.sample_rate
@@ -1691,7 +1554,7 @@ unsafe extern "system" fn audio_setup_processing(
             // 保证"setup 接受过的率"在音频线程上不会再被拒（见 `ExtensionOwner::setup_sample_rate`）。
             // SAFETY: this 为存活音频接口。
             let owner = unsafe { &(*base_from_audio(this)).extension_owner };
-            crate::log_line(&format!(
+            hifishifter_plugin::log_line(&format!(
                 "IAudioProcessor::setupProcessing mode={} rate={}",
                 setup.process_mode, setup.sample_rate
             ));
@@ -1705,7 +1568,7 @@ unsafe extern "system" fn audio_setup_processing(
             // 链路**（用户看到"插件不见了"，没有任何提示）。保留插件则离线产物静音，且日志里
             // 有一条明确的原因 —— 可诊断的降级优于静默的消失。
             if let Err(error) = owner.setup_processing(setup.sample_rate, setup.process_mode == 2) {
-                crate::log_line(&format!(
+                hifishifter_plugin::log_line(&format!(
                     "Offline preparation failed after setupProcessing: {error}. Keeping the plugin in the chain; offline output will be silent until preparation succeeds."
                 ));
                 return K_RESULT_OK;
@@ -1719,7 +1582,7 @@ unsafe extern "system" fn audio_set_processing(this: *mut c_void, state: i8) -> 
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             // SDK 允许从音频线程调用此函数；禁止触发同步文件日志。
             if this.is_null() {
                 return K_INVALID_ARGUMENT;
@@ -1756,14 +1619,14 @@ unsafe extern "system" fn audio_process(this: *mut c_void, data: *mut c_void) ->
     // （`realtime_callbacks_do_not_enter_the_file_logger`）—— 而慢块恰恰在最坏时刻
     // 出现。计数 + 峰值进原子量，由诊断包（`audioSlowBlockCount` / `audioSlowBlockPeakMs`）
     // 落盘；既有测试保证健康小块零日志零分配。
-    crate::audio_stats::note_block_elapsed(started.elapsed());
+    hifishifter_plugin::audio_stats::note_block_elapsed(started.elapsed());
     match outcome {
         Ok(result) => result,
         Err(_) => {
-            crate::audio_stats::note_panic();
+            hifishifter_plugin::audio_stats::note_panic();
             // SAFETY: 宿主提供的 ProcessData；清空失败（形状非法）也只能返回 OK，
             // 不能二次 panic。
-            let _ = unsafe { crate::audio_abi::clear_outputs(data.cast()) };
+            let _ = unsafe { hifishifter_plugin::audio_abi::clear_outputs(data.cast()) };
             K_RESULT_OK
         }
     }
@@ -1774,7 +1637,7 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
     if this.is_null() {
         return K_INVALID_ARGUMENT;
     }
-    let shape = unsafe { crate::audio_abi::validate(data.cast()) };
+    let shape = unsafe { hifishifter_plugin::audio_abi::validate(data.cast()) };
     // 【为什么 Capture 的观察与捕获在形状判定**之前】** 见 `ExtensionOwner::capture_observe`：
     // 录制只依赖“宿主给的位置”与“宿主给的输入”，与输出总线的形状无关。此前它在下面的
     // `num_outputs == 0` 早退之后 —— 于是“宿主没接我们的输出”这一个无关事实会让插件
@@ -1782,9 +1645,9 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
     //
     // 只跳过 `InvalidArgument`（data 本身非法）：那种情况下连字段读取都不该做。
     let mut evidence = None;
-    if !matches!(shape, Err(crate::audio_abi::BufferError::InvalidArgument)) {
+    if !matches!(shape, Err(hifishifter_plugin::audio_abi::BufferError::InvalidArgument)) {
         // SAFETY: 宿主持有 Processor；data 的字段布局由 `validate` 的调用契约保证。
-        let probe = unsafe { &mut *data.cast::<crate::audio_abi::ProcessData>() };
+        let probe = unsafe { &mut *data.cast::<hifishifter_plugin::audio_abi::ProcessData>() };
         // SAFETY: this 是存活的音频接口子对象。
         let owner = unsafe { &(*base_from_audio(this)).extension_owner };
         // 【T23】`process` 是宿主**一定会周期性到达**的少数入口之一，因此它是“宿主不再
@@ -1798,7 +1661,7 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
             let context = unsafe { &*probe.process_context };
             // 【为什么在这里转成中立描述】VST3 的 state 位只在这一处解码；之后只看事实。
-            let block = crate::block_context::BlockContext::from_vst3(context);
+            let block = hifishifter_plugin::block_context::BlockContext::from_vst3(context);
             // 【观察顺序：离线 pass → 捕获 → 宿主采样】三步的顺序与依赖写在
             // `observe_input_block` 里（CLAP 走的是同一个方法），外壳不再复述。
             evidence = owner.capture_observe(probe, block);
@@ -1807,7 +1670,7 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
     match shape {
         Ok(()) => {
             // SAFETY: 宿主持有 Processor，validate已验证当前数据和音频总线。
-            let data = unsafe { &mut *data.cast::<crate::audio_abi::ProcessData>() };
+            let data = unsafe { &mut *data.cast::<hifishifter_plugin::audio_abi::ProcessData>() };
             if data.num_samples == 0 || data.num_outputs == 0 {
                 return K_RESULT_OK;
             }
@@ -1821,25 +1684,25 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                 None
             } else {
                 // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
-                Some(crate::block_context::BlockContext::from_vst3(unsafe {
+                Some(hifishifter_plugin::block_context::BlockContext::from_vst3(unsafe {
                     &*data.process_context
                 }))
             };
             // SAFETY: validate 已确认输出总线非空、非空平面至少含 num_samples 帧。
-            let Some(mut block) = (unsafe { crate::audio_abi::block_from_vst3(data) }) else {
+            let Some(mut block) = (unsafe { hifishifter_plugin::audio_abi::block_from_vst3(data) }) else {
                 return K_RESULT_OK;
             };
             // SAFETY: 与 `block_from_vst3` 同一份宿主缓冲，且只在本次回调内使用。
             match unsafe { owner.render_block(&mut block, context, evidence) } {
-                crate::render::extension::RenderOutcome::Done => K_RESULT_OK,
-                crate::render::extension::RenderOutcome::NotReady => K_RESULT_FALSE,
-                crate::render::extension::RenderOutcome::Invalid => K_INVALID_ARGUMENT,
-                crate::render::extension::RenderOutcome::Unsupported => {
+                hifishifter_plugin::render::extension::RenderOutcome::Done => K_RESULT_OK,
+                hifishifter_plugin::render::extension::RenderOutcome::NotReady => K_RESULT_FALSE,
+                hifishifter_plugin::render::extension::RenderOutcome::Invalid => K_INVALID_ARGUMENT,
+                hifishifter_plugin::render::extension::RenderOutcome::Unsupported => {
                     // 样本宽度不支持（kSample64）时按实际宽度静音并留在链路里；其余形状
                     // 问题仍按失败上报 —— 见 `silence_unsupported_sample_size`。
                     if unsafe {
-                        crate::audio_abi::silence_unsupported_sample_size(
-                            data as *mut crate::audio_abi::ProcessData,
+                        hifishifter_plugin::audio_abi::silence_unsupported_sample_size(
+                            data as *mut hifishifter_plugin::audio_abi::ProcessData,
                         )
                     } {
                         K_RESULT_OK
@@ -1849,13 +1712,13 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                 }
             }
         }
-        Err(crate::audio_abi::BufferError::InvalidArgument) => K_INVALID_ARGUMENT,
-        Err(crate::audio_abi::BufferError::UnsupportedFormat) => {
+        Err(hifishifter_plugin::audio_abi::BufferError::InvalidArgument) => K_INVALID_ARGUMENT,
+        Err(hifishifter_plugin::audio_abi::BufferError::UnsupportedFormat) => {
             // 样本宽度不支持（kSample64）时按实际宽度静音并留在链路里；其余形状问题
             // （多总线等）仍按失败上报 —— 见 `silence_unsupported_sample_size`。
             if unsafe {
-                crate::audio_abi::silence_unsupported_sample_size(
-                    data.cast::<crate::audio_abi::ProcessData>(),
+                hifishifter_plugin::audio_abi::silence_unsupported_sample_size(
+                    data.cast::<hifishifter_plugin::audio_abi::ProcessData>(),
                 )
             } {
                 K_RESULT_OK
@@ -1869,7 +1732,7 @@ unsafe extern "system" fn audio_get_tail_samples(_this: *mut c_void) -> u32 {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0, || 0)
+        hifishifter_plugin_core::guard_ffi(0, || 0)
     }
 }
 
@@ -1942,9 +1805,9 @@ pub struct EditControllerVtbl {
 struct EditController {
     vtbl: *const EditControllerVtbl,
     refcount: AtomicI32,
-    connection_vtbl: *const crate::editor::connection::ConnectionVtbl,
-    connection: crate::editor::connection::ConnectionState,
-    editor_link: Arc<crate::editor::routing::EditorLink>,
+    connection_vtbl: *const crate::connection::ConnectionVtbl,
+    connection: crate::connection::ConnectionState,
+    editor_link: Arc<hifishifter_plugin::editor::EditorLink>,
     /// 控制器先于路由拿到状态时的暂存。
     ///
     /// 【为什么需要】宿主可以只走 `IEditController` 通道；`setComponentState` /
@@ -1964,7 +1827,7 @@ impl EditController {
                 let link = Arc::new(Default::default());
                 // 控制器在视图之前就可能持有 owner（宿主可以只走 IEditController 通道），
                 // 于是它也要进心跳表，否则那段时间里没有任何人推进宿主侧周期工作。
-                <crate::editor::routing::EditorLink>::register_heartbeat(&link);
+                <hifishifter_plugin::editor::EditorLink>::register_heartbeat(&link);
                 link
             },
             pending_state: std::sync::Mutex::new(None),
@@ -2014,11 +1877,7 @@ impl EditController {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
-            .unwrap_or_else(|| {
-                crate::state_channel::EditState::default()
-                    .encode()
-                    .unwrap_or_default()
-            })
+            .unwrap_or_else(hifishifter_plugin::state_channel::empty_state_payload)
     }
 
     /// 控制器通道的恢复：owner 可用就直接应用，否则暂存。
@@ -2056,13 +1915,13 @@ unsafe extern "system" fn edit_controller_query_interface(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_NO_INTERFACE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_NO_INTERFACE, || {
+        hifishifter_plugin_core::guard_ffi(K_NO_INTERFACE, || {
             if obj.is_null() {
                 return K_INVALID_ARGUMENT;
             }
             // SAFETY: obj 是宿主提供的输出槽。
             unsafe { *obj = std::ptr::null_mut() };
-            if unsafe { crate::editor::connection::is_connection(iid) } {
+            if unsafe { crate::connection::is_connection(iid) } {
                 let controller = this as *mut EditController;
                 unsafe {
                     edit_controller_add_ref(this);
@@ -2091,7 +1950,7 @@ unsafe extern "system" fn edit_controller_add_ref(this: *mut c_void) -> u32 {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0, || {
+        hifishifter_plugin_core::guard_ffi(0, || {
             let controller = this as *const EditController;
             // SAFETY: this 是活动控制器对象。
             unsafe { (*controller).refcount.fetch_add(1, Ordering::AcqRel) as u32 + 1 }
@@ -2103,7 +1962,7 @@ unsafe extern "system" fn edit_controller_release(this: *mut c_void) -> u32 {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0, || {
+        hifishifter_plugin_core::guard_ffi(0, || {
             let controller = this as *mut EditController;
             // SAFETY: this 是活动控制器对象。
             let previous = unsafe { (*controller).refcount.fetch_sub(1, Ordering::AcqRel) };
@@ -2124,13 +1983,13 @@ unsafe extern "system" fn edit_controller_initialize(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             unsafe {
                 (*(this as *mut EditController))
                     .connection
                     .initialize(context);
             }
-            crate::log_line("IEditController::initialize");
+            hifishifter_plugin::log_line("IEditController::initialize");
             K_RESULT_OK
         })
     }
@@ -2140,7 +1999,7 @@ unsafe extern "system" fn edit_controller_terminate(this: *mut c_void) -> TResul
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             unsafe {
                 let controller = &*(this as *mut EditController);
                 controller.editor_link.clear();
@@ -2149,7 +2008,7 @@ unsafe extern "system" fn edit_controller_terminate(this: *mut c_void) -> TResul
                     .set_component_handler(std::ptr::null_mut());
                 controller.connection.close();
             }
-            crate::log_line("IEditController::terminate");
+            hifishifter_plugin::log_line("IEditController::terminate");
             K_RESULT_OK
         })
     }
@@ -2164,9 +2023,9 @@ unsafe extern "system" fn edit_controller_set_component_state(
     }
     // 【为什么不再回 `E_NOTIMPL`】少数宿主只走控制器通道；回 not-implemented 会让
     // 它们保存/恢复不到任何编辑。这里与 `IComponent::setState` 共用同一份恢复逻辑。
-    crate::guard_ffi(K_RESULT_FALSE, || {
+    hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
         let controller = unsafe { &*(this as *const EditController) };
-        match unsafe { crate::state_stream::read_state(state) } {
+        match unsafe { hifishifter_plugin::state_stream::read_state(state) } {
             Ok(bytes) => {
                 controller.restore_bytes(bytes);
                 K_RESULT_OK
@@ -2186,9 +2045,9 @@ unsafe extern "system" fn edit_controller_set_state(
     if this.is_null() || state.is_null() {
         return K_INVALID_ARGUMENT;
     }
-    crate::guard_ffi(K_RESULT_FALSE, || {
+    hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
         let controller = unsafe { &*(this as *const EditController) };
-        match unsafe { crate::state_stream::read_state(state) } {
+        match unsafe { hifishifter_plugin::state_stream::read_state(state) } {
             Ok(bytes) => {
                 controller.restore_bytes(bytes);
                 K_RESULT_OK
@@ -2208,10 +2067,10 @@ unsafe extern "system" fn edit_controller_get_state(
     if this.is_null() || state.is_null() {
         return K_INVALID_ARGUMENT;
     }
-    crate::guard_ffi(K_RESULT_FALSE, || {
+    hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
         let controller = unsafe { &*(this as *const EditController) };
         let bytes = controller.state_bytes();
-        match unsafe { crate::state_stream::write_state(state, &bytes) } {
+        match unsafe { hifishifter_plugin::state_stream::write_state(state, &bytes) } {
             Ok(()) => K_RESULT_OK,
             Err(error) => {
                 log::warn!("[state] controller getState could not write: {error}");
@@ -2225,7 +2084,7 @@ unsafe extern "system" fn edit_controller_get_parameter_count(_this: *mut c_void
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0, || 0)
+        hifishifter_plugin_core::guard_ffi(0, || 0)
     }
 }
 
@@ -2237,7 +2096,7 @@ unsafe extern "system" fn edit_controller_get_parameter_info(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
     }
 }
 
@@ -2250,7 +2109,7 @@ unsafe extern "system" fn edit_controller_get_param_string_by_value(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
     }
 }
 
@@ -2263,7 +2122,7 @@ unsafe extern "system" fn edit_controller_get_param_value_by_string(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
     }
 }
 
@@ -2275,7 +2134,7 @@ unsafe extern "system" fn edit_controller_normalized_param_to_plain(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0.0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0.0, || value)
+        hifishifter_plugin_core::guard_ffi(0.0, || value)
     }
 }
 
@@ -2287,7 +2146,7 @@ unsafe extern "system" fn edit_controller_plain_param_to_normalized(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0.0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0.0, || value)
+        hifishifter_plugin_core::guard_ffi(0.0, || value)
     }
 }
 
@@ -2298,7 +2157,7 @@ unsafe extern "system" fn edit_controller_get_param_normalized(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0.0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0.0, || 0.0)
+        hifishifter_plugin_core::guard_ffi(0.0, || 0.0)
     }
 }
 
@@ -2310,7 +2169,7 @@ unsafe extern "system" fn edit_controller_set_param_normalized(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || K_NOT_IMPLEMENTED)
     }
 }
 
@@ -2321,7 +2180,7 @@ unsafe extern "system" fn edit_controller_set_component_handler(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             if this.is_null() {
                 return K_INVALID_ARGUMENT;
             }
@@ -2333,7 +2192,7 @@ unsafe extern "system" fn edit_controller_set_component_handler(
             {
                 return K_RESULT_FALSE;
             }
-            crate::log_line(&format!(
+            hifishifter_plugin::log_line(&format!(
                 "IEditController::setComponentHandler({})",
                 if handler.is_null() {
                     "null"
@@ -2355,7 +2214,7 @@ unsafe extern "system" fn edit_controller_create_view(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `std::ptr::null_mut()` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(std::ptr::null_mut(), || {
+        hifishifter_plugin_core::guard_ffi(std::ptr::null_mut(), || {
             if this.is_null()
                 || name.is_null()
                 || unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes() != b"editor"
@@ -2364,15 +2223,15 @@ unsafe extern "system" fn edit_controller_create_view(
             }
             // 【为什么是 WARN】它是"宿主真的要开窗了"的唯一证据。放在 INFO 上时，
             // 用户日志里连这一行都没有，于是"面板空白"到底是没开窗还是开窗失败无从判断。
-            crate::gui_log_line("IEditController::createView -> native editor");
+            hifishifter_plugin::gui_log_line("IEditController::createView -> native editor");
             // 【临时探针】HIFISHIFTER_NO_VIEW=1 时完全不产生 IPlugView，用来判定
             // "宿主冻结"是否出在我们这套视图实现上。
             if std::env::var("HIFISHIFTER_NO_VIEW").is_ok_and(|value| value.trim() == "1") {
-                crate::gui_log_line("createView suppressed by HIFISHIFTER_NO_VIEW");
+                hifishifter_plugin::gui_log_line("createView suppressed by HIFISHIFTER_NO_VIEW");
                 return std::ptr::null_mut();
             }
             let controller = unsafe { &*(this as *const EditController) };
-            let view = crate::editor::create_view_with_link(controller.editor_link.clone());
+            let view = crate::view::create_view_with_link(controller.editor_link.clone());
             // 视图创建后路由可能已可用；把早到的控制器状态补投一次（不可用则放回）。
             controller.flush_pending_state();
             view
@@ -2485,7 +2344,7 @@ unsafe extern "system" fn pcr_query(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_NO_INTERFACE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_NO_INTERFACE, || unsafe {
+        hifishifter_plugin_core::guard_ffi(K_NO_INTERFACE, || unsafe {
             component_query_interface(base_from_context_requirements(this).cast(), iid, out)
         })
     }
@@ -2494,7 +2353,7 @@ unsafe extern "system" fn pcr_query(
 unsafe extern "system" fn pcr_add_ref(this: *mut c_void) -> u32 {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-        crate::guard_ffi(0, || unsafe {
+        hifishifter_plugin_core::guard_ffi(0, || unsafe {
             processor_add_ref(base_from_context_requirements(this))
         })
     }
@@ -2503,7 +2362,7 @@ unsafe extern "system" fn pcr_add_ref(this: *mut c_void) -> u32 {
 unsafe extern "system" fn pcr_release(this: *mut c_void) -> u32 {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
-        crate::guard_ffi(0, || unsafe {
+        hifishifter_plugin_core::guard_ffi(0, || unsafe {
             processor_release(base_from_context_requirements(this))
         })
     }
@@ -2518,7 +2377,7 @@ unsafe extern "system" fn pcr_get_process_context_requirements(_this: *mut c_voi
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
         // 返回 0 的语义是"什么都不要"，是安全的降级：宿主少发信息，我们按有效位退回默认。
-        crate::guard_ffi(0, process_context_requirements)
+        hifishifter_plugin_core::guard_ffi(0, process_context_requirements)
     }
 }
 
@@ -2530,7 +2389,7 @@ unsafe extern "system" fn pc_query(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || unsafe {
             component_query_interface(processor_from_connection(this).cast(), iid, out)
         })
     }
@@ -2539,7 +2398,7 @@ unsafe extern "system" fn pc_add(this: *mut c_void) -> u32 {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0, || unsafe {
+        hifishifter_plugin_core::guard_ffi(0, || unsafe {
             processor_add_ref(processor_from_connection(this))
         })
     }
@@ -2548,7 +2407,7 @@ unsafe extern "system" fn pc_release(this: *mut c_void) -> u32 {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0, || unsafe {
+        hifishifter_plugin_core::guard_ffi(0, || unsafe {
             processor_release(processor_from_connection(this))
         })
     }
@@ -2557,12 +2416,12 @@ unsafe extern "system" fn pc_connect(this: *mut c_void, other: *mut c_void) -> T
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             let processor = unsafe { &*processor_from_connection(this) };
             let result = unsafe { processor.connection.connect(other) };
             if result == K_RESULT_OK {
                 let sent = processor.connection.send(Some(processor.route.token()));
-                crate::log_line(&format!("processor connection route sent result={sent}"));
+                hifishifter_plugin::log_line(&format!("processor connection route sent result={sent}"));
             }
             result
         })
@@ -2572,7 +2431,7 @@ unsafe extern "system" fn pc_disconnect(this: *mut c_void, other: *mut c_void) -
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             unsafe { &*processor_from_connection(this) }
                 .connection
                 .disconnect(other)
@@ -2583,10 +2442,10 @@ unsafe extern "system" fn pc_notify(this: *mut c_void, message: *mut c_void) -> 
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             let processor = unsafe { &*processor_from_connection(this) };
-            match unsafe { crate::editor::connection::read(message) } {
-                Ok(crate::editor::connection::Message::RequestRoute) => {
+            match unsafe { crate::connection::read(message) } {
+                Ok(crate::connection::Message::RequestRoute) => {
                     processor.connection.send(Some(processor.route.token()))
                 }
                 _ => K_RESULT_FALSE,
@@ -2602,7 +2461,7 @@ unsafe extern "system" fn cc_query(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || unsafe {
             edit_controller_query_interface(controller_from_connection(this).cast(), iid, out)
         })
     }
@@ -2611,7 +2470,7 @@ unsafe extern "system" fn cc_add(this: *mut c_void) -> u32 {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0, || unsafe {
+        hifishifter_plugin_core::guard_ffi(0, || unsafe {
             edit_controller_add_ref(controller_from_connection(this).cast())
         })
     }
@@ -2620,7 +2479,7 @@ unsafe extern "system" fn cc_release(this: *mut c_void) -> u32 {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0, || unsafe {
+        hifishifter_plugin_core::guard_ffi(0, || unsafe {
             edit_controller_release(controller_from_connection(this).cast())
         })
     }
@@ -2629,12 +2488,12 @@ unsafe extern "system" fn cc_connect(this: *mut c_void, other: *mut c_void) -> T
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             let controller = unsafe { &*controller_from_connection(this) };
             let result = unsafe { controller.connection.connect(other) };
             if result == K_RESULT_OK {
                 let sent = controller.connection.send(None);
-                crate::log_line(&format!(
+                hifishifter_plugin::log_line(&format!(
                     "controller connection route requested result={sent}"
                 ));
             }
@@ -2646,7 +2505,7 @@ unsafe extern "system" fn cc_disconnect(this: *mut c_void, other: *mut c_void) -
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             let controller = unsafe { &*controller_from_connection(this) };
             let result = controller.connection.disconnect(other);
             if result == K_RESULT_OK {
@@ -2660,17 +2519,17 @@ unsafe extern "system" fn cc_notify(this: *mut c_void, message: *mut c_void) -> 
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             let controller = unsafe { &*controller_from_connection(this) };
-            match unsafe { crate::editor::connection::read(message) } {
-                Ok(crate::editor::connection::Message::Route { pid, token }) => {
+            match unsafe { crate::connection::read(message) } {
+                Ok(crate::connection::Message::Route { pid, token }) => {
                     match controller.editor_link.bind(pid, &token) {
                         Ok(()) => {
-                            crate::log_line("controller editor route bound to actual processor");
+                            hifishifter_plugin::log_line("controller editor route bound to actual processor");
                             K_RESULT_OK
                         }
                         Err(error) => {
-                            crate::log_line(&format!("controller editor route rejected: {error}"));
+                            hifishifter_plugin::log_line(&format!("controller editor route rejected: {error}"));
                             K_RESULT_FALSE
                         }
                     }
@@ -2680,9 +2539,9 @@ unsafe extern "system" fn cc_notify(this: *mut c_void, message: *mut c_void) -> 
         })
     }
 }
-static PROCESSOR_CONNECTION_VTBL: crate::editor::connection::ConnectionVtbl =
-    crate::editor::connection::ConnectionVtbl {
-        base: crate::editor::connection::UnknownVtbl {
+static PROCESSOR_CONNECTION_VTBL: crate::connection::ConnectionVtbl =
+    crate::connection::ConnectionVtbl {
+        base: UnknownVtbl {
             query: pc_query,
             add: pc_add,
             release: pc_release,
@@ -2693,7 +2552,7 @@ static PROCESSOR_CONNECTION_VTBL: crate::editor::connection::ConnectionVtbl =
     };
 static PROCESS_CONTEXT_REQUIREMENTS_VTBL: ProcessContextRequirementsVtbl =
     ProcessContextRequirementsVtbl {
-        base: crate::editor::connection::UnknownVtbl {
+        base: UnknownVtbl {
             query: pcr_query,
             add: pcr_add_ref,
             release: pcr_release,
@@ -2701,9 +2560,9 @@ static PROCESS_CONTEXT_REQUIREMENTS_VTBL: ProcessContextRequirementsVtbl =
         get_process_context_requirements: pcr_get_process_context_requirements,
     };
 
-static CONTROLLER_CONNECTION_VTBL: crate::editor::connection::ConnectionVtbl =
-    crate::editor::connection::ConnectionVtbl {
-        base: crate::editor::connection::UnknownVtbl {
+static CONTROLLER_CONNECTION_VTBL: crate::connection::ConnectionVtbl =
+    crate::connection::ConnectionVtbl {
+        base: UnknownVtbl {
             query: cc_query,
             add: cc_add,
             release: cc_release,
@@ -2715,8 +2574,8 @@ static CONTROLLER_CONNECTION_VTBL: crate::editor::connection::ConnectionVtbl =
 
 /// 建立 ARA 主工厂适配器（`ARA::IMainFactory`）。
 pub fn new_main_factory_adapter() -> Option<Vst3MainFactoryAdapter> {
-    let runtime = crate::runtime::runtime()?;
-    Vst3MainFactoryAdapter::new(crate::CLASS_NAME, runtime.companion.clone()).ok()
+    let runtime = hifishifter_plugin::runtime::runtime()?;
+    Vst3MainFactoryAdapter::new(hifishifter_plugin::CLASS_NAME, runtime.companion.clone()).ok()
 }
 
 #[cfg(test)]
@@ -2728,7 +2587,9 @@ mod factory_declaration_tests;
 #[cfg(test)]
 mod host_handshake_tests;
 #[cfg(test)]
-mod iid_layout_tests;
+mod ara_entry_tests;
+#[cfg(test)]
+mod class_id_tests;
 #[cfg(test)]
 mod lifetime_tests;
 #[cfg(test)]

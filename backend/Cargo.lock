@@ -2153,6 +2153,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "hifishifter-vst3"
+version = "0.2.0-beta"
+dependencies = [
+ "ara2-bridge",
+ "ctor",
+ "hifishifter-capture",
+ "hifishifter-kernel",
+ "hifishifter-plugin",
+ "hifishifter-plugin-core",
+ "log",
+ "serde_json",
+]
+
+[[package]]
 name = "hmac-sha256"
 version = "1.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"

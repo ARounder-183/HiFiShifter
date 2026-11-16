@@ -1898,7 +1898,7 @@ impl DocumentSession {
         Ok(())
     }
     /// 文档惰性持有唯一原编辑actor；actor只弱引用文档，组件不持第二份history。
-    pub(crate) fn editor_session(
+    pub fn editor_session(
         self: &Arc<Self>,
     ) -> Result<Arc<crate::editor::session::EditorSession>, String> {
         // UI command routing must not acquire the PCM/geometry transaction.

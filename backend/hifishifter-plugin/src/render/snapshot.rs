@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 const RECLAIM_SPIN_LIMIT: u32 = 4096;
 
 #[derive(Debug)]
-pub(crate) struct PlaybackSnapshot {
+pub struct PlaybackSnapshot {
     pub sample_rate: u32,
     pub origin_sample: i64,
     pub left: Vec<f32>,
@@ -140,7 +140,7 @@ impl LayeredProbe {
 }
 
 #[derive(Debug, PartialEq)]
-pub(crate) enum SnapshotError {
+pub enum SnapshotError {
     InvalidGeometry,
     MissingSource,
     UnsupportedTransform,
@@ -336,7 +336,7 @@ struct RetainedSnapshot {
     snapshot: Arc<PlaybackSnapshot>,
 }
 
-pub(crate) struct SnapshotPublisher {
+pub struct SnapshotPublisher {
     retained: Mutex<(Vec<Box<RetainedSnapshot>>, usize)>,
     current: AtomicPtr<RetainedSnapshot>,
     /// 正在"载入当前指针并登记到该快照"的读者数。

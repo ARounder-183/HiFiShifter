@@ -179,6 +179,64 @@ pub fn is_vegas_family() -> bool {
     HOST_IS_VEGAS.load(std::sync::atomic::Ordering::Acquire)
 }
 
+/// 宿主应用名的**宿主自报读数**（VST3：`IHostApplication::getName` 的最近一次结果）。
+///
+/// 【为什么单独存一份】报障时最需要的一条信息是"你在哪个宿主里"——而这份信息此前只有
+/// 一个**声明过却从未调用**的 vtable 槽位。存下来供证据链与诊断包读取。
+///
+/// 【为什么在共享层而不是 VST3 外壳】ARA 绑定路径（`render/extension/binding.rs`）在
+/// 绑定窗口里也读它；而"谁写入它"只有 VST3 外壳（`IHostApplication` 握手）—— CLAP
+/// 没有对应接口、不写。读数是进程级事实，写入方是格式细节。
+///
+/// 【为什么绝不用于分支】按宿主名分支会让"没见过的宿主"退化成不可用；一切差异都应由
+/// 能力探测（`BootstrapFlags` / `NativeHost::from_context` 的 Option bundle）决定。
+static HOST_APPLICATION_NAME: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
+
+/// 登记宿主自报的应用名（VST3 外壳在 `IHostApplication` 握手成功后调用）。
+pub fn note_host_application_name(name: &str) {
+    *HOST_APPLICATION_NAME.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.to_owned());
+}
+
+/// 读回宿主自报的应用名（未识别为 `None`）。只读，供证据链与诊断输出。
+pub fn host_application_name() -> Option<String> {
+    HOST_APPLICATION_NAME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// 收集全部证据、定出宿主、把日志切到 `plugin-<format>-<host>.log`。
+///
+/// 【为什么住在这里而不是某个外壳】进程证据（映像名、祖先链、环境变量）与格式无关，
+/// 而证据的**追加**是格式的事实：VST3 外壳能在 `IHostApplication::getName` 返回后追加
+/// [`EvidenceSource::Vst3Name`]，CLAP 没有对应接口就只给进程证据。两个外壳调用这**同一个**
+/// 解析与登记流程，`plugin-<format>-<host>.log` 的宿主段才有同一个判据。
+///
+/// 【为什么可以重复调用】Cubase 在加载期只给 unknown，真正使用时的名字更晚才到。
+/// 第一次拿不到就留 unknown，后续调用（首次 process）再解析一次；一旦得到非 unknown
+/// 的结果就不再重算 —— 否则日志文件名会来回跳（`note_identity` 只在首次报告，
+/// `note_host_application` 只在拿到名字时切换）。
+pub fn resolve_and_record(evidence: &[Evidence]) -> HostIdentity {
+    let identity = resolve_identity(evidence);
+    note_identity(&identity);
+    crate::log_line(&identity.describe());
+    if identity.display != "unknown" {
+        // 日志按宿主分文件：拿到名字的这一刻把日志切过去
+        //（此前攒下的行会一起补写进去，见 `diagnostics::note_host_application`）。
+        crate::diagnostics::note_host_application(&identity.display);
+    }
+    identity
+}
+
+/// 只用进程证据解析宿主身份（CLAP 与未来 AU 的入口：没有格式专属证据可追加）。
+///
+/// 【为什么公开】外壳的 `lib.rs::resolve_host_identity` 退化为对本函数的转发；编排
+/// （收集 → 解析 → 登记 → 切日志）只有这一份。
+pub fn resolve_and_record_host_identity() -> HostIdentity {
+    resolve_and_record(&process_evidence())
+}
+
 /// 别名表：**子串**匹配（小写、去扩展名），新增宿主 = 加一行。
 ///
 /// 用子串而不是全等：vegas180.exe / VEGAS Pro 21 / FL64.exe 这些变体必须命中同一条。

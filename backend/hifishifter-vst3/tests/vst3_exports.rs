@@ -4,7 +4,7 @@
 //! 与符号拼错、IID 布局写错完全同一个症状（探针期实测过）。那是这类问题里最难定位的
 //! 一种，所以用测试把每个平台的入口清单钉住。
 //!
-//! 前置：先 `cargo build -p hifishifter-plugin`（cdylib 由它产出，`cargo test` 不产出）。
+//! 前置：先 `cargo build -p hifishifter-vst3`（cdylib 由本壳产出，`cargo test` 不产出）。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -12,11 +12,11 @@ use std::process::Command;
 /// 各平台的模块产物文件名。
 fn module_file_name() -> &'static str {
     if cfg!(target_os = "windows") {
-        "hifishifter_plugin.dll"
+        "hifishifter_vst3.dll"
     } else if cfg!(target_os = "macos") {
-        "libhifishifter_plugin.dylib"
+        "libhifishifter_vst3.dylib"
     } else {
-        "libhifishifter_plugin.so"
+        "libhifishifter_vst3.so"
     }
 }
 
@@ -131,7 +131,7 @@ fn the_engine_only_imports_dlls_the_bundle_ships() {
         .join(module_file_name());
     assert!(
         artifact.is_file(),
-        "找不到 {} —— 先跑 cargo build -p hifishifter-plugin",
+        "找不到 {} —— 先跑 cargo build -p hifishifter-vst3",
         artifact.display()
     );
     // 与 `scripts/build/build.ps1` 的 `foreach ($dll in ...)` 白名单逐字对应。
@@ -155,7 +155,7 @@ fn the_vst3_module_entry_points_are_exported() {
         .join(module_file_name());
     assert!(
         artifact.is_file(),
-        "找不到 {} —— 先跑 `cargo build -p hifishifter-plugin` 再跑测试（cdylib 不由 cargo test 产出）",
+        "找不到 {} —— 先跑 `cargo build -p hifishifter-vst3` 再跑测试（cdylib 不由 cargo test 产出）",
         artifact.display()
     );
 

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 thread_local! {static ACTIVE:Cell<usize>=const {Cell::new(0)};}
 #[repr(C)]
-pub(crate) struct Fixture {
+pub struct Fixture {
     table: *const HostVtbl,
     refs: AtomicU32,
     take_token: u8,
@@ -322,16 +322,16 @@ unsafe extern "system" fn query(this: *mut c_void, iid: *const u8, out: *mut *mu
     // 夹具默认照这个来；`force_alternate_iid_layout` 把它换成"另一套"，用来验证
     // `from_context` 的兜底重试不是摆设。
     let own_iid = if f.alternate_iid_layout.get() {
-        crate::vst3::alternate_iid(IID)
+        crate::vst3_abi::alternate_iid(IID)
     } else {
-        crate::vst3::platform_iid(IID)
+        crate::vst3_abi::platform_iid(IID)
     };
-    let host_iid = crate::vst3::platform_iid([0x58E595CC, 0xDB2D4969, 0x8B6AAF8C, 0x36A664E5]);
+    let host_iid = crate::vst3_abi::platform_iid([0x58E595CC, 0xDB2D4969, 0x8B6AAF8C, 0x36A664E5]);
     if requested != own_iid && !(f.connection_host.get() && requested == host_iid) {
         unsafe {
             *out = std::ptr::null_mut();
         }
-        return crate::vst3::K_NO_INTERFACE;
+        return crate::vst3_abi::K_NO_INTERFACE;
     }
     unsafe {
         *out = this;

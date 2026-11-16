@@ -128,7 +128,7 @@ impl ExtensionOwner {
         }
     }
 
-    pub(crate) fn capture_prepare_job(
+    pub fn capture_prepare_job(
         &self,
         cancel: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<(), String> {

@@ -1,6 +1,7 @@
 //! 按锁定iplugview.h实现的原生VST3视图ABI；只操作自有子窗口。
-use crate::vst3::{
-    iid_matches, TResult, K_INVALID_ARGUMENT, K_NO_INTERFACE, K_RESULT_FALSE, K_RESULT_OK,
+use hifishifter_plugin::vst3_abi::{
+    iid_matches, UnknownVtbl, TResult, K_INVALID_ARGUMENT, K_NO_INTERFACE, K_RESULT_FALSE,
+    K_RESULT_OK,
 };
 use std::ffi::{c_char, c_void, CStr};
 use std::rc::Rc;
@@ -23,8 +24,8 @@ impl Default for ViewRect {
         Self {
             left: 0,
             top: 0,
-            right: crate::editor::gui::EDITOR_DEFAULT_SIZE.0 as i32,
-            bottom: crate::editor::gui::EDITOR_DEFAULT_SIZE.1 as i32,
+            right: hifishifter_plugin::editor::gui::EDITOR_DEFAULT_SIZE.0 as i32,
+            bottom: hifishifter_plugin::editor::gui::EDITOR_DEFAULT_SIZE.1 as i32,
         }
     }
 }
@@ -33,8 +34,8 @@ impl ViewRect {
     fn dimensions(&self) -> Option<(i32, i32)> {
         let width = self.right.checked_sub(self.left)?;
         let height = self.bottom.checked_sub(self.top)?;
-        let (min_w, min_h) = crate::editor::gui::EDITOR_MIN_SIZE;
-        let (max_w, max_h) = crate::editor::gui::EDITOR_MAX_SIZE;
+        let (min_w, min_h) = hifishifter_plugin::editor::gui::EDITOR_MIN_SIZE;
+        let (max_w, max_h) = hifishifter_plugin::editor::gui::EDITOR_MAX_SIZE;
         ((min_w as i32..=max_w as i32).contains(&width)
             && (min_h as i32..=max_h as i32).contains(&height))
         .then_some((width, height))
@@ -70,14 +71,14 @@ struct ViewState {
     ///
     /// 【为什么是 `Rc` 而不是 `Box`】几何/焦点/按键三处都需要**先取出来、再释放 view 锁**
     /// 才能调用它（宿主回调会同步重入）。`Rc` 让"取出来"是一次克隆。
-    native: Option<Rc<dyn super::gui::EditorHost>>,
+    native: Option<Rc<dyn hifishifter_plugin::editor::gui::EditorHost>>,
 }
 #[repr(C)]
 struct View {
     vtbl: *const ViewVtbl,
     refs: AtomicU32,
     state: Mutex<ViewState>,
-    link: std::sync::Arc<super::routing::EditorLink>,
+    link: std::sync::Arc<hifishifter_plugin::editor::EditorLink>,
 }
 
 /// 返回一个具有宿主owning引用的IPlugView；实例路由由后续connection接线提供。
@@ -87,7 +88,7 @@ fn create_view() -> *mut c_void {
 }
 /// 每个FX视图继承其真实controller connection，不做任何全局实例搜索。
 pub(crate) fn create_view_with_link(
-    link: std::sync::Arc<super::routing::EditorLink>,
+    link: std::sync::Arc<hifishifter_plugin::editor::EditorLink>,
 ) -> *mut c_void {
     Box::into_raw(Box::new(View {
         vtbl: &VTBL,
@@ -113,7 +114,7 @@ unsafe extern "system" fn query(
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             if out.is_null() || this.is_null() {
                 return K_INVALID_ARGUMENT;
             }
@@ -136,7 +137,7 @@ unsafe extern "system" fn add_ref(this: *mut c_void) -> u32 {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0, || {
+        hifishifter_plugin_core::guard_ffi(0, || {
             unsafe { view(this) }.refs.fetch_add(1, Ordering::Relaxed) + 1
         })
     }
@@ -145,7 +146,7 @@ unsafe extern "system" fn release(this: *mut c_void) -> u32 {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `0` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(0, || {
+        hifishifter_plugin_core::guard_ffi(0, || {
             let previous = unsafe { view(this) }.refs.fetch_sub(1, Ordering::AcqRel);
             if previous == 1 {
                 unsafe {
@@ -160,7 +161,7 @@ unsafe extern "system" fn platform(_this: *mut c_void, kind: *const c_char) -> T
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             if kind.is_null() {
                 return K_INVALID_ARGUMENT;
             }
@@ -214,7 +215,7 @@ unsafe extern "system" fn attached(
     if parent.is_null() || unsafe { platform(this, kind) } != K_RESULT_OK {
         // 【为什么要记】走到这里说明**宿主给了一个我们不认的平台类型**（或者 parent
         // 是空）。这是一条"宿主想开窗、我们拒绝了"的现场证据，此前完全静默。
-        crate::gui_log_line(&format!(
+        hifishifter_plugin::gui_log_line(&format!(
             "attached rejected: parent={:?} type={:?}",
             parent,
             if kind.is_null() {
@@ -227,7 +228,7 @@ unsafe extern "system" fn attached(
         ));
         return K_INVALID_ARGUMENT;
     }
-    crate::gui_log_line(&format!(
+    hifishifter_plugin::gui_log_line(&format!(
         "attached: parent=0x{:x} type={:?}",
         parent as usize,
         unsafe { CStr::from_ptr(kind) }.to_string_lossy()
@@ -261,7 +262,7 @@ unsafe extern "system" fn attached(
                 .unwrap_or_else(|e| e.into_inner());
             state.frame
         };
-        let native = super::gui::create_for(
+        let native = hifishifter_plugin::editor::gui::create_for(
             parent as usize,
             width,
             height,
@@ -284,22 +285,22 @@ unsafe extern "system" fn attached(
             // 【Unavailable 是"结论"，不是错误】宿主拿不到 GUI 时看到的是空面板 +
             // 日志里一行可搜到的原因；`attached` 必须如实返回失败，否则宿主会以为
             // 面板里有一个能用的编辑器（见方案 §3.4）。
-            Ok(host) if matches!(host.fidelity(), super::gui::GuiFidelity::Unavailable(_)) => {
+            Ok(host) if matches!(host.fidelity(), hifishifter_plugin::editor::gui::GuiFidelity::Unavailable(_)) => {
                 let reason = host.fidelity().as_str();
                 drop(state);
                 drop(host);
-                crate::gui_log_line(&format!("no embedded editor: {reason}"));
+                hifishifter_plugin::gui_log_line(&format!("no embedded editor: {reason}"));
                 K_RESULT_FALSE
             }
             Ok(host) => {
                 let fidelity = host.fidelity();
                 state.native = Some(host);
                 drop(state);
-                crate::gui_log_line(&format!("editor view attached ({})", fidelity.as_str()));
+                hifishifter_plugin::gui_log_line(&format!("editor view attached ({})", fidelity.as_str()));
                 // 【为什么要单独一行】"浮窗"是一种**有损**的降级：泵不在宿主线程上，
                 // 宿主 Undo 的合并粒度会变粗。用户报"撤销一次退两步"时这行是关键线索。
-                if matches!(fidelity, super::gui::GuiFidelity::FloatingWindow) {
-                    crate::gui_log_line(
+                if matches!(fidelity, hifishifter_plugin::editor::gui::GuiFidelity::FloatingWindow) {
+                    hifishifter_plugin::gui_log_line(
                         "running on a private GUI thread; host undo coalescing degraded",
                     );
                 }
@@ -307,7 +308,7 @@ unsafe extern "system" fn attached(
             }
             Err(error) => {
                 drop(state);
-                crate::log_line(&format!("IPlugView attach failed: {error}"));
+                hifishifter_plugin::log_line(&format!("IPlugView attach failed: {error}"));
                 K_RESULT_FALSE
             }
         }
@@ -339,7 +340,7 @@ unsafe extern "system" fn wheel(_this: *mut c_void, _distance: f32) -> TResult {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || K_RESULT_FALSE)
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || K_RESULT_FALSE)
     }
 }
 /// 按锁定SDK的kCommandKey/ASCII虚拟键约定识别共享编辑键，不消费宿主其它快捷键。
@@ -387,7 +388,7 @@ unsafe extern "system" fn key_down(this: *mut c_void, key: u16, code: i16, mods:
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || unsafe {
             forward_edit_key(this, key, code, mods, true)
         })
     }
@@ -396,7 +397,7 @@ unsafe extern "system" fn key_up(this: *mut c_void, key: u16, code: i16, mods: i
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || unsafe {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || unsafe {
             forward_edit_key(this, key, code, mods, false)
         })
     }
@@ -441,7 +442,7 @@ unsafe extern "system" fn get_size(this: *mut c_void, rect: *mut ViewRect) -> TR
     // 以及注册到宿主的 `plugin_register("timer")` 节拍 —— 是 `host::marshal` 唯一
     // 能拿到宿主线程的两个入口。视图回调只在宿主重排窗口时来，所以它不是主力，
     // 但它是**不依赖宿主支持任何额外能力**的那一条。
-    crate::host::marshal::pump();
+    hifishifter_plugin::editor::pump_host_thread();
     let _guard = EnterExit::new("get_size");
     if rect.is_null() {
         return K_INVALID_ARGUMENT;
@@ -463,7 +464,7 @@ unsafe extern "system" fn on_size(this: *mut c_void, rect: *mut ViewRect) -> TRe
     // 以及注册到宿主的 `plugin_register("timer")` 节拍 —— 是 `host::marshal` 唯一
     // 能拿到宿主线程的两个入口。视图回调只在宿主重排窗口时来，所以它不是主力，
     // 但它是**不依赖宿主支持任何额外能力**的那一条。
-    crate::host::marshal::pump();
+    hifishifter_plugin::editor::pump_host_thread();
     let _guard = EnterExit::new("on_size");
     if rect.is_null() {
         return K_INVALID_ARGUMENT;
@@ -506,7 +507,7 @@ unsafe extern "system" fn on_size(this: *mut c_void, rect: *mut ViewRect) -> TRe
             if let Err(error) = host.resize(width, height) {
                 // 【为什么不回失败】见上：让宿主把"应用失败"当成"协商失败"只会让它重试
                 // 到死。记录原因，返回成功，界面最多是尺寸没跟上。
-                crate::log_line(&format!("IPlugView resize failed: {error}"));
+                hifishifter_plugin::log_line(&format!("IPlugView resize failed: {error}"));
             }
         }
         K_RESULT_OK
@@ -529,7 +530,7 @@ unsafe extern "system" fn focus(this: *mut c_void, focused: u8) -> TResult {
         if let Some(host) = native {
             host.host_tick();
             if let Err(error) = host.focus() {
-                crate::log_line(&format!("IPlugView focus failed: {error}"));
+                hifishifter_plugin::log_line(&format!("IPlugView focus failed: {error}"));
                 return K_RESULT_FALSE;
             }
         }
@@ -537,12 +538,6 @@ unsafe extern "system" fn focus(this: *mut c_void, focused: u8) -> TResult {
     })
 }
 
-#[repr(C)]
-struct UnknownVtbl {
-    query: unsafe extern "system" fn(*mut c_void, *const u8, *mut *mut c_void) -> TResult,
-    add: unsafe extern "system" fn(*mut c_void) -> u32,
-    release: unsafe extern "system" fn(*mut c_void) -> u32,
-}
 unsafe fn frame_add(frame: usize) {
     if frame != 0 {
         let ptr = frame as *mut c_void;
@@ -595,7 +590,7 @@ unsafe extern "system" fn can_resize(_this: *mut c_void) -> TResult {
     // 以及注册到宿主的 `plugin_register("timer")` 节拍 —— 是 `host::marshal` 唯一
     // 能拿到宿主线程的两个入口。视图回调只在宿主重排窗口时来，所以它不是主力，
     // 但它是**不依赖宿主支持任何额外能力**的那一条。
-    crate::host::marshal::pump();
+    hifishifter_plugin::editor::pump_host_thread();
     let _guard = EnterExit::new("can_resize");
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
@@ -605,14 +600,14 @@ unsafe extern "system" fn can_resize(_this: *mut c_void) -> TResult {
         if std::env::var("HIFISHIFTER_FIXED_SIZE").is_ok_and(|value| value.trim() == "1") {
             return K_RESULT_FALSE;
         }
-        crate::guard_ffi(K_RESULT_FALSE, || K_RESULT_OK)
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || K_RESULT_OK)
     }
 }
 unsafe extern "system" fn constrain(_this: *mut c_void, rect: *mut ViewRect) -> TResult {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
-        crate::guard_ffi(K_RESULT_FALSE, || {
+        hifishifter_plugin_core::guard_ffi(K_RESULT_FALSE, || {
             if rect.is_null() {
                 return K_INVALID_ARGUMENT;
             }
@@ -628,12 +623,12 @@ unsafe extern "system" fn constrain(_this: *mut c_void, rect: *mut ViewRect) -> 
             }
             let (Some(right), Some(bottom)) = (
                 rect.left.checked_add(width.clamp(
-                    crate::editor::gui::EDITOR_MIN_SIZE.0 as i32,
-                    crate::editor::gui::EDITOR_MAX_SIZE.0 as i32,
+                    hifishifter_plugin::editor::gui::EDITOR_MIN_SIZE.0 as i32,
+                    hifishifter_plugin::editor::gui::EDITOR_MAX_SIZE.0 as i32,
                 )),
                 rect.top.checked_add(height.clamp(
-                    crate::editor::gui::EDITOR_MIN_SIZE.1 as i32,
-                    crate::editor::gui::EDITOR_MAX_SIZE.1 as i32,
+                    hifishifter_plugin::editor::gui::EDITOR_MIN_SIZE.1 as i32,
+                    hifishifter_plugin::editor::gui::EDITOR_MAX_SIZE.1 as i32,
                 )),
             ) else {
                 return K_INVALID_ARGUMENT;

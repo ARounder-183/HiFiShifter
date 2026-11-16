@@ -1,11 +1,11 @@
 //! 控制器身份感知的 ARA entry；复用 audited C++ shim 和 companion 绑定，不手写 ARA COM vtable。
 //!
 //! 【绑定逻辑不在这里】角色校验、文档查找、代数协商检查、companion 复位与幂等复用全在
-//! [`crate::ara::binder::AraBinder`] —— CLAP 外壳调的是**同一个方法**。本文件只剩 VST3 的
+//! [`hifishifter_plugin::ara::binder::AraBinder`] —— CLAP 外壳调的是**同一个方法**。本文件只剩 VST3 的
 //! COM 外壳：把 shim 的三个回调转成对 binder 的调用，并持有唯一的 owning COM 引用。
 
-use crate::ara::binder::AraBinder;
-use crate::render::extension::ExtensionOwner;
+use hifishifter_plugin::ara::binder::AraBinder;
+use hifishifter_plugin::render::extension::ExtensionOwner;
 use ara2_bridge::companion::vst3::ffi::*;
 use ara2_bridge::companion::{CompanionFactory, CompanionRoles};
 use ara2_bridge::core::AraError;

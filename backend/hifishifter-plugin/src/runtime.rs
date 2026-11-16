@@ -40,8 +40,8 @@ impl StaticFactory {
     /// `vst3::factory_declaration_tests`；不带这条属性时它在产品构建里"从未使用"，
     /// `clippy --all-targets -D warnings` 直接红。与 `ee9d95cd` 对同类只读访问器的
     /// 处理一致。
-    #[cfg(test)]
-    pub(crate) fn factory_raw(&self) -> *const ara2_bridge::sys::ARAFactory {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn factory_raw(&self) -> *const ara2_bridge::sys::ARAFactory {
         self.0.as_raw()
     }
 }

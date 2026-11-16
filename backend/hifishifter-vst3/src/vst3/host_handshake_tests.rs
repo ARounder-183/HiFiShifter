@@ -25,7 +25,7 @@ use ara2_bridge::sys::{ARADocumentControllerInstance, ARADocumentProperties};
 /// 【为什么不写字面量】这组用例的全部意义是"声明区间要覆盖宿主会请求的代数"。把区间
 /// 抄成字面量，`runtime.rs` 一改窄用例就会假通过 —— 那正是这次要防的回归。
 fn advertised_range() -> (ApiGeneration, ApiGeneration) {
-    let runtime = crate::runtime::runtime().expect("进程级 ARA 运行时必须可建");
+    let runtime = hifishifter_plugin::runtime::runtime().expect("进程级 ARA 运行时必须可建");
     // SAFETY: 工厂泄漏到进程结束；`ARAFactory` 是紧凑结构，整份拷出来再读字段。
     let raw = unsafe { std::ptr::read_unaligned(runtime.factory.factory_raw()) };
     // 按值读出（对 packed 字段取引用是 UB，见 `factory_declaration_tests` 的同款说明）。
@@ -46,14 +46,14 @@ fn probe_factory() -> &'static Factory {
     Box::leak(Box::new(
         FactoryBuilder::new("org.hfs.handshake.probe", "org.hfs.handshake.probe.archive")
             .display(
-                crate::CLASS_NAME,
+                hifishifter_plugin::CLASS_NAME,
                 "HiFiShifter",
                 "https://github.com/ARounder-183/HiFiShifter",
                 crate::VERSION,
             )
             .generations(lowest, highest)
             .document_controller(|| {
-                let model = crate::ara::model::ModelHandle::new();
+                let model = hifishifter_plugin::ara::model::ModelHandle::new();
                 let session = model.session();
                 PluginBuilder::new(model)
                     .controller_identity(move |key| session.register(key))
@@ -66,7 +66,7 @@ fn probe_factory() -> &'static Factory {
 
 /// 按宿主的方式请求一个文档控制器，返回原始指针（null 表示我们把它交给了宿主）。
 fn request_document_controller(factory: &Factory) -> *const ARADocumentControllerInstance {
-    let mut fixture = crate::test_host::HostFixture::new(vec![]);
+    let mut fixture = hifishifter_plugin::test_support::HostFixture::new(vec![]);
     let host = fixture.instance();
     let properties = ARADocumentProperties {
         structSize: std::mem::size_of::<ARADocumentProperties>(),
@@ -116,7 +116,7 @@ fn every_host_generation_in_our_range_yields_a_real_controller() {
         let factory = probe_factory();
         factory
             .entry()
-            .initialize(generation, crate::test_host::assert_address())
+            .initialize(generation, hifishifter_plugin::test_support::assert_address())
             .unwrap_or_else(|error| {
                 panic!("{generation:?} 被拒了：{error} —— 宿主拿不到文档控制器，会拿着 null 继续写")
             });
@@ -170,7 +170,7 @@ fn a_generation_outside_our_range_hands_the_host_a_null_controller() {
     );
     let rejected = factory
         .entry()
-        .initialize(outside, crate::test_host::assert_address());
+        .initialize(outside, hifishifter_plugin::test_support::assert_address());
     assert!(rejected.is_err(), "区间外的代数必须被拒（这正是问题所在）");
     let raw = request_document_controller(factory);
     assert!(

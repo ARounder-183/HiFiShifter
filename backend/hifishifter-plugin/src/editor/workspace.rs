@@ -2375,7 +2375,7 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
         Ok(WorkspaceScope { regions })
     }
     /// 原GUI的多轨快照只扩展查看/编辑范围，不更改任何播放renderer的混音归属。
-    pub(crate) fn workspace_timeline(&self) -> Result<TimelineState, String> {
+    pub fn workspace_timeline(&self) -> Result<TimelineState, String> {
         let _transaction = self.transaction.lock_or_recover();
         self.workspace_timeline_locked()
     }

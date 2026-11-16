@@ -3,7 +3,7 @@ name = "hifishifter-plugin"
 version = "0.2.0-beta"
 edition = "2021"
 publish = false
-description = "HiFiShifter 的 VST3 / ARA 插件适配层（复用本体离线内核）"
+description = "HiFiShifter 插件的格式无关实现层（VST3 / CLAP 外壳共用；复用本体离线内核）"
 
 # lock 由 `backend/` workspace 统一持有（见 backend/Cargo.toml 的说明）。
 
@@ -27,14 +27,19 @@ hifishifter-kernel = { path = "../hifishifter-kernel", default-features = false,
 hifishifter-host-link = { path = "../hifishifter-host-link" }
 hifishifter-clipboard = { path = "../hifishifter-clipboard" }
 blake3 = "1"
-# ARA2 ↔ VST3 的桥。`vst3` 特性提供 companion 适配器（主工厂 / 处理器入口）；
-# 默认特性 `plugin` 提供 `PluginModel` 那套语义 trait。
+# ARA2 的桥。共享层只需要两块：
+#   * `plugin` —— `PluginModel` 那套语义 trait（文档模型 / 角色位）；
+#   * 裸 `companion` —— 格式中立的 binding 层（`CompanionFactory` /
+#     `CompanionProcessorBinding` / `CompanionControllerBinding` / `CompanionRoles`，
+#     见 `ara/binder.rs`）。它是本仓给 ara2-bridge 打的补丁特性
+#     （`third-party/ara2-bridge/PATCHED.md`），不启用任何格式子模块，因此
+#     **不需要任何 SDK 检出**。
 #
-# 【build.rs 依赖】它要求环境变量 `ARA_VST3_SDK_DIR` 与 `ARA_SDK_DIR` 指向按
-# 它自己校验过的两个 SDK 检出（仓库 + commit + tree hash 三项匹配，tree 一脏即拒绝）。
-# 本仓库里它们在 `third_party/sdk/`（路径见 `scripts/env/sdk-env.ps1`，revision 见
-# `scripts/env/plugin-sdks.json`）；先跑 `scripts/setup/prepare-plugin-sdks.ps1` 下载并校验。
-ara2-bridge = { version = "0.3.0", features = ["vst3"] }
+# 【为什么这里没有 vst3 / clap】"feature 由最终 cdylib 决定"（见 plugin-core 的
+# Cargo.toml）：VST3 的 companion（含 C++ shim 与 SDK 需求）只由 `hifishifter-vst3`
+# 启用，CLAP 的只由 `hifishifter-clap` 启用。共享层钉死某个格式特性，会让每个
+# 其他外壳都被迫携带它（CLAP 曾因此被迫检出 VST3 SDK）。
+ara2-bridge = { version = "0.3.0", default-features = false, features = ["plugin", "companion"] }
 log = { version = "0.4", features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -138,8 +143,13 @@ windows = { version = "0.62", features = ["Win32_System_ProcessStatus"] }
 default = ["onnx", "soundtouch"]
 onnx = ["hifishifter-kernel/onnx"]
 soundtouch = ["hifishifter-kernel/soundtouch"]
+# 【只在测试构建里启用】把共享测试夹具（test_allocator / test_host / MockHost /
+# session::tests::workspace_fixture）暴露给格式外壳的测试。产品构建的依赖树里
+# 不得出现它 —— 判据见 hifishifter-plugin/tests/format_feature_boundary.rs。
+test-support = []
 
 [lib]
 name = "hifishifter_plugin"
-# `cdylib` 才是 REAPER 加载的产物；`rlib` 让 crate 自己的测试能链接它。
-crate-type = ["cdylib", "rlib"]
+# 【为什么只有 rlib】本 crate 是格式无关实现层，不产出任何可被宿主加载的二进制；
+# cdylib 由各外壳 crate（`hifishifter-vst3` / `hifishifter-clap`）产出。
+crate-type = ["rlib"]

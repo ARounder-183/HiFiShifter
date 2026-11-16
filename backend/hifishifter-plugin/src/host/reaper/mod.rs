@@ -1,8 +1,8 @@
 //! 核对官方REAPER SDK的原生宿主适配：只在原始UI/model线程读所属project的真实位置。
 //! ABI依据 justinfrankel/reaper-sdk c0eafe87863b2bf69c5c822760f1b32a753b211b，
 //! sdk/reaper_vst3_interfaces.h 与 reaper_plugin_functions.h。手写适配，不是SDK原文件。
-use crate::editor::connection::UnknownVtbl;
-use crate::vst3::{alternate_iid, platform_iid, K_RESULT_OK};
+use crate::vst3_abi::UnknownVtbl;
+use crate::vst3_abi::{alternate_iid, platform_iid, K_RESULT_OK};
 use std::ffi::{c_char, c_void};
 pub(super) mod item_chunk;
 pub(crate) use item_chunk::RewrittenItem;
@@ -381,7 +381,7 @@ impl NativeHost {
             crate::log_line(&format!(
                 "[reaper-host] QI result={result} interface={} (iid layout={}, tried both)",
                 !pointer.is_null(),
-                crate::vst3::iid_layout()
+                crate::vst3_abi::iid_layout()
             ));
             return None;
         }
@@ -1291,11 +1291,12 @@ fn new_fade_axes(version: &str) -> Option<bool> {
     Some((major, minor) >= NEW_FADE_AXES_SINCE)
 }
 
-#[cfg(test)]
 #[path = "tests.rs"]
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(not(test), allow(dead_code))]
 mod geometry_tests;
-#[cfg(test)]
-pub(crate) use geometry_tests::Fixture as MockHost;
+#[cfg(any(test, feature = "test-support"))]
+pub use geometry_tests::Fixture as MockHost;
 
 #[cfg(test)]
 mod tests {
@@ -1347,7 +1348,7 @@ mod tests {
                     0x12, 0xc2, 0x7c,
                 ];
                 if unsafe { std::slice::from_raw_parts(iid, 16) } != expected {
-                    return crate::vst3::K_NO_INTERFACE;
+                    return crate::vst3_abi::K_NO_INTERFACE;
                 }
                 unsafe {
                     add(this);

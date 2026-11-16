@@ -7,7 +7,7 @@ pub(crate) type RegionKey = u64;
 pub(crate) type DocumentId = u64;
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum OwnershipError {
+pub enum OwnershipError {
     InvalidIdentity,
     DuplicateRegion,
     // 下面三个只由 `resolve` 产出，而 `resolve` 目前只有测试在用（见它的 `#[cfg(test)]`）。

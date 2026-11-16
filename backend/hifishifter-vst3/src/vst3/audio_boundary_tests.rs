@@ -1,8 +1,8 @@
 //! `vst3.rs` 的音频边界测试（缓冲布局、清零、快照透传）。从内联模块纯搬到这里。
 
 use super::*;
-use crate::audio_abi::{AudioBusBuffers, ProcessData};
-use crate::sync::MutexExt;
+use hifishifter_plugin::audio_abi::{AudioBusBuffers, ProcessData};
+use hifishifter_plugin::sync::MutexExt;
 
 /// 让文档上另有一个实例持 playback 角色。
 ///
@@ -12,9 +12,9 @@ use crate::sync::MutexExt;
 /// 编辑实例、于是插件永远不发声"的形态。本文件的用例要测的是"编辑实例与播放实例**并存**时的
 /// 透传"（REAPER 的形态），所以必须把播放实例摆出来。
 fn with_a_playback_sibling(
-    model: &crate::ara::model::ModelHandle,
-) -> std::sync::Arc<crate::render::extension::ExtensionOwner> {
-    let owner = std::sync::Arc::new(crate::render::extension::ExtensionOwner::default());
+    model: &hifishifter_plugin::ara::model::ModelHandle,
+) -> std::sync::Arc<hifishifter_plugin::render::extension::ExtensionOwner> {
+    let owner = std::sync::Arc::new(hifishifter_plugin::render::extension::ExtensionOwner::default());
     owner
         .bind_to_document(
             model.session(),
@@ -30,7 +30,7 @@ fn with_a_playback_sibling(
 /// SDK纯editor renderer透传宿主音频，不能把已含fade/gain的输入换成自己的旧快照。
 #[test]
 fn editor_only_renderer_preserves_host_fades_in_all_process_modes_without_allocations() {
-    let model = crate::ara::model::ModelHandle::new();
+    let model = hifishifter_plugin::ara::model::ModelHandle::new();
     let mut processor = Processor::create().unwrap();
     processor
         .extension_owner
@@ -44,7 +44,7 @@ fn editor_only_renderer_preserves_host_fades_in_all_process_modes_without_alloca
         .unwrap();
     let _playback = with_a_playback_sibling(&model);
     processor.extension_owner.snapshots[0]
-        .publish(crate::render::snapshot::PlaybackSnapshot {
+        .publish(hifishifter_plugin::render::snapshot::PlaybackSnapshot {
             sample_rate: 44100,
             origin_sample: 0,
             left: vec![0.9; 4],
@@ -80,10 +80,10 @@ fn editor_only_renderer_preserves_host_fades_in_all_process_modes_without_alloca
             outputs: &raw mut output,
             ..Default::default()
         };
-        crate::test_allocator::begin();
+        hifishifter_plugin::test_support::begin();
         let result =
             unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
-        let allocations = crate::test_allocator::end();
+        let allocations = hifishifter_plugin::test_support::end();
         assert_eq!(result, K_RESULT_OK);
         assert_eq!(allocations, 0);
         assert_eq!(left, [0.0, 0.1, 0.2, 0.3, 9.0]);
@@ -97,7 +97,7 @@ fn editor_only_renderer_preserves_host_fades_in_all_process_modes_without_alloca
 #[allow(unused_assignments)]
 #[test]
 fn editor_only_passthrough_handles_in_place_silence_and_inactive_planes() {
-    let model = crate::ara::model::ModelHandle::new();
+    let model = hifishifter_plugin::ara::model::ModelHandle::new();
     let mut processor = Processor::create().unwrap();
     processor
         .extension_owner
@@ -167,7 +167,7 @@ fn editor_only_passthrough_handles_in_place_silence_and_inactive_planes() {
 /// 真正 process 在有效快照下输出 PCM，且观察区间不分配或释放任何内存。
 #[test]
 fn process_outputs_the_snapshot_without_allocating_or_deallocating() {
-    let model = crate::ara::model::ModelHandle::new();
+    let model = hifishifter_plugin::ara::model::ModelHandle::new();
     let mut processor = Processor::create().unwrap();
     // 【为什么必须绑定文档】本用例测的是"播放实例把快照送出去"。未绑定的实例是
     // Capture 形态（没有素材时透明、有素材时出自己的内容），根本不是这条通路的形状；
@@ -183,7 +183,7 @@ fn process_outputs_the_snapshot_without_allocating_or_deallocating() {
         )
         .unwrap();
     processor.extension_owner.snapshots[0]
-        .publish(crate::render::snapshot::PlaybackSnapshot {
+        .publish(hifishifter_plugin::render::snapshot::PlaybackSnapshot {
             sample_rate: 44100,
             origin_sample: 10,
             left: vec![0.1, 0.2],
@@ -200,7 +200,7 @@ fn process_outputs_the_snapshot_without_allocating_or_deallocating() {
         silence_flags: 0,
         channel_buffers: planes.as_mut_ptr(),
     };
-    let mut context = crate::audio_abi::ProcessContext {
+    let mut context = hifishifter_plugin::audio_abi::ProcessContext {
         state: 1 << 1,
         sample_rate: 44100.0,
         project_time_samples: 11,
@@ -213,11 +213,11 @@ fn process_outputs_the_snapshot_without_allocating_or_deallocating() {
         process_context: &raw mut context,
         ..Default::default()
     };
-    crate::test_allocator::begin();
+    hifishifter_plugin::test_support::begin();
     // SAFETY: 实际 processor 音频子对象和完整 SDK 缓冲都在回调期间存活。
     let result =
         unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
-    let allocations = crate::test_allocator::end();
+    let allocations = hifishifter_plugin::test_support::end();
     assert_eq!(result, K_RESULT_OK);
     assert_eq!(left, [0.2, 0.0, 8.0]);
     assert_eq!(right, [0.4, 0.0, 8.0]);
@@ -229,7 +229,7 @@ fn process_outputs_the_snapshot_without_allocating_or_deallocating() {
 #[test]
 fn offline_setup_waits_for_current_snapshot_and_reprepares_after_edit_revision_changes() {
     use std::sync::mpsc;
-    let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
+    let (model, owners, _ids) = hifishifter_plugin::editor::session::tests::workspace_fixture();
     let document = model.session();
     let pcm = document.edit_sources.lock_or_recover()["ara://source"].clone();
     document
@@ -308,7 +308,7 @@ fn offline_setup_waits_for_current_snapshot_and_reprepares_after_edit_revision_c
         silence_flags: 0,
         channel_buffers: planes.as_mut_ptr(),
     };
-    let mut context = crate::audio_abi::ProcessContext {
+    let mut context = hifishifter_plugin::audio_abi::ProcessContext {
         sample_rate: 44100.,
         ..Default::default()
     };
@@ -334,7 +334,7 @@ fn offline_setup_waits_for_current_snapshot_and_reprepares_after_edit_revision_c
 /// 离线缺快照/上下文必须显式失败；实时仍安全静音，全部回调保持零分配。
 #[test]
 fn offline_missing_snapshot_is_failure_not_successful_silence() {
-    let model = crate::ara::model::ModelHandle::new();
+    let model = hifishifter_plugin::ara::model::ModelHandle::new();
     let mut processor = Processor::create().unwrap();
     // 同上：离线"缺快照必须显式失败"是 ARA 播放实例的契约。
     processor
@@ -355,7 +355,7 @@ fn offline_missing_snapshot_is_failure_not_successful_silence() {
         silence_flags: 0,
         channel_buffers: planes.as_mut_ptr(),
     };
-    let mut context = crate::audio_abi::ProcessContext {
+    let mut context = hifishifter_plugin::audio_abi::ProcessContext {
         sample_rate: 44100.,
         ..Default::default()
     };
@@ -367,7 +367,7 @@ fn offline_missing_snapshot_is_failure_not_successful_silence() {
         process_context: &raw mut context,
         ..Default::default()
     };
-    crate::test_allocator::begin();
+    hifishifter_plugin::test_support::begin();
     let missing =
         unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
     data.process_context = std::ptr::null_mut();
@@ -376,7 +376,7 @@ fn offline_missing_snapshot_is_failure_not_successful_silence() {
     data.process_mode = 0;
     let realtime =
         unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
-    let allocations = crate::test_allocator::end();
+    let allocations = hifishifter_plugin::test_support::end();
     assert_eq!(
         (missing, no_context, realtime),
         (K_RESULT_FALSE, K_RESULT_FALSE, K_RESULT_OK)
@@ -395,7 +395,7 @@ fn run(data: *mut ProcessData) -> TResult {
 /// 停播重复process同一帧必须静音；离线导出没有kPlaying也必须保留音频。
 #[test]
 fn idle_transport_is_silent_but_offline_export_still_reads_snapshot() {
-    let model = crate::ara::model::ModelHandle::new();
+    let model = hifishifter_plugin::ara::model::ModelHandle::new();
     let mut processor = Processor::create().unwrap();
     // 同上：这是"播放实例 + 快照"的契约，未绑定实例不是那个形状。
     processor
@@ -409,7 +409,7 @@ fn idle_transport_is_silent_but_offline_export_still_reads_snapshot() {
         )
         .unwrap();
     processor.extension_owner.snapshots[0]
-        .publish(crate::render::snapshot::PlaybackSnapshot {
+        .publish(hifishifter_plugin::render::snapshot::PlaybackSnapshot {
             sample_rate: 44100,
             origin_sample: 0,
             left: vec![0.25; 4],
@@ -426,7 +426,7 @@ fn idle_transport_is_silent_but_offline_export_still_reads_snapshot() {
         silence_flags: 0,
         channel_buffers: planes.as_mut_ptr(),
     };
-    let mut context = crate::audio_abi::ProcessContext {
+    let mut context = hifishifter_plugin::audio_abi::ProcessContext {
         sample_rate: 44100.,
         ..Default::default()
     };
@@ -458,9 +458,9 @@ fn idle_transport_is_silent_but_offline_export_still_reads_snapshot() {
 // 审查探针版本标记 v2
 #[test]
 fn effective_item_mute_projects_to_gui_and_gates_real_process_without_inference() {
-    let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
+    let (model, owners, _ids) = hifishifter_plugin::editor::session::tests::workspace_fixture();
     let document = model.session();
-    let host = crate::host::MockHost::new();
+    let host = hifishifter_plugin::test_support::MockHost::new();
     host.set_value("D_POSITION", 0.);
     host.set_value("D_LENGTH", 4. / 44100.);
     host.set_value("B_MUTE", 1.);
@@ -475,7 +475,7 @@ fn effective_item_mute_projects_to_gui_and_gates_real_process_without_inference(
     let mut processor = Processor::create().unwrap();
     processor.extension_owner = owners[0].clone();
     owners[0].snapshots[0]
-        .publish(crate::render::snapshot::PlaybackSnapshot {
+        .publish(hifishifter_plugin::render::snapshot::PlaybackSnapshot {
             sample_rate: 44100,
             origin_sample: 0,
             // 32 帧：本用例的传输全程逐块推进（见下方"为什么推进位置"），解除块
@@ -495,7 +495,7 @@ fn effective_item_mute_projects_to_gui_and_gates_real_process_without_inference(
         silence_flags: 0,
         channel_buffers: planes.as_mut_ptr(),
     };
-    let mut context = crate::audio_abi::ProcessContext {
+    let mut context = hifishifter_plugin::audio_abi::ProcessContext {
         state: 1 << 1,
         sample_rate: 44100.,
         ..Default::default()
@@ -526,10 +526,10 @@ fn effective_item_mute_projects_to_gui_and_gates_real_process_without_inference(
         unsafe { (*data.process_context).project_time_samples = position_frames };
         position_frames += 4;
         data.process_mode = mode;
-        crate::test_allocator::begin();
+        hifishifter_plugin::test_support::begin();
         let result =
             unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
-        let allocations = crate::test_allocator::end();
+        let allocations = hifishifter_plugin::test_support::end();
         assert_eq!(result, K_RESULT_OK);
         assert_eq!(allocations, 0);
         assert_eq!(&left[..4], &[0.; 4]);
@@ -887,7 +887,7 @@ fn the_capture_path_records_the_host_playback_at_its_project_positions() {
     owner.note_binding_window_closed_without_ara();
     assert_eq!(
         owner.mode(),
-        crate::render::extension::InstanceMode::Capture,
+        hifishifter_plugin::render::extension::InstanceMode::Capture,
         "未绑定 ARA 的实例必须被判成 Capture，否则下面这条通路根本不会被走到"
     );
     owner.set_setup_sample_rate(48_000.0);
@@ -916,7 +916,7 @@ fn the_capture_path_records_the_host_playback_at_its_project_positions() {
             silence_flags: 3,
             channel_buffers: output_planes.as_mut_ptr(),
         };
-        let mut context = crate::audio_abi::ProcessContext {
+        let mut context = hifishifter_plugin::audio_abi::ProcessContext {
             // kPlaying 必须置位：停播时宿主仍在 process 固定光标位置。
             state: 1 << 1,
             sample_rate: 48_000.0,
@@ -939,9 +939,9 @@ fn the_capture_path_records_the_host_playback_at_its_project_positions() {
             assert_eq!(result, K_RESULT_OK);
             0
         } else {
-            crate::test_allocator::begin();
+            hifishifter_plugin::test_support::begin();
             let result = unsafe { (AUDIO_VTBL.process)(audio_ptr(raw), (&raw mut data).cast()) };
-            let allocations = crate::test_allocator::end();
+            let allocations = hifishifter_plugin::test_support::end();
             assert_eq!(result, K_RESULT_OK);
             allocations
         };
@@ -990,7 +990,7 @@ fn in_place_buffers_still_capture_the_host_audio() {
             silence_flags: 0,
             channel_buffers: planes.as_mut_ptr(),
         };
-        let mut context = crate::audio_abi::ProcessContext {
+        let mut context = hifishifter_plugin::audio_abi::ProcessContext {
             state: 1 << 1,
             sample_rate: 48_000.0,
             project_time_samples: block * frames as i64,
@@ -1050,7 +1050,7 @@ fn in_place_buffers_still_pass_the_host_audio_through() {
         silence_flags: 0,
         channel_buffers: planes.as_mut_ptr(),
     };
-    let mut context = crate::audio_abi::ProcessContext {
+    let mut context = hifishifter_plugin::audio_abi::ProcessContext {
         state: 1 << 1,
         sample_rate: 48_000.0,
         project_time_samples: 0,
@@ -1110,7 +1110,7 @@ fn a_silence_flagged_input_bus_is_still_captured_and_passed_through() {
         silence_flags: 3,
         channel_buffers: output_planes.as_mut_ptr(),
     };
-    let mut context = crate::audio_abi::ProcessContext {
+    let mut context = hifishifter_plugin::audio_abi::ProcessContext {
         state: 1 << 1,
         sample_rate: 48_000.0,
         project_time_samples: 0,
@@ -1162,7 +1162,7 @@ fn capture_happens_even_when_the_host_supplies_no_output_bus() {
         silence_flags: 0,
         channel_buffers: input_planes.as_mut_ptr(),
     };
-    let mut context = crate::audio_abi::ProcessContext {
+    let mut context = hifishifter_plugin::audio_abi::ProcessContext {
         state: 1 << 1,
         sample_rate: 48_000.0,
         project_time_samples: 0,
@@ -1204,7 +1204,7 @@ fn capture_happens_even_when_the_host_supplies_no_output_bus() {
 /// 一旦未录制时它也写输出，ARA 宿主上正常渲染的实例就会被静音或直通掉。
 #[test]
 fn an_unarmed_capture_path_leaves_the_snapshot_output_alone() {
-    let model = crate::ara::model::ModelHandle::new();
+    let model = hifishifter_plugin::ara::model::ModelHandle::new();
     let mut processor = Processor::create().unwrap();
     processor
         .extension_owner
@@ -1217,7 +1217,7 @@ fn an_unarmed_capture_path_leaves_the_snapshot_output_alone() {
         )
         .unwrap();
     processor.extension_owner.snapshots[0]
-        .publish(crate::render::snapshot::PlaybackSnapshot {
+        .publish(hifishifter_plugin::render::snapshot::PlaybackSnapshot {
             sample_rate: 44100,
             origin_sample: 0,
             left: vec![0.7; 4],
@@ -1241,7 +1241,7 @@ fn an_unarmed_capture_path_leaves_the_snapshot_output_alone() {
         silence_flags: 3,
         channel_buffers: output_planes.as_mut_ptr(),
     };
-    let mut context = crate::audio_abi::ProcessContext {
+    let mut context = hifishifter_plugin::audio_abi::ProcessContext {
         state: 1 << 1,
         sample_rate: 44100.0,
         project_time_samples: 0,
@@ -1300,7 +1300,7 @@ fn a_recorded_take_is_rendered_and_published_through_the_snapshot_reader() {
             silence_flags: 3,
             channel_buffers: output_planes.as_mut_ptr(),
         };
-        let mut context = crate::audio_abi::ProcessContext {
+        let mut context = hifishifter_plugin::audio_abi::ProcessContext {
             state: 1 << 1,
             sample_rate: 48_000.0,
             project_time_samples: block * frames as i64,
@@ -1346,7 +1346,7 @@ fn a_recorded_take_is_rendered_and_published_through_the_snapshot_reader() {
     };
     // SAFETY: bus 的形状与长度由本用例保证；publisher 由 owner 保留。
     let ready = unsafe {
-        owner.snapshots[1].copy_block(0, 48_000, &mut crate::audio_abi::output_bus(&mut bus), 64)
+        owner.snapshots[1].copy_block(0, 48_000, &mut hifishifter_plugin::audio_abi::output_bus(&mut bus), 64)
     };
     assert!(ready, "录制之后必须有一份可读的快照");
     // 【为什么不比对具体样本值】这条通路下游是内核的合成（可能含神经网络声码器），
@@ -1386,7 +1386,7 @@ fn a_negative_preroll_block_is_recorded_from_project_zero() {
         silence_flags: 3,
         channel_buffers: output_planes.as_mut_ptr(),
     };
-    let mut context = crate::audio_abi::ProcessContext {
+    let mut context = hifishifter_plugin::audio_abi::ProcessContext {
         state: 1 << 1,
         sample_rate: 48_000.0,
         // 4 帧 pre-roll + 4 帧工程内容。
@@ -1449,7 +1449,7 @@ fn a_lagging_playing_bit_still_captures_the_first_process_block() {
             silence_flags: 3,
             channel_buffers: output_planes.as_mut_ptr(),
         };
-        let mut context = crate::audio_abi::ProcessContext {
+        let mut context = hifishifter_plugin::audio_abi::ProcessContext {
             // 起播窗口：宿主还没有置 kPlaying。
             state: 0,
             sample_rate: 48_000.0,
@@ -1519,7 +1519,7 @@ fn a_stale_prefetch_block_does_not_silence_the_playback_start() {
             silence_flags: 3,
             channel_buffers: output_planes.as_mut_ptr(),
         };
-        let mut context = crate::audio_abi::ProcessContext {
+        let mut context = hifishifter_plugin::audio_abi::ProcessContext {
             state: 0,
             sample_rate: 48_000.0,
             project_time_samples: start,
@@ -1575,7 +1575,7 @@ fn run_stream_block(
         silence_flags: 3,
         channel_buffers: output_planes.as_mut_ptr(),
     };
-    let mut context = crate::audio_abi::ProcessContext {
+    let mut context = hifishifter_plugin::audio_abi::ProcessContext {
         state,
         sample_rate: 48_000.0,
         project_time_samples: start,
@@ -1667,7 +1667,7 @@ fn a_pinned_block_with_playing_one_is_silenced_after_the_first_occurrence() {
     processor
         .extension_owner
         .note_binding_window_closed_without_ara();
-    let playing = crate::audio_abi::PROCESS_CONTEXT_PLAYING;
+    let playing = hifishifter_plugin::audio_abi::PROCESS_CONTEXT_PLAYING;
     let (first, _) = run_stream_block(&mut processor, 0, playing, 0, 8, 0.5);
     assert_eq!(first, vec![0.5; 8], "首次出现的区间必须出音");
     // 【T20】同上去抖：连续两块不推进才静音。
@@ -1706,7 +1706,7 @@ fn interleaved_prefetch_and_realtime_capture_the_whole_first_window() {
         .unwrap();
     assert_eq!(
         diagnostics.elected,
-        Some(crate::capture::recorder::ProcessStream::Prefetch),
+        Some(hifishifter_capture::recorder::ProcessStream::Prefetch),
         "prefetch-only 的起播窗口必须由 prefetch 供料"
     );
     assert_eq!(diagnostics.stream_switches, 0);
@@ -1740,8 +1740,8 @@ fn in_place_passthrough_is_not_poisoned_by_high_verbosity_audit() {
         silence_flags: 0,
         channel_buffers: planes.as_mut_ptr(),
     };
-    let mut context = crate::audio_abi::ProcessContext {
-        state: crate::audio_abi::PROCESS_CONTEXT_PLAYING,
+    let mut context = hifishifter_plugin::audio_abi::ProcessContext {
+        state: hifishifter_plugin::audio_abi::PROCESS_CONTEXT_PLAYING,
         sample_rate: 48_000.0,
         project_time_samples: 0,
         ..Default::default()
@@ -1757,7 +1757,7 @@ fn in_place_passthrough_is_not_poisoned_by_high_verbosity_audit() {
         ..Default::default()
     };
     // 审计只在本线程打开：并行用例不会因此被点亮。
-    let _audit = crate::audio_stats::test_support::enable_buffer_audit();
+    let _audit = hifishifter_plugin::audio_stats::test_support::enable_buffer_audit();
     let result =
         unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
     assert_eq!(result, K_RESULT_OK);

@@ -1399,7 +1399,7 @@ impl ExtensionOwner {
     /// 【为什么留着它】它是 VST3 音频回调唯一认识的形状；真正的观察在
     /// [`Self::capture_observe_block`] 里。CLAP 侧从 `clap_audio_buffer_t` 直接造
     /// `InputBlock`，两边之后走的是同一段代码。
-    pub(crate) fn capture_observe(
+    pub fn capture_observe(
         &self,
         data: *mut crate::audio_abi::ProcessData,
         context: crate::block_context::BlockContext,
