@@ -62,7 +62,11 @@ import {
 } from "../../../renderKernel/gl/polylineProgram";
 import { buildPolylineVertices } from "../../../renderKernel/gl/polylineGeometry";
 import { buildSelectionBandInstances } from "../scene/selectionBandInstances";
-import { buildParamBlockScene, snapParamBlockRect } from "../scene/blockInstances";
+import {
+    buildParamBlockScene,
+    snapParamBlockRect,
+    type ParamBlockRectInput,
+} from "../scene/blockInstances";
 import {
     blockRowHeightPx,
     projectParamBlockCenterY,
@@ -683,16 +687,6 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     if (args.glSceneEnabled === true && args.glCanvas != null) {
         try {
             glHandle = createGlCanvas(args.glCanvas);
-            if (glHandle !== null) {
-                // 【为什么恢复后必须自己重绘】浏览器不会替我们重新调度一帧；而恢复时
-                // 全部 GL 资源（program / buffer / 图集）都已失效。不重绘，画布就
-                // 一直空白到下一次用户操作 —— 那正是"切走再切回来是空白的"。
-                teardown.push(
-                    glHandle.onRestored(() => {
-                        invalidateFull();
-                    }),
-                );
-            }
             if (glHandle === null) {
                 glFailureReason = "WebGL2 不可用";
             } else {
@@ -847,6 +841,83 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      * （以及尺寸 / dpr / 滚动订阅）清位；`draw()` 读取后立即复位。
      */
     let playheadOnlyFrame = false;
+
+    // ── 上下文恢复：重建全部 GL 资源 ─────────────────────────────────
+    //
+    // 【为什么 invalidateFull 不够】`webglcontextrestored` 之后规范规定 context
+    // 等同新建 —— program / VAO / buffer / texture 句柄**全部失效**，旧实现的
+    // 恢复回调只作废重绘，用死句柄画出来的仍是空白（且永久如此，直到卸载）。
+    // 与 WaveformSurface 的正确姿势一致：恢复 = 释放旧资源 + 走与首次挂载相同
+    // 的创建路径 + 全量作废重绘。
+    //
+    // 【失效的不只是句柄】签名缓存的几何（`lastGridSignature` /
+    // `lastKeyboardSignature`）还留在**旧 program 的缓冲里**；新 program 是空的，
+    // 签名不变就不会重新上传 —— 表现为网格/键盘/文字永久缺失。恢复时把签名
+    // 缓存清零，强制下一帧全量重建。
+    const disposeGlResources = (): void => {
+        glProgram?.dispose();
+        glProgram = null;
+        glAxisProgram?.dispose();
+        glAxisProgram = null;
+        mainGlyphSurface?.dispose();
+        mainGlyphSurface = null;
+        axisGlyphSurface?.dispose();
+        axisGlyphSurface = null;
+        glCurveProgram?.dispose();
+        glCurveProgram = null;
+        glSelectionProgram?.dispose();
+        glSelectionProgram = null;
+        glOverlayProgram?.dispose();
+        glOverlayProgram = null;
+    };
+    const recreateGlResources = (): void => {
+        disposeGlResources();
+        if (glHandle !== null) {
+            try {
+                glProgram = createSdfBoxProgram(glHandle.gl);
+                glCurveProgram = createPolylineProgram(glHandle.gl);
+                glSelectionProgram = createSdfBoxProgram(glHandle.gl);
+                mainGlyphSurface = createSurfaceFor(glHandle.gl);
+            } catch (error) {
+                glFailureReason = error instanceof Error ? error.message : String(error);
+                glProgram = null;
+                glCurveProgram = null;
+                glSelectionProgram = null;
+                mainGlyphSurface = null;
+            }
+        }
+        if (glAxisHandle !== null) {
+            try {
+                glAxisProgram = createSdfBoxProgram(glAxisHandle.gl);
+                axisGlyphSurface = createSurfaceFor(glAxisHandle.gl);
+            } catch {
+                glAxisProgram = null;
+                axisGlyphSurface = null;
+            }
+        }
+        if (glOverlayHandle !== null) {
+            try {
+                glOverlayProgram = createSdfBoxProgram(glOverlayHandle.gl);
+            } catch {
+                glOverlayProgram = null;
+            }
+        }
+        // 新 program 的缓冲是空的：签名缓存与上传状态全部复位，下一帧
+        // （恢复回调 → invalidateFull 调度的全量帧）重建几何与字形图集。
+        lastGridSignature = "";
+        lastKeyboardSignature = "";
+        glTextQuads = [];
+        glBlockTextQuads = [];
+        glGeometryUploaded = false;
+        glAxisGeometryUploaded = false;
+        // 浏览器不会替我们重新调度一帧；全量作废是恢复后内容重现的唯一入口。
+        invalidateFull();
+    };
+    for (const handle of [glHandle, glAxisHandle, glOverlayHandle]) {
+        if (handle !== null) {
+            teardown.push(handle.onRestored(recreateGlResources));
+        }
+    }
 
     /**
      * 解析**本帧的实时视口**（中心与跨度都取自实时来源，不用 render 期快照）。
@@ -2681,23 +2752,11 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             teardown.length = 0;
             // GL 资源最后释放：program 持有 VAO / buffer / shader，漏掉会随
             // 反复挂载（StrictMode 双挂载 / HMR）累积并最终耗尽上下文。
-            glProgram?.dispose();
-            glProgram = null;
+            // 与上下文恢复共用同一份释放清单（`recreateGlResources` 的前置步骤）。
+            disposeGlResources();
             glHandle = null;
-            glAxisProgram?.dispose();
-            glAxisProgram = null;
-            mainGlyphSurface?.dispose();
-            mainGlyphSurface = null;
-            axisGlyphSurface?.dispose();
-            axisGlyphSurface = null;
             glAxisHandle = null;
-            glOverlayProgram?.dispose();
-            glOverlayProgram = null;
             glOverlayHandle = null;
-            glCurveProgram?.dispose();
-            glCurveProgram = null;
-            glSelectionProgram?.dispose();
-            glSelectionProgram = null;
         },
     };
 }

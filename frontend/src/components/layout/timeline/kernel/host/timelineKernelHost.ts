@@ -1543,7 +1543,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     const glCanvas = createGlCanvas(canvas);
     if (!glCanvas) throw new Error("WebGL2 不可用");
     const gl = glCanvas.gl;
-    const sdfBox = createSdfBoxProgram(gl);
+    // 【为什么是 let】上下文恢复后 program 全部失效，必须 dispose + 重建
+    // （见 `loop` 之后的 onRestored 注册）。
+    let sdfBox = createSdfBoxProgram(gl);
 
     const readDpr = () => window.devicePixelRatio || 1;
     const clipBuilder = createClipInstanceBuilder();
@@ -2683,6 +2685,24 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     const loop = createRenderLoop({ draw });
     loop.start();
+    // ── 上下文恢复：重建 GL program ─────────────────────────────────
+    //
+    // 【为什么只 invalidateFull 不够】`webglcontextrestored` 之后规范规定
+    // context 等同新建 —— program / VAO / buffer 全部失效，本宿主此前没有注册
+    // 恢复回调，连"重绘"都不会发生（画布从此空白，直到卸载重挂）。与
+    // WaveformSurface / pianoRoll host 的正确姿势一致：恢复 = dispose 旧
+    // program + 重建 + 复位上传标记 + 调度一帧。时间轴宿主只有一层 SDF 块面，
+    // 几何数据（`combinedInstances`）在宿主侧持有，重建 program 后走 render
+    // 全量重传即可，无需重建场景。
+    glCanvas.onRestored(() => {
+        sdfBox.dispose();
+        sdfBox = createSdfBoxProgram(gl);
+        // 旧缓冲随上下文失效：复位上传标记，下一帧走 render 而不是 repaint
+        // （repaint 只更新 uniform，画出的仍是空缓冲）。
+        sceneUploaded = false;
+        // 浏览器不会替我们重新调度一帧。
+        loop.invalidate();
+    });
     /**
      * 把轨道头容器的滚动位置**立即**镜像到内核当前位置。
      *

@@ -9,7 +9,13 @@ import {
 } from "./timelineKernelHost";
 
 vi.mock("../../../renderKernel/gl/glContext", () => ({
-    createGlCanvas: () => ({ gl: {}, dispose: vi.fn() }),
+    // GlCanvasHandle 的最小形状：宿主在挂载时会注册 onRestored 回调
+    // （上下文恢复 → 重建 program）。
+    createGlCanvas: () => ({
+        gl: {},
+        dispose: vi.fn(),
+        onRestored: vi.fn(() => () => {}),
+    }),
 }));
 vi.mock("../../../renderKernel/gl/sdfBoxProgram", () => ({
     createSdfBoxProgram: () => ({ dispose: vi.fn() }),
