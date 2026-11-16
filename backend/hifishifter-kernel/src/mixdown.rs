@@ -1142,10 +1142,6 @@ impl SegmentBuf {
         self.as_slice().len()
     }
 
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     /// 可变访问：共享条目先物化为 owned。
     ///
     /// 【为什么必须物化而不是就地改】`Shared` 的 Arc 与共振峰缓存共享同一块
