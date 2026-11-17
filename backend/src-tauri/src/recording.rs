@@ -416,6 +416,17 @@ pub fn stop(state: &AppState) -> Result<RecordingFinishedInfo, String> {
         None => Ok(()),
     };
     if let Err(err) = thread_result {
+        // 【先收写盘线程，再删文件】捕获线程失败时写盘线程还活着、WAV 句柄还开着：
+        // 此处直接删在 Windows 上是 sharing violation（错误被 `let _` 吞掉），随后
+        // `ActiveRecording::drop` 会把半截文件 finalize 落盘 —— 结果是"报了错、
+        // 却留下一个坏文件"，与删除的本意相反。与 Drop 同序：先 Finish → join，
+        // 句柄关闭后再删（此时文件必然可删）。
+        if let Some(tx) = active.writer_tx.take() {
+            let _ = tx.send(WriterMsg::Finish);
+        }
+        if let Some(join) = active.writer_join.take() {
+            let _ = join.join();
+        }
         let _ = std::fs::remove_file(&active.output_path);
         return Err(err);
     }

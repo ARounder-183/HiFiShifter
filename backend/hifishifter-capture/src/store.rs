@@ -1511,7 +1511,6 @@ impl CaptureStore {
                 }
             }
         }
-        let _ = planes[1].len().max(planes[0].len());
         slots.slots[free_index] = Some(DeferredBlock {
             start: block.start,
             frames,
