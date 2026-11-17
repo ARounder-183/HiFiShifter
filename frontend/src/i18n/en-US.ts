@@ -2338,6 +2338,25 @@ export const enUS = {
     ctx_host_pitch_import: "Import REAPER Take Pitch",
     ctx_host_pitch_export: "Convert to REAPER Take Pitch Envelope",
 
+    // ── 参数编辑器：REAPER 音高互转菜单（按作用域）──────────────────
+    // 【为什么作用域写在这里】它只在参数编辑器里出现（时间轴的片段菜单是逐片段的）。
+    pitch_bridge_menu_tooltip: "REAPER take pitch bridge",
+    pitch_bridge_import_heading: "Import take pitch",
+    pitch_bridge_export_heading: "Convert to take pitch envelope",
+    pitch_bridge_scope_track: "Current track",
+    pitch_bridge_scope_selection: "In selection",
+    pitch_bridge_scope_all: "All clips",
+    pitch_bridge_scope_item: "{scope} ({count})",
+    pitch_bridge_copy_note: "Conversion copies: each side keeps its own data",
+    pitch_bridge_nothing_converted: "Nothing to convert",
+    pitch_bridge_skipped_clips: "{count} clip skipped|{count} clips skipped",
+    pitch_bridge_skipped_tooltip: "Clips without convertible pitch data were left untouched",
+    status_pitch_bridge_imported:
+        "Take pitch imported ({count} clip)|Take pitch imported ({count} clips)",
+    status_pitch_bridge_exported:
+        "Take pitch envelope written ({count} clip)|Take pitch envelope written ({count} clips)",
+    status_pitch_bridge_failed: "Pitch bridge failed",
+
     // ── 宿主淡入淡出 tooltip 的补充说明 ─────────────────────────────
     fade_shape_axes_owned_by_host:
         "The host's fade axis version could not be read, so shape presets are unavailable; use the curvature slider",

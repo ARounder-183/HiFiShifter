@@ -2323,6 +2323,24 @@ export const koKR = {
     ctx_host_pitch_import: "REAPER 테이크 피치 가져오기",
     ctx_host_pitch_export: "REAPER 테이크 피치 엔벨로프로 변환",
 
+    // ── 파라미터 편집기: REAPER 피치 상호 변환 메뉴 ──────────────────
+    // 【왜 여기에 범위를 두는가】파라미터 편집기에서만 나온다(타임라인의 클립 메뉴는
+    // 클립 1개 단위).
+    pitch_bridge_menu_tooltip: "REAPER 테이크 피치 상호 변환",
+    pitch_bridge_import_heading: "테이크 피치 가져오기",
+    pitch_bridge_export_heading: "테이크 피치 엔벨로프로 변환",
+    pitch_bridge_scope_track: "현재 트랙",
+    pitch_bridge_scope_selection: "선택 범위 안",
+    pitch_bridge_scope_all: "모든 클립",
+    pitch_bridge_scope_item: "{scope} ({count})",
+    pitch_bridge_copy_note: "변환은 복사입니다. 양쪽에 각각 남습니다",
+    pitch_bridge_nothing_converted: "변환할 클립이 없습니다",
+    pitch_bridge_skipped_clips: "{count}개 클립 건너뜀",
+    pitch_bridge_skipped_tooltip: "변환할 피치 데이터가 없는 클립은 그대로 두었습니다",
+    status_pitch_bridge_imported: "{count}개 클립에 테이크 피치를 가져왔습니다",
+    status_pitch_bridge_exported: "{count}개 클립에 피치 엔벨로프를 기록했습니다",
+    status_pitch_bridge_failed: "피치 변환에 실패했습니다",
+
     // ── 호스트 페이드 tooltip 보충 설명 ─────────────────────────────
     fade_shape_axes_owned_by_host:
         "호스트의 페이드 축 버전을 읽을 수 없어 모양 프리셋을 쓸 수 없습니다. 아래 곡률 슬라이더를 사용하세요",

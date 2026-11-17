@@ -2266,6 +2266,23 @@ export const zhCN = {
     ctx_host_pitch_import: "导入 REAPER Take 音高",
     ctx_host_pitch_export: "转换为 REAPER Take 音高包络",
 
+    // ── 参数编辑器：REAPER 音高互转菜单（按作用域）──────────────────
+    // 【为什么作用域要写在这里】它只在参数编辑器里出现（时间轴的片段菜单是逐片段的）。
+    pitch_bridge_menu_tooltip: "REAPER Take 音高互转",
+    pitch_bridge_import_heading: "导入 Take 音高",
+    pitch_bridge_export_heading: "转换为 Take 音高包络",
+    pitch_bridge_scope_track: "当前轨道",
+    pitch_bridge_scope_selection: "选区内",
+    pitch_bridge_scope_all: "全部片段",
+    pitch_bridge_scope_item: "{scope}（{count}）",
+    pitch_bridge_copy_note: "转换是复制：两侧各留一份",
+    pitch_bridge_nothing_converted: "没有可转换的片段",
+    pitch_bridge_skipped_clips: "跳过 {count} 个片段",
+    pitch_bridge_skipped_tooltip: "没有可转换音高数据的片段未作改动",
+    status_pitch_bridge_imported: "已导入 {count} 个片段的 Take 音高",
+    status_pitch_bridge_exported: "已写入 {count} 个片段的 Take 音高包络",
+    status_pitch_bridge_failed: "音高转换失败",
+
     // ── 宿主淡入淡出 tooltip 的补充说明 ─────────────────────────────
     fade_shape_axes_owned_by_host: "读不出宿主的淡化轴版本，无法确定用哪套轴；请用下方曲率滑杆调整",
     // ── 安装器（NSIS）─────────────────────────────────────────────────────

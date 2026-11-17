@@ -1,8 +1,13 @@
 /**
- * 参数块操作反馈的全局状态栏通道。
+ * 操作反馈的全局状态栏通道（**单槽位**）。
  *
  * 画布内不再渲染块错误浮层；所有失败、拒绝与需要用户处置的提示都从这里进入
  * 左下角状态栏，与音高分析 / 波形分析共用同一处视线落点。
+ *
+ * 【为什么名字里带 paramBlock 而别的功能也在用】它是为参数块写入失败建的，但形状
+ * 与"任何一次性命令做完了说一声"完全一致（一个槽位、tone、tooltip、停留时长）。
+ * 音高互转等命令通过下面的 `publishStatusFeedback` 别名写同一个槽位 —— 改名要动
+ * 十几个调用点与两份测试，收益只是措辞；而**两套**单槽位并排出现才是真的错。
  */
 import {
     PARAM_BLOCK_FEEDBACK_HOLD_MS,
@@ -95,6 +100,13 @@ export function publishParamBlockWriteFailure(args: {
         holdMs: PARAM_BLOCK_FEEDBACK_HOLD_MS.transport,
     });
 }
+
+/**
+ * 同一个槽位的通用名字（参数块之外的调用方用它，见模块头）。
+ *
+ * 不是包装函数：多一层转发只会让"这是同一个槽位"变得不明显。
+ */
+export const publishStatusFeedback = publishParamBlockFeedback;
 
 export const paramBlockFeedbackStore = {
     subscribe(listener: () => void): () => void {

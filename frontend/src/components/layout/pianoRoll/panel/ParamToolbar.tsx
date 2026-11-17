@@ -27,6 +27,7 @@ import { DrawToolMenu } from "./DrawToolMenu";
 import { SelectToolMenu } from "./SelectToolMenu";
 import { ParamBlockAlwaysShowToggle } from "./ParamBlockAlwaysShowToggle";
 import { PitchSnapMenu } from "./PitchSnapMenu";
+import { PitchBridgeMenu } from "./PitchBridgeMenu";
 import { DragDirectionButton } from "./DragDirectionButton";
 import { ReferenceTrackGroup } from "./ReferenceTrackGroup";
 import { ChildPitchGroup } from "./ChildPitchGroup";
@@ -80,6 +81,7 @@ export type Props = {
         | "openVibratoDialog"
         | "orderedProcessorParams"
         | "pitchAlgoOptions"
+        | "pitchBridgeScopes"
         | "pitchEnabled"
         | "pitchGroupActive"
         | "pitchGroupLabel"
@@ -315,6 +317,10 @@ export function ParamToolbar({ m }: Props) {
                         }
                     />
                     <ParamBlockAlwaysShowToggle m={m} />
+                    {/* REAPER Take 音高 ⇄ 音高线：宿主不支持时**整项不渲染**（门禁在
+                        组件内部，见 `PitchBridgeMenu` 的模块头）。它是一族"对整条
+                        曲线做的事"，所以紧挨着参数线编辑的开关，而不是工具族那边。 */}
+                    <PitchBridgeMenu m={m} />
                     <SmoothingSlider m={m} />
                 </Flex>
             </Flex>

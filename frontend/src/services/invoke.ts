@@ -546,10 +546,16 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             return { clipIds: args[0] };
 
         case "import_host_take_pitch":
-            return { clipIds: args[0] };
-
         case "export_host_take_pitch":
-            return { clipIds: args[0] };
+            // `tolerant` 只给"批量作用域"用（见 `useHostPitchBridge`）：单条片段走
+            // 时间轴右键时，映射不到宿主 take 必须**报错**而不是静默跳过 —— 用户点的是
+            // 那一条，跳过它等于什么都没发生。
+            return args[1] === undefined
+                ? { clipIds: args[0] }
+                : {
+                      clipIds: args[0],
+                      tolerant: (args[1] as { tolerant?: boolean }).tolerant === true,
+                  };
 
         case "select_clip":
             return { clipId: args[0] };

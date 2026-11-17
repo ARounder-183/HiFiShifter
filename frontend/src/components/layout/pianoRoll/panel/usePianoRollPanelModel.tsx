@@ -22,6 +22,7 @@ import {
     resolveDragDirectionTool,
 } from "../../../../features/session/dragDirection";
 import { resolveRootTrackId } from "../../../../features/session/trackUtils";
+import { resolvePitchBridgeScopes } from "../../../../features/hostPitchBridge/scope";
 import {
     buildPitchAlgoOptions,
     resolveEffectivePitchAlgo,
@@ -2095,6 +2096,36 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         if (rootId === null) return [];
         return s.clips.filter((c) => c.trackId === rootId);
     }, [s.clips, groupTrackIds, rootTrackId]);
+    /**
+     * 「REAPER 音高互转」的三个作用域（工具栏菜单直接读这三份 id 列表）。
+     *
+     * 【为什么在模型里算】作用域的两个输入都在模型内部：当前根轨道**组**的轨道 id
+     * （`groupTrackIds`）与参数选区的**帧区间**（`selectionUi`）。把帧换算成秒、
+     * 把"与选区重叠"算出来，视图层就只拿到 id 列表 —— 菜单组件因此不必认识轨道树，
+     * 也不必知道帧周期。解析本身是纯函数（见 `features/hostPitchBridge/scope`）。
+     *
+     * 【为什么跟着 `s.clips` 重算】计数要实时：用户在菜单开着的时候切轨道、改选区，
+     * 括号里的数字必须跟着变，否则那是一次"看起来对、实际改了另一批片段"的操作。
+     */
+    const pitchBridgeScopes = useMemo(() => {
+        const framePeriodMs = paramView?.framePeriodMs ?? 5;
+        const rangesSec =
+            selectionUi === null
+                ? []
+                : selectionUi.map(
+                      (range) =>
+                          [
+                              (range.startFrame * framePeriodMs) / 1000,
+                              ((range.startFrame + range.frameCount) * framePeriodMs) / 1000,
+                          ] as const,
+                  );
+        return resolvePitchBridgeScopes({
+            clips: s.clips,
+            trackIds: groupTrackIds,
+            rangesSec,
+        });
+    }, [groupTrackIds, paramView?.framePeriodMs, s.clips, selectionUi]);
+
     /**
      * 参数块的 Clip 来源。
      *
@@ -6900,6 +6931,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         pitchSnapMenuOpen,
         pitchSnapMenuRef,
         pitchSnapOpen,
+        pitchBridgeScopes,
         paramBlocksLayerVisible,
         paramBlockContextMenu,
         paramBlockMenuContext,

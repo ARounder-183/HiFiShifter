@@ -2354,6 +2354,24 @@ export const jaJP = {
     ctx_host_pitch_import: "REAPER テイクのピッチを読み込む",
     ctx_host_pitch_export: "REAPER テイクのピッチエンベロープへ変換",
 
+    // ── パラメータエディタ：REAPER ピッチ相互変換メニュー ────────────
+    // 【なぜここに作用域を置くか】パラメータエディタにしか出ない（タイムラインの
+    // クリップメニューは 1 クリップ単位）。
+    pitch_bridge_menu_tooltip: "REAPER テイクピッチの相互変換",
+    pitch_bridge_import_heading: "テイクピッチを読み込む",
+    pitch_bridge_export_heading: "テイクピッチエンベロープへ変換",
+    pitch_bridge_scope_track: "現在のトラック",
+    pitch_bridge_scope_selection: "選択範囲内",
+    pitch_bridge_scope_all: "すべてのクリップ",
+    pitch_bridge_scope_item: "{scope}（{count}）",
+    pitch_bridge_copy_note: "変換はコピーです。両側にそれぞれ残ります",
+    pitch_bridge_nothing_converted: "変換できるクリップがありません",
+    pitch_bridge_skipped_clips: "{count} 個のクリップをスキップ",
+    pitch_bridge_skipped_tooltip: "変換できるピッチデータがないクリップは変更していません",
+    status_pitch_bridge_imported: "{count} 個のクリップにテイクピッチを読み込みました",
+    status_pitch_bridge_exported: "{count} 個のクリップにピッチエンベロープを書き込みました",
+    status_pitch_bridge_failed: "ピッチ変換に失敗しました",
+
     // ── ホストフェードの tooltip 補足 ───────────────────────────────
     fade_shape_axes_owned_by_host:
         "ホストのフェード軸バージョンを読み取れないため、形状プリセットは使えません。下のカーブ調整をお使いください",
