@@ -61,6 +61,7 @@ export type ModelDeps = {
     dispatch: AppDispatch;
     editParam: string;
     editParamAxisUnit: ParamAxisUnit;
+    dynamicProjectSec: number;
     effectiveProjectScale: ScaleLike;
     fontFamily: string;
     getCurrentViewportForScrollbar: (param: ParamName) => ValueViewport;

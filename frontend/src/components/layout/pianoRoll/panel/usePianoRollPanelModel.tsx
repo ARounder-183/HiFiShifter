@@ -1549,13 +1549,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      *
      * 特殊说明 3（音阶高亮）：条件与旧 Canvas2D 分支**逐字对齐**——`always` 模式且
      * 存在工程音阶时才给音级集合（`off` / 无音阶时给空数组，等价于不高亮）。
-     *
-     * 【已知限制：Tempo Map 分段音阶未迁移】旧 Canvas2D 路径还支持 Tempo Map 的
-     * **分段音阶**（`buildScaleSegments`：不同时间段用不同音阶，按段画不同 x 范围）。
-     * GL 网格几何是**视口坐标且不含时间轴**——它不知道自己在哪个时间段上，无法表达
-     * 分段。要迁移需要把网格层做成时间相关（或把高亮拆成独立的时间感知图层），
-     * 超出本次改动范围。因此这里只实现**单一工程音阶**的均匀路径：有 Tempo Map
-     * 音阶变化的工程，高亮会按工程音阶（而非各段音阶）绘制。
+     * 有 Tempo Map 音阶变化时走**分段**路径（每段按自己的音阶、全工程范围），宿主
+     * 逐帧投影 + 实例层裁剪负责"哪些段可见"；无分段时退回单一工程音阶的均匀路径。
      *
      * 特殊说明 4（钢琴背景）：黑键行背景带**恒开**、无开关、无持久化设置；它只是
      * 纹理，与音阶高亮（语义）互不影响，后者在 GL 实例顺序上压在它之上。
@@ -1565,6 +1560,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     function buildGridSpec(): PianoRollGridSpec | null {
         return buildGridSpecImpl({
             clampViewport,
+            dynamicProjectSec,
             editParam,
             editParamAxisUnit,
             paramAxisDirectionsRef,
@@ -1572,7 +1568,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             fontFamily,
             getCurrentViewportForScrollbar,
             getParamValueBoundsForScrollbar,
-            prAxis,
             processorParamsRef,
             s,
             themeMode,
@@ -1628,6 +1623,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         timelineOffsetPx,
         // 见特殊说明 2：buildGridSpec 读到的主题 / 高亮 / 音阶都必须在此列出。
         themeMode,
+        // 字形字体：buildGridSpec 把它嵌进 spec（宿主据此重建键盘 / 轴文字的字形
+        // 图集）；换字体后漏了它，GL 文字会停留在旧字体上，直到别的输入变化。
+        fontFamily,
         s.scaleHighlightMode,
         effectiveProjectScale,
         // 纵轴展示单位（倍率 / dB）：同样是 buildGridSpec 的输入，漏了就是
@@ -6755,13 +6753,16 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         [editParam, invalidate, liveEditOverrideRef, paramBlockInteractionCurveRef, paramViewRef],
     );
     useLayoutEffect(() => {
-        drawParamBlocks(paramBlockSpec);
-    }, [drawParamBlocks, paramBlockSpec]);
-    useLayoutEffect(() => {
         /*
          * 曲线 / 块拖动写在 live override 的原地数组里，不换 React state。
          * 每次数据窗口、参数或可见性变化重建一次采样引用；拖动时宿主读到的
          * 仍是同一数组的最新内容。
+         *
+         * 【为什么只有一个 effect】spec 与 paramView 的重绘共用这一个入口：
+         * 此前还有一个仅依赖 spec 的同体 effect，依赖是这里的子集 —— spec
+         * 变化的提交里两个都跑，块规格写入、帧窗解析与 invalidate 各做两遍。
+         * ref（liveEditOverrideRef / paramBlockDragSnapshotRef）按构造稳定，
+         * 列在这里只为满足依赖完备性，不会额外触发。
          */
         drawParamBlocks(paramBlockSpec);
     }, [

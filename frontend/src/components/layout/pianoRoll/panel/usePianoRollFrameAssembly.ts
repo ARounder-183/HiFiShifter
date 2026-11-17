@@ -532,9 +532,10 @@ export function usePianoRollFrameAssembly({
     // 分段音阶高亮）。该入参随 Canvas2D 音高网格分支一起删除（分支因 `skipGrid`
     // 恒为 true 而不可达），缓存随之失去唯一读者。
     //
-    // 【分段音阶高亮的去向】GL 网格几何是视口坐标、不含时间轴，无法表达"不同时间段
-    // 用不同音阶"，因此**分段高亮未迁移**；现在只支持单一工程音阶。见
-    // `buildGridSpec` 的说明。`s.tempoMap` 仍被自动吸附与标尺使用，未失去读者。
+    // 【分段音阶高亮的去向】已迁移到 GL 网格层：`buildGridSpec` 产出**全工程范围**
+    // 的时间分段（见其说明），宿主每帧把段投影成视口 x、实例层按视口裁剪后逐段画
+    // 强调线 —— 见 `pianoRollKernelHost.projectScaleSegments` 与
+    // `buildPitchGridInstances`。`s.tempoMap` 仍被自动吸附与标尺使用，未失去读者。
 
     /**
      * 组装曲线图层描述符（阶段 3：曲线 GL）。

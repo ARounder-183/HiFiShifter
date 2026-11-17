@@ -837,10 +837,23 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     /** 上一次构建几何用的**内容签名**（变化才重建，见 `gridGeometrySignature`）。 */
     let lastGridSignature = "";
     /**
-     * 本帧是否**只需要**叠加层。由 `invalidatePlayhead()` 置位、`invalidate()`
-     * （以及尺寸 / dpr / 滚动订阅）清位；`draw()` 读取后立即复位。
+     * 本帧是否**只需要**叠加层。由 `invalidatePlayhead()` 置位、`draw()` 读取后立即复位。
      */
     let playheadOnlyFrame = false;
+    /**
+     * 最近一次请求是否要求**完整**重绘（`invalidateFull` 置位、`draw()` 读取后复位）。
+     *
+     * 【为什么需要这个闩锁】`playheadOnlyFrame` 是单布尔、后写者胜：播放期间共享视觉
+     * 时钟（`useVisualPlayhead` 的模块级 rAF）每帧调用 `invalidatePlayhead()`，而它
+     * 在每次 tick **末尾**才重新注册下一帧的 rAF —— 于是"帧间到达的完整失效"（曲线
+     * 数据到位、选区变化、切换参数、主题 / DPR 变化）注册得更晚，却在时钟 tick
+     * **之前**执行：`invalidateFull()` 先清位、时钟 tick 再置位，随后本帧绘制按
+     * "只画叠加层"消费掉这个标记 —— 完整失效被静默丢弃，且没有任何机制重发：GL
+     * 各层（网格 / 键盘 / 选区带 / 参数块 / 曲线）在播放停止前一直显示旧内容。
+     * 闩锁让完整失效**存活**过后续的 playhead-only 请求：draw 按
+     * `playheadOnlyFrame && !fullFramePending` 判定，时钟的置位降级不了完整帧。
+     */
+    let fullFramePending = false;
 
     // ── 上下文恢复：重建全部 GL 资源 ─────────────────────────────────
     //
@@ -2297,8 +2310,15 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         // 播放头前进不改变曲线几何（几何是视口坐标，视口没动），因此这些图层可以
         // 整层跳过 —— GL 画布保留上一帧内容，与 timeline host 的 `invalidatePlayhead`
         // 同一机制。见接口处 `invalidatePlayhead` 的说明。
-        const playheadOnly = playheadOnlyFrame;
+        //
+        // 【完整失效必须赢过播放头的置位】播放期间共享视觉时钟每帧调用
+        // `invalidatePlayhead()`，且它先于本循环的帧回调执行（时钟在 tick 末尾
+        // 重新注册，见 `fullFramePending` 的注释）。单布尔的 `playheadOnlyFrame`
+        // 后写者胜 —— 没有 `fullFramePending` 闩锁，帧间到达的完整失效会被时钟
+        // 置位覆盖并随本帧消费，GL 各层在播放停止前一直显示旧内容。
+        const playheadOnly = playheadOnlyFrame && !fullFramePending;
         playheadOnlyFrame = false;
+        fullFramePending = false;
 
         // GL 几何重建：只在内容签名变化时做（滚动 / 播放不触发重建）。
         if (!playheadOnly && glProgram !== null) {
@@ -2605,6 +2625,10 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      * 时不会漏。
      */
     function invalidateFull(): void {
+        // 【闩锁语义】置位 `fullFramePending` 而不只是清 `playheadOnlyFrame`：
+        // 播放期间时钟 tick 可能在本调用之后、绘制之前再次置位 playhead-only，
+        // 闩锁保证这次完整失效在 draw 里仍被判定为完整帧（见其声明处注释）。
+        fullFramePending = true;
         playheadOnlyFrame = false;
         loop.invalidate();
     }
