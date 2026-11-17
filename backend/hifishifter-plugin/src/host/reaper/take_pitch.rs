@@ -15,6 +15,14 @@
 //!
 //! 与 \`source_direction\` 同一条边界：插件只绑定 active take，多 take item 上
 //! "改哪一个 take 的包络"没有宿主无关的答案，因此明确拒绝而不是猜。
+//!
+//! ## 坐标域：播放时间，不含源起点
+//!
+//! \`EnvelopePoint::time\` 就是 chunk 里 \`PT\` 的第一个字段，属于 take 的**播放**
+//! 时间轴（u = 0 在入点，按 \`PLAYRATE\` 缩放）。\`SOFFS\`、SECTION 的 \`STARTPOS\`、
+//! 倒放位都不进入它 —— 真机渲染实测见
+//! \`docs/2026-11-17-take-envelope-axis-findings.md\`。因此本模块既不读也不写
+//! \`SOFFS\`：整块替换时其余字段逐字节保留，**不要**顺手补上源起点。
 
 use super::item_chunk::MAX_ITEM_CHUNK_BYTES;
 use hifishifter_kernel::pitch_bridge::EnvelopePoint;
@@ -290,6 +298,29 @@ mod tests {
         let without = rewrite_take_pitch(&with, TAKE, &[]).unwrap();
         assert!(!without.contains("PITCHENV"));
         assert!(!read_take_pitch(&without, TAKE).unwrap().present);
+    }
+
+    /// 【u 域不含源起点/倒放镜像】源起点 30 s、带倒放位的 take：写进去的 \`PT\`
+    /// 必须原样是 0 / 1。补一个 \`SOFFS\` 或镜像一次，整条曲线就整体平移 ——
+    /// 真机实测见 \`docs/2026-11-17-take-envelope-axis-findings.md\`。
+    #[test]
+    fn the_envelope_is_written_in_playback_time_without_the_source_offset() {
+        let shifted = format!(
+            "<ITEM\nPOSITION 0\nLENGTH 1\nSOFFS 30\nGUID {TAKE}\n<SOURCE SECTION\nLENGTH 1\nMODE 3\nSTARTPOS 0\n<SOURCE WAVE\nFILE \"a.wav\"\n>\n>\n>\n"
+        );
+        let points = [EnvelopePoint::new(0.0, 0.0), EnvelopePoint::new(1.0, 2.0)];
+        let text = rewrite_take_pitch(&shifted, TAKE, &points).unwrap();
+        assert!(
+            text.contains("PT 0.00000000000000000 0.00000000000000000 0"),
+            "{text}"
+        );
+        assert!(
+            text.contains("PT 1.00000000000000000 2.00000000000000000 0"),
+            "{text}"
+        );
+        assert!(!text.contains("PT 30"), "源起点不得进入包络坐标：{text}");
+        assert!(text.contains("SOFFS 30"), "源起点必须逐字保留：{text}");
+        assert_eq!(read_take_pitch(&text, TAKE).unwrap().points, points);
     }
 
     /// 身份不符 / 多 take / 非有限值都必须拒绝。

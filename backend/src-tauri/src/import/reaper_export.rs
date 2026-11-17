@@ -1157,6 +1157,85 @@ mod tests {
         );
     }
 
+    /// 【u 域是播放时间，不是媒体时间】源起点 30 s 的 clip：`SOFFS` 必须落在媒体
+    /// 时间 30 s，而 PITCHENV 的点仍然从 `u = 0` 起、止于 `长度 × 速率`。补一个
+    /// `SOFFS` 就整条平移（真机渲染实测见
+    /// `docs/2026-11-17-take-envelope-axis-findings.md`）。
+    #[test]
+    fn pitch_envelope_stays_in_playback_time_when_the_source_starts_late() {
+        let mut timeline = TimelineState::default();
+        // 音高曲线受根轨道 Compose 门控（`TimelineState::default()` 是关的）。
+        timeline.tracks[0].compose_enabled = true;
+        let root_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(root_id.clone()),
+            Some("Late".to_string()),
+            Some(0.0),
+            Some(2.0),
+            Some("C:/audio/late.wav".to_string()),
+        );
+        {
+            let clip = timeline
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == clip_id)
+                .expect("clip exists");
+            clip.duration_sec = Some(60.0);
+            clip.source_start_sec = 30.0;
+            clip.source_end_sec = 32.0;
+            clip.playback_rate = 1.0;
+            clip.sync_take_from_flat();
+        }
+        timeline.params_by_root_track.insert(
+            root_id,
+            crate::state::TrackParamsState {
+                frame_period_ms: 5.0,
+                pitch_orig: vec![60.0; 400],
+                pitch_edit: vec![62.0; 400],
+                pitch_edit_user_modified: true,
+                ..crate::state::TrackParamsState::default()
+            },
+        );
+
+        // 【曲线要显式喂进来】`build_reaper_clipboard` 不会自己算参数线；缺省是
+        // `ClipExportCurves::default()`（没有音高 ⇒ 不写 PITCHENV）。
+        let clip = timeline
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .expect("clip exists");
+        let curves = build_clip_export_curves(&timeline, clip);
+        assert!(curves.pitch_offset.is_some(), "夹具必须带音高曲线");
+        let mut curves_by_clip = BTreeMap::new();
+        curves_by_clip.insert(clip_id.clone(), curves);
+
+        let export =
+            build_reaper_clipboard(&timeline, std::slice::from_ref(&clip_id), &curves_by_clip)
+                .unwrap();
+        let parsed = parse_for_test(&export.bytes);
+        let item = &parsed.tracks[0].items[0];
+        assert!(
+            (item.default_take.s_offs - 30.0).abs() < 1e-9,
+            "SOFFS 必须落在媒体时间 30 s，got {}",
+            item.default_take.s_offs
+        );
+        let env = item
+            .default_take
+            .envelopes
+            .iter()
+            .find(|env| env.env_type == "PITCHENV")
+            .expect("PITCHENV");
+        assert!(
+            env.points[0][0].abs() < 1e-9,
+            "首点必须是 u=0：源起点不得进入坐标"
+        );
+        assert!(
+            (env.points[1][0] - 2.0).abs() < 1e-9,
+            "末点 = 长度 × 速率 = 2，got {}",
+            env.points[1][0]
+        );
+    }
+
     #[test]
     fn reversed_loop_clip_exports_whole_file_section_with_anchor() {
         // 倒放 + Loop：SECTION 必须覆盖整个媒体文件（回绕域），
@@ -1650,7 +1729,8 @@ mod tests {
 
     #[test]
     fn pitch_env_u_domain_independent_of_clip_position() {
-        // Take 包络为 u 域（媒体时间），与 clip 的工程位置无关：
+        // Take 包络的 u 是**播放时间 × 速率**（不是媒体文件时间，见
+        // docs/2026-11-17-take-envelope-axis-findings.md），与 clip 的工程位置无关：
         // clip 在 45s 的导出必须与 clip 在 0s 完全一致（PT 0..len×rate），
         // 端点强制落在 item 起止（不得被工程位置污染，也不得依赖 hold）。
         let make_curves = |values: Vec<f32>| ClipExportCurves {

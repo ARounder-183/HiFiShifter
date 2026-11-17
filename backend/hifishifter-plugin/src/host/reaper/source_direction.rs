@@ -18,6 +18,14 @@
 //! 插件与宿主 item 的唯一绑定是 `active take` 那一条通道（`HostClipTarget` 冻结的就是它）。
 //! 多 take item 上"改哪一个 take 的方向"没有宿主无关的答案，因此这里**明确拒绝**，
 //! 而不是猜一个。拒绝是可读的错误，猜错是工程损坏。
+//!
+//! ## 只改方向，不碰 take 的包络
+//!
+//! 真机实测（REAPER 7.85）：宿主自己的 `Toggle take reverse` 只改 `SOFFS` 与 SECTION
+//! 包装，`<PITCHENV>` 的 `PT` 时间**一字不动** —— 包络横轴是 take 的播放时间
+//! （u = 0 在入点），倒放只改变"哪个媒体采样被播放"，不改变坐标域（见
+//! `docs/2026-11-17-take-envelope-axis-findings.md`）。所以这里同样只改结构：
+//! 顺手镜像包络点会让用户已有的曲线整体颠倒。
 
 use super::item_chunk::MAX_ITEM_CHUNK_BYTES;
 
