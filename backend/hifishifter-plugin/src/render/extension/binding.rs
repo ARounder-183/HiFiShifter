@@ -1379,6 +1379,17 @@ impl ExtensionOwner {
         stamp.0.inventory_incomplete.store(true, Ordering::Release);
         let mut tracks = std::collections::BTreeMap::new();
         let mut seen = std::collections::BTreeSet::new();
+        // 上一轮已经发布的宿主轨身份（`ui_tracks[guid].id` → 它的 guid 与父轨）。用来
+        // 回答"这条 id 是不是别人的"：宿主轨第一次学身份时只准学没人占的 id（见下面的
+        // "身份只学一次"）。带上父轨是为了认出**同一个 folder 里的兄弟轨** —— 它们由
+        // 同一个实例处理、共用一个参数根，互相"占用"是正常的。
+        let known_owner: std::collections::HashMap<String, (String, Option<String>)> = stamp
+            .0
+            .ui_tracks
+            .lock_or_recover()
+            .iter()
+            .map(|(guid, track)| (track.id.clone(), (guid.clone(), track.parent_guid.clone())))
+            .collect();
         // 诊断计数：多少 item 认领到了 region（没认领的只能是无源占位）。
         let mut item_count = 0usize;
         let mut claimed_items = 0usize;
@@ -1426,6 +1437,8 @@ impl ExtensionOwner {
                 let timeline = stamp.0.timeline.lock_or_recover();
                 let ids = stamp.0.clip_ids.lock_or_recover();
                 item_count += track.items.len();
+                // 这条宿主轨能从 clip 学到的模型身份（见下面的"只学一次"）。
+                let mut learned: Option<String> = None;
                 for candidate in stamp.0.renderer_owners() {
                     // 该 owner 可能同时持有多个 region（folder 轨上的 FX）：只要本轨有
                     // 任一 item 被它的某个 region 绑定，就把轨道身份认领到那个 clip 上。
@@ -1450,7 +1463,7 @@ impl ExtensionOwner {
                                 .as_ref()
                                 .and_then(|t| t.clips.iter().find(|c| &c.id == id))
                             {
-                                track.id = clip.track_id.clone();
+                                learned = Some(clip.track_id.clone());
                                 break;
                             }
                         }
@@ -1458,10 +1471,36 @@ impl ExtensionOwner {
                 }
                 drop(timeline);
                 drop(ids);
+                // 【身份只学一次，而且不许抢】此前这里无条件 `track.id = clip.track_id`：
+                // 宿主把 item 从轨道 1 拖到轨道 2 之后，轨道 2 从**这条 clip** 学到的是
+                // 轨道 1 的模型 id —— 于是 `ui_tracks` 里两条宿主轨共用一个身份，
+                // `present_host_inventory` 再忠实地把两条并成一条（用户报的"两条轨折成
+                // 一条"）。身份是**参数根**的键，一旦被抢，轨道 1 的曲线就挂到了轨道 2 上。
+                //
+                // 现在：已经学过的轨道绝不重学（`ui_tracks` 里记着它）；第一次学也不许
+                // 选一个已经被别的宿主轨占用的 id —— 学不到就保留自己的宿主身份，
+                // 宁可多一行空轨，也不能把两条轨并成一条。
                 if track.id.starts_with("host-track-") {
-                    if let Some(old) = stamp.0.ui_tracks.lock_or_recover().get(&track.guid) {
-                        track.id = old.id.clone();
-                    }
+                    let previous = stamp
+                        .0
+                        .ui_tracks
+                        .lock_or_recover()
+                        .get(&track.guid)
+                        .map(|old| old.id.clone());
+                    let own_guid = track.guid.clone();
+                    let own_parent = track.parent_guid.clone();
+                    let taken_by_other = |id: &str| {
+                        known_owner.get(id).is_some_and(|(guid, parent)| {
+                            guid != &own_guid && !(parent.is_some() && parent == &own_parent)
+                        })
+                    };
+                    let next = match previous {
+                        Some(id) if !id.starts_with("host-track-") => id,
+                        _ => learned
+                            .filter(|id| !taken_by_other(id))
+                            .unwrap_or_else(|| track.id.clone()),
+                    };
+                    track.id = next;
                 }
                 tracks.insert(track.guid.clone(), track);
             }
