@@ -42,6 +42,15 @@ export function applyTimelineState(
     const oldClipsById = new Map(state.clips.map((c) => [c.id, c]));
 
     state.clips = timeline.clips.map((clip: TimelineClip) => {
+        // 【active take 只查一次】下面对 active take 的六个字段读取共享同一次
+        // `takes.find`：此前每处都内联同一条表达式，其中两条还挂在逐 span 的
+        // `.map()` 里 —— 每个快照应用（每次编辑 / 撤销 / 保存回包 / 导入）都是
+        // O(clips × (6·takes + 2·spans·takes)) 次闭包调用，千级 clip 工程
+        // （片段带数百 span）每次应用要空转上百万次 find。与下方
+        // clipFormantStatus 剪枝的 O(n²)→O(n) 是同一类问题。
+        const activeTake = clip.takes?.find(
+            (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
+        );
         const parsed = {
             id: clip.id,
             trackId: clip.track_id,
@@ -145,34 +154,20 @@ export function applyTimelineState(
                 }),
             ),
             midiFillGaps: clip.midi_fill_gaps ?? false,
-            syllableSpansSec: clip.takes
-                ?.find((take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id))
-                ?.syllable_spans_sec?.map(([startSec, endSec], index) => ({
-                    startSec,
-                    endSec,
-                    note:
-                        clip.takes?.find(
-                            (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
-                        )?.syllable_notes?.[index] ?? null,
-                    eventId:
-                        clip.takes?.find(
-                            (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
-                        )?.syllable_event_ids?.[index] ??
-                        `${startSec.toFixed(9)}:${endSec.toFixed(9)}`,
-                })),
-            syllableNotes: clip.takes?.find(
-                (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
-            )?.syllable_notes,
-            syllableEventIds: clip.takes?.find(
-                (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
-            )?.syllable_event_ids,
-            syllableAnalysisWindowSec: (clip.takes?.find(
-                (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
-            )?.syllable_analysis_window_sec ?? null) as [number, number] | undefined,
+            syllableSpansSec: activeTake?.syllable_spans_sec?.map(([startSec, endSec], index) => ({
+                startSec,
+                endSec,
+                note: activeTake?.syllable_notes?.[index] ?? null,
+                eventId:
+                    activeTake?.syllable_event_ids?.[index] ??
+                    `${startSec.toFixed(9)}:${endSec.toFixed(9)}`,
+            })),
+            syllableNotes: activeTake?.syllable_notes,
+            syllableEventIds: activeTake?.syllable_event_ids,
+            syllableAnalysisWindowSec: (activeTake?.syllable_analysis_window_sec ?? null) as
+                [number, number] | undefined,
             gameBlockBaseline: (() => {
-                const source = clip.takes?.find(
-                    (take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id),
-                )?.game_block_baseline;
+                const source = activeTake?.game_block_baseline;
                 return source
                     ? {
                           revision: source.revision,

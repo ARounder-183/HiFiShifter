@@ -30,7 +30,6 @@ import {
 import {
     addFormToTabset,
     collectDockedForms,
-    collectTabsets,
     dockForm,
     findTabsetOfForm,
     findZone,
@@ -816,7 +815,11 @@ const dockSlice = createSlice({
                           tree,
                           sourceFormId,
                           zone === "center"
-                              ? { kind: "tab", tabsetId: mainTabsetIdOfTree(tree), rootId }
+                              ? {
+                                    kind: "tab",
+                                    tabsetId: mainTabsetIdOfTree(state.layout, rootId),
+                                    rootId,
+                                }
                               : { kind: "root", rootId, side: dropZoneToSideKind(zone) },
                           allocate,
                       )
@@ -1172,10 +1175,18 @@ function nextFormSuffix(layout: DockLayout, panelId: string): number {
     return max + 1;
 }
 
-/** 一棵树里的"主编辑区"标签组：优先含 preferMain 面板者，否则第一个（浮窗组合的落点）。 */
-function mainTabsetIdOfTree(tree: DockNode): string {
-    const tabsets = collectTabsets(tree);
-    return tabsets[0]?.id ?? "";
+/**
+ * 一棵树里的"主编辑区"标签组：优先含 preferMain 面板者，否则第一个（浮窗组合的落点）。
+ *
+ * 【为什么与 `findMainTabset` 同一条规则】两者回答同一个问题（"这棵树的主编辑区是
+ * 哪个标签组"），只是入参不同：这里拿的是面板的子树（组合浮窗时的落点），那边拿
+ * 的是布局根。规则一旦分叉，"重新停靠"与"往面板里组合"就会把窗体送进不同的标签组。
+ * 实现直接复用 `findMainTabset`：它按 `layout.forms` + 面板注册表判 preferMain，
+ * 而本调用点（composeFloats 的 center 分支）此刻 `state.layout.roots[rootId]` 就是
+ * 这棵树，直接传布局即可 —— 不必维护第二份扫描逻辑。
+ */
+function mainTabsetIdOfTree(layout: DockLayout, rootId: string): string {
+    return findMainTabset(layout, rootId)?.id ?? "";
 }
 
 /** 落点部位 → 分割方向（center 不会走到这里：调用方已分流）。 */

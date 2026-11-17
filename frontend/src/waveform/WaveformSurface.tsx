@@ -134,8 +134,18 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
      * 渲染器不得跨 `render()` 边界持有 `geometry.vertices`。
      */
     const vertexSinkRef = React.useRef<WaveformVertexSink>({ buffer: new Float32Array(0) });
-    /** 上一帧的 mipmap 选级（selectLevelStable 的迟滞基准）。 */
-    const levelStickyRef = React.useRef<0 | 1 | 2 | null>(null);
+    /**
+     * 上一帧的 mipmap 选级（selectLevelStable 的迟滞基准），**按源路径各留一份**。
+     *
+     * 【为什么不能整个表面共享一个基准】getPeaks 解析器每帧对**每个可见片段**各调
+     * 一次，而 `spp = sampleRate / pxPerSec` 带着各自的源采样率：44.1 kHz 与 96 kHz
+     * 的片段在同一缩放下理想档位差约 2.18 倍。单一基准会让两个片段的选级互相覆盖
+     * —— 迟滞判定"上一帧是哪档"时参照的是另一个片段的选择，表现为一方长期停在比
+     * 自己 spp 更粗的档位、另一方则拉取比自己更细的档位，并且逐帧来回改写。按源
+     * 路径分开后，迟滞的"上一帧"永远是自己那一帧。每一帧绘制后会把 map 收敛到
+     * 本帧仍可见的路径（见 draw 内的裁剪），离场片段的条目不会累积。
+     */
+    const levelStickyByPathRef = React.useRef<Map<string, 0 | 1 | 2>>(new Map());
     /**
      * 几何缓存的锚点：记录「当前 GPU 上的几何是按什么窗口与缩放构建的」。
      *
@@ -352,6 +362,10 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             viewportTopPx: windowTopPx,
             rows: props.rows,
         });
+        // 本帧仍出现的源路径：迟滞基准按路径各留一份，绘制后把 map 收敛到这份
+        // 集合（离场片段的条目不累积；条目本身只是一个小整数，但源文件数量在
+        // 长会话里可以很大）。
+        const usedStickyPaths = new Set<string>();
         const geometry = buildWaveformGeometry({
             scene,
             color: props.color,
@@ -366,8 +380,10 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
                 // 迟滞选级：spp 在阈值附近时 selectLevel 会在两档间来回跳变
                 // （每次跳变都拉取不同级别的 peaks → 几何反复重建）；用上一帧
                 // 的选级做迟滞（与 mipmap store 的 selectLevelStable 同参数）。
+                // 基准按**源路径**取 —— 见 levelStickyByPathRef 的说明。
                 const spp = Math.max(1, Math.round(sampleRate / Math.max(1e-6, pxPerSec)));
-                const previousLevel = levelStickyRef.current;
+                const previousLevel = levelStickyByPathRef.current.get(sourcePath) ?? null;
+                usedStickyPaths.add(sourcePath);
                 let level = waveformMipmapStore.selectLevelStable(spp, previousLevel);
                 // 【选级必须等目标级别的数据到位】
                 //
@@ -387,7 +403,7 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
                 ) {
                     level = previousLevel;
                 }
-                levelStickyRef.current = level;
+                levelStickyByPathRef.current.set(sourcePath, level);
                 return waveformMipmapStore.getBestSliceView(
                     sourcePath,
                     level,
@@ -403,6 +419,15 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             // 非整数 dpr 下若仍按 CSS 像素枚举，列宽会在 1~2 物理像素间抖动。
             dpr,
         });
+
+        // 迟滞基准收敛到本帧仍可见的源路径（见 usedStickyPaths 的说明）。
+        if (levelStickyByPathRef.current.size !== usedStickyPaths.size) {
+            for (const path of levelStickyByPathRef.current.keys()) {
+                if (!usedStickyPaths.has(path)) {
+                    levelStickyByPathRef.current.delete(path);
+                }
+            }
+        }
 
         // 渲染原点取自 `computeWaveformWindow`（= 视口左上角的窗口局部坐标）。
         // 它恒为整数个物理像素，渲染器对它的吸附因此是恒等操作 —— 波形不会随
