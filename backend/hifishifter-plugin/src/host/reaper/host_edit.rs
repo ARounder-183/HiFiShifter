@@ -616,6 +616,15 @@ fn host_take_direction(
     let duration = media_duration_sec
         .filter(|value| value.is_finite() && *value > 0.0)
         .ok_or("cannot write a reversed take without its media duration")?;
+    if clip.loop_enabled {
+        // Loop：回绕域是整份媒体，锚点取 `min(source_end, D) mod D` —— 与读取侧
+        // `(min_bound.min(anchor), anchor)` 同一条式子（窗口起点在读取侧就是 0）。
+        let anchor = clip.source_end_sec.min(duration).rem_euclid(duration);
+        return Ok(super::source_direction::DirectionEdit::reversed(
+            anchor.max(1e-9),
+            (duration - anchor).rem_euclid(duration),
+        ));
+    }
     let (start, end) = hifishifter_kernel::state::clip_playback_window_sec(clip);
     let window = hifishifter_kernel::take_geometry::ForwardWindow::new(start, end)
         .ok_or("reversed take has no valid forward window")?;
@@ -839,8 +848,16 @@ pub(crate) fn execute_managed(
             if !target.geometry.markers.is_empty() {
                 return Err("nonlinear host stretch-marker editing is not supported".into());
             }
-            let media = hifishifter_kernel::state::clip_source_media_duration_sec(&edit.after)
-                .or(target.geometry.source_length_sec);
+            // 【镜像轴取两侧读数的较小者】读取侧 `take_axis_sec` 对"段末端"与"ARA
+            // 源时长"取 min；写回若用较大的那个，读回来的锚点会差一个 `D − ara`
+            // （容器头级别的几毫秒 ⇒ 内容轻微错位）。两侧同一口径即可逐位互逆。
+            let media = match (
+                hifishifter_kernel::state::clip_source_media_duration_sec(&edit.after),
+                target.geometry.source_length_sec,
+            ) {
+                (Some(ara), Some(host)) => Some(ara.min(host)),
+                (ara, host) => ara.or(host),
+            };
             Some(host_take_direction(&edit.after, media)?)
         } else {
             None
@@ -1662,11 +1679,12 @@ mod tests {
         );
         assert_eq!(reversed.s_offs, 2.5, "SOFFS 必须是镜像起点 D − 正向终点");
 
-        // 倒放 + Loop：同一套编码（宿主的 `MODE 3` 不区分 loop）。
+        // 倒放 + Loop：同一套编码（宿主的 `MODE 3` 不区分 loop），跨度是
+        // `[0, 锚点)` —— 与读取侧的 loop 分支同一条式子。
         clip.loop_enabled = true;
         let looped = host_take_direction(&clip, Some(4.0)).unwrap();
         let section = looped.section.expect("倒放必须建段");
-        assert_eq!((section.start_sec, section.length_sec), (0.0, 1.0));
+        assert_eq!((section.start_sec, section.length_sec), (0.0, 1.5));
         assert_eq!(looped.s_offs, 2.5);
 
         // 媒体总长未知 ⇒ 拒绝（宁可不写，也不写一个读不回来的结构）。
