@@ -705,13 +705,22 @@ fn pitch_bridge_clip_ids(input: &Value) -> Result<Vec<String>, String> {
 }
 
 /// 这个片段唯一直接绑定的宿主 take（与 host_edit_target 同一口径）。
+///
+/// 【为什么这里必须先剥掉 namespace 前缀】编辑器时间线里的 id 是**呈现 id**
+/// （`hfs-ui-{pid}-{n}-ara-item-{guid}`，见 `EditorSession::rewrite_ids`），而
+/// `host_edit_target` 认的是**裸**宿主身份（`ara-item-{guid}`）。此前这条路径
+/// 直接把呈现 id 递进去，`strip_prefix("ara-item-")` 恒为 `None`，随后的
+/// `clip_ids` 反查也找不到 —— 于是**两个方向都恒失败**，用户看到的是
+/// "clip has no unique directly bound host take"（现场日志里每一次音高互转都是它）。
+/// `plan_host_edit` 一直有这一句，本函数当初漏了。
 fn pitch_bridge_target(
     session: &EditorSession,
     clip_id: &str,
 ) -> Result<crate::host::HostClipTarget, String> {
+    let native_id = clip_id.strip_prefix(&session.namespace).unwrap_or(clip_id);
     let document = session.document().ok_or("host timeline unavailable")?;
     for owner in document.renderer_owners() {
-        if let Ok(target) = owner.host_edit_target(clip_id) {
+        if let Ok(target) = owner.host_edit_target(native_id) {
             return Ok(target);
         }
     }
@@ -2618,5 +2627,50 @@ pub(super) fn dispatch(
             )
         }
         _ => Err(format!("Command unavailable in plug-in mode: {command}")),
+    }
+}
+
+#[cfg(test)]
+mod pitch_bridge_tests {
+    use super::*;
+
+    /// 音高互转必须能从**呈现 id** 找到宿主 take。
+    ///
+    /// 【为什么这是回归】编辑器时间线的 id 带 `hfs-ui-{pid}-{n}-` 前缀
+    /// （`EditorSession::rewrite_ids`），而 `host_edit_target` 认的是**裸**宿主身份
+    /// （`ara-item-{guid}`）。漏掉剥前缀时`pitch_bridge_target` 恒失败 —— 两个方向
+    /// 都是"点了没反应 + clip has no unique directly bound host take"（现场日志里每
+    /// 一次音高互转都是这一句），而菜单、能力位、命令分发看起来全都正常。
+    #[test]
+    fn the_pitch_bridge_accepts_a_presented_clip_id() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_item_state(&host.single_take_chunk());
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        let native = clip
+            .id
+            .strip_prefix(&editor.namespace)
+            .expect("夹具 clip 必须是呈现 id（带 namespace）")
+            .to_owned();
+        // 前提：裸 id 本来就解析得到 —— 否则这条用例证明不了"前缀"这一层。
+        assert!(
+            pitch_bridge_target(&editor, &native).is_ok(),
+            "裸 id 必须能解析到宿主 take"
+        );
+        assert!(
+            pitch_bridge_target(&editor, &clip.id).is_ok(),
+            "呈现 id 必须先剥掉 namespace 再交给 host_edit_target"
+        );
+        document.close();
     }
 }
