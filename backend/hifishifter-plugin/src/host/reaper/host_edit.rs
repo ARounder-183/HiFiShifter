@@ -582,18 +582,25 @@ pub(super) fn host_forward_window_start(
 
 /// 由 clip 与媒体总长算出**写回 take 方向**的参数（SECTION 与 SOFFS）。
 ///
-/// 【为什么两者必须一起算】`D_STARTOFFS` 在两种编码里含义不同：没有 SECTION 时它是
-/// **绝对**源坐标（正放是进入锚点，倒放是镜像量），有 SECTION 时它是**段内**偏移。
-/// 把两者分开写会互相覆盖 —— 那正是"倒放 take 每写一次就漂一段"的成因。
+/// 【编码只有一种（真机取证）】REAPER 7.85 的 `Item properties: Toggle take
+/// reverse`（41051）写出的就是：
 ///
-/// 三种情形（与读取侧 `hifishifter_kernel::take_geometry` 逐一互逆）：
+/// ```text
+/// SOFFS = D − 正向窗口终点
+/// <SOURCE SECTION LENGTH <正向跨度> MODE 3 STARTPOS 0 OVERLAP 0.01> … </SOURCE SECTION>
+/// ```
 ///
-/// * **正放**：拆掉 SECTION，`SOFFS = 正向窗口起点`（绝对坐标）；
-/// * **倒放 + 非 Loop**：SECTION = 正向窗口 `[a, b)`、`SOFFS = 0`
-///   （段内偏移 0 ⇒ 反向段从段尾开始播）；
-/// * **倒放 + Loop**：SECTION = `[0, D)`（回绕域必须是整份媒体）、
-///   `SOFFS = (D − anchor) mod D`、`anchor = min(source_end, D)`
-///   —— 与独立 App 导出 `import::reaper_export` 逐行同款。
+/// 其中 `MODE 3` = "整份媒体 + 反向"（位语义见 [`super::source_direction`]）。
+/// 于是**倒放**不论是否 Loop，参数都是这一组：
+///
+/// * `LENGTH` = 正向窗口跨度（Loop 时窗口本来就是 `[0, 锚点]`，跨度 = 锚点）；
+/// * `SOFFS` = `D − 正向窗口终点`（宿主镜像域）。
+///
+/// 读取侧（`take_geometry`）对 `MODE 3` 拿到的段是"整份媒体"，轴 = D，
+/// 锚点 = D − SOFFS = 正向终点 —— 与这里逐位互逆。
+///
+/// **正放**：拆掉 SECTION、`SOFFS = 正向窗口起点`（绝对坐标）。这正是宿主
+/// 自己 toggle 回去时写的东西。
 ///
 /// 媒体总长取不到、或正向窗口落到媒体之外时返回 `Err`：**宁可不写**，
 /// 也不写一个必然读不回来的结构。
@@ -609,25 +616,15 @@ fn host_take_direction(
     let duration = media_duration_sec
         .filter(|value| value.is_finite() && *value > 0.0)
         .ok_or("cannot write a reversed take without its media duration")?;
-    if clip.loop_enabled {
-        let anchor = clip.source_end_sec.min(duration).rem_euclid(duration);
-        return Ok(super::source_direction::DirectionEdit::reversed(
-            0.0,
-            duration,
-            (duration - anchor).rem_euclid(duration),
-        ));
-    }
     let (start, end) = hifishifter_kernel::state::clip_playback_window_sec(clip);
     let window = hifishifter_kernel::take_geometry::ForwardWindow::new(start, end)
         .ok_or("reversed take has no valid forward window")?;
     if window.end() > duration + 1e-9 || window.start() < -1e-9 {
         return Err("reversed take window falls outside the media".into());
     }
-    let start = window.start().max(0.0);
     Ok(super::source_direction::DirectionEdit::reversed(
-        start,
-        (window.end() - start).max(1e-9),
-        0.0,
+        window.span().max(1e-9),
+        (duration - window.end()).max(0.0),
     ))
 }
 
@@ -870,7 +867,7 @@ pub(crate) fn execute_managed(
             if (before.playback_rate - after.playback_rate).abs() > 1e-6 {
                 target.set_take(c"B_PPITCH", 1., &authorized)?;
                 // 【为什么保留符号】负速率是 REAPER 表达倒放的**方式之一**（另一个是
-                // `SECTION MODE 1`）。此前这里恒写正值 —— 用户只要改一次速率，倒放就被
+                // `SECTION` 的 `MODE` 反向位）。此前这里恒写正值 —— 用户只要改一次速率，倒放就被
                 // 静默改成正放。符号取自宿主的原始读数，不由 clip 推断。
                 let sign = if target.geometry.play_rate_signed < 0.0 {
                     -1.0
@@ -1649,22 +1646,27 @@ mod tests {
         assert!(forward.section.is_none(), "正放不该带 SECTION");
         assert_eq!(forward.s_offs, 0.5);
 
-        // 倒放 + 非 Loop：SECTION = 正向窗口 [a, b)、SOFFS = 0（段内偏移）。
+        // 倒放：SECTION = `MODE 3` + `LENGTH = 跨度` + `STARTPOS 0`，SOFFS 是镜像起点
+        // `D − 正向终点` = 4.0 − 1.5 = 2.5（宿主自己的编码，见函数文档）。
         clip.reversed = true;
         let reversed = host_take_direction(&clip, Some(4.0)).unwrap();
         let section = reversed.section.expect("倒放必须建段");
-        assert_eq!((section.start_sec, section.length_sec), (0.5, 1.0));
+        assert_eq!(
+            (section.start_sec, section.length_sec),
+            (0.0, 1.0),
+            "STARTPOS 恒 0、LENGTH 是窗口跨度"
+        );
         assert_eq!(
             section.mode,
             super::super::source_direction::SECTION_MODE_REVERSED
         );
-        assert_eq!(reversed.s_offs, 0.0, "段内偏移必须归零");
+        assert_eq!(reversed.s_offs, 2.5, "SOFFS 必须是镜像起点 D − 正向终点");
 
-        // 倒放 + Loop：段覆盖**整份媒体**，SOFFS 承载相位 (D − anchor) mod D。
+        // 倒放 + Loop：同一套编码（宿主的 `MODE 3` 不区分 loop）。
         clip.loop_enabled = true;
         let looped = host_take_direction(&clip, Some(4.0)).unwrap();
         let section = looped.section.expect("倒放必须建段");
-        assert_eq!((section.start_sec, section.length_sec), (0.0, 4.0));
+        assert_eq!((section.start_sec, section.length_sec), (0.0, 1.0));
         assert_eq!(looped.s_offs, 2.5);
 
         // 媒体总长未知 ⇒ 拒绝（宁可不写，也不写一个读不回来的结构）。
@@ -1691,6 +1693,13 @@ mod tests {
         let plan = editor
             .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"reversed":true}))
             .expect("倒放补丁必须被接受");
+        // 镜像起点由**写回后的**几何决定（补丁翻转方向时内核会重算消费窗口），
+        // 轴与生产代码同一条取值顺序（clip 自带的 ARA 源时长优先，其次宿主读数）。
+        let (_, window_end) =
+            hifishifter_kernel::state::clip_playback_window_sec(&plan.edits[0].after);
+        let axis = hifishifter_kernel::state::clip_source_media_duration_sec(&plan.edits[0].after)
+            .unwrap_or(2.0);
+        let expected_offs = axis - window_end;
         host.reset();
         execute(&owner, plan, || document.is_alive()).expect("倒放写回必须成功");
 
@@ -1701,10 +1710,15 @@ mod tests {
         );
         let chunk = host.item_state_chunk.borrow().clone();
         assert!(chunk.contains("<SOURCE SECTION"), "{chunk}");
-        assert!(chunk.contains("MODE 1"), "{chunk}");
         assert!(
-            chunk.contains("SOFFS 0.00000000000000000"),
-            "段内偏移必须归零：{chunk}"
+            chunk.contains("MODE 3"),
+            "倒放必须写成宿主自己的 MODE 3（整份媒体 + 反向）：{chunk}"
+        );
+        assert!(chunk.contains("STARTPOS 0.00000000000000000"), "{chunk}");
+        // 镜像起点：夹具媒体总长 2.0 s，`SOFFS = D − 正向窗口终点`。
+        assert!(
+            chunk.contains(&format!("SOFFS {expected_offs:.17}")),
+            "写回的必须是镜像域起点 {expected_offs}：{chunk}"
         );
         assert!(
             chunk.contains("ara://source"),

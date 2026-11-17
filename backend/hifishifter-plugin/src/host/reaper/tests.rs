@@ -32,6 +32,11 @@ pub struct Fixture {
     pub take_reversed: Cell<bool>,
     /// `PCM_Source_GetSectionInfo` 是否返回成功（false = 读不出方向 → `None`）。
     pub section_reports: Cell<bool>,
+    /// `PCM_Source_GetSectionInfo` 报告的段边界（`SetItemStateChunk` 按 `MODE` 位
+    /// 更新，与 REAPER 同一条规则：`MODE 3` 报整份媒体、`MODE 0/2` 报
+    /// `STARTPOS`/`LENGTH`、非段块报 0/0）。
+    pub take_section_start: Cell<f64>,
+    pub take_section_length: Cell<f64>,
     /// `GetMediaSourceFileName` 报告的路径；`None` = 读不出文件名（回退身份不可用）。
     pub source_file_name: RefCell<Option<String>>,
     undo_records: RefCell<Vec<std::ffi::CString>>,
@@ -105,6 +110,8 @@ impl Fixture {
             extra_takes: RefCell::new(Vec::new()),
             take_reversed: Cell::new(false),
             section_reports: Cell::new(false),
+            take_section_start: Cell::new(0.),
+            take_section_length: Cell::new(0.),
             source_file_name: RefCell::new(None),
             undo_records: RefCell::new(vec![std::ffi::CString::new("Initial state").unwrap()]),
             undo_position: Cell::new(0),
@@ -1007,8 +1014,8 @@ unsafe extern "C" fn take_source(take: *mut c_void) -> *mut c_void {
 }
 unsafe extern "C" fn section_info(
     source: *mut c_void,
-    _offset: *mut f64,
-    _length: *mut f64,
+    offset: *mut f64,
+    length: *mut f64,
     reversed: *mut bool,
 ) -> bool {
     let f = fixture();
@@ -1017,7 +1024,11 @@ unsafe extern "C" fn section_info(
     if !f.section_reports.get() {
         return false;
     }
-    unsafe { *reversed = f.take_reversed.get() };
+    unsafe {
+        *offset = f.take_section_start.get();
+        *length = f.take_section_length.get();
+        *reversed = f.take_reversed.get();
+    }
     true
 }
 
@@ -1072,13 +1083,27 @@ unsafe extern "C" fn set_item_state(
         return false;
     }
     let sectioned = chunk.contains("<SOURCE SECTION");
-    let mode = chunk
-        .lines()
-        .find(|line| line.trim_start().starts_with("MODE "))
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|value| value.parse::<i32>().ok())
-        .unwrap_or(0);
-    f.take_reversed.set(sectioned && mode > 0);
+    let field = |name: &str| -> Option<f64> {
+        chunk
+            .lines()
+            .find(|line| line.trim_start().starts_with(&format!("{name} ")))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<f64>().ok())
+    };
+    let mode = field("MODE").map_or(0, |value| value as i32);
+    // 与 REAPER 7.85 一致：`MODE` 是位 —— 1 = 段边界无效（整份媒体）、2 = 反向。
+    f.take_reversed.set(sectioned && mode & 2 != 0);
+    if sectioned && mode & 1 == 0 {
+        f.take_section_start.set(field("STARTPOS").unwrap_or(0.));
+        f.take_section_length.set(field("LENGTH").unwrap_or(0.));
+    } else if sectioned {
+        // `MODE 1/3`：宿主报的是整份媒体（见 `source_direction` 的真机读数表）。
+        f.take_section_start.set(0.);
+        f.take_section_length.set(2.);
+    } else {
+        f.take_section_start.set(0.);
+        f.take_section_length.set(0.);
+    }
     f.item_state_chunk.replace(chunk);
     f.change.set(f.change.get().wrapping_add(1));
     true

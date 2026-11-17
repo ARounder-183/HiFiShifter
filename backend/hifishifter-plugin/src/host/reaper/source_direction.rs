@@ -1,10 +1,9 @@
 //! 把 take 的**播放方向**写回 REAPER —— 它没有"反向 setter"，倒放是结构。
 //!
 //! REAPER 表达倒放的方式是 `<SOURCE SECTION MODE n>` 这一层**包装**：一个正向
-//! `<SOURCE WAVE>` 被放进"从 STARTPOS 开始、长 LENGTH"的段里，MODE 置位后这段
-//! 反向播放。`PLAYRATE` 保持正数。仓库里两处独立证据都指向同一个约定
-//! （`kernel::take_geometry` 的模块文档、`import::reaper_export` 的导出与回归测试），
-//! 因此这里不再自创第三种写法。
+//! `<SOURCE WAVE>` 被放进段里，`MODE` 置反向位后这段反向播放，`PLAYRATE` 保持
+//! 正数。编码细节见 [`SECTION_MODE_REVERSED`]（真机取值来自 REAPER 7.85 的
+//! `Item properties: Toggle take reverse`，不是推断）。
 //!
 //! ## 为什么单独一个模块
 //!
@@ -22,14 +21,41 @@
 
 use super::item_chunk::MAX_ITEM_CHUNK_BYTES;
 
-/// REAPER 里"这一段反向播放"的模式位。
+/// REAPER 里"这一段反向播放"的 `MODE` 取值。
 ///
-/// 仓库内两处独立约定：`take_geometry` 的模块文档（"Toggle take reverse 是
-/// 正 PLAYRATE + SECTION MODE 1"）与 `reaper_export` 的导出（`section_mode = 1`，
-/// 并由回归测试钉死）。写入后还有一次"写→读→比"自校验（见 `host_edit`），
-/// 若宿主报回来的方向位不符就整批回滚 —— 所以即使某天 REAPER 改了取值，
-/// 失败也是"没改"，而不是"改成了别的东西"。
-pub(super) const SECTION_MODE_REVERSED: i32 = 1;
+/// 【真机取证（REAPER 7.85）】对一个普通 audio item 执行宿主自带的
+/// `Item properties: Toggle take reverse`（命令号 41051），它写出的是：
+///
+/// ```text
+/// SOFFS 26.29858333333333          <- D − 正向窗口终点
+/// <SOURCE SECTION
+///   LENGTH 3                       <- 正向窗口跨度
+///   MODE 3
+///   STARTPOS 0
+///   OVERLAP 0.01
+///   <SOURCE WAVE ... >
+/// >
+/// ```
+///
+/// 而 `PCM_Source_GetSectionInfo` 对四种 `MODE` 的读数（同一份 chunk、段
+/// `STARTPOS 5 / LENGTH 3`）是：
+///
+/// | MODE | offs | len | rev |
+/// |------|------|-----|-----|
+/// | 0 | 5 | 3 | false |
+/// | 1 | 0 | 媒体全长 | false |
+/// | 2 | 5 | 3 | true |
+/// | 3 | 0 | 媒体全长 | true |
+///
+/// 即 `MODE` 是**位**：`1` = "段边界无效、按整份媒体算"，`2` = 反向。
+/// 此前这里写 `1`，宿主读回来的是一个**正放**的整媒体段 —— "写→读→比"永远
+/// 不符，用户看到的是"倒放点了没反应"（现场日志：`the host did not apply the
+/// requested take direction`）。
+///
+/// 因此倒放统一写成宿主自己的编码：`MODE 3`（整份媒体 + 反向）+ 镜像 `SOFFS`。
+/// 读取侧（`take_geometry`）本来就是"轴 = 整份媒体、SOFFS = 镜像量"的解算，
+/// 两个方向就此对齐；真机往返（写→读）已按 `MODE 3` 复核过。
+pub(super) const SECTION_MODE_REVERSED: i32 = 3;
 
 /// 反向段与源的默认重叠量（秒）。REAPER 自己写 SECTION 时也带这一行；
 /// 缺省值由 REAPER 的 item 属性决定，显式写出来才能让往返不依赖它。
@@ -54,10 +80,14 @@ impl DirectionEdit {
     }
 
     /// 反向：把源包进一个反向段。
-    pub(super) fn reversed(start_sec: f64, length_sec: f64, s_offs: f64) -> Self {
+    ///
+    /// `length_sec` 是**正向窗口跨度**（写进 SECTION 的 `LENGTH`，宿主自己的
+    /// 写法就是跨度而不是起点），`s_offs` 是镜像起点 `D − 正向窗口终点`。
+    /// `STARTPOS` 恒写 0：`MODE 3` 下宿主不拿它解算，写 0 与宿主自己的输出一致。
+    pub(super) fn reversed(length_sec: f64, s_offs: f64) -> Self {
         Self {
             section: Some(SectionSpec {
-                start_sec,
+                start_sec: 0.0,
                 length_sec,
                 mode: SECTION_MODE_REVERSED,
                 overlap_sec: SECTION_OVERLAP_SEC,
@@ -69,9 +99,13 @@ impl DirectionEdit {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct SectionSpec {
+    /// `STARTPOS`（秒）。倒放编码里恒为 0（见 [`DirectionEdit::reversed`]）。
     pub start_sec: f64,
+    /// `LENGTH`（秒）：正向窗口跨度。
     pub length_sec: f64,
+    /// `MODE` 位（见 [`SECTION_MODE_REVERSED`]）。
     pub mode: i32,
+    /// `OVERLAP`（秒）：反相段与源的默认重叠量，宿主自己也写 0.01。
     pub overlap_sec: f64,
 }
 
@@ -341,13 +375,12 @@ mod tests {
     /// 倒放：只换上 SECTION 头与 SOFFS，别的行逐字节不变。
     #[test]
     fn reversing_wraps_the_source_and_rewrites_only_soffs() {
-        let rewrite =
-            rewrite_take_direction(&chunk(), TAKE, &DirectionEdit::reversed(1.5, 2.5, 0.0))
-                .expect("reverse write");
+        let rewrite = rewrite_take_direction(&chunk(), TAKE, &DirectionEdit::reversed(2.5, 0.0))
+            .expect("reverse write");
         assert!(rewrite.contains("<SOURCE SECTION\n"));
         assert!(rewrite.contains("LENGTH 2.50000000000000000\n"));
-        assert!(rewrite.contains("MODE 1\n"));
-        assert!(rewrite.contains("STARTPOS 1.50000000000000000\n"));
+        assert!(rewrite.contains("MODE 3\n"));
+        assert!(rewrite.contains("STARTPOS 0.00000000000000000\n"));
         assert!(rewrite.contains("SOFFS 0.00000000000000000\n"));
         // 源本身仍然是那一条，文件路径与 GUID 原样保留。
         assert!(rewrite.contains("<SOURCE WAVE"));
@@ -360,8 +393,7 @@ mod tests {
     #[test]
     fn un_reversing_unwraps_the_section_idempotently() {
         let reversed =
-            rewrite_take_direction(&chunk(), TAKE, &DirectionEdit::reversed(1.5, 2.5, 0.0))
-                .unwrap();
+            rewrite_take_direction(&chunk(), TAKE, &DirectionEdit::reversed(2.5, 0.0)).unwrap();
         let forward =
             rewrite_take_direction(&reversed, TAKE, &DirectionEdit::forward(1.5)).unwrap();
         assert!(!forward.contains("SOURCE SECTION"));
@@ -383,20 +415,20 @@ mod tests {
                 "identity",
                 chunk(),
                 "{EEEEEEEE-1111-2222-3333-444444444444}",
-                DirectionEdit::reversed(0.0, 1.0, 0.0),
+                DirectionEdit::reversed(1.0, 0.0),
             ),
             (
                 "multi-take",
                 two_takes,
                 TAKE,
-                DirectionEdit::reversed(0.0, 1.0, 0.0),
+                DirectionEdit::reversed(1.0, 0.0),
             ),
             ("nan", chunk(), TAKE, DirectionEdit::forward(f64::NAN)),
             (
                 "bad-section",
                 chunk(),
                 TAKE,
-                DirectionEdit::reversed(0.0, 0.0, 0.0),
+                DirectionEdit::reversed(0.0, 0.0),
             ),
             (
                 "truncated",

@@ -479,7 +479,8 @@ mod tests {
     /// **回归：负 `D_PLAYRATE` 也是倒放的一种表达，必须与方向位等价。**
     ///
     /// 【为什么这是回归测试】REAPER 用**两种**方式表达倒放：负速率、或
-    /// `SECTION MODE 1`。独立 App 的判据是 `play_rate < 0 || section_mode > 0`；
+    /// `SECTION` 的 `MODE` 反向位（宿主写 `MODE 3`）。独立 App 的判据是
+    /// `play_rate < 0 || section_mode_reversed`；
     /// 插件此前把速率符号 `.abs()` 掉、只认方向位 —— 于是"只用负速率表达倒放"的
     /// take 被**静默按正放渲染**：输出错的音频，而不是报错。
     #[test]

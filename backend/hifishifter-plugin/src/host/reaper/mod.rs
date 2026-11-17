@@ -1118,8 +1118,8 @@ impl NativeHost {
             return Err("invalid REAPER length".into());
         }
         // 【为什么保留符号】负速率是宿主表达倒放的**两个来源之一**（另一个是
-        // `SECTION MODE 1` / `PCM_Source_GetSectionInfo` 的方向位）。独立 App 的判据
-        // 是 `play_rate < 0 || section_mode > 0`；插件此前把符号 `.abs()` 掉、只认方向位，
+        // `SECTION` 的 `MODE` 反向位 / `PCM_Source_GetSectionInfo` 的方向位）。独立 App
+        // 的判据是 `play_rate < 0 || section_mode_reversed`；插件此前把符号 `.abs()` 掉、只认方向位，
         // 于是"只用负速率表达倒放"的 take 被**静默按正放渲染** —— 输出错的音频。
         // 幅值仍单独保留（`playback_rate`）：窗口宽度、缓存键这些与方向无关的消费者用它。
         // 拒绝 0 与非有限值：此前直接拒绝 `<= 0` 会让**整个 item 从清单里消失**，
