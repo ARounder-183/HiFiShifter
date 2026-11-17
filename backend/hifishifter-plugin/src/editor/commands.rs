@@ -922,6 +922,86 @@ fn export_host_take_pitch(session: &EditorSession, input: &Value) -> Result<Valu
     }))
 }
 
+/// 逐片段的**源音高参考曲线**（参数编辑器里那条 "Clip 音高参考线"）。
+///
+/// 【为什么插件也必须回答】独立 App 分析完成后由后端用 `clip_pitch_data` 事件
+/// 推送曲线，卫星窗口晚打开时再用 `get_clip_pitch_data` 补一次。插件的钢琴卷帘
+/// 默认就打开这条参考线（`showClipPitchOverlay` 默认 true），而这条命令此前落到
+/// `Command unavailable` —— 于是每次挂载都刷一条 ERROR，参考线永远空白。
+///
+/// 【数据来源】插件的原线就是 `params_by_root_track[root].pitch_orig`：**工程时间
+/// 轴**上的 MIDI 音高（0 = 无音高）。因此这里只做"按 clip 的时间窗切片"，payload
+/// 形状与 App 的 `build_clip_pitch_data_payload` 逐字段一致（`curve_start_sec`
+/// = clip 起点，`midi_curve` 每帧一个音高，`frame_period_ms` 与时间线同源）。
+///
+/// 【为什么没有原线就不返回这个 clip】分析未完成时 `pitch_orig` 是空表，切出来
+/// 只有 0；把全 0 曲线交给前端等于让它把"还没算"缓存成"就是没有"，而参考线不会
+/// 再取第二次。空表 = 没有 payload，与 App 的 cache-miss 同一处置。
+fn clip_pitch_data(session: &EditorSession, input: &Value) -> Result<Value, String> {
+    const MAX_CLIPS: usize = 512;
+    /// 单条曲线最多回多少帧（5 ms 一帧 ⇒ 10 分钟；再长的片段参考线也没法看）。
+    const MAX_FRAMES_PER_CLIP: usize = 120_000;
+    /// 一次请求的**总**帧预算：这条命令走 actor 线程，回一份几十 MB 的 JSON 会把
+    /// 界面顶住。超出的 clip 直接跳过（不报错）—— 前端在分析完成事件里还会再来。
+    const MAX_FRAMES_TOTAL: usize = 600_000;
+    let clip_ids: Vec<String> = serde_json::from_value(input["clipIds"].clone())
+        .map_err(|_| "invalid clip id list".to_string())?;
+    if clip_ids.is_empty() || clip_ids.len() > MAX_CLIPS {
+        return Err(format!("the pitch data request needs 1..{MAX_CLIPS} clips"));
+    }
+    let timeline = session.timeline.lock_or_recover();
+    let timeline_period = timeline.frame_period_ms().max(0.1);
+    let mut payloads = Vec::new();
+    let mut budget = MAX_FRAMES_TOTAL;
+    for clip_id in clip_ids {
+        let Some(clip) = timeline.clips.iter().find(|clip| clip.id == clip_id) else {
+            continue;
+        };
+        let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
+            continue;
+        };
+        let Some(params) = timeline.params_by_root_track.get(&root) else {
+            continue;
+        };
+        if params.pitch_orig.is_empty() {
+            continue;
+        }
+        let period = if params.frame_period_ms.is_finite() && params.frame_period_ms > 0.0 {
+            params.frame_period_ms
+        } else {
+            timeline_period
+        };
+        let start_frame = ((clip.start_sec.max(0.0) * 1000.0) / period).round() as usize;
+        let count = (((clip.length_sec.max(0.0) * 1000.0) / period).ceil()).max(1.0) as usize;
+        if count > MAX_FRAMES_PER_CLIP || count > budget {
+            continue;
+        }
+        budget -= count;
+        let mut curve = Vec::with_capacity(count);
+        let mut voiced = false;
+        for index in 0..count {
+            let value = params
+                .pitch_orig
+                .get(start_frame + index)
+                .copied()
+                .unwrap_or(0.0);
+            voiced |= value > 0.0;
+            curve.push(value);
+        }
+        if !voiced {
+            // 这一段没有能量（静音 / 还没分析到）⇒ 没有可画的参考线。
+            continue;
+        }
+        payloads.push(json!({
+            "clip_id": clip.id,
+            "curve_start_sec": clip.start_sec.max(0.0),
+            "midi_curve": curve,
+            "frame_period_ms": period,
+        }));
+    }
+    Ok(json!({"ok": true, "payloads": payloads}))
+}
+
 /// 快速导出**选中片段**：范围取选中片段在工程时间上的并集，其余走同一条路径。
 ///
 /// 【为什么不另写一套渲染】导出与播放共用 `RenderInput::mix_interleaved`
@@ -2615,6 +2695,8 @@ pub(super) fn dispatch(
         // 快速导出选中片段：与 `export_audio_advanced` 共用渲染与编码路径，
         // 只是把范围取成选中片段的并集、目标路径由 `outputDir` + `fileName` 组成。
         "quick_export_selected_clips" => quick_export_selected_clips(session, &args(input)?),
+        // 参数编辑器的 "Clip 音高参考线"：独立 App 在卫星窗口懒取时用同一条命令。
+        "get_clip_pitch_data" => clip_pitch_data(session, &input),
         // REAPER take 音高 ⇄ 参数线（一次性迁移，两侧都清零对侧）。
         "import_host_take_pitch" => import_host_take_pitch(session, &input),
         "export_host_take_pitch" => export_host_take_pitch(session, &input),
@@ -2672,5 +2754,80 @@ mod pitch_bridge_tests {
             "呈现 id 必须先剥掉 namespace 再交给 host_edit_target"
         );
         document.close();
+    }
+}
+
+#[cfg(test)]
+mod clip_pitch_tests {
+    use super::*;
+
+    /// 参考线命令必须按 clip 的**时间窗**切出原线，并且没分析到就不返回 payload。
+    ///
+    /// 【为什么钉死这两条】插件里这条命令此前根本不存在（`Command unavailable`），
+    /// 前端每次挂载都刷一条 ERROR 且参考线永远空白。补上之后最危险的错误形态是
+    /// "把全 0 当曲线发回去" —— 那会让前端把"还没算"缓存成"就是没有"，
+    /// 而参考线不会取第二次（见 `useClipPitchHydration` 的 requested 集合）。
+    #[test]
+    fn the_pitch_reference_curve_is_sliced_from_the_root_line() {
+        let (_model, owner, _id) = crate::editor::session::tests::fixture();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let (clip_id, root, start_sec, length_sec, period) = {
+            let mut timeline = editor.timeline.lock_or_recover();
+            let clip_id = timeline.clips[0].id.clone();
+            // 夹具的 clip 只有 4 个采样点；这里给它一个可分辨的时间窗（50 ms 起、100 ms 长）。
+            let track_id = {
+                let clip = timeline
+                    .clips
+                    .iter_mut()
+                    .find(|clip| clip.id == clip_id)
+                    .unwrap();
+                clip.start_sec = 0.05;
+                clip.length_sec = 0.1;
+                clip.track_id.clone()
+            };
+            let root = timeline.resolve_root_track_id(&track_id).unwrap();
+            timeline.ensure_params_for_root(&root);
+            let params = timeline.params_by_root_track.get_mut(&root).unwrap();
+            params.frame_period_ms = 5.0;
+            // 时间线是 5 ms 一帧：在 clip 窗口上填一段 57/59 交替的音高。
+            let period = params.frame_period_ms;
+            let start_frame = 10usize; // 0.05 s ÷ 5 ms
+            let count = 20usize; // 0.1 s ÷ 5 ms
+            params.pitch_orig = vec![0.0; start_frame + count + 4];
+            for index in 0..count {
+                params.pitch_orig[start_frame + index] = if index % 2 == 0 { 57.0 } else { 59.0 };
+            }
+            (clip_id, root, 0.05_f64, 0.1_f64, period)
+        };
+
+        let payload = clip_pitch_data(&editor, &json!({"clipIds": [clip_id.clone()]})).unwrap();
+        let payloads = payload["payloads"].as_array().unwrap();
+        assert_eq!(
+            payloads.len(),
+            1,
+            "有原线的 clip 必须回一条 payload：{payload}"
+        );
+        assert_eq!(payloads[0]["clip_id"], json!(clip_id));
+        assert!((payloads[0]["curve_start_sec"].as_f64().unwrap() - start_sec).abs() < 1e-9);
+        assert!((payloads[0]["frame_period_ms"].as_f64().unwrap() - period).abs() < 1e-9);
+        let curve = payloads[0]["midi_curve"].as_array().unwrap();
+        let expected = (((length_sec.max(0.0) * 1000.0) / period).ceil()).max(1.0) as usize;
+        assert_eq!(curve.len(), expected);
+        assert_eq!(curve[0], json!(57.0));
+        assert_eq!(curve[1], json!(59.0));
+
+        // 分析未完成（原线为空）⇒ 不返回 payload，而不是一条全 0 曲线。
+        {
+            let mut timeline = editor.timeline.lock_or_recover();
+            timeline
+                .params_by_root_track
+                .get_mut(&root)
+                .unwrap()
+                .pitch_orig
+                .clear();
+        }
+        let empty = clip_pitch_data(&editor, &json!({"clipIds": [clip_id]})).unwrap();
+        assert_eq!(empty["payloads"].as_array().unwrap().len(), 0);
     }
 }
