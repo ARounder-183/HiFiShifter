@@ -270,6 +270,36 @@ export const coreApi = {
 
     cancelExportAudio: () => invoke<{ ok: boolean; active?: boolean }>("cancel_export_audio"),
 
+    /**
+     * REAPER take 音高 → HiFiShifter 音高参数线（一次性**迁移**）。
+     *
+     * 【为什么回执里要带 framesSkipped】没有音高分析的帧不会被写（那会让"无声"
+     * 变成"有音高"）。这个数让界面能说清"有一部分没转"，而不是假装全成功。
+     */
+    importHostTakePitch: (clipIds: string[]) =>
+        invoke<{
+            ok: boolean;
+            clips?: number;
+            framesWritten?: number;
+            framesSkipped?: number;
+            clearedPoints?: number;
+            error?: string;
+        }>("import_host_take_pitch", clipIds),
+
+    /**
+     * HiFiShifter 音高参数线 → REAPER take 音高包络（一次性**迁移**）。
+     *
+     * 【为什么它同时清空 HFS 曲线】迁移语义：两侧都留就是两倍音高（见方案 §3.4.1）。
+     */
+    exportHostTakePitch: (clipIds: string[]) =>
+        invoke<{
+            ok: boolean;
+            clips?: number;
+            pointsWritten?: number;
+            clearedFrames?: number;
+            error?: string;
+        }>("export_host_take_pitch", clipIds),
+
     getExportAudioDefaults: () => invoke<ExportAudioDefaults>("get_export_audio_defaults"),
 
     previewExportAudioPlan: (request: AdvancedExportRequest) =>

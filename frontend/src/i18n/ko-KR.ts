@@ -1990,6 +1990,8 @@ export const koKR = {
     history_op_param_block_edit: "파라미터 블록 편집",
     history_op_import_midi: "MIDI 가져오기",
     history_op_edit_midi: "MIDI 데이터 편집",
+    history_op_host_pitch_import: "REAPER 테이크 피치 가져오기",
+    history_op_host_pitch_export: "REAPER 테이크 피치로 변환",
     history_op_import_vocalshifter: "VocalShifter 프로젝트 가져오기",
     history_op_recording: "녹음",
     history_op_batch: "일괄 작업",

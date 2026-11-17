@@ -141,6 +141,7 @@ pub mod fade_axes;
 pub mod fade_curves;
 pub mod gain;
 pub mod models;
+pub mod pitch_bridge;
 pub mod pitch_config;
 pub mod vibrato;
 

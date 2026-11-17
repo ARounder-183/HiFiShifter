@@ -209,11 +209,11 @@ impl NativeHost {
     }
     /// take 的**音高包络**能否读写（REAPER 的 PITCHENV）。
     ///
-    /// 【为什么现在恒为 false】读点 / 写点 / 排序三件事是一束 API；这一束在下一个
-    /// 提交里才接上（`take_envelope` 模块）。在此之前"没有"是诚实的答案 ——
-    /// 前端据此不渲染音高互转入口，而不是让用户点出一个半途失败。
+    /// 【为什么与倒放同一条判据】两者都走 item state chunk：一个换 SOURCE 结构，
+    /// 一个换 PITCHENV 块。缺 `Get/SetItemStateChunk` 时两条路一起不可用，
+    /// 有它时两条路一起可用 —— 拆成两位只会制造两个必然同值的布尔。
     pub(crate) fn can_bridge_take_pitch(&self) -> bool {
-        false
+        self.can_edit_clips() && self.item_state.is_some()
     }
     /// 参数和几何共用所属project历史；没有item时也能为首次导入/参数编辑开启Undo。
     pub(crate) fn begin_project_undo(
@@ -737,12 +737,19 @@ impl HostClipTarget {
         self.verify(authorized)?;
         if !matches!(
             name.to_bytes(),
-            b"D_STARTOFFS" | b"D_PLAYRATE" | b"B_PPITCH" | b"I_CHANMODE"
+            b"D_STARTOFFS" | b"D_PLAYRATE" | b"B_PPITCH" | b"I_CHANMODE" | b"D_PITCH"
         ) {
             return Err("unsupported host take field".into());
         }
         if !value.is_finite() {
             return Err("nonfinite host take edit".into());
+        }
+        // 【为什么要给 D_PITCH 设上界】音高迁移要把宿主侧清零；而清零是一个**写**。
+        // 没有上界时一次误算（例如把"音分"当半音）会把 take 推到几十个八度之外 ——
+        // 用户听到的是噪声，看不出是一个单位错误。±240 半音 = ±20 八度，
+        // 远超任何音乐用途，又足以拦住量级错误。
+        if name == c"D_PITCH" && value.abs() > 240. {
+            return Err("take pitch outside the supported range -240..240 semitones".into());
         }
         let api = self.api()?;
         if !checked(authorized, || unsafe {
@@ -830,6 +837,28 @@ impl HostClipTarget {
             return Err("REAPER rejected the item state".into());
         }
         Ok(())
+    }
+    /// 读该 take 的音高包络（chunk 里的 `<PITCHENV>`）。
+    pub(crate) fn take_pitch_points(
+        &self,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<super::take_pitch::TakePitch, String> {
+        let chunk = self.item_state_chunk(authorized)?;
+        super::take_pitch::read_take_pitch(&chunk, &self.geometry.take_id)
+    }
+    /// 用 `points` 整块替换该 take 的音高包络（空列表 = 删除）。
+    pub(crate) fn write_take_pitch_points(
+        &self,
+        points: &[hifishifter_kernel::pitch_bridge::EnvelopePoint],
+        authorized: &impl Fn() -> bool,
+    ) -> Result<(), String> {
+        let chunk = self.item_state_chunk(authorized)?;
+        let rewritten =
+            super::take_pitch::rewrite_take_pitch(&chunk, &self.geometry.take_id, points)?;
+        if rewritten == chunk {
+            return Ok(());
+        }
+        self.set_item_state_chunk(&rewritten, authorized)
     }
     /// 宿主此刻报告的方向位（`PCM_Source_GetSectionInfo`）。
     ///

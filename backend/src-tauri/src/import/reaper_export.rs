@@ -352,10 +352,12 @@ fn build_item(
 
 // ─── 参数线 → REAPER 包络 ────────────────────────────────────────────────────
 
-/// 精简容差。
-const SIMPLIFY_TOLERANCE_VOLUME: f64 = 0.005;
-const SIMPLIFY_TOLERANCE_PAN: f64 = 0.005;
-const SIMPLIFY_TOLERANCE_PITCH: f64 = 0.02;
+// 精简容差与断点算法**只有一份**：`hifishifter_kernel::pitch_bridge`。
+// 导出与插件桥接共用同一份，否则"导出听起来对、插件里听起来不对"。
+use hifishifter_kernel::pitch_bridge::{
+    simplify_breakpoints, SIMPLIFY_TOLERANCE_PAN, SIMPLIFY_TOLERANCE_PITCH,
+    SIMPLIFY_TOLERANCE_VOLUME,
+};
 
 /// 每个导出 Clip 的参数线视图（命令层从 live timeline 预解析后传入）。
 ///
@@ -471,150 +473,6 @@ pub fn build_clip_export_curves(timeline: &TimelineState, clip: &Clip) -> ClipEx
 /// - 端点强制：恒写 range_start 与 range_end 两端点（不得依赖 hold 语义
 ///   跨 Item / 段边界）；
 /// - 平坦非默认 → 恰好 2 点；斜线 → 仅折点。
-fn simplify_breakpoints(
-    samples: &[(f64, f64)],
-    range_start: f64,
-    range_end: f64,
-    default_value: f64,
-    tolerance: f64,
-) -> Vec<(f64, f64)> {
-    if samples.is_empty() || range_end <= range_start {
-        return Vec::new();
-    }
-    if samples
-        .iter()
-        .all(|(_, v)| (v - default_value).abs() <= tolerance)
-    {
-        return Vec::new();
-    }
-
-    // 单样本：无折线可言，端点强制（区间两端同值）。
-    // （低于一个帧周期的短 clip 可达此处，此前 samples[1] 越界 panic。）
-    if samples.len() == 1 {
-        let v = samples[0].1;
-        let first_t = samples[0].0.clamp(range_start, range_end);
-        return vec![(first_t, v), (range_end, v)];
-    }
-
-    // O(n) 快速通道，消除最坏输入（恒平坦 / 全程线性 —— 也是最常见形态）
-    // 在下方贪心扫描里的 O(n²) 逐帧重扫：
-    // - 全部样本在容差内等于首样本值 → 平坦；
-    // - 全部样本在容差内落在首末样本连线上 → 直线；
-    // 两者都输出恰好 2 个端点。真实曲线几乎必然违背其一，落到贪心扫描
-    // （单段越界即 break，实际复杂度接近 O(n)）。
-    {
-        let (t0, v0) = samples[0];
-        let (tn, vn) = samples[samples.len() - 1];
-        let span = tn - t0;
-        let slope = if span > 1e-12 { (vn - v0) / span } else { 0.0 };
-        let mut flat = true;
-        let mut linear = true;
-        for (tj, vj) in samples.iter() {
-            if (vj - v0).abs() > tolerance {
-                flat = false;
-            }
-            if (vj - (v0 + slope * (tj - t0))).abs() > tolerance {
-                linear = false;
-            }
-            if !flat && !linear {
-                break;
-            }
-        }
-        if flat || linear {
-            let first_t = t0.max(range_start);
-            let last_t = range_end.max(first_t);
-            return vec![
-                (first_t, v0 + slope * (first_t - t0)),
-                (last_t, v0 + slope * (last_t - t0)),
-            ];
-        }
-    }
-
-    let value_at = |t: f64| -> f64 {
-        let idx = samples.partition_point(|s| s.0 < t);
-        if idx == 0 {
-            return samples[0].1;
-        }
-        if idx >= samples.len() {
-            return samples[samples.len() - 1].1;
-        }
-        let (t0, v0) = samples[idx - 1];
-        let (t1, v1) = samples[idx];
-        if (t1 - t0).abs() < 1e-12 {
-            return v0;
-        }
-        let frac = ((t - t0) / (t1 - t0)).clamp(0.0, 1.0);
-        v0 + (v1 - v0) * frac
-    };
-
-    // 折线 a→f 是否容纳 (a, f) 内全部样本（端点精确）。
-    let line_fits = |a: usize, f: usize| -> bool {
-        let (ta, va) = samples[a];
-        let (tf, vf) = samples[f];
-        let span = tf - ta;
-        if span <= 1e-12 {
-            return (vf - va).abs() <= tolerance;
-        }
-        let slope = (vf - va) / span;
-        samples[a + 1..f]
-            .iter()
-            .all(|(tj, vj)| (vj - (va + slope * (tj - ta))).abs() <= tolerance)
-    };
-
-    let mut out: Vec<(f64, f64)> = Vec::new();
-    let push_point = |t: f64, v: f64, out: &mut Vec<(f64, f64)>| {
-        if let Some(last) = out.last_mut() {
-            if (last.0 - t).abs() <= 1e-9 {
-                last.1 = v;
-                return;
-            }
-        }
-        out.push((t, v));
-    };
-
-    // 首端点（强制）。
-    let first_t = samples[0].0.max(range_start);
-    push_point(first_t, value_at(first_t), &mut out);
-
-    let mut anchor = 0usize;
-    loop {
-        // 找从 anchor 出发能容纳税入的最远样本。
-        let mut f = anchor + 1;
-        let mut farthest = anchor + 1;
-        while f < samples.len() {
-            if line_fits(anchor, f) {
-                farthest = f;
-                f += 1;
-            } else {
-                break;
-            }
-        }
-        let (t, v) = samples[farthest];
-        push_point(t, v, &mut out);
-        anchor = farthest;
-        if anchor + 1 >= samples.len() {
-            break;
-        }
-    }
-
-    // 末端点（强制）。若末点值与端值在容差内相等（帧网格取不到精确 range_end
-    // 的常态），把末点延伸到 range_end 而不是追加第四点——最后一段的偏差
-    // 仍在容差内，且保持"线性段只有端点"的精简不变式。
-    let end_t = range_end;
-    let end_v = value_at(end_t);
-    if let Some(last) = out.last_mut() {
-        if (last.1 - end_v).abs() <= tolerance {
-            last.0 = end_t;
-            last.1 = end_v;
-        } else {
-            push_point(end_t, end_v, &mut out);
-        }
-    } else {
-        push_point(end_t, end_v, &mut out);
-    }
-    out
-}
-
 /// 音高参数线 → 活跃 take 的 PITCHENV（default take 的 ITEM 直属块）。
 ///
 /// - 坐标 u = t_rel × 组合速率（`item_time_to_take_env_u` 唯一转换点）；

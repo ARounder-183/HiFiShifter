@@ -1653,6 +1653,43 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                           void dispatch(updatePitchReferenceRemote(ids));
                                           setMultiSelectedClipIds([]);
                                       }}
+                                      onImportHostPitch={(ids) => {
+                                          // 一次性迁移：REAPER take 音高 → 参数线。
+                                          // 回执里的 framesSkipped 是"没有音高分析
+                                          // 因而没写"的帧数，如实回报而不是假装全成。
+                                          void (async () => {
+                                              const result = await webApi.importHostTakePitch(ids);
+                                              if (result?.ok === false) {
+                                                  frontendLog("warn", 
+                                                      "import_host_take_pitch failed",
+                                                      result.error ?? "unknown",
+                                                  );
+                                                  return;
+                                              }
+                                              frontendLog("info", 
+                                                  "import_host_take_pitch",
+                                                  `frames=${result?.framesWritten ?? 0} skipped=${result?.framesSkipped ?? 0}`,
+                                              );
+                                          })();
+                                      }}
+                                      onExportHostPitch={(ids) => {
+                                          // 一次性迁移：参数线 → REAPER take 音高包络
+                                          // （宿主侧 Item 音高偏移一并归零）。
+                                          void (async () => {
+                                              const result = await webApi.exportHostTakePitch(ids);
+                                              if (result?.ok === false) {
+                                                  frontendLog("warn", 
+                                                      "export_host_take_pitch failed",
+                                                      result.error ?? "unknown",
+                                                  );
+                                                  return;
+                                              }
+                                              frontendLog("info", 
+                                                  "export_host_take_pitch",
+                                                  `points=${result?.pointsWritten ?? 0}`,
+                                              );
+                                          })();
+                                      }}
                                       onExportMidi={(ids) => {
                                           setContextMenu(null);
                                           void handleExportMidi(ids);

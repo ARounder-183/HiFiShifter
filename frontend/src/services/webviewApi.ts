@@ -34,6 +34,8 @@ export const webApi = {
     setPitchShift: coreApi.setPitchShift,
     synthesize: coreApi.synthesize,
     saveSynthesized: coreApi.saveSynthesized,
+    importHostTakePitch: coreApi.importHostTakePitch,
+    exportHostTakePitch: coreApi.exportHostTakePitch,
     saveSeparated: coreApi.saveSeparated,
     exportAudioAdvanced: coreApi.exportAudioAdvanced,
     playOriginal: coreApi.playOriginal,

@@ -2017,6 +2017,8 @@ export const jaJP = {
     history_op_param_block_edit: "パラメータブロックを編集",
     history_op_import_midi: "MIDI をインポート",
     history_op_edit_midi: "MIDI データを編集",
+    history_op_host_pitch_import: "REAPER テイクのピッチを読み込み",
+    history_op_host_pitch_export: "REAPER テイクのピッチへ変換",
     history_op_import_vocalshifter: "VocalShifter プロジェクトをインポート",
     history_op_recording: "録音",
     history_op_batch: "一括操作",

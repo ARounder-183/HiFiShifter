@@ -177,6 +177,8 @@ export const enUS = {
     history_op_param_block_edit: "Edit parameter blocks",
     history_op_import_midi: "Import MIDI",
     history_op_edit_midi: "Edit MIDI data",
+    history_op_host_pitch_import: "Import REAPER take pitch",
+    history_op_host_pitch_export: "Convert to REAPER take pitch",
     history_op_import_vocalshifter: "Import VocalShifter project",
     history_op_recording: "Recording",
     history_op_batch: "Batch operation",

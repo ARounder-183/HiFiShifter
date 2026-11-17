@@ -21,6 +21,8 @@ pub(crate) mod host_edit;
 pub(crate) mod host_split;
 /// take 方向（倒放）的结构写回：REAPER 没有反向 setter，倒放是 SOURCE SECTION。
 mod source_direction;
+/// take 音高包络（PITCHENV）在 item state chunk 里的读写。
+mod take_pitch;
 pub(crate) mod undo;
 
 const IID: [u32; 4] = [0x79655E36, 0x77EE4267, 0xA573FEF7, 0x4912C27C];

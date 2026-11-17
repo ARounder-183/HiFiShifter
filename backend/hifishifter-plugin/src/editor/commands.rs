@@ -20,6 +20,9 @@ pub(super) fn mutates_audio(command: &str) -> bool {
             | "stretch_track_linked_params"
             // MIDI 导入整段改写音高曲线，与 `set_param_frames` 同一类改动。
             | "import_midi_to_pitch"
+            // REAPER 音高互转同样整段改写曲线（两个方向都会写），在途渲染必须作废。
+            | "import_host_take_pitch"
+            | "export_host_take_pitch"
             | "set_track_state"
             | "move_track"
             | "undo_timeline"
@@ -681,6 +684,232 @@ fn export_audio_to_file(
             .map(|parent| parent.to_string_lossy().to_string())
             .unwrap_or_default(),
         "count": 1,
+    }))
+}
+
+// ── REAPER take 音高 ⇄ HiFiShifter 参数线（一次性迁移）─────────────────────
+//
+// 【语义是**迁移**，不是复制】REAPER 的 D_PITCH / PITCHENV 作用在**送进插件的
+// 素材**上，HiFiShifter 的 pitch_edit 作用在**插件输出**上。转换后两侧都留着，
+// 听到的就是**两倍**音高。因此每个方向在写完之后都要把另一侧清零 —— 这也正是
+// 「转换为 REAPER Take 音高包络需重置 Item 音高偏移」那条需求的一半。
+
+/// 命令入参里的片段列表。
+fn pitch_bridge_clip_ids(input: &Value) -> Result<Vec<String>, String> {
+    let ids: Vec<String> = serde_json::from_value(input["clipIds"].clone())
+        .map_err(|_| "invalid clip id list".to_string())?;
+    if ids.is_empty() || ids.len() > 512 {
+        return Err("the pitch bridge needs 1..512 clips".into());
+    }
+    Ok(ids)
+}
+
+/// 这个片段唯一直接绑定的宿主 take（与 host_edit_target 同一口径）。
+fn pitch_bridge_target(
+    session: &EditorSession,
+    clip_id: &str,
+) -> Result<crate::host::HostClipTarget, String> {
+    let document = session.document().ok_or("host timeline unavailable")?;
+    for owner in document.renderer_owners() {
+        if let Ok(target) = owner.host_edit_target(clip_id) {
+            return Ok(target);
+        }
+    }
+    Err("clip has no unique directly bound host take".into())
+}
+
+/// 一个片段在桥接时需要的只读事实（全部在**不持时间线锁**时算好）。
+struct PitchBridgeClip {
+    root_track: String,
+    start_sec: f64,
+    length_sec: f64,
+    rate: f64,
+    /// D_PITCH（半音）：REAPER 的 Item 音高偏移。
+    static_semitones: f64,
+    /// take 的音高包络点（u 域）。
+    points: Vec<hifishifter_kernel::pitch_bridge::EnvelopePoint>,
+}
+
+fn pitch_bridge_collect(
+    session: &EditorSession,
+    clip_ids: &[String],
+) -> Result<Vec<PitchBridgeClip>, String> {
+    let snapshot = session.timeline.lock_or_recover().clone();
+    let mut collected = Vec::with_capacity(clip_ids.len());
+    for clip_id in clip_ids {
+        let clip = snapshot
+            .clips
+            .iter()
+            .find(|clip| clip.id == *clip_id)
+            .ok_or("unknown editor clip")?
+            .clone();
+        let root_track = snapshot
+            .resolve_root_track_id(&clip.track_id)
+            .ok_or("clip track has no root parameter line")?;
+        let target = pitch_bridge_target(session, clip_id)?;
+        let pitch = target.take_pitch_points(&|| true)?;
+        collected.push(PitchBridgeClip {
+            root_track,
+            start_sec: clip.start_sec.max(0.0),
+            length_sec: clip.length_sec.max(0.0),
+            rate: if clip.playback_rate.is_finite() && clip.playback_rate > 0.0 {
+                clip.playback_rate as f64
+            } else {
+                1.0
+            },
+            static_semitones: target.geometry.take_pitch,
+            points: pitch.points,
+        });
+    }
+    Ok(collected)
+}
+
+/// 把所选片段的宿主侧音高清零（迁移语义的另一半）。
+fn clear_host_take_pitch(session: &EditorSession, clip_ids: &[String]) -> Result<usize, String> {
+    let mut cleared = 0usize;
+    for clip_id in clip_ids {
+        let target = pitch_bridge_target(session, clip_id)?;
+        target.set_take(c"D_PITCH", 0., &|| true)?;
+        target.write_take_pitch_points(&[], &|| true)?;
+        target.update(&|| true)?;
+        cleared += 1;
+    }
+    Ok(cleared)
+}
+
+/// 方向 1：REAPER take 音高 → HiFiShifter 参数线。
+fn import_host_take_pitch(session: &EditorSession, input: &Value) -> Result<Value, String> {
+    let clip_ids = pitch_bridge_clip_ids(input)?;
+    let clips = pitch_bridge_collect(session, &clip_ids)?;
+
+    let mut written_frames = 0usize;
+    let mut skipped_frames = 0usize;
+    let mut windows: Vec<(String, u32, Vec<f32>, Vec<bool>)> = Vec::new();
+    {
+        let mut timeline = session.timeline.lock_or_recover();
+        let frame_period_ms = timeline.frame_period_ms().max(0.1);
+        let mut before_by_root: std::collections::BTreeMap<String, Vec<f32>> =
+            std::collections::BTreeMap::new();
+        for clip in &clips {
+            timeline.ensure_params_for_root(&clip.root_track);
+            let Some(entry) = timeline.params_by_root_track.get_mut(&clip.root_track) else {
+                return Err("params_missing".into());
+            };
+            before_by_root
+                .entry(clip.root_track.clone())
+                .or_insert_with(|| entry.pitch_edit.clone());
+            let start_frame = ((clip.start_sec * 1000.0) / frame_period_ms).round() as usize;
+            let count = (((clip.length_sec * 1000.0) / frame_period_ms).ceil()).max(1.0) as usize;
+            for index in 0..count {
+                let frame = start_frame + index;
+                let orig = entry.pitch_orig.get(frame).copied().unwrap_or(0.0);
+                if !(orig.is_finite() && orig > 0.0) || frame >= entry.pitch_edit.len() {
+                    skipped_frames += 1;
+                    continue;
+                }
+                let offset_sec = index as f64 * frame_period_ms / 1000.0;
+                let u = hifishifter_kernel::pitch_bridge::offset_to_take_u(offset_sec, clip.rate);
+                let value = clip.static_semitones
+                    + hifishifter_kernel::pitch_bridge::sample_envelope(&clip.points, u);
+                if !value.is_finite() {
+                    skipped_frames += 1;
+                    continue;
+                }
+                entry.pitch_edit[frame] = orig + value as f32;
+                written_frames += 1;
+            }
+        }
+        for (root, before) in before_by_root {
+            let Some(entry) = timeline.params_by_root_track.get(&root) else {
+                continue;
+            };
+            if let Some((start, values, present)) =
+                hifishifter_kernel::editor::midi_import::pitch_write_window(
+                    &before,
+                    &entry.pitch_edit,
+                )
+            {
+                windows.push((root, start, values, present));
+            }
+        }
+    }
+    // 【权威写在锁外】与 MIDI 导入同一条理由：write_authority_frames 会再取一次
+    // 时间线锁压撤销点，持锁调用即自死锁。
+    for (root, start, values, present) in &windows {
+        match session.write_authority_frames(root, "pitch", *start, values, Some(present), true) {
+            Some(Ok(_)) => {}
+            Some(Err(error)) => return Err(error),
+            None => return Err("parameter authority disappeared during the pitch import".into()),
+        }
+    }
+    let cleared = clear_host_take_pitch(session, &clip_ids)?;
+    Ok(json!({
+        "ok": true,
+        "clips": clip_ids.len(),
+        "framesWritten": written_frames,
+        "framesSkipped": skipped_frames,
+        "clearedPoints": cleared,
+    }))
+}
+
+/// 方向 2：HiFiShifter 参数线 → REAPER take 音高包络。
+fn export_host_take_pitch(session: &EditorSession, input: &Value) -> Result<Value, String> {
+    let clip_ids = pitch_bridge_clip_ids(input)?;
+    let mut points_written = 0usize;
+    let mut cleared_frames = 0usize;
+    let mut plans = Vec::new();
+    {
+        let timeline = session.timeline.lock_or_recover();
+        let frame_period_ms = timeline.frame_period_ms().max(0.1);
+        for clip_id in &clip_ids {
+            let clip = timeline
+                .clips
+                .iter()
+                .find(|clip| clip.id == *clip_id)
+                .ok_or("unknown editor clip")?
+                .clone();
+            let offsets = hifishifter_kernel::pitch_editing::compute_clip_export_pitch_offsets(
+                &timeline, &clip,
+            )
+            .map(|frames| frames.offsets)
+            .unwrap_or_default();
+            let rate = if clip.playback_rate.is_finite() && clip.playback_rate > 0.0 {
+                clip.playback_rate as f64
+            } else {
+                1.0
+            };
+            let points = hifishifter_kernel::pitch_bridge::build_take_pitch_points(
+                &offsets,
+                frame_period_ms,
+                clip.length_sec.max(0.0),
+                rate,
+            );
+            let root_track = timeline.resolve_root_track_id(&clip.track_id);
+            let start_frame = ((clip.start_sec.max(0.0) * 1000.0) / frame_period_ms).round() as u32;
+            let count =
+                (((clip.length_sec.max(0.0) * 1000.0) / frame_period_ms).ceil()).max(0.0) as u32;
+            plans.push((clip_id.clone(), points, root_track, start_frame, count));
+        }
+    }
+    for (clip_id, points, root_track, start_frame, count) in plans {
+        let target = pitch_bridge_target(session, &clip_id)?;
+        target.write_take_pitch_points(&points, &|| true)?;
+        // 「需重置 Item 音高偏移」：迁移语义的这一半。
+        target.set_take(c"D_PITCH", 0., &|| true)?;
+        target.update(&|| true)?;
+        points_written += points.len();
+        if let Some(root) = root_track {
+            if count > 0 {
+                session.restore_authority_frames(&root, "pitch", start_frame, count, true);
+                cleared_frames += count as usize;
+            }
+        }
+    }
+    Ok(json!({
+        "ok": true,
+        "clips": clip_ids.len(),
+        "pointsWritten": points_written,
+        "clearedFrames": cleared_frames,
     }))
 }
 
@@ -2377,6 +2606,9 @@ pub(super) fn dispatch(
         // 快速导出选中片段：与 `export_audio_advanced` 共用渲染与编码路径，
         // 只是把范围取成选中片段的并集、目标路径由 `outputDir` + `fileName` 组成。
         "quick_export_selected_clips" => quick_export_selected_clips(session, &args(input)?),
+        // REAPER take 音高 ⇄ 参数线（一次性迁移，两侧都清零对侧）。
+        "import_host_take_pitch" => import_host_take_pitch(session, &input),
+        "export_host_take_pitch" => export_host_take_pitch(session, &input),
         // 合成结果另存：插件的渲染输出**就是**合成结果，因此与工程导出同一条路径。
         "save_synthesized" => {
             let path = input["outputPath"].as_str().unwrap_or_default().to_owned();

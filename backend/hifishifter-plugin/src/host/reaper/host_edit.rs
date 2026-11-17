@@ -1304,7 +1304,10 @@ mod tests {
             .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"reversed":true}))
             .is_ok());
         assert!(editor
-            .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"reversed":false}))
+            .plan_host_edit(
+                "set_clip_state",
+                &json!({"clipId":clip.id,"reversed":false})
+            )
             .is_ok());
         // 循环源**可以**规划：`B_LOOPSRC` 是纯 item 属性，内核语义与它一致。
         assert!(editor

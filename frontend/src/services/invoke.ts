@@ -545,6 +545,12 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "update_pitch_reference":
             return { clipIds: args[0] };
 
+        case "import_host_take_pitch":
+            return { clipIds: args[0] };
+
+        case "export_host_take_pitch":
+            return { clipIds: args[0] };
+
         case "select_clip":
             return { clipId: args[0] };
 

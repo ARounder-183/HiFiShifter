@@ -1952,6 +1952,8 @@ export const zhTW = {
     history_op_param_block_edit: "編輯參數區塊",
     history_op_import_midi: "匯入 MIDI",
     history_op_edit_midi: "編輯 MIDI 資料",
+    history_op_host_pitch_import: "匯入 REAPER Take 音高",
+    history_op_host_pitch_export: "轉換為 REAPER Take 音高",
     history_op_import_vocalshifter: "匯入 VocalShifter 專案",
     history_op_recording: "錄音",
     history_op_batch: "批次操作",

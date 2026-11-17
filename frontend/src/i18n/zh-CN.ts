@@ -1949,6 +1949,8 @@ export const zhCN = {
     history_op_param_block_edit: "编辑参数块",
     history_op_import_midi: "导入 MIDI",
     history_op_edit_midi: "编辑 MIDI 数据",
+    history_op_host_pitch_import: "导入 REAPER Take 音高",
+    history_op_host_pitch_export: "转换为 REAPER Take 音高",
     history_op_import_vocalshifter: "导入 VocalShifter 工程",
     history_op_recording: "录音",
     history_op_batch: "批量操作",
