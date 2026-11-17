@@ -1660,13 +1660,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                           void (async () => {
                                               const result = await webApi.importHostTakePitch(ids);
                                               if (result?.ok === false) {
-                                                  frontendLog("warn", 
+                                                  frontendLog(
+                                                      "warn",
                                                       "import_host_take_pitch failed",
                                                       result.error ?? "unknown",
                                                   );
                                                   return;
                                               }
-                                              frontendLog("info", 
+                                              frontendLog(
+                                                  "info",
                                                   "import_host_take_pitch",
                                                   `frames=${result?.framesWritten ?? 0} skipped=${result?.framesSkipped ?? 0}`,
                                               );
@@ -1678,13 +1680,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                           void (async () => {
                                               const result = await webApi.exportHostTakePitch(ids);
                                               if (result?.ok === false) {
-                                                  frontendLog("warn", 
+                                                  frontendLog(
+                                                      "warn",
                                                       "export_host_take_pitch failed",
                                                       result.error ?? "unknown",
                                                   );
                                                   return;
                                               }
-                                              frontendLog("info", 
+                                              frontendLog(
+                                                  "info",
                                                   "export_host_take_pitch",
                                                   `points=${result?.pointsWritten ?? 0}`,
                                               );
