@@ -70,6 +70,10 @@ impl ExtensionOwner {
             caps.media_import = host.can_import_audio();
             caps.track_create = host.can_create_audio_track();
             caps.undo_stack = host.has_project_history();
+            // 【为什么这两位也走同一个 host】它们是**结构**写回（item state chunk /
+            // take 包络），判据是那束 API 在不在，而不是"能不能拖片段"。
+            caps.clip_reverse = host.can_reverse_clips();
+            caps.take_pitch_bridge = host.can_bridge_take_pitch();
         }
         caps
     }

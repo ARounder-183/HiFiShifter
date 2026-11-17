@@ -69,6 +69,10 @@ pub struct Fixture {
     /// 的用例必须显式设置它。
     pub track_value: Cell<f64>,
     pub hook: RefCell<Option<(String, Box<dyn Fn()>)>>,
+    /// `GetItemStateChunk` / `SetItemStateChunk` 是否注册。
+    pub item_state_enabled: Cell<bool>,
+    /// 夹具当前持有的 item state chunk（`SetItemStateChunk` 会写进这里）。
+    pub item_state_chunk: RefCell<String>,
 }
 impl Fixture {
     /// 夹具的指针会交给 `NativeHost` 持有（`IMainFactory` 那条 QI 通路），而
@@ -160,6 +164,8 @@ impl Fixture {
             change: Cell::new(-9),
             track_value: Cell::new(1.),
             hook: RefCell::new(None),
+            item_state_enabled: Cell::new(false),
+            item_state_chunk: RefCell::new(String::new()),
         }));
         ACTIVE.set(value as *const Self as usize);
         value
@@ -197,6 +203,28 @@ impl Fixture {
     }
     pub fn enable_writer(&self) {
         self.writer_enabled.set(true);
+    }
+    /// 启用结构读写（`Get/SetItemStateChunk`）并装入一份初始 chunk。
+    ///
+    /// 【为什么顺带打开媒体与多 take 枚举】方向写回要三样东西：chunk 文本、
+    /// 媒体总长（镜像轴）、以及 `PCM_Source_GetSectionInfo` 的方向位（写后自校验）。
+    /// 缺任何一个都只会得到"能力不可用"，测不到真正的写回路径。
+    pub fn enable_item_state(&self, chunk: &str) {
+        self.enable_media();
+        self.takes_enabled.set(true);
+        self.take_source.set(0x1000);
+        self.section_reports.set(true);
+        self.clear_markers();
+        self.item_state_chunk.replace(chunk.to_string());
+        self.item_state_enabled.set(true);
+    }
+    /// 一键装好"单 take 音频 item"的 chunk（GUID 与夹具的 take 身份一致）。
+    pub fn single_take_chunk(&self) -> String {
+        "<ITEM\nPOSITION 0\nLENGTH 0.00009070294784580499\nSEL 1\n\
+         IGUID {11111111-1111-1111-1111-111111111111}\n\
+         SOFFS 0\nPLAYRATE 1 1 0\nGUID {22222222-2222-2222-2222-222222222222}\n\
+         <SOURCE WAVE\nFILE \"ara://source\"\n>\n>\n"
+            .to_string()
     }
     pub fn enable_media(&self) {
         self.enable_writer();
@@ -422,6 +450,10 @@ unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_voi
         "GetMediaTrackInfo_Value" if f.inventory_enabled.get() => {
             inventory_track_value as *const ()
         }
+        "GetItemStateChunk" if f.item_state_enabled.get() => get_item_state as *const (),
+        "SetItemStateChunk" if f.item_state_enabled.get() => set_item_state as *const (),
+        "genGuid" if f.item_state_enabled.get() => gen_guid as *const (),
+        "guidToString" if f.item_state_enabled.get() => guid_to_string as *const (),
         "GetUserFileNameForRead" if f.media_enabled.get() => media_picker as *const (),
         "GetUserFileName" if f.media_enabled.get() => multi_picker as *const (),
         "InsertTrackInProject" if f.media_enabled.get() => insert_track as *const (),
@@ -987,6 +1019,86 @@ unsafe extern "C" fn section_info(
     }
     unsafe { *reversed = f.take_reversed.get() };
     true
+}
+
+/// `GetItemStateChunk(MediaItem*, char* buf, int size, bool isUndo)`。
+unsafe extern "C" fn get_item_state(
+    item: *mut c_void,
+    buffer: *mut std::ffi::c_char,
+    size: i32,
+    _is_undo: bool,
+) -> bool {
+    let f = fixture();
+    assert!(item == f.item() || item == f.right_item());
+    f.record("get-item-state");
+    let chunk = f.item_state_chunk.borrow().clone();
+    let bytes = chunk.as_bytes();
+    // 与 REAPER 一致：放不下就返回 false（调用方据此扩容重试）。
+    if size <= 0 || bytes.len() + 1 > size as usize {
+        return false;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            bytes.as_ptr().cast::<std::ffi::c_char>(),
+            buffer,
+            bytes.len(),
+        );
+        *buffer.add(bytes.len()) = 0;
+    }
+    true
+}
+
+/// `SetItemStateChunk(MediaItem*, const char* chunk, bool isUndo)`。
+///
+/// 【为什么夹具要"解析"方向】写回之后调用方会立刻用
+/// `PCM_Source_GetSectionInfo` 做一次"写→读→比"。夹具若只是存下文本，
+/// 那一步永远读到旧值，自校验就成了摆设 —— 只有真的按 chunk 里的 MODE 更新
+/// 方向位，这条回归才有意义。
+unsafe extern "C" fn set_item_state(
+    item: *mut c_void,
+    text: *const std::ffi::c_char,
+    _is_undo: bool,
+) -> bool {
+    let f = fixture();
+    assert!(item == f.item() || item == f.right_item());
+    f.record("set-item-state");
+    if text.is_null() {
+        return false;
+    }
+    let chunk = unsafe { CStr::from_ptr(text) }
+        .to_string_lossy()
+        .to_string();
+    if chunk.is_empty() {
+        return false;
+    }
+    let sectioned = chunk.contains("<SOURCE SECTION");
+    let mode = chunk
+        .lines()
+        .find(|line| line.trim_start().starts_with("MODE "))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(0);
+    f.take_reversed.set(sectioned && mode > 0);
+    f.item_state_chunk.replace(chunk);
+    f.change.set(f.change.get().wrapping_add(1));
+    true
+}
+
+/// `genGuid(GUID*)`：夹具不需要真 GUID，给一个确定的零值即可（身份校验走
+/// `GetSetMediaItem*Info_String`，不读这里）。
+unsafe extern "C" fn gen_guid(out: *mut super::item_chunk::NativeGuid) {
+    unsafe { std::ptr::write(out, super::item_chunk::NativeGuid::default()) };
+}
+
+/// `guidToString(const GUID*, char*)`。
+unsafe extern "C" fn guid_to_string(
+    _guid: *const super::item_chunk::NativeGuid,
+    buffer: *mut std::ffi::c_char,
+) {
+    let text = c"{00000000-0000-0000-0000-000000000000}";
+    unsafe {
+        std::ptr::copy_nonoverlapping(text.as_ptr(), buffer, text.to_bytes_with_nul().len());
+    }
 }
 
 /// `GetMediaSourceFileName(PCM_source*, char* buf, int sz)`：把夹具里记的路径写进缓冲。

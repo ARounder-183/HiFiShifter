@@ -19,6 +19,8 @@ mod host_timer;
 pub(crate) mod clipboard;
 pub(crate) mod host_edit;
 pub(crate) mod host_split;
+/// take 方向（倒放）的结构写回：REAPER 没有反向 setter，倒放是 SOURCE SECTION。
+mod source_direction;
 pub(crate) mod undo;
 
 const IID: [u32; 4] = [0x79655E36, 0x77EE4267, 0xA573FEF7, 0x4912C27C];
@@ -309,6 +311,8 @@ impl hifishifter_kernel::editor::host::EditorHost for NativeHost {
             media_import: self.can_import_audio(),
             track_create: self.can_create_audio_track(),
             item_clipboard: self.can_clipboard_items(),
+            clip_reverse: self.can_reverse_clips(),
+            take_pitch_bridge: self.can_bridge_take_pitch(),
             fade_axes: self.fade_axes_v2.is_some(),
             // 导出与宿主无关：两条后端都只读授权 PCM 再写用户选定的文件。
             export_audio: true,
