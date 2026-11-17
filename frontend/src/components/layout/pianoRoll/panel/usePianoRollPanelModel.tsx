@@ -2158,6 +2158,21 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         return byClip;
     }, [paramBlockClips]);
     useEffect(() => {
+        // 【"还没分析"不是缺陷】自动音节分析只在块层可见 + 合成开启时才会被请求
+        // （见下方分析批处理）。图层关着时每一条 clip 都处于 `missing` ——
+        // 那是**设置**，不是诊断信号；逐条上报只会在日志里刷出上百条
+        // `analysis_window_stale`，把真正需要看的 `stale`（有旧结果但窗口
+        // 覆盖不到）淹掉。两层判据与下方批处理取同一来源，声明在更后面，
+        // 这里按值读取（依赖数组同样按值）。
+        if (
+            !isParamBlockLayerVisible({
+                alwaysShowParamBlocks: s.alwaysShowParamBlocks,
+                toolMode: s.toolMode,
+                selectToolMode: s.selectToolMode,
+            }) ||
+            !pitchEnabled
+        )
+            return;
         for (const clip of paramBlockClips) {
             const take =
                 clip.takes?.find((item) => item.id === clip.activeTakeId) ?? clip.takes?.[0];
@@ -2179,7 +2194,14 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 });
             }
         }
-    }, [paramBlockClips, rootTrackId]);
+    }, [
+        s.alwaysShowParamBlocks,
+        s.toolMode,
+        s.selectToolMode,
+        paramBlockClips,
+        pitchEnabled,
+        rootTrackId,
+    ]);
 
     /** Drag-time loudness warp from the frozen geometry to the current one. */
     const loudnessSnapshotKey = loudnessSnapshot?.baselineKey ?? null;
