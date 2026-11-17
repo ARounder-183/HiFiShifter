@@ -33,6 +33,10 @@ Invoke-Gate 'Log verbosity gate' { python scripts/checks/check-log-verbosity.py 
 # 症状是"控件能点、点了没反应" —— 静默失效，且不会有编译错误。
 Invoke-Gate 'Command gating gate' { python scripts/checks/check-command-gating.py }
 
+# 每个系统「另存为 / 打开」对话框都必须带词表里的类型过滤器。缺了不会报错：
+# 类型下拉框变成空的，用户可以把 .zip 诊断包存成 .txt（实测发生过）。
+Invoke-Gate 'Dialog filter gate' { python scripts/checks/check-dialog-filters.py }
+
 # 版本号、安装器文案、模型清单、许可清单、安装器形态：都是"少一处也不报错"的约定。
 Invoke-Gate 'Product consistency gate' { & (Join-Path $PSScriptRoot 'check-product-consistency.ps1') }
 

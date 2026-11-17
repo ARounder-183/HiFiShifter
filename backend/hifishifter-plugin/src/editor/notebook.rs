@@ -288,8 +288,13 @@ pub(super) fn export_with_dialog(
                 args["suggestedName"].as_str().unwrap_or_default(),
                 "untitled",
             );
-            let Some(path) =
-                super::browser_files::pick_save_path(window, &format!("{base}.{ext}"), &ext)?
+            let Some(path) = super::browser_files::pick_save_path(
+                window,
+                &format!("{base}.{ext}"),
+                // 正文格式由用户在前端选（md / html）；词表按扩展名取对应的类型名，
+                // 于是下拉框里显示的是「Markdown Document」而不是一个通配符。
+                &hifishifter_kernel::file_types::notebook_document(&ext),
+            )?
             else {
                 return Ok(serde_json::json!({"ok": true, "canceled": true}));
             };
@@ -320,7 +325,12 @@ pub(super) fn export_with_dialog(
                 .filter(|name| !name.trim().is_empty())
                 .unwrap_or(&fallback);
             let name = sanitize_export_file_name(suggested, "asset");
-            let Some(path) = super::browser_files::pick_save_path(window, &name, &asset.ext)?
+            // 附件扩展名来自资产本身（用户贴进来的图片），词表按它**动态**构造一条。
+            let Some(path) = super::browser_files::pick_save_path(
+                window,
+                &name,
+                &hifishifter_kernel::file_types::FileType::asset(&asset.ext),
+            )?
             else {
                 return Ok(serde_json::json!({"ok": true, "canceled": true}));
             };
