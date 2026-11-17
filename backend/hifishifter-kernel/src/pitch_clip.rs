@@ -489,6 +489,10 @@ fn file_exists_cached(path: &Path) -> bool {
     len > 0
 }
 
+/// 插件物化分析副本的文件名前缀（`host_pcm::materialize_impl` 写出的
+/// `source-{blake3}.wav`）。命中前缀 ⇒ 文件名即内容令牌（见键构造处的说明）。
+const MATERIALIZED_SOURCE_PREFIX: &str = "source-";
+
 fn resample_curve_linear(values: &[f32], out_len: usize) -> Vec<f32> {
     if out_len == 0 {
         return vec![];
@@ -553,10 +557,32 @@ fn build_clip_pitch_key(
         hasher.update(b"(content)");
         hasher.update(content_id.as_bytes());
     } else if let Some(source_path) = source_path {
-        hasher.update(source_path.as_bytes());
-        let (len, mtime) = file_sig(Path::new(source_path));
-        hasher.update(&len.to_le_bytes());
-        hasher.update(&mtime.to_le_bytes());
+        // 【物化副本按**内容令牌**建键】插件的分析源是私有副本
+        // `…/sources/source-{blake3}.wav`：文件名本身就是整份内容的哈希。
+        // 把**完整路径 + 文件签名**哈希进键有两个真实代价，且都在真机日志里出现过：
+        // ① 命名空间含会话序号 ⇒ 宿主重绑一次组件（REAPER 在播放/弹窗时反复做）就换一个
+        //    pcm_dir ⇒ 同一份音频换个路径 ⇒ 缓存必 miss ⇒ 每次绑完整重分析（真机
+        //    01:18–01:23 的 17 次 `starting analysis` 全是同一份 Vocal 文件）；
+        // ② mtime 进键 ⇒ 同路径原子重建（tmp+rename）一次，键就变 ⇒ 又一轮重分析。
+        // 文件名令牌已经回答了"内容变没变"：内容变 ⇒ blake3 变 ⇒ 文件名变 ⇒ 键变。
+        // 因此物化形态只哈希**文件名**；真实用户文件（App / 外部拖入）保持原判据
+        // （路径 + 文件签名），那里路径本身就是身份。
+        let path = Path::new(source_path);
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
+        match name.filter(|name| name.starts_with(MATERIALIZED_SOURCE_PREFIX)) {
+            Some(token) => {
+                hasher.update(b"(materialized)");
+                hasher.update(token.as_bytes());
+            }
+            None => {
+                hasher.update(source_path.as_bytes());
+                let (len, mtime) = file_sig(path);
+                hasher.update(&len.to_le_bytes());
+                hasher.update(&mtime.to_le_bytes());
+            }
+        }
     } else {
         hasher.update(b"(no_source)");
     }
@@ -1933,12 +1959,39 @@ mod tests {
         );
 
         // 没有内容身份时退回路径 + 文件签名（老工程 / 外部拖入），行为与改动前一致。
+        // 物化副本例外：文件名 `source-{blake3}.wav` 即内容令牌 —— 只哈希文件名。
         let d = clip("C:/pcm/hfs-ui-1-1-/sources/source-aaa.wav", None);
         let e = clip("C:/pcm/hfs-ui-9-2-/sources/source-bbb.wav", None);
         assert_ne!(
             build_clip_pitch_key(&tl, &d, "root", 5.0).unwrap().key,
             build_clip_pitch_key(&tl, &e, "root", 5.0).unwrap().key,
             "没有内容身份时键必须仍然区分不同的源"
+        );
+
+        // 【回归：会话私有目录换名不得换键】宿主重绑组件 ⇒ 新 EditorSession ⇒ 新
+        // 命名空间目录；同一份音频物化到不同目录。完整路径入键的旧实现每次绑都
+        // 整份重分析（真机日志里同一份 Vocal 文件 17 次 `starting analysis`）。
+        // 物化形态只认文件名令牌：目录变了、键不变。
+        let session_one = clip("C:/pcm/hfs-ui-1-1-/sources/source-aaa.wav", None);
+        let session_two = clip("C:/pcm/hfs-ui-9-2-/sources/source-aaa.wav", None);
+        assert_eq!(
+            build_clip_pitch_key(&tl, &session_one, "root", 5.0)
+                .unwrap()
+                .key,
+            build_clip_pitch_key(&tl, &session_two, "root", 5.0)
+                .unwrap()
+                .key,
+            "物化副本换个会话目录必须命中同一份分析结果"
+        );
+
+        // 非物化形态（真实用户文件）仍然按完整路径区分：两个不同路径的两个文件
+        // 即便文件名相同也必须得到不同的键。
+        let real_a = clip("C:/music/Vocal-1-2.wav", None);
+        let real_b = clip("C:/other/Vocal-1-2.wav", None);
+        assert_ne!(
+            build_clip_pitch_key(&tl, &real_a, "root", 5.0).unwrap().key,
+            build_clip_pitch_key(&tl, &real_b, "root", 5.0).unwrap().key,
+            "真实文件按路径区分"
         );
     }
 
