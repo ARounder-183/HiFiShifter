@@ -12,7 +12,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Provider } from "react-redux";
 import { combineReducers, configureStore } from "@reduxjs/toolkit";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import sessionReducer from "../../../../features/session/sessionSlice";
 import dockReducer from "../../../../features/dock/dockSlice";
@@ -20,6 +20,7 @@ import keybindingsReducer from "../../../../features/keybindings/keybindingsSlic
 import { enUS } from "../../../../i18n/en-US";
 import { I18nProvider } from "../../../../i18n/I18nProvider";
 import { writableHostCaps, type HostCaps } from "../../../../services/pluginBootstrapFixtures";
+import { webApi } from "../../../../services/webviewApi";
 import { AppThemeProvider } from "../../../../theme/AppThemeProvider";
 import { PitchBridgeMenu } from "./PitchBridgeMenu";
 
@@ -86,11 +87,12 @@ function headingLabels(): string[] {
     );
 }
 
+/** 右键展开菜单 —— 与工具栏其它带小三角的按钮同一条协议。 */
 async function openMenu() {
     const trigger = container.querySelector("button");
     expect(trigger, "工具栏按钮必须渲染出来").toBeTruthy();
     await act(async () => {
-        trigger!.click();
+        trigger!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
     });
 }
 
@@ -120,7 +122,7 @@ test("it renders nothing outside a REAPER ARA session", async () => {
     expect(container.querySelector("button")).toBeNull();
 });
 
-test("the three scopes carry their counts, and the copy note is spelled out", async () => {
+test("the three scopes carry their counts", async () => {
     setBootstrap(pluginCaps({ takePitchBridge: true }));
     await mount();
     await openMenu();
@@ -128,8 +130,6 @@ test("the three scopes carry their counts, and the copy note is spelled out", as
     const headings = headingLabels();
     expect(headings).toContain(enUS.pitch_bridge_import_heading);
     expect(headings).toContain(enUS.pitch_bridge_export_heading);
-    // "转换是复制"是唯一能解释语义的一行，必须在菜单里（只读行，不是可点项）。
-    expect(headings).toContain(enUS.pitch_bridge_copy_note);
 
     // 两个方向各三项（当前轨道 / 选区内 / 全部），计数取自作用域。
     const labels = menuLabels();
@@ -162,4 +162,33 @@ test("a scope with nothing in it is disabled instead of silently doing nothing",
     expect(empty!.disabled).toBe(true);
     const filled = entries.find((el) => (el.textContent ?? "").startsWith("All clips (1)"));
     expect(filled!.disabled).toBe(false);
+});
+test("the left button exports the current track while the right button opens the scopes", async () => {
+    setBootstrap(pluginCaps({ takePitchBridge: true }));
+    const exported = vi
+        .spyOn(webApi, "exportHostTakePitch")
+        .mockResolvedValue({ ok: true, clipsConverted: 2 } as never);
+    await mount();
+
+    const trigger = container.querySelector<HTMLButtonElement>("button")!;
+    expect(trigger.disabled).toBe(false);
+    // 同一排的按钮都是「左键立刻做事」：这枚做的事是导出当前轨道。
+    expect(trigger.getAttribute("data-tooltip")).toBe(enUS.pitch_bridge_tooltip_export_track);
+
+    await act(async () => {
+        trigger.click();
+    });
+    await act(async () => {
+        await Promise.resolve();
+    });
+
+    expect(exported).toHaveBeenCalledTimes(1);
+    expect(exported.mock.calls[0][0]).toEqual(["c1", "c2"]);
+    expect(exported.mock.calls[0][1]).toEqual({ tolerant: true });
+    // 左键不是「开菜单」：菜单是右键的东西。
+    expect(document.body.querySelector(".hs-menu__item")).toBeNull();
+
+    await openMenu();
+    expect(document.body.querySelector(".hs-menu__item")).toBeTruthy();
+    exported.mockRestore();
 });

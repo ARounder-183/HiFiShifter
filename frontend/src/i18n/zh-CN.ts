@@ -2275,7 +2275,7 @@ export const zhCN = {
     pitch_bridge_scope_selection: "选区内",
     pitch_bridge_scope_all: "全部片段",
     pitch_bridge_scope_item: "{scope}（{count}）",
-    pitch_bridge_copy_note: "转换是复制：两侧各留一份",
+    pitch_bridge_tooltip_export_track: "Take 音高互转：导出当前轨道",
     pitch_bridge_nothing_converted: "没有可转换的片段",
     pitch_bridge_skipped_clips: "跳过 {count} 个片段",
     pitch_bridge_skipped_tooltip: "没有可转换音高数据的片段未作改动",

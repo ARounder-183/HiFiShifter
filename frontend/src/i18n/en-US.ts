@@ -2347,7 +2347,7 @@ export const enUS = {
     pitch_bridge_scope_selection: "In selection",
     pitch_bridge_scope_all: "All clips",
     pitch_bridge_scope_item: "{scope} ({count})",
-    pitch_bridge_copy_note: "Conversion copies: each side keeps its own data",
+    pitch_bridge_tooltip_export_track: "Take pitch bridge: Export current track",
     pitch_bridge_nothing_converted: "Nothing to convert",
     pitch_bridge_skipped_clips: "{count} clip skipped|{count} clips skipped",
     pitch_bridge_skipped_tooltip: "Clips without convertible pitch data were left untouched",

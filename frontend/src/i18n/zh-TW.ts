@@ -2279,7 +2279,7 @@ export const zhTW = {
     pitch_bridge_scope_selection: "選取範圍內",
     pitch_bridge_scope_all: "全部片段",
     pitch_bridge_scope_item: "{scope}（{count}）",
-    pitch_bridge_copy_note: "轉換是複製：兩側各留一份",
+    pitch_bridge_tooltip_export_track: "Take 音高互轉：匯出目前軌道",
     pitch_bridge_nothing_converted: "沒有可轉換的片段",
     pitch_bridge_skipped_clips: "略過 {count} 個片段",
     pitch_bridge_skipped_tooltip: "沒有可轉換音高資料的片段未作改動",

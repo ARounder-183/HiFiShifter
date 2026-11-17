@@ -2333,7 +2333,7 @@ export const koKR = {
     pitch_bridge_scope_selection: "선택 범위 안",
     pitch_bridge_scope_all: "모든 클립",
     pitch_bridge_scope_item: "{scope} ({count})",
-    pitch_bridge_copy_note: "변환은 복사입니다. 양쪽에 각각 남습니다",
+    pitch_bridge_tooltip_export_track: "테이크 피치 변환: 현재 트랙 내보내기",
     pitch_bridge_nothing_converted: "변환할 클립이 없습니다",
     pitch_bridge_skipped_clips: "{count}개 클립 건너뜀",
     pitch_bridge_skipped_tooltip: "변환할 피치 데이터가 없는 클립은 그대로 두었습니다",
