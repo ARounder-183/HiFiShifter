@@ -4642,7 +4642,20 @@ impl EditorSession {
 
     /// 参数写入前的 undo 点：先把当前 authority 挂到当前位置，再把新步的占位
     /// 也填成“写入前”的权威；写入成功后再用 `note_authority_step` 覆盖新步。
+    ///
+    /// 操作名固定是 `param_curve`；一次操作有自己名字时用
+    /// `checkpoint_authority_step_as`。
     pub(super) fn checkpoint_authority_step(&self) {
+        self.checkpoint_authority_step_as(HistoryOp::ParamCurve.key());
+    }
+
+    /// 带操作名的 undo 点。
+    ///
+    /// 【为什么需要】撤销面板按这个 key 显示"这一步做了什么"（词典里
+    /// `history_op_<key>`）。`HistoryOp::HostPitchImport` / `HostPitchExport` 与它们的
+    /// 五语系文案一直存在，但此前没有任何调用点用它们 —— 于是"导入 REAPER Take
+    /// 音高"在撤销面板里显示成"参数曲线"，用户回退时看不出自己退回的是哪一步。
+    pub(super) fn checkpoint_authority_step_as(&self, op: &str) {
         if self.suppress_history.load(Ordering::Acquire) {
             return;
         }
@@ -4652,12 +4665,7 @@ impl EditorSession {
         let timeline = self.timeline.lock_or_recover().clone();
         let mut history = self.history.lock_or_recover();
         let previous = history.position;
-        history::checkpoint(
-            &mut history,
-            &timeline,
-            HistoryOp::ParamCurve.key().into(),
-            || None,
-        );
+        history::checkpoint(&mut history, &timeline, op.to_string(), || None);
         let next = history.position;
         drop(history);
         let mut steps = self.authority_history.lock_or_recover();
