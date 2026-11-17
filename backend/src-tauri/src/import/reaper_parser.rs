@@ -185,8 +185,12 @@ impl Default for ReaperTake {
 pub struct ReaperSource {
     pub source_type: String,
     pub file_path: String,
-    /// Reaper SECTION SOURCE 的 MODE 值。
-    /// 当 MODE > 0 时表示该 SECTION 以反向方式读取。
+    /// Reaper SECTION SOURCE 的 `MODE` 值 —— 是**位**，不是"越大越反向"。
+    ///
+    /// 【真机读数（REAPER 7.85）】位 0 = 段边界无效（按整份媒体算）、位 1 = 反向：
+    /// `MODE 1` 是**正放**的整媒体段（`PCM_Source_GetSectionInfo` 报 reverse=false），
+    /// `MODE 3` 才是宿主 `Toggle take reverse` 写出的形态。判方向请用
+    /// `hifishifter_kernel::take_geometry::section_mode_reversed`。
     pub section_mode: i32,
     /// Reaper SECTION SOURCE 的起点（秒）。
     pub section_start_sec: Option<f64>,

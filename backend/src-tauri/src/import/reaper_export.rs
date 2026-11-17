@@ -80,27 +80,27 @@ fn reaper_source_type(path: &str) -> &'static str {
     }
 }
 
-fn audio_source(take: &ClipTake, _rate: f64, source_span_sec: f64) -> ReaperSource {
+/// 构造 take 的 `<SOURCE>` 块。
+///
+/// `section` = `Some((mode, start, length))` ⇒ 写成 `SECTION` 包装；`None` ⇒ 裸媒体源。
+/// `MODE` 的位语义见 `hifishifter_kernel::take_geometry`（真机读数表）。
+fn audio_source(take: &ClipTake, section: Option<(i32, f64, f64)>) -> ReaperSource {
     let path = take.source_path.clone().unwrap_or_default();
-    let (start, _) = source_bounds(take, 0.0);
-
-    if take.reversed {
-        let mut source = ReaperSource::new();
-        source.source_type = "SECTION".to_string();
-        source.file_path = path.clone();
-        source.section_mode = 1;
-        source.section_start_sec = Some(start);
-        source.section_length_sec = Some(source_span_sec.max(0.0));
-        source
-    } else {
-        let mut source = ReaperSource::new();
-        source.source_type = reaper_source_type(&path).to_string();
-        source.file_path = path;
-        source.section_mode = 0;
-        source.section_start_sec = None;
-        source.section_length_sec = None;
-        source
+    let mut source = ReaperSource::new();
+    match section {
+        Some((mode, start_sec, length_sec)) => {
+            source.source_type = "SECTION".to_string();
+            source.file_path = path;
+            source.section_mode = mode;
+            source.section_start_sec = Some(start_sec);
+            source.section_length_sec = Some(length_sec.max(0.0));
+        }
+        None => {
+            source.source_type = reaper_source_type(&path).to_string();
+            source.file_path = path;
+        }
     }
+    source
 }
 
 fn midi_source(take: &ClipTake, bpm: f64) -> ReaperSource {
@@ -195,29 +195,32 @@ fn fill_reaper_take(
         return false;
     }
 
+    // 媒体总长：倒放镜像轴的唯一来源（take 自带时长优先，其次帧数 ÷ 采样率）。
+    let media_dur = take
+        .duration_sec
+        .filter(|d| d.is_finite() && *d > 1e-9)
+        .or_else(|| {
+            take.duration_frames
+                .zip(take.source_sample_rate)
+                .filter(|(frames, sr)| *sr > 0 && *frames > 0)
+                .map(|(frames, sr)| frames as f64 / sr as f64)
+        });
+
     if take.reversed && take.loop_enabled {
-        // 倒放 + Loop：回绕发生在整个媒体文件上（与引擎及正放 Loop 的
-        // "循环原始音频文件"语义一致）。用覆盖全媒体的 SECTION 承载回绕域，
-        // SOFFS 承载倒放相位锚点。
-        let media_dur = take
-            .duration_sec
-            .filter(|d| d.is_finite() && *d > 1e-9)
-            .or_else(|| {
-                take.duration_frames
-                    .zip(take.source_sample_rate)
-                    .filter(|(frames, sr)| *sr > 0 && *frames > 0)
-                    .map(|(frames, sr)| frames as f64 / sr as f64)
-            });
         if let Some(d) = media_dur {
+            // 倒放 + Loop：宿主的 `MODE 3` 让**源就是整份媒体**（回绕域天然正确，
+            // 与引擎"循环原始音频文件"语义一致），相位由镜像 `SOFFS` 承载。
             let anchor = take.source_end_sec.min(d).rem_euclid(d);
-            let mut source = ReaperSource::new();
-            source.source_type = "SECTION".to_string();
-            source.file_path = source_path.to_string();
-            source.section_mode = 1;
-            source.section_start_sec = Some(0.0);
-            source.section_length_sec = Some(d);
             dest.s_offs = (d - anchor).rem_euclid(d);
-            dest.source = Some(source);
+            dest.source = Some(audio_source(
+                take,
+                Some((
+                    hifishifter_kernel::take_geometry::SECTION_MODE_WHOLE_SOURCE
+                        | hifishifter_kernel::take_geometry::SECTION_MODE_REVERSED,
+                    0.0,
+                    anchor,
+                )),
+            ));
             return true;
         }
         // 媒体时长未知：退化为下方通用反向路径（尽力而为）。
@@ -226,19 +229,33 @@ fn fill_reaper_take(
     let (start, end) = source_bounds(take, clip_length_sec);
     let source_span = (end - start).max(0.0);
 
-    let mut source = audio_source(take, rate, source_span);
     if take.reversed {
-        // 反向：SECTION MODE 1 承载源窗口，SOFFS 置 0。
-        dest.s_offs = 0.0;
+        // 倒放（非 Loop）：宿主自己的编码 —— `MODE 3`（整份媒体 + 反向）+
+        // 镜像 `SOFFS = D − 正向窗口终点`（REAPER 7.85 的 `Toggle take reverse`）。
+        // 媒体总长读不出来时退回 `MODE 2`（段内反向、`SOFFS 0`）：同样是宿主认得的
+        // 结构，只是镜像轴改由段端点自己承担。
+        let (mode, section_start, s_offs) = match media_dur.filter(|d| end <= *d + 1e-9) {
+            Some(axis) => (
+                hifishifter_kernel::take_geometry::SECTION_MODE_WHOLE_SOURCE
+                    | hifishifter_kernel::take_geometry::SECTION_MODE_REVERSED,
+                0.0,
+                (axis - end).max(0.0),
+            ),
+            None => (
+                hifishifter_kernel::take_geometry::SECTION_MODE_REVERSED,
+                start,
+                0.0,
+            ),
+        };
+        dest.s_offs = s_offs;
+        dest.source = Some(audio_source(take, Some((mode, section_start, source_span))));
     } else {
         // 正向：plain SOURCE + SOFFS 承载进入锚点（可为负 = 前导静音）。
         // Loop 的回绕发生在整个媒体文件上（REAPER 原生 Loop source 语义），
         // 无需 SECTION；非 Loop 超出媒体的 LENGTH 部分由 REAPER 渲染静音。
-        source.section_start_sec = None;
-        source.section_length_sec = None;
         dest.s_offs = start;
+        dest.source = Some(audio_source(take, None));
     }
-    dest.source = Some(source);
     true
 }
 
@@ -797,18 +814,6 @@ pub(crate) fn parse_for_test(bytes: &[u8]) -> crate::reaper_parser::ReaperData {
     crate::reaper_parser::parse_clipboard_bytes(bytes).expect("parse exported REAPER clipboard")
 }
 
-/// 测试辅助：按导入端约定从 SECTION take 还原倒放锚点（区间末端 − SOFFS）。
-#[cfg(test)]
-fn compute_anchor_from_section_for_test(take: &crate::reaper_parser::ReaperTake) -> f64 {
-    let src = take.source.as_ref().expect("source present");
-    let end = src.section_start_sec.unwrap_or(0.0)
-        + src
-            .section_length_sec
-            .filter(|len| len.is_finite() && *len > 0.0)
-            .unwrap_or(0.0);
-    end - take.s_offs.max(0.0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1113,6 +1118,46 @@ mod tests {
     }
 
     #[test]
+    fn reversed_clip_exports_the_host_own_mirror_encoding() {
+        // 倒放（非 Loop）：`MODE 3` + 镜像 `SOFFS = D − 正向终点` + `LENGTH = 跨度`。
+        // 夹具：媒体 10 s，正向窗口 [2, 5) ⇒ SOFFS = 10 − 5 = 5。
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(track_id),
+            Some("Reversed".to_string()),
+            Some(0.0),
+            Some(3.0),
+            Some("C:/audio/reverse.wav".to_string()),
+        );
+        if let Some(clip) = timeline.clips.iter_mut().find(|clip| clip.id == clip_id) {
+            clip.duration_sec = Some(10.0);
+            clip.reversed = true;
+            clip.loop_enabled = false;
+            clip.source_start_sec = 2.0;
+            clip.source_end_sec = 5.0;
+            clip.sync_take_from_flat();
+        }
+
+        let export = build_reaper_clipboard(&timeline, &[clip_id], &BTreeMap::new()).unwrap();
+        let parsed = parse_for_test(&export.bytes);
+        let item = &parsed.tracks[0].items[0];
+        let source = item.default_take.source.as_ref().unwrap();
+        assert_eq!(
+            source.section_mode,
+            hifishifter_kernel::take_geometry::SECTION_MODE_WHOLE_SOURCE
+                | hifishifter_kernel::take_geometry::SECTION_MODE_REVERSED
+        );
+        assert_eq!(source.section_start_sec, Some(0.0));
+        assert!((source.section_length_sec.unwrap_or(-1.0) - 3.0).abs() < 1e-9);
+        assert!(
+            (item.default_take.s_offs - 5.0).abs() < 1e-9,
+            "镜像起点必须是 D − 正向终点 = 5，got {}",
+            item.default_take.s_offs
+        );
+    }
+
+    #[test]
     fn reversed_loop_clip_exports_whole_file_section_with_anchor() {
         // 倒放 + Loop：SECTION 必须覆盖整个媒体文件（回绕域），
         // SOFFS 承载倒放相位锚点：SOFFS = D − floor_mod(min(source_end, D), D)。
@@ -1141,26 +1186,32 @@ mod tests {
         let item = &parsed.tracks[0].items[0];
         assert!(item.is_loop, "loop flag must be exported");
         let source = item.default_take.source.as_ref().unwrap();
+        // 宿主自己的编码：`MODE 3`（整份媒体 + 反向）+ 镜像 SOFFS。
         assert_eq!(
-            source.section_mode, 1,
-            "reversal must be expressed via SECTION MODE"
+            source.section_mode,
+            hifishifter_kernel::take_geometry::SECTION_MODE_WHOLE_SOURCE
+                | hifishifter_kernel::take_geometry::SECTION_MODE_REVERSED,
+            "倒放必须写成 MODE 3（读侧的证据见 take_geometry 的模块文档）"
         );
-        assert!(
-            source.section_start_sec == Some(0.0) && source.section_length_sec == Some(4.0),
-            "SECTION must cover the whole media file, got {:?}..{:?}",
+        assert_eq!(
             source.section_start_sec,
-            source.section_length_sec
+            Some(0.0),
+            "MODE 3 下 STARTPOS 不参与解算，宿主自己写 0"
         );
-        // φ = mod(min(1, 4), 4) = 1 ⇒ SOFFS = 4 − 1 = 3。
+        // φ = mod(min(1, 4), 4) = 1 ⇒ SOFFS = 4 − 1 = 3，LENGTH = 回绕跨度 φ。
         assert!(
             (item.default_take.s_offs - 3.0).abs() < 1e-9,
             "reverse anchor phase must round-trip, got {}",
             item.default_take.s_offs
         );
+        assert!(
+            (source.section_length_sec.unwrap_or(-1.0) - 1.0).abs() < 1e-9,
+            "LENGTH 必须是正向跨度（= 锚点），got {:?}",
+            source.section_length_sec
+        );
 
-        // 导入端按同一约定还原倒放锚点：anchor = 区间末端 − SOFFS = 4 − 3 = 1 = φ。
-        let take = &item.default_take;
-        let anchor = super::compute_anchor_from_section_for_test(take);
+        // 导入端按同一约定还原锚点：MODE 3 的轴是媒体总长 ⇒ anchor = D − SOFFS = 1 = φ。
+        let anchor = 4.0 - item.default_take.s_offs;
         assert!((anchor - 1.0).abs() < 1e-9);
     }
 

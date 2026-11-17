@@ -167,11 +167,17 @@ fn take_geometry(
     is_reversed: bool,
     is_loop: bool,
 ) -> hifishifter_kernel::take_geometry::TakeGeometry {
-    use hifishifter_kernel::take_geometry::{SourceSection, TakeGeometry};
+    use hifishifter_kernel::take_geometry::TakeGeometry;
     let section = take.source.as_ref().and_then(|source| {
-        source.section_start_sec.map(|start_sec| SourceSection {
-            start_sec,
-            length_sec: source.section_length_sec,
+        source.section_start_sec.and_then(|start_sec| {
+            // 【为什么按 MODE 位判】`MODE 1/3` 是"整份媒体"（宿主忽略 STARTPOS/
+            // LENGTH），把这两个字段当段边界会让镜像轴从 D 缩成段长，倒放 take 整体
+            // 平移 `2·soffs − D`（读数表见 `take_geometry` 的模块文档）。
+            hifishifter_kernel::take_geometry::section_from_rpp(
+                source.section_mode,
+                start_sec,
+                source.section_length_sec,
+            )
         })
     });
     TakeGeometry {
@@ -181,8 +187,9 @@ fn take_geometry(
         play_rate_signed: take.play_rate.first().copied().unwrap_or(1.0),
         media_duration_sec,
         section,
-        // 【为什么是 `Some`】App 的方向判据是 `play_rate < 0 || section_mode > 0`，
-        // 两个来源都在 `.rpp` 里读得到 —— 这一侧永远**知道**方向。
+        // 【为什么是 `Some`】App 的方向判据是 `play_rate < 0 || section_mode_reversed`
+        // （`MODE` 的**位**，不是 `> 0`），两个来源都在 `.rpp` 里读得到 ——
+        // 这一侧永远**知道**方向。
         reversed: Some(is_reversed),
         loop_enabled: is_loop,
     }
@@ -294,11 +301,9 @@ fn build_audio_clip_take(
     // 该 take 自身存在激活 VOLENV 时其音量钮被取代（各 take 独立判定）。
     let take_volume_overridden = take_volume_envelope_active(take);
     let raw_play_rate = take.play_rate.first().copied().unwrap_or(1.0);
-    let source_section_reversed = take
-        .source
-        .as_ref()
-        .map(|src| src.section_mode > 0)
-        .unwrap_or(false);
+    let source_section_reversed = take.source.as_ref().is_some_and(|src| {
+        hifishifter_kernel::take_geometry::section_mode_reversed(src.section_mode)
+    });
     let item_reversed = raw_play_rate < 0.0 || source_section_reversed;
     let play_rate = raw_play_rate.abs().max(0.01);
 
@@ -1297,11 +1302,9 @@ fn process_item(
 
     // 获取 take 参数
     let raw_play_rate = take.play_rate.first().copied().unwrap_or(1.0);
-    let source_section_reversed = take
-        .source
-        .as_ref()
-        .map(|src| src.section_mode > 0)
-        .unwrap_or(false);
+    let source_section_reversed = take.source.as_ref().is_some_and(|src| {
+        hifishifter_kernel::take_geometry::section_mode_reversed(src.section_mode)
+    });
     let item_reversed = raw_play_rate < 0.0 || source_section_reversed;
     let play_rate = raw_play_rate.abs().max(0.01);
     let item_pitch_semitones = take.play_rate.get(2).copied().unwrap_or(0.0); // 整体音高偏移

@@ -14,6 +14,24 @@
 //! 现在只有这一份：两侧各自把宿主读数装进 [TakeGeometry]，调用
 //! [TakeGeometry::forward_source_window]，结果必然一致。
 //!
+//! ## `SOURCE SECTION` 的 `MODE` 是**位**（真机取证，REAPER 7.85）
+//!
+//! 同一份 `STARTPOS 5 / LENGTH 3` 的段，四种 `MODE` 下
+//! `PCM_Source_GetSectionInfo` 的回报：
+//!
+//! | MODE | offset | length | reverse | 含义 |
+//! |------|--------|--------|---------|------|
+//! | 0 | 5 | 3 | false | 正向段 |
+//! | 1 | 0 | 媒体全长 | false | 段边界无效（整份媒体） |
+//! | 2 | 5 | 3 | true | 反向段 |
+//! | 3 | 0 | 媒体全长 | true | 整份媒体 + 反向 |
+//!
+//! 宿主自己的 `Item properties: Toggle take reverse` 写的是 **`MODE 3`** +
+//! `SOFFS = D − 正向窗口终点`（`LENGTH` 写正向跨度、`STARTPOS` 写 0）。
+//! 因此 **`MODE > 0` 不等于"倒放"** —— `MODE 1` 是正放的整媒体段。早期实现
+//! 按 `> 0` 判方向、按 `MODE 1` 写倒放，两侧都错：读会把"整媒体正放"当成倒放，
+//! 写在 REAPER 里读回来是正放（插件侧的"写→读→比"因此永远失败）。
+//!
 //! ## 坐标约定（这是全部混乱的源头，先钉死）
 //!
 //! 内核的倒放消费模型（state::model::clip_playback_window_sec）是：
@@ -36,6 +54,46 @@
 //! - [ForwardWindow] 只由本模块产出；
 //! - [MirroredOffset] 只由 [host_start_offset]（读取的逆运算）产出；
 //! - 两者都不实现 Deref，想取值必须显式调 .start() / .end() / .value()。
+
+/// REAPER `SOURCE SECTION` 的 `MODE` 位：段边界无效（按整份媒体算）。
+///
+/// 读数证据见模块文档的表（`MODE 1/3` 下 `offset=0`、`length=媒体全长`）。
+pub const SECTION_MODE_WHOLE_SOURCE: i32 = 1;
+/// REAPER `SOURCE SECTION` 的 `MODE` 位：反向播放。
+///
+/// 宿主自己的 `Item properties: Toggle take reverse` 写 `MODE 3`
+/// （= `WHOLE_SOURCE | REVERSED`）+ 镜像 `SOFFS`。
+pub const SECTION_MODE_REVERSED: i32 = 2;
+
+/// `MODE` 是否置了反向位。
+pub fn section_mode_reversed(mode: i32) -> bool {
+    mode & SECTION_MODE_REVERSED != 0
+}
+
+/// `MODE` 是否让段边界失效（整份媒体）。
+pub fn section_mode_whole_source(mode: i32) -> bool {
+    mode & SECTION_MODE_WHOLE_SOURCE != 0
+}
+
+/// `.rpp` 文本里的 `SOURCE SECTION` → 可寻址段。
+///
+/// 【为什么 `MODE` 置了整媒体位就返回 `None`】宿主会忽略 `STARTPOS`/`LENGTH`
+/// （报的是整份媒体），把这两个字段当段边界用会让镜像轴从"媒体总长 D"缩成
+/// "段长" —— 倒放 take 因此整体平移 `2·soffs − D`，而波形、时长、淡变全都正常，
+/// 极难归因。`MODE 0/2`（真正的段）照旧带上边界。
+pub fn section_from_rpp(
+    mode: i32,
+    start_sec: f64,
+    length_sec: Option<f64>,
+) -> Option<SourceSection> {
+    if section_mode_whole_source(mode) {
+        return None;
+    }
+    Some(SourceSection {
+        start_sec,
+        length_sec,
+    })
+}
 
 /// 一个 SOURCE SECTION 的边界。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -106,10 +164,10 @@ pub struct TakeGeometry {
     pub media_duration_sec: Option<f64>,
     /// SECTION 边界（RPP 的 STARTPOS/LENGTH，或实时 PCM_Source_GetSectionInfo）。
     pub section: Option<SourceSection>,
-    /// 方向：`play_rate < 0` **或** SECTION MODE > 0（App），或宿主方向位（插件）。
+    /// 方向：`play_rate < 0` **或** SECTION `MODE` 的反向位（App），或宿主方向位（插件）。
     ///
-    /// 【为什么是三态】REAPER 的 "Toggle take reverse" 是"正 PLAYRATE + SECTION MODE 1"，
-    /// 方向**唯一**来源就是那个方向位。读不到它时旧实现按正放处理 —— 而"读不到"与
+    /// 【为什么是三态】REAPER 的 "Toggle take reverse" 是"正 PLAYRATE + SECTION
+    /// `MODE 3`"（整份媒体 + 反向），方向**唯一**来源就是那个方向位。读不到它时旧实现按正放处理 —— 而"读不到"与
     /// "确实是正放"是两件完全不同的事：前者会把倒放片段按正放渲染（方向与 REAPER
     /// 完全相反、偏移量差 `2·soffs + consumed − D`），后者是正常。
     ///
@@ -121,13 +179,16 @@ pub struct TakeGeometry {
 }
 
 impl TakeGeometry {
-    /// App 口径的方向判定：负速率 **或** 反向 SECTION。
+    /// App 口径的方向判定：负速率 **或** 反向位。
     ///
     /// 【为什么两个来源都要】REAPER 有两种表达倒放的方式，用哪一种取决于用户
     /// 怎么操作（"Toggle take reverse" 建 SECTION，手改速率则没有 SECTION）。
     /// 只看一个会漏掉另一半。
+    ///
+    /// 【为什么判位而不是 `> 0`】见模块文档的读数表：`MODE 1` 是**正放**的整媒体
+    /// 段，`> 0` 会把它读成倒放。只看位 1 才与宿主一致。
     pub fn reversed_from_host(play_rate_signed: f64, section_mode: i32) -> bool {
-        play_rate_signed < 0.0 || section_mode > 0
+        play_rate_signed < 0.0 || section_mode_reversed(section_mode)
     }
 
     /// 速率幅值，下限 0.01（与 App 的 raw_play_rate.abs().max(0.01) 一致）。
@@ -553,11 +614,26 @@ mod tests {
         assert_eq!(geometry.forward_source_window(), Some(win(-0.5, 0.5)));
     }
 
-    /// 负速率是倒放的**另一个**来源，必须与 SECTION MODE 1 等价。
+    /// 负速率是倒放的**另一个**来源；`MODE` 按**位**判，不是按 `> 0`。
+    ///
+    /// 【为什么钉死 `MODE 1` 是正放】真机读数表（模块文档）：`MODE 1` 下
+    /// `PCM_Source_GetSectionInfo` 报 `reverse=false`，它是"整份媒体"的正放段。
+    /// 按 `> 0` 判方向会把每个 `MODE 1` 的工程读成倒放。
     #[test]
     fn negative_play_rate_is_reversed_like_a_section_mode() {
         assert!(TakeGeometry::reversed_from_host(-1.0, 0));
-        assert!(TakeGeometry::reversed_from_host(1.0, 1));
+        assert!(
+            TakeGeometry::reversed_from_host(1.0, 3),
+            "MODE 3 = 整媒体 + 反向"
+        );
+        assert!(
+            TakeGeometry::reversed_from_host(1.0, 2),
+            "MODE 2 = 段 + 反向"
+        );
+        assert!(
+            !TakeGeometry::reversed_from_host(1.0, 1),
+            "MODE 1 是正放的整媒体段"
+        );
         assert!(!TakeGeometry::reversed_from_host(1.0, 0));
         let geometry = TakeGeometry {
             start_offset_sec: 0.75,
@@ -566,6 +642,37 @@ mod tests {
             ..base()
         };
         assert_eq!(geometry.forward_source_window(), Some(win(0.25, 1.25)));
+    }
+
+    /// `MODE` 置了整媒体位时，RPP 里的 `STARTPOS/LENGTH` 不是段边界。
+    #[test]
+    fn a_whole_source_mode_ignores_the_section_bounds() {
+        assert_eq!(
+            section_from_rpp(3, 0.0, Some(3.0)),
+            None,
+            "MODE 3 报的是整份媒体，边界无效"
+        );
+        assert_eq!(
+            section_from_rpp(1, 5.0, Some(3.0)),
+            None,
+            "MODE 1 同样忽略边界（正放）"
+        );
+        assert_eq!(
+            section_from_rpp(0, 5.0, Some(3.0)),
+            Some(SourceSection {
+                start_sec: 5.0,
+                length_sec: Some(3.0)
+            }),
+            "MODE 0 是真正的段"
+        );
+        assert_eq!(
+            section_from_rpp(2, 5.0, Some(3.0)),
+            Some(SourceSection {
+                start_sec: 5.0,
+                length_sec: Some(3.0)
+            }),
+            "MODE 2 是反向段，边界照旧有效"
+        );
     }
 
     /// 倒放 Loop 走"锚点 → 区间起点"的完整区间，不被 item 长度钳制。
