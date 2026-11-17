@@ -687,12 +687,22 @@ fn export_audio_to_file(
     }))
 }
 
-// ── REAPER take 音高 ⇄ HiFiShifter 参数线（一次性迁移）─────────────────────
+// ── REAPER take 音高 ⇄ HiFiShifter 参数线（一次性转换）─────────────────────
 //
-// 【语义是**迁移**，不是复制】REAPER 的 D_PITCH / PITCHENV 作用在**送进插件的
-// 素材**上，HiFiShifter 的 pitch_edit 作用在**插件输出**上。转换后两侧都留着，
-// 听到的就是**两倍**音高。因此每个方向在写完之后都要把另一侧清零 —— 这也正是
-// 「转换为 REAPER Take 音高包络需重置 Item 音高偏移」那条需求的一半。
+// 【两侧各管各的，**互不叠加**】REAPER 的 take 音高（`D_PITCH` / `PITCHENV`）是
+// **源级**播放属性：真机实测（REAPER 7.85）把 +12 半音写进 take 包络后，take FX 里
+// 生成的 440 Hz 测试音仍然是 440 Hz —— 音高处理发生在源级、早于 take FX。ARA 插件交给
+// 宿主的渲染结果同样落在那层之后（同族证据见
+// `docs/2026-11-17-take-envelope-axis-findings.md` 的附节：源级那一层是渲染实测，
+// ARA 那一层是推断 + 现场报障），宿主不会对它再做一遍重采样。于是：
+//
+// - 插件读到、并送去渲染的素材**不含** take 音高 ⇒ `pitch_edit` 必须原样保留；
+// - take 包络只在插件被旁路 / 移除时才作用于这段音频 ⇒ 两侧永远不会同时处理。
+//
+// 所以两个方向都是**复制**（copy）：谁也不清空对方。唯一要动的宿主数值是 item 级
+// `D_PITCH` —— 它与包络叠加，而「转换为 REAPER Take 音高包络」这条需求的语义就是
+// 让包络成为 REAPER 侧唯一的音高来源，因此导出后把它归零（导入方向本来就会把它的
+// 值加进 `pitch_edit`，归零不会丢信息）。
 
 /// 命令入参里的片段列表。
 fn pitch_bridge_clip_ids(input: &Value) -> Result<Vec<String>, String> {
@@ -773,20 +783,11 @@ fn pitch_bridge_collect(
     Ok(collected)
 }
 
-/// 把所选片段的宿主侧音高清零（迁移语义的另一半）。
-fn clear_host_take_pitch(session: &EditorSession, clip_ids: &[String]) -> Result<usize, String> {
-    let mut cleared = 0usize;
-    for clip_id in clip_ids {
-        let target = pitch_bridge_target(session, clip_id)?;
-        target.set_take(c"D_PITCH", 0., &|| true)?;
-        target.write_take_pitch_points(&[], &|| true)?;
-        target.update(&|| true)?;
-        cleared += 1;
-    }
-    Ok(cleared)
-}
-
 /// 方向 1：REAPER take 音高 → HiFiShifter 参数线。
+///
+/// 【宿主侧一个字节都不改】`D_PITCH` 与 `PITCHENV` 留在原处：它们只在插件被旁路 /
+/// 移除时作用，与插件渲染的音频永远不会同时处理（见本段开头的实测）。此前这条命令
+/// 会把宿主侧的包络删掉、`D_PITCH` 归零，用户丢掉的是他自己在 REAPER 里的数据。
 fn import_host_take_pitch(session: &EditorSession, input: &Value) -> Result<Value, String> {
     let clip_ids = pitch_bridge_clip_ids(input)?;
     let clips = pitch_bridge_collect(session, &clip_ids)?;
@@ -851,21 +852,22 @@ fn import_host_take_pitch(session: &EditorSession, input: &Value) -> Result<Valu
             None => return Err("parameter authority disappeared during the pitch import".into()),
         }
     }
-    let cleared = clear_host_take_pitch(session, &clip_ids)?;
     Ok(json!({
         "ok": true,
         "clips": clip_ids.len(),
         "framesWritten": written_frames,
         "framesSkipped": skipped_frames,
-        "clearedPoints": cleared,
     }))
 }
 
 /// 方向 2：HiFiShifter 参数线 → REAPER take 音高包络。
+///
+/// 【为什么**不**清空 HiFiShifter 的音高线】take 音高是源级属性，ARA 渲染结果在它之后
+/// （见本段开头的实测），所以包络根本不会作用到插件渲染出来的音频上 —— 清空只会让
+/// 用户"转换完就听不见音高了"（现场报障）。两侧各留一份，谁也不会被叠加两次。
 fn export_host_take_pitch(session: &EditorSession, input: &Value) -> Result<Value, String> {
     let clip_ids = pitch_bridge_clip_ids(input)?;
     let mut points_written = 0usize;
-    let mut cleared_frames = 0usize;
     let mut plans = Vec::new();
     {
         let timeline = session.timeline.lock_or_recover();
@@ -893,32 +895,22 @@ fn export_host_take_pitch(session: &EditorSession, input: &Value) -> Result<Valu
                 clip.length_sec.max(0.0),
                 rate,
             );
-            let root_track = timeline.resolve_root_track_id(&clip.track_id);
-            let start_frame = ((clip.start_sec.max(0.0) * 1000.0) / frame_period_ms).round() as u32;
-            let count =
-                (((clip.length_sec.max(0.0) * 1000.0) / frame_period_ms).ceil()).max(0.0) as u32;
-            plans.push((clip_id.clone(), points, root_track, start_frame, count));
+            plans.push((clip_id.clone(), points));
         }
     }
-    for (clip_id, points, root_track, start_frame, count) in plans {
+    for (clip_id, points) in plans {
         let target = pitch_bridge_target(session, &clip_id)?;
         target.write_take_pitch_points(&points, &|| true)?;
-        // 「需重置 Item 音高偏移」：迁移语义的这一半。
+        // 「需重置 Item 音高偏移」：`D_PITCH` 与包络会叠加，而这条命令的语义是让
+        // 包络成为 REAPER 侧唯一的音高来源；它的值在导入方向已经折进 `pitch_edit`。
         target.set_take(c"D_PITCH", 0., &|| true)?;
         target.update(&|| true)?;
         points_written += points.len();
-        if let Some(root) = root_track {
-            if count > 0 {
-                session.restore_authority_frames(&root, "pitch", start_frame, count, true);
-                cleared_frames += count as usize;
-            }
-        }
     }
     Ok(json!({
         "ok": true,
         "clips": clip_ids.len(),
         "pointsWritten": points_written,
-        "clearedFrames": cleared_frames,
     }))
 }
 
@@ -2752,6 +2744,134 @@ mod pitch_bridge_tests {
         assert!(
             pitch_bridge_target(&editor, &clip.id).is_ok(),
             "呈现 id 必须先剥掉 namespace 再交给 host_edit_target"
+        );
+        document.close();
+    }
+
+    /// 【导出不得清空 HiFiShifter 的音高线】take 音高是源级属性，ARA 渲染结果在它之后
+    /// —— 包络不会作用到插件渲染出来的音频上，清空只会让用户"转换完就听不见音高"。
+    /// 同时钉住「需重置 Item 音高偏移」那一半：`D_PITCH` 必须归零。
+    #[test]
+    fn exporting_the_take_envelope_keeps_the_hifishifter_line() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_item_state(&host.single_take_chunk());
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        host.set_value("D_PITCH", 2.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let (clip_id, root) = {
+            let mut timeline = editor.timeline.lock_or_recover();
+            let clip_id = timeline.clips[0].id.clone();
+            let track_id = timeline.clips[0].track_id.clone();
+            // 窗口拉长到 8 帧（5 ms 一帧）：旧实现的 `restore_authority_frames` 会正好
+            // 覆盖这 8 帧，所以这条用例对"顺手清空"是敏感的。
+            let clip = timeline
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == clip_id)
+                .unwrap();
+            clip.start_sec = 0.0;
+            clip.length_sec = 0.04;
+            let root = timeline.resolve_root_track_id(&track_id).unwrap();
+            timeline.ensure_params_for_root(&root);
+            (clip_id, root)
+        };
+
+        // 【必须走权威】`params_by_root_track` 只是派生缓存，直接改会被下一次合成抹掉
+        // （见 `midi_import` 的同一条注释）；这里写入的编辑才是"用户的音高线"。
+        editor
+            .write_authority_frames(&root, "pitch", 0, &[2.0_f32; 8], None, true)
+            .expect("插件宿主必须应答权威写口")
+            .expect("权威写入必须成功");
+        let read_line = || {
+            editor
+                .read_authority_frames(&root, "pitch", 0, 8, None, Some(true), None)
+                .expect("插件宿主必须应答权威读口")
+                .expect("权威读取必须成功")
+        };
+        let before = read_line();
+        assert!(
+            before.edit.iter().all(|value| (*value - 2.0).abs() < 1e-6),
+            "夹具必须真的写入一段音高线：{:?}",
+            before.edit
+        );
+
+        export_host_take_pitch(&editor, &json!({ "clipIds": [clip_id.clone()] })).unwrap();
+
+        assert_eq!(
+            host.item_value("D_PITCH"),
+            Some(0.),
+            "Item 音高偏移必须归零（包络成为 REAPER 侧唯一来源）"
+        );
+        let after = read_line();
+        assert_eq!(
+            after.edit, before.edit,
+            "导出 take 音高包络**不得**改动 HiFiShifter 的音高线"
+        );
+        assert_eq!(after.edited, before.edited);
+        document.close();
+    }
+
+    /// 【导入不得删掉宿主的数据】`PITCHENV` 与 `D_PITCH` 只在插件旁路时才作用于那段
+    /// 音频，与插件渲染互不叠加 —— 导入是复制，不是把 REAPER 侧的东西搬走。
+    #[test]
+    fn importing_the_take_pitch_leaves_the_host_envelope_alone() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        let chunk = "<ITEM\nPOSITION 0\nLENGTH 0.00009070294784580499\nSEL 1\n\
+                     IGUID {11111111-1111-1111-1111-111111111111}\n\
+                     SOFFS 0\nPLAYRATE 1 1 0\nGUID {22222222-2222-2222-2222-222222222222}\n\
+                     <SOURCE WAVE\nFILE \"ara://source\"\n>\n\
+                     <PITCHENV\nACT 1 -1\nVIS 1 1 1\nLANEHEIGHT 0 0\nARM 0\n\
+                     DEFSHAPE 0 12 -1\nPT 0.00000000000000000 4.00000000000000000 0\n>\n>\n";
+        host.enable_item_state(chunk);
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        host.set_value("D_PITCH", 3.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip_id = {
+            let mut timeline = editor.timeline.lock_or_recover();
+            let clip_id = timeline.clips[0].id.clone();
+            let track_id = timeline.clips[0].track_id.clone();
+            let root = timeline.resolve_root_track_id(&track_id).unwrap();
+            timeline.ensure_params_for_root(&root);
+            let params = timeline.params_by_root_track.get_mut(&root).unwrap();
+            params.frame_period_ms = 5.0;
+            params.pitch_orig = vec![60.0; 8];
+            params.pitch_edit = vec![60.0; 8];
+            clip_id
+        };
+
+        let result =
+            import_host_take_pitch(&editor, &json!({ "clipIds": [clip_id.clone()] })).unwrap();
+        assert!(
+            result["framesWritten"].as_u64().unwrap() > 0,
+            "导入必须真的写帧：{result}"
+        );
+        assert_eq!(
+            host.item_state_chunk.borrow().as_str(),
+            chunk,
+            "导入不得改写宿主 take 的状态（包络原样保留）"
+        );
+        assert_eq!(
+            host.item_value("D_PITCH"),
+            Some(3.),
+            "导入不得把宿主 Item 音高偏移归零"
         );
         document.close();
     }
