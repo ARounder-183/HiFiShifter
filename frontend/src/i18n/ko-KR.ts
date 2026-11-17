@@ -783,8 +783,6 @@ export const koKR = {
     ctx_channel_mode: "채널 모드",
     ctx_group: "그룹",
     ctx_scan_fake_stereo: "가짜 스테레오 검사 후 변환",
-    ctx_scan_fake_stereo_hint:
-        "좌우 내용이 같은 소재는 모노로 접으면 들리는 소리는 그대로이고 렌더링 시간이 절반으로 줄어듭니다. 일괄 처리는 실행 취소 한 단계로 묶입니다.",
     clip_channel_import_dialog_title: "가져오기 채널 처리",
     clip_channel_import_dialog_desc:
         "가져올 때 좌우 채널 내용이 같은 “가짜 스테레오” 소재를 모노로 접습니다.",
@@ -924,8 +922,6 @@ export const koKR = {
     ctx_replace_midi: "MIDI 교체",
     ctx_replace_midi_all: "모든 MIDI 교체",
     ctx_split_at_playhead: "재생 위치에서 분할",
-    ctx_split_multi_reason: "선택한 모든 클립이 재생 위치에서 분할 가능해야 합니다",
-    ctx_split_playhead_reason: "재생 위치가 클립 범위 안에 있어야 합니다",
     ctx_silence_detection: "무음 감지...",
     silence_method: "감지 방식",
     silence_method_rms: "RMS(에너지)",
@@ -955,7 +951,6 @@ export const koKR = {
     silence_preview_clip: "{n}구간, 총 {dur}s",
     silence_skipped: "건너뜀",
     silence_more_clips: "...외 {n}개 클립",
-    silence_no_audio_source: "선택한 클립에 오디오 소스가 없습니다",
     silence_apply: "적용",
     silence_double_click_reset: "파라미터를 더블클릭하면 기본값으로 재설정됩니다",
     silence_applying: "적용 중...",
@@ -2263,9 +2258,6 @@ export const koKR = {
     plugin_transport_play: "호스트에서 재생/일시 정지",
     plugin_transport_host_only:
         "재생은 호스트가 제어합니다. 플러그인의 재생 키는 호스트로 전달됩니다.",
-    plugin_feature_unavailable: "이 기능은 아직 VST/ARA 플러그인에서 제공되지 않습니다",
-    plugin_reverse_unavailable:
-        "ARA는 역재생 오디오를 제공하지 않습니다. 역재생은 호스트에서 하세요",
     // ── 캡처（ARA 미지원 호스트에서 호스트 재생음을 가져오기）─────────────
     capture_settings_title: "캡처 설정",
     capture_settings_desc:
@@ -2323,6 +2315,11 @@ export const koKR = {
     cap_reason_app_only: "독립 실행형 앱에서만 사용할 수 있습니다",
     cap_reason_plugin_only: "플러그인에서만 사용할 수 있습니다",
     cap_reason_piano_roll_only: "매개변수 편집기에서만 적용됩니다",
+    cap_reason_not_in_plugin: "플러그인에서는 사용할 수 없습니다",
+    // ── 클립 메뉴: REAPER 테이크 피치 변환 ─────────────────────────
+    ctx_host_pitch: "REAPER 피치",
+    ctx_host_pitch_import: "REAPER 테이크 피치 가져오기",
+    ctx_host_pitch_export: "REAPER 테이크 피치 엔벨로프로 변환",
 
     // ── 호스트 페이드 tooltip 보충 설명 ─────────────────────────────
     fade_shape_axes_owned_by_host:

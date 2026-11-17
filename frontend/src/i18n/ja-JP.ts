@@ -722,8 +722,6 @@ export const jaJP = {
     ctx_channel_mode: "チャンネルモード",
     ctx_group: "グループ",
     ctx_scan_fake_stereo: "疑似ステレオをスキャンして変換",
-    ctx_scan_fake_stereo_hint:
-        "左右の内容が同一の素材はモノラルに折りたたむと、聴感は変わらずレンダリング時間が半減します。一括処理は 1 回の元に戻す操作にまとまります。",
     clip_channel_import_dialog_title: "取り込み時のチャンネル処理",
     clip_channel_import_dialog_desc:
         "取り込み時、左右チャンネルの内容が同一の「疑似ステレオ」素材をモノラルに折りたたみます。",
@@ -862,8 +860,6 @@ export const jaJP = {
     ctx_replace_midi: "MIDIを置換",
     ctx_replace_midi_all: "すべてのMIDIを置換",
     ctx_split_at_playhead: "再生ヘッドで分割",
-    ctx_split_multi_reason: "選択したすべてのクリップを再生ヘッドで分割できる必要があります",
-    ctx_split_playhead_reason: "再生ヘッドがクリップの範囲内にある必要があります",
     ctx_silence_detection: "無音検出...",
     silence_method: "検出方式",
     silence_method_rms: "RMS（エネルギー）",
@@ -893,7 +889,6 @@ export const jaJP = {
     silence_preview_clip: "{n} 箇所、計 {dur}s",
     silence_skipped: "スキップ",
     silence_more_clips: "...他 {n} クリップ",
-    silence_no_audio_source: "選択したクリップに音声ソースがありません",
     silence_apply: "適用",
     silence_double_click_reset: "パラメータをダブルクリックでデフォルトに戻す",
     silence_applying: "適用中...",
@@ -2294,9 +2289,6 @@ export const jaJP = {
     plugin_transport_play: "ホストの再生/一時停止",
     plugin_transport_host_only:
         "再生はホストが制御します。プラグインの再生キーはホストに転送されます。",
-    plugin_feature_unavailable: "この機能は VST/ARA プラグインでは未提供です",
-    plugin_reverse_unavailable:
-        "逆再生はホストのアイテム操作です。ホストでこのクリップを逆再生してください",
     // ── キャプチャ（ARA 非対応ホストで、ホストの再生音を取り込む）────────────
     capture_settings_title: "キャプチャ設定",
     capture_settings_desc:
@@ -2354,6 +2346,11 @@ export const jaJP = {
     cap_reason_app_only: "スタンドアロン版でのみ使用できます",
     cap_reason_plugin_only: "プラグインでのみ使用できます",
     cap_reason_piano_roll_only: "パラメータエディタでのみ有効です",
+    cap_reason_not_in_plugin: "プラグインでは利用できません",
+    // ── クリップメニュー：REAPER テイクのピッチ変換 ────────────────
+    ctx_host_pitch: "REAPER ピッチ",
+    ctx_host_pitch_import: "REAPER テイクのピッチを読み込む",
+    ctx_host_pitch_export: "REAPER テイクのピッチエンベロープへ変換",
 
     // ── ホストフェードの tooltip 補足 ───────────────────────────────
     fade_shape_axes_owned_by_host:

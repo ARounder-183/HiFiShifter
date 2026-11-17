@@ -694,8 +694,6 @@ export const zhTW = {
     ctx_channel_mode: "聲道模式",
     ctx_group: "編組",
     ctx_scan_fake_stereo: "掃描假立體聲並轉換",
-    ctx_scan_fake_stereo_hint:
-        "左右聲道內容一致的素材可折疊為單聲道：聽感不變，渲染耗時減半。整批只產生一個復原步驟。",
     clip_channel_import_dialog_title: "匯入聲道處理",
     clip_channel_import_dialog_desc: "匯入時把左右聲道內容一致的「假立體聲」素材折疊為單聲道。",
     clip_channel_import_mode: "自動轉換",
@@ -829,8 +827,6 @@ export const zhTW = {
     ctx_replace_midi: "取代 MIDI",
     ctx_replace_midi_all: "取代全部 MIDI",
     ctx_split_at_playhead: "在播放頭處分割",
-    ctx_split_multi_reason: "需要選取的每條片段都能在播放頭處分割",
-    ctx_split_playhead_reason: "播放頭需要落在片段範圍內",
     ctx_silence_detection: "靜音偵測...",
     silence_method: "偵測方式",
     silence_method_rms: "RMS（能量）",
@@ -860,7 +856,6 @@ export const zhTW = {
     silence_preview_clip: "{n} 段，共 {dur}s",
     silence_skipped: "已跳過",
     silence_more_clips: "...等 {n} 個音訊塊",
-    silence_no_audio_source: "所選音訊塊沒有音訊來源",
     silence_apply: "套用",
     silence_double_click_reset: "雙擊參數可重設為預設值",
     silence_applying: "套用中...",
@@ -2214,8 +2209,6 @@ export const zhTW = {
     plugin_transport_stop: "控制宿主停止播放",
     plugin_transport_play: "控制宿主播放/暫停",
     plugin_transport_host_only: "播放由宿主控制；鍵盤上的播放鍵會轉交給宿主。",
-    plugin_feature_unavailable: "該功能尚未在 VST/ARA 外掛裡提供",
-    plugin_reverse_unavailable: "倒放是宿主 item 操作；請在宿主裡倒放這一條",
     // ── 捕獲（不支援 ARA 的宿主裡，把宿主播放的音訊錄進外掛）──────────────
     capture_settings_title: "捕獲設定",
     capture_settings_desc:
@@ -2269,6 +2262,11 @@ export const zhTW = {
     cap_reason_app_only: "僅在獨立 App 中可用",
     cap_reason_plugin_only: "僅在外掛中可用",
     cap_reason_piano_roll_only: "僅適用於參數編輯器",
+    cap_reason_not_in_plugin: "外掛裡沒有這個功能",
+    // ── 片段菜單：REAPER take 音高互轉 ─────────────────────────────
+    ctx_host_pitch: "REAPER 音高",
+    ctx_host_pitch_import: "匯入 REAPER Take 音高",
+    ctx_host_pitch_export: "轉換為 REAPER Take 音高包絡",
 
     // ── 宿主淡入淡出 tooltip 的補充說明 ─────────────────────────────
     fade_shape_axes_owned_by_host: "讀不出宿主的淡化軸版本，無法確定用哪套軸；請用下方曲率滑桿調整",

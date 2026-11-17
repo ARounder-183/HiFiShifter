@@ -854,8 +854,6 @@ export const enUS = {
     ctx_channel_mode: "Channel Mode",
     ctx_group: "Grouping",
     ctx_scan_fake_stereo: "Scan for Fake Stereo and Convert",
-    ctx_scan_fake_stereo_hint:
-        "Material whose left and right channels match can be folded to mono: identical sound, half the render time. A batch run becomes a single undo step.",
     clip_channel_import_dialog_title: "Import Channel Handling",
     clip_channel_import_dialog_desc:
         'Fold "fake stereo" material, where both channels carry the same content, to mono on import.',
@@ -993,8 +991,6 @@ export const enUS = {
     ctx_replace_midi: "Replace MIDI",
     ctx_replace_midi_all: "Replace MIDI All",
     ctx_split_at_playhead: "Split at Playhead",
-    ctx_split_multi_reason: "Every selected clip must be splittable at the playhead",
-    ctx_split_playhead_reason: "The playhead must be inside the clip",
     ctx_silence_detection: "Silence Detection...",
     silence_method: "Detection",
     silence_method_rms: "RMS (energy)",
@@ -1024,7 +1020,6 @@ export const enUS = {
     silence_preview_clip: "{n} regions, {dur}s",
     silence_skipped: "Skipped",
     silence_more_clips: "...and {n} more clips",
-    silence_no_audio_source: "No audio source in the selected clips",
     silence_apply: "Apply",
     silence_double_click_reset: "Double-click a parameter to reset it to its default",
     silence_applying: "Applying...",
@@ -2276,9 +2271,6 @@ export const enUS = {
     plugin_transport_stop: "Stop playback in the host",
     plugin_transport_play: "Play or pause in the host",
     plugin_transport_host_only: "Playback belongs to the host; play keys are handed to it.",
-    plugin_feature_unavailable: "Not available in the VST/ARA plugin yet",
-    plugin_reverse_unavailable:
-        "Reversing is a host item operation; use the host to reverse this clip",
     // ── Capture (hosts without ARA: record what the host is playing) ──────
     capture_settings_title: "Capture settings",
     capture_settings_desc:
@@ -2338,6 +2330,11 @@ export const enUS = {
     cap_reason_app_only: "Only available in the standalone app",
     cap_reason_plugin_only: "Only available in the plug-in",
     cap_reason_piano_roll_only: "Only applies to the parameter editor",
+    cap_reason_not_in_plugin: "Not available in the plug-in",
+    // ── 片段菜单：REAPER take 音高互转 ─────────────────────────────
+    ctx_host_pitch: "REAPER Pitch",
+    ctx_host_pitch_import: "Import REAPER Take Pitch",
+    ctx_host_pitch_export: "Convert to REAPER Take Pitch Envelope",
 
     // ── 宿主淡入淡出 tooltip 的补充说明 ─────────────────────────────
     fade_shape_axes_owned_by_host:

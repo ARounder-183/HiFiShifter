@@ -69,6 +69,74 @@ export function canSplitHostClips(): boolean {
 export function canClipboardHostClips(): boolean {
     return isPluginMode() && caps()?.itemClipboard === true;
 }
+
+/**
+ * 宿主 **take 结构**（切换 active take / 增删 take / 逐 take 改写）能否写回。
+ *
+ * 【为什么插件里恒为 false，而不是"暂时没做"】插件与宿主 item 的唯一绑定是
+ * **active take 那一条直接通道**（`HostClipTarget` 冻结的就是它）。切换 active take
+ * 会让这条绑定指向另一个 take，增删 take 会让 ARA region 与 take 的一一对应断掉 ——
+ * 两者都不是"多写一个字段"，而是重建整条绑定。这一族因此在插件里**做不到**，
+ * 菜单里不该出现（而不是灰着一片）。
+ *
+ * 能做的仍然保留：读取 take 列表（哪一个是 active、一共有几个）与**重命名** active take
+ * （`set_clip_state{name}` 后端已实现）。
+ */
+export function canEditHostTakes(): boolean {
+    return !isPluginMode();
+}
+/**
+ * 胶合能否执行。
+ *
+ * 【为什么插件里不成立】胶合要么新建一个宿主 item（需要 `AddMediaItemToTrack` +
+ * 逐 take 重建），要么把多个 take 塞进一个 item —— 两条路都是 take/item **结构**
+ * 写回，与上面的 `canEditHostTakes` 同一条边界。
+ */
+export function canGlueClips(): boolean {
+    return !isPluginMode();
+}
+/**
+ * 静音检测能否执行。
+ *
+ * 【为什么插件里不成立】它要按源媒体逐段扫描振幅并**改写 take 的源窗口**（切出一段
+ * 静音）。切源窗口本身可写，但"一次扫描产出很多段新片段"需要新建 item —— 那是
+ * `canGlueClips` 同一条边界。后端也没有对应命令，声明可用只会得到一个点不动的项。
+ */
+export function canDetectSilence(): boolean {
+    return !isPluginMode();
+}
+/**
+ * 假立体声扫描能否执行。
+ *
+ * 【为什么插件里不成立】它要把"左右声道完全相同"的 take 折叠成单声道，写的是
+ * `I_CHANMODE` —— 而声道模式本身**可写**。真正缺的是**扫描**：判定"是否假立体声"
+ * 要读整条源的 PCM，插件的授权只覆盖已绑定 region 的时间窗，覆盖不到整份媒体。
+ * 因此这一项与"声道模式"分开：后者在插件里照常可用。
+ */
+export function canScanFakeStereo(): boolean {
+    return !isPluginMode();
+}
+/**
+ * 宿主 item / take 的**倒放**能否写回。
+ *
+ * 【为什么它是能力位而不是恒真】REAPER 把倒放表达成 `<SOURCE SECTION MODE n>`
+ * 这一层**结构**（见 `kernel/take_geometry` 的方向解算），写回需要
+ * `Get/SetItemStateChunk` 与可解析的 WAVE 源；缺任一项就必须整项不出现。
+ * 后端据此报 `clipReverse`，前端只读这一位 —— 不按宿主名猜。
+ */
+export function canReverseHostClips(): boolean {
+    return !isPluginMode() || caps()?.clipReverse === true;
+}
+/**
+ * REAPER 的 Take 音高 ⇄ HiFiShifter 音高参数线能否互转。
+ *
+ * 【为什么三个条件缺一不可】宿主得**是 REAPER**（PITCHENV 与 `D_PITCH` 是它的概念）、
+ * 后端得真的查到了音高包络 API（读点 / 写点 / 排序，缺一即整束不可用）、并且要能写
+ * `D_PITCH`（迁移语义要把宿主侧清零，见方案 §3.4.1）。三者同时成立才在菜单里出现。
+ */
+export function canBridgeHostTakePitch(): boolean {
+    return isPluginMode() && hostKind() === "reaper" && caps()?.takePitchBridge === true;
+}
 /** 只允许插件私有参数分组，不代表能重排或创建REAPER的轨道/folder。 */
 export function canGroupPluginTracks(): boolean {
     return isPluginMode() && pluginBootstrap()?.trackGrouping === true;
@@ -335,6 +403,14 @@ export type CapabilityId =
     | "clip.clipboard"
     | "clip.geometry"
     | "clip.normalize"
+    | "clip.takes"
+    | "clip.glue"
+    | "clip.silenceDetection"
+    | "clip.fakeStereoScan"
+    | "clip.pitchReference"
+    | "clip.quickExport"
+    | "clip.reverse"
+    | "host.pitchBridge"
     | "track.create"
     | "track.group"
     | "track.edit"
@@ -378,6 +454,20 @@ const CAPABILITIES: Record<CapabilityId, { allowed: () => boolean; reason: Messa
     "clip.clipboard": { allowed: canClipboardHostClips, reason: "cap_reason_unsupported_by_host" },
     "clip.geometry": { allowed: () => false, reason: "cap_reason_host_owns" },
     "clip.normalize": { allowed: () => true, reason: "cap_reason_host_owns" },
+    "clip.takes": { allowed: canEditHostTakes, reason: "cap_reason_not_in_plugin" },
+    "clip.glue": { allowed: canGlueClips, reason: "cap_reason_not_in_plugin" },
+    "clip.silenceDetection": { allowed: canDetectSilence, reason: "cap_reason_not_in_plugin" },
+    "clip.fakeStereoScan": { allowed: canScanFakeStereo, reason: "cap_reason_not_in_plugin" },
+    // 【为什么这两条恒真却仍占一行】它们此前被 `pluginLocalTools`（`!pluginMode`）一刀
+    // 切关掉，而两条命令在插件里**已实现**（`convert_clips_to_pitch_reference` /
+    // `quick_export_selected_clips`）。写进表里，菜单与快捷键才有同一个真相源。
+    "clip.pitchReference": { allowed: () => true, reason: "cap_reason_host_owns" },
+    "clip.quickExport": { allowed: canExportAudio, reason: "cap_reason_unsupported_by_host" },
+    "clip.reverse": { allowed: canReverseHostClips, reason: "cap_reason_unsupported_by_host" },
+    "host.pitchBridge": {
+        allowed: canBridgeHostTakePitch,
+        reason: "cap_reason_unsupported_by_host",
+    },
     "track.create": { allowed: canCreateHostTracks, reason: "cap_reason_unsupported_by_host" },
     "track.group": { allowed: canGroupPluginTracks, reason: "cap_reason_unsupported_by_host" },
     "track.edit": { allowed: () => false, reason: "cap_reason_host_owns" },
@@ -462,6 +552,37 @@ export function capabilityForAction(action: string, surface: string | null): Cap
     if (action === "clip.delete" || action === "edit.pasteTracks") return "clip.clipboard";
     if (action === "clip.normalize") return "clip.normalize";
     if (action === "clip.group" || action === "clip.ungroup") return "clip.edit";
+    if (action === "clip.glue") return "clip.glue";
+    if (action === "clip.reverse" || action === "clip.toggleReverse") return "clip.reverse";
+    if (action === "clip.quickExport") return "clip.quickExport";
+    if (action === "clip.silenceDetection") return "clip.silenceDetection";
+    if (action === "clip.scanFakeStereo") return "clip.fakeStereoScan";
+    if (
+        action === "clip.pitchReference" ||
+        action === "clip.updatePitchReference" ||
+        action === "clip.convertToPitchReference"
+    )
+        return "clip.pitchReference";
+    if (action === "host.pitchImport" || action === "host.pitchExport") return "host.pitchBridge";
+    // 【为什么 take 族要**先于**下面的 `clip.*` 兜底】兜底把它们映射成 `clip.geometry`
+    // （"宿主几何只读"），而它们的真实边界是"take 结构做不到" —— 理由完全不同，
+    // 用户看到的下一步也不同（换宿主 vs 换编辑方式）。
+    if (
+        [
+            "clip.cycleTake",
+            "clip.cycleTakePrev",
+            "clip.packIntoTakes",
+            "clip.addTake",
+            "clip.duplicateTake",
+            "clip.removeTake",
+            "clip.explodeTakes",
+            "clip.setActiveTake",
+            "clip.renameTake",
+            "clip.setTakeChannelMode",
+            "clip.setTakeReversed",
+        ].includes(action)
+    )
+        return "clip.takes";
     if (action.startsWith("transport.") || action.startsWith("recording.")) {
         return action.startsWith("recording.") ? "recording.local" : "transport.control";
     }
