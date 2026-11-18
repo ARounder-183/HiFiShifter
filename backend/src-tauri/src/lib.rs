@@ -78,6 +78,23 @@ mod link_bridge;
 #[cfg(target_os = "macos")]
 mod macos_menu;
 mod mcp;
+
+/// CLI entrypoint for `HiFiShifter --mcp-stdio [--mcp-url=<url>] [--mcp-project=<path_or_name>]`.
+pub fn run_mcp_stdio_cli(args: &[String]) -> Result<(), String> {
+    let explicit_url = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--mcp-url="))
+        .map(str::trim);
+    let project_filter = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--mcp-project="))
+        .map(str::trim);
+    let dir = hifishifter_kernel::app_paths::local_data_dir()
+        .map(|root| root.join("mcp").join("instances"));
+    let endpoint =
+        hifishifter_mcp::discovery::resolve_endpoint(dir.as_deref(), explicit_url, project_filter);
+    hifishifter_mcp::stdio::run_blocking_stdio_bridge(&endpoint)
+}
 mod recording;
 mod search;
 #[path = "audio/silence_detect.rs"]
@@ -641,6 +658,8 @@ pub fn run() {
                     );
                 }
             });
+
+            mcp::maybe_start_from_args(app.handle(), std::env::args());
 
             Ok(())
         })

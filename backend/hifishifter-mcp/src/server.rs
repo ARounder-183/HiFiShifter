@@ -43,7 +43,7 @@ impl EditorServer {
         result
     }
     #[tool(
-        description = "Read the visible HiFiShifter project's current revision, effective App settings and connection state. Call this first. No audio or model inference is run."
+        description = "Read the visible HiFiShifter project's current revision, per-root-track scope_revisions, effective App settings and connection state. Call this first. No audio or model inference is run."
     )]
     async fn hfs_get_context(&self) -> CallToolResult {
         self.call(EditorRequest::Context).await
@@ -58,13 +58,13 @@ impl EditorServer {
         self.call(EditorRequest::Capabilities(request)).await
     }
     #[tool(
-        description = "Read timeline, tracks, clips/takes, curve samples and edit masks, static values, parameter blocks, effective settings, playback or undo state. Results are paginated; curve windows are bounded. Times are project seconds and curve indices use the returned frame_period_ms."
+        description = "Read timeline, tracks, clips/takes, curve samples and edit masks, static values, parameter blocks, effective settings, playback, render, undo history, notebook or MCP audit ledger. Results are paginated; curve windows are bounded. Times are project seconds and curve indices use the returned frame_period_ms."
     )]
     async fn hfs_query(&self, Parameters(request): Parameters<QueryRequest>) -> CallToolResult {
         self.call(EditorRequest::Query(request)).await
     }
     #[tool(
-        description = "Atomically edit the currently visible project. Supports tracks/hierarchy/settings, audio placement/crop/stretch/fades/takes, every available parameter curve and static value, pitch flatten/shift, tempo and parameter blocks. Uses App/track algorithms. Client IDs reference earlier creations in this batch. Requires current revision and a retry key; one batch is one undo step. Failed validation writes nothing."
+        description = "Atomically edit the currently visible project. Supports tracks/hierarchy/settings, audio placement/crop/stretch/fades/takes, multi-candidate take packing, every available parameter curve and static value, pitch flatten/shift/hermite/vibrato/smooth, scale-preserving tempo and parameter blocks. Accepts expected_revision (whole-project CAS) or expected_scope (root-track scoped CAS for concurrent human-agent co-editing) plus idempotency_key; one batch is one undo step."
     )]
     async fn hfs_edit(&self, Parameters(request): Parameters<EditRequest>) -> CallToolResult {
         self.call(EditorRequest::Edit(request)).await
@@ -103,7 +103,7 @@ impl EditorServer {
         self.call(EditorRequest::Settings(request)).await
     }
     #[tool(
-        description = "Read or change the actual visible editor's selected track/clip, active parameter, reference tracks or drawing tool. Uses the live GUI and returns its acknowledged state; fails clearly when the view is unavailable. No audio editing occurs."
+        description = "Read or change the actual visible editor's selected track/clip, active parameter, reference tracks, drawing tool or viewport time focus. Uses the live GUI and returns its acknowledged state; fails clearly when the view is unavailable. No audio editing occurs."
     )]
     async fn hfs_editor_view(
         &self,
@@ -111,13 +111,59 @@ impl EditorServer {
     ) -> CallToolResult {
         self.call(EditorRequest::View(request)).await
     }
+    #[tool(
+        description = "Wait until requested asynchronous subsystems (pitch_analysis, clip_render, gui_view) become ready or until timeout_ms expires, optionally triggering source pitch analysis on target tracks. Use this barrier instead of polling hfs_query in a loop."
+    )]
+    async fn hfs_wait_ready(&self, Parameters(request): Parameters<WaitRequest>) -> CallToolResult {
+        self.call(EditorRequest::Wait(request)).await
+    }
+    #[tool(
+        description = "Render a bounded phrase window (<= 30s) of the project or selected tracks offline, optionally writing a .wav preview file, and return deterministic acoustic QA metrics (peak/RMS dBFS, clipping, silent dropouts, and clip-boundary click/step checks) so Agents can self-verify audio quality."
+    )]
+    async fn hfs_render_preview(
+        &self,
+        Parameters(request): Parameters<RenderPreviewRequest>,
+    ) -> CallToolResult {
+        self.call(EditorRequest::RenderPreview(request)).await
+    }
+    #[tool(
+        description = "Read the project's Markdown Notebook or atomically upsert/remove a fenced Agent review section (e.g. needs_review checklist, OOV notes, candidate explanations) without overwriting human-written notes."
+    )]
+    async fn hfs_notebook(
+        &self,
+        Parameters(request): Parameters<NotebookRequest>,
+    ) -> CallToolResult {
+        self.call(EditorRequest::Notebook(request)).await
+    }
+}
+
+/// Export the JSON Schema bundle for every MCP tool input contract and error enum.
+pub fn export_contract_schemas() -> serde_json::Value {
+    serde_json::json!({
+        "server": "HiFiShifter",
+        "version": env!("CARGO_PKG_VERSION"),
+        "error_codes": schemars::schema_for!(McpErrorCode),
+        "tools": {
+            "hfs_get_edit_capabilities": schemars::schema_for!(TargetRequest),
+            "hfs_query": schemars::schema_for!(QueryRequest),
+            "hfs_edit": schemars::schema_for!(EditRequest),
+            "hfs_history": schemars::schema_for!(HistoryRequest),
+            "hfs_transport": schemars::schema_for!(TransportRequest),
+            "hfs_save_project": schemars::schema_for!(SaveRequest),
+            "hfs_settings": schemars::schema_for!(SettingsRequest),
+            "hfs_editor_view": schemars::schema_for!(ViewRequest),
+            "hfs_wait_ready": schemars::schema_for!(WaitRequest),
+            "hfs_render_preview": schemars::schema_for!(RenderPreviewRequest),
+            "hfs_notebook": schemars::schema_for!(NotebookRequest),
+        }
+    })
 }
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for EditorServer {
     fn get_info(&self) -> ServerConfig {
         let mut info = ServerConfig::default();
-        info.instructions = Some("Control the open, visible HiFiShifter project. Start with hfs_get_context and hfs_get_edit_capabilities. Read revision, then send an atomic hfs_edit with explicit IDs and idempotency_key. All time positions are project seconds; source offsets are file seconds. Respect parameter owner_track_id, bounds, gates and voiced masks. Stretch and synthesis inherit App/track settings; default synthesis is HiFi-GAN. A committed edit is not proof that synthesis or GUI refresh has finished.".into());
+        info.instructions = Some("Control the open, visible HiFiShifter project. Start with hfs_get_context and hfs_get_edit_capabilities. Read revision (or scope_revisions for root-track concurrent co-editing), then send an atomic hfs_edit with explicit IDs and idempotency_key. Use hfs_wait_ready instead of sleep-polling for pitch analysis or synthesis renders, hfs_render_preview for acoustic QA & WAV previews, and hfs_notebook to post review checklists for the human. All time positions are project seconds; source offsets are file seconds.".into());
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info.name = "HiFiShifter".into();
         info.server_info.version = env!("CARGO_PKG_VERSION").into();

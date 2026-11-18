@@ -179,3 +179,139 @@ fn rejects_gain_that_the_native_editor_would_silently_clamp() {
         "INVALID_ARGUMENT"
     );
 }
+
+#[test]
+fn set_tempo_preserves_existing_scale_unless_overridden_or_cleared() {
+    let mut tl = project();
+    tl.tempo_map = Some(vec![TempoPointData {
+        id: "tp0".into(),
+        position_sec: 0.0,
+        bpm: 120.0,
+        numerator: Some(4),
+        denominator: Some(4),
+        scale: Some(TempoScaleData {
+            key: Some("Eb".into()),
+            name: None,
+            notes: Some(vec![3, 5, 7, 8, 10, 0, 2]),
+        }),
+    }]);
+
+    // Updating BPM without specifying `scale` must keep the existing Eb scale intact.
+    let keep_ops: Vec<Operation> = serde_json::from_value(json!([
+        {
+            "kind": "set_tempo",
+            "points": [{ "position_sec": 0.0, "bpm": 148.0, "numerator": 4, "denominator": 4 }]
+        }
+    ]))
+    .unwrap();
+    let (tl_kept, _) = apply(tl, &keep_ops, true).unwrap();
+    let tp0 = &tl_kept.tempo_map.as_ref().unwrap()[0];
+    assert_eq!(tp0.bpm, 148.0);
+    assert_eq!(tp0.scale.as_ref().unwrap().key.as_deref(), Some("Eb"));
+
+    // Explicit `scale` sets a new scale and normalizes pitch classes; `clear_scale: true` removes it.
+    let set_ops: Vec<Operation> = serde_json::from_value(json!([
+        {
+            "kind": "set_tempo",
+            "points": [
+                {
+                    "position_sec": 0.0,
+                    "bpm": 148.0,
+                    "numerator": 4,
+                    "denominator": 4,
+                    "scale": { "key": "G", "notes": [7, 9, 11, 0, 2, 4, 6, 7] }
+                },
+                {
+                    "position_sec": 2.0,
+                    "bpm": 160.0,
+                    "clear_scale": true
+                }
+            ]
+        }
+    ]))
+    .unwrap();
+    let (tl_updated, _) = apply(tl_kept, &set_ops, true).unwrap();
+    let pts = tl_updated.tempo_map.as_ref().unwrap();
+    assert_eq!(
+        pts[0].scale.as_ref().unwrap().notes.as_deref(),
+        Some(&[0, 2, 4, 6, 7, 9, 11][..])
+    );
+    assert!(pts[1].scale.is_none());
+}
+
+#[test]
+fn imports_top_k_candidate_takes_and_applies_musical_curve_transforms() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut paths = Vec::new();
+    for idx in 0..3 {
+        let p = dir.path().join(format!("ka_cand_{idx}.wav"));
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(&p, spec).unwrap();
+        for n in 0..8_000 {
+            w.write_sample((((n as f64) * 0.08 * (idx + 1) as f64).sin() * 4000.0) as i16)
+                .unwrap();
+        }
+        w.finalize().unwrap();
+        paths.push(p.to_string_lossy().into_owned());
+    }
+
+    let mut tl = project();
+    tl.project_sec = 4.0;
+    let track = tl.tracks[0].id.clone();
+    let ops: Vec<Operation> = serde_json::from_value(json!([
+        {
+            "kind": "import_candidate_takes",
+            "client_id": "ka_slot",
+            "track_id": track,
+            "start_sec": 0.5,
+            "candidates": [
+                { "name": "ka_01 [score=0.95]", "path": paths[0], "source_start_sec": 0.02, "length_sec": 0.3 },
+                { "name": "ka_02 [score=0.88]", "path": paths[1], "source_start_sec": 0.05, "length_sec": 0.3 },
+                { "name": "ka_03 [cross_take]", "path": paths[2], "source_start_sec": 0.01, "length_sec": 0.3 }
+            ]
+        },
+        {
+            "kind": "transform_curve",
+            "track_id": track,
+            "param": "volume",
+            "start_sec": 0.5,
+            "end_sec": 0.8,
+            "transform": { "mode": "hermite_transition", "from": 0.4, "to": 1.0 }
+        },
+        {
+            "kind": "transform_curve",
+            "track_id": track,
+            "param": "volume",
+            "start_sec": 0.5,
+            "end_sec": 0.8,
+            "transform": { "mode": "vibrato", "rate_hz": 5.5, "depth": 0.05, "attack_sec": 0.05 }
+        },
+        {
+            "kind": "transform_curve",
+            "track_id": track,
+            "param": "volume",
+            "start_sec": 0.5,
+            "end_sec": 0.8,
+            "transform": { "mode": "smooth", "window_frames": 5 }
+        }
+    ]))
+    .unwrap();
+
+    let (tl_after, ids) = apply(tl, &ops, true).unwrap();
+    assert_eq!(tl_after.clips.len(), 1);
+    let clip_id = ids["ka_slot"].as_str().unwrap();
+    let packed = tl_after.clips.iter().find(|c| c.id == clip_id).unwrap();
+    assert_eq!(packed.takes.len(), 3);
+    assert_eq!(packed.active_take().name, "ka_01 [score=0.95]");
+    assert_eq!(packed.takes[1].name, "ka_02 [score=0.88]");
+    assert_eq!(packed.takes[2].name, "ka_03 [cross_take]");
+
+    let vol = &tl_after.params_by_root_track[&track].extra_curves["volume"];
+    assert!(vol[100] >= 0.35 && vol[100] <= 0.5);
+    assert!(vol[159] >= 0.90 && vol[159] <= 1.05);
+}

@@ -59,6 +59,16 @@ fn main() {
     // 在日志里完全不可见 —— 迁移恰恰是"用户数据动了位置"的大事）。
     layout.log_summary("app");
 
+    // Headless stdio -> Streamable HTTP bridge for stdio-only MCP clients:
+    // `HiFiShifter --mcp-stdio [--mcp-url=http://127.0.0.1:39393/mcp] [--mcp-project=...]`
+    if args.iter().any(|a| a == "--mcp-stdio") {
+        if let Err(e) = backend_lib::run_mcp_stdio_cli(&args) {
+            log::error!("mcp-stdio bridge error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // CLI diagnostics: `HiFiShifter --benchmark` runs the inference-device
     // benchmark and prints the JSON result, then exits.  Useful for
     // debugging GPU/CoreML issues from a terminal without opening the GUI.

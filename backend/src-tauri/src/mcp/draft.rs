@@ -349,6 +349,107 @@ pub(super) fn apply(
                 );
                 alias(&mut ids, client_id, id)?;
             }
+            Operation::ImportCandidateTakes {
+                client_id,
+                track_id,
+                start_sec,
+                candidates,
+            } => {
+                finite(*start_sec, 0.0, 86400.0, "start_sec")?;
+                if candidates.is_empty() || candidates.len() > 16 {
+                    return Err(invalid("candidates must contain 1..16 entries"));
+                }
+                let mut prepared = Vec::with_capacity(candidates.len());
+                for cand in candidates {
+                    let path = Path::new(&cand.path);
+                    if !path.is_absolute() || !path.is_file() {
+                        return Err(invalid(
+                            "candidate audio path must be an existing absolute file",
+                        ));
+                    }
+                    let info = hifishifter_kernel::audio_utils::try_read_audio_header_only(path)
+                        .ok_or_else(|| invalid("candidate audio file cannot be decoded"))?;
+                    let source = cand.source_start_sec.unwrap_or(0.0);
+                    finite(source, 0.0, info.duration_sec, "source_start_sec")?;
+                    let rate = cand.playback_rate.unwrap_or(1.0);
+                    finite(rate as f64, 0.05, 20.0, "playback_rate")?;
+                    let length = cand
+                        .length_sec
+                        .unwrap_or((info.duration_sec - source) / rate as f64);
+                    finite(length, 0.000001, 86400.0, "length_sec")?;
+                    if source + length * rate as f64 > info.duration_sec + 1e-6 {
+                        return Err(invalid("candidate source window exceeds file duration"));
+                    }
+                    if let Some(g) = cand.gain {
+                        finite(
+                            g as f64,
+                            0.0,
+                            hifishifter_kernel::gain::GAIN_MAX as f64,
+                            "candidate gain",
+                        )?;
+                    }
+                    prepared.push((
+                        path.to_string_lossy().into_owned(),
+                        cand.name.clone(),
+                        source,
+                        length,
+                        rate,
+                        cand.gain,
+                    ));
+                }
+                let mut tl = lock(&draft);
+                let target = resolve(&ids, track_id);
+                track(&tl, &target)?;
+                let mut staged_ids = Vec::with_capacity(prepared.len());
+                let mut custom_names = Vec::with_capacity(prepared.len());
+                for (path_str, custom_name, source, length, rate, gain) in prepared {
+                    let cid = tl.add_clip(
+                        Some(target.clone()),
+                        custom_name.clone(),
+                        Some(*start_sec),
+                        Some(length),
+                        Some(path_str),
+                    );
+                    tl.patch_clip_state(
+                        &cid,
+                        ClipStatePatch {
+                            name: custom_name.clone(),
+                            length_sec: Some(length),
+                            source_start_sec: Some(source),
+                            playback_rate: Some(rate),
+                            gain,
+                            loop_enabled: Some(false),
+                            ..Default::default()
+                        },
+                    );
+                    staged_ids.push(cid);
+                    custom_names.push(custom_name);
+                }
+                let final_id = if staged_ids.len() == 1 {
+                    let single_id = staged_ids.remove(0);
+                    if let Some(Some(label)) = custom_names.first() {
+                        if let Some(c) = tl.clips.iter_mut().find(|c| c.id == single_id) {
+                            let tid = c.active_take().id.clone();
+                            let _ = c.rename_take(&tid, label);
+                        }
+                    }
+                    single_id
+                } else {
+                    let packed_id = tl
+                        .pack_clips_into_takes(&staged_ids)
+                        .ok_or_else(|| invalid("failed to pack candidate takes"))?;
+                    if let Some(c) = tl.clips.iter_mut().find(|c| c.id == packed_id) {
+                        let take_ids: Vec<String> = c.takes.iter().map(|t| t.id.clone()).collect();
+                        for (tid, maybe_name) in take_ids.into_iter().zip(custom_names) {
+                            if let Some(label) = maybe_name {
+                                let _ = c.rename_take(&tid, &label);
+                            }
+                        }
+                    }
+                    packed_id
+                };
+                alias(&mut ids, client_id, final_id)?;
+            }
             Operation::PatchClip { clip_id, patch } => {
                 let mut tl = lock(&draft);
                 let id = resolve(&ids, clip_id);
@@ -651,18 +752,52 @@ pub(super) fn apply(
                     {
                         return Err(invalid("invalid time signature"));
                     }
+                    if let Some(scale) = &p.scale {
+                        if scale.key.is_none() && scale.name.is_none() && scale.notes.is_none() {
+                            return Err(invalid("tempo scale must specify key, name or notes"));
+                        }
+                        if let Some(notes) = &scale.notes {
+                            if notes.is_empty() || notes.iter().any(|&n| n > 11) {
+                                return Err(invalid(
+                                    "scale notes must be non-empty pitch classes in 0..=11",
+                                ));
+                            }
+                        }
+                    }
                 }
                 let mut tl = lock(&draft);
+                let existing_points = tl.tempo_map.clone().unwrap_or_default();
                 tl.tempo_map = Some(
                     points
                         .iter()
-                        .map(|p| TempoPointData {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            position_sec: p.position_sec,
-                            bpm: p.bpm,
-                            numerator: p.numerator,
-                            denominator: p.denominator,
-                            scale: None,
+                        .map(|p| {
+                            let resolved_scale = if p.clear_scale == Some(true) {
+                                None
+                            } else if let Some(spec) = &p.scale {
+                                let mut clean_notes = spec.notes.clone();
+                                if let Some(ns) = &mut clean_notes {
+                                    ns.sort_unstable();
+                                    ns.dedup();
+                                }
+                                Some(TempoScaleData {
+                                    key: spec.key.clone(),
+                                    name: spec.name.clone(),
+                                    notes: clean_notes,
+                                })
+                            } else {
+                                existing_points
+                                    .iter()
+                                    .find(|old| (old.position_sec - p.position_sec).abs() <= 1e-6)
+                                    .and_then(|old| old.scale.clone())
+                            };
+                            TempoPointData {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                position_sec: p.position_sec,
+                                bpm: p.bpm,
+                                numerator: p.numerator,
+                                denominator: p.denominator,
+                                scale: resolved_scale,
+                            }
                         })
                         .collect(),
                 );
@@ -763,16 +898,47 @@ fn transform_curve(
         .collect();
     voiced.sort_by(f32::total_cmp);
     let median = voiced.get(voiced.len() / 2).copied();
+    let total_span_sec = (values.len() as f64) * (fp / 1000.0);
+    if let CurveTransform::Vibrato {
+        rate_hz,
+        depth,
+        phase_deg,
+        attack_sec,
+        release_sec,
+    } = transform
+    {
+        finite(*rate_hz as f64, 0.1, 30.0, "rate_hz")?;
+        finite(*depth as f64, 0.0, 2400.0, "depth")?;
+        if let Some(ph) = phase_deg {
+            finite(*ph as f64, -3600.0, 3600.0, "phase_deg")?;
+        }
+        if let Some(att) = attack_sec {
+            finite(*att as f64, 0.0, 60.0, "attack_sec")?;
+        }
+        if let Some(rel) = release_sec {
+            finite(*rel as f64, 0.0, 60.0, "release_sec")?;
+        }
+    }
+    if let CurveTransform::Smooth { window_frames } = transform {
+        if *window_frames == 0 || *window_frames > 201 {
+            return Err(invalid("window_frames must be in 1..=201"));
+        }
+    }
+
+    let source_edit = values.clone();
     for i in 0..values.len() {
         if pitch && frames.orig.get(i).copied().unwrap_or(0.0) <= 0.0 {
             values[i] = 0.0;
             present[i] = false;
             continue;
         }
+        let t_norm = i as f32 / (values.len().saturating_sub(1).max(1) as f32);
         values[i] = match transform {
             CurveTransform::Set { value } => *value,
-            CurveTransform::Ramp { from, to } => {
-                from + (to - from) * i as f32 / (values.len().saturating_sub(1).max(1) as f32)
+            CurveTransform::Ramp { from, to } => from + (to - from) * t_norm,
+            CurveTransform::HermiteTransition { from, to } => {
+                let smooth_t = t_norm * t_norm * (3.0 - 2.0 * t_norm);
+                from + (to - from) * smooth_t
             }
             CurveTransform::Shift { amount } => values[i] + amount,
             CurveTransform::ShiftToNote { target_midi } => {
@@ -789,6 +955,48 @@ fn transform_curve(
                     return Err(invalid("flatten_to_note requires pitch"));
                 }
                 *target_midi
+            }
+            CurveTransform::Vibrato {
+                rate_hz,
+                depth,
+                phase_deg,
+                attack_sec,
+                release_sec,
+            } => {
+                let local_sec = (i as f64) * (fp / 1000.0);
+                let rem_sec = (total_span_sec - local_sec).max(0.0);
+                let att_env = match attack_sec {
+                    Some(a) if *a > 1e-6 => (local_sec / (*a as f64)).clamp(0.0, 1.0),
+                    _ => 1.0,
+                };
+                let rel_env = match release_sec {
+                    Some(r) if *r > 1e-6 => (rem_sec / (*r as f64)).clamp(0.0, 1.0),
+                    _ => 1.0,
+                };
+                let phase_rad = (phase_deg.unwrap_or(0.0) as f64).to_radians()
+                    + std::f64::consts::TAU * (*rate_hz as f64) * local_sec;
+                source_edit[i] + ((*depth as f64) * att_env * rel_env * phase_rad.sin()) as f32
+            }
+            CurveTransform::Smooth { window_frames } => {
+                let half = (*window_frames as usize) / 2;
+                let lo = i.saturating_sub(half);
+                let hi = (i + half).min(source_edit.len().saturating_sub(1));
+                let mut acc = 0.0f64;
+                let mut n = 0usize;
+                for j in lo..=hi {
+                    if pitch && frames.orig.get(j).copied().unwrap_or(0.0) <= 0.0 {
+                        continue;
+                    }
+                    if source_edit[j].is_finite() {
+                        acc += source_edit[j] as f64;
+                        n += 1;
+                    }
+                }
+                if n > 0 {
+                    (acc / n as f64) as f32
+                } else {
+                    source_edit[i]
+                }
             }
         };
     }
