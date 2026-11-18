@@ -1,5 +1,23 @@
 //! 角色、快照可用性与宿主传输观测。
 use super::*;
+/// 把三态编码成 `host_bypass` 的原子值（0 = 未知）。
+fn encode_bypass(state: crate::host::reaper::FxBypass) -> u8 {
+    match state {
+        crate::host::reaper::FxBypass::Active => 1,
+        crate::host::reaper::FxBypass::Bypassed => 2,
+        crate::host::reaper::FxBypass::Unknown => 0,
+    }
+}
+
+/// 把 `host_bypass` 的编码翻回三态（日志用）。
+fn decode_bypass(raw: u8) -> crate::host::reaper::FxBypass {
+    match raw {
+        1 => crate::host::reaper::FxBypass::Active,
+        2 => crate::host::reaper::FxBypass::Bypassed,
+        _ => crate::host::reaper::FxBypass::Unknown,
+    }
+}
+
 impl ExtensionOwner {
     /// 本实例是否负责把处理结果作为音频输出（而非透传宿主原声）。
     ///
@@ -456,6 +474,83 @@ impl ExtensionOwner {
         &self.capture
     }
 
+    /// 宿主是否把本实例的音频放进了信号链（三态；见 [crate::host::reaper::FxBypass]）。
+    ///
+    /// 【为什么这个读数能省下一整次合成】ARA 没有旁通概念，宿主旁通一个 FX 时只是
+    /// **不再调用**播放渲染器。于是"用户已经旁通、插件还在算"这一段开销完全是浪费：
+    /// 神经合成的结果永远不会被取用。判据由宿主自己的原生 API 给出（REAPER 的
+    /// `TrackFX_GetEnabled` 一族），其它宿主恒为 `Unknown` ⇒ 行为与改动前一致。
+    pub(crate) fn host_bypass(&self) -> crate::host::reaper::FxBypass {
+        decode_bypass(self.host_bypass.load(Ordering::Acquire))
+    }
+
+    /// UI 定时器路径：按自己的节奏采样旁通读数（100 ms 一次）。
+    ///
+    /// 【为什么不用枚举那套节流】见 [Self::host_bypass] 与 `last_bypass_sample` 的说明：
+    /// 枚举会退避到秒级，而旁通必须在一个 tick 的量级内被看见。
+    pub(super) fn poll_host_bypass(&self) {
+        const INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+        let now = std::time::Instant::now();
+        {
+            let mut last = self.last_bypass_sample.lock_or_recover();
+            if last.is_some_and(|at| now.duration_since(at) < INTERVAL) {
+                return;
+            }
+            *last = Some(now);
+        }
+        self.sample_host_bypass();
+    }
+
+    /// 只刷新旁通缓存（返回"读数是否变化"），**不**做任何失效动作。
+    ///
+    /// 【为什么要与 [Self::sample_host_bypass] 分开】文档级失效会遍历全部 owner 并要求
+    /// 它们重排；而重排是否真的发生取决于**各自**缓存里的旁通读数。若那时缓存还是旧的，
+    /// 播放实例会以"我被旁通了"为由直接返回 —— 用户解除旁通后仍然没有声音。所以
+    /// 失效路径必须先刷新缓存，再通知重排。
+    pub(crate) fn refresh_host_bypass_cache(&self) -> bool {
+        if !self.is_bound() || self.is_closed() {
+            return false;
+        }
+        let Some(host) = self.native_host() else {
+            return false;
+        };
+        let authorized = || !self.is_closed();
+        let state = host.fx_bypass_state(&authorized);
+        let encoded = encode_bypass(state);
+        let previous = self.host_bypass.swap(encoded, Ordering::AcqRel);
+        if previous == encoded {
+            return false;
+        }
+        log::info!(
+            "[ara] writer {} host bypass: {} -> {}",
+            self.writer_id(),
+            decode_bypass(previous).as_str(),
+            state.as_str()
+        );
+        true
+    }
+
+    /// 重新采样一次旁通读数，返回"读数是否变化"。
+    ///
+    /// 【为什么变化时要让渲染输入失效】旁通**解除**的那一刻宿主会立刻来取音频；快照
+    /// 若还停在旁通期间那一版（或根本没算过），用户会先听到旧声音。进入旁通则相反：
+    /// 在途的那次合成已经没人要，直接取消比让它跑完更省。
+    pub(crate) fn sample_host_bypass(&self) -> bool {
+        if !self.refresh_host_bypass_cache() {
+            return false;
+        }
+        if self.host_bypass().is_bypassed() {
+            // 刚进入旁通：在途的合成已经没人要，丢掉待办并让正在跑的那次尽早返回。
+            if let Some(queue) = self.preparation() {
+                queue.cancel();
+            }
+        }
+        if let Ok(document) = self.editor_document() {
+            document.invalidate_render_input();
+        }
+        true
+    }
+
     /// 本实例是否**应当**发布快照。
     ///
     /// 【为什么不能直接改 `renders_playback()`】那个读数的语义是"本文档的播放由本实例
@@ -476,5 +571,29 @@ impl ExtensionOwner {
         // 恒假 ⇒ 一条快照都不发布 ⇒ 录制正常、界面正常、**播放时全静音**。
         // 素材是比时钟更早、更硬的证据：它已经存在，就说明这个实例在录宿主。
         self.capture.has_material()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::reaper::FxBypass;
+
+    /// `host_bypass` 的编码是跨线程契约：写侧（`sample_host_bypass`）与读侧
+    /// （`host_bypass` / `prepare` 的门）必须对同一个字节给出同一个结论。默认值 0
+    /// 必须是 `Unknown` —— 那是"照改动前渲染"的唯一保证。
+    #[test]
+    fn the_bypass_encoding_never_turns_unknown_into_a_verdict() {
+        assert_eq!(decode_bypass(0), FxBypass::Unknown);
+        assert_eq!(decode_bypass(1), FxBypass::Active);
+        assert_eq!(decode_bypass(2), FxBypass::Bypassed);
+        // 任何未来可能出现的值都必须落回"未知"，不得被当成"活跃"或"旁通"。
+        for raw in [3_u8, 7, 200, 255] {
+            assert_eq!(decode_bypass(raw), FxBypass::Unknown, "raw={raw}");
+        }
+        // 只有"确定旁通"能挡住渲染。
+        assert!(decode_bypass(2).is_bypassed());
+        assert!(!decode_bypass(0).is_bypassed());
+        assert!(!decode_bypass(1).is_bypassed());
     }
 }

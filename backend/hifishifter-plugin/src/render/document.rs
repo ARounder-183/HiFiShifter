@@ -537,6 +537,21 @@ pub struct DocumentSession {
     pub assembly_spans: Mutex<std::collections::BTreeMap<String, Vec<usize>>>,
     /// 最近一次装配里**没挂上任何 item** 的 region 行（不产生 clip，只进读数）。
     pub assembly_unbound: Mutex<Vec<usize>>,
+    /// 装配的输入变过、还没被消费。
+    ///
+    /// 【为什么必须有这个标记】装配有两份输入：ARA 侧的 region 表（模型回调写）与宿主
+    /// 侧的 item 清单（20 ms 定时器写）。此前只有一个调用点（模型收口），于是**清单自己
+    /// 的变化永远不会触发装配** —— 而在 REAPER 里复制/粘贴一个 item 时，清单先看到新
+    /// item、模型收口那一轮又可能因为宿主工程正在变化而拿不到新清单。结果是新 item 只能
+    /// 以"无源占位"出现：没有波形、没有原始音高线、永远显示"正在等待宿主完成音频分配"，
+    /// 直到下一次重新加载（那次模型收口带上了完整清单）才正确。用户报障的正是这一条。
+    ///
+    /// 【为什么是"标记 + 单一冲刷点"而不是就地重装】装配要写 `clip_ids`，而清单刷新会
+    /// 被 `host_geometries_locked` / `clip_for_host_item` 调到（那两处正持有 `clip_ids`，
+    /// `std::sync::Mutex` 不可重入），也可能被持有 `transaction` 的路径调到。就地重装
+    /// 实测会让两个 bound 用例永久挂起。标记把"该重装"与"现在能重装"分开：任何写输入的
+    /// 地方只置位，真正重装只发生在**不持任何相关锁**的定时器/收口点。
+    pub(crate) assembly_dirty: AtomicBool,
     /// ARA 模型是否**已经交付过**至少一次。
     ///
     /// 【为什么需要】`rebuild_timeline_locked` 会在每次清单刷新后跑。而清单可能先于
@@ -923,6 +938,80 @@ mod tests {
         document
             .reconcile_parameter_geometry_locked(&frame, &mut edits)
             .expect("a well-formed frame must reconcile")
+    }
+
+    /// **装配的两份输入里，任何一份变了都必须在安全点上重装。**
+    ///
+    /// 【为什么这条是用户报障的可执行形式】REAPER 复制/粘贴一个 item 时，宿主清单先看到
+    /// 新 item，而模型收口那一轮的清单刷新可能因为"宿主工程正在变化"被放弃。此前装配
+    /// 只在模型收口跑，于是新 item 永远进不了装配：它只能以无源占位出现 —— 没有波形、
+    /// 没有原始音高线、一直显示"正在等待宿主完成音频分配"，直到下一次重新加载。
+    ///
+    /// 这里钉住三件事：
+    /// 1. 没有输入变化时，安全点什么都不做（不允许每 20 ms 白跑一次装配）；
+    /// 2. 标记置位后，安全点必须产出 region → clip 的身份边；
+    /// 3. clip 集合真的变了就必须推进 model 版本 —— 否则编辑器与渲染都不会重读，
+    ///    装配发生了却等于没发生。
+    #[test]
+    fn a_changed_assembly_input_is_rebuilt_at_the_next_safe_point() {
+        use hifishifter_kernel::editor::assembly::{RegionRow, TrackRow};
+        use std::sync::atomic::Ordering;
+        let document = document_with_one_empty_track(0.0);
+        document.ara_model_seen.store(true, Ordering::Release);
+        *document.region_tracks.lock_or_recover() = vec![TrackRow {
+            id: "track".into(),
+            name: "track".into(),
+            order: 0,
+            color: String::new(),
+        }];
+        *document.region_rows.lock_or_recover() = vec![RegionRow {
+            key: 7,
+            clip_id: "ara-region-7".into(),
+            track_id: "track".into(),
+            start_sec: 0.0,
+            duration_sec: 2.0,
+            source_start_sec: 0.0,
+            source_end_sec: 2.0,
+            playback_rate: 1.0,
+            name: "vocal".into(),
+            source_id: "src".into(),
+            modification_id: "mod".into(),
+            source_sample_rate: 48_000.0,
+            source_duration_sec: 2.0,
+            source_channels: 1,
+        }];
+        // ① 没有任何输入变化 ⇒ 一个安全点都不该动它。
+        document.flush_pending_assembly();
+        assert!(
+            document.clip_ids.lock_or_recover().is_empty(),
+            "no input changed, so nothing may be assembled"
+        );
+        let revision = document.revision.load(Ordering::Acquire);
+        // ② 输入变了（清单发布 / region 表发布）⇒ 下一个安全点必须把装配跑掉。
+        document.note_assembly_input_changed();
+        document.flush_pending_assembly();
+        assert_eq!(
+            document
+                .clip_ids
+                .lock_or_recover()
+                .get(&7)
+                .map(String::as_str),
+            Some("ara-region-7"),
+            "the new input must reach the clip set at the next safe point"
+        );
+        // ③ clip 集合变了 ⇒ model 版本前进（读者据此重读）。
+        assert_eq!(
+            document.revision.load(Ordering::Acquire),
+            revision + 1,
+            "a changed clip set must advance the model revision"
+        );
+        // ④ 标记已被消费：再冲一次不会重复推进版本。
+        document.flush_pending_assembly();
+        assert_eq!(
+            document.revision.load(Ordering::Acquire),
+            revision + 1,
+            "the flag is consumed by one flush"
+        );
     }
 
     /// **分割一个循环源 item，参数线一根都不许动（插件侧粘合层）。**
@@ -1511,6 +1600,49 @@ impl DocumentSession {
             .collect()
     }
 
+    /// 记一次"装配的输入变了"（见 [Self::assembly_dirty]）。
+    ///
+    /// 唯一职责是置位；重装由 [Self::flush_pending_assembly] 在安全点上完成。
+    pub(crate) fn note_assembly_input_changed(&self) {
+        self.assembly_dirty.store(true, Ordering::Release);
+    }
+
+    /// 在安全点上把挂起的装配跑掉（不持任何相关锁时调用）。
+    ///
+    /// 【为什么用 `try_transaction` 而不是阻塞】调用方是 20 ms 的 UI 定时器与宿主写回
+    /// 路径；后台 actor 正持事务时阻塞会把它要等的那次宿主泵堵死（见
+    /// [Self::try_transaction] 的说明）。拿不到就留到下一个 tick —— 标记还在。
+    ///
+    /// 【为什么拿不到事务也要留标记】"这一轮没装上"不是"不需要装"：清掉标记会让一次
+    /// 真正的输入变化永久丢失，而那正是本函数要消灭的那类缺陷。
+    pub(crate) fn flush_pending_assembly(&self) {
+        if !self.assembly_dirty.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(_transaction) = self.try_transaction() else {
+            return;
+        };
+        if !self.is_alive() {
+            return;
+        }
+        let before = self.clip_ids.lock_or_recover().clone();
+        if let Err(error) = self.rebuild_timeline_locked() {
+            log::warn!("[ara] deferred timeline assembly failed: {error}");
+            return;
+        }
+        // 【clip 集合真的变了才算一次模型变化】`clip_ids` 是装配产物里唯一的身份投影
+        // （region key → clip id）；它一变，读者必须重读：编辑器按 `revision` 判"要不要
+        // 重新加载"，渲染按 `revision` 判"已发布的快照还对不对"。少了这一句，界面会
+        // 一直显示上一次装配的片段 —— 而装配本身已经发生，症状与"没重装"一模一样。
+        //
+        // 【为什么在这里直接加而不是调 `clear_renderers`】本函数持有 `transaction`，
+        // 而那个入口要取同一把不可重入的锁。这里只需要"版本前进一步"这一半语义：
+        // 已发布的快照继续可听，下一次 `prepare_job` 会因为版本不匹配而重算。
+        if *self.clip_ids.lock_or_recover() != before {
+            self.revision.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
     /// **唯一**的时间线重建入口 —— clip 集合只在这里产生。
     ///
     /// 【为什么必须只有一个入口】此前 clip 有两个生产者：`ara/mapping.rs` 按 playback
@@ -1540,6 +1672,8 @@ impl DocumentSession {
                 .as_ref()
                 .is_some_and(|timeline| !timeline.clips.is_empty())
         {
+            // 这一轮什么也没做：清掉标记，等模型真正交付时由收口路径重装。
+            self.assembly_dirty.store(false, Ordering::Release);
             return Ok(());
         }
         let rows = self.region_rows.lock_or_recover().clone();
@@ -1584,6 +1718,8 @@ impl DocumentSession {
         }
         let mut timeline = assembly.timeline(&tracks, crate::ara::mapping::default_bpm());
         self.log_item_map(&assembly, &rows);
+        // 这一轮已经把**当前**两份输入都消费掉了（含中途到达的那一份）。
+        self.assembly_dirty.store(false, Ordering::Release);
         *self.clip_ids.lock_or_recover() = ids;
         *self.assembly_spans.lock_or_recover() = assembly.spans.clone();
         *self.assembly_unbound.lock_or_recover() = assembly.unbound.clone();
@@ -4664,6 +4800,9 @@ impl DocumentSession {
                     "busy": busy,
                     "error": error,
                     "prepared": owner.prepared_snapshot(),
+                    // 宿主是否仍在读我们的输出。它是"编辑完没有声音 / 算了但没人要"这类
+                    // 报障里最先要排除的一格：bypassed 说明渲染被有意跳过（见 prepare）。
+                    "host_bypass": owner.host_bypass().as_str(),
                 })
             })
             .collect::<Vec<_>>();
@@ -5000,6 +5139,10 @@ clips_src={clips_src} dupes={dupes}}}"
             .filter(|owner| !owner.is_closed())
             .collect::<Vec<_>>();
         for owner in owners {
+            // 【先刷新旁通缓存，再通知重排】重排是否真的发生取决于各 owner 自己缓存里的
+            // 旁通读数；缓存还是旧的时，刚被解除旁通的那个实例会以"我被旁通了"为由
+            // 直接返回，用户解除旁通后仍然没有声音。
+            owner.refresh_host_bypass_cache();
             owner.prepare();
         }
     }

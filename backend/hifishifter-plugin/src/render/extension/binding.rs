@@ -1106,6 +1106,9 @@ impl ExtensionOwner {
     /// 变成"下次再看"。所以节流只属于定时器这一个调用方。
     pub(crate) fn refresh_host_transport_tick(&self) {
         let _query_scope = super::document::HostQueryScope::nonblocking();
+        // 【旁通读数必须在枚举之前】它决定"这次编辑要不要合成"，而枚举可能正在退避；
+        // 两者同一 tick 内都要，但只有旁通是"用户刚按了一下"级别的时效。
+        self.poll_host_bypass();
         // 【T5：前台恢复的本地信号】编辑器窗口是 `WS_CHILD`，收不到 `WM_ACTIVATEAPP`；
         // 而 `resume_resync()` 的唯一调用点是 `setActive(true)`，宿主切窗口焦点时不会重发。
         // 于是"后台→前台"没有任何入口。这里用**定时器自身的间隔**补上：20 ms 的定时器
@@ -1307,6 +1310,9 @@ impl ExtensionOwner {
             }
         }
         self.refresh_ui_inventory();
+        // 清单是装配的输入之一（见 `DocumentSession::assembly_dirty`）：它一变就必须重装，
+        // 否则新出现的 item 只能以无源占位出现 —— 那正是"粘贴出来的片段一直等宿主音频"。
+        stamp.0.flush_pending_assembly();
     }
     /// GUI清单按项目change/model/scope代次刷新，不每20ms枚举所有item，也不借活动工程。
     pub(crate) fn refresh_ui_inventory(&self) {
@@ -1614,20 +1620,21 @@ impl ExtensionOwner {
         // 在下一次 `FACTS_REFRESH_INTERVAL` 到期时强制重采（见 `ui_inventory_sampled_at`）。
         *stamp.0.ui_inventory_sampled_at.lock_or_recover() = Some(std::time::Instant::now());
         stamp.0.ui_geometry_revision.fetch_add(1, Ordering::AcqRel);
-        // 【为什么这里**不**重新装配】
+        // 【为什么不在这里就地重装，而是置位】
         //
-        // clip 集合由装配器在 `remap_and_log` 收口时产出，而那一轮之前会先调一次
-        // `refresh_ui_inventory`（见 `remap_and_log`）—— 清单的最新结果因此已经在
-        // 装配输入里。在这里再装配一次有两个代价：本函数会被
-        // `host_geometries_locked` → `fade_items_locked` / `clip_for_host_item`
-        // 调到（那两处正持有 `clip_ids`，而装配要写它，`std::sync::Mutex` 不可重入），
-        // 也会被 `refresh_host_transport` 调到（那条路可能正持有 `transaction`）。
-        // 实测两个 `bound_tests` 用例因此永久挂起。
+        // 装配要写 `clip_ids`，而本函数会被 `host_geometries_locked` → `fade_items_locked` /
+        // `clip_for_host_item` 调到（那两处正持有 `clip_ids`，`std::sync::Mutex` 不可重入），
+        // 也可能被持有 `transaction` 的路径调到 —— 就地重装实测让两个 bound 用例永久挂起。
         //
-        // 清单变化本身仍然立即生效：`present_host_inventory` 会把宿主的
-        // `D_POSITION` / `D_LENGTH` 投影到既有 clip 上，`project_host_item_geometry_locked`
-        // 会让渲染读到同一份几何。只有"item 的**增删**"需要重新装配，而那在 REAPER 里
-        // 必然伴随 region 的增删 ⇒ 必然收口。
+        // 但"**不**重装"是错的：清单是装配的两份输入之一，它变了就必须重装。此前这里
+        // 依据的是"item 的增删必然伴随 region 的增删 ⇒ 必然模型收口"，而这条在 REAPER 的
+        // **复制/粘贴**上不成立：清单先看到新 item，而收口那一轮的清单刷新可能因为宿主
+        // 工程正在变化被放弃 —— 于是新 item 永远进不了装配，只能以无源占位出现（没有
+        // 波形、没有原始音高线、一直显示"正在等待宿主完成音频分配"），直到下一次重新加载。
+        //
+        // 现在：这里只置位，重装由 `flush_pending_assembly` 在**不持任何相关锁**的
+        // 定时器/收口点完成（见该函数的说明）。
+        stamp.0.note_assembly_input_changed();
         *self.host_audio.lock_or_recover() = status;
         // 用户报障时最需要的一行：宿主清单里有多少 item，其中多少被 ARA region 认领。
         // 认领不到的那些只能以无源占位出现（见方案 Task 5.1 / R4）。
@@ -1742,6 +1749,10 @@ impl ExtensionOwner {
     /// 元数据单独采集，不让每个隐藏实例重复写工程clock；宿主调用始终不持内部锁。
     pub(crate) fn refresh_host_state_for_model(&self) {
         self.refresh_host_geometry();
+        // 【收口就是"用户刚编辑完"】旁通读数必须在这一刻是最新的：否则 `prepare` 会为
+        // 一个已经被旁通的实例排队一整次神经合成，而那正是本读数要消除的浪费。
+        // 窗口关着时 UI 定时器不跑，这条路径就是唯一的采样点。
+        self.sample_host_bypass();
     }
     pub(super) fn refresh_host_geometry(&self) {
         let Ok(stamp) = self.host_query_stamp() else {

@@ -13,6 +13,9 @@ pub(crate) use media::HostTrackTarget;
 mod ui_inventory;
 pub(crate) use ui_inventory::{UiItem, UiTrack};
 mod folder;
+/// FX 旁通 / 离线读数（宿主是否仍在读我们的输出）。
+mod fx_state;
+pub(crate) use fx_state::FxBypass;
 mod host_timer;
 // 宿主原生执行层：写回 / 分割 / 剪贴板 / Undo 调度。它们直接调用 REAPER API，
 // 因此整体住在本模块内；通用层只经 `crate::host` 的中立门面访问。
@@ -175,6 +178,8 @@ pub(crate) struct NativeHost {
     take_enum: Option<TakeEnumApi>,
     /// 轨道组（folder）只读入口；与建轨能力束解耦，见 `folder` 模块文档。
     folder: Option<folder::FolderApi>,
+    /// FX 旁通读数入口；缺省时旁通状态恒为 `Unknown`（照改动前照常渲染）。
+    fx_state: Option<fx_state::FxStateApi>,
     /// 本实例创建的 Undo 条目的**时间戳缓存**（条目索引 → Unix 毫秒）。
     ///
     /// 【为什么需要】REAPER 的 `Undo_GetEntryDesc` 只给标签，**没有时间**。此前
@@ -343,6 +348,34 @@ fn checked<T>(authorized: &impl Fn() -> bool, call: impl FnOnce() -> T) -> Resul
     Ok(value)
 }
 impl NativeHost {
+    /// 本实例在宿主里此刻是否被旁通（判据与三态语义见 [fx_state]）。
+    ///
+    /// 【为什么必须回到宿主线程】`TrackFX_*` 与 `GetMediaTrackInfo_Value` 只认宿主自己的
+    /// 线程；在别的线程上调用会投递并原地等它完成 —— 与其余宿主查询同一纪律。
+    ///
+    /// 【为什么找不到就报 Unknown】"这条轨上没有本插件的 FX"可能是宿主改了显示名，
+    /// 也可能这个实例根本不是挂在轨道上的（Capture 形态）。两种情况下替用户断言
+    /// "你旁通了"都会让本该出声的实例静音。
+    pub(crate) fn fx_bypass_state(&self, authorized: &impl Fn() -> bool) -> FxBypass {
+        if std::thread::current().id() != self.thread {
+            return self
+                .on_host(|| self.fx_bypass_state(authorized))
+                .unwrap_or(FxBypass::Unknown);
+        }
+        let Some(api) = self.fx_state.as_ref() else {
+            return FxBypass::Unknown;
+        };
+        let pointer = self._interface.0 as *mut c_void;
+        let table = unsafe { &**pointer.cast::<*const HostVtbl>() };
+        let Ok(track) = checked(authorized, || unsafe { (table.parent)(pointer, 1) }) else {
+            return FxBypass::Unknown;
+        };
+        if track.is_null() {
+            return FxBypass::Unknown;
+        }
+        fx_state::read(api, track, crate::CLASS_NAME, authorized).unwrap_or(FxBypass::Unknown)
+    }
+
     /// 从真实host context QI；parent(3)是所属project，不使用当前活动project或按轨名猜归属。
     /// # Safety
     /// context是初始化期间可读的活FUnknown；host在该 owning reference期间保持接口/API有效。
@@ -671,6 +704,25 @@ impl NativeHost {
             }
             _ => None,
         };
+        // FX 旁通读数：四个函数缺一不可（缺了就整体降级为 Unknown）。
+        let fx_state = match (
+            lookup!(c"TrackFX_GetCount", fx_state::FxCount),
+            lookup!(c"TrackFX_GetEnabled", fx_state::FxEnabled),
+            lookup!(c"TrackFX_GetOffline", fx_state::FxOffline),
+            lookup!(c"TrackFX_GetFXName", fx_state::FxName),
+            lookup!(c"GetMediaTrackInfo_Value", fx_state::TrackValue),
+        ) {
+            (Some(count), Some(enabled), Some(offline), Some(name), Some(track_value)) => {
+                Some(fx_state::FxStateApi {
+                    count,
+                    enabled,
+                    offline,
+                    name,
+                    track_value,
+                })
+            }
+            _ => None,
+        };
         let plugin_register = lookup!(c"plugin_register", PluginRegister);
         // 【为什么要在这里挂节拍】`from_context` 只在宿主的 model/UI 线程上被调用
         // （`setActive` / 初始化），而 `plugin_register` 的注册动作本身要求宿主线程。
@@ -702,6 +754,7 @@ impl NativeHost {
             app_version,
             take_enum,
             folder,
+            fx_state,
             undo_entry_times: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             undo_ends: std::sync::Mutex::new(Vec::new()),
         })

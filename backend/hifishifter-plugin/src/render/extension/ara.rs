@@ -346,6 +346,13 @@ impl ExtensionOwner {
         if self.is_closed() || !self.renders() {
             return;
         }
+        // 【旁通即不渲染】宿主已经把这个 FX 旁通（或离线 / 关掉整条 FX 链）时，
+        // 合成结果**没有任何人会取用** —— ARA 的播放渲染器在旁通期间根本不会被调用。
+        // 判据只认宿主自己报的读数（见 `sample_host_bypass`）：非 REAPER 宿主恒为
+        // Unknown，走的是改动前的行为。
+        if self.host_bypass().is_bypassed() {
+            return;
+        }
         // 源/assignment撤销在文档事务内清理；此函数只排队，不能在事务外clear旧任务刚发布的音频。
         #[cfg(test)]
         self.prepare_requests.fetch_add(1, Ordering::AcqRel);

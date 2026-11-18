@@ -197,6 +197,23 @@ pub struct ExtensionOwner {
     host_geometry: Mutex<Option<CachedHostGeometry>>,
     /// 每个真实单region播放实例的有效mute；process仅读原子，不查询宿主或清修音参数。
     host_item_muted: std::sync::atomic::AtomicBool,
+    /// 宿主此刻是否把本实例的音频放进了信号链（[crate::host::reaper::FxBypass] 的编码）。
+    ///
+    /// 【为什么是原子】`prepare` 可能由会话 actor、模型线程、UI 定时器任一处触发，而它要
+    /// 在这一句上决定"要不要花几秒做神经合成"。为读一个三态量取锁毫无必要。
+    ///
+    /// 【为什么默认 0（未知）】未知必须等于改动前的行为：照常渲染。默认成"已旁通"会让
+    /// 所有不支持这一读数的宿主（Cubase / Studio One / 任何非 REAPER 宿主）静音。
+    ///
+    /// 【为什么翻转时还要让渲染输入失效】旁通解除的那一刻宿主会立刻来取音频；快照若还
+    /// 停在旁通期间那一版（或根本没算过），用户会先听到一段旧声音。失效由
+    /// [Self::sample_host_bypass] 在**同一处**完成，两个方向才不会各自漂移。
+    host_bypass: AtomicU8,
+    /// 上一次采样旁通读数的时刻（限流用；见 [Self::poll_host_bypass]）。
+    ///
+    /// 【为什么单独限流】几何/清单枚举在结构性失败时会退避到 4 秒一次，而"用户按了
+    /// 旁通"必须在一次 UI tick 的量级内被看见：否则旁通之后插件还会再算一整次合成。
+    last_bypass_sample: Mutex<Option<std::time::Instant>>,
     /// 宿主在 `setupProcessing` 声明的采样率（Hz；`0` = 尚未声明）。
     ///
     /// 【为什么必须记下来】`process` 此前用 `ProcessContext::sample_rate` 选快照，且只认
