@@ -835,6 +835,7 @@ mod tests {
     use super::*;
     use crate::midi_import::MidiNoteEvent;
     use crate::state::TimelineState;
+    use hifishifter_kernel::pitch_bridge::{UnvoicedFill, UnvoicedFillPolicy};
 
     #[test]
     fn multi_take_export_uses_reaper_takevolpan_layout() {
@@ -1798,6 +1799,180 @@ mod tests {
             env.points.iter().all(|point| point[1] > 1.9),
             "包络里不得出现由 unvoiced 造成的 0 点：{:?}",
             env.points
+        );
+    }
+
+    // ─── 未识别帧填充的回归保险 ─────────────────────────────────────────────
+
+    /// 一根根轨（已开 Compose）+ 一个 clip + 指定原线/编辑线的导出夹具。
+    ///
+    /// `length_sec` 由原线长度反算，保证导出窗口正好是 `orig.len()` 帧。
+    fn pitch_timeline(orig: Vec<f32>, edit: Vec<f32>) -> (TimelineState, String) {
+        let mut timeline = TimelineState::default();
+        timeline.tracks[0].compose_enabled = true;
+        let root_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(root_id.clone()),
+            Some("Pitch".to_string()),
+            Some(0.0),
+            Some(orig.len() as f64 * 0.005),
+            Some("C:/audio/voice.wav".to_string()),
+        );
+        timeline.params_by_root_track.insert(
+            root_id,
+            crate::state::TrackParamsState {
+                frame_period_ms: 5.0,
+                pitch_orig: orig,
+                pitch_edit: edit,
+                pitch_edit_user_modified: true,
+                ..crate::state::TrackParamsState::default()
+            },
+        );
+        (timeline, clip_id)
+    }
+
+    fn policy_for(fill: UnvoicedFill) -> UnvoicedFillPolicy {
+        UnvoicedFillPolicy::for_frame_period(fill, 5.0)
+    }
+
+    /// `zero` 档必须与"完全不填充"逐点相同 —— 它是回归开关，不是第五种行为。
+    ///
+    /// 【为什么比 `points` 而不是格式化字符串】浮点格式化会把差异藏起来（1e-17 与 0
+    /// 打印成同一个 `0`）。这里比的是写出层最终的 `Vec<Vec<f64>>`。
+    #[test]
+    fn the_zero_policy_exports_the_same_points_as_before_the_fill() {
+        let mut orig = vec![60.0f32; 40];
+        let mut edit = vec![62.0f32; 40];
+        for frame in 10..16 {
+            orig[frame] = 0.0;
+            edit[frame] = 0.0;
+        }
+        let (timeline, clip_id) = pitch_timeline(orig, edit);
+        let clip = timeline.clips.iter().find(|c| c.id == clip_id).unwrap();
+
+        let raw = crate::pitch_editing::compute_clip_export_pitch_offsets(&timeline, clip)
+            .expect("offsets")
+            .offsets;
+        let zero = crate::pitch_editing::compute_clip_take_pitch_offsets(
+            &timeline,
+            clip,
+            &policy_for(UnvoicedFill::Zero),
+        )
+        .expect("filled");
+        assert_eq!(zero, raw, "zero 档必须逐元素等于不填充");
+
+        let envelope = |values: Vec<f32>| {
+            build_take_pitch_envelope(
+                &ClipExportCurves {
+                    frame_period_ms: 5.0,
+                    pitch_offset: Some(values),
+                    volume: None,
+                    pan: None,
+                },
+                0.2,
+                1.0,
+            )
+            .expect("envelope")
+        };
+        assert_eq!(
+            envelope(zero).points,
+            envelope(raw).points,
+            "zero 档写出的点必须与改动前逐点相同"
+        );
+    }
+
+    /// 填充不得增加断点预算（§5.5）：同一份素材，`bridge` 的点数 ≤ `zero`。
+    #[test]
+    fn filling_never_increases_the_envelope_point_count() {
+        // "整句人声"形态：缓慢上行的音高线 + 长短不一的 unvoiced 间隙。
+        let frames = 400usize;
+        let mut orig = vec![60.0f32; frames];
+        let mut edit: Vec<f32> = (0..frames).map(|i| 60.0 + i as f32 * 0.01).collect();
+        for (start, len) in [(20usize, 4usize), (60, 8), (150, 40), (300, 3)] {
+            for frame in start..start + len {
+                orig[frame] = 0.0;
+                edit[frame] = 0.0;
+            }
+        }
+        let (timeline, clip_id) = pitch_timeline(orig, edit);
+        let clip = timeline.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let count = |fill: UnvoicedFill| {
+            let values = crate::pitch_editing::compute_clip_take_pitch_offsets(
+                &timeline,
+                clip,
+                &policy_for(fill),
+            )
+            .expect("filled");
+            build_take_pitch_envelope(
+                &ClipExportCurves {
+                    frame_period_ms: 5.0,
+                    pitch_offset: Some(values),
+                    volume: None,
+                    pan: None,
+                },
+                2.0,
+                1.0,
+            )
+            .map_or(0, |env| env.points.len())
+        };
+        assert!(
+            count(UnvoicedFill::Bridge) <= count(UnvoicedFill::Zero),
+            "填充把断点从 {} 涨到 {}",
+            count(UnvoicedFill::Zero),
+            count(UnvoicedFill::Bridge)
+        );
+    }
+
+    /// 端点强制必须穿过填充：段首/段尾的 unvoiced run 被 hold 之后，包络仍然从
+    /// `u = 0` 起、止于 `u = 长度 × 速率`（不得依赖宿主的 hold 语义跨界）。
+    #[test]
+    fn the_forced_endpoints_survive_the_fill() {
+        // 段首 6 帧与段尾 6 帧都是 unvoiced（辅音 + 收尾气声）。
+        let frames = 100usize;
+        let mut orig = vec![60.0f32; frames];
+        let mut edit = vec![62.0f32; frames];
+        for frame in 0..6 {
+            orig[frame] = 0.0;
+            edit[frame] = 0.0;
+        }
+        for frame in frames - 6..frames {
+            orig[frame] = 0.0;
+            edit[frame] = 0.0;
+        }
+        let (timeline, clip_id) = pitch_timeline(orig, edit);
+        let clip = timeline.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let curves = build_clip_export_curves(&timeline, clip);
+        // 0.5 s × 0.5 速率 ⇒ u 域 0..0.25。
+        let env = build_take_pitch_envelope(&curves, 0.5, 0.5).expect("envelope");
+        let first = env.points.first().expect("first point");
+        let last = env.points.last().expect("last point");
+        assert!(first[0].abs() < 1e-9, "首点必须在 u = 0，实际 {}", first[0]);
+        assert!(
+            (last[0] - 0.25).abs() < 1e-9,
+            "末点必须在 u = 长度 × 速率 = 0.25，实际 {}",
+            last[0]
+        );
+        // 段首的 unvoiced run 被 hold 成 +2（而不是回到 0）。
+        assert!((first[1] - 2.0).abs() < 1e-6, "段首必须 hold 邻域值");
+    }
+
+    /// 整条曲线都是 unvoiced（全 0）⇒ 填充没有来源 ⇒ 仍然不写包络。
+    ///
+    /// 【为什么这条重要】"填充"很容易顺手把"没有包络"变成"有一条平包络" —— 那会在
+    /// REAPER 里给一个从没编辑过音高的片段加上一条自动化，用户看到的是凭空的点。
+    #[test]
+    fn a_clip_whose_curve_is_all_zero_still_writes_no_envelope() {
+        let (timeline, clip_id) = pitch_timeline(vec![0.0; 40], vec![0.0; 40]);
+        let clip = timeline.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let curves = build_clip_export_curves(&timeline, clip);
+        let values = curves.pitch_offset.clone().expect("曲线仍在（全 0）");
+        assert!(
+            values.iter().all(|value| *value == 0.0),
+            "没有可填的来源时不得凭空造值：{values:?}"
+        );
+        assert!(
+            build_take_pitch_envelope(&curves, 0.2, 1.0).is_none(),
+            "全 0 曲线不得因为填充而写出包络"
         );
     }
 
