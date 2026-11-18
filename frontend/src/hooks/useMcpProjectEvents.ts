@@ -1,9 +1,10 @@
 import { useEffect } from "react";
 import { useAppDispatch, useAppStore } from "../app/hooks";
-import { fetchTimeline } from "../features/session/thunks/transportThunks";
+import { fetchTimeline, seekPlayhead } from "../features/session/thunks/transportThunks";
 import {
     bumpParamsEpoch,
     setEditParam,
+    setPlayheadSec,
     setSelectedClip,
     setToolMode,
     setVisibleReferenceRootTrackIds,
@@ -78,6 +79,9 @@ export function useMcpProjectEvents(): void {
                 active_param?: string;
                 reference_root_track_ids?: string[];
                 tool_mode?: ToolMode;
+                focus_start_sec?: number;
+                focus_end_sec?: number;
+                seek_playhead?: boolean;
             };
         };
         void listen<ViewCommand>("mcp_view_request", (event) => {
@@ -101,6 +105,23 @@ export function useMcpProjectEvents(): void {
                                 setVisibleReferenceRootTrackIds(request.reference_root_track_ids),
                             );
                         if (request.tool_mode) dispatch(setToolMode(request.tool_mode));
+                        if (
+                            request.focus_start_sec !== undefined ||
+                            request.focus_end_sec !== undefined
+                        ) {
+                            window.dispatchEvent(
+                                new CustomEvent("hifi:focusTimelineRange", {
+                                    detail: {
+                                        startSec: request.focus_start_sec,
+                                        endSec: request.focus_end_sec,
+                                    },
+                                }),
+                            );
+                        }
+                        if (request.seek_playhead && request.focus_start_sec !== undefined) {
+                            dispatch(setPlayheadSec(request.focus_start_sec));
+                            await dispatch(seekPlayhead(request.focus_start_sec));
+                        }
                         await new Promise<void>((resolve) =>
                             requestAnimationFrame(() => resolve()),
                         );
@@ -113,6 +134,9 @@ export function useMcpProjectEvents(): void {
                             active_param: s.editParam,
                             reference_root_track_ids: s.visibleReferenceRootTrackIds,
                             tool_mode: s.toolMode,
+                            playhead_sec: s.playheadSec,
+                            focus_start_sec: request.focus_start_sec ?? null,
+                            focus_end_sec: request.focus_end_sec ?? null,
                         });
                     } catch (error) {
                         await mcpApi.replyView(request_id, {

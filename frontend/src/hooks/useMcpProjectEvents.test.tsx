@@ -48,6 +48,7 @@ vi.mock("../features/session/thunks/transportThunks", () => ({
     fetchTimeline: {
         fulfilled: (payload: unknown) => ({ type: "timeline/fulfilled", payload }),
     },
+    seekPlayhead: (sec: number) => ({ type: "transport/seek", payload: sec }),
 }));
 vi.mock("../features/session/thunks/timelineThunks", () => ({
     selectTrackRemote: (id: string) => ({ type: "track/select", payload: id }),
@@ -55,6 +56,7 @@ vi.mock("../features/session/thunks/timelineThunks", () => ({
 vi.mock("../features/session/sessionSlice", () => ({
     bumpParamsEpoch: () => ({ type: "params/refresh" }),
     setEditParam: (payload: unknown) => ({ type: "param/select", payload }),
+    setPlayheadSec: (payload: unknown) => ({ type: "playhead/set", payload }),
     setSelectedClip: (payload: unknown) => ({ type: "clip/select", payload }),
     setToolMode: (payload: unknown) => ({ type: "tool/select", payload }),
     setVisibleReferenceRootTrackIds: (payload: unknown) => ({ type: "reference/select", payload }),
@@ -163,5 +165,32 @@ test("view queries return the live acknowledged GUI state and reject changes dur
     await waitFor(() =>
         expect(fake.reply).toHaveBeenCalledWith("busy", { ok: false, code: "VIEW_BUSY" }),
     );
+    fake.session._interactionLockCount = 0;
+    const focusEvents: Array<{ startSec?: number; endSec?: number }> = [];
+    const onFocus = (e: Event) =>
+        focusEvents.push((e as CustomEvent<{ startSec?: number; endSec?: number }>).detail);
+    window.addEventListener("hifi:focusTimelineRange", onFocus);
+    await act(async () =>
+        fake.handlers.get("mcp_view_request")?.({
+            payload: {
+                request_id: "focus",
+                request: { focus_start_sec: 4.0, focus_end_sec: 8.5, seek_playhead: true },
+            },
+        }),
+    );
+    await waitFor(() =>
+        expect(fake.reply).toHaveBeenCalledWith(
+            "focus",
+            expect.objectContaining({
+                ok: true,
+                focus_start_sec: 4.0,
+                focus_end_sec: 8.5,
+            }),
+        ),
+    );
+    window.removeEventListener("hifi:focusTimelineRange", onFocus);
+    expect(focusEvents).toEqual([{ startSec: 4.0, endSec: 8.5 }]);
+    expect(fake.dispatch).toHaveBeenCalledWith({ type: "playhead/set", payload: 4.0 });
+    expect(fake.dispatch).toHaveBeenCalledWith({ type: "transport/seek", payload: 4.0 });
     unmount();
 });

@@ -4,6 +4,7 @@ import type { TimelineResult } from "../../types/api";
 export interface McpStatus {
     ok: boolean;
     enabled: boolean;
+    port?: number;
     endpoint?: string;
     instance_id?: string;
     client_config?: Record<string, unknown>;

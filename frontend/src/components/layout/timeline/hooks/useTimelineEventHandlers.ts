@@ -519,4 +519,79 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         window.addEventListener("hifi:focusCursor", handler);
         return () => window.removeEventListener("hifi:focusCursor", handler);
     }, [getPlayheadSec, pxPerSec, sessionRef, syncScrollLeft, viewport]);
+
+    // ── hifi:focusTimelineRange（MCP hfs_editor_view 区间聚焦）──────────────
+    useEffect(() => {
+        function onFocusRange(e: Event) {
+            const detail = (e as CustomEvent<{ startSec?: number; endSec?: number }>).detail;
+            const startSec = detail?.startSec;
+            const endSec = detail?.endSec;
+            if (startSec === undefined && endSec === undefined) return;
+
+            const kernelMode = viewport.isKernel();
+            const scroller = kernelMode ? null : scrollRef.current;
+            if (!kernelMode && !scroller) return;
+            const viewportWidthPx = Math.max(
+                1,
+                kernelMode ? viewport.getViewportWidth() : scroller!.clientWidth,
+            );
+            const totalSec = resolveScrollableProjectSec(
+                sessionRef.current.projectSec,
+                sessionRef.current.clips,
+                resolveCaptureScrollExtentSec(sessionRef.current.projectSec),
+            );
+            const minScale = resolveTimelineMinPxPerSec({
+                baseMinPxPerSec: MIN_PX_PER_SEC,
+                projectSec: totalSec,
+                viewportWidthPx,
+            });
+
+            let nextScale = pxPerSecRef.current;
+            let anchorSec = Math.max(0, startSec ?? endSec ?? 0);
+            if (
+                startSec !== undefined &&
+                endSec !== undefined &&
+                Number.isFinite(startSec) &&
+                Number.isFinite(endSec) &&
+                endSec > startSec
+            ) {
+                const spanSec = endSec - startSec;
+                const paddedSpan = Math.max(0.05, spanSec * 1.2);
+                nextScale = Math.min(
+                    MAX_PX_PER_SEC,
+                    Math.max(minScale, viewportWidthPx / paddedSpan),
+                );
+                anchorSec = Math.max(0, startSec - spanSec * 0.1);
+            }
+            const nextScrollLeft = Math.max(0, anchorSec * nextScale);
+
+            if (kernelMode) {
+                const applied = viewport.setZoomAndScroll(nextScale, nextScrollLeft);
+                setPxPerSec(applied.pxPerSec);
+                commitScrollLeftState(applied.scrollLeft);
+                return;
+            }
+            keyboardZoomPendingRef.current = {
+                nextScale,
+                nextScrollLeft,
+            };
+            pxPerSecRef.current = nextScale;
+            flushSync(() => {
+                setPxPerSec(nextScale);
+                commitScrollLeftState(nextScrollLeft);
+            });
+        }
+
+        window.addEventListener("hifi:focusTimelineRange", onFocusRange as EventListener);
+        return () =>
+            window.removeEventListener("hifi:focusTimelineRange", onFocusRange as EventListener);
+    }, [
+        commitScrollLeftState,
+        keyboardZoomPendingRef,
+        pxPerSecRef,
+        scrollRef,
+        sessionRef,
+        setPxPerSec,
+        viewport,
+    ]);
 }
