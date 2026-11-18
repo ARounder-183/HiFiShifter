@@ -22,6 +22,12 @@
 //! 倒放 take 也一样 —— u 是**播放顺序**的时间，方向由 SECTION 表达，不改变坐标域。
 //! 因此本模块只提供 [offset_to_take_u] / [take_u_to_offset] 一对函数，任何调用点都
 //! 不许就地再乘一次速率。
+//!
+//! 【第二个纯数学问题：未识别帧怎么填】分析产物用 `0` 当"这一帧没有音高"的哨兵，
+//! 而宿主包络是**连续控制信号** —— 它没有帧，也没有"这一帧不处理"。逐帧写 0 会让
+//! 移调器在几十毫秒内把比率从 +12 拉到 0 再拉回 +12。[`fill_unvoiced_offsets`]
+//! 把"没有音高"从**值**里拿出来，改成"跟随邻域"，四个档位见 [`UnvoicedFill`]。
+//! 它与断点简化是**两步**：先填、后简化（端点强制与同时间点合并都在简化里）。
 
 use serde::{Deserialize, Serialize};
 
@@ -272,6 +278,335 @@ pub fn simplify_breakpoints(
     out
 }
 
+// ─── 未识别帧的填充（导出侧） ────────────────────────────────────────────────
+//
+// 分析产物 `pitch_orig` 用 `0` 当哨兵，同时表示"这一帧没有 F0""还没分析""超出
+// 音域"三件事。而宿主的 take 音高包络是一条**连续的控制信号** —— 它没有帧，也没
+// 有"这一帧不处理"。把逐帧的"不处理"写成显式 0 点，等于让宿主的移调器在 1–2 帧内
+// 把比率从 +12 拉到 0 再拉回 +12：每个辅音处一下"咯噔"。
+//
+// 填充把"没有音高"从**值**里拿出来，改成"跟随邻域"。三个前提：
+//
+// 1. 它只作用于**导出边界**（`compute_clip_take_pitch_offsets`）。同一份偏移还是
+//    渲染端子轨偏移的输入，而渲染端对无 F0 帧的语义就是"不变换" —— 改那里等于顺手
+//    改掉渲染。
+// 2. `voiced` 的口径是"至少有一侧定义了音高"，**不是**"偏移不为 0"，也**不是**
+//    `orig > 0 && edit > 0`（后者的后果见 `fill_unvoiced_offsets` 的文档）。
+// 3. 填充在断点简化**之前**：简化器的端点强制与同时间点合并都保持原样。
+
+/// 未识别帧（unvoiced）的填充策略。
+///
+/// 【为什么不叫"平滑"】平滑会改用户画出来的曲线。这里只动"本来没有值"的帧 ——
+/// 用户主动画成 0 的有声帧（`voiced = true, offset = 0`）一个字节都不许变。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnvoicedFill {
+    /// 今天的行为：unvoiced 帧保持 0。
+    ///
+    /// **这是回归开关**：取它时 [`fill_unvoiced_offsets`] 的第一行就原样返回，
+    /// 输出必须与引入填充之前逐字节一致。
+    Zero,
+    /// 一律 hold 前一个 voiced 值；只有整段静音才插值。
+    Hold,
+    /// 短间隙插值；长且可闻的间隙 hold 前值；静音段插值。**默认。**
+    #[default]
+    Bridge,
+    /// 短间隙插值；长且可闻的间隙 hold 0（带斜坡）；静音段插值。
+    ///
+    /// 【为什么必须留这一档】渲染端对"无 F0 但有能量"的帧（齿音、气爆）**故意**
+    /// 切回干声（`world_vocoder::blend_unvoiced_regions_with_silence_gate`）。
+    /// 这一档是"与渲染端对齐"的候选：齿音在 REAPER 里也不被移调。哪一档更好听
+    /// 取决于素材与算法，只能靠真机 A/B，所以必须有一条能直接对比的路。
+    Dry,
+}
+
+impl UnvoicedFill {
+    /// 宽松解析。**非法值回退默认**，不报错。
+    ///
+    /// 配置是手可编辑的文本，一个拼写错误不该让整份设置加载失败（与
+    /// `ExportSettings` 的既有惯例一致）。
+    pub fn from_name(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "zero" => Self::Zero,
+            "hold" => Self::Hold,
+            "dry" => Self::Dry,
+            _ => Self::Bridge,
+        }
+    }
+
+    /// 规范名（与 [`Self::from_name`] 互逆，供配置回写与日志使用）。
+    pub fn as_name(self) -> &'static str {
+        match self {
+            Self::Zero => "zero",
+            Self::Hold => "hold",
+            Self::Bridge => "bridge",
+            Self::Dry => "dry",
+        }
+    }
+}
+
+/// 短间隙的上限（毫秒）。**以帧存储、以毫秒声明** —— 帧周期不是常量。
+///
+/// 【为什么是 30 ms，而不是"越长越平滑"的 120 ms】渲染端对同一件事的补洞是
+/// 15 ms（`world_vocoder::cleanup_f0_inplace`）。120 ms 会覆盖典型齿音
+/// （80–150 ms），把渲染端**故意**保持干声的段落在 REAPER 里移调 —— 那不是在修
+/// 不一致，是在制造另一种不一致。30 ms 覆盖爆破音（5–20 ms）与短气口，同时远
+/// 小于最短的典型齿音。
+pub const MAX_BRIDGE_MS: f64 = 30.0;
+
+/// 允许插值的两端偏移差上限（半音）。
+///
+/// 同号且差值小才插值：在"前一句 +12、后一句 −5"的换气处插值会造出一个谁也没画
+/// 过的中间调，而那个中间调会**穿过 0**（= 移调量为零的那一段恰好落在气口中间）。
+pub const MAX_BRIDGE_SPAN_SEMITONES: f64 = 2.0;
+
+/// 判定"静音"的峰值门（`1.0` = 0 dBFS）。
+///
+/// 【与 `WORLD_DRY_SILENCE_RMS` 同量级但**口径不同**】那个是 20 ms 窗内的 RMS，
+/// 这里是 `dyn_orig` 的逐帧**峰值**电平。数值可以接近，含义不能互相替代 ——
+/// 不要为了"少一个常量"把它们合并。
+pub const SILENCE_PEAK: f32 = 0.003;
+
+/// 毫秒 → 帧。**阈值换算的唯一实现**（默认值与环境变量覆盖共用同一个）。
+///
+/// 与 `cleanup_f0_inplace` 同一条下限：再短的间隙也算一帧，否则 `max_bridge_frames`
+/// 会退化成 0 而把所有短间隙都判成长间隙。`0` 毫秒是合法取值，表示**禁用插值**
+/// （等价于"纯 hold"）—— 这是 A/B 时最需要的一档。
+fn bridge_frames_for(max_bridge_ms: f64, frame_period_ms: f64) -> usize {
+    let fp = if frame_period_ms.is_finite() && frame_period_ms > 0.0 {
+        frame_period_ms
+    } else {
+        5.0
+    };
+    if !(max_bridge_ms.is_finite() && max_bridge_ms > 0.0) {
+        return 0;
+    }
+    ((max_bridge_ms / fp).round() as isize).max(1) as usize
+}
+
+/// 导出侧填充未识别帧时用的一组常量。
+///
+/// 【为什么所有阈值都以**帧**存储】帧周期不是常量（`frame_period_ms` 是工程级
+/// 设置）。以毫秒声明、在 [`Self::for_frame_period`] 一次换算，比较时不再做除法。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UnvoicedFillPolicy {
+    /// 换算所依据的帧周期（毫秒）。毫秒→帧的**唯一**换算点见 [`Self::for_frame_period`]。
+    pub frame_period_ms: f64,
+    /// 间隙 ≤ 这个长度（帧）走插值，更长走长间隙规则。
+    pub max_bridge_frames: usize,
+    /// 两端偏移同号且差值 ≤ 这个值（半音）才允许插值。
+    pub max_bridge_span_semitones: f64,
+    /// 每个 hold 段尾部留多少帧做线性过渡。
+    ///
+    /// `0` **不是**"没有过渡"：写不出垂直阶跃（简化器的同时间点合并会把同一时刻的
+    /// 两点并成一点），所以 `0` 得到的是落在相邻两帧之间的 **5 ms 斜坡**。这个参数
+    /// 因此只决定"5 ms 还是 20 ms"，由听感定，不由正确性定。
+    pub ramp_frames: usize,
+    /// 判定"静音"的峰值门（`1.0` = 0 dBFS）。
+    pub silence_peak: f32,
+    pub fill: UnvoicedFill,
+}
+
+impl UnvoicedFillPolicy {
+    /// 按帧周期把毫秒常量换算成帧，其余取默认值。
+    pub fn for_frame_period(fill: UnvoicedFill, frame_period_ms: f64) -> Self {
+        let fp = if frame_period_ms.is_finite() && frame_period_ms > 0.0 {
+            frame_period_ms
+        } else {
+            5.0
+        };
+        Self {
+            frame_period_ms: fp,
+            max_bridge_frames: bridge_frames_for(MAX_BRIDGE_MS, fp),
+            max_bridge_span_semitones: MAX_BRIDGE_SPAN_SEMITONES,
+            ramp_frames: 0,
+            silence_peak: SILENCE_PEAK,
+            fill,
+        }
+    }
+
+    /// 环境变量 A/B 覆盖。
+    ///
+    /// 【为什么必须有】这四个常量的正确取值只能靠听。有了它，A/B 时不用重新编译、
+    /// 不用改配置、不用重启宿主 —— REAPER 里换一段素材就能对比。没有它，每一轮
+    /// 听感实验都要走一次完整构建 + 插件重装。
+    ///
+    /// | 变量 | 字段 |
+    /// |---|---|
+    /// | `HIFISHIFTER_TAKE_PITCH_UNVOICED` | [`Self::fill`] |
+    /// | `HIFISHIFTER_TAKE_PITCH_MAX_BRIDGE_MS` | [`Self::max_bridge_frames`]（换算后） |
+    /// | `HIFISHIFTER_TAKE_PITCH_RAMP_FRAMES` | [`Self::ramp_frames`] |
+    /// | `HIFISHIFTER_TAKE_PITCH_SILENCE_PEAK` | [`Self::silence_peak`] |
+    ///
+    /// 解析不了的值**保持原值**（不做部分覆盖、不报错）：一次手误不该让导出行为
+    /// 悄悄落到某个"半个默认"的组合上。
+    pub fn with_env_overrides(self) -> Self {
+        self.with_overrides_from(|name| std::env::var(name).ok())
+    }
+
+    /// [`Self::with_env_overrides`] 的实现，取值来源可注入（因此可测）。
+    ///
+    /// 【为什么不直接读 `std::env`】`set_var` 在多线程测试里是不安全的，而"环境变量
+    /// 钩子"恰恰是最容易写完就再没人验证的那类代码。收一个查找闭包，让"解析失败
+    /// 保持原值"这件事能被真正测到。
+    fn with_overrides_from(mut self, lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let number = |name: &str| -> Option<f64> {
+            lookup(name)
+                .and_then(|raw| raw.trim().parse::<f64>().ok())
+                .filter(|value| value.is_finite())
+        };
+
+        if let Some(name) = lookup("HIFISHIFTER_TAKE_PITCH_UNVOICED") {
+            self.fill = UnvoicedFill::from_name(&name);
+        }
+        if let Some(ms) = number("HIFISHIFTER_TAKE_PITCH_MAX_BRIDGE_MS") {
+            self.max_bridge_frames = bridge_frames_for(ms, self.frame_period_ms);
+        }
+        if let Some(frames) = number("HIFISHIFTER_TAKE_PITCH_RAMP_FRAMES").filter(|v| *v >= 0.0) {
+            self.ramp_frames = frames.round() as usize;
+        }
+        if let Some(peak) = number("HIFISHIFTER_TAKE_PITCH_SILENCE_PEAK") {
+            self.silence_peak = peak.max(0.0) as f32;
+        }
+        self
+    }
+}
+
+impl Default for UnvoicedFillPolicy {
+    fn default() -> Self {
+        Self::for_frame_period(UnvoicedFill::default(), 5.0)
+    }
+}
+
+/// 导出侧的逐帧偏移里，把**未识别帧**填成邻域的连续值。
+///
+/// 参数：
+/// - `offsets`：来自 `compute_clip_export_pitch_offsets` 的逐帧半音偏移；
+/// - `voiced`：哪些帧**至少有一侧定义了音高**。口径是
+///   `(pitch_orig > 0) || (pitch_edit > 0)`，与
+///   `PitchCurvesSnapshot::is_voiced_at_time` 逐字同义。
+///
+///   **最容易做错的一步**：不能写 `orig > 0 && edit > 0`。整条没编辑过的有声帧
+///   `edit == 0`（用户没碰过 ⇒ 不需要偏移），那样判会把**用户从未编辑过的整段**
+///   判成 unvoiced 并填成邻居的值 —— 等于凭空给它们加了移调。也不能用
+///   `offset != 0` 反推：用户可以把音高画回原调，也可以把一整段画成 0。
+/// - `energy`：与 `offsets` **同栅格**的逐帧峰值电平（`dyn_orig`，`1.0` = 0 dBFS）。
+///   `None` = **未知**，按"可闻"处理（保守 hold）。**绝不补 0** —— 补 0 等于把
+///   "不知道"判成"确定的静音"，长间隙会走插值路径。
+/// - `policy`：见 [`UnvoicedFillPolicy`]。
+///
+/// 返回与 `offsets` 等长的新表（`voiced` 比它短时，尾部的帧原样保留）。
+pub fn fill_unvoiced_offsets(
+    offsets: &[f32],
+    voiced: &[bool],
+    energy: Option<&[f32]>,
+    policy: &UnvoicedFillPolicy,
+) -> Vec<f32> {
+    // 【回归开关必须在第一行】`Zero` 连 `voiced` 都不读 —— "与改动前逐字节一致"
+    // 这件事不该需要读代码来判断。没有掩码时同理（= 旧行为）。
+    if policy.fill == UnvoicedFill::Zero || voiced.is_empty() {
+        return offsets.to_vec();
+    }
+
+    let mut out = offsets.to_vec();
+    let n = out.len().min(voiced.len());
+    let mut i = 0usize;
+    while i < n {
+        if voiced[i] {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < n && !voiced[i] {
+            i += 1;
+        }
+        let end = i; // [start, end) 是一段 unvoiced
+
+        let left = if start > 0 {
+            Some(out[start - 1])
+        } else {
+            None
+        };
+        let right = if end < n { Some(out[end]) } else { None };
+        match (left, right) {
+            // 整条没有浊音帧：没有可填的来源，保持原值。
+            (None, None) => {}
+            // 段首 / 段尾：只有一侧有依据，只能 hold 那一侧。
+            (Some(value), None) | (None, Some(value)) => hold(&mut out, start, end, value),
+            (Some(left), Some(right)) => {
+                let len = end - start;
+                let short = len <= policy.max_bridge_frames;
+                let same_sign = left * right >= 0.0;
+                let close = ((right - left) as f64).abs() <= policy.max_bridge_span_semitones;
+                if short && same_sign && close {
+                    lerp(&mut out, start, end, left, right);
+                } else if energy
+                    .is_some_and(|levels| run_is_silent(levels, start, end, policy.silence_peak))
+                {
+                    // 长静音：填什么都不影响听感，但**填 0 会留下一个阶跃**，而且
+                    // 那个阶跃正好落在下一句的起音上。插值穿过静音既听不见又消掉
+                    // 阶跃，还省断点（一条直线 2 点）。
+                    lerp(&mut out, start, end, left, right);
+                } else {
+                    // 长且可闻：hold 一段，尾部（可选）爬到右侧值。
+                    let from = if policy.fill == UnvoicedFill::Dry {
+                        0.0
+                    } else {
+                        left
+                    };
+                    hold_then_ramp(&mut out, start, end, from, right, policy.ramp_frames);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 这一段是否**整段都低于静音门**。
+///
+/// 【非有限值算"可闻"】NaN 电平意味着"不知道"。把"不知道"当静音会让长间隙走插值
+/// 路径 —— 而插值正是"凭空造一个中间调"。保守方向是 hold。
+/// 【电平比窗口短也算"不知道"】`dyn_orig` 部分命中时返回的是"当前可得的部分"。
+fn run_is_silent(energy: &[f32], start: usize, end: usize, silence_peak: f32) -> bool {
+    let Some(levels) = energy.get(start..end) else {
+        return false;
+    };
+    !levels.is_empty()
+        && levels
+            .iter()
+            .all(|peak| peak.is_finite() && *peak < silence_peak)
+}
+
+/// 端点不动的线性插值。
+///
+/// 【公式与 `world_vocoder::cleanup_f0_inplace` 逐字同形】两侧补的是同一件事
+/// （"这一帧没有音高"），补出来的必须是同一条线，否则"插件里补的和 REAPER 里补的
+/// 不是一个形状"。`(k + 1) / (len + 1)` 保证首末两端都不被改写。
+fn lerp(out: &mut [f32], start: usize, end: usize, left: f32, right: f32) {
+    let len = end - start;
+    for k in 0..len {
+        let t = (k + 1) as f32 / (len + 1) as f32;
+        out[start + k] = left + (right - left) * t;
+    }
+}
+
+fn hold(out: &mut [f32], start: usize, end: usize, value: f32) {
+    out[start..end].fill(value);
+}
+
+/// 先 hold `from`，最后 `min(ramp, len)` 帧线性爬到 `to`。
+///
+/// `to` 是**下一帧 voiced 的实际值**（不是 `from`、也不是插值终点）：这一段结束后
+/// 宿主立刻要接到那个值上，斜坡的终点必须与它重合，否则过渡末尾又多一个折角。
+fn hold_then_ramp(out: &mut [f32], start: usize, end: usize, from: f32, to: f32, ramp: usize) {
+    let len = end - start;
+    let ramp = ramp.min(len);
+    out[start..end - ramp].fill(from);
+    for k in 0..ramp {
+        let t = (k + 1) as f32 / ramp as f32;
+        out[end - ramp + k] = from + (to - from) * t;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,5 +662,303 @@ mod tests {
         assert!(points.len() <= 3, "斜坡不该逐帧写点：{}", points.len());
         assert!((points[0].value - 0.0).abs() < 0.03);
         assert!((points[points.len() - 1].value - 1.99).abs() < 0.03);
+    }
+
+    // ─── 未识别帧填充 ───────────────────────────────────────────────────────
+
+    fn policy(fill: UnvoicedFill, max_bridge_frames: usize) -> UnvoicedFillPolicy {
+        UnvoicedFillPolicy {
+            frame_period_ms: 5.0,
+            max_bridge_frames,
+            max_bridge_span_semitones: MAX_BRIDGE_SPAN_SEMITONES,
+            ramp_frames: 0,
+            silence_peak: SILENCE_PEAK,
+            fill,
+        }
+    }
+
+    /// 把"变量名 → 值"对当环境变量用（`with_env_overrides` 的注入版）。
+    fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_string())
+        }
+    }
+
+    /// `Zero` 是回归开关：输出必须与输入逐元素相同（含 0）。
+    #[test]
+    fn zero_policy_reproduces_the_input_verbatim() {
+        let offsets = [12.0f32, 0.0, 0.0, 7.0];
+        let voiced = [true, false, false, true];
+        let energy = [1.0f32, 1.0, 1.0, 1.0];
+        let out = fill_unvoiced_offsets(
+            &offsets,
+            &voiced,
+            Some(&energy),
+            &policy(UnvoicedFill::Zero, 1),
+        );
+        assert_eq!(out, offsets.to_vec());
+    }
+
+    /// 全 voiced ⇒ 恒等（填充是恒等变换，不是"平滑"）。
+    #[test]
+    fn an_all_voiced_curve_is_untouched() {
+        let offsets = [0.0f32, 2.0, 0.0];
+        let voiced = [true; 3];
+        assert_eq!(
+            fill_unvoiced_offsets(&offsets, &voiced, None, &policy(UnvoicedFill::Bridge, 6)),
+            offsets.to_vec()
+        );
+    }
+
+    /// 全 unvoiced ⇒ 恒等（没有可填的来源，不能凭空造值）。
+    #[test]
+    fn an_all_unvoiced_curve_is_untouched() {
+        let offsets = [0.0f32, 1.0, 2.0];
+        let voiced = [false; 3];
+        assert_eq!(
+            fill_unvoiced_offsets(&offsets, &voiced, None, &policy(UnvoicedFill::Bridge, 6)),
+            offsets.to_vec()
+        );
+    }
+
+    /// 段首：只有右侧有依据 ⇒ hold 后值。
+    #[test]
+    fn a_leading_unvoiced_run_holds_the_first_voiced_value() {
+        let offsets = [0.0f32, 0.0, 0.0, 5.0, 6.0];
+        let voiced = [false, false, false, true, true];
+        assert_eq!(
+            fill_unvoiced_offsets(&offsets, &voiced, None, &policy(UnvoicedFill::Bridge, 6)),
+            vec![5.0, 5.0, 5.0, 5.0, 6.0]
+        );
+    }
+
+    /// 段尾：只有左侧有依据 ⇒ hold 前值。
+    #[test]
+    fn a_trailing_unvoiced_run_holds_the_last_voiced_value() {
+        let offsets = [5.0f32, 6.0, 0.0, 0.0];
+        let voiced = [true, true, false, false];
+        assert_eq!(
+            fill_unvoiced_offsets(&offsets, &voiced, None, &policy(UnvoicedFill::Bridge, 6)),
+            vec![5.0, 6.0, 6.0, 6.0]
+        );
+    }
+
+    /// 间隙长度**正好等于**阈值 ⇒ 插值（阈值是"≤"，不是"<"）。
+    #[test]
+    fn a_gap_exactly_at_the_threshold_is_interpolated() {
+        let offsets = [2.0f32, 0.0, 0.0, 3.0];
+        let voiced = [true, false, false, true];
+        let out = fill_unvoiced_offsets(&offsets, &voiced, None, &policy(UnvoicedFill::Bridge, 2));
+        assert!((out[1] - 7.0 / 3.0).abs() < 1e-6, "{out:?}");
+        assert!((out[2] - 8.0 / 3.0).abs() < 1e-6, "{out:?}");
+    }
+
+    /// 间隙比阈值长一帧 ⇒ 走长间隙规则（hold）。
+    #[test]
+    fn a_gap_one_frame_past_the_threshold_holds() {
+        let offsets = [2.0f32, 0.0, 0.0, 0.0, 3.0];
+        let voiced = [true, false, false, false, true];
+        let out = fill_unvoiced_offsets(&offsets, &voiced, None, &policy(UnvoicedFill::Bridge, 2));
+        assert_eq!(&out[1..4], &[2.0, 2.0, 2.0]);
+    }
+
+    /// 插值不得改写两端的有声帧，且中间严格单调。
+    #[test]
+    fn interpolation_never_touches_the_bounding_frames() {
+        let offsets = [2.0f32, 0.0, 0.0, 0.0, 3.0];
+        let voiced = [true, false, false, false, true];
+        let out = fill_unvoiced_offsets(&offsets, &voiced, None, &policy(UnvoicedFill::Bridge, 4));
+        assert_eq!(out[0], 2.0, "左端点不动");
+        assert_eq!(out[4], 3.0, "右端点不动");
+        assert!(out[1] < out[2] && out[2] < out[3], "{out:?}");
+        assert!(out[1] > 2.0 && out[3] < 3.0, "严格夹在两端之间：{out:?}");
+    }
+
+    /// 两端异号 ⇒ hold，绝不造出穿过 0 的中间值。
+    #[test]
+    fn a_sign_flip_gap_holds_instead_of_crossing_zero() {
+        let offsets = [12.0f32, 0.0, 0.0, -5.0];
+        let voiced = [true, false, false, true];
+        let out = fill_unvoiced_offsets(&offsets, &voiced, None, &policy(UnvoicedFill::Bridge, 6));
+        assert_eq!(&out[1..3], &[12.0, 12.0], "{out:?}");
+    }
+
+    /// 差值超过跨度上限 ⇒ hold（哪怕间隙很短）。
+    #[test]
+    fn a_large_span_gap_holds() {
+        let offsets = [12.0f32, 0.0, 0.0, 7.0];
+        let voiced = [true, false, false, true];
+        let out = fill_unvoiced_offsets(&offsets, &voiced, None, &policy(UnvoicedFill::Bridge, 6));
+        assert_eq!(&out[1..3], &[12.0, 12.0], "{out:?}");
+    }
+
+    /// 长**静音**间隙插值：听不见，但消掉了落在下一句起音上的阶跃。
+    #[test]
+    fn a_silent_long_gap_is_interpolated() {
+        let offsets = [2.0f32, 0.0, 0.0, 0.0, 3.0];
+        let voiced = [true, false, false, false, true];
+        let energy = [0.5f32, 0.0001, 0.0002, 0.0003, 0.5];
+        let out = fill_unvoiced_offsets(
+            &offsets,
+            &voiced,
+            Some(&energy),
+            &policy(UnvoicedFill::Bridge, 1),
+        );
+        assert!((out[1] - 2.25).abs() < 1e-6, "{out:?}");
+        assert!((out[2] - 2.5).abs() < 1e-6, "{out:?}");
+        assert!((out[3] - 2.75).abs() < 1e-6, "{out:?}");
+    }
+
+    /// 长**可闻**间隙 hold：插值会让辅音被移调到中间调。
+    #[test]
+    fn a_loud_long_gap_holds() {
+        let offsets = [2.0f32, 0.0, 0.0, 0.0, 3.0];
+        let voiced = [true, false, false, false, true];
+        let energy = [0.5f32, 0.4, 0.0, 0.0, 0.5];
+        let out = fill_unvoiced_offsets(
+            &offsets,
+            &voiced,
+            Some(&energy),
+            &policy(UnvoicedFill::Bridge, 1),
+        );
+        assert_eq!(&out[1..4], &[2.0, 2.0, 2.0], "{out:?}");
+    }
+
+    /// **缺失的能量 ≠ 静音**：`None` 必须走 hold，不能走插值。
+    ///
+    /// 【为什么这条最容易写错】"没有电平数据"看起来像"电平是 0"，而 0 低于静音门
+    /// ⇒ 判成静音 ⇒ 插值。于是"未知"被悄悄翻译成"确定的静音"，一条本该 hold 的
+    /// 长间隙开始凭空造中间调。
+    #[test]
+    fn missing_energy_is_not_treated_as_silence() {
+        let offsets = [2.0f32, 0.0, 0.0, 0.0, 3.0];
+        let voiced = [true, false, false, false, true];
+        let out = fill_unvoiced_offsets(&offsets, &voiced, None, &policy(UnvoicedFill::Bridge, 1));
+        assert_eq!(&out[1..4], &[2.0, 2.0, 2.0], "{out:?}");
+        // 电平比窗口短同样是"不知道"。
+        let short = [0.0f32, 0.0];
+        let out = fill_unvoiced_offsets(
+            &offsets,
+            &voiced,
+            Some(&short),
+            &policy(UnvoicedFill::Bridge, 1),
+        );
+        assert_eq!(
+            &out[1..4],
+            &[2.0, 2.0, 2.0],
+            "短电平表不得被当成静音：{out:?}"
+        );
+    }
+
+    /// 用户主动画成 0 的**有声**帧必须原样保留 —— 那是用户的意思，不是"没有音高"。
+    #[test]
+    fn a_user_zero_frame_is_never_filled() {
+        let offsets = [3.0f32, 0.0, 0.0, 2.0];
+        let voiced = [true, true, false, true];
+        let out = fill_unvoiced_offsets(&offsets, &voiced, None, &policy(UnvoicedFill::Bridge, 6));
+        assert_eq!(out[1], 0.0, "用户画的 0 被改写：{out:?}");
+        assert!((out[2] - 1.0).abs() < 1e-6, "{out:?}");
+        assert_eq!(out[3], 2.0);
+    }
+
+    /// `Dry`：长可闻间隙 hold **0**，与渲染端"无 F0 有能量 ⇒ 干声"对齐。
+    #[test]
+    fn dry_policy_holds_zero_inside_a_long_audible_gap() {
+        let offsets = [3.0f32, 0.0, 0.0, 0.0, 4.0];
+        let voiced = [true, false, false, false, true];
+        let energy = [0.5f32, 0.4, 0.4, 0.4, 0.5];
+        let out = fill_unvoiced_offsets(
+            &offsets,
+            &voiced,
+            Some(&energy),
+            &policy(UnvoicedFill::Dry, 1),
+        );
+        assert_eq!(&out[1..4], &[0.0, 0.0, 0.0], "{out:?}");
+
+        // 带斜坡时尾部爬到右侧值（`to` 是下一帧 voiced 的实际值）。
+        let mut ramped = policy(UnvoicedFill::Dry, 1);
+        ramped.ramp_frames = 2;
+        let out = fill_unvoiced_offsets(&offsets, &voiced, Some(&energy), &ramped);
+        assert_eq!(out[1], 0.0, "{out:?}");
+        assert!((out[2] - 2.0).abs() < 1e-6, "{out:?}");
+        assert!((out[3] - 4.0).abs() < 1e-6, "{out:?}");
+    }
+
+    /// 斜坡长度只改"过渡多长"，不改断点预算（线性段仍被压成两端点）。
+    #[test]
+    fn ramp_frames_does_not_change_the_point_count() {
+        // frames 0..10 voiced 0；10..30 unvoiced 且可闻（hold 前值 0）；
+        // 30..40 voiced 12 ⇒ 一个阶跃。ramp=4 把它磨成 4 帧线性。
+        let mut offsets = vec![0.0f32; 40];
+        for slot in offsets.iter_mut().skip(30) {
+            *slot = 12.0;
+        }
+        let mut voiced = vec![true; 40];
+        for slot in voiced.iter_mut().take(30).skip(10) {
+            *slot = false;
+        }
+        let energy = vec![0.4f32; 40];
+        let count = |ramp: usize| {
+            let mut tuned = policy(UnvoicedFill::Bridge, 1);
+            tuned.ramp_frames = ramp;
+            let filled = fill_unvoiced_offsets(&offsets, &voiced, Some(&energy), &tuned);
+            build_take_pitch_points(&filled, 5.0, 0.2, 1.0).len()
+        };
+        assert_eq!(count(0), count(4), "线性斜坡不该增加断点");
+    }
+
+    /// 四个常量的取值只能靠听 ⇒ 环境变量 A/B 钩子必须真的能改到它们。
+    #[test]
+    fn the_environment_can_switch_the_policy_and_its_thresholds() {
+        let base = UnvoicedFillPolicy::for_frame_period(UnvoicedFill::Bridge, 5.0);
+        assert_eq!(base.max_bridge_frames, 6, "30 ms ÷ 5 ms = 6 帧");
+        let tuned = base.with_overrides_from(env(&[
+            ("HIFISHIFTER_TAKE_PITCH_UNVOICED", "dry"),
+            ("HIFISHIFTER_TAKE_PITCH_MAX_BRIDGE_MS", "120"),
+            ("HIFISHIFTER_TAKE_PITCH_RAMP_FRAMES", "4"),
+            ("HIFISHIFTER_TAKE_PITCH_SILENCE_PEAK", "0.01"),
+        ]));
+        assert_eq!(tuned.fill, UnvoicedFill::Dry);
+        assert_eq!(tuned.max_bridge_frames, 24, "120 ms ÷ 5 ms = 24 帧");
+        assert_eq!(tuned.ramp_frames, 4);
+        assert!((tuned.silence_peak - 0.01).abs() < 1e-9);
+        // 0 毫秒是合法值：禁用插值（等价于纯 hold）。
+        let off = base.with_overrides_from(env(&[("HIFISHIFTER_TAKE_PITCH_MAX_BRIDGE_MS", "0")]));
+        assert_eq!(off.max_bridge_frames, 0);
+    }
+
+    /// 解析不了的值**保持原值**，不做部分覆盖。
+    #[test]
+    fn an_unparsable_override_keeps_the_default() {
+        let base = UnvoicedFillPolicy::for_frame_period(UnvoicedFill::Bridge, 5.0);
+        let tuned = base.with_overrides_from(env(&[
+            ("HIFISHIFTER_TAKE_PITCH_MAX_BRIDGE_MS", "not-a-number"),
+            ("HIFISHIFTER_TAKE_PITCH_RAMP_FRAMES", "-3"),
+            ("HIFISHIFTER_TAKE_PITCH_SILENCE_PEAK", "NaN"),
+            ("HIFISHIFTER_TAKE_PITCH_UNVOICED", "smooth-ish"),
+        ]));
+        assert_eq!(tuned.max_bridge_frames, base.max_bridge_frames);
+        assert_eq!(tuned.ramp_frames, base.ramp_frames);
+        assert_eq!(tuned.silence_peak, base.silence_peak);
+        assert_eq!(tuned.fill, UnvoicedFill::Bridge, "非法档位回退默认");
+    }
+
+    /// 配置里存的是名字，两个方向必须互逆（否则"存 dry、读回 bridge"）。
+    #[test]
+    fn the_policy_names_round_trip_through_the_loose_parser() {
+        for fill in [
+            UnvoicedFill::Zero,
+            UnvoicedFill::Hold,
+            UnvoicedFill::Bridge,
+            UnvoicedFill::Dry,
+        ] {
+            assert_eq!(UnvoicedFill::from_name(fill.as_name()), fill);
+        }
+        assert_eq!(UnvoicedFill::from_name("  DRY "), UnvoicedFill::Dry);
+        assert_eq!(UnvoicedFill::from_name(""), UnvoicedFill::Bridge);
+        assert_eq!(UnvoicedFill::from_name("bogus"), UnvoicedFill::Bridge);
     }
 }
