@@ -557,6 +557,34 @@ function mergeLatestSourceFileChanges(
     return merged;
 }
 
+/**
+ * 两轮电平载荷的内容是否完全一致（键集合与每键三个字段）。
+ *
+ * 【为什么是逐字段比较而不是 JSON.stringify】captureStore 的载荷是定键序的 IPC
+ * 对象，序列化即内容指纹；这里的键来自后端 HashMap 的迭代序（engine.rs 的
+ * `meter_state` 每轮重建），序列化结果随顺序抖动，会把"内容相同"误判成"变了"。
+ * 键数量 + 逐键字段比较与顺序无关。缺少的一侧按"内容变了"处理（undefined ≠ any）。
+ */
+function sameMeterContents(
+    previous: Record<string, import("./features/session/sessionTypes").TrackMeterInfo>,
+    next: Record<string, import("./features/session/sessionTypes").TrackMeterInfo>,
+): boolean {
+    const previousIds = Object.keys(previous);
+    if (previousIds.length !== Object.keys(next).length) {
+        return false;
+    }
+    return previousIds.every((trackId) => {
+        const a = previous[trackId];
+        const b = next[trackId];
+        return (
+            b !== undefined &&
+            a.peakLinear === b.peakLinear &&
+            a.maxPeakLinear === b.maxPeakLinear &&
+            a.clipped === b.clipped
+        );
+    });
+}
+
 function AppInner() {
     useSyllableAnalysisEvents();
     const dispatch = useAppDispatch();
@@ -987,6 +1015,11 @@ function AppInner() {
     useEffect(() => {
         let disposed = false;
         let unlisten: null | (() => void) = null;
+        // 上一轮电平内容（去重用）：同内容事件不进 Redux。
+        let previousMeters: Record<
+            string,
+            import("./features/session/sessionTypes").TrackMeterInfo
+        > = {};
 
         async function setup() {
             try {
@@ -1040,6 +1073,19 @@ function AppInner() {
                             };
                         }
 
+                        // 【内容不变就不派发】电平事件播放中每 33ms 一发，而暂停回落
+                        // 完成后、或全部轨道静音时，连续多次事件的**内容**完全相同；
+                        // 照发会让 Redux 引用必换、两个面板跟着空重渲染（与
+                        // `captureStore.withStatus` 同一条纪律）。
+                        //
+                        // 【为什么逐字段比较而不是 JSON.stringify】captureStore 的载荷
+                        // 是定键序的 IPC 对象；这里的键来自后端 HashMap 的迭代序
+                        // （engine.rs 的 meter_state 每轮重建），序列化结果随顺序抖动，
+                        // 会把"内容相同"误判成"变了"。键数量 + 逐键字段比较与顺序无关。
+                        if (sameMeterContents(previousMeters, next)) {
+                            return;
+                        }
+                        previousMeters = next;
                         dispatch(setTrackMeters(next));
                     },
                 );

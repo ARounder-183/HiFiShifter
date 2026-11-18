@@ -17,7 +17,6 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "re
 
 import { useAppDispatch, useAppSelector } from "../../../../app/hooks";
 import { store, type RootState } from "../../../../app/store";
-import { shallowEqual } from "react-redux";
 import { timelineViewportBus } from "../../../../utils/timelineViewportBus";
 import { timelineViewportSync } from "../../../../utils/timelineViewportSync";
 import { readUiValue } from "../../../../services/uiStorage";
@@ -148,7 +147,6 @@ export type TimelineSessionSlice = Pick<
     | "showAllTakes"
     | "tempoMap"
     | "tempoMapVisible"
-    | "trackMeters"
     | "tracks"
 >;
 
@@ -334,46 +332,75 @@ export interface UseTimelineStateArgs {
     readonly kernelHostRef?: React.MutableRefObject<TimelineKernelHost | null>;
 }
 
+/** 面板级会话选集：字段与 [`selectTimelineSession`] 一一对应。 */
+export type TimelineSessionSelection = ReturnType<typeof selectTimelineSession>;
+
+/**
+ * 面板的会话选集。字段清单与参数编辑器的整会话订阅
+ * （`pianoRoll/panel/panelSessionSubscription.ts`）各自维护，剔除口径见
+ * [`timelineSessionEqual`]。
+ */
+const selectTimelineSession = (state: RootState) => ({
+    autoCrossfadeEnabled: state.session.autoCrossfadeEnabled,
+    showAllTakes: state.session.showAllTakes,
+    autoScrollEnabled: state.session.autoScrollEnabled,
+    autoScrollMode: state.session.autoScrollMode,
+    beats: state.session.beats,
+    bpm: state.session.bpm,
+    clips: state.session.clips,
+    clipFormantStatus: state.session.clipFormantStatus,
+    clipFormantToolWindow: state.session.clipFormantToolWindow,
+    customScalePresets: state.session.customScalePresets,
+    grid: state.session.grid,
+    snapEnabled: state.session.snapEnabled,
+    timelineSnap: state.session.timelineSnap,
+    playheadSec: state.session.playheadSec,
+    pendingPlayheadRevealSec: state.session.pendingPlayheadRevealSec,
+    playheadZoomEnabled: state.session.playheadZoomEnabled,
+    paramEditorSyncTimeline: state.session.paramEditorSyncTimeline,
+    projectSec: state.session.projectSec,
+    paramEditorTimelineClickSelectTrackEnabled:
+        state.session.paramEditorTimelineClickSelectTrackEnabled,
+    primaryTimeUnit: state.session.primaryTimeUnit,
+    playbackRateVersion: state.session.playbackRateVersion,
+    project: state.session.project,
+    rulerLabelSpacingPx: state.session.rulerLabelSpacingPx,
+    secondaryTimeUnit: state.session.secondaryTimeUnit,
+    selectedClipId: state.session.selectedClipId,
+    selectedTrackId: state.session.selectedTrackId,
+    multiSelectionIntentional: state.session.multiSelectionIntentional,
+    showPlayheadTimeInTrackHeader: state.session.showPlayheadTimeInTrackHeader,
+    tempoMap: state.session.tempoMap,
+    tempoMapVisible: state.session.tempoMapVisible,
+    tracks: state.session.tracks,
+});
+
+/**
+ * 高频会话字段的剔除口径：`playheadSec` 在播放时约 30Hz 更新（轮询 / 插件形态的
+ * `transportPushed`），面板有数百个 hook 与子树，若随它重渲染，60Hz 的光标与自动
+ * 滚屏会被 React 提交拖慢 —— 与参数编辑器面板（`panelSessionSubscription.ts`）
+ * 同一条纪律。
+ *
+ * 【为什么 `playheadSec` 仍留在选集里】面板对它的消费只接受"提交值"：标尺的
+ * 播放头位置由内核逐帧命令式驱动（`positionPlayheadFromProps={false}`），右键菜单
+ * 的"播放头是否在片段内"在菜单打开的那次渲染里读取（store 触发的更新被这里
+ * 剔除后，菜单打开本身触发的重渲染仍会拿到打开时刻的值）。电平表同理不在这里：
+ * `trackMeters` 由 `TrackList` 自行订阅 —— 电平条是唯一消费方，整面板不必陪跑。
+ */
+const TIMELINE_VOLATILE_SESSION_KEYS = new Set<keyof TimelineSessionSelection>(["playheadSec"]);
+
+const timelineSessionEqual = (left: TimelineSessionSelection, right: TimelineSessionSelection) => {
+    if (left === right) return true;
+    for (const key of Object.keys(left) as Array<keyof TimelineSessionSelection>) {
+        if (TIMELINE_VOLATILE_SESSION_KEYS.has(key)) continue;
+        if (left[key] !== right[key]) return false;
+    }
+    return true;
+};
+
 export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineStateResult {
     const dispatch = useAppDispatch();
-    const s = useAppSelector(
-        (state: RootState) => ({
-            autoCrossfadeEnabled: state.session.autoCrossfadeEnabled,
-            showAllTakes: state.session.showAllTakes,
-            autoScrollEnabled: state.session.autoScrollEnabled,
-            autoScrollMode: state.session.autoScrollMode,
-            beats: state.session.beats,
-            bpm: state.session.bpm,
-            clips: state.session.clips,
-            clipFormantStatus: state.session.clipFormantStatus,
-            clipFormantToolWindow: state.session.clipFormantToolWindow,
-            customScalePresets: state.session.customScalePresets,
-            grid: state.session.grid,
-            snapEnabled: state.session.snapEnabled,
-            timelineSnap: state.session.timelineSnap,
-            playheadSec: state.session.playheadSec,
-            pendingPlayheadRevealSec: state.session.pendingPlayheadRevealSec,
-            playheadZoomEnabled: state.session.playheadZoomEnabled,
-            paramEditorSyncTimeline: state.session.paramEditorSyncTimeline,
-            projectSec: state.session.projectSec,
-            paramEditorTimelineClickSelectTrackEnabled:
-                state.session.paramEditorTimelineClickSelectTrackEnabled,
-            primaryTimeUnit: state.session.primaryTimeUnit,
-            playbackRateVersion: state.session.playbackRateVersion,
-            project: state.session.project,
-            rulerLabelSpacingPx: state.session.rulerLabelSpacingPx,
-            secondaryTimeUnit: state.session.secondaryTimeUnit,
-            selectedClipId: state.session.selectedClipId,
-            selectedTrackId: state.session.selectedTrackId,
-            multiSelectionIntentional: state.session.multiSelectionIntentional,
-            showPlayheadTimeInTrackHeader: state.session.showPlayheadTimeInTrackHeader,
-            tempoMap: state.session.tempoMap,
-            tempoMapVisible: state.session.tempoMapVisible,
-            trackMeters: state.session.trackMeters,
-            tracks: state.session.tracks,
-        }),
-        shallowEqual,
-    );
+    const s = useAppSelector(selectTimelineSession, timelineSessionEqual);
     const sessionRef = useRef(store.getState().session);
     useEffect(() => {
         sessionRef.current = store.getState().session;

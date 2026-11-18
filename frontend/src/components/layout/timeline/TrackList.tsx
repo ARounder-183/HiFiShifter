@@ -408,7 +408,6 @@ function meterFillClass(peakLinear: number, clipped: boolean): string {
 type TrackListProps = {
     t: (key: MessageKey) => string;
     tracks: TrackInfo[];
-    trackMeters: Record<string, TrackMeterInfo>;
     selectedTrackId: string | null;
     rowHeight: number;
     setRowHeight?: React.Dispatch<React.SetStateAction<number>>;
@@ -454,7 +453,6 @@ type TrackListProps = {
 const TrackListInner: React.FC<TrackListProps> = ({
     t,
     tracks,
-    trackMeters,
     selectedTrackId,
     rowHeight,
     setRowHeight,
@@ -483,6 +481,12 @@ const TrackListInner: React.FC<TrackListProps> = ({
     bottomGutterHeightPx = 0,
 }) => {
     const listRef = useRef<HTMLDivElement | null>(null);
+    // 电平表数据由本组件**自行订阅**：电平条是 trackMeters 的唯一消费方，播放中
+    // 每 33ms 一事件。此前它从 TimelinePanel 一路传下来，面板选择器因此把它纳入
+    // 浅比较 —— 每次事件连 2000 行的面板主体一起重渲染。改成本组件叶子订阅后
+    // （同文件 TrackHeaderPlayheadTime 的先例），重渲染范围收敛到轨道头本身，
+    // 面板主体不再陪跑。
+    const trackMeters = useAppSelector((state) => state.session.trackMeters, shallowEqual);
     /** 当前 dpr：渲染期写出的物理像素细线用它，并在 dpr 变化时触发重渲染。 */
     const dpr = useDevicePixelRatio();
     // 轨道头色条/取色预览需要和时间线画布同一套主题化轨道色。
