@@ -112,6 +112,9 @@ pub fn apply(settings: &UiSettings) -> AppliedChanges {
     );
     crate::config::set_loop_new_clips_default(settings.loop_new_clips);
     crate::config::set_sync_edits_across_takes(settings.sync_edits_across_takes);
+    // 插件的「自动写入 Take 音高」：消费方是会话 actor 的心跳，必须与磁盘上的取值一致 ——
+    // 否则用户打开开关后要重启宿主才生效，而关掉它更要命（关不掉就会继续改写宿主工程）。
+    crate::config::set_reaper_auto_take_pitch_write(settings.reaper_auto_take_pitch_write);
     crate::config::set_channel_import_policy(&settings.channel_import_policy);
     crate::config::set_unvoiced_pitch_policy(&settings.unvoiced_pitch_policy);
     crate::render_cache::apply_settings(&settings.render_cache);

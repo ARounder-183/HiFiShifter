@@ -504,6 +504,22 @@ pub struct UiSettings {
     /// 只有它还能表达「每个 Clip 原本的音高」。纯展示开关，不进工程。
     #[serde(default = "default_true")]
     pub show_clip_pitch_overlay: bool,
+    /// 「自动写入 Take 音高」：插件里**每一次对音高参数的编辑**是否自动写成 REAPER 的
+    /// take 音高包络（`D_PITCH` 归零、`PITCHENV` 整块替换，与手动转换同一条命令）。
+    ///
+    /// 【为什么默认关闭】它是本仓库里唯一会在用户**没点任何东西**的情况下改写宿主工程
+    /// 数据的开关。自动化的边界只能由用户自己划：默认关、明确打开才生效；关着的时候
+    /// 一个字节都不碰宿主，也不留待办（免得打开开关的一瞬间补写历史编辑）。
+    ///
+    /// 【为什么不在这里判断宿主】字段是纯存储：只有 REAPER 能表达 take 音高
+    /// （其他宿主上 `takePitchBridge` 能力位恒假，消费方自己会短路），把宿主判断塞进
+    /// 配置层会让"这个值是什么"依赖"谁在读它"。
+    ///
+    /// 【为什么消费方读进程级副本而不是这个字段】它由会话 actor 的心跳每 100 ms 读一次，
+    /// 而 `UiSettings` 有几十个字段（含若干 `Value` 与 `Vec`）。见
+    /// [`reaper_auto_take_pitch_write`]。
+    #[serde(default)]
+    pub reaper_auto_take_pitch_write: bool,
     /// 纵轴标尺的展示单位（参数 id → `"ratio"` / `"db"`）。
     ///
     /// 只对音量 / 动态这类线性幅值倍率参数有意义（`1× = 0 dB`）：同一个值既能读成
@@ -862,6 +878,27 @@ pub fn sync_edits_across_takes() -> bool {
 
 pub fn set_sync_edits_across_takes(enabled: bool) {
     SYNC_EDITS_ACROSS_TAKES.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 「自动写入 Take 音高」的进程级生效值（默认关闭）。
+///
+/// 与 `SYNC_EDITS_ACROSS_TAKES` / `CHANNEL_IMPORT_POLICY` 同款：由
+/// `ui_settings_apply::apply` 在加载与保存设置时同步。
+///
+/// 【为什么不能直接读 `UiSettings`】消费方是**会话 actor 的心跳**（100 ms 一轮），
+/// 每轮克隆整份设置只为读一个布尔，代价与收益完全不成比例（与
+/// `REAPER_AUTO_TAKE_PITCH` 的自动导入同一条理由）。
+pub static REAPER_AUTO_TAKE_PITCH_WRITE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 当前是否开启「自动写入 Take 音高」。
+pub fn reaper_auto_take_pitch_write() -> bool {
+    REAPER_AUTO_TAKE_PITCH_WRITE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 同步「自动写入 Take 音高」的进程级生效值。
+pub fn set_reaper_auto_take_pitch_write(enabled: bool) {
+    REAPER_AUTO_TAKE_PITCH_WRITE.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 导入声道处理策略的进程级生效值（默认"智能转换"）。
@@ -1834,6 +1871,8 @@ impl Default for UiSettings {
             show_clipboard_preview: true,
             show_param_value_popup: true,
             show_clip_pitch_overlay: true,
+            // 自动改写用户数据的功能默认关（见字段说明）。
+            reaper_auto_take_pitch_write: false,
             param_axis_units: std::collections::HashMap::new(),
             param_axis_directions: std::collections::HashMap::new(),
             last_project_save_format: default_project_save_format(),
