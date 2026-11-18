@@ -1,82 +1,18 @@
 use std::path::Path;
 
-/// Decode any media file (WAV fast-path, everything else via Symphonia).
+/// 解码任意媒体文件为交错 f32 PCM。
+///
+/// 【为什么这里只剩一次转发】WAV 的容错曾经有三份实现：这里一份、App 的音频引擎
+/// 一份、而 `media` 自己只有 symphonia。于是同一个文件"能导入、能播、能导出"，
+/// 音高分析与波形镜像却整条失败 —— 三份实现必然只修在其中一份上。
+/// hound 快路径现已收进 `media`（见那里的说明），这里不再保留第二份：
+/// 多一份转换就多一处采样定标（i16 除以 32767 还是 32768）可能悄悄分叉的地方。
 pub fn decode_audio_f32_interleaved(path: &Path) -> Result<(u32, u16, Vec<f32>), String> {
     if path.as_os_str().is_empty() {
         return Err("empty path".to_string());
     }
 
-    let is_wav = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("wav"))
-        .unwrap_or(false);
-
-    if is_wav {
-        if let Ok(v) = decode_wav_f32_interleaved_hound(path) {
-            return Ok(v);
-        }
-    }
-
     crate::media::decode_media_audio_f32_interleaved(path, None)
-}
-
-fn decode_wav_f32_interleaved_hound(path: &Path) -> Result<(u32, u16, Vec<f32>), String> {
-    use hound::{SampleFormat, WavReader};
-
-    let mut reader = WavReader::open(path).map_err(|e| e.to_string())?;
-    let spec = reader.spec();
-    if spec.sample_rate == 0 || spec.channels == 0 {
-        return Err("invalid wav spec".to_string());
-    }
-
-    let channels = spec.channels;
-    let sample_rate = spec.sample_rate;
-    // hound::duration() 返回每声道的帧数（frames），总样本数 = frames * channels。
-    // duration() 来自头字段，损坏文件可声称巨量帧数 → with_capacity 一次性
-    // 分配失败 abort 进程；按文件大小钳制上界（总样本 ≤ 文件字节 / 最少每样本字节），
-    // metadata 不可得时用 64M 样本的兜底上界。
-    let min_bytes_per_sample = (spec.bits_per_sample as usize / 8).max(1);
-    let file_bound = std::fs::metadata(path)
-        .map(|m| (m.len() as usize).saturating_div(min_bytes_per_sample))
-        .unwrap_or(1 << 22);
-    let mut out: Vec<f32> = Vec::with_capacity(
-        reader
-            .duration()
-            .min(file_bound.min(u32::MAX as usize) as u32) as usize
-            * channels as usize,
-    );
-
-    match (spec.sample_format, spec.bits_per_sample) {
-        (SampleFormat::Int, 16) => {
-            for s in reader.samples::<i16>() {
-                let v = s.map_err(|e| e.to_string())? as f32 / i16::MAX as f32;
-                out.push(v);
-            }
-        }
-        (SampleFormat::Int, 24) => {
-            // hound returns 24-bit PCM as sign-extended i32 in range [-2^23, 2^23-1].
-            let denom = (1u32 << 23) as f32;
-            for s in reader.samples::<i32>() {
-                let v = s.map_err(|e| e.to_string())? as f32 / denom;
-                out.push(v);
-            }
-        }
-        (SampleFormat::Int, 32) => {
-            for s in reader.samples::<i32>() {
-                let v = s.map_err(|e| e.to_string())? as f32 / i32::MAX as f32;
-                out.push(v);
-            }
-        }
-        (SampleFormat::Float, 32) => {
-            for s in reader.samples::<f32>() {
-                out.push(s.map_err(|e| e.to_string())?);
-            }
-        }
-        _ => return Err("unsupported wav format".to_string()),
-    }
-
-    Ok((sample_rate, channels, out))
 }
 
 pub struct WavInfo {

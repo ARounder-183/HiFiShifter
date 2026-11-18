@@ -99,6 +99,222 @@ pub fn codec_registry() -> &'static CodecRegistry {
     })
 }
 
+// ─── WAV 快路径（hound）───────────────────────────────────────────────────────
+//
+// 【为什么 media 层也要有 hound 分支】symphonia 的 RIFF 解析对"RIFF 长度比真实
+// 长度少 2 字节"的文件是**硬错**：它拿 `riff_len - 4` 当父块长度，而
+// `fmt `(18 字节) 加上 `data` 的字节数恰好比它多 2，于是读到 `data` 就判
+// `riff: chunk length exceeds parent (list) chunk length`。VocalShifter 导出的
+// WAV 全是这种头（实测 48 kHz / 立体声 / float32，RIFF 长度 = 文件长度 − 10）。
+//
+// 【为什么它的表现是"能导入、能播，就是不能分析"】hound 早就被 `audio_utils`
+// 与 App 的音频引擎用作 WAV 快路径（先试 hound，失败再退回 symphonia），而**这条**
+// 入口（media）只有 symphonia。同一个文件因此分叉：导入 / 预览 / 渲染正常，波形镜像
+// （`hfspeaks_v2`）与音高分析（`streaming_pitch`）整条失败 —— 三个地方
+// 各写一份解码器的必然结果。
+//
+// 【修法】把容错收进 media 层：所有媒体读取都从这里出去，WAV 一律先走 hound
+// （它按块读，工作集只与块长有关），打不开或格式不认识时才退回 symphonia。
+
+/// WAV 快路径的块长（帧）。分析路径靠它维持"工作集与素材长度无关"的承诺。
+const WAV_BLOCK_FRAMES: usize = 8192;
+
+fn is_wav_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("wav"))
+        .unwrap_or(false)
+}
+
+/// 打开 WAV。返回 `None` 表示"不是 WAV / hound 打不开 / 采样格式不认识"，
+/// 调用方一律回退 symphonia（让它给出它自己的诊断，而不是被这里吞掉）。
+fn open_wav(path: &Path) -> Option<hound::WavReader<std::io::BufReader<std::fs::File>>> {
+    use hound::SampleFormat;
+
+    if !is_wav_path(path) {
+        return None;
+    }
+    let reader = hound::WavReader::open(path).ok()?;
+    let spec = reader.spec();
+    if spec.sample_rate == 0 || spec.channels == 0 {
+        return None;
+    }
+    if !matches!(
+        (spec.sample_format, spec.bits_per_sample),
+        (SampleFormat::Int, 8)
+            | (SampleFormat::Int, 16)
+            | (SampleFormat::Int, 24)
+            | (SampleFormat::Int, 32)
+            | (SampleFormat::Float, 32)
+    ) {
+        return None;
+    }
+    Some(reader)
+}
+
+/// 帧数上界：`hound::duration()` 读的是头字段，损坏文件可以声称巨量帧数，
+/// 因此按文件长度钳一遍（每帧按"声道数 × 每样本字节数"算）。
+fn wav_total_frames(path: &Path, spec: &hound::WavSpec, declared: u32) -> u64 {
+    let bytes_per_frame =
+        (u64::from(spec.channels.max(1)) * u64::from((spec.bits_per_sample / 8).max(1))).max(1);
+    let file_bound = std::fs::metadata(path)
+        .map(|meta| meta.len() / bytes_per_frame)
+        .unwrap_or(u64::from(declared));
+    u64::from(declared).min(file_bound)
+}
+
+/// WAV 头。`None` = 不是 WAV / 打不开 / 请求的不是第 0 个流（WAV 只有一路，
+/// 越界请求交给 symphonia 报出准确的错）。
+fn wav_media_header(path: &Path, preferred_stream: Option<usize>) -> Option<MediaHeader> {
+    if preferred_stream.is_some_and(|index| index != 0) {
+        return None;
+    }
+    let reader = open_wav(path)?;
+    let spec = reader.spec();
+    let total_frames = wav_total_frames(path, &spec, reader.duration());
+    Some(MediaHeader {
+        audio_stream_index: 0,
+        sample_rate: spec.sample_rate,
+        channels: spec.channels,
+        total_frames,
+        duration_sec: total_frames as f64 / f64::from(spec.sample_rate),
+        has_video_stream: false,
+        container_format: "wav".to_string(),
+        audio_stream_count: 1,
+    })
+}
+
+/// WAV 的流列表（恒为一路）。
+fn wav_audio_streams(path: &Path) -> Option<Vec<MediaAudioStream>> {
+    let reader = open_wav(path)?;
+    let spec = reader.spec();
+    let total_frames = wav_total_frames(path, &spec, reader.duration());
+    Some(vec![MediaAudioStream {
+        index: 0,
+        title: None,
+        language: None,
+        codec: "pcm".to_string(),
+        sample_rate: spec.sample_rate,
+        channels: spec.channels,
+        duration_sec: total_frames as f64 / f64::from(spec.sample_rate),
+    }])
+}
+
+/// 逐样本搬运 + 按块回调。四种采样格式只差一个转换函数，循环本身共用一份：
+/// 复制四遍"攒块 / 记帧数 / 到限就返回"的逻辑，是最容易在某一支上漏掉边界的地方。
+fn stream_wav_samples<S, F>(
+    reader: &mut hound::WavReader<std::io::BufReader<std::fs::File>>,
+    sample_rate: u32,
+    channels: u16,
+    max_frames: usize,
+    convert: impl Fn(S) -> f32,
+    on_frame: &mut F,
+) -> Result<(u32, u16, bool), String>
+where
+    S: hound::Sample,
+    F: FnMut(&[f32], u32, u16) -> Result<(), String>,
+{
+    let channel_count = usize::from(channels.max(1));
+    let block_samples = WAV_BLOCK_FRAMES
+        .saturating_mul(channel_count)
+        .max(channel_count);
+    // 调用方给了上限时按上限切块：`decode_media_audio_prefix_f32` 承诺"至多 N 帧"，
+    // 若这里仍按整块刷出，一次前缀读取就会多吐将近一个块。
+    let flush_at = if max_frames == usize::MAX {
+        block_samples
+    } else {
+        block_samples.min(
+            max_frames
+                .max(1)
+                .saturating_mul(channel_count)
+                .max(channel_count),
+        )
+    };
+    let mut buffer: Vec<f32> = Vec::with_capacity(flush_at);
+    let mut emitted_frames = 0usize;
+
+    for sample in reader.samples::<S>() {
+        buffer.push(convert(
+            sample.map_err(|e| format!("wav decode failed: {e}"))?,
+        ));
+        if buffer.len() >= flush_at {
+            let frames = buffer.len() / channel_count;
+            on_frame(&buffer, sample_rate, channels)?;
+            emitted_frames = emitted_frames.saturating_add(frames);
+            if emitted_frames >= max_frames {
+                return Ok((sample_rate, channels, true));
+            }
+            buffer.clear();
+        }
+    }
+
+    if !buffer.is_empty() {
+        on_frame(&buffer, sample_rate, channels)?;
+    }
+    Ok((sample_rate, channels, false))
+}
+
+/// 流式解码 WAV。`None` = 交给 symphonia；`Some` 才是本函数的结论。
+fn decode_wav_track_frames_until<F>(
+    path: &Path,
+    max_frames: usize,
+    on_frame: &mut F,
+) -> Option<Result<(u32, u16, bool), String>>
+where
+    F: FnMut(&[f32], u32, u16) -> Result<(), String>,
+{
+    use hound::SampleFormat;
+
+    let mut reader = open_wav(path)?;
+    let spec = reader.spec();
+    let (sample_rate, channels) = (spec.sample_rate, spec.channels);
+
+    let result = match (spec.sample_format, spec.bits_per_sample) {
+        (SampleFormat::Int, 8) => stream_wav_samples(
+            &mut reader,
+            sample_rate,
+            channels,
+            max_frames,
+            |value: i8| value as f32 / i8::MAX as f32,
+            on_frame,
+        ),
+        (SampleFormat::Int, 16) => stream_wav_samples(
+            &mut reader,
+            sample_rate,
+            channels,
+            max_frames,
+            |value: i16| value as f32 / i16::MAX as f32,
+            on_frame,
+        ),
+        (SampleFormat::Int, 24) => stream_wav_samples(
+            &mut reader,
+            sample_rate,
+            channels,
+            max_frames,
+            |value: i32| value as f32 / (1u32 << 23) as f32,
+            on_frame,
+        ),
+        (SampleFormat::Int, 32) => stream_wav_samples(
+            &mut reader,
+            sample_rate,
+            channels,
+            max_frames,
+            |value: i32| value as f32 / i32::MAX as f32,
+            on_frame,
+        ),
+        // 已经是 f32 的 float32 WAV：不缩放（hound 的 Float 分支就是原始值）。
+        _ => stream_wav_samples(
+            &mut reader,
+            sample_rate,
+            channels,
+            max_frames,
+            |value: f32| value,
+            on_frame,
+        ),
+    };
+    Some(result)
+}
+
 fn open_format(path: &Path) -> Result<Box<dyn FormatReader>, String> {
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -259,6 +475,11 @@ struct MediaHeader {
 }
 
 fn read_media_header(path: &Path, preferred_stream: Option<usize>) -> Result<MediaHeader, String> {
+    // WAV 快路径：见本节开头关于 RIFF 长度容错的说明。
+    if let Some(header) = wav_media_header(path, preferred_stream) {
+        return Ok(header);
+    }
+
     let mut format = open_format(path)?;
 
     let container_format = format.format_info().short_name.to_string();
@@ -335,6 +556,11 @@ fn track_titles(format: &mut dyn FormatReader) -> HashMap<u32, String> {
 }
 
 pub fn list_audio_streams(path: &Path) -> Result<Vec<MediaAudioStream>, String> {
+    // WAV 恒为一路；走 hound 才看得见 RIFF 长度不规整的文件（见本节开头）。
+    if let Some(streams) = wav_audio_streams(path) {
+        return Ok(streams);
+    }
+
     let mut format = open_format(path)?;
     let tracks: Vec<Track> = format
         .tracks()
@@ -559,6 +785,13 @@ fn decode_track_frames_until<F>(
 where
     F: FnMut(&[f32], u32, u16) -> Result<(), String>,
 {
+    // WAV 快路径：见本节开头关于 RIFF 长度容错的说明。`None` 表示交给 symphonia。
+    if preferred_stream.is_none_or(|index| index == 0) {
+        if let Some(result) = decode_wav_track_frames_until(path, max_frames, on_frame) {
+            return result;
+        }
+    }
+
     let mut format = open_format(path)?;
     let (selected_track, _) = select_audio_track(format.as_ref(), preferred_stream)?;
     let track = selected_track.clone();
@@ -1175,5 +1408,184 @@ mod tests {
         assert!(sr > 0);
         assert!(ch > 0);
         assert!(!pcm.is_empty());
+    }
+
+    /// 造一个"RIFF 长度比真实长度少 2 字节"的 WAV，返回写进去的样本。
+    ///
+    /// 【为什么偏偏是这种形状】VocalShifter 导出的 WAV 就长这样：`fmt ` 18 字节
+    /// （cbSize=0）、48 kHz / 立体声 / float32、RIFF 长度写成"文件长度 − 10"。
+    /// symphonia 拿 `riff_len - 4` 当父块长度，`fmt ` 与 `data` 加起来正好多 2，
+    /// 于是读到 `data` 就判死。用户在 App 里看到的现象是：能导入、能播、能导出，
+    /// 但**音高分析与波形镜像整条失败** —— 因为那条路只有 symphonia。
+    fn write_short_riff_wav(
+        path: &Path,
+        sample_rate: u32,
+        channels: u16,
+        frames: usize,
+    ) -> Vec<f32> {
+        let samples: Vec<f32> = (0..frames * usize::from(channels))
+            .map(|index| ((index % 97) as f32 / 97.0) - 0.5)
+            .collect();
+        let data_len = (samples.len() * 4) as u32;
+        let mut bytes: Vec<u8> = Vec::with_capacity(data_len as usize + 60);
+        bytes.extend_from_slice(b"RIFF");
+        // 真实值是 `4 + (8 + 18) + (8 + data_len)`；这里刻意少写 2。
+        bytes.extend_from_slice(&(4 + 8 + 18 + 8 + data_len - 2).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&18u32.to_le_bytes());
+        bytes.extend_from_slice(&3u16.to_le_bytes()); // WAVE_FORMAT_IEEE_FLOAT
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&(sample_rate * u32::from(channels) * 4).to_le_bytes());
+        bytes.extend_from_slice(&(channels * 4).to_le_bytes());
+        bytes.extend_from_slice(&32u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // cbSize
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        for sample in &samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        std::fs::write(path, &bytes).expect("write fixture");
+        samples
+    }
+
+    fn short_riff_fixture(tag: &str, frames: usize) -> (std::path::PathBuf, Vec<f32>) {
+        let dir = std::env::temp_dir().join(format!(
+            "hfs-short-riff-{tag}-{}-{}",
+            std::process::id(),
+            frames
+        ));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let path = dir.join("short.wav");
+        let samples = write_short_riff_wav(&path, 48_000, 2, frames);
+        (path, samples)
+    }
+
+    /// **前提先行**：这种头在 symphonia 眼里就是打不开的。这条断言同时保证下面
+    /// 那些"能读"的断言确实是被 WAV 快路径救回来的，而不是文件本来就没问题。
+    #[test]
+    fn a_two_byte_short_riff_header_is_rejected_by_symphonia_alone() {
+        let (path, _samples) = short_riff_fixture("premise", 256);
+        let error = open_format(&path)
+            .err()
+            .expect("symphonia 必须拒绝 RIFF 长度少 2 字节的头");
+        assert!(
+            error.contains("chunk length exceeds parent"),
+            "实际错误：{error}"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn every_media_reader_survives_a_two_byte_short_riff_header() {
+        let frames = 20_000;
+        let (path, samples) = short_riff_fixture("readers", frames);
+
+        // 1) 头：采样率 / 声道 / 帧数。分析器与波形镜像都从这里起步。
+        let probe = probe_media(&path, 0, None).expect("probe");
+        assert_eq!((probe.sample_rate, probe.channels), (48_000, 2));
+        assert_eq!(probe.total_frames, frames as u64);
+        assert!((probe.duration_sec - frames as f64 / 48_000.0).abs() < 1e-9);
+
+        // 2) 整份解码：逐样本相同（快路径不得悄悄改音量或声道顺序）。
+        let (rate, channels, pcm) =
+            decode_media_audio_f32_interleaved(&path, None).expect("decode");
+        assert_eq!((rate, channels), (48_000, 2));
+        assert_eq!(pcm.len(), samples.len());
+        for (index, (got, want)) in pcm.iter().zip(samples.iter()).enumerate() {
+            assert_eq!(got.to_bits(), want.to_bits(), "第 {index} 个样本不一致");
+        }
+
+        // 3) 流式遍历（波形镜像与音高分析的入口）：分块产出，内容与整份一致。
+        let mut streamed: Vec<f32> = Vec::new();
+        let mut blocks = 0usize;
+        visit_media_audio_frames(&path, None, |frame, _rate, _ch| {
+            blocks += 1;
+            streamed.extend_from_slice(frame);
+            Ok(())
+        })
+        .expect("visit");
+        assert_eq!(streamed.len(), samples.len());
+        assert_eq!(streamed, samples);
+        assert!(blocks > 1, "必须分块产出，工作集才能与素材长度无关");
+
+        // 4) 波形预览走的是同一条解码路径。
+        let preview = probe_media(&path, 8, None).expect("probe + preview");
+        assert_eq!(preview.waveform_preview.len(), 8);
+        assert!(
+            preview.waveform_preview.iter().any(|value| *value != 0.0),
+            "预览不能全是 0"
+        );
+
+        // 5) 流列表（UI 的流选择器）。
+        let streams = list_audio_streams(&path).expect("streams");
+        assert_eq!(streams.len(), 1);
+        assert_eq!((streams[0].sample_rate, streams[0].channels), (48_000, 2));
+        assert_eq!(streams[0].duration_sec, frames as f64 / 48_000.0);
+
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// 端到端：这种头的 48 kHz WAV 也必须能跑完流式音高分析。
+    ///
+    /// 【为什么不能只测解码】用户报的是"音高分析失败"，而分析路径在解码之后还有
+    /// 重采样（48 kHz → 44.1 kHz）、分块、逐帧电平与检测器调用。只钉住"能解码"
+    /// 证明不了那条链能走完 —— 这里直接用生产的 `MediaFileSource` 跑一遍。
+    #[test]
+    fn a_short_riff_wav_survives_the_streaming_pitch_analysis() {
+        struct FixedPitch;
+        impl crate::streaming_pitch::PitchEstimator for FixedPitch {
+            fn estimate(
+                &self,
+                mono: &[f32],
+                _sample_rate: u32,
+                _frame_period_ms: f64,
+            ) -> Result<Vec<f64>, String> {
+                // 帧数只被调用方拿去截断，给足即可；内容固定，便于断言"检测器真被调到"。
+                Ok(vec![220.0; mono.len()])
+            }
+        }
+
+        let (path, _samples) = short_riff_fixture("analysis", 48_000);
+        let estimator = FixedPitch;
+        let cancelled = || false;
+        let params = crate::streaming_pitch::StreamParams {
+            analysis_rate: 44_100,
+            frame_period_ms: 5.0,
+            want_pitch: true,
+            chunking: crate::streaming_pitch::Chunking {
+                chunk_sec: 0.25,
+                ctx_sec: 0.05,
+            },
+            estimator: &estimator,
+            cancelled: &cancelled,
+        };
+        let mut source = crate::streaming_pitch::MediaFileSource::new(&path);
+        let streamed = crate::streaming_pitch::analyze_streaming(&mut source, &params)
+            .expect("这种头的 WAV 必须能跑完流式分析");
+
+        assert!(!streamed.cancelled);
+        // 1 s / 5 ms ≈ 200 帧；首尾各差一帧是帧栅格的边界效应。
+        assert!(
+            (198..=202).contains(&streamed.level.len()),
+            "level 帧数 {}",
+            streamed.level.len()
+        );
+        assert_eq!(streamed.f0_hz.len(), streamed.level.len());
+        assert!(streamed.f0_hz.iter().all(|hz| *hz == 220.0));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// 前缀读取的"至多 N 帧"契约在快路径上同样成立：文件浏览器用它限制内存。
+    #[test]
+    fn the_wav_fast_path_stops_at_the_requested_frame_count() {
+        let (path, samples) = short_riff_fixture("prefix", 5_000);
+        let (rate, channels, pcm) =
+            decode_media_audio_prefix_f32(&path, None, 128).expect("prefix decode");
+        assert_eq!((rate, channels), (48_000, 2));
+        assert_eq!(pcm.len(), 128 * 2);
+        assert_eq!(pcm, samples[..128 * 2].to_vec());
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 }
