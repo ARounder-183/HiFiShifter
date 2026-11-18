@@ -103,8 +103,9 @@ pub fn apply(settings: &UiSettings) -> AppliedChanges {
         crate::fcpe_onnx::update_ort_ep(&settings.ort_ep, device_index);
     }
 
-    // 以下三项是廉价的纯赋值，不做去重 —— 它们没有"重建会话"那种代价，
-    // 而漏掉一次下发的后果（导入策略/拉伸默认值与用户选择不一致）更隐蔽。
+    // 以下各项是廉价的纯赋值，不做去重 —— 它们没有"重建会话"那种代价，
+    // 而漏掉一次下发的后果（导入策略/拉伸默认值/未识别帧填充档位与用户选择不一致）
+    // 更隐蔽：设置里写着 `dry`、导出却按 `bridge` 跑，没有任何别的信号能暴露它。
     crate::time_stretch::update_global_stretch_defaults(
         settings.default_stretch_algorithm,
         settings.default_hifigan_mel_stretch,
@@ -112,6 +113,7 @@ pub fn apply(settings: &UiSettings) -> AppliedChanges {
     crate::config::set_loop_new_clips_default(settings.loop_new_clips);
     crate::config::set_sync_edits_across_takes(settings.sync_edits_across_takes);
     crate::config::set_channel_import_policy(&settings.channel_import_policy);
+    crate::config::set_unvoiced_pitch_policy(&settings.unvoiced_pitch_policy);
     crate::render_cache::apply_settings(&settings.render_cache);
 
     changes
@@ -120,6 +122,16 @@ pub fn apply(settings: &UiSettings) -> AppliedChanges {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 串行化所有会改写进程级 `applied_key` 的测试（`apply` 与 `record` 都写它）。
+    ///
+    /// 【为什么必须是模块级的】去重记录是**进程级单例**：一个用例把记录改成
+    /// `gpu`、另一个用例紧接着断言"同一取值不算变化"时，后者会随机失败。此前只有
+    /// 一条用例自带一把局部锁 —— 那把锁保护不了后来者。
+    fn applied_key_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn key(ep: &str, device_key: Option<&'static str>) -> AppliedKey {
         AppliedKey {
@@ -187,12 +199,11 @@ mod tests {
 
     /// `record` 的去重是跨调用的（进程级记录），不只是同一次比较。
     ///
-    /// 这条测试与其它用例共用进程级记录，因此必须串行：用一把测试内互斥锁，
-    /// 否则并行执行时另一次 `record` 会改写记录，让断言随机失败。
+    /// 这条测试与其它用例共用进程级记录，因此必须串行（[`applied_key_test_guard`]），
+    /// 否则并行执行时另一次 `apply` / `record` 会改写记录，让断言随机失败。
     #[test]
     fn recording_the_same_values_twice_dedupes_across_calls() {
-        static SERIAL: Mutex<()> = Mutex::new(());
-        let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = applied_key_test_guard();
 
         let first = record(key("cpu", Some("4318:9634")));
         assert!(first.inference_device_changed, "首次记录应视为变化");
@@ -206,5 +217,35 @@ mod tests {
 
         let third = record(key("cpu", Some("8086:17958")));
         assert!(third.inference_device_changed, "设备变化未被识别");
+    }
+
+    /// 下发必须真的落到进程级单元上。
+    ///
+    /// 【为什么这条值得单独写】插件与独立 App 共用同一份 `app_config.json`，两者都经
+    /// 本函数下发。漏掉这一行时，"改了配置不生效"只在其中一个形态里出现 —— 而
+    /// `ui_settings_apply` 存在的全部理由就是消灭这种不对称。
+    #[test]
+    fn applying_settings_pushes_the_unvoiced_pitch_policy() {
+        let _policy = crate::config::channel_policy_test_guard();
+        let _applied = applied_key_test_guard();
+        let original = crate::config::unvoiced_pitch_policy();
+
+        let mut settings = UiSettings::default();
+        settings.unvoiced_pitch_policy = "dry".to_string();
+        apply(&settings);
+        assert_eq!(
+            crate::config::unvoiced_pitch_policy(),
+            crate::pitch_bridge::UnvoicedFill::Dry
+        );
+
+        // 非法值回退默认，而不是把上一个值留在单元里。
+        settings.unvoiced_pitch_policy = "bogus".to_string();
+        apply(&settings);
+        assert_eq!(
+            crate::config::unvoiced_pitch_policy(),
+            crate::pitch_bridge::UnvoicedFill::Bridge
+        );
+
+        crate::config::set_unvoiced_pitch_policy(original.as_name());
     }
 }

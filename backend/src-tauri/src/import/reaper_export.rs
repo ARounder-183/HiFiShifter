@@ -372,8 +372,8 @@ fn build_item(
 // 精简容差与断点算法**只有一份**：`hifishifter_kernel::pitch_bridge`。
 // 导出与插件桥接共用同一份，否则"导出听起来对、插件里听起来不对"。
 use hifishifter_kernel::pitch_bridge::{
-    simplify_breakpoints, UnvoicedFill, UnvoicedFillPolicy, SIMPLIFY_TOLERANCE_PAN,
-    SIMPLIFY_TOLERANCE_PITCH, SIMPLIFY_TOLERANCE_VOLUME,
+    simplify_breakpoints, SIMPLIFY_TOLERANCE_PAN, SIMPLIFY_TOLERANCE_PITCH,
+    SIMPLIFY_TOLERANCE_VOLUME,
 };
 
 /// 每个导出 Clip 的参数线视图（命令层从 live timeline 预解析后传入）。
@@ -488,7 +488,7 @@ pub fn build_clip_export_curves(timeline: &TimelineState, clip: &Clip) -> ClipEx
             crate::pitch_editing::compute_clip_take_pitch_offsets(
                 timeline,
                 clip,
-                &UnvoicedFillPolicy::for_frame_period(UnvoicedFill::default(), frame_period_ms),
+                &crate::pitch_editing::take_pitch_fill_policy(frame_period_ms),
             )
         } else {
             None
@@ -1785,7 +1785,9 @@ mod tests {
         let values = curves.pitch_offset.clone().expect("pitch curve");
         assert_eq!(values.len(), 40);
         assert!(
-            values[10..16].iter().all(|value| (value - 2.0).abs() < 1e-6),
+            values[10..16]
+                .iter()
+                .all(|value| (value - 2.0).abs() < 1e-6),
             "辅音间隙必须被填成邻域值，实际 {:?}",
             &values[10..16]
         );

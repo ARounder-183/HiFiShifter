@@ -2096,6 +2096,19 @@ pub fn compute_clip_take_pitch_offsets(
     ))
 }
 
+/// 导出侧的策略来源：配置档位 + 帧周期换算 + 环境变量 A/B 覆盖。
+///
+/// 【为什么收成一个函数】两条导出路径（REAPER 剪贴板 / `.rpp`、插件桥接）各拼一次
+/// "读配置 + 换算 + 环境变量"，迟早一处漏了其中一步 —— 而 A/B 时恰恰靠环境变量区分
+/// 两档听感，漏掉就等于"改了环境变量没反应"，那是最难查的一种"没生效"。
+pub fn take_pitch_fill_policy(frame_period_ms: f64) -> crate::pitch_bridge::UnvoicedFillPolicy {
+    crate::pitch_bridge::UnvoicedFillPolicy::for_frame_period(
+        crate::config::unvoiced_pitch_policy(),
+        frame_period_ms,
+    )
+    .with_env_overrides()
+}
+
 pub fn build_clip_input_pitch_curve(
     timeline: &TimelineState,
     clip: &crate::state::Clip,

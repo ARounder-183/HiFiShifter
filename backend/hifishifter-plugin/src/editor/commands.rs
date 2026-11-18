@@ -993,10 +993,8 @@ fn export_host_take_pitch(session: &EditorSession, input: &Value) -> Result<Valu
         let frame_period_ms = timeline.frame_period_ms().max(0.1);
         // 【策略只解析一次】放在循环外：循环内每次重算等于每个 clip 读一遍配置、
         // 四次环境变量 —— 而结果对整批 clip 完全相同。
-        let fill_policy = hifishifter_kernel::pitch_bridge::UnvoicedFillPolicy::for_frame_period(
-            hifishifter_kernel::pitch_bridge::UnvoicedFill::default(),
-            frame_period_ms,
-        );
+        let fill_policy =
+            hifishifter_kernel::pitch_editing::take_pitch_fill_policy(frame_period_ms);
         for clip in &clips {
             // 【批量作用域：分析还没落地的片段一律不写】此时 `pitch_orig` 全是 0，
             // 会被当成"音高线是平的" ⇒ 空包络 ⇒ **删掉用户在 REAPER 里画好的包络**。
