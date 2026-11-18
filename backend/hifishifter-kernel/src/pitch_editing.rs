@@ -1487,6 +1487,52 @@ mod tests {
         assert_eq!(frames.voiced, vec![true; 4]);
     }
 
+    /// 逐帧电平比导出窗口**短** ⇒ 按"未知"处理（hold），不是按静音处理（插值）。
+    ///
+    /// 【为什么这条最容易写错】"没有电平数据"看起来像"电平是 0"，而 0 低于静音门 ⇒
+    /// 判成静音 ⇒ 插值。于是"不知道"被悄悄翻译成"确定的静音"，一条本该 hold 的长间隙
+    /// 开始凭空造中间调。补 0 是这里唯一**不能**做的"容错"。
+    #[test]
+    fn a_short_level_curve_is_unknown_not_silent() {
+        // 10 帧：0 与 9 有声（+2 / +3），1..9 是无 F0 的 8 帧间隙（40 ms > 默认 30 ms）。
+        let mut orig = vec![0.0f32; 10];
+        orig[0] = 60.0;
+        orig[9] = 60.0;
+        let mut edit = vec![0.0f32; 10];
+        edit[0] = 62.0;
+        edit[9] = 63.0;
+        let (mut timeline, clip) = export_fixture(orig, edit);
+        let policy = crate::pitch_bridge::UnvoicedFillPolicy::for_frame_period(
+            crate::pitch_bridge::UnvoicedFill::Bridge,
+            5.0,
+        );
+        let root = clip.track_id.clone();
+
+        // 电平齐全且整段低于静音门 ⇒ 插值。
+        timeline
+            .params_by_root_track
+            .get_mut(&root)
+            .expect("entry")
+            .dyn_orig = vec![0.0; 10];
+        let filled =
+            super::compute_clip_take_pitch_offsets(&timeline, &clip, &policy).expect("filled");
+        assert!((filled[1] - 2.0 - 1.0 / 9.0).abs() < 1e-5, "{filled:?}");
+        assert!((filled[8] - 2.0 - 8.0 / 9.0).abs() < 1e-5, "{filled:?}");
+
+        // 电平只有前 5 帧 ⇒ 尾部"不知道" ⇒ hold 前值。
+        timeline
+            .params_by_root_track
+            .get_mut(&root)
+            .expect("entry")
+            .dyn_orig = vec![0.0; 5];
+        let filled =
+            super::compute_clip_take_pitch_offsets(&timeline, &clip, &policy).expect("filled");
+        assert!(
+            filled[1..9].iter().all(|value| (value - 2.0).abs() < 1e-6),
+            "未知必须 hold 而不是插值：{filled:?}"
+        );
+    }
+
     /// 全 voiced ⇒ 填充是恒等变换（导出侧新增的那一层不得改动任何值）。
     #[test]
     fn the_fill_is_identity_when_every_frame_is_voiced() {

@@ -964,6 +964,32 @@ fn import_host_take_pitch(session: &EditorSession, input: &Value) -> Result<Valu
     }))
 }
 
+/// 为一批根轨道补一次 `dyn_orig` 组装（导出侧填充的能量判据要用它）。
+///
+/// 【必须在取时间线锁**之前**调用】`maybe_schedule_dyn_orig` 内部会
+/// `session.timeline.lock()`（见 `dyn_analysis.rs` 的文档），持锁调用即自死锁 ——
+/// 与 `editor/params.rs` 的同一条纪律。
+///
+/// 【为什么插件尤其需要它】独立 App 的引擎在 `handle_update_timeline` 里会为"画过
+/// dyn / 动态面板打开"的根轨道组装基线，而插件这条路径此前**完全不组装**。于是插件
+/// 里导出时逐帧电平永远是"未知" ⇒ 长间隙一律保守 hold，`dry` 档与 `bridge` 档听
+/// 起来完全一样 —— 那会让 A/B 的结论直接失真。
+///
+/// 【口径是保守的】`dyn_orig` 是整条根轨组**融合后**的电平，不是"本 take 的电平"：
+/// 别的 clip 在响 ⇒ 判为可闻 ⇒ hold。宁可少插值，也不要凭空造中间调。
+fn schedule_dyn_orig_for_roots<'a>(
+    session: &EditorSession,
+    roots: impl IntoIterator<Item = &'a str>,
+) {
+    let mut unique: Vec<&str> = roots.into_iter().collect();
+    unique.sort_unstable();
+    unique.dedup();
+    for root in unique {
+        let _ =
+            hifishifter_kernel::pitch_analysis::maybe_schedule_dyn_orig(&session.timeline, root);
+    }
+}
+
 /// 方向 2：HiFiShifter 参数线 → REAPER take 音高包络。
 ///
 /// 【为什么**不**清空 HiFiShifter 的音高线】take 音高是源级属性，ARA 渲染结果在它之后
@@ -982,6 +1008,9 @@ fn export_host_take_pitch(session: &EditorSession, input: &Value) -> Result<Valu
     let clip_ids = pitch_bridge_clip_ids(input)?;
     let tolerant = pitch_bridge_tolerant(input);
     let (clips, mut unresolved) = pitch_bridge_collect(session, &clip_ids, tolerant)?;
+    // 能量通道：必须在下面的 `session.timeline.lock_or_recover()` **之前**
+    // （`maybe_schedule_dyn_orig` 内部会再取一次时间线锁）。
+    schedule_dyn_orig_for_roots(session, clips.iter().map(|clip| clip.root_track.as_str()));
     let mut converted = 0usize;
     let mut points_written = 0usize;
     let mut plans: Vec<(
