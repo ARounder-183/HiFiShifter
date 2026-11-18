@@ -704,6 +704,27 @@ fn export_audio_to_file(
 // 让包络成为 REAPER 侧唯一的音高来源，因此导出后把它归零（导入方向本来就会把它的
 // 值加进 `pitch_edit`，归零不会丢信息）。
 
+/// 在导入方向运行期间抑制「自动写入 Take 音高」（见 `import_host_take_pitch` 的说明）。
+///
+/// 【为什么是 Drop 而不是手动复位】那个函数有七处 `?` 早退；漏掉任何一处都会把抑制位
+/// 永久留在"开"的位置 —— 表现是"自动写入从此不再发生"，而且没有任何报错。
+struct AutoPitchWriteSuppression<'a> {
+    session: &'a EditorSession,
+}
+
+impl<'a> AutoPitchWriteSuppression<'a> {
+    fn begin(session: &'a EditorSession) -> Self {
+        session.set_suppress_auto_pitch_write(true);
+        Self { session }
+    }
+}
+
+impl Drop for AutoPitchWriteSuppression<'_> {
+    fn drop(&mut self) {
+        self.session.set_suppress_auto_pitch_write(false);
+    }
+}
+
 /// 命令入参里的片段列表。
 fn pitch_bridge_clip_ids(input: &Value) -> Result<Vec<String>, String> {
     let ids: Vec<String> = serde_json::from_value(input["clipIds"].clone())
@@ -765,7 +786,11 @@ struct PitchBridgeClip {
 }
 
 /// 片段的播放速率（非有限 / 非正 ⇒ 1，与渲染端同一口径）。
-fn pitch_bridge_rate(clip: &Clip) -> f64 {
+///
+/// 【为什么 `pub(super)`】会话侧的包络指纹（`auto_pitch_write_fingerprint`）必须与导出
+/// 用同一个速率：两处各写一份 `if rate > 0 { rate } else { 1.0 }`，一处改了另一处就会
+/// "自动写出来的包络与手动点一次的不一样"。
+pub(super) fn pitch_bridge_rate(clip: &Clip) -> f64 {
     if clip.playback_rate.is_finite() && clip.playback_rate > 0.0 {
         clip.playback_rate as f64
     } else {
@@ -869,6 +894,11 @@ fn pitch_bridge_collect(
 fn import_host_take_pitch(session: &EditorSession, input: &Value) -> Result<Value, String> {
     let clip_ids = pitch_bridge_clip_ids(input)?;
     let tolerant = pitch_bridge_tolerant(input);
+    // 【导入期间不许自动写回】本命令会经 `write_authority_frames` 改参数线，而那条路径
+    // 正是「自动写入 Take 音高」的触发点。不抑制的话，导入结束 400 ms 后会来一次自动
+    // 导出，而导出的 `D_PITCH = 0` 会把本命令刻意保留在宿主侧的 Item 音高偏移抹掉
+    // （见文件开头"两侧各管各的"）。
+    let _suppression = AutoPitchWriteSuppression::begin(session);
     let (clips, mut unresolved) = pitch_bridge_collect(session, &clip_ids, tolerant)?;
 
     let mut converted = 0usize;
@@ -1004,10 +1034,45 @@ fn schedule_dyn_orig_for_roots<'a>(
 /// - **批量作用域**里这不行：一次点击会顺手删掉几百条包络，而报告只会说"写了 N 条"。
 ///   因此批量模式先用 `pitch_orig_key` 判断"这一轮的分析是否落地"，没落地的片段
 ///   一律跳过并进 `unresolved`（见 `pitch_bridge_analysis_ready`）。
-fn export_host_take_pitch(session: &EditorSession, input: &Value) -> Result<Value, String> {
+///
+/// `auto`（入参）=「自动写入 Take 音高」用的形态：用户没点任何按钮，只是改了一下音高线。
+/// 因此它比手动档更保守：没有唯一 take 的片段照样跳过，另外**绝不删掉已经存在的包络**
+/// （空点集等于删掉整个 `<PITCHENV>`），也**不接管 take 自带 `D_PITCH` 的片段**
+/// （归零会把那个偏移无声抹掉）。两条理由都在函数体内。
+pub(super) fn export_host_take_pitch(
+    session: &EditorSession,
+    input: &Value,
+) -> Result<Value, String> {
     let clip_ids = pitch_bridge_clip_ids(input)?;
-    let tolerant = pitch_bridge_tolerant(input);
+    // 【自动档（逐次编辑的写回）一定是宽容档】它是"顺带写一下"：一条片段没有唯一 take
+    // 不该让整批失败，而**分析还没落地的片段更不该被写成空包络** —— 空包络 = 删掉
+    // 用户在 REAPER 里画好的 PITCHENV。
+    let auto = input["auto"].as_bool().unwrap_or(false);
+    let tolerant = pitch_bridge_tolerant(input) || auto;
     let (clips, mut unresolved) = pitch_bridge_collect(session, &clip_ids, tolerant)?;
+    // 【自动档不接管"自带静态音高"的 take】本命令的语义是让包络成为 REAPER 侧唯一的
+    // 音高来源，因此它会把 `D_PITCH` 归零。而自动档是用户**没点任何东西**时发生的：
+    // 若那个 take 本来带着 +2 半音的 Item 音高偏移（插件这一侧完全看不出来），归零就是
+    // 一次无声的数据丢失。跳过它，用户手动转一次即可（那一步是他自己点的，看得见）。
+    let clips: Vec<PitchBridgeClip> = if auto {
+        clips
+            .into_iter()
+            .filter(|clip| {
+                if clip.static_semitones.abs() <= 1e-6 {
+                    return true;
+                }
+                log::debug!(
+                    "[pitch] auto take-pitch write skips {}: the take carries its own D_PITCH={} semitones",
+                    clip.clip_id,
+                    clip.static_semitones
+                );
+                unresolved.push(clip.clip_id.clone());
+                false
+            })
+            .collect()
+    } else {
+        clips
+    };
     // 能量通道：必须在下面的 `session.timeline.lock_or_recover()` **之前**
     // （`maybe_schedule_dyn_orig` 内部会再取一次时间线锁）。
     schedule_dyn_orig_for_roots(session, clips.iter().map(|clip| clip.root_track.as_str()));
@@ -1028,7 +1093,10 @@ fn export_host_take_pitch(session: &EditorSession, input: &Value) -> Result<Valu
             // 【批量作用域：分析还没落地的片段一律不写】此时 `pitch_orig` 全是 0，
             // 会被当成"音高线是平的" ⇒ 空包络 ⇒ **删掉用户在 REAPER 里画好的包络**。
             // 单条片段保持原语义：用户点的是那一条，看得见、且只有一步撤销。
-            if tolerant && !pitch_bridge_analysis_ready(&timeline, &clip.root_track) {
+            // 【自动档不查"分析是否落地"这个键】那个键是**记账**：布局一变就会被清空，
+            // 与"这段到底有没有可写的音高"不是一回事。自动档真正要防的是"把用户在 REAPER
+            // 里画好的包络删掉"，那件事由下面那条"空包络守卫"直接回答（用包络本身判断）。
+            if tolerant && !auto && !pitch_bridge_analysis_ready(&timeline, &clip.root_track) {
                 unresolved.push(clip.clip_id.clone());
                 continue;
             }
@@ -1051,6 +1119,18 @@ fn export_host_take_pitch(session: &EditorSession, input: &Value) -> Result<Valu
                 clip.clip.length_sec.max(0.0),
                 pitch_bridge_rate(&clip.clip),
             );
+            // 【自动档绝不删掉已经存在的包络】空点集 = 空包络 = 整个 `<PITCHENV>` 被删掉。
+            // 手动档这是语义的一部分（用户点名要转，而且只有一步撤销）；自动档不行 ——
+            // 它发生在用户**没点任何东西**的时候，而"这一轮算出来是平的"既可能是用户把线
+            // 拉平了，也可能是原线还没组装好。分不清就不动。
+            if auto && points.is_empty() && !clip.points.is_empty() {
+                log::debug!(
+                    "[pitch] auto take-pitch write keeps the existing envelope of {} (nothing to write)",
+                    clip.clip_id
+                );
+                unresolved.push(clip.clip_id.clone());
+                continue;
+            }
             plans.push((clip, points));
         }
     }
@@ -1062,7 +1142,11 @@ fn export_host_take_pitch(session: &EditorSession, input: &Value) -> Result<Valu
         target.write_take_pitch_points(&points, &|| true)?;
         // 「需重置 Item 音高偏移」：`D_PITCH` 与包络会叠加，而这条命令的语义是让
         // 包络成为 REAPER 侧唯一的音高来源；它的值在导入方向已经折进 `pitch_edit`。
-        target.set_take(c"D_PITCH", 0., &|| true)?;
+        // 【为 0 时不写】自动档会在每次编辑后跑一遍，而"写一次 0"没有任何效果却要过一次
+        // 宿主 API；这一句只是省掉那次空写，语义与无条件写入逐字相同。
+        if clip.static_semitones.abs() > 1e-6 {
+            target.set_take(c"D_PITCH", 0., &|| true)?;
+        }
         target.update(&|| true)?;
         points_written += points.len();
         converted += 1;
@@ -2657,6 +2741,11 @@ pub(super) fn dispatch(
                 let timeline_for_publish = timeline.clone();
                 drop(timeline);
                 let restored_curve = session.restore_authority_step(target);
+                // 撤销 / 重做把整份参数权威换掉了：自动写入要按「我们写过的片段」重扫一遍
+                // （窗口未知 —— 见 `note_pitch_edit_of_every_written_clip`）。
+                if restored_curve == Some(true) {
+                    session.note_pitch_edit_of_every_written_clip();
+                }
                 if !layout_only || restored_curve == Some(true) {
                     session.mark_dirty();
                     session.publish_timeline(timeline_for_publish);

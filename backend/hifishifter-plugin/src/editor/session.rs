@@ -400,6 +400,103 @@ struct Loaded {
     view: Option<Arc<crate::render::document::WorkspaceView>>,
     reverse_paths: HashMap<String, String>,
 }
+/// 「自动写入 Take 音高」的静默窗：最后一笔音高编辑之后多久才写。
+///
+/// 【为什么是 400 ms】心跳 100 ms 一轮 ⇒ 总延迟约 0.5 s，用户感觉是"跟着走"；而一般的
+/// 手势内停顿（抬手换工具、看一眼）都长于这个数 —— 一次手势只写一次宿主。
+const AUTO_PITCH_WRITE_QUIET: Duration = Duration::from_millis(400);
+
+/// 单轮最多发多少条片段（见 [`EditorSession::service_auto_pitch_write`] 的批次说明）。
+const AUTO_PITCH_WRITE_BATCH: usize = 64;
+
+/// 「算不出包络」这个状态的指纹值。
+///
+/// 【为什么它必须是一个确定的值】分析还没落地的片段每一轮都会被算成"没有包络"；若把它
+/// 当成"和谁都不一样"，这些片段会在每一轮里反复进批次（而它们本来就会被导出侧跳过）。
+const AUTO_PITCH_WRITE_NO_ENVELOPE: u64 = 0;
+
+/// 「自动写入 Take 音高」的记账（消费点在 [`EditorSession::service_auto_pitch_write`]）。
+///
+/// 【为什么状态挂在会话上】它回答的是「这条**时间线**上哪条片段的包络与音高线不同步」，
+/// 而时间线、包络的数学、宿主 take 都是会话级事实 —— 换一个工程就是另一份。
+///
+/// 【为什么按片段记指纹，而不是把轨道记成「脏」】一条轨道上通常挂着多条片段，用户一般只改
+/// 其中一段；按轨道记会把整条轨道的片段全部重写一遍（每条一次宿主 chunk 读写 + 一次 item
+/// 重建）。指纹把写入收敛到「真的会变的那几条」，也让撤销（窗口未知）有了可用的判据。
+#[derive(Default)]
+struct AutoPitchWrite {
+    /// 「这次编辑停手了」的到期时刻；`None` = 没有待办。
+    due: Option<Instant>,
+    /// 待扫描的帧窗口（轨道 id → 本轮改过的帧区间，取并按轨道合并）。
+    ///
+    /// 【为什么按轨道取并集而不是逐笔记】一次拖动会写出上百笔相邻窗口；取并集只是把候选
+    /// 片段放宽几帧，而放宽的部分由指纹兜住 —— 反过来（逐笔记）会让待办无界增长。
+    windows: HashMap<String, (u32, u32)>,
+    /// 「不知道改了哪里」的待办（撤销 / 重做：整份权威被换掉）。
+    ///
+    /// 这时扫描集不是全部片段，而是**我们写过的那些** —— 没写过的片段没有"应该是什么"的
+    /// 答案，主动补写等于替用户做他从未要求过的事。
+    sweep: bool,
+    /// 上一次**成功写进宿主**的包络指纹（片段 id → 指纹）。
+    written: HashMap<String, u64>,
+    /// 上一轮因批次上限没发出去的片段（连同算好的指纹）：下一轮直接发，不再扫描。
+    deferred: Vec<(String, u64)>,
+}
+
+/// 这条曲线的改动会不会改变「会写进 take 的那条音高包络」。
+///
+/// 【为什么连子轨音分也算】导出侧的包络不是"音高线"本身：它是根轨道的 `pitch_edit` 经
+/// `apply_child_pitch_offset_to_midi` 加上子轨的音分 / 度数差、再减去原线得来的（见
+/// `compute_clip_export_pitch_offsets`）。子轨音分是**另一条**参数曲线
+/// （`child_pitch_offset_cents@<track>`），改它同样会让包络不同 —— 而它和音高线一样，
+/// 是用户眼里的"音高参数"。
+fn is_pitch_curve_param(param: &str) -> bool {
+    param == "pitch" || param.starts_with("child_pitch_offset_")
+}
+
+/// 一条片段此刻会写进宿主的包络指纹。
+///
+/// 【为什么指纹取"算出来的包络点"而不是"音高线的一段"】包络还取决于原线、子轨音分、
+/// 音阶分段、未识别帧填充档位与片段几何；任何一项变了，写进去的东西就不同。直接对**要写
+/// 的东西**取指纹，判据就只剩一条："这份字节和上次那份一样吗"。
+fn auto_pitch_write_fingerprint(
+    timeline: &TimelineState,
+    clip: &Clip,
+    policy: &hifishifter_kernel::pitch_bridge::UnvoicedFillPolicy,
+    frame_period_ms: f64,
+) -> u64 {
+    let Some(offsets) =
+        hifishifter_kernel::pitch_editing::compute_clip_take_pitch_offsets(timeline, clip, policy)
+    else {
+        return AUTO_PITCH_WRITE_NO_ENVELOPE;
+    };
+    let points = hifishifter_kernel::pitch_bridge::build_take_pitch_points(
+        &offsets,
+        frame_period_ms,
+        clip.length_sec.max(0.0),
+        super::commands::pitch_bridge_rate(clip),
+    );
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for point in points {
+        hash = fnv1a_step(hash, point.time.to_bits());
+        hash = fnv1a_step(hash, point.value.to_bits());
+    }
+    // 【空包络也要一个非零值】"算得出、但一个点都不该写"（整段平坦）与"算不出来"是两件
+    // 不同的事：前者要真的去删掉宿主的包络，后者什么都不该做。空点集的 FNV 初值本身就
+    // 非零，所以两者天然分得开。
+    hash
+}
+
+/// FNV-1a 的续算：这里只要"一样不一样"，不需要抗碰撞强度。
+fn fnv1a_step(hash: u64, value: u64) -> u64 {
+    let mut hash = hash;
+    for byte in value.to_le_bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 /// 本会话的**时间线/参数从哪里来**。
 ///
 /// 【为什么需要一个显式来源，而不是"有没有文档"这个隐含判据】`EditorSession` 此前
@@ -554,6 +651,15 @@ pub struct EditorSession {
     /// 【什么时候清】素材变化时（重新加载时间线把 `pitch_orig_key` 全部清空的那一刻）：
     /// 那是"该为新素材重新分析"的唯一语义点，也是一次新的、值得等待的机会。
     analysis_abandoned: Mutex<std::collections::BTreeSet<String>>,
+    /// 「自动写入 Take 音高」的记账（见 [AutoPitchWrite] 与
+    /// [Self::service_auto_pitch_write]）。
+    auto_pitch_write: Mutex<AutoPitchWrite>,
+    /// 导入方向正在写参数线：那期间**不得**触发自动写入。
+    ///
+    /// 【为什么必须有】导入会把 take 音高折进 `pitch_edit`；若不抑制，导入结束 400 ms 后
+    /// 就会来一次自动导出，而导出的 `D_PITCH = 0` 会把导入方向刻意保留在宿主侧的 Item
+    /// 音高偏移抹掉（见 `commands.rs` 开头"两侧各管各的"那一段）。
+    suppress_auto_pitch_write: AtomicBool,
     submitted: AtomicU64,
     processed: AtomicU64,
     pub(super) applied: AtomicU64,
@@ -1008,6 +1114,8 @@ impl EditorSession {
             last_revision_report: Mutex::new(None),
             clip_count: AtomicU64::new(0),
             analysis_abandoned: Mutex::new(std::collections::BTreeSet::new()),
+            auto_pitch_write: Mutex::new(AutoPitchWrite::default()),
+            suppress_auto_pitch_write: AtomicBool::new(false),
             submitted: AtomicU64::new(0),
             processed: AtomicU64::new(0),
             applied: AtomicU64::new(0),
@@ -1573,6 +1681,9 @@ impl EditorSession {
                     retry.rearm();
                     deadline = Some(Instant::now() + Duration::from_millis(150));
                 }
+                // 「自动写入 Take 音高」的服务点：音高编辑的落点在上面那条命令分支里，
+                // 此刻时间线是稳定的（见该方法的说明）。
+                session.service_auto_pitch_write();
                 if deadline.is_none()
                     && session.render_requested.load(Ordering::Acquire)
                     // 【为什么终态错误才停自动渲染】此前只要 `error` 非空就停 —— 而
@@ -1617,9 +1728,15 @@ impl EditorSession {
             } else {
                 break;
             }
-            let wait = deadline
+            let mut wait = deadline
                 .map(|d| d.saturating_duration_since(Instant::now()))
                 .unwrap_or(Duration::from_millis(100));
+            // 「自动写入 Take 音高」的到期时刻也要决定这一轮睡多久：命令处理完之后循环的
+            // deadline 可能是几秒后的渲染重试，不夹住就会把自动写入拖到那之后。
+            // 下限 10 ms：到期时刻已过时只是让下一轮立刻重算，不是忙等。
+            if let Some(hint) = weak.upgrade().and_then(|s| s.auto_pitch_write_wait()) {
+                wait = wait.min(hint.max(Duration::from_millis(10)));
+            }
             match receiver.recv_timeout(wait) {
                 Ok(Job::Close) => break,
                 Ok(Job::Barrier(sender)) => {
@@ -3031,6 +3148,242 @@ impl EditorSession {
         }
         self.notify_timeline();
     }
+    /// 音高线被改动了一次 —— 「自动写入 Take 音高」的触发入口。
+    ///
+    /// 【为什么只推迟到期时刻，不在这里发命令】编辑期间 `set_param_frames` 每帧一笔
+    /// （`commitOncePerFrame`）：每笔都导一次，一次 3 秒的拖动会在宿主里留下上百个撤销点，
+    /// 每笔还要 `SetItemStateChunk` 重建一次 item（见 `host/reaper/write.rs` 的说明）。
+    /// 静默 [`AUTO_PITCH_WRITE_QUIET`] 之后才写 ⇒「一次手势 = 一次宿主写入」。
+    ///
+    /// 【为什么关着的时候直接返回】关闭期间攒下的待办会在用户打开开关的一瞬间被补写，而
+    /// 那些编辑发生时用户并没有同意这件事（与「新增片段自动导入」同一条判据）。
+    fn note_pitch_edit(&self, track_id: &str, start_frame: u32, frame_count: u32) {
+        if !hifishifter_kernel::config::reaper_auto_take_pitch_write()
+            || self.suppress_auto_pitch_write.load(Ordering::Acquire)
+        {
+            return;
+        }
+        let end = start_frame.saturating_add(frame_count.max(1));
+        let mut state = self.auto_pitch_write.lock_or_recover();
+        if let Some(existing) = state.windows.get_mut(track_id) {
+            existing.0 = existing.0.min(start_frame);
+            existing.1 = existing.1.max(end);
+        } else {
+            state
+                .windows
+                .insert(track_id.to_owned(), (start_frame, end));
+        }
+        state.due = Some(Instant::now() + AUTO_PITCH_WRITE_QUIET);
+    }
+
+    /// 撤销 / 重做换掉了整份参数权威：不知道改了哪一段，只能按「我们写过的片段」扫一遍。
+    pub(super) fn note_pitch_edit_of_every_written_clip(&self) {
+        if !hifishifter_kernel::config::reaper_auto_take_pitch_write()
+            || self.suppress_auto_pitch_write.load(Ordering::Acquire)
+        {
+            return;
+        }
+        let mut state = self.auto_pitch_write.lock_or_recover();
+        state.sweep = true;
+        state.due = Some(Instant::now() + AUTO_PITCH_WRITE_QUIET);
+    }
+
+    /// 进入 / 离开「导入方向正在写参数线」的作用域（见字段说明）。
+    pub(super) fn set_suppress_auto_pitch_write(&self, suppress: bool) {
+        self.suppress_auto_pitch_write
+            .store(suppress, Ordering::Release);
+    }
+
+    /// 心跳还该睡多久：`Some` 表示「自动写入」有一个不晚于该时刻的到期点。
+    ///
+    /// 【为什么心跳必须知道它】命令处理完之后循环用 `deadline` 决定睡多久，而那条 deadline
+    /// 可能是几秒后的渲染重试；不夹住它，一次编辑的自动写入会被拖到那之后。
+    fn auto_pitch_write_wait(&self) -> Option<Duration> {
+        let state = self.auto_pitch_write.lock_or_recover();
+        if !state.deferred.is_empty() {
+            return Some(Duration::ZERO);
+        }
+        Some(state.due?.saturating_duration_since(Instant::now()))
+    }
+
+    /// 丢掉全部待办（开关关掉 / 宿主不支持 / 会话换了一份时间线）。
+    ///
+    /// 【为什么不动 `written`】它记的是"宿主里现在是什么"。清掉它只会让下一次打开开关时
+    /// 把所有片段当成"没写过"，于是第一笔编辑就重写整个工程 —— 那正是本功能最该避免的事。
+    fn clear_auto_pitch_write(&self) {
+        let mut state = self.auto_pitch_write.lock_or_recover();
+        state.due = None;
+        state.windows.clear();
+        state.sweep = false;
+        state.deferred.clear();
+    }
+
+    /// 「自动写入 Take 音高」的一次服务：把「与上次写进去的包络不同」的片段写回宿主。
+    ///
+    /// 【为什么挂在 actor 心跳上】它是唯一「既不看窗口开没开、又不在音频线程」的周期点，而
+    /// 在这里做事天然串行于所有参数写入 —— 不需要额外的并发控制。待办为空时它只付一次
+    /// 加锁的代价。
+    ///
+    /// 四条判据，顺序即理由：
+    /// 1. 开关关着 ⇒ 清空待办（关闭期间不该有残留）；
+    /// 2. 没有待办 / 还没到静默期 ⇒ 返回；
+    /// 3. 宿主不支持 take 包络（能力位）⇒ 清空；
+    /// 4. 指纹与上次写进去的相同 ⇒ 这条片段根本不进批次（连宿主 chunk 都不读）。
+    fn service_auto_pitch_write(&self) {
+        if !hifishifter_kernel::config::reaper_auto_take_pitch_write() {
+            self.clear_auto_pitch_write();
+            return;
+        }
+        {
+            let state = self.auto_pitch_write.lock_or_recover();
+            let due = state.due.is_some_and(|due| due <= Instant::now());
+            if !due && state.deferred.is_empty() {
+                return;
+            }
+        }
+        // 只有真能读写 take 包络的宿主才做（判据与菜单 / 能力位同源）。
+        let can_write = self.document().is_some_and(|document| {
+            document
+                .renderer_owners()
+                .iter()
+                .any(|owner| owner.effective_host_capabilities().take_pitch_bridge)
+        });
+        if !can_write {
+            self.clear_auto_pitch_write();
+            return;
+        }
+        let (mut batch, windows, sweep) = {
+            let mut state = self.auto_pitch_write.lock_or_recover();
+            state.due = None;
+            (
+                std::mem::take(&mut state.deferred),
+                std::mem::take(&mut state.windows),
+                std::mem::replace(&mut state.sweep, false),
+            )
+        };
+        // 【两批要合并】上一轮剩下的（`deferred`）与这一轮新攒的窗口都是待办：只发前一批会
+        // 把窗口里那几条编辑悄悄丢掉（下一次编辑之前它们再也不会被扫到）。
+        if !windows.is_empty() || sweep {
+            let known: std::collections::HashSet<String> =
+                batch.iter().map(|(id, _)| id.clone()).collect();
+            for entry in self.auto_pitch_write_candidates(&windows, sweep) {
+                if !known.contains(&entry.0) {
+                    batch.push(entry);
+                }
+            }
+        }
+        if batch.is_empty() {
+            return;
+        }
+        // 单轮上限：一次粘贴几百个片段时，逐条读宿主 chunk 会把 actor 顶住好几百毫秒。
+        // 剩下的留给下一轮 —— 待办本来就在，不需要在这里一次做完（每轮都在缩短，必然收敛）。
+        let deferred = if batch.len() > AUTO_PITCH_WRITE_BATCH {
+            batch.split_off(AUTO_PITCH_WRITE_BATCH)
+        } else {
+            Vec::new()
+        };
+        let clip_ids: Vec<String> = batch.iter().map(|(id, _)| id.clone()).collect();
+        let request = json!({ "clipIds": clip_ids, "auto": true });
+        // 【失败就放弃这一轮】待办已在上面取走；把失败的那批放回队列会让 actor 每 100 ms
+        // 重试一次同一个必然失败的动作。下一次音高编辑会重新武装 —— 那是唯一能自愈的路径。
+        let report = match super::commands::export_host_take_pitch(self, &request) {
+            Ok(report) => report,
+            Err(error) => {
+                log::warn!("[pitch] auto take-pitch write failed: {error}");
+                return;
+            }
+        };
+        let unresolved: std::collections::HashSet<String> = report
+            .get("unresolved")
+            .and_then(Value::as_array)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut written = 0usize;
+        {
+            let mut state = self.auto_pitch_write.lock_or_recover();
+            for (id, fingerprint) in batch {
+                // 【只记真的转成的】没转成的（没有唯一 take / 算不出包络 / 会删掉已有包络 /
+                // take 自带 `D_PITCH`）留到下一次编辑重试：记下来就等于永久放弃它。
+                if !unresolved.contains(&id) {
+                    state.written.insert(id, fingerprint);
+                    written += 1;
+                }
+            }
+            state.deferred = deferred;
+        }
+        if written > 0 {
+            log::info!("[pitch] auto-wrote the take pitch envelope of {written} clip(s)");
+        }
+    }
+
+    /// 逐片段算「此刻会写进去的包络」指纹，挑出与上次不同的那几条。
+    ///
+    /// 【为什么在时间线锁内算、在锁外发命令】指纹是纯计算（读曲线 → 算偏移 → 简化断点），
+    /// 而命令会去碰宿主（读 chunk / 写 chunk / `UpdateItemInProject`）—— 后者绝不能持锁。
+    fn auto_pitch_write_candidates(
+        &self,
+        windows: &HashMap<String, (u32, u32)>,
+        sweep: bool,
+    ) -> Vec<(String, u64)> {
+        let written = self.auto_pitch_write.lock_or_recover().written.clone();
+        let timeline = self.timeline.lock_or_recover();
+        let frame_period_ms = timeline.frame_period_ms().max(0.1);
+        let policy = hifishifter_kernel::pitch_editing::take_pitch_fill_policy(frame_period_ms);
+        // 轨道 id（可能是子轨）→ 根轨道：窗口是按根轨道的栅格记的。
+        let mut ranges: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+        for (track, range) in windows {
+            let root = timeline
+                .resolve_root_track_id(track)
+                .unwrap_or_else(|| track.clone());
+            ranges
+                .entry(root)
+                .or_default()
+                .push((range.0 as usize, range.1 as usize));
+        }
+        let mut candidates = Vec::new();
+        let mut live: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for clip in &timeline.clips {
+            live.insert(clip.id.clone());
+            let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
+                continue;
+            };
+            let involved = if sweep {
+                // 撤销 / 重做：只回写我们写过的片段（没写过的没有"应该是什么"的答案）。
+                written.contains_key(&clip.id)
+            } else {
+                let (start, end) = hifishifter_kernel::frame_grid::clip_frame_window(
+                    clip.start_sec,
+                    clip.length_sec,
+                    frame_period_ms,
+                );
+                ranges.get(&root).is_some_and(|ranges| {
+                    ranges.iter().any(|(from, to)| start < *to && *from < end)
+                })
+            };
+            if !involved {
+                continue;
+            }
+            let fingerprint =
+                auto_pitch_write_fingerprint(&timeline, clip, &policy, frame_period_ms);
+            if written.get(&clip.id).copied() != Some(fingerprint) {
+                candidates.push((clip.id.clone(), fingerprint));
+            }
+        }
+        drop(timeline);
+        // 【自限长】被删掉的片段不该在表里越积越多。撤销让它们重现时按"没写过"重来一遍是
+        // **正确**的：那条包络此刻确实与音高线不一致。
+        self.auto_pitch_write
+            .lock_or_recover()
+            .written
+            .retain(|id, _| live.contains(id));
+        candidates
+    }
+
     /// 稳定模型变化在后台自动读取；pending曲线遇到真实冲突保留，不静默强制重载。
     fn refresh_host(&self) {
         let Some(document) = self.document() else {
@@ -4801,6 +5154,13 @@ impl ParamHost for EditorSession {
             self.mark_dirty();
             self.render_requested.store(true, Ordering::Release);
             self.publish_timeline_derived();
+            // 【为什么在 refresh 之后】指纹读的是 `self.timeline` 里的派生数组，它由上一行
+            // 从文档权威重新装出来 —— 提前记会给这一次编辑算到**上一笔**的曲线上。
+            if is_pitch_curve_param(param) {
+                // 【记的是**呈现 id**】窗口要与 `timeline.clips[].track_id` 同一套 id 才能
+                // 对得上（`host` 是剥掉命名空间的裸宿主 id，按它反查根轨道恒失败）。
+                self.note_pitch_edit(track_id, start_frame, values.len() as u32);
+            }
         }
         Some(result)
     }
@@ -4841,6 +5201,9 @@ impl ParamHost for EditorSession {
             self.mark_dirty();
             self.render_requested.store(true, Ordering::Release);
             self.publish_timeline_derived();
+            if is_pitch_curve_param(param) {
+                self.note_pitch_edit(track_id, start_frame, frame_count);
+            }
         }
         Some(result)
     }
@@ -9522,6 +9885,415 @@ mod host_selection_tests {
             "宿主清空选择不得连带清空插件里的选择"
         );
 
+        drop(model);
+        editor.close();
+    }
+}
+
+/// 「自动写入 Take 音高」的会话级判据。
+///
+/// 【为什么这些是会话级测试】判据全在会话上：谁被改了、哪条片段的包络与音高线不同步、
+/// 开关关着时该不该碰宿主。写错任何一条都不会报错 —— 只会在用户不知情的时候改写（或
+/// 悄悄不再改写）REAPER 里的数据。
+#[cfg(test)]
+mod auto_pitch_write_tests {
+    use super::*;
+
+    /// 装好一个"有唯一宿主 take、take 上不带静态音高"的会话。
+    ///
+    /// 【为什么把渲染按成终态错误】夹具注入的原线是**假的**：会话 actor 一旦真的开始渲染，
+    /// `complete_cached_analysis` 会按 clip 缓存重算原线（夹具里没有缓存，结果全是 0），
+    /// 把注入的 60 抹掉 —— 与「新增片段自动导入」的用例同一条处置。
+    fn bind_take_host(
+        owner: &Arc<crate::render::extension::ExtensionOwner>,
+    ) -> &'static crate::host::reaper::MockHost {
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_item_state(&host.single_take_chunk());
+        host.set_value("D_POSITION", 0.);
+        // 【必须等于素材真实时长（4 个采样点）】`host_edit_target` 会把 item 几何与 ARA
+        // 内容对齐；长度对不上时它判"没有唯一绑定的 take"，整条桥接路径直接不可用。
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        host.set_value("D_PITCH", 0.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        host
+    }
+
+    /// 把夹具的片段改成一个可分辨的时间窗（0 s 起、40 ms 长），返回 (clip, root)。
+    fn eight_frame_clip(editor: &EditorSession) -> (String, String) {
+        let mut timeline = editor.timeline.lock_or_recover();
+        let clip_id = timeline.clips[0].id.clone();
+        let track_id = timeline.clips[0].track_id.clone();
+        let clip = timeline
+            .clips
+            .iter_mut()
+            .find(|clip| clip.id == clip_id)
+            .unwrap();
+        clip.start_sec = 0.0;
+        clip.length_sec = 0.04;
+        let root = timeline.resolve_root_track_id(&track_id).unwrap();
+        timeline.ensure_params_for_root(&root);
+        (clip_id, root)
+    }
+
+    /// 给这条根轨道喂一段**原线**（分析结果），让导出侧能算出非零偏移。
+    ///
+    /// 【为什么必须自己填】夹具没有分析缓存，文档视图里的 `pitch_orig` 是整段 0；而 0 会让
+    /// 导出侧按"这一帧没有音高"处理 ⇒ 偏移恒为 0 ⇒ 空包络。这里要钉的是"音高线变了 ⇒
+    /// 包络跟着变"，前提得先有一段真实的原线。
+    ///
+    /// 【每轮都要重新喂】权威写入结束时会 `install_document_params`，按文档视图**整条**
+    /// 替换该根轨道的参数 entry —— 夹具的 view 里没有原线，注入的那段会被覆盖掉。
+    fn feed_original_pitch(editor: &EditorSession, root: &str, semitones: f32) {
+        let mut timeline = editor.timeline.lock_or_recover();
+        let frames = (timeline.project_sec.max(0.0) * 1000.0 / timeline.frame_period_ms().max(0.1))
+            .ceil() as usize;
+        let params = timeline.params_by_root_track.get_mut(root).unwrap();
+        params.pitch_orig = vec![60.0; frames.max(8)];
+        params.pending_pitch_offset = None;
+        let _ = semitones;
+    }
+
+    /// 跑一轮「编辑 → 停手 → 服务」，直到宿主那边真的出现包络（最多三次）。
+    ///
+    /// 【为什么要重试】夹具的文档视图里没有分析基线，而会话 actor 每 100 ms 会按视图把
+    /// 参数 entry **整条重装**一次：「喂原线」与「服务跑一轮」之间被它打断时，这一轮就会
+    /// 算成空包络。真实环境里原线由分析发布、不会被这样抹掉 —— 重试只是让用例只判
+    /// "这条链路通不通"，不去赌两个线程的时序。
+    fn settle_until_written(
+        editor: &EditorSession,
+        root: &str,
+        host: &crate::host::reaper::MockHost,
+        values: &[f32; 8],
+    ) -> bool {
+        for _ in 0..3 {
+            editor
+                .write_authority_frames(root, "pitch", 0, values, None, true)
+                .expect("插件宿主必须应答权威写口")
+                .expect("权威写入必须成功");
+            feed_original_pitch(editor, root, 3.0);
+            editor.auto_pitch_write.lock_or_recover().due = Some(Instant::now());
+            editor.service_auto_pitch_write();
+            if host.item_state_chunk.borrow().contains("<PITCHENV") {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn count(calls: &[String], name: &str) -> usize {
+        calls.iter().filter(|call| call.as_str() == name).count()
+    }
+
+    /// **端到端：一次静默下来的音高编辑会把包络写进宿主。**
+    ///
+    /// 【为什么这条必须存在】每条判据各自成立、但链子接不上时，用户看到的都是"打开了开关，
+    /// 什么也没发生"：写口没有武装、心跳没有消费、或者指纹把唯一该写的那条挡住了。
+    #[test]
+    fn a_settled_pitch_edit_writes_the_take_envelope() {
+        let _serial = hifishifter_kernel::config::channel_policy_test_guard();
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let host = bind_take_host(&owner);
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        assert!(
+            owner.effective_host_capabilities().take_pitch_bridge,
+            "假宿主必须声明 take 音高桥能力，否则服务在能力门禁处直接返回"
+        );
+        let (_clip_id, root) = eight_frame_clip(&editor);
+        // 【开关必须在会话创建之后设】`new_with` 会读一次 `settings_store`，那次惰性加载
+        // 会把进程级开关按磁盘上的值（默认关）重新下发。
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(true);
+
+        // 静默期到了（心跳每 100 ms 一轮，测试里直接把到期时刻拨到"已经过了"）。
+        assert!(
+            settle_until_written(&editor, &root, host, &[3.0_f32; 8]),
+            "宿主的 take 上必须出现音高包络：{}",
+            host.item_state_chunk.borrow()
+        );
+        let chunk = host.item_state_chunk.borrow().clone();
+        assert!(chunk.contains("PT "), "包络里必须至少有断点：{chunk}");
+        assert_eq!(
+            host.item_value("D_PITCH"),
+            Some(0.),
+            "写完后 Item 音高偏移必须归零（包络是 REAPER 侧唯一来源）"
+        );
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(false);
+        drop(model);
+        editor.close();
+    }
+
+    /// **线没变就不再碰宿主（连 chunk 都不读）。**
+    ///
+    /// 【为什么这条是"一次编辑一次写入"的另一半】拖动期间前端每帧写一次，写完还会落一次
+    /// settle；没有指纹的话每一轮都要读一遍宿主的 chunk 才发现"其实一样"。判据必须发生在
+    /// **发命令之前**。
+    #[test]
+    fn a_settle_without_a_real_change_does_not_touch_the_host() {
+        let _serial = hifishifter_kernel::config::channel_policy_test_guard();
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let host = bind_take_host(&owner);
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        *editor.error.lock_or_recover() = Some("fixture: rendering disabled".into());
+        std::thread::sleep(Duration::from_millis(300));
+        let (_clip_id, root) = eight_frame_clip(&editor);
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(true);
+
+        assert!(
+            settle_until_written(&editor, &root, host, &[3.0_f32; 8]),
+            "宿主的 take 上必须出现音高包络：{}",
+            host.item_state_chunk.borrow()
+        );
+        let after_first = count(&host.calls(), "get-item-state");
+
+        // 再写一遍**同样的值**（编辑器里常见：抬手前的最后一帧重复提交）。
+        editor
+            .write_authority_frames(&root, "pitch", 0, &[3.0_f32; 8], None, false)
+            .expect("插件宿主必须应答权威写口")
+            .expect("权威写入必须成功");
+        // 权威写入会按文档视图重装参数 entry（夹具的 view 里没有原线）—— 补回去，让这一轮
+        // 与上一轮**只差"线没变"**这一件事。
+        feed_original_pitch(&editor, &root, 3.0);
+        editor.auto_pitch_write.lock_or_recover().due = Some(Instant::now());
+        editor.service_auto_pitch_write();
+
+        assert_eq!(
+            count(&host.calls(), "get-item-state"),
+            after_first,
+            "包络没变时不得再读一次宿主的 chunk（判据在发命令之前）"
+        );
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(false);
+        drop(model);
+        editor.close();
+    }
+
+    /// **一次手势只写一次。**
+    ///
+    /// 拖动期间每帧一笔，全部落在同一个静默窗里 ⇒ settle 只发一次命令、宿主只被写一次。
+    #[test]
+    fn a_drag_inside_one_quiet_window_writes_once() {
+        let _serial = hifishifter_kernel::config::channel_policy_test_guard();
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let host = bind_take_host(&owner);
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        *editor.error.lock_or_recover() = Some("fixture: rendering disabled".into());
+        std::thread::sleep(Duration::from_millis(300));
+        let (_clip_id, root) = eight_frame_clip(&editor);
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(true);
+
+        for value in [1.0_f32, 2.0, 3.0, 4.0] {
+            editor
+                .write_authority_frames(&root, "pitch", 0, &[value; 8], None, false)
+                .expect("插件宿主必须应答权威写口")
+                .expect("权威写入必须成功");
+        }
+        assert!(
+            settle_until_written(&editor, &root, host, &[4.0_f32; 8]),
+            "宿主的 take 上必须出现音高包络：{}",
+            host.item_state_chunk.borrow()
+        );
+
+        assert_eq!(
+            count(&host.calls(), "set-item-state"),
+            1,
+            "四笔编辑落在同一个静默窗里，宿主只该被写一次：{:?}",
+            host.calls()
+        );
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(false);
+        drop(model);
+        editor.close();
+    }
+
+    /// **非音高参数不武装自动写入。**
+    ///
+    /// 音量 / 共振峰之类的曲线每次拖动都会写一遍；若它们也武装，用户调一下音量就会在
+    /// REAPER 的 take 上重写一遍音高包络（并留一个撤销点）。
+    #[test]
+    fn a_non_pitch_edit_does_not_arm_the_auto_write() {
+        let _serial = hifishifter_kernel::config::channel_policy_test_guard();
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let _host = bind_take_host(&owner);
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let (_clip_id, root) = eight_frame_clip(&editor);
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(true);
+
+        editor
+            .write_authority_frames(&root, "tension", 0, &[0.5_f32; 8], None, true)
+            .expect("插件宿主必须应答权威写口")
+            .expect("权威写入必须成功");
+
+        assert!(
+            editor.auto_pitch_write.lock_or_recover().due.is_none(),
+            "非音高参数不得武装自动写入"
+        );
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(false);
+        drop(model);
+        editor.close();
+    }
+
+    /// **开关关着时一个字节都不碰宿主。**
+    ///
+    /// 【为什么这条是本功能的第一道门】它会改写用户的工程数据，而默认值是"关"。判据写错的
+    /// 表现是"我从没打开过这个开关，REAPER 里的包络却变了"。
+    #[test]
+    fn the_option_being_off_keeps_the_host_untouched() {
+        let _serial = hifishifter_kernel::config::channel_policy_test_guard();
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(false);
+        assert!(
+            !hifishifter_kernel::config::UiSettings::default().reaper_auto_take_pitch_write,
+            "这个开关必须默认关闭：它会在用户没点任何东西的时候改写宿主工程"
+        );
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let host = bind_take_host(&owner);
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        *editor.error.lock_or_recover() = Some("fixture: rendering disabled".into());
+        std::thread::sleep(Duration::from_millis(300));
+        let (_clip_id, root) = eight_frame_clip(&editor);
+        let before = host.item_state_chunk.borrow().clone();
+
+        editor
+            .write_authority_frames(&root, "pitch", 0, &[3.0_f32; 8], None, true)
+            .expect("插件宿主必须应答权威写口")
+            .expect("权威写入必须成功");
+        editor.service_auto_pitch_write();
+
+        assert_eq!(
+            host.item_state_chunk.borrow().clone(),
+            before,
+            "开关关着时不得改写宿主 take"
+        );
+        assert_eq!(count(&host.calls(), "set-item-state"), 0);
+        drop(model);
+        editor.close();
+    }
+
+    /// **自动档绝不删掉已经存在的包络。**
+    ///
+    /// 【为什么这是数据丢失】这一轮算出来是空点集时，写进去的就是"空包络"—— 而空包络 =
+    /// 删掉整个 `<PITCHENV>`。用户刚在 REAPER 里画好的包络会在一次"顺手写一下"里消失，
+    /// 而报告只会说"写了 N 条"。手动档这么做是语义的一部分（用户点名要转），自动档不行。
+    #[test]
+    fn a_settle_never_deletes_an_existing_take_envelope() {
+        let _serial = hifishifter_kernel::config::channel_policy_test_guard();
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let host = bind_take_host(&owner);
+        // 宿主 take 上先有一条包络（用户在 REAPER 里画的）。
+        let chunk = "<ITEM\nPOSITION 0\nLENGTH 0.00009070294784580499\nSEL 1\n\
+                     IGUID {11111111-1111-1111-1111-111111111111}\n\
+                     SOFFS 0\nPLAYRATE 1 1 0\nGUID {22222222-2222-2222-2222-222222222222}\n\
+                     <SOURCE WAVE\nFILE \"ara://source\"\n>\n\
+                     <PITCHENV\nACT 1 -1\nVIS 1 1 1\nLANEHEIGHT 0 0\nARM 0\n\
+                     DEFSHAPE 0 12 -1\nPT 0.00000000000000000 4.00000000000000000 0\n>\n>\n";
+        host.enable_item_state(chunk);
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let (_clip_id, root) = eight_frame_clip(&editor);
+        // 【不喂待应用偏移】夹具的文档视图里没有分析结果 —— 这一轮算出来必然是空点集。
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(true);
+
+        editor
+            .write_authority_frames(&root, "pitch", 0, &[3.0_f32; 8], None, true)
+            .expect("插件宿主必须应答权威写口")
+            .expect("权威写入必须成功");
+        editor.auto_pitch_write.lock_or_recover().due = Some(Instant::now());
+        editor.service_auto_pitch_write();
+
+        assert_eq!(
+            *host.item_state_chunk.borrow(),
+            chunk,
+            "自动档不得删掉用户在 REAPER 里画好的包络"
+        );
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(false);
+        drop(model);
+        editor.close();
+    }
+
+    /// **take 自带 `D_PITCH` 的片段不接管。**
+    ///
+    /// 手动转换会把 `D_PITCH` 归零（"让包络成为 REAPER 侧唯一来源"），而那一步是用户点出来的。
+    /// 自动写入是**没点任何东西**时发生的：若照做，用户先前在 REAPER 里设的 Item 音高偏移会在
+    /// 第一次编辑时无声消失，且从插件界面完全看不出来。
+    #[test]
+    fn a_take_with_its_own_pitch_offset_is_left_alone() {
+        let _serial = hifishifter_kernel::config::channel_policy_test_guard();
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let host = bind_take_host(&owner);
+        host.set_value("D_PITCH", 3.);
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        *editor.error.lock_or_recover() = Some("fixture: rendering disabled".into());
+        std::thread::sleep(Duration::from_millis(300));
+        let (_clip_id, root) = eight_frame_clip(&editor);
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(true);
+        let before = host.item_state_chunk.borrow().clone();
+
+        editor
+            .write_authority_frames(&root, "pitch", 0, &[3.0_f32; 8], None, true)
+            .expect("插件宿主必须应答权威写口")
+            .expect("权威写入必须成功");
+        // 【原线要在写完权威之后补】否则证明不了"是被 D_PITCH 挡住的"。
+        feed_original_pitch(&editor, &root, 3.0);
+        editor.auto_pitch_write.lock_or_recover().due = Some(Instant::now());
+        editor.service_auto_pitch_write();
+
+        assert_eq!(
+            host.item_state_chunk.borrow().clone(),
+            before,
+            "自带 D_PITCH 的 take 不得被自动接管（那会把那个偏移抹掉）"
+        );
+        assert_eq!(
+            host.item_value("D_PITCH"),
+            Some(3.),
+            "被跳过的片段连 D_PITCH 都不该被归零"
+        );
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(false);
+        drop(model);
+        editor.close();
+    }
+
+    /// **自动写出来的包络与手动点一次得到的逐字相同。**
+    ///
+    /// 【为什么这条必须存在】两个入口若各写一份数学，听感差异是最难被用户描述出来的一类
+    /// bug（"好像偏了一点"）。这里用同一份宿主 chunk 做判据：先自动写一次、记下文本，再把
+    /// chunk 还原、手动跑一次同样的命令，两份必须一字不差。
+    #[test]
+    fn the_automatic_write_matches_the_manual_command_byte_for_byte() {
+        let _serial = hifishifter_kernel::config::channel_policy_test_guard();
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let host = bind_take_host(&owner);
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        *editor.error.lock_or_recover() = Some("fixture: rendering disabled".into());
+        std::thread::sleep(Duration::from_millis(300));
+        let (clip_id, root) = eight_frame_clip(&editor);
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(true);
+
+        assert!(
+            settle_until_written(&editor, &root, host, &[3.0_f32; 8]),
+            "宿主的 take 上必须出现音高包络：{}",
+            host.item_state_chunk.borrow()
+        );
+        let automatic = host.item_state_chunk.borrow().clone();
+
+        // 还原宿主，再让手动命令跑一遍**同一条线**。
+        host.enable_item_state(&host.single_take_chunk());
+        host.set_value("D_PITCH", 0.);
+        super::super::commands::export_host_take_pitch(&editor, &json!({ "clipIds": [clip_id] }))
+            .unwrap();
+
+        assert_eq!(
+            host.item_state_chunk.borrow().clone(),
+            automatic,
+            "自动档与手动命令必须写出逐字相同的 take 状态"
+        );
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(false);
         drop(model);
         editor.close();
     }
