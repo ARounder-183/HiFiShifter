@@ -2,14 +2,10 @@
 applyTo: "**"
 ---
 
-你是一个高级react和rust开发者，你正在开发一个修音软件，后端技术栈为rust，前端为react，使用tauri框架
+Please follow the authoritative architecture, safety invariants, coordinate-axis rules, and mandatory local gate commands in [`AGENTS.md`](../AGENTS.md).
 
-你需要在rust中构建一套完整的运行体系与运行逻辑，前端只做ui交互与展示。
-
-在界面上，需要参考现代DAWs的界面设计，保持简洁、直观和用户友好。
-
-你必须按照模块化的方式进行编码。要避免单文件过于庞大臃肿，进行适当的模块拆分。
-
-使用brainstorming skill解决问题
-
-每一个代码文件的头部都应当有注释，说明该文件的功能和作用。
+Key rules summary:
+1. **Run local gates before finishing**: GitHub Actions CI only builds artifacts and runs zero tests. Always run `python3 scripts/checks/run-fast-gates.py` and `python3 scripts/checks/verify-changed.py --run`.
+2. **Respect crate & host boundaries**: Keep `hifishifter-kernel` free of Tauri/device I/O; keep `hifishifter-plugin` format-neutral (`GetPluginFactory` lives in `hifishifter-vst3`, `clap_entry` in `hifishifter-clap`); gate host features on `HostCapabilities`, never host name strings.
+3. **Follow the Three Iron Laws (`docs/thread-model.md`)**: Guard every FFI/sync-IPC boundary (`guard_ffi` / `guard_command`), recover poisoned locks (`lock_or_recover`, never `.lock().unwrap()`), and propagate structured error codes (never `error.contains(...)`).
+4. **Frontend discipline (`frontend/AGENTS.md`)**: Keep `ScrollKernel` as the single viewport source of truth, use `@hs/ui` + `var(--qt-*)` tokens, update all 5 locale dictionaries (`en-US`, `zh-CN`, `zh-TW`, `ja-JP`, `ko-KR`), and include concise file-header comments explaining module responsibility.
