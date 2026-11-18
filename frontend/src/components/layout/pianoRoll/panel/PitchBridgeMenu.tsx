@@ -37,10 +37,20 @@
  * 【为什么左键固定"当前轨道"而不记住上次的作用域】记住上次会把"点一下"变成
  * "点一下可能改写整个工程" —— 同一枚按钮的含义随上一次选择而变，肌肉记忆就此不可靠。
  * 批量作用域只从菜单进，那里每项都写着计数。
+ *
+ * 【菜单最后一项是开关，不是第七个作用域】「自动写入 Take 音高」打开之后，用户在参数
+ * 编辑器里每改一笔音高，插件都会在停手约 0.4 s 后自己把包络写进宿主 —— 于是这个菜单
+ * 从"我现在转一遍"变成"以后都别问我"。它单独一行、排在分隔线之后：上面六项都会**立刻**
+ * 改写东西，这一项只改一个开关，混在同一组里会让一次右键出现七件看起来一样的事，
+ * 而其中一件点了没有任何可见变化。
  */
 import { useCallback, useRef, useState } from "react";
 import { Box } from "@radix-ui/themes";
 
+import {
+    persistUiSettings,
+    toggleReaperAutoTakePitchWrite,
+} from "../../../../features/session/sessionSlice";
 import {
     useHostPitchBridge,
     type PitchBridgeDirection,
@@ -53,7 +63,8 @@ import { AppAnchoredMenu, AppIconButton } from "../../../../ui";
 import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
 
 type Props = {
-    m: Pick<PianoRollPanelModel, "pitchBridgeScopes">;
+    /** `s` / `dispatch` 只为底部那条"自动写入"开关服务（见模块头最后一段）。 */
+    m: Pick<PianoRollPanelModel, "dispatch" | "pitchBridgeScopes" | "s">;
 };
 
 /** 作用域的显示顺序：由窄到宽（与"我改动了多少东西"的直觉一致）。 */
@@ -106,6 +117,7 @@ function BridgeIcon() {
 export function PitchBridgeMenu({ m }: Props) {
     const { t, tVars } = useI18n();
     const { available, busy, run } = useHostPitchBridge();
+    const { dispatch, s } = m;
     const [open, setOpen] = useState(false);
     const anchorRef = useRef<HTMLDivElement>(null);
     const menuRef = useRef<HTMLDivElement>(null);
@@ -159,6 +171,26 @@ export function PitchBridgeMenu({ m }: Props) {
             label: t("pitch_bridge_export_heading"),
         },
         ...scopesFor("export"),
+        /**
+         * 自动写入：**开关**，不是又一次"现在转一遍"。
+         *
+         * 【为什么放在这里而不是"选项"菜单】它是这个功能的一部分，而用户想到它的时刻
+         * 正是"我不想每次都点这一下"—— 也就是站在这个菜单前面的时候。
+         *
+         * 【为什么单独一行、分隔线之后】上面六项都会**立刻**改写东西；这一项只是改一个
+         * 开关。混在同一组里，按一次右键就会看到七件"看起来一样"的事，其中一件点了不会
+         * 发生任何可见变化。
+         */
+        {
+            key: "auto-write",
+            label: t("pitch_bridge_auto_write"),
+            separatorBefore: true,
+            checked: s.reaperAutoTakePitchWrite,
+            onSelect: () => {
+                dispatch(toggleReaperAutoTakePitchWrite());
+                void dispatch(persistUiSettings());
+            },
+        },
     ];
 
     return (

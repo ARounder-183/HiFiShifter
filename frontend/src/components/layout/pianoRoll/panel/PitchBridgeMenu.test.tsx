@@ -12,6 +12,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Provider } from "react-redux";
 import { combineReducers, configureStore } from "@reduxjs/toolkit";
+import type { Store } from "@reduxjs/toolkit";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import sessionReducer from "../../../../features/session/sessionSlice";
@@ -20,14 +21,17 @@ import keybindingsReducer from "../../../../features/keybindings/keybindingsSlic
 import { enUS } from "../../../../i18n/en-US";
 import { I18nProvider } from "../../../../i18n/I18nProvider";
 import { writableHostCaps, type HostCaps } from "../../../../services/pluginBootstrapFixtures";
+import { settingsApi } from "../../../../services/api";
 import { webApi } from "../../../../services/webviewApi";
 import { AppThemeProvider } from "../../../../theme/AppThemeProvider";
 import { PitchBridgeMenu } from "./PitchBridgeMenu";
+import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 let container: HTMLDivElement;
 let root: Root;
+let store: Store;
 
 function buildStore() {
     return configureStore({
@@ -47,12 +51,22 @@ const SCOPES = {
 };
 
 async function mount(scopes: typeof SCOPES = SCOPES) {
+    store = buildStore();
     await act(async () => {
         root.render(
-            <Provider store={buildStore()}>
+            <Provider store={store}>
                 <AppThemeProvider>
                     <I18nProvider>
-                        <PitchBridgeMenu m={{ pitchBridgeScopes: scopes }} />
+                        <PitchBridgeMenu
+                            m={{
+                                // `buildStore` 用 `combineReducers` 建的 store 丢了 thunk 的
+                                // dispatch 类型；这里只是把它交回面板模型本身的口径。
+                                dispatch:
+                                    store.dispatch as unknown as PianoRollPanelModel["dispatch"],
+                                s: store.getState().session,
+                                pitchBridgeScopes: scopes,
+                            }}
+                        />
                     </I18nProvider>
                 </AppThemeProvider>
             </Provider>,
@@ -191,4 +205,31 @@ test("the left button exports the current track while the right button opens the
     await openMenu();
     expect(document.body.querySelector(".hs-menu__item")).toBeTruthy();
     exported.mockRestore();
+});
+
+test("the auto-write switch sits at the bottom of the menu and flips the session state", async () => {
+    setBootstrap(pluginCaps({ takePitchBridge: true }));
+    // 落盘这一跳在测试里没有后端：只关心"有没有被调用"，不关心结果。
+    const saved = vi.spyOn(settingsApi, "saveUiSettings").mockResolvedValue({ ok: true } as never);
+    await mount();
+    await openMenu();
+
+    const labels = menuLabels();
+    // 【为什么钉"在最后"】上面六项都会立刻改写东西；这一项只改一个开关。混在同一组里会让
+    // 一次右键出现七件"看起来一样"的事，其中一件点了没有任何可见变化。
+    expect(labels[labels.length - 1]).toBe(enUS.pitch_bridge_auto_write);
+    expect(store.getState().session.reaperAutoTakePitchWrite).toBe(false);
+
+    const entry = Array.from(
+        document.body.querySelectorAll<HTMLButtonElement>("button.hs-menu__item"),
+    ).find((el) => (el.textContent ?? "").startsWith(enUS.pitch_bridge_auto_write));
+    expect(entry, "自动写入必须渲染成一个可点的菜单项").toBeTruthy();
+    await act(async () => {
+        entry!.click();
+    });
+
+    expect(store.getState().session.reaperAutoTakePitchWrite).toBe(true);
+    expect(saved).toHaveBeenCalledTimes(1);
+    expect(saved.mock.calls[0][0]).toMatchObject({ reaperAutoTakePitchWrite: true });
+    saved.mockRestore();
 });

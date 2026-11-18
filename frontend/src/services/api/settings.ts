@@ -188,6 +188,13 @@ export interface UiSettings {
     /** 音高模式下是否绘制各 Clip 自己的源音高参考线（默认开）。 */
     showClipPitchOverlay?: boolean;
     /**
+     * 「自动写入 Take 音高」（默认关，插件 + REAPER）。
+     *
+     * 打开后，插件里每一次对音高参数的编辑都会在停手约 0.4 s 后自动写成该片段
+     * REAPER take 的音高包络。入口在参数编辑器工具栏的「Take 音高互转」右键菜单。
+     */
+    reaperAutoTakePitchWrite?: boolean;
+    /**
      * 纵轴标尺的展示单位（参数 id → `"ratio"` | `"db"`）。
      *
      * 只对音量 / 动态有效（`1× = 0 dB`）：同一个线性幅值既能读成倍率也能读成 dB。

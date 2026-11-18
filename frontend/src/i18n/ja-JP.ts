@@ -2364,6 +2364,7 @@ export const jaJP = {
     pitch_bridge_scope_selection: "選択範囲内",
     pitch_bridge_scope_all: "すべてのクリップ",
     pitch_bridge_scope_item: "{scope}（{count}）",
+    pitch_bridge_auto_write: "テイクピッチを自動書き込み",
     pitch_bridge_tooltip_export_track: "テイクピッチ変換：現在のトラックを書き出し",
     pitch_bridge_nothing_converted: "変換できるクリップがありません",
     pitch_bridge_skipped_clips: "{count} 個のクリップをスキップ",

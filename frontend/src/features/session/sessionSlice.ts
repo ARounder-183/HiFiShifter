@@ -788,6 +788,16 @@ const sessionSlice = createSlice({
             state.showClipPitchOverlay = !state.showClipPitchOverlay;
         },
         /**
+         * 切换「自动写入 Take 音高」（参数编辑器工具栏的 Take 音高互转菜单）。
+         *
+         * 【为什么只是一个布尔翻转】真正生效的判据在插件侧：会话 actor 每 100 ms 读一次
+         * 进程级设置副本，而这个字段落盘后由 `ui_settings_apply` 同步过去。前端这份只负责
+         * 画勾选态与把用户的意图写进设置文件。
+         */
+        toggleReaperAutoTakePitchWrite(state) {
+            state.reaperAutoTakePitchWrite = !state.reaperAutoTakePitchWrite;
+        },
+        /**
          * 切换某参数纵轴标尺的展示单位（倍率 ↔ dB）。
          *
          * 只对支持切换的参数生效（音量 / 动态）；其余参数点击纵轴不应有任何反应，
@@ -1268,6 +1278,7 @@ export const {
     toggleClipboardPreview,
     toggleParamValuePopup,
     toggleClipPitchOverlay,
+    toggleReaperAutoTakePitchWrite,
     toggleParamAxisUnit,
     toggleParamAxisDirection,
     setProjectLastSaveFormat,
