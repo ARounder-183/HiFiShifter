@@ -1,0 +1,1850 @@
+{
+  "error_codes": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Canonical domain error codes returned when `CallToolResult.is_error == Some(true)`.",
+    "enum": [
+      "REVISION_CONFLICT",
+      "IDEMPOTENCY_CONFLICT",
+      "INVALID_ARGUMENT",
+      "INVALID_HIERARCHY",
+      "TRACK_NOT_FOUND",
+      "CLIP_NOT_FOUND",
+      "PARAM_NOT_SUPPORTED",
+      "PARAM_DISABLED",
+      "PARAM_BLOCK_INVALID",
+      "ANALYSIS_PENDING",
+      "PITCH_UNAVAILABLE",
+      "HISTORY_EMPTY",
+      "EDITOR_BUSY",
+      "VIEW_BUSY",
+      "VIEW_UNAVAILABLE",
+      "VIEW_UPDATE_FAILED",
+      "SAVE_FAILED",
+      "PREVIEW_RENDER_FAILED",
+      "WAIT_TIMEOUT",
+      "SERIALIZATION_FAILED",
+      "EDITOR_TASK_FAILED"
+    ],
+    "title": "McpErrorCode",
+    "type": "string"
+  },
+  "server": "HiFiShifter",
+  "tools": {
+    "hfs_edit": {
+      "$defs": {
+        "CandidateTakeSpec": {
+          "additionalProperties": false,
+          "properties": {
+            "gain": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "length_sec": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "playback_rate": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "source_start_sec": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        "ClipPatch": {
+          "additionalProperties": false,
+          "properties": {
+            "auto_fade_in_sec": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "auto_fade_out_sec": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "color": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "fade_in_dir": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "fade_in_sec": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "fade_in_shape": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "fade_out_dir": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "fade_out_sec": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "fade_out_shape": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "gain": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "item_gain": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "length_sec": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "loop_enabled": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "muted": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "playback_rate": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "reversed": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "source_start_sec": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "start_sec": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "CurveTransform": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "mode": {
+                  "const": "set",
+                  "type": "string"
+                },
+                "value": {
+                  "format": "float",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "mode",
+                "value"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "from": {
+                  "format": "float",
+                  "type": "number"
+                },
+                "mode": {
+                  "const": "ramp",
+                  "type": "string"
+                },
+                "to": {
+                  "format": "float",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "mode",
+                "from",
+                "to"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Smooth zero-slope cubic S-curve (`3t^2 - 2t^3`) transition for natural portamento/envelopes.",
+              "properties": {
+                "from": {
+                  "format": "float",
+                  "type": "number"
+                },
+                "mode": {
+                  "const": "hermite_transition",
+                  "type": "string"
+                },
+                "to": {
+                  "format": "float",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "mode",
+                "from",
+                "to"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "amount": {
+                  "format": "float",
+                  "type": "number"
+                },
+                "mode": {
+                  "const": "shift",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode",
+                "amount"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Pitch only: shift the source contour's voiced median onto `target_midi`.",
+              "properties": {
+                "mode": {
+                  "const": "shift_to_note",
+                  "type": "string"
+                },
+                "target_midi": {
+                  "format": "float",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "mode",
+                "target_midi"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Pitch only: flatten reliable voiced samples; unvoiced samples remain unedited.",
+              "properties": {
+                "mode": {
+                  "const": "flatten_to_note",
+                  "type": "string"
+                },
+                "target_midi": {
+                  "format": "float",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "mode",
+                "target_midi"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Add sinusoidal vibrato modulation with optional attack/release fade envelope onto existing contour.",
+              "properties": {
+                "attack_sec": {
+                  "format": "float",
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "depth": {
+                  "format": "float",
+                  "type": "number"
+                },
+                "mode": {
+                  "const": "vibrato",
+                  "type": "string"
+                },
+                "phase_deg": {
+                  "format": "float",
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "rate_hz": {
+                  "format": "float",
+                  "type": "number"
+                },
+                "release_sec": {
+                  "format": "float",
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "mode",
+                "rate_hz",
+                "depth"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Symmetric moving-average de-jitter smoothing (`window_frames` in `1..=201`).",
+              "properties": {
+                "mode": {
+                  "const": "smooth",
+                  "type": "string"
+                },
+                "window_frames": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "mode",
+                "window_frames"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "EditScope": {
+          "description": "Scoped optimistic concurrency token for real-time human-agent co-editing.",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "Batch only creates brand-new root tracks (plus child tracks, clips, and curves under them).\nSucceeds even if a human concurrently edits existing tracks, provided `tempo_revision` matches.",
+              "properties": {
+                "mode": {
+                  "const": "isolated_new_tracks",
+                  "type": "string"
+                },
+                "tempo_revision": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode",
+                "tempo_revision"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Batch only mutates a single root track's subtree (tracks, clips, takes, curves, param blocks).\nSucceeds even if a human concurrently edits other root tracks, provided `track_revision` and\n`tempo_revision` both match.",
+              "properties": {
+                "mode": {
+                  "const": "root_track",
+                  "type": "string"
+                },
+                "root_track_id": {
+                  "type": "string"
+                },
+                "tempo_revision": {
+                  "type": "string"
+                },
+                "track_revision": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode",
+                "root_track_id",
+                "track_revision",
+                "tempo_revision"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "Operation": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "client_id": {
+                  "type": "string"
+                },
+                "index": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "const": "create_track",
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "parent_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "client_id",
+                "name"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "patch_track",
+                  "type": "string"
+                },
+                "patch": {
+                  "$ref": "#/$defs/TrackPatch"
+                },
+                "track_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "track_id",
+                "patch"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "index": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "kind": {
+                  "const": "move_track",
+                  "type": "string"
+                },
+                "parent_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "track_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "track_id",
+                "index"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "duplicate_track",
+                  "type": "string"
+                },
+                "track_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "track_id"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "remove_track",
+                  "type": "string"
+                },
+                "track_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "track_id"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "client_id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "import_clip",
+                  "type": "string"
+                },
+                "length_sec": {
+                  "format": "double",
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "path": {
+                  "type": "string"
+                },
+                "playback_rate": {
+                  "format": "float",
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "source_start_sec": {
+                  "format": "double",
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "start_sec": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "track_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "client_id",
+                "track_id",
+                "path",
+                "start_sec"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Import Top-K ranked vocal candidates into a single Clip's Takes in one step.\nCandidate 0 becomes the active take; remaining candidates become alternative takes\nthat the human can cycle through in-place with `T` / `Shift+T`.",
+              "properties": {
+                "candidates": {
+                  "items": {
+                    "$ref": "#/$defs/CandidateTakeSpec"
+                  },
+                  "type": "array"
+                },
+                "client_id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "import_candidate_takes",
+                  "type": "string"
+                },
+                "start_sec": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "track_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "client_id",
+                "track_id",
+                "start_sec",
+                "candidates"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "clip_id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "patch_clip",
+                  "type": "string"
+                },
+                "patch": {
+                  "$ref": "#/$defs/ClipPatch"
+                }
+              },
+              "required": [
+                "kind",
+                "clip_id",
+                "patch"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "clip_id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "move_clip",
+                  "type": "string"
+                },
+                "start_sec": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "track_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "clip_id",
+                "start_sec"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "at_sec": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "clip_id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "split_clip",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "clip_id",
+                "at_sec"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "clip_id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "remove_clip",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "clip_id"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "clip_id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "set_active_take",
+                  "type": "string"
+                },
+                "take_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "clip_id",
+                "take_id"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "clip_id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "rename_take",
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "take_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "clip_id",
+                "take_id",
+                "name"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "clip_id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "duplicate_take",
+                  "type": "string"
+                },
+                "take_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "clip_id",
+                "take_id"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "clip_id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "remove_take",
+                  "type": "string"
+                },
+                "take_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "clip_id",
+                "take_id"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "clip_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "kind": {
+                  "const": "pack_takes",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "clip_ids"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "clip_id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "explode_takes",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "clip_id"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "clip_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "delta_sec": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "kind": {
+                  "const": "duplicate_clips",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "clip_ids",
+                "delta_sec"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "clip_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "grouped": {
+                  "type": "boolean"
+                },
+                "kind": {
+                  "const": "group_clips",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "clip_ids",
+                "grouped"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "write_curve",
+                  "type": "string"
+                },
+                "param": {
+                  "type": "string"
+                },
+                "start_frame": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "track_id": {
+                  "type": "string"
+                },
+                "values": {
+                  "items": {
+                    "format": "float",
+                    "type": "number"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "track_id",
+                "param",
+                "start_frame",
+                "values"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "frame_count": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "kind": {
+                  "const": "restore_curve",
+                  "type": "string"
+                },
+                "param": {
+                  "type": "string"
+                },
+                "start_frame": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "track_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "track_id",
+                "param",
+                "start_frame",
+                "frame_count"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "set_static",
+                  "type": "string"
+                },
+                "param": {
+                  "type": "string"
+                },
+                "track_id": {
+                  "type": "string"
+                },
+                "value": {
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "kind",
+                "track_id",
+                "param",
+                "value"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "end_sec": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "kind": {
+                  "const": "transform_curve",
+                  "type": "string"
+                },
+                "param": {
+                  "type": "string"
+                },
+                "start_sec": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "track_id": {
+                  "type": "string"
+                },
+                "transform": {
+                  "$ref": "#/$defs/CurveTransform"
+                }
+              },
+              "required": [
+                "kind",
+                "track_id",
+                "param",
+                "start_sec",
+                "end_sec",
+                "transform"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "set_tempo",
+                  "type": "string"
+                },
+                "points": {
+                  "items": {
+                    "$ref": "#/$defs/TempoPoint"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "points"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "set_project_length",
+                  "type": "string"
+                },
+                "seconds": {
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "kind",
+                "seconds"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "set_param_blocks",
+                  "type": "string"
+                },
+                "layout": true,
+                "track_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "track_id",
+                "layout"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "TempoPoint": {
+          "additionalProperties": false,
+          "properties": {
+            "bpm": {
+              "format": "double",
+              "type": "number"
+            },
+            "clear_scale": {
+              "default": null,
+              "description": "Set to `true` to explicitly clear an existing scale override at this tempo point.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "denominator": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "numerator": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "position_sec": {
+              "format": "double",
+              "type": "number"
+            },
+            "scale": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TempoScaleSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Musical scale override at this tempo point. When omitted (and `clear_scale != Some(true)`),\nan existing scale override at the same `position_sec` is preserved."
+            }
+          },
+          "required": [
+            "position_sec",
+            "bpm"
+          ],
+          "type": "object"
+        },
+        "TempoScaleSpec": {
+          "additionalProperties": false,
+          "properties": {
+            "key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "notes": {
+              "description": "Scale pitch classes (`0..=11`).",
+              "items": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "TrackPatch": {
+          "additionalProperties": false,
+          "properties": {
+            "algorithm": {
+              "description": "Use an algorithm ID returned by `hfs_get_edit_capabilities`. Omit to keep App settings.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "color": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "compose_enabled": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "muted": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "solo": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "volume": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "All positions are absolute project seconds; source positions are seconds from the file start.\nTrack IDs may refer to a `client_id` created earlier in the same atomic edit.\nProvide either `expected_revision` (whole-project CAS) or `expected_scope`\n(root-track scoped CAS for concurrent human-agent co-editing).",
+      "properties": {
+        "expected_revision": {
+          "default": null,
+          "description": "Opaque project-wide version returned by `hfs_get_context` / `hfs_query`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expected_scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EditScope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional fine-grained concurrency token allowing concurrent human edits on other root tracks."
+        },
+        "idempotency_key": {
+          "description": "Retry the identical request with the same key after a lost response.",
+          "type": "string"
+        },
+        "label": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operations": {
+          "items": {
+            "$ref": "#/$defs/Operation"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "idempotency_key",
+        "operations"
+      ],
+      "title": "EditRequest",
+      "type": "object"
+    },
+    "hfs_editor_view": {
+      "$defs": {
+        "ViewTool": {
+          "enum": [
+            "select",
+            "draw",
+            "line",
+            "vibrato"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "active_param": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "focus_end_sec": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "focus_start_sec": {
+          "default": null,
+          "description": "Optional time-range focus (`[focus_start_sec, focus_end_sec]`) to pan/zoom the GUI viewport onto a phrase.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "reference_root_track_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "seek_playhead": {
+          "default": null,
+          "description": "When `true` alongside `focus_start_sec`, also moves the transport playhead to `focus_start_sec`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "selected_clip_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selected_track_id": {
+          "description": "Omit all fields to read the active editor view. This changes selection/view only, never audio.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ViewTool"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "title": "ViewRequest",
+      "type": "object"
+    },
+    "hfs_get_edit_capabilities": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "track_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "TargetRequest",
+      "type": "object"
+    },
+    "hfs_history": {
+      "$defs": {
+        "HistoryAction": {
+          "enum": [
+            "undo",
+            "redo"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/HistoryAction"
+        },
+        "expected_revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "action"
+      ],
+      "title": "HistoryRequest",
+      "type": "object"
+    },
+    "hfs_notebook": {
+      "$defs": {
+        "NotebookAction": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "read",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Atomically insert or replace a fenced `<!-- hfs-agent:start:<section_id> -->` section\ninside the project notebook without clobbering human notes outside that section.",
+              "properties": {
+                "expected_revision": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "const": "upsert_agent_section",
+                  "type": "string"
+                },
+                "markdown_body": {
+                  "type": "string"
+                },
+                "section_id": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "section_id",
+                "title",
+                "markdown_body"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "expected_revision": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "const": "remove_agent_section",
+                  "type": "string"
+                },
+                "section_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "section_id"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "Human-in-the-loop collaboration via the project's built-in Markdown Notebook.",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/NotebookAction"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "title": "NotebookRequest",
+      "type": "object"
+    },
+    "hfs_query": {
+      "$defs": {
+        "QueryKind": {
+          "enum": [
+            "timeline",
+            "tracks",
+            "clips",
+            "curve",
+            "static",
+            "param_blocks",
+            "settings",
+            "playback",
+            "history",
+            "render",
+            "notebook",
+            "ledger"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "clip_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "frame_count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/QueryKind"
+        },
+        "limit": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "param": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start_frame": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "track_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "QueryRequest",
+      "type": "object"
+    },
+    "hfs_render_preview": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "Bounded offline mixdown & deterministic acoustic QA self-check for Agents.",
+      "properties": {
+        "apply_pitch_edit": {
+          "default": null,
+          "description": "Whether to apply vocal synthesis / pitch curves (`true` by default; `false` renders dry arrangement).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "end_sec": {
+          "format": "double",
+          "type": "number"
+        },
+        "output_wav_path": {
+          "default": null,
+          "description": "Optional absolute `.wav` path to write the rendered preview for multimodal audio listening.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "overwrite": {
+          "default": null,
+          "description": "Must be `true` to replace an existing `.wav` file at `output_wav_path`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "sample_rate": {
+          "default": null,
+          "description": "Output sample rate (`8000..=96000`, default `44100`).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "start_sec": {
+          "format": "double",
+          "type": "number"
+        },
+        "track_ids": {
+          "default": null,
+          "description": "Optional subset of tracks (root or child) to solo-isolate in an offscreen snapshot.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "start_sec",
+        "end_sec"
+      ],
+      "title": "RenderPreviewRequest",
+      "type": "object"
+    },
+    "hfs_save_project": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "expected_revision": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "path"
+      ],
+      "title": "SaveRequest",
+      "type": "object"
+    },
+    "hfs_settings": {
+      "$defs": {
+        "SettingsChange": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "const": "read",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Both override fields are the complete desired project override; `null` means inherit App defaults.",
+              "properties": {
+                "action": {
+                  "const": "set_project_stretch",
+                  "type": "string"
+                },
+                "algorithm_override": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/StretchAlgorithm"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "expected_revision": {
+                  "type": "string"
+                },
+                "hifigan_mel_stretch_override": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "action",
+                "expected_revision"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "StretchAlgorithm": {
+          "enum": [
+            "signalsmith",
+            "soundtouch",
+            "linear"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/SettingsChange"
+        }
+      },
+      "required": [
+        "change"
+      ],
+      "title": "SettingsRequest",
+      "type": "object"
+    },
+    "hfs_transport": {
+      "$defs": {
+        "TransportAction": {
+          "enum": [
+            "play",
+            "stop",
+            "seek"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/TransportAction"
+        },
+        "position_sec": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "title": "TransportRequest",
+      "type": "object"
+    },
+    "hfs_wait_ready": {
+      "$defs": {
+        "WaitTarget": {
+          "enum": [
+            "pitch_analysis",
+            "clip_render",
+            "gui_view"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "Server-side readiness barrier replacing blind client sleep/polling loops.",
+      "properties": {
+        "clip_ids": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/WaitTarget"
+          },
+          "type": "array"
+        },
+        "timeout_ms": {
+          "default": null,
+          "description": "Bounded wait timeout in milliseconds (`0..=30000`, default `5000`).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "track_ids": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "trigger_analysis": {
+          "default": null,
+          "description": "When `true` (default), proactively schedules pitch analysis on requested root tracks if missing.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "targets"
+      ],
+      "title": "WaitRequest",
+      "type": "object"
+    }
+  },
+  "version": "0.1.0"
+}

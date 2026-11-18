@@ -15,39 +15,50 @@ HiFiShifter 的独立 App 可作为本机 MCP 服务，供 Agent 读取和编辑
 
 ```mermaid
 flowchart LR
-    A[本地音源库] --> B[扫描、哈希与文件名解析]
-    B --> C[语言 / 读音 / 词典检查]
-    C --> D[HubertFA 音素对齐]
-    C --> E[FCPE / 声学特征]
-    D --> F[稳定元音区与边界质检]
+    A[整首纯人声 / 本地音源库] --> B[自然断句与哈希指纹]
+    B --> C[词典 / G2P / 多音字检查]
+    C --> D[强制对齐音节与音素边界]
+    C --> E[FCPE 音高与声学特征]
+    D --> F[元音起点、稳定区与跨音 VC 过渡]
     E --> F
-    F --> G[library.jsonl + analysis artifacts]
-    U[UST] --> V[编码、tick、Tempo、歌词解析]
+    F --> G[library.json + *.marks.json]
+    G <--> CAL[App 内音源校准工作区 / Ctrl+F]
+    U[UST / MIDI] --> V[编码、tick、Tempo、歌词解析]
     V --> W[score.json]
     G --> X[候选过滤与整句选样]
     W --> X
     X --> Y[plan.json / bundle.json]
     Y --> Z[App MCP]
     Z --> APP[当前可视工程]
-    APP --> H[人工试听、调整、撤销、保存]
+    APP --> QA[hfs_render_preview 听觉与声学自检]
+    QA --> H[hfs_notebook 清单 + 人工试听保存]
 ```
 
-### 0.1 目录与职责边界
+### 0.1 目录与统一音源契约（句段优先 + `*.marks.json`）
 
-推荐把外部运行目录与 App 工程分开：
+为保证**外部自动标注、App 内音源校准工作区、`Ctrl+F` 快速选样与 Agent 自动整句编排**共用同一份数据真值，音源库统一采用「按自然句段保存 WAV + 同名 `*.marks.json` 旁挂标记 + 根级 `library.json`」结构（机器契约见 [`voicebank-marks.schema.json`](schemas/voicebank-marks.schema.json) 与 [`voicebank.rs`](../backend/hifishifter-mcp/src/voicebank.rs)）：
 
 ```text
+voicebank/
+  library.json                  音源库清单、版本、歌手、默认语言与句段索引
+  song-a/
+    001.wav                     自然间隔切出的完整句段（不拆成零碎单音 WAV）
+    001.marks.json              音节、音素、onset/nucleus/coda、稳定元音区、跨音 VC 过渡、tag 与校对状态
+    002.wav
+    002.marks.json
+
 agent-work/
-  library.jsonl                 素材索引，每行一个音源版本
-  annotations/                  HFA 等对齐器的原始及规范化结果
-  regions.jsonl                 元音、辅音、稳定区和尾部区域
-  f0/                           F0 数组与 voiced mask
-  features/                     音色、唱腔、可选情感特征
-  score.json                    UST 标准化结果
-  plan.json                     候选、选择理由与放置几何
+  f0/                           可选逐帧 F0 数组与 voiced mask 制品
+  features/                     可选 eGeMAPS 音色与唱腔特征缓存
+  score.json                    UST / MIDI 标准化结果
+  plan.json                     Top-K 候选路径、选择理由与放置几何
   bundle/
     bundle.json                 路径、哈希、模型版本和校验清单
 ```
+
+- **单音旧音源库天然兼容**：已切成单音的 `ka.wav` 直接表示为只含 1 个 `syllable` 的退化句段 `ka.marks.json`，无需维护第二套单音 JSONL 格式。
+- **自然跨音 `VC` 衔接**：如 `ka ta` 句段中的 `a → t` 在 `transitions[]` 中记录为 `cross_syllable_vc`（`reading: "at"`），由 `ImportClip` 按源窗口动态截取，不预先生成独立切片文件。
+- **人工校准永不被重跑覆盖**：每个句段、音节、过渡和 tag 都携带 `provenance`（`auto` / `manual`）与 `review_state`（`auto_draft` / `needs_review` / `confirmed` / `disabled`）。重新运行自动对齐时，调用 `PhraseMarks::merge_auto_draft` 保留全部人工边界、人工 tag、已确认项与禁用项。
 
 App MCP 不读取模型缓存，不执行 Python，不解析 UST，也不负责下载模型。它只接受已经校验过的音频路径和编辑参数。外部 CLI/Skill 可以独立运行；App 未启动时仍能完成素材准备，App 启动后再提交工程修改。
 
@@ -337,11 +348,12 @@ Agent 完成“提交 + 渲染 Ready”后仍需人工验收：
 
 如果客户端使用不同配置格式，只填写 HTTP URL 即可。客户端 SDK 负责 MCP 初始化/版本协商，这个 URL 不是普通 REST 接口。
 
-- 默认关闭，每次 App 运行中单独启用；地址固定为 `http://127.0.0.1:39393/mcp`，重启不变。端口被占用时明确报错，不自动换随机端口。
-- 只监听 `127.0.0.1`，不做鉴权；保留 Host/Origin 本机请求校验。
-- 当前提供 HTTP 传输；没有内置 stdio 桥接器，也不提供远程 OAuth 登录。
+- 默认关闭；可通过菜单手动启用，也可在启动独立 App 时传入 `--enable-mcp`（默认绑定 `127.0.0.1:39393/mcp`）或 `--mcp-port=<端口|auto>`（多开窗口时自动分配空闲回环端口）。
+- 每次启用 MCP 时，App 会在本机数据目录 `mcp/instances/<instance_id>.json` 原子写入实例租约（含 PID、端口、`endpoint`、当前工程名与路径），停止或退出时自动清理。
+- 只监听 `127.0.0.1`，不做鉴权；保留 Host/Origin 本机请求校验（拒绝任何携带浏览器 `Origin` 的跨站请求）。
+- **内置 `stdio` 桥接模式**：针对仅支持 `stdio` 的客户端，可直接配置命令 `HiFiShifter --mcp-stdio`（可选 `--mcp-project=<工程名或路径>` 或 `--mcp-url=<url>`），进程不会拉起第二个 GUI，而是自动寻址本机活跃实例并转发 JSON-RPC。
 - 使用官方 Rust SDK `rmcp`。协议回归覆盖 `2025-11-25` 初始化式调用和 `2026-07-28` 每请求元数据调用。
-- MCP 入口只在独立 App 中显示；VST3/ARA/CLAP 不启用这条独立工程写入通道。
+- MCP 入口当前在独立 App 中启用；VST3/ARA/CLAP 不直接启用独立工程写入通道。
 
 ## 2. 本地素材标注与对齐模型
 
@@ -394,18 +406,21 @@ ds-zh-pinyin-lite.txt
 
 ## 3. 工具一览
 
-工具的 JSON Schema 是可执行契约。以下参数例子是 **`tools/call.arguments`**，不包含客户端 SDK 包装的 JSON-RPC 字段。
+工具的完整机器 JSON Schema 快照位于 [`docs/schemas/mcp-tools.schema.json`](schemas/mcp-tools.schema.json)（由 `schema_snapshot` 测试强制防漂移）。以下参数例子是 **`tools/call.arguments`**，不包含客户端 SDK 包装的 JSON-RPC 字段。
 
 | 工具 | 用途 |
 | --- | --- |
-| `hfs_get_context` | 当前工程 revision、有效设置、模型状态、GUI 时间线同步状态 |
-| `hfs_get_edit_capabilities` | 轨道属性、有效调音算法、根轨参数及其单位/范围/门禁，含主音高和子轨虚拟参数 |
-| `hfs_query` | 分页读取 timeline/tracks/clips、曲线/静态值/参数块、设置、播放、渲染和历史 |
-| `hfs_edit` | 原子批量修改轨道、素材、Take、参数、Tempo Map 和参数块；一批一步撤销 |
+| `hfs_get_context` | 当前工程全局 `revision`、按根轨分片的 `scope_revisions`、有效设置、模型状态、GUI 同步状态与发现目录 |
+| `hfs_get_edit_capabilities` | 轨道属性、有效调音算法、根轨参数及其单位/范围/门禁（含主音高、子轨虚拟参数与 `track_scope_revision`） |
+| `hfs_query` | 分页读取 `timeline`/`tracks`/`clips`、`curve`/`static`/`param_blocks`、`settings`、`playback`、`render`、`history`、`notebook` 与 `ledger`（MCP 批次审计流） |
+| `hfs_edit` | 原子批量修改轨道、素材、多候选 Take（`import_candidate_takes`）、曲线（含 `hermite_transition`/`vibrato`/`smooth`）、保留音阶的 Tempo Map 和参数块；支持全局 `expected_revision` 或根轨级 `expected_scope` |
+| `hfs_wait_ready` | 服务端就绪等待栅栏：按需触发并等待 `pitch_analysis`、`clip_render`、`gui_view` 就绪或超时返回，替代客户端盲目轮询 |
+| `hfs_render_preview` | 导出 ≤ 30 秒区间（可按轨道子集隔离）离线混音预览 WAV，并返回确定性声学质检指标（峰值/RMS dBFS、削波、静音断洞、拼接点跳变咔哒检测） |
+| `hfs_notebook` | 读取工程记事本，或无损插入/更新/移除带 `<!-- hfs-agent:start:<id> -->` 围栏的 Agent 审校章节（绝不覆盖人工笔记） |
 | `hfs_history` | 使用同一个 App 撤销栈执行 undo/redo，并检查预期 revision |
 | `hfs_transport` | 播放、停止、定位当前 App 工程 |
 | `hfs_settings` | 回读默认/有效拉伸配置，或显式设置工程拉伸 override |
-| `hfs_editor_view` | 查询或操作实际 GUI 的轨道/素材选择、活动参数、参考轨道和工具模式，等待 GUI 回执 |
+| `hfs_editor_view` | 查询或操作实际 GUI 的轨道/素材选择、活动参数、参考轨道、工具模式与时间窗聚焦（`focus_start_sec`/`focus_end_sec`/`seek_playhead`），等待 GUI 回执 |
 | `hfs_save_project` | 无对话框保存可重新打开的 `.hshp` 工程副本；拒绝覆盖已有目标 |
 
 ### 配置权威
@@ -423,11 +438,16 @@ ds-zh-pinyin-lite.txt
 5. 确认写入成功后，查询 `kind=render` 和 GUI/模型状态；编辑提交不等于声音已渲染。
 6. 人在同一 App 时间线和参数面板中检查、试听和修改。可用 `hfs_editor_view` 选中目标。
 
-### 原子写入与重试
+### 原子写入、根轨级并发（`expected_scope`）与幂等重试
 
-`expected_revision` 是 App 返回的不透明版本，不要自己生成。后端在工程副本上执行整批校验，再在实时工程锁内核对版本并提交；任何操作失败都不会把前面几步留在当前工程里。
+`hfs_edit` 支持两种乐观并发控制模式（二选一）：
 
-同一请求的网络重试使用**相同的 `idempotency_key` 和完全相同的请求内容**。请求若已完成，会返回原结果并设置 `replayed=true`。相同 key 搭配不同内容会报 `IDEMPOTENCY_CONFLICT`。缓存保留本进程最近 128 个成功编辑，不承诺跨重启去重。
+1. **全局 CAS（`expected_revision`）**：校验整份工程的 `revision`（修改全局 Tempo Map、工程长度或跨多条根轨联动编辑时使用）。
+2. **根轨级作用域 CAS（`expected_scope`）**：支持真人与 Agent 在不同轨道组上同时编辑而不互相打断：
+   - `{"mode": "isolated_new_tracks", "tempo_revision": "..."}`：仅新建独立候选/实验根轨及其内部素材和曲线；即使真人同时在主唱轨调音，只要拍速未变即可零冲突合并。
+   - `{"mode": "root_track", "root_track_id": "...", "track_revision": "...", "tempo_revision": "..."}`：仅修改单个目标根轨子树（子轨、Clip、Take、曲线、参数块），提交时仅将该根轨子树原子拼回实时时间线，完整保留真人同期在其他根轨上的改动。
+
+同一请求的网络重试使用**相同的 `idempotency_key` 和完全相同的请求内容**。请求若已完成，会返回原结果并设置 `replayed=true`。相同 key 搭配不同内容会报 `IDEMPOTENCY_CONFLICT`。缓存保留本进程最近 128 个成功编辑（可通过 `hfs_query(kind="ledger")` 审计），不承诺跨重启去重。
 
 收到 `REVISION_CONFLICT` 时重新读取相关状态，重新计算操作并使用新 key；不要无条件覆盖人工编辑。GUI 正在持有撤销分组时可能返回 `EDITOR_BUSY`。
 
@@ -527,10 +547,12 @@ Agent 可以在一批操作中导入同源的两段 clip，分别设置源窗/�
 
 | operation.kind | 语义 |
 | --- | --- |
+| `import_candidate_takes` | 一步导入 1–16 个排序候选窗口并自动打包为同一 Clip 的多条命名 Take（第 1 项为当前激活 Take，供人工按 `T`/`Shift+T` 原位盲听切换） |
 | `write_curve` | 从 `start_frame` 连续写 values，区间之外保持原状 |
 | `restore_curve` | 指定帧区间恢复基线，取消显式编辑 |
 | `set_static` | 设置描述符中列出的静态枚举值 |
-| `transform_curve` | 指定工程秒区间，应用 set/ramp/shift/shift_to_note/flatten_to_note |
+| `transform_curve` | 指定工程秒区间，应用 `set` / `ramp` / `hermite_transition`（平滑 S 型滑音）/ `shift` / `shift_to_note` / `flatten_to_note` / `vibrato`（带起振/释放包络的正弦颤音）/ `smooth`（仅在有声帧内做去毛刺均值平滑） |
+| `set_tempo` | 更新 Tempo Map；省略 `scale` 时自动继承同位置既有音阶（不会冲掉子轨度数差所需的音阶），也可显式传 `scale` 或 `clear_scale: true` |
 | `set_param_blocks` | 以查询得到的 schema 替换根轨参数块布局；与曲线写入可放在同一事务 |
 
 参数块使用当前 App 的 `ParamBlockEditSet` v2 契约。先查询：
@@ -593,7 +615,16 @@ Compose 和分离开关等门禁会在能力工具中给出 `disabled_reason`。
 }
 ```
 
-这是 `hfs_editor_view` 的参数。省略所有字段即读取实际 GUI 状态；窗口未响应返回 `VIEW_UNAVAILABLE`，人工手势期间返回 `VIEW_BUSY`。目前支持轨道/素材选择、活动参数、参考根轨和 select/draw/line/vibrato 工具；不提供坐标式鼠标操作。
+这是 `hfs_editor_view` 的参数。省略所有字段即读取实际 GUI 状态；窗口未响应返回 `VIEW_UNAVAILABLE`，人工手势期间返回 `VIEW_BUSY`。支持轨道/素材选择、活动参数、参考根轨、`select/draw/line/vibrato` 工具，以及通过 `focus_start_sec` / `focus_end_sec` / `seek_playhead` 将时间线视口与播放头直接聚焦到目标乐句；不提供坐标式鼠标操作。
+
+### 等待栅栏、离线试听自检与记事本移交
+
+1. **等待异步分析或合成完成（`hfs_wait_ready`）**：
+   提交导入或曲线修改后，直接调用 `{"targets":["pitch_analysis","clip_render"],"track_ids":["<轨道ID>"],"timeout_ms":8000}`，无需在客户端循环 sleep 轮询。
+2. **听觉与声学指标自检（`hfs_render_preview`）**：
+   调用 `{"start_sec":1.0,"end_sec":5.0,"track_ids":["<轨道ID>"],"output_wav_path":"E:/work/phrase1.wav"}` 离线混音导出局部预览，同时读取返回的 `metrics`（`peak_dbfs`、`rms_dbfs`、`clipped_samples`、`internal_silent_dropout_count`、`boundary_checks[].click_suspect`）客观核验是否存在破音、静音断洞或拼接咔哒声。
+3. **工程记事本协同移交（`hfs_notebook`）**：
+   使用 `{"action":{"kind":"upsert_agent_section","section_id":"review-phrase-01","title":"待人工复核音符","markdown_body":"..."}}` 将 OOV、跨 take 拼接说明与时间戳写入工程内置记事本的受控围栏区，不会改动围栏外的人工笔记。
 
 播放使用 `hfs_transport`，例如 `{"action":"play","position_sec":2.0}`，停止为 `{"action":"stop"}`，定位为 `{"action":"seek","position_sec":2.0}`。
 

@@ -1,0 +1,473 @@
+{
+  "phrase_marks": {
+    "$defs": {
+      "MarkProvenance": {
+        "enum": [
+          "auto",
+          "manual"
+        ],
+        "type": "string"
+      },
+      "PhoneRole": {
+        "enum": [
+          "onset",
+          "nucleus",
+          "coda",
+          "silence",
+          "breath"
+        ],
+        "type": "string"
+      },
+      "PhoneSegment": {
+        "additionalProperties": false,
+        "properties": {
+          "confidence": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "end_sec": {
+            "format": "double",
+            "type": "number"
+          },
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/$defs/MarkProvenance",
+            "default": "auto"
+          },
+          "role": {
+            "$ref": "#/$defs/PhoneRole"
+          },
+          "start_sec": {
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "start_sec",
+          "end_sec",
+          "role"
+        ],
+        "type": "object"
+      },
+      "ReviewState": {
+        "enum": [
+          "auto_draft",
+          "needs_review",
+          "confirmed",
+          "disabled"
+        ],
+        "type": "string"
+      },
+      "ScopedTag": {
+        "additionalProperties": false,
+        "properties": {
+          "provenance": {
+            "$ref": "#/$defs/MarkProvenance",
+            "default": "auto"
+          },
+          "scope": {
+            "$ref": "#/$defs/TagScope"
+          },
+          "tag": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tag",
+          "scope"
+        ],
+        "type": "object"
+      },
+      "SyllableSegment": {
+        "additionalProperties": false,
+        "properties": {
+          "end_sec": {
+            "format": "double",
+            "type": "number"
+          },
+          "f0_median_midi": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "phone_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "provenance": {
+            "$ref": "#/$defs/MarkProvenance",
+            "default": "auto"
+          },
+          "reading": {
+            "type": "string"
+          },
+          "review_state": {
+            "$ref": "#/$defs/ReviewState",
+            "default": "auto_draft"
+          },
+          "stable_vowel_regions_sec": {
+            "description": "Safe time-stretch sub-spans inside the vowel nucleus (`[start_sec, end_sec]`).",
+            "items": {
+              "items": {
+                "format": "double",
+                "type": "number"
+              },
+              "maxItems": 2,
+              "minItems": 2,
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "start_sec": {
+            "format": "double",
+            "type": "number"
+          },
+          "vowel_onset_sec": {
+            "description": "Vowel anchor (`A`) used for beat alignment and vowel-first crossfades.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "reading",
+          "start_sec",
+          "end_sec"
+        ],
+        "type": "object"
+      },
+      "TagScope": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "phrase",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "syllable",
+                "type": "string"
+              },
+              "syllable_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "syllable_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "end_sec": {
+                "format": "double",
+                "type": "number"
+              },
+              "kind": {
+                "const": "span",
+                "type": "string"
+              },
+              "start_sec": {
+                "format": "double",
+                "type": "number"
+              }
+            },
+            "required": [
+              "kind",
+              "start_sec",
+              "end_sec"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "TransitionKind": {
+        "oneOf": [
+          {
+            "const": "cross_syllable_vc",
+            "description": "Natural cross-syllable VC transition (e.g. `a -> t` inside `ka ta`).",
+            "type": "string"
+          },
+          {
+            "const": "intra_syllable_vc",
+            "description": "Intra-syllable vowel-to-coda transition (e.g. `a -> n` inside `kan`).",
+            "type": "string"
+          },
+          {
+            "const": "vv",
+            "description": "Vowel-to-vowel continuous transition (e.g. `a -> i`).",
+            "type": "string"
+          }
+        ]
+      },
+      "TransitionSegment": {
+        "additionalProperties": false,
+        "properties": {
+          "boundary_sec": {
+            "description": "Acoustic handoff anchor (e.g. consonant closure / onset start).",
+            "format": "double",
+            "type": "number"
+          },
+          "end_sec": {
+            "format": "double",
+            "type": "number"
+          },
+          "from_syllable_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/TransitionKind"
+          },
+          "provenance": {
+            "$ref": "#/$defs/MarkProvenance",
+            "default": "auto"
+          },
+          "reading": {
+            "description": "Searchable transition token such as `\"at\"` (from `ka` -> `ta`).",
+            "type": "string"
+          },
+          "review_state": {
+            "$ref": "#/$defs/ReviewState",
+            "default": "auto_draft"
+          },
+          "start_sec": {
+            "format": "double",
+            "type": "number"
+          },
+          "to_syllable_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "reading",
+          "kind",
+          "from_syllable_id",
+          "start_sec",
+          "boundary_sec",
+          "end_sec"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "content_sha256": {
+        "type": "string"
+      },
+      "duration_sec": {
+        "format": "double",
+        "type": "number"
+      },
+      "language": {
+        "type": "string"
+      },
+      "lyric": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "phones": {
+        "default": [],
+        "items": {
+          "$ref": "#/$defs/PhoneSegment"
+        },
+        "type": "array"
+      },
+      "phrase_id": {
+        "type": "string"
+      },
+      "review_state": {
+        "$ref": "#/$defs/ReviewState",
+        "default": "auto_draft"
+      },
+      "sample_rate": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "schema_version": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "syllables": {
+        "default": [],
+        "items": {
+          "$ref": "#/$defs/SyllableSegment"
+        },
+        "type": "array"
+      },
+      "tags": {
+        "items": {
+          "$ref": "#/$defs/ScopedTag"
+        },
+        "type": "array"
+      },
+      "transitions": {
+        "items": {
+          "$ref": "#/$defs/TransitionSegment"
+        },
+        "type": "array"
+      },
+      "wav_rel_path": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "schema_version",
+      "phrase_id",
+      "wav_rel_path",
+      "content_sha256",
+      "sample_rate",
+      "duration_sec",
+      "language"
+    ],
+    "title": "PhraseMarks",
+    "type": "object"
+  },
+  "voicebank_manifest": {
+    "$defs": {
+      "PhraseIndexEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "content_sha256": {
+            "type": "string"
+          },
+          "duration_sec": {
+            "format": "double",
+            "type": "number"
+          },
+          "lyric_summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "marks_rel_path": {
+            "type": "string"
+          },
+          "phrase_id": {
+            "type": "string"
+          },
+          "review_state": {
+            "$ref": "#/$defs/ReviewState",
+            "default": "auto_draft"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "wav_rel_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "phrase_id",
+          "wav_rel_path",
+          "marks_rel_path",
+          "content_sha256",
+          "duration_sec"
+        ],
+        "type": "object"
+      },
+      "ReviewState": {
+        "enum": [
+          "auto_draft",
+          "needs_review",
+          "confirmed",
+          "disabled"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "aligner_revision": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "default_language": {
+        "type": "string"
+      },
+      "library_id": {
+        "type": "string"
+      },
+      "name": {
+        "type": "string"
+      },
+      "phrases": {
+        "items": {
+          "$ref": "#/$defs/PhraseIndexEntry"
+        },
+        "type": "array"
+      },
+      "schema_version": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "singer": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "schema_version",
+      "library_id",
+      "name",
+      "default_language",
+      "phrases"
+    ],
+    "title": "VoicebankManifest",
+    "type": "object"
+  }
+}
