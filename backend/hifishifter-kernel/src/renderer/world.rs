@@ -3,6 +3,7 @@
 use super::traits::{RenderContext, Renderer, RendererCapabilities};
 use super::utils::{clip_midi_at_time, edit_midi_at_time_or_none};
 use crate::state::SynthPipelineKind;
+use crate::world_vocoder::PitchFrame;
 
 /// 基于 WORLD 声码器的渲染器。
 pub struct WorldRenderer;
@@ -32,6 +33,10 @@ impl Renderer for WorldRenderer {
         let pitch_edit = ctx.pitch_edit;
         let clip_midi = ctx.clip_midi;
 
+        // 移调指令按**两条绝对音高**下发：源音高 = 工程里的音高线（这一帧有没有
+        // 音高、包络该按哪个周期分析），目标音高 = 编辑后的音高（激励频率）。
+        // 半音数在这里就换算完，声码器内部不再做"绝对 × 比率"的二次乘法 ——
+        // 那条路会让输出的绝对音准取决于 WORLD 自己的估计器，而不是音高线。
         crate::world_vocoder::vocode_pitch_shift_chunked(
             ctx.mono_pcm,
             ctx.sample_rate,
@@ -42,18 +47,13 @@ impl Renderer for WorldRenderer {
             move |abs_time_sec| {
                 let orig = clip_midi_at_time(fp, clip_start, clip_midi, abs_time_sec);
                 if !(orig.is_finite() && orig > 0.0) {
-                    return 0.0;
+                    return PitchFrame::UNPITCHED;
                 }
                 let target = match edit_midi_at_time_or_none(fp, pitch_edit, abs_time_sec) {
-                    Some(v) => v,
-                    None => orig,
+                    Some(v) if v.is_finite() && v > 0.0 => v,
+                    _ => orig,
                 };
-                let shift = (target - orig).clamp(-24.0, 24.0);
-                if shift.is_finite() {
-                    shift
-                } else {
-                    0.0
-                }
+                PitchFrame::shifted(orig, target - orig)
             },
         )
     }

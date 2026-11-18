@@ -142,10 +142,6 @@ pub fn is_available() -> bool {
     true
 }
 
-fn ratio_from_semitones(semitones: f64) -> f64 {
-    crate::pitch_editing::semitone_to_ratio(semitones)
-}
-
 fn clamp11(x: f64) -> f64 {
     x.clamp(-1.0, 1.0)
 }
@@ -156,115 +152,188 @@ fn env_f64(name: &str) -> Option<f64> {
         .and_then(|s| s.trim().parse::<f64>().ok())
 }
 
-const WORLD_DRY_SILENCE_RMS: f64 = 0.003;
-
-fn blend_unvoiced_regions_with_silence_gate(
-    out: &mut [f64],
-    dry: &[f64],
-    voiced: &[bool],
-    fp: f64,
-    fs: i32,
-) {
-    static SILENCE_RMS: OnceLock<f64> = OnceLock::new();
-    let silence_rms = *SILENCE_RMS.get_or_init(|| {
-        env_f64("HIFISHIFTER_WORLD_DRY_SILENCE_RMS")
-            .unwrap_or(WORLD_DRY_SILENCE_RMS)
-            .max(0.0)
-    });
-    blend_unvoiced_regions_with_silence_gate_impl(out, dry, voiced, fp, fs, silence_rms);
+/// “短洞”的上限（毫秒）：`HIFISHIFTER_WORLD_F0_GAP_MS`，默认 15；`<= 0` 关闭。
+///
+/// 【为什么音高线与估计器共用这一个开关】“多短的空洞算抖动、多长的算真的没有音高”
+/// 是同一个听感问题。两条轨（工程里的音高线、WORLD 自己的估计）若各用一个阈值，
+/// 就会在两种判定的缝隙里互相打架：估计器说“这是洞，我填上”，音高线说“这里没有值，
+/// 切回干声” —— 于是移调中间插进一段 20 ms 的原声孤岛。共用一条策略，
+/// 两个消费者对“什么是洞”只有一个答案。
+fn f0_gap_ms() -> f64 {
+    static GAP_MS: OnceLock<f64> = OnceLock::new();
+    *GAP_MS.get_or_init(|| env_f64("HIFISHIFTER_WORLD_F0_GAP_MS").unwrap_or(15.0))
 }
 
-fn blend_unvoiced_regions_with_silence_gate_impl(
-    out: &mut [f64],
-    dry: &[f64],
-    voiced: &[bool],
-    fp: f64,
-    fs: i32,
-    silence_rms: f64,
-) {
-    if out.is_empty() || dry.is_empty() || voiced.is_empty() {
+// ── 移调指令：两条绝对音高 ────────────────────────────────────────────────────
+
+/// 一帧的移调指令：**源音高**与**目标音高**（MIDI 音高；`<= 0`/非有限 = 该帧没有音高）。
+///
+/// 【为什么收“两条绝对音高”而不是“一个半音数”】半音数只说“要移多少”，它必须乘到
+/// 某个**具体**的 F0 上才成为激励频率。此前那个具体值来自 WORLD 自己的估计器
+/// （`shifted_f0 = est × ratio`），于是输出音高 = **估计器的绝对值** × 比率 ——
+/// 音高线只是“相对量”的建议，绝对音准由估计器说了算：估计器漏一帧，那一帧就不移调；
+/// 估计器差一个八度，整段就错一个八度。
+///
+/// 而工程里的音高线（渲染端的 `clip_midi` / `pitch_edit`）本来就是**绝对音高**：
+/// HiFiGAN 路径直接把它喂给 `midi_to_hz`（`renderer/hifigan.rs` 的 `midi_fn`），
+/// 导出侧也按绝对值写 REAPER 的 PIT 包络。WORLD 是唯一一个“另算一遍”的消费者。
+/// 所以这里也按绝对值收：**激励频率 = 目标音高**，包络分析继续用估计器（见
+/// `vocode_with_f0` 的 ②）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PitchFrame {
+    /// 该帧的**源**音高（MIDI）。`<= 0` = 音高线在这一帧没有值（辅音 / 气声 / 静音）。
+    pub source_midi: f64,
+    /// 该帧的**目标**音高（MIDI）。只在 `source_midi > 0` 时有意义。
+    pub target_midi: f64,
+}
+
+impl PitchFrame {
+    /// 该帧没有音高。
+    pub const UNPITCHED: Self = Self {
+        source_midi: 0.0,
+        target_midi: 0.0,
+    };
+
+    /// 移调上限（半音），与 `RendererCapabilities::max_pitch_shift_semitones` 同值。
+    pub const MAX_SHIFT_SEMITONES: f64 = 24.0;
+
+    /// 由“源音高 + 半音数”构造（测试与只关心相对量的调用方的便捷入口）。
+    pub fn shifted(source_midi: f64, semitones: f64) -> Self {
+        if !(source_midi.is_finite() && source_midi > 0.0) {
+            return Self::UNPITCHED;
+        }
+        let semitones = if semitones.is_finite() {
+            semitones.clamp(-Self::MAX_SHIFT_SEMITONES, Self::MAX_SHIFT_SEMITONES)
+        } else {
+            0.0
+        };
+        Self {
+            source_midi,
+            target_midi: source_midi + semitones,
+        }
+    }
+
+    /// 这一帧有没有音高（音高线在这里有没有值）。
+    pub fn is_pitched(&self) -> bool {
+        self.source_midi.is_finite()
+            && self.source_midi > 0.0
+            && self.target_midi.is_finite()
+            && self.target_midi > 0.0
+    }
+
+    /// 目标 / 源 的频率比（半音差已夹到 ±24）。**只用于日志与测试** —— 合成用的
+    /// 不是这个比率，而是 `midi_to_hz` 算出的目标绝对值。
+    pub fn ratio(&self) -> f64 {
+        if !self.is_pitched() {
+            return 1.0;
+        }
+        let semitones = (self.target_midi - self.source_midi)
+            .clamp(-Self::MAX_SHIFT_SEMITONES, Self::MAX_SHIFT_SEMITONES);
+        crate::pitch_editing::semitone_to_ratio(semitones)
+    }
+}
+
+/// MIDI 音高 → Hz（A4 = MIDI 69 = 440 Hz）。无效输入返回 0（= 无周期激励）。
+fn midi_to_hz(midi: f64) -> f64 {
+    if !(midi.is_finite() && midi > 0.0) {
+        return 0.0;
+    }
+    let hz = 440.0 * (2.0f64).powf((midi - 69.0) / 12.0);
+    if hz.is_finite() {
+        hz
+    } else {
+        0.0
+    }
+}
+
+/// 把音高线上的**短空洞**补上（两端都有音高、洞长不超过 `f0_gap_ms`）。
+///
+/// 【为什么不交给 `clip_midi_at_time` 的“单帧桥接”】那个只跨 1 帧（5 ms）。
+/// 分析产物里 2–3 帧的空洞很常见（清辅音擦过、基频弱），而 3 帧 = 15 ms 的原声
+/// 孤岛插在一段 +7 的旋律里，听感就是“每个字都咯噔一下”。补洞的判据与
+/// `cleanup_f0_inplace` 逐条一致：两端都必须有声、洞长 ≤ 阈值、端点不越界。
+fn close_pitch_gaps(frames: &mut [PitchFrame], frame_period_ms: f64) {
+    let gap_ms = f0_gap_ms();
+    if gap_ms <= 0.0 || frames.is_empty() {
+        return;
+    }
+    let fp = frame_period_ms.max(0.1);
+    let max_gap_frames = ((gap_ms / fp).round() as isize).max(1) as usize;
+
+    let mut i = 0usize;
+    while i < frames.len() {
+        if frames[i].is_pitched() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < frames.len() && !frames[i].is_pitched() {
+            i += 1;
+        }
+        let end = i; // [start, end) 是空洞
+        let gap_len = end - start;
+        if gap_len == 0 || gap_len > max_gap_frames || start == 0 || end >= frames.len() {
+            continue;
+        }
+        let (left, right) = (frames[start - 1], frames[end]);
+        if !(left.is_pitched() && right.is_pitched()) {
+            continue;
+        }
+        for k in 0..gap_len {
+            let t = (k + 1) as f64 / (gap_len + 1) as f64;
+            frames[start + k] = PitchFrame {
+                source_midi: left.source_midi + (right.source_midi - left.source_midi) * t,
+                target_midi: left.target_midi + (right.target_midi - left.target_midi) * t,
+            };
+        }
+    }
+}
+
+/// 干 / 湿门：**音高线上有值**的帧用合成（湿），其余原样混回（干）。
+///
+/// 【为什么判据就是音高线，而不是“这一帧有没有 F0”或“这一帧响不响”】声码器能改变的
+/// 东西只有“有周期的激励”，而“这一帧有没有音高”这件事，工程里已经有一个权威答案 ——
+/// 音高线。此前这里另立一套判据（WORLD 估计器说有没有 F0 + 帧能量是否过 -50 dBFS），
+/// 于是**干 / 湿门与移调用的是两张不同的掩码**：音高线说“这一帧 +7”，估计器说“没有
+/// F0”，门就把这一帧原样混回去 —— 一段**没被移调的原声**插在移调中间，正是“辅音处
+/// 音高变调质量变差”的形状。判据统一之后，“音高线连续的段落一律被移调”由构造保证，
+/// 与估计器无关。
+///
+/// 【为什么不再需要能量门】没有音高的帧（辅音、气声、静音）**本来就该原样通过**：
+/// 搬不动它们（无周期可伸缩），重合成只会给它们换一层“沙”的音色。能量门当年是为了
+/// “真静音保持湿、避免抖动”，但静音走干声什么也不会发生 —— 原样就是静音。
+fn hand_back_unpitched_frames(out: &mut [f64], dry: &[f64], pitched: &[bool], fp: f64, fs: i32) {
+    if out.is_empty() || dry.is_empty() || pitched.is_empty() {
         return;
     }
 
     let fade_ms = 10.0f64;
     let fade_samples = ((fade_ms / 1000.0) * (fs.max(1) as f64)).round().max(0.0) as usize;
-    let frame_samples = ((fp.max(0.1) / 1000.0) * (fs.max(1) as f64))
-        .round()
-        .max(1.0) as usize;
-
     let n = out.len().min(dry.len());
 
-    // 1) 逐样本求"目标权重"：1 = 用合成（湿），0 = 用原始（干）。
-    //
-    // 判据**正向写**（这里算的是"要不要保持湿声"）：
-    //   - 浊音帧                → 湿（必须走声码器，否则移调与音色变化都不生效）；
-    //   - 无 F0 且可闻（齿音/气声/爆破）→ **干**（原样混回。WORLD 对无 F0 帧做的是
-    //     随机相位重合成，听感是"沙"；这类内容正是它最不擅长的地方）；
-    //   - 无 F0 且真静音        → 湿（合成的静音也是静音；保持湿可避免在"静音 ↔ 气声"
-    //     的判定抖动处反复切换）。
-    // 即 `keep_wet = voiced || rms < silence_rms`。
-    //
-    // 【这条判据曾被写反】`eda045974` 的一次"只改性能"重构把两个分支的**值**换了位置
-    // （条件本身没动），于是可闻的齿音走了湿声、真静音走了干声，而注释仍描述正确语义 ——
-    // 这类 diff 读起来"只是重构"。所以判据现在直接以"保持湿"的形式表达，并由
-    // `an_audible_unvoiced_frame_comes_back_dry` 钉住。
-    //
-    // 【为什么改成帧级查表】旧实现每个样本都对所属帧重新求一遍能量 —— 同一帧内
-    // ~frame_samples 个样本重复同样的 multiply-add（5ms @ 44.1kHz ≈ 220 倍冗余）。
-    // 判定结果与逐样本实现完全一致：每帧的 RMS 只依赖 `dry` 与 `frame_samples`。
-    let keep_wet: Vec<bool> = voiced
-        .iter()
-        .enumerate()
-        .map(|(fi, &is_voiced)| {
-            if is_voiced {
-                return true;
-            }
-            let start = fi.saturating_mul(frame_samples).min(dry.len());
-            let end = ((fi + 1).saturating_mul(frame_samples)).min(dry.len());
-            if start >= end {
-                // 帧越界：没有"可闻"的依据 ⇒ 按真静音处理（保持湿）。
-                return true;
-            }
-            let mut energy = 0.0f64;
-            for &sample in &dry[start..end] {
-                energy += sample * sample;
-            }
-            // 低于静音门 ⇒ 听不见 ⇒ 保持湿；否则切回干。
-            (energy / (end - start) as f64).sqrt() < silence_rms
-        })
-        .collect();
-
+    // 1) 逐样本求目标权重：1 = 用合成（湿），0 = 用原始（干）。
     let mut target = vec![0.0f32; n];
     for (si, t) in target.iter_mut().enumerate() {
         let t_ms = (si as f64) * 1000.0 / (fs.max(1) as f64);
         let fi = (t_ms / fp.max(0.1)).floor().max(0.0) as usize;
-        // 帧越界视为湿（合成静音）；其余直接查表（见 `keep_wet` 的判据）。
-        *t = if keep_wet.get(fi).copied().unwrap_or(true) {
+        *t = if pitched.get(fi).copied().unwrap_or(false) {
             1.0
         } else {
             0.0
         };
     }
 
-    // 2) 对目标权重做**居中**滑动平均，得到 10ms 的平滑过渡。
+    // 2) 对目标权重做**居中**滑动平均，得到 10 ms 的平滑过渡。
     //
-    // 【为什么是居中而不是"跟随上一个样本的斜坡"】旧实现用一个跨越整段的
-    // `w_prev` / `ramp_left` 状态机：它把"上一次的权重"当作历史，于是
-    // **权重依赖窗口从哪里开始**。本函数在分块渲染里被**逐块**调用，
-    // 每块都从 `w_prev = 0.0` 重启，结果是**每个块的开头都被强行淡入一次**
-    // （10ms 从 0 爬到 1），每 6s 一次。
-    //
-    // 居中滑动平均只依赖目标权重在 `[i-fade/2, i+fade/2]` 内的取值 ——
-    // 而目标权重由 `voiced` 与 `dry` 决定，这两者在相邻块的**重叠区**
-    // 是同一份数据。因此平滑结果是**位置的函数，与分块无关**，
-    // 逐块调用与整段调用给出同一个权重。实现见 `seam::smooth_binary_gate`。
+    // 【为什么是居中而不是“跟随上一个样本的斜坡”】居中平滑只依赖目标权重在
+    // [i-fade/2, i+fade/2] 内的取值，因此是**位置的函数，与分块无关** —— 同一位置
+    // 无论被哪个块处理都得到同一个增益。旧实现用一个跨样本的状态机，逐块调用时每块
+    // 都从 0 重启，于是每个块首被强行淡入一次（每 6s 一次）。
     crate::seam::smooth_binary_gate(&mut target, fade_samples);
 
     for si in 0..n {
         let w = target[si] as f64;
-        let wet = out[si];
-        let dry_sample = dry[si];
-        out[si] = wet * w + dry_sample * (1.0 - w);
+        out[si] = out[si] * w + dry[si] * (1.0 - w);
     }
 }
 
@@ -284,11 +353,9 @@ fn cleanup_f0_inplace(f0: &mut [f64], frame_period_ms: f64, f0_floor: f64, f0_ce
         }
     }
 
-    // 2) Fill short unvoiced gaps inside voiced regions.
-    // This reduces analysis/synthesis instability ("gargling") when f0 flickers to 0 for a few frames.
-    // Default: 15ms; set HIFISHIFTER_WORLD_F0_GAP_MS=0 to disable.
-    static GAP_MS: OnceLock<f64> = OnceLock::new();
-    let gap_ms = *GAP_MS.get_or_init(|| env_f64("HIFISHIFTER_WORLD_F0_GAP_MS").unwrap_or(15.0));
+    // 2) 填掉浊音区里的短洞：分析/合成在 f0 抖成 0 的那几帧上会"咕噜"。
+    //    阈值与音高线共用 `f0_gap_ms()`（默认 15 ms，0 = 关闭），见那里的说明。
+    let gap_ms = f0_gap_ms();
     if gap_ms <= 0.0 {
         return;
     }
@@ -505,7 +572,7 @@ fn vocode_one(
     f0_floor: f64,
     f0_ceil: f64,
     abs_time_start_sec: f64,
-    semitone_at_time: &impl Fn(f64) -> f64,
+    frame_at_time: &impl Fn(f64) -> PitchFrame,
 ) -> Result<Vec<f64>, String> {
     if x_f64.is_empty() {
         return Ok(vec![]);
@@ -563,7 +630,7 @@ fn vocode_one(
                     f0_floor,
                     f0_ceil,
                     abs_time_start_sec,
-                    semitone_at_time,
+                    frame_at_time,
                     positions,
                     retry_f0,
                 );
@@ -578,16 +645,26 @@ fn vocode_one(
         f0_floor,
         f0_ceil,
         abs_time_start_sec,
-        semitone_at_time,
+        frame_at_time,
         temporal_positions,
         f0,
     )
 }
 
-/// 用给定的一对（时间戳, f0）完成 CHEAPTRIK / D4C / Synthesis 合成。
+/// 用给定的一对（时间戳, 估计器 f0）完成 CHEAPTRIK / D4C / Synthesis 合成。
 ///
 /// 【为什么要拆出来】`vocode_one` 现在有两条"先估 F0、再合成"的路径（首选估计器
 /// 与重试估计器）。把合成留在一处，两条路才保证产出**同一套**后处理。
+///
+/// # 三件事，三个来源
+///
+/// 1. **包络与非周期性**（CheapTrick / D4C）用**估计器的 f0**：它描述的是"这段波形
+///    的周期结构"，决定谱平滑的宽度。估计器漏掉的帧用音高线的值补 —— 音高线说
+///    这一帧有声，就不该按"无周期"去分析（那会把谱窗开到最宽，齿音化的正是这一帧）。
+/// 2. **激励音高**（Synthesis）用**音高线的目标值**：音高线说这一帧是什么音，输出
+///    就是什么音。这一条让输出的绝对音准只由工程数据决定，与估计器的偏差无关 ——
+///    与 HiFiGAN（`midi_to_hz(midi_fn(t))`）和导出侧（PIT 包络写绝对值）同一口径。
+/// 3. **干 / 湿**用**音高线有没有值**：见 `hand_back_unpitched_frames`。
 #[allow(clippy::too_many_arguments)]
 fn vocode_with_f0(
     x_f64: &[f64],
@@ -596,13 +673,13 @@ fn vocode_with_f0(
     f0_floor: f64,
     f0_ceil: f64,
     abs_time_start_sec: f64,
-    semitone_at_time: &impl Fn(f64) -> f64,
+    frame_at_time: &impl Fn(f64) -> PitchFrame,
     temporal_positions: Vec<f64>,
     mut f0: Vec<f64>,
 ) -> Result<Vec<f64>, String> {
     cleanup_f0_inplace(&mut f0, fp, f0_floor, f0_ceil);
     if f0.is_empty() {
-        // Nothing voiced; passthrough.
+        // 连帧网格都没有；passthrough。
         return Ok(x_f64.to_vec());
     }
     let f0_len_i32: i32 = f0
@@ -610,21 +687,46 @@ fn vocode_with_f0(
         .try_into()
         .map_err(|_| "WORLD: f0 too long".to_string())?;
 
-    // Precompute voiced flags. WORLD uses 0 Hz for unvoiced.
-    let voiced: Vec<bool> = f0.iter().map(|&hz| hz > 0.0).collect();
-
-    // Create shifted f0.
-    let mut shifted_f0 = vec![0.0f64; f0.len()];
-    for i in 0..f0.len() {
-        let hz = f0[i];
-        if hz > 0.0 {
-            let t = temporal_positions.get(i).copied().unwrap_or(0.0);
-            let abs_t = abs_time_start_sec + t;
-            let semitones = semitone_at_time(abs_t);
-            let r = ratio_from_semitones(semitones);
-            shifted_f0[i] = hz * r;
-        }
+    // ① 逐帧收集移调指令（唯一事实源：工程里的音高线），并把音高线上的短洞补上。
+    let mut frames: Vec<PitchFrame> = temporal_positions
+        .iter()
+        .map(|t| frame_at_time(abs_time_start_sec + t))
+        .collect();
+    close_pitch_gaps(&mut frames, fp);
+    let pitched: Vec<bool> = frames.iter().map(PitchFrame::is_pitched).collect();
+    if !pitched.iter().any(|&p| p) {
+        // 整段没有音高 ⇒ 这一段本来就不该被移调。原样返回：既不花一次
+        // CheapTrick/D4C/Synthesis，也不会把齿音交给 WORLD 重合成一遍。
+        return Ok(x_f64.to_vec());
     }
+
+    // ② 包络分析用的 f0：估计器优先（音色与今天逐帧相同），漏掉的帧用音高线补。
+    let analysis_f0: Vec<f64> = f0
+        .iter()
+        .zip(&frames)
+        .map(|(&estimated, frame)| {
+            if estimated > 0.0 {
+                estimated
+            } else {
+                midi_to_hz(frame.source_midi)
+                    .clamp(f0_floor.max(1.0), f0_ceil.max(f0_floor.max(1.0)))
+            }
+        })
+        .collect();
+
+    // ③ 合成激励：目标音高的**绝对值**。超过 Nyquist 的值会让 Synthesis 生成
+    //    不存在的谐波，按采样率夹一刀（下界只防 0，上界留 10% 余量）。
+    let nyquist = 0.45 * f64::from(fs.max(1));
+    let synthesis_f0: Vec<f64> = frames
+        .iter()
+        .map(|frame| {
+            if frame.is_pitched() {
+                midi_to_hz(frame.target_midi).clamp(1.0, nyquist)
+            } else {
+                0.0
+            }
+        })
+        .collect();
 
     // CheapTrick options.
     let mut ct_opt = CheapTrickOption {
@@ -659,7 +761,7 @@ fn vocode_with_f0(
                 .map_err(|_| "WORLD: input too long".to_string())?,
             fs,
             temporal_positions.as_ptr(),
-            f0.as_ptr(),
+            analysis_f0.as_ptr(),
             f0_len_i32,
             &ct_opt as *const CheapTrickOption,
             sp_ptrs.as_mut_ptr(),
@@ -684,7 +786,7 @@ fn vocode_with_f0(
                 .map_err(|_| "WORLD: input too long".to_string())?,
             fs,
             temporal_positions.as_ptr(),
-            f0.as_ptr(),
+            analysis_f0.as_ptr(),
             f0_len_i32,
             fft_size,
             &d4c_opt as *const D4COption,
@@ -701,7 +803,7 @@ fn vocode_with_f0(
 
     unsafe {
         Synthesis(
-            shifted_f0.as_ptr(),
+            synthesis_f0.as_ptr(),
             f0_len_i32,
             sp_ptrs.as_ptr() as *const *const f64,
             ap_ptrs.as_ptr() as *const *const f64,
@@ -713,25 +815,18 @@ fn vocode_with_f0(
         );
     }
 
-    // Blend vocoded output with original for unvoiced / aperiodic regions.
-    // This significantly reduces the typical "sand/noise" artifacts after pitch edits,
-    // especially on fricatives/breath sounds where WORLD vocoding is brittle.
-    // NOTE: This is not a low-pass on the control curve; it is voiced/unvoiced gating.
+    // ④ 干 / 湿：音高线上没有值的帧原样混回（辅音、气声、静音都是原声）。
     let mut out = y;
-    if !voiced.is_empty() {
-        let debug = crate::log_policy::probes_enabled();
-        if debug {
-            let voiced_n = voiced.iter().filter(|&&b| b).count();
-            let ratio = (voiced_n as f64) / (voiced.len().max(1) as f64);
-            log::warn!(
-                "WORLD vocoder: voiced_ratio={:.3} f0_len={} fp_ms={:.3}",
-                ratio,
-                voiced.len(),
-                fp
-            );
-        }
-        blend_unvoiced_regions_with_silence_gate(&mut out, x_f64, &voiced, fp, fs);
+    if crate::log_policy::probes_enabled() {
+        let pitched_n = pitched.iter().filter(|&&b| b).count();
+        log::warn!(
+            "WORLD vocoder: pitched_ratio={:.3} f0_len={} fp_ms={:.3}",
+            (pitched_n as f64) / (pitched.len().max(1) as f64),
+            pitched.len(),
+            fp
+        );
     }
+    hand_back_unpitched_frames(&mut out, x_f64, &pitched, fp, fs);
 
     Ok(out)
 }
@@ -784,6 +879,12 @@ fn world_input_normalization(mono_pcm: &[f32]) -> (f64, f64) {
 ///
 /// `start_sec` 是 `mono_pcm[0]` 对应的绝对时间线时间。
 ///
+/// `frame_at_time` 是**移调指令的唯一入口**：给定绝对时间，返回该帧的源音高与目标
+/// 音高（见 [`PitchFrame`]）。声码器与音高有关的三件事全部由它决定 —— 包络按哪个
+/// 周期分析、激励合成到哪个音、哪些帧原样通过。**不要再把"移多少"作为半音数传进来**：
+/// 那样它还得再乘到某个绝对 F0 上，而能提供那个绝对值的东西（WORLD 自己的估计器）
+/// 恰恰是这里要绕开的。
+///
 /// # 接缝处理（本函数的核心约束）
 /// 每块的分析窗口向外扩 `overlap_len`（**分析需要上下文**），但只把**核心区**
 /// 的合成结果按 [`crate::seam`] 的等功率窗**叠加**进输出，最后按权重和归一。
@@ -805,10 +906,10 @@ pub fn vocode_pitch_shift_chunked<F>(
     frame_period_ms: f64,
     f0_floor: f64,
     f0_ceil: f64,
-    semitone_at_time: F,
+    frame_at_time: F,
 ) -> Result<Vec<f32>, String>
 where
-    F: Fn(f64) -> f64,
+    F: Fn(f64) -> PitchFrame,
 {
     if mono_pcm.is_empty() {
         return Ok(vec![]);
@@ -862,7 +963,7 @@ where
             f0_floor,
             f0_ceil,
             abs_time_start_sec,
-            &semitone_at_time,
+            &frame_at_time,
         )?;
         if y.len() != x_f64.len() {
             return Err("WORLD: chunk output length mismatch".to_string());
@@ -914,40 +1015,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    /// **声码器必须真的移调**：+12 半音的 220 Hz 正弦，输出主频要变成 ~440 Hz。
-    ///
-    /// 【为什么这条不可省】移调失败最典型的形态是"静默直通"：F0 估计器返回全 0，
-    /// 声码器判定"没有有声音高"就把输入原样返回 —— 界面上曲线画满，声音一点没变，
-    /// 而且没有任何报错。这里用 220→440 的频率比把它钉死。
-    #[test]
-    fn the_vocoder_actually_shifts_the_pitch() {
-        let rate = 48_000_u32;
-        let samples: Vec<f32> = (0..rate)
-            .map(|index| {
-                (2.0 * std::f64::consts::PI * 220.0 * f64::from(index) / f64::from(rate)).sin()
-                    as f32
-                    * 0.4
-            })
-            .collect();
-        let out = vocode_pitch_shift_chunked(&samples, rate, 0.0, 5.0, 40.0, 1600.0, |_| 12.0)
-            .expect("vocoding failed");
-        assert!(!out.is_empty(), "no output");
-        // 中段 50% 的过零率：避开首尾淡化。
-        let lo = out.len() / 4;
-        let hi = out.len() * 3 / 4;
-        let mut crossings = 0_usize;
-        for pair in out[lo..hi].windows(2) {
-            if (pair[0] < 0.0 && pair[1] >= 0.0) || (pair[0] >= 0.0 && pair[1] < 0.0) {
-                crossings += 1;
-            }
-        }
-        let seconds = (hi - lo) as f64 / f64::from(rate);
-        let hz = crossings as f64 / (2.0 * seconds);
-        assert!(
-            (hz - 440.0).abs() < 40.0,
-            "expected ~440 Hz after +12 semitones, got {hz:.1} Hz"
-        );
-    }
+    use super::*;
+
+    // ── 基础：F0 估计与归一化 ────────────────────────────────────────────────
 
     /// WORLD 的 F0 入口必须真的能从 PCM 里读出音高。
     ///
@@ -982,8 +1052,6 @@ mod tests {
         );
     }
 
-    use super::*;
-
     /// 归一化系数必须是**整段**统计量（旧实现逐块计算，块间因此有台阶）。
     #[test]
     fn normalization_is_global() {
@@ -1003,41 +1071,251 @@ mod tests {
         assert_eq!(world_input_normalization(&[]), (0.0, 1.0));
     }
 
-    /// 干/湿混合的权重必须只由**位置**决定，与"窗口从哪开始"无关。
+    // ── 移调指令（PitchFrame）的口径 ─────────────────────────────────────────
+
+    /// PitchFrame 的三个口径：没有音高、夹取到 ±24、比率只在有音高时有意义。
+    #[test]
+    fn a_pitch_frame_is_pitched_only_when_both_ends_have_a_value() {
+        assert!(!PitchFrame::UNPITCHED.is_pitched());
+        assert!(!PitchFrame::shifted(0.0, 12.0).is_pitched());
+        assert!(!PitchFrame::shifted(f64::NAN, 12.0).is_pitched());
+        assert!(!PitchFrame {
+            source_midi: 57.0,
+            target_midi: 0.0,
+        }
+        .is_pitched());
+
+        let up = PitchFrame::shifted(57.0, 12.0);
+        assert!(up.is_pitched());
+        assert!((up.ratio() - 2.0).abs() < 1e-9);
+        assert!((up.target_midi - 69.0).abs() < 1e-9);
+
+        // 超界只夹到 ±24：用户画到 +90 时，输出仍是 +24 的那一档。
+        let over = PitchFrame::shifted(57.0, 90.0);
+        assert!((over.target_midi - 81.0).abs() < 1e-9);
+        assert!((over.ratio() - 4.0).abs() < 1e-9);
+    }
+
+    // ── 移调本身 ────────────────────────────────────────────────────────────
+
+    /// **声码器必须真的移调**：+12 半音的 220 Hz 正弦，输出主频要变成 ~440 Hz。
     ///
-    /// 【为什么钉住】旧实现用 `w_prev` / `ramp_left` 状态机，逐块调用时每块都从
-    /// `w_prev = 0.0` 重启 → 每个块首被强行淡入一次，每 6s 一次。改为居中滑动
+    /// 【为什么这条不可省】移调失败最典型的形态是"静默直通"：用户把音高线画满，
+    /// 听到的仍是原声，而且没有任何报错。这里用 220→440 的频率比把它钉死。
+    #[test]
+    fn the_vocoder_actually_shifts_the_pitch() {
+        let rate = 48_000_u32;
+        // 【为什么素材必须是**谐波丰富**的音】WORLD 搬的是"激励的周期 × 谱包络"：
+        // 纯正弦只有一个谐波，移到 +12 之后它落在包络（仍停在 220 Hz）之外，
+        // 输出只剩 -30 dB 的残响 —— 那时测到的"频率"只是噪底，测不出任何东西。
+        // 24 次谐波的锯齿波才是"移调之后每个谐波都落在新基频的整数倍上"的形态。
+        let samples = sawtooth(1.0, 220.0, rate);
+        let out = vocode_pitch_shift_chunked(&samples, rate, 0.0, 5.0, 40.0, 1600.0, |_| {
+            PitchFrame::shifted(57.0, 12.0)
+        })
+        .expect("vocoding failed");
+        assert!(!out.is_empty(), "no output");
+        let hz = pitch_hz(&out[out.len() / 4..out.len() * 3 / 4], rate);
+        assert!(
+            (hz - 440.0).abs() < 12.0,
+            "expected ~440 Hz after +12 semitones, got {hz:.1} Hz"
+        );
+    }
+
+    /// **输出音高由音高线决定，不由估计器决定**：把估计器偏一个八度，
+    /// 输出仍必须是音高线写的那个音。
+    ///
+    /// 【为什么钉住】旧实现算的是"估计器 f0 × 比率"。于是"移了多少"是对的，
+    /// "移到哪"却取决于估计器的绝对准度：估计器差一个八度，整段就错一个八度。
+    /// 音高线在工程里本来就是绝对值（HiFiGAN 直接 midi_to_hz 用它），
+    /// WORLD 没有理由另算一遍。
+    #[test]
+    fn the_output_pitch_follows_the_pitch_line_not_the_estimator() {
+        let rate = 48_000u32;
+        let fs = rate as i32;
+        let samples: Vec<f64> = sawtooth(1.0, 220.0, rate)
+            .iter()
+            .map(|v| *v as f64)
+            .collect();
+        let (positions, _) = five_ms_grid(&samples, fs, 5.0);
+        // 估计器说 110 Hz（真实是 220），音高线说 57 → +12（= 440 Hz）。
+        let wrong_estimator = vec![110.0f64; positions.len()];
+        let out = vocode_with_f0(
+            &samples,
+            fs,
+            5.0,
+            40.0,
+            1600.0,
+            0.0,
+            &|_| PitchFrame::shifted(57.0, 12.0),
+            positions,
+            wrong_estimator,
+        )
+        .unwrap();
+        let out32: Vec<f32> = out.iter().map(|v| *v as f32).collect();
+        let hz = pitch_hz(&out32[out32.len() / 4..out32.len() * 3 / 4], rate);
+        assert!(
+            (hz - 440.0).abs() < 12.0,
+            "激励频率必须取音高线的目标值（440 Hz），实际 {hz:.1} Hz —— 估计器偏了八度就把输出带跑了"
+        );
+    }
+
+    /// **音高线上连续的段落里，没有任何一帧会被原样混回。**
+    ///
+    /// 【这条就是真机报障的判据】干 / 湿门一度用 WORLD 自己的估计器判断"这一帧有没有
+    /// F0"。估计器漏掉的帧（起音、气声、辅音过渡）于是被原样混回去 —— 一段**没被移调
+    /// 的原声**插在移调中间。用户听到的是"辅音处音高变调质量变差"，而界面上的音高线
+    /// 在那里明明是连续的。这里把估计器人为挖出一个 60 ms 的洞，音高线保持连续：
+    /// 洞里每一帧都必须被合成过（不是输入本身），且音高是目标音高。
+    #[test]
+    fn a_pitch_track_hole_never_hands_the_frame_back_dry() {
+        let rate = 48_000u32;
+        let fs = rate as i32;
+        let samples: Vec<f64> = sawtooth(0.6, 220.0, rate)
+            .iter()
+            .map(|v| *v as f64)
+            .collect();
+        let (positions, _) = five_ms_grid(&samples, fs, 5.0);
+        let mut estimator = vec![220.0f64; positions.len()];
+        // 洞：中间 60 ms（12 帧）估计器完全失灵。
+        let hole = positions.len() / 2..positions.len() / 2 + 12;
+        for hz in estimator[hole.clone()].iter_mut() {
+            *hz = 0.0;
+        }
+        let out = vocode_with_f0(
+            &samples,
+            fs,
+            5.0,
+            40.0,
+            1600.0,
+            0.0,
+            &|_| PitchFrame::shifted(57.0, 7.0),
+            positions,
+            estimator,
+        )
+        .unwrap();
+
+        let frame_samples = (rate as usize) / 200; // 5 ms
+        for frame in hole.clone() {
+            let start = frame * frame_samples;
+            let end = (start + frame_samples).min(out.len());
+            let diff = samples[start..end]
+                .iter()
+                .zip(out[start..end].iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f64, f64::max);
+            assert!(
+                diff > 1e-3,
+                "第 {frame} 帧被原样混回了（max diff {diff:.6}）—— 音高线连续却被当成无音高"
+            );
+        }
+        // 洞里必须真的是**移调后**的音高（+7：220 → 329.6 Hz）。
+        let hole_start = hole.start * frame_samples;
+        let hole_end = (hole.end * frame_samples).min(out.len());
+        let hole32: Vec<f32> = out[hole_start..hole_end]
+            .iter()
+            .map(|v| *v as f32)
+            .collect();
+        let hz = pitch_hz(&hole32, rate);
+        assert!(
+            (hz - 329.6).abs() < 15.0,
+            "洞里的音高不是音高线给的 +7（期望 ~330 Hz，实际 {hz:.1} Hz）"
+        );
+    }
+
+    /// **音高线上没有值的帧必须逐样本原样通过**（辅音、气声、静音都是原声）。
+    ///
+    /// 这条曾经红过：干 / 湿门在 eda045974 里被写反（可闻的无 F0 帧走湿声），
+    /// 而函数注释仍然描述正确语义，于是那段 diff 读起来"只是重构"。
+    /// 现在判据是音高线，与"这一帧响不响"无关 —— 逐样本相同是唯一可信的判据。
+    #[test]
+    fn an_unpitched_frame_comes_back_dry() {
+        let mut state = 0xdead_beef_1234_5678u64;
+        let mut noise: Vec<f32> = (0..(0.5 * f64::from(CONSONANT_SR)) as usize)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((state >> 33) as f32 / (u32::MAX >> 1) as f32) * 0.2 - 0.1
+            })
+            .collect();
+        de_mean(&mut noise);
+        let out = vocode_pitch_shift_chunked(&noise, CONSONANT_SR, 0.0, 5.0, 40.0, 1600.0, |_| {
+            PitchFrame::UNPITCHED
+        })
+        .unwrap();
+        let max_diff = noise
+            .iter()
+            .zip(out.iter())
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_diff < 1e-6,
+            "没有音高的帧被重合成了一遍（max diff {max_diff}）"
+        );
+    }
+
+    /// **辅音（音高线无值）不随移调变化**：三种移调下逐样本相同。
+    ///
+    /// 【为什么钉这条】它是"辅音没有被移调"这件事的**唯一客观判据**。任何"顺手让辅音
+    /// 也跟一下"的改动都会在这里变红 —— 那正是取舍需要重新讨论的信号，而不是一次
+    /// 普通的实现改动。移调只作用于"音高线说这里有音高"的帧，辅音连声码器都不进。
+    #[test]
+    fn a_consonant_keeps_its_spectrum_across_every_transposition() {
+        // 声码器入口做一次**全局去均值**且从不加回，所以"原样"严格等于"去均值后的
+        // 输入"。先在测试里去掉直流，判据才能写成逐样本相同（见 de_mean 的说明）。
+        let mut input = consonant_band(0.5);
+        de_mean(&mut input);
+        for semitones in [0.0f64, 7.0, 12.0] {
+            let out =
+                vocode_pitch_shift_chunked(&input, CONSONANT_SR, 0.0, 5.0, 40.0, 1600.0, |_| {
+                    PitchFrame::UNPITCHED
+                })
+                .unwrap();
+            let max_diff = input
+                .iter()
+                .zip(out.iter())
+                .map(|(left, right)| (left - right).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                max_diff < 1e-9,
+                "辅音在 +{semitones} 半音下被改动了（max diff {max_diff}）"
+            );
+        }
+    }
+
+    // ── 干 / 湿门的实现细节 ──────────────────────────────────────────────────
+
+    /// 干/湿权重必须只由**位置**决定，与"窗口从哪开始"无关。
+    ///
+    /// 【为什么钉住】旧实现用 w_prev / ramp_left 状态机，逐块调用时每块都从
+    /// w_prev = 0.0 重启 → 每个块首被强行淡入一次，每 6s 一次。改为居中滑动
     /// 平均后，重叠区的权重在"整段调用"与"分块调用"下必须逐样本相同。
     #[test]
-    fn unvoiced_blend_weight_is_position_determined() {
+    fn the_gate_weight_is_position_determined() {
         let fs = 44_100i32;
         let fp = 5.0f64;
-        let frame_samples = ((fp / 1000.0) * fs as f64) as usize; // 220
-        let n_frames = 40usize;
-        let n = n_frames * frame_samples;
+        let n = (0.2 * f64::from(fs)) as usize; // 200 ms
+        let frames = 40usize; // 5 ms 一帧
         let dry: Vec<f64> = (0..n).map(|i| ((i as f64) * 0.013).sin() * 0.5).collect();
-        // 前半浊音、后半非浊音（干声有能量 → 应切回干）
-        let mut voiced = vec![true; n_frames];
-        for v in voiced.iter_mut().skip(20) {
-            *v = false;
+        // 湿声 = 干声 + 常量偏置，这样"有没有切回干"一眼可测。
+        let wet: Vec<f64> = dry.iter().map(|v| v + 0.25).collect();
+
+        // 前半有音高（湿）、后半没有音高（干）。掩码按**帧**索引，不是按样本。
+        let mut pitched = vec![true; frames];
+        let split_frame = frames / 2;
+        for p in pitched.iter_mut().skip(split_frame) {
+            *p = false;
         }
 
-        let mut full = dry.clone();
-        blend_unvoiced_regions_with_silence_gate_impl(&mut full, &dry, &voiced, fp, fs, 0.001);
+        let mut full = wet.clone();
+        hand_back_unpitched_frames(&mut full, &dry, &pitched, fp, fs);
 
-        // 模拟第二个 chunk：从第 20 帧开始（对齐到帧边界）
-        let start = 20 * frame_samples;
-        let mut part = dry[start..].to_vec();
-        blend_unvoiced_regions_with_silence_gate_impl(
-            &mut part,
-            &dry[start..],
-            &voiced[20..],
-            fp,
-            fs,
-            0.001,
-        );
+        // 模拟第二个 chunk：从一半处开始（帧边界）
+        let start = split_frame * (fs as usize) * 5 / 1000;
+        let mut part = wet[start..].to_vec();
+        hand_back_unpitched_frames(&mut part, &dry[start..], &pitched[split_frame..], fp, fs);
 
-        // 窗口中部（远离首尾边界效应）必须与整段结果一致
         let margin = 2000;
         for i in margin..part.len() - margin {
             assert!(
@@ -1047,6 +1325,9 @@ mod tests {
                 full[start + i]
             );
         }
+        // 远离过渡区：有音高 = 湿，没有音高 = 干。
+        assert!((full[0] - wet[0]).abs() < 1e-12);
+        assert!((full[n - 1] - dry[n - 1]).abs() < 1e-12);
     }
 
     /// 分块渲染的接缝处：既不得有 click/DC 台阶，也不得有电平鼓包。
@@ -1066,7 +1347,10 @@ mod tests {
             })
             .collect();
 
-        let out = vocode_pitch_shift_chunked(&pcm, sr, 0.0, 5.0, 40.0, 1600.0, |_| 0.0).unwrap();
+        let out = vocode_pitch_shift_chunked(&pcm, sr, 0.0, 5.0, 40.0, 1600.0, |_| {
+            PitchFrame::shifted(57.0, 0.0)
+        })
+        .unwrap();
         assert_eq!(out.len(), n);
 
         let chunk_len = (WORLD_CHUNK_SEC_DEFAULT * sr as f64) as usize;
@@ -1088,20 +1372,14 @@ mod tests {
         let xfade = rms(boundary, boundary + overlap_len);
         let settled = rms(boundary + overlap_len, boundary + 2 * overlap_len);
         let ratio = xfade / settled.max(1e-12);
-        // 【为什么区间不是 0.9..1.1】这条用例此前一直"通过"，是因为当时声码器
-        // 根本没在合成：F0 估计器（Harvest）在本仓库的静态链接构建里返回全 0，
-        // `vocode_one` 于是走了"没有有声音高 → 原样返回"的直通分支，`out` 与输入
-        // 逐样本相同，比值恒为 1。改用 DIO 之后才第一次真正合成，接缝处的电平
-        // 取决于两个独立合成的块在同一时刻的**相位关系** —— 那是任意的（每块
-        // `Synthesis` 都从自己的起点重新起相），因此"电平严格相等"在这个结构下
-        // 不可达：同相会 +3dB、反相会掉下去。
+        // 【为什么区间不是 0.9..1.1】接缝处的电平取决于两个独立合成的块在同一时刻的
+        // **相位关系** —— 那是任意的（每块 Synthesis 都从自己的起点重新起相），
+        // 因此"电平严格相等"在这个结构下不可达：同相会 +3dB、反相会掉下去。
         //
         // 这里保留的两条判据是**真正可保证**的：
         //   1. 不出现电平鼓包（比值不得 > 1.15）；
         //   2. 不出现近乎静音的塌陷（比值不得 < 0.5）；
         //   3. 接缝处不得有样本级台阶（下面 (b) 那条）。
-        // 要做到接缝电平完全平直，需要相位连续的流式合成（旧实现尝试过，见文件头
-        // FFI 声明处的说明：它因时间轴倒退而从未正确工作）。那是独立的一项工作。
         assert!(
             (0.5..1.15).contains(&ratio),
             "crossfade level discontinuity: ratio={ratio} (xfade={xfade} settled={settled})"
@@ -1121,16 +1399,87 @@ mod tests {
         );
     }
 
-    // ── 无 F0 帧（辅音）的既定行为 ────────────────────────────────────────────
-    //
-    // 辅音、齿音、气声**不参与移调**：这是听感上定下的取舍 —— 搬它们的谱包络会把
-    // /s/ 推成 /ʃ/，而同一个说话人念同一个字时齿音本来就几乎不随音高移动。与其猜
-    // 一个补偿量，不如让它们原样通过；代价是大幅移调下辅音与元音的音区会略微脱节。
-    //
-    // 这一组用例是这个取舍的**契约**。它们断言谱心而不是波形：波形对相位敏感
-    // （WORLD 每次合成都重新起相），谱心才是"有没有搬"的直接判据。
+    // ── 测试辅助 ────────────────────────────────────────────────────────────
 
     const CONSONANT_SR: u32 = 44_100;
+
+    /// 归一化自相关的基频估计（60–800 Hz）。只用于测试里的稳态合成信号。
+    ///
+    /// 【为什么不用过零率】WORLD 的输出是谐波叠加，过零率会被高次谐波带偏；
+    /// 而自相关在基频周期上有唯一的第一个峰，对 220 / 330 / 440 这种差别足够准。
+    fn pitch_hz(samples: &[f32], rate: u32) -> f64 {
+        let n = samples.len().min(rate as usize / 10).max(2);
+        let x = &samples[..n];
+        let energy: f64 = x.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        if energy <= 1e-12 {
+            return 0.0;
+        }
+        let min_lag = ((rate / 800) as usize).max(1);
+        let max_lag = ((rate / 60) as usize).min(n - 1);
+        if max_lag <= min_lag + 1 {
+            return 0.0;
+        }
+        let mut corr = vec![0.0f64; max_lag + 2];
+        for lag in min_lag..=max_lag {
+            let mut acc = 0.0f64;
+            for i in 0..n - lag {
+                acc += x[i] as f64 * x[i + lag] as f64;
+            }
+            corr[lag] = acc / energy;
+        }
+        let peak = corr[min_lag..=max_lag]
+            .iter()
+            .cloned()
+            .fold(f64::MIN, f64::max);
+        if peak <= 0.0 {
+            return 0.0;
+        }
+        // 自相关在周期的整数倍上都有峰 —— 第一个"足够高"的局部峰才是基频。
+        for lag in min_lag + 1..max_lag {
+            if corr[lag] >= corr[lag - 1] && corr[lag] >= corr[lag + 1] && corr[lag] > 0.7 * peak {
+                return f64::from(rate) / lag as f64;
+            }
+        }
+        f64::from(rate) / (min_lag + 1) as f64
+    }
+
+    /// 谐波丰富的测试音（锯齿波，24 次谐波，1/k 幅度）。
+    fn sawtooth(seconds: f64, f0: f64, rate: u32) -> Vec<f32> {
+        let n = (seconds * f64::from(rate)) as usize;
+        (0..n)
+            .map(|i| {
+                let t = i as f64 / f64::from(rate);
+                let mut s = 0.0f64;
+                for k in 1..=24 {
+                    s += (2.0 * std::f64::consts::PI * f0 * k as f64 * t).sin() / k as f64;
+                }
+                (s * 0.15) as f32
+            })
+            .collect()
+    }
+
+    /// 造一条与 WORLD 一致的 5 ms 帧网格（帧数取 GetSamplesForDIO 的口径：
+    /// y_length / fs * 1000 / fp + 1）。
+    fn five_ms_grid(x: &[f64], fs: i32, fp: f64) -> (Vec<f64>, usize) {
+        let frames = ((x.len() as f64) / f64::from(fs) * 1000.0 / fp) as usize + 1;
+        let positions: Vec<f64> = (0..frames).map(|i| i as f64 * fp / 1000.0).collect();
+        (positions, frames)
+    }
+
+    /// 去掉直流分量。
+    ///
+    /// 【为什么每条"逐样本相同"的用例都要先做这一条】声码器入口会做一次**全局**
+    /// 去均值，而且**从不加回** —— 于是"干声"严格等于"去直流后的输入"。
+    /// 不去直流，一条 1e-5 级的 DC 偏移就会让"门有没有关上"看不出来。
+    fn de_mean(samples: &mut [f32]) {
+        if samples.is_empty() {
+            return;
+        }
+        let mean = samples.iter().map(|v| f64::from(*v)).sum::<f64>() / samples.len() as f64;
+        for value in samples.iter_mut() {
+            *value = (*value as f64 - mean) as f32;
+        }
+    }
 
     /// 两个谐振器加权求和：模拟 /s/ 那样的 6–8 kHz 噪声带。
     fn consonant_band(seconds: f64) -> Vec<f32> {
@@ -1157,105 +1506,5 @@ mod tests {
                     * 0.08) as f32
             })
             .collect()
-    }
-
-    /// 加 Hann 窗的谱心（150 Hz–16 kHz，1/4 倍频程栅格）。
-    fn consonant_centroid(samples: &[f32]) -> f64 {
-        let frequencies: Vec<f64> = (0..30)
-            .map(|index| 150.0 * 2f64.powf(index as f64 * 0.25))
-            .filter(|value| *value < f64::from(CONSONANT_SR) * 0.45)
-            .collect();
-        let mut numerator = 0.0;
-        let mut denominator = 0.0;
-        for frequency in frequencies {
-            let omega = 2.0 * std::f64::consts::PI * frequency / f64::from(CONSONANT_SR);
-            let length = samples.len() as f64;
-            let mut real = 0.0f64;
-            let mut imaginary = 0.0f64;
-            for (index, value) in samples.iter().enumerate() {
-                let window = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * index as f64 / length).cos();
-                let shaped = f64::from(*value) * window;
-                real += shaped * (omega * index as f64).cos();
-                imaginary -= shaped * (omega * index as f64).sin();
-            }
-            let energy = real * real + imaginary * imaginary;
-            numerator += frequency * energy;
-            denominator += energy;
-        }
-        if denominator <= 1e-12 {
-            0.0
-        } else {
-            numerator / denominator
-        }
-    }
-
-    /// **辅音不随移调变化**：同一段无 F0 噪声在 `+0` / `+7` / `+12` 下谱心必须相同。
-    ///
-    /// 【为什么钉这条】它是"辅音没有被移调"这件事的**唯一客观判据**。任何"顺手让辅音
-    /// 也跟一下"的改动都会在这里变红 —— 那正是取舍需要重新讨论的信号，而不是一次
-    /// 普通的实现改动。
-    #[test]
-    fn a_consonant_keeps_its_spectrum_across_every_transposition() {
-        let input = consonant_band(0.5);
-        let mut centroids = Vec::new();
-        for semitones in [0.0f64, 7.0, 12.0] {
-            let out = vocode_pitch_shift_chunked(
-                &input,
-                CONSONANT_SR,
-                0.0,
-                5.0,
-                40.0,
-                1600.0,
-                move |_| semitones,
-            )
-            .unwrap();
-            let window = &out[(0.1 * f64::from(CONSONANT_SR)) as usize
-                ..(0.4 * f64::from(CONSONANT_SR)) as usize];
-            centroids.push(consonant_centroid(window));
-        }
-        let reference = centroids[0];
-        for (index, value) in centroids.iter().enumerate() {
-            assert!(
-                (value - reference).abs() / reference < 0.02,
-                "辅音谱心随移调变化了：{centroids:?}（第 {index} 项）"
-            );
-        }
-    }
-
-    /// **可闻的无 F0 帧必须原样返回**（干声），不是被 WORLD 重合成一遍。
-    ///
-    /// 这条曾经红过：`blend_unvoiced_regions_with_silence_gate` 的干/湿门在
-    /// `eda045974` 里被写反（可闻的无 F0 帧走湿声、真静音走干声），而函数注释
-    /// 仍然描述正确语义，于是那段 diff 读起来"只是重构"。判据现在写成逐样本相同而
-    /// 不是相信注释 —— 极性再翻一次，这里就会红。
-    #[test]
-    fn an_audible_unvoiced_frame_comes_back_dry() {
-        let mut state = 0xdead_beef_1234_5678u64;
-        let mut noise: Vec<f32> = (0..(0.5 * f64::from(CONSONANT_SR)) as usize)
-            .map(|_| {
-                state = state
-                    .wrapping_mul(6364136223846793005)
-                    .wrapping_add(1442695040888963407);
-                ((state >> 33) as f32 / (u32::MAX >> 1) as f32) * 0.2 - 0.1
-            })
-            .collect();
-        // 【为什么要先去直流】声码器入口会做一次全局去均值（且**从不加回**），
-        // 因此"干声"在严格意义上等于"去直流后的输入"。测试先去直流，判据才能写成
-        // 逐样本相同 —— 否则一条 1e-4 级的 DC 偏移会让"门到底有没有关上"看不出来。
-        let mean = noise.iter().map(|value| f64::from(*value)).sum::<f64>() / noise.len() as f64;
-        for value in noise.iter_mut() {
-            *value = (*value as f64 - mean) as f32;
-        }
-        let out = vocode_pitch_shift_chunked(&noise, CONSONANT_SR, 0.0, 5.0, 40.0, 1600.0, |_| 0.0)
-            .unwrap();
-        let max_diff = noise
-            .iter()
-            .zip(out.iter())
-            .map(|(left, right)| (left - right).abs())
-            .fold(0.0f32, f32::max);
-        assert!(
-            max_diff < 1e-6,
-            "可闻的无 F0 帧被重合成了一遍（max diff {max_diff}）；干/湿门极性反了"
-        );
     }
 }
