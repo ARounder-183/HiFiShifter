@@ -235,6 +235,14 @@ fn main() {
     // binary for the About dialog, log banners and diagnostics export.
     emit_git_info();
 
+    // Clean git checkouts and parallel subagent worktrees only track
+    // `resources/models/models.json` (~200 MB weights are fetched on demand via
+    // `scripts/setup/fetch-models.py`). In debug/test builds (never release or
+    // dist packaging!), override `bundle.resources` to an empty list via
+    // `TAURI_CONFIG` when model files are absent so `cargo check` / `cargo test`
+    // can run without writing fake 0-byte model files onto disk.
+    allow_missing_models_in_dev_build();
+
     // tauri_build validates resources listed in tauri.conf.json and its
     // platform-specific merges (tauri.windows.conf.json, tauri.linux.conf.json),
     // and copies bundle.macOS.frameworks for darwin targets. All referenced
@@ -1050,6 +1058,33 @@ fn generate_coreml_model_variant() {
 
 #[cfg(not(target_os = "macos"))]
 fn generate_coreml_model_variant() {}
+
+fn allow_missing_models_in_dev_build() {
+    println!("cargo:rerun-if-env-changed=HIFISHIFTER_ALLOW_MISSING_MODELS");
+    let profile = std::env::var("PROFILE").unwrap_or_default();
+    let allow = profile == "debug"
+        || std::env::var("HIFISHIFTER_ALLOW_MISSING_MODELS").as_deref() == Ok("1");
+    if !allow || std::env::var_os("TAURI_CONFIG").is_some() {
+        return;
+    }
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut required = vec![
+        "resources/models/nsf_hifigan/config.json",
+        "resources/models/hnsep/hnsep.onnx",
+        "resources/models/hnsep/config.yaml",
+        "resources/models/fcpe/fcpe.onnx",
+        "resources/models/GAME",
+    ];
+    if cfg!(target_os = "macos") {
+        required.push("resources/models/nsf_hifigan/pc_nsf_hifigan_coreml.onnx");
+    }
+    if required.iter().any(|rel| !manifest.join(rel).exists()) {
+        println!(
+            "cargo:warning=[build.rs] model weights missing in profile={profile}; overriding TAURI_CONFIG bundle.resources=[] for dev/test build (release/dist still require scripts/setup/fetch-models.py)"
+        );
+        std::env::set_var("TAURI_CONFIG", r#"{"bundle":{"resources":[]}}"#);
+    }
+}
 
 // ── git 构建信息 ────────────────────────────────────────────────────
 //
