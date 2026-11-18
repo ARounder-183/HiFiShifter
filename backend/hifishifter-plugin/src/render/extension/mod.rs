@@ -386,6 +386,12 @@ pub struct ExtensionOwner {
     buffer_audit_channels: AtomicU32,
     buffer_audit_frames: AtomicU32,
     buffer_audit_unwritten: AtomicU64,
+    /// 因漏写而被清成 0 的非有限样本数（见 `render_block` 的写满审计；音频线程只写原子）。
+    ///
+    /// 【为什么只记原子不记日志】漏写发生时音频线程正处于最需要省时的场景（多半正是
+    /// 那次漏写引发的掉线），此刻去抢日志锁、做文件 I/O 只会放大故障。读数由
+    /// `log_buffer_audit` 的周期行带出。
+    buffer_audit_scrubbed: AtomicU64,
     /// 因与输入平面共享内存而被跳过的输出平面数（见 `AudioBlock::poison_outputs`）。
     buffer_audit_aliased: AtomicU32,
     /// 本块输入与输出是否是同一份总线（in-place 宿主）。

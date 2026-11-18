@@ -69,13 +69,16 @@ impl ExtensionOwner {
         let outcome = unsafe { self.render_block_inner(block, context, evidence) };
         if auditing {
             let audit = block.count_unwritten();
-            if audit.unwritten > 0 {
-                // 【诊断可以暴露 bug，但不能让宿主收到 NaN】漏写一旦发生，返回宿主前
-                // 把非有限样本清成 0。unwritten 仍然如实记录，所以 bug 没有被掩盖。
-                let scrubbed = block.sanitize_non_finite_outputs();
-                log::debug!("[buf] scrubbed {scrubbed} non-finite output sample(s)");
-            }
-            self.note_buffer_audit(audit, aliased, block.in_place, block.frames);
+            // 【诊断可以暴露 bug，但不能让宿主收到 NaN】漏写一旦发生，返回宿主前
+            // 把非有限样本清成 0。计数进审计读数由非实时线程带出（`log_buffer_audit`）：
+            // 漏写发生时多半正是掉线现场，音频线程此刻抢日志锁、做文件 I/O 只会放大
+            // 故障 —— 与"音频线程不能写文件、不能抢日志锁"的同一条纪律（audio_stats）。
+            let scrubbed = if audit.unwritten > 0 {
+                block.sanitize_non_finite_outputs()
+            } else {
+                0
+            };
+            self.note_buffer_audit(audit, scrubbed, aliased, block.in_place, block.frames);
         }
         outcome
     }
