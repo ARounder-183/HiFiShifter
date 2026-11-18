@@ -3052,6 +3052,79 @@ mod pitch_bridge_tests {
         document.close();
     }
 
+    /// 【填充是可逆的】导回来的包络在"没有原线"的帧上必须被**跳过**，而不是写回填充值。
+    ///
+    /// 导出侧会把辅音处的偏移填成邻域值（让宿主的连续控制信号不跳变）。如果导入不跳过
+    /// 这些帧，用户"导出 → 导入"来回一次就会在辅音上得到一条被移调的音高线 —— 而那是
+    /// 他从没画过的东西，且**没有任何界面能让他看见**。
+    ///
+    /// 两条导入路径都靠 `pitch_orig > 0` 挡住：本命令（`commands.rs` 的逐帧判据）与
+    /// pending 回退（`schedule.rs` 的 `pending_pitch_offset` 应用）。这条用例钉住前者。
+    #[test]
+    fn importing_a_filled_envelope_leaves_unvoiced_frames_alone() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        // 恒为 +4 的包络：正是"填充之后"的样子（辅音处不再掉回 0）。
+        let chunk = "<ITEM\nPOSITION 0\nLENGTH 0.00009070294784580499\nSEL 1\n\
+                     IGUID {11111111-1111-1111-1111-111111111111}\n\
+                     SOFFS 0\nPLAYRATE 1 1 0\nGUID {22222222-2222-2222-2222-222222222222}\n\
+                     <SOURCE WAVE\nFILE \"ara://source\"\n>\n\
+                     <PITCHENV\nACT 1 -1\nVIS 1 1 1\nLANEHEIGHT 0 0\nARM 0\n\
+                     DEFSHAPE 0 12 -1\nPT 0.00000000000000000 4.00000000000000000 0\n>\n>\n";
+        host.enable_item_state(chunk);
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        host.set_value("D_PITCH", 0.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let (clip_id, root) = {
+            let mut timeline = editor.timeline.lock_or_recover();
+            let clip_id = timeline.clips[0].id.clone();
+            let track_id = timeline.clips[0].track_id.clone();
+            let root = timeline.resolve_root_track_id(&track_id).unwrap();
+            timeline.ensure_params_for_root(&root);
+            (clip_id, root)
+        };
+        // 预热：必须先跑掉"第一次解析宿主身份"（它会按宿主重建一次时间线，把此前写的
+        // 片段几何与派生参数一起冲掉）。
+        pitch_bridge_target(&editor, &clip_id).expect("夹具的宿主身份必须可解析");
+        {
+            let mut timeline = editor.timeline.lock_or_recover();
+            // 【几何必须在预热之后写】否则被上面那次重建还原成宿主的 D_LENGTH
+            // （4 样本 ⇒ 1 帧），这条用例就退化成"只导一帧"。
+            if let Some(clip) = timeline.clips.iter_mut().find(|clip| clip.id == clip_id) {
+                clip.start_sec = 0.0;
+                clip.length_sec = 0.04; // 8 帧（5 ms 一帧）
+            }
+            timeline.ensure_params_for_root(&root);
+            let params = timeline.params_by_root_track.get_mut(&root).unwrap();
+            params.frame_period_ms = 5.0;
+            // 帧 2..5 没有 F0（辅音）；其余有声。编辑线 = 原线（用户还没编辑过）。
+            params.pitch_orig = vec![60.0, 60.0, 0.0, 0.0, 0.0, 60.0, 60.0, 60.0];
+            params.pitch_edit = params.pitch_orig.clone();
+        }
+
+        let result =
+            import_host_take_pitch(&editor, &json!({ "clipIds": [clip_id.clone()] })).unwrap();
+        assert_eq!(
+            result["framesSkipped"].as_u64(),
+            Some(3),
+            "没有 F0 的帧必须被跳过，实际 {result}"
+        );
+        assert_eq!(
+            result["framesWritten"].as_u64(),
+            Some(5),
+            "有声帧必须照常写入，实际 {result}"
+        );
+        document.close();
+    }
+
     /// 批量作用域：一个 id 在时间线上根本不存在，不该让整批失败；严格模式必须报错。
     ///
     /// 【为什么两种模式都要钉】宽容模式是"全部片段"能用的前提（工程在命令执行途中被
