@@ -550,52 +550,6 @@ if ($Target -eq 'All' -or $Target -eq 'Installer') {
     Write-Host "安装器：$setup" -ForegroundColor Green
 }
 
-# ── 安装器 ──────────────────────────────────────────────────────────────────
-$makensis = (Get-Command makensis -ErrorAction SilentlyContinue).Source
-if (!$makensis) {
-    # 【为什么不读 `ProgramFiles(x86)` 环境变量】它在部分宿主里根本不存在，而
-    # `msvc-env.ps1` 导入 vcvars 环境时会把空值写回（.NET 把空值当"删除"），于是
-    # 构建尾部会以一个和 NSIS 毫无关系的报错失败："无法将自变量绑定到参数 'Path'"。
-    # 目录只能问系统 API（与 `scripts/env/msvc-env.ps1` 的 `Get-ProgramFilesRoots` 同源）。
-    foreach ($kind in 'ProgramFilesX86', 'ProgramFiles') {
-        $base = [Environment]::GetFolderPath($kind)
-        if (!$base) { continue }
-        $candidate = Join-Path $base 'NSIS\makensis.exe'
-        if (Test-Path -LiteralPath $candidate) { $makensis = $candidate; break }
-    }
-}
-if (!$makensis) {
-    throw '找不到 makensis：先跑 scripts\setup\install_deps_windows.ps1（Windows 只交付这一个安装器，缺它等于没有产物）'
-}
-
-# 安装器文案由五语词表生成；先重新生成一次，漏翻译在这里就失败。
-node (Join-Path $PSScriptRoot '..\release\build-installer-strings.mjs')
-Assert-Ok '安装器文案生成'
-
-$bootstrapper = Get-WebView2Bootstrapper
-$setup = Join-Path $dist ('HiFiShifter_v' + $version + '_windows-' + $arch + '-setup.exe')
-Remove-Item $setup -Force -ErrorAction SilentlyContinue
-
-# 每一个路径都以 /D 传入，脚本里不出现任何相对路径猜测（值带引号：路径里可能有空格）。
-& $makensis /INPUTCHARSET UTF8 `
-    "/DAPP_DIR=$(Join-Path $stage 'app')" `
-    "/DVST3_DIR=$(Join-Path $stage 'vst3')" `
-    "/DCLAP_FILE=$(Join-Path $stage 'HiFiShifter.clap')" `
-    "/DCLAP_RES_DIR=$(Join-Path $stage 'HiFiShifter-resources')" `
-    "/DMODELS_DIR=$(Join-Path $stage 'models')" `
-    "/DMODELS_VERSION=$modelsVersion" `
-    "/DMODELS_VERIFY=$(Join-Path $stage 'models-verify.nsh')" `
-    "/DHFS_LICENSE=$(Join-Path $stage 'LICENSE')" `
-    "/DHFS_LICENSE_PAGE=$(Join-Path $stage 'license-page.txt')" `
-    "/DHFS_LICENSES=$(Join-Path $stage 'licenses')" `
-    "/DOUTPUT_FILE=$setup" `
-    "/DAPP_VERSION=$version" `
-    "/DWEBVIEW2_BOOTSTRAPPER=$bootstrapper" `
-    "/DHFS_ICON=$(Join-Path $root 'backend\src-tauri\icons\icon.ico')" `
-    (Join-Path $PSScriptRoot '..\release\merged-installer.nsi')
-Assert-Ok '安装器编译'
-Write-Host "安装器：$setup" -ForegroundColor Green
-
 # ── 便携包 ──────────────────────────────────────────────────────────────────
 # 便携包**自包含**：模型全量随包，解压即用，不依赖安装器与 ProgramData。
 if ($Target -ne 'All') {

@@ -1569,7 +1569,9 @@ Section "Uninstall"
   ${If} $HfsUnOptCache == 1
   ${AndIf} $HfsUnOtherInstall == 0
     Call un.HfsSweepDisposableDirs
-    DetailPrint "Removed caches, logs and temporary data. Settings and any unsaved work were kept in %APPDATA%\HiFiShifter and %LOCALAPPDATA%\HiFiShifter."
+    ; 【为什么是 $APPDATA 而不是 %APPDATA%】NSIS 字符串不做 cmd 风格的环境展开，
+    ; %VAR% 会原样出现在卸载日志里；shell 文件夹常量是 $APPDATA / $LOCALAPPDATA。
+    DetailPrint "Removed caches, logs and temporary data. Settings and any unsaved work were kept in $APPDATA\HiFiShifter and $LOCALAPPDATA\HiFiShifter."
   ${ElseIf} $HfsUnOtherInstall == 1
     DetailPrint "Another HiFiShifter installation is still present; shared data was kept."
   ${Else}

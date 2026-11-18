@@ -40,7 +40,7 @@ import sys
 import tempfile
 import urllib.request
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 # Windows 的 stdout 跟随 ANSI 代码页（英文系统是 cp1252、中文系统是 GBK），打印中文会
 # UnicodeEncodeError 打死进程 —— 真正的结论一条都进不了日志，红的是编码而不是规则。
@@ -278,12 +278,34 @@ def install_from_directory(source: Path, manifest: dict) -> None:
         shutil.copy2(src, dst)
 
 
+def safe_extractall(bundle: zipfile.ZipFile, destination: Path) -> None:
+    """解压一个 zip 到 destination，拒绝任何会落到目录之外的条目（zip-slip）。
+
+    【为什么不用 extractall(filter="data")】filter 参数是 Python 3.12 才有的，而
+    本脚本的解释器判据只认 major==3（见 build.ps1 的 Resolve-Python），3.8-3.11
+    传 filter 会当场 TypeError。逐条目校验在所有版本上语义一致。
+
+    【防什么】发布 zip 是第三方内容（GitHub release、本地镜像）：条目名带 `..`
+    段、绝对路径、盘符或反斜杠分隔时，extractall 会把文件写到 destination 之外，
+    且这是在开发机上以用户权限执行的。名字不合法就直接终止，绝无"凑合解"。
+    """
+    for info in bundle.infolist():
+        normalized = info.filename.replace("\\", "/")
+        if (
+            normalized.startswith("/")
+            or (len(normalized) > 1 and normalized[1] == ":")
+            or ".." in PurePosixPath(normalized).parts
+        ):
+            raise SystemExit(f"{bundle.filename} 里的条目越界，拒绝解压：{info.filename}")
+    bundle.extractall(destination)
+
+
 def install_from_zip(archive: Path, manifest: dict) -> None:
     # 【为什么要先解压到临时目录】直接解到目标目录会让"解压中途失败"留下一个看起来
     # 存在但缺文件的模型目录 —— 那正是运行时最难诊断的状态。
     with tempfile.TemporaryDirectory(prefix="hfs-models-") as tmp:
         with zipfile.ZipFile(archive) as bundle:
-            bundle.extractall(tmp)
+            safe_extractall(bundle, Path(tmp))
         root = Path(tmp)
         # zip 可能带一层顶层目录（models-<version>/…），这里自适应。
         candidates = [root] + [p for p in root.iterdir() if p.is_dir()]
@@ -300,7 +322,7 @@ def install_game_from_official_zip(archive: Path) -> None:
     target = MODELS_DIR / "GAME"
     with tempfile.TemporaryDirectory(prefix="hfs-game-install-") as tmp:
         with zipfile.ZipFile(archive) as bundle:
-            bundle.extractall(tmp)
+            safe_extractall(bundle, Path(tmp))
         root = Path(tmp) / GAME_RELEASE_DIR
         if not root.is_dir():
             root = Path(tmp)
@@ -415,7 +437,7 @@ def verify_asset(archive: Path, manifest: dict) -> list[str]:
         if problems:
             return problems
         with tempfile.TemporaryDirectory(prefix="hfs-models-verify-") as tmp:
-            bundle.extractall(tmp)
+            safe_extractall(bundle, Path(tmp))
             problems += verify_hashes(Path(tmp), manifest)
     sidecar = archive.with_name(archive.name + ".sha256")
     if sidecar.is_file():
