@@ -70,6 +70,28 @@ def scan_roots():
     return roots
 
 
+def _raw_string_end(src, i):
+    """If `src[i:]` starts a Rust raw string (`r"..."`, `r#"..."#`, `br#"..."#`,
+    `cr#"..."#`), return the index right after its closing delimiter; else None.
+    """
+    n = len(src)
+    j = i
+    if j < n and src[j] in ('b', 'c'):
+        j += 1
+    if j >= n or src[j] != 'r':
+        return None
+    j += 1
+    hashes = 0
+    while j < n and src[j] == '#':
+        hashes += 1
+        j += 1
+    if j >= n or src[j] != '"':
+        return None
+    closing = '"' + ('#' * hashes)
+    end = src.find(closing, j + 1)
+    return n if end == -1 else end + len(closing)
+
+
 def count_braces(src, start):
     i = start
     n = len(src)
@@ -93,6 +115,11 @@ def count_braces(src, start):
                 else:
                     i += 1
             continue
+        if c in ('r', 'b', 'c'):
+            raw_end = _raw_string_end(src, i)
+            if raw_end is not None:
+                i = raw_end
+                continue
         if c == '"':
             i += 1
             while i < n:
@@ -105,7 +132,7 @@ def count_braces(src, start):
                 i += 1
             continue
         if c == "'":
-            m = re.match(r"'(\\.|[^\\'])'", src[i:])
+            m = re.match(r"'(\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\}|.)|[^\\'\"])'", src[i:])
             if m:
                 i += m.end()
                 continue
@@ -122,14 +149,23 @@ def count_braces(src, start):
 
 
 # 【为什么不是一句 `#[cfg(test)]\s*mod \w+`】那样只认裸 `mod`。测试模块普遍写成
-# `#[cfg(test)]\n pub(crate) mod tests {`（`editor/session.rs` 就是），带可见性的那一种
-# 匹配不上，整个模块体于是被当成**生产代码**扫描 —— 里面每一句断言都会被算成违规。
-# 这个门禁曾经因此对着一个只出现在 `assert!` 里的 `error.contains(` 报红，而基线允许 0。
+# `#[cfg(test)]\n pub(crate) mod tests {`（`editor/session.rs` 就是），或共享测试支撑模块
+# `#[cfg(any(test, feature = "test-support"))] pub mod test_support {`（产品构建由
+# `format_feature_boundary` 钉死绝不启用 `test-support`）。带可见性或 `test-support`
+# 门控的写法匹配不上时，整个模块体会被当成**生产代码**扫描。
+TEST_CFG_ATTR = (
+    r'#\[cfg\('
+    r'(?:test|feature\s*=\s*"test-support"|any\(\s*test\s*,\s*feature\s*=\s*"test-support"\s*\))'
+    r'\)\]'
+)
+
+INTER_ATTR_TRIVIA = r'(?:\s|//[^\n]*\n|/\*[\s\S]*?\*/|#\[[^\]]*\])*'
+
 CFG_TEST_MOD = re.compile(
-    r'#\[cfg\(test\)\]'                 # the attribute itself
-    r'(?:\s*#\[[^\]]*\])*'              # any further attributes on the item
-    r'\s*(?:pub(?:\s*\([^)]*\))?\s+)?'  # optional visibility (pub / pub(crate) / …)
-    r'mod\s+\w+\s*\{'                    # the module body
+    TEST_CFG_ATTR                        # the cfg(test / test-support) attribute
+    + INTER_ATTR_TRIVIA                  # comments or further attributes on the item
+    + r'(?:pub(?:\s*\([^)]*\))?\s+)?'    # optional visibility (pub / pub(crate) / …)
+    + r'mod\s+\w+\s*\{'                  # the module body
 )
 
 
@@ -151,15 +187,21 @@ def is_test_path(rel_path):
 
 
 def test_only_modules(root):
-    """Absolute paths of files whose module is declared as `#[cfg(test)] mod X;`.
+    """Absolute paths of files whose module is declared as `#[cfg(test)] mod X;`
+    (or `#[cfg(any(test, feature = "test-support"))] mod X;`).
 
     【Why this is not just a filename rule】`src/test_host.rs` implements the ARA
     test host: it is full of `extern "C"` callbacks that a real host never calls,
-    and it is gated by `#[cfg(test)] mod test_host;` in `lib.rs`. Naming it in a
-    list here would rot; reading the parent's declaration cannot.
+    and it is gated by `#[cfg(any(test, feature = "test-support"))] mod test_host;`
+    in `lib.rs`. Naming it in a list here would rot; reading the parent's
+    declaration cannot.
     """
     declared = set()
-    pattern = re.compile(r'#\[cfg\(test\)\]\s*mod\s+(\w+)\s*;')
+    pattern = re.compile(
+        TEST_CFG_ATTR
+        + INTER_ATTR_TRIVIA
+        + r'(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+(\w+)\s*;'
+    )
     for dirpath, _dirs, files in os.walk(root):
         for fn in files:
             if not fn.endswith('.rs'):
@@ -249,7 +291,12 @@ def format_crate_roots():
     unguarded extern through with a green gate - the exact blind spot this
     gate exists to close.
     """
-    prefixes = ("hifishifter-plugin", "hifishifter-clap", "hifishifter-au")
+    prefixes = (
+        "hifishifter-plugin",
+        "hifishifter-vst3",
+        "hifishifter-clap",
+        "hifishifter-au",
+    )
     roots = [r for r in scan_roots() if r.split("/")[0].startswith(prefixes)]
     if not roots:
         raise SystemExit("check-ffi-guards: no plug-in format crate found")
