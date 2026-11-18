@@ -18,11 +18,11 @@ use std::sync::Mutex;
 
 static mut ASSERT_FUNCTION: ARAAssertFunction = None;
 /// 相同 ARA generation 的测试工厂必须共享同一 assert-function 地址。
-pub(crate) fn assert_address() -> *mut ARAAssertFunction {
+pub fn assert_address() -> *mut ARAAssertFunction {
     &raw mut ASSERT_FUNCTION
 }
 
-pub(crate) struct HostFixture {
+pub struct HostFixture {
     pub planes: Vec<Vec<f32>>,
     pub created: AtomicUsize,
     pub destroyed: AtomicUsize,

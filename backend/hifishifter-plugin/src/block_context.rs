@@ -110,7 +110,10 @@ impl BlockContext {
     ///
     /// 【为什么集中在这里】VST3 的 `state` 位是本仓库里**唯一**需要按 SDK 语义解码的
     /// 一处；解码之后所有消费方只看布尔与 `Option`，不再各自去按位与。
-    pub(crate) fn from_vst3(context: &crate::audio_abi::ProcessContext) -> Self {
+    ///
+    /// 【为什么 pub】`hifishifter-vst3` 外壳把宿主的 `ProcessContext` 转成中立描述的
+    /// 唯一入口就是它；CLAP 不经这条路径（它直接构造 [`BlockContext`] 字段）。
+    pub fn from_vst3(context: &crate::audio_abi::ProcessContext) -> Self {
         use crate::audio_abi::{
             PROCESS_CONTEXT_CONTINUOUS_VALID, PROCESS_CONTEXT_CYCLE_ACTIVE,
             PROCESS_CONTEXT_CYCLE_VALID, PROCESS_CONTEXT_PLAYING,

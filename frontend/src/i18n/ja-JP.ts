@@ -732,8 +732,6 @@ export const jaJP = {
     ctx_channel_mode: "チャンネルモード",
     ctx_group: "グループ",
     ctx_scan_fake_stereo: "疑似ステレオをスキャンして変換",
-    ctx_scan_fake_stereo_hint:
-        "左右の内容が同一の素材はモノラルに折りたたむと、聴感は変わらずレンダリング時間が半減します。一括処理は 1 回の元に戻す操作にまとまります。",
     clip_channel_import_dialog_title: "取り込み時のチャンネル処理",
     clip_channel_import_dialog_desc:
         "取り込み時、左右チャンネルの内容が同一の「疑似ステレオ」素材をモノラルに折りたたみます。",
@@ -872,8 +870,6 @@ export const jaJP = {
     ctx_replace_midi: "MIDIを置換",
     ctx_replace_midi_all: "すべてのMIDIを置換",
     ctx_split_at_playhead: "再生ヘッドで分割",
-    ctx_split_multi_reason: "選択したすべてのクリップを再生ヘッドで分割できる必要があります",
-    ctx_split_playhead_reason: "再生ヘッドがクリップの範囲内にある必要があります",
     ctx_silence_detection: "無音検出...",
     silence_method: "検出方式",
     silence_method_rms: "RMS（エネルギー）",
@@ -903,7 +899,6 @@ export const jaJP = {
     silence_preview_clip: "{n} 箇所、計 {dur}s",
     silence_skipped: "スキップ",
     silence_more_clips: "...他 {n} クリップ",
-    silence_no_audio_source: "選択したクリップに音声ソースがありません",
     silence_apply: "適用",
     silence_double_click_reset: "パラメータをダブルクリックでデフォルトに戻す",
     silence_applying: "適用中...",
@@ -1732,7 +1727,6 @@ export const jaJP = {
     appearance_font_search_placeholder: "フォント検索...",
     appearance_font_no_results: "一致するフォントが見つかりません",
     appearance_font_count: "{count} フォントを検出",
-    appearance_reset: "リセット",
     appearance_font_restore_default: "既定フォントに戻す",
     appearance_apply: "適用",
     appearance_import_theme: "インポート...",
@@ -2033,6 +2027,8 @@ export const jaJP = {
     history_op_param_block_edit: "パラメータブロックを編集",
     history_op_import_midi: "MIDI をインポート",
     history_op_edit_midi: "MIDI データを編集",
+    history_op_host_pitch_import: "REAPER テイクのピッチを読み込み",
+    history_op_host_pitch_export: "REAPER テイクのピッチへ変換",
     history_op_import_vocalshifter: "VocalShifter プロジェクトをインポート",
     history_op_recording: "録音",
     history_op_batch: "一括操作",
@@ -2305,9 +2301,6 @@ export const jaJP = {
     plugin_transport_play: "ホストの再生/一時停止",
     plugin_transport_host_only:
         "再生はホストが制御します。プラグインの再生キーはホストに転送されます。",
-    plugin_feature_unavailable: "この機能は VST/ARA プラグインでは未提供です",
-    plugin_reverse_unavailable:
-        "逆再生はホストのアイテム操作です。ホストでこのクリップを逆再生してください",
     // ── キャプチャ（ARA 非対応ホストで、ホストの再生音を取り込む）────────────
     capture_settings_title: "キャプチャ設定",
     capture_settings_desc:
@@ -2356,6 +2349,8 @@ export const jaJP = {
     plugin_apply_analyzing_hint:
         "この工程は素材の長さに比例して数秒から数分かかります。解析中は生録音を再生します。",
     plugin_apply_rendering: "合成中...",
+    plugin_render_background_hint:
+        "バックグラウンドで新しいバージョンを生成中です。現在聞こえているのは前のバージョンです。",
     plugin_daw_controlled_reason:
         "ホストが制御します。ファイル、クリップのジオメトリ、テンポ、拍子、再生はホスト側で操作してください",
     cap_reason_host_owns: "この操作はホストが担当します（プラグインは引き受けません）",
@@ -2363,6 +2358,29 @@ export const jaJP = {
     cap_reason_app_only: "スタンドアロン版でのみ使用できます",
     cap_reason_plugin_only: "プラグインでのみ使用できます",
     cap_reason_piano_roll_only: "パラメータエディタでのみ有効です",
+    cap_reason_not_in_plugin: "プラグインでは利用できません",
+    // ── クリップメニュー：REAPER テイクのピッチ変換 ────────────────
+    ctx_host_pitch: "REAPER ピッチ",
+    ctx_host_pitch_import: "REAPER テイクのピッチを読み込む",
+    ctx_host_pitch_export: "REAPER テイクのピッチエンベロープへ変換",
+
+    // ── パラメータエディタ：REAPER ピッチ相互変換メニュー ────────────
+    // 【なぜここに作用域を置くか】パラメータエディタにしか出ない（タイムラインの
+    // クリップメニューは 1 クリップ単位）。
+    pitch_bridge_menu_tooltip: "REAPER テイクピッチの相互変換",
+    pitch_bridge_import_heading: "テイクピッチを読み込む",
+    pitch_bridge_export_heading: "テイクピッチエンベロープへ変換",
+    pitch_bridge_scope_track: "現在のトラック",
+    pitch_bridge_scope_selection: "選択範囲内",
+    pitch_bridge_scope_all: "すべてのクリップ",
+    pitch_bridge_scope_item: "{scope}（{count}）",
+    pitch_bridge_tooltip_export_track: "テイクピッチ変換：現在のトラックを書き出し",
+    pitch_bridge_nothing_converted: "変換できるクリップがありません",
+    pitch_bridge_skipped_clips: "{count} 個のクリップをスキップ",
+    pitch_bridge_skipped_tooltip: "変換できるピッチデータがないクリップは変更していません",
+    status_pitch_bridge_imported: "{count} 個のクリップにテイクピッチを読み込みました",
+    status_pitch_bridge_exported: "{count} 個のクリップにピッチエンベロープを書き込みました",
+    status_pitch_bridge_failed: "ピッチ変換に失敗しました",
 
     // ── ホストフェードの tooltip 補足 ───────────────────────────────
     fade_shape_axes_owned_by_host:
@@ -2421,4 +2439,12 @@ export const jaJP = {
     installer_uninstall_opt_cache_desc:
         "波形/レンダリング キャッシュ、ログ、WebView データ、一時ファイル。",
     installer_repair_done: "修復が完了しました。",
+    installer_reinstall_options_title: "旧バージョンのアンインストール",
+    installer_reinstall_options_subtitle:
+        "インストール前に共有モデルを削除するか選択してください。",
+    installer_reinstall_options_top:
+        "HiFiShifter の旧バージョンが見つかりました。先にアンインストールし、新しいバージョンは同じフォルダーにインストールします。",
+    installer_reinstall_uninstalling: "旧バージョンをアンインストール中...",
+    installer_reinstall_failed:
+        "旧バージョンをアンインストールできませんでした。手動でアンインストールしてから再試行してください。",
 } as const;

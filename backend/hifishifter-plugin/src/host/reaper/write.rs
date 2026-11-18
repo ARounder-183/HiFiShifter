@@ -199,6 +199,22 @@ impl NativeHost {
     pub(crate) fn has_project_history(&self) -> bool {
         self.history.is_some() && self.can_edit_clips()
     }
+    /// take 的**播放方向**（倒放）能否写回。
+    ///
+    /// 【为什么不需要 `geometry`】倒放只改文本结构（SOURCE SECTION + SOFFS），
+    /// 走的是 `Get/SetItemStateChunk`，与逐字段 setter 无关。要求 `geometry` 会
+    /// 把一条本来可用的路径挡在门外（反之亦然）。
+    pub(crate) fn can_reverse_clips(&self) -> bool {
+        self.item_state.is_some()
+    }
+    /// take 的**音高包络**能否读写（REAPER 的 PITCHENV）。
+    ///
+    /// 【为什么与倒放同一条判据】两者都走 item state chunk：一个换 SOURCE 结构，
+    /// 一个换 PITCHENV 块。缺 `Get/SetItemStateChunk` 时两条路一起不可用，
+    /// 有它时两条路一起可用 —— 拆成两位只会制造两个必然同值的布尔。
+    pub(crate) fn can_bridge_take_pitch(&self) -> bool {
+        self.can_edit_clips() && self.item_state.is_some()
+    }
     /// 参数和几何共用所属project历史；没有item时也能为首次导入/参数编辑开启Undo。
     pub(crate) fn begin_project_undo(
         self: &Arc<Self>,
@@ -523,6 +539,17 @@ impl HostClipTarget {
     pub(crate) fn same_project(&self, other: &Self) -> bool {
         self.project == other.project
     }
+    /// 这个 target 所在的宿主能不能写回 take 方向。
+    ///
+    /// 【为什么委托给 host】能力位是**宿主级**的（`Get/SetItemStateChunk` 存不存在），
+    /// 不是 item 级的；target 只是"这个宿主上的一个对象"。
+    pub(crate) fn can_reverse_clips(&self) -> bool {
+        self.host.can_reverse_clips()
+    }
+    /// 是不是同一个宿主 item（回滚时用来避免同一对象被撤两次）。
+    pub(crate) fn same_item(&self, other: &Self) -> bool {
+        self.project == other.project && self.item == other.item
+    }
     pub(crate) fn import_target(
         &self,
         authorized: &impl Fn() -> bool,
@@ -710,12 +737,19 @@ impl HostClipTarget {
         self.verify(authorized)?;
         if !matches!(
             name.to_bytes(),
-            b"D_STARTOFFS" | b"D_PLAYRATE" | b"B_PPITCH" | b"I_CHANMODE"
+            b"D_STARTOFFS" | b"D_PLAYRATE" | b"B_PPITCH" | b"I_CHANMODE" | b"D_PITCH"
         ) {
             return Err("unsupported host take field".into());
         }
         if !value.is_finite() {
             return Err("nonfinite host take edit".into());
+        }
+        // 【为什么要给 D_PITCH 设上界】音高迁移要把宿主侧清零；而清零是一个**写**。
+        // 没有上界时一次误算（例如把"音分"当半音）会把 take 推到几十个八度之外 ——
+        // 用户听到的是噪声，看不出是一个单位错误。±240 半音 = ±20 八度，
+        // 远超任何音乐用途，又足以拦住量级错误。
+        if name == c"D_PITCH" && value.abs() > 240. {
+            return Err("take pitch outside the supported range -240..240 semitones".into());
         }
         let api = self.api()?;
         if !checked(authorized, || unsafe {
@@ -727,6 +761,118 @@ impl HostClipTarget {
             ));
         }
         Ok(())
+    }
+    /// 读取该 item 的完整 state chunk（写回结构前必须先在宿主线程拿到原文）。
+    ///
+    /// 【为什么在 target 上而不是直接拿 host 的 API】item 指针是冻结并校验过的
+    /// （`verify` 会核对 GUID）；绕开它去拿"当前选中 item"的 chunk 会写错对象。
+    pub(crate) fn item_state_chunk(
+        &self,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<String, String> {
+        if std::thread::current().id() != self.host.thread {
+            return self.host.on_host(|| self.item_state_chunk(authorized))?;
+        }
+        self.verify(authorized)?;
+        let api = self
+            .host
+            .item_state
+            .as_ref()
+            .ok_or("REAPER item state API unavailable")?;
+        let mut capacity = 64 * 1024_usize;
+        while capacity <= super::item_chunk::MAX_ITEM_CHUNK_BYTES {
+            let mut buffer = vec![0_u8; capacity];
+            let ok = checked(authorized, || unsafe {
+                (api.get)(
+                    self.item as *mut c_void,
+                    buffer.as_mut_ptr().cast(),
+                    capacity as i32,
+                    true,
+                )
+            })?;
+            if !ok {
+                return Err("REAPER refused to read the item state".into());
+            }
+            // 宿主把 chunk 写成 NUL 结尾的 C 串；没写满就说明读完了一整份。
+            let end = buffer.iter().position(|byte| *byte == 0);
+            if let Some(end) = end {
+                let text = String::from_utf8(buffer[..end].to_vec())
+                    .map_err(|_| "host item state is not valid UTF-8".to_string())?;
+                return Ok(text);
+            }
+            capacity *= 2;
+        }
+        Err("host item state exceeds the supported budget".into())
+    }
+    /// 把改写后的 state chunk 交回宿主。
+    ///
+    /// 与 `item_state_chunk` 成对出现：调用方必须先读原文、只在**确实要改**时才写，
+    /// 因为 `SetItemStateChunk` 会让宿主重建这个 item（选择态、undo 点都会受影响）。
+    pub(crate) fn set_item_state_chunk(
+        &self,
+        chunk: &str,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<(), String> {
+        if std::thread::current().id() != self.host.thread {
+            return self
+                .host
+                .on_host(|| self.set_item_state_chunk(chunk, authorized))?;
+        }
+        self.verify(authorized)?;
+        if chunk.is_empty()
+            || chunk.len() > super::item_chunk::MAX_ITEM_CHUNK_BYTES
+            || chunk.contains('\0')
+        {
+            return Err("invalid item state to write".into());
+        }
+        let api = self
+            .host
+            .item_state
+            .as_ref()
+            .ok_or("REAPER item state API unavailable")?;
+        let text = std::ffi::CString::new(chunk).map_err(|_| "item state contains NUL")?;
+        if !checked(authorized, || unsafe {
+            (api.set)(self.item as *mut c_void, text.as_ptr(), true)
+        })? {
+            return Err("REAPER rejected the item state".into());
+        }
+        Ok(())
+    }
+    /// 读该 take 的音高包络（chunk 里的 `<PITCHENV>`）。
+    pub(crate) fn take_pitch_points(
+        &self,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<super::take_pitch::TakePitch, String> {
+        let chunk = self.item_state_chunk(authorized)?;
+        super::take_pitch::read_take_pitch(&chunk, &self.geometry.take_id)
+    }
+    /// 用 `points` 整块替换该 take 的音高包络（空列表 = 删除）。
+    pub(crate) fn write_take_pitch_points(
+        &self,
+        points: &[hifishifter_kernel::pitch_bridge::EnvelopePoint],
+        authorized: &impl Fn() -> bool,
+    ) -> Result<(), String> {
+        let chunk = self.item_state_chunk(authorized)?;
+        let rewritten =
+            super::take_pitch::rewrite_take_pitch(&chunk, &self.geometry.take_id, points)?;
+        if rewritten == chunk {
+            return Ok(());
+        }
+        self.set_item_state_chunk(&rewritten, authorized)
+    }
+    /// 宿主此刻报告的方向位（`PCM_Source_GetSectionInfo`）。
+    ///
+    /// 写回之后必须用它做一次"写→读→比"自校验：SECTION MODE 的取值属于宿主，
+    /// 仓库里没有第二份证据能替代这次实测。
+    pub(crate) fn reversed_now(&self, authorized: &impl Fn() -> bool) -> Result<bool, String> {
+        if std::thread::current().id() != self.host.thread {
+            return self.host.on_host(|| self.reversed_now(authorized))?;
+        }
+        self.verify(authorized)?;
+        self.host
+            .take_direction_facts(self.take as *mut c_void, authorized)
+            .map(|facts| facts.reversed)
+            .ok_or_else(|| "the host did not report the take direction".to_string())
     }
     /// 只重命名当前真实active take；字符串通过REAPER官方setter写入，不改HFS孤立名称。
     pub(crate) fn set_take_name(

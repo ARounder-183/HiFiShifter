@@ -54,35 +54,42 @@ export function createFrameCommitter<T>(
     // 用对象包一层：`T` 本身可能是 `null`，需要区分"没有挂起值"与"挂起值是 null"。
     let pending: { value: T } | null = null;
     let handle: number | null = null;
+    // 每次调度都带一个独立令牌。cancel / flush 后浏览器仍可能投递已排队的
+    // rAF 回调；旧令牌一律作废，绝不让它提前提交新一轮挂起值或抢占新帧。
+    let activeToken: object | null = null;
 
-    const run = () => {
+    const run = (token: object | null) => {
+        if (token === null || token !== activeToken) return;
+        activeToken = null;
         handle = null;
         const next = pending;
         pending = null;
         if (next === null) return;
         commit(next.value);
         // 提交期间又 schedule 了新的值：再排一帧（绝不在同一帧里递归提交）。
-        if (pending !== null && handle === null) handle = scheduler.request(run);
+        if (pending !== null && handle === null) {
+            const nextToken = {};
+            activeToken = nextToken;
+            handle = scheduler.request(() => run(nextToken));
+        }
     };
-
     return {
         schedule(value: T) {
             pending = { value };
             if (handle !== null) return;
-            handle = scheduler.request(run);
+            const token = {};
+            activeToken = token;
+            handle = scheduler.request(() => run(token));
         },
         flush() {
-            if (handle !== null) {
-                scheduler.cancel(handle);
-                handle = null;
-            }
-            run();
+            if (handle !== null) scheduler.cancel(handle);
+            handle = null;
+            run(activeToken);
         },
         cancel() {
-            if (handle !== null) {
-                scheduler.cancel(handle);
-                handle = null;
-            }
+            if (handle !== null) scheduler.cancel(handle);
+            activeToken = null;
+            handle = null;
             pending = null;
         },
         isPending() {

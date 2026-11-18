@@ -13,6 +13,7 @@ use crate::reaper_parser::{
 use crate::state::{
     Clip, PitchAnalysisAlgo, TempoPointData, TimelineState, Track, TrackParamsState,
 };
+use hifishifter_kernel::take_geometry::ForwardWindow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
@@ -166,11 +167,17 @@ fn take_geometry(
     is_reversed: bool,
     is_loop: bool,
 ) -> hifishifter_kernel::take_geometry::TakeGeometry {
-    use hifishifter_kernel::take_geometry::{SourceSection, TakeGeometry};
+    use hifishifter_kernel::take_geometry::TakeGeometry;
     let section = take.source.as_ref().and_then(|source| {
-        source.section_start_sec.map(|start_sec| SourceSection {
-            start_sec,
-            length_sec: source.section_length_sec,
+        source.section_start_sec.and_then(|start_sec| {
+            // 【为什么按 MODE 位判】`MODE 1/3` 是"整份媒体"（宿主忽略 STARTPOS/
+            // LENGTH），把这两个字段当段边界会让镜像轴从 D 缩成段长，倒放 take 整体
+            // 平移 `2·soffs − D`（读数表见 `take_geometry` 的模块文档）。
+            hifishifter_kernel::take_geometry::section_from_rpp(
+                source.section_mode,
+                start_sec,
+                source.section_length_sec,
+            )
         })
     });
     TakeGeometry {
@@ -180,8 +187,9 @@ fn take_geometry(
         play_rate_signed: take.play_rate.first().copied().unwrap_or(1.0),
         media_duration_sec,
         section,
-        // 【为什么是 `Some`】App 的方向判据是 `play_rate < 0 || section_mode > 0`，
-        // 两个来源都在 `.rpp` 里读得到 —— 这一侧永远**知道**方向。
+        // 【为什么是 `Some`】App 的方向判据是 `play_rate < 0 || section_mode_reversed`
+        // （`MODE` 的**位**，不是 `> 0`），两个来源都在 `.rpp` 里读得到 ——
+        // 这一侧永远**知道**方向。
         reversed: Some(is_reversed),
         loop_enabled: is_loop,
     }
@@ -293,11 +301,9 @@ fn build_audio_clip_take(
     // 该 take 自身存在激活 VOLENV 时其音量钮被取代（各 take 独立判定）。
     let take_volume_overridden = take_volume_envelope_active(take);
     let raw_play_rate = take.play_rate.first().copied().unwrap_or(1.0);
-    let source_section_reversed = take
-        .source
-        .as_ref()
-        .map(|src| src.section_mode > 0)
-        .unwrap_or(false);
+    let source_section_reversed = take.source.as_ref().is_some_and(|src| {
+        hifishifter_kernel::take_geometry::section_mode_reversed(src.section_mode)
+    });
     let item_reversed = raw_play_rate < 0.0 || source_section_reversed;
     let play_rate = raw_play_rate.abs().max(0.01);
 
@@ -341,12 +347,27 @@ fn build_audio_clip_take(
     // 一次上界，而退化时本来就没超上界），因此是死代码。退化只在"宿主报了越界
     // 镜像读数"或"正放 Loop 锚点被钳到段末端"时出现，见
     // `hifishifter_kernel::take_geometry` 的边界测试。
-    let window = take_geometry(take, item.length, duration_sec, item_reversed, item_loop)
-        .forward_source_window()
-        // 【为什么这里可以 `expect`】.rpp 给出了方向，媒体时长来自**已解码的文件**
-        // （调用方保证），于是轴必然存在。这是本仓库里唯一"两个输入都在手"的路径 ——
-        // 它也因此是本方案的对拍基准。
-        .expect("an imported take always has a direction and a decoded media duration");
+    let geometry = take_geometry(take, item.length, duration_sec, item_reversed, item_loop);
+    let window = match geometry.forward_source_window() {
+        Some(window) => window,
+        None => {
+            // 【None 是合法输入，不是不变式破坏】倒放 take 的媒体时长**并不总是可得**
+            // ——源文件缺失 / 头解析失败时上面只记 skipped_files 就继续，duration_sec
+            // 保持 None，于是镜像轴（max_bound）不存在，倒放锚点解不出窗口。此前这里
+            // `expect`，一次这样的导入会让整条命令以 panic 收场（guard_command 兜住
+            // 不崩进程，但整个工程导入失败）。按内核契约降级：**保留宿主镜像坐标并
+            // 留读数** —— 窗口退回 [SOFFS, SOFFS + 消耗量]（与正向未知时长时内核
+            // 内部的退化同形），reversed 读数原样保留，不编造镜像轴。
+            ForwardWindow::new(
+                take.s_offs.max(0.0),
+                take.s_offs.max(0.0) + geometry.consumed_sec(),
+            )
+            // item 长度为 NaN 等退化输入连这个窗口也给不出：按"无内容"处理
+            // （该 take 渲染为静音）。0..0 恒构成窗口，expect 承载的只是
+            // "逻辑上不可达"。
+            .unwrap_or_else(|| ForwardWindow::new(0.0, 0.0).expect("0..0 is always a window"))
+        }
+    };
     let (source_start, source_end) = (window.start(), window.end());
 
     let name = if take.name.trim().is_empty() {
@@ -1281,11 +1302,9 @@ fn process_item(
 
     // 获取 take 参数
     let raw_play_rate = take.play_rate.first().copied().unwrap_or(1.0);
-    let source_section_reversed = take
-        .source
-        .as_ref()
-        .map(|src| src.section_mode > 0)
-        .unwrap_or(false);
+    let source_section_reversed = take.source.as_ref().is_some_and(|src| {
+        hifishifter_kernel::take_geometry::section_mode_reversed(src.section_mode)
+    });
     let item_reversed = raw_play_rate < 0.0 || source_section_reversed;
     let play_rate = raw_play_rate.abs().max(0.01);
     let item_pitch_semitones = take.play_rate.get(2).copied().unwrap_or(0.0); // 整体音高偏移
@@ -1564,9 +1583,21 @@ fn process_item(
         // 无 stretch markers：使用 take 的 play_rate。窗口同样由共享解算给出
         // （见 `take_geometry`），两条导入路径不可能再分叉。
         let effective_rate = play_rate;
-        let window = take_geometry(take, item_length, duration_sec, item_reversed, item_loop)
-            .forward_source_window()
-            .expect("an imported take always has a direction and a decoded media duration");
+        let geometry = take_geometry(take, item_length, duration_sec, item_reversed, item_loop);
+        let window = match geometry.forward_source_window() {
+            Some(window) => window,
+            None => {
+                // 与 build_audio_clip_take 的降级同一契约：倒放 + 媒体时长读不到
+                // （源文件缺失 / 头解析失败只记 skipped）时镜像轴不存在，按内核
+                // 契约"保留宿主镜像坐标并留读数"退回 [SOFFS, SOFFS + 消耗量]，
+                // 不编造镜像轴（此前 `expect` 会让整条导入命令 panic）。
+                ForwardWindow::new(
+                    take.s_offs.max(0.0),
+                    take.s_offs.max(0.0) + geometry.consumed_sec(),
+                )
+                .unwrap_or_else(|| ForwardWindow::new(0.0, 0.0).expect("0..0 is always a window"))
+            }
+        };
         let (source_start, source_end) = (window.start(), window.end());
         // 构造全部 take（default + 显式 TAKE 块），active take 由选择规则决定。
         let mut hs_takes: Vec<crate::state::ClipTake> = Vec::new();

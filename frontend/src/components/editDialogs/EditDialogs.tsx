@@ -457,7 +457,6 @@ interface QuantizeProps {
     onOpenChange: (open: boolean) => void;
     valueMode?: boolean;
     defaultQuantizeUnit?: number;
-    defaultTolerance?: number;
     defaultScale?: ScaleKey;
     defaultUseProjectScale?: boolean;
     projectScaleLabel?: string;
@@ -477,7 +476,6 @@ export function QuantizeDialog({
     onOpenChange,
     valueMode = false,
     defaultQuantizeUnit = 1,
-    defaultTolerance = 0,
     defaultScale = "C",
     defaultUseProjectScale = true,
     projectScaleLabel,
@@ -486,7 +484,6 @@ export function QuantizeDialog({
     onConfirm,
 }: QuantizeProps) {
     const { tf } = useI18n();
-    const toleranceDefault = defaultTolerance ?? defaultToleranceCents;
     const [unit, setUnit] = useState<"semitone" | "scale">("semitone");
     const [scaleValue, setScaleValue] = useDialogDraft<string>(open, () =>
         defaultUseProjectScale ? "__project__" : defaultScale,
@@ -501,7 +498,7 @@ export function QuantizeDialog({
         [projectScaleLabel, customScalePresets, tf],
     );
     const [toleranceCents, setToleranceCents] = useDialogDraft(open, () =>
-        String(toleranceDefault),
+        String(defaultToleranceCents),
     );
     const [quantizeUnit, setQuantizeUnit] = useDialogDraft(open, () => String(defaultQuantizeUnit));
     const [smoothness, setSmoothness] = useDialogDraft(open, () =>
@@ -608,7 +605,6 @@ interface MeanQuantizeProps {
     onOpenChange: (open: boolean) => void;
     valueMode?: boolean;
     defaultQuantizeUnit?: number;
-    defaultTolerance?: number;
     defaultScale?: ScaleKey;
     defaultUseProjectScale?: boolean;
     projectScaleLabel?: string;
@@ -628,7 +624,6 @@ export function MeanQuantizeDialog({
     onOpenChange,
     valueMode = false,
     defaultQuantizeUnit = 1,
-    defaultTolerance = 0,
     defaultScale = "C",
     defaultUseProjectScale = true,
     projectScaleLabel,
@@ -637,7 +632,6 @@ export function MeanQuantizeDialog({
     onConfirm,
 }: MeanQuantizeProps) {
     const { tf } = useI18n();
-    const toleranceDefault = defaultTolerance ?? defaultToleranceCents;
     const [unit, setUnit] = useState<"semitone" | "scale">("semitone");
     const [scaleValue, setScaleValue] = useDialogDraft<string>(open, () =>
         defaultUseProjectScale ? "__project__" : defaultScale,
@@ -652,7 +646,7 @@ export function MeanQuantizeDialog({
         [projectScaleLabel, customScalePresets, tf],
     );
     const [toleranceCents, setToleranceCents] = useDialogDraft(open, () =>
-        String(toleranceDefault),
+        String(defaultToleranceCents),
     );
     const [quantizeUnit, setQuantizeUnit] = useDialogDraft(open, () => String(defaultQuantizeUnit));
     const [smoothness, setSmoothness] = useDialogDraft(open, () =>

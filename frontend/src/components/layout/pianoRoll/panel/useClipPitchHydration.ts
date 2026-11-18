@@ -6,7 +6,7 @@
  * 发生，若不在这里补一次，参考线会永久空白。
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { AppDispatch } from "../../../../app/store";
 import type { ClipInfo } from "../../../../features/session/sessionTypes";
@@ -22,6 +22,39 @@ export function useClipPitchHydration(args: {
     const { dispatch, editParam, clips, session } = args;
     const { showClipPitchOverlay, clipPitchCurves } = session;
     const requestedRef = useRef(new Set<string>());
+    // 分析完成代次：原线（`pitch_orig`）是异步算出来的，首次请求很可能还没算完。
+    // 收到 `pitch_orig_updated` 就把"已请求"集合清空并重取一次 —— 否则这一屏
+    // 永远停在"空白参考线"，而用户只能靠关掉再打开参考线来重试。
+    const [analysisEpoch, setAnalysisEpoch] = useState(0);
+
+    useEffect(() => {
+        let disposed = false;
+        let unlisten: (() => void) | null = null;
+
+        async function setup() {
+            try {
+                const mod = await import("../../../../services/hostEvents");
+                unlisten = await mod.listen<{ rootTrackId?: string }>("pitch_orig_updated", () => {
+                    if (disposed) return;
+                    requestedRef.current.clear();
+                    setAnalysisEpoch((value) => value + 1);
+                });
+                if (disposed) {
+                    unlisten();
+                    unlisten = null;
+                }
+            } catch {
+                // 浏览器 / pywebview 构建没有宿主事件口：只在首次挂载时取一次。
+            }
+        }
+
+        void setup();
+
+        return () => {
+            disposed = true;
+            if (unlisten) unlisten();
+        };
+    }, []);
 
     useEffect(() => {
         if (editParam !== "pitch" || !showClipPitchOverlay) return;
@@ -50,5 +83,5 @@ export function useClipPitchHydration(args: {
                 // 后端分析未完成 / 旧版本没有该命令：事件推送路径仍可用。
                 for (const clipId of missing) requestedRef.current.delete(clipId);
             });
-    }, [clipPitchCurves, clips, dispatch, editParam, showClipPitchOverlay]);
+    }, [analysisEpoch, clipPitchCurves, clips, dispatch, editParam, showClipPitchOverlay]);
 }

@@ -20,6 +20,9 @@ pub(super) fn mutates_audio(command: &str) -> bool {
             | "stretch_track_linked_params"
             // MIDI 导入整段改写音高曲线，与 `set_param_frames` 同一类改动。
             | "import_midi_to_pitch"
+            // REAPER 音高互转同样整段改写曲线（两个方向都会写），在途渲染必须作废。
+            | "import_host_take_pitch"
+            | "export_host_take_pitch"
             | "set_track_state"
             | "move_track"
             | "undo_timeline"
@@ -684,6 +687,432 @@ fn export_audio_to_file(
     }))
 }
 
+// ── REAPER take 音高 ⇄ HiFiShifter 参数线（一次性转换）─────────────────────
+//
+// 【两侧各管各的，**互不叠加**】REAPER 的 take 音高（`D_PITCH` / `PITCHENV`）是
+// **源级**播放属性：真机实测（REAPER 7.85）把 +12 半音写进 take 包络后，take FX 里
+// 生成的 440 Hz 测试音仍然是 440 Hz —— 音高处理发生在源级、早于 take FX。ARA 插件交给
+// 宿主的渲染结果同样落在那层之后（同族证据见
+// `docs/2026-11-17-take-envelope-axis-findings.md` 的附节：源级那一层是渲染实测，
+// ARA 那一层是推断 + 现场报障），宿主不会对它再做一遍重采样。于是：
+//
+// - 插件读到、并送去渲染的素材**不含** take 音高 ⇒ `pitch_edit` 必须原样保留；
+// - take 包络只在插件被旁路 / 移除时才作用于这段音频 ⇒ 两侧永远不会同时处理。
+//
+// 所以两个方向都是**复制**（copy）：谁也不清空对方。唯一要动的宿主数值是 item 级
+// `D_PITCH` —— 它与包络叠加，而「转换为 REAPER Take 音高包络」这条需求的语义就是
+// 让包络成为 REAPER 侧唯一的音高来源，因此导出后把它归零（导入方向本来就会把它的
+// 值加进 `pitch_edit`，归零不会丢信息）。
+
+/// 命令入参里的片段列表。
+fn pitch_bridge_clip_ids(input: &Value) -> Result<Vec<String>, String> {
+    let ids: Vec<String> = serde_json::from_value(input["clipIds"].clone())
+        .map_err(|_| "invalid clip id list".to_string())?;
+    if ids.is_empty() || ids.len() > 512 {
+        return Err("the pitch bridge needs 1..512 clips".into());
+    }
+    Ok(ids)
+}
+
+/// 这个片段唯一直接绑定的宿主 take（与 host_edit_target 同一口径）。
+///
+/// 【为什么这里必须先剥掉 namespace 前缀】编辑器时间线里的 id 是**呈现 id**
+/// （`hfs-ui-{pid}-{n}-ara-item-{guid}`，见 `EditorSession::rewrite_ids`），而
+/// `host_edit_target` 认的是**裸**宿主身份（`ara-item-{guid}`）。此前这条路径
+/// 直接把呈现 id 递进去，`strip_prefix("ara-item-")` 恒为 `None`，随后的
+/// `clip_ids` 反查也找不到 —— 于是**两个方向都恒失败**，用户看到的是
+/// "clip has no unique directly bound host take"（现场日志里每一次音高互转都是它）。
+/// `plan_host_edit` 一直有这一句，本函数当初漏了。
+fn pitch_bridge_target(
+    session: &EditorSession,
+    clip_id: &str,
+) -> Result<crate::host::HostClipTarget, String> {
+    let native_id = clip_id.strip_prefix(&session.namespace).unwrap_or(clip_id);
+    let document = session.document().ok_or("host timeline unavailable")?;
+    for owner in document.renderer_owners() {
+        if let Ok(target) = owner.host_edit_target(native_id) {
+            return Ok(target);
+        }
+    }
+    Err("clip has no unique directly bound host take".into())
+}
+
+/// 一个片段在桥接时需要的只读事实（全部在**不持时间线锁**时算好）。
+struct PitchBridgeClip {
+    /// 完整片段状态：导出方向要把它原样交给 `compute_clip_export_pitch_offsets`。
+    clip: Clip,
+    /// 时间线里的片段 id（含命名空间前缀，与命令入参同一口径）。
+    clip_id: String,
+    /// 这个片段唯一直接绑定的宿主 take（收集时解析一次，两个方向共用）。
+    target: crate::host::HostClipTarget,
+    root_track: String,
+    /// D_PITCH（半音）：REAPER 的 Item 音高偏移。
+    static_semitones: f64,
+    /// take 的音高包络点（u 域）。
+    points: Vec<hifishifter_kernel::pitch_bridge::EnvelopePoint>,
+    /// 这个 take 上**到底有没有**音高（`D_PITCH ≠ 0`，或包络里存在非零值）。
+    ///
+    /// 【为什么它是一位独立的事实】"没有音高"与"音高是 0"在 REAPER 里是同一件事
+    /// （都不变调），但在**导入**方向上是两件完全不同的事：把"没有音高"导进来，
+    /// 等于把整条音高线重置成原线 —— 用户画的每一笔都会消失。批量作用域必须能分辨
+    /// 这两者，否则"一键导入全部片段"就是一次静默的格式化。
+    ///
+    /// 【为什么不看 `<PITCHENV>` 块是否存在】`DEFSHAPE` 的默认值不进 `points`
+    /// （`read_take_pitch` 只读 `PT` 行），而一个只有默认值的包络在语义上仍然可能
+    /// 有音高。这里取**保守**判据：看不到任何非零值就当没有 —— 宁可少导入一条
+    /// （用户还能对单条片段走严格模式），也不要误删别人的音高线。
+    has_pitch: bool,
+}
+
+/// 片段的播放速率（非有限 / 非正 ⇒ 1，与渲染端同一口径）。
+fn pitch_bridge_rate(clip: &Clip) -> f64 {
+    if clip.playback_rate.is_finite() && clip.playback_rate > 0.0 {
+        clip.playback_rate as f64
+    } else {
+        1.0
+    }
+}
+
+/// 这条片段的音高分析**是否已经落地**（原线按当前布局组装完成）。
+///
+/// 【为什么用 `pitch_orig_key` 而不是"`pitch_orig` 是不是全 0"】全 0 既可能是
+/// "还没分析"，也可能是"分析完了，这段确实没有音高"。前者不能写、后者必须写（写出
+/// 空包络 = 让 REAPER 侧也回到"不变调"）。只有键能区分这两者：它描述的是"这一轮
+/// 原线是按哪个布局算的"，为空即表示这一轮还没算完。
+fn pitch_bridge_analysis_ready(timeline: &TimelineState, root_track: &str) -> bool {
+    timeline
+        .params_by_root_track
+        .get(root_track)
+        .is_some_and(|entry| entry.pitch_orig_key.is_some())
+}
+
+/// 命令是否走宽容模式（批量作用域）。
+///
+/// 【为什么默认是严格】单条片段（时间轴右键）映射不到宿主 take 时必须**报错**：
+/// 用户点的是那一条，静默跳过等于"点了没反应"。批量作用域相反 —— 500 条里有一条
+/// 不是 ARA 片段，不该让另外 499 条一条都转不了。
+fn pitch_bridge_tolerant(input: &Value) -> bool {
+    input["tolerant"].as_bool().unwrap_or(false)
+}
+
+/// 收集片段事实。
+///
+/// `tolerant` 为真时（批量作用域），映射不到宿主 take 的片段进 `unresolved` 而不是让
+/// 整批失败。
+fn pitch_bridge_collect(
+    session: &EditorSession,
+    clip_ids: &[String],
+    tolerant: bool,
+) -> Result<(Vec<PitchBridgeClip>, Vec<String>), String> {
+    let snapshot = session.timeline.lock_or_recover().clone();
+    let mut collected = Vec::with_capacity(clip_ids.len());
+    let mut unresolved: Vec<String> = Vec::new();
+    for clip_id in clip_ids {
+        let Some(clip) = snapshot
+            .clips
+            .iter()
+            .find(|clip| clip.id == *clip_id)
+            .cloned()
+        else {
+            if tolerant {
+                unresolved.push(clip_id.clone());
+                continue;
+            }
+            return Err("unknown editor clip".into());
+        };
+        // 一段解析拆成闭包：宽容模式下**任何**一条失败都只影响这一条。
+        let resolved = (|| -> Result<PitchBridgeClip, String> {
+            let root_track = snapshot
+                .resolve_root_track_id(&clip.track_id)
+                .ok_or("clip track has no root parameter line")?;
+            let target = pitch_bridge_target(session, clip_id)?;
+            // 先取出要用的两个数：`target` 随后整份移进结构体，之后再读它的字段
+            // 就是 use-after-move。
+            let static_semitones = target.geometry.take_pitch;
+            let pitch = target.take_pitch_points(&|| true)?;
+            let has_pitch = pitch.points.iter().any(|point| point.value.abs() > 1e-6)
+                || static_semitones.abs() > 1e-6;
+            Ok(PitchBridgeClip {
+                clip,
+                clip_id: clip_id.clone(),
+                target,
+                root_track,
+                static_semitones,
+                points: pitch.points,
+                has_pitch,
+            })
+        })();
+        match resolved {
+            Ok(entry) => collected.push(entry),
+            Err(error) if tolerant => {
+                log::debug!("[ara] pitch bridge skipped {clip_id}: {error}");
+                unresolved.push(clip_id.clone());
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok((collected, unresolved))
+}
+
+/// 方向 1：REAPER take 音高 → HiFiShifter 参数线。
+///
+/// 【宿主侧一个字节都不改】`D_PITCH` 与 `PITCHENV` 留在原处：它们只在插件被旁路 /
+/// 移除时作用，与插件渲染的音频永远不会同时处理（见本段开头的实测）。此前这条命令
+/// 会把宿主侧的包络删掉、`D_PITCH` 归零，用户丢掉的是他自己在 REAPER 里的数据。
+///
+/// 【批量作用域的两条额外判据】`tolerant` 为真时：
+///
+/// 1. 映射不到宿主 take 的片段跳过（进 `unresolved`），不让整批失败；
+/// 2. **take 上根本没有音高的片段一律不动**。导入一条"没有音高"的片段等于把它的
+///    音高线重置成原线；批量跑一遍就是把工程里没碰过音高的片段全部格式化。
+///    单条片段仍走严格模式 —— 用户明确点了那一条，"重置成原线"是他的意图。
+fn import_host_take_pitch(session: &EditorSession, input: &Value) -> Result<Value, String> {
+    let clip_ids = pitch_bridge_clip_ids(input)?;
+    let tolerant = pitch_bridge_tolerant(input);
+    let (clips, mut unresolved) = pitch_bridge_collect(session, &clip_ids, tolerant)?;
+
+    let mut converted = 0usize;
+    let mut written_frames = 0usize;
+    let mut skipped_frames = 0usize;
+    let mut windows: Vec<(String, u32, Vec<f32>, Vec<bool>)> = Vec::new();
+    {
+        let mut timeline = session.timeline.lock_or_recover();
+        let frame_period_ms = timeline.frame_period_ms().max(0.1);
+        let mut before_by_root: std::collections::BTreeMap<String, Vec<f32>> =
+            std::collections::BTreeMap::new();
+        for clip in &clips {
+            if tolerant && !clip.has_pitch {
+                unresolved.push(clip.clip_id.clone());
+                continue;
+            }
+            timeline.ensure_params_for_root(&clip.root_track);
+            let Some(entry) = timeline.params_by_root_track.get_mut(&clip.root_track) else {
+                return Err("params_missing".into());
+            };
+            before_by_root
+                .entry(clip.root_track.clone())
+                .or_insert_with(|| entry.pitch_edit.clone());
+            let start_sec = clip.clip.start_sec.max(0.0);
+            let length_sec = clip.clip.length_sec.max(0.0);
+            let rate = pitch_bridge_rate(&clip.clip);
+            let start_frame = ((start_sec * 1000.0) / frame_period_ms).round() as usize;
+            let count = (((length_sec * 1000.0) / frame_period_ms).ceil()).max(1.0) as usize;
+            let mut wrote_any = false;
+            for index in 0..count {
+                let frame = start_frame + index;
+                let orig = entry.pitch_orig.get(frame).copied().unwrap_or(0.0);
+                if !(orig.is_finite() && orig > 0.0) || frame >= entry.pitch_edit.len() {
+                    skipped_frames += 1;
+                    continue;
+                }
+                let offset_sec = index as f64 * frame_period_ms / 1000.0;
+                let u = hifishifter_kernel::pitch_bridge::offset_to_take_u(offset_sec, rate);
+                let value = clip.static_semitones
+                    + hifishifter_kernel::pitch_bridge::sample_envelope(&clip.points, u);
+                if !value.is_finite() {
+                    skipped_frames += 1;
+                    continue;
+                }
+                entry.pitch_edit[frame] = orig + value as f32;
+                written_frames += 1;
+                wrote_any = true;
+            }
+            if wrote_any {
+                converted += 1;
+            }
+        }
+        for (root, before) in before_by_root {
+            let Some(entry) = timeline.params_by_root_track.get(&root) else {
+                continue;
+            };
+            if let Some((start, values, present)) =
+                hifishifter_kernel::editor::midi_import::pitch_write_window(
+                    &before,
+                    &entry.pitch_edit,
+                )
+            {
+                windows.push((root, start, values, present));
+            }
+        }
+    }
+    // 【一次命令 = 一步撤销】旧实现每根根轨道各压一步：多轨选择下一次"导入"在撤销栈
+    // 上要按三次，而用户只点了一次。空窗口不压点 —— 那会留下一步"按了什么也没发生"。
+    if !windows.is_empty() {
+        session.checkpoint_authority_step_as(HistoryOp::HostPitchImport.key());
+    }
+    // 【权威写在锁外】与 MIDI 导入同一条理由：write_authority_frames 会再取一次
+    // 时间线锁，持锁调用即自死锁。撤销点已在上方压过，因此这里传 `false`。
+    for (root, start, values, present) in &windows {
+        match session.write_authority_frames(root, "pitch", *start, values, Some(present), false) {
+            Some(Ok(_)) => {}
+            Some(Err(error)) => return Err(error),
+            None => return Err("parameter authority disappeared during the pitch import".into()),
+        }
+    }
+    Ok(json!({
+        "ok": true,
+        "clips": clip_ids.len(),
+        "clipsConverted": converted,
+        "framesWritten": written_frames,
+        "framesSkipped": skipped_frames,
+        "unresolved": unresolved,
+    }))
+}
+
+/// 方向 2：HiFiShifter 参数线 → REAPER take 音高包络。
+///
+/// 【为什么**不**清空 HiFiShifter 的音高线】take 音高是源级属性，ARA 渲染结果在它之后
+/// （见本段开头的实测），所以包络根本不会作用到插件渲染出来的音频上 —— 清空只会让
+/// 用户"转换完就听不见音高了"（现场报障）。两侧各留一份，谁也不会被叠加两次。
+///
+/// 【"还没分析"与"音高线是平的"必须分开】`compute_clip_export_pitch_offsets` 返回
+/// `None`、或原线还是全 0 时，这条片段的曲线会被当成"平的" ⇒ 空断点 ⇒
+/// `rewrite_take_pitch` 删掉整个 `<PITCHENV>`。
+///
+/// - **单条片段**保持原语义：用户点的是那一条，看得见，而且只有一步撤销。
+/// - **批量作用域**里这不行：一次点击会顺手删掉几百条包络，而报告只会说"写了 N 条"。
+///   因此批量模式先用 `pitch_orig_key` 判断"这一轮的分析是否落地"，没落地的片段
+///   一律跳过并进 `unresolved`（见 `pitch_bridge_analysis_ready`）。
+fn export_host_take_pitch(session: &EditorSession, input: &Value) -> Result<Value, String> {
+    let clip_ids = pitch_bridge_clip_ids(input)?;
+    let tolerant = pitch_bridge_tolerant(input);
+    let (clips, mut unresolved) = pitch_bridge_collect(session, &clip_ids, tolerant)?;
+    let mut converted = 0usize;
+    let mut points_written = 0usize;
+    let mut plans: Vec<(
+        &PitchBridgeClip,
+        Vec<hifishifter_kernel::pitch_bridge::EnvelopePoint>,
+    )> = Vec::new();
+    {
+        let timeline = session.timeline.lock_or_recover();
+        let frame_period_ms = timeline.frame_period_ms().max(0.1);
+        for clip in &clips {
+            // 【批量作用域：分析还没落地的片段一律不写】此时 `pitch_orig` 全是 0，
+            // 会被当成"音高线是平的" ⇒ 空包络 ⇒ **删掉用户在 REAPER 里画好的包络**。
+            // 单条片段保持原语义：用户点的是那一条，看得见、且只有一步撤销。
+            if tolerant && !pitch_bridge_analysis_ready(&timeline, &clip.root_track) {
+                unresolved.push(clip.clip_id.clone());
+                continue;
+            }
+            // 【单条片段保持原语义】没有分析结果时按"全 0 曲线"处理 ⇒ 写空包络。那一步
+            // 是**可见**的（用户点的是那一条，且只有一步撤销）；批量方向由上面的判据
+            // 挡住 —— 一次点击不该顺手删掉几百条包络。
+            let offsets = hifishifter_kernel::pitch_editing::compute_clip_export_pitch_offsets(
+                &timeline, &clip.clip,
+            )
+            .map(|frames| frames.offsets)
+            .unwrap_or_default();
+            let points = hifishifter_kernel::pitch_bridge::build_take_pitch_points(
+                &offsets,
+                frame_period_ms,
+                clip.clip.length_sec.max(0.0),
+                pitch_bridge_rate(&clip.clip),
+            );
+            plans.push((clip, points));
+        }
+    }
+    for (clip, points) in plans {
+        // 目标在收集阶段已经解析过（并校验过 GUID）；这里**复用**同一份，不再重新查
+        // 一次 —— 两次解析之间的时间窗里，片段完全可能被宿主删掉或换掉 take，而
+        // 写错对象的表现是"另一个片段的音高变了"。
+        let target = &clip.target;
+        target.write_take_pitch_points(&points, &|| true)?;
+        // 「需重置 Item 音高偏移」：`D_PITCH` 与包络会叠加，而这条命令的语义是让
+        // 包络成为 REAPER 侧唯一的音高来源；它的值在导入方向已经折进 `pitch_edit`。
+        target.set_take(c"D_PITCH", 0., &|| true)?;
+        target.update(&|| true)?;
+        points_written += points.len();
+        converted += 1;
+    }
+    Ok(json!({
+        "ok": true,
+        "clips": clip_ids.len(),
+        "clipsConverted": converted,
+        "pointsWritten": points_written,
+        "unresolved": unresolved,
+    }))
+}
+
+/// 逐片段的**源音高参考曲线**（参数编辑器里那条 "Clip 音高参考线"）。
+///
+/// 【为什么插件也必须回答】独立 App 分析完成后由后端用 `clip_pitch_data` 事件
+/// 推送曲线，卫星窗口晚打开时再用 `get_clip_pitch_data` 补一次。插件的钢琴卷帘
+/// 默认就打开这条参考线（`showClipPitchOverlay` 默认 true），而这条命令此前落到
+/// `Command unavailable` —— 于是每次挂载都刷一条 ERROR，参考线永远空白。
+///
+/// 【数据来源】插件的原线就是 `params_by_root_track[root].pitch_orig`：**工程时间
+/// 轴**上的 MIDI 音高（0 = 无音高）。因此这里只做"按 clip 的时间窗切片"，payload
+/// 形状与 App 的 `build_clip_pitch_data_payload` 逐字段一致（`curve_start_sec`
+/// = clip 起点，`midi_curve` 每帧一个音高，`frame_period_ms` 与时间线同源）。
+///
+/// 【为什么没有原线就不返回这个 clip】分析未完成时 `pitch_orig` 是空表，切出来
+/// 只有 0；把全 0 曲线交给前端等于让它把"还没算"缓存成"就是没有"，而参考线不会
+/// 再取第二次。空表 = 没有 payload，与 App 的 cache-miss 同一处置。
+fn clip_pitch_data(session: &EditorSession, input: &Value) -> Result<Value, String> {
+    const MAX_CLIPS: usize = 512;
+    /// 单条曲线最多回多少帧（5 ms 一帧 ⇒ 10 分钟；再长的片段参考线也没法看）。
+    const MAX_FRAMES_PER_CLIP: usize = 120_000;
+    /// 一次请求的**总**帧预算：这条命令走 actor 线程，回一份几十 MB 的 JSON 会把
+    /// 界面顶住。超出的 clip 直接跳过（不报错）—— 前端在分析完成事件里还会再来。
+    const MAX_FRAMES_TOTAL: usize = 600_000;
+    let clip_ids: Vec<String> = serde_json::from_value(input["clipIds"].clone())
+        .map_err(|_| "invalid clip id list".to_string())?;
+    if clip_ids.is_empty() || clip_ids.len() > MAX_CLIPS {
+        return Err(format!("the pitch data request needs 1..{MAX_CLIPS} clips"));
+    }
+    let timeline = session.timeline.lock_or_recover();
+    let timeline_period = timeline.frame_period_ms().max(0.1);
+    let mut payloads = Vec::new();
+    let mut budget = MAX_FRAMES_TOTAL;
+    for clip_id in clip_ids {
+        let Some(clip) = timeline.clips.iter().find(|clip| clip.id == clip_id) else {
+            continue;
+        };
+        let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
+            continue;
+        };
+        let Some(params) = timeline.params_by_root_track.get(&root) else {
+            continue;
+        };
+        if params.pitch_orig.is_empty() {
+            continue;
+        }
+        let period = if params.frame_period_ms.is_finite() && params.frame_period_ms > 0.0 {
+            params.frame_period_ms
+        } else {
+            timeline_period
+        };
+        let start_frame = ((clip.start_sec.max(0.0) * 1000.0) / period).round() as usize;
+        let count = (((clip.length_sec.max(0.0) * 1000.0) / period).ceil()).max(1.0) as usize;
+        if count > MAX_FRAMES_PER_CLIP || count > budget {
+            continue;
+        }
+        budget -= count;
+        let mut curve = Vec::with_capacity(count);
+        let mut voiced = false;
+        for index in 0..count {
+            let value = params
+                .pitch_orig
+                .get(start_frame + index)
+                .copied()
+                .unwrap_or(0.0);
+            voiced |= value > 0.0;
+            curve.push(value);
+        }
+        if !voiced {
+            // 这一段没有能量（静音 / 还没分析到）⇒ 没有可画的参考线。
+            continue;
+        }
+        payloads.push(json!({
+            "clip_id": clip.id,
+            "curve_start_sec": clip.start_sec.max(0.0),
+            "midi_curve": curve,
+            "frame_period_ms": period,
+        }));
+    }
+    Ok(json!({"ok": true, "payloads": payloads}))
+}
+
 /// 快速导出**选中片段**：范围取选中片段在工程时间上的并集，其余走同一条路径。
 ///
 /// 【为什么不另写一套渲染】导出与播放共用 `RenderInput::mix_interleaved`
@@ -1116,7 +1545,7 @@ pub(super) fn dispatch(
         "host_link_export" => {
             let owner = session
                 .capture_owner()
-                .ok_or("host link needs this instance to be bound to a host document")?;
+                .ok_or("host link is only available in Capture mode")?;
             return crate::render::link::start_export(owner);
         }
         "host_link_status" => return Ok(crate::render::link::status()),
@@ -2377,6 +2806,11 @@ pub(super) fn dispatch(
         // 快速导出选中片段：与 `export_audio_advanced` 共用渲染与编码路径，
         // 只是把范围取成选中片段的并集、目标路径由 `outputDir` + `fileName` 组成。
         "quick_export_selected_clips" => quick_export_selected_clips(session, &args(input)?),
+        // 参数编辑器的 "Clip 音高参考线"：独立 App 在卫星窗口懒取时用同一条命令。
+        "get_clip_pitch_data" => clip_pitch_data(session, &input),
+        // REAPER take 音高 ⇄ 参数线（一次性迁移，两侧都清零对侧）。
+        "import_host_take_pitch" => import_host_take_pitch(session, &input),
+        "export_host_take_pitch" => export_host_take_pitch(session, &input),
         // 合成结果另存：插件的渲染输出**就是**合成结果，因此与工程导出同一条路径。
         "save_synthesized" => {
             let path = input["outputPath"].as_str().unwrap_or_default().to_owned();
@@ -2386,5 +2820,483 @@ pub(super) fn dispatch(
             )
         }
         _ => Err(format!("Command unavailable in plug-in mode: {command}")),
+    }
+}
+
+#[cfg(test)]
+mod pitch_bridge_tests {
+    use super::*;
+
+    /// 音高互转必须能从**呈现 id** 找到宿主 take。
+    ///
+    /// 【为什么这是回归】编辑器时间线的 id 带 `hfs-ui-{pid}-{n}-` 前缀
+    /// （`EditorSession::rewrite_ids`），而 `host_edit_target` 认的是**裸**宿主身份
+    /// （`ara-item-{guid}`）。漏掉剥前缀时`pitch_bridge_target` 恒失败 —— 两个方向
+    /// 都是"点了没反应 + clip has no unique directly bound host take"（现场日志里每
+    /// 一次音高互转都是这一句），而菜单、能力位、命令分发看起来全都正常。
+    #[test]
+    fn the_pitch_bridge_accepts_a_presented_clip_id() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_item_state(&host.single_take_chunk());
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        let native = clip
+            .id
+            .strip_prefix(&editor.namespace)
+            .expect("夹具 clip 必须是呈现 id（带 namespace）")
+            .to_owned();
+        // 前提：裸 id 本来就解析得到 —— 否则这条用例证明不了"前缀"这一层。
+        assert!(
+            pitch_bridge_target(&editor, &native).is_ok(),
+            "裸 id 必须能解析到宿主 take"
+        );
+        assert!(
+            pitch_bridge_target(&editor, &clip.id).is_ok(),
+            "呈现 id 必须先剥掉 namespace 再交给 host_edit_target"
+        );
+        document.close();
+    }
+
+    /// 【导出不得清空 HiFiShifter 的音高线】take 音高是源级属性，ARA 渲染结果在它之后
+    /// —— 包络不会作用到插件渲染出来的音频上，清空只会让用户"转换完就听不见音高"。
+    /// 同时钉住「需重置 Item 音高偏移」那一半：`D_PITCH` 必须归零。
+    #[test]
+    fn exporting_the_take_envelope_keeps_the_hifishifter_line() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_item_state(&host.single_take_chunk());
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        host.set_value("D_PITCH", 2.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let (clip_id, root) = {
+            let mut timeline = editor.timeline.lock_or_recover();
+            let clip_id = timeline.clips[0].id.clone();
+            let track_id = timeline.clips[0].track_id.clone();
+            // 窗口拉长到 8 帧（5 ms 一帧）：旧实现的 `restore_authority_frames` 会正好
+            // 覆盖这 8 帧，所以这条用例对"顺手清空"是敏感的。
+            let clip = timeline
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == clip_id)
+                .unwrap();
+            clip.start_sec = 0.0;
+            clip.length_sec = 0.04;
+            let root = timeline.resolve_root_track_id(&track_id).unwrap();
+            timeline.ensure_params_for_root(&root);
+            (clip_id, root)
+        };
+
+        // 【必须走权威】`params_by_root_track` 只是派生缓存，直接改会被下一次合成抹掉
+        // （见 `midi_import` 的同一条注释）；这里写入的编辑才是"用户的音高线"。
+        editor
+            .write_authority_frames(&root, "pitch", 0, &[2.0_f32; 8], None, true)
+            .expect("插件宿主必须应答权威写口")
+            .expect("权威写入必须成功");
+        let read_line = || {
+            editor
+                .read_authority_frames(&root, "pitch", 0, 8, None, Some(true), None)
+                .expect("插件宿主必须应答权威读口")
+                .expect("权威读取必须成功")
+        };
+        let before = read_line();
+        assert!(
+            before.edit.iter().all(|value| (*value - 2.0).abs() < 1e-6),
+            "夹具必须真的写入一段音高线：{:?}",
+            before.edit
+        );
+
+        export_host_take_pitch(&editor, &json!({ "clipIds": [clip_id.clone()] })).unwrap();
+
+        assert_eq!(
+            host.item_value("D_PITCH"),
+            Some(0.),
+            "Item 音高偏移必须归零（包络成为 REAPER 侧唯一来源）"
+        );
+        let after = read_line();
+        assert_eq!(
+            after.edit, before.edit,
+            "导出 take 音高包络**不得**改动 HiFiShifter 的音高线"
+        );
+        assert_eq!(after.edited, before.edited);
+        document.close();
+    }
+
+    /// 【导入不得删掉宿主的数据】`PITCHENV` 与 `D_PITCH` 只在插件旁路时才作用于那段
+    /// 音频，与插件渲染互不叠加 —— 导入是复制，不是把 REAPER 侧的东西搬走。
+    #[test]
+    fn importing_the_take_pitch_leaves_the_host_envelope_alone() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        let chunk = "<ITEM\nPOSITION 0\nLENGTH 0.00009070294784580499\nSEL 1\n\
+                     IGUID {11111111-1111-1111-1111-111111111111}\n\
+                     SOFFS 0\nPLAYRATE 1 1 0\nGUID {22222222-2222-2222-2222-222222222222}\n\
+                     <SOURCE WAVE\nFILE \"ara://source\"\n>\n\
+                     <PITCHENV\nACT 1 -1\nVIS 1 1 1\nLANEHEIGHT 0 0\nARM 0\n\
+                     DEFSHAPE 0 12 -1\nPT 0.00000000000000000 4.00000000000000000 0\n>\n>\n";
+        host.enable_item_state(chunk);
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        host.set_value("D_PITCH", 3.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let (clip_id, root) = {
+            let mut timeline = editor.timeline.lock_or_recover();
+            let clip_id = timeline.clips[0].id.clone();
+            let track_id = timeline.clips[0].track_id.clone();
+            let root = timeline.resolve_root_track_id(&track_id).unwrap();
+            timeline.ensure_params_for_root(&root);
+            (clip_id, root)
+        };
+        // 【预热：必须先跑掉"第一次解析宿主身份"】那一步会重建一次 `ui_tracks`，并把
+        // 派生参数缓存按基线重装一遍 —— 注入的值会被它抹掉。不预热，这条用例就会随
+        // 线程时序红绿不定（注入 → 重建 → 命令读到全 0）。
+        pitch_bridge_target(&editor, &clip_id).expect("夹具的宿主身份必须可解析");
+        {
+            let mut timeline = editor.timeline.lock_or_recover();
+            timeline.ensure_params_for_root(&root);
+            let params = timeline.params_by_root_track.get_mut(&root).unwrap();
+            params.frame_period_ms = 5.0;
+            params.pitch_orig = vec![60.0; 8];
+            params.pitch_edit = vec![60.0; 8];
+        }
+
+        let result =
+            import_host_take_pitch(&editor, &json!({ "clipIds": [clip_id.clone()] })).unwrap();
+        assert!(
+            result["framesWritten"].as_u64().unwrap() > 0,
+            "导入必须真的写帧：{result}"
+        );
+        assert_eq!(
+            host.item_state_chunk.borrow().as_str(),
+            chunk,
+            "导入不得改写宿主 take 的状态（包络原样保留）"
+        );
+        assert_eq!(
+            host.item_value("D_PITCH"),
+            Some(3.),
+            "导入不得把宿主 Item 音高偏移归零"
+        );
+        document.close();
+    }
+
+    /// 批量作用域：一个 id 在时间线上根本不存在，不该让整批失败；严格模式必须报错。
+    ///
+    /// 【为什么两种模式都要钉】宽容模式是"全部片段"能用的前提（工程在命令执行途中被
+    /// 宿主改动、片段被删掉都会走到这里），而严格模式是单条片段的正确语义 —— 用户点的
+    /// 是那一条，静默跳过等于"点了没反应"。同一段代码两种行为，只有成对断言才守得住。
+    #[test]
+    fn a_batch_skips_an_unknown_clip_id_but_a_single_clip_still_fails() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_item_state(&host.single_take_chunk());
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        host.set_value("D_PITCH", 2.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip_id = {
+            let mut timeline = editor.timeline.lock_or_recover();
+            let clip_id = timeline.clips[0].id.clone();
+            let track_id = timeline.clips[0].track_id.clone();
+            let root = timeline.resolve_root_track_id(&track_id).unwrap();
+            timeline.ensure_params_for_root(&root);
+            let params = timeline.params_by_root_track.get_mut(&root).unwrap();
+            params.frame_period_ms = 5.0;
+            params.pitch_orig = vec![60.0; 8];
+            params.pitch_edit = vec![60.0; 8];
+            clip_id
+        };
+
+        // 【顺序不能反】夹具把 `pitch_orig` 直接写进派生缓存，而命令会在宿主线程上刷新
+        // 一次文档（缓存按权威重建）。因此**需要读到那段音高**的那次调用必须排在最前面；
+        // 严格模式那次在收集阶段就因为未知 id 失败了，根本不读参数线。
+        let result = import_host_take_pitch(
+            &editor,
+            &json!({ "clipIds": [clip_id.clone(), "ghost-clip"], "tolerant": true }),
+        )
+        .expect("宽容模式不该因为一条片段失败");
+        // 【只断言"跳过了谁"，不断言"写了几帧"】夹具把 `pitch_orig` 直接写进派生缓存，
+        // 而命令会在宿主线程上刷新一次文档（缓存按权威重建）—— 写帧数因此取决于一次
+        // 线程竞态。跳过名单不依赖参数线，是这条用例真正要钉的东西。
+        assert_eq!(result["clips"].as_u64(), Some(2), "{result}");
+        assert_eq!(result["unresolved"][0], "ghost-clip", "{result}");
+        assert_eq!(
+            result["unresolved"].as_array().map(|items| items.len()),
+            Some(1),
+            "{result}"
+        );
+
+        let strict = import_host_take_pitch(
+            &editor,
+            &json!({ "clipIds": [clip_id.clone(), "ghost-clip"] }),
+        );
+        assert!(
+            strict.is_err(),
+            "严格模式必须报错而不是静默跳过：{strict:?}"
+        );
+        document.close();
+    }
+
+    /// 片段在时间线上、但没有任何宿主 take 绑定它（take 被宿主删掉、或它来自另一个
+    /// 实例）：批量作用域必须把它报进 `unresolved`，而不是让整批失败。
+    ///
+    /// 【为什么这条与上一条分开】上一条走的是"id 不在时间线上"的分支（收集阶段就
+    /// 查不到片段）；这一条走的是"片段在、宿主身份解析失败"的分支 —— 两条路各有
+    /// 自己的失败点，合成一条用例只会让断言落在先命中的那一条上。
+    #[test]
+    fn a_clip_without_a_host_take_is_reported_but_does_not_fail_the_batch() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_item_state(&host.single_take_chunk());
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        host.set_value("D_PITCH", 2.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip_id = {
+            let mut timeline = editor.timeline.lock_or_recover();
+            let clip_id = timeline.clips[0].id.clone();
+            // 第二条片段：时间线上存在，但没有任何宿主 take 绑定它。
+            let mut ghost = timeline.clips[0].clone();
+            ghost.id = "ghost-clip".into();
+            timeline.clips.push(ghost);
+            clip_id
+        };
+
+        let result = import_host_take_pitch(
+            &editor,
+            &json!({ "clipIds": [clip_id.clone(), "ghost-clip"], "tolerant": true }),
+        )
+        .expect("一条解析不到宿主 take 的片段不该让整批失败");
+        assert_eq!(result["clips"].as_u64(), Some(2), "{result}");
+        assert_eq!(result["unresolved"][0], "ghost-clip", "{result}");
+        assert_eq!(
+            result["unresolved"].as_array().map(|items| items.len()),
+            Some(1),
+            "{result}"
+        );
+        document.close();
+    }
+
+    /// 批量导入**不得**把"take 上没有音高"当成"音高是 0"。
+    ///
+    /// 【为什么这是最危险的一条】导入的语义是 `pitch_edit = pitch_orig + take 音高`。
+    /// take 上没有音高时这个式子退化成"把音高线重置成原线" —— 对单条片段那是用户
+    /// 明确点下的意图，对"全部片段"就是把工程里所有没碰过音高的编辑一次抹掉。
+    #[test]
+    fn a_batch_import_leaves_lines_alone_when_the_take_has_no_pitch() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        // `single_take_chunk` 既没有 `<PITCHENV>`，`D_PITCH` 也是 0 —— 正是绝大多数
+        // 真实片段的形状。
+        host.enable_item_state(&host.single_take_chunk());
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        host.set_value("D_PITCH", 0.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip_id = {
+            let mut timeline = editor.timeline.lock_or_recover();
+            let clip_id = timeline.clips[0].id.clone();
+            let track_id = timeline.clips[0].track_id.clone();
+            let root = timeline.resolve_root_track_id(&track_id).unwrap();
+            timeline.ensure_params_for_root(&root);
+            let params = timeline.params_by_root_track.get_mut(&root).unwrap();
+            params.frame_period_ms = 5.0;
+            params.pitch_orig = vec![60.0; 8];
+            // 用户画过的两个半音：批量导入一旦把它重置成 60，这条断言就会失败。
+            params.pitch_edit = vec![62.0; 8];
+            clip_id
+        };
+
+        let tolerant = import_host_take_pitch(
+            &editor,
+            &json!({ "clipIds": [clip_id.clone()], "tolerant": true }),
+        )
+        .unwrap();
+        assert_eq!(tolerant["framesWritten"].as_u64(), Some(0), "{tolerant}");
+        assert_eq!(tolerant["clipsConverted"].as_u64(), Some(0), "{tolerant}");
+        // 【这一条才是判据】没有 guard 时这条片段会被正常处理（帧因为没有原线而被跳过），
+        // 但它**不会**出现在 `unresolved` 里。名单里有它，说明"take 上没有音高"被识别
+        // 出来并主动放过了。
+        assert_eq!(tolerant["unresolved"][0], clip_id, "{tolerant}");
+        document.close();
+    }
+
+    /// 批量导出时"分析还没落地"的片段**不得**被当成全 0 曲线。
+    ///
+    /// 【为什么这是数据丢失】全 0 曲线经 `build_take_pitch_points` 得到空断点，而空
+    /// 断点 = 删除整个 `<PITCHENV>`。批量跑一遍，工程里所有还没分析完的片段都会失去
+    /// 用户在 REAPER 里画好的包络 —— 而报告只会说"写了 N 条"。
+    ///
+    /// 【为什么判据是 `pitch_orig_key` 而不是"原线全 0"】全 0 也可能是"分析完了，
+    /// 这段确实没有音高"；那种情况下写出空包络是**正确**的（让 REAPER 侧回到不变调）。
+    #[test]
+    fn a_batch_export_leaves_the_host_envelope_alone_until_analysis_lands() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        let chunk = "<ITEM\nPOSITION 0\nLENGTH 0.00009070294784580499\nSEL 1\n\
+                     IGUID {11111111-1111-1111-1111-111111111111}\n\
+                     SOFFS 0\nPLAYRATE 1 1 0\nGUID {22222222-2222-2222-2222-222222222222}\n\
+                     <SOURCE WAVE\nFILE \"ara://source\"\n>\n\
+                     <PITCHENV\nACT 1 -1\nVIS 1 1 1\nLANEHEIGHT 0 0\nARM 0\n\
+                     DEFSHAPE 0 12 -1\nPT 0.00000000000000000 4.00000000000000000 0\n>\n>\n";
+        host.enable_item_state(chunk);
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        host.set_value("D_PITCH", 3.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip_id = {
+            let mut timeline = editor.timeline.lock_or_recover();
+            let clip_id = timeline.clips[0].id.clone();
+            let track_id = timeline.clips[0].track_id.clone();
+            let root = timeline.resolve_root_track_id(&track_id).unwrap();
+            // 只建参数线、**不填** `pitch_orig`：模拟"分析还没跑完"。
+            timeline.ensure_params_for_root(&root);
+            clip_id
+        };
+
+        let tolerant = export_host_take_pitch(
+            &editor,
+            &json!({ "clipIds": [clip_id.clone()], "tolerant": true }),
+        )
+        .unwrap();
+        assert_eq!(tolerant["clipsConverted"].as_u64(), Some(0), "{tolerant}");
+        assert_eq!(tolerant["unresolved"][0], clip_id, "{tolerant}");
+        assert_eq!(
+            host.item_state_chunk.borrow().as_str(),
+            chunk,
+            "批量模式同样不得改动宿主 take"
+        );
+        assert_eq!(
+            host.item_value("D_PITCH"),
+            Some(3.),
+            "没写成时连 D_PITCH 都不能归零"
+        );
+        document.close();
+    }
+}
+
+#[cfg(test)]
+mod clip_pitch_tests {
+    use super::*;
+
+    /// 参考线命令必须按 clip 的**时间窗**切出原线，并且没分析到就不返回 payload。
+    ///
+    /// 【为什么钉死这两条】插件里这条命令此前根本不存在（`Command unavailable`），
+    /// 前端每次挂载都刷一条 ERROR 且参考线永远空白。补上之后最危险的错误形态是
+    /// "把全 0 当曲线发回去" —— 那会让前端把"还没算"缓存成"就是没有"，
+    /// 而参考线不会取第二次（见 `useClipPitchHydration` 的 requested 集合）。
+    #[test]
+    fn the_pitch_reference_curve_is_sliced_from_the_root_line() {
+        let (_model, owner, _id) = crate::editor::session::tests::fixture();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let (clip_id, root, start_sec, length_sec, period) = {
+            let mut timeline = editor.timeline.lock_or_recover();
+            let clip_id = timeline.clips[0].id.clone();
+            // 夹具的 clip 只有 4 个采样点；这里给它一个可分辨的时间窗（50 ms 起、100 ms 长）。
+            let track_id = {
+                let clip = timeline
+                    .clips
+                    .iter_mut()
+                    .find(|clip| clip.id == clip_id)
+                    .unwrap();
+                clip.start_sec = 0.05;
+                clip.length_sec = 0.1;
+                clip.track_id.clone()
+            };
+            let root = timeline.resolve_root_track_id(&track_id).unwrap();
+            timeline.ensure_params_for_root(&root);
+            let params = timeline.params_by_root_track.get_mut(&root).unwrap();
+            params.frame_period_ms = 5.0;
+            // 时间线是 5 ms 一帧：在 clip 窗口上填一段 57/59 交替的音高。
+            let period = params.frame_period_ms;
+            let start_frame = 10usize; // 0.05 s ÷ 5 ms
+            let count = 20usize; // 0.1 s ÷ 5 ms
+            params.pitch_orig = vec![0.0; start_frame + count + 4];
+            for index in 0..count {
+                params.pitch_orig[start_frame + index] = if index % 2 == 0 { 57.0 } else { 59.0 };
+            }
+            (clip_id, root, 0.05_f64, 0.1_f64, period)
+        };
+
+        let payload = clip_pitch_data(&editor, &json!({"clipIds": [clip_id.clone()]})).unwrap();
+        let payloads = payload["payloads"].as_array().unwrap();
+        assert_eq!(
+            payloads.len(),
+            1,
+            "有原线的 clip 必须回一条 payload：{payload}"
+        );
+        assert_eq!(payloads[0]["clip_id"], json!(clip_id));
+        assert!((payloads[0]["curve_start_sec"].as_f64().unwrap() - start_sec).abs() < 1e-9);
+        assert!((payloads[0]["frame_period_ms"].as_f64().unwrap() - period).abs() < 1e-9);
+        let curve = payloads[0]["midi_curve"].as_array().unwrap();
+        let expected = (((length_sec.max(0.0) * 1000.0) / period).ceil()).max(1.0) as usize;
+        assert_eq!(curve.len(), expected);
+        assert_eq!(curve[0], json!(57.0));
+        assert_eq!(curve[1], json!(59.0));
+
+        // 分析未完成（原线为空）⇒ 不返回 payload，而不是一条全 0 曲线。
+        {
+            let mut timeline = editor.timeline.lock_or_recover();
+            timeline
+                .params_by_root_track
+                .get_mut(&root)
+                .unwrap()
+                .pitch_orig
+                .clear();
+        }
+        let empty = clip_pitch_data(&editor, &json!({"clipIds": [clip_id]})).unwrap();
+        assert_eq!(empty["payloads"].as_array().unwrap().len(), 0);
     }
 }

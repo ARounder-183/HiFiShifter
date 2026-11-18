@@ -22,6 +22,7 @@ import {
     resolveDragDirectionTool,
 } from "../../../../features/session/dragDirection";
 import { resolveRootTrackId } from "../../../../features/session/trackUtils";
+import { resolvePitchBridgeScopes } from "../../../../features/hostPitchBridge/scope";
 import {
     buildPitchAlgoOptions,
     resolveEffectivePitchAlgo,
@@ -297,29 +298,8 @@ import { usePianoRollViewport } from "./usePianoRollViewport";
 import { usePianoRollProjection } from "./usePianoRollProjection";
 import { useParamValueFormatter } from "./useParamValueFormatter";
 import { useProcessorParams } from "./useProcessorParams";
-/** 空选中集合的共享实例：避免每次渲染换引用让 `paramBlockSpec` 的 memo 白跑一次。 */
-const EMPTY_BLOCK_ID_SET: ReadonlySet<string> = new Set<string>();
-/**
- * 高频会话字段：它们由 `PianoRollPlayheadBridge` 单独订阅，面板主体不因它们重渲染。
- *
- * 【为什么必须从面板选择器里剔除】`playheadSec` 与 `runtime` 在播放时约 30Hz 更新；
- * 面板有数百个 hook / 子组件，若随每次轮询重渲染，60Hz 的光标与自动滚屏会被 React
- * 提交拖慢。这里只忽略它们，其余会话字段仍按引用浅比较。
- */
-const PIANO_ROLL_VOLATILE_SESSION_KEYS = new Set<keyof RootState["session"]>([
-    "playheadSec",
-    "playheadSampledAtMs",
-    "runtime",
-]);
-
-function pianoRollSessionEqual(left: RootState["session"], right: RootState["session"]): boolean {
-    if (left === right) return true;
-    for (const key of Object.keys(left) as Array<keyof RootState["session"]>) {
-        if (PIANO_ROLL_VOLATILE_SESSION_KEYS.has(key)) continue;
-        if (left[key] !== right[key]) return false;
-    }
-    return true;
-}
+import { createRafCoalescedReplay } from "./gesturePreviewRaf";
+import { EMPTY_BLOCK_ID_SET, pianoRollSessionEqual } from "./panelSessionSubscription";
 
 /**
  * 装配参数编辑器面板的模型。
@@ -2117,6 +2097,36 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         return s.clips.filter((c) => c.trackId === rootId);
     }, [s.clips, groupTrackIds, rootTrackId]);
     /**
+     * 「REAPER 音高互转」的三个作用域（工具栏菜单直接读这三份 id 列表）。
+     *
+     * 【为什么在模型里算】作用域的两个输入都在模型内部：当前根轨道**组**的轨道 id
+     * （`groupTrackIds`）与参数选区的**帧区间**（`selectionUi`）。把帧换算成秒、
+     * 把"与选区重叠"算出来，视图层就只拿到 id 列表 —— 菜单组件因此不必认识轨道树，
+     * 也不必知道帧周期。解析本身是纯函数（见 `features/hostPitchBridge/scope`）。
+     *
+     * 【为什么跟着 `s.clips` 重算】计数要实时：用户在菜单开着的时候切轨道、改选区，
+     * 括号里的数字必须跟着变，否则那是一次"看起来对、实际改了另一批片段"的操作。
+     */
+    const pitchBridgeScopes = useMemo(() => {
+        const framePeriodMs = paramView?.framePeriodMs ?? 5;
+        const rangesSec =
+            selectionUi === null
+                ? []
+                : selectionUi.map(
+                      (range) =>
+                          [
+                              (range.startFrame * framePeriodMs) / 1000,
+                              ((range.startFrame + range.frameCount) * framePeriodMs) / 1000,
+                          ] as const,
+                  );
+        return resolvePitchBridgeScopes({
+            clips: s.clips,
+            trackIds: groupTrackIds,
+            rangesSec,
+        });
+    }, [groupTrackIds, paramView?.framePeriodMs, s.clips, selectionUi]);
+
+    /**
      * 参数块的 Clip 来源。
      *
      * 参数编辑器画的是“根轨道组”的一条参数线，而参考音频 Clip 在
@@ -2148,6 +2158,21 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         return byClip;
     }, [paramBlockClips]);
     useEffect(() => {
+        // 【"还没分析"不是缺陷】自动音节分析只在块层可见 + 合成开启时才会被请求
+        // （见下方分析批处理）。图层关着时每一条 clip 都处于 `missing` ——
+        // 那是**设置**，不是诊断信号；逐条上报只会在日志里刷出上百条
+        // `analysis_window_stale`，把真正需要看的 `stale`（有旧结果但窗口
+        // 覆盖不到）淹掉。两层判据与下方批处理取同一来源，声明在更后面，
+        // 这里按值读取（依赖数组同样按值）。
+        if (
+            !isParamBlockLayerVisible({
+                alwaysShowParamBlocks: s.alwaysShowParamBlocks,
+                toolMode: s.toolMode,
+                selectToolMode: s.selectToolMode,
+            }) ||
+            !pitchEnabled
+        )
+            return;
         for (const clip of paramBlockClips) {
             const take =
                 clip.takes?.find((item) => item.id === clip.activeTakeId) ?? clip.takes?.[0];
@@ -2169,7 +2194,14 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 });
             }
         }
-    }, [paramBlockClips, rootTrackId]);
+    }, [
+        s.alwaysShowParamBlocks,
+        s.toolMode,
+        s.selectToolMode,
+        paramBlockClips,
+        pitchEnabled,
+        rootTrackId,
+    ]);
 
     /** Drag-time loudness warp from the frozen geometry to the current one. */
     const loudnessSnapshotKey = loudnessSnapshot?.baselineKey ?? null;
@@ -3789,6 +3821,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
              * 播放头动了"，而不是一条要读三秒的提示。
              */
             if (!blockPersistence.ready || !paramViewRef.current) return { handled: false };
+            // 【手势时刻的活值】依赖数组刻意只挑低频标量（见下方 eslint-disable）；
+            // tempoMap / tracks / 多选 / 播放头 / 整包 timelineSnap 这些"按下那一刻"
+            // 必须最新的输入从 store 现读，不用渲染闭包里的旧值。
+            const sLive = store.getState().session;
             const blockModifierActive = (
                 action:
                     | "modifier.paramBlockSplitAtClick"
@@ -3921,7 +3957,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     setParamBlockSelection(next);
                 };
                 const seekFollowingPointer = (clientX: number) => {
-                    if (!s.paramEditorSeekPlayheadEnabled) return;
+                    if (!sLive.paramEditorSeekPlayheadEnabled) return;
                     const sec = hit.secAtClientX(clientX);
                     dispatch(setPlayheadSec(sec));
                     void dispatch(seekPlayhead(sec));
@@ -4447,16 +4483,16 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     const snapCreateResult = (sec: number, toggle: boolean) =>
                         resolveParamBlockTimeSnapResult({
                             rawSec: sec,
-                            settings: s.timelineSnap,
+                            settings: sLive.timelineSnap,
                             grid: s.project.gridSize,
                             bpm: s.bpm,
-                            beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
-                            tempoMap: s.tempoMap,
+                            beatsPerBar: Math.max(1, Math.round(sLive.beats || 4)),
+                            tempoMap: sLive.tempoMap,
                             pxPerSec: hostRef.current?.getAxis()?.pxPerSec ?? pxPerSecRef.current,
                             clips: paramBlockClips,
-                            tracks: s.tracks,
-                            selectedClipIds: s.multiSelectedClipIds,
-                            playheadSec: s.playheadSec,
+                            tracks: sLive.tracks,
+                            selectedClipIds: sLive.multiSelectedClipIds,
+                            playheadSec: sLive.playheadSec,
                             originSec: createStartSec,
                             toggleModifierActive: toggle,
                         });
@@ -4481,7 +4517,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         ctrlKey: hit.ctrlKey === true,
                         metaKey: hit.metaKey === true,
                     });
-                    const createEffectiveSnap = s.timelineSnap.enabled !== createSnapToggle;
+                    const createEffectiveSnap = sLive.timelineSnap.enabled !== createSnapToggle;
                     let createSpan = resolveParamBlockCreateSpan({
                         framePeriodMs: paramBlockStateRef.current.framePeriodMs,
                         anchorSec: createStartSec,
@@ -4601,7 +4637,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                             anchorSec: createStartSec,
                             pointerSec,
                             snapToGrid: (sec) => snapCreateAt(sec, false),
-                            snapEnabled: s.timelineSnap.enabled !== noSnap,
+                            snapEnabled: sLive.timelineSnap.enabled !== noSnap,
                             minBlockSec: paramBlockStateRef.current.framePeriodMs / 1000,
                         });
                         const axisValue = yToValue(
@@ -4645,7 +4681,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                          * 新建块也要报读数：这一笔把块定在什么值上，与画笔落笔同义。
                          * 读数入口与拖块共用（同一个合帧 setState），不另写一份。
                          */
-                        if (s.showParamValuePopup) {
+                        if (sLive.showParamValuePopup) {
                             publishParamValuePreview({
                                 clientX: event.clientX,
                                 clientY: event.clientY,
@@ -4803,7 +4839,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         },
                         onEnd: (reason, event) => {
                             hit.edgeScroll?.stop();
-                            if (s.showParamValuePopup) publishParamValuePreview(null);
+                            if (sLive.showParamValuePopup) publishParamValuePreview(null);
                             const activity = paramBlockDragActivityRef.current;
                             if (activity.pointerGestureToken === createToken)
                                 activity.pointerGestureToken = null;
@@ -5051,7 +5087,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 let moved = false;
                 let lastX = startClientX;
                 const seekFollowingPointer = (clientX: number) => {
-                    if (!s.paramEditorSeekPlayheadEnabled) return;
+                    if (!sLive.paramEditorSeekPlayheadEnabled) return;
                     const sec = hit.secAtClientX(clientX);
                     dispatch(setPlayheadSec(sec));
                     void dispatch(seekPlayhead(sec));
@@ -5278,6 +5314,15 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     });
                 let activateResize = false;
                 let lastResizeEvent: globalThis.PointerEvent | null = null;
+                // 预览重算 rAF 合帧：planParamBlockGesture + 渲染规格是 O(数据量)，
+                // 逐事件重算在长工程上明显卡顿；首个越死区的 move 仍立即执行以保证起步手感。
+                let resizePendingImmediate = true;
+                const resizeReplay = createRafCoalescedReplay(() => {
+                    const source = lastResizeEvent;
+                    // PointerEvent 结构上满足 applyResizeAt 的入参形状，直接传。
+                    if (source !== null) applyResizeAt(source);
+                });
+                const { schedule: scheduleResize, flush: flushResize } = resizeReplay;
                 const applyResizeAt = (event: {
                     clientX: number;
                     ctrlKey: boolean;
@@ -5303,17 +5348,17 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         snapToGrid: (sec) => {
                             const result = resolveParamBlockTimeSnapResult({
                                 rawSec: sec,
-                                settings: s.timelineSnap,
+                                settings: sLive.timelineSnap,
                                 grid: s.project.gridSize,
                                 bpm: s.bpm,
-                                beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
-                                tempoMap: s.tempoMap,
+                                beatsPerBar: Math.max(1, Math.round(sLive.beats || 4)),
+                                tempoMap: sLive.tempoMap,
                                 pxPerSec:
                                     hostRef.current?.getAxis()?.pxPerSec ?? pxPerSecRef.current,
                                 clips: paramBlockClips,
-                                tracks: s.tracks,
-                                selectedClipIds: s.multiSelectedClipIds,
-                                playheadSec: s.playheadSec,
+                                tracks: sLive.tracks,
+                                selectedClipIds: sLive.multiSelectedClipIds,
+                                playheadSec: sLive.playheadSec,
                                 originSec: gestureRef.startSec,
                                 toggleModifierActive: noSnapKeyHeld(event),
                             });
@@ -5360,6 +5405,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         hit.edgeScroll?.track(event.clientX, event.clientY, (clientX) => {
                             const source = lastResizeEvent;
                             if (source === null) return;
+                            // 边缘滚动的回放已经用当前事件画过一次；刷新它挂起的
+                            // 合帧状态，免得提交时再拿旧的 lastResizeEvent 重放。
+                            resizeReplay.cancel();
                             applyResizeAt({
                                 clientX,
                                 ctrlKey: source.ctrlKey,
@@ -5368,9 +5416,21 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                 metaKey: source.metaKey,
                             });
                         });
-                        applyResizeAt(event);
+                        if (resizePendingImmediate) {
+                            resizePendingImmediate = false;
+                            applyResizeAt(event);
+                            return;
+                        }
+                        scheduleResize();
                     },
                     onEnd: (reason) => {
+                        // 提交读 gestureRef.resizePlan：挂起的预览帧先同步冲刷，
+                        // 漏冲刷会把最后一段位移丢掉。取消路径不提交，丢弃挂起帧。
+                        if (reason === "up" && activateResize) {
+                            flushResize();
+                        } else {
+                            resizeReplay.cancel();
+                        }
                         const plan = gestureRef.resizePlan;
                         if (reason === "up" && activateResize && plan !== null) {
                             publishParamBlockVisualTransaction(
@@ -6893,6 +6953,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         pitchSnapMenuOpen,
         pitchSnapMenuRef,
         pitchSnapOpen,
+        pitchBridgeScopes,
         paramBlocksLayerVisible,
         paramBlockContextMenu,
         paramBlockMenuContext,

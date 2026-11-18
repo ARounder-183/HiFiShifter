@@ -50,7 +50,7 @@ impl ExtensionOwner {
     /// # Safety
     /// `block` 的平面由宿主提供，非空平面至少含 `frames` 帧；本函数只在本回调内使用
     /// 它们，不保留任何指针。
-    pub(crate) unsafe fn render_block(
+    pub unsafe fn render_block(
         &self,
         block: &mut crate::audio_block::AudioBlock<'_>,
         context: Option<crate::block_context::BlockContext>,
@@ -60,14 +60,22 @@ impl ExtensionOwner {
         // 它必须在**所有**返回路径上生效，所以只能罩在仲裁函数外面：仲裁有六条早退，
         // 逐条插入既会漏，也会让"哪条分支没写满"重新变成靠人眼找。
         let auditing = crate::audio_stats::buffer_audit_enabled();
-        if auditing {
-            block.poison_outputs();
-        }
+        // 【别名平面绝不预填】in-place 宿主下输出平面就是输入平面；写 NaN 等于把
+        // 宿主喂进来的样本改坏，而直通分支没有第二份原始输入可写回（见
+        // `AudioBlock::poison_outputs`）。返回值是"因为别名而跳过的平面数"，进
+        // 审计读数单列 —— 它说明这一块本来就不该被预填，而不是漏写。
+        let aliased = if auditing { block.poison_outputs() } else { 0 };
         // SAFETY: 由本函数的调用契约保证（见下方 inner 的说明）。
         let outcome = unsafe { self.render_block_inner(block, context, evidence) };
         if auditing {
-            let (channels, unwritten) = block.count_unwritten();
-            self.note_buffer_audit(channels, unwritten, block.frames);
+            let audit = block.count_unwritten();
+            if audit.unwritten > 0 {
+                // 【诊断可以暴露 bug，但不能让宿主收到 NaN】漏写一旦发生，返回宿主前
+                // 把非有限样本清成 0。unwritten 仍然如实记录，所以 bug 没有被掩盖。
+                let scrubbed = block.sanitize_non_finite_outputs();
+                log::debug!("[buf] scrubbed {scrubbed} non-finite output sample(s)");
+            }
+            self.note_buffer_audit(audit, aliased, block.in_place, block.frames);
         }
         outcome
     }
@@ -342,7 +350,7 @@ impl ExtensionOwner {
     /// 此前这三步各写一份：VST3 在外壳里顺序调用，CLAP 只走了其中一部分 ——
     /// 于是 CLAP 的离线导出永远拿不到本地起点（offline_pass_active 恒假 ⇒
     /// 离线准备不要求用户曲线 ⇒ 产物里是"没处理"的声音），而且从未记过精度。
-    pub(crate) fn observe_input_block(
+    pub fn observe_input_block(
         &self,
         mut input: crate::capture::recorder::InputBlock<'_>,
         context: crate::block_context::BlockContext,

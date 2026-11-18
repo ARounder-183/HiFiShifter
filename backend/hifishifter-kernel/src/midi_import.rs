@@ -484,10 +484,16 @@ pub fn build_tempo_map_points_from_midi(
     let mut events: Vec<Event> = Vec::new();
     if import_tempo {
         for &(tick, us_per_beat) in &result.tempo_events {
+            // 【为什么要钳到 10..960】`us_per_beat > 0 && is_finite` 挡不住
+            // `1e-300` 这种畸形值：算出的 bpm ≈ 6e303，导出时
+            // `60_000_000 / bpm` 变成 0，写出一个 0 us/beat 的 tempo 事件
+            // （DAW 里就是除零 / 冻结）。项目支持的 BPM 区间与导出端
+            // `fallback_bpm.clamp(10, 960)` 一致，这里从入口就收住。
             if us_per_beat > 0.0 && us_per_beat.is_finite() {
+                let bpm = (60_000_000.0 / us_per_beat).clamp(10.0, 960.0);
                 events.push(Event {
                     sec: to_sec(tick),
-                    bpm: Some(60_000_000.0 / us_per_beat),
+                    bpm: Some(bpm),
                     numerator: None,
                     denominator: None,
                     scale_key: None,

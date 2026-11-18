@@ -433,7 +433,7 @@ pub(super) fn graph_summary_of(document: &super::document::DocumentSession) -> S
 /// 是**早的** —— 多数支持 ARA 的宿主正在这段时间里完成绑定。此前把"没绑"直接当成
 /// "ARA-only"，正是 `bound_once` 那套措辞分支要解决的问题的同一个根源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InstanceMode {
+pub enum InstanceMode {
     /// 绑定窗口仍开着：宿主还可能把本实例绑到 ARA 文档。
     Undetermined,
     /// 宿主把本实例绑到了 ARA 文档：素材由 ARA 逐个 region 授权。
@@ -578,7 +578,7 @@ pub(crate) enum SnapshotSource {
 /// `capture_observe` 算出，原样交给 `capture_stage` 与记录器。
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
-pub(crate) struct BlockEvidence {
+pub struct BlockEvidence {
     pub stream: ProcessStream,
     /// 本块的有效工程起点（可能来自 continuous/music 回退）。
     ///

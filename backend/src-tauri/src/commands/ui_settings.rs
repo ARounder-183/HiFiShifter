@@ -56,26 +56,47 @@ pub(super) fn save_ui_settings(
     // UiSettings 的所有字段都带 serde default，直接用部分对象反序列化
     // 会把未发送字段重置为默认值，覆盖磁盘上的其他设置 —— 因此以
     // 现有设置为基础做 JSON 级合并，再反序列化应用。
-    let prev_settings = if let Some(dir) = state.config_dir.get() {
-        crate::config::load_ui_settings(dir)
-    } else {
-        UiSettings::default()
+    //
+    // 【合并必须在锁内做】合并基准若在保存前单独 load（旧实现），插件进程在
+    // 两步之间保存的 UI 字段会被这份旧快照盖掉 —— 跨进程设置丢失。内核的
+    // update_ui_settings_with 把"读基准 → 合并 → 写回"整体放进跨进程文件锁，
+    // prev/最终值都在锁内捕获。
+    let mut prev_settings = UiSettings::default();
+    let settings = match state.config_dir.get() {
+        Some(dir) => {
+            let prev_ref = &mut prev_settings;
+            hifishifter_kernel::config::update_ui_settings_with(dir, |current| {
+                *prev_ref = current.clone();
+                let merged_value = match serde_json::to_value(&current) {
+                    Ok(base) => merge_ui_settings_patch(base, &settings_value),
+                    Err(_) => settings_value.clone(),
+                };
+                let mut merged: UiSettings =
+                    serde_json::from_value(merged_value).unwrap_or_else(|_| current.clone());
+                merged.normalize_split_transition();
+                merged.normalize_time_display();
+                merged.render_cache = merged.render_cache.normalized();
+                merged.channel_import_policy = merged.channel_import_policy.normalized();
+                merged
+            })
+        }
+        None => {
+            // 无配置目录（测试 / 降级环境）：按默认值合并，只下发消费方、不落盘。
+            let base =
+                serde_json::to_value(UiSettings::default()).unwrap_or(serde_json::Value::Null);
+            let merged_value = match base {
+                serde_json::Value::Null => settings_value.clone(),
+                base => merge_ui_settings_patch(base, &settings_value),
+            };
+            let mut merged: UiSettings =
+                serde_json::from_value(merged_value).unwrap_or_else(|_| UiSettings::default());
+            merged.normalize_split_transition();
+            merged.normalize_time_display();
+            merged.render_cache = merged.render_cache.normalized();
+            merged.channel_import_policy = merged.channel_import_policy.normalized();
+            merged
+        }
     };
-    let merged_value = match serde_json::to_value(&prev_settings) {
-        Ok(base) => merge_ui_settings_patch(base, &settings_value),
-        Err(_) => settings_value,
-    };
-    let mut settings: UiSettings =
-        serde_json::from_value(merged_value).unwrap_or_else(|_| prev_settings.clone());
-
-    settings.normalize_split_transition();
-    settings.normalize_time_display();
-    settings.render_cache = settings.render_cache.normalized();
-    settings.channel_import_policy = settings.channel_import_policy.normalized();
-
-    if let Some(dir) = state.config_dir.get() {
-        crate::config::save_ui_settings(dir, &settings);
-    }
     // 下发到进程级消费方；返回值说明这次真的变了什么。
     let applied = hifishifter_kernel::ui_settings_apply::apply(&settings);
     // 刷新进程内缓存，供拖拽热路径（ripple/split 选项）无盘读取

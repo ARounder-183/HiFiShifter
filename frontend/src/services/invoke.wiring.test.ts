@@ -11,6 +11,10 @@ import pluginCommandSource from "../../../backend/hifishifter-plugin/src/editor/
 // 那一半命令的唯一登记处；漏扫它，`create_host_track` / 记事本导出这类命令就会变成
 // 前端调了、后端没人接的静默分叉 —— 这正是本测试存在的理由。
 import pluginClientSource from "../../../backend/hifishifter-plugin/src/editor/gui/client.rs?raw";
+// client.rs 里 `request["command"] == protocol::PAGE_READY` 这类比较用的是**常量**
+// 而不是字面量；常量值登记在 protocol.rs。不解析它们，页面首句话（plugin_ready）
+// 与内存自报（plugin_heap）就成了后端存在性检查的盲区。
+import pluginProtocolSource from "../../../backend/hifishifter-plugin/src/editor/gui/protocol.rs?raw";
 // Capture 的命令入口是独立模块（视图层按前缀分流，不进 actor match）。
 // 【为什么必须一起扫】漏掉它就等于给这套穷举检查开了一个后门：新模块里的命令
 // 永远不会被发现，而它们正是"前端调了、后端没有"这类静默分叉的又一来源。
@@ -31,6 +35,15 @@ function extractPluginHandlers(source: string): string[] {
         /(?:\bcommand|request\["command"\])\s*==\s*"([a-z_0-9]+)"/g,
     ))
         result.add(match[1]);
+    // `request["command"] == protocol::PAGE_READY` 这类**常量**比较：解析
+    // protocol.rs 的 `const NAME: &str = "value";` 把常量名换成命令名。
+    // 页面首句话（plugin_ready）与内存自报（plugin_heap）走这条路。
+    for (const match of source.matchAll(
+        /(?:\bcommand|request\["command"\])\s*==\s*protocol::([A-Z_0-9]+)/g,
+    )) {
+        const value = extractProtocolConst(pluginProtocolSource, match[1]);
+        if (value !== null) result.add(value);
+    }
     // UI 线程的整字面量分支：`Some("cmd") => ...` 与 `Some(command @ ("a"|"b")) => ...`。
     //
     // 【为什么要单独一条】`create_host_track` / 记事本导出这类命令在 UI 线程直接
@@ -42,6 +55,12 @@ function extractPluginHandlers(source: string): string[] {
     ))
         for (const literal of match[1].matchAll(/"([a-z_0-9]+)"/g)) result.add(literal[1]);
     return [...result];
+}
+
+/** 从 protocol.rs 提取 `const NAME: &str = "value";` 的字符串常量值。 */
+function extractProtocolConst(source: string, name: string): string | null {
+    const match = source.match(new RegExp(`const\\s+${name}\\s*:\\s*&str\\s*=\\s*"([a-z_0-9]+)"`));
+    return match === null ? null : (match[1] ?? null);
 }
 
 /**
@@ -109,7 +128,14 @@ describe("invoke wiring", () => {
         // 此前 `<` 必填，最朴素的 invoke("cmd") 调用全部漏扫（见布线门禁的
         // "新增命令漏登记必红"契约）。PluginHost.invoke 自己接收命名参数/附件，
         // 不经过 buildTauriArgs。
-        const callPattern = /(?<![.\w])invoke\s*(?:<[^>]*>)?\s*\(\s*["'`]([a-z_0-9]+)["'`]/g;
+        //
+        // 【为什么 lookbehind 只挡 \w】`getPluginHost()?.invoke("plugin_ready")`
+        // 与跨行的 `host\n.invoke("plugin_heap", …)` 是合法的命令调用点
+        // （PluginHost 的命令布线同样按本门禁登记）。旧写法 `(?<![.\w])` 把
+        // 前面带 `.` 的全部排除 —— 这两个调用点恰好都不可见：一侧漏了布线
+        // 登记，另一侧连后端存在性都查不到。挡 `\w` 已足够排除 `reinvoke(`
+        // 这类标识符前缀；`invoke:` 对象键本就不后随 `(`。
+        const callPattern = /(?<!\w)invoke\s*(?:<[^>]*>)?\s*\(\s*["'`]([a-z_0-9]+)["'`]/g;
         const invoked = new Set<string>();
         const fileCount = Object.keys(sources).length;
         for (const [file, text] of Object.entries(sources)) {
@@ -158,7 +184,7 @@ describe("invoke wiring", () => {
             import: "default",
             eager: true,
         }) as Record<string, string>;
-        const callPattern = /(?<![.\w])invoke\s*(?:<[^>]*>)?\s*\(\s*["'`]([a-z_0-9]+)["'`]/g;
+        const callPattern = /(?<!\w)invoke\s*(?:<[^>]*>)?\s*\(\s*["'`]([a-z_0-9]+)["'`]/g;
         const invoked = new Set<string>();
         for (const [file, text] of Object.entries(sources)) {
             if (/\.test\.(ts|tsx)$/.test(file)) continue;

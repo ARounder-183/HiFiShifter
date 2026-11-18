@@ -12,6 +12,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -113,13 +114,34 @@ pub fn save_undo_history(state: &AppState, project_path: &Path) -> bool {
     let Some(target) = undo_file_path_for(project_path) else {
         return false;
     };
-    match fs::write(&target, bytes) {
+    // 原子写：先写临时文件再整体替换，与本仓其余持久化路径（app_config.json、
+    // capture 伴生文件、host-link 工作区）同一模式。直接 `fs::write` 目标的话，
+    // 进程被杀会留下半截文件 —— 而它名字上已是完整的，读取侧会把它当
+    // "无历史"静默吞掉，用户的撤销资产就此丢失且没有任何日志。
+    // 临时名必须逐工程唯一：两个同 stem 的工程同时保存不能共用一个 .tmp，
+    // 也不能用 with_extension 改掉工程名里的点（foo.bar.hshp-UNDO → foo.bar.tmp）。
+    // 同一进程也可能并发保存两个工程（自动保存与手动保存、两个编辑器窗口）。
+    // 进程 id + 目标路径仍可能撞上同一条命令的重入，因此再加一个进程内递增序号；
+    // 临时名同时保留完整工程名，绝不用 with_extension 截断含点的文件名。
+    static NEXT_TMP_ID: AtomicU64 = AtomicU64::new(0);
+    let sequence = NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed);
+    let mut tmp_name = target.as_os_str().to_os_string();
+    tmp_name.push(format!(
+        ".hfs-undo-{}-{sequence}-{}.tmp",
+        std::process::id(),
+        crate::state::now_unix_ms()
+    ));
+    let tmp = PathBuf::from(tmp_name);
+    let result = fs::write(&tmp, bytes)
+        .and_then(|()| hifishifter_kernel::util::replace_file_atomically(&tmp, &target));
+    match result {
         Ok(()) => true,
         Err(error) => {
             log::warn!(
                 "[undo-history] write failed ({}): {error}",
                 target.display()
             );
+            let _ = fs::remove_file(&tmp);
             false
         }
     }
@@ -140,16 +162,34 @@ pub fn serialize_undo_history(state: &AppState) -> Option<Vec<u8>> {
     }
 
     // 取快照：历史记录 + 实时时间线（补齐「当前位置」记录的快照）。
-    let (position, started_at_ms, records) = {
-        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    //
+    // 【锁的持有范围】旧实现把全局 timeline 锁横跨**整段记录深拷贝**（每条
+    // 记录都是一份 TimelineState 快照，总量可达 128MB 级 memcpy）—— timeline
+    // 锁是所有命令与 30Hz UI 轮询的串行点，保存期间全部卡死。这里两段式：
+    // 先在 timeline+history 双锁内取「当前位置」的实时快照（保证快照与
+    // position 配对原子），随后**只持 history 锁**拷贝其余记录；若期间
+    // position 变了（并发撤销/重做，罕见）就整趟重来。锁序不变
+    // （timeline → history），不引入 history → timeline 的死锁风险。
+    let (position, started_at_ms, records) = loop {
+        let (position, started_at_ms, current_snapshot) = {
+            let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            let h = state
+                .timeline_history
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            (h.position, h.started_at_ms, tl.clone())
+        };
         let h = state
             .timeline_history
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        if h.position != position {
+            continue;
+        }
         let mut records: Vec<UndoFileRecord> = Vec::with_capacity(h.records.len());
         for (index, record) in h.records.iter().enumerate() {
-            let snapshot = if index == h.position {
-                Some(tl.clone())
+            let snapshot = if index == position {
+                Some(current_snapshot.clone())
             } else {
                 record.state.clone()
             };
@@ -162,19 +202,25 @@ pub fn serialize_undo_history(state: &AppState) -> Option<Vec<u8>> {
                 notes_markdown: record
                     .notes_markdown
                     .clone()
-                    .or_else(|| (index == h.position).then(|| state.current_notes_value())),
+                    .or_else(|| (index == position).then(|| state.current_notes_value())),
                 param_selection: record.param_selection.clone(),
             });
         }
-        (h.position, h.started_at_ms, records)
+        break (position, started_at_ms, records);
     };
     if records.is_empty() {
         return None;
     }
 
     // 从最新往回累加：超出体积上限即停止，更旧的记录被丢弃。
+    //
+    // 【为什么每条只序列化一次】旧实现 per record 三趟：to_value（建树）+
+    // to_string（量体积）+ 最终整文件 to_vec（再全量走一遍）。这里把每条记录
+    // 的序列化字节直接保留，最终文件用头部 + 字节拼接组装 —— 省掉最后一次
+    // 全文件重序列化（128MB 上限下是纯白付的 CPU 与双份内存）。
+    // 记录内容仍走 to_value（浮点经 Number 归一的口径与旧文件逐字节一致）。
     let total_records = records.len();
-    let mut kept: Vec<serde_json::Value> = Vec::with_capacity(records.len());
+    let mut kept: Vec<Vec<u8>> = Vec::with_capacity(records.len());
     let mut total = 0usize;
     let mut oldest_kept_at_ms = started_at_ms;
     for record in records.into_iter().rev() {
@@ -186,13 +232,20 @@ pub fn serialize_undo_history(state: &AppState) -> Option<Vec<u8>> {
                 return None;
             }
         };
-        let size = serde_json::to_string(&value).map(|s| s.len()).unwrap_or(0);
+        let bytes = match serde_json::to_vec(&value) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                log::warn!("[undo-history] record serialize failed: {error}");
+                return None;
+            }
+        };
+        let size = bytes.len();
         if !kept.is_empty() && total.saturating_add(size) > MAX_UNDO_FILE_BYTES {
             break;
         }
         total = total.saturating_add(size);
         oldest_kept_at_ms = at_ms;
-        kept.push(value);
+        kept.push(bytes);
     }
     kept.reverse();
     if kept.is_empty() {
@@ -207,20 +260,33 @@ pub fn serialize_undo_history(state: &AppState) -> Option<Vec<u8>> {
         started_at_ms
     };
 
-    let file = serde_json::json!({
+    // 头部对象（serde_json 默认 BTreeMap：键按字母序输出），records 数组以
+    // 已序列化的字节拼接，避免整文件二次序列化。
+    let header = serde_json::json!({
         "version": UNDO_FILE_VERSION,
         "savedAtMs": crate::state::now_unix_ms(),
         "startedAtMs": started_at_ms,
         "position": position,
-        "records": kept,
     });
-    match serde_json::to_vec(&file) {
-        Ok(bytes) => Some(bytes),
+    let mut file = match serde_json::to_string(&header) {
+        Ok(header) => header,
         Err(error) => {
             log::warn!("[undo-history] serialize failed: {error}");
-            None
+            return None;
         }
+    };
+    // 头部以 '}' 结尾：弹掉后接 records 数组。字节全部来自 serde_json 自身
+    // 的输出，拼接结果必为合法 JSON。
+    file.pop();
+    file.push_str(",\"records\":[");
+    for (index, bytes) in kept.iter().enumerate() {
+        if index > 0 {
+            file.push(',');
+        }
+        file.push_str(&String::from_utf8_lossy(bytes));
     }
+    file.push_str("]}");
+    Some(file.into_bytes())
 }
 
 /// 读取伴生文件恢复操作记录（`open_project` 无条件尝试）。
@@ -363,6 +429,44 @@ mod tests {
         assert!(super::serialize_undo_history(&state).is_some());
     }
 
+    /// 同一进程的自动保存与手动保存可能并发：临时名必须逐次唯一。
+    #[test]
+    fn concurrent_saves_use_distinct_temp_paths() {
+        use crate::state::{AppState, HistoryOp};
+
+        let dir = temp_dir("concurrent_temp_names");
+        let project = dir.join("project.hshp");
+        let state = AppState::default();
+        {
+            let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            state.checkpoint_timeline(&tl, HistoryOp::AddClip);
+        }
+        state.set_project_save_undo_history(true);
+
+        std::thread::scope(|scope| {
+            let writers: Vec<_> = (0..4)
+                .map(|_| {
+                    let project = &project;
+                    let state = &state;
+                    scope.spawn(move || super::save_undo_history(state, project))
+                })
+                .collect();
+            for writer in writers {
+                assert!(writer.join().expect("save thread"));
+            }
+        });
+        assert!(super::undo_file_path_for(&project).unwrap().is_file());
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".hfs-undo-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "atomic replace must not leave temp files"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test]
     fn undo_file_name_keeps_extension_and_uppercases_suffix() {
         let project = PathBuf::from("/tmp/projects/1.hshp");

@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 const RECLAIM_SPIN_LIMIT: u32 = 4096;
 
 #[derive(Debug)]
-pub(crate) struct PlaybackSnapshot {
+pub struct PlaybackSnapshot {
     pub sample_rate: u32,
     pub origin_sample: i64,
     pub left: Vec<f32>,
@@ -140,7 +140,7 @@ impl LayeredProbe {
 }
 
 #[derive(Debug, PartialEq)]
-pub(crate) enum SnapshotError {
+pub enum SnapshotError {
     InvalidGeometry,
     MissingSource,
     UnsupportedTransform,
@@ -336,7 +336,7 @@ struct RetainedSnapshot {
     snapshot: Arc<PlaybackSnapshot>,
 }
 
-pub(crate) struct SnapshotPublisher {
+pub struct SnapshotPublisher {
     retained: Mutex<(Vec<Box<RetainedSnapshot>>, usize)>,
     current: AtomicPtr<RetainedSnapshot>,
     /// 正在"载入当前指针并登记到该快照"的读者数。
@@ -378,6 +378,14 @@ impl Default for SnapshotPublisher {
 
 impl SnapshotPublisher {
     /// IPC/诊断线程有界读当前实际发布的PCM；不复制音频、不调用宿主、不在实时回调执行。
+    ///
+    /// 【为什么是 `#[cfg(test)]`】原有的生产消费者（host-link 诊断 IPC）已随
+    /// "workspace 导出收口到 Capture 会话"一并移除，本方法目前只剩集成测试在
+    /// 断言失败消息里用它报告发布器状态。按 `-D warnings` 的门禁，非测试构建
+    /// 携带这段无人调用的代码会直接判死（dead_code）；把它整体钉在测试构建里，
+    /// 既保留失败诊断的现场还原，又不让发布产物携带死代码。日后若再出现诊断
+    /// IPC，恢复为 `pub(crate)` 即可。
+    #[cfg(test)]
     pub(crate) fn diagnose(&self, ranges: &[(String, f64, f64)]) -> serde_json::Value {
         let read = self.enter();
         // SAFETY: 与 copy_block 相同读区契约；本读区登记的快照在返回前不会被释放。

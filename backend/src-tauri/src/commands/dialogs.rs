@@ -95,8 +95,9 @@ pub(super) fn pick_directory() -> serde_json::Value {
 }
 
 pub(super) fn pick_midi_output_path() -> serde_json::Value {
+    let file_type = &hifishifter_kernel::file_types::MIDI;
     let picked = rfd::FileDialog::new()
-        .add_filter("MIDI", &["mid"])
+        .add_filter(file_type.name(), &file_type.extension_refs())
         .set_file_name("export.mid")
         .save_file();
 
@@ -109,8 +110,9 @@ pub(super) fn pick_midi_output_path() -> serde_json::Value {
 }
 
 pub(super) fn open_midi_dialog() -> serde_json::Value {
+    let file_type = &hifishifter_kernel::file_types::MIDI;
     let picked = rfd::FileDialog::new()
-        .add_filter("MIDI", &["mid", "midi"])
+        .add_filter(file_type.name(), &file_type.extension_refs())
         .pick_file();
 
     match picked {

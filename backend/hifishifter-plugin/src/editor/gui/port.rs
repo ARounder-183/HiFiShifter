@@ -23,7 +23,7 @@
 /// 【为什么是 `usize` 而不是裸指针】它会被存进 `EditorClient` 并转交给
 /// `browser_files`（那里的四个平台服务只认一个整数）；裸指针会让这些结构体
 /// 全部变成 `!Send` 的传播源，而它们本来就不需要解引用 —— 解引用发生在平台实现内部。
-pub(crate) type NativeWindow = usize;
+pub type NativeWindow = usize;
 
 /// 平台自己说它能做到哪一步。
 ///
@@ -31,7 +31,7 @@ pub(crate) type NativeWindow = usize;
 /// 不是调用点的偏好。让平台自报一次，Policy 与 `view.rs` 只读这一个枚举，
 /// 新增平台时不必回头改判定。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum GuiFidelity {
+pub enum GuiFidelity {
     /// 完整内嵌：视图就在宿主给的 parent 里。
     Embedded,
     /// 只能开自己的顶层窗口（Wayland 兜底、以及 GTK 只能跑在私有线程上的宿主）。
@@ -46,7 +46,7 @@ pub(crate) enum GuiFidelity {
 
 impl GuiFidelity {
     /// 诊断/日志用的稳定短名。
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             GuiFidelity::Embedded => "embedded",
             GuiFidelity::FloatingWindow => "floating-window",
@@ -84,7 +84,7 @@ pub(crate) trait EditorPort {
 /// 同一线程（`docs/thread-model.md`），所以这个句柄**只属于那条线程**；给它加 `Send`
 /// 只会逼 macOS/Linux 的实现去藏 `Rc`（见 `linux.rs` 的注册表），换不来任何真实保证。
 /// 需要"从任意线程投递"的地方（情形 3 的 GTK 线程）走的是通道，不是这个句柄。
-pub(crate) trait EditorHost {
+pub trait EditorHost {
     fn fidelity(&self) -> GuiFidelity;
 
     /// 视图尺寸变化。macOS 的实现负责把物理像素换算成逻辑点。

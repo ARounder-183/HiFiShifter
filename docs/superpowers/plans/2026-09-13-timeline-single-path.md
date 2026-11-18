@@ -730,22 +730,11 @@ npx tsc -b --noEmit 2>&1 | head -20
 
 **说明**：`kernelUnavailable` 这个标识符在本任务后不再存在；渲染判据统一写作 `isKernelAvailable(kernelUnavailableReason !== null)`（任务 5 步骤 8 会给出最终形态）。
 
-- [ ] **步骤 8：简化 `kernelMount.ts` 并保留行为测试**
+- [x] **步骤 8：删除 `kernelMount.ts` 并完成行为守护迁移**
 
-`kernelMount.ts` 的 `enabled` 维度已消失，保留它会造成"含恒真参数的伪抽象"。把它替换为不引入新模块的直接判断（删除该文件），**同时**把其测试改为守护"失败必须报错而非静默空白"这一行为——通过保留一个新测试文件覆盖面板的判定逻辑。
+`kernelMount.ts` 的 `enabled` 维度已消失，保留它会造成“含恒真参数的伪抽象”。已删除该模块及其单测；`kernelAvailability.ts` + 测试承接“失败必须报错而非静默空白”的行为守护。
 
-> **实施记录（与本文的偏差，2026-09-13 阶段 4 提交）**：实际执行时**保留了
-> `kernelMount.ts` 与 `kernelMount.test.ts`**（仅修正其已成假的注释：上游改为"当前
-> 无生产调用方"、`enabled` 的语义由"用户开关"改为"调用方意愿"），未按本节删除。
-> 原因有二：
-> 1. 本节原本的处置路径已在任务 4 步骤 7 之外由 `kernelAvailability.ts` + 测试
->    **另行承接**（该文件在阶段 4 之前就已存在），"删除以保住行为守护"的动机不再成立；
-> 2. 阶段 4 的验收判据是**通过数恰为 838**（= 阶段 3 的 863 − `featureFlag.test.ts` 的
->    25）。`kernelMount.test.ts` 有 8 项用例，删掉会得到 830，与判据不符。
->
-> 结论：删不删它是**独立决策**，不属于"移除开关"的任务范围。已在该文件头写明
-> "当前无生产消费者、是否删除属独立决策"，避免下一位读者误以为是遗漏。
-> 若将来决定删除，应同时把验收计数改为 830 并说明差异。
+> **实施记录（后续全仓审查补齐）**：`kernelMount.ts` 与 `kernelMount.test.ts` 已按本节删除；行为守护由 `kernelAvailability.ts` 承接。阶段 4 当时的 838 用例验收判据是历史记录，删除后全量通过数相应减少 8 项。
 
 具体做法：删除 `kernelMount.ts` 与 `kernelMount.test.ts`，并在 `frontend/src/components/layout/TimelinePanel.tsx` 内联判定（步骤 7 的 `kernelAvailable`）。为保住行为守护，在任务 5 创建的 `KernelUnavailableNotice.tsx` 旁新增 `kernelAvailability.ts` + `.test.ts`：
 
@@ -1523,9 +1512,9 @@ TimelineScrollArea"，而该文件已删除。该注释**已在 `df430b91` 修�
 `OFF_*`），因此只能删那个函数与按钮，不能删文件。注释已在 `d3f6f516` 修正（写明
 逃生门已失效、历史用途与归属），函数与按钮留待与上面 7 个模块一并清理。
 
-**另有一个待定项**：`timeline/kernel/kernelMount.ts` + 其 8 项测试**无生产消费者**
-（`enabled` 维度随开关移除而消失）。任务 4 执行时**未删**，理由有二：其行为守护已由
-`kernelAvailability.ts` 承接；且删除会使验收命中数变 830、与任务 4 的 838 判据不符。
+**原待定项已收尾**：`timeline/kernel/kernelMount.ts` + 其 8 项测试**无生产消费者**
+（`enabled` 维度随开关移除而消失），已在后续全仓审查中删除；行为守护由
+`kernelAvailability.ts` 承接，验收计数随之减少 8 项。
 **是否删除属独立决策**（若决定删除，应同时把验收计数改为 830 并说明差异），已在该
 文件头与任务 4 的提交信息中写明。
 

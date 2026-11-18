@@ -1974,7 +1974,7 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
             (||->Result<serde_json::Value,String>{
                 let identity=interaction_identity(&link)?;
                 let name=crate::editor::plugin_diagnostics::default_file_name();
-                let path=crate::editor::browser_files::pick_save_path(window,&name,"zip")?;
+                let path=crate::editor::browser_files::pick_save_path(window,&name,&hifishifter_kernel::file_types::DIAGNOSTICS_ZIP)?;
                 // 对话框期间用户可能关窗/切实例；租约变了就不再交付这个路径。
                 if !interaction_unchanged(&link,&identity) {return Err("diagnostics picker editor lease changed".into());}
                 match path {Some(path)=>Ok(serde_json::json!({"ok":true,"path":path.to_string_lossy()})),
@@ -1990,7 +1990,7 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
             let (link,window)={let state=state.borrow();(state.link.clone(),state.window)};
             (||->Result<serde_json::Value,String>{
                 let identity=interaction_identity(&link)?;
-                let path=crate::editor::browser_files::pick_save_path(window,"export.mid","mid")?;
+                let path=crate::editor::browser_files::pick_save_path(window,"export.mid",&hifishifter_kernel::file_types::MIDI)?;
                 // 对话框期间用户可能关窗/切实例；租约变了就不再交付这个路径。
                 if !interaction_unchanged(&link,&identity) {return Err("MIDI picker editor lease changed".into());}
                 match path {
@@ -2009,7 +2009,9 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
             let (link,window)={let state=state.borrow();(state.link.clone(),state.window)};
             (||->Result<serde_json::Value,String>{
                 let identity=interaction_identity(&link)?;
-                let path=crate::editor::browser_files::pick_open_path(window,"MIDI","mid")?;
+                // 【为什么现在也认 .midi】词表里 MIDI 有两条扩展名，与独立 App 一致；
+                // 此前插件只认 .mid，用户按 App 习惯起的 .midi 文件在这里选不到。
+                let path=crate::editor::browser_files::pick_open_path(window,&hifishifter_kernel::file_types::MIDI)?;
                 // 对话框期间用户可能关窗/切实例；租约变了就不再交付这个路径。
                 if !interaction_unchanged(&link,&identity) {return Err("MIDI picker editor lease changed".into());}
                 match path {
@@ -2147,7 +2149,7 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
             (||->Result<serde_json::Value,String>{
                 // 对话框是模态的：期间用户可能关窗或切实例，所以前后各核对一次租约。
                 let identity=interaction_identity(&link)?;
-                let path=crate::editor::browser_files::pick_save_path(window,&name,"json")?;
+                let path=crate::editor::browser_files::pick_save_path(window,&name,&hifishifter_kernel::file_types::HIFISHIFTER_JSON)?;
                 if !interaction_unchanged(&link,&identity) {return Err("json export dialog editor lease changed".into());}
                 let Some(path)=path else {return Ok(serde_json::json!({"ok":false,"canceled":true}))};
                 std::fs::write(&path,json.as_bytes()).map_err(|e|e.to_string())?;

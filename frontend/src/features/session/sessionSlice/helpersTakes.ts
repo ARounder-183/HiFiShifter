@@ -366,8 +366,13 @@ export type TakeOptimisticFlat = Pick<
 
 export const pendingTakeRollbacks = new Map<
     string,
-    { activeTakeId: string | undefined; flat: TakeOptimisticFlat }
+    { activeTakeId: string | undefined; flat: TakeOptimisticFlat; take?: ClipTakeInfo }
 >();
+
+/** Immer draft 的 Take 也要脱壳：producer 结束后模块级快照不能留吊销代理。 */
+function cloneTakeSnapshot(take: ClipTakeInfo): ClipTakeInfo {
+    return JSON.parse(JSON.stringify(take)) as ClipTakeInfo;
+}
 
 /**
  * take 快照要浅拷贝的字段。
@@ -413,7 +418,11 @@ export function snapshotTakeValue(value: unknown): unknown {
     }
 }
 
-export function captureTakeRollback(state: SessionState, clipIds: readonly string[]): void {
+export function captureTakeRollback(
+    state: SessionState,
+    clipIds: readonly string[],
+    takeId?: string,
+): void {
     for (const clipId of clipIds) {
         const clip = state.clips.find((entry) => entry.id === clipId);
         if (!clip) continue;
@@ -430,7 +439,13 @@ export function captureTakeRollback(state: SessionState, clipIds: readonly strin
             // `satisfies` 在编译期守住。
             (flat as Record<string, unknown>)[key] = snapshotTakeValue(clip[key]);
         }
-        pendingTakeRollbacks.set(clipId, { activeTakeId: clip.activeTakeId, flat });
+        const take =
+            takeId !== undefined ? clip.takes?.find((entry) => entry.id === takeId) : undefined;
+        pendingTakeRollbacks.set(clipId, {
+            activeTakeId: clip.activeTakeId,
+            flat,
+            ...(take ? { take: cloneTakeSnapshot(take) } : {}),
+        });
     }
 }
 
@@ -443,6 +458,12 @@ export function restoreTakeRollback(state: SessionState, clipIds: readonly strin
         if (!clip) continue;
         clip.activeTakeId = snapshot.activeTakeId;
         Object.assign(clip, snapshot.flat);
+        // reversed / channelMode 的乐观修改落在 take 条目自身；flat 投影还原后
+        // 若不同步还原它，下一次应用 active take 又会把失败的值物化回来。
+        if (snapshot.take && clip.takes) {
+            const index = clip.takes.findIndex((entry) => entry.id === snapshot.take!.id);
+            if (index >= 0) clip.takes[index] = cloneTakeSnapshot(snapshot.take);
+        }
     }
 }
 

@@ -10,6 +10,7 @@
  * 给它们加一层待提交状态只会制造"改了没反应"的困惑。
  */
 
+import { shallowEqual } from "react-redux";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { setDockSettings, setTabPosition } from "../../features/dock/dockSlice";
 import type { DockSettings } from "../../features/dock/dockSettings";
@@ -28,7 +29,14 @@ export function DockLayoutSettingsDialog({ open, onOpenChange }: DockLayoutSetti
     const { t, tf } = useI18n();
     const settings = useAppSelector((state) => state.dock.settings);
     const layoutTabPosition = useAppSelector((state) => state.dock.layout.tabPosition);
-    const presetNames = useAppSelector((state) => Object.keys(state.dock.layout.presets ?? {}));
+    // 【为什么带 shallowEqual】`Object.keys()` 每次调用都产生新数组，引用相等
+    // 恒为 false —— 挂载期间**每一个** store 动作（33Hz 播放轮询、5Hz 采集轮询、
+    // 电表事件）都会触发本组件重渲染。预设名是字符串数组，浅比较即正确且免费
+    // （与 ActionBar / MenuBar 的窄订阅同口径）。
+    const presetNames = useAppSelector(
+        (state) => Object.keys(state.dock.layout.presets ?? {}),
+        shallowEqual,
+    );
 
     const patch = (next: DockSettings) => dispatch(setDockSettings(next));
 

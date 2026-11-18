@@ -97,7 +97,6 @@ export function drawPianoRollFrame(deps: DrawFrameDeps): void {
         t,
         themeMode,
         valueToY,
-        viewSize,
         viewSizeRef,
         visibleSecondaryParamIds,
         visualPlayheadSecRef,
@@ -209,7 +208,9 @@ export function drawPianoRollFrame(deps: DrawFrameDeps): void {
      * 【必须包含什么】主画布上绘制的**全部输入**：
      * - 绘图资源：各条曲线数据、参考线、Clip 源音高、副参数视口、morph 叠加、
      *   剪贴板预览、选区块、live 编辑覆盖、中央提示文字 `overlayText`；
-     * - 视口：`viewSize`、`pxPerSec`、`scrollLeft`、`dpr`（滚动/缩放会改变投影）；
+     * - 视口：`viewSizeRef.current`、`resolvePanelRenderViewport` 解析出的
+     *   `pxPerSec` / `scrollLeft`、原始 `dpr`（滚动/缩放会改变投影）；
+     *   这三项必须与下方 `drawPianoRoll` 实际收到的值**逐字相同**，见签名处的说明。
      * - 主题与字体（颜色解析与文字宽度都会影响像素结果）。
      *
      * 【音阶高亮为什么不在签名里】它已迁到 **GL 网格层**（主画布不再绘制它），
@@ -237,12 +238,17 @@ export function drawPianoRollFrame(deps: DrawFrameDeps): void {
      * 成本只是偶尔多一次重绘。最后再列一遍 `secondaryParamViews` 并非冗余——
      * 它与 `paramViewsRef.current` 同为曲线数据源，两者都必须进签名。
      */
+    // 【签名必须逐项等于真正喂给 drawPianoRoll 的值】此前这里用 React state 的
+    // `viewSize`、渲染期 `pxPerSecRef/scrollLeftRef` 与 `Math.round(dpr*100)`，
+    // 而绘制用的是 `viewSizeRef.current` 与 `resolvePanelRenderViewport(kernel)`
+    // 解析出的 viewport、以及原始 dpr。并发渲染 / 量化滚动 / 换屏导致两边不同
+    // 时，签名不变但绘制内容已变 —— 缓存直接 return，画布停在旧选区/旧曲线。
     const mainContentSignature: MainCanvasSignature = [
-        viewSize.w,
-        viewSize.h,
-        pxPerSecRef.current,
-        scrollLeftRef.current,
-        Math.round((window.devicePixelRatio || 1) * 100),
+        viewSizeRef.current.w,
+        viewSizeRef.current.h,
+        viewport.pxPerSec,
+        viewport.scrollLeftPx,
+        window.devicePixelRatio || 1,
         editParam,
         themeMode,
         fontFamily,

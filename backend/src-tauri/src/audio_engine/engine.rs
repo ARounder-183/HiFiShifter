@@ -1276,12 +1276,25 @@ fn handle_default_output_device_changed(
     })?;
 
     // 3) 切换播放：先停旧流；新流起不来就把它恢复，保持"切换失败等于没发生"。
+    //
+    // 【为什么先压住 is_playing】`play()` 一返回，新流的回调就可能跑起来读共享
+    // 原子量 —— 而提交（第 4 步）之前它们还是旧采样率域的值：is_playing 为真时
+    // 首个回调块会按旧快照 + 旧位置出声，表现为切设备瞬间的杂音/爆点。先置 false
+    // 让新流的头几个块走回调的"未播放"分支（数字静音、不推进位置），提交完成
+    // 后由第 4 步末尾按 was_playing 恢复播放。
+    let was_audible = was_playing;
+    if was_audible {
+        is_playing.store(false, Ordering::Relaxed);
+    }
     if let Some(old_stream) = stream.as_ref() {
         let _ = old_stream.pause();
     }
     if let Err(error) = new_stream.play() {
         if let Some(old_stream) = stream.as_ref() {
             let _ = old_stream.play();
+        }
+        if was_audible {
+            is_playing.store(true, Ordering::Relaxed);
         }
         return Err(format!("new output stream play failed: {error}"));
     }

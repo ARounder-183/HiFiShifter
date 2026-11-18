@@ -1,8 +1,8 @@
 //! 核对官方REAPER SDK的原生宿主适配：只在原始UI/model线程读所属project的真实位置。
 //! ABI依据 justinfrankel/reaper-sdk c0eafe87863b2bf69c5c822760f1b32a753b211b，
 //! sdk/reaper_vst3_interfaces.h 与 reaper_plugin_functions.h。手写适配，不是SDK原文件。
-use crate::editor::connection::UnknownVtbl;
-use crate::vst3::{alternate_iid, platform_iid, K_RESULT_OK};
+use crate::vst3_abi::UnknownVtbl;
+use crate::vst3_abi::{alternate_iid, platform_iid, K_RESULT_OK};
 use std::ffi::{c_char, c_void};
 pub(super) mod item_chunk;
 pub(crate) use item_chunk::RewrittenItem;
@@ -19,6 +19,10 @@ mod host_timer;
 pub(crate) mod clipboard;
 pub(crate) mod host_edit;
 pub(crate) mod host_split;
+/// take 方向（倒放）的结构写回：REAPER 没有反向 setter，倒放是 SOURCE SECTION。
+mod source_direction;
+/// take 音高包络（PITCHENV）在 item state chunk 里的读写。
+mod take_pitch;
 pub(crate) mod undo;
 
 const IID: [u32; 4] = [0x79655E36, 0x77EE4267, 0xA573FEF7, 0x4912C27C];
@@ -309,6 +313,8 @@ impl hifishifter_kernel::editor::host::EditorHost for NativeHost {
             media_import: self.can_import_audio(),
             track_create: self.can_create_audio_track(),
             item_clipboard: self.can_clipboard_items(),
+            clip_reverse: self.can_reverse_clips(),
+            take_pitch_bridge: self.can_bridge_take_pitch(),
             fade_axes: self.fade_axes_v2.is_some(),
             // 导出与宿主无关：两条后端都只读授权 PCM 再写用户选定的文件。
             export_audio: true,
@@ -381,7 +387,7 @@ impl NativeHost {
             crate::log_line(&format!(
                 "[reaper-host] QI result={result} interface={} (iid layout={}, tried both)",
                 !pointer.is_null(),
-                crate::vst3::iid_layout()
+                crate::vst3_abi::iid_layout()
             ));
             return None;
         }
@@ -1112,8 +1118,8 @@ impl NativeHost {
             return Err("invalid REAPER length".into());
         }
         // 【为什么保留符号】负速率是宿主表达倒放的**两个来源之一**（另一个是
-        // `SECTION MODE 1` / `PCM_Source_GetSectionInfo` 的方向位）。独立 App 的判据
-        // 是 `play_rate < 0 || section_mode > 0`；插件此前把符号 `.abs()` 掉、只认方向位，
+        // `SECTION` 的 `MODE` 反向位 / `PCM_Source_GetSectionInfo` 的方向位）。独立 App
+        // 的判据是 `play_rate < 0 || section_mode_reversed`；插件此前把符号 `.abs()` 掉、只认方向位，
         // 于是"只用负速率表达倒放"的 take 被**静默按正放渲染** —— 输出错的音频。
         // 幅值仍单独保留（`playback_rate`）：窗口宽度、缓存键这些与方向无关的消费者用它。
         // 拒绝 0 与非有限值：此前直接拒绝 `<= 0` 会让**整个 item 从清单里消失**，
@@ -1291,11 +1297,12 @@ fn new_fade_axes(version: &str) -> Option<bool> {
     Some((major, minor) >= NEW_FADE_AXES_SINCE)
 }
 
-#[cfg(test)]
 #[path = "tests.rs"]
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(not(test), allow(dead_code))]
 mod geometry_tests;
-#[cfg(test)]
-pub(crate) use geometry_tests::Fixture as MockHost;
+#[cfg(any(test, feature = "test-support"))]
+pub use geometry_tests::Fixture as MockHost;
 
 #[cfg(test)]
 mod tests {
@@ -1347,7 +1354,7 @@ mod tests {
                     0x12, 0xc2, 0x7c,
                 ];
                 if unsafe { std::slice::from_raw_parts(iid, 16) } != expected {
-                    return crate::vst3::K_NO_INTERFACE;
+                    return crate::vst3_abi::K_NO_INTERFACE;
                 }
                 unsafe {
                     add(this);

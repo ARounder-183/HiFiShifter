@@ -66,7 +66,7 @@ function Get-CargoCommand([string]$kind, [int]$Threads = 0) {
     # 【为什么每一条 cargo 命令前面都要先设环境】ara2-bridge 的 build.rs 在缺少
     # ARA_SDK_DIR / ARA_VST3_SDK_DIR 时会直接 panic。这两个变量的唯一来源是
     # scripts/env/sdk-env.ps1；不在这里设，失败就发生在"编译到一半、由 build script
-    # 抛出"，看起来像源码坏了。CI 的 plugin-gates 第一次真跑插件单测时就是这样红的。
+    # 抛出"，看起来像源码坏了。CI 的旧插件单测 job 第一次真跑时就是这样红的。
     $msvc = Join-Path $root 'scripts\env\msvc-env.ps1'
     $sdkEnv = Join-Path $root 'scripts/env/sdk-env.ps1'
     $sdkRoot = Join-Path $root 'third_party/sdk'
@@ -106,7 +106,10 @@ function Get-CargoCommand([string]$kind, [int]$Threads = 0) {
             # 日志停在 host_edit::tests::a_poisoned_editor_timeline_refuses_host_edits 之后，
             # 然后一直挂到 60 分钟上限（本地 16 核跑同一份代码 168 秒全绿）。
             # 每个模块一个进程，继承的状态就只剩该模块自己的；挂死时也一眼看得出是哪个模块。
-            $pluginChunks = @('ara::', 'capture::', 'editor::', 'host::', 'render::', 'vst3::')
+            # 【vst3:: 为什么不在列表里】VST3 的壳体与其黑盒测试整体搬进了
+            # `hifishifter-vst3`（见 docs/plans/2026-11-17-vst3-shell-extraction-plan.md）；
+            # 壳的测试按"整 crate 一个进程"跑（数量级与单个模块相当）。
+            $pluginChunks = @('ara::', 'capture::', 'editor::', 'host::', 'render::')
             $skips = if ($skipArgs.Count -gt 0) { ' ' + ($skipArgs -join ' ') } else { '' }
             $pluginRun = (!$Package -or $Package -eq 'hifishifter-plugin')
 
@@ -114,9 +117,10 @@ function Get-CargoCommand([string]$kind, [int]$Threads = 0) {
             # 来断言导出表，而 `cargo test` 只编测试用的 rlib，不产出 .dll —— 干净检出上
             # 那条用例必然找不到文件（它自己的报错也写着"先跑 cargo build"）。
             if ($pluginRun -and $threads -le 1) {
-                Write-Output "$prefix cargo build --locked --manifest-path $manifest -p hifishifter-plugin"
-                # clap 的导出表用例同样 dlopen 产出的 cdylib（hifishifter_clap.dll），
-                # 而 cargo test 只编测试用的 rlib —— 与 vst3_exports 是同一个坑。
+                # 两个壳的导出表用例都 dlopen 产出的 cdylib（hifishifter_vst3.dll /
+                # hifishifter_clap.dll），而 cargo test 只编测试用的 rlib —— 与
+                # vst3_exports / clap_exports 是同一个坑，先 build 一次。
+                Write-Output "$prefix cargo build --locked --manifest-path $manifest -p hifishifter-vst3"
                 Write-Output "$prefix cargo build --locked --manifest-path $manifest -p hifishifter-clap"
             }
 
@@ -129,10 +133,15 @@ function Get-CargoCommand([string]$kind, [int]$Threads = 0) {
                 # Cargo.toml 明明写了 default-features = false。单独 -p 解析时
                 # 依赖图里没有 src-tauri，产物才是发布形态。判据不变，只把检查
                 # 对象换成与产物同形的那一份。
-                $clapExclude = ' --exclude hifishifter-clap'
-                # 先跑"除插件与 CLAP 以外的一切"（含内核），再按模块把插件拆开。
+                # 【exclude 名单为什么是两个壳】壳的 build.rs 仍要 SDK/构建身份
+                # （vst3 壳要 ARA/VST3 SDK），且 Cargo 的特性并集会把 src-tauri 的
+                # vslib 并进 CLAP 的导入表判据 —— 与此前 hifishifter-plugin 的
+                # 待遇相同，逐个 -p。共享层（plugin）零 SDK、无 cdylib，回归
+                # workspace 全量。
+                $shellExclude = ' --exclude hifishifter-vst3 --exclude hifishifter-clap'
                 if (!$Package) {
-                    Write-Output "$prefix cargo test --locked --manifest-path $manifest --workspace --exclude hifishifter-plugin$clapExclude -- --test-threads=1$skips"
+                    Write-Output "$prefix cargo test --locked --manifest-path $manifest --workspace $shellExclude -- --test-threads=1$skips"
+                    Write-Output "$prefix cargo test --locked --manifest-path $manifest -p hifishifter-vst3 -- --test-threads=1$skips"
                     Write-Output "$prefix cargo test --locked --manifest-path $manifest -p hifishifter-clap -- --test-threads=1$skips"
                 }
                 # 【为什么先 --no-run 一次】按模块拆进程时，每条 cargo test 都会重新
@@ -156,7 +165,7 @@ function Get-CargoCommand([string]$kind, [int]$Threads = 0) {
                 $concurrentSkips = ''
                 if (!$Package -and $threads -gt 1) {
                     # 同上：并发复跑也不能把 src-tauri 的 vslib 并进 CLAP 的导入表。
-                    $exclude = ' --exclude hifishifter-plugin --exclude hifishifter-clap'
+                    $exclude = ' --exclude hifishifter-vst3 --exclude hifishifter-clap'
                     $concurrentSkips = ' --skip mixing_a_faded_clip_on_the_audio_thread_does_not_allocate'
                 }
                 Write-Output "$prefix cargo test --locked --manifest-path $manifest $target$exclude -- --test-threads=$threads$skips$concurrentSkips"

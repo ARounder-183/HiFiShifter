@@ -55,6 +55,11 @@
             "occurrences": 1
         },
         {
+            "path": "backend/hifishifter-vst3/Cargo.toml",
+            "pattern": "(?ms)(\\[package\\].*?^\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1
+        },
+        {
             "path": "backend/hifishifter-clap/Cargo.toml",
             "pattern": "(?ms)(\\[package\\].*?^\\s*version\\s*=\\s*\")([^\"]+)(\")",
             "occurrences": 1
@@ -95,6 +100,12 @@
             "pattern": "(?ms)(\\[\\[package\\]\\]\\s*name\\s*=\\s*\"hifishifter-clap\"\\s*version\\s*=\\s*\")([^\"]+)(\")",
             "occurrences": 1,
             "id": "backend/Cargo.lock (hifishifter-clap)"
+        },
+{
+            "path": "backend/Cargo.lock",
+            "pattern": "(?ms)(\\[\\[package\\]\\]\\s*name\\s*=\\s*\"hifishifter-vst3\"\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "id": "backend/Cargo.lock (hifishifter-vst3)"
         },
         {
             "path": "backend/hifishifter-clipboard/Cargo.toml",

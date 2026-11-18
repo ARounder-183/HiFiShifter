@@ -49,6 +49,14 @@ describe("parseRgbaColor", () => {
         expect(parseRgbaColor("#4f8ef7")).toEqual([1, 0, 1, 1]);
         expect(parseRgbaColor("var(--qt-border)")).toEqual([1, 0, 1, 1]);
     });
+
+    it("数字形态非法（1.2.3 / 空符号）时回退洋红，绝不把 NaN 送进实例缓冲", () => {
+        // 宽松字符类 [-\d.]+ 会接受这些串，Number() 得到 NaN；NaN 一旦写进
+        // Float32Array，着色器的 SDF 全线变 NaN，整块 clip 静默消失。
+        expect(parseRgbaColor("rgba(1.2.3, 40, 60, 1)")).toEqual([1, 0, 1, 1]);
+        expect(parseRgbaColor("rgba(--, 40, 60, 1)")).toEqual([1, 0, 1, 1]);
+        expect(Number.isFinite(parseRgbaColor("rgba(1.2.3, 40, 60, 1)")[0])).toBe(true);
+    });
 });
 
 describe("clip 实例数据布局", () => {

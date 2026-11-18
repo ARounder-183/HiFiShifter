@@ -185,7 +185,6 @@ export const koKR = {
     appearance_font_search_placeholder: "글꼴 검색...",
     appearance_font_no_results: "일치하는 글꼴 없음",
     appearance_font_count: "{count}개 글꼴 감지됨",
-    appearance_reset: "초기화",
     appearance_font_restore_default: "기본 글꼴로 복원",
     appearance_apply: "적용",
     appearance_import_theme: "가져오기...",
@@ -794,8 +793,6 @@ export const koKR = {
     ctx_channel_mode: "채널 모드",
     ctx_group: "그룹",
     ctx_scan_fake_stereo: "가짜 스테레오 검사 후 변환",
-    ctx_scan_fake_stereo_hint:
-        "좌우 내용이 같은 소재는 모노로 접으면 들리는 소리는 그대로이고 렌더링 시간이 절반으로 줄어듭니다. 일괄 처리는 실행 취소 한 단계로 묶입니다.",
     clip_channel_import_dialog_title: "가져오기 채널 처리",
     clip_channel_import_dialog_desc:
         "가져올 때 좌우 채널 내용이 같은 “가짜 스테레오” 소재를 모노로 접습니다.",
@@ -935,8 +932,6 @@ export const koKR = {
     ctx_replace_midi: "MIDI 교체",
     ctx_replace_midi_all: "모든 MIDI 교체",
     ctx_split_at_playhead: "재생 위치에서 분할",
-    ctx_split_multi_reason: "선택한 모든 클립이 재생 위치에서 분할 가능해야 합니다",
-    ctx_split_playhead_reason: "재생 위치가 클립 범위 안에 있어야 합니다",
     ctx_silence_detection: "무음 감지...",
     silence_method: "감지 방식",
     silence_method_rms: "RMS(에너지)",
@@ -966,7 +961,6 @@ export const koKR = {
     silence_preview_clip: "{n}구간, 총 {dur}s",
     silence_skipped: "건너뜀",
     silence_more_clips: "...외 {n}개 클립",
-    silence_no_audio_source: "선택한 클립에 오디오 소스가 없습니다",
     silence_apply: "적용",
     silence_double_click_reset: "파라미터를 더블클릭하면 기본값으로 재설정됩니다",
     silence_applying: "적용 중...",
@@ -2006,6 +2000,8 @@ export const koKR = {
     history_op_param_block_edit: "파라미터 블록 편집",
     history_op_import_midi: "MIDI 가져오기",
     history_op_edit_midi: "MIDI 데이터 편집",
+    history_op_host_pitch_import: "REAPER 테이크 피치 가져오기",
+    history_op_host_pitch_export: "REAPER 테이크 피치로 변환",
     history_op_import_vocalshifter: "VocalShifter 프로젝트 가져오기",
     history_op_recording: "녹음",
     history_op_batch: "일괄 작업",
@@ -2274,9 +2270,6 @@ export const koKR = {
     plugin_transport_play: "호스트에서 재생/일시 정지",
     plugin_transport_host_only:
         "재생은 호스트가 제어합니다. 플러그인의 재생 키는 호스트로 전달됩니다.",
-    plugin_feature_unavailable: "이 기능은 아직 VST/ARA 플러그인에서 제공되지 않습니다",
-    plugin_reverse_unavailable:
-        "ARA는 역재생 오디오를 제공하지 않습니다. 역재생은 호스트에서 하세요",
     // ── 캡처（ARA 미지원 호스트에서 호스트 재생음을 가져오기）─────────────
     capture_settings_title: "캡처 설정",
     capture_settings_desc:
@@ -2325,6 +2318,8 @@ export const koKR = {
     plugin_apply_analyzing_hint:
         "이 단계는 소재 길이에 따라 몇 초에서 몇 분 걸립니다. 분석 중에는 원본 녹음을 재생합니다.",
     plugin_apply_rendering: "합성 중...",
+    plugin_render_background_hint:
+        "백그라운드에서 새 버전을 생성 중입니다. 지금 들리는 것은 이전 버전입니다.",
     plugin_daw_controlled_reason:
         "호스트가 제어합니다. 파일, 클립 지오메트리, 템포, 박자, 재생은 호스트에서 조작하세요",
     cap_reason_host_owns: "이 단계는 호스트가 담당합니다(플러그인이 넘겨받지 않습니다)",
@@ -2332,6 +2327,29 @@ export const koKR = {
     cap_reason_app_only: "독립 실행형 앱에서만 사용할 수 있습니다",
     cap_reason_plugin_only: "플러그인에서만 사용할 수 있습니다",
     cap_reason_piano_roll_only: "매개변수 편집기에서만 적용됩니다",
+    cap_reason_not_in_plugin: "플러그인에서는 사용할 수 없습니다",
+    // ── 클립 메뉴: REAPER 테이크 피치 변환 ─────────────────────────
+    ctx_host_pitch: "REAPER 피치",
+    ctx_host_pitch_import: "REAPER 테이크 피치 가져오기",
+    ctx_host_pitch_export: "REAPER 테이크 피치 엔벨로프로 변환",
+
+    // ── 파라미터 편집기: REAPER 피치 상호 변환 메뉴 ──────────────────
+    // 【왜 여기에 범위를 두는가】파라미터 편집기에서만 나온다(타임라인의 클립 메뉴는
+    // 클립 1개 단위).
+    pitch_bridge_menu_tooltip: "REAPER 테이크 피치 상호 변환",
+    pitch_bridge_import_heading: "테이크 피치 가져오기",
+    pitch_bridge_export_heading: "테이크 피치 엔벨로프로 변환",
+    pitch_bridge_scope_track: "현재 트랙",
+    pitch_bridge_scope_selection: "선택 범위 안",
+    pitch_bridge_scope_all: "모든 클립",
+    pitch_bridge_scope_item: "{scope} ({count})",
+    pitch_bridge_tooltip_export_track: "테이크 피치 변환: 현재 트랙 내보내기",
+    pitch_bridge_nothing_converted: "변환할 클립이 없습니다",
+    pitch_bridge_skipped_clips: "{count}개 클립 건너뜀",
+    pitch_bridge_skipped_tooltip: "변환할 피치 데이터가 없는 클립은 그대로 두었습니다",
+    status_pitch_bridge_imported: "{count}개 클립에 테이크 피치를 가져왔습니다",
+    status_pitch_bridge_exported: "{count}개 클립에 피치 엔벨로프를 기록했습니다",
+    status_pitch_bridge_failed: "피치 변환에 실패했습니다",
 
     // ── 호스트 페이드 tooltip 보충 설명 ─────────────────────────────
     fade_shape_axes_owned_by_host:
@@ -2387,4 +2405,10 @@ export const koKR = {
     installer_uninstall_opt_cache: "캐시 및 로그 삭제",
     installer_uninstall_opt_cache_desc: "파형/렌더 캐시, 로그, WebView 데이터 및 임시 파일.",
     installer_repair_done: "복구가 완료되었습니다.",
+    installer_reinstall_options_title: "이전 버전 제거",
+    installer_reinstall_options_subtitle: "설치 전에 공유 모델 파일을 삭제할지 선택하세요.",
+    installer_reinstall_options_top:
+        "이전 버전의 HiFiShifter가 있습니다. 새 버전을 설치하기 전에 먼저 제거하며 같은 설치 폴더를 사용합니다.",
+    installer_reinstall_uninstalling: "이전 버전을 제거하는 중...",
+    installer_reinstall_failed: "이전 버전을 제거하지 못했습니다. 직접 제거한 뒤 다시 시도하세요.",
 } as const;

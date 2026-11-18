@@ -1556,6 +1556,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <span>{t("menu_help")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
+                    {/* 日志详细程度的唯一入口：一级菜单只占一行，四档在子菜单里。 */}
+                    <LogVerbosityMenuItems
+                        onSaveFailed={(message) =>
+                            setNotice({ title: tf("status_error_prefix"), message })
+                        }
+                    />
                     <DropdownMenu.Item
                         onSelect={async () => {
                             const { openLogFolder } =
@@ -1600,12 +1606,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     >
                         {tf("menu_export_diagnostics")}
                     </DropdownMenu.Item>
-                    {/* 日志详细程度的唯一入口：一级菜单只占一行，四档在子菜单里。 */}
-                    <LogVerbosityMenuItems
-                        onSaveFailed={(message) =>
-                            setNotice({ title: tf("status_error_prefix"), message })
-                        }
-                    />
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item onSelect={() => setAboutDialogOpen(true)}>
                         {t("menu_about")}
@@ -1805,7 +1805,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
             {/*
               菜单导入模式选择（多文件）。
-              
+
               此前是手写模态：缺 Esc、无焦点管理、不抑制全局快捷键（框内按空格会触发
               播放）、无 Enter 默认动作，标题 13px（其余对话框是 20px），宽度写死
               380px（四档是 400/520/640/800）。改走 `AppDialog` 后这些一次对齐。
@@ -1984,7 +1984,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 onOpenChange={setQuantizeOpen}
                 valueMode={!isPitchParam}
                 defaultQuantizeUnit={quantizeDefaultUnit}
-                defaultTolerance={0}
                 defaultScale={s.project.baseScale}
                 defaultUseProjectScale={true}
                 projectScaleLabel={projectScaleLabelWithHint}
@@ -2012,7 +2011,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 onOpenChange={setMeanQuantizeOpen}
                 valueMode={!isPitchParam}
                 defaultQuantizeUnit={quantizeDefaultUnit}
-                defaultTolerance={0}
                 defaultScale={s.project.baseScale}
                 defaultUseProjectScale={true}
                 projectScaleLabel={projectScaleLabelWithHint}

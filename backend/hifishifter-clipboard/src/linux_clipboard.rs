@@ -297,9 +297,16 @@ fn x11_serve(
                         // INCR: the requestor deletes the property after each
                         // chunk and we answer with the next chunk on
                         // PropertyNotify(PROPERTY_DELETE).
+                        //
+                        // STRUCTURE_NOTIFY 让我们同时收到该窗口的 DestroyNotify：
+                        // 请求方半途崩溃 / 窗口销毁时不再有 PropertyNotify 到来，
+                        // 在途条目（持有整份数据快照的 Arc）若无此 eviction 会
+                        // 在长寿命的宿主进程里永久泄漏。
                         context.connection.send_request(&x::ChangeWindowAttributes {
                             window: event.requestor(),
-                            value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
+                            value_list: &[x::Cw::EventMask(
+                                x::EventMask::PROPERTY_CHANGE | x::EventMask::STRUCTURE_NOTIFY,
+                            )],
                         });
                         context.connection.send_request(&x::ChangeProperty {
                             mode: x::PropMode::Replace,
@@ -371,6 +378,19 @@ fn x11_serve(
                         current_entries.clear();
                     }
                     incr_transfers.clear();
+                }
+            }
+            // 请求方窗口销毁（含崩溃）：它的 INCR 传输永远等不到下一步
+            // PropertyNotify，这里按 requestor 全部逐出，避免整份数据快照
+            // 滞留在长寿命进程里。
+            xcb::Event::X(x::Event::DestroyNotify(event)) => {
+                let before = incr_transfers.len();
+                incr_transfers.retain(|(requestor, _), _| *requestor != event.window());
+                if incr_transfers.len() != before {
+                    log::debug!(
+                        "x11 clipboard: dropped {} abandoned INCR transfer(s) for destroyed requestor",
+                        before - incr_transfers.len()
+                    );
                 }
             }
             _ => {}

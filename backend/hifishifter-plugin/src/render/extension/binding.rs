@@ -2,13 +2,18 @@
 use super::*;
 const HOST_QUERY_BUSY: &str = "host query deferred: document transaction busy";
 impl ExtensionOwner {
-    pub(crate) fn startup_stage(&self, stage: crate::startup::Stage) {
+    /// 登记实例的启动阶段读数（诊断时序用；VST3 外壳在组件创建时调用）。
+    ///
+    /// 【为什么 pub】外壳是另一个 crate（`hifishifter-vst3`），它持有
+    /// `ExtensionOwner` 并在组件创建时打点；共享层内部的打点（ARA 绑定、视图等）
+    /// 仍走各自模块。
+    pub fn startup_stage(&self, stage: crate::startup::Stage) {
         self.startup
             .mark(stage, self.bound_document_id.load(Ordering::Acquire));
     }
 
     /// 组件终止独立于Arc尚存与否，旧native entry不能维持可编辑授权。
-    pub(crate) fn is_closed(&self) -> bool {
+    pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
     }
     /// 已绑定且实例仍存活时的扩展实例指针。
@@ -24,7 +29,7 @@ impl ExtensionOwner {
     /// 宿主随后对新文档调用 `addPlaybackRegion`，却落在旧文档的 observer 上。
     /// 调用方必须比对文档身份；`existing_binding_raw()` 只保留给"同文档重复绑定"
     /// 的诊断/测试路径。
-    pub(crate) fn existing_binding_raw(
+    pub fn existing_binding_raw(
         &self,
     ) -> Option<*const ara2_bridge::sys::ARAPlugInExtensionInstance> {
         if self.is_closed() {
@@ -63,7 +68,7 @@ impl ExtensionOwner {
     /// 同一文档"（幂等复用即可），也可能是"宿主重开工程、同一实例要求绑新文档"
     /// （必须复位 companion 再绑）。前者复用，后者复位 —— 两种处理不能互换：
     /// 复用会把已销毁文档的绑定交给宿主，复位则会把还在用的绑定拆掉。
-    pub(crate) fn was_bound_before(&self) -> bool {
+    pub fn was_bound_before(&self) -> bool {
         self.bound_once.load(Ordering::Acquire)
     }
     /// 实时流此刻是否在推进（供"内容更新要不要撤渲染许可"判断）。
@@ -94,7 +99,24 @@ impl ExtensionOwner {
         self.companion_resets.fetch_add(1, Ordering::Relaxed);
     }
     /// companion 绑定复位的累计次数（诊断）。
-    pub(crate) fn companion_reset_count(&self) -> u64 {
+    /// 测试与诊断用：读回某个实例槽位的 region 键表（快照；不暴露内部锁）。
+    ///
+    /// 【为什么不是 `pub` 字段】`assignments` 的锁与键表是协作内部状态；外壳测试
+    /// 只需要"这一槽位现在认了哪些 region"这一个读数。
+    /// 是否当前**没有任何** region 认领（测试断言用；全实例口径）。
+    pub fn has_no_assignments(&self) -> bool {
+        self.assignments.lock_or_recover().is_empty()
+    }
+
+    pub fn assignments_snapshot(&self, instance: i32) -> Vec<u64> {
+        self.assignments
+            .lock_or_recover()
+            .get(&instance)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn companion_reset_count(&self) -> u64 {
         self.companion_resets.load(Ordering::Relaxed)
     }
     /// 记录"有一份持久化状态待恢复"。
@@ -209,7 +231,7 @@ impl ExtensionOwner {
         self.host_backend()
             .app_name()
             .map(str::to_owned)
-            .or_else(crate::editor::connection::host_application_name)
+            .or_else(crate::host_identity::host_application_name)
             .or_else(|| self.host_self_report().map(|(name, _)| name))
     }
 
@@ -291,7 +313,7 @@ impl ExtensionOwner {
     ///
     /// 与 `bound_once` 的区别：那个是"曾经绑定过"的单调历史，这个是"此刻有效"。
     /// 诊断（"宿主是否走了 ARA 路径"）要的是后者。
-    pub(crate) fn is_ara_bound(&self) -> bool {
+    pub fn is_ara_bound(&self) -> bool {
         self.document
             .lock_or_recover()
             .as_ref()
@@ -317,7 +339,7 @@ impl ExtensionOwner {
     /// 已被测试覆盖的读数，而 `binding_mode` 是本轮新增的。取"任一说 ARA 就是 ARA"
     /// 的交集语义，让新字段在任何写入点漏掉时**退化成旧行为**（AraOnly），
     /// 而不是退化成 Capture —— 后者会让一个正常绑定的实例去录制自己的输出。
-    pub(crate) fn mode(&self) -> InstanceMode {
+    pub fn mode(&self) -> InstanceMode {
         if self.bound_once.load(Ordering::Acquire) {
             return InstanceMode::Ara;
         }
@@ -343,7 +365,7 @@ impl ExtensionOwner {
     /// `setActive` 之后过了宽限期（见 [`Self::note_editor_tick`]），那需要读
     /// `set_active_at` 这个锁下的值。这里只负责**写入结论**，判定留在唯一的调用点，
     /// 避免同一判据出现两份。
-    pub(crate) fn note_binding_window_closed_without_ara(&self) {
+    pub fn note_binding_window_closed_without_ara(&self) {
         // 已经绑过就不回落：那会把一个正常工作的 ARA 实例降级成 Capture。
         if self.bound_once.load(Ordering::Acquire) {
             return;
@@ -456,7 +478,7 @@ impl ExtensionOwner {
     /// 初始化在宿主UI/model线程保存有引用的typed扩展，不在actor或process调用REAPER API。
     /// # Safety
     /// context须为宿主初始化期间活FUnknown。
-    pub(crate) unsafe fn bind_host_adapter(&self, context: *mut std::ffi::c_void) {
+    pub unsafe fn bind_host_adapter(&self, context: *mut std::ffi::c_void) {
         // SAFETY: 调用方保证 context 是宿主初始化期间存活的 FUnknown。
         unsafe { self.bind_host_adapter_inner(context, false) }
     }
@@ -471,13 +493,22 @@ impl ExtensionOwner {
     ///
     /// # Safety
     /// `context` 必须是本组件持有的、在组件生命周期内有效的宿主接口。
-    pub(crate) unsafe fn rebind_host_adapter(&self, context: *mut std::ffi::c_void) {
+    pub unsafe fn rebind_host_adapter(&self, context: *mut std::ffi::c_void) {
         // SAFETY: 同 `bind_host_adapter`。
         unsafe { self.bind_host_adapter_inner(context, true) }
     }
 
     /// 当前宿主适配器是否与调用线程不匹配（`false` = 没有适配器或线程一致）。
-    pub(crate) fn host_adapter_thread_mismatch(&self) -> bool {
+    /// 是否缺少可用的宿主原生适配器（没绑上，或绑在别的线程上）。
+    ///
+    /// 【为什么收窄成一个谓词】VST3 外壳在 `setActive` 时只需要这个布尔；暴露
+    /// [`NativeHost`] 类型本身会把整个 REAPER 模块提升成壳可见的 API
+    /// （`render/extension/session.rs::native_host` 保持 pub(crate)）。
+    pub fn native_adapter_unavailable(&self) -> bool {
+        self.native_host().is_none() || self.host_adapter_thread_mismatch()
+    }
+
+    pub fn host_adapter_thread_mismatch(&self) -> bool {
         self.native_host()
             .is_some_and(|host| host.bound_thread() != std::thread::current().id())
     }
@@ -1036,7 +1067,7 @@ impl ExtensionOwner {
     }
 
     /// 完整刷新：时钟 + 几何 + 清单。写回路径与测试用这个（必须**同步**生效）。
-    pub(crate) fn refresh_host_transport(&self) {
+    pub fn refresh_host_transport(&self) {
         self.refresh_host_transport_inner(false);
     }
 
@@ -1348,6 +1379,17 @@ impl ExtensionOwner {
         stamp.0.inventory_incomplete.store(true, Ordering::Release);
         let mut tracks = std::collections::BTreeMap::new();
         let mut seen = std::collections::BTreeSet::new();
+        // 上一轮已经发布的宿主轨身份（`ui_tracks[guid].id` → 它的 guid 与父轨）。用来
+        // 回答"这条 id 是不是别人的"：宿主轨第一次学身份时只准学没人占的 id（见下面的
+        // "身份只学一次"）。带上父轨是为了认出**同一个 folder 里的兄弟轨** —— 它们由
+        // 同一个实例处理、共用一个参数根，互相"占用"是正常的。
+        let known_owner: std::collections::HashMap<String, (String, Option<String>)> = stamp
+            .0
+            .ui_tracks
+            .lock_or_recover()
+            .iter()
+            .map(|(guid, track)| (track.id.clone(), (guid.clone(), track.parent_guid.clone())))
+            .collect();
         // 诊断计数：多少 item 认领到了 region（没认领的只能是无源占位）。
         let mut item_count = 0usize;
         let mut claimed_items = 0usize;
@@ -1395,6 +1437,8 @@ impl ExtensionOwner {
                 let timeline = stamp.0.timeline.lock_or_recover();
                 let ids = stamp.0.clip_ids.lock_or_recover();
                 item_count += track.items.len();
+                // 这条宿主轨能从 clip 学到的模型身份（见下面的"只学一次"）。
+                let mut learned: Option<String> = None;
                 for candidate in stamp.0.renderer_owners() {
                     // 该 owner 可能同时持有多个 region（folder 轨上的 FX）：只要本轨有
                     // 任一 item 被它的某个 region 绑定，就把轨道身份认领到那个 clip 上。
@@ -1419,7 +1463,7 @@ impl ExtensionOwner {
                                 .as_ref()
                                 .and_then(|t| t.clips.iter().find(|c| &c.id == id))
                             {
-                                track.id = clip.track_id.clone();
+                                learned = Some(clip.track_id.clone());
                                 break;
                             }
                         }
@@ -1427,10 +1471,36 @@ impl ExtensionOwner {
                 }
                 drop(timeline);
                 drop(ids);
+                // 【身份只学一次，而且不许抢】此前这里无条件 `track.id = clip.track_id`：
+                // 宿主把 item 从轨道 1 拖到轨道 2 之后，轨道 2 从**这条 clip** 学到的是
+                // 轨道 1 的模型 id —— 于是 `ui_tracks` 里两条宿主轨共用一个身份，
+                // `present_host_inventory` 再忠实地把两条并成一条（用户报的"两条轨折成
+                // 一条"）。身份是**参数根**的键，一旦被抢，轨道 1 的曲线就挂到了轨道 2 上。
+                //
+                // 现在：已经学过的轨道绝不重学（`ui_tracks` 里记着它）；第一次学也不许
+                // 选一个已经被别的宿主轨占用的 id —— 学不到就保留自己的宿主身份，
+                // 宁可多一行空轨，也不能把两条轨并成一条。
                 if track.id.starts_with("host-track-") {
-                    if let Some(old) = stamp.0.ui_tracks.lock_or_recover().get(&track.guid) {
-                        track.id = old.id.clone();
-                    }
+                    let previous = stamp
+                        .0
+                        .ui_tracks
+                        .lock_or_recover()
+                        .get(&track.guid)
+                        .map(|old| old.id.clone());
+                    let own_guid = track.guid.clone();
+                    let own_parent = track.parent_guid.clone();
+                    let taken_by_other = |id: &str| {
+                        known_owner.get(id).is_some_and(|(guid, parent)| {
+                            guid != &own_guid && !(parent.is_some() && parent == &own_parent)
+                        })
+                    };
+                    let next = match previous {
+                        Some(id) if !id.starts_with("host-track-") => id,
+                        _ => learned
+                            .filter(|id| !taken_by_other(id))
+                            .unwrap_or_else(|| track.id.clone()),
+                    };
+                    track.id = next;
                 }
                 tracks.insert(track.guid.clone(), track);
             }
@@ -1936,7 +2006,7 @@ mod host_identity_tests {
         owner.note_host_self_report(Some("Cubase"), Some("13.0"));
         // 进程级探针是进程全局状态（同进程里别的用例可能已经写过），所以只在它确实
         // 没有读数时断言最终结果 —— 这里要钉的是"自报不会被丢掉"，不是探针的优先级。
-        if crate::editor::connection::host_application_name().is_none() {
+        if crate::host_identity::host_application_name().is_none() {
             assert_eq!(owner.host_app_name().as_deref(), Some("Cubase"));
             assert_eq!(owner.host_app_version().as_deref(), Some("13.0"));
         }

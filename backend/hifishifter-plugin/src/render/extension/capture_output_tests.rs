@@ -1331,6 +1331,31 @@ fn a_short_cycle_wrap_is_not_resting() {
     assert_eq!(second.phase, TransportPhase::Rolling);
 }
 
+/// **循环区域在工程采样域中的 `[start, end)` 必须与音乐时间一致。**
+///
+/// 【为什么这是循环合成的根】投影按 `(loop_start, loop_end)` 分组；起点或终点
+/// 算错一个块，同一圈就会被拆成两个 Clip，或者把相邻的另一圈并进来。
+#[test]
+fn cycle_region_returns_the_loop_region_in_project_samples() {
+    let owner = insert_owner();
+    let context = crate::block_context::BlockContext {
+        sample_rate: 48_000.0,
+        project_time_samples: 96_000,
+        cycle_active: true,
+        cycle_valid: true,
+        tempo: Some(120.0),
+        music: Some(4.0),
+        cycle_start_music: 0.0,
+        cycle_end_music: 8.0,
+        ..Default::default()
+    };
+    // 120 BPM：4 拍 = 2 s = 96 000 帧；8 拍循环 = 4 s = 192 000 帧。
+    assert_eq!(
+        owner.cycle_region(context, 48_000.0, 96_000),
+        Some((0, 192_000))
+    );
+}
+
 /// **块跨越循环终点：切成两段，后半段回到 cycle start。**
 #[test]
 fn a_block_crossing_the_cycle_end_is_split() {

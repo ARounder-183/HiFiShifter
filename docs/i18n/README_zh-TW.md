@@ -15,18 +15,18 @@ HiFiShifter 是一個圖形化人聲編輯與合成工具。它支援多軌道�
 - **三種聲碼器演算法**：nsf-hifigan（PC-NSF-HiFiGAN）、World、VsLib，詳見[演算法](#演算法)。
 - **互操作性**：匯入 REAPER（`.rpp`）與 VocalShifter（`.vshp` / `.vsp`）專案，雙向讀寫 REAPER 與 VocalShifter 剪貼簿；MIDI 可匯入為音高參考塊 / 音高參數 / 速度映射，音訊塊與音高線可匯出為 MIDI。
 - **匯入匯出**：常見音訊 / 視訊格式匯入（視訊檔自動提取音訊軌），專案與分軌匯出為 `wav` / `mp3` / `flac`。
-- **VST3 ARA 外掛與 CLAP 外掛**：除獨立 App 外，另提供 Windows x64 的 VST3 與 CLAP 外掛。VST3 外掛可透過 ARA 在 REAPER 中直接開啟同一套編輯介面：宿主負責片段幾何、BPM 與漸變聲音，HiFiShifter 負責參數曲線，編輯自動套用回宿主。CLAP 外掛是同一套編輯器的插入效果器形態（不與 REAPER 建立 ARA 綁定）。詳見使用手冊的 [外掛](USERMANUAL_zh-TW.md#八vst3-ara-外掛與-clap-外掛reaper)章節。
+- **VST3 ARA 外掛與 CLAP 外掛**：除獨立 App 外，三個平台的三合一安裝包都包含 VST3 與 CLAP 外掛。VST3 外掛可透過 ARA 在 REAPER 中直接開啟同一套編輯介面：宿主負責片段幾何、BPM 與漸變聲音，HiFiShifter 負責參數曲線，編輯自動套用回宿主。CLAP 外掛是同一套編輯器的插入效果器形態（不與 REAPER 建立 ARA 綁定）。詳見使用手冊的 [外掛](USERMANUAL_zh-TW.md#八vst3-ara-外掛與-clap-外掛reaper)章節。
 - **其他**：內建檔案瀏覽器與快速搜尋、記事本、自動備份、多語言介面（简体中文 / 繁體中文 / English / 日本語 / 한국어）、深淺色主題、推理裝置選擇與基準測試。
 
 ## 安裝
 
 從 [Releases](https://github.com/ARounder-183/HiFiShifter/releases) 頁面下載對應作業系統與架構的安裝包：
 
-- **Windows**：NSIS 安裝包（`installer`）或可攜版壓縮包（`portable`），提供 x86_64 與 arm64 架構。
-- **macOS**：未簽名 dmg（Apple Silicon 裝 `arm64`，Intel 裝 `x86_64`）。首次安裝需要手動放行；若提示「檔案已損毀」，請按照[使用手冊](USERMANUAL_zh-TW.md#一安裝)中的步驟處理。
-- **Linux**：AppImage（x86_64 / arm64）。執行需要系統提供 `webkit2gtk-4.1`（Arch/CachyOS、Ubuntu 24.04+、Fedora 39+、Debian 13+ 等均已提供；Ubuntu 22.04 僅有 `webkit2gtk-4.0`，不支援）。
+- **Windows**：NSIS 安裝包（`installer`）或可攜版壓縮包（`portable`），提供 x86_64 與 arm64 架構。安裝包包含獨立 App、VST3/CLAP 外掛與共享模型庫。
+- **macOS**：未簽名三合一 `.pkg`（Apple Silicon 裝 `arm64`，Intel 裝 `x86_64`），一次安裝 App、VST3/CLAP 外掛與共享模型庫。首次安裝需要手動放行；若提示「檔案已損毀」，請按照[使用手冊](USERMANUAL_zh-TW.md#一安裝)中的步驟處理。
+- **Linux**：三合一 `.tar.gz`（x86_64 / arm64），內含 AppImage、VST3/CLAP 外掛、共享模型庫與 `install.sh`。執行 `./install.sh` 裝進目前使用者，或 `sudo ./install.sh --system` 裝到系統。執行需要系統提供 `webkit2gtk-4.1`（Arch/CachyOS、Ubuntu 24.04+、Fedora 39+、Debian 13+ 等均已提供；Ubuntu 22.04 僅有 `webkit2gtk-4.0`，不支援）。
 
-**VST3 ARA 外掛與 CLAP 外掛**：Windows x64 另有兩種外掛形態。在 REAPER 裡請以 VST3 外掛作為 ARA 嵌入介面使用（目前僅針對 REAPER 驗證），CLAP 外掛則可作為一般插入效果器。安裝方式、執行依賴與使用限制見使用手冊的 [外掛](USERMANUAL_zh-TW.md#八vst3-ara-外掛與-clap-外掛reaper)章節。
+**VST3 ARA 外掛與 CLAP 外掛**：三個平台都包含兩種外掛形態。在 REAPER 裡請以 VST3 外掛作為 ARA 嵌入介面使用（目前主要針對 REAPER 驗證），CLAP 外掛則可作為一般插入效果器。安裝方式、執行依賴與使用限制見使用手冊的 [外掛](USERMANUAL_zh-TW.md#八vst3-ara-外掛與-clap-外掛reaper)章節。
 
 GPU 加速：Windows 使用 DirectML（DirectX 12），macOS（Apple Silicon）使用 CoreML + WebGPU，Linux x86_64 使用 WebGPU（Dawn/Vulkan），其餘平台回退 CPU。可在應用內 `選項 → 推理裝置` 中切換裝置並執行基準測試。
 

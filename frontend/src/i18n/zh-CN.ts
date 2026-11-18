@@ -702,8 +702,6 @@ export const zhCN = {
     ctx_channel_mode: "声道模式",
     ctx_group: "编组",
     ctx_scan_fake_stereo: "扫描假立体声并转换",
-    ctx_scan_fake_stereo_hint:
-        "左右声道内容一致的素材可折叠为单声道：听感不变，渲染耗时减半。整批只产生一个撤销步。",
     clip_channel_import_dialog_title: "导入声道处理",
     clip_channel_import_dialog_desc: "导入时把左右声道内容一致的“假立体声”素材折叠为单声道。",
     clip_channel_import_mode: "自动转换",
@@ -837,8 +835,6 @@ export const zhCN = {
     ctx_replace_midi: "替换 MIDI",
     ctx_replace_midi_all: "替换全部 MIDI",
     ctx_split_at_playhead: "在播放头处分割",
-    ctx_split_multi_reason: "需要选中的每条片段都能在播放头处分割",
-    ctx_split_playhead_reason: "播放头需要落在片段范围内",
     ctx_silence_detection: "静音检测...",
     silence_method: "检测方式",
     silence_method_rms: "RMS（能量）",
@@ -868,7 +864,6 @@ export const zhCN = {
     silence_preview_clip: "{n} 段，共 {dur}s",
     silence_skipped: "已跳过",
     silence_more_clips: "...等 {n} 个音频块",
-    silence_no_audio_source: "所选音频块没有音频源",
     silence_apply: "应用",
     silence_double_click_reset: "双击参数可重置为默认值",
     silence_applying: "应用中...",
@@ -1675,7 +1670,6 @@ export const zhCN = {
     appearance_font_search_placeholder: "搜索字体...",
     appearance_font_no_results: "未找到匹配字体",
     appearance_font_count: "已检测到 {count} 个字体",
-    appearance_reset: "重置",
     appearance_font_restore_default: "还原默认字体",
     appearance_apply: "应用",
     appearance_import_theme: "导入...",
@@ -1964,6 +1958,8 @@ export const zhCN = {
     history_op_param_block_edit: "编辑参数块",
     history_op_import_midi: "导入 MIDI",
     history_op_edit_midi: "编辑 MIDI 数据",
+    history_op_host_pitch_import: "导入 REAPER Take 音高",
+    history_op_host_pitch_export: "转换为 REAPER Take 音高",
     history_op_import_vocalshifter: "导入 VocalShifter 工程",
     history_op_recording: "录音",
     history_op_batch: "批量操作",
@@ -2220,8 +2216,6 @@ export const zhCN = {
     plugin_transport_stop: "控制宿主停止播放",
     plugin_transport_play: "控制宿主播放/暂停",
     plugin_transport_host_only: "播放由宿主控制；键盘上的播放键会转交给宿主。",
-    plugin_feature_unavailable: "该功能尚未在 VST/ARA 插件里提供",
-    plugin_reverse_unavailable: "倒放是宿主 item 操作；请在宿主里倒放这一条",
     // ── 捕获（不支持 ARA 的宿主里，把宿主播放的音频录进插件）──────────────
     capture_settings_title: "捕获设置",
     capture_settings_desc:
@@ -2268,12 +2262,35 @@ export const zhCN = {
     plugin_apply_analyzing: "正在分析音高...",
     plugin_apply_analyzing_hint: "这一步要按素材长度跑，通常几秒到几分钟。分析期间先播原始录音。",
     plugin_apply_rendering: "正在合成...",
+    plugin_render_background_hint: "后台正在生成新版本；当前听到的仍是上一版。",
     plugin_daw_controlled_reason: "由宿主控制；在宿主中操作文件、片段几何、速度、拍号与播放",
     cap_reason_host_owns: "这一步由宿主完成，插件不接管",
     cap_reason_unsupported_by_host: "当前宿主没有提供这个接口",
     cap_reason_app_only: "只在独立 App 中可用",
     cap_reason_plugin_only: "只在插件中可用",
     cap_reason_piano_roll_only: "只适用于参数编辑器",
+    cap_reason_not_in_plugin: "插件里没有这个功能",
+    // ── 片段菜单：REAPER take 音高互转 ─────────────────────────────
+    ctx_host_pitch: "REAPER 音高",
+    ctx_host_pitch_import: "导入 REAPER Take 音高",
+    ctx_host_pitch_export: "转换为 REAPER Take 音高包络",
+
+    // ── 参数编辑器：REAPER 音高互转菜单（按作用域）──────────────────
+    // 【为什么作用域要写在这里】它只在参数编辑器里出现（时间轴的片段菜单是逐片段的）。
+    pitch_bridge_menu_tooltip: "REAPER Take 音高互转",
+    pitch_bridge_import_heading: "导入 Take 音高",
+    pitch_bridge_export_heading: "转换为 Take 音高包络",
+    pitch_bridge_scope_track: "当前轨道",
+    pitch_bridge_scope_selection: "选区内",
+    pitch_bridge_scope_all: "全部片段",
+    pitch_bridge_scope_item: "{scope}（{count}）",
+    pitch_bridge_tooltip_export_track: "Take 音高互转：导出当前轨道",
+    pitch_bridge_nothing_converted: "没有可转换的片段",
+    pitch_bridge_skipped_clips: "跳过 {count} 个片段",
+    pitch_bridge_skipped_tooltip: "没有可转换音高数据的片段未作改动",
+    status_pitch_bridge_imported: "已导入 {count} 个片段的 Take 音高",
+    status_pitch_bridge_exported: "已写入 {count} 个片段的 Take 音高包络",
+    status_pitch_bridge_failed: "音高转换失败",
 
     // ── 宿主淡入淡出 tooltip 的补充说明 ─────────────────────────────
     fade_shape_axes_owned_by_host: "读不出宿主的淡化轴版本，无法确定用哪套轴；请用下方曲率滑杆调整",
@@ -2322,4 +2339,10 @@ export const zhCN = {
     installer_uninstall_opt_cache: "清理缓存与日志",
     installer_uninstall_opt_cache_desc: "波形/渲染缓存、日志、WebView 数据与临时文件。",
     installer_repair_done: "修复完成。",
+    installer_reinstall_options_title: "卸载旧版本",
+    installer_reinstall_options_subtitle: "选择安装前是否删除共享模型文件。",
+    installer_reinstall_options_top:
+        "检测到已安装的 HiFiShifter。安装新版本前将先卸载旧版本，并沿用原来的安装目录。",
+    installer_reinstall_uninstalling: "正在卸载旧版本...",
+    installer_reinstall_failed: "卸载旧版本失败，请先手动卸载后重试。",
 } as const;

@@ -1,4 +1,4 @@
-import { startPointerGesture, type PointerGesture } from "../pointerGesture";
+import { startPointerGesture, type GestureEndReason, type PointerGesture } from "../pointerGesture";
 import { secToViewportPx } from "../../../renderKernel/timelineAxis.js";
 import { clamp } from "../../../timeline";
 import { isDynParam } from "../../paramRanges";
@@ -163,6 +163,16 @@ export function handleMorphPointerDown(
             clientY: number;
             value: number;
         } | null = null;
+        /** 按下时的控制线：取消时必须恢复，否则下一次拖动从半截形状开始。 */
+        const overlaysAtPress = existingMorph.map((overlay) => ({
+            ...overlay,
+            points: overlay.points.map((point) => ({ ...point })),
+        }));
+        /** 预览会就地改写 paramView.edit；取消时用它把曲线还原成按下前的值。 */
+        const viewAtPress: ParamViewSegment = {
+            ...pvForMorph,
+            edit: pvForMorph.edit.slice(),
+        };
         const flushPreview = () => {
             previewRafId = null;
             if (pendingOverlays != null) {
@@ -234,12 +244,35 @@ export function handleMorphPointerDown(
             }
         };
 
-        const onEnd = () => {
+        const onEnd = (reason: GestureEndReason) => {
             const drag = morphDragRef.current;
             const overlayNow = morphOverlayRef.current;
             const pvNow = paramViewRef.current;
             morphDragRef.current = null;
             disposeFineAdjustedPointerState(finePointerState);
+            if (reason === "cancel") {
+                // OS 取消（pointercancel / 失焦登记的 cancel）：手势不可信 ——
+                // **回滚**而不是提交，与自由绘制 / 块拖拽 / 选区平移的 cancel
+                // 分支同一语义：挂起的预览帧不冲刷、live 覆盖层丢弃，曲线
+                // 回到按下时的真实值。
+                if (previewRafId != null) {
+                    cancelAnimationFrame(previewRafId);
+                    previewRafId = null;
+                }
+                pendingOverlays = null;
+                pendingPopup = null;
+                liveEditOverrideRef.current = null;
+                if (liveEditActiveRef) liveEditActiveRef.current = false;
+                // 取消不能只清 live 覆盖层：onMove 已把 morphOverlayRef 改成
+                // 拖动后的控制线，下一次按下会接着这条半截形状继续形变。
+                morphOverlayRef.current = overlaysAtPress;
+                setMorphOverlay(overlaysAtPress);
+                setParamView(viewAtPress);
+                bumpRefreshToken();
+                if (paramValuePopupEnabled) onParamValuePreviewChange?.(null);
+                setCanvasCursor("default");
+                return;
+            }
             // 最后一次 move 的预览若还在 rAF 队列里，必须在提交前
             // 同步冲刷：提交读 overlayNow / live 层，漏冲刷会把
             // 末段位移丢掉（与选区拖拽"松手即取消"不同——这里

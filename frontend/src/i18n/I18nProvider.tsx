@@ -108,10 +108,14 @@ export function I18nProvider({ children }: PropsWithChildren) {
 
     /*
      * 订阅扩展文案注册表：第三方面板注册文案后，已经挂载的组件需要重新取值。
-     * 用 `useSyncExternalStore` 而不是把版本号塞进 `useMemo` 依赖 —— 后者会让
-     * 每次注册都重建整个 context value，把所有消费方一起重渲染。
+     *
+     * 【版本号必须进 useMemo 依赖】`lookup`/`tf` 闭包引用的是**活的层表**（注册后
+     * 不重建也能读到新层），但 context value 本身按 `Object.is` 判等：版本号不进
+     * 依赖时，本组件的重渲染会在 value 相等处被 React 短路，消费方拿不到重新
+     * 渲染 —— "重新取值"根本不会发生（已挂载的组件停在 raw key 上）。注册是
+     * 低频事件（面板挂载时一次），整体重建 context 的代价可接受。
      */
-    useSyncExternalStore(
+    const extensionMessagesVersion = useSyncExternalStore(
         subscribeExtensionMessages,
         getExtensionMessagesVersion,
         getExtensionMessagesVersion,
@@ -156,7 +160,8 @@ export function I18nProvider({ children }: PropsWithChildren) {
                 (messages["en-US"] as Record<string, string>)[key] ??
                 key,
         };
-    }, [localeState]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- extensionMessagesVersion 不被 memo 体**引用**，但它是注册事件的重渲染扳机（见上方注释）：语境 value 按 Object.is 判等，不进依赖时消费方拿不到"重新取值"
+    }, [localeState, extensionMessagesVersion]);
 
     return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }

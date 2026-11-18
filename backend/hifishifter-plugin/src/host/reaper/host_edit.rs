@@ -373,18 +373,11 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
         }
     }
     let patch: ClipStatePatch = serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
-    // 倒放**编辑**仍然拒绝，但理由与旧注释不同（旧注释说"插件渲染不出反向内容"，
-    // 那句已经过期 —— 插件现在会物化并反向渲染，见 `ReversePolicy::Materialize`）。
-    //
-    // 真正缺的是**写回**：把方向交给宿主需要在 take 上建 `SOURCE SECTION MODE 1`，
-    // 而本模块只写数值/字符串字段，建不了结构。放行的话，GUI 的"倒放"开关会
-    // 静默什么都不做 —— 那比明确拒绝更糟。
-    if patch.reversed == Some(true) {
-        return Err(
-            "toggling reverse in the host is not supported yet; reverse it in the host itself"
-                .into(),
-        );
-    }
+    // 【倒放现在可写了】旧实现在这里整条拒绝，理由是"本模块只写数值/字符串字段，
+    // 建不了 `SOURCE SECTION`"。那条理由是对的 —— 只是结论过期：方向改由
+    // `source_direction::rewrite_take_direction` 做**结构**写回（见 `execute_managed`）。
+    // 是否真的能写由 `HostClipTarget::can_reverse_clips()` 在预检里判定，
+    // 前端另有同一来源的能力位决定菜单项出不出来。
     Ok(patch)
 }
 
@@ -587,6 +580,63 @@ pub(super) fn host_forward_window_start(
     .map(|window| window.start())
 }
 
+/// 由 clip 与媒体总长算出**写回 take 方向**的参数（SECTION 与 SOFFS）。
+///
+/// 【编码只有一种（真机取证）】REAPER 7.85 的 `Item properties: Toggle take
+/// reverse`（41051）写出的就是：
+///
+/// ```text
+/// SOFFS = D − 正向窗口终点
+/// <SOURCE SECTION LENGTH <正向跨度> MODE 3 STARTPOS 0 OVERLAP 0.01> … </SOURCE SECTION>
+/// ```
+///
+/// 其中 `MODE 3` = "整份媒体 + 反向"（位语义见 [`super::source_direction`]）。
+/// 于是**倒放**不论是否 Loop，参数都是这一组：
+///
+/// * `LENGTH` = 正向窗口跨度（Loop 时窗口本来就是 `[0, 锚点]`，跨度 = 锚点）；
+/// * `SOFFS` = `D − 正向窗口终点`（宿主镜像域）。
+///
+/// 读取侧（`take_geometry`）对 `MODE 3` 拿到的段是"整份媒体"，轴 = D，
+/// 锚点 = D − SOFFS = 正向终点 —— 与这里逐位互逆。
+///
+/// **正放**：拆掉 SECTION、`SOFFS = 正向窗口起点`（绝对坐标）。这正是宿主
+/// 自己 toggle 回去时写的东西。
+///
+/// 媒体总长取不到、或正向窗口落到媒体之外时返回 `Err`：**宁可不写**，
+/// 也不写一个必然读不回来的结构。
+fn host_take_direction(
+    clip: &hifishifter_kernel::state::Clip,
+    media_duration_sec: Option<f64>,
+) -> Result<super::source_direction::DirectionEdit, String> {
+    if !clip.reversed {
+        return Ok(super::source_direction::DirectionEdit::forward(
+            clip.source_start_sec,
+        ));
+    }
+    let duration = media_duration_sec
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .ok_or("cannot write a reversed take without its media duration")?;
+    if clip.loop_enabled {
+        // Loop：回绕域是整份媒体，锚点取 `min(source_end, D) mod D` —— 与读取侧
+        // `(min_bound.min(anchor), anchor)` 同一条式子（窗口起点在读取侧就是 0）。
+        let anchor = clip.source_end_sec.min(duration).rem_euclid(duration);
+        return Ok(super::source_direction::DirectionEdit::reversed(
+            anchor.max(1e-9),
+            (duration - anchor).rem_euclid(duration),
+        ));
+    }
+    let (start, end) = hifishifter_kernel::state::clip_playback_window_sec(clip);
+    let window = hifishifter_kernel::take_geometry::ForwardWindow::new(start, end)
+        .ok_or("reversed take has no valid forward window")?;
+    if window.end() > duration + 1e-9 || window.start() < -1e-9 {
+        return Err("reversed take window falls outside the media".into());
+    }
+    Ok(super::source_direction::DirectionEdit::reversed(
+        window.span().max(1e-9),
+        (duration - window.end()).max(0.0),
+    ))
+}
+
 /// 先冻结并验证整批对象，再开始Undo和setter；任一预检失败都不写入任何宿主item。
 // 保留无undo上下文的一次性执行入口，当前调用方统一走execute_managed。
 #[cfg(test)]
@@ -606,6 +656,8 @@ pub(crate) fn execute_managed(
     let document = owner.editor_document()?;
     let mut targets: Vec<(ClipEdit, HostClipTarget, Option<HostClipTarget>)> = Vec::new();
     let mut styles = std::collections::BTreeMap::new();
+    // 每个 edit 对应的方向结构写回计划（None = 本次不改方向）。
+    let mut reverse_plans: Vec<Option<super::source_direction::DirectionEdit>> = Vec::new();
     // 插件自有、宿主表达不到的逐片段属性（颜色 / 共振峰变形），键为宿主稳定 item 身份。
     let mut locals = std::collections::BTreeMap::new();
     for edit in plan.edits {
@@ -786,6 +838,31 @@ pub(crate) fn execute_managed(
                 entry.formant_morph = Some(morph.clone());
             }
         }
+        // ── 方向（倒放）结构写回：预检 ──────────────────────────────────────
+        // 【为什么这里只做纯计算】真正的 chunk 读写放在写循环**末尾**：它必须读
+        // "位置/长度/速率都写完"之后的那份原文，否则会把刚写的数值覆盖回去。
+        let reverse_plan = if edit.before.reversed != edit.after.reversed {
+            if !target.can_reverse_clips() {
+                return Err("the host cannot write the take direction".into());
+            }
+            if !target.geometry.markers.is_empty() {
+                return Err("nonlinear host stretch-marker editing is not supported".into());
+            }
+            // 【镜像轴取两侧读数的较小者】读取侧 `take_axis_sec` 对"段末端"与"ARA
+            // 源时长"取 min；写回若用较大的那个，读回来的锚点会差一个 `D − ara`
+            // （容器头级别的几毫秒 ⇒ 内容轻微错位）。两侧同一口径即可逐位互逆。
+            let media = match (
+                hifishifter_kernel::state::clip_source_media_duration_sec(&edit.after),
+                target.geometry.source_length_sec,
+            ) {
+                (Some(ara), Some(host)) => Some(ara.min(host)),
+                (ara, host) => ara.or(host),
+            };
+            Some(host_take_direction(&edit.after, media)?)
+        } else {
+            None
+        };
+        reverse_plans.push(reverse_plan);
         targets.push((edit, target, destination));
     }
     let undo = if managed {
@@ -796,8 +873,10 @@ pub(crate) fn execute_managed(
     // 已开始写入的片段。**在写入之前**登记：写入中途失败时，最后一个片段可能只写了
     // 一半（例如位置已改、长度还没改），它同样必须被回滚。
     let mut applied: Vec<(&ClipEdit, &HostClipTarget)> = Vec::new();
+    // 结构改写前的**原文**：回滚时把它整份写回，等于连该 clip 的数值编辑一起撤销。
+    let mut applied_structural: Vec<(HostClipTarget, String)> = Vec::new();
     let result: Result<(), String> = (|| {
-        for (edit, target, destination) in &targets {
+        for (index, (edit, target, destination)) in targets.iter().enumerate() {
             applied.push((edit, target));
             let before = &edit.before;
             let after = &edit.after;
@@ -805,7 +884,7 @@ pub(crate) fn execute_managed(
             if (before.playback_rate - after.playback_rate).abs() > 1e-6 {
                 target.set_take(c"B_PPITCH", 1., &authorized)?;
                 // 【为什么保留符号】负速率是 REAPER 表达倒放的**方式之一**（另一个是
-                // `SECTION MODE 1`）。此前这里恒写正值 —— 用户只要改一次速率，倒放就被
+                // `SECTION` 的 `MODE` 反向位）。此前这里恒写正值 —— 用户只要改一次速率，倒放就被
                 // 静默改成正放。符号取自宿主的原始读数，不由 clip 推断。
                 let sign = if target.geometry.play_rate_signed < 0.0 {
                     -1.0
@@ -820,10 +899,15 @@ pub(crate) fn execute_managed(
             }
             // 【倒放必须写**镜像**起点】宿主 `D_STARTOFFS` 在倒放 take 上是
             // `D − 正向终点`（F-4 实测），而 clip 持有的是镜像复原之后的**正向**窗口。
-            let after_offs = host_start_offset(after)
-                .ok_or("cannot write a reversed take without its media duration")?;
-            if host_start_offset(before).is_none_or(|b| (b - after_offs).abs() > 1e-9) {
-                target.set_take(c"D_STARTOFFS", after_offs, &authorized)?;
+            //
+            // 【本次改方向的 clip 在这里不写】SOFFS 与 SECTION 是同一份计算的两个分量
+            // （段内偏移 vs 绝对坐标），分开写会互相覆盖 —— 交给下面的结构写回一次写完。
+            if reverse_plans[index].is_none() {
+                let after_offs = host_start_offset(after)
+                    .ok_or("cannot write a reversed take without its media duration")?;
+                if host_start_offset(before).is_none_or(|b| (b - after_offs).abs() > 1e-9) {
+                    target.set_take(c"D_STARTOFFS", after_offs, &authorized)?;
+                }
             }
             if (before.start_sec - after.start_sec).abs() > 1e-9 {
                 target.set_item(c"D_POSITION", after.start_sec, &authorized)?;
@@ -987,6 +1071,24 @@ pub(crate) fn execute_managed(
                     }
                 }
             }
+            if let Some(direction) = &reverse_plans[index] {
+                // 结构写回**最后**做：读的是这份 chunk 的当前全文（含刚写的数值）。
+                let original = target.item_state_chunk(&authorized)?;
+                let rewritten = super::source_direction::rewrite_take_direction(
+                    &original,
+                    &target.geometry.take_id,
+                    direction,
+                )?;
+                target.set_item_state_chunk(&rewritten, &authorized)?;
+                applied_structural.push((target.clone(), original));
+                // 【写 → 读 → 比】SECTION MODE 的取值属于宿主，仓库里没有第二份证据
+                // 能替代这次实测。不符就整批回滚（回滚写回原文 ⇒ 等于没改），
+                // 而不是让用户看到"点了没反应"。
+                let expected = direction.section.is_some();
+                if target.reversed_now(&authorized)? != expected {
+                    return Err("the host did not apply the requested take direction".into());
+                }
+            }
             target.update(&authorized)?;
         }
         Ok(())
@@ -1041,13 +1143,37 @@ pub(crate) fn execute_managed(
             // 宿主上。若不回滚，用户看到的是"部分片段移动了 + 一条拒绝"，而那句
             // "被拒绝"会被理解成"什么都没发生" —— 两者的差别正是用户报障里最刺眼的
             // 部分（编辑明明生效了却报错）。回滚让"拒绝"与"没改"重新成为同一件事。
-            match restore_applied_geometry(&applied, &authorized) {
-                Ok(()) => Err(format!(
+            //
+            // 【先撤结构、再撤数值】结构写回的是**整份 chunk**，把它写回原文就等于连
+            // 该 clip 的数值编辑一起撤销；随后只对"没被结构覆盖"的 clip 做数值回滚，
+            // 否则会把刚复原的原文再按镜像域改写一遍。
+            let mut rollback_errors: Vec<String> = Vec::new();
+            for (target, original) in applied_structural.iter().rev() {
+                if let Err(rollback) = target.set_item_state_chunk(original, &authorized) {
+                    rollback_errors.push(rollback);
+                }
+            }
+            let numeric: Vec<(&ClipEdit, &HostClipTarget)> = applied
+                .iter()
+                .filter(|(_, target)| {
+                    !applied_structural
+                        .iter()
+                        .any(|(done, _)| done.same_item(target))
+                })
+                .copied()
+                .collect();
+            if let Err(rollback) = restore_applied_geometry(&numeric, &authorized) {
+                rollback_errors.push(rollback);
+            }
+            if rollback_errors.is_empty() {
+                Err(format!(
                     "host clip edit rolled back; nothing was changed ({error})"
-                )),
-                Err(rollback) => Err(format!(
-                    "host clip edit failed and could not be rolled back; use host Undo ({error}; rollback: {rollback})"
-                )),
+                ))
+            } else {
+                Err(format!(
+                    "host clip edit failed and could not be rolled back; use host Undo ({error}; rollback: {})",
+                    rollback_errors.join("; ")
+                ))
             }
         }
     };
@@ -1185,9 +1311,18 @@ mod tests {
             .unwrap();
         assert_eq!(plan.edits[0].after.playback_rate, 2.);
         assert_eq!(plan.edits[0].after.length_sec, 1.);
+        // 【倒放不再是"规划期拒绝"】它以前在这里被拒，理由是"本模块只写数值字段，
+        // 建不了 `SOURCE SECTION`"。方向现在走**结构**写回（`source_direction`），
+        // 能不能写由执行期的宿主能力（`can_reverse_clips`）判定，因此规划阶段接受它。
         assert!(editor
             .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"reversed":true}))
-            .is_err());
+            .is_ok());
+        assert!(editor
+            .plan_host_edit(
+                "set_clip_state",
+                &json!({"clipId":clip.id,"reversed":false})
+            )
+            .is_ok());
         // 循环源**可以**规划：`B_LOOPSRC` 是纯 item 属性，内核语义与它一致。
         assert!(editor
             .plan_host_edit(
@@ -1505,6 +1640,110 @@ mod tests {
         clip.loop_enabled = false;
         clip.duration_sec = None;
         assert_eq!(host_start_offset(&clip), None);
+    }
+
+    /// 方向写回的三种编码必须与读取侧**互逆**。
+    ///
+    /// 【为什么钉死这一条】倒放没有 setter：写下去的是 `SOURCE SECTION` 加一个 SOFFS，
+    /// 而读回来的是 `take_geometry` 的解算。两边的编码只要差一个坐标域
+    /// （绝对 vs 段内、正向 vs 镜像），用户看到的就是"片段整体平移了半个媒体"——
+    /// 而波形、时长、淡变全都正常，极难归因。
+    #[test]
+    fn host_take_direction_matches_the_read_side_encoding() {
+        let mut clip: hifishifter_kernel::state::Clip = serde_json::from_value(json!({
+            "id":"c","track_id":"t","name":"n","start_sec":0,"length_sec":1,
+            "duration_sec":4.0,
+            "takes":[{"id":"k","source_start_sec":0.5,"source_end_sec":1.5,"duration_sec":4.0}]
+        }))
+        .unwrap();
+        clip.normalize_takes();
+
+        // 正放：拆段，SOFFS = 正向窗口起点（绝对坐标）。
+        let forward = host_take_direction(&clip, Some(4.0)).unwrap();
+        assert!(forward.section.is_none(), "正放不该带 SECTION");
+        assert_eq!(forward.s_offs, 0.5);
+
+        // 倒放：SECTION = `MODE 3` + `LENGTH = 跨度` + `STARTPOS 0`，SOFFS 是镜像起点
+        // `D − 正向终点` = 4.0 − 1.5 = 2.5（宿主自己的编码，见函数文档）。
+        clip.reversed = true;
+        let reversed = host_take_direction(&clip, Some(4.0)).unwrap();
+        let section = reversed.section.expect("倒放必须建段");
+        assert_eq!(
+            (section.start_sec, section.length_sec),
+            (0.0, 1.0),
+            "STARTPOS 恒 0、LENGTH 是窗口跨度"
+        );
+        assert_eq!(
+            section.mode,
+            super::super::source_direction::SECTION_MODE_REVERSED
+        );
+        assert_eq!(reversed.s_offs, 2.5, "SOFFS 必须是镜像起点 D − 正向终点");
+
+        // 倒放 + Loop：同一套编码（宿主的 `MODE 3` 不区分 loop），跨度是
+        // `[0, 锚点)` —— 与读取侧的 loop 分支同一条式子。
+        clip.loop_enabled = true;
+        let looped = host_take_direction(&clip, Some(4.0)).unwrap();
+        let section = looped.section.expect("倒放必须建段");
+        assert_eq!((section.start_sec, section.length_sec), (0.0, 1.5));
+        assert_eq!(looped.s_offs, 2.5);
+
+        // 媒体总长未知 ⇒ 拒绝（宁可不写，也不写一个读不回来的结构）。
+        assert!(host_take_direction(&clip, None).is_err());
+    }
+
+    /// 倒放必须走**结构**写回：换 SOURCE 子树、写 SOFFS，并在写后自校验方向位。
+    #[test]
+    fn reverse_is_written_back_as_a_source_section() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_item_state(&host.single_take_chunk());
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        let plan = editor
+            .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"reversed":true}))
+            .expect("倒放补丁必须被接受");
+        // 镜像起点由**写回后的**几何决定（补丁翻转方向时内核会重算消费窗口），
+        // 轴与生产代码同一条取值顺序（clip 自带的 ARA 源时长优先，其次宿主读数）。
+        let (_, window_end) =
+            hifishifter_kernel::state::clip_playback_window_sec(&plan.edits[0].after);
+        let axis = hifishifter_kernel::state::clip_source_media_duration_sec(&plan.edits[0].after)
+            .unwrap_or(2.0);
+        let expected_offs = axis - window_end;
+        host.reset();
+        execute(&owner, plan, || document.is_alive()).expect("倒放写回必须成功");
+
+        let calls = host.calls();
+        assert!(
+            calls.contains(&"set-item-state".to_string()),
+            "倒放必须写成结构，而不是某个数值字段：{calls:?}"
+        );
+        let chunk = host.item_state_chunk.borrow().clone();
+        assert!(chunk.contains("<SOURCE SECTION"), "{chunk}");
+        assert!(
+            chunk.contains("MODE 3"),
+            "倒放必须写成宿主自己的 MODE 3（整份媒体 + 反向）：{chunk}"
+        );
+        assert!(chunk.contains("STARTPOS 0.00000000000000000"), "{chunk}");
+        // 镜像起点：夹具媒体总长 2.0 s，`SOFFS = D − 正向窗口终点`。
+        assert!(
+            chunk.contains(&format!("SOFFS {expected_offs:.17}")),
+            "写回的必须是镜像域起点 {expected_offs}：{chunk}"
+        );
+        assert!(
+            chunk.contains("ara://source"),
+            "源本身必须原样保留：{chunk}"
+        );
+        assert!(host.take_reversed.get(), "写后方向位必须已经变成倒放");
+        document.close();
     }
 
     /// 形状 / 曲率必须进完成门：否则"只改曲率"的补丁 `matches()` 恒真，响应会带着

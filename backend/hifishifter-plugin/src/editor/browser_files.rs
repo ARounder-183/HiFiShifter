@@ -731,16 +731,29 @@ pub(super) fn pick_directory(
 pub(super) fn pick_save_path(
     window: crate::editor::gui::NativeWindow,
     file_name: &str,
-    extension: &str,
+    file_type: &hifishifter_kernel::file_types::FileType,
 ) -> Result<Option<PathBuf>, String> {
     use std::ffi::c_void;
-    use windows::core::HSTRING;
+    use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::Foundation::HWND;
     use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
+    use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
     use windows::Win32::UI::Shell::{
         FileSaveDialog, IFileSaveDialog, FOS_FORCEFILESYSTEM, FOS_OVERWRITEPROMPT,
         SIGDN_FILESYSPATH,
     };
+    // 【为什么空过滤器要显式拒绝】给系统一个空的 COMDLG_FILTERSPEC，它会静默退化成
+    // 「所有文件」—— 那正是本次要修的症状（用户把 .zip 诊断包写成 .txt）。宁可在这里
+    // 报一条可读的错误，也不要对话框看起来正常、实际没有任何约束。
+    if !file_type.is_usable() {
+        return Err("file dialog filter has no usable extension".into());
+    }
+    // 【为什么三个 HSTRING 必须活到 SetFileTypes 返回之后】PCWSTR 只是裸指针，
+    // 与 pick_open_path 里那条注释同一条注意事项。
+    let title = HSTRING::from(file_type.name());
+    let name = HSTRING::from(file_type.name());
+    let spec = HSTRING::from(file_type.com_pattern());
+    let default_extension = HSTRING::from(file_type.default_extension());
     unsafe {
         let dialog: IFileSaveDialog = CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER)
             .map_err(|e| e.to_string())?;
@@ -751,11 +764,20 @@ pub(super) fn pick_save_path(
                     | FOS_OVERWRITEPROMPT,
             )
             .map_err(|e| e.to_string())?;
+        // 【为什么此前没有这三行】另存为对话框只调了 SetFileName + SetDefaultExtension，
+        // 于是类型下拉框是空的 —— 用户能选到的「所有文件」是唯一选项。同一个文件的
+        // **打开**对话框一直是对的（见 pick_open_path），所以这不是平台限制。
+        dialog.SetTitle(&title).map_err(|e| e.to_string())?;
+        let filters = [COMDLG_FILTERSPEC {
+            pszName: PCWSTR(name.as_ptr()),
+            pszSpec: PCWSTR(spec.as_ptr()),
+        }];
+        dialog.SetFileTypes(&filters).map_err(|e| e.to_string())?;
         dialog
             .SetFileName(&HSTRING::from(file_name))
             .map_err(|e| e.to_string())?;
         dialog
-            .SetDefaultExtension(&HSTRING::from(extension))
+            .SetDefaultExtension(&default_extension)
             .map_err(|e| e.to_string())?;
         if let Err(error) = dialog.Show(Some(HWND(window as *mut c_void))) {
             // 0x800704c7 = ERROR_CANCELLED。
@@ -781,9 +803,9 @@ pub(super) fn pick_save_path(
 pub(super) fn pick_save_path(
     _window: crate::editor::gui::NativeWindow,
     file_name: &str,
-    extension: &str,
+    file_type: &hifishifter_kernel::file_types::FileType,
 ) -> Result<Option<PathBuf>, String> {
-    crate::editor::platform_services::pick_save_path(file_name, extension)
+    crate::editor::platform_services::pick_save_path(file_name, file_type)
 }
 
 /// 原生"打开文件"对话框，带一条扩展名筛选（MIDI 导入用）。
@@ -796,8 +818,7 @@ pub(super) fn pick_save_path(
 #[cfg(windows)]
 pub(super) fn pick_open_path(
     window: crate::editor::gui::NativeWindow,
-    filter_name: &str,
-    extension: &str,
+    file_type: &hifishifter_kernel::file_types::FileType,
 ) -> Result<Option<PathBuf>, String> {
     use std::ffi::c_void;
     use windows::core::{HSTRING, PCWSTR};
@@ -808,9 +829,12 @@ pub(super) fn pick_open_path(
         FileOpenDialog, IFileOpenDialog, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
         SIGDN_FILESYSPATH,
     };
-    // 两个 HSTRING 必须活到 `SetFileTypes` 返回之后 —— `PCWSTR` 只是裸指针。
-    let name = HSTRING::from(filter_name);
-    let spec = HSTRING::from(format!("*.{extension}"));
+    if !file_type.is_usable() {
+        return Err("file dialog filter has no usable extension".into());
+    }
+    // 两个 HSTRING 必须活到 SetFileTypes 返回之后 —— PCWSTR 只是裸指针。
+    let name = HSTRING::from(file_type.name());
+    let spec = HSTRING::from(file_type.com_pattern());
     unsafe {
         let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)
             .map_err(|e| e.to_string())?;
@@ -847,10 +871,9 @@ pub(super) fn pick_open_path(
 #[cfg(not(windows))]
 pub(super) fn pick_open_path(
     _window: crate::editor::gui::NativeWindow,
-    filter_name: &str,
-    extension: &str,
+    file_type: &hifishifter_kernel::file_types::FileType,
 ) -> Result<Option<PathBuf>, String> {
-    crate::editor::platform_services::pick_open_path(filter_name, extension)
+    crate::editor::platform_services::pick_open_path(file_type)
 }
 
 /// 在系统文件管理器中打开一个目录（Windows）。

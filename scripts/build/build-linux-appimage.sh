@@ -42,8 +42,15 @@ echo "Profile: $PROFILE"
 # Step 1: 编译 Rust 后端并让 Tauri 组装 AppDir。
 # 注意：打包那一步在 WSL2 上可能失败（linuxdeploy/FUSE），但 AppDir 在此之前
 # 就已经组装完毕，所以这里容忍失败，后面统一由 linux-appimage.sh 重打包。
+#
+# 【为什么记下主二进制的时间戳】上面这份"容忍失败"有个致命副作用：如果编译
+# 一开始就失败，而磁盘上留着**上一次构建**的 AppDir，Step 2 照样找得到它，
+# 打包脚本会开心地把一个旧二进制打进新 AppImage，全程打印 SUCCESS。用一个
+# 时间戳哨兵要求"本次构建真的产出了新二进制"，才能既容忍打包失败又不放过编译失败。
 echo ""
 echo "--- Step 1: Building Rust binary + AppDir ---"
+BUILD_STAMP="$(mktemp)"
+trap 'rm -f "$BUILD_STAMP"' EXIT
 cd "$BACKEND_DIR"
 set +e
 HIFISHIFTER_SKIP_FRONTEND_BUILD=1 APPIMAGE_EXTRACT_AND_RUN=1 cargo tauri build \
@@ -70,6 +77,17 @@ fi
 if [ ! -d "$RELEASE_DIR/bundle/appimage/HiFiShifter.AppDir" ]; then
     echo "ERROR: 找不到 AppDir：$RELEASE_DIR/bundle/appimage/HiFiShifter.AppDir" >&2
     echo "Tauri 构建大概率失败了，请检查上面的输出。" >&2
+    exit 1
+fi
+APP_BINARY="$RELEASE_DIR/bundle/appimage/HiFiShifter.AppDir/usr/bin/HiFiShifter"
+if [ ! -f "$APP_BINARY" ]; then
+    echo "ERROR: AppDir 里没有主二进制：$APP_BINARY" >&2
+    exit 1
+fi
+if [ ! "$APP_BINARY" -nt "$BUILD_STAMP" ]; then
+    echo "ERROR: 主二进制没有在本次构建中更新（编译失败却留下了上一次的 AppDir）" >&2
+    echo "       二进制：$APP_BINARY" >&2
+    echo "       哨兵：$BUILD_STAMP（构建开始前创建）" >&2
     exit 1
 fi
 

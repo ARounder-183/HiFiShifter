@@ -93,6 +93,19 @@ pub struct HostCapabilities {
     /// 【为什么与 `export_audio` 分开】前者要渲染音频，后者只把前端算好的 JSON
     /// 写成文件；两者失败面完全不同，混用会让"JSON 导出能用"被音频导出拖住。
     pub export_data: bool,
+    /// 宿主允许把 **take 的播放方向（倒放）** 写回。
+    ///
+    /// 【为什么它必须是独立一位，而不是由 `clip_write` 推出来】REAPER 没有"反向
+    /// setter"：倒放是 `<SOURCE SECTION MODE n>` 这一层**结构**。写它需要
+    /// `Get/SetItemStateChunk` 与可解析的源，而普通的几何写只需要 `SetMediaItem*Info_Value`。
+    /// 两者可以各自缺失；混成一位会让"能拖片段"直接被读成"能倒放"，
+    /// 用户点下去才撞一条 `unsupported`。
+    pub clip_reverse: bool,
+    /// 宿主允许读写 take 的**音高包络**（REAPER 的 PITCHENV）并写 `D_PITCH`。
+    ///
+    /// 【为什么单独一位】音高互转要同时读点、写点、排序三件事，它们是一束 API；
+    /// 缺任何一个都必须整项不可用，而不是"点了之后半途失败"。
+    pub take_pitch_bridge: bool,
     /// 后端从 VST3 输入总线取得素材（Capture 通路）。
     ///
     /// 【为什么它是一个能力位而不是恒真的"是不是 Capture 形态"】它与 `HostKind::Capture`
@@ -118,6 +131,8 @@ impl HostCapabilities {
             fade_axes: false,
             export_audio: false,
             export_data: false,
+            clip_reverse: false,
+            take_pitch_bridge: false,
             capture: false,
         }
     }
@@ -144,6 +159,8 @@ impl HostCapabilities {
             fade_axes: false,
             export_audio: true,
             export_data: true,
+            clip_reverse: false,
+            take_pitch_bridge: false,
             capture: false,
         }
     }
@@ -178,6 +195,8 @@ impl HostCapabilities {
             fade_axes: false,
             export_audio: true,
             export_data: true,
+            clip_reverse: false,
+            take_pitch_bridge: false,
             capture: true,
         }
     }
@@ -226,6 +245,10 @@ mod tests {
         assert!(!caps.track_create);
         assert!(!caps.item_clipboard);
         assert!(!caps.fade_axes);
+        // 【为什么 ARA-only 上一定是 false】倒放写回要 `SetItemStateChunk`，而
+        // ARA 2.0 连 region 几何都不允许插件改 —— 结构写回更不可能。
+        assert!(!caps.clip_reverse);
+        assert!(!caps.take_pitch_bridge);
         assert!(!HostKind::AraOnly.clip_write_allowed());
         assert!(HostKind::Reaper.clip_write_allowed());
     }
@@ -245,6 +268,10 @@ mod tests {
         assert_eq!(json["clipWrite"], false);
         assert_eq!(json["clipGeometry"], true);
         assert_eq!(json["undoStack"], false);
+        // 两位新能力必须原样出现在快照里：前端按 camelCase 读它们，
+        // 名字写错就是"菜单永远不出现"，而不会有任何编译错误。
+        assert_eq!(json["clipReverse"], false);
+        assert_eq!(json["takePitchBridge"], false);
     }
 
     /// 身份序列化成 snake_case 字符串。

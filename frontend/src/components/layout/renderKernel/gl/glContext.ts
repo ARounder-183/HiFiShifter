@@ -97,14 +97,16 @@ export function createGlCanvas(canvas: HTMLCanvasElement): GlCanvasHandle | null
     // `preventDefault` 是恢复的前提：不阻止默认处理，浏览器不会触发 restored。
     let lost = false;
     const restoredListeners: Array<() => void> = [];
-    canvas.addEventListener("webglcontextlost", (event) => {
+    const onContextLost = (event: Event): void => {
         event.preventDefault();
         lost = true;
-    });
-    canvas.addEventListener("webglcontextrestored", () => {
+    };
+    const onContextRestored = (): void => {
         lost = false;
         for (const listener of restoredListeners.slice()) listener();
-    });
+    };
+    canvas.addEventListener("webglcontextlost", onContextLost);
+    canvas.addEventListener("webglcontextrestored", onContextRestored);
 
     return {
         gl,
@@ -156,6 +158,13 @@ export function createGlCanvas(canvas: HTMLCanvasElement): GlCanvasHandle | null
             //
             // 真正的 GPU 资源（program / buffer / texture）由各 program 的 dispose
             // 释放；context 本身随 canvas 被 GC 回收，无需手动丢失。
+            //
+            // 【监听器必须摘除】React 复用同一个 `<canvas>` DOM 节点（StrictMode
+            // 双挂载 / HMR / 停靠重挂），不摘除的话每次挂载都会往同一个节点上再叠
+            // 一对监听器；恢复事件还会扇出到每个陈旧句柄的 restoredListeners。
+            canvas.removeEventListener("webglcontextlost", onContextLost);
+            canvas.removeEventListener("webglcontextrestored", onContextRestored);
+            restoredListeners.length = 0;
         },
     };
 }

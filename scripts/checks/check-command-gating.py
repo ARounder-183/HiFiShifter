@@ -48,6 +48,9 @@ APP_LIB = ROOT / "backend" / "src-tauri" / "src" / "lib.rs"
 PLUGIN_ACTOR = ROOT / "backend" / "hifishifter-plugin" / "src" / "editor" / "commands.rs"
 PLUGIN_EDITOR_UI = ROOT / "backend" / "hifishifter-plugin" / "src" / "editor" / "gui" / "client.rs"
 PLUGIN_CAPTURE = ROOT / "backend" / "hifishifter-plugin" / "src" / "capture" / "commands.rs"
+# client.rs 里 `request["command"] == protocol::PAGE_READY` 这类比较用的是常量；
+# 常量值登记在 protocol.rs（页面首句话 plugin_ready / 内存自报 plugin_heap）。
+PLUGIN_PROTOCOL = ROOT / "backend" / "hifishifter-plugin" / "src" / "editor" / "gui" / "protocol.rs"
 
 
 def read(path: pathlib.Path) -> str:
@@ -89,6 +92,16 @@ def plugin_commands(*sources: str) -> set[str]:
         for group in re.findall(r"Some\((?:command @ )?\(([^)]*)\)\)", source):
             commands |= set(re.findall(r'"([A-Za-z0-9_]+)"', group))
         commands |= set(re.findall(r'Some\("([A-Za-z0-9_]+)"\)\s*\|', source))
+        # `request["command"] == protocol::NAME` 常量比较：按 protocol.rs 的
+        # `const NAME: &str = "value"` 把常量名换成命令名。字面量正则抓不到
+        # 这一类，缺了它 plugin_ready / plugin_heap 会被误报为"无后端承接"。
+        for const_name in re.findall(r'request\["command"\]\s*==\s*protocol::([A-Za-z0-9_]+)', source):
+            commands |= set(
+                re.findall(
+                    rf'const\s+{re.escape(const_name)}\s*:\s*&str\s*=\s*"([A-Za-z0-9_]+)"',
+                    read(PLUGIN_PROTOCOL),
+                )
+            )
     return commands
 
 

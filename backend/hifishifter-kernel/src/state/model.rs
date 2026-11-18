@@ -2504,6 +2504,10 @@ pub enum HistoryOp {
     ParamBlockEdit,
     ImportMidi,
     EditMidi,
+    /// REAPER take 音高包络 → HiFiShifter 参数线（一次性迁移）。
+    HostPitchImport,
+    /// HiFiShifter 参数线 → REAPER take 音高包络（一次性迁移）。
+    HostPitchExport,
     ImportVocalShifter,
     // ── 其它 ──
     Recording,
@@ -2566,6 +2570,8 @@ impl HistoryOp {
             HistoryOp::ParamBlockEdit => "param_block_edit",
             HistoryOp::ImportMidi => "import_midi",
             HistoryOp::EditMidi => "edit_midi",
+            HistoryOp::HostPitchImport => "host_pitch_import",
+            HistoryOp::HostPitchExport => "host_pitch_export",
             HistoryOp::ImportVocalShifter => "import_vocalshifter",
             HistoryOp::Recording => "recording",
             HistoryOp::Batch => "batch",

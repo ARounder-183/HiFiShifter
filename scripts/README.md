@@ -35,7 +35,7 @@ Windows 只有一条构建命令，它按顺序做完：前端 → App → VST3 
 macOS / Linux 的插件构建不经过 PowerShell。**构建按格式分开，分发统一**：
 
 ```bash
-# 分发入口：一次编译 → 每个 OS 一个可安装的产物（Linux tar.gz / macOS pkg）
+# 分发入口：一次编译 → 每个 OS 一个可安装的产物（Linux 三合一 tar.gz / macOS 三合一 pkg）
 scripts/build/unix/package.sh                  # VST3 + CLAP
 scripts/build/unix/package.sh --formats=vst3   # 只出 VST3
 

@@ -1,5 +1,6 @@
 name: CLAP plug-in
 
+# CI 只做构建：工作流不跑测试；产物的黑盒自检在本地执行。
 on:
   pull_request:
   push:
@@ -7,14 +8,11 @@ on:
   workflow_dispatch:
 
 jobs:
-  gates:
-    uses: ./.github/workflows/gates.yml
-    with:
-      scope: frontend
-    secrets: inherit
+  frontend:
+    uses: ./.github/workflows/frontend-build.yml
 
   build:
-    needs: gates
+    needs: frontend
     strategy:
       fail-fast: false
       matrix:
@@ -28,7 +26,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
-      # 【为什么 Unix 也要装 GTK/WebKit】CLAP 外壳复用 hifishifter-plugin，而后者
+      # 【为什么 Unix 也要装 GTK/WebKit】CLAP 外壳复用 hifishifter-plugin（实现层），而后者
       # 在 Linux 上的内嵌编辑器走 wry/gtk3：glib-sys 的 build.rs 用 pkg-config 找
       # glib-2.0.pc，缺了它编译在 build script 阶段就以
       # "Package glib-2.0 was not found" 失败。清单与 vst3-unix.yml 保持一致，
@@ -59,19 +57,15 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/setup/prepare-plugin-sdks.ps1
-      # 【为什么 Unix 也要准备 ARA / VST3 SDK】CLAP 外壳复用 hifishifter-plugin，
-      # 而该 crate 的 ara2-bridge 同时启用了 vst3 companion feature；Cargo 的 feature
-      # 是构建图并集，ara2-bridge-companion 的 build.rs 因此会读 ARA_SDK_DIR 与
-      # ARA_VST3_SDK_DIR。只准备 CLAP 头文件时，编译在 build script 阶段以
-      # "VST3 SDK v3.8.0_build_66 is required" 失败。VST3 流水线已经有同一套 pin 校验，
-      # 这里直接复用它的 sdk 阶段，避免两份规则漂移。
-      - name: Prepare pinned ARA and VST3 SDKs (Unix)
+      # 【为什么只需要 CLAP SDK】壳提取（docs/plans/2026-11-17-vst3-shell-extraction-plan.md）
+      # 之后，共享层只用 ara2-bridge 的裸 companion 特性（纯 Rust，无 SDK 检出），
+      # CLAP companion 也是纯 Rust —— CLAP 外壳的构建不再需要 ARA / VST3 SDK。
+      # CLAP 头文件仍然要钉住：clap_layout 的 ABI oracle 用它编原生基准
+      # （HIFISHIFTER_CLAP_SDK_DIR）。
+      - name: Prepare pinned CLAP SDK (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          bash scripts/vst3/unix/build.sh --stage=sdk
-          echo "ARA_SDK_DIR=$GITHUB_WORKSPACE/third_party/sdk/ARA_SDK" >> "$GITHUB_ENV"
-          echo "ARA_VST3_SDK_DIR=$GITHUB_WORKSPACE/third_party/sdk/vst3sdk" >> "$GITHUB_ENV"
           echo "HIFISHIFTER_CLAP_SDK_DIR=$GITHUB_WORKSPACE/third_party/sdk/clap" >> "$GITHUB_ENV"
 
       # 【为什么按 commit 取而不是按分支】pin 的是 commit，分支 tip 早就走远了；
@@ -96,8 +90,8 @@ jobs:
           python scripts/setup/fetch-models.py
           python scripts/setup/fetch-models.py --fetch-game
         shell: bash
-      # 前端产物来自 gates.yml 的 frontend job。CLAP 的包与 VST3 同构地带一份
-      # frontend/ 与 models.json：少了它，自检里的"窗口空白"判据就成了空跑。
+      # 前端产物来自 frontend-build.yml。CLAP 的包与 VST3 同构地带一份
+      # frontend/ 与 models.json：少了它，插件窗口在宿主里就是一片空白。
       - name: Download frontend artifact
         uses: actions/download-artifact@v8
         with:
@@ -119,17 +113,33 @@ jobs:
           $zip = Get-ChildItem -Path frontend-dist -Filter *.zip | Select-Object -First 1
           if (-not $zip) { Write-Host "No zip artifact found in frontend-dist"; Get-ChildItem frontend-dist; exit 1 }
           Expand-Archive -Path $zip.FullName -DestinationPath frontend -Force
+      # CI 只构建：跳过产物的黑盒自检（其中包含 cargo test ABI oracle）。
       - name: Build CLAP (Unix)
         if: runner.os != 'Windows'
-        run: bash scripts/clap/unix/build.sh --reuse-frontend
+        run: bash scripts/clap/unix/build.sh --reuse-frontend --no-verify
       - name: Build CLAP (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: pwsh scripts/clap/windows/build.ps1
-      - uses: actions/upload-artifact@v7
+        run: pwsh scripts/clap/windows/build.ps1 -SkipVerify
+      - name: Upload CLAP (Unix)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v7
         with:
           name: clap-${{ matrix.platform }}
+          # 只传压缩包：dist/clap/** 是同一份 bundle 的原始目录，再传一遍
+          # 会让 artifact 里出现两份完整的 200 MB 权重。
           path: |
-            dist/clap/**
-            dist/HiFiShifter_*clap*
-          if-no-files-found: warn
+            dist/HiFiShifter_*clap*.tar.gz
+            dist/HiFiShifter_*clap*.tar.gz.sha256
+          # 本 job 的唯一交付物就是这份产物：glob 与脚本输出布局漂移时必须当场红，
+          # 不能 warn 后带着空产物绿灯（build.yml 的上传全部用 error，同一纪律）。
+          if-no-files-found: error
+
+      - name: Upload CLAP (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: clap-${{ matrix.platform }}
+          # Windows 的 CLAP 是单文件模块，资源目录跟着模块走；没有 tar.gz。
+          path: dist/clap/**
+          if-no-files-found: error

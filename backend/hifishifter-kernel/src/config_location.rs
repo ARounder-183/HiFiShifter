@@ -60,14 +60,14 @@ pub fn local_data_subdir(name: &str) -> PathBuf {
     crate::app_paths::local_data_subdir(name)
 }
 
-/// 平台默认的**全机共享**数据目录（只有 Windows 有，其余为 `None`）。
+/// 平台默认的**共享**数据目录；macOS/Linux 返回安装器拥有的落点，不再有平台为 `None`。
 ///
 /// 理由见 [crate::app_paths::shared_data_dir] 与 [crate::model_store] 的模块文档。
 pub fn default_shared_data_dir() -> Option<PathBuf> {
     crate::app_paths::shared_data_dir()
 }
 
-/// 共享数据目录下的一个子目录；非 Windows 或不可用时为 `None`。
+/// 共享数据目录下的一个子目录；平台无法确定共享根目录时为 `None`。
 pub fn shared_data_subdir(name: &str) -> Option<PathBuf> {
     crate::app_paths::shared_data_subdir(name)
 }

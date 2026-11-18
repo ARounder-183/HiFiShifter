@@ -5,7 +5,26 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// 会话轨道键只用于live关联；值完全来自宿主的modification/source persistentID。
-pub(crate) type TrackBindings = BTreeMap<String, Vec<(String, String)>>;
+pub type TrackBindings = BTreeMap<String, Vec<(String, String)>>;
+
+/// 控制器通道"owner 尚不可用"时的**空状态载荷**。
+///
+/// 【为什么是一个共享函数而不是外壳自建】VST3 的编辑控制器在 owner 缺失时回退到
+/// "编码一份空 [`EditState`]"。让壳去构造 [`EditState`] 意味着把整个状态模型
+/// （权威表 / 轨道 / 绑定 / fade…）提升成壳可见的 API —— 那是一大片纯属实现细节的
+/// 面。壳只需要"一份合法的空载荷"，不需要知道它是怎么造出来的。
+/// 当前存档格式版本（`EditState::encode` 写进 `version` 字段的那个值）。
+///
+/// 【为什么是模块级别名】外壳的测试要核对存档字节里的版本号，而 [`EditState`]
+/// 本身保持私有（壳不需要认识整个状态模型）；这一个数字是**线格式契约**，可以公开。
+pub const STATE_VERSION: u64 = EditState::STATE_VERSION;
+
+pub fn empty_state_payload() -> Vec<u8> {
+    EditState::default().encode().unwrap_or_else(|error| {
+        log::warn!("[state] empty state payload failed to encode: {error}");
+        Vec::new()
+    })
+}
 
 /// 插件自有、宿主表达不到的**逐片段**属性。
 ///
@@ -17,7 +36,7 @@ pub(crate) type TrackBindings = BTreeMap<String, Vec<(String, String)>>;
 /// 【键为什么是 clip id】`apply` 收到的时间线里 clip id 形如 `ara-item-{item GUID}`，
 /// 即宿主的稳定 item 身份；与 `fades` 的键口径一致，冷重建后仍能对上。
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct ClipLocalState {
+pub struct ClipLocalState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
     /// 共振峰变形是**渲染输入**（内核 DSP 读它），所以必须随片段一起播种，
@@ -27,7 +46,7 @@ pub(crate) struct ClipLocalState {
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
-pub(crate) struct EditState {
+pub struct EditState {
     pub revision: u64,
     /// **唯一用户编辑权威**：项目时间的稀疏 run，不存显示数组、不存默认值。
     #[serde(default)]

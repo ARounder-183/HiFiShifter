@@ -109,10 +109,9 @@ hfs_stage_frontend() {
     hfs_log "前端资源（$(du -sh "$res/frontend" | cut -f1)）"
 }
 
-# 模型必须进包。Windows 有安装器拥有的共享模型库，Unix 没有 —— 见
-# hifishifter-kernel/src/model_store.rs 的模块文档：非 Windows 上 shared_store_dir 返回
-# None，插件直接用 bundle 里的副本。所以 Unix 的包是自包含的（约 150 MB），
-# 代价是两个格式各带一份；换来的是"解压就能用、不依赖任何外部目录"。
+# 模型必须进包。Windows 有安装器拥有的共享模型库；macOS/Linux 的统一
+# 安装包也把权重放在共享库，只让 bundle 带 models.json。纯插件包（不经过统一
+# 安装器）仍保持自包含（约 200 MB），解压就能用、不依赖外部目录。
 # <resources-dir> <models-source>
 hfs_stage_models() {
     local res="$1" src="$2"
@@ -121,6 +120,18 @@ hfs_stage_models() {
     cp -R "$src/." "$res/models/"
     [ -f "$res/models/models.json" ] \
         || hfs_die "模型清单缺失：先跑 python3 scripts/setup/fetch-models.py --write-manifest"
+}
+
+# 把 bundle 内的模型目录压缩成"只有清单"的形态。统一安装包把权重放在共享库，
+# 独立 App 与每个插件都靠 models.json 里的版本号去共享库找同一份；bundle 里再留
+# 一份完整权重只会让 pkg/tar 体积翻倍。
+# <models-dir>
+hfs_strip_models_to_manifest() {
+    local models="$1"
+    [ -f "$models/models.json" ] || hfs_die "缺少模型清单：$models/models.json"
+    find "$models" -mindepth 1 -maxdepth 1 ! -name 'models.json' -exec rm -rf {} \;
+    [ "$(find "$models" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = "1" ] \
+        || hfs_die "模型目录没有清理干净：$models"
 }
 
 # <dest-dir> <repo-root>

@@ -1379,16 +1379,11 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                             <AppFormSection
                                 title={tf("appearance_font")}
                                 action={
-                                    <div className="flex items-center gap-2">
-                                        <AppButton
-                                            size="sm"
-                                            onClick={() => {
-                                                markDraftDirty();
-                                                setFontFamily(DEFAULT_FONT_FAMILY);
-                                            }}
-                                        >
-                                            {tf("appearance_reset")}
-                                        </AppButton>
+                                    <>
+                                        {/* 此前这里有两个按钮（"重置"与"恢复默认字体"），
+                                            点击行为完全相同（后者多清一次搜索框）——
+                                            字体区段唯一可复位的状态就是字族，留一个语义
+                                            准确的按钮即可。 */}
                                         <AppButton
                                             size="sm"
                                             onClick={() => {
@@ -1399,7 +1394,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                         >
                                             {tf("appearance_font_restore_default")}
                                         </AppButton>
-                                    </div>
+                                    </>
                                 }
                             >
                                 <input

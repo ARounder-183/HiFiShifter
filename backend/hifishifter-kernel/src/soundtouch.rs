@@ -111,6 +111,46 @@ fn pack_layout_candidates(module_dir: &Path, name: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Windows 安装器版：插件资源**不**在公共 CLAP 目录里，而在全机共享目录
+/// （`%PROGRAMDATA%\HiFiShifter\plugin-resources`，与共享模型库同一个根）。
+///
+/// 【为什么单独一条】CLAP 目录只放 `.clap` 一个文件之后，模块旁边就没有
+/// `HiFiShifter-resources` 了；少了这条候选，安装版 CLAP 会静默降级到 Signalsmith
+/// —— 不报错、不崩溃，只是变调质感变了。
+#[cfg(target_os = "windows")]
+fn shared_plugin_resource_candidate_at(programdata: &Path, name: &str) -> PathBuf {
+    programdata
+        .join("HiFiShifter")
+        .join("plugin-resources")
+        .join(name)
+}
+
+#[cfg(target_os = "windows")]
+fn shared_programdata_root() -> PathBuf {
+    // 与 app_paths::shared_data_dirs() 和 plugin_core::resource_root 同一套兜底：
+    // PROGRAMDATA 缺失时按 SystemDrive:\ProgramData，最后才是 C:\ProgramData。
+    // 这里漏一条候选的表现是安装版 CLAP 静默降级到 Signalsmith，不会报错。
+    std::env::var_os("PROGRAMDATA")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("SystemDrive").map(|drive| PathBuf::from(drive).join("ProgramData"))
+        })
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+}
+
+#[cfg(target_os = "windows")]
+fn shared_plugin_resource_candidates(name: &str) -> Vec<PathBuf> {
+    vec![shared_plugin_resource_candidate_at(
+        &shared_programdata_root(),
+        name,
+    )]
+}
+
+#[cfg(not(target_os = "windows"))]
+fn shared_plugin_resource_candidates(_name: &str) -> Vec<PathBuf> {
+    Vec::new()
+}
+
 fn load_api() -> Option<Api> {
     let name = runtime_library_name();
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -120,6 +160,7 @@ fn load_api() -> Option<Api> {
     if let Some(dir) = module_dir() {
         candidates.extend(pack_layout_candidates(&dir, name));
     }
+    candidates.extend(shared_plugin_resource_candidates(name));
     let mut loaded = None;
     for path in &candidates {
         if !path.is_file() {
@@ -609,7 +650,16 @@ pub fn try_time_stretch_interleaved_realtime(
             break;
         }
     }
-    Ok(normalize_output_len(out, channels, out_frames_hint))
+    // hint == 0 时与离线入口同款回退：按时间比从输入帧数推算目标长度。
+    // （离线入口在 629 行有这条回退；现在所有调用方都保证 hint >= 2，
+    // 但两份入口的契约应当一致 —— 下一个调用方不该踩进"静默输出空"的坑。）
+    let in_frames = input_interleaved.len() / channels.max(1);
+    let target_frames = if out_frames_hint > 0 {
+        out_frames_hint
+    } else {
+        ((in_frames as f64) * time_ratio).round().max(1.0) as usize
+    };
+    Ok(normalize_output_len(out, channels, target_frames))
 }
 
 #[cfg(test)]
@@ -674,6 +724,38 @@ mod tests {
     /// 变 false、time_stretch 落到 Signalsmith），没有任何崩溃或日志能暴露它；
     /// CI 的产物门禁（AppImage / .app 自检）断言的是**文件在哪**，这一条断言的是
     /// **加载器往哪找** —— 两份清单必须互为镜像。
+    /// 安装器版 CLAP 的 SoundTouch 落在全机共享资源目录，路径必须与安装器的
+    /// `HFS_CLAP_RES_DIR` 一致。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_shared_plugin_resources_dir_is_a_candidate() {
+        let path = super::shared_plugin_resource_candidate_at(
+            std::path::Path::new("C:/ProgramData"),
+            super::runtime_library_name(),
+        );
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        assert_eq!(
+            normalized,
+            format!(
+                "C:/ProgramData/HiFiShifter/plugin-resources/{}",
+                super::runtime_library_name()
+            )
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn shared_programdata_root_falls_back_to_system_drive() {
+        let root = super::shared_programdata_root();
+        assert!(root.is_absolute(), "{root:?}");
+        assert!(
+            root.to_string_lossy()
+                .to_ascii_lowercase()
+                .ends_with("programdata"),
+            "{root:?}"
+        );
+    }
+
     #[test]
     fn pack_layout_candidates_cover_every_bundled_location() {
         let dir = std::path::Path::new("/app/bin");

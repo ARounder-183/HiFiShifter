@@ -67,9 +67,12 @@ use types::*;
 // 这些类型本来就是 `pub(crate)`（别的模块按 `render::extension::X` 引用），搬家后
 // 必须在本模块名下重新导出，否则它们的可见面会静默窄一层。
 pub use render_block::RenderOutcome;
+// BlockEvidence / InstanceMode 进了壳的 process/测试 API 面（capture_observe /
+// render_block 的签名与音频边界测试），随方法一起 pub。
+pub use types::{BlockEvidence, InstanceMode};
 pub(crate) use types::{
-    BlockEvidence, CaptureOutput, CaptureStage, HostAudioState, InstanceMode,
-    RestoreIdentityVerdict, ScopeSource, SnapshotSource,
+    CaptureOutput, CaptureStage, HostAudioState, RestoreIdentityVerdict, ScopeSource,
+    SnapshotSource,
 };
 
 /// 原生接口与只读元数据属于真实组件，缓存不跨其文档/分配/host变更复用。
@@ -366,6 +369,10 @@ pub struct ExtensionOwner {
     buffer_audit_channels: AtomicU32,
     buffer_audit_frames: AtomicU32,
     buffer_audit_unwritten: AtomicU64,
+    /// 因与输入平面共享内存而被跳过的输出平面数（见 `AudioBlock::poison_outputs`）。
+    buffer_audit_aliased: AtomicU32,
+    /// 本块输入与输出是否是同一份总线（in-place 宿主）。
+    buffer_audit_in_place: AtomicBool,
     buffer_audit_active: AtomicBool,
     last_buffer_diag: Mutex<Option<String>>,
     repeats_suppressed: AtomicU64,

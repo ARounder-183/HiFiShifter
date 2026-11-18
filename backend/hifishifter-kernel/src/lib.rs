@@ -70,6 +70,8 @@ pub mod byte_budget_cache;
 pub mod config_location;
 pub mod engine_command;
 pub mod events;
+// 「另存为 / 打开」对话框的类型过滤词表：插件（COM/GTK/Cocoa）与独立 App（rfd）共用。
+pub mod file_types;
 pub mod host;
 pub mod log_limiter;
 pub mod log_policy;
@@ -139,6 +141,7 @@ pub mod fade_axes;
 pub mod fade_curves;
 pub mod gain;
 pub mod models;
+pub mod pitch_bridge;
 pub mod pitch_config;
 pub mod vibrato;
 

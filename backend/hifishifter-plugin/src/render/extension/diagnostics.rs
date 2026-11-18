@@ -22,13 +22,23 @@ impl ExtensionOwner {
     ///
     /// 【为什么按档位去重打印】它由音频线程记原子，格式化留给 actor；一次播放里同一档位
     /// 只报一次，避免每块一行。
-    pub(crate) fn note_buffer_audit(&self, channels: usize, unwritten: usize, frames: usize) {
+    pub(crate) fn note_buffer_audit(
+        &self,
+        audit: crate::audio_block::BufferAudit,
+        aliased: usize,
+        in_place: bool,
+        frames: usize,
+    ) {
         self.buffer_audit_channels
-            .store(channels as u32, Ordering::Relaxed);
+            .store(audit.channels as u32, Ordering::Relaxed);
         self.buffer_audit_frames
             .store(frames as u32, Ordering::Relaxed);
         self.buffer_audit_unwritten
-            .fetch_max(unwritten as u64, Ordering::Relaxed);
+            .fetch_max(audit.unwritten as u64, Ordering::Relaxed);
+        self.buffer_audit_aliased
+            .fetch_max(aliased as u32, Ordering::Relaxed);
+        self.buffer_audit_in_place
+            .store(in_place, Ordering::Relaxed);
     }
 
     /// 把写满审计的结论打成一行（非实时线程）。
@@ -38,10 +48,15 @@ impl ExtensionOwner {
             return;
         }
         let unwritten = self.buffer_audit_unwritten.load(Ordering::Acquire);
+        // 【aliased / in_place 为什么必须进日志】它们是"这一块本来就不该预填"的
+        // 现场证据：in-place 宿主上 unwritten=0 + aliased=2 是健康形状，而
+        // unwritten>0 才是真的漏写。没有这两栏，现场只能看到一条无法归因的 0。
         let line = format!(
-            "[buf] audit: channels={} frames={} unwritten={unwritten} output={}",
+            "[buf] audit: channels={} frames={} unwritten={unwritten} aliased={} in_place={} output={}",
             self.buffer_audit_channels.load(Ordering::Acquire),
             self.buffer_audit_frames.load(Ordering::Acquire),
+            self.buffer_audit_aliased.load(Ordering::Acquire),
+            self.buffer_audit_in_place.load(Ordering::Acquire),
             self.capture_output().as_str(),
         );
         let mut last = self.last_buffer_diag.lock_or_recover();
@@ -184,7 +199,7 @@ impl ExtensionOwner {
     }
 
     /// 块级诊断的 JSON（非音频线程）。`trace_limit` 控制环形记录条数。
-    pub(crate) fn block_diagnostics_json(&self, trace_limit: usize) -> serde_json::Value {
+    pub fn block_diagnostics_json(&self, trace_limit: usize) -> serde_json::Value {
         let capture = self.capture.capture_diagnostics().map(|capture| {
             serde_json::json!({
                 "preroll_frames_dropped": capture.preroll_frames_dropped,

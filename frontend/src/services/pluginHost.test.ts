@@ -208,4 +208,17 @@ describe("command timeouts", () => {
         expect(commandTimeoutMs("analyze_clip_syllables")).toBe(15 * 60_000);
         expect(commandTimeoutMs("get_syllable_analysis_progress")).toBe(DEFAULT_COMMAND_TIMEOUT_MS);
     });
+
+    it("gives the plugin-reachable export family room to render offline", () => {
+        // canExportAudio 在插件里放行的三条导出命令共用播放的渲染数学，
+        // 大工程整段渲染远超默认 30 s（回归：此前 30 s 就 reject，回执被丢弃）。
+        expect(commandTimeoutMs("export_audio_advanced")).toBe(15 * 60_000);
+        expect(commandTimeoutMs("quick_export_selected_clips")).toBe(15 * 60_000);
+        expect(commandTimeoutMs("save_synthesized")).toBe(15 * 60_000);
+    });
+
+    it("gives the silence detection lane room to scan whole clips", () => {
+        expect(commandTimeoutMs("analyze_clip_silence")).toBe(5 * 60_000);
+        expect(commandTimeoutMs("remove_clip_silence")).toBe(5 * 60_000);
+    });
 });

@@ -15,18 +15,18 @@ HiFiShifterは、グラフィカルなボーカル編集・合成ツールです
 - **3 種類のボコーダーアルゴリズム**：nsf-hifigan（PC-NSF-HiFiGAN）、World、VsLib。詳細は[アルゴリズム](#アルゴリズム)を参照。
 - **相互運用性**：REAPER（`.rpp`）および VocalShifter（`.vshp` / `.vsp`）プロジェクトのインポート、REAPER / VocalShifter クリップボードとの双方向の読み書きに対応。MIDI は音高リファレンスブロック / 音高パラメータ / テンポマップとしてインポートでき、クリップとピッチラインは MIDI としてエクスポートできます。
 - **インポート / エクスポート**：一般的なオーディオ / 動画フォーマットをインポート（動画からは自動で音声トラックを抽出）。プロジェクトと分離トラックを `wav` / `mp3` / `flac` でエクスポート。
-- **VST3 ARA プラグインと CLAP プラグイン**：スタンドアロン版とは別に、Windows x64 向けの VST3 と CLAP プラグインを提供しています。VST3 プラグインは REAPER 内で ARA 経由で同じ編集インターフェースを直接開けます。ホストがクリップのジオメトリ、BPM、フェード音声を担当し、HiFiShifter がパラメータ曲線を担当します。編集は自動的にホストへ適用されます。CLAP プラグインは同じエディターのインサートエフェクト形態です（REAPER との ARA バインドは行いません）。詳細はユーザーマニュアルの [プラグイン](USERMANUAL_ja.md#八vst3-ara-プラグインと-clap-プラグインreaper)の章を参照してください。
+- **VST3 ARA プラグインと CLAP プラグイン**：スタンドアロン版とは別に、3 プラットフォームの統合インストーラーに VST3 と CLAP プラグインが含まれます。VST3 プラグインは REAPER 内で ARA 経由で同じ編集インターフェースを直接開けます。ホストがクリップのジオメトリ、BPM、フェード音声を担当し、HiFiShifter がパラメータ曲線を担当します。編集は自動的にホストへ適用されます。CLAP プラグインは同じエディターのインサートエフェクト形態です（REAPER との ARA バインドは行いません）。詳細はユーザーマニュアルの [プラグイン](USERMANUAL_ja.md#八vst3-ara-プラグインと-clap-プラグインreaper)の章を参照してください。
 - **その他**：内蔵ファイルブラウザーとクイック検索、ノート、自動バックアップ、多言語 UI（简体中文 / 繁體中文 / English / 日本語 / 한국어）、ライト / ダークテーマ、推論デバイスの選択とベンチマーク。
 
 ## インストール
 
 [Releases](https://github.com/ARounder-183/HiFiShifter/releases) ページから、お使いの OS とアーキテクチャに対応したインストーラーをダウンロードしてください：
 
-- **Windows**：NSIS インストーラー（`installer`）またはポータブル版 ZIP（`portable`）。x86_64 と arm64 の両アーキテクチャを提供しています。
-- **macOS**：未署名の dmg（Apple Silicon は `arm64`、Intel は `x86_64`）。初回起動時は手動で許可する必要があります。「ファイルが破損しています」と表示された場合は、[ユーザーマニュアル](USERMANUAL_ja.md#一インストール)の手順に従って対処してください。
-- **Linux**：AppImage（x86_64 / arm64）。実行にはシステムの `webkit2gtk-4.1` が必要です（Arch/CachyOS、Ubuntu 24.04+、Fedora 39+、Debian 13+ などが提供。Ubuntu 22.04 は `webkit2gtk-4.0` のみのため非対応）。
+- **Windows**：NSIS インストーラー（`installer`）またはポータブル版 ZIP（`portable`）。x86_64 と arm64 の両アーキテクチャを提供しています。インストーラーにはスタンドアロン版、VST3/CLAP プラグイン、共有モデルライブラリが含まれます。
+- **macOS**：未署名の統合 `.pkg`（Apple Silicon は `arm64`、Intel は `x86_64`）。アプリ、VST3/CLAP プラグイン、共有モデルライブラリを一度にインストールします。初回起動時は手動で許可する必要があります。「ファイルが破損しています」と表示された場合は、[ユーザーマニュアル](USERMANUAL_ja.md#一インストール)の手順に従って対処してください。
+- **Linux**：統合 `.tar.gz`（x86_64 / arm64）。AppImage、VST3/CLAP プラグイン、共有モデルライブラリ、`install.sh` を含みます。`./install.sh` でユーザー単位、`sudo ./install.sh --system` でシステム単位にインストールします。実行にはシステムの `webkit2gtk-4.1` が必要です（Arch/CachyOS、Ubuntu 24.04+、Fedora 39+、Debian 13+ などが提供。Ubuntu 22.04 は `webkit2gtk-4.0` のみのため非対応）。
 
-**VST3 ARA プラグインと CLAP プラグイン**：Windows x64 には両方の形態があります。REAPER 内では VST3 プラグインを ARA の埋め込みインターフェースとして使用し（現在は REAPER でのみ検証済み）、CLAP プラグインは通常のインサートエフェクトとして使用できます。インストール方法、実行時依存、使用上の制限はユーザーマニュアルの [プラグイン](USERMANUAL_ja.md#八vst3-ara-プラグインと-clap-プラグインreaper)の章を参照してください。
+**VST3 ARA プラグインと CLAP プラグイン**：3 プラットフォームすべてに両方の形態があります。REAPER 内では VST3 プラグインを ARA の埋め込みインターフェースとして使用し（現在は REAPER でのみ検証済み）、CLAP プラグインは通常のインサートエフェクトとして使用できます。インストール方法、実行時依存、使用上の制限はユーザーマニュアルの [プラグイン](USERMANUAL_ja.md#八vst3-ara-プラグインと-clap-プラグインreaper)の章を参照してください。
 
 GPU アクセラレーション：Windows では DirectML（DirectX 12）、macOS（Apple Silicon）では CoreML + WebGPU、Linux x86_64 では WebGPU（Dawn/Vulkan）を使用し、その他のプラットフォームでは CPU にフォールバックします。アプリ内の `オプション → 推論デバイス` からデバイスを切り替えて、ベンチマークを実行できます。
 

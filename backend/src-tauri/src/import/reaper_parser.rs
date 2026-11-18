@@ -185,8 +185,12 @@ impl Default for ReaperTake {
 pub struct ReaperSource {
     pub source_type: String,
     pub file_path: String,
-    /// Reaper SECTION SOURCE 的 MODE 值。
-    /// 当 MODE > 0 时表示该 SECTION 以反向方式读取。
+    /// Reaper SECTION SOURCE 的 `MODE` 值 —— 是**位**，不是"越大越反向"。
+    ///
+    /// 【真机读数（REAPER 7.85）】位 0 = 段边界无效（按整份媒体算）、位 1 = 反向：
+    /// `MODE 1` 是**正放**的整媒体段（`PCM_Source_GetSectionInfo` 报 reverse=false），
+    /// `MODE 3` 才是宿主 `Toggle take reverse` 写出的形态。判方向请用
+    /// `hifishifter_kernel::take_geometry::section_mode_reversed`。
     pub section_mode: i32,
     /// Reaper SECTION SOURCE 的起点（秒）。
     pub section_start_sec: Option<f64>,
@@ -536,12 +540,24 @@ fn parse_tempo_env_time_signature(slow_curv: f64) -> Option<(u32, u32)> {
 
 // ─── Take 包络 u 域换算（唯一转换点） ──────────────────────────────────────
 //
-// REAPER take 包络点坐标是 take 媒体时间 u（pitch_test.rpp 证据：包络末点
-// 与 LENGTH×|PLAYRATE| 精确相等）；u=0 对应 item 起点，与 SOFFS/倒放/
-// 拉伸标记无关（拉伸标记只改 u→源位置映射，不改 u→时间映射）。
-// 若 REAPER 实测推翻该结论，只需修正这两个函数。
+// u = **播放时间 × |PLAYRATE|**，u = 0 落在 take 的**入点**（不是媒体文件起点）。
+//
+// 【真机实测（REAPER 7.85，2026-11-17）】判据是渲染后按窗反推的音高，见
+// `docs/2026-11-17-take-envelope-axis-findings.md`：
+//
+// - `SOFFS 2` 的 take 上写 `u = 2.0 / 2.5` ⇒ 渲染恒定 440 Hz（点落在片段之外）；
+//   同一份几何改写成 `u = 0 / 0.5` ⇒ 立刻出现 +12 半音斜坡。**SOFFS 不进坐标**。
+// - `SECTION STARTPOS 3 LENGTH 3` + `SOFFS 1` 上写 `u = 0.5 / 1.0` ⇒ 斜坡落在播放
+//   0.5–1.0 s。**STARTPOS 不进坐标**。
+// - 倒放（`MODE 3`/`MODE 2`）上写镜像的媒体时间不生效，写 `u = 0.25 / 0.75` 才在
+//   播放 0.25–0.75 s 出现斜坡。**方向不进坐标**（u 是播放顺序）。
+// - 改 `SOFFS` 或执行宿主的倒放切换后，chunk 里的 `PT` 时间**一字不动**。
+//
+// ⇒ 导出端不得加 `SOFFS`、不得做倒放镜像；导入端照 `PT` 原值采样。唯一未实测的是
+// 非线性拉伸标记下的分段映射，而写回路径对带拉伸标记的 take 一律拒绝。
+// 若将来实测推翻该结论，只需修正这两个函数。
 
-/// take 媒体时间 u → item 相对时间线秒。
+/// take 播放时间 u（× 速率）→ item 相对时间线秒。
 ///
 /// 保留为设计文档指定的"唯一转换点"反向函数（导入端按帧 t→u 采样，故当前
 /// 无直接调用者；u 域结论被 REAPER 实测推翻时，u↔t 的整体翻转只改这里）。
@@ -551,7 +567,7 @@ pub fn take_env_u_to_item_time(u: f64, take_rate: f64) -> f64 {
     u / take_rate.max(1e-6)
 }
 
-/// item 相对时间线秒 → take 媒体时间 u（导出反向换算同用此点）。
+/// item 相对时间线秒 → take 播放时间 u（导出反向换算同用此点）。
 #[inline]
 pub fn item_time_to_take_env_u(item_time: f64, take_rate: f64) -> f64 {
     item_time * take_rate.max(0.0)

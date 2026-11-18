@@ -2421,7 +2421,10 @@ mod tests {
             let mut settings: UiSettings =
                 serde_json::from_value(serde_json::json!({ "rippleMode": value }))
                     .expect("旧配置必须能读");
-            assert!(settings.ripple_enabled.is_none(), "旧配置里不该有 rippleEnabled");
+            assert!(
+                settings.ripple_enabled.is_none(),
+                "旧配置里不该有 rippleEnabled"
+            );
             settings.normalize_ripple_mode();
             (settings.ripple_enabled, settings.ripple_mode)
         };
@@ -2435,9 +2438,10 @@ mod tests {
     /// 新配置：关闭时仍要记住方向（重启后打开开关不该被重置成"按轨道"）。
     #[test]
     fn new_ripple_settings_keep_scope_while_disabled() {
-        let mut settings: UiSettings =
-            serde_json::from_value(serde_json::json!({ "rippleEnabled": false, "rippleMode": "all" }))
-                .expect("新配置必须能读");
+        let mut settings: UiSettings = serde_json::from_value(
+            serde_json::json!({ "rippleEnabled": false, "rippleMode": "all" }),
+        )
+        .expect("新配置必须能读");
         settings.normalize_ripple_mode();
         assert_eq!(settings.ripple_enabled, Some(false));
         assert_eq!(settings.ripple_mode, "all");
@@ -3271,6 +3275,29 @@ pub fn load_ui_settings(config_dir: &Path) -> UiSettings {
 /// 将 UI 设置写入 config dir；保留现有配置中的其他字段。
 pub fn save_ui_settings(config_dir: &Path, ui: &UiSettings) {
     update_config(config_dir, |cfg| cfg.ui = ui.clone());
+}
+
+/// 在两层串行化锁内做一次 UI 设置的读-改-写，返回写回的最终值。
+///
+/// 【为什么不是调用方 load → 合并 → save_ui_settings】那样合并基准（load）在
+/// 文件锁**之外**读：插件进程在这中间保存过的 UI 字段会被本进程的旧快照盖掉
+/// —— 正是文件锁要消灭的"偶发、无法复现的设置丢失"。`f` 在锁内收到**当前**
+/// 的 `cfg.ui`（而不是调用方启动时的快照），返回要写回的值；返回值把最终值
+/// 带回调用方，供进程内缓存与"这次真的变了什么"检测使用。
+pub fn update_ui_settings_with(
+    config_dir: &Path,
+    f: impl FnOnce(UiSettings) -> UiSettings,
+) -> UiSettings {
+    let mut result: Option<UiSettings> = None;
+    update_config(config_dir, |cfg| {
+        let next = f(cfg.ui.clone());
+        cfg.ui = next.clone();
+        result = Some(next);
+    });
+    // update_config 的闭包一定被调用一次，因此 result 必为 Some。兜底显式失败
+    // 而不是退回 load_ui_settings：后者会把本次补丁整个丢掉，却仍向前端回
+    // `ok: true`（用户看到"保存成功"但值没变），比报错更难排查。
+    result.expect("update_config must invoke its update closure")
 }
 
 /// 从 config dir 读取导出设置。

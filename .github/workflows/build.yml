@@ -1,14 +1,12 @@
 name: HiFiShifter Cross-Platform Build (Windows, macOS, Linux)
 
-# 产物流水线：把**已经过门禁的树**变成可交付的东西。
+# 产物流水线：把源码变成可交付的产物。
 #
-# 【门禁去哪了】源码级检查（静态约定 / 前端 / fmt / clippy / 单测 / testkit）全部在
-# gates.yml 里，本流水线 `uses:` 它。此前两边各写一份、参数还不一样，于是同一条用例
-# 可以在一条流水线上绿、在另一条上红。判据现在只有一处。
+# 【CI 只做构建】本仓库的 CI 不再运行测试（单测 / 集成测试 / testkit / 安装器闭环 /
+# 冒烟全部移除）；测试请在本地按需运行 scripts/checks/ 下的脚本。
 #
 # 【触发】PR 跑三平台（windows-x86_64 / macos-arm64 / linux-x86_64）；`v*` tag 与手动
-# 触发跑全量六平台。直接 push develop 的插件反馈由 plugin-gates.yml 承担 —— 它是轻的
-# （不编译产物），而六平台矩阵按小时计。
+# 触发跑全量六平台。
 on:
   workflow_dispatch:
   pull_request:
@@ -24,20 +22,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ── 门禁：源码级检查全部交给 gates.yml ──────────────────────────────────
+  # ── 前端产物：只构建，不跑测试 ──────────────────────────────────────────
   #
-  # 【为什么抽成可复用工作流】此前 fmt / clippy / test / 前端门禁 / 产品一致性散在
-  # build.yml 与 vst3.yml 两处，参数互不相同（--offline / --jobs / --skip 各写一遍），
-  # 同一条用例可以在一条流水线上绿、在另一条上红。现在只有一处定义，
-  # build.yml / plugin-gates.yml 都 `uses:` 它，判据因此不可能分叉。
-  #
-  # 【为什么 backend 要 needs 它】产物流水线跑的应当是"已经过门禁的树"：否则一个
-  # 格式化违规会先在六平台矩阵上烧掉一小时，再在一个完全无关的 lint job 上失败。
-  gates:
-    uses: ./.github/workflows/gates.yml
-    # 产物流水线需要 frontend-dist 这个 artifact，因此跑全量门禁。
-    with:
-      scope: all
+  # 所有平台的打包都复用同一份 frontend/dist，避免每条腿各自重跑一次 vite。
+  frontend:
+    uses: ./.github/workflows/frontend-build.yml
 
   # tag 与版本号必须对上：release 产物里的文件名、安装器的 DisplayVersion、
   # 关于对话框全都读同一个版本号，而 tag 是唯一"人手工敲"的那一处。
@@ -61,21 +50,19 @@ jobs:
 
   backend:
     name: Build Backend (${{ matrix.name }})
-    needs: [gates, assert-version]
+    needs: [frontend, assert-version]
     # assert-version 只在 tag 上存在；非 tag 运行时它是 skipped，不该拦住构建。
     if: >-
-      always() && needs.gates.result == 'success'
+      always() && needs.frontend.result == 'success'
       && (needs.assert-version.result == 'success' || needs.assert-version.result == 'skipped')
     runs-on: ${{ matrix.os }}
     # 六平台矩阵：单个入口的最长构建（交叉编译 + 打包）120 分钟封顶。
     timeout-minutes: 180
     env:
       # 【为什么不再设 RUSTFLAGS】这里原本是 `RUSTFLAGS: "-Awarnings"`，它确实让
-      # 构建日志安静了，代价却是**把本 workspace 自己的告警一起吞掉** —— 190 条
-      # clippy 告警因此在 CI 里完全不可见，其中 15 条是死代码/未使用导入。
+      # 构建日志安静了，代价却是**把本 workspace 自己的告警一起吞掉**。
       # 安静由 `setup-rust-toolchain` 的 `rustflags: ''` 负责（见下方 Setup 步骤），
       # 它只取消"把警告升级为错误"，不再屏蔽警告本身。
-      HIFISHIFTER_SKIP_CARGO_CHECK: "1"
       HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
       HIFISHIFTER_WEBKIT_ABI: "4.1"
       APPIMAGE_EXTRACT_AND_RUN: "1"
@@ -148,7 +135,7 @@ jobs:
           cache: false
           # 该 action 默认把既有警告升级为错误（`-D warnings`）。构建 job 不该因为
           # 依赖 crate 的告警而红，也不该把告警静音 —— 因此显式置空，让警告可见
-          # 但不判死。与 `vst3.yml` 的同一处理保持口径一致。
+          # 但不判死。与 `vst3-unix.yml` 的同一处理保持口径一致。
           rustflags: ''
 
       - name: Setup Node.js
@@ -159,12 +146,13 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       # 【为什么 Unix 也要准备 ARA / VST3 SDK】backend job 的 package.sh 除了 App 本体
-      # 还要产出 VST3 与 CLAP 两个插件产物，而 CLAP 外壳复用 hifishifter-plugin，
-      # 该 crate 的 ara2-bridge 启用了 vst3 companion feature；ara2-bridge-companion
-      # 的 build.rs 在缺 ARA_VST3_SDK_DIR 时当场 panic（"VST3 SDK v3.8.0_build_66 is
-      # required"）。Windows 由 install_deps_windows.ps1 走 prepare-plugin-sdks.ps1；
-      # Unix 这里与 clap.yml 用同一套命令（--stage=sdk + 三个环境变量），避免两份
-      # SDK pin 规则漂移。
+      # 还要产出 VST3 与 CLAP 两个插件产物：VST3 外壳（hifishifter-vst3）启用
+      # ara2-bridge 的 vst3 companion（C++ shim），其 build.rs 在缺 ARA_VST3_SDK_DIR
+      # 时当场 panic（"VST3 SDK v3.8.0_build_66 is required"）。CLAP 外壳在壳提取
+      # （docs/plans/2026-11-17-vst3-shell-extraction-plan.md）之后只用裸 companion +
+      # clap 特性（纯 Rust），已不再需要这两个 SDK —— 但同一次构建里 VST3 壳仍需要。
+      # Windows 由 install_deps_windows.ps1 走 prepare-plugin-sdks.ps1；Unix 这里保持
+      # 同一套命令（--stage=sdk + 三个环境变量），避免两份 SDK pin 规则漂移。
       - name: Prepare pinned ARA and VST3 SDKs (Unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -181,9 +169,7 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update -y
-          # xvfb + libgl1-mesa-dri：后面要用无头 X 服务器真正启动一次 AppImage
-          # （冒烟）；没有 DRI 驱动时 EGL 会退化为 llvmpipe。
-          sudo apt-get install -y jq cmake libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0 librsvg2-dev patchelf pkg-config libasound2-dev xvfb libgl1-mesa-dri
+          sudo apt-get install -y jq cmake libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0 librsvg2-dev patchelf pkg-config libasound2-dev
           sudo apt-get install -y libappindicator3-dev || sudo apt-get install -y libayatana-appindicator3-dev
 
       - name: Ensure AppImage bundling prerequisites (Linux)
@@ -210,8 +196,8 @@ jobs:
       # 【为什么 Windows 也要准备 pin 过的 ARA / VST3 SDK】build.ps1 的"插件引擎与
       # CLAP 模块"那一步会编译 ara2-bridge-companion，它的 build.rs 要求
       # ARA_VST3_SDK_DIR 指向可读的 VST3 SDK 3.8.0 检出；install_deps_windows.ps1
-      # 只装工具链，不取 SDK。此前 Windows backend 腿从未走完（gates 先挡住），
-      # 这一环一直没被触发。与 gates.yml 的 Windows 腿用同一条准备命令。
+      # 只装工具链，不取 SDK。此前 Windows backend 腿从未走完（前置检查先挡住），
+      # 这一环一直没被触发。
       - name: Prepare pinned ARA and VST3 SDKs (Windows)
         if: runner.os == 'Windows'
         run: ./scripts/setup/prepare-plugin-sdks.ps1
@@ -253,7 +239,9 @@ jobs:
         shell: bash
 
       # ── Frontend deps ──────────────────────────────────────────────────
-
+      #
+      # tauri-action 会执行 tauri.conf.json 的 beforeBuildCommand（npm run build），
+      # 而 frontend-dist artifact 只带 dist、不带 node_modules，因此这里仍要装依赖。
       - name: Install frontend deps
         run: npm --prefix frontend ci
 
@@ -264,24 +252,16 @@ jobs:
       # 【为什么不再用 tauri-action】Windows 只交付一个安装器，它要装两个位置
       # （App 与 VST3）、并且独占写入共享模型库 —— Tauri 的打包器给不了这些
       # （见 scripts/release/merged-installer.nsi 的头部注释）。build.ps1 负责
-      # 编译、组装、校验、打安装器，CI 只是调用它。
-      - name: Build, gate and package (Windows x86_64)
+      # 编译、组装、打安装器，CI 只是调用它。CI 只构建，不跑插件自检。
+      - name: Build and package (Windows x86_64)
         if: runner.os == 'Windows' && matrix.cargo_target == 'x86_64-pc-windows-msvc'
         env:
           HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
         run: |
           . ./scripts/env/sdk-env.ps1
           Set-SdkEnvironment
-          ./scripts/build/build.ps1 -Target All -SkipFrontend
+          ./scripts/build/build.ps1 -Target All -SkipFrontend -SkipVerify
           if ($LASTEXITCODE -ne 0) { throw 'build.ps1 failed.' }
-
-      # ── 安装器闭环门禁 ────────────────────────────────────────────────
-      #
-      # 装 → 查（ARP / 模型库 / 无 .onnx / VST3 只有清单）→ 重装（幂等）→ 卸载 → 查。
-      # 安装器是所有失败方式都静默的那类东西，只有真跑一遍再逐条断言才看得见。
-      - name: Installer gate (Windows x86_64)
-        if: runner.os == 'Windows' && matrix.cargo_target == 'x86_64-pc-windows-msvc'
-        run: ./scripts/checks/check-installer.ps1
 
       # ── Windows arm64：App-only ────────────────────────────────────────
       #
@@ -305,11 +285,9 @@ jobs:
           HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
         with:
           projectPath: backend/src-tauri
-          # Request the .app bundle explicitly: when only the DMG is requested,
-          # tauri-bundler deletes the intermediate .app from bundle/macos right
-          # after creating the DMG ("Cleaning ...HiFiShifter.app"), which leaves
-          # nothing on disk for the bundle verification step to inspect.
-          args: --bundles app,dmg ${{ matrix.cargo_extra }}
+          # Unified macOS pkg 需要保留 .app 作为 pkg 载荷；DMG 已不再单独产出。
+          # 只请求 app，避免 tauri-bundler 在生成 DMG 后清理中间产物。
+          args: --bundles app ${{ matrix.cargo_extra }}
 
       - name: Set LD_LIBRARY_PATH for linuxdeploy (Linux)
         if: runner.os == 'Linux'
@@ -359,8 +337,7 @@ jobs:
           APP_DIR="${GITHUB_WORKSPACE}/${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/macos/HiFiShifter.app"
           if [ ! -d "$APP_DIR" ]; then
             echo "ERROR: $APP_DIR not found." >&2
-            echo "When only the DMG is requested, tauri-bundler removes the intermediate .app" >&2
-            echo "after creating the DMG. Build with --bundles app,dmg so the .app is kept." >&2
+            echo "macOS 统一 pkg 需要 .app 载荷；请用 --bundles app 构建并保留 bundle/macos。" >&2
             ls -la "$(dirname "$APP_DIR")" 2>/dev/null || true
             exit 1
           fi
@@ -528,43 +505,46 @@ jobs:
           fi
         shell: bash
 
-      - name: Package, verify and smoke-test the AppImage (Linux)
+      - name: Package the AppImage (Linux)
         if: runner.os == 'Linux' && !cancelled()
         working-directory: ${{ github.workspace }}
         env:
           RELEASE_DIR: ${{ github.workspace }}/${{ steps.tauri-release-dir.outputs.release-dir }}
-          # 运行器没有 GPU：把软件路径显式钉死，免得冒烟结果取决于驱动探测。
-          LIBGL_ALWAYS_SOFTWARE: "1"
-          WEBKIT_DISABLE_DMABUF_RENDERER: "1"
+          # 三合一包把权重放到安装目录的共享库；AppImage 只保留 models.json。
+          HIFISHIFTER_EXTERNAL_MODELS: "1"
+          # CI 只构建：跳过启动 AppImage 的冒烟测试；本地脚本默认仍会冒烟。
+          HIFISHIFTER_SKIP_SMOKE: "1"
         run: |
           set -euo pipefail
           if [ -z "${{ steps.tauri-release-dir.outputs.release-dir }}" ]; then
             echo "ERROR: 解析不到 Tauri 产物目录，无法打包" >&2
             exit 1
           fi
-          # 剪裁（桌面栈交还宿主）→ 断言（该有的有、不该有的没有）→ 重打包 → 冒烟。
-          HIFISHIFTER_SMOKE_REQUIRED=1 bash scripts/build/linux-appimage.sh package "$RELEASE_DIR"
+          # 按 cargo target 而非 runner 的 uname 选打包判据：ARM64 腿是否带
+          # libwebgpu_dawn.so 取决于 Rust 目标，不能让运行器架构替它做决定。
+          case "${{ matrix.cargo_target }}" in
+            aarch64-unknown-linux-gnu) HFS_APP_ARCH=aarch64 ;;
+            x86_64-unknown-linux-gnu) HFS_APP_ARCH=x86_64 ;;
+            *) echo "ERROR: 未知的 Linux 打包目标 ${{ matrix.cargo_target }}" >&2; exit 1 ;;
+          esac
+          # 剪裁（桌面栈交还宿主）→ 静态断言 → 重打包。CI 不启动产物。
+          ARCH="$HFS_APP_ARCH" \
+            bash scripts/build/linux-appimage.sh package "$RELEASE_DIR"
         shell: bash
 
       # 便携包由 build.ps1 直接产出（自包含：模型全量随包），YAML 不再重复铺目录。
 
       # ── LICENSE alongside artifacts ──────────────────────────────────
 
-      # Place LICENSE and the licenses/ folder next to the DMG/AppImage and the
-      # Windows installer so the uploaded artifacts ship with them. The portable
-      # directory already includes both (staged above).
-      - name: Stage LICENSE next to bundles/installer
-        if: steps.tauri-release-dir.outputs.release-dir != ''
+      # Windows 安装器在上传前把 LICENSE 放到 NSIS 目录；macOS pkg / Linux tar
+      # 已经把许可打进各自的安装包，不再额外铺一份。
+      - name: Stage LICENSE next to Windows installer
+        if: runner.os == 'Windows' && steps.tauri-release-dir.outputs.release-dir != ''
         shell: bash
         run: |
           set -euo pipefail
           RELEASE_DIR="${GITHUB_WORKSPACE}/${{ steps.tauri-release-dir.outputs.release-dir }}"
-          case "${{ runner.os }}" in
-            Windows) COPY_TARGET="$RELEASE_DIR/bundle/nsis" ;;
-            macOS)   COPY_TARGET="$RELEASE_DIR/bundle/dmg" ;;
-            Linux)   COPY_TARGET="$RELEASE_DIR/bundle/appimage" ;;
-            *)       echo "Unsupported runner OS: ${{ runner.os }}"; exit 1 ;;
-          esac
+          COPY_TARGET="$RELEASE_DIR/bundle/nsis"
           if [ ! -d "$COPY_TARGET" ]; then
             echo "WARNING: bundle dir not found, LICENSE not staged: $COPY_TARGET" >&2
             exit 0
@@ -576,14 +556,25 @@ jobs:
       # ── 插件产物（Unix）─────────────────────────────────────────────
       #
       # 【为什么和 App 在同一条腿里出】App 与插件共用文档格式、模型清单版本与前端
-      # 产物；同一次构建里产出两种产物，版本不可能错配。格式自己的门禁仍由
-      # vst3-unix.yml 与 clap.yml 承担 —— 它们只回答"能产出、能加载"，不负责分发。
-      - name: Package plug-ins (Unix)
+      # 产物；同一次构建里产出两种产物，版本不可能错配。格式自己的构建仍由
+      # vst3-unix.yml 与 clap.yml 承担 —— 它们只回答"能不能产出"，不负责分发。
+      - name: Package unified installer (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          bash scripts/build/unix/package.sh --profile dist --reuse-frontend
+          RELEASE_DIR="${GITHUB_WORKSPACE}/${{ steps.tauri-release-dir.outputs.release-dir }}"
+          APP_ARGS=()
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            APP_BUNDLE="$RELEASE_DIR/bundle/macos/HiFiShifter.app"
+            [ -d "$APP_BUNDLE" ] || { echo "ERROR: 找不到 macOS App：$APP_BUNDLE" >&2; exit 1; }
+            APP_ARGS+=(--app-bundle "$APP_BUNDLE")
+          else
+            APPIMAGE="$(find "$RELEASE_DIR/bundle/appimage" -maxdepth 1 -name '*.AppImage' -print -quit)"
+            [ -f "$APPIMAGE" ] || { echo "ERROR: 找不到 Linux AppImage：$RELEASE_DIR/bundle/appimage" >&2; exit 1; }
+            APP_ARGS+=(--appimage "$APPIMAGE")
+          fi
+          bash scripts/build/unix/package.sh --profile dist --reuse-frontend --no-verify "${APP_ARGS[@]}"
 
       # ── Artifact naming ───────────────────────────────────────────────
 
@@ -600,11 +591,13 @@ jobs:
               if ($j.productName) { $prod = $j.productName }
               if ($j.package -and $j.package.version) { $ver = $j.package.version }
               elseif ($j.version) { $ver = $j.version }
-            } catch { }
+            } catch { throw "无法从 ${conf} 读取版本号（缺失或 JSON 损坏）：$_" }
+          } else {
+            throw "无法从 ${conf} 读取版本号（文件缺失）"
           }
           $prodSafe = ($prod -replace '["\\/:*?<>|]', '') -replace '\s+', '_'
           $verSafe = ($ver -replace '["\\/:*?<>|]', '') -replace '^v', ''
-          $artifactName = "${prodSafe}_v${verSafe}_${{ matrix.name }}-bundles"
+          $artifactName = "${prodSafe}_v${verSafe}_${{ matrix.name }}-unified"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "artifact-name=$artifactName"
         shell: pwsh
 
@@ -621,7 +614,9 @@ jobs:
               if ($j.productName) { $prod = $j.productName }
               if ($j.package -and $j.package.version) { $ver = $j.package.version }
               elseif ($j.version) { $ver = $j.version }
-            } catch { }
+            } catch { throw "无法从 ${conf} 读取版本号（缺失或 JSON 损坏）：$_" }
+          } else {
+            throw "无法从 ${conf} 读取版本号（文件缺失）"
           }
           $prodSafe = ($prod -replace '["\\/:*?<>|]', '') -replace '\s+', '_'
           $verSafe = ($ver -replace '["\\/:*?<>|]', '') -replace '^v', ''
@@ -647,7 +642,9 @@ jobs:
               if ($j.productName) { $prod = $j.productName }
               if ($j.package -and $j.package.version) { $ver = $j.package.version }
               elseif ($j.version) { $ver = $j.version }
-            } catch { }
+            } catch { throw "无法从 ${conf} 读取版本号（缺失或 JSON 损坏）：$_" }
+          } else {
+            throw "无法从 ${conf} 读取版本号（文件缺失）"
           }
           $prodSafe = ($prod -replace '["\\/:*?<>|]', '') -replace '\s+', '_'
           $verSafe = ($ver -replace '["\\/:*?<>|]', '') -replace '^v', ''
@@ -693,40 +690,15 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload plug-in package (Unix)
+      - name: Upload unified package (Unix)
         if: runner.os != 'Windows'
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.artifact-name-nonwindows.outputs.artifact-name }}-plugins
-          # 【为什么是 -plugins 不是 _plugins】package.sh 的命名字面量就是
-          # `HiFiShifter_v<版本>_<os>-<arch>-plugins.<ext>`（平台标签用连字符），
-          # 此前写成 `*_plugins.*` 永远匹配不到产物 —— backend 腿第一次真正跑完
-          # 打包后才暴露：tar 明明生成了 225M，上传步骤却报 "No files were found"。
-          path: |
-            dist/HiFiShifter_*-plugins.tar.gz
-            dist/HiFiShifter_*-plugins.tar.gz.sha256
-            dist/HiFiShifter_*-plugins.pkg
-            dist/HiFiShifter_*-plugins.pkg.sha256
-          if-no-files-found: error
-
-      - name: Upload DMG (macOS)
-        if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v7
-        with:
           name: ${{ steps.artifact-name-nonwindows.outputs.artifact-name }}
-          path: |
-            ${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/dmg/*.dmg
-            ${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/dmg/LICENSE
-          if-no-files-found: error
-
-      - name: Upload AppImage (Linux)
-        if: runner.os == 'Linux' && !cancelled()
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ steps.artifact-name-nonwindows.outputs.artifact-name }}
-          path: |
-            ${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/appimage/*.AppImage
-            ${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/appimage/LICENSE
+          # package.sh 的命名字面量是
+          # `HiFiShifter_v<版本>_<os>-<arch>-unified.{pkg,tar.gz}`。
+          # 一个 artifact 只装一个安装器；两平台各一条腿，不会混。
+          path: dist/HiFiShifter_*-${{ matrix.name }}-unified.*
           if-no-files-found: error
 
       - name: Dump diagnostics on failure (Linux)

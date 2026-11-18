@@ -67,7 +67,11 @@ pub(crate) fn pin_analysis_code() -> Result<(), String> {
 ///
 /// 【为什么不用 `std::env::current_exe`】插件跑在宿主进程里，那是**宿主**的路径。
 /// 【为什么不用 `/proc/self/maps`】只有 Linux 有；dladdr 两个平台都有。
-pub(crate) fn module_path() -> Result<PathBuf, String> {
+/// 本模块二进制的装载路径（资源根与 WebView profile 反查的输入）。
+///
+/// 【为什么 pub】模块入口住在格式外壳 crate（`hifishifter-vst3` / `hifishifter-clap`），
+/// 资源根登记发生在壳的初始化序列里，壳需要自己"在哪"这一事实。
+pub fn module_path() -> Result<PathBuf, String> {
     #[cfg(all(windows, not(test)))]
     {
         use windows::core::PCWSTR;

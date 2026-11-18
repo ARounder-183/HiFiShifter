@@ -57,10 +57,14 @@ pub(super) fn pick_diagnostics_output_path() -> serde_json::Value {
         "HiFiShifter-diagnostics-{}.zip",
         chrono::Local::now().format("%Y%m%d-%H%M%S")
     );
+    // 类型名与扩展名来自内核词表（hifishifter_kernel::file_types），与插件侧
+    // 同一张表 —— 两处各写一份时，改了一边就会让同一个导出在 App 与插件里
+    // 出现两种下拉框。
+    let file_type = &hifishifter_kernel::file_types::DIAGNOSTICS_ZIP;
     let picked = rfd::FileDialog::new()
         .set_title("Export diagnostics")
         .set_file_name(&default_name)
-        .add_filter("Zip archive", &["zip"])
+        .add_filter(file_type.name(), &file_type.extension_refs())
         .save_file();
     match picked {
         Some(path) => serde_json::json!({ "ok": true, "path": path.to_string_lossy() }),

@@ -41,11 +41,11 @@ unsafe impl GlobalAlloc for GuardedAllocator {
         unsafe { System.realloc(pointer, layout, size) }
     }
 }
-pub(crate) fn begin() {
+pub fn begin() {
     CALLS.with(|calls| calls.set(0));
     OBSERVING.with(|flag| flag.set(true));
 }
-pub(crate) fn end() -> usize {
+pub fn end() -> usize {
     OBSERVING.with(|flag| flag.set(false));
     CALLS.with(Cell::get)
 }

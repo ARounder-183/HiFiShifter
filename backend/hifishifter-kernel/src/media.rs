@@ -575,6 +575,9 @@ where
         .map(|c| c.count())
         .unwrap_or(1)
         .max(1) as u16;
+    // 实际解码到的声道数：帧按 `spec().channels()` 交错排布，返回值必须与之一致
+    // —— 容器声明的声道数只是兜底（一帧都没解出来时才用）。
+    let mut observed_channels: Option<u16> = None;
     let track_id = track.id;
     let mut emitted_frames = 0usize;
     let mut frame_buf: Vec<f32> = Vec::new();
@@ -613,6 +616,7 @@ where
             sample_rate = spec.rate().max(1);
         }
         let channels = spec.channels().count().max(1) as u16;
+        observed_channels = Some(channels);
 
         frame_buf.clear();
         decoded.copy_to_vec_interleaved::<f32>(&mut frame_buf);
@@ -634,7 +638,7 @@ where
 
     Ok((
         if sample_rate > 0 { sample_rate } else { 44100 },
-        declared_channels,
+        observed_channels.unwrap_or(declared_channels),
         false,
     ))
 }

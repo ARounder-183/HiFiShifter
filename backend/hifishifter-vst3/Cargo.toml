@@ -1,0 +1,64 @@
+# HiFiShifter 的 VST3 插件外壳。
+#
+# 【本 crate 是谁】VST3 的模块 ABI：入口符号（`GetPluginFactory` / `InitDll` /
+# `ExitDll` / `ModuleEntry`…）、工厂、组件/处理器、编辑控制器、`IPlugView`、
+# `IConnectionPoint` 与 ARA 的 COM 入口。实现层（ARA 模型 / 渲染 / 编辑器 / 宿主
+# 适配）**唯一的一份**在 `hifishifter-plugin`；本 crate 只做格式翻译 —— 与
+# `hifishifter-clap` 平级、同形。
+#
+# 【为什么它是独立 crate】外壳曾经住在共享层里（`hifishifter-plugin` 既是实现层
+# 又是 VST3 cdylib）。后果是每个其他外壳的产物都被链接并**导出** VST3 的入口符号
+# （2026-11-17 实测 `HiFiShifter.clap` 导出 4 个符号），且 CLAP 构建被迫检出 VST3
+# SDK。提取设计见 `docs/plans/2026-11-17-vst3-shell-extraction-plan.md`。
+[package]
+name = "hifishifter-vst3"
+version = "0.2.0-beta"
+edition = "2021"
+publish = false
+description = "HiFiShifter 的 VST3 插件外壳（与 hifishifter-clap 平级）"
+
+# lock 由 `backend/` workspace 统一持有（见 backend/Cargo.toml 的说明）。
+
+[lib]
+name = "hifishifter_vst3"
+# `cdylib` 才是宿主加载的产物；`rlib` 让 crate 自己的测试能链接它。
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# 实现层（ARA 模型 / 渲染 / 编辑器 / 宿主适配）**唯一的一份**：本外壳不复制任何
+# 逻辑，只做 VST3 的 ABI 翻译。VST3 专属的 ABI 词汇（TResult / TUID 布局 /
+# `FUnknown` 前缀）住在共享层的 `hifishifter_plugin::vst3_abi` —— REAPER 原生扩展
+# 等共享代码也消费它，见该模块文档。
+hifishifter-plugin = { path = "../hifishifter-plugin" }
+# FFI panic 守卫与资源根契约（`guard_ffi` / `resource_root`）。
+hifishifter-plugin-core = { path = "../hifishifter-plugin-core" }
+# 【为什么显式写 features、且必须与 hifishifter-plugin / CLAP / App 字面一致】
+# 见 ../hifishifter-clap/Cargo.toml 的三段注释（SoundTouch 运行期 libloading /
+# ONNX 静态链接 / 历史 feature 并集分叉）。
+hifishifter-kernel = { path = "../hifishifter-kernel", default-features = false, features = ["onnx", "soundtouch"] }
+# 【为什么带 vst3】companion 的 vst3 分支提供 ARA↔VST3 的 C++ shim（主工厂 /
+# 处理器入口），要求 `ARA_VST3_SDK_DIR` 与 `ARA_SDK_DIR` 指向
+# `scripts/env/plugin-sdks.json` 钉住的检出（先跑
+# `scripts/setup/prepare-plugin-sdks.ps1`）。整个依赖图里只有本外壳启用它 ——
+# CLAP 用 clap 分支（纯 Rust），共享层只用裸 companion：
+# "feature 由最终 cdylib 决定" 在这张表上兑现。
+ara2-bridge = { version = "0.3.0", features = ["plugin", "companion", "vst3"] }
+log = { version = "0.4", features = ["std"] }
+
+[dev-dependencies]
+# 测试二进制在进入 main 前关闭 ONNX 异步预热（见 src/lib.rs 的 test_prewarm_guard）。
+ctor = "1.0.13"
+# 【为什么开 test-support】壳的黑盒测试驱动共享渲染/编辑面，需要共享层的测试夹具
+# （test_allocator / test_host / MockHost / workspace_fixture）。产品构建的依赖树
+# 不得出现该特性 —— 判据见 hifishifter-plugin/tests/format_feature_boundary.rs。
+hifishifter-plugin = { path = "../hifishifter-plugin", features = ["test-support"] }
+# 测试直接构造捕获流（`ProcessStream::Prefetch`）；产品代码不碰捕获运行时。
+hifishifter-capture = { path = "../hifishifter-capture" }
+# 存档载荷的字节断言用（lifetime_tests 解析 IBStream 里的 JSON）。
+serde_json = "1"
+
+[features]
+# 与 `hifishifter-plugin` / `hifishifter-clap` 字面相同的默认形态（见上方 kernel 注释）。
+default = ["onnx", "soundtouch"]
+onnx = ["hifishifter-kernel/onnx"]
+soundtouch = ["hifishifter-kernel/soundtouch"]

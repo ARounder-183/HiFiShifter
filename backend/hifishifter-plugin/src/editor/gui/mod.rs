@@ -31,13 +31,13 @@ use std::rc::Rc;
 // 宿主主线程上的周期工作由 `editor::host_main_thread_tick` 统一暴露：VST3 挂在
 // REAPER 的 `plugin_register("timer")`、GTK 定时器上，CLAP 挂在 `clap.timer-support` 上，
 // 但每次节拍要做的事只有 `client::host_heartbeat` 这一份。
-pub(crate) use port::{EditorHost, GuiFidelity, NativeWindow};
+pub use port::{EditorHost, GuiFidelity, NativeWindow};
 
 /// 建一个内嵌视图，并把 JS 消息接到 Policy。
 ///
 /// 【为什么返回 `Result` 而不是 `Option`】"父窗口不可用""宿主不在 UI 线程"这类失败
 /// 必须能被日志说清楚 —— 宿主只看到 `K_RESULT_FALSE` 加一块空面板，日志是唯一线索。
-pub(crate) fn create_for(
+pub fn create_for(
     parent: NativeWindow,
     width: i32,
     height: i32,

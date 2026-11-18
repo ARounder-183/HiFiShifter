@@ -34,7 +34,20 @@ import {
 } from "../../../utils/gainDb";
 import { formatCursorTime } from "./timeFormat";
 import type { TimeFormatContext } from "./timeFormat";
-import { MAX_ROW_HEIGHT, MIN_ROW_HEIGHT, TRACK_ADD_ROW_HEIGHT } from "./constants";
+import {
+    MAX_ROW_HEIGHT,
+    MIN_ROW_HEIGHT,
+    TRACK_ADD_ROW_HEIGHT,
+    WHEEL_ZOOM_IN_FACTOR,
+    WHEEL_ZOOM_OUT_FACTOR,
+} from "./constants";
+import {
+    createWheelZoomAccumulator,
+    resolveWheelZoomStep,
+    type WheelZoomAccumulator,
+} from "./kernel/input/wheelZoomIntent";
+import { normalizeWheelDelta } from "./kernel/input/normalizeWheel";
+import { WHEEL_LINE_HEIGHT_PX } from "../../../utils/pinchGesture";
 import { advanceFineAxisDrag, type FineAxisDragState } from "../../../utils/fineAxisDrag";
 import { shouldSuppressHoverSideEffects } from "../../../utils/penInput";
 import { AppTooltipBubble } from "../../AppTooltip";
@@ -482,6 +495,17 @@ const TrackListInner: React.FC<TrackListProps> = ({
         nextRowHeight: number;
         nextScrollTop: number;
     } | null>(null);
+    // 纵向缩放的「主轴 + 死区」累积器（组件生命周期内持续有效）。
+    //
+    // 【为什么不能用 `deltaY < 0 ? in : out`】该写法把 `deltaY = 0`（纯横向手势 /
+    // 纵向噪声归零）判成缩小，且对 precision touchpad 的变号小幅增量逐事件翻转
+    // 方向 —— 内核侧（timelineKernelHost 的 onWheel）已按 Windows 实测（行高
+    // 88 → 80 → 88 → 80 往复）改为带死区的累积判定；轨道头这块画布左邻的同一条
+    // Ctrl+滚轮缩放路径必须走同一判定，否则同一手势两半 UI 缩放手感不同。
+    const wheelZoomAccumulatorRef = useRef<WheelZoomAccumulator | null>(null);
+    if (wheelZoomAccumulatorRef.current === null) {
+        wheelZoomAccumulatorRef.current = createWheelZoomAccumulator();
+    }
     const panRef = useRef<{
         pointerId: number | null;
         startY: number;
@@ -541,15 +565,15 @@ const TrackListInner: React.FC<TrackListProps> = ({
     );
     const editingGainInputRef = useRef<HTMLInputElement | null>(null);
 
-    // 轨道颜色选择器弹出状�?
+    // 轨道颜色选择器弹出状态。
     const [colorPickerTrackId, setColorPickerTrackId] = useState<string | null>(null);
 
-    // 轨道名称行内编辑状�?
+    // 轨道名称行内编辑状态。
     const [editingTrackId, setEditingTrackId] = useState<string | null>(null);
     const [editingName, setEditingName] = useState("");
     const nameInputRef = useRef<HTMLInputElement | null>(null);
 
-    // 轨道右键菜单状�?
+    // 轨道右键菜单状态。
     const [trackCtxMenu, setTrackCtxMenu] = useState<{
         x: number;
         y: number;
@@ -599,7 +623,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
         return () => window.removeEventListener("pointerdown", handler, true);
     }, [editingTrackId]);
 
-    // 点击其他区域关闭颜色选择�?
+    // 点击其他区域关闭颜色选择器。
     useEffect(() => {
         if (!colorPickerTrackId) return;
         const handler = (e: PointerEvent) => {
@@ -619,7 +643,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
         return m;
     }, [tracks]);
 
-    /** 根轨道数�?*/
+    /** 根轨道数量。*/
     const rootTrackCount = useMemo(
         () => tracks.filter((t) => (t.parentId ?? null) == null).length,
         [tracks],
@@ -732,9 +756,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
     }, [aggregatedTrackMeters, backendTrackVolumeById, parentById, tracks]);
 
     /**
-     * 判断是否不允许删除该轨道�?
-     * 当该轨道是根轨道且只剩最后一个根轨道时，禁止删除（否则会导致零轨道）�?
-     * 子轨道的删除不会导致零轨道，始终允许�?
+     * 判断是否不允许删除该轨道。
+     * 当该轨道是根轨道且只剩最后一个根轨道时，禁止删除（否则会导致零轨道）。
+     * 子轨道的删除不会导致零轨道，始终允许。
      */
     function isLastRootTrack(trackId: string): boolean {
         if (rootTrackCount > 1) return false;
@@ -1012,10 +1036,29 @@ const TrackListInner: React.FC<TrackListProps> = ({
 
             if (verticalZoomRequested && setRowHeight) {
                 e.preventDefault();
-                const factor = e.deltaY < 0 ? 1.1 : 0.9;
+                const bounds = el.getBoundingClientRect();
+                // 与内核同一判定：死区累积 + 主轴方向，方向为 0（噪声）不触发。
+                // 增量先按 deltaMode 归一（Firefox 的 line/page 量纲不同），与
+                // timelineKernelHost.onWheel 同一套换算。
+                const wheelDeltaContext = {
+                    lineHeightPx: WHEEL_LINE_HEIGHT_PX,
+                    pageHeightPx: Math.max(1, bounds.height),
+                };
+                const zoomStep = resolveWheelZoomStep({
+                    accumulator: wheelZoomAccumulatorRef.current!,
+                    deltaX: normalizeWheelDelta(e.deltaX, e.deltaMode, wheelDeltaContext),
+                    deltaY: normalizeWheelDelta(e.deltaY, e.deltaMode, wheelDeltaContext),
+                });
+                // resolveWheelZoomStep 是纯函数：返回**新的**累积状态。不写回 ref
+                // 就等于把「死区累积」整个丢掉 —— 触摸板的小幅同向增量永远到不了
+                // 死区，轨道头纵向缩放对此完全无响应（内核宿主已在写回，见
+                // timelineKernelHost 的 wheelZoomAccumulator.pending 赋值）。
+                wheelZoomAccumulatorRef.current = zoomStep.accumulator;
+                if (zoomStep.direction === 0) return;
+                const factor =
+                    zoomStep.direction < 0 ? WHEEL_ZOOM_IN_FACTOR : WHEEL_ZOOM_OUT_FACTOR;
                 const baseRowHeight =
                     pendingVerticalZoomRef.current?.nextRowHeight ?? rowHeightRef.current;
-                const bounds = el.getBoundingClientRect();
                 const pointerY = Math.max(
                     0,
                     Math.min(Math.max(1, bounds.height), e.clientY - bounds.top),
@@ -1213,7 +1256,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
         // 插入索引直接对应可见行缝；后端“先克隆（紧贴源）再移动到
         // target_index”的组合会把它映射到完全相同的位置。
 
-        // 当鼠标在列表容器上方时，直接插入到顶层第一个位�?
+        // 当鼠标在列表容器上方时，直接插入到顶层第一个位置。
         if (bounds && clientY < bounds.top && tracks.length > 0) {
             return {
                 parentTrackId: null,
@@ -1276,7 +1319,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
             ? siblingsOf(parentTrackId)
             : siblingsOf(parentTrackId).filter((id) => id !== draggingTrackId);
         const baseIndex = Math.max(0, siblings.indexOf(over.id));
-        // 使用 35% 边缘区域：上 35% 插入到上方，�?35% 插入到下方，中间 30% 保持不动
+        // 使用 35% 边缘区域：上 35% 插入到上方，下 35% 插入到下方，中间 30% 保持不动
         const edgeZone = rowHeight * 0.35;
         const insertAfter = yInRow > rowHeight - edgeZone;
         const insertBefore = yInRow < edgeZone;
@@ -1291,11 +1334,11 @@ const TrackListInner: React.FC<TrackListProps> = ({
             };
         }
 
-        // 如果鼠标在中间区域，保持原位不触发重�?
+        // 如果鼠标在中间区域，保持原位不触发重排。
         if (!insertAfter && !insertBefore) {
             const siblingsIncl = siblingsOf(parentTrackId);
             const indexSelf = Math.max(0, siblingsIncl.indexOf(draggingTrackId));
-            // 如果不在同一层级，则追加到末�?
+            // 如果不在同一层级，则追加到末尾。
             const targetIndex = indexSelf >= 0 ? indexSelf : siblings.length;
             return { parentTrackId, targetIndex, mode: "reorder" };
         }
@@ -1628,7 +1671,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                             if (spec.mode === "reorder") {
                                                 const listBounds =
                                                     listRef.current?.getBoundingClientRect();
-                                                // 鼠标在列表上方时，指示线固定在顶�?
+                                                // 鼠标在列表上方时，指示线固定在顶部。
                                                 if (listBounds && ev.clientY < listBounds.top) {
                                                     indicatorY = 0;
                                                 } else {

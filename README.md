@@ -15,18 +15,18 @@ HiFiShifter 是一个图形化人声编辑与合成工具。它支持多轨道�
 - **三种声码器算法**：nsf-hifigan（PC-NSF-HiFiGAN）、World、VsLib，详见[算法](#算法)。
 - **互操作性**：导入 REAPER（`.rpp`）与 VocalShifter（`.vshp` / `.vsp`）工程，双向读写 REAPER 与 VocalShifter 剪贴板；MIDI 可导入为音高参考块 / 音高参数 / 速度映射，音频块与音高线可导出为 MIDI。
 - **导入导出**：常见音频 / 视频格式导入（视频自动提取音轨），工程与分轨导出为 `wav` / `mp3` / `flac`。
-- **VST3 / ARA 插件**：除独立 App 外，另提供 Windows x64 的 VST3（ARA）插件，可在 REAPER 中直接打开同一套编辑界面：宿主负责片段几何、BPM 与淡变声音，HiFiShifter 负责参数曲线，编辑自动应用回宿主。macOS（arm64 / x86_64）与 Linux（x86_64 / aarch64）的 VST3 产物由独立流水线构建（`vst3-unix.yml`，实验性，随 Release 提供 tar.gz）。详见[使用手册](docs/i18n/USERMANUAL.md#八vst3--ara-插件reaper)的插件章节。
+- **VST3 / ARA 与 CLAP 插件**：三个平台的三合一安装包都包含插件，可在 REAPER 中直接打开同一套编辑界面：宿主负责片段几何、BPM 与淡变声音，HiFiShifter 负责参数曲线，编辑自动应用回宿主。`vst3-unix.yml` 与 `clap.yml` 仍单独构建插件用于 CI 验证，但最终用户请使用三合一安装包。详见[使用手册](docs/i18n/USERMANUAL.md#八vst3--ara-插件reaper)的插件章节。
 - **其他**：内置文件浏览器与快速搜索、记事本、自动备份、多语言界面（简体中文 / 繁體中文 / English / 日本語 / 한국어）、深浅色主题、推理设备选择与基准测试。
 
 ## 安装
 
 从 [Releases](https://github.com/ARounder-183/HiFiShifter/releases) 页面下载对应操作系统与架构的安装包：
 
-- **Windows**：NSIS 安装包（`installer`）或便携版压缩包（`portable`），提供 x86_64 与 arm64 架构。
-- **macOS**：未签名 dmg（Apple Silicon 装 `arm64`，Intel 装 `x86_64`）。首次安装需要手动放行；若提示"文件已损坏"，请按[使用手册](docs/i18n/USERMANUAL.md#一安装)中的步骤处理。
-- **Linux**：AppImage（x86_64 / arm64）。运行需要系统提供 `webkit2gtk-4.1`（Arch/CachyOS、Ubuntu 24.04+、Fedora 39+、Debian 13+ 等均已提供；Ubuntu 22.04 只有 `webkit2gtk-4.0`，不受支持）。
+- **Windows**：NSIS 安装包（`installer`）或便携版压缩包（`portable`），提供 x86_64 与 arm64 架构。安装包一次装上独立 App、VST3/CLAP 插件与全机共享模型库。
+- **macOS**：三合一 `.pkg`（Apple Silicon 装 `arm64`，Intel 装 `x86_64`）一次装上 `/Applications/HiFiShifter.app`、VST3/CLAP 插件与共享模型库。安装包未签名，首次安装需要手动放行；若提示"文件已损坏"，请按[使用手册](docs/i18n/USERMANUAL.md#一安装)中的步骤处理。
+- **Linux**：三合一 `.tar.gz`，内含 AppImage、VST3/CLAP 插件、共享模型库与 `install.sh`。解压后执行 `./install.sh` 装进当前用户（`~/.local`、`~/.vst3`、`~/.clap`），或 `sudo ./install.sh --system` 装到系统目录。运行需要系统提供 `webkit2gtk-4.1`（Arch/CachyOS、Ubuntu 24.04+、Fedora 39+、Debian 13+ 等均已提供；Ubuntu 22.04 只有 `webkit2gtk-4.0`，不受支持）。
 
-**VST3 / ARA 插件**：Windows x64 另有 VST3（ARA）插件形态，可在 REAPER 中以嵌入界面使用（目前仅针对 REAPER 验证）。macOS 与 Linux 的 VST3 为实验性产物（见 Release 附件）。安装方式、运行依赖与使用限制见[使用手册](docs/i18n/USERMANUAL.md#八vst3--ara-插件reaper)的插件章节。
+**VST3 / ARA 插件**：Windows、macOS 与 Linux 的三合一安装包都已包含 VST3（ARA）与 CLAP 插件，可在 REAPER 中以嵌入界面使用（目前主要针对 REAPER 验证）。安装方式、运行依赖与使用限制见[使用手册](docs/i18n/USERMANUAL.md#八vst3--ara-插件reaper)的插件章节。
 
 GPU 加速：Windows 使用 DirectML（DirectX 12），macOS（Apple Silicon）使用 CoreML + WebGPU，Linux x86_64 使用 WebGPU（Dawn/Vulkan），其余平台回退 CPU。可在应用内 `选项 → 推理设备` 中切换设备并运行基准测试。
 
@@ -237,6 +237,16 @@ cargo tauri build
 cargo tauri build --bundles appimage -- --no-default-features --features onnx
 # 或使用辅助脚本：bash scripts/build/build-linux-appimage.sh
 
+# Linux 三合一（AppImage + VST3/CLAP + 共享模型库）：
+# HIFISHIFTER_EXTERNAL_MODELS=1 bash scripts/build/linux-appimage.sh package backend/target/release
+# bash scripts/build/unix/package.sh --reuse-frontend \
+#   --appimage backend/target/release/bundle/appimage/HiFiShifter_*.AppImage
+
+# macOS 三合一（.app + VST3/CLAP + 共享模型库）：
+# cargo tauri build --bundles app -- --locked --no-default-features --features onnx
+# bash scripts/build/unix/package.sh --reuse-frontend \
+#   --app-bundle backend/target/release/bundle/macos/HiFiShifter.app
+
 # Windows：合并安装器（App + VST3 + 模型库）+ 便携 ZIP，产物全在 dist\
 .\build.bat
 
@@ -246,7 +256,7 @@ cargo tauri build --bundles appimage -- --no-default-features --features onnx
 .\build.bat -Target Installer
 ```
 
-AppImage 的打包内容由 `scripts/build/linux-appimage.sh` 统一决定，CI 与本地共用同一份逻辑：先把 WebKitGTK / GStreamer / GL / Wayland 这些**必须由宿主提供**的库从包里剪掉，再用 `ldd` 断言可执行文件确实解析到宿主的副本，然后重新打包并做一次无头启动冒烟。需要单独复用某一步时：`bash scripts/build/linux-appimage.sh package <Tauri 产物目录>`（或 `verify <AppDir>` 只做断言）。
+AppImage 的打包内容由 `scripts/build/linux-appimage.sh` 统一决定，本地与构建流水线共用同一份逻辑：先把 WebKitGTK / GStreamer / GL / Wayland 这些**必须由宿主提供**的库从包里剪掉，再用 `ldd` 断言可执行文件确实解析到宿主的副本，然后重新打包。本地默认还会做一次无头启动冒烟；CI 只构建，通过 `HIFISHIFTER_SKIP_SMOKE=1` 跳过冒烟。需要单独复用某一步时：`bash scripts/build/linux-appimage.sh package <Tauri 产物目录>`（或 `verify <AppDir>` 只做断言）。
 
 双击 `build.bat` 就是一次完整构建（合并安装器 + 便携包）；参数见 `scripts/build/build.ps1`。
 
@@ -345,7 +355,7 @@ ONNX Runtime 二进制文件由 ort crate 在编译时通过 `download-binaries`
 | 设置 | `%APPDATA%\HiFiShifter` | `~/Library/Application Support/HiFiShifter` | `$XDG_CONFIG_HOME/HiFiShifter`（缺省 `~/.config/HiFiShifter`） |
 | 缓存（波形 / 整段渲染） | `%LOCALAPPDATA%\HiFiShifter\cache` | `~/Library/Caches/HiFiShifter` | `$XDG_CACHE_HOME/HiFiShifter`（缺省 `~/.cache/HiFiShifter`） |
 | 未保存会话的导入素材 | `%LOCALAPPDATA%\HiFiShifter\unsaved\<会话>` | `~/Library/Application Support/HiFiShifter/unsaved/<会话>` | `$XDG_DATA_HOME/HiFiShifter/unsaved/<会话>` |
-| 共享模型库（仅 Windows，由安装器写入） | `%PROGRAMDATA%\HiFiShifter\models\<版本>` | — | — |
+| 共享模型库（由安装器写入） | `%PROGRAMDATA%\HiFiShifter\models\<版本>` | `/Library/Application Support/HiFiShifter/models/<版本>` | `$XDG_DATA_HOME/HiFiShifter/models/<版本>` 或 `/usr/local/share/HiFiShifter/models/<版本>` |
 
 - 已保存工程的导入素材放在工程文件旁边的 `<工程名>_media` 目录里，随工程一起拷走即可。
 - 从旧版本升级时，首次启动会自动把原来的 `com.arounder.hifishifter` 目录搬到新位置；若新旧目录同时存在则**不合并**（两边原样保留），并在日志里记一条说明。

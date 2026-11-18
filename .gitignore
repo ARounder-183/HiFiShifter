@@ -14,6 +14,10 @@ __pycache__/
 /NVIDIA Corporation/
 backend/NVIDIA Corporation/
 
+# CI frontend artifact handoff (build output, never source)
+/frontend-dist/
+/frontend-dist.zip
+
 # Distribution / packaging
 # 【为什么逐条加根锚点】这一段来自 Python 模板，语义是"忽略仓库根的打包产物"。
 # 不带锚点的 `build/` 会一路命中 `scripts/build/` —— 那里是**源码**（7 个已跟踪

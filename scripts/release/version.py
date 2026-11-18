@@ -87,26 +87,50 @@ def resolve_target(requested: str, current: str) -> str:
     return f"{prefix_match.group(1)}-beta" + (f".{ordinal}" if ordinal else "")
 
 
+def collect_sources(manifest: dict) -> list[tuple[dict, str, list[re.Match[str]]]]:
+    """读出全部来源并校验**前 N 处**产品版本字段存在，返回 (source, text, matches)。
+
+    【为什么是"至少 occurrences"而不是"恰好 occurrences"】清单里的 occurrences
+    表示"正则命中的前 N 处是产品版本"，不是文件里只能有 N 处匹配：
+    `frontend/package-lock.json` 的正则会连带命中几百个依赖的 version 字段，
+    `re.sub(..., count=N)` 只改前两处（顶层 + packages[""]）。校验必须遵守同一
+    口径，否则把合法依赖版本当成漂移。
+    """
+    collected: list[tuple[dict, str, list[re.Match[str]]]] = []
+    for source in manifest["sources"]:
+        text = read_text(source["path"])
+        expected = int(source["occurrences"])
+        matches = list(re.finditer(source["pattern"], text))
+        if len(matches) < expected:
+            raise SystemExit(
+                f"{source['path']} 里只找到 {len(matches)} 处版本字段，"
+                f"version-sources.json 要求至少 {expected} 处"
+            )
+        collected.append((source, text, matches))
+    return collected
+
+
 def write_version(requested: str) -> int:
     manifest = load_sources()
     current = canonical_version(manifest)
     version = resolve_target(requested, current)
 
-    for source in manifest["sources"]:
-        text = read_text(source["path"])
+    # 【两阶段】先校验并算好全部写入内容，再统一落盘。旧实现边校验边写：
+    # 若第 5 个来源突然少了一处版本字段，前 4 个文件已经被改成了新版本，
+    # 仓库停在半升级状态，而 --check 当时也查不出这种"多/少一处"的漂移。
+    pending: list[tuple[str, str]] = []
+    for source, text, _matches in collect_sources(manifest):
         occurrences = int(source["occurrences"])
-        found = len(re.findall(source["pattern"], text))
-        if found < occurrences:
-            raise SystemExit(
-                f"{source['path']} 里只找到 {found} 处版本字段，version-sources.json 要求 {occurrences} 处"
-            )
         updated = re.sub(
             source["pattern"],
             lambda match, v=version: match.group(1) + v + match.group(3),
             text,
             count=occurrences,
         )
-        write_text(source["path"], updated)
+        pending.append((source["path"], updated))
+
+    for path, updated in pending:
+        write_text(path, updated)
 
     print(f"版本：{current} -> {version}")
     return 0
@@ -114,15 +138,16 @@ def write_version(requested: str) -> int:
 
 def check_version() -> int:
     manifest = load_sources()
+    try:
+        collected = collect_sources(manifest)
+    except SystemExit as error:
+        print(str(error), file=sys.stderr)
+        return 1
+
     found: list[tuple[str, str]] = []
-    for source in manifest["sources"]:
-        text = read_text(source["path"])
-        occurrences = int(source["occurrences"])
-        matches = list(re.finditer(source["pattern"], text))
-        if len(matches) < occurrences:
-            print(f"{source['path']} 里只找到 {len(matches)} 处版本字段，清单要求 {occurrences} 处", file=sys.stderr)
-            return 1
-        for index in range(occurrences):
+    for source, _text, matches in collected:
+        # 与写入口径一致：只比对前 occurrences 处（其余命中的是依赖版本）。
+        for index in range(int(source["occurrences"])):
             found.append((source_label(source, index), matches[index].group(2)))
 
     distinct = sorted({value for _, value in found})

@@ -572,21 +572,25 @@ pub fn notes_from_outputs(
     out
 }
 
-/// 去掉零宽、重叠事件并排序；`voiced=false` 的休止事件也保留。
+/// 去掉零宽与重叠事件；`voiced=false` 的休止事件也保留。
+///
+/// 【输入顺序约定】调用方（`infer_waveform`）按 chunk 顺序拼接事件，天然按
+/// `start_sec` 递增 —— 这里只与 `out` 的最后一个事件比较即可；无序输入不属于
+/// 该函数的契约。
+/// 【重叠处理】一旦与前一个事件重叠，整个后一个事件被丢弃（保持前一个），
+/// 不制造重叠、也不截断 —— 两个分支的旧行为就是同一个 `continue`，这里只是
+/// 把它写成显式的一条。
 pub fn normalize_events(events: Vec<GameNoteEvent>) -> Vec<GameNoteEvent> {
-    let mut out = Vec::new();
+    // 显式标注：下面的 `previous.end_sec` 字段访问发生在任何 push 之前，
+    // 元素类型必须有标注才可推断。
+    let mut out: Vec<GameNoteEvent> = Vec::new();
     for event in events {
         if !(event.end_sec > event.start_sec + 1e-9) {
             continue;
         }
         if let Some(previous) = out.last_mut() {
-            let previous: &mut GameNoteEvent = previous;
             if event.start_sec < previous.end_sec - 1e-9 {
-                // 不制造重叠：截断后一个事件的起点。
-                if previous.end_sec <= event.end_sec {
-                    continue;
-                }
-                // 前面的事件更长：保持前一个，丢弃后一个重叠段。
+                // 与前一个事件重叠：保持前一个，丢弃后一个重叠段。
                 continue;
             }
         }

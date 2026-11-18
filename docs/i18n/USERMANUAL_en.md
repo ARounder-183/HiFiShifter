@@ -11,13 +11,13 @@ Download the HiFiShifter installer corresponding to your operating system and ar
 - For Windows, NSIS installer (`installer`) and portable zip (`portable`) are provided. General users can directly use the installer.  
   If you are a Windows user and do not know the difference between `x86_64` and `arm64`, choose `x86_64`. Only if you clearly understand `arm64` and have a Windows ARM device, you may download the `arm64` version.
 
-- For macOS, an unsigned dmg installer is provided. Since it is not signed, installation requires a few extra steps to allow the app to run.  
+- For macOS, an unsigned unified `pkg` installer is provided: one package installs `/Applications/HiFiShifter.app`, the VST3/CLAP plug-ins, and the shared model library. Since it is not signed, installation requires a few extra steps to allow the app to run.  
   macOS users with M-series chips should install the `arm64` version. Only older Intel users need the `x86_64` version.  
-  If you see a "file is damaged" error after double-clicking the dmg, follow these steps:
+  If you see a "file is damaged" error after installation, follow these steps:
     1. Run `xattr -cr /Applications/HiFiShifter.app` in Terminal;
     2. Allow the app to run via `System Settings` -> `Privacy & Security` -> click `Open Anyway`.
 
-- For Linux, an AppImage package is provided. You need to go to file `Properties -> Permissions` and check `Allow executing file as program`, then you can run it directly. Before launching, make sure the system provides **WebKitGTK 4.1** (see "About WebView" below) — it is the only large dependency the AppImage expects from the host.
+- For Linux, a unified `.tar.gz` is provided containing the AppImage, VST3/CLAP plug-ins, the shared model library, and `install.sh`. Extract it and run `./install.sh` to install for the current user (`~/.local`, `~/.vst3`, `~/.clap`), or `sudo ./install.sh --system` for system-wide installation (`/opt`, `/usr/lib/vst3`, `/usr/lib/clap`). Before launching, make sure the system provides **WebKitGTK 4.1** (see "About WebView" below) — it is the only large dependency the AppImage expects from the host.
 
 **About GPU Acceleration**: HiFiShifter provides multiple GPU acceleration options across platforms:
 
@@ -37,7 +37,7 @@ In the menu `Options → Inference Device`, you can select `Auto`, `CPU`, or `GP
 
 On Windows, HiFiShifter disables the browser shortcuts that WebView2 normally intercepts (such as `Ctrl + F`, `Ctrl + P`, `F5`, and `Ctrl` with `+` / `-` for page zoom), so those key combinations reach HiFiShifter normally and never interrupt your editing.
 
-**About the plug-ins**: Besides the standalone app, HiFiShifter is also available as VST3 and CLAP plug-ins, which opens the same editing interface directly inside a REAPER project. In REAPER, use the VST3 form for ARA; the CLAP form works as an ordinary insert effect. The plugin is currently a Windows x64 build and has only been verified against REAPER; see the [VST3 ARA Plug-in and CLAP Plug-in](#8-vst3-ara-plug-in-and-clap-plug-in-reaper) chapter for installation and usage.
+**About the plug-ins**: Besides the standalone app, HiFiShifter is also available as VST3 and CLAP plug-ins, which opens the same editing interface directly inside a REAPER project. In REAPER, use the VST3 form for ARA; the CLAP form works as an ordinary insert effect. The unified installers for all three platforms include the VST3 and CLAP plug-ins; they are currently verified primarily against REAPER. See the [VST3 ARA Plug-in and CLAP Plug-in](#8-vst3-ara-plug-in-and-clap-plug-in-reaper) chapter for installation and usage.
 
 ## 2. Menu
 
@@ -129,9 +129,9 @@ The `Options` menu allows you to modify various settings of HiFiShifter:
 
 The `Help` menu provides diagnostics and support entries:
 
+- `Log verbosity`: A submenu containing only None / Low / Medium / High; the first-level menu shows the current level.
 - `Open Log Folder`: Opens the folder containing the run log in the system file manager. See the [Logs and Troubleshooting](#9-logs-and-troubleshooting) section.
 - `Export Diagnostics...`: Lets you pick a save location, then generates a diagnostics package (system info + all logs + inference-device benchmark results) that you can attach to an issue.
-- `Log verbosity`: A submenu containing only None / Low / Medium / High; the first-level menu shows the current level.
 - `About HiFiShifter`: Opens an About dialog showing the project introduction, the current version, and the project homepage link.
 
 ## 3. Track View
@@ -771,14 +771,14 @@ inside REAPER's own code as soon as the timeline contains audio; this is unrelat
 plug-in. The plug-in therefore offers ARA only to CLAP hosts that implement the finalized
 ARA SDK protocol. If you need ARA in REAPER, use the VST3 form.
 
-The plugin is currently a Windows x64 build and has only been verified against REAPER; there is no plugin delivery for Linux / macOS yet.
+The unified installers for all three platforms include the VST3 and CLAP plug-ins; they are currently verified primarily against REAPER.
 
 ### Installation and Connection
 
 There are two ways to install the plugin; pick either one:
 
-- **Installer (recommended)**: run `HiFiShifter_v<version>_windows-x86_64-setup.exe`. **One package installs the standalone app, the VST3/ARA plug-in and the CLAP plug-in**: the wizard follows the system UI language, lets you pick the app and VST3 directories separately, writes the models once (machine-wide shared library, see [Model Files and Sharing](#model-files-and-sharing)), and registers a **single** uninstall entry under Windows "Programs and Features / Installed apps". The installer first confirms that REAPER and HiFiShifter have exited.
-- **Manual copy**: close REAPER and put the **entire** `HiFiShifter.vst3` folder into a VST3 directory (for example `C:\Program Files\Common Files\VST3`), or add its parent directory to REAPER's VST scan path. Do not copy only the individual files inside the folder — the interface, models and runtime dependencies all live in that folder. This approach writes nothing to the registry; to uninstall, just delete the folder.
+- **Unified installer (recommended)**: on Windows run `HiFiShifter_v<version>_windows-x86_64-setup.exe`; on macOS run `HiFiShifter_v<version>_macos-<arch>-unified.pkg`; on Linux extract `HiFiShifter_v<version>_linux-<arch>-unified.tar.gz` and run `./install.sh` (or `sudo ./install.sh --system`). **One package installs the standalone app, the VST3/ARA and CLAP plug-ins**; the models are installed only once (shared library, see [Model Files and Sharing](#model-files-and-sharing)). The Windows installer first verifies that REAPER and HiFiShifter are closed.
+- **Manual copy**: close REAPER and copy the **entire** `HiFiShifter.vst3` folder into a VST3 directory (for example `C:\Program Files\Common Files\VST3` on Windows, `~/Library/Audio/Plug-Ins/VST3` on macOS, or `~/.vst3` on Linux), or add its parent directory to REAPER's VST scan path. Do not copy only a single file from the folder — the UI and runtime dependencies live inside the bundle. A manual copy needs its own model files (or `HIFISHIFTER_MODELS_DIR` pointing at a model directory).
 
 Both ways require the WebView2 runtime and the VC++ x64 runtime to be installed.
 
@@ -800,10 +800,10 @@ REAPER manages ARA plug-ins **per track**: it only hands the plug-in the audio o
 
 ### Model Files and Sharing
 
-The plugin needs three models — FCPE, HNSEP and HiFiGAN (about 150 MB in total). The installer puts the models into the **machine-wide shared library** (`%ProgramData%\HiFiShifter\models\<model version>`), which the standalone app reads as well — using both the plugin and the standalone app does not duplicate the 150 MB. The manual-copy version carries its own copy of the models and does not depend on the shared library.
+The plug-in needs FCPE, HNSEP, HiFiGAN, and related models (about 200 MB in total at present). The unified installer puts them into the platform shared library (Windows `%ProgramData%\HiFiShifter\models\<model version>`; macOS `/Library/Application Support/HiFiShifter/models/<model version>`; Linux `$XDG_DATA_HOME/HiFiShifter/models/<model version>` or `/usr/local/share/HiFiShifter/models/<model version>`), which the standalone app and every plug-in read — the 200 MB is not duplicated. A manual-copy plug-in bundle carries its own models and does not depend on the shared library.
 
 - The model version is derived from the model content: an upgrade lands in a new directory, and reinstalling the same version is skipped.
-- Uninstalling the plugin does **not** delete the shared model library (the standalone app uses it too). If you really want it gone, delete `%ProgramData%\HiFiShifter\models` by hand.
+- Uninstalling the plugin does **not** delete the shared model library (the standalone app uses it too). If you really want it gone, delete the shared model directory for your platform by hand.
 - The environment variable `HIFISHIFTER_MODELS_DIR` overrides the model directory and takes precedence over the shared library.
 
 ### Division of Labor in Plugin Mode
@@ -818,10 +818,12 @@ In plugin mode, **the host handles** audio import, item position / trimming / li
 - Fade audio on items is handled by REAPER; the envelope drawn in the interface is HiFiShifter's own schematic. The hover text gives the same three values as the standalone app (shape / length / curvature) and no longer prints the host's `c=` / `S=` readings, which told the user nothing actionable. The curve is not required to match REAPER's point by point.
 - The tempo map **is available in the plug-in, but only its scale axis is editable**: the tempo map _is_ the storage for time-varying scale, and scale is HiFiShifter's own (REAPER has no project key signature). A change point's `BPM` and time signature are host-authoritative readings and are shown read-only in the dialog; the plug-in also does not auto-match the host tempo map (REAPER hands no tempo / time-signature content to ARA plug-ins — measured, see F-2 in `probe/ara/README.md`). Scale change points live in the plug-in's own settings.
 - Loop source (REAPER's "loop source" flag) is read and written faithfully: the plug-in renders with REAPER's loop semantics, and `Loop` / `Unloop` in the clip context menu are usable.
-- Reverse takes are **not processed** by the plug-in: ARA delivers no reversed audio, so the plug-in cannot render correct content. Such clips are still shown (with a reverse marker) and the reverse entry is disabled with a reason — do it in REAPER.
+- Reverse **is** processed by the plug-in: it renders backwards from the direction bit the host reports, and the context menu's `Reverse` / `Un-reverse` writes the change **back to REAPER** (the take's source is wrapped in a reversed `SECTION` and `SOFFS` follows), undoable in one step. The write covers single-take audio items only: clips with stretch markers or a non-WAVE source are refused instead of being written wrong.
+- The two one-shot `REAPER Pitch` conversions: `Import REAPER Take Pitch` copies the item pitch offset (`D_PITCH`) and the take pitch envelope onto the pitch parameter line, and `Convert to REAPER Take Pitch Envelope` writes the parameter line back as the take's pitch envelope (and zeroes the item pitch offset so the envelope is REAPER's only pitch source). Both **copy**: each side keeps its own data and nothing is applied twice - take pitch only acts on that audio while the plug-in is bypassed or removed.
+- Conversions are reachable from two places: the clip context menu's `REAPER Pitch` submenu (the selected clips) and a single button of the same name on the **parameter editor toolbar** (whole track / inside the parameter selection / all clips). The toolbar one is what you reach for while tuning pitch, because that is where you are. It follows the same rule as the rest of that row: **left-click exports the current track, right-click picks the direction and scope**. Every entry shows its clip count, so the blast radius is visible before you click; `All clips` runs in batches and still leaves exactly **one** undo step. Clips without take pitch, and clips whose analysis has not landed yet, are skipped and reported in the status bar instead of being silently reset.
 - When a clip has no audio the hint now says **why**: `Waiting for REAPER to finish assigning audio` (the normal in-flight state right after split / trim / paste), `Waiting for REAPER to hand over audio` (this clip will not get audio, e.g. the FX sits on a folder parent track), `Reversed by REAPER; HiFiShifter does not process it`. A split clip inherits its parent's audio immediately, so it no longer sits on a placeholder.
 - Clip tooltips show the name only, never a file path.
-- The clip context menu is **the same one** as in the standalone app: the Takes submenu, channel mode, loop and the fade-shape rows all appear. Entries the plug-in cannot do are shown disabled with a reason (glue, silence detection) instead of disappearing.
+- The clip context menu is **the same one** as in the standalone app, with one rule: entries the plug-in can never do (glue, silence detection, take structure edits) are **not shown at all**, and entries that are only unavailable right now (split with the playhead outside the clip) are shown disabled. The Takes submenu becomes a read-only take list plus rename, because switching or adding takes would break the one direct binding the plug-in has to a host item.
 
 ### Editing and Automatic Apply
 
@@ -841,7 +843,7 @@ Parameter editing works exactly as in the standalone app (see the [Parameter Edi
 - These settings are **shared with the standalone app**: appearance and keybindings adjusted in the standalone app apply in the plugin and vice versa.
 - After reopening the project, the plugin must fetch the audio from the host again and finish its background preparation; the status bar first returns to `Waiting for host audio`.
 - Before upgrading the plugin, save the project and fully quit REAPER; do not overwrite the loaded plugin folder while the host is running.
-- Only forward, **linear** stretching is supported: reverse and non-linear stretching are out of scope, and the interface clearly marks `Reverse playback unsupported`.
+- Only **linear** stretching is supported: non-linear stretching is out of scope, and the interface marks it clearly.
 - Harmonic Separation (HNSEP) processes the whole region, so very long material can use a lot of memory once `Harmonic Separation` is enabled; HiFiGAN inference, by contrast, runs in chunks.
 
 ### Troubleshooting
@@ -884,7 +886,7 @@ Besides the logs, the user data lives here (the standalone app and the plug-in s
 | Settings                                                      | `%APPDATA%\HiFiShifter`                        | `~/Library/Application Support/HiFiShifter`                   | `$XDG_CONFIG_HOME/HiFiShifter` (default `~/.config/HiFiShifter`) |
 | Caches (waveform / render)                                    | `%LOCALAPPDATA%\HiFiShifter\cache`             | `~/Library/Caches/HiFiShifter`                                | `$XDG_CACHE_HOME/HiFiShifter` (default `~/.cache/HiFiShifter`)   |
 | Imported media of unsaved sessions                            | `%LOCALAPPDATA%\HiFiShifter\unsaved\<session>` | `~/Library/Application Support/HiFiShifter/unsaved/<session>` | `$XDG_DATA_HOME/HiFiShifter/unsaved/<session>`                   |
-| Shared model library (Windows only, written by the installer) | `%PROGRAMDATA%\HiFiShifter\models\<version>`   | —                                                             | —                                                                |
+| Shared model library (written by the installer) | `%PROGRAMDATA%\HiFiShifter\models\<version>` | `/Library/Application Support/HiFiShifter/models/<version>` | `$XDG_DATA_HOME/HiFiShifter/models/<version>` or `/usr/local/share/HiFiShifter/models/<version>` |
 
 - Imported media of a saved project lives in a `<project name>_media` folder next to the project file; copy the project together with that folder.
 - When upgrading from an older version, the first launch moves the old `com.arounder.hifishifter` directories to the new locations. If both the old and the new directory exist, they are **not merged** (both are left untouched) and a note is written to the log.

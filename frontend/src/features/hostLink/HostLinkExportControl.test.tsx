@@ -21,10 +21,14 @@ vi.mock("../../services/invoke", () => ({
 }));
 
 import { I18nProvider } from "../../i18n/I18nProvider";
+import {
+    publishPluginApplyStateForTests,
+    resetPluginApplyStoreForTests,
+} from "../ara/pluginApplyStore";
 import { enUS } from "../../i18n/en-US";
 import { AppThemeProvider } from "../../theme/AppThemeProvider";
 import type { HostLinkExportStatus } from "./hostLinkApi";
-import { HostLinkExportControl } from "./HostLinkExportControl";
+import { CaptureHostLinkExportControl } from "./HostLinkExportControl";
 import { resetHostLinkPluginStoreForTests } from "./hostLinkPluginStore";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -61,6 +65,8 @@ beforeEach(() => {
     vi.useFakeTimers();
     invokeMock.mockReset();
     resetHostLinkPluginStoreForTests();
+    resetPluginApplyStoreForTests();
+    publishPluginApplyStateForTests({ mode: "capture" } as never);
     status = { attached: false };
     invokeMock.mockImplementation((command: string) => {
         switch (command) {
@@ -97,7 +103,7 @@ async function render() {
         root.render(
             <AppThemeProvider>
                 <I18nProvider>
-                    <HostLinkExportControl />
+                    <CaptureHostLinkExportControl />
                 </I18nProvider>
             </AppThemeProvider>,
         );
@@ -123,6 +129,13 @@ async function click(label: string, scope: ParentNode = container) {
         await vi.advanceTimersByTimeAsync(0);
     });
 }
+
+test("ARA 形态不显示导出入口，也不发起轮询", async () => {
+    publishPluginApplyStateForTests({ mode: "ara" } as never);
+    await render();
+    expect(buttonNamed(enUS.host_link_export)).toBeUndefined();
+    expect(invokeMock).not.toHaveBeenCalled();
+});
 
 test("未导出时给出按钮与「未导出」状态", async () => {
     await render();

@@ -204,6 +204,20 @@ test.each([
     expect(text()).toContain(enUS[expectedKey]);
 });
 
+test("stale 状态带渲染进度，不再只说「正在合成」", async () => {
+    invokeMock.mockResolvedValue(
+        hostState({
+            audible_state: "stale",
+            rendering_active: true,
+            render_progress: 0.42,
+            render_audible_stale: true,
+        }),
+    );
+    await render();
+    expect(text()).toContain(enUS.plugin_apply_rendering);
+    expect(text()).toContain("42%");
+});
+
 test("播放开始时的内务工作不再说「正在应用」", async () => {
     // 后端如实报告"输出就是当前编辑"，同时 `pending` 为真（素材仍在物化）。
     // 状态栏必须**沉默于这件事** —— 它没有用户可感知的后果。

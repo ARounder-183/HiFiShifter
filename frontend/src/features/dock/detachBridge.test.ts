@@ -149,6 +149,33 @@ describe("detachBridge（跨窗口状态桥）", () => {
         expect(store.getState()).toEqual({ value: 42 });
     });
 
+    it("★ rAF 被停发时队列超限必须走 setTimeout 兜底（后台逃生通道）", async () => {
+        // 回归：挂起的是 rAF 而主窗口被遮挡时，WebView2 整段停发 rAF，挂起的句柄
+        // 永远不会自然清空 —— 此前 scheduleFlush 的提前返回让"队列超限"判据永远
+        // 够不到 setTimeout 兜底，动作无限堆积、回前台时一次性巨型 IPC。这里用
+        // 一个**永不触发**的 rAF 桩模拟被停发，断言队列到上限后仍能发出一批。
+        const parked: Array<(time: number) => void> = [];
+        (globalThis as { requestAnimationFrame?: unknown }).requestAnimationFrame = (
+            callback: (time: number) => void,
+        ) => {
+            parked.push(callback);
+            return parked.length as unknown as number;
+        };
+        const store = makeStore();
+        await flushFrame();
+        emitted.length = 0;
+        // 推到队列上限（64 条）。前 63 条各挂起一个 rAF（都被"停发"），第 64 条
+        // 触发逃生通道：取消挂起的 rAF、改走 setTimeout(0)。
+        for (let i = 0; i < 64; i += 1) store.dispatch({ type: `queued/${i}` });
+        expect(emitted.filter((item) => item.event === BRIDGE_ACTION_EVENT)).toHaveLength(0);
+        // 逃生通道的 setTimeout(0) 在下一个宏任务触发。
+        await flushFrame();
+        const batches = emitted.filter((item) => item.event === BRIDGE_ACTION_EVENT);
+        expect(batches).toHaveLength(1);
+        const payload = batches[0].payload as { actions: Array<{ type: string }> };
+        expect(payload.actions).toHaveLength(64);
+    });
+
     it("不可序列化的动作跳过广播，且不抛错", async () => {
         const store = makeStore();
         await flushFrame();

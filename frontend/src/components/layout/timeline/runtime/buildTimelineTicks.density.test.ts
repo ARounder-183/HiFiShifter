@@ -142,6 +142,12 @@ describe("标尺标签间距上限（密度）", () => {
      * 【主回归锁】视口内相邻标签间距不得超过请求值的 2 倍。
      *
      * 修复前实测最坏 2.73×（无图）/ 4.09×（密集图）；修复后应 ≤ 2.0×（+ 浮点余量）。
+     *
+     * 【为什么显式放宽超时】本用例是全仓最重的参数扫描（3 图 × 3 视口 × 2 栅格 ×
+     * 2 间距 × 80 档缩放 × 2 滚动 ≈ 5 760 次 buildTimelineTicks），单独跑实测约
+     * 0.8 s；但整套 557 个文件并发时 worker 争核，同样的用例实测超过默认 5 s
+     * 而被误判为失败（本地与 CI 都复现过）。真回归两次都红的原则由 CI 的
+     * retry 兜底，这里把超时放宽到 20 s 只是消除资源竞争噪声，不放松任何判据。
      */
     it("★ 网格足够密时，相邻标签间距 ≤ 2 × 请求间距", () => {
         let checked = 0;
@@ -185,7 +191,7 @@ describe("标尺标签间距上限（密度）", () => {
         // 2 是栅格固有粒度（相邻档位是 2 的幂）；密度补充以此为目标。
         // 修复前实测 2.097×（同一批样本），修复后 ≤ 2.0×。
         expect(worst.ratio, `标签过稀：${worst.detail}`).toBeLessThanOrEqual(DENSITY_TARGET_MULT);
-    });
+    }, 20_000);
 
     it("★ 补充不得造出过密的标签（间距仍 ≥ 让位阈值）", () => {
         let worstViolation = 0;
@@ -284,5 +290,53 @@ describe("标尺标签间距上限（密度）", () => {
             compared += 1;
         }
         expect(compared).toBeGreaterThan(0);
+    });
+
+    it("★ spacing 压到下限时，先出现的强制变化点标签不得被 §5 隐藏", () => {
+        // 回归：§4 给强制标签的间距下限是 `spacingPx`（下限 24），而 §5 的让位阈值是
+        // 固定的 26 —— 两个都带强制标记的标签落在 24~26px 之间时，"左侧强制则让
+        // 右侧"的分支对 forced→forced 不生效，落入通用让位分支把左侧变化点标签
+        // 关掉，与 §4"变化点是时间地标、必须带标签"自相矛盾。修复是让 §4 的强制
+        // 间距直接钉在让位阈值上。
+        // 构造：bpm=120（每拍 0.5s）、1/8 网格（每格 0.25s）、pps=100 → 相邻两格
+        // 恰好 25px，落在 [24, 26) 区间内；两个变化点相距一个格子。
+        const twoAdjacentPoints: TempoMap = {
+            points: [
+                {
+                    id: "p0",
+                    positionSec: 0,
+                    bpm: 120,
+                    timeSignature: { numerator: 4, denominator: 4 },
+                    scale: null,
+                },
+                {
+                    id: "p1",
+                    positionSec: 0.25,
+                    bpm: 120,
+                    timeSignature: { numerator: 4, denominator: 4 },
+                    scale: null,
+                },
+            ],
+        };
+        const { axis } = createTickAxis({
+            pxPerSec: 100,
+            scrollLeftPx: 0,
+            viewportWidthPx: 900,
+        });
+        const ticks = buildTimelineTicks({
+            axis,
+            bpm: 120,
+            beatsPerBar: 4,
+            grid: "1/8",
+            primaryUnit: "barBeats",
+            secondaryUnit: "clock",
+            minLabelSpacingPx: 24,
+            minGridSpacingPx: 8,
+            swingPercent: 0,
+            tempoMap: twoAdjacentPoints,
+        });
+        const firstChangePoint = ticks.find((tick) => Math.round(tick.sec * 1e6) === 0);
+        expect(firstChangePoint, "t=0 处必须存在网格刻度").toBeDefined();
+        expect(firstChangePoint?.showLabel, "§4 强制的变化点标签被 §5 隐藏").toBe(true);
     });
 });

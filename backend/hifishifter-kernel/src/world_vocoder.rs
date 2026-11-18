@@ -199,31 +199,43 @@ fn blend_unvoiced_regions_with_silence_gate_impl(
     // 浊音帧恒为湿；非浊音帧若原始信号本身有能量（齿音/气声）则切回干，
     // 否则（真静音）保留合成 —— 合成的静音也是静音，切不切听感相同，
     // 保持湿可避免在"静音↔气声"的判定抖动处反复切换。
-    let mut target = vec![0.0f32; n];
-    for (si, t) in target.iter_mut().enumerate() {
-        let t_ms = (si as f64) * 1000.0 / (fs.max(1) as f64);
-        let fi = (t_ms / fp.max(0.1)).floor().max(0.0) as usize;
-        if fi >= voiced.len() {
-            *t = 1.0;
-            continue;
-        }
-        if voiced[fi] {
-            *t = 1.0;
-            continue;
-        }
-        // 非浊音帧：原始信号是否有能量？
-        let start = fi.saturating_mul(frame_samples).min(dry.len());
-        let end = ((fi + 1).saturating_mul(frame_samples)).min(dry.len());
-        let allowed = if start >= end {
-            false
-        } else {
+    // 帧级能量门：每帧只做一次能量求和，样本循环里直接查表。
+    //
+    // 【为什么不是在样本循环里逐帧求和】旧实现每个样本都对所属帧重新求一遍
+    // 能量 —— 同一帧内 ~frame_samples 个样本重复同样的 multiply-add
+    // （5ms @ 44.1kHz ≈ 220 倍冗余），整段 WORLD 渲染里非浊音部分
+    // 直接多出一个数量级的白做功。判定结果与逐样本实现完全一致：
+    // 每帧的 RMS 只依赖 `dry` 与 `frame_samples`，与查询样本无关。
+    let frame_gate: Vec<bool> = voiced
+        .iter()
+        .enumerate()
+        .map(|(fi, &is_voiced)| {
+            if is_voiced {
+                return true;
+            }
+            let start = fi.saturating_mul(frame_samples).min(dry.len());
+            let end = ((fi + 1).saturating_mul(frame_samples)).min(dry.len());
+            if start >= end {
+                return false;
+            }
             let mut energy = 0.0f64;
             for &sample in &dry[start..end] {
                 energy += sample * sample;
             }
             (energy / (end - start) as f64).sqrt() >= silence_rms
+        })
+        .collect();
+
+    let mut target = vec![0.0f32; n];
+    for (si, t) in target.iter_mut().enumerate() {
+        let t_ms = (si as f64) * 1000.0 / (fs.max(1) as f64);
+        let fi = (t_ms / fp.max(0.1)).floor().max(0.0) as usize;
+        // 帧越界视为湿（合成静音）；浊音帧湿；非浊音但有能量切回干；真静音保持湿。
+        *t = if frame_gate.get(fi).copied().unwrap_or(true) {
+            1.0
+        } else {
+            0.0
         };
-        *t = if allowed { 0.0 } else { 1.0 };
     }
 
     // 2) 对目标权重做**居中**滑动平均，得到 10ms 的平滑过渡。

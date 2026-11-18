@@ -17,11 +17,12 @@ pub(super) fn get_pitch_analysis_progress(
         }));
     }
 
-    // 回退到旧的 pitch_analysis_progress（单 clip 路径）
+    // 回退到旧的 pitch_analysis_progress（单 clip 路径）。
+    // 毒化恢复与本仓其余锁访问同一策略（一次 panic 不应让这条轮询命令永久失败）。
     let progress = state
         .pitch_analysis_progress
         .read()
-        .map_err(|e| format!("Failed to read progress: {}", e))?;
+        .unwrap_or_else(|e| e.into_inner());
 
     Ok(progress.as_ref().map(PitchProgressPayload::from))
 }
@@ -40,12 +41,8 @@ pub(super) fn get_clip_pitch_data(
     state: tauri::State<'_, AppState>,
     clip_ids: Vec<String>,
 ) -> serde_json::Value {
-    let timeline = match state.timeline.lock() {
-        Ok(guard) => guard,
-        Err(error) => {
-            return serde_json::json!({ "ok": false, "error": format!("lock_failed: {error}") })
-        }
-    };
+    // 毒化恢复与本仓其余锁访问同一策略（见 commands.rs 的 export_pitch_to_midi）。
+    let timeline = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     let mut payloads = Vec::new();
     for clip_id in clip_ids {
         let Some(clip) = timeline.clips.iter().find(|clip| clip.id == clip_id) else {

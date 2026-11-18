@@ -1,7 +1,6 @@
 //! 插件内原GUI宿主；原生视图不启动独立app，也不接管宿主消息循环。
 mod browser_files;
 pub(crate) mod commands;
-pub(crate) mod connection;
 pub(crate) mod errors;
 mod events;
 mod formant;
@@ -24,7 +23,7 @@ pub(crate) mod platform_services;
 mod plugin_diagnostics;
 pub mod port;
 pub(crate) mod private_groups;
-pub(crate) mod resources;
+pub mod resources;
 pub(crate) mod routing;
 pub mod session;
 pub(crate) mod slow_lane;
@@ -32,7 +31,6 @@ mod syllable_reply;
 #[cfg(not(test))]
 mod temp_sweep;
 
-mod view;
 pub(crate) mod workspace;
 
 /// 临时目录回收表：「本地数据子目录 → 目录名前缀」。
@@ -56,7 +54,6 @@ pub(crate) use errors::classify_error;
 /// 视图 bootstrap 的能力快照（两种格式共用同一份事实）。
 pub use gui::client::bootstrap_capabilities;
 pub use gui::client::log_frontend_error;
-pub(crate) use view::create_view_with_link;
 
 /// 建视图的唯一入口（父句柄 + 尺寸 + 实例链路）。
 pub use gui::create_view as create_editor_view;

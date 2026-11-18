@@ -461,7 +461,7 @@ export function handleParamLineNearDrag(
         applyPointerPosition(adjusted.clientX, adjusted.clientY, lastEffectiveSnap);
     };
 
-    const onEnd = async () => {
+    const onEnd = async (cancelled: boolean) => {
         edgeScroll?.stop();
         disposeDragDirKey();
         disposeFineAdjustedPointerState(finePointerState);
@@ -489,6 +489,27 @@ export function handleParamLineNearDrag(
             isChildPitchOffsetDegreesParam(editParam)
         ) {
             onPitchSnapGestureActiveChange?.(false);
+        }
+
+        // OS 取消（pointercancel / 失焦登记的 cancel）：手势不可信 —— **回滚**
+        // 而不是把半截变换写进后端，与自由绘制（freehandPointerDown 的
+        // finishCancel）和块拖拽（paramBlockDrag 的 cancel 分支）同一语义。
+        // 预览阶段已把选区平移过（runPreviewStep 里的 shiftSelectionRanges），
+        // 必须一并还原成按下时的选区；live 覆盖层同样丢弃。
+        if (cancelled) {
+            liveEditOverrideRef.current = null;
+            if (liveEditActiveRef) {
+                liveEditActiveRef.current = false;
+            }
+            selectionRef.current = sel;
+            updateSelectionUi(sel);
+            requestWaveformRepaint();
+            if (paramValuePopupEnabled) {
+                onParamValuePreviewChange?.(null);
+            }
+            setCanvasCursor("grab");
+            invalidate();
+            return;
         }
 
         // 单击（未越过点击死区）：这次手势没有改动任何值 ——
@@ -667,8 +688,8 @@ export function handleParamLineNearDrag(
         pointerId: pid,
         captureTarget: e.currentTarget,
         onMove,
-        onEnd: () => {
-            void onEnd();
+        onEnd: (reason) => {
+            void onEnd(reason === "cancel");
         },
         extra: [
             { type: "contextmenu", listener: onContextMenuDuringDrag, capture: true },

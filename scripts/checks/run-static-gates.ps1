@@ -33,6 +33,10 @@ Invoke-Gate 'Log verbosity gate' { python scripts/checks/check-log-verbosity.py 
 # 症状是"控件能点、点了没反应" —— 静默失效，且不会有编译错误。
 Invoke-Gate 'Command gating gate' { python scripts/checks/check-command-gating.py }
 
+# 每个系统「另存为 / 打开」对话框都必须带词表里的类型过滤器。缺了不会报错：
+# 类型下拉框变成空的，用户可以把 .zip 诊断包存成 .txt（实测发生过）。
+Invoke-Gate 'Dialog filter gate' { python scripts/checks/check-dialog-filters.py }
+
 # 版本号、安装器文案、模型清单、许可清单、安装器形态：都是"少一处也不报错"的约定。
 Invoke-Gate 'Product consistency gate' { & (Join-Path $PSScriptRoot 'check-product-consistency.ps1') }
 
@@ -40,6 +44,10 @@ Invoke-Gate 'Product consistency gate' { & (Join-Path $PSScriptRoot 'check-produ
 # 把构建脚本的 `$root`（仓库根）改写成了 Visual Studio 安装目录，构建在
 # "找不到 backend\src-tauri\resources\models\models.json" 处失败。
 Invoke-Gate 'Env script scope gate' { & (Join-Path $PSScriptRoot 'check-env-scripts.ps1') }
+
+# 源码注释里的半截 UTF-8 字节不会让任何编译器报错，但会把中文注释变成乱码，
+# 且此后每次 diff 都带着它。第三方树沿用上游原始编码，不在本门禁管辖内。
+Invoke-Gate 'Source UTF-8 gate' { python scripts/checks/check-utf8.py }
 
 # SoundTouch 构建生成器与缓存自愈。
 Invoke-Gate 'SoundTouch generator gate' { python scripts/checks/check-soundtouch-generator.py }

@@ -21,6 +21,18 @@ export interface AdvancedSeparatedTarget {
     trackId: string;
 }
 
+/**
+ * REAPER Take 音高互转的可选项。
+ *
+ * 【`tolerant` 为什么必须显式给】单条片段（时间轴右键）走**严格**模式：映射不到宿主
+ * take 就报错 —— 用户点的是那一条，静默跳过等于什么都没发生。批量作用域（当前轨道 /
+ * 选区内 / 全部）走宽容模式：一条对不上不该让整批 500 条失败，跳过的由回执里的
+ * `unresolved` 如实回报。
+ */
+export interface PitchBridgeOptions {
+    tolerant?: boolean;
+}
+
 // ── 渲染缓存（持久化合成结果）───────────────────────────────────────────────
 
 /** 清理作用域：全部 / 当前工程 / 超期 / 其它采样率。 */
@@ -269,6 +281,47 @@ export const coreApi = {
         }>("export_audio_advanced", request),
 
     cancelExportAudio: () => invoke<{ ok: boolean; active?: boolean }>("cancel_export_audio"),
+
+    /**
+     * REAPER take 音高 → HiFiShifter 音高参数线（一次性**复制**）。
+     *
+     * 【为什么不改宿主侧】take 音高是源级属性，插件渲染出来的音频在它之后 —— 两边
+     * 永远不会同时处理，所以转换不需要"从 REAPER 搬走"任何东西（宿主侧一个字节都不改）。
+     *
+     * 【为什么回执里要带 framesSkipped】没有音高分析的帧不会被写（那会让"无声"
+     * 变成"有音高"）。这个数让界面能说清"有一部分没转"，而不是假装全成功。
+     */
+    importHostTakePitch: (clipIds: string[], options?: PitchBridgeOptions) =>
+        invoke<{
+            ok: boolean;
+            clips?: number;
+            /** 真的被转换的片段数（跳过的、没有 Take 音高的都不计）。 */
+            clipsConverted?: number;
+            framesWritten?: number;
+            framesSkipped?: number;
+            /** 无法转换的片段 id：没有直接绑定的宿主 take、或未知片段。 */
+            unresolved?: string[];
+            error?: string;
+        }>("import_host_take_pitch", clipIds, options),
+
+    /**
+     * HiFiShifter 音高参数线 → REAPER take 音高包络（一次性**复制**）。
+     *
+     * 【为什么不顺手清空 HFS 曲线】take 音高只在插件被旁路 / 移除时作用于那段音频，
+     * 与插件渲染的结果互不叠加；清空只会让用户"转换完就听不见音高了"。
+     * 唯一被归零的是宿主 item 的音高偏移（`D_PITCH`）—— 让包络成为 REAPER 侧
+     * 唯一的音高来源（见「转换为 REAPER Take 音高包络需重置 Item 音高偏移」）。
+     */
+    exportHostTakePitch: (clipIds: string[], options?: PitchBridgeOptions) =>
+        invoke<{
+            ok: boolean;
+            clips?: number;
+            /** 真的被转换的片段数（没有音高分析因而跳过的都不计）。 */
+            clipsConverted?: number;
+            pointsWritten?: number;
+            unresolved?: string[];
+            error?: string;
+        }>("export_host_take_pitch", clipIds, options),
 
     getExportAudioDefaults: () => invoke<ExportAudioDefaults>("get_export_audio_defaults"),
 
