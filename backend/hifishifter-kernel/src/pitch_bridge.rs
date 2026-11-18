@@ -228,6 +228,11 @@ pub fn simplify_breakpoints(
             .all(|(t, v)| (v - (va + slope * (t - ta))).abs() <= tolerance)
     };
 
+    // 【同一时间点必须合并 —— 不要为了"更连续"删掉这条】宿主包络里同一个 u 上不能
+    // 有两个值：两个值意味着"这一刻有两段"，而宿主只能任选其一，选哪一个不由我们
+    // 决定。这条合并也正是"写不出垂直阶跃"的原因 —— 未识别帧填充在 `ramp_frames = 0`
+    // 时的阶跃会被表达成相邻两帧之间的 **5 ms 斜坡**。那是**结果**，不是缺陷：
+    // 想要更长的过渡就调 `UnvoicedFillPolicy::ramp_frames`，不要改这里。
     let mut out: Vec<(f64, f64)> = Vec::new();
     let push_point = |t: f64, v: f64, out: &mut Vec<(f64, f64)>| {
         if let Some(last) = out.last_mut() {

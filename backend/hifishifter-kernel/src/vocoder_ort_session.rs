@@ -392,7 +392,20 @@ pub fn set_async_session_prewarm(enabled: bool) {
 }
 
 /// 后台会话预热是否允许启动。
+///
+/// 【本 crate 的测试进程一律关掉】见 [`ASYNC_SESSION_PREWARM`] 的说明：测试进程
+/// 结束时没有收尾钩子，预热线程会在"建会话"的中途被拆掉。宿主侧（插件 / vst3 /
+/// clap）各自显式调 `set_async_session_prewarm(false)`；内核自己的测试二进制没有
+/// 这样的初始化点，于是任何一条**会走下发路径**的用例（例如 `ui_settings_apply` 里
+/// 验证"设置真的落到进程级单元"的那条）都会顺手放出几个构建线程 —— 它们抢的是
+/// `vocoder_ort_session` 的全局构建租约，而租约用例的 5 秒预算正好被一次 DML 会话
+/// 构建吃掉，表现为"空闲时租约必须可得"随机失败。
+///
+/// 关掉它不损失任何覆盖：会话仍然在首次真正使用时**惰性构建**。
 pub fn async_session_prewarm_enabled() -> bool {
+    if cfg!(test) {
+        return false;
+    }
     ASYNC_SESSION_PREWARM.load(std::sync::atomic::Ordering::Acquire)
 }
 
