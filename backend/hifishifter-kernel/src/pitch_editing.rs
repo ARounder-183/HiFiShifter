@@ -1354,6 +1354,48 @@ mod tests {
         ));
     }
 
+    /// **导出窗口 = 组装窗口**：片段起点落在两帧之间时，导出必须读组装写进去的那几帧。
+    ///
+    /// 【回归对象】导出侧曾用 `floor(start·1000/fp)` 而组装侧用 `round`。小数部分 ≥ 0.5
+    /// 时两者差一帧 ⇒ 导出的 PIT 包络整体晚 5 ms，而参数编辑器的参考线是准的 ——
+    /// 用户看到的是"导出的和界面上不一样"，却查不出差在哪一帧上。
+    #[test]
+    fn the_export_reads_the_frames_the_assembly_wrote() {
+        let mut timeline = TimelineState::default();
+        let root = timeline.add_track(Some("root".to_string()), None, None);
+        let mut clip = make_clip();
+        clip.track_id = root.clone();
+        // 1.0026 s × 200 = 200.52 ⇒ 组装写在工程帧 201（`floor` 会给 200）。
+        clip.start_sec = 1.0026;
+        clip.length_sec = 1.0;
+        timeline.clips.push(clip.clone());
+
+        // 偏移 = edit − orig = k × 0.01 ⇒ `offsets[0]` 直接暴露"读的是第几帧"。
+        let frames = 600usize;
+        timeline.params_by_root_track.insert(
+            root,
+            TrackParamsState {
+                frame_period_ms: 5.0,
+                pitch_orig: vec![60.0; frames],
+                pitch_edit: (0..frames).map(|k| 60.0 + k as f32 * 0.01).collect(),
+                ..Default::default()
+            },
+        );
+
+        let offsets = super::compute_clip_export_pitch_offsets(&timeline, &clip)
+            .expect("export offsets")
+            .offsets;
+        assert!(
+            (offsets[0] - 2.01).abs() < 1e-4,
+            "必须从第 201 帧读（offsets[0] = 2.01），实际 {} ≈ 第 {} 帧",
+            offsets[0],
+            (offsets[0] / 0.01).round()
+        );
+        // 长度 = `round(1.0 s × 200)` = 200（不是 `ceil` 的 201）：多读的那一帧
+        // 属于下一个片段，会在包络末尾造出一个与内容无关的点。
+        assert_eq!(offsets.len(), 200);
+    }
+
     /// 开关**缺失**等同关闭（`extra_param_enabled` 的既有语义）。
     #[test]
     fn missing_switch_behaves_as_off() {
@@ -1813,11 +1855,13 @@ pub fn compute_clip_export_pitch_offsets(
     let entry = timeline.params_by_root_track.get(&root_track_id)?;
     let frame_period_ms = entry.frame_period_ms.max(0.1);
 
-    let clip_start = clip.start_sec.max(0.0);
-    let clip_length = clip.length_sec.max(0.0);
-    let start_frame = ((clip_start * 1000.0) / frame_period_ms).floor().max(0.0) as usize;
-    let frame_count = (((clip_length * 1000.0) / frame_period_ms).ceil().max(1.0)) as usize;
-    let end_frame = start_frame + frame_count;
+    // 【窗口 = 组装侧写进去的那几帧】起点必须 `round`：栅格是点采样，帧 k 代表
+    // t = k·fp，而 `schedule.rs` 就是把片段第 0 帧写在 `round(start)` 上。此前这里
+    // 用 `floor`，当 `start·1000/fp` 的小数部分 ≥ 0.5 时读到的每个值都属于**前一帧**
+    // —— 导出的 PIT 包络整体晚 5 ms，而参数编辑器的参考线是准的。
+    let (start_frame, end_frame) =
+        crate::frame_grid::clip_frame_window(clip.start_sec, clip.length_sec, frame_period_ms);
+    let frame_count = end_frame - start_frame;
 
     let child_cfg = active_child_pitch_offset_config(timeline, &clip.track_id);
     let scale_segments = timeline.scale_segments();
@@ -1918,7 +1962,7 @@ pub fn build_clip_input_pitch_curve(
 
     let timeline_midi = if let Some(ref cfg) = child_offset_cfg {
         let fp = frame_period_ms.max(0.1);
-        let start_idx = ((clip_start_sec.max(0.0) * 1000.0) / fp).floor().max(0.0) as usize;
+        let start_idx = crate::frame_grid::frame_at_time(clip_start_sec, fp);
         // Tempo Map 感知：按帧时刻解析生效音阶（帧时间单调递增，使用游标）。
         let scale_segments = timeline.scale_segments();
         let mut cursor = ScaleSegmentsCursor::new(&scale_segments);
@@ -2444,7 +2488,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
 
         if is_vslib && !timeline_midi.is_empty() {
             let fp = frame_period_ms.max(0.1);
-            let start_idx = ((clip_start_sec.max(0.0) * 1000.0) / fp).floor().max(0.0) as usize;
+            let start_idx = crate::frame_grid::frame_at_time(clip_start_sec, fp);
             for (local_idx, midi) in timeline_midi.iter().copied().enumerate() {
                 if !(midi.is_finite() && midi > 0.0) {
                     continue;

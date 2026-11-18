@@ -405,8 +405,11 @@ fn curve_default_value(key: &str) -> f32 {
     }
 }
 
-/// 曲线切片（帧 0 = clip 起点），不足处补参数默认值（与
-/// `extract_linked_params_from_root_range` 的切片语义一致）。
+/// 曲线切片（帧 0 = clip 起点），不足处补参数默认值。
+///
+/// 【`start_frame` 必须来自 `frame_grid::clip_frame_window`】与
+/// `extract_linked_params_from_root_range` 同一个**定位**窗口：帧 k 代表 k·fp。
+/// 自己写一遍 `floor` 会让整条曲线早一帧（见 `frame_grid` 模块文档）。
 fn slice_curve_with_default(
     curve: &[f32],
     start_frame: usize,
@@ -438,12 +441,14 @@ pub fn build_clip_export_curves(timeline: &TimelineState, clip: &Clip) -> ClipEx
     let frame_period_ms = root_entry
         .map(|entry| entry.frame_period_ms.max(0.1))
         .unwrap_or(5.0);
-    let start_frame = ((clip.start_sec.max(0.0) * 1000.0) / frame_period_ms)
-        .floor()
-        .max(0.0) as usize;
-    let frame_count = (((clip.length_sec.max(0.0) * 1000.0) / frame_period_ms)
-        .ceil()
-        .max(1.0)) as usize;
+    // 与音高同一条换算（`frame_grid`）：音量/声像切片也要落在组装侧写入的那几帧上，
+    // 否则导出包络与音高包络相差一帧 —— 同一个片段的两条包络对不上。
+    let (start_frame, end_frame) = hifishifter_kernel::frame_grid::clip_frame_window(
+        clip.start_sec,
+        clip.length_sec,
+        frame_period_ms,
+    );
+    let frame_count = end_frame - start_frame;
 
     let merged_curve = |key: &str| -> Option<Vec<f32>> {
         // 渲染同款合并：clip.extra_curves[key] 覆盖 root[key]（整 key 覆盖）；

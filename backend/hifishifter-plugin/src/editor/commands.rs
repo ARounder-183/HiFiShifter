@@ -895,8 +895,13 @@ fn import_host_take_pitch(session: &EditorSession, input: &Value) -> Result<Valu
             let start_sec = clip.clip.start_sec.max(0.0);
             let length_sec = clip.clip.length_sec.max(0.0);
             let rate = pitch_bridge_rate(&clip.clip);
-            let start_frame = ((start_sec * 1000.0) / frame_period_ms).round() as usize;
-            let count = (((length_sec * 1000.0) / frame_period_ms).ceil()).max(1.0) as usize;
+            // 与导出方向同一个窗口：写回的帧区间必须正好是那个片段自己的那几帧。
+            let (start_frame, end_frame) = hifishifter_kernel::frame_grid::clip_frame_window(
+                start_sec,
+                length_sec,
+                frame_period_ms,
+            );
+            let count = end_frame - start_frame;
             let mut wrote_any = false;
             for index in 0..count {
                 let frame = start_frame + index;
@@ -1082,8 +1087,14 @@ fn clip_pitch_data(session: &EditorSession, input: &Value) -> Result<Value, Stri
         } else {
             timeline_period
         };
-        let start_frame = ((clip.start_sec.max(0.0) * 1000.0) / period).round() as usize;
-        let count = (((clip.length_sec.max(0.0) * 1000.0) / period).ceil()).max(1.0) as usize;
+        // 与组装侧同一个窗口（`frame_grid`）：参考线必须与导出包络落在同一帧上，
+        // 否则用户看到"界面上的线和导出的不一样"却查不出差在哪。
+        let (start_frame, end_frame) = hifishifter_kernel::frame_grid::clip_frame_window(
+            clip.start_sec,
+            clip.length_sec,
+            period,
+        );
+        let count = end_frame - start_frame;
         if count > MAX_FRAMES_PER_CLIP || count > budget {
             continue;
         }

@@ -83,9 +83,12 @@ pub fn assemble_pitch_orig_from_cache(
     for clip in &processed_clips {
         // 计算 clip 在 timeline 中的起始帧（MIDI clip 和音频 clip 共用）
         let clip_start_sec = clip.start_sec.max(0.0);
-        let clip_start_frame = ((clip_start_sec * 1000.0) / fp).round().max(0.0) as usize;
         let clip_len_sec = clip.length_sec.max(0.0);
-        let clip_len_frames = ((clip_len_sec * 1000.0) / fp).round().max(0.0) as usize;
+        // 【窗口只能有一个出处】导出、参考线、渲染切片都按同一份换算回读这几帧；
+        // 任何一侧自己写一遍取整，整条曲线就平移一帧（见 `crate::frame_grid`）。
+        let (clip_start_frame, clip_end_frame) =
+            crate::frame_grid::clip_frame_window(clip_start_sec, clip_len_sec, fp);
+        let clip_len_frames = clip_end_frame - clip_start_frame;
 
         // ── MIDI clip 路径：直接从 midi_note_data 生成音高帧 ──
         if let Some(ref notes) = clip.midi_note_data {

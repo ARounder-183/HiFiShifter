@@ -127,11 +127,10 @@ pub fn assemble_dyn_orig_from_cache(tl: &TimelineState, root_track_id: &str) -> 
         };
 
         let clip_len_sec = clip.length_sec.max(0.0);
-        let clip_start_frame = ((clip.start_sec.max(0.0) * 1000.0) / fp).round().max(0.0) as usize;
-        let clip_len_frames = ((clip_len_sec * 1000.0) / fp).round().max(0.0) as usize;
-        let Some(clip_start_frame) = usize::checked_add(clip_start_frame, 0) else {
-            continue;
-        };
+        // 与音高组装同一个窗口（`frame_grid::clip_frame_window`）：两条曲线必须同栅格。
+        let (clip_start_frame, clip_end_frame) =
+            crate::frame_grid::clip_frame_window(clip.start_sec, clip_len_sec, fp);
+        let clip_len_frames = clip_end_frame - clip_start_frame;
         if clip_start_frame >= target_frames {
             continue;
         }

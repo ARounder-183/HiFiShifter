@@ -937,7 +937,12 @@ fn apply_host_pitch_edit(
     // 少这一项，App 路径的子轨偏移会整段前置 `clip.start_sec` 秒；
     // 多这一项（旧代码在 ARA 上），则整段后置一个分割点。
     if let Some(offsets) = crate::pitch_editing::compute_clip_export_pitch_offsets(timeline, clip) {
-        let origin = (clip.start_sec.max(0.0) * 1000.0 / fp).floor() as usize;
+        // 【必须与 `compute_clip_export_pitch_offsets` 的起点同一算式】那边按
+        // `frame_grid::clip_frame_window` 读的是工程帧 `round(start)+local`，这里就
+        // 必须写到同一个帧号上。两侧各写一份取整（此前这里是 `floor`）时，
+        // 写进去的是"这一帧的原值 + 下一帧的偏移量"—— 一帧的基线配上另一帧的编辑，
+        // 结果既不是这一帧的目标也不是邻居的目标，而是一个都不对的中间值。
+        let origin = crate::frame_grid::frame_at_time(clip.start_sec, fp);
         for (local, offset) in offsets.offsets.iter().enumerate() {
             let frame = origin + local;
             // 【为什么越界帧直接跳过】`pitch_orig` 越界时回退 0.0 会让目标音高
