@@ -111,6 +111,8 @@ def build_plan(files: list[str]) -> list[list[str]]:
     }
 
     for path in files:
+        if path.endswith(".md"):
+            continue
         for prefix, pkg in crate_map.items():
             if path.startswith(prefix):
                 crates.add(pkg)
@@ -133,10 +135,29 @@ def build_plan(files: list[str]) -> list[list[str]]:
                     if os.path.isfile(cand):
                         frontend_tests.append(stem + ext)
 
-    # Run independent library crates first, keeping shells isolated from src-tauri.
-    for pkg in sorted(crates - {"hifishifter-vst3", "hifishifter-clap"}):
+    # Run independent library crates first, keeping shells isolated from src-tauri
+    # and splitting hifishifter-plugin by module chunk (mirroring run-rust-gates.ps1
+    # so process-global caches never accumulate across 700+ tests).
+    for pkg in sorted(crates - {"hifishifter-vst3", "hifishifter-clap", "hifishifter-plugin"}):
         cmds.append(
             ["cargo", "test", "--locked", "--manifest-path", "backend/Cargo.toml", "-p", pkg, "--", "--test-threads=1"]
+            + skip_flags
+        )
+
+    if "hifishifter-plugin" in crates:
+        plugin_chunks = ["ara::", "capture::", "editor::", "host::", "render::"]
+        cmds.append(["cargo", "test", "--locked", "--manifest-path", "backend/Cargo.toml", "-p", "hifishifter-plugin", "--no-run"])
+        for chunk in plugin_chunks:
+            cmds.append(
+                ["cargo", "test", "--locked", "--manifest-path", "backend/Cargo.toml", "-p", "hifishifter-plugin", "--", chunk, "--test-threads=1"]
+                + skip_flags
+            )
+        chunk_skips: list[str] = []
+        for chunk in plugin_chunks:
+            chunk_skips.extend(["--skip", chunk])
+        cmds.append(
+            ["cargo", "test", "--locked", "--manifest-path", "backend/Cargo.toml", "-p", "hifishifter-plugin", "--", "--test-threads=1"]
+            + chunk_skips
             + skip_flags
         )
 
