@@ -215,19 +215,6 @@ pub fn simplify_breakpoints(
         v0 + (v1 - v0) * fraction
     };
 
-    let line_fits = |a: usize, f: usize| -> bool {
-        let (ta, va) = samples[a];
-        let (tf, vf) = samples[f];
-        let span = tf - ta;
-        if span <= 1e-12 {
-            return (vf - va).abs() <= tolerance;
-        }
-        let slope = (vf - va) / span;
-        samples[a + 1..f]
-            .iter()
-            .all(|(t, v)| (v - (va + slope * (t - ta))).abs() <= tolerance)
-    };
-
     // 【同一时间点必须合并 —— 不要为了"更连续"删掉这条】宿主包络里同一个 u 上不能
     // 有两个值：两个值意味着"这一刻有两段"，而宿主只能任选其一，选哪一个不由我们
     // 决定。这条合并也正是"写不出垂直阶跃"的原因 —— 未识别帧填充在 `ramp_frames = 0`
@@ -247,17 +234,50 @@ pub fn simplify_breakpoints(
     let first_t = samples[0].0.max(range_start);
     push_point(first_t, value_at(first_t), &mut out);
 
+    // 【弦斜率窗口】贪心"从锚点能看到多远"的判定：候选弦 (anchor → f) 成立
+    // ⟺ 每个中间样本 p 都满足 |v_p - va - slope·(t_p - ta)| ≤ tolerance。
+    // 对 slope 解一次不等式，这条约束就变成一个区间（窗口）；把中间样本的
+    // 窗口逐个求交是 O(1)，于是整段贪心从"每个候选都从头复扫 [a+1, f)"
+    // 的平方降到线性 —— 与直接求值代数等价，只是把同一约束换了次序计算。
+    // 动机：长直线段后接折点（一段滑音接颤音）此前恰好落在平方路径上，
+    // 3 分钟的 5 ms 帧曲线 ≈ 3.6 万样本、~10⁸ 次浮点求值，而写包络发生在
+    // 编辑落定的 UI 线程上 —— 表现为可感的卡顿。
     let mut anchor = 0usize;
     loop {
-        let mut f = anchor + 1;
+        let (ta, va) = samples[anchor];
+        // 弦 (anchor → f) 的可行斜率窗口：空约束集 = 全体斜率可行。
+        let mut slope_lo = f64::NEG_INFINITY;
+        let mut slope_hi = f64::INFINITY;
         let mut farthest = anchor + 1;
+        let mut f = anchor + 1;
         while f < samples.len() {
-            if line_fits(anchor, f) {
-                farthest = f;
-                f += 1;
+            let (tf, vf) = samples[f];
+            let span = tf - ta;
+            let fits = if span <= 1e-12 {
+                // 与直接求值同一条退化分支：终点与锚点几乎同时刻，弦没有斜率。
+                (vf - va).abs() <= tolerance
             } else {
+                let slope = (vf - va) / span;
+                slope_lo <= slope && slope <= slope_hi
+            };
+            if !fits {
                 break;
             }
+            farthest = f;
+            // 终点 f 自此成为下一个候选的中间样本：把它的窗口并入交集。
+            // （对 f 自身该约束恒真 —— 弦正好穿过它，直接求值同样不检查它。）
+            // span == 0（与锚点同刻）时偏差与斜率无关，且必在容差内 —— 上面
+            // 刚按值差放行，所以对窗口无贡献，跳过（也避开 0 除的 inf/NaN）。
+            let mid = vf - va;
+            if span > 0.0 {
+                slope_lo = slope_lo.max((mid - tolerance) / span);
+                slope_hi = slope_hi.min((mid + tolerance) / span);
+            } else if span < 0.0 {
+                // 时间倒退（畸形输入）：除以负数翻转区间端点。
+                slope_lo = slope_lo.max((mid + tolerance) / span);
+                slope_hi = slope_hi.min((mid - tolerance) / span);
+            }
+            f += 1;
         }
         let (t, v) = samples[farthest];
         push_point(t, v, &mut out);
@@ -668,6 +688,210 @@ mod tests {
         assert!(points.len() <= 3, "斜坡不该逐帧写点：{}", points.len());
         assert!((points[0].value - 0.0).abs() < 0.03);
         assert!((points[points.len() - 1].value - 1.99).abs() < 0.03);
+    }
+
+    // ─── 断点精简（弦斜率窗口实现） ──────────────────────────────────────
+
+    /// 直接求值的朴素参考实现：与弦斜率窗口版**逐点同判据**，只是每个候选都
+    /// 从头复扫中间样本（平方）。它钉住"线性化不改语义"这件事 —— 窗口版与它
+    /// 的差异只允许来自浮点舍入，任何构造出的曲线都不得给出不同的断点序列。
+    fn simplify_breakpoints_reference(
+        samples: &[(f64, f64)],
+        range_start: f64,
+        range_end: f64,
+        default_value: f64,
+        tolerance: f64,
+    ) -> Vec<(f64, f64)> {
+        if samples.is_empty() || range_end <= range_start {
+            return Vec::new();
+        }
+        if samples
+            .iter()
+            .all(|(_, value)| (value - default_value).abs() <= tolerance)
+        {
+            return Vec::new();
+        }
+        if samples.len() == 1 {
+            let value = samples[0].1;
+            let first = samples[0].0.clamp(range_start, range_end);
+            return vec![(first, value), (range_end, value)];
+        }
+        {
+            let (t0, v0) = samples[0];
+            let (tn, vn) = samples[samples.len() - 1];
+            let span = tn - t0;
+            let slope = if span > 1e-12 { (vn - v0) / span } else { 0.0 };
+            let mut flat = true;
+            let mut linear = true;
+            for (t, v) in samples.iter() {
+                if (v - v0).abs() > tolerance {
+                    flat = false;
+                }
+                if (v - (v0 + slope * (t - t0))).abs() > tolerance {
+                    linear = false;
+                }
+                if !flat && !linear {
+                    break;
+                }
+            }
+            if flat || linear {
+                let first_t = t0.max(range_start);
+                let last_t = range_end.max(first_t);
+                return vec![
+                    (first_t, v0 + slope * (first_t - t0)),
+                    (last_t, v0 + slope * (last_t - t0)),
+                ];
+            }
+        }
+        let value_at = |t: f64| -> f64 {
+            let index = samples.partition_point(|sample| sample.0 < t);
+            if index == 0 {
+                return samples[0].1;
+            }
+            if index >= samples.len() {
+                return samples[samples.len() - 1].1;
+            }
+            let (t0, v0) = samples[index - 1];
+            let (t1, v1) = samples[index];
+            if (t1 - t0).abs() < 1e-12 {
+                return v0;
+            }
+            let fraction = ((t - t0) / (t1 - t0)).clamp(0.0, 1.0);
+            v0 + (v1 - v0) * fraction
+        };
+        let line_fits = |a: usize, f: usize| -> bool {
+            let (ta, va) = samples[a];
+            let (tf, vf) = samples[f];
+            let span = tf - ta;
+            if span <= 1e-12 {
+                return (vf - va).abs() <= tolerance;
+            }
+            let slope = (vf - va) / span;
+            samples[a + 1..f]
+                .iter()
+                .all(|(t, v)| (v - (va + slope * (t - ta))).abs() <= tolerance)
+        };
+        let mut out: Vec<(f64, f64)> = Vec::new();
+        let push_point = |t: f64, v: f64, out: &mut Vec<(f64, f64)>| {
+            if let Some(last) = out.last_mut() {
+                if (last.0 - t).abs() <= 1e-9 {
+                    last.1 = v;
+                    return;
+                }
+            }
+            out.push((t, v));
+        };
+        let first_t = samples[0].0.max(range_start);
+        push_point(first_t, value_at(first_t), &mut out);
+        let mut anchor = 0usize;
+        loop {
+            let mut f = anchor + 1;
+            let mut farthest = anchor + 1;
+            while f < samples.len() {
+                if line_fits(anchor, f) {
+                    farthest = f;
+                    f += 1;
+                } else {
+                    break;
+                }
+            }
+            let (t, v) = samples[farthest];
+            push_point(t, v, &mut out);
+            anchor = farthest;
+            if anchor + 1 >= samples.len() {
+                break;
+            }
+        }
+        let end_v = value_at(range_end);
+        if let Some(last) = out.last_mut() {
+            if (last.1 - end_v).abs() <= tolerance {
+                last.0 = range_end;
+                last.1 = end_v;
+            } else {
+                push_point(range_end, end_v, &mut out);
+            }
+        } else {
+            push_point(range_end, end_v, &mut out);
+        }
+        out
+    }
+
+    /// 确定性伪随机（无外部依赖）：足够搅动出各种折线形态，且每次运行一致。
+    fn noise_sequence(length: usize, seed: u64) -> Vec<f64> {
+        let mut state = seed | 1;
+        (0..length)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let unit = ((state >> 11) & ((1u64 << 53) - 1)) as f64 / (1u64 << 53) as f64;
+                (unit - 0.5) * 2.0
+            })
+            .collect()
+    }
+
+    /// 窗口版必须与直接求值版给出**相同**的断点序列：随机折线（各种长度/容差）、
+    /// 长直线接折点（曾经的平方路径）、重复时间戳与时间倒退（畸形输入）都要一致。
+    #[test]
+    fn the_slope_window_simplifier_matches_direct_evaluation() {
+        let cases: Vec<Vec<(f64, f64)>> = {
+            let mut cases = Vec::new();
+            // 随机折线：长度 × 种子 × 容差都扫一遍。
+            for length in [2usize, 3, 8, 64, 257] {
+                for seed in [1u64, 7, 12345, 0xDEADBEEF] {
+                    let noise = noise_sequence(length * 2, seed);
+                    let samples: Vec<(f64, f64)> = (0..length)
+                        .map(|i| {
+                            (
+                                i as f64 * 0.005,
+                                // 大幅值：让相邻点的差远超容差，逼出折点。
+                                noise[i * 2] * 8.0,
+                            )
+                        })
+                        .collect();
+                    cases.push(samples);
+                    let gentle: Vec<(f64, f64)> = (0..length)
+                        .map(|i| (i as f64 * 0.005, noise[i * 2 + 1] * 0.02))
+                        .collect();
+                    cases.push(gentle);
+                }
+            }
+            // 长直线段接折点（一段滑音接颤音的形态）：曾经的平方路径。
+            let bent: Vec<(f64, f64)> = (0..4000usize)
+                .map(|i| {
+                    let t = i as f64 * 0.005;
+                    let v = if t < 15.0 {
+                        t / 15.0
+                    } else {
+                        1.0 + (t - 15.0).sin() * 0.5
+                    };
+                    (t, v)
+                })
+                .collect();
+            cases.push(bent);
+            // 重复时间戳（畸形）：同刻不同值、同刻同值各一组。
+            cases.push(vec![
+                (0.0, 1.0),
+                (0.0, 1.0 + 0.02),
+                (0.0, 2.0),
+                (0.01, 3.0),
+                (0.02, 0.5),
+            ]);
+            cases.push(vec![(0.0, 1.0), (0.0, 1.0), (0.005, 1.0), (0.01, 2.0)]);
+            // 时间倒退（畸形）。
+            cases.push(vec![(0.02, 1.0), (0.01, 2.0), (0.005, 0.5), (0.03, 1.5)]);
+            cases
+        };
+        for samples in &cases {
+            for tolerance in [0.02, 0.005, 1e-4] {
+                let windowed = simplify_breakpoints(samples, 0.0, 10.0, 0.0, tolerance);
+                let reference = simplify_breakpoints_reference(samples, 0.0, 10.0, 0.0, tolerance);
+                assert_eq!(
+                    windowed, reference,
+                    "容差 {tolerance} 下与直接求值不一致：{samples:?}"
+                );
+            }
+        }
     }
 
     // ─── 未识别帧填充 ───────────────────────────────────────────────────────
