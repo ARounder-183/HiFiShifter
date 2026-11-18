@@ -717,6 +717,13 @@ impl EditState {
                 take_id: take.id.clone(),
             };
             if let Some(analysis) = self.take_syllables.get(&key) {
+                // 【空区间不是缓存】分析提交闸（session 的 syllable 结果落地点）
+                // 把"没检出区间"定义为"保留现有缓存"，空区间从来不是可缓存的
+                // 结果。旧构建的存档里可能残留空副本 —— 让它套用到 take 上会把
+                // 新会话刚分析出的非空结果整片抹掉，直到下一次重新分析。跳过。
+                if analysis.source_spans_sec.is_empty() {
+                    continue;
+                }
                 // 存档里的缓存是跨重建的权威副本；ARA 重建时从旧 take 继承的
                 // 可能是更旧的一轮。按稳定键存在时以存档为准，避免回退。
                 take.syllable_analysis = Some(analysis.clone());
@@ -738,28 +745,34 @@ impl EditState {
                 // 【为什么在这里校验】此方法会被保存路径调用；坏区间若进入存档，
                 // 下一次 `getState` 会让整份状态被拒，等于保存失败。逐条过滤比整份
                 // 丢安全得多，而且分析侧写出的本来就是合法区间。
+                //
+                // 【判据与 validate_take_syllables 逐条相同】这里的逐条循环是它的
+                // 镜像，两条规则不得漂移。此前用 `windows(2).all(...)` 时，空表与
+                // 单元素表的窗口都是空的，`all` 空转成真 —— 空区间（分析提交闸
+                // 明确"保留现有缓存"的形态）与非法的单区间都被当成合法收进存档；
+                // 后者更糟：validate 在恢复路径上会整份拒绝，存一次就再也读不回。
                 if analysis.algorithm.is_empty()
                     || analysis.algorithm_version == 0
                     || analysis.source_digest.is_empty()
+                    || analysis.source_spans_sec.is_empty()
                     || analysis.source_spans_sec.len() > 20000
                 {
                     continue;
                 }
-                let spans_valid = analysis.source_spans_sec.windows(2).all(|pair| {
-                    pair[0].start_sec.is_finite()
-                        && pair[0].end_sec.is_finite()
-                        && pair[0].end_sec > pair[0].start_sec
-                        && pair[1].start_sec >= pair[0].end_sec - 1e-9
-                        && pair[1].start_sec.is_finite()
-                        && pair[1].end_sec.is_finite()
-                        && pair[1].end_sec > pair[1].start_sec
-                });
-                let single_valid = analysis.source_spans_sec.len() == 1
-                    && analysis.source_spans_sec[0].start_sec.is_finite()
-                    && analysis.source_spans_sec[0].end_sec.is_finite()
-                    && analysis.source_spans_sec[0].end_sec
-                        > analysis.source_spans_sec[0].start_sec;
-                if !(spans_valid || single_valid) {
+                let mut previous_end = f64::NEG_INFINITY;
+                let mut spans_valid = true;
+                for span in &analysis.source_spans_sec {
+                    if !span.start_sec.is_finite()
+                        || !span.end_sec.is_finite()
+                        || span.end_sec <= span.start_sec
+                        || span.start_sec < previous_end - 1e-9
+                    {
+                        spans_valid = false;
+                        break;
+                    }
+                    previous_end = span.end_sec;
+                }
+                if !spans_valid {
                     continue;
                 }
                 self.take_syllables.insert(
@@ -1089,6 +1102,77 @@ mod tests {
             clip_id: "clip-a".into(),
             take_id: "take-a".into(),
         }));
+    }
+
+    /// 空区间与非法区间都不得进存档表：分析提交闸把"没检出区间"定义为
+    /// "保留现有缓存"，空区间不是可缓存的结果；非法单区间更会卡死恢复路径
+    /// （validate 整份拒绝）。此前 `windows(2).all` 对空表与单元素表空转成真，
+    /// 两类都被当成合法收进来。
+    #[test]
+    fn capture_refuses_empty_and_invalid_span_analyses() {
+        let mut edits = EditState::default();
+        let mut empty = syllable_analysis();
+        empty.source_spans_sec.clear();
+        let mut reversed = syllable_analysis();
+        reversed.source_spans_sec.clear();
+        reversed
+            .source_spans_sec
+            .push(hifishifter_kernel::pitch_analysis::SyllableSpan {
+                start_sec: 0.3,
+                end_sec: 0.1,
+                midi_note: None,
+                event_id: None,
+            });
+        let mut timeline = host();
+        timeline.clips = vec![serde_json::from_value(serde_json::json!({
+            "id":"clip-a","track_id":"track","name":"clip","start_sec":0,"length_sec":1,
+            "takes":[
+                {"id":"take-empty","source_start_sec":0,"source_end_sec":1,
+                 "syllable_analysis": empty},
+                {"id":"take-reversed","source_start_sec":0,"source_end_sec":1,
+                 "syllable_analysis": reversed}
+            ],
+            "active_take_id":"take-empty"
+        }))
+        .unwrap()];
+        edits.capture_take_syllables(&timeline);
+        assert!(
+            edits.take_syllables.is_empty(),
+            "{:?}",
+            edits.take_syllables
+        );
+    }
+
+    /// 存档里的空副本不得抹掉 live 上更权威的分析：跳过套用，而不是整体覆盖。
+    #[test]
+    fn an_archived_empty_analysis_never_clobbers_a_live_one() {
+        let mut edits = EditState::default();
+        let mut empty = syllable_analysis();
+        empty.source_spans_sec.clear();
+        edits.take_syllables.insert(
+            TakeSyllableKey {
+                clip_id: "clip-a".into(),
+                take_id: "take-a".into(),
+            },
+            empty,
+        );
+        let mut timeline = host();
+        timeline.clips = vec![serde_json::from_value(serde_json::json!({
+            "id":"clip-a","track_id":"track","name":"clip","start_sec":0,"length_sec":1,
+            "takes":[{"id":"take-a","source_start_sec":0,"source_end_sec":1,
+                      "syllable_analysis": syllable_analysis()}],
+            "active_take_id":"take-a"
+        }))
+        .unwrap()];
+        timeline.normalize_clip_takes();
+        edits.needs_rebind = false;
+        edits.unbound.clear();
+        edits.apply(&mut timeline);
+        assert_eq!(
+            timeline.clips[0].active_take().syllable_analysis,
+            Some(syllable_analysis()),
+            "live 的非空分析必须原样保留"
+        );
     }
     #[test]
     fn invalid_curve_and_unknown_track_are_rejected() {
