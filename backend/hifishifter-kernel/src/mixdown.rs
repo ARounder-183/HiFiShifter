@@ -936,6 +936,12 @@ fn apply_host_pitch_edit(
     // 因此必须按 `clip.start_sec` 把 offsets 的起点平移到曲线的帧号上。
     // 少这一项，App 路径的子轨偏移会整段前置 `clip.start_sec` 秒；
     // 多这一项（旧代码在 ARA 上），则整段后置一个分割点。
+    //
+    // 【刻意**不**读 `ExportPitchOffsetFrames::voiced`，也刻意不调
+    // `compute_clip_take_pitch_offsets`】渲染端对"这一帧没有 F0"的语义就是
+    // **不变换**（下面的 `filter(|value| **value > 0.0)` 就是这个语义），而导出侧的
+    // 未识别帧填充是"为了让宿主的连续控制信号不跳变"才存在的补偿。把填充搬到渲染端
+    // 等于改掉插件自己听到的声音 —— 那是另一个变更，不属于导出格式的修正。
     if let Some(offsets) = crate::pitch_editing::compute_clip_export_pitch_offsets(timeline, clip) {
         // 【必须与 `compute_clip_export_pitch_offsets` 的起点同一算式】那边按
         // `frame_grid::clip_frame_window` 读的是工程帧 `round(start)+local`，这里就

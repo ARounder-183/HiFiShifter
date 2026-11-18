@@ -991,6 +991,12 @@ fn export_host_take_pitch(session: &EditorSession, input: &Value) -> Result<Valu
     {
         let timeline = session.timeline.lock_or_recover();
         let frame_period_ms = timeline.frame_period_ms().max(0.1);
+        // 【策略只解析一次】放在循环外：循环内每次重算等于每个 clip 读一遍配置、
+        // 四次环境变量 —— 而结果对整批 clip 完全相同。
+        let fill_policy = hifishifter_kernel::pitch_bridge::UnvoicedFillPolicy::for_frame_period(
+            hifishifter_kernel::pitch_bridge::UnvoicedFill::default(),
+            frame_period_ms,
+        );
         for clip in &clips {
             // 【批量作用域：分析还没落地的片段一律不写】此时 `pitch_orig` 全是 0，
             // 会被当成"音高线是平的" ⇒ 空包络 ⇒ **删掉用户在 REAPER 里画好的包络**。
@@ -1002,10 +1008,15 @@ fn export_host_take_pitch(session: &EditorSession, input: &Value) -> Result<Valu
             // 【单条片段保持原语义】没有分析结果时按"全 0 曲线"处理 ⇒ 写空包络。那一步
             // 是**可见**的（用户点的是那一条，且只有一步撤销）；批量方向由上面的判据
             // 挡住 —— 一次点击不该顺手删掉几百条包络。
-            let offsets = hifishifter_kernel::pitch_editing::compute_clip_export_pitch_offsets(
-                &timeline, &clip.clip,
+            // 【未识别帧必须在这里填掉】渲染端对"这一帧没有 F0"的语义是**不变换**，
+            // 而宿主包络是连续控制信号 —— 逐帧写 0 会让移调器在每个辅音处把比率从
+            // +12 拉到 0 再拉回 +12。填充只发生在导出边界（见
+            // `compute_clip_take_pitch_offsets` 的文档），渲染端一个字节都不改。
+            let offsets = hifishifter_kernel::pitch_editing::compute_clip_take_pitch_offsets(
+                &timeline,
+                &clip.clip,
+                &fill_policy,
             )
-            .map(|frames| frames.offsets)
             .unwrap_or_default();
             let points = hifishifter_kernel::pitch_bridge::build_take_pitch_points(
                 &offsets,

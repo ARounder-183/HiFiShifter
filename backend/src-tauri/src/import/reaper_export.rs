@@ -372,8 +372,8 @@ fn build_item(
 // 精简容差与断点算法**只有一份**：`hifishifter_kernel::pitch_bridge`。
 // 导出与插件桥接共用同一份，否则"导出听起来对、插件里听起来不对"。
 use hifishifter_kernel::pitch_bridge::{
-    simplify_breakpoints, SIMPLIFY_TOLERANCE_PAN, SIMPLIFY_TOLERANCE_PITCH,
-    SIMPLIFY_TOLERANCE_VOLUME,
+    simplify_breakpoints, UnvoicedFill, UnvoicedFillPolicy, SIMPLIFY_TOLERANCE_PAN,
+    SIMPLIFY_TOLERANCE_PITCH, SIMPLIFY_TOLERANCE_VOLUME,
 };
 
 /// 每个导出 Clip 的参数线视图（命令层从 live timeline 预解析后传入）。
@@ -480,9 +480,16 @@ pub fn build_clip_export_curves(timeline: &TimelineState, clip: &Clip) -> ClipEx
         frame_period_ms,
         volume: merged_curve("volume"),
         pan: merged_curve("pan"),
+        // 【未识别帧的填充只装在这一个接缝上】REAPER 剪贴板与 `.rpp` 导出都经本
+        // 函数（事实：`build_clip_export_curves` 的调用者只有 `build_reaper_clipboard`
+        // 与 `build_item`）。因此 `build_take_pitch_envelope` 保持"只负责写"，
+        // 它收到的已经是填好的曲线 —— 写点逻辑与填充逻辑各自可测。
         pitch_offset: if root_compose_enabled {
-            crate::pitch_editing::compute_clip_export_pitch_offsets(timeline, clip)
-                .map(|p| p.offsets)
+            crate::pitch_editing::compute_clip_take_pitch_offsets(
+                timeline,
+                clip,
+                &UnvoicedFillPolicy::for_frame_period(UnvoicedFill::default(), frame_period_ms),
+            )
         } else {
             None
         },
@@ -499,8 +506,12 @@ pub fn build_clip_export_curves(timeline: &TimelineState, clip: &Clip) -> ClipEx
 ///
 /// - 坐标 u = t_rel × 组合速率（`item_time_to_take_env_u` 唯一转换点）；
 /// - 端点强制（u=0 与 u=item_length×rate）；值为 0 的帧 = 不做音高修正
-///  （显式 0 落点，不得依赖 hold 语义跨界或桥接邻近帧）；
+///  （显式 0 落点，不得依赖 hold 语义跨界）；
 /// - 值不钳制（REAPER PIT 值域无限制）；DEFSHAPE 范围按最大偏移写入。
+///
+/// 【本函数**不做**任何填充】未识别帧的填充在上游 `build_clip_export_curves`
+/// （`compute_clip_take_pitch_offsets`）里完成，这里收到的已经是最终值。这样"填什么"
+/// 与"怎么写点"各自可测，也不必让写出层知道策略的存在。
 fn build_take_pitch_envelope(
     curves: &ClipExportCurves,
     item_length_sec: f64,
@@ -1730,6 +1741,62 @@ mod tests {
         );
         // 随后显式升到 +2 并保持到段末。
         assert!((env.points[1][1] - 2.0).abs() < 1e-6);
+        // 【本函数只负责写】上游 `build_clip_export_curves` 会先把"未识别帧"填成
+        // 邻域值，因此真实导出里通常见不到这种曲线。这条用例钉的是**写出层**的契约：
+        // 给它 0 就必须写 0 —— 不要在这里补桥接，那会让"填充"与"写点"又搅在一起。
+    }
+
+    /// 辅音间隙不再掉到 0：填充后的包络跟随邻域，写出的点里没有"由 unvoiced 造成的 0"。
+    ///
+    /// 【回归对象】导出侧曾把 `pitch_orig == 0` 的帧显式写成 0 点，于是 REAPER 拿到一条
+    /// `+2 → 0 → +2` 的折线，在每个辅音处把比率拉回 1 再拉上去。填充只作用于导出
+    /// 边界，渲染端不受影响。
+    #[test]
+    fn a_consonant_gap_no_longer_dips_to_zero() {
+        let mut timeline = TimelineState::default();
+        timeline.tracks[0].compose_enabled = true;
+        let root_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(root_id.clone()),
+            Some("Consonant".to_string()),
+            Some(0.0),
+            Some(0.2),
+            Some("C:/audio/voice.wav".to_string()),
+        );
+        // 40 帧 = 0.2 s：10..16 是 6 帧（30 ms）无 F0 的辅音，正好在阈值上。
+        let mut pitch_orig = vec![60.0f32; 40];
+        let mut pitch_edit = vec![62.0f32; 40];
+        for frame in 10..16 {
+            pitch_orig[frame] = 0.0;
+            pitch_edit[frame] = 0.0;
+        }
+        timeline.params_by_root_track.insert(
+            root_id,
+            crate::state::TrackParamsState {
+                frame_period_ms: 5.0,
+                pitch_orig,
+                pitch_edit,
+                pitch_edit_user_modified: true,
+                ..crate::state::TrackParamsState::default()
+            },
+        );
+        let clip = timeline.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let curves = build_clip_export_curves(&timeline, clip);
+        let values = curves.pitch_offset.clone().expect("pitch curve");
+        assert_eq!(values.len(), 40);
+        assert!(
+            values[10..16].iter().all(|value| (value - 2.0).abs() < 1e-6),
+            "辅音间隙必须被填成邻域值，实际 {:?}",
+            &values[10..16]
+        );
+        // 整条曲线现在是平的 +2 ⇒ 恰好 2 个端点，且没有任何 0 点。
+        let env = build_take_pitch_envelope(&curves, 0.2, 1.0).expect("envelope");
+        assert_eq!(env.points.len(), 2, "{:?}", env.points);
+        assert!(
+            env.points.iter().all(|point| point[1] > 1.9),
+            "包络里不得出现由 unvoiced 造成的 0 点：{:?}",
+            env.points
+        );
     }
 
     #[test]
