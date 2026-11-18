@@ -196,17 +196,23 @@ fn blend_unvoiced_regions_with_silence_gate_impl(
 
     // 1) 逐样本求"目标权重"：1 = 用合成（湿），0 = 用原始（干）。
     //
-    // 浊音帧恒为湿；非浊音帧若原始信号本身有能量（齿音/气声）则切回干，
-    // 否则（真静音）保留合成 —— 合成的静音也是静音，切不切听感相同，
-    // 保持湿可避免在"静音↔气声"的判定抖动处反复切换。
-    // 帧级能量门：每帧只做一次能量求和，样本循环里直接查表。
+    // 判据**正向写**（这里算的是"要不要保持湿声"）：
+    //   - 浊音帧                → 湿（必须走声码器，否则移调与音色变化都不生效）；
+    //   - 无 F0 且可闻（齿音/气声/爆破）→ **干**（原样混回。WORLD 对无 F0 帧做的是
+    //     随机相位重合成，听感是"沙"；这类内容正是它最不擅长的地方）；
+    //   - 无 F0 且真静音        → 湿（合成的静音也是静音；保持湿可避免在"静音 ↔ 气声"
+    //     的判定抖动处反复切换）。
+    // 即 `keep_wet = voiced || rms < silence_rms`。
     //
-    // 【为什么不是在样本循环里逐帧求和】旧实现每个样本都对所属帧重新求一遍
-    // 能量 —— 同一帧内 ~frame_samples 个样本重复同样的 multiply-add
-    // （5ms @ 44.1kHz ≈ 220 倍冗余），整段 WORLD 渲染里非浊音部分
-    // 直接多出一个数量级的白做功。判定结果与逐样本实现完全一致：
-    // 每帧的 RMS 只依赖 `dry` 与 `frame_samples`，与查询样本无关。
-    let frame_gate: Vec<bool> = voiced
+    // 【这条判据曾被写反】`eda045974` 的一次"只改性能"重构把两个分支的**值**换了位置
+    // （条件本身没动），于是可闻的齿音走了湿声、真静音走了干声，而注释仍描述正确语义 ——
+    // 这类 diff 读起来"只是重构"。所以判据现在直接以"保持湿"的形式表达，并由
+    // `an_audible_unvoiced_frame_comes_back_dry` 钉住。
+    //
+    // 【为什么改成帧级查表】旧实现每个样本都对所属帧重新求一遍能量 —— 同一帧内
+    // ~frame_samples 个样本重复同样的 multiply-add（5ms @ 44.1kHz ≈ 220 倍冗余）。
+    // 判定结果与逐样本实现完全一致：每帧的 RMS 只依赖 `dry` 与 `frame_samples`。
+    let keep_wet: Vec<bool> = voiced
         .iter()
         .enumerate()
         .map(|(fi, &is_voiced)| {
@@ -216,13 +222,15 @@ fn blend_unvoiced_regions_with_silence_gate_impl(
             let start = fi.saturating_mul(frame_samples).min(dry.len());
             let end = ((fi + 1).saturating_mul(frame_samples)).min(dry.len());
             if start >= end {
-                return false;
+                // 帧越界：没有"可闻"的依据 ⇒ 按真静音处理（保持湿）。
+                return true;
             }
             let mut energy = 0.0f64;
             for &sample in &dry[start..end] {
                 energy += sample * sample;
             }
-            (energy / (end - start) as f64).sqrt() >= silence_rms
+            // 低于静音门 ⇒ 听不见 ⇒ 保持湿；否则切回干。
+            (energy / (end - start) as f64).sqrt() < silence_rms
         })
         .collect();
 
@@ -230,8 +238,8 @@ fn blend_unvoiced_regions_with_silence_gate_impl(
     for (si, t) in target.iter_mut().enumerate() {
         let t_ms = (si as f64) * 1000.0 / (fs.max(1) as f64);
         let fi = (t_ms / fp.max(0.1)).floor().max(0.0) as usize;
-        // 帧越界视为湿（合成静音）；浊音帧湿；非浊音但有能量切回干；真静音保持湿。
-        *t = if frame_gate.get(fi).copied().unwrap_or(true) {
+        // 帧越界视为湿（合成静音）；其余直接查表（见 `keep_wet` 的判据）。
+        *t = if keep_wet.get(fi).copied().unwrap_or(true) {
             1.0
         } else {
             0.0
@@ -1110,6 +1118,144 @@ mod tests {
         assert!(
             peak <= p999 * 8.0,
             "seam at {boundary} has an outlier step: peak={peak} p99.9={p999}"
+        );
+    }
+
+    // ── 无 F0 帧（辅音）的既定行为 ────────────────────────────────────────────
+    //
+    // 辅音、齿音、气声**不参与移调**：这是听感上定下的取舍 —— 搬它们的谱包络会把
+    // /s/ 推成 /ʃ/，而同一个说话人念同一个字时齿音本来就几乎不随音高移动。与其猜
+    // 一个补偿量，不如让它们原样通过；代价是大幅移调下辅音与元音的音区会略微脱节。
+    //
+    // 这一组用例是这个取舍的**契约**。它们断言谱心而不是波形：波形对相位敏感
+    // （WORLD 每次合成都重新起相），谱心才是"有没有搬"的直接判据。
+
+    const CONSONANT_SR: u32 = 44_100;
+
+    /// 两个谐振器加权求和：模拟 /s/ 那样的 6–8 kHz 噪声带。
+    fn consonant_band(seconds: f64) -> Vec<f32> {
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let mut low = (0.0f64, 0.0f64);
+        let mut high = (0.0f64, 0.0f64);
+        let resonator = |input: f32, memory: &mut (f64, f64), centre: f64, bandwidth: f64| {
+            let r = (-std::f64::consts::PI * bandwidth / f64::from(CONSONANT_SR)).exp();
+            let theta = 2.0 * std::f64::consts::PI * centre / f64::from(CONSONANT_SR);
+            let value =
+                (1.0 - r) * f64::from(input) + 2.0 * r * theta.cos() * memory.0 - r * r * memory.1;
+            memory.1 = memory.0;
+            memory.0 = value;
+            value * 3.0
+        };
+        (0..(seconds * f64::from(CONSONANT_SR)) as usize)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let white = ((state >> 33) as f32 / (u32::MAX >> 1) as f32) * 2.0 - 1.0;
+                ((resonator(white, &mut low, 6000.0, 900.0) * 0.35
+                    + resonator(white, &mut high, 8100.0, 1400.0) * 0.25)
+                    * 0.08) as f32
+            })
+            .collect()
+    }
+
+    /// 加 Hann 窗的谱心（150 Hz–16 kHz，1/4 倍频程栅格）。
+    fn consonant_centroid(samples: &[f32]) -> f64 {
+        let frequencies: Vec<f64> = (0..30)
+            .map(|index| 150.0 * 2f64.powf(index as f64 * 0.25))
+            .filter(|value| *value < f64::from(CONSONANT_SR) * 0.45)
+            .collect();
+        let mut numerator = 0.0;
+        let mut denominator = 0.0;
+        for frequency in frequencies {
+            let omega = 2.0 * std::f64::consts::PI * frequency / f64::from(CONSONANT_SR);
+            let length = samples.len() as f64;
+            let mut real = 0.0f64;
+            let mut imaginary = 0.0f64;
+            for (index, value) in samples.iter().enumerate() {
+                let window = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * index as f64 / length).cos();
+                let shaped = f64::from(*value) * window;
+                real += shaped * (omega * index as f64).cos();
+                imaginary -= shaped * (omega * index as f64).sin();
+            }
+            let energy = real * real + imaginary * imaginary;
+            numerator += frequency * energy;
+            denominator += energy;
+        }
+        if denominator <= 1e-12 {
+            0.0
+        } else {
+            numerator / denominator
+        }
+    }
+
+    /// **辅音不随移调变化**：同一段无 F0 噪声在 `+0` / `+7` / `+12` 下谱心必须相同。
+    ///
+    /// 【为什么钉这条】它是"辅音没有被移调"这件事的**唯一客观判据**。任何"顺手让辅音
+    /// 也跟一下"的改动都会在这里变红 —— 那正是取舍需要重新讨论的信号，而不是一次
+    /// 普通的实现改动。
+    #[test]
+    fn a_consonant_keeps_its_spectrum_across_every_transposition() {
+        let input = consonant_band(0.5);
+        let mut centroids = Vec::new();
+        for semitones in [0.0f64, 7.0, 12.0] {
+            let out = vocode_pitch_shift_chunked(
+                &input,
+                CONSONANT_SR,
+                0.0,
+                5.0,
+                40.0,
+                1600.0,
+                move |_| semitones,
+            )
+            .unwrap();
+            let window = &out[(0.1 * f64::from(CONSONANT_SR)) as usize
+                ..(0.4 * f64::from(CONSONANT_SR)) as usize];
+            centroids.push(consonant_centroid(window));
+        }
+        let reference = centroids[0];
+        for (index, value) in centroids.iter().enumerate() {
+            assert!(
+                (value - reference).abs() / reference < 0.02,
+                "辅音谱心随移调变化了：{centroids:?}（第 {index} 项）"
+            );
+        }
+    }
+
+    /// **可闻的无 F0 帧必须原样返回**（干声），不是被 WORLD 重合成一遍。
+    ///
+    /// 这条曾经红过：`blend_unvoiced_regions_with_silence_gate` 的干/湿门在
+    /// `eda045974` 里被写反（可闻的无 F0 帧走湿声、真静音走干声），而函数注释
+    /// 仍然描述正确语义，于是那段 diff 读起来"只是重构"。判据现在写成逐样本相同而
+    /// 不是相信注释 —— 极性再翻一次，这里就会红。
+    #[test]
+    fn an_audible_unvoiced_frame_comes_back_dry() {
+        let mut state = 0xdead_beef_1234_5678u64;
+        let mut noise: Vec<f32> = (0..(0.5 * f64::from(CONSONANT_SR)) as usize)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((state >> 33) as f32 / (u32::MAX >> 1) as f32) * 0.2 - 0.1
+            })
+            .collect();
+        // 【为什么要先去直流】声码器入口会做一次全局去均值（且**从不加回**），
+        // 因此"干声"在严格意义上等于"去直流后的输入"。测试先去直流，判据才能写成
+        // 逐样本相同 —— 否则一条 1e-4 级的 DC 偏移会让"门到底有没有关上"看不出来。
+        let mean = noise.iter().map(|value| f64::from(*value)).sum::<f64>() / noise.len() as f64;
+        for value in noise.iter_mut() {
+            *value = (*value as f64 - mean) as f32;
+        }
+        let out = vocode_pitch_shift_chunked(&noise, CONSONANT_SR, 0.0, 5.0, 40.0, 1600.0, |_| 0.0)
+            .unwrap();
+        let max_diff = noise
+            .iter()
+            .zip(out.iter())
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_diff < 1e-6,
+            "可闻的无 F0 帧被重合成了一遍（max diff {max_diff}）；干/湿门极性反了"
         );
     }
 }

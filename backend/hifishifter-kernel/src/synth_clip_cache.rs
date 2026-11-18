@@ -450,7 +450,10 @@ pub fn clear_pad_suppressed_clips() {
 ///
 /// v10：新增 `hifigan_growl`（GRWC 怒音）——它在谐波支上改变波形，
 /// 旧缓存不得被当作本版本结果返回。
-pub const RENDER_PIPELINE_VERSION: u32 = 10;
+/// v11：WORLD 的干/湿门极性修正。可闻的无 F0 帧（齿音、气声、爆破）恢复走干声，
+/// 此前它们被当成湿声交给 WORLD 做随机相位重合成（听感是"沙"）。这条改变了既有
+/// 工程的渲染结果，必须整体失效，否则升级后会读到旧算法的 PCM。
+pub const RENDER_PIPELINE_VERSION: u32 = 11;
 
 /// [`compute_rendered_clip_hash`] 的输入集合。
 ///
