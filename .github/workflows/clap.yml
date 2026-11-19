@@ -1,11 +1,24 @@
 name: CLAP plug-in
 
 # CI 只做构建：工作流不跑测试；产物的黑盒自检在本地执行。
+#
+# 【权限/并发/超时与 PR 过滤】与 vst3-unix.yml、build.yml、frontend-build.yml 保持
+# 同一口径：只读令牌；同分支新推送取消在途的旧一轮（三条昂贵的矩阵腿不该陪跑）；
+# job 级超时兜底（默认 360 分钟太宽）；PR 只钉 main/develop，功能分支的迭代
+# 由开发者的本地门禁（scripts/checks）负责。
 on:
   pull_request:
+    branches: [main, develop]
   push:
     tags: ["v*"]
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clap-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   frontend:
@@ -13,6 +26,7 @@ jobs:
 
   build:
     needs: frontend
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
