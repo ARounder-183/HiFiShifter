@@ -669,6 +669,16 @@ impl ExtensionOwner {
         // 第一个实例的行会把其余实例的行全部挤进 `[throttled]` —— 日志里于是只剩编辑
         // 实例的声音，而"播放实例根本没读到旁通"这件事被静默掉。那正是本轮排查卡住的
         // 地方。两个桶既保住了"哪一类实例在说话"，又不随实例数增长。
+        // 【把"凭什么"一起写出来】结论本身说明不了任何事：`active -> bypassed` 既可能是
+        // 用户点了旁通，也可能是我们把一个不存在的读数当成了事实（take FX 那次静音的
+        // 全部证据就是"整链总开关读到 0"）。四位事实 —— 匹配数/总数、启用数、离线数、
+        // 整链开关 —— 正好把这两种情形分开，而且只在结论变化时写一行。
+        let note = host.host_bypass_note();
+        let detail = if note.is_empty() {
+            String::new()
+        } else {
+            format!(" ({note})")
+        };
         hifishifter_kernel::log_limiter::emit_limited_key(
             log::Level::Warn,
             if self.renders_playback() {
@@ -677,10 +687,11 @@ impl ExtensionOwner {
                 "ara.host-bypass.editor"
             },
             format_args!(
-                "[ara] writer {} host bypass: {} -> {}",
+                "[ara] writer {} host bypass: {} -> {}{}",
                 self.writer_id(),
                 previous.as_str(),
-                state.as_str()
+                state.as_str(),
+                detail
             ),
         );
         true

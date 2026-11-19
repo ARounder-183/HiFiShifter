@@ -9,9 +9,20 @@
 //! 旁通扩展。所以"我是不是被旁通了"只能问**宿主自己的**原生 API。
 //!
 //! REAPER 给出**两条平行**的这一族读数：轨道的 `TrackFX_*` 与 take 的 `TakeFX_*`，
-//! 各有四件（`GetCount` / `GetEnabled` / `GetOffline` / `GetFXName`），外加各自的
-//! 整链总开关（轨道的 `I_FXEN`、take 的 `B_TAKEFX`）。本模块把它们收成一个**链**的
-//! 只读视图（[`FxChain`]），于是"读哪条链"由调用方按放置位置选，"怎么判"只有一份。
+//! 各有四件（`GetCount` / `GetEnabled` / `GetOffline` / `GetFXName`）。本模块把它们
+//! 收成一个**链**的只读视图（[`FxChain`]），于是"读哪条链"由调用方按放置位置选，
+//! "怎么判"只有一份。
+//!
+//! # 两条链**并不对称**：整链总开关只有轨道侧有
+//!
+//! 轨道有 `I_FXEN`（"fx enabled, 0=bypassed"），take 侧**没有**对应物：
+//! `GetMediaItemTakeInfo_Value` 的字段表里没有任何整链开关（`TAKEFX_NCH` 只是内部
+//! 通道数），`TakeFX_*` 一族也只有逐 FX 的 `GetEnabled` / `GetOffline`。
+//!
+//! 这条不对称曾经被"对称美学"抹平过：take 链照轨道的样子去读 `B_TAKEFX`，而宿主对
+//! **未知**参数一律返回 0 —— 于是一个**完全没有被旁通**的 take FX 实例被判成旁通，
+//! 渲染入口整段跳过，用户听到的是**彻底的静音**。教训写进 [`ChainGate`]：读不到
+//! 就是读不到，绝不用"0"这个默认值替宿主下结论。
 //!
 //! # 为什么是三态而不是布尔
 //!
@@ -40,8 +51,6 @@ pub(super) type FxOffline = unsafe extern "C" fn(*mut c_void, i32) -> bool;
 pub(super) type FxName = unsafe extern "C" fn(*mut c_void, i32, *mut c_char, i32) -> bool;
 /// `double GetMediaTrackInfo_Value(MediaTrack*, const char*)`
 pub(super) type TrackValue = unsafe extern "C" fn(*mut c_void, *const c_char) -> f64;
-/// `double GetMediaItemTakeInfo_Value(MediaItem_Take*, const char*)`
-pub(super) type TakeValue = unsafe extern "C" fn(*mut c_void, *const c_char) -> f64;
 
 /// 轨道 FX 链的四件读数 + 整链总开关（`I_FXEN`）。
 pub(super) struct TrackChainApi {
@@ -52,13 +61,17 @@ pub(super) struct TrackChainApi {
     pub track_value: TrackValue,
 }
 
-/// take FX 链的四件读数 + 整链总开关（`B_TAKEFX`）。
+/// take FX 链的四件读数。
+///
+/// 【为什么**没有**整链总开关】take 侧根本没有这个读数（见模块文档）：`TakeFX_*` 没有
+/// `GetChainEnabled`，`GetMediaItemTakeInfo_Value` 也没有对应字段。曾经凭"轨道有、
+/// take 也该有"去读了一个不存在的 `B_TAKEFX`，宿主对未知参数返回 0 ⇒ 一律判成"整链
+/// 被关掉" ⇒ take FX 下**整段静音**。宁可承认"这条链没有总开关"，也不许再猜。
 pub(super) struct TakeChainApi {
     pub count: FxCount,
     pub enabled: FxEnabled,
     pub offline: FxOffline,
     pub name: FxName,
-    pub take_value: TakeValue,
 }
 
 /// 读 FX 旁通所需的入口。
@@ -122,6 +135,37 @@ impl FxBypass {
     }
 }
 
+/// 一条链**整链总开关**的读数。
+///
+/// `Unknown` 是"**没有这个读数**"：take 链恒为它，轨道链在 API 缺失 / 读取被拒时也是它。
+/// 与 [`FxBypass::Unknown`] 同一条纪律 —— 不得被当成"关掉"。判据里把它读作"这一位
+/// 不投票"：只要每个 FX 自己的 enabled / offline 都说"在用"，门就是开的。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ChainGate {
+    /// 宿主明确报告这条链是通的。
+    Open,
+    /// 宿主明确报告这条链被关掉（轨道 `I_FXEN == 0`）。
+    Closed,
+    /// 没有这个读数（take 链，或这一轮读不出来）。
+    Unknown,
+}
+
+impl ChainGate {
+    /// 稳定的语言无关编码（诊断用）。
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed => "closed",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// 只有**宿主明确说**关掉才算关 —— `Unknown` 不算。
+    pub(super) fn is_closed(self) -> bool {
+        matches!(self, Self::Closed)
+    }
+}
+
 /// 一条 FX 链的只读视图；轨道与 take 各实现一次。
 ///
 /// 【为什么要有这层】"哪条链"与"怎么判"是两件事。判定（[`decide`]）是纯函数、
@@ -133,8 +177,8 @@ pub(super) trait FxChain {
     fn name(&self, index: i32, buffer: &mut [i8]) -> Result<bool, String>;
     fn enabled(&self, index: i32) -> Result<bool, String>;
     fn offline(&self, index: i32) -> Result<bool, String>;
-    /// 整条链的总开关。
-    fn chain_enabled(&self) -> Result<bool, String>;
+    /// 整条链的总开关。没有这个读数的链返回 [`ChainGate::Unknown`]。
+    fn chain_enabled(&self) -> Result<ChainGate, String>;
 }
 
 /// 轨道 FX 链（`TrackFX_*` + `I_FXEN`）。
@@ -178,15 +222,19 @@ impl FxChain for TrackChain<'_> {
             (self.api.offline)(self.track, index)
         })
     }
-    fn chain_enabled(&self) -> Result<bool, String> {
+    fn chain_enabled(&self) -> Result<ChainGate, String> {
         let value = checked(self.authorized, || unsafe {
             (self.api.track_value)(self.track, c"I_FXEN".as_ptr())
         })?;
-        Ok(value != 0.0)
+        Ok(if value != 0.0 {
+            ChainGate::Open
+        } else {
+            ChainGate::Closed
+        })
     }
 }
 
-/// take FX 链（`TakeFX_*` + `B_TAKEFX`）。
+/// take FX 链（只有 `TakeFX_*` 四件；take 侧没有整链总开关）。
 pub(super) struct TakeChain<'a> {
     api: &'a TakeChainApi,
     take: *mut c_void,
@@ -227,17 +275,12 @@ impl FxChain for TakeChain<'_> {
             (self.api.offline)(self.take, index)
         })
     }
-    /// take 侧的整链开关是 take 自己的字段 `B_TAKEFX`（`I_FXEN` 的对应物）。
+    /// take 侧**没有**整链总开关这个读数（见模块文档与 [`TakeChainApi`]）。
     ///
-    /// 【为什么不用 `TakeFX_GetEnabled(take, -1)`】两个读数表达同一件事，但
-    /// `GetMediaItemTakeInfo_Value` 与轨道侧的 `GetMediaTrackInfo_Value` 是同一条
-    /// 读取纪律（同族入口、同一种"读不到就当 0"的失败面），选它让两条链的失败形态
-    /// 一致。真机复核（方案 E2）若发现 `B_TAKEFX` 不表达整链开关，只需改这一处。
-    fn chain_enabled(&self) -> Result<bool, String> {
-        let value = checked(self.authorized, || unsafe {
-            (self.api.take_value)(self.take, c"B_TAKEFX".as_ptr())
-        })?;
-        Ok(value != 0.0)
+    /// 【为什么是"没有读数"而不是"链是开的"】两种答案都让门保持敞开，但一个是事实、
+    /// 一个是断言。诊断里必须能看出"这一位没有投票"，否则下一次同样的故障又要从头查。
+    fn chain_enabled(&self) -> Result<ChainGate, String> {
+        Ok(ChainGate::Unknown)
     }
 }
 
@@ -281,20 +324,71 @@ pub(super) fn probe(chain: &dyn FxChain, class_name: &str) -> Result<ChainFacts,
     Ok(ChainFacts { count, matching })
 }
 
+/// 一条链上一轮读取的完整读数：结论 **和** 它凭什么。
+///
+/// 【为什么要连"凭什么"一起交出来】旁通门一旦判错，用户看到的是"完全没有声音"或
+/// "旁通了还在跑满 CPU"，而日志里只有一行结论。把四份原始读数留在同一行里，
+/// 下一次同类报障第一眼就能看出是哪一位判错了 —— take FX 那次静音正是这样：
+/// 结论"被旁通"，而四位事实里唯一的反常是"整链总开关 = 关"。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ChainReading {
+    /// 结论。
+    pub verdict: FxBypass,
+    /// 这条链上有几个 FX、其中几个是本插件。
+    pub facts: ChainFacts,
+    /// 匹配到的 FX 里有几个是启用的。
+    pub enabled: usize,
+    /// 匹配到的 FX 里有几个处于离线。
+    pub offline: usize,
+    /// 整链总开关的读数（take 链恒为 [`ChainGate::Unknown`]）。
+    pub gate: ChainGate,
+}
+
+impl ChainReading {
+    /// 没有读数（链是空的 / 这条链上没有本插件）。
+    fn unknown(facts: ChainFacts) -> Self {
+        Self {
+            verdict: FxBypass::Unknown,
+            facts,
+            enabled: 0,
+            offline: 0,
+            gate: ChainGate::Unknown,
+        }
+    }
+
+    /// 一行诊断：`found=1/1 enabled=1 offline=0 gate=unknown`。
+    ///
+    /// 【为什么要带上分母】`found=1` 与 `found=1/3` 是两种完全不同的处境：后者说明
+    /// 这条链上还挂着别人的 FX。排查"读错链"时这一点比结论本身更有用。
+    pub(super) fn summary(self) -> String {
+        format!(
+            "found={}/{} enabled={} offline={} gate={}",
+            self.facts.matching,
+            self.facts.count,
+            self.enabled,
+            self.offline,
+            self.gate.as_str()
+        )
+    }
+}
+
 /// 在**一条**链上读一次旁通结论。
 ///
 /// 调用方保证：`authorized` 在整段读取期间可反复求值；`chain` 指向本实例**真正挂靠**
 /// 的那条链（由 [`super::placement::HostPlacement`] 决定）。**不得**在查不到时换一条链
 /// 重试 —— 见模块文档。
-pub(super) fn read_chain(chain: &dyn FxChain, class_name: &str) -> Result<FxBypass, String> {
+pub(super) fn read_chain(chain: &dyn FxChain, class_name: &str) -> Result<ChainReading, String> {
     let count = chain.count()?;
     if count <= 0 {
-        return Ok(FxBypass::Unknown);
+        return Ok(ChainReading::unknown(ChainFacts {
+            count: count.max(0),
+            matching: 0,
+        }));
     }
     let needle = class_name.to_ascii_lowercase();
     let mut found = 0_usize;
-    let mut any_enabled = false;
-    let mut all_offline = true;
+    let mut enabled = 0_usize;
+    let mut offline = 0_usize;
     let mut buffer = [0_i8; 256];
     for index in 0..count {
         if !chain.name(index, &mut buffer)? {
@@ -308,39 +402,50 @@ pub(super) fn read_chain(chain: &dyn FxChain, class_name: &str) -> Result<FxBypa
             continue;
         }
         found += 1;
-        any_enabled |= chain.enabled(index)?;
-        all_offline &= chain.offline(index)?;
+        if chain.enabled(index)? {
+            enabled += 1;
+        }
+        if chain.offline(index)? {
+            offline += 1;
+        }
     }
     if found == 0 {
-        return Ok(FxBypass::Unknown);
+        return Ok(ChainReading::unknown(ChainFacts { count, matching: 0 }));
     }
-    let chain_enabled = chain.chain_enabled()?;
-    Ok(decide(found, any_enabled, all_offline, chain_enabled))
+    // 【整链总开关排在逐 FX 读数之后读】它是唯一一个"每个 FX 都正常、但整条链被关掉"
+    // 的读数，只在确实匹配到本插件时才值得问一次宿主。
+    let gate = chain.chain_enabled()?;
+    Ok(ChainReading {
+        verdict: decide(found, enabled, offline, gate),
+        facts: ChainFacts {
+            count,
+            matching: found,
+        },
+        enabled,
+        offline,
+        gate,
+    })
 }
 
-/// 由四份读数得出结论。
+/// 由几份原始读数得出结论。
 ///
 /// 入参都是**已经核实过的**事实：
 /// * `found` —— 这条链上有几个 FX 是本插件（按类名匹配到的个数）；
-/// * `any_enabled` —— 其中是否至少有一个是启用的；
-/// * `all_offline` —— 其中是否全部处于离线（offline = 不加载、不处理）；
-/// * `chain_enabled` —— 这条链的总开关（轨道 `I_FXEN` / take `B_TAKEFX`）。
+/// * `enabled` —— 其中几个是启用的；
+/// * `offline` —— 其中几个处于离线（offline = 不加载、不处理）；
+/// * `gate` —— 这条链的整链总开关；[`ChainGate::Unknown`] = 没有这个读数。
 ///
 /// 判定取"**全部**证据都指向旁通才报旁通"：
 /// * 一个都没匹配到 ⇒ 不知道（可能是宿主改了显示名，也可能这条链上挂的是别的实例）；
 /// * 只要有一个同类 FX 是启用的 ⇒ 活跃（同一条链上挂两个本插件实例时宿主只会把区域交给
 ///   其中一个，"至少有一个在用"才是安全的答案）；
-/// * 全部离线、或整条链被关掉 ⇒ 旁通 —— 这两种状态下宿主都拿不到我们的输出。
-pub(crate) fn decide(
-    found: usize,
-    any_enabled: bool,
-    all_offline: bool,
-    chain_enabled: bool,
-) -> FxBypass {
+/// * 全部离线、或整条链**被明确关掉** ⇒ 旁通 —— 这两种状态下宿主都拿不到我们的输出；
+/// * [`ChainGate::Unknown`] ⇒ 这一位不投票。它不是"关掉"，而是"这条链没有这个开关"。
+pub(crate) fn decide(found: usize, enabled: usize, offline: usize, gate: ChainGate) -> FxBypass {
     if found == 0 {
         return FxBypass::Unknown;
     }
-    if !chain_enabled || all_offline || !any_enabled {
+    if gate.is_closed() || offline >= found || enabled == 0 {
         return FxBypass::Bypassed;
     }
     FxBypass::Active
@@ -376,21 +481,29 @@ pub(crate) fn combine(verdicts: &[FxBypass]) -> FxBypass {
 mod tests {
     use super::*;
 
-    /// 一条纯内存的 FX 链：把宿主的五件读数换成五个可断言的值。
+    /// 一条纯内存的 FX 链：把宿主的读数换成几个可断言的值。
     ///
     /// 【为什么值得造它】[`read_chain`] 的判据（名字匹配 → 逐 FX enabled/offline →
     /// 整链开关）此前只能靠真机验证；有了它，两条链共用的那份判定在没有宿主的前提下
     /// 也能被逐值钉住。
     struct FakeChain {
         entries: Vec<(&'static str, bool, bool)>,
-        chain_enabled: bool,
+        gate: ChainGate,
     }
 
     impl FakeChain {
         fn new(entries: &[(&'static str, bool, bool)]) -> Self {
             Self {
                 entries: entries.to_vec(),
-                chain_enabled: true,
+                gate: ChainGate::Open,
+            }
+        }
+
+        /// 没有整链总开关的链（take FX 的唯一形态）。
+        fn without_master_switch(entries: &[(&'static str, bool, bool)]) -> Self {
+            Self {
+                entries: entries.to_vec(),
+                gate: ChainGate::Unknown,
             }
         }
     }
@@ -414,8 +527,8 @@ mod tests {
         fn offline(&self, index: i32) -> Result<bool, String> {
             Ok(self.entries[index as usize].2)
         }
-        fn chain_enabled(&self) -> Result<bool, String> {
-            Ok(self.chain_enabled)
+        fn chain_enabled(&self) -> Result<ChainGate, String> {
+            Ok(self.gate)
         }
     }
 
@@ -423,27 +536,60 @@ mod tests {
     /// 绝不猜成"旁通"（那会让用户听不到声音）。
     #[test]
     fn no_matching_fx_is_unknown_not_a_guess() {
-        assert_eq!(decide(0, false, false, true), FxBypass::Unknown);
-        assert_eq!(decide(0, true, false, false), FxBypass::Unknown);
+        assert_eq!(decide(0, 0, 0, ChainGate::Open), FxBypass::Unknown);
+        assert_eq!(decide(0, 1, 0, ChainGate::Closed), FxBypass::Unknown);
+        assert_eq!(
+            read_chain(&FakeChain::new(&[]), "hifishifter"),
+            Ok(ChainReading::unknown(ChainFacts {
+                count: 0,
+                matching: 0
+            }))
+        );
     }
 
     /// 只要有一个同类实例是启用的，就按活跃处理 —— 同轨两个实例时宿主只会把区域交给
     /// 其中一个，"至少有一个在用"是唯一安全的答案。
     #[test]
     fn one_enabled_instance_keeps_the_renderer_active() {
-        assert_eq!(decide(2, true, false, true), FxBypass::Active);
-        assert_eq!(decide(1, true, false, true), FxBypass::Active);
+        assert_eq!(decide(2, 1, 0, ChainGate::Open), FxBypass::Active);
+        assert_eq!(decide(1, 1, 0, ChainGate::Open), FxBypass::Active);
     }
 
     /// 三种"宿主不会读我们的输出"都必须报旁通。
     #[test]
     fn every_way_the_host_stops_reading_us_reports_bypass() {
         // 单个 FX 被旁通。
-        assert_eq!(decide(1, false, false, true), FxBypass::Bypassed);
+        assert_eq!(decide(1, 0, 0, ChainGate::Open), FxBypass::Bypassed);
         // FX 离线（不加载）。
-        assert_eq!(decide(1, true, true, true), FxBypass::Bypassed);
+        assert_eq!(decide(1, 1, 1, ChainGate::Open), FxBypass::Bypassed);
         // 整条 FX 链被关掉。
-        assert_eq!(decide(1, true, false, false), FxBypass::Bypassed);
+        assert_eq!(decide(1, 1, 0, ChainGate::Closed), FxBypass::Bypassed);
+    }
+
+    /// **整链总开关"没有读数"不是"关掉"。**
+    ///
+    /// 【为什么这条是 take FX 那次静音的回归】take 链没有 `I_FXEN` 的对应物，而旧实现
+    /// 按轨道的形状去读了一个不存在的参数（`B_TAKEFX`）。宿主对**未知**参数一律返回
+    /// 0.0，于是"整链总开关"读成 0 ⇒ 判旁通 ⇒ `prepare()` 直接返回 ⇒ **一点声音都
+    /// 没有**，而日志里只有一行 `unknown -> bypassed`。判据必须能表达"这一位不存在"。
+    #[test]
+    fn a_chain_without_a_master_switch_never_closes_the_gate() {
+        let take = FakeChain::without_master_switch(&[("VST3: HiFiShifter", true, false)]);
+        let reading = read_chain(&take, "hifishifter").unwrap();
+        assert_eq!(reading.verdict, FxBypass::Active);
+        assert_eq!(reading.gate, ChainGate::Unknown);
+        // 逐 FX 的读数照旧说话：用户真的旁通了那个 FX，就必须报旁通。
+        let bypassed = FakeChain::without_master_switch(&[("VST3: HiFiShifter", false, false)]);
+        assert_eq!(
+            read_chain(&bypassed, "hifishifter").unwrap().verdict,
+            FxBypass::Bypassed
+        );
+        // 离线同理。
+        let offline = FakeChain::without_master_switch(&[("VST3: HiFiShifter", true, true)]);
+        assert_eq!(
+            read_chain(&offline, "hifishifter").unwrap().verdict,
+            FxBypass::Bypassed
+        );
     }
 
     /// 一条只有**别的**插件的链，与一条同名但离线/旁通的链，判据必须分开：
@@ -455,24 +601,39 @@ mod tests {
     #[test]
     fn a_chain_without_our_class_name_never_borrows_a_verdict() {
         let other = FakeChain::new(&[("VST3: Someone Else", true, false)]);
-        assert_eq!(read_chain(&other, "hifishifter"), Ok(FxBypass::Unknown));
+        assert_eq!(
+            read_chain(&other, "hifishifter").unwrap().verdict,
+            FxBypass::Unknown
+        );
         let empty = FakeChain::new(&[]);
-        assert_eq!(read_chain(&empty, "hifishifter"), Ok(FxBypass::Unknown));
+        assert_eq!(
+            read_chain(&empty, "hifishifter").unwrap().verdict,
+            FxBypass::Unknown
+        );
         let bypassed = FakeChain::new(&[("VST3: HiFiShifter", false, false)]);
-        assert_eq!(read_chain(&bypassed, "hifishifter"), Ok(FxBypass::Bypassed));
+        assert_eq!(
+            read_chain(&bypassed, "hifishifter").unwrap().verdict,
+            FxBypass::Bypassed
+        );
         let active = FakeChain::new(&[("VST3: HiFiShifter", true, false)]);
-        assert_eq!(read_chain(&active, "hifishifter"), Ok(FxBypass::Active));
+        assert_eq!(
+            read_chain(&active, "hifishifter").unwrap().verdict,
+            FxBypass::Active
+        );
     }
 
     /// 两条链的**同一条**判定：只要本插件在链上，整链总开关就说话。
     ///
     /// 【为什么值得单测】`chain_enabled` 是唯一一个"每个 FX 都正常、但整条链被关掉"
-    /// 的读数。它错了，用户会在 take FX 窗口里关掉整条链、插件照旧跑满 CPU。
+    /// 的读数。它错了，用户会在 FX 链窗口里关掉整条链、插件照旧跑满 CPU。
     #[test]
     fn the_chain_toggle_closes_the_gate_even_when_every_fx_is_enabled() {
         let mut chain = FakeChain::new(&[("VST3: HiFiShifter", true, false)]);
-        chain.chain_enabled = false;
-        assert_eq!(read_chain(&chain, "hifishifter"), Ok(FxBypass::Bypassed));
+        chain.gate = ChainGate::Closed;
+        assert_eq!(
+            read_chain(&chain, "hifishifter").unwrap().verdict,
+            FxBypass::Bypassed
+        );
     }
 
     /// `probe` 只回答"我在不在里面"，不读 enabled/offline。
@@ -497,6 +658,32 @@ mod tests {
                 matching: 0
             })
         );
+    }
+
+    /// 诊断行必须把"凭什么"写全：结论、匹配数/总数、启用数、离线数、整链开关。
+    ///
+    /// 【为什么值得钉住字符串】它是排查"没声音"时唯一的一手证据；把 `gate=unknown`
+    /// 写成 `gate=open` 会让下一个人以为宿主明确说了"链是通的"。
+    #[test]
+    fn the_reading_names_the_fact_that_decided_it() {
+        let take = FakeChain::without_master_switch(&[("VST3: HiFiShifter", true, false)]);
+        assert_eq!(
+            read_chain(&take, "hifishifter").unwrap().summary(),
+            "found=1/1 enabled=1 offline=0 gate=unknown"
+        );
+        let mixed = FakeChain::new(&[
+            ("VST3: HiFiShifter", true, false),
+            ("VST3: Other", true, false),
+        ]);
+        assert_eq!(
+            read_chain(&mixed, "hifishifter").unwrap().summary(),
+            "found=1/2 enabled=1 offline=0 gate=open"
+        );
+        assert_eq!(ChainGate::Open.as_str(), "open");
+        assert_eq!(ChainGate::Closed.as_str(), "closed");
+        assert_eq!(ChainGate::Unknown.as_str(), "unknown");
+        assert!(!ChainGate::Unknown.is_closed());
+        assert!(ChainGate::Closed.is_closed());
     }
 
     /// `FxBypass` 的编码是**跨线程契约**：写侧（`sample_host_bypass`）与读侧

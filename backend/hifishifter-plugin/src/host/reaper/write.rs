@@ -112,36 +112,14 @@ impl HostClipTarget {
             .as_ref()
             .ok_or("host item state API unavailable")?;
         let version = self.host.geometry_revision(authorized)?;
-        let mut capacity = 16 * 1024;
-        while capacity <= super::item_chunk::MAX_ITEM_CHUNK_BYTES {
-            self.verify(authorized)?;
-            let mut bytes = vec![0_u8; capacity];
-            let read = checked(authorized, || unsafe {
-                (api.get)(
-                    self.item as *mut c_void,
-                    bytes.as_mut_ptr().cast(),
-                    capacity as i32,
-                    false,
-                )
-            })?;
-            if read {
-                let end = bytes
-                    .iter()
-                    .position(|value| *value == 0)
-                    .ok_or("unterminated item state")?;
-                if end == 0 {
-                    return Err("empty host item state".into());
-                }
-                self.verify(authorized)?;
-                if self.host.geometry_revision(authorized)? != version {
-                    return Err("host item changed during clipboard capture".into());
-                }
-                bytes.truncate(end);
-                return String::from_utf8(bytes).map_err(|_| "host item state is not UTF-8".into());
-            }
-            capacity *= 2;
+        self.verify(authorized)?;
+        let text =
+            read_complete_item_state(api, self.item as *mut c_void, 16 * 1024, false, authorized)?;
+        self.verify(authorized)?;
+        if self.host.geometry_revision(authorized)? != version {
+            return Err("host item changed during clipboard capture".into());
         }
-        Err("host item state exceeds clipboard budget".into())
+        Ok(text)
     }
 
     /// 冻结UI对象不保活item，写入前按GUID查验并重新读取当前几何。
@@ -482,6 +460,73 @@ impl NativeHost {
         target.verify(&authorized)?;
         Ok(target)
     }
+}
+
+/// 读一份 item state，直到拿到**一整份** chunk。
+///
+/// 【为什么"宿主说读成功"不等于"读完了"】`GetItemStateChunk` 能写多少由调用方给的
+/// 缓冲区决定。宿主对"放不下"有两种表现：返回 `false`（调用方据此扩容），或者把前缀
+/// 写满后**照常返回 true**。后者是这次 take 音高转换失败的根：一份 200 KB 的 item chunk
+/// （长片段上千个 `PITCHENV` 点，或 take FX 里那坨插件状态）被当成"宿主给的 chunk 坏了"，
+/// 于是每一次读写都在解析阶段失败 —— 而用户看到的只是"转换没反应"。
+///
+/// 判据只能是**结构**：能不能解析成一整份 `<ITEM>` 块（见 `take_chunk`）。截断必然
+/// 留下未闭合的块，完好的 chunk 一定闭合 —— 这比再猜一个字节数可靠得多，也不会因为
+/// 宿主换了写法（多一个自闭合叶子块）而误判。
+///
+/// 【为什么两种失败一起重试】把"`!ok`"也当成"可能太小"是唯一不依赖宿主文档的选择：
+/// 真的读不出来时最多多读几次（最后一次仍在预算内），而误判成"坏了"会让一个完好的
+/// item 永久写不进去。
+fn read_complete_item_state(
+    api: &super::item_chunk::ItemStateApi,
+    item: *mut c_void,
+    initial_capacity: usize,
+    is_undo: bool,
+    authorized: &(impl Fn() -> bool + ?Sized),
+) -> Result<String, String> {
+    let mut capacity = initial_capacity.max(1024);
+    let mut observed: Option<String> = None;
+    loop {
+        let mut buffer = vec![0_u8; capacity];
+        let ok = checked(authorized, || unsafe {
+            (api.get)(item, buffer.as_mut_ptr().cast(), capacity as i32, is_undo)
+        })?;
+        if ok {
+            // 宿主把 chunk 写成 NUL 结尾的 C 串；没有 NUL 就说明这一段没有边界。
+            if let Some(end) = buffer.iter().position(|byte| *byte == 0) {
+                if end > 0 {
+                    if let Ok(text) = std::str::from_utf8(&buffer[..end]) {
+                        // 【判据只有结构这一条】不引入"NUL 之前还有余量就算完整"这类启发式：
+                        // 一旦成立就把完整性押在"宿主不会悄悄截断"上，而这次的故障正是它。
+                        // 扫描是 O(字节)，读一次 chunk 本来就要整份解析；item chunk 的常见
+                        // 尺寸是几十 KB，take FX 那份大的也只有**一个** clip 会走到这里。
+                        if super::take_chunk::is_complete_item_state(text) {
+                            return Ok(text.to_owned());
+                        }
+                        observed = Some(text.to_owned());
+                    }
+                }
+            }
+        }
+        if capacity >= super::item_chunk::MAX_ITEM_CHUNK_BYTES {
+            break;
+        }
+        capacity = (capacity * 2).min(super::item_chunk::MAX_ITEM_CHUNK_BYTES);
+    }
+    // 【失败时留下形状，而不是只留一句话】"读不出来"有三种完全不同的成因：宿主截断、
+    // 宿主改了写法（多一种块）、指针早已失效。三者只能从"拿到了什么"里分开，而这条
+    // 日志是用户下一次报障时唯一的一手证据。限流：同一个键只留一行。
+    if let Some(text) = observed {
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.item-chunk",
+            format_args!(
+                "[ara] the host item state is unusable: {}",
+                super::take_chunk::describe_shape(&text)
+            ),
+        );
+    }
+    Err("host item state is not a complete item chunk within the supported budget".into())
 }
 
 impl HostClipTarget {
@@ -879,30 +924,7 @@ impl HostClipTarget {
             .item_state
             .as_ref()
             .ok_or("REAPER item state API unavailable")?;
-        let mut capacity = 64 * 1024_usize;
-        while capacity <= super::item_chunk::MAX_ITEM_CHUNK_BYTES {
-            let mut buffer = vec![0_u8; capacity];
-            let ok = checked(authorized, || unsafe {
-                (api.get)(
-                    self.item as *mut c_void,
-                    buffer.as_mut_ptr().cast(),
-                    capacity as i32,
-                    true,
-                )
-            })?;
-            if !ok {
-                return Err("REAPER refused to read the item state".into());
-            }
-            // 宿主把 chunk 写成 NUL 结尾的 C 串；没写满就说明读完了一整份。
-            let end = buffer.iter().position(|byte| *byte == 0);
-            if let Some(end) = end {
-                let text = String::from_utf8(buffer[..end].to_vec())
-                    .map_err(|_| "host item state is not valid UTF-8".to_string())?;
-                return Ok(text);
-            }
-            capacity *= 2;
-        }
-        Err("host item state exceeds the supported budget".into())
+        read_complete_item_state(api, self.item as *mut c_void, 64 * 1024, true, authorized)
     }
     /// 把改写后的 state chunk 交回宿主。
     ///

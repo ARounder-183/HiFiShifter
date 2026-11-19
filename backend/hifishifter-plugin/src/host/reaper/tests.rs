@@ -102,7 +102,7 @@ pub struct Fixture {
     /// 的用例必须显式设置它。
     pub track_value: Cell<f64>,
     pub hook: RefCell<Option<(String, Box<dyn Fn()>)>>,
-    /// `TrackFX_*` / `TakeFX_*` / `I_FXEN` / `B_TAKEFX` 这部分读数是否注册。
+    /// `TrackFX_*` / `TakeFX_*` / `I_FXEN` 这部分读数是否注册。
     ///
     /// 【为什么单独一个开关】旁通读数是**可选**能力：不注册时 `fx_bypass_state` 恒为
     /// `Unknown`（照改动前照常渲染）。把它挂在 `media_enabled` 上会让"能不能导入音频"
@@ -114,8 +114,6 @@ pub struct Fixture {
     pub fx_take_chain: RefCell<Vec<FxEntry>>,
     /// `I_FXEN`（轨道整链总开关）。
     pub fx_chain_on: Cell<bool>,
-    /// `B_TAKEFX`（take 整链总开关）。
-    pub take_fx_chain_on: Cell<bool>,
     /// 是否注册 `TakeFX_*` 一族（缺省关：老宿主形态）。
     pub take_fx_api: Cell<bool>,
     /// `parent(2)` 报哪条 take；0 = 主 take（多 take 用例把它指到别的 take 上）。
@@ -221,7 +219,7 @@ impl Fixture {
             fx_track_chain: RefCell::new(Vec::new()),
             fx_take_chain: RefCell::new(Vec::new()),
             fx_chain_on: Cell::new(true),
-            take_fx_chain_on: Cell::new(true),
+
             take_fx_api: Cell::new(false),
             parent_take: Cell::new(0),
             item_state_enabled: Cell::new(false),
@@ -671,10 +669,16 @@ fn value(object: *mut c_void, name: *const c_char, is_take: bool) -> f64 {
         f.record("D_VOL");
         return f.take_volume.get();
     }
-    // take 的整条 FX 链总开关（`I_FXEN` 的 take 侧对应物）。
-    if is_take && unsafe { CStr::from_ptr(name) } == c"B_TAKEFX" {
-        f.record("take-fx-chain-enabled");
-        return if f.take_fx_chain_on.get() { 1. } else { 0. };
+    // 【宿主对**未知**参数一律返回 0.0】这不是夹具偷懒，而是 REAPER 的真实行为：take FX 那次
+    // "没被旁通却一点声音都没有"，根因就是 `B_TAKEFX` 这个参数在 take 上根本不存在，宿主
+    // 照例回了 0，于是"整链总开关"读成"关"，渲染入口整段跳过。夹具照抄这条行为，这样
+    // "再按轨道的形状去读一个 take 参数"会被用例当场抓住，而不是等下一次真机报障。
+    if is_take {
+        let name = unsafe { CStr::from_ptr(name) }.to_str().unwrap();
+        if !f.values.borrow().contains_key(name) {
+            f.record(format!("unknown-take-param:{name}"));
+            return 0.0;
+        }
     }
     if object
         == if is_take {
@@ -1961,6 +1965,25 @@ fn take_fx_fixture() -> &'static Fixture {
     fixture
 }
 
+/// **轨道链的整链开关（`I_FXEN`）仍然会关门。**
+///
+/// 【为什么与 take 侧成对存在】take 侧修的是"读了一个**不存在**的读数"，不是"整链开关不
+/// 重要"。轨道侧那个读数是真的：用户把整条轨道 FX 链关掉时插件必须停下，否则白烧 CPU
+/// —— 而这条路径的判据与 take 侧共用同一份 `decide()`，所以它必须一直有覆盖。
+#[test]
+fn a_track_chain_toggle_still_closes_the_gate() {
+    let f = Fixture::new();
+    f.enable_media();
+    f.fx_api.set(true);
+    *f.fx_track_chain.borrow_mut() = vec![FxEntry::HFS];
+    let host = std::sync::Arc::new(f.client());
+    assert_eq!(host.fx_bypass_state(&|| true), FxBypass::Active);
+    f.fx_chain_on.set(false);
+    assert_eq!(host.fx_bypass_state(&|| true), FxBypass::Bypassed);
+    f.fx_chain_on.set(true);
+    assert_eq!(host.fx_bypass_state(&|| true), FxBypass::Active);
+}
+
 /// **take FX 实例必须读 take 链，而不是轨道链。**
 ///
 /// 【为什么这条是本次修复的主验收】改动前 `fx_bypass_state` 只认 `parent(1)` +
@@ -1986,9 +2009,9 @@ fn a_take_fx_instance_reads_the_take_chain_not_the_track_chain() {
     // 恢复。
     f.fx_take_chain.borrow_mut()[0].enabled = true;
     assert_eq!(host.fx_bypass_state(&|| true), FxBypass::Active);
-    // 关掉 take 的整链总开关（`B_TAKEFX`）同样是"宿主不会读我"。
-    f.take_fx_chain_on.set(false);
-    assert_eq!(host.fx_bypass_state(&|| true), FxBypass::Bypassed);
+    // 【绝不按轨道的形状去读 take 的"整链总开关"】take 没有这个参数；宿主对未知参数
+    // 回 0.0（夹具照抄这条行为）。旧实现把它读成"链被关掉" ⇒ 判旁通 ⇒ 一点声音都没有，
+    // 而这一整段用例从头到尾都能跑通 —— 判据本身不认识"没有这个读数"，那才是根因。
 }
 
 /// **轨道 FX 实例绝不读同轨另一条 take 链。**
@@ -2142,6 +2165,50 @@ fn a_take_fx_instance_never_offers_track_level_entries() {
     assert!(take_fx.split);
     assert!(take_fx.take_pitch_bridge);
     assert!(take_fx.clip_reverse);
+}
+
+/// **超过第一次读取缓冲区的 item chunk 必须整份读回、整份写回。**
+///
+/// 【为什么这条是"take 音高转换永远失败"的回归】`GetItemStateChunk` 能写多少由调用方给的
+/// 缓冲区决定：放不下时宿主返回 `false`（真机也把前缀写满后照常返回 `true`）。旧实现
+/// 第一次就只要 64 KiB，且把"读到 NUL 为止"当成读完 —— 于是一份带几千个 `PITCHENV` 点
+/// （长片段）或带着 take FX 插件状态的 chunk 永远读不全，每一次转换都在解析阶段失败，
+/// 而用户看到的只是"点了没反应"。判据必须是结构（能不能解析成一整份 `<ITEM>`），
+/// 不是字节数猜测。
+#[test]
+fn a_chunk_larger_than_the_first_read_is_read_whole() {
+    let f = Fixture::new();
+    f.enable_media();
+    let mut chunk = String::from(
+        "<ITEM\nPOSITION 0\nLENGTH 1\nSEL 1\n\
+         IGUID {11111111-1111-1111-1111-111111111111}\n\
+         GUID {22222222-2222-2222-2222-222222222222}\n\
+         <SOURCE WAVE\nFILE \"ara://source\"\n>\n<PITCHENV\nACT 1 -1\n",
+    );
+    for index in 0..6000 {
+        chunk.push_str(&format!("PT {:.17} {:.17} 0\n", index as f64 * 0.01, 0.0));
+    }
+    chunk.push_str(">\n>\n");
+    assert!(chunk.len() > 64 * 1024, "chunk is {} bytes", chunk.len());
+    f.enable_item_state(&chunk);
+    let host = std::sync::Arc::new(f.client());
+    let target = host.clip_target(|| true).expect("bound take");
+    // 读：旧实现在第一次（64 KiB）就停手，把半份 chunk 当整份交出去。
+    let read = target.item_state_chunk(&|| true).expect("whole chunk");
+    assert_eq!(read.len(), chunk.len());
+    // 写：整块替换后仍然是一份完整 chunk，新点集在里面。
+    let points = vec![
+        hifishifter_kernel::pitch_bridge::EnvelopePoint::new(0.0, 3.0),
+        hifishifter_kernel::pitch_bridge::EnvelopePoint::new(1.0, -2.0),
+    ];
+    target
+        .write_take_pitch_points(&points, &|| true)
+        .expect("write");
+    let written = target.item_state_chunk(&|| true).expect("reread");
+    let parsed =
+        super::take_pitch::read_take_pitch(&written, "{22222222-2222-2222-2222-222222222222}")
+            .expect("parse");
+    assert_eq!(parsed.points, points);
 }
 
 /// **多 take item 分割后，右半段的写回目标仍是"同一条 take"。**

@@ -1,6 +1,7 @@
 //! 核对官方REAPER SDK的原生宿主适配：只在原始UI/model线程读所属project的真实位置。
 //! ABI依据 justinfrankel/reaper-sdk c0eafe87863b2bf69c5c822760f1b32a753b211b，
 //! sdk/reaper_vst3_interfaces.h 与 reaper_plugin_functions.h。手写适配，不是SDK原文件。
+use crate::sync::MutexExt;
 use crate::vst3_abi::UnknownVtbl;
 use crate::vst3_abi::{alternate_iid, platform_iid, K_RESULT_OK};
 use std::ffi::{c_char, c_void};
@@ -191,6 +192,12 @@ pub(crate) struct NativeHost {
     placement: std::sync::Mutex<placement::PlacementCache>,
     /// 上一次输出的放置位置诊断指纹（只在变化时再打一行）。
     placement_reported: std::sync::Mutex<Option<String>>,
+    /// 上一次旁通读数的"凭什么"（`take-fx; take chain: found=1/1 …`）。
+    ///
+    /// 【为什么留在宿主适配器上】它由读取点（[`Self::fx_bypass_state`]）写入、由日志点
+    /// （`roles::refresh_host_bypass_cache`）读出，两处之间只隔一次函数返回；放进共享
+    /// 状态机反而要新增一条跨线程通道。结论变化时读一次即可，稳态下无人访问。
+    bypass_note: std::sync::Mutex<String>,
     /// `GetMediaItem_Track`：item → 宿主轨。
     ///
     /// 【为什么单独留一份】take FX 下"我的轨道"只能沿 take → item → track 这条边取，
@@ -442,7 +449,7 @@ impl NativeHost {
                     return FxBypass::Unknown;
                 };
                 let chain = fx_state::TrackChain::new(&api.track, track, authorized);
-                fx_state::read_chain(&chain, crate::CLASS_NAME).unwrap_or(FxBypass::Unknown)
+                self.record_bypass_reading("track", placement, &chain)
             }
             HostPlacement::TakeFx { take, .. } => {
                 // 【为什么查不到就直接 Unknown】不得回退到轨道链 —— 那是"读别人的开关"。
@@ -454,10 +461,45 @@ impl NativeHost {
                     return FxBypass::Unknown;
                 };
                 let chain = fx_state::TakeChain::new(take_api, take, authorized);
-                fx_state::read_chain(&chain, crate::CLASS_NAME).unwrap_or(FxBypass::Unknown)
+                self.record_bypass_reading("take", placement, &chain)
             }
             HostPlacement::Unbound => FxBypass::Unknown,
         }
+    }
+
+    /// 读一条链并把"凭什么"记下来，供日志与诊断回答"为什么是这个结论"。
+    ///
+    /// 【为什么要把四位事实存下来】旁通门判错的两种后果（静音 / 白跑 CPU）在日志里都只
+    /// 表现为一行结论差异。结论一致但事实不同（例如 `gate=unknown` 与 `gate=open`）
+    /// 恰恰是排查的分岔点 —— take FX 那次静音的全部证据就是"整链总开关读到 0"。
+    fn record_bypass_reading(
+        &self,
+        chain_kind: &str,
+        placement: HostPlacement,
+        chain: &dyn fx_state::FxChain,
+    ) -> FxBypass {
+        let reading = match fx_state::read_chain(chain, crate::CLASS_NAME) {
+            Ok(reading) => reading,
+            Err(error) => {
+                *self.bypass_note.lock_or_recover() = format!("{chain_kind} chain: {error}");
+                return FxBypass::Unknown;
+            }
+        };
+        *self.bypass_note.lock_or_recover() = format!(
+            "{}; {} chain: {}",
+            placement.as_str(),
+            chain_kind,
+            reading.summary()
+        );
+        reading.verdict
+    }
+
+    /// 上一次旁通读数的"凭什么"，形如
+    /// `take-fx; take chain: found=1/1 enabled=1 offline=0 gate=unknown`。
+    ///
+    /// 只在结论变化时被 `render::extension::roles` 写进日志，于是稳态下仍然只有一行。
+    pub(crate) fn host_bypass_note(&self) -> String {
+        self.bypass_note.lock_or_recover().clone()
     }
 
     /// 从真实host context QI；parent(3)是所属project，不使用当前活动project或按轨名猜归属。
@@ -814,20 +856,21 @@ impl NativeHost {
             }
             _ => None,
         };
+        // 【take 侧只要四件】整链总开关**不在**这一族里（take 没有 `I_FXEN` 的对应物，
+        // 见 `fx_state` 的模块文档）。少读一个不存在的参数，就少一次"宿主返回 0 ⇒ 我们
+        // 当真的"的机会 —— take FX 下的整段静音正是这么来的。
         let take_chain = match (
             lookup!(c"TakeFX_GetCount", fx_state::FxCount),
             lookup!(c"TakeFX_GetEnabled", fx_state::FxEnabled),
             lookup!(c"TakeFX_GetOffline", fx_state::FxOffline),
             lookup!(c"TakeFX_GetFXName", fx_state::FxName),
-            lookup!(c"GetMediaItemTakeInfo_Value", fx_state::TakeValue),
         ) {
-            (Some(count), Some(enabled), Some(offline), Some(name), Some(take_value)) => {
+            (Some(count), Some(enabled), Some(offline), Some(name)) => {
                 Some(fx_state::TakeChainApi {
                     count,
                     enabled,
                     offline,
                     name,
-                    take_value,
                 })
             }
             _ => None,
@@ -870,6 +913,7 @@ impl NativeHost {
             fx_state,
             placement: std::sync::Mutex::new(placement::PlacementCache::default()),
             placement_reported: std::sync::Mutex::new(None),
+            bypass_note: std::sync::Mutex::new(String::new()),
             item_track,
             undo_entry_times: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             undo_ends: std::sync::Mutex::new(Vec::new()),

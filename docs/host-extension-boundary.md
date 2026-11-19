@@ -46,7 +46,7 @@ REAPER 的 ARA 支持两种插入位置，而它们对上面那张能力表给�
 
 | 判据 | 轨道 FX | take FX |
 |---|---|---|
-| 读哪条 FX 链（旁通 / 离线） | `TrackFX_*` + `I_FXEN` | `TakeFX_*` + `B_TAKEFX` |
+| 读哪条 FX 链（旁通 / 离线） | `TrackFX_*` + `I_FXEN` | 只有 `TakeFX_*`（take 侧**没有**整链总开关，见下） |
 | 清单枚举哪一段 | 本轨 + folder 后代 + 自己建的轨 | **只有** `parent(2)` 那条 take 的 item |
 | 写回用哪个 take | item 的 active take | `parent(2)` 那条 take（按 GUID 定位，多 take 也成立） |
 | 导入 / 建轨 / item 剪贴板 | 可用 | **不可用**（目标对象不成立，见下） |
@@ -61,6 +61,19 @@ item 上新建**第二个实例**。露出一个注定失败的入口，比藏�
 
 **绝不跨链回退**：take 链上查不到本插件的 FX 就是 `Unknown`（照常渲染），不得转头去读
 同一条轨的轨道链 —— 那正是"读到另一个实例的旁通开关"的那条路。
+
+**两条链并不对称，别把它抹平**：轨道有 `I_FXEN`（"fx enabled, 0=bypassed"），take 侧
+**没有**对应物 —— `GetMediaItemTakeInfo_Value` 的字段表里没有整链开关（`TAKEFX_NCH` 只是
+内部通道数），`TakeFX_*` 也没有 `GetChainEnabled`。按轨道的形状去读一个不存在的
+`B_TAKEFX` 会得到宿主对未知参数的标准答复 **0.0**，于是"整链被关掉"成立 ⇒ 判旁通 ⇒
+`prepare()` 直接返回 ⇒ **take FX 下一点声音都没有**。读不到就是读不到：`ChainGate::Unknown`
+是一位不投票的读数，不是"关"。
+
+**"读成功了"不等于"读完了"**：`GetItemStateChunk` 能写多少由调用方给的缓冲区决定，
+宿主对放不下有两种表现（返回 `false`，或把前缀写满后照常返回 `true`）。读取端因此以
+**结构**为准：能不能解析成一整份 `<ITEM>` 块才算读完，否则扩容重试。旧实现按"读到 NUL
+为止"当读完，于是长片段（上千个 `PITCHENV` 点）或 take FX 里带着插件状态的 item 永远
+读不全 —— 每一次"转换为 take 包络"都在解析阶段失败，用户看到的只是"点了没反应"。
 
 诊断：位置变化时输出一行 `[ara] placement: …`（含两条链的 `总数/匹配数`），
 诊断包的 `renderer_diagnostics()` 里也有 `host_placement` 一格。
