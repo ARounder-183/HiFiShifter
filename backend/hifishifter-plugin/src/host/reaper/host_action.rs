@@ -400,8 +400,18 @@ impl super::NativeHost {
                 break;
             }
         }
+        // 【为什么找不到就是错】API 齐全却枚举不到绑定指针 = take 已被删除/重建，
+        // 绑定指针失效。此时若照旧返回 `None`，下面的 toggle 动作（倒放/建音高包络，
+        // 都落在 item **当前**的 active take 上）会翻错 take —— 倒放是宿主侧的破坏性
+        // 变更，编辑失败后的回滚只认绑定 take（它本来就没被动过），翻错的兄弟 take
+        // 只能靠宿主自己的 undo。如实报错，让动作根本不跑。
+        // `None` 只保留给"宿主根本没有 take 枚举 API"的情形：那种宿主无从切换
+        // active take，单 take item（常态）上动作恰好落在绑定 take，是仅有的退路。
+        let Some(index) = index else {
+            return Err("the bound take is no longer one of the item's takes".into());
+        };
         let current = self.item_f64(item, c"I_CURTAKE", authorized)?.round() as i32;
-        Ok(index.map(|index| (index, current)))
+        Ok(Some((index, current)))
     }
 
     /// 读一个 item 数值字段（`GetMediaItemInfo_Value`）。
