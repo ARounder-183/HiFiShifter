@@ -11,12 +11,17 @@ sudo add-apt-repository -y universe || true
 sudo apt-get update -y || true
 
 # Core packages used by native crates
-# Also install libfuse2 and fuse so AppImages can run in CI (provides libfuse.so.2)
 # 【为什么这一组不许 || true】其余安装都是"尽力而为的兼容探测"（不同发行版包名
 # 不同、AppImage 运行时工具可选）。但 cmake / pkg-config / build-essential / glib /
 # ssl / gtk / alsa 是**编译期硬依赖**：装不上却继续跑，失败会推迟到几十分钟后的
 # Rust build script，报一个和依赖毫无关系的错误。核心组失败必须当场停。
-sudo apt-get install -y pkg-config cmake libglib2.0-dev libgirepository1.0-dev gobject-introspection libssl-dev build-essential libgtk-3-dev libgdk-pixbuf2.0-dev libasound2-dev libfuse2 fuse
+# 【为什么 FUSE 不在硬依赖组里】libfuse2 在 Ubuntu 24.04 (noble) 起被
+# libfuse2t64 取代、旧名已从源里移除 —— 把它放进这一组，整条 apt 命令以
+# exit 100 收场，核心依赖一个都装不上。而 FUSE 只是"直接运行 AppImage"的
+# 运行期便利：CI 走 APPIMAGE_EXTRACT_AND_RUN=1（scripts/build 里的 AppImage
+# 打包同样如此），本仓没有构建期硬依赖它的环节；脚本底部的探测组已按
+# 新旧包名尽力安装。
+sudo apt-get install -y pkg-config cmake libglib2.0-dev libgirepository1.0-dev gobject-introspection libssl-dev build-essential libgtk-3-dev libgdk-pixbuf2.0-dev libasound2-dev
 
 # Additional dev packages commonly required by linuxdeploy and the GTK/GStreamer plugins
 # (helps Tauri's bundler find webkit/gstreamer and related girs at build time)
