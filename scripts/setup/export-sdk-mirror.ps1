@@ -1,4 +1,4 @@
-﻿# 导出本地 SDK 镜像：把已校验的 pin 检出（ARA_SDK / vst3sdk，以及 SoundTouch）整体拷进
+﻿# 导出本地 SDK 镜像：把已校验的 pin 检出（ARA_SDK / vst3sdk / clap，以及 SoundTouch）整体拷进
 # 镜像根，供离网机器取源。镜像只是"另一份可整体拷贝的本地缓存"，服务于同一开发者在无网络
 # 环境下的构建，不是再分发渠道（许可说明见 README '第三方源码'）。
 #
@@ -35,7 +35,10 @@ if ($WithTestkit) { $exportPrepareArgs['WithTestkit'] = $true }
 & (Join-Path $PSScriptRoot 'prepare-plugin-sdks.ps1') @exportPrepareArgs
 
 New-Item -ItemType Directory -Path $exportMirrorRoot -Force | Out-Null
-foreach ($exportSdk in @('ARA_SDK', 'vst3sdk')) {
+# 与 prepare-plugin-sdks.ps1 的检出清单保持一致（ARA_SDK / vst3sdk / clap）：
+# prepare 侧无条件准备 clap（HIFISHIFTER_CLAP_SDK_DIR，ABI oracle 用），镜像里
+# 少一份，离网机器的 `prepare-plugin-sdks.ps1 -Offline` 就会因缺 clap 直接失败。
+foreach ($exportSdk in @('ARA_SDK', 'vst3sdk', 'clap')) {
     Copy-IntoMirror (Join-Path $exportCacheRoot $exportSdk) $exportSdk
 }
 
