@@ -1456,6 +1456,9 @@ impl EditorSession {
     /// 让"有人请求过渲染"成为一个稳定的读数 —— 回归测试（`render::extension` 的清单
     /// 刷新用例）钉的就是它。
     #[cfg(any(test, feature = "test-support"))]
+    // test-support 形态下本 lib 不编译 `#[cfg(test)]` 的用例模块，读数没有产品内调用方
+    // —— 同 `host::reaper::geometry_tests` 的口径，压掉那个配置下的 dead_code。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn rearm_requests(&self) -> u64 {
         self.rearm_requests.load(Ordering::Acquire)
     }
