@@ -15,7 +15,7 @@ system=0
 for arg in "$@"; do
     case "$arg" in
         --system) system=1 ;;
-        -h|--help) sed -n '2,11p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '2,9p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) printf '未知参数：%s\n' "$arg" >&2; exit 2 ;;
     esac
 done

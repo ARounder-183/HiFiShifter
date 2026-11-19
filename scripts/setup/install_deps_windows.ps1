@@ -2,22 +2,23 @@
     [switch]$SkipFrontend
 )
 
-Write-Host "[install_deps_windows] Installing NSIS via chocolatey (if available)"
-choco install nsis -y
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "choco or NSIS install failed or not available"
+# 【choco 失败必须喊出来】保持非致命（runner 常预装这些工具），但失败只写
+# Write-Host 会在日志里淹没 —— NSIS 没有别的安装路径，静默失败的症状是几十分钟
+# 后 build.ps1 报"找不到 makensis"，与依赖毫无关系。Write-Warning 走 stderr 并带
+# [warning] 前缀，CI 摘要与本地终端都能一眼看到。choco 本身不存在时单独提示
+# （那条"failed or not available"从此有了明确的归属）。
+$chocoCommand = Get-Command choco.exe -ErrorAction SilentlyContinue
+if ($null -eq $chocoCommand) {
+    Write-Warning "choco.exe not found on PATH; skipping NSIS / CMake / LLVM installs. NSIS in particular has no fallback installer here - 'build.ps1' will fail with '找不到 makensis' when packaging."
 }
-
-Write-Host "[install_deps_windows] Installing CMake via chocolatey (if available)"
-choco install cmake -y
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "choco or cmake install failed or not available"
-}
-
-Write-Host "[install_deps_windows] Installing LLVM/Clang via chocolatey (if available)"
-choco install llvm -y
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "choco or llvm install failed or not available"
+else {
+    foreach ($tool in @('nsis', 'cmake', 'llvm')) {
+        Write-Host "[install_deps_windows] Installing $tool via chocolatey"
+        choco install $tool -y
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "choco install $tool failed (exit $LASTEXITCODE); continuing - later steps will report the missing tool explicitly."
+        }
+    }
 }
 
 Write-Host "[install_deps_windows] Installing tauri-cli via cargo"

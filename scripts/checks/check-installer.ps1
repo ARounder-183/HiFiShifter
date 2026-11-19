@@ -495,7 +495,17 @@ try {
     if (!(Test-Path $uninstaller)) { throw '缺少 uninstall.exe' }
     Invoke-InstallerProcess $uninstaller @('/S') | Out-Null
     # 卸载器把自己复制到临时目录再运行，退出码在 -Wait 下并不可靠；用目录与注册表判定。
-    Start-Sleep -Seconds 3
+    # 【为什么轮询而不是固定睡 3 秒】慢机器 / 实时杀毒扫描下 3 秒可能只卸到一半，
+    # 后面的断言会把"还没删完"误判成"没删干净"。轮询到 App 目录与 ARP 键都消失
+    # （上限 60 秒）才继续；超时不抛错 —— 交给下面的逐项断言给出精确到条目的失败。
+    $uninstallDone = $false
+    for ($i = 0; $i -lt 120; $i++) {
+        if (!(Test-Path $installDir) -and !(Test-Path $arpKey)) { $uninstallDone = $true; break }
+        Start-Sleep -Milliseconds 500
+    }
+    if (!$uninstallDone) {
+        Write-Warning '卸载 60 秒后仍有残留（App 目录 / ARP 键），继续用断言定位具体项。'
+    }
 
     Assert-That '卸载后 App 目录消失' {
         if (Test-Path $installDir) { throw "目录仍存在：$installDir" }
