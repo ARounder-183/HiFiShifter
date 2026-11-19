@@ -15,6 +15,8 @@ pub(crate) use ui_inventory::{UiItem, UiTrack};
 mod folder;
 /// FX 旁通 / 离线读数（宿主是否仍在读我们的输出）。
 mod fx_state;
+/// 把多个实例的旁通读数合成"这份工程还会不会出声"（判据见 [fx_state::combine]）。
+pub(crate) use fx_state::combine as combine_fx_bypass;
 pub(crate) use fx_state::FxBypass;
 mod host_timer;
 // 宿主原生执行层：写回 / 分割 / 剪贴板 / Undo 调度。它们直接调用 REAPER API，

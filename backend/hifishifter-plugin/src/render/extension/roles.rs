@@ -463,21 +463,37 @@ impl ExtensionOwner {
     /// **不再调用**播放渲染器。于是"用户已经旁通、插件还在算"这一段开销完全是浪费：
     /// 神经合成的结果永远不会被取用。判据由宿主自己的原生 API 给出（REAPER 的
     /// `TrackFX_GetEnabled` 一族），其它宿主恒为 `Unknown` ⇒ 行为与改动前一致。
-    /// 【为什么先读文档】旁通是**这个 FX** 的属性，而一次 ARA 绑定在 REAPER 里会造出
-    /// 两个实例（playback / editor+view），采样点却只在有视图定时器的那个实例上。
-    /// 按实例缓存等于让"谁碰巧有空看一眼"决定"要不要渲染" —— 播放实例的缓存永远是
-    /// `Unknown`，于是用户旁通了 FX、插件还在合成。读数搬到文档之后，任一实例采到的
-    /// 结论立刻对全部实例与后台作业生效。
+    /// 【为什么按实例存，而不是存到文档上】旁通是**这个 FX** 的属性。一个 ARA 文档
+    /// （工程）里有多条轨道、每轨一个实例，而 `DocumentSession` 每文档只有一份 —— 把
+    /// 结论写进那一格，等于让"轨 1 被旁通"和"轨 2 没被旁通"互相覆盖：读数每轮在两个
+    /// 值之间跳，每次跳都让渲染输入失效 ⇒ 每个实例每 100 ms 重算一整次合成（用户
+    /// 看到的就是"无限渲染"），而且一条轨被旁通会把另一条轨一起静音。
     ///
-    /// 【为什么还要留实例这一格】Capture 实例不在任何 ARA 文档上，没有文档可写；
-    /// 而它的渲染判据与 ARA 同源（`prepare` 的门）。这一格就是它的退路。
+    /// 【那"播放实例没有视图定时器"怎么办】采样点有两个，且都**逐实例**跑：视图定时器
+    /// （`poll_host_bypass`）与模型收口（`refresh_host_state_for_model` 对每个 owner 调
+    /// 一次）。后者与窗口开不开无关，所以播放实例也会被采到。
     pub(crate) fn host_bypass(&self) -> crate::host::reaper::FxBypass {
-        match self.editor_document() {
-            Ok(document) => document.host_bypass(),
-            Err(_) => {
-                crate::host::reaper::FxBypass::decode(self.host_bypass.load(Ordering::Acquire))
-            }
-        }
+        crate::host::reaper::FxBypass::decode(self.host_bypass.load(Ordering::Acquire))
+    }
+
+    /// 距上一次成功采样旁通读数有多久（`None` = 从未采过）。
+    ///
+    /// 【为什么要把它报出来】`Unknown`（宿主不提供这一族 API）与"很久没采过"（没找到
+    /// 采样时机）是两件不同的事，而它们在读数上长得一样。诊断包带上这个年龄，
+    /// "旁通了还在渲染"就能直接分开这两种成因。
+    ///
+    /// 【为什么采样点不放在 `prepare` 里】`fx_bypass_state` 只在**宿主线程**上是同步的；
+    /// 别的线程会投递并等 250 ms，而 `prepare` 从不跑在宿主线程上（actor / 模型线程）。
+    pub(crate) fn host_bypass_age(&self) -> Option<std::time::Duration> {
+        self.last_bypass_sample
+            .lock_or_recover()
+            .map(|at| at.elapsed())
+    }
+
+    /// 测试用：直接设置旁通读数（没有宿主就采不到样）。
+    #[cfg(test)]
+    pub(crate) fn set_host_bypass_for_tests(&self, state: crate::host::reaper::FxBypass) {
+        self.host_bypass.store(state.encode(), Ordering::Release);
     }
 
     /// UI 定时器路径：按自己的节奏采样旁通读数（100 ms 一次）。
@@ -515,14 +531,12 @@ impl ExtensionOwner {
         // 编码只有一个来源（`FxBypass::encode`）：写侧、读侧、诊断包必须对同一个字节
         // 给出同一个结论，否则"旁通了还在渲染"会在两侧各有一个互相矛盾的答案。
         let encoded = state.encode();
-        // 【实例那一格仍然写】Capture 没有文档，而 `prepare` 的门对两种形态同源。
         let previous = self.host_bypass.swap(encoded, Ordering::AcqRel);
-        // 【文档那一格是权威】两个实例读到的是同一个 FX；谁先采到都对。
-        let document_previous = self
-            .editor_document()
-            .ok()
-            .map(|document| document.note_host_bypass(state));
-        if previous == encoded && document_previous.is_none_or(|previous| previous == state) {
+        // 【采样时刻与读数一起记】诊断包要用它分开"读不出来"与"很久没采过"；
+        // `poll_host_bypass` 的节流也读它，于是收口时的那次采样同样会推迟下一次轮询
+        // （两次采样挨得太近没有意义，而 `fx_bypass_state` 是一族宿主调用）。
+        *self.last_bypass_sample.lock_or_recover() = Some(std::time::Instant::now());
+        if previous == encoded {
             return false;
         }
         // 【为什么这条是 WARN】默认档（`verbosity=low`）下 `log::info!` 一行都看不见 ——
@@ -543,33 +557,38 @@ impl ExtensionOwner {
 
     /// 重新采样一次旁通读数，返回"读数是否变化"。
     ///
-    /// 【为什么变化时要让渲染输入失效】旁通**解除**的那一刻宿主会立刻来取音频；快照
-    /// 若还停在旁通期间那一版（或根本没算过），用户会先听到旧声音。进入旁通则相反：
-    /// 在途的那次合成已经没人要，直接取消比让它跑完更省。
+    /// 【只有 `bypassed -> active` 这一个跃迁会动渲染输入】方向不对称，代价也不对称：
+    ///
+    /// * **离开旁通**：宿主立刻会来取音频，而快照可能停在旁通期间那一版（或根本没算过）
+    ///   ⇒ 必须失效**并且**把被跳过的那次编辑重新排上队。少了"重排"，用户解除旁通后
+    ///   若不再动任何东西，就永远不会有新音频。
+    /// * **进入旁通**：在途的合成已经没人要，丢掉待办就够。**不得**失效渲染输入 ——
+    ///   失效会遍历**全部** owner，让**别的轨道**为一次与自己无关的旁通重算一整次合成。
+    /// * **`unknown -> active`**：`Unknown` 的语义就是"照常渲染"，已发布的快照与这个
+    ///   结论并不矛盾 ⇒ 什么都不用做。这条很重要：某次读取暂时失败（`found == 0`）会
+    ///   让读数在 `unknown` / `active` 之间来回，若把它也算跃迁，一次宿主抖动就会变成
+    ///   每个 tick 一次全量重算（"无限渲染"）。
     pub(crate) fn sample_host_bypass(&self) -> bool {
         let before = self.host_bypass();
         if !self.refresh_host_bypass_cache() {
             return false;
         }
-        let after = self.host_bypass();
-        if after.is_bypassed() {
-            // 刚进入旁通：在途的合成已经没人要，丢掉待办并让正在跑的那次尽早返回。
-            if let Some(queue) = self.preparation() {
-                queue.cancel();
-            }
-        } else if before.is_bypassed() && after == crate::host::reaper::FxBypass::Active {
-            // 【解除旁通要把被跳过的那次编辑补上】旁通期间 `prepare_apply` 直接返回
-            // （见那里的门），所以那些编辑**从未**被渲染过。这里只让渲染失效是不够的：
-            // 失效只影响"下一次取音频"，而取音频由宿主驱动 —— 用户解除旁通后若不再动
-            // 任何东西，就永远不会有新音频。必须把票据重新排上队。
-            if let Ok(document) = self.editor_document() {
-                if let Some(editor) = document.existing_editor_session() {
-                    editor.rearm_render();
+        match bypass_action(before, self.host_bypass()) {
+            BypassAction::Nothing => {}
+            BypassAction::CancelQueue => {
+                // 刚进入旁通：在途的合成已经没人要，丢掉待办并让正在跑的那次尽早返回。
+                if let Some(queue) = self.preparation() {
+                    queue.cancel();
                 }
             }
-        }
-        if let Ok(document) = self.editor_document() {
-            document.invalidate_render_input();
+            BypassAction::InvalidateAndRearm => {
+                if let Ok(document) = self.editor_document() {
+                    if let Some(editor) = document.existing_editor_session() {
+                        editor.rearm_render();
+                    }
+                    document.invalidate_render_input();
+                }
+            }
         }
         true
     }
@@ -600,3 +619,71 @@ impl ExtensionOwner {
 // 【编码的用例搬到了 `host::reaper::fx_state`】编码本身现在只有一份
 // （`FxBypass::encode` / `decode`），所以它的契约由**它的定义处**负责钉住。
 // 在这里再留一份副本，等于让"改一处、忘一处"重新变得可能。
+
+/// 旁通读数变化之后该做什么。
+///
+/// 【为什么是一个返回值而不是内联 if】这是"旁通"这条链上唯一会动**渲染调度**的判据，
+/// 两个方向判错的后果都很重：
+///   * 把 `unknown -> active` 也当成跃迁 ⇒ 某次宿主读取暂时失败（`found == 0`）就会
+///     让读数在 `unknown` / `active` 之间抖，而每抖一次都失效渲染输入 ⇒ **每个实例每
+///     tick 重算一整次合成**（用户看到的就是"无限渲染"）；
+///   * 漏掉 `bypassed -> active` ⇒ 用户解除旁通后永远不会有新音频。
+///
+/// 所以它必须能被逐值断言，而不是靠读一遍代码来相信。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BypassAction {
+    /// 读数没变，或变化与本实例的渲染调度无关。
+    Nothing,
+    /// 刚进入旁通：丢掉在途的合成，**不**动渲染输入（别的轨道不该为它重算）。
+    CancelQueue,
+    /// 离开旁通：失效渲染输入，并把被跳过的编辑重新排上队。
+    InvalidateAndRearm,
+}
+
+/// 纯判据：一次读数变化该触发哪个动作。
+pub(crate) fn bypass_action(
+    before: crate::host::reaper::FxBypass,
+    after: crate::host::reaper::FxBypass,
+) -> BypassAction {
+    use crate::host::reaper::FxBypass;
+    if before == after {
+        return BypassAction::Nothing;
+    }
+    if after.is_bypassed() {
+        return BypassAction::CancelQueue;
+    }
+    // 【只有"确定旁通 → 确定活跃"才是跃迁】`unknown -> active` 只是"我们又能读到了"，
+    // 而 `Unknown` 的语义本来就是"照常渲染"—— 已发布的快照与这个结论并不矛盾。
+    if before.is_bypassed() && after == FxBypass::Active {
+        return BypassAction::InvalidateAndRearm;
+    }
+    BypassAction::Nothing
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::reaper::FxBypass;
+
+    /// **只有"确定旁通 → 确定活跃"能动渲染输入。**
+    ///
+    /// 【为什么这条必须单测】判宽了 ⇒ 读数一抖就全量重算（"无限渲染"）；判窄了 ⇒
+    /// 用户解除旁通后永远没有新音频。两个方向都是用户直接可感知的故障。
+    #[test]
+    fn only_a_real_un_bypass_touches_the_render_input() {
+        use BypassAction::{CancelQueue, InvalidateAndRearm, Nothing};
+        use FxBypass::{Active, Bypassed, Unknown};
+        // 读数没变 ⇒ 什么都不做。
+        assert_eq!(bypass_action(Active, Active), Nothing);
+        assert_eq!(bypass_action(Bypassed, Bypassed), Nothing);
+        // 进入旁通 ⇒ 只丢队列（**不**失效渲染输入：别的轨道不该为它重算）。
+        assert_eq!(bypass_action(Active, Bypassed), CancelQueue);
+        assert_eq!(bypass_action(Unknown, Bypassed), CancelQueue);
+        // 真正解除旁通 ⇒ 失效 + 重排。
+        assert_eq!(bypass_action(Bypassed, Active), InvalidateAndRearm);
+        // 【最容易判错的一格】读数"又能读到了"不是跃迁：宿主抖动不得变成重算风暴。
+        assert_eq!(bypass_action(Unknown, Active), Nothing);
+        assert_eq!(bypass_action(Active, Unknown), Nothing);
+        assert_eq!(bypass_action(Bypassed, Unknown), Nothing);
+    }
+}

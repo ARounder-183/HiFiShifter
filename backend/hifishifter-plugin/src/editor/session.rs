@@ -6550,19 +6550,18 @@ pub mod tests {
     fn a_bypassed_fx_never_queues_a_background_job() {
         use crate::host::reaper::FxBypass;
         let (model, owner, _identity) = fixture();
-        let document = model.session();
         let editor = owner.editor_session().unwrap();
         wait_for_source_files(&editor);
         // ① 读数未知（非 REAPER 宿主 / 读不出来）⇒ 行为必须与改动前**逐字相同**：
         //    照常走原路。跳过渲染会让所有这类宿主静音。
-        document.note_host_bypass(FxBypass::Unknown);
+        owner.set_host_bypass_for_tests(FxBypass::Unknown);
         assert!(
             !matches!(editor.prepare_apply(), Ok(None)),
             "Unknown 绝不能被当成旁通（那会让不支持这一族读数的宿主静音）"
         );
         // ② 确定旁通 ⇒ 不排作业，但**必须收口**：`applied = generation`，否则
         //    `pending` 恒真，状态栏永远显示"正在应用"。
-        document.note_host_bypass(FxBypass::Bypassed);
+        owner.set_host_bypass_for_tests(FxBypass::Bypassed);
         let generation = editor.generation.load(Ordering::Acquire);
         editor.applied.store(0, Ordering::Release);
         editor.render_requested.store(true, Ordering::Release);
@@ -6580,7 +6579,7 @@ pub mod tests {
             "跳过了就不能留着待办（解除旁通由 `rearm_render` 重新排队）"
         );
         // ③ 解除旁通 ⇒ 读数回到 active，门不再挡。
-        document.note_host_bypass(FxBypass::Active);
+        owner.set_host_bypass_for_tests(FxBypass::Active);
         assert!(
             !matches!(editor.prepare_apply(), Ok(None)),
             "解除旁通之后必须恢复原路"

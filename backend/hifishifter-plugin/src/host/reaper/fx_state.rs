@@ -123,6 +123,32 @@ pub(crate) fn decide(
     FxBypass::Active
 }
 
+/// 把**多个实例**的旁通读数合成"这份工程此刻还会不会出声"。
+///
+/// 【为什么需要合成，而不是让它们共享一格】旁通是**每个 FX** 的属性，而一个 ARA 文档
+/// 里可以有多条轨道、每轨一个实例。把结论写进一个共享格子，等于让"轨 1 被旁通"和
+/// "轨 2 没被旁通"互相覆盖：读数每一轮都在两个值之间跳，而每次跳都会让渲染输入失效
+/// ⇒ 每个实例每 100 ms 重算一整次神经合成（用户看到的就是"无限渲染"）。
+///
+/// 【判据：只有**全部**实例都确定被旁通，才算旁通】
+/// * 任何一个 `Active` ⇒ 有人会来取音频，必须渲染；
+/// * 任何一个 `Unknown` ⇒ "读不出来"必须按改动前的行为（照常渲染），不得被别人的
+///   `Bypassed` 带着一起跳过 —— 否则那个实例的用户会静音；
+/// * 一个实例都没有 ⇒ 无从判断。
+pub(crate) fn combine(verdicts: &[FxBypass]) -> FxBypass {
+    if verdicts.is_empty() {
+        return FxBypass::Unknown;
+    }
+    if verdicts.iter().all(|verdict| verdict.is_bypassed()) {
+        return FxBypass::Bypassed;
+    }
+    if verdicts.contains(&FxBypass::Active) {
+        return FxBypass::Active;
+    }
+    // 剩下的组合里一定既有 `Bypassed` 又有 `Unknown`：任何一个实例读不出来就不许跳过。
+    FxBypass::Unknown
+}
+
 /// 在**宿主线程**上读一次旁通结论。
 ///
 /// 调用方保证：`authorized` 在整段读取期间可反复求值；`track` 是本实例的直接 parent
@@ -222,6 +248,30 @@ mod tests {
         assert!(FxBypass::decode(2).is_bypassed());
         assert!(!FxBypass::decode(0).is_bypassed());
         assert!(!FxBypass::decode(1).is_bypassed());
+    }
+
+    /// **合成判据：只有全部实例都确定被旁通，才算这份工程不会出声。**
+    ///
+    /// 【为什么这条必须单测】它是"跳过整次合成"的唯一门。判宽了（把 Unknown 当旁通）
+    /// 会让读不出读数的宿主静音；判窄了（要求任意一个就算）会让"轨 1 旁通、轨 2 正常"
+    /// 的工程永远不渲染。两个方向都是用户直接可感知的故障。
+    #[test]
+    fn only_an_unanimous_bypass_skips_the_render() {
+        use FxBypass::{Active, Bypassed, Unknown};
+        assert_eq!(combine(&[]), Unknown, "没有实例 ⇒ 无从判断");
+        assert_eq!(combine(&[Bypassed]), Bypassed);
+        assert_eq!(combine(&[Bypassed, Bypassed]), Bypassed);
+        // 只要有一个还在用，就必须渲染。
+        assert_eq!(combine(&[Bypassed, Active]), Active);
+        assert_eq!(combine(&[Active]), Active);
+        // 读不出来必须按改动前的行为：不得被别人的结论带着一起跳过。
+        assert_eq!(combine(&[Bypassed, Unknown]), Unknown);
+        assert_eq!(combine(&[Unknown]), Unknown);
+        assert_eq!(combine(&[Unknown, Active]), Active);
+        // 只有 `Bypassed` 能挡住渲染。
+        assert!(combine(&[Bypassed, Bypassed]).is_bypassed());
+        assert!(!combine(&[Bypassed, Unknown]).is_bypassed());
+        assert!(!combine(&[Bypassed, Active]).is_bypassed());
     }
 
     /// 三态的编码是诊断契约的一部分：改字面量等于改日志与诊断包的读法。

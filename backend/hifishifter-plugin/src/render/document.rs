@@ -7,7 +7,7 @@ use ara2_bridge::companion::CompanionControllerBinding;
 use ara2_bridge::core::{ApiGeneration, AraError};
 use ara2_bridge::plugin::ExtensionControllerLease;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 thread_local! {
@@ -706,24 +706,13 @@ pub struct DocumentSession {
     /// 宿主给本**文档**的播放控制租约，连同它被创建时所在的那条线程。
     pub playback: Mutex<Option<PlaybackEndpoint>>,
     pub host_undo: crate::host::undo::HostUndo,
-    /// 宿主此刻是否把本实例的音频放进了信号链（`FxBypass` 的编码）。
+
+    /// 渲染输入失效的"一秒钟里发生了几次"（诊断用，见 `invalidate_render_input`）。
     ///
-    /// 【为什么在**文档**上，而不是在每个 renderer 实例上】旁通是**这个 FX** 的属性，
-    /// 而一次 ARA 绑定在 REAPER 里会造出两个实例（playback / editor+view）。读数按实例
-    /// 缓存等于让"谁碰巧有空看一眼"决定"要不要渲染"：播放实例没有视图定时器，它的
-    /// 缓存永远是 `Unknown`（= 照常渲染），于是用户旁通了 FX 而插件还在合成。
-    /// 采样仍然由任一实例在**宿主线程**上做（`refresh_host_bypass_cache`），结果写到
-    /// 这里，两个实例与后台作业读同一格。
-    ///
-    /// 【为什么默认 0（未知）】未知必须等于改动前的行为：照常渲染。见
-    /// `crate::host::reaper::FxBypass::encode`。
-    pub host_bypass: AtomicU8,
-    /// 上一次成功采样旁通读数的时刻（`None` = 从未采过）。
-    ///
-    /// 【为什么需要"多旧"】`prepare` / 后台作业在"读数已经过期"时宁可**再采一次**也
-    /// 不愿按一个几分钟前的结论跳过合成；而"采一次"必须在宿主线程上做，所以这个时刻
-    /// 也是"还能不能相信这一格"的唯一判据。
-    pub(crate) host_bypass_sampled_at: Mutex<Option<std::time::Instant>>,
+    /// 【为什么需要它】"渲染停不下来"这个症状在日志里此前**完全不可见**：每次失效都只
+    /// 推进一个原子计数，而重算发生在另一条线程上。于是"某个判据把每 tick 都当成变化"
+    /// 这种缺陷只能靠读代码发现。这里只记一个窗口内的次数，超阈值发一条 WARN。
+    render_epoch_window: Mutex<(Option<std::time::Instant>, u32)>,
     /// 宿主 BPM / 拍号读数（VST3 进程上下文）。
     ///
     /// 【为什么记在文档上】Tempo Map 的音阶点需要宿主轴：0 位置点**必须**显式带拍号
@@ -1161,28 +1150,67 @@ mod tests {
         ));
     }
 
-    /// 旁通读数存在**文档**上：一个实例采到，全部实例与后台作业立刻看见。
+    /// 文档级的旁通结论是**派生**的：没有实例 ⇒ 未知；实例的读数怎么合成由
+    /// `fx_state::combine` 负责（它的用例钉住"只有全部确定被旁通才算旁通"）。
     ///
-    /// 【为什么这是"旁通了还在渲染"的回归】读数此前按实例缓存，而采样点只在有视图
-    /// 定时器的那个实例上；播放实例的缓存永远是 `Unknown`（= 照常渲染）。
+    /// 【为什么这里不再存一格】`DocumentSession` 是**每个 ARA 文档（工程）一份**，
+    /// 而旁通是**每个 FX** 的事实。存一格等于让不同轨道的结论互相覆盖 —— 那会让读数
+    /// 每轮在 `active` / `bypassed` 之间跳，每次跳都让渲染输入失效 ⇒ 每 100 ms 重算
+    /// 一整次神经合成（"无限渲染"），而且一条轨被旁通会把另一条轨一起静音。
     #[test]
-    fn the_bypass_reading_is_shared_through_the_document() {
+    fn the_document_bypass_verdict_is_derived_from_the_instances() {
         use crate::host::reaper::FxBypass;
         let document = DocumentSession::new(9_003);
-        assert_eq!(document.host_bypass(), FxBypass::Unknown);
-        assert!(document.host_bypass_age().is_none(), "还没采过");
         assert_eq!(
-            document.note_host_bypass(FxBypass::Bypassed),
+            document.host_bypass(),
             FxBypass::Unknown,
-            "返回值是**上一次**的读数（变化判定要用它）"
+            "没有任何渲染实例时无从判断（必须等于改动前的行为：照常渲染）"
         );
-        assert_eq!(document.host_bypass(), FxBypass::Bypassed);
-        assert!(document.host_bypass_age().is_some(), "采样时刻必须落下来");
+    }
+
+    /// **一条轨被旁通，不许把另一条轨一起静音。**
+    ///
+    /// 【为什么这是本轮最重要的一条回归】`DocumentSession` 每**文档**一份，而旁通是每
+    /// **FX** 的事实。把结论存进文档那一格，等于让两条轨道的读数互相覆盖：
+    ///   * 谁最后采样谁说了算 ⇒ 轨 2 会在轨 1 被旁通时一起静音（用户听到"整轨没声音"）；
+    ///   * 两个结论每 100 ms 互相覆盖一次 ⇒ 每次覆盖都让渲染输入失效 ⇒ 每个实例每
+    ///     tick 重算一整次神经合成（用户看到"无限渲染"）。
+    ///
+    /// 所以结论必须**派生**：只有全部播放实例都确定被旁通，才算这份工程不会出声。
+    #[test]
+    fn one_bypassed_track_never_silences_another() {
+        use crate::host::reaper::FxBypass;
+        let document = DocumentSession::new(9_004);
+        let bypassed = Arc::new(ExtensionOwner::default());
+        let other = Arc::new(ExtensionOwner::default());
+        for owner in [&bypassed, &other] {
+            owner
+                .bind_to_document(
+                    document.clone(),
+                    ApiGeneration::V2Final,
+                    ara2_bridge::plugin::ExtensionRoles::all(),
+                    ara2_bridge::plugin::ExtensionRoles::PLAYBACK_RENDERER
+                        | ara2_bridge::plugin::ExtensionRoles::EDITOR_RENDERER,
+                    None,
+                )
+                .expect("两个实例都必须能绑到同一个文档");
+        }
+        bypassed.set_host_bypass_for_tests(FxBypass::Bypassed);
+        other.set_host_bypass_for_tests(FxBypass::Active);
         assert_eq!(
-            document.note_host_bypass(FxBypass::Active),
-            FxBypass::Bypassed
+            document.host_bypass(),
+            FxBypass::Active,
+            "一条轨被旁通时另一条轨必须照常渲染"
         );
-        assert_eq!(document.host_bypass(), FxBypass::Active);
+        // 全部旁通才是"这份工程不会出声"。
+        other.set_host_bypass_for_tests(FxBypass::Bypassed);
+        assert_eq!(document.host_bypass(), FxBypass::Bypassed);
+        // 任何一条读不出来 ⇒ 不得跳过（`Unknown` 的语义是"照常渲染"）。
+        other.set_host_bypass_for_tests(FxBypass::Unknown);
+        assert!(
+            !document.host_bypass().is_bypassed(),
+            "读不出读数的实例不得被别人的结论带着一起跳过"
+        );
     }
 
     /// **分割一个循环源 item，参数线一根都不许动（插件侧粘合层）。**
@@ -5091,7 +5119,7 @@ impl DocumentSession {
                     // 宿主不提供这一族 API（非 REAPER），后者是本插件没找到采样时机。
                     // 报障时这一格能直接分开它们（"旁通了还在渲染"最常见的原因就是
                     // 这一格一直是 `None`）。
-                    "host_bypass_age_ms": self.host_bypass_age().map(|age| age.as_millis() as u64),
+                    "host_bypass_age_ms": owner.host_bypass_age().map(|age| age.as_millis() as u64),
                 })
             })
             .collect::<Vec<_>>();
@@ -5433,6 +5461,7 @@ clips_src={clips_src} dupes={dupes}}}"
 
     pub fn invalidate_render_input(&self) {
         self.render_epoch.fetch_add(1, Ordering::AcqRel);
+        self.note_render_epoch_pressure();
         let owners = self
             .renderers
             .lock_or_recover()
@@ -5449,41 +5478,50 @@ clips_src={clips_src} dupes={dupes}}}"
         }
     }
 
-    /// 宿主此刻是否把本实例的音频放进了信号链（三态，见 `FxBypass`）。
+    /// **这份工程**此刻还会不会出声（三态，见 `FxBypass`）。
     ///
-    /// 【为什么读文档这一格】旁通是**这个 FX** 的属性，而一次 ARA 绑定在 REAPER 里会造出
-    /// 两个实例。按实例缓存等于让"谁碰巧有空看一眼"决定"要不要渲染"：播放实例没有视图
-    /// 定时器，它的缓存永远是 `Unknown`（= 照常渲染）—— 用户旁通了 FX，插件还在合成。
+    /// 【为什么是"派生"而不是"存一格"】旁通是**每个 FX** 的属性，而一个 ARA 文档里可以
+    /// 有多条轨道、每轨一个实例（`ModelHandle` 每文档一份，所有实例绑到同一个文档）。
+    /// 把结论写进共享格子，等于让"轨 1 被旁通"与"轨 2 没被旁通"互相覆盖：读数每轮都在
+    /// 两个值之间跳，而每次跳都让渲染输入失效 ⇒ 每个实例每 100 ms 重算一整次神经合成
+    /// （用户看到的就是"无限渲染"，而且轨 2 会跟着轨 1 一起静音）。
+    ///
+    /// 所以这里**只读各实例自己的读数**，用 `fx_state::combine` 合成：只有全部播放实例
+    /// 都确定被旁通，才算这份工程不会出声。
     pub(crate) fn host_bypass(&self) -> crate::host::reaper::FxBypass {
-        crate::host::reaper::FxBypass::decode(self.host_bypass.load(Ordering::Acquire))
+        let verdicts: Vec<crate::host::reaper::FxBypass> = self
+            .renderer_owners()
+            .into_iter()
+            .filter(|owner| owner.renders_playback())
+            .map(|owner| owner.host_bypass())
+            .collect();
+        crate::host::reaper::combine_fx_bypass(&verdicts)
     }
 
-    /// 记一次旁通采样（写侧唯一入口；任何实例都可以写，读侧只读这一格）。
-    pub(crate) fn note_host_bypass(
-        &self,
-        state: crate::host::reaper::FxBypass,
-    ) -> crate::host::reaper::FxBypass {
-        *self.host_bypass_sampled_at.lock_or_recover() = Some(std::time::Instant::now());
-        crate::host::reaper::FxBypass::decode(
-            self.host_bypass.swap(state.encode(), Ordering::AcqRel),
-        )
-    }
-
-    /// 距上一次成功采样旁通读数有多久（`None` = 从未采过）。
+    /// 一秒钟内失效太多次 ⇒ 报一次（"渲染停不下来"的唯一可查痕迹）。
     ///
-    /// 【为什么要把它报出来】`Unknown`（宿主不提供这一族 API）与"很久没采过"（本插件
-    /// 没找到采样时机）是两件不同的事，而它们在读数上长得一样。诊断包带上这个年龄，
-    /// "旁通了还在渲染"就能直接分开这两种成因 —— 它最常见的形式正是"这一格从来没被
-    /// 采过"（播放实例没有视图定时器）。
-    ///
-    /// 【为什么采样点不放在 `prepare` 里】`fx_bypass_state` 只在**宿主线程**上是同步的；
-    /// 别的线程会投递并等 250 ms。而 `prepare` 从不跑在宿主线程上（它在 actor / 模型
-    /// 线程上），在那里采样等于每次准备都堵 250 ms。采样点因此只有两个：视图定时器
-    /// （`poll_host_bypass`）与模型收口（`refresh_host_state_for_model`）。
-    pub(crate) fn host_bypass_age(&self) -> Option<std::time::Duration> {
-        self.host_bypass_sampled_at
-            .lock_or_recover()
-            .map(|at| at.elapsed())
+    /// 【阈值为什么是 8】正常编辑一轮最多两三次（源物化 / 事实变化 / 旁通跃迁）；
+    /// 8 次/秒已经说明有个判据把"没变"读成了"变了"，而每一次都意味着一次完整重算。
+    fn note_render_epoch_pressure(&self) {
+        const WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+        const THRESHOLD: u32 = 8;
+        let mut window = self.render_epoch_window.lock_or_recover();
+        let now = std::time::Instant::now();
+        let (since, count) = &mut *window;
+        if since.is_none_or(|at| now.duration_since(at) >= WINDOW) {
+            *since = Some(now);
+            *count = 0;
+        }
+        *count += 1;
+        if *count == THRESHOLD {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.render.epoch-storm",
+                format_args!(
+                    "[render] the render input was invalidated {THRESHOLD} times within one second;                      something re-invalidates it every tick, so the published snapshot can never be                      reused — this is what a render that never stops looks like from the inside"
+                ),
+            );
+        }
     }
 
     fn revoke_snapshots(&self) {
