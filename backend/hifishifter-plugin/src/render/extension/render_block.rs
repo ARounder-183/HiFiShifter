@@ -124,6 +124,16 @@ impl ExtensionOwner {
                 RenderOutcome::Done
             };
         };
+        // 【未知 process_mode 必须拒绝】SDK 只定义 0/1/2；把它当成 Realtime 会把
+        // 离线/未知流写进实时捕获与门控状态。透传是最诚实的降级。
+        // 【为什么排在停播门控**之前**】门控分支会把 `evidence.stream` 缺省成
+        // Realtime 并去清实时门的尾巴/去咔状态 —— 对未知流做这套写入，正是上面
+        // 这条注释禁止的污染；停播 + 未知流的组合会先落进门控分支。透传不写任何
+        // 状态，必须先判。
+        if ProcessStream::from_mode(block.mode).is_none() {
+            let _ = unsafe { block.pass_through() };
+            return RenderOutcome::Done;
+        }
         // REAPER 停播也会 process 固定光标位置；只离线导出允许没有 kPlaying 的供音。
         //
         // 【为什么这一支必须排在 `capture_stage` **之前**】门控判“要静音”时若已经
@@ -133,12 +143,6 @@ impl ExtensionOwner {
             let stream = evidence.map_or(ProcessStream::Realtime, |evidence| evidence.stream);
             self.note_gate_cleared(stream);
             self.apply_gate_fade_out(stream, &mut block.output, block.frames);
-            return RenderOutcome::Done;
-        }
-        // 【未知 process_mode 必须拒绝】SDK 只定义 0/1/2；把它当成 Realtime 会把
-        // 离线/未知流写进实时捕获与门控状态。透传是最诚实的降级。
-        if ProcessStream::from_mode(block.mode).is_none() {
-            let _ = unsafe { block.pass_through() };
             return RenderOutcome::Done;
         }
         // 【Capture 通路】在快照输出之前插入。它要么自己写完输出（`Handled`），要么
