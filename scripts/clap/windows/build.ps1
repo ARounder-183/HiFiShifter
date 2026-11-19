@@ -7,14 +7,33 @@ $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\.."))
 # env 脚本是点源的（事故记录见 scripts/build/build.ps1）：再算一次，绝不让它们留下的
 # 同名变量把仓库根换掉。
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\.."))
-Push-Location (Join-Path $root "backend")
+# 目标目录与 sibling 口径一致（scripts/build/build.ps1:147、clap/unix/build.sh:73）：
+# 尊重 CARGO_TARGET_DIR。相对值按 cargo 的解析规则折算 —— 本脚本在 backend/ 里
+# 跑 cargo，相对 CARGO_TARGET_DIR 就相对 backend 解析；写回绝对值，让下面取
+# 产物路径与 cargo 的实际落盘位置永远一致。硬编码 backend\target 的旧写法在设置
+# 了 CARGO_TARGET_DIR 的机器上要么拷贝失败，要么更糟：把 default-target 里
+# **上一次构建的旧 DLL** 静默打包成"新"插件。
+$backendDir = Join-Path $root "backend"
+if ($env:CARGO_TARGET_DIR) {
+    if ([IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
+        $cargoTarget = [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
+    }
+    else {
+        $cargoTarget = [IO.Path]::GetFullPath((Join-Path $backendDir $env:CARGO_TARGET_DIR))
+    }
+    $env:CARGO_TARGET_DIR = $cargoTarget
+}
+else {
+    $cargoTarget = Join-Path $backendDir "target"
+}
+Push-Location $backendDir
 try { cargo build -p hifishifter-clap --release --locked } finally { Pop-Location }
 # PowerShell 不因原生命令的非零退出而抛错（$ErrorActionPreference 只管 cmdlet）；
 # 不检查 $LASTEXITCODE 的话，编译失败时下面的 Copy-Item 会把**上一次构建的旧
 # hifishifter_clap.dll** 静默打包成"新"插件（verify.ps1 对任何有效旧构建都放行）
 # —— 与 build.ps1 的 Assert-Ok 纪律同一理由。
 if ($LASTEXITCODE -ne 0) { throw "cargo build -p hifishifter-clap failed (exit $LASTEXITCODE)" }
-$module = Join-Path $root "backend\target\release\hifishifter_clap.dll"
+$module = Join-Path $cargoTarget "release\hifishifter_clap.dll"
 $outDir = Join-Path $root "dist\clap"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 Copy-Item $module (Join-Path $outDir "HiFiShifter.clap") -Force
