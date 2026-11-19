@@ -1,5 +1,32 @@
 //! ARA 文档绑定、region 分配与离线准备。
 use super::*;
+
+/// 实例 **writer 身份**的发号器（诊断 / 日志读数，不参与任何行为判定 —— 旁通表决
+/// 看的是输入读数，不是身份）。
+///
+/// 【为什么是模块级而不是函数内 static】此前 ARA 绑定（`bind_to_document`）与
+/// Capture 激活（`arm_capture_rendering`）各养了一个计数器 —— 两种形态共存的会话里，
+/// 第一个 ARA 实例与第一个 Capture 实例都是 1，旁通表决表、`[ara] writer N …` 日志
+/// 与诊断包把两个实例混成同一个身份。
+///
+/// 【为什么只在 0 时发号】`writer_id` 的语义是"实例身份"，不是"绑定序号"：
+/// `arm_capture_rendering` 虽自称幂等，宿主在总线 / 采样率重配时确实会重调
+/// `setupProcessing` —— 每次都发新号会让实例身份中途改变，诊断读数前后对不上。
+/// 已有身份（非 0）的实例保持不变；发号过程中真正的竞态由 CAS 兜底（输掉的候选
+/// 号作废，序列出现空洞 —— 身份互异才是目的，连续并不重要）。
+static NEXT_WRITER_ID: AtomicU64 = AtomicU64::new(1);
+
+/// 给本实例发一个一次性 writer 身份（详见 [`NEXT_WRITER_ID`]）。
+fn assign_writer_id(owner: &ExtensionOwner) {
+    if owner.writer_id.load(Ordering::Acquire) != 0 {
+        return;
+    }
+    let candidate = NEXT_WRITER_ID.fetch_add(1, Ordering::Relaxed);
+    let _ = owner
+        .writer_id
+        .compare_exchange(0, candidate, Ordering::Release, Ordering::Relaxed);
+}
+
 impl ExtensionOwner {
     /// 把租约关联到真实文档；关闭文档时由其同步撤销。
     pub fn bind_to_document(
@@ -189,11 +216,7 @@ impl ExtensionOwner {
         // 只登记weak供宿主回调排队；后台计算不形成owner自循环。
         *self.prepare_owner.lock_or_recover() = Some(weak);
         let _ = self.clock.set(document.clock.clone());
-        static NEXT_WRITER: AtomicU64 = AtomicU64::new(1);
-        self.writer_id.store(
-            NEXT_WRITER.fetch_add(1, Ordering::Relaxed),
-            Ordering::Release,
-        );
+        assign_writer_id(self);
         *current = Some(owned.0);
         self.bound_document_id.store(document.id, Ordering::Release);
         // 【T-B0-1】账本里的 `bound` 此前没有任何写者，于是它恒为 false —— 读数在说谎。
@@ -320,11 +343,9 @@ impl ExtensionOwner {
         let _ = self
             .clock
             .set(Arc::new(super::transport::TransportClock::default()));
-        static NEXT_WRITER: AtomicU64 = AtomicU64::new(1);
-        self.writer_id.store(
-            NEXT_WRITER.fetch_add(1, Ordering::Relaxed),
-            Ordering::Release,
-        );
+        // 身份只发一次：重复调用（宿主重配 / UI 定时器）不得改变实例身份，
+        // 见模块级 NEXT_WRITER_ID 的说明。
+        assign_writer_id(self);
         // 【为什么在这里也要把会话立起来】处理结果的**唯一**生产者是会话 actor
         // （`start_capture_render` → `capture_prepare_job`），而会话此前只在
         // `webview.rs` 的命令分发里惰性创建 —— 于是"从未打开过插件窗口"的会话里
