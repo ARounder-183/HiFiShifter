@@ -5,6 +5,13 @@ use crate::sync::MutexExt;
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::Arc;
 
+/// 宿主拒绝重建这个 item 时的**原文**错误（`SetItemStateChunk` 返回 false）。
+///
+/// 【为什么单独一个常量】它不是"写坏了"，而是宿主的一条策略：带**在线 ARA FX** 的 item
+/// 一律不接受整份 chunk 重建（真机取证见 [`super::take_env`]）。调用方要靠它区分
+/// "这条路在宿主上不存在"与"我们的 chunk 拼错了"，前者才允许退到宿主动作。
+pub(crate) const ITEM_STATE_REFUSED: &str = "REAPER rejected the item state";
+
 pub(super) type SetValue = unsafe extern "C" fn(*mut c_void, *const c_char, f64) -> bool;
 pub(super) type SetString =
     unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_char, bool) -> bool;
@@ -179,17 +186,23 @@ impl NativeHost {
     }
     /// take 的**播放方向**（倒放）能否写回。
     ///
-    /// 【为什么不需要 `geometry`】倒放只改文本结构（SOURCE SECTION + SOFFS），
-    /// 走的是 `Get/SetItemStateChunk`，与逐字段 setter 无关。要求 `geometry` 会
-    /// 把一条本来可用的路径挡在门外（反之亦然）。
+    /// 【为什么不需要 `geometry`】倒放只改结构（SOURCE SECTION + SOFFS），与逐字段
+    /// setter 无关。要求 `geometry` 会把一条本来可用的路径挡在门外（反之亦然）。
+    ///
+    /// 【为什么判据仍是 `item_state`】真正落地的是**两条**实现：chunk 整份改写，以及
+    /// 宿主自己的 toggle 动作（见 `host_edit::write_take_direction`）。后者是前者被宿主
+    /// 拒绝时的退路，而"现在到底是哪个方向"的核对（`PCM_Source_GetSectionInfo` 之外的第二
+    /// 判据）与 item chunk 那条主路都在这一族 API 上 —— 缺它就没有可信的起点。
     pub(crate) fn can_reverse_clips(&self) -> bool {
         self.item_state.is_some()
     }
     /// take 的**音高包络**能否读写（REAPER 的 PITCHENV）。
     ///
-    /// 【为什么与倒放同一条判据】两者都走 item state chunk：一个换 SOURCE 结构，
-    /// 一个换 PITCHENV 块。缺 `Get/SetItemStateChunk` 时两条路一起不可用，
-    /// 有它时两条路一起可用 —— 拆成两位只会制造两个必然同值的布尔。
+    /// 【为什么与倒放同一条判据】写的那一步有更近的路（`GetTakeEnvelopeByName` +
+    /// `SetEnvelopeStateChunk`，让写回绕开 chunk），但没有包络时"建一条"要借宿主动作，
+    /// 而"到底有没有包络、有没有点"的判据、以及没有包络 API 时的整条退路，都建在 item
+    /// state 上。缺 `Get/SetItemStateChunk` 时两条路一起不可用，有它时两条路一起可用 ——
+    /// 拆成两位只会制造两个必然同值的布尔。
     pub(crate) fn can_bridge_take_pitch(&self) -> bool {
         self.can_edit_clips() && self.item_state.is_some()
     }
@@ -956,7 +969,7 @@ impl HostClipTarget {
         if !checked(authorized, || unsafe {
             (api.set)(self.item as *mut c_void, text.as_ptr(), true)
         })? {
-            return Err("REAPER rejected the item state".into());
+            return Err(ITEM_STATE_REFUSED.into());
         }
         Ok(())
     }
@@ -981,14 +994,18 @@ impl HostClipTarget {
     }
     /// 用 `points` 整块替换该 take 的音高包络（空列表 = 删除）。
     ///
-    /// 【三条路径，按"最不可能打扰宿主"排序】
+    /// 【三条路径，按"最不打扰宿主"排序】
     /// 1. **包络对象已存在** ⇒ `SetEnvelopeStateChunk`。真机实测这条路在 take FX（本插件
     ///    在线、item chunk 写回被拒）时仍然成功，而且不重建 item —— 轨道 FX 下也更快、
     ///    更安全（不会顺手重建同一条 item 上的别的 take FX）。
-    /// 2. **没有包络** ⇒ 回到 item chunk 的逐字节路径（轨道 FX 下的历史行为，也是"创建"
-    ///    包络唯一不依赖宿主动作的办法）。
-    /// 3. 第 2 步被拒（take FX 下的**预期**行为，见 `take_env` 的模块文档）⇒ 借宿主的
-    ///    `Take: Toggle take pitch envelope` 建一条，再走第 1 条路。
+    /// 2. **没有包络** ⇒ 借宿主自己的动作建一条（[`super::host_action`]）再走 1。
+    ///    两种放置通用，同样不重建 item。
+    /// 3. 动作不可用（老宿主/精简导出）⇒ 回到 item chunk 的逐字节路径。这条是历史行为，
+    ///    也是唯一不依赖宿主动作的"创建"，因此必须留着。
+    ///
+    /// 【为什么不再"先试 chunk、失败再建包络"】那条顺序在 take FX 下每次都要读一份几百 KB
+    /// 的 chunk 再吃一次必然的拒绝（宿主不允许重建带在线 ARA FX 的 item），最后才走包络 ——
+    /// 用户看到的是几秒钟的卡顿加一条吓人的日志。现在失败的那条路只在最后兜底。
     pub(crate) fn write_take_pitch_points(
         &self,
         points: &[hifishifter_kernel::pitch_bridge::EnvelopePoint],
@@ -1006,27 +1023,28 @@ impl HostClipTarget {
             // 没有包络就没有可删的东西：连 item chunk 都不必读。
             return Ok(());
         }
-        let written = (|| -> Result<(), String> {
-            let chunk = self.item_state_chunk(authorized)?;
-            let rewritten =
-                super::take_pitch::rewrite_take_pitch(&chunk, &self.geometry.take_id, points)?;
-            if rewritten == chunk {
-                return Ok(());
-            }
-            self.set_item_state_chunk(&rewritten, authorized)
-        })();
-        match written {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                let envelope = self
-                    .host
-                    .create_take_pitch_envelope(self.item as *mut c_void, take, authorized)
-                    .map_err(|fallback| format!("{error}; {fallback}"))?;
-                self.host.set_envelope_state_chunk(
-                    envelope,
-                    &super::take_pitch::block_text(points),
-                    authorized,
-                )
+        let created =
+            self.host
+                .create_take_pitch_envelope(self.item as *mut c_void, take, authorized);
+        match created {
+            Ok(envelope) => self.host.set_envelope_state_chunk(
+                envelope,
+                &super::take_pitch::block_text(points),
+                authorized,
+            ),
+            Err(action_error) => {
+                let chunk = self.item_state_chunk(authorized).and_then(|chunk| {
+                    let rewritten = super::take_pitch::rewrite_take_pitch(
+                        &chunk,
+                        &self.geometry.take_id,
+                        points,
+                    )?;
+                    if rewritten == chunk {
+                        return Ok(());
+                    }
+                    self.set_item_state_chunk(&rewritten, authorized)
+                });
+                chunk.map_err(|chunk_error| format!("{action_error}; {chunk_error}"))
             }
         }
     }
@@ -1044,6 +1062,44 @@ impl HostClipTarget {
             .map(|facts| facts.reversed)
             .ok_or_else(|| "the host did not report the take direction".to_string())
     }
+    /// 这个 item 是不是**本实例自己挂着的那个**（take FX 下必然如此）。
+    ///
+    /// 【为什么它就是"item chunk 写不进去"的判据】真机取证（REAPER 7.85，见
+    /// [`super::take_env`] 的模块文档）：一个带着**在线 ARA FX** 的 item，
+    /// `SetItemStateChunk` 连"原样写回"都拒绝。take FX 放置下我们要改方向/包络的那个
+    /// item 正是挂着本插件的那个 —— 判据来自放置位置缓存（`placement().item()`），
+    /// 不需要再往宿主跑一趟，也不会把"其它 ARA 实例的 item"误判成自己的。
+    ///
+    /// 【读的是缓存】`Unbound`（还没求值）时返回 `false`：那就照历史路径先写 chunk，
+    /// 真被拒绝时调用方还有动作那条退路 —— 两条判据叠起来不会漏。
+    pub(crate) fn hosts_this_instance(&self) -> bool {
+        self.host.placement().item() == Some(self.item)
+    }
+
+    /// 借宿主自己的动作把这条 take 的**播放方向**切到 `reversed`（已经是它就不动）。
+    ///
+    /// 【为什么不自己写结构】倒放没有 setter：它是 `<SOURCE SECTION MODE 3>` 这层包装，
+    /// 而 chunk 那条路在 take FX 下被宿主拒绝。宿主的 `Item properties: Toggle take
+    /// reverse` 写出的结构与我们的编码逐字节一致（真机对照过，见
+    /// [`super::source_direction`]），于是"借它的动作"与"写同一份结构"等价。
+    ///
+    /// 【为什么先比再动】动作是 toggle：已经是对的方向时再跑一次会把用户刚改的倒放翻回去。
+    pub(crate) fn apply_take_direction(
+        &self,
+        reversed: bool,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<(), String> {
+        if self.reversed_now(authorized)? == reversed {
+            return Ok(());
+        }
+        self.host.run_item_action(
+            self.item as *mut c_void,
+            self.take as *mut c_void,
+            &super::host_action::TAKE_REVERSE,
+            authorized,
+        )
+    }
+
     /// 只重命名当前真实active take；字符串通过REAPER官方setter写入，不改HFS孤立名称。
     pub(crate) fn set_take_name(
         &self,

@@ -75,6 +75,25 @@ item 上新建**第二个实例**。露出一个注定失败的入口，比藏�
 为止"当读完，于是长片段（上千个 `PITCHENV` 点）或 take FX 里带着插件状态的 item 永远
 读不全 —— 每一次"转换为 take 包络"都在解析阶段失败，用户看到的只是"点了没反应"。
 
+**"写成功了"也有它的反面：带在线 ARA FX 的 item，chunk 一律写不进去。** 真机实测
+（REAPER 7.85）：`SetItemStateChunk` 对"挂着在线 ARA FX 的 item"连**原样写回**都返回
+`false`（`isundo`、undo 块、改一个字节，三种写法全 false）；同一份 chunk 在没有本插件
+take FX 的 item 上成功，把本插件设成 offline 之后也成功。宿主显然不允许扩展在 ARA 实例
+在线时重建它的 FX 链 —— 而 take FX 放置下，"要改的那个 item"恰好就是挂着本插件的那个。
+于是**所有靠重写 item chunk 的结构写回**（take 音高、倒放）都必须另找入口：
+
+| 结构 | 没有 setter，只能… | 真机可用的入口 |
+|---|---|---|
+| take 音高包络 | 建一条 `<PITCHENV>` | 已有包络 ⇒ `SetEnvelopeStateChunk`；没有 ⇒ 宿主动作 `Take: Toggle take pitch envelope` 建一条再写 |
+| take 播放方向 | 写 `<SOURCE SECTION MODE 3>` 包装 | 宿主动作 `Item properties: Toggle take reverse`（写出的结构与我们的编码逐字节一致） |
+
+**宿主动作表是一条正式通道，但它有两条硬约束**：动作作用于**选中项**与**active take**。
+所以调用前快照**原来选中的那几条**、清空选区、只选中目标，必要时用 `I_CURTAKE` 把目标
+take 切成 active，跑完原样回填 —— 否则"转换一次"就等于给用户整条选区都动了手。按名字
+解析命令号（`SectionFromUniqueID(0)` + `kbd_enumerateActions`，签名是
+`KbdSectionInfo*,int,const char**`：出参是**指针的指针**），本地化宿主上还要吃掉
+`本地化 |||||| English` 这层前缀。
+
 诊断：位置变化时输出一行 `[ara] placement: …`（含两条链的 `总数/匹配数`），
 诊断包的 `renderer_diagnostics()` 里也有 `host_placement` 一格。
 

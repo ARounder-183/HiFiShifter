@@ -16,6 +16,8 @@ pub(crate) use ui_inventory::{UiItem, UiTrack};
 mod folder;
 /// FX 旁通 / 离线读数（宿主是否仍在读我们的输出）。
 mod fx_state;
+/// 宿主**自己的动作**：借它的动作表做那两件"没有 setter"的事（建 take 包络、换方向）。
+mod host_action;
 /// 本实例在宿主里挂在哪里（轨道 FX 链 / take FX 链 / 没有）。
 mod placement;
 /// take 的 Pitch **包络对象**：读写走 Envelope API（item chunk 在 take FX 下写不进去）。
@@ -233,6 +235,11 @@ pub(crate) struct NativeHost {
     host_timer_retry_at: std::sync::Mutex<Option<std::time::Instant>>,
     /// 到这个时刻（Unix 毫秒）之前不再尝试投递 —— 见 `on_host` 的熔断说明。
     host_unreachable_until: std::sync::atomic::AtomicU64,
+    /// 已解析的宿主动作号（键 = 登记的回退命令号）。
+    ///
+    /// 【为什么必须缓存】解析一次要枚举几千条动作（每条一次宿主调用）；而"建一条 take
+    /// 音高包络"是用户点一次就走的路径，不该每次都把动作表扫一遍。动作表在进程内是静态的。
+    action_ids: std::sync::Mutex<std::collections::BTreeMap<i32, i32>>,
 }
 
 impl NativeHost {
@@ -919,8 +926,34 @@ impl NativeHost {
             item_track,
             undo_entry_times: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             undo_ends: std::sync::Mutex::new(Vec::new()),
+            action_ids: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         })
     }
+    /// 取一个宿主原生函数入口（用到才取，取不到就报错）。
+    ///
+    /// 【为什么按需查而不是在 `from_context` 里一次查齐】这些入口只服务"结构写回"那几条
+    /// 冷路径（建 take 包络、翻方向、读包络），把它们塞进启动期的大 `match` 会让"缺一个
+    /// 可选入口"决定整个适配器能不能建起来。这里反过来：缺了就只让那一条路失败。
+    pub(super) fn native_api<T: Copy>(
+        &self,
+        name: &std::ffi::CStr,
+        authorized: &(impl Fn() -> bool + ?Sized),
+    ) -> Result<T, String> {
+        let pointer = self._interface.0 as *mut c_void;
+        // SAFETY: 接口在本对象生命周期内有效；函数表按 `HostVtbl` 的布局读取。
+        let table = unsafe { &**pointer.cast::<*const HostVtbl>() };
+        let function = checked(authorized, || unsafe {
+            (table.api)(pointer, name.as_ptr())
+        })?;
+        if function.is_null() {
+            return Err(format!(
+                "REAPER API unavailable: {}",
+                name.to_string_lossy()
+            ));
+        }
+        Ok(unsafe { std::mem::transmute_copy::<*mut c_void, T>(&function) })
+    }
+
     /// 当前线程是不是宿主绑定线程（model/UI 线程）。
     pub(crate) fn on_host_thread(&self) -> bool {
         std::thread::current().id() == self.thread

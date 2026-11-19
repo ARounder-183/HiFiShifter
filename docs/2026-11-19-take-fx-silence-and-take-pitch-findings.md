@@ -139,7 +139,7 @@
 
 【创建为什么只能用动作】ARA 2.0 与 REAPER 的扩展 API 都没有"新建一条 take 包络"的
 入口；`GetTakeEnvelopeByName` 在没有包络时返回空指针，而写 chunk 正是被拒的那条路。
-动作按**名字**解析（不是硬编码 id），调用前后**记录并恢复全部 item 的选择位** —— 动作
+动作按**名字**解析（不是硬编码 id），调用前后**记录并恢复原来选中的那几条** —— 动作
 作用于所有选中的 item，不改选择就等于给用户的每条选中片段都加一条音高包络。
 
 ## 没动的东西
@@ -166,10 +166,135 @@
 | 190 KB 包络写回（take FX item） | `SetItemStateChunk = false` ⇒ 见第三节 | 这是第三节那条根因的直接证据 |
 | 同一份包络走 `SetEnvelopeStateChunk` | `true`，读回 3 个点 | 修法可行 |
 
+## 四、转换仍然失败：动作表**根本没读到**（第二弹）
+
+第三节的包络路径上线之后，用户的现场日志（22:25 那次会话）换成了另一句：
+
+```
+[pitch] auto take-pitch write failed: REAPER rejected the item state; the host action
+        "Take: Toggle take pitch envelope" was not found (localized REAPER?);
+        enable the take pitch envelope once by hand and retry
+```
+
+即：包络路径没走到，因为"建一条包络"这一步找不到动作。而真机上的动作表**是有的**。
+
+### 根因：`kbd_enumerateActions` 的第三个参数是指针的指针
+
+`reaper.exe` 的 API 注册表里这条签名是逐字写着的（连参数名一起）：
+
+```text
+kbd_enumerateActions
+  KbdSectionInfo*,int,const char**
+  section,idx,nameOut
+```
+
+出参是 **`const char**`**（宿主写回一个指向它自己字符串的指针），不是调用方提供的字符
+缓冲区 —— 而且第一个参数是 `KbdSectionInfo*`，不是段号。此前按"缓冲区 + 长度"实现，
+于是宿主的返回值被当成字符串读，名字永远匹配不上；`section` 传 `0` 更是"碰巧能用"而不是
+"按契约用"。**同一个错误类型第三次出现**（前两次是 `B_TAKEFX` 与把前缀当整份 chunk）：
+按记忆写 ABI。这次的规则改成：签名必须以 `reaper.exe` 里的注册表为准，并且每个签名都在
+真机上跑一遍。
+
+主段的指针有正式入口：`KbdSectionInfo* SectionFromUniqueID(int uniqueID)`，
+`SectionFromUniqueID(0)` 就是 main section（真机返回非空指针，用它枚举到 **4390** 条动作）。
+
+### 名字与本地化
+
+同一台机器是中文 REAPER，但这两条动作枚举出来的名字**就是英文**：
+`Take: Toggle take pitch envelope`（41612）、`Item properties: Toggle take reverse`（41051）。
+另有一批动作写成 `本地化文本 |||||| English`（MIDI/OSC 那一族）。所以判据是：
+
+1. 逐条枚举主段动作，取**分隔符 `||||||` 之后那一段**（没有分隔符就用整串）与目标名字比较；
+2. 名字没对上时才退回登记过的命令号，但仍要 `kbd_getTextFromCmd(id, section)` 非空；
+3. 解析结果按命令号缓存（动作表在进程内静态，枚举一次 4400 条太贵）。
+
+`GetToggleCommandState(41612)` 在真机上返回 `-1`（不是 toggle-state 命令），所以它**不能**
+用来判断"这条动作存不存在"——存在性只能问 `kbd_getTextFromCmd`。
+
+解析结果现在会留一行日志（默认详细程度就能看到）：
+
+```
+[ara] host action resolved by name: "Take: Toggle take pitch envelope" -> command 41612 (4390 actions scanned)
+[ara] host action "…" is not in the main action table; using the documented command 41612
+[ara] host action "…" is not available (N actions scanned; no documented command 41612)
+```
+
+三行分别对应"名字命中""名字没命中但有退路""彻底没有"。报障时这一行就能分辨是
+"动作没找到"还是"动作跑了但没效果"。
+
+### 动作怎么调才安全
+
+动作作用于**选中项**的**active take**，因此调用前必须把两件事都对齐、调用后都复原：
+
+- 快照**原来选中的那几条**（`CountSelectedMediaItems` + `GetSelectedMediaItem`），一次
+  `SelectAllMediaItems(false)` 清空选区、只选中目标，跑完原样回填（真机上"整工程逐条改
+  选择位"的写法让宿主主线程卡了 2 s，改成按选中数之后与工程规模无关）；
+- 目标 take 不是 active 时先写 `I_CURTAKE`（真机实测可写，`SetMediaItemInfo_Value` 返回
+  `true` 且 `GetActiveTake` 立刻跟着变），跑完切回原来的序号。
+
+顺带否掉一个"看起来能用"的写法：`GetToggleCommandState` 判存在性（见上）、
+`PCM_Source_CreateSection` 造反向段（ReaScript 里根本没有这个函数，扩展侧也没有文档签名）。
+
+## 五、倒放：同一道铁门，换成宿主动作
+
+用户在 take FX 下点倒放，现场是：
+
+```
+[cmd] set_clips_state_bulk failed (client): host clip edit failed (Undo block retained):
+      host clip edit rolled back; nothing was changed (REAPER rejected the item state)
+```
+
+根因与第三节完全相同（`SetItemStateChunk` 拒绝带在线 ARA FX 的 item），只是这次撞门的是
+`source_direction`。
+
+### 修法：把"宿主自己的做法"借出来
+
+`Item properties: Toggle take reverse` 写出的结构与我们的编码**逐字节一致**（真机对照）：
+
+```text
+SOFFS 0.6                      <- D − 正向窗口终点
+<SOURCE SECTION
+LENGTH 2                       <- 正向窗口跨度
+MODE 3
+STARTPOS 0
+OVERLAP 0.01
+<SOURCE WAVE ... >
+>
+```
+
+于是 `write_take_direction` 有两条路，用**放置位置**先选，不靠"试一次失败再换路"：
+
+- `placement().item() == 目标 item`（take FX 下必然如此）⇒ **直接**走动作，连那次注定被拒的
+  几百 KB chunk 读写都不做；
+- 否则先走 chunk（逐字节保留、能精确到多 take item 的某一条 take），**万一**被拒（同工程里
+  还有别的 ARA 实例）再退到动作，并写一行 `[ara] the host refused the item state ...`。
+
+两条路都要过同一道"写 → 读 → 比"：`PCM_Source_GetSectionInfo` 报的方向位必须等于期望值，
+否则整批回滚。动作路径在 toggle 之后**再写一次 `D_STARTOFFS`**（`DirectionEdit` 算出来的镜像
+起点）—— 宿主的 toggle 会自己镜像，但镜像基准是它手上的旧值，写死才让往返不依赖宿主状态。
+
+回滚也按"走过的哪条路"撤：chunk 那条写回原文（连本批次数值一起撤销）；动作那条再 toggle
+一次回原方向，数值仍由几何回滚逐字段恢复。
+
+## 六、顺带确认的读数（真机，REAPER 7.85）
+
+| 读数 | 结果 | 说明 |
+|---|---|---|
+| 主段动作数（`kbd_enumerateActions`，section 0） | 4390 | 名字 → 命令号这条路可用 |
+| `Take: Toggle take pitch envelope` | 41612 | 与登记值一致 |
+| `Item properties: Toggle take reverse` | 41051 | 与登记值一致 |
+| `GetToggleCommandState(41612)` | `-1` | **不能**当"存在性判据" |
+| 在线 ARA take FX 下 `SetMediaItemInfo_Value` `D_POSITION`/`D_LENGTH` | `true` | 逐字段 setter 不受那道铁门影响 |
+| 同上 `SetMediaItemTakeInfo_Value` `D_STARTOFFS`/`D_PLAYRATE`（含 `-1`） | `true` | 同上 |
+| 同上 `I_CURTAKE` | `true` | 动作路径切 take 的前提 |
+| 在线 ARA 下 `Main_OnCommand(41051)` | 成功，`PCM_Source_GetSectionInfo` 的 `rev` 立刻翻转 | 这是倒放的修法 |
+| 在线 ARA 下 `Main_OnCommand(41612)` | 成功，`CountTakeEnvelopes` 0 → 1 | 这是建包络的修法 |
+| 启动脚本里直接调 `Main_OnCommand` | **挂住整个 REAPER** | 只能在消息循环里跑（`defer` tick / 我们的宿主线程泵） |
+| 本插件调动作的时机 | 宿主线程泵（一等价于 `defer` tick） | 队列里只排播放请求，不在 ARA 模型线程上执行任意闭包 |
+
 ## 仍未复核
 
-1. **倒放**（`source_direction`）在 take FX 下同样只能走 chunk，因此会被同一条拒绝挡住。
-   本次只把 take 音高换成了包络路径；倒放要么也找一条不重建 item 的写法，要么在 take FX 下
-   明确报"宿主不支持"。现场还没有人报过它，先留在这里。
-2. 真实工程（几分钟的素材、上千个包络点、几百 KB 的 ARA 存档）里的一次完整
-   "转换 → 保存 → 重开 → 再转换"往返。
+1. 真实工程（几分钟的素材、上千个包络点、几百 KB 的 ARA 存档）里的一次完整
+   "转换 → 保存 → 重开 → 再转换"往返，以及倒放/反倒在保存重开后的几何一致性。
+2. 多 take item 上"绑定 take 不是 active take"时的动作路径（真机只有单 take 的用例；
+   夹具里有覆盖，但宿主行为未复核）。

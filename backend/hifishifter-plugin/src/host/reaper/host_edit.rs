@@ -873,8 +873,8 @@ pub(crate) fn execute_managed(
     // 已开始写入的片段。**在写入之前**登记：写入中途失败时，最后一个片段可能只写了
     // 一半（例如位置已改、长度还没改），它同样必须被回滚。
     let mut applied: Vec<(&ClipEdit, &HostClipTarget)> = Vec::new();
-    // 结构改写前的**原文**：回滚时把它整份写回，等于连该 clip 的数值编辑一起撤销。
-    let mut applied_structural: Vec<(HostClipTarget, String)> = Vec::new();
+    // 已落地的**结构**写回：回滚按同一条路撤（chunk 写回原文 / 动作再 toggle 一次）。
+    let mut applied_structural: Vec<(HostClipTarget, DirectionWrite)> = Vec::new();
     let result: Result<(), String> = (|| {
         for (index, (edit, target, destination)) in targets.iter().enumerate() {
             applied.push((edit, target));
@@ -1072,22 +1072,9 @@ pub(crate) fn execute_managed(
                 }
             }
             if let Some(direction) = &reverse_plans[index] {
-                // 结构写回**最后**做：读的是这份 chunk 的当前全文（含刚写的数值）。
-                let original = target.item_state_chunk(&authorized)?;
-                let rewritten = super::source_direction::rewrite_take_direction(
-                    &original,
-                    &target.geometry.take_id,
-                    direction,
-                )?;
-                target.set_item_state_chunk(&rewritten, &authorized)?;
-                applied_structural.push((target.clone(), original));
-                // 【写 → 读 → 比】SECTION MODE 的取值属于宿主，仓库里没有第二份证据
-                // 能替代这次实测。不符就整批回滚（回滚写回原文 ⇒ 等于没改），
-                // 而不是让用户看到"点了没反应"。
-                let expected = direction.section.is_some();
-                if target.reversed_now(&authorized)? != expected {
-                    return Err("the host did not apply the requested take direction".into());
-                }
+                // 结构写回**最后**做：它读的是"位置/长度/速率都写完"之后的那份原文。
+                let write = write_take_direction(target, direction, &authorized)?;
+                applied_structural.push((target.clone(), write));
             }
             target.update(&authorized)?;
         }
@@ -1148,17 +1135,27 @@ pub(crate) fn execute_managed(
             // 该 clip 的数值编辑一起撤销；随后只对"没被结构覆盖"的 clip 做数值回滚，
             // 否则会把刚复原的原文再按镜像域改写一遍。
             let mut rollback_errors: Vec<String> = Vec::new();
-            for (target, original) in applied_structural.iter().rev() {
-                if let Err(rollback) = target.set_item_state_chunk(original, &authorized) {
+            for (target, write) in applied_structural.iter().rev() {
+                let rollback = match write {
+                    DirectionWrite::Chunk { original } => {
+                        target.set_item_state_chunk(original, &authorized)
+                    }
+                    DirectionWrite::Action { before } => {
+                        target.apply_take_direction(*before, &authorized)
+                    }
+                };
+                if let Err(rollback) = rollback {
                     rollback_errors.push(rollback);
                 }
             }
             let numeric: Vec<(&ClipEdit, &HostClipTarget)> = applied
                 .iter()
                 .filter(|(_, target)| {
-                    !applied_structural
-                        .iter()
-                        .any(|(done, _)| done.same_item(target))
+                    // chunk 写回的是**整份** item，已经连数值一起撤销；动作那条只换了方向，
+                    // 位置/长度/SOFFS 仍要按几何逐字段回滚。
+                    !applied_structural.iter().any(|(done, write)| {
+                        matches!(write, DirectionWrite::Chunk { .. }) && done.same_item(target)
+                    })
                 })
                 .copied()
                 .collect();
@@ -1179,6 +1176,76 @@ pub(crate) fn execute_managed(
     };
     drop(undo);
     result.map_err(|error| format!("host clip edit failed (Undo block retained): {error}"))
+}
+
+/// 一次方向写回实际走了哪条路。
+///
+/// 【为什么要区分】两条路的回滚方式不同：chunk 写回的是一份**整 item** 的原文（连本批次
+/// 刚写的数值一起撤销），而宿主动作只换了方向，数值仍要按几何逐字段回滚。混着撤会把
+/// 已经复原的字段再按镜像域改写一遍。
+enum DirectionWrite {
+    /// item chunk 整份写回；`original` 就是回滚内容。
+    Chunk { original: String },
+    /// 宿主自己的动作；回滚时按 `before` 再 toggle 一次。
+    Action { before: bool },
+}
+
+/// 把一条 take 的播放方向写到宿主上。
+///
+/// 【两条路】
+/// 1. **item chunk 整份改写**（[`super::source_direction::rewrite_take_direction`]）——
+///    逐字节保留除目标 take 的 `SOURCE`/`SOFFS` 之外的一切，是多 take item 上唯一能
+///    "只改这一条 take"的写法；
+/// 2. **宿主自己的 `Item properties: Toggle take reverse`** —— 宿主**不允许**扩展重建
+///    带在线 ARA FX 的 item（真机取证见 [`super::take_env`]），而 take FX 放置下那个
+///    item 恰好就是挂着本插件的那个。这条路写出的结构与第 1 条逐字节一致，因此两者在
+///    模型看来是同一种状态。
+///
+/// 【选择顺序】先看"这个 item 是不是本实例自己挂着的"（放置位置缓存，不花宿主调用）：
+/// 是就**直接**走动作，不做那次注定被拒的几百 KB 读写。不是的话先走 chunk（精确到 take），
+/// 万一被拒（同工程里可能还有别的 ARA 实例）再退到动作。
+///
+/// 【写完必须核对】`SECTION MODE` 的取值属于宿主，仓库里没有第二份证据能替代这次实测。
+/// 不符就返回错误 —— 调用方整批回滚，"点了没反应"不会伪装成成功。
+fn write_take_direction(
+    target: &HostClipTarget,
+    direction: &super::source_direction::DirectionEdit,
+    authorized: &impl Fn() -> bool,
+) -> Result<DirectionWrite, String> {
+    let expected = direction.section.is_some();
+    if !target.hosts_this_instance() {
+        let original = target.item_state_chunk(authorized)?;
+        let rewritten = super::source_direction::rewrite_take_direction(
+            &original,
+            &target.geometry.take_id,
+            direction,
+        )?;
+        match target.set_item_state_chunk(&rewritten, authorized) {
+            Ok(()) => {
+                if target.reversed_now(authorized)? != expected {
+                    return Err("the host did not apply the requested take direction".into());
+                }
+                return Ok(DirectionWrite::Chunk { original });
+            }
+            Err(error) if error == super::write::ITEM_STATE_REFUSED => {
+                crate::log_line(&format!(
+                    "[ara] the host refused the item state ({error}); \
+                     writing the take direction through its own action"
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let before = target.reversed_now(authorized)?;
+    target.apply_take_direction(expected, authorized)?;
+    // 【SOFFS 由模型写死】宿主的 toggle 会自己镜像 `D_STARTOFFS`，但镜像基准是**它**手上
+    // 的旧值（本批次还没写这一条）。写死成 `DirectionEdit` 算出来的那个，往返才不依赖
+    // 宿主此刻的状态 —— 真机实测这个 setter 在倒放段上照样可写。
+    target.set_take(c"D_STARTOFFS", direction.s_offs, authorized)?;
+    if target.reversed_now(authorized)? != expected {
+        return Err("the host did not apply the requested take direction".into());
+    }
+    Ok(DirectionWrite::Action { before })
 }
 
 /// 把已写入的片段**按编辑前的几何**写回去。
@@ -1743,6 +1810,53 @@ mod tests {
             "源本身必须原样保留：{chunk}"
         );
         assert!(host.take_reversed.get(), "写后方向位必须已经变成倒放");
+        document.close();
+    }
+
+    /// take FX 下 item chunk 一律写不进去（真机行为）时，倒放改走宿主自己的动作。
+    ///
+    /// 【为什么这条是本次修复的核心】`SetItemStateChunk` 对"挂着在线 ARA FX 的 item"连
+    /// 原样写回都拒绝，而 take FX 放置下要改方向的那个 item 正是挂着本插件的那个 —— 于是
+    /// 用户点倒放，收到的是 `host clip edit failed ... REAPER rejected the item state`，
+    /// 而工程里什么都没变。宿主的 `Item properties: Toggle take reverse` 写出的结构与
+    /// 我们自己的编码一致（真机对照过），所以借它动作既不改语义、也不需要重建 item。
+    #[test]
+    fn a_refused_item_chunk_sends_the_reverse_through_the_host_action() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_item_state(&host.single_take_chunk());
+        // 动作路径要把"只有目标 item 被选中"这件事做对，需要能枚举 item。
+        host.inventory_enabled.set(true);
+        host.take_env_enabled.set(true);
+        host.item_state_write_refused.set(true);
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        let plan = editor
+            .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"reversed":true}))
+            .expect("倒放补丁必须被接受");
+        host.reset();
+        execute(&owner, plan, || document.is_alive()).expect("take FX 下倒放必须走宿主动作");
+
+        let calls = host.calls();
+        assert!(host.take_reversed.get(), "方向位必须真的翻过来");
+        assert!(
+            calls.iter().any(|call| call.starts_with("run-command-ex:")),
+            "必须借宿主自己的动作切方向：{calls:?}"
+        );
+        let chunk = host.item_state_chunk.borrow().clone();
+        assert!(
+            !chunk.contains("<SOURCE SECTION"),
+            "chunk 从未被真正改写（宿主拒绝了它）：{chunk}"
+        );
         document.close();
     }
 

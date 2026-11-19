@@ -116,6 +116,11 @@ pub struct Fixture {
     pub fx_chain_on: Cell<bool>,
     /// 是否注册 `TakeFX_*` 一族（缺省关：老宿主形态）。
     pub take_fx_api: Cell<bool>,
+    /// 动作表里"Take: Toggle take pitch envelope"报的命令号（缺省 41612）。
+    ///
+    /// 【为什么要能改】"按名字解析"这条纪律只有在**名字与命令号对不上**时才能被验证：
+    /// 用例把它改成一个只在夹具里存在的号码，实现却仍然跑对了，才说明它读的是名字。
+    pub pitch_action_id: Cell<i32>,
     /// `parent(2)` 报哪条 take；0 = 主 take（多 take 用例把它指到别的 take 上）。
     pub parent_take: Cell<usize>,
     /// `GetItemStateChunk` / `SetItemStateChunk` 是否注册。
@@ -193,6 +198,8 @@ impl Fixture {
                 ("D_SNAPOFFSET", 0.),
                 ("I_GROUPID", 0.),
                 ("D_STARTOFFS", 0.),
+                // 动作路径会临时切 active take（多 take item 上"给这条 take 建包络"）。
+                ("I_CURTAKE", 0.),
                 ("D_PLAYRATE", 0.5),
                 ("B_PPITCH", 1.),
                 ("I_CHANMODE", 2.),
@@ -229,6 +236,7 @@ impl Fixture {
             fx_chain_on: Cell::new(true),
 
             take_fx_api: Cell::new(false),
+            pitch_action_id: Cell::new(41612),
             parent_take: Cell::new(0),
             item_state_enabled: Cell::new(false),
             item_state_write_refused: Cell::new(false),
@@ -539,6 +547,14 @@ unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_voi
         "GetEnvelopeStateChunk" if f.take_env_enabled.get() => get_envelope_state as *const (),
         "SetEnvelopeStateChunk" if f.take_env_enabled.get() => set_envelope_state as *const (),
         "kbd_enumerateActions" if f.take_env_enabled.get() => enumerate_actions as *const (),
+        "CountSelectedMediaItems" if f.take_env_enabled.get() => count_selected as *const (),
+        "GetSelectedMediaItem" if f.take_env_enabled.get() => selected_item as *const (),
+        "SelectAllMediaItems" if f.take_env_enabled.get() => select_all as *const (),
+        "SetMediaItemSelected" if f.take_env_enabled.get() => set_item_selected as *const (),
+        "IsMediaItemSelected" if f.take_env_enabled.get() => item_is_selected as *const (),
+        "SectionFromUniqueID" if f.take_env_enabled.get() => section_from_unique_id as *const (),
+        "kbd_getTextFromCmd" if f.take_env_enabled.get() => action_text as *const (),
+        "Main_OnCommandEx" if f.take_env_enabled.get() => run_command_ex as *const (),
         "Main_OnCommand" if f.take_env_enabled.get() => run_command as *const (),
         "SetItemStateChunk" if f.item_state_enabled.get() => set_item_state as *const (),
         "genGuid" if f.item_state_enabled.get() => gen_guid as *const (),
@@ -1238,45 +1254,123 @@ unsafe extern "C" fn set_envelope_state(
     true
 }
 
-/// `kbd_enumerateActions(int section, int idx, char* desc, int size)`：够用的两条 + 结束。
+/// 夹具里的主动作段句柄。
+const SECTION_HANDLE: usize = 0x5EC7;
+
+/// 夹具的动作表：一条无关动作 + 本插件要的两条。
+///
+/// 【为什么"无关动作"必须在最前面】真实现是按索引逐条枚举、按名字匹配；只有表里存在
+/// 不匹配的条目，"匹配错位置"才会被用例抓住。
+fn action_table() -> [(&'static std::ffi::CStr, i32); 3] {
+    [
+        (c"File: New project", 40023),
+        (
+            c"Take: Toggle take pitch envelope",
+            fixture().pitch_action_id.get(),
+        ),
+        (c"Item properties: Toggle take reverse", 41051),
+    ]
+}
+
+/// `KbdSectionInfo* SectionFromUniqueID(int uniqueID)`：只认主动作段（0）。
+unsafe extern "C" fn section_from_unique_id(unique: i32) -> *mut c_void {
+    if unique == 0 {
+        SECTION_HANDLE as *mut c_void
+    } else {
+        std::ptr::null_mut()
+    }
+}
+
+/// `int kbd_enumerateActions(KbdSectionInfo*, int idx, const char** nameOut)`。
+///
+/// 【签名为什么要照真机】出参是**指向名字的指针**（`const char**`），不是字符缓冲区。
+/// 夹具照抄这一点，才可能抓住"把出参当缓冲区读"的写法（真机上的现场就是它）。
 unsafe extern "C" fn enumerate_actions(
-    _section: i32,
+    section: *mut c_void,
     index: i32,
-    buffer: *mut std::ffi::c_char,
-    size: i32,
+    name_out: *mut *const std::ffi::c_char,
 ) -> i32 {
-    let table: [(&str, i32); 2] = [
-        ("File: New project", 40023),
-        ("Take: Toggle take pitch envelope", 41612),
-    ];
+    let f = fixture();
+    assert_eq!(section as usize, SECTION_HANDLE, "必须传主动作段的指针");
+    f.record(format!("enumerate:{index}"));
+    let table = action_table();
     let Some((name, command)) = table.get(index as usize) else {
         return 0;
     };
-    let bytes = name.as_bytes();
-    if size > 0 {
-        let length = bytes.len().min(size as usize - 1);
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                bytes.as_ptr().cast::<std::ffi::c_char>(),
-                buffer,
-                length,
-            );
-            *buffer.add(length) = 0;
-        }
+    if !name_out.is_null() {
+        unsafe { *name_out = name.as_ptr() };
     }
     *command
 }
 
-/// `Main_OnCommand(int, int)`：只实现"建一条 take pitch 包络"。
-unsafe extern "C" fn run_command(command: i32, _flag: i32) {
+/// 夹具里的选择态只有一个 item（`item_ui_selected`），足以验证"只影响目标 item"。
+unsafe extern "C" fn count_selected(_project: *mut c_void) -> i32 {
+    i32::from(fixture().item_ui_selected.get())
+}
+
+unsafe extern "C" fn selected_item(_project: *mut c_void, index: i32) -> *mut c_void {
     let f = fixture();
-    f.record(format!("run-command:{command}"));
-    if command == 41612 && f.take_env_chunk.borrow().is_none() {
+    if index == 0 && f.item_ui_selected.get() {
+        f.item()
+    } else {
+        std::ptr::null_mut()
+    }
+}
+
+unsafe extern "C" fn select_all(_project: *mut c_void, selected: bool) {
+    fixture().item_ui_selected.set(selected);
+}
+
+unsafe extern "C" fn set_item_selected(item: *mut c_void, selected: bool) {
+    let f = fixture();
+    assert_eq!(item, f.item());
+    f.item_ui_selected.set(selected);
+}
+
+unsafe extern "C" fn item_is_selected(item: *mut c_void) -> bool {
+    let f = fixture();
+    assert_eq!(item, f.item());
+    f.item_ui_selected.get()
+}
+
+/// `const char* kbd_getTextFromCmd(int cmd, KbdSectionInfo* section)`。
+unsafe extern "C" fn action_text(command: i32, _section: *mut c_void) -> *const std::ffi::c_char {
+    for (name, id) in action_table() {
+        if id == command {
+            return name.as_ptr();
+        }
+    }
+    std::ptr::null()
+}
+
+/// 动作的**效果**：建一条 take pitch 包络 / 翻转 take 方向。
+fn action_effect(command: i32) {
+    let f = fixture();
+    if command == f.pitch_action_id.get() && f.take_env_chunk.borrow().is_none() {
         f.take_env_chunk.replace(Some(
             "<PITCHENV\nACT 1 -1\nVIS 1 1 1\nLANEHEIGHT 0 0\nARM 0\nDEFSHAPE 0 -1 -1\nPT 0 0 0\n>\n"
                 .to_string(),
         ));
     }
+    if command == 41051 {
+        let reversed = !f.take_reversed.get();
+        f.take_reversed.set(reversed);
+    }
+}
+
+/// `Main_OnCommandEx(int command, int flag, ReaProject* proj)`。
+unsafe extern "C" fn run_command_ex(command: i32, _flag: i32, project: *mut c_void) {
+    let f = fixture();
+    assert_eq!(project, f.project(), "动作必须落在本实例的工程上");
+    f.record(format!("run-command-ex:{command}"));
+    action_effect(command);
+}
+
+/// `Main_OnCommand(int, int)`：老宿主形态。
+unsafe extern "C" fn run_command(command: i32, _flag: i32) {
+    let f = fixture();
+    f.record(format!("run-command:{command}"));
+    action_effect(command);
 }
 
 /// `GetItemStateChunk(MediaItem*, char* buf, int size, bool isUndo)`。
@@ -2250,6 +2344,32 @@ fn the_placement_is_recomputed_after_a_rebind() {
     );
 }
 
+/// take FX 下"目标 item 就是本实例挂着的那个 item"必须被认出来。
+///
+/// 【为什么这是一个断言而不是注释】它是"方向/包络不重写 item chunk"的**唯一**判据：
+/// 认错了，倒放就会去撞那次必然被拒的 chunk 写回（然后才退到动作）；认反了，轨道 FX
+/// 实例会把别人的 item 当成自己的、绕开精确的 chunk 路径。
+#[test]
+fn a_take_fx_item_is_recognised_as_the_one_hosting_this_instance() {
+    let f = take_fx_fixture();
+    f.enable_item_state(&f.single_take_chunk());
+    let host = std::sync::Arc::new(f.client());
+    assert_eq!(host.placement().item(), None, "还没求值前不许瞎认");
+    let target = host.clip_target(|| true).expect("bound take");
+    assert!(!target.hosts_this_instance(), "Unbound 时按历史路径走");
+    assert!(host.resolve_placement(&[], &|| true).is_take_fx());
+    assert!(
+        target.hosts_this_instance(),
+        "take FX 下目标 item 就是本实例挂着的那个"
+    );
+    // 轨道 FX 的实例不拥有任何 item。
+    f.forget_and_rearm_as_track_fx();
+    host.forget_placement();
+    assert!(host.resolve_placement(&[], &|| true).track().is_some());
+    let target = host.clip_target(|| true).expect("bound take");
+    assert!(!target.hosts_this_instance());
+}
+
 /// take FX 的清单只有**自己那条 take 的 item**，且写回目标绑在那条 take 上。
 ///
 /// 【为什么非 active take 是关键】take FX 恰好最适合挂在多 take item 的某一条上，而
@@ -2345,13 +2465,18 @@ fn a_take_pitch_write_uses_the_envelope_object_when_it_exists() {
     assert!(read.present);
 }
 
-/// item chunk 被宿主拒绝（take FX 下的真机行为）时，借宿主动作建一条包络再写。
+/// 没有包络时**先**借宿主动作建一条，而不是先去撞 item chunk。
+///
+/// 【为什么顺序本身是断言】真机上那条"先写 chunk"的路在 take FX 下必然失败：每次转换都要
+/// 读一份几百 KB 的 item chunk、再吃一次宿主拒绝，然后才建包络 —— 用户看到的是几秒卡顿
+/// 加一条吓人的日志。所以这里不仅要求结果对，还要求**根本没去碰** item chunk。
 #[test]
-fn a_refused_item_chunk_write_falls_back_to_a_created_envelope() {
+fn a_missing_envelope_is_created_through_the_host_action_first() {
     let f = Fixture::new();
     f.enable_item_state(&f.single_take_chunk());
     f.inventory_enabled.set(true);
     f.take_env_enabled.set(true);
+    // 宿主此刻确实会拒绝 chunk 写回（take FX 下的真机行为）—— 但这条路径不该走到那里。
     f.item_state_write_refused.set(true);
     let host = std::sync::Arc::new(f.client());
     let target = host.clip_target(|| true).expect("bound take");
@@ -2362,13 +2487,45 @@ fn a_refused_item_chunk_write_falls_back_to_a_created_envelope() {
         .write_take_pitch_points(&points, &|| true)
         .expect("write through a created envelope");
     assert!(
-        f.calls().iter().any(|call| call == "run-command:41612"),
+        f.calls().iter().any(|call| call == "run-command-ex:41612"),
         "必须借宿主自己的动作建包络"
+    );
+    assert!(
+        !f.calls().iter().any(|call| call == "get-item-state"),
+        "建包络不该先读一份 item chunk"
     );
     let stored = f.take_env_chunk.borrow().clone().expect("envelope created");
     assert!(stored.contains("PT 0.00000000000000000 5.00000000000000000 0"));
     // 选择位必须恢复到进入时的样子（动作只该影响目标 item，不该改用户的选区）。
     assert!(!f.item_ui_selected.get(), "选择位要还原");
+}
+
+/// **按名字解析动作号，不认死号码**：夹具把命令号改成 99999，实现仍要跑对。
+///
+/// 【为什么这条是回归】真机上第一次尝试"借宿主动作"时，枚举函数的出参被当成字符缓冲区
+/// 读，名字永远匹配不上 —— 用户看到的是"宿主里找不到该动作，请手动打开一次音高包络"。
+/// 那时日志里其实连动作表都没读到。判据必须是"名字 → 命令号"，而不是记忆里的数字。
+#[test]
+fn the_action_is_resolved_by_name_not_by_a_remembered_number() {
+    let f = Fixture::new();
+    f.enable_item_state(&f.single_take_chunk());
+    f.inventory_enabled.set(true);
+    f.take_env_enabled.set(true);
+    f.pitch_action_id.set(99_999);
+    let host = std::sync::Arc::new(f.client());
+    let target = host.clip_target(|| true).expect("bound take");
+    let points = vec![hifishifter_kernel::pitch_bridge::EnvelopePoint::new(
+        0.0, 1.0,
+    )];
+    target
+        .write_take_pitch_points(&points, &|| true)
+        .expect("write through the enumerated action");
+    assert!(
+        f.calls().iter().any(|call| call == "run-command-ex:99999"),
+        "用的是动作表里的命令号：{:?}",
+        f.calls()
+    );
+    assert!(f.take_env_chunk.borrow().is_some());
 }
 
 /// 空点集 = 删掉整条包络，而且**不碰** item chunk。
