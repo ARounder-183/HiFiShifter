@@ -24,13 +24,21 @@ pub(crate) struct UiTake {
 
 #[derive(Clone)]
 pub(crate) struct UiItem {
-    /// active take 的几何。既有消费者（淡化装饰、item→clip 反查）都读它，
-    /// 保持"每个 item 一份权威几何"的语义不变。
+    /// **本实例写入的那条 take** 的几何。轨道 FX 下它就是 active take（与改动前一致）；
+    /// take FX 下它是 `parent(2)` 那一条 —— 否则"非 active take 上的实例"会把几何、
+    /// 名称与写回目标一起指到别人的 take 上。
     pub geometry: super::super::geometry::HostClipGeometry,
     pub name: String,
     pub target: HostClipTarget,
     /// 全部 take（含 active）。宿主没有枚举接口时恰好一个元素。
     pub takes: Vec<UiTake>,
+    /// 本实例**绑定**的那条 take 的 GUID；`None` = 与 active take 相同（改动前的语义）。
+    ///
+    /// 【为什么它与 `takes` 里那个 `active` 标记分开】`active` 是**宿主**的选择
+    /// （用户按 T 切换的那一条），绑定的 take 是**实例**的归属（take FX 挂在谁身上）。
+    /// 轨道 FX 下两者恰好同一条，take FX 下则经常不是 —— 把两者合成一位，就回到了
+    /// "非 active take 的实例写到别人的 take 上"。
+    pub bound_take: Option<String>,
 }
 #[derive(Clone)]
 pub(crate) struct UiTrack {
@@ -68,7 +76,49 @@ impl NativeHost {
         let pointer = self._interface.0 as *mut c_void;
         let table = unsafe { &**pointer.cast::<*const HostVtbl>() };
         let track = checked(authorized, || unsafe { (table.parent)(pointer, 1) })?;
-        self.ui_track_at(project, track, None, authorized)
+        self.ui_track_at(project, track, None, None, authorized)
+    }
+
+    /// 本实例**绑定**在这个 item 上的那条 take（指针）；轨道 FX 或别的 item 都是 `None`。
+    ///
+    /// 【判据为什么只能是指针相等】take 的 GUID 要再问一次宿主才能拿到，而这里已经有
+    /// `parent(2)` 那个指针（`HostPlacement::TakeFx` 记的就是它）。同一份 chunk 里
+    /// 指针的归属由 `ValidatePtr2` 在探测时核实过。
+    fn bound_take_for(&self, item: *mut c_void) -> Option<usize> {
+        match self.placement() {
+            HostPlacement::TakeFx {
+                item: bound_item,
+                take,
+                ..
+            } if bound_item == item as usize => Some(take),
+            _ => None,
+        }
+    }
+
+    /// 本实例的清单作用域。
+    ///
+    /// * 轨道 FX：本轨 + folder 全部后代 + 自己建出来的轨道（与改动前完全一致）；
+    /// * take FX：**只有**自己绑定的那条 take 所属的 item —— 实例只渲染这一条 take，
+    ///   把整轨（或整组 folder）列出来会让界面出现大量"看得见、改不了、也不会出声"的
+    ///   片段；同一轨上两个 take 实例时，两份清单还会完全相同、互相争同一批 clip。
+    ///
+    /// 位置读不出来（`Unbound`）时退回轨道语义：那是改动前的行为，宁可多列也不丢。
+    pub(crate) fn ui_scope(
+        self: &Arc<Self>,
+        authorized: &impl Fn() -> bool,
+        adopted: &[String],
+    ) -> Result<Vec<UiTrack>, String> {
+        let placement = self.placement();
+        if let HostPlacement::TakeFx { item, track, .. } = placement {
+            if !self.on_host_thread() {
+                return self.on_host(|| self.ui_scope(authorized, adopted))?;
+            }
+            let project = self.project(authorized)?;
+            let track =
+                self.ui_track_at(project, track as *mut c_void, None, Some(item), authorized)?;
+            return Ok(vec![track]);
+        }
+        self.ui_folder_tracks(authorized, adopted)
     }
 
     /// FX 所在轨道 +（若它是 folder）其全部后代轨道。
@@ -110,7 +160,13 @@ impl NativeHost {
         for node in tree.descendant_nodes(&own_guid) {
             // 父级取自重建出的树，而不是一律挂到 FX 轨上 —— 否则嵌套 folder 会被压平。
             let parent_guid = tree.parent_of(&node.guid).flatten();
-            match self.ui_track_at(project, node.track as *mut c_void, parent_guid, authorized) {
+            match self.ui_track_at(
+                project,
+                node.track as *mut c_void,
+                parent_guid,
+                None,
+                authorized,
+            ) {
                 Ok(track) => tracks.push(track),
                 // 单条后代读不到不该让整组消失；如实记账并继续。
                 Err(error) => crate::log_line(&format!(
@@ -131,7 +187,13 @@ impl NativeHost {
                 continue;
             };
             let parent_guid = tree.parent_of(guid).flatten();
-            match self.ui_track_at(project, node.track as *mut c_void, parent_guid, authorized) {
+            match self.ui_track_at(
+                project,
+                node.track as *mut c_void,
+                parent_guid,
+                None,
+                authorized,
+            ) {
                 Ok(track) => tracks.push(track),
                 Err(error) => crate::log_line(&format!(
                     "[reaper-folder] adopted track {guid} unavailable: {error}"
@@ -172,11 +234,14 @@ impl NativeHost {
         project: *mut c_void,
         track: *mut c_void,
         parent_guid: Option<String>,
+        only_item: Option<usize>,
         authorized: &impl Fn() -> bool,
     ) -> Result<UiTrack, String> {
         // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
         if std::thread::current().id() != self.thread {
-            return self.on_host(|| self.ui_track_at(project, track, parent_guid, authorized))?;
+            return self.on_host(|| {
+                self.ui_track_at(project, track, parent_guid, only_item, authorized)
+            })?;
         }
         let pointer = self._interface.0 as *mut c_void;
         let table = unsafe { &**pointer.cast::<*const HostVtbl>() };
@@ -258,6 +323,11 @@ impl NativeHost {
             valid(track, c"MediaTrack*")?;
             let item = checked(authorized, || unsafe { get_item(track, index) })?;
             valid(item, c"MediaItem*")?;
+            // 【take FX 的作用域】只枚举本实例绑定的那个 item —— 这条过滤是本实例
+            // "只渲染一条 take"在清单层的唯一体现。其余 item 连元数据都不读。
+            if only_item.is_some_and(|only| only != item as usize) {
+                continue;
+            }
             // active take 是本实例唯一可能持有 ARA PCM 的那个；其余 take 只取元数据。
             let active = checked(authorized, || unsafe { active_take(item) })?;
             if active.is_null() {
@@ -303,24 +373,43 @@ impl NativeHost {
                             continue;
                         }
                         valid(take, c"MediaItem_Take*")?;
-                        takes.push(read_take(take, take == active)?);
+                        takes.push((read_take(take, take == active)?, take as usize));
                     }
                     takes
                 }
                 None => Vec::new(),
             };
-            if !takes.iter().any(|take| take.active) {
-                takes.insert(0, read_take(active, true)?);
+            if !takes.iter().any(|(take, _)| take.active) {
+                takes.insert(0, (read_take(active, true)?, active as usize));
             }
-            let active_index = takes.iter().position(|take| take.active).unwrap_or(0);
-            let g = takes[active_index].geometry.clone();
-            let name = takes[active_index].name.clone();
+            // 【本实例绑定的那条 take】take FX 下 `parent(2)` 就是它；轨道 FX 下没有
+            // 绑定 take（写回沿用 active take，与改动前一致）。
+            let bound = self.bound_take_for(item);
+            let bound_index = match bound {
+                Some(bound) => {
+                    // 宿主没有枚举接口时绑定的 take 可能不在集合里 —— 直接读它，
+                    // 而不是退回 active（退回就是把写回指到别人的 take 上）。
+                    let position = takes.iter().position(|(_, pointer)| *pointer == bound);
+                    match position {
+                        Some(position) => position,
+                        None => {
+                            let entry = read_take(bound as *mut c_void, false)?;
+                            takes.insert(0, (entry, bound));
+                            0
+                        }
+                    }
+                }
+                None => takes.iter().position(|(take, _)| take.active).unwrap_or(0),
+            };
+            let g = takes[bound_index].0.geometry.clone();
+            let name = takes[bound_index].0.name.clone();
+            let bound_take = (bound.is_some()).then(|| g.take_id.clone());
             let target = super::write::inventory_target(
                 self.clone(),
                 project as usize,
                 track as usize,
                 item as usize,
-                active as usize,
+                takes[bound_index].1,
                 g.clone(),
                 authorized,
             )?;
@@ -328,7 +417,8 @@ impl NativeHost {
                 geometry: g,
                 name,
                 target,
-                takes,
+                takes: takes.into_iter().map(|(take, _)| take).collect(),
+                bound_take,
             });
         }
         if change != checked(authorized, || unsafe { (geometry.change)(project) })? {

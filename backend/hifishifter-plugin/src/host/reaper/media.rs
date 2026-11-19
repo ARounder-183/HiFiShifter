@@ -1,5 +1,5 @@
 //! 官方REAPER媒体创建接口：宿主创建item/take/source，PCM与region仍等真实ARA回流授权。
-use super::{checked, Guid, HostVtbl, NativeHost};
+use super::{checked, Guid, HostPlacement, HostVtbl, NativeHost};
 use std::ffi::{c_char, c_void, CString};
 use std::sync::Arc;
 
@@ -448,7 +448,13 @@ impl NativeHost {
             .map(Some)
             .map_err(|_| "host file path is not UTF-8".into())
     }
-    /// 空ARA轨道的首次导入也沿直接parent(1)，不伪造track_main或根据轨名找目标。
+    /// 本实例所属的宿主轨道：take FX 下沿 take → item → track，其余沿直接 parent(1)。
+    ///
+    /// 【为什么 take FX 必须换一条边】take FX 的 `parent(1)` 不保证是 item 的宿主轨
+    /// （也可能直接是 `null`，见方案 E0）。而清单作用域、folder 深度这些读数都要求
+    /// 一个**真实**的轨道。轨道的唯一可靠来源是 `GetMediaItemTake_Item` →
+    /// `GetMediaItem_Track` 这条边。轨道 FX 下保持 `parent(1)` 不变：那是本实例的
+    /// 直接父对象，比任何推导都强。
     pub(crate) fn direct_track_target(
         self: &Arc<Self>,
         authorized: &impl Fn() -> bool,
@@ -460,7 +466,13 @@ impl NativeHost {
         let project = self.project(authorized)?;
         let pointer = self._interface.0 as *mut c_void;
         let table = unsafe { &**pointer.cast::<*const HostVtbl>() };
-        let track = checked(authorized, || unsafe { (table.parent)(pointer, 1) })?;
+        let track = match self.placement() {
+            HostPlacement::TakeFx { track, .. } => track as *mut c_void,
+            _ => checked(authorized, || unsafe { (table.parent)(pointer, 1) })?,
+        };
+        if track.is_null() {
+            return Err("REAPER instance has no host track".into());
+        }
         self.track_target(project as usize, track as usize, authorized)
     }
     pub(super) fn track_target(

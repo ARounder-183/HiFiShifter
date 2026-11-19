@@ -75,6 +75,16 @@ impl ExtensionOwner {
             caps.clip_reverse = host.can_reverse_clips();
             caps.take_pitch_bridge = host.can_bridge_take_pitch();
         }
+        // 【放置位置是**本实例**的事实，覆盖不得把它抹掉】上面那段读的是"文档里任一持有
+        // 历史 API 的实例"—— take FX 下它可能是一个轨道 FX 实例。而下面这三项对 take FX
+        // **目标对象不成立**：导入的 item 不属于本实例的 ARA 内容、新建的轨道更不属于，
+        // 复制 item 还会把 `<TAKEFX>` 块整块带出去（宿主会在目标 item 上再建一个实例）。
+        // 露出一个注定失败的入口，比藏起来更坏。
+        if self.host_placement().is_take_fx() {
+            caps.media_import = false;
+            caps.track_create = false;
+            caps.item_clipboard = false;
+        }
         caps
     }
     /// 撤销历史的**权威**：宿主提供撤销栈时用宿主的，否则用插件自管的那份。
@@ -160,6 +170,19 @@ impl ExtensionOwner {
         self.refresh_ui_inventory();
         let document = self.editor_document()?;
         if let Some(item) = clip_id.strip_prefix("ara-item-") {
+            // 【take FX：先用强身份】`parent(2)` 就是本实例绑定的那条 take，比清单更直接
+            // （清单是"上一次枚举的结论"，而宿主可能刚把 item 挪走）。解析到**同一个**
+            // item 才接受，否则退回清单 —— 绝不把另一条 item 的 take 冒充成本条 clip。
+            if self.host_placement().is_take_fx() {
+                if let Some(host) = self.native_host() {
+                    let authorized = || !self.is_closed() && document.is_alive();
+                    if let Ok(target) = host.clip_target(authorized) {
+                        if target.geometry.item_id == item {
+                            return Ok(target);
+                        }
+                    }
+                }
+            }
             let target = document
                 .ui_tracks
                 .lock_or_recover()

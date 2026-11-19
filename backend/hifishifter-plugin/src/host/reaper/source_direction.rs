@@ -13,11 +13,11 @@
 //! 用户插件的不透明状态、别的 take。任何"重新序列化整份 chunk"的做法都会在不报错的
 //! 情况下丢掉它们。
 //!
-//! ## 作用范围：单 take item
+//! ## 作用范围：按 take GUID 定位的那一条
 //!
-//! 插件与宿主 item 的唯一绑定是 `active take` 那一条通道（`HostClipTarget` 冻结的就是它）。
-//! 多 take item 上"改哪一个 take 的方向"没有宿主无关的答案，因此这里**明确拒绝**，
-//! 而不是猜一个。拒绝是可读的错误，猜错是工程损坏。
+//! 插件与宿主 item 的绑定是`HostClipTarget` 冻结的那条 take。多 take item 上"改哪一个
+//! take 的方向"因此有唯一答案：**GUID 相等的那一条**（解析见 [`super::take_chunk`]）。
+//! 找不到唯一匹配仍然**明确拒绝** —— 拒绝是可读的错误，猜错是工程损坏。
 //!
 //! ## 只改方向，不碰 take 的包络
 //!
@@ -28,6 +28,7 @@
 //! 顺手镜像包络点会让用户已有的曲线整体颠倒。
 
 use super::item_chunk::MAX_ITEM_CHUNK_BYTES;
+use super::take_chunk;
 
 /// REAPER 里"这一段反向播放"的 `MODE` 取值。
 ///
@@ -153,18 +154,22 @@ pub(super) fn rewrite_take_direction(
         }
     }
     let lines: Vec<&str> = chunk.lines().collect();
-    let blocks = outer_source_blocks(&lines)?;
-    if blocks.len() != 1 {
-        return Err(format!(
-            "reversing is only supported for single-take items (found {} takes)",
-            blocks.len()
-        ));
-    }
-    let block = &blocks[0];
-    if !has_take_guid(&lines, take_guid) {
-        return Err("host take identity changed before the reverse write".into());
-    }
-    let soffs = find_root_field(&lines, "SOFFS")
+    let section = take_chunk::section_with_guid(&lines, take_guid)?;
+    let block = take_chunk::block(&lines, &section, "SOURCE")
+        .ok_or("host take state has no source block")?;
+    let block = SourceBlock {
+        start: block.start,
+        end: block.end,
+        kind: lines[block.start]
+            .trim()
+            .trim_start_matches('<')
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("")
+            .to_string(),
+    };
+    let block = &block;
+    let soffs = take_chunk::field(&lines, &section, "SOFFS")
         .ok_or("host take state has no SOFFS line; cannot write the direction")?;
 
     let base_indent = indent_of(lines[block.start]);
@@ -241,60 +246,6 @@ struct SourceBlock {
     kind: String,
 }
 
-/// 找出所有"直接挂在 ITEM 上"的 SOURCE 块 —— 也就是 take 的源。
-///
-/// 【为什么按块数判 take 数】REAPER 的 chunk 对单 take item 直接把 take 的字段写在
-/// ITEM 下面，多 take 才有 `TAKE` 标记行。用"外层 SOURCE 块的数量"判 take 数，
-/// 同时覆盖两种形态，也不会把 `TAKEFX` 里的东西算进来。
-fn outer_source_blocks(lines: &[&str]) -> Result<Vec<SourceBlock>, String> {
-    let mut blocks = Vec::new();
-    let mut stack: Vec<String> = Vec::new();
-    let mut current: Option<SourceBlock> = None;
-    for (index, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Some(open) = trimmed.strip_prefix('<') {
-            let kind = open
-                .split_whitespace()
-                .next()
-                .ok_or("invalid item state block")?
-                .to_string();
-            if stack.len() >= 64 {
-                return Err("item state nesting budget exceeded".into());
-            }
-            if stack.len() == 1 && kind == "SOURCE" && current.is_none() {
-                current = Some(SourceBlock {
-                    start: index,
-                    end: index,
-                    kind: open.split_whitespace().nth(1).unwrap_or("").to_string(),
-                });
-            }
-            stack.push(kind);
-        } else if trimmed == ">" {
-            if stack.pop().is_none() {
-                return Err("unbalanced item state closing block".into());
-            }
-            if stack.len() == 1 {
-                if let Some(block) = current.as_mut() {
-                    block.end = index;
-                    blocks.push(SourceBlock {
-                        start: block.start,
-                        end: block.end,
-                        kind: block.kind.clone(),
-                    });
-                    current = None;
-                }
-            }
-        }
-    }
-    if !stack.is_empty() {
-        return Err("unbalanced item state".into());
-    }
-    Ok(blocks)
-}
-
 /// 段块的内层行：去掉 SECTION 自己的 LENGTH / MODE / STARTPOS / OVERLAP，
 /// 保留真正描述源的那些（`<SOURCE WAVE>` / FILE / GUID …）。
 fn inner_source_lines<'a>(lines: &[&'a str], block: &SourceBlock) -> Vec<&'a str> {
@@ -321,40 +272,6 @@ fn inner_source_lines<'a>(lines: &[&'a str], block: &SourceBlock) -> Vec<&'a str
         out.push(*line);
     }
     out
-}
-
-/// 深度 1 上的字段行（`SOFFS` / `GUID` / `POSITION` …）。
-fn find_root_field(lines: &[&str], field: &str) -> Option<usize> {
-    let mut stack: Vec<&str> = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Some(open) = trimmed.strip_prefix('<') {
-            stack.push(open.split_whitespace().next().unwrap_or(""));
-            continue;
-        }
-        if trimmed == ">" {
-            stack.pop();
-            continue;
-        }
-        if stack.len() == 1 && trimmed.split_whitespace().next() == Some(field) {
-            return Some(index);
-        }
-    }
-    None
-}
-
-/// take 身份校验：深度 1 上有一条 `GUID &lt;take_guid&gt;`。
-fn has_take_guid(lines: &[&str], take_guid: &str) -> bool {
-    if take_guid.is_empty() {
-        return false;
-    }
-    let Some(index) = find_root_field(lines, "GUID") else {
-        return false;
-    };
-    lines[index].split_whitespace().nth(1) == Some(take_guid)
 }
 
 fn indent_of(line: &str) -> &str {
@@ -411,24 +328,50 @@ mod tests {
         assert_eq!(again, forward);
     }
 
-    /// 身份不符、多 take、非有限值、坏结构都必须拒绝 —— 宁可"没改"。
+    /// 兄弟 take（多 take item）：本 take 在前，另一条在后。
+    fn multi_take_chunk() -> String {
+        format!(
+            "<ITEM\nPOSITION 2.0\nLENGTH 4.0\nIGUID {{BBBBBBBB-1111-2222-3333-444444444444}}\n\
+             SOFFS 1.5\nGUID {TAKE}\n<SOURCE WAVE\nFILE \"a.wav\"\n>\n\
+             TAKE\nGUID {{DDDDDDDD-1111-2222-3333-444444444444}}\nSOFFS 0.25\n\
+             <SOURCE WAVE\nFILE \"b.wav\"\n>\n>\n"
+        )
+    }
+
+    /// **多 take item：只改 GUID 匹配的那一条的 SOURCE 与 SOFFS。**
+    ///
+    /// 【为什么这条是本轮的核心回归】take FX 可以挂在**非 active** 的 take 上，而那种
+    /// item 天生就是多 take。此前整条路径直接拒绝（"reversing is only supported for
+    /// single-take items"），用户看到的是"倒放点了没反应"。
     #[test]
-    fn refuses_identity_mismatch_multi_take_and_malformed_state() {
-        let two_takes = format!(
-            "{}TAKE\nGUID {{DDDDDDDD-1111-2222-3333-444444444444}}\n<SOURCE WAVE\nFILE \"b.wav\"\n>\n>\n",
-            chunk().trim_end_matches('>').trim_end()
-        );
+    fn a_multi_take_item_reverses_only_the_take_with_the_matching_guid() {
+        let rewrite = rewrite_take_direction(
+            &multi_take_chunk(),
+            TAKE,
+            &DirectionEdit::reversed(2.5, 0.0),
+        )
+        .expect("reverse write");
+        assert!(rewrite.contains("<SOURCE SECTION\n"));
+        assert!(rewrite.contains("MODE 3\n"));
+        // 兄弟 take 的源、它的 SOFFS 与它自己的块全部原样保留。
+        assert!(rewrite.contains("SOFFS 0.25\n"), "{rewrite}");
+        assert!(rewrite.contains("FILE \"b.wav\""));
+        // 只有一个 SECTION（只包了本 take 的源）。
+        assert_eq!(rewrite.matches("<SOURCE SECTION").count(), 1);
+        // 取消倒放回到原文（幂等往返）。
+        let forward = rewrite_take_direction(&rewrite, TAKE, &DirectionEdit::forward(1.5)).unwrap();
+        assert!(!forward.contains("SOURCE SECTION"));
+        assert!(forward.contains("SOFFS 1.50000000000000000\n"));
+    }
+
+    /// 身份不符、非有限值、坏结构都必须拒绝 —— 宁可"没改"。
+    #[test]
+    fn refuses_identity_mismatch_and_malformed_state() {
         for (label, chunk, guid, edit) in [
             (
                 "identity",
                 chunk(),
                 "{EEEEEEEE-1111-2222-3333-444444444444}",
-                DirectionEdit::reversed(1.0, 0.0),
-            ),
-            (
-                "multi-take",
-                two_takes,
-                TAKE,
                 DirectionEdit::reversed(1.0, 0.0),
             ),
             ("nan", chunk(), TAKE, DirectionEdit::forward(f64::NAN)),

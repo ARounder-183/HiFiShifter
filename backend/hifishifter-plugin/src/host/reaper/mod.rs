@@ -15,9 +15,12 @@ pub(crate) use ui_inventory::{UiItem, UiTrack};
 mod folder;
 /// FX 旁通 / 离线读数（宿主是否仍在读我们的输出）。
 mod fx_state;
+/// 本实例在宿主里挂在哪里（轨道 FX 链 / take FX 链 / 没有）。
+mod placement;
 /// 把多个实例的旁通读数合成"这份工程还会不会出声"（判据见 [fx_state::combine]）。
 pub(crate) use fx_state::combine as combine_fx_bypass;
 pub(crate) use fx_state::FxBypass;
+pub(crate) use placement::HostPlacement;
 mod host_timer;
 // 宿主原生执行层：写回 / 分割 / 剪贴板 / Undo 调度。它们直接调用 REAPER API，
 // 因此整体住在本模块内；通用层只经 `crate::host` 的中立门面访问。
@@ -26,6 +29,8 @@ pub(crate) mod host_edit;
 pub(crate) mod host_split;
 /// take 方向（倒放）的结构写回：REAPER 没有反向 setter，倒放是 SOURCE SECTION。
 mod source_direction;
+/// item state chunk 里"一条 take 的字段区"的解析（单 take / 多 take 同一套）。
+mod take_chunk;
 /// take 音高包络（PITCHENV）在 item state chunk 里的读写。
 mod take_pitch;
 pub(crate) mod undo;
@@ -182,6 +187,16 @@ pub(crate) struct NativeHost {
     folder: Option<folder::FolderApi>,
     /// FX 旁通读数入口；缺省时旁通状态恒为 `Unknown`（照改动前照常渲染）。
     fx_state: Option<fx_state::FxStateApi>,
+    /// 本实例的放置位置缓存（见 [`placement`]）。**每次绑定后重算**。
+    placement: std::sync::Mutex<placement::PlacementCache>,
+    /// 上一次输出的放置位置诊断指纹（只在变化时再打一行）。
+    placement_reported: std::sync::Mutex<Option<String>>,
+    /// `GetMediaItem_Track`：item → 宿主轨。
+    ///
+    /// 【为什么单独留一份】take FX 下"我的轨道"只能沿 take → item → track 这条边取，
+    /// 而这条边是清单作用域与 track 目标的唯一来源。`write` 那一束是"能写才齐备"的
+    /// 能力束，读路径不该被写能力拖下水。
+    item_track: Option<write::Track>,
     /// 本实例创建的 Undo 条目的**时间戳缓存**（条目索引 → Unix 毫秒）。
     ///
     /// 【为什么需要】REAPER 的 `Undo_GetEntryDesc` 只给标签，**没有时间**。此前
@@ -311,15 +326,44 @@ impl hifishifter_kernel::editor::host::EditorHost for NativeHost {
     }
 
     fn capabilities(&self) -> hifishifter_kernel::editor::host::HostCapabilities {
+        // 读缓存里的位置（不发宿主调用）：能力位由 bootstrap 与每个命令分派点读取，
+        // 频率远高于清单枚举，而位置在同一条刷新链上刚刚求值过（见 `resolve_placement`）。
+        self.capabilities_for(self.placement())
+    }
+
+    fn app_version(&self) -> Option<&str> {
+        self.app_version.as_deref()
+    }
+}
+
+impl NativeHost {
+    /// 按**放置位置**派生的能力位：同一份宿主 API 在两种位置下能做的事不同。
+    ///
+    /// 【为什么必须按位置派生】能力位此前只看"这族 API 在不在"，于是 take FX 下前端
+    /// 仍然露出导入 / 建轨 / 剪贴板入口 —— 而这三条的**目标对象**（本轨、新轨、item
+    /// 副本）对 take FX 实例根本不成立：导入的 item 不属于本实例的 ARA 内容，剪贴板
+    /// 复制还会把 `<TAKEFX>` 块整块复制出去（宿主会在目标 item 上新建第二个实例）。
+    /// 露出一个注定失败的入口，比藏起来更坏：用户会以为是插件坏了。
+    ///
+    /// 【take 音高为什么**不**关】真机实测（`docs/2026-11-17-take-envelope-axis-findings.md`
+    /// 附节）：take 音高在源级生效、早于 take FX，**不会**再对 take FX 的输出移调，也不会
+    /// 叠加到插件自己的渲染上。于是"转换成 take 包络"在两种位置下是同一条语义 ——
+    /// 只复制、不补偿。关掉它等于凭空砍掉一个本来正确的功能。
+    pub(crate) fn capabilities_for(
+        &self,
+        placement: HostPlacement,
+    ) -> hifishifter_kernel::editor::host::HostCapabilities {
+        let take_fx = placement.is_take_fx();
         hifishifter_kernel::editor::host::HostCapabilities {
             transport: self.transport.is_some(),
             clip_geometry: self.geometry.is_some(),
             clip_write: self.can_edit_clips(),
             split: self.can_split_clips(),
             undo_stack: self.has_project_history(),
-            media_import: self.can_import_audio(),
-            track_create: self.can_create_audio_track(),
-            item_clipboard: self.can_clipboard_items(),
+            // 【take FX 下为什么关掉这三项】见上面说明：目标对象不成立。
+            media_import: self.can_import_audio() && !take_fx,
+            track_create: self.can_create_audio_track() && !take_fx,
+            item_clipboard: self.can_clipboard_items() && !take_fx,
             clip_reverse: self.can_reverse_clips(),
             take_pitch_bridge: self.can_bridge_take_pitch(),
             fade_axes: self.fade_axes_v2.is_some(),
@@ -333,13 +377,12 @@ impl hifishifter_kernel::editor::host::EditorHost for NativeHost {
             capture: false,
         }
     }
-
-    fn app_version(&self) -> Option<&str> {
-        self.app_version.as_deref()
-    }
 }
 /// 每次外部调用前后重检；Arc/FUnknown引用不保活project/item/take。
-fn checked<T>(authorized: &impl Fn() -> bool, call: impl FnOnce() -> T) -> Result<T, String> {
+fn checked<T>(
+    authorized: &(impl Fn() -> bool + ?Sized),
+    call: impl FnOnce() -> T,
+) -> Result<T, String> {
     if !authorized() {
         return Err("host query authorization revoked".into());
     }
@@ -367,15 +410,54 @@ impl NativeHost {
         let Some(api) = self.fx_state.as_ref() else {
             return FxBypass::Unknown;
         };
+        // 【为什么这里可能要求值】旁通采样是**最高频**的那条路径（100 ms），而放置位置
+        // 平时由绑定/清单刷新求值。二者之间可能隔着一个"用户刚把 FX 从轨道剪到 take 上"
+        // 的窗口 —— 那时缓存还是旧的，读到的会是另一条链。惰性求值把那个窗口关掉：
+        // 没求值过就先探一次（只探一次，之后走缓存）。
+        let placement = if self.placement_resolved() {
+            self.placement()
+        } else {
+            self.resolve_placement(&[], authorized)
+        };
+        // 【为什么每条链都重取一次直接 parent】缓存里存的是求值那一刻的指针，而宿主
+        // 可能已经把 item/take 删掉。两个选择器恰好都是"强身份"：轨道 FX 的直接父是
+        // 轨道、take FX 的直接父是 take —— 重取一次拿到的对象与缓存指向**同一个**，
+        // 但一定还活着（取不到就退回缓存值，并多半在 `ValidatePtr2` 之后读成 Unknown，
+        // 绝不会去读另一条链）。
         let pointer = self._interface.0 as *mut c_void;
         let table = unsafe { &**pointer.cast::<*const HostVtbl>() };
-        let Ok(track) = checked(authorized, || unsafe { (table.parent)(pointer, 1) }) else {
-            return FxBypass::Unknown;
+        let fresh = |selector: u32, fallback: usize| -> *mut c_void {
+            let parent = checked(authorized, || unsafe { (table.parent)(pointer, selector) })
+                .unwrap_or(std::ptr::null_mut());
+            if parent.is_null() {
+                fallback as *mut c_void
+            } else {
+                parent
+            }
         };
-        if track.is_null() {
-            return FxBypass::Unknown;
+        match placement {
+            HostPlacement::TrackFx { track } => {
+                let track = self.live_chain_owner(fresh(1, track), c"MediaTrack*", authorized);
+                let Some(track) = track else {
+                    return FxBypass::Unknown;
+                };
+                let chain = fx_state::TrackChain::new(&api.track, track, authorized);
+                fx_state::read_chain(&chain, crate::CLASS_NAME).unwrap_or(FxBypass::Unknown)
+            }
+            HostPlacement::TakeFx { take, .. } => {
+                // 【为什么查不到就直接 Unknown】不得回退到轨道链 —— 那是"读别人的开关"。
+                let Some(take_api) = api.take.as_ref() else {
+                    return FxBypass::Unknown;
+                };
+                let take = self.live_chain_owner(fresh(2, take), c"MediaItem_Take*", authorized);
+                let Some(take) = take else {
+                    return FxBypass::Unknown;
+                };
+                let chain = fx_state::TakeChain::new(take_api, take, authorized);
+                fx_state::read_chain(&chain, crate::CLASS_NAME).unwrap_or(FxBypass::Unknown)
+            }
+            HostPlacement::Unbound => FxBypass::Unknown,
         }
-        fx_state::read(api, track, crate::CLASS_NAME, authorized).unwrap_or(FxBypass::Unknown)
     }
 
     /// 从真实host context QI；parent(3)是所属project，不使用当前活动project或按轨名猜归属。
@@ -621,11 +703,14 @@ impl NativeHost {
             }
             _ => None,
         };
+        // item → 宿主轨：写能力束要用它，**读**路径（take FX 的清单作用域）也要它，
+        // 因此单独留一份，不跟着写能力一起消失。
+        let item_track = lookup!(c"GetMediaItem_Track", write::Track);
         let write = match (
             lookup!(c"SetMediaItemInfo_Value", write::SetValue),
             lookup!(c"SetMediaItemTakeInfo_Value", write::SetValue),
             lookup!(c"GetSetMediaItemTakeInfo_String", write::SetString),
-            lookup!(c"GetMediaItem_Track", write::Track),
+            item_track,
             lookup!(c"MoveMediaItemToTrack", write::Move),
             lookup!(c"Undo_BeginBlock2", write::Begin),
             lookup!(c"Undo_EndBlock2", write::End),
@@ -706,8 +791,12 @@ impl NativeHost {
             }
             _ => None,
         };
-        // FX 旁通读数：四个函数缺一不可（缺了就整体降级为 Unknown）。
-        let fx_state = match (
+        // FX 旁通读数：**每条链**各自四件，缺一不可（缺了就整体降级为 Unknown）。
+        //
+        // 【为什么 take 侧独立可选】`TakeFX_*` 是后来才进宿主的一族。缺它时 take 链上
+        // 的实例一律 `Unknown` ⇒ 照常渲染（与改动前一致）；把它与轨道侧绑在一起，
+        // 会让一个老宿主连轨道 FX 的旁通都读不出来。
+        let track_chain = match (
             lookup!(c"TrackFX_GetCount", fx_state::FxCount),
             lookup!(c"TrackFX_GetEnabled", fx_state::FxEnabled),
             lookup!(c"TrackFX_GetOffline", fx_state::FxOffline),
@@ -715,7 +804,7 @@ impl NativeHost {
             lookup!(c"GetMediaTrackInfo_Value", fx_state::TrackValue),
         ) {
             (Some(count), Some(enabled), Some(offline), Some(name), Some(track_value)) => {
-                Some(fx_state::FxStateApi {
+                Some(fx_state::TrackChainApi {
                     count,
                     enabled,
                     offline,
@@ -725,6 +814,28 @@ impl NativeHost {
             }
             _ => None,
         };
+        let take_chain = match (
+            lookup!(c"TakeFX_GetCount", fx_state::FxCount),
+            lookup!(c"TakeFX_GetEnabled", fx_state::FxEnabled),
+            lookup!(c"TakeFX_GetOffline", fx_state::FxOffline),
+            lookup!(c"TakeFX_GetFXName", fx_state::FxName),
+            lookup!(c"GetMediaItemTakeInfo_Value", fx_state::TakeValue),
+        ) {
+            (Some(count), Some(enabled), Some(offline), Some(name), Some(take_value)) => {
+                Some(fx_state::TakeChainApi {
+                    count,
+                    enabled,
+                    offline,
+                    name,
+                    take_value,
+                })
+            }
+            _ => None,
+        };
+        let fx_state = track_chain.map(|track| fx_state::FxStateApi {
+            track,
+            take: take_chain,
+        });
         let plugin_register = lookup!(c"plugin_register", PluginRegister);
         // 【为什么要在这里挂节拍】`from_context` 只在宿主的 model/UI 线程上被调用
         // （`setActive` / 初始化），而 `plugin_register` 的注册动作本身要求宿主线程。
@@ -757,6 +868,9 @@ impl NativeHost {
             take_enum,
             folder,
             fx_state,
+            placement: std::sync::Mutex::new(placement::PlacementCache::default()),
+            placement_reported: std::sync::Mutex::new(None),
+            item_track,
             undo_entry_times: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             undo_ends: std::sync::Mutex::new(Vec::new()),
         })

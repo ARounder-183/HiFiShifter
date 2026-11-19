@@ -800,8 +800,12 @@ impl ExtensionOwner {
         }
         let host = self.native_host().ok_or("host extension unavailable")?;
         let authorized = || self.host_query_authorized(&stamp);
+        // 【候选集按放置位置收窄】`ui_scope` 对 take FX 只返回本实例绑定的那条 take 的
+        // item；轨道 FX 仍返回"本轨 + folder 后代 + 自己建的"。此前这里无条件扫 folder，
+        // take FX 于是可能按几何匹配绑到**同位置的兄弟 item** 上（folder 里两条轨同一
+        // 时间点各放一条很常见），后续移动/切分/淡变全部写到别的 item。
         let candidates = host
-            .ui_folder_tracks(&authorized, &stamp.0.adopted_track_ids())?
+            .ui_scope(&authorized, &stamp.0.adopted_track_ids())?
             .into_iter()
             .flat_map(|track| track.items.into_iter().map(|item| item.geometry))
             .collect::<Vec<_>>();
@@ -881,6 +885,24 @@ impl ExtensionOwner {
             &format!("ara:binding-report:{detail}"),
             format_args!("[ara] region→item binding: {detail}"),
         );
+    }
+
+    /// 本实例这一轮分配到的 region 的**播放时间区间**（`(起点, 终点)`）。
+    ///
+    /// 【为什么需要区间而不是 key】放置位置的歧义裁决问的是"这些 region 是不是都落在
+    /// `parent(2)` 那条 take 的 item 里" —— 那是一个几何问题，key 回答不了。
+    pub(super) fn assigned_region_ranges(
+        document: &super::document::DocumentSession,
+        keys: &[u64],
+    ) -> Vec<(f64, f64)> {
+        let regions = document.regions.lock_or_recover();
+        keys.iter()
+            .filter_map(|key| regions.get(key))
+            .map(|region| {
+                let start = region.start_in_playback_time;
+                (start, start + region.duration_in_playback_time)
+            })
+            .collect()
     }
 
     /// 这份读数是否**尚未报告过**；是则记下它。纯状态判定，可独立单测。
@@ -1424,13 +1446,18 @@ impl ExtensionOwner {
                 fx_folder_depth = parent.folder_depth(&own_allowed).ok();
             }
             // 父轨已枚举过 ⇒ 它的全部后代也已经在 `tracks` 里，不必重走一遍。
-            if seen.contains(parent.inventory_guid()) {
+            // 【take FX 是例外】每个 take 实例的清单只含**自己那条 take 的 item**，
+            // 同一轨道上的两个实例共享 track GUID 而内容不同 —— 按轨跳过会让第二个
+            // 实例的片段整条不出现（见下面的按 GUID 合并）。
+            if !owner.host_placement().is_take_fx() && seen.contains(parent.inventory_guid()) {
                 continue;
             }
             // FX 挂在 folder 轨上时，folder 轨自身通常没有 item：连同后代一起枚举，
             // 否则整组在插件里"看不见"（ARA 侧没有 folder 概念，只能从宿主清单取）。
             let adopted = stamp.0.adopted_track_ids();
-            let Ok(own_tracks) = host.ui_folder_tracks(&own_allowed, &adopted) else {
+            // 【位置必须在枚举之前求值】清单作用域与能力位都按放置位置派生；
+            // 位置是"这一轮宿主对象是谁"的唯一来源，读旧值会让 take 实例去枚举整轨。
+            let Ok(own_tracks) = host.ui_scope(&own_allowed, &adopted) else {
                 continue;
             };
             for mut track in own_tracks {
@@ -1442,7 +1469,7 @@ impl ExtensionOwner {
                 // 的正序共存，构成真实的死锁窗口。
                 let timeline = stamp.0.timeline.lock_or_recover();
                 let ids = stamp.0.clip_ids.lock_or_recover();
-                item_count += track.items.len();
+
                 // 这条宿主轨能从 clip 学到的模型身份（见下面的"只学一次"）。
                 let mut learned: Option<String> = None;
                 for candidate in stamp.0.renderer_owners() {
@@ -1508,7 +1535,38 @@ impl ExtensionOwner {
                     };
                     track.id = next;
                 }
-                tracks.insert(track.guid.clone(), track);
+                // 【为什么按 GUID 合并而不是覆盖】take FX 下同一轨道可以有多个实例，
+                // 各自的清单只含自己那条 take 的 item；直接覆盖会让后一个实例把前一个
+                // 的片段顶掉。轨道 FX 下两份清单内容相同，合并是空操作。
+                match tracks.entry(track.guid.clone()) {
+                    std::collections::btree_map::Entry::Vacant(slot) => {
+                        item_count += track.items.len();
+                        slot.insert(track);
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut slot) => {
+                        let existing = slot.get_mut();
+                        for item in track.items {
+                            let known = existing
+                                .items
+                                .iter_mut()
+                                .find(|known| known.geometry.item_id == item.geometry.item_id);
+                            match known {
+                                // 【同一 item 被两种实例枚举到】轨道 FX 那一份的写回目标是
+                                // active take，take FX 那一份指向实例自己绑的 take —— 后者
+                                // 更具体，保留它；反过来会把写回指到别人的 take 上。
+                                Some(slot) => {
+                                    if item.bound_take.is_some() && slot.bound_take.is_none() {
+                                        *slot = item;
+                                    }
+                                }
+                                None => {
+                                    existing.items.push(item);
+                                    item_count += 1;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         // 分类只用可核实的事实（见 `classify_host_audio`）。folder 结构读不出来时
@@ -1792,6 +1850,13 @@ impl ExtensionOwner {
             return;
         }
         let authorized = || self.host_query_authorized(&stamp);
+        // 【为什么几何刷新要重新求值位置】这一轮绑定的候选集、写回目标与旁通读的链
+        // 全部取决于"我挂在哪条链上"。位置在每次绑定后重算是**必须**的（宿主复用同一
+        // 个处理器实例重开工程时也可能换位置），而这里是全部刷新路径的共同入口。
+        if let Some(host) = host.as_ref() {
+            let ranges = Self::assigned_region_ranges(&stamp.0, &stamp.3);
+            host.resolve_placement(&ranges, &authorized);
+        }
         let before = host
             .as_ref()
             .and_then(|host| host.geometry_revision(authorized).ok());

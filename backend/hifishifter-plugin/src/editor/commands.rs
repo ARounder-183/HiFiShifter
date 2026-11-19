@@ -750,7 +750,15 @@ fn pitch_bridge_target(
 ) -> Result<crate::host::HostClipTarget, String> {
     let native_id = clip_id.strip_prefix(&session.namespace).unwrap_or(clip_id);
     let document = session.document().ok_or("host timeline unavailable")?;
-    for owner in document.renderer_owners() {
+    // 【顺序：take FX 先认领】一个 take FX 实例只服务它自己那条 take，它的清单里也只有
+    // 那个 item —— 所以"它能不能解析这条 clip"本身就是最精确的判据。反过来（先问轨道
+    // FX 实例）会把 clip 交给**同一个 item 的 active take**，而用户的实例可能挂在另一条
+    // take 上：那是"转换成功、音高没变"与"把别的 take 改了"的直接成因。
+    let owners = document.renderer_owners();
+    let (take_fx, others): (Vec<_>, Vec<_>) = owners
+        .into_iter()
+        .partition(|owner| owner.host_placement().is_take_fx());
+    for owner in take_fx.into_iter().chain(others) {
         if let Ok(target) = owner.host_edit_target(native_id) {
             return Ok(target);
         }

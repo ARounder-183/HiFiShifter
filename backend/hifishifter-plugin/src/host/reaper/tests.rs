@@ -6,6 +6,34 @@ use std::ffi::CStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 thread_local! {static ACTIVE:Cell<usize>=const {Cell::new(0)};}
+
+/// 假宿主里的一条 FX 链项（名字 / 启用 / 离线）。
+///
+/// 【为什么用 `&'static str` 而不是 `String`】夹具是 `Cell`/`RefCell` 里的**常量**
+/// 数据，用例在断言里写的名字必须与宿主读到的一字不差；静态串让"名字写错"变成编译期
+/// 问题，而不是一条永远匹配不上的运行时谜题。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FxEntry {
+    pub name: &'static str,
+    pub enabled: bool,
+    pub offline: bool,
+}
+
+impl FxEntry {
+    /// 本插件的 FX（类名匹配 `HiFiShifter`）。
+    pub const HFS: Self = Self {
+        name: "VST3: HiFiShifter",
+        enabled: true,
+        offline: false,
+    };
+    /// 一个与本插件无关的原生 FX。
+    pub const OTHER: Self = Self {
+        name: "VST3: ReaEQ",
+        enabled: true,
+        offline: false,
+    };
+}
+
 #[repr(C)]
 pub struct Fixture {
     table: *const HostVtbl,
@@ -74,6 +102,24 @@ pub struct Fixture {
     /// 的用例必须显式设置它。
     pub track_value: Cell<f64>,
     pub hook: RefCell<Option<(String, Box<dyn Fn()>)>>,
+    /// `TrackFX_*` / `TakeFX_*` / `I_FXEN` / `B_TAKEFX` 这部分读数是否注册。
+    ///
+    /// 【为什么单独一个开关】旁通读数是**可选**能力：不注册时 `fx_bypass_state` 恒为
+    /// `Unknown`（照改动前照常渲染）。把它挂在 `media_enabled` 上会让"能不能导入音频"
+    /// 决定"能不能读旁通"，两组用例互相牵连。
+    pub fx_api: Cell<bool>,
+    /// 轨道 FX 链的内容（`TrackFX_*`）。
+    pub fx_track_chain: RefCell<Vec<FxEntry>>,
+    /// take FX 链的内容（`TakeFX_*`）。
+    pub fx_take_chain: RefCell<Vec<FxEntry>>,
+    /// `I_FXEN`（轨道整链总开关）。
+    pub fx_chain_on: Cell<bool>,
+    /// `B_TAKEFX`（take 整链总开关）。
+    pub take_fx_chain_on: Cell<bool>,
+    /// 是否注册 `TakeFX_*` 一族（缺省关：老宿主形态）。
+    pub take_fx_api: Cell<bool>,
+    /// `parent(2)` 报哪条 take；0 = 主 take（多 take 用例把它指到别的 take 上）。
+    pub parent_take: Cell<usize>,
     /// `GetItemStateChunk` / `SetItemStateChunk` 是否注册。
     pub item_state_enabled: Cell<bool>,
     /// 夹具当前持有的 item state chunk（`SetItemStateChunk` 会写进这里）。
@@ -171,6 +217,13 @@ impl Fixture {
             change: Cell::new(-9),
             track_value: Cell::new(1.),
             hook: RefCell::new(None),
+            fx_api: Cell::new(false),
+            fx_track_chain: RefCell::new(Vec::new()),
+            fx_take_chain: RefCell::new(Vec::new()),
+            fx_chain_on: Cell::new(true),
+            take_fx_chain_on: Cell::new(true),
+            take_fx_api: Cell::new(false),
+            parent_take: Cell::new(0),
             item_state_enabled: Cell::new(false),
             item_state_chunk: RefCell::new(String::new()),
         }));
@@ -201,6 +254,15 @@ impl Fixture {
     }
     fn take(&self) -> *mut c_void {
         (&self.take_token as *const u8 as *mut u8).cast()
+    }
+    /// `parent(2)` 此刻报的那条 take（默认为主 take）。
+    fn parent_take(&self) -> *mut c_void {
+        let override_ = self.parent_take.get();
+        if override_ == 0 {
+            self.take()
+        } else {
+            override_ as *mut c_void
+        }
     }
     fn item(&self) -> *mut c_void {
         (&self.item_token as *const u8 as *mut u8).cast()
@@ -247,6 +309,11 @@ impl Fixture {
         for _ in 0..extra {
             self.extra_takes.borrow_mut().push(Box::new(11));
         }
+    }
+    /// 模拟"宿主把同一个处理器搬到另一条链上"：take 链清空、轨道链上放本插件。
+    pub fn forget_and_rearm_as_track_fx(&self) {
+        self.fx_take_chain.borrow_mut().clear();
+        *self.fx_track_chain.borrow_mut() = vec![FxEntry::HFS];
     }
     pub fn num_takes(&self) -> i32 {
         self.take_count_override
@@ -395,7 +462,7 @@ unsafe extern "system" fn parent(this: *mut c_void, selector: u32) -> *mut c_voi
     f.record(format!("parent:{selector}"));
     match selector {
         3 if !f.no_project.get() => f.project(),
-        2 if !f.no_take.get() => f.take(),
+        2 if !f.no_take.get() => f.parent_take(),
         1 if f.media_enabled.get() => f.track(),
         _ => std::ptr::null_mut(),
     }
@@ -454,7 +521,7 @@ unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_voi
         "GetMediaItemTake_Source" if f.takes_enabled.get() => take_source as *const (),
         "PCM_Source_GetSectionInfo" if f.takes_enabled.get() => section_info as *const (),
         "GetMediaSourceFileName" if f.takes_enabled.get() => source_file_name as *const (),
-        "GetMediaTrackInfo_Value" if f.inventory_enabled.get() => {
+        "GetMediaTrackInfo_Value" if f.inventory_enabled.get() || f.fx_api.get() => {
             inventory_track_value as *const ()
         }
         "GetItemStateChunk" if f.item_state_enabled.get() => get_item_state as *const (),
@@ -469,8 +536,19 @@ unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_voi
         "TrackFX_AddByName" if f.media_enabled.get() => add_fx as *const (),
         "DeleteTrack" if f.media_enabled.get() => delete_track as *const (),
         "CountTrackMediaItems" if f.media_enabled.get() => count_track_items as *const (),
-        "TrackFX_GetCount" if f.media_enabled.get() => fx_count as *const (),
+        "TrackFX_GetCount" if f.fx_api.get() || f.media_enabled.get() => fx_count as *const (),
         "TrackFX_GetFXGUID" if f.media_enabled.get() => fx_guid as *const (),
+        "TrackFX_GetEnabled" if f.fx_api.get() => fx_enabled as *const (),
+        "TrackFX_GetOffline" if f.fx_api.get() => fx_offline as *const (),
+        "TrackFX_GetFXName" if f.fx_api.get() => fx_name as *const (),
+        "TakeFX_GetCount" if f.fx_api.get() && f.take_fx_api.get() => take_fx_count as *const (),
+        "TakeFX_GetEnabled" if f.fx_api.get() && f.take_fx_api.get() => {
+            take_fx_enabled as *const ()
+        }
+        "TakeFX_GetOffline" if f.fx_api.get() && f.take_fx_api.get() => {
+            take_fx_offline as *const ()
+        }
+        "TakeFX_GetFXName" if f.fx_api.get() && f.take_fx_api.get() => take_fx_name as *const (),
         _ => std::ptr::null(),
     };
     p as *mut c_void
@@ -592,6 +670,11 @@ fn value(object: *mut c_void, name: *const c_char, is_take: bool) -> f64 {
     if is_take && unsafe { CStr::from_ptr(name) } == c"D_VOL" {
         f.record("D_VOL");
         return f.take_volume.get();
+    }
+    // take 的整条 FX 链总开关（`I_FXEN` 的 take 侧对应物）。
+    if is_take && unsafe { CStr::from_ptr(name) } == c"B_TAKEFX" {
+        f.record("take-fx-chain-enabled");
+        return if f.take_fx_chain_on.get() { 1. } else { 0. };
     }
     if object
         == if is_take {
@@ -983,19 +1066,40 @@ unsafe extern "C" fn inventory_take(item: *mut c_void) -> *mut c_void {
 unsafe extern "C" fn inventory_name(_take: *mut c_void) -> *const c_char {
     c"short voice".as_ptr()
 }
-unsafe extern "C" fn inventory_track_value(track: *mut c_void, _name: *const c_char) -> f64 {
+unsafe extern "C" fn inventory_track_value(track: *mut c_void, name: *const c_char) -> f64 {
     let f = fixture();
     assert_eq!(track, f.track());
+    // 【为什么在这里分流】`GetMediaTrackInfo_Value` 同时服务 folder 读数与整链总开关；
+    // 夹具按**字段名**回答，才能让"folder 深度"与"FX 链被关掉"是两个独立的事实。
+    if unsafe { CStr::from_ptr(name) } == c"I_FXEN" {
+        f.record("fx-chain-enabled");
+        return if f.fx_chain_on.get() { 1. } else { 0. };
+    }
     f.track_value.get()
 }
 unsafe extern "C" fn num_takes(item: *mut c_void) -> i32 {
     let f = fixture();
+    // 分割出来的右半段与左半段 take 数相同（REAPER 两个新 item 各带全部 take）。
+    if item == f.right_item() {
+        f.record("num-takes-right");
+        return f.num_takes();
+    }
     assert_eq!(item, f.item());
     f.record("num-takes");
     f.num_takes()
 }
 unsafe extern "C" fn take_at(item: *mut c_void, index: i32) -> *mut c_void {
     let f = fixture();
+    if item == f.right_item() {
+        f.record(format!("take-at-right:{index}"));
+        // 夹具只造**一条**右半段 take：它占据与本条序号相同的那一格（本组用例把实例
+        // 挂在最后一条 take 上），其余序号返回空 —— 调用方必须据此拒绝，而不是退回
+        // active take。
+        if index == f.num_takes() - 1 {
+            return f.right_take();
+        }
+        return std::ptr::null_mut();
+    }
     assert_eq!(item, f.item());
     f.record(format!("take-at:{index}"));
     if index < 0 || index >= f.num_takes() {
@@ -1007,7 +1111,7 @@ unsafe extern "C" fn take_source(take: *mut c_void) -> *mut c_void {
     let f = fixture();
     f.record("take-source");
     assert!(
-        take == f.take() || f.extra_take_index(take).is_some(),
+        take == f.take() || f.extra_take_index(take).is_some() || take == f.right_take(),
         "source read must be for an enumerated take"
     );
     f.take_source.get() as *mut c_void
@@ -1178,7 +1282,91 @@ fn folder_depth_is_read_from_the_fx_track_alone() {
     }
 }
 unsafe extern "C" fn fx_count(track: *mut c_void) -> i32 {
-    i32::from(fixture().new_fx.borrow().contains(&(track as usize)))
+    let f = fixture();
+    // 【两套语义】`fx_api` 打开时按显式的链内容回答（旁通用例）；否则沿用"新建轨道
+    // 自带一个 FX"的旧行为（建轨用例）。
+    if f.fx_api.get() {
+        f.record("track-fx-count");
+        return f.fx_track_chain.borrow().len() as i32;
+    }
+    i32::from(f.new_fx.borrow().contains(&(track as usize)))
+}
+
+unsafe extern "C" fn fx_enabled(track: *mut c_void, index: i32) -> bool {
+    let f = fixture();
+    assert_eq!(track, f.track());
+    f.record(format!("track-fx-enabled:{index}"));
+    f.fx_track_chain.borrow()[index as usize].enabled
+}
+
+unsafe extern "C" fn fx_offline(track: *mut c_void, index: i32) -> bool {
+    let f = fixture();
+    assert_eq!(track, f.track());
+    f.record(format!("track-fx-offline:{index}"));
+    f.fx_track_chain.borrow()[index as usize].offline
+}
+
+unsafe extern "C" fn fx_name(
+    track: *mut c_void,
+    index: i32,
+    buffer: *mut c_char,
+    size: i32,
+) -> bool {
+    let f = fixture();
+    assert_eq!(track, f.track());
+    f.record(format!("track-fx-name:{index}"));
+    copy_fx_name(f.fx_track_chain.borrow()[index as usize].name, buffer, size)
+}
+
+unsafe extern "C" fn take_fx_count(take: *mut c_void) -> i32 {
+    let f = fixture();
+    assert_eq!(
+        take,
+        f.parent_take(),
+        "take FX chain read must use the bound take"
+    );
+    f.record("take-fx-count");
+    f.fx_take_chain.borrow().len() as i32
+}
+
+unsafe extern "C" fn take_fx_enabled(take: *mut c_void, index: i32) -> bool {
+    let f = fixture();
+    assert_eq!(take, f.parent_take());
+    f.record(format!("take-fx-enabled:{index}"));
+    f.fx_take_chain.borrow()[index as usize].enabled
+}
+
+unsafe extern "C" fn take_fx_offline(take: *mut c_void, index: i32) -> bool {
+    let f = fixture();
+    assert_eq!(take, f.parent_take());
+    f.record(format!("take-fx-offline:{index}"));
+    f.fx_take_chain.borrow()[index as usize].offline
+}
+
+unsafe extern "C" fn take_fx_name(
+    take: *mut c_void,
+    index: i32,
+    buffer: *mut c_char,
+    size: i32,
+) -> bool {
+    let f = fixture();
+    assert_eq!(take, f.parent_take());
+    f.record(format!("take-fx-name:{index}"));
+    copy_fx_name(f.fx_take_chain.borrow()[index as usize].name, buffer, size)
+}
+
+/// 把 FX 显示名写进宿主缓冲（NUL 结尾，放不下就截断 —— 与宿主同一条纪律）。
+fn copy_fx_name(name: &str, buffer: *mut c_char, size: i32) -> bool {
+    if buffer.is_null() || size <= 0 {
+        return false;
+    }
+    let bytes = name.as_bytes();
+    let count = bytes.len().min(size as usize - 1);
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.cast::<u8>(), count);
+        *buffer.add(count) = 0;
+    }
+    true
 }
 unsafe extern "C" fn fx_guid(track: *mut c_void, index: i32) -> *const u8 {
     let f = fixture();
@@ -1761,4 +1949,227 @@ fn task38a_geometry_and_transport_reject_worker_threads_without_host_calls() {
     f.valid.set(false);
     assert!(f.geometry(&client).is_err());
     assert!(f.calls.borrow().is_empty());
+}
+
+/// take FX 夹具：轨道链**为空**，take 链上有本插件与一个原生 FX。
+fn take_fx_fixture() -> &'static Fixture {
+    let fixture = Fixture::new();
+    fixture.enable_media();
+    fixture.fx_api.set(true);
+    fixture.take_fx_api.set(true);
+    *fixture.fx_take_chain.borrow_mut() = vec![FxEntry::HFS, FxEntry::OTHER];
+    fixture
+}
+
+/// **take FX 实例必须读 take 链，而不是轨道链。**
+///
+/// 【为什么这条是本次修复的主验收】改动前 `fx_bypass_state` 只认 `parent(1)` +
+/// `TrackFX_*`：take 链上的实例永远匹配不到（`found == 0` ⇒ `Unknown`），于是
+/// "旁通了还在渲染"在 take FX 下**必然复发**。这条用例同时钉住两个方向：
+/// 用户旁通 take 链上的那个 FX ⇒ 必须报 `Bypassed`；恢复 ⇒ 必须报 `Active`。
+#[test]
+fn a_take_fx_instance_reads_the_take_chain_not_the_track_chain() {
+    let f = take_fx_fixture();
+    let host = std::sync::Arc::new(f.client());
+    assert_eq!(
+        host.resolve_placement(&[], &|| true),
+        HostPlacement::TakeFx {
+            track: f.track() as usize,
+            item: f.item() as usize,
+            take: f.take() as usize,
+        }
+    );
+    assert_eq!(host.fx_bypass_state(&|| true), FxBypass::Active);
+    // 用户旁通 take 链上的本插件。
+    f.fx_take_chain.borrow_mut()[0].enabled = false;
+    assert_eq!(host.fx_bypass_state(&|| true), FxBypass::Bypassed);
+    // 恢复。
+    f.fx_take_chain.borrow_mut()[0].enabled = true;
+    assert_eq!(host.fx_bypass_state(&|| true), FxBypass::Active);
+    // 关掉 take 的整链总开关（`B_TAKEFX`）同样是"宿主不会读我"。
+    f.take_fx_chain_on.set(false);
+    assert_eq!(host.fx_bypass_state(&|| true), FxBypass::Bypassed);
+}
+
+/// **轨道 FX 实例绝不读同轨另一条 take 链。**
+///
+/// 【为什么这是反方向的同一条边界】同一条轨上可以同时有轨道 FX 实例与 take FX 实例。
+/// 若轨道实例越过自己的链去看 take 链，它会把"某个 take 上的实例被旁通"当成自己
+/// 被旁通 —— 用户听不到声音，而日志里只有一条 `active -> bypassed`。
+#[test]
+fn a_track_fx_instance_never_reads_a_sibling_take_chain() {
+    let f = Fixture::new();
+    f.enable_media();
+    f.fx_api.set(true);
+    f.take_fx_api.set(true);
+    // 轨道链上的本插件被旁通；take 链上的那个是启用的。
+    *f.fx_track_chain.borrow_mut() = vec![FxEntry {
+        enabled: false,
+        ..FxEntry::HFS
+    }];
+    *f.fx_take_chain.borrow_mut() = vec![FxEntry::HFS];
+    let host = std::sync::Arc::new(f.client());
+    // region 落在 item 之外 ⇒ 没有"这组 region 全在 take 里"的证据 ⇒ 判轨道 FX。
+    assert_eq!(
+        host.resolve_placement(&[(0.0, 0.5)], &|| true),
+        HostPlacement::TrackFx {
+            track: f.track() as usize
+        }
+    );
+    assert_eq!(host.fx_bypass_state(&|| true), FxBypass::Bypassed);
+    // 反过来：轨道链启用、take 链旁通，轨道实例仍报活跃（没有被 take 链带偏）。
+    f.fx_track_chain.borrow_mut()[0].enabled = true;
+    f.fx_take_chain.borrow_mut()[0].enabled = false;
+    assert_eq!(host.fx_bypass_state(&|| true), FxBypass::Active);
+}
+
+/// 两条链都有本插件、且 region 全在 take 的 item 内 ⇒ 判 take FX（歧义裁决的正例）。
+#[test]
+fn both_chains_are_disambiguated_by_the_bound_item_span() {
+    let f = take_fx_fixture();
+    *f.fx_track_chain.borrow_mut() = vec![FxEntry::HFS];
+    let host = std::sync::Arc::new(f.client());
+    // item 的区间是 [1, 5)（夹具的 D_POSITION / D_LENGTH）。
+    assert_eq!(
+        host.resolve_placement(&[(1.0, 4.0), (4.0, 5.0)], &|| true),
+        HostPlacement::TakeFx {
+            track: f.track() as usize,
+            item: f.item() as usize,
+            take: f.take() as usize,
+        }
+    );
+    // 有一条 region 落在 item 之外 ⇒ 退回轨道 FX。
+    assert_eq!(
+        host.resolve_placement(&[(1.0, 4.0), (5.5, 9.0)], &|| true),
+        HostPlacement::TrackFx {
+            track: f.track() as usize
+        }
+    );
+}
+
+/// 宿主不提供 `TakeFX_*` 一族时，take 实例必须报 `Unknown`，**不得**回退去读轨道链。
+#[test]
+fn a_take_fx_instance_without_the_take_api_stays_unknown() {
+    let f = Fixture::new();
+    f.enable_media();
+    f.fx_api.set(true);
+    // take 侧 API 缺席（老宿主形态），轨道链上有一个**已旁通**的本插件。
+    *f.fx_track_chain.borrow_mut() = vec![FxEntry {
+        enabled: false,
+        ..FxEntry::HFS
+    }];
+    let host = std::sync::Arc::new(f.client());
+    assert_eq!(host.fx_bypass_state(&|| true), FxBypass::Bypassed);
+    // 同一条链缺席时的手动确认：探不到 take 链 ⇒ 只可能落在轨道或 Unbound。
+    assert!(host.probe_placement(&|| true).take.is_none());
+}
+
+/// 放置位置在重绑后必须**重新求值**，不能把上一次的结论带到下一次。
+#[test]
+fn the_placement_is_recomputed_after_a_rebind() {
+    let f = take_fx_fixture();
+    let host = std::sync::Arc::new(f.client());
+    assert!(host.resolve_placement(&[], &|| true).is_take_fx());
+    assert!(host.placement_resolved());
+    // 重绑：适配器丢掉旧结论，宿主把同一个处理器搬到另一条链上。
+    host.forget_placement();
+    f.forget_and_rearm_as_track_fx();
+    assert_eq!(host.placement(), HostPlacement::Unbound);
+    assert!(!host.placement_resolved());
+    assert_eq!(
+        host.resolve_placement(&[], &|| true),
+        HostPlacement::TrackFx {
+            track: f.track() as usize
+        }
+    );
+}
+
+/// take FX 的清单只有**自己那条 take 的 item**，且写回目标绑在那条 take 上。
+///
+/// 【为什么非 active take 是关键】take FX 恰好最适合挂在多 take item 的某一条上，而
+/// `GetActiveTake` 恒指向**宿主选中**的那条。绑定一旦取错，写回（音高/方向/淡变）
+/// 全部落到别人的 take。
+#[test]
+fn a_take_fx_inventory_lists_only_the_bound_take() {
+    let f = take_fx_fixture();
+    f.enable_takes(2);
+    f.parent_take.set(f.take_at(2) as usize);
+    let host = std::sync::Arc::new(f.client());
+    assert!(host.resolve_placement(&[], &|| true).is_take_fx());
+    let tracks = host.ui_scope(&|| true, &[]).unwrap();
+    assert_eq!(tracks.len(), 1, "take FX 只属于一条轨道");
+    assert_eq!(tracks[0].items.len(), 1, "take FX 只列自己那个 item");
+    let item = &tracks[0].items[0];
+    assert_eq!(item.takes.len(), 3, "全部 take 仍然供界面展示");
+    // 绑定的是第 3 条 take（非 active），而几何与写回目标都跟着它走。
+    assert_eq!(
+        item.bound_take.as_deref(),
+        Some("{55555555-5555-5555-5555-000000000002}")
+    );
+    assert_eq!(
+        item.geometry.take_id,
+        "{55555555-5555-5555-5555-000000000002}"
+    );
+    assert_eq!(
+        item.takes.iter().filter(|take| take.active).count(),
+        1,
+        "active 标记仍然且只有一个"
+    );
+}
+
+/// take FX 下导入 / 建轨 / 剪贴板这三个入口必须关掉，其余能力不受影响。
+#[test]
+fn a_take_fx_instance_never_offers_track_level_entries() {
+    let f = Fixture::new();
+    f.enable_media();
+    f.enable_split();
+    f.enable_item_state(&f.single_take_chunk());
+    let host = std::sync::Arc::new(f.client());
+    let track_fx = host.capabilities_for(HostPlacement::TrackFx { track: 1 });
+    assert!(track_fx.media_import, "轨道 FX 下导入仍然可用");
+    assert!(track_fx.track_create, "轨道 FX 下建轨仍然可用");
+    assert!(track_fx.item_clipboard, "轨道 FX 下剪贴板仍然可用");
+    let take_fx = host.capabilities_for(HostPlacement::TakeFx {
+        track: 1,
+        item: 2,
+        take: 3,
+    });
+    assert!(!take_fx.media_import, "take FX 下导入的目标对象不成立");
+    assert!(!take_fx.track_create, "take FX 下建轨的目标对象不成立");
+    assert!(!take_fx.item_clipboard, "复制 item 会连带复制出第二个实例");
+    // 写能力本身不受影响：take FX 照样能拖片段、切分、写音高包络。
+    assert!(take_fx.clip_write);
+    assert!(take_fx.split);
+    assert!(take_fx.take_pitch_bridge);
+    assert!(take_fx.clip_reverse);
+}
+
+/// **多 take item 分割后，右半段的写回目标仍是"同一条 take"。**
+///
+/// 【为什么这是本轮必须钉住的一条】`SplitMediaItem` 之后旧代码取 `GetActiveTake(right)`：
+/// 那是宿主**选中**的 take，而 take FX 恰好可以挂在非 active 的那条上。一旦取错，
+/// 右半段的音高/方向/淡变全部落到别人的 take 上 —— 用户看到的是"分割一次，另一条 take
+/// 的音高变了"。
+#[test]
+fn a_multi_take_split_keeps_the_bound_take() {
+    let f = Fixture::new();
+    f.enable_split();
+    f.enable_takes(1);
+    // 实例挂在第 2 条 take 上（不是 active 的第 1 条）。
+    f.parent_take.set(f.take_at(1) as usize);
+    let host = std::sync::Arc::new(f.client());
+    let target = host.clip_target(|| true).expect("bound take");
+    let (left, right) = target.split_at(2.0, &|| true).expect("split");
+    assert_eq!(left.item_id, "{11111111-1111-1111-1111-111111111111}");
+    // 右半段的身份来自"同一序号"，不是 active take。
+    assert_eq!(right.take_id, "{44444444-4444-4444-4444-444444444444}");
+    assert_eq!(right.item_id, "{33333333-3333-3333-3333-333333333333}");
+    // 两段都真的写回宿主（update-item 各一次）。
+    assert_eq!(
+        f.calls()
+            .iter()
+            .filter(|call| call.as_str() == "update-item")
+            .count(),
+        2
+    );
 }

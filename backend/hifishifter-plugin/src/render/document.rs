@@ -5214,11 +5214,22 @@ impl DocumentSession {
                         .map(|age| age.as_millis() as u64),
                     // 这一票到底算不算数（确定 + 新鲜）。渲染门的判据就是它。
                     "host_bypass_vote": owner.fresh_host_bypass().map(|verdict| verdict.as_str()),
+                    // 【我挂在哪条链上】`track-fx` / `take-fx` / `unbound`。旁通读的
+                    // 是哪条链、清单枚举了哪一段、能力位关掉了哪几项，全由它派生 ——
+                    // "旁通了还在渲染"的第一格要排除的就是它是不是被读错了位置。
+                    "host_placement": owner.host_placement().as_str(),
                 })
             })
             .collect::<Vec<_>>();
+        let placements = self
+            .renderer_owners()
+            .into_iter()
+            .map(|owner| owner.host_placement().as_str())
+            .collect::<Vec<_>>();
         serde_json::json!({
             "renderers": renderers,
+            // 每个活实例的放置位置（顺序与 `renderers` 无关，仅供总览）。
+            "placements": placements,
             // 【文档级的门此刻是怎么算出来的】渲染门只看这一格。它等于
             // `combine(renderers[].host_bypass_vote)`，把两个数组放在一起就能一眼看出
             // "为什么门没关上"：是没人投票，还是有人投了 `active`。

@@ -63,6 +63,12 @@ impl ExtensionOwner {
             self.sequences.lock_or_recover().clear();
             self.document.lock_or_recover().take();
             self.rebind_generation.fetch_add(1, Ordering::Relaxed);
+            // 【放置位置是"这次绑定"的事实】同一个处理器实例被复用到另一份文档时，
+            // 宿主也可能把它从轨道 FX 挪到某条 take 上（用户拖 FX 就会）。留着上一次的
+            // 结论，下一次旁通采样会去读**另一条链**。
+            if let Some(host) = self.native_host() {
+                host.forget_placement();
+            }
             self.closed.store(false, Ordering::Release);
         }
         let owner = Arc::downgrade(self);

@@ -188,8 +188,8 @@ impl RenderFacts {
 /// 归装配器（`hifishifter_kernel::editor::assembly`）。
 ///
 /// 【为什么没有 take 时也要造一条】宿主没有 take 枚举接口时 `UiItem::geometry` 仍是
-/// **active take 的权威几何**（见该结构的说明）。空 take 列表会让装配器拿不到源窗口，
-/// 于是这条 clip 会显示成"偏移待定"——而它明明有几何。
+/// **本实例写入的那条 take 的权威几何**（见该结构的说明）。空 take 列表会让装配器拿不到
+/// 源窗口，于是这条 clip 会显示成"偏移待定"——而它明明有几何。
 pub(crate) fn item_row_from_host(
     item: &crate::host::UiItem,
     track_id: &str,
@@ -222,7 +222,17 @@ pub(crate) fn item_row_from_host(
         .iter()
         .map(|take| take_of(&take.geometry, &take.name, take.active, take.reversed))
         .collect();
-    let active_take = item.takes.iter().position(|take| take.active);
+    // 【本实例绑定的那条 take 优先】轨道 FX 下 `bound_take` 是 `None`，行为与改动前
+    // 完全一致（取宿主选中的 active take）。take FX 下它指向 `parent(2)` 那条 ——
+    // 而 clip 的 `active_take_id` / 循环周期 / 扁平投影都描述"本实例渲染的那条 take"，
+    // 取 active 会把它们指到**另一条** take 上（多 take item 上这正是"转换成功了但音高
+    // 落在别的 take"的另一半成因）。
+    let bound_take = item.bound_take.as_deref().and_then(|guid| {
+        item.takes
+            .iter()
+            .position(|take| take.geometry.take_id == guid)
+    });
+    let active_take = bound_take.or_else(|| item.takes.iter().position(|take| take.active));
     if takes.is_empty() {
         takes.push(take_of(
             &item.geometry,

@@ -468,6 +468,18 @@ impl ExtensionOwner {
         })
     }
 
+    /// 本实例在宿主里的**放置位置**（轨道 FX 链 / take FX 链 / 没有）。
+    ///
+    /// 【为什么通用层可以问这一句】它决定"哪条 FX 链、哪一段清单、哪个 take、哪些能力位"
+    /// 四件事，而这四件事的判据全在宿主适配器里。没有原生扩展（ARA-only / Capture）
+    /// 时恒为 `Unbound` —— 那是"回到改动前的行为"，不是"没有位置"的错误。
+    pub(crate) fn host_placement(&self) -> crate::host::reaper::HostPlacement {
+        self.native_host()
+            .map_or_else(crate::host::reaper::HostPlacement::default, |host| {
+                host.placement()
+            })
+    }
+
     /// 只返回同文档活入口的拥有引用接口；其project()仍钉在初始化时的真实所属工程。
     pub(crate) fn project_history_host(&self) -> Option<Arc<crate::host::NativeHost>> {
         let document = self.editor_document().ok()?;

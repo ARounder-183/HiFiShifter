@@ -31,6 +31,42 @@
 
 ---
 
+## 1.5 同一份 API，两种**放置位置**
+
+REAPER 的 ARA 支持两种插入位置，而它们对上面那张能力表给出的答案**并不一样**：
+
+| 放置位置 | 插件挂在哪 | ARA 内容覆盖 | 首次绑定拿到的角色 |
+|---|---|---|---|
+| 轨道 FX | `MediaTrack` 的 FX 链 | 这条轨（及其 folder 后代）的 item | `[editor, view]` |
+| 媒体项 take FX | `MediaItem_Take` 的 FX 链 | **这一条 take** | `[playback, view]` |
+
+插件把这件事收成一个显式的值（`host::reaper::HostPlacement`：`track-fx` / `take-fx` /
+`unbound`），并在**每次绑定后重新求值**（宿主复用同一个处理器实例重开工程、或用户把 FX
+拖到某条 take 上，位置都会变）。四条判据从它派生：
+
+| 判据 | 轨道 FX | take FX |
+|---|---|---|
+| 读哪条 FX 链（旁通 / 离线） | `TrackFX_*` + `I_FXEN` | `TakeFX_*` + `B_TAKEFX` |
+| 清单枚举哪一段 | 本轨 + folder 后代 + 自己建的轨 | **只有** `parent(2)` 那条 take 的 item |
+| 写回用哪个 take | item 的 active take | `parent(2)` 那条 take（按 GUID 定位，多 take 也成立） |
+| 导入 / 建轨 / item 剪贴板 | 可用 | **不可用**（目标对象不成立，见下） |
+
+**为什么 take FX 下关掉那三项**：导入的 item 不属于本实例的 ARA 内容（实例只绑定它原本
+那条 take 的源）；新建轨道更不属于；复制 item 会把 `<TAKEFX>` 块整块带出去，宿主会在目标
+item 上新建**第二个实例**。露出一个注定失败的入口，比藏起来更坏。
+
+**take 音高互转在两种位置下同一条语义**：真机实测（`docs/2026-11-17-take-envelope-axis-findings.md`
+的附节）证明 take 音高在源级生效、早于 take FX，不会再对 take FX 的输出移调。因此
+"转换成 take 包络"是**复制**，不需要按位置做反向补偿。
+
+**绝不跨链回退**：take 链上查不到本插件的 FX 就是 `Unknown`（照常渲染），不得转头去读
+同一条轨的轨道链 —— 那正是"读到另一个实例的旁通开关"的那条路。
+
+诊断：位置变化时输出一行 `[ara] placement: …`（含两条链的 `总数/匹配数`），
+诊断包的 `renderer_diagnostics()` 里也有 `host_placement` 一格。
+
+---
+
 ## 2. 只能靠宿主扩展的部分
 
 以下能力 ARA 2.0 **没有**对应接口，只有原生扩展能给。ARA-only 后端上它们是**诚实的

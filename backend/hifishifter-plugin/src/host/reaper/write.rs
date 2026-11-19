@@ -514,10 +514,7 @@ impl HostClipTarget {
             return Err("REAPER rejected item split".into());
         }
         current.valid(right as usize, c"MediaItem*", authorized)?;
-        let take = checked(authorized, || unsafe { (api.active_take)(right) })?;
-        if take.is_null() {
-            return Err("split item has no active take; host Undo remains available".into());
-        }
+        let take = self.split_right_take(right, position, authorized)?;
         let right_geometry = self.host.geometry_for_take(take, authorized)?;
         let right_target = HostClipTarget {
             host: self.host.clone(),
@@ -535,6 +532,109 @@ impl HostClipTarget {
             right_target.current(authorized)?.geometry,
         ))
     }
+    /// 分割后右半段的 take：按"同一序号 + 源起点连续"解析。
+    ///
+    /// 【为什么不能直接取 active take】`SplitMediaItem` 之后 `GetActiveTake(right)`
+    /// 给的是**宿主选中的**那条 take。take FX 恰好可以挂在非 active 的 take 上 ——
+    /// 那时旧代码会把右半段的写回目标指到别人的 take，用户看到的是"分割后音高/方向
+    /// 落到了另一条 take 上"。
+    ///
+    /// 【判据】REAPER 在分割出的两个 item 上保持 take 的**顺序**，因此"本条 take 在原
+    /// item 里的序号"是最强的身份证据；再用源起点连续性（右 = 左 + 位移 × 播放速率）
+    /// 复核一次。序号对得上、连续性也对得上才写；否则拒绝（宿主 Undo 仍然可用），
+    /// 因为"猜一个 take"等于改错别人的音频。
+    fn split_right_take(
+        &self,
+        right: *mut c_void,
+        position: f64,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<*mut c_void, String> {
+        let left = self.current(authorized)?;
+        let delta = position - left.geometry.start_sec;
+        let Some(api) = self.host.take_enum() else {
+            return self.single_take_after_split(right, authorized);
+        };
+        let count = checked(authorized, || unsafe {
+            (api.count)(left.item as *mut c_void)
+        })?;
+        if !(0..=1024).contains(&count) {
+            return Err("split item has an implausible take count".into());
+        }
+        let mut index = None;
+        for slot in 0..count {
+            let candidate = checked(authorized, || unsafe {
+                (api.at)(left.item as *mut c_void, slot)
+            })?;
+            if candidate as usize == left.take {
+                index = Some(slot);
+                break;
+            }
+        }
+        let Some(index) = index else {
+            return Err("split item no longer holds the bound take".into());
+        };
+        let candidate = checked(authorized, || unsafe { (api.at)(right, index) })?;
+        if candidate.is_null() {
+            return Err("split item has no take at the bound index".into());
+        }
+        // 源起点连续性：右侧的 SOFFS 必须等于"左侧 SOFFS + 位移 × 播放速率"。
+        // 这条读数由宿主自己算出来，改错了一条 take 就会对不上。
+        let rate = if left.geometry.play_rate_signed.is_finite() {
+            left.geometry.play_rate_signed
+        } else {
+            1.0
+        };
+        let expected = left.geometry.source_start_sec + delta * rate;
+        let actual = self.read_take_start_offs(candidate, authorized)?;
+        if (actual - expected).abs() > 1e-3 {
+            return Err("split take sequence does not match the bound take".into());
+        }
+        Ok(candidate)
+    }
+
+    /// 读一条 take 的 `D_STARTOFFS`。
+    fn read_take_start_offs(
+        &self,
+        take: *mut c_void,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<f64, String> {
+        let geometry = self
+            .host
+            .geometry
+            .as_ref()
+            .ok_or("REAPER geometry API unavailable")?;
+        let value = checked(authorized, || unsafe {
+            (geometry.take_value)(take, c"D_STARTOFFS".as_ptr())
+        })?;
+        if !value.is_finite() {
+            return Err("host take start offset is not finite".into());
+        }
+        Ok(value)
+    }
+
+    /// 宿主没有多 take 枚举接口时：退回改动前的行为（取 active take）。
+    ///
+    /// 【为什么这里诚实退化而不是拒绝】没有 `GetMediaItemNumTakes` 的宿主上，插件连
+    /// "一个 item 有几条 take"都看不到 —— 多 take 的 take FX 在那样的宿主上本来也
+    /// 绑不出正确结果。此时保留旧行为，等于把改动的影响面限制在"宿主确实提供了枚举
+    /// 接口"的那一档。
+    fn single_take_after_split(
+        &self,
+        right: *mut c_void,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<*mut c_void, String> {
+        let api = self
+            .host
+            .split
+            .as_ref()
+            .ok_or("REAPER split API unavailable")?;
+        let take = checked(authorized, || unsafe { (api.active_take)(right) })?;
+        if take.is_null() {
+            return Err("split item has no active take; host Undo remains available".into());
+        }
+        Ok(take)
+    }
+
     /// 同批所有对象须来自同一project，不以“当前活动项目”或相同轨名推断。
     pub(crate) fn same_project(&self, other: &Self) -> bool {
         self.project == other.project

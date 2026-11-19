@@ -2,29 +2,31 @@
 //!
 //! ## 为什么走 chunk 而不是 Envelope* API
 //!
-//! 1. **创建**：\`GetTakeEnvelopeByName\` 在 take 还没有音高包络时返回空指针，而
+//! 1. **创建**：`GetTakeEnvelopeByName` 在 take 还没有音高包络时返回空指针，而
 //!    "新建一条音高包络"没有独立的创建入口 —— 只能靠写 state chunk。独立 App 的
-//!    \`.rpp\` 导出早就这么做了（\`import::reaper_export::build_take_pitch_envelope\`），
+//!    `.rpp` 导出早就这么做了（`import::reaper_export::build_take_pitch_envelope`），
 //!    格式因此已经被往返测试钉住；
 //! 2. **一致性**：倒放写回已经建立了"只改目标块、其余逐字节保留"的纪律，
 //!    两条结构写回共用同一套解析；
-//! 3. **少一束风险**：\`InsertEnvelopePoint\` / \`DeleteEnvelopePointRange\` /
-//!    \`Envelope_SortPoints\` 的签名要逐版本核对，而 chunk 是纯文本。
+//! 3. **少一束风险**：`InsertEnvelopePoint` / `DeleteEnvelopePointRange` /
+//!    `Envelope_SortPoints` 的签名要逐版本核对，而 chunk 是纯文本。
 //!
-//! ## 作用范围：单 take item
+//! ## 作用范围：**按 take GUID 定位的那一条**
 //!
-//! 与 \`source_direction\` 同一条边界：插件只绑定 active take，多 take item 上
-//! "改哪一个 take 的包络"没有宿主无关的答案，因此明确拒绝而不是猜。
+//! 两条结构写回共用 [`super::take_chunk`] 的解析：单 take 与多 take 是同一套（多 take
+//! 只是在每条 take 前多一行 `TAKE` 标记）。此前这里只认"take 字段直接挂在 ITEM 下"的
+//! 单 take 形态，多 take 一律拒绝 —— 而 take FX 最常挂的正是多 take item 的某一条。
+//! 现在的判据是"GUID 相等的那一条"，找不到唯一匹配仍然拒绝（不猜）。
 //!
 //! ## 坐标域：播放时间，不含源起点
 //!
-//! \`EnvelopePoint::time\` 就是 chunk 里 \`PT\` 的第一个字段，属于 take 的**播放**
-//! 时间轴（u = 0 在入点，按 \`PLAYRATE\` 缩放）。\`SOFFS\`、SECTION 的 \`STARTPOS\`、
-//! 倒放位都不进入它 —— 真机渲染实测见
-//! \`docs/2026-11-17-take-envelope-axis-findings.md\`。因此本模块既不读也不写
-//! \`SOFFS\`：整块替换时其余字段逐字节保留，**不要**顺手补上源起点。
+//! `EnvelopePoint::time` 就是 chunk 里 `PT` 的第一个字段，属于 take 的**播放**时间轴
+//! （u = 0 在入点，按 `PLAYRATE` 缩放）。`SOFFS`、SECTION 的 `STARTPOS`、倒放位都不
+//! 进入它 —— 真机渲染实测见 `docs/2026-11-17-take-envelope-axis-findings.md`。因此本
+//! 模块既不读也不写 `SOFFS`：整块替换时其余字段逐字节保留，**不要**顺手补上源起点。
 
 use super::item_chunk::MAX_ITEM_CHUNK_BYTES;
+use super::take_chunk;
 use hifishifter_kernel::pitch_bridge::EnvelopePoint;
 
 /// 从 chunk 里读到的音高状态。
@@ -32,7 +34,7 @@ use hifishifter_kernel::pitch_bridge::EnvelopePoint;
 pub(crate) struct TakePitch {
     /// 包络点（u 域，半音）。空 = 没有包络或包络没有点。
     pub points: Vec<EnvelopePoint>,
-    /// chunk 里确实存在 \`<PITCHENV>\` 块。
+    /// chunk 里确实存在 `<PITCHENV>` 块。
     pub present: bool,
 }
 
@@ -41,12 +43,10 @@ pub(crate) struct TakePitch {
 /// 【为什么读不到也算成功】"没有音高包络"是**常态**（绝大多数 take 都没有），
 /// 调用方据此把宿主侧的值当作 0，而不是报错。
 pub(super) fn read_take_pitch(chunk: &str, take_guid: &str) -> Result<TakePitch, String> {
-    if chunk.is_empty() || chunk.len() > MAX_ITEM_CHUNK_BYTES || chunk.contains('\0') {
-        return Err("invalid or oversized REAPER item state".into());
-    }
+    take_chunk::check_budget(chunk)?;
     let lines: Vec<&str> = chunk.lines().collect();
-    verify_take_identity(&lines, take_guid)?;
-    let Some(block) = find_take_block(&lines, "PITCHENV") else {
+    let section = take_chunk::section_with_guid(&lines, take_guid)?;
+    let Some(block) = take_chunk::block(&lines, &section, "PITCHENV") else {
         return Ok(TakePitch::default());
     };
     let mut points = Vec::new();
@@ -73,7 +73,7 @@ pub(super) fn read_take_pitch(chunk: &str, take_guid: &str) -> Result<TakePitch,
     })
 }
 
-/// 把 take 的音高包络整块替换成 \`points\`；空列表 = 删除该块。
+/// 把 take 的音高包络整块替换成 `points`；空列表 = 删除该块。
 ///
 /// 【为什么整块替换而不是逐点插删】包络的读与写必须来自同一份数据（这条路径是
 /// 一次性快照，不是实时绑定）。逐点增删要处理"旧点残留"，而残留点会让换算后的
@@ -83,9 +83,7 @@ pub(super) fn rewrite_take_pitch(
     take_guid: &str,
     points: &[EnvelopePoint],
 ) -> Result<String, String> {
-    if chunk.is_empty() || chunk.len() > MAX_ITEM_CHUNK_BYTES || chunk.contains('\0') {
-        return Err("invalid or oversized REAPER item state".into());
-    }
+    take_chunk::check_budget(chunk)?;
     if points
         .iter()
         .any(|point| !point.time.is_finite() || !point.value.is_finite())
@@ -93,9 +91,10 @@ pub(super) fn rewrite_take_pitch(
         return Err("nonfinite pitch envelope point".into());
     }
     let lines: Vec<&str> = chunk.lines().collect();
-    verify_take_identity(&lines, take_guid)?;
-    let existing = find_take_block(&lines, "PITCHENV");
-    let source = outer_source_block(&lines)?;
+    let section = take_chunk::section_with_guid(&lines, take_guid)?;
+    let existing = take_chunk::block(&lines, &section, "PITCHENV");
+    let source = take_chunk::block(&lines, &section, "SOURCE")
+        .ok_or_else(|| "the host take has no source".to_string())?;
     let indent = indent_of(lines[source.start]).to_string();
 
     let mut output: Vec<String> = Vec::with_capacity(lines.len() + points.len() + 8);
@@ -109,8 +108,8 @@ pub(super) fn rewrite_take_pitch(
             }
         }
         output.push(lines[index].to_string());
-        // 没有旧块时，插在 take 的 SOURCE 之后 —— 那里是 take 字段区的末尾，
-        // 且仍在外层 ITEM 之内（单 take item 的 take 字段就挂在 ITEM 下）。
+        // 没有旧块时，插在**本条 take** 的 SOURCE 之后 —— 那里是这条 take 字段区的末尾，
+        // 而且仍在它自己的字段区之内（多 take item 下不会串到隔壁那条）。
         if existing.is_none() && index == source.end {
             push_envelope_block(&mut output, &indent, points);
         }
@@ -123,7 +122,7 @@ pub(super) fn rewrite_take_pitch(
     Ok(text)
 }
 
-/// 写一块 \`<PITCHENV>\`；\`points\` 为空时什么都不写（等价于删除）。
+/// 写一块 `<PITCHENV>`；`points` 为空时什么都不写（等价于删除）。
 fn push_envelope_block(out: &mut Vec<String>, indent: &str, points: &[EnvelopePoint]) {
     if points.is_empty() {
         return;
@@ -150,102 +149,6 @@ fn push_envelope_block(out: &mut Vec<String>, indent: &str, points: &[EnvelopePo
     out.push(format!("{indent}>"));
 }
 
-struct Block {
-    start: usize,
-    end: usize,
-}
-
-/// take 字段区里名为 \`kind\` 的块（\`<PITCHENV>\`）。
-fn find_take_block(lines: &[&str], kind: &str) -> Option<Block> {
-    let mut stack: Vec<&str> = Vec::new();
-    let mut open: Option<usize> = None;
-    for (index, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix('<') {
-            let name = rest.split_whitespace().next().unwrap_or("");
-            if stack.len() == 1 && name == kind {
-                open = Some(index);
-            }
-            stack.push(name);
-        } else if trimmed == ">" {
-            stack.pop();
-            if stack.len() == 1 {
-                if let Some(start) = open.take() {
-                    return Some(Block { start, end: index });
-                }
-            }
-        }
-    }
-    None
-}
-
-/// take 的源块（与 \`source_direction\` 同一判据：直接挂在 ITEM 上的 SOURCE）。
-fn outer_source_block(lines: &[&str]) -> Result<Block, String> {
-    let mut stack: Vec<&str> = Vec::new();
-    let mut open: Option<usize> = None;
-    let mut found: Option<Block> = None;
-    for (index, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix('<') {
-            let name = rest.split_whitespace().next().unwrap_or("");
-            if stack.len() == 1 && name == "SOURCE" {
-                // 第二条外层 SOURCE 就是第二个 take：本条路径只处理单 take item。
-                if found.is_some() || open.is_some() {
-                    return Err("the host item has more than one take".into());
-                }
-                open = Some(index);
-            }
-            stack.push(name);
-        } else if trimmed == ">" {
-            stack.pop();
-            if stack.len() == 1 {
-                if let Some(start) = open.take() {
-                    found = Some(Block { start, end: index });
-                }
-            }
-        }
-    }
-    if !stack.is_empty() {
-        return Err("unbalanced item state".into());
-    }
-    found.ok_or_else(|| "the host item has no take source".to_string())
-}
-
-/// 深度 1 上的 \`GUID <take_guid>\`。
-fn verify_take_identity(lines: &[&str], take_guid: &str) -> Result<(), String> {
-    if take_guid.is_empty() {
-        return Err("host take identity missing".into());
-    }
-    let mut stack: Vec<&str> = Vec::new();
-    for line in lines {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix('<') {
-            stack.push(rest.split_whitespace().next().unwrap_or(""));
-            continue;
-        }
-        if trimmed == ">" {
-            stack.pop();
-            continue;
-        }
-        if stack.len() == 1
-            && trimmed.split_whitespace().next() == Some("GUID")
-            && trimmed.split_whitespace().nth(1) == Some(take_guid)
-        {
-            return Ok(());
-        }
-    }
-    Err("host take identity changed before the pitch write".into())
-}
-
 fn indent_of(line: &str) -> &str {
     &line[..line.len() - line.trim_start().len()]
 }
@@ -255,6 +158,7 @@ mod tests {
     use super::*;
 
     const TAKE: &str = "{AAAAAAAA-1111-2222-3333-444444444444}";
+    const SIBLING: &str = "{DDDDDDDD-1111-2222-3333-444444444444}";
 
     fn chunk() -> String {
         format!(
@@ -262,7 +166,17 @@ mod tests {
         )
     }
 
-    /// 没有包络是常态：读成空、且 \`present == false\`。
+    /// 多 take item：本 take 在前、兄弟 take 在后（各自带自己的 SOURCE 与包络）。
+    fn multi_take_chunk() -> String {
+        format!(
+            "<ITEM\nPOSITION 0\nLENGTH 1\nIGUID {{BBBBBBBB-1111-2222-3333-444444444444}}\n\
+             SOFFS 0\nGUID {TAKE}\n<SOURCE WAVE\nFILE \"a.wav\"\n>\n\
+             TAKE\nGUID {SIBLING}\nSOFFS 3\n<PITCHENV\n  PT 0 5 0\n>\n\
+             <SOURCE WAVE\nFILE \"b.wav\"\n>\n>\n"
+        )
+    }
+
+    /// 没有包络是常态：读成空、且 present 为假。
     #[test]
     fn a_take_without_an_envelope_reads_as_absent() {
         let pitch = read_take_pitch(&chunk(), TAKE).unwrap();
@@ -300,9 +214,9 @@ mod tests {
         assert!(!read_take_pitch(&without, TAKE).unwrap().present);
     }
 
-    /// 【u 域不含源起点/倒放镜像】源起点 30 s、带倒放位的 take：写进去的 \`PT\`
-    /// 必须原样是 0 / 1。补一个 \`SOFFS\` 或镜像一次，整条曲线就整体平移 ——
-    /// 真机实测见 \`docs/2026-11-17-take-envelope-axis-findings.md\`。
+    /// 【u 域不含源起点/倒放镜像】源起点 30 s、带倒放位的 take：写进去的 PT
+    /// 必须原样是 0 / 1。补一个 SOFFS 或镜像一次，整条曲线就整体平移 ——
+    /// 真机实测见 `docs/2026-11-17-take-envelope-axis-findings.md`。
     #[test]
     fn the_envelope_is_written_in_playback_time_without_the_source_offset() {
         let shifted = format!(
@@ -323,19 +237,39 @@ mod tests {
         assert_eq!(read_take_pitch(&text, TAKE).unwrap().points, points);
     }
 
-    /// 身份不符 / 多 take / 非有限值都必须拒绝。
+    /// **多 take item：只改 GUID 匹配的那一条，兄弟 take 的包络一字不动。**
+    ///
+    /// 【为什么这条是本轮的核心回归】take FX 最常挂的正是多 take item 的某一条。
+    /// 此前整条路径直接返回 "the host item has more than one take"，用户看到的是
+    /// "转换成功、音高没变"（或干脆报错）。
     #[test]
-    fn refuses_identity_mismatch_multi_take_and_nonfinite_points() {
-        // 两个 take：两条**深度 1** 的 SOURCE 块（第二条挂在 TAKE 标记之后）。
-        let two_takes = format!(
-            "<ITEM\nPOSITION 0\nLENGTH 1\nGUID {TAKE}\n<SOURCE WAVE\nFILE \"a.wav\"\n>\nTAKE\nGUID {{DDDDDDDD-1111-2222-3333-444444444444}}\n<SOURCE WAVE\nFILE \"b.wav\"\n>\n>\n"
-        );
+    fn a_multi_take_item_rewrites_only_the_take_with_the_matching_guid() {
+        let points = [EnvelopePoint::new(0.0, 0.0), EnvelopePoint::new(1.0, 12.0)];
+        let text = rewrite_take_pitch(&multi_take_chunk(), TAKE, &points).unwrap();
+        // 本 take 的包络写进去了。
+        assert_eq!(read_take_pitch(&text, TAKE).unwrap().points, points);
+        // 兄弟 take 的包络原样保留（PT 0 5 0 仍在，且仍属于它自己）。
+        let sibling = read_take_pitch(&text, SIBLING).unwrap();
+        assert!(sibling.present);
+        assert_eq!(sibling.points, [EnvelopePoint::new(0.0, 5.0)]);
+        // 源文件与 SOFFS 都没有被换位。
+        assert!(text.contains("FILE \"a.wav\""));
+        assert!(text.contains("FILE \"b.wav\""));
+        assert!(text.contains("SOFFS 3"));
+        // 本 take 的包络插在它自己的 SOURCE 之后，而不是兄弟 take 的 SOURCE 之后。
+        let inserted = text.find("PT 1.00000000000000000").unwrap();
+        let sibling_source = text.find("FILE \"b.wav\"").unwrap();
+        assert!(inserted < sibling_source, "{text}");
+    }
+
+    /// 身份不符 / 非有限值都必须拒绝。
+    #[test]
+    fn refuses_identity_mismatch_and_nonfinite_points() {
         let points = [EnvelopePoint::new(0.0, 1.0)];
         assert!(
             rewrite_take_pitch(&chunk(), "{EEEEEEEE-1111-2222-3333-444444444444}", &points)
                 .is_err()
         );
-        assert!(rewrite_take_pitch(&two_takes, TAKE, &points).is_err());
         assert!(rewrite_take_pitch(&chunk(), TAKE, &[EnvelopePoint::new(f64::NAN, 1.0)]).is_err());
     }
 }
