@@ -727,6 +727,13 @@ pub struct EditorSession {
     pub(super) error: Mutex<Option<String>>,
     render_error: Mutex<Option<String>>,
     render_requested: AtomicBool,
+    /// `rearm_render` 被调用的累计次数（诊断/回归读数；见该字段的说明）。
+    ///
+    /// 【为什么要有它】`render_requested` 是 actor 的**待办标志**：渲染一旦跑完就被清回
+    /// false，跨线程的观察者（回归测试）可能根本看不到它为真的一瞬。这个单调计数只在
+    /// `rearm_render` 里加一，"有没有人请求过渲染"因此是一个稳定的读数。
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    rearm_requests: AtomicU64,
     /// 上一次写进日志的"旁通门结论"（`0` = 还没写过 / `1` = 照常渲染 / `2` = 跳过作业）。
     ///
     /// 【为什么只记结论不记读数】这条日志的用途是回答"旁通了为什么还在渲染"，而那只有
@@ -1210,6 +1217,7 @@ impl EditorSession {
             error: Mutex::new(None),
             render_error: Mutex::new(None),
             render_requested: AtomicBool::new(false),
+            rearm_requests: AtomicU64::new(0),
             bypass_gate_logged: AtomicU8::new(0),
             playhead_gaps: Mutex::new(PlayheadGaps::default()),
             transport_stall: Mutex::new(None),
@@ -1437,7 +1445,29 @@ impl EditorSession {
     /// 就永远不会有新音频。
     pub(crate) fn rearm_render(&self) {
         self.render_requested.store(true, Ordering::Release);
+        self.rearm_requests.fetch_add(1, Ordering::AcqRel);
         let _ = self.queue.try_send(Job::Wake);
+    }
+
+    /// `rearm_render` 的累计调用次数（诊断/回归读数）。
+    ///
+    /// 【为什么是计数而不是读 `render_requested`】那个标志是 actor 的**待办位**：渲染
+    /// 一跑完就被清回 false，另一条线程上的观察者可能永远看不到它为真的一瞬。单调计数
+    /// 让"有人请求过渲染"成为一个稳定的读数 —— 回归测试（`render::extension` 的清单
+    /// 刷新用例）钉的就是它。
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn rearm_requests(&self) -> u64 {
+        self.rearm_requests.load(Ordering::Acquire)
+    }
+
+    /// 是否已有一笔渲染在排队（`render_requested` 的只读窗口）。
+    ///
+    /// 【为什么清单刷新需要问它】纯几何变化只推进 epoch；若**本来就有**一笔渲染在途/排队，
+    /// 那次渲染的版本复核（`render_ticket_locked` 含 epoch）必然会看到新代次并按新输入
+    /// 重算（不匹配时走 "automatic apply superseded" 立即重排）—— 再 rearm 一次是重复调度，
+    /// 而且会在"宿主几何还没回读"的窗口里抢跑一次以旧几何为准的渲染。
+    pub(crate) fn render_pending(&self) -> bool {
+        self.render_requested.load(Ordering::Acquire)
     }
 
     pub(crate) fn request_reload(&self) {

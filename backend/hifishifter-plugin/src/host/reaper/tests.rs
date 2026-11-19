@@ -1355,6 +1355,10 @@ fn action_effect(command: i32) {
     if command == 41051 {
         let reversed = !f.take_reversed.get();
         f.take_reversed.set(reversed);
+        // 【与真机一致】宿主的 toggle 会把 take 的源包上 SECTION/REVERSE（真机对照：
+        // 动作之后 `PCM_Source_GetSectionInfo` 的 isSection/rev 立即可读）。此后方向位
+        // 从"缺席"变为"可读"—— 正放 take 被倒放的那次 toggle 正是这条转变。
+        f.section_reports.set(true);
     }
 }
 

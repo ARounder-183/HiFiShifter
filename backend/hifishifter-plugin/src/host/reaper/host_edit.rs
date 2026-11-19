@@ -495,10 +495,20 @@ impl EditorSession {
             let mut after = view.clips.remove(0);
             if let Some(end) = patch.source_end_sec {
                 if patch.length_sec.is_none() {
-                    after.length_sec =
-                        (end - after.source_start_sec) / (after.playback_rate as f64);
-                    if after.length_sec <= 0. {
-                        return Err("source trim window must have positive length".into());
+                    // 【Loop 的窗口不是区间】`source_start_sec / source_end_sec` 在
+                    // 循环源上是**回绕相位锚点**（前端 `slipWindow` 对两端取模回绕，
+                    // 回绕后 end < start 完全合法；内核引擎同样按锚点 rem_euclid
+                    // 消费）。`(end − start) / rate` 的区间算式对它们必然得出
+                    // 负数 —— 此前这里直接拒绝，症状正是"loop clip 的一次 slip
+                    // 提交报 source trim window must have positive length"。
+                    // 长度只能来自补丁本身（trim 会带 lengthSec）或编辑前的值
+                    // （slip 不改长度），两种来源都已经落在 `after` 上。
+                    if !after.loop_enabled {
+                        after.length_sec =
+                            (end - after.source_start_sec) / (after.playback_rate as f64);
+                        if after.length_sec <= 0. {
+                            return Err("source trim window must have positive length".into());
+                        }
                     }
                 }
             }
@@ -1429,6 +1439,49 @@ mod tests {
         );
         editor.close();
     }
+    /// **Loop clip 的 slip 提交不得按区间算式反推长度**。
+    ///
+    /// 【为什么这是回归】循环源的 `source_start_sec / source_end_sec` 是**回绕相位
+    /// 锚点**（前端 `slipWindow` 对两端取模回绕，回绕后 end < start 完全合法）。
+    /// 此前规划器用 `(end − start) / rate` 反推长度，对回绕窗口必然得出负数 ⇒
+    /// 一次 slip 提交整批被拒："source trim window must have positive length"。
+    /// 修复后 Loop 分支不动长度（长度只能来自补丁或编辑前的值）。
+    #[test]
+    fn a_loop_slip_with_a_wrapped_window_keeps_its_length() {
+        let (_model, owner, _id) = crate::editor::session::tests::fixture();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        // 回绕窗口：媒体长 2.0，slip 把窗口推过文件头，end(0.4) < start(1.6)。
+        // 前端 `computeSlipWindow` 的取模输出就长这样。
+        let plan = editor
+            .plan_host_edit(
+                "set_clip_state",
+                &json!({
+                    "clipId": clip.id,
+                    "loopEnabled": true,
+                    "sourceStartSec": 1.6,
+                    "sourceEndSec": 0.4
+                }),
+            )
+            .expect("loop 的回绕窗口必须被接受");
+        let edit = &plan.edits[0];
+        assert!(edit.after.loop_enabled, "补丁打开循环源");
+        assert!(
+            (edit.after.length_sec - clip.length_sec).abs() < 1e-9,
+            "slip 不改长度：before={:?} after={:?}",
+            clip.length_sec,
+            edit.after.length_sec
+        );
+        assert!(
+            (edit.after.source_start_sec - 1.6).abs() < 1e-9
+                && (edit.after.source_end_sec - 0.4).abs() < 1e-9,
+            "回绕锚点必须原样入库：{:?}",
+            (edit.after.source_start_sec, edit.after.source_end_sec)
+        );
+        editor.close();
+    }
+
     /// 使用生产clip路由、官方typed getter/setter与Undo块；没有把私有timeline赋值当同步。
     #[test]
     fn host_edit_writes_directly_bound_item_under_one_project_undo_block() {
@@ -1856,6 +1909,59 @@ mod tests {
         assert!(
             !chunk.contains("<SOURCE SECTION"),
             "chunk 从未被真正改写（宿主拒绝了它）：{chunk}"
+        );
+        document.close();
+    }
+
+    /// **方向位缺席（无 SECTION 包装的 take）不是错误**。
+    ///
+    /// 【为什么这是回归】`PCM_Source_GetSectionInfo` 对从未倒放过、也没有显式
+    /// SECTION 的 take 返回 false —— 那是"正放"的正常读数。此前
+    /// `reversed_now` 把它当"宿主不肯报告"，直接返回错误：take FX 放置下
+    /// 动作路径的第一步（读 `before`）就整批失败，真机日志
+    /// "the host did not report the take direction" 正是它（而轨道 FX 走 chunk
+    /// 路径没有这次预读，所以"轨道正常、take FX 被拒"）。修复后"读不到 = 正放"，
+    /// 与几何读取侧同一纪律；动作切换之后方向位出现，写→读→比照常成立。
+    #[test]
+    fn a_take_fx_reverse_succeeds_when_the_host_never_reported_a_direction() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_item_state(&host.single_take_chunk());
+        host.inventory_enabled.set(true);
+        host.take_env_enabled.set(true);
+        host.item_state_write_refused.set(true);
+        // 【前提】`section_reports` 保持 false：模拟"从未倒放过、无 SECTION 包装"
+        // 的 take —— `PCM_Source_GetSectionInfo` 返回 false。此前这一格让整条
+        // 动作路径第一步就报 "the host did not report the take direction"。
+        host.section_reports.set(false);
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        let plan = editor
+            .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"reversed":true}))
+            .expect("倒放补丁必须被接受");
+        host.reset();
+        execute(&owner, plan, || document.is_alive())
+            .expect("方向位缺席时倒放必须仍走宿主动作成功");
+
+        let calls = host.calls();
+        assert!(host.take_reversed.get(), "方向位必须真的翻过来");
+        assert!(
+            calls.iter().any(|call| call.starts_with("run-command-ex:")),
+            "必须借宿主自己的动作切方向：{calls:?}"
+        );
+        // 动作之后宿主写出了 SECTION 包装，方向位应可读回为倒放。
+        assert!(
+            host.section_reports.get() || host.take_reversed.get(),
+            "toggle 动作之后宿主侧必须处于可读的倒放形态"
         );
         document.close();
     }

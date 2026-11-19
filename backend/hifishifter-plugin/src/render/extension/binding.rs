@@ -1752,11 +1752,30 @@ impl ExtensionOwner {
             // 会调每个 owner 的 `prepare()`，而 `prepare()` 要投递到会话 actor。
             // 本函数可能正跑在**那条 actor 线程**上（`ensure_loaded` 的清单刷新），
             // 于是"投递并等自己"就是一次必然的自锁 —— 实测整份测试套件挂死在这里。
-            //
-            // 只推进 `render_epoch` 已经足够：`PreparedVersion` 含它，下一次
-            // 20 ms 定时器驱动的 prepare 会看到版本不匹配并重算。位置/长度这类纯几何
-            // 变化只需要"让已发布的快照失效"，不需要当场重排。
             stamp.0.note_render_geometry_changed();
+            // 【但"等下一次定时器驱动的 prepare"是一句空话】全代码库**没有**任何周期性的
+            // `prepare()`：`refresh_host_transport_tick`（20 ms 节拍）只做时钟采样 /
+            // 清单枚举 / 装配冲刷，从不调 prepare；播放实例没有视图定时器；音频线程只在
+            // `render_wanted`（Capture）与"窗口越界"（窗口渲染）时补排。于是纯几何变化
+            // 推进 epoch 之后，`PreparedVersion` 永不匹配、重排也永不被排队 —— 快照停
+            // 在旧版本，直到**碰巧**有别的编辑触发收口。真机症状正是它：把一个启用了
+            // 循环源的 item 拖长（产生循环节），波形立刻画出循环，音频却要等下一次编辑
+            // 或重载才更新。
+            //
+            // 通知的载体用编辑会话的自动渲染链（`rearm_render` →
+            // `apply_workspace_edits_with_progress` → 逐 playback owner 渲染并发布）。
+            // 它与"旁通恢复"（`sample_host_bypass` 的 `InvalidateAndRearm`）是同一条
+            // 通路，本身就带在途检查、票据复核与重试预算；这里只是置位原子 + `try_send`
+            // 一个 Wake，不做任何阻塞等待 —— 在 actor 线程上调用它也是安全的（这正是
+            // 旁通恢复路径已有的用法）。
+            if let Some(editor) = stamp.0.existing_editor_session() {
+                // 【已有一笔渲染排队时不再重复调度】`render_requested` 在途意味着那一轮
+                // 渲染的版本复核（票据含 epoch）必然按新代次重算；此刻再 rearm 是重复调度，
+                // 而且会在"宿主几何尚未回读"的窗口抢跑一次以旧几何为准的渲染。
+                if !editor.render_pending() {
+                    editor.rearm_render();
+                }
+            }
         }
     }
     /// ARA-only 后端的渲染事实来源：只登记 ARA region 自己能给出的字段。

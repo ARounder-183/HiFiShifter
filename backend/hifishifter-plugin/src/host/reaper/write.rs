@@ -1057,10 +1057,30 @@ impl HostClipTarget {
             return self.host.on_host(|| self.reversed_now(authorized))?;
         }
         self.verify(authorized)?;
-        self.host
+        // 【读不到方向位 = 正放，不是错误】`PCM_Source_GetSectionInfo` 对**没有
+        // SECTION/REVERSE 包装**的 take 返回 false —— 那是"从未倒放过"的正常形态，
+        // 与几何读取侧（`project_host_take_facts_locked` 对 `None` 按正放处理）是
+        // 同一条纪律。把它当错误会让 take FX 的动作路径在第一步（读 `before`）就
+        // 整批失败：真机日志 "the host did not report the take direction" 正是它，
+        // 而轨道 FX 走 chunk 路径没有这次预读，所以"轨道正常、take FX 被拒"。
+        //
+        // 方向判定与读取侧同一口径：方向位（若有）**或**负速率（REAPER 表达倒放的
+        // 另一个来源，见 `HostClipGeometry::play_rate_signed`）。
+        if let Some(facts) = self
+            .host
             .take_direction_facts(self.take as *mut c_void, authorized)
-            .map(|facts| facts.reversed)
-            .ok_or_else(|| "the host did not report the take direction".to_string())
+        {
+            return Ok(facts.reversed);
+        }
+        let geometry = self
+            .host
+            .geometry
+            .as_ref()
+            .ok_or("REAPER geometry API unavailable")?;
+        let rate = checked(authorized, || unsafe {
+            (geometry.take_value)(self.take as *mut c_void, c"D_PLAYRATE".as_ptr())
+        })?;
+        Ok(rate.is_finite() && rate < 0.0)
     }
     /// 这个 item 是不是**本实例自己挂着的那个**（take FX 下必然如此）。
     ///
