@@ -2339,6 +2339,7 @@ export const jaJP = {
     plugin_apply_analyzing_hint:
         "この工程は素材の長さに比例して数秒から数分かかります。解析中は生録音を再生します。",
     plugin_apply_rendering: "合成中...",
+    plugin_apply_bypassed: "バイパス中 · レンダリングしません",
     plugin_render_background_hint:
         "バックグラウンドで新しいバージョンを生成中です。現在聞こえているのは前のバージョンです。",
     plugin_daw_controlled_reason:

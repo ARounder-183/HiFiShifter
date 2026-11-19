@@ -204,7 +204,7 @@ test.each([
     expect(text()).toContain(enUS[expectedKey]);
 });
 
-test("stale 状态带渲染进度，不再只说「正在合成」", async () => {
+test("stale 只说「正在合成」，百分比归左侧状态片", async () => {
     invokeMock.mockResolvedValue(
         hostState({
             audible_state: "stale",
@@ -215,7 +215,22 @@ test("stale 状态带渲染进度，不再只说「正在合成」", async () =>
     );
     await render();
     expect(text()).toContain(enUS.plugin_apply_rendering);
-    expect(text()).toContain("42%");
+    // 【为什么这里不该再有百分比】两处各拼一份、判据还分叉，只会得到
+    // "左边 40%、右边 100%"。这一片回答的是"你听到的是不是当前编辑"，
+    // 而进度由 `AppStatusProgressChips` 唯一承担。
+    expect(text()).not.toContain("42%");
+});
+
+/*
+ * 【为什么旁通必须单独一条】旁通时宿主根本不来取输出，后端把 `applied` 收口到当前
+ * 代次 ⇒ `audible_state` 落在 `current` ⇒ 这一片会说「已应用」。而用户刚做的编辑
+ * **一次都没被渲染**。说「已旁通 · 不渲染」才是实话：这不是故障，是宿主的选择。
+ */
+test("宿主旁通时如实说「已旁通 · 不渲染」，而不是「已应用」", async () => {
+    invokeMock.mockResolvedValue(hostState({ audible_state: "current", host_bypass: "bypassed" }));
+    await render();
+    expect(text()).toContain(enUS.plugin_apply_bypassed);
+    expect(text()).not.toContain(enUS.plugin_apply_applied);
 });
 
 test("播放开始时的内务工作不再说「正在应用」", async () => {

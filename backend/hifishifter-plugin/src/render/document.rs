@@ -7,7 +7,7 @@ use ara2_bridge::companion::CompanionControllerBinding;
 use ara2_bridge::core::{ApiGeneration, AraError};
 use ara2_bridge::plugin::ExtensionControllerLease;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 thread_local! {
@@ -339,6 +339,67 @@ pub struct PlaybackEndpoint {
     pub supersession: std::sync::Arc<crate::editor::host_threads::SupersessionDomain>,
 }
 
+/// 因"两份输入不同代"而推迟发布的上界。
+///
+/// 【为什么是 2 s】拖动一个 item 期间，清单每 100 ms 就可能发布一代新的，于是
+/// "输入动过 ⇒ 再等等"会一直成立。2 s 足够覆盖任何一次真实的两份输入错位
+/// （现场日志里是 40~120 ms），又远短于用户能接受"我拖完了它还没更新"的时间。
+/// 预算耗尽后照常发布（不能饿死界面），但会把两个代次写进 WARN。
+const ASSEMBLY_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// "这一轮的 `unbound` 该不该推迟发布" —— 纯判据（可单测）。
+///
+/// 参数是四个**已经读到**的事实，因此它不碰锁、不碰宿主、不看时间以外的任何状态：
+///
+/// * `unbound` —— 这一轮没挂上任何 item 的 region 条数；
+/// * `consumed` —— 上一次装配尝试消费的那一对输入代次（`None` = 还没有过上一次）；
+/// * `inputs` —— 这一轮读到的代次；
+/// * `deferred_since` —— 当前这串推迟的起点（`None` = 没有在推迟）；
+/// * `now` —— 由调用方给出，测试因此不必睡觉。
+///
+/// 【三条判据，每条都对应一次真实的误判】
+///
+/// 1. `unbound == 0` ⇒ 不推迟。这一轮就是答案，推迟只会白白晚一帧；
+/// 2. `consumed == Some(inputs)` ⇒ 不推迟。两份输入与上一次尝试**逐位相同**，再试一次
+///    只会得到同一个结论 —— 此时推迟是纯损失（界面停在旧时间线上）；
+/// 3. `consumed == None` ⇒ 不推迟。没有上一次可比，"输入动过"无从谈起；而第一轮装配
+///    必须产出点东西（否则冷启动永远空白）。
+///
+/// 剩下的唯一情形 —— `unbound > 0` 且输入动过 —— 才是"两份输入可能还没对齐"。
+/// 预算（[`ASSEMBLY_RETRY_BUDGET`]）封住上界：拖动 item 期间清单每一代都在变，
+/// 没有预算就会一直推迟到用户松手。
+pub(crate) fn should_defer_assembly(
+    unbound: usize,
+    consumed: Option<(u64, u64)>,
+    inputs: (u64, u64),
+    deferred_since: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    if unbound == 0 {
+        return false;
+    }
+    let Some(consumed) = consumed else {
+        return false;
+    };
+    if consumed == inputs {
+        return false;
+    }
+    deferred_since.is_none_or(|since| now.duration_since(since) < ASSEMBLY_RETRY_BUDGET)
+}
+
+/// 一次装配尝试的结局。
+///
+/// 【为什么不是一个 `bool`】"推迟发布"与"发布了"必须被**区别对待**：推迟时
+/// `assembly_dirty` 要留着（下一个安全点再来），发布时它要清掉。用布尔表达这件事，
+/// 唯一可能的写法是"调用方再去读一次标记" —— 而两次读写之间正好是产生新竞态的地方。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssemblyOutcome {
+    /// 这一轮的输入被消费了：时间线已发布（或确认无需改动）。
+    Published,
+    /// 两份输入还没对齐：**保留上一轮已发布的时间线**，下一个安全点重试。
+    Deferred,
+}
+
 #[derive(Default)]
 pub struct DocumentSession {
     controller: AtomicUsize,
@@ -537,6 +598,27 @@ pub struct DocumentSession {
     pub assembly_spans: Mutex<std::collections::BTreeMap<String, Vec<usize>>>,
     /// 最近一次装配里**没挂上任何 item** 的 region 行（不产生 clip，只进读数）。
     pub assembly_unbound: Mutex<Vec<usize>>,
+    /// 装配的**输入 A**（`region_rows`）写了几次。
+    ///
+    /// 【为什么要一个计数而不是"读一下内容变没变"】两份输入是**两张表**，逐字段比较
+    /// 的代价与"它们是不是同一时刻的事实"这个问题根本不对等：一个代次就够回答
+    /// "这一轮装配读到的和上一轮是不是同一对"。见 [`Self::assembly_consumed`]。
+    pub(crate) region_rows_stamp: AtomicU64,
+    /// 装配的**输入 B**（`ui_tracks`）发布了几次。
+    pub(crate) ui_tracks_stamp: AtomicU64,
+    /// 上一次装配尝试消费的那一对代次 `(ui_tracks_stamp, region_rows_stamp)`。
+    ///
+    /// 【它回答什么】"这一轮读到的两份输入，与上一轮相比**动过**吗"。动了就说明
+    /// 其中至少一份可能还没跟上另一份 —— 那正是 `unbound` 最可能的成因（item 已经
+    /// 挪到新位置、region 表还是旧的，或反过来）。没动则说明再试一次也只会得到同一个
+    /// 答案：那就是结论，该发布（并报警）。
+    pub(crate) assembly_consumed: Mutex<Option<(u64, u64)>>,
+    /// 当前这一串"推迟发布"的起点（`None` = 没有在推迟）。
+    ///
+    /// 【为什么必须有上界】清单在**拖动 item** 期间每 100 ms 就可能发布一代新的，
+    /// 于是"输入动过 ⇒ 再等等"会一直成立。没有预算的话界面会停在上一份时间线上直到
+    /// 用户松手 —— 那比"少一条片段"糟得多。
+    pub(crate) assembly_deferred_since: Mutex<Option<std::time::Instant>>,
     /// 装配的输入变过、还没被消费。
     ///
     /// 【为什么必须有这个标记】装配有两份输入：ARA 侧的 region 表（模型回调写）与宿主
@@ -624,6 +706,24 @@ pub struct DocumentSession {
     /// 宿主给本**文档**的播放控制租约，连同它被创建时所在的那条线程。
     pub playback: Mutex<Option<PlaybackEndpoint>>,
     pub host_undo: crate::host::undo::HostUndo,
+    /// 宿主此刻是否把本实例的音频放进了信号链（`FxBypass` 的编码）。
+    ///
+    /// 【为什么在**文档**上，而不是在每个 renderer 实例上】旁通是**这个 FX** 的属性，
+    /// 而一次 ARA 绑定在 REAPER 里会造出两个实例（playback / editor+view）。读数按实例
+    /// 缓存等于让"谁碰巧有空看一眼"决定"要不要渲染"：播放实例没有视图定时器，它的
+    /// 缓存永远是 `Unknown`（= 照常渲染），于是用户旁通了 FX 而插件还在合成。
+    /// 采样仍然由任一实例在**宿主线程**上做（`refresh_host_bypass_cache`），结果写到
+    /// 这里，两个实例与后台作业读同一格。
+    ///
+    /// 【为什么默认 0（未知）】未知必须等于改动前的行为：照常渲染。见
+    /// `crate::host::reaper::FxBypass::encode`。
+    pub host_bypass: AtomicU8,
+    /// 上一次成功采样旁通读数的时刻（`None` = 从未采过）。
+    ///
+    /// 【为什么需要"多旧"】`prepare` / 后台作业在"读数已经过期"时宁可**再采一次**也
+    /// 不愿按一个几分钟前的结论跳过合成；而"采一次"必须在宿主线程上做，所以这个时刻
+    /// 也是"还能不能相信这一格"的唯一判据。
+    pub(crate) host_bypass_sampled_at: Mutex<Option<std::time::Instant>>,
     /// 宿主 BPM / 拍号读数（VST3 进程上下文）。
     ///
     /// 【为什么记在文档上】Tempo Map 的音阶点需要宿主轴：0 位置点**必须**显式带拍号
@@ -1012,6 +1112,77 @@ mod tests {
             revision + 1,
             "the flag is consumed by one flush"
         );
+    }
+
+    /// **`unbound` 什么时候该推迟发布、什么时候就是结论。**
+    ///
+    /// 【为什么这条判据值得单测】它决定"一条本来有源的 clip 会不会被写成永久无源"。
+    /// 判错的方向有两个，代价完全不同：
+    ///   * 该推迟而不推迟 ⇒ 一次 100 ms 的竞态被写成终局（用户看到"一直在等宿主音频"，
+    ///     重开工程才好）；
+    ///   * 不该推迟而推迟 ⇒ 界面晚一帧（20 ms），且预算封住上界。
+    ///
+    /// 所以只有"输入确实动过"这一种情形才推迟，其余一律发布。
+    #[test]
+    fn assembly_defers_only_while_the_two_inputs_are_moving() {
+        let now = std::time::Instant::now();
+        let previous = Some((3_u64, 4_u64));
+        // 输入动过 + 有 unbound ⇒ 推迟（这是"item 挪了、region 表还没跟上"的形状）。
+        assert!(should_defer_assembly(1, previous, (4, 4), None, now));
+        assert!(should_defer_assembly(1, previous, (3, 5), None, now));
+        // 没有 unbound ⇒ 这一轮就是答案。
+        assert!(!should_defer_assembly(0, previous, (4, 5), None, now));
+        // 输入与上一次尝试逐位相同 ⇒ 再试一百次也是同一个结论。
+        assert!(!should_defer_assembly(1, previous, (3, 4), None, now));
+        // 还没有过上一次尝试 ⇒ 无从判断，先把这一轮发布出去（冷启动不能永远空白）。
+        assert!(!should_defer_assembly(1, None, (0, 0), None, now));
+    }
+
+    /// 拖动 item 期间清单每一代都在变：预算必须封住上界，不能饿死界面。
+    #[test]
+    fn assembly_publishes_after_the_retry_budget() {
+        let now = std::time::Instant::now();
+        let started = now - ASSEMBLY_RETRY_BUDGET - std::time::Duration::from_millis(1);
+        // 预算内：继续推迟。
+        assert!(should_defer_assembly(
+            2,
+            Some((1, 1)),
+            (2, 2),
+            Some(now - std::time::Duration::from_millis(10)),
+            now
+        ));
+        // 预算耗尽：照常发布（`unbound` 会连同两个代次进 WARN）。
+        assert!(!should_defer_assembly(
+            2,
+            Some((1, 1)),
+            (2, 2),
+            Some(started),
+            now
+        ));
+    }
+
+    /// 旁通读数存在**文档**上：一个实例采到，全部实例与后台作业立刻看见。
+    ///
+    /// 【为什么这是"旁通了还在渲染"的回归】读数此前按实例缓存，而采样点只在有视图
+    /// 定时器的那个实例上；播放实例的缓存永远是 `Unknown`（= 照常渲染）。
+    #[test]
+    fn the_bypass_reading_is_shared_through_the_document() {
+        use crate::host::reaper::FxBypass;
+        let document = DocumentSession::new(9_003);
+        assert_eq!(document.host_bypass(), FxBypass::Unknown);
+        assert!(document.host_bypass_age().is_none(), "还没采过");
+        assert_eq!(
+            document.note_host_bypass(FxBypass::Bypassed),
+            FxBypass::Unknown,
+            "返回值是**上一次**的读数（变化判定要用它）"
+        );
+        assert_eq!(document.host_bypass(), FxBypass::Bypassed);
+        assert!(document.host_bypass_age().is_some(), "采样时刻必须落下来");
+        assert_eq!(
+            document.note_host_bypass(FxBypass::Active),
+            FxBypass::Bypassed
+        );
+        assert_eq!(document.host_bypass(), FxBypass::Active);
     }
 
     /// **分割一个循环源 item，参数线一根都不许动（插件侧粘合层）。**
@@ -1626,9 +1797,16 @@ impl DocumentSession {
             return;
         }
         let before = self.clip_ids.lock_or_recover().clone();
-        if let Err(error) = self.rebuild_timeline_locked() {
-            log::warn!("[ara] deferred timeline assembly failed: {error}");
-            return;
+        match self.rebuild_timeline_locked() {
+            Ok(AssemblyOutcome::Published) => {}
+            // 【推迟不是失败，也不是"做完了"】标记必须留着：它表达的正是"这份输入
+            // 还没被消费"。清掉它等于把一次真正的输入变化永久丢失 —— 而那正是本函数
+            // 要消灭的那类缺陷。
+            Ok(AssemblyOutcome::Deferred) => return,
+            Err(error) => {
+                log::warn!("[ara] deferred timeline assembly failed: {error}");
+                return;
+            }
         }
         // 【clip 集合真的变了才算一次模型变化】`clip_ids` 是装配产物里唯一的身份投影
         // （region key → clip id）；它一变，读者必须重读：编辑器按 `revision` 判"要不要
@@ -1658,8 +1836,8 @@ impl DocumentSession {
     /// 【锁序】调用方必须已持有 `transaction`。本函数先取两张输入表（宿主事实层级），
     /// 立刻释放，再取 `timeline` / `clip_ids` —— 与 `transaction → timeline → edits →
     /// host facts` 同向。
-    pub(crate) fn rebuild_timeline_locked(&self) -> Result<(), String> {
-        use hifishifter_kernel::editor::assembly::{assemble, attach};
+    pub(crate) fn rebuild_timeline_locked(&self) -> Result<AssemblyOutcome, String> {
+        use hifishifter_kernel::editor::assembly::{assemble, attach, inherit_media};
         // 【模型没交付过 ⇒ 不动已发布的时间线】见 `ara_model_seen` 的说明。装配器的
         // 输入只有两份，缺了 ARA 那一份时它只能给出"没有源窗口的占位" —— 用那份占位
         // 盖掉一份真实的图，比不刷新糟得多。
@@ -1674,8 +1852,16 @@ impl DocumentSession {
         {
             // 这一轮什么也没做：清掉标记，等模型真正交付时由收口路径重装。
             self.assembly_dirty.store(false, Ordering::Release);
-            return Ok(());
+            return Ok(AssemblyOutcome::Published);
         }
+        // 【代次必须在读表**之前**取】两个写者各自把计数 +1 再写表，所以"先取后读"
+        // 只可能让记下的那一对比读到的**更旧** —— 那种情况下下一轮会被判成"输入动过"
+        // 而多推迟一次，代价是一轮 20 ms；反过来（先读后取）会把"读表期间到达的新一代"
+        // 记成已消费，于是那份输入永远等不到装配。
+        let inputs = (
+            self.ui_tracks_stamp.load(Ordering::Acquire),
+            self.region_rows_stamp.load(Ordering::Acquire),
+        );
         let rows = self.region_rows.lock_or_recover().clone();
         let tracks = self.region_tracks.lock_or_recover().clone();
         let mut items = self.collect_item_rows();
@@ -1702,7 +1888,57 @@ impl DocumentSession {
                 }
             }
         }
-        let assembly = assemble(&items, &rows);
+        let mut assembly = assemble(&items, &rows);
+        // 【"有源"不许被一次竞态降级成"无源"】
+        //
+        // 上面那次 `attach` 用的是**这一轮**的两份输入。它们不是同一时刻的事实：
+        // item 已经挪到新位置、region 表还是旧的（或反过来）时，一条本来挂得好好的
+        // region 会落在 item 的**旧**矩形之外 ⇒ `unbound` ⇒ 这个 item 的 clip 被
+        // `clip_for_item(item, track, None)` 写成无源 ⇒ 界面上波形与原始音高线一起
+        // 消失，只剩一句"正在等待宿主完成音频分配"。
+        //
+        // 但"这条 item 用哪个源"是**文档级事实**：它不会因为 item 挪了 0.39 s 而改变。
+        // 所以这里把上一轮已发布的媒体身份借回来（几何仍然取 item，判据见
+        // `assembly::inherit_media`）。借不到的那些仍然是无源 —— 那是真的没有。
+        let live_sources: std::collections::BTreeSet<String> = rows
+            .iter()
+            .map(|row| row.source_id.clone())
+            .filter(|id| !id.is_empty())
+            .collect();
+        let previous_clips = self
+            .timeline
+            .lock_or_recover()
+            .as_ref()
+            .map(|timeline| timeline.clips.clone())
+            .unwrap_or_default();
+        let inherited = inherit_media(&mut assembly.clips, &previous_clips, &live_sources);
+        // 【`unbound` 不是结论，是"两份输入还没对齐"】
+        //
+        // 判据只有一条：**这一轮读到的两份输入，与上一次尝试相比动过吗**。
+        //   * 动过 ⇒ 其中至少一份可能还没跟上另一份，值得在下一个安全点再看一眼；
+        //   * 没动 ⇒ 再试一百次也是同一个答案：那就是结论，该发布（并报 WARN）。
+        //
+        // 推迟的代价是"界面晚 20~120 ms 才看到新片段"，收益是"不会把一次 100 ms 的
+        // 竞态写成一条永久无源的 clip"。预算（[`ASSEMBLY_RETRY_BUDGET`]）保证拖动
+        // item 期间（清单每一代都在变）不会无限推迟。
+        {
+            let now = std::time::Instant::now();
+            let consumed = *self.assembly_consumed.lock_or_recover();
+            let mut since = self.assembly_deferred_since.lock_or_recover();
+            let defer =
+                should_defer_assembly(assembly.unbound.len(), consumed, inputs, *since, now);
+            if defer {
+                if since.is_none() {
+                    *since = Some(now);
+                }
+                drop(since);
+                // 【"输入动过"这一轮也算被消费了】否则同一个代次会被反复判成"动过" ——
+                // 下一次尝试就会带着同样的输入再推迟一次，预算被白白烧掉。
+                *self.assembly_consumed.lock_or_recover() = Some(inputs);
+                self.log_item_map(&assembly, &rows, inputs, true);
+                return Ok(AssemblyOutcome::Deferred);
+            }
+        }
         // region key → clip id：由 `spans` 反算。**这是唯一写 `clip_ids` 的地方** ——
         // 此前它由映射层与清单层各写一次，于是"身份升级"窗口里两边各说一套，
         // `workspace_timeline_locked` 按 id 过滤会把全部 clip 滤掉。
@@ -1717,7 +1953,15 @@ impl DocumentSession {
             }
         }
         let mut timeline = assembly.timeline(&tracks, crate::ara::mapping::default_bpm());
-        self.log_item_map(&assembly, &rows);
+        self.log_item_map(&assembly, &rows, inputs, false);
+        // 这一轮真的发布了 ⇒ 推迟窗口结束（下一次竞态重新计时）。
+        *self.assembly_consumed.lock_or_recover() = Some(inputs);
+        *self.assembly_deferred_since.lock_or_recover() = None;
+        if inherited > 0 {
+            // 解释性跟踪：拖动 item 期间它每一轮都可能 > 0 —— 那正是这条继承在起作用，
+            // 属于竞态的自愈，用户不需要为此做任何事，所以不是 WARN。
+            log::debug!("[ara] inherited the media identity of {inherited} clip(s) this round");
+        }
         // 这一轮已经把**当前**两份输入都消费掉了（含中途到达的那一份）。
         self.assembly_dirty.store(false, Ordering::Release);
         *self.clip_ids.lock_or_recover() = ids;
@@ -1761,7 +2005,7 @@ impl DocumentSession {
             }
             *slot = Some(timeline);
         }
-        Ok(())
+        Ok(AssemblyOutcome::Published)
     }
 
     /// `[ara] item map` —— **真读数**。
@@ -1774,6 +2018,8 @@ impl DocumentSession {
         &self,
         assembly: &hifishifter_kernel::editor::assembly::Assembly,
         rows: &[hifishifter_kernel::editor::assembly::RegionRow],
+        inputs: (u64, u64),
+        deferred: bool,
     ) {
         let items = assembly.clips.len();
         let attached: usize = assembly.spans.values().map(Vec::len).sum();
@@ -1793,6 +2039,27 @@ impl DocumentSession {
             rows.len(),
             assembly.unbound.len()
         );
+        // 【为什么这条读数必须出现在默认档】`verbosity=low` ⇒ `LevelFilter::Warn`
+        // （`kernel/log_policy.rs`），所以上面那行 `info!` 在真机上**一行都没有**。
+        // 而"一个 item 到底吃掉了几条 region、有几条挂不上"正是"粘贴出来的片段一直
+        // 等宿主音频"这个问题的第一现场 —— 查了三轮才拿到实锤，就是因为这个。
+        //
+        // 只在**不干净**时发：稳态（每条 region 都挂上、每条 item 只吃一条）下这行
+        // 没有任何信息量，而它会随每次清单刷新重跑。带上两个代次，是为了让"哪一份
+        // 输入是旧的"从此不必再推。
+        if !assembly.unbound.is_empty() || multi > 0 {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.item-map",
+                format_args!(
+                    "[ara] item map: items={items} regions={} unbound={} multi={multi}                      items_stamp={} regions_stamp={} deferred={deferred}",
+                    rows.len(),
+                    assembly.unbound.len(),
+                    inputs.0,
+                    inputs.1,
+                ),
+            );
+        }
         // 【为什么循环要单独一行】周期未知时内核会退化成"完全不循环、后半段静音"，
         // 而那在插件里无法与"宿主没给音频"区分 —— 用户只会以为素材坏了。
         for clip in assembly.clips.iter().filter(|clip| clip.loop_enabled) {
@@ -1818,7 +2085,10 @@ impl DocumentSession {
         }
         // 【挂不上的 region 必须能归因】它们不画、不渲染，只进读数；不报出来就等于
         // "宿主给了、我们丢了"，而用户看到的只是"某一段不见了"。
-        for index in &assembly.unbound {
+        // 【推迟的那一轮不逐条报】下一轮要么已经挂上（这些 region 就不该再报），要么在
+        // 发布时统一报一次（上面的汇总行）。逐条报会让同一条 region 每 20 ms 刷一行，
+        // 而它恰好是"清单每一代都在变"的拖动期间。
+        for index in assembly.unbound.iter().filter(|_| !deferred) {
             let Some(row) = rows.get(*index) else {
                 continue;
             };
@@ -2917,13 +3187,27 @@ impl DocumentSession {
             return Err("automatic apply superseded".into());
         }
         let mut prepared = Vec::new();
-        for (owner, keys, mut input) in inputs {
+        // 【一个作业要渲染多个 owner 时，进度必须**分段聚合**】
+        //
+        // 每个 owner 的 `render_with_progress` 都从 0 走到 1。此前它们共用一个回调，
+        // 而回调侧有一条"不得回退"的判据（那是对的：回退对用户是纯粹的故障信号）——
+        // 于是第二个 owner 的 0 被挡掉、随后每个中间值也被挡掉，显示**一直停在 100%**
+        // 直到作业结束。把第 i 个 owner 的 0..1 折算到 `[i/n, (i+1)/n)` 之后，整份作业
+        // 天然单调，且最后一个 owner 的 1.0 恰好等于整份作业的 1.0。
+        let owners = inputs.len().max(1);
+        for (index, (owner, keys, mut input)) in inputs.into_iter().enumerate() {
             for publisher in &owner.snapshots {
                 publisher.collect_retired();
             }
             let window = self.plan_render_window(&input, owner.as_ref());
             input.window = window;
-            let snapshots = input.render_with_progress(cancel.clone(), progress.clone())?;
+            let slice = progress.clone().map(|callback| {
+                hifishifter_kernel::mixdown::ProgressCallback::new(move |value: f64| {
+                    let value = value.clamp(0.0, 1.0);
+                    callback.call((index as f64 + value) / owners as f64);
+                })
+            });
+            let snapshots = input.render_with_progress(cancel.clone(), slice)?;
             prepared.push((owner, keys, snapshots));
         }
         let _transaction = self.transaction.lock_or_recover();
@@ -4803,10 +5087,28 @@ impl DocumentSession {
                     // 宿主是否仍在读我们的输出。它是"编辑完没有声音 / 算了但没人要"这类
                     // 报障里最先要排除的一格：bypassed 说明渲染被有意跳过（见 prepare）。
                     "host_bypass": owner.host_bypass().as_str(),
+                    // 【读数有多旧】`Unknown` 与"很久没采过"是两件不同的事：前者是
+                    // 宿主不提供这一族 API（非 REAPER），后者是本插件没找到采样时机。
+                    // 报障时这一格能直接分开它们（"旁通了还在渲染"最常见的原因就是
+                    // 这一格一直是 `None`）。
+                    "host_bypass_age_ms": self.host_bypass_age().map(|age| age.as_millis() as u64),
                 })
             })
             .collect::<Vec<_>>();
-        serde_json::json!({ "renderers": renderers })
+        serde_json::json!({
+            "renderers": renderers,
+            // 【装配的两份输入各写到第几代】见 `assembly_consumed`：两者不同步时
+            // `unbound` 会先被推迟一轮，而这一对数字就是"谁还没跟上"的答案。
+            "assembly_inputs": {
+                "ui_tracks_stamp": self.ui_tracks_stamp.load(Ordering::Acquire),
+                "region_rows_stamp": self.region_rows_stamp.load(Ordering::Acquire),
+                "consumed": self.assembly_consumed.lock_or_recover().map(|(items, regions)| {
+                    serde_json::json!({ "ui_tracks_stamp": items, "region_rows_stamp": regions })
+                }),
+                "deferred": self.assembly_deferred_since.lock_or_recover().is_some(),
+                "unbound": self.assembly_unbound.lock_or_recover().len(),
+            },
+        })
     }
 
     /// 记一次"宿主侧发生了变化，渲染许可随之失效"。
@@ -5145,6 +5447,43 @@ clips_src={clips_src} dupes={dupes}}}"
             owner.refresh_host_bypass_cache();
             owner.prepare();
         }
+    }
+
+    /// 宿主此刻是否把本实例的音频放进了信号链（三态，见 `FxBypass`）。
+    ///
+    /// 【为什么读文档这一格】旁通是**这个 FX** 的属性，而一次 ARA 绑定在 REAPER 里会造出
+    /// 两个实例。按实例缓存等于让"谁碰巧有空看一眼"决定"要不要渲染"：播放实例没有视图
+    /// 定时器，它的缓存永远是 `Unknown`（= 照常渲染）—— 用户旁通了 FX，插件还在合成。
+    pub(crate) fn host_bypass(&self) -> crate::host::reaper::FxBypass {
+        crate::host::reaper::FxBypass::decode(self.host_bypass.load(Ordering::Acquire))
+    }
+
+    /// 记一次旁通采样（写侧唯一入口；任何实例都可以写，读侧只读这一格）。
+    pub(crate) fn note_host_bypass(
+        &self,
+        state: crate::host::reaper::FxBypass,
+    ) -> crate::host::reaper::FxBypass {
+        *self.host_bypass_sampled_at.lock_or_recover() = Some(std::time::Instant::now());
+        crate::host::reaper::FxBypass::decode(
+            self.host_bypass.swap(state.encode(), Ordering::AcqRel),
+        )
+    }
+
+    /// 距上一次成功采样旁通读数有多久（`None` = 从未采过）。
+    ///
+    /// 【为什么要把它报出来】`Unknown`（宿主不提供这一族 API）与"很久没采过"（本插件
+    /// 没找到采样时机）是两件不同的事，而它们在读数上长得一样。诊断包带上这个年龄，
+    /// "旁通了还在渲染"就能直接分开这两种成因 —— 它最常见的形式正是"这一格从来没被
+    /// 采过"（播放实例没有视图定时器）。
+    ///
+    /// 【为什么采样点不放在 `prepare` 里】`fx_bypass_state` 只在**宿主线程**上是同步的；
+    /// 别的线程会投递并等 250 ms。而 `prepare` 从不跑在宿主线程上（它在 actor / 模型
+    /// 线程上），在那里采样等于每次准备都堵 250 ms。采样点因此只有两个：视图定时器
+    /// （`poll_host_bypass`）与模型收口（`refresh_host_state_for_model`）。
+    pub(crate) fn host_bypass_age(&self) -> Option<std::time::Duration> {
+        self.host_bypass_sampled_at
+            .lock_or_recover()
+            .map(|at| at.elapsed())
     }
 
     fn revoke_snapshots(&self) {

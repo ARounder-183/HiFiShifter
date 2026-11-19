@@ -32,7 +32,7 @@
 use crate::state::{Clip, TimelineState};
 use crate::take_geometry::TakeGeometry;
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// "一条 region 落在一条 item 之内"的容差（秒）。
 ///
@@ -452,6 +452,99 @@ pub fn clip_for_item(
         "loop_period_sec": loop_period_sec,
         "takes": takes,
     }))
+}
+
+/// 把**上一轮已发布**的媒体身份借给这一轮挂不上 region 的 clip。
+///
+/// ## 为什么需要它
+///
+/// 装配的两份输入不是同一时刻的事实（见 `DocumentSession::rebuild_timeline_locked`
+/// 与 `assembly_dirty` 的说明）。item 挪动之后、region 表跟上之前，`attach` 会给出
+/// `None`，于是 `clip_for_item(item, track, None)` 把 `source_path` 写成 `null` ——
+/// 一条**本来有源**的片段被降级成"等待宿主完成音频分配"，而且这个降级是终局：
+/// 界面上没有波形、没有原始音高线，渲染侧也拿不到 PCM。
+///
+/// 但"这条 item 用哪个源"是**文档级事实**（`AudioSource.persistentID` 由宿主在
+/// `addPlaybackRegion` 时写入，与几何无关）：它不会因为 item 挪了 0.39 s 而改变。
+/// 因此这里只在三条判据同时成立时借用，借的也**只是**媒体身份 —— 几何永远取 item。
+///
+/// ## 判据（三条同时成立才借）
+///
+/// 1. 这条 clip 的 active take 这一轮没有源；
+/// 2. 上一轮**同一个 clip id** 有源，且那个源仍然活在 `live_sources` 里
+///    （region 表里还有行指向它）—— 源被宿主收回时不得借，否则会把一份已经失效的
+///    采样重新挂上去；
+/// 3. active take 的身份没变（`active_take_id` 相同）—— 用户换了 take 时不得把
+///    上一个 take 的采样挂到新 take 上（那是 `take_switched` 要报的故障，不是要
+///    掩盖的故障）。
+///
+/// 返回借出的条数（读数用：它是"这一轮有多少条靠继承保住了波形"）。
+pub fn inherit_media(
+    clips: &mut [Clip],
+    previous: &[Clip],
+    live_sources: &BTreeSet<String>,
+) -> usize {
+    if clips.is_empty() || previous.is_empty() {
+        return 0;
+    }
+    let by_id: BTreeMap<&str, &Clip> = previous
+        .iter()
+        .map(|clip| (clip.id.as_str(), clip))
+        .collect();
+    let mut inherited = 0_usize;
+    for clip in clips.iter_mut() {
+        // 判据 1：这一轮已经有源 ⇒ 不需要借（也绝不覆盖：装配给出的源是权威）。
+        if clip
+            .source_path
+            .as_deref()
+            .is_some_and(|path| !path.is_empty())
+        {
+            continue;
+        }
+        if clip.takes.is_empty() {
+            continue;
+        }
+        let Some(donor) = by_id.get(clip.id.as_str()) else {
+            continue;
+        };
+        let Some(source) = donor.source_path.as_deref().filter(|path| !path.is_empty()) else {
+            continue;
+        };
+        // 判据 2：源必须仍然活在文档里。
+        if !live_sources.contains(source) {
+            continue;
+        }
+        // 判据 3：active take 的身份必须没变。
+        if donor.active_take_id != clip.active_take_id {
+            continue;
+        }
+        let media = donor.active_take().clone();
+        let index = clip
+            .takes
+            .iter()
+            .position(|take| Some(take.id.as_str()) == clip.active_take_id.as_deref())
+            .unwrap_or(0)
+            .min(clip.takes.len() - 1);
+        {
+            let take = &mut clip.takes[index];
+            take.source_path = media.source_path;
+            take.source_path_relative = media.source_path_relative;
+            take.duration_sec = media.duration_sec;
+            take.duration_frames = media.duration_frames;
+            take.source_sample_rate = media.source_sample_rate;
+            take.source_file_fingerprint = media.source_file_fingerprint;
+            take.source_file_mtime = media.source_file_mtime;
+            take.source_file_size = media.source_file_size;
+            take.content_id = media.content_id;
+            take.waveform_preview = media.waveform_preview;
+            take.pitch_range = media.pitch_range;
+        }
+        // 扁平投影必须跟着物化：`Clip::source_path` 是 `active_take()` 的投影，
+        // 少了这一步，界面读 `source_path` 仍然是空的。
+        clip.normalize_takes();
+        inherited += 1;
+    }
+    inherited
 }
 
 fn build(value: serde_json::Value) -> Result<Clip, String> {
@@ -900,5 +993,95 @@ mod tests {
         // 的是"**没有**宿主 take 身份"而不是"take 列表为空"。
         assert!(assembly.clips[0].source_path.is_none());
         assert_eq!(assembly.clips[0].name, "ara-item-a");
+    }
+
+    /// 这一轮的 item 挂不上 region（两份输入不同代）⇒ 上一轮有源的 clip 必须**保住**
+    /// 源，而几何仍然取 item。这是"拖一下 item，波形与音高线全没了"的那条回归。
+    #[test]
+    fn a_bound_clip_never_loses_its_source_to_a_race() {
+        // 上一轮：region 与 item 对齐，clip 有源。
+        let host = item(
+            "a",
+            1.0,
+            2.0,
+            vec![take("t", geometry(0.0, 2.0, Some(9.0), None, false, false))],
+        );
+        let previous = assemble(std::slice::from_ref(&host), &[row(7, 1.0, 2.0)]).clips;
+        assert_eq!(previous[0].source_path.as_deref(), Some("source-7"));
+        // 这一轮：item 已经挪到 5.0，region 还停在 1.0 ⇒ 挂不上 ⇒ 装配出的是无源 clip。
+        let mut moved = host.clone();
+        moved.start_sec = 5.0;
+        let mut clips = assemble(std::slice::from_ref(&moved), &[row(7, 1.0, 2.0)]).clips;
+        assert!(clips[0].source_path.is_none(), "先确认这一轮真的丢了源");
+        let live: BTreeSet<String> = ["source-7".to_string()].into_iter().collect();
+        assert_eq!(inherit_media(&mut clips, &previous, &live), 1);
+        assert_eq!(clips[0].source_path.as_deref(), Some("source-7"));
+        // 几何仍取 item，不是 region 的。
+        assert_eq!(clips[0].start_sec, 5.0);
+        assert_eq!(clips[0].length_sec, 2.0);
+        // 扁平投影与 take 存储必须一致（`normalize_takes` 的契约）。
+        assert_eq!(
+            clips[0].active_take().source_path.as_deref(),
+            Some("source-7")
+        );
+    }
+
+    /// 源已经从文档里消失 ⇒ 一个字节都不借（否则会把失效的采样重新挂上去）。
+    #[test]
+    fn a_source_that_left_the_document_is_not_inherited() {
+        let host = item(
+            "a",
+            1.0,
+            2.0,
+            vec![take("t", geometry(0.0, 2.0, Some(9.0), None, false, false))],
+        );
+        let previous = assemble(std::slice::from_ref(&host), &[row(7, 1.0, 2.0)]).clips;
+        let mut moved = host.clone();
+        moved.start_sec = 5.0;
+        let mut clips = assemble(std::slice::from_ref(&moved), &[]).clips;
+        assert_eq!(inherit_media(&mut clips, &previous, &BTreeSet::new()), 0);
+        assert!(clips[0].source_path.is_none());
+    }
+
+    /// 用户换了 active take ⇒ 不许借（那是 `take_switched`，必须报出来而不是掩盖）。
+    #[test]
+    fn a_switched_take_never_inherits_the_previous_sampling() {
+        let host = item(
+            "a",
+            1.0,
+            2.0,
+            vec![take(
+                "t1",
+                geometry(0.0, 2.0, Some(9.0), None, false, false),
+            )],
+        );
+        let previous = assemble(std::slice::from_ref(&host), &[row(7, 1.0, 2.0)]).clips;
+        let mut switched = host.clone();
+        switched.start_sec = 5.0;
+        switched.takes = vec![take(
+            "t2",
+            geometry(0.0, 2.0, Some(9.0), None, false, false),
+        )];
+        let mut clips = assemble(std::slice::from_ref(&switched), &[]).clips;
+        let live: BTreeSet<String> = ["source-7".to_string()].into_iter().collect();
+        assert_eq!(inherit_media(&mut clips, &previous, &live), 0);
+        assert!(clips[0].source_path.is_none());
+    }
+
+    /// 这一轮已经有源 ⇒ 一个字段都不覆盖（装配给出的源是权威）。
+    #[test]
+    fn an_assembled_source_is_never_overwritten() {
+        let host = item(
+            "a",
+            1.0,
+            2.0,
+            vec![take("t", geometry(0.0, 2.0, Some(9.0), None, false, false))],
+        );
+        let previous = assemble(std::slice::from_ref(&host), &[row(7, 1.0, 2.0)]).clips;
+        let mut clips = assemble(std::slice::from_ref(&host), &[row(9, 1.0, 2.0)]).clips;
+        assert_eq!(clips[0].source_path.as_deref(), Some("source-9"));
+        let live: BTreeSet<String> = ["source-7".to_string()].into_iter().collect();
+        assert_eq!(inherit_media(&mut clips, &previous, &live), 0);
+        assert_eq!(clips[0].source_path.as_deref(), Some("source-9"));
     }
 }

@@ -1615,6 +1615,11 @@ impl ExtensionOwner {
             .lock_or_recover()
             .extend(tracks.values().map(|track| track.id.clone()));
         *stamp.0.ui_tracks.lock_or_recover() = tracks;
+        // 【装配输入 B 的代次】装配器用它与 region 表的代次一起判断"这一轮读到的两份
+        // 输入，与上一次尝试相比动过吗"。见 `DocumentSession::assembly_consumed`：
+        // `unbound` 非空且输入动过 ⇒ 推迟发布、下一个安全点重试（那是"粘贴 / 拖动之后
+        // 片段一直没有源"的唯一自愈路径）。
+        stamp.0.ui_tracks_stamp.fetch_add(1, Ordering::AcqRel);
         *stamp.0.ui_inventory_stamp.lock_or_recover() = Some(token);
         // 完整采集已完成：记下时刻，让"令牌不动但 take 级事实变了"这条兜底路径
         // 在下一次 `FACTS_REFRESH_INTERVAL` 到期时强制重采（见 `ui_inventory_sampled_at`）。
@@ -1753,6 +1758,24 @@ impl ExtensionOwner {
         // 一个已经被旁通的实例排队一整次神经合成，而那正是本读数要消除的浪费。
         // 窗口关着时 UI 定时器不跑，这条路径就是唯一的采样点。
         self.sample_host_bypass();
+        // 【挂起的装配不能只有视图定时器一个节拍】
+        //
+        // `flush_pending_assembly` 此前只有一个周期调用点：20 ms 的视图定时器
+        // （`refresh_host_transport_inner` 的末尾）。窗口关着时它**完全不跑**，于是
+        // "清单变了 ⇒ 置脏 ⇒ 下一个安全点重装"这条链在关窗状态下断了 —— 界面上看不见
+        // （窗口关着），但渲染侧同样吃这份装配结果（`workspace_timeline_locked`），
+        // 表现为"粘贴出来的片段没声音"。
+        //
+        // 模型收口是"宿主刚改完"的最强信号，而且它已经在这条路径上做几何刷新与旁通
+        // 采样 —— 补一次"把挂起的装配跑掉"不增加任何宿主调用（`flush` 自己会在没有
+        // 脏标记时立刻返回）。
+        //
+        // 【为什么不在这里补一次清单刷新】`remap_and_log` 在**同一条路径**上已经对每个
+        // owner 调了 `refresh_ui_inventory`（见那里的注释）；在这里再加一次只会把一次
+        // 完整枚举变成两次，而枚举本身有代次门，重复调用并不便宜。
+        if let Ok(document) = self.editor_document() {
+            document.flush_pending_assembly();
+        }
     }
     pub(super) fn refresh_host_geometry(&self) {
         let Ok(stamp) = self.host_query_stamp() else {

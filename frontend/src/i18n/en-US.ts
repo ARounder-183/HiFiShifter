@@ -2323,6 +2323,7 @@ export const enUS = {
     plugin_apply_analyzing_hint:
         "This step runs with the length of the material; seconds to minutes. The raw take plays meanwhile.",
     plugin_apply_rendering: "Synthesising...",
+    plugin_apply_bypassed: "Bypassed · not rendering",
     plugin_render_background_hint:
         "A new version is rendering in the background; you are still hearing the previous one.",
     plugin_daw_controlled_reason:

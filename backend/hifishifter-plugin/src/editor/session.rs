@@ -12,7 +12,7 @@ use hifishifter_kernel::state::*;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -324,6 +324,55 @@ pub(super) fn syllable_source_digest(
     hasher.update(&take.source_sample_rate.unwrap_or(0).to_le_bytes());
     hasher.update(&((frame_period_ms.max(0.1) * 1000.0).round() as u32).to_le_bytes());
     hasher.finalize().to_hex().to_string()
+}
+
+/// 后台 apply 作业的阶段。
+///
+/// 【为什么进度必须带阶段】混音算完（`MixdownProgress::finish()` 会 `emit(1.0)`）到
+/// 快照真正发布之间还有一段（发布 + `record_prepared`），而 `rendering_active` 要等
+/// 作业结束才落。没有阶段名时那一段只能显示成"渲染中 100%" —— 一句会停留上百毫秒的
+/// 假话（用户报障："进度要么没有，要么一直 100%"）。
+///
+/// 有了阶段之后，判据变成"只有 `Synthesizing` 才有百分比"：
+///   * `Preparing` —— 在物化素材 / 预检预算，进度**还不知道**，但阶段是明确的；
+///   * `Synthesizing` —— 有真实的 0..1 读数；
+///   * `Publishing` —— 算完了，正在发布；此时报百分比就是那句假话。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    Idle,
+    Preparing,
+    Synthesizing,
+    Publishing,
+}
+
+impl Stage {
+    fn encode(self) -> u8 {
+        match self {
+            Self::Idle => 0,
+            Self::Preparing => 1,
+            Self::Synthesizing => 2,
+            Self::Publishing => 3,
+        }
+    }
+
+    /// 未知编码一律落回 `Idle`（= 不报阶段，也不报进度）。
+    fn decode(raw: u8) -> Self {
+        match raw {
+            1 => Self::Preparing,
+            2 => Self::Synthesizing,
+            3 => Self::Publishing,
+            _ => Self::Idle,
+        }
+    }
+
+    fn as_str(self) -> Option<&'static str> {
+        match self {
+            Self::Idle => None,
+            Self::Preparing => Some("preparing"),
+            Self::Synthesizing => Some("synthesizing"),
+            Self::Publishing => Some("publishing"),
+        }
+    }
 }
 
 /// 单个可取消DSP任务；编辑actor只收结果，计算线程不改GUI历史或参数权威。
@@ -693,6 +742,35 @@ pub struct EditorSession {
     /// 快照；两者之间不能加锁（进度回调在渲染热路径上）。NaN 用 bit 表示，
     /// `state()` 再决定要不要把它变成 `null`。
     render_progress_bits: AtomicU64,
+    /// **当前**在跑的渲染作业的票据（`0` = 没有作业）。
+    ///
+    /// 【为什么需要它】`submitted` 是"用户编辑的账本"，每画一笔就前进一格；而进度属于
+    /// **作业**。此前进度回调拿 `submitted != ticket` 当"我被取代了"的判据 —— 于是
+    /// 用户边画边渲染时，整个作业期间的回调**全部**被丢弃，状态栏只剩"渲染中"没有
+    /// 百分比。判据换成这一格之后，"作业还在跑"与"用户又改了一笔"不再互相污染。
+    render_ticket: AtomicU64,
+    /// 上一次写进 `render_progress_bits` 的那个值属于哪张票据。
+    ///
+    /// 【为什么值要带票据】被取代的作业可能还在写（它自己不知道被取代了）；没有票据时
+    /// 它的最后几个百分点会被当成当前作业的进度报出去，而下一个作业的 0% 会被"不得
+    /// 回退"挡住 —— 用户看到的是"一直 100%"。
+    render_progress_ticket: AtomicU64,
+    /// 当前这一轮作业**有没有进度来源**。
+    ///
+    /// 【为什么不能靠"票据非零"判断】票据来自 `submitted`，而它**可以合法地等于 0**
+    /// （会话刚建、用户还没编辑过）。把它当"有没有作业"的判据，第一个作业的进度就会
+    /// 被整轮丢掉。
+    ///
+    /// 【谁置真】只有 ARA 的后台 apply 作业（`start_render`）—— 它把 `ProgressCallback`
+    /// 一路交给 `render_with_progress`。Capture 的 `capture_prepare_job` 不接受进度回调，
+    /// 所以它的这一格恒为假 ⇒ 快照报 `null`（"没有进度来源"），而不是一个永远不动的 0%。
+    render_progress_tracked: AtomicBool,
+    /// 作业阶段（[`Stage`] 的编码）。
+    ///
+    /// 【为什么进度必须带阶段】混音算完（`emit(1.0)`）到快照发布之间还有一段（发布 +
+    /// `record_prepared`），而 `rendering_active` 要等作业真正结束才落。没有阶段名时，
+    /// 那一段只能显示成"渲染中 100%"—— 一句会停留上百毫秒的假话。
+    render_stage: AtomicU8,
     closed: AtomicBool,
     pub(super) suppress_history: AtomicBool,
     /// **上一次采纳过的**宿主编辑器视图选择（A5），用于与宿主的新选择比对。
@@ -1132,6 +1210,10 @@ impl EditorSession {
             pending_reported: AtomicBool::new(false),
             render_task: Mutex::new(None),
             render_progress_bits: AtomicU64::new(f64::NAN.to_bits()),
+            render_ticket: AtomicU64::new(0),
+            render_progress_ticket: AtomicU64::new(0),
+            render_progress_tracked: AtomicBool::new(false),
+            render_stage: AtomicU8::new(Stage::Idle.encode()),
             closed: AtomicBool::new(false),
             suppress_history: AtomicBool::new(false),
             host_selection: Mutex::new(None),
@@ -1333,6 +1415,21 @@ impl EditorSession {
         let mut next = self.initial_retry_at.lock_or_recover();
         let due = Instant::now() + Duration::from_millis(20);
         *next = Some(next.map_or(due, |previous| previous.min(due)));
+        let _ = self.queue.try_send(Job::Wake);
+    }
+
+    /// 把"这次编辑还没被渲染"重新排上队（不推进任何票据）。
+    ///
+    /// 【为什么不是 [`Self::wake_for_source`]】那个只让 actor 立刻回去重试**加载**；
+    /// 真正让渲染排上队的是 `render_requested`。两者缺一个就会有一半的情况不生效，
+    /// 所以合并成一次调用 —— 分开写必然有人只写一个。
+    ///
+    /// 【谁需要它】宿主把本 FX 从"旁通"恢复成"活跃"时：旁通期间 `prepare_apply` 直接
+    /// 返回（见那里的门），那段时间的编辑一次都没被渲染过。只让渲染输入失效不够 ——
+    /// 失效只影响"下一次取音频"，而取音频由宿主驱动；用户解除旁通后若不再动任何东西，
+    /// 就永远不会有新音频。
+    pub(crate) fn rearm_render(&self) {
+        self.render_requested.store(true, Ordering::Release);
         let _ = self.queue.try_send(Job::Wake);
     }
 
@@ -1654,7 +1751,14 @@ impl EditorSession {
                     }
                 }
                 if let Some((generation, ticket, cancelled, result)) = session.complete_render() {
-                    session.emit("playback_rendering_state",json!({"active":false,"progress":if result.is_ok()&&!cancelled {Some(1.0)} else {None::<f64>},"target":"background"}));
+                    // 【完成事件不再携带进度】它此前在成功时带 `progress: 1.0`，而
+                    // 前端在 `active:false` 时先清高水位、随后又把这个 1.0 写回总线 ⇒
+                    // 状态片在作业结束之后还亮着"100%"，直到下一次 250 ms 快照才熄。
+                    // 作业结束就是"没有进度"，如实报 `null`。
+                    session.emit(
+                        "playback_rendering_state",
+                        json!({"active":false,"progress":None::<f64>,"target":"background"}),
+                    );
                     let current = !cancelled
                         && ticket == session.submitted.load(Ordering::Acquire)
                         && generation == session.generation.load(Ordering::Acquire);
@@ -1953,6 +2057,14 @@ impl EditorSession {
         drop(task);
         // 【任务结束后必须回到"没有进度"】否则下一次渲染开始前，快照会带着上一轮
         // 的 100% 显示成"渲染中 100%"。
+        //
+        // 【顺序有意义】先把票据清零：仍在跑的进度回调看到"票据不是当前作业"就停手，
+        // 于是不会有谁在这之后把 1.0 写回来（那正是"一直 100%"的第二个来源）。
+        self.render_ticket.store(0, Ordering::Release);
+        self.render_progress_ticket.store(0, Ordering::Release);
+        self.render_progress_tracked.store(false, Ordering::Release);
+        self.render_stage
+            .store(Stage::Idle.encode(), Ordering::Release);
         self.render_progress_bits
             .store(f64::NAN.to_bits(), Ordering::Release);
         let cancelled = current.cancel.load(Ordering::Acquire);
@@ -2014,7 +2126,8 @@ impl EditorSession {
     }
 
     /// 原线缓存组装保留在actor；只把已确认的版本票据交给DSP线程，不并发修改timeline。
-    fn prepare_apply(&self) -> Result<(Arc<DocumentSession>, u64), String> {
+    /// 后台 apply 作业的前置检查；`None` = 这一轮**故意**不排作业（宿主已旁通本 FX）。
+    fn prepare_apply(&self) -> Result<Option<(Arc<DocumentSession>, u64)>, String> {
         // 【R7：只有**终态**错误才短路自动渲染】瞬时冲突（`Conflict: …`）意味着"宿主
         // 在提交窗口里动过"，它必然收敛 —— 而 `self.error` 只在"提交成功"或
         // `ensure_loaded` 成功时被清空。于是**一次**冲突就能让音频停在旧版本，直到
@@ -2031,32 +2144,80 @@ impl EditorSession {
         if let Some(error) = self.error.lock_or_recover().clone() {
             return Err(error);
         }
-        // 全零占位原线并非已完成的清音分析；收敛前保留旧快照及dirty代次。
-        if self.requires_analysis(&self.timeline.lock_or_recover()) {
-            return Err("pitch analysis pending".into());
-        }
         // 【票据不再从这里出】它是渲染入口（`apply_workspace_edits_with_progress`）
         // 自己取的。`loaded` 的语义是"编辑器最后一次读工作区时的票据"，把它当渲染
         // 守卫等于"用户每画一笔就让下一次渲染必然 Conflict"。
         let document = self.require_document()?;
-        Ok((document, self.generation.load(Ordering::Acquire)))
+        let generation = self.generation.load(Ordering::Acquire);
+        // 【旁通的门必须在这里，而不是只在 `prepare()` 里】
+        //
+        // `ExtensionOwner::prepare()` 挡的是**实时准备**（宿主播放时要的那份快照）。
+        // 而"用户编辑落定之后"跑的是**后台 apply 作业**：
+        //
+        //   publish_timeline → start_render → prepare_apply →
+        //   apply_workspace_edits_with_progress → render_with_progress → mix_interleaved
+        //
+        // 这条链**一次都没有** `prepare()`。把门只放在那里，等于"旁通了 FX，编辑完
+        // 照旧渲染一整次神经合成"—— 而那正是用户报障的形状。
+        //
+        // 【只在"确定旁通"时跳】`Unknown` 一律照旧：那是所有非 REAPER 宿主与所有
+        // 读不出读数的情况，跳过渲染会让它们静音。
+        if document.host_bypass().is_bypassed() {
+            // 【必须收口】否则 `pending` 恒真：`generation != applied` 会让状态栏
+            // 永远显示"正在应用"，而实际上这一轮**故意**什么都没做。
+            //
+            // 【为什么 `applied = generation` 是诚实的】旁通期间宿主不读我们的输出，
+            // 旧快照继续可服务；解除旁通时 `sample_host_bypass` 会把票据重新排上队
+            // （见 `rearm_render`），所以这里不是在"假装成功"。
+            self.applied.store(generation, Ordering::Release);
+            self.render_requested.store(false, Ordering::Release);
+            *self.render_error.lock_or_recover() = None;
+            self.emit_state();
+            return Ok(None);
+        }
+        // 全零占位原线并非已完成的清音分析；收敛前保留旧快照及dirty代次。
+        //
+        // 【为什么排在旁通门之后】"要不要工作"必须先于"能不能开始"：旁通时宿主不会来
+        // 取输出，分析是否收敛**不影响**这一轮的结论。把顺序倒过来，一个还没收敛的分析
+        // 就会让旁通门永远走不到，而状态栏会一直显示"在分析"。
+        if self.requires_analysis(&self.timeline.lock_or_recover()) {
+            return Err("pitch analysis pending".into());
+        }
+        Ok(Some((document, generation)))
     }
     fn start_render(self: &Arc<Self>, ticket: u64) -> Result<(), String> {
         if self.is_capture() {
             return self.start_capture_render(ticket);
         }
-        let (document, generation) = self.prepare_apply()?;
+        let Some((document, generation)) = self.prepare_apply()? else {
+            // 宿主旁通了这个 FX：宿主不会来取音频，合成结果没有任何人会取用。
+            // 收口已经在 `prepare_apply` 里做完（`applied = generation`）。
+            return Ok(());
+        };
         let cancel = Arc::new(AtomicBool::new(false));
         let current = self.clone();
         let job_cancel = cancel.clone();
         let progress_session = self.clone();
         let progress_cancel = cancel.clone();
+        // 【作业开始：票据、阶段、进度一次写全】顺序有意义 —— 先立票据再写 0%，
+        // 否则读侧可能看到"上一轮的 100% + 这一轮的票据"。
+        self.render_ticket.store(ticket, Ordering::Release);
+        // 【这一轮有进度来源】与票据分开记：票据可以合法地等于 0（用户还没编辑过）。
+        self.render_progress_tracked.store(true, Ordering::Release);
+        self.render_stage
+            .store(Stage::Preparing.encode(), Ordering::Release);
+        self.render_progress_bits
+            .store(0.0_f64.to_bits(), Ordering::Release);
+        self.render_progress_ticket.store(ticket, Ordering::Release);
         let progress_last = AtomicU64::new(0);
         let progress = hifishifter_kernel::mixdown::ProgressCallback::new(move |value| {
+            // 【为什么不再看 `submitted`】`submitted` 是"用户编辑的账本"，每画一笔就前进
+            // 一格；而这里问的是"**我这张票据**还是当前作业吗"。此前的判据把两者混成
+            // 一个，于是用户边画边渲染时，整个作业期间的回调**全部**被丢弃 ——
+            // 状态栏只剩"渲染中"，一个百分比都没有（用户报障）。
             if progress_cancel.load(Ordering::Acquire)
                 || progress_session.closed.load(Ordering::Acquire)
-                || progress_session.submitted.load(Ordering::Acquire) != ticket
-                || progress_session.generation.load(Ordering::Acquire) != generation
+                || progress_session.render_ticket.load(Ordering::Acquire) != ticket
             {
                 return;
             }
@@ -2066,6 +2227,22 @@ impl EditorSession {
                 return;
             }
             progress_last.store(value.to_bits(), Ordering::Release);
+            // 【阶段从进度值本身读出来】`MixdownProgress::finish()` 会 `emit(1.0)`，而
+            // 那之后还有发布（`publish_shared` + `record_prepared`）。于是"1.0"恰好是
+            // "混音算完了、作业还没结束"这条边界 —— 不需要再加一条阶段通道，也就不会
+            // 出现"两条通道各说一套"。多 owner 作业里中间那几个 owner 的 1.0 在聚合时
+            // 已经折算成 (i+1)/n < 1，只有最后一个才真正跨过这条边界。
+            let stage = if value >= 1.0 {
+                Stage::Publishing
+            } else {
+                Stage::Synthesizing
+            };
+            progress_session
+                .render_stage
+                .store(stage.encode(), Ordering::Release);
+            progress_session
+                .render_progress_ticket
+                .store(ticket, Ordering::Release);
             // 【快照与事件同源】进度事件会丢（`try_send`），快照每 250 ms 读这里，
             // 于是"事件丢了就永远看不到百分比"不再可能。
             progress_session
@@ -2076,11 +2253,12 @@ impl EditorSession {
                 json!({"active":true,"progress":value,"target":"background"}),
             );
         });
-        self.render_progress_bits
-            .store(0.0_f64.to_bits(), Ordering::Release);
+        // 【`pass` 就是作业票据】前端用它判断"这是一轮新的作业"，并把上一轮的高水位
+        // 清零。没有它，一次被取消的作业留下的 60% 会挡住下一个作业的 0~59% ——
+        // 用户看到的就是"卡在某个百分比不动"或"一直 100%"。
         self.emit(
             "playback_rendering_state",
-            json!({"active":true,"progress":0.0,"target":"background"}),
+            json!({"active":true,"progress":0.0,"target":"background","pass":ticket}),
         );
         let worker = RenderTask::spawn(ticket, generation, cancel, move || {
             document.apply_workspace_edits_with_progress(
@@ -2127,6 +2305,11 @@ impl EditorSession {
         let cancel = Arc::new(AtomicBool::new(false));
         let current = self.clone();
         let job_cancel = cancel.clone();
+        // 【Capture 这一轮**没有**进度来源】`capture_prepare_job` 不接受进度回调，
+        // 于是快照必须报 `null`（"没有进度可报"）而不是一个永远不动的 0%。
+        self.render_progress_tracked.store(false, Ordering::Release);
+        self.render_stage
+            .store(Stage::Idle.encode(), Ordering::Release);
         self.render_progress_bits
             .store(0.0_f64.to_bits(), Ordering::Release);
         self.emit(
@@ -2157,7 +2340,9 @@ impl EditorSession {
         ticket: u64,
         progress: Option<hifishifter_kernel::mixdown::ProgressCallback>,
     ) -> Result<(), String> {
-        let (document, _generation) = self.prepare_apply()?;
+        let Some((document, _generation)) = self.prepare_apply()? else {
+            return Ok(());
+        };
         document.apply_workspace_edits_with_progress(
             self.analysis_cancel.clone(),
             || {
@@ -4804,6 +4989,37 @@ impl EditorSession {
         );
     }
 
+    /// 快照里该报的渲染进度（`None` = 没有可报的进度）。
+    ///
+    /// 【为什么抽成一个方法】它是状态栏百分比的**唯一**判据，而三条判据各自对应一条
+    /// 真实故障（见下）。写成内联表达式时，测试只能把同一段逻辑复述一遍 —— 那等于
+    /// 测了一份副本。
+    ///
+    /// 三个判据：
+    ///   * `render_ticket != 0` —— Capture 的渲染没有进度回调（`capture_prepare_job`
+    ///     不接受 `ProgressCallback`），票据恒为 0 ⇒ 报 `null`（"没有进度来源"），
+    ///     而不是一个永远不动的 0%；
+    ///   * `render_progress_ticket == render_ticket` —— 被取代的作业可能还在写，它的
+    ///     读数不得冒充当前作业的；
+    ///   * `stage == Synthesizing` —— 混音算完（`emit(1.0)`）到快照发布之间还有一段，
+    ///     那一段报百分比就是"渲染中 100%"。
+    fn visible_render_progress(&self, rendering: bool) -> Option<f64> {
+        let ticket = self.render_ticket.load(Ordering::Acquire);
+        if !rendering
+            || !self.render_progress_tracked.load(Ordering::Acquire)
+            || self.render_stage_now() != Stage::Synthesizing
+            || self.render_progress_ticket.load(Ordering::Acquire) != ticket
+        {
+            return None;
+        }
+        let value = f64::from_bits(self.render_progress_bits.load(Ordering::Acquire));
+        value.is_finite().then_some(value)
+    }
+
+    fn render_stage_now(&self) -> Stage {
+        Stage::decode(self.render_stage.load(Ordering::Acquire))
+    }
+
     pub(super) fn state(&self) -> Value {
         let generation = self.generation.load(Ordering::Acquire);
         let applied = self.applied.load(Ordering::Acquire);
@@ -4821,14 +5037,12 @@ impl EditorSession {
         let host_error = states.into_iter().find_map(|state| state.1);
         let analysis_pending = self.requires_analysis(&self.timeline.lock_or_recover());
         let rendering = self.render_task.lock_or_recover().is_some();
-        // 【进度只在有任务时报告】任务结束后原子量被置回 NaN；渲染中但还没收到第一个
-        // 进度回调时是 0.0。两者都如实进快照，前端不需要再从会丢的事件里猜。
-        let render_progress = if rendering {
-            let value = f64::from_bits(self.render_progress_bits.load(Ordering::Acquire));
-            value.is_finite().then_some(value)
-        } else {
-            None
-        };
+        // 【进度只属于**当前作业**】判据收敛在 `visible_render_progress` 一处（见那里的
+        // 说明）：没有作业票据（Capture）、票据过期（被取代）、`publishing` 阶段，
+        // 三种情况都报 `null`。
+        let stage = self.render_stage_now();
+        let render_ticket = self.render_ticket.load(Ordering::Acquire);
+        let render_progress = self.visible_render_progress(rendering);
         // 「你听到的是不是旧版本」：有任务在跑，**而且**音频线程此刻没有可服务的快照。
         //
         // 【为什么与 `rendering` 分开】后者回答"后台在忙吗"，用户问的是"我听到的是不是
@@ -4896,7 +5110,17 @@ impl EditorSession {
             // 丢一个 `active:false` 就会让片永久亮着；快照每 250 ms 重读一次，自愈。
             "rendering_active":rendering,
             // 本次渲染的进度（0..1 或 null）。快照是权威通道：事件只做快速更新。
+            // `0` 是**真读数**（"刚开始"），`null` 才是"没有进度可报"。
             "render_progress":render_progress,
+            // 【进度属于哪一轮作业】前端据此把上一轮的高水位清零。它与事件里的
+            // `pass` 是同一个数（作业票据），两条通道因此不会各说一套。
+            "render_pass":render_ticket,
+            // 作业阶段（`null` = 没有阶段可言）：preparing / synthesizing / publishing。
+            "render_stage":stage.as_str(),
+            // 【宿主是否旁通了本 FX】三态字符串（active / bypassed / unknown）。
+            // `bypassed` 时插件**故意**不渲染（宿主不会来取输出），状态栏据此说
+            // "已旁通 · 不渲染"而不是"正在合成"—— 后者会让用户以为它卡住了。
+            "host_bypass":self.document().map(|document| document.host_bypass().as_str()),
             // 状态栏的「渲染中」读这一个（见上面 `audible_stale` 的说明）。
             "render_audible_stale":audible_stale,
             // 【唯一驱动状态栏文案的字段】见上面 `audible_state` 的说明。
@@ -5646,8 +5870,9 @@ pub mod tests {
         let (release, wait) = mpsc::channel();
         let (started, ready) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
+        let ticket = editor.submitted.load(Ordering::Acquire);
         let job = RenderTask::spawn(
-            editor.submitted.load(Ordering::Acquire),
+            ticket,
             editor.generation.load(Ordering::Acquire),
             cancel,
             move || {
@@ -5662,6 +5887,21 @@ pub mod tests {
         {
             let mut active = editor.render_task.lock_or_recover();
             *active = Some(job);
+            // 【进度必须带上"它是哪一轮作业的"】`state()` 只报**当前作业**的读数：
+            // 没有票据（Capture 那种没有进度回调的作业）或票据过期（被取代）时一律
+            // `null`。所以这一组原子量必须一起写 —— 只写数值的旧写法描述的是一份
+            // 无法归属的读数，而那正是"一直 100%"的成因。
+            editor.render_ticket.store(ticket, Ordering::Release);
+            editor
+                .render_progress_ticket
+                .store(ticket, Ordering::Release);
+            editor
+                .render_stage
+                .store(Stage::Synthesizing.encode(), Ordering::Release);
+            // ARA 的 apply 作业**有**进度来源；Capture 那一支没有（见 `start_capture_render`）。
+            editor
+                .render_progress_tracked
+                .store(true, Ordering::Release);
             editor
                 .render_progress_bits
                 .store(0.5_f64.to_bits(), Ordering::Release);
@@ -5669,6 +5909,8 @@ pub mod tests {
         let state = editor.state();
         assert_eq!(state["rendering_active"], true);
         assert_eq!(state["render_progress"], 0.5);
+        assert_eq!(state["render_stage"], "synthesizing");
+        assert_eq!(state["render_pass"], ticket);
         // 任务结束后进度必须回到 null（下一次渲染不能继承 100%）。
         release.send(()).unwrap();
         let deadline = Instant::now() + ACTOR_REPLY_TIMEOUT;
@@ -5679,6 +5921,9 @@ pub mod tests {
         let state = editor.state();
         assert_eq!(state["rendering_active"], false);
         assert!(state["render_progress"].is_null());
+        // 票据与阶段也必须归零：留着它们，下一次作业的 0% 会被"不得回退"挡住。
+        assert_eq!(state["render_pass"], 0);
+        assert!(state["render_stage"].is_null());
         document.close();
     }
 
@@ -6289,6 +6534,153 @@ pub mod tests {
             assert!(Instant::now() < deadline, "{:?}", editor.state());
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// **宿主旁通这个 FX 之后，编辑落定**不许**再排一次后台作业。**
+    ///
+    /// 【为什么门必须在 `prepare_apply` 而不是只在 `prepare()`】后者挡的是"宿主播放时
+    /// 要的那份快照"；而用户编辑落定之后跑的是另一条链：
+    ///
+    ///   publish_timeline → start_render → prepare_apply →
+    ///   apply_workspace_edits_with_progress → render_with_progress → mix_interleaved
+    ///
+    /// 这条链**一次都没有** `prepare()`。把门只放在那里，用户旁通了 FX，编辑完照旧
+    /// 渲染一整次神经合成 —— 而宿主根本不会来取输出。
+    #[test]
+    fn a_bypassed_fx_never_queues_a_background_job() {
+        use crate::host::reaper::FxBypass;
+        let (model, owner, _identity) = fixture();
+        let document = model.session();
+        let editor = owner.editor_session().unwrap();
+        wait_for_source_files(&editor);
+        // ① 读数未知（非 REAPER 宿主 / 读不出来）⇒ 行为必须与改动前**逐字相同**：
+        //    照常走原路。跳过渲染会让所有这类宿主静音。
+        document.note_host_bypass(FxBypass::Unknown);
+        assert!(
+            !matches!(editor.prepare_apply(), Ok(None)),
+            "Unknown 绝不能被当成旁通（那会让不支持这一族读数的宿主静音）"
+        );
+        // ② 确定旁通 ⇒ 不排作业，但**必须收口**：`applied = generation`，否则
+        //    `pending` 恒真，状态栏永远显示"正在应用"。
+        document.note_host_bypass(FxBypass::Bypassed);
+        let generation = editor.generation.load(Ordering::Acquire);
+        editor.applied.store(0, Ordering::Release);
+        editor.render_requested.store(true, Ordering::Release);
+        assert!(
+            matches!(editor.prepare_apply(), Ok(None)),
+            "旁通时不得排后台作业"
+        );
+        assert_eq!(
+            editor.applied.load(Ordering::Acquire),
+            generation,
+            "跳过得收口，否则 pending 永远为真"
+        );
+        assert!(
+            !editor.render_requested.load(Ordering::Acquire),
+            "跳过了就不能留着待办（解除旁通由 `rearm_render` 重新排队）"
+        );
+        // ③ 解除旁通 ⇒ 读数回到 active，门不再挡。
+        document.note_host_bypass(FxBypass::Active);
+        assert!(
+            !matches!(editor.prepare_apply(), Ok(None)),
+            "解除旁通之后必须恢复原路"
+        );
+        drop(model);
+        editor.close();
+    }
+
+    /// **进度只属于当前作业，而且只有 `synthesizing` 阶段才有百分比。**
+    ///
+    /// 【为什么这三条要一起钉】用户报的是"要么没有百分比，要么一直 100%"，而三个
+    /// 判据各自能造出其中一种：
+    ///   * 没有作业票据 ⇒ Capture 那种"没有进度来源"的作业会报一个永远不动的 0%；
+    ///   * 票据不是当前作业 ⇒ 被取代的作业的读数冒充当前作业；
+    ///   * `publishing` 阶段仍报百分比 ⇒ 混音算完到发布之间那段"渲染中 100%"。
+    #[test]
+    fn progress_is_reported_for_the_current_job_only_while_synthesizing() {
+        let (model, owner, _identity) = fixture();
+        let editor = owner.editor_session().unwrap();
+        let read = || {
+            let state = editor.state();
+            (
+                state["render_progress"].clone(),
+                state["render_stage"].clone(),
+                state["render_pass"].clone(),
+            )
+        };
+        // ① 没有作业：没有进度，也没有阶段。
+        let (progress, stage, pass) = read();
+        assert!(progress.is_null(), "没有作业就没有进度：{progress}");
+        assert!(stage.is_null(), "没有作业就没有阶段：{stage}");
+        assert_eq!(pass.as_u64(), Some(0), "没有作业时票据为 0");
+        // ② 作业刚起步（`Preparing`）：阶段明确，但**不报**百分比。
+        editor.render_ticket.store(7, Ordering::Release);
+        editor
+            .render_stage
+            .store(Stage::Preparing.encode(), Ordering::Release);
+        editor
+            .render_progress_bits
+            .store(0.0_f64.to_bits(), Ordering::Release);
+        editor.render_progress_ticket.store(7, Ordering::Release);
+        *editor.render_task.lock_or_recover() = None;
+        // `state()` 的 `rendering` 读的是 `render_task`，这里没有真任务 —— 所以先断言
+        // 进度**不因票据而泄露**，再用下面几支覆盖有任务的形状（判据本身是纯读原子）。
+        assert!(read().0.is_null(), "没有在跑的任务就不该报进度");
+        // ③ 合成中：0 是**真读数**（"刚开始"），必须报出来。
+        assert_eq!(
+            editor_progress_from(&editor, Stage::Synthesizing, 0.0, 7, 7),
+            Some(0.0),
+            "0% 是真读数，不是「没有进度」"
+        );
+        // ④ 发布阶段：算完了但作业还没结束 ⇒ 报 `null`（不再冒充 100%）。
+        assert_eq!(
+            editor_progress_from(&editor, Stage::Publishing, 1.0, 7, 7),
+            None,
+            "发布阶段报百分比就是那句「渲染中 100%」"
+        );
+        // ⑤ 票据过期（被新作业取代）：旧作业的读数不得冒充当前作业。
+        assert_eq!(
+            editor_progress_from(&editor, Stage::Synthesizing, 0.4, 6, 7),
+            None,
+            "被取代的作业不得泄露它的进度"
+        );
+        // ⑥ 恢复现场。
+        editor.render_ticket.store(0, Ordering::Release);
+        editor.render_progress_ticket.store(0, Ordering::Release);
+        editor
+            .render_stage
+            .store(Stage::Idle.encode(), Ordering::Release);
+        drop(model);
+        editor.close();
+    }
+
+    /// 写一组"作业票据 / 阶段 / 进度"，再按 `state()` 的判据读回来。
+    ///
+    /// 【为什么不直接调 `state()`】它的 `rendering` 读的是 `render_task` 里有没有真任务，
+    /// 而那个任务要真的拉起一条 DSP 线程才存在。判据本身（`visible_render_progress`）
+    /// 是**同一份**代码，所以这里固定 `rendering = true`，只让票据与阶段参与判断。
+    fn editor_progress_from(
+        editor: &EditorSession,
+        stage: Stage,
+        value: f64,
+        progress_ticket: u64,
+        current_ticket: u64,
+    ) -> Option<f64> {
+        editor
+            .render_progress_bits
+            .store(value.to_bits(), Ordering::Release);
+        editor
+            .render_progress_ticket
+            .store(progress_ticket, Ordering::Release);
+        editor
+            .render_ticket
+            .store(current_ticket, Ordering::Release);
+        editor.render_stage.store(stage.encode(), Ordering::Release);
+        // ARA 的 apply 作业有进度来源（Capture 没有）；判据本身在 `visible_render_progress`。
+        editor
+            .render_progress_tracked
+            .store(true, Ordering::Release);
+        editor.visible_render_progress(true)
     }
 
     pub(crate) fn fixture() -> (ModelHandle, Arc<ExtensionOwner>, Box<u8>) {

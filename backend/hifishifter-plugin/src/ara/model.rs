@@ -736,6 +736,13 @@ impl ModelHandle {
                 // item 不会被画成 N 条片段"的结构性保证（见 `editor::assembly` 的模块文档）。
                 *self.session.region_rows.lock_or_recover() = region_rows.clone();
                 *self.session.region_tracks.lock_or_recover() = region_tracks.clone();
+                // 【装配输入 A 的代次】与 `ui_tracks_stamp` 一起回答"这一轮读到的两份
+                // 输入，与上一次装配尝试相比动过吗"。装配器据此把 `unbound` 分成两种：
+                // "两份输入还没对齐，再等等"与"这就是结论"（见
+                // `DocumentSession::rebuild_timeline_locked`）。
+                self.session
+                    .region_rows_stamp
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                 // 从这里起，这份时间线归装配器管（见 `DocumentSession::ara_model_seen`）。
                 self.session
                     .ara_model_seen

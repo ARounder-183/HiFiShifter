@@ -2253,6 +2253,7 @@ export const zhCN = {
     plugin_apply_analyzing: "正在分析音高...",
     plugin_apply_analyzing_hint: "这一步要按素材长度跑，通常几秒到几分钟。分析期间先播原始录音。",
     plugin_apply_rendering: "正在合成...",
+    plugin_apply_bypassed: "已旁通 · 不渲染",
     plugin_render_background_hint: "后台正在生成新版本；当前听到的仍是上一版。",
     plugin_daw_controlled_reason: "由宿主控制；在宿主中操作文件、片段几何、速度、拍号与播放",
     cap_reason_host_owns: "这一步由宿主完成，插件不接管",

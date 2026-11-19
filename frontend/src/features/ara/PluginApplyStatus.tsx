@@ -67,19 +67,23 @@ export function PluginApplyStatus({
      * **每一次**播放开始都亮成"进行中"，而那一刻后台跑的只是素材物化 —— 用户看到的
      * 是一盏与自己的操作无关的灯。`waiting` 同理：它不是"在应用你的编辑"。
      */
+    // 【旁通用中性色】它不是"在忙"，也不是"出错"：宿主把这个 FX 从信号链里摘了，
+    // 插件的行为（不渲染）是正确的。用强调色会让用户以为它在算东西。
     const tone = terminal
         ? "danger"
         : error
           ? "danger"
           : reloading
             ? "accent"
-            : state?.audible_state === "preparing" ||
-                state?.audible_state === "stale" ||
-                state?.audible_state === "awaiting-analysis"
-              ? "accent"
-              : state?.ready
-                ? "success"
-                : "neutral";
+            : state?.host_bypass === "bypassed"
+              ? "neutral"
+              : state?.audible_state === "preparing" ||
+                  state?.audible_state === "stale" ||
+                  state?.audible_state === "awaiting-analysis"
+                ? "accent"
+                : state?.ready
+                  ? "success"
+                  : "neutral";
     /*
      * 【只读 `audible_state`】它的语义是「你听到的是不是当前编辑」，与状态栏要回答的
      * 问题**同一个**。逐个读 `ready` / `analysis_pending` / `rendering_active` /
@@ -90,31 +94,38 @@ export function PluginApplyStatus({
      * 「有没有可服务的输出」仍然只有 `ready` 能回答。它是兜底，不是主判据。
      */
     const audibleState = state?.audible_state;
-    // 【进度只在 stale 时显示】此时用户听到的确实是旧版，"正在合成 42%"是
-    // 对"还要等多久"最直接的回答；stale=false 的刷新由左侧中性片承担。
-    const renderProgress =
-        state?.rendering_active &&
-        typeof state.render_progress === "number" &&
-        Number.isFinite(state.render_progress)
-            ? Math.max(0, Math.min(1, state.render_progress))
-            : null;
-    // 【0 不显示百分比】Capture 渲染没有进度回调，后端会一直报 0；把 0%
-    // 显示出来会让用户以为"卡在 0 不动"。有真实进度时才有百分比。
-    const progressSuffix =
-        renderProgress != null && renderProgress > 0 ? ` ${Math.round(renderProgress * 100)}%` : "";
+    /*
+     * 【百分比不在这里】它只由左侧 `AppStatusProgressChips` 显示。
+     *
+     * 旧实现在这里拼「正在合成 42%」，条件是 `audible_state === "stale"` —— 而那一档
+     * 在 ARA 下**恒不成立**（一旦发布过快照，`has_serviceable_snapshot()` 就永远为真，
+     * 于是 `stale` 永远为假）。也就是说这条百分比是死代码：用户永远看不到它。
+     * 两处各拼一份、判据还分叉，只会得到"左边 40%、右边 100%"。
+     *
+     * 现在：这一片只回答「你听到的是不是当前编辑」与「宿主是否把本插件旁通了」。
+     */
+    /*
+     * 【旁通优先于「已应用」】旁通时宿主根本不来取输出，`audible_state` 会落在
+     * `current`（后端把 `applied` 收口到当前代次），于是这一片会说「已应用」——
+     * 而用户刚做的编辑**一次都没被渲染**。说「已旁通 · 不渲染」才是实话：
+     * 这不是故障，是宿主的选择，用户解除旁通后会自动补上。
+     */
+    const bypassed = state?.host_bypass === "bypassed";
     const label = terminal
         ? terminalLabel
-        : audibleState === "preparing"
-          ? t("plugin_apply_waiting_host")
-          : audibleState === "stale"
-            ? `${t("plugin_apply_rendering")}${progressSuffix}`
-            : audibleState === "awaiting-analysis"
-              ? t("plugin_apply_analyzing")
-              : audibleState === "current"
-                ? t("plugin_apply_applied")
-                : !state?.ready
-                  ? t("plugin_apply_waiting_host")
-                  : t("plugin_apply_applied");
+        : bypassed
+          ? t("plugin_apply_bypassed")
+          : audibleState === "preparing"
+            ? t("plugin_apply_waiting_host")
+            : audibleState === "stale"
+              ? t("plugin_apply_rendering")
+              : audibleState === "awaiting-analysis"
+                ? t("plugin_apply_analyzing")
+                : audibleState === "current"
+                  ? t("plugin_apply_applied")
+                  : !state?.ready
+                    ? t("plugin_apply_waiting_host")
+                    : t("plugin_apply_applied");
     /*
      * 修订数与长说明都进 tooltip：它们在状态栏里没有位置，但"为什么还没应用"
      * 恰恰要靠它们判断 —— 塞进片里会把状态栏撑成一条跑道。

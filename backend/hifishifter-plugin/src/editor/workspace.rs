@@ -367,6 +367,28 @@ impl PresentedIds {
 /// 唯一差别就是前缀 —— 这个换算必须只有一处，否则"文档 id 与呈现 id 混用"会再一次
 /// 散落成几个各写各的字符串拼接（它已经害过：\`claimed_id\` 用无前缀 id 去比带前缀的
 /// 时间线，于是每轮新建一条副本 clip）。
+/// 把一条**文档域**的 clip 换算到呈现域（id + 每个 take id + active take）。
+///
+/// 【为什么必须是同一个函数】文档域（`ara-item-{guid}` / 宿主 take GUID）与呈现域
+/// （加过命名空间前缀）的唯一差别就是前缀；这个换算散落成几处各写各的字符串拼接时，
+/// 它已经害过两次（`claimed_id` 用无前缀 id 去比带前缀的时间线 ⇒ 每轮新建一条副本
+/// clip）。装配产物的克隆与占位构造都必须走这里。
+fn present_document_clip(
+    mut clip: hifishifter_kernel::state::Clip,
+    id: &str,
+    prefix: &impl Fn(&str) -> String,
+) -> hifishifter_kernel::state::Clip {
+    clip.id = id.to_string();
+    for take in &mut clip.takes {
+        take.id = prefix(&take.id);
+    }
+    clip.active_take_id = clip.active_take_id.as_deref().map(prefix);
+    // 反序列化后再物化一次：`clip_for_item` 已调过 `normalize_takes`，但 take id 刚刚
+    // 才被换算到命名空间，扁平投影必须跟着更新，否则 `active_take()` 会指回旧 id。
+    clip.normalize_takes();
+    clip
+}
+
 fn materialise_presented_clip(
     item: &crate::host::UiItem,
     id: &str,
@@ -376,16 +398,8 @@ fn materialise_presented_clip(
     let row = crate::host::geometry::item_row_from_host(item, track_id);
     let mut clip =
         hifishifter_kernel::editor::assembly::clip_for_item(&row, track_id, None).ok()?;
-    clip.id = id.to_string();
     clip.track_id = track_id.to_string();
-    for take in &mut clip.takes {
-        take.id = prefix(&take.id);
-    }
-    clip.active_take_id = clip.active_take_id.as_deref().map(prefix);
-    // 反序列化后再物化一次：\`clip_for_item\` 已调过 \`normalize_takes\`，但 take id 刚刚
-    // 才被换算到命名空间，扁平投影必须跟着更新，否则 \`active_take()\` 会指回旧 id。
-    clip.normalize_takes();
-    Some(clip)
+    Some(present_document_clip(clip, id, prefix))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -508,6 +522,33 @@ impl DocumentSession {
 
     pub(crate) fn present_host_inventory(&self, timeline: &mut TimelineState, namespace: &str) {
         let prefix = |id: &str| format!("{namespace}{id}");
+        // 【兜底占位不许比装配产物更差】
+        //
+        // 下面那条 `materialise_presented_clip` 的兜底是**按构造无源**的（它拿不到
+        // region，也就拿不到 ARA 源身份）。而"装配器已经为这个 item 产出过 clip、但那条
+        // clip 被工作区过滤掉了"是另一回事：那份产物**有源**，只是没进这一份时间线
+        // （`workspace_timeline_locked` 按 `clip_ids` retain，而 region 还没挂上时
+        // `clip_ids` 里没有它）。用无源占位盖住有源产物，就把"装配失败"翻译成了一句
+        // **永远成立的**等待 —— 用户看到的就是「正在等待宿主完成音频分配」，而且重开
+        // 工程才恢复。
+        //
+        // 【为什么用 try-lock】本函数可能被"已经持有文档时间线"的路径调用（见上面的
+        // 说明），阻塞取锁会在那里当场自锁。拿不到就退回原来的兜底：那是**行为不变**
+        // 的一支，而不是错误。用仓库的 `try_lock_or_recover` 而不是裸 `try_lock`：
+        // 毒化过的锁也要能读到（见 `hifishifter_plugin_core::sync` 的模块文档）。
+        let assembled: std::collections::HashMap<String, hifishifter_kernel::state::Clip> =
+            crate::sync::try_lock_or_recover(&self.timeline)
+                .and_then(|slot| {
+                    slot.as_ref().map(|timeline| {
+                        timeline
+                            .clips
+                            .iter()
+                            .filter(|clip| clip.id.starts_with("ara-item-"))
+                            .map(|clip| (clip.id.clone(), clip.clone()))
+                            .collect::<std::collections::HashMap<_, _>>()
+                    })
+                })
+                .unwrap_or_default();
         // 【媒体总时长索引整段删除】它此前只为"占位 clip 的源窗口解算"服务，而那段
         // 解算已经搬进 `hifishifter_kernel::editor::assembly::clip_for_item`（装配器
         // 在装配前会按 region 侧补齐每个 item 的媒体总时长，见
@@ -925,7 +966,14 @@ impl DocumentSession {
                     // 分叉。此前这里是独立的一份 `serde_json::json!` 字面量，与映射层
                     // 那一份各自维护 —— 两份默认值迟早不同，而表现是"同一个 item 在两个
                     // 前端里字段不一样"。
-                    match materialise_presented_clip(item, &id, &track_id, &prefix) {
+                    // 【先问装配器】它已经为这个 item 产出过 clip ⇒ 直接复用那一条（带源），
+                    // 而不是造一条按构造无源的占位。
+                    let from_assembly = assembled
+                        .get(&format!("ara-item-{}", g.item_id))
+                        .map(|clip| present_document_clip(clip.clone(), &id, &prefix));
+                    match from_assembly
+                        .or_else(|| materialise_presented_clip(item, &id, &track_id, &prefix))
+                    {
                         Some(clip) => timeline.clips.push(clip),
                         None => {
                             log::warn!("[ara] skipping host item {id}: cannot build a clip");
@@ -1562,7 +1610,18 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
             let mut last = self.last_media_diag.lock_or_recover();
             if last.as_deref() != Some(line.as_str()) {
                 *last = Some(line.clone());
-                log::info!("{line}");
+                // 【为什么这条必须是 WARN】`verbosity=low` ⇒ `LevelFilter::Warn`
+                // （`kernel/log_policy.rs`），所以 `log::info!` 在用户的默认档日志里
+                // **一行都没有**。而"哪一条 clip 没有源、为什么"正是"粘贴出来的片段
+                // 一直等宿主音频"这个问题的第一现场 —— 它已经因此查了三轮。
+                //
+                // 内容变才发（上面那道比较），限流器再兜一层（同键 10 s 一行），
+                // 稳态下不会刷屏。
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.media",
+                    format_args!("{line}"),
+                );
             }
         }
         // 被跳过的 playback region（MIDI / 零长度 item…）：只 log 会让它们静默消失。

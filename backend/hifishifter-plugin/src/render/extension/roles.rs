@@ -1,22 +1,5 @@
 //! 角色、快照可用性与宿主传输观测。
 use super::*;
-/// 把三态编码成 `host_bypass` 的原子值（0 = 未知）。
-fn encode_bypass(state: crate::host::reaper::FxBypass) -> u8 {
-    match state {
-        crate::host::reaper::FxBypass::Active => 1,
-        crate::host::reaper::FxBypass::Bypassed => 2,
-        crate::host::reaper::FxBypass::Unknown => 0,
-    }
-}
-
-/// 把 `host_bypass` 的编码翻回三态（日志用）。
-fn decode_bypass(raw: u8) -> crate::host::reaper::FxBypass {
-    match raw {
-        1 => crate::host::reaper::FxBypass::Active,
-        2 => crate::host::reaper::FxBypass::Bypassed,
-        _ => crate::host::reaper::FxBypass::Unknown,
-    }
-}
 
 impl ExtensionOwner {
     /// 本实例是否负责把处理结果作为音频输出（而非透传宿主原声）。
@@ -480,8 +463,21 @@ impl ExtensionOwner {
     /// **不再调用**播放渲染器。于是"用户已经旁通、插件还在算"这一段开销完全是浪费：
     /// 神经合成的结果永远不会被取用。判据由宿主自己的原生 API 给出（REAPER 的
     /// `TrackFX_GetEnabled` 一族），其它宿主恒为 `Unknown` ⇒ 行为与改动前一致。
+    /// 【为什么先读文档】旁通是**这个 FX** 的属性，而一次 ARA 绑定在 REAPER 里会造出
+    /// 两个实例（playback / editor+view），采样点却只在有视图定时器的那个实例上。
+    /// 按实例缓存等于让"谁碰巧有空看一眼"决定"要不要渲染" —— 播放实例的缓存永远是
+    /// `Unknown`，于是用户旁通了 FX、插件还在合成。读数搬到文档之后，任一实例采到的
+    /// 结论立刻对全部实例与后台作业生效。
+    ///
+    /// 【为什么还要留实例这一格】Capture 实例不在任何 ARA 文档上，没有文档可写；
+    /// 而它的渲染判据与 ARA 同源（`prepare` 的门）。这一格就是它的退路。
     pub(crate) fn host_bypass(&self) -> crate::host::reaper::FxBypass {
-        decode_bypass(self.host_bypass.load(Ordering::Acquire))
+        match self.editor_document() {
+            Ok(document) => document.host_bypass(),
+            Err(_) => {
+                crate::host::reaper::FxBypass::decode(self.host_bypass.load(Ordering::Acquire))
+            }
+        }
     }
 
     /// UI 定时器路径：按自己的节奏采样旁通读数（100 ms 一次）。
@@ -516,16 +512,31 @@ impl ExtensionOwner {
         };
         let authorized = || !self.is_closed();
         let state = host.fx_bypass_state(&authorized);
-        let encoded = encode_bypass(state);
+        // 编码只有一个来源（`FxBypass::encode`）：写侧、读侧、诊断包必须对同一个字节
+        // 给出同一个结论，否则"旁通了还在渲染"会在两侧各有一个互相矛盾的答案。
+        let encoded = state.encode();
+        // 【实例那一格仍然写】Capture 没有文档，而 `prepare` 的门对两种形态同源。
         let previous = self.host_bypass.swap(encoded, Ordering::AcqRel);
-        if previous == encoded {
+        // 【文档那一格是权威】两个实例读到的是同一个 FX；谁先采到都对。
+        let document_previous = self
+            .editor_document()
+            .ok()
+            .map(|document| document.note_host_bypass(state));
+        if previous == encoded && document_previous.is_none_or(|previous| previous == state) {
             return false;
         }
-        log::info!(
-            "[ara] writer {} host bypass: {} -> {}",
-            self.writer_id(),
-            decode_bypass(previous).as_str(),
-            state.as_str()
+        // 【为什么这条是 WARN】默认档（`verbosity=low`）下 `log::info!` 一行都看不见 ——
+        // 于是用户旁通了 FX、插件还在合成，而日志里**没有任何痕迹**能证明这个功能
+        // 存在（上一轮改完无法验证，正是这个原因）。限流器保证稳态下最多一行。
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.host-bypass",
+            format_args!(
+                "[ara] writer {} host bypass: {} -> {}",
+                self.writer_id(),
+                crate::host::reaper::FxBypass::decode(previous).as_str(),
+                state.as_str()
+            ),
         );
         true
     }
@@ -536,13 +547,25 @@ impl ExtensionOwner {
     /// 若还停在旁通期间那一版（或根本没算过），用户会先听到旧声音。进入旁通则相反：
     /// 在途的那次合成已经没人要，直接取消比让它跑完更省。
     pub(crate) fn sample_host_bypass(&self) -> bool {
+        let before = self.host_bypass();
         if !self.refresh_host_bypass_cache() {
             return false;
         }
-        if self.host_bypass().is_bypassed() {
+        let after = self.host_bypass();
+        if after.is_bypassed() {
             // 刚进入旁通：在途的合成已经没人要，丢掉待办并让正在跑的那次尽早返回。
             if let Some(queue) = self.preparation() {
                 queue.cancel();
+            }
+        } else if before.is_bypassed() && after == crate::host::reaper::FxBypass::Active {
+            // 【解除旁通要把被跳过的那次编辑补上】旁通期间 `prepare_apply` 直接返回
+            // （见那里的门），所以那些编辑**从未**被渲染过。这里只让渲染失效是不够的：
+            // 失效只影响"下一次取音频"，而取音频由宿主驱动 —— 用户解除旁通后若不再动
+            // 任何东西，就永远不会有新音频。必须把票据重新排上队。
+            if let Ok(document) = self.editor_document() {
+                if let Some(editor) = document.existing_editor_session() {
+                    editor.rearm_render();
+                }
             }
         }
         if let Ok(document) = self.editor_document() {
@@ -574,26 +597,6 @@ impl ExtensionOwner {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::host::reaper::FxBypass;
-
-    /// `host_bypass` 的编码是跨线程契约：写侧（`sample_host_bypass`）与读侧
-    /// （`host_bypass` / `prepare` 的门）必须对同一个字节给出同一个结论。默认值 0
-    /// 必须是 `Unknown` —— 那是"照改动前渲染"的唯一保证。
-    #[test]
-    fn the_bypass_encoding_never_turns_unknown_into_a_verdict() {
-        assert_eq!(decode_bypass(0), FxBypass::Unknown);
-        assert_eq!(decode_bypass(1), FxBypass::Active);
-        assert_eq!(decode_bypass(2), FxBypass::Bypassed);
-        // 任何未来可能出现的值都必须落回"未知"，不得被当成"活跃"或"旁通"。
-        for raw in [3_u8, 7, 200, 255] {
-            assert_eq!(decode_bypass(raw), FxBypass::Unknown, "raw={raw}");
-        }
-        // 只有"确定旁通"能挡住渲染。
-        assert!(decode_bypass(2).is_bypassed());
-        assert!(!decode_bypass(0).is_bypassed());
-        assert!(!decode_bypass(1).is_bypassed());
-    }
-}
+// 【编码的用例搬到了 `host::reaper::fx_state`】编码本身现在只有一份
+// （`FxBypass::encode` / `decode`），所以它的契约由**它的定义处**负责钉住。
+// 在这里再留一份副本，等于让"改一处、忘一处"重新变得可能。

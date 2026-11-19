@@ -2308,6 +2308,7 @@ export const koKR = {
     plugin_apply_analyzing_hint:
         "이 단계는 소재 길이에 따라 몇 초에서 몇 분 걸립니다. 분석 중에는 원본 녹음을 재생합니다.",
     plugin_apply_rendering: "합성 중...",
+    plugin_apply_bypassed: "바이패스됨 · 렌더링 안 함",
     plugin_render_background_hint:
         "백그라운드에서 새 버전을 생성 중입니다. 지금 들리는 것은 이전 버전입니다.",
     plugin_daw_controlled_reason:

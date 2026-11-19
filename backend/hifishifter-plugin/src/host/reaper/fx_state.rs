@@ -68,6 +68,31 @@ impl FxBypass {
     pub(crate) fn is_bypassed(self) -> bool {
         matches!(self, Self::Bypassed)
     }
+
+    /// 跨线程传递用的编码（`AtomicU8` 的载荷）。
+    ///
+    /// 【为什么需要编码而不是直接存枚举】读侧可能在音频线程、写侧在宿主线程；为读一个
+    /// 三态量取锁毫无必要，而"一个字节"是三态量能有的最小共享形式。
+    ///
+    /// 【为什么 `Unknown` 必须是 0】它是 `AtomicU8` 的默认值，而默认值必须等于
+    /// **改动前的行为**（照常渲染）。任何把默认值改成"旁通"的改动都会让所有不支持这
+    /// 一族读数的宿主（Cubase / Studio One / 任何非 REAPER 宿主）当场静音。
+    pub(crate) fn encode(self) -> u8 {
+        match self {
+            Self::Unknown => 0,
+            Self::Active => 1,
+            Self::Bypassed => 2,
+        }
+    }
+
+    /// 解码。**任何未定义值都必须落回 `Unknown`** —— 见 [`Self::encode`]。
+    pub(crate) fn decode(raw: u8) -> Self {
+        match raw {
+            1 => Self::Active,
+            2 => Self::Bypassed,
+            _ => Self::Unknown,
+        }
+    }
 }
 
 /// 由四份读数得出结论。
@@ -175,6 +200,28 @@ mod tests {
         assert_eq!(decide(1, true, true, true), FxBypass::Bypassed);
         // 整条 FX 链被关掉。
         assert_eq!(decide(1, true, false, false), FxBypass::Bypassed);
+    }
+
+    /// `FxBypass` 的编码是**跨线程契约**：写侧（`sample_host_bypass`）与读侧
+    /// （`prepare` / 后台作业的门）必须对同一个字节给出同一个结论。默认值 0
+    /// 必须是 `Unknown` —— 那是"照改动前渲染"的唯一保证。
+    #[test]
+    fn the_bypass_encoding_never_turns_unknown_into_a_verdict() {
+        assert_eq!(FxBypass::decode(0), FxBypass::Unknown);
+        assert_eq!(FxBypass::decode(1), FxBypass::Active);
+        assert_eq!(FxBypass::decode(2), FxBypass::Bypassed);
+        // 任何未来可能出现的值都必须落回"未知"，不得被当成"活跃"或"旁通"。
+        for raw in [3_u8, 7, 200, 255] {
+            assert_eq!(FxBypass::decode(raw), FxBypass::Unknown, "raw={raw}");
+        }
+        // 往返：三态各自编码再解码必须回到自己。
+        for state in [FxBypass::Unknown, FxBypass::Active, FxBypass::Bypassed] {
+            assert_eq!(FxBypass::decode(state.encode()), state);
+        }
+        // 只有"确定旁通"能挡住渲染。
+        assert!(FxBypass::decode(2).is_bypassed());
+        assert!(!FxBypass::decode(0).is_bypassed());
+        assert!(!FxBypass::decode(1).is_bypassed());
     }
 
     /// 三态的编码是诊断契约的一部分：改字面量等于改日志与诊断包的读法。

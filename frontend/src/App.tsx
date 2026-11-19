@@ -1297,8 +1297,12 @@ function AppInner() {
                         // 独立 App 没有这份快照（`state` 为 null）⇒ 行为不变。
                         const active = Boolean(payload?.active);
                         const pRaw = payload?.progress;
+                        // 【结束事件不携带进度】后端在 `active:false` 时如实报 `null`；
+                        // 这里再兜一层：即便某个旧后端仍然带 `1.0`，也一律当成"没有进度"。
+                        // 否则完成事件会把高水位写回 100%，状态片在作业结束后还亮着
+                        // "渲染中 100%"，直到下一次 250 ms 快照才熄。
                         const p =
-                            typeof pRaw === "number" && Number.isFinite(pRaw)
+                            active && typeof pRaw === "number" && Number.isFinite(pRaw)
                                 ? Math.max(0, Math.min(1, pRaw))
                                 : null;
                         const target = typeof payload?.target === "string" ? payload.target : null;
@@ -1414,11 +1418,19 @@ function AppInner() {
             // 【进度也以快照为准】事件只是快速更新；轮询每 250 ms 会把当前进度
             // 带回来。`rendering_active` 从 false → true 时清掉上一轮的高水位，
             // 否则新一轮的 0% 会被旧的 100% 挡住。
+            // 【新的一轮作业 ⇒ 高水位清零】`render_pass` 就是后端那张作业票据。
+            // 没有它，一次被取消的作业留下的 60% 会挡住下一个作业的 0~59% ——
+            // 用户看到的就是"卡在某个百分比不动"或"一直 100%"。
+            const pass = typeof state.render_pass === "number" ? state.render_pass : null;
+            const passChanged = pass != null && renderPassRef.current !== pass;
+            if (pass != null) renderPassRef.current = pass;
             if (!active) {
                 renderProgressRef.current = 0;
                 appStatusProgressBus.setRenderingProgress(null);
             } else {
-                if (!backgroundRenderActiveRef.current) renderProgressRef.current = 0;
+                if (!backgroundRenderActiveRef.current || passChanged) {
+                    renderProgressRef.current = 0;
+                }
                 const raw = state.render_progress;
                 const progress =
                     typeof raw === "number" && Number.isFinite(raw)

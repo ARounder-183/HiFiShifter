@@ -7,8 +7,12 @@
  * - 插件：`plugin_get_apply_state` 的 250 ms 快照（`rendering_active` /
  *   `render_progress` / `render_audible_stale`）。
  *
- * 把"读哪一份"收在一处，状态片组件就不必同时知道两条通道；两条通道的语义
- * （stale 决定左侧片是否让位给右侧的「正在合成」，不改变状态片的强调色）也只需要在这里解释一次。
+ * 把"读哪一份"收在一处，状态片组件就不必同时知道两条通道。
+ *
+ * 【`stale` 不再决定"谁显示百分比"】旧约定是"stale 时左侧让位给右侧的「正在合成
+ * N%」"，而右侧那条百分比只在 `audible_state === "stale"` 时才会出现 —— 那个分支
+ * 在 ARA 下**恒不成立**（有快照就永远不是 stale）。两边都不显示，于是"渲染中"
+ * 完全没有百分比。现在百分比固定由左侧承担，`stale` 只作为读数保留。
  */
 import { useSyncExternalStore } from "react";
 
