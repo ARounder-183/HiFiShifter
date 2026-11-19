@@ -1205,12 +1205,99 @@ mod tests {
         // 全部旁通才是"这份工程不会出声"。
         other.set_host_bypass_for_tests(FxBypass::Bypassed);
         assert_eq!(document.host_bypass(), FxBypass::Bypassed);
-        // 任何一条读不出来 ⇒ 不得跳过（`Unknown` 的语义是"照常渲染"）。
+        // 【没有读数 = 弃权，不是否决】REAPER 的播放实例是宿主按 item 现建的：它既没有
+        // 视图定时器也没有模型收口，用户按下旁通的那一刻它很可能一次都没被采样过。
+        // 把它当否决票，门就永远关着 —— 用户报的"旁通了还在渲染"。
         other.set_host_bypass_for_tests(FxBypass::Unknown);
-        assert!(
-            !document.host_bypass().is_bypassed(),
-            "读不出读数的实例不得被别人的结论带着一起跳过"
+        assert_eq!(
+            document.host_bypass(),
+            FxBypass::Bypassed,
+            "从没读到过读数的实例不得否决别人已经确定的旁通结论"
         );
+    }
+
+    /// **播放实例从没报过读数时，编辑实例的那一票必须算数（REAPER 的真实形态）。**
+    ///
+    /// 【现场证据】2026-11-19 13:14 的 REAPER 会话里，用户按下旁通之后日志只有一行
+    /// `writer 1 host bypass: active -> bypassed` —— 那是**编辑**实例（视图定时器每
+    /// 100 ms 采一次）。播放实例（同一文档、同一 FX，由宿主按需现建）从头到尾**一行
+    /// 都没有**：它没有视图定时器，而模型收口只在宿主改模型时发生。
+    ///
+    /// 【为什么会变成"旁通了还在渲染"】上一版的门只让 `renders_playback()` 的实例投票，
+    /// 而唯一的播放实例读数永远是初始的 `Unknown` ⇒ 文档结论永远是 `Unknown` ⇒ 门
+    /// 永远开着。这条用例把那个形态原样钉住。
+    #[test]
+    fn an_editor_bypass_reading_counts_when_the_playback_instance_never_reported() {
+        use crate::host::reaper::FxBypass;
+        let document = DocumentSession::new(9_006);
+        let editor = Arc::new(ExtensionOwner::default());
+        let playback = Arc::new(ExtensionOwner::default());
+        editor
+            .bind_to_document(
+                document.clone(),
+                ApiGeneration::V2Final,
+                ara2_bridge::plugin::ExtensionRoles::all(),
+                ara2_bridge::plugin::ExtensionRoles::EDITOR_RENDERER,
+                None,
+            )
+            .expect("编辑实例必须能绑到文档");
+        playback
+            .bind_to_document(
+                document.clone(),
+                ApiGeneration::V2Final,
+                ara2_bridge::plugin::ExtensionRoles::all(),
+                ara2_bridge::plugin::ExtensionRoles::PLAYBACK_RENDERER,
+                None,
+            )
+            .expect("播放实例必须能绑到同一个文档");
+        // 让"编辑实例是 editor-only、播放实例才是渲染者"这件事成立（与宿主一致）。
+        document.report_playback_ownership();
+        assert!(!editor.renders_playback(), "编辑实例不应被当作渲染者");
+        assert!(playback.renders_playback(), "播放实例才是渲染者");
+        // 编辑实例读到了旁通；播放实例一次都没被采样过（缓存仍是初始的 `Unknown`）。
+        editor.set_host_bypass_for_tests(FxBypass::Bypassed);
+        assert_eq!(playback.host_bypass(), FxBypass::Unknown);
+        assert_eq!(
+            document.host_bypass(),
+            FxBypass::Bypassed,
+            "唯一能说话的那一票必须算数，否则门永远关不上"
+        );
+        // 播放实例真的读到 `active` 时，仍然必须照常渲染。
+        playback.set_host_bypass_for_tests(FxBypass::Active);
+        assert_eq!(document.host_bypass(), FxBypass::Active);
+    }
+
+    /// **过期读数不得再投票。**
+    ///
+    /// 【为什么这条与上一条不矛盾】"没有读数"与"读数过期"都必须回到"照常渲染"：
+    /// 过期读数若继续阻止渲染，用户解除旁通之后就没有声音；若要它继续**允许**渲染，
+    /// 就是"旁通了还在渲染"。所以它一律弃权 —— 而弃权在门上的表现就是 `Unknown`。
+    #[test]
+    fn an_expired_reading_stops_counting_as_a_bypass() {
+        use crate::host::reaper::FxBypass;
+        let document = DocumentSession::new(9_005);
+        let owner = Arc::new(ExtensionOwner::default());
+        owner
+            .bind_to_document(
+                document.clone(),
+                ApiGeneration::V2Final,
+                ara2_bridge::plugin::ExtensionRoles::all(),
+                ara2_bridge::plugin::ExtensionRoles::PLAYBACK_RENDERER,
+                None,
+            )
+            .expect("实例必须能绑到文档");
+        owner.set_host_bypass_for_tests(FxBypass::Bypassed);
+        assert_eq!(document.host_bypass(), FxBypass::Bypassed);
+        // 做旧到远超有效期：这一票作废，门回到"照常渲染"。
+        owner.age_host_bypass_for_tests(std::time::Duration::from_secs(60));
+        assert_eq!(
+            document.host_bypass(),
+            FxBypass::Unknown,
+            "过期读数必须弃权（`Unknown` = 照常渲染），而不是继续挡住渲染"
+        );
+        // 重新采到 ⇒ 立刻恢复投票权。
+        owner.set_host_bypass_for_tests(FxBypass::Bypassed);
+        assert_eq!(document.host_bypass(), FxBypass::Bypassed);
     }
 
     /// **分割一个循环源 item，参数线一根都不许动（插件侧粘合层）。**
@@ -5120,11 +5207,22 @@ impl DocumentSession {
                     // 报障时这一格能直接分开它们（"旁通了还在渲染"最常见的原因就是
                     // 这一格一直是 `None`）。
                     "host_bypass_age_ms": owner.host_bypass_age().map(|age| age.as_millis() as u64),
+                    // 【确定读数有多旧】`None` = 从来没读到过。它与上面那一格合起来能
+                    // 分开"没采过"（两格都是 None）与"采了但没读到"（上面有值、这里 None）。
+                    "host_bypass_verdict_age_ms": owner
+                        .host_bypass_verdict_age()
+                        .map(|age| age.as_millis() as u64),
+                    // 这一票到底算不算数（确定 + 新鲜）。渲染门的判据就是它。
+                    "host_bypass_vote": owner.fresh_host_bypass().map(|verdict| verdict.as_str()),
                 })
             })
             .collect::<Vec<_>>();
         serde_json::json!({
             "renderers": renderers,
+            // 【文档级的门此刻是怎么算出来的】渲染门只看这一格。它等于
+            // `combine(renderers[].host_bypass_vote)`，把两个数组放在一起就能一眼看出
+            // "为什么门没关上"：是没人投票，还是有人投了 `active`。
+            "bypass_verdict": self.host_bypass().as_str(),
             // 【装配的两份输入各写到第几代】见 `assembly_consumed`：两者不同步时
             // `unbound` 会先被推迟一轮，而这一对数字就是"谁还没跟上"的答案。
             "assembly_inputs": {
@@ -5484,18 +5582,98 @@ clips_src={clips_src} dupes={dupes}}}"
     /// 有多条轨道、每轨一个实例（`ModelHandle` 每文档一份，所有实例绑到同一个文档）。
     /// 把结论写进共享格子，等于让"轨 1 被旁通"与"轨 2 没被旁通"互相覆盖：读数每轮都在
     /// 两个值之间跳，而每次跳都让渲染输入失效 ⇒ 每个实例每 100 ms 重算一整次神经合成
-    /// （用户看到的就是"无限渲染"，而且轨 2 会跟着轨 1 一起静音）。
+    /// （用户看到的就是"无限渲染"），而且轨 2 会跟着轨 1 一起静音。
     ///
-    /// 所以这里**只读各实例自己的读数**，用 `fx_state::combine` 合成：只有全部播放实例
-    /// 都确定被旁通，才算这份工程不会出声。
+    /// 所以这里**只读各实例自己的读数**，用 `fx_state::combine` 合成：只有全部**有读数**
+    /// 的实例都确定被旁通，才算这份工程不会出声。
+    ///
+    /// 【为什么读数的"有没有"也算一票】上一版把"从没采到过"的实例也算成否决票
+    /// （`Unknown` ⇒ 照常渲染）。而 REAPER 的播放实例是宿主按 item 现建的，它们既没有
+    /// 视图定时器，也不会在用户按下旁通时被模型收口扫到 —— 于是一份**所有实例都被
+    /// 旁通**的工程里，只要有一个刚建好的播放实例还没被采样，结论就永远是 `Unknown`，
+    /// 门永远开着。用户看到的就是"旁通了还在渲染"。现在"没有读数"= 弃权
+    /// （见 [`crate::render::extension::ExtensionOwner::fresh_host_bypass`]），
+    /// 而不是否决。
     pub(crate) fn host_bypass(&self) -> crate::host::reaper::FxBypass {
-        let verdicts: Vec<crate::host::reaper::FxBypass> = self
-            .renderer_owners()
-            .into_iter()
+        self.bypass_sample().0
+    }
+
+    /// 结论 + 每一票的来源：`(writer, 是否播放实例, 最后一次确定读数, 读数年龄 ms)`。
+    ///
+    /// 【为什么要把票源带出来】"旁通了还在渲染"只有这张表能回答：到底是**没人投出旁通**
+    /// （实例没被采样）、**有人投了反票**（读数是 `active`）、还是**票过期了**（年龄超过
+    /// `BYPASS_VERDICT_TTL`）。三种成因的治疗完全不同，而在旧日志里它们长得一模一样：
+    /// 同一个限流键、同一行 `[throttled]`，什么都看不出来。
+    ///
+    /// 【表格是给日志/诊断包的，不是判据】判据只有 [`Self::host_bypass`]。
+    pub(crate) fn bypass_sample(
+        &self,
+    ) -> (
+        crate::host::reaper::FxBypass,
+        Vec<(u64, bool, crate::host::reaper::FxBypass, Option<u64>)>,
+    ) {
+        let owners = self.renderer_owners();
+        let mut table = Vec::with_capacity(owners.len());
+        let mut votes = Vec::with_capacity(owners.len());
+        for owner in &owners {
+            let verdict = owner.host_bypass();
+            let age = owner
+                .host_bypass_verdict_age()
+                .map(|age| age.as_millis() as u64);
+            table.push((owner.writer_id(), owner.renders_playback(), verdict, age));
+            if let Some(fresh) = owner.fresh_host_bypass() {
+                votes.push(fresh);
+            }
+        }
+        // 【为什么不分"播放实例 / 编辑实例"】旁通是**这个 FX** 的属性，而一个 FX 的编辑
+        // 实例与播放实例读的是同一条 TrackFX 记录。按角色筛掉编辑实例，等于在"播放实例
+        // 还没被采样"时把唯一能说话的那一票丢掉 —— 那正是上一版的门失效的地方。
+        // 多轨工程里"轨 1 旁通、轨 2 正常"仍然成立：轨 2 的实例会说 `active`。
+        (crate::host::reaper::combine_fx_bypass(&votes), table)
+    }
+
+    /// 会话心跳：把**最该重采**的那一个实例采一次。
+    ///
+    /// 【为什么必须有这条通道】三个采样点里有两个只覆盖**可见**实例：视图定时器
+    /// （`poll_host_bypass`，要开窗口）与模型收口（`refresh_host_state_for_model`，
+    /// 要宿主改模型）。REAPER 的播放实例两样都没有 —— 用户按下旁通之后，它的缓存可以
+    /// 一直停在"上一次采样时的 active"，而渲染门正是拿它做的判据（用户报的"旁通了
+    /// 还在渲染"）。
+    ///
+    /// 【为什么一轮只采一个】实例数由宿主决定，而每次采样都是一次宿主线程往返（最坏
+    /// 250 ms）。一轮一个 + 750 ms 的间隔，几个实例就在几秒内轮一遍，而音频线程与 UI
+    /// 线程都不会被它拖住。轮不到的那些由有效期兜底：读数过期 = 弃权（照常渲染），
+    /// 绝不因为"排队没轮到"而把一条轨静音。
+    pub(crate) fn service_host_bypass_samples(&self) {
+        /// 有读数的实例：按 750 ms 保鲜（有效期 5 s，留足六次机会）。
+        const INTERVAL_MS: u64 = 750;
+        /// 从没读到过读数的实例：退到 3 s 一次。
+        ///
+        /// 【为什么要退】这类实例要么是宿主根本没给这一族 API（每次都白花一次宿主
+        /// 往返），要么这条轨上找不到本 FX。而心跳跑在会话 actor 上 —— 每 750 ms 付
+        /// 一次最坏 250 ms 的阻塞，就足以让 UI 命令排队。真正需要"随时知道"的是**已经
+        /// 读到过**的实例（旁通的跃迁）；从没读到过的那些，慢一点没有代价。
+        const NEVER_READ_MS: u64 = 3_000;
+        let owners = self.renderer_owners();
+        let Some(owner) = owners
+            .iter()
             .filter(|owner| owner.renders_playback())
-            .map(|owner| owner.host_bypass())
-            .collect();
-        crate::host::reaper::combine_fx_bypass(&verdicts)
+            .max_by_key(|owner| owner.host_bypass_sample_age_ms())
+        else {
+            return;
+        };
+        let interval = if owner.host_bypass_verdict_age().is_none() {
+            NEVER_READ_MS
+        } else {
+            INTERVAL_MS
+        };
+        if owner.host_bypass_sample_age_ms() < interval {
+            return;
+        }
+        // 【为什么用 `sample_host_bypass` 而不是 `refresh_host_bypass_cache`】旁通跃迁的
+        // 两个动作（进入旁通丢队列、离开旁通重排）必须与采样在同一处发生，否则"解除
+        // 旁通之后没有声音"会以另一种形式回来。
+        owner.sample_host_bypass();
     }
 
     /// 一秒钟内失效太多次 ⇒ 报一次（"渲染停不下来"的唯一可查痕迹）。

@@ -1,6 +1,39 @@
 //! 角色、快照可用性与宿主传输观测。
 use super::*;
 
+/// 旁通读数的**有效期**。
+///
+/// 【为什么必须有期限】读数来自宿主的一次查询，而宿主可能在中途换轨、切工程、卸载 FX、
+/// 甚至换一个进程内的另一份工程。过期读数若继续阻止渲染 ⇒ 用户解除旁通后没有声音；
+/// 过期读数若继续**允许**渲染 ⇒ 就是用户报的"旁通了还在渲染"。两种都不行，所以过期的
+/// 读数一律弃权（回到"照常渲染"）。
+///
+/// 【为什么是 5 秒】会话心跳（`DocumentSession::service_host_bypass_samples`）每 750 ms
+/// 轮一个实例，编辑实例的视图定时器每 100 ms 采一次。5 秒 = 六个心跳，足以容忍宿主忙
+/// 时的几次超时，又远小于"用户会以为它已经生效"的量级。
+const BYPASS_VERDICT_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 单调时钟（毫秒）。`0` 保留给"从未采过"，所以真实值从 1 开始。
+///
+/// 【为什么不用 `Instant`】这些时间戳要在音频/渲染线程上被读（见
+/// [`ExtensionOwner::fresh_host_bypass`]），而 `Instant` 不能放进原子量。存"进程启动
+/// 以来的毫秒数"既不取锁，也天然单调（系统时间被用户改回拨也不影响）。
+fn bypass_clock_ms() -> u64 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let epoch = EPOCH.get_or_init(std::time::Instant::now);
+    epoch.elapsed().as_millis() as u64 + 1
+}
+
+/// 把上面那个毫秒时间戳换算成"过了多久"；`0`（从未）返回 `None`。
+fn elapsed_since(stamp: u64) -> Option<std::time::Duration> {
+    if stamp == 0 {
+        return None;
+    }
+    Some(std::time::Duration::from_millis(
+        bypass_clock_ms().saturating_sub(stamp),
+    ))
+}
+
 impl ExtensionOwner {
     /// 本实例是否负责把处理结果作为音频输出（而非透传宿主原声）。
     ///
@@ -469,14 +502,37 @@ impl ExtensionOwner {
     /// 值之间跳，每次跳都让渲染输入失效 ⇒ 每个实例每 100 ms 重算一整次合成（用户
     /// 看到的就是"无限渲染"），而且一条轨被旁通会把另一条轨一起静音。
     ///
-    /// 【那"播放实例没有视图定时器"怎么办】采样点有两个，且都**逐实例**跑：视图定时器
-    /// （`poll_host_bypass`）与模型收口（`refresh_host_state_for_model` 对每个 owner 调
-    /// 一次）。后者与窗口开不开无关，所以播放实例也会被采到。
+    /// 【这里给的是"最后一次确定读到的结论"，不保证新鲜】采样点有三个：视图定时器
+    /// （`poll_host_bypass`）、模型收口（`refresh_host_state_for_model`）与会话心跳
+    /// （`service_host_bypass_samples`），其中任何一次都可能失败。失败**不清空**上一次
+    /// 的结论 —— 否则"用户已经旁通"这件事会在缓存里凭空消失，下一秒的门就重新打开。
+    /// 新鲜度由 [`Self::fresh_host_bypass`] 单独回答：**要据此跳过渲染，必须用它**。
     pub(crate) fn host_bypass(&self) -> crate::host::reaper::FxBypass {
         crate::host::reaper::FxBypass::decode(self.host_bypass.load(Ordering::Acquire))
     }
 
-    /// 距上一次成功采样旁通读数有多久（`None` = 从未采过）。
+    /// **可以用来投票的**旁通读数：确定 + 新鲜，二者缺一不可。
+    ///
+    /// 【为什么必须带新鲜度】三种"没有答案"在旧实现里长得一样，后果却完全不同：
+    ///   * 从来没有读到过（刚绑上的播放实例、非 REAPER 宿主）—— 把它当否决票，
+    ///     整个文档的门就永远关着，正是用户报的"旁通了还在渲染"；
+    ///   * 读到过但已经过期（宿主换轨 / 切工程 / 卸载 FX 之后）—— 把它当旁通，
+    ///     用户解除旁通后没有声音；
+    ///   * 刚刚读失败（宿主忙，`on_host` 250 ms 超时）—— 与过期同罪。
+    ///
+    /// 一律返回 `None` = 这一票弃权。门只在**有人明确说"我还能出声"或"我不出声"**
+    /// 时才有结论；没有票就回到改动前的行为（照常渲染）。
+    pub(crate) fn fresh_host_bypass(&self) -> Option<crate::host::reaper::FxBypass> {
+        let verdict = self.host_bypass();
+        if verdict == crate::host::reaper::FxBypass::Unknown {
+            return None;
+        }
+        self.host_bypass_verdict_age()
+            .filter(|age| *age <= BYPASS_VERDICT_TTL)
+            .map(|_| verdict)
+    }
+
+    /// 距上一次**尝试**采样旁通读数有多久（`None` = 从未采过）。
     ///
     /// 【为什么要把它报出来】`Unknown`（宿主不提供这一族 API）与"很久没采过"（没找到
     /// 采样时机）是两件不同的事，而它们在读数上长得一样。诊断包带上这个年龄，
@@ -485,40 +541,90 @@ impl ExtensionOwner {
     /// 【为什么采样点不放在 `prepare` 里】`fx_bypass_state` 只在**宿主线程**上是同步的；
     /// 别的线程会投递并等 250 ms，而 `prepare` 从不跑在宿主线程上（actor / 模型线程）。
     pub(crate) fn host_bypass_age(&self) -> Option<std::time::Duration> {
-        self.last_bypass_sample
-            .lock_or_recover()
-            .map(|at| at.elapsed())
+        elapsed_since(self.host_bypass_sample_ms.load(Ordering::Acquire))
+    }
+
+    /// 距上一次**确定**读数有多久（`None` = 从来没读到过）。
+    pub(crate) fn host_bypass_verdict_age(&self) -> Option<std::time::Duration> {
+        #[cfg(test)]
+        if let Some(simulated) = self.simulated_bypass_age() {
+            return Some(simulated);
+        }
+        elapsed_since(self.host_bypass_verdict_ms.load(Ordering::Acquire))
+    }
+
+    /// 测试用：读"被做旧"的时长（生产构建里没有这个概念）。
+    #[cfg(test)]
+    fn simulated_bypass_age(&self) -> Option<std::time::Duration> {
+        match self.bypass_age_override_ms.load(Ordering::Acquire) {
+            0 => None,
+            millis => Some(std::time::Duration::from_millis(millis)),
+        }
+    }
+
+    /// 距上一次**尝试**采样过了多少毫秒；`u64::MAX` = 从未采过。
+    ///
+    /// 【为什么用"毫秒 + 哨兵"而不是 `Option<Instant>`】采样由三个线程上的三条通道驱动，
+    /// 其中会话心跳要挑"最该重采的那一个实例"：为读一个时间戳取锁没有必要，而这个值
+    /// 只需要单调、可比较。
+    pub(crate) fn host_bypass_sample_age_ms(&self) -> u64 {
+        #[cfg(test)]
+        if let Some(simulated) = self.simulated_bypass_age() {
+            return simulated.as_millis() as u64;
+        }
+        let at = self.host_bypass_sample_ms.load(Ordering::Acquire);
+        if at == 0 {
+            u64::MAX
+        } else {
+            bypass_clock_ms().saturating_sub(at)
+        }
     }
 
     /// 测试用：直接设置旁通读数（没有宿主就采不到样）。
     #[cfg(test)]
     pub(crate) fn set_host_bypass_for_tests(&self, state: crate::host::reaper::FxBypass) {
+        self.bypass_age_override_ms.store(0, Ordering::Release);
+        let now = bypass_clock_ms();
         self.host_bypass.store(state.encode(), Ordering::Release);
+        self.host_bypass_sample_ms.store(now, Ordering::Release);
+        // `Unknown` 在语义上是"没有读数"，时间戳必须一起清掉，否则
+        // `fresh_host_bypass` 会把一个不存在的结论当成刚读到过。
+        let stamp = if state == crate::host::reaper::FxBypass::Unknown {
+            0
+        } else {
+            now
+        };
+        self.host_bypass_verdict_ms.store(stamp, Ordering::Release);
+    }
+
+    /// 测试用：把读数**做旧**，用来钉住"过期读数不得再投票"。
+    #[cfg(test)]
+    pub(crate) fn age_host_bypass_for_tests(&self, age: std::time::Duration) {
+        self.bypass_age_override_ms
+            .store(age.as_millis() as u64, Ordering::Release);
     }
 
     /// UI 定时器路径：按自己的节奏采样旁通读数（100 ms 一次）。
     ///
-    /// 【为什么不用枚举那套节流】见 [Self::host_bypass] 与 `last_bypass_sample` 的说明：
-    /// 枚举会退避到秒级，而旁通必须在一个 tick 的量级内被看见。
+    /// 【为什么不用枚举那套节流】见 [Self::host_bypass] 与 `host_bypass_sample_ms` 的
+    /// 说明：枚举会退避到秒级，而旁通必须在一个 tick 的量级内被看见。
     pub(super) fn poll_host_bypass(&self) {
-        const INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
-        let now = std::time::Instant::now();
-        {
-            let mut last = self.last_bypass_sample.lock_or_recover();
-            if last.is_some_and(|at| now.duration_since(at) < INTERVAL) {
-                return;
-            }
-            *last = Some(now);
+        const INTERVAL_MS: u64 = 100;
+        if self.host_bypass_sample_age_ms() < INTERVAL_MS {
+            return;
         }
         self.sample_host_bypass();
     }
 
-    /// 只刷新旁通缓存（返回"读数是否变化"），**不**做任何失效动作。
+    /// 只刷新旁通缓存（返回"**确定**读数是否变化"），**不**做任何失效动作。
     ///
     /// 【为什么要与 [Self::sample_host_bypass] 分开】文档级失效会遍历全部 owner 并要求
     /// 它们重排；而重排是否真的发生取决于**各自**缓存里的旁通读数。若那时缓存还是旧的，
     /// 播放实例会以"我被旁通了"为由直接返回 —— 用户解除旁通后仍然没有声音。所以
     /// 失效路径必须先刷新缓存，再通知重排。
+    ///
+    /// 【为什么读失败时不写缓存】见 [Self::host_bypass]：一次 250 ms 超时不是"结论"，
+    /// 把上一次的 `bypassed` 抹成 `unknown` 正是"旁通了还在渲染"的成因之一。
     pub(crate) fn refresh_host_bypass_cache(&self) -> bool {
         if !self.is_bound() || self.is_closed() {
             return false;
@@ -528,27 +634,40 @@ impl ExtensionOwner {
         };
         let authorized = || !self.is_closed();
         let state = host.fx_bypass_state(&authorized);
+        let now = bypass_clock_ms();
+        self.host_bypass_sample_ms.store(now, Ordering::Release);
+        if state == crate::host::reaper::FxBypass::Unknown {
+            return false;
+        }
         // 编码只有一个来源（`FxBypass::encode`）：写侧、读侧、诊断包必须对同一个字节
         // 给出同一个结论，否则"旁通了还在渲染"会在两侧各有一个互相矛盾的答案。
-        let encoded = state.encode();
-        let previous = self.host_bypass.swap(encoded, Ordering::AcqRel);
-        // 【采样时刻与读数一起记】诊断包要用它分开"读不出来"与"很久没采过"；
-        // `poll_host_bypass` 的节流也读它，于是收口时的那次采样同样会推迟下一次轮询
-        // （两次采样挨得太近没有意义，而 `fx_bypass_state` 是一族宿主调用）。
-        *self.last_bypass_sample.lock_or_recover() = Some(std::time::Instant::now());
-        if previous == encoded {
+        let previous = crate::host::reaper::FxBypass::decode(
+            self.host_bypass.swap(state.encode(), Ordering::AcqRel),
+        );
+        self.host_bypass_verdict_ms.store(now, Ordering::Release);
+        if previous == state {
             return false;
         }
         // 【为什么这条是 WARN】默认档（`verbosity=low`）下 `log::info!` 一行都看不见 ——
         // 于是用户旁通了 FX、插件还在合成，而日志里**没有任何痕迹**能证明这个功能
         // 存在（上一轮改完无法验证，正是这个原因）。限流器保证稳态下最多一行。
+        //
+        // 【为什么按"播放 / 编辑"分桶，而不是所有实例共用一个键】宿主的播放实例数量由
+        // 它自己决定（REAPER 每个 item 一个），而限流器是**按键**分桶的：共用一个键时，
+        // 第一个实例的行会把其余实例的行全部挤进 `[throttled]` —— 日志里于是只剩编辑
+        // 实例的声音，而"播放实例根本没读到旁通"这件事被静默掉。那正是本轮排查卡住的
+        // 地方。两个桶既保住了"哪一类实例在说话"，又不随实例数增长。
         hifishifter_kernel::log_limiter::emit_limited_key(
             log::Level::Warn,
-            "ara.host-bypass",
+            if self.renders_playback() {
+                "ara.host-bypass.playback"
+            } else {
+                "ara.host-bypass.editor"
+            },
             format_args!(
                 "[ara] writer {} host bypass: {} -> {}",
                 self.writer_id(),
-                crate::host::reaper::FxBypass::decode(previous).as_str(),
+                previous.as_str(),
                 state.as_str()
             ),
         );

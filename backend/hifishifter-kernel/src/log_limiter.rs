@@ -127,10 +127,10 @@ pub fn emit_limited(
 ///
 /// 【为什么键集合有上限】见 [`DYNAMIC_KEY_CAPACITY`]：超出后淘汰最久未见者，
 /// 保证"一直有新错误"不会把这张表变成内存泄漏。
-pub fn emit_limited_key(level: log::Level, key: &str, args: std::fmt::Arguments<'_>) {
+pub fn emit_limited_key(level: log::Level, key: &str, args: std::fmt::Arguments<'_>) -> bool {
     let filter = level_filter_of(level);
     if filter > log::STATIC_MAX_LEVEL || filter > log::max_level() {
-        return;
+        return false;
     }
 
     let now = Instant::now();
@@ -148,17 +148,23 @@ pub fn emit_limited_key(level: log::Level, key: &str, args: std::fmt::Arguments<
         limited_decision(state, now, RATE_LIMIT_WINDOW)
     };
 
-    if let EmitDecision::Emit {
-        previously_suppressed,
-    } = decision
-    {
-        if previously_suppressed > 0 {
-            log::log!(
-                level,
-                "[throttled] {key} — {previously_suppressed} message(s) suppressed",
-            );
+    match decision {
+        EmitDecision::Emit {
+            previously_suppressed,
+        } => {
+            if previously_suppressed > 0 {
+                log::log!(
+                    level,
+                    "[throttled] {key} — {previously_suppressed} message(s) suppressed",
+                );
+            }
+            log::log!(level, "{args}");
+            true
         }
-        log::log!(level, "{args}");
+        // 【为什么要回报"这一次没写出去"】调用方可能按"结论变化"去重（例如旁通门的
+        // 判定）：被限流吞掉的那一次如果被调用方当成"已经写过"，一条真正有用的跃迁
+        // 就永久消失了。
+        EmitDecision::Suppress => false,
     }
 }
 

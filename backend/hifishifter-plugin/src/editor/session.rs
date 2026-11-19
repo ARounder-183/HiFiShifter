@@ -727,6 +727,12 @@ pub struct EditorSession {
     pub(super) error: Mutex<Option<String>>,
     render_error: Mutex<Option<String>>,
     render_requested: AtomicBool,
+    /// 上一次写进日志的"旁通门结论"（`0` = 还没写过 / `1` = 照常渲染 / `2` = 跳过作业）。
+    ///
+    /// 【为什么只记结论不记读数】这条日志的用途是回答"旁通了为什么还在渲染"，而那只有
+    /// 结论**变化**的那一刻才看得出来；按变化记，一份几小时的现场日志只会多出个位数行，
+    /// 按采样记就是每秒几十行。
+    bypass_gate_logged: AtomicU8,
     /// 播放位置采样的节奏读数（见 `note_playhead_sample`）。
     playhead_gaps: Mutex<PlayheadGaps>,
     /// "在播、但位置一秒没动"的观测起点（见 `note_transport_stall`）。
@@ -1204,6 +1210,7 @@ impl EditorSession {
             error: Mutex::new(None),
             render_error: Mutex::new(None),
             render_requested: AtomicBool::new(false),
+            bypass_gate_logged: AtomicU8::new(0),
             playhead_gaps: Mutex::new(PlayheadGaps::default()),
             transport_stall: Mutex::new(None),
             pending_since: Mutex::new(None),
@@ -1660,6 +1667,14 @@ impl EditorSession {
                     retry.rearm();
                 }
                 session.refresh_host();
+                // 【旁通读数的心跳】三个采样点里有两个只覆盖**可见**实例（视图定时器要开
+                // 窗口、模型收口要宿主改模型），而 REAPER 的播放实例两样都没有。用户按下
+                // 旁通之后它的缓存可以一直停在"上一次采样时的 active"，而渲染门正是拿它
+                // 做的判据 —— 用户看到的就是"旁通了还在渲染"。这里由会话 actor 补一条与
+                // 窗口无关的节奏（一轮只采一个，见方法的说明）。
+                if let Some(document) = session.document() {
+                    document.service_host_bypass_samples();
+                }
                 // 【为什么补给线与自动 promote 挂在会话 actor 上】它是**周期性**维护，
                 // 且必须在音频线程取用备用缓冲之前完成。此前它挂在 WebView 的 20ms
                 // 定时器上 —— 于是关掉插件窗口就断录（2 粒 × 8 秒 = 24 秒后 `NoSpare`）。
@@ -2162,7 +2177,9 @@ impl EditorSession {
         //
         // 【只在"确定旁通"时跳】`Unknown` 一律照旧：那是所有非 REAPER 宿主与所有
         // 读不出读数的情况，跳过渲染会让它们静音。
-        if document.host_bypass().is_bypassed() {
+        let (bypass, votes) = document.bypass_sample();
+        self.log_bypass_gate(bypass, &votes);
+        if bypass.is_bypassed() {
             // 【必须收口】否则 `pending` 恒真：`generation != applied` 会让状态栏
             // 永远显示"正在应用"，而实际上这一轮**故意**什么都没做。
             //
@@ -2184,6 +2201,59 @@ impl EditorSession {
             return Err("pitch analysis pending".into());
         }
         Ok(Some((document, generation)))
+    }
+    /// 把"这一轮的门是怎么算出来的"写成一行 —— **只在结论变化时**写。
+    ///
+    /// 【为什么值得一条专用日志】用户报障是"旁通了还在渲染"，而现场日志里只能看到
+    /// `writer N host bypass: active -> bypassed`（某个实例的读数变了），看不到**门**的
+    /// 结论、参加投票的是谁、谁没投票。三者正好是三种不同的故障：
+    ///   * 票表里没有任何 `bypassed` ⇒ 没有实例被采样到（采样通道断了）；
+    ///   * 有人投 `active` ⇒ 那条轨真的还在出声（本来就不该跳过）；
+    ///   * 票过期（年龄 > 5 s）⇒ 采样跟不上，读数作废（回到"照常渲染"）。
+    ///
+    /// 没有这一行，三种成因在日志里长得一模一样（同一个限流键、同样静默）。
+    ///
+    /// 【为什么按"结论变化"去重】每次用户编辑都会走到这里；按采样写就是每秒几十行，
+    /// 而"门有没有变"才是要回答的问题。用 `emit_limited_key` 的返回值确认**真的写出去
+    /// 了**再记账：被限流吞掉的那一次不能当成"已经报过"。
+    fn log_bypass_gate(
+        &self,
+        verdict: crate::host::reaper::FxBypass,
+        votes: &[(u64, bool, crate::host::reaper::FxBypass, Option<u64>)],
+    ) {
+        let decision = if verdict.is_bypassed() { 2_u8 } else { 1 };
+        if self.bypass_gate_logged.load(Ordering::Acquire) == decision {
+            return;
+        }
+        let table = votes
+            .iter()
+            .map(|(writer, playback, reading, age)| {
+                format!(
+                    "{writer}{}:{}{}",
+                    if *playback { "p" } else { "e" },
+                    reading.as_str(),
+                    age.map_or_else(|| "/never".to_owned(), |age| format!("/{age}ms"))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let written = hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.bypass.gate",
+            format_args!(
+                "[ara] bypass gate: {}; writers(e/p=editor/playback)=[{}]; background job {}",
+                verdict.as_str(),
+                table,
+                if verdict.is_bypassed() {
+                    "skipped"
+                } else {
+                    "runs"
+                }
+            ),
+        );
+        if written {
+            self.bypass_gate_logged.store(decision, Ordering::Release);
+        }
     }
     fn start_render(self: &Arc<Self>, ticket: u64) -> Result<(), String> {
         if self.is_capture() {

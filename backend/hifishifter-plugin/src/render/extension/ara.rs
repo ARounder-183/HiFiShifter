@@ -350,7 +350,12 @@ impl ExtensionOwner {
         // 合成结果**没有任何人会取用** —— ARA 的播放渲染器在旁通期间根本不会被调用。
         // 判据只认宿主自己报的读数（见 `sample_host_bypass`）：非 REAPER 宿主恒为
         // Unknown，走的是改动前的行为。
-        if self.host_bypass().is_bypassed() {
+        //
+        // 【为什么用 `fresh_host_bypass`】`host_bypass` 给的是"最后一次确定读到的
+        // 结论"，它可能已经过期（宿主换轨 / 切工程 / 卸载 FX）。拿过期读数挡渲染，
+        // 用户解除旁通后就没有声音了；而"从没读到过"更不是旁通。两者都必须回到
+        // 改动前的行为（照常渲染）。
+        if self.fresh_host_bypass() == Some(crate::host::reaper::FxBypass::Bypassed) {
             return;
         }
         // 源/assignment撤销在文档事务内清理；此函数只排队，不能在事务外clear旧任务刚发布的音频。
