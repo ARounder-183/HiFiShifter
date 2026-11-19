@@ -1414,7 +1414,6 @@ function AppInner() {
             const state = getPluginApplySnapshot().state;
             if (!state) return;
             const active = state.rendering_active === true;
-            const stale = state.render_audible_stale === true;
             // 【进度也以快照为准】事件只是快速更新；轮询每 250 ms 会把当前进度
             // 带回来。`rendering_active` 从 false → true 时清掉上一轮的高水位，
             // 否则新一轮的 0% 会被旧的 100% 挡住。
@@ -1458,23 +1457,25 @@ function AppInner() {
                 );
                 return;
             }
-            // 【stale 时不熄灭】此时右侧 PluginApplyStatus 正在显示"正在合成"，
-            // 左侧那片由它单点承担；事件/快照的 active:false 只说明任务刚结束，
-            // 而 audible_state 仍可能是 stale。
-            if (!stale) {
-                if (!originalRenderActiveRef.current && !backgroundRenderActiveRef.current) {
-                    return;
-                }
-                originalRenderActiveRef.current = false;
-                backgroundRenderActiveRef.current = false;
-                dispatch(
-                    setPlaybackRenderingState({
-                        active: false,
-                        target: "background",
-                        blocking: false,
-                    }),
-                );
+            // 【stale 不再让位】旧约定是"stale 时右侧 PluginApplyStatus 显示正在合成，
+            // 左侧让位"—— 而 7ce4c0216 之后状态片只读快照的 `rendering_active`
+            // （见 useRenderStatus / AppStatusProgressChips 的说明），stale 只作为
+            // 独立读数保留。这里若仍按 stale 拒绝熄灭，被取消的渲染会让
+            // originalRenderActiveRef 永远为 true —— blocking 镜像不落，下方播放轮询
+            // 的 blocking 守卫就再也不采样传输态，直到下一次渲染成功为止。快照说
+            // "不在渲染"就必须熄灭。
+            if (!originalRenderActiveRef.current && !backgroundRenderActiveRef.current) {
+                return;
             }
+            originalRenderActiveRef.current = false;
+            backgroundRenderActiveRef.current = false;
+            dispatch(
+                setPlaybackRenderingState({
+                    active: false,
+                    target: "background",
+                    blocking: false,
+                }),
+            );
         };
         const unsubscribeApply = isPluginMode()
             ? (() => {
