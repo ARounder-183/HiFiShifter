@@ -226,6 +226,18 @@ pub fn sanitize_finite_in_place(buf: &mut [f32]) {
 ///
 /// `ramp < 2` 时不做任何事（没有可平滑的空间）。
 pub fn smooth_binary_gate(gate: &mut [f32], ramp: usize) {
+    let mut prefix = Vec::new();
+    smooth_binary_gate_with_prefix(gate, ramp, &mut prefix);
+}
+
+/// [`smooth_binary_gate`] 的复用形态：前缀和写进调用方给的缓冲。
+///
+/// 【为什么要有这个变体】分块渲染的调用方（WORLD 干/湿门）**每块**调一次平滑，
+/// 块长上限 6 s（48 kHz 下前缀和约 1.15 MB）—— 在函数里现分配意味着长素材每块
+/// 一对兆级 alloc/free。把缓冲暴露成参数，调用方就能像 `vocode_pitch_shift_chunked`
+/// 复用 `win` / `x_f64` 那样跨块复用；一次性的调用方（时间拉伸的静音门）继续用
+/// [`smooth_binary_gate`]，行为逐位相同。
+pub fn smooth_binary_gate_with_prefix(gate: &mut [f32], ramp: usize, prefix: &mut Vec<f32>) {
     let n = gate.len();
     if ramp < 2 || n == 0 {
         return;
@@ -234,7 +246,8 @@ pub fn smooth_binary_gate(gate: &mut [f32], ramp: usize) {
     let tail = ramp - half;
 
     // 前缀和：把每个样本的窗口求和从 O(ramp) 降到 O(1)。
-    let mut prefix = Vec::with_capacity(n + 1);
+    prefix.clear();
+    prefix.reserve(n + 1);
     prefix.push(0.0f32);
     let mut acc = 0.0f32;
     for &g in gate.iter() {

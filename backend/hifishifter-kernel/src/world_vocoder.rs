@@ -289,6 +289,19 @@ fn close_pitch_gaps(frames: &mut [PitchFrame], frame_period_ms: f64) {
     }
 }
 
+thread_local! {
+    /// 干 / 湿门的复用缓冲：`target` 是逐样本权重，`prefix` 是居中平滑的前缀和。
+    ///
+    /// 【为什么是 thread_local 而不是函数内分配】`hand_back_unpitched_frames` 由
+    /// [`vocode_pitch_shift_chunked`] **逐块**调用，块长上限 6 s（48 kHz 下两个缓冲
+    /// 各约 1.15 MB）—— 现分配意味着长素材每一块都要做两次兆级 alloc/free，与
+    /// `vocode_pitch_shift_chunked` 循环外复用 `win` / `x_f64` / `seg_f32` 的纪律
+    /// 相悖。WORLD 合成固定跑在渲染 worker 线程上，thread_local 命中稳定；缓冲
+    /// 随最大块长增长后常驻（与那几个循环外缓冲同量级）。
+    static GATE_SCRATCH: std::cell::RefCell<(Vec<f32>, Vec<f32>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
 /// 干 / 湿门：**音高线上有值**的帧用合成（湿），其余原样混回（干）。
 ///
 /// 【为什么判据就是音高线，而不是“这一帧有没有 F0”或“这一帧响不响”】声码器能改变的
@@ -311,30 +324,35 @@ fn hand_back_unpitched_frames(out: &mut [f64], dry: &[f64], pitched: &[bool], fp
     let fade_samples = ((fade_ms / 1000.0) * (fs.max(1) as f64)).round().max(0.0) as usize;
     let n = out.len().min(dry.len());
 
-    // 1) 逐样本求目标权重：1 = 用合成（湿），0 = 用原始（干）。
-    let mut target = vec![0.0f32; n];
-    for (si, t) in target.iter_mut().enumerate() {
-        let t_ms = (si as f64) * 1000.0 / (fs.max(1) as f64);
-        let fi = (t_ms / fp.max(0.1)).floor().max(0.0) as usize;
-        *t = if pitched.get(fi).copied().unwrap_or(false) {
-            1.0
-        } else {
-            0.0
-        };
-    }
+    GATE_SCRATCH.with(|scratch| {
+        let (target, prefix) = &mut *scratch.borrow_mut();
 
-    // 2) 对目标权重做**居中**滑动平均，得到 10 ms 的平滑过渡。
-    //
-    // 【为什么是居中而不是“跟随上一个样本的斜坡”】居中平滑只依赖目标权重在
-    // [i-fade/2, i+fade/2] 内的取值，因此是**位置的函数，与分块无关** —— 同一位置
-    // 无论被哪个块处理都得到同一个增益。旧实现用一个跨样本的状态机，逐块调用时每块
-    // 都从 0 重启，于是每个块首被强行淡入一次（每 6s 一次）。
-    crate::seam::smooth_binary_gate(&mut target, fade_samples);
+        // 1) 逐样本求目标权重：1 = 用合成（湿），0 = 用原始（干）。
+        target.clear();
+        target.resize(n, 0.0f32);
+        for (si, t) in target.iter_mut().enumerate() {
+            let t_ms = (si as f64) * 1000.0 / (fs.max(1) as f64);
+            let fi = (t_ms / fp.max(0.1)).floor().max(0.0) as usize;
+            *t = if pitched.get(fi).copied().unwrap_or(false) {
+                1.0
+            } else {
+                0.0
+            };
+        }
 
-    for si in 0..n {
-        let w = target[si] as f64;
-        out[si] = out[si] * w + dry[si] * (1.0 - w);
-    }
+        // 2) 对目标权重做**居中**滑动平均，得到 10 ms 的平滑过渡。
+        //
+        // 【为什么是居中而不是“跟随上一个样本的斜坡”】居中平滑只依赖目标权重在
+        // [i-fade/2, i+fade/2] 内的取值，因此是**位置的函数，与分块无关** —— 同一位置
+        // 无论被哪个块处理都得到同一个增益。旧实现用一个跨样本的状态机，逐块调用时每块
+        // 都从 0 重启，于是每个块首被强行淡入一次（每 6s 一次）。
+        crate::seam::smooth_binary_gate_with_prefix(target, fade_samples, prefix);
+
+        for si in 0..n {
+            let w = target[si] as f64;
+            out[si] = out[si] * w + dry[si] * (1.0 - w);
+        }
+    });
 }
 
 fn cleanup_f0_inplace(f0: &mut [f64], frame_period_ms: f64, f0_floor: f64, f0_ceil: f64) {
