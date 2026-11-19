@@ -18,6 +18,8 @@ mod folder;
 mod fx_state;
 /// 本实例在宿主里挂在哪里（轨道 FX 链 / take FX 链 / 没有）。
 mod placement;
+/// take 的 Pitch **包络对象**：读写走 Envelope API（item chunk 在 take FX 下写不进去）。
+mod take_env;
 /// 把多个实例的旁通读数合成"这份工程还会不会出声"（判据见 [fx_state::combine]）。
 pub(crate) use fx_state::combine as combine_fx_bypass;
 pub(crate) use fx_state::FxBypass;

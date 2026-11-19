@@ -960,27 +960,75 @@ impl HostClipTarget {
         }
         Ok(())
     }
-    /// 读该 take 的音高包络（chunk 里的 `<PITCHENV>`）。
+    /// 读该 take 的音高包络。
+    ///
+    /// 【为什么优先读包络对象】take FX 放置下，要读的那个 item 恰好就是挂着本插件的 item，
+    /// 而它的 item chunk 里塞着整个插件状态（真机工程里是几百 KB）。包络自己的 chunk 只有
+    /// 几十个点、几十字节 —— 而且这条读数在"item chunk 写回被宿主拒绝"时仍然可用。
     pub(crate) fn take_pitch_points(
         &self,
         authorized: &impl Fn() -> bool,
     ) -> Result<super::take_pitch::TakePitch, String> {
+        if let Some(envelope) = self
+            .host
+            .take_pitch_envelope(self.take as *mut c_void, authorized)?
+        {
+            let text = self.host.envelope_state_chunk(envelope, authorized)?;
+            return super::take_pitch::read_block(&text);
+        }
         let chunk = self.item_state_chunk(authorized)?;
         super::take_pitch::read_take_pitch(&chunk, &self.geometry.take_id)
     }
     /// 用 `points` 整块替换该 take 的音高包络（空列表 = 删除）。
+    ///
+    /// 【三条路径，按"最不可能打扰宿主"排序】
+    /// 1. **包络对象已存在** ⇒ `SetEnvelopeStateChunk`。真机实测这条路在 take FX（本插件
+    ///    在线、item chunk 写回被拒）时仍然成功，而且不重建 item —— 轨道 FX 下也更快、
+    ///    更安全（不会顺手重建同一条 item 上的别的 take FX）。
+    /// 2. **没有包络** ⇒ 回到 item chunk 的逐字节路径（轨道 FX 下的历史行为，也是"创建"
+    ///    包络唯一不依赖宿主动作的办法）。
+    /// 3. 第 2 步被拒（take FX 下的**预期**行为，见 `take_env` 的模块文档）⇒ 借宿主的
+    ///    `Take: Toggle take pitch envelope` 建一条，再走第 1 条路。
     pub(crate) fn write_take_pitch_points(
         &self,
         points: &[hifishifter_kernel::pitch_bridge::EnvelopePoint],
         authorized: &impl Fn() -> bool,
     ) -> Result<(), String> {
-        let chunk = self.item_state_chunk(authorized)?;
-        let rewritten =
-            super::take_pitch::rewrite_take_pitch(&chunk, &self.geometry.take_id, points)?;
-        if rewritten == chunk {
+        let take = self.take as *mut c_void;
+        if let Some(envelope) = self.host.take_pitch_envelope(take, authorized)? {
+            return self.host.set_envelope_state_chunk(
+                envelope,
+                &super::take_pitch::block_text(points),
+                authorized,
+            );
+        }
+        if points.is_empty() {
+            // 没有包络就没有可删的东西：连 item chunk 都不必读。
             return Ok(());
         }
-        self.set_item_state_chunk(&rewritten, authorized)
+        let written = (|| -> Result<(), String> {
+            let chunk = self.item_state_chunk(authorized)?;
+            let rewritten =
+                super::take_pitch::rewrite_take_pitch(&chunk, &self.geometry.take_id, points)?;
+            if rewritten == chunk {
+                return Ok(());
+            }
+            self.set_item_state_chunk(&rewritten, authorized)
+        })();
+        match written {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let envelope = self
+                    .host
+                    .create_take_pitch_envelope(self.item as *mut c_void, take, authorized)
+                    .map_err(|fallback| format!("{error}; {fallback}"))?;
+                self.host.set_envelope_state_chunk(
+                    envelope,
+                    &super::take_pitch::block_text(points),
+                    authorized,
+                )
+            }
+        }
     }
     /// 宿主此刻报告的方向位（`PCM_Source_GetSectionInfo`）。
     ///

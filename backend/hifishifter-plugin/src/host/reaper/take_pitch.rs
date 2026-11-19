@@ -122,11 +122,60 @@ pub(super) fn rewrite_take_pitch(
     Ok(text)
 }
 
-/// 写一块 `<PITCHENV>`；`points` 为空时什么都不写（等价于删除）。
+/// 从一份**包络自己的** chunk（`GetEnvelopeStateChunk`）里读点。
+///
+/// 【为什么与 `read_take_pitch` 分开】那份要先在 item chunk 里按 GUID 找到"这一条 take 的
+/// 字段区"；包络对象给的本来就是一块 `<PITCHENV>`，没有 take 上下文可找。两份都只做
+/// "把 `PT` 行读成点"，不变量相同，输入不同。
+pub(super) fn read_block(text: &str) -> Result<TakePitch, String> {
+    take_chunk::check_budget(text)?;
+    if !text.contains("<PITCHENV") {
+        return Ok(TakePitch::default());
+    }
+    let mut points = Vec::new();
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.first() != Some(&"PT") || fields.len() < 3 {
+            continue;
+        }
+        let time = fields[1]
+            .parse::<f64>()
+            .map_err(|_| "invalid PITCHENV point time")?;
+        let value = fields[2]
+            .parse::<f64>()
+            .map_err(|_| "invalid PITCHENV point value")?;
+        if !time.is_finite() || !value.is_finite() {
+            continue;
+        }
+        points.push(EnvelopePoint::new(time, value));
+    }
+    points.sort_by(|a, b| a.time.total_cmp(&b.time));
+    Ok(TakePitch {
+        points,
+        present: true,
+    })
+}
+
+/// 交给 `SetEnvelopeStateChunk` 的整块文本（无缩进）。
+///
+/// 【为什么空点集也返回一个**只有头**的块】真机实测：把只有 `ACT/VIS/…` 的 `<PITCHENV>`
+/// 交给宿主，宿主会把整条包络删掉 —— 那正是"清空一条曲线"的语义。item chunk 那条路相反
+/// （空块会被宿主丢弃，所以那边靠"整块不写"表达删除）。
+pub(super) fn block_text(points: &[EnvelopePoint]) -> String {
+    block_lines("", points).join("\n") + "\n"
+}
+
+/// 写一块 `<PITCHENV>`；`points` 为空时什么都不写（等价于删除，用于 item chunk）。
 fn push_envelope_block(out: &mut Vec<String>, indent: &str, points: &[EnvelopePoint]) {
     if points.is_empty() {
         return;
     }
+    out.extend(block_lines(indent, points));
+}
+
+/// 一块 `<PITCHENV>` 的全部行。
+fn block_lines(indent: &str, points: &[EnvelopePoint]) -> Vec<String> {
+    let mut out = Vec::with_capacity(points.len() + 8);
     // 显示范围按最大偏移取整（最少 ±3 半音），与独立 App 的导出同一口径 ——
     // 范围太小会把曲线画在框外，用户以为"没写进去"。
     let max_abs = points
@@ -147,6 +196,7 @@ fn push_envelope_block(out: &mut Vec<String>, indent: &str, points: &[EnvelopePo
         ));
     }
     out.push(format!("{indent}>"));
+    out
 }
 
 fn indent_of(line: &str) -> &str {

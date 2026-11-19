@@ -103,6 +103,45 @@
 另外把**自闭合行**（`<KIND …>`）按"不开不关"处理：RPPXML 允许叶子块写在一行里，把它当
 "开"会让栈在文件末尾多一层，整份 chunk 被判成不完整。
 
+## 三、take FX 下 **item chunk 根本写不进去**（真机实测，深一层）
+
+把上面两条修完之后在真机上复测，又发现第三条 —— 它才是"take 音高转换没反应"的最后一道门：
+
+| 场景（REAPER 7.85 实测） | `SetItemStateChunk` 的答复 |
+|---|---|
+| 普通 item（无 take FX） | `true` |
+| item + ReaEQ（普通 VST take FX，在线） | `true` |
+| item + 本插件（ARA take FX，在线） | **`false`** |
+| item + 本插件（ARA take FX，**offline**） | `true` |
+
+连"把刚读到的 chunk 原样写回"都被拒（`isundo` / undo 块 / 改一个字节，三种写法全 `false`）。
+结论：**宿主不允许在 ARA 实例在线时重建这个 item 的 FX 链** —— 而 take FX 放置下，
+"要改包络的那个 item"恰好就是挂着本插件的那个 item。
+
+于是任何走 chunk 的写回（take 音高、倒放）在 take FX 下必然失败，现场就是
+`[pitch] auto take-pitch write failed: REAPER rejected the item state`。
+
+### 修法：写**包络对象**，不碰 item
+
+真机实测这条路完全可用（本插件在线时照样成功）：
+
+- `GetTakeEnvelopeByName(take, "Pitch")` → 包络对象；
+- `GetEnvelopeStateChunk` / `SetEnvelopeStateChunk` 读/整块替换它的点；
+- 只有头没有 `PT` 的块 ⇒ 宿主删掉整条包络（"清空曲线"的语义）。
+
+于是 `write_take_pitch_points` 变成三条路径，按"最不打扰宿主"排序：
+
+1. **包络已存在** ⇒ 写包络（两种放置都走这条：不重建 item，也不会顺手重建同一条
+   item 上的别的 take FX）；
+2. **没有包络** ⇒ 回到 item chunk 的逐字节路径（轨道 FX 下的历史行为）；
+3. 第 2 步被拒（take FX 下的**预期**行为）⇒ 借宿主的
+   `Take: Toggle take pitch envelope` 动作建一条，再写包络。
+
+【创建为什么只能用动作】ARA 2.0 与 REAPER 的扩展 API 都没有"新建一条 take 包络"的
+入口；`GetTakeEnvelopeByName` 在没有包络时返回空指针，而写 chunk 正是被拒的那条路。
+动作按**名字**解析（不是硬编码 id），调用前后**记录并恢复全部 item 的选择位** —— 动作
+作用于所有选中的 item，不改选择就等于给用户的每条选中片段都加一条音高包络。
+
 ## 没动的东西
 
 - 三态 `FxBypass` 与它的编码：`Unknown` 仍然是"照改动前渲染"，仍然是 `AtomicU8` 的默认值。
@@ -110,11 +149,27 @@
 - 逐 FX 的 enabled / offline 判据、类名匹配、"查不到就 `Unknown`、绝不跨链回退"。
 - 写回的全部前置校验（GUID 定位、多 take 只改自己那条、除目标块外逐字节保留）。
 
-## 仍需真机复核（本机没有 REAPER 可跑）
+## 真机复核（REAPER 7.85/x64，本机，2026-11-19 晚）
 
-1. `TakeFX_GetEnabled(take, 0)` 在 REAPER 里对**未旁通**的 take FX 返回 true（本次修复没有改它，
-   但它是 take 链上仅剩的那个"宿主说了算"的读数）。新的日志行会直接给出 `enabled=…`。
-2. take FX 的 ARA 实例在 item chunk 里的体积上限：现在按 8 MiB 预算读，超出会有一行明确的
-   "unusable" 形状日志。
-3. 多 take item（`TAKE SEL` / `TAKE NULL`）上的"转换为 take 包络"与"倒放"各来一次 ——
-   本次的两条修改都在这条路上。
+用 `reaper.exe -newinst -nosplash -new <script.lua>` 直接驱动一个临时实例（不碰用户的工程与配置；
+日志用 `HIFISHIFTER_PLUGIN_LOG` 指到临时文件，避免混进用户日志）：
+
+| 读数 | 真机结果 | 说明 |
+|---|---|---|
+| `TakeFX_GetEnabled(take, 0)` | `true` | 未旁通的 take FX 报告"启用"，判据可用 |
+| `TakeFX_GetEnabled(take, -1)` | `false` | "-1 = 整链"这个技巧在 take 侧**不成立**（所以当初才去编了 `B_TAKEFX`） |
+| `GetMediaItemTakeInfo_Value(take, "B_TAKEFX")` | `0` | 与一个**我编的**参数返回同一个值 ⇒ 未知参数一律 0，旧代码必判旁通 |
+| 多 take 标记（活跃那条） | `TAKE SEL` | 非活跃那条是裸 `TAKE` —— 旧解析只认后者 |
+| 插件日志（take FX，修复后） | `writer 1 host bypass: unknown -> active (take-fx; take chain: found=1/1 enabled=1 offline=0 gate=unknown)` | 同一次会话里旧构建打印的是 `unknown -> bypassed` |
+| 插件日志（track FX） | `... (track-fx; track chain: found=1/1 enabled=1 offline=0 gate=open)` | 轨道侧 `I_FXEN` 照旧是真读数 |
+| 离线渲染（`-renderproject`，take FX 工程） | 3 s / 1 kHz / peak 0.25 / RMS 0.1768 | 与输入逐值一致 ⇒ 不再是"没有声音" |
+| 190 KB 包络写回（take FX item） | `SetItemStateChunk = false` ⇒ 见第三节 | 这是第三节那条根因的直接证据 |
+| 同一份包络走 `SetEnvelopeStateChunk` | `true`，读回 3 个点 | 修法可行 |
+
+## 仍未复核
+
+1. **倒放**（`source_direction`）在 take FX 下同样只能走 chunk，因此会被同一条拒绝挡住。
+   本次只把 take 音高换成了包络路径；倒放要么也找一条不重建 item 的写法，要么在 take FX 下
+   明确报"宿主不支持"。现场还没有人报过它，先留在这里。
+2. 真实工程（几分钟的素材、上千个包络点、几百 KB 的 ARA 存档）里的一次完整
+   "转换 → 保存 → 重开 → 再转换"往返。

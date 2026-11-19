@@ -120,6 +120,14 @@ pub struct Fixture {
     pub parent_take: Cell<usize>,
     /// `GetItemStateChunk` / `SetItemStateChunk` 是否注册。
     pub item_state_enabled: Cell<bool>,
+    /// `SetItemStateChunk` 是否像 take FX 下的真机那样**拒绝**写回。
+    pub item_state_write_refused: Cell<bool>,
+    /// take 包络那一族（`GetTakeEnvelopeByName` / `*EnvelopeStateChunk` / 动作）是否注册。
+    pub take_env_enabled: Cell<bool>,
+    /// 当前那条 take 的 Pitch 包络 chunk；`None` = 没有包络。
+    pub take_env_chunk: RefCell<Option<String>>,
+    /// item 的选择位（`B_UISEL`），动作路径会临时改它又改回来。
+    pub item_ui_selected: Cell<bool>,
     /// 夹具当前持有的 item state chunk（`SetItemStateChunk` 会写进这里）。
     pub item_state_chunk: RefCell<String>,
 }
@@ -223,6 +231,10 @@ impl Fixture {
             take_fx_api: Cell::new(false),
             parent_take: Cell::new(0),
             item_state_enabled: Cell::new(false),
+            item_state_write_refused: Cell::new(false),
+            take_env_enabled: Cell::new(false),
+            take_env_chunk: RefCell::new(None),
+            item_ui_selected: Cell::new(false),
             item_state_chunk: RefCell::new(String::new()),
         }));
         ACTIVE.set(value as *const Self as usize);
@@ -523,6 +535,11 @@ unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_voi
             inventory_track_value as *const ()
         }
         "GetItemStateChunk" if f.item_state_enabled.get() => get_item_state as *const (),
+        "GetTakeEnvelopeByName" if f.take_env_enabled.get() => get_take_envelope as *const (),
+        "GetEnvelopeStateChunk" if f.take_env_enabled.get() => get_envelope_state as *const (),
+        "SetEnvelopeStateChunk" if f.take_env_enabled.get() => set_envelope_state as *const (),
+        "kbd_enumerateActions" if f.take_env_enabled.get() => enumerate_actions as *const (),
+        "Main_OnCommand" if f.take_env_enabled.get() => run_command as *const (),
         "SetItemStateChunk" if f.item_state_enabled.get() => set_item_state as *const (),
         "genGuid" if f.item_state_enabled.get() => gen_guid as *const (),
         "guidToString" if f.item_state_enabled.get() => guid_to_string as *const (),
@@ -701,6 +718,10 @@ fn value(object: *mut c_void, name: *const c_char, is_take: bool) -> f64 {
     assert_eq!(object, if is_take { f.take() } else { f.item() });
     let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_str().unwrap();
     f.record(name);
+    // 动作路径会读/写 item 的选择位（`B_UISEL`）：夹具按一个可断言的开关回答。
+    if !is_take && name == "B_UISEL" {
+        return if f.item_ui_selected.get() { 1. } else { 0. };
+    }
     f.values.borrow()[name]
 }
 unsafe extern "C" fn item_value(object: *mut c_void, name: *const c_char) -> f64 {
@@ -715,6 +736,10 @@ unsafe extern "C" fn set_item(object: *mut c_void, name: *const c_char, value: f
     assert_eq!(object, f.item());
     let name = unsafe { CStr::from_ptr(name) }.to_str().unwrap();
     f.record(format!("write-item:{name}"));
+    if name == "B_UISEL" {
+        f.item_ui_selected.set(value != 0.0);
+        return true;
+    }
     let mut values = f.values.borrow_mut();
     let key = values.keys().find(|key| **key == name).copied();
     if let Some(key) = key {
@@ -1140,6 +1165,120 @@ unsafe extern "C" fn section_info(
     true
 }
 
+/// 夹具里的包络句柄：只要非空就代表"这条 take 有 Pitch 包络"。
+const ENVELOPE_HANDLE: usize = 0xE70E;
+
+/// `GetTakeEnvelopeByName(MediaItem_Take*, const char*) -> TrackEnvelope*`。
+unsafe extern "C" fn get_take_envelope(
+    take: *mut c_void,
+    name: *const std::ffi::c_char,
+) -> *mut c_void {
+    let f = fixture();
+    assert_eq!(take, f.take());
+    let name = unsafe { CStr::from_ptr(name) }.to_str().unwrap();
+    f.record(format!("get-take-envelope:{name}"));
+    if f.take_env_chunk.borrow().is_some() {
+        ENVELOPE_HANDLE as *mut c_void
+    } else {
+        std::ptr::null_mut()
+    }
+}
+
+/// `GetEnvelopeStateChunk(TrackEnvelope*, char*, int, bool)`。
+unsafe extern "C" fn get_envelope_state(
+    envelope: *mut c_void,
+    buffer: *mut std::ffi::c_char,
+    size: i32,
+    _is_undo: bool,
+) -> bool {
+    let f = fixture();
+    assert_eq!(envelope as usize, ENVELOPE_HANDLE);
+    f.record("get-envelope-state");
+    let stored = f.take_env_chunk.borrow().clone();
+    let Some(text) = stored else {
+        return false;
+    };
+    let bytes = text.as_bytes();
+    if size <= 0 || bytes.len() + 1 > size as usize {
+        return false;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            bytes.as_ptr().cast::<std::ffi::c_char>(),
+            buffer,
+            bytes.len(),
+        );
+        *buffer.add(bytes.len()) = 0;
+    }
+    true
+}
+
+/// `SetEnvelopeStateChunk(TrackEnvelope*, const char*, bool)`。
+///
+/// 【为什么"只有头没有点"要存成 `None`】真机行为：这样的块会让宿主删掉整条包络。
+unsafe extern "C" fn set_envelope_state(
+    envelope: *mut c_void,
+    text: *const std::ffi::c_char,
+    _is_undo: bool,
+) -> bool {
+    let f = fixture();
+    assert_eq!(envelope as usize, ENVELOPE_HANDLE);
+    f.record("set-envelope-state");
+    if text.is_null() {
+        return false;
+    }
+    let chunk = unsafe { CStr::from_ptr(text) }
+        .to_string_lossy()
+        .to_string();
+    let has_points = chunk
+        .lines()
+        .any(|line| line.split_whitespace().next() == Some("PT"));
+    f.take_env_chunk
+        .replace(if has_points { Some(chunk) } else { None });
+    true
+}
+
+/// `kbd_enumerateActions(int section, int idx, char* desc, int size)`：够用的两条 + 结束。
+unsafe extern "C" fn enumerate_actions(
+    _section: i32,
+    index: i32,
+    buffer: *mut std::ffi::c_char,
+    size: i32,
+) -> i32 {
+    let table: [(&str, i32); 2] = [
+        ("File: New project", 40023),
+        ("Take: Toggle take pitch envelope", 41612),
+    ];
+    let Some((name, command)) = table.get(index as usize) else {
+        return 0;
+    };
+    let bytes = name.as_bytes();
+    if size > 0 {
+        let length = bytes.len().min(size as usize - 1);
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr().cast::<std::ffi::c_char>(),
+                buffer,
+                length,
+            );
+            *buffer.add(length) = 0;
+        }
+    }
+    *command
+}
+
+/// `Main_OnCommand(int, int)`：只实现"建一条 take pitch 包络"。
+unsafe extern "C" fn run_command(command: i32, _flag: i32) {
+    let f = fixture();
+    f.record(format!("run-command:{command}"));
+    if command == 41612 && f.take_env_chunk.borrow().is_none() {
+        f.take_env_chunk.replace(Some(
+            "<PITCHENV\nACT 1 -1\nVIS 1 1 1\nLANEHEIGHT 0 0\nARM 0\nDEFSHAPE 0 -1 -1\nPT 0 0 0\n>\n"
+                .to_string(),
+        ));
+    }
+}
+
 /// `GetItemStateChunk(MediaItem*, char* buf, int size, bool isUndo)`。
 unsafe extern "C" fn get_item_state(
     item: *mut c_void,
@@ -1181,6 +1320,10 @@ unsafe extern "C" fn set_item_state(
     let f = fixture();
     assert!(item == f.item() || item == f.right_item());
     f.record("set-item-state");
+    // 【take FX 下的真机行为】宿主拒绝重写一个挂着本实例的 item（见 `take_env` 的模块文档）。
+    if f.item_state_write_refused.get() {
+        return false;
+    }
     if text.is_null() {
         return false;
     }
@@ -2165,6 +2308,90 @@ fn a_take_fx_instance_never_offers_track_level_entries() {
     assert!(take_fx.split);
     assert!(take_fx.take_pitch_bridge);
     assert!(take_fx.clip_reverse);
+}
+
+/// 有包络对象时，音高写回**只**碰包络，绝不重写 item chunk。
+///
+/// 【为什么这条是 take FX 的核心】真机实测：挂着本插件（ARA）的 take FX 的那个 item，
+/// `SetItemStateChunk` 连"原样写回"都拒绝。包络对象那条路不受这条限制 —— 而且它不重建
+/// item，轨道 FX 下也顺带避免了"写一次包络、把同一条 item 上的别的 take FX 重建一遍"。
+#[test]
+fn a_take_pitch_write_uses_the_envelope_object_when_it_exists() {
+    let f = Fixture::new();
+    f.enable_item_state(&f.single_take_chunk());
+    f.inventory_enabled.set(true);
+    f.take_env_enabled.set(true);
+    f.take_env_chunk.replace(Some(
+        "<PITCHENV\nACT 1 -1\nVIS 1 1 1\nLANEHEIGHT 0 0\nARM 0\nDEFSHAPE 0 -1 -1\nPT 0 0 0\n>\n"
+            .to_string(),
+    ));
+    let host = std::sync::Arc::new(f.client());
+    let target = host.clip_target(|| true).expect("bound take");
+    let points = vec![
+        hifishifter_kernel::pitch_bridge::EnvelopePoint::new(0.0, 3.0),
+        hifishifter_kernel::pitch_bridge::EnvelopePoint::new(1.5, -2.0),
+    ];
+    target
+        .write_take_pitch_points(&points, &|| true)
+        .expect("write through the envelope");
+    assert!(
+        !f.calls().iter().any(|call| call == "set-item-state"),
+        "不得重写 item chunk"
+    );
+    assert!(f.calls().iter().any(|call| call == "set-envelope-state"));
+    // 读回也走包络对象，且点集逐字一致。
+    let read = target.take_pitch_points(&|| true).expect("read");
+    assert_eq!(read.points, points);
+    assert!(read.present);
+}
+
+/// item chunk 被宿主拒绝（take FX 下的真机行为）时，借宿主动作建一条包络再写。
+#[test]
+fn a_refused_item_chunk_write_falls_back_to_a_created_envelope() {
+    let f = Fixture::new();
+    f.enable_item_state(&f.single_take_chunk());
+    f.inventory_enabled.set(true);
+    f.take_env_enabled.set(true);
+    f.item_state_write_refused.set(true);
+    let host = std::sync::Arc::new(f.client());
+    let target = host.clip_target(|| true).expect("bound take");
+    let points = vec![hifishifter_kernel::pitch_bridge::EnvelopePoint::new(
+        0.0, 5.0,
+    )];
+    target
+        .write_take_pitch_points(&points, &|| true)
+        .expect("write through a created envelope");
+    assert!(
+        f.calls().iter().any(|call| call == "run-command:41612"),
+        "必须借宿主自己的动作建包络"
+    );
+    let stored = f.take_env_chunk.borrow().clone().expect("envelope created");
+    assert!(stored.contains("PT 0.00000000000000000 5.00000000000000000 0"));
+    // 选择位必须恢复到进入时的样子（动作只该影响目标 item，不该改用户的选区）。
+    assert!(!f.item_ui_selected.get(), "选择位要还原");
+}
+
+/// 空点集 = 删掉整条包络，而且**不碰** item chunk。
+#[test]
+fn an_empty_point_set_clears_the_envelope_without_touching_the_item() {
+    let f = Fixture::new();
+    f.enable_item_state(&f.single_take_chunk());
+    f.inventory_enabled.set(true);
+    f.take_env_enabled.set(true);
+    f.take_env_chunk.replace(Some(
+        "<PITCHENV\nACT 1 -1\nVIS 1 1 1\nLANEHEIGHT 0 0\nARM 0\nDEFSHAPE 0 -1 -1\nPT 0 0 0\n>\n"
+            .to_string(),
+    ));
+    let host = std::sync::Arc::new(f.client());
+    let target = host.clip_target(|| true).expect("bound take");
+    target
+        .write_take_pitch_points(&[], &|| true)
+        .expect("clear");
+    assert!(
+        f.take_env_chunk.borrow().is_none(),
+        "只有头的块 = 宿主删掉整条包络"
+    );
+    assert!(!f.calls().iter().any(|call| call == "set-item-state"));
 }
 
 /// **超过第一次读取缓冲区的 item chunk 必须整份读回、整份写回。**
