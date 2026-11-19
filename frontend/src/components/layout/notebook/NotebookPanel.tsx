@@ -20,6 +20,7 @@ import { CardStackIcon, ChevronDownIcon, ChevronRightIcon, GearIcon } from "@rad
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAppDispatch, useAppSelector } from "../../../app/hooks";
+import { store } from "../../../app/store";
 import { isPluginMode } from "../../../services/hostCapabilities";
 import {
     setNotebookAssetIndex,
@@ -119,10 +120,12 @@ export function NotebookPanel() {
     const projectName = useAppSelector((state) => state.session.project.name);
     const baseScale = useAppSelector((state) => state.session.project.baseScale);
     const dirty = useAppSelector((state) => state.session.project.dirty);
-    const playheadSec = useAppSelector((state) => state.session.playheadSec);
-    const selectedClipId = useAppSelector((state) => state.session.selectedClipId);
-    const clips = useAppSelector((state) => state.session.clips);
     const bpm = useAppSelector((state) => state.session.bpm);
+    // 注意（订阅纪律，与 App.tsx 同一条）：playheadSec 以 ~30Hz 持续变化、clips
+    // 是拖拽热路径（pointermove 每帧写），selectedClipId 也随点选高频翻转 —— 它们
+    // 在本面板的全部消费方都在**事件回调**里（插入动作、右键菜单快照、内链跳转），
+    // 经 store.getState() 现读即可。订阅它们会让 1400 行的 TipTap 面板随播放头
+    // 移动 / 拖拽每帧重渲，即使面板被 dock 停靠到后台标签页也不会卸载。
 
     const [findOpen, setFindOpen] = useState(false);
     const [attachmentsOpen, setAttachmentsOpen] = useState(false);
@@ -381,14 +384,14 @@ export function NotebookPanel() {
                 notify(`${t("notebook_seek_jump")} ${formatTimecode(link.seconds)}`);
                 return;
             }
-            const clip = clips.find((entry) => entry.id === link.clipId);
+            const clip = store.getState().session.clips.find((entry) => entry.id === link.clipId);
             if (clip) {
                 dispatch(setPlayheadSec(clip.startSec));
                 void dispatch(seekPlayhead(clip.startSec));
             }
             void dispatch(selectClipRemote(link.clipId));
         },
-        [clips, dispatch, notify, t],
+        [dispatch, notify, t],
     );
 
     useEffect(() => {
@@ -551,10 +554,13 @@ export function NotebookPanel() {
         () => ({
             insertImage: () => fileInputRef.current?.click(),
             insertTimecode: () => {
-                if (insertContext) insertMarkdown(insertContext, buildSeekLink(playheadSec) + " ");
+                if (!insertContext) return;
+                const { playheadSec } = store.getState().session;
+                insertMarkdown(insertContext, buildSeekLink(playheadSec) + " ");
             },
             insertClipReference: () => {
                 if (!insertContext) return;
+                const { clips, selectedClipId } = store.getState().session;
                 const clip = clips.find((entry) => entry.id === selectedClipId);
                 if (!clip) {
                     notify(t("notebook_clip_ref_none"));
@@ -593,19 +599,7 @@ export function NotebookPanel() {
                 })();
             },
         }),
-        [
-            baseScale,
-            bpm,
-            clips,
-            editor,
-            insertContext,
-            notify,
-            playheadSec,
-            projectName,
-            refreshAssets,
-            selectedClipId,
-            t,
-        ],
+        [baseScale, bpm, editor, insertContext, notify, projectName, refreshAssets, t],
     );
 
     const onFilePicked = useCallback(
@@ -813,6 +807,9 @@ export function NotebookPanel() {
             const disabled: NotebookMenuDisabled = {};
             // 没有选中音频块时，"插入 Clip 引用"点了只会弹一句提示；菜单里直接
             // 置灰并说明原因更省事（tooltip 就是为"为什么点不了"准备的）。
+            // clips / selectedClipId 经 store 现读（见上方订阅纪律）：菜单本来
+            // 就是"打开那一刻一次性算完"的快照，读实时值正合语义。
+            const { clips, selectedClipId } = store.getState().session;
             const hasClip =
                 selectedClipId !== null && clips.some((entry) => entry.id === selectedClipId);
             if (!hasClip) disabled.insertClipReference = t("notebook_clip_ref_none");
@@ -821,14 +818,12 @@ export function NotebookPanel() {
         },
         [
             bridge,
-            clips,
             copySelection,
             handlers,
             insertContext,
             openLinkEditor,
             pasteFromClipboard,
             runInternalLink,
-            selectedClipId,
             t,
         ],
     );

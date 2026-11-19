@@ -228,21 +228,20 @@ const TrackHeaderPlayheadTime = React.memo(function TrackHeaderPlayheadTime() {
     const digitProbeRef = useRef<HTMLSpanElement | null>(null);
     const [boxWidth, setBoxWidth] = useState<number | null>(null);
     const [digitWidth, setDigitWidth] = useState<number | null>(null);
+    // 【为什么按整秒量化】这条读数只用来**预留宽度**（"最长可能文本"），而
+    // playheadSec 以 ~30Hz 持续增长 —— 不量化的话，前进播放的每一帧都要重跑一次
+    // formatCursorTime 并重挂 ResizeObserver。宽度只随整数秒变化（且量化只会
+    // 向上取整，预留只会更宽、不会裁字），把 memo 的键钉在整秒上，重算频率从
+    // 每帧一次降到每秒一次。
+    const maxLabelSec = Math.ceil(Math.max(1, selector.projectSec, selector.playheadSec));
     const maxLabel = React.useMemo(() => {
-        const maxSec = Math.max(1, selector.projectSec, selector.playheadSec);
         return formatCursorTime(
             selector.primaryTimeUnit,
             selector.secondaryTimeUnit,
-            maxSec,
+            maxLabelSec,
             timeContext,
         ).combined;
-    }, [
-        selector.primaryTimeUnit,
-        selector.secondaryTimeUnit,
-        selector.projectSec,
-        selector.playheadSec,
-        timeContext,
-    ]);
+    }, [selector.primaryTimeUnit, selector.secondaryTimeUnit, maxLabelSec, timeContext]);
 
     const updateDigitWidth = React.useCallback(() => {
         const probe = digitProbeRef.current;

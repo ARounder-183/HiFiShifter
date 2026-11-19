@@ -1,6 +1,8 @@
 // FileBrowser 的对话框、行内编辑、右键菜单与面板级键盘模型。拆自 FileBrowserPanel。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { StarIcon } from "@radix-ui/react-icons";
+// playheadSec 在导入动作里现读（见 useFileBrowserListing 的订阅纪律）。
+import { store } from "../../../app/store";
 import {
     buildFileBrowserContextMenu,
     type FileBrowserMenuActions,
@@ -58,7 +60,6 @@ export function useFileBrowserActions(
         view,
         favorites,
         selectedTrackId,
-        playheadSec,
         tracks,
         isSearchMode,
         isComputerLevel,
@@ -465,7 +466,7 @@ export function useFileBrowserActions(
                 } else if (isMidiFile(entry)) {
                     emitImportMidiRequest({
                         path: entry.path,
-                        startSec: playheadSec,
+                        startSec: store.getState().session.playheadSec,
                         trackId: selectedTrackId,
                     });
                 } else if (isReaperFile(entry)) {
@@ -484,7 +485,7 @@ export function useFileBrowserActions(
                         importAudioAtPosition({
                             audioPath: paths[0],
                             trackId: selectedTrackId,
-                            startSec: playheadSec,
+                            startSec: store.getState().session.playheadSec,
                         }),
                     );
                 } else {
@@ -493,7 +494,7 @@ export function useFileBrowserActions(
                             audioPaths: paths,
                             mode: "across-time",
                             trackId: selectedTrackId,
-                            startSec: playheadSec,
+                            startSec: store.getState().session.playheadSec,
                         }),
                     );
                 }
@@ -507,7 +508,7 @@ export function useFileBrowserActions(
                         importAudioAtPosition({
                             audioPath: paths[0],
                             trackId: null,
-                            startSec: playheadSec,
+                            startSec: store.getState().session.playheadSec,
                         }),
                     );
                 } else {
@@ -516,7 +517,7 @@ export function useFileBrowserActions(
                             audioPaths: paths,
                             mode: "across-tracks",
                             trackId: null,
-                            startSec: playheadSec,
+                            startSec: store.getState().session.playheadSec,
                         }),
                     );
                 }
@@ -529,7 +530,7 @@ export function useFileBrowserActions(
                         audioPaths: paths,
                         mode,
                         trackId: selectedTrackId,
-                        startSec: playheadSec,
+                        startSec: store.getState().session.playheadSec,
                     }),
                 );
             },
@@ -543,7 +544,7 @@ export function useFileBrowserActions(
                     dirs,
                     looseFiles: [],
                     trackId: selectedTrackId,
-                    startSec: playheadSec,
+                    startSec: store.getState().session.playheadSec,
                     insertIndex: rootIndexAtDrop(tracks, selectedTrackId),
                     fromExplicitRequest: true,
                 });
@@ -565,7 +566,7 @@ export function useFileBrowserActions(
             importMidi: (path) =>
                 emitImportMidiRequest({
                     path,
-                    startSec: playheadSec,
+                    startSec: store.getState().session.playheadSec,
                     trackId: selectedTrackId,
                 }),
             openContainingFolder: (entry) => {
@@ -601,7 +602,6 @@ export function useFileBrowserActions(
             handleOpenFolder,
             handleRefresh,
             navigateTo,
-            playheadSec,
             previewToggle,
             selectAll,
             selectedTrackId,

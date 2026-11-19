@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 
 
 import { ChevronDownIcon, ChevronUpIcon, MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
-import type { RootState } from "../../app/store";
+import { store, type RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import { selectMergedKeybindings, matchesAnyKeybinding } from "../../features/keybindings";
 import type { Keybinding } from "../../features/keybindings";
@@ -55,7 +55,9 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
 
     const currentPath = useAppSelector((state: RootState) => state.fileBrowser.currentPath);
     const selectedTrackId = useAppSelector((state: RootState) => state.session.selectedTrackId);
-    const playheadSec = useAppSelector((state: RootState) => state.session.playheadSec);
+    // 注意（订阅纪律，与 App.tsx 同一条）：playheadSec 以 ~30Hz 持续变化，唯一消费方
+    // 是 handleConfirm 的放置动作 —— 在回调内经 store.getState() 现读。订阅会让这个
+    // 常驻组件（关闭时渲染 null，但仍挂载）随播放头移动每帧重渲。
     const quickSearchAutoNormalizeEnabled = useAppSelector(
         (state: RootState) => state.session.quickSearchAutoNormalizeEnabled,
     );
@@ -285,6 +287,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
     const handleConfirm = useCallback(
         (entry: FileEntry) => {
             stopPreview();
+            const { playheadSec } = store.getState().session;
             if (isMidiFile(entry)) {
                 emitImportMidiRequest({
                     path: entry.path,
@@ -305,14 +308,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
             );
             onClose();
         },
-        [
-            dispatch,
-            onClose,
-            playheadSec,
-            quickSearchAutoNormalizeEnabled,
-            selectedTrackId,
-            stopPreview,
-        ],
+        [dispatch, onClose, quickSearchAutoNormalizeEnabled, selectedTrackId, stopPreview],
     );
 
     const focusSearchInput = useCallback(() => {
