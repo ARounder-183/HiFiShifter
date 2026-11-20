@@ -830,74 +830,74 @@ function AppInner() {
 
     const handleFillGapsChange = useCallback((v: boolean) => {
         setFillGaps(v);
-        settingsApi.saveUiSettings({ midiFillGaps: v });
+        void settingsApi.saveUiSettings({ midiFillGaps: v }).catch(() => {});
     }, []);
 
     const handleAutoReloadModifiedMediaChange = useCallback((v: boolean) => {
         setAutoReloadModifiedMedia(v);
-        settingsApi.saveUiSettings({ autoReloadModifiedMedia: v });
+        void settingsApi.saveUiSettings({ autoReloadModifiedMedia: v }).catch(() => {});
     }, []);
 
     const handleLoopNewClipsChange = useCallback((v: boolean) => {
         setLoopNewClips(v);
-        settingsApi.saveUiSettings({ loopNewClips: v });
+        void settingsApi.saveUiSettings({ loopNewClips: v }).catch(() => {});
     }, []);
 
     const handleMultiTrackMergeChange = useCallback((v: boolean) => {
         setMultiTrackMerge(v);
-        settingsApi.saveUiSettings({ midiMultiTrackMerge: v });
+        void settingsApi.saveUiSettings({ midiMultiTrackMerge: v }).catch(() => {});
     }, []);
 
     const handleImportBpmAsProjectChange = useCallback((v: boolean) => {
         setImportBpmAsProject(v);
-        settingsApi.saveUiSettings({ midiImportBpmAsProject: v });
+        void settingsApi.saveUiSettings({ midiImportBpmAsProject: v }).catch(() => {});
     }, []);
 
     const handleNoteBpmModeChange = useCallback((v: string) => {
         setNoteBpmMode(v);
-        settingsApi.saveUiSettings({ midiNoteBpmMode: v });
+        void settingsApi.saveUiSettings({ midiNoteBpmMode: v }).catch(() => {});
     }, []);
 
     const handleSpecifiedBpmChange = useCallback((v: number) => {
         setSpecifiedBpm(v);
-        settingsApi.saveUiSettings({ midiSpecifiedBpm: v });
+        void settingsApi.saveUiSettings({ midiSpecifiedBpm: v }).catch(() => {});
     }, []);
 
     const handleImportPositionChange = useCallback((position: string) => {
         setImportPosition(position);
-        settingsApi.saveUiSettings({ midiImportPosition: position });
+        void settingsApi.saveUiSettings({ midiImportPosition: position }).catch(() => {});
     }, []);
 
     const handleCloseLeadingGapChange = useCallback((v: boolean) => {
         setCloseLeadingGap(v);
-        settingsApi.saveUiSettings({ midiCloseLeadingGap: v });
+        void settingsApi.saveUiSettings({ midiCloseLeadingGap: v }).catch(() => {});
     }, []);
 
     const handleImportTempoMapEnabledChange = useCallback((v: boolean) => {
         setImportTempoMapEnabled(v);
-        settingsApi.saveUiSettings({ midiImportAsTempoMap: v });
+        void settingsApi.saveUiSettings({ midiImportAsTempoMap: v }).catch(() => {});
     }, []);
     const handleImportTempoMapTempoChange = useCallback((v: boolean) => {
         setImportTempoMapTempo(v);
-        settingsApi.saveUiSettings({ midiImportTempoMapTempo: v });
+        void settingsApi.saveUiSettings({ midiImportTempoMapTempo: v }).catch(() => {});
     }, []);
     const handleImportTempoMapTimeSignatureChange = useCallback((v: boolean) => {
         setImportTempoMapTimeSignature(v);
-        settingsApi.saveUiSettings({ midiImportTempoMapTimeSignature: v });
+        void settingsApi.saveUiSettings({ midiImportTempoMapTimeSignature: v }).catch(() => {});
     }, []);
     const handleImportTempoMapKeySignatureChange = useCallback((v: boolean) => {
         setImportTempoMapKeySignature(v);
-        settingsApi.saveUiSettings({ midiImportTempoMapKeySignature: v });
+        void settingsApi.saveUiSettings({ midiImportTempoMapKeySignature: v }).catch(() => {});
     }, []);
 
     const handleImportTargetMenuChange = useCallback((v: string) => {
         setMidiImportTargetMenu(v);
-        settingsApi.saveUiSettings({ midiImportTargetMenu: v });
+        void settingsApi.saveUiSettings({ midiImportTargetMenu: v }).catch(() => {});
     }, []);
 
     const handleImportTargetDragDropChange = useCallback((v: string) => {
         setMidiImportTargetDragDrop(v);
-        settingsApi.saveUiSettings({ midiImportTargetDragDrop: v });
+        void settingsApi.saveUiSettings({ midiImportTargetDragDrop: v }).catch(() => {});
     }, []);
 
     /**
