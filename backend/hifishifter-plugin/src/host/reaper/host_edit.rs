@@ -250,22 +250,20 @@ impl HostEditReceipt {
         let Some(clips) = payload["clips"].as_array() else {
             return false;
         };
-        self.clips.iter().all(
-            |ClipReceipt {
-                 id,
-                 fields,
-                 takes,
-             }| {
-                clips
-                    .iter()
-                    .find(|clip| clip["id"] == *id)
-                    .is_some_and(|clip| {
-                        fields.iter().all(|(key, value)| {
-                            match (clip[*key].as_f64(), value.as_f64()) {
-                                (Some(actual), Some(expected)) => crate::host::geometry::host_value_compatible(actual, expected),
-                                _ => clip[*key] == *value,
+        self.clips.iter().all(|ClipReceipt { id, fields, takes }| {
+            clips
+                .iter()
+                .find(|clip| clip["id"] == *id)
+                .is_some_and(|clip| {
+                    fields
+                        .iter()
+                        .all(|(key, value)| match (clip[*key].as_f64(), value.as_f64()) {
+                            (Some(actual), Some(expected)) => {
+                                crate::host::geometry::host_value_compatible(actual, expected)
                             }
-                        }) && takes.iter().all(|(take_id, take_fields)| {
+                            _ => clip[*key] == *value,
+                        })
+                        && takes.iter().all(|(take_id, take_fields)| {
                             // 载荷的 `takes[].id` 与期望同在内核 take id 空间；
                             // 找不到这一条 take 就是"宿主还没跟上"。
                             clip["takes"].as_array().is_some_and(|takes| {
@@ -275,16 +273,19 @@ impl HostEditReceipt {
                                     .is_some_and(|take| {
                                         take_fields.iter().all(|(key, value)| {
                                             match (take[*key].as_f64(), value.as_f64()) {
-                                                (Some(actual), Some(expected)) => crate::host::geometry::host_value_compatible(actual, expected),
+                                                (Some(actual), Some(expected)) => {
+                                                    crate::host::geometry::host_value_compatible(
+                                                        actual, expected,
+                                                    )
+                                                }
                                                 _ => take[*key] == *value,
                                             }
                                         })
                                     })
                             })
                         })
-                    })
-            },
-        )
+                })
+        })
     }
 }
 
@@ -405,7 +406,11 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
             if take.is_empty() || take.len() > 256 || take.contains('\0') {
                 return Err("invalid host take id".into());
             }
-            if value.get("reversed").and_then(|reversed| reversed.as_bool()).is_none() {
+            if value
+                .get("reversed")
+                .and_then(|reversed| reversed.as_bool())
+                .is_none()
+            {
                 return Err("host take direction requires a boolean reversed".into());
             }
             continue;
@@ -855,11 +860,7 @@ fn write_sibling_take_direction(
         let original = target.item_state_chunk(authorized)?;
         let rewritten = {
             let direction = sibling_take_direction_edit(target, take, expected, authorized)?;
-            super::source_direction::rewrite_take_direction(
-                &original,
-                &edit.take_guid,
-                &direction,
-            )?
+            super::source_direction::rewrite_take_direction(&original, &edit.take_guid, &direction)?
         };
         match target.set_item_state_chunk(&rewritten, authorized) {
             Ok(()) => {
@@ -936,13 +937,12 @@ fn sibling_take_direction_edit(
     let geometry = target
         .host_geometry_api()
         .ok_or("REAPER geometry API unavailable")?;
-    let facts = target
-        .host_take_direction_facts(take as *mut c_void, authorized);
+    let facts = target.host_take_direction_facts(take as *mut c_void, authorized);
     // 【读不到方向位 = 正放，不是错误】`PCM_Source_GetSectionInfo` 对没有 SECTION
     // 包装的裸源返回 false —— 那是"从未倒放过"的正常形态，与 `reversed_now`
     // （读不到按正放）是同一口径。只有**写倒放**时媒体时长缺失才报错。
-    let (current_reversed, section) = facts
-        .map_or((false, None), |facts| (facts.reversed, facts.section));
+    let (current_reversed, section) =
+        facts.map_or((false, None), |facts| (facts.reversed, facts.section));
     let read = |name: &CStr| -> Result<f64, String> {
         let value = checked(authorized, || unsafe {
             (geometry.take_value)(take as *mut c_void, name.as_ptr())
@@ -1538,8 +1538,7 @@ pub(crate) fn execute_managed(
             // 只对**没有** chunk 写回的 item 撤）。
             for (target, take, old) in applied_take_modes.iter().rev() {
                 let covered_by_chunk = applied_structural.iter().any(|(done, write)| {
-                    matches!(write, DirectionWrite::Chunk { .. })
-                        && done.same_item(target)
+                    matches!(write, DirectionWrite::Chunk { .. }) && done.same_item(target)
                 });
                 if covered_by_chunk {
                     continue;
@@ -2452,7 +2451,7 @@ FILE \"ara://source\"
 >
 >
 "
-            .to_string();
+        .to_string();
         host.enable_item_state(&chunk);
         host.enable_takes(1);
         host.set_value("D_POSITION", 0.);
@@ -2489,8 +2488,7 @@ FILE \"ara://source\"
         let stale = json!({"clips":[{"id":clip.id,"takes":[{"id":sibling,"reversed":false}]}]});
         assert!(!receipt.matches(&stale), "回声还是改动前时完成门必须拦下");
         host.reset();
-        execute(&owner, plan, || document.is_alive())
-            .expect("兄弟 take 的倒放写回必须成功");
+        execute(&owner, plan, || document.is_alive()).expect("兄弟 take 的倒放写回必须成功");
         let written = host.item_state_chunk.borrow().clone();
         let lines: Vec<&str> = written.lines().collect();
         // 主 take 原样：源还是裸 WAVE（没有 SECTION），SOFFS 保持 0。
@@ -2512,8 +2510,8 @@ FILE \"ara://source\"
             "{55555555-5555-5555-5555-000000000001}",
         )
         .expect("兄弟 take 必须还在 chunk 里");
-        let sibling_source =
-            super::super::take_chunk::block(&lines, &sibling, "SOURCE").expect("兄弟 take 必须有源");
+        let sibling_source = super::super::take_chunk::block(&lines, &sibling, "SOURCE")
+            .expect("兄弟 take 必须有源");
         assert!(
             lines[sibling_source.start].contains("SOURCE SECTION"),
             "兄弟 take 的源必须被 SECTION 包住：{}",
@@ -2521,7 +2519,11 @@ FILE \"ara://source\"
         );
         let written_lines = written.lines().collect::<Vec<_>>();
         let mode_line = written_lines[sibling_source.start + 2];
-        assert_eq!(mode_line.trim(), "MODE 3", "必须是宿主自己的 MODE 3 编码：{written}");
+        assert_eq!(
+            mode_line.trim(),
+            "MODE 3",
+            "必须是宿主自己的 MODE 3 编码：{written}"
+        );
         document.close();
     }
 
@@ -2562,8 +2564,7 @@ FILE \"ara://source\"
         assert!(plan.edits[0].patch.channel_mode.is_none());
         assert!(plan.edits[0].take_channel_mode.is_some());
         host.reset();
-        execute(&owner, plan, || document.is_alive())
-            .expect("兄弟 take 的声道模式写回必须成功");
+        execute(&owner, plan, || document.is_alive()).expect("兄弟 take 的声道模式写回必须成功");
         assert!(
             host.calls().contains(&"write-take:I_CHANMODE".to_string()),
             "必须按 take 指针写 I_CHANMODE：{:?}",
@@ -2594,7 +2595,10 @@ FILE \"ara://source\"
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
         let clip = editor.timeline.lock_or_recover().clips[0].clone();
-        let active_take = clip.active_take_id.clone().expect("夹具 clip 必须有 active take");
+        let active_take = clip
+            .active_take_id
+            .clone()
+            .expect("夹具 clip 必须有 active take");
         let plan = editor
             .plan_host_edit(
                 "set_clip_state",

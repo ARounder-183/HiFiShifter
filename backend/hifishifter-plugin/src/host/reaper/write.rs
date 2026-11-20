@@ -1167,12 +1167,7 @@ impl HostClipTarget {
             }
             let mut bytes = [0_u8; 64];
             let matched = checked(authorized, || unsafe {
-                (geometry.take_guid)(
-                    take,
-                    c"GUID".as_ptr(),
-                    bytes.as_mut_ptr().cast(),
-                    false,
-                )
+                (geometry.take_guid)(take, c"GUID".as_ptr(), bytes.as_mut_ptr().cast(), false)
             })? && bytes[..guid.len()] == *guid.as_bytes()
                 && bytes[guid.len()] == 0;
             if matched {
@@ -1197,9 +1192,9 @@ impl HostClipTarget {
         // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
         if std::thread::current().id() != self.host.thread {
             let name = name.to_owned();
-            return self.host.on_host(move || {
-                self.set_take_pointer_value(take, &name, value, authorized)
-            })?;
+            return self
+                .host
+                .on_host(move || self.set_take_pointer_value(take, &name, value, authorized))?;
         }
         self.valid(self.project, c"ReaProject*", authorized)?;
         self.valid(self.item, c"MediaItem*", authorized)?;
@@ -1238,7 +1233,10 @@ impl HostClipTarget {
                 .on_host(move || self.take_reversed_now(take, authorized))?;
         }
         self.valid(take, c"MediaItem_Take*", authorized)?;
-        if let Some(facts) = self.host.take_direction_facts(take as *mut c_void, authorized) {
+        if let Some(facts) = self
+            .host
+            .take_direction_facts(take as *mut c_void, authorized)
+        {
             return Ok(facts.reversed);
         }
         let geometry = self
@@ -1279,9 +1277,7 @@ impl HostClipTarget {
     ///
     /// 【为什么不是 `api()`】`api()` 还要求写 API 存在；兄弟 take 的**读数**在
     /// 只读宿主上也成立，不该被写能力门挡住。
-    pub(crate) fn host_geometry_api(
-        &self,
-    ) -> Option<&super::GeometryApi> {
+    pub(crate) fn host_geometry_api(&self) -> Option<&super::GeometryApi> {
         self.host.geometry.as_ref()
     }
 
