@@ -49,6 +49,38 @@ pub fn get_clip_rendering_state(clip_id: &str) -> Option<ClipRenderingState> {
 
 // ─── param_hash 计算 ───────────────────────────────────────────────────────────
 
+/// 曲线参数的越界语义是否为 hold-last（`renderer::chain::sample_curve_at_abs_sec`
+/// 家族：曲线画到哪，增益保持到哪）。
+///
+/// 【为什么按参数名判】哈希切片拿到的只有 `(参数名, 曲线)`，越界语义没有随数据
+/// 一起传进来。已知的例外只有 `formant_shift_cents`：hifigan 的
+/// `formant_shift_fn` 明确用 FallToDefault（越界回 0，与"曲线为空"同语义，
+/// 末值不影响越界后的音频）。未知参数按 hold-last 处理是**安全方向** ——
+/// 多失效（多一次重合成）永远不会错，漏失效（陈旧渲染命中）才是本仓定义的
+/// 最严重缓存缺陷。
+fn is_hold_last_curve(param_id: &str) -> bool {
+    param_id != "formant_shift_cents"
+}
+
+/// 窗口越过曲线末尾时，把 hold-last 曲线的末值混进哈希。
+///
+/// 【为什么必须有这条】hold-last 曲线在末尾之后**仍以 `curve.last()` 作用于音频**
+/// （`sample_curve_linear_beyond`），而切片 `curve[lo..hi]` 在窗口整段越过末尾时
+/// 是空的 —— 末值从未进哈希，改末值无法让那些块/整 clip 缓存失效。陈旧命中不只
+/// 发生在内存缓存：整 clip 级哈希喂给**磁盘**渲染缓存，坏条目重启后照样命中。
+/// FallToDefault 的曲线越界读缺省值、不受末值影响，跳过混入以免无谓失效。
+macro_rules! mix_hold_last_tail {
+    ($h:expr, $key:expr, $curve:expr, $start_idx:expr, $end_idx:expr) => {
+        if $end_idx > $curve.len() && !$curve.is_empty() && is_hold_last_curve($key) {
+            let last = $curve[$curve.len() - 1];
+            for &b in &last.to_bits().to_le_bytes() {
+                $h ^= b as u64;
+                $h = $h.wrapping_mul(1099511628211u64);
+            }
+        }
+    };
+}
+
 /// 计算 clip 的参数哈希（FNV-1a 64-bit）。
 ///
 /// 输入覆盖：
@@ -154,6 +186,7 @@ where
         for &val in &curve[lo..hi] {
             mix_bytes!(&val.to_bits().to_le_bytes());
         }
+        mix_hold_last_tail!(h, k.as_ref(), curve, start_idx, end_idx);
     }
 
     // 混入 extra_params（StaticEnum 类型参数），按 key 排序保证确定性
@@ -842,6 +875,9 @@ pub fn compute_rendered_clip_hash_excluding(
         for &val in &v[curve_lo..curve_hi] {
             mix_bytes!(&val.to_bits().to_le_bytes());
         }
+        // 整 clip 级哈希喂给磁盘渲染缓存：hold-last 末值不进哈希的漏失效会在重启
+        // 后照样命中，比分块缓存那一侧更持久（见 mix_hold_last_tail! 的说明）。
+        mix_hold_last_tail!(h, k.as_str(), v, start_idx, end_idx);
     }
 
     // 混入 extra_params（StaticEnum 类型参数），按 key 排序保证确定性
@@ -1218,6 +1254,37 @@ mod tests {
         assert_ne!(hash_a, fixture.hash());
     }
 
+    /// 整 clip 级哈希同样要吃到 hold-last 末值：clip 窗口整段落在曲线末尾之后时
+    /// （曲线是撤销残留 / 曲线挂在别的轨道段上），渲染仍按末值进行。此前切片为空，
+    /// 改末值命中的是**磁盘缓存**里按旧末值渲染的条目 —— 重启后照样命中。
+    #[test]
+    fn rendered_clip_hash_includes_the_held_last_value_when_the_window_lies_past_the_curve() {
+        let _stretch = lock_stretch_global_read();
+        let mut fixture = Fixture::new();
+        // 曲线按 frame_period_ms=5ms 采样：40 点 = 0.2s；窗口挪到 [2s, 3s)。
+        fixture
+            .extra_curves
+            .insert("hifigan_tension".into(), vec![0.0; 40]);
+        let mut input = fixture.input();
+        input.start_frame = 48_000 * 2;
+        input.end_frame = 48_000 * 3;
+        let hash_a = compute_rendered_clip_hash(&input);
+
+        fixture.extra_curves.insert("hifigan_tension".into(), {
+            let mut v = vec![0.0f32; 39];
+            v.push(80.0);
+            v
+        });
+        let mut input = fixture.input();
+        input.start_frame = 48_000 * 2;
+        input.end_frame = 48_000 * 3;
+        assert_ne!(
+            hash_a,
+            compute_rendered_clip_hash(&input),
+            "the held last value drives the whole-clip render; editing it MUST invalidate"
+        );
+    }
+
     #[test]
     fn rendered_clip_hash_changes_when_reversed_changes() {
         let _stretch = lock_stretch_global_read();
@@ -1482,6 +1549,89 @@ mod tests {
             hash_with_curve(&a),
             hash_with_curve(&b),
             "an edit inside the queried range MUST invalidate this chunk"
+        );
+    }
+
+    /// hold-last 曲线的**末值**作用于窗口越过曲线末尾之后的音频；改末值必须让
+    /// 那些窗口失效。
+    ///
+    /// 【为什么这条是回归测试】曲线只画 0.2s、查询窗口从 1s 起 —— 此前的切片
+    /// `curve[lo..hi]` 为空，末值从未进哈希，改末值命中的是按旧末值渲染的陈旧块
+    /// （且整 clip 级条目持久化在磁盘缓存里，重启后照样命中）。
+    #[test]
+    fn editing_the_last_value_of_a_hold_last_curve_invalidates_windows_past_its_end() {
+        let snapshot = crate::pitch_editing::PitchCurvesSnapshot {
+            frame_period_ms: 5.0,
+            pitch_orig: &[],
+            pitch_edit: &[],
+        };
+        // 曲线按 frame_period_ms=5ms 采样：40 点 = 0.2s。窗口 [1s, 2s) 整段在
+        // 曲线末尾之后 —— 渲染按 hold-last 用末值。
+        let hash_with_curve = |curve: &[f32]| {
+            let extra = vec![("hifigan_tension", curve)];
+            compute_param_hash(
+                "clip-x",
+                44_100, // 1s
+                44_100 * 2,
+                44_100,
+                0,
+                "nsf_hifigan_onnx",
+                &snapshot,
+                extra,
+                &std::collections::HashMap::new(),
+            )
+        };
+
+        let a = vec![0.0f32; 40];
+        let mut b = a.clone();
+        b[39] = 80.0; // 末值
+        assert_ne!(
+            hash_with_curve(&a),
+            hash_with_curve(&b),
+            "the held last value drives windows past the curve end; editing it MUST invalidate"
+        );
+
+        // 越过末尾的窗口只按末值渲染：非末值点改动不得让它失效（局部性仍在）。
+        let mut c = a.clone();
+        c[10] = 80.0;
+        assert_eq!(
+            hash_with_curve(&a),
+            hash_with_curve(&c),
+            "a non-final point does not affect windows entirely past the curve end"
+        );
+    }
+
+    /// FallToDefault 的曲线（formant）越界读缺省值：末值变化**不得**让越过末尾的
+    /// 窗口失效 —— 那些窗口的渲染根本不读曲线。
+    #[test]
+    fn a_fall_to_default_curve_keeps_windows_past_its_end_on_the_same_hash() {
+        let snapshot = crate::pitch_editing::PitchCurvesSnapshot {
+            frame_period_ms: 5.0,
+            pitch_orig: &[],
+            pitch_edit: &[],
+        };
+        let hash_with_curve = |curve: &[f32]| {
+            let extra = vec![("formant_shift_cents", curve)];
+            compute_param_hash(
+                "clip-x",
+                44_100,
+                44_100 * 2,
+                44_100,
+                0,
+                "nsf_hifigan_onnx",
+                &snapshot,
+                extra,
+                &std::collections::HashMap::new(),
+            )
+        };
+
+        let a = vec![0.0f32; 40];
+        let mut b = a.clone();
+        b[39] = 359.0;
+        assert_eq!(
+            hash_with_curve(&a),
+            hash_with_curve(&b),
+            "past the curve end the formant shift falls back to 0; the last value must not invalidate"
         );
     }
 
