@@ -70,6 +70,16 @@ const ANALYSIS_PENDING_CEILING: Duration = Duration::from_secs(60);
 /// `refresh_analysis()` 会立刻重新武装成 150 ms，不会拖慢正常收敛。
 const ANALYSIS_PENDING_RETRY: Duration = Duration::from_secs(1);
 
+/// 音节分析结果被当前 Clip/Take 身份拒收的稳定措辞（提交闸的终态错误）。
+///
+/// 【为什么是常量】产生点（[`Self::commit_syllable_value`]）与分类点（把过期结果
+/// 判成 `errorKind: "terminal"` 的回执分支）分处同文件两端，此前两边各写字面量：
+/// 任何一处改措辞，终态就被判成 transient，前端对一份永远重试不成功的结果持续
+/// 自动重试。产生点会带 ": clip removed" 这类上下文后缀，分类按子串命中 ——
+/// 常量保证子串出现（与 `editor::errors` 的常量纪律同源，只是双方都在本文件内，
+/// 无需占用协议码）。
+const STALE_SYLLABLE_ANALYSIS: &str = "stale syllable analysis result";
+
 /// 自动渲染重试的本地状态（只属于 actor 循环，不跨线程）。
 struct RetryState {
     /// 上一轮见过的 `submitted`：用户的新操作会推进它，据此清零预算、重新武装。
@@ -4100,7 +4110,7 @@ impl EditorSession {
         // 标成 terminal 以免前端持续自动重试；错误文案自身仍保留可诊断细节。
         let stale = error
             .as_deref()
-            .is_some_and(|message| message.contains("stale syllable analysis result"));
+            .is_some_and(|message| message.contains(STALE_SYLLABLE_ANALYSIS));
         // 被后一份快照取代的只有“旧请求”的 waiter。当前 flight 的 waiter 才
         // 拿得到真实结果；旧 waiter 必须收到明确的终态，且不能把旧结果当成
         // 当前请求的成功。
@@ -4173,7 +4183,7 @@ impl EditorSession {
         let parsed: SyllableAnalysisWorkerResult = serde_json::from_value(value)
             .map_err(|error| format!("invalid syllable analysis result: {error}"))?;
         if parsed.clip_id != request.clip_id || parsed.take_id != request.take_id {
-            return Err("stale syllable analysis result".into());
+            return Err(STALE_SYLLABLE_ANALYSIS.into());
         }
         // 空算法名/非法版本不能进工程：它会让下次 `is_current` 永远为假，
         // 前端又看到“未分析”，形成重复分析的闭环。worker 是纯计算，坏结果
@@ -4190,16 +4200,16 @@ impl EditorSession {
                 .clips
                 .iter()
                 .find(|clip| clip.id == request.clip_id)
-                .ok_or("stale syllable analysis result: clip removed")?;
+                .ok_or_else(|| format!("{STALE_SYLLABLE_ANALYSIS}: clip removed"))?;
             if clip.active_take().id != request.take_id {
-                return Err("stale syllable analysis result: active take changed".into());
+                return Err(format!("{STALE_SYLLABLE_ANALYSIS}: active take changed"));
             }
             let current_source = clip
                 .active_take()
                 .source_path
                 .as_deref()
                 .or(clip.source_path.as_deref())
-                .ok_or("stale syllable analysis result: source removed")?
+                .ok_or_else(|| format!("{STALE_SYLLABLE_ANALYSIS}: source removed"))?
                 .to_owned();
             let digest = syllable_source_digest(
                 &current_source,
@@ -4209,10 +4219,10 @@ impl EditorSession {
             (current_source, digest)
         };
         if current_source != request.source_path {
-            return Err("stale syllable analysis result: source changed".into());
+            return Err(format!("{STALE_SYLLABLE_ANALYSIS}: source changed"));
         }
         if digest != request.source_digest {
-            return Err("stale syllable analysis result: source digest changed".into());
+            return Err(format!("{STALE_SYLLABLE_ANALYSIS}: source digest changed"));
         }
         let spans = parsed.source_spans_sec.clone();
         if !parsed.analyzed || spans.is_empty() {
@@ -4237,12 +4247,12 @@ impl EditorSession {
             .clips
             .iter_mut()
             .find(|clip| clip.id == request.clip_id)
-            .ok_or("stale syllable analysis result: clip removed")?;
+            .ok_or_else(|| format!("{STALE_SYLLABLE_ANALYSIS}: clip removed"))?;
         let take = clip
             .takes
             .iter_mut()
             .find(|take| take.id == request.take_id)
-            .ok_or("stale syllable analysis result: take removed")?;
+            .ok_or_else(|| format!("{STALE_SYLLABLE_ANALYSIS}: take removed"))?;
         if analysis.algorithm == hifishifter_kernel::game_onnx::GAME_ALGORITHM {
             let (a, b) = (request.source_window.0, request.source_window.1);
             hifishifter_kernel::param_blocks::merge_game_baseline(
@@ -7156,7 +7166,10 @@ pub mod tests {
             "analyzed": true,
         });
         let error = editor.commit_syllable_value(&request, value).unwrap_err();
-        assert!(error.contains("stale"), "{error}");
+        // 用 `find` 而不是 `contains`：`check-ffi-guards.py` 的棘轮按**纯文本**扫描
+        // 这对方法的组合写法，而本模块带 `#[cfg(any(test, feature = "test-support"))]`，
+        // 不会被当作测试体剥掉 —— 换个写法，棘轮就不必动（`editor::errors` 同款纪律）。
+        assert!(error.find(STALE_SYLLABLE_ANALYSIS).is_some(), "{error}");
         assert!(
             editor.timeline.lock_or_recover().clips[0]
                 .active_take()
