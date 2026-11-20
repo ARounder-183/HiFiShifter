@@ -885,6 +885,15 @@ impl AppState {
     /// `label` 由调用方给出（语言无关的 key，前端本地化）：批量导入等场景
     /// 能给出比「批量操作」更准确的名字；缺省用 HistoryOp::Batch。
     pub fn begin_undo_group(&self, label: Option<String>) -> TimelineStatePayload {
+        // 【诊断未闭合的上一组】`begin`/`end` 是两个独立 IPC，前端在两者之间抛错
+        // 就会漏掉 `end`，suppress 一直为真、期间的编辑全部没有撤销点。下面的
+        // 防御性重开会自愈，但自愈若无声，这类缺陷永远不可见 —— 记一条警告。
+        if self
+            .suppress_checkpoints
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            log::warn!("[undo] begin_undo_group while a previous group never ended");
+        }
         let tl = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
         // Force a checkpoint even if suppress was already active (defensive)
         self.suppress_checkpoints
@@ -905,8 +914,13 @@ impl AppState {
 
     /// End the undo group: re-enable checkpoints.
     pub fn end_undo_group(&self) -> serde_json::Value {
-        self.suppress_checkpoints
-            .store(false, std::sync::atomic::Ordering::Release);
+        // 没有开组就收组（前端重复收尾 / 丢包重放）：无害，但说明配对逻辑有问题。
+        if !self
+            .suppress_checkpoints
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            log::warn!("[undo] end_undo_group without an open group");
+        }
         serde_json::json!({ "ok": true })
     }
 
