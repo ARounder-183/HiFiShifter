@@ -248,11 +248,7 @@ test("plugin take submenu falls back to a read-only list when the host cannot re
     const takeSubmenu = entries.find(
         (entry) => entry.kind === "submenu" && entry.key === "takes",
     ) as Extract<ClipMenuEntry, { kind: "submenu" }>;
-    expect(takeSubmenu.children.map((child) => child.kind)).toEqual([
-        "heading",
-        "heading",
-        "item",
-    ]);
+    expect(takeSubmenu.children.map((child) => child.kind)).toEqual(["heading", "heading", "item"]);
 });
 
 test("situational unavailability stays visible but disabled", () => {
