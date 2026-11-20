@@ -265,7 +265,10 @@ Test-Invariant '含非 ASCII 的 Python 脚本把 stdout 钉成 UTF-8' {
     foreach ($file in Get-ChildItem (Join-Path $root 'scripts') -Recurse -File -Include *.py) {
         $text = [IO.File]::ReadAllText($file.FullName, [Text.Encoding]::UTF8)
         if ($text -notmatch '[^\x00-\x7f]') { continue }
-        if ($text -notmatch "reconfigure\(encoding='utf-8'") { $offenders += $file.FullName.Substring($root.Length + 1) }
+        # 【为什么引号两种都收】不变量是"钉了 UTF-8"，不是"钉的时候用了哪种引号"：
+        # 仓库里两种引号风格并存（check-ffi-guards.py 单引号、check-dialog-filters.py
+        # 双引号），只认单引号会把钉好的脚本误报成漏钉 —— 门禁红的是引号，不是编码。
+        if ($text -notmatch 'reconfigure\(encoding=[''"]utf-8[''"]') { $offenders += $file.FullName.Substring($root.Length + 1) }
     }
     if ($offenders.Count) { throw ('以下脚本含非 ASCII 却没有把 stdout 钉成 UTF-8：' + ($offenders -join ' | ')) }
     'scripts/**/*.py'

@@ -121,13 +121,26 @@ def count_braces(src, start):
     raise ValueError('unbalanced braces')
 
 
+# 【为什么不止认 `#[cfg(test)]`】共享层的测试夹具（test_host / test_allocator）以
+# `#[cfg(any(test, feature = "test-support"))]` 声明：产品构建整块不存在，只有格式
+# 外壳的测试构建经该特性看见它们（lib.rs 的 `test_support` 文档）。只认 cfg(test)
+# 会把 test_host.rs 的 27 个 extern "C" 回调当成宿主边界逐个点名 —— 而它们从不进
+# 真实宿主进程，正是本门禁设计上要豁免的那类测试替身。
+TEST_ONLY_ATTR = (
+    r'#\[cfg\(test\)\]',
+    r'#\[cfg\(any\(test,\s*feature\s*=\s*"test-support"\)\)\]',
+)
+
 # 【为什么不是一句 `#[cfg(test)]\s*mod \w+`】那样只认裸 `mod`。测试模块普遍写成
 # `#[cfg(test)]\n pub(crate) mod tests {`（`editor/session.rs` 就是），带可见性的那一种
 # 匹配不上，整个模块体于是被当成**生产代码**扫描 —— 里面每一句断言都会被算成违规。
 # 这个门禁曾经因此对着一个只出现在 `assert!` 里的 `error.contains(` 报红，而基线允许 0。
+# 【为什么属性链也吞 `//` 注释】本仓习惯在 cfg 属性与 mod 之间放"为什么"注释块
+# （`editor/session.rs` 的 `pub mod tests` 就是三行注释隔开两个属性）；不吞注释，
+# 这一类模块体同样会被当成生产代码扫描。
 CFG_TEST_MOD = re.compile(
-    r'#\[cfg\(test\)\]'                 # the attribute itself
-    r'(?:\s*#\[[^\]]*\])*'              # any further attributes on the item
+    r'(?:' + r'|'.join(TEST_ONLY_ATTR) + r')'  # the attribute itself
+    r'(?:\s*(?://[^\n]*|#[^\]]*\]))*'   # comments between the attributes
     r'\s*(?:pub(?:\s*\([^)]*\))?\s+)?'  # optional visibility (pub / pub(crate) / …)
     r'mod\s+\w+\s*\{'                    # the module body
 )
@@ -159,7 +172,14 @@ def test_only_modules(root):
     list here would rot; reading the parent's declaration cannot.
     """
     declared = set()
-    pattern = re.compile(r'#\[cfg\(test\)\]\s*mod\s+(\w+)\s*;')
+    # Same attribute forms as CFG_TEST_MOD above (see its why-comment for the
+    # `test-support` half); a declaration file may carry why-comments between
+    # the cfg attribute and the `mod` item.
+    pattern = re.compile(
+        r'(?:' + r'|'.join(TEST_ONLY_ATTR) + r')'
+        r'(?:\s*(?://[^\n]*|#[^\]]*\]))*'
+        r'\s*mod\s+(\w+)\s*;'
+    )
     for dirpath, _dirs, files in os.walk(root):
         for fn in files:
             if not fn.endswith('.rs'):
