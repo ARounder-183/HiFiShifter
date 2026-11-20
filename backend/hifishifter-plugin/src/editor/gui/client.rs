@@ -1700,6 +1700,13 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
             .cloned()
             .unwrap_or_default();
         if ids.is_empty() || ids.len() > 512 || ids.iter().any(|id| id.as_str().is_none()) {
+            // 【为什么给明确错误而不是静默丢弃】`invoke` 是请求-响应通道：不回执
+            // 就是让那个 promise 挂到 30 s 超时 —— "编组点了没反应"与"从未发送"
+            // 在日志里完全同形（本函数头部的三处早退注释是同一条纪律）。
+            state.borrow_mut().post(
+                serde_json::json!({"version":1,"viewId":view_id,"id":id,"ok":false,
+                "error":"group_clips requires 1..512 string clip ids"}),
+            );
             return;
         }
         let group = if request["command"] == "ungroup_clips" {

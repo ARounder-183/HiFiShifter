@@ -466,7 +466,13 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
                 if !(-1.0..=1.0).contains(&number) {
                     return Err("fade curvature/S outside -1..1".into());
                 }
-            } else if !(0. ..=1_000_000.).contains(&number) {
+            } else if key != "hostGroupId" && !(0. ..=1_000_000.).contains(&number) {
+                // 【为什么 hostGroupId 不走通用上限】通用上限服务的是"秒/倍率/增益"
+                // 这些几何量；编组 id 的值域是 `0..=HOST_GROUP_ID_MAX`（2e9，
+                // `host_group_id_for` 的哈希取模就落在整个区间上）。让它吃几何
+                // 上限会把 ~99.95% 的编组在解析阶段整条拒绝 —— 用户看到的就是
+                // "编组点了没反应"，而下面那条专属检查（同值域、还要求整数）
+                // 永远不可达。两者各管各的值域。
                 return Err("clip edit outside supported finite range".into());
             }
             if matches!(key.as_str(), "fadeInShape" | "fadeOutShape") && number >= 7. {
@@ -2597,6 +2603,81 @@ FILE \"ara://source\"
             .expect("active take 的逐 take 补丁必须被接受");
         assert_eq!(plan.edits[0].patch.reversed, Some(true));
         assert!(plan.edits[0].take_direction.is_none());
+        document.close();
+    }
+
+    /// **编组 → 宿主 `I_GROUPID`**：补丁解析、setter、完成门三段同测。
+    ///
+    /// 【为什么要端到端】编组是"多片段各写一位"的批次：补丁键（`hostGroupId`）、
+    /// 写口白名单（`I_GROUPID`）、完成门（`group_id` 回声）三处各一段代码 —— 任何
+    /// 一处拒绝都以"编组点了没反应"收场（真机曾经整批拒绝过越界 id）。完成门
+    /// 按**字符串**回声比对（"host-group-N" 来自清单对 `I_GROUPID` 的读回），
+    /// 回声没带上编组 id 之前不算完成 —— 否则前端会拿旧状态覆盖乐观更新。
+    #[test]
+    fn a_group_patch_writes_host_group_ids_and_waits_for_the_echo() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_writer();
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        let group = 123_456_789_i32;
+        let plan = editor
+            .plan_host_edit(
+                "set_clips_state_bulk",
+                &json!({"updates":[{"clipId":clip.id,"hostGroupId":group}],"checkpoint":true}),
+            )
+            .expect("编组补丁必须被接受");
+        let before = plan.edits[0].before.clone();
+        let receipt = plan.receipt(&editor.namespace, owner.host_fade_axes());
+        let echo = |group_id: serde_json::Value| {
+            json!({"clips":[{
+                "id": before.id,
+                "start_sec": before.start_sec,
+                "length_sec": before.length_sec,
+                "source_start_sec": before.source_start_sec,
+                "playback_rate": before.playback_rate,
+                "track_id": before.track_id,
+                "clip_gain": before.clip_gain,
+                "gain": before.gain,
+                "reversed": before.reversed,
+                "loop_enabled": before.loop_enabled,
+                "group_id": group_id,
+            }]})
+        };
+        assert!(
+            !receipt.matches(&echo(json!(""))),
+            "回声没有编组 id 时完成门必须拦下"
+        );
+        assert!(
+            receipt.matches(&echo(json!(format!("host-group-{group}")))),
+            "回声带上编组 id 才算完成"
+        );
+        host.reset();
+        execute(&owner, plan, || document.is_alive()).expect("编组写回必须成功");
+        assert_eq!(
+            host.item_value("I_GROUPID"),
+            Some(group as f64),
+            "编组必须按 I_GROUPID 写到宿主 item 上"
+        );
+        // 解组：期望回声是 group_id 缺席（Null），任何残留编组 id 都不算完成。
+        let plan = editor
+            .plan_host_edit(
+                "set_clips_state_bulk",
+                &json!({"updates":[{"clipId":clip.id,"hostGroupId":0}],"checkpoint":true}),
+            )
+            .expect("解组补丁必须被接受");
+        let receipt = plan.receipt(&editor.namespace, owner.host_fade_axes());
+        assert!(receipt.matches(&echo(serde_json::Value::Null)));
+        assert!(!receipt.matches(&echo(json!("host-group-1"))));
         document.close();
     }
 
