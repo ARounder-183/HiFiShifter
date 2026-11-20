@@ -13,6 +13,7 @@ use hifishifter_kernel::unicode_path::normalize_relative_path;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use tauri::{Manager, State, Window};
 
 /// 归一化音阶键名。清单只有一份，在 `hifishifter_kernel::state::model` 里 ——
@@ -974,6 +975,17 @@ pub(crate) fn save_project_to_path_inner(
     // 记事本附件：按正文引用清理未引用条目，再构建快照 —— 顺序不能反，
     // 否则登记表里还留着已被删掉的条目（字节内嵌在工程文件里，随之一起变大）。
     crate::commands::notebook::prepare_assets_for_save(state);
+    // 【快照基线要在快照之前取】序列化 + fsync + rename 可能耗时数秒；期间用户的
+    // 编辑（时间线打点、记事本、工程元数据）会再次置脏 —— 它们**不在已写出的
+    // 文件里**。与 link_bridge::submit 同一条纪律：只有"写出去的就是现在的"才
+    // 允许清 dirty，否则关闭窗口时"未保存修改"的提示被静默吞掉，编辑随进程
+    // 退出丢失。基线取在快照前：基线与快照之间挤进来的编辑宁可让 dirty 多留
+    // 一轮（再存一次即清），也不能误清。
+    let saved_timeline_version = state.timeline_version.load(Ordering::Acquire);
+    let saved_content_fingerprint = {
+        let p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+        crate::link_bridge::project_content_fingerprint(&p)
+    };
     let pf = build_project_file_snapshot(state, &path, &name);
     let bytes = serialize_project_file_for_format(&pf, format)?;
 
@@ -1005,7 +1017,16 @@ pub(crate) fn save_project_to_path_inner(
         let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
         p.name = name;
         p.path = Some(project_path.clone());
-        p.dirty = false;
+        // 【清脏的前提是快照仍然是最新内容】见上方的基线说明：代次或内容指纹
+        // 在快照后前进过，就说明有编辑不在已写出的文件里 —— 保留 dirty。
+        // name/path 本身不计入（保存就是要改它们，见 project_content_fingerprint）。
+        let timeline_stable =
+            state.timeline_version.load(Ordering::Acquire) == saved_timeline_version;
+        let content_stable =
+            crate::link_bridge::project_content_fingerprint(&p) == saved_content_fingerprint;
+        if timeline_stable && content_stable {
+            p.dirty = false;
+        }
         p.recent.retain(|x| x != &project_path);
         p.recent.insert(0, project_path.clone());
         if p.recent.len() > 10 {

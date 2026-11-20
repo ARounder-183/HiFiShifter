@@ -295,6 +295,10 @@ pub(super) fn import_midi_as_clip(
                             }
                             p.dirty = true;
                         }
+                        // 本分支不走 checkpoint_timeline（无撤销步），但 BPM/拍号/音阶
+                        // 已写进时间线与工程：保存流程靠 timeline_version 判断"快照
+                        // 之后内容有没有变"，这里不递增会让该窗口内的保存误清 dirty。
+                        state.bump_timeline_version();
                     }
                     tl.tempo_map = None;
                     midi_log("import_midi_as_clip: no tempo map change (initial values applied to project)");
