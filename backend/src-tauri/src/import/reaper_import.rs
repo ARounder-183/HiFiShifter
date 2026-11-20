@@ -2092,7 +2092,9 @@ fn clip_name_from_path(path: &str) -> String {
 
 fn resolve_path(raw_path: &str, base_dir: Option<&Path>) -> String {
     let p = Path::new(raw_path);
-    if p.is_absolute() {
+    // 【跨平台绝对路径必须原样放行】RPP 可能来自别的平台：`/Users/…` 在 Windows
+    // 上不是绝对路径，join 后会变成一条必然不存在的伪造路径（见 `import_paths`）。
+    if crate::import_paths::is_cross_platform_absolute(raw_path) {
         return raw_path.to_string();
     }
     if let Some(dir) = base_dir {
