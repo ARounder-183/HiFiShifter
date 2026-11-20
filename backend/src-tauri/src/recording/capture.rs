@@ -339,6 +339,11 @@ fn run_cpal_input(
     };
     let capture_ctx = ctx.clone();
     let capture_resampler = resampler.clone();
+    // 【音频回调里不能打日志】限流日志要格式化 + 全局表，不是实时安全的；回调里
+    // 只做一次原子递增，退出时由非实时线程统一报告。丢包本身仍保留录音（带洞的
+    // take 比删掉整段有用），但"为什么有洞"必须能在日志里查到。
+    let resample_failures = Arc::new(AtomicU32::new(0));
+    let capture_failures = resample_failures.clone();
     let stream = device
         .build_input_stream_raw(
             config,
@@ -352,8 +357,11 @@ fn run_cpal_input(
                     .lock()
                     .unwrap_or_else(|err| err.into_inner());
                 if let Some(converter) = guard.as_mut() {
-                    if let Ok(out) = converter.push_interleaved(&samples, channels_out) {
-                        capture_ctx.push(&out);
+                    match converter.push_interleaved(&samples, channels_out) {
+                        Ok(out) => capture_ctx.push(&out),
+                        Err(_) => {
+                            capture_failures.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                 } else {
                     capture_ctx.push(&samples);
@@ -372,6 +380,10 @@ fn run_cpal_input(
         std::thread::sleep(Duration::from_millis(10));
     }
     drop(stream);
+    let failures = resample_failures.load(Ordering::Relaxed);
+    if failures > 0 {
+        log_error_limited!("[recording] input resampler dropped {failures} packet(s)");
+    }
     // Flush whatever is still sitting in the resampler so the final ~20 ms of
     // audio is not lost.
     if let Ok(mut guard) = resampler.lock() {
@@ -661,7 +673,11 @@ impl RateConverter {
         }
         let input = self.drain_chunk(needed);
         let mut out = Vec::new();
-        let _ = self.resample_into(&input, channels_in, channels_out, &mut out);
+        // 收尾冲刷失败不能无声：这是最后 ~20 ms 的音频，`let _` 会让它连同
+        // "为什么尾音没了"一起消失（与 push 路径同一条诊断纪律）。
+        if let Err(err) = self.resample_into(&input, channels_in, channels_out, &mut out) {
+            log_error_limited!("[recording] input resampler flush failed: {err}");
+        }
         out
     }
 

@@ -348,12 +348,20 @@ pub fn start(state: &AppState, start_sec: f64) -> Result<RecordingStartedInfo, S
         Ok(Err(_)) | Err(_) => {
             stop_signal.store(true, Ordering::Relaxed);
             let _ = writer_tx.send(WriterMsg::Finish);
-            let _ = thread_join.join();
+            // 先收割捕获线程：run_capture 的返回值是**唯一**带真实失败原因的地方
+            // （设备解析、WASAPI init 等失败都发生在 ready_tx 首次发送之前，
+            // ready_rx 只会收到 Disconnected）。此前这里丢弃 join 结果，把一切
+            // 启动失败都报告成 "start timeout" —— 用户对着"超时"提示去查一个
+            // 根本没有超时的设备故障（拔掉的麦克风、失效的默认设备）。
+            let capture_error = match thread_join.join() {
+                Ok(Err(err)) => Some(err),
+                Ok(Ok(())) | Err(_) => None,
+            };
             let _ = writer_join.join();
             let _ = std::fs::remove_file(&output_path);
             let error = match readiness {
                 Ok(Err(err)) => err,
-                _ => "recording_error_start_timeout".to_string(),
+                _ => capture_error.unwrap_or_else(|| "recording_error_start_timeout".to_string()),
             };
             return Err(error);
         }
@@ -435,10 +443,13 @@ pub fn stop(state: &AppState) -> Result<RecordingFinishedInfo, String> {
         let _ = tx.send(WriterMsg::Finish);
     }
 
-    let writer_result = match active.writer_join.take() {
-        Some(join) => join
-            .join()
-            .map_err(|_| "recording_error_writer_panic".to_string())?,
+    // 【panic 分支也要清理半截文件】此前 panic 走 `?` 直接返回，磁盘上留下一个
+    // 已 finalize 或写了一半的 WAV（与下面两条失败分支的卫生纪律不一致）。
+    let writer_result: Result<(), String> = match active.writer_join.take() {
+        Some(join) => match join.join() {
+            Ok(result) => result,
+            Err(_) => Err("recording_error_writer_panic".to_string()),
+        },
         None => Ok(()),
     };
     if let Err(err) = writer_result {

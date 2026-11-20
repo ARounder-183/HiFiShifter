@@ -387,9 +387,15 @@ impl CaptureOutput {
                 let converted =
                     convert_channels(&decoded, *channels_in as usize, *channels_out as usize);
                 if let Some(resampler) = resampler {
-                    if let Ok(out) = resampler.push_interleaved(&converted, *channels_out as usize)
-                    {
-                        ctx.push(&out);
+                    match resampler.push_interleaved(&converted, *channels_out as usize) {
+                        Ok(out) => ctx.push(&out),
+                        // 【不能静默丢包】重采样器中途失败时，此前每个包都被无声丢弃：
+                        // WAV 写出的是带洞的录音，stop() 却报成功。录音仍保留（带洞的
+                        // take 比删掉整段录音有用），但故障必须在日志里可诊断 —— 限流
+                        // 记录，避免每包一行把日志刷爆。
+                        Err(err) => log_error_limited!(
+                            "[recording] input resampler dropped a packet: {err}"
+                        ),
                     }
                 } else {
                     ctx.push(&converted);
