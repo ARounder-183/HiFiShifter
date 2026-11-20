@@ -1650,3 +1650,45 @@ fn a_live_document_does_not_block_rebinding_to_another_document() {
     first.close();
     second.close();
 }
+
+/// **同步发布第一份快照的前提：源 PCM 必须已经在手上。**
+///
+/// 【为什么这条是"每隔一小会儿一个静音断点"的一半】**宿主不会等我们的后台队列**：
+/// 实例建好之后 REAPER 立刻按 region 一块块渲染（实测 21 个块 ≈225 ms 里我们还没有
+/// 快照，于是逐样本写零，而宿主把那些零烘进自己的 ARA 缓存）。所以第一份快照必须在
+/// 宿主问第一块之前就发布 —— 这也意味着"什么时候可以同步发布"必须判准：源 PCM 由
+/// 宿主异步授权，素材没到时同步渲染必然 `MissingSource`，白烧掉那次机会。
+///
+/// 本用例钉的就是这个前提：没有 PCM 时不许认为"可以算了"，PCM 到手之后必须是。
+#[test]
+fn the_inline_first_snapshot_sees_the_host_pcm_and_publishes() {
+    let (model, owner, _identity) = crate::editor::session::tests::fixture();
+    let document = model.session();
+    assert!(owner.is_bound(), "夹具的实例绑定在 ARA 文档上");
+    // 夹具只塞了 `edit_sources`（内核渲染读的那一份）；直通通路读的是 `sources`。
+    document.sources.lock_or_recover().insert(
+        "ara://source".into(),
+        Arc::new(crate::render::source::SourcePcm {
+            covered: Vec::new(),
+            sample_rate: 44100,
+            planes: vec![vec![0.1, 0.2, 0.3, 0.4]],
+            version: 0,
+            _reservation: None,
+        }),
+    );
+    assert!(
+        owner.has_pending_render_sources(),
+        "PCM 到手之后必须认为可以渲染，否则第一份快照永远发不出去"
+    );
+    // 并证明这条前提确实通向"能发布"：素材在就是能算出来。
+    owner
+        .prepare_job(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )))
+        .expect("素材在手时第一份快照必须能算出并发布");
+    assert!(
+        owner.snapshots.iter().all(|snapshot| snapshot.is_ready()),
+        "算完就必须有可播的快照"
+    );
+    document.close();
+}

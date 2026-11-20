@@ -425,6 +425,8 @@ impl ExtensionOwner {
                 return;
             }
         }
+        // 【第一次必须是同步的】见 `publish_first_snapshot_inline`。
+        self.publish_first_snapshot_inline();
         self.ensure_preparation();
         if let Some(worker) = self.preparation() {
             if let Err(error) = worker.request(Box::new(move |cancel| {
@@ -554,6 +556,115 @@ impl ExtensionOwner {
             worker.wait_idle_until(deadline)?;
         }
     }
+    /// 宿主拿到 region 之后**立刻**开始渲染，而渲染线程不会等后台队首的任务。
+    ///
+    /// 【为什么必须同步】实测（REAPER，48 kHz）：实例建好到第一份快照发布之间，宿主
+    /// 已经渲染了 21 个块（≈225 ms），那段窗口里 `copy_block_at` 没有快照 ⇒ 逐样本
+    /// 写零。ARA 宿主把渲染结果**存进自己的缓存**，那 225 ms 的零于是成了时间轴上
+    /// 的一段：此后每次播放都在同一处断一次，只有让宿主整段重渲（重载）才好。
+    /// 队列化解决不了这件事 —— 它保证"最终会发布"，而宿主问的是"现在这一块有没有
+    /// 内容"。第一块之前必须有内容，所以这一次只能在调用线程上算完。
+    ///
+    /// 【为什么只破例一次】同步渲染会占住调用线程一次完整合成的时长。它只在"已绑定、
+    /// 已分配到 region、且一份快照都没发布过"时发生，一个实例的整个生命周期至多
+    /// 一次；之后的每一次编辑都有一份可听的旧快照兜底，走后台队列即可。失败会把
+    /// 闸门放回去（素材晚到、文档正忙都还有下一次机会），但同一次调用里绝不循环 ——
+    /// 绝不演变成"宿主每问一次就阻塞一次"。
+    fn publish_first_snapshot_inline(&self) {
+        if !self.is_bound() {
+            return;
+        }
+        // 【为什么只在有原生扩展时做】会提前渲染的宿主，就是会按 region 抢在播放头
+        // 之前把音频烘进自己缓存的宿主（REAPER 的 ARA 渲染器实测 100% 走 prefetch）。
+        // 没有原生扩展就没有这条渲染通路，"第一块之前必须有内容"也就无从谈起 —— 那
+        // 一侧保持改动前的行为，别为一条用不上的前提在别处多算一次完整合成。
+        if self.native_host().is_none() {
+            return;
+        }
+        if self.first_snapshot_inlined.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if self.snapshots.iter().all(|snapshot| snapshot.is_ready()) {
+            return;
+        }
+        // 【素材还没到就别把这一次机会用掉】宿主授权源 PCM 是异步的（实测 32 ms），
+        // 而 `prepare_job` 在源还没到时会以 `MissingSource` 失败。同步发布只能成功
+        // 一次 —— 在素材到达之前就失败，等于等宿主真正开始问音频时我们再没有机会。
+        if !self.has_pending_render_sources() {
+            self.first_snapshot_inlined.store(false, Ordering::Release);
+            return;
+        }
+        let Some(weak) = self.prepare_owner.lock_or_recover().clone() else {
+            self.first_snapshot_inlined.store(false, Ordering::Release);
+            return;
+        };
+        self.ensure_preparation();
+        let Some(worker) = self.preparation() else {
+            self.first_snapshot_inlined.store(false, Ordering::Release);
+            return;
+        };
+        if let Err(error) = worker.request(Box::new(move |cancel| {
+            weak.upgrade()
+                .ok_or("renderer closed".to_owned())?
+                .prepare_job(cancel)
+        })) {
+            log::warn!("[ara] the inline first snapshot could not be queued: {error}");
+            self.first_snapshot_inlined.store(false, Ordering::Release);
+            return;
+        }
+        // 【为什么是"有界等待"而不是"直接调"】这一次必须发生在宿主问第一块之前，所以
+        // 调用线程得等它做完；但一次完整合成在长素材上可以到秒级，而无界的等待会把
+        // "第一块有内容"换成"宿主/界面卡死"。上界之内拿不到内容就把请求留给后台继续跑
+        // —— 最坏情况退回改动前的行为，绝不比它更糟。
+        //
+        // 【为什么不是同步 `prepare_job`】它会在版本不匹配时回调 `prepare()`，而那条
+        // 路径可能正持着文档事务：同线程再取一次就是自锁。让 worker 做，顺带避开这一点。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let _ = worker.wait_idle_until(deadline);
+        if self.snapshots.iter().all(|snapshot| snapshot.is_ready()) {
+            log::info!("[ara] the first snapshot is ready before the host can ask for audio");
+            return;
+        }
+        self.first_snapshot_inlined.store(false, Ordering::Release);
+        log::warn!("[ara] the first snapshot did not finish within the inline budget; the background worker keeps going");
+    }
+    /// 已分配的 region 里，是否至少有一条的源 PCM 已经在手上。
+    ///
+    /// 【为什么这件事要单独判】见 `publish_first_snapshot_inline`：没有源 PCM 的
+    /// 同步渲染必然 `MissingSource`，而那次尝试只允许成功一次。三个表分开取锁，
+    /// 顺序与 `ara_render_input` 一致（regions → sources → edit_sources），不制造新的
+    /// 交叉持锁。
+    pub(crate) fn has_pending_render_sources(&self) -> bool {
+        let Ok(keys) = self.assigned_regions() else {
+            return false;
+        };
+        let Ok(document) = self.editor_document() else {
+            return false;
+        };
+        let ids: Vec<String> = {
+            let regions = document.regions.lock_or_recover();
+            keys.iter()
+                .filter_map(|key| {
+                    regions
+                        .get(key)
+                        .map(|region| region.audio_source_persistent_id.clone())
+                })
+                .collect()
+        };
+        if ids.is_empty() {
+            return false;
+        }
+        let live = {
+            let sources = document.sources.lock_or_recover();
+            ids.iter().any(|id| sources.contains_key(id))
+        };
+        if live {
+            return true;
+        }
+        let edits = document.edit_sources.lock_or_recover();
+        ids.iter().any(|id| edits.contains_key(id))
+    }
+
     /// 后台冻结/计算/发布三阶段；撤销标记和全部版本在发布短事务内重新验证。
     pub(super) fn prepare_job(
         &self,

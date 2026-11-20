@@ -619,8 +619,22 @@ impl ExtensionOwner {
         } else {
             (energy / f64::from(energy_frames)).sqrt() as f32
         };
+        // 【本块读的位置】快照发布器已经记下了它（`copy_block_at` 的第一次 relaxed
+        // store）。账本按块带着它，"这一下静音在工程第几秒"就不必再靠块序号推算 ——
+        // 而块序号只在块严格相接时才等价于时间（`RecordedBlock::jump` 回答这件事）。
+        let rate = self.setup_sample_rate();
+        let publisher = &self.snapshots[self.snapshot_index_for_rate(rate)];
+        let pos = publisher.last_sample_position();
+        let pos_sec =
+            if pos == crate::render::click::NO_POSITION || !rate.is_finite() || rate <= 0.0 {
+                f32::NAN
+            } else {
+                (pos as f64 / rate) as f32
+            };
         self.click.record(crate::render::click::BlockSample {
             stream: stream.index() as u8,
+            pos,
+            pos_sec,
             kind,
             seam,
             fade_len: self.declick[stream.index()]

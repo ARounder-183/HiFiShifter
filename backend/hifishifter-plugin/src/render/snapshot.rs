@@ -444,6 +444,13 @@ impl SnapshotPublisher {
         }
     }
 
+    /// 音频线程最后一次请求的工程样本位置（帧）。`i64::MIN` = 还没请求过。
+    ///
+    /// 【为什么原始帧也要取出来】`[click]` 账本要给每块标出"这一下在第几秒"，而
+    /// 它同时需要帧号去判"这块与上一块接不接得上"。秒只给人看，帧才是判据。
+    pub(crate) fn last_sample_position(&self) -> i64 {
+        self.last_sample.load(Ordering::Relaxed)
+    }
     /// 音频线程最后一次请求的工程样本位置（秒）。`None` = 还没请求过。
     pub(crate) fn last_sample_seconds(&self, rate: f64) -> Option<f64> {
         let sample = self.last_sample.load(Ordering::Relaxed);
@@ -876,6 +883,9 @@ impl SnapshotPublisher {
         if output.num_channels == 0 {
             return false;
         }
+        // 【窗口渲染的锚点】与 `copy_block_at` 同一份记账：分层拷贝也是"音频线程读了
+        // 某个工程位置"，漏记会让账本的位置读数在这条通路上停在上一块。
+        self.last_sample.store(sample, Ordering::Relaxed);
         let read_guard = self.enter();
         // SAFETY: 本读区登记的快照在 `read_guard` 存活期间不会被回收（逐快照读者计数非零）。
         let snapshot = read_guard.snapshot();
