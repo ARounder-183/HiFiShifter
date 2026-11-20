@@ -5,8 +5,9 @@ use std::ffi::CStr;
 use std::sync::Arc;
 
 /// 单个 item 的 take 数量上限。REAPER 实际远低于此；设上限只为把畸形/竞态下的
-/// `GetMediaItemNumTakes` 返回值挡在枚举循环之外。
-const MAX_TAKES: i32 = 1024;
+/// `GetMediaItemNumTakes` 返回值挡在枚举循环之外。`pub(super)`：逐 take 写回
+/// （`write.rs` 按 GUID 认领 take 指针）用同一道预算。
+pub(super) const MAX_TAKES: i32 = 1024;
 
 #[derive(Clone)]
 pub(crate) struct UiTake {

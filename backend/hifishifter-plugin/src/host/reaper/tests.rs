@@ -766,7 +766,13 @@ unsafe extern "C" fn set_item(object: *mut c_void, name: *const c_char, value: f
 }
 unsafe extern "C" fn set_take(object: *mut c_void, name: *const c_char, value: f64) -> bool {
     let f = fixture();
-    assert_eq!(object, f.take());
+    // 逐 take 写回（兄弟 take 的声道模式）走同一个入口：额外 take 与主 take 共用
+    // 同一份数值表，与读路径（`value`）同一注释 —— 本组用例不靠逐 take 不同的
+    // 数值伪造结论，只验证"写到了那条 take 的指针上"。
+    assert!(
+        object == f.take() || f.extra_take_index(object).is_some(),
+        "take field writes must target an enumerated take"
+    );
     let name = unsafe { CStr::from_ptr(name) }.to_str().unwrap();
     f.record(format!("write-take:{name}"));
     let mut values = f.values.borrow_mut();

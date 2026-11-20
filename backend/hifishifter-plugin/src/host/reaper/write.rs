@@ -1120,6 +1120,200 @@ impl HostClipTarget {
         )
     }
 
+    /// 按 take GUID 在**同一 item**上解析另一条 take 的指针（逐 take 写回用）。
+    ///
+    /// 【为什么在写回时才解析】UI 清单的 `UiItem.takes` 只保存几何、不保存指针；
+    /// 而且 take 指针在两次清单刷新之间可能已被宿主重建。写回时刻逐槽枚举、按
+    /// GUID 认领 —— 与 `verify` 对 item/take 的"GUID 相等才算同一个对象"同一条
+    /// 纪律。找不到唯一匹配就报错：猜错 take 是工程损坏。
+    pub(crate) fn take_pointer_by_guid(
+        &self,
+        guid: &str,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<usize, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            let guid = guid.to_owned();
+            return self
+                .host
+                .on_host(move || self.take_pointer_by_guid(&guid, authorized))?;
+        }
+        self.valid(self.project, c"ReaProject*", authorized)?;
+        self.valid(self.item, c"MediaItem*", authorized)?;
+        let enum_api = self
+            .host
+            .take_enum()
+            .ok_or("REAPER take enumeration API unavailable")?;
+        let count = checked(authorized, || unsafe {
+            (enum_api.count)(self.item as *mut c_void)
+        })?;
+        if !(0..=super::ui_inventory::MAX_TAKES).contains(&count) {
+            return Err("take inventory budget exceeded".into());
+        }
+        let geometry = self
+            .host
+            .geometry
+            .as_ref()
+            .ok_or("REAPER geometry API unavailable")?;
+        if guid.len() != 38 {
+            return Err("invalid captured host take GUID".into());
+        }
+        for slot in 0..count {
+            let take = checked(authorized, || unsafe {
+                (enum_api.at)(self.item as *mut c_void, slot)
+            })?;
+            if take.is_null() {
+                continue;
+            }
+            let mut bytes = [0_u8; 64];
+            let matched = checked(authorized, || unsafe {
+                (geometry.take_guid)(
+                    take,
+                    c"GUID".as_ptr(),
+                    bytes.as_mut_ptr().cast(),
+                    false,
+                )
+            })? && bytes[..guid.len()] == *guid.as_bytes()
+                && bytes[guid.len()] == 0;
+            if matched {
+                return Ok(take as usize);
+            }
+        }
+        Err("the requested take is gone from the host item".to_string())
+    }
+
+    /// 对**任意一条 take**（按指针）写白名单数值字段。
+    ///
+    /// 与 [`Self::set_take`] 的差别只有目标：那是绑定 take，这一条服务逐 take 写回
+    /// （声道模式落在用户点的那一条上，而不是永远落在 active take）。字段白名单
+    /// 两侧同源，指针在使用前由 [`Self::take_pointer_by_guid`] 按 GUID 现场认领。
+    pub(crate) fn set_take_pointer_value(
+        &self,
+        take: usize,
+        name: &CStr,
+        value: f64,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<(), String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            let name = name.to_owned();
+            return self.host.on_host(move || {
+                self.set_take_pointer_value(take, &name, value, authorized)
+            })?;
+        }
+        self.valid(self.project, c"ReaProject*", authorized)?;
+        self.valid(self.item, c"MediaItem*", authorized)?;
+        self.valid(take, c"MediaItem_Take*", authorized)?;
+        if !matches!(name.to_bytes(), b"I_CHANMODE" | b"D_STARTOFFS") {
+            return Err("unsupported host take field".into());
+        }
+        if !value.is_finite() {
+            return Err("nonfinite host take edit".into());
+        }
+        let api = self.api()?;
+        if !checked(authorized, || unsafe {
+            (api.1.set_take)(take as *mut c_void, name.as_ptr(), value)
+        })? {
+            return Err(format!(
+                "REAPER rejected take field {}",
+                name.to_string_lossy()
+            ));
+        }
+        Ok(())
+    }
+
+    /// 读**任意一条 take**此刻的方向位（逐 take 倒放的自校验用）。
+    ///
+    /// 与 [`Self::reversed_now`] 同一口径：方向位（若有）或负速率；读不到方向位
+    /// 按正放处理（"从未倒放过"是正常形态，不是错误）。
+    pub(crate) fn take_reversed_now(
+        &self,
+        take: usize,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<bool, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            return self
+                .host
+                .on_host(move || self.take_reversed_now(take, authorized))?;
+        }
+        self.valid(take, c"MediaItem_Take*", authorized)?;
+        if let Some(facts) = self.host.take_direction_facts(take as *mut c_void, authorized) {
+            return Ok(facts.reversed);
+        }
+        let geometry = self
+            .host
+            .geometry
+            .as_ref()
+            .ok_or("REAPER geometry API unavailable")?;
+        let rate = checked(authorized, || unsafe {
+            (geometry.take_value)(take as *mut c_void, c"D_PLAYRATE".as_ptr())
+        })?;
+        Ok(rate.is_finite() && rate < 0.0)
+    }
+
+    /// 借宿主自己的动作把**任意一条 take**的方向切到 `reversed`（已经是它就不动）。
+    ///
+    /// [`Self::apply_take_direction`] 只作用于绑定 take；逐 take 倒放的目标是兄弟
+    /// take —— 宿主动作作用于 item 的 active take，所以入口先把 `I_CURTAKE` 切到
+    /// 目标、跑完切回来（[`super::host_action::NativeHost::run_item_action`] 的
+    /// 既有纪律，音高包络创建走的就是同一条路）。
+    pub(crate) fn apply_take_direction_on(
+        &self,
+        take: usize,
+        reversed: bool,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<(), String> {
+        if self.take_reversed_now(take, authorized)? == reversed {
+            return Ok(());
+        }
+        self.host.run_item_action(
+            self.item as *mut c_void,
+            take as *mut c_void,
+            &super::host_action::TAKE_REVERSE,
+            authorized,
+        )
+    }
+
+    /// 宿主几何 API 读数束（兄弟 take 的 SOFFS/LENGTH/PLAYRATE/I_CHANMODE 读用）。
+    ///
+    /// 【为什么不是 `api()`】`api()` 还要求写 API 存在；兄弟 take 的**读数**在
+    /// 只读宿主上也成立，不该被写能力门挡住。
+    pub(crate) fn host_geometry_api(
+        &self,
+    ) -> Option<&super::GeometryApi> {
+        self.host.geometry.as_ref()
+    }
+
+    /// 读任意一条 take 的方向事实（`PCM_Source_GetSectionInfo`）。
+    pub(crate) fn host_take_direction_facts(
+        &self,
+        take: *mut c_void,
+        authorized: &impl Fn() -> bool,
+    ) -> Option<super::TakeDirectionFacts> {
+        self.host.take_direction_facts(take, authorized)
+    }
+
+    /// 读任意一条 take 的媒体总时长（`GetMediaSourceLength`）。
+    pub(crate) fn host_take_source_length(
+        &self,
+        take: *mut c_void,
+        authorized: &impl Fn() -> bool,
+    ) -> Option<f64> {
+        self.host.take_source_length(take, authorized)
+    }
+
+    /// 绑定 take 的指针（回滚要区分"这条写的是绑定 take 还是兄弟 take"）。
+    pub(crate) fn bound_take(&self) -> usize {
+        self.take
+    }
+
+    /// 宿主是否具备 take 字段写能力（逐 take 声道模式预检用；语义同
+    /// `NativeHost::can_edit_clips`）。
+    pub(crate) fn host_can_write_take_fields(&self) -> bool {
+        self.host.can_edit_clips()
+    }
+
     /// 只重命名当前真实active take；字符串通过REAPER官方setter写入，不改HFS孤立名称。
     pub(crate) fn set_take_name(
         &self,

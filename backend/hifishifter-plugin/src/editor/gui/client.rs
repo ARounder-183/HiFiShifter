@@ -1770,6 +1770,33 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
             }
         }
     }
+    // 逐 take 的方向（倒放）与声道模式可以按 take GUID 精确落盘：方向是
+    // `<SOURCE SECTION MODE>` 结构（chunk 改写 / 宿主动作），声道模式是 take 指针上
+    // 的 `I_CHANMODE` —— 两者都不改 take 结构，ARA region ↔ item 的一一对应不受影响。
+    // 重写成 `set_clip_state` 的宿主侧字段，让 plan/write 的一套预检、Undo、回滚与
+    // 完成门照常生效（active take 在 plan 里折进 clip 级补丁，兄弟 take 走逐 take 路）。
+    if matches!(
+        request["command"].as_str(),
+        Some("set_clip_take_reversed") | Some("set_clip_take_channel_mode")
+    ) {
+        let clip_id = request["args"]["clipId"].as_str().unwrap_or("").to_owned();
+        let take_id = request["args"]["takeId"].as_str().unwrap_or("").to_owned();
+        let checkpoint = request["args"]["checkpoint"].clone();
+        let mut patch = serde_json::json!({"clipId": clip_id, "checkpoint": checkpoint});
+        if request["command"] == "set_clip_take_reversed" {
+            patch["hostTakeReversed"] = serde_json::json!({
+                "takeId": take_id,
+                "reversed": request["args"]["reversed"].as_bool().unwrap_or(false),
+            });
+        } else {
+            patch["hostTakeChannelMode"] = serde_json::json!({
+                "takeId": take_id,
+                "channelMode": request["args"]["channelMode"].as_f64().unwrap_or(0.0),
+            });
+        }
+        request["command"] = serde_json::json!("set_clip_state");
+        request["args"] = patch;
+    }
     // 拖入的真实磁盘文件由**平台**在进入本函数之前解析成路径（见 `gui/windows.rs`）：
     // WebKit 的 `File` 没有磁盘路径（沙箱），macOS/Linux 走原生拖放事件 + `import_audio_item`。
     // 普通命令只排队；UI回调不得分析、推理、读文件或等待worker。

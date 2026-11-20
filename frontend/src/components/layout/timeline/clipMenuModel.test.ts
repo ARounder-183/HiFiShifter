@@ -93,10 +93,10 @@ const REAPER_CAPS: ClipMenuCaps = {
 };
 
 function build(overrides: Partial<ClipMenuInput> = {}): ClipMenuEntry[] {
-    const clip = baseClip();
+    const clip = overrides.clip ?? baseClip();
     return buildClipMenuModel({
         clip,
-        selectedClips: [clip],
+        selectedClips: overrides.selectedClips ?? [clip],
         playheadInClip: true,
         canSplitSelected: true,
         pluginMode: false,
@@ -199,14 +199,60 @@ test("REAPER plugin drops every structurally impossible entry", () => {
     expect(keys).toContain("quick-export");
 });
 
-test("plugin take submenu degenerates to a read-only list plus rename", () => {
-    const entries = build({ pluginMode: true, caps: REAPER_CAPS });
+/** 两个 take 的片段：插件 take 行的行数断言需要它。 */
+function clipWithTwoTakes(): ClipInfo {
+    const clip = baseClip();
+    const takes = clip.takes ?? [];
+    return {
+        ...clip,
+        takes: [
+            takes[0],
+            {
+                id: "t2",
+                name: "Take B",
+                gain: 1,
+                reversed: false,
+                channelMode: 0,
+                loopEnabled: false,
+                sourcePath: "C:/audio/vocal.wav",
+            },
+        ],
+    } as ClipInfo;
+}
+
+test("plugin take submenu renders actionable rows: reverse/channel writable, switching not", () => {
+    const clip = clipWithTwoTakes();
+    const entries = build({ pluginMode: true, caps: REAPER_CAPS, clip, selectedClips: [clip] });
     const takeSubmenu = entries.find(
         (entry) => entry.kind === "submenu" && entry.key === "takes",
     ) as Extract<ClipMenuEntry, { kind: "submenu" }>;
     expect(takeSubmenu).toBeTruthy();
-    expect(takeSubmenu.children.map((child) => child.kind)).toEqual(["heading", "item"]);
-    expect((takeSubmenu.children[1] as { key: string }).key).toBe("take-rename");
+    // 行渲染（不是只读标题）：逐 take 的方向与声道模式结构上可写回。
+    const rows = takeSubmenu.children.filter((child) => child.kind === "takeRow");
+    expect(rows.length).toBe(2);
+    // 行点击（切换 active take）恒禁用 —— 那是结构写回，会断 ARA region ↔ take
+    // 的一一对应；行尾按钮不属于这个边界。
+    expect(rows.every((row) => !(row as { switchable: boolean }).switchable)).toBe(true);
+    // 重命名仍是最末一项。
+    expect((takeSubmenu.children.at(-1) as { key: string }).key).toBe("take-rename");
+});
+
+test("plugin take submenu falls back to a read-only list when the host cannot reverse", () => {
+    const clip = clipWithTwoTakes();
+    const entries = build({
+        pluginMode: true,
+        caps: { ...REAPER_CAPS, reverse: false },
+        clip,
+        selectedClips: [clip],
+    });
+    const takeSubmenu = entries.find(
+        (entry) => entry.kind === "submenu" && entry.key === "takes",
+    ) as Extract<ClipMenuEntry, { kind: "submenu" }>;
+    expect(takeSubmenu.children.map((child) => child.kind)).toEqual([
+        "heading",
+        "heading",
+        "item",
+    ]);
 });
 
 test("situational unavailability stays visible but disabled", () => {

@@ -1,11 +1,12 @@
 //! 原GUI几何命令的纯规划与真实宿主写入；不修改actor私有timeline冒充REAPER成功。
-use super::HostClipTarget;
+use super::{checked, HostClipTarget};
 use crate::editor::session::EditorSession;
 use crate::host::geometry::host_value_compatible;
 use crate::render::extension::ExtensionOwner;
 use crate::sync::MutexExt;
 use hifishifter_kernel::state::{Clip, ClipStatePatch, TimelineState};
 use serde_json::Value;
+use std::ffi::{c_void, CStr};
 use std::sync::Arc;
 
 /// 宿主 `I_GROUPID` 的上界（0 保留给"未编组"）。
@@ -22,6 +23,37 @@ pub(crate) struct ClipEdit {
     pub before: Clip,
     pub after: Clip,
     pub patch: ClipStatePatch,
+    /// 逐 take 的方向写回（**非 active take**）。
+    ///
+    /// 【为什么 active take 不在这里】active take 就是绑定 take：`patch.reversed`
+    /// 走既有的几何/镜像/完成门路径（`host_take_direction` + D_STARTOFFS 镜像写），
+    /// 回执也按 clip 级字段核对。只有**兄弟 take** 需要按 GUID 现场定位 —— 那不是
+    /// "多写一个字段"，是另一条目标寻址。
+    pub take_direction: Option<TakeDirectionEdit>,
+    /// 逐 take 的声道模式写回（**非 active take**；`I_CHANMODE` 是 take 属性）。
+    pub take_channel_mode: Option<TakeChannelModeEdit>,
+}
+
+/// 一次"把某条 take 的方向切到 reversed"的逐 take 写回。
+#[derive(Debug, Clone)]
+pub(crate) struct TakeDirectionEdit {
+    /// 内核 take id（带 GUI namespace 前缀）；用于回执核对。
+    pub take_id: String,
+    /// 宿主 take GUID（去前缀）；用于 chunk 改写定位与指针认领。
+    pub take_guid: String,
+    /// 目标方向。
+    pub reversed: bool,
+}
+
+/// 一次"把某条 take 的声道模式设为 mode"的逐 take 写回。
+#[derive(Debug, Clone)]
+pub(crate) struct TakeChannelModeEdit {
+    /// 内核 take id（带 GUI namespace 前缀）；用于回执核对。
+    pub take_id: String,
+    /// 宿主 take GUID（去前缀）。
+    pub take_guid: String,
+    /// 0..=4，对齐 REAPER CHANMODE（与 clip 级 `channelMode` 同一值域）。
+    pub channel_mode: i32,
 }
 pub(crate) struct HostEditPlan {
     pub edits: Vec<ClipEdit>,
@@ -30,7 +62,16 @@ pub(crate) struct HostEditPlan {
 /// 宿主setter完成后只等待本次确切clip的几何回流，不把旧的可读timeline当成功。
 #[derive(Debug)]
 pub(crate) struct HostEditReceipt {
-    clips: Vec<(String, Vec<(&'static str, Value)>)>,
+    clips: Vec<ClipReceipt>,
+}
+
+/// 一条 clip 的回执期望：顶层字段 + （逐 take 写回时）**兄弟 take** 的字段。
+#[derive(Debug)]
+struct ClipReceipt {
+    id: String,
+    fields: Vec<(&'static str, Value)>,
+    /// 逐 take 期望：键为内核 take id（与载荷 `takes[].id` 同一空间）。
+    takes: Vec<(String, Vec<(&'static str, Value)>)>,
 }
 impl HostEditPlan {
     /// 冻结本次确切clip及预期宿主几何，单独的fade宽度也必须进入完成门。
@@ -168,7 +209,27 @@ impl HostEditPlan {
                             },
                         ));
                     }
-                    (edit.before.id.clone(), fields)
+                    // 【逐 take 写回也必须进门】凡是被补丁改到、又出现在载荷里的字段，
+                    // 都要等真实回声——兄弟 take 的方向 / 声道模式落在 `takes[]` 里，
+                    // 单独收集（见 `matches` 的 take 匹配）。
+                    let mut takes: Vec<(String, Vec<(&'static str, Value)>)> = Vec::new();
+                    if let Some(direction) = &edit.take_direction {
+                        takes.push((
+                            direction.take_id.clone(),
+                            vec![("reversed", serde_json::json!(direction.reversed))],
+                        ));
+                    }
+                    if let Some(mode) = &edit.take_channel_mode {
+                        takes.push((
+                            mode.take_id.clone(),
+                            vec![("channel_mode", serde_json::json!(mode.channel_mode))],
+                        ));
+                    }
+                    ClipReceipt {
+                        id: edit.before.id.clone(),
+                        fields,
+                        takes,
+                    }
                 })
                 .collect(),
         }
@@ -189,21 +250,41 @@ impl HostEditReceipt {
         let Some(clips) = payload["clips"].as_array() else {
             return false;
         };
-        self.clips.iter().all(|(id, fields)| {
-            clips
-                .iter()
-                .find(|clip| clip["id"] == *id)
-                .is_some_and(|clip| {
-                    fields
-                        .iter()
-                        .all(|(key, value)| match (clip[*key].as_f64(), value.as_f64()) {
-                            (Some(actual), Some(expected)) => {
-                                crate::host::geometry::host_value_compatible(actual, expected)
+        self.clips.iter().all(
+            |ClipReceipt {
+                 id,
+                 fields,
+                 takes,
+             }| {
+                clips
+                    .iter()
+                    .find(|clip| clip["id"] == *id)
+                    .is_some_and(|clip| {
+                        fields.iter().all(|(key, value)| {
+                            match (clip[*key].as_f64(), value.as_f64()) {
+                                (Some(actual), Some(expected)) => crate::host::geometry::host_value_compatible(actual, expected),
+                                _ => clip[*key] == *value,
                             }
-                            _ => clip[*key] == *value,
+                        }) && takes.iter().all(|(take_id, take_fields)| {
+                            // 载荷的 `takes[].id` 与期望同在内核 take id 空间；
+                            // 找不到这一条 take 就是"宿主还没跟上"。
+                            clip["takes"].as_array().is_some_and(|takes| {
+                                takes
+                                    .iter()
+                                    .find(|take| take["id"].as_str() == Some(take_id.as_str()))
+                                    .is_some_and(|take| {
+                                        take_fields.iter().all(|(key, value)| {
+                                            match (take[*key].as_f64(), value.as_f64()) {
+                                                (Some(actual), Some(expected)) => crate::host::geometry::host_value_compatible(actual, expected),
+                                                _ => take[*key] == *value,
+                                            }
+                                        })
+                                    })
+                            })
                         })
-                })
-        })
+                    })
+            },
+        )
     }
 }
 
@@ -303,6 +384,10 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
                 | "loopEnabled"
                 | "channelMode"
                 | "hostGroupId"
+                // 逐 take 写回（前端 `set_clip_take_reversed` / `set_clip_take_channel_mode`
+                // 的重写形态）。值为 `{takeId, reversed|channelMode}` 对象。
+                | "hostTakeReversed"
+                | "hostTakeChannelMode"
                 // 插件自有、宿主表达不到的属性。宿主没有 clip 颜色 / 共振峰变形的概念，
                 // 所以它们**不写宿主**，而是落到本地权威 `EditState::clip_local`
                 // （与 `fades` 同一手法）。此前它们在白名单外 ⇒ 任何带这两项的
@@ -311,6 +396,35 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
                 | "formantMorph"
         ) {
             return Err(format!("host clip property is not yet writable: {key}"));
+        }
+        if key == "hostTakeReversed" {
+            let take = value
+                .get("takeId")
+                .and_then(|id| id.as_str())
+                .ok_or("host take direction requires a takeId")?;
+            if take.is_empty() || take.len() > 256 || take.contains('\0') {
+                return Err("invalid host take id".into());
+            }
+            if value.get("reversed").and_then(|reversed| reversed.as_bool()).is_none() {
+                return Err("host take direction requires a boolean reversed".into());
+            }
+            continue;
+        }
+        if key == "hostTakeChannelMode" {
+            let take = value
+                .get("takeId")
+                .and_then(|id| id.as_str())
+                .ok_or("host take channel mode requires a takeId")?;
+            if take.is_empty() || take.len() > 256 || take.contains('\0') {
+                return Err("invalid host take id".into());
+            }
+            let mode = value
+                .get("channelMode")
+                .and_then(|mode| mode.as_f64())
+                .filter(|mode| (0.0..=4.0).contains(mode) && mode.fract() == 0.0)
+                .ok_or("host take channel mode outside 0..=4")?;
+            let _ = mode;
+            continue;
         }
         if key == "name" {
             if value
@@ -474,6 +588,63 @@ impl EditorSession {
             // 曲线的位置由图集投影按**当前**设置决定，与这个字段无关。
             changes.as_object_mut().unwrap().remove("moveLinkedParams");
             let mut patch = patch(&changes)?;
+            // ── 逐 take 写回的规划 ─────────────────────────────────────────────
+            //
+            // 前端把 `set_clip_take_reversed` / `set_clip_take_channel_mode` 重写成
+            // `set_clip_state` 的 `hostTakeReversed` / `hostTakeChannelMode`
+            // （`{takeId, ...}` 对象）。kernel `ClipStatePatch` 不认识它们（serde
+            // 丢弃未知字段），因此从原始请求里取。
+            //
+            // 【active take 折进 clip 级补丁】绑定 take 就是 active take：折进
+            // `patch.reversed` / `patch.channel_mode` 之后，既有路径（几何换算、
+            // 镜像 SOFFS、回执门）原样生效。兄弟 take 才进 side 字段，由写循环
+            // 按 GUID 现场定位。
+            let mut take_direction: Option<TakeDirectionEdit> = None;
+            let mut take_channel_mode: Option<TakeChannelModeEdit> = None;
+            if let Some(direction) = changes.get("hostTakeReversed").filter(|v| !v.is_null()) {
+                let take_id = direction["takeId"].as_str().unwrap_or_default().to_owned();
+                let reversed = direction["reversed"].as_bool().unwrap_or(false);
+                // 只验存在性：兄弟 take 的指针在写循环里按 GUID 现场认领。
+                if !before.takes.iter().any(|take| take.id == take_id) {
+                    return Err("unknown host take".into());
+                }
+                let take_guid = take_id
+                    .strip_prefix(&self.namespace)
+                    .ok_or("take belongs to another editor session")?
+                    .to_owned();
+                if before.active_take_id.as_deref() == Some(take_id.as_str()) {
+                    patch.reversed = Some(reversed);
+                } else {
+                    take_direction = Some(TakeDirectionEdit {
+                        take_id,
+                        take_guid,
+                        reversed,
+                    });
+                }
+            }
+            if let Some(mode) = changes.get("hostTakeChannelMode").filter(|v| !v.is_null()) {
+                let take_id = mode["takeId"].as_str().unwrap_or_default().to_owned();
+                let channel_mode = mode["channelMode"].as_f64().unwrap_or(f64::NAN);
+                if !(0.0..=4.0).contains(&channel_mode) || channel_mode.fract() != 0.0 {
+                    return Err("invalid host take channel mode".into());
+                }
+                if !before.takes.iter().any(|take| take.id == take_id) {
+                    return Err("unknown host take".into());
+                }
+                let take_guid = take_id
+                    .strip_prefix(&self.namespace)
+                    .ok_or("take belongs to another editor session")?
+                    .to_owned();
+                if before.active_take_id.as_deref() == Some(take_id.as_str()) {
+                    patch.channel_mode = Some(channel_mode as i32);
+                } else {
+                    take_channel_mode = Some(TakeChannelModeEdit {
+                        take_id,
+                        take_guid,
+                        channel_mode: channel_mode as i32,
+                    });
+                }
+            }
             // 整体宽度/交叉点patch会带未改的shape；不能把它误判为自定义渐变请求。
             if patch.fade_in_shape == Some(before.fade_in_shape) {
                 patch.fade_in_shape = None;
@@ -541,6 +712,8 @@ impl EditorSession {
                 before,
                 after,
                 patch,
+                take_direction,
+                take_channel_mode,
             });
         }
         Ok(HostEditPlan { edits })
@@ -653,6 +826,161 @@ fn host_take_direction(
     Ok(super::source_direction::DirectionEdit::reversed(
         window.span().max(1e-9),
         (duration - window.end()).max(0.0),
+    ))
+}
+
+/// 逐 take（**兄弟 take**）的方向写回：解析 take 指针、算编码、走 chunk/动作两条路。
+///
+/// 【DirectionEdit 为什么在这里算】兄弟 take 的正向窗口与媒体时长只有宿主线程上
+/// 有（SECTION 读数 / PCM 源时长），规划阶段拿不到。从宿主读数（SOFFS/LENGTH/
+/// PLAYRATE/SECTION）经 `take_geometry` 解算正向窗口，再按目标方向折叠成编码 ——
+/// 镜像式子与 [`host_take_direction`] 同一条（`soffs = D − 正向终点`）。
+fn write_sibling_take_direction(
+    target: &HostClipTarget,
+    edit: &TakeDirectionEdit,
+    authorized: &impl Fn() -> bool,
+) -> Result<DirectionWrite, String> {
+    if !target.can_reverse_clips() {
+        return Err("the host cannot write the take direction".into());
+    }
+    let take = target.take_pointer_by_guid(&edit.take_guid, authorized)?;
+    let expected = edit.reversed;
+    if !target.hosts_this_instance() {
+        let original = target.item_state_chunk(authorized)?;
+        let rewritten = {
+            let direction = sibling_take_direction_edit(target, take, expected, authorized)?;
+            super::source_direction::rewrite_take_direction(
+                &original,
+                &edit.take_guid,
+                &direction,
+            )?
+        };
+        match target.set_item_state_chunk(&rewritten, authorized) {
+            Ok(()) => {
+                if target.take_reversed_now(take, authorized)? != expected {
+                    return Err("the host did not apply the requested take direction".into());
+                }
+                return Ok(DirectionWrite::Chunk { original });
+            }
+            Err(error) if error == super::write::ITEM_STATE_REFUSED => {
+                crate::log_line(&format!(
+                    "[ara] the host refused the item state ({error}); \
+                     writing the sibling take direction through its own action"
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    // 宿主动作路径：`run_item_action` 先把 I_CURTAKE 切到目标 take、跑完切回来
+    // （音高包络创建走的就是这条既有纪律）。方向由宿主自己的 toggle 计算 ——
+    // 它写出的结构与我们的编码逐字节一致（真机对照过，见 `source_direction`）。
+    let before = target.take_reversed_now(take, authorized)?;
+    target.apply_take_direction_on(take, expected, authorized)?;
+    if target.take_reversed_now(take, authorized)? != expected {
+        return Err("the host did not apply the requested take direction".into());
+    }
+    Ok(DirectionWrite::Action { before, take })
+}
+
+/// 把一条**兄弟 take**（非绑定 take）的声道模式写到宿主上，返回 (take 指针, 旧值)。
+///
+/// `I_CHANMODE` 是 take 属性：`GetSetMediaItemTakeInfo_Value` 对 item 上**任意**
+/// take 指针都成立，指针由 [`HostClipTarget::take_pointer_by_guid`] 按 GUID 现场认领。
+/// 旧值供整批失败时回滚。
+fn set_take_channel_mode_for_take(
+    target: &HostClipTarget,
+    edit: &TakeChannelModeEdit,
+    authorized: &impl Fn() -> bool,
+) -> Result<(usize, i32), String> {
+    let take = target.take_pointer_by_guid(&edit.take_guid, authorized)?;
+    let geometry = target
+        .host_geometry_api()
+        .ok_or("REAPER geometry API unavailable")?;
+    let read = |name: &CStr| -> Result<f64, String> {
+        let value = checked(authorized, || unsafe {
+            (geometry.take_value)(take as *mut c_void, name.as_ptr())
+        })?;
+        if !value.is_finite() {
+            return Err("the host reported a nonfinite take channel mode".into());
+        }
+        Ok(value)
+    };
+    let old = read(c"I_CHANMODE")?;
+    if old.fract() != 0.0 || !(0.0..=4.0).contains(&old) {
+        return Err("the host reported an invalid take channel mode".into());
+    }
+    if old as i32 != edit.channel_mode {
+        target.set_take_pointer_value(take, c"I_CHANMODE", edit.channel_mode as f64, authorized)?;
+        // 写→读→比：宿主拒绝或换算过值都要如实报错，"点了没反应"不伪装成成功。
+        let now = read(c"I_CHANMODE")?;
+        if now as i32 != edit.channel_mode {
+            return Err("the host did not apply the requested take channel mode".into());
+        }
+    }
+    Ok((take, old as i32))
+}
+
+/// 由兄弟 take 的宿主读数算出方向写回的编码（SECTION 与 SOFFS）。
+fn sibling_take_direction_edit(
+    target: &HostClipTarget,
+    take: usize,
+    desired_reversed: bool,
+    authorized: &impl Fn() -> bool,
+) -> Result<super::source_direction::DirectionEdit, String> {
+    let geometry = target
+        .host_geometry_api()
+        .ok_or("REAPER geometry API unavailable")?;
+    let facts = target
+        .host_take_direction_facts(take as *mut c_void, authorized);
+    // 【读不到方向位 = 正放，不是错误】`PCM_Source_GetSectionInfo` 对没有 SECTION
+    // 包装的裸源返回 false —— 那是"从未倒放过"的正常形态，与 `reversed_now`
+    // （读不到按正放）是同一口径。只有**写倒放**时媒体时长缺失才报错。
+    let (current_reversed, section) = facts
+        .map_or((false, None), |facts| (facts.reversed, facts.section));
+    let read = |name: &CStr| -> Result<f64, String> {
+        let value = checked(authorized, || unsafe {
+            (geometry.take_value)(take as *mut c_void, name.as_ptr())
+        })?;
+        if !value.is_finite() {
+            return Err(format!(
+                "nonfinite sibling take field {}",
+                name.to_string_lossy()
+            ));
+        }
+        Ok(value)
+    };
+    let offs = read(c"D_STARTOFFS")?;
+    let length = read(c"D_LENGTH")?;
+    let rate = read(c"D_PLAYRATE")?;
+    let media = target
+        .host_take_source_length(take as *mut c_void, authorized)
+        .filter(|value| *value > 0.0);
+    let take_geometry = hifishifter_kernel::take_geometry::TakeGeometry {
+        start_offset_sec: offs,
+        item_length_sec: length,
+        play_rate_signed: rate,
+        media_duration_sec: media,
+        section,
+        reversed: Some(current_reversed),
+        loop_enabled: false,
+    };
+    let forward = take_geometry
+        .forward_source_window()
+        .ok_or("the sibling take window is not resolvable")?;
+    if !desired_reversed {
+        // 回到正放：SOFFS = 正向窗口起点，SECTION 拆掉（`rewrite_take_direction`
+        // 对本来就不是 SECTION 的源是幂等的）。
+        return Ok(super::source_direction::DirectionEdit::forward(
+            forward.start(),
+        ));
+    }
+    let duration = media.ok_or("cannot write a reversed take without its media duration")?;
+    if forward.end() > duration + 1e-9 || forward.start() < -1e-9 {
+        return Err("reversed take window falls outside the media".into());
+    }
+    Ok(super::source_direction::DirectionEdit::reversed(
+        forward.span().max(1e-9),
+        (duration - forward.end()).max(0.0),
     ))
 }
 
@@ -881,6 +1209,16 @@ pub(crate) fn execute_managed(
         } else {
             None
         };
+        // ── 逐 take 写回：预检 ──────────────────────────────────────────────
+        // 【为什么只验能力位、不解析指针】兄弟 take 的指针与几何要到写循环里才
+        // 解析（写前最新的宿主读数才可信）；这里先把"这个宿主做不做得到"判掉，
+        // 让注定失败的批次在碰第一个 setter 之前就整条拒绝。
+        if edit.take_direction.is_some() && !target.can_reverse_clips() {
+            return Err("the host cannot write the take direction".into());
+        }
+        if edit.take_channel_mode.is_some() && !target.host_can_write_take_fields() {
+            return Err("the host cannot write take fields".into());
+        }
         reverse_plans.push(reverse_plan);
         targets.push((edit, target, destination));
     }
@@ -894,6 +1232,9 @@ pub(crate) fn execute_managed(
     let mut applied: Vec<(&ClipEdit, &HostClipTarget)> = Vec::new();
     // 已落地的**结构**写回：回滚按同一条路撤（chunk 写回原文 / 动作再 toggle 一次）。
     let mut applied_structural: Vec<(HostClipTarget, DirectionWrite)> = Vec::new();
+    // 已落地的**兄弟 take 声道模式**写回：回滚按写入前的旧值写回
+    // （take 指针、I_CHANMODE 旧值）。与 `applied` 分开——它们写的是另一条 take。
+    let mut applied_take_modes: Vec<(HostClipTarget, usize, i32)> = Vec::new();
     let result: Result<(), String> = (|| {
         for (index, (edit, target, destination)) in targets.iter().enumerate() {
             applied.push((edit, target));
@@ -1095,6 +1436,18 @@ pub(crate) fn execute_managed(
                 let write = write_take_direction(target, direction, &authorized)?;
                 applied_structural.push((target.clone(), write));
             }
+            if let Some(edit) = &edit.take_direction {
+                // 兄弟 take 的方向写回：同一"最后做"的纪律（chunk 读到的是本批次
+                // 数值已生效的原文）。回滚走同一条 applied_structural 撤链。
+                let write = write_sibling_take_direction(target, edit, &authorized)?;
+                applied_structural.push((target.clone(), write));
+            }
+            if let Some(edit) = &edit.take_channel_mode {
+                // 兄弟 take 的声道模式：字段 setter + 写→读→比。旧值进
+                // applied_take_modes，整批失败时按原值写回。
+                let (take, old) = set_take_channel_mode_for_take(target, edit, &authorized)?;
+                applied_take_modes.push((target.clone(), take, old));
+            }
             target.update(&authorized)?;
         }
         Ok(())
@@ -1159,11 +1512,35 @@ pub(crate) fn execute_managed(
                     DirectionWrite::Chunk { original } => {
                         target.set_item_state_chunk(original, &authorized)
                     }
-                    DirectionWrite::Action { before } => {
-                        target.apply_take_direction(*before, &authorized)
+                    DirectionWrite::Action { before, take } => {
+                        // 【take 在哪条上就撤哪条】绑定 take 用原入口；兄弟 take 的
+                        // 方向动作要按同一条 take 的指针再 toggle 回去 —— 撤到
+                        // active take 上等于把用户没动过的 take 翻转一遍。
+                        if *take == target.bound_take() {
+                            target.apply_take_direction(*before, &authorized)
+                        } else {
+                            target.apply_take_direction_on(*take, *before, &authorized)
+                        }
                     }
                 };
                 if let Err(rollback) = rollback {
+                    rollback_errors.push(rollback);
+                }
+            }
+            // 兄弟 take 的声道模式按旧值写回。它写的是另一条 take，不受上面的
+            // chunk 回滚影响（chunk 回滚整份原文反而已经把它一起撤了 —— 因此
+            // 只对**没有** chunk 写回的 item 撤）。
+            for (target, take, old) in applied_take_modes.iter().rev() {
+                let covered_by_chunk = applied_structural.iter().any(|(done, write)| {
+                    matches!(write, DirectionWrite::Chunk { .. })
+                        && done.same_item(target)
+                });
+                if covered_by_chunk {
+                    continue;
+                }
+                if let Err(rollback) =
+                    target.set_take_pointer_value(*take, c"I_CHANMODE", *old as f64, &authorized)
+                {
                     rollback_errors.push(rollback);
                 }
             }
@@ -1205,8 +1582,10 @@ pub(crate) fn execute_managed(
 enum DirectionWrite {
     /// item chunk 整份写回；`original` 就是回滚内容。
     Chunk { original: String },
-    /// 宿主自己的动作；回滚时按 `before` 再 toggle 一次。
-    Action { before: bool },
+    /// 宿主自己的动作；回滚时按 `before` 再 toggle 一次。`take` 记录动作作用在
+    /// **哪一条** take 上（绑定 take 或兄弟 take）—— 回滚必须撤同一条，撤错了
+    /// 就是把用户没动过的 take 翻转一遍。
+    Action { before: bool, take: usize },
 }
 
 /// 把一条 take 的播放方向写到宿主上。
@@ -1264,7 +1643,10 @@ fn write_take_direction(
     if target.reversed_now(authorized)? != expected {
         return Err("the host did not apply the requested take direction".into());
     }
-    Ok(DirectionWrite::Action { before })
+    Ok(DirectionWrite::Action {
+        before,
+        take: target.bound_take(),
+    })
 }
 
 /// 把已写入的片段**按编辑前的几何**写回去。
@@ -2034,6 +2416,190 @@ mod tests {
         document.close();
     }
 
+    /// **兄弟 take 的方向写回**：chunk 按 take GUID 精确改写那一条，其余 take 逐字节保留。
+    ///
+    /// 【为什么要这条测试】插件 take 菜单的逐 take 倒放走的是"非 active take"的
+    /// 新路径：目标不是绑定 take，而是同一 item 上的兄弟 take。chunk 改写是
+    /// 多 take item 上唯一能"只动这一条"的写法 —— 改错 take 是工程损坏。
+    #[test]
+    fn a_sibling_take_direction_write_touches_only_that_take() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        let chunk = "<ITEM
+POSITION 0
+LENGTH 0.00009070294784580499
+SEL 1
+         IGUID {11111111-1111-1111-1111-111111111111}
+         SOFFS 0
+PLAYRATE 1 1 0
+GUID {22222222-2222-2222-2222-222222222222}
+         <SOURCE WAVE
+FILE \"ara://source\"
+>
+         TAKE
+         SOFFS 0.5
+PLAYRATE 1 1 0
+GUID {55555555-5555-5555-5555-000000000001}
+         <SOURCE WAVE
+FILE \"ara://source\"
+>
+>
+"
+            .to_string();
+        host.enable_item_state(&chunk);
+        host.enable_takes(1);
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 0.5);
+        host.set_value("D_PLAYRATE", 1.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        let sibling = clip
+            .takes
+            .iter()
+            .find(|take| take.id.ends_with("{55555555-5555-5555-5555-000000000001}"))
+            .expect("清单必须枚举到兄弟 take")
+            .id
+            .clone();
+        let plan = editor
+            .plan_host_edit(
+                "set_clip_state",
+                &json!({"clipId":clip.id,"hostTakeReversed":{"takeId":sibling,"reversed":true}}),
+            )
+            .expect("逐 take 倒放补丁必须被接受");
+        // 兄弟 take 不得折进 clip 级补丁：折进去会把绑定 take 的窗口一并翻转。
+        assert!(
+            plan.edits[0].patch.reversed.is_none(),
+            "兄弟 take 的方向必须走逐 take 路径"
+        );
+        assert!(plan.edits[0].take_direction.is_some());
+        // 回执门必须按这一条 take 的回声收口。
+        let receipt = plan.receipt(&editor.namespace, owner.host_fade_axes());
+        let stale = json!({"clips":[{"id":clip.id,"takes":[{"id":sibling,"reversed":false}]}]});
+        assert!(!receipt.matches(&stale), "回声还是改动前时完成门必须拦下");
+        host.reset();
+        execute(&owner, plan, || document.is_alive())
+            .expect("兄弟 take 的倒放写回必须成功");
+        let written = host.item_state_chunk.borrow().clone();
+        let lines: Vec<&str> = written.lines().collect();
+        // 主 take 原样：源还是裸 WAVE（没有 SECTION），SOFFS 保持 0。
+        let main = super::super::take_chunk::section_with_guid(
+            &lines,
+            "{22222222-2222-2222-2222-222222222222}",
+        )
+        .expect("主 take 必须还在 chunk 里");
+        let main_source =
+            super::super::take_chunk::block(&lines, &main, "SOURCE").expect("主 take 必须有源");
+        assert!(
+            lines[main_source.start].contains("SOURCE WAVE"),
+            "主 take 不得被改写：{}",
+            lines[main_source.start]
+        );
+        // 兄弟 take：源被 SECTION（MODE 3）包住，SOFFS 折成镜像域。
+        let sibling = super::super::take_chunk::section_with_guid(
+            &lines,
+            "{55555555-5555-5555-5555-000000000001}",
+        )
+        .expect("兄弟 take 必须还在 chunk 里");
+        let sibling_source =
+            super::super::take_chunk::block(&lines, &sibling, "SOURCE").expect("兄弟 take 必须有源");
+        assert!(
+            lines[sibling_source.start].contains("SOURCE SECTION"),
+            "兄弟 take 的源必须被 SECTION 包住：{}",
+            lines[sibling_source.start]
+        );
+        let written_lines = written.lines().collect::<Vec<_>>();
+        let mode_line = written_lines[sibling_source.start + 2];
+        assert_eq!(mode_line.trim(), "MODE 3", "必须是宿主自己的 MODE 3 编码：{written}");
+        document.close();
+    }
+
+    /// **兄弟 take 的声道模式**：`I_CHANMODE` 是 take 属性，写必须落在目标 take 的
+    /// 指针上，写后读回核对；回执门按 `takes[].channel_mode` 收口。
+    #[test]
+    fn a_sibling_take_channel_mode_write_lands_on_that_take() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_item_state(&host.single_take_chunk());
+        host.enable_takes(1);
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 0.5);
+        host.set_value("D_PLAYRATE", 1.);
+        // 写口只更新已存在的键（见夹具 set_take 的注释）：先注册旧值 0。
+        host.set_value("I_CHANMODE", 0.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        let sibling = clip
+            .takes
+            .iter()
+            .find(|take| take.id.ends_with("{55555555-5555-5555-5555-000000000001}"))
+            .expect("清单必须枚举到兄弟 take")
+            .id
+            .clone();
+        let plan = editor
+            .plan_host_edit(
+                "set_clip_state",
+                &json!({"clipId":clip.id,"hostTakeChannelMode":{"takeId":sibling,"channelMode":2}}),
+            )
+            .expect("逐 take 声道模式补丁必须被接受");
+        assert!(plan.edits[0].patch.channel_mode.is_none());
+        assert!(plan.edits[0].take_channel_mode.is_some());
+        host.reset();
+        execute(&owner, plan, || document.is_alive())
+            .expect("兄弟 take 的声道模式写回必须成功");
+        assert!(
+            host.calls().contains(&"write-take:I_CHANMODE".to_string()),
+            "必须按 take 指针写 I_CHANMODE：{:?}",
+            host.calls()
+        );
+        assert_eq!(host.item_value("I_CHANMODE"), Some(2.0));
+        document.close();
+    }
+
+    /// **active take 的逐 take 补丁折进 clip 级路径**：绑定 take 走既有的几何/镜像/
+    /// 完成门（`patch.reversed`），不进逐 take side 字段。
+    #[test]
+    fn an_active_take_direction_patch_folds_into_the_clip_level_path() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_item_state(&host.single_take_chunk());
+        // 清单必须启用：take id 的命名空间前缀来自清单投影（ARA-only 形态保留原始
+        // take id，见 session.rs 的 namespace_takes 注释），而本路径只服务原生宿主。
+        host.enable_takes(0);
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 0.5);
+        host.set_value("D_PLAYRATE", 1.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        let active_take = clip.active_take_id.clone().expect("夹具 clip 必须有 active take");
+        let plan = editor
+            .plan_host_edit(
+                "set_clip_state",
+                &json!({"clipId":clip.id,"hostTakeReversed":{"takeId":active_take,"reversed":true}}),
+            )
+            .expect("active take 的逐 take 补丁必须被接受");
+        assert_eq!(plan.edits[0].patch.reversed, Some(true));
+        assert!(plan.edits[0].take_direction.is_none());
+        document.close();
+    }
+
     /// 形状 / 曲率必须进完成门：否则"只改曲率"的补丁 `matches()` 恒真，响应会带着
     /// **改动前**的 dir 回来，前端按权威回声整份应用 → 用户拖完曲率看到曲线弹回。
     ///
@@ -2057,7 +2623,7 @@ mod tests {
         let clip = editor.timeline.lock_or_recover().clips[0].clone();
 
         let fields_of = |receipt: &super::HostEditReceipt| -> Vec<(&'static str, Value)> {
-            receipt.clips[0].1.clone()
+            receipt.clips[0].fields.clone()
         };
         let key_value = |fields: &[(&'static str, Value)], key: &str| -> Option<Value> {
             fields

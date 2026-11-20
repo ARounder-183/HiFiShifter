@@ -180,7 +180,9 @@ test("no menu entry ever renders a second line in the plug-in", async () => {
 });
 
 test("structurally impossible entries are absent instead of disabled", async () => {
-    setBootstrap(pluginCaps());
+    // REAPER 原生扩展的基线能力：方向写回（clip 级与逐 take 同一位）成立，
+    // take 行照常渲染（行尾按钮可点，行点击禁用）。
+    setBootstrap(pluginCaps({ clipReverse: true }));
     await mountMenu();
 
     const labels = menuLabels().join("\n");
@@ -205,13 +207,16 @@ test("structurally impossible entries are absent instead of disabled", async () 
     ]) {
         expect(openLabels, label).not.toContain(label);
     }
-    // 能做的两件仍在：只读 take 名（说明行，不是可点项）与重命名。
+    // 能做的三件仍在：逐 take 行（方向 / 声道按钮在行尾）与重命名。
     expect(openLabels).toContain(enUS.clip_take_rename);
-    const panelText = Array.from(document.body.querySelectorAll(".hs-menu__label"))
+    // take 名进了可操作行（行点击切换已禁用，行尾按钮可点）。
+    const rowLabels = Array.from(
+        document.body.querySelectorAll("button.hs-menu__item .hs-menu__label-text"),
+    )
         .map((el) => el.textContent ?? "")
         .join("\n");
-    expect(panelText).toContain("Take A");
-    expect(panelText).toContain("Take B");
+    expect(rowLabels).toContain("Take A");
+    expect(rowLabels).toContain("Take B");
 });
 
 test("reverse becomes usable once the host can write the source section", async () => {

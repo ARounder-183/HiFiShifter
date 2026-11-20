@@ -163,7 +163,7 @@ export interface ClipMenuInput {
     /** 播放头是否落在片段内（分割的**情境性**前提）。 */
     playheadInClip: boolean;
     canSplitSelected: boolean;
-    /** 插件形态。**只**用于「take 子菜单退化成只读列表」这一件事。 */
+    /** 插件形态。**只**用于「take 子菜单的结构项收起、行点击禁用」这一件事。 */
     pluginMode: boolean;
     caps: ClipMenuCaps;
     available: ClipMenuAvailability;
@@ -316,18 +316,42 @@ export function buildClipMenuModel(input: ClipMenuInput): ClipMenuEntry[] {
     // ── Take ───────────────────────────────────────────────────────────────
     const takeChildren: ClipMenuEntry[] = [];
     if (pluginMode) {
-        // 【插件里 Take 只剩「看 + 改名」】结构写回没有宿主对应（见 canEditHostTakes）。
-        // 列表本身仍是有价值的信息：哪个是 active、一共有几个 —— 删掉它会让用户
-        // 连「这条 item 有几个 take」都看不到。
-        for (const take of takes) {
-            takeChildren.push({
-                kind: "heading",
-                key: "take-" + take.id,
-                text:
-                    (take.id === clip.activeTakeId ? t("clip_take_active_mark") : "\u2003") +
-                    " " +
-                    (take.name || take.id),
-            });
+        // 【插件里 Take 的边界：结构做不到，属性做得到】切换 / 增删 / 打包 take 会
+        // 重建 ARA region ↔ take 的一一对应，是 `canEditHostTakes` 的结构边界。
+        // 但**逐 take 的方向与声道模式**落在 take 属性上（chunk 改写 / take 指针的
+        // `I_CHANMODE`），结构上做得到 —— 行照常渲染，行尾按钮是可操作项；行点击
+        // （切换 active take）恒禁用。
+        //
+        // 【方向写不回去时退回只读列表】逐 take 倒放与 clip 级倒放共用同一个能力位
+        // （chunk 改写 / 宿主动作是同一族）；能力位为 false 的宿主上按钮点不动，
+        // 退回标题行 —— "宁可不少显示一个入口，也不露一个注定失败的"。
+        if (caps.reverse) {
+            for (const take of takes) {
+                takeChildren.push({
+                    kind: "takeRow",
+                    key: "take-" + take.id,
+                    takeId: take.id,
+                    label:
+                        (take.id === clip.activeTakeId ? t("clip_take_active_mark") : "\u2003") +
+                        " " +
+                        (take.name || take.id),
+                    switchable: false,
+                    reversed: Boolean(take.reversed),
+                    reverseToggle: caps.reverse,
+                    channelMode: take.sourcePath ? normalizeChannelMode(take.channelMode) : null,
+                });
+            }
+        } else {
+            for (const take of takes) {
+                takeChildren.push({
+                    kind: "heading",
+                    key: "take-" + take.id,
+                    text:
+                        (take.id === clip.activeTakeId ? t("clip_take_active_mark") : "\u2003") +
+                        " " +
+                        (take.name || take.id),
+                });
+            }
         }
         takeChildren.push(item("take-rename", t("clip_take_rename"), { disabled: !activeTake }));
     } else {

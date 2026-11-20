@@ -128,6 +128,28 @@ export function canReverseHostClips(): boolean {
     return !isPluginMode() || caps()?.clipReverse === true;
 }
 /**
+ * 宿主**逐 take 的方向**（兄弟 take 的倒放）能否写回。
+ *
+ * 【为什么与 clip 级倒放同一位】倒放没有 setter：它是 `<SOURCE SECTION MODE>` 结构，
+ * 落地的两条实现（item chunk 整份改写 / 宿主自己的 toggle 动作）与 clip 级倒放
+ * 完全同一族。兄弟 take 的差异只在**目标寻址**（按 take GUID 定位 chunk / 用
+ * `I_CURTAKE` 临时切换动作目标），不在能力 —— 多 take item 的 chunk 改写本来就是
+ * "只动目标 take 那一段"（逐字节保留其余 take）。
+ */
+export function canWriteHostTakeDirection(): boolean {
+    return canReverseHostClips();
+}
+/**
+ * 宿主**逐 take 的声道模式**能否写回。
+ *
+ * 【为什么与 clip 级声道模式同一条】`I_CHANMODE` 是 take 属性，`GetSetMediaItemTakeInfo`
+ * 对 item 上**任意** take 指针都成立 —— 能写绑定 take 的声道模式就能写兄弟 take 的。
+ * 与倒放不同，它不涉及任何结构改写。
+ */
+export function canWriteHostTakeChannelMode(): boolean {
+    return !isPluginMode() || canEditHostClips();
+}
+/**
  * REAPER 的 Take 音高 ⇄ HiFiShifter 音高参数线能否互转。
  *
  * 【为什么三个条件缺一不可】宿主得**是 REAPER**（PITCHENV 与 `D_PITCH` 是它的概念）、
@@ -567,6 +589,10 @@ export function capabilityForAction(action: string, surface: string | null): Cap
     // 【为什么 take 族要**先于**下面的 `clip.*` 兜底】兜底把它们映射成 `clip.geometry`
     // （"宿主几何只读"），而它们的真实边界是"take 结构做不到" —— 理由完全不同，
     // 用户看到的下一步也不同（换宿主 vs 换编辑方式）。
+    //
+    // 【两个例外】逐 take 的方向与声道模式**结构上做得到**（chunk 改写 / take 指针
+    // setter），各自映射到 clip 级的同一能力位 —— 它们不该被 "clip.takes" 的
+    // 结构边界挡住。
     if (
         [
             "clip.cycleTake",
@@ -578,11 +604,11 @@ export function capabilityForAction(action: string, surface: string | null): Cap
             "clip.explodeTakes",
             "clip.setActiveTake",
             "clip.renameTake",
-            "clip.setTakeChannelMode",
-            "clip.setTakeReversed",
         ].includes(action)
     )
         return "clip.takes";
+    if (action === "clip.setTakeReversed") return "clip.reverse";
+    if (action === "clip.setTakeChannelMode") return "clip.edit";
     if (action.startsWith("transport.") || action.startsWith("recording.")) {
         return action.startsWith("recording.") ? "recording.local" : "transport.control";
     }
