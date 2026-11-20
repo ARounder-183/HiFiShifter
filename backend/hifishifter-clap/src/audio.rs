@@ -60,7 +60,7 @@ impl AudioState {
         self.offline_render.load(Ordering::Acquire)
     }
 
-    /// 把 CLAP 的时间读数翻译成**共享的** `BlockContext`；宿主没给 transport 时返回 `None`。
+    /// 把 CLAP 的时间读数翻译成**共享的** `BlockContext`；宿主没给时间事实时返回 `None`。
     ///
     /// 【为什么不再有第二个中性时间类型】本文件此前还构造过 `TransportFrame`
     /// （`hifishifter-plugin-core::format`），于是"一个块的时间事实"在仓库里有两份描述：
@@ -73,6 +73,10 @@ impl AudioState {
     /// `ProcessContext` 同样可以为空。两边都映射成 `None`，共享层据此按"没有时间事实"
     /// 处理（实时静音、离线报 NotReady）。把空 transport 读成"工程第 0 帧"会让离线块
     /// 从快照开头取音频 —— 那是数据正确性失败，不是降级。
+    ///
+    /// 【transport 在场也不等于位置在场】CLAP 允许宿主只给速度/拍号而不给任何位置轴
+    /// （两条轴都缺席，`transport_position` 回 `None`）—— 那同样是"宿主什么都没说"，
+    /// 同样映射成 `None`，与空 transport 走同一条路径。
     pub fn block_context(&self, process: &clap_process_t) -> Option<BlockContext> {
         // SAFETY: `process` 由宿主在本次回调内给出；transport 指针要么为空，要么指向
         // 一个在回调期间有效的 `clap_event_transport_t`。
@@ -83,9 +87,11 @@ impl AudioState {
         let has_tempo = flags & transport_flags::HAS_TEMPO != 0;
         let has_time_signature = flags & transport_flags::HAS_TIME_SIGNATURE != 0;
         let beats = |value: i64| value as f64 / crate::abi::CLAP_BEATTIME_FACTOR;
+        // 两条位置轴都缺席 ⇒ 没有时间事实，与空 transport 同一条 `None` 路径。
+        let position = transport_position(transport, sample_rate)?;
         Some(BlockContext {
             sample_rate,
-            project_time_samples: transport_position(transport, sample_rate).unwrap_or(0),
+            project_time_samples: position,
             playing: flags & transport_flags::IS_PLAYING != 0,
             recording: flags & transport_flags::IS_RECORDING != 0,
             // 【为什么恒为 None】`steady_time` 是"回调的稳态计数"，不是工程位置；
