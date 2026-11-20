@@ -21,6 +21,7 @@
 
 import type React from "react";
 import { isPluginMode } from "../../../../services/hostCapabilities";
+import { frontendLog } from "../../../../services/frontendLog";
 
 import type { AppDispatch } from "../../../../app/store";
 import type { SessionState } from "../../../../features/session/sessionSlice";
@@ -115,8 +116,10 @@ export async function copyClipsFromDrag(deps: CopyClipsFromDragDeps): Promise<vo
 
     dispatch(checkpointHistory());
 
-    await webApi.beginUndoGroup("duplicate_clips");
+    let groupOpen = false;
     try {
+        await webApi.beginUndoGroup("duplicate_clips");
+        groupOpen = true;
         const nativeNewTracks = isPluginMode() && dropToNewTrack;
         const targetTrackIdByClipId = new Map<string, string>();
         if (dropToNewTrack && !nativeNewTracks) {
@@ -265,6 +268,17 @@ export async function copyClipsFromDrag(deps: CopyClipsFromDragDeps): Promise<vo
             }
         }
     } finally {
-        void webApi.endUndoGroup();
+        // 【必须无条件收组，失败也不能漏】`begin_undo_group` 把会话的
+        // `suppress_history` 置真；漏掉 `end_undo_group` 之后所有参数编辑都不再
+        // 压撤销点（撤销栈从此静默失效）。`void` 丢弃的是一笔会 reject 的 IPC ——
+        // 失败既没有诊断，也违反"不产生未处理拒绝"的约定，这里按
+        // `useHostPitchBridge` 的同款写法记录并按 `groupOpen` 收组。
+        if (groupOpen) {
+            try {
+                await webApi.endUndoGroup();
+            } catch (error) {
+                frontendLog("warn", "end_undo_group failed", String(error));
+            }
+        }
     }
 }
