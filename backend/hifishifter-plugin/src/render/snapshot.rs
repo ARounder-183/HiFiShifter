@@ -1233,6 +1233,16 @@ impl SnapshotPublisher {
             }
         }
         output.set_silence_flags(silence);
+        // 【越界读的记账与 `copy_block_at` 同一口径】`layered` 对 bound 实例恒为真
+        // （见 `capture_stage`），越界帧回退宿主输入而不是零；读数仍要如实记下
+        // "这一块越过了已发布快照的末尾"，否则包尾那一段会从读数里彻底消失。
+        if let Some(snapshot) = snapshot {
+            let last = (sample.saturating_add(frames as i64)) as f64 * ratio
+                - snapshot.origin_sample as f64;
+            if last > snapshot.left.len() as f64 {
+                self.past_end.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         snapshot.is_some()
     }
 }

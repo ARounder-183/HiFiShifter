@@ -1836,9 +1836,30 @@ impl ExtensionOwner {
             CaptureOutput::Untouched => {
                 let ready = self.processed_snapshot_ready();
                 self.note_bound_snapshot_fallback(!ready);
+                // 【layered 恒为真：bound 实例不得凭空写出静音】
+                //
+                // 这一支是 ARA 实例唯一会走到的输出通路。旧写法是 `layered: !ready`
+                // —— 快照没就绪时回退宿主输入，就绪之后改成"快照之外逐样本写 0"。
+                // 于是只要请求位置落在已发布快照的范围之外（越界预取、包尾对齐、
+                // 快照重建瞬间的旧原点），那一块就变成一串**真正的零**，而宿主会把它
+                // 烘进自己的 ARA 渲染缓存：之后每次播放都原样重放那些零，只有整段重渲
+                // （用户说的"重新加载"）才清掉。
+                //
+                // 【为什么"回退宿主输入"才是 ARA 的正确语义】ARA 的播放渲染器本来就
+                // 会收到这条 item 的**原始音频**作为输入总线，插件只负责"改哪一段"。
+                // 实测（REAPER 7.85，快照尚未发布的那一段）：我们写出去的每一块都与
+                // 源文件逐块峰值相同 —— 那就是这条输入总线。所以"我们没有内容"的地方，
+                // 宿主原声恰好就是宿主本来会播的东西；写 0 等于我们单方面把它吞掉。
+                // 反过来，宿主若在输入总线上给静音（ARA-only 宿主常这样），回退结果与
+                // 旧行为**逐样本相同** —— 这个改动只可能把静音换成原声，不可能把原声
+                // 换成静音。
+                //
+                // 【为什么这也让读数变真】`uncovered` / `input_peak` 只由分层拷贝记录。
+                // `layered == false` 时它们恒为 `0` / `n/a`，于是"这一块有多少帧不是我们"
+                // 在 ARA 通路上**从来不可见**——那正是"断断续续"查了三轮都没有读数的原因。
                 CaptureStage::Snapshot {
                     source: SnapshotSource::Processed,
-                    layered: !ready,
+                    layered: true,
                 }
             }
             CaptureOutput::Recording => {

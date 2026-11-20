@@ -724,6 +724,7 @@ impl ExtensionOwner {
             publisher.collect_retired();
         }
         let snapshots = input.render(cancel.clone())?;
+        Self::log_snapshot_integrity(&snapshots);
         let _transaction = document.transaction.lock_or_recover();
         if cancel.load(Ordering::Acquire) || !document.ready.load(Ordering::Acquire) {
             return Ok(());
@@ -777,4 +778,98 @@ impl ExtensionOwner {
         );
         Ok(())
     }
+
+    /// 发布前扫一遍快照**内容**：短洞（2 ~ 250 ms、两侧都有信号）是"断断续续"的直接证据。
+    ///
+    /// 【为什么这个读数必须存在】"播放时有静音断点"有两种成因，而它们在播放侧的所有
+    /// 读数里逐样本相同：**内容里就有洞**（快照那几帧真的是零）与**播放没读到内容**
+    /// （读指针越界 → 写零）。前者要在合成里修，后者要在拷贝里修 —— 方向完全相反。
+    /// 快照是两条路唯一的汇合点，所以判据放在这里：发布时扫一次，把"洞在哪一秒、多宽"
+    /// 直接写进日志。
+    ///
+    /// 【为什么不报正常静音】只看**两侧 100 ms 内都有 >= -40 dBFS 信号**的短洞：
+    /// 一句唱完的换气、间奏、句尾收音都长得多或一侧没有信号，不该进这份读数。
+    fn log_snapshot_integrity(
+        snapshots: &[std::sync::Arc<crate::render::snapshot::PlaybackSnapshot>],
+    ) {
+        let Some(snapshot) = snapshots.first() else {
+            return;
+        };
+        if snapshot.left.is_empty() || snapshot.sample_rate == 0 {
+            return;
+        }
+        let rate = f64::from(snapshot.sample_rate);
+        let frames = snapshot.left.len();
+        let level = |index: usize| -> f32 {
+            let left = snapshot.left[index].abs();
+            let right = snapshot.right.get(index).copied().unwrap_or(0.0).abs();
+            left.max(right)
+        };
+        let has_signal = |lo: usize, hi: usize| -> bool {
+            let hi = hi.min(frames);
+            lo < hi && (lo..hi).any(|index| level(index) >= SNAPSHOT_HOLE_SIGNAL)
+        };
+        let mut holes = 0usize;
+        let mut silent_frames = 0usize;
+        let mut places: Vec<f64> = Vec::new();
+        // 【为什么用 `is_finite && <= 地板` 而不是 `> 地板` 取反】NaN 与地板的比较
+        // 两边都假：写成 `if value > FLOOR { 前进 } else { 进入静音段 }` 时，一个
+        // 非有限采样会让内层循环**一步都不前进** —— 那就是一次不返回的发布
+        // （实测：带 NaN 的夹具把整条测试运行卡死）。判据必须先问"这一帧确实是零"。
+        let is_silent = |index: usize| -> bool {
+            let value = level(index);
+            value.is_finite() && value <= SNAPSHOT_HOLE_FLOOR
+        };
+        let mut index = 0usize;
+        while index < frames {
+            if !is_silent(index) {
+                index += 1;
+                continue;
+            }
+            let start = index;
+            while index < frames && is_silent(index) {
+                index += 1;
+            }
+            let len = index - start;
+            if !(SNAPSHOT_HOLE_MIN_FRAMES..=SNAPSHOT_HOLE_MAX_FRAMES).contains(&len) {
+                continue;
+            }
+            let before = start.saturating_sub(SNAPSHOT_HOLE_LOOKAROUND);
+            if !has_signal(before, start) || !has_signal(index, index + SNAPSHOT_HOLE_LOOKAROUND) {
+                continue;
+            }
+            holes += 1;
+            silent_frames += len;
+            if places.len() < 8 {
+                places.push((snapshot.origin_sample + start as i64) as f64 / rate);
+            }
+        }
+        if holes > 0 {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.snapshot.integrity",
+                format_args!(
+                    "[ara] the published snapshot has {holes} short silent run(s) inside signal ({silent_frames} frames); first at {places:?}s — the content itself is chopped, not the playback path",
+                ),
+            );
+        } else {
+            log::info!(
+                "[ara] snapshot integrity: no short silent run inside signal ({} frames @ {} Hz, origin={})",
+                frames,
+                snapshot.sample_rate,
+                snapshot.origin_sample
+            );
+        }
+    }
 }
+
+/// 判"静音"的地板：低于它就是数字零（或残余噪声底）。
+const SNAPSHOT_HOLE_FLOOR: f32 = 1e-6;
+/// 判"两侧确实有信号"的门限（满幅 = 1.0）：约 −40 dBFS。
+const SNAPSHOT_HOLE_SIGNAL: f32 = 0.01;
+/// 短于 2 ms 的洞不可闻（48 kHz 下 96 帧），不报。
+const SNAPSHOT_HOLE_MIN_FRAMES: usize = 96;
+/// 长于 250 ms 的洞是正常静音（换气 / 间奏），不报。
+const SNAPSHOT_HOLE_MAX_FRAMES: usize = 12_000;
+/// 两侧看多远（100 ms @ 48 kHz）。
+const SNAPSHOT_HOLE_LOOKAROUND: usize = 4_800;

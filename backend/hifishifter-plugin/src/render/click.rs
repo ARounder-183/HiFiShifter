@@ -299,16 +299,17 @@ impl ClickLedger {
     /// 【为什么"报告过"要单独记】本函数由 UI 定时器驱动（20 ms 一次）。没有游标时
     /// 同一块会在环里存活 2.7 秒、被打印上百遍，日志立刻失去价值。
     ///
-    /// # 三类事件，各自回答一个不同的问题
+    /// # 四类事件，各自回答一个不同的问题
     ///
-    /// 【为什么必须分三类】此前只有"阶跃显著"一类，于是：
+    /// 【为什么必须分四类】此前只有"阶跃显著"一类，于是：
     ///   * **包络类**（20 ms 等功率过渡）逐样本连续，`max_step` 只有 0.01 量级 ⇒
     ///     一条都不报。用户的"咔"在读数上**完全隐形**，我们只能靠猜；
     ///   * **源切换**本身就是用户听到那一下的位置，却被"可疑"这个过滤器挡在门外 ——
     ///     只有当它恰好也产生大阶跃时才露头。
     ///
     /// 现在：`switch` 无条件报告（一次播放本该只有极少几次），`envelope` 看相邻块的
-    /// 能量比，`step` 保留原有的阶跃判据。
+    /// 能量比，`step` 保留原有的阶跃判据，`hole` 抓"上一块有信号、这一块塌到近乎零"
+    /// —— 也就是用户说的"静音断点"本身。
     pub(crate) fn drain_reports(&self) -> Vec<String> {
         let blocks = self.recorded();
         if blocks.is_empty() {
@@ -340,6 +341,21 @@ impl ClickLedger {
                 counted += 1;
                 out.push(format!("step {}", format_block(block, median)));
                 continue;
+            }
+            // `hole`：上一块有信号、这一块塌到近乎零 —— "有声 → 静音 → 有声"就是用户
+            // 说的"静音断点"。
+            //
+            // 【为什么这一档必须存在】`envelope_ratio` 在 `rms <= 1e-5` 时直接放弃
+            // （整块是零时没有比值可言），`is_suspicious` 只看块内的阶跃（整块零的
+            // `max_step` 恰好是 0）。于是**真正的洞恰好是唯一看不见的一类**：一块纯零
+            // 既不进 `step` 也不进 `envelope`。此前两轮"读数全绿、耳朵有洞"的僵局，
+            // 缺的就是这一档读数。
+            if let Some(previous) = previous_peak(&blocks, index) {
+                if previous >= HOLE_PREVIOUS_PEAK && sample.peak < previous * HOLE_RATIO {
+                    counted += 1;
+                    out.push(format!("hole {}", format_block(block, median)));
+                    continue;
+                }
             }
             // `envelope`：同一条流、上一块非静音时的能量比。
             if let Some(ratio) = envelope_ratio(&blocks, index) {
@@ -376,6 +392,15 @@ impl ClickLedger {
 const ENVELOPE_MIN: f32 = 0.5;
 const ENVELOPE_MAX: f32 = 2.0;
 
+/// "上一块确实有信号"的门限（满幅 = 1.0）。低于它就是安静段落，没有"断"可言。
+const HOLE_PREVIOUS_PEAK: f32 = 0.01;
+
+/// 本块峰值跌到上一块的这么多倍以下 ⇒ 判为一次洞。
+///
+/// 【为什么是 −34 dB】音乐内容在 10 ms 尺度上不可能自然掉这么多；而人耳听到的
+/// 就是一次"静音断点"。比它更严会漏掉"塌到残余噪声"的洞，更松会把正常换气算进来。
+const HOLE_RATIO: f32 = 0.02;
+
 /// 本块相对**同一条流上一块**的 RMS 比值（`None` = 没有可比的上文）。
 ///
 /// 【为什么必须限定同一条流】实时流与预取流描述的是两段互不相邻的时间；把它们
@@ -394,6 +419,20 @@ fn envelope_ratio(blocks: &[RecordedBlock], index: usize) -> Option<f32> {
         return None;
     }
     Some(current.rms / previous.rms)
+}
+
+/// 同一条流上一块的峰值（`None` = 没有可比的上文）。
+///
+/// 【为什么按流取】实时流与预取流描述的是两段互不相邻的时间；跨流比较会把
+/// "另一条流刚播完"读成一次洞。
+fn previous_peak(blocks: &[RecordedBlock], index: usize) -> Option<f32> {
+    let current = &blocks.get(index)?.sample;
+    let previous = blocks[..index]
+        .iter()
+        .rev()
+        .find(|block| block.sample.stream == current.stream)?
+        .sample;
+    previous.peak.is_finite().then_some(previous.peak)
 }
 
 /// 这一块是否可疑。**纯函数**：判定规则本身要被单测钉住。
@@ -491,6 +530,34 @@ mod tests {
             pos: NO_POSITION,
             pos_sec: f32::NAN,
         }
+    }
+
+    /// **"有声 → 整块零 → 有声"必须报成 `hole`，而不是悄无声息。**
+    ///
+    /// 【为什么要单独钉这一条】块内阶跃判据对整块零的 `max_step` 恰好是 0，包络判据
+    /// 在 `rms <= 1e-5` 时直接放弃 —— 于是"真正的静音断点"是账本里唯一看不见的一类，
+    /// 而它正是用户反复报的那个症状。
+    #[test]
+    fn a_block_that_collapses_to_silence_is_reported_as_a_hole() {
+        let ledger = ClickLedger::new();
+        for _ in 0..4 {
+            ledger.record(BlockSample {
+                peak: 0.4,
+                rms: 0.2,
+                ..sample(0.01)
+            });
+        }
+        ledger.record(BlockSample {
+            peak: 0.0,
+            rms: 0.0,
+            first: 0.0,
+            last: 0.0,
+            ..sample(0.0)
+        });
+        let lines = ledger.drain_suspicious();
+        assert_eq!(lines.len(), 1, "只应有那一条：{lines:?}");
+        assert!(lines[0].starts_with("hole "), "{}", lines[0]);
+        assert!(lines[0].contains("peak=0.0000"), "{}", lines[0]);
     }
 
     /// 绝对阈值：一次满幅跳变必须被判成可疑，且带得出它的全部读数。
