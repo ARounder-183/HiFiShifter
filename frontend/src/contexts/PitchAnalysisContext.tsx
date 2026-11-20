@@ -83,33 +83,7 @@ export function PitchAnalysisProvider({ children }: { children: ReactNode }) {
         window.addEventListener(HISTORY_JUMP_EVENT, onHistoryJump);
 
         async function setup() {
-            // ① 先做一次初始查询，防止分析在 Provider 挂载前就已开始
-            try {
-                const progress = await coreApi.getPitchAnalysisProgress();
-                if (!disposed && progress && progress.totalClips && progress.totalClips > 0) {
-                    const p = Number(progress.progress);
-                    const completed = Number(progress.completedClips ?? 0);
-                    const finished =
-                        p >= 1 || (progress.totalClips > 0 && completed >= progress.totalClips);
-                    // 复位即可，绝不能提前 return：后面的监听器注册
-                    // 仍必须执行，否则本会话内再发起的新分析将没有进度事件可听。
-                    if (finished) {
-                        setStateRaw(DEFAULT_STATE);
-                    } else {
-                        setStateRaw({
-                            pending: true,
-                            progress: Number.isFinite(p) ? Math.max(0, Math.min(1, p)) : 0,
-                            currentClip: progress.currentClipName ?? null,
-                            completedClips: progress.completedClips ?? null,
-                            totalClips: progress.totalClips ?? null,
-                        });
-                    }
-                }
-            } catch {
-                // 非 Tauri 环境忽略
-            }
-
-            // ② 注册事件监听
+            // ① 先注册事件监听：事件从注册那一刻起就不会丢。
             try {
                 const mod = await import("../services/hostEvents");
 
@@ -197,6 +171,36 @@ export function PitchAnalysisProvider({ children }: { children: ReactNode }) {
                 }
             } catch {
                 // Safe no-op：浏览器 / pywebview 构建中没有 Tauri API。
+            }
+
+            // ② 再补一次初始查询，防止分析在 Provider 挂载前就已开始。
+            //    注册与查询之间到达的事件会被这次查询的**最新**读数统一收敛：
+            //    完成 → 复位；进行中 → 覆盖为查询结果。（此前的顺序相反：动态
+            //    import + 三次 listen IPC 的窗口里丢一个完成事件，状态栏就会
+            //    永久停在"正在分析"。）
+            try {
+                const progress = await coreApi.getPitchAnalysisProgress();
+                if (!disposed && progress && progress.totalClips && progress.totalClips > 0) {
+                    const p = Number(progress.progress);
+                    const completed = Number(progress.completedClips ?? 0);
+                    const finished =
+                        p >= 1 || (progress.totalClips > 0 && completed >= progress.totalClips);
+                    // 复位即可；保持单出口不提前 return —— 监听器已经先注册好了，
+                    // 单出口让未来追加在 setup 尾部的收尾逻辑不会被这条早退跳过。
+                    if (finished) {
+                        setStateRaw(DEFAULT_STATE);
+                    } else {
+                        setStateRaw({
+                            pending: true,
+                            progress: Number.isFinite(p) ? Math.max(0, Math.min(1, p)) : 0,
+                            currentClip: progress.currentClipName ?? null,
+                            completedClips: progress.completedClips ?? null,
+                            totalClips: progress.totalClips ?? null,
+                        });
+                    }
+                }
+            } catch {
+                // 非 Tauri 环境忽略
             }
         }
 
