@@ -2979,6 +2979,14 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
         pcm_stereo.truncate(expected_out_frames * 2);
     }
 
+    // 【写出前统一净化】seam.rs 的契约：声码器的 STFT/ISTFT 与 ONNX 推理都存在
+    // 产生 NaN 的路径（0 除、log(0)、非有限权重），在写出前统一净化，而不是指望
+    // 每条上游路径都保证有限。实时混音路径（audio_engine/mix.rs）已经这么做；
+    // 此前这条离线合并路径没有 —— 一个 NaN 会同时进内存缓存、磁盘渲染缓存
+    // （重启后照样命中）与导出（MP3 编码器对 NaN 不安全）。净化语义与实时路径
+    // 完全一致：非有限归零 + 夹到 [-1, 1]。
+    crate::seam::sanitize_finite_in_place(pcm_stereo);
+
     Ok(true)
 }
 

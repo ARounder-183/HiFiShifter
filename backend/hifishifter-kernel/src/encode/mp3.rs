@@ -89,7 +89,11 @@ impl FileAudioEncoder for Mp3FileEncoder {
         self.scratch.clear();
         self.scratch.reserve(interleaved.len());
         // rusty_mp3 约定输入在 [-1, 1]；混音管线可能产生越界样本，钳制后再喂。
+        // 【NaN 必须归零】`f32::clamp` 遇 NaN 原样返回 NaN（`clamp11` 的老坑，
+        // 见 seam.rs 的说明），而 LAME 对 NaN 不安全 —— 会编出损坏的帧。导出是
+        // 最后一道门：哪怕上游有一条路径漏了净化，也不能把坏样本写进文件。
         for &sample in interleaved {
+            let sample = if sample.is_finite() { sample } else { 0.0 };
             self.scratch.push(sample.clamp(-1.0, 1.0));
         }
         self.encoder
