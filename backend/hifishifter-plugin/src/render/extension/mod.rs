@@ -334,6 +334,14 @@ pub struct ExtensionOwner {
     blocks_playing: AtomicU64,
     blocks_flow_without_playing: AtomicU64,
     gate_cleared: AtomicU64,
+    /// 门控在**传输正在推进**（`TransportPhase::Rolling`）的块上关掉门的次数。
+    ///
+    /// 【为什么它必须单独存在】`gate_cleared` 在停播时每块都会涨（那是正确行为：
+    /// 停播就该淡出），因此它既不能进读数判据、也不能当缺陷证据。而"位置在走、
+    /// 我们却整块写零"是**结构性错误**：它意味着一个会被真的播出来的块被丢掉了。
+    /// 位置判据（`emit_allowed`）成立时门必须开，所以这个数应当恒为 0；一旦非零，
+    /// 就是又出现了一条"记 bookkeeping 而制造静音"的路径。
+    gate_cleared_rolling: AtomicU64,
     /// ARA 实例在快照未就绪时退到 layered（宿主原声兜底）的块数。
     ///
     /// 【为什么必须是诊断】它等于"本该由我们出声、实际让宿主原声顶替"的次数。

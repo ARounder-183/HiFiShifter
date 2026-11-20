@@ -78,8 +78,15 @@ impl ExtensionOwner {
     }
 
     /// 门控清掉一块（诊断用）。按流分开计数：prefetch/offline 的清零必须是 0。
-    pub(crate) fn note_gate_cleared(&self, stream: ProcessStream) {
+    ///
+    /// `rolling` = 本块所在的传输相位是 `Rolling`（位置确实在推进）。那种块"会被
+    /// 播出来"，门关掉它就是一次真正的静音断点，因此单独计数（见
+    /// `gate_cleared_rolling` 的说明）。
+    pub(crate) fn note_gate_cleared(&self, stream: ProcessStream, rolling: bool) {
         self.gate_cleared.fetch_add(1, Ordering::Relaxed);
+        if rolling {
+            self.gate_cleared_rolling.fetch_add(1, Ordering::Relaxed);
+        }
         self.stream_gate_cleared[stream.index()].fetch_add(1, Ordering::Relaxed);
     }
 
@@ -284,6 +291,7 @@ impl ExtensionOwner {
             "blocks_playing": self.blocks_playing.load(Ordering::Acquire),
             "blocks_flow_without_playing": self.blocks_flow_without_playing.load(Ordering::Acquire),
             "gate_cleared": self.gate_cleared.load(Ordering::Acquire),
+            "gate_cleared_rolling": self.gate_cleared_rolling.load(Ordering::Acquire),
             "bound_snapshot_fallback": self.bound_snapshot_fallback.load(Ordering::Acquire),
             "continuous_used": self.continuous_used.load(Ordering::Acquire),
             "music_used": self.music_used.load(Ordering::Acquire),

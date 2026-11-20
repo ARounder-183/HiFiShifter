@@ -2324,6 +2324,50 @@ fn a_bound_instance_does_not_silence_a_prefetch_block_without_k_playing() {
     );
 }
 
+/// **位置在推进的实时块，不能因为 `kPlaying` 缺席被整块清零。**
+///
+/// 【为什么这是"每隔一小会儿一个静音断点"的回归】bound（ARA）实例的实时流此前只读
+/// `kPlaying`。宿主会在预取 / 擦洗 / 循环折返上合法地报 `kPlaying == 0`，而那些块
+/// **照样会被播出来** —— 于是每一块被误判的块都被 `apply_gate_fade_out` 写满整块零。
+/// 位置判据（`allow_output`）本来就只认"这一块是不是新内容"，两者取或之后，只有
+/// "既没有播放位、位置也不推进"才会静音。
+#[test]
+fn a_bound_instance_emits_a_rolling_block_without_k_playing() {
+    let owner = insert_owner();
+    owner.roles.store(
+        ara2_bridge::plugin::ExtensionRoles::PLAYBACK_RENDERER.bits(),
+        std::sync::atomic::Ordering::Release,
+    );
+    let rolling = BlockEvidence {
+        stream: ProcessStream::Realtime,
+        position: 48_000,
+        frames: 512,
+        playing: false,
+        phase: TransportPhase::Rolling,
+        had_previous: true,
+        allow_output: true,
+        split: BlockSplit::whole(48_000, 512),
+        capture_epoch: 1,
+        transport_active: true,
+        ..Default::default()
+    };
+    assert!(
+        owner.capture_should_emit(Some(rolling), false),
+        "位置在推进就是新内容：播放位缺席不能把它清成零"
+    );
+    // 同一块但位置钉住（停播光标反复重写）仍然必须静音 —— 那是嗡鸣形态，不是新内容。
+    let pinned = BlockEvidence {
+        position: 48_000,
+        phase: TransportPhase::Resting,
+        allow_output: false,
+        ..rolling
+    };
+    assert!(
+        !owner.capture_should_emit(Some(pinned), false),
+        "既没有播放位、位置也不推进 ⇒ 停播光标处的重复块必须静音"
+    );
+}
+
 /// **快照就绪探测必须查"实际会被读取的那一份"。**
 ///
 /// 【为什么是 48 kHz】`snapshot_index_for_rate` 对 48 kHz 及倍率返回 1。此前

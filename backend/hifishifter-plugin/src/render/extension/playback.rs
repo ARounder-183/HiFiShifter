@@ -957,9 +957,17 @@ impl ExtensionOwner {
 
     /// 门控问“本块是否可以不清空”。
     ///
-    /// 【真值表】ARA 实例：`false`（保持“停播即静音”的既有语义，由调用方的
-    /// `!kPlaying` 决定）。未绑定实例：offline/prefetch 恒真（它们的输出稍后才被
-    /// 播放，不能用此刻的传输状态挖洞）；实时流看本块证据。
+    /// 【真值表】offline / prefetch：恒真（它们的输出稍后才被播放，不能用此刻的传输
+    /// 状态挖洞）。实时流：`kPlaying` **或** 位置判据（[`Self::emit_allowed`]）任一成立就
+    /// 出声 —— 两者都是"这一块会被真的播出来"的证据，缺一个就整块写零。
+    ///
+    /// 【为什么实时流不能只看 `kPlaying`】`kPlaying` 与 `projectTimeSamples` 不是原子
+    /// 更新的（见 [`Self::capture_transport_running`] 的说明），而且宿主会在**预取 / 擦洗 /
+    /// 循环折返**这些"输出稍后照播"的块上合法地报 `kPlaying == 0`。此前 bound 实例的
+    /// 实时流只读 `kPlaying`：那些块被 `apply_gate_fade_out` 写满整块零 —— 用户听到的就是
+    /// "每隔一小会儿一个静音断点，又恢复正常"。位置判据是宿主无关的硬事实（真在播就必然
+    /// 前进），把它加进来之后，只有"既没有播放位、位置也不推进"才会静音，而那正是
+    /// "停播光标反复重写同一小段"的嗡鸣形态。
     pub(crate) fn capture_should_emit(
         &self,
         evidence: Option<BlockEvidence>,
@@ -967,15 +975,16 @@ impl ExtensionOwner {
     ) -> bool {
         if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
             // 【为什么 ARA 实例也要区分流】REAPER 在预取 / 擦洗 / 循环折返时会
-            // **合法地**以 `kPlaying == 0` 调用 `process`，而预取块会被它缓存并真的
-            // 播出来 —— 按 `kPlaying` 清零等于往缓存里写静音（"有概率完全没声音"）。
+            // **合法地**以 `kPlaying == 0` 调用 `process`，而这些块会被它缓存并真的播
+            // 出来 —— 按 `kPlaying` 清零等于往缓存里写静音（"有概率完全没声音"）。
             // offline / prefetch 与 Capture 实例同一判据：输出稍后才被播放，此刻的
-            // 传输状态不适用。实时流仍保持 ARA 的"停播即静音"语义：光标处的重复块
-            // 不该循环出声，而真实起播由 `kPlaying` 与捕获侧证据驱动。
+            // 传输状态不适用。实时流保留"停播即静音"：光标处的重复块不该循环出声，
+            // 但判据换成"`kPlaying` 或位置在推进"（见函数文档）—— 只认播放位会让
+            // 上面那三种块在一部分宿主上照样被清成零。
             return match evidence {
                 Some(evidence) => match evidence.stream {
                     ProcessStream::Offline | ProcessStream::Prefetch => true,
-                    ProcessStream::Realtime => playing,
+                    ProcessStream::Realtime => playing || Self::emit_allowed(Some(evidence)),
                 },
                 None => playing,
             };
@@ -1563,13 +1572,13 @@ impl ExtensionOwner {
         playing_rising: bool,
         recording_rising: bool,
     ) -> bool {
-        // 【为什么 bound 实例不参与这里的判据】它的"停播即静音"由
-        // `capture_should_emit` 直接读 `kPlaying` 决定（见那里的说明：预取/offline
-        // 恒真、实时流看播放位）。若这里也参与，`evidence.allow_output` 会在"停播
-        // 光标处的重复块"上翻假，把 ARA 的既有语义改掉。
-        if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
-            return true;
-        }
+        // 【bound 实例必须一起参与】此前这里对 ARA 实例直接返回真，理由是"它的
+        // 停播即静音由 `capture_should_emit` 读 `kPlaying` 决定"。而 `kPlaying` 在
+        // 预取 / 擦洗 / 循环折返上会被宿主合法地报成 0（见那里的说明），于是那条
+        // 通路既没有位置判据、又依赖一个不可靠的位 —— 每一块被误判的块都被整块
+        // 淡成零。现在两条通路共用同一个谓词（这也是 `emit_allowed` 文档要求的
+        // "三道门只认一个判据"）：位置在推进 ⇒ 这是新内容，绝不能因为播放位缺席
+        // 就丢掉；位置钉住且反复到达同一处 ⇒ 才是该淡出的嗡鸣形态。
         // 【零帧块不参与门控】它是参数 flush，不代表时间轴在走；把它算进
         // "连续多少块没推进"会让紧随其后的真实块被吞掉 10–20 ms。
         if block.frames == 0 {

@@ -141,7 +141,12 @@ impl ExtensionOwner {
         // 小块**新位置**的音频。先判、后写，“清输出”才是真的清。
         if !block.is_offline() && !self.capture_should_emit(evidence, context.playing) {
             let stream = evidence.map_or(ProcessStream::Realtime, |evidence| evidence.stream);
-            self.note_gate_cleared(stream);
+            // 【为什么把相位一起报上去】"位置在走却把门关了"是结构性错误（那个块会被
+            // 真的播出来），而停播时的淡出是正确行为。两者混在一个计数里就没有判据。
+            self.note_gate_cleared(
+                stream,
+                evidence.is_some_and(|evidence| evidence.phase == TransportPhase::Rolling),
+            );
             self.apply_gate_fade_out(stream, &mut block.output, block.frames);
             return RenderOutcome::Done;
         }

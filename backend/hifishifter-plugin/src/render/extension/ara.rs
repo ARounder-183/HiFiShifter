@@ -164,8 +164,24 @@ impl ExtensionOwner {
                             role.bits()
                         );
                     }
-                    owner.cancel_preparation();
-                    owner.snapshots.iter().for_each(|snapshot| snapshot.clear());
+                    // 【只有"分配真的变了"才作废】宿主会在一次编辑里把**同一份**分配重发很多遍
+                    // （begin_editing 之后、endEditing 收口之前，实测 1 ms 内三次）。而下面这两句的
+                    // 代价是"整条轨静音 + 一次完整重渲"：此前这里无条件 clear()，于是每一次重发
+                    // 都把可听快照撤成空指针 ⇒ copy_block_at 逐样本写零 —— 用户听到的正是
+                    // "每隔一小会儿一次静音断点，又恢复正常"，随后还要再跑一次整条人声的神经合成。
+                    // 分配没变 ⇒ 这一轮的渲染输入也没变 ⇒ 什么都不该作废。
+                    if changed {
+                        owner.cancel_preparation();
+                        // 【为什么是 invalidate_generation 而不是 clear】与
+                        // DocumentSession::clear_renderers 同一条结论：clear 之后 copy_block_at
+                        // 逐样本返回 0.0，而 bound 实例固定 layered == false，没有兜底 —— 那一整段
+                        // 就是纯静音。分配变化只该让"这份快照是不是当前内容"失效，不该让它停止可听；
+                        // 真正该清空的是"这个实例从此不再渲染"（stop_editor / close）。
+                        owner
+                            .snapshots
+                            .iter()
+                            .for_each(|snapshot| snapshot.invalidate_generation());
+                    }
                     let owners = document.renderer_owners();
                     for renderer in &owners {
                         if let Err(error) = renderer.merge_pending_restore(&document) {
@@ -609,6 +625,24 @@ impl ExtensionOwner {
         {
             // 跨轨接受新参数不一定有新的model callback；丢弃后补排最新任务，不能永久留空且假idle。
             self.prepare();
+            return Ok(());
+        }
+        // 【空分配不是内容变成静音】ara_render_input 在没有任何被分配 region 时返回一份空的
+        // 渲染输入，而它渲出来的是一份 len == 0 的快照。把那份快照发布出去有两个直接后果：
+        // is_ready() 变成真（于是 processed_snapshot_ready 也真、layered 退化成 false），而
+        // copy_block_at 在这份空快照上逐样本返回 0.0 —— 整条轨就是纯静音，直到下一次真正的
+        // 分配把快照换回来。宿主在一次编辑里会短暂地给出空分配
+        // （renderer assignment ... regions=0），这段时间用户听到的正是静音断点。
+        //
+        // 【判据为什么是"文档里还有 region"】自己也一条都没有、文档里也一条都没有 ⇒ 真的没
+        // 内容可播，此时发布空快照才是诚实的（否则删掉全部片段之后还在播上一版）。文档里有
+        // region、只是这一刻没分配给我们 ⇒ 只是记账上的空窗，保留上一份可听快照。
+        if keys.is_empty() && !document.regions.lock_or_recover().is_empty() {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Debug,
+                "ara.prepare.empty-assignment",
+                format_args!("[ara] no region is assigned to this renderer right now; the published snapshot is kept instead of replacing it with an empty one"),
+            );
             return Ok(());
         }
         if !self

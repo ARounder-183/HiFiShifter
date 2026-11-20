@@ -674,14 +674,24 @@ impl ExtensionOwner {
             .map(|publisher| publisher.past_end.load(Ordering::Relaxed))
             .sum();
         let fallback = self.bound_snapshot_fallback.load(Ordering::Relaxed);
-        if misses == 0 && fallback == 0 && past_end == 0 {
+        // 【为什么要带出门控计数】前两项只回答"读快照时有没有内容"；而整块被
+        // `apply_gate_fade_out` 写满零的那条路径**根本不经过读快照**，因此在前两类
+        // 读数里完全不存在 —— 现场"听到静音、读数为零"的僵局正是这么来的。把它并列
+        // 写在同一行里，"这一下是我们没内容、还是我们自己把门关了、还是下游掉帧"
+        // 才是一次就能分开的三件事。
+        //
+        // 【为什么只报 Rolling 那一档】停播时的淡出是正确的，每块都会涨；只有
+        // "位置在走、门却关了"才是缺陷证据（那个块会被真的播出来）。结构上线之
+        // 后它应当恒为 0。
+        let gate = self.gate_cleared_rolling.load(Ordering::Relaxed);
+        if misses == 0 && fallback == 0 && past_end == 0 && gate == 0 {
             return;
         }
         hifishifter_kernel::log_limiter::emit_limited_key(
             log::Level::Warn,
             "ara.snapshot.readout",
             format_args!(
-                "[ara] snapshot readout: misses={misses} past_end={past_end} fallback_blocks={fallback}                  (misses>0 = 没有快照; past_end>0 = 播放头越过了已发布快照的末尾,                 这两种都是逐样本的 0)"
+                "[ara] snapshot readout: misses={misses} past_end={past_end} fallback_blocks={fallback} gate_rolling={gate}                  (misses>0 = 没有快照; past_end>0 = 播放头越过了已发布快照的末尾;                 这两种是逐样本的 0; gate_rolling>0 = 位置在走却把整块门成了零)"
             ),
         );
     }
