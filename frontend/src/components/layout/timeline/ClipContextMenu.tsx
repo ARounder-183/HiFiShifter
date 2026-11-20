@@ -378,9 +378,16 @@ export const ClipContextMenu: React.FC<{
         canSplitSelected,
         pluginMode: pluginMode,
         caps: {
-            editClips: canEditHostClips(),
-            clipboard: canClipboardHostClips(),
-            split: canSplitHostClips(),
+            // 【为什么每条都带 `!pluginMode ||`】这些能力位在独立 App **同样成立**：
+            // 后端命令（set_clips_state_bulk / split_clip / remove_clip …）在
+            // src-tauri 里全量实现，独立 App 走本地时间线，不需要宿主能力快照。
+            // `canEditHostClips` 一族是"插件形态的宿主写能力"谓词，直接当菜单判据
+            // 会把独立 App 的 删除/复制/静音/声道模式/分割/编组 整段隐藏 —— 那正是
+            // 用户报的"独立 APP 菜单缺一大堆选项"。与 TrackAreaContextMenu 的
+            // `!plugin || cap()` 同一条约定。
+            editClips: !pluginMode || canEditHostClips(),
+            clipboard: !pluginMode || canClipboardHostClips(),
+            split: !pluginMode || canSplitHostClips(),
             takes: canEditHostTakes(),
             glue: canGlueClips(),
             silenceDetection: canDetectSilence(),

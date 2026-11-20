@@ -266,3 +266,58 @@ test("split is contextually disabled and carries no explanation", async () => {
     expect(split?.disabled).toBe(true);
     expect(split?.querySelector(".hs-menu__description")).toBeNull();
 });
+
+/*
+ * 独立 App 必须看到**完整**的菜单。
+ *
+ * 【为什么钉这一条】能力位重构时，渲染端把 `canEditHostClips` 一族（插件形态的
+ * "宿主写能力"谓词，独立 App 恒为 false）直接当成了菜单判据 —— 独立 App 的
+ * 删除/复制/剪切/静音/声道模式/循环/分割/编组 整段消失，而后端命令全部健在。
+ * 独立 App 无 bootstrap ⇒ 所有宿主能力谓词都 false ⇒ 只有"独立 App 恒真"的
+ * 那些谓词（倒放 / 音高参考 / 快速导出 / 淡变形状）幸存。
+ */
+test("standalone keeps the full tree: delete/mute/channel mode/loop/split/group/copy", async () => {
+    await mountMenu({ canSplitSelected: true });
+    for (const label of [
+        enUS.ctx_delete,
+        enUS.clip_mute,
+        enUS.ctx_channel_mode,
+        enUS.ctx_loop,
+        enUS.ctx_split_at_playhead,
+        enUS.ctx_copy,
+        enUS.ctx_cut,
+        enUS.ctx_normalize,
+    ]) {
+        const entry = entryByLabel(label);
+        expect(entry, label).toBeTruthy();
+        expect(entry!.disabled, label).toBe(false);
+    }
+    // 声道模式子菜单展开后五档模式齐全。
+    const channel = entryByLabel(enUS.ctx_channel_mode);
+    await act(async () => {
+        channel!.click();
+    });
+    expect(menuLabels().join("\n")).toContain(enUS.clip_channel_mode_normal);
+
+    // take 子菜单在独立 App 里是可操作的 take 行（倒放 / 声道按钮在行尾）。
+    act(() => root.unmount());
+    document.body.innerHTML = "";
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await mountMenu();
+    const takes = entryByLabel(enUS.clip_takes);
+    await act(async () => {
+        takes!.click();
+    });
+    const openLabels = menuLabels().join("\n");
+    for (const label of [
+        enUS.clip_take_add,
+        enUS.clip_take_duplicate,
+        enUS.clip_take_remove,
+        enUS.clip_take_explode,
+        enUS.ctx_replace,
+    ]) {
+        expect(openLabels, label).toContain(label);
+    }
+});
