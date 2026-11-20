@@ -1576,6 +1576,32 @@ pub(crate) fn execute_managed(
         }
     };
     drop(undo);
+    // 【写回成功 ≠ 完成门能收口】数值/结构写回只落在**宿主**上；完成门比对的是
+    // **编辑器时间线**，而它的 take 级事实（reversed / loop / channel_mode）只有一条
+    // 更新通路：原生清单 `ui_tracks` 重发布 → `ui_geometry_revision` 推进 →
+    // `refresh_ui_geometry` 投影。那条通路被三道节流按住：
+    //   * 清单早退"令牌未变 + 距上次采集 < 1 s"（方向位**不**推进宿主的
+    //     `GetProjectStateChangeCount`，令牌不变是常态）；
+    //   * 定时器 100 ms 枚举节流（忙时静默跳过）；
+    //   * `host_query_transaction` 在后台事务持有文档时直接放弃本轮。
+    // 三道叠加的真机后果（23 次现场失败）：完成门把预算（24 次退避 ≈ 10.6 s）耗尽，
+    // 而 REAPER 的 ARA 文档再同步在 +11.2 s 才到 —— 用户看到
+    // "clip was edited in the host but its ARA geometry has not caught up"，
+    // 乐观更新被回滚，之后由几何刷新再"追认"一遍。剪贴板写回路径
+    // （`execute_paste`/`execute_delete`）早已用 `refresh_host_transport()`
+    // 同步拉回新几何；几何写回恰恰是最需要它的（它本身就是几何编辑），漏掉它是缺口。
+    //
+    // 【为什么清 `ui_inventory_sampled_at` 而不是只调刷新】`refresh_host_transport`
+    // 里的清单刷新会被"刚采过样"早退拦下 —— 而写回刚把宿主改了，那份"刚采的样"
+    // 恰恰是写前快照。清掉采样时刻，下一轮枚举必然执行；方向位变化会走
+    // `facts_changed` → 立即发布 → `ui_geometry_revision` 推进 → 完成门在下一次
+    // `get_timeline_state` 就能对上。
+    if result.is_ok() {
+        if let Ok(document) = owner.editor_document() {
+            *document.ui_inventory_sampled_at.lock_or_recover() = None;
+        }
+        owner.refresh_host_transport();
+    }
     result.map_err(|error| format!("host clip edit failed (Undo block retained): {error}"))
 }
 
@@ -2364,6 +2390,143 @@ mod tests {
         assert!(
             !chunk.contains("<SOURCE SECTION"),
             "chunk 从未被真正改写（宿主拒绝了它）：{chunk}"
+        );
+        document.close();
+    }
+
+    /// **不变量：几何写回成功后，编辑器时间线必须立刻投影到新的宿主事实。**
+    ///
+    /// 【为什么这是回归】`execute_managed` 的完成门比对的是 `get_timeline_state`
+    /// 载荷，而它的 take 级事实（`reversed` / `loop_enabled` / `channel_mode`）
+    /// 只能从原生清单 `ui_tracks` 投影进编辑器时间线。那条通路被"令牌未变 + 刚采过
+    /// 样"早退按住：方向位**不**推进宿主的 `GetProjectStateChangeCount`（take 级
+    /// 属性），令牌不变是常态。真机后果：写回已成功，完成门把 24 次退避预算（≈10.6 s）
+    /// 耗尽后报 "ARA geometry has not caught up"，乐观更新被前端回滚 —— 而工程里
+    /// 方向其实已经翻了。修复：写回成功后清掉采样时刻并同步 `refresh_host_transport`
+    /// —— 同步重采发布清单后，一轮重投内完成门就能对上。
+    #[test]
+    fn a_successful_direction_write_projects_host_facts_into_the_editor_timeline_immediately() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_item_state(&host.single_take_chunk());
+        host.inventory_enabled.set(true);
+        host.take_env_enabled.set(true);
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        let plan = editor
+            .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"reversed":true}))
+            .expect("倒放补丁必须被接受");
+        host.reset();
+        execute(&owner, plan, || document.is_alive()).expect("倒放写回必须成功");
+        assert!(host.take_reversed.get(), "方向位必须已经翻过来");
+
+        // 回复泵的重投入口就是 `get_timeline_state` → `ensure_loaded`。真实链路里
+        // `refresh_host_transport` 已在写回线程同步重采并发布清单（写回先清掉了采样
+        // 时刻，"令牌未变 + 刚采过样"的早退拦不住这一轮）；这一轮重投再把新事实投影
+        // 进时间线。完成门的方向判据到此必然成立 —— 不必再等 ARA 文档收口。
+        editor.ensure_loaded(false).expect("写回后的重投必须成功");
+        let payload = crate::editor::commands::payload(&editor, false).unwrap();
+        // 不做整张回执比对：夹具的本地 clip 与宿主清单在增益等非方向字段上本就
+        // 不同源，那是夹具口径，不是本回归的对象。完成门在此等待的**方向判据**
+        // 单独钉死：方向位必须在一轮重投内到达载荷。
+        let clip = &payload["clips"][0];
+        assert_eq!(
+            clip["reversed"],
+            serde_json::json!(true),
+            "一轮重投内方向位必须到达载荷：{clip}"
+        );
+        // 方向唯一补丁上 `reversed` 就是完成门的**唯一**阻塞判据：其余字段
+        // （start/length/rate/gain/loop）一位都没动。它到达 ⇒ 门可收口。
+        // 窗口坐标不在此断言：夹具的 clip 没有 ARA 源时长（`duration_sec` 为空），
+        // 镜像复原按设计退回"保留宿主镜像坐标"——那是另一条已独立钉住的通路。
+        document.close();
+    }
+
+    /// 兄弟 take 的逐 take 方向写回同样必须当场投影（回声走 `takes[].reversed`）。
+    ///
+    /// 【为什么单独一条】兄弟 take 的完成门期望在 `takes[]` 里，而清单投影写的是
+    /// clip 级字段与 active take；这条测试钉住"逐 take 回声也能在写回线程内成立"，
+    /// 与上一条（clip 级 `reversed`）共同覆盖完成门的两个消费面。
+    #[test]
+    fn a_sibling_take_direction_write_also_projects_immediately() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        let chunk = "<ITEM
+POSITION 0
+LENGTH 0.00009070294784580499
+SEL 1
+         IGUID {11111111-1111-1111-1111-111111111111}
+         SOFFS 0
+PLAYRATE 1 1 0
+GUID {22222222-2222-2222-2222-222222222222}
+         <SOURCE WAVE
+FILE \"ara://source\"
+>
+         TAKE
+         SOFFS 0.5
+PLAYRATE 1 1 0
+GUID {55555555-5555-5555-5555-000000000001}
+         <SOURCE WAVE
+FILE \"ara://source\"
+>
+>
+"
+        .to_string();
+        host.enable_item_state(&chunk);
+        host.enable_takes(1);
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 0.5);
+        host.set_value("D_PLAYRATE", 1.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        let sibling = clip
+            .takes
+            .iter()
+            .find(|take| take.id.ends_with("{55555555-5555-5555-5555-000000000001}"))
+            .expect("清单必须枚举到兄弟 take")
+            .id
+            .clone();
+        let plan = editor
+            .plan_host_edit(
+                "set_clip_state",
+                &json!({"clipId":clip.id,"hostTakeReversed":{"takeId":sibling,"reversed":true}}),
+            )
+            .expect("逐 take 倒放补丁必须被接受");
+        host.reset();
+        execute(&owner, plan, || document.is_alive()).expect("兄弟 take 写回必须成功");
+
+        editor.ensure_loaded(false).expect("写回后的重投必须成功");
+        let payload = crate::editor::commands::payload(&editor, false).unwrap();
+        // 同上：不做整张 `receipt.matches` —— 夹具所有 take 共享同一个源指针，
+        // chunk 改写后 `PCM_Source_GetSectionInfo` 对 active take 也报倒放（真机每条
+        // take 有独立源，不存在这个伪影），clip 级字段随之偏移。完成门等待的
+        // **take 级回声**单独钉死：兄弟 take 的方向必须在一轮重投内到达载荷。
+        let echoed = payload["clips"][0]["takes"]
+            .as_array()
+            .expect("载荷必须带 takes")
+            .iter()
+            .find(|take| take["id"] == serde_json::json!(sibling))
+            .expect("载荷必须仍枚举到兄弟 take")["reversed"]
+            .as_bool();
+        assert_eq!(
+            echoed,
+            Some(true),
+            "兄弟 take 的方向回声必须在一轮重投内到达载荷"
         );
         document.close();
     }

@@ -3446,6 +3446,7 @@ impl EditorSession {
         }
         self.notify_timeline();
     }
+
     /// 音高线被改动了一次 —— 「自动写入 Take 音高」的触发入口。
     ///
     /// 【为什么只推迟到期时刻，不在这里发命令】编辑期间 `set_param_frames` 每帧一笔
