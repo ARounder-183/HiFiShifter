@@ -124,38 +124,60 @@ fn mime_for(path: &str) -> &'static str {
 }
 
 fn main() {
-    let mut args = std::env::args().skip(1);
+    // 【为什么用 args_os】argv 是原始字节：极端 locale / 挂载点下的非 UTF-8 参数会让
+    // `std::env::args()` 当场 panic —— 死在下面"缺 --root"的诊断路径之前，宿主只看到
+    // "编辑器进程退了"，一个日志都没有。数值型参数 lossy 转换即可；`--root` 与
+    // bootstrap 文件路径保留 OsString，不给文件系统路径强加 UTF-8 假设。
+    let mut args = std::env::args_os().skip(1);
     let mut parent: u64 = 0;
     let mut width: i32 = 900;
     let mut height: i32 = 600;
-    let mut root = String::new();
+    let mut root = std::path::PathBuf::new();
     let mut bootstrap = String::from("{}");
     while let Some(arg) = args.next() {
+        let arg = arg.to_string_lossy().into_owned();
         match arg.as_str() {
             // 宿主给的是十六进制（`0x60002c`），`u64::from_str` 不认 `0x` 前缀。
             "--parent" => {
                 parent = args
                     .next()
-                    .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+                    .and_then(|v| {
+                        u64::from_str_radix(v.to_string_lossy().trim_start_matches("0x"), 16).ok()
+                    })
                     .unwrap_or(0)
             }
-            "--width" => width = args.next().and_then(|v| v.parse().ok()).unwrap_or(900),
-            "--height" => height = args.next().and_then(|v| v.parse().ok()).unwrap_or(600),
-            "--root" => root = args.next().unwrap_or_default(),
+            "--width" => {
+                width = args
+                    .next()
+                    .and_then(|v| v.to_string_lossy().parse().ok())
+                    .unwrap_or(900)
+            }
+            "--height" => {
+                height = args
+                    .next()
+                    .and_then(|v| v.to_string_lossy().parse().ok())
+                    .unwrap_or(600)
+            }
+            "--root" => {
+                root = args
+                    .next()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_default()
+            }
             "--bootstrap-file" => {
                 if let Some(path) = args.next() {
-                    bootstrap = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".into());
+                    bootstrap = std::fs::read_to_string(&path).unwrap_or_else(|_| "{}".into());
                 }
             }
             _ => {}
         }
     }
 
-    // 【为什么在这里就拒绝】`--root` 缺参时留下的是空串：scheme handler 会把每个
+    // 【为什么在这里就拒绝】`--root` 缺参时留下的是空路径：scheme handler 会把每个
     // 请求都判成"invalid path"，页面表现为白屏 —— 而渲染进程还活着，宿主侧看不到
     // 任何异常。宁可启动即败，把原因说清楚（本 crate 没有 log 依赖，走 stderr +
     // 管道消息双通道上报）。
-    if root.is_empty() {
+    if root.as_os_str().is_empty() {
         eprintln!("hfs-gui: missing required --root <frontend assets directory>");
         send(serde_json::json!({
             "type": "error",
@@ -413,6 +435,12 @@ fn main() {
                 break;
             }
         }
+        // 管道 EOF 却没等到"close"指令 ⇒ 宿主侧已经死了：正常关闭会先发 "close"
+        // 再收割本进程（editor/gui/linux.rs 的 ChildReaper），宿主崩溃则什么都不会
+        // 发。stdin 是本进程与宿主之间唯一的生命线，它断了就该退场 —— 否则一个带
+        // WebKit 的完整 GTK 循环会被孤儿化，几百 MB 的内存挂在死掉的宿主底下无人
+        // 回收。复用 "close" 是有意的：此刻唯一的正确动作就是退出主循环。
+        let _ = commands.send(serde_json::json!({"type":"close"}));
     });
     gtk::glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
         while let Ok(value) = incoming.try_recv() {
