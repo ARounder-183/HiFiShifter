@@ -3250,6 +3250,102 @@ mod tests {
         tl
     }
 
+    /// ★★ 未画 DYN 不得成为"静音门"：基线的 0 只表示"这一帧没分析到内容"，
+    /// 绝不能被当成增益 0（用户报告的"每隔一小会儿一个静音断点"）。
+    ///
+    /// 【现场形状】真实 31.8 s 人声（4 段数字静音）上，把一份**含 0 缺口**的电平基线
+    /// 与一条**全线未画**的 `dyn` 曲线一起交给混音：静音段从 4 段变成 38 段、静音总量
+    /// 63k → 221k 帧，洞全部落在有内容的帧上（听感即"每隔一小会儿一个静音断点"，
+    /// 且倒放/取消倒放后洞会跟着上一次渲染的静音区走）。
+    /// 根因是未画帧被解析成"目标 = 基线"，`compute_dyn_gain` 于是退化成
+    /// `no_content_fade(基线)` —— 一个由响度分析曲线驱动的静音门。
+    ///
+    /// 【正对照为什么必须有】没有它，这条用例在"夹具根本没让 DYN 生效"时也会通过。
+    /// 把同一区间画成目标 1.0（基线 0.5）后，该区间必须被放大成两倍 —— 证明 DYN 确实
+    /// 接在这条夹具上。
+    #[test]
+    fn an_unset_dyn_curve_never_gates_the_audio_against_its_baseline() {
+        let identity = "ara://dyn-gate";
+        let plain = reuse_test_timeline(identity, "host-pcm-clip", false);
+        let root = plain.tracks[0].id.clone();
+        const FRAMES: usize = 100; // 0.5 s @ 5 ms
+        const GAP: std::ops::Range<usize> = 40..60;
+        // 基线在 GAP 里是 0（"这里没分析到内容"），其余 0.5。
+        let mut baseline_with_holes = vec![0.5f32; FRAMES];
+        for value in &mut baseline_with_holes[GAP] {
+            *value = 0.0;
+        }
+        let with_dyn = |baseline: Vec<f32>, curve: Vec<f32>| {
+            let mut view = plain.clone();
+            let entry = view.params_by_root_track.get_mut(&root).unwrap();
+            entry.frame_period_ms = 5.0;
+            entry.dyn_orig = baseline;
+            entry.extra_curves.insert("dyn".to_string(), curve);
+            view
+        };
+        // 0.5 s / 44.1 kHz 的谐波音（纯正弦会被分析判为清音，见 host_pcm::tone 的说明）。
+        let samples: Vec<f32> = (0..22_050)
+            .flat_map(|i| {
+                let phase = 2.0 * std::f64::consts::PI * 220.0 * i as f64 / 44_100.0;
+                let sample = (1..=16)
+                    .map(|harmonic| (phase * harmonic as f64).sin() * 0.2 / harmonic as f64)
+                    .sum::<f64>() as f32;
+                [sample, sample * 0.6]
+            })
+            .collect();
+        let src = HashMap::from([(
+            identity.to_string(),
+            MixdownPcm {
+                sample_rate: 44_100,
+                channels: 2,
+                samples: Arc::new(samples),
+            },
+        )]);
+        let options = MixdownOptions {
+            sample_rate: 44_100,
+            start_sec: 0.0,
+            end_sec: None,
+            stretch: StretchAlgorithm::LinearResample,
+            apply_pitch_edit: false,
+            output: OutputSpec::default(),
+            quality_preset: QualityPreset::Export,
+            cancel_flag: None,
+            progress: None,
+            cache_stats: None,
+        };
+        let run = |tl: &TimelineState| {
+            render_mixdown_with_pcm(tl, options.clone(), &src)
+                .unwrap()
+                .3
+        };
+        // 帧 → 交错样本：一帧 5 ms ⇒ 每帧 220.5 个样本，两声道交错 ⇒ ×2。
+        let gap_start = GAP.start * 5 * 44_100 / 1000 * 2;
+        let gap_end = GAP.end * 5 * 44_100 / 1000 * 2;
+        let peak = |buf: &[f32], lo: usize, hi: usize| -> f32 {
+            buf[lo..hi].iter().fold(0.0f32, |acc, v| acc.max(v.abs()))
+        };
+
+        let reference = run(&plain);
+        let unset = with_dyn(baseline_with_holes.clone(), vec![-1.0f32; FRAMES]);
+        assert_eq!(
+            run(&unset),
+            reference,
+            "全线未画的 DYN 必须逐样本旁路：基线里的 0 不是增益 0"
+        );
+
+        // 正对照：同一区间改成"目标 1.0 / 基线 0.5" ⇒ 必须放大成两倍。
+        let mut drawn = vec![-1.0f32; FRAMES];
+        for value in &mut drawn[GAP] {
+            *value = 1.0;
+        }
+        let boosted = run(&with_dyn(vec![0.5f32; FRAMES], drawn));
+        let ratio = peak(&boosted, gap_start, gap_end) / peak(&reference, gap_start, gap_end);
+        assert!(
+            (ratio - 2.0).abs() < 0.05,
+            "对照：画成目标 1.0 / 基线 0.5 后该区间应放大两倍，实测 {ratio}"
+        );
+    }
+
     #[test]
     fn export_reuses_rendered_clip_cache_faithfully() {
         use crate::state::TimelineState;
