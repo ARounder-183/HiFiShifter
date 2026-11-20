@@ -619,12 +619,13 @@ unsafe extern "system" fn message_attributes(this: *mut c_void) -> *mut c_void {
         if attrs.is_null() {
             return std::ptr::null_mut();
         }
-        // SAFETY: attrs 与消息同寿；交出去的那一份由调用方 release。
-        unsafe {
-            (*attrs)
-                .refs
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        }
+        // SAFETY: attrs 与消息同寿；交出的是**借用**，不另立引用 —— 与 VST3 SDK 的
+        // `IMessage::getAttributes` 事实语义一致（"Returns the attribute list
+        // associated to the message"：表归消息所有，随消息消失）。此前这里 AddRef
+        // 一份，而本仓唯一的读者（`read`）按借用语义不 release，于是每次路由回执
+        // 都把属性表漏掉一份引用，消息放掉后它永远停在 1。若改回"交引用"的口径，
+        // 读者就必须区分宿主自有消息（宿主的 getAttributes 十有八九按借用交出，
+        // 对它 release 是 use-after-free）—— 借用口径对两种来源都安全。
         attrs.cast()
     })
 }
@@ -895,6 +896,8 @@ pub(crate) unsafe fn read(message: *mut c_void) -> Result<Message, String> {
     if id != ROUTE_ID {
         return Err("unknown VST3 message".into());
     }
+    // getAttributes 交出的是**借用**（表归消息所有，随消息消失）—— 只在本回调内
+    // 读它，不 release；对宿主自有消息 release 才是真正的 use-after-free。
     let attrs = unsafe { (table.attributes)(message) };
     if attrs.is_null() {
         return Err("route attributes missing".into());
@@ -952,34 +955,31 @@ mod owned_message_tests {
         }
     }
 
-    /// **不变量：消息与属性表各自计数。**
+    /// **不变量：`getAttributes` 交出的是与消息同寿的借用。**
     ///
-    /// 【为什么必须分开】宿主完全可以先放消息、后放属性（或反序）。共用一份计数时，
-    /// 先放的那一个会把另一个一起释放 —— 那是 use-after-free，只在宿主恰好这个顺序时出现。
+    /// 【为什么钉死成"借用"】本仓唯一的读者（`read`）按 SDK 语义不 release；此前
+    /// getAttributes 另立一份引用，每次路由回执就把属性表漏掉一份引用（消息放掉后
+    /// refs 永远停在 1）。借用口径让"我们的消息往返"零泄漏，也让读者对宿主自有
+    /// 消息安全（宿主的 getAttributes 十有八九按借用交出，对它 release 是
+    /// use-after-free）。重复调用必须返回同一指针：属性表只有一份。
     #[test]
-    fn message_and_attribute_references_are_counted_separately() {
+    fn get_attributes_hands_out_a_borrowed_list_tied_to_the_message() {
         // SAFETY: 全程单线程，指针都在本用例里产生与释放。
         unsafe {
             let message = OwnedMessage::allocate(ROUTE_ID);
-            let attrs = message_attributes(message.cast());
-            assert!(!attrs.is_null());
+            let first = message_attributes(message.cast());
+            let second = message_attributes(message.cast());
+            assert!(!first.is_null());
+            assert_eq!(first, second, "属性表只有一份，重复 getAttributes 不得新建");
             assert_eq!(
-                (*attrs.cast::<OwnedAttributes>())
-                    .refs
-                    .load(std::sync::atomic::Ordering::Acquire),
-                2,
-                "getAttributes 必须交出自己的一份引用"
-            );
-            // 宿主先放消息：属性表还剩 getAttributes 那一份。
-            release_message(message.cast());
-            assert_eq!(
-                (*attrs.cast::<OwnedAttributes>())
+                (*first.cast::<OwnedAttributes>())
                     .refs
                     .load(std::sync::atomic::Ordering::Acquire),
                 1,
-                "消息释放不能连带把属性表放掉"
+                "借用不另立引用：计数仍是消息自己那一份"
             );
-            attributes_release(attrs);
+            // 消息放掉，属性表随之消失 —— 之后不得再碰 first。
+            release_message(message.cast());
         }
     }
 
@@ -1001,7 +1001,7 @@ mod owned_message_tests {
                 K_RESULT_FALSE
             );
             assert_eq!(pid, 7, "被拒绝的读不能改动输出槽");
-            attributes_release(attrs);
+            // attrs 是借用，随消息释放；不能对它单独 release。
             release_message(message.cast());
         }
     }
