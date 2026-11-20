@@ -311,6 +311,8 @@ export const ClipContextMenu: React.FC<{
     const dispatch = useAppDispatch();
     const menuRef = useRef<HTMLDivElement>(null);
     useMenuKeyboard(menuRef);
+    /** 形态判据只取一次：caps 的 `!pluginMode ||` 与模型的 pluginMode 用同一份。 */
+    const pluginMode = isPluginMode();
     /** Take 重命名的内联输入草稿（替代 window.prompt）。 */
     const [takeRenameDraft, setTakeRenameDraft] = useState<{
         takeId: string;
@@ -356,7 +358,6 @@ export const ClipContextMenu: React.FC<{
         if (rect.right > vw) el.style.left = Math.max(0, vw - rect.width) + "px";
         if (rect.bottom > vh) el.style.top = Math.max(0, vh - rect.height) + "px";
     }, [x, y]);
-
     // Escape 关闭菜单（键盘可达性）；输入框内的 Escape 由其自身的
     // onKeyDown stopPropagation 拦截，不会触发这里。
     useEffect(() => {
@@ -375,7 +376,7 @@ export const ClipContextMenu: React.FC<{
         overlappingClips,
         playheadInClip,
         canSplitSelected,
-        pluginMode: isPluginMode(),
+        pluginMode: pluginMode,
         caps: {
             editClips: canEditHostClips(),
             clipboard: canClipboardHostClips(),
@@ -664,9 +665,10 @@ export const ClipContextMenu: React.FC<{
             role="menu"
             data-hs-context-menu="1"
             data-hs-floating-menu="1"
-            // --no-scroll：本菜单里挂着 AppSubMenu 的子面板，而子面板是**绝对定位**
-            // 的后代 —— 壳一旦 overflow-y: auto 就会把它裁掉。子面板自己会滚动。
-            className="hs-menu hs-menu--no-scroll"
+            // 壳保持共享样式模型的滚动契约（max-height + overflow-y: auto）：窗口
+            // 高度不够时整张菜单可滚。子菜单面板（AppSubMenu）以 fixed 定位相对
+            // 视口展开，不再被壳的滚动裁切（见 src/index.css 的 .hs-menu--submenu）。
+            className="hs-menu"
             style={{ left: x, top: y }}
             onPointerDown={(e) => e.stopPropagation()}
         >

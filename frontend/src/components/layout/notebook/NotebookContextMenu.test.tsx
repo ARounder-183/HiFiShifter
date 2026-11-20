@@ -342,21 +342,26 @@ test("禁用子项点不动", async () => {
 });
 
 /*
- * 含子菜单的菜单壳**不得裁切内容**。
+ * 子菜单面板以 fixed 定位展开，壳**不再**为子菜单放弃滚动。
  *
- * 【为什么这条必须在**单测**里也钉一遍】子面板留在父壳内部（它要靠百分比相对触发项
- * 定位），而壳默认 `max-height` + `overflow-y: auto` 会把伸出右边的子面板裁掉 ——
- * 实测只露出 5px，等于**子菜单完全看不见**。jsdom 没有布局，量不出裁切，但
- * `hs-menu--no-scroll` 这个**类名**是可观察的，而它正是"别裁我"的唯一表达。
+ * 【旧契约为什么被替换】子面板曾是父壳里的绝对定位后代，壳的
+ * `overflow-y: auto` 会把伸出右边的子面板裁掉 —— 实测只露出 5px，等于子菜单
+ * 完全看不见，当时的解法是"带子菜单的壳一律 `--no-scroll`"。子面板改为
+ * `position: fixed`（相对视口定位，脱离壳的裁切上下文，见 `index.css` 的
+ * `.hs-menu--submenu`）之后，那条解法成了枷锁：窗口高度不够时，带子菜单的
+ * 菜单整张不可滚 —— 与扁平菜单行为分叉，正是用户报的"轨道时间轴右键菜单
+ * 窄窗口下没法滚"。
  *
- * 【为什么当初漏了】浏览器验证用的是 `getBoundingClientRect()`：它给的是布局几何，
- * 与裁切无关，照样报出完整矩形 —— 假绿灯。可见性必须用 `elementFromPoint` 判，
- * 那条检查留在 `scripts/notebook-menu-probe.mjs` 里（jsdom 做不到）。
+ * 新契约钉两条：壳**不挂** `--no-scroll`（保持滚动）；子面板的定位是 `fixed`
+ * （jsdom 没有布局，类名与内联定位是唯一可观察面）。
  */
-test("含子菜单时壳用 hs-menu--no-scroll（否则子面板被 overflow 裁掉）", async () => {
+test("含子菜单的壳保持滚动（子面板已改为 fixed，不再要求壳放手）", async () => {
     await mount(WITH_SUBMENU);
-    const shell = surface();
-    expect(shell?.className, "壳会裁掉子面板").toContain("hs-menu--no-scroll");
+    expect(surface()?.className, "壳不应再挂 no-scroll").not.toContain("hs-menu--no-scroll");
+    await act(async () => itemByText("Format").click());
+    const panel = document.querySelector<HTMLElement>(".hs-menu--submenu");
+    expect(panel, "子面板没有展开").not.toBeNull();
+    expect(panel!.className).toContain("hs-menu--submenu");
 });
 
 test("不含子菜单时不加 no-scroll（长菜单仍要能自己滚）", async () => {

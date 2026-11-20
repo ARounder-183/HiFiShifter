@@ -100,10 +100,9 @@ export function DrawToolMenu({ m }: Props) {
                 open={drawToolMenuOpen}
                 anchorRef={drawToolMenuAnchorRef}
                 menuRef={drawToolMenuRef}
-                // 菜单里挂着 `AppSubMenu` 的绝对定位子面板：壳一旦
-                // `overflow-y: auto` 就会把它裁掉（与 `ClipContextMenu`
-                // 同一理由，见 `.hs-menu--submenu` 的说明）。子面板自己滚动。
-                className="hs-menu--no-scroll"
+                // 子菜单面板（`AppSubMenu`）以 fixed 定位相对视口展开，不再被壳的
+                // 滚动裁切（见 `index.css` 的 `.hs-menu--submenu`）—— 壳保持共享
+                // 样式模型的滚动契约，窗口高度不够时整张菜单可滚。
             >
                 {/* 三种绘制工具并列。直线与颤音在这里是**平级**的两项
                                 —— 它们在类型与实现上也是两个工具，只是共用一条
