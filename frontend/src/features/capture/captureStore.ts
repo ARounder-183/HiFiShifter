@@ -216,9 +216,3 @@ export const captureActions = {
     /** 手动刷新（面板打开时用一次，不必等 200ms）。 */
     refresh,
 };
-
-/** 供测试注入一条状态（不发命令）。 */
-export function publishCaptureStatusForTests(status: CaptureStatus | null): void {
-    rememberStatus(status);
-    publish({ ...snapshot, status });
-}

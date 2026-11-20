@@ -34,7 +34,7 @@ const DEFAULT_SAMPLE_RATE = 44100;
 /**
  * 默认 mipmap 除数因子：L2（最粗档）。
  *
- * 与 `waveformMipmapStore` 的 `DIV_FACTORS[2]` 同值。小缩放下
+ * 与 mipmap L2 档的除数因子（4096）同值。小缩放下
  * `selectLevel(samplesPerPixel)` 对 spp > 1024 一律返回 2，故基准用这一档。
  */
 const DEFAULT_DIVISION_FACTOR = 4096;

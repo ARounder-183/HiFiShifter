@@ -27,7 +27,6 @@ export {
     isEditableTarget,
     matchesKeybinding,
     matchesAnyKeybinding,
-    matchKeybinding,
     normalizeEventKey,
 } from "./useKeybindings";
 export {

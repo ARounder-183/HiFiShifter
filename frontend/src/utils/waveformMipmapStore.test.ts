@@ -2,12 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { waveformApi } from "../services/api/waveform";
 
-import {
-    getDivisionFactors,
-    getSppThresholds,
-    waveformMipmapStore,
-    type WaveformMipmapLevel,
-} from "./waveformMipmapStore.js";
+import { waveformMipmapStore, type WaveformMipmapLevel } from "./waveformMipmapStore.js";
 
 vi.mock("../services/api/waveform", () => ({
     waveformApi: {
@@ -29,9 +24,6 @@ it("utils/waveformMipmapStore.test.ts scripted checks", async () => {
             throw new Error(`${label}: expected ${expectedJson}, received ${actualJson}`);
         }
     }
-
-    assertEqual(getSppThresholds(), [512, 1024], "updated spp thresholds");
-    assertEqual(getDivisionFactors(), [16, 512, 4096], "updated division factors");
 
     assertEqual(waveformMipmapStore.selectLevel(512), 0, "L0 covers spp <= 512");
     assertEqual(waveformMipmapStore.selectLevel(513), 1, "L1 starts above 512");

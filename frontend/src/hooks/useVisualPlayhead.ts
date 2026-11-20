@@ -199,8 +199,8 @@ function subscribeVisualPlayhead(subscriber: VisualPlayheadSubscriber): () => vo
     };
 }
 
-/** 读当前共享视觉播放头（秒）。用于非 React 的逐帧消费者与测试。 */
-export function readSharedVisualPlayheadSec(): number {
+/** 读当前共享视觉播放头（秒）—— 模块内部的逐帧消费者用。 */
+function readSharedVisualPlayheadSec(): number {
     return clockVisualSec;
 }
 
