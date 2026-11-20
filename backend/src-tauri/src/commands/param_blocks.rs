@@ -107,27 +107,40 @@ pub(super) fn set(
             .map(|params| params.param_block_edits.clone())
             .unwrap_or_default();
         let next = current.replace(expected_edit_revision, edits)?;
-        let mut candidate = if patches.is_empty() {
-            timeline.clone()
+        let frame_period_ms = timeline.frame_period_ms();
+        // 【块级编辑不克隆整条时间线】patches 为空时唯一要写的是目标根的块表与
+        // 重组视图 —— 此前先在全局时间线锁内 `timeline.clone()`（含全部 clip /
+        // take / 参数曲线，MB 级），再把克隆整体换回。拖动块期间每次 `set` 都付
+        // 一次 O(工程) 深拷贝，而这条锁是所有命令与 30Hz 轮询的串行点。曲线补丁
+        // 需要候选副本（`apply_curve_patches` 的返回值就是它），保留原路径。
+        let audio;
+        let view;
+        if patches.is_empty() {
+            view = compose_param_block_view(&timeline, &root, &next, frame_period_ms)?;
+            if checkpoint && next.blocks != current.blocks {
+                state.checkpoint_block_layout(&timeline);
+            }
+            timeline.ensure_params_for_root(&root);
+            if let Some(params) = timeline.params_by_root_track.get_mut(&root) {
+                params.param_block_edits = next.clone();
+                params.param_block_view = Some(view.clone());
+            }
+            audio = None;
         } else {
-            apply_curve_patches(&timeline, &root, &patches)?
-        };
-        let frame_period_ms = candidate.frame_period_ms();
-        let view = compose_param_block_view(&candidate, &root, &next, frame_period_ms)?;
-        if checkpoint && (next.blocks != current.blocks || !patches.is_empty()) {
-            state.checkpoint_block_layout(&timeline);
-        }
-        candidate.ensure_params_for_root(&root);
-        let params = candidate.params_by_root_track.get_mut(&root).unwrap();
-        params.param_block_edits = next.clone();
-        params.param_block_view = Some(view.clone());
-        *timeline = candidate;
-        let audio = if patches.is_empty() {
-            None
-        } else {
+            let mut candidate = apply_curve_patches(&timeline, &root, &patches)?;
+            view = compose_param_block_view(&candidate, &root, &next, frame_period_ms)?;
+            if checkpoint {
+                state.checkpoint_block_layout(&timeline);
+            }
+            candidate.ensure_params_for_root(&root);
+            if let Some(params) = candidate.params_by_root_track.get_mut(&root) {
+                params.param_block_edits = next.clone();
+                params.param_block_view = Some(view.clone());
+            }
+            *timeline = candidate;
             state.bump_timeline_version();
-            Some(timeline.clone())
-        };
+            audio = Some(timeline.clone());
+        }
         (
             view,
             next,
