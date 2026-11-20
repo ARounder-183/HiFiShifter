@@ -81,6 +81,15 @@ impl HostEditPlan {
                         // "宿主把 16 夹到 15.8" 这类事判成成功。
                         ("clip_gain", serde_json::json!(after.clip_gain)),
                         ("gain", serde_json::json!(after.gain)),
+                        // 【为什么方向与循环源也必须进门】倒放 / 循环都是**只改这一位**的
+                        // 补丁：整段媒体上的位置、长度、源窗口一位都不动，于是没有这两项时
+                        // `matches()` 恒真 —— 响应立刻带着**改动前**的 `reversed=false`
+                        // 回来，前端按权威回声整份应用，用户看到的波形是"倒放 → 正放 →
+                        // 倒放"（真机日志 18:14:45 那次倒放，2 s 后才被几何刷新纠正）。
+                        // 与当年 dir/shape 弹回同一类缺陷：**凡是被补丁改到、又出现在载荷
+                        // 里的字段，都必须进完成门**。
+                        ("reversed", serde_json::json!(after.reversed)),
+                        ("loop_enabled", serde_json::json!(after.loop_enabled)),
                     ];
                     for (value, key) in [
                         (edit.patch.fade_in_sec, "fade_in_sec"),
@@ -1329,7 +1338,10 @@ mod tests {
             // `gain`（active take 的投影）。本次只改 item 层，因此 `gain` 保持夹具原值。
             let payload = json!({"clips":[{"id":clip.id,"start_sec":clip.start_sec,"length_sec":clip.length_sec,
                 "source_start_sec":clip.source_start_sec,"playback_rate":clip.playback_rate,"track_id":clip.track_id,
-                "clip_gain":gain,"gain":clip.gain}]});
+                "clip_gain":gain,"gain":clip.gain,
+                // 真实载荷**总是**带这两项（`decorate_host_*` 从几何与 take 读），
+                // 完成门也按这两项判方向/循环源 —— 夹具缺了它们就不再是"回声"。
+                "reversed":clip.reversed,"loop_enabled":clip.loop_enabled}]});
             assert!(receipt.matches(&payload), "{receipt:?} vs {payload}");
             let mut stale = payload;
             stale["clips"][0]["clip_gain"] = json!(1.);
@@ -1864,6 +1876,62 @@ mod tests {
         );
         assert!(host.take_reversed.get(), "写后方向位必须已经变成倒放");
         document.close();
+    }
+
+    /// **方向必须进完成门**：倒放/循环都是"只改这一位"的补丁。
+    ///
+    /// 【为什么这条是本轮的核心回归】完成门此前只比 start/length/source_start/rate/
+    /// gain/淡变轴。整段媒体上的倒放一位几何都不动，于是 `matches()` 对**改动前**的
+    /// 载荷恒真 —— 前端把权威回声（`reversed=false`）整份应用，波形先倒放、再回退
+    /// 正放、最后被 20 ms 的几何刷新纠正成倒放。用户看到的就是那三次翻转。
+    #[test]
+    fn a_direction_only_patch_is_not_confirmed_by_the_stale_payload() {
+        let (_model, owner, _id) = crate::editor::session::tests::fixture();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        let payload = |after: &Clip, reversed: bool, loop_enabled: bool| {
+            json!({"clips":[{
+                "id": after.id,
+                "start_sec": after.start_sec,
+                "length_sec": after.length_sec,
+                "source_start_sec": after.source_start_sec,
+                "playback_rate": after.playback_rate,
+                "track_id": after.track_id,
+                "clip_gain": after.clip_gain,
+                "gain": after.gain,
+                "reversed": reversed,
+                "loop_enabled": loop_enabled,
+            }]})
+        };
+        // 倒放：整段媒体上几何一位不动，唯一变化的就是 `reversed`。
+        let plan = editor
+            .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"reversed":true}))
+            .unwrap();
+        let receipt = plan.receipt(&editor.namespace, owner.host_fade_axes());
+        let after = plan.edits[0].after.clone();
+        assert!(
+            !receipt.matches(&payload(&after, false, after.loop_enabled)),
+            "方向还是改动前的回声，完成门必须拦下（否则前端会弹回正放）"
+        );
+        assert!(
+            receipt.matches(&payload(&after, true, after.loop_enabled)),
+            "方向已经翻过来的回声才算完成"
+        );
+        // 循环源同理：它是 `B_LOOPSRC` 那一位，同样只在补丁里出现。
+        let plan = editor
+            .plan_host_edit(
+                "set_clip_state",
+                &json!({"clipId":clip.id,"loopEnabled":true}),
+            )
+            .unwrap();
+        let receipt = plan.receipt(&editor.namespace, owner.host_fade_axes());
+        let after = plan.edits[0].after.clone();
+        assert!(
+            !receipt.matches(&payload(&after, after.reversed, false)),
+            "循环源还是旧值时不算完成"
+        );
+        assert!(receipt.matches(&payload(&after, after.reversed, true)));
     }
 
     /// take FX 下 item chunk 一律写不进去（真机行为）时，倒放改走宿主自己的动作。

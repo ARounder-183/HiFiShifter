@@ -649,6 +649,43 @@ impl ExtensionOwner {
         }
     }
 
+    /// 把"读快照时到底有没有拿到内容"打成一行（非实时线程；由 `prepare()` 驱动）。
+    ///
+    /// 【为什么这一行必须存在】"播放时断断续续的静音断点"有两种完全不同的成因，而在
+    /// 现场日志里此前**完全不可区分**：
+    ///
+    ///   * **渲染内容里就有洞** —— 导出同样能听到，问题在合成；
+    ///   * **播放时读不到内容** —— `copy_block_at` 在快照范围之外逐样本返回 `0.0`，
+    ///     问题在"这一块没内容"而不是"内容错了"。
+    ///
+    /// 内核侧已经用逐帧对拍排除了第一种（倒放 / 循环 / 倒放+循环三档渲染的最长连续
+    /// 静音都是 1 帧）。第二种此前**没有任何读数**：`SnapshotPublisher::misses` 只增
+    /// 不读，`bound_snapshot_fallback` 也已无读者。两个数一起打出来，下一次报障就能
+    /// 直接回答"这一下静音是我们没内容，还是内容本身静音"。
+    pub(crate) fn log_snapshot_readout(&self) {
+        let misses: u64 = self
+            .snapshots
+            .iter()
+            .map(|publisher| publisher.misses.load(Ordering::Relaxed))
+            .sum();
+        let past_end: u64 = self
+            .snapshots
+            .iter()
+            .map(|publisher| publisher.past_end.load(Ordering::Relaxed))
+            .sum();
+        let fallback = self.bound_snapshot_fallback.load(Ordering::Relaxed);
+        if misses == 0 && fallback == 0 && past_end == 0 {
+            return;
+        }
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.snapshot.readout",
+            format_args!(
+                "[ara] snapshot readout: misses={misses} past_end={past_end} fallback_blocks={fallback}                  (misses>0 = 没有快照; past_end>0 = 播放头越过了已发布快照的末尾,                 这两种都是逐样本的 0)"
+            ),
+        );
+    }
+
     /// 把**最近一块**的宿主上下文打成一行（非实时线程；由会话 actor 驱动）。
     ///
     /// 【为什么必须有这一行】排查"起播窗口/位置钉住"时，唯一的硬事实是**宿主到底

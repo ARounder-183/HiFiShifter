@@ -348,6 +348,13 @@ pub struct SnapshotPublisher {
     registering: AtomicUsize,
     limit: usize,
     pub misses: AtomicU64,
+    /// 有多少个音频块的**请求区间越过了**当前快照的末尾（快照在、但这一段不在里面）。
+    ///
+    /// 【为什么它与 `misses` 必须分开】`misses` 只在"完全没有快照"时前进；而"快照
+    /// 有、播放头已经走出它的覆盖范围"是另一回事：那一块逐样本返回 `0.0`，听起来
+    /// 就是一次静音断点，却在旧读数里**完全不存在**。两者混在一起，现场只能猜
+    /// "是没算完还是走过头了"。
+    pub past_end: AtomicU64,
     /// 快照内容代次：每次 `publish` / `clear` 前进。
     ///
     /// 【它回答的是"发布过几次"，不是"内容变了没有"】需要后者时用 `content`。
@@ -430,6 +437,7 @@ impl SnapshotPublisher {
             registering: AtomicUsize::new(0),
             limit,
             misses: AtomicU64::new(0),
+            past_end: AtomicU64::new(0),
             generation: AtomicU64::new(0),
             content: AtomicU64::new(0),
             last_sample: AtomicI64::new(i64::MIN),
@@ -762,6 +770,14 @@ impl SnapshotPublisher {
             }
         }
         output.set_silence_flags(silence);
+        // 【越界读的一处记账】见 `past_end` 的说明：快照在、但本块的末尾越过了它。
+        if let Some(snapshot) = snapshot {
+            let last = (sample.saturating_add(frames as i64)) as f64 * ratio
+                - snapshot.origin_sample as f64;
+            if last > snapshot.left.len() as f64 {
+                self.past_end.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         snapshot.is_some()
     }
 

@@ -370,6 +370,7 @@ impl ExtensionOwner {
         // `renders()` 为假，而那正是"刚录完、播放中"这个最需要读数的时刻。
         self.log_click_report();
         self.log_capture_report();
+        self.log_snapshot_readout();
         if self.is_closed() || !self.renders() {
             return;
         }
