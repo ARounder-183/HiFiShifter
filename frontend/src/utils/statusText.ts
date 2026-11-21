@@ -52,16 +52,22 @@ export function resolveStatusText(status: string, statusKey: StatusKeyMap, t: Tr
     }
 
     // 假立体声扫描：分数形计数（{m}=已折叠/可折叠数，{n}=总数）+ 试扫/实扫两种
-    // 变体。形如 "Fake-stereo scan: 3/5 folded"。
-    const scan = status.match(/^Fake-stereo scan: (\d+)\/(\d+) (foldable|folded)$/);
+    // 变体。形如 "Fake-stereo scan: 3/5 folded"；"扫描过但读不出音频"的尾部计数
+    // （clipState 写作 ", N unreadable"）可选出现 —— 同一条扫描既可能只报分数，
+    // 也可能带上未读数，两段要各自成句（未读数走复数模板）。
+    const scan = status.match(
+        /^Fake-stereo scan: (\d+)\/(\d+) (foldable|folded)(?:, (\d+) unreadable)?$/,
+    );
     if (scan) {
         const key =
             scan[3] === "foldable"
                 ? "status_fake_stereo_scan_foldable"
                 : "status_fake_stereo_scan_folded";
-        return t(key)
+        const main = t(key)
             .replace("{m}", scan[1] ?? "0")
             .replace("{n}", scan[2] ?? "0");
+        if (scan[4] === undefined) return main;
+        return main + t("status_fake_stereo_scan_unreadable", Number(scan[4]));
     }
 
     // 目录导入的收尾汇总：两个数量（成功 / 失败）。失败数让用户知道"有东西没进来"，

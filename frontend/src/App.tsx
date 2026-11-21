@@ -276,6 +276,7 @@ const statusKey: Record<string, string> = {
     "VocalShifter imported with skipped files": "vs_import_skipped_header",
     // 播放/停止传输状态
     "Playing original": "status_playing_original",
+    "Playback requested": "status_playback_requested",
     "Play original failed": "status_play_original_failed",
     "Stopping audio...": "status_stopping_audio",
     "Audio stopped": "status_audio_stopped",
@@ -285,6 +286,7 @@ const statusKey: Record<string, string> = {
     "Dropped audio imported": "status_dropped_audio_imported",
     "Clips duplicated": "status_clips_duplicated",
     "Clip edit rejected": "status_clip_edit_rejected",
+    "Track edit rejected": "status_track_edit_rejected",
     "Import done": "status_import_done",
     "Import failed": "status_import_failed",
     "Import audio failed": "status_import_audio_failed",

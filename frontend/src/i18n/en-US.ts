@@ -716,6 +716,7 @@ export const enUS = {
     status_clipboard_copy_failed: "Copy failed: cannot access the system clipboard.",
     status_clipboard_cut_failed: "Cut failed: cannot access the system clipboard.",
     status_playing_original: "Playing original",
+    status_playback_requested: "Playback requested",
     status_play_original_failed: "Play original failed",
     status_stopping_audio: "Stopping audio...",
     status_audio_stopped: "Audio stopped",
@@ -724,6 +725,7 @@ export const enUS = {
     status_dropped_audio_imported: "Dropped audio imported",
     status_clips_duplicated: "Clips duplicated",
     status_clip_edit_rejected: "Clip edit rejected",
+    status_track_edit_rejected: "Track edit rejected",
     status_import_done: "Import done",
     status_import_failed: "Import failed",
     status_project_imported: "Project imported",
@@ -1971,6 +1973,7 @@ export const enUS = {
     status_fake_stereo_scan_rejected: "Fake-stereo scan rejected",
     status_fake_stereo_scan_foldable: "Fake-stereo: {m}/{n} foldable",
     status_fake_stereo_scan_folded: "Fake-stereo: {m}/{n} folded",
+    status_fake_stereo_scan_unreadable: ", 1 unreadable|, {count} unreadable",
     status_channel_scan_folded:
         "Folded {count} clip to mono automatically|Folded {count} clips to mono automatically",
     status_channel_scan_pending:

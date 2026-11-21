@@ -38,3 +38,21 @@ describe("目录导入的汇总状态行", () => {
         expect(resolveStatusText("Something odd happened", {}, t)).toBe("Something odd happened");
     });
 });
+
+describe("假立体声扫描的未读尾部", () => {
+    const fakeT = (key: string, count?: number) => {
+        if (key === "status_fake_stereo_scan_folded") return "{m}/{n} 已折叠";
+        if (key === "status_fake_stereo_scan_unreadable")
+            return count === 1 ? "，1 个无法读取" : `，${count} 个无法读取`;
+        return key;
+    };
+
+    it("只有分数时不变", () => {
+        expect(resolveStatusText("Fake-stereo scan: 3/5 folded", {}, fakeT)).toBe("3/5 已折叠");
+    });
+
+    it("带未读数时两段各自成句", () => {
+        const text = resolveStatusText("Fake-stereo scan: 3/5 folded, 2 unreadable", {}, fakeT);
+        expect(text).toBe("3/5 已折叠，2 个无法读取");
+    });
+});
