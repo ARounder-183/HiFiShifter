@@ -26,7 +26,10 @@ use webview2_com::{
     WebMessageReceivedEventHandler,
 };
 use windows::core::{w, Interface, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
+use windows::Win32::Graphics::Gdi::{ClientToScreen, MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GET_MODULE_HANDLE_EX_FLAG_PIN;
 use windows::Win32::System::LibraryLoader::{
@@ -35,9 +38,9 @@ use windows::Win32::System::LibraryLoader::{
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::HiDpi::{
-    AreDpiAwarenessContextsEqual, GetDpiForWindow, GetWindowDpiAwarenessContext,
+    AreDpiAwarenessContextsEqual, GetDpiForMonitor, GetDpiForWindow, GetWindowDpiAwarenessContext,
     SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT,
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, DPI_AWARENESS_CONTEXT_UNAWARE,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, DPI_AWARENESS_CONTEXT_UNAWARE, MDT_EFFECTIVE_DPI,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -172,6 +175,84 @@ impl Drop for HostContextScope {
     }
 }
 
+impl HostContextScope {
+    /// 把线程临时切到 **PMv2**（不参照任何宿主窗口）。
+    ///
+    /// 【为什么需要它】顶层窗口（popup）的感知上下文在创建时定死，而它**不该**跟
+    /// 包裹层走：popup 拥有独立的 DWM surface，按物理像素渲染 —— 这正是它能锐利的
+    /// 原因（见 `attach` 的 popup 分支说明）。
+    fn force_pm_v2() -> Option<Self> {
+        if std::env::var_os("HIFISHIFTER_NO_DPI_AWARE").is_some_and(|value| value == "1") {
+            return None;
+        }
+        // SAFETY: 参数是常量伪句柄；失败返回 null 伪句柄，按"没切成"处理。
+        let previous =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        if previous.0.is_null() {
+            return None;
+        }
+        Some(Self { previous })
+    }
+}
+
+/// 包裹窗口客户区的**物理**屏幕矩形（popup 的摆放依据）。
+///
+/// 【为什么能拿到物理值】坐标按**调用线程**的感知上下文虚拟化：PMv2 线程去查
+/// DPI-unaware 的包裹窗，系统把它的逻辑矩形按屏幕缩放换算回物理值返回 —— 于是
+/// "包裹窗在屏幕上到底占了多大"与"popup 摆多大"是同一把尺子。
+fn wrapper_physical_client(parent: HWND) -> Option<RECT> {
+    let _scope = HostContextScope::force_pm_v2()?;
+    // SAFETY: 只读查询；失败按"拿不到"处理。
+    let mut client = RECT::default();
+    if unsafe { GetClientRect(parent, &mut client) }.is_err()
+        || client.right <= 0
+        || client.bottom <= 0
+    {
+        return None;
+    }
+    let mut origin = POINT::default();
+    if unsafe { ClientToScreen(parent, &mut origin) }.as_bool() {
+        Some(RECT {
+            left: origin.x,
+            top: origin.y,
+            right: origin.x + client.right,
+            bottom: origin.y + client.bottom,
+        })
+    } else {
+        None
+    }
+}
+
+/// 嵌入 popup 化的判据：包裹窗 DPI-unaware 且屏幕缩放 > 1。
+///
+/// 【为什么要这一层】ACID 的 `sfvstwrap` 在不感知上下文里创建包裹窗，宿主进程本身
+/// 是感知的。子窗口无论跟包裹层走（96 DPI 渲染 + DWM 1.25× 拉伸 = 模糊）还是强制
+/// PMv2（几何被两把尺子撕开 = 滚动条 + 裁切），都修不好"模糊" —— 因为模糊的根源
+/// 是**包裹窗的 DWM surface 只有 96 DPI**，子窗口共享它的 surface。popup 是顶层
+/// 窗口：它有自己的 surface、自己的感知上下文，是包裹层不感知时唯一能锐利的形态。
+///
+/// 返回 popup 应用的缩放读数（仅用于日志）；`None` = 走既有子窗口路径。
+fn popup_scale_for(parent: HWND) -> Option<f64> {
+    let context = unsafe { GetWindowDpiAwarenessContext(parent) };
+    let unaware =
+        unsafe { AreDpiAwarenessContextsEqual(context, DPI_AWARENESS_CONTEXT_UNAWARE) }.as_bool();
+    if !unaware {
+        return None;
+    }
+    // 屏幕缩放 = 显示器有效 DPI / 96。窗口 DPI（unaware 恒 96）只是确认读数。
+    let monitor = unsafe { MonitorFromWindow(parent, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_invalid() {
+        return None;
+    }
+    let mut dpi_x = 0_u32;
+    let mut dpi_y = 0_u32;
+    // SAFETY: 只读查询；失败按"拿不到缩放"处理。
+    if unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }.is_err() {
+        return None;
+    }
+    (dpi_y > 96).then(|| f64::from(dpi_y) / 96.0)
+}
+
 /// 参照窗口的父级（嵌入形态里就是宿主包裹窗口）；拿不到时退回自身。
 ///
 /// 【为什么退回自身】浮窗等非嵌入形态没有宿主父级；此时子窗口自己的上下文就是
@@ -266,6 +347,11 @@ struct WindowData {
     port: Rc<WindowsPort>,
     capturered: Rc<Cell<bool>>,
     token: usize,
+    /// popup 形态的同步参照：我们覆盖其客户区的包裹窗口（子窗口形态为默认值）。
+    ///
+    /// 【为什么放这里】同步发生在 20 ms 定时器上，那一条只拿 `WindowData`；
+    /// 参照物属于"窗口的事实"，随窗口数据同生命周期最自然。
+    popup_owner: Cell<HWND>,
 }
 impl Drop for WindowData {
     fn drop(&mut self) {
@@ -398,12 +484,32 @@ impl WindowKey {
             result.map(|_| ()).map_err(|e| e.to_string())
         }
     }
+    /// popup 形态的同步参照（子窗口形态为 `None`）。
+    fn popup_owner(self) -> Option<HWND> {
+        if !self.valid() {
+            return None;
+        }
+        let hwnd = HWND(self.hwnd as *mut c_void);
+        let pointer = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const WindowData;
+        if pointer.is_null() {
+            return None;
+        }
+        // SAFETY: pointer 来自窗口属性，窗口存活期间有效（valid() 已验证）。
+        let owner = unsafe { (*pointer).popup_owner.get() };
+        (!owner.0.is_null()).then_some(owner)
+    }
     /// 可复制的窗口身份不持有 COM 资源，允许调用前释放 view 锁以防 Win32 同步重入。
     fn resize(self, width: i32, height: i32) -> Result<(), String> {
         if unsafe { GetCurrentThreadId() } != self.thread || !self.valid() {
             return Err("resize on stale window or off UI thread".into());
         }
         let hwnd = HWND(self.hwnd as *mut c_void);
+        // 【popup 形态不按宿主数字摆放】宿主 onSize 传来的数字属于宿主的坐标语义；
+        // popup 的唯一正确尺寸是包裹窗客户区的物理矩形 —— 同步一次即可。
+        if let Some(wrapper) = self.popup_owner() {
+            sync_popup_to_wrapper(hwnd, wrapper);
+            return Ok(());
+        }
         let _dpi_scope = HostContextScope::enter(context_reference(hwnd));
         // 【为什么按父窗口客户区收口，而不是宿主给的 (width, height)】嵌入子窗口的
         // 正确尺寸是"填满父窗口客户区"。宿主给的数字在**宿主的上下文**里有意义，
@@ -599,11 +705,32 @@ impl WindowsHost {
             port: port.clone(),
             capturered: capturered.clone(),
             token,
+            popup_owner: Cell::new(HWND::default()),
         }));
         // 【为什么在创建前记 DPI 事实】父窗口的感知上下文决定"尺寸数字到底落在
         // 多少物理像素上"；没有这一行，ACID 的滚动条/模糊只能靠猜（见
         // `HostContextScope` 的文档）。
         log_host_dpi_facts(parent);
+        // ── popup 分支：包裹窗 DPI-unaware 且屏幕缩放 > 1（ACID 的 sfvstwrap 形态）──
+        //
+        // 【为什么子窗口修不了模糊】模糊的根源是**包裹窗（顶层）的 DWM surface 只有
+        // 96 DPI**：DWM 把整棵窗口树（含任何子窗口）按 1.25× 拉伸上屏。子窗口无论
+        // 什么感知上下文，都渲染进同一个 surface —— PMv2 子窗口实测（2026-11）只改
+        // 儿何、不改清晰度。popup 是**顶层**窗口：独立 surface + 独立感知上下文，
+        // 以物理像素渲染，DWM 不拉伸 —— 这是不改宿主的前提下唯一能锐利的形态。
+        //
+        // 【代价与纪律】popup 不被 owner 裁剪、也不随宿主窗口移动，所以必须**逐拍
+        // 同步**到包裹窗客户区的物理矩形（见 `sync_popup_to_wrapper`，挂在既有 20 ms
+        // 定时器上）。owner 取包裹窗的**顶层祖先**：随宿主最小化/还原，z 序跟随宿主。
+        // 逃生门 `HIFISHIFTER_NO_DPI_POPUP=1` 回到子窗口路径。
+        if std::env::var_os("HIFISHIFTER_NO_DPI_POPUP").is_none() {
+            if let Some(scale) = popup_scale_for(parent) {
+                return Self::attach_popup(
+                    parent, data, port, client, capturered, scale, token, thread, instance, width,
+                    height,
+                );
+            }
+        }
         // 【为什么这里切上下文】子窗口的感知上下文在创建时定死；与父窗口不一致的
         // 线程创建出的子窗口，坐标语义就和包裹层对不上 —— 滚动条 + 裁切 + 模糊
         // 的根因（见 `HostContextScope`）。守卫覆盖 WM_NCCREATE/WM_CREATE 的同步
@@ -675,6 +802,161 @@ impl WindowsHost {
         }
         Ok(host)
     }
+
+    /// popup 形态的附着：顶层窗口 + 逐拍同步到包裹窗客户区的物理矩形。
+    ///
+    /// 【为什么初始尺寸不取 (width, height)】那两个数是宿主 `getSize` 协商出的，属于
+    /// **宿主**的坐标语义；popup 按物理像素摆放，唯一的正确初始值就是包裹窗客户区的
+    /// 物理矩形。attach 这一刻宿主可能还没定尺寸 —— 拿不到就先以协商值近似（按屏幕
+    /// 缩放换算成物理），20 ms 定时器会在下一拍把它校正到真值。
+    #[allow(clippy::too_many_arguments)]
+    fn attach_popup(
+        parent: HWND,
+        data: *mut WindowData,
+        port: Rc<WindowsPort>,
+        client: Rc<RefCell<EditorClient>>,
+        capturered: Rc<Cell<bool>>,
+        scale: f64,
+        token: usize,
+        thread: u32,
+        instance: HINSTANCE,
+        width: i32,
+        height: i32,
+    ) -> Result<Self, String> {
+        let owner = unsafe { GetAncestor(parent, GA_ROOT) };
+        let wrapper = if owner.0.is_null() || owner == parent {
+            parent
+        } else {
+            owner
+        };
+        let physical = wrapper_physical_client(wrapper);
+        let (x, y, width, height) = physical
+            .map(|rect| {
+                (
+                    rect.left,
+                    rect.top,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
+                )
+            })
+            .unwrap_or_else(|| {
+                // 协商值属于宿主上下文；屏幕缩放>1 时它按物理像素理解，换算成 popup
+                // 的物理像素再摆 —— 误差由下一拍同步收敛。
+                let scaled = ((width as f64) * scale).round().max(1.0) as i32;
+                let scaled_height = ((height as f64) * scale).round().max(1.0) as i32;
+                let mut origin = POINT::default();
+                {
+                    let _scope = HostContextScope::force_pm_v2();
+                    // 换算失败只影响这一拍的近似位置；下一拍同步会收敛到真值。
+                    let _ = unsafe { ClientToScreen(wrapper, &mut origin) };
+                }
+                (origin.x, origin.y, scaled, scaled_height)
+            });
+        crate::gui_log_line(&format!(
+            "editor popup: wrapper=0x{:x} scale={scale:.2} rect=({x},{y},{width},{height})",
+            wrapper.0 as usize
+        ));
+        // 【为什么这里强制 PMv2】popup 是顶层窗口，感知上下文不跟包裹层走：PMv2 让
+        // WebView2 以 devicePixelRatio=屏幕缩放 渲染物理像素，DWM 不再拉伸 —— 模糊
+        // 由此消失。创建与摆放必须在同一上下文里。
+        let _dpi_scope = HostContextScope::force_pm_v2();
+        let result = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(WS_EX_TOOLWINDOW.0),
+                w!("HiFiShifter.ARA.Editor"),
+                w!("HiFiShifter plugin editor initializing…"),
+                WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN,
+                x,
+                y,
+                width,
+                height,
+                Some(wrapper),
+                None,
+                Some(instance),
+                Some(data.cast()),
+            )
+        };
+        drop(_dpi_scope);
+        let hwnd = match result {
+            Ok(hwnd) => hwnd,
+            Err(error) => {
+                // WM_NCCREATE 之前失败时系统未接管 data；之后失败则 WM_NCDESTROY 已负责释放。
+                if !capturered.get() {
+                    unsafe {
+                        drop(Box::from_raw(data));
+                    }
+                }
+                return Err(format!("create editor popup: {error}"));
+            }
+        };
+        // SAFETY: data 由本函数分配；WM_NCCREATE 之前写入是安全的（窗口尚未取走所有权）。
+        unsafe { (*data).popup_owner.set(wrapper) };
+        port.hwnd.set(hwnd);
+        client.borrow_mut().set_window(hwnd.0 as usize);
+        let host = Self {
+            key: WindowKey {
+                hwnd: hwnd.0 as usize,
+                thread,
+                token,
+            },
+        };
+        if unsafe { SetTimer(Some(hwnd), 0x4853, 20, None) } == 0 {
+            port.show_error("UI response timer unavailable");
+        }
+        if let Err(error) = begin_browser(&client, &port) {
+            port.show_error(&error);
+            unsafe {
+                let _ = KillTimer(Some(hwnd), 0x4853);
+            }
+        }
+        Ok(host)
+    }
+}
+
+/// 把 popup 逐拍摆回包裹窗客户区的物理矩形；返回是否发生了摆放。
+///
+/// 【为什么是"变了才摆"】SetWindowPos 即使矩形不变也会打扰窗口（窗口消息、可能
+/// 的重绘），20 ms 一拍的空摆是纯损耗；先比较，只在真变了的时候动。
+///
+/// 【为什么可见性也跟随】宿主最小化/隐藏面板时，popup 不在 owner 的窗口树里，
+/// 系统不会自动隐藏它 —— 不跟随就是"宿主窗口没了，插件还浮在桌面上"。
+fn sync_popup_to_wrapper(hwnd: HWND, wrapper: HWND) -> bool {
+    let Some(rect) = wrapper_physical_client(wrapper) else {
+        return false;
+    };
+    let shown = unsafe { IsWindowVisible(wrapper) }.as_bool();
+    let _scope = HostContextScope::force_pm_v2();
+    // SAFETY: 只读查询；popup 与 wrapper 都是活窗口（定时器回调里已验证）。
+    let mut current = RECT::default();
+    let same = unsafe { GetWindowRect(hwnd, &mut current) }.is_ok()
+        && current.left == rect.left
+        && current.top == rect.top
+        && current.right == rect.right
+        && current.bottom == rect.bottom;
+    if !same {
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+                SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER,
+            );
+        }
+    }
+    let visible = unsafe { IsWindowVisible(hwnd) }.as_bool();
+    if shown && !visible {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+    } else if !shown && visible {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+    true
 }
 
 unsafe extern "system" fn window_proc(
@@ -707,6 +989,13 @@ unsafe extern "system" fn window_proc(
                 // 宿主 getter 可能重入并关闭窗口：先持 Rc，不再在调用后解引用 WindowData。
                 let client = (*pointer).client.clone();
                 client::tick(&client);
+                // 【popup 逐拍同步】popup 不在宿主窗口树里，宿主移动/缩放面板不会通知
+                // 我们 —— 参照包裹窗客户区的物理矩形，把 popup 摆回去（见
+                // `sync_popup_to_wrapper` 的"变了才摆"纪律）。
+                let owner = (*pointer).popup_owner.get();
+                if !owner.0.is_null() {
+                    sync_popup_to_wrapper(hwnd, owner);
+                }
                 // 【为什么先重建而不是直接关窗】页面进程崩溃 / OOM 之后所有投递都会
                 // 失败，界面已是一张死图。此前唯一的处置是**关掉窗口** —— 用户看到的
                 // 是一块空白，而且必须自己重开插件（这正是用户报的"关掉再开就好"）。
