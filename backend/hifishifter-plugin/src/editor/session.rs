@@ -2760,15 +2760,20 @@ impl EditorSession {
             use std::hash::{Hash, Hasher};
             let timeline = self.timeline.lock_or_recover();
             let mut audio = std::collections::hash_map::DefaultHasher::new();
-            hifishifter_kernel::state::timeline_fingerprint(&timeline).hash(&mut audio);
+            // 【为什么用渲染指纹而不是 GUI 指纹】这一份指纹的唯一读者是"要不要重渲染"，
+            // 而渲染输入是曲线本身，不含分析键。键的 presence 位与键字符串此前都进了
+            // 这份哈希：一次 INVALIDATE（键清空又立即被缓存组装填回**同样的曲线**）或
+            // 一次重载清键，都会让指纹推进 ⇒ 版本闸永远追不上 ⇒ 每次播放/重载都排一轮
+            // 输出逐位相同的真渲染（REAPER 23:40:34 与 VEGAS 23:43:56~23:44:30 实测，
+            // 后者 30 秒 15 轮 mixdown）。曲线内容变化仍会推进 —— 真重算不漏。
+            hifishifter_kernel::state::timeline_render_fingerprint(&timeline).hash(&mut audio);
             // Baseline completion can affect audio even when an explicit pitch
             // edit stays unchanged, including Capture's derived dynamics.
+            // `pitch_assembly_partial` 保留：它标记"组装还没收口"，此刻的曲线不是成品。
             let mut roots: Vec<_> = timeline.params_by_root_track.iter().collect();
             roots.sort_by_key(|(root, _)| *root);
             for (root, params) in roots {
                 root.hash(&mut audio);
-                params.pitch_orig_key.hash(&mut audio);
-                params.dyn_orig_key.hash(&mut audio);
                 params.pitch_assembly_partial.hash(&mut audio);
             }
             (timeline.clips.len(), audio.finish())
@@ -3252,13 +3257,18 @@ impl EditorSession {
         if let Some(edits) = restored.as_ref() {
             super::capture_edits::apply_project_state(&mut timeline, edits);
         }
-        // 新 take 的源内容不同 ⇒ 缓存的原线/动态谱必须失效（与 ARA 加载同一条纪律）。
-        // 撤销"放弃等待"同理：素材换了，就再给分析一次机会。
+        // 新 take 的源内容不同 ⇒ 缓存的原线/动态谱必须失效。失效的**唯一权威**是
+        // 上面 `ensure_params_for_root` 的期望键比对：键匹配（素材与布局都没变）的根
+        // 键被它保留，键失配（换了 take / 动了源窗口）的根被它清空。这里此前**无条件**
+        // 再清一遍 —— 把它刚刚保下来的键也毁了，而每次强制重载（VEGAS 家族每遍
+        // setActive 都 setState → request_reload 走到这里）因此必然自废渲染版本：
+        // 键一清指纹必变、timeline_revision 必推进，版本闸永远判"过期"，每遍重载
+        // 排一轮输出逐位相同的真渲染（VEGAS 23:43:56~23:44:30 实测：30 秒 15 轮
+        // mixdown，状态栏"渲染中"随每次播放闪）。
+        //
+        // 撤销"放弃等待"保留：素材换了时要再给分析一次机会；素材没换时清一个空集，
+        // 无副作用。
         self.analysis_abandoned.lock_or_recover().clear();
-        for params in timeline.params_by_root_track.values_mut() {
-            params.pitch_orig_key = None;
-            params.dyn_orig_key = None;
-        }
         // 宿主音乐读数是**只读**的宿主权威：Capture 没有文档，读 owner 自己的时钟。
         if let Some(clock) = owner.clock.get() {
             if let Some(tempo) = clock.tempo() {
@@ -4470,15 +4480,10 @@ impl EditorSession {
             let Some(pcm) = sources.get(&path) else {
                 continue;
             };
-            // 内容指纹：PCM 代次 + 长度 + 前 4096 个采样的 FNV。
-            // 代次由发布方单调推进；采样哈希兜住"代次没变但内容被就地改写"的形状。
-            let mut stamp: u64 = 0xcbf2_9ce4_8422_2325;
-            for value in pcm.planes.iter().flat_map(|plane| plane.iter()).take(4096) {
-                stamp ^= u64::from(value.to_bits());
-                stamp = stamp.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-            stamp ^= (pcm.planes.first().map(Vec::len).unwrap_or(0) as u64) << 1;
-            stamp ^= pcm.version.rotate_left(17);
+            // 内容指纹：PCM 代次 + 长度 + 前 4096 个采样的 FNV。代次由发布方单调推进；
+            // 采样哈希兜住"代次没变但内容被就地改写"的形状。口径只有一份
+            // （`render::source::source_content_stamp`），源发布去重消费同一个。
+            let stamp = crate::render::source::source_content_stamp(pcm);
             if clip.source_file_fingerprint != Some(stamp) {
                 clip.source_file_fingerprint = Some(stamp);
                 changed = true;
@@ -7021,6 +7026,21 @@ pub mod tests {
                 .get_mut(&root)
                 .unwrap()
                 .dyn_orig_key = Some("new-baseline".into());
+        }
+        editor.publish_timeline_derived();
+        assert!(
+            !editor.render_requested.load(Ordering::Acquire),
+            "键换了而曲线没换：渲染输出逐位不变，不得请求渲染（键只是组装簿记，\
+             真基线的到达通过曲线内容本身推进指纹）"
+        );
+        editor.render_requested.store(false, Ordering::Release);
+        {
+            let mut timeline = editor.timeline.lock_or_recover();
+            let root = timeline.tracks[0].id.clone();
+            let params = timeline.params_by_root_track.get_mut(&root).unwrap();
+            // 分析基线"到达"在真实流程里就是曲线从无到有/由旧变新 —— 这里按同一形状喂
+            // （push 一帧；夹具里 dyn_orig 可能还是空的，first_mut 不保证有值）。
+            params.dyn_orig.push(1.0);
         }
         editor.publish_timeline_derived();
         assert!(

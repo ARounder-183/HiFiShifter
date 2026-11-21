@@ -1806,15 +1806,33 @@ impl DocumentSession {
             match result {
                 Ok(pcm) => {
                     let pcm = Arc::new(pcm);
-                    self.edit_sources
-                        .lock_or_recover()
-                        .insert(id.clone(), pcm.clone());
-                    self.sources.lock_or_recover().insert(id.clone(), pcm);
+                    // 【同一代内容不重复发布】宿主每次重新授予样本访问（起播、前台恢复、
+                    // 重同步）都会让插件把源**重读一遍**；读回来的是同一代内容
+                    // （`version` 只在宿主通知内容变更时才前进），却不加区别地推进
+                    // `editor_audio_revision` ⇒ 指纹必变 ⇒ 排一轮输出完全相同的重渲染
+                    // ⇒ 状态栏"渲染中"随每次播放开始闪一下（REAPER 23:40:34 实测）。
+                    // 同代重读是幂等的：留着手上这份，只把读数状态修好。
+                    let superseded = match self.edit_sources.lock_or_recover().get(&id) {
+                        Some(existing) if Self::same_pcm_generation(existing, &pcm) => {
+                            log::debug!(
+                                "[ara] source {id} re-read the same content generation {}; keeping the published PCM",
+                                pcm.version
+                            );
+                            true
+                        }
+                        _ => false,
+                    };
+                    if !superseded {
+                        self.edit_sources
+                            .lock_or_recover()
+                            .insert(id.clone(), pcm.clone());
+                        self.sources.lock_or_recover().insert(id.clone(), pcm);
+                        self.editor_audio_revision.fetch_add(1, Ordering::AcqRel);
+                    }
                     self.source_states
                         .lock_or_recover()
                         .insert(id.clone(), SourceState::Published);
                     self.source_failures.lock_or_recover().remove(&id);
-                    self.editor_audio_revision.fetch_add(1, Ordering::AcqRel);
                 }
                 Err(error) => {
                     self.source_states
@@ -1859,11 +1877,40 @@ impl DocumentSession {
 
     pub(crate) fn publish_source_pcm(&self, id: String, pcm: Arc<super::source::SourcePcm>) {
         let _transaction = self.transaction.lock_or_recover();
+        // 【同一代内容不重复发布】见 `publish_source_read_result` 的说明：重读幂等。
+        if let Some(existing) = self.edit_sources.lock_or_recover().get(&id) {
+            if Self::same_pcm_generation(existing, &pcm) {
+                return;
+            }
+        }
         self.edit_sources
             .lock_or_recover()
             .insert(id.clone(), pcm.clone());
         self.sources.lock_or_recover().insert(id, pcm);
         self.editor_audio_revision.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// 两份源 PCM 是否同一代内容（同代重读 ⇒ 幂等，见发布点的说明）。
+    ///
+    /// 【为什么用内容代次指纹判】`version` 契约是"宿主改了内容必然通知"，但系统
+    /// 既有口径（`refresh_source_fingerprints`）本来就承认"代次没变但内容被就地
+    /// 改写"这一兜底形状 —— 去重只按 version+几何判会把它吞掉（late-PCM 测试
+    /// `late_host_pcm_refreshes_existing_editor_without_model_change` 的形状：同
+    /// version、内容不同，必须照常发布）。指纹与键刷新同源
+    /// （`render::source::source_content_stamp`），两处口径永不漂移。
+    fn same_pcm_generation(
+        existing: &super::source::SourcePcm,
+        incoming: &super::source::SourcePcm,
+    ) -> bool {
+        super::source::source_content_stamp(existing)
+            == super::source::source_content_stamp(incoming)
+            && existing.sample_rate == incoming.sample_rate
+            && existing.planes.len() == incoming.planes.len()
+            && existing
+                .planes
+                .iter()
+                .zip(&incoming.planes)
+                .all(|(a, b)| a.len() == b.len())
     }
 
     /// 宿主清单 → 装配器的**输入 B**（一条 item 一行）。
