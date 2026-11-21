@@ -5,7 +5,7 @@
 ; - bundle.windows.nsis.installerHooks can only **inject code** into the script Tauri
 ;   generates; it cannot add a components page, nor a "second install directory" (the VST3
 ;   directory). The models would still be packed into the App directory by Tauri's payload —
-;   exactly the second 150 MB copy this is meant to eliminate.
+;   exactly the second full copy of the weights this is meant to eliminate.
 ; - A custom nsis.template means copying out the 700-line template together with all of its
 ;   implicit !define contracts, then drifting along with tauri-cli versions. Every upstream
 ;   template upgrade would turn into a manual merge.
@@ -372,8 +372,8 @@ Var HfsUnOtherInstall
 Var HfsOldInstallDir
 ; [Why the old model root is recorded too] The shared library's location has changed across
 ; installer versions (in the install directory during the Tauri era, now in %ProgramData%).
-; Deleting/keeping only by this version's constant would leave behind a 150 MB ghost copy of
-; the old version.
+; Deleting/keeping only by this version's constant would leave behind a ghost copy of
+; the old version's weights.
 Var HfsOldModelRoot
 Var HfsReinstallRemoveModels
 Var HfsReinstallRemoveCache
@@ -980,8 +980,8 @@ Function HfsRemovePreviousInstall
   ; again later.
   ${If} $HfsReinstallRemoveModels == 1
     ; The old version may have written the shared library under a different root (version
-    ; differences): the same choice must apply to it as well, otherwise a 150 MB copy is still
-    ; sitting on disk after "deleted the models".
+    ; differences): the same choice must apply to it as well, otherwise a full copy of the
+    ; weights is still sitting on disk after "deleted the models".
     Call HfsPurgeLegacyModelRoot
     FindFirst $R3 $R4 "$HfsModelRoot\*"
     StrCmp $R4 "" hfs_prev_models_done
@@ -1063,7 +1063,7 @@ FunctionEnd
 ; version's root.
 ;
 ; [Why move instead of leave] The runtime recognizes only one root (shared_store_dir). A copy
-; left in the old root is never read — 150 MB occupied for nothing; once moved over,
+; left in the old root is never read — dead weight on disk; once moved over,
 ; HfsVerifyModels hits and even the unpacking step is saved.
 Function HfsAdoptLegacyModelRoot
   ${If} $HfsOldModelRoot == ""
@@ -1100,7 +1100,7 @@ Function HfsAdoptLegacyModelRoot
       ${EndIf}
     ${Else}
       ; The new root already has this version: the old copy is a duplicate; deleting it is what
-      ; "not occupying 150 MB twice" means.
+      ; "not storing the weights twice" means.
       RMDir /r "$HfsOldModelRoot\$R4"
     ${EndIf}
   ${Else}
@@ -1271,7 +1271,7 @@ Function .onInit
 FunctionEnd
 
 Function un.onInit
-  ; [Why "delete models" is checked by default] Only this product writes the 150 MB shared
+  ; [Why "delete models" is checked by default] Only this product writes the shared
   ; model library; deleting it by default is the only way the disk does not stay occupied after
   ; "I already uninstalled it". Users who want to keep it (e.g. planning to reinstall the same
   ; version right away) simply uncheck it on the options page. Caches and logs stay kept by
@@ -1386,9 +1386,9 @@ Section "$(HFS_COMPONENT_APP)"
   ; ── Directory reconciliation: purge old output first, then write ────
   ;
   ; [Why $INSTDIR\models must be cleared] The old installer (the Tauri template) installed
-  ; 150 MB of weights here; the new layout keeps only models.json here (weights go to the
-  ; shared library in ProgramData). Not deleting means quietly occupying 150 MB more after an
-  ; upgrade, and the App would still preferentially read those old weights.
+  ; the weights here; the new layout keeps only models.json here (weights go to the
+  ; shared library in ProgramData). Not deleting means quietly keeping a second full copy of
+  ; the weights after an upgrade, and the App would still preferentially read those old weights.
   ;
   ; [Why licenses and LICENSE are deleted] Old versions put them in the install root; they now
   ; ship as a whole with the App. Deleting first guarantees that a "document went missing"
@@ -1432,7 +1432,7 @@ Section "$(HFS_COMPONENT_APP)"
   ; [Why the model library root is written into the uninstall entry] The shared library's
   ; location is not a permanent constant: after the directory layout changed, the uninstaller
   ; and the next reinstall must both be able to ask "where did the previous version put its
-  ; 150 MB" instead of guessing from this version's constant.
+  ; model library" instead of guessing from this version's constant.
   WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "ModelRoot" "$HfsModelRoot"
   ; Without _?=: the uninstaller copies itself to a temporary directory by default before
   ; running, which is what lets it delete itself.
@@ -1615,7 +1615,7 @@ SectionGroupEnd
 ; ── Uninstall options page ─────────────────────────────────────────────
 ; "Clean shared model library" is checked by default (set to 1 in un.onInit);
 ; "Clean caches and logs" is unchecked by default:
-;   - Clean shared model library (about 150 MB, shared by all installs)
+;   - Clean shared model library (shared by all installs)
 ;   - Clean caches and logs (waveform/render caches, logs, WebView data, temporary files)
 ; However the checkboxes are set, settings and unsaved projects are always kept; if another
 ; HiFiShifter install exists, neither option takes effect (so uninstalling the App never

@@ -2,8 +2,9 @@
 """Fetch / package model weights: three acquisition paths + one publishing path,
 each verified file by file.
 
-[Why the weights are not in the repository] 151.6 MB / 7 files make a single
-checkout 150 MB, and every CI job checks out once (about 11 times per PR). Only
+[Why the weights are not in the repository] The main package (151.6 MB / 6 files)
+would make a single checkout huge, and every CI job checks out once (about 11
+times per PR). Only
 the manifest stays in the repository:
 `backend/src-tauri/resources/models/models.json` (1.5 KB).
 

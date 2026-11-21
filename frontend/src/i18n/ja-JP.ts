@@ -2425,8 +2425,7 @@ export const jaJP = {
     installer_uninstall_options_top:
         "以下をあわせて削除できます。設定と未保存の作業は常に保持されます。",
     installer_uninstall_opt_models: "共有モデル ライブラリを削除",
-    installer_uninstall_opt_models_desc:
-        "約 150 MB を解放。すべての HiFiShifter インストールで共有されます。",
+    installer_uninstall_opt_models_desc: "すべての HiFiShifter インストールで共有されます。",
     installer_uninstall_opt_cache: "キャッシュとログを削除",
     installer_uninstall_opt_cache_desc:
         "波形/レンダリング キャッシュ、ログ、WebView データ、一時ファイル。",

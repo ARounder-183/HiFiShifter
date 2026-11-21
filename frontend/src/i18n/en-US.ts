@@ -2412,8 +2412,7 @@ export const enUS = {
     installer_uninstall_options_top:
         "Also remove the data below. Your settings and unsaved work are always kept.",
     installer_uninstall_opt_models: "Remove the shared model library",
-    installer_uninstall_opt_models_desc:
-        "Frees about 150 MB. Shared by every HiFiShifter installation.",
+    installer_uninstall_opt_models_desc: "Shared by every HiFiShifter installation.",
     installer_uninstall_opt_cache: "Remove caches and logs",
     installer_uninstall_opt_cache_desc:
         "Waveform/render caches, logs, WebView data and temporary files.",

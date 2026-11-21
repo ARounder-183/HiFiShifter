@@ -2328,7 +2328,7 @@ export const zhCN = {
     installer_uninstall_options_subtitle: "选择卸载 HiFiShifter 时要一并清理的内容。",
     installer_uninstall_options_top: "可一并清理下列数据。设置与未保存的工程始终保留。",
     installer_uninstall_opt_models: "清理共享模型库",
-    installer_uninstall_opt_models_desc: "约释放 150 MB，所有 HiFiShifter 安装共用这一份。",
+    installer_uninstall_opt_models_desc: "所有 HiFiShifter 安装共用这一份。",
     installer_uninstall_opt_cache: "清理缓存与日志",
     installer_uninstall_opt_cache_desc: "波形/渲染缓存、日志、WebView 数据与临时文件。",
     installer_repair_done: "修复完成。",

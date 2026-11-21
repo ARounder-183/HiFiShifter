@@ -175,7 +175,7 @@ Test-Invariant 'merged installer registers the uninstall entry, cleans managed d
         throw 'merged-installer.nsi no longer cleans Contents\Resources\frontend — repeated installs pile up assets again'
     }
     if ($nsi -notmatch 'RMDir /r "\$INSTDIR\\models"') {
-        throw 'merged-installer.nsi no longer cleans models\ inside the install directory — upgrading from the old installer permanently costs 150 MB extra'
+        throw 'merged-installer.nsi no longer cleans models\ inside the install directory — upgrading from the old installer permanently keeps a second weights copy'
     }
     'WriteUninstaller / UninstallString / directory reconciliation / shared model library'
 }

@@ -13,7 +13,7 @@
 #   .\scripts\build\build.ps1 -Configuration Debug   # debug artifacts, no packaging
 #
 # [Why Windows has a single installer] The standalone App and the VST3 plugin serve the same
-# users, and both use the same 150 MB of models. Splitting into two installers has only two
+# users, and both use the same shared model weights. Splitting into two installers has only two
 # outcomes: the user pays for identical weights twice on disk, or the two packages each write
 # half the logic to guess whether the other is installed. Merged, the models are written once
 # and uninstall has a single entry point.

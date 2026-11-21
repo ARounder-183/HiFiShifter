@@ -295,11 +295,11 @@ LangString HFS_UNINSTALL_OPT_MODELS ${LANG_JAPANESE} "共有モデル ライブ�
 LangString HFS_UNINSTALL_OPT_MODELS ${LANG_KOREAN} "공유 모델 라이브러리 삭제"
 
 ; installer_uninstall_opt_models_desc
-LangString HFS_UNINSTALL_OPT_MODELS_DESC ${LANG_ENGLISH} "Frees about 150 MB. Shared by every HiFiShifter installation."
-LangString HFS_UNINSTALL_OPT_MODELS_DESC ${LANG_SIMPCHINESE} "约释放 150 MB，所有 HiFiShifter 安装共用这一份。"
-LangString HFS_UNINSTALL_OPT_MODELS_DESC ${LANG_TRADCHINESE} "約釋出 150 MB，所有 HiFiShifter 安裝共用這一份。"
-LangString HFS_UNINSTALL_OPT_MODELS_DESC ${LANG_JAPANESE} "約 150 MB を解放。すべての HiFiShifter インストールで共有されます。"
-LangString HFS_UNINSTALL_OPT_MODELS_DESC ${LANG_KOREAN} "약 150 MB 확보. 모든 HiFiShifter 설치가 공유합니다."
+LangString HFS_UNINSTALL_OPT_MODELS_DESC ${LANG_ENGLISH} "Shared by every HiFiShifter installation."
+LangString HFS_UNINSTALL_OPT_MODELS_DESC ${LANG_SIMPCHINESE} "所有 HiFiShifter 安装共用这一份。"
+LangString HFS_UNINSTALL_OPT_MODELS_DESC ${LANG_TRADCHINESE} "所有 HiFiShifter 安裝共用這一份。"
+LangString HFS_UNINSTALL_OPT_MODELS_DESC ${LANG_JAPANESE} "すべての HiFiShifter インストールで共有されます。"
+LangString HFS_UNINSTALL_OPT_MODELS_DESC ${LANG_KOREAN} "모든 HiFiShifter 설치가 공유합니다."
 
 ; installer_uninstall_options_subtitle
 LangString HFS_UNINSTALL_OPTIONS_SUBTITLE ${LANG_ENGLISH} "Choose what to remove along with HiFiShifter."

@@ -2393,7 +2393,7 @@ export const koKR = {
     installer_uninstall_options_top:
         "아래 데이터를 함께 정리할 수 있습니다. 설정과 저장하지 않은 작업은 항상 유지됩니다.",
     installer_uninstall_opt_models: "공유 모델 라이브러리 삭제",
-    installer_uninstall_opt_models_desc: "약 150 MB 확보. 모든 HiFiShifter 설치가 공유합니다.",
+    installer_uninstall_opt_models_desc: "모든 HiFiShifter 설치가 공유합니다.",
     installer_uninstall_opt_cache: "캐시 및 로그 삭제",
     installer_uninstall_opt_cache_desc: "파형/렌더 캐시, 로그, WebView 데이터 및 임시 파일.",
     installer_repair_done: "복구가 완료되었습니다.",

@@ -2,7 +2,7 @@
 #
 # [Why CI must run a real install] Almost none of the installer's failure modes raise an error: the
 # model bundle is missing a file (the runtime just reports "inference unavailable"), a copy of the
-# weights sneaks back into the bundle (disk quietly grows by 150 MB), or uninstall leaves files
+# weights sneaks back into the bundle (disk quietly grows by a full second copy), or uninstall leaves files
 # behind (the user sees two copies after reinstalling). These are only visible by actually running
 # the installer and asserting each item one by one.
 #
@@ -473,7 +473,7 @@ try {
     # The shared library's location changes with the installer version. The installer writes the root
     # into the uninstall entry's ModelRoot; on upgrade the recorded root must be handled: keep → merge
     # into the new root (drop the old copy when the version duplicates); delete → clear the legacy
-    # root too. Otherwise 150 MB the runtime never reads stays on disk.
+    # root too. Otherwise a weights copy the runtime never reads stays on disk.
     $legacyModelRoot = Join-Path $env:APPDATA 'HiFiShifterTestLegacy\models'
     $legacyModelRoot2 = Join-Path $env:APPDATA 'HiFiShifterTestLegacy2\models'
     $arpRegPath = 'HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\HiFiShifter'
@@ -579,7 +579,7 @@ try {
         'own removed, foreign kept'
     }
     # [Why the model library default assertion is "deleted"] "Delete models" is checked by default:
-    # the 150 MB is written only by this product, and it keeping occupying disk after uninstall
+    # the model library is written only by this product, and it keeping occupying disk after uninstall
     # defies user expectations. Cache and logs stay kept by default (a reinstall reuses the cache
     # while troubleshooting, and the logs are the only clue for locating the last failure).
     Assert-That 'uninstall deletes the shared model library by default (kept only when unchecked)' {
