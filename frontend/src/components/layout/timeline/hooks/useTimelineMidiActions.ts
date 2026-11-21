@@ -105,9 +105,20 @@ export function useTimelineMidiActions({
             specifiedBpm?: number;
             importBpmAsProject?: boolean;
             closeLeadingGap?: boolean;
+            clipboardGuid?: string;
         }) => {
             const clipId = replaceMidiDialog.clipId;
             if (!clipId) return;
+            if (hostMode() === "plugin") {
+                void webApi.replaceMidiAsHostTake(
+                    clipId,
+                    result.midiPath,
+                    result.trackIndices,
+                    result.clipboardGuid,
+                );
+                setReplaceMidiDialog({ open: false, clipId: null, midiPath: null });
+                return;
+            }
             void dispatch(
                 replaceMidiClipDataRemote({
                     clipId,

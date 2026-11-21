@@ -103,6 +103,7 @@ export const webApi = {
     importMidiAsClip: paramsApi.importMidiAsClip,
     importMidiAsTake: paramsApi.importMidiAsTake,
     importMidiAsHostTake: paramsApi.importMidiAsHostTake,
+    replaceMidiAsHostTake: paramsApi.replaceMidiAsHostTake,
     replaceMidiClipData: paramsApi.replaceMidiClipData,
     getMidiTracks: paramsApi.getMidiTracks,
     readMidiClipboardToMemory: paramsApi.readMidiClipboardToMemory,

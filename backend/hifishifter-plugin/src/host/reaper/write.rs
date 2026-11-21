@@ -83,6 +83,21 @@ pub(super) fn inventory_target(
     Ok(target)
 }
 impl HostClipTarget {
+    /// 覆盖本 target 绑定 take 的 MIDI 数据。调用方负责 undo block 与清单刷新。
+    pub(crate) fn write_midi_take(
+        &self,
+        data: &hifishifter_kernel::midi_take::MidiTakeData,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<(), String> {
+        self.verify(authorized)?;
+        self.host.write_midi_take(
+            self.take as *mut c_void,
+            &self.geometry,
+            data,
+            authorized,
+        )
+    }
+
     /// 删除前核对project/item/take/GUID；删除后不再对已失效对象调用UpdateItem。
     pub(crate) fn delete_item(&self, authorized: &impl Fn() -> bool) -> Result<(), String> {
         // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。

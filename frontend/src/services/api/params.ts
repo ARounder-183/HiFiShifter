@@ -361,6 +361,20 @@ export const paramsApi = {
             midiRole,
         ),
 
+    replaceMidiAsHostTake: (
+        clipId: string,
+        midiPath: string,
+        trackIndices: number[],
+        clipboardGuid?: string,
+    ) =>
+        invoke<TimelineResult & { ok: boolean; error?: string }>(
+            "replace_midi_host_take",
+            clipId,
+            midiPath,
+            trackIndices,
+            clipboardGuid ?? null,
+        ),
+
     replaceMidiClipData: (
         clipId: string,
         midiPath: string,

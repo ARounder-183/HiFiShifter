@@ -937,6 +937,14 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "export_midi_take":
             return { clipId: args[0], outputPath: args[1] };
 
+        case "replace_midi_host_take":
+            return {
+                clipId: args[0],
+                midiPath: args[1],
+                trackIndices: args[2],
+                ...(args[3] != null ? { clipboardGuid: args[3] } : {}),
+            };
+
         case "set_timeline_tempo_map":
             return { tempoMap: args[0] };
 
