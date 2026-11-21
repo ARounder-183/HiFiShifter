@@ -71,7 +71,7 @@ export function collectGlDiagnostics(): GlDiagnostics {
         userAgent:
             typeof globalThis.navigator?.userAgent === "string"
                 ? globalThis.navigator.userAgent
-                : "未知",
+                : "unknown",
         devicePixelRatio:
             typeof globalThis.devicePixelRatio === "number" ? globalThis.devicePixelRatio : 1,
     };

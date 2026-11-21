@@ -688,7 +688,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         try {
             glHandle = createGlCanvas(args.glCanvas);
             if (glHandle === null) {
-                glFailureReason = "WebGL2 不可用";
+                glFailureReason = "WebGL2 unavailable";
             } else {
                 glProgram = createSdfBoxProgram(glHandle.gl);
             }

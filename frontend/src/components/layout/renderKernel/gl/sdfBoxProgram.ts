@@ -184,8 +184,8 @@ function compile(gl: WebGL2RenderingContext, type: number, source: string): WebG
         // createShader 返回 null 几乎只发生在上下文已丢失时（规范允许的失败分支）。
         throw new Error(
             gl.isContextLost()
-                ? "WebGL 上下文已丢失（GPU 进程异常或资源耗尽），请刷新页面"
-                : "无法创建着色器对象（GPU 资源不足）",
+                ? "WebGL context lost (GPU process failure or resource exhaustion); please restart the app"
+                : "Failed to create shader object (GPU resources exhausted)",
         );
     }
     gl.shaderSource(shader, source);

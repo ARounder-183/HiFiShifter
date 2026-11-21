@@ -249,7 +249,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * @param reason 失败原因（来自内核创建的 catch）。
      */
     const handleKernelUnavailable = React.useCallback((reason: string) => {
-        frontendLog("warn", `[TimelinePanel] 时间轴内核不可用（${reason}），当前没有回退渲染路径`);
+        frontendLog(
+            "warn",
+            `[TimelinePanel] timeline kernel unavailable (${reason}); there is no fallback render path`,
+        );
         setKernelUnavailableReason(reason);
     }, []);
 
@@ -1357,7 +1360,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             />
                         </>
                     ) : (
-                        <KernelUnavailableNotice reason={kernelUnavailableReason ?? "未知原因"} />
+                        <KernelUnavailableNotice reason={kernelUnavailableReason ?? "unknown"} />
                     )}
 
                     {/* 共振峰工具窗口：`fixed` 定位（视口坐标），与渲染模式无关。

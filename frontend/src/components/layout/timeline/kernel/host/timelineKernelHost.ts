@@ -1541,7 +1541,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     } = args;
 
     const glCanvas = createGlCanvas(canvas);
-    if (!glCanvas) throw new Error("WebGL2 不可用");
+    if (!glCanvas) throw new Error("WebGL2 unavailable");
     const gl = glCanvas.gl;
     // 【为什么是 let】上下文恢复后 program 全部失效，必须 dispose + 重建
     // （见 `loop` 之后的 onRestored 注册）。

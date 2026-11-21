@@ -288,7 +288,9 @@ async function detachFormToWindowInner(
     if (!result.ok) {
         // 回退：保持进程内浮窗（用户仍能看到并使用它）。
         // **必须留日志**：静默回退让"窗口没开出来"看起来像"功能没实现"（实际发生过）。
-        reportFrontendError(`[detach] 独立窗口创建失败，已回退为进程内浮窗：${result.reason}`);
+        reportFrontendError(
+            `[detach] failed to create the detached window; fell back to an in-app floating panel: ${result.reason}`,
+        );
         // 创建"失败"也可能是竞态下另一个调用已把窗口开出来（label 已被占用）。
         // 只有窗口**确实不存在**时才回退进程内浮窗 —— 否则同一名窗体会两处各渲染
         // 一份，而独立窗口从此无人回收。
@@ -391,7 +393,7 @@ export async function restoreDetachedWindows(
         });
         if (!result.ok) {
             reportFrontendError(
-                `[detach] 启动恢复独立窗口失败，已回退为进程内浮窗：${result.reason}`,
+                `[detach] failed to restore the detached window on startup; fell back to an in-app floating panel: ${result.reason}`,
             );
             dispatch(setFormFloatMode({ formId, floatMode: "inApp" }));
         } else {

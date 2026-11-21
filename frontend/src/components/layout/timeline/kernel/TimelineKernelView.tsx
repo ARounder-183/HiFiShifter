@@ -761,7 +761,11 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             // 内核没有 Canvas2D 等效绘制（GL 是唯一路径），本视图无法自行降级：
             // 回报给面板，由它渲染失败界面（见 `onUnavailable` 的说明）。
             const reason = error instanceof Error ? error.message : String(error);
-            frontendLog("warn", "[TimelineKernelView] 内核不可用，上报面板显示排障界面", error);
+            frontendLog(
+                "warn",
+                "[TimelineKernelView] kernel unavailable; reporting to the panel to show the troubleshooting UI",
+                error,
+            );
             callbacksRef.current.onUnavailable?.(reason);
             return;
         }

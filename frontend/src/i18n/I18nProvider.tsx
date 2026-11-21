@@ -196,3 +196,23 @@ export function translateOutsideReact(key: string): string {
         key
     );
 }
+
+/**
+ * 组件之外按当前语言取复数文案（与 `useI18n().plural` 同一套解析与数字格式）。
+ *
+ * 【为什么单独一个入口】与 `translateOutsideReact` 同因：调用点不是组件，
+ * 拿不到 Hook；默认标题、系统对话框等在组件树外成文。语言取自同一来源，
+ * 两边因此不会分叉。查不到的键原样返回（复数形态无从选择，保持原样最诚实）。
+ */
+export function pluralOutsideReact(key: MessageKey, count: number): string {
+    const locale: Locale = typeof localStorage === "undefined" ? "en-US" : getDefaultLocale();
+    const dict = messages[locale] as Record<string, string | undefined>;
+    const raw =
+        dict[key] ??
+        lookupExtensionMessage(locale, key) ??
+        (messages["en-US"] as Record<string, string | undefined>)[key] ??
+        key;
+    return formatTemplate(selectPluralForm(locale, count, raw), {
+        count: formatNumber(locale, count),
+    });
+}

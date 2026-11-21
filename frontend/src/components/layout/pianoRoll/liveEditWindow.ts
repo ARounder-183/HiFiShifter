@@ -299,8 +299,8 @@ function frameToIndex(
  */
 export function warnLiveEditWindowMismatch(expectedKey: string, actualKey: string | null): void {
     warnDev(
-        "[liveEdit] 覆盖层与当前参数窗口不匹配：本次笔画不会绘制。" +
-            "（重锚逻辑被绕过？见 liveEditWindow.reanchorLiveEditWindow）" +
+        "[liveEdit] the overlay does not match the current param window; this stroke will not be drawn." +
+            " (Was the re-anchor logic bypassed? See liveEditWindow.reanchorLiveEditWindow)" +
             ` expected=${expectedKey} actual=${actualKey ?? "<none>"}`,
     );
 }
