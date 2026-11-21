@@ -202,6 +202,9 @@ export const jaJP = {
 
     panel_editor: "エディタ",
     panel_unavailable: "パネルを利用できません",
+    panel_render_failed: "パネルの描画に失敗しました",
+    error_boundary_copy_details: "詳細をコピー",
+    error_boundary_reload: "再読み込み",
     detached_shortcut_unavailable: "このショートカットは分離ウィンドウでは使用できません",
     panel_timeline: "タイムライン",
     panel_io: "入出力",
@@ -577,6 +580,7 @@ export const jaJP = {
     status_export_done: "エクスポート完了",
     status_export_failed: "エクスポートに失敗しました",
     status_export_separated_done: "トラック別エクスポート完了",
+    status_export_separated_summary: "トラック別エクスポート完了 — {path}（{n} トラック）",
     status_export_separated_failed: "トラック別エクスポートに失敗しました",
     status_clipboard_copy_failed:
         "コピーに失敗しました：システムクリップボードにアクセスできません",
@@ -597,6 +601,10 @@ export const jaJP = {
     status_project_imported: "プロジェクトをインポートしました",
     status_vocalshifter_project_imported: "VocalShifter プロジェクトをインポートしました",
     status_reaper_project_imported: "REAPER プロジェクトをインポートしました",
+    status_import_project_failed: "プロジェクトのインポートに失敗しました",
+    status_import_vocalshifter_failed: "VocalShifter プロジェクトのインポートに失敗しました",
+    status_import_reaper_failed: "REAPER プロジェクトのインポートに失敗しました",
+    status_request_failed: "リクエストに失敗しました",
     status_pasted_vocalshifter_clipboard: "VocalShifter クリップボードデータをペーストしました",
     status_pasted_reaper_clipboard: "REAPER クリップボードデータをペーストしました",
     status_timeline_clipboard_pasted: "タイムラインクリップボードをペーストしました",
@@ -806,6 +814,8 @@ export const jaJP = {
     status_param_block_write_failed: "パラメータブロックの書き込みに失敗しました",
     status_param_block_not_ready:
         "パラメータブロック層の準備ができていません。しばらくしてから再試行してください。",
+    status_param_block_conflict_curve_changed: "競合：読み取り中にパラメータカーブが変更されました",
+    status_param_block_edit_set_not_loaded: "パラメータブロックの編集セットが読み込まれていません",
     kb_param_block_split: "パラメータブロックを分割",
     kb_param_block_delete: "パラメータブロックを削除",
     kb_param_block_group: "パラメータブロックをグループ化",
@@ -847,6 +857,9 @@ export const jaJP = {
     fb_searching: "検索中...",
     fb_loading: "読み込み中...",
     fb_error: "ディレクトリの読み込みエラー",
+    fb_error_load_directory: "ディレクトリを読み込めませんでした",
+    fb_error_search_failed: "検索に失敗しました",
+    fb_error_unknown: "不明なエラー",
 
     ctx_selected_n: "{n} 件選択中",
     ctx_delete_all: "すべて削除",

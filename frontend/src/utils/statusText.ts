@@ -79,6 +79,17 @@ export function resolveStatusText(status: string, statusKey: StatusKeyMap, t: Tr
             .replace("{n}", folderImport[2] ?? "0");
     }
 
+    // 分轨导出的收尾汇总：路径（数据，原样保留）+ 轨道数（UI 文案，回填 {n}）。
+    // audio.ts 写作 "Export separated done — <dir> (N tracks)"；没有输出目录时
+    // 只有前缀，走 statusKey 前缀匹配。不带 {count} 复数形态：目录收尾汇总里
+    // 数字几乎总是 >1，且 {path} 占位符在复数模板里不被目录完整性测试允许。
+    const separated = status.match(/^Export separated done — (.+) \((\d+) tracks\)$/);
+    if (separated) {
+        return t("status_export_separated_summary")
+            .replace("{path}", separated[1] ?? "")
+            .replace("{n}", separated[2] ?? "0");
+    }
+
     // 带数量的状态：提取数字回填占位符模板（如 "Waveform cache cleared (3 files)"）。
     const counted = status.match(/^(.+?)\s*\((\d+)\s*\w+\)$/);
     if (counted) {

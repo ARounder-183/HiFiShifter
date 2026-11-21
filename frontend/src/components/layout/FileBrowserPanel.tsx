@@ -55,6 +55,19 @@ import { useFileBrowserSelection } from "./fileBrowserPanel/useFileBrowserSelect
 import { useFileBrowserActions } from "./fileBrowserPanel/useFileBrowserActions";
 import { useFileBrowserDrag } from "./fileBrowserPanel/useFileBrowserDrag";
 
+/**
+ * fileBrowserSlice 写入 `fb.error` 的兜底文案 → i18n 键。
+ *
+ * slice 里的字面量是运输格式（与 session 的 status 通道同一架构）：真正展示在
+ * 「加载目录出错：」之后时按当前语言取词；后端 / 运行时的真实错误消息（err.message）
+ * 不在表内，原样保留诊断信息。
+ */
+const FB_ERROR_KEY: Record<string, string> = {
+    "Failed to load directory": "fb_error_load_directory",
+    "Search failed": "fb_error_search_failed",
+    "Unknown error": "fb_error_unknown",
+};
+
 export const FileBrowserPanel: React.FC = () => {
     const listing = useFileBrowserListing();
     const selection = useFileBrowserSelection(listing);
@@ -541,7 +554,8 @@ export const FileBrowserPanel: React.FC = () => {
                         <AppEmptyState>{tf("fb_loading")}</AppEmptyState>
                     ) : fb.error ? (
                         <AppEmptyState tone="danger">
-                            {tf("fb_error")}: {fb.error}
+                            {tf("fb_error")}:{" "}
+                            {FB_ERROR_KEY[fb.error] ? tf(FB_ERROR_KEY[fb.error]) : fb.error}
                         </AppEmptyState>
                     ) : !fb.currentPath ? (
                         <AppEmptyState>{tf("fb_no_folder")}</AppEmptyState>

@@ -362,6 +362,13 @@ const errorCodeKey: Record<string, string> = {
     "Remove take failed": "status_remove_take_failed",
     "Rename take failed": "status_rename_take_failed",
     "Take channel mode rejected": "status_take_channel_mode_rejected",
+    // 打开 / 导入工程与通用 thunk 的兜底失败文案（sessionSlice 写入 error 通道的
+    // 原文；payload.error 存在时写的是后端原因，走上面的码映射或原样展示）
+    "Open project failed": "status_open_failed",
+    "Import project failed": "status_import_project_failed",
+    "Import VocalShifter failed": "status_import_vocalshifter_failed",
+    "Import Reaper failed": "status_import_reaper_failed",
+    "Request failed": "status_request_failed",
 };
 
 // 这些状态表示工程内容刚被替换/导入，需立即执行一次缺失媒体检测，

@@ -342,6 +342,9 @@ export const enUS = {
 
     panel_editor: "Editor",
     panel_unavailable: "Panel unavailable",
+    panel_render_failed: "Panel failed to render",
+    error_boundary_copy_details: "Copy details",
+    error_boundary_reload: "Reload",
     detached_shortcut_unavailable: "This shortcut is not available in a detached window",
     panel_timeline: "Timeline",
     panel_io: "I/O",
@@ -712,6 +715,7 @@ export const enUS = {
     status_export_done: "Export completed",
     status_export_failed: "Export failed",
     status_export_separated_done: "Separated export completed",
+    status_export_separated_summary: "Separated export completed — {path} ({n} tracks)",
     status_export_separated_failed: "Separated export failed",
     status_clipboard_copy_failed: "Copy failed: cannot access the system clipboard.",
     status_clipboard_cut_failed: "Cut failed: cannot access the system clipboard.",
@@ -731,6 +735,10 @@ export const enUS = {
     status_project_imported: "Project imported",
     status_vocalshifter_project_imported: "VocalShifter project imported",
     status_reaper_project_imported: "REAPER project imported",
+    status_import_project_failed: "Import project failed",
+    status_import_vocalshifter_failed: "Import VocalShifter failed",
+    status_import_reaper_failed: "Import REAPER failed",
+    status_request_failed: "Request failed",
     status_pasted_vocalshifter_clipboard: "Pasted VocalShifter clipboard data",
     status_pasted_reaper_clipboard: "Pasted REAPER clipboard data",
     status_timeline_clipboard_pasted: "Timeline clipboard pasted",
@@ -939,6 +947,9 @@ export const enUS = {
     status_param_block_write_failed: "Failed to write parameter blocks",
     status_param_block_not_ready:
         "The parameter block layer is not ready yet. Please try again shortly.",
+    status_param_block_conflict_curve_changed:
+        "Conflict: parameter curve changed during block read",
+    status_param_block_edit_set_not_loaded: "Parameter block edit set is not loaded",
     kb_param_block_split: "Split Parameter Block",
     kb_param_block_delete: "Delete parameter block",
     kb_param_block_group: "Group parameter blocks",
@@ -980,6 +991,9 @@ export const enUS = {
     fb_searching: "Searching...",
     fb_loading: "Loading...",
     fb_error: "Error loading directory",
+    fb_error_load_directory: "Failed to load directory",
+    fb_error_search_failed: "Search failed",
+    fb_error_unknown: "Unknown error",
 
     ctx_selected_n: "{n} selected",
     ctx_delete_all: "Delete All",

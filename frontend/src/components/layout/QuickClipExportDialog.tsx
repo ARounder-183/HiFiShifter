@@ -114,13 +114,19 @@ export function QuickClipExportDialog({ open, clipIds, onOpenChange }: QuickClip
                             ? "export_dialog_error_mp3_unsupported_sample_rate"
                             : null;
                 setErrorText(
-                    errorKey ? t(errorKey as MessageKey) : String(result.error ?? "Export failed"),
+                    // 未收录的后端码原样展示（诊断信息）；连码都没有时兜底文案按
+                    // 当前语言取词（status_export_failed 与状态栏同一键）。
+                    errorKey
+                        ? t(errorKey as MessageKey)
+                        : result.error
+                          ? String(result.error)
+                          : t("status_export_failed"),
                 );
                 return;
             }
             onOpenChange(false);
         } catch (error) {
-            setErrorText(error instanceof Error ? error.message : "Export failed");
+            setErrorText(error instanceof Error ? error.message : t("status_export_failed"));
         } finally {
             setSubmitting(false);
         }

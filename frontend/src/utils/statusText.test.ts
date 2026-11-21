@@ -39,6 +39,22 @@ describe("目录导入的汇总状态行", () => {
     });
 });
 
+describe("分轨导出的汇总状态行", () => {
+    const fakeT = (key: string, _count?: number) =>
+        key === "status_export_separated_summary" ? "分轨导出完成 — {path}（{n} 条轨道）" : key;
+
+    it("路径原样保留，轨道数回填模板", () => {
+        const text = resolveStatusText("Export separated done — D:\\out (5 tracks)", {}, fakeT);
+        expect(text).toBe("分轨导出完成 — D:\\out（5 条轨道）");
+    });
+
+    it("无输出目录时只有前缀，走 statusKey", () => {
+        expect(
+            resolveStatusText("Export separated done", { "Export separated done": "sep_done" }, t),
+        ).toBe("sep_done");
+    });
+});
+
 describe("假立体声扫描的未读尾部", () => {
     const fakeT = (key: string, count?: number) => {
         if (key === "status_fake_stereo_scan_folded") return "{m}/{n} 已折叠";

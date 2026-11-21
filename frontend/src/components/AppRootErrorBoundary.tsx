@@ -18,6 +18,7 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 
 import { reportFrontendError } from "../services/frontendErrorLog";
+import { translateOutsideReact } from "../i18n/I18nProvider";
 
 interface AppRootErrorBoundaryProps {
     children: ReactNode;
@@ -74,7 +75,7 @@ export class AppRootErrorBoundary extends Component<
                             );
                         }}
                     >
-                        Copy details
+                        {translateOutsideReact("error_boundary_copy_details")}
                     </button>
                     <button
                         type="button"
@@ -83,7 +84,7 @@ export class AppRootErrorBoundary extends Component<
                         // 而项目数据在后端 / Redux 之外，重载不会丢。
                         onClick={() => window.location.reload()}
                     >
-                        Reload
+                        {translateOutsideReact("error_boundary_reload")}
                     </button>
                 </div>
             </div>
