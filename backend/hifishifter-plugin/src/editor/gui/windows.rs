@@ -34,6 +34,11 @@ use windows::Win32::System::LibraryLoader::{
     GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::HiDpi::{
+    AreDpiAwarenessContextsEqual, GetDpiForWindow, GetWindowDpiAwarenessContext,
+    SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -87,6 +92,91 @@ const MAX_PAGE_REBUILDS: u32 = 3;
 /// 数字乘上"曾经攒下的 147 份"就是 7 GiB。给一个明确上限之后，即使清扫失效，一份
 /// profile 也不会再长到那个量级。
 const BROWSER_ARGUMENTS: &str = "--enable-precise-memory-info --disk-cache-size=67108864";
+
+/// 把本线程临时切到 Per-Monitor-V2 感知的作用域守卫。
+///
+/// 【为什么插件要自己切】插件的 DPI 感知**继承宿主**：REAPER / Cubase / Studio One 的
+/// 编辑器线程本来就是 PMv2，子窗口按物理像素创建，一切自洽。而 ACID Pro 11 经
+/// `sfvstwrap` 桥承载插件（见 `docs/host-extension-boundary.md` §5.1），创建编辑器
+/// 的线程不是感知线程 —— 1100×720 被当成 96-DPI 逻辑值，落进宿主的感知窗口后被
+/// 整体放大 1.25×（实测 2026-11，ACID Pro 11.0.2.21 + Windows 125% 缩放）：
+///   * 宿主按 `getSize` 报的 1100×720 留出客户区，子窗口实际占 1375×900
+///     ⇒ 内容溢出 ⇒ 宿主给滚动条、底部被裁；
+///   * WebView2 在非感知上下文里以 `devicePixelRatio=1.0` 渲染，再被 DWM 拉伸
+///     ⇒ 界面整体模糊。
+///
+/// 两个症状同一根因。子窗口的感知上下文在**创建时**定死且随后不可改，所以
+/// "创建与摆放"这几段必须发生在 PMv2 线程上；宿主自身的感知策略一概不动。
+///
+/// 【为什么是线程级而不是进程级】进程/线程的感知策略是**宿主**的资产，永久改掉
+/// 会连带改变宿主其余窗口的缩放行为；`SetThreadDpiAwarenessContext` 只在守卫
+/// 存活期间生效，出作用域即还原。
+///
+/// 【逃生门】`HIFISHIFTER_NO_DPI_AWARE=1` 回到"继承宿主上下文"的旧行为 —— 与
+/// `HIFISHIFTER_NO_ARA`（`host_identity.rs`）同一模式，给现场排查留退路。
+struct PerMonitorV2Scope {
+    previous: DPI_AWARENESS_CONTEXT,
+}
+
+impl PerMonitorV2Scope {
+    /// `None` = 保持宿主上下文（逃生门开启，或线程切换失败）。
+    fn enter() -> Option<Self> {
+        if std::env::var_os("HIFISHIFTER_NO_DPI_AWARE").is_some_and(|value| value == "1") {
+            return None;
+        }
+        // SAFETY: 参数是常量伪句柄；失败返回 null 伪句柄，按"没切成"处理。
+        let previous =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        if previous.0.is_null() {
+            return None;
+        }
+        Some(Self { previous })
+    }
+    /// 本线程当前的感知上下文是否已经是 PMv2（诊断读数，读后保持原状）。
+    fn thread_is_pm_v2() -> bool {
+        // SAFETY: 查询 = 切过去拿旧值再立刻还原；伪句柄常量，无副作用。
+        let previous =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        unsafe { SetThreadDpiAwarenessContext(previous) };
+        unsafe {
+            AreDpiAwarenessContextsEqual(previous, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+        }
+        .as_bool()
+    }
+}
+
+impl Drop for PerMonitorV2Scope {
+    fn drop(&mut self) {
+        // SAFETY: `previous` 来自 enter() 的成对返回值；还原失败无可用恢复手段。
+        unsafe { SetThreadDpiAwarenessContext(self.previous) };
+    }
+}
+
+/// 附着点的一次性 DPI 事实：宿主父窗口的 DPI 与感知上下文、本线程切换前的状态。
+///
+/// 【为什么值得一行日志】ACID 的两个症状都源自"宿主桥线程不感知"，而哪一层进程
+/// 在承载编辑器（`acidpro.exe` 内的 `sfvstwrap`，还是独立桥服务器）只有现场日志
+/// 才能回答：父窗口 DPI=120 且父上下文非 PMv2 ⇒ 桥线程不感知（修复生效的前提）；
+/// 父窗口 DPI=96 ⇒ 宿主本身 100% 缩放，症状另有其因。
+fn log_host_dpi_facts(parent: HWND) {
+    let (dpi, pm_v2, thread_pm_v2) = {
+        // SAFETY: 只读查询；`AreDpiAwarenessContextsEqual` 对任意伪句柄安全。
+        let (dpi, pm_v2) = unsafe {
+            (
+                GetDpiForWindow(parent),
+                AreDpiAwarenessContextsEqual(
+                    GetWindowDpiAwarenessContext(parent),
+                    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+                )
+                .as_bool(),
+            )
+        };
+        (dpi, pm_v2, PerMonitorV2Scope::thread_is_pm_v2())
+    };
+    crate::gui_log_line(&format!(
+        "editor DPI facts: parent-dpi={dpi} parent-pmv2={pm_v2} thread-pmv2={thread_pm_v2}"
+    ));
+}
 
 fn cached_environment() -> Option<ICoreWebView2Environment> {
     ENVIRONMENT.with(|slot| slot.borrow().clone())
@@ -184,7 +274,10 @@ impl EditorPort for WindowsPort {
             return;
         }
         // 自有 child 没有标题栏；用真实 STATIC 控件显示错误，不能只写不可见 window text。
-        if let Ok(window) = unsafe {
+        // 【为什么切 PMv2】错误框的坐标按物理像素解释 —— 桥宿主线程不感知时会把
+        // 它放大 1.25×，正好在"界面已经坏了"的时刻再添一层错位（见 `PerMonitorV2Scope`）。
+        let _dpi_scope = PerMonitorV2Scope::enter();
+        let created = unsafe {
             CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 w!("STATIC"),
@@ -199,7 +292,9 @@ impl EditorPort for WindowsPort {
                 None,
                 None,
             )
-        } {
+        };
+        drop(_dpi_scope);
+        if let Ok(window) = created {
             *self.error_window.borrow_mut() = Some(window);
         }
     }
@@ -268,8 +363,14 @@ impl WindowKey {
         if unsafe { GetCurrentThreadId() } != self.thread || !self.valid() {
             return Err("resize on stale window or off UI thread".into());
         }
-        unsafe { MoveWindow(HWND(self.hwnd as *mut c_void), 0, 0, width, height, true) }
-            .map_err(|e| e.to_string())
+        // 【为什么切 PMv2】宿主给来的 (width, height) 按物理像素解释（感知宿主如此
+        // 报数）；桥宿主的调用线程可能不感知，MoveWindow 会把它再放大一次 —— 与
+        // 创建时的错位同根（见 `PerMonitorV2Scope`）。
+        let _dpi_scope = PerMonitorV2Scope::enter();
+        let result =
+            unsafe { MoveWindow(HWND(self.hwnd as *mut c_void), 0, 0, width, height, true) };
+        drop(_dpi_scope);
+        result.map_err(|e| e.to_string())
     }
 }
 impl EditorHost for WindowsHost {
@@ -443,6 +544,15 @@ impl WindowsHost {
             capturered: capturered.clone(),
             token,
         }));
+        // 【为什么在创建前记 DPI 事实】父窗口的感知上下文决定"1100×720 到底落在
+        // 多少物理像素上"；没有这一行，ACID 的滚动条/模糊只能靠猜（见
+        // `PerMonitorV2Scope` 的文档）。
+        log_host_dpi_facts(parent);
+        // 【为什么这里切 PMv2】子窗口的感知上下文在创建时定死；桥宿主（ACID 的
+        // sfvstwrap）的线程可能不感知，不切就会把逻辑值当物理值用 —— 滚动条 + 模糊
+        // 的根因（见 `PerMonitorV2Scope`）。守卫覆盖 WM_NCCREATE/WM_CREATE 的同步
+        // 送达；宿主的上下文在守卫析构后原样还原。
+        let _dpi_scope = PerMonitorV2Scope::enter();
         let result = unsafe {
             CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
@@ -459,6 +569,7 @@ impl WindowsHost {
                 Some(data.cast()),
             )
         };
+        drop(_dpi_scope);
         let hwnd = match result {
             Ok(hwnd) => hwnd,
             Err(error) => {
@@ -810,8 +921,14 @@ impl WindowsPort {
     fn sync_bounds(&self, hwnd: HWND) {
         let controller = self.controller.borrow().clone();
         if let Some(controller) = controller {
+            // 【为什么切 PMv2】`GetClientRect` 会把坐标换算到**调用线程**的上下文：
+            // 非感知线程拿到的是缩小过的逻辑值，交出去的 WebView 边界就比窗口小
+            // 一截（页面右/下留白）。见 `PerMonitorV2Scope`。
+            let _dpi_scope = PerMonitorV2Scope::enter();
             let mut bounds = RECT::default();
-            if unsafe { GetClientRect(hwnd, &mut bounds) }.is_ok() {
+            let ok = unsafe { GetClientRect(hwnd, &mut bounds) }.is_ok();
+            drop(_dpi_scope);
+            if ok {
                 let _ = unsafe { controller.SetBounds(bounds) };
             }
         }
@@ -888,10 +1005,18 @@ fn configure_browser(
 ) -> windows::core::Result<()> {
     let hwnd = port.hwnd.get();
     let mut bounds = RECT::default();
-    unsafe {
-        GetClientRect(hwnd, &mut bounds)?;
-        controller.SetBounds(bounds)?;
-        controller.SetIsVisible(true)?;
+    {
+        // 【为什么切 PMv2】与 `sync_bounds` 同一条理由：客户区读数按调用线程的上下文
+        // 换算，非感知线程会把 WebView 初始边界给小（见 `PerMonitorV2Scope`）。
+        let _dpi_scope = PerMonitorV2Scope::enter();
+        unsafe {
+            GetClientRect(hwnd, &mut bounds)?;
+        }
+        drop(_dpi_scope);
+        unsafe {
+            controller.SetBounds(bounds)?;
+            controller.SetIsVisible(true)?;
+        }
     }
     // 异步创建完成时仅延续宿主已交给本窗口的焦点，不能抢另一个 FX/应用的焦点。
     if unsafe { GetFocus() } == hwnd {
