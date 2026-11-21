@@ -37,7 +37,7 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::HiDpi::{
     AreDpiAwarenessContextsEqual, GetDpiForWindow, GetWindowDpiAwarenessContext,
     SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT,
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, DPI_AWARENESS_CONTEXT_UNAWARE,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -93,20 +93,27 @@ const MAX_PAGE_REBUILDS: u32 = 3;
 /// profile 也不会再长到那个量级。
 const BROWSER_ARGUMENTS: &str = "--enable-precise-memory-info --disk-cache-size=67108864";
 
-/// 把本线程临时切到 Per-Monitor-V2 感知的作用域守卫。
+/// 把本线程临时切到"与参照窗口同一坐标语义"的作用域守卫。
 ///
-/// 【为什么插件要自己切】插件的 DPI 感知**继承宿主**：REAPER / Cubase / Studio One 的
-/// 编辑器线程本来就是 PMv2，子窗口按物理像素创建，一切自洽。而 ACID Pro 11 经
-/// `sfvstwrap` 桥承载插件（见 `docs/host-extension-boundary.md` §5.1），创建编辑器
-/// 的线程不是感知线程 —— 1100×720 被当成 96-DPI 逻辑值，落进宿主的感知窗口后被
-/// 整体放大 1.25×（实测 2026-11，ACID Pro 11.0.2.21 + Windows 125% 缩放）：
-///   * 宿主按 `getSize` 报的 1100×720 留出客户区，子窗口实际占 1375×900
-///     ⇒ 内容溢出 ⇒ 宿主给滚动条、底部被裁；
-///   * WebView2 在非感知上下文里以 `devicePixelRatio=1.0` 渲染，再被 DWM 拉伸
-///     ⇒ 界面整体模糊。
+/// 【这条守卫回答的问题】创建子窗口 / 移动子窗口 / 读客户区，Win32 都按**调用线程**
+/// 的感知上下文解释坐标；而嵌入插件的参照物（宿主父窗口）有它自己的上下文。两者
+/// 不一致时，同一组数字会被解释成两种长度 —— ACID Pro 11 实测（125% 缩放，2026-11）：
+/// `sfvstwrap` 包裹窗口在不感知线程上创建（父窗口 96-DPI），它的客户区被系统虚拟化
+/// 成 96 空间，而感知宿主按物理像素给它留位 —— 子窗口若按 `getSize` 的数字创建，
+/// 要么被再放大 1.25×（溢出 ⇒ 宿主滚动条、右/下被裁），要么被再缩小（页面留白）。
 ///
-/// 两个症状同一根因。子窗口的感知上下文在**创建时**定死且随后不可改，所以
-/// "创建与摆放"这几段必须发生在 PMv2 线程上；宿主自身的感知策略一概不动。
+/// 【守卫的规则：跟父窗口走，不跟"最优感知"走】
+///   * 父窗口 DPI-unaware（96 且上下文不感知）⇒ 切到 **unaware**。unaware 父窗口
+///     里嵌感知子窗口是平台**不支持**的组合（实测 2026-11：几何错位且内容仍被 DWM
+///     拉伸）—— 上下文一致才能让"父窗口给多大、子窗口占多大"成立。模糊依旧，但
+///     那是包裹层整体被拉伸的结果，属于宿主桥的限制（根因修复见 `host_identity.rs`
+///     的 DllMain 线程提升）；
+///   * 其余（感知父窗口）⇒ 切 **PMv2**。感知父窗口与 PMv2 子窗口是平台支持的混合
+///     模式（VEGAS Pro 实测父窗口 120/system-aware、子窗口 PMv2，几何与清晰度都
+///     正确）；PMv2 让 WebView2 按 `devicePixelRatio=1.25` 渲染，物理像素准确。
+///
+/// 子窗口的感知上下文在**创建时**定死且随后不可改，所以"创建与摆放"必须发生在
+/// 与父窗口一致的上下文里；宿主自身的感知策略一概不动。
 ///
 /// 【为什么是线程级而不是进程级】进程/线程的感知策略是**宿主**的资产，永久改掉
 /// 会连带改变宿主其余窗口的缩放行为；`SetThreadDpiAwarenessContext` 只在守卫
@@ -114,19 +121,32 @@ const BROWSER_ARGUMENTS: &str = "--enable-precise-memory-info --disk-cache-size=
 ///
 /// 【逃生门】`HIFISHIFTER_NO_DPI_AWARE=1` 回到"继承宿主上下文"的旧行为 —— 与
 /// `HIFISHIFTER_NO_ARA`（`host_identity.rs`）同一模式，给现场排查留退路。
-struct PerMonitorV2Scope {
+struct HostContextScope {
     previous: DPI_AWARENESS_CONTEXT,
 }
 
-impl PerMonitorV2Scope {
-    /// `None` = 保持宿主上下文（逃生门开启，或线程切换失败）。
-    fn enter() -> Option<Self> {
+impl HostContextScope {
+    /// 把线程切到与 `reference` 一致的坐标语义；`None` = 保持原状（逃生门开启，
+    /// 参照窗口读不到，或线程切换失败）。
+    fn enter(reference: HWND) -> Option<Self> {
         if std::env::var_os("HIFISHIFTER_NO_DPI_AWARE").is_some_and(|value| value == "1") {
             return None;
         }
+        // SAFETY: 只读查询；伪句柄查询对任意 HWND 安全。
+        let unaware = unsafe {
+            AreDpiAwarenessContextsEqual(
+                GetWindowDpiAwarenessContext(reference),
+                DPI_AWARENESS_CONTEXT_UNAWARE,
+            )
+        }
+        .as_bool();
+        let target = if unaware {
+            DPI_AWARENESS_CONTEXT_UNAWARE
+        } else {
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+        };
         // SAFETY: 参数是常量伪句柄；失败返回 null 伪句柄，按"没切成"处理。
-        let previous =
-            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        let previous = unsafe { SetThreadDpiAwarenessContext(target) };
         if previous.0.is_null() {
             return None;
         }
@@ -145,36 +165,56 @@ impl PerMonitorV2Scope {
     }
 }
 
-impl Drop for PerMonitorV2Scope {
+impl Drop for HostContextScope {
     fn drop(&mut self) {
         // SAFETY: `previous` 来自 enter() 的成对返回值；还原失败无可用恢复手段。
         unsafe { SetThreadDpiAwarenessContext(self.previous) };
     }
 }
 
+/// 参照窗口的父级（嵌入形态里就是宿主包裹窗口）；拿不到时退回自身。
+///
+/// 【为什么退回自身】浮窗等非嵌入形态没有宿主父级；此时子窗口自己的上下文就是
+/// 事实参照 —— 守卫按它匹配，行为与"继承"一致。
+fn context_reference(hwnd: HWND) -> HWND {
+    // SAFETY: 查询失败返回 null，调用方按自身处理。GA_PARENT（直接父级）而不是
+    // GA_ROOT：坐标语义的参照物是**直接包裹**子窗口的那层（感知宿主里的不感知
+    // 包裹窗），根窗口的上下文回答不了"这层包裹怎么解释坐标"。
+    let parent = unsafe { GetAncestor(hwnd, GA_PARENT) };
+    if parent.0.is_null() || parent == hwnd {
+        hwnd
+    } else {
+        parent
+    }
+}
+
 /// 附着点的一次性 DPI 事实：宿主父窗口的 DPI 与感知上下文、本线程切换前的状态。
 ///
-/// 【为什么值得一行日志】ACID 的两个症状都源自"宿主桥线程不感知"，而哪一层进程
-/// 在承载编辑器（`acidpro.exe` 内的 `sfvstwrap`，还是独立桥服务器）只有现场日志
-/// 才能回答：父窗口 DPI=120 且父上下文非 PMv2 ⇒ 桥线程不感知（修复生效的前提）；
-/// 父窗口 DPI=96 ⇒ 宿主本身 100% 缩放，症状另有其因。
+/// 【为什么值得一行日志】ACID 的两个症状都源自"包裹层上下文与感知宿主不一致"，
+/// 而修复走到了哪一层只有现场日志才能回答：
+///   * 父窗口 DPI=120 且父上下文非 PMv2 ⇒ 感知宿主里的 system-aware 包裹窗（VEGAS
+///     形态），PMv2 子窗口是平台支持的组合；
+///   * 父窗口 DPI=96 ⇒ 包裹窗 DPI-unaware（ACID 形态）——守卫因此按父窗口匹配
+///     （见 `HostContextScope`）；`loader-promote` 则回答 DllMain 的线程提升
+///     （见 `host_identity.rs`）有没有赶在包裹窗创建之前生效。
 fn log_host_dpi_facts(parent: HWND) {
-    let (dpi, pm_v2, thread_pm_v2) = {
+    let (dpi, pm_v2, unaware, thread_pm_v2) = {
         // SAFETY: 只读查询；`AreDpiAwarenessContextsEqual` 对任意伪句柄安全。
-        let (dpi, pm_v2) = unsafe {
+        let context = unsafe { GetWindowDpiAwarenessContext(parent) };
+        let (dpi, pm_v2, unaware) = unsafe {
             (
                 GetDpiForWindow(parent),
-                AreDpiAwarenessContextsEqual(
-                    GetWindowDpiAwarenessContext(parent),
-                    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-                )
-                .as_bool(),
+                AreDpiAwarenessContextsEqual(context, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+                    .as_bool(),
+                AreDpiAwarenessContextsEqual(context, DPI_AWARENESS_CONTEXT_UNAWARE).as_bool(),
             )
         };
-        (dpi, pm_v2, PerMonitorV2Scope::thread_is_pm_v2())
+        (dpi, pm_v2, unaware, HostContextScope::thread_is_pm_v2())
     };
     crate::gui_log_line(&format!(
-        "editor DPI facts: parent-dpi={dpi} parent-pmv2={pm_v2} thread-pmv2={thread_pm_v2}"
+        "editor DPI facts: parent-dpi={dpi} parent-pmv2={pm_v2} parent-unaware={unaware} \
+         thread-pmv2={thread_pm_v2} loader-promote={}",
+        crate::host_identity::wrapper_thread_dpi_promote_outcome()
     ));
 }
 
@@ -274,9 +314,9 @@ impl EditorPort for WindowsPort {
             return;
         }
         // 自有 child 没有标题栏；用真实 STATIC 控件显示错误，不能只写不可见 window text。
-        // 【为什么切 PMv2】错误框的坐标按物理像素解释 —— 桥宿主线程不感知时会把
-        // 它放大 1.25×，正好在"界面已经坏了"的时刻再添一层错位（见 `PerMonitorV2Scope`）。
-        let _dpi_scope = PerMonitorV2Scope::enter();
+        // 【为什么切上下文】错误框的坐标按调用线程解释 —— 与包裹层不一致时会把
+        // 它放大 1.25×，正好在"界面已经坏了"的时刻再添一层错位（见 `HostContextScope`）。
+        let _dpi_scope = HostContextScope::enter(context_reference(hwnd));
         let created = unsafe {
             CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
@@ -363,12 +403,28 @@ impl WindowKey {
         if unsafe { GetCurrentThreadId() } != self.thread || !self.valid() {
             return Err("resize on stale window or off UI thread".into());
         }
-        // 【为什么切 PMv2】宿主给来的 (width, height) 按物理像素解释（感知宿主如此
-        // 报数）；桥宿主的调用线程可能不感知，MoveWindow 会把它再放大一次 —— 与
-        // 创建时的错位同根（见 `PerMonitorV2Scope`）。
-        let _dpi_scope = PerMonitorV2Scope::enter();
-        let result =
-            unsafe { MoveWindow(HWND(self.hwnd as *mut c_void), 0, 0, width, height, true) };
+        let hwnd = HWND(self.hwnd as *mut c_void);
+        let _dpi_scope = HostContextScope::enter(context_reference(hwnd));
+        // 【为什么按父窗口客户区收口，而不是宿主给的 (width, height)】嵌入子窗口的
+        // 正确尺寸是"填满父窗口客户区"。宿主给的数字在**宿主的上下文**里有意义，
+        // 换一层上下文就换一种长度：ACID 的包裹窗在不感知上下文里把感知宿主按
+        // 物理像素留出的客户区虚拟化成 96 值，`onSize` 传下来的数字因此比实际
+        // 客户区大 1.25× —— 按它移动，子窗口必然溢出（实测：宿主滚动条、右/下被裁；
+        // 2026-11 第一份现场截图正是这个形状）。在守卫上下文里量父窗口客户区，量出
+        // 的数字与 MoveWindow 的解释**同一把尺子**，量多大就占多大。感知宿主
+        // （REAPER / VEGAS）里父窗口客户区与宿主数字一致，行为不变。
+        let parent = context_reference(hwnd);
+        let mut client = RECT::default();
+        let fitted = parent != hwnd
+            && unsafe { GetClientRect(parent, &mut client) }.is_ok()
+            && client.right > 0
+            && client.bottom > 0;
+        let (fit_width, fit_height) = if fitted {
+            (client.right, client.bottom)
+        } else {
+            (width, height)
+        };
+        let result = unsafe { MoveWindow(hwnd, 0, 0, fit_width, fit_height, true) };
         drop(_dpi_scope);
         result.map_err(|e| e.to_string())
     }
@@ -544,15 +600,30 @@ impl WindowsHost {
             capturered: capturered.clone(),
             token,
         }));
-        // 【为什么在创建前记 DPI 事实】父窗口的感知上下文决定"1100×720 到底落在
+        // 【为什么在创建前记 DPI 事实】父窗口的感知上下文决定"尺寸数字到底落在
         // 多少物理像素上"；没有这一行，ACID 的滚动条/模糊只能靠猜（见
-        // `PerMonitorV2Scope` 的文档）。
+        // `HostContextScope` 的文档）。
         log_host_dpi_facts(parent);
-        // 【为什么这里切 PMv2】子窗口的感知上下文在创建时定死；桥宿主（ACID 的
-        // sfvstwrap）的线程可能不感知，不切就会把逻辑值当物理值用 —— 滚动条 + 模糊
-        // 的根因（见 `PerMonitorV2Scope`）。守卫覆盖 WM_NCCREATE/WM_CREATE 的同步
+        // 【为什么这里切上下文】子窗口的感知上下文在创建时定死；与父窗口不一致的
+        // 线程创建出的子窗口，坐标语义就和包裹层对不上 —— 滚动条 + 裁切 + 模糊
+        // 的根因（见 `HostContextScope`）。守卫覆盖 WM_NCCREATE/WM_CREATE 的同步
         // 送达；宿主的上下文在守卫析构后原样还原。
-        let _dpi_scope = PerMonitorV2Scope::enter();
+        let _dpi_scope = HostContextScope::enter(parent);
+        // 【为什么按父窗口客户区定初始尺寸】`getSize` 协商出的 (width, height) 属于
+        // 宿主的上下文；包裹层与宿主上下文不一致时（ACID：感知宿主 + 不感知包裹窗），
+        // 按它创建的子窗口会被系统再放大 1.25× —— 2026-11 实测的"宿主滚动条 +
+        // 右/下被裁"正是这个错位。守卫上下文里量出的父窗口客户区与 CreateWindow
+        // 的解释同尺；感知宿主里它与宿主给的数字一致，行为不变。
+        let mut parent_client = RECT::default();
+        let (create_width, create_height) = if unsafe { GetClientRect(parent, &mut parent_client) }
+            .is_ok()
+            && parent_client.right > 0
+            && parent_client.bottom > 0
+        {
+            (parent_client.right, parent_client.bottom)
+        } else {
+            (width, height)
+        };
         let result = unsafe {
             CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
@@ -561,8 +632,8 @@ impl WindowsHost {
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
                 0,
                 0,
-                width,
-                height,
+                create_width,
+                create_height,
                 Some(parent),
                 None,
                 Some(instance),
@@ -921,10 +992,10 @@ impl WindowsPort {
     fn sync_bounds(&self, hwnd: HWND) {
         let controller = self.controller.borrow().clone();
         if let Some(controller) = controller {
-            // 【为什么切 PMv2】`GetClientRect` 会把坐标换算到**调用线程**的上下文：
-            // 非感知线程拿到的是缩小过的逻辑值，交出去的 WebView 边界就比窗口小
-            // 一截（页面右/下留白）。见 `PerMonitorV2Scope`。
-            let _dpi_scope = PerMonitorV2Scope::enter();
+            // 【为什么切上下文】`GetClientRect` 会把坐标换算到**调用线程**的上下文：
+            // 与子窗口自身上下文不一致的线程拿到的是换算过的值，交出去的 WebView
+            // 边界就会与窗口差一截（页面右/下留白或溢出）。见 `HostContextScope`。
+            let _dpi_scope = HostContextScope::enter(context_reference(hwnd));
             let mut bounds = RECT::default();
             let ok = unsafe { GetClientRect(hwnd, &mut bounds) }.is_ok();
             drop(_dpi_scope);
@@ -1006,9 +1077,9 @@ fn configure_browser(
     let hwnd = port.hwnd.get();
     let mut bounds = RECT::default();
     {
-        // 【为什么切 PMv2】与 `sync_bounds` 同一条理由：客户区读数按调用线程的上下文
-        // 换算，非感知线程会把 WebView 初始边界给小（见 `PerMonitorV2Scope`）。
-        let _dpi_scope = PerMonitorV2Scope::enter();
+        // 【为什么切上下文】与 `sync_bounds` 同一条理由：客户区读数按调用线程的上下文
+        // 换算，与子窗口不一致的线程会把 WebView 初始边界给错（见 `HostContextScope`）。
+        let _dpi_scope = HostContextScope::enter(context_reference(hwnd));
         unsafe {
             GetClientRect(hwnd, &mut bounds)?;
         }

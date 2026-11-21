@@ -559,6 +559,134 @@ pub fn process_evidence() -> Vec<Evidence> {
     evidence
 }
 
+// ── VEGAS 家族包裹层的 DPI 提升（DllMain 阶段） ──────────────────────────────
+//
+// 【现场事实】ACID Pro 11（125% 缩放）里，承载插件编辑器的包裹窗口是在
+// DPI-unaware 线程上创建的（附着点实测 parent-dpi=96 parent-unaware=true，而
+// 宿主主界面是感知的 —— 截图里 ACID 自己的 UI 清晰、插件面板整体模糊）。
+// unaware 窗口内的所有内容先按 96-DPI 渲染、再被 DWM 整体拉伸 1.25×：这就是
+// "插件面板模糊"；感知宿主按物理像素给包裹窗留位、包裹窗把数字虚拟化，两边
+// 各说一套长度，这就是"溢出 ⇒ 滚动条 + 右/下被裁"。
+//
+// 【为什么在 DllMain 提升线程】包裹窗口与插件模块同进程（`acidpro.exe` 内的
+// sfvstwrap），窗口由**加载我们之前的那个线程**创建则来不及 —— 但若包裹层先
+// LoadLibrary 再开窗（典型顺序：装载插件、问 getSize、再建窗），那么在
+// DLL_PROCESS_ATTACH 把**加载线程**的上下文切成 PMv2，随后创建的包裹窗口与
+// 子窗口就都在感知上下文里：与感知宿主同尺度，无拉伸（清晰）、无虚拟化错位
+// （无溢出）。对已经感知的线程（VEGAS 的 system-aware 包裹层，实测工作正常）
+// 不做任何事 —— 能工作的东西不动。
+//
+// 【为什么只圈 VEGAS 家族】与 `hide_ara_entry_points` 同一条纪律：这是**加载
+// 兼容性**闸门，不是编辑器能力分支。让任意宿主的加载线程永久改上下文是越权
+// 行为；家族包裹层（sfvstwrap）被现场证据钉死了"unaware 包裹 + 感知宿主"这
+// 一种形状，才值得做。
+//
+// 【逃生门】`HIFISHIFTER_NO_DPI_PROMOTE=1` 停用提升，回到包裹层原生行为。
+
+/// 提升结果（`wrapper_thread_dpi_promote_outcome` 的读数；附着点打进日志）。
+#[cfg(windows)]
+static WRAPPER_PROMOTE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(windows)]
+const PROMOTE_NOT_ATTEMPTED: u8 = 0;
+#[cfg(windows)]
+const PROMOTE_APPLIED: u8 = 1;
+#[cfg(windows)]
+const PROMOTE_THREAD_ALREADY_AWARE: u8 = 2;
+#[cfg(windows)]
+const PROMOTE_NOT_VEGAS_FAMILY: u8 = 3;
+#[cfg(windows)]
+const PROMOTE_ESCAPE_HATCH: u8 = 4;
+#[cfg(windows)]
+const PROMOTE_FAILED: u8 = 5;
+
+/// DllMain 阶段调用：把 DPI-unaware 的加载线程提升为 PMv2（仅 VEGAS 家族映像）。
+///
+/// 只做三类调用：进程映像名查询、本线程上下文查询、上下文设置 —— 都是 kernel32
+/// 的无同步标志位操作，loader lock 下安全（不碰 COM / 线程同步 / 其它 DLL）。
+/// 结果只落原子量，日志推迟到附着点（`log_host_dpi_facts`）再打：DllMain 里做
+/// 文件 I/O 是 loader-lock 事故。
+#[cfg(windows)]
+pub fn promote_wrapper_thread_dpi() {
+    use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
+    use windows::Win32::UI::HiDpi::{
+        GetThreadDpiAwarenessContext, SetThreadDpiAwarenessContext,
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, DPI_AWARENESS_CONTEXT_UNAWARE,
+    };
+
+    // 一次进程只试一次：多次 LoadLibrary（扫描 + 实例化）不重复动手。
+    let previous = WRAPPER_PROMOTE.swap(PROMOTE_NOT_ATTEMPTED, std::sync::atomic::Ordering::AcqRel);
+    if previous != PROMOTE_NOT_ATTEMPTED {
+        WRAPPER_PROMOTE.store(previous, std::sync::atomic::Ordering::Release);
+        return;
+    }
+    if std::env::var_os("HIFISHIFTER_NO_DPI_PROMOTE").is_some_and(|value| value == "1") {
+        WRAPPER_PROMOTE.store(PROMOTE_ESCAPE_HATCH, std::sync::atomic::Ordering::Release);
+        return;
+    }
+    // 进程映像名（GetModuleFileNameW(NULL)）比 Toolhelp 快照轻得多 —— 这段跑在
+    // loader lock 里。
+    let mut buffer = [0_u16; 512];
+    let length = unsafe { GetModuleFileNameW(None, &mut buffer) } as usize;
+    let image = String::from_utf16_lossy(&buffer[..length.min(buffer.len())]).to_ascii_lowercase();
+    let in_vegas_family = ["acidpro", "vegas", "soundforge", "sound forge", "sfvst"]
+        .iter()
+        .any(|marker| image.contains(marker));
+    if !in_vegas_family {
+        WRAPPER_PROMOTE.store(
+            PROMOTE_NOT_VEGAS_FAMILY,
+            std::sync::atomic::Ordering::Release,
+        );
+        return;
+    }
+    // SAFETY: 只读查询，伪句柄比较。
+    let thread_context = unsafe { GetThreadDpiAwarenessContext() };
+    let thread_unaware = unsafe {
+        windows::Win32::UI::HiDpi::AreDpiAwarenessContextsEqual(
+            thread_context,
+            DPI_AWARENESS_CONTEXT_UNAWARE,
+        )
+    }
+    .as_bool();
+    if !thread_unaware {
+        // 感知线程（VEGAS 的 system-aware 包裹层 / REAPER 等 PMv2 宿主）不动。
+        WRAPPER_PROMOTE.store(
+            PROMOTE_THREAD_ALREADY_AWARE,
+            std::sync::atomic::Ordering::Release,
+        );
+        return;
+    }
+    // SAFETY: 参数是常量伪句柄；失败返回 null 伪句柄。**刻意不还原**：提升的意义
+    // 就是让本线程此后创建的包裹窗口与子窗口都落在感知上下文里。
+    let switched =
+        unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    let outcome = if switched.0.is_null() {
+        PROMOTE_FAILED
+    } else {
+        PROMOTE_APPLIED
+    };
+    WRAPPER_PROMOTE.store(outcome, std::sync::atomic::Ordering::Release);
+}
+
+/// 提升结果的日志读数（附着点的 `editor DPI facts` 行）。
+pub fn wrapper_thread_dpi_promote_outcome() -> &'static str {
+    #[cfg(windows)]
+    {
+        match WRAPPER_PROMOTE.load(std::sync::atomic::Ordering::Acquire) {
+            PROMOTE_APPLIED => "applied",
+            PROMOTE_THREAD_ALREADY_AWARE => "thread-already-aware",
+            PROMOTE_NOT_VEGAS_FAMILY => "not-vegas-family",
+            PROMOTE_ESCAPE_HATCH => "escape-hatch",
+            PROMOTE_FAILED => "failed",
+            _ => "not-attempted",
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        "not-applicable"
+    }
+}
+
 #[cfg(windows)]
 mod win {
     use windows::Win32::System::Diagnostics::ToolHelp::{
