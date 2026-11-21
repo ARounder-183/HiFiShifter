@@ -214,7 +214,8 @@ Test-Invariant 'Windows has one installer and the models install only once' {
 # Criteria are allowed to live only in scripts. Seeing --skip / --test-threads / --offline in
 # workflow YAML means someone is "patching in place" again — which is exactly where skip drift
 # starts (the same test skipped on one pipeline and not on another, with nobody knowing which one
-# counts).
+# counts). `--skip` must stand alone: build-tool flags like build.sh's `--skip-frontend` are not
+# test criteria and were false-positives here since 3ae1e1048 introduced them.
 Test-Invariant 'workflows contain no inline test criteria' {
     $offenders = @()
     foreach ($file in Get-ChildItem (Join-Path $root '.github\workflows') -Filter *.yml -File) {
@@ -222,7 +223,7 @@ Test-Invariant 'workflows contain no inline test criteria' {
             # Mentioning these words in comments is allowed (explaining history); the criterion only
             # looks at code.
             $code = ($line -split '#', 2)[0]
-            if ($code -match '--skip|--test-threads|--offline') { $offenders += "$($file.Name): $($line.Trim())" }
+            if ($code -match '--skip(?!-)|--test-threads|--offline') { $offenders += "$($file.Name): $($line.Trim())" }
         }
     }
     if ($offenders.Count) { throw ('criteria belong in scripts/checks/: ' + ($offenders -join ' | ')) }
