@@ -1787,22 +1787,52 @@ impl ExtensionOwner {
         &self,
         stamp: &(Arc<super::document::DocumentSession>, u64, u64, Vec<u64>),
     ) {
-        let facts = {
+        // ARA 能给出的渲染事实只有三项（时间拉伸 / 头尾内容淡化）；方向、循环源与
+        // 声道模式是**原生扩展专属**（ARA 表达不到，见 `ara::mapping::LOST_FIELDS`）。
+        //
+        // 【为什么按 item 身份合并而不是整表替换】本文档可能有**两个**实例在写
+        // `render_facts`：REAPER 按轨道管理 ARA 实例，持有原生扩展的编辑实例每次清单
+        // 刷新都会整表重建（item GUID 键、原生字段是真值），而**没有**原生适配器的
+        // 播放实例走本函数。此前这里用 `ara-region-{key}` 键、原生字段硬编码 false
+        // 整表替换 —— 两个写者交替 ⇒ 事实在 `loops=1`（真值）与 `loops=0`（默认值）
+        // 之间逐轮翻转 ⇒ `invalidate_render_input` 每轮触发 ⇒ `prepare_job` 的版本
+        // 闸永远失配 ⇒ 一次光标移动引发一串**全量**重渲染（现场 2026-11-22 02:06:22：
+        // 0.6 s 内 4 轮 mixdown，状态栏"渲染中"随之闪现）。合并口径：ARA 字段照实
+        // 更新，读不到的原生字段**保留上一轮的值** —— 两个写者从此产出同一张表。
+        //
+        // 【为什么 ARA-only 宿主仍整表替换】没有原生写者时"上一次的值"无从谈起，
+        // region 消失也必须能删行；region 键在那种宿主上是唯一可用身份。
+        let region_facts: Vec<(String, bool, bool, bool)> = {
             let regions = stamp.0.regions.lock_or_recover();
-            crate::host::geometry::RenderFacts::from_items(regions.iter().map(|(key, region)| {
-                (
-                    format!("ara-region-{key}"),
-                    crate::host::geometry::RenderItemFacts {
-                        // 方向 / 循环 / 声道是**原生扩展专属**事实，ARA 表达不到 ⇒ 恒为安全默认。
-                        reversed: false,
-                        loop_enabled: false,
-                        channel_mode: 0,
-                        timestretch: region.is_timestretch_enabled,
-                        content_fade_head: region.has_content_based_fade_at_head,
-                        content_fade_tail: region.has_content_based_fade_at_tail,
-                    },
-                )
-            }))
+            let items = stamp.0.region_items.lock_or_recover();
+            let mapped = items
+                .iter()
+                .filter_map(|(key, item_id)| {
+                    let region = regions.get(key)?;
+                    Some((
+                        item_id.clone(),
+                        region.is_timestretch_enabled,
+                        region.has_content_based_fade_at_head,
+                        region.has_content_based_fade_at_tail,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            if !mapped.is_empty() {
+                mapped
+            } else {
+                // ARA-only 宿主（没有原生清单）：region 键是唯一可用身份。
+                regions
+                    .iter()
+                    .map(|(key, region)| {
+                        (
+                            format!("ara-region-{key}"),
+                            region.is_timestretch_enabled,
+                            region.has_content_based_fade_at_head,
+                            region.has_content_based_fade_at_tail,
+                        )
+                    })
+                    .collect()
+            }
         };
         let Some(_transaction) = stamp.0.host_query_transaction() else {
             return;
@@ -1816,12 +1846,23 @@ impl ExtensionOwner {
         }
         let changed = {
             let mut previous = stamp.0.render_facts.lock_or_recover();
-            if *previous != facts {
-                *previous = facts;
-                true
-            } else {
-                false
+            let mut changed = false;
+            for (identity, timestretch, head, tail) in region_facts {
+                let entry = previous
+                    .items
+                    .entry(identity)
+                    .or_insert_with(crate::host::geometry::RenderItemFacts::default);
+                if entry.timestretch != timestretch
+                    || entry.content_fade_head != head
+                    || entry.content_fade_tail != tail
+                {
+                    entry.timestretch = timestretch;
+                    entry.content_fade_head = head;
+                    entry.content_fade_tail = tail;
+                    changed = true;
+                }
             }
+            changed
         };
         drop(_transaction);
         if changed {

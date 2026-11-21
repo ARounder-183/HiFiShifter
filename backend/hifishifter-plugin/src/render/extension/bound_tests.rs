@@ -1692,3 +1692,70 @@ fn the_inline_first_snapshot_sees_the_host_pcm_and_publishes() {
     );
     document.close();
 }
+
+/// **ARA 回退的渲染事实必须与原生写者同身份、同口径（合并，不许整表替换）。**
+///
+/// 现场形状（2026-11-22 02:06:22）：REAPER 按轨道管理 ARA 实例——持有原生适配器的
+/// 编辑实例整表重建 render_facts（item GUID 键、`B_LOOPSRC=true`），而**没有**原生
+/// 适配器的播放实例走 `refresh_ara_render_facts`。此前那里用 `ara-region-*` 键 +
+/// 原生字段硬编码 false 整表替换 —— 两个写者逐轮翻转 `loops=1↔0`，render_epoch 每
+/// 轮推进，`prepare_job` 的版本闸永远失配 ⇒ 一次光标移动连出 4 轮全量 mixdown
+/// （状态栏"渲染中"随清单刷新闪烁）。
+#[test]
+fn the_ara_render_fact_fallback_merges_with_native_facts_instead_of_replacing_them() {
+    use crate::host::geometry::{RenderFacts, RenderItemFacts};
+
+    let owner = ExtensionOwner::default();
+    let document = crate::render::document::DocumentSession::new(202);
+    // 原生写者的产物：item GUID 键 + 原生真值（循环源开、声道模式 2）。
+    document.render_facts.lock_or_recover().items.insert(
+        "item-A".to_string(),
+        RenderItemFacts {
+            reversed: false,
+            loop_enabled: true,
+            channel_mode: 2,
+            timestretch: false,
+            content_fade_head: false,
+            content_fade_tail: false,
+        },
+    );
+    // ARA 侧：region 1 已认领到 item-A，时间拉伸开启。
+    let identity = Box::new(0_u8);
+    let key = (&*identity as *const u8) as u64;
+    document.regions.lock_or_recover().insert(
+        key,
+        crate::ara::AraPlaybackRegion {
+            audio_source_persistent_id: "source".into(),
+            is_timestretch_enabled: true,
+            ..Default::default()
+        },
+    );
+    document
+        .region_items
+        .lock_or_recover()
+        .insert(key, "item-A".to_string());
+
+    let stamp = (
+        document.clone(),
+        document.revision.load(Ordering::Acquire),
+        document.scope_revision.load(Ordering::Acquire),
+        Vec::new(),
+    );
+    owner.refresh_ara_render_facts(&stamp);
+
+    let facts: &RenderFacts = &document.render_facts.lock_or_recover();
+    assert_eq!(
+        facts.items.len(),
+        1,
+        "不许出现 ara-region-* 的并行身份：键必须与原生写者一致"
+    );
+    let entry = facts
+        .items
+        .get("item-A")
+        .expect("item-A 必须仍在（同一身份被更新，而不是被默认表覆盖）");
+    assert!(
+        entry.loop_enabled && entry.channel_mode == 2,
+        "读不到的原生字段必须保留上一轮的真值，不许被安全默认覆盖"
+    );
+    assert!(entry.timestretch, "ARA 能给出的字段必须照实更新");
+}
