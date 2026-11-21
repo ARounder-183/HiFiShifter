@@ -1758,14 +1758,16 @@ impl EditorSession {
                         session.render_requested.store(true, Ordering::Release);
                         deadline = Some(Instant::now());
                     }
-                    // 【窗口渲染的补排】播放头走出当前快照的安全区（或整段装不下、
-                    // 当前窗口已经走完）时补一次。整段快照时这条恒为 false。
-                    if !session.render_requested.load(Ordering::Acquire)
-                        && owner.window_needs_rerender()
-                    {
-                        session.render_requested.store(true, Ordering::Release);
-                        deadline = Some(Instant::now());
-                    }
+                    // 【为什么这里没有"窗口补排"】窗口渲染（`RenderInput.window`）是
+                    // **ARA 文档路径**的能力（`document.rs::plan_render_window`）；
+                    // Capture 的渲染输入恒为整段（`capture_render_input` 固定
+                    // `window: None`），输出与播放头无关 —— 播放头位置永远不构成
+                    // 重渲染的理由。这里曾有一个从窗口渲染搬来的补排信号，它把
+                    // "播放头在覆盖区间之外/末端四分之一"当成要补排：工程 0 点 +
+                    // take 在 33 s（ACID Pro 实测）时每个 tick 都为真 ⇒ 每 100 ms
+                    // 一轮空渲染 ⇒ 状态栏常亮闪"渲染中"。过期信号的正确归宿是
+                    // 删除，而不是补条件 —— 素材过期由音频线程的 `render_wanted`
+                    // 闩锁与版本闸负责（上面那条 + `capture_prepare_job_inner`）。
                     // 一次性诊断：素材在、结果不在，就把这件事写进日志（按代次去重）。
                     owner.report_pending_synthesis_once();
                     // 起播窗口的块级 trace：只在音频线程标记了可疑窗口时落一次。
@@ -2054,7 +2056,16 @@ impl EditorSession {
                     if mutates {
                         session.processed.fetch_add(1, Ordering::AcqRel);
                     }
-                    session.schedule_analysis();
+                    // 【为什么只读命令不排分析】`schedule_analysis` 要克隆整份时间线、
+                    // 刷新源指纹、再走一遍 clip 候选判定 —— 而 250 ms 的状态轮询
+                    // （`plugin_get_apply_state`）是只读命令，播放期间每个 poll 都会
+                    // 撞上它：日志里就是那四行一组的 `schedule_clip_pitch_jobs` 周期
+                    // （cache HIT → nothing to do），全是对同一份缓存的复读。
+                    // 排分析的触发面没有变：真改了音频的命令照旧排；只读命令偶然
+                    // 触发了重载（代次动了）也照旧排 —— 那正是需要重新看指纹的时刻。
+                    if mutates || session.generation.load(Ordering::Acquire) != before {
+                        session.schedule_analysis();
+                    }
                     if session.generation.load(Ordering::Acquire) != before {
                         deadline = Some(Instant::now() + Duration::from_millis(150));
                     }
@@ -2408,12 +2419,30 @@ impl EditorSession {
         if let Some(error) = self.error.lock_or_recover().clone() {
             return Err(error);
         }
-        if self.requires_analysis(&self.timeline.lock_or_recover()) {
-            return Err("pitch analysis pending".into());
-        }
         let Some(owner) = self.capture_owner() else {
             return Err("capture host is gone".into());
         };
+        // 【空转轮在门口收掉，而不是放进去再空跑】渲染请求的来源（音频线程闩锁、
+        // 重载置位）只知道"该问一次"；发布器里已经是当前版本成品时，这一轮跑下去
+        // 只会发一次 `active:true` 再立刻 `active:false` —— 左下角"渲染中"闪一下
+        // （ACID Pro 实测：播放头在素材之外时每 100 ms 一轮）。与 ARA 路径
+        // `prepare_apply` 的旁通门同一收口方式：诚实地记"这一代已应用"，不占
+        // render_task、不闪状态栏。
+        //
+        // 【为什么放在 requires_analysis 之前】分析是否收敛只影响"能不能开始"，
+        // 而"要不要开始"先于它 —— 快照已是当前版本时，等分析收敛再空跑一遍
+        // 纯属浪费；真有新编辑时版本闸本来就不会过。
+        if owner.capture_render_up_to_date(owner.capture_prepare_wants_curves()) {
+            self.applied
+                .store(self.generation.load(Ordering::Acquire), Ordering::Release);
+            self.render_requested.store(false, Ordering::Release);
+            *self.render_error.lock_or_recover() = None;
+            self.emit_state();
+            return Ok(());
+        }
+        if self.requires_analysis(&self.timeline.lock_or_recover()) {
+            return Err("pitch analysis pending".into());
+        }
         let generation = self.generation.load(Ordering::Acquire);
         let cancel = Arc::new(AtomicBool::new(false));
         let current = self.clone();
