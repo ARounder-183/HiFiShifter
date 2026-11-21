@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-"""日志详细程度的源码门禁：四档策略的不回潮检查。
+"""Source gate for log verbosity: anti-regression check for the four-level policy.
 
-【为什么需要】四档设置落地之后，最容易退化成"代码里又长出一个独立开关"：
-某处重新读 HIFISHIFTER_DEBUG_*、某处重新直接调 console.*、注释里重新写
-"因为默认级别是 Warn 所以用 Warn"。这些都不会让编译失败，只会让用户选了
-「无」却仍然有输出、选了「低」却仍然刷屏。
+[Why this is needed] Once the four-level setting shipped, the easiest way to
+regress is "an independent switch growing out of the code again": somewhere
+re-reading HIFISHIFTER_DEBUG_*, somewhere calling console.* directly again, or
+a comment re-stating "because the default level is Warn, use Warn". None of
+these fail the build; they only mean the user picks "None" but still gets
+output, or picks "Low" but still gets flooded.
 
-检查项（逐条可定位）：
-  1. 生产 Rust 源码不得出现遗留调试环境变量；
-  2. 生产前端源码不得直接调用 console.*（唯一出口 services/frontendLog.ts）；
-  3. 注释不得再陈述"默认级别是 Warn 所以用 Warn"；
-  4. 出厂默认必须是 Low，且宿主不在自己模块里调 set_max_level；
-  5. log_settings.json 的文件名常量只有一处；
-  6. 文档默认值一致（不再写 release 默认 info）。
+Checks (each individually locatable):
+  1. Production Rust source must not contain legacy debug env variables;
+  2. Production frontend source must not call console.* directly (the only
+     escape hatch is services/frontendLog.ts);
+  3. Comments must not re-state "the default level is Warn, so use Warn";
+  4. The shipped default must be Low, and hosts must not call set_max_level
+     inside their own modules;
+  5. The log_settings.json filename constant must appear exactly once;
+  6. Documentation defaults must agree (no more "release default info").
 
-排除：docs/、scripts/、third_party/、target/、cfg(test) 区间、build.rs。
-退出码：0 = 合规，1 = 发现违规。
+Excluded: docs/, scripts/, third_party/, target/, cfg(test) blocks, build.rs.
+Exit code: 0 = compliant, 1 = violations found.
 """
 
 from __future__ import annotations
@@ -39,9 +43,15 @@ LEGACY_ENV = re.compile(
     r'HIFISHIFTER_CLICK_AUDIT|HIFISHIFTER_PLUGIN_PROBE_ANALYSIS'
 )
 CONSOLE = re.compile(r'console\.(log|debug|info|warn|error|trace|assert|dir|table|group|time)\s*\(')
+# The Chinese alternatives match existing Chinese source comments and must stay;
+# the English alternatives catch the same stale claims written in English.
 STALE_COMMENT = re.compile(
     r'默认日志级别是 Warn|因为默认级别|必须是 WARN 级|'
-    r'用 WARN 级|release 默认 Warn|默认级别是 Warn'
+    r'用 WARN 级|release 默认 Warn|默认级别是 Warn|'
+    r'[Dd]efault log level is Warn|because the default level|'
+    r'since the default level|must be (at )?WARN level|'
+    r'use (the )?WARN level|release defaults? to Warn|'
+    r'release default Warn|[Dd]efault level is Warn'
 )
 DEFAULT_LOW = re.compile(r'pub const DEFAULT_VERBOSITY:[^=]*=\s*LogVerbosity::Low')
 
@@ -69,7 +79,8 @@ def frontend_sources() -> list[pathlib.Path]:
 
 
 def strip_test_blocks(text: str) -> str:
-    """把 cfg(test) mod tests 区间换成空行，避免测试里的探针误报。"""
+    """Replace cfg(test) mod tests blocks with blank lines so probes inside
+    tests do not trigger false positives."""
     out: list[str] = []
     depth = 0
     for line in text.splitlines(keepends=True):
@@ -127,12 +138,14 @@ def main() -> int:
         if not doc.exists():
             continue
         text = doc.read_text(encoding='utf-8', errors='replace')
-        if re.search(r'release (版|build|builds).{0,24}(默认|default).{0,16}info', text, re.I):
+        if re.search(r'release (版|version|build|builds)?.{0,24}(默认|default).{0,16}info', text, re.I):
             violations.append(f'{doc.relative_to(ROOT).as_posix()}: stale "release default info" text')
 
-    # 帮助菜单的「复制诊断摘要」已按用户要求彻底移除；子菜单只保留四档，
-    # 不再有标题 Label / "当前：低" / 覆盖说明 / 健康状态 / 分隔线。
-    # 这类"死文案复活"不会让编译失败，却会重新把菜单压成低信息密度。
+    # The Help menu's "Copy diagnostics summary" was removed entirely at the
+    # user's request; the submenu keeps only the four levels, with no title
+    # Label / "Current: Low" / override note / health status / separator.
+    # This kind of "dead copy resurrection" does not fail the build, but it
+    # would flatten the menu back into low information density.
     removed_identifiers = (
         'menu_copy_diagnostics_summary',
         'menu_copy_diagnostics_fallback',
@@ -162,10 +175,10 @@ def main() -> int:
             )
 
     if violations:
-        print('日志详细程度门禁失败：')
+        print('log verbosity gate failed:')
         for item in violations[:120]:
             print('  ' + item)
-        print(f'\n共 {len(violations)} 处。见本脚本头部说明。')
+        print(f'\n{len(violations)} violation(s) in total. See the header of this script for details.')
         return 1
     print(f'log verbosity ok ({len(rust)} Rust, {len(frontend_sources())} frontend files scanned)')
     return 0

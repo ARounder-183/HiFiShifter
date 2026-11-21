@@ -4,9 +4,10 @@ set -euo pipefail
 echo "[install_deps_macos] Ensure Homebrew is installed"
 if ! command -v brew >/dev/null 2>&1; then
   echo "Homebrew not found. Installing..."
-  # 【为什么不用命令替换】`bash -c "$(curl ...)"` 在 curl 失败时替换成空串，
-  # `bash -c ""` 退出 0 —— set -e 抓不到，Homebrew 静默没装，后面每个 brew
-  # 命令才逐个报 "command not found"。先落盘、显式查退出码、再执行。
+  # [Why not command substitution] If curl fails, `bash -c "$(curl ...)"` becomes
+  # `bash -c ""`, which exits 0 -- set -e never catches it, Homebrew silently fails
+  # to install, and only later does every brew command report "command not found"
+  # one by one. Write to disk first, check the exit code explicitly, then execute.
   BREW_INSTALLER="$(mktemp -t hfs-brew-install.XXXXXX.sh)"
   trap 'rm -f "$BREW_INSTALLER"' EXIT
   curl -fsSL -o "$BREW_INSTALLER" https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh

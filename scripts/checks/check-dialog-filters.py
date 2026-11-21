@@ -38,10 +38,11 @@ if hasattr(sys.stdout, "reconfigure"):
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "backend"
 
-# 插件的两个「问用户要路径」入口。
+# The plug-in's two "ask the user for a path" entry points.
 PICKER_CALLS = ("pick_save_path", "pick_open_path")
 
-# 词表里的类型：调用点必须交出其中之一（或现构造一个 FileType）。
+# Types from the vocabulary: call sites must hand over one of them
+# (or construct a FileType on the spot).
 VOCABULARY = (
     "DIAGNOSTICS_ZIP",
     "MIDI",
@@ -60,7 +61,7 @@ VOCABULARY = (
     "file_types::",
 )
 
-# rfd 的终止调用：链在这里结束。
+# rfd terminating calls: a builder chain ends here.
 RFD_TERMINATORS = (".save_file(", ".pick_file(", ".pick_files(", ".pick_folder(")
 
 SKIP_DIRS = {"target", "node_modules", ".git", "third-party", "gen"}
@@ -76,24 +77,28 @@ def rust_sources():
 
 
 def chain_of(source, start):
-    """从 start 起的 builder 链，到终止调用为止。"""
+    """The builder chain starting at start, up to the terminating call."""
     for terminator in RFD_TERMINATORS:
         index = source.find(terminator, start)
         if index >= 0:
             return source[start : index + len(terminator)]
-    # 没有终止调用（或链写成了变量）—— 截到下一个分号，让缺失照常报出来。
+    # No terminating call (or the chain was assigned to a variable) -- cut at
+    # the next semicolon so the missing filter is still reported.
     semi = source.find(";", start)
     return source[start : semi if semi >= 0 else len(source)]
 
 
 def enclosing_signature(source, index):
     """
-    包住 index 的那个函数签名（从最近的 fn 到它的左花括号）。
+    The signature of the function enclosing index (from the nearest fn to its
+    opening brace).
 
-    【为什么需要】browser_files.rs 里的非 Windows 分支是**转发**：
-    platform_services::pick_save_path(file_name, file_type)。它把调用方交进来的
-    过滤器原样往下传，本身当然不写词表常量 —— 硬要求它写，只会逼出一个多余的参数。
-    只要**它自己**的签名声明了 FileType，这条路就仍然是类型安全的。
+    [Why this is needed] The non-Windows branch in browser_files.rs is a
+    **forwarder**: platform_services::pick_save_path(file_name, file_type). It
+    passes the caller-supplied filter through untouched, so of course it does
+    not spell out a vocabulary constant itself -- forcing it to would only
+    push an extra parameter into the call. As long as **its own** signature
+    declares a FileType, the path remains type-safe.
     """
     start = source.rfind("fn ", 0, index)
     if start < 0:
@@ -103,7 +108,7 @@ def enclosing_signature(source, index):
 
 
 def call_arguments(source, start):
-    """start 处那次调用的参数文本（按括号配对截取）。"""
+    """The argument text of the call at start (extracted by matching parentheses)."""
     depth = 0
     for index in range(start, len(source)):
         char = source[index]
@@ -125,10 +130,11 @@ def main():
         source = path.read_text(encoding="utf-8", errors="replace")
         display = path.relative_to(ROOT).as_posix()
 
-        # ── 插件：pick_save_path / pick_open_path 必须拿到词表里的一条 ────────
+        # ── Plug-in: pick_save_path / pick_open_path must get a vocabulary type ──
         for name in PICKER_CALLS:
             for match in re.finditer(r"\b" + name + r"\s*\(", source):
-                # 定义处（fn pick_save_path(）不是调用点。
+                # The definition site (the `fn pick_save_path(` line) is not
+                # a call site.
                 prefix = source[max(0, match.start() - 12) : match.start()]
                 if prefix.rstrip().endswith("fn"):
                     continue
@@ -136,18 +142,19 @@ def main():
                 arguments = call_arguments(source, match.end() - 1)
                 signature = enclosing_signature(source, match.start())
                 if "FileType" in signature and "FileType" not in arguments:
-                    # 转发：本函数自己就声明了 FileType 参数，类型链没有断。
+                    # Forwarder: this function itself declares a FileType
+                    # parameter, so the type chain is not broken.
                     continue
                 if not any(token in arguments for token in VOCABULARY):
                     violations.append(
                         display
                         + ": "
                         + name
-                        + " 没有使用内核词表里的类型过滤器\n    "
+                        + " does not use a type filter from the kernel vocabulary\n    "
                         + arguments.strip()[:160]
                     )
 
-        # ── 独立 App：rfd 链必须在终止前带上 add_filter ───────────────────────
+        # ── Standalone app: rfd chain must call add_filter before terminating ──
         for match in re.finditer(r"rfd::FileDialog::new\(\)", source):
             chain = chain_of(source, match.start())
             if ".pick_folder(" in chain:
@@ -156,7 +163,7 @@ def main():
             if ".add_filter(" not in chain:
                 violations.append(
                     display
-                    + ": rfd 对话框没有 add_filter（类型下拉框会是空的）\n    "
+                    + ": rfd dialog has no add_filter (the type dropdown will be empty)\n    "
                     + chain.strip()[:200]
                 )
 
@@ -168,16 +175,23 @@ def main():
         + " rfd dialog(s)"
     )
 
-    # 自检：扫描必须真的扫到东西，否则「0 处违规」毫无意义。
+    # Sanity check: the scan must actually hit something, otherwise
+    # "0 violations" is meaningless.
     if checked_pickers == 0 or checked_rfd == 0:
-        print("\n扫描没有命中任何对话框 —— 路径或判据已失效（不是「没有违规」）")
+        print(
+            "\nthe scan matched no dialogs -- the paths or criteria are stale; "
+            "this is not 'zero violations'"
+        )
         return 1
 
     if violations:
-        print("\n以下文件对话框没有正确的类型过滤器：")
+        print("\nthe following file dialogs lack a proper type filter:")
         for violation in violations:
             print("  - " + violation)
-        print("\n类型名与扩展名的唯一来源是 backend/hifishifter-kernel/src/file_types.rs。")
+        print(
+            "\ntype names and extensions come from exactly one source: "
+            "backend/hifishifter-kernel/src/file_types.rs."
+        )
         return 1
     return 0
 

@@ -1,20 +1,24 @@
-# 测试跳过清单 —— 唯一事实来源。
+# Test skip list - the single source of truth.
 #
-# 【为什么要有这个文件】跳过判据此前散在三条工作流的 YAML 里：build.yml 一条、
-# vst3.yml 一条、vst3-unix.yml 四条。同一条用例在不同流水线上可能被跳过也可能没被跳过，
-# 而"为什么跳过"只写在注释里 —— 时间一长没人敢删，于是跳过永久化。
-# 现在只有这一份：脚本按平台过滤后拼进 cargo 命令行，工作流里**不再出现任何 --skip**。
+# [Why this file exists] The skip criteria used to be scattered across the YAML of
+# three workflows: one in build.yml, one in vst3.yml, four in vst3-unix.yml. The
+# same test case could be skipped on one pipeline and not on another, and the
+# "why skip" lived only in comments - after a while nobody dared delete an entry,
+# so skips became permanent. Now there is only this one file: the scripts filter
+# by platform, splice the entries into the cargo command line, and **no --skip
+# appears in any workflow anymore**.
 #
-# 格式（用 " — " 分隔三段）：
-#   <测试名> — <跟踪位置> — <原因>
-# 以 [unix] 开头的条目只在 Linux/macOS 生效；[windows] 反之。
+# Format (three segments separated by " — "):
+#   <test name> — <tracking> — <reason>
+# Entries starting with [unix] apply on Linux/macOS only; [windows] vice versa.
 #
-# 【删条目的时机】修好之后连同这段原因一起删 —— 清单里每一条都应当能指向一个
-# 正在跟进的解释，否则它就是"我们不打算修"的另一种说法。
+# [When to remove an entry] Once fixed, delete the entry together with its reason -
+# every entry in this list must point to an explanation that is actively tracked,
+# otherwise it is just another way of saying "we do not plan to fix it".
 
 
-[unix] task34_tail_and_shared_undo_save_restore_both_world_tracks_without_gui — 本地测试跳过清单 — clear_renderers() 之后请求仍被受理（只在 Unix 暴露）。
-[unix] effective_item_mute_projects_to_gui_and_gates_real_process_without_inference — 本地测试跳过清单 — 静音→有声的去咔没有落成淡入（缓冲原样留在静音值）。
-[unix] automatic_apply_releases_the_transaction_and_rechecks_model_and_edit_versions — 本地测试跳过清单 — 偶发（单独连跑 3 次：1 过 2 挂）：快照已发布、块却还没被后台渲染填上；Windows 侧根因已修，Unix 夹具尚未按修复后的形态复验。
-[unix] host_move_without_local_generation_reapplies_and_reuses_analysis_file — 本地测试跳过清单 — 宿主移动后等不到新 PCM：state 显示 analysis_pending=false / generation=0 / audible_state=current，说明重分析根本没发布（不是等得不够久，5s 与 30s 上限都超时）。与上一条同属 Unix 渲染夹具的后台填充链，单独跑能过、整组跑偶发不发布。
-[unix] async_dsp_completion_retains_ticket_generation_and_cancellation — 本地测试跳过清单 — RenderTask 的 reply 一直 try_recv 到 Empty：30s 上限内 complete_render() 始终返回 None，DSP worker 的结果没被发布。单跑 0.00s 通过，整组 editor:: 在负载下的 macOS x86_64 / Linux 上偶发。同属 Unix 渲染夹具的后台填充链。
+[unix] task34_tail_and_shared_undo_save_restore_both_world_tracks_without_gui — local test-skip list — requests are still accepted after clear_renderers() (exposed on Unix only).
+[unix] effective_item_mute_projects_to_gui_and_gates_real_process_without_inference — local test-skip list — the mute→audible declick does not land as a fade-in (the buffer is left as-is at the muted value).
+[unix] automatic_apply_releases_the_transaction_and_rechecks_model_and_edit_versions — local test-skip list — flaky (3 consecutive solo runs: 1 pass, 2 fail): the snapshot is already published but the block has not yet been filled by the background render; the root cause is fixed on the Windows side, and the Unix fixture has not yet been re-verified against the fixed shape.
+[unix] host_move_without_local_generation_reapplies_and_reuses_analysis_file — local test-skip list — after a host move the new PCM never arrives: state shows analysis_pending=false / generation=0 / audible_state=current, meaning the re-analysis was never published (not a matter of waiting longer - both the 5s and 30s caps timed out). Same Unix render-fixture background-fill chain as the entry above; passes solo, flakily fails to publish when the whole group runs.
+[unix] async_dsp_completion_retains_ticket_generation_and_cancellation — local test-skip list — RenderTask's reply keeps returning Empty from try_recv: complete_render() returns None throughout the 30s cap, so the DSP worker's result is never published. Passes solo in 0.00s; flaky on macOS x86_64 / Linux under load when the whole editor:: group runs. Same Unix render-fixture background-fill chain.

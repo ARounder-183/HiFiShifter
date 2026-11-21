@@ -1,20 +1,21 @@
 name: HiFiShifter VST3 (macOS / Linux)
 
-# 与 build.yml（Windows 合并安装器）**并列**：这边只负责 Unix 的插件产物。
+# Runs **in parallel** with build.yml (the Windows merged installer): this pipeline owns
+# only the Unix plugin artifacts.
 #
-# 【为什么另起一条流水线】Windows 那条的组织方式是 MSVC 环境导入 + WebView2 + NSIS
-# 安装器；Unix 这边没有一样是共通的：构建脚本是 bash、产物是 .vst3 bundle + tar.gz。
-# 硬把两者塞进一个矩阵，只会得到一堆
-# `if: runner.os == ...`，而每一条都是只在一个平台上被跑过的分支。
+# [Why a separate pipeline] The Windows one is organized around MSVC env imports + WebView2
+# + an NSIS installer; nothing on the Unix side is shared: the build script is bash, the
+# artifacts are a .vst3 bundle + tar.gz. Forcing both into one matrix only yields a pile of
+# `if: runner.os == ...` branches, each exercised on exactly one platform.
 #
-# 两条流水线共享的只有两条约定：产物命名（HiFiShifter_v<版本>_<os>-<arch>-vst3）
-# 与「CI 只构建」。
+# The two pipelines share only two conventions: artifact naming
+# (HiFiShifter_v<version>_<os>-<arch>-vst3) and "CI builds only".
 
-# 【CI 只做构建】本工作流不跑单元测试 / 集成测试 / testkit；测试请在本地运行
-# scripts/checks/run-rust-gates.ps1。
+# [CI builds only] This workflow runs no unit tests / integration tests / testkit; run
+# scripts/checks/run-rust-gates.ps1 locally for tests.
 #
-# 【为什么不在 push 时跑】Unix 这条是四平台矩阵 + SDK 拉取，push 触发的成本不成比例，
-# 保持 PR/tag 触发。
+# [Why not on push] The Unix pipeline is a four-platform matrix + SDK fetches; a push
+# trigger costs disproportionately much, so it stays PR/tag-triggered.
 on:
   workflow_dispatch:
   pull_request:
@@ -30,8 +31,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # 前端产物来自 frontend-build.yml —— 同一份 frontend/dist 不该在每条流水线上
-  # 各构建一遍。跨工作流的 artifact 不共享，所以要显式 `uses:`。
+  # The frontend artifact comes from frontend-build.yml — the same frontend/dist should not
+  # be built once per pipeline. Artifacts are not shared across workflows, hence the
+  # explicit `uses:`.
   frontend:
     uses: ./.github/workflows/frontend-build.yml
 
@@ -43,12 +45,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 【为什么这里没有 exclude】本工作流曾经用
+        # [Why there is no exclude here] This workflow once used
         # `exclude: [{name: ${{ github.event_name == 'pull_request' && 'linux-aarch64' || '' }}}]`
-        # 让 PR 只跑两个平台。结果是**整个 job 一个实例都没被创建**：运行记录里只有
-        # frontend，vst3-unix 连一行都没有，而同一份写法在 build.yml 里是好的。与其继续猜
-        # GitHub 的矩阵展开规则，不如让四个平台都跑 —— 这条工作流只在 PR / tag /
-        # 手动触发时启动，多两个并行 leg 的代价远小于"什么都没跑却说绿了"。
+        # to run only two platforms on PRs. The result was **no job instance created at all**:
+        # the run log showed only frontend, without a single line for vst3-unix, while the same
+        # construct worked fine in build.yml. Rather than keep guessing GitHub's matrix
+        # expansion rules, all four platforms now run — this workflow only starts on PR /
+        # tag / manual dispatch, and two extra parallel legs cost far less than "nothing ran
+        # yet everything looked green".
         include:
           - name: linux-x86_64
             os: ubuntu-24.04
@@ -56,9 +60,10 @@ jobs:
           - name: linux-aarch64
             os: ubuntu-24.04-arm
             platform: linux-aarch64
-          # macOS 两个架构分开出包，不做 universal2：arm64 走 CoreML + WebGPU，
-          # x86_64 走 ort-tract(CPU)，链接的是**不同的** ONNX 后端；lipo 只会把两份
-          # 静态推理运行时塞进同一个文件（体积翻倍），换不来任何一个架构的性能。
+          # The two macOS architectures package separately, no universal2: arm64 uses
+          # CoreML + WebGPU, x86_64 uses ort-tract(CPU), linking **different** ONNX backends;
+          # lipo would only stuff two static inference runtimes into one file (double the
+          # size) with no performance gain for either architecture.
           - name: macos-arm64
             os: macos-15
             platform: macos-arm64
@@ -74,12 +79,12 @@ jobs:
           cache: false
           rustflags: ""
 
-      # C 工具链 + CMake（SoundTouch 走 cmake）+ libxcb（剪贴板）+ **WebKitGTK**。
+      # C toolchain + CMake (SoundTouch builds via cmake) + libxcb (clipboard) + **WebKitGTK**.
       #
-      # 【为什么现在要装 WebKit】内嵌编辑器在 Linux 上是 GtkPlug + WebKitWebView
-      # （见 editor/gui/linux.rs）。不装它，pkg-config 会在编译插件时直接失败 ——
-      # 与"装了也不会被链接"的旧状态正好相反。约 200 MB，换来的是插件窗口在这条
-      # 流水线上真的被编译过一次。
+      # [Why WebKit is now installed] The embedded editor on Linux is GtkPlug + WebKitWebView
+      # (see editor/gui/linux.rs). Without it, pkg-config fails outright while compiling the
+      # plugin — the exact opposite of the old "installed but never linked" state. About
+      # 200 MB, in exchange for the plugin window actually being compiled once on this pipeline.
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -88,7 +93,8 @@ jobs:
             build-essential cmake pkg-config libxcb1-dev libssl-dev python3 file \
             libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev
 
-      # 权重不在仓库里：以清单哈希为键缓存解压结果（模型一换键就变）。
+      # The weights are not in the repo: the extracted result is cached keyed by the manifest
+      # hash (any model change alters the key).
       - name: Cache model weights
         uses: actions/cache@v5
         with:
@@ -103,9 +109,10 @@ jobs:
         run: |
           brew install cmake || true
 
-      # 【为什么必须钉 Node 版本】bundle 里的前端是 `npm run build` 产出的，而 vite 8
-      # 前端产物由 frontend-build.yml 构建一次并以 artifact 分发 —— 同一份
-      # frontend/dist 不该在四条流水线上各构建一遍（版本还各不相同）。
+      # [Why the Node version must be pinned] The frontend inside the bundle is produced by
+      # `npm run build`, and the vite 8 frontend artifact is built once by frontend-build.yml
+      # and distributed as an artifact — the same frontend/dist should not be built again on
+      # four pipelines (with differing versions, no less).
       - name: Download frontend artifact
         uses: actions/download-artifact@v8
         with:
@@ -117,16 +124,17 @@ jobs:
           set -euo pipefail
           ZIP=$(ls frontend-dist | grep -E "\.zip$" || true)
           if [ -z "$ZIP" ]; then echo "No zip artifact found in frontend-dist"; ls -la frontend-dist; exit 1; fi
-          # 【为什么解到 frontend/ 而不是 "."】artifact 的条目以 `dist/` 开头
-          # （frontend-build.yml 在 frontend 目录里打包）。解到仓库根会把产物落进
-          # `$GITHUB_WORKSPACE/dist` —— 那是本工作流自己的构建产物目录，
-          # 等于把构建好的前端白白丢弃；build.sh 又没拿 `--skip-frontend`，
-          # 于是四个平台各自再完整跑一遍 npm ci + build，"共享一份前端产物"
-          # 的注释形同虚设。与 build.yml / clap.yml 的解法对齐（-d frontend）。
+          # [Why extract to frontend/ instead of "."] The artifact's entries start with
+          # `dist/` (frontend-build.yml packages from inside the frontend directory).
+          # Extracting to the repo root drops the output into `$GITHUB_WORKSPACE/dist` —
+          # this workflow's own build-output directory — effectively discarding the built
+          # frontend; build.sh is not given `--skip-frontend`, so all four platforms would
+          # each run the full npm ci + build again, making the "share one frontend artifact"
+          # comment pointless. Aligned with the build.yml / clap.yml solution (-d frontend).
           unzip -o frontend-dist/$ZIP -d frontend
 
-      # 桥接脚本是**手写的 JS**，语法错的表现是插件窗口一片空白。
-      # 一条 `node --check` 就能把它挡在合并之前。
+      # The bridge script is **hand-written JS**; a syntax error shows up as a blank plugin
+      # window. A single `node --check` blocks that before merge.
       - name: Check the WebKit bridge script
         run: node --check backend/hifishifter-plugin/src/editor/gui/bridge.js
 
@@ -143,15 +151,17 @@ jobs:
           path: third_party/sdk
           key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
 
-      # 一条命令做完：取 SDK → 复用前端产物 → 编译 → 组装 bundle → tar.gz。
-      # 构建逻辑只在 scripts/vst3/unix/ 里存在一份，CI 不重复实现任何一步。
+      # One command does it all: fetch SDKs → reuse the frontend artifact → compile →
+      # assemble the bundle → tar.gz. The build logic exists only in scripts/vst3/unix/;
+      # CI does not reimplement any step.
       - name: Build and package
-        # 前端产物来自 frontend-build.yml 的 artifact（上面已解到 frontend/dist）：
-        # --skip-frontend 让 build.sh 复用它，四条腿不再各自重跑 npm 构建。
+        # The frontend artifact comes from frontend-build.yml (extracted to frontend/dist
+        # above): --skip-frontend makes build.sh reuse it, so the four legs no longer each
+        # rerun the npm build.
         run: bash scripts/vst3/unix/build.sh --skip-frontend --no-verify
 
-      # 文件名本身已经带版本与平台（build.sh 生成），这里只是读出来，
-      # 免得 artifact 列表里四个平台长成一模一样。
+      # The file name already carries the version and platform (generated by build.sh);
+      # this just reads it out so the four platforms do not look identical in the artifact list.
       - name: Determine artifact name
         id: artifact-name
         run: echo "base=$(basename dist/*.tar.gz .tar.gz)" >> "$GITHUB_OUTPUT"

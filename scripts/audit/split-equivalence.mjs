@@ -1,75 +1,94 @@
 #!/usr/bin/env node
 /**
- * 拆分等价性重放：**被删掉的每一行代码，必须在同一个提交之后仍然存在**。
+ * Split-equivalence replay: **every deleted line of code must still exist after the same
+ * commit**.
  *
- * # 为什么需要它（而不是沿用上一轮的比对）
+ * # Why this exists (instead of reusing the previous round's comparison)
  *
- * 上一轮每一次拆分都做了语句级等价性比对，但比对的是"**搬走的那些语句**"：
- * 把新模块的函数体和旧文件里对应区间逐句比。这种做法对"搬错了"有效，对
- * "**少搬了一块**"完全无效 —— 漏掉的那一块根本不在比对集合里。
+ * Each split in the previous round did a statement-level equivalence check, but it compared
+ * "the **statements that were moved**": the new module's function bodies against the
+ * corresponding ranges of the old file, statement by statement. That approach works for
+ * "moved wrong" and is completely useless for "**a block was left behind**" — the missed
+ * block simply is not in the comparison set.
  *
- * `710ff764` 就是这样丢掉自由绘制的：提交信息写"两个分支的 token 流与改动前
- * 完全一致（8986 / 1670 token）"，那句话是真的，而第三个分支已经不在文件里了。
+ * `710ff764` lost freehand drawing exactly this way: the commit message claimed "the token
+ * streams of both branches are identical to before the change (8986 / 1670 tokens)" — that
+ * sentence was true, and the third branch was no longer in the file.
  *
- * # 判据
+ * # Criteria
  *
- * 对区间内每一个 `refactor(pianoroll)` 提交 C：
+ * For every `refactor(pianoroll)` commit C in the range:
  *
- *   1. 取 C 相对 C^ 的 diff，逐文件收集**被删除的行**；
- *   2. 丢掉空白行、纯注释行、纯括号行（`}` / `);` / `}` 之类）—— 它们会随
- *      缩进变化而合理地消失；
- *   3. 对每一行做规范化（去首尾空白、折叠内部空白），要求它**在该提交之后
- *      的整个 `frontend/src` 里仍能作为某一行的后缀出现**。
+ *   1. take C's diff against C^, collecting **deleted lines** per file;
+ *   2. drop blank lines, pure comment lines, pure bracket lines (`}` / `);` and the like) —
+ *      they legitimately disappear as indentation changes;
+ *   3. normalize each line (trim, collapse internal whitespace) and require it to **still
+ *      appear as a suffix of some line anywhere in `frontend/src` after that commit**.
  *
- * 后缀匹配而不是全等：搬进模块后整段会多缩进一级，行首缩进不属于语义。
+ * Suffix matching rather than equality: after moving into a module a whole block gains a
+ * level of indentation, and leading indentation carries no semantics.
  *
- * 4. 命中不了的行 → 打印出来。要么是真的丢了，要么是刻意的改写，后者必须
- *    登记进 `ALLOWED`（每条带理由），否则脚本以非零码退出。
+ * 4. Lines that cannot be matched → printed. Either they are truly lost, or they were
+ *    deliberately rewritten; the latter must be registered in `ALLOWED` (each with a
+ *    reason), otherwise the script exits non-zero.
  *
- * # 为什么不是完整的 AST 比对
+ * # Why not a full AST comparison
  *
- * 本脚本要跑 30+ 个提交、覆盖 3000+ 行删除。AST 比对需要为每个提交解析两棵树
- * 并做结构对齐，误报率高到没人会看结果。行级后缀匹配不完美，但它对"整块消失"
- * 这一类恰好是精确的 —— 而这一类正是发生过的那一类。
+ * This script runs over 30+ commits covering 3000+ deleted lines. AST comparison would need
+ * to parse two trees per commit and align them structurally, with a false-positive rate so
+ * high nobody would read the results. Line-level suffix matching is imperfect, but it is
+ * exactly precise for the "whole block disappears" class — and that is the class that
+ * actually happened.
  *
- * 用法：
- *   node scripts/audit/split-equivalence.mjs             # 报告
+ * Usage:
+ *   node scripts/audit/split-equivalence.mjs             # report
  *   node scripts/audit/split-equivalence.mjs --since=193a486a
  */
 import { execFileSync } from "node:child_process";
 
-/** 重放区间的起点（参数编辑器拆分的第一个提交）。 */
+/** Start of the replay range (the first commit of the parameter-editor split). */
 const DEFAULT_SINCE = "193a486a";
 
 /**
- * 允许消失的行：**每一条都必须写明为什么它不需要在拆分后继续存在**。
+ * Lines allowed to disappear: **each entry must state why it does not need to survive the
+ * split**.
  *
- * 键是规范化后的行文本，值是一句话理由。清单只增不减地审 —— 想加一条就必须
- * 先回答"这句话去哪了"。
+ * Keys are normalized line text, values are one-sentence reasons. The list is audited
+ * append-only — adding an entry requires first answering "where did this line go".
  */
 const ALLOWED = new Map([
     [
         "export function handleCanvasPointerDown(",
-        "函数声明本身在拆分中改名 / 拆成多个导出，声明行不再逐字存在",
+        "the function declaration itself was renamed / split into several exports during the split; the declaration line no longer exists verbatim",
     ],
-    ["export function handleSelectPointerDown(", "同上：分支模块的声明行"],
-    ["export function handleVibratoPointerDown(", "同上：分支模块的声明行"],
-    ["type CanvasPointerDownDeps = Pick<", "依赖类型在拆分中被拆成每个模块自己的 Pick 子集"],
+    [
+        "export function handleSelectPointerDown(",
+        "same as above: a branch module's declaration line",
+    ],
+    [
+        "export function handleVibratoPointerDown(",
+        "same as above: a branch module's declaration line",
+    ],
+    [
+        "type CanvasPointerDownDeps = Pick<",
+        "the deps type was split into each module's own Pick subset",
+    ],
 ]);
 
-/** 纯结构行：它们随缩进 / 分号位置变化而合理地消失。 */
+/** Purely structural lines: they legitimately disappear as indentation / semicolon position changes. */
 const STRUCTURAL =
     /^(\}|\)|\);|\}\)|\} else \{|else \{|\};|\]\);|\]|return;|\},|\] as const;|\} as const;)$/;
 
-/** 注释行：以两个斜杠、星号或斜杠星号开头的行。 */
+/** Comment lines: lines starting with two slashes, an asterisk, or a slash-asterisk. */
 const COMMENT = /^(\/\/|\*|\/\*)/;
 
 /**
- * 判定"整块消失"的最小连续行数。
+ * Minimum number of contiguous lines to declare "a whole block disappeared".
  *
- * 【为什么是 6】单行 / 两行找不到，绝大多数是 Prettier 重新折行、重命名、或者 import
- * 重新拼装；一次真正的"整块漏搬"（`710ff764` 的自由绘制分支）是 260 行连成一片。
- * 阈值定在 6 让判据对前者不敏感、对后者极敏感 —— 这是本脚本唯一需要的取舍。
+ * [Why 6] a single line or two going unmatched is almost always Prettier re-wrapping, a
+ * rename, or re-assembled imports; a real "whole block left behind" (`710ff764`'s freehand
+ * branch) was 260 contiguous lines. A threshold of 6 makes the criterion insensitive to the
+ * former and extremely sensitive to the latter — the only trade-off this script needs.
  */
 const MIN_RUN = 6;
 
@@ -91,21 +110,23 @@ function commits(since) {
         .filter(({ subject }) => /^refactor\(pianoroll\)/.test(subject));
 }
 
-/** 规范化：去首尾空白 + 折叠内部空白。 */
+/** Normalize: trim + collapse internal whitespace. */
 function norm(line) {
     return line.trim().replace(/\s+/g, " ");
 }
 
 /**
- * 某一修订下 `frontend/src` 的全部行（规范化后）。
+ * All lines of `frontend/src` at a given revision (normalized).
  *
- * 【为什么只取一次、且默认取 HEAD】判据问的是"这行代码还在不在仓库里"。逐提交各取
- * 一份是 30 × 1000 次 `git show`（实测十分钟以上）；而"在 C 里被删、后来又加回来"
- * 这种情形本来就应当通过 —— 代码没有丢。因此只收集一份，默认 HEAD。
+ * [Why it is collected once and defaults to HEAD] the criterion asks "does this line of code
+ * still exist in the repo". Fetching one copy per commit would be 30 × 1000 `git show` calls
+ * (measured: over ten minutes); and the case "deleted in C, added back later" is supposed to
+ * pass anyway — the code was not lost. So a single copy is collected, defaulting to HEAD.
  *
- * 想验证"这个检查真的能抓到丢失"，把 `--haystack=` 指向修复之前的修订即可：
+ * To verify "this check really catches loss", point `--haystack=` at the revision before the
+ * fix:
  *   node scripts/audit/split-equivalence.mjs --haystack=17f3a393^
- * 它会精确报出被 `710ff764` 丢掉的那一支。
+ * It reports precisely the branch dropped by `710ff764`.
  */
 function haystackAt(revision) {
     const listing = execFileSync(
@@ -139,7 +160,7 @@ function haystackAt(revision) {
     return lines;
 }
 
-/** 一次提交里被删掉的行（只关心 frontend/src 下的 .ts/.tsx）。 */
+/** Lines deleted by one commit (only .ts/.tsx under frontend/src are considered). */
 function removedLines(commit) {
     const diff = git([
         "show",
@@ -159,7 +180,7 @@ function removedLines(commit) {
             continue;
         }
         if (raw.startsWith("--- ")) {
-            // 新增文件的 `--- /dev/null` 没有可删除的行；`--- a/<path>` 才是真实路径。
+            // `--- /dev/null` for new files has no deletable lines; `--- a/<path>` is the real path.
             file = raw.startsWith("--- a/") ? raw.slice(6) : null;
             continue;
         }
@@ -183,7 +204,7 @@ function main() {
 
     const list = commits(since);
     if (list.length === 0) {
-        console.log(`没有在 ${since}..HEAD 里找到 refactor(pianoroll) 提交`);
+        console.log(`no refactor(pianoroll) commits found in ${since}..HEAD`);
         return 0;
     }
 
@@ -199,7 +220,7 @@ function main() {
 
     for (const { hash, subject } of list) {
         const lines = removedLines(hash);
-        /** 逐文件收集"这一行在 ${haystackRevision} 里找不到"的**连续**片段。 */
+        /** Collect per file the **contiguous** runs of "this line cannot be found in ${haystackRevision}". */
         const runs = [];
         let run = null;
         let previousLineNo = -10;
@@ -209,7 +230,7 @@ function main() {
                 text.length > 0 &&
                 !STRUCTURAL.test(text) &&
                 !COMMENT.test(text) &&
-                // import / export-from 行每次拆分都会被重新拼装，逐字比对没有意义。
+                // import / export-from lines are re-assembled at every split; verbatim comparison is meaningless.
                 !/^(import|\}\s*from)\b/.test(text);
             if (!isCandidate) continue;
             removed += 1;
@@ -228,7 +249,8 @@ function main() {
             }
             previousLineNo = entry.line;
         }
-        // 孤立的一两行几乎总是格式化 / 重命名；**成片的**才是"整块消失"。
+        // Isolated one-or-two-line misses are almost always formatting / renames; **contiguous
+        // runs** are what "whole block disappears" looks like.
         const suspicious = runs.filter((candidate) => candidate.entries.length >= MIN_RUN);
         if (suspicious.length > 0) {
             const count = suspicious.reduce((total, item) => total + item.entries.length, 0);
@@ -238,20 +260,20 @@ function main() {
     }
 
     console.log(
-        `重放 ${list.length} 个提交，检查 ${removed} 行被删除的代码（存在性以 ${haystackRevision} 为准）。`,
+        `replayed ${list.length} commits, checked ${removed} deleted code lines (existence judged against ${haystackRevision}).`,
     );
     if (dropped === 0) {
-        console.log(`✔ 没有任何连续 ${MIN_RUN} 行以上的代码块在删除后消失`);
+        console.log(`✔ no contiguous block of ${MIN_RUN}+ lines disappeared after deletion`);
         return 0;
     }
 
-    console.log(`✘ ${dropped} 行代码成片消失（连续 ≥ ${MIN_RUN} 行）：`);
+    console.log(`✘ ${dropped} lines of code disappeared in contiguous runs (>= ${MIN_RUN} lines):`);
     for (const { hash, subject, suspicious } of report) {
         console.log(`\n${hash.slice(0, 8)}  ${subject}`);
         for (const item of suspicious) {
             const first = item.entries[0];
             console.log(
-                `  ${item.file}:${first.line}  (${item.entries.length} 行)  ${first.text.trim().slice(0, 90)}`,
+                `  ${item.file}:${first.line}  (${item.entries.length} lines)  ${first.text.trim().slice(0, 90)}`,
             );
         }
     }

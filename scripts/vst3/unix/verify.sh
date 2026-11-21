@@ -1,45 +1,49 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# HiFiShifter VST3 bundle 自检（macOS / Linux）。
+# HiFiShifter VST3 bundle self-check (macOS / Linux).
 #
 #     scripts/vst3/unix/verify.sh <path/to/HiFiShifter.vst3>
 #
-# 判据（任何一条不过就退出非零）。设计原则：**只信外部证据** ——
-# 符号表、动态段、真的 dlopen 一次、真的和宿主握一次手、以及"前端产物真的在包里"，
-# 而不是"构建脚本说它没问题"。
+# Criteria (any failure exits non-zero). Design principle: **trust external evidence only** —
+# the symbol table, the dynamic section, a real dlopen, a real handshake with the host, and
+# "the frontend artifacts really are in the package", not "the build script said it was fine".
 #
-#   1 布局  2 导出符号  3 依赖自洽  4 dlopen 黑盒加载  5 macOS bundle 元数据
-#   6 打包卫生  7 前端产物  8 宿主握手（原生扩展 + IID 布局）
+#   1 Layout  2 Exported symbols  3 Dependency closure  4 dlopen black-box load  5 macOS bundle metadata
+#   6 Packaging hygiene  7 Frontend artifacts  8 Host handshake (native extension + IID layout)
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-# 【为什么要先转成绝对路径】第 3 节用 "$BUNDLE"/* 判断"依赖是否落在包内"，
-# 而 ldd 给的是绝对路径。传相对路径时前缀永远对不上，两个包内依赖会被误报成泄漏 ——
-# 本地按 README 的写法跑一次就会红，CI 上却因为传的是绝对路径而绿。
-readonly BUNDLE="$(cd -- "${1:?用法：verify.sh <path/to/HiFiShifter.vst3>}" && pwd)"
+# [Why convert to an absolute path first] section 3 uses "$BUNDLE"/* to decide "is the
+# dependency inside the package", while ldd reports absolute paths. With a relative path the
+# prefix never matches, so two in-package dependencies get reported as leaks — running it
+# locally as the README shows turns red, while CI stays green only because it passes an
+# absolute path.
+readonly BUNDLE="$(cd -- "${1:?usage: verify.sh <path/to/HiFiShifter.vst3>}" && pwd)"
 
 FAILED=0
 ok()   { printf "  \033[32m✓\033[0m %s\n" "$*"; }
 bad()  { printf "  \033[31m✗\033[0m %s\n" "$*"; FAILED=1; }
 note() { printf "    %s\n" "$*"; }
 
-# 插件入口一旦死锁（dlopen / GetPluginFactory / 宿主握手），探针会永远不返回，
-# 把整条打包流水线挂到 job 超时。Windows 的 verify.ps1 明确要求"死锁必须在这里
-# 失败，而不是挂住 CI"；Unix 侧用 coreutils 的 timeout 保持同一纪律。
+# If the plugin entry deadlocks (dlopen / GetPluginFactory / host handshake) the probe never
+# returns and the whole packaging pipeline hangs until job timeout. The Windows verify.ps1
+# states the requirement explicitly: "a deadlock must fail here, not hang CI"; the Unix side
+# keeps the same discipline with coreutils timeout.
 #
-# 【为什么要有 python3 兜底】macOS runner 没有 GNU coreutils，`timeout` 这个命令
-# 根本不存在（vst3-unix.yml 的测试步骤就为此修过一次）。没有兜底时 rc=127，
-# 探针被当成"加载失败"，而日志是空的 —— 包明明是好的，流水线却红了。
-# python3 在两条 CI 腿上都可用（Linux 工作流显式安装、macOS 预装）：用新进程组
-# 限时杀，退出语义与 GNU timeout 对齐（超时 124、子进程被信号打死 128+n）。
+# [Why the python3 fallback] macOS runners have no GNU coreutils, so a `timeout` command does
+# not even exist (the vst3-unix.yml test step was fixed for this once). Without a fallback
+# rc=127, the probe is treated as "load failed", and the log is empty — the package was fine
+# yet the pipeline went red. python3 is available on both CI legs (explicitly installed on
+# Linux, preinstalled on macOS): kill the fresh process group after a time limit, with exit
+# semantics aligned with GNU timeout (timeout 124, child killed by signal 128+n).
 readonly PROBE_TIMEOUT_SEC="${HFS_PROBE_TIMEOUT_SEC:-30}"
 run_probe() {
     if command -v timeout >/dev/null 2>&1; then
         timeout "$PROBE_TIMEOUT_SEC" "$@"
         local rc=$?
         if [ "$rc" -eq 124 ]; then
-            bad "探针 $PROBE_TIMEOUT_SEC 秒未返回（插件入口很可能死锁）"
+            bad "probe did not return within $PROBE_TIMEOUT_SEC seconds (plugin entry likely deadlocked)"
             return 1
         fi
         return "$rc"
@@ -58,23 +62,23 @@ sys.exit(128 - rc if rc < 0 else rc)
 ' "$PROBE_TIMEOUT_SEC" "$@"
     local rc=$?
     if [ "$rc" -eq 124 ]; then
-        bad "探针 $PROBE_TIMEOUT_SEC 秒未返回（插件入口很可能死锁）"
+        bad "probe did not return within $PROBE_TIMEOUT_SEC seconds (plugin entry likely deadlocked)"
         return 1
     fi
     return "$rc"
 }
 
-[ -d "$BUNDLE" ] || { printf "bundle 不存在：%s\n" "$BUNDLE" >&2; exit 2; }
+[ -d "$BUNDLE" ] || { printf "bundle does not exist: %s\n" "$BUNDLE" >&2; exit 2; }
 
 case "$(uname -s)" in
     Linux)  HOST_OS="linux" ;;
     Darwin) HOST_OS="macos" ;;
-    *)      printf "不支持的平台\n" >&2; exit 2 ;;
+    *)      printf "unsupported platform\n" >&2; exit 2 ;;
 esac
 case "$(uname -m)" in
     x86_64|amd64) HOST_ARCH="x86_64" ;;
     arm64|aarch64) HOST_ARCH="arm64" ;;
-    *) printf "不支持的架构：%s\n" "$(uname -m)" >&2; exit 2 ;;
+    *) printf "unsupported architecture: %s\n" "$(uname -m)" >&2; exit 2 ;;
 esac
 
 if [ "$HOST_OS" = "linux" ]; then
@@ -90,20 +94,20 @@ fi
 
 printf "\n[vst3:verify] %s\n" "$BUNDLE"
 
-# ── 1. 布局 ──────────────────────────────────────────────────────────────────
-printf "\n1) 布局\n"
+# ── 1. Layout ────────────────────────────────────────────────────────────────
+printf "\n1) Layout\n"
 if [ -f "$MODULE" ]; then
-    ok "模块在规范路径：${MODULE#"$BUNDLE"/}"
+    ok "module at the canonical path: ${MODULE#"$BUNDLE"/}"
 else
-    bad "找不到模块：$MODULE"
-    printf "\n布局不对，后续检查没有意义。\n" >&2
+    bad "module not found: $MODULE"
+    printf "\nLayout is wrong; the remaining checks are meaningless.\n" >&2
     exit 1
 fi
 [ -f "$BUNDLE/Contents/Resources/models/models.json" ] \
-    && ok "模型清单存在" || bad "缺少 Contents/Resources/models/models.json"
+    && ok "model manifest present" || bad "missing Contents/Resources/models/models.json"
 
-# ── 2. 导出符号 ──────────────────────────────────────────────────────────────
-printf "\n2) 导出符号\n"
+# ── 2. Exported symbols ──────────────────────────────────────────────────────
+printf "\n2) Exported symbols\n"
 if [ "$HOST_OS" = "linux" ]; then
     SYMBOLS="$(nm -D --defined-only "$MODULE" 2>/dev/null || true)"
 else
@@ -113,28 +117,31 @@ for symbol in $REQUIRED_SYMBOLS; do
     if printf "%s" "$SYMBOLS" | grep -Eq "(^|[[:space:]])_?${symbol}$"; then
         ok "$symbol"
     else
-        bad "缺少导出符号 ${symbol}（宿主会显示 0 个类，且不报错）"
+        bad "missing exported symbol ${symbol} (the host will show 0 classes and not complain)"
     fi
 done
 
-# ── 3. 依赖自洽 ──────────────────────────────────────────────────────────────
+# ── 3. Dependency closure ────────────────────────────────────────────────────
 #
-# 判据：每一条动态依赖要么在 bundle 内，要么是**系统库**（/lib、/usr/lib 前缀）。
-# 其余一律算泄漏 —— 编译环境的绝对路径在目标系统上必然不存在。
-printf "\n3) 动态依赖\n"
+# Criterion: every dynamic dependency must be either inside the bundle or a **system library**
+# (/lib, /usr/lib prefix). Everything else counts as a leak — the build environment's absolute
+# paths are guaranteed not to exist on the target system.
+printf "\n3) Dynamic dependencies\n"
 ESCAPED=()
 if [ "$HOST_OS" = "linux" ]; then
-    # 【为什么要清掉 LD_LIBRARY_PATH】本检查回答的是"用户机上能否解析"：用户没有
-    # 构建树的搜索路径，依赖只能靠模块自带的 $ORIGIN rpath 与 bundle 内的邻居。
-    # CI 任务级的 LD_LIBRARY_PATH（linuxdeploy / 打包步需要它，指向
-    # backend/target/dist）优先级高于 DT_RUNPATH，会把 libwebgpu_dawn.so 劫持到
-    # 构建树 —— 判据因此被编译环境污染，bundle 内明明有也会被误报成"外部"。
+    # [Why LD_LIBRARY_PATH is cleared] this check answers "can it resolve on the user's
+    # machine": the user has no search paths into the build tree, so dependencies can only
+    # come from the module's own $ORIGIN rpath and its in-bundle neighbors. A CI job-level
+    # LD_LIBRARY_PATH (needed by linuxdeploy / the packaging step, pointing at
+    # backend/target/dist) takes precedence over DT_RUNPATH and hijacks libwebgpu_dawn.so
+    # into the build tree — the criterion would be polluted by the build environment, and
+    # something present inside the bundle would be misreported as "external".
     LINKAGE="$(env -u LD_LIBRARY_PATH ldd "$MODULE" 2>&1 || true)"
     if printf "%s" "$LINKAGE" | grep -q "not found"; then
-        bad "有依赖解析不到："
+        bad "some dependencies cannot be resolved:"
         printf "%s\n" "$LINKAGE" | grep "not found" | sed "s/^/    /"
     else
-        ok "ldd 全部解析成功"
+        ok "ldd resolved everything"
     fi
     while IFS= read -r linkage_line; do
         dep="$(printf "%s" "$linkage_line" | sed -n "s/.*=> \(\/[^ ]*\).*/\1/p")"
@@ -147,116 +154,120 @@ if [ "$HOST_OS" = "linux" ]; then
     done <<< "$LINKAGE"
 else
     LINKAGE="$(otool -L "$MODULE" 2>&1 || true)"
-    # 【为什么要跳过自己】otool -L 的第一条"依赖"其实是模块自己的 install name
-    # （LC_ID_DYLIB），链接时写的是编译环境的绝对路径 —— 它不是依赖，却会在这条
-    # "有没有指向包外部的东西"的判据里自己举报自己。用 otool -D 精确取出它。
+    # [Why the module itself is skipped] otool -L's first "dependency" is really the module's
+    # own install name (LC_ID_DYLIB), written at link time as a build-environment absolute
+    # path — it is not a dependency, yet it would denounce itself under this "anything
+    # pointing outside the package" criterion. otool -D extracts it precisely.
     SELF_ID="$(otool -D "$MODULE" 2>/dev/null | tail -n +2 | head -1 || true)"
     while IFS= read -r linkage_line; do
         dep="$(printf "%s" "$linkage_line" | sed -E "s/^[[:space:]]*//; s/ \(compatibility.*$//")"
         [ -z "$dep" ] && continue
         case "$dep" in
-            # otool -L 的第一条是模块自己的 install name（LC_ID_DYLIB），不是依赖。
+            # otool -L's first entry is the module's own install name (LC_ID_DYLIB), not a dependency.
             "$MODULE") continue ;;
             "$SELF_ID") continue ;;
             /usr/lib/*|/System/*) continue ;;
             @rpath/*|@loader_path/*)
-                # @rpath 的条目必须能在 Frameworks 里找到实体，否则照样加载失败。
+                # An @rpath entry must resolve to a real file inside Frameworks, otherwise loading fails anyway.
                 base="$(basename "$dep")"
-                [ -f "$LIB_DIR/$base" ] || bad "依赖 $base 声明为 $dep 但 $LIB_DIR 里没有它"
+                [ -f "$LIB_DIR/$base" ] || bad "dependency $base declared as $dep but $LIB_DIR does not contain it"
                 ;;
             *) ESCAPED+=("$dep") ;;
         esac
     done <<< "$(printf "%s\n" "$LINKAGE" | tail -n +2)"
 fi
 if [ ${#ESCAPED[@]} -eq 0 ]; then
-    ok "没有指向 bundle 外部的非系统依赖"
+    ok "no non-system dependencies pointing outside the bundle"
 else
-    bad "以下依赖指向 bundle 外部（用户机上大概率不存在）："
+    bad "the following dependencies point outside the bundle (very likely absent on the user's machine):"
     printf "    %s\n" "${ESCAPED[@]}"
 fi
 
-# ── 4. 黑盒加载 ──────────────────────────────────────────────────────────────
-printf "\n4) 黑盒加载（dlopen → 入口 → 工厂）\n"
+# ── 4. Black-box load ────────────────────────────────────────────────────────
+printf "\n4) Black-box load (dlopen → entry → factory)\n"
 PROBE_DIR="$(mktemp -d)"
 trap "rm -rf \"$PROBE_DIR\"" EXIT
 EXTRA_LIBS=""
 [ "$HOST_OS" = "linux" ] && EXTRA_LIBS="-ldl"
     if cc -O1 -Wall -o "$PROBE_DIR/probe" "$SCRIPT_DIR/probe.c" $EXTRA_LIBS 2>"$PROBE_DIR/cc.log"; then
-        # 与上面同理：黑盒加载是打包形态的事实核查，不带编译树的搜索路径。
+        # Same reasoning as above: the black-box load is a fact check of the packaged form,
+        # with no search paths from the build tree.
         if run_probe env -u LD_LIBRARY_PATH "$PROBE_DIR/probe" "$MODULE" >"$PROBE_DIR/out.log" 2>&1; then
-        ok "模块可加载，工厂可用"
+        ok "module loads, factory usable"
         sed "s/^/    /" "$PROBE_DIR/out.log"
     else
-        bad "黑盒加载失败："
+        bad "black-box load failed:"
         sed "s/^/    /" "$PROBE_DIR/out.log"
     fi
 else
-    bad "探针编译失败（需要 C 编译器）："
+    bad "probe compilation failed (a C compiler is required):"
     sed "s/^/    /" "$PROBE_DIR/cc.log"
 fi
 
-# ── 5. macOS bundle 元数据 ───────────────────────────────────────────────────
+# ── 5. macOS bundle metadata ─────────────────────────────────────────────────
 if [ "$HOST_OS" = "macos" ]; then
-    printf "\n5) macOS bundle 元数据\n"
+    printf "\n5) macOS bundle metadata\n"
     PLIST="$BUNDLE/Contents/Info.plist"
     if [ -f "$PLIST" ]; then
-        ok "Info.plist 存在"
+        ok "Info.plist present"
         EXEC_NAME="$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$PLIST" 2>/dev/null || true)"
         if [ -n "$EXEC_NAME" ] && [ -f "$BUNDLE/Contents/MacOS/$EXEC_NAME" ]; then
-            ok "CFBundleExecutable=$EXEC_NAME 指向真实文件"
+            ok "CFBundleExecutable=$EXEC_NAME points at a real file"
         else
-            bad "CFBundleExecutable 缺失或指向不存在的文件（宿主不会加载这个 bundle）"
+            bad "CFBundleExecutable missing or pointing at a non-existent file (hosts will not load this bundle)"
         fi
     else
-        bad "缺少 Contents/Info.plist"
+        bad "missing Contents/Info.plist"
     fi
     if codesign --verify --strict "$BUNDLE" >/dev/null 2>&1; then
-        ok "签名有效（ad-hoc）"
+        ok "signature valid (ad-hoc)"
     else
-        bad "签名校验失败（arm64 上无法加载）"
+        bad "signature verification failed (will not load on arm64)"
     fi
 else
-    printf "\n5) macOS bundle 元数据 —— 本平台不适用\n"
+    printf "\n5) macOS bundle metadata — not applicable on this platform\n"
 fi
 
-# ── 6. 打包卫生 ──────────────────────────────────────────────────────────────
-printf "\n6) 打包卫生\n"
-# 【为什么查悬空链接】ORT 的 libwebgpu_dawn 在 target 下是**指向 ~/.cache 的符号链接**；
-# cp 时不加 -L 就会把链接本身打进产物，在用户机上指向一个不存在的路径。
+# ── 6. Packaging hygiene ─────────────────────────────────────────────────────
+printf "\n6) Packaging hygiene\n"
+# [Why dangling links are checked] ORT's libwebgpu_dawn under target/ is a **symlink into
+# ~/.cache**; cp without -L packs the link itself into the artifact, pointing at a path that
+# does not exist on the user's machine.
 DANGLING="$(find "$BUNDLE" -type l ! -exec test -e {} \; -print 2>/dev/null || true)"
 if [ -z "$DANGLING" ]; then
-    ok "没有悬空符号链接"
+    ok "no dangling symlinks"
 else
-    bad "存在悬空符号链接："
+    bad "dangling symlinks found:"
     printf "%s\n" "$DANGLING" | sed "s/^/    /"
 fi
 MODULE_KIND="$(file -b "$MODULE" 2>/dev/null || echo unknown)"
 if [ "$HOST_OS" = "linux" ]; then
     case "$MODULE_KIND" in
-        *ELF*shared\ object*) ok "模块是 ELF 共享库" ;;
-        *) bad "模块不是 ELF 共享库：$MODULE_KIND" ;;
+        *ELF*shared\ object*) ok "module is an ELF shared library" ;;
+        *) bad "module is not an ELF shared library: $MODULE_KIND" ;;
     esac
 else
     case "$MODULE_KIND" in
-        *Mach-O*) ok "模块是 Mach-O" ;;
-        *) bad "模块不是 Mach-O：$MODULE_KIND" ;;
+        *Mach-O*) ok "module is Mach-O" ;;
+        *) bad "module is not Mach-O: $MODULE_KIND" ;;
     esac
 fi
 
 
-# ── 7. 前端产物 ──────────────────────────────────────────────────────────────
+# ── 7. Frontend artifacts ────────────────────────────────────────────────────
 #
-# 【为什么这三条必须在这里】缺一个 asset 的 bundle 是最常见的打包漏项，而它的表现是
-# "插件窗口一片空白" —— 宿主不会报错，日志里也没有一行。三条判据分别覆盖：有没有 html、
-# html 引用的 js/css 在不在、有没有偷偷依赖远程资源。
-printf "\n7) 前端产物\n"
+# [Why these three checks live here] a bundle missing one asset is the most common packaging
+# omission, and its symptom is "the plugin window is completely blank" — the host does not
+# complain and no log line appears. The three criteria cover: is there an html, do the
+# js/css files the html references exist, and does anything secretly depend on remote resources.
+printf "\n7) Frontend artifacts\n"
 FRONTEND="$BUNDLE/Contents/Resources/frontend"
 if [ -s "$FRONTEND/plugin.html" ]; then
-    ok "plugin.html 存在（$(du -h "$FRONTEND/plugin.html" | cut -f1)）"
+    ok "plugin.html present ($(du -h "$FRONTEND/plugin.html" | cut -f1))"
 else
-    bad "缺少或为空的 Contents/Resources/frontend/plugin.html"
+    bad "missing or empty Contents/Resources/frontend/plugin.html"
 fi
-# html 里引用的每个 js/css 都必须真的存在。
+# Every js/css referenced by the html must really exist.
 MISSING_ASSETS=""
 if [ -s "$FRONTEND/plugin.html" ]; then
     while IFS= read -r asset; do
@@ -270,16 +281,17 @@ if [ -s "$FRONTEND/plugin.html" ]; then
         | sed -E 's/^(src|href)="//; s/"$//' || true)"
 fi
 if [ -z "$MISSING_ASSETS" ]; then
-    ok "html 引用的 js/css 都在 bundle 内"
+    ok "every js/css referenced by the html is inside the bundle"
 else
-    bad "html 引用了不存在的资源：$MISSING_ASSETS"
+    bad "html references non-existent resources: $MISSING_ASSETS"
 fi
-# 远程引用：插件窗口必须离线可用。
+# Remote references: the plugin window must work offline.
 #
-# 【为什么只查 html/css 的**属性**而不是全库 grep】压缩后的 JS 里到处是
-# `http://www.w3.org/2000/svg` 这类**命名空间字符串**和许可证里的链接 —— 它们不加载
-# 任何东西，却会让全库 grep 每次都报一堆假阳性，最终被所有人忽略。真正能触发网络请求的只有
-# html 的 src/href 与 css 的 url()，判据就只查这两处。
+# [Why only html/css **attributes** are checked instead of a repo-wide grep] minified JS is
+# full of **namespace strings** like `http://www.w3.org/2000/svg` and links inside license
+# text — they load nothing, yet they make a repo-wide grep report piles of false positives
+# that everyone eventually ignores. The only things that can trigger a network request are
+# the html's src/href and css's url(), so the criteria look at exactly those two places.
 REMOTE=""
 if [ -d "$FRONTEND" ]; then
     HTML_REMOTE="$(grep -rInE "(src|href)[[:space:]]*=[[:space:]]*[\"']https?://" \
@@ -289,44 +301,47 @@ if [ -d "$FRONTEND" ]; then
     REMOTE="$(printf "%s\n%s\n" "$HTML_REMOTE" "$CSS_REMOTE" | sed "/^$/d")"
 fi
 if [ -z "$REMOTE" ]; then
-    ok "html/css 里没有远程引用"
+    ok "no remote references in html/css"
 else
-    note "下列位置引用了远程资源："
+    note "the following locations reference remote resources:"
     printf "%s\n" "$REMOTE" | sed "s/^/    /"
-    bad "前端产物里有远程引用（离线打开会失败）"
+    bad "remote references in the frontend artifacts (offline opening will fail)"
 fi
-# ── 8. 宿主握手 ──────────────────────────────────────────────────────────────
+# ── 8. Host handshake ────────────────────────────────────────────────────────
 #
-# 【为什么这条必须在打包门禁里】VST3 的 IID 是**逐字节**比较的，而 `INLINE_UID`
-# 按 `COM_COMPATIBLE` 展开成两种布局：Windows 是 COM/GUID，Linux / macOS 是每字大端。
-# 发错布局的失败形态是"宿主回一个空指针"——不崩、不报错，Windows 上完全看不出来，
-# 而在 Unix 上等于 ARA 拿不到 item、编辑器与处理器断链、工程永不标脏。
+# [Why this belongs in the packaging gate] VST3 IIDs are compared **byte for byte**, and
+# `INLINE_UID` expands into two layouts depending on `COM_COMPATIBLE`: Windows uses
+# COM/GUID, Linux / macOS use big-endian per 32-bit word. The failure shape of sending the
+# wrong layout is "the host answers with a null pointer" — no crash, no error, completely
+# invisible on Windows, while on Unix it means ARA gets no item, the editor and processor
+# lose their link, and the project never marks itself dirty.
 #
-# 探针自己实现 `IHostApplication` 与 `IReaperHostApplication`（**只按本平台布局**），
-# 走一遍 `setHostContext → createInstance → initialize`，然后读插件日志断言三行。
-# 不建视图、不碰 X11，所以无显示环境也能跑。
-printf "\n8) 宿主握手（原生扩展 + IID 布局）\n"
+# The probe implements `IHostApplication` and `IReaperHostApplication` itself (**using only
+# this platform's layout**), walks `setHostContext → createInstance → initialize`, then reads
+# the plugin log and asserts three lines. No view is built and X11 is not touched, so it runs
+# without a display server.
+printf "\n8) Host handshake (native extension + IID layout)\n"
 if [ "$HOST_OS" = "linux" ]; then
     if cc -O1 -Wall -o "$PROBE_DIR/host_iid" "$SCRIPT_DIR/host_iid_probe.c" -ldl \
         2>"$PROBE_DIR/host_iid-cc.log"; then
         if run_probe "$PROBE_DIR/host_iid" "$MODULE" "$PROBE_DIR/handshake" >"$PROBE_DIR/host_iid.log" 2>&1; then
-            ok "插件按本平台布局拿到了宿主的原生扩展"
+            ok "plugin obtained the host's native extension using this platform's layout"
             sed "s/^/    /" "$PROBE_DIR/host_iid.log"
         else
-            bad "宿主握手失败（插件拿不到 IReaperHostApplication）："
+            bad "host handshake failed (plugin cannot obtain IReaperHostApplication):"
             sed "s/^/    /" "$PROBE_DIR/host_iid.log"
         fi
     else
-        bad "握手探针编译失败（需要 C 编译器）："
+        bad "handshake probe compilation failed (a C compiler is required):"
         sed "s/^/    /" "$PROBE_DIR/host_iid-cc.log"
     fi
 else
-    printf "    macOS 跳过：探针按 ELF 的加载路径编写，Darwin 需要另做一次\n"
+    printf "    macOS skipped: the probe is written against ELF's loading path; Darwin needs its own pass\n"
 fi
 
 if [ "$FAILED" = "0" ]; then
-    printf "\n[vst3:verify] 全部通过\n\n"
+    printf "\n[vst3:verify] all checks passed\n\n"
     exit 0
 fi
-printf "\n[vst3:verify] 有检查未通过\n\n" >&2
+printf "\n[vst3:verify] some checks failed\n\n" >&2
 exit 1

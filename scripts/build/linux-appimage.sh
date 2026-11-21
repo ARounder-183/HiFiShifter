@@ -1,55 +1,60 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# HiFiShifter AppImage 打包：**唯一**一处决定"包里带什么、运行时要宿主给什么"。
+# HiFiShifter AppImage packaging: the **single** place that decides "what the bundle carries and
+# what the runtime expects the host to provide".
 #
-# ── 为什么要有这个文件 ─────────────────────────────────────────────────
-# AppImage 的默认行为是"把可执行文件的动态依赖尽量复制进来"。对 Tauri 应用而言，
-# 这条规则会把宿主桌面栈里**必须由宿主提供**的东西也一起卷进来：WebKitGTK、
-# GStreamer、以及一串只有 WebKit 才用的 ICU / libsoup / enchant。于是同一个子
-# 系统被劈成两半——GTK 来自包内（Ubuntu 24.04 的副本），libEGL / libwayland-client
-# / Mesa 来自宿主。缝上两边的版本一旦对不上，WebKit 就在启动时直接 abort：
+# ── Why this file exists ──────────────────────────────────────────────
+# AppImage's default behavior is "copy in as many of the executable's dynamic dependencies as
+# possible". For a Tauri app, that rule also sweeps in things in the host desktop stack that
+# **must come from the host**: WebKitGTK, GStreamer, and the ICU / libsoup / enchant that only
+# WebKit uses. The same subsystem then gets split in two — GTK from inside the bundle (the
+# Ubuntu 24.04 copy), libEGL / libwayland-client / Mesa from the host. The moment the versions
+# on the two sides of that seam disagree, WebKit aborts right at startup:
 #
 #     Could not create default EGL display: EGL_BAD_PARAMETER. Aborting...
 #
-# 这不是假设：v0.1.0-beta.13 的反馈（Arch/CachyOS + AMD RX560，需要用
-# LD_PRELOAD 加载 libwayland-client.so 才能启动）就是这条缝的症状。当时的
-# "修复"（2026-07-30 的两个提交）用 find -type f 收集库文件，而 Ubuntu 上这些
-# SONAME 全是符号链接，于是**一个文件都没打进包**，问题原样保留。
+# This is not hypothetical: the v0.1.0-beta.13 feedback (Arch/CachyOS + AMD RX560, needing
+# LD_PRELOAD of libwayland-client.so to start at all) was a symptom of exactly this seam. The
+# "fix" at the time (the two commits of 2026-07-30) collected library files with find -type f,
+# but on Ubuntu those SONAMEs are all symlinks, so **not one file** made it into the bundle and
+# the problem shipped unchanged.
 #
-# ── 现在的策略：桌面栈整块交给宿主 ─────────────────────────────────────
-# 包内只保留"产品自己的东西"和 GTK3（Tauri 的 linuxdeploy-plugin-gtk 的既有
-# 行为，全生态的 AppImage 都这么发，ABI 稳定）：
+# ── The current strategy: hand the whole desktop stack to the host ────
+# The bundle keeps only "the product's own files" plus GTK3 (the existing behavior of Tauri's
+# linuxdeploy-plugin-gtk; how AppImages across the whole ecosystem ship, ABI stable):
 #
-#   * 随包：HiFiShifter 可执行文件、libSoundTouchDLL.so、libwebgpu_dawn.so、models
-#   * 宿主提供：WebKitGTK、GStreamer、ICU、libsoup、libEGL/GLES、libgbm/libdrm、
-#     libwayland-*、libxkbcommon
+#   * bundled: the HiFiShifter executable, libSoundTouchDLL.so, libwebgpu_dawn.so, models
+#   * host-provided: WebKitGTK, GStreamer, ICU, libsoup, libEGL/GLES, libgbm/libdrm,
+#     libwayland-*, libxkbcommon
 #
-# 这样 EGL / Wayland / Mesa 只有宿主那一份，WebKit 与它们同源，缝不存在。
+# EGL / Wayland / Mesa then exist only as the host's copy, WebKit uses that same copy, and the
+# seam is gone.
 #
-# 代价：宿主必须有 webkit2gtk-4.1（Arch/CachyOS、Ubuntu 24.04+、Fedora 39+、
-# Debian 13+、openSUSE Tumbleweed 都提供；Ubuntu 22.04 只有 4.0，不再支持）。
+# Cost: the host must have webkit2gtk-4.1 (provided by Arch/CachyOS, Ubuntu 24.04+, Fedora 39+,
+# Debian 13+ and openSUSE Tumbleweed; Ubuntu 22.04 only has 4.0 and is no longer supported).
 #
-# ── 被否决的另一条路 ──────────────────────────────────────────────────
-# "把 WebKit 连同 GL / DRM / GStreamer 插件 / DRI 驱动整套打进包"也能消除缝，
-# 但要同时背下：包体翻倍、NVIDIA 用户的 libEGL 根本没法随包分发（驱动专有）、
-# Mesa 与内核版本强耦合、以及 glvnd vendor JSON 的重定向。那只是换一种方式继续
-# 制造同一类故障，所以不采用。
+# ── The rejected alternative ──────────────────────────────────────────
+# "Bundle WebKit together with GL / DRM / GStreamer plugins / DRI drivers" would also remove the
+# seam, but it means taking on all of: double the bundle size, libEGL that cannot be distributed
+# with the bundle at all for NVIDIA users (proprietary drivers), Mesa tightly coupled to the
+# kernel version, and the glvnd vendor JSON redirection. That just keeps manufacturing the same
+# class of failure in another form, so it is not used.
 #
-# ── 用法 ──────────────────────────────────────────────────────────────
-#   linux-appimage.sh package <release-dir>      # 剪裁 → 校验 → 重打包 → 冒烟
-#   linux-appimage.sh prune   <AppDir>           # 只剪裁
-#   linux-appimage.sh verify  <AppDir>           # 只校验（不修改任何东西）
-#   linux-appimage.sh repack  <AppDir> [out]     # 只重打包
-#   linux-appimage.sh smoke   <AppImage>         # 只冒烟
+# ── Usage ─────────────────────────────────────────────────────────────
+#   linux-appimage.sh package <release-dir>      # prune → verify → repack → smoke
+#   linux-appimage.sh prune   <AppDir>           # prune only
+#   linux-appimage.sh verify  <AppDir>           # verify only (modifies nothing)
+#   linux-appimage.sh repack  <AppDir> [out]     # repack only
+#   linux-appimage.sh smoke   <AppImage>         # smoke only
 #
-# 环境变量：
-#   HIFISHIFTER_SKIP_SMOKE=1        跳过冒烟（CI 只构建时用）
-#   HIFISHIFTER_SMOKE_REQUIRED=1    没有 xvfb-run 时视为失败
-#   HIFISHIFTER_SMOKE_TIMEOUT=45    冒烟超时秒数
-#   HIFISHIFTER_EXTERNAL_MODELS=1   去掉 AppImage 内的权重，只留 models.json（三合一包用）
-#   HIFISHIFTER_SMOKE_MODELS_DIR=DIR 外部模型目录；配合 external models 给冒烟用
-#   ARCH=x86_64|aarch64             appimagetool 的目标架构（默认 uname -m）
+# Environment variables:
+#   HIFISHIFTER_SKIP_SMOKE=1        skip smoke (for CI build-only runs)
+#   HIFISHIFTER_SMOKE_REQUIRED=1    treat a missing xvfb-run as a failure
+#   HIFISHIFTER_SMOKE_TIMEOUT=45    smoke timeout in seconds
+#   HIFISHIFTER_EXTERNAL_MODELS=1   drop the weights inside the AppImage, keep only models.json (unified package)
+#   HIFISHIFTER_SMOKE_MODELS_DIR=DIR external model directory; for the smoke test with external models
+#   ARCH=x86_64|aarch64             target architecture for appimagetool (default uname -m)
 
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SELF_DIR/../.." && pwd)
@@ -61,25 +66,26 @@ die() {
 
 HFS_APP_ARCH=""
 normalize_arch() {
-    # 【为什么写进变量而不是 stdout】顶层数组会调用两次本函数；非法 ARCH 时若在
-    # 命令替换的子 shell 里 die，外层只看到一次失败却会继续跑 usage，且报错重复。
-    # 这里在**当前 shell**解析一次并直接退出，后面统一复用这份结果。
+    # [Why write into a variable instead of stdout] The top level calls this function twice; with
+    # an invalid ARCH, if die fires inside the command-substitution subshell, the outer shell sees
+    # one failure yet keeps running usage, and the error is duplicated. Parse once here in the
+    # **current shell** and exit directly; everything after reuses this result.
     case "${ARCH:-$(uname -m)}" in
         x86_64 | amd64) HFS_APP_ARCH=x86_64 ;;
         aarch64 | arm64) HFS_APP_ARCH=aarch64 ;;
-        *) die "不支持的架构：${ARCH:-$(uname -m)}" ;;
+        *) die "unsupported architecture: ${ARCH:-$(uname -m)}" ;;
     esac
 }
 normalize_arch
 
-# 必须随包提供、缺一不可的文件（相对 AppDir）。
+# Files that must ship in the bundle — every one required (relative to AppDir).
 #
-# 【libwebgpu_dawn.so 为什么按架构区分】Linux ARM64 的 ort 刻意不带 webgpu
-# feature（没有预编译的 dawn，见 backend/src-tauri/Cargo.toml 的 target 分支；
-# scripts/plugin/unix/lib.sh 的 HFS_ARCH=arm64 分支是同一结论）——产物里既不会
-# 存在也不会 NEEDED dawn。无条件列进来会让 linux-arm64 发布腿在 verify 的
-# "文件存在" 与 "NEEDED 解析" 两处必挂，且 CI 的 if:failure() 兜底会把没过
-# 校验的 AppImage 照样上传。
+# [Why libwebgpu_dawn.so is per-architecture] ort on Linux ARM64 deliberately does not enable the
+# webgpu feature (no prebuilt dawn; see the target branches in backend/src-tauri/Cargo.toml; the
+# HFS_ARCH=arm64 branch of scripts/plugin/unix/lib.sh reaches the same conclusion) — the artifact
+# neither contains nor NEEDs dawn. Listing it unconditionally would fail the linux-arm64 release
+# leg in verify at both "file exists" and "NEEDED resolution", and CI's if:failure() backstop
+# would upload the AppImage that failed verification anyway.
 case "$HFS_APP_ARCH" in
     aarch64)
         REQUIRED_FILES=(
@@ -98,10 +104,12 @@ case "$HFS_APP_ARCH" in
         ;;
 esac
 
-# 必须由宿主提供、包内一份都不许留的库（glob，作用于 usr/lib 与 usr/lib64 顶层）。
+# Libraries the host must provide — not one may remain in the bundle (globs, applied to the top
+# level of usr/lib and usr/lib64).
 #
-# 判据只有一条：**它的消费者是谁**。WebKit / GStreamer / GL / Wayland 的消费者
-# 是宿主，所以这些库必须整组来自宿主；留下半组就是 2026-07 那个故障的复现条件。
+# There is only one criterion: **who consumes it**. WebKit / GStreamer / GL / Wayland are
+# consumed by the host, so these libraries must come from the host as whole groups; leaving half
+# a group behind reproduces the 2026-07 failure.
 HOST_OWNED_GLOBS=(
     'libwebkit2gtk-*.so*'
     'libjavascriptcoregtk-*.so*'
@@ -119,8 +127,9 @@ HOST_OWNED_GLOBS=(
     'libglapi.so*'
 )
 
-# 可执行文件的直接 NEEDED 里，必须"落在包外"的条目 —— 这就是"单一图形栈"的
-# 可执行断言。libwayland-client 单独列出，因为 2026-07 的用户偏方正是 preload 它。
+# Entries among the executable's direct NEEDED that must "land outside the bundle" — the
+# executable-level assertion of the "single graphics stack". libwayland-client is listed
+# separately, because the 2026-07 user workaround was precisely preloading it.
 MUST_RESOLVE_HOST=(
     libwebkit2gtk-4.1.so.0
     libjavascriptcoregtk-4.1.so.0
@@ -128,17 +137,17 @@ MUST_RESOLVE_HOST=(
     libwayland-client.so.0
 )
 
-# 直接 NEEDED 里必须"落在包内"的条目（自有库 + Tauri 打包的 GTK）。
+# Entries among the direct NEEDED that must "land inside the bundle" (own libraries + the GTK that Tauri bundles).
 #
-# 【为什么没有 libSoundTouchDLL.so】SoundTouch 已改为**运行期 dlopen**（libloading
-# 按绝对路径加载，见 kernel soundtouch.rs 的 pack_layout_candidates）：它不在
-# DT_NEEDED 里，ldd 自然解析不到；rpath 也帮不上忙（linuxdeploy 会用 patchelf
-# 整段替换 RUNPATH）。随包存在性由 REQUIRED_FILES 断言，加载器的候选清单由
-# kernel 的 pack_layout_candidates_cover_every_bundled_location 单测钉死 ——
-# 两份清单必须互为镜像。
+# [Why libSoundTouchDLL.so is absent] SoundTouch has moved to **runtime dlopen** (libloading with
+# absolute paths; see pack_layout_candidates in kernel soundtouch.rs): it is not in DT_NEEDED, so
+# ldd naturally cannot resolve it, and rpath would not help either (linuxdeploy replaces the whole
+# RUNPATH with patchelf). Bundled presence is asserted by REQUIRED_FILES, and the loader's
+# candidate list is pinned by the kernel unit test
+# pack_layout_candidates_cover_every_bundled_location — the two lists must mirror each other.
 #
-# 【libwebgpu_dawn.so 为什么按架构区分】同上方 REQUIRED_FILES 的说明：
-# ARM64 Linux 没有 dawn，NEEDED 断言在该平台上必须跳过它。
+# [Why libwebgpu_dawn.so is per-architecture] Same note as REQUIRED_FILES above: ARM64 Linux has
+# no dawn, and the NEEDED assertion must skip it on that platform.
 case "$HFS_APP_ARCH" in
     aarch64)
         MUST_RESOLVE_BUNDLE=(
@@ -157,12 +166,12 @@ esac
 
 usage() {
     cat <<'EOF'
-用法：
-  linux-appimage.sh package <release-dir>   剪裁 → 校验 → 重打包 → 冒烟（CI 与本地都用这一条）
-  linux-appimage.sh prune   <AppDir>        删除必须由宿主提供的库
-  linux-appimage.sh verify  <AppDir>        断言包内该有什么、不该有什么、动态解析落在哪里
-  linux-appimage.sh repack  <AppDir> [out]  用 appimagetool 重新生成 AppImage
-  linux-appimage.sh smoke   <AppImage>      在 xvfb 下启动，要求出现启动日志且没有 abort
+Usage:
+  linux-appimage.sh package <release-dir>   prune → verify → repack → smoke (one entry point for CI and local builds)
+  linux-appimage.sh prune   <AppDir>        remove the libraries the host must provide
+  linux-appimage.sh verify  <AppDir>        assert what the bundle must and must not contain, and where dynamic resolution lands
+  linux-appimage.sh repack  <AppDir> [out]  regenerate the AppImage with appimagetool
+  linux-appimage.sh smoke   <AppImage>      start under xvfb, requiring a startup log and no abort
 EOF
 }
 
@@ -171,10 +180,10 @@ note() {
 }
 
 require_dir() {
-    [ -d "$1" ] || die "不是目录：$1"
+    [ -d "$1" ] || die "not a directory: $1"
 }
 
-# 找一个可用的 appimagetool：先看 PATH，再看缓存，最后下载。
+# Find a usable appimagetool: check PATH first, then the cache, then download.
 ensure_appimagetool() {
     local arch="$1"
     if command -v appimagetool >/dev/null 2>&1; then
@@ -188,7 +197,7 @@ ensure_appimagetool() {
         printf 'downloading appimagetool (%s)...\n' "$arch" >&2
         curl -fsSL -o "$cached" \
             "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$arch.AppImage" \
-            || die "appimagetool 下载失败；请把它放到 PATH 上"
+            || die "failed to download appimagetool; put it on PATH"
         chmod +x "$cached"
     fi
     printf '%s\n' "$cached"
@@ -214,8 +223,9 @@ cmd_prune() {
         done
     done
 
-    # WebKit 的辅助进程（WebKitWebProcess / WebKitNetworkProcess / injected bundle）
-    # 与 GStreamer 插件目录：前者只有 WebKit 用，后者与宿主核心版本强绑定。
+    # WebKit's helper processes (WebKitWebProcess / WebKitNetworkProcess / injected bundle)
+    # and the GStreamer plugin directory: only WebKit uses the former; the latter is tightly
+    # bound to the host's core version.
     while IFS= read -r -d '' path; do
         rm -rf -- "$path"
         removed=$((removed + 1))
@@ -226,29 +236,30 @@ cmd_prune() {
     printf 'pruned %d entries: %s MiB -> %s MiB\n' "$removed" "$before" "$after"
 
     if [ "$removed" -eq 0 ]; then
-        # 剪裁掉 0 项通常意味着 AppDir 已经剪过，不是错误，但值得说一句。
-        printf 'note: 没有匹配到任何宿主库（可能已经剪裁过）\n'
+        # Pruning 0 entries usually means the AppDir was pruned before; not an error, but worth saying.
+        printf 'note: no host-owned libraries matched (possibly already pruned)\n'
     fi
 }
 
 # ── strip models ──────────────────────────────────────────────────────
 
-# 三合一包把权重放在安装目录的 models/<version>，AppImage 只保留清单。
-# AppImage 是只读 squashfs，运行时无法从里面把权重"共享"给插件；如果继续
-# 把权重留在 AppImage，安装后同一份权重会同时存在于 AppImage 与共享库。
+# The unified package puts the weights in the install directory's models/<version>, and the
+# AppImage keeps only the manifest. An AppImage is read-only squashfs; at runtime the weights
+# cannot be "shared" out of it to the plugins. If the weights stayed in the AppImage, after
+# installing, the same weights would exist in both the AppImage and the shared store.
 cmd_strip_models() {
     local appdir="$1" models
     require_dir "$appdir"
     models="$appdir/usr/lib/HiFiShifter/models"
     require_dir "$models"
-    [ -f "$models/models.json" ] || die "缺少模型清单：$models/models.json"
+    [ -f "$models/models.json" ] || die "missing model manifest: $models/models.json"
     find "$models" -mindepth 1 -maxdepth 1 ! -name 'models.json' -exec rm -rf {} +
-    printf 'external models: %s（只保留 models.json）\n' "$models"
+    printf 'external models: %s (kept only models.json)\n' "$models"
 }
 
 # ── verify ────────────────────────────────────────────────────────────
 
-# 从 ldd 输出里取某个 soname 的解析路径（取不到则为空）。
+# Take a soname's resolved path from ldd output (empty if unresolvable).
 resolve_of() {
     local ldd_output="$1" soname="$2"
     printf '%s\n' "$ldd_output" | awk -v n="$soname" '$1 == n && $2 == "=>" { print $3; exit }'
@@ -261,30 +272,30 @@ cmd_verify() {
     local failures=0
     local f path glob name resolved
 
-    note "随包文件"
+    note "bundled files"
     for f in "${REQUIRED_FILES[@]}"; do
         if [ -e "$appdir/$f" ]; then
             printf 'ok    %s\n' "$f"
         else
-            printf 'FAIL  %s 不存在\n' "$f" >&2
+            printf 'FAIL  %s does not exist\n' "$f" >&2
             failures=$((failures + 1))
         fi
     done
 
-    note "宿主库不得入包"
+    note "host-owned libraries must not be bundled"
     local bundled=0
     for glob in "${HOST_OWNED_GLOBS[@]}"; do
         while IFS= read -r -d '' path; do
-            printf 'FAIL  %s 必须由宿主提供，却被打了进来\n' "${path#"$appdir"/}" >&2
+            printf 'FAIL  %s must come from the host but was bundled\n' "${path#"$appdir"/}" >&2
             failures=$((failures + 1))
             bundled=$((bundled + 1))
         done < <(find "$appdir/usr/lib" "$appdir/usr/lib64" -maxdepth 1 -name "$glob" -print0 2>/dev/null)
     done
-    [ "$bundled" -eq 0 ] && printf 'ok    包内没有任何 GL / Wayland / WebKit / GStreamer 库\n'
+    [ "$bundled" -eq 0 ] && printf 'ok    no GL / Wayland / WebKit / GStreamer libraries inside the bundle\n'
 
-    note "动态解析"
+    note "dynamic resolution"
     local ld_path="$appdir/usr/lib:$appdir/usr/lib/HiFiShifter"
-    # GTK 的模块（gdk-pixbuf / immodules）在带 triplet 的子目录里，一并加入搜索路径。
+    # GTK's modules (gdk-pixbuf / immodules) live in triplet-suffixed subdirectories; add them to the search path too.
     for path in "$appdir"/usr/lib/*-linux-gnu; do
         [ -d "$path" ] && ld_path="$ld_path:$path"
     done
@@ -292,44 +303,44 @@ cmd_verify() {
     local ldd_output
     if ! ldd_output=$(LD_LIBRARY_PATH="$ld_path" ldd "$appdir/usr/bin/HiFiShifter" 2>&1); then
         printf '%s\n' "$ldd_output" >&2
-        die "ldd 无法解析 $appdir/usr/bin/HiFiShifter"
+        die "ldd could not resolve $appdir/usr/bin/HiFiShifter"
     fi
 
     if printf '%s\n' "$ldd_output" | grep -q 'not found'; then
         printf '%s\n' "$ldd_output" | grep 'not found' >&2
-        die "有依赖既不在包里、也不在宿主上"
+        die "a dependency is neither in the bundle nor on the host"
     fi
 
     for name in "${MUST_RESOLVE_HOST[@]}"; do
         resolved=$(resolve_of "$ldd_output" "$name")
         if [ -z "$resolved" ]; then
-            printf 'FAIL  %s 不在 NEEDED 里 —— 断言已失效，请更新脚本\n' "$name" >&2
+            printf 'FAIL  %s not in NEEDED — assertion stale, update the script\n' "$name" >&2
             failures=$((failures + 1))
         elif [[ "$resolved" == "$appdir"/* ]]; then
-            printf 'FAIL  %s 仍然解析到包内：%s\n' "$name" "$resolved" >&2
+            printf 'FAIL  %s still resolves inside the bundle: %s\n' "$name" "$resolved" >&2
             failures=$((failures + 1))
         else
-            printf 'ok    %s -> %s（宿主）\n' "$name" "$resolved"
+            printf 'ok    %s -> %s (host)\n' "$name" "$resolved"
         fi
     done
 
     for name in "${MUST_RESOLVE_BUNDLE[@]}"; do
         resolved=$(resolve_of "$ldd_output" "$name")
         if [ -z "$resolved" ]; then
-            printf 'FAIL  %s 不在 NEEDED 里 —— 断言已失效，请更新脚本\n' "$name" >&2
+            printf 'FAIL  %s not in NEEDED — assertion stale, update the script\n' "$name" >&2
             failures=$((failures + 1))
         elif [[ "$resolved" != "$appdir"/* ]]; then
-            printf 'FAIL  %s 应当随包提供，却解析到 %s\n' "$name" "$resolved" >&2
+            printf 'FAIL  %s should be bundled but resolves to %s\n' "$name" "$resolved" >&2
             failures=$((failures + 1))
         else
-            printf 'ok    %s -> 包内\n' "$name"
+            printf 'ok    %s -> bundled\n' "$name"
         fi
     done
 
     if [ "$failures" -ne 0 ]; then
-        die "$failures 项校验未通过"
+        die "$failures check(s) failed"
     fi
-    printf '\n全部校验通过\n'
+    printf '\nall checks passed\n'
 }
 
 # ── repack ────────────────────────────────────────────────────────────
@@ -339,7 +350,7 @@ cmd_repack() {
     require_dir "$appdir"
 
     if [ -z "$output" ]; then
-        # 沿用目录里已有的 AppImage 名字；没有就按产品名 + 版本 + 架构拼一个。
+        # Reuse an AppImage name already present in the directory; otherwise compose one from product + version + arch.
         output=$(find "$(dirname "$appdir")" -maxdepth 1 -name '*.AppImage' -print -quit 2>/dev/null || true)
         if [ -z "$output" ]; then
             local version product
@@ -356,7 +367,7 @@ cmd_repack() {
     rm -f -- "$output"
     printf 'repacking %s -> %s (%s)\n' "$appdir" "$output" "$arch"
     APPIMAGE_EXTRACT_AND_RUN=1 ARCH="$arch" "$tool" "$appdir" "$output" >/dev/null
-    [ -f "$output" ] || die "appimagetool 没有产出 $output"
+    [ -f "$output" ] || die "appimagetool produced no $output"
     printf 'repacked: %s (%s)\n' "$output" "$(du -h "$output" | cut -f1)"
 }
 
@@ -364,27 +375,27 @@ cmd_repack() {
 
 cmd_smoke() {
     if [ "${HIFISHIFTER_SKIP_SMOKE:-0}" = "1" ]; then
-        printf '跳过冒烟（HIFISHIFTER_SKIP_SMOKE=1）\n'
+        printf 'skipping smoke (HIFISHIFTER_SKIP_SMOKE=1)\n'
         return 0
     fi
     local appimage="$1"
-    [ -f "$appimage" ] || die "找不到 AppImage：$appimage"
+    [ -f "$appimage" ] || die "AppImage not found: $appimage"
 
     local runner=()
     if command -v xvfb-run >/dev/null 2>&1; then
         runner=(xvfb-run -a)
     elif [ "${HIFISHIFTER_SMOKE_REQUIRED:-0}" = "1" ]; then
-        die "需要 xvfb-run（CI 里请安装 xvfb）"
+        die "xvfb-run is required (install xvfb in CI)"
     else
-        printf 'skip: 没有 xvfb-run，跳过冒烟（本地可选装 xvfb）\n' >&2
+        printf 'skip: no xvfb-run, skipping smoke (xvfb is optional locally)\n' >&2
         return 0
     fi
 
     local log rc=0 workdir
     log=$(mktemp)
-    # 给这次运行一个独立的 TMPDIR：APPIMAGE_EXTRACT_AND_RUN 会按固定名字解包，
-    # 复用同一个目录时每次都要重新核对全部文件（几万行 "file size matches"），
-    # 既拖慢冒烟也把真正的启动日志埋掉。
+    # Give this run its own TMPDIR: APPIMAGE_EXTRACT_AND_RUN extracts under fixed names, and
+    # reusing the same directory means re-verifying every file on every run (tens of thousands of
+    # "file size matches" lines), which slows the smoke test and buries the real startup log.
     workdir=$(mktemp -d)
     local -a smoke_env=(TMPDIR="$workdir" APPIMAGE_EXTRACT_AND_RUN=1)
     if [ -n "${HIFISHIFTER_SMOKE_MODELS_DIR:-}" ]; then
@@ -397,32 +408,32 @@ cmd_smoke() {
     set -e
     rm -rf "$workdir"
 
-    # 124 = 到点了还活着（正常：这是 GUI 应用）；0 / 143 = 自己退出或收到 TERM。
+    # 124 = still alive when time ran out (normal: this is a GUI app); 0 / 143 = exited on its own or got TERM.
     if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] && [ "$rc" -ne 143 ]; then
-        printf '%s\n' '--- 冒烟输出 ---' >&2
+        printf '%s\n' '--- smoke output ---' >&2
         cat "$log" >&2
         rm -f "$log"
-        die "AppImage 启动失败（退出码 ${rc}）"
+        die "AppImage failed to start (exit code ${rc})"
     fi
 
     local failed=0
     if ! grep -q 'starting; log file' "$log"; then
-        printf '%s\n' 'FAIL  没有出现启动日志' >&2
+        printf '%s\n' 'FAIL  no startup log appeared' >&2
         failed=1
     fi
     if grep -qiE 'could not create default egl display|Aborting\.\.\.|error while loading shared libraries' "$log"; then
-        printf '%s\n' 'FAIL  启动过程中出现致命错误：' >&2
+        printf '%s\n' 'FAIL  fatal error during startup:' >&2
         grep -iE 'could not create default egl display|Aborting\.\.\.|error while loading shared libraries' "$log" >&2
         failed=1
     fi
     if [ "$failed" -ne 0 ]; then
-        printf '%s\n' '--- 冒烟输出 ---' >&2
+        printf '%s\n' '--- smoke output ---' >&2
         cat "$log" >&2
         rm -f "$log"
-        die "冒烟未通过"
+        die "smoke test failed"
     fi
 
-    printf 'smoke ok（%ss 内保持运行，启动日志正常）\n' "${HIFISHIFTER_SMOKE_TIMEOUT:-45}"
+    printf 'smoke ok (kept running for %ss, startup log normal)\n' "${HIFISHIFTER_SMOKE_TIMEOUT:-45}"
     rm -f "$log"
 }
 
@@ -440,7 +451,7 @@ cmd_package() {
     require_dir "$release_dir"
 
     local appdir
-    appdir=$(find_appdir "$release_dir") || die "找不到 AppDir：$release_dir/bundle/appimage/HiFiShifter.AppDir"
+    appdir=$(find_appdir "$release_dir") || die "AppDir not found: $release_dir/bundle/appimage/HiFiShifter.AppDir"
 
     note "prune"
     cmd_prune "$appdir"
@@ -457,7 +468,7 @@ cmd_package() {
     cmd_repack "$appdir"
 
     note "smoke"
-    # 三合一 AppImage 不带权重；默认拿构建树里的完整模型给冒烟用。
+    # The unified AppImage carries no weights; default the smoke test to the full models in the build tree.
     if [ "${HIFISHIFTER_EXTERNAL_MODELS:-0}" = "1" ] && [ -z "${HIFISHIFTER_SMOKE_MODELS_DIR:-}" ]; then
         HIFISHIFTER_SMOKE_MODELS_DIR="$REPO_ROOT/backend/src-tauri/resources/models"
     fi

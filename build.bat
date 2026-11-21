@@ -5,10 +5,10 @@ where pwsh >nul 2>&1 && (set "HFS_PS=pwsh") || (set "HFS_PS=powershell")
 %HFS_PS% -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\build\build.ps1" %*
 if errorlevel 1 (
     echo.
-    echo 构建失败。
+    echo Build failed.
     pause
     exit /b 1
 )
 echo.
-echo 完成。产物在 dist 目录下。
+echo Done. Artifacts are in the dist directory.
 pause

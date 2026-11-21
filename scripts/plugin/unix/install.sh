@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# HiFiShifter Linux 安装脚本。
+# HiFiShifter Linux install script.
 #
-#   ./install.sh              当前用户：~/.local（AppImage + ~/.vst3 + ~/.clap + XDG 模型库）
-#   sudo ./install.sh --system 系统级：/opt/hifishifter + /usr/lib/vst3 + /usr/lib/clap
-#                              + /usr/local/share/HiFiShifter 模型库
+#   ./install.sh               current user: ~/.local (AppImage + ~/.vst3 + ~/.clap + XDG model store)
+#   sudo ./install.sh --system system-wide: /opt/hifishifter + /usr/lib/vst3 + /usr/lib/clap
+#                              + /usr/local/share/HiFiShifter model store
 #
-# 三合一包里同时存在 HiFiShifter.AppImage、VST3、CLAP 与 models/；纯插件包
-# 只有后两者，脚本会按实际存在的条目自动跳过。只碰自己的名字，不改别的插件。
+# The all-in-one package contains HiFiShifter.AppImage, VST3, CLAP and models/ at the same
+# time; the plugin-only package has just the latter two, and the script skips entries that
+# are not present. It only touches its own names and never modifies other plugins.
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,13 +17,13 @@ for arg in "$@"; do
     case "$arg" in
         --system) system=1 ;;
         -h|--help) sed -n '2,9p' "$0" | sed 's/^# \?//'; exit 0 ;;
-        *) printf '未知参数：%s\n' "$arg" >&2; exit 2 ;;
+        *) printf 'unknown option: %s\n' "$arg" >&2; exit 2 ;;
     esac
 done
 
 if [ "$system" = "1" ]; then
     if [ "$(id -u)" != "0" ]; then
-        printf -- '--system 需要 root：sudo ./install.sh --system\n' >&2
+        printf -- '--system requires root: sudo ./install.sh --system\n' >&2
         exit 1
     fi
     app_dir="/opt/hifishifter"
@@ -38,32 +39,35 @@ else
     clap_dir="$HOME/.clap"
 fi
 
-# ── 独立 App ────────────────────────────────────────────────────────────────
+# ── Standalone app ──────────────────────────────────────────────────────────
 if [ -f "$here/HiFiShifter.AppImage" ]; then
     mkdir -p "$app_dir" "$bin_dir"
     cp -f "$here/HiFiShifter.AppImage" "$app_dir/HiFiShifter.AppImage"
     chmod 755 "$app_dir/HiFiShifter.AppImage"
-    # 用一层薄 wrapper 而不是直接 symlink：AppImage 的运行器在部分版本里会
-    # 把 argv[0] 当成镜像路径，经 symlink 启动时解析到错误位置。
+    # A thin wrapper instead of a direct symlink: some AppImage runner versions treat
+    # argv[0] as the image path and resolve to the wrong location when launched through a
+    # symlink.
     printf '#!/bin/sh\nexec "%s" "$@"\n' "$app_dir/HiFiShifter.AppImage" >"$bin_dir/hifishifter"
     chmod 755 "$bin_dir/hifishifter"
-    printf 'AppImage → %s/HiFiShifter.AppImage（启动命令：%s/hifishifter）\n' "$app_dir" "$bin_dir"
+    printf 'AppImage → %s/HiFiShifter.AppImage (launch command: %s/hifishifter)\n' "$app_dir" "$bin_dir"
 fi
 
-# ── 共享模型库 ──────────────────────────────────────────────────────────────
+# ── Shared model store ──────────────────────────────────────────────────────
 if [ -d "$here/models" ]; then
-    # 这个目录由安装器独占；先整体替换，避免升级后旧版本权重永久占着磁盘。
-    # 运行中的插件只读模型，升级前请先退出宿主。
+    # This directory is owned by the installer; replace it wholesale so old-version weights
+    # do not keep occupying disk forever after upgrades. Running plugins only read the
+    # models; please quit the host before upgrading.
     rm -rf "$data_root/models"
     mkdir -p "$data_root/models"
     for version_dir in "$here/models"/*; do
         [ -d "$version_dir" ] || continue
         version="$(basename "$version_dir")"
         cp -R "$version_dir" "$data_root/models/$version"
-        printf '模型库 → %s/models/%s\n' "$data_root" "$version"
+        printf 'model store → %s/models/%s\n' "$data_root" "$version"
     done
 
-    # 模型库的许可与根 LICENSE 一起放到共享目录，卸载插件时也能找到。
+    # The model store's license is placed next to the shared directory together with the
+    # root LICENSE, so it remains findable after uninstalling the plugin.
     [ -f "$here/LICENSE" ] && cp -f "$here/LICENSE" "$data_root/LICENSE"
     if [ -d "$here/licenses" ]; then
         rm -rf "$data_root/licenses"
@@ -89,4 +93,4 @@ if [ -f "$here/HiFiShifter.clap" ]; then
     printf 'CLAP → %s/HiFiShifter.clap\n' "$clap_dir"
 fi
 
-printf '\n完成。重启宿主（或在宿主里重新扫描插件）。\n'
+printf '\nDone. Restart your host (or rescan plugins inside it).\n'

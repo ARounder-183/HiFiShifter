@@ -1,32 +1,39 @@
 #!/usr/bin/env python3
-"""取 / 打包模型权重：三条获取路径 + 一条发布路径，四条路都做逐文件校验。
+"""Fetch / package model weights: three acquisition paths + one publishing path,
+each verified file by file.
 
-【为什么权重不在仓库里】151.6 MB / 7 个文件让一次 checkout 就是 150 MB，而每个 CI
-job 都要 checkout 一次（一次 PR 约 11 次）。仓库里只保留清单
-`backend/src-tauri/resources/models/models.json`（1.5 KB）。
+[Why the weights are not in the repository] 151.6 MB / 7 files make a single
+checkout 150 MB, and every CI job checks out once (about 11 times per PR). Only
+the manifest stays in the repository:
+`backend/src-tauri/resources/models/models.json` (1.5 KB).
 
-【为什么是 .py 而不是 .ps1】同一份实现要在三个平台上跑（build.ps1 / vst3/unix/build.sh
-/ CI）。本仓的门禁脚本（scripts/checks/check-*.py）已经依赖 Python，三个平台的 runner
-也都预装，没有一个平台需要额外装东西。两份实现（ps1 + sh）只会分叉，分叉的后果是"某一个平台的构建悄悄
-用着旧权重"。
+[Why .py instead of .ps1] One implementation must run on three platforms
+(build.ps1 / vst3/unix/build.sh / CI). This repo's gate scripts
+(scripts/checks/check-*.py) already depend on Python, the runners on all three
+platforms preinstall it, and no platform needs an extra install. Two
+implementations (ps1 + sh) would only diverge, and the consequence of divergence
+is "one platform's build quietly using stale weights".
 
-【完整性判据与运行时一致】逐文件比对**字节数 + sha256**，数据来源就是 models.json
-（与 model_store::looks_complete 同一份清单；那份只比字节数是因为它跑在每次启动的
-路径上，这里可以付出哈希的代价）。版本号是内容派生值，取错版本必然在这里暴露。
+[Completeness criteria match the runtime] Compare **byte count + sha256** per
+file; the source of truth is models.json (the same manifest as
+model_store::looks_complete; that one compares only byte counts because it runs
+on the per-startup path, while this one can afford the cost of hashing). The
+version is content-derived, so a wrongly fetched version is guaranteed to
+surface here.
 
-用法（取权重）：
-    python scripts/setup/fetch-models.py                # 缺就取（默认从 release 资产）
-    python scripts/setup/fetch-models.py --check        # 只检查，缺就退出码 1
-    python scripts/setup/fetch-models.py --source DIR   # 从本地目录拷贝（已有权重）
-    python scripts/setup/fetch-models.py --archive ZIP  # 从本地 zip 解压
-    python scripts/setup/fetch-models.py --fetch-game    # 取 GAME small ONNX
-    python scripts/setup/fetch-models.py --base-url URL # 换一个下载源（镜像）
+Usage (fetch weights):
+    python scripts/setup/fetch-models.py                # fetch what is missing (default: from release assets)
+    python scripts/setup/fetch-models.py --check        # check only; exit code 1 if anything is missing
+    python scripts/setup/fetch-models.py --source DIR   # copy from a local directory (existing weights)
+    python scripts/setup/fetch-models.py --archive ZIP  # extract from a local zip
+    python scripts/setup/fetch-models.py --fetch-game    # fetch the GAME small ONNX
+    python scripts/setup/fetch-models.py --base-url URL # use another download source (mirror)
 
-用法（发布新权重，一年几次；流程见 docs/models.md）：
-    python scripts/setup/fetch-models.py --write-manifest      # 按目录里的真实文件重写 models.json
-    python scripts/setup/fetch-models.py --check-manifest      # 只校验 models.json 是否最新（CI 用）
-    python scripts/setup/fetch-models.py --package             # 打出可复算的 release 资产
-    python scripts/setup/fetch-models.py --verify-archive ZIP  # 校验某个 zip 是否等于这份清单
+Usage (publish new weights, a few times a year; process in docs/models.md):
+    python scripts/setup/fetch-models.py --write-manifest      # rewrite models.json from the real files on disk
+    python scripts/setup/fetch-models.py --check-manifest      # only check that models.json is current (used by CI)
+    python scripts/setup/fetch-models.py --package             # build a reproducible release asset
+    python scripts/setup/fetch-models.py --verify-archive ZIP  # verify a zip against this manifest
 """
 
 from __future__ import annotations
@@ -42,23 +49,28 @@ import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
 
-# Windows 的 stdout 跟随 ANSI 代码页（英文系统是 cp1252、中文系统是 GBK），打印中文会
-# UnicodeEncodeError 打死进程 —— 真正的结论一条都进不了日志，红的是编码而不是规则。
+# On Windows, stdout follows the ANSI code page (cp1252 on English systems, GBK on
+# Chinese ones); printing unmappable characters kills the process with a
+# UnicodeEncodeError -- not a single real finding reaches the log, and what fails
+# is the encoding, not the rule.
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MODELS_DIR = REPO_ROOT / "backend" / "src-tauri" / "resources" / "models"
 MANIFEST = MODELS_DIR / "models.json"
-# 待发布的资产放 dist/（与其它产物同一处，见 scripts/README.md）。构建只会重置
-# dist/_stage，因此这里的东西不会被下一次构建抹掉。
+# Assets awaiting release go to dist/ (same place as the other artifacts, see
+# scripts/README.md). Builds only reset dist/_stage, so what lives here is not
+# wiped by the next build.
 ASSET_DIR = REPO_ROOT / "dist" / "models"
-# 【为什么是 zip 而不是 tar.zst】三个平台都能解（Expand-Archive / zipfile / unzip），
-# 不需要额外的 zstd 二进制。150 MB 的一次性下载里，压缩率差别可以忽略。
+# [Why zip instead of tar.zst] All three platforms can unpack it
+# (Expand-Archive / zipfile / unzip); no extra zstd binary is needed. In a one-time
+# 150 MB download the compression-ratio difference is negligible.
 DEFAULT_BASE_URL = "https://github.com/ARounder-183/HiFiShifter/releases/download"
 
-# GAME 自动音符分块权重。上游按模型包发布；单独取、单独校验，再与其它模型一起
-# 写入同一份 models.json。这样不需要把权重提交进仓库。
+# GAME automatic note-segmentation weights. Upstream publishes them as a model
+# package; fetch and verify them separately, then write them into the same
+# models.json as the other models. That avoids committing the weights to the repo.
 GAME_RELEASE_URL = (
     "https://github.com/openvpi/GAME/releases/download/v1.0.3/"
     "GAME-1.0.3-small-onnx.zip"
@@ -73,24 +85,31 @@ GAME_FILES = (
     "segmenter.onnx",
 )
 
-# 目录里允许存在、但既不进清单也不进资产的构建产物：macOS 的 build.rs 会把
-# pc_nsf_hifigan.onnx 改写成 CoreML 变体（backend/src-tauri/build.rs::
-# generate_coreml_model_variant），产物落在同一棵资源树里。它由构建自动生成 ——
-# 进了清单就意味着 Windows/Linux 白装 56 MB 用不上的权重，而且版本号会取决于
-# "构建环境里有没有编过 macOS 目标"。打包时按清单取文件，它天然被排除；这里只是
-# 别把它报成"多余文件"。
+# Build artifacts allowed to exist in the directory but excluded from both the
+# manifest and the assets: macOS's build.rs rewrites pc_nsf_hifigan.onnx into a
+# CoreML variant (backend/src-tauri/build.rs::
+# generate_coreml_model_variant), and the output lands in the same resource tree.
+# The build generates it automatically -- listing it would mean Windows/Linux
+# installing 56 MB of unusable weights, and the version would depend on
+# "whether the build environment ever compiled the macOS target". Packaging takes
+# files from the manifest, so it is naturally excluded; this set only stops it
+# from being reported as a "stray file".
 GENERATED_ARTIFACTS = frozenset({"nsf_hifigan/pc_nsf_hifigan_coreml.onnx"})
 
-# GAME 是可独立启用的可选模型：本机只验证 GAME 时旧模型缺失是正常的。
-# 但发布资产仍必须包含清单里的全部条目；只有“检查本地是否可用”时跳过它。
+# GAME is an optional model that can be enabled on its own: on a machine that only
+# verified GAME, the old models being missing is normal. Release assets must still
+# contain every manifest entry; only the "is the local copy usable" check skips it.
 OPTIONAL_MODEL_PREFIXES = ("GAME/",)
 
-# 资产内部每个条目的时间戳。固定成 zip 能表示的最小值：让"同一份权重打两次包"
-# 逐字节相同，sha256 才有资格当发布物的身份。
+# Timestamp of every entry inside the asset. Pinned to the smallest value a zip can
+# represent: "packaging the same weights twice" is then byte-identical, which is
+# what qualifies sha256 as the release artifact's identity.
 ZIP_DATE_TIME = (1980, 1, 1, 0, 0, 0)
 
-# 不参与清单的文件：本脚本自己的输出，加上已知的构建产物。两者都按**文件名**排除 —
-# 与历史实现（PowerShell 版）一致，因此同一棵目录树在这里和在那边得到同一份清单。
+# Files that do not participate in the manifest: this script's own output plus known
+# build artifacts. Both are excluded by **file name** -- matching the historical
+# (PowerShell) implementation, so the same directory tree yields the same manifest
+# here and there.
 MANIFEST_EXCLUDED_NAMES = frozenset({"models.json"}) | frozenset(
     entry.rsplit("/", 1)[-1] for entry in GENERATED_ARTIFACTS
 )
@@ -98,7 +117,7 @@ MANIFEST_EXCLUDED_NAMES = frozenset({"models.json"}) | frozenset(
 
 def load_manifest() -> dict:
     if not MANIFEST.is_file():
-        raise SystemExit(f"缺少模型清单：{MANIFEST}（它必须在仓库里）")
+        raise SystemExit(f"Model manifest missing: {MANIFEST} (it must be in the repository)")
     with MANIFEST.open("r", encoding="utf-8") as handle:
         return json.load(handle)
 
@@ -112,21 +131,26 @@ def sha256_of(path: Path) -> str:
 
 
 def manifest_sort_key(entry: dict) -> str:
-    """清单的排序键：完整路径形式（分隔符是反斜杠）。
+    """Manifest sort key: full-path form (the separator is a backslash).
 
-    【为什么是反斜杠】版本号是「路径 + sha256」逐行拼接后的哈希，顺序变了就是另一个
-    版本号。历史实现按 PowerShell 的「完整路径」排序，而完整路径里只有分隔符是反斜杠 ——
-    这里对齐它，已有的 models.json 才能在两种实现之间逐字节对上。
+    [Why backslash] The version is the hash of the "path + sha256" lines joined in
+    order; a different order is a different version. The historical implementation
+    sorted by PowerShell's "full path", and in a full path only the separator is a
+    backslash -- aligning with it lets the existing models.json match byte for byte
+    across both implementations.
     """
     return entry["path"].replace("/", "\\")
 
 
 def derive_version(files: list[dict]) -> str:
-    """重算版本号：所有 (路径, sha256) 排序后拼接、取 sha256 的前 12 位。
+    """Recompute the version: sort all (path, sha256) pairs, join them, take the first
+    12 hex digits of the sha256.
 
-    【为什么每一处都要重算】version 是清单里**唯一不能手写**的字段，而它同时决定
-    release 的 tag 与 CI 的缓存键。生成、校验、打包三条路都从内容重算，手改过的清单
-    会当场失败，而不是变成一份"版本号与内容无关"的资产被发出去。
+    [Why every path recomputes it] version is the **only field in the manifest that
+    must never be hand-written**, and it also decides the release tag and the CI
+    cache key. Generation, verification, and packaging all recompute it from
+    content, so a hand-edited manifest fails on the spot instead of becoming an
+    asset "whose version has nothing to do with its contents" and being published.
     """
     entries = sorted(files, key=manifest_sort_key)
     lines = "\n".join(f"{entry['path']} {entry['sha256']}" for entry in entries)
@@ -134,11 +158,13 @@ def derive_version(files: list[dict]) -> str:
 
 
 def collect_manifest_entries() -> list[dict]:
-    """扫一遍权重目录，返回清单条目（路径 / 字节数 / 大写 sha256）。
+    """Scan the weights directory and return manifest entries (path / bytes / uppercase
+    sha256).
 
-    【为什么 sha256 是大写】历史清单是 PowerShell 的 Get-FileHash 写的，它给大写。
-    大小写在比较时都按小写归一（见 verify_hashes），但**存储**保持原样，免得同一份
-    权重在两次生成之间整份 diff。
+    [Why sha256 is uppercase] The historical manifest was written by PowerShell's
+    Get-FileHash, which emits uppercase. Comparisons normalize to lowercase (see
+    verify_hashes), but the **stored** form stays as-is so the same weights do not
+    diff wholesale between two generations.
     """
     existing = load_manifest()["files"] if MANIFEST.is_file() else []
     entries = [
@@ -150,8 +176,10 @@ def collect_manifest_entries() -> list[dict]:
         for path in MODELS_DIR.rglob("*")
         if path.is_file() and path.name not in MANIFEST_EXCLUDED_NAMES
     ]
-    # 本机往往只缓存其中一部分权重（例如只验证 GAME）。清单是“可下载的完整集合”，
-    # 不是当前工作树快照：缺失的旧条目原样保留，等下一次取权重时再校验。
+    # A machine often caches only part of the weights (e.g. only GAME was verified).
+    # The manifest is the "complete downloadable set", not a snapshot of the current
+    # working tree: missing old entries are kept as-is and verified again the next
+    # time the weights are fetched.
     present = {entry["path"] for entry in entries}
     entries.extend(entry for entry in existing if entry["path"] not in present)
     entries.sort(key=manifest_sort_key)
@@ -159,11 +187,11 @@ def collect_manifest_entries() -> list[dict]:
 
 
 def write_manifest() -> int:
-    """按目录里的真实文件重写 models.json（版本号 = 内容哈希）。"""
+    """Rewrite models.json from the real files on disk (version = content hash)."""
     entries = collect_manifest_entries()
     if not entries:
         print(
-            f"{MODELS_DIR} 里没有可登记的模型文件：先跑 python scripts/setup/fetch-models.py",
+            f"No model files to register in {MODELS_DIR}: run python scripts/setup/fetch-models.py first",
             file=sys.stderr,
         )
         return 1
@@ -171,42 +199,46 @@ def write_manifest() -> int:
     text = json.dumps({"version": version, "files": entries}, ensure_ascii=False, indent=4) + "\n"
     with MANIFEST.open("w", encoding="utf-8", newline="\n") as handle:
         handle.write(text)
-    print(f"已写入 {MANIFEST}（版本 {version}，{len(entries)} 个文件）")
+    print(f"Wrote {MANIFEST} (version {version}, {len(entries)} files)")
     return 0
 
 
 def check_manifest() -> int:
-    """只比版本号：版本号就是文件内容的哈希，它一致则清单必然一致。
+    """Compare versions only: the version is the hash of the manifest contents, so an
+    equal version guarantees an equal manifest.
 
-    【为什么权重缺失时算通过】干净 clone 里只有 models.json —— 那是正常状态，不是
-    回归。清单与权重的对账只有在取到权重之后才可能。
+    [Why missing weights counts as a pass] A clean clone has only models.json --
+    that is the normal state, not a regression. Reconciling the manifest with the
+    weights is only possible after the weights have been fetched.
     """
     if not MANIFEST.is_file():
-        print(f"缺少模型清单：{MANIFEST}（它必须在仓库里）", file=sys.stderr)
+        print(f"Model manifest missing: {MANIFEST} (it must be in the repository)", file=sys.stderr)
         return 1
     entries = collect_manifest_entries()
     if not entries:
-        print("models.json 检查跳过：权重还没取（跑 scripts/setup/fetch-models.py）")
+        print("models.json check skipped: weights not fetched yet (run scripts/setup/fetch-models.py)")
         return 0
     manifest = load_manifest()
     expected = derive_version(entries)
     if manifest["version"] != expected:
         print(
-            f"models.json 过期（清单 {manifest['version']}，重算 {expected}）："
-            "跑 python scripts/setup/fetch-models.py --write-manifest",
+            f"models.json is stale (manifest {manifest['version']}, recomputed {expected}): "
+            "run python scripts/setup/fetch-models.py --write-manifest",
             file=sys.stderr,
         )
         return 1
-    print(f"models.json 是最新的（版本 {expected}）")
+    print(f"models.json is up to date (version {expected})")
     return 0
 
 
 def missing_files(models_dir: Path, manifest: dict) -> list[str]:
-    """返回不完整（缺文件 / 字节数不符）的条目。
+    """Return entries that are incomplete (missing file / byte count mismatch).
 
-    【为什么先只比字节数】哈希 150 MB 要几百毫秒到几秒，而这个脚本在每次构建前都跑。
-    字节数不符已经能挡住绝大多数故障（没解压完、拷了一半、版本混装）；真正的哈希
-    校验放在"下载 / 解压之后"那一步（见 verify_hashes）。
+    [Why byte counts are compared first] Hashing 150 MB takes hundreds of
+    milliseconds to a few seconds, and this script runs before every build. A
+    byte-count mismatch already blocks the vast majority of failures (unfinished
+    extraction, half-copied files, mixed versions); the real hash verification is
+    the "after download / extraction" step (see verify_hashes).
     """
     problems: list[str] = []
     for entry in manifest["files"]:
@@ -228,16 +260,17 @@ def verify_hashes(models_dir: Path, manifest: dict) -> list[str]:
             problems.append(f"missing {entry['path']}")
             continue
         actual = sha256_of(path)
-        # 【为什么按小写比】清单里的哈希是大写十六进制（历史实现是 PowerShell 的
-        # Get-FileHash），hexdigest() 给的是小写。两边都是同一个哈希，直接比字符会让
-        # 每一份**正确**的权重都判成"校验失败"。
+        # [Why compare lowercase] The manifest stores uppercase hex (the historical
+        # implementation was PowerShell's Get-FileHash), while hexdigest() emits
+        # lowercase. Both sides are the same hash; comparing characters directly
+        # would mark every **correct** copy of the weights as "verification failed".
         if actual != entry["sha256"].lower():
             problems.append(f"sha256 {entry['path']}: {actual} != {entry['sha256']}")
     return problems
 
 
 def verify_optional_game_hashes(manifest: dict) -> list[str]:
-    """可选 GAME 文件若存在，也逐文件校验；不存在时不报错。"""
+    """If the optional GAME files exist, verify them file by file; do not error when they are absent."""
     problems: list[str] = []
     for entry in manifest["files"]:
         if not entry["path"].startswith(OPTIONAL_MODEL_PREFIXES):
@@ -254,7 +287,7 @@ def verify_optional_game_hashes(manifest: dict) -> list[str]:
 
 
 def stray_files(models_dir: Path, manifest: dict) -> list[str]:
-    """清单没登记、也不是已知构建产物的文件 —— 通常是"新模型文件忘了进清单"。"""
+    """Files neither listed in the manifest nor known build artifacts -- usually "a new model file was never added to the manifest"."""
     listed = {entry["path"] for entry in manifest["files"]}
     found: list[str] = []
     for path in sorted(models_dir.rglob("*")):
@@ -268,26 +301,30 @@ def stray_files(models_dir: Path, manifest: dict) -> list[str]:
 
 
 def install_from_directory(source: Path, manifest: dict) -> None:
-    """从一份已有的模型目录拷贝（离线 / 本地镜像）。"""
+    """Copy from an existing model directory (offline / local mirror)."""
     for entry in manifest["files"]:
         src = source / entry["path"]
         if not src.is_file():
-            raise SystemExit(f"源目录缺少 {entry['path']}：{source}")
+            raise SystemExit(f"Source directory is missing {entry['path']}: {source}")
         dst = MODELS_DIR / entry["path"]
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
 
 
 def safe_extractall(bundle: zipfile.ZipFile, destination: Path) -> None:
-    """解压一个 zip 到 destination，拒绝任何会落到目录之外的条目（zip-slip）。
+    """Extract a zip into destination, rejecting any entry that would land outside
+    it (zip-slip).
 
-    【为什么不用 extractall(filter="data")】filter 参数是 Python 3.12 才有的，而
-    本脚本的解释器判据只认 major==3（见 build.ps1 的 Resolve-Python），3.8-3.11
-    传 filter 会当场 TypeError。逐条目校验在所有版本上语义一致。
+    [Why not extractall(filter="data")] The filter parameter exists only since
+    Python 3.12, and this script's interpreter criterion accepts major==3 only
+    (see Resolve-Python in build.ps1); on 3.8-3.11 passing filter raises TypeError
+    immediately. Per-entry validation behaves identically on every version.
 
-    【防什么】发布 zip 是第三方内容（GitHub release、本地镜像）：条目名带 `..`
-    段、绝对路径、盘符或反斜杠分隔时，extractall 会把文件写到 destination 之外，
-    且这是在开发机上以用户权限执行的。名字不合法就直接终止，绝无"凑合解"。
+    [What it defends against] Published zips are third-party content (GitHub
+    releases, local mirrors): when an entry name contains `..` segments, absolute
+    paths, drive letters, or backslash separators, extractall writes files outside
+    destination -- and this runs on a developer machine with user privileges. An
+    invalid name terminates immediately; there is no "fallback hack".
     """
     for info in bundle.infolist():
         normalized = info.filename.replace("\\", "/")
@@ -296,29 +333,31 @@ def safe_extractall(bundle: zipfile.ZipFile, destination: Path) -> None:
             or (len(normalized) > 1 and normalized[1] == ":")
             or ".." in PurePosixPath(normalized).parts
         ):
-            raise SystemExit(f"{bundle.filename} 里的条目越界，拒绝解压：{info.filename}")
+            raise SystemExit(f"Entry in {bundle.filename} would escape the destination, refusing to extract: {info.filename}")
     bundle.extractall(destination)
 
 
 def install_from_zip(archive: Path, manifest: dict) -> None:
-    # 【为什么要先解压到临时目录】直接解到目标目录会让"解压中途失败"留下一个看起来
-    # 存在但缺文件的模型目录 —— 那正是运行时最难诊断的状态。
+    # [Why extract into a temp directory first] Extracting straight into the target
+    # directory lets "failure mid-extraction" leave a model directory that looks
+    # present but is missing files -- exactly the state that is hardest to diagnose
+    # at runtime.
     with tempfile.TemporaryDirectory(prefix="hfs-models-") as tmp:
         with zipfile.ZipFile(archive) as bundle:
             safe_extractall(bundle, Path(tmp))
         root = Path(tmp)
-        # zip 可能带一层顶层目录（models-<version>/…），这里自适应。
+        # The zip may carry a top-level directory (models-<version>/...); adapt to it.
         candidates = [root] + [p for p in root.iterdir() if p.is_dir()]
         first = manifest["files"][0]["path"]
         for candidate in candidates:
             if (candidate / first).is_file():
                 install_from_directory(candidate, manifest)
                 return
-        raise SystemExit(f"{archive} 里没有 models.json 列出的文件")
+        raise SystemExit(f"{archive} does not contain the files listed in models.json")
 
 
 def install_game_from_official_zip(archive: Path) -> None:
-    """把 OpenVPI 的 GAME 发布 zip 安装到 models/GAME/。"""
+    """Install OpenVPI's GAME release zip into models/GAME/."""
     target = MODELS_DIR / "GAME"
     with tempfile.TemporaryDirectory(prefix="hfs-game-install-") as tmp:
         with zipfile.ZipFile(archive) as bundle:
@@ -330,26 +369,29 @@ def install_game_from_official_zip(archive: Path) -> None:
         for name in GAME_FILES:
             source = root / name
             if not source.is_file():
-                raise SystemExit(f"GAME 发布包缺少 {name}: {archive}")
+                raise SystemExit(f"GAME release package is missing {name}: {archive}")
             shutil.copy2(source, target / name)
 
 
 def fetch_official_game() -> None:
-    # 【为什么不能只看"文件存在"】上一次下载被截断、或用户手工换了同名 ONNX，
-    # 六个文件都在，但推理输出是错的/全零。以前 `--fetch-game` 在这里直接
-    # return，哈希校验只在**主下载路径**末尾跑，于是这个入口永远验不到。
-    # 先按清单校验，损坏就重新下载；清单里没登记 GAME 时退回存在性判断。
+    # [Why "file exists" alone is not enough] If the previous download was truncated,
+    # or the user hand-swapped a same-named ONNX, all six files are present but the
+    # inference output is wrong / all zeros. `--fetch-game` used to simply return
+    # here, and hash verification only ran at the end of the **main download path**,
+    # so this entry point was never verified. Verify against the manifest first and
+    # re-download when corrupted; when GAME is not registered in the manifest, fall
+    # back to an existence check.
     manifest = load_manifest()
     game_entries = [
         entry for entry in manifest["files"] if entry["path"].startswith(OPTIONAL_MODEL_PREFIXES)
     ]
     if game_entries and all((MODELS_DIR / "GAME" / name).is_file() for name in GAME_FILES):
         if not verify_optional_game_hashes(manifest):
-            print("GAME 模型已存在且校验通过，跳过下载")
+            print("GAME model already exists and passed verification; skipping download")
             return
-        print("GAME 模型校验失败，重新下载", file=sys.stderr)
+        print("GAME model failed verification; re-downloading", file=sys.stderr)
     elif all((MODELS_DIR / "GAME" / name).is_file() for name in GAME_FILES):
-        print("GAME 模型已存在，跳过下载")
+        print("GAME model already exists; skipping download")
         return
     with tempfile.TemporaryDirectory(prefix="hfs-game-dl-") as tmp:
         archive = Path(tmp) / "GAME-1.0.3-small-onnx.zip"
@@ -358,14 +400,15 @@ def fetch_official_game() -> None:
 
 
 def download(url: str, destination: Path) -> None:
-    """下载到 `destination`，先写 .part 再原子替换。
+    """Download to `destination`: write a .part first, then replace atomically.
 
-    【为什么必须 timeout】150 MB 的模型下载在连接挂起时会永久阻塞 CI（没有
-    timeout 的 urlopen 会一直等 TCP 保活）。【为什么写 .part】中途失败 / Ctrl-C
-    会在目标路径留下一个截断的 zip，下一次运行看到"文件已存在"就跳过，症状是
-    "安装成功但推理全零"。
+    [Why timeout is mandatory] On a hung connection a 150 MB model download would
+    block CI forever (urlopen without timeout keeps waiting on TCP keepalive).
+    [Why a .part file] A mid-download failure / Ctrl-C would leave a truncated zip
+    at the destination; the next run sees "file already exists" and skips it, and
+    the symptom is "install succeeded but inference is all zeros".
     """
-    print(f"下载 {url}")
+    print(f"Downloading {url}")
     request = urllib.request.Request(url, headers={"User-Agent": "hifishifter-fetch-models"})
     part = destination.with_name(destination.name + ".part")
     try:
@@ -383,26 +426,33 @@ def format_mib(size: int) -> str:
 
 
 def build_asset(destination: Path, manifest: dict) -> None:
-    """把清单列出的文件写成一个可复算的 zip（发布资产）。
+    """Write the files listed in the manifest into a reproducible zip (release asset).
 
-    【为什么不用右键"压缩为 zip"】资产的身份就是它的 sha256：上传之后任何人重打一遍
-    包、比一下哈希，就知道自己手上是不是同一份权重。而资源管理器会写进打包那一刻的时间戳、
-    用不定的条目顺序 —— 同一份权重每次得到不同字节，那个哈希就没有意义了。
+    [Why not right-click "compress to zip"] An asset's identity is its sha256:
+    after upload, anyone can repackage it and compare hashes to learn whether they
+    hold the same weights. Explorer, however, embeds the timestamp of the moment of
+    packaging and an unspecified entry order -- the same weights yield different
+    bytes every time, and that hash means nothing.
 
-    【为什么存而不压】deflate 的字节流随 zlib 版本变化，跨机器就不再可复算；而 ONNX
-    权重是浮点张量，压得动的只有个位数百分点。用几十 MB 的下载体积换"处处可复算"是
-    划算的：这个包是故障排查时唯一能把"你装的那份"和"我发的那份"对上的东西。
+    [Why store instead of compress] The deflate byte stream varies with the zlib
+    version and stops being reproducible across machines; ONNX weights are float
+    tensors, and compression only saves single-digit percentages. Trading a few
+    dozen MB of download size for "reproducible everywhere" is worth it: this
+    package is the only thing that can match "the copy you installed" with "the
+    copy I published" while troubleshooting.
     """
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(destination.name + ".tmp")
-    # 【为什么先写 .tmp 再改名】150 MB 写到一半失败会留下一个"看起来存在"的资产，
-    # 而它是发布物 —— 下一次有人把它传上去就是灾难。
+    # [Why write .tmp first, then rename] A failure halfway through writing 150 MB
+    # would leave an asset that "looks present" -- and it is a release artifact;
+    # the next person uploading it would be a disaster.
     try:
         with zipfile.ZipFile(temporary, "w", zipfile.ZIP_STORED) as bundle:
             for entry in sorted(manifest["files"], key=lambda item: item["path"].replace("/", "\\")):
                 info = zipfile.ZipInfo(entry["path"], date_time=ZIP_DATE_TIME)
                 info.compress_type = zipfile.ZIP_STORED
-                # 不加这两行，Windows 打的包与 Unix 打的包头部不同，sha256 也就不同。
+                # Without these two lines, packages built on Windows and on Unix differ in
+                # their headers, hence in sha256.
                 info.create_system = 3  # 0 = MS-DOS, 3 = Unix
                 info.external_attr = 0o644 << 16
                 with (MODELS_DIR / entry["path"]).open("rb") as reader, bundle.open(info, "w") as writer:
@@ -413,7 +463,7 @@ def build_asset(destination: Path, manifest: dict) -> None:
 
 
 def write_digest(archive: Path) -> str:
-    """写 sha256 边车（与 sha256sum -c 同一格式），下载方不装 Python 也能核对。"""
+    """Write a sha256 sidecar (same format as sha256sum -c) so downloaders can verify without installing Python."""
     digest = sha256_of(archive)
     sidecar = archive.with_name(archive.name + ".sha256")
     with sidecar.open("w", encoding="utf-8", newline="\n") as handle:
@@ -422,18 +472,21 @@ def write_digest(archive: Path) -> str:
 
 
 def verify_asset(archive: Path, manifest: dict) -> list[str]:
-    """把一个 zip 当成发布物检查：条目必须**恰好**是清单列的那几项。
+    """Check a zip as a release artifact: its entries must be **exactly** the ones the
+    manifest lists.
 
-    【为什么多一个文件也报错】资产多带东西只有两种来路，都是事故：把上一版权重一起
-    打了进去（安装器按清单装，多出来的既进不了共享库、又白占用户的下载），或者把
-    CoreML 变体当成了模型文件。少一个文件则更直接：装完就是"模型不可用"。
+    [Why even one extra file is an error] Extra content in an asset has only two
+    origins, both accidents: the previous weights got packaged in (the installer
+    installs from the manifest, so the extras never reach the shared library and
+    just bloat the user's download), or the CoreML variant was mistaken for a model
+    file. A missing file is more direct: after installation, "the model is unusable".
     """
     problems: list[str] = []
     with zipfile.ZipFile(archive) as bundle:
         names = {name for name in bundle.namelist() if not name.endswith("/")}
         expected = {entry["path"] for entry in manifest["files"]}
-        problems += [f"zip 里缺少 {path}" for path in sorted(expected - names)]
-        problems += [f"zip 里多出 {path}" for path in sorted(names - expected)]
+        problems += [f"zip is missing {path}" for path in sorted(expected - names)]
+        problems += [f"zip has extra {path}" for path in sorted(names - expected)]
         if problems:
             return problems
         with tempfile.TemporaryDirectory(prefix="hfs-models-verify-") as tmp:
@@ -444,7 +497,7 @@ def verify_asset(archive: Path, manifest: dict) -> list[str]:
         recorded = sidecar.read_text(encoding="utf-8").split()[0].lower()
         actual = sha256_of(archive)
         if recorded != actual:
-            problems.append(f"{sidecar.name} 与 zip 不符：{actual} != {recorded}")
+            problems.append(f"{sidecar.name} does not match the zip: {actual} != {recorded}")
     return problems
 
 
@@ -456,79 +509,80 @@ def package_asset(destination: Path, manifest: dict) -> int:
     if not problems:
         derived = derive_version(manifest["files"])
         if derived != version:
-            problems.append(f"清单的 version {version} 与内容重算值 {derived} 不符（清单被手改过）")
+            problems.append(f"manifest version {version} does not match the value recomputed from content {derived} (the manifest was hand-edited)")
     if problems:
-        print(f"拒绝打包（清单版本 {version}）：", file=sys.stderr)
+        print(f"Refusing to package (manifest version {version}):", file=sys.stderr)
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)
         print(
-            "  权重改过就重生成清单：python scripts/setup/fetch-models.py --write-manifest\n"
-            "  没改过就先补齐权重：python scripts/setup/fetch-models.py",
+            "  Weights changed: regenerate the manifest with python scripts/setup/fetch-models.py --write-manifest\n"
+            "  Weights unchanged: fetch them first with python scripts/setup/fetch-models.py",
             file=sys.stderr,
         )
         return 1
     for stray in stray_files(MODELS_DIR, manifest):
-        print(f"警告：{stray} 不在清单里，不会进资产（新增了模型文件就先重生成清单）", file=sys.stderr)
+        print(f"Warning: {stray} is not in the manifest and will not go into the asset (if you added new model files, regenerate the manifest first)", file=sys.stderr)
 
     build_asset(destination, manifest)
     digest = write_digest(destination)
     sidecar = destination.with_name(destination.name + ".sha256")
-    print(f"资产 {destination}（{format_mib(destination.stat().st_size)}）")
-    print(f"  sha256 {digest}")
-    print(f"  边车   {sidecar}")
-    print("下一步：")
+    print(f"Asset {destination} ({format_mib(destination.stat().st_size)})")
+    print(f"  sha256  {digest}")
+    print(f"  sidecar {sidecar}")
+    print("Next steps:")
     print(f"  1) python scripts/setup/fetch-models.py --verify-archive {destination}")
-    print(f"  2) 传到 tag models-{version}：命令与顺序见 docs/models.md")
-    print("  3) 线上资产确认能下载之后，再合并清单")
+    print(f"  2) Upload to the tag models-{version}: commands and order in docs/models.md")
+    print("  3) Merge the manifest once the published asset is confirmed downloadable")
     return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="取 / 打包 HiFiShifter 的模型权重")
-    parser.add_argument("--check", action="store_true", help="只检查是否完整（缺则退出码 1）")
+    parser = argparse.ArgumentParser(description="Fetch / package HiFiShifter model weights")
+    parser.add_argument("--check", action="store_true", help="check completeness only (exit code 1 if anything is missing)")
     parser.add_argument(
         "--write-manifest",
         action="store_true",
-        help="按目录里的真实文件重写 models.json（版本号 = 内容哈希）",
+        help="rewrite models.json from the real files on disk (version = content hash)",
     )
     parser.add_argument(
         "--check-manifest",
         action="store_true",
-        help="只校验 models.json 是否最新（权重缺失时跳过，退出码 0）",
+        help="only check that models.json is current (skips when weights are missing, exit code 0)",
     )
-    parser.add_argument("--source", type=Path, help="从本地模型目录拷贝")
-    parser.add_argument("--archive", type=Path, help="从本地 zip 解压")
+    parser.add_argument("--source", type=Path, help="copy from a local model directory")
+    parser.add_argument("--archive", type=Path, help="extract from a local zip")
     parser.add_argument(
         "--fetch-game",
         action="store_true",
-        help="从 OpenVPI 官方 release 取 GAME small ONNX 模型，写入 models/GAME/",
+        help="fetch the GAME small ONNX model from OpenVPI's official release into models/GAME/",
     )
     parser.add_argument(
         "--package",
         nargs="?",
         const="",
         metavar="OUT",
-        help="打包成 release 资产（默认 dist/models/models-<version>.zip，不联网）",
+        help="package into a release asset (default dist/models/models-<version>.zip, no network)",
     )
     parser.add_argument(
         "--verify-archive",
         type=Path,
         metavar="ZIP",
-        help="校验一个 zip 资产是否恰好等于这份清单",
+        help="verify that a zip asset matches this manifest exactly",
     )
     parser.add_argument(
         "--base-url",
         default=os.environ.get("HIFISHIFTER_MODELS_BASE_URL", DEFAULT_BASE_URL),
-        help="release 资产的基地址（镜像用；也可设 HIFISHIFTER_MODELS_BASE_URL）",
+        help="base URL of the release assets (for mirrors; HIFISHIFTER_MODELS_BASE_URL also works)",
     )
     args = parser.parse_args()
 
     if args.fetch_game:
         fetch_official_game()
-        print("GAME 模型已安装到 backend/src-tauri/resources/models/GAME")
+        print("GAME model installed to backend/src-tauri/resources/models/GAME")
         return 0
 
-    # 这两个模式自己读 / 写清单，不需要先加载它（干净 clone 里权重还没有）。
+    # These two modes read / write the manifest themselves and do not need it loaded
+    # first (a clean clone has no weights yet).
     if args.write_manifest:
         return write_manifest()
     if args.check_manifest:
@@ -540,14 +594,14 @@ def main() -> int:
     if args.verify_archive:
         archive = args.verify_archive.expanduser().resolve()
         if not archive.is_file():
-            raise SystemExit(f"找不到 {archive}")
+            raise SystemExit(f"Not found: {archive}")
         problems = verify_asset(archive, manifest)
         if problems:
-            print(f"{archive.name} 不是版本 {version} 的资产：", file=sys.stderr)
+            print(f"{archive.name} is not the version {version} asset:", file=sys.stderr)
             for problem in problems:
                 print(f"  {problem}", file=sys.stderr)
             return 1
-        print(f"{archive.name} 与清单一致（版本 {version}，{len(manifest['files'])} 个文件）")
+        print(f"{archive.name} matches the manifest (version {version}, {len(manifest['files'])} files)")
         return 0
 
     if args.package is not None:
@@ -561,16 +615,16 @@ def main() -> int:
     problems = missing_files(MODELS_DIR, manifest)
     if not problems:
         if args.check or args.source or args.archive:
-            print(f"模型权重完整（版本 {version}）")
+            print(f"Model weights complete (version {version})")
         return 0
     if args.check:
         print(
-            f"模型权重不完整（版本 {version}）：{'; '.join(problems[:5])}",
+            f"Model weights incomplete (version {version}): {'; '.join(problems[:5])}",
             file=sys.stderr,
         )
         return 1
 
-    print(f"模型权重不完整（版本 {version}），开始获取……")
+    print(f"Model weights incomplete (version {version}); fetching now...")
     if args.source:
         install_from_directory(args.source.expanduser().resolve(), manifest)
     elif args.archive:
@@ -582,24 +636,25 @@ def main() -> int:
             url = f"{args.base_url.rstrip('/')}/models-{version}/models-{version}.zip"
             try:
                 download(url, archive)
-            except Exception as error:  # noqa: BLE001 - 网络错误的形态太多，统一给人话
+            except Exception as error:  # noqa: BLE001 - network errors take too many shapes; give one human-readable message for all
                 raise SystemExit(
-                    f"下载失败：{error}\n"
-                    f"  资产地址：{url}\n"
-                    "  离线环境请用 --source <已有模型目录> 或 --archive <本地 zip>。"
+                    f"Download failed: {error}\n"
+                    f"  Asset URL: {url}\n"
+                    "  Offline: use --source <existing model directory> or --archive <local zip>."
                 ) from error
             install_from_zip(archive, manifest)
 
-    # 【为什么下载完还要哈希校验】字节数对得上但内容不对（换了个同名文件、被截断后
-    # 又补齐）是真实发生过的：症状是推理输出悄悄变差，而不是报错。
+    # [Why hash-verify after the download] "Byte count matches but content does not"
+    # (a same-named file swapped in, or a truncated download padded back) has really
+    # happened: the symptom is inference quality quietly degrading, not an error.
     hash_problems = verify_hashes(MODELS_DIR, manifest)
     hash_problems += verify_optional_game_hashes(manifest)
     if hash_problems:
-        print("模型权重校验失败：", file=sys.stderr)
+        print("Model weight verification failed:", file=sys.stderr)
         for problem in hash_problems:
             print(f"  {problem}", file=sys.stderr)
         return 1
-    print(f"模型权重就绪（版本 {version}，{len(manifest['files'])} 个文件）")
+    print(f"Model weights ready (version {version}, {len(manifest['files'])} files)")
     return 0
 
 

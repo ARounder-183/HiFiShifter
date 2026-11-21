@@ -62,12 +62,14 @@ typedef struct {
     const void *in_events, *out_events;
 } clap_process_t;
 
-/* clap/events.h 的 CLAP_EVENT_TRANSPORT 记录。布局必须与 Rust 侧
-   clap_event_transport_t 的 #[repr(C)] 逐字段对齐（头文件本身也是 C ABI）。
-   【为什么探针要给 transport】共享渲染通路把空 transport 读成"宿主没给时间
-   事实"——实时块按设计静音，离线块报 NotReady。那样插件是"正确地拒绝输出"，
-   而这条黑盒判据要验的是**有位置时的直通**，两者不是同一件事。给一份最小
-   合法的 transport，探针才真正走到 pass_through 分支。 */
+/* CLAP_EVENT_TRANSPORT record from clap/events.h. The layout must match the Rust side's
+   clap_event_transport_t #[repr(C)] field by field (the header itself is C ABI).
+   [Why the probe supplies a transport] the shared render path treats an empty transport as
+   "the host gave no timing facts" — realtime blocks are muted by design, offline blocks
+   report NotReady. In that case the plugin is "correctly refusing to output", but this
+   black-box criterion verifies **passthrough with a position present**, which is not the
+   same thing. Only with a minimal legal transport does the probe actually reach the
+   pass_through branch. */
 typedef struct {
     uint32_t size; uint32_t time; uint16_t space_id; uint16_t type; uint32_t flags;
 } clap_event_header_t;
@@ -88,9 +90,10 @@ typedef struct {
 #define CLAP_TRANSPORT_HAS_TIME_SIGNATURE (1u << 3)
 #define CLAP_TRANSPORT_IS_PLAYING        (1u << 4)
 
-/* ctx 必须排在函数指针前面：CLAP 的 stream 结构以 ctx 开头（clap/stream.h）。
-   少了这个字段，插件会从错误的偏移读 write —— 症状是 state.save 永远返回 false，
-   而"保存失败"与"插件没有 state 扩展"在宿主日志里长得一模一样。 */
+/* ctx must come before the function pointers: CLAP's stream structs start with ctx
+   (clap/stream.h). Without this field the plugin reads write from the wrong offset — the
+   symptom is state.save always returning false, and "save failed" looks exactly like "the
+   plugin has no state extension" in the host log. */
 typedef struct { void *ctx; int64_t (*write)(const void *, const void *, uint64_t); } clap_ostream_t;
 typedef struct { void *ctx; int64_t (*read)(const void *, void *, uint64_t); } clap_istream_t;
 typedef struct {
@@ -98,9 +101,10 @@ typedef struct {
     bool (*load)(const void *, const void *);
 } clap_plugin_state_t;
 
-/* ARA：entry 级工厂表与实例级扩展（ARACLAP.h 的 stable ID）。
-   【为什么判据要在这里】宿主在扫描阶段就用 `get_plugin_id` 把这张表与 descriptor
-   配对；两者只要差一个字符，插件永远不会被 ARA 认领，而宿主日志里不会有任何提示。 */
+/* ARA: entry-level factory table and instance-level extension (stable IDs from ARACLAP.h).
+   [Why the criterion lives here] the host pairs this table with the descriptor at scan time
+   via `get_plugin_id`; one character of difference and the plugin is never claimed by ARA,
+   with no hint whatsoever in the host log. */
 typedef struct {
     uint32_t (*get_factory_count)(const void *);
     const void *(*get_ara_factory)(const void *, uint32_t);
@@ -115,7 +119,8 @@ static unsigned char saved_state[4096];
 static unsigned char first_state[4096];
 static size_t saved_len = 0, loaded_len = 0;
 
-/* 假宿主实现：clap.log 把插件日志收进下面的数组，用来证明 logger 真的接上了。 */
+/* Fake host implementation: clap.log collects plugin log lines into the array below,
+   proving the logger is really wired up. */
 typedef struct { void (*log)(const void *, int32_t, const char *); } clap_host_log_t;
 typedef struct { uint32_t (*get)(const void *); } clap_plugin_latency_t;
 typedef struct { uint32_t (*get)(const void *); } clap_plugin_tail_t;
@@ -136,8 +141,9 @@ static const void *host_get_extension(const void *host, const char *id) {
 static clap_host_t host = { {1,1,9}, NULL, "probe", "HiFiShifter", "https://example.invalid", "1",
     host_get_extension, NULL, NULL, NULL };
 
-/* 每次只接受 7 字节：clap/stream.h 明确允许宿主限制单次读写的字节数，
-   插件必须循环推进。用这个假宿主复现"短写丢尾部 / 短读把状态截断"。 */
+/* Accept only 7 bytes per call: clap/stream.h explicitly allows the host to limit the bytes
+   per read/write, and the plugin must loop. This fake host reproduces "short write drops
+   the tail / short read truncates the state". */
 #define STREAM_CHUNK 7
 static int64_t stream_write(const void *stream, const void *buffer, uint64_t size) {
     (void)stream;
@@ -185,9 +191,10 @@ int main(int argc, char **argv) {
             printf("feature=%s\n", *feature);
             if (strcmp(*feature, "ara:supported") == 0) saw_ara_supported = true;
         }
-        /* 阶段 2：descriptor 必须声明 ara:supported（宿主据此知道可以从 ARA 入口插入），
-           但**绝不**声明 ara:required —— 那会让不支持 ARA 的宿主直接拒绝建立实例。
-           两种宿主都要能插上，这是本插件的基本前提。 */
+        /* Stage 2: the descriptor must declare ara:supported (hosts use it to learn the
+           plugin can be inserted via the ARA entry) but **never** ara:required — that would
+           make hosts without ARA refuse to create instances outright. Both kinds of hosts
+           must be able to load this plugin; it is a basic premise. */
         for (const char *const *feature = desc->features; *feature; ++feature) {
             if (strcmp(*feature, "ara:required") == 0) {
                 fprintf(stderr, "the descriptor must not require ARA: %s\n", *feature);
@@ -199,13 +206,13 @@ int main(int argc, char **argv) {
         fprintf(stderr, "the descriptor does not advertise ara:supported\n");
         entry->deinit(); return 1;
     }
-    /* 工厂只能报一个插件；get_plugin_descriptor(1) 必须返回 null，否则
-       宿主扫描索引会越界。 */
+    /* The factory must report exactly one plugin; get_plugin_descriptor(1) must return null,
+       otherwise host scan indexes would run out of bounds. */
     if (factory->get_plugin_descriptor(factory, 1) != NULL) {
         fprintf(stderr, "get_plugin_descriptor(1) should return null\n");
         entry->deinit(); return 1;
     }
-    /* ARA 工厂表：与 descriptor 同索引、同 id、同一份二进制。 */
+    /* ARA factory table: same index, same id, same binary as the descriptor. */
     const clap_ara_factory_t *ara_factory =
         (const clap_ara_factory_t *)entry->get_factory("org.ara-audio.ara.factory/2");
     if (!ara_factory || !ara_factory->get_factory_count || !ara_factory->get_ara_factory ||
@@ -235,7 +242,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "create_plugin returned an incomplete plug-in\n"); return 1;
     }
     if (!plugin->init(plugin)) { fprintf(stderr, "plugin.init failed\n"); return 1; }
-    /* 实例级 ARA 扩展必须给出**同一张**工厂表的指针：宿主用它把实例绑到文档控制器。 */
+    /* The instance-level ARA extension must hand out **the same** factory table pointer:
+       the host uses it to bind the instance to a document controller. */
     const clap_ara_plugin_extension_t *ara_ext = (const clap_ara_plugin_extension_t *)
         plugin->get_extension(plugin, "org.ara-audio.ara.pluginextension/2");
     if (!ara_ext || !ara_ext->get_factory || !ara_ext->bind_to_document_controller) {
@@ -246,9 +254,11 @@ int main(int argc, char **argv) {
         fprintf(stderr, "the instance ARA factory differs from the entry table\n");
         plugin->destroy(plugin); entry->deinit(); return 1;
     }
-    /* REAPER 6.71+ 用 2022 私有草案 ID 做实例级发现，但那条草案的宿主实现在需要
-       真正渲染时会崩在自身代码里（见 hifishifter_clap::ara 模块文档）。因此这里断言
-       的是**必须缺席**：应答它等于把宿主的空指针缺陷引到用户面前。 */
+    /* REAPER 6.71+ uses the 2022 private draft ID for instance-level discovery, but that
+       draft's host implementation crashes inside its own code when it actually needs to
+       render (see the hifishifter_clap::ara module docs). The assertion here is therefore
+       **must be absent**: answering it hands the host's null-pointer defect straight to the
+       user. */
     const clap_ara_plugin_extension_t *reaper_ext = (const clap_ara_plugin_extension_t *)
         plugin->get_extension(plugin, "com.celemony.ara.plugin_extension.draft/1");
     if (reaper_ext != NULL) {
@@ -284,9 +294,10 @@ int main(int argc, char **argv) {
     printf("process=ok state_extension=");
     const clap_plugin_state_t *state_ext =
         (const clap_plugin_state_t *)plugin->get_extension(plugin, "clap.state");
-    /* 【为什么必须要求它存在】打印 "absent" 再返回 0 等于把"没有 state 扩展"
-       当成合格产物：宿主保存工程时不会写任何字节，重开后编辑全丢，而自检
-       依然是绿的。这一条判据把"能力缺席"变成硬失败。 */
+    /* [Why it must be required] printing "absent" and returning 0 amounts to certifying "no
+       state extension" as a good artifact: the host writes no bytes on project save, every
+       edit is lost after reopening, and the self-check still shows green. This criterion
+       turns a "missing capability" into a hard failure. */
     if (!state_ext || !state_ext->save || !state_ext->load) {
         fprintf(stderr, "clap.state is missing or incomplete\n"); return 1;
     }
@@ -294,8 +305,9 @@ int main(int argc, char **argv) {
         clap_ostream_t ostream = {NULL, stream_write}; clap_istream_t istream = {NULL, stream_read};
         if (!state_ext->save(plugin, &ostream) || saved_len == 0) { fprintf(stderr, "state.save failed\n"); return 1; }
         size_t first_len = saved_len;
-        /* 同一实例连续保存必须给出同一份字节：宿主会反复写工程。
-           先把第一次结果拷出来，再让第二次写回同一个缓冲区做逐字比较。 */
+        /* Consecutive saves from the same instance must produce identical bytes: hosts write
+           projects repeatedly. Copy the first result out, then let the second save write the
+           same buffer again for a byte-for-byte comparison. */
         memcpy(first_state, saved_state, first_len);
         saved_len = 0;
         if (!state_ext->save(plugin, &ostream) || saved_len != first_len ||
@@ -306,8 +318,9 @@ int main(int argc, char **argv) {
         if (!state_ext->load(plugin, &istream) || loaded_len != saved_len) { fprintf(stderr, "state.load failed\n"); return 1; }
         printf("round-trip(%zu bytes)\n", saved_len);
     }
-    /* 其余扩展必须如实返回：未接线的扩展返回 null 是允许的，但声明过的
-       render / audio-ports / timer-support 三类宿主能力不能凭空消失。 */
+    /* The remaining extensions must answer honestly: an unwired extension returning null is
+       allowed, but declared render / audio-ports / timer-support host capabilities must not
+       vanish into thin air. */
     printf("render_extension=%s\n", plugin->get_extension(plugin, "clap.render") ? "present" : "absent");
     printf("audio_ports_extension=%s\n", plugin->get_extension(plugin, "clap.audio-ports") ? "present" : "absent");
     printf("timer_support_extension=%s\n", plugin->get_extension(plugin, "clap.timer-support") ? "present" : "absent");
@@ -322,8 +335,9 @@ int main(int argc, char **argv) {
     if (!tail || !tail->get || tail->get(plugin) != 0) { fprintf(stderr, "clap.tail must report 0\n"); return 1; }
     printf("host_log_bytes=%zu\n", host_log_len);
     if (host_log_len == 0) { fprintf(stderr, "clap.log was never delivered to the host\n"); return 1; }
-    /* clap.gui 必须存在：宿主靠它建窗口、嵌前端。阶段 1 曾把它整个拿掉，
-       结果是 REAPER 扫描到插件却只给出一块空白窗口。 */
+    /* clap.gui must exist: hosts rely on it to create windows and embed the frontend. Stage
+       1 once removed it entirely; the result was REAPER scanning the plugin yet showing only
+       a blank window. */
     if (!plugin->get_extension(plugin, "clap.gui")) {
         fprintf(stderr, "clap.gui extension is missing; the host cannot show the editor\n"); return 1;
     }

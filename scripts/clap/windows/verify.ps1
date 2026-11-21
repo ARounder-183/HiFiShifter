@@ -1,9 +1,10 @@
-﻿# CLAP Windows 产物自检：导出符号、黑盒加载、ARA 能力。
+﻿# CLAP Windows artifact self-check: exported symbols, black-box load, ARA capabilities.
 param([Parameter(Mandatory=$true)][string]$ModulePath)
 $ErrorActionPreference = "Stop"
 if (!(Test-Path -LiteralPath $ModulePath)) { throw "CLAP module missing: $ModulePath" }
-# 单文件 CLAP 的资源目录必须与模块同级；缺 plugin.html 的表现是宿主扫描到插件
-# 却只给出一块空白窗口（前端根本没被加载）。
+# A single-file CLAP's resources directory must sit beside the module; a missing plugin.html
+# shows up as the host scanning the plugin yet showing only a blank window (the frontend was
+# never loaded).
 $moduleDir = Split-Path -Parent $ModulePath
 $resources = Join-Path $moduleDir "HiFiShifter-resources"
 $frontend = Join-Path $resources "frontend\plugin.html"
@@ -11,9 +12,10 @@ $manifest = Join-Path $resources "models\models.json"
 if (!(Test-Path -LiteralPath $frontend)) { throw "CLAP frontend assets missing: $frontend" }
 if (!(Test-Path -LiteralPath $manifest)) { throw "CLAP model manifest missing: $manifest" }
 Write-Host "OK   resources: frontend + models.json next to the module"
-# WebView2 的用户数据目录必须落在 %LOCALAPPDATA%\HiFiShifter\webview 下：模块自己
-# 在 Program Files，profile 一旦出现在这里，浏览器进程就无权写自己的数据目录
-# （宿主里弹"Microsoft Edge 无法读取和写入其数据目录"，窗口空白）。
+# WebView2's user data directory must live under %LOCALAPPDATA%\HiFiShifter\webview: the
+# module itself sits in Program Files, and once the profile appears in the resource tree the
+# browser process loses write access to its data directory (hosts pop up "Microsoft Edge
+# can't read and write to its data directory", and the window goes blank).
 $strayProfile = Join-Path $resources "webview"
 if (Test-Path -LiteralPath $strayProfile) {
     throw "WebView2 profile leaked into the resource tree: $strayProfile"
@@ -44,9 +46,10 @@ try {
     if ($entry -eq [IntPtr]::Zero) { throw "clap_entry not found by LoadLibrary" }
     Write-Host "OK   black-box load: clap_entry resolved"
 } finally { [void][ClapProbe]::FreeLibrary($handle) }
-# 【为什么 Windows 也要跑 ABI oracle】这里的 LoadLibrary 只证明符号存在；
-# 手写 #[repr(C)] 与官方头文件的字段偏移必须再比一次，否则 cl.exe / MSVC ABI 下的
-# 对齐差异（例如 clap_process_t 的 8 字节填充）不会被发现。
+# [Why Windows runs the ABI oracle too] LoadLibrary here only proves the symbols exist;
+# the hand-written #[repr(C)] field offsets must be compared against the official headers
+# once more, otherwise alignment differences under cl.exe / the MSVC ABI (e.g. clap_process_t's
+# 8-byte padding) would go unnoticed.
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\.."))
 . (Join-Path $root "scripts\env\sdk-env.ps1"); Set-SdkEnvironment
 Push-Location (Join-Path $root "backend")

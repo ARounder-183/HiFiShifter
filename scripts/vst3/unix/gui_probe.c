@@ -1,10 +1,11 @@
-/* gui_probe.c —— 实测 GTK3/WebKitGTK 在当前环境（如 WSLg）能不能真的画出来。
+/* gui_probe.c — hands-on check of whether GTK3/WebKitGTK can actually render in the current
+ * environment (e.g. WSLg).
  *
- * 四件事，任何一件不成立，插件窗口就是"空面板"：
- *   1. GTK3 能不能在某个 GDK 后端上初始化
- *   2. WebKit 的 web process 能不能起来（容器/WSL 里 bubblewrap 常失败）
- *   3. 页面能不能 load-finished
- *   4. GtkPlug 能不能挂在宿主的 X11 窗口里（只有 X11 后端可以）
+ * Four things; if any one of them fails, the plugin window is an "empty panel":
+ *   1. GTK3 can initialize on some GDK backend
+ *   2. WebKit's web process can start (bubblewrap often fails in containers/WSL)
+ *   3. the page can reach load-finished
+ *   4. GtkPlug can embed into the host's X11 window (X11 backend only)
  */
 #include <gtk/gtk.h>
 #include <gtk/gtkx.h>

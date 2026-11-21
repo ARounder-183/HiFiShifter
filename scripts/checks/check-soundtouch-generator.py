@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""SoundTouch 的 CMake 生成器必须被钉住，且能自愈陈旧缓存。
+"""SoundTouch's CMake generator must be pinned, and stale caches must self-heal.
 
-【为什么需要这条门禁】build.rs 把 SoundTouch 配到 OUT_DIR/soundtouch_build。
-CMake 一旦用某个生成器生成过 CMakeCache.txt，后续即使 CMAKE_GENERATOR 环境变量
-变了也仍复用旧缓存 —— 本机实测 8 份缓存都写着 Visual Studio 17 2022，而当前
-msvc-env.ps1 给的是 NMake Makefiles，于是 clippy 门禁死在 build script 里，看起来
-像源码坏了。build.rs 必须：显式把生成器传给 -G、声明环境变量变化重跑、并在缓存
-生成器不一致时清理重建，同时把 cmake 的输出回传，避免只留一句 exit code。
+[Why this gate exists] build.rs configures SoundTouch into OUT_DIR/soundtouch_build.
+Once CMake has generated a CMakeCache.txt with some generator, it keeps reusing that
+old cache even after the CMAKE_GENERATOR environment variable changes - measured on
+this machine, all 8 caches said Visual Studio 17 2022 while the current
+msvc-env.ps1 provides NMake Makefiles, so the clippy gate died inside the build
+script and looked like broken source code. build.rs must: pass the generator
+explicitly to -G, declare a rerun when the environment variable changes, clean and
+rebuild when the cached generator disagrees, and surface cmake's output so a bare
+exit code is never all that remains.
 
-退出码：0 = 合规，1 = 发现违规。
+Exit codes: 0 = compliant, 1 = violation found.
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ BUILD_RS = ROOT / "backend" / "hifishifter-kernel" / "build.rs"
 
 def require(text: str, needle: str, reason: str, failures: list[str]) -> None:
     if needle not in text:
-        failures.append(f"缺少 {reason}：{needle}")
+        failures.append(f"missing {reason}: {needle}")
 
 
 def main() -> int:
@@ -33,14 +36,14 @@ def main() -> int:
     require(
         text,
         'cargo:rerun-if-env-changed=CMAKE_GENERATOR',
-        "生成器环境变量的 rerun 声明",
+        "rerun declaration for the generator environment variable",
         failures,
     )
-    require(text, '"-G"', "显式的 cmake -G 参数", failures)
-    require(text, "CMAKE_GENERATOR:INTERNAL=", "缓存生成器比对", failures)
-    require(text, "remove_dir_all(&build_dir)", "不一致缓存的清理", failures)
-    require(text, "cmake configure stdout", "configure 失败时的 stdout 回传", failures)
-    require(text, "cmake configure stderr", "configure 失败时的 stderr 回传", failures)
+    require(text, '"-G"', "explicit cmake -G argument", failures)
+    require(text, "CMAKE_GENERATOR:INTERNAL=", "cached-generator comparison", failures)
+    require(text, "remove_dir_all(&build_dir)", "cleanup of a mismatched cache", failures)
+    require(text, "cmake configure stdout", "stdout surfaced when configure fails", failures)
+    require(text, "cmake configure stderr", "stderr surfaced when configure fails", failures)
     if failures:
         print("SoundTouch generator gate FAILED:")
         for failure in failures:

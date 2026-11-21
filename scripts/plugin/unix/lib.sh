@@ -1,35 +1,39 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# Unix 插件打包的共享规则（VST3 / CLAP 共用，macOS + Linux）。
+# Shared rules for Unix plugin packaging (VST3 / CLAP, macOS + Linux).
 #
-# 【为什么要有这一层】两个格式的**布局**不同：VST3 在 Linux 上也是
-# Contents/<arch>-linux/ 的 bundle，CLAP 在 Linux 上是单文件、在 macOS 上才是
-# bundle。但**平台规则完全相同**：运行时依赖必须躺在模块旁边、rpath 必须是
-# $ORIGIN / @loader_path、前端产物只有一份、许可证必须随包、产物里不许有悬空符号
-# 链接。这些规则原先只写在 vst3/unix/build.sh 里，CLAP 那边一条都没写 —— 于是
-# hifishifter-clap/build.rs 声明了 $ORIGIN，打包时却没人把库放进去，clap.yml 在
-# ldd 与 dyld 上同时红掉。
+# [Why this layer exists] the two formats' **layouts** differ: VST3 is a
+# Contents/<arch>-linux/ bundle even on Linux, while CLAP is a single file on Linux and only
+# a bundle on macOS. But the **platform rules are identical**: runtime dependencies must sit
+# beside the module, the rpath must be $ORIGIN / @loader_path, the frontend artifact is
+# single-sourced, licenses must travel with the package, and the artifact must contain no
+# dangling symlinks. These rules used to live only in vst3/unix/build.sh — the CLAP side had
+# none of them — so hifishifter-clap/build.rs declared $ORIGIN while packaging never put the
+# libraries in, and clap.yml went red on ldd and dyld at the same time.
 #
-# 这里只放"与格式无关"的实现。格式脚本负责自己的布局、入口符号与黑盒探针。
+# Only the "format-independent" implementation lives here. Format scripts own their layout,
+# entry symbols and black-box probes.
 #
-# 约定：本文件不设置 set -e，也不读写调用方的变量；所有状态放在 HFS_* 里。
+# Convention: this file does not set set -e and does not read or write the caller's
+# variables; all state lives in HFS_*.
 # ─────────────────────────────────────────────────────────────────────────────
 
 hfs_die() { printf '[plugin] ERROR: %s\n' "$*" >&2; exit 1; }
 hfs_log() { printf '[plugin] %s\n' "$*"; }
 
-# 平台三元组。macOS 的架构名沿用 uname（arm64），Linux 用 dpkg 的叫法（aarch64）——
-# 这与既有产物命名 HiFiShifter_v<版本>_<os>-<arch>-* 一致，改名会让已发布的文件名断档。
+# Platform triple. macOS keeps uname's architecture name (arm64); Linux uses dpkg's spelling
+# (aarch64) — this matches the existing artifact naming HiFiShifter_v<version>_<os>-<arch>-*,
+# and renaming would break continuity with already-published file names.
 hfs_detect_platform() {
     case "$(uname -s)" in
         Linux)  HFS_OS="linux" ;;
         Darwin) HFS_OS="macos" ;;
-        *)      hfs_die "只支持 Linux 与 macOS，当前是 $(uname -s)" ;;
+        *)      hfs_die "only Linux and macOS are supported, current: $(uname -s)" ;;
     esac
     case "$(uname -m)" in
         x86_64|amd64)  HFS_ARCH="x86_64" ;;
         arm64|aarch64) HFS_ARCH="arm64" ;;
-        *)             hfs_die "不支持的 CPU 架构：$(uname -m)" ;;
+        *)             hfs_die "unsupported CPU architecture: $(uname -m)" ;;
     esac
     if [ "$HFS_OS" = "linux" ] && [ "$HFS_ARCH" = "arm64" ]; then
         HFS_PLATFORM_ARCH="aarch64"
@@ -48,7 +52,8 @@ hfs_sha256() {
     fi
 }
 
-# CFBundleVersion 只接受点分的整数；完整版本号（含 -beta）另存自定义键。
+# CFBundleVersion only accepts dot-separated integers; the full version (including -beta) is
+# stored under a custom key.
 hfs_numeric_version() {
     local version
     version="$(printf '%s' "${1#v}" | sed -E 's/-.*$//')"
@@ -58,23 +63,25 @@ hfs_numeric_version() {
     esac
 }
 
-# 产物里必须与模块同级的运行时库。ort 的 copy-dylibs 会把它们放在 target 目录下；
-# Linux ARM64 的 ort 刻意不带 webgpu feature（没有预编译的 dawn），产物里既不会
-# NEEDED 也不会存在 libwebgpu_dawn.so —— 列进来会让构建在该平台上永远失败。
+# Runtime libraries that must sit beside the module in the artifact. ort's copy-dylibs puts
+# them under the target directory; Linux ARM64's ort deliberately ships without the webgpu
+# feature (no prebuilt dawn), so the artifact neither NEEDs nor contains libwebgpu_dawn.so —
+# listing it would make the build fail forever on that platform.
 hfs_runtime_deps() {
     if [ "$HFS_OS" = "linux" ]; then
-        # 【为什么判 HFS_ARCH 而不是 HFS_PLATFORM_ARCH】后者在 Linux/arm64 上被改名成
-        # "aarch64"（dpkg 的叫法，产物名沿用它），与 "arm64" 永远不相等 —— 这条分支
-        # 因此一次都没命中过，linux-aarch64 会去要一个该平台根本没有的 dawn。
+        # [Why HFS_ARCH is tested instead of HFS_PLATFORM_ARCH] the latter is renamed to
+        # "aarch64" on Linux/arm64 (dpkg's spelling, kept in artifact names) and therefore
+        # never equals "arm64" — this branch would never have hit, and linux-aarch64 would
+        # demand a dawn that simply does not exist on that platform.
         if [ "$HFS_ARCH" = "arm64" ]; then
             printf '%s\n' "libSoundTouchDLL.so"
         else
             printf '%s\n' "libSoundTouchDLL.so" "libwebgpu_dawn.so"
         fi
     elif [ "$HFS_ARCH" = "x86_64" ]; then
-        # macOS Intel 走 ort 的 alternative-backend（纯 Rust 的 tract，见 kernel 的
-        # Cargo.toml）：既不链接 libonnxruntime，也不链接 dawn。把 dawn 列进来会让
-        # 这条腿在"缺少运行时依赖"上失败，而产物其实没有任何问题。
+        # macOS Intel uses ort's alternative-backend (pure-Rust tract, see kernel's
+        # Cargo.toml): it links neither libonnxruntime nor dawn. Listing dawn would make
+        # this leg fail on "missing runtime dependency" while the artifact is actually fine.
         printf '%s\n' "libSoundTouchDLL.dylib"
     else
         printf '%s\n' "libSoundTouchDLL.dylib" "libwebgpu_dawn.dylib"
@@ -88,57 +95,60 @@ hfs_stage_runtime_deps() {
     while IFS= read -r dep; do
         [ -n "$dep" ] || continue
         src="$target/$dep"
-        [ -e "$src" ] || hfs_die "缺少运行时依赖 ${src}（先编译：ort 的 copy-dylibs 会把它放在 target 目录下）"
-        # -L：ORT 的 dawn 在 target 下是指向 ~/.cache 的符号链接，直接 cp 会在压缩包里
-        # 留下一个悬空链接（用户机上指向不存在的路径）。
+        [ -e "$src" ] || hfs_die "missing runtime dependency ${src} (build first: ort's copy-dylibs puts it under the target directory)"
+        # -L: ORT's dawn under target/ is a symlink into ~/.cache; a plain cp would leave a
+        # dangling link inside the archive (pointing at a path that does not exist on the
+        # user's machine).
         cp -Lf "$src" "$dest/$dep"
-        hfs_log "依赖 ${dep}（$(du -h "$dest/$dep" | cut -f1)）"
+        hfs_log "dependency ${dep} ($(du -h "$dest/$dep" | cut -f1))"
     done <<< "$(hfs_runtime_deps)"
 }
 
 # <resources-dir> [<frontend-dist>]
 hfs_stage_frontend() {
     local res="$1" src="${2:-${HFS_FRONTEND_DIST:-}}"
-    [ -n "$src" ] || hfs_die "没有指定前端产物目录"
-    [ -s "$src/plugin.html" ] || hfs_die "缺少前端产物：$src/plugin.html"
-    [ -d "$src/assets" ] || hfs_die "缺少 $src/assets：插件入口没有脚本可加载"
+    [ -n "$src" ] || hfs_die "no frontend artifact directory given"
+    [ -s "$src/plugin.html" ] || hfs_die "missing frontend artifact: $src/plugin.html"
+    [ -d "$src/assets" ] || hfs_die "missing $src/assets: the plugin entry has no script to load"
     mkdir -p "$res/frontend"
     cp -f "$src/plugin.html" "$res/frontend/"
     rm -rf "$res/frontend/assets"
     cp -R "$src/assets" "$res/frontend/"
-    hfs_log "前端资源（$(du -sh "$res/frontend" | cut -f1)）"
+    hfs_log "frontend assets ($(du -sh "$res/frontend" | cut -f1))"
 }
 
-# 模型必须进包。Windows 有安装器拥有的共享模型库；macOS/Linux 的统一
-# 安装包也把权重放在共享库，只让 bundle 带 models.json。纯插件包（不经过统一
-# 安装器）仍保持自包含（约 200 MB），解压就能用、不依赖外部目录。
+# Models must ship in the package. Windows has an installer-owned shared model store; the
+# unified macOS/Linux installer also keeps the weights in a shared store and lets only
+# models.json travel with the bundle. The plugin-only package (not going through the unified
+# installer) stays self-contained (~200 MB): extract and it works, no external directory.
 # <resources-dir> <models-source>
 hfs_stage_models() {
     local res="$1" src="$2"
-    [ -d "$src" ] || hfs_die "缺少模型资源目录：$src"
+    [ -d "$src" ] || hfs_die "missing model resources directory: $src"
     mkdir -p "$res/models"
     cp -R "$src/." "$res/models/"
     [ -f "$res/models/models.json" ] \
-        || hfs_die "模型清单缺失：先跑 python3 scripts/setup/fetch-models.py --write-manifest"
+        || hfs_die "model manifest missing: run python3 scripts/setup/fetch-models.py --write-manifest first"
 }
 
-# 把 bundle 内的模型目录压缩成"只有清单"的形态。统一安装包把权重放在共享库，
-# 独立 App 与每个插件都靠 models.json 里的版本号去共享库找同一份；bundle 里再留
-# 一份完整权重只会让 pkg/tar 体积翻倍。
+# Compress the bundle's models directory to "manifest only" form. The unified installer
+# keeps the weights in the shared store, and the standalone app plus every plugin locate
+# that one copy via the version recorded in models.json; leaving a full copy in the bundle
+# would just double the pkg/tar size.
 # <models-dir>
 hfs_strip_models_to_manifest() {
     local models="$1"
-    [ -f "$models/models.json" ] || hfs_die "缺少模型清单：$models/models.json"
+    [ -f "$models/models.json" ] || hfs_die "missing model manifest: $models/models.json"
     find "$models" -mindepth 1 -maxdepth 1 ! -name 'models.json' -exec rm -rf {} \;
     [ "$(find "$models" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = "1" ] \
-        || hfs_die "模型目录没有清理干净：$models"
+        || hfs_die "models directory was not cleaned up: $models"
 }
 
 # <dest-dir> <repo-root>
 hfs_stage_licenses() {
     local dest="$1" root="$2" extra
     for extra in LICENSE licenses; do
-        [ -e "$root/$extra" ] || hfs_die "缺少许可证：$extra"
+        [ -e "$root/$extra" ] || hfs_die "missing license: $extra"
         cp -R "$root/$extra" "$dest/"
     done
 }
@@ -166,53 +176,57 @@ hfs_write_info_plist() {
         printf '  <key>HiFiShifterVersion</key><string>%s</string>\n' "$version"
         printf '</dict>\n</plist>\n'
     } >"$path"
-    hfs_log "Info.plist 已生成（CFBundleVersion=${numeric}）"
+    hfs_log "Info.plist generated (CFBundleVersion=${numeric})"
 }
 
-# 签名身份：默认 ad-hoc（arm64 上未签名的 Mach-O 根本加载不了）。发布签名与公证由
-# HIFISHIFTER_CODESIGN_IDENTITY 打开，构建脚本不假装拥有证书。
+# Signing identity: ad-hoc by default (an unsigned Mach-O simply fails to load on arm64).
+# Release signing and notarization are enabled via HIFISHIFTER_CODESIGN_IDENTITY; the build
+# script does not pretend to own a certificate.
 # <bundle-dir> <module-file>
 hfs_sign_bundle() {
     local bundle="$1" module="$2" identity file
     identity="${HIFISHIFTER_CODESIGN_IDENTITY:--}"
-    command -v codesign >/dev/null 2>&1 || hfs_die "缺少 codesign"
+    command -v codesign >/dev/null 2>&1 || hfs_die "codesign missing"
     local -a args=(--force --sign "$identity")
     if [ "$identity" != "-" ]; then
-        # 公证要求 hardened runtime + 安全时间戳；ad-hoc 签名带这两个参数没有意义。
+        # Notarization requires hardened runtime + a secure timestamp; with ad-hoc signing
+        # these two flags are pointless.
         args+=(--options runtime --timestamp)
     fi
-    # 顺序是硬约束：先依赖、再模块、最后 bundle —— bundle 的签名覆盖整棵目录树，
-    # 反过来会让前两步的签名立刻失效。
+    # The order is a hard constraint: dependencies first, then the module, then the bundle —
+    # the bundle's signature covers the whole directory tree, and the other way around would
+    # instantly invalidate the first two steps' signatures.
     while IFS= read -r file; do
         [ -n "$file" ] || continue
-        codesign "${args[@]}" "$file" >/dev/null 2>&1 || hfs_die "依赖签名失败：$file"
+        codesign "${args[@]}" "$file" >/dev/null 2>&1 || hfs_die "failed to sign dependency: $file"
     done < <(find "$bundle" -type f \( -name '*.dylib' -o -name '*.so' \) -print)
-    codesign "${args[@]}" "$module" >/dev/null 2>&1 || hfs_die "模块签名失败：$module"
-    codesign "${args[@]}" "$bundle" >/dev/null 2>&1 || hfs_die "bundle 签名失败：$bundle"
+    codesign "${args[@]}" "$module" >/dev/null 2>&1 || hfs_die "failed to sign module: $module"
+    codesign "${args[@]}" "$bundle" >/dev/null 2>&1 || hfs_die "failed to sign bundle: $bundle"
     if [ "$identity" = "-" ]; then
-        hfs_log "已完成 ad-hoc 签名"
+        hfs_log "ad-hoc signing done"
     else
-        hfs_log "已用 $identity 签名"
+        hfs_log "signed with $identity"
     fi
 }
 
-# 依赖放在模块旁边就必须有 $ORIGIN / @loader_path 的搜索路径：用户机上没有
-# LD_LIBRARY_PATH，那是宿主进程的环境，我们无权要求。
+# Dependencies placed beside the module require a $ORIGIN / @loader_path search path: the
+# user's machine has no LD_LIBRARY_PATH — that is the host process's environment, which we
+# have no right to demand.
 # <module-file>
 hfs_assert_rpath() {
     local module="$1" paths
     if [ "$HFS_OS" = "linux" ]; then
-        command -v readelf >/dev/null 2>&1 || { hfs_log "SKIP rpath：没有 readelf"; return 0; }
+        command -v readelf >/dev/null 2>&1 || { hfs_log "SKIP rpath: no readelf"; return 0; }
         paths="$(readelf -d "$module" 2>/dev/null | sed -n 's/.*(\(RPATH\|RUNPATH\)).*\[\(.*\)\]/\2/p' | tr '\n' ':')"
         case ":$paths" in
-            *':$ORIGIN'*) hfs_log "rpath 含 \$ORIGIN（${paths}）"; return 0 ;;
+            *':$ORIGIN'*) hfs_log "rpath contains \$ORIGIN (${paths})"; return 0 ;;
         esac
-        hfs_die "模块没有 \$ORIGIN 的 rpath（当前：${paths:-无}）：用户机上依赖会解析失败"
+        hfs_die "module has no \$ORIGIN rpath (current: ${paths:-none}): dependencies would fail to resolve on the user's machine"
     else
-        command -v otool >/dev/null 2>&1 || { hfs_log "SKIP rpath：没有 otool"; return 0; }
+        command -v otool >/dev/null 2>&1 || { hfs_log "SKIP rpath: no otool"; return 0; }
         otool -l "$module" 2>/dev/null | grep -A2 'LC_RPATH' | grep -q '@loader_path' \
-            || hfs_die "模块没有 @loader_path 的 rpath：bundle 内的依赖会解析失败"
-        hfs_log "rpath 含 @loader_path"
+            || hfs_die "module has no @loader_path rpath: dependencies inside the bundle would fail to resolve"
+        hfs_log "rpath contains @loader_path"
     fi
 }
 
@@ -220,35 +234,38 @@ hfs_assert_rpath() {
 hfs_check_no_dangling() {
     local dir="$1" dangling
     dangling="$(find "$dir" -type l ! -exec test -e {} \; -print 2>/dev/null || true)"
-    [ -z "$dangling" ] || hfs_die "产物里有悬空符号链接：$dangling"
+    [ -z "$dangling" ] || hfs_die "artifact contains dangling symlinks: $dangling"
 }
 
-# cargo 构建失败时的现场回放。**不退出**：调用方保留自己的 [vst3] / [clap] 前缀。
+# Scene replay when a cargo build fails. **Does not exit**: the caller keeps its own
+# [vst3] / [clap] prefix.
 # <log-file> <exit-status>
 #
-# 【为什么要先找 error 行】build script 的 panic 写在日志**中段**：cargo 会让并行的作业
-# 跑完才退出，所以它后面还跟着几百行原生依赖（World 的 C++）的编译告警。只回放末尾，
-# 得到的现场就是"一堆 warning + 退出码 101"，看上去像没有任何原因 —— vst3-unix.yml
-# 为此被误判成 OOM 过一轮，直到把完整日志翻出来才看见真正的 panic。
+# [Why the error line is located first] a build script's panic lands in the **middle** of the
+# log: cargo lets its parallel jobs finish before exiting, so hundreds of compile warnings
+# from native dependencies (World's C++) follow it. Replaying only the tail produces the
+# scene "a pile of warnings + exit code 101" that looks causeless — vst3-unix.yml was once
+# misread as OOM for a whole round until the full log was dug out and the real panic showed.
 hfs_report_build_failure() {
     local log="$1" status="$2" first_line window
     if [ ! -f "$log" ]; then
-        printf '[plugin] 没有构建日志：%s\n' "$log" >&2
+        printf '[plugin] no build log: %s\n' "$log" >&2
         return 0
     fi
     if [ "$status" -eq 137 ] || [ "$status" -eq 143 ]; then
-        printf '[plugin] 进程被信号杀死（exit %s）：runner 内存或磁盘不足。\n' "$status" >&2
+        printf '[plugin] process killed by signal (exit %s): the runner is short on memory or disk.\n' "$status" >&2
     fi
-    # CARGO_TERM_COLOR=never 是这条判据成立的前提（否则行首是转义序列）。
+    # CARGO_TERM_COLOR=never is the precondition for this criterion (otherwise lines start
+    # with escape sequences).
     first_line="$(grep -n -m1 -E '^error(\[|:)' "$log" 2>/dev/null | cut -d: -f1 || true)"
     if [ -n "$first_line" ]; then
         window=$((first_line + 40))
-        printf '[plugin] 日志里第一处 error（第 %s 行起）：\n' "$first_line" >&2
+        printf '[plugin] first error in the log (from line %s):\n' "$first_line" >&2
         sed -n "${first_line},${window}p" "$log" >&2
-        printf '[plugin] 日志末尾 20 行：\n' >&2
+        printf '[plugin] last 20 lines of the log:\n' >&2
         tail -20 "$log" >&2
     else
-        printf '[plugin] 日志里没有 error 行，末尾 120 行：\n' >&2
+        printf '[plugin] no error lines in the log; last 120 lines:\n' >&2
         tail -120 "$log" >&2
     fi
 }
@@ -257,12 +274,12 @@ hfs_report_build_failure() {
 hfs_tarball() {
     local out="$1" work="$2"
     shift 2
-    [ $# -gt 0 ] || hfs_die "打包没有指定条目"
+    [ $# -gt 0 ] || hfs_die "no entries given for packaging"
     rm -f "$out"
-    ( cd "$work" && tar -czf "$out" "$@" ) || hfs_die "打包失败：$out"
+    ( cd "$work" && tar -czf "$out" "$@" ) || hfs_die "packaging failed: $out"
     local digest
     digest="$(hfs_sha256 "$out")"
     printf '%s  %s\n' "$digest" "$(basename "$out")" >"$out.sha256"
-    hfs_log "产物 $(du -h "$out" | cut -f1)：$out"
+    hfs_log "artifact $(du -h "$out" | cut -f1): $out"
     hfs_log "sha256 $digest"
 }

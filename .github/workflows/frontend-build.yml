@@ -1,7 +1,8 @@
 name: Frontend build
 
-# 纯构建流水线：只产出 frontend-dist artifact，供各条产物流水线复用。
-# CI 不运行前端测试；这里只执行生产构建（typecheck + vite build）。
+# Pure build pipeline: produces only the frontend-dist artifact for the other artifact
+# pipelines to reuse. CI does not run frontend tests; only the production build runs here
+# (typecheck + vite build).
 on:
   workflow_call:
   workflow_dispatch:

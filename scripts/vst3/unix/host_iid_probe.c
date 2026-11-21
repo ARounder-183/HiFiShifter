@@ -1,26 +1,30 @@
-/* host_iid_probe.c —— 判定"插件能否按**本平台**的 IID 布局拿到宿主的原生扩展"。
+/* host_iid_probe.c — decides "can the plugin obtain the host's native extension using the
+ * **this-platform** IID layout".
  *
  *   cc -O1 -o host_iid_probe host_iid_probe.c -ldl
- *   ./host_iid_probe <HiFiShifter.so> [工作目录]
+ *   ./host_iid_probe <HiFiShifter.so> [workdir]
  *
- * 【为什么需要它】VST3 的 IID 是**逐字节**比较的，而 INLINE_UID 按 COM_COMPATIBLE
- * 展开成两种布局：Windows 是 COM/GUID，Linux / macOS 是每字大端。插件若把
- * queryInterface 的 IID 编错，宿主的回答是"空指针"——不崩、不报错，日志里只剩一行
- * available=false。这类缺陷在 Windows 上完全看不出来，只能靠一条**在 Unix 上真的跑
- * 一遍握手**的判据挡住。
+ * [Why this exists] VST3 IIDs are compared **byte for byte**, and INLINE_UID expands into
+ * two layouts depending on COM_COMPATIBLE: Windows uses COM/GUID, Linux / macOS use
+ * big-endian per word. If the plugin encodes queryInterface's IID wrong, the host's answer
+ * is "null pointer" — no crash, no error, just a single available=false line in the log.
+ * Such a defect is completely invisible on Windows; only a criterion that **really runs the
+ * handshake on Unix** can catch it.
  *
- * 判据（四条全中才算过）：
- *   1. 日志里有 "[reaper-host] QI succeeded"
- *   2. 日志里有 "native host extension available=true"
- *   3. 日志里的 "iid layout:" 与本平台一致（Unix 必须是 big-endian）
- *   4. 日志里有 "host application (vst3 name): SynthHost"（证明 IHostApplication
- *      那一份引用真的拿到了 —— 编辑器与处理器的消息通道靠它）
+ * Criteria (all four must hit):
+ *   1. the log contains "[reaper-host] QI succeeded"
+ *   2. the log contains "native host extension available=true"
+ *   3. the log's "iid layout:" matches this platform (Unix must be big-endian)
+ *   4. the log contains "host application (vst3 name): SynthHost" (proof that the
+ *      IHostApplication reference was really obtained — the editor/processor message
+ *      channel depends on it)
  *
- * 【为什么自己实现宿主】用真 DAW 当判据就跑不进 CI。这里只实现插件握手时**真的会
- * 调用**的两个接口：IHostApplication（getName）与 IReaperHostApplication
- * （getReaperApi）。不建视图、不碰 X11，所以没有显示环境也能跑。
+ * [Why the host is implemented here] using a real DAW as the criterion would never run in
+ * CI. Only the two interfaces the plugin **actually calls** during the handshake are
+ * implemented: IHostApplication (getName) and IReaperHostApplication (getReaperApi).
+ * No view is built and X11 is not touched, so it runs without a display server.
  *
- * 退出码：0 = 通过；1 = 插件日志不满足判据；2 = 用法/加载失败。
+ * Exit codes: 0 = pass; 1 = plugin log does not satisfy the criteria; 2 = usage/load failure.
  */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -36,7 +40,7 @@ typedef int32_t tresult;
 #define NO_INTERFACE (-2147467262)
 #define NOT_IMPLEMENTED (-2147467263)
 
-/* ── IID：四个 32 位字 + 平台布局 ─────────────────────────────────────────── */
+/* ── IIDs: four 32-bit words + platform layout ───────────────────────────── */
 
 typedef struct { uint32_t w[4]; } IidWords;
 
@@ -44,12 +48,12 @@ static const IidWords IID_HOST      = {{0x58E595CC, 0xDB2D4969, 0x8B6AAF8C, 0x36
 static const IidWords IID_REAPER_HOST= {{0x79655E36, 0x77EE4267, 0xA573FEF7, 0x4912C27C}};
 static const IidWords IID_COMPONENT = {{0xE831FF31, 0xF2D54301, 0x928EBBEE, 0x25697802}};
 
-/* FUnknown {00000000-0000-0000-C000-000000000046}：两种布局在这里恰好相同。 */
+/* FUnknown {00000000-0000-0000-C000-000000000046}: both layouts happen to coincide here. */
 static const unsigned char IID_FUNKNOWN[16] = {
     0,0,0,0, 0,0,0,0, 0xC0,0,0,0, 0,0,0,0x46
 };
 
-/* 【与 vst3.rs::platform_iid 同构】Windows 走 COM 布局，其余平台每字大端。 */
+/* [Isomorphic to vst3.rs::platform_iid] Windows uses the COM layout, other platforms big-endian per word. */
 static void platform_iid(IidWords words, unsigned char out[16]) {
 #if defined(_WIN32)
     uint32_t l1 = words.w[0], l2 = words.w[1], l3 = words.w[2], l4 = words.w[3];
@@ -71,14 +75,14 @@ static void platform_iid(IidWords words, unsigned char out[16]) {
 #endif
 }
 
-/* ── 宿主对象 ─────────────────────────────────────────────────────────────── */
+/* ── Host objects ────────────────────────────────────────────────────────── */
 
 static uint32_t ref_add(void *self) { (void)self; return 2; }
 static uint32_t ref_release(void *self) { (void)self; return 1; }
 
 static const char *app_version(void) { return "7.99/synthetic"; }
 
-/* IReaperHostApplication：getReaperApi / getReaperParent / extended。 */
+/* IReaperHostApplication: getReaperApi / getReaperParent / extended. */
 static void *rh_api(void *self, const char *name) {
     (void)self;
     if (name && strcmp(name, "GetAppVersion") == 0) return (void *)&app_version;
@@ -104,7 +108,7 @@ static void *rh_vtbl[] = {
 };
 static void *rh_object[1] = { (void *)rh_vtbl };
 
-/* IHostApplication：getName / createInstance；同时按 IID 交出上面的 REAPER 接口。 */
+/* IHostApplication: getName / createInstance; also hands out the REAPER interface above by IID. */
 static tresult ha_get_name(void *self, char *name) {
     (void)self;
     snprintf(name, 128, "SynthHost");
@@ -136,7 +140,7 @@ static void *ha_vtbl[] = {
 };
 static void *ha_object[1] = { (void *)ha_vtbl };
 
-/* ── 插件入口 ─────────────────────────────────────────────────────────────── */
+/* ── Plugin entry ────────────────────────────────────────────────────────── */
 
 #define VT(obj) (*(void ***)(obj))
 #define CALL(obj, slot, type, ...) ((type)(VT(obj)[slot]))(__VA_ARGS__)
@@ -154,7 +158,7 @@ typedef struct {
     char name[64];
 } PClassInfo;
 
-/* 读整个文件到内存（日志很小，一次读完最省事）。 */
+/* Read an entire file into memory (logs are small; one read is the simplest). */
 static char *slurp(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
@@ -180,22 +184,24 @@ static void hex16(const unsigned char *bytes, char out[33]) {
     out[32] = 0;
 }
 
-/* 把插件自己的日志尾巴打出来。
+/* Print the tail of the plugin's own log.
  *
- * 【为什么 createInstance 失败也要打】"工厂回了 kNoInterface"有两种完全不同的成因：
- * 它不认识这个 IID，或者它认识、但对象建不出来（Processor::create() 在 ARA 运行时
- * 初始化失败时也回同一个码）。只看返回值分不出是哪一种，而插件日志里那句
- * "factory createInstance cid=... iid=..." 与随后的行能直接分开它们。
+ * [Why it is printed even when createInstance fails] "the factory answered kNoInterface" has
+ * two entirely different causes: it does not recognize the IID, or it recognizes it but
+ * cannot build the object (Processor::create() returns the same code when ARA runtime
+ * initialization fails). The return value alone cannot tell them apart, but the plugin
+ * log's "factory createInstance cid=... iid=..." line and what follows separates them
+ * directly.
  */
 static void dump_log(const char *path) {
     char *log = slurp(path);
     if (!log) {
-        printf("  (没有插件日志：%s)\n", path);
+        printf("  (no plugin log: %s)\n", path);
         return;
     }
     size_t length = strlen(log);
     size_t from = length > 3000 ? length - 3000 : 0;
-    printf("\n---- 插件日志（尾部）----\n%s\n--------------------------\n", log + from);
+    printf("\n---- plugin log (tail) ----\n%s\n--------------------------\n", log + from);
     free(log);
 }
 
@@ -204,7 +210,7 @@ static void expect(const char *haystack, const char *needle, const char *what) {
     if (haystack && strstr(haystack, needle)) {
         printf("  ok   %s\n", what);
     } else {
-        printf("  FAIL %s（日志里找不到 \"%s\"）\n", what, needle);
+        printf("  FAIL %s (log does not contain \"%s\")\n", what, needle);
         failures++;
     }
 }
@@ -219,7 +225,7 @@ int main(int argc, char **argv) {
     char workdir[512];
     if (argc >= 3) {
         snprintf(workdir, sizeof workdir, "%s", argv[2]);
-        mkdir(workdir, 0700); /* 已存在也没关系 */
+        mkdir(workdir, 0700); /* already existing is fine */
     } else {
         snprintf(workdir, sizeof workdir, "/tmp/hfs-iid-XXXXXX");
         if (!mkdtemp(workdir)) {
@@ -228,10 +234,11 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* 【为什么用 PLUGIN_LOG 精确文件】日志文件名的形状是
-     * plugin-<format>-<host>.log，会随格式与宿主改写；探针只关心"这一个文件里有没有
-     * 握手行"，不该跟着命名规则走。显式文件路径还会关掉内存缓冲，于是握手行不会
-     * 因为进程提前退出而丢在内存里。 */
+    /* [Why an exact PLUGIN_LOG file] the log file name's shape is plugin-<format>-<host>.log
+     * and changes with format and host; the probe only cares "does this one file contain
+     * the handshake lines" and should not chase a naming scheme. An explicit file path also
+     * disables in-memory buffering, so handshake lines are not lost in memory when the
+     * process exits early. */
     char probe_log_path[1100];
     snprintf(probe_log_path, sizeof probe_log_path, "%s/plugin-iid-probe.log", workdir);
     setenv("HIFISHIFTER_PLUGIN_LOG", probe_log_path, 1);
@@ -250,7 +257,8 @@ int main(int argc, char **argv) {
     void *factory = get_factory();
     if (!factory) { printf("factory is null\n"); return 2; }
 
-    /* setHostContext：VST3 3.7 起宿主会把上下文交出来；插件在这里就试着拿原生扩展。 */
+    /* setHostContext: since VST3 3.7 the host hands over the context; the plugin already
+     * tries to grab the native extension here. */
     ((SetHostContextFn)VT(factory)[9])(factory, ha_object);
 
     int32_t count = CALL(factory, 4, CountFn, factory);
@@ -274,37 +282,38 @@ int main(int argc, char **argv) {
         char cid_hex[33], iid_hex[33];
         hex16(component_cid, cid_hex);
         hex16(component_iid, iid_hex);
-        printf("createInstance failed: %d\n  cid=%s\n  iid=%s（本平台布局）\n", result, cid_hex, iid_hex);
+        printf("createInstance failed: %d\n  cid=%s\n  iid=%s (this platform's layout)\n", result, cid_hex, iid_hex);
         dump_log(log_path);
         return 1;
     }
 
-    /* initialize 是插件拿宿主应用接口的地方：IHostApplication 与原生扩展都在这里绑。 */
+    /* initialize is where the plugin grabs the host application interfaces: IHostApplication
+     * and the native extension are both bound here. */
     ((InitializeFn)VT(component)[3])(component, ha_object);
 
-    /* 等日志落地（显式目录不缓冲，但宿主调用是异步的）。 */
+    /* Wait for the log to land (the explicit directory is unbuffered, but host calls are async). */
     usleep(300 * 1000);
 
     CALL(component, 2, ReleaseFn, component);
 
     char *log = slurp(log_path);
     if (!log) {
-        printf("  FAIL 没有日志：%s\n", log_path);
+        printf("  FAIL no log: %s\n", log_path);
         return 1;
     }
 
     printf("[vst3:iid] %s\n", module_path);
-    expect(log, "[reaper-host] QI succeeded", "原生扩展握手成功");
-    expect(log, "native host extension available=true", "原生扩展可用");
-    expect(log, "host application (vst3 name): SynthHost", "宿主应用接口可用（getName）");
+    expect(log, "[reaper-host] QI succeeded", "native extension handshake succeeded");
+    expect(log, "native host extension available=true", "native extension available");
+    expect(log, "host application (vst3 name): SynthHost", "host application interface usable (getName)");
 #if defined(_WIN32)
-    expect(log, "iid layout: com-guid", "IID 布局与平台一致（com-guid）");
+    expect(log, "iid layout: com-guid", "IID layout matches the platform (com-guid)");
 #else
-    expect(log, "iid layout: big-endian", "IID 布局与平台一致（big-endian）");
+    expect(log, "iid layout: big-endian", "IID layout matches the platform (big-endian)");
 #endif
 
     if (failures) {
-        printf("\n---- 插件日志（尾部）----\n");
+        printf("\n---- plugin log (tail) ----\n");
         size_t length = strlen(log);
         size_t from = length > 3000 ? length - 3000 : 0;
         printf("%s\n", log + from);

@@ -1,25 +1,28 @@
-﻿# 插件 SDK（ARA_SDK / vst3sdk）检出的唯一事实来源。
+﻿# Single source of truth for the plugin SDK (ARA_SDK / vst3sdk) checkouts.
 #
-# 这里只回答三个问题：检出放在哪、本地镜像在哪、消费方要设哪两个环境变量。
-#   - 拉哪个仓库 / 哪个 commit / 哪个 tree 由 scripts/env/plugin-sdks.json 钉死；
-#   - 下载与校验由 scripts/setup/prepare-plugin-sdks.ps1 完成；
-#   - 本地镜像由 scripts/setup/export-sdk-mirror.ps1 生成。
+# This file answers only three questions: where the checkouts live, where the local mirror
+# is, and which environment variables consumers must set.
+#   - Which repository / commit / tree is pinned by scripts/env/plugin-sdks.json;
+#   - Downloading and verification are handled by scripts/setup/prepare-plugin-sdks.ps1;
+#   - The local mirror is produced by scripts/setup/export-sdk-mirror.ps1.
 #
-# 用法（点源后调用）：
+# Usage (call after dot-sourcing):
 #   . .\scripts\env\sdk-env.ps1
-#   Set-SdkEnvironment            # 设置 ARA_SDK_DIR / ARA_VST3_SDK_DIR
-#   Get-SdkCacheRoot              # 取缓存根
-#   Get-SdkMirrorRoot             # 取本地镜像根（HIFISHIFTER_SDK_MIRROR 可覆盖）
-#   Test-SdkOfflineRequested      # 是否禁止为取源联网（HIFISHIFTER_OFFLINE）
+#   Set-SdkEnvironment            # sets ARA_SDK_DIR / ARA_VST3_SDK_DIR
+#   Get-SdkCacheRoot              # returns the cache root
+#   Get-SdkMirrorRoot             # returns the local mirror root (HIFISHIFTER_SDK_MIRROR overrides)
+#   Test-SdkOfflineRequested      # whether fetching sources over the network is forbidden (HIFISHIFTER_OFFLINE)
 
 function Get-SdkCacheRoot {
-    # 按 pin 下载到仓库内、被 gitignore 的 third_party/sdk：控体积，并履行许可声明义务。
+    # Per the pins, downloaded into the gitignored third_party/sdk inside the repository:
+    # keeps the repo lean and fulfills the license attribution obligation.
     [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\third_party\sdk'))
 }
 
 function Get-SdkMirrorRoot {
-    # 可整体拷贝的本地源缓存，形状与缓存根相同（含 ARA_SDK/、vst3sdk/、soundtouch/）。
-    # 由能联网的机器导出后拷到离网机器，全程不触网。
+    # A copyable local source cache shaped like the cache root (containing ARA_SDK/,
+    # vst3sdk/, soundtouch/). Exported on a networked machine and copied to the offline
+    # one; it never touches the network.
     if ($env:HIFISHIFTER_SDK_MIRROR) {
         return [IO.Path]::GetFullPath($env:HIFISHIFTER_SDK_MIRROR)
     }
@@ -31,7 +34,7 @@ function Test-SdkOfflineRequested {
 }
 
 function Set-SdkEnvironment {
-    # ara2-bridge 的 build.rs 与 audio_abi 的 ABI oracle 都读这两个变量。
+    # Both ara2-bridge's build.rs and audio_abi's ABI oracle read these variables.
     $sdkRoot = Get-SdkCacheRoot
     $env:ARA_SDK_DIR = Join-Path $sdkRoot 'ARA_SDK'
     $env:ARA_VST3_SDK_DIR = Join-Path $sdkRoot 'vst3sdk'
