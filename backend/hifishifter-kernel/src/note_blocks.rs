@@ -80,8 +80,7 @@ pub fn source_note_spans(take: &ClipTake) -> Option<(Vec<NoteBlockSpan>, NoteBlo
         ));
     }
     if let Some(notes) = take
-        .midi_note_data
-        .as_ref()
+        .pitch_reference_notes()
         .filter(|notes| !notes.is_empty())
     {
         return Some((
@@ -174,6 +173,8 @@ mod tests {
             note: 60.0,
             velocity: 100,
             channel: 0,
+muted: false,
+release_velocity: 0,
         }]);
         assert_eq!(
             source_note_spans(take).unwrap().1,

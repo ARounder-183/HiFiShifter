@@ -159,8 +159,9 @@ export function needsNotBoundNotice(status: HostAudioPayload | null): boolean {
 export function isAwaitingHostAudio(clip: {
     sourcePath?: string | null;
     midiNoteCount?: number | null;
+    midiTakeNoteCount?: number | null;
 }): boolean {
-    return !clip.sourcePath && clip.midiNoteCount == null;
+    return !clip.sourcePath && clip.midiNoteCount == null && clip.midiTakeNoteCount == null;
 }
 
 /** 后端给出的逐 clip 宿主媒体分类；与 `render::editor::workspace` 一一对应。 */
@@ -188,6 +189,7 @@ export type HostMediaState = "ready" | "pending" | "unavailable";
 export function hostMediaState(clip: {
     sourcePath?: string | null;
     midiNoteCount?: number | null;
+    midiTakeNoteCount?: number | null;
     hostMedia?: string | null;
 }): HostMediaState {
     const raw = clip.hostMedia;

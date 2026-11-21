@@ -393,7 +393,17 @@ export function canImportMidiToPitch(): boolean {
  * 变成我的编辑内容"由此满足；只有"在时间线上多出一个 MIDI 片段"这一步没有。
  */
 export function canImportMidiAsClip(): boolean {
-    return !isPluginMode();
+    return !isPluginMode() || caps()?.midiCreate === true;
+}
+
+/** 宿主 MIDI take 是否可读（REAPER 原生；ARA-only 恒 false）。 */
+export function canReadHostMidi(): boolean {
+    return isPluginMode() && caps()?.midiRead === true;
+}
+
+/** 宿主 MIDI take 是否可写回（REAPER 原生；ARA-only 恒 false）。 */
+export function canWriteHostMidi(): boolean {
+    return isPluginMode() && caps()?.midiWrite === true;
 }
 
 /**

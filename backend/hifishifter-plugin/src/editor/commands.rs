@@ -2537,6 +2537,65 @@ pub(super) fn dispatch(
             }
             after_write(session, result)
         }
+        // MIDI 角色/试听是**插件私有**状态：宿主只提供音符，不知道“音高参考”。
+        // 写进 EditState 的持久化 map，同时投影到当前时间线，下一次宿主重建
+        // 由 EditState::apply 重新播种。
+        "set_midi_take_role" | "set_midi_preview" => {
+            let clip_id = input["clipId"].as_str().ok_or("clipId missing")?.to_owned();
+            let take_id = input["takeId"].as_str().map(str::to_owned);
+            let role = input["role"].as_str().unwrap_or("midi_take");
+            let enabled = input["enabled"].as_bool().unwrap_or(false);
+            let gain_db = input["gainDb"].as_f64().map(|value| value as f32);
+            let document = session.document().ok_or("document closed")?;
+            let canonical = clip_id
+                .strip_prefix(&session.namespace)
+                .unwrap_or(&clip_id)
+                .to_owned();
+            let take_key = {
+                let tl = session.timeline.lock_or_recover();
+                let clip = tl.clips.iter().find(|clip| clip.id == clip_id);
+                let take = clip.and_then(|clip| {
+                    let wanted = take_id.as_deref();
+                    clip.takes.iter().find(|take| wanted.is_none_or(|id| take.id == id))
+                });
+                take.map(|take| crate::state_channel::midi_take_key(&canonical, &take.id))
+            };
+            let Some(take_key) = take_key else {
+                return Err("MIDI take not found".into());
+            };
+            let mut tl = session.timeline.lock_or_recover();
+            let mutable_id = clip_id.clone();
+            if command == "set_midi_take_role" {
+                let role = if role == "pitch_reference" {
+                    hifishifter_kernel::midi_take::MidiTakeRole::PitchReference
+                } else {
+                    hifishifter_kernel::midi_take::MidiTakeRole::MidiTake
+                };
+                tl.set_midi_take_role(&mutable_id, take_id.as_deref(), role)
+                    .map_err(|error| error.to_string())?;
+                document
+                    .edits
+                    .lock_or_recover()
+                    .midi_roles
+                    .insert(take_key, role);
+            } else {
+                let mut preview = hifishifter_kernel::midi_take::MidiPreviewSettings::default();
+                preview.enabled = enabled;
+                if let Some(gain) = gain_db.filter(|value| value.is_finite()) {
+                    preview.gain_db = gain.clamp(-60.0, 12.0);
+                }
+                tl.set_midi_preview(&mutable_id, take_id.as_deref(), preview)
+                    .map_err(|error| error.to_string())?;
+                document
+                    .edits
+                    .lock_or_recover()
+                    .midi_previews
+                    .insert(take_key, preview);
+            }
+            drop(tl);
+            session.mark_dirty();
+            after_write(session, json!({"ok": true}))
+        }
         "get_track_summary" => {
             let timeline = session.timeline.lock_or_recover();
             Ok(

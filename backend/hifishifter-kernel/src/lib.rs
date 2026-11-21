@@ -158,6 +158,8 @@ pub mod encode;
 pub mod media;
 pub mod midi_export;
 pub mod midi_import;
+pub mod midi_preview;
+pub mod midi_take;
 
 // ── 渲染与缓存 ──────────────────────────────────────────────────────────────
 pub mod mixdown;

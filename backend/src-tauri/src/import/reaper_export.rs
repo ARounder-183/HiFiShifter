@@ -106,7 +106,17 @@ fn audio_source(take: &ClipTake, section: Option<(i32, f64, f64)>) -> ReaperSour
 fn midi_source(take: &ClipTake, bpm: f64) -> ReaperSource {
     const PPQ: u32 = 960;
 
-    let notes = take.midi_note_data.as_deref().unwrap_or(&[]);
+    let owned_notes;
+    let notes: &[hifishifter_kernel::midi_import::MidiNoteEvent] = if let Some(data) = take.midi_take.as_ref() {
+        owned_notes = if data.is_pitch_reference() {
+            data.baked_notes()
+        } else {
+            data.notes.clone()
+        };
+        owned_notes.as_slice()
+    } else {
+        take.midi_note_data.as_deref().unwrap_or(&[])
+    };
     let mut events: Vec<ReaperMidiEvent> = Vec::new();
     let mut raw_events: Vec<(u64, u8, u8, u8)> = Vec::new();
 
@@ -181,10 +191,12 @@ fn fill_reaper_take(
     // 属预期行为。
     dest.chan_mode = crate::channel_mode::TakeChannelMode::to_reaper_chanmode(take.channel_mode);
 
-    if let Some(ref midi_data) = take.midi_note_data {
-        if midi_data.is_empty() {
-            return false;
-        }
+    let has_midi = take
+        .midi_take
+        .as_ref()
+        .is_some_and(|data| !data.notes.is_empty())
+        || take.midi_note_data.as_ref().is_some_and(|notes| !notes.is_empty());
+    if has_midi {
         dest.s_offs = 0.0;
         dest.source = Some(midi_source(take, bpm));
         return true;
@@ -334,7 +346,7 @@ fn build_item(
     // item_time_to_take_env_u）；值不钳制（REAPER PIT 值域无限制）。
     // MIDI take 不写音高包络（HiFiShifter 音高线基于音频分析，MIDI take
     // 的 PIT 包络在 REAPER 中无对应渲染语义）。
-    if active_take.midi_note_data.is_none() {
+    if active_take.midi_note_data.is_none() && active_take.midi_take.is_none() {
         if let Some(env) = build_take_pitch_envelope(curves, item.length, combined_rate) {
             item.default_take.envelopes.push(env);
         }
@@ -1008,6 +1020,8 @@ mod tests {
                 note: 60.0,
                 velocity: 100,
                 channel: 0,
+                muted: false,
+                release_velocity: 0,
             }]);
             clip.source_path = None;
             // MIDI 内容写在投影上，须 sync 回 Take 权威数据供导出读取。

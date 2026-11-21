@@ -257,6 +257,8 @@ pub struct ExtensionOwner {
     #[cfg(test)]
     prepare_requests: AtomicU64,
     pub snapshots: [super::snapshot::SnapshotPublisher; 2],
+    /// MIDI 试听调度（只读；音频线程无锁读取）。由后台准备阶段按时间线重建。
+    pub midi_preview: arc_swap::ArcSwap<hifishifter_kernel::midi_preview::MidiPreviewSchedule>,
     /// 活动 Capture take 的**未处理** PCM，与处理结果同形（一份 `PlaybackSnapshot`）。
     ///
     /// 【为什么需要它】处理结果要经过神经合成（数秒），而"录完就想听到东西"是用户的

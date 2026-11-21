@@ -153,6 +153,8 @@ pub(crate) struct EngineSnapshot {
     pub(crate) duration_frames: u64,
     pub(crate) track_ids: Arc<Vec<String>>,
     pub(crate) clips: Arc<Vec<EngineClip>>,
+    /// 仅用于编辑参考的 MIDI 试听；独立 App 的播放混音会叠加它，导出/混音不会。
+    pub(crate) midi_preview: Arc<hifishifter_kernel::midi_preview::MidiPreviewSchedule>,
 }
 
 impl EngineSnapshot {
@@ -162,6 +164,7 @@ impl EngineSnapshot {
             duration_frames: 0,
             track_ids: Arc::new(vec![]),
             clips: Arc::new(vec![]),
+            midi_preview: Arc::new(hifishifter_kernel::midi_preview::MidiPreviewSchedule::default()),
         }
     }
 }

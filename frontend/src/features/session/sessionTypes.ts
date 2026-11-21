@@ -267,6 +267,12 @@ export interface ClipTakeInfo {
     sourceChannels?: number;
     midiNoteData?: MidiNoteEvent[];
     midiFillGaps?: boolean;
+    midiTakeNoteData?: MidiNoteEvent[];
+    midiTakeNoteCount?: number;
+    midiTakeLengthSec?: number;
+    midiRole?: "midi_take" | "pitch_reference";
+    midiPreviewEnabled?: boolean;
+    midiPreviewGainDb?: number;
     /** 源域音节区间；显示时再按裁切 / 速率 / 倒放 / Loop 投影。 */
     syllableSpansSec?: Array<{
         startSec: number;
@@ -384,6 +390,12 @@ export interface ClipInfo {
     midiNoteCount?: number;
     midiNoteData?: MidiNoteEvent[];
     midiFillGaps?: boolean;
+    midiTakeNoteData?: MidiNoteEvent[];
+    midiTakeNoteCount?: number;
+    midiTakeLengthSec?: number;
+    midiRole?: "midi_take" | "pitch_reference";
+    midiPreviewEnabled?: boolean;
+    midiPreviewGainDb?: number;
     /** 当前 Take 的源域音节区间（主投影字段的镜像）。 */
     syllableSpansSec?: Array<{
         startSec: number;
@@ -540,6 +552,8 @@ export interface MidiNoteEvent {
     note: number;
     velocity: number;
     channel: number;
+    muted?: boolean;
+    releaseVelocity?: number;
 }
 
 export interface LinkedParamCurves {

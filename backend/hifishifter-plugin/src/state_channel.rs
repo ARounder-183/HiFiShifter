@@ -45,6 +45,12 @@ pub struct ClipLocalState {
     pub formant_morph: Option<hifishifter_kernel::state::ClipFormantMorph>,
 }
 
+/// MIDI 角色 / 试听设置的键：JSON map 的 key 必须可序列化为字符串，
+/// 用不会出现在 id 里的单元分隔符把 clip/take 身份拼起来。
+pub(crate) fn midi_take_key(clip_id: &str, take_id: &str) -> String {
+    format!("{clip_id}\u{001f}{take_id}")
+}
+
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub struct EditState {
     pub revision: u64,
@@ -75,6 +81,13 @@ pub struct EditState {
     )]
     pub take_syllables:
         BTreeMap<TakeSyllableKey, hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis>,
+    /// 插件私有的 MIDI Take 角色（宿主只提供音符，不提供“这是音高参考”）。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub midi_roles: BTreeMap<String, hifishifter_kernel::midi_take::MidiTakeRole>,
+    /// 插件私有的 MIDI 试听设置。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub midi_previews:
+        BTreeMap<String, hifishifter_kernel::midi_take::MidiPreviewSettings>,
     /// 参数块的唯一用户编辑权威：root → Take 源域编辑集。
     ///
     /// 【为什么独立于音频权威】块是离散分段，曲线是连续函数；宿主重建不能把
@@ -698,6 +711,7 @@ impl EditState {
             let Some(local) = self.clip_local.get(&clip.id) else {
                 // clip_local 不是音节缓存的准入条件；两类字段独立播种。
                 self.apply_take_syllables(clip);
+                self.apply_midi_take_settings(clip);
                 continue;
             };
             if let Some(color) = &local.color {
@@ -707,7 +721,26 @@ impl EditState {
                 clip.formant_morph = local.formant_morph.clone();
             }
             self.apply_take_syllables(clip);
+            self.apply_midi_take_settings(clip);
         }
+    }
+
+    fn apply_midi_take_settings(&self, clip: &mut hifishifter_kernel::state::Clip) {
+        for take in &mut clip.takes {
+            let key = midi_take_key(&clip.id, &take.id);
+            if let Some(role) = self.midi_roles.get(&key) {
+                if let Some(data) = take.midi_take.as_mut() {
+                    data.role = *role;
+                }
+            }
+            if let Some(preview) = self.midi_previews.get(&key) {
+                if let Some(data) = take.midi_take.as_mut() {
+                    data.preview = *preview;
+                }
+            }
+            take.sync_legacy_midi_mirror();
+        }
+        clip.normalize_takes();
     }
 
     fn apply_take_syllables(&self, clip: &mut hifishifter_kernel::state::Clip) {
@@ -838,7 +871,7 @@ impl EditState {
     ///
     /// 【音节缓存不升代际】`take_syllables` 缺省为空，是**可选缓存**；升代会让已经
     /// 写出的第 2 代载荷被整份拒绝，而缺少缓存最多回退成整段 / MIDI 音符。
-    pub(crate) const STATE_VERSION: u64 = 3;
+    pub(crate) const STATE_VERSION: u64 = 4;
 
     /// 有版本且有界的组件state；旧空state保持默认编辑。
     pub fn encode(&self) -> Result<Vec<u8>, String> {

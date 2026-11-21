@@ -65,6 +65,18 @@ export interface TimelineClipTake {
         channel?: number;
     }>;
     midi_fill_gaps?: boolean;
+    midi_role?: "midi_take" | "pitch_reference";
+    midi_take_note_count?: number;
+    midi_take_length_sec?: number;
+    midi_take_note_data?: Array<{
+        start_sec: number;
+        end_sec: number;
+        note: number;
+        velocity: number;
+        channel?: number;
+    }>;
+    midi_preview_enabled?: boolean;
+    midi_preview_gain_db?: number;
     /** 源域音节区间 [start_sec, end_sec]；缺省表示尚未分析。 */
     syllable_spans_sec?: Array<[number, number]>;
     /** 与 syllable_spans_sec 平行的源音符（MIDI）；null 表示该段无音高。 */
@@ -163,6 +175,18 @@ export interface TimelineClip {
         strength: number;
     };
     midi_note_count?: number;
+    midi_role?: "midi_take" | "pitch_reference";
+    midi_take_note_count?: number;
+    midi_take_length_sec?: number;
+    midi_take_note_data?: Array<{
+        start_sec: number;
+        end_sec: number;
+        note: number;
+        velocity: number;
+        channel?: number;
+    }>;
+    midi_preview_enabled?: boolean;
+    midi_preview_gain_db?: number;
     midi_note_data?: Array<{
         start_sec: number;
         end_sec: number;

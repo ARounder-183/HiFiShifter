@@ -28,6 +28,15 @@ pub struct MidiTrackInfo {
     pub min_note: u8,
     /// 最高音高 (MIDI note number)
     pub max_note: u8,
+    pub channel_mask: u16,
+    pub has_pitch_bend: bool,
+    pub has_cc: bool,
+    pub has_sysex: bool,
+    pub program: Option<u8>,
+    pub length_sec: f64,
+    pub tempo_event_count: usize,
+    pub time_signature_count: usize,
+    pub key_signature_count: usize,
 }
 
 /// 单个音符事件
@@ -47,13 +56,21 @@ pub struct MidiNoteEvent {
     /// MIDI 通道 (0-15)
     #[serde(alias = "channel")]
     pub channel: u8,
+    /// 音符是否静音（宿主/文件里的 mute 标记）。
+    #[serde(default)]
+    pub muted: bool,
+    /// Note Off 力度；文件没有时为 0。
+    #[serde(default)]
+    pub release_velocity: u8,
 }
 
 /// MIDI 文件解析结果
 pub struct MidiParseResult {
     pub tracks: Vec<MidiTrackInfo>,
-    /// 每个轨道的音符事件列表
+    /// 每个轨道的音符事件列表（旧音高路径：弯音已烘焙、复调已切分）
     pub track_notes: Vec<Vec<MidiNoteEvent>>,
+    /// 每个轨道的完整 MIDI Take 数据（新路径：名义音高 + 表情/控制事件）
+    pub track_data: Vec<crate::midi_take::MidiTakeData>,
     /// MIDI 初始 BPM（第一个 Tempo 事件的 BPM，或回退默认值）
     pub initial_bpm: f64,
     /// MIDI 文件是否包含实际的 Tempo 事件（非回退值）
@@ -101,6 +118,8 @@ fn split_active_notes_on_channel(
                     note: adjusted_note,
                     velocity,
                     channel: note_ch,
+muted: false,
+release_velocity: 0,
                 });
                 // 开启新段（从当前时间继续）
                 active_notes[note_idx as usize] = Some((split_time_sec, velocity, note_ch));
@@ -266,6 +285,8 @@ fn parse_midi_data(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiParseRe
                                         note: adjusted_note,
                                         velocity: start_vel,
                                         channel: note_ch,
+muted: false,
+release_velocity: 0,
                                     });
                                 }
                             } else {
@@ -284,6 +305,8 @@ fn parse_midi_data(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiParseRe
                                         note: adjusted_note,
                                         velocity: start_vel,
                                         channel: prev_ch,
+muted: false,
+release_velocity: 0,
                                     });
                                 }
                                 active_notes[raw_note as usize] = Some((current_sec, velocity, ch));
@@ -307,6 +330,8 @@ fn parse_midi_data(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiParseRe
                                     note: adjusted_note,
                                     velocity: start_vel,
                                     channel: note_ch,
+muted: false,
+release_velocity: 0,
                                 });
                             }
                         }
@@ -380,6 +405,8 @@ fn parse_midi_data(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiParseRe
                     note: adjusted_note,
                     velocity,
                     channel: ch,
+muted: false,
+release_velocity: 0,
                 });
             }
         }
@@ -408,13 +435,63 @@ fn parse_midi_data(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiParseRe
             note_count,
             min_note: min_note as u8,
             max_note: max_note as u8,
+            channel_mask: 0,
+            has_pitch_bend: false,
+            has_cc: false,
+            has_sysex: false,
+            program: None,
+            length_sec: end_sec.max(0.0),
+            tempo_event_count: 0,
+            time_signature_count: 0,
+            key_signature_count: 0,
         });
         all_track_notes.push(notes);
     }
 
+    let track_data = build_track_data(
+        &smf,
+        ticks_per_beat,
+        is_smpte,
+        &tempo_events,
+        initial_bpm,
+        &time_signature_events,
+        &key_signature_events,
+    );
+    for (info, data) in all_tracks.iter_mut().zip(&track_data) {
+        let mut channel_mask = 0u16;
+        for note in &data.notes {
+            channel_mask |= 1u16 << note.channel.min(15);
+        }
+        info.channel_mask = channel_mask;
+        info.has_pitch_bend = data
+            .expression
+            .iter()
+            .any(|event| matches!(event.kind, crate::midi_take::MidiExpressionKind::PitchBend { .. }));
+        info.has_cc = data.expression.iter().any(|event| {
+            matches!(
+                event.kind,
+                crate::midi_take::MidiExpressionKind::ControlChange { .. }
+            )
+        });
+        info.has_sysex = data.expression.iter().any(|event| {
+            matches!(
+                event.kind,
+                crate::midi_take::MidiExpressionKind::SysEx { .. }
+            )
+        });
+        info.program = data.expression.iter().find_map(|event| match event.kind {
+            crate::midi_take::MidiExpressionKind::ProgramChange { program, .. } => Some(program),
+            _ => None,
+        });
+        info.length_sec = data.effective_length_sec();
+        info.tempo_event_count = data.tempo_map.len();
+        info.time_signature_count = data.time_signatures.len();
+        info.key_signature_count = data.key_signatures.len();
+    }
     Ok(MidiParseResult {
         tracks: all_tracks,
         track_notes: all_track_notes,
+        track_data,
         initial_bpm,
         has_tempo,
         tempo_events,
@@ -423,6 +500,289 @@ fn parse_midi_data(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiParseRe
         ticks_per_beat,
         is_smpte,
     })
+}
+
+/// 把一条轨道解析成完整的 MIDI Take 数据（名义音高 + 表情/控制事件）。
+///
+/// 与上面的旧解析器**并行存在**：旧解析器把弯音烘焙进音符并按弯音切分，供
+/// 音高参考路径使用；本函数保留名义音高与原始表情，供 MIDI Take 路径使用。
+/// 两条路径共享同一个 tick→秒换算，因此导入后时间轴完全一致。
+fn build_track_data(
+    smf: &Smf,
+    ticks_per_beat: f64,
+    is_smpte: bool,
+    tempo_events: &[(u64, f64)],
+    initial_bpm: f64,
+    time_signature_events: &[(u64, u32, u32)],
+    key_signature_events: &[(u64, i8)],
+) -> Vec<crate::midi_take::MidiTakeData> {
+    use crate::midi_take::{
+        MidiExpressionEvent, MidiExpressionKind, MidiKeySignatureEvent, MidiTakeData,
+        MidiTempoEvent, MidiTimeSignatureEvent,
+    };
+
+    let to_sec = |tick: u64| tick_to_sec(tick, ticks_per_beat, tempo_events, is_smpte);
+    let tempo_map: Vec<MidiTempoEvent> = tempo_events
+        .iter()
+        .filter_map(|&(tick, us)| {
+            if us > 0.0 && us.is_finite() {
+                Some(MidiTempoEvent {
+                    time_sec: to_sec(tick),
+                    bpm: (60_000_000.0 / us).clamp(10.0, 960.0),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+    let time_signatures: Vec<MidiTimeSignatureEvent> = time_signature_events
+        .iter()
+        .map(|&(tick, numerator, denominator)| MidiTimeSignatureEvent {
+            time_sec: to_sec(tick),
+            numerator,
+            denominator,
+        })
+        .collect();
+    let key_signatures: Vec<MidiKeySignatureEvent> = key_signature_events
+        .iter()
+        .map(|&(tick, sharps_flats)| MidiKeySignatureEvent {
+            time_sec: to_sec(tick),
+            sharps_flats,
+            minor: false,
+        })
+        .collect();
+
+    smf.tracks
+        .iter()
+        .enumerate()
+        .map(|(track_index, track)| {
+            let mut name = format!("MIDI {}", track_index + 1);
+            let mut notes: Vec<MidiNoteEvent> = Vec::new();
+            // 每个 (channel,key) 一个栈：同一音高重叠时 NoteOff 先关闭最早的一个。
+            let mut active: Vec<Vec<(f64, u8)>> = vec![Vec::new(); 16 * 128];
+            let mut expression: Vec<MidiExpressionEvent> = Vec::new();
+            let mut bend_ranges = [2.0f32; 16];
+            let mut rpn_msb = [0x7Fu8; 16];
+            let mut rpn_lsb = [0x7Fu8; 16];
+            let mut pending_cents = [0.0f32; 16];
+            let mut abs_tick = 0u64;
+            let mut last_event_tick = 0u64;
+
+            for event in track {
+                abs_tick += event.delta.as_int() as u64;
+                last_event_tick = last_event_tick.max(abs_tick);
+                let now = to_sec(abs_tick);
+                match event.kind {
+                    TrackEventKind::Meta(meta) => match meta {
+                        MetaMessage::TrackName(bytes) => {
+                            let decoded = String::from_utf8_lossy(bytes).trim().to_string();
+                            if !decoded.is_empty() {
+                                name = decoded;
+                            }
+                        }
+                        MetaMessage::Tempo(_)
+                        | MetaMessage::TimeSignature(..)
+                        | MetaMessage::KeySignature(..)
+                        | MetaMessage::EndOfTrack => {}
+                        other => {
+                            if let Some((kind, data)) = meta_to_expression(other) {
+                                expression.push(MidiExpressionEvent {
+                                    time_sec: now,
+                                    kind: MidiExpressionKind::Meta { kind, data },
+                                });
+                            }
+                        }
+                    },
+                    TrackEventKind::SysEx(data) => {
+                        expression.push(MidiExpressionEvent {
+                            time_sec: now,
+                            kind: MidiExpressionKind::SysEx { data: data.to_vec() },
+                        });
+                    }
+                    TrackEventKind::Escape(data) => {
+                        expression.push(MidiExpressionEvent {
+                            time_sec: now,
+                            kind: MidiExpressionKind::SysEx {
+                                data: [vec![0xF7], data.to_vec()].concat(),
+                            },
+                        });
+                    }
+                    TrackEventKind::Midi { channel, message } => {
+                        let ch = channel.as_int();
+                        match message {
+                            MidiMessage::NoteOn { key, vel } => {
+                                let key = key.as_int();
+                                if vel.as_int() == 0 {
+                                    if let Some((start, velocity)) =
+                                        close_note(&mut active, ch, key)
+                                    {
+                                        notes.push(MidiNoteEvent {
+                                            start_sec: start,
+                                            end_sec: now,
+                                            note: key as f32,
+                                            velocity,
+                                            channel: ch,
+                                            muted: false,
+                                            release_velocity: 0,
+                                        });
+                                    }
+                                } else {
+                                    active[(ch as usize) * 128 + key as usize]
+                                        .push((now, vel.as_int()));
+                                }
+                            }
+                            MidiMessage::NoteOff { key, vel } => {
+                                let key = key.as_int();
+                                if let Some((start, velocity)) = close_note(&mut active, ch, key) {
+                                    notes.push(MidiNoteEvent {
+                                        start_sec: start,
+                                        end_sec: now,
+                                        note: key as f32,
+                                        velocity,
+                                        channel: ch,
+                                        muted: false,
+                                        release_velocity: vel.as_int(),
+                                    });
+                                }
+                            }
+                            MidiMessage::PitchBend { bend } => {
+                                expression.push(MidiExpressionEvent {
+                                    time_sec: now,
+                                    kind: MidiExpressionKind::PitchBend {
+                                        channel: ch,
+                                        value: (bend.0.as_int() as i32 - 8192)
+                                            .clamp(-8192, 8191) as i16,
+                                    },
+                                });
+                            }
+                            MidiMessage::Controller { controller, value } => {
+                                let cc = controller.as_int();
+                                let val = value.as_int();
+                                expression.push(MidiExpressionEvent {
+                                    time_sec: now,
+                                    kind: MidiExpressionKind::ControlChange {
+                                        channel: ch,
+                                        controller: cc,
+                                        value: val,
+                                    },
+                                });
+                                match cc {
+                                    101 => rpn_msb[ch as usize] = val,
+                                    100 => rpn_lsb[ch as usize] = val,
+                                    6 if rpn_msb[ch as usize] == 0 && rpn_lsb[ch as usize] == 0 => {
+                                        bend_ranges[ch as usize] =
+                                            (val as f32 + pending_cents[ch as usize])
+                                                .clamp(0.0, 96.0);
+                                        pending_cents[ch as usize] = 0.0;
+                                    }
+                                    38 if rpn_msb[ch as usize] == 0 && rpn_lsb[ch as usize] == 0 => {
+                                        pending_cents[ch as usize] = val as f32 / 100.0;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            MidiMessage::ProgramChange { program } => {
+                                expression.push(MidiExpressionEvent {
+                                    time_sec: now,
+                                    kind: MidiExpressionKind::ProgramChange {
+                                        channel: ch,
+                                        program: program.as_int(),
+                                    },
+                                });
+                            }
+                            MidiMessage::ChannelAftertouch { vel } => {
+                                expression.push(MidiExpressionEvent {
+                                    time_sec: now,
+                                    kind: MidiExpressionKind::ChannelAftertouch {
+                                        channel: ch,
+                                        value: vel.as_int(),
+                                    },
+                                });
+                            }
+                            MidiMessage::Aftertouch { key, vel } => {
+                                expression.push(MidiExpressionEvent {
+                                    time_sec: now,
+                                    kind: MidiExpressionKind::PolyAftertouch {
+                                        channel: ch,
+                                        key: key.as_int(),
+                                        value: vel.as_int(),
+                                    },
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            let end_sec = to_sec(last_event_tick);
+            for (slot, stack) in active.iter_mut().enumerate() {
+                for (start, velocity) in stack.drain(..) {
+                    notes.push(MidiNoteEvent {
+                        start_sec: start,
+                        end_sec: end_sec.max(start),
+                        note: (slot % 128) as f32,
+                        velocity,
+                        channel: (slot / 128) as u8,
+                        muted: false,
+                        release_velocity: 0,
+                    });
+                }
+            }
+            notes.sort_by(|a, b| a.start_sec.total_cmp(&b.start_sec));
+            let mut data = MidiTakeData {
+                role: crate::midi_take::MidiTakeRole::MidiTake,
+                notes,
+                expression,
+                length_sec: end_sec.max(0.0),
+                source_bpm: initial_bpm,
+                ticks_per_beat: if is_smpte {
+                    0
+                } else {
+                    ticks_per_beat.round() as u16
+                },
+                pitch_bend_ranges: bend_ranges,
+                tempo_map: tempo_map.clone(),
+                time_signatures: time_signatures.clone(),
+                key_signatures: key_signatures.clone(),
+                name,
+                pitch_reference: Default::default(),
+                content_hash: String::new(),
+                preview: crate::midi_take::MidiPreviewSettings::default(),
+            };
+            data.normalize();
+            data.refresh_hash();
+            data
+        })
+        .collect()
+}
+
+fn close_note(active: &mut [Vec<(f64, u8)>], channel: u8, key: u8) -> Option<(f64, u8)> {
+    let slot = (channel as usize) * 128 + key as usize;
+    let stack = active.get_mut(slot)?;
+    if stack.is_empty() {
+        None
+    } else {
+        Some(stack.remove(0))
+    }
+}
+
+fn meta_to_expression(meta: MetaMessage<'_>) -> Option<(u8, Vec<u8>)> {
+    match meta {
+        MetaMessage::Text(bytes) => Some((0x01, bytes.to_vec())),
+        MetaMessage::Copyright(bytes) => Some((0x02, bytes.to_vec())),
+        MetaMessage::TrackName(_) => None,
+        MetaMessage::InstrumentName(bytes) => Some((0x04, bytes.to_vec())),
+        MetaMessage::Lyric(bytes) => Some((0x05, bytes.to_vec())),
+        MetaMessage::Marker(bytes) => Some((0x06, bytes.to_vec())),
+        MetaMessage::CuePoint(bytes) => Some((0x07, bytes.to_vec())),
+        MetaMessage::ProgramName(bytes) => Some((0x08, bytes.to_vec())),
+        MetaMessage::DeviceName(bytes) => Some((0x09, bytes.to_vec())),
+        MetaMessage::MidiChannel(ch) => Some((0x20, vec![ch.as_int()])),
+        MetaMessage::MidiPort(port) => Some((0x21, vec![port.as_int()])),
+        MetaMessage::SequencerSpecific(bytes) => Some((0x7F, bytes.to_vec())),
+        MetaMessage::Unknown(kind, bytes) => Some((kind, bytes.to_vec())),
+        _ => None,
+    }
 }
 
 /// 将 MIDI 调号（升降号数 -7..=7）映射为 HiFiShifter 内置音阶键名。

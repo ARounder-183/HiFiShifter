@@ -18,7 +18,7 @@ pub fn assemble_pitch_orig_from_cache(
     };
     let _bs = 60.0 / bpm;
 
-    // 收集属于 root track 的所有 clip（同时包含有音频源的 clip 和带 midi_note_data 的 MIDI clip）
+    // 收集属于 root track 的所有 clip（音频 clip + **音高参考角色**的 MIDI clip）
     // 按轨道由上至下的顺序排列：上方轨道的 clip 优先于下方轨道。
     // 先收集整个轨道组内的所有轨道（任何深度），按 tl.tracks 顺序（即 UI 从上到下）排列。
     let mut group_track_ids: Vec<&str> = Vec::new();
@@ -48,10 +48,11 @@ pub fn assemble_pitch_orig_from_cache(
         if clip.muted {
             continue;
         }
-        if clip.source_path.is_none() && clip.midi_note_data.is_none() {
+        // 普通 MIDI Take 不是音高参考：它没有音频源、也不得覆盖原声。
+        if clip.source_path.is_none() && !clip.is_pitch_reference() {
             continue;
         }
-        if clip.midi_note_data.is_some() {
+        if clip.is_pitch_reference() {
             has_pitch_adjustment = true;
         }
         track_clips
@@ -90,8 +91,8 @@ pub fn assemble_pitch_orig_from_cache(
             crate::frame_grid::clip_frame_window(clip_start_sec, clip_len_sec, fp);
         let clip_len_frames = clip_end_frame - clip_start_frame;
 
-        // ── MIDI clip 路径：直接从 midi_note_data 生成音高帧 ──
-        if let Some(ref notes) = clip.midi_note_data {
+        // ── 音高参考路径：只接受 PitchReference 角色；MidiTake 在这里不可见 ──
+        if let Some(notes) = clip.pitch_reference_notes() {
             let pr = clip.playback_rate as f64;
             let pr_valid = if pr.is_finite() && pr > 0.0 { pr } else { 1.0 };
             // 消费窗口（非 Loop 倒放锚定 se：win=[se−len·r, se]）——
@@ -114,7 +115,7 @@ pub fn assemble_pitch_orig_from_cache(
             // 收集已写入音符的帧范围（用于后续填补空隙）和音高值
             let mut note_ranges: Vec<(usize, usize, f32)> = Vec::new();
 
-            for note in notes {
+            for note in &notes {
                 // Loop（循环源）：按媒体时长 D 的锚点回绕放置音符（与音频渲染
                 // 的 floor_mod 映射逐帧一致；纯 MIDI clip 无媒体 → 周期退化为
                 // 窗口跨度）。注意不能用 start/end 与窗口比较做可见性过滤 ——

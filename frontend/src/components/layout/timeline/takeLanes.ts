@@ -26,7 +26,10 @@ export const MIN_TAKE_LANE_HEIGHT_PX = 14;
  * 音符判据同时覆盖了原实现想表达的那条边界：MIDI Take 有 `midiNoteData`，音频 Take 没有。
  */
 function isAudioTake(take: ClipTakeInfo): boolean {
-    return !take.midiNoteData || take.midiNoteData.length === 0;
+    return (
+        (!take.midiNoteData || take.midiNoteData.length === 0) &&
+        (!take.midiTakeNoteData || take.midiTakeNoteData.length === 0)
+    );
 }
 
 /** 计算一个 Clip 的全部波形 lane；空间不足或非多 Take 时返回 null。 */

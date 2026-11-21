@@ -491,7 +491,7 @@ export function useTimelineClipActions(
             // 过滤掉音高参考块（没有音频源文件）
             const audioOnlyIds = ids.filter((id) => {
                 const c = sessionRef.current.clips.find((clip) => clip.id === id);
-                return c && c.midiNoteCount == null;
+                return c && c.midiNoteCount == null && c.midiTakeNoteCount == null;
             });
             if (audioOnlyIds.length === 0) return;
 

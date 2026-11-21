@@ -3720,6 +3720,87 @@ pub fn import_midi_as_clip(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn import_midi_as_take(
+    state: State<'_, AppState>,
+    midi_path: String,
+    track_indices: Vec<usize>,
+    track_id: Option<String>,
+    start_sec: f64,
+    multi_track_merge: Option<bool>,
+    note_bpm_mode: Option<String>,
+    specified_bpm: Option<f64>,
+    import_midi_bpm_as_project: Option<bool>,
+    clipboard_guid: Option<String>,
+    close_leading_gap: Option<bool>,
+    midi_role: Option<String>,
+) -> crate::models::TimelineStatePayload {
+    {
+        common::guard_command(
+            "import_midi_as_take",
+            common::timeline_error_payload("panic in command: import_midi_as_take"),
+            || {
+                midi::import_midi_as_take(
+                    state.inner(),
+                    midi_path,
+                    track_indices,
+                    track_id,
+                    start_sec,
+                    multi_track_merge,
+                    note_bpm_mode,
+                    specified_bpm,
+                    import_midi_bpm_as_project,
+                    clipboard_guid,
+                    close_leading_gap,
+                    midi_role,
+                )
+            },
+        )
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn export_midi_take(
+    state: State<'_, AppState>,
+    clip_id: String,
+    output_path: String,
+) -> serde_json::Value {
+    common::guard_command(
+        "export_midi_take",
+        serde_json::json!({"ok": false, "error": "panic in command: export_midi_take"}),
+        || midi::export_midi_take(state.inner(), clip_id, output_path),
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_midi_take_role(
+    state: State<'_, AppState>,
+    clip_id: String,
+    take_id: Option<String>,
+    role: String,
+) -> crate::models::TimelineStatePayload {
+    common::guard_command(
+        "set_midi_take_role",
+        common::timeline_error_payload("panic in command: set_midi_take_role"),
+        || midi::set_midi_take_role(state.inner(), clip_id, take_id, role),
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_midi_preview(
+    state: State<'_, AppState>,
+    clip_id: String,
+    take_id: Option<String>,
+    enabled: bool,
+    gain_db: Option<f32>,
+) -> crate::models::TimelineStatePayload {
+    common::guard_command(
+        "set_midi_preview",
+        common::timeline_error_payload("panic in command: set_midi_preview"),
+        || midi::set_midi_preview(state.inner(), clip_id, take_id, enabled, gain_db),
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn replace_midi_clip_data(
     state: State<'_, AppState>,
     clip_id: String,

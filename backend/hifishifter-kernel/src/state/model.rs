@@ -11,6 +11,7 @@
 
 use crate::audio_utils::try_read_wav_info;
 use crate::midi_import::MidiNoteEvent;
+use crate::midi_take::{MidiPreviewSettings, MidiTakeData, MidiTakeRole};
 use crate::models::{PitchRange, TimelineClip, TimelineStatePayload, TimelineTrack};
 use crate::project::CustomScale;
 use crate::time_stretch::UserStretchAlgorithm;
@@ -67,6 +68,12 @@ pub fn clip_source_media_duration_sec(clip: &Clip) -> Option<f64> {
     }
     if let Some(duration) = clip.duration_sec.filter(|d| d.is_finite() && *d > 0.0) {
         return Some(duration);
+    }
+    if let Some(data) = clip.midi_take.as_ref() {
+        let length = data.effective_length_sec();
+        if length.is_finite() && length > 0.0 {
+            return Some(length);
+        }
     }
     if let Some(notes) = clip.midi_note_data.as_ref() {
         let max_end = notes.iter().map(|n| n.end_sec).fold(0.0f64, f64::max);
@@ -1266,6 +1273,13 @@ pub struct ClipTake {
     #[serde(default, skip_serializing_if = "is_false")]
     pub midi_fill_gaps: bool,
 
+    /// MIDI 内容的**权威**。None = 音频 Take（或旧音高参考镜像）。
+    ///
+    /// 不能与 `midi_note_data` 同时作为权威：旧字段只是本字段 role=PitchReference
+    /// 时的兼容镜像。所有写入必须走 `set_midi_take` / `set_pitch_reference_notes`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub midi_take: Option<MidiTakeData>,
+
     /// 源域音节边界估计（可选附加字段；旧工程缺省为空）。
     ///
     /// 这是**可重算缓存**：源文件或算法版本变化时可整体重算。但它与纯显示缓存
@@ -1287,6 +1301,118 @@ pub struct ClipTake {
     pub stretch_markers: Vec<ClipStretchMarker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub envelopes: Option<ClipTakeEnvelopeSet>,
+}
+
+impl ClipTake {
+    /// 该 Take 是否承担“覆盖原声”的音高参考角色。
+    ///
+    /// 旧数据（只有 `midi_note_data`、没有 `midi_take`）按旧语义视为音高参考；
+    /// 新 MIDI Take 即使带音符也不会被误判。
+    pub fn is_pitch_reference(&self) -> bool {
+        match self.midi_take.as_ref() {
+            Some(data) => data.is_pitch_reference(),
+            None => self.midi_note_data.is_some(),
+        }
+    }
+
+    pub fn is_midi_take(&self) -> bool {
+        self.midi_take
+            .as_ref()
+            .is_some_and(MidiTakeData::is_midi_take)
+    }
+
+    pub fn midi_role(&self) -> Option<MidiTakeRole> {
+        self.midi_take
+            .as_ref()
+            .map(|data| data.role)
+            .or_else(|| self.midi_note_data.as_ref().map(|_| MidiTakeRole::PitchReference))
+    }
+
+    pub fn midi_content(&self) -> Option<&MidiTakeData> {
+        self.midi_take.as_ref()
+    }
+
+    /// 音高参考派生音符：只对 PitchReference 返回，且已经按 flatten 策略压平。
+    pub fn pitch_reference_notes(&self) -> Option<Vec<MidiNoteEvent>> {
+        if let Some(data) = self.midi_take.as_ref() {
+            return data.is_pitch_reference().then(|| data.flatten_to_note_events());
+        }
+        self.midi_note_data.clone()
+    }
+
+    /// 时间轴/钢琴卷帘显示用的音符：角色无关，保留复调。
+    pub fn midi_display_notes(&self) -> Option<&[MidiNoteEvent]> {
+        self.midi_take
+            .as_ref()
+            .map(|data| data.notes.as_slice())
+            .or(self.midi_note_data.as_deref())
+    }
+
+    pub fn midi_content_length_sec(&self) -> Option<f64> {
+        self.midi_take
+            .as_ref()
+            .map(MidiTakeData::effective_length_sec)
+            .filter(|length| length.is_finite() && *length > 1e-9)
+            .or_else(|| {
+                self.midi_note_data.as_ref().and_then(|notes| {
+                    let end = notes.iter().map(|n| n.end_sec).fold(0.0f64, f64::max);
+                    (end.is_finite() && end > 0.0).then_some(end)
+                })
+            })
+    }
+
+    /// 把权威 MIDI 内容与旧镜像整理到唯一自洽的状态。
+    ///
+    /// - `midi_take` 缺失、旧镜像存在 ⇒ 迁移为 `role=PitchReference`；
+    /// - `role=PitchReference` ⇒ 写回旧镜像（旧的音高组装路径仍可读）；
+    /// - `role=MidiTake` ⇒ 旧镜像必须清空，旧版本因此看不到“错误的音高覆盖”。
+    pub fn normalize_midi_take(&mut self) {
+        if let Some(mut data) = self.midi_take.take() {
+            data.normalize();
+            self.midi_take = Some(data);
+        } else if let Some(notes) = self.midi_note_data.clone() {
+            self.midi_take = Some(MidiTakeData::from_legacy_notes(
+                notes,
+                self.midi_fill_gaps,
+                self.name.clone(),
+            ));
+        }
+        self.sync_legacy_midi_mirror();
+    }
+
+    /// 写兼容镜像。只允许本函数与 `set_midi_take` 改这两个字段。
+    pub fn sync_legacy_midi_mirror(&mut self) {
+        match self.midi_take.as_ref() {
+            Some(data) if data.is_pitch_reference() => {
+                self.midi_note_data = data.legacy_mirror_notes();
+                self.midi_fill_gaps = data.pitch_reference.fill_gaps;
+            }
+            Some(_) => {
+                self.midi_note_data = None;
+                self.midi_fill_gaps = false;
+            }
+            None => {}
+        }
+    }
+
+    pub fn set_midi_take(&mut self, mut data: MidiTakeData) {
+        data.normalize();
+        data.refresh_hash();
+        self.midi_take = Some(data);
+        self.sync_legacy_midi_mirror();
+    }
+
+    pub fn clear_midi_take(&mut self) {
+        self.midi_take = None;
+        self.midi_note_data = None;
+        self.midi_fill_gaps = false;
+    }
+
+    pub fn set_pitch_reference_notes(&mut self, notes: Vec<MidiNoteEvent>, fill_gaps: bool) {
+        let data = MidiTakeData::from_legacy_notes(notes, fill_gaps, self.name.clone());
+        self.set_midi_take(data);
+    }
+
 }
 
 impl ClipTake {
@@ -1339,6 +1465,7 @@ impl ClipTake {
             channel_decision: None,
             midi_note_data: clip.midi_note_data.clone(),
             midi_fill_gaps: clip.midi_fill_gaps,
+            midi_take: clip.midi_take.clone(),
             syllable_analysis: None,
             game_block_baseline: None,
             stretch_markers: Vec::new(),
@@ -1377,6 +1504,7 @@ impl ClipTake {
         clip.source_channels = self.source_channels;
         clip.midi_note_data = self.midi_note_data.clone();
         clip.midi_fill_gaps = self.midi_fill_gaps;
+        clip.midi_take = self.midi_take.clone();
     }
 }
 
@@ -1389,6 +1517,12 @@ fn clip_take_media_duration_sec(take: &ClipTake) -> Option<f64> {
     }
     if let Some(duration) = take.duration_sec.filter(|d| d.is_finite() && *d > 0.0) {
         return Some(duration);
+    }
+    if let Some(data) = take.midi_take.as_ref() {
+        let length = data.effective_length_sec();
+        if length.is_finite() && length > 0.0 {
+            return Some(length);
+        }
     }
     if let Some(notes) = take.midi_note_data.as_ref() {
         let max_end = notes.iter().map(|n| n.end_sec).fold(0.0f64, f64::max);
@@ -1797,9 +1931,13 @@ pub struct Clip {
     #[serde(default, skip_serializing)]
     pub midi_note_data: Option<Vec<MidiNoteEvent>>,
 
-    /// 是否在 pitch_orig 组装时填补 MIDI 音符之间的空隙。
+    /// 是否在 pitch_orig 组装时填补 MIDI 音符之间的空隙（旧镜像）。
     #[serde(default, skip_serializing)]
     pub midi_fill_gaps: bool,
+
+    /// MIDI Take 的 active-take 投影（不落盘；权威在 `ClipTake.midi_take`）。
+    #[serde(default, skip_serializing)]
+    pub midi_take: Option<MidiTakeData>,
 
     /// 循环**回绕周期**（源域秒）；`None` = 按媒体总时长（历史行为）。
     ///
@@ -1857,6 +1995,109 @@ pub fn split_transition_curve_spec(curve: &str) -> Option<(f64, f64, f64)> {
 }
 
 impl Clip {
+    fn active_take_mut(&mut self) -> Option<&mut ClipTake> {
+        if self.takes.is_empty() {
+            self.sync_take_from_flat();
+        }
+        let index = self.active_take_index().min(self.takes.len().saturating_sub(1));
+        self.takes.get_mut(index)
+    }
+
+    fn active_take_ref(&self) -> Option<&ClipTake> {
+        self.takes.get(self.active_take_index())
+    }
+
+    pub fn is_pitch_reference(&self) -> bool {
+        self.active_take_ref()
+            .is_some_and(ClipTake::is_pitch_reference)
+            || (self.midi_note_data.is_some() && !self.is_midi_take())
+    }
+
+    pub fn is_midi_take(&self) -> bool {
+        self.active_take_ref().is_some_and(ClipTake::is_midi_take)
+    }
+
+    pub fn midi_role(&self) -> Option<MidiTakeRole> {
+        self.active_take_ref()
+            .and_then(ClipTake::midi_role)
+            .or_else(|| self.midi_note_data.as_ref().map(|_| MidiTakeRole::PitchReference))
+    }
+
+    pub fn pitch_reference_notes(&self) -> Option<Vec<MidiNoteEvent>> {
+        self.active_take_ref()
+            .and_then(ClipTake::pitch_reference_notes)
+            .or_else(|| self.midi_note_data.clone())
+    }
+
+    pub fn midi_display_notes(&self) -> Option<&[MidiNoteEvent]> {
+        self.active_take_ref()
+            .and_then(ClipTake::midi_display_notes)
+            .or(self.midi_note_data.as_deref())
+    }
+
+    pub fn midi_content_length_sec(&self) -> Option<f64> {
+        self.active_take_ref()
+            .and_then(ClipTake::midi_content_length_sec)
+            .or_else(|| {
+                self.midi_note_data.as_ref().and_then(|notes| {
+                    let end = notes.iter().map(|note| note.end_sec).fold(0.0f64, f64::max);
+                    (end.is_finite() && end > 0.0).then_some(end)
+                })
+            })
+    }
+
+    /// 权威 MIDI 内容的唯一写入口。写完整投影与兼容镜像，避免三处状态漂移。
+    pub fn set_midi_take(&mut self, data: MidiTakeData) {
+        if self.takes.is_empty() {
+            self.sync_take_from_flat();
+        }
+        let take_id = self
+            .active_take_id
+            .clone()
+            .or_else(|| self.takes.first().map(|take| take.id.clone()));
+        if let Some(take_id) = take_id {
+            if let Some(take) = self.takes.iter_mut().find(|take| take.id == take_id) {
+                take.set_midi_take(data);
+                let take = take.clone();
+                take.apply_to_clip(self);
+            }
+        }
+    }
+
+    pub fn set_pitch_reference_notes(&mut self, notes: Vec<MidiNoteEvent>, fill_gaps: bool) {
+        if self.takes.is_empty() {
+            self.sync_take_from_flat();
+        }
+        let take_id = self
+            .active_take_id
+            .clone()
+            .or_else(|| self.takes.first().map(|take| take.id.clone()));
+        if let Some(take_id) = take_id {
+            if let Some(take) = self.takes.iter_mut().find(|take| take.id == take_id) {
+                take.set_pitch_reference_notes(notes, fill_gaps);
+                let take = take.clone();
+                take.apply_to_clip(self);
+            }
+        }
+    }
+
+    pub fn clear_midi_take(&mut self) {
+        if let Some(take) = self.active_take_mut() {
+            take.clear_midi_take();
+            let take = take.clone();
+            take.apply_to_clip(self);
+        }
+    }
+
+    pub fn sync_legacy_midi_mirror(&mut self) {
+        for take in &mut self.takes {
+            take.sync_legacy_midi_mirror();
+        }
+        if let Some(take) = self.takes.get(self.active_take_index()).cloned() {
+            take.apply_to_clip(self);
+        }
+    }
+
     /// 该片段当前**可听**的线性增益（item × take）。
     ///
     /// 【为什么要一个入口】两层增益相乘这件事若散落在渲染、混音、导出、波形各处，
@@ -1942,7 +2183,8 @@ impl Clip {
         );
         let idx = self.active_take_index().min(self.takes.len() - 1);
         &self.takes[idx]
-    }
+
+}
 
     pub fn take(&self, take_id: &str) -> Option<&ClipTake> {
         self.takes.iter().find(|t| t.id == take_id)
@@ -1953,6 +2195,7 @@ impl Clip {
     pub fn sync_take_from_flat(&mut self) {
         let mut projection = ClipTake::from_clip(self);
         if self.takes.is_empty() {
+            projection.normalize_midi_take();
             self.active_take_id = Some(projection.id.clone());
             self.takes.push(projection);
             return;
@@ -1983,6 +2226,12 @@ impl Clip {
         if projection.content_id.is_none() {
             projection.content_id = existing.content_id;
         }
+        // MIDI 内容不在扁平投影里时就继承既有权威（见 `ClipTake::midi_take`）。
+        // 否则每次 audio 字段 sync 都会把刚导入的 MIDI 擦掉。
+        if projection.midi_take.is_none() {
+            projection.midi_take = existing.midi_take;
+        }
+        projection.normalize_midi_take();
         self.active_take_id = Some(existing.id);
         self.takes[idx] = projection;
     }
@@ -1994,6 +2243,7 @@ impl Clip {
         for take in &mut self.takes {
             take.channel_mode =
                 crate::channel_mode::TakeChannelMode::normalize_raw(take.channel_mode);
+            take.normalize_midi_take();
         }
         if self.takes.is_empty() {
             self.sync_take_from_flat();
@@ -2156,6 +2406,7 @@ impl Clip {
         found.name = name.trim().to_string();
         Ok(())
     }
+
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2378,6 +2629,17 @@ pub fn timeline_fingerprint(timeline: &TimelineState) -> u64 {
         h.maybe(clip.group_id.as_deref());
         h.maybe(clip.source_path.as_deref());
         h.maybe(clip.active_take_id.as_deref());
+        h.maybe(clip.midi_role().map(|role| match role {
+            MidiTakeRole::MidiTake => "midi_take",
+            MidiTakeRole::PitchReference => "pitch_reference",
+        }));
+        h.u64(clip.midi_display_notes().map_or(0, |notes| notes.len()) as u64);
+        h.f64(clip.midi_content_length_sec().unwrap_or(f64::NAN));
+        h.flag(
+            clip.midi_take
+                .as_ref()
+                .is_some_and(|data| data.preview.enabled),
+        );
         h.u64(clip.takes.len() as u64);
         for take in &clip.takes {
             h.text(&take.id);
@@ -5099,7 +5361,8 @@ mod tests {
         }
         fn read<'a>(tl: &'a TimelineState, cid: &str) -> &'a super::Clip {
             tl.clips.iter().find(|c| c.id == cid).unwrap()
-        }
+
+}
 
         // 正放：win=[ss, ss+len·r)。
         let (ws, we) = clip_playback_window_sec(read(&tl, &clip_id));
@@ -6296,6 +6559,8 @@ mod tests {
                 note: 60.0 + i as f32,
                 velocity: 100,
                 channel: 0,
+muted: false,
+release_velocity: 0,
             })
             .collect();
         let clip = tl.clips.iter_mut().find(|c| c.id == id).unwrap();
@@ -8286,6 +8551,15 @@ impl TimelineState {
                 } else {
                     None
                 },
+                midi_role: c.midi_role().map(|role| match role {
+                    MidiTakeRole::MidiTake => "midi_take".to_string(),
+                    MidiTakeRole::PitchReference => "pitch_reference".to_string(),
+                }),
+                midi_take_note_count: c.midi_take.as_ref().map(|data| data.notes.len()),
+                midi_take_length_sec: c.midi_take.as_ref().map(|data| data.effective_length_sec()),
+                midi_take_note_data: c.midi_take.as_ref().map(|data| data.notes.clone()),
+                midi_preview_enabled: c.midi_take.as_ref().map(|data| data.preview.enabled),
+                midi_preview_gain_db: c.midi_take.as_ref().map(|data| data.preview.gain_db),
             })
             .collect::<Vec<_>>();
 
@@ -8381,6 +8655,15 @@ impl TimelineState {
                 } else {
                     None
                 },
+                midi_role: c.midi_role().map(|role| match role {
+                    MidiTakeRole::MidiTake => "midi_take".to_string(),
+                    MidiTakeRole::PitchReference => "pitch_reference".to_string(),
+                }),
+                midi_take_note_count: c.midi_take.as_ref().map(|data| data.notes.len()),
+                midi_take_length_sec: c.midi_take.as_ref().map(|data| data.effective_length_sec()),
+                midi_take_note_data: None, // skip — lazy-loaded by content hash
+                midi_preview_enabled: c.midi_take.as_ref().map(|data| data.preview.enabled),
+                midi_preview_gain_db: c.midi_take.as_ref().map(|data| data.preview.gain_db),
             })
             .collect::<Vec<_>>();
 
@@ -9169,6 +9452,79 @@ impl TimelineState {
         }
     }
 
+    /// 修改某条 Take 的 MIDI 角色。独立 App 的唯一写入口；插件侧由
+    /// `EditState.midi_roles` 持久化后在投影边界调用。
+    pub fn set_midi_take_role(
+        &mut self,
+        clip_id: &str,
+        take_id: Option<&str>,
+        role: MidiTakeRole,
+    ) -> Result<(), String> {
+        let clip = self
+            .clips
+            .iter_mut()
+            .find(|clip| clip.id == clip_id)
+            .ok_or_else(|| format!("clip_not_found: {clip_id}"))?;
+        let take = match take_id {
+            Some(id) => clip
+                .takes
+                .iter_mut()
+                .find(|take| take.id == id)
+                .ok_or_else(|| format!("take_not_found: {id}"))?,
+            None => {
+                let index = clip.active_take_index();
+                clip.takes
+                    .get_mut(index)
+                    .ok_or_else(|| "take_not_found".to_string())?
+            }
+        };
+        let data = take
+            .midi_take
+            .as_mut()
+            .ok_or_else(|| "not_a_midi_take".to_string())?;
+        data.role = role;
+        data.preview.enabled = role == MidiTakeRole::MidiTake;
+        take.sync_legacy_midi_mirror();
+        let active = clip.active_take().clone();
+        active.apply_to_clip(clip);
+        Ok(())
+    }
+
+    /// 修改 MIDI 试听开关/音量。只影响监听，不参与 `pitch_orig`。
+    pub fn set_midi_preview(
+        &mut self,
+        clip_id: &str,
+        take_id: Option<&str>,
+        settings: MidiPreviewSettings,
+    ) -> Result<(), String> {
+        let clip = self
+            .clips
+            .iter_mut()
+            .find(|clip| clip.id == clip_id)
+            .ok_or_else(|| format!("clip_not_found: {clip_id}"))?;
+        let take = match take_id {
+            Some(id) => clip
+                .takes
+                .iter_mut()
+                .find(|take| take.id == id)
+                .ok_or_else(|| format!("take_not_found: {id}"))?,
+            None => {
+                let index = clip.active_take_index();
+                clip.takes
+                    .get_mut(index)
+                    .ok_or_else(|| "take_not_found".to_string())?
+            }
+        };
+        let data = take
+            .midi_take
+            .as_mut()
+            .ok_or_else(|| "not_a_midi_take".to_string())?;
+        data.preview = settings;
+        let active = clip.active_take().clone();
+        active.apply_to_clip(clip);
+        Ok(())
+    }
+
     pub fn select_track(&mut self, track_id: &str) {
         if self.tracks.iter().any(|t| t.id == track_id) {
             self.selected_track_id = Some(track_id.to_string());
@@ -9411,6 +9767,7 @@ impl TimelineState {
             formant_morph: None,
             midi_note_data: None,
             midi_fill_gaps: false,
+            midi_take: None,
         };
         self.clips.push(clip);
         // 确保文件元数据始终被填充（包括继承 waveform 但未计算 metadata 的情况）
@@ -10315,7 +10672,10 @@ impl TimelineState {
             if template.midi_note_data.is_some() || template.midi_fill_gaps.is_some() {
                 if let Some(clip) = self.clips.iter_mut().find(|c| c.id == created_id) {
                     if let Some(ref midi_data) = template.midi_note_data {
-                        clip.midi_note_data = Some(midi_data.clone());
+                        clip.set_pitch_reference_notes(
+                            midi_data.clone(),
+                            template.midi_fill_gaps.unwrap_or(false),
+                        );
                         clip.source_path = None;
                         clip.source_path_relative = None;
                         clip.color = "cyan".to_string();
@@ -10324,11 +10684,6 @@ impl TimelineState {
                             max: 127.0,
                         });
                     }
-                    if let Some(fill_gaps) = template.midi_fill_gaps {
-                        clip.midi_fill_gaps = fill_gaps;
-                    }
-                    // MIDI 内容写在投影上，写回 Take 权威数据。
-                    clip.sync_take_from_flat();
                 }
             }
 
@@ -10610,6 +10965,7 @@ impl TimelineState {
             formant_morph: None,
             midi_note_data: None,
             midi_fill_gaps: false,
+            midi_take: None,
         };
         packed.normalize_takes();
 
@@ -11510,7 +11866,7 @@ impl TimelineState {
         selected.sort_by(|a, b| a.start_sec.total_cmp(&b.start_sec));
 
         // 针对音高参考块的胶合流程
-        let all_pitch = selected.iter().all(|c| c.midi_note_data.is_some());
+        let all_pitch = selected.iter().all(|c| c.is_pitch_reference());
         if all_pitch {
             let original_ids: Vec<String> = clip_ids.to_vec();
             self.glue_pitch_clips(&selected, &original_ids);
@@ -11714,8 +12070,8 @@ impl TimelineState {
                 None => continue,
             };
 
-            // 跳过已经是音高块的 clip
-            if clip.midi_note_data.is_some() {
+            // 跳过已经是音高参考块的 clip；普通 MIDI Take 有内容但不是参考。
+            if clip.is_pitch_reference() {
                 continue;
             }
 
@@ -11753,8 +12109,7 @@ impl TimelineState {
 
             // 更新 clip
             if let Some(clip) = self.clips.iter_mut().find(|c| c.id == *clip_id) {
-                clip.midi_note_data = Some(midi_notes);
-                clip.midi_fill_gaps = true;
+                clip.set_pitch_reference_notes(midi_notes, true);
                 clip.source_path = None;
                 clip.source_path_relative = None;
                 clip.duration_sec = None;
@@ -11805,7 +12160,7 @@ impl TimelineState {
             .iter()
             .filter_map(|clip_id| {
                 let clip = self.clips.iter().find(|c| c.id == *clip_id)?;
-                clip.midi_note_data.as_ref()?;
+                let original_midi = clip.pitch_reference_notes()?;
                 let root = self.resolve_root_track_id(&clip.track_id)?;
                 // 源域上下文（消费窗口 + Loop 回绕描述）与转换路径共用同一份
                 // 实现，保证两条写音符的路径落在同一个坐标系里。
@@ -11820,7 +12175,7 @@ impl TimelineState {
                     loop_cycle,
                     src_start,
                     src_end,
-                    original_midi: clip.midi_note_data.clone(),
+                    original_midi: Some(original_midi),
                 })
             })
             .collect();
@@ -11896,9 +12251,11 @@ impl TimelineState {
                     min: (min_note - padding).max(0.0),
                     max: (max_note + padding).min(127.0),
                 });
-                clip.midi_note_data = Some(remapped);
-                // midi_note_data 是 active-take 投影字段，写回 Take 权威数据。
-                clip.sync_take_from_flat();
+                clip.set_pitch_reference_notes(remapped, true);
+                clip.pitch_range = Some(PitchRange {
+                    min: (min_note - padding).max(0.0),
+                    max: (max_note + padding).min(127.0),
+                });
             }
         }
 
@@ -12065,7 +12422,7 @@ impl TimelineState {
                             start_sec: s,
                             end_sec: e,
                             ..note
-                        });
+});
                     }
                 } else {
                     // 倒放：w = 倒放锚点 − 消费量，对 D 取模得文件域坐标。
@@ -12076,7 +12433,7 @@ impl TimelineState {
                             start_sec: s,
                             end_sec: e,
                             ..note
-                        });
+});
                     }
                 }
                 continue;
@@ -12098,7 +12455,7 @@ impl TimelineState {
                 start_sec: new_start,
                 end_sec: new_end,
                 ..note
-            });
+});
         }
 
         out
@@ -12132,6 +12489,8 @@ impl TimelineState {
                     note: current_note,
                     velocity: 100,
                     channel: 0,
+muted: false,
+release_velocity: 0,
                 });
                 seg_start_frame = i;
                 current_note = note;
@@ -12146,6 +12505,8 @@ impl TimelineState {
             note: current_note,
             velocity: 100,
             channel: 0,
+muted: false,
+release_velocity: 0,
         });
 
         notes
@@ -12167,14 +12528,16 @@ impl TimelineState {
         let mut merged_notes: Vec<MidiNoteEvent> = Vec::new();
         for clip in selected {
             let offset = clip.start_sec - start;
-            if let Some(ref notes) = clip.midi_note_data {
-                for note in notes {
+            if let Some(notes) = clip.pitch_reference_notes() {
+                for note in &notes {
                     merged_notes.push(MidiNoteEvent {
                         start_sec: note.start_sec + offset,
                         end_sec: note.end_sec + offset,
                         note: note.note,
                         velocity: note.velocity,
                         channel: note.channel,
+muted: false,
+release_velocity: 0,
                     });
                 }
             }
@@ -12199,6 +12562,8 @@ impl TimelineState {
                     note: 0.0, // rest
                     velocity: 0,
                     channel: 0,
+muted: false,
+release_velocity: 0,
                 });
             }
             filled_notes.push(*note);
@@ -12213,6 +12578,8 @@ impl TimelineState {
                 note: 0.0,
                 velocity: 0,
                 channel: 0,
+muted: false,
+release_velocity: 0,
             });
         }
 
@@ -12222,8 +12589,7 @@ impl TimelineState {
         glued.name = "Glued".to_string();
         glued.start_sec = start;
         glued.length_sec = length;
-        glued.midi_note_data = Some(filled_notes);
-        glued.midi_fill_gaps = true;
+        glued.set_pitch_reference_notes(filled_notes, true);
         glued.color = "cyan".to_string();
         glued.source_path = None;
         glued.source_path_relative = None;

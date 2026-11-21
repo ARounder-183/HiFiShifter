@@ -87,6 +87,9 @@ export type PluginBootstrap = {
          * 读点、写点、排序三个 API 缺一即整束不可用（与方向读取同一降级纪律）。
          */
         takePitchBridge: boolean;
+        midiRead?: boolean;
+        midiCreate?: boolean;
+        midiWrite?: boolean;
     };
     /**
      * Capture 通路的**观察位**（`hostKind === "capture"` 时才有值，否则 `null`）。

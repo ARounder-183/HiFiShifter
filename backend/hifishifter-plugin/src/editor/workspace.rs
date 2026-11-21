@@ -220,6 +220,13 @@ fn sync_host_takes(
                 "channel_decision": old.and_then(|take| take.channel_decision),
                 "midi_note_data": old.and_then(|take| take.midi_note_data.clone()),
                 "midi_fill_gaps": old.is_some_and(|take| take.midi_fill_gaps),
+                // 宿主 MIDI 快照优先；没有快照时保留插件上一轮内容。
+                "midi_hash": take.midi_hash,
+                "midi_take": take
+                    .midi
+                    .as_ref()
+                    .map(|snapshot| snapshot.data.clone())
+                    .or_else(|| old.and_then(|take| take.midi_take.clone())),
                 "syllable_analysis": old.and_then(|take| take.syllable_analysis.clone()),
                 "stretch_markers": old.map(|take| take.stretch_markers.clone()).unwrap_or_default(),
                 "envelopes": old.and_then(|take| take.envelopes.clone()),
@@ -2545,7 +2552,11 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
             .lock_or_recover()
             .clone()
             .ok_or("host timeline unavailable")?;
-        timeline.clips.retain(|clip| clips.contains(&clip.id));
+        // MIDI item 没有 ARA region，但仍必须出现在工作区时间线里；它是
+        // 宿主 item 图的合法成员，不是第二套 clip。
+        timeline.clips.retain(|clip| {
+            clips.contains(&clip.id) || clip.takes.iter().any(|take| take.midi_take.is_some())
+        });
         // 【一个 id 只允许一条 clip —— 渲染侧同样要归并】
         //
         // 两个 region 认领同一个 item 时，`clip_ids` 把两个 key 都映到**同一个** id，

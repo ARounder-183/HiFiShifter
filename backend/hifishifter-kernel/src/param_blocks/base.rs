@@ -173,8 +173,7 @@ pub fn root_analysis_pending(timeline: &TimelineState, root_track_id: &str) -> b
         };
         clip.source_path.is_some()
             && take
-                .midi_note_data
-                .as_ref()
+                .pitch_reference_notes()
                 .is_none_or(|notes| notes.is_empty())
             && take.syllable_analysis.as_ref().is_none_or(|analysis| {
                 crate::pitch_analysis::analysis_window_status(

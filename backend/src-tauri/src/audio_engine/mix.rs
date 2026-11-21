@@ -674,6 +674,14 @@ fn render_snapshot_window(
     }
 
     mix_snapshot_clips_into_scratch(frames, snap, pos0, pos1, scratch.as_mut_slice(), meter);
+    // 试听只叠加在实时播放混音上；导出/离线路径不经过本函数（二者直接读 PCM）。
+    hifishifter_kernel::midi_preview::mix_into_interleaved(
+        scratch.as_mut_slice(),
+        &snap.midi_preview,
+        pos0,
+        pos1,
+        snap.sample_rate,
+    );
     true
 }
 fn blend_snapshot_windows_in_place(
@@ -1701,6 +1709,7 @@ mod tests {
             duration_frames: 64,
             track_ids: Arc::new(vec!["track-a".to_string()]),
             clips: Arc::new(vec![clip]),
+            midi_preview: Arc::new(hifishifter_kernel::midi_preview::MidiPreviewSchedule::default()),
         };
 
         let mut scratch = vec![0.0f32; 64 * 2];

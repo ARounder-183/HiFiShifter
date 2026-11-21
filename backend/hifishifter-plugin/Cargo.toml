@@ -27,6 +27,7 @@ hifishifter-kernel = { path = "../hifishifter-kernel", default-features = false,
 hifishifter-host-link = { path = "../hifishifter-host-link" }
 hifishifter-clipboard = { path = "../hifishifter-clipboard" }
 blake3 = "1"
+arc-swap = "1.7"
 # ARA2 的桥。共享层只需要两块：
 #   * `plugin` —— `PluginModel` 那套语义 trait（文档模型 / 角色位）；
 #   * 裸 `companion` —— 格式中立的 binding 层（`CompanionFactory` /

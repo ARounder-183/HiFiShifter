@@ -251,6 +251,9 @@ pub(crate) fn build_snapshot(
     let duration_frames = (timeline.project_sec.max(0.0) * out_rate as f64)
         .round()
         .max(0.0) as u64;
+    let midi_preview = std::sync::Arc::new(
+        hifishifter_kernel::midi_preview::MidiPreviewSchedule::from_timeline(timeline),
+    );
 
     let track_gain = compute_track_gains(&timeline.tracks);
     let tracks_by_id: HashMap<&str, &Track> =
@@ -1084,6 +1087,7 @@ pub(crate) fn build_snapshot(
         duration_frames,
         track_ids: Arc::new(track_ids),
         clips: Arc::new(clips_out),
+        midi_preview,
     }
 }
 
@@ -1110,6 +1114,7 @@ pub(crate) fn build_snapshot_for_file(
         sample_rate: out_rate,
         duration_frames: length_frames,
         track_ids: Arc::new(vec!["__file_preview__".to_string()]),
+        midi_preview: Arc::new(hifishifter_kernel::midi_preview::MidiPreviewSchedule::default()),
         clips: Arc::new(vec![EngineClip {
             clip_id: "__file_preview__".to_string(),
             track_id: "__file_preview__".to_string(),
@@ -1240,7 +1245,9 @@ mod tests {
             group_id: None,
             midi_fill_gaps: false,
             midi_note_data: None,
-        });
+
+            midi_take: None,
+});
         let params = tl.params_by_root_track.entry(root).or_default();
         params
             .extra_curves

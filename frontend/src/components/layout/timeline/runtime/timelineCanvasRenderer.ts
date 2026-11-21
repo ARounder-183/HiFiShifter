@@ -332,6 +332,14 @@ export function drawTimelineCanvas(
              * 已由模型侧按统一 axis 投影——绘制端拿不到 pxPerSec，不得自行换算。
              */
             midiLoopMarkerOffsetsPx?: number[];
+            midiTakeNotesPx?: Array<{
+                x: number;
+                y: number;
+                widthPx: number;
+                heightPx: number;
+                velocity: number;
+                channel: number;
+            }>;
         }>;
         /** 轨道横向分界线（延伸到工程末尾之后）。 */
         rowGuides?: {
@@ -1265,6 +1273,19 @@ export function drawTimelineCanvas(
         /** 该 clip 的 body 矩形（内容坐标），用于**逐条**裁剪。 */
         clip: { left: number; top: number; width: number; height: number };
     }> = [];
+    /** MIDI Take 的复调音符块（最后一遍画，避免被后续块面盖住）。 */
+    const midiTakeNotes: Array<{
+        notes: Array<{
+            x: number;
+            y: number;
+            widthPx: number;
+            heightPx: number;
+            velocity: number;
+            channel: number;
+        }>;
+        muted: boolean;
+        clip: { left: number; top: number; width: number; height: number };
+    }> = [];
     /** 回绕标记：颜色 + 位置（相对 clip 左缘）+ 所属 clip 的 body 矩形。 */
     const midiLoopMarkers: Array<{
         xs: number[];
@@ -1327,6 +1348,18 @@ export function drawTimelineCanvas(
                 color: clip.midiPitchStroke ?? "rgba(34, 211, 238, 0.78)",
                 // 与搬迁前 MidiPitchTrackCanvas 同一透明度语义：静音整体压暗。
                 alpha: clip.muted ? 0.4 : 0.85,
+                clip: {
+                    left: item.left,
+                    top: item.bodyTop,
+                    width: item.width,
+                    height: item.bodyHeight,
+                },
+            });
+        }
+        if (clip.midiTakeNotesPx !== undefined && clip.midiTakeNotesPx.length > 0) {
+            midiTakeNotes.push({
+                notes: clip.midiTakeNotesPx,
+                muted: clip.muted,
                 clip: {
                     left: item.left,
                     top: item.bodyTop,
@@ -1401,6 +1434,39 @@ export function drawTimelineCanvas(
         ctx.fillStyle = "rgba(0, 0, 0, 0.18)";
         for (const line of takeLaneSeparators) {
             ctx.fillRect(line.left, line.top, line.width, 1);
+        }
+        ctx.restore();
+    }
+
+    // ── MIDI Take 的复调音符块 ────────────────────────────────────────
+    if (midiTakeNotes.length > 0) {
+        const channelColors = [
+            "#60a5fa",
+            "#34d399",
+            "#fbbf24",
+            "#f472b6",
+            "#a78bfa",
+            "#22d3ee",
+            "#fb923c",
+            "#4ade80",
+        ];
+        ctx.save();
+        for (const block of midiTakeNotes) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(block.clip.left, block.clip.top, block.clip.width, block.clip.height);
+            ctx.clip();
+            for (const note of block.notes) {
+                ctx.globalAlpha = (block.muted ? 0.35 : 0.75) * (0.45 + 0.55 * (note.velocity / 127));
+                ctx.fillStyle = channelColors[note.channel % channelColors.length]!;
+                ctx.fillRect(
+                    block.clip.left + note.x,
+                    block.clip.top + note.y,
+                    note.widthPx,
+                    note.heightPx,
+                );
+            }
+            ctx.restore();
         }
         ctx.restore();
     }

@@ -21,6 +21,9 @@ pub(crate) struct UiTake {
     /// 渲染，与 `loop_enabled`（`geometry.rs` 的同名注释）是同一条纪律。此前把"读不到"
     /// 投影成一个面向用户的提示，等于让用户为一个**不可操作**的内部读数负责。
     pub reversed: bool,
+    /// MIDI take 的只读快照；None = 音频 take 或宿主未提供 MIDI API。
+    pub midi: Option<Arc<MidiTakeSnapshot>>,
+    pub midi_hash: Option<String>,
 }
 
 #[derive(Clone)]
@@ -348,6 +351,7 @@ impl NativeHost {
             };
             let read_take = |take: *mut c_void, is_active: bool| -> Result<UiTake, String> {
                 let geometry = self.geometry_for_take(take, authorized)?;
+                let midi = self.read_midi_take(take, &geometry, authorized);
                 Ok(UiTake {
                     name: read_name(take)?,
                     // 方向已经在 `geometry_for_take` 里连同 SECTION 边界一起读过一次；
@@ -355,6 +359,8 @@ impl NativeHost {
                     reversed: geometry.reversed,
                     geometry,
                     active: is_active,
+                    midi_hash: midi.as_ref().map(|snapshot| snapshot.hash.clone()),
+                    midi,
                 })
             };
             // 【为什么先枚举再补 active】宿主清单与 active 指针之间没有原子性保证
@@ -923,7 +929,8 @@ mod tests {
         .unwrap();
         clip.normalize_takes();
         clip
-    }
+
+}
 
     /// "宿主换了 active take"是**可证明**的事实：我们同时有"授权那一刻的 take GUID"
     /// 与"宿主现在报的 take GUID"，两者不同就立刻能说，不必等超时。

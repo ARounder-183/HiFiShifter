@@ -222,7 +222,7 @@ pub(super) fn import_project(
             .created_clip_ids
             .iter()
             .filter_map(|clip_id| tl.clips.iter().find(|clip| clip.id == *clip_id))
-            .filter(|clip| clip.midi_note_data.is_some())
+            .filter(|clip| clip.is_pitch_reference())
             .filter_map(|clip| tl.resolve_root_track_id(&clip.track_id))
             .collect::<std::collections::HashSet<_>>()
             .into_iter()

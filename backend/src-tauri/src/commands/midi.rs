@@ -377,6 +377,8 @@ pub(super) fn import_midi_as_clip(
                 note: n.note,
                 velocity: n.velocity,
                 channel: n.channel,
+muted: false,
+release_velocity: 0,
             })
             .collect();
 
@@ -400,8 +402,7 @@ pub(super) fn import_midi_as_clip(
         );
 
         if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {
-            clip.midi_note_data = Some(normalized_notes);
-            clip.midi_fill_gaps = fill;
+            clip.set_pitch_reference_notes(normalized_notes, fill);
             clip.pitch_range = pitch_range;
             clip.color = "cyan".to_string();
             clip.source_path = None;
@@ -507,6 +508,8 @@ pub(super) fn import_midi_as_clip(
                         note: n.note,
                         velocity: n.velocity,
                         channel: n.channel,
+muted: false,
+release_velocity: 0,
                     })
                     .collect();
 
@@ -538,8 +541,7 @@ pub(super) fn import_midi_as_clip(
                 );
 
                 if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {
-                    clip.midi_note_data = Some(normalized);
-                    clip.midi_fill_gaps = fill;
+                    clip.set_pitch_reference_notes(normalized, fill);
                     clip.pitch_range = pitch_range;
                     clip.color = "cyan".to_string();
                     clip.source_path = None;
@@ -618,6 +620,258 @@ pub(super) fn import_midi_as_clip(
 
 /// 替换指定 MIDI clip 的音符数据。
 ///
+/// 导入 MIDI 为真正的 Take 级 MIDI 内容（MIDI Take 或音高参考角色）。
+///
+/// 与旧的 import_midi_as_clip 分开：旧路径把音符压成 pitch reference 的单线，
+/// 本路径保留复调/通道/力度/弯音/CC，写进 ClipTake.midi_take。
+pub(super) fn import_midi_as_take(
+    state: &AppState,
+    midi_path: String,
+    track_indices: Vec<usize>,
+    track_id: Option<String>,
+    start_sec: f64,
+    multi_track_merge: Option<bool>,
+    note_bpm_mode: Option<String>,
+    specified_bpm: Option<f64>,
+    import_midi_bpm_as_project: Option<bool>,
+    clipboard_guid: Option<String>,
+    close_leading_gap: Option<bool>,
+    midi_role: Option<String>,
+) -> crate::models::TimelineStatePayload {
+    let project_bpm = {
+        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        tl.bpm
+    };
+    let (mut parse_result, source_stem) = match resolve_midi_source(
+        state,
+        Some(&midi_path).filter(|s| !s.is_empty()),
+        clipboard_guid.as_deref(),
+        Some(project_bpm),
+    ) {
+        Ok(value) => value,
+        Err(error) => return error_payload(&error),
+    };
+    let initial_bpm = parse_result.initial_bpm;
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    let import_as_project = import_midi_bpm_as_project.unwrap_or(false);
+    if import_as_project {
+        set_project_bpm_syncing_tempo_map(&mut tl, initial_bpm);
+    }
+    let target_bpm = match note_bpm_mode.as_deref().unwrap_or("midi") {
+        "project" if !import_as_project => Some(project_bpm),
+        "specified" => specified_bpm.filter(|b| b.is_finite() && *b > 0.0),
+        _ => None,
+    };
+    if let Some(target) = target_bpm {
+        let scale = initial_bpm / target;
+        if scale.is_finite() && scale > 0.0 {
+            for data in &mut parse_result.track_data {
+                data.scale_time(scale);
+            }
+        }
+    }
+    let role = match midi_role.as_deref() {
+        Some("pitch_reference") => crate::midi_take::MidiTakeRole::PitchReference,
+        _ => crate::midi_take::MidiTakeRole::MidiTake,
+    };
+    let close_gap = close_leading_gap.unwrap_or(role == crate::midi_take::MidiTakeRole::PitchReference);
+    let merge = multi_track_merge.unwrap_or(true);
+    let indices: Vec<usize> = if track_indices.is_empty() {
+        (0..parse_result.track_data.len()).collect()
+    } else {
+        track_indices
+            .iter()
+            .copied()
+            .filter(|index| *index < parse_result.track_data.len())
+            .collect()
+    };
+    if indices.is_empty() {
+        return error_payload("no_notes_in_track");
+    }
+    let file_stem = source_stem.unwrap_or_else(|| "MIDI".to_string());
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::ImportMidi);
+
+    let mut created_clip_ids = Vec::new();
+    let mut created_track_ids = Vec::new();
+    let mut current_track_id = track_id;
+    if merge {
+        let mut merged = crate::midi_take::MidiTakeData::default();
+        for &index in &indices {
+            let mut data = parse_result.track_data[index].clone();
+            data.pitch_reference.flatten = crate::midi_take::MidiFlattenMode::Highest;
+            if data.notes.is_empty() {
+                continue;
+            }
+            merged.merge_from(&data, 0.0);
+        }
+        if merged.notes.is_empty() {
+            return error_payload("no_notes_in_track");
+        }
+        if close_gap {
+            merged.trim_leading_silence();
+        }
+        merged.role = role;
+        merged.preview.enabled = role == crate::midi_take::MidiTakeRole::MidiTake;
+        let length = merged.effective_length_sec().max(0.1);
+        let clip_id = tl.add_clip(
+            current_track_id.clone(),
+            Some(file_stem.clone()),
+            Some(start_sec),
+            Some(length),
+            None,
+        );
+        if let Some(clip) = tl.clips.iter_mut().find(|clip| clip.id == clip_id) {
+            clip.set_midi_take(merged.clone());
+            clip.pitch_range = Some(crate::models::PitchRange {
+                min: merged.notes.iter().fold(127.0f32, |m, n| m.min(n.note)),
+                max: merged.notes.iter().fold(0.0f32, |m, n| m.max(n.note)),
+            });
+            clip.color = if role == crate::midi_take::MidiTakeRole::PitchReference {
+                "cyan".to_string()
+            } else {
+                "blue".to_string()
+            };
+            clip.source_path = None;
+            clip.source_path_relative = None;
+        }
+        created_clip_ids.push(clip_id);
+    } else {
+        for (position, &index) in indices.iter().enumerate() {
+            let mut data = parse_result.track_data[index].clone();
+            data.role = role;
+            data.pitch_reference.flatten = crate::midi_take::MidiFlattenMode::Highest;
+            data.preview.enabled = role == crate::midi_take::MidiTakeRole::MidiTake;
+            if data.notes.is_empty() {
+                continue;
+            }
+            if close_gap {
+                data.trim_leading_silence();
+            }
+            if position > 0 {
+                current_track_id = Some(tl.add_track(Some(file_stem.clone()), None, None));
+                if let Some(id) = current_track_id.clone() {
+                    created_track_ids.push(id);
+                }
+            }
+            let length = data.effective_length_sec().max(0.1);
+            let name = if data.name.trim().is_empty() {
+                file_stem.clone()
+            } else {
+                format!("{} - {}", file_stem, data.name)
+            };
+            let clip_id = tl.add_clip(
+                current_track_id.clone(),
+                Some(name),
+                Some(start_sec),
+                Some(length),
+                None,
+            );
+            if let Some(clip) = tl.clips.iter_mut().find(|clip| clip.id == clip_id) {
+                clip.set_midi_take(data.clone());
+                clip.pitch_range = Some(crate::models::PitchRange {
+                    min: data.notes.iter().fold(127.0f32, |m, n| m.min(n.note)),
+                    max: data.notes.iter().fold(0.0f32, |m, n| m.max(n.note)),
+                });
+                clip.color = if role == crate::midi_take::MidiTakeRole::PitchReference {
+                    "cyan".to_string()
+                } else {
+                    "blue".to_string()
+                };
+                clip.source_path = None;
+                clip.source_path_relative = None;
+            }
+            created_clip_ids.push(clip_id);
+        }
+    }
+    if created_clip_ids.is_empty() {
+        return error_payload("no_notes_in_track");
+    }
+    tl.sync_clip_takes_from_flat();
+    state.audio_engine.update_timeline(tl.clone());
+    let mut payload = tl.to_payload();
+    payload.created_clip_ids = Some(created_clip_ids);
+    payload.created_track_ids = Some(created_track_ids);
+    payload.project = Some(state.project_meta_payload());
+    drop(tl);
+    if let Some(ref guid) = clipboard_guid {
+        if !guid.is_empty() {
+            take_clipboard_midi(state, guid);
+        }
+    }
+    payload
+}
+
+/// 切换 MIDI Take / 音高参考角色。写权威数据并同步旧镜像。
+pub(super) fn set_midi_take_role(
+    state: &AppState,
+    clip_id: String,
+    take_id: Option<String>,
+    role: String,
+) -> crate::models::TimelineStatePayload {
+    let role = if role == "pitch_reference" {
+        crate::midi_take::MidiTakeRole::PitchReference
+    } else {
+        crate::midi_take::MidiTakeRole::MidiTake
+    };
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::ImportMidi);
+    if let Err(error) = tl.set_midi_take_role(&clip_id, take_id.as_deref(), role) {
+        return error_payload(&error);
+    }
+    tl.sync_clip_takes_from_flat();
+    state.audio_engine.update_timeline(tl.clone());
+    let mut payload = tl.to_payload();
+    payload.project = Some(state.project_meta_payload());
+    payload
+}
+
+/// 切换 MIDI Take 的试听开关（只影响监听，不进入导出/渲染）。
+pub(super) fn set_midi_preview(
+    state: &AppState,
+    clip_id: String,
+    take_id: Option<String>,
+    enabled: bool,
+    gain_db: Option<f32>,
+) -> crate::models::TimelineStatePayload {
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    let mut settings = crate::midi_take::MidiPreviewSettings::default();
+    settings.enabled = enabled;
+    if let Some(gain) = gain_db.filter(|gain| gain.is_finite()) {
+        settings.gain_db = gain.clamp(-60.0, 12.0);
+    }
+    if let Err(error) = tl.set_midi_preview(&clip_id, take_id.as_deref(), settings) {
+        return error_payload(&error);
+    }
+    tl.sync_clip_takes_from_flat();
+    state.audio_engine.update_timeline(tl.clone());
+    let mut payload = tl.to_payload();
+    payload.project = Some(state.project_meta_payload());
+    payload
+}
+
+/// 直接导出某个 MIDI Take 的复调内容，不做音高曲线压平。
+pub(super) fn export_midi_take(
+    state: &AppState,
+    clip_id: String,
+    output_path: String,
+) -> serde_json::Value {
+    let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(clip) = tl.clips.iter().find(|clip| clip.id == clip_id) else {
+        return serde_json::json!({"ok":false,"error":"clip_not_found"});
+    };
+    let Some(data) = clip.midi_take.as_ref() else {
+        return serde_json::json!({"ok":false,"error":"not_a_midi_take"});
+    };
+    let path = std::path::Path::new(&output_path);
+    if !path.is_absolute() {
+        return serde_json::json!({"ok":false,"error":"an absolute .mid output path is required"});
+    }
+    match crate::midi_export::export_midi_take_to_file(data, path, tl.bpm) {
+        Ok(()) => serde_json::json!({"ok":true,"path":output_path}),
+        Err(error) => serde_json::json!({"ok":false,"error":error}),
+    }
+}
+
 /// 从新的 MIDI 文件中解析音符，替换已有 MIDI clip 的 `midi_note_data`、
 /// `midi_pitch_bends`、`pitch_range` 和时长。
 ///
@@ -748,6 +1002,8 @@ pub(super) fn replace_midi_clip_data(
             note: n.note,
             velocity: n.velocity,
             channel: n.channel,
+muted: false,
+release_velocity: 0,
         })
         .collect();
 
@@ -766,8 +1022,7 @@ pub(super) fn replace_midi_clip_data(
     if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {
         clip.name = file_stem;
         clip.length_sec = length_sec;
-        clip.midi_note_data = Some(normalized_notes);
-        clip.midi_fill_gaps = fill;
+        clip.set_pitch_reference_notes(normalized_notes, fill);
         clip.pitch_range = pitch_range;
         clip.source_path = None;
         clip.source_path_relative = None;

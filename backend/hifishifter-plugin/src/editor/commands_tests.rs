@@ -187,6 +187,8 @@ fn timeline_payload_omits_redundant_waveforms_and_preserves_all_block_sources() 
             note: 60.0,
             velocity: 100,
             channel: 0,
+            muted: false,
+            release_velocity: 0,
         }];
         clip.midi_note_data = Some(notes.clone());
         clip.takes[0].midi_note_data = Some(notes);

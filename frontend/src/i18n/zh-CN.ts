@@ -1217,6 +1217,11 @@ export const zhCN = {
     midi_clipboard_read_failed: "从剪贴板读取 MIDI 失败",
 
     // MIDI 导入目标选择
+    ctx_midi_preview_on: "开启 MIDI 试听",
+    ctx_midi_preview_off: "关闭 MIDI 试听",
+    ctx_midi_as_pitch_ref: "作为音高参考",
+    ctx_midi_clear_pitch_ref: "取消音高参考",
+    midi_import_target_midi_take: "MIDI 片段",
     midi_import_target: "导入目标",
     midi_import_target_pitch_block: "音高参考块",
     midi_import_target_pitch_param: "音高参数",

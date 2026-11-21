@@ -121,6 +121,7 @@ export interface ClipMenuCaps {
     pitchBridge: boolean;
     /** 能把 MIDI 建成片段（决定「替换 MIDI」是否出现）。 */
     midiAsClip: boolean;
+    midiWrite?: boolean;
     /** 淡变形状轴可写。 */
     fadeShape: boolean;
 }
@@ -133,6 +134,8 @@ export interface ClipMenuAvailability {
     convertToPitchRef?: boolean;
     updatePitchRef?: boolean;
     exportMidi?: boolean;
+    midiTake?: boolean;
+    midiPreview?: boolean;
     addToParamSelection?: boolean;
     silenceDetection?: boolean;
     scanFakeStereo?: boolean;
@@ -203,7 +206,12 @@ export function collapseClipMenuEntries(entries: readonly ClipMenuEntry[]): Clip
 
 // ── 纯判定 ──────────────────────────────────────────────────────────────────
 
-export const isPitchClip = (clip: ClipInfo): boolean => clip.midiNoteCount != null;
+export const isPitchClip = (clip: ClipInfo): boolean =>
+    clip.midiRole === "pitch_reference" || (clip.midiRole == null && clip.midiNoteCount != null);
+
+/** 普通 MIDI Take：有 MIDI 内容，但不覆盖原声。 */
+export const isMidiTakeClip = (clip: ClipInfo): boolean =>
+    clip.midiRole === "midi_take" || (clip.midiRole == null && clip.midiTakeNoteCount != null);
 
 /** 某个片段是否至少有一个 take 带音频源（静音检测的前提）。 */
 export const hasAudioTake = (clip: ClipInfo): boolean =>
@@ -542,6 +550,27 @@ export function buildClipMenuModel(input: ClipMenuInput): ClipMenuEntry[] {
                     disabled: !silenceEligible,
                 }),
             );
+        }
+        return out;
+    });
+
+    // ── MIDI Take / 音高参考 ───────────────────────────────────────────────
+    section(() => {
+        const out: ClipMenuEntry[] = [];
+        if (!isMulti && isMidiTakeClip(clip) && available.midiTake) {
+            out.push(
+                item(
+                    "midi-preview",
+                    clip.midiPreviewEnabled === false
+                        ? t("ctx_midi_preview_on")
+                        : t("ctx_midi_preview_off"),
+                    { disabled: available.midiPreview === false },
+                ),
+                item("midi-as-pitch-ref", t("ctx_midi_as_pitch_ref")),
+            );
+        }
+        if (!isMulti && isPitchClip(clip) && available.midiTake) {
+            out.push(item("midi-clear-pitch-ref", t("ctx_midi_clear_pitch_ref")));
         }
         return out;
     });

@@ -94,6 +94,8 @@ pub struct TakeRow {
     pub active: bool,
     pub geometry: TakeGeometry,
     pub channel_mode: i32,
+    /// Take 级 MIDI 内容；None = 音频 take。
+    pub midi_take: Option<crate::midi_take::MidiTakeData>,
 }
 
 /// 一个宿主 item —— **输入**，一行。
@@ -432,6 +434,7 @@ pub fn clip_for_item(
                 "reversed": take.geometry.is_reversed(),
                 "loop_enabled": item.loop_source,
                 "channel_mode": take.channel_mode,
+                "midi_take": take.midi_take,
                 "source_sample_rate": media.map(|row| row.source_sample_rate.max(0.0) as u32),
                 "duration_sec": media.map(|row| row.source_duration_sec),
                 "source_channels": media.map(|row| row.source_channels.max(0) as u16),
@@ -585,6 +588,7 @@ mod tests {
             active: true,
             geometry,
             channel_mode: 0,
+            midi_take: None,
         }
     }
 

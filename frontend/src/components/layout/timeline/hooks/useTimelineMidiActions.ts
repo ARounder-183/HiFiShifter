@@ -5,6 +5,7 @@ import {
     replaceMidiClipDataRemote,
 } from "../../../../features/session/sessionSlice";
 import { webApi } from "../../../../services/webviewApi";
+import { hostMode, isPluginMode } from "../../../../services/hostCapabilities";
 import { coreApi } from "../../../../services/api/core";
 import { paramsApi } from "../../../../services/api/params";
 import { resolveRootTrackId } from "../../../../features/session/trackUtils";
@@ -50,7 +51,24 @@ export function useTimelineMidiActions({
             importTempo?: boolean;
             importTimeSignature?: boolean;
             importKeySignature?: boolean;
+            midiRole?: "midi_take" | "pitch_reference";
         }) => {
+            if (hostMode() === "plugin" && result.midiRole != null) {
+                void webApi.importMidiAsHostTake(
+                    result.midiPath,
+                    result.trackIndices,
+                    midiClipTrackId ?? undefined,
+                    midiClipStartSec,
+                    result.multiTrackMerge,
+                    result.noteBpmMode,
+                    result.specifiedBpm,
+                    result.importBpmAsProject,
+                    result.clipboardGuid,
+                    result.closeLeadingGap,
+                    result.midiRole,
+                );
+                return;
+            }
             void dispatch(
                 importMidiAsClip({
                     midiPath: result.midiPath,
@@ -68,6 +86,7 @@ export function useTimelineMidiActions({
                     importTempo: result.importTempo,
                     importTimeSignature: result.importTimeSignature,
                     importKeySignature: result.importKeySignature,
+                    midiRole: result.midiRole,
                 }),
             );
         },
@@ -141,6 +160,15 @@ export function useTimelineMidiActions({
             if (!saveResult.ok || saveResult.canceled || !saveResult.path) return;
 
             const s = sessionRef.current;
+            const single = clipIds.length === 1 ? s.clips.find((c) => c.id === clipIds[0]) : null;
+            if (
+                single &&
+                !isPluginMode() &&
+                (single.midiRole === "midi_take" || single.midiTakeNoteCount != null)
+            ) {
+                await paramsApi.exportMidiTake(single.id, saveResult.path);
+                return;
+            }
             const clipsMap = new Map(s.clips.map((c) => [c.id, c]));
             const trackMap = new Map(s.tracks.map((t) => [t.id, t]));
 

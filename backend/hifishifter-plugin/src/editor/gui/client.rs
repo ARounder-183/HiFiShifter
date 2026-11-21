@@ -1964,6 +1964,72 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
             })();
             match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id,false);state.host_replies.insert(id,reply);return;},Err(error)=>Err(error)}
         },
+        // 把 MIDI 文件建成**宿主** MIDI item（REAPER 原生）。ARA-only 宿主没有
+        // MIDI 对象，能力位会先把它挡在 UI 外；这里再守一次，避免脚本调用绕过。
+        Some("import_midi_as_host_take")=>{
+            let (link,sink,full)={let mut state=state.borrow_mut();(state.link.clone(),state.sink.clone(),state.pending_full(id,false))};
+            let outcome=(||->Result<HostReply,String>{
+                if full {return Err("native MIDI import request budget exceeded".into());}
+                let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
+                let editor=owner.editor_session()?;
+                let allowed=||link.authorize(&document).is_ok_and(|current|current==lease);
+                let host=owner.project_history_host().ok_or("host project history missing")?;
+                if host.capabilities_for(host.placement()).midi_create != true {return Err("host MIDI item creation is unavailable".into());}
+                let midi_path=request["args"]["midiPath"].as_str().unwrap_or_default();
+                let clipboard_guid=request["args"]["clipboardGuid"].as_str().unwrap_or_default();
+                let track_id=request["args"]["trackId"].as_str().ok_or("MIDI target track missing")?;
+                let start_sec=request["args"]["startSec"].as_f64().unwrap_or(0.0);
+                let multi=request["args"]["multiTrackMerge"].as_bool().unwrap_or(true);
+                let close_gap=request["args"]["closeLeadingGap"].as_bool().unwrap_or(false);
+                let fallback_bpm={let tl=editor.timeline.lock_or_recover();tl.bpm};
+                let parsed=if !midi_path.is_empty() {
+                    hifishifter_kernel::midi_import::parse_midi_file(
+                        std::path::Path::new(midi_path), Some(fallback_bpm)
+                    )?
+                } else if !clipboard_guid.is_empty() {
+                    let bytes={let cache=editor.clipboard_midi.lock_or_recover();cache.iter().find(|(guid,_)|guid==clipboard_guid).map(|(_,bytes)|bytes.clone())};
+                    let bytes=bytes.ok_or("MIDI clipboard payload missing")?;
+                    hifishifter_kernel::midi_import::parse_midi_bytes(&bytes, Some(fallback_bpm))?
+                } else {
+                    return Err("MIDI path missing".into());
+                };
+                let indices:Vec<usize>=request["args"]["trackIndices"].as_array().map(|values|values.iter().filter_map(|v|v.as_u64().map(|n|n as usize)).collect()).unwrap_or_default();
+                let indices=if indices.is_empty(){(0..parsed.track_data.len()).collect()}else{indices};
+                let mut track_data:Vec<_>=indices.iter().filter_map(|index|parsed.track_data.get(*index).cloned()).collect();
+                if track_data.is_empty(){return Err("no_notes_in_track".into());}
+                if let Some(role)=request["args"]["midiRole"].as_str(){
+                    let role=if role=="pitch_reference"{hifishifter_kernel::midi_take::MidiTakeRole::PitchReference}else{hifishifter_kernel::midi_take::MidiTakeRole::MidiTake};
+                    for data in &mut track_data{data.role=role;data.preview.enabled=role==hifishifter_kernel::midi_take::MidiTakeRole::MidiTake;}
+                }
+                if close_gap { for data in &mut track_data { data.trim_leading_silence(); } }
+                let target=document.ui_tracks.lock_or_recover().values().find(|track|track.id==track_id).map(|track|track.target.clone()).ok_or("MIDI target track not in host inventory")?;
+                state.borrow_mut().undo_document=Some(Arc::downgrade(&document));
+                document.host_undo.begin_request(&view_id,id,true,true,&host,&allowed)?;
+                let result=(||->Result<(),String>{
+                    if multi {
+                        let mut merged=hifishifter_kernel::midi_take::MidiTakeData::default();
+                        for data in &track_data { if !data.notes.is_empty(){merged.merge_from(data,0.0);} }
+                        if merged.notes.is_empty(){return Err("no_notes_in_track".into());}
+                        let length=merged.effective_length_sec().max(0.1);
+                        target.create_midi_item(start_sec,length,&merged,"HiFiShifter MIDI",&allowed)?;
+                    } else {
+                        let mut offset=0.0;
+                        for data in &track_data {
+                            if data.notes.is_empty(){continue;}
+                            let length=data.effective_length_sec().max(0.1);
+                            target.create_midi_item(start_sec+offset,length,data,"HiFiShifter MIDI",&allowed)?;
+                            offset+=length;
+                        }
+                    }
+                    Ok(())
+                })();
+                document.host_undo.finish_request(&view_id,id);result?;
+                owner.refresh_host_transport();editor.notify_timeline();
+                editor.enqueue(crate::editor::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
+                Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),attempts:0,next_attempt:std::time::Instant::now(),jump:None,imported:None,geometry:None,split:None,media:None,action:None})
+            })();
+            match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.mark_pending(id,false);state.host_replies.insert(id,reply);return;},Err(error)=>Err(error)}
+        },
         // 独立的"添加宿主轨道"入口。
         //
         // 【为什么不是 `add_track`】`add_track` 建的是**插件自己的**轨道，且被

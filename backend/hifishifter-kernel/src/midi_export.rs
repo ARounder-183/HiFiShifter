@@ -15,6 +15,126 @@ use midly::{Format, Header, MetaMessage, MidiMessage, Smf, Timing, TrackEvent, T
 use serde::Deserialize;
 use std::fs;
 use std::io::Write;
+use std::path::Path;
+
+use crate::midi_take::{MidiExpressionKind, MidiTakeData};
+
+/// 直接导出 MIDI Take（复调/通道/力度/CC/弯音），不经过“音高曲线压成单线”。
+pub fn export_midi_take_to_file(
+    data: &MidiTakeData,
+    output_path: &Path,
+    fallback_bpm: f64,
+) -> Result<(), String> {
+    let bpm = if data.source_bpm.is_finite() && data.source_bpm > 0.0 {
+        data.source_bpm
+    } else if fallback_bpm.is_finite() && fallback_bpm > 0.0 {
+        fallback_bpm
+    } else {
+        120.0
+    };
+    let ticks_per_beat = 480u16;
+    let sec_to_tick = |sec: f64| -> u64 {
+        ((sec.max(0.0) * bpm / 60.0) * ticks_per_beat as f64).round() as u64
+    };
+    let mut events: Vec<(u64, TrackEventKind<'static>)> = Vec::new();
+    events.push((
+        0,
+        TrackEventKind::Meta(MetaMessage::TrackName(
+            Box::leak(data.name.clone().into_boxed_str()).as_bytes(),
+        )),
+    ));
+    events.push((
+        0,
+        TrackEventKind::Meta(MetaMessage::Tempo(
+            midly::num::u24::new(tempo_us_per_beat(bpm)),
+        )),
+    ));
+    for note in &data.notes {
+        if note.muted || note.end_sec <= note.start_sec {
+            continue;
+        }
+        let channel = midly::num::u4::new(note.channel.min(15));
+        let key = midly::num::u7::new(note.note.round().clamp(0.0, 127.0) as u8);
+        let velocity = midly::num::u7::new(note.velocity.min(127));
+        events.push((
+            sec_to_tick(note.start_sec),
+            TrackEventKind::Midi {
+                channel,
+                message: MidiMessage::NoteOn { key, vel: velocity },
+            },
+        ));
+        events.push((
+            sec_to_tick(note.end_sec),
+            TrackEventKind::Midi {
+                channel,
+                message: MidiMessage::NoteOff {
+                    key,
+                    vel: midly::num::u7::new(note.release_velocity.min(127)),
+                },
+            },
+        ));
+    }
+    for event in &data.expression {
+        let channel = match &event.kind {
+            MidiExpressionKind::ControlChange { channel, .. }
+            | MidiExpressionKind::PitchBend { channel, .. }
+            | MidiExpressionKind::ProgramChange { channel, .. }
+            | MidiExpressionKind::ChannelAftertouch { channel, .. }
+            | MidiExpressionKind::PolyAftertouch { channel, .. } => *channel,
+            _ => continue,
+        };
+        let message = match &event.kind {
+            MidiExpressionKind::ControlChange {
+                controller, value, ..
+            } => MidiMessage::Controller {
+                controller: midly::num::u7::new(*controller & 0x7F),
+                value: midly::num::u7::new(*value & 0x7F),
+            },
+            MidiExpressionKind::PitchBend { value, .. } => MidiMessage::PitchBend {
+                bend: midly::PitchBend(midly::num::u14::new((*value as i32 + 8192).clamp(0, 16383) as u16)),
+            },
+            MidiExpressionKind::ProgramChange { program, .. } => MidiMessage::ProgramChange {
+                program: midly::num::u7::new(*program & 0x7F),
+            },
+            MidiExpressionKind::ChannelAftertouch { value, .. } => {
+                MidiMessage::ChannelAftertouch {
+                    vel: midly::num::u7::new(*value & 0x7F),
+                }
+            }
+            MidiExpressionKind::PolyAftertouch { key, value, .. } => MidiMessage::Aftertouch {
+                key: midly::num::u7::new(*key & 0x7F),
+                vel: midly::num::u7::new(*value & 0x7F),
+            },
+            _ => continue,
+        };
+        events.push((
+            sec_to_tick(event.time_sec),
+            TrackEventKind::Midi {
+                channel: midly::num::u4::new(channel.min(15)),
+                message,
+            },
+        ));
+    }
+    events.sort_by_key(|(tick, _)| *tick);
+    events.push((events.last().map_or(0, |(tick, _)| *tick), TrackEventKind::Meta(MetaMessage::EndOfTrack)));
+    let mut track: Vec<TrackEvent<'static>> = Vec::with_capacity(events.len());
+    let mut previous = 0u64;
+    for (tick, kind) in events {
+        let delta = tick.saturating_sub(previous).min(0x0FFF_FFFF);
+        previous = tick;
+        track.push(TrackEvent {
+            delta: delta_u28(delta),
+            kind,
+        });
+    }
+    let smf = Smf {
+        header: Header::new(Format::SingleTrack, Timing::Metrical(midly::num::u15::new(ticks_per_beat))),
+        tracks: vec![track],
+    };
+    let mut bytes = Vec::new();
+    smf.write(&mut bytes).map_err(|e| e.to_string())?;
+    fs::write(output_path, bytes).map_err(|e| e.to_string())
+}
 
 // ── 请求数据结构 ──────────────────────────────────────────────────────────────
 
@@ -746,8 +866,8 @@ fn read_pitch_for_clip(
     let clip_len = clip.length_sec.max(0.0);
     let target_frames = ((clip_len * 1000.0) / fp).round().max(1.0) as usize;
 
-    // ── MIDI clip 路径 ──
-    if let Some(ref notes) = clip.midi_note_data {
+    // ── 音高参考路径（普通 MIDI Take 不走单线导出） ──
+    if let Some(notes) = clip.pitch_reference_notes() {
         let mut midi_curve = vec![0.0f32; target_frames];
 
         let pr = clip.playback_rate as f64;
@@ -771,7 +891,7 @@ fn read_pitch_for_clip(
         };
         let src_total_len = src_end - src_start;
 
-        for note in notes {
+        for note in &notes {
             // Loop（循环源）：按媒体时长 D 的锚点回绕放置音符（与实时引擎 /
             // assemble 的放置算法一致）。不能用窗口比较过滤可见性 —— split
             // 产生的"环绕窗口"（start > end）会把所有音符误判为越界。
@@ -1166,6 +1286,8 @@ mod tests {
                 note: 60.0,
                 velocity: 100,
                 channel: 0,
+muted: false,
+release_velocity: 0,
             }]);
         }
 

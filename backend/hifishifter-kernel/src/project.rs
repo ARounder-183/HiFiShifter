@@ -105,10 +105,15 @@ impl SynthConfig {
 ///
 /// v7：参数块改为“Take 源域编辑集 + 派生视图”。
 ///
-/// 【为什么直接升 v7 且不迁移】开发版从未分发给终端用户；旧的绝对帧块、
+/// v8：Take 级 MIDI 内容（`ClipTake.midi_take`）成为权威；旧
+/// `midi_note_data` 降为 `role=PitchReference` 的兼容镜像。加载时自动
+/// 把旧音高参考块迁移成 `MidiTakeData{ role: PitchReference }`，因此旧工程
+/// 的听感/渲染行为不变。
+///
+/// 【为什么 v7 不保留兼容分支】开发版从未分发给终端用户；旧的绝对帧块、
 /// 合并意图与切分/伸缩记录全部删除。旧工程里的这些字段被 serde 忽略，
-/// 块编辑从空集开始。工程版本不保留兼容分支。
-pub const CURRENT_PROJECT_FILE_VERSION: u32 = 7;
+/// 块编辑从空集开始。
+pub const CURRENT_PROJECT_FILE_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -385,6 +390,10 @@ pub fn prepare_timeline_for_project_save(
     tl.sync_clip_takes_from_flat();
     for clip in &mut tl.clips {
         for take in &mut clip.takes {
+            // 保存前把权威 MIDI 内容写成旧版本可读镜像：音高参考仍可被旧
+            // 版本打开；普通 MIDI Take 的镜像为空（旧版本看到空片段，而不是
+            // 一条错误的音高覆盖）。
+            take.normalize_midi_take();
             take.waveform_preview = None;
             // 保证保存的工程中携带用于后续哈希匹配的内容指纹。
             // 已持久化或运行时刚更新的值保持不变；旧工程没有指纹时按当前

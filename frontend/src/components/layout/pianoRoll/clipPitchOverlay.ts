@@ -44,6 +44,8 @@ export interface ClipPitchOverlayClip {
     readonly color?: string;
     readonly sourcePath?: string;
     readonly midiNoteData?: readonly unknown[];
+    readonly midiTakeNoteCount?: number;
+    readonly midiRole?: "midi_take" | "pitch_reference";
 }
 
 export interface ClipPitchCurveData {
@@ -196,6 +198,9 @@ export function buildClipPitchOverlays(args: {
     const eligible: EligibleClip[] = [];
     clips.forEach((clip, zOrder) => {
         if (!groupTrackIds.has(clip.trackId) || clip.muted === true) return;
+        // 普通 MIDI Take 不是音高参考：它的音符由时间轴画块，不能把后端
+        // 可能残留的曲线当成原声 F0 画进参数编辑器。
+        if (clip.midiRole === "midi_take" || clip.midiTakeNoteCount != null) return;
         const curve = curves[clip.id];
         if (curve === undefined || !Number.isFinite(curve.curveStartSec)) return;
         const framePeriodMs = curve.framePeriodMs;
@@ -251,7 +256,8 @@ export function buildClipPitchOverlays(args: {
             framePeriodMs: curve.framePeriodMs,
             midiCurve: curve.midiCurve,
             kind:
-                clip.midiNoteData !== undefined && clip.midiNoteData.length > 0
+                clip.midiRole === "pitch_reference" ||
+                (clip.midiNoteData !== undefined && clip.midiNoteData.length > 0)
                     ? "midiReference"
                     : "sourceF0",
             colorIndex: colorIndices.get(clip.id) ?? 0,

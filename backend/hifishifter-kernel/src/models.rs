@@ -85,6 +85,18 @@ pub struct TimelineClipTake {
     pub midi_note_data: Option<Vec<MidiNoteEvent>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub midi_fill_gaps: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub midi_role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub midi_take_note_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub midi_take_length_sec: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub midi_take_note_data: Option<Vec<MidiNoteEvent>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub midi_preview_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub midi_preview_gain_db: Option<f32>,
     /// 源域音节区间；前端据此派生参数块，不重复做时间映射。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub syllable_spans_sec: Option<Vec<[f64; 2]>>,
@@ -134,6 +146,19 @@ impl TimelineClipTake {
             } else {
                 None
             },
+            midi_role: take.midi_role().map(|role| match role {
+                crate::midi_take::MidiTakeRole::MidiTake => "midi_take".to_string(),
+                crate::midi_take::MidiTakeRole::PitchReference => "pitch_reference".to_string(),
+            }),
+            midi_take_note_count: take.midi_take.as_ref().map(|data| data.notes.len()),
+            midi_take_length_sec: take.midi_take.as_ref().map(|data| data.effective_length_sec()),
+            midi_take_note_data: if include_midi {
+                take.midi_take.as_ref().map(|data| data.notes.clone())
+            } else {
+                None
+            },
+            midi_preview_enabled: take.midi_take.as_ref().map(|data| data.preview.enabled),
+            midi_preview_gain_db: take.midi_take.as_ref().map(|data| data.preview.gain_db),
             // 音节区间是参数块的前端输入，不是 MIDI 内容。它必须在 lite
             // 轮询里照常下发，否则插件/App 的常规刷新会把刚写回的缓存
             // 当成“尚未分析”，触发无限重分析（编辑器表现为卡死）。
@@ -244,6 +269,18 @@ pub struct TimelineClip {
     pub midi_note_data: Option<Vec<MidiNoteEvent>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub midi_fill_gaps: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub midi_role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub midi_take_note_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub midi_take_length_sec: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub midi_take_note_data: Option<Vec<MidiNoteEvent>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub midi_preview_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub midi_preview_gain_db: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize)]

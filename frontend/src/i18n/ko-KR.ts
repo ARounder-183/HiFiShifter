@@ -1318,6 +1318,11 @@ export const koKR = {
     midi_clipboard_read_failed: "클립보드에서 MIDI를 읽지 못했습니다",
 
     // MIDI 가져오기 대상 선택
+    ctx_midi_preview_on: "MIDI 미리 듣기 켜기",
+    ctx_midi_preview_off: "MIDI 미리 듣기 끄기",
+    ctx_midi_as_pitch_ref: "음높이 참조로 사용",
+    ctx_midi_clear_pitch_ref: "음높이 참조 해제",
+    midi_import_target_midi_take: "MIDI 테이크",
     midi_import_target: "가져오기 대상",
     midi_import_target_pitch_block: "음높이 참조 블록",
     midi_import_target_pitch_param: "음높이 파라미터",

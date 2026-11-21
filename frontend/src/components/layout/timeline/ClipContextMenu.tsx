@@ -19,6 +19,8 @@ import {
     canReverseHostClips,
     canBridgeHostTakePitch,
     canExportAudio,
+    canWriteHostMidi,
+    canReadHostMidi,
 } from "../../../services/hostCapabilities";
 import { FadeShapeIcon } from "./FadeShapeIcon";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
@@ -47,8 +49,12 @@ import {
     nextChannelMode,
 } from "../../../utils/channelMode";
 import { webApi } from "../../../services/webviewApi";
+import { paramsApi } from "../../../services/api/params";
+import { fetchTimeline } from "../../../features/session/thunks/transportThunks";
 import {
     buildClipMenuModel,
+    isMidiTakeClip,
+    isPitchClip,
     type ClipMenuEntry,
     type ClipMenuFadeRow,
     type ClipMenuTakeRow,
@@ -325,8 +331,10 @@ export const ClipContextMenu: React.FC<{
     const allReversed = isMulti ? selectedClips.every((c) => c.reversed) : clip.reversed;
     const allLooped = isMulti ? selectedClips.every((c) => c.loopEnabled) : clip.loopEnabled;
 
-    const audioOnlyIds = selectedClips.filter((c) => c.midiNoteCount == null).map((c) => c.id);
-    const pitchOnlyIds = selectedClips.filter((c) => c.midiNoteCount != null).map((c) => c.id);
+    const audioOnlyIds = selectedClips
+        .filter((c) => !isPitchClip(c) && !isMidiTakeClip(c))
+        .map((c) => c.id);
+    const pitchOnlyIds = selectedClips.filter(isPitchClip).map((c) => c.id);
     const anyPitch = pitchOnlyIds.length > 0;
 
     // 菜单项右侧的快捷键提示：从快捷键注册表读取当前生效的绑定
@@ -398,6 +406,7 @@ export const ClipContextMenu: React.FC<{
                 canBridgeHostTakePitch() &&
                 (onImportHostPitch != null || onExportHostPitch != null),
             midiAsClip: canImportMidiAsClip(),
+            midiWrite: canWriteHostMidi(),
             fadeShape: canEditFadeShape(),
         },
         available: {
@@ -407,6 +416,8 @@ export const ClipContextMenu: React.FC<{
             convertToPitchRef: onConvertToPitchRef != null,
             updatePitchRef: onUpdatePitchRef != null,
             exportMidi: onExportMidi != null,
+            midiTake: !pluginMode || canWriteHostMidi(),
+            midiPreview: !pluginMode || canReadHostMidi(),
             addToParamSelection: onAddToParamSelection != null,
             silenceDetection: onSilenceDetection != null,
             scanFakeStereo: onScanFakeStereo != null,
@@ -491,6 +502,31 @@ export const ClipContextMenu: React.FC<{
         },
         "pitch-reference-update": () => {
             if (pitchOnlyIds.length > 0) onUpdatePitchRef?.(pitchOnlyIds);
+        },
+        "midi-preview": () => {
+            const active =
+                clip.takes?.find((take) => take.id === clip.activeTakeId) ?? clip.takes?.[0];
+            void paramsApi
+                .setMidiPreview(
+                    clip.id,
+                    active?.id ?? null,
+                    clip.midiPreviewEnabled === false,
+                )
+                .then(() => void dispatch(fetchTimeline()));
+        },
+        "midi-as-pitch-ref": () => {
+            const active =
+                clip.takes?.find((take) => take.id === clip.activeTakeId) ?? clip.takes?.[0];
+            void paramsApi
+                .setMidiTakeRole(clip.id, active?.id ?? null, "pitch_reference")
+                .then(() => void dispatch(fetchTimeline()));
+        },
+        "midi-clear-pitch-ref": () => {
+            const active =
+                clip.takes?.find((take) => take.id === clip.activeTakeId) ?? clip.takes?.[0];
+            void paramsApi
+                .setMidiTakeRole(clip.id, active?.id ?? null, "midi_take")
+                .then(() => void dispatch(fetchTimeline()));
         },
         "quick-export": () => onQuickExport(anyPitch ? audioOnlyIds : ids),
         "export-midi": () => onExportMidi?.(ids),

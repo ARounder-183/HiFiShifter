@@ -1264,6 +1264,11 @@ export const jaJP = {
     midi_clipboard_read_failed: "クリップボードから MIDI を読み取れませんでした",
 
     // MIDI インポート対象選択
+    ctx_midi_preview_on: "MIDI 試聴をオン",
+    ctx_midi_preview_off: "MIDI 試聴をオフ",
+    ctx_midi_as_pitch_ref: "音高リファレンスとして使用",
+    ctx_midi_clear_pitch_ref: "音高リファレンスを解除",
+    midi_import_target_midi_take: "MIDI テイク",
     midi_import_target: "インポート対象",
     midi_import_target_pitch_block: "音高リファレンスブロック",
     midi_import_target_pitch_param: "音高パラメータ",

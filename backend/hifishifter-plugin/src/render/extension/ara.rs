@@ -720,6 +720,11 @@ impl ExtensionOwner {
                 input,
             )
         };
+        if let Some(timeline) = input.timeline.as_ref() {
+            self.midi_preview.store(std::sync::Arc::new(
+                hifishifter_kernel::midi_preview::MidiPreviewSchedule::from_timeline(timeline),
+            ));
+        }
         for publisher in &self.snapshots {
             publisher.collect_retired();
         }

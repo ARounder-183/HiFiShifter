@@ -132,6 +132,8 @@ export function resolveLoopMediaDurationSec(args: {
 export function resolveClipContentDurationSec(clip: {
     sourcePath?: string | null;
     midiNoteData?: ReadonlyArray<{ endSec: number }> | null;
+    midiTakeNoteData?: ReadonlyArray<{ endSec: number }> | null;
+    midiTakeLengthSec?: number | null;
     durationFrames?: number | null;
     sourceSampleRate?: number | null;
     durationSec?: number | null;
@@ -154,7 +156,10 @@ export function resolveClipContentDurationSec(clip: {
         durationSec: clip.durationSec,
     });
     if (metadataDur > 1e-9) return metadataDur;
-    const notes = clip.midiNoteData;
+    if (Number.isFinite(Number(clip.midiTakeLengthSec)) && Number(clip.midiTakeLengthSec) > 1e-9) {
+        return Number(clip.midiTakeLengthSec);
+    }
+    const notes = clip.midiTakeNoteData ?? clip.midiNoteData;
     if (notes && notes.length > 0) {
         let maxEnd = 0;
         for (const n of notes) {

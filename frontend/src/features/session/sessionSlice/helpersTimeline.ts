@@ -154,6 +154,26 @@ export function applyTimelineState(
                 }),
             ),
             midiFillGaps: clip.midi_fill_gaps ?? false,
+            midiTakeNoteData: clip.midi_take_note_data?.map(
+                (n: {
+                    start_sec: number;
+                    end_sec: number;
+                    note: number;
+                    velocity: number;
+                    channel?: number;
+                }) => ({
+                    startSec: n.start_sec,
+                    endSec: n.end_sec,
+                    note: n.note,
+                    velocity: n.velocity,
+                    channel: n.channel ?? 0,
+                }),
+            ),
+            midiTakeNoteCount: clip.midi_take_note_count,
+            midiTakeLengthSec: clip.midi_take_length_sec,
+            midiRole: clip.midi_role,
+            midiPreviewEnabled: clip.midi_preview_enabled,
+            midiPreviewGainDb: clip.midi_preview_gain_db,
             syllableSpansSec: activeTake?.syllable_spans_sec?.map(([startSec, endSec], index) => ({
                 startSec,
                 endSec,

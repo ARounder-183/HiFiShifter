@@ -79,8 +79,8 @@ pub fn layout_key(timeline: &TimelineState, root_track_id: &str, frame_period_ms
                 hasher.update(&span.midi_note.unwrap_or(f32::NAN).to_le_bytes());
             }
         }
-        if let Some(notes) = &take.midi_note_data {
-            for note in notes {
+        if let Some(notes) = take.pitch_reference_notes() {
+            for note in &notes {
                 hasher.update(&note.start_sec.to_le_bytes());
                 hasher.update(&note.end_sec.to_le_bytes());
                 hasher.update(&note.note.to_le_bytes());

@@ -78,7 +78,7 @@ fn source_note_for_member(timeline: &TimelineState, member: &ProjectedMember) ->
         }
     }
     if spans.is_empty() {
-        if let Some(notes) = &take.midi_note_data {
+        if let Some(notes) = take.pitch_reference_notes() {
             spans.extend(
                 notes
                     .iter()

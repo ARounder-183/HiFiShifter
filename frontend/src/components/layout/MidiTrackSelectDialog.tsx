@@ -15,6 +15,15 @@ interface MidiTrackInfo {
     note_count: number;
     min_note: number;
     max_note: number;
+    channel_mask?: number;
+    has_pitch_bend?: boolean;
+    has_cc?: boolean;
+    has_sysex?: boolean;
+    program?: number | null;
+    length_sec?: number;
+    tempo_event_count?: number;
+    time_signature_count?: number;
+    key_signature_count?: number;
 }
 
 interface MidiTrackSelectDialogProps {
@@ -47,9 +56,10 @@ interface MidiTrackSelectDialogProps {
         importTempo?: boolean;
         importTimeSignature?: boolean;
         importKeySignature?: boolean;
+        midiRole?: "midi_take" | "pitch_reference";
     }) => void;
     /** 默认导入目标（弹窗首次打开时的选中项） */
-    defaultImportTarget?: "pitchRef" | "pitchParam";
+    defaultImportTarget?: "pitchRef" | "pitchParam" | "midiTake";
     /** 持久化的导入目标值（优先于 defaultImportTarget） */
     importTarget?: string;
     /** 导入目标变更回调（用于持久化） */
@@ -169,9 +179,11 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
         : tf("midi_import_clip_plugin_unavailable");
     const resolveImportTarget = () =>
         clipTargetAvailable
-            ? ((importTarget as "pitchRef" | "pitchParam") ?? defaultImportTarget ?? "pitchParam")
+            ? ((importTarget as "pitchRef" | "pitchParam" | "midiTake") ??
+                  defaultImportTarget ??
+                  "midiTake")
             : "pitchParam";
-    const [currentTarget, setCurrentTarget] = useState<"pitchRef" | "pitchParam">(
+    const [currentTarget, setCurrentTarget] = useState<"pitchRef" | "pitchParam" | "midiTake">(
         resolveImportTarget(),
     );
     // 弹窗重新打开时重置目标
@@ -466,6 +478,12 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                     importKeySignature: tempoMapImportEnabled
                         ? importTempoMapKeySignature
                         : undefined,
+                    midiRole:
+                        currentTarget === "midiTake"
+                            ? "midi_take"
+                            : currentTarget === "pitchRef"
+                              ? "pitch_reference"
+                              : undefined,
                 });
                 onOpenChange(false);
                 return;
@@ -692,12 +710,18 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                         <RadioGroup.Root
                             value={currentTarget}
                             onValueChange={(v) => {
-                                const target = v as "pitchRef" | "pitchParam";
+                                const target = v as "pitchRef" | "pitchParam" | "midiTake";
                                 setCurrentTarget(target);
                                 onImportTargetChange?.(v);
                             }}
                         >
-                            <Flex gap="3">
+                            <Flex gap="3" wrap="wrap">
+                                <label className="flex items-center gap-1 cursor-pointer">
+                                    <RadioGroup.Item value="midiTake" disabled={!clipTargetAvailable} />
+                                    <span className="hs-type-label" style={clipTargetAvailable ? undefined : { opacity: 0.5 }}>
+                                        {tf("midi_import_target_midi_take")}
+                                    </span>
+                                </label>
                                 <label className="flex items-center gap-1 cursor-pointer">
                                     <RadioGroup.Item value="pitchParam" />
                                     <span className="hs-type-label">

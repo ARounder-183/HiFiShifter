@@ -2840,7 +2840,8 @@ mod tests {
                 formant_morph: None,
                 midi_note_data: None,
                 midi_fill_gaps: false,
-            };
+            midi_take: None,
+        };
             tl.clips.push(clip);
             tl.normalize_clip_takes();
             tl
@@ -2978,7 +2979,8 @@ mod tests {
                 formant_morph: None,
                 midi_note_data: None,
                 midi_fill_gaps: false,
-            };
+            midi_take: None,
+        };
             tl.clips.push(clip);
             tl.normalize_clip_takes();
             tl
@@ -3101,7 +3103,8 @@ mod tests {
                 formant_morph: None,
                 midi_note_data: None,
                 midi_fill_gaps: false,
-            };
+            midi_take: None,
+        };
             tl.clips.push(clip);
         }
         tl.normalize_clip_takes();
@@ -3244,6 +3247,7 @@ mod tests {
             formant_morph: None,
             midi_note_data: None,
             midi_fill_gaps: false,
+            midi_take: None,
         };
         tl.clips.push(clip);
         tl.normalize_clip_takes();

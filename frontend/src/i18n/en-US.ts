@@ -1389,6 +1389,11 @@ export const enUS = {
     midi_clipboard_read_failed: "Failed to read MIDI from clipboard",
 
     // MIDI import target selector
+    ctx_midi_preview_on: "Enable MIDI preview",
+    ctx_midi_preview_off: "Mute MIDI preview",
+    ctx_midi_as_pitch_ref: "Use as pitch reference",
+    ctx_midi_clear_pitch_ref: "Stop using as pitch reference",
+    midi_import_target_midi_take: "MIDI Take",
     midi_import_target: "Import Target",
     midi_import_target_pitch_block: "Pitch Reference Block",
     midi_import_target_pitch_param: "Pitch Parameter",

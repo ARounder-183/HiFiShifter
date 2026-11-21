@@ -1257,6 +1257,7 @@ export const importMidiAsClip = createAsyncThunk(
             importTempo?: boolean;
             importTimeSignature?: boolean;
             importKeySignature?: boolean;
+            midiRole?: "midi_take" | "pitch_reference";
         },
         { dispatch, rejectWithValue, getState },
     ) => {
@@ -1295,23 +1296,37 @@ export const importMidiAsClip = createAsyncThunk(
                 return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
             }
 
-            const imported = await webApi.importMidiAsClip(
-                payload.midiPath,
-                payload.trackIndices,
-                targetTrackId,
-                payload.startSec ?? 0,
-                payload.fillGaps,
-                payload.multiTrackMerge,
-                payload.noteBpmMode,
-                payload.specifiedBpm,
-                payload.importBpmAsProject,
-                payload.clipboardGuid,
-                payload.closeLeadingGap,
-                payload.importAsTempoMap,
-                payload.importTempo,
-                payload.importTimeSignature,
-                payload.importKeySignature,
-            );
+            const imported = payload.midiRole
+                ? await webApi.importMidiAsTake(
+                      payload.midiPath,
+                      payload.trackIndices,
+                      targetTrackId,
+                      payload.startSec ?? 0,
+                      payload.multiTrackMerge,
+                      payload.noteBpmMode,
+                      payload.specifiedBpm,
+                      payload.importBpmAsProject,
+                      payload.clipboardGuid,
+                      payload.closeLeadingGap,
+                      payload.midiRole,
+                  )
+                : await webApi.importMidiAsClip(
+                      payload.midiPath,
+                      payload.trackIndices,
+                      targetTrackId,
+                      payload.startSec ?? 0,
+                      payload.fillGaps,
+                      payload.multiTrackMerge,
+                      payload.noteBpmMode,
+                      payload.specifiedBpm,
+                      payload.importBpmAsProject,
+                      payload.clipboardGuid,
+                      payload.closeLeadingGap,
+                      payload.importAsTempoMap,
+                      payload.importTempo,
+                      payload.importTimeSignature,
+                      payload.importKeySignature,
+                  );
             if (isImportCancelled(importGen)) {
                 return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
             }

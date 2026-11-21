@@ -132,10 +132,7 @@ fn take_media_duration(take: &ClipTake) -> Option<f64> {
     if let Some(duration) = take.duration_sec.filter(|d| d.is_finite() && *d > 0.0) {
         return Some(duration);
     }
-    take.midi_note_data
-        .as_ref()
-        .map(|notes| notes.iter().map(|note| note.end_sec).fold(0.0f64, f64::max))
-        .filter(|end| end.is_finite() && *end > 0.0)
+    take.midi_content_length_sec()
 }
 
 impl ClipProjection {
@@ -799,7 +796,8 @@ mod tests {
         let mut clip: Clip = serde_json::from_value(json).unwrap();
         clip.normalize_takes();
         clip
-    }
+
+}
 
     fn span(start: f64, end: f64) -> TakeSpan {
         TakeSpan {

@@ -517,6 +517,26 @@ impl NativeHost {
     }
 }
 impl HostTrackTarget {
+    /// 在已验证归属的宿主轨道上新建 MIDI item。目标轨道身份沿用现有
+    /// HostTrackTarget 租约；不接收 JS 地址，也不按轨名猜。
+    pub(crate) fn create_midi_item(
+        &self,
+        start_sec: f64,
+        length_sec: f64,
+        data: &hifishifter_kernel::midi_take::MidiTakeData,
+        name: &str,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<String, String> {
+        self.host.create_midi_item(
+            self.track as *mut c_void,
+            start_sec,
+            length_sec,
+            data,
+            name,
+            authorized,
+        )
+    }
+
     /// 本轨道的 `I_FOLDERDEPTH`（`>= 1` 即 folder 父轨）。
     ///
     /// 读不出来时返回 `Err`，调用方据此保持"不知道" —— **不得**把它当作 `0`：

@@ -542,7 +542,7 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
         let midi_root_tracks: Vec<String> = tl
             .clips
             .iter()
-            .filter(|c| c.midi_note_data.is_some())
+            .filter(|c| c.is_pitch_reference())
             .filter_map(|c| tl.resolve_root_track_id(&c.track_id))
             .collect::<std::collections::HashSet<_>>()
             .into_iter()

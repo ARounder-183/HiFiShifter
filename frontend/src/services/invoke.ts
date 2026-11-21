@@ -889,6 +889,54 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 ...(args[14] !== undefined ? { importMidiKeySignature: args[14] } : {}),
             };
 
+        case "import_midi_as_take":
+            return {
+                midiPath: args[0],
+                ...(args[1] !== undefined ? { trackIndices: args[1] } : {}),
+                ...(args[2] !== undefined ? { trackId: args[2] } : {}),
+                ...(args[3] !== undefined ? { startSec: args[3] } : {}),
+                ...(args[4] !== undefined ? { multiTrackMerge: args[4] } : {}),
+                ...(args[5] !== undefined ? { noteBpmMode: args[5] } : {}),
+                ...(args[6] !== undefined ? { specifiedBpm: args[6] } : {}),
+                ...(args[7] !== undefined ? { importMidiBpmAsProject: args[7] } : {}),
+                ...(args[8] != null ? { clipboardGuid: args[8] } : {}),
+                ...(args[9] !== undefined ? { closeLeadingGap: args[9] } : {}),
+                ...(args[10] !== undefined ? { midiRole: args[10] } : {}),
+            };
+
+        case "import_midi_as_host_take":
+            return {
+                midiPath: args[0],
+                ...(args[1] !== undefined ? { trackIndices: args[1] } : {}),
+                ...(args[2] !== undefined ? { trackId: args[2] } : {}),
+                ...(args[3] !== undefined ? { startSec: args[3] } : {}),
+                ...(args[4] !== undefined ? { multiTrackMerge: args[4] } : {}),
+                ...(args[5] !== undefined ? { noteBpmMode: args[5] } : {}),
+                ...(args[6] !== undefined ? { specifiedBpm: args[6] } : {}),
+                ...(args[7] !== undefined ? { importMidiBpmAsProject: args[7] } : {}),
+                ...(args[8] != null ? { clipboardGuid: args[8] } : {}),
+                ...(args[9] !== undefined ? { closeLeadingGap: args[9] } : {}),
+                ...(args[10] !== undefined ? { midiRole: args[10] } : {}),
+            };
+
+        case "set_midi_take_role":
+            return {
+                clipId: args[0],
+                takeId: args[1] ?? null,
+                role: args[2],
+            };
+
+        case "set_midi_preview":
+            return {
+                clipId: args[0],
+                takeId: args[1] ?? null,
+                enabled: args[2],
+                ...(args[3] !== undefined ? { gainDb: args[3] } : {}),
+            };
+
+        case "export_midi_take":
+            return { clipId: args[0], outputPath: args[1] };
+
         case "set_timeline_tempo_map":
             return { tempoMap: args[0] };
 

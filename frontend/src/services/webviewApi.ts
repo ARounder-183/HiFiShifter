@@ -101,6 +101,8 @@ export const webApi = {
     importAudioItem: timelineApi.importAudioItem,
     importAudioBytes: timelineApi.importAudioBytes,
     importMidiAsClip: paramsApi.importMidiAsClip,
+    importMidiAsTake: paramsApi.importMidiAsTake,
+    importMidiAsHostTake: paramsApi.importMidiAsHostTake,
     replaceMidiClipData: paramsApi.replaceMidiClipData,
     getMidiTracks: paramsApi.getMidiTracks,
     readMidiClipboardToMemory: paramsApi.readMidiClipboardToMemory,

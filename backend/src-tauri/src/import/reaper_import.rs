@@ -415,7 +415,9 @@ fn build_audio_clip_take(
         game_block_baseline: None,
         stretch_markers: Vec::new(),
         envelopes: None,
-    }
+
+        midi_take: None,
+}
 }
 
 pub struct ReaperImportResult {
@@ -1510,6 +1512,7 @@ fn process_item(
                 formant_morph: None,
                 midi_note_data: None,
                 midi_fill_gaps: false,
+                midi_take: None,
             });
             if let Some(gid) = item.group_id {
                 reaper_group_map.entry(gid).or_default().push(clip_id);
@@ -1707,7 +1710,9 @@ fn process_item(
             formant_morph: None,
             midi_note_data: None,
             midi_fill_gaps: false,
-        };
+
+            midi_take: None,
+};
         // active take 的投影以现有计算（含零窗口兜底）为准写回。
         clip.sync_take_from_flat();
         clips.push(clip);
@@ -2155,7 +2160,9 @@ fn reaper_midi_events_to_notes(
                             note: note as f32,
                             velocity: start_vel,
                             channel,
-                        });
+                                                muted: false,
+                        release_velocity: 0,
+});
                     }
                 } else {
                     // Note On: 如果已有同键活跃音符则先关闭
@@ -2168,7 +2175,9 @@ fn reaper_midi_events_to_notes(
                             note: note as f32,
                             velocity: start_vel,
                             channel,
-                        });
+                                                muted: false,
+                        release_velocity: 0,
+});
                     }
                     active.insert(key, (cumulative_ticks, velocity));
                 }
@@ -2186,7 +2195,9 @@ fn reaper_midi_events_to_notes(
                         note: note as f32,
                         velocity: start_vel,
                         channel,
-                    });
+                                        muted: false,
+                    release_velocity: 0,
+});
                 }
             }
             _ => {
@@ -2211,7 +2222,9 @@ fn reaper_midi_events_to_notes(
             note: note as f32,
             velocity,
             channel,
-        });
+                muted: false,
+        release_velocity: 0,
+});
     }
 
     notes.sort_by(|a, b| {
@@ -2360,9 +2373,14 @@ fn process_midi_item(
         extra_curves: None,
         extra_params: None,
         formant_morph: None,
+        midi_take: Some(hifishifter_kernel::midi_take::MidiTakeData::from_legacy_notes(
+            notes.clone(),
+            false,
+            "MIDI".to_string(),
+        )),
         midi_note_data: Some(notes),
         midi_fill_gaps: false,
-    });
+});
 
     if let Some(gid) = item.group_id {
         reaper_group_map.entry(gid).or_default().push(clip_id);

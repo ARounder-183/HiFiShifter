@@ -10,6 +10,8 @@ pub(crate) use item_chunk::RewrittenItem;
 mod write;
 pub(crate) use write::{HostClipTarget, HostUndoBlock};
 mod media;
+mod midi;
+pub(crate) use midi::MidiTakeSnapshot;
 pub(crate) use media::HostTrackTarget;
 mod ui_inventory;
 pub(crate) use ui_inventory::{UiItem, UiTrack};
@@ -179,6 +181,8 @@ pub(crate) struct NativeHost {
     history: Option<write::HistoryApi>,
     media: Option<media::MediaApi>,
     extended_media: Option<media::ExtendedMedia>,
+    /// REAPER 原生 MIDI 读写束。缺省时 MIDI 入口整体不可用（ARA-only 语义）。
+    midi: Option<midi::MidiApi>,
     validate: Option<Validate>,
     fade_axes_v2: Option<bool>,
     /// 宿主原始版本串（`GetAppVersion`，如 `"7.81/x64"`）；读不出来时为 `None`。
@@ -385,6 +389,9 @@ impl NativeHost {
             // 导出与宿主无关：两条后端都只读授权 PCM 再写用户选定的文件。
             export_audio: true,
             export_data: true,
+            midi_read: self.can_read_midi(),
+            midi_create: self.can_create_midi() && !take_fx,
+            midi_write: self.can_write_midi() && !take_fx,
             // 【为什么恒为 false】REAPER 走的是原生扩展 + ARA，素材由 ARA 逐个 region
             // 授权。Capture 是"宿主不给片段几何时"的替代通路，两者不会同时成立；
             // 声明 true 会让前端在 REAPER 上也露出录制入口，而它录进来的东西
@@ -637,6 +644,34 @@ impl NativeHost {
                 at,
                 direction: take_direction,
             });
+        // MIDI 读能力的最小束：缺任一必需函数就整体为 None，前端据此置灰，
+        // 而不是在用户点击后才撞一条半途失败。
+        let midi = match (
+            lookup!(c"TakeIsMIDI", midi::TakeIsMidi),
+            lookup!(c"MIDI_CountEvts", midi::MidiCountEvts),
+            lookup!(c"MIDI_GetNote", midi::MidiGetNote),
+            lookup!(c"MIDI_GetAllEvts", midi::MidiGetAllEvts),
+            lookup!(c"MIDI_GetProjTimeFromPPQPos", midi::MidiProjTimeFromPpq),
+            lookup!(c"GetActiveTake", midi::ActiveTake),
+        ) {
+            (Some(take_is_midi), Some(count), Some(get_note), Some(get_all), Some(proj_time), active_take) => {
+                Some(midi::MidiApi {
+                    active_take,
+                    take_is_midi,
+                    count,
+                    get_note,
+                    get_all,
+                    set_all: lookup!(c"MIDI_SetAllEvts", midi::MidiSetAllEvts),
+                    hash: lookup!(c"MIDI_GetHash", midi::MidiGetHash),
+                    proj_time_from_ppq: proj_time,
+                    ppq_from_proj_time: lookup!(c"MIDI_GetPPQPosFromProjTime", midi::MidiPpqFromProjTime),
+                    sort: lookup!(c"MIDI_Sort", midi::MidiSort),
+                    create_item: lookup!(c"CreateNewMIDIItemInProj", midi::CreateMidiItem),
+                    track_fx_instrument: lookup!(c"TrackFX_GetInstrument", midi::TrackFxInstrument),
+                })
+            }
+            _ => None,
+        };
         let tracks = match (
             lookup!(c"InsertTrackInProject", media::InsertTrack),
             lookup!(c"CountTracks", media::CountTracks),
@@ -913,6 +948,7 @@ impl NativeHost {
             history,
             media,
             extended_media,
+            midi,
             validate,
             fade_axes_v2,
             app_version,

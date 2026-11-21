@@ -158,8 +158,8 @@ pub fn build_root_pitch_key(tl: &TimelineState, root_track_id: &str) -> String {
         hasher.update(&quantize_u32(clip.source_end_sec, 1000.0).to_le_bytes());
         hasher.update(&[u8::from(clip.loop_enabled)]);
         hasher.update(&[u8::from(clip.reversed)]);
-        if let Some(notes) = clip.midi_note_data.as_ref() {
-            for note in notes {
+        if let Some(notes) = clip.pitch_reference_notes() {
+            for note in &notes {
                 hasher.update(&quantize_u32(note.start_sec, 1000.0).to_le_bytes());
                 hasher.update(&quantize_u32(note.end_sec, 1000.0).to_le_bytes());
                 hasher.update(&quantize_i64(note.note as f64, 10000.0).to_le_bytes());

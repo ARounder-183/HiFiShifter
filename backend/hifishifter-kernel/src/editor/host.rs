@@ -113,6 +113,12 @@ pub struct HostCapabilities {
     /// 在 Capture 后端上它可能是 `false` —— 宿主从不提供 `ProcessContext`（拿不到工程
     /// 位置）时录制无法工作，前端要据此**禁用按钮并说明原因**，而不是让用户对着一个
     /// 点得动、永远不进度的控件。
+    /// 宿主允许枚举 / 读取 item 上的 MIDI take。
+    pub midi_read: bool,
+    /// 宿主允许创建 MIDI item。
+    pub midi_create: bool,
+    /// 宿主允许写回已有 MIDI take。
+    pub midi_write: bool,
     pub capture: bool,
 }
 
@@ -133,6 +139,9 @@ impl HostCapabilities {
             export_data: false,
             clip_reverse: false,
             take_pitch_bridge: false,
+            midi_read: false,
+            midi_create: false,
+            midi_write: false,
             capture: false,
         }
     }
@@ -161,6 +170,9 @@ impl HostCapabilities {
             export_data: true,
             clip_reverse: false,
             take_pitch_bridge: false,
+            midi_read: false,
+            midi_create: false,
+            midi_write: false,
             capture: false,
         }
     }
@@ -197,6 +209,9 @@ impl HostCapabilities {
             export_data: true,
             clip_reverse: false,
             take_pitch_bridge: false,
+            midi_read: false,
+            midi_create: false,
+            midi_write: false,
             capture: true,
         }
     }

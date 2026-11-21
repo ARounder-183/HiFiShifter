@@ -237,6 +237,7 @@ mod tests {
             group_id: None,
             midi_fill_gaps: false,
             midi_note_data: None,
+            midi_take: None,
         }
     }
 

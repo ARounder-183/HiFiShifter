@@ -1219,6 +1219,11 @@ export const zhTW = {
     midi_clipboard_read_failed: "從剪貼簿讀取 MIDI 失敗",
 
     // MIDI 匯入目標選擇
+    ctx_midi_preview_on: "開啟 MIDI 試聽",
+    ctx_midi_preview_off: "關閉 MIDI 試聽",
+    ctx_midi_as_pitch_ref: "作為音高參考",
+    ctx_midi_clear_pitch_ref: "取消音高參考",
+    midi_import_target_midi_take: "MIDI 片段",
     midi_import_target: "匯入目標",
     midi_import_target_pitch_block: "音高參考塊",
     midi_import_target_pitch_param: "音高參數",

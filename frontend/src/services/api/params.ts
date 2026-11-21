@@ -305,6 +305,62 @@ export const paramsApi = {
             importMidiKeySignature,
         ),
 
+    importMidiAsTake: (
+        midiPath: string,
+        trackIndices: number[],
+        trackId?: string,
+        startSec?: number,
+        multiTrackMerge?: boolean,
+        noteBpmMode?: string,
+        specifiedBpm?: number,
+        importMidiBpmAsProject?: boolean,
+        clipboardGuid?: string,
+        closeLeadingGap?: boolean,
+        midiRole?: "midi_take" | "pitch_reference",
+    ) =>
+        invoke<TimelineResult & { ok: boolean; error?: string }>(
+            "import_midi_as_take",
+            midiPath,
+            trackIndices,
+            trackId,
+            startSec,
+            multiTrackMerge,
+            noteBpmMode,
+            specifiedBpm,
+            importMidiBpmAsProject,
+            clipboardGuid ?? null,
+            closeLeadingGap,
+            midiRole,
+        ),
+
+    importMidiAsHostTake: (
+        midiPath: string,
+        trackIndices: number[],
+        trackId?: string,
+        startSec?: number,
+        multiTrackMerge?: boolean,
+        noteBpmMode?: string,
+        specifiedBpm?: number,
+        importMidiBpmAsProject?: boolean,
+        clipboardGuid?: string,
+        closeLeadingGap?: boolean,
+        midiRole?: "midi_take" | "pitch_reference",
+    ) =>
+        invoke<TimelineResult & { ok: boolean; error?: string }>(
+            "import_midi_as_host_take",
+            midiPath,
+            trackIndices,
+            trackId,
+            startSec,
+            multiTrackMerge,
+            noteBpmMode,
+            specifiedBpm,
+            importMidiBpmAsProject,
+            clipboardGuid ?? null,
+            closeLeadingGap,
+            midiRole,
+        ),
+
     replaceMidiClipData: (
         clipId: string,
         midiPath: string,
@@ -327,6 +383,35 @@ export const paramsApi = {
             importMidiBpmAsProject,
             clipboardGuid ?? null,
             closeLeadingGap,
+        ),
+
+    setMidiTakeRole: (clipId: string, takeId: string | null, role: "midi_take" | "pitch_reference") =>
+        invoke<TimelineResult & { ok: boolean; error?: string }>(
+            "set_midi_take_role",
+            clipId,
+            takeId,
+            role,
+        ),
+
+    setMidiPreview: (
+        clipId: string,
+        takeId: string | null,
+        enabled: boolean,
+        gainDb?: number,
+    ) =>
+        invoke<TimelineResult & { ok: boolean; error?: string }>(
+            "set_midi_preview",
+            clipId,
+            takeId,
+            enabled,
+            gainDb,
+        ),
+
+    exportMidiTake: (clipId: string, outputPath: string) =>
+        invoke<{ ok: boolean; error?: string; path?: string }>(
+            "export_midi_take",
+            clipId,
+            outputPath,
         ),
 
     exportPitchToMidi: (request: {

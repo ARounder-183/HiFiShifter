@@ -196,7 +196,7 @@ pub(crate) fn item_row_from_host(
 ) -> hifishifter_kernel::editor::assembly::ItemRow {
     use hifishifter_kernel::editor::assembly::{ItemRow, TakeRow};
     use hifishifter_kernel::take_geometry::TakeGeometry;
-    let take_of = |geometry: &HostClipGeometry, name: &str, active: bool, reversed: bool| TakeRow {
+    let take_of = |geometry: &HostClipGeometry, name: &str, active: bool, reversed: bool, midi_take: Option<hifishifter_kernel::midi_take::MidiTakeData>| TakeRow {
         id: geometry.take_id.clone(),
         name: name.to_string(),
         active,
@@ -216,11 +216,20 @@ pub(crate) fn item_row_from_host(
             loop_enabled: geometry.loop_source,
         },
         channel_mode: geometry.channel_mode,
+        midi_take,
     };
     let mut takes: Vec<TakeRow> = item
         .takes
         .iter()
-        .map(|take| take_of(&take.geometry, &take.name, take.active, take.reversed))
+        .map(|take| {
+            take_of(
+                &take.geometry,
+                &take.name,
+                take.active,
+                take.reversed,
+                take.midi.as_ref().map(|snapshot| snapshot.data.clone()),
+            )
+        })
         .collect();
     // 【本实例绑定的那条 take 优先】轨道 FX 下 `bound_take` 是 `None`，行为与改动前
     // 完全一致（取宿主选中的 active take）。take FX 下它指向 `parent(2)` 那条 ——
@@ -239,6 +248,7 @@ pub(crate) fn item_row_from_host(
             &item.name,
             true,
             item.geometry.reversed,
+            None,
         ));
     }
     ItemRow {

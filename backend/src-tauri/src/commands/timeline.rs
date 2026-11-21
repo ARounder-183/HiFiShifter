@@ -1928,7 +1928,9 @@ pub(super) fn add_clip_take_from_media(
         game_block_baseline: None,
         stretch_markers: Vec::new(),
         envelopes: None,
-    };
+
+        midi_take: None,
+};
     crate::channel_policy::apply_resolution(&mut take, channel_decision);
     if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {
         clip.add_take(take);
@@ -2006,7 +2008,9 @@ pub(super) fn import_media_files_as_takes(
             game_block_baseline: None,
             stretch_markers: Vec::new(),
             envelopes: None,
-        };
+
+            midi_take: None,
+};
         // 声道判定不在本循环里逐条做：同一文件被多次拖入时那会把解码量按引用
         // 数放大，而这条路径用户正在等进度。改为下面的**分组一次性判定**。
         takes.push(take);
@@ -2114,7 +2118,9 @@ pub(super) fn import_media_files_as_takes(
         formant_morph: None,
         midi_note_data: None,
         midi_fill_gaps: false,
-    };
+
+        midi_take: None,
+};
     clip.normalize_takes();
     crate::state::TimelineState::populate_clip_file_metadata(&mut clip);
     tl.clips.push(clip);

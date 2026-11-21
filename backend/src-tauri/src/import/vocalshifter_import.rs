@@ -577,7 +577,9 @@ fn create_midi_clip_from_file(
         formant_morph: None,
         midi_note_data: Some(notes),
         midi_fill_gaps: false,
-    })
+
+        midi_take: None,
+})
 }
 
 /// 将 VocalShifter 音量倍率（1.0 = 0 dB）转换为 HiFiShifter 的 0.0–1.0 音量范围。
@@ -988,7 +990,9 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                     formant_morph: None,
                     midi_note_data: None,
                     midi_fill_gaps: false,
-                });
+
+                    midi_take: None,
+});
                 segment_clip_indices.push(clip_index);
                 segment_actual_pre_tl.push(actual_pre_tl);
                 segment_actual_post_tl.push(actual_post_tl);
@@ -1114,7 +1118,9 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                 formant_morph: None,
                 midi_note_data: None,
                 midi_fill_gaps: false,
-            });
+
+                midi_take: None,
+});
 
             // 写入 pitch 数据
             write_pitch_data_for_segment(
@@ -1779,7 +1785,9 @@ pub fn import_vsp_clipboard(
                     formant_morph: None,
                     midi_note_data: None,
                     midi_fill_gaps: false,
-                });
+
+                    midi_take: None,
+});
                 segment_clip_indices.push(clip_index);
                 segment_actual_pre_tl.push(actual_pre_tl);
                 segment_actual_post_tl.push(actual_post_tl);
@@ -1904,7 +1912,9 @@ pub fn import_vsp_clipboard(
                 formant_morph: None,
                 midi_note_data: None,
                 midi_fill_gaps: false,
-            });
+
+                midi_take: None,
+});
 
             write_pitch_data_for_segment(
                 &target_track_id,
@@ -2388,7 +2398,9 @@ fn import_vsp_clipboard_selected_tracks(
                     formant_morph: None,
                     midi_note_data: None,
                     midi_fill_gaps: false,
-                });
+
+                    midi_take: None,
+});
                 segment_clip_indices.push(clip_index);
                 segment_actual_pre_tl.push(actual_pre_tl);
                 segment_actual_post_tl.push(actual_post_tl);
@@ -2511,7 +2523,9 @@ fn import_vsp_clipboard_selected_tracks(
                 formant_morph: None,
                 midi_note_data: None,
                 midi_fill_gaps: false,
-            });
+
+                midi_take: None,
+});
 
             write_pitch_data_for_segment(
                 &track_id,

@@ -2280,8 +2280,8 @@ pub(crate) fn build_clip_pitch_data_payload(
         clip.playback_rate, root,
     );
 
-    // ── MIDI clip 路径：直接从 midi_note_data 生成音高曲线 ──
-    if let Some(ref notes) = clip.midi_note_data {
+    // ── 音高参考路径：普通 MIDI Take 不得覆盖原声 ──
+    if let Some(notes) = clip.pitch_reference_notes() {
         let fp = frame_period_ms.max(0.1);
         let clip_len_sec = clip.length_sec.max(0.0);
         let target_frames = ((clip_len_sec * 1000.0) / fp).round().max(1.0) as usize;
@@ -2312,7 +2312,7 @@ pub(crate) fn build_clip_pitch_data_payload(
 
         let clip_visible_frames = target_frames;
 
-        for note in notes {
+        for note in &notes {
             // Loop（循环源）：按媒体时长 D 的锚点回绕放置音符（与音频渲染的
             // floor_mod 映射逐帧一致；纯 MIDI clip 无媒体 → 周期退化为窗口
             // 跨度）。不能用窗口比较做可见性过滤 —— split 产生的"环绕窗口"
@@ -2519,6 +2519,7 @@ fn clip_pitch_data_needs_emit(old: Option<&crate::state::Clip>, new: &crate::sta
         || old.muted != new.muted
         || old.midi_note_data != new.midi_note_data
         || old.midi_fill_gaps != new.midi_fill_gaps
+        || old.midi_take != new.midi_take
         || old.source_path != new.source_path
         || old.source_file_mtime != new.source_file_mtime
         // 换 active take = 换内容（窗口与速率都可能跟着变）。
@@ -2592,7 +2593,9 @@ mod tests {
             group_id: None,
             midi_fill_gaps: false,
             midi_note_data: None,
-        });
+
+            midi_take: None,
+});
         timeline
     }
 
@@ -2719,6 +2722,7 @@ mod tests {
             duration_frames: 0,
             track_ids: Arc::new(vec![]),
             clips: Arc::new(vec![]),
+            midi_preview: Arc::new(hifishifter_kernel::midi_preview::MidiPreviewSchedule::default()),
         }));
         let is_playing = Arc::new(AtomicBool::new(false));
         let play_start_wait = Arc::new(AtomicBool::new(false));

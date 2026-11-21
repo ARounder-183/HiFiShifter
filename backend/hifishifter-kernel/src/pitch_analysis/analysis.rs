@@ -45,7 +45,7 @@ fn assembly_gate_open(tl: &TimelineState, root_track_id: &str) -> bool {
     let has_active_midi_clip = tl.clips.iter().any(|c| {
         tl.resolve_root_track_id(&c.track_id).as_deref() == Some(root_track_id)
             && !c.muted
-            && c.midi_note_data.is_some()
+            && c.is_pitch_reference()
     });
     if compose_enabled || has_active_midi_clip {
         return true;

@@ -255,6 +255,25 @@ impl ExtensionOwner {
         // 现在位置只有一个权威（`StreamGeometry` 的 R1–R4），跳变只可能发生在 pass
         // 边界，而 pass 边界本来就要重新开始；接缝去咔的一次交叉淡化就够。
         self.apply_output_declick(declick_stream, &mut block.output, block.frames);
+        // MIDI 试听只进入非 Offline 流：Prefetch 的输出稍后会被宿主播放，必须保留；
+        // Offline 是最终渲染，绝不允许参考音进入。
+        if !block.is_offline() {
+            let schedule = self.midi_preview.load();
+            if !schedule.is_empty() {
+                let left = block.output.pointer(0);
+                let right = block.output.pointer(1);
+                let pos0 = context.project_time_samples.max(0) as u64;
+                hifishifter_kernel::midi_preview::mix_into_planar(
+                    [left, right],
+                    block.frames,
+                    &schedule,
+                    pos0,
+                    pos0.saturating_add(block.frames as u64),
+                    output_rate.max(1.0) as u32,
+                );
+                block.output.set_silence_flags(0);
+            }
+        }
         if block.is_offline() && !ready {
             return RenderOutcome::NotReady;
         }

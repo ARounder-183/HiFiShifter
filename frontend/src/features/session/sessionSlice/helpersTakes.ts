@@ -62,6 +62,18 @@ export function parseTimelineClipTake(take: TimelineClipTake): ClipTakeInfo {
             channel: n.channel ?? 0,
         })),
         midiFillGaps: take.midi_fill_gaps ?? false,
+        midiTakeNoteData: take.midi_take_note_data?.map((n) => ({
+            startSec: n.start_sec,
+            endSec: n.end_sec,
+            note: n.note,
+            velocity: n.velocity,
+            channel: n.channel ?? 0,
+        })),
+        midiTakeNoteCount: take.midi_take_note_count,
+        midiTakeLengthSec: take.midi_take_length_sec,
+        midiRole: take.midi_role,
+        midiPreviewEnabled: take.midi_preview_enabled,
+        midiPreviewGainDb: take.midi_preview_gain_db,
         syllableSpansSec: take.syllable_spans_sec?.map(([startSec, endSec], index) => ({
             startSec,
             endSec,
@@ -272,6 +284,12 @@ export function applyActiveTakeToFlat(clip: ClipInfo, take: ClipTakeInfo): void 
     clip.midiNoteData = take.midiNoteData;
     clip.midiNoteCount = take.midiNoteData?.length;
     clip.midiFillGaps = take.midiFillGaps ?? false;
+    clip.midiTakeNoteData = take.midiTakeNoteData;
+    clip.midiTakeNoteCount = take.midiTakeNoteCount ?? take.midiTakeNoteData?.length;
+    clip.midiTakeLengthSec = take.midiTakeLengthSec;
+    clip.midiRole = take.midiRole;
+    clip.midiPreviewEnabled = take.midiPreviewEnabled;
+    clip.midiPreviewGainDb = take.midiPreviewGainDb;
     if (take.syllableSpansSec !== undefined) clip.syllableSpansSec = take.syllableSpansSec;
     if (take.syllableNotes !== undefined) clip.syllableNotes = take.syllableNotes;
     if (take.syllableEventIds !== undefined) clip.syllableEventIds = take.syllableEventIds;
@@ -361,6 +379,12 @@ export type TakeOptimisticFlat = Pick<
     | "midiNoteData"
     | "midiNoteCount"
     | "midiFillGaps"
+    | "midiTakeNoteData"
+    | "midiTakeNoteCount"
+    | "midiTakeLengthSec"
+    | "midiRole"
+    | "midiPreviewEnabled"
+    | "midiPreviewGainDb"
     | "syllableSpansSec"
 >;
 
@@ -399,6 +423,12 @@ export const TAKE_FLAT_KEYS = [
     "midiNoteData",
     "midiNoteCount",
     "midiFillGaps",
+    "midiTakeNoteData",
+    "midiTakeNoteCount",
+    "midiTakeLengthSec",
+    "midiRole",
+    "midiPreviewEnabled",
+    "midiPreviewGainDb",
     "syllableSpansSec",
 ] as const satisfies readonly (keyof TakeOptimisticFlat)[];
 
