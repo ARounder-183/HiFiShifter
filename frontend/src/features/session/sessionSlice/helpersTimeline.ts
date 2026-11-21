@@ -154,7 +154,7 @@ export function applyTimelineState(
                 }),
             ),
             midiFillGaps: clip.midi_fill_gaps ?? false,
-            midiTakeNoteData: clip.midi_take_note_data?.map(
+            midiTakeNoteData: (clip.midi_take_note_data ?? oldClipsById.get(clip.id)?.midiTakeNoteData)?.map(
                 (n: {
                     start_sec: number;
                     end_sec: number;
