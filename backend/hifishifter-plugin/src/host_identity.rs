@@ -179,6 +179,65 @@ pub fn is_vegas_family() -> bool {
     HOST_IS_VEGAS.load(std::sync::atomic::Ordering::Acquire)
 }
 
+/// VST3 组件是否对本宿主**隐藏** ARA 入口点（`IPlugInEntryPoint` / `IPlugInEntryPoint2`）。
+///
+/// 这是本模块第一个按宿主**分支**的决定，与模块头的「绝不按宿主名分支」并不矛盾：
+/// 那条纪律针对的是**编辑器能力**（没见过的宿主必须完整可用）；而这里 gate 的是
+/// **加载兼容性** —— 一旦被扫描器标成 ARA，这个家族的桥会拒绝加载模块本身，
+/// 插件在宿主里从「ARA 缺失」劣化成「完全不可用」。与 CLAP 侧拒绝 REAPER 的
+/// 私有 ARA 草案 ID（`docs/host-extension-boundary.md` §3.1）同类：宿主显然
+/// 处理不了我们按规范给出的东西，规范让位于「能加载」。
+///
+/// # 证据链（ACID Pro 11.0.2.21 x64，2026-11 现场排查，错误 0x8004E204）
+///
+/// 1. 扫描器按 ARA SDK 规范探测组件上的 `IPlugInEntryPoint`（12814E54-…）与
+///    `IPlugInEntryPoint2`（CD9A5913-…），命中后把插件标记为 ARA（家族插件缓存
+///    `acidpro_bridgeaware_plugincache_x64.xml` 记 `isAra="1"`）；
+/// 2. 把插件添加到轨道时，家族共用的 VST3 桥（`sfvstwrap.dll`，宿主进程内；错误码
+///    `0x8004E204` 的立即数只出现在 sfvstwrap/sfvstserver 一对二进制里）走 **ARA
+///    专用路径**：先打开名为 `plugin_finder_shared_memory` 的 boost::interprocess
+///    共享内存做校验 —— 该映射在 ACID Pro 11 里**不存在**（添加尝试前后与尝试期间
+///    共 1.8 秒 ~4878 万次 `OpenFileMappingW` 竞速捕获 0 次命中）；
+/// 3. 打开失败 ⇒ 立即返回 `0x8004E204`（弹窗文案「消息缺失」= 该错误码在消息表里
+///    没有条目的兜底格式），全程**不加载插件模块**：引擎日志零会话、shim 的
+///    OutputDebugString 零输出、也没有 sfvstserver 进程被拉起；
+/// 4. 与插件内容无关：把缓存记录的版本字段 0→1、二进制不动，错误原样复现；
+///    把缓存记录改成 `isAra="0"` 后，同一插件正常加载，捕获工作流完整可用；
+/// 5. ACID Pro 11 自带的 ARA 插件（Melodyne、acidFX MorphPad）由主程序里的**定制
+///    集成类**承载（RTTI 可见 `MelodynePluginView` / `FXPadPluginView`），不经这条
+///    通用路径；官方口径里 ACID 的 ARA2 即 Melodyne 集成。
+///
+/// 结论：宿主侧基础设施缺失，插件侧无可补救。入口点只由**组件**的 queryInterface
+/// 暴露，在这里对家族隐藏即可让扫描器记 `isAra="0"`，插件以普通插入形态加载。
+/// 只圈定 VEGAS 家族（`is_vegas_family`）：REAPER / Cubase / Studio One 等真 ARA2
+/// 宿主不受影响；Samplitude / Sequoia 不落进这个判定（它们不用 sfvstwrap 壳）。
+/// Sound Forge 同壳同桥，按家族一并隐藏 —— 文档表里它的 ARA2「是」从未验收过。
+pub fn hide_ara_entry_points() -> bool {
+    let no_ara = std::env::var("HIFISHIFTER_NO_ARA").ok();
+    let force_ara = std::env::var("HIFISHIFTER_FORCE_ARA").ok();
+    ara_entry_points_hidden(is_vegas_family(), no_ara.as_deref(), force_ara.as_deref())
+}
+
+/// [`hide_ara_entry_points`] 的纯判定（单元测试用）。
+///
+/// `no_ara` / `force_ara` 是 `HIFISHIFTER_NO_ARA` / `HIFISHIFTER_FORCE_ARA` 的读数
+/// （`None` = 未设置）。优先级：`NO_ARA=1` 是全局杀开关，压过一切；`FORCE_ARA=1`
+/// 只覆盖家族闸门（给未来修好了桥的 MAGIX 版本与现场排查留门）；两者都为 1 时
+/// **隐藏**获胜 —— 显式关闭压过显式开启。
+fn ara_entry_points_hidden(
+    vegas_family: bool,
+    no_ara: Option<&str>,
+    force_ara: Option<&str>,
+) -> bool {
+    if no_ara.map(str::trim) == Some("1") {
+        return true;
+    }
+    if force_ara.map(str::trim) == Some("1") {
+        return false;
+    }
+    vegas_family
+}
+
 /// 宿主应用名的**宿主自报读数**（VST3：`IHostApplication::getName` 的最近一次结果）。
 ///
 /// 【为什么单独存一份】报障时最需要的一条信息是"你在哪个宿主里"——而这份信息此前只有
@@ -736,5 +795,37 @@ mod tests {
             Some("VEGAS Creative Software")
         );
         assert_eq!(family_of("fruity-wrapper"), None);
+    }
+
+    /// VEGAS 家族宿主隐藏 ARA 入口点（家族桥拒绝 ARA 标记的模块，ACID Pro 11 实测）。
+    #[test]
+    fn the_vegas_family_hides_ara_entry_points() {
+        assert!(ara_entry_points_hidden(true, None, None));
+    }
+
+    /// 其它宿主保持 ARA 暴露（REAPER / Cubase / Studio One 不受影响）。
+    #[test]
+    fn other_hosts_still_expose_ara_entry_points() {
+        assert!(!ara_entry_points_hidden(false, None, None));
+    }
+
+    /// `HIFISHIFTER_NO_ARA=1` 是全局杀开关：压过家族闸门，也压过 FORCE_ARA。
+    #[test]
+    fn no_ara_wins_over_everything() {
+        assert!(ara_entry_points_hidden(false, Some("1"), None));
+        assert!(ara_entry_points_hidden(true, Some("1"), None));
+        assert!(ara_entry_points_hidden(true, Some("1"), Some("1")));
+        // 值要 trim 后等于 "1"：首尾空白不影响判定，其它值一律视为未设置。
+        assert!(ara_entry_points_hidden(true, Some(" 1 "), None));
+        assert!(ara_entry_points_hidden(false, Some(" 1 "), Some("0")));
+        assert!(!ara_entry_points_hidden(true, Some("on"), Some("1")));
+    }
+
+    /// `HIFISHIFTER_FORCE_ARA=1` 只覆盖家族闸门，给修好的宿主版本与现场排查留门。
+    #[test]
+    fn force_ara_only_overrides_the_family_gate() {
+        assert!(!ara_entry_points_hidden(true, None, Some("1")));
+        assert!(!ara_entry_points_hidden(false, None, Some("1")));
+        assert!(!ara_entry_points_hidden(true, Some("0"), Some("1")));
     }
 }

@@ -1009,31 +1009,46 @@ unsafe extern "system" fn component_query_interface(
             // 它永远会成功。若宿主问的是别的接口（实测会问 IEditController），
             // 无条件返回 ARA 指针会让宿主用错误的 vtable 调用方法而崩溃。
             // SAFETY: processor 是活动对象；entry 在对象生命周期内有效。
-            // 【临时探针】HIFISHIFTER_NO_ARA=1 时不暴露任何 ARA 接口，用来判定
-            // "打开 FX 窗口就冻结"是否来自 ARA 这一侧。
-            let ara_disabled =
-                std::env::var("HIFISHIFTER_NO_ARA").is_ok_and(|value| value.trim() == "1");
-            if !ara_disabled {
-                if let Some(entry) = unsafe { (*processor).entry.as_ref() } {
-                    for kind in [
-                        Ara2Vst3InterfaceKind::PluginEntry,
-                        Ara2Vst3InterfaceKind::PluginEntry2,
-                    ] {
-                        let Some(words) = ara_iid_words(kind) else {
-                            continue;
-                        };
-                        if unsafe { iid_matches(iid, words) } {
-                            if let Ok(interface) = entry.query_interface(kind) {
-                                hifishifter_plugin::log_line(&format!(
-                                    "component queryInterface ARA hit iid={}",
-                                    unsafe { hex_iid(iid) }
-                                ));
-                                // SAFETY: 输出槽非空。
-                                unsafe { *obj = interface };
-                                return K_RESULT_OK;
-                            }
+            // 【宿主兼容闸门】VEGAS 家族（ACID Pro 11 实测）的 VST3 桥会把扫描期命中
+            // ARA 入口点的模块记成 ARA 插件，随后在添加路径里因自家基础设施缺失直接
+            // 拒绝加载（0x8004E204，模块根本不被加载）——对该家族隐藏入口点，让插件
+            // 以普通插入形态加载。证据链与开关见
+            // `hifishifter_plugin::host_identity::hide_ara_entry_points`；
+            // `HIFISHIFTER_NO_ARA=1` 仍是不分宿主的全局探针。
+            let ara_hidden = hifishifter_plugin::host_identity::hide_ara_entry_points();
+            let mut requested_ara_kind = None;
+            for kind in [
+                Ara2Vst3InterfaceKind::PluginEntry,
+                Ara2Vst3InterfaceKind::PluginEntry2,
+            ] {
+                let Some(words) = ara_iid_words(kind) else {
+                    continue;
+                };
+                if unsafe { iid_matches(iid, words) } {
+                    requested_ara_kind = Some(kind);
+                    break;
+                }
+            }
+            if let Some(kind) = requested_ara_kind {
+                if !ara_hidden {
+                    if let Some(entry) = unsafe { (*processor).entry.as_ref() } {
+                        if let Ok(interface) = entry.query_interface(kind) {
+                            hifishifter_plugin::log_line(&format!(
+                                "component queryInterface ARA hit iid={}",
+                                unsafe { hex_iid(iid) }
+                            ));
+                            // SAFETY: 输出槽非空。
+                            unsafe { *obj = interface };
+                            return K_RESULT_OK;
                         }
                     }
+                } else {
+                    // 命中 ARA IID 但被闸门隐藏：单独记一行，把"为什么 miss"说清楚，
+                    // 不落进泛泛的 queryInterface miss。
+                    hifishifter_plugin::log_line(&format!(
+                        "component queryInterface ARA hidden for this host (vegas-family bridge rejects ARA-flagged modules; HIFISHIFTER_FORCE_ARA=1 overrides) iid={}",
+                        unsafe { hex_iid(iid) }
+                    ));
                 }
             }
             log_query_interface_miss("component", iid);
