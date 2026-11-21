@@ -66,8 +66,14 @@ export function openLogFolder(): Promise<LogFolderResult> {
     return invoke("open_log_folder");
 }
 
-export function pickDiagnosticsOutputPath(): Promise<DiagnosticsExportResult> {
-    return invoke("pick_diagnostics_output_path");
+/**
+ * 弹出诊断包的保存对话框。
+ *
+ * `dialogTitle` 由调用方按当前语言传入（后端不再硬编码英文标题）；
+ * 空串 / 缺省时后端回退系统默认标题。
+ */
+export function pickDiagnosticsOutputPath(dialogTitle: string): Promise<DiagnosticsExportResult> {
+    return invoke("pick_diagnostics_output_path", dialogTitle);
 }
 
 export function exportDiagnostics(outputPath: string): Promise<DiagnosticsExportResult> {

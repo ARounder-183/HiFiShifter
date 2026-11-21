@@ -52,7 +52,10 @@ pub(super) fn open_log_folder(app: tauri::AppHandle) -> serde_json::Value {
 // ===================== export_diagnostics =====================
 
 /// 「导出诊断信息」第一步：选择输出路径（同步命令，运行在主线程，rfd 才可用）。
-pub(super) fn pick_diagnostics_output_path() -> serde_json::Value {
+///
+/// 对话框标题由前端按当前语言传入（与 `open_audio_dialog_for_source` 的
+/// `dialog_title` 同一约定）；空串 / 缺省时回退系统默认标题。
+pub(super) fn pick_diagnostics_output_path(dialog_title: Option<String>) -> serde_json::Value {
     let default_name = format!(
         "HiFiShifter-diagnostics-{}.zip",
         chrono::Local::now().format("%Y%m%d-%H%M%S")
@@ -61,11 +64,14 @@ pub(super) fn pick_diagnostics_output_path() -> serde_json::Value {
     // 同一张表 —— 两处各写一份时，改了一边就会让同一个导出在 App 与插件里
     // 出现两种下拉框。
     let file_type = &hifishifter_kernel::file_types::DIAGNOSTICS_ZIP;
-    let picked = rfd::FileDialog::new()
-        .set_title("Export diagnostics")
+    let mut dialog = rfd::FileDialog::new()
         .set_file_name(&default_name)
-        .add_filter(file_type.name(), &file_type.extension_refs())
-        .save_file();
+        .add_filter(file_type.name(), &file_type.extension_refs());
+    let title = dialog_title.as_deref().map(str::trim).unwrap_or("");
+    if !title.is_empty() {
+        dialog = dialog.set_title(title);
+    }
+    let picked = dialog.save_file();
     match picked {
         Some(path) => serde_json::json!({ "ok": true, "path": path.to_string_lossy() }),
         None => serde_json::json!({ "ok": false, "canceled": true }),

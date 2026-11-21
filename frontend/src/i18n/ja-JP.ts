@@ -660,6 +660,7 @@ export const jaJP = {
 
     menu_open_log_folder: "ログフォルダーを開く",
     menu_export_diagnostics: "診断情報をエクスポート...",
+    export_diagnostics_dialog_title: "診断情報をエクスポート",
     menu_open_log_folder_failed: "ログフォルダーを開けませんでした",
     menu_open_log_folder_copy_path: "パスをコピー",
     menu_open_log_folder_copied: "クリップボードにコピーしました",

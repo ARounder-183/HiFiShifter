@@ -794,6 +794,7 @@ export const enUS = {
 
     menu_open_log_folder: "Open Log Folder",
     menu_export_diagnostics: "Export Diagnostics...",
+    export_diagnostics_dialog_title: "Export Diagnostics",
     menu_open_log_folder_failed: "Could not open the log folder",
     menu_open_log_folder_copy_path: "Copy path",
     menu_open_log_folder_copied: "Copied to clipboard",

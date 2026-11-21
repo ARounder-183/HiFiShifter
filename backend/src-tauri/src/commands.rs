@@ -2934,14 +2934,14 @@ pub fn open_log_folder(app: tauri::AppHandle) -> serde_json::Value {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn pick_diagnostics_output_path() -> serde_json::Value {
+pub fn pick_diagnostics_output_path(dialog_title: Option<String>) -> serde_json::Value {
     {
         // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
         // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
         common::guard_command(
             "pick_diagnostics_output_path",
             serde_json::json!({ "ok": false, "error": "panic in command: pick_diagnostics_output_path" }),
-            diagnostics::pick_diagnostics_output_path,
+            || diagnostics::pick_diagnostics_output_path(dialog_title),
         )
     }
 }

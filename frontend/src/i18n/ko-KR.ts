@@ -721,6 +721,7 @@ export const koKR = {
 
     menu_open_log_folder: "로그 폴더 열기",
     menu_export_diagnostics: "진단 정보 내보내기...",
+    export_diagnostics_dialog_title: "진단 정보 내보내기",
     menu_open_log_folder_failed: "로그 폴더를 열 수 없습니다",
     menu_open_log_folder_copy_path: "경로 복사",
     menu_open_log_folder_copied: "클립보드에 복사됨",

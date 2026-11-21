@@ -632,6 +632,7 @@ export const zhCN = {
 
     menu_open_log_folder: "打开日志文件夹",
     menu_export_diagnostics: "导出诊断信息...",
+    export_diagnostics_dialog_title: "导出诊断信息",
     menu_open_log_folder_failed: "无法打开日志文件夹",
     menu_open_log_folder_copy_path: "复制路径",
     menu_open_log_folder_copied: "已复制到剪贴板",

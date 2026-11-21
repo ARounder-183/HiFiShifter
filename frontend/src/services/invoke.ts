@@ -1007,6 +1007,11 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 ...(args[1] !== undefined ? { frontendSettings: args[1] } : {}),
             };
 
+        case "pick_diagnostics_output_path":
+            // 保存对话框标题由前端按当前语言传入（与 open_audio_dialog_for_source
+            // 的 dialog_title 同一约定）；后端空串时回退系统默认标题。
+            return { dialogTitle: args[0] ?? null };
+
         case "export_layout_json":
             return { json: args[0] };
 
@@ -1146,7 +1151,6 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "open_project_dialog",
     "open_reaper_dialog",
     "open_vocalshifter_dialog",
-    "pick_diagnostics_output_path",
     "pick_directory",
     "pick_midi_output_path",
     "ping",

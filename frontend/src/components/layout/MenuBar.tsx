@@ -562,7 +562,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         const { pickDiagnosticsOutputPath, exportDiagnostics } =
             await import("../../services/api/diagnostics");
         try {
-            const pick = await pickDiagnosticsOutputPath();
+            // 对话框标题按当前语言传入：原生保存对话框的标题栏是用户可见 UI，
+            // 不能在后端硬编码英文。
+            const pick = await pickDiagnosticsOutputPath(tf("export_diagnostics_dialog_title"));
             if (!pick?.ok || !pick.path) return; // 用户取消
             setDiagnosticsExporting(true);
             const res = await exportDiagnostics(pick.path);

@@ -633,6 +633,7 @@ export const zhTW = {
 
     menu_open_log_folder: "開啟日誌資料夾",
     menu_export_diagnostics: "匯出診斷資訊...",
+    export_diagnostics_dialog_title: "匯出診斷資訊",
     menu_open_log_folder_failed: "無法開啟日誌資料夾",
     menu_open_log_folder_copy_path: "複製路徑",
     menu_open_log_folder_copied: "已複製到剪貼簿",
