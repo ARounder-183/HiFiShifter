@@ -554,10 +554,42 @@ companion 的 `clap` feature 只挂在 `[dev-dependencies]`：它是纯 checked-
 |---|---|---|
 | Studio One / Cubase / Nuendo / Samplitude / Sequoia / Pyramix / Sonar | 是 | 读 + 渲染 + 调音；**不可写**、无 take、无 folder、无宿主撤销栈 |
 | Logic Pro（10.8+，ARA 面较薄） | 是 | 读 + 渲染 |
-| WaveLab / Sound Forge / Acoustica | 是 | 读 + 渲染；transport 可能缺席 |
+| WaveLab / Acoustica | 是 | 读 + 渲染；transport 可能缺席 |
+| **ACID Pro（11.0.2.21 实测）** | **否（§5.1）** | 普通插入 FX：捕获工作流完整可用 |
+| Sound Forge / 其它 VEGAS 家族壳宿主 | 预期否（同族桥） | 普通插入 FX |
+
+原表中 Sound Forge 的 ARA2「是」从未验收过；它与 ACID Pro 共用同一 VST 桥
+（`sfvstwrap`），按 §5.1 的同一条拒绝路径预期一致，故移出 ARA2 行。
 
 **没有任何一家暴露 `GetMediaItemInfo_Value`。** 所以产品必须在原生扩展调用全部为 0 时
 依然完整。
+
+### 5.1 ACID Pro 11：宿主桥在加载前拒绝 ARA 插件（2026-11 实测）
+
+**症状**：扫描、列表、供应商页一切正常；把 "HiFiShifter (VST3)" 添加到轨道 FX 弹
+「添加轨道插件时发生错误。错误 0x8004e204（消息缺失）——插件加载失败。
+未成功加载任何插件」。
+
+**证据链**（对应 `hide_ara_entry_points` 的注释，这里只列现场可复核的事实）：
+
+1. 错误码 `0x8004E204` 的立即数只出现在家族桥 `sfvstwrap.dll` / `sfvstserver.exe`
+   （各 3 处）；「消息缺失」是错误表查无此码时的兜底格式串，不是错误语义。
+2. 添加失败时**插件模块从未被加载**：引擎日志零会话、shim 的 OutputDebugString
+   零输出、也没有 `sfvstserver.exe` / `audio_plugin_server_x64.exe` 被拉起 ——
+   拒绝发生在 `sfvstwrap`（宿主进程内）读自家运行时缓存时。
+3. 该路径先打开 boost::interprocess 共享内存 `plugin_finder_shared_memory`，该映射
+   在 ACID Pro 11 里不存在（添加尝试前后与期间共 1.8 秒 ~4878 万次
+   `OpenFileMappingW` 竞速捕获 0 次）。
+4. 与插件内容无关：改缓存记录里的版本字段（0→1）错误原样复现；把缓存记录改成
+   `isAra="0"` 后同一插件立即正常加载。
+5. ACID Pro 11 自带的 ARA 插件（Melodyne、acidFX MorphPad）由主程序的定制集成类
+   承载（RTTI：`MelodynePluginView` / `FXPadPluginView`），不走这条通用桥路径；
+   官方口径中 ACID 的 ARA2 即 Melodyne 集成。
+
+**对策**：`hifishifter_plugin::host_identity::hide_ara_entry_points()` 对 VEGAS
+家族（`is_vegas_family`）让组件的 queryInterface 不应答 ARA 入口点 → 扫描器记
+`isAra="0"` → 插件以普通插入 FX 加载（捕获工作流完整）。`HIFISHIFTER_FORCE_ARA=1`
+是逃生门；`HIFISHIFTER_NO_ARA=1` 仍是全局探针。
 
 ---
 
