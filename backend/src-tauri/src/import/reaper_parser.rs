@@ -542,8 +542,7 @@ fn parse_tempo_env_time_signature(slow_curv: f64) -> Option<(u32, u32)> {
 //
 // u = **播放时间 × |PLAYRATE|**，u = 0 落在 take 的**入点**（不是媒体文件起点）。
 //
-// 【真机实测（REAPER 7.85，2026-11-17）】判据是渲染后按窗反推的音高，见
-// `docs/2026-11-17-take-envelope-axis-findings.md`：
+// 【真机实测（REAPER 7.85，2026-11-17）】判据是渲染后按窗反推的音高：
 //
 // - `SOFFS 2` 的 take 上写 `u = 2.0 / 2.5` ⇒ 渲染恒定 440 Hz（点落在片段之外）；
 //   同一份几何改写成 `u = 0 / 0.5` ⇒ 立刻出现 +12 半音斜坡。**SOFFS 不进坐标**。

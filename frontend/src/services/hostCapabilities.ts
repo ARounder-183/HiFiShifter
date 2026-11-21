@@ -265,8 +265,8 @@ export function hostKind(): "reaper" | "ara_only" | "capture" {
  * 预设形状按钮是否可用。
  *
  * 【为什么新轴宿主上也能用】REAPER ≥7.81 由 curvature/S 两个连续轴决定形状，
- * 而"预设 → (curvature, S)"的映射是**实测**出来的（`timeline/hostFadeAxes.ts`，
- * 证据 `probe/ara/FADE-AXIS-FINDINGS.md`）：七个预设各自对应一组确定的坐标，两轴
+ * 而"预设 → (curvature, S)"的映射是**实测**出来的（`timeline/hostFadeAxes.ts`）：
+ * 七个预设各自对应一组确定的坐标，两轴
  * 正交，没有表达不到的预设。所以新轴宿主上照常摆七个按钮，点了写两个分量。
  *
  * 此前这里只放行 `legacy`，理由是"映射尚未校准" —— 那条理由已经随实测消失。

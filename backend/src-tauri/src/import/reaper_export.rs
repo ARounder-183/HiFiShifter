@@ -178,7 +178,7 @@ fn fill_reaper_take(
     dest.play_rate = vec![rate, 1.0, 0.0, -1.0, 0.0, 0.0025];
     // 声道模式回写（0..=4 与 REAPER CHANMODE 一一对应）：
     // 导入时 ≥5 的多声道编码已降级为本工程五模式，导出无法还原原始编码，
-    // 属预期行为（见 docs/plans/2026-09-19-stereo-channel-support-design.md §5）。
+    // 属预期行为。
     dest.chan_mode = crate::channel_mode::TakeChannelMode::to_reaper_chanmode(take.channel_mode);
 
     if let Some(ref midi_data) = take.midi_note_data {
@@ -1176,8 +1176,7 @@ mod tests {
 
     /// 【u 域是播放时间，不是媒体时间】源起点 30 s 的 clip：`SOFFS` 必须落在媒体
     /// 时间 30 s，而 PITCHENV 的点仍然从 `u = 0` 起、止于 `长度 × 速率`。补一个
-    /// `SOFFS` 就整条平移（真机渲染实测见
-    /// `docs/2026-11-17-take-envelope-axis-findings.md`）。
+    /// `SOFFS` 就整条平移（真机渲染实测确认）。
     #[test]
     fn pitch_envelope_stays_in_playback_time_when_the_source_starts_late() {
         let mut timeline = TimelineState::default();
@@ -1978,8 +1977,8 @@ mod tests {
 
     #[test]
     fn pitch_env_u_domain_independent_of_clip_position() {
-        // Take 包络的 u 是**播放时间 × 速率**（不是媒体文件时间，见
-        // docs/2026-11-17-take-envelope-axis-findings.md），与 clip 的工程位置无关：
+        // Take 包络的 u 是**播放时间 × 速率**（不是媒体文件时间，真机实测确认），
+        // 与 clip 的工程位置无关：
         // clip 在 45s 的导出必须与 clip 在 0s 完全一致（PT 0..len×rate），
         // 端点强制落在 item 起止（不得被工程位置污染，也不得依赖 hold）。
         let make_curves = |values: Vec<f32>| ClipExportCurves {

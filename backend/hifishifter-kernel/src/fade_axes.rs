@@ -13,8 +13,7 @@
 //!
 //! 并注明 7.81+ 由 `DIR_NEW`/`DIR2_NEW` 决定形状 —— 但**没有**公开 fade 求值函数，
 //! 也没有说明七个预设各自对应哪一组 `(curvature, S)`。所以这张表是量出来的，不是
-//! 从文档抄的：`docs/2026-10-09-fade-axis-findings.md`，原始数据
-//! `tests/fixtures/fade-axis-7.82.json`（REAPER 7.82/x64，50 个采样）。
+//! 从文档抄的：原始数据在 `tests/fixtures/fade-axis-7.82.json`（REAPER 7.82/x64，50 个采样）。
 //!
 //! ## 表的形状
 //!
@@ -131,9 +130,8 @@ mod tests {
     /// 表必须与实测数据逐行一致：`legacy_shape_only` 用例里写 `C_FADEINSHAPE = k`
     /// 后读回的 `(D_FADEINDIR_NEW, D_FADEINDIR2_NEW)`。
     ///
-    /// 改 `HOST_FADE_PRESET_AXES` 必须同时改 `tests/fixtures/fade-axis-7.82.json`、
-    /// `docs/2026-10-09-fade-axis-findings.md` 的表，以及前端同源的
-    /// `hostFadeAxes.test.ts` 绑定 —— 否则这条测试红。
+    /// 改 `HOST_FADE_PRESET_AXES` 必须同时改 `tests/fixtures/fade-axis-7.82.json`
+    /// 以及前端同源的 `hostFadeAxes.test.ts` 绑定 —— 否则这条测试红。
     #[test]
     fn preset_table_matches_the_committed_capture() {
         let capture = fade_axis_capture();

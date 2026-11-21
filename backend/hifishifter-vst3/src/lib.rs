@@ -12,8 +12,8 @@
 //! 文档）；不带 Tauri/wry/app runtime。
 //!
 //! 【为什么本 crate 是独立的外壳】外壳曾住在共享层（`hifishifter-plugin`）里，
-//! 后果是其他外壳的产物被链接并导出 VST3 入口符号、CLAP 构建被迫检出 VST3 SDK。
-//! 拆分设计见 `docs/plans/2026-11-17-vst3-shell-extraction-plan.md`。
+//! 后果是其他外壳的产物被链接并导出 VST3 入口符号、CLAP 构建被迫检出 VST3 SDK，
+//! 这正是拆分外壳的由来。
 
 // ── clippy 策略 ─────────────────────────────────────────────────────────────
 //

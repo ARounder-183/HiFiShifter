@@ -178,8 +178,7 @@ test("MIDI import reaches the pitch curve in the plugin but never builds a local
  * 淡化轴能力分三档：版本读不出（`null`）→ 整块只读；旧轴 → 形状与曲率都写；
  * 新轴（≥7.81）→ 曲率与 S 直接写，形状预设由 Rust 侧翻成 `(curvature, S)` 一对分量。
  *
- * 【为什么新轴也放行预设】映射是实测的（`timeline/hostFadeAxes.ts`，证据
- * `probe/ara/FADE-AXIS-FINDINGS.md`），七个预设各自对应一组确定坐标。此前这里只放行
+ * 【为什么新轴也放行预设】映射是实测的（`timeline/hostFadeAxes.ts`），七个预设各自对应一组确定坐标。此前这里只放行
  * `legacy`，那条"映射尚未校准"的理由已经随实测消失。
  */
 test("fade shape editing follows the host axis generation instead of one blanket mode", () => {

@@ -361,8 +361,7 @@ impl NativeHost {
     /// 复制还会把 `<TAKEFX>` 块整块复制出去（宿主会在目标 item 上新建第二个实例）。
     /// 露出一个注定失败的入口，比藏起来更坏：用户会以为是插件坏了。
     ///
-    /// 【take 音高为什么**不**关】真机实测（`docs/2026-11-17-take-envelope-axis-findings.md`
-    /// 附节）：take 音高在源级生效、早于 take FX，**不会**再对 take FX 的输出移调，也不会
+    /// 【take 音高为什么**不**关】真机实测：take 音高在源级生效、早于 take FX，**不会**再对 take FX 的输出移调，也不会
     /// 叠加到插件自己的渲染上。于是"转换成 take 包络"在两种位置下是同一条语义 ——
     /// 只复制、不补偿。关掉它等于凭空砍掉一个本来正确的功能。
     pub(crate) fn capabilities_for(
@@ -1523,7 +1522,7 @@ const MAX_MARKERS: i32 = 16_384;
 ///                            determine shape in v7.81 and later)
 /// ```
 /// 所以 `(7, 81)` 是官方文档化的区间边界，不是"我们测过的版本"。
-/// 取头文件的方法见 `probe/ara/README.md`；pin 见 `REAPER-SDK-NOTICE.md`。
+/// pin 见本目录的 `REAPER-SDK-NOTICE.md`。
 const NEW_FADE_AXES_SINCE: (u32, u32) = (7, 81);
 
 /// 比较官方版本的整数分量（7.100不能按浮点误判为7.10）。

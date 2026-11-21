@@ -55,8 +55,7 @@ REAPER 的 ARA 支持两种插入位置，而它们对上面那张能力表给�
 那条 take 的源）；新建轨道更不属于；复制 item 会把 `<TAKEFX>` 块整块带出去，宿主会在目标
 item 上新建**第二个实例**。露出一个注定失败的入口，比藏起来更坏。
 
-**take 音高互转在两种位置下同一条语义**：真机实测（`docs/2026-11-17-take-envelope-axis-findings.md`
-的附节）证明 take 音高在源级生效、早于 take FX，不会再对 take FX 的输出移调。因此
+**take 音高互转在两种位置下同一条语义**：真机实测证明 take 音高在源级生效、早于 take FX，不会再对 take FX 的输出移调。因此
 "转换成 take 包络"是**复制**，不需要按位置做反向补偿。
 
 **绝不跨链回退**：take 链上查不到本插件的 FX 就是 `Unknown`（照常渲染），不得转头去读
@@ -235,8 +234,7 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 > **现状勘误（2026-11-08，第二次修订）**：本节先写作「Capture-only 外壳」，随后一度
 > 改为「REAPER 7.85 已跑通 CLAP ARA」。**后一结论是错的**：那次验证只覆盖了空工程，
 > 一旦时间线上有音频 item，REAPER 7.85 就会崩在自己的代码里
-> （`reaper.exe+0x5a677`，`0xC0000005`，读地址 `0x8`）。取证见
-> [报告](2026-11-08-reaper-clap-ara-crash-analysis.md)。
+> （`reaper.exe+0x5a677`，`0xC0000005`，读地址 `0x8`）。
 >
 > 根因是 **REAPER 的 2022 私有草案实现不完整**，不是插件侧可修补的：该崩溃函数在
 > `test rbx,rbx` 之后仍解引用 `rbx`（空的是它自己的 playback 渲染器槽位）；强制本
@@ -363,10 +361,8 @@ MultitrackStudio）的 CLAP ARA 仍需逐个真机验收。
   必须返回 0。打印 "absent" 后照常返回成功的老判据不再成立。
 
 REAPER 7.85 / Windows x64 的 CLAP 扫描、实例化与 Capture 形态已由隔离真机复测覆盖
-（含音频 item 场景，退出码 0）；**CLAP ARA 在该宿主不可用**，取证与结论见
-[崩溃分析报告](2026-11-08-reaper-clap-ara-crash-analysis.md)。其余宿主
-（Bitwig / Studio One / MultitrackStudio）与保存重开、WebView 编辑仍按
-`docs/plugin-host-survey.md` 保持「未测」。
+（含音频 item 场景，退出码 0）；**CLAP ARA 在该宿主不可用**（上文勘误即取证与结论）。其余宿主
+（Bitwig / Studio One / MultitrackStudio）与保存重开、WebView 编辑仍保持「未测」。
 
 ### CLAP ↔ VST3 覆盖对照（2026-11 全量审查 + 第二轮收敛）
 

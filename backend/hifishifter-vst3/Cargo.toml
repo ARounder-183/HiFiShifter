@@ -9,7 +9,7 @@
 # 【为什么它是独立 crate】外壳曾经住在共享层里（`hifishifter-plugin` 既是实现层
 # 又是 VST3 cdylib）。后果是每个其他外壳的产物都被链接并**导出** VST3 的入口符号
 # （2026-11-17 实测 `HiFiShifter.clap` 导出 4 个符号），且 CLAP 构建被迫检出 VST3
-# SDK。提取设计见 `docs/plans/2026-11-17-vst3-shell-extraction-plan.md`。
+# SDK —— 这正是把它提成独立 crate 的由来。
 [package]
 name = "hifishifter-vst3"
 version = "0.2.0-beta"

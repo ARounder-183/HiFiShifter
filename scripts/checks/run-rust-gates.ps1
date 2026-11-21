@@ -107,7 +107,7 @@ function Get-CargoCommand([string]$kind, [int]$Threads = 0) {
             # 然后一直挂到 60 分钟上限（本地 16 核跑同一份代码 168 秒全绿）。
             # 每个模块一个进程，继承的状态就只剩该模块自己的；挂死时也一眼看得出是哪个模块。
             # 【vst3:: 为什么不在列表里】VST3 的壳体与其黑盒测试整体搬进了
-            # `hifishifter-vst3`（见 docs/plans/2026-11-17-vst3-shell-extraction-plan.md）；
+            # `hifishifter-vst3`；
             # 壳的测试按"整 crate 一个进程"跑（数量级与单个模块相当）。
             $pluginChunks = @('ara::', 'capture::', 'editor::', 'host::', 'render::')
             $skips = if ($skipArgs.Count -gt 0) { ' ' + ($skipArgs -join ' ') } else { '' }

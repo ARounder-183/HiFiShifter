@@ -35,8 +35,7 @@
 //! 结论：这条 ID 不是可用的宿主契约 —— 应答它等于把宿主的空指针缺陷引到用户面前，
 //! 而且没有任何插件侧写法能让宿主补出那个缺失的实例。本模块因此只认 ARACLAP.h
 //! 定稿的工厂/实例 ID；REAPER 里的 CLAP 插件以 Capture 形态稳定运行，需要 ARA 时
-//! 用 VST3 形态（走官方 `ARAVST3.h`，实测稳定）。完整取证见
-//! `docs/2026-11-08-reaper-clap-ara-crash-analysis.md`。
+//! 用 VST3 形态（走官方 `ARAVST3.h`，实测稳定）。上面的取证清单即完整证据。
 
 use crate::abi::clap_plugin_t;
 use ara2_bridge::companion::clap::sys::{ClapAraPluginExtension, ClapPlugin};

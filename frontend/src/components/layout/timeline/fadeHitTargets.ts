@@ -14,8 +14,7 @@
  *
  * 【为什么必须走 `visualFadeGain` 而不是 `fadeGainSigned`】宿主是 7.81+ 时画布画的
  * 是宿主的 `(curvature, S)` 两轴曲线，而 `fadeGainSigned` 算的是 HiFiShifter 自己的
- * `(shape, dir)` 曲线 —— 两者不是同一套参数化（实测见
- * `probe/ara/FADE-AXIS-FINDINGS.md`）。用后者铺命中块，用户就得**离开看得见的曲线**
+ * `(shape, dir)` 曲线 —— 两者不是同一套参数化（真机实测）。用后者铺命中块，用户就得**离开看得见的曲线**
  * 去抓，且抓取点会随曲率变化漂移。这正是"看到的 = 可点的"这条不变量被破坏的形态。
  */
 import { visualFadeGain } from "./hostFadeDisplay";

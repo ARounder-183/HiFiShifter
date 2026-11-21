@@ -2197,8 +2197,8 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
             clip.reversed = item_facts.reversed;
             clip.loop_enabled = item_facts.loop_source;
             clip.channel_mode = item_facts.channel_mode;
-            // 【倒放的镜像坐标复原】ARA 报的 region 时间是**已镜像坐标**（F-4 实测，
-            // 见 `probe/ara/REVERSE-FINDINGS.md`）：倒放 take 的 `D_STARTOFFS` 是
+            // 【倒放的镜像坐标复原】ARA 报的 region 时间是**已镜像坐标**（真机实测）：
+            // 倒放 take 的 `D_STARTOFFS` 是
             // `源长 − 正向起点 − 跨度`，而内核的倒放消费窗口
             // （`clip_playback_window_sec`）要的是**正向**窗口的终点 —— 直接用 ARA
             // 的区间会让内核二次镜像 = 又变正放。

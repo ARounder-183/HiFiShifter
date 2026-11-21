@@ -5,8 +5,8 @@
 //! 所有"插件 → 宿主"的 `queryInterface` 静默失败（宿主回 null 指针，日志只剩一行
 //! `available=false`），而 Windows 上一切正常 —— 是最难在 CI 里被发现的一类回归。
 //!
-//! 【为什么挂在 `vst3_abi` 而不是 VST3 壳】它测的是词汇层的布局约定；壳搬走之后
-//! （见 `docs/plans/2026-11-17-vst3-shell-extraction-plan.md`），这份约定仍由
+//! 【为什么挂在 `vst3_abi` 而不是 VST3 壳】它测的是词汇层的布局约定；壳搬走之后，
+//! 这份约定仍由
 //! 共享层自己钉住 —— `editor/routing.rs` / `editor/gui/linux.rs` / `host/reaper/`
 //! 都在用它。
 

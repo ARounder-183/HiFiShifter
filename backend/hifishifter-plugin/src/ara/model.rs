@@ -844,7 +844,7 @@ impl ModelHandle {
                 // 记下"授权这一刻"的 active take GUID。
                 //
                 // 【为什么在这里、而不是每次清单刷新都重记】ARA 的 playback region 指向
-                // item 的 active take（`probe/ara/MULTI-TAKE-FINDINGS.md` 的 F-3），所以
+                // item 的 active take（真机实测），所以
                 // 授权 PCM 属于**那一刻**的 active take。`sync_host_takes` 重建 take 列表
                 // 时只有 GUID 相等的那一个能带上授权媒体；用户随后在 REAPER 里切换 active
                 // take 时这条记录保持旧值，于是新 take 不会被挂上旧采样 —— 直到 ARA 模型

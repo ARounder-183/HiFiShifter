@@ -154,8 +154,8 @@ export function buildSingleFadeInfoText(args: {
  * 界面要显示的形状号。
  *
  * 【为什么不能直接用 `args.shape`】插件（新轴宿主）的 `fadeInShape` 读自
- * `C_FADE*SHAPE`，实测在坐标不落在七个预设上时是 `-1`（见
- * `probe/ara/FADE-AXIS-FINDINGS.md`）—— 直接命名会把它显示成"线性"。
+ * `C_FADE*SHAPE`，实测在坐标不落在七个预设上时是 `-1`
+ * —— 直接命名会把它显示成"线性"。
  * `hostFadeDisplayShape` 按**画布真正画的那一族曲线**给出形状，所以图标/名称与
  * 用户看到的包络一致；独立 App 与旧轴宿主原样返回。
  *

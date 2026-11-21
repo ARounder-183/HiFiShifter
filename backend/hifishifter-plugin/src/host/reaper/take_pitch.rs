@@ -22,7 +22,7 @@
 //!
 //! `EnvelopePoint::time` 就是 chunk 里 `PT` 的第一个字段，属于 take 的**播放**时间轴
 //! （u = 0 在入点，按 `PLAYRATE` 缩放）。`SOFFS`、SECTION 的 `STARTPOS`、倒放位都不
-//! 进入它 —— 真机渲染实测见 `docs/2026-11-17-take-envelope-axis-findings.md`。因此本
+//! 进入它 —— 真机渲染实测确认。因此本
 //! 模块既不读也不写 `SOFFS`：整块替换时其余字段逐字节保留，**不要**顺手补上源起点。
 
 use super::item_chunk::MAX_ITEM_CHUNK_BYTES;
@@ -266,7 +266,7 @@ mod tests {
 
     /// 【u 域不含源起点/倒放镜像】源起点 30 s、带倒放位的 take：写进去的 PT
     /// 必须原样是 0 / 1。补一个 SOFFS 或镜像一次，整条曲线就整体平移 ——
-    /// 真机实测见 `docs/2026-11-17-take-envelope-axis-findings.md`。
+    /// 真机实测确认。
     #[test]
     fn the_envelope_is_written_in_playback_time_without_the_source_offset() {
         let shifted = format!(

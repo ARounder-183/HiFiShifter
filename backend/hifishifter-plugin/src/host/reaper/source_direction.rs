@@ -23,8 +23,7 @@
 //!
 //! 真机实测（REAPER 7.85）：宿主自己的 `Toggle take reverse` 只改 `SOFFS` 与 SECTION
 //! 包装，`<PITCHENV>` 的 `PT` 时间**一字不动** —— 包络横轴是 take 的播放时间
-//! （u = 0 在入点），倒放只改变"哪个媒体采样被播放"，不改变坐标域（见
-//! `docs/2026-11-17-take-envelope-axis-findings.md`）。所以这里同样只改结构：
+//! （u = 0 在入点），倒放只改变"哪个媒体采样被播放"，不改变坐标域。所以这里同样只改结构：
 //! 顺手镜像包络点会让用户已有的曲线整体颠倒。
 
 use super::item_chunk::MAX_ITEM_CHUNK_BYTES;

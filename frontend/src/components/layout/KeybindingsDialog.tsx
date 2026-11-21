@@ -8,8 +8,7 @@
  * 无查询时按分组排列且组标题粘性吸顶。
  *
  * 数据本身（默认值、录入、冲突、预设）仍在 `features/keybindings` 里；本文件只负责
- * 呈现与编排。检索为什么要单独一栏的设计见
- * `docs/plans/2026-09-30-keybindings-search-design.md`。
+ * 呈现与编排。
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Flex, TextField, IconButton, Button } from "@radix-ui/themes";

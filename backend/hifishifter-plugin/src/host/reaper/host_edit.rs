@@ -318,8 +318,8 @@ fn requests_fade_axes(patch: &ClipStatePatch) -> bool {
 /// - 版本读不出来（`None`）→ 拒绝，不猜；
 /// - 旧轴宿主 + S 参数 → 拒绝（S 只存在于新轴，做不到的事不静默丢弃）；
 /// - 新轴宿主 + 形状预设 → **接受**。这里此前是拒绝的，理由是"预设 → (curvature, S)
-///   的映射尚未校准"；该映射现已实测落地（[`hifishifter_kernel::fade_axes`]，
-///   证据 `docs/2026-10-09-fade-axis-findings.md`），所以预设按钮在新轴宿主上也能用。
+///   的映射尚未校准"；该映射现已实测落地（[`hifishifter_kernel::fade_axes`]），
+///   所以预设按钮在新轴宿主上也能用。
 ///   表外的形状号（越界或小数变体）仍然拒绝 —— 宿主会把它静默变成别的形状
 ///   （实测写 `5.1` 读回 `SHAPE=7`）。
 fn validate_fade_axes(axes_new: Option<bool>, patch: &ClipStatePatch) -> Result<(), String> {
@@ -1385,7 +1385,7 @@ pub(crate) fn execute_managed(
                     // `fadeInShape` 与该形状的默认 `fadeInDir`（HFS 自己的曲率轴，
                     // `DEFAULT_FADE_DIR_BY_SHAPE`）。但两套轴不是同一套参数化 ——
                     // 实测旧 `D_FADEINDIR` 与新 `D_FADEINDIR_NEW` 互相读回都是被重
-                    // 映射过的值（`docs/2026-10-09-fade-axis-findings.md`）。若让 HFS 的 dir
+                    // 映射过的值。若让 HFS 的 dir
                     // 覆盖预设的 curvature，用户点了"轻微凸"会得到线性
                     // （预设 1 = `c 0.5`，而 HFS 给该形状的默认 dir 是 0）。
                     // 曲率滑杆走的是**只带 dir、不带 shape** 的补丁，不受此规则影响。
@@ -3104,7 +3104,7 @@ mod fade_axis_validation_tests {
     }
 
     /// 表外的形状号必须拒绝。宿主对越界值不会报错，而是静默变成别的形状 ——
-    /// 实测写 `5.1` 读回 `SHAPE=7`（见 `docs/2026-10-09-fade-axis-findings.md`）。
+    /// 实测写 `5.1` 读回 `SHAPE=7`。
     /// 宁可报错，也不要用户点了 A 得到 B。
     #[test]
     fn continuous_axis_hosts_reject_shapes_outside_the_measured_table() {

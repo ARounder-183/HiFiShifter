@@ -97,7 +97,7 @@ test("changing either axis changes visual curves and App/legacy remain exactly u
             );
         }
     // `(0, 0)` 是实测表里的**预设 0（线性）**，不是"宿主默认曲线"：REAPER 新建 item 的
-    // 默认读数是 `SHAPE=1` / `c=0.5`（`probe/ara/captures/fade-axis-7.82.json` 的 baseline）。
+    // 默认读数是 `SHAPE=1` / `c=0.5`（实测捕获 baseline，见内核 `tests/fixtures/fade-axis-7.82.json`）。
     // 坐标落在表内时画的是那个预设自己的曲线，而线性预设就是恒等。
     expect(visualFadeGain({ ...metadata, in_curvature: 0, in_s: 0 }, 0, 0, "in", 0.3)).toBeCloseTo(
         0.3,

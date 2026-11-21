@@ -29,8 +29,8 @@
 //! 【为什么这里没有 VST3 工厂】VST3 的模块 ABI（入口符号、工厂、组件、处理器、
 //! `IPlugView`、`IConnectionPoint`）整体住在 `hifishifter-vst3` 外壳 crate；
 //! 让它留在本 crate 的历史原因是"VST3 先实现"，后果是每个其他外壳的产物都会
-//! 链接并导出 VST3 的入口符号（2026-11-17 实测 `HiFiShifter.clap` 导出 4 个符号）。
-//! 拆分设计见 `docs/plans/2026-11-17-vst3-shell-extraction-plan.md`。
+//! 链接并导出 VST3 的入口符号（2026-11-17 实测 `HiFiShifter.clap` 导出 4 个符号），
+//! 这正是拆分外壳的由来。
 
 // ── clippy 策略 ─────────────────────────────────────────────────────────────
 //

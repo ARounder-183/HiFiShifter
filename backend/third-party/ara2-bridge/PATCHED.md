@@ -24,8 +24,7 @@
    直接矛盾。
 
 裸 `companion` 特性补上"只要 binding 层、不要任何格式"这一档，让格式特性真正
-回到各壳 crate 的依赖表上。详细设计见
-`docs/plans/2026-11-17-vst3-shell-extraction-plan.md` §6.1。
+回到各壳 crate 的依赖表上。
 
 ## 上游修复后的撤销方式
 

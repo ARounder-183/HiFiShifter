@@ -67,7 +67,7 @@ cd ..\hifishifter-plugin; cargo test --jobs 1 --offline 2>&1 | Select-String 'te
 ## ⚠ 执行状态与修正后的顺序（2026-10-04）
 
 **Task 1、Task 2 已完成并验证**（提交 `51fea2a5`、`552a99ab`）。执行到 Task 3 时发现
-原顺序不成立，实测证据见 `probe/ara/kernel-closure-measured.md` 与设计文档 §4.2 / §4.9。
+原顺序不成立（探针工作区的实测证据，探针目录未入库），见设计文档 §4.2 / §4.9。
 
 ### 已完成
 
@@ -378,7 +378,7 @@ git commit -m "refactor(ara): split state into a pure model and the runtime cont
 >
 > **处置**：本任务暂停，等设计文档 §4.9 的"原生依赖构建归属"决定下来之后再重写。
 > 直接后果是**顺序要反过来**：先做机械搬迁（原 Task 6），再搬 `state/model`。
-> 实测数据见设计文档 §4.2 与 `probe/ara/kernel-closure-measured.md`。
+> 实测数据见设计文档 §4.2（探针工作区的原始数据未入库）。
 
 **为什么是这三个**：它们是离 Tauri 最远的三块，且是 `EngineCommand` 的前置（命令里的 `UpdateTimeline(TimelineState)` 与 `UserStretchAlgorithm` / `MetronomeConfig` 来自这里）。
 

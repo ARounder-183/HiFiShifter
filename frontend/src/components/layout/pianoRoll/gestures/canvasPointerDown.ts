@@ -627,8 +627,7 @@ export function handleCanvasPointerDown(
      *
      * 【为什么绘制类要额外受窗口约束】`usePianoRollData` 的取数窗口是
      * "可见区 ± 一个可见时长"，而笔画期间取数被 `liveEditDeferral` 推迟到
-     * pointer-up（换窗口会让正在画的轨迹消失，见
-     * docs/plans/2026-09-26-volume-dyn-drag-trail-fix.md）。滚出窗口后
+     * pointer-up（换窗口会让正在画的轨迹消失）。滚出窗口后
      * 提交仍会写进后端，但**画面上什么都不会出现** —— 用户对着空白拖一条
      * 看不见的线。窗口自带一整个视口宽的余量，因此这个上限足够一次边缘
      * 滚屏走完一屏，用户感知不到限制。

@@ -428,8 +428,7 @@ pub struct DocumentSession {
     pub region_items: Mutex<HashMap<u64, String>>,
     /// ARA 授权那一刻，每个 region 对应 item 的 **active take GUID**（region_key → take GUID）。
     ///
-    /// 【为什么需要】ARA 只授权 active take 的 PCM（见 `probe/ara/MULTI-TAKE-FINDINGS.md`
-    /// 与 plan Part 2 的授权边界）。宿主清单重建 take 列表时（`sync_host_takes`），
+    /// 【为什么需要】ARA 只授权 active take 的 PCM（真机实测）。宿主清单重建 take 列表时（`sync_host_takes`），
     /// 只有 GUID 与这里相等的那一个 take 可以带上授权媒体；其余 take 必须保持无源。
     ///
     /// 【为什么记 GUID 而不是"就是 active 那个"】用户在 REAPER 里切换 active take 后，

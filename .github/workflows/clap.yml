@@ -71,8 +71,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/setup/prepare-plugin-sdks.ps1
-      # 【为什么只需要 CLAP SDK】壳提取（docs/plans/2026-11-17-vst3-shell-extraction-plan.md）
-      # 之后，共享层只用 ara2-bridge 的裸 companion 特性（纯 Rust，无 SDK 检出），
+      # 【为什么只需要 CLAP SDK】壳提取之后，共享层只用 ara2-bridge 的裸 companion 特性（纯 Rust，无 SDK 检出），
       # CLAP companion 也是纯 Rust —— CLAP 外壳的构建不再需要 ARA / VST3 SDK。
       # CLAP 头文件仍然要钉住：clap_layout 的 ABI oracle 用它编原生基准
       # （HIFISHIFTER_CLAP_SDK_DIR）。

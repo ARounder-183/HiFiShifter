@@ -129,8 +129,7 @@ fn the_clap_module_entry_point_is_exported() {
 
 /// 本壳产物**不得导出任何 VST3 模块入口**。
 ///
-/// 【为什么钉死缺席】壳提取（`docs/plans/2026-11-17-vst3-shell-extraction-plan.md`）
-/// 之前，VST3 的模块入口随共享 rlib 被链接进 CLAP 产物并被默认导出 —— 实测
+/// 【为什么钉死缺席】壳提取之前，VST3 的模块入口随共享 rlib 被链接进 CLAP 产物并被默认导出 —— 实测
 /// `dumpbin /EXPORTS dist/HiFiShifter.clap` 返回 4 个符号（`clap_entry` 之外还有
 /// `GetPluginFactory` / `InitDll` / `ExitDll`）。它们在 CLAP 里没有任何意义；
 /// 若它们重新出现，说明有人把某个格式壳塞回了共享层（`hifishifter-plugin`）。

@@ -63,7 +63,7 @@ trash = "5.2.9"
 # 不靠传递依赖 —— 传递依赖一旦被上游裁剪，失败会发生在链接期而不是编译期。
 libc = "0.2"
 
-# ── Unix 内嵌编辑器（见 docs/plans/2026-10-24-plugin-unix-gui-plan.md `11.1）──
+# ── Unix 内嵌编辑器 ──
 #
 # 【为什么这些不是新依赖】它们是 tauri/wry 的**传递依赖**，版本早已被 workspace 的
 # Cargo.lock 钉住（gtk 0.18.2 / webkit2gtk 2.0.2 / glib 0.18.5 / objc2 0.6.5 …）。
