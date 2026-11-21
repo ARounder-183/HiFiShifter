@@ -364,7 +364,7 @@ function Write-Vst3Stage {
     $resources = Join-Path $contents 'Resources'
     foreach ($required in $winModule, $resources) {
         if (!(Test-Path -LiteralPath $required)) {
-            throw "VST3 bundle is missing $required: run .\scripts\build\build.ps1 -Target Plugin first"
+            throw "VST3 bundle is missing ${required}: run .\scripts\build\build.ps1 -Target Plugin first"
         }
     }
     New-Item -ItemType Directory -Force (Join-Path $vst3 'Contents') | Out-Null
@@ -514,7 +514,7 @@ if ($Target -eq 'All') {
 if ($Target -eq 'Installer') {
     foreach ($required in 'app', 'vst3', 'HiFiShifter.clap', 'HiFiShifter-resources', 'models', 'licenses', 'LICENSE', 'license-page.txt', 'models-verify.nsh') {
         if (!(Test-Path (Join-Path $stage $required))) {
-            throw "dist\_stage\installer is missing $required: run .\scripts\build\build.ps1 -Target All first"
+            throw "dist\_stage\installer is missing ${required}: run .\scripts\build\build.ps1 -Target All first"
         }
     }
 }

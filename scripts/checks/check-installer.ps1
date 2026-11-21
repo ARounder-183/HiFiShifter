@@ -340,7 +340,7 @@ try {
         if ($hshp -ne 'HiFiShifter.Project') { throw ".hshp default ProgID = $hshp" }
         $command = Get-RegDefault "$classesRoot\HiFiShifter.Project\shell\open\command"
         if (!$command -or !$command.Contains("$installDir\HiFiShifter.exe")) {
-            throw "open command does not point at $installDir: $command"
+            throw "open command does not point at ${installDir}: $command"
         }
         $hsp = Get-RegDefault "$classesRoot\.hsp"
         if ($hsp -ne 'HiFiShifter.Project') { throw ".hsp default ProgID = $hsp" }
