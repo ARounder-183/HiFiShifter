@@ -146,7 +146,21 @@ pub fn parse_midi_bytes(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiPa
 }
 
 fn parse_midi_data(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiParseResult, String> {
+    const MAX_MIDI_BYTES: usize = 64 * 1024 * 1024;
+    const MAX_TRACKS: usize = 256;
+    const MAX_EVENTS: usize = 1_000_000;
+    const MAX_NOTES_PER_TRACK: usize = 200_000;
+    if data.len() > MAX_MIDI_BYTES {
+        return Err("midi_too_large".to_string());
+    }
     let smf = Smf::parse(data).map_err(|e| format!("midi_parse_error: {}", e))?;
+    if smf.tracks.len() > MAX_TRACKS {
+        return Err("midi_track_budget_exceeded".to_string());
+    }
+    let event_count: usize = smf.tracks.iter().map(|track| track.len()).sum();
+    if event_count > MAX_EVENTS {
+        return Err("midi_event_budget_exceeded".to_string());
+    }
 
     // 解析 tempo map（用于将 tick 转换为秒）
     let ticks_per_beat = match smf.header.timing {
@@ -419,6 +433,9 @@ release_velocity: 0,
         });
 
         let note_count = notes.len();
+        if note_count > MAX_NOTES_PER_TRACK {
+            return Err("midi_note_budget_exceeded".to_string());
+        }
         let (min_note, max_note) = if notes.is_empty() {
             (0.0f32, 0.0f32)
         } else {
