@@ -511,7 +511,13 @@ impl ClockState {
             if input.playing {
                 self.domain = ClockDomain::Project;
                 self.provisional = false;
-                let decision = self.decision(raw, true, 0, false, 0, true, false);
+                // 【为什么 switched=false】PendingAbsolute 是"还没确认"的工程域，不是另一把
+                // 尺子；kPlaying 升起把它落成 Project 是**探针收敛**，不是域切换。此前
+                // switched=true 会杀掉流级 resync（`!time_base_switch` 判据），于是 VEGAS
+                // 起播窗口里数出来的位置与宿主恢复后的位置之间那 ~5.3k 帧记账差被判成
+                // Gap —— take 在接缝处封段断开、拼接处硬切出咔（现场 2026-11-22 01:56 的
+                // take 1：segments 在 tape 32768 处分裂）。探针收敛必须保持"同一次演奏"。
+                let decision = self.decision(raw, false, 0, false, 0, true, false);
                 self.commit(
                     raw,
                     raw,
@@ -541,9 +547,12 @@ impl ClockState {
                 return decision;
             }
             // 探针到期：它确实是一次工程域停播（Track 停在光标处），如实落成 Project。
+            // 【为什么 switched=false】与上面同一条理由：PendingAbsolute 本来就是暂记的
+            // 工程域，落成 Project 不换尺子。停播期间没有块写下（会话窗口没开），
+            // 后续真正的起播走新 epoch，不存在被这条掩盖的 seek。
             self.domain = ClockDomain::Project;
             self.provisional = false;
-            let decision = self.decision(raw, true, 0, false, 0, true, false);
+            let decision = self.decision(raw, false, 0, false, 0, true, false);
             self.commit(
                 raw,
                 raw,

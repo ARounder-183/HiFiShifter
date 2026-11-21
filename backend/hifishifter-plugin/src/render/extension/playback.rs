@@ -361,7 +361,10 @@ impl ExtensionOwner {
         let last_raw = geometry.last_raw_start.load(Ordering::Acquire);
         let last_continuous = geometry.last_continuous.load(Ordering::Acquire);
         let last_music = f64::from_bits(geometry.last_music_bits.load(Ordering::Acquire));
-        let last_source = PositionSource::from_code(geometry.last_source.load(Ordering::Acquire))
+        // 【读后未用】它此前参与 resync 的旁证判定；判据换成 `advance_before` 之后
+        // 只剩诊断读数。保留加载会让"这块的来源是什么"永远可见（trace/ring 还在读），
+        // 但本函数不再引用 —— 前缀下划线以免未用告警。
+        let _last_source = PositionSource::from_code(geometry.last_source.load(Ordering::Acquire))
             .unwrap_or(PositionSource::Project);
         let anchor_before = geometry.anchor.load(Ordering::Acquire);
         let advance_before = geometry.frames_since_anchor.load(Ordering::Acquire);
@@ -463,6 +466,28 @@ impl ExtensionOwner {
         // 【首块起播容差的唯一正证据】见下面 `playing_rising` 的说明：只有本块真的
         // 有信号，才允许“kPlaying 滞后”的宿主在第一块上打开有界起点窗口。
         let audio_evidence = !geometry.last_block_silent.load(Ordering::Acquire);
+        // 【停播重复投递的判据先于窗口合成】同一条事实在下面还有一处读（块级诊断）；
+        // 窗口合成必须先问它，否则 FL Studio 式的"停播反复送同一份非零内容"会逐块
+        // 重开起点窗口。
+        let silent = geometry.last_block_silent.load(Ordering::Acquire);
+        let repeated_nonzero = geometry.unchanged_run.load(Ordering::Acquire) > 0 && !silent;
+        // 【kPlaying 滞后不止发生在首块】VEGAS 的 Capture 起播窗口实测延续 ~0.66 s：
+        // 音频按块长流入、raw 钉在播放头、kPlaying 迟迟不置位。`!had` 只覆盖流几何
+        // 重置后的第一块（现场 2026-11-22 take 3：武装块先到 ⇒ `had=true` ⇒ 整个窗口
+        // 一次都没开 ⇒ 32768 帧真实内容全部门控丢弃，take 只剩旗标升起后的正文）。
+        // 所以除了首块，还允许"武装且有内容"的块重开窗口：内容非静音 + 非重复投递
+        // （排除 FL Studio 形状）+ 传输会话已收口（Idle/Paused/Stopped，排除正在播放
+        // 中的波动）。窗口本身有 1 s 上限，误开的代价有界。
+        //
+        // 【为什么要求武装或有素材】停播状态下"有内容的块"还有一种完全不同的成因：
+        // 输入监听（宿主没播，FX 实时返回输入）。监听时位置**不该**前进 —— 冻结才是
+        // 正确的。武装（用户正在录）或有素材（捕获模式回放监听宿主的起播）才有理由
+        // 把这段流动当作播放时间。
+        let stream_window_eligible = !playing
+            && !is_offline
+            && audio_evidence
+            && !repeated_nonzero
+            && (self.capture().is_armed() || self.capture().has_material());
         let decision = session.observe(SessionInput {
             // 离线 pass 有自己的 cursor；它不需要 kPlaying 也必须在走。
             playing: playing || is_offline,
@@ -480,7 +505,12 @@ impl ExtensionOwner {
             // 这次容差只影响“没播放”的那段，不会吞掉任何一帧真实音频。
             playing_rising: playing_rising
                 || recording_rising
-                || (!had && !playing && !is_offline && audio_evidence),
+                || (!had && !playing && !is_offline && audio_evidence)
+                || (stream_window_eligible
+                    && matches!(
+                        phase_before,
+                        SessionPhase::Idle | SessionPhase::Paused | SessionPhase::Stopped
+                    )),
             recording_rising,
             // 域切换不是 seek：不能让它触发 host_reset 的新 epoch。
             host_reset: host_rewound && !clock.switched,
@@ -518,9 +548,8 @@ impl ExtensionOwner {
 
         // 【停播重复投递的判据】同一份**非零**内容逐块重复 ⇒ 宿主在停播时反复送同一
         // 段缓冲，那不是播放时间。它与 VEGAS 起播窗口的区分点是内容：窗口送的是静音，
-        // FL Studio 停播送的是同一份非零内容。
-        let silent = geometry.last_block_silent.load(Ordering::Acquire);
-        let repeated_nonzero = geometry.unchanged_run.load(Ordering::Acquire) > 0 && !silent;
+        // FL Studio 停播送的是同一份非零内容。（`silent` / `repeated_nonzero` 已在
+        // 会话判定之前读出 —— 见 `stream_window_eligible` —— 此处直接复用。）
 
         let mut position = clock.local_start;
         let mut source = if time.cycle_active {
@@ -828,16 +857,19 @@ impl ExtensionOwner {
 
         // 【resync：宿主纠正了我们数出来的位置】这不是 seek，是记账纠正 —— 真正的
         // 差值判定在捕获侧（它才持有 `expected_next`），这里只给上限与意图。
+        //
+        // 【上限为什么取 `counted_before ∨ advance_before`】捕获侧要回答的是"我们的
+        // 时钟最多可能错过多少帧"。那个数是**我们自己推进过的全部帧**——无论是
+        // 计数器（R2）还是 continuous/music 回退推进的；只数计数器会在"窗口由 music
+        // 回退推进"的形状里读出 0（VEGAS 起播窗口正是这个形状：位置回退被 music
+        // 表接管，counted_run 被清零），于是 ~5.3k 帧的记账差被判成 Gap，take 在
+        // 接缝处断开。`advance_before` 正是"锚点以来我们自己加的帧数"，两者取大。
         let resync = had
             && !time.cycle_active
             && !new_pass
             && !time_base_switch
             && host_moved
-            && (counted_before > 0
-                || matches!(
-                    last_source,
-                    PositionSource::Continuous | PositionSource::Music
-                ));
+            && (counted_before > 0 || advance_before > 0);
         StreamBlock {
             position,
             raw_start,
@@ -847,7 +879,7 @@ impl ExtensionOwner {
             new_pass,
             activity_moving,
             resync,
-            resync_limit_frames: counted_before,
+            resync_limit_frames: counted_before.max(advance_before),
             preceding_silent_frames,
             counted,
             discard_pre_roll,
