@@ -29,6 +29,9 @@ struct Gate {
     ~Gate() { ReleaseSRWLockExclusive(&gate); }
 };
 
+// 把一行诊断追加到 %LOCALAPPDATA%\HiFiShifter\logs\vst3-loader.log（best-effort）。
+void append_diag_log(const wchar_t* line) noexcept;
+
 // 仅用于诊断；所有调用都发生在 Gate 内，天然串行。不要在这里做重活。
 void log_loader(const wchar_t* message, DWORD error = 0) noexcept {
     wchar_t buffer[512];
@@ -38,6 +41,50 @@ void log_loader(const wchar_t* message, DWORD error = 0) noexcept {
         swprintf_s(buffer, L"HiFiShifter loader: %s\n", message);
     }
     OutputDebugStringW(buffer);
+    append_diag_log(buffer);
+}
+
+// 把一行诊断追加到 %LOCALAPPDATA%\HiFiShifter\logs\vst3-loader.log（best-effort）。
+//
+// 【为什么只有 OutputDebugString 不够】"在宿主 X 里加载失败、在宿主 Y 里正常"时，
+// 现场用户抓不到 DebugView，而引擎为什么没加载往往只有这一层能给出原因 —— ACID Pro
+// 拒载（0x8004E204，模块级失败却无任何文件日志）的排查教训。每行带时间戳与 pid，
+// 供跨进程对照。任何一步失败都静默放弃：诊断路径绝不能引入新的加载失败。
+void append_diag_log(const wchar_t* line) noexcept {
+    wchar_t local[32768];
+    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", local, 32768);
+    if (!length || length >= 32768) return;
+
+    std::wstring base(local, length);
+    base += L"\\HiFiShifter";
+    CreateDirectoryW(base.c_str(), nullptr);
+    base += L"\\logs";
+    CreateDirectoryW(base.c_str(), nullptr);
+
+    const HANDLE file = CreateFileW(
+        (base + L"\\vst3-loader.log").c_str(), FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+
+    // 空文件先补 UTF-16 BOM，记事本等工具才认得宽字符行。
+    LARGE_INTEGER size;
+    if (GetFileSizeEx(file, &size) && size.QuadPart == 0) {
+        const WORD bom = 0xFEFF;
+        DWORD written = 0;
+        WriteFile(file, &bom, sizeof(bom), &written, nullptr);
+    }
+
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    wchar_t stamped[640];
+    swprintf_s(stamped, L"[%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu] %s", now.wYear,
+               now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond, now.wMilliseconds,
+               GetCurrentProcessId(), line);
+    DWORD written = 0;
+    WriteFile(file, stamped, static_cast<DWORD>(wcslen(stamped) * sizeof(wchar_t)), &written,
+              nullptr);
+    CloseHandle(file);
 }
 
 // 调用者必须持有 gate。本函数绝不再取锁。
@@ -100,6 +147,7 @@ bool load_engine_locked() noexcept {
         initialize = init;
         engine_exit = exit;
         engine = module;
+        log_loader(L"HiFiShifterEngine.dll loaded");
         return true;
     } catch (...) {
         log_loader(L"unexpected exception while loading HiFiShifterEngine.dll");
