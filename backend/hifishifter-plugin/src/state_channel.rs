@@ -47,8 +47,33 @@ pub struct ClipLocalState {
 
 /// MIDI 角色 / 试听设置的键：JSON map 的 key 必须可序列化为字符串，
 /// 用不会出现在 id 里的单元分隔符把 clip/take 身份拼起来。
+///
+/// 【为什么必须剥掉 GUI 命名空间】同一份设置会被**两个 id 空间**读到：
+///
+///   * 写入口是编辑器时间线（`EditorSession::timeline`）：clip id 与 take id 都带
+///     `hfs-ui-{pid}-{n}-` 前缀（见 `sync_host_takes` 与 `EditorSession::rewrite_ids`）；
+///   * 读入口是文档时间线（`DocumentSession::workspace_timeline_locked`）：两者都是
+///     宿主裸身份。
+///
+/// 键一旦按写入侧的形状存下来，读入口就永远查不到 —— 表现是"把 MIDI Take 转成音高
+/// 参考，下一次宿主刷新又变回 MIDI Take"。这不是缓存问题，是**两个键空间**。
+/// 归一化放在唯一的键构造函数里，两个读者就不可能再各说一套。
 pub(crate) fn midi_take_key(clip_id: &str, take_id: &str) -> String {
-    format!("{clip_id}\u{001f}{take_id}")
+    let clip = crate::editor::capture_edits::strip_session_namespace(clip_id);
+    let take = crate::editor::capture_edits::strip_session_namespace(take_id);
+    format!("{clip}\u{001f}{take}")
+}
+
+/// 片段级 MIDI 角色默认值（键里没有 take 段）。
+///
+/// 【为什么需要第二把键】新建宿主 MIDI item 的那一刻**还不知道**它的 take GUID
+/// （`CreateNewMIDIItemInProj` 只返回 item），而"导入为音高参考块"这个角色必须在
+/// 那时记下来 —— 否则下一次清单刷新用宿主快照覆盖 `midi_take` 时，
+/// `read_midi_take` 的默认角色（`MidiTake`）会把用户选的角色抹掉。片段级键表达
+/// "这条 clip 的 active take 默认是什么角色"；take 级键（[`midi_take_key`]）表达
+/// "用户显式改过的那一条"，后者优先。
+pub(crate) fn midi_clip_role_key(clip_id: &str) -> String {
+    crate::editor::capture_edits::strip_session_namespace(clip_id).to_owned()
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
@@ -86,8 +111,7 @@ pub struct EditState {
     pub midi_roles: BTreeMap<String, hifishifter_kernel::midi_take::MidiTakeRole>,
     /// 插件私有的 MIDI 试听设置。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub midi_previews:
-        BTreeMap<String, hifishifter_kernel::midi_take::MidiPreviewSettings>,
+    pub midi_previews: BTreeMap<String, hifishifter_kernel::midi_take::MidiPreviewSettings>,
     /// 参数块的唯一用户编辑权威：root → Take 源域编辑集。
     ///
     /// 【为什么独立于音频权威】块是离散分段，曲线是连续函数；宿主重建不能把
@@ -725,10 +749,29 @@ impl EditState {
         }
     }
 
+    /// 把持久化的 MIDI 角色 / 试听播种到整条时间线。
+    ///
+    /// 【为什么必须与音节缓存同一个入口】两者都是"插件私有、宿主表达不到、每次
+    /// 重建都要重新播种"的逐片段状态。分开写就一定会有一条路径漏掉 —— MIDI 角色
+    /// 的漏点正是"转成音高参考块，下一次刷新又变回 MIDI Take"。
+    pub(crate) fn apply_midi_settings(&self, timeline: &mut TimelineState) {
+        for clip in &mut timeline.clips {
+            self.apply_midi_take_settings(clip);
+        }
+    }
+
     fn apply_midi_take_settings(&self, clip: &mut hifishifter_kernel::state::Clip) {
-        for take in &mut clip.takes {
+        let clip_default = midi_clip_role_key(&clip.id);
+        let active = clip.active_take_index();
+        for (index, take) in clip.takes.iter_mut().enumerate() {
             let key = midi_take_key(&clip.id, &take.id);
-            if let Some(role) = self.midi_roles.get(&key) {
+            // 片段级默认只作用于**当前 take**：它是"这条 clip 的默认角色"，不是
+            // "这条 clip 里每一条 take 的角色"（多 take item 的兄弟 take 各有自己的
+            // 内容，用户对它们的选择走 take 级键）。
+            let fallback = (index == active)
+                .then(|| self.midi_roles.get(&clip_default))
+                .flatten();
+            if let Some(role) = self.midi_roles.get(&key).or(fallback) {
                 if let Some(data) = take.midi_take.as_mut() {
                     data.role = *role;
                 }
@@ -935,6 +978,36 @@ impl EditState {
         }
         Ok(bytes)
     }
+    /// 把 MIDI 角色 / 试听表的键归一到**宿主裸身份**。
+    ///
+    /// 【为什么要做】早期版本的写入口用了编辑器时间线的 id（带 `hfs-ui-{pid}-{n}-`
+    /// 前缀）当键，而读入口用文档时间线的裸 id —— 同一份设置被写进了另一个键空间，
+    /// 于是"转成音高参考块"在下一次刷新后回退。修复落在键构造函数里，但**已经写进
+    /// 存档**的旧键仍是前缀形态：加载时归一化一次，用户的历史选择才不会凭空消失。
+    fn normalize_midi_keys(&mut self) {
+        let roles = std::mem::take(&mut self.midi_roles);
+        self.midi_roles = roles
+            .into_iter()
+            .map(|(key, role)| {
+                let normalized = match key.split_once('\u{001f}') {
+                    Some((clip, take)) => midi_take_key(clip, take),
+                    None => midi_clip_role_key(&key),
+                };
+                (normalized, role)
+            })
+            .collect();
+        let previews = std::mem::take(&mut self.midi_previews);
+        self.midi_previews = previews
+            .into_iter()
+            .map(|(key, preview)| {
+                let normalized = match key.split_once('\u{001f}') {
+                    Some((clip, take)) => midi_take_key(clip, take),
+                    None => key,
+                };
+                (normalized, preview)
+            })
+            .collect();
+    }
     /// 恢复使乐观并发revision前进，防止旧GUI再次覆盖宿主undo/恢复。
     pub fn restore(&mut self, bytes: &[u8]) -> Result<(), String> {
         if bytes.is_empty() {
@@ -988,6 +1061,7 @@ impl EditState {
             || !restored.param_block_edits.is_empty();
         restored.validate_clip_local()?;
         restored.validate_take_syllables()?;
+        restored.normalize_midi_keys();
         restored.revision = self
             .revision
             .max(restored.revision)
@@ -1655,6 +1729,33 @@ mod tests {
         let again = EditState::default().encode().unwrap();
         assert!(!again.is_empty());
         assert_eq!(restored.params.len(), 3);
+    }
+
+    /// **MIDI 角色键必须跨两个 id 空间**。
+    ///
+    /// 写入口是编辑器时间线（clip/take id 带 `hfs-ui-{pid}-{n}-` 前缀），读入口是
+    /// 文档时间线（宿主裸身份）。键一旦按写入侧的形状存下来，读入口就永远查不到 ——
+    /// 用户看到的是"把 MIDI Take 转成音高参考块，下一次刷新又变回 MIDI Take"。
+    #[test]
+    fn midi_role_keys_are_identical_across_editor_and_document_id_spaces() {
+        let editor_clip = "hfs-ui-4242-7-ara-item-{11111111-2222-3333-4444-555555555555}";
+        let editor_take = "hfs-ui-4242-7-{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}";
+        let document_clip = "ara-item-{11111111-2222-3333-4444-555555555555}";
+        let document_take = "{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}";
+        assert_eq!(
+            midi_take_key(editor_clip, editor_take),
+            midi_take_key(document_clip, document_take),
+            "同一份设置必须落在同一个键上"
+        );
+        assert_eq!(
+            midi_clip_role_key(editor_clip),
+            midi_clip_role_key(document_clip)
+        );
+        assert_ne!(
+            midi_clip_role_key(document_clip),
+            midi_take_key(document_clip, document_take),
+            "片段级默认角色与 take 级显式选择是两把键，不得混同"
+        );
     }
 
     /// **I3-3 的另一半：没有身份的条目不得被"套用"到一条同名的 live 轨上。**

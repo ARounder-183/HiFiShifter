@@ -631,6 +631,19 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 {shortcutLabel("project.importMedia")}
                             </div>
                         </DropdownMenu.Item>
+                        {/* 【MIDI 导入在插件里必须有入口】此前插件形态的文件菜单只留了
+                            "导入媒体 / 导出音频"，MIDI 导入只能从参数编辑器或文件浏览器
+                            进入 —— 而用户在时间轴上工作时根本看不到那些入口，于是"插件里
+                            没法导入 MIDI"。它与音频导入不是同一件事：音频导入要宿主写
+                            接口（禁用是对的），MIDI 导入的落点可以是插件自己的音高曲线，
+                            也可能是宿主 MIDI item（REAPER 原生），两者都与"能不能导入音频"
+                            无关，因此**不禁用**。 */}
+                        <DropdownMenu.Item onSelect={() => void handleImportMidiFromMenu()}>
+                            {t("menu_import_midi")}
+                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                {shortcutLabel("project.importMidi")}
+                            </div>
+                        </DropdownMenu.Item>
                         <DropdownMenu.Item onSelect={() => setExportDialogOpen(true)}>
                             {t("menu_export_audio")}
                             <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">

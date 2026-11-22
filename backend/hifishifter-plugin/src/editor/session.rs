@@ -3018,7 +3018,7 @@ impl EditorSession {
                         metadata.selected_track_id = metadata
                             .selected_track_id
                             .or_else(|| metadata.tracks.first().map(|t| t.id.clone()));
-                        self.restore_take_syllables(
+                        self.restore_plugin_clip_state(
                             &document.edits.lock_or_recover(),
                             &mut metadata,
                         );
@@ -3082,7 +3082,7 @@ impl EditorSession {
         self.project_host_facts(&mut timeline);
         Self::restore_materialized_source_paths(&mut timeline, &reverse_paths);
         self.retain_display_waveforms(&mut timeline, true);
-        self.restore_take_syllables(&document.edits.lock_or_recover(), &mut timeline);
+        self.restore_plugin_clip_state(&document.edits.lock_or_recover(), &mut timeline);
         // 音频迟到只能补齐资源，不能把用户已选中的新粘贴片段跳回首个clip。
         {
             let previous = self.timeline.lock_or_recover();
@@ -3434,7 +3434,7 @@ impl EditorSession {
         {
             let edits = document.edits.lock_or_recover();
             let mut timeline = self.timeline.lock_or_recover();
-            self.restore_take_syllables(&edits, &mut timeline);
+            self.restore_plugin_clip_state(&edits, &mut timeline);
         }
         let mut adopted = !adopt_view;
         // 【take 事实也是几何】清单改写了 clip 的方向 / Loop / 窗口 ⇒ 图集几何变了 ⇒
@@ -4804,6 +4804,20 @@ impl EditorSession {
                 restore(&mut take.source_path);
             }
         }
+    }
+
+    /// 插件私有、宿主表达不到的逐片段状态：音节缓存 + MIDI 角色/试听。
+    ///
+    /// 【为什么要合成一个入口】两者都必须在**每一次**时间线重建后重新播种，而重建
+    /// 有三条路径（首次加载、音频迟到、清单几何刷新）。分开写就一定会漏一条 ——
+    /// MIDI 角色的漏点正是"把 MIDI Take 转成音高参考块，刷新后又变回 MIDI Take"。
+    fn restore_plugin_clip_state(
+        &self,
+        edits: &crate::state_channel::EditState,
+        timeline: &mut TimelineState,
+    ) {
+        self.restore_take_syllables(edits, timeline);
+        edits.apply_midi_settings(timeline);
     }
 
     fn restore_take_syllables(

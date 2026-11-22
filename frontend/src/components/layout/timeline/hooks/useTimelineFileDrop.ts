@@ -129,10 +129,13 @@ export function useTimelineFileDrop({
     };
 
     const handleTimelineDrop = (e: React.DragEvent<HTMLDivElement>) => {
-        if (isPluginMode() && !canImportHostAudio()) {
-            e.preventDefault();
-            return;
-        }
+        /*
+         * 【只挡音频，不挡 MIDI】插件里"能不能导入音频"取决于宿主写接口，而 MIDI 导入
+         * 的落点是插件自己的音高曲线（所有宿主）或宿主 MIDI item（REAPER 原生）—— 两者
+         * 都与那条能力无关。此前整条 drop 被一起挡掉，于是插件里拖入 .mid **没有任何
+         * 反应**：既不开对话框，也不报错（用户报障"MIDI 文件拖不进来"）。
+         */
+        const audioImportBlocked = isPluginMode() && !canImportHostAudio();
         const dt = e.dataTransfer;
         const tauriPath = tauriDraggedPathRef.current;
         const lastTauriDropPath = tauriLastDropPathRef.current;
@@ -173,6 +176,7 @@ export function useTimelineFileDrop({
                 if (actionKind !== "importFolder") emitExternalFileAction(actionKind, resolvedPath);
                 return;
             }
+            if (audioImportBlocked) return;
             void dispatch(
                 importAudioAtPosition({
                     audioPath: resolvedPath,
@@ -204,6 +208,7 @@ export function useTimelineFileDrop({
                     if (actionKind !== "importFolder") emitExternalFileAction(actionKind, p);
                     return;
                 }
+                if (audioImportBlocked) return;
                 void dispatch(
                     importAudioAtPosition({
                         audioPath: p,
@@ -216,6 +221,7 @@ export function useTimelineFileDrop({
 
         const fallbackFile = dt.files?.[0] ?? null;
         if (isPluginMode() && dt.files?.length > 1) {
+            if (audioImportBlocked) return;
             const files = Array.from(dt.files).filter(isAcceptedDropFile);
             if (files.length)
                 void dispatch(
@@ -230,6 +236,7 @@ export function useTimelineFileDrop({
         }
         // 无本地路径的兜底分支同样必须过准入判据：此前它**完全不做校验**就把任何
         // `File` 按音频导入（后端内容嗅探会放行，于是无关文件也变成 Clip）。
+        if (audioImportBlocked) return;
         if (fallbackFile && isAcceptedDropFile(fallbackFile)) {
             void dispatch(
                 importAudioFileAtPosition({

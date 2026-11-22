@@ -1686,7 +1686,7 @@ export const jaJP = {
     import_across_tracks: "トラック間に追加",
     import_as_takes: "テイクとして追加",
     midi_import_clip_plugin_unavailable:
-        "ARA プラグインモードでは使用できません。クリップはホストの item です。ピッチカーブへのインポートをご利用ください。",
+        "このホストは MIDI アイテムを作成できません。MIDI Take にはホストのアイテムが必要です。ピッチカーブへの読み込みをご利用ください。",
     folder_import_title: "フォルダをインポート",
     folder_import_import: "インポート",
     folder_import_mode: "配置方法",

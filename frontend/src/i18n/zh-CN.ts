@@ -1631,7 +1631,7 @@ export const zhCN = {
     import_across_tracks: "跨轨道添加",
     import_as_takes: "作为 Take 添加",
     midi_import_clip_plugin_unavailable:
-        "ARA 插件模式下不可用：片段归宿主的 item，请改为导入到音高曲线。",
+        "此宿主不支持新建 MIDI item：MIDI Take 需要一条宿主 MIDI 片段，请改为导入到音高曲线。",
     folder_import_title: "导入文件夹",
     folder_import_import: "导入",
     folder_import_mode: "排列方式",

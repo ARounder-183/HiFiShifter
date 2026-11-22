@@ -432,7 +432,17 @@ export function buildClipMenuModel(input: ClipMenuInput): ClipMenuEntry[] {
                     ),
                 );
             }
-            if (anyPitch && available.replaceMidi && caps.midiAsClip) {
+            // 【替换已有 MIDI 内容的判据是「能写宿主 take」】`midiAsClip` 回答的是
+            // "能不能新建一个 MIDI 片段"，而替换写的是**已有 take** 的事件流 ——
+            // 两者可以各自缺失（例如只有创建接口的宿主）。独立 App 没有宿主，
+            // 判据退回 `midiAsClip`（它在本地的含义就是"能建/能改 MIDI 片段"）。
+            // 【为什么按 pluginMode 分支而不是 `??`】能力位在独立 App 里是 `false`
+            // 而不是 `undefined`，用空值合并会把独立 App 的入口整条吃掉。
+            if (
+                anyPitch &&
+                available.replaceMidi &&
+                (pluginMode ? caps.midiWrite === true : caps.midiAsClip)
+            ) {
                 takeChildren.push(
                     item(
                         isMulti ? "replace-midi-all" : "replace-midi",

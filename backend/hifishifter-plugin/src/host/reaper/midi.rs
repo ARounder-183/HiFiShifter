@@ -27,14 +27,14 @@ pub(super) type MidiGetNote = unsafe extern "C" fn(
     *mut i32,
     *mut i32,
 ) -> bool;
-pub(super) type MidiGetAllEvts =
-    unsafe extern "C" fn(*mut c_void, *mut c_char, *mut i32) -> bool;
+pub(super) type MidiGetAllEvts = unsafe extern "C" fn(*mut c_void, *mut c_char, *mut i32) -> bool;
 pub(super) type MidiSetAllEvts = unsafe extern "C" fn(*mut c_void, *const c_char, i32) -> bool;
 pub(super) type MidiGetHash = unsafe extern "C" fn(*mut c_void, bool, *mut c_char, i32) -> bool;
 pub(super) type MidiProjTimeFromPpq = unsafe extern "C" fn(*mut c_void, f64) -> f64;
 pub(super) type MidiPpqFromProjTime = unsafe extern "C" fn(*mut c_void, f64) -> f64;
 pub(super) type MidiSort = unsafe extern "C" fn(*mut c_void);
-pub(super) type CreateMidiItem = unsafe extern "C" fn(*mut c_void, f64, f64, *const bool) -> *mut c_void;
+pub(super) type CreateMidiItem =
+    unsafe extern "C" fn(*mut c_void, f64, f64, *const bool) -> *mut c_void;
 pub(super) type TrackFxInstrument = unsafe extern "C" fn(*mut c_void) -> i32;
 
 pub(crate) struct MidiTakeSnapshot {
@@ -90,7 +90,9 @@ impl NativeHost {
             })?;
         }
         let api = self.midi.as_ref().ok_or("host MIDI API unavailable")?;
-        let create = api.create_item.ok_or("host MIDI item creation unavailable")?;
+        let create = api
+            .create_item
+            .ok_or("host MIDI item creation unavailable")?;
         let set_all = api.set_all.ok_or("host MIDI write unavailable")?;
         let sort = api.sort.ok_or("host MIDI sort unavailable")?;
         if !start_sec.is_finite() || !length_sec.is_finite() || length_sec <= 0.0 {
@@ -114,7 +116,10 @@ impl NativeHost {
             return Err("REAPER rejected MIDI event write".into());
         }
         checked(authorized, || unsafe { sort(take) })?;
-        let write = self.write.as_ref().ok_or("host item write API unavailable")?;
+        let write = self
+            .write
+            .as_ref()
+            .ok_or("host item write API unavailable")?;
         let _ = checked(authorized, || unsafe {
             (write.set_item)(item, c"D_POSITION".as_ptr(), start_sec)
         });
@@ -125,12 +130,7 @@ impl NativeHost {
             let mut bytes = name.as_bytes().to_vec();
             bytes.push(0);
             let _ = checked(authorized, || unsafe {
-                (write.set_take_string)(
-                    take,
-                    c"P_NAME".as_ptr(),
-                    bytes.as_mut_ptr().cast(),
-                    true,
-                )
+                (write.set_take_string)(take, c"P_NAME".as_ptr(), bytes.as_mut_ptr().cast(), true)
             });
         }
         item_guid(self, item, authorized)
@@ -213,11 +213,7 @@ fn encode_events(
                 channel,
                 key,
                 value,
-            } => Some(vec![
-                0xA0 | channel.min(&15),
-                *key & 0x7F,
-                *value & 0x7F,
-            ]),
+            } => Some(vec![0xA0 | channel.min(&15), *key & 0x7F, *value & 0x7F]),
             _ => None,
         };
         if let Some(message) = message {
@@ -258,7 +254,9 @@ fn encode_events_for_take(
 ) -> Result<Vec<u8>, String> {
     // 已有 take 的 tick 是 take 源域；source_sec 先回到工程时间。
     let rate = geometry.play_rate_signed.abs().max(1e-6);
-    let project_start = geometry.start_sec + (data.notes.iter().map(|n| n.start_sec).fold(0.0, f64::min) - geometry.source_start_sec) / rate;
+    let project_start = geometry.start_sec
+        + (data.notes.iter().map(|n| n.start_sec).fold(0.0, f64::min) - geometry.source_start_sec)
+            / rate;
     encode_events(data, project_start, api, take, authorized)
 }
 
@@ -345,9 +343,10 @@ impl NativeHost {
                 (api.proj_time_from_ppq)(take, start_ppq)
             })
             .unwrap_or(0.0);
-            let project_end =
-                checked(authorized, || unsafe { (api.proj_time_from_ppq)(take, end_ppq) })
-                    .unwrap_or(project_start);
+            let project_end = checked(authorized, || unsafe {
+                (api.proj_time_from_ppq)(take, end_ppq)
+            })
+            .unwrap_or(project_start);
             let start_sec = source_sec(geometry, project_start);
             let end_sec = source_sec(geometry, project_end);
             if end_sec <= start_sec || !start_sec.is_finite() || !end_sec.is_finite() {
@@ -367,12 +366,12 @@ impl NativeHost {
         if let Some(buf) = read_all_events(api, take, authorized) {
             expression = parse_expression(&buf, geometry, api, take, authorized);
         }
-        if notes.is_empty() && expression.is_empty() {
-            return None;
-        }
-        let hash = read_hash(api, take, authorized).unwrap_or_else(|| {
-            format!("notes:{}:{}", notes.len(), expression.len())
-        });
+        // 【空 MIDI take 也是 MIDI take】此前这里把"没有音符"当成"不是 MIDI"，
+        // 于是用户刚建的空 MIDI item 拿不到快照 ⇒ clip 上没有 MIDI 内容 ⇒ 界面按
+        // **音频占位**渲染，永远挂着"正在等待宿主完成音频分配"。宿主已经明确回答
+        // `TakeIsMidi` 了，空内容只是一条还没有音符的 MIDI take。
+        let hash = read_hash(api, take, authorized)
+            .unwrap_or_else(|| format!("notes:{}:{}", notes.len(), expression.len()));
         if !diagnostics.is_empty() {
             log::debug!("[midi] host take diagnostics: {:?}", diagnostics);
         }
@@ -380,9 +379,15 @@ impl NativeHost {
             role: MidiTakeRole::MidiTake,
             notes,
             expression,
+            // 【源总长可能是 0】REAPER 对 MIDI source 常常报 0（它不是采样文件）。
+            // 0 会让"内容长度"退化成 0 ⇒ Loop 周期未知、裁剪窗口无意义。此时用
+            // item 消费的源域长度（时长 × 速率）兜底 —— 那是这段内容真实覆盖的范围。
             length_sec: geometry
                 .source_length_sec
-                .unwrap_or(geometry.duration_sec)
+                .filter(|length| length.is_finite() && *length > 0.0)
+                .unwrap_or_else(|| {
+                    geometry.duration_sec * geometry.play_rate_signed.abs().max(1e-6)
+                })
                 .max(0.0),
             source_bpm: 0.0,
             ticks_per_beat: 0,
@@ -439,11 +444,7 @@ fn source_sec(geometry: &HostClipGeometry, project_sec: f64) -> f64 {
     local * rate + geometry.source_start_sec
 }
 
-fn read_hash(
-    api: &MidiApi,
-    take: *mut c_void,
-    authorized: &impl Fn() -> bool,
-) -> Option<String> {
+fn read_hash(api: &MidiApi, take: *mut c_void, authorized: &impl Fn() -> bool) -> Option<String> {
     let hash = api.hash?;
     let mut buf = vec![0u8; 256];
     let ok = checked(authorized, || unsafe {

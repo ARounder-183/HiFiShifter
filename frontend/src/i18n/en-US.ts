@@ -1810,7 +1810,7 @@ export const enUS = {
     import_across_tracks: "Add Across Tracks",
     import_as_takes: "Add as Takes",
     midi_import_clip_plugin_unavailable:
-        "Not available in ARA plugin mode: a clip there is a host item. Import into the pitch curve instead.",
+        "This host cannot create MIDI items: a MIDI take lives on a host item. Import into the pitch curve instead.",
     folder_import_title: "Import Folder",
     folder_import_import: "Import",
     folder_import_mode: "Arrangement",

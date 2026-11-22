@@ -5,7 +5,7 @@ import {
     replaceMidiClipDataRemote,
 } from "../../../../features/session/sessionSlice";
 import { webApi } from "../../../../services/webviewApi";
-import { hostMode, isPluginMode } from "../../../../services/hostCapabilities";
+import { hostMode } from "../../../../services/hostCapabilities";
 import { coreApi } from "../../../../services/api/core";
 import { paramsApi } from "../../../../services/api/params";
 import { resolveRootTrackId } from "../../../../features/session/trackUtils";
@@ -173,7 +173,11 @@ export function useTimelineMidiActions({
 
             const s = sessionRef.current;
             const single = clipIds.length === 1 ? s.clips.find((c) => c.id === clipIds[0]) : null;
-            if (single && !isPluginMode() && isMidiTakeClip(single)) {
+            // 【插件里也要能导出】MIDI Take 的导出是纯数据变换（读音符 → 写 .mid），
+            // 不碰宿主任何写接口；此前按 `!isPluginMode()` 整段跳过，于是插件里点
+            // 「导出 MIDI」会落到"音高曲线导出"那条路，而 MIDI Take 没有可压平的
+            // 曲线 —— 结果是一个空文件或一条错误。
+            if (single && isMidiTakeClip(single)) {
                 await paramsApi.exportMidiTake(single.id, saveResult.path);
                 return;
             }

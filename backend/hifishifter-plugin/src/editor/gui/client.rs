@@ -1987,12 +1987,25 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                     hifishifter_kernel::midi_import::parse_midi_bytes(&bytes.ok_or("MIDI clipboard payload missing")?,Some(fallback_bpm))?
                 } else {return Err("MIDI path missing".into());};
                 let index=request["args"]["trackIndices"].as_array().and_then(|values|values.first()).and_then(|v|v.as_u64()).unwrap_or(0) as usize;
-                let data=parsed.track_data.get(index).ok_or("MIDI track missing")?;
+                let mut data=parsed.track_data.get(index).cloned().ok_or("MIDI track missing")?;
+                // 与 `import_midi_as_host_take` 同一口径：替换素材时音符时间轴同样按
+                // 对话框选的 BPM 模式缩放（此前完全忽略，替换后节奏与新建时不一致）。
+                let import_as_project=request["args"]["importBpmAsProject"].as_bool().unwrap_or(false);
+                let target_bpm=match request["args"]["noteBpmMode"].as_str().unwrap_or("midi"){
+                    "project" if !import_as_project=>Some(fallback_bpm),
+                    "specified"=>request["args"]["specifiedBpm"].as_f64().filter(|bpm|bpm.is_finite()&&*bpm>0.0),
+                    _=>None,
+                };
+                if let Some(target)=target_bpm{
+                    let scale=parsed.initial_bpm/target;
+                    if scale.is_finite()&&scale>0.0{data.scale_time(scale);}
+                }
+                if request["args"]["closeLeadingGap"].as_bool().unwrap_or(false){data.trim_leading_silence();}
                 let bare=clip_id.strip_prefix(&editor.namespace).unwrap_or(clip_id);
                 let target=owner.host_edit_target(bare)?;
                 state.borrow_mut().undo_document=Some(Arc::downgrade(&document));
                 document.host_undo.begin_request(&view_id,id,true,true,&owner.project_history_host().ok_or("host project history missing")?,&allowed)?;
-                let result=target.write_midi_take(data,&allowed);
+                let result=target.write_midi_take(&data,&allowed);
                 document.host_undo.finish_request(&view_id,id);result?;
                 owner.refresh_host_transport();editor.notify_timeline();
                 editor.enqueue(crate::editor::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
@@ -2013,7 +2026,19 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 if host.capabilities_for(host.placement()).midi_create != true {return Err("host MIDI item creation is unavailable".into());}
                 let midi_path=request["args"]["midiPath"].as_str().unwrap_or_default();
                 let clipboard_guid=request["args"]["clipboardGuid"].as_str().unwrap_or_default();
-                let track_id=request["args"]["trackId"].as_str().ok_or("MIDI target track missing")?;
+                // 【目标轨必须是**宿主裸身份**】前端拿到的是编辑器时间线的 id
+                // （带 `hfs-ui-{pid}-{n}-` 前缀），而 `ui_tracks[].id` 记的是宿主身份。
+                // 直接比较永远不相等 ⇒ 每次导入都报 "MIDI target track not in host
+                // inventory"。换算收敛到 `EditorSession::host_track_id`（音频导入走的
+                // 同一条），未指定时退回当前选中轨。
+                let requested_track=request["args"]["trackId"].as_str().map(str::to_owned).or_else(||{
+                    let tl=editor.timeline.lock_or_recover();
+                    tl.selected_track_id.clone()
+                });
+                let track_id=match requested_track{
+                    Some(id)=>editor.host_track_id(&id)?,
+                    None=>return Err("MIDI target track missing".into()),
+                };
                 let start_sec=request["args"]["startSec"].as_f64().unwrap_or(0.0);
                 let multi=request["args"]["multiTrackMerge"].as_bool().unwrap_or(true);
                 let close_gap=request["args"]["closeLeadingGap"].as_bool().unwrap_or(false);
@@ -2033,33 +2058,68 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 let indices=if indices.is_empty(){(0..parsed.track_data.len()).collect()}else{indices};
                 let mut track_data:Vec<_>=indices.iter().filter_map(|index|parsed.track_data.get(*index).cloned()).collect();
                 if track_data.is_empty(){return Err("no_notes_in_track".into());}
-                if let Some(role)=request["args"]["midiRole"].as_str(){
-                    let role=if role=="pitch_reference"{hifishifter_kernel::midi_take::MidiTakeRole::PitchReference}else{hifishifter_kernel::midi_take::MidiTakeRole::MidiTake};
+                // 【BPM 选项必须真的生效】对话框把「音符 BPM 模式 / 指定 BPM」当作音符
+                // 时间轴的缩放依据；此前插件这条路径把它们**整个忽略**，于是同一个 MIDI
+                // 文件在独立 App 与插件里落成不同长度（用户看到的是"插件里节奏不对"）。
+                // 缩放规则与独立 App 的 `import_midi_as_take` 逐字相同：目标 BPM 已知时
+                // 按 initial/target 缩放全部音符；「导入为工程 BPM」在插件里做不到
+                // （工程 BPM 属于宿主），因此按"保持 MIDI 自身速度"处理 —— 那正是独立
+                // App 设完工程 BPM 之后的同一条路径（不再二次缩放）。
+                let initial_bpm=parsed.initial_bpm;
+                let import_as_project=request["args"]["importBpmAsProject"].as_bool().unwrap_or(false);
+                let target_bpm=match request["args"]["noteBpmMode"].as_str().unwrap_or("midi"){
+                    "project" if !import_as_project=>Some(fallback_bpm),
+                    "specified"=>request["args"]["specifiedBpm"].as_f64().filter(|bpm|bpm.is_finite()&&*bpm>0.0),
+                    _=>None,
+                };
+                if let Some(target)=target_bpm{
+                    let scale=initial_bpm/target;
+                    if scale.is_finite()&&scale>0.0{
+                        for data in &mut track_data{data.scale_time(scale);}
+                    }
+                }
+                let requested_role=request["args"]["midiRole"].as_str().map(|role|if role=="pitch_reference"{hifishifter_kernel::midi_take::MidiTakeRole::PitchReference}else{hifishifter_kernel::midi_take::MidiTakeRole::MidiTake});
+                if let Some(role)=requested_role{
                     for data in &mut track_data{data.role=role;data.preview.enabled=role==hifishifter_kernel::midi_take::MidiTakeRole::MidiTake;}
                 }
                 if close_gap { for data in &mut track_data { data.trim_leading_silence(); } }
                 let target=document.ui_tracks.lock_or_recover().values().find(|track|track.id==track_id).map(|track|track.target.clone()).ok_or("MIDI target track not in host inventory")?;
                 state.borrow_mut().undo_document=Some(Arc::downgrade(&document));
                 document.host_undo.begin_request(&view_id,id,true,true,&host,&allowed)?;
-                let result=(||->Result<(),String>{
+                let result=(||->Result<Vec<String>,String>{
+                    let mut created=Vec::new();
                     if multi {
                         let mut merged=hifishifter_kernel::midi_take::MidiTakeData::default();
                         for data in &track_data { if !data.notes.is_empty(){merged.merge_from(data,0.0);} }
                         if merged.notes.is_empty(){return Err("no_notes_in_track".into());}
                         let length=merged.effective_length_sec().max(0.1);
-                        target.create_midi_item(start_sec,length,&merged,"HiFiShifter MIDI",&allowed)?;
+                        created.push(target.create_midi_item(start_sec,length,&merged,"HiFiShifter MIDI",&allowed)?);
                     } else {
                         let mut offset=0.0;
                         for data in &track_data {
                             if data.notes.is_empty(){continue;}
                             let length=data.effective_length_sec().max(0.1);
-                            target.create_midi_item(start_sec+offset,length,data,"HiFiShifter MIDI",&allowed)?;
+                            created.push(target.create_midi_item(start_sec+offset,length,data,"HiFiShifter MIDI",&allowed)?);
                             offset+=length;
                         }
                     }
-                    Ok(())
+                    Ok(created)
                 })();
-                document.host_undo.finish_request(&view_id,id);result?;
+                document.host_undo.finish_request(&view_id,id);
+                let created=result?;
+                // 【角色没有宿主字段可存】宿主的 MIDI take 里没有"音高参考"这个概念，
+                // 下一次清单刷新用宿主快照覆盖 `midi_take` 时角色会被重置成 MIDI Take。
+                // 这里按**片段级默认角色**记进插件私有表（键用 clip 身份，见
+                // `midi_clip_role_key`）—— 装配与呈现随后都会按它播种。
+                if requested_role==Some(hifishifter_kernel::midi_take::MidiTakeRole::PitchReference){
+                    let mut edits=document.edits.lock_or_recover();
+                    for guid in &created{
+                        edits.midi_roles.insert(
+                            crate::state_channel::midi_clip_role_key(&format!("ara-item-{guid}")),
+                            hifishifter_kernel::midi_take::MidiTakeRole::PitchReference,
+                        );
+                    }
+                }
                 owner.refresh_host_transport();editor.notify_timeline();
                 editor.enqueue(crate::editor::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
                 Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),attempts:0,next_attempt:std::time::Instant::now(),jump:None,imported:None,geometry:None,split:None,media:None,action:None})

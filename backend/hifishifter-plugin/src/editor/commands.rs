@@ -2505,6 +2505,45 @@ pub(super) fn dispatch(
                 &timeline, request,
             ))
         }
+        // 直接导出某个 MIDI Take 的**复调**内容（不压平成音高曲线）。
+        //
+        // 【为什么插件里必须支持】MIDI Take 在插件里就是宿主 item 的 take，而导出是
+        // 纯数据变换：读音符 → 写 .mid，不需要任何宿主写接口。此前这条命令只在独立
+        // App 的命令表里，插件落到通用分派后返回 "command unavailable" —— 用户在插件
+        // 里对 MIDI Take 点「导出 MIDI」永远失败，而那正是这条内容最常见的下一步。
+        "export_midi_take" => {
+            let clip_id = input["clipId"].as_str().ok_or("clipId missing")?.to_owned();
+            let output_path = input["outputPath"]
+                .as_str()
+                .ok_or("outputPath missing")?
+                .to_owned();
+            let path = std::path::Path::new(&output_path);
+            if !path.is_absolute()
+                || !path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| {
+                        ext.eq_ignore_ascii_case("mid") || ext.eq_ignore_ascii_case("midi")
+                    })
+            {
+                return Err("an absolute .mid output path is required".into());
+            }
+            if !path.parent().is_some_and(std::path::Path::is_dir) {
+                return Err("the output folder does not exist".into());
+            }
+            let (data, bpm) = {
+                let timeline = session.timeline.lock_or_recover();
+                let clip = timeline
+                    .clips
+                    .iter()
+                    .find(|clip| clip.id == clip_id)
+                    .ok_or_else(|| format!("clip_not_found: {clip_id}"))?;
+                let data = clip.midi_take.as_ref().ok_or("not_a_midi_take")?.clone();
+                (data, timeline.bpm)
+            };
+            hifishifter_kernel::midi_export::export_midi_take_to_file(&data, path, bpm)?;
+            Ok(serde_json::json!({"ok": true, "path": output_path}))
+        }
         // ── MIDI 导入 ──
         //
         // 【为什么插件里能做】`import_midi_to_pitch` 写的是 `params_by_root_track` 里的
@@ -2556,7 +2595,9 @@ pub(super) fn dispatch(
                 let clip = tl.clips.iter().find(|clip| clip.id == clip_id);
                 let take = clip.and_then(|clip| {
                     let wanted = take_id.as_deref();
-                    clip.takes.iter().find(|take| wanted.is_none_or(|id| take.id == id))
+                    clip.takes
+                        .iter()
+                        .find(|take| wanted.is_none_or(|id| take.id == id))
                 });
                 take.map(|take| crate::state_channel::midi_take_key(&canonical, &take.id))
             };

@@ -413,6 +413,26 @@ fn materialise_presented_clip(
 pub(crate) struct WorkspaceScope {
     pub regions: BTreeSet<u64>,
 }
+/// 该 clip 是否带插件私有的 MIDI 内容（MIDI Take / 音高参考）。
+///
+/// 【为什么按 role 判而不是按"有没有音频源"】MIDI item 在宿主里**永远**没有可授权的
+/// 音频源（ARA 只为音频 region 授权 PCM），所以"缺 source_path"对它不是"在途"，
+/// 而是它的正常形状。此前它与音频占位共用同一条 pending 分支，界面上每个 MIDI item
+/// 都挂着「正在等待宿主完成音频分配」—— 而宿主根本不会给它音频。
+fn clip_has_midi_content(clip: &serde_json::Value) -> bool {
+    fn role(value: &serde_json::Value) -> bool {
+        value
+            .get("midi_role")
+            .and_then(|role| role.as_str())
+            .is_some_and(|role| !role.is_empty())
+    }
+    role(clip)
+        || clip
+            .get("takes")
+            .and_then(|takes| takes.as_array())
+            .is_some_and(|takes| takes.iter().any(role))
+}
+
 impl DocumentSession {
     /// 参数分组只沿宿主已校验的轨道GUID关联；namespace仅用于当前WebView显示身份。
     pub(crate) fn group_aliases(
@@ -808,13 +828,26 @@ impl DocumentSession {
             host: &crate::host::UiTrack,
         ) -> Option<String> {
             for item in &host.items {
-                let Some((key, _)) = items
+                // 【第一条线索：region → item 的映射边】音频 item 一定有活 region，
+                // 这条边也就是它唯一的模型身份来源。
+                let clip_id = items
                     .iter()
                     .find(|(_, guid)| **guid == item.geometry.item_id)
-                else {
-                    continue;
-                };
-                let Some(clip_id) = presented.get(*key) else {
+                    .and_then(|(key, _)| presented.get(*key).map(str::to_owned))
+                    // 【第二条线索：item GUID 本身】MIDI item **没有 ARA region**，
+                    // 于是上面那条边永远不存在。而 clip 的 id 恒为 ara-item-{guid}
+                    // （见装配器），按后缀就能认出"这条 clip 就是那个 item"。少了这条，
+                    // 每个 MIDI item 的宿主轨都会解析失败 ⇒ 新建一条同 id 的轨，
+                    // 装配补出来的占位轨则留在原地变成一条空轨。
+                    .or_else(|| {
+                        let wanted = item.geometry.item_id.as_str();
+                        timeline
+                            .clips
+                            .iter()
+                            .find(|clip| host_item_guid(&clip.id) == Some(wanted))
+                            .map(|clip| clip.id.clone())
+                    });
+                let Some(clip_id) = clip_id else {
                     continue;
                 };
                 if let Some(clip) = timeline.clips.iter().find(|clip| clip.id == clip_id) {
@@ -1410,7 +1443,10 @@ impl DocumentSession {
                 // 【为什么没有"倒放"这一态】倒放现在由本插件渲染
                 // （`ReversePolicy::Materialize` + 内核装配期翻转），不再是"交给宿主
                 // 处理"。它和正放一样走 `ready` —— 方向不再是用户需要处置的状态。
-                let (state, reason, waiting) = if has_source {
+                let (state, reason, waiting) = if clip_has_midi_content(clip) {
+                    // MIDI item：没有音频可等，也没有"在途"这回事。
+                    ("ready", None, false)
+                } else if has_source {
                     ("ready", None, false)
                 } else if source_by_item
                     .get(&item_id)
@@ -1518,6 +1554,12 @@ impl DocumentSession {
                     let has_source = clip["source_path"]
                         .as_str()
                         .is_some_and(|path| !path.is_empty());
+                    if clip_has_midi_content(clip) {
+                        // 与上面第一趟同一契约：MIDI 内容永远不是"等宿主音频"。
+                        clip["host_media"] = serde_json::json!("ready");
+                        pending_since.remove(&id);
+                        continue;
+                    }
                     if has_source {
                         clip["host_media"] = serde_json::json!("ready");
                         // 拿到音频 ⇒ settled：清掉计时，否则下次掉回"在途"会立刻超期。
@@ -1657,7 +1699,9 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
         let missing: Vec<&str> = timeline
             .clips
             .iter()
-            .filter(|clip| !clip.muted && clip.source_path.is_none())
+            // 【MIDI 内容永远不算在途】MIDI item 没有音频源可等；把它计进来会让
+            // 左下角的"进行中"永不停转（`EditorSession::state` 的 `inventory_pending`）。
+            .filter(|clip| !clip.muted && clip.source_path.is_none() && clip.midi_role().is_none())
             .map(|clip| clip.id.as_str())
             .collect();
         if missing.is_empty() {
@@ -1750,9 +1794,12 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
                     clips
                         .iter()
                         .filter(|clip| {
-                            clip.get("source_path")
-                                .and_then(|value| value.as_str())
-                                .is_none_or(str::is_empty)
+                            // MIDI 内容不算"在等音频"（理由见 `clip_has_midi_content`）。
+                            !clip_has_midi_content(clip)
+                                && clip
+                                    .get("source_path")
+                                    .and_then(|value| value.as_str())
+                                    .is_none_or(str::is_empty)
                         })
                         .count()
                 });
@@ -2626,11 +2673,21 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
             let mut current = id;
             let mut visited = BTreeSet::new();
             while visited.insert(current.clone()) {
-                let track = timeline
-                    .tracks
-                    .iter()
-                    .find(|track| track.id == current)
-                    .ok_or("workspace track identity missing")?;
+                // 【为什么这里不再用 ? 传播】"轨道身份缺失"曾经是一个**致命**错误：
+                // 只要有一条 clip 指向的轨不在表里，整份工作区时间线就打不开 —— 而
+                // 那是 MIDI item 的常态（它们没有 ARA region，轨道行只能由装配器补位）。
+                // 装配器现在保证"每条 clip 都有轨"，这里退化成**逐条**防御：真的缺了
+                // 就停在这一层，并在下面把指向空轨的 clip 滤掉，其余轨道照常呈现。
+                let Some(track) = timeline.tracks.iter().find(|track| track.id == current) else {
+                    hifishifter_kernel::log_limiter::emit_limited_key(
+                        log::Level::Warn,
+                        "ara.workspace.track-identity-missing",
+                        format_args!(
+                            "[ara] workspace clip references a track that does not exist: {current}"
+                        ),
+                    );
+                    break;
+                };
                 let Some(parent) = &track.parent_id else {
                     break;
                 };
@@ -2666,6 +2723,23 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
                     "[ara] dropping {} track(s) with no clip and no host entry: {}",
                     dropped.len(),
                     dropped.join(",")
+                ),
+            );
+        }
+        // 【clip 与轨必须同时成立】上面的父链求解已经确定了"存在的轨"集合；任何
+        // 指向不存在轨道的 clip 都只能是一条**无主**残留（装配器已保证新产物不会
+        // 出现这种形状），留着它会让画布上的片段既选不中也拖不动。
+        let before_clips = timeline.clips.len();
+        timeline
+            .clips
+            .retain(|clip| tracks.contains(&clip.track_id));
+        if timeline.clips.len() != before_clips {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.workspace.orphan-clip",
+                format_args!(
+                    "[ara] dropped {} workspace clip(s) whose track does not exist",
+                    before_clips - timeline.clips.len()
                 ),
             );
         }
@@ -2953,6 +3027,64 @@ mod tests {
             Some(60),
             "等了多久必须作为读数发出，等待才有上界可言"
         );
+    }
+
+    /// **MIDI item 没有 ARA region，但它必须照常出现在工作区里。**
+    ///
+    /// 【为什么这条是回归】MIDI item 的 clip 只能带宿主清单给的轨道 id
+    /// （`host-track-{guid}`），而工作区时间线的轨道行来自 region 侧
+    /// （`ara-sequence-*`）。旧实现在父链求解里用 `ok_or("workspace track identity
+    /// missing")?` 直接失败 ⇒ **一个 MIDI item 就能让整份工作区时间线打不开**，
+    /// 用户看到的是报错 + 所有 Clip 停在占位。
+    #[test]
+    fn a_midi_item_without_any_region_does_not_break_the_workspace_timeline() {
+        let document = DocumentSession::new(40_004);
+        *document.timeline.lock_or_recover() = Some(
+            serde_json::from_value(serde_json::json!({
+                "tracks":[{"id":"host-track-{midi}","name":"MIDI","order":0}],
+                "clips":[{
+                    "id":"ara-item-{midi}", "track_id":"host-track-{midi}", "name":"MIDI",
+                    "start_sec":0.0, "length_sec":2.0,
+                    "takes":[{"id":"t","midi_take":{"role":"midi_take","notes":[],"length_sec":2.0}}]
+                }],
+                "bpm":120,"project_sec":2.0
+            }))
+            .unwrap(),
+        );
+        let timeline = document
+            .workspace_timeline_locked()
+            .expect("MIDI item 不得让工作区时间线整体失败");
+        assert_eq!(timeline.clips.len(), 1, "MIDI clip 必须仍然可见");
+        assert!(
+            timeline
+                .tracks
+                .iter()
+                .any(|track| track.id == "host-track-{midi}"),
+            "它的轨道必须被呈现出来（否则片段没有落脚处）"
+        );
+    }
+
+    /// **MIDI 内容不是"在等宿主音频"。**
+    ///
+    /// 【为什么这条是回归】MIDI item 在宿主里永远没有可授权的音频源，所以
+    /// 「缺 source_path」是它的正常形状；旧实现让它走音频占位的 pending 分支，
+    /// 界面上每个 MIDI item 都挂着「正在等待宿主完成音频分配」。
+    #[test]
+    fn a_midi_clip_is_ready_instead_of_waiting_for_host_audio() {
+        let document = DocumentSession::new(40_005);
+        let mut payload = serde_json::json!({
+            "clips": [{
+                "id": "ara-item-{midi}", "track_id": "t",
+                "start_sec": 0.0, "length_sec": 2.0,
+                "midi_role": "midi_take", "midi_take_note_count": 0
+            }],
+        });
+        document.decorate_host_media_locked(&mut payload, "");
+        assert_eq!(
+            payload["clips"][0]["host_media"], "ready",
+            "MIDI 内容没有音频可等，不得被标成占位"
+        );
+        assert!(payload["clips"][0].get("wait_seconds").is_none());
     }
 
     /// **不变量：一个宿主 item 只呈现一条 clip —— 身份升级窗口内也一样。**

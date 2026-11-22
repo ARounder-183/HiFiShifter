@@ -242,6 +242,28 @@ test("pitch reference and quick export are no longer gated by plugin mode", asyn
     expect(entryByLabel(enUS.ctx_quick_export)?.disabled).toBe(false);
 });
 
+/*
+ * MIDI Take 的「试听 / 转为音高参考块」是**插件私有**状态。
+ *
+ * 【为什么钉这一条】`set_midi_take_role` / `set_midi_preview` 只写插件自己的
+ * `EditState`（宿主只提供音符，不知道"音高参考"是什么），不需要任何宿主 MIDI 写
+ * 接口。此前它们被 `canWriteHostMidi()` 门住，于是非 REAPER 插件里这两个入口整段
+ * 消失 —— 而它们正是 MIDI Take 唯一的"下一步"（用户报障："根本无法把 MIDI Take
+ * 转成音高参考块"）。
+ */
+test("MIDI take role and preview stay usable without any host MIDI capability", async () => {
+    setBootstrap(pluginCaps({ midiRead: false, midiWrite: false, midiCreate: false }));
+    const clip = {
+        ...clipWithTakes(),
+        midiRole: "midi_take",
+        midiTakeNoteCount: 2,
+        midiPreviewEnabled: true,
+    } as ClipInfo;
+    await mountMenu({ clip, selectedClips: [clip] });
+    expect(entryByLabel(enUS.ctx_midi_preview_off)?.disabled).toBe(false);
+    expect(entryByLabel(enUS.ctx_midi_as_pitch_ref)?.disabled).toBe(false);
+});
+
 test("the REAPER pitch bridge only appears on REAPER with the envelope API", async () => {
     setBootstrap(pluginCaps({ takePitchBridge: true }), "reaper");
     await mountMenu();

@@ -202,6 +202,28 @@ describe("hostMediaState", () => {
         // MIDI 片段有内容可画，不是占位。
         expect(hostMediaState({ sourcePath: undefined, midiNoteCount: 3 })).toBe("ready");
     });
+
+    test("MIDI 内容永远不是「等宿主音频」——哪怕后端仍报 pending", () => {
+        // 【为什么这一条必须成立】MIDI item 在宿主里没有可授权的音频源，
+        // 「缺 source_path」是它的正常形状。竞态里旧载荷仍可能带着 pending，
+        // 而那句文案会把"这条 MIDI 内容正常"说成"插件在等宿主"。
+        expect(
+            hostMediaState({
+                sourcePath: undefined,
+                midiRole: "midi_take",
+                midiTakeNoteCount: 4,
+                hostMedia: "pending",
+            }),
+        ).toBe("ready");
+        // 空 MIDI Take（0 个音符）同样不是占位：它仍然是 MIDI 内容。
+        expect(
+            hostMediaState({ sourcePath: undefined, midiRole: "midi_take", hostMedia: "pending" }),
+        ).toBe("ready");
+        // 音高参考块同理。
+        expect(hostMediaState({ sourcePath: undefined, midiRole: "pitch_reference" })).toBe(
+            "ready",
+        );
+    });
 });
 
 /**

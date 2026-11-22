@@ -1739,7 +1739,7 @@ export const koKR = {
     import_across_tracks: "트랙 간 추가",
     import_as_takes: "테이크로 추가",
     midi_import_clip_plugin_unavailable:
-        "ARA 플러그인 모드에서는 사용할 수 없습니다. 클립은 호스트 item이므로 피치 커브로 가져오기를 사용하세요.",
+        "이 호스트는 MIDI 아이템을 만들 수 없습니다. MIDI Take에는 호스트 아이템이 필요합니다. 피치 커브로 가져오기를 사용하세요.",
     folder_import_title: "폴더 가져오기",
     folder_import_import: "가져오기",
     folder_import_mode: "배치 방식",

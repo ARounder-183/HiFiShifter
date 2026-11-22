@@ -20,7 +20,6 @@ import {
     canBridgeHostTakePitch,
     canExportAudio,
     canWriteHostMidi,
-    canReadHostMidi,
 } from "../../../services/hostCapabilities";
 import { FadeShapeIcon } from "./FadeShapeIcon";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
@@ -416,8 +415,14 @@ export const ClipContextMenu: React.FC<{
             convertToPitchRef: onConvertToPitchRef != null,
             updatePitchRef: onUpdatePitchRef != null,
             exportMidi: onExportMidi != null,
-            midiTake: !pluginMode || canWriteHostMidi(),
-            midiPreview: !pluginMode || canReadHostMidi(),
+            // 【角色转换与试听都是**插件私有**状态】`set_midi_take_role` /
+            // `set_midi_preview` 只写插件自己的 `EditState`（宿主只提供音符，不知道
+            // "音高参考"），不需要任何宿主 MIDI 写接口。此前它们被 `canWriteHostMidi()`
+            // 门住，于是非 REAPER 插件里这两个入口整段消失 —— 而那正是 MIDI Take 唯一
+            // 的"下一步"。真正需要宿主写能力的只有「替换 MIDI」（`caps.midiAsClip`），
+            // 那一条仍在 `clipMenuModel` 里按能力位把关。
+            midiTake: true,
+            midiPreview: true,
             addToParamSelection: onAddToParamSelection != null,
             silenceDetection: onSilenceDetection != null,
             scanFakeStereo: onScanFakeStereo != null,

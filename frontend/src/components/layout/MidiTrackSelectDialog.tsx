@@ -716,7 +716,18 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                             }}
                         >
                             <Flex gap="3" wrap="wrap">
-                                <label className="flex items-center gap-1 cursor-pointer">
+                                {/* 【禁用理由必须挂在这个选项自己身上】此前它只挂在
+                                    "音高参考块"那一项上，而两项共用同一个判据 —— 用户看到
+                                    的是"MIDI Take 灰着但没有任何解释"，旁边那项却顶着一条
+                                    与它无关的原因。 */}
+                                <label
+                                    className={
+                                        clipTargetAvailable
+                                            ? "flex items-center gap-1 cursor-pointer"
+                                            : "flex items-center gap-1"
+                                    }
+                                    data-tooltip={clipTargetReason}
+                                >
                                     <RadioGroup.Item
                                         value="midiTake"
                                         disabled={!clipTargetAvailable}

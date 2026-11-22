@@ -1,3 +1,4 @@
+import { resolveClipContentKind } from "../../utils/clipContentKind";
 /**
  * 宿主音频读数（插件模式）的解析与判定。
  *
@@ -158,10 +159,13 @@ export function needsNotBoundNotice(status: HostAudioPayload | null): boolean {
  */
 export function isAwaitingHostAudio(clip: {
     sourcePath?: string | null;
+    midiRole?: "midi_take" | "pitch_reference" | string | null;
     midiNoteCount?: number | null;
     midiTakeNoteCount?: number | null;
 }): boolean {
-    return !clip.sourcePath && clip.midiNoteCount == null && clip.midiTakeNoteCount == null;
+    // 判据与 `hostMediaState` 共用同一个内容分类：MIDI 内容永远不是"等宿主音频"。
+    if (resolveClipContentKind(clip) !== "audio") return false;
+    return !clip.sourcePath;
 }
 
 /** 后端给出的逐 clip 宿主媒体分类；与 `render::editor::workspace` 一一对应。 */
@@ -188,10 +192,15 @@ export type HostMediaState = "ready" | "pending" | "unavailable";
  */
 export function hostMediaState(clip: {
     sourcePath?: string | null;
+    midiRole?: "midi_take" | "pitch_reference" | string | null;
     midiNoteCount?: number | null;
     midiTakeNoteCount?: number | null;
     hostMedia?: string | null;
 }): HostMediaState {
+    // 【MIDI 内容永远不是"等宿主音频"】MIDI item 在宿主里没有可授权的音频源，
+    // 所以"缺 source_path"是它的正常形状。后端已经按同一判据给 `ready`，这里再
+    // 兜一次：旧载荷 / 竞态里的 `pending` 不该把 MIDI 片段渲染成占位。
+    if (resolveClipContentKind(clip) !== "audio") return "ready";
     const raw = clip.hostMedia;
     if (typeof raw === "string" && HOST_MEDIA_STATES.has(raw)) {
         return raw as HostMediaState;

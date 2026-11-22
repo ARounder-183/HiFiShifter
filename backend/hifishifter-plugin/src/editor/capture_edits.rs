@@ -427,7 +427,7 @@ fn bind_key(key: &str, namespace: &str) -> String {
 ///
 /// 【为什么不用 `split('-')`】轨道 id 本身可能含 `-`；`splitn(3)` 只吃掉两个数字段，
 /// 其余（含连字符）完整保留。
-fn strip_session_namespace(key: &str) -> &str {
+pub(crate) fn strip_session_namespace(key: &str) -> &str {
     let Some(rest) = key.strip_prefix("hfs-ui-") else {
         return key;
     };

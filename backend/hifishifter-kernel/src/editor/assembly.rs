@@ -166,6 +166,29 @@ impl Assembly {
         timeline.clips = self.clips.clone();
         timeline.bpm = bpm;
         timeline.project_sec = project_sec;
+        // 【不变量：clip 必须有轨】装配的轨道行来自 **region 侧**（`ara-sequence-*`），
+        // 而 MIDI item 没有 ARA region —— 它的 clip 只能拿宿主清单给的轨道 id
+        // （`host-track-{guid}`）。那条轨不在 region 表里，于是"clip 指向一条不存在的
+        // 轨道"会成为**装配产物**的常态，而下游（`workspace_timeline_locked` 的父链
+        // 求解）把它当成"轨道身份缺失"直接失败 ⇒ 一个 MIDI item 能让整份工作区
+        // 时间线打不开（用户看到的是报错 + 所有 Clip 停在占位）。
+        //
+        // 修法放在装配器：它已经知道"有哪些 clip"，补一条占位轨是**结构上正确**的
+        // （轨道名/顺序随后由清单投影覆盖），而不是让每个读者各自兜底。
+        let mut known: BTreeSet<String> = timeline.tracks.iter().map(|t| t.id.clone()).collect();
+        for clip in &timeline.clips {
+            if !known.insert(clip.track_id.clone()) {
+                continue;
+            }
+            if let Ok(track) = serde_json::from_value::<crate::state::Track>(json!({
+                "id": clip.track_id,
+                "name": clip.track_id,
+                "order": timeline.tracks.len() as i32,
+                "compose_enabled": true,
+            })) {
+                timeline.tracks.push(track);
+            }
+        }
         timeline
     }
 
@@ -635,6 +658,41 @@ mod tests {
         }
     }
 
+    /// **不变量：每条 clip 都有一条轨道可落脚。**
+    ///
+    /// 【为什么这是回归】MIDI item 没有 ARA region，它的 clip 只能带宿主清单给的轨道
+    /// id（`host-track-{guid}`），而装配的轨道行来自 region 侧（`ara-sequence-*`）。
+    /// 少了补位，装配产物里就有一条"指向不存在轨道"的 clip —— 下游
+    /// `workspace_timeline_locked` 的父链求解会以 `workspace track identity missing`
+    /// 整体失败，用户看到的是报错 + 全部 Clip 停在占位。
+    #[test]
+    fn every_clip_lands_on_an_existing_track() {
+        let mut item = item(
+            "midi-guid",
+            0.0,
+            2.0,
+            vec![take(
+                "t1",
+                geometry(0.0, 2.0, Some(2.0), None, false, false),
+            )],
+        );
+        item.track_id = "host-track-{midi-guid}".into();
+        // region 表为空：这条 item 没有任何 ARA region（正是 MIDI item 的形状）。
+        let assembly = assemble(&[item], &[]);
+        assert_eq!(assembly.clips.len(), 1);
+        let timeline = assembly.timeline(&[], 120.0);
+        assert_eq!(timeline.clips.len(), 1);
+        let clip = &timeline.clips[0];
+        assert!(
+            timeline
+                .tracks
+                .iter()
+                .any(|track| track.id == clip.track_id),
+            "clip 的轨道必须真实存在：clip.track_id={}",
+            clip.track_id
+        );
+    }
+
     /// K1：没有宿主清单（ARA-only 后端）时，每条 region 一条 clip，id 与旧映射逐字相同。
     ///
     /// 【为什么这是本轮最要紧的一条回归】Cubase / Studio One 不暴露 item 枚举，
@@ -887,18 +945,22 @@ mod tests {
     /// K12：工程长度 = max(item.start + item.length)，与 region 无关。
     #[test]
     fn k12_project_length_follows_the_items() {
-        let a = item(
+        // 两条 item 落在**同一条**轨道上（本用例只关心工程长度；轨道补位由
+        // `every_clip_lands_on_an_existing_track` 单独覆盖）。
+        let mut a = item(
             "a",
             0.0,
             4.0,
             vec![take("t", geometry(0.0, 4.0, Some(9.0), None, false, false))],
         );
-        let b = item(
+        a.track_id = "track-a".into();
+        let mut b = item(
             "b",
             10.0,
             5.0,
             vec![take("t", geometry(0.0, 5.0, Some(9.0), None, false, false))],
         );
+        b.track_id = "track-a".into();
         let assembly = assemble(&[a, b], &[row(1, 0.0, 1.0)]);
         let timeline = assembly.timeline(&[track("track-a")], 120.0);
         assert_eq!(timeline.project_sec, 15.0);

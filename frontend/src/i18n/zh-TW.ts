@@ -1634,7 +1634,7 @@ export const zhTW = {
     import_across_tracks: "跨軌道新增",
     import_as_takes: "作為 Take 新增",
     midi_import_clip_plugin_unavailable:
-        "ARA 外掛模式下無法使用：片段屬於宿主的 item，請改為匯入到音高曲線。",
+        "此宿主不支援新建 MIDI item：MIDI Take 需要一條宿主 MIDI 片段，請改為匯入到音高曲線。",
     folder_import_title: "匯入資料夾",
     folder_import_import: "匯入",
     folder_import_mode: "排列方式",
