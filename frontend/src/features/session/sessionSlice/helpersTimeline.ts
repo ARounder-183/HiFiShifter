@@ -164,12 +164,16 @@ export function applyTimelineState(
                             note: number;
                             velocity: number;
                             channel?: number;
+                            muted?: boolean;
+                            release_velocity?: number;
                         }) => ({
                             startSec: n.start_sec,
                             endSec: n.end_sec,
                             note: n.note,
                             velocity: n.velocity,
                             channel: n.channel ?? 0,
+                            muted: n.muted ?? false,
+                            releaseVelocity: n.release_velocity ?? 0,
                         }),
                     );
                 }

@@ -63,6 +63,8 @@ export interface TimelineClipTake {
         note: number;
         velocity: number;
         channel?: number;
+        muted?: boolean;
+        release_velocity?: number;
     }>;
     midi_fill_gaps?: boolean;
     midi_role?: "midi_take" | "pitch_reference";
@@ -74,6 +76,8 @@ export interface TimelineClipTake {
         note: number;
         velocity: number;
         channel?: number;
+        muted?: boolean;
+        release_velocity?: number;
     }>;
     midi_preview_enabled?: boolean;
     midi_preview_gain_db?: number;
@@ -184,6 +188,8 @@ export interface TimelineClip {
         note: number;
         velocity: number;
         channel?: number;
+        muted?: boolean;
+        release_velocity?: number;
     }>;
     midi_preview_enabled?: boolean;
     midi_preview_gain_db?: number;
@@ -193,6 +199,8 @@ export interface TimelineClip {
         note: number;
         velocity: number;
         channel?: number;
+        muted?: boolean;
+        release_velocity?: number;
     }>;
     midi_fill_gaps?: boolean;
     /** 源域音节区间 [start_sec, end_sec]；缺省表示尚未分析。 */

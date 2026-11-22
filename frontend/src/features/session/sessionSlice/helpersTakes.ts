@@ -68,6 +68,8 @@ export function parseTimelineClipTake(take: TimelineClipTake): ClipTakeInfo {
             note: n.note,
             velocity: n.velocity,
             channel: n.channel ?? 0,
+            muted: n.muted ?? false,
+            releaseVelocity: n.release_velocity ?? 0,
         })),
         midiTakeNoteCount: take.midi_take_note_count,
         midiTakeLengthSec: take.midi_take_length_sec,
