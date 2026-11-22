@@ -507,11 +507,7 @@ export const ClipContextMenu: React.FC<{
             const active =
                 clip.takes?.find((take) => take.id === clip.activeTakeId) ?? clip.takes?.[0];
             void paramsApi
-                .setMidiPreview(
-                    clip.id,
-                    active?.id ?? null,
-                    clip.midiPreviewEnabled === false,
-                )
+                .setMidiPreview(clip.id, active?.id ?? null, clip.midiPreviewEnabled === false)
                 .then(() => void dispatch(fetchTimeline()));
         },
         "midi-as-pitch-ref": () => {

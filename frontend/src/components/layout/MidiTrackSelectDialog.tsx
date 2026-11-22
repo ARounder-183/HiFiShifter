@@ -180,8 +180,8 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
     const resolveImportTarget = () =>
         clipTargetAvailable
             ? ((importTarget as "pitchRef" | "pitchParam" | "midiTake") ??
-                  defaultImportTarget ??
-                  "midiTake")
+              defaultImportTarget ??
+              "midiTake")
             : "pitchParam";
     const [currentTarget, setCurrentTarget] = useState<"pitchRef" | "pitchParam" | "midiTake">(
         resolveImportTarget(),
@@ -717,8 +717,14 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                         >
                             <Flex gap="3" wrap="wrap">
                                 <label className="flex items-center gap-1 cursor-pointer">
-                                    <RadioGroup.Item value="midiTake" disabled={!clipTargetAvailable} />
-                                    <span className="hs-type-label" style={clipTargetAvailable ? undefined : { opacity: 0.5 }}>
+                                    <RadioGroup.Item
+                                        value="midiTake"
+                                        disabled={!clipTargetAvailable}
+                                    />
+                                    <span
+                                        className="hs-type-label"
+                                        style={clipTargetAvailable ? undefined : { opacity: 0.5 }}
+                                    >
                                         {tf("midi_import_target_midi_take")}
                                     </span>
                                 </label>

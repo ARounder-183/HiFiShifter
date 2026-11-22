@@ -399,7 +399,11 @@ export const paramsApi = {
             closeLeadingGap,
         ),
 
-    setMidiTakeRole: (clipId: string, takeId: string | null, role: "midi_take" | "pitch_reference") =>
+    setMidiTakeRole: (
+        clipId: string,
+        takeId: string | null,
+        role: "midi_take" | "pitch_reference",
+    ) =>
         invoke<TimelineResult & { ok: boolean; error?: string }>(
             "set_midi_take_role",
             clipId,
@@ -407,12 +411,7 @@ export const paramsApi = {
             role,
         ),
 
-    setMidiPreview: (
-        clipId: string,
-        takeId: string | null,
-        enabled: boolean,
-        gainDb?: number,
-    ) =>
+    setMidiPreview: (clipId: string, takeId: string | null, enabled: boolean, gainDb?: number) =>
         invoke<TimelineResult & { ok: boolean; error?: string }>(
             "set_midi_preview",
             clipId,
