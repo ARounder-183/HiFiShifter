@@ -244,6 +244,13 @@ fn popup_scale_for(parent: HWND) -> Option<f64> {
     if monitor.is_invalid() {
         return None;
     }
+    // 【为什么查询前切 PMv2】`GetDpiForMonitor` 只回答 per-monitor 感知的线程：ACID
+    // 重开插件时附着线程已被守卫匹配成包裹层的 unaware 上下文（首开恰好落在感知
+    // 宿主线程上，所以首开正常）——在 unaware 上下文里这个调用直接报错，判据退化成
+    // None，于是"第二次起永远走子窗口路径"，症状回到滚动条 + 裁切 + 模糊。屏幕
+    // 缩放是显示器的物理事实，与线程上下文无关；临时切 PMv2 只是让它肯回答（与
+    // `wrapper_physical_client` 同一手法）。
+    let _scope = HostContextScope::force_pm_v2()?;
     let mut dpi_x = 0_u32;
     let mut dpi_y = 0_u32;
     // SAFETY: 只读查询；失败按"拿不到缩放"处理。
