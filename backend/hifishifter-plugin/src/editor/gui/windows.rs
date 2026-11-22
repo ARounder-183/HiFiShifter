@@ -1608,24 +1608,31 @@ mod focus_tests {
     /// 用真实自有HWND验证Tab边界，不凭源码是否包含某个style判断可达性。
     #[test]
     fn native_editor_is_a_tab_stop_in_its_host_parent() {
+        // 【为什么在 PMv2 作用域里建夹具父窗】本用例验证的是**感知包裹窗里的 child
+        // 焦点语义**（宿主 Tab 链）。不感知包裹窗在 >96 DPI 屏幕上会命中 popup 分支
+        // （ACID 形态，见 `popup_scale_for`）—— 那时编辑器是顶层 popup，Tab 链属于
+        // 它自己，宿主父窗里的断言不再适用。PMv2 父窗正是"child 路径正确"的宿主形态。
         // SAFETY: 夹具父窗口仅在本线程创建/销毁，不操作任何用户或REAPER窗口。
-        let parent = unsafe {
-            CreateWindowExW(
-                WINDOW_EX_STYLE::default(),
-                w!("STATIC"),
-                w!("HiFiShifter focus fixture"),
-                WS_OVERLAPPEDWINDOW,
-                0,
-                0,
-                1100,
-                720,
-                None,
-                None,
-                None,
-                None,
-            )
-        }
-        .unwrap();
+        let parent = {
+            let _dpi_scope = HostContextScope::force_pm_v2();
+            unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE::default(),
+                    w!("STATIC"),
+                    w!("HiFiShifter focus fixture"),
+                    WS_OVERLAPPEDWINDOW,
+                    0,
+                    0,
+                    1100,
+                    720,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            .unwrap()
+        };
         let host = WindowsHost::attach(parent.0 as usize, 1100, 720, Arc::new(Default::default()))
             .unwrap();
         let child = HWND(host.key.hwnd as *mut c_void);
