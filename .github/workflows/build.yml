@@ -139,8 +139,7 @@ jobs:
           cache: false
           # The action promotes existing warnings to errors by default (`-D warnings`). The
           # build job must not go red over dependency-crate warnings, nor silence warnings —
-          # so it is explicitly cleared, making warnings visible but non-fatal. Matches the
-          # same treatment in `vst3-unix.yml`.
+          # so it is explicitly cleared, making warnings visible but non-fatal.
           rustflags: ''
 
       - name: Setup Node.js
@@ -149,6 +148,12 @@ jobs:
           node-version: "24"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+
+      # The bridge script is **hand-written JS**; a syntax error shows up as a blank plugin
+      # window. This check used to live in the retired vst3-unix.yml — keep it on the main
+      # pipeline so deleting that workflow does not drop the guard.
+      - name: Check the WebKit bridge script
+        run: node --check backend/hifishifter-plugin/src/editor/gui/bridge.js
 
       # [Why Unix also prepares the ARA / VST3 SDK] Besides the App itself, the backend job's
       # package.sh also produces two plugin artifacts: the VST3 shell (hifishifter-vst3)
@@ -577,9 +582,7 @@ jobs:
       # [Why they ship on the same leg as the App] The App and plugins share the document
       # format, the model manifest version, and the frontend artifact; producing both from
       # one build makes a version mismatch impossible. This workflow is the sole build path
-      # for every platform's App and plugins. The only remaining standalone plugin job is
-      # `vst3-unix.yml`: a PR-only compile check for the two Unix architectures that this
-      # PR matrix leaves to tag builds. It produces no distribution artifact.
+      # for every platform's App and plugins.
       - name: Package unified installer (Unix)
         if: runner.os != 'Windows'
         shell: bash

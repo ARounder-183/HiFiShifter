@@ -11,7 +11,6 @@
 | --------------------- | --------------------- | --------------------------------------------------------------------- | ------------------------------------------------------ |
 | `frontend-build.yml` | 被调用 / 手动         | 构建前端 `dist`（typecheck + vite build），供各产物流水线复用        | `frontend-dist`                                        |
 | `build.yml`          | PR、`v*` tag、手动    | 六平台产物；Windows x64 出一个合并安装器 + 便携包；macOS/Linux 出「App + 插件 + 共享模型库」三合一包 | Windows 安装器 / 便携包；macOS `.pkg`；Linux `.tar.gz` |
-| `vst3-unix.yml`      | PR、手动              | 补测 PR 矩阵未覆盖的两个 Unix 架构（linux-aarch64 / macos-x86_64）的 VST3 编译；只验证，不分发 | 无（失败时上传诊断日志）                               |
 
 ## 构建脚本与自检
 
@@ -35,9 +34,9 @@
 
 ## 触发与矩阵
 
-- PR：`build.yml` 只跑三个平台（windows-x86_64 / macos-arm64 / linux-x86_64）。
-  `vst3-unix.yml` 在 PR 上补测另外两个 Unix 架构（linux-aarch64 / macos-x86_64）的
-  VST3 编译，不重叠、不产出分发件；CLAP 不再单独构建，随各平台安装包一起产出。
+- PR：`build.yml` 只跑三个平台（windows-x86_64 / macos-arm64 / linux-x86_64）；
+  linux-aarch64、macos-x86_64 与 windows-arm64 只在 tag / 手动触发时构建。
+  插件不再有独立流水线，随各平台安装包一起构建。
 - `v*` tag：`build.yml` 跑全量六平台（含每个平台的插件）。
 - tag 与版本号必须一致：`build.yml` 的 `assert-version` 用
   `backend/src-tauri/tauri.conf.json` 的 `version` 比对 tag，不一致直接停。
