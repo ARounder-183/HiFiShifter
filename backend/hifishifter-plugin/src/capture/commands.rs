@@ -111,6 +111,8 @@ fn status_json(owner: &Arc<ExtensionOwner>) -> Value {
             ara_bound: owner.is_ara_bound(),
             output: owner.capture_output().as_str(),
             block_diagnostics: owner.block_diagnostics_json(0),
+            // 捕获区间记在喂入域；展示层必须与 UI 播放头同域（见 `capture_json`）。
+            ui_playhead_offset: owner.ui_playhead_offset(),
         },
     )
 }

@@ -493,6 +493,19 @@ impl ExtensionOwner {
         &self.capture
     }
 
+    /// 当前 **UI 播放头修正量**（帧）：宿主喂入位领先它自己的光标多少。
+    ///
+    /// 【为什么捕获状态也要读它】捕获区间（`runs` / 当前位置）记在**喂入域** ——
+    /// 磁带记账必须如此，素材的工程位置由它决定。但时间轴上的红色捕获带与参数编辑器
+    /// 标尺上的红条是**展示**，必须和用户看到的宿主光标同域（见
+    /// `StreamBlock::playhead_offset`）。此前只有播放头减了这个量，两条捕获带没减，
+    /// 于是 VEGAS 里光标已经对齐、带子整体右偏一个渲染领先量。
+    pub(crate) fn ui_playhead_offset(&self) -> i64 {
+        self.streams[ProcessStream::Realtime.index()]
+            .playhead_offset
+            .load(Ordering::Acquire)
+    }
+
     /// 宿主是否把本实例的音频放进了信号链（三态；见 [crate::host::reaper::FxBypass]）。
     ///
     /// 【为什么这个读数能省下一整次合成】ARA 没有旁通概念，宿主旁通一个 FX 时只是

@@ -701,6 +701,44 @@ fn a_stop_measures_the_host_render_lead_and_the_next_rise_uses_it() {
         "第二次升起：UI 光标必须用实测领先量 {lead}（发布 {expected}），实际 {}",
         view.position_sec
     );
+    assert_eq!(
+        owner.ui_playhead_offset(),
+        lead,
+        "UI 播放头修正量必须等于实测渲染领先量"
+    );
+
+    // 捕获状态里的几何是**展示值**：red 捕获带与参数编辑器标尺都用它，必须和
+    // 播放头同域。磁带记账仍是喂入域 —— 这里只核对发布出来的 JSON，不碰存储。
+    let status = crate::capture::commands::handle(&owner, "capture_status", &serde_json::json!({}))
+        .expect("capture_status");
+    let published = &status["capture"];
+    let stored = owner
+        .capture()
+        .status()
+        .capture
+        .expect("armed capture must expose a span");
+    assert_eq!(
+        published["positionFrame"].as_i64(),
+        Some(stored.position_frame - lead),
+        "捕获当前位置必须平移到宿主光标域"
+    );
+    assert_eq!(
+        published["startFrame"].as_i64(),
+        Some(stored.start_frame - lead),
+        "捕获带起点必须平移到宿主光标域"
+    );
+    for (index, run) in stored.runs.iter().enumerate() {
+        assert_eq!(
+            published["runs"][index]["startFrame"].as_i64(),
+            Some(run.start - lead),
+            "第 {index} 段捕获带起点必须平移到宿主光标域"
+        );
+        assert_eq!(
+            published["runs"][index]["endFrame"].as_i64(),
+            Some(run.end - lead),
+            "第 {index} 段捕获带终点必须平移到宿主光标域"
+        );
+    }
 
     // 播放推进保持同速。
     let mut raw2 = rise2;
