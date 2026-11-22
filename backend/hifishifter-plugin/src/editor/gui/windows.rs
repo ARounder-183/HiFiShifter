@@ -1022,6 +1022,9 @@ impl WindowsHost {
         // 包裹窗决定了 surface 的 DPI。要清晰度就得离开窗口树，而离开窗口树就不再是
         // 插件窗口。因此默认选宿主集成，popup 只作为显式逃生门
         // （`HIFISHIFTER_DPI_POPUP=1`，见 `dpi_popup_requested`）。
+        // 【但尺寸必须与它同尺】模糊可以忍，"内容被放大两轮、右/下永远滚不到"不行：
+        // WebView 的 raw surface 必须按窗口坐标下发（见 `content_geometry`），
+        // 交给 DWM 只拉伸一次。
         //
         // 【子窗口的尺寸纪律】`resize` 与 20 ms 定时器都把子窗口收口到**父窗口客户区**
         // （见 `fit_child_to_parent`）：宿主给的 `onSize` 数字属于宿主的坐标语义，
@@ -1072,25 +1075,15 @@ impl WindowsHost {
             )
         };
         drop(_dpi_scope);
-        // 【几何现场】包裹层不感知时，宿主上下文里的客户区与屏幕上实际合成的矩形
-        // 差一个屏幕缩放（ACID：1100×720 → 1375×900）。这两个数字直接回答"WebView
-        // 应该按哪个尺子铺满"，也是下一次现场排查的第一行证据。
-        let parent_physical = {
-            let mut rect = RECT::default();
-            let _scope = HostContextScope::force_pm_v2();
-            if unsafe { GetClientRect(parent, &mut rect) }.is_ok()
-                && rect.right > 0
-                && rect.bottom > 0
-            {
-                format!("{}x{}", rect.right, rect.bottom)
-            } else {
-                "unavailable".to_string()
-            }
-        };
+        // 【几何现场】不感知包裹层里客户区是窗口坐标（1100×720），DWM 会把它
+        // 按屏幕缩放合成为物理值（125% → 1375×900）；感知包裹层里客户区就是
+        // 物理值。这两类窗口的 WebView 内容面不同（见 `content_geometry`），
+        // 所以把判据与屏幕缩放一起记下来。
         crate::gui_log_line(&format!(
             "editor embed: parent-client={create_width}x{create_height} \
-             parent-physical={parent_physical} parent-unaware={}",
-            window_is_unaware(parent)
+             parent-unaware={} display-scale={:.2}",
+            window_is_unaware(parent),
+            monitor_scale_for(parent).unwrap_or(1.0)
         ));
         let hwnd = match result {
             Ok(hwnd) => hwnd,
@@ -1299,18 +1292,67 @@ fn fit_child_to_parent(hwnd: HWND, fallback: Option<(i32, i32)>) -> Result<bool,
         .map_err(|error| error.to_string())
 }
 
-/// 编辑器子窗口的三套尺寸读数：窗口坐标里的客户区、物理客户区、显示器缩放。
+/// 一次窗口测量得出的 **WebView 内容面**：窗口客户区、交给 `SetBounds` 的原始
+/// 像素面、交给 `SetRasterizationScale` 的比例。
+struct EditorGeometry {
+    /// 窗口坐标里的客户区（只用于诊断日志）。
+    client: (i32, i32),
+    /// 交给 `SetBounds` 的原始像素面（`USE_RAW_PIXELS` 的含义见 [`content_geometry`]）。
+    content: (i32, i32),
+    /// 交给 `SetRasterizationScale` 的比例。
+    scale: f64,
+    /// 窗口是否 DPI-unaware。
+    unaware: bool,
+}
+
+/// 由测量值决定 WebView 的内容面 —— **判据只有一条：这块 surface 会不会被 DWM 拉伸**。
 ///
-/// 【为什么物理值要在 PMv2 上下文里量】窗口坐标按**窗口自己的感知上下文**解释，
-/// 而 DWM 合成按显示器缩放。ACID 的 `sfvstwrap` 是 DPI-unaware：它的客户区在
-/// 96-DPI 空间里是 1100×720，屏幕上是 1375×900（125%）。WebView2 的
-/// `USE_RAW_PIXELS` 边界要的是后者；只给前者，页面视口就只剩 80%，右/下永远滚不到
-/// （2026-11-22 现场）。PMv2 上下文里 `GetClientRect` 会被系统虚拟化成物理值 ——
-/// 与 `wrapper_physical_client` 同一手法；感知窗口里物理值与窗口值相等。
+/// 【DPI-unaware 窗口：内容面 = 窗口坐标，缩放 = 1】DWM 把整棵窗口树按屏幕缩放
+/// 拉伸。ACID 的 `sfvstwrap` 就是这种：窗口坐标里客户区 1100×720，屏幕上合成为
+/// 1375×900（125%）。WebView 的 surface 是这棵树的一部分，它的“raw pixel”就是
+/// **窗口坐标里的像素**，不是屏幕上的物理像素。把 PMv2 量到的 1375×900 交给它，
+/// surface 会比窗口大 25%，DWM 再拉伸一次 —— 于是内容被放大两轮、状态栏被推出
+/// 窗口外，滚到最右下也看不见（2026-11-22 第二次打开 ACID 的现场）。缩放固定 1.0：
+/// 窗口自己的 DPI 就是 96（unaware 的 `GetDpiForWindow` 恒回 96），屏幕缩放由 DWM
+/// 在窗口外完成；再乘一次 1.25 只会让文字再次变大。
 ///
-/// 返回 `(窗口宽, 窗口高, 物理宽, 物理高, 缩放)`。
-fn editor_geometry(window: HWND) -> Option<(i32, i32, i32, i32, f64)> {
-    // 【窗口自己的坐标】诊断用；unaware 窗口里它是 96-DPI 逻辑值。
+/// 【DPI-aware 窗口：内容面 = 物理客户区，缩放 = 显示器缩放】窗口自己按物理像素
+/// 合成，DWM 不再拉伸。`USE_RAW_PIXELS` 要的正是物理值，rasterization scale 取
+/// 显示器缩放，页面拿到 `物理 / 缩放` 的 CSS 视口（第一次打开 ACID：1100×720 物理
+/// → 880×576 CSS）。
+fn content_geometry(
+    client: (i32, i32),
+    physical: (i32, i32),
+    unaware: bool,
+    monitor_scale: f64,
+) -> EditorGeometry {
+    if unaware {
+        return EditorGeometry {
+            client,
+            content: client,
+            scale: 1.0,
+            unaware,
+        };
+    }
+    EditorGeometry {
+        client,
+        content: physical,
+        scale: if monitor_scale > 0.0 {
+            monitor_scale
+        } else {
+            1.0
+        },
+        unaware,
+    }
+}
+
+/// 量一次编辑器窗口，按它的感知上下文给出 WebView 该铺多大的内容面。
+///
+/// 两种窗口读同一组 `GetClientRect` 会得到不同含义的值，所以**先判感知上下文，
+/// 再决定要不要读物理值**：unaware 窗口的物理值（PMv2 里量到的 1375×900）恰恰
+/// 是绝不能交给 WebView 的那一个。
+fn editor_geometry(window: HWND) -> Option<EditorGeometry> {
+    // 【窗口自己的坐标】不感知窗口里是 96-DPI 逻辑值；感知窗口里就是物理值。
     let mut client = RECT::default();
     {
         let _scope = HostContextScope::enter(window);
@@ -1318,9 +1360,17 @@ fn editor_geometry(window: HWND) -> Option<(i32, i32, i32, i32, f64)> {
             return None;
         }
     }
-    // 【DWM 实际合成的物理值】从 PMv2 看同一个 unaware 窗口，系统会把逻辑矩形
-    // 按屏幕缩放换算回来。逃生门（`HIFISHIFTER_NO_DPI_AWARE=1`）下退回当前上下文，
-    // 行为与改动前一致。
+    if client.right <= 0 || client.bottom <= 0 {
+        return None;
+    }
+    let client = (client.right, client.bottom);
+    if window_is_unaware(window) {
+        // 不感知窗口：内容面与窗口同尺，屏幕缩放交给 DWM —— 不能再读物理值。
+        return Some(content_geometry(client, client, true, 1.0));
+    }
+    // 【感知窗口的物理值】窗口自己按物理像素合成；从 PMv2 再量一次覆盖宿主线程
+    // 上下文被临时改过的情形。逃生门（`HIFISHIFTER_NO_DPI_AWARE=1`）下退回当前
+    // 上下文，行为与改动前一致。
     let mut physical = RECT::default();
     {
         let _scope = HostContextScope::force_pm_v2();
@@ -1328,17 +1378,60 @@ fn editor_geometry(window: HWND) -> Option<(i32, i32, i32, i32, f64)> {
             return None;
         }
     }
-    if client.right <= 0 || client.bottom <= 0 || physical.right <= 0 || physical.bottom <= 0 {
+    if physical.right <= 0 || physical.bottom <= 0 {
         return None;
     }
-    let scale = monitor_scale_for(window).unwrap_or(1.0);
-    Some((
-        client.right,
-        client.bottom,
-        physical.right,
-        physical.bottom,
-        scale,
+    let physical = (physical.right, physical.bottom);
+    Some(content_geometry(
+        client,
+        physical,
+        false,
+        monitor_scale_for(window).unwrap_or(1.0),
     ))
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+
+    /// 不感知窗口的内容面必须是**窗口坐标**，不能是 PMv2 量到的物理值。
+    ///
+    /// 【为什么这条是回归】把 1375×900 交给 WebView 后，DWM 会把这块 surface 再
+    /// 按 1.25× 拉伸 —— 用户看到的是"内容又放大一圈、填满窗口，状态栏被推出窗口
+    /// 外，滚到最右下也看不见"（ACID 第二次打开，2026-11-22）。内容面与窗口同尺
+    /// 之后，DWM 只拉伸一次：文字回到与第一次打开相同的物理大小，底部与右侧也能
+    /// 被宿主滚动条完整取到。
+    #[test]
+    fn an_unaware_window_sizes_the_view_in_window_coordinates() {
+        let geometry = content_geometry((1100, 720), (1375, 900), true, 1.25);
+        assert_eq!(
+            geometry.content,
+            (1100, 720),
+            "不感知窗口的 raw surface 是窗口坐标，不是屏幕物理值"
+        );
+        assert_eq!(
+            geometry.scale, 1.0,
+            "屏幕缩放由 DWM 完成，WebView 再乘一次就是二次放大"
+        );
+    }
+
+    /// 感知窗口没有 DWM 拉伸：内容面取物理客户区，缩放取显示器缩放。
+    ///
+    /// 【为什么让两个输入不同】这样断言才区分得出实现选了哪一个；真实 PMv2
+    /// 窗口里两者相等，选错也看不出来。
+    #[test]
+    fn an_aware_window_sizes_the_view_in_physical_pixels() {
+        let geometry = content_geometry((880, 576), (1100, 720), false, 1.25);
+        assert_eq!(geometry.content, (1100, 720), "感知窗口按物理像素合成");
+        assert_eq!(geometry.scale, 1.25, "rasterization scale 跟随显示器");
+    }
+
+    /// 拿不到显示器缩放时退回 1.0，不把 0 当作比例交给 WebView。
+    #[test]
+    fn a_missing_monitor_scale_falls_back_to_one() {
+        let geometry = content_geometry((1100, 720), (1100, 720), false, 0.0);
+        assert_eq!(geometry.scale, 1.0);
+    }
 }
 
 /// 把 popup 逐拍摆回**宿主留给插件那块矩形**的物理客户区；返回是否发生了摆放。
@@ -1466,9 +1559,10 @@ unsafe extern "system" fn window_proc(
                 let port = (*pointer).port.clone();
                 port.sync_bounds(hwnd);
             } else if message == WM_DPICHANGED || message == WM_DPICHANGED_AFTERPARENT {
-                // 【为什么 DPI 变化也要重下边界】raw-pixels 边界不变，但
-                // RasterizationScale 变了（窗口被拖到另一块缩放不同的显示器）。子窗口
-                // 收到的是 `WM_DPICHANGED_AFTERPARENT`；顶层窗口是 `WM_DPICHANGED`。
+                // 【为什么 DPI 变化也要重下边界】感知窗口换了显示器 ⇒ 物理内容面与
+                // rasterization scale 都要更新；不感知窗口的缩放固定 1.0，但窗口
+                // 尺寸本身会被重新协商，内容面同样要跟着走。子窗口收到的是
+                // `WM_DPICHANGED_AFTERPARENT`；顶层窗口是 `WM_DPICHANGED`。
                 let port = (*pointer).port.clone();
                 port.sync_bounds(hwnd);
             } else if message == WM_CLOSE {
@@ -1740,34 +1834,36 @@ impl WindowsPort {
         }
     }
 
-    /// 子窗口尺寸变了：把**物理**客户区交给控制器，并显式固定渲染比例。
+    /// 子窗口尺寸变了：把它的**内容面**交给控制器，并显式固定渲染比例。
     ///
-    /// 【为什么不能直接把 `GetClientRect` 的结果交出去】WebView2 的 `Bounds` 默认按
-    /// `BoundsMode` 解释；`USE_RAW_PIXELS` 要物理像素，`USE_RASTERIZATION_SCALE`
-    /// 要逻辑像素。宿主的包裹层是否感知 DPI 决定这个子窗口拿到的是哪一种数字
-    /// （ACID：unaware 包裹层报 1100×720 逻辑，DWM 实际合成 1375×900 物理）。
-    /// 此前直接交客户区原值，在不感知窗口里就少了 1.25×，页面视口只有
-    /// 1100/1375 = 80% —— 用户滚动到最右下仍然缺一条，且内容被 DWM 二次拉伸发糊。
-    /// 现在两边都显式：BoundsMode=RAW_PIXELS、Bounds=物理客户区、
-    /// RasterizationScale=显示器缩放。页面始终拿到 `物理 / 缩放` 的 CSS 视口，
-    /// 与宿主/窗口的感知上下文无关；渲染面又与窗口物理像素 1:1。
+    /// 【为什么不能只看 `GetClientRect` 的数字】同一个客户区在两种感知上下文里
+    /// 是两种长度：ACID 的 unaware 包裹层报 1100×720（窗口坐标，DWM 会拉伸到
+    /// 1375×900 物理），感知窗口报的就是物理值。WebView 的 raw surface 必须与
+    /// **窗口 surface** 同尺，否则 DWM 会把它再拉伸一次 —— 内容放大、右/下被裁。
+    /// 判据在 [`content_geometry`] 里只有一条：窗口会不会被 DWM 拉伸。
+    ///
+    /// 现在两边都显式：BoundsMode=RAW_PIXELS、Bounds=`content_geometry` 给出的
+    /// 内容面、RasterizationScale 也由它给出。页面视口于是始终是 `内容面 / 缩放`，
+    /// 与窗口的合成方式一致。
     fn sync_bounds(&self, hwnd: HWND) {
         let controller = self.controller.borrow().clone();
         let Some(controller) = controller else {
             return;
         };
-        let Some((client_width, client_height, width, height, scale)) = editor_geometry(hwnd)
-        else {
+        let Some(geometry) = editor_geometry(hwnd) else {
             return;
         };
+        let (width, height) = geometry.content;
+        let scale = geometry.scale;
         let key = (width, height, scale.to_bits());
         let previous = self.bounds.get();
         if previous == Some(key) {
             return;
         }
         let Ok(controller3) = controller.cast::<ICoreWebView2Controller3>() else {
-            // 【旧运行时没有 BoundsMode】保持改动前的语义：交窗口上下文里的客户区
-            // 原值。它不能修不感知包裹层的裁切，但也不会把已知可用的宿主弄坏。
+            // 【旧运行时没有 BoundsMode】交窗口上下文里的客户区原值：unaware 窗口
+            // 里它正好是内容面；感知窗口里它是物理值。它不能显式固定缩放，但也
+            // 不会把已知可用的宿主弄坏。
             let mut bounds = RECT::default();
             let _scope = HostContextScope::enter(hwnd);
             if unsafe { GetClientRect(hwnd, &mut bounds) }.is_ok() {
@@ -1776,8 +1872,8 @@ impl WindowsPort {
             return;
         };
         // 【为什么关掉自动检测】不感知窗口的 `GetDpiForWindow` 恒为 96，自动检测
-        // 会把 RasterizationScale 拉回 1.0，页面重新缩成 80%。缩放由我们按
-        // 显示器事实显式给。
+        // 会让缩放与窗口坐标脱节；缩放该取多少由 [`content_geometry`] 按 surface
+        // 是否被 DWM 拉伸决定，这里显式给。
         let _ = unsafe { controller3.SetShouldDetectMonitorScaleChanges(false) };
         let _ = unsafe { controller3.SetBoundsMode(COREWEBVIEW2_BOUNDS_MODE_USE_RAW_PIXELS) };
         let _ = unsafe { controller3.SetRasterizationScale(scale) };
@@ -1790,15 +1886,16 @@ impl WindowsPort {
         if unsafe { controller.SetBounds(bounds) }.is_ok() {
             self.bounds.set(Some(key));
             // 尺寸变化在拖动分隔条时会来很多次；只在首次配置 / 缩放变化时留一行，
-            // 诊断"子窗口跟随了没有、WebView 拿到了多大的物理面"已经足够。
+            // 诊断"子窗口跟随了没有、WebView 拿到了多大的面"已经足够。
             let scale_changed = previous.is_none_or(|previous| previous.2 != key.2);
             if scale_changed {
                 let css_width = (f64::from(width) / scale).round() as i32;
                 let css_height = (f64::from(height) / scale).round() as i32;
                 crate::gui_log_line(&format!(
-                    "editor webview bounds: client={client_width}x{client_height} \
-                     physical={width}x{height} css={css_width}x{css_height} \
-                     scale={scale:.2} mode=raw-pixels"
+                    "editor webview bounds: client={}x{} content={width}x{height} \
+                     css={css_width}x{css_height} scale={scale:.2} mode=raw-pixels \
+                     unaware={}",
+                    geometry.client.0, geometry.client.1, geometry.unaware
                 ));
             }
         }
