@@ -60,6 +60,73 @@ pub(crate) struct UiTrack {
     pub target: HostTrackTarget,
 }
 
+impl UiTrack {
+    /// 与另一份枚举结果的**内容**逐字比较（不含指针类 target 与死字段）。
+    fn content_matches(&self, other: &Self) -> bool {
+        self.guid == other.guid
+            && self.id == other.id
+            && self.name == other.name
+            && self.order == other.order
+            && self.parent_guid == other.parent_guid
+            && self.items.len() == other.items.len()
+            && self
+                .items
+                .iter()
+                .zip(other.items.iter())
+                .all(|(a, b)| a.content_matches(b))
+    }
+}
+
+impl UiItem {
+    fn content_matches(&self, other: &Self) -> bool {
+        self.geometry == other.geometry
+            && self.name == other.name
+            && self.bound_take == other.bound_take
+            && self.takes.len() == other.takes.len()
+            && self
+                .takes
+                .iter()
+                .zip(other.takes.iter())
+                .all(|(a, b)| a.content_matches(b))
+    }
+}
+
+impl UiTake {
+    fn content_matches(&self, other: &Self) -> bool {
+        self.geometry == other.geometry
+            && self.name == other.name
+            && self.active == other.active
+            && self.reversed == other.reversed
+    }
+}
+
+/// 两轮清单枚举的**内容**是否逐字相同。
+///
+/// 【为什么需要它】"宿主工程状态计数器推进了"（`GetProjectStateChangeCount`）只是
+/// 一条**提示**：REAPER 里 item 的选中、视图缩放、光标移动都会推进它，而清单枚举
+/// 出的内容可能一字未变。把提示当真相 ⇒ 点选任何 item（包括与本插件无关的）都会
+/// 推进 `render_epoch` 并 rearm 渲染 —— 空闲工程也会被这条假变更通道搅出一轮又一轮
+/// 全量 mixdown（2026-11-22 现场实测：81 次 mixdown / 7 分钟，全部 `cache_reused=0`）。
+/// 枚举结果才是真相：与已发布清单逐字相同 ⇒ 这一轮只记令牌，渲染管线一概不动。
+///
+/// 【为什么手写字段清单而不是 derive】`target`（item/take/track 的宿主裸地址）与
+/// `change`（无读取方的死字段）不参与比较 —— 前者是宿主内部实现细节，比较它会把
+/// "内容没变"误判成"变了"。渲染与装配消费的一切都在其余字段里：几何全量
+/// （`HostClipGeometry` 的 `PartialEq`）、take 结构、名称、轨道身份与顺序。新增
+/// 渲染相关字段时**必须**同步加进来，否则真实变更会被这道闸门吞掉。
+pub(crate) fn inventory_content_matches(
+    published: &std::collections::BTreeMap<String, UiTrack>,
+    enumerated: &std::collections::BTreeMap<String, UiTrack>,
+) -> bool {
+    published.len() == enumerated.len()
+        && published
+            .iter()
+            .zip(enumerated.iter())
+            .all(|((published_guid, published_track), (enumerated_guid, enumerated_track))| {
+                published_guid == enumerated_guid && published_track.content_matches(enumerated_track)
+            })
+}
+
 impl NativeHost {
     /// 所有查询都在所属UI线程并逐调用授权；没有region也不代表轨道或item已被删除。
     pub(crate) fn ui_track(
@@ -565,6 +632,69 @@ mod tests {
         // 宿主不回答（不是 section/reverse 块）→ 按正放，而不是制造一个"未知"态。
         fixture.section_reports.set(false);
         assert!(!host.ui_track(&|| true).unwrap().items[0].takes[0].reversed);
+    }
+
+    /// **清单内容比对：宿主一字未改必须判"相同"，任何真实变更必须被认出来。**
+    ///
+    /// 【回归的现场】2026-11-22：REAPER 的工程状态计数器会为 item 选中、视图缩放、
+    /// 光标移动推进，而清单枚举出的内容一字不变。此前"令牌变了"就被当成"几何变了"，
+    /// 点选任何 item（包括与本插件无关的）都推进 `render_epoch` 并 rearm 渲染 ——
+    /// 状态栏"渲染中"随每次点选常亮，空闲工程也被搅出一轮轮全量 mixdown。
+    /// 闸门契约：内容逐字相同 ⇒ 不动渲染管线；几何 / take 结构任一变化 ⇒ 放行。
+    #[test]
+    fn inventory_content_gate_passes_only_real_changes() {
+        let fixture = super::super::MockHost::new();
+        fixture.enable_writer();
+        fixture.enable_media();
+        fixture.inventory_enabled.set(true);
+        let host = Arc::new(fixture.client());
+        let first = host.ui_track(&|| true).unwrap();
+        let second = host.ui_track(&|| true).unwrap();
+        let mut published = std::collections::BTreeMap::new();
+        published.insert(first.guid.clone(), first);
+        let mut enumerated = std::collections::BTreeMap::new();
+        enumerated.insert(second.guid.clone(), second);
+        assert!(
+            inventory_content_matches(&published, &enumerated),
+            "宿主一字未改 ⇒ 两轮枚举逐字相同（target 指针与死字段的差异必须被排除）"
+        );
+        // 真实变更一：mute 翻转（几何字段）必须放行。
+        fixture.set_value("B_MUTE", 1.);
+        let muted = host.ui_track(&|| true).unwrap();
+        let mut with_mute = std::collections::BTreeMap::new();
+        with_mute.insert(muted.guid.clone(), muted);
+        assert!(
+            !inventory_content_matches(&published, &with_mute),
+            "mute 翻转是真实变更，必须放行发布与失效路径"
+        );
+        // 真实变更二：take 结构变化必须放行（增删 take 都算）。直接对克隆出的清单
+        // 做 take 变异 —— 比对器必须覆盖 take 数组。
+        let mut with_takes = std::collections::BTreeMap::new();
+        let mut extra_take_track = published.values().next().unwrap().clone();
+        let one_more = extra_take_track.items[0].takes[0].clone();
+        extra_take_track.items[0].takes.push(one_more);
+        with_takes.insert(extra_take_track.guid.clone(), extra_take_track);
+        assert!(
+            !inventory_content_matches(&published, &with_takes),
+            "take 结构变化是真实变更"
+        );
+        // 真实变更三：item 名称变化（GUI 与装配都消费）必须放行。
+        let mut renamed = std::collections::BTreeMap::new();
+        let mut renamed_track = published.values().next().unwrap().clone();
+        renamed_track.items[0].name.push('!');
+        renamed.insert(renamed_track.guid.clone(), renamed_track);
+        assert!(
+            !inventory_content_matches(&published, &renamed),
+            "item 名称变化是真实变更"
+        );
+        // 轨道集合不同（增删轨）也必须放行。
+        let mut extra_track = published.clone();
+        let another = host.ui_track(&|| true).unwrap();
+        extra_track.insert(format!("{}-extra", another.guid), another);
+        assert!(
+            !inventory_content_matches(&published, &extra_track),
+            "轨道集合变化是真实变更"
+        );
     }
 
     /// **回归：负 `D_PLAYRATE` 也是倒放的一种表达，必须与方向位等价。**

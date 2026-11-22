@@ -12,7 +12,7 @@ pub(crate) use write::{HostClipTarget, HostUndoBlock};
 mod media;
 pub(crate) use media::HostTrackTarget;
 mod ui_inventory;
-pub(crate) use ui_inventory::{UiItem, UiTrack};
+pub(crate) use ui_inventory::{inventory_content_matches, UiItem, UiTrack};
 mod folder;
 /// FX 旁通 / 离线读数（宿主是否仍在读我们的输出）。
 mod fx_state;

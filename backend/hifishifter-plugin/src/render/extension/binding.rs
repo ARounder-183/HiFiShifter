@@ -1667,6 +1667,25 @@ impl ExtensionOwner {
             *stamp.0.ui_inventory_sampled_at.lock_or_recover() = Some(std::time::Instant::now());
             return;
         }
+        // 【令牌动了 ≠ 内容动了】令牌是**提示**（`GetProjectStateChangeCount` 会为
+        // item 选中、视图缩放、光标移动推进），枚举出的清单才是真相。此前只要令牌
+        // 变了就发布 + bump 代次 + 推进 `render_epoch` + rearm 渲染 —— REAPER 里点选
+        // 任何 item（包括与本插件无关的）都会点亮"渲染中"，空闲工程也被它搅出一轮轮
+        // 全量 mixdown（2026-11-22 现场：81 次 mixdown / 7 分钟，枚举内容逐轮相同）。
+        // 内容与已发布清单逐字相同时，这一轮只把令牌记下，渲染管线一概不动；真变了
+        // （几何、take、名称、facts 任一）才走下面的发布与失效路径。
+        if !facts_changed
+            && crate::host::reaper::inventory_content_matches(
+                &stamp.0.ui_tracks.lock_or_recover(),
+                &tracks,
+            )
+        {
+            *stamp.0.ui_inventory_stamp.lock_or_recover() = Some(token);
+            *stamp.0.ui_inventory_sampled_at.lock_or_recover() = Some(std::time::Instant::now());
+            // 枚举完整地走完了，且结论是"与已发布的完整清单一致" —— 缺席证据继续有效。
+            stamp.0.inventory_incomplete.store(false, Ordering::Release);
+            return;
+        }
         stamp
             .0
             .ui_known_tracks
