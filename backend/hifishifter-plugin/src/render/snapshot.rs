@@ -459,20 +459,6 @@ impl SnapshotPublisher {
         }
         Some(sample as f64 / rate)
     }
-    /// 当前快照覆盖的工程秒区间（`None` = 没有快照）。
-    pub(crate) fn current_span_seconds(&self, rate: f64) -> Option<(f64, f64)> {
-        if !(rate.is_finite() && rate > 0.0) {
-            return None;
-        }
-        let read = self.enter();
-        let snapshot = read.snapshot()?;
-        if snapshot.sample_rate == 0 || snapshot.left.is_empty() {
-            return None;
-        }
-        let start = snapshot.origin_sample as f64 / rate;
-        let end = (snapshot.origin_sample + snapshot.left.len() as i64) as f64 / rate;
-        Some((start, end))
-    }
     /// 当前快照代次（测试断言用；接缝淡化问的是下面的 `content`）。
     #[cfg(test)]
     pub(crate) fn generation(&self) -> u64 {

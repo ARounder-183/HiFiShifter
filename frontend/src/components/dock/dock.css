@@ -588,14 +588,15 @@ body[data-dock-dragging="true"] iframe {
 /*
  * 单标签且不显示标签条时的抓手：给用户一个能抓住拖出去的地方。
  *
- * 【为什么是 6px 且默认近乎透明】它只是一次拖拽的着力点，用户并不频繁使用，却要
- * 长期让出高度 —— 默认布局下时间轴 + 参数编辑器各 12px，合计 24px 纯属浪费。
- * 现在减半到 6px，并且默认只留极淡的底纹，指针移到窗格上才显形（不占额外的视觉
- * 注意力）。
+ * 【为什么保留 6px 的流内条】窗格的每一条边都属于某个面板的交互面（顶部是
+ * 标尺、底部是横向滚动条、左右是内容），把抓手做成覆盖内容的悬浮层会吃掉这些
+ * 位置上的第一次点击。保留一条很薄的**真实占位**，内容就不会被盖住，标尺与
+ * 工具栏也照常可点。默认布局里上下两个面板各让出 6px，合计 12px，可接受。
  *
- * 【为什么不干脆做成零高度悬浮层】窗格的每一条边都属于某个面板的交互面（顶部是
- * 标尺、底部是横向滚动条、左右是内容），悬浮层一旦按"悬停即激活"就会吃掉这些
- * 位置上的第一次点击。零成本换来的误触风险不可接受，因此保留一个很薄的真实占位。
+ * 【为什么只有左边一小段可拖】此前整条 6px 都能起拖：用户在日常点击顶部边缘
+ * 时很容易误触，而 15px 的图标又被 6px 的条裁得只剩中间两个点，视觉上反而不
+ * 像一个抓手。现在条本身只是安全间隔，真正可拖的是左上角 24×6 的抓手：看得
+ * 见、抓得准，又不会让整行都变成拖拽热区。
  *
  * 【为什么固定在**上方**、不跟着标签行走】拖起一个窗体时，被拖动的是它的**左上角**
  * （浮动窗口的定位锚点）。抓手在下方会变成"用户抓的是底边、动的却是顶边"，拖拽
@@ -605,23 +606,47 @@ body[data-dock-dragging="true"] iframe {
 .hs-dock-grip {
     display: flex;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     flex: 0 0 auto;
     height: 6px;
-    color: var(--qt-text-muted);
+    /* 左侧留 4px：面板左边若有 splitter，它的命中区会向窗格内扩 3px。 */
+    padding-left: 4px;
     background: var(--qt-window);
-    opacity: 0.18;
     user-select: none;
-    cursor: default;
 }
 
-.hs-dock-tabset:hover .hs-dock-grip {
-    opacity: 0.55;
+/*
+ * 左上角真正的抓手。
+ *
+ * 24×6 是"鼠标能稳定抓住"和"不占视觉"之间的折中：高度与条相同，不越界；
+ * 宽度足够容纳一个 6px 的点阵并留出可点的余量。默认只留半透明的点阵，指针
+ * 落到抓手本身才点亮背景与点阵 —— 既不会横贯整窗，也不会在用户只是划过
+ * 面板时抢注意力。
+ */
+.hs-dock-grip-handle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 24px;
+    height: 100%;
+    border-radius: var(--qt-radius-sm);
+    color: var(--qt-text-muted);
+    opacity: 0.5;
+    cursor: grab;
+    transition:
+        opacity 90ms linear,
+        background 90ms linear;
 }
 
-.hs-dock-grip:hover {
+.hs-dock-grip-handle:hover,
+.hs-dock-grip-handle:active {
     opacity: 1;
-    background: var(--qt-panel);
+    background: var(--qt-hover);
+}
+
+.hs-dock-grip-handle:active {
+    cursor: grabbing;
 }
 
 /* ── 浮动落点预览 ───────────────────────────────────────────────── */

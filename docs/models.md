@@ -21,10 +21,37 @@
 | App / VST3 / CLAP bundle 里的 `models/models.json` | `build.ps1`、Unix 统一打包脚本（只留清单） | 运行时 `model_store`，用来判断共享库能不能用 |
 | 共享模型库（Windows `%PROGRAMDATA%\HiFiShifter\models\<version>`；macOS `/Library/Application Support/HiFiShifter/models/<version>`；Linux `$XDG_DATA_HOME/HiFiShifter/models/<version>`） | 各平台统一安装器（独占写） | App 与插件（只读） |
 | 纯插件包 / 便携版的 `Contents/Resources/models/` | 构建（自包含，权重随包） | 运行时直接读 |
+| 用户自备目录（本地数据目录下的 `models-user`，见下节） | 用户（手工） | App 与插件（按件优先） |
 | release 资产 `models-<version>.zip` | 人，按本文 | `fetch-models.py`、镜像 |
 
 权重为什么不在仓库里、三个平台各自的共享库落点，见
 [`ci.md`](ci.md) 与 `backend/hifishifter-kernel/src/model_store.rs` 的文件头。
+
+## 用户自备模型：`models-user`
+
+想自己换一份权重（例如换声码器）的用户不需要重打包、改清单或设环境变量：把文件放进
+本地数据目录下的 `models-user`（Windows 是 `%LOCALAPPDATA%\HiFiShifter\models-user`）
+即可，**放哪件就覆盖哪件**，没放的件由共享库 / bundle 照常兜底。目录布局与安装的模型
+根一致：
+
+```
+fcpe/fcpe.onnx                                   （音高检测）
+nsf_hifigan/pc_nsf_hifigan.onnx + config.json    （声码器）
+hnsep/hnsep.onnx                                 （气声分离）
+GAME/                                            （音符分块，可选）
+```
+
+- **校验只有"文件存在"**：安装的模型靠清单（版本 + 字节数）挡拷贝中断；自备权重没有
+  清单可言，那份闸只会把人挡在门外。它的"校验"就是推理加载本身 —— 加载失败会在日志
+  与界面上如实报错。正确性由使用者负责。
+- **按件、先登记者胜**：`model_paths` 的登记处只写一次，`models-user` 在共享库之前
+  登记 —— 放了的件赢，没放的件留给后面的链。
+- **优先级**：`HIFISHIFTER_MODELS_DIR`（整树覆盖，CI / 排障用）> `models-user` >
+  共享库 > bundle。启动日志会写明实际生效的来源
+  （`models: <目录> (shared, …, user-overlay)`）；目录存在却一件没认出来时，也有一行
+  WARN 指出该放哪些文件名。
+- 一次性换掉整棵树仍然用 `HIFISHIFTER_MODELS_DIR`；`models-user` 的价值在
+  "只换一件 + 不用改环境"。
 
 ## 发布一个新版本
 
@@ -194,6 +221,7 @@ CI 替你跑同一件事的另一半：`build.yml` 的每个 job 都在编译前
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
+| 自备模型没生效 | 文件名 / 子目录不对（启动日志有一行"没有可识别的模型文件"），或被 `HIFISHIFTER_MODELS_DIR` 整树覆盖 | 按上一节的布局放文件；确认环境变量没设 |
 | `下载失败：HTTP Error 404` | tag / 资产名不对，或 release 还是 draft | `gh release view models-<v> --json assets`；draft 就先 publish |
 | `模型权重校验失败：sha256 …` | 下载被截断、镜像是旧的，或手上是另一版权重 | 删掉本地这几个文件重取；与本文件第 2 步打印的 sha256 比对 |
 | `源目录缺少 X` | `--source` 指到了 `models\` 的上一层 | 指向同时含 `fcpe/`、`hnsep/`、`nsf_hifigan/` 的目录 |

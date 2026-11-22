@@ -11,6 +11,31 @@ use ara2_bridge::plugin::HostContentScope;
 /// 音频"的直接来源。捕获运行时因此持有唯一那份定义，这里只改名。
 pub(crate) type SourcePcm = hifishifter_capture::CapturePcm;
 
+/// 一份源 PCM 的**内容代次指纹**：version + 首平面长度 + 前 4096 个采样的 FNV。
+///
+/// 【为什么只有一份实现】它有两个必须口径一致的读者：
+///   * `EditorSession::refresh_source_fingerprints` —— 把它写进 clip 的
+///     `source_file_fingerprint`，键组装与渲染键都消费它；
+///   * 源发布去重（`DocumentSession::publish_source_pcm` /
+///     `publish_source_read_result`）—— 判"这次重读是不是同一代内容"。
+///
+/// 两处各写一份必然漂移：去重漏判会让一次发布静默丢失（late-PCM 不上屏），键失配
+/// 误判会让重读自废渲染版本。
+///
+/// 【为什么只哈希前 4096 个采样】version 契约是"宿主改了内容必然通知"；采样哈希
+/// 只兜"代次没变但内容被就地改写"的兜底形状 —— 与 `refresh_source_fingerprints`
+/// 既有口径一致，不扩大也不缩小。
+pub(crate) fn source_content_stamp(pcm: &SourcePcm) -> u64 {
+    let mut stamp: u64 = 0xcbf2_9ce4_8422_2325;
+    for value in pcm.planes.iter().flat_map(|plane| plane.iter()).take(4096) {
+        stamp ^= u64::from(value.to_bits());
+        stamp = stamp.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    stamp ^= (pcm.planes.first().map(Vec::len).unwrap_or(0) as u64) << 1;
+    stamp ^= pcm.version.rotate_left(17);
+    stamp
+}
+
 /// 完整读取后才返回；任何失败必须释放 reader，不发布部分音频。
 pub(crate) fn read_source_pcm(
     host: &HostContentScope<'_, '_>,

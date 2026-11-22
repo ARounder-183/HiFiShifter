@@ -5,7 +5,7 @@
 //! 各写一份必然漂移，所以形状由运行时给出，格式外壳只补三个**只有它自己知道**的读数
 //! （见 [`StatusExtras`]）。
 
-use crate::{CaptureStatus, CaptureStore};
+use crate::{CaptureSpan, CaptureStatus, CaptureStore};
 use serde_json::{json, Value};
 
 /// 只有格式外壳才知道的读数。
@@ -16,6 +16,42 @@ pub struct StatusExtras<'a> {
     pub output: &'a str,
     /// 块级诊断（计数 + 捕获侧 lookbehind 结果）。trace 本身走独立命令。
     pub block_diagnostics: Value,
+    /// **UI 播放头修正量**（帧）：宿主喂入位领先它自己的光标多少。
+    ///
+    /// 【为什么由外壳给】它是音频时段观测到的宿主属性（VEGAS 的渲染缓存），
+    /// 捕获存储本身不知道宿主光标。捕获区间记在喂入域（磁带记账必须如此），
+    /// 而展示层（时间轴红色带、参数编辑器标尺）必须与播放头同域。
+    pub ui_playhead_offset: i64,
+}
+
+/// 把一段捕获区间渲染成前端读的 JSON，并把帧号从喂入域平移到**宿主光标域**。
+///
+/// 【为什么平移】`runs` 与当前位置描述"已经录到喂入域的哪一段"。VEGAS 的渲染缓存
+/// 让喂入位领先自己的 UI 光标一个预热窗；播放头已经减掉这个差（见
+/// `StreamBlock::playhead_offset`），捕获带如果没有减，就会整体右偏 —— 用户看到的
+/// 是光标在 0:19、红带却从 0:19+lead 开始。只平移展示值，磁带/素材的工程位置不动。
+fn capture_json(capture: &CaptureSpan, ui_playhead_offset: i64) -> Value {
+    let to_ui = |frame: i64| frame.saturating_sub(ui_playhead_offset);
+    // 【为什么给"区间列表"而不只是并集】并集会把"跳到 30 秒再继续录"画成一条
+    // 0..33 秒的连续带子 —— 中间那 30 秒其实什么都没录到。
+    let runs: Vec<Value> = capture
+        .runs
+        .iter()
+        .map(|run| {
+            json!({
+                "startFrame": to_ui(run.start),
+                "endFrame": to_ui(run.end),
+            })
+        })
+        .collect();
+    json!({
+        "startFrame": to_ui(capture.start_frame),
+        "endFrame": to_ui(capture.end_frame),
+        "positionFrame": to_ui(capture.position_frame),
+        "blockFrames": capture.block_frames,
+        "sampleRate": capture.sample_rate,
+        "runs": runs,
+    })
 }
 
 /// 把 [`CaptureStatus`] 渲染成前端读的那份 JSON。
@@ -34,23 +70,10 @@ pub fn status_json(store: &CaptureStore, extras: StatusExtras<'_>) -> Value {
     // 【为什么把"录制长到哪了"发出来】录制过程中界面上必须有东西在动。没有这一项，
     // 用户只能看到一个"已录 0.0 秒"的数字，而时间轴毫无变化 —— 这正是"不知道自己
     // 录了什么"的来源。带子由前端画，几何由这里给。
-    let capture = status.capture.map(|capture| {
-        // 【为什么给"区间列表"而不只是并集】并集会把"跳到 30 秒再继续录"画成一条
-        // 0..33 秒的连续带子 —— 中间那 30 秒其实什么都没录到。
-        let runs: Vec<Value> = capture
-            .runs
-            .iter()
-            .map(|run| json!({ "startFrame": run.start, "endFrame": run.end }))
-            .collect();
-        json!({
-            "startFrame": capture.start_frame,
-            "endFrame": capture.end_frame,
-            "positionFrame": capture.position_frame,
-            "blockFrames": capture.block_frames,
-            "sampleRate": capture.sample_rate,
-            "runs": runs,
-        })
-    });
+    let capture = status
+        .capture
+        .as_ref()
+        .map(|capture| capture_json(capture, extras.ui_playhead_offset));
     // 【为什么把"录到了但没有内容"单独报出来】全静音的录制不产生片段，于是时间轴空白、
     // 面板却说"已录制"。把捕获帧数与片段数一起给出来，界面就能说"录到了 12.5 秒，
     // 但输入总线是静音"，而不是让用户面对三个互相矛盾的读数。
@@ -147,4 +170,50 @@ pub fn status_json(store: &CaptureStore, extras: StatusExtras<'_>) -> Value {
         // 宿主是否**正在**通过 ARA 供音（那时 Capture 不适用）。
         "araBound": extras.ara_bound,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn span() -> CaptureSpan {
+        CaptureSpan {
+            start_frame: 480_000,
+            end_frame: 528_000,
+            position_frame: 528_000,
+            block_frames: 848,
+            sample_rate: 48_000,
+            runs: vec![480_000..528_000],
+        }
+    }
+
+    /// 捕获带是**展示**：帧号必须从喂入域平移到宿主光标域，长度不变。
+    ///
+    /// VEGAS 的渲染缓存让喂入位领先光标一个预热窗；只对齐播放头、不平移捕获带，
+    /// 时间轴上的红带与参数编辑器标尺就会整体右偏（2026-11-22 现场 +0.3 s）。
+    #[test]
+    fn capture_geometry_is_shifted_into_the_host_cursor_domain() {
+        let lead = 14_400_i64; // 0.3 s @ 48 kHz
+        let published = capture_json(&span(), lead);
+        assert_eq!(published["startFrame"].as_i64(), Some(465_600));
+        assert_eq!(published["endFrame"].as_i64(), Some(513_600));
+        assert_eq!(published["positionFrame"].as_i64(), Some(513_600));
+        assert_eq!(published["runs"][0]["startFrame"].as_i64(), Some(465_600));
+        assert_eq!(published["runs"][0]["endFrame"].as_i64(), Some(513_600));
+        // 【长度必须原样保留】平移不是裁剪：红带表达"录了多久"，与域无关。
+        let stored_len = span().end_frame - span().start_frame;
+        assert_eq!(
+            published["runs"][0]["endFrame"].as_i64().unwrap()
+                - published["runs"][0]["startFrame"].as_i64().unwrap(),
+            stored_len
+        );
+    }
+
+    /// 没有渲染领先量的宿主（REAPER / 第一次播放）保持喂入域原值。
+    #[test]
+    fn zero_offset_keeps_the_feed_domain() {
+        let published = capture_json(&span(), 0);
+        assert_eq!(published["positionFrame"].as_i64(), Some(528_000));
+        assert_eq!(published["runs"][0]["startFrame"].as_i64(), Some(480_000));
+    }
 }

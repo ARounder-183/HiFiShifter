@@ -147,7 +147,7 @@ pub(crate) struct RenderFacts {
 /// 把两者放进同一个结构，是因为它们的作用相同（都会改变渲染结果、都必须推进
 /// `render_epoch`），而不是因为它们来自同一个 API。任何"ARA 能给出"的渲染输入都应在
 /// 这里登记，避免又出现"某一处忘了手动 bump"的缺口。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct RenderItemFacts {
     /// 方向（`PCM_Source_GetSectionInfo` 的 revOut）；读不到即正放。**仅原生扩展**。
     pub reversed: bool,

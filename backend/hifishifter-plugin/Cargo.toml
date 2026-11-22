@@ -124,7 +124,11 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com"
     # `GlobalMemoryStatusEx`：PCM 预算按物理内存自适应（见 `render/budget.rs`）。
     "Win32_System_SystemInformation",
     "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi",
-    "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
+    "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_Shell_Common",
+    # `SetThreadDpiAwarenessContext`：编辑器子窗口按物理像素创建（见 `gui/windows.rs`
+    # 的 `PerMonitorV2Scope`）—— ACID Pro 的 sfvstwrap 桥线程不是感知线程，
+    # 不切上下文就会得到滚动条 + 整体模糊（Windows 125% 缩放实测）。
+    "Win32_UI_HiDpi"] }
 
 [dev-dependencies]
 # 测试二进制在进入 main 前关闭 ONNX 异步预热（见 src/lib.rs 的 test_prewarm_guard）。

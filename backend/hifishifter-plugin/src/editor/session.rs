@@ -1758,14 +1758,16 @@ impl EditorSession {
                         session.render_requested.store(true, Ordering::Release);
                         deadline = Some(Instant::now());
                     }
-                    // 【窗口渲染的补排】播放头走出当前快照的安全区（或整段装不下、
-                    // 当前窗口已经走完）时补一次。整段快照时这条恒为 false。
-                    if !session.render_requested.load(Ordering::Acquire)
-                        && owner.window_needs_rerender()
-                    {
-                        session.render_requested.store(true, Ordering::Release);
-                        deadline = Some(Instant::now());
-                    }
+                    // 【为什么这里没有"窗口补排"】窗口渲染（`RenderInput.window`）是
+                    // **ARA 文档路径**的能力（`document.rs::plan_render_window`）；
+                    // Capture 的渲染输入恒为整段（`capture_render_input` 固定
+                    // `window: None`），输出与播放头无关 —— 播放头位置永远不构成
+                    // 重渲染的理由。这里曾有一个从窗口渲染搬来的补排信号，它把
+                    // "播放头在覆盖区间之外/末端四分之一"当成要补排：工程 0 点 +
+                    // take 在 33 s（ACID Pro 实测）时每个 tick 都为真 ⇒ 每 100 ms
+                    // 一轮空渲染 ⇒ 状态栏常亮闪"渲染中"。过期信号的正确归宿是
+                    // 删除，而不是补条件 —— 素材过期由音频线程的 `render_wanted`
+                    // 闩锁与版本闸负责（上面那条 + `capture_prepare_job_inner`）。
                     // 一次性诊断：素材在、结果不在，就把这件事写进日志（按代次去重）。
                     owner.report_pending_synthesis_once();
                     // 起播窗口的块级 trace：只在音频线程标记了可疑窗口时落一次。
@@ -2054,7 +2056,16 @@ impl EditorSession {
                     if mutates {
                         session.processed.fetch_add(1, Ordering::AcqRel);
                     }
-                    session.schedule_analysis();
+                    // 【为什么只读命令不排分析】`schedule_analysis` 要克隆整份时间线、
+                    // 刷新源指纹、再走一遍 clip 候选判定 —— 而 250 ms 的状态轮询
+                    // （`plugin_get_apply_state`）是只读命令，播放期间每个 poll 都会
+                    // 撞上它：日志里就是那四行一组的 `schedule_clip_pitch_jobs` 周期
+                    // （cache HIT → nothing to do），全是对同一份缓存的复读。
+                    // 排分析的触发面没有变：真改了音频的命令照旧排；只读命令偶然
+                    // 触发了重载（代次动了）也照旧排 —— 那正是需要重新看指纹的时刻。
+                    if mutates || session.generation.load(Ordering::Acquire) != before {
+                        session.schedule_analysis();
+                    }
                     if session.generation.load(Ordering::Acquire) != before {
                         deadline = Some(Instant::now() + Duration::from_millis(150));
                     }
@@ -2408,12 +2419,30 @@ impl EditorSession {
         if let Some(error) = self.error.lock_or_recover().clone() {
             return Err(error);
         }
-        if self.requires_analysis(&self.timeline.lock_or_recover()) {
-            return Err("pitch analysis pending".into());
-        }
         let Some(owner) = self.capture_owner() else {
             return Err("capture host is gone".into());
         };
+        // 【空转轮在门口收掉，而不是放进去再空跑】渲染请求的来源（音频线程闩锁、
+        // 重载置位）只知道"该问一次"；发布器里已经是当前版本成品时，这一轮跑下去
+        // 只会发一次 `active:true` 再立刻 `active:false` —— 左下角"渲染中"闪一下
+        // （ACID Pro 实测：播放头在素材之外时每 100 ms 一轮）。与 ARA 路径
+        // `prepare_apply` 的旁通门同一收口方式：诚实地记"这一代已应用"，不占
+        // render_task、不闪状态栏。
+        //
+        // 【为什么放在 requires_analysis 之前】分析是否收敛只影响"能不能开始"，
+        // 而"要不要开始"先于它 —— 快照已是当前版本时，等分析收敛再空跑一遍
+        // 纯属浪费；真有新编辑时版本闸本来就不会过。
+        if owner.capture_render_up_to_date(owner.capture_prepare_wants_curves()) {
+            self.applied
+                .store(self.generation.load(Ordering::Acquire), Ordering::Release);
+            self.render_requested.store(false, Ordering::Release);
+            *self.render_error.lock_or_recover() = None;
+            self.emit_state();
+            return Ok(());
+        }
+        if self.requires_analysis(&self.timeline.lock_or_recover()) {
+            return Err("pitch analysis pending".into());
+        }
         let generation = self.generation.load(Ordering::Acquire);
         let cancel = Arc::new(AtomicBool::new(false));
         let current = self.clone();
@@ -2731,15 +2760,20 @@ impl EditorSession {
             use std::hash::{Hash, Hasher};
             let timeline = self.timeline.lock_or_recover();
             let mut audio = std::collections::hash_map::DefaultHasher::new();
-            hifishifter_kernel::state::timeline_fingerprint(&timeline).hash(&mut audio);
+            // 【为什么用渲染指纹而不是 GUI 指纹】这一份指纹的唯一读者是"要不要重渲染"，
+            // 而渲染输入是曲线本身，不含分析键。键的 presence 位与键字符串此前都进了
+            // 这份哈希：一次 INVALIDATE（键清空又立即被缓存组装填回**同样的曲线**）或
+            // 一次重载清键，都会让指纹推进 ⇒ 版本闸永远追不上 ⇒ 每次播放/重载都排一轮
+            // 输出逐位相同的真渲染（REAPER 23:40:34 与 VEGAS 23:43:56~23:44:30 实测，
+            // 后者 30 秒 15 轮 mixdown）。曲线内容变化仍会推进 —— 真重算不漏。
+            hifishifter_kernel::state::timeline_render_fingerprint(&timeline).hash(&mut audio);
             // Baseline completion can affect audio even when an explicit pitch
             // edit stays unchanged, including Capture's derived dynamics.
+            // `pitch_assembly_partial` 保留：它标记"组装还没收口"，此刻的曲线不是成品。
             let mut roots: Vec<_> = timeline.params_by_root_track.iter().collect();
             roots.sort_by_key(|(root, _)| *root);
             for (root, params) in roots {
                 root.hash(&mut audio);
-                params.pitch_orig_key.hash(&mut audio);
-                params.dyn_orig_key.hash(&mut audio);
                 params.pitch_assembly_partial.hash(&mut audio);
             }
             (timeline.clips.len(), audio.finish())
@@ -3223,13 +3257,18 @@ impl EditorSession {
         if let Some(edits) = restored.as_ref() {
             super::capture_edits::apply_project_state(&mut timeline, edits);
         }
-        // 新 take 的源内容不同 ⇒ 缓存的原线/动态谱必须失效（与 ARA 加载同一条纪律）。
-        // 撤销"放弃等待"同理：素材换了，就再给分析一次机会。
+        // 新 take 的源内容不同 ⇒ 缓存的原线/动态谱必须失效。失效的**唯一权威**是
+        // 上面 `ensure_params_for_root` 的期望键比对：键匹配（素材与布局都没变）的根
+        // 键被它保留，键失配（换了 take / 动了源窗口）的根被它清空。这里此前**无条件**
+        // 再清一遍 —— 把它刚刚保下来的键也毁了，而每次强制重载（VEGAS 家族每遍
+        // setActive 都 setState → request_reload 走到这里）因此必然自废渲染版本：
+        // 键一清指纹必变、timeline_revision 必推进，版本闸永远判"过期"，每遍重载
+        // 排一轮输出逐位相同的真渲染（VEGAS 23:43:56~23:44:30 实测：30 秒 15 轮
+        // mixdown，状态栏"渲染中"随每次播放闪）。
+        //
+        // 撤销"放弃等待"保留：素材换了时要再给分析一次机会；素材没换时清一个空集，
+        // 无副作用。
         self.analysis_abandoned.lock_or_recover().clear();
-        for params in timeline.params_by_root_track.values_mut() {
-            params.pitch_orig_key = None;
-            params.dyn_orig_key = None;
-        }
         // 宿主音乐读数是**只读**的宿主权威：Capture 没有文档，读 owner 自己的时钟。
         if let Some(clock) = owner.clock.get() {
             if let Some(tempo) = clock.tempo() {
@@ -4441,15 +4480,10 @@ impl EditorSession {
             let Some(pcm) = sources.get(&path) else {
                 continue;
             };
-            // 内容指纹：PCM 代次 + 长度 + 前 4096 个采样的 FNV。
-            // 代次由发布方单调推进；采样哈希兜住"代次没变但内容被就地改写"的形状。
-            let mut stamp: u64 = 0xcbf2_9ce4_8422_2325;
-            for value in pcm.planes.iter().flat_map(|plane| plane.iter()).take(4096) {
-                stamp ^= u64::from(value.to_bits());
-                stamp = stamp.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-            stamp ^= (pcm.planes.first().map(Vec::len).unwrap_or(0) as u64) << 1;
-            stamp ^= pcm.version.rotate_left(17);
+            // 内容指纹：PCM 代次 + 长度 + 前 4096 个采样的 FNV。代次由发布方单调推进；
+            // 采样哈希兜住"代次没变但内容被就地改写"的形状。口径只有一份
+            // （`render::source::source_content_stamp`），源发布去重消费同一个。
+            let stamp = crate::render::source::source_content_stamp(pcm);
             if clip.source_file_fingerprint != Some(stamp) {
                 clip.source_file_fingerprint = Some(stamp);
                 changed = true;
@@ -6147,6 +6181,7 @@ pub mod tests {
                 0,
                 512,
                 true,
+                0,
             );
             let (position, playing) = session.transport();
             assert!(playing, "宿主在播放必须如实报出");
@@ -6168,6 +6203,7 @@ pub mod tests {
                 0,
                 512,
                 true,
+                0,
             );
             assert!(!session.transport().1, "停止播放必须如实回落");
         }));
@@ -6992,6 +7028,21 @@ pub mod tests {
                 .get_mut(&root)
                 .unwrap()
                 .dyn_orig_key = Some("new-baseline".into());
+        }
+        editor.publish_timeline_derived();
+        assert!(
+            !editor.render_requested.load(Ordering::Acquire),
+            "键换了而曲线没换：渲染输出逐位不变，不得请求渲染（键只是组装簿记，\
+             真基线的到达通过曲线内容本身推进指纹）"
+        );
+        editor.render_requested.store(false, Ordering::Release);
+        {
+            let mut timeline = editor.timeline.lock_or_recover();
+            let root = timeline.tracks[0].id.clone();
+            let params = timeline.params_by_root_track.get_mut(&root).unwrap();
+            // 分析基线"到达"在真实流程里就是曲线从无到有/由旧变新 —— 这里按同一形状喂
+            // （push 一帧；夹具里 dyn_orig 可能还是空的，first_mut 不保证有值）。
+            params.dyn_orig.push(1.0);
         }
         editor.publish_timeline_derived();
         assert!(

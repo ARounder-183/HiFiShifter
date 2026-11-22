@@ -66,7 +66,8 @@ pub(crate) fn pick_open_path(
 /// 不是一个文件类型。
 #[cfg(all(unix, not(target_os = "macos")))]
 fn gtk_filter(file_type: &hifishifter_kernel::file_types::FileType) -> gtk::FileFilter {
-    use gtk::prelude::*;
+    // 这里只用 `FileFilter` 的固有方法（`new` / `set_name` / `add_pattern`），
+    // 引 prelude 是多余的 —— aarch64 构建会把它报成 unused import。
     let filter = gtk::FileFilter::new();
     filter.set_name(Some(file_type.name()));
     for pattern in file_type.patterns() {

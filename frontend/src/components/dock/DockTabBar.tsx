@@ -13,7 +13,6 @@ import {
     ChevronDownIcon,
     ChevronUpIcon,
     Cross2Icon,
-    DragHandleDots2Icon,
     ExternalLinkIcon,
 } from "@radix-ui/react-icons";
 
@@ -45,8 +44,8 @@ export interface DockTabBarProps {
     onToggleFloat: (formId: string) => void;
     /**
      * 紧凑形态：单标签、未折叠、且用户没要求"总是显示标签条"时，只渲染一条
-     * 极窄抓手（12px）而不是 26px 的完整标签条 —— 时间轴这类面板自带标题栏，
-     * 再顶一条标签条纯属浪费垂直空间。
+     * 6px 的流内安全条 + 左上角 24×6 的抓手，而不是 26px 的完整标签条 ——
+     * 时间轴这类面板自带标题栏，再顶一条标签条纯属浪费垂直空间。
      */
     compact: boolean;
     /** 标签行位置（与 `DockZone` 的 `data-tab-position` 同源）。 */
@@ -150,7 +149,7 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
     );
 
     const onTabPointerDown = useCallback(
-        (event: React.PointerEvent<HTMLDivElement>, formId: string) => {
+        (event: React.PointerEvent<HTMLDivElement>, formId: string, anchorAtPointer = false) => {
             if (event.button !== 0) return;
             // 关闭按钮走自己的 onClick。
             if ((event.target as HTMLElement).closest("[data-dock-tab-close]")) return;
@@ -159,12 +158,25 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
             if (renamingFormId === formId) return;
             dispatch(focusForm(formId));
             const panelId = forms[formId]?.panelId;
+            /*
+             * 【左上角抓手为什么不能沿用标签的 48/12】标签拖拽把指针放在浮窗
+             * 标题栏左侧 48px，像"从标签上拎起来"；而紧凑抓手只有 24px 宽，
+             * 沿用 48 会让浮窗出现在指针左侧甚至屏幕外。抓手传入指针在抓手内
+             * 的偏移，浮窗左上角因此贴住抓手本身。
+             */
+            const rect = anchorAtPointer ? event.currentTarget.getBoundingClientRect() : null;
             beginTabDrag(event, {
                 formId,
                 panelId: panelId ?? formId,
                 tabsetId: node.id,
                 tabCount: node.tabs.length,
                 tabBarElement: barElement,
+                offset: rect
+                    ? {
+                          x: Math.max(0, event.clientX - rect.left),
+                          y: Math.max(0, event.clientY - rect.top),
+                      }
+                    : undefined,
             });
         },
         [barElement, dispatch, forms, node.id, node.tabs.length, renamingFormId],
@@ -281,10 +293,15 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                     </div>
                 </div>
             ) : (
-                // 紧凑形态：只留一条极窄的抓手。
+                // 紧凑形态：一条 6px 的流内安全条 + 左上角真正的抓手。
                 //
                 // 【为什么不能什么都不渲染】面板需要一个可拖拽的着力点，否则
                 // 用户再也没法把它拖出去、或与别的面板合并。
+                //
+                // 【为什么只有左边一小段可拖】此前整条 6px 都能起拖：用户点顶部
+                // 边缘时容易误触，而 15px 的图标又被 6px 的条裁得只剩两个点。
+                // 现在条只是**安全间隔**（内容不会被覆盖），可拖的是左上角
+                // 24×6 的抓手；条本身仍可右键打开标签菜单。
                 //
                 // 【为什么这里没有 ARIA 角色】抓手只是**指针**的着力点，不是
                 // 可激活的控件：它不可聚焦、没有键盘等价操作，而紧凑形态下这个
@@ -294,17 +311,22 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                     ref={setBarElement}
                     className="hs-dock-grip"
                     data-dock-tabbar={node.id}
-                    data-dock-tab={node.active}
                     data-active="true"
                     data-position={tabPosition}
-                    data-tooltip={dragHint}
-                    onPointerDown={(event) => onTabPointerDown(event, node.active)}
                     onContextMenu={(event) => {
                         event.preventDefault();
                         setMenu({ formId: node.active, x: event.clientX, y: event.clientY });
                     }}
                 >
-                    <DragHandleDots2Icon />
+                    <div
+                        className="hs-dock-grip-handle"
+                        data-dock-grip-handle="1"
+                        data-dock-tab={node.active}
+                        data-tooltip={dragHint}
+                        onPointerDown={(event) => onTabPointerDown(event, node.active, true)}
+                    >
+                        <DockGripDots />
+                    </div>
                 </div>
             )}
 
@@ -348,5 +370,27 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                 />
             ) : null}
         </>
+    );
+}
+
+/**
+ * 6px 条内能完整显示的 2×3 点阵抓手。
+ *
+ * 【为什么不用 `DragHandleDots2Icon`】那个图标按 15px 设计，放进 6px 的条会被
+ * 上下裁掉，只剩中间两个点 —— 用户看不出这是一个抓手。这里按条高画 6px 字形，
+ * 六个点完整可见，也不会有一半图标压在面板顶部。
+ */
+function DockGripDots() {
+    return (
+        <svg width="6" height="6" viewBox="0 0 6 6" aria-hidden="true" focusable="false">
+            <g fill="currentColor">
+                <circle cx="1.5" cy="1.2" r="0.75" />
+                <circle cx="4.5" cy="1.2" r="0.75" />
+                <circle cx="1.5" cy="3" r="0.75" />
+                <circle cx="4.5" cy="3" r="0.75" />
+                <circle cx="1.5" cy="4.8" r="0.75" />
+                <circle cx="4.5" cy="4.8" r="0.75" />
+            </g>
+        </svg>
     );
 }

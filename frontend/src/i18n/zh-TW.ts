@@ -210,7 +210,7 @@ export const zhTW = {
     dock_expand: "展開",
     dock_collapse: "折疊為標籤條",
     dock_rename_tab: "重新命名...",
-    dock_drag_rearrange: "拖曳以重排",
+    dock_drag_float: "拖曳以浮動",
     dock_dock_hint: "按住 {modifier} 可停靠",
     dock_dock_hint_always: "拖到目標位置即可停靠",
     dock_hint_dock: "停靠到此處",

@@ -162,6 +162,33 @@ pub extern "system" fn ExitDll() -> bool {
     hifishifter_plugin_core::guard_ffi(false, module_shutdown)
 }
 
+// ── DLL_PROCESS_ATTACH：VEGAS 家族包裹层的线程 DPI 提升 ─────────────────────
+//
+// 【为什么是 DllMain 而不是 InitDll】`InitDll` 是 VST3 约定入口，REAPER 显式调它；
+// 而 ACID/VEGAS 家族的 sfvstwrap 只 LoadLibrary、不保证调它。提升的意义取决于
+// "赶在包裹窗口创建之前" —— 入口越早越好，DllMain 是我们能拿到的最早一点。
+//
+// 【loader lock 纪律】这里只允许 kernel32 的无同步操作（见
+// `host_identity::promote_wrapper_thread_dpi` 的说明）：映像名查询 + 线程上下文
+// 读/写，不碰 COM、不开线程、不做文件 I/O。结果推迟到附着点的 `editor DPI facts`
+// 行再落日志。
+#[cfg(windows)]
+#[no_mangle]
+extern "system" fn DllMain(
+    _module: *mut core::ffi::c_void,
+    reason: u32,
+    _reserved: *mut core::ffi::c_void,
+) -> i32 {
+    // DLL_PROCESS_ATTACH（winbase.h）；DLL_THREAD_ATTACH 不动 —— 提升只对
+    // "加载线程将来会创建包裹窗口"这一次有意义；DETACH 也不动（卸载清理是
+    // ExitDll 的职责，loader lock 里不做任何有副作用的事）。
+    const DLL_PROCESS_ATTACH: u32 = 1;
+    if reason == DLL_PROCESS_ATTACH {
+        hifishifter_plugin::host_identity::promote_wrapper_thread_dpi();
+    }
+    1 // TRUE：永不阻断加载
+}
+
 // ── Unix 模块入口 ───────────────────────────────────────────────────────────
 //
 // 【为什么需要它们】VST3 的模块 ABI 不是"有 `GetPluginFactory` 就行"：Windows 的

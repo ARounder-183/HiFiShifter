@@ -11,8 +11,6 @@
 | --------------------- | --------------------- | --------------------------------------------------------------------- | ------------------------------------------------------ |
 | `frontend-build.yml` | 被调用 / 手动         | 构建前端 `dist`（typecheck + vite build），供各产物流水线复用        | `frontend-dist`                                        |
 | `build.yml`          | PR、`v*` tag、手动    | 六平台产物；Windows x64 出一个合并安装器 + 便携包；macOS/Linux 出「App + 插件 + 共享模型库」三合一包 | Windows 安装器 / 便携包；macOS `.pkg`；Linux `.tar.gz` |
-| `vst3-unix.yml`      | PR、`v*` tag、手动    | Linux/macOS 的 VST3 bundle（构建验证，不是最终分发入口）              | `*.tar.gz` + `*.sha256`                                |
-| `clap.yml`           | PR、`v*` tag、手动    | Linux/macOS/Windows 的 CLAP 模块（构建验证，不是最终分发入口）        | `HiFiShifter.clap` / bundle                            |
 
 ## 构建脚本与自检
 
@@ -20,8 +18,7 @@
 - 本地构建默认会跑产物的黑盒自检（dlopen / 导出符号 / ABI oracle / AppImage 冒烟）。
   CI 只构建，因此显式传入跳过自检的开关：
   - `scripts/vst3/unix/build.sh --no-verify`
-  - `scripts/clap/unix/build.sh --no-verify`
-  - `scripts/clap/windows/build.ps1 -SkipVerify`
+  - `scripts/clap/unix/build.sh --no-verify`（由 `package.sh` 传入）
   - `scripts/build/build.ps1 -SkipVerify`
   - `scripts/build/unix/package.sh --no-verify`
   - `linux-appimage.sh` 通过 `HIFISHIFTER_SKIP_SMOKE=1` 跳过启动冒烟。
@@ -37,8 +34,10 @@
 
 ## 触发与矩阵
 
-- PR：`build.yml` 只跑三个平台（windows-x86_64 / macos-arm64 / linux-x86_64）。
-- `v*` tag：全量六平台 + 全量 Unix 矩阵。
+- PR：`build.yml` 只跑三个平台（windows-x86_64 / macos-arm64 / linux-x86_64）；
+  linux-aarch64、macos-x86_64 与 windows-arm64 只在 tag / 手动触发时构建。
+  插件不再有独立流水线，随各平台安装包一起构建。
+- `v*` tag：`build.yml` 跑全量六平台（含每个平台的插件）。
 - tag 与版本号必须一致：`build.yml` 的 `assert-version` 用
   `backend/src-tauri/tauri.conf.json` 的 `version` 比对 tag，不一致直接停。
 - 矩阵用 `fromJSON` 直接展开，不使用 `exclude` 里的表达式（GitHub 对后者不会报错，

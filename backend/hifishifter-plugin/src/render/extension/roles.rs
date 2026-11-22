@@ -128,29 +128,6 @@ impl ExtensionOwner {
     pub(crate) fn has_prepared_snapshot(&self) -> bool {
         self.snapshots.iter().any(|publisher| publisher.is_ready())
     }
-    /// 播放头是否已经走出当前快照的安全区（窗口渲染的补排信号）。
-    ///
-    /// 【为什么由 actor 判】音频线程只记一个 `last_sample` 原子；"要不要重渲"是
-    /// 调度决策，只能在非实时线程做（实时回调里不许分配、不许抢锁）。
-    ///
-    /// 【为什么是 75 %】窗口渲染的代价是"重新算一段"，提前四分之一窗口开始补排，
-    /// 保证播放头走到窗口末尾之前新窗口已经就位。整段快照时这个判据恒为 false
-    /// （播放头永远落在覆盖区间里），行为与今天完全一致。
-    pub(crate) fn window_needs_rerender(&self) -> bool {
-        let rate = self.setup_sample_rate().max(1.0);
-        let Some(playhead) = self.snapshots[0].last_sample_seconds(rate) else {
-            return false;
-        };
-        let Some((start, end)) = self.snapshots[0].current_span_seconds(rate) else {
-            return false;
-        };
-        let len = end - start;
-        if !(len.is_finite() && len > 0.0) {
-            return false;
-        }
-        playhead < start - 1e-9 || playhead > start + len * 0.75
-    }
-
     /// 处理结果发布器是否对**实际会被读取的那一份**就绪。
     ///
     /// 【为什么不能固定查 `snapshots[0]`】真正被读的是
@@ -272,12 +249,17 @@ impl ExtensionOwner {
         self.is_non_playback() && self.playback_covered.load(Ordering::Acquire)
     }
     /// process只写有界原子诊断，JSON/日志全部由actor读取，暂不把候选计数当作根因。
+    ///
+    /// `playhead_offset` 是本块的 UI 播放头修正量（见 `StreamBlock::playhead_offset`）：
+    /// 喂入位置领先宿主 UI 播放头的帧数（VEGAS 渲染缓存的预热窗）。它**只**作用于
+    /// 写给 UI 的位置（`clock.update`），诊断通道（`clock.observe`）仍记录宿主原值。
     pub(crate) fn observe_transport(
         &self,
         context: &crate::block_context::BlockContext,
         mode: i32,
         frames: usize,
         position_trusted: bool,
+        playhead_offset: i64,
     ) {
         // 【为什么这条判据在共享方法里】离线 pass 的块是"渲染进度"，不是播放位置，
         // 不能驱动光标。它属于语义、不属于某个外壳，所以两种格式一视同仁 ——
@@ -305,7 +287,16 @@ impl ExtensionOwner {
                 // 【块长必须先记】播放位的寿命由它决定（见 `block_playing_ttl_ms`）。
                 clock.note_block_length(frames, context.sample_rate);
                 if position_trusted {
-                    clock.update(context);
+                    // 【发布的是播放头域，不是喂入域】未武装实例的 UI 由 realtime
+                    // 通道驱动；VEGAS 的喂入位置领先它的播放头一个预热窗，不减掉
+                    // 修正量，光标就全程领先宿主（用户报的"右偏 ~0.6 s"）。定位结算
+                    // （settle_seek）也用修正后的值 —— seek 目标本来就是用户在
+                    // 播放头域里点的。无窗口宿主的修正量恒为 0，行为不变。
+                    let mut playhead_context = *context;
+                    playhead_context.project_time_samples = playhead_context
+                        .project_time_samples
+                        .saturating_sub(playhead_offset);
+                    clock.update(&playhead_context);
                 } else {
                     // 【证据不足不写位置】PendingAbsolute 期间宿主报的是绝对域预卷
                     // （现场 60.000 s）。写进去就是用户看到的光标跳变；只冻结。
@@ -500,6 +491,19 @@ impl ExtensionOwner {
     /// Capture 通路的捕获存储。
     pub fn capture(&self) -> &crate::capture::CaptureStore {
         &self.capture
+    }
+
+    /// 当前 **UI 播放头修正量**（帧）：宿主喂入位领先它自己的光标多少。
+    ///
+    /// 【为什么捕获状态也要读它】捕获区间（`runs` / 当前位置）记在**喂入域** ——
+    /// 磁带记账必须如此，素材的工程位置由它决定。但时间轴上的红色捕获带与参数编辑器
+    /// 标尺上的红条是**展示**，必须和用户看到的宿主光标同域（见
+    /// `StreamBlock::playhead_offset`）。此前只有播放头减了这个量，两条捕获带没减，
+    /// 于是 VEGAS 里光标已经对齐、带子整体右偏一个渲染领先量。
+    pub(crate) fn ui_playhead_offset(&self) -> i64 {
+        self.streams[ProcessStream::Realtime.index()]
+            .playhead_offset
+            .load(Ordering::Acquire)
     }
 
     /// 宿主是否把本实例的音频放进了信号链（三态；见 [crate::host::reaper::FxBypass]）。

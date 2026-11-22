@@ -402,6 +402,9 @@ impl ExtensionOwner {
             stream.index() as i32,
             input.frames,
             evidence.is_some_and(|evidence| evidence.position_trusted),
+            evidence
+                .as_ref()
+                .map_or(0, |evidence| evidence.playhead_offset),
         );
         evidence
     }

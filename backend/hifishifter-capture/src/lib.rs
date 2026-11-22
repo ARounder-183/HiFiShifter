@@ -40,7 +40,7 @@ pub mod transport;
 pub mod types;
 
 pub use store::{
-    CaptureOptions, CaptureStatus, CaptureStore, MaterialSpan, MaterialSummary, MissingCapture,
-    RecordingStatus, TakeSummary,
+    CaptureOptions, CaptureSpan, CaptureStatus, CaptureStore, MaterialSpan, MaterialSummary,
+    MissingCapture, RecordingStatus, TakeSummary,
 };
 pub use types::{CapturePcm, CaptureRegion, CaptureTape};

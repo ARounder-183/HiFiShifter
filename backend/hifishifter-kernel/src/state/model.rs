@@ -2647,7 +2647,23 @@ pub struct TimelineState {
 /// 【为什么是 FNV-1a】这里要回答的是"这两份**几乎一样**的图有没有区别"，所以需要
 /// 对"相邻两次只有一两个字节不同"敏感、又足够快（每次通知都要算一遍）。密码学哈希
 /// 在这里只多花时间。
+///
+/// 【为什么有渲染指纹变体】同一份指纹喂两个读者，而它们对"键"的敏感度不同：
+/// 前端看得到键的 presence（`pitch_orig_key` 为空的根，参数线画成半透明 —— 用户
+/// 可见），渲染器不读键（渲染输入是曲线本身）。渲染指纹因此排除那两个 presence
+/// 位：一次键的 None↔Some 抖动（失配一轮的 INVALIDATE、重载清键再组装）不改任何
+/// 曲线值，却会让含位的指纹推进 ⇒ 排一轮输出完全相同的重渲染 ⇒ 状态栏"渲染中"
+/// 随每次播放/重载闪（REAPER 23:40:34 实测：起播一拍之内两轮整段 mixdown，
+/// max_abs 逐位相同）。曲线内容变化仍然推进 —— 真重算不会被漏。
+pub fn timeline_render_fingerprint(timeline: &TimelineState) -> u64 {
+    timeline_fingerprint_impl(timeline, false)
+}
+
 pub fn timeline_fingerprint(timeline: &TimelineState) -> u64 {
+    timeline_fingerprint_impl(timeline, true)
+}
+
+fn timeline_fingerprint_impl(timeline: &TimelineState, key_presence: bool) -> u64 {
     struct Hasher(u64);
     impl Hasher {
         fn bytes(&mut self, bytes: &[u8]) {
@@ -2786,8 +2802,12 @@ pub fn timeline_fingerprint(timeline: &TimelineState) -> u64 {
         // 立即展示原始音高线、必须手动画线才开始分析"的成因之一。
         h.curve(&params.pitch_orig);
         h.curve(&params.dyn_orig);
-        h.flag(params.pitch_orig_key.is_some());
-        h.flag(params.dyn_orig_key.is_some());
+        // 【键的 presence 只进"GUI 看得到"的那份指纹】参数线透明度跟着它走（见
+        // `timeline_render_fingerprint` 的说明）；渲染输入不含键，渲染指纹跳过。
+        if key_presence {
+            h.flag(params.pitch_orig_key.is_some());
+            h.flag(params.dyn_orig_key.is_some());
+        }
         h.curve(&params.tension_edit);
         let mut keys: Vec<&String> = params.extra_curves.keys().collect();
         keys.sort();
@@ -4032,7 +4052,7 @@ impl TimelineState {
 
             if crate::log_policy::probes_enabled() {
                 log::warn!(
-                    "state: [INVALIDATE] Cleared stale pitch curves for root_track={} (key changed, user_modified={})",
+                    "state: [INVALIDATE] invalidated the original-pitch cache key for root_track={} (key changed, curves preserved, user_modified={})",
                     root_track_id, entry.pitch_edit_user_modified
                 );
             }

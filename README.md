@@ -15,7 +15,7 @@ HiFiShifter 是一个图形化人声编辑与合成工具。它支持多轨道�
 - **三种声码器算法**：nsf-hifigan（PC-NSF-HiFiGAN）、World、VsLib，详见[算法](#算法)。
 - **互操作性**：导入 REAPER（`.rpp`）与 VocalShifter（`.vshp` / `.vsp`）工程，双向读写 REAPER 与 VocalShifter 剪贴板；MIDI 可导入为音高参考块 / 音高参数 / 速度映射，音频块与音高线可导出为 MIDI。
 - **导入导出**：常见音频 / 视频格式导入（视频自动提取音轨），工程与分轨导出为 `wav` / `mp3` / `flac`。
-- **VST3 / ARA 与 CLAP 插件**：三个平台的三合一安装包都包含插件，可在 REAPER 中直接打开同一套编辑界面：宿主负责片段几何、BPM 与淡变声音，HiFiShifter 负责参数曲线，编辑自动应用回宿主。`vst3-unix.yml` 与 `clap.yml` 仍单独构建插件用于 CI 验证，但最终用户请使用三合一安装包。详见[使用手册](docs/i18n/USERMANUAL.md#八vst3--ara-插件reaper)的插件章节。
+- **VST3 / ARA 与 CLAP 插件**：三个平台的三合一安装包都包含插件，可在 REAPER 中直接打开同一套编辑界面：宿主负责片段几何、BPM 与淡变声音，HiFiShifter 负责参数曲线，编辑自动应用回宿主。插件随各平台的安装包统一构建，不再单独提供插件构建产物。详见[使用手册](docs/i18n/USERMANUAL.md#八vst3--ara-插件reaper)的插件章节。
 - **其他**：内置文件浏览器与快速搜索、记事本、自动备份、多语言界面（简体中文 / 繁體中文 / English / 日本語 / 한국어）、深浅色主题、推理设备选择与基准测试。
 
 ## 安装
