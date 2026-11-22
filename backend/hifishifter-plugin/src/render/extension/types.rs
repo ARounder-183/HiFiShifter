@@ -433,7 +433,7 @@ pub(super) fn graph_summary_of(document: &super::document::DocumentSession) -> S
 /// 是**早的** —— 多数支持 ARA 的宿主正在这段时间里完成绑定。此前把"没绑"直接当成
 /// "ARA-only"，正是 `bound_once` 那套措辞分支要解决的问题的同一个根源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InstanceMode {
+pub enum InstanceMode {
     /// 绑定窗口仍开着：宿主还可能把本实例绑到 ARA 文档。
     Undetermined,
     /// 宿主把本实例绑到了 ARA 文档：素材由 ARA 逐个 region 授权。
@@ -578,7 +578,7 @@ pub(crate) enum SnapshotSource {
 /// `capture_observe` 算出，原样交给 `capture_stage` 与记录器。
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
-pub(crate) struct BlockEvidence {
+pub struct BlockEvidence {
     pub stream: ProcessStream,
     /// 本块的有效工程起点（可能来自 continuous/music 回退）。
     ///
@@ -631,6 +631,9 @@ pub(crate) struct BlockEvidence {
     /// “这一遍的正文”，也不是“上一张 take”；它只应该监听输入，不能被当成
     /// 可以发布的位置。
     pub position_trusted: bool,
+    /// **UI 播放头修正量**（帧）：喂入位置与宿主 UI 播放头的当前差。realtime 通道
+    /// 的时钟采样用它把发布位置拉回宿主播放头域（见 `StreamBlock::playhead_offset`）。
+    pub playhead_offset: i64,
     /// 本块位置暂不发布（`PendingAbsolute`）。
     pub publish_deferred: bool,
     /// 本块由一次域切换开始：需要丢弃该本地位置之前的不连续前缀。
@@ -659,6 +662,7 @@ impl Default for BlockEvidence {
             start_window: false,
             transport_active: false,
             transport_paused: false,
+            playhead_offset: 0,
             rebase_frames: 0,
             cycle_wrap: false,
             repeated_nonzero: false,

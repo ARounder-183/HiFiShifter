@@ -1,18 +1,25 @@
 /**
- * 从五语词表抽出安装器文案，生成 NSIS 的 `LangString` 片段。
+ * Extract the installer copy from the five-language catalog and emit the NSIS
+ * `LangString` fragment.
  *
- * 【为什么是"抽取"而不是"手写五份 .nsh"】安装器原先硬编码简体中文，五语用户看到的
- * 是中文向导。手写第二份文案等于把同一批文字放进一个**没有测试**的地方 —— 词表那边
- * 有 `catalogIntegrity`（五语键齐全、格式合规）守着，这边没有，几个月后必然漂移。
- * 抽取让"新增一种语言"自动生效，也让漏翻译在构建安装器时**立刻失败**。
+ * [Why extract instead of hand-writing five .nsh files] The installer used to
+ * hard-code Simplified Chinese, so users of the other four languages saw a
+ * Chinese wizard. Hand-writing a second copy would put the same words into a
+ * place **without any tests** — the catalog side is guarded by
+ * `catalogIntegrity` (all keys present in all five languages, well-formed);
+ * this side had nothing, and would drift within months. Extraction makes
+ * "add a language" take effect automatically and makes a missing translation
+ * **fail immediately** at installer build time.
  *
- * 【为什么用 esbuild 而不是正则解析 .ts】词表里既有跨行字符串也有注释，正则迟早会被
- * 某一行注释或一次换行坑掉，而失败方式是"安静地漏掉一条文案"。用仓库里已经存在的
- * esbuild 把它编译成 JS 再求值，拿到的是真正的对象。
+ * [Why esbuild instead of regex-parsing the .ts] The catalog contains
+ * multi-line strings as well as comments; a regex would eventually be tripped
+ * up by one comment line or one newline, and the failure mode is "quietly
+ * dropping one string". Compiling it to JS with the esbuild already in the
+ * repo and evaluating it yields the real object.
  *
- * 用法：
- *   node scripts/release/build-installer-strings.mjs           # 生成
- *   node scripts/release/build-installer-strings.mjs --check    # 只校验已生成的文件是否最新
+ * Usage:
+ *   node scripts/release/build-installer-strings.mjs           # generate
+ *   node scripts/release/build-installer-strings.mjs --check    # only verify the generated file is current
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
@@ -25,7 +32,7 @@ const repoRoot = resolve(scriptDir, "..", "..");
 const catalogDir = join(repoRoot, "frontend", "src", "i18n");
 const outputPath = join(scriptDir, "installer", "installer_strings.nsh");
 
-/** 词表语言 → NSIS 语言常量。五个 `.nlf` 都随 NSIS 分发，无需额外下载。 */
+/** Catalog language → NSIS language constant. All five `.nlf` files ship with NSIS. */
 const LANGUAGES = [
     { locale: "en-US", nsis: "English", export: "enUS", suffix: "EN" },
     { locale: "zh-CN", nsis: "SimpChinese", export: "zhCN", suffix: "ZH_CN" },
@@ -34,23 +41,24 @@ const LANGUAGES = [
     { locale: "ko-KR", nsis: "Korean", export: "koKR", suffix: "KO" },
 ];
 
-/** 默认语言：NSIS 在系统语言不匹配任何已声明语言时回退到第一个。 */
+/** Default language: NSIS falls back to the first one when the system language matches none. */
 const DEFAULT_LANGUAGE = LANGUAGES[0];
 
-/** 需要抽出的键前缀。 */
+/** Key prefix that gets extracted. */
 const KEY_PREFIX = "installer_";
 
-/** NSIS 的 `LangString` 名：`installer_welcome_title` → `HFS_WELCOME_TITLE`。 */
+/** NSIS `LangString` name: `installer_welcome_title` → `HFS_WELCOME_TITLE`. */
 function langStringName(key) {
     return "HFS_" + key.slice(KEY_PREFIX.length).toUpperCase();
 }
 
 /**
- * 转义为 NSIS 字符串字面量。
+ * Escape into an NSIS string literal.
  *
- * 【逐字符而不是链式 replace】顺序敏感：先把换行变成 `$\r$\n`，再转义 `$` 会把刚
- * 插进去的 `$` 又转义一遍，结果是字面量 `$\r$\n` 原样显示给用户。逐字符一次成型
- * 就没有这个陷阱。
+ * [Per-character instead of chained replace] Order matters: turn newlines into
+ * `$\r$\n` first, then escaping `$` would re-escape the `$` just inserted and
+ * the literal `$\r$\n` would be shown to the user verbatim. Building the
+ * output per character avoids that trap in one pass.
  */
 function nsisEscape(text) {
     let out = "";
@@ -64,10 +72,10 @@ function nsisEscape(text) {
     return out;
 }
 
-/** 把词表 `.ts` 编译成 JS 并求值，取出导出的词典对象。 */
+/** Compile the catalog `.ts` into JS and evaluate it, taking the exported dictionary. */
 async function loadCatalog(entry) {
-    // esbuild 装在 frontend 下；`import()` 需要 file:// URL（Windows 盘符路径
-    // 会被 ESM 加载器当成协议而拒绝）。
+    // esbuild is installed under frontend; `import()` needs a file:// URL (a
+    // Windows drive-letter path is rejected by the ESM loader as a protocol).
     const esbuildEntry = createRequire(import.meta.url).resolve("esbuild", {
         paths: [join(repoRoot, "frontend")],
     });
@@ -75,7 +83,7 @@ async function loadCatalog(entry) {
     const source = readFileSync(join(catalogDir, `${entry.locale}.ts`), "utf8");
     const { code } = await esbuild.transform(source, { loader: "ts", format: "cjs" });
     const module = { exports: {} };
-    // 词表是纯数据模块（只有 `export const x = {...} as const`），求值是安全的。
+    // The catalog is a pure data module (only `export const x = {...} as const`); evaluating it is safe.
     new Function("module", "exports", code)(module, module.exports);
     const catalog = module.exports[entry.export];
     if (!catalog || typeof catalog !== "object") {
@@ -84,7 +92,7 @@ async function loadCatalog(entry) {
     return catalog;
 }
 
-/** 收集全部语言的安装器文案；缺键即失败。 */
+/** Collect the installer copy for every language; a missing key fails. */
 async function collectStrings() {
     const catalogs = [];
     for (const entry of LANGUAGES) {
@@ -118,14 +126,14 @@ async function collectStrings() {
 
 function render({ keys, catalogs }) {
     const lines = [
-        "; 本文件由 scripts/release/build-installer-strings.mjs 生成 —— 不要手工编辑。",
+        "; Generated by scripts/release/build-installer-strings.mjs — do not edit by hand.",
         ";",
-        "; 文案的唯一来源是 frontend/src/i18n/*.ts 里 installer_ 前缀的词条；",
-        "; 直接改这里会在下一次生成时被覆盖，且 scripts/checks/check-product-consistency.ps1",
-        "; 会因与本文件不一致而失败。",
+        "; The single source of the copy is the installer_-prefixed entries in frontend/src/i18n/*.ts;",
+        "; editing this file directly gets overwritten on the next generation, and",
+        "; scripts/checks/check-product-consistency.ps1 fails on the mismatch.",
         "",
-        `; 语言：${LANGUAGES.map((entry) => `${entry.locale}→${entry.nsis}`).join("、")}`,
-        `; 词条：${keys.length} 条 × ${LANGUAGES.length} 种语言`,
+        `; Languages: ${LANGUAGES.map((entry) => `${entry.locale}→${entry.nsis}`).join(", ")}`,
+        `; Entries: ${keys.length} × ${LANGUAGES.length} languages`,
         "",
     ];
 
@@ -140,11 +148,13 @@ function render({ keys, catalogs }) {
         lines.push("");
     }
 
-    // 语言选择对话框之前的报错只能用字面量（此时还不知道用户选了哪种语言），
-    // 因此把五种语言并列 —— 看不懂日文的用户至少能在同一段文字里认出自己那一行。
+    // An error box shown before the language-selection dialog can only use
+    // literals ($LANGUAGE is not decided yet, so $(HFS_...) has no value);
+    // therefore all five languages are concatenated — a user who cannot read
+    // Japanese still recognizes their own line in the same text.
     lines.push(
-        "; 「需要 64 位 Windows」是唯一在语言选择**之前**就要显示的提示：",
-        "; 那时 $LANGUAGE 还没定，$(HFS_...) 取不到值，只能五种语言并列。",
+        '; "64-bit Windows required" is the only message shown **before** language selection:',
+        "; at that point $LANGUAGE is unset and $(HFS_...) resolves to nothing, so all five languages are concatenated.",
         "!macro HFS_FATAL_NOT_X64",
     );
     for (const { entry, catalog } of catalogs) {
@@ -163,7 +173,8 @@ async function main() {
 
     if (checkOnly) {
         const current = existsSync(outputPath) ? readFileSync(outputPath, "utf8") : null;
-        // 生成物带 BOM；比较前去掉，避免把"有没有 BOM"当成内容差异。
+        // The generated file has a BOM; strip it before comparing so the
+        // BOM's presence is not treated as a content difference.
         const normalized = current?.replace(/^\uFEFF/, "") ?? null;
         if (normalized !== rendered) {
             throw new Error(
@@ -175,8 +186,9 @@ async function main() {
     }
 
     mkdirSync(dirname(outputPath), { recursive: true });
-    // UTF-8 **带 BOM**：`makensis /INPUTCHARSET UTF8` 对 BOM 更宽容，且与仓库里
-    // 其它含非 ASCII 的脚本保持一致（见 scripts/**/*.ps1 的处理）。
+    // UTF-8 **with BOM**: `makensis /INPUTCHARSET UTF8` is more forgiving with a
+    // BOM, and this matches the other non-ASCII scripts in the repo (see
+    // scripts/**/*.ps1).
     writeFileSync(outputPath, "\uFEFF" + rendered, "utf8");
     console.log(
         `wrote ${outputPath} (${strings.keys.length} keys × ${LANGUAGES.length} languages)`,

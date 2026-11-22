@@ -475,16 +475,14 @@ pub(super) fn export_document(
     content: String,
 ) -> serde_json::Value {
     let ext = notebook_assets::sanitize_ext(&extension);
-    let filter_label = match ext.as_str() {
-        "html" => "HTML Document",
-        _ => "Markdown Document",
-    };
     // suggested_name 由前端传入，先清洗再拼扩展名：路径分隔符可以让对话框
     // 预导航到任意目录。
     let base_name = notebook_assets::sanitize_export_file_name(&suggested_name, "untitled");
 
+    // 类型名与扩展名同源（内核词表），不再在这里按扩展名手抄一份标签。
+    let file_type = hifishifter_kernel::file_types::notebook_document(&ext);
     let picked = rfd::FileDialog::new()
-        .add_filter(filter_label, &[ext.as_str()])
+        .add_filter(file_type.name(), &file_type.extension_refs())
         .set_file_name(format!("{base_name}.{ext}"))
         .save_file();
     let Some(output_path) = picked else {
@@ -565,7 +563,13 @@ pub(super) fn save_asset_as(
             .unwrap_or(&fallback),
         "asset",
     );
-    let picked = rfd::FileDialog::new().set_file_name(name).save_file();
+    // 【为什么这里此前没有过滤器】附件另存为是唯一一处"只设文件名"的保存对话框，
+    // 于是可以存成任意扩展名 —— 与插件侧同一个缺口。类型名由资产扩展名派生。
+    let file_type = hifishifter_kernel::file_types::FileType::asset(&asset.ext);
+    let picked = rfd::FileDialog::new()
+        .set_file_name(name)
+        .add_filter(file_type.name(), &file_type.extension_refs())
+        .save_file();
     let Some(output_path) = picked else {
         return json!({ "ok": true, "canceled": true });
     };

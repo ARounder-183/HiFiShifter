@@ -3,9 +3,12 @@
  *
  * 【要钉死什么】
  * 1. 插件模式由 **250 ms 快照**驱动：事件丢了也要显示"渲染中 42%"；
- * 2. `render_audible_stale === true` 时左侧不显示 —— 右侧 PluginApplyStatus
- *    已经在说"正在合成 xx%"，两处重复是噪音；
- * 3. 独立 App 仍走 Redux + appStatusProgressBus，行为不变。
+ * 2. **百分比只在这一处**。右侧 PluginApplyStatus 只说「你听到的是不是当前编辑」，
+ *    不再拼百分比 —— 它那条分支（`audible_state === "stale"`）在 ARA 下恒不成立，
+ *    是死代码；而左侧此前在 stale 时让位，于是"渲染中"完全没有百分比。
+ * 3. `0` 是**真读数**（刚开始），`null` 才是"没有进度可报"。把 0 也藏起来会让
+ *    "刚开始"与"不知道"长得一模一样。
+ * 4. 独立 App 仍走 Redux + appStatusProgressBus，行为不变。
  */
 // @vitest-environment jsdom
 import { act } from "react";
@@ -129,7 +132,7 @@ test("渲染中片跟随用户自定义的强调色，而不是灰色", async ()
     expect(chip?.style.color).toContain("--accent-11");
 });
 
-test("stale 时左侧不显示，避免与右侧「正在合成」重复", async () => {
+test("stale 时左侧仍然显示百分比（百分比只有一个来源）", async () => {
     (window as { __HFS_PLUGIN_BOOTSTRAP__?: unknown }).__HFS_PLUGIN_BOOTSTRAP__ = {
         version: 1,
         viewId: "test",
@@ -138,7 +141,37 @@ test("stale 时左侧不显示，避免与右侧「正在合成」重复", async
         pluginState({ rendering_active: true, render_progress: 0.42, render_audible_stale: true }),
     );
     await render();
-    expect(text()).not.toContain(enUS.common_rendering);
+    // 【为什么不再让位】右侧那条百分比只在 `audible_state === "stale"` 时出现，而那个
+    // 分支在 ARA 下恒不成立（一旦发布过快照就永远不是 stale）。两边都不显示，用户就
+    // 永远看不到百分比 —— 这正是报障的形状。现在百分比固定由左侧承担。
+    expect(text()).toContain(enUS.common_rendering);
+    expect(text()).toContain("42%");
+});
+
+test("0% 是真读数，不是「没有进度」", async () => {
+    (window as { __HFS_PLUGIN_BOOTSTRAP__?: unknown }).__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "test",
+    };
+    publishPluginApplyStateForTests(
+        pluginState({ rendering_active: true, render_progress: 0, render_audible_stale: false }),
+    );
+    await render();
+    expect(text()).toContain(enUS.common_rendering);
+    expect(text()).toContain("0%");
+});
+
+test("null 进度只显示「渲染中」，不编一个数字", async () => {
+    (window as { __HFS_PLUGIN_BOOTSTRAP__?: unknown }).__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "test",
+    };
+    publishPluginApplyStateForTests(
+        pluginState({ rendering_active: true, render_progress: null, render_audible_stale: false }),
+    );
+    await render();
+    expect(text()).toContain(enUS.common_rendering);
+    expect(text()).not.toMatch(/\d+%/);
 });
 
 test("独立 App 仍读 Redux 与 appStatusProgressBus", async () => {

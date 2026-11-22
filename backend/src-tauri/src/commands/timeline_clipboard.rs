@@ -109,6 +109,38 @@ fn record_written_clipboard(
     }
 }
 
+/// 解析一批锚点 id（clip 或 track 都行）所属的根轨道，并为每一条补一次 `dyn_orig`
+/// 组装。
+///
+/// 【为什么导出需要它】音高包络的"未识别帧填充"用逐帧电平判断"这段长间隙可不可闻"：
+/// 静音段插值、可闻段 hold。`dyn_orig` 是 `#[serde(skip)]` 的派生数据，只有组装过
+/// 才有值，而引擎只在"轨道画过 dyn / 动态面板打开"时才组装它 —— 于是纯音高工程里
+/// 导出侧永远拿到"未知"，长间隙一律保守 hold。这里补一次组装：拿得到就用，拿不到
+/// 仍是 hold（退化路径与没有能量通道完全一致）。
+///
+/// 【必须在 `state.timeline.lock()` **之前**调用】`maybe_schedule_dyn_orig` 内部会
+/// 再取一次时间线锁（见 `dyn_analysis.rs` 的文档），持锁调用即自死锁 —— 与
+/// `commands/params.rs` 的同一条纪律。
+///
+/// 【为什么要先短取一次锁】根轨道 id 只能从 live timeline 解析。这一次"取锁 → 读 id
+/// → 放锁"与随后真正的导出之间没有任何等待：两者在同一个同步命令里，用户编辑不可能
+/// 插进来。即使插进来了，最坏结果也只是能量判据比曲线旧一帧级的变化 —— 那只会让一段
+/// 本该插值的静音走 hold，不会产出错误的值。
+fn schedule_dyn_orig_for_roots(
+    state: &AppState,
+    roots_of: impl FnOnce(&crate::state::TimelineState) -> Vec<String>,
+) {
+    let mut roots = {
+        let timeline = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        roots_of(&timeline)
+    };
+    roots.sort_unstable();
+    roots.dedup();
+    for root in &roots {
+        let _ = crate::pitch_analysis::maybe_schedule_dyn_orig(&state.timeline, root);
+    }
+}
+
 fn build_reaper_clipboard(
     timeline: &crate::state::TimelineState,
     clip_ids: &[String],
@@ -337,6 +369,14 @@ fn paste_fragment(
 }
 
 pub(super) fn copy_timeline_clips(state: &AppState, clip_ids: Vec<String>) -> serde_json::Value {
+    // 能量通道：必须在取时间线锁之前（见 `schedule_dyn_orig_for_roots`）。
+    schedule_dyn_orig_for_roots(state, |timeline| {
+        clip_ids
+            .iter()
+            .filter_map(|id| timeline.clips.iter().find(|clip| &clip.id == id))
+            .filter_map(|clip| timeline.resolve_root_track_id(&clip.track_id))
+            .collect()
+    });
     let timeline = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     let fragment = match build_clip_fragment(&timeline, &clip_ids, current_project_name(state)) {
         Ok(fragment) => fragment,
@@ -386,6 +426,13 @@ pub(super) fn copy_timeline_clips(state: &AppState, clip_ids: Vec<String>) -> se
 }
 
 pub(super) fn copy_timeline_tracks(state: &AppState, track_ids: Vec<String>) -> serde_json::Value {
+    // 能量通道：轨道 id 也能解析到根，覆盖该根下的全部 clip。
+    schedule_dyn_orig_for_roots(state, |timeline| {
+        track_ids
+            .iter()
+            .filter_map(|id| timeline.resolve_root_track_id(id))
+            .collect()
+    });
     let timeline = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     let fragment = match build_track_fragment(&timeline, &track_ids, current_project_name(state)) {
         Ok(fragment) => fragment,

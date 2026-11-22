@@ -7,8 +7,8 @@
 //! 再交给时间线当**参数根**（不是音频路由，见 `editor::workspace`）。
 //!
 //! # 只读，绝不写
-//! `ReorderSelectedTracks` 不带 project 参数、操作的是全局/当前工程选择（见本仓
-//! `probe/ara/EXECUTION-LEDGER.md` Task 74），所以插件绝不写宿主轨道结构。本模块
+//! `ReorderSelectedTracks` 不带 project 参数、操作的是全局/当前工程选择（真机实测），
+//! 所以插件绝不写宿主轨道结构。本模块
 //! 只用已核对的只读入口：`CountTracks`、`GetTrack`、`GetMediaTrackInfo_Value`、
 //! `GetSetMediaTrackInfo_String`（`setNewValue=false`）、`ValidatePtr2`、
 //! `GetProjectStateChangeCount`。
@@ -32,8 +32,7 @@
 //! 轨"，行为与本次改动之前完全一致。
 //!
 //! 【未闭合项】要放宽这一条，必须先拿真实 REAPER 采一次样，确认 `I_FOLDERDEPTH > 1`
-//! 到底出现在什么结构里（见 `docs/plans/2026-10-08-folder-child-items-to-clips.md`
-//! 的 Task 5.6）。在拿到实测之前**不要**凭对称性外推：`-2` 的语义有官方文档支撑，
+//! 到底出现在什么结构里。在拿到实测之前**不要**凭对称性外推：`-2` 的语义有官方文档支撑，
 //! `+2` 没有。放宽的判据是实测样本，不是推理。
 use super::{checked, NativeHost};
 use std::collections::BTreeMap;

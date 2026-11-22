@@ -26,7 +26,12 @@ use webview2_com::{
     WebMessageReceivedEventHandler,
 };
 use windows::core::{w, Interface, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    COLORREF, HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
+use windows::Win32::Graphics::Gdi::{
+    ClientToScreen, CreateSolidBrush, MonitorFromWindow, MONITOR_DEFAULTTONEAREST,
+};
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GET_MODULE_HANDLE_EX_FLAG_PIN;
 use windows::Win32::System::LibraryLoader::{
@@ -34,6 +39,11 @@ use windows::Win32::System::LibraryLoader::{
     GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::HiDpi::{
+    AreDpiAwarenessContextsEqual, GetDpiForMonitor, GetDpiForWindow, GetWindowDpiAwarenessContext,
+    SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, DPI_AWARENESS_CONTEXT_UNAWARE, MDT_EFFECTIVE_DPI,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -48,6 +58,42 @@ static WINDOWS: AtomicUsize = AtomicUsize::new(0);
 static NEXT_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 static CLASS_LOCK: Mutex<bool> = Mutex::new(false);
 static WEBVIEW_MODULE_PIN: OnceLock<Result<(), String>> = OnceLock::new();
+
+/// 编辑器加载期的底色（RGB 30/30/34）。
+///
+/// 【为什么要有它】控制器创建到首帧之间 WebView2 画的是**默认白底**；现场
+/// （VEGAS 2026-11）重开面板时会白屏数秒，与编辑器的深色主题形成刺眼反差。
+/// 窗口类背景与 `SetDefaultBackgroundColor` 用同一个颜色，等待期就是一块
+/// 与编辑器同色的面板，而不是白屏。
+const EDITOR_BACKGROUND: COLORREF = COLORREF(0x0022_1E1E); // B=0x22, G=0x1E, R=0x1E
+const EDITOR_BACKGROUND_RGB: (u8, u8, u8) = (30, 30, 34);
+
+/// 停放的编辑器窗口：宿主关掉插件面板后**不销毁**的那一份原生视图。
+///
+/// 【为什么停放而不是销毁】WebView2 在"上一个控制器刚关闭"之后创建新控制器，
+/// 现场实测要等 ~5.6 s（VEGAS 2026-11-22：每次重开面板 `createView` → `page ready`
+/// 正好 5619/5629 ms，期间面板一片白）。而窗口、控制器、页面本身都可复用：
+/// 宿主给的下一个 `attached` 只是同一控制器（`EditorLink` 是同一个 `Arc`）的另一个
+/// 视图。把 HWND 挂到 message-only 窗口下隐藏，下一次 attached 原样挂回新父窗口，
+/// 重开瞬时完成，页面状态（滚动位置、展开的面板）也一并保留。
+///
+/// 【为什么只停放嵌入形态】popup 是宿主窗口树的"替身"，它的几何/可见性逐拍跟随
+/// 宿主；停放它等于把一个顶层窗口藏起来再改回子窗口，收益（ACID 重开本来就快）
+/// 远小于风险。popup 形态仍按原路径销毁重建。
+struct ParkedWindow {
+    /// 只存数值，不把 `HWND` 当 `Send`：真正的 Win32 调用都在 `thread` 上做。
+    hwnd: usize,
+    thread: u32,
+    token: usize,
+    /// 与宿主控制器的编辑器链路同一份 —— 只有同一个链路才允许复用。
+    link: Arc<crate::editor::routing::EditorLink>,
+    /// 创建时的父窗口是不是 DPI-unaware。上下文不同（感知父窗口 vs 不感知父窗口）
+    /// 不能复用同一个子窗口：子窗口的感知上下文在创建时定死。
+    unaware_parent: bool,
+}
+static PARKED: Mutex<Vec<ParkedWindow>> = Mutex::new(Vec::new());
+/// 最多停放几个窗口。正常一个插件实例一个；上限只是防止异常宿主把内存堆起来。
+const MAX_PARKED_WINDOWS: usize = 4;
 
 // 进程内**唯一**的 WebView2 环境。
 //
@@ -88,6 +134,229 @@ const MAX_PAGE_REBUILDS: u32 = 3;
 /// profile 也不会再长到那个量级。
 const BROWSER_ARGUMENTS: &str = "--enable-precise-memory-info --disk-cache-size=67108864";
 
+/// 把本线程临时切到"与参照窗口同一坐标语义"的作用域守卫。
+///
+/// 【这条守卫回答的问题】创建子窗口 / 移动子窗口 / 读客户区，Win32 都按**调用线程**
+/// 的感知上下文解释坐标；而嵌入插件的参照物（宿主父窗口）有它自己的上下文。两者
+/// 不一致时，同一组数字会被解释成两种长度 —— ACID Pro 11 实测（125% 缩放，2026-11）：
+/// `sfvstwrap` 包裹窗口在不感知线程上创建（父窗口 96-DPI），它的客户区被系统虚拟化
+/// 成 96 空间，而感知宿主按物理像素给它留位 —— 子窗口若按 `getSize` 的数字创建，
+/// 要么被再放大 1.25×（溢出 ⇒ 宿主滚动条、右/下被裁），要么被再缩小（页面留白）。
+///
+/// 【守卫的规则：跟父窗口走，不跟"最优感知"走】
+///   * 父窗口 DPI-unaware（96 且上下文不感知）⇒ 切到 **unaware**。unaware 父窗口
+///     里嵌感知子窗口是平台**不支持**的组合（实测 2026-11：几何错位且内容仍被 DWM
+///     拉伸）—— 上下文一致才能让"父窗口给多大、子窗口占多大"成立。模糊依旧，但
+///     那是包裹层整体被拉伸的结果，属于宿主桥的限制（根因修复见 `host_identity.rs`
+///     的 DllMain 线程提升）；
+///   * 其余（感知父窗口）⇒ 切 **PMv2**。感知父窗口与 PMv2 子窗口是平台支持的混合
+///     模式（VEGAS Pro 实测父窗口 120/system-aware、子窗口 PMv2，几何与清晰度都
+///     正确）；PMv2 让 WebView2 按 `devicePixelRatio=1.25` 渲染，物理像素准确。
+///
+/// 子窗口的感知上下文在**创建时**定死且随后不可改，所以"创建与摆放"必须发生在
+/// 与父窗口一致的上下文里；宿主自身的感知策略一概不动。
+///
+/// 【为什么是线程级而不是进程级】进程/线程的感知策略是**宿主**的资产，永久改掉
+/// 会连带改变宿主其余窗口的缩放行为；`SetThreadDpiAwarenessContext` 只在守卫
+/// 存活期间生效，出作用域即还原。
+///
+/// 【逃生门】`HIFISHIFTER_NO_DPI_AWARE=1` 回到"继承宿主上下文"的旧行为 —— 与
+/// `HIFISHIFTER_NO_ARA`（`host_identity.rs`）同一模式，给现场排查留退路。
+struct HostContextScope {
+    previous: DPI_AWARENESS_CONTEXT,
+}
+
+impl HostContextScope {
+    /// 把线程切到与 `reference` 一致的坐标语义；`None` = 保持原状（逃生门开启，
+    /// 参照窗口读不到，或线程切换失败）。
+    fn enter(reference: HWND) -> Option<Self> {
+        if std::env::var_os("HIFISHIFTER_NO_DPI_AWARE").is_some_and(|value| value == "1") {
+            return None;
+        }
+        // SAFETY: 只读查询；伪句柄查询对任意 HWND 安全。
+        let unaware = unsafe {
+            AreDpiAwarenessContextsEqual(
+                GetWindowDpiAwarenessContext(reference),
+                DPI_AWARENESS_CONTEXT_UNAWARE,
+            )
+        }
+        .as_bool();
+        let target = if unaware {
+            DPI_AWARENESS_CONTEXT_UNAWARE
+        } else {
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+        };
+        // SAFETY: 参数是常量伪句柄；失败返回 null 伪句柄，按"没切成"处理。
+        let previous = unsafe { SetThreadDpiAwarenessContext(target) };
+        if previous.0.is_null() {
+            return None;
+        }
+        Some(Self { previous })
+    }
+    /// 本线程当前的感知上下文是否已经是 PMv2（诊断读数，读后保持原状）。
+    fn thread_is_pm_v2() -> bool {
+        // SAFETY: 查询 = 切过去拿旧值再立刻还原；伪句柄常量，无副作用。
+        let previous =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        unsafe { SetThreadDpiAwarenessContext(previous) };
+        unsafe {
+            AreDpiAwarenessContextsEqual(previous, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+        }
+        .as_bool()
+    }
+}
+
+impl Drop for HostContextScope {
+    fn drop(&mut self) {
+        // SAFETY: `previous` 来自 enter() 的成对返回值；还原失败无可用恢复手段。
+        unsafe { SetThreadDpiAwarenessContext(self.previous) };
+    }
+}
+
+impl HostContextScope {
+    /// 把线程临时切到 **PMv2**（不参照任何宿主窗口）。
+    ///
+    /// 【为什么需要它】顶层窗口（popup）的感知上下文在创建时定死，而它**不该**跟
+    /// 包裹层走：popup 拥有独立的 DWM surface，按物理像素渲染 —— 这正是它能锐利的
+    /// 原因（见 `attach` 的 popup 分支说明）。
+    fn force_pm_v2() -> Option<Self> {
+        if std::env::var_os("HIFISHIFTER_NO_DPI_AWARE").is_some_and(|value| value == "1") {
+            return None;
+        }
+        // SAFETY: 参数是常量伪句柄；失败返回 null 伪句柄，按"没切成"处理。
+        let previous =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        if previous.0.is_null() {
+            return None;
+        }
+        Some(Self { previous })
+    }
+}
+
+/// 包裹窗口客户区的**物理**屏幕矩形（popup 的摆放依据）。
+///
+/// 【为什么能拿到物理值】坐标按**调用线程**的感知上下文虚拟化：PMv2 线程去查
+/// DPI-unaware 的包裹窗，系统把它的逻辑矩形按屏幕缩放换算回物理值返回 —— 于是
+/// "包裹窗在屏幕上到底占了多大"与"popup 摆多大"是同一把尺子。
+fn wrapper_physical_client(parent: HWND) -> Option<RECT> {
+    let _scope = HostContextScope::force_pm_v2()?;
+    // SAFETY: 只读查询；失败按"拿不到"处理。
+    let mut client = RECT::default();
+    if unsafe { GetClientRect(parent, &mut client) }.is_err()
+        || client.right <= 0
+        || client.bottom <= 0
+    {
+        return None;
+    }
+    let mut origin = POINT::default();
+    if unsafe { ClientToScreen(parent, &mut origin) }.as_bool() {
+        Some(RECT {
+            left: origin.x,
+            top: origin.y,
+            right: origin.x + client.right,
+            bottom: origin.y + client.bottom,
+        })
+    } else {
+        None
+    }
+}
+
+/// 是否**显式**要求 DPI popup 形态（`HIFISHIFTER_DPI_POPUP=1`）。
+///
+/// 【为什么默认关闭】popup 是顶层窗口，不在宿主的窗口树里：它换来了 125% 缩放下的
+/// 清晰度，代价是**脱离宿主裁剪与布局** —— 现场（ACID Pro 2026-11-22）表现为覆盖
+/// 宿主 FX 链/预设栏、宿主缩放面板时它停在原地。作为插件窗口，这比"宿主包裹层被
+/// DWM 拉伸导致的模糊"更不可接受：模糊是宿主的 DPI 虚拟化对**所有**子窗口的统一
+/// 结果，而覆盖宿主控件直接让用户无法管理 FX。默认形态因此是宿主父窗口里的普通
+/// 子窗口；需要清晰度的用户显式打开这个逃生门，并接受浮窗行为。
+fn dpi_popup_requested() -> bool {
+    std::env::var_os("HIFISHIFTER_DPI_POPUP").is_some_and(|value| value == "1")
+}
+
+/// popup 形态的判据：宿主显式要求，且包裹窗 DPI-unaware、屏幕缩放 > 1。
+///
+/// 【为什么要这一层】ACID 的 `sfvstwrap` 在不感知上下文里创建包裹窗，宿主进程本身
+/// 是感知的。子窗口无论跟包裹层走（96 DPI 渲染 + DWM 1.25× 拉伸 = 模糊）还是强制
+/// PMv2（几何被两把尺子撕开 = 滚动条 + 裁切），都修不好"模糊" —— 因为模糊的根源
+/// 是**包裹窗的 DWM surface 只有 96 DPI**，子窗口共享它的 surface。popup 是顶层
+/// 窗口：它有自己的 surface、自己的感知上下文，是包裹层不感知时唯一能锐利的形态。
+///
+/// 返回 popup 应用的缩放读数（仅用于日志）；`None` = 走默认的子窗口路径。
+fn popup_scale_for(parent: HWND) -> Option<f64> {
+    if !window_is_unaware(parent) {
+        return None;
+    }
+    monitor_scale_for(parent).filter(|scale| *scale > 1.0)
+}
+
+/// 窗口所在显示器的有效缩放（`DPI / 96`）。
+///
+/// 【为什么不能只用 `GetDpiForWindow`】它对 DPI-unaware 窗口恒回 96 —— 那正是
+/// ACID 包裹层的形态，而 DWM 实际按 125% 合成它。显示器缩放是**物理事实**，
+/// 与窗口/线程的感知上下文无关；`GetDpiForMonitor` 只回答 PMv2 上下文里的调用，
+/// 所以查询前后要切一次（见 `HostContextScope::force_pm_v2`）。
+fn monitor_scale_for(window: HWND) -> Option<f64> {
+    let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_invalid() {
+        return None;
+    }
+    let _scope = HostContextScope::force_pm_v2()?;
+    let mut dpi_x = 0_u32;
+    let mut dpi_y = 0_u32;
+    // SAFETY: 只读查询；失败按"拿不到缩放"处理。
+    if unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }.is_err() {
+        return None;
+    }
+    (dpi_y > 0).then(|| f64::from(dpi_y) / 96.0)
+}
+
+/// 参照窗口的父级（嵌入形态里就是宿主包裹窗口）；拿不到时退回自身。
+///
+/// 【为什么退回自身】浮窗等非嵌入形态没有宿主父级；此时子窗口自己的上下文就是
+/// 事实参照 —— 守卫按它匹配，行为与"继承"一致。
+fn context_reference(hwnd: HWND) -> HWND {
+    // SAFETY: 查询失败返回 null，调用方按自身处理。GA_PARENT（直接父级）而不是
+    // GA_ROOT：坐标语义的参照物是**直接包裹**子窗口的那层（感知宿主里的不感知
+    // 包裹窗），根窗口的上下文回答不了"这层包裹怎么解释坐标"。
+    let parent = unsafe { GetAncestor(hwnd, GA_PARENT) };
+    if parent.0.is_null() || parent == hwnd {
+        hwnd
+    } else {
+        parent
+    }
+}
+
+/// 附着点的一次性 DPI 事实：宿主父窗口的 DPI 与感知上下文、本线程切换前的状态。
+///
+/// 【为什么值得一行日志】ACID 的两个症状都源自"包裹层上下文与感知宿主不一致"，
+/// 而修复走到了哪一层只有现场日志才能回答：
+///   * 父窗口 DPI=120 且父上下文非 PMv2 ⇒ 感知宿主里的 system-aware 包裹窗（VEGAS
+///     形态），PMv2 子窗口是平台支持的组合；
+///   * 父窗口 DPI=96 ⇒ 包裹窗 DPI-unaware（ACID 形态）——守卫因此按父窗口匹配
+///     （见 `HostContextScope`）；`loader-promote` 则回答 DllMain 的线程提升
+///     （见 `host_identity.rs`）有没有赶在包裹窗创建之前生效。
+fn log_host_dpi_facts(parent: HWND) {
+    let thread = unsafe { GetCurrentThreadId() };
+    let (dpi, pm_v2, unaware, thread_pm_v2) = {
+        // SAFETY: 只读查询；`AreDpiAwarenessContextsEqual` 对任意伪句柄安全。
+        let context = unsafe { GetWindowDpiAwarenessContext(parent) };
+        let (dpi, pm_v2, unaware) = unsafe {
+            (
+                GetDpiForWindow(parent),
+                AreDpiAwarenessContextsEqual(context, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+                    .as_bool(),
+                AreDpiAwarenessContextsEqual(context, DPI_AWARENESS_CONTEXT_UNAWARE).as_bool(),
+            )
+        };
+        (dpi, pm_v2, unaware, HostContextScope::thread_is_pm_v2())
+    };
+    crate::gui_log_line(&format!(
+        "editor DPI facts: parent-dpi={dpi} parent-pmv2={pm_v2} parent-unaware={unaware} \
+         thread-pmv2={thread_pm_v2} thread=0x{thread:x} loader-promote={}",
+        crate::host_identity::wrapper_thread_dpi_promote_outcome()
+    ));
+}
+
 fn cached_environment() -> Option<ICoreWebView2Environment> {
     ENVIRONMENT.with(|slot| slot.borrow().clone())
 }
@@ -127,6 +396,221 @@ fn profile_directory() -> Result<Vec<u16>, String> {
     Ok(wide(&profile.to_string_lossy()))
 }
 
+/// 窗口是不是 DPI-unaware（子窗口的感知上下文必须与父窗口同尺，见 `HostContextScope`）。
+fn window_is_unaware(window: HWND) -> bool {
+    // SAFETY: 只读查询；伪句柄比较对任意 HWND 安全。
+    unsafe {
+        AreDpiAwarenessContextsEqual(
+            GetWindowDpiAwarenessContext(window),
+            DPI_AWARENESS_CONTEXT_UNAWARE,
+        )
+    }
+    .as_bool()
+}
+
+/// 取一个可复用的停放窗口；顺手清掉已经死掉的条目。
+///
+/// 复用条件（缺一不可）：同一线程、同一个 `EditorLink`（同一个宿主控制器）、
+/// 宿主这次要的仍是嵌入形态、父窗口的 DPI 感知上下文与创建时一致。
+/// 条件不满足的条目**留在池里**（宿主下次可能换回原来的形态），死掉的才销毁。
+fn take_parked_window(
+    link: &Arc<crate::editor::routing::EditorLink>,
+    parent: HWND,
+) -> Option<ParkedWindow> {
+    let thread = unsafe { GetCurrentThreadId() };
+    let adopt_unaware = window_is_unaware(parent);
+    let popup_wanted = dpi_popup_requested() && popup_scale_for(parent).is_some();
+    let mut dead = Vec::new();
+    let taken = {
+        let mut parked = PARKED.lock().unwrap_or_else(|e| e.into_inner());
+        let mut index = 0;
+        let mut found = None;
+        while index < parked.len() {
+            let entry = &parked[index];
+            let key = WindowKey {
+                hwnd: entry.hwnd,
+                thread: entry.thread,
+                token: entry.token,
+            };
+            let alive = entry.thread == thread
+                && key.valid()
+                && key.client().is_some_and(|client| {
+                    let client = client.borrow();
+                    // 宿主销毁 FX 实例后链路 owner 会消失：这种窗口没有复用价值，
+                    // 留着只会把一份 WebView 挂在 message-only 窗口下。
+                    !client.is_dead() && client.link.owner().is_ok()
+                });
+            if !alive {
+                dead.push(parked.remove(index));
+                continue;
+            }
+            if found.is_none()
+                && !popup_wanted
+                && entry.unaware_parent == adopt_unaware
+                && Arc::ptr_eq(&entry.link, link)
+            {
+                found = Some(parked.remove(index));
+                continue;
+            }
+            index += 1;
+        }
+        found
+    };
+    for entry in dead {
+        destroy_parked(entry);
+    }
+    taken
+}
+
+/// 销毁一个停放窗口（必须在 `thread` 上调用；跨线程的条目投 `WM_CLOSE`）。
+fn destroy_parked(entry: ParkedWindow) {
+    let hwnd = HWND(entry.hwnd as *mut c_void);
+    if unsafe { GetCurrentThreadId() } == entry.thread {
+        let _ = unsafe { DestroyWindow(hwnd) };
+    } else {
+        let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+    }
+}
+
+/// 把窗口挂到 message-only 窗口下隐藏；成功返回 `true`（调用方不要 `DestroyWindow`）。
+///
+/// 【为什么不销毁】见 [`ParkedWindow`]：复用同一个 HWND/控制器/页面，下一次
+/// `attached` 是毫秒级的；销毁重建会让 WebView2 在"控制器刚关闭"时冷启动 ~5.6 s。
+fn park_window(hwnd: HWND, thread: u32, token: usize) -> bool {
+    let key = WindowKey {
+        hwnd: hwnd.0 as usize,
+        thread,
+        token,
+    };
+    let Some(client) = key.client() else {
+        return false;
+    };
+    {
+        let client = client.borrow();
+        // 页面已死，或宿主正在销毁 FX 实例（链路 owner 已消失）：没有复用价值。
+        if client.is_dead() || client.link.owner().is_err() {
+            return false;
+        }
+    }
+    let pointer = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const WindowData;
+    if pointer.is_null() {
+        return false;
+    }
+    // popup 形态不停放（见 `ParkedWindow` 的说明）。
+    if unsafe { !(*pointer).popup_anchor.get().0.is_null() } {
+        return false;
+    }
+    let Ok(parent) = (unsafe { GetParent(hwnd) }) else {
+        return false;
+    };
+    let unaware_parent = window_is_unaware(parent);
+    let link = client.borrow().link.clone();
+    let port = unsafe { (*pointer).port.clone() };
+    // 先让页面停止渲染，再隐藏并挂走：宿主随后销毁父窗口时，窗口树里已经没有我们。
+    port.set_page_visible(false);
+    let _ = unsafe { KillTimer(Some(hwnd), 0x4853) };
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_HIDE);
+        if SetParent(hwnd, Some(HWND_MESSAGE)).is_err() {
+            // 挂不走就保持原状，让 Drop 走销毁路径。
+            let _ = SetParent(hwnd, Some(parent));
+            return false;
+        }
+    }
+    let entry = ParkedWindow {
+        hwnd: hwnd.0 as usize,
+        thread,
+        token,
+        link,
+        unaware_parent,
+    };
+    let evicted = {
+        let mut parked = PARKED.lock().unwrap_or_else(|e| e.into_inner());
+        let evicted = if parked.len() >= MAX_PARKED_WINDOWS {
+            Some(parked.remove(0))
+        } else {
+            None
+        };
+        parked.push(entry);
+        evicted
+    };
+    if let Some(evicted) = evicted {
+        destroy_parked(evicted);
+    }
+    true
+}
+
+/// 把停放的窗口挂回宿主父窗口并显示。
+fn adopt_parked(
+    parked: ParkedWindow,
+    parent: HWND,
+    width: i32,
+    height: i32,
+) -> Result<WindowsHost, String> {
+    let hwnd = HWND(parked.hwnd as *mut c_void);
+    let attached = (|| -> Result<(), String> {
+        let _dpi_scope = HostContextScope::enter(parent);
+        // 与新建路径同一把尺子：填满宿主父窗口客户区（见 `attach` 的说明）。
+        let mut parent_client = RECT::default();
+        let (width, height) = if unsafe { GetClientRect(parent, &mut parent_client) }.is_ok()
+            && parent_client.right > 0
+            && parent_client.bottom > 0
+        {
+            (parent_client.right, parent_client.bottom)
+        } else {
+            (width, height)
+        };
+        unsafe { SetParent(hwnd, Some(parent)) }.map_err(|e| e.to_string())?;
+        unsafe { MoveWindow(hwnd, 0, 0, width, height, true) }.map_err(|e| e.to_string())?;
+        let _ = unsafe { ShowWindow(hwnd, SW_SHOWNA) };
+        Ok(())
+    })();
+    if let Err(error) = attached {
+        // 已经脱离停放池：挂不回去就销毁，不能让它悬在 message-only 窗口下。
+        destroy_parked(parked);
+        return Err(error);
+    }
+    let pointer = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const WindowData;
+    if pointer.is_null() {
+        destroy_parked(parked);
+        return Err("parked window lost its data".into());
+    }
+    // 页面在停放期间被 `put_IsVisible(false)`；恢复可见并按新父窗口尺寸对齐。
+    let port = unsafe { (*pointer).port.clone() };
+    port.set_page_visible(true);
+    port.sync_bounds(hwnd);
+    // 停放前可能留着一张错误提示 STATIC；恢复时它不该继续盖在页面上。
+    port.clear_error();
+    if unsafe { SetTimer(Some(hwnd), 0x4853, 20, None) } == 0 {
+        port.show_error("UI response timer unavailable");
+    }
+    crate::gui_log_line(&format!(
+        "editor view resumed (parked window 0x{:x} reused)",
+        parked.hwnd
+    ));
+    Ok(WindowsHost {
+        key: WindowKey {
+            hwnd: parked.hwnd,
+            thread: parked.thread,
+            token: parked.token,
+        },
+    })
+}
+
+/// 销毁所有停放窗口（`ExitDll` 前调用）。
+///
+/// 【为什么必须显式收尾】它们不在宿主窗口树里，宿主退出时不会替我们销毁；留着它们
+/// 会让 `WINDOWS` 永远非零，`ExitDll` 永远被拒（模块无法卸载）。
+fn destroy_parked_windows() {
+    let entries: Vec<ParkedWindow> = {
+        let mut parked = PARKED.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut *parked)
+    };
+    for entry in entries {
+        destroy_parked(entry);
+    }
+}
+
 /// 挂在 `GWLP_USERDATA` 上的窗口数据：它是**唯一的**"从 HWND 找回判定状态"的入口。
 ///
 /// 【为什么仍然用窗口属性而不是全局表】`WM_NCDESTROY` 是系统给的、与窗口同寿的析构
@@ -136,6 +620,17 @@ struct WindowData {
     port: Rc<WindowsPort>,
     capturered: Rc<Cell<bool>>,
     token: usize,
+    /// popup 形态的几何参照：宿主交给 `IPlugView::attached` 的**父窗口**
+    /// （ACID 的 `sfvstwrap` 子窗口；子窗口形态为默认值）。
+    ///
+    /// 【为什么不是顶层祖先】顶层祖先是宿主整个插件窗口（含 FX 链、预设栏等
+    /// 宿主自有控件），popup 覆盖它的客户区会把宿主控件一起盖住 —— 现场表现
+    /// 就是"插件替换掉了宿主窗口"。几何参照必须是宿主**留给插件的那块矩形**；
+    /// 顶层祖先只用作 popup 的 owner（z 序/最小化跟随），两者不是同一个窗口。
+    ///
+    /// 【为什么放这里】同步发生在 20 ms 定时器上，那一条只拿 `WindowData`；
+    /// 参照物属于"窗口的事实"，随窗口数据同生命周期最自然。
+    popup_anchor: Cell<HWND>,
 }
 impl Drop for WindowData {
     fn drop(&mut self) {
@@ -159,6 +654,12 @@ pub(super) struct WindowsPort {
     hwnd: Cell<HWND>,
     /// 控制器是**异步**到的；它到达之前一切投递都只能报"投不出去"。
     controller: RefCell<Option<ICoreWebView2Controller>>,
+    /// 最近一次真的交给 WebView2 的（物理宽、物理高、rasterization scale 位）。
+    ///
+    /// 【为什么缓存】`WM_SIZE` 在宿主拖动面板时每像素来一次；尺寸没变就不要再
+    /// `SetBounds`/`SetRasterizationScale`，否则每次重排都要多一次跨进程 COM。
+    /// 控制器重建时 `attach` 会清空它（新控制器必须重新收一遍边界）。
+    bounds: Cell<Option<(i32, i32, u64)>>,
     /// 错误提示用的 `STATIC` 子窗口（自有 child 没有标题栏，不能只写 window text）。
     error_window: RefCell<Option<HWND>>,
 }
@@ -184,7 +685,10 @@ impl EditorPort for WindowsPort {
             return;
         }
         // 自有 child 没有标题栏；用真实 STATIC 控件显示错误，不能只写不可见 window text。
-        if let Ok(window) = unsafe {
+        // 【为什么切上下文】错误框的坐标按调用线程解释 —— 与包裹层不一致时会把
+        // 它放大 1.25×，正好在"界面已经坏了"的时刻再添一层错位（见 `HostContextScope`）。
+        let _dpi_scope = HostContextScope::enter(context_reference(hwnd));
+        let created = unsafe {
             CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 w!("STATIC"),
@@ -199,7 +703,9 @@ impl EditorPort for WindowsPort {
                 None,
                 None,
             )
-        } {
+        };
+        drop(_dpi_scope);
+        if let Ok(window) = created {
             *self.error_window.borrow_mut() = Some(window);
         }
     }
@@ -263,13 +769,41 @@ impl WindowKey {
             result.map(|_| ()).map_err(|e| e.to_string())
         }
     }
+    /// popup 形态的几何参照（子窗口形态为 `None`）。
+    fn popup_anchor(self) -> Option<HWND> {
+        if !self.valid() {
+            return None;
+        }
+        let hwnd = HWND(self.hwnd as *mut c_void);
+        let pointer = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const WindowData;
+        if pointer.is_null() {
+            return None;
+        }
+        // SAFETY: pointer 来自窗口属性，窗口存活期间有效（valid() 已验证）。
+        let anchor = unsafe { (*pointer).popup_anchor.get() };
+        (!anchor.0.is_null()).then_some(anchor)
+    }
     /// 可复制的窗口身份不持有 COM 资源，允许调用前释放 view 锁以防 Win32 同步重入。
     fn resize(self, width: i32, height: i32) -> Result<(), String> {
         if unsafe { GetCurrentThreadId() } != self.thread || !self.valid() {
             return Err("resize on stale window or off UI thread".into());
         }
-        unsafe { MoveWindow(HWND(self.hwnd as *mut c_void), 0, 0, width, height, true) }
-            .map_err(|e| e.to_string())
+        let hwnd = HWND(self.hwnd as *mut c_void);
+        // 【popup 形态不按宿主数字摆放】宿主 onSize 传来的数字属于宿主的坐标语义；
+        // popup 的唯一正确尺寸是**宿主留给插件那块矩形**的物理客户区 —— 同步一次即可。
+        if let Some(anchor) = self.popup_anchor() {
+            sync_popup_to_anchor(hwnd, anchor);
+            return Ok(());
+        }
+        // 【为什么按父窗口客户区收口，而不是宿主给的 (width, height)】嵌入子窗口的
+        // 正确尺寸是"填满父窗口客户区"。宿主给的数字在**宿主的上下文**里有意义，
+        // 换一层上下文就换一种长度：ACID 的包裹窗在不感知上下文里把感知宿主按
+        // 物理像素留出的客户区虚拟化成 96 值，`onSize` 传下来的数字因此比实际
+        // 客户区大 1.25× —— 按它移动，子窗口必然溢出（实测：宿主滚动条、右/下被裁；
+        // 2026-11 第一份现场截图正是这个形状）。`fit_child_to_parent` 在守卫上下文
+        // 里量父窗口客户区，量出的数字与 MoveWindow 的解释**同一把尺子**；感知宿主
+        // （REAPER / VEGAS）里父窗口客户区与宿主数字一致，行为不变。
+        fit_child_to_parent(hwnd, Some((width, height))).map(|_| ())
     }
 }
 impl EditorHost for WindowsHost {
@@ -310,12 +844,20 @@ impl Drop for WindowsHost {
         if !self.key.valid() {
             return;
         }
-        if unsafe { GetCurrentThreadId() } == self.key.thread {
-            let _ = unsafe { DestroyWindow(hwnd) };
-        } else {
+        if unsafe { GetCurrentThreadId() } != self.key.thread {
             // COM 由自有窗口线程 Close，不在错误线程释放。正常 REAPER UI 析构走上分支。
             let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+            return;
         }
+        // 【先试停放】宿主关面板 ≠ 插件实例销毁：同一个控制器很快会再 attached
+        // 一个新视图（同一个 `EditorLink`）。把 HWND+控制器+页面停放到 message-only
+        // 窗口下，下一次 attached 复用 —— 避免 WebView2 在"控制器刚关闭"时创建新
+        // 控制器的 ~5.6 s 冷启动（VEGAS 现场白屏）。popup / 页面已死 / 挂不走时
+        // 仍走销毁路径。
+        if park_window(hwnd, self.key.thread, self.key.token) {
+            return;
+        }
+        let _ = unsafe { DestroyWindow(hwnd) };
     }
 }
 
@@ -371,6 +913,9 @@ fn register_class() -> Result<(), String> {
         lpfnWndProc: Some(window_proc),
         hInstance: HINSTANCE(module()?.0),
         lpszClassName: w!("HiFiShifter.ARA.Editor"),
+        // 【深色加载底】控制器创建到首帧之间 WebView2 画的是默认白底；窗口类背景
+        // 与 `SetDefaultBackgroundColor` 用同一个颜色，等待期不再闪白屏。
+        hbrBackground: unsafe { CreateSolidBrush(EDITOR_BACKGROUND) },
         ..Default::default()
     };
     if unsafe { RegisterClassW(&class) } == 0 {
@@ -383,6 +928,9 @@ fn register_class() -> Result<(), String> {
 }
 /// 不留指向已卸载DLL的window class；打开中的child明确阻止正常卸载。
 pub(super) fn shutdown() -> bool {
+    // 【先收停放窗口】它们不在宿主窗口树里，宿主退出时不会替我们销毁；留着它们
+    // 会让 `WINDOWS` 永远非零，`ExitDll` 永远被拒（模块无法卸载）。
+    destroy_parked_windows();
     if WINDOWS.load(Ordering::Acquire) != 0 {
         crate::gui_log_line("ExitDll refused: native editor windows still alive");
         return false;
@@ -422,6 +970,21 @@ impl WindowsHost {
             return Err("IPlugView attached off the parent UI thread".into());
         }
         register_class()?;
+        // 【为什么在创建前记 DPI 事实】父窗口的感知上下文决定"尺寸数字到底落在
+        // 多少物理像素上"；没有这一行，ACID 的滚动条/模糊只能靠猜（见
+        // `HostContextScope` 的文档）。
+        log_host_dpi_facts(parent);
+        // 【复用优先】同一个宿主控制器重开面板时，停放窗口里已经有活的 HWND /
+        // WebView2 控制器 / 页面。必须在 `CoInitializeEx` 与新建 client 之前分流：
+        // 复用路径不新建任何东西（COM 也已经在那个窗口的线程上初始化过）。
+        if let Some(parked) = take_parked_window(&link, parent) {
+            match adopt_parked(parked, parent, width, height) {
+                Ok(host) => return Ok(host),
+                Err(error) => crate::gui_log_line(&format!(
+                    "parked editor window unusable ({error}); creating a fresh one"
+                )),
+            }
+        }
         let instance = HINSTANCE(module()?.0);
         let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
         initialized
@@ -434,6 +997,7 @@ impl WindowsHost {
         let port = Rc::new(WindowsPort {
             hwnd: Cell::new(HWND::default()),
             controller: RefCell::new(None),
+            bounds: Cell::new(None),
             error_window: RefCell::new(None),
         });
         let capturered = Rc::new(Cell::new(false));
@@ -442,7 +1006,58 @@ impl WindowsHost {
             port: port.clone(),
             capturered: capturered.clone(),
             token,
+            popup_anchor: Cell::new(HWND::default()),
         }));
+        // ── 默认形态：宿主父窗口里的普通子窗口 ──────────────────────────────
+        //
+        // 【为什么默认不再 popup】宿主交给 `attached` 的父窗口就是"插件的那块矩形"：
+        // 子窗口天然跟随宿主的裁剪、移动、缩放与 z 序，这是插件窗口唯一可靠的形态。
+        // 曾经的默认 popup 只在"包裹窗 DPI-unaware + 屏幕缩放 > 1"（ACID 的
+        // `sfvstwrap`）时启用，用独立顶层 surface 换清晰度；但顶层窗口不被宿主裁剪、
+        // 也不随宿主布局 —— 现场（2026-11-22）就是覆盖宿主 FX 链/预设栏、宿主缩放
+        // 面板时停在原地，用户连删除 FX 都做不到。这比模糊更不可接受。
+        //
+        // 【模糊的归属】包裹窗不感知时，DWM 把整棵窗口树（含子窗口）按屏幕缩放拉伸；
+        // 任何子窗口形态都共享这个 surface。它不是本插件能修的 —— 宿主自己创建的
+        // 包裹窗决定了 surface 的 DPI。要清晰度就得离开窗口树，而离开窗口树就不再是
+        // 插件窗口。因此默认选宿主集成，popup 只作为显式逃生门
+        // （`HIFISHIFTER_DPI_POPUP=1`，见 `dpi_popup_requested`）。
+        // 【但尺寸必须与它同尺】模糊可以忍，"内容被放大两轮、右/下永远滚不到"不行：
+        // WebView 的 raw surface 必须按窗口坐标下发（见 `content_geometry`），
+        // 交给 DWM 只拉伸一次。
+        //
+        // 【子窗口的尺寸纪律】`resize` 与 20 ms 定时器都把子窗口收口到**父窗口客户区**
+        // （见 `fit_child_to_parent`）：宿主给的 `onSize` 数字属于宿主的坐标语义，
+        // 包裹层与宿主上下文不一致时按它摆放会溢出；量父窗口客户区与 `MoveWindow`
+        // 是同一把尺子。定时器兜底还覆盖"宿主缩放了包裹窗却没调用 `onSize`"的宿主。
+        if dpi_popup_requested() {
+            if let Some(scale) = popup_scale_for(parent) {
+                return Self::attach_popup(
+                    parent, data, port, client, capturered, scale, token, thread, instance, width,
+                    height,
+                );
+            }
+        }
+        // 【为什么这里切上下文】子窗口的感知上下文在创建时定死；与父窗口不一致的
+        // 线程创建出的子窗口，坐标语义就和包裹层对不上 —— 滚动条 + 裁切 + 模糊
+        // 的根因（见 `HostContextScope`）。守卫覆盖 WM_NCCREATE/WM_CREATE 的同步
+        // 送达；宿主的上下文在守卫析构后原样还原。
+        let _dpi_scope = HostContextScope::enter(parent);
+        // 【为什么按父窗口客户区定初始尺寸】`getSize` 协商出的 (width, height) 属于
+        // 宿主的上下文；包裹层与宿主上下文不一致时（ACID：感知宿主 + 不感知包裹窗），
+        // 按它创建的子窗口会被系统再放大 1.25× —— 2026-11 实测的"宿主滚动条 +
+        // 右/下被裁"正是这个错位。守卫上下文里量出的父窗口客户区与 CreateWindow
+        // 的解释同尺；感知宿主里它与宿主给的数字一致，行为不变。
+        let mut parent_client = RECT::default();
+        let (create_width, create_height) = if unsafe { GetClientRect(parent, &mut parent_client) }
+            .is_ok()
+            && parent_client.right > 0
+            && parent_client.bottom > 0
+        {
+            (parent_client.right, parent_client.bottom)
+        } else {
+            (width, height)
+        };
         let result = unsafe {
             CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
@@ -451,14 +1066,25 @@ impl WindowsHost {
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
                 0,
                 0,
-                width,
-                height,
+                create_width,
+                create_height,
                 Some(parent),
                 None,
                 Some(instance),
                 Some(data.cast()),
             )
         };
+        drop(_dpi_scope);
+        // 【几何现场】不感知包裹层里客户区是窗口坐标（1100×720），DWM 会把它
+        // 按屏幕缩放合成为物理值（125% → 1375×900）；感知包裹层里客户区就是
+        // 物理值。这两类窗口的 WebView 内容面不同（见 `content_geometry`），
+        // 所以把判据与屏幕缩放一起记下来。
+        crate::gui_log_line(&format!(
+            "editor embed: parent-client={create_width}x{create_height} \
+             parent-unaware={} display-scale={:.2}",
+            window_is_unaware(parent),
+            monitor_scale_for(parent).unwrap_or(1.0)
+        ));
         let hwnd = match result {
             Ok(hwnd) => hwnd,
             Err(error) => {
@@ -493,6 +1119,365 @@ impl WindowsHost {
         }
         Ok(host)
     }
+
+    /// popup 形态的附着（**显式 opt-in**，见 `dpi_popup_requested`）：顶层窗口 +
+    /// 逐拍同步到**宿主留给插件那块矩形**的物理客户区。
+    ///
+    /// 【为什么初始尺寸不取 (width, height)】那两个数是宿主 `getSize` 协商出的，属于
+    /// **宿主**的坐标语义；popup 按物理像素摆放，唯一的正确初始值就是宿主父窗口
+    /// （插件区域）客户区的物理矩形。attach 这一刻宿主可能还没定尺寸 —— 拿不到就先以
+    /// 协商值近似（按屏幕缩放换算成物理），20 ms 定时器会在下一拍把它校正到真值。
+    ///
+    /// 【owner 与几何参照必须分开】owner 是**顶层祖先**（popup 跟着宿主最小化/还原、
+    /// z 序在宿主之上）；几何参照是宿主交给 `attached` 的**父窗口**。ACID 的父窗口是
+    /// 顶层窗口里的 `sfvstwrap` 子窗口，顶层窗口还画着宿主自己的 FX 链/预设栏 ——
+    /// 用顶层祖先的客户区摆 popup，就会把宿主控件一起盖住（用户报"插件替换了宿主
+    /// 窗口，连删除 FX 都做不到"）。
+    #[allow(clippy::too_many_arguments)]
+    fn attach_popup(
+        parent: HWND,
+        data: *mut WindowData,
+        port: Rc<WindowsPort>,
+        client: Rc<RefCell<EditorClient>>,
+        capturered: Rc<Cell<bool>>,
+        scale: f64,
+        token: usize,
+        thread: u32,
+        instance: HINSTANCE,
+        width: i32,
+        height: i32,
+    ) -> Result<Self, String> {
+        // owner 只负责窗口归属（z 序/最小化）；几何一律看 anchor。
+        let root = unsafe { GetAncestor(parent, GA_ROOT) };
+        let owner = if root.0.is_null() || root == parent {
+            parent
+        } else {
+            root
+        };
+        let anchor = parent;
+        let physical = wrapper_physical_client(anchor);
+        let (x, y, width, height) = physical
+            .map(|rect| {
+                (
+                    rect.left,
+                    rect.top,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
+                )
+            })
+            .unwrap_or_else(|| {
+                // 协商值属于宿主上下文；屏幕缩放>1 时它按物理像素理解，换算成 popup
+                // 的物理像素再摆 —— 误差由下一拍同步收敛。
+                let scaled = ((width as f64) * scale).round().max(1.0) as i32;
+                let scaled_height = ((height as f64) * scale).round().max(1.0) as i32;
+                let mut origin = POINT::default();
+                {
+                    let _scope = HostContextScope::force_pm_v2();
+                    // 换算失败只影响这一拍的近似位置；下一拍同步会收敛到真值。
+                    let _ = unsafe { ClientToScreen(anchor, &mut origin) };
+                }
+                (origin.x, origin.y, scaled, scaled_height)
+            });
+        crate::gui_log_line(&format!(
+            "editor popup: anchor=0x{:x} owner=0x{:x} scale={scale:.2} rect=({x},{y},{width},{height})",
+            anchor.0 as usize, owner.0 as usize
+        ));
+        // 【为什么这里强制 PMv2】popup 是顶层窗口，感知上下文不跟包裹层走：PMv2 让
+        // WebView2 以 devicePixelRatio=屏幕缩放 渲染物理像素，DWM 不再拉伸 —— 模糊
+        // 由此消失。创建与摆放必须在同一上下文里。
+        let _dpi_scope = HostContextScope::force_pm_v2();
+        let result = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(WS_EX_TOOLWINDOW.0),
+                w!("HiFiShifter.ARA.Editor"),
+                w!("HiFiShifter plugin editor initializing…"),
+                WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN,
+                x,
+                y,
+                width,
+                height,
+                Some(owner),
+                None,
+                Some(instance),
+                Some(data.cast()),
+            )
+        };
+        drop(_dpi_scope);
+        let hwnd = match result {
+            Ok(hwnd) => hwnd,
+            Err(error) => {
+                // WM_NCCREATE 之前失败时系统未接管 data；之后失败则 WM_NCDESTROY 已负责释放。
+                if !capturered.get() {
+                    unsafe {
+                        drop(Box::from_raw(data));
+                    }
+                }
+                return Err(format!("create editor popup: {error}"));
+            }
+        };
+        // SAFETY: data 由本函数分配；WM_NCCREATE 之前写入是安全的（窗口尚未取走所有权）。
+        unsafe { (*data).popup_anchor.set(anchor) };
+        port.hwnd.set(hwnd);
+        client.borrow_mut().set_window(hwnd.0 as usize);
+        let host = Self {
+            key: WindowKey {
+                hwnd: hwnd.0 as usize,
+                thread,
+                token,
+            },
+        };
+        if unsafe { SetTimer(Some(hwnd), 0x4853, 20, None) } == 0 {
+            port.show_error("UI response timer unavailable");
+        }
+        if let Err(error) = begin_browser(&client, &port) {
+            port.show_error(&error);
+            unsafe {
+                let _ = KillTimer(Some(hwnd), 0x4853);
+            }
+        }
+        Ok(host)
+    }
+}
+
+/// 把嵌入形态的子窗口收口到**宿主父窗口客户区**；`Ok(true)` = 发生了摆放。
+///
+/// 【为什么是父窗口客户区，而不是宿主 `onSize` 的数字】两者在宿主自己的上下文里
+/// 一致，但在"感知宿主 + 不感知包裹窗"的混合形态里不是同一把尺子（ACID 现场）：
+/// `onSize` 的数字会被系统按另一层上下文解释，按它摆放必然溢出（宿主滚动条 +
+/// 右/下被裁）。在父窗口的上下文里量客户区、在同一个上下文里 `MoveWindow`，
+/// 量多大就占多大。
+///
+/// 【为什么定时器也要做】`WM_SIZE` 只会在**我们自己的**窗口尺寸变化时到来；宿主
+/// 缩放了包裹窗却没调用 `IPlugView::onSize`（或调用晚于布局）时，子窗口就停在
+/// 旧尺寸上。20 ms 一拍的空查询是两次 `GetClientRect`，只有真变了才 `MoveWindow`。
+///
+/// `fallback` 是"量不到父窗口客户区"时的退路（`resize` 用宿主给的协商值；定时器
+/// 不传，直接放弃这一拍）。
+fn fit_child_to_parent(hwnd: HWND, fallback: Option<(i32, i32)>) -> Result<bool, String> {
+    let parent = match unsafe { GetParent(hwnd) } {
+        Ok(parent) if !parent.0.is_null() => parent,
+        _ => {
+            return match fallback {
+                Some((width, height)) => unsafe { MoveWindow(hwnd, 0, 0, width, height, true) }
+                    .map(|_| true)
+                    .map_err(|error| error.to_string()),
+                None => Ok(false),
+            };
+        }
+    };
+    // 子窗口的感知上下文在创建时已按父窗口匹配（见 `attach`），这里再切一次是为了
+    // 让"量客户区"与"MoveWindow"都落在与父窗口一致的坐标语义里（宿主线程的上下文
+    // 可能已被宿主改过）。
+    let _dpi_scope = HostContextScope::enter(parent);
+    let mut client = RECT::default();
+    let (width, height) = if unsafe { GetClientRect(parent, &mut client) }.is_ok()
+        && client.right > 0
+        && client.bottom > 0
+    {
+        (client.right, client.bottom)
+    } else if let Some(size) = fallback {
+        size
+    } else {
+        return Ok(false);
+    };
+    let mut current = RECT::default();
+    if unsafe { GetClientRect(hwnd, &mut current) }.is_ok()
+        && current.right == width
+        && current.bottom == height
+    {
+        return Ok(false);
+    }
+    unsafe { MoveWindow(hwnd, 0, 0, width, height, true) }
+        .map(|_| true)
+        .map_err(|error| error.to_string())
+}
+
+/// 一次窗口测量得出的 **WebView 内容面**：窗口客户区、交给 `SetBounds` 的原始
+/// 像素面、交给 `SetRasterizationScale` 的比例。
+struct EditorGeometry {
+    /// 窗口坐标里的客户区（只用于诊断日志）。
+    client: (i32, i32),
+    /// 交给 `SetBounds` 的原始像素面（`USE_RAW_PIXELS` 的含义见 [`content_geometry`]）。
+    content: (i32, i32),
+    /// 交给 `SetRasterizationScale` 的比例。
+    scale: f64,
+    /// 窗口是否 DPI-unaware。
+    unaware: bool,
+}
+
+/// 由测量值决定 WebView 的内容面 —— **判据只有一条：这块 surface 会不会被 DWM 拉伸**。
+///
+/// 【DPI-unaware 窗口：内容面 = 窗口坐标，缩放 = 1】DWM 把整棵窗口树按屏幕缩放
+/// 拉伸。ACID 的 `sfvstwrap` 就是这种：窗口坐标里客户区 1100×720，屏幕上合成为
+/// 1375×900（125%）。WebView 的 surface 是这棵树的一部分，它的“raw pixel”就是
+/// **窗口坐标里的像素**，不是屏幕上的物理像素。把 PMv2 量到的 1375×900 交给它，
+/// surface 会比窗口大 25%，DWM 再拉伸一次 —— 于是内容被放大两轮、状态栏被推出
+/// 窗口外，滚到最右下也看不见（2026-11-22 第二次打开 ACID 的现场）。缩放固定 1.0：
+/// 窗口自己的 DPI 就是 96（unaware 的 `GetDpiForWindow` 恒回 96），屏幕缩放由 DWM
+/// 在窗口外完成；再乘一次 1.25 只会让文字再次变大。
+///
+/// 【DPI-aware 窗口：内容面 = 物理客户区，缩放 = 显示器缩放】窗口自己按物理像素
+/// 合成，DWM 不再拉伸。`USE_RAW_PIXELS` 要的正是物理值，rasterization scale 取
+/// 显示器缩放，页面拿到 `物理 / 缩放` 的 CSS 视口（第一次打开 ACID：1100×720 物理
+/// → 880×576 CSS）。
+fn content_geometry(
+    client: (i32, i32),
+    physical: (i32, i32),
+    unaware: bool,
+    monitor_scale: f64,
+) -> EditorGeometry {
+    if unaware {
+        return EditorGeometry {
+            client,
+            content: client,
+            scale: 1.0,
+            unaware,
+        };
+    }
+    EditorGeometry {
+        client,
+        content: physical,
+        scale: if monitor_scale > 0.0 {
+            monitor_scale
+        } else {
+            1.0
+        },
+        unaware,
+    }
+}
+
+/// 量一次编辑器窗口，按它的感知上下文给出 WebView 该铺多大的内容面。
+///
+/// 两种窗口读同一组 `GetClientRect` 会得到不同含义的值，所以**先判感知上下文，
+/// 再决定要不要读物理值**：unaware 窗口的物理值（PMv2 里量到的 1375×900）恰恰
+/// 是绝不能交给 WebView 的那一个。
+fn editor_geometry(window: HWND) -> Option<EditorGeometry> {
+    // 【窗口自己的坐标】不感知窗口里是 96-DPI 逻辑值；感知窗口里就是物理值。
+    let mut client = RECT::default();
+    {
+        let _scope = HostContextScope::enter(window);
+        if unsafe { GetClientRect(window, &mut client) }.is_err() {
+            return None;
+        }
+    }
+    if client.right <= 0 || client.bottom <= 0 {
+        return None;
+    }
+    let client = (client.right, client.bottom);
+    if window_is_unaware(window) {
+        // 不感知窗口：内容面与窗口同尺，屏幕缩放交给 DWM —— 不能再读物理值。
+        return Some(content_geometry(client, client, true, 1.0));
+    }
+    // 【感知窗口的物理值】窗口自己按物理像素合成；从 PMv2 再量一次覆盖宿主线程
+    // 上下文被临时改过的情形。逃生门（`HIFISHIFTER_NO_DPI_AWARE=1`）下退回当前
+    // 上下文，行为与改动前一致。
+    let mut physical = RECT::default();
+    {
+        let _scope = HostContextScope::force_pm_v2();
+        if unsafe { GetClientRect(window, &mut physical) }.is_err() {
+            return None;
+        }
+    }
+    if physical.right <= 0 || physical.bottom <= 0 {
+        return None;
+    }
+    let physical = (physical.right, physical.bottom);
+    Some(content_geometry(
+        client,
+        physical,
+        false,
+        monitor_scale_for(window).unwrap_or(1.0),
+    ))
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+
+    /// 不感知窗口的内容面必须是**窗口坐标**，不能是 PMv2 量到的物理值。
+    ///
+    /// 【为什么这条是回归】把 1375×900 交给 WebView 后，DWM 会把这块 surface 再
+    /// 按 1.25× 拉伸 —— 用户看到的是"内容又放大一圈、填满窗口，状态栏被推出窗口
+    /// 外，滚到最右下也看不见"（ACID 第二次打开，2026-11-22）。内容面与窗口同尺
+    /// 之后，DWM 只拉伸一次：文字回到与第一次打开相同的物理大小，底部与右侧也能
+    /// 被宿主滚动条完整取到。
+    #[test]
+    fn an_unaware_window_sizes_the_view_in_window_coordinates() {
+        let geometry = content_geometry((1100, 720), (1375, 900), true, 1.25);
+        assert_eq!(
+            geometry.content,
+            (1100, 720),
+            "不感知窗口的 raw surface 是窗口坐标，不是屏幕物理值"
+        );
+        assert_eq!(
+            geometry.scale, 1.0,
+            "屏幕缩放由 DWM 完成，WebView 再乘一次就是二次放大"
+        );
+    }
+
+    /// 感知窗口没有 DWM 拉伸：内容面取物理客户区，缩放取显示器缩放。
+    ///
+    /// 【为什么让两个输入不同】这样断言才区分得出实现选了哪一个；真实 PMv2
+    /// 窗口里两者相等，选错也看不出来。
+    #[test]
+    fn an_aware_window_sizes_the_view_in_physical_pixels() {
+        let geometry = content_geometry((880, 576), (1100, 720), false, 1.25);
+        assert_eq!(geometry.content, (1100, 720), "感知窗口按物理像素合成");
+        assert_eq!(geometry.scale, 1.25, "rasterization scale 跟随显示器");
+    }
+
+    /// 拿不到显示器缩放时退回 1.0，不把 0 当作比例交给 WebView。
+    #[test]
+    fn a_missing_monitor_scale_falls_back_to_one() {
+        let geometry = content_geometry((1100, 720), (1100, 720), false, 0.0);
+        assert_eq!(geometry.scale, 1.0);
+    }
+}
+
+/// 把 popup 逐拍摆回**宿主留给插件那块矩形**的物理客户区；返回是否发生了摆放。
+///
+/// 【为什么是"变了才摆"】SetWindowPos 即使矩形不变也会打扰窗口（窗口消息、可能
+/// 的重绘），20 ms 一拍的空摆是纯损耗；先比较，只在真变了的时候动。
+///
+/// 【为什么可见性也跟随】宿主最小化/隐藏面板时，popup 不在 owner 的窗口树里，
+/// 系统不会自动隐藏它 —— 不跟随就是"宿主窗口没了，插件还浮在桌面上"。
+fn sync_popup_to_anchor(hwnd: HWND, anchor: HWND) -> bool {
+    let Some(rect) = wrapper_physical_client(anchor) else {
+        return false;
+    };
+    let shown = unsafe { IsWindowVisible(anchor) }.as_bool();
+    let _scope = HostContextScope::force_pm_v2();
+    // SAFETY: 只读查询；popup 与 anchor 都是活窗口（定时器回调里已验证）。
+    let mut current = RECT::default();
+    let same = unsafe { GetWindowRect(hwnd, &mut current) }.is_ok()
+        && current.left == rect.left
+        && current.top == rect.top
+        && current.right == rect.right
+        && current.bottom == rect.bottom;
+    if !same {
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+                SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER,
+            );
+        }
+    }
+    let visible = unsafe { IsWindowVisible(hwnd) }.as_bool();
+    if shown && !visible {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+    } else if !shown && visible {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+    true
 }
 
 unsafe extern "system" fn window_proc(
@@ -524,7 +1509,21 @@ unsafe extern "system" fn window_proc(
             if message == WM_TIMER && wparam.0 == 0x4853 {
                 // 宿主 getter 可能重入并关闭窗口：先持 Rc，不再在调用后解引用 WindowData。
                 let client = (*pointer).client.clone();
+                // 【几何参照也在 tick 之前取】tick 可能重入宿主并销毁本窗口
+                // （WM_NCDESTROY 会释放 WindowData）；之后再解引用 pointer 就是 UAF。
+                let anchor = (*pointer).popup_anchor.get();
                 client::tick(&client);
+                // 【几何跟随】popup 不在宿主窗口树里，宿主移动/缩放面板不会通知
+                // 我们 —— 参照**宿主留给插件那块矩形**的物理客户区，把 popup 摆回去
+                // （见 `sync_popup_to_anchor` 的"变了才摆"纪律）。嵌入形态是宿主窗口
+                // 树里的子窗口，裁剪/移动天然跟随，但**尺寸**仍可能停在旧值上：宿主
+                // 缩放了包裹窗却没调用 `IPlugView::onSize`。定时器用同一个"变了才摆"
+                // 的判据兜底（见 `fit_child_to_parent`）。
+                if !anchor.0.is_null() {
+                    sync_popup_to_anchor(hwnd, anchor);
+                } else {
+                    let _ = fit_child_to_parent(hwnd, None);
+                }
                 // 【为什么先重建而不是直接关窗】页面进程崩溃 / OOM 之后所有投递都会
                 // 失败，界面已是一张死图。此前唯一的处置是**关掉窗口** —— 用户看到的
                 // 是一块空白，而且必须自己重开插件（这正是用户报的"关掉再开就好"）。
@@ -557,6 +1556,13 @@ unsafe extern "system" fn window_proc(
                 port.focus_page();
                 return LRESULT(0);
             } else if message == WM_SIZE {
+                let port = (*pointer).port.clone();
+                port.sync_bounds(hwnd);
+            } else if message == WM_DPICHANGED || message == WM_DPICHANGED_AFTERPARENT {
+                // 【为什么 DPI 变化也要重下边界】感知窗口换了显示器 ⇒ 物理内容面与
+                // rasterization scale 都要更新；不感知窗口的缩放固定 1.0，但窗口
+                // 尺寸本身会被重新协商，内容面同样要跟着走。子窗口收到的是
+                // `WM_DPICHANGED_AFTERPARENT`；顶层窗口是 `WM_DPICHANGED`。
                 let port = (*pointer).port.clone();
                 port.sync_bounds(hwnd);
             } else if message == WM_CLOSE {
@@ -645,10 +1651,13 @@ fn native_file_request(
 fn begin_browser(state: &Rc<RefCell<EditorClient>>, port: &Rc<WindowsPort>) -> Result<(), String> {
     let folder = assets()?;
     pin_callback_code()?;
+    let started = std::time::Instant::now();
     // 已经有环境：直接建控制器。这条路是"开第二个窗口"与"重建"的共同路径。
     if let Some(environment) = cached_environment() {
+        crate::gui_log_line("webview: environment reused (per-thread pool)");
         return create_controller(&environment, state, port, folder, true);
     }
+    crate::gui_log_line("webview: creating the environment");
     let profile = profile_directory()?;
     let weak = Rc::downgrade(state);
     let outer_port = port.clone();
@@ -663,6 +1672,10 @@ fn begin_browser(state: &Rc<RefCell<EditorClient>>, port: &Rc<WindowsPort>) -> R
             let environment = match (result, environment) {
                 (Ok(()), Some(environment)) => environment,
                 (Err(error), _) => {
+                    crate::gui_log_line(&format!(
+                        "webview: environment failed after {}ms: {error}",
+                        started.elapsed().as_millis()
+                    ));
                     outer_port.show_error(&error.to_string());
                     return Ok(());
                 }
@@ -671,6 +1684,10 @@ fn begin_browser(state: &Rc<RefCell<EditorClient>>, port: &Rc<WindowsPort>) -> R
                     return Ok(());
                 }
             };
+            crate::gui_log_line(&format!(
+                "webview: environment ready after {}ms",
+                started.elapsed().as_millis()
+            ));
             store_environment(&environment);
             if let Err(error) =
                 create_controller(&environment, &state, &outer_port, folder.clone(), false)
@@ -703,6 +1720,7 @@ fn create_controller(
     folder: PathBuf,
     from_cache: bool,
 ) -> Result<(), String> {
+    let started = std::time::Instant::now();
     let weak = Rc::downgrade(state);
     let outer_port = port.clone();
     let controller_ready = CreateCoreWebView2ControllerCompletedHandler::create(Box::new(
@@ -723,6 +1741,10 @@ fn create_controller(
                 // 【为什么这里必须把视图重新判死】池化的环境可能已经随浏览器进程一起
                 // 死了；控制器建不出来时页面不会自己好起来，而"没死"就意味着定时器
                 // 再也不会来重建。判死 + 丢掉环境，下一次 tick 就会用新环境重试。
+                crate::gui_log_line(&format!(
+                    "webview: controller failed after {}ms (from_cache={from_cache}): {error}",
+                    started.elapsed().as_millis()
+                ));
                 if from_cache {
                     drop_environment();
                     state.borrow_mut().mark_dead("controller creation failed");
@@ -734,6 +1756,10 @@ fn create_controller(
                 outer_port.show_error("WebView2 returned no controller");
                 return Ok(());
             };
+            crate::gui_log_line(&format!(
+                "webview: controller ready after {}ms",
+                started.elapsed().as_millis()
+            ));
             outer_port.attach(controller.clone());
             // 控制器起来了 = 这一代页面已经接手这块矩形；旧的错误提示必须撤掉，
             // 否则它会一直盖在刚恢复的界面上。
@@ -784,6 +1810,8 @@ fn rebuild_page(state: &Rc<RefCell<EditorClient>>, port: &Rc<WindowsPort>) -> Re
 impl WindowsPort {
     fn attach(&self, controller: ICoreWebView2Controller) {
         *self.controller.borrow_mut() = Some(controller);
+        // 新控制器还没有收过任何边界：下一次 sync_bounds 必须真的下发一次。
+        self.bounds.set(None);
     }
 
     /// 撤掉错误提示。
@@ -806,14 +1834,79 @@ impl WindowsPort {
         }
     }
 
-    /// 子窗口尺寸变了：把同一个矩形交给控制器（客户区坐标，物理像素）。
+    /// 子窗口尺寸变了：把它的**内容面**交给控制器，并显式固定渲染比例。
+    ///
+    /// 【为什么不能只看 `GetClientRect` 的数字】同一个客户区在两种感知上下文里
+    /// 是两种长度：ACID 的 unaware 包裹层报 1100×720（窗口坐标，DWM 会拉伸到
+    /// 1375×900 物理），感知窗口报的就是物理值。WebView 的 raw surface 必须与
+    /// **窗口 surface** 同尺，否则 DWM 会把它再拉伸一次 —— 内容放大、右/下被裁。
+    /// 判据在 [`content_geometry`] 里只有一条：窗口会不会被 DWM 拉伸。
+    ///
+    /// 现在两边都显式：BoundsMode=RAW_PIXELS、Bounds=`content_geometry` 给出的
+    /// 内容面、RasterizationScale 也由它给出。页面视口于是始终是 `内容面 / 缩放`，
+    /// 与窗口的合成方式一致。
     fn sync_bounds(&self, hwnd: HWND) {
         let controller = self.controller.borrow().clone();
-        if let Some(controller) = controller {
+        let Some(controller) = controller else {
+            return;
+        };
+        let Some(geometry) = editor_geometry(hwnd) else {
+            return;
+        };
+        let (width, height) = geometry.content;
+        let scale = geometry.scale;
+        let key = (width, height, scale.to_bits());
+        let previous = self.bounds.get();
+        if previous == Some(key) {
+            return;
+        }
+        let Ok(controller3) = controller.cast::<ICoreWebView2Controller3>() else {
+            // 【旧运行时没有 BoundsMode】交窗口上下文里的客户区原值：unaware 窗口
+            // 里它正好是内容面；感知窗口里它是物理值。它不能显式固定缩放，但也
+            // 不会把已知可用的宿主弄坏。
             let mut bounds = RECT::default();
+            let _scope = HostContextScope::enter(hwnd);
             if unsafe { GetClientRect(hwnd, &mut bounds) }.is_ok() {
                 let _ = unsafe { controller.SetBounds(bounds) };
             }
+            return;
+        };
+        // 【为什么关掉自动检测】不感知窗口的 `GetDpiForWindow` 恒为 96，自动检测
+        // 会让缩放与窗口坐标脱节；缩放该取多少由 [`content_geometry`] 按 surface
+        // 是否被 DWM 拉伸决定，这里显式给。
+        let _ = unsafe { controller3.SetShouldDetectMonitorScaleChanges(false) };
+        let _ = unsafe { controller3.SetBoundsMode(COREWEBVIEW2_BOUNDS_MODE_USE_RAW_PIXELS) };
+        let _ = unsafe { controller3.SetRasterizationScale(scale) };
+        let bounds = RECT {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        };
+        if unsafe { controller.SetBounds(bounds) }.is_ok() {
+            self.bounds.set(Some(key));
+            // 尺寸变化在拖动分隔条时会来很多次；只在首次配置 / 缩放变化时留一行，
+            // 诊断"子窗口跟随了没有、WebView 拿到了多大的面"已经足够。
+            let scale_changed = previous.is_none_or(|previous| previous.2 != key.2);
+            if scale_changed {
+                let css_width = (f64::from(width) / scale).round() as i32;
+                let css_height = (f64::from(height) / scale).round() as i32;
+                crate::gui_log_line(&format!(
+                    "editor webview bounds: client={}x{} content={width}x{height} \
+                     css={css_width}x{css_height} scale={scale:.2} mode=raw-pixels \
+                     unaware={}",
+                    geometry.client.0, geometry.client.1, geometry.unaware
+                ));
+            }
+        }
+    }
+
+    /// 停放/恢复页面渲染。停放期间页面不必画，也避免 Chromium 在隐藏窗口上
+    /// 继续合成；恢复时由 `sync_bounds` 按新父窗口尺寸对齐。
+    fn set_page_visible(&self, visible: bool) {
+        let controller = self.controller.borrow().clone();
+        if let Some(controller) = controller {
+            let _ = unsafe { controller.SetIsVisible(visible) };
         }
     }
 }
@@ -887,11 +1980,26 @@ fn configure_browser(
     folder: &std::path::Path,
 ) -> windows::core::Result<()> {
     let hwnd = port.hwnd.get();
-    let mut bounds = RECT::default();
-    unsafe {
-        GetClientRect(hwnd, &mut bounds)?;
-        controller.SetBounds(bounds)?;
-        controller.SetIsVisible(true)?;
+    {
+        // 【深色加载底】控制器刚创建、页面还没画第一帧时 WebView2 用的是默认白底；
+        // 把它设成编辑器主题色，等待期不再闪白屏（与窗口类背景同一个颜色）。
+        if let Ok(controller2) = controller.cast::<ICoreWebView2Controller2>() {
+            let color = COREWEBVIEW2_COLOR {
+                A: 255,
+                R: EDITOR_BACKGROUND_RGB.0,
+                G: EDITOR_BACKGROUND_RGB.1,
+                B: EDITOR_BACKGROUND_RGB.2,
+            };
+            let _ = unsafe { controller2.SetDefaultBackgroundColor(color) };
+        }
+        // 【初始边界走与 WM_SIZE 完全相同的一条路】raw-pixels + 显式缩放的决定只该
+        // 有一份；在这里重写一遍 `GetClientRect/SetBounds` 会让第二次打开（不感知
+        // 包裹层）重新落回"逻辑值当物理值"的错误。`sync_bounds` 在控制器刚 attach
+        // 时缓存为空，因此这里一定会真的下发一次。
+        port.sync_bounds(hwnd);
+        unsafe {
+            controller.SetIsVisible(true)?;
+        }
     }
     // 异步创建完成时仅延续宿主已交给本窗口的焦点，不能抢另一个 FX/应用的焦点。
     if unsafe { GetFocus() } == hwnd {
@@ -1116,24 +2224,31 @@ mod focus_tests {
     /// 用真实自有HWND验证Tab边界，不凭源码是否包含某个style判断可达性。
     #[test]
     fn native_editor_is_a_tab_stop_in_its_host_parent() {
+        // 【为什么在 PMv2 作用域里建夹具父窗】本用例验证的是**感知包裹窗里的 child
+        // 焦点语义**（宿主 Tab 链）。默认形态已经是宿主父窗口里的子窗口（popup 只在
+        // 显式 `HIFISHIFTER_DPI_POPUP=1` 时启用，见 `dpi_popup_requested`），这里仍用
+        // PMv2 父窗，覆盖"感知宿主 + 子窗口"这条最常见路径。
         // SAFETY: 夹具父窗口仅在本线程创建/销毁，不操作任何用户或REAPER窗口。
-        let parent = unsafe {
-            CreateWindowExW(
-                WINDOW_EX_STYLE::default(),
-                w!("STATIC"),
-                w!("HiFiShifter focus fixture"),
-                WS_OVERLAPPEDWINDOW,
-                0,
-                0,
-                1100,
-                720,
-                None,
-                None,
-                None,
-                None,
-            )
-        }
-        .unwrap();
+        let parent = {
+            let _dpi_scope = HostContextScope::force_pm_v2();
+            unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE::default(),
+                    w!("STATIC"),
+                    w!("HiFiShifter focus fixture"),
+                    WS_OVERLAPPEDWINDOW,
+                    0,
+                    0,
+                    1100,
+                    720,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            .unwrap()
+        };
         let host = WindowsHost::attach(parent.0 as usize, 1100, 720, Arc::new(Default::default()))
             .unwrap();
         let child = HWND(host.key.hwnd as *mut c_void);

@@ -71,6 +71,9 @@ cover/
 *.pot
 
 # Django stuff:
+# 【*.log 是本仓的 dev 杂物闸门】来自 Python 模板，但实际挡住的是构建/门禁的
+# 重定向日志（clippy.log、test-*.log、fmt.log ……）与 NSIS 写进仓库根的日志。
+# scratch 重定向请优先落进已忽略的 .tmp/，别在仓库根留成品。
 *.log
 local_settings.py
 db.sqlite3
@@ -136,16 +139,17 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-# 上面这几条来自 Python 模板，`env/` 与 `ENV/` 会连本仓自己的 `scripts/env/`
-# 一起忽略（该目录下的 SDK 路径 / MSVC 环境脚本是构建的必需件）。已跟踪的文件
-# 不受影响，但**新增**文件会被 `git add` 静默跳过 —— 这里把它重新纳入。
+# 【为什么全部根锚点】这几条来自 Python 模板，不带锚点会命中**任意层级**的同名
+# 目录 —— 本仓自己的 `scripts/env/`（SDK 路径 / MSVC 环境脚本，构建必需件）就
+# 中过招；将来任何子项目里新建 `env/`/`venv/` 同样会被 `git add` 静默跳过。
+# 锚到仓库根只保留模板的本意（根上的临时虚拟环境），并重新纳入 scripts/env/。
+/.env
+/.venv
+/env/
+/venv/
+/ENV/
+/env.bak/
+/venv.bak/
 !scripts/env/
 
 # Spyder project settings

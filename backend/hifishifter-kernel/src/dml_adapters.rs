@@ -35,8 +35,7 @@ impl DmlAdapterInfo {
     /// 【为什么不能持久化 `device_id`】它是**本进程**的 DXGI 适配器序号，
     /// 在混合显卡笔记本上会随进程而变。实测同一分钟内：独立 App 进程枚举到
     /// `RTX 3050 = 1 / Intel UHD = 0`，而 VEGAS 插件进程枚举到
-    /// `RTX 3050 = 0 / Intel UHD = 1`（见 `docs/plans/2026-10-23-audit-round-3-plan.md`
-    /// §12）。于是持久化的 `1` 在 App 里是独显、在插件里是集显 —— 同一份设置，
+    /// `RTX 3050 = 0 / Intel UHD = 1`。于是持久化的 `1` 在 App 里是独显、在插件里是集显 —— 同一份设置，
     /// 两种硬件。PCI 标识不随枚举顺序变化，这才是该存的东西。
     pub fn stable_key(&self) -> String {
         format!("{}:{}", self.vendor_id, self.device_id_pci)

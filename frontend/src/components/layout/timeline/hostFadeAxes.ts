@@ -11,8 +11,8 @@
  * （`C_FADE*SHAPE`/`D_FADE*DIR` 是 v7.80 and earlier，`D_FADE*DIR_NEW`/
  * `D_FADE*DIR2_NEW` 是 v7.81 and later），并注明 7.81+ 由后两个轴决定形状 ——
  * 但**没有**公开 fade 求值函数，也没说七个预设各自对应哪一组坐标。
- * 证据：`probe/ara/FADE-AXIS-FINDINGS.md`，原始数据
- * `probe/ara/captures/fade-axis-7.82.json`（REAPER 7.82/x64，50 个采样）。
+ * 原始数据在内核侧的 `tests/fixtures/fade-axis-7.82.json`（REAPER 7.82/x64，50 个采样），
+ * 映射表与内核 `hifishifter_kernel::fade_axes` 同源。
  *
  * 表里的七个点落在两条**正交**的轴上：0/1/2/3/4 只用 curvature，5/6 只用 S。
  */

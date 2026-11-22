@@ -85,6 +85,7 @@ export const persistUiSettings = createAsyncThunk(
             showClipboardPreview: s.showClipboardPreview,
             showParamValuePopup: s.showParamValuePopup,
             showClipPitchOverlay: s.showClipPitchOverlay,
+            reaperAutoTakePitchWrite: s.reaperAutoTakePitchWrite,
             paramAxisUnits: s.paramAxisUnits,
             paramAxisDirections: s.paramAxisDirections,
             lastProjectSaveFormat: s.project.lastSaveFormat,

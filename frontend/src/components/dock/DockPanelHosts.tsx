@@ -11,7 +11,7 @@
  */
 
 import { Component, Suspense, type ComponentType, type ReactNode } from "react";
-import { useI18n } from "../../i18n/I18nProvider";
+import { translateOutsideReact, useI18n } from "../../i18n/I18nProvider";
 import { createPortal } from "react-dom";
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 
@@ -131,7 +131,9 @@ class PanelErrorBoundary extends Component<
         return (
             <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-qt-window p-4 text-center">
                 <div className="text-qt-xs text-qt-text">
-                    {this.props.panelId} — panel failed to render
+                    {/* PanelErrorBoundary 是类组件，拿不到 useI18n —— 与 AppRootErrorBoundary
+                        同走组件外的 translateOutsideReact（同源语言）。 */}
+                    {this.props.panelId} — {translateOutsideReact("panel_render_failed")}
                 </div>
                 <div className="max-w-full truncate text-qt-xs text-qt-text-muted">
                     {this.state.error.message}

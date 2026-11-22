@@ -1,5 +1,39 @@
 //! 角色、快照可用性与宿主传输观测。
 use super::*;
+
+/// 旁通读数的**有效期**。
+///
+/// 【为什么必须有期限】读数来自宿主的一次查询，而宿主可能在中途换轨、切工程、卸载 FX、
+/// 甚至换一个进程内的另一份工程。过期读数若继续阻止渲染 ⇒ 用户解除旁通后没有声音；
+/// 过期读数若继续**允许**渲染 ⇒ 就是用户报的"旁通了还在渲染"。两种都不行，所以过期的
+/// 读数一律弃权（回到"照常渲染"）。
+///
+/// 【为什么是 5 秒】会话心跳（`DocumentSession::service_host_bypass_samples`）每 750 ms
+/// 轮一个实例，编辑实例的视图定时器每 100 ms 采一次。5 秒 = 六个心跳，足以容忍宿主忙
+/// 时的几次超时，又远小于"用户会以为它已经生效"的量级。
+const BYPASS_VERDICT_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 单调时钟（毫秒）。`0` 保留给"从未采过"，所以真实值从 1 开始。
+///
+/// 【为什么不用 `Instant`】这些时间戳要在音频/渲染线程上被读（见
+/// [`ExtensionOwner::fresh_host_bypass`]），而 `Instant` 不能放进原子量。存"进程启动
+/// 以来的毫秒数"既不取锁，也天然单调（系统时间被用户改回拨也不影响）。
+fn bypass_clock_ms() -> u64 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let epoch = EPOCH.get_or_init(std::time::Instant::now);
+    epoch.elapsed().as_millis() as u64 + 1
+}
+
+/// 把上面那个毫秒时间戳换算成"过了多久"；`0`（从未）返回 `None`。
+fn elapsed_since(stamp: u64) -> Option<std::time::Duration> {
+    if stamp == 0 {
+        return None;
+    }
+    Some(std::time::Duration::from_millis(
+        bypass_clock_ms().saturating_sub(stamp),
+    ))
+}
+
 impl ExtensionOwner {
     /// 本实例是否负责把处理结果作为音频输出（而非透传宿主原声）。
     ///
@@ -94,29 +128,6 @@ impl ExtensionOwner {
     pub(crate) fn has_prepared_snapshot(&self) -> bool {
         self.snapshots.iter().any(|publisher| publisher.is_ready())
     }
-    /// 播放头是否已经走出当前快照的安全区（窗口渲染的补排信号）。
-    ///
-    /// 【为什么由 actor 判】音频线程只记一个 `last_sample` 原子；"要不要重渲"是
-    /// 调度决策，只能在非实时线程做（实时回调里不许分配、不许抢锁）。
-    ///
-    /// 【为什么是 75 %】窗口渲染的代价是"重新算一段"，提前四分之一窗口开始补排，
-    /// 保证播放头走到窗口末尾之前新窗口已经就位。整段快照时这个判据恒为 false
-    /// （播放头永远落在覆盖区间里），行为与今天完全一致。
-    pub(crate) fn window_needs_rerender(&self) -> bool {
-        let rate = self.setup_sample_rate().max(1.0);
-        let Some(playhead) = self.snapshots[0].last_sample_seconds(rate) else {
-            return false;
-        };
-        let Some((start, end)) = self.snapshots[0].current_span_seconds(rate) else {
-            return false;
-        };
-        let len = end - start;
-        if !(len.is_finite() && len > 0.0) {
-            return false;
-        }
-        playhead < start - 1e-9 || playhead > start + len * 0.75
-    }
-
     /// 处理结果发布器是否对**实际会被读取的那一份**就绪。
     ///
     /// 【为什么不能固定查 `snapshots[0]`】真正被读的是
@@ -137,9 +148,9 @@ impl ExtensionOwner {
             self.roles.load(Ordering::Acquire)
         );
     }
-    /// 文档关闭后重绑到另一份文档的次数（诊断；测试断言用）。
-    #[cfg(test)]
-    pub(crate) fn rebind_generation_count(&self) -> u64 {
+    /// 文档关闭后重绑到另一份文档的次数（诊断；测试断言用，含 test-support 下的外壳测试）。
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn rebind_generation_count(&self) -> u64 {
         self.rebind_generation.load(Ordering::Acquire)
     }
     /// 本实例的创建序号（越小越早）；诊断时用来指认实例。
@@ -155,7 +166,7 @@ impl ExtensionOwner {
         self.roles.load(Ordering::Acquire)
     }
     /// 记录 `setupProcessing` 声明的采样率（Hz）。非有限/非正数忽略（保持未声明）。
-    pub(crate) fn set_setup_sample_rate(&self, rate: f64) {
+    pub fn set_setup_sample_rate(&self, rate: f64) {
         let hz = rate.round();
         if hz.is_finite() && hz > 0.0 && hz <= f64::from(i32::MAX) {
             self.setup_sample_rate.store(hz as i32, Ordering::Release);
@@ -171,7 +182,7 @@ impl ExtensionOwner {
     }
     /// 记录 `setBusArrangements` 协商出的扬声器编排（`kMono` = 1 / `kStereo` = 3），
     /// 打包为 `(输入 << 32) | 输出`。
-    pub(crate) fn set_bus_arrangements(&self, inputs: u64, outputs: u64) {
+    pub fn set_bus_arrangements(&self, inputs: u64, outputs: u64) {
         self.bus_arrangement
             .store((inputs << 32) | (outputs & 0xffff_ffff), Ordering::Release);
     }
@@ -180,7 +191,7 @@ impl ExtensionOwner {
     /// 声道数 = 掩码置位数（`count_ones`）：kMono=1 ⇒ 1，kStereo=3 ⇒ 2，
     /// 5.1=63 ⇒ 6。尚未协商（`0`）时按默认 `kStereo`(3) 报告 —— 与
     /// `component_get_bus_info` 声明的 2 声道一致，不与宿主协商结果矛盾。
-    pub(crate) fn bus_arrangement(&self, direction: i32) -> u64 {
+    pub fn bus_arrangement(&self, direction: i32) -> u64 {
         let packed = self.bus_arrangement.load(Ordering::Acquire);
         if packed == 0 {
             return 3;
@@ -224,7 +235,7 @@ impl ExtensionOwner {
         }
     }
     /// 最终输出前的有效item静音门；与编辑器内轨道mute不同，不从输入是否全零猜静音。
-    pub(crate) fn host_item_muted(&self) -> bool {
+    pub fn host_item_muted(&self) -> bool {
         self.host_item_muted.load(Ordering::Acquire)
     }
     /// editor-only必须透传；未绑定角色不在这里虚构为editor，保留原未绑定安全行为。
@@ -238,12 +249,17 @@ impl ExtensionOwner {
         self.is_non_playback() && self.playback_covered.load(Ordering::Acquire)
     }
     /// process只写有界原子诊断，JSON/日志全部由actor读取，暂不把候选计数当作根因。
+    ///
+    /// `playhead_offset` 是本块的 UI 播放头修正量（见 `StreamBlock::playhead_offset`）：
+    /// 喂入位置领先宿主 UI 播放头的帧数（VEGAS 渲染缓存的预热窗）。它**只**作用于
+    /// 写给 UI 的位置（`clock.update`），诊断通道（`clock.observe`）仍记录宿主原值。
     pub(crate) fn observe_transport(
         &self,
         context: &crate::block_context::BlockContext,
         mode: i32,
         frames: usize,
         position_trusted: bool,
+        playhead_offset: i64,
     ) {
         // 【为什么这条判据在共享方法里】离线 pass 的块是"渲染进度"，不是播放位置，
         // 不能驱动光标。它属于语义、不属于某个外壳，所以两种格式一视同仁 ——
@@ -271,7 +287,16 @@ impl ExtensionOwner {
                 // 【块长必须先记】播放位的寿命由它决定（见 `block_playing_ttl_ms`）。
                 clock.note_block_length(frames, context.sample_rate);
                 if position_trusted {
-                    clock.update(context);
+                    // 【发布的是播放头域，不是喂入域】未武装实例的 UI 由 realtime
+                    // 通道驱动；VEGAS 的喂入位置领先它的播放头一个预热窗，不减掉
+                    // 修正量，光标就全程领先宿主（用户报的"右偏 ~0.6 s"）。定位结算
+                    // （settle_seek）也用修正后的值 —— seek 目标本来就是用户在
+                    // 播放头域里点的。无窗口宿主的修正量恒为 0，行为不变。
+                    let mut playhead_context = *context;
+                    playhead_context.project_time_samples = playhead_context
+                        .project_time_samples
+                        .saturating_sub(playhead_offset);
+                    clock.update(&playhead_context);
                 } else {
                     // 【证据不足不写位置】PendingAbsolute 期间宿主报的是绝对域预卷
                     // （现场 60.000 s）。写进去就是用户看到的光标跳变；只冻结。
@@ -302,7 +327,7 @@ impl ExtensionOwner {
     /// （那是 `ARA_NOT_BOUND` 的语义），而 Capture 的编辑界面**必须**能用 ——
     /// 否则"录进来由插件处理"无从发生：用户改不了音高，也就没有处理可言。
     /// 两个分支产出同一个类型，因此命令分发、历史、参数、分析全部共用。
-    pub(crate) fn editor_session(
+    pub fn editor_session(
         self: &Arc<Self>,
     ) -> Result<Arc<crate::editor::session::EditorSession>, String> {
         if !self.is_bound() && !self.bound_once.load(Ordering::Acquire) {
@@ -434,6 +459,18 @@ impl ExtensionOwner {
         })
     }
 
+    /// 本实例在宿主里的**放置位置**（轨道 FX 链 / take FX 链 / 没有）。
+    ///
+    /// 【为什么通用层可以问这一句】它决定"哪条 FX 链、哪一段清单、哪个 take、哪些能力位"
+    /// 四件事，而这四件事的判据全在宿主适配器里。没有原生扩展（ARA-only / Capture）
+    /// 时恒为 `Unbound` —— 那是"回到改动前的行为"，不是"没有位置"的错误。
+    pub(crate) fn host_placement(&self) -> crate::host::reaper::HostPlacement {
+        self.native_host()
+            .map_or_else(crate::host::reaper::HostPlacement::default, |host| {
+                host.placement()
+            })
+    }
+
     /// 只返回同文档活入口的拥有引用接口；其project()仍钉在初始化时的真实所属工程。
     pub(crate) fn project_history_host(&self) -> Option<Arc<crate::host::NativeHost>> {
         let document = self.editor_document().ok()?;
@@ -456,13 +493,259 @@ impl ExtensionOwner {
         &self.capture
     }
 
+    /// 当前 **UI 播放头修正量**（帧）：宿主喂入位领先它自己的光标多少。
+    ///
+    /// 【为什么捕获状态也要读它】捕获区间（`runs` / 当前位置）记在**喂入域** ——
+    /// 磁带记账必须如此，素材的工程位置由它决定。但时间轴上的红色捕获带与参数编辑器
+    /// 标尺上的红条是**展示**，必须和用户看到的宿主光标同域（见
+    /// `StreamBlock::playhead_offset`）。此前只有播放头减了这个量，两条捕获带没减，
+    /// 于是 VEGAS 里光标已经对齐、带子整体右偏一个渲染领先量。
+    pub(crate) fn ui_playhead_offset(&self) -> i64 {
+        self.streams[ProcessStream::Realtime.index()]
+            .playhead_offset
+            .load(Ordering::Acquire)
+    }
+
+    /// 宿主是否把本实例的音频放进了信号链（三态；见 [crate::host::reaper::FxBypass]）。
+    ///
+    /// 【为什么这个读数能省下一整次合成】ARA 没有旁通概念，宿主旁通一个 FX 时只是
+    /// **不再调用**播放渲染器。于是"用户已经旁通、插件还在算"这一段开销完全是浪费：
+    /// 神经合成的结果永远不会被取用。判据由宿主自己的原生 API 给出（REAPER 的
+    /// `TrackFX_GetEnabled` 一族），其它宿主恒为 `Unknown` ⇒ 行为与改动前一致。
+    /// 【为什么按实例存，而不是存到文档上】旁通是**这个 FX** 的属性。一个 ARA 文档
+    /// （工程）里有多条轨道、每轨一个实例，而 `DocumentSession` 每文档只有一份 —— 把
+    /// 结论写进那一格，等于让"轨 1 被旁通"和"轨 2 没被旁通"互相覆盖：读数每轮在两个
+    /// 值之间跳，每次跳都让渲染输入失效 ⇒ 每个实例每 100 ms 重算一整次合成（用户
+    /// 看到的就是"无限渲染"），而且一条轨被旁通会把另一条轨一起静音。
+    ///
+    /// 【这里给的是"最后一次确定读到的结论"，不保证新鲜】采样点有三个：视图定时器
+    /// （`poll_host_bypass`）、模型收口（`refresh_host_state_for_model`）与会话心跳
+    /// （`service_host_bypass_samples`），其中任何一次都可能失败。失败**不清空**上一次
+    /// 的结论 —— 否则"用户已经旁通"这件事会在缓存里凭空消失，下一秒的门就重新打开。
+    /// 新鲜度由 [`Self::fresh_host_bypass`] 单独回答：**要据此跳过渲染，必须用它**。
+    pub(crate) fn host_bypass(&self) -> crate::host::reaper::FxBypass {
+        crate::host::reaper::FxBypass::decode(self.host_bypass.load(Ordering::Acquire))
+    }
+
+    /// **可以用来投票的**旁通读数：确定 + 新鲜，二者缺一不可。
+    ///
+    /// 【为什么必须带新鲜度】三种"没有答案"在旧实现里长得一样，后果却完全不同：
+    ///   * 从来没有读到过（刚绑上的播放实例、非 REAPER 宿主）—— 把它当否决票，
+    ///     整个文档的门就永远关着，正是用户报的"旁通了还在渲染"；
+    ///   * 读到过但已经过期（宿主换轨 / 切工程 / 卸载 FX 之后）—— 把它当旁通，
+    ///     用户解除旁通后没有声音；
+    ///   * 刚刚读失败（宿主忙，`on_host` 250 ms 超时）—— 与过期同罪。
+    ///
+    /// 一律返回 `None` = 这一票弃权。门只在**有人明确说"我还能出声"或"我不出声"**
+    /// 时才有结论；没有票就回到改动前的行为（照常渲染）。
+    pub(crate) fn fresh_host_bypass(&self) -> Option<crate::host::reaper::FxBypass> {
+        let verdict = self.host_bypass();
+        if verdict == crate::host::reaper::FxBypass::Unknown {
+            return None;
+        }
+        self.host_bypass_verdict_age()
+            .filter(|age| *age <= BYPASS_VERDICT_TTL)
+            .map(|_| verdict)
+    }
+
+    /// 距上一次**尝试**采样旁通读数有多久（`None` = 从未采过）。
+    ///
+    /// 【为什么要把它报出来】`Unknown`（宿主不提供这一族 API）与"很久没采过"（没找到
+    /// 采样时机）是两件不同的事，而它们在读数上长得一样。诊断包带上这个年龄，
+    /// "旁通了还在渲染"就能直接分开这两种成因。
+    ///
+    /// 【为什么采样点不放在 `prepare` 里】`fx_bypass_state` 只在**宿主线程**上是同步的；
+    /// 别的线程会投递并等 250 ms，而 `prepare` 从不跑在宿主线程上（actor / 模型线程）。
+    pub(crate) fn host_bypass_age(&self) -> Option<std::time::Duration> {
+        elapsed_since(self.host_bypass_sample_ms.load(Ordering::Acquire))
+    }
+
+    /// 距上一次**确定**读数有多久（`None` = 从来没读到过）。
+    pub(crate) fn host_bypass_verdict_age(&self) -> Option<std::time::Duration> {
+        #[cfg(test)]
+        if let Some(simulated) = self.simulated_bypass_age() {
+            return Some(simulated);
+        }
+        elapsed_since(self.host_bypass_verdict_ms.load(Ordering::Acquire))
+    }
+
+    /// 测试用：读"被做旧"的时长（生产构建里没有这个概念）。
+    #[cfg(test)]
+    fn simulated_bypass_age(&self) -> Option<std::time::Duration> {
+        match self.bypass_age_override_ms.load(Ordering::Acquire) {
+            0 => None,
+            millis => Some(std::time::Duration::from_millis(millis)),
+        }
+    }
+
+    /// 距上一次**尝试**采样过了多少毫秒；`u64::MAX` = 从未采过。
+    ///
+    /// 【为什么用"毫秒 + 哨兵"而不是 `Option<Instant>`】采样由三个线程上的三条通道驱动，
+    /// 其中会话心跳要挑"最该重采的那一个实例"：为读一个时间戳取锁没有必要，而这个值
+    /// 只需要单调、可比较。
+    pub(crate) fn host_bypass_sample_age_ms(&self) -> u64 {
+        #[cfg(test)]
+        if let Some(simulated) = self.simulated_bypass_age() {
+            return simulated.as_millis() as u64;
+        }
+        let at = self.host_bypass_sample_ms.load(Ordering::Acquire);
+        if at == 0 {
+            u64::MAX
+        } else {
+            bypass_clock_ms().saturating_sub(at)
+        }
+    }
+
+    /// 测试用：直接设置旁通读数（没有宿主就采不到样）。
+    #[cfg(test)]
+    pub(crate) fn set_host_bypass_for_tests(&self, state: crate::host::reaper::FxBypass) {
+        self.bypass_age_override_ms.store(0, Ordering::Release);
+        let now = bypass_clock_ms();
+        self.host_bypass.store(state.encode(), Ordering::Release);
+        self.host_bypass_sample_ms.store(now, Ordering::Release);
+        // `Unknown` 在语义上是"没有读数"，时间戳必须一起清掉，否则
+        // `fresh_host_bypass` 会把一个不存在的结论当成刚读到过。
+        let stamp = if state == crate::host::reaper::FxBypass::Unknown {
+            0
+        } else {
+            now
+        };
+        self.host_bypass_verdict_ms.store(stamp, Ordering::Release);
+    }
+
+    /// 测试用：把读数**做旧**，用来钉住"过期读数不得再投票"。
+    #[cfg(test)]
+    pub(crate) fn age_host_bypass_for_tests(&self, age: std::time::Duration) {
+        self.bypass_age_override_ms
+            .store(age.as_millis() as u64, Ordering::Release);
+    }
+
+    /// UI 定时器路径：按自己的节奏采样旁通读数（100 ms 一次）。
+    ///
+    /// 【为什么不用枚举那套节流】见 [Self::host_bypass] 与 `host_bypass_sample_ms` 的
+    /// 说明：枚举会退避到秒级，而旁通必须在一个 tick 的量级内被看见。
+    pub(super) fn poll_host_bypass(&self) {
+        const INTERVAL_MS: u64 = 100;
+        if self.host_bypass_sample_age_ms() < INTERVAL_MS {
+            return;
+        }
+        self.sample_host_bypass();
+    }
+
+    /// 只刷新旁通缓存（返回"**确定**读数是否变化"），**不**做任何失效动作。
+    ///
+    /// 【为什么要与 [Self::sample_host_bypass] 分开】文档级失效会遍历全部 owner 并要求
+    /// 它们重排；而重排是否真的发生取决于**各自**缓存里的旁通读数。若那时缓存还是旧的，
+    /// 播放实例会以"我被旁通了"为由直接返回 —— 用户解除旁通后仍然没有声音。所以
+    /// 失效路径必须先刷新缓存，再通知重排。
+    ///
+    /// 【为什么读失败时不写缓存】见 [Self::host_bypass]：一次 250 ms 超时不是"结论"，
+    /// 把上一次的 `bypassed` 抹成 `unknown` 正是"旁通了还在渲染"的成因之一。
+    pub(crate) fn refresh_host_bypass_cache(&self) -> bool {
+        if !self.is_bound() || self.is_closed() {
+            return false;
+        }
+        let Some(host) = self.native_host() else {
+            return false;
+        };
+        let authorized = || !self.is_closed();
+        let state = host.fx_bypass_state(&authorized);
+        let now = bypass_clock_ms();
+        self.host_bypass_sample_ms.store(now, Ordering::Release);
+        if state == crate::host::reaper::FxBypass::Unknown {
+            return false;
+        }
+        // 编码只有一个来源（`FxBypass::encode`）：写侧、读侧、诊断包必须对同一个字节
+        // 给出同一个结论，否则"旁通了还在渲染"会在两侧各有一个互相矛盾的答案。
+        let previous = crate::host::reaper::FxBypass::decode(
+            self.host_bypass.swap(state.encode(), Ordering::AcqRel),
+        );
+        self.host_bypass_verdict_ms.store(now, Ordering::Release);
+        if previous == state {
+            return false;
+        }
+        // 【为什么这条是 WARN】默认档（`verbosity=low`）下 `log::info!` 一行都看不见 ——
+        // 于是用户旁通了 FX、插件还在合成，而日志里**没有任何痕迹**能证明这个功能
+        // 存在（上一轮改完无法验证，正是这个原因）。限流器保证稳态下最多一行。
+        //
+        // 【为什么按"播放 / 编辑"分桶，而不是所有实例共用一个键】宿主的播放实例数量由
+        // 它自己决定（REAPER 每个 item 一个），而限流器是**按键**分桶的：共用一个键时，
+        // 第一个实例的行会把其余实例的行全部挤进 `[throttled]` —— 日志里于是只剩编辑
+        // 实例的声音，而"播放实例根本没读到旁通"这件事被静默掉。那正是本轮排查卡住的
+        // 地方。两个桶既保住了"哪一类实例在说话"，又不随实例数增长。
+        // 【把"凭什么"一起写出来】结论本身说明不了任何事：`active -> bypassed` 既可能是
+        // 用户点了旁通，也可能是我们把一个不存在的读数当成了事实（take FX 那次静音的
+        // 全部证据就是"整链总开关读到 0"）。四位事实 —— 匹配数/总数、启用数、离线数、
+        // 整链开关 —— 正好把这两种情形分开，而且只在结论变化时写一行。
+        let note = host.host_bypass_note();
+        let detail = if note.is_empty() {
+            String::new()
+        } else {
+            format!(" ({note})")
+        };
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            if self.renders_playback() {
+                "ara.host-bypass.playback"
+            } else {
+                "ara.host-bypass.editor"
+            },
+            format_args!(
+                "[ara] writer {} host bypass: {} -> {}{}",
+                self.writer_id(),
+                previous.as_str(),
+                state.as_str(),
+                detail
+            ),
+        );
+        true
+    }
+
+    /// 重新采样一次旁通读数，返回"读数是否变化"。
+    ///
+    /// 【只有 `bypassed -> active` 这一个跃迁会动渲染输入】方向不对称，代价也不对称：
+    ///
+    /// * **离开旁通**：宿主立刻会来取音频，而快照可能停在旁通期间那一版（或根本没算过）
+    ///   ⇒ 必须失效**并且**把被跳过的那次编辑重新排上队。少了"重排"，用户解除旁通后
+    ///   若不再动任何东西，就永远不会有新音频。
+    /// * **进入旁通**：在途的合成已经没人要，丢掉待办就够。**不得**失效渲染输入 ——
+    ///   失效会遍历**全部** owner，让**别的轨道**为一次与自己无关的旁通重算一整次合成。
+    /// * **`unknown -> active`**：`Unknown` 的语义就是"照常渲染"，已发布的快照与这个
+    ///   结论并不矛盾 ⇒ 什么都不用做。这条很重要：某次读取暂时失败（`found == 0`）会
+    ///   让读数在 `unknown` / `active` 之间来回，若把它也算跃迁，一次宿主抖动就会变成
+    ///   每个 tick 一次全量重算（"无限渲染"）。
+    pub(crate) fn sample_host_bypass(&self) -> bool {
+        let before = self.host_bypass();
+        if !self.refresh_host_bypass_cache() {
+            return false;
+        }
+        match bypass_action(before, self.host_bypass()) {
+            BypassAction::Nothing => {}
+            BypassAction::CancelQueue => {
+                // 刚进入旁通：在途的合成已经没人要，丢掉待办并让正在跑的那次尽早返回。
+                if let Some(queue) = self.preparation() {
+                    queue.cancel();
+                }
+            }
+            BypassAction::InvalidateAndRearm => {
+                if let Ok(document) = self.editor_document() {
+                    if let Some(editor) = document.existing_editor_session() {
+                        editor.rearm_render();
+                    }
+                    document.invalidate_render_input();
+                }
+            }
+        }
+        true
+    }
+
     /// 本实例是否**应当**发布快照。
     ///
     /// 【为什么不能直接改 `renders_playback()`】那个读数的语义是"本文档的播放由本实例
     /// 渲染"，它被 `report_playback_ownership` 与诊断用于回答"文档上还有没有人在渲染"。
     /// Capture 实例**不在任何 ARA 文档上**，把它算进去会让那两处以为文档有播放实例。
     /// 这里另立一个"要不要出音"的判据，只在渲染准入点使用。
-    pub(crate) fn renders(&self) -> bool {
+    pub fn renders(&self) -> bool {
         if self.is_bound() {
             return !self.is_editor_only();
         }
@@ -476,5 +759,77 @@ impl ExtensionOwner {
         // 恒假 ⇒ 一条快照都不发布 ⇒ 录制正常、界面正常、**播放时全静音**。
         // 素材是比时钟更早、更硬的证据：它已经存在，就说明这个实例在录宿主。
         self.capture.has_material()
+    }
+}
+
+// 【编码的用例搬到了 `host::reaper::fx_state`】编码本身现在只有一份
+// （`FxBypass::encode` / `decode`），所以它的契约由**它的定义处**负责钉住。
+// 在这里再留一份副本，等于让"改一处、忘一处"重新变得可能。
+
+/// 旁通读数变化之后该做什么。
+///
+/// 【为什么是一个返回值而不是内联 if】这是"旁通"这条链上唯一会动**渲染调度**的判据，
+/// 两个方向判错的后果都很重：
+///   * 把 `unknown -> active` 也当成跃迁 ⇒ 某次宿主读取暂时失败（`found == 0`）就会
+///     让读数在 `unknown` / `active` 之间抖，而每抖一次都失效渲染输入 ⇒ **每个实例每
+///     tick 重算一整次合成**（用户看到的就是"无限渲染"）；
+///   * 漏掉 `bypassed -> active` ⇒ 用户解除旁通后永远不会有新音频。
+///
+/// 所以它必须能被逐值断言，而不是靠读一遍代码来相信。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BypassAction {
+    /// 读数没变，或变化与本实例的渲染调度无关。
+    Nothing,
+    /// 刚进入旁通：丢掉在途的合成，**不**动渲染输入（别的轨道不该为它重算）。
+    CancelQueue,
+    /// 离开旁通：失效渲染输入，并把被跳过的编辑重新排上队。
+    InvalidateAndRearm,
+}
+
+/// 纯判据：一次读数变化该触发哪个动作。
+pub(crate) fn bypass_action(
+    before: crate::host::reaper::FxBypass,
+    after: crate::host::reaper::FxBypass,
+) -> BypassAction {
+    use crate::host::reaper::FxBypass;
+    if before == after {
+        return BypassAction::Nothing;
+    }
+    if after.is_bypassed() {
+        return BypassAction::CancelQueue;
+    }
+    // 【只有"确定旁通 → 确定活跃"才是跃迁】`unknown -> active` 只是"我们又能读到了"，
+    // 而 `Unknown` 的语义本来就是"照常渲染"—— 已发布的快照与这个结论并不矛盾。
+    if before.is_bypassed() && after == FxBypass::Active {
+        return BypassAction::InvalidateAndRearm;
+    }
+    BypassAction::Nothing
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::reaper::FxBypass;
+
+    /// **只有"确定旁通 → 确定活跃"能动渲染输入。**
+    ///
+    /// 【为什么这条必须单测】判宽了 ⇒ 读数一抖就全量重算（"无限渲染"）；判窄了 ⇒
+    /// 用户解除旁通后永远没有新音频。两个方向都是用户直接可感知的故障。
+    #[test]
+    fn only_a_real_un_bypass_touches_the_render_input() {
+        use BypassAction::{CancelQueue, InvalidateAndRearm, Nothing};
+        use FxBypass::{Active, Bypassed, Unknown};
+        // 读数没变 ⇒ 什么都不做。
+        assert_eq!(bypass_action(Active, Active), Nothing);
+        assert_eq!(bypass_action(Bypassed, Bypassed), Nothing);
+        // 进入旁通 ⇒ 只丢队列（**不**失效渲染输入：别的轨道不该为它重算）。
+        assert_eq!(bypass_action(Active, Bypassed), CancelQueue);
+        assert_eq!(bypass_action(Unknown, Bypassed), CancelQueue);
+        // 真正解除旁通 ⇒ 失效 + 重排。
+        assert_eq!(bypass_action(Bypassed, Active), InvalidateAndRearm);
+        // 【最容易判错的一格】读数"又能读到了"不是跃迁：宿主抖动不得变成重算风暴。
+        assert_eq!(bypass_action(Unknown, Active), Nothing);
+        assert_eq!(bypass_action(Active, Unknown), Nothing);
+        assert_eq!(bypass_action(Bypassed, Unknown), Nothing);
     }
 }

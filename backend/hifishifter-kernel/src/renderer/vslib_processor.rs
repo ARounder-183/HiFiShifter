@@ -555,7 +555,8 @@ impl ClipProcessor for VslibProcessor {
                     let source_sec = (pnt as f64) * cp_interval_sec;
                     // 映射到 timeline 绝对时间
                     let timeline_sec = seg_start + source_sec / playback_rate;
-                    let edit_idx = (timeline_sec * 1000.0 / fp).floor().max(0.0) as usize;
+                    // 与组装侧同一个换算：`pitch_edit` 是工程栅格数组，帧 k 代表 k·fp。
+                    let edit_idx = crate::frame_grid::frame_at_time(timeline_sec, fp);
                     let midi_val = ctx.pitch_edit.get(edit_idx).copied().unwrap_or(0.0);
                     if midi_val > 0.0 {
                         cp2.pitEdit = (midi_val * 100.0).round() as c_int;

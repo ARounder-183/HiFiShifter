@@ -470,6 +470,31 @@ pub fn resolve_dyn_curves_for_audio(
     dyn_curve: &[f32],
     orig_curve: Option<&[f32]>,
 ) -> AudioDynCurves {
+    // 【全线未画 ⇒ 逐字节旁路：这是音频安全的硬不变式，不是优化】
+    //
+    // 未画帧的解析规则是"目标 = 该帧原声电平"（见 `dyn_resolved_target_at`），本意
+    // 是让**已画段与未画段的交界**连续。但它有一个致命的副产品：整条曲线都没画时，
+    // 解析结果的每一帧都等于基线，于是 `compute_dyn_gain` 退化成
+    // `no_content_fade(基线)` —— **DYN 变成一个由响度分析曲线驱动的静音门**。
+    // 基线是分析派生物（`assemble_dyn_orig_from_cache`），它的 0 只表示"这一帧没分析
+    // 到内容"，既可能是素材真空、也可能只是这一份几何/方向下的窗口边界。把它当增益 0
+    // 用，就会在**有内容的帧上**打出数字零：实测（真实 31.8 s 人声）静音段从 4 段
+    // 变成 38 段、静音总量 63k → 221k 帧，听感正是"每隔一小会儿一个静音断点"。
+    //
+    // 用户没画 DYN 时，DYN 阶段必须对音频**一点作用都没有**；"没有编辑"与"画了一条
+    // 恒等于基线的曲线"在听感上必须无法区分（后者本来也不可能被画出来）。
+    // 因此全线未画直接返回空平面：两个引擎的 `dyn_gain_at*` 都以"曲线为空 ⇒ 1.0"
+    // 短路，音频与关闭 DYN 时逐位相同。
+    if dyn_curve
+        .iter()
+        .all(|value| dyn_frame_is_unset(Some(*value)))
+    {
+        return AudioDynCurves {
+            target: Vec::new(),
+            baseline: Vec::new(),
+        };
+    }
+
     // 与采样器同源的"该帧原声"：数组之外持有末值；无基线 → 0（引擎侧等价于增益 1）。
     let denominator_at = |i: usize| -> f32 {
         match orig_curve {
@@ -922,50 +947,50 @@ mod tests {
     }
 
     #[test]
-    fn resolve_yields_unity_gain_for_unset_frames() {
-        // 关键性质：解析**不改变**未画帧的实际增益（恒为 1），只改变插值表现。
+    fn an_all_unset_dyn_curve_is_a_byte_exact_bypass() {
+        // 【为什么这是硬不变式】未画帧的解析规则是"目标 = 该帧基线"，于是整条曲线都
+        // 没画时 DYN 会退化成 `no_content_fade(基线)` —— 一个由响度分析驱动的静音门。
+        // 基线的 0 只表示"这一帧没分析到内容"（可能是窗口边界、方向、或分析未到位），
+        // 拿它当增益 0 就会在有内容的帧上打出数字零。
+        //
+        // 用户没画 DYN ⇒ DYN 阶段必须对音频一点作用都没有，任何基线都不例外
+        //（包括 0 与 NaN）。空平面就是这条语义的唯一表达：两个引擎都以
+        //"曲线为空 ⇒ 增益 1.0"短路。
         for baseline in [1.0f32, 0.25, 0.0005, 0.0, f32::NAN] {
-            let curve = [DYN_FOLLOW_ORIG];
-            let orig = [baseline];
+            let curve = [DYN_FOLLOW_ORIG; 4];
+            let orig = [baseline; 4];
             let r = resolve_dyn_curves_for_audio(&curve, Some(&orig));
-            let denom = if baseline.is_finite() && baseline > 0.0 {
-                baseline
-            } else {
-                0.0 // 采样器对无数据帧的取值；`compute_dyn_gain` 会再钳到下限。
-            };
-            let gain = compute_dyn_gain(r.target[0], denom);
-            if baseline.is_finite() && baseline >= DYN_SILENCE_FLOOR {
-                assert!(
-                    (gain - 1.0).abs() < 1e-6,
-                    "基线 {baseline} 时未画帧增益应为 1，实测 {gain}"
-                );
-            } else {
-                // 下限之下 = 无内容：未画帧也按"无内容"淡出（越接近真静音越彻底）。
-                // 注意这是**渐弱**而非硬门限：−66 dB（下限的一半）时仍有 −6 dB 的
-                // 残留增益，到 −90 dB 抖动级才基本归零（见 no_content_fade 的曲线）。
-                assert!(
-                    gain < 1.0,
-                    "基线 {baseline}（无内容）时未画帧应淡出，实测增益 {gain}"
-                );
-                if baseline == 0.0 {
-                    assert_eq!(gain, 0.0, "真静音处增益必须为 0");
-                }
-            }
+            assert!(r.target.is_empty(), "未画曲线必须解析成空目标平面");
+            assert!(r.baseline.is_empty(), "未画曲线不应携带基线");
         }
     }
 
     #[test]
+    fn an_unset_frame_next_to_a_drawn_one_still_resolves_to_the_baseline() {
+        // 交界连续性仍然要保留：只要曲线里有**一帧**画过，未画帧就必须解析成该帧基线，
+        // 否则从已画值插值到 -1 哨兵会穿过 0（= 画静音）并产生硬跳。
+        let curve = [DYN_FOLLOW_ORIG, 0.5, DYN_FOLLOW_ORIG];
+        let orig = [0.2f32, 0.2, 0.2];
+        let r = resolve_dyn_curves_for_audio(&curve, Some(&orig));
+        assert_eq!(r.target[0], 0.2, "未画帧解析成基线");
+        assert_eq!(r.target[1], 0.5, "已画帧原样");
+        assert_eq!(r.target[2], 0.2, "未画帧解析成基线");
+    }
+
+    #[test]
     fn resolve_handles_missing_and_short_baseline() {
-        let curve = [DYN_FOLLOW_ORIG, DYN_FOLLOW_ORIG, DYN_FOLLOW_ORIG];
+        // 含一帧已画值：全线未画的曲线现在整体旁路（见上个用例），
+        // 而"缺基线/基线过短"的语义要在真正会解析的那条路径上验证。
+        let curve = [DYN_FOLLOW_ORIG, 0.4, DYN_FOLLOW_ORIG];
         let r_none = resolve_dyn_curves_for_audio(&curve, None);
-        // 原声未知 → 解析值 0、基线为空；引擎侧据此直接退回增益 1（既有语义）。
-        assert!(r_none.target.iter().all(|v| *v == 0.0));
+        // 原声未知 → 未画帧解析值 0、基线为空；引擎侧据此直接退回增益 1（既有语义）。
+        assert_eq!(r_none.target, vec![0.0, 0.4, 0.0, 0.0]);
         assert!(r_none.baseline.is_empty());
         let r_short = resolve_dyn_curves_for_audio(&curve, Some(&[0.5]));
         assert_eq!(r_short.target[0], 0.5);
         assert_eq!(r_short.baseline, vec![0.5]);
         // 越界帧按持有末值（与采样器一致），而不是回落到下限。
-        assert_eq!(r_short.target[1], 0.5);
+        assert_eq!(r_short.target[1], 0.4, "已画帧不被基线覆盖");
         assert_eq!(r_short.target[2], 0.5);
         assert_eq!(r_short.target[3], 0.5);
     }

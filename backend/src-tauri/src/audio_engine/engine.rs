@@ -27,6 +27,43 @@ const METER_STALL_FALLBACK: Duration = Duration::from_millis(150);
 /// 每槽 4 字节，取宽裕值让"死表"远离现实工程规模；越界时 meter 线程告警一次。
 const METER_BUS_CAPACITY: usize = 512;
 
+/// 引擎 worker 命令处理层的 panic 隔离。
+///
+/// 【为什么命令层也要接住】音频回调与 Tauri 命令边界各有一层 catch_unwind
+/// （`output_stream` 的渲染回调、`common::guard_command`），但 worker 的
+/// `handle_*` 恰好裸奔在两者之外：worker 线程一旦 panic 就整体消失，而发送侧
+/// 对 SendError 静默 —— 之后每一条播放/停止/seek 都无声丢弃，传输永久失灵且
+/// 无从察觉。接住 panic、保住线程，同一条纪律在这里补齐。
+///
+/// 【为什么 AssertUnwindSafe】worker 的 `EngineWorkerState` 借用大量循环局部
+/// 可变状态；panic 后这些状态可能不一致（半更新的快照、半清空的缓存），但
+/// 这份风险与"线程死亡、传输无声失灵"相比是明确的净收益 —— 与互斥锁
+/// `lock_or_recover` 对毒锁的取舍是同一条原则。
+fn contain_command_panic<F: FnOnce()>(what: &'static str, run: F) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).is_err() {
+        log::error!(
+            "AudioEngine: command handler for {what} panicked; worker survived, this command was dropped"
+        );
+    }
+}
+
+/// 同 [`contain_command_panic`]，但 handler 有自己的 `Result`：panic 映射成
+/// `Err`，让调用方的失败重试路径照常接管（设备切换失败会排定退避重试）。
+fn contain_command_panic_result<T, F>(what: &'static str, run: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String>,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(result) => result,
+        Err(_) => {
+            log::error!(
+                "AudioEngine: command handler for {what} panicked; worker survived, treated as a handler failure"
+            );
+            Err(format!("{what} handler panicked"))
+        }
+    }
+}
+
 use super::device_watch::{
     output_device_changed, spawn_default_output_watcher, OutputDeviceIdentity,
 };
@@ -111,6 +148,9 @@ pub struct AudioEngine {
     meter_shutdown: Arc<AtomicBool>,
     /// Shutdown flag for the default-output watcher.
     device_watch_shutdown: Arc<AtomicBool>,
+    /// `send` 遇到 SendError 只告警一次的闸（跨 Clone 共享；worker 线程消失后
+    /// 每条命令都会失败，闸住避免日志被刷爆）。
+    send_failed_logged: Arc<AtomicBool>,
 }
 
 impl Clone for AudioEngine {
@@ -128,6 +168,7 @@ impl Clone for AudioEngine {
             worker_ready: self.worker_ready.clone(),
             meter_shutdown: self.meter_shutdown.clone(),
             device_watch_shutdown: self.device_watch_shutdown.clone(),
+            send_failed_logged: self.send_failed_logged.clone(),
         }
     }
 }
@@ -142,8 +183,26 @@ impl AudioEngine {
     /// 【为什么需要它】内核侧的宿主回调（`app_events::AppHostCallbacks`）拿不到
     /// `AudioEngine` 的私有 channel，只能经由这个入口 —— 它取代了原来的
     /// `set_app_handle`：句柄不再经命令通道传递（那条通道现在是纯数据的内核类型）。
+    ///
+    /// 【SendError 为什么只静默到第一次】worker 线程活着时 send 不会失败；失败
+    /// 意味着 worker 已经消失（正常 Shutdown 之后，或异常死亡）。前者是退出流程
+    /// 的正常噪音（shutdown 已置位，保持静默），后者是"传输从此无声失灵"的唯一
+    /// 现场证据 —— 所以只把第一次落进日志，之后照旧静默（闸住，别把日志刷爆）。
     pub fn send(&self, command: EngineCommand) {
-        let _ = self.tx.send(command);
+        self.dispatch(command);
+    }
+
+    /// 所有命令入口共用的投递通道：`send`（宿主回调入口）与各公开方法
+    /// （`play_original` / `stop` / `update_timeline` …）走同一条告警纪律。
+    fn dispatch(&self, command: EngineCommand) {
+        if self.tx.send(command).is_err()
+            && !self.device_watch_shutdown.load(Ordering::Relaxed)
+            && !self.send_failed_logged.swap(true, Ordering::AcqRel)
+        {
+            log::error!(
+                "AudioEngine: worker is gone without shutdown; this and later commands are dropped"
+            );
+        }
     }
 
     fn with_app_handle(app_handle: Option<tauri::AppHandle>) -> Self {
@@ -472,119 +531,152 @@ impl AudioEngine {
                 let tx_ready = tx_for_worker.clone();
                 thread::spawn(move || {
                     while let Ok(job) = stretch_rx.recv() {
-                        let runtime_available = match job.algorithm {
-                            crate::time_stretch::StretchAlgorithm::SoundTouchDll => {
-                                crate::soundtouch::is_available()
-                            }
-                            crate::time_stretch::StretchAlgorithm::SignalsmithStretch
-                            | crate::time_stretch::StretchAlgorithm::LinearResample => true,
-                            crate::time_stretch::StretchAlgorithm::ElastiqueSoloist => false,
-                        };
-                        if !runtime_available {
-                            if let Ok(mut s) = inflight.lock() {
-                                s.remove(&job.key);
-                            }
-                            continue;
-                        }
-
-                        let src = match super::io::get_resampled_stereo_cached(
-                            &job.key.path,
-                            job.key.out_rate,
-                            &cache,
-                        ) {
-                            Some(v) => v,
-                            None => {
-                                if let Ok(mut s) = inflight.lock() {
-                                    s.remove(&job.key);
+                        // 【每个任务一层 panic 隔离】任务中途 panic 若不处理，
+                        // inflight 里的 key 就永远摘不掉 —— 这个 clip 从此再也不会
+                        // 排队拉伸，界面停在"拉伸中"。catch_unwind 之后补摘 key、
+                        // 补发完成事件：worker 与命令队列都活着。与音频回调的
+                        // catch_unwind（output_stream）同一条纪律。
+                        // （源路径与 key 在闭包外先取出来：闭包的成功路径会把 key
+                        // 移进 StretchReady，panic 分支还要用它摘 inflight、落日志。）
+                        let inflight_key = job.key.clone();
+                        let job_source_path = job.key.path.clone();
+                        let job_result =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                let runtime_available = match job.algorithm {
+                                    crate::time_stretch::StretchAlgorithm::SoundTouchDll => {
+                                        crate::soundtouch::is_available()
+                                    }
+                                    crate::time_stretch::StretchAlgorithm::SignalsmithStretch
+                                    | crate::time_stretch::StretchAlgorithm::LinearResample => true,
+                                    crate::time_stretch::StretchAlgorithm::ElastiqueSoloist => {
+                                        false
+                                    }
+                                };
+                                if !runtime_available {
+                                    if let Ok(mut s) = inflight.lock() {
+                                        s.remove(&job.key);
+                                    }
+                                    return;
                                 }
-                                continue;
-                            }
-                        };
 
-                        let (src_start, src_end) = source_bounds_frames(
-                            job.source_start_sec,
-                            job.source_end_sec,
-                            src.frames,
-                            job.key.out_rate,
-                        );
-                        let loop_in_frames = src_end.saturating_sub(src_start) as usize;
-                        if loop_in_frames < 2 {
+                                let src = match super::io::get_resampled_stereo_cached(
+                                    &job.key.path,
+                                    job.key.out_rate,
+                                    &cache,
+                                ) {
+                                    Some(v) => v,
+                                    None => {
+                                        if let Ok(mut s) = inflight.lock() {
+                                            s.remove(&job.key);
+                                        }
+                                        return;
+                                    }
+                                };
+
+                                let (src_start, src_end) = source_bounds_frames(
+                                    job.source_start_sec,
+                                    job.source_end_sec,
+                                    src.frames,
+                                    job.key.out_rate,
+                                );
+                                let loop_in_frames = src_end.saturating_sub(src_start) as usize;
+                                if loop_in_frames < 2 {
+                                    if let Ok(mut s) = inflight.lock() {
+                                        s.remove(&job.key);
+                                    }
+                                    return;
+                                }
+
+                                let playback_rate =
+                                    if job.playback_rate.is_finite() && job.playback_rate > 0.0 {
+                                        job.playback_rate
+                                    } else {
+                                        1.0
+                                    };
+                                if (playback_rate - 1.0).abs() <= 1e-6 {
+                                    if let Ok(mut s) = inflight.lock() {
+                                        s.remove(&job.key);
+                                    }
+                                    return;
+                                }
+
+                                let i0 = (src_start as usize) * 2;
+                                let i1 = (src_end as usize) * 2;
+                                if i1 > src.pcm.len() || i0 + 4 > i1 {
+                                    if let Ok(mut s) = inflight.lock() {
+                                        s.remove(&job.key);
+                                    }
+                                    return;
+                                }
+
+                                let loop_pcm: Vec<f32> = src.pcm[i0..i1].to_vec();
+                                let loop_out_frames =
+                                    ((loop_in_frames as f64) / playback_rate).round().max(2.0)
+                                        as usize;
+
+                                // 向前端推送拉伸开始事件
+                                if let Some(ref app) = job.app_handle {
+                                    let _ = app.emit(
+                                        "stretch_progress",
+                                        StretchProgressPayload {
+                                            active: true,
+                                            clip_name: Some(job.clip_name.clone()),
+                                        },
+                                    );
+                                }
+
+                                let stretched = time_stretch_interleaved(
+                                    &loop_pcm,
+                                    2,
+                                    job.key.out_rate,
+                                    loop_out_frames,
+                                    job.algorithm,
+                                );
+
+                                let stretched_src = ResampledStereo {
+                                    sample_rate: job.key.out_rate,
+                                    frames: loop_out_frames,
+                                    pcm: Arc::new(stretched),
+                                };
+
+                                if let Ok(mut m) = stretch_cache.lock() {
+                                    // Byte-budgeted LRU: evicts the least-recently-used
+                                    // entry beyond the entry cap or the byte budget.
+                                    let pcm_bytes = stretched_src.pcm_bytes();
+                                    m.insert(job.key.clone(), stretched_src, pcm_bytes);
+                                }
+
+                                // 向前端推送拉伸完成事件
+                                if let Some(ref app) = job.app_handle {
+                                    let _ = app.emit(
+                                        "stretch_progress",
+                                        StretchProgressPayload {
+                                            active: false,
+                                            clip_name: None,
+                                        },
+                                    );
+                                }
+
+                                let _ = tx_ready.send(EngineCommand::StretchReady { key: job.key });
+                            }));
+                        if job_result.is_err() {
                             if let Ok(mut s) = inflight.lock() {
-                                s.remove(&job.key);
+                                s.remove(&inflight_key);
                             }
-                            continue;
-                        }
-
-                        let playback_rate =
-                            if job.playback_rate.is_finite() && job.playback_rate > 0.0 {
-                                job.playback_rate
-                            } else {
-                                1.0
-                            };
-                        if (playback_rate - 1.0).abs() <= 1e-6 {
-                            if let Ok(mut s) = inflight.lock() {
-                                s.remove(&job.key);
+                            if let Some(ref app) = job.app_handle {
+                                let _ = app.emit(
+                                    "stretch_progress",
+                                    StretchProgressPayload {
+                                        active: false,
+                                        clip_name: None,
+                                    },
+                                );
                             }
-                            continue;
-                        }
-
-                        let i0 = (src_start as usize) * 2;
-                        let i1 = (src_end as usize) * 2;
-                        if i1 > src.pcm.len() || i0 + 4 > i1 {
-                            if let Ok(mut s) = inflight.lock() {
-                                s.remove(&job.key);
-                            }
-                            continue;
-                        }
-
-                        let loop_pcm: Vec<f32> = src.pcm[i0..i1].to_vec();
-                        let loop_out_frames =
-                            ((loop_in_frames as f64) / playback_rate).round().max(2.0) as usize;
-
-                        // 向前端推送拉伸开始事件
-                        if let Some(ref app) = job.app_handle {
-                            let _ = app.emit(
-                                "stretch_progress",
-                                StretchProgressPayload {
-                                    active: true,
-                                    clip_name: Some(job.clip_name.clone()),
-                                },
+                            log::error!(
+                                "AudioEngine: stretch job for {} panicked; worker survived, clip can requeue",
+                                job_source_path.display()
                             );
                         }
-
-                        let stretched = time_stretch_interleaved(
-                            &loop_pcm,
-                            2,
-                            job.key.out_rate,
-                            loop_out_frames,
-                            job.algorithm,
-                        );
-
-                        let stretched_src = ResampledStereo {
-                            sample_rate: job.key.out_rate,
-                            frames: loop_out_frames,
-                            pcm: Arc::new(stretched),
-                        };
-
-                        if let Ok(mut m) = stretch_cache.lock() {
-                            // Byte-budgeted LRU: evicts the least-recently-used
-                            // entry beyond the entry cap or the byte budget.
-                            let pcm_bytes = stretched_src.pcm_bytes();
-                            m.insert(job.key.clone(), stretched_src, pcm_bytes);
-                        }
-
-                        // 向前端推送拉伸完成事件
-                        if let Some(ref app) = job.app_handle {
-                            let _ = app.emit(
-                                "stretch_progress",
-                                StretchProgressPayload {
-                                    active: false,
-                                    clip_name: None,
-                                },
-                            );
-                        }
-
-                        let _ = tx_ready.send(EngineCommand::StretchReady { key: job.key });
                     }
                 });
             }
@@ -674,11 +766,19 @@ impl AudioEngine {
                         metro_for_thread.store_schedule(clicks);
                     }
                     EngineCommand::EvictSourcePath { path } => {
-                        handle_evict_source_path(&mut state, &path);
+                        contain_command_panic("EvictSourcePath", || {
+                            handle_evict_source_path(&mut state, &path)
+                        });
                     }
-                    EngineCommand::Stop => handle_stop(&mut state),
-                    EngineCommand::SeekSec { sec } => handle_seek_sec(&mut state, sec),
-                    EngineCommand::PlayFrom { sec } => handle_play_from(&mut state, sec),
+                    EngineCommand::Stop => {
+                        contain_command_panic("Stop", || handle_stop(&mut state))
+                    }
+                    EngineCommand::SeekSec { sec } => {
+                        contain_command_panic("SeekSec", || handle_seek_sec(&mut state, sec))
+                    }
+                    EngineCommand::PlayFrom { sec } => {
+                        contain_command_panic("PlayFrom", || handle_play_from(&mut state, sec))
+                    }
                     EngineCommand::DefaultOutputDeviceChanged { force } => {
                         // 【风暴节流】err_fn 对每一次流错误都发一条 force，而一次
                         // 成功的重建并不证明故障结束 —— 驱动重协商会"建好又立刻
@@ -703,21 +803,23 @@ impl AudioEngine {
                             }
                             continue;
                         }
-                        match handle_default_output_device_changed(
-                            &mut state,
-                            &mut stream,
-                            &mut sr,
-                            &mut current_output,
-                            is_playing_thread.clone(),
-                            play_start_wait_thread.clone(),
-                            position_frames_thread.clone(),
-                            duration_frames_thread.clone(),
-                            sample_rate_thread.clone(),
-                            meter_bus.clone(),
-                            metro_for_thread.clone(),
-                            &tx_for_worker,
-                            force,
-                        ) {
+                        match contain_command_panic_result("DefaultOutputDeviceChanged", || {
+                            handle_default_output_device_changed(
+                                &mut state,
+                                &mut stream,
+                                &mut sr,
+                                &mut current_output,
+                                is_playing_thread.clone(),
+                                play_start_wait_thread.clone(),
+                                position_frames_thread.clone(),
+                                duration_frames_thread.clone(),
+                                sample_rate_thread.clone(),
+                                meter_bus.clone(),
+                                metro_for_thread.clone(),
+                                &tx_for_worker,
+                                force,
+                            )
+                        }) {
                             Ok(()) => {
                                 // 成功：回到最短重试间隔，下次失败仍能快速恢复。
                                 device_retry = None;
@@ -747,13 +849,25 @@ impl AudioEngine {
                     EngineCommand::SetPlaying { playing, target } => {
                         handle_set_playing(&mut state, playing, target)
                     }
-                    EngineCommand::UpdateTimeline(tl) => handle_update_timeline(&mut state, tl),
-                    EngineCommand::RenderedClipsChanged => {
-                        handle_rendered_clips_changed(&mut state)
+                    EngineCommand::UpdateTimeline(tl) => {
+                        contain_command_panic("UpdateTimeline", || {
+                            handle_update_timeline(&mut state, tl)
+                        })
                     }
-                    EngineCommand::StretchReady { key } => handle_stretch_ready(&mut state, key),
+                    EngineCommand::RenderedClipsChanged => {
+                        contain_command_panic("RenderedClipsChanged", || {
+                            handle_rendered_clips_changed(&mut state)
+                        })
+                    }
+                    EngineCommand::StretchReady { key } => {
+                        contain_command_panic("StretchReady", || {
+                            handle_stretch_ready(&mut state, key)
+                        })
+                    }
                     EngineCommand::ClipPitchReady { clip_id } => {
-                        handle_clip_pitch_ready(&mut state, clip_id)
+                        contain_command_panic("ClipPitchReady", || {
+                            handle_clip_pitch_ready(&mut state, clip_id)
+                        })
                     }
                     // 动态（DYN）的后台电平分析：不受 compose_enabled 门控，
                     // 由参数面板请求 dyn 参数时驱动（见 commands::params）。
@@ -762,12 +876,16 @@ impl AudioEngine {
                             schedule_clip_pitch_jobs(&tl, state.tx, state.sr);
                         }
                     }
-                    EngineCommand::AudioReady { key } => handle_audio_ready(&mut state, key),
+                    EngineCommand::AudioReady { key } => {
+                        contain_command_panic("AudioReady", || handle_audio_ready(&mut state, key))
+                    }
                     EngineCommand::PlayFile {
                         path,
                         offset_sec,
                         target,
-                    } => handle_play_file(&mut state, path, offset_sec, target),
+                    } => contain_command_panic("PlayFile", || {
+                        handle_play_file(&mut state, path, offset_sec, target)
+                    }),
                     // 两个入口（recv 与排水暂存）都已在上方对 Shutdown break；
                     // 若未来新增路径漏掉预过滤，这里降级为跳过而不是 abort。
                     EngineCommand::Shutdown => {
@@ -792,6 +910,7 @@ impl AudioEngine {
             worker_ready,
             meter_shutdown,
             device_watch_shutdown,
+            send_failed_logged: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -801,18 +920,18 @@ impl AudioEngine {
 
     /// 更新节拍器配置（开关 / 音量 / 细分模式 / 重音 / 音色）。
     pub fn set_metronome(&self, config: metronome::MetronomeConfig) {
-        let _ = self.tx.send(EngineCommand::SetMetronome { config });
+        self.dispatch(EngineCommand::SetMetronome { config });
     }
 
     /// 换入节拍器响点表（升序，输出设备采样率域）。
     pub fn set_metronome_schedule(&self, clicks: Arc<Vec<metronome::MetronomeClick>>) {
-        let _ = self.tx.send(EngineCommand::SetMetronomeSchedule { clicks });
+        self.dispatch(EngineCommand::SetMetronomeSchedule { clicks });
     }
 
     pub fn shutdown(&self) {
         self.device_watch_shutdown.store(true, Ordering::Relaxed);
         self.meter_shutdown.store(true, Ordering::Relaxed);
-        let _ = self.tx.send(EngineCommand::Shutdown);
+        self.dispatch(EngineCommand::Shutdown);
     }
 
     /// 使指定源路径的解码缓存和拉伸缓存失效。
@@ -820,17 +939,17 @@ impl AudioEngine {
     /// 在 `replace_clip_source` 中被调用，早于 `update_timeline` 发送，
     /// 确保引擎在重建 snapshot 时不会使用旧文件的解码/拉伸数据。
     pub fn evict_source_path(&self, path: &str) {
-        let _ = self.tx.send(EngineCommand::EvictSourcePath {
+        self.dispatch(EngineCommand::EvictSourcePath {
             path: path.to_string(),
         });
     }
 
     pub fn update_timeline(&self, timeline: TimelineState) {
-        let _ = self.tx.send(EngineCommand::UpdateTimeline(timeline));
+        self.dispatch(EngineCommand::UpdateTimeline(timeline));
     }
 
     pub fn seek_sec(&self, sec: f64) {
-        let _ = self.tx.send(EngineCommand::SeekSec { sec });
+        self.dispatch(EngineCommand::SeekSec { sec });
     }
 
     /// 引擎当前的**绝对**播放位置（秒）。
@@ -860,12 +979,12 @@ impl AudioEngine {
     /// `handle_play_from`，`Some` 分支由 worker 级测试覆盖）。
     /// 调用方负责确认当前会话目标是时间线；文件预览的 base 是文件域偏移。
     pub fn play_from_current(&self) {
-        let _ = self.tx.send(EngineCommand::PlayFrom { sec: None });
+        self.dispatch(EngineCommand::PlayFrom { sec: None });
     }
 
     #[allow(dead_code)]
     pub fn set_playing(&self, playing: bool, target: Option<&str>) {
-        let _ = self.tx.send(EngineCommand::SetPlaying {
+        self.dispatch(EngineCommand::SetPlaying {
             playing,
             target: target.map(|s| s.to_string()),
         });
@@ -880,7 +999,7 @@ impl AudioEngine {
     /// 时无需重建这条通路。
     #[allow(dead_code)]
     pub fn play_file(&self, path: &Path, offset_sec: f64, target: &str) {
-        let _ = self.tx.send(EngineCommand::PlayFile {
+        self.dispatch(EngineCommand::PlayFile {
             path: path.to_path_buf(),
             offset_sec,
             target: target.to_string(),
@@ -888,7 +1007,7 @@ impl AudioEngine {
     }
 
     pub fn stop(&self) {
-        let _ = self.tx.send(EngineCommand::Stop);
+        self.dispatch(EngineCommand::Stop);
     }
 
     pub fn is_playing(&self) -> bool {
@@ -931,7 +1050,7 @@ impl AudioEngine {
     /// 这是"原地等待渲染"解除的唯一入口 —— 由**产出者**主动推送，
     /// 无需任何轮询、版本号比对或等待状态上报。
     pub fn refresh_rendered_snapshot(&self) {
-        let _ = self.tx.send(EngineCommand::RenderedClipsChanged);
+        self.dispatch(EngineCommand::RenderedClipsChanged);
     }
 }
 

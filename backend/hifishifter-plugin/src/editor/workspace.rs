@@ -367,6 +367,28 @@ impl PresentedIds {
 /// 唯一差别就是前缀 —— 这个换算必须只有一处，否则"文档 id 与呈现 id 混用"会再一次
 /// 散落成几个各写各的字符串拼接（它已经害过：\`claimed_id\` 用无前缀 id 去比带前缀的
 /// 时间线，于是每轮新建一条副本 clip）。
+/// 把一条**文档域**的 clip 换算到呈现域（id + 每个 take id + active take）。
+///
+/// 【为什么必须是同一个函数】文档域（`ara-item-{guid}` / 宿主 take GUID）与呈现域
+/// （加过命名空间前缀）的唯一差别就是前缀；这个换算散落成几处各写各的字符串拼接时，
+/// 它已经害过两次（`claimed_id` 用无前缀 id 去比带前缀的时间线 ⇒ 每轮新建一条副本
+/// clip）。装配产物的克隆与占位构造都必须走这里。
+fn present_document_clip(
+    mut clip: hifishifter_kernel::state::Clip,
+    id: &str,
+    prefix: &impl Fn(&str) -> String,
+) -> hifishifter_kernel::state::Clip {
+    clip.id = id.to_string();
+    for take in &mut clip.takes {
+        take.id = prefix(&take.id);
+    }
+    clip.active_take_id = clip.active_take_id.as_deref().map(prefix);
+    // 反序列化后再物化一次：`clip_for_item` 已调过 `normalize_takes`，但 take id 刚刚
+    // 才被换算到命名空间，扁平投影必须跟着更新，否则 `active_take()` 会指回旧 id。
+    clip.normalize_takes();
+    clip
+}
+
 fn materialise_presented_clip(
     item: &crate::host::UiItem,
     id: &str,
@@ -376,16 +398,8 @@ fn materialise_presented_clip(
     let row = crate::host::geometry::item_row_from_host(item, track_id);
     let mut clip =
         hifishifter_kernel::editor::assembly::clip_for_item(&row, track_id, None).ok()?;
-    clip.id = id.to_string();
     clip.track_id = track_id.to_string();
-    for take in &mut clip.takes {
-        take.id = prefix(&take.id);
-    }
-    clip.active_take_id = clip.active_take_id.as_deref().map(prefix);
-    // 反序列化后再物化一次：\`clip_for_item\` 已调过 \`normalize_takes\`，但 take id 刚刚
-    // 才被换算到命名空间，扁平投影必须跟着更新，否则 \`active_take()\` 会指回旧 id。
-    clip.normalize_takes();
-    Some(clip)
+    Some(present_document_clip(clip, id, prefix))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -508,6 +522,33 @@ impl DocumentSession {
 
     pub(crate) fn present_host_inventory(&self, timeline: &mut TimelineState, namespace: &str) {
         let prefix = |id: &str| format!("{namespace}{id}");
+        // 【兜底占位不许比装配产物更差】
+        //
+        // 下面那条 `materialise_presented_clip` 的兜底是**按构造无源**的（它拿不到
+        // region，也就拿不到 ARA 源身份）。而"装配器已经为这个 item 产出过 clip、但那条
+        // clip 被工作区过滤掉了"是另一回事：那份产物**有源**，只是没进这一份时间线
+        // （`workspace_timeline_locked` 按 `clip_ids` retain，而 region 还没挂上时
+        // `clip_ids` 里没有它）。用无源占位盖住有源产物，就把"装配失败"翻译成了一句
+        // **永远成立的**等待 —— 用户看到的就是「正在等待宿主完成音频分配」，而且重开
+        // 工程才恢复。
+        //
+        // 【为什么用 try-lock】本函数可能被"已经持有文档时间线"的路径调用（见上面的
+        // 说明），阻塞取锁会在那里当场自锁。拿不到就退回原来的兜底：那是**行为不变**
+        // 的一支，而不是错误。用仓库的 `try_lock_or_recover` 而不是裸 `try_lock`：
+        // 毒化过的锁也要能读到（见 `hifishifter_plugin_core::sync` 的模块文档）。
+        let assembled: std::collections::HashMap<String, hifishifter_kernel::state::Clip> =
+            crate::sync::try_lock_or_recover(&self.timeline)
+                .and_then(|slot| {
+                    slot.as_ref().map(|timeline| {
+                        timeline
+                            .clips
+                            .iter()
+                            .filter(|clip| clip.id.starts_with("ara-item-"))
+                            .map(|clip| (clip.id.clone(), clip.clone()))
+                            .collect::<std::collections::HashMap<_, _>>()
+                    })
+                })
+                .unwrap_or_default();
         // 【媒体总时长索引整段删除】它此前只为"占位 clip 的源窗口解算"服务，而那段
         // 解算已经搬进 `hifishifter_kernel::editor::assembly::clip_for_item`（装配器
         // 在装配前会按 region 侧补齐每个 item 的媒体总时长，见
@@ -775,13 +816,84 @@ impl DocumentSession {
             }
             None
         }
+        // 【解析结果每轮只算一次】下面两遍扫描都要用同一份：第一遍让"自己的 id 正好是
+        // 那条模型轨"的宿主轨先占位，第二遍才给其余轨道挑落点。两次现算会读到两份
+        // 不同的 `region_items` 快照，于是"占位"与"落地"可能指向不同答案。
+        let resolved_by_host: std::collections::HashMap<String, Option<String>> = {
+            let items = self.region_items.lock_or_recover();
+            tracks
+                .values()
+                .map(|host| {
+                    (
+                        host.guid.clone(),
+                        resolve_model_track(timeline, &items, &presented, host),
+                    )
+                })
+                .collect()
+        };
+        // 【一轮里一条模型轨只能归一条宿主轨】—— 用户报的"两条轨折成一条、三条 clip
+        // 全在它上面"就是这条不变量被打破的样子：宿主把 item 拖到另一条轨之后，ARA 侧
+        // 的 region 仍报旧序列，于是**目标轨**的 item 解析出**源轨**的模型 id，两条
+        // 宿主轨写进同一行（后写的那条把名字、order 一起覆盖了 —— 用户看到的是
+        // "轨道 2 的名字 + 3 条 clip"）。
+        //
+        // 抢占的优先级：自己的 id 就是命中的那条模型轨 ⇒ 无条件归它。这条必须优先于
+        // 遍历顺序 —— `ui_tracks` 是按 GUID 排的 `BTreeMap`，让顺序决定谁保住参数根
+        // 等于掷骰子，而参数根正挂在这个 id 上。
+        let mut claims: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for host in tracks.values() {
-            // 解析成功 ⇒ 用模型轨；解析不到 ⇒ 退回宿主 id（未认领的 item 走占位路径）。
-            let resolved = {
-                let items = self.region_items.lock_or_recover();
-                resolve_model_track(timeline, &items, &presented, host)
+            let own = prefix(&host.id);
+            if resolved_by_host
+                .get(&host.guid)
+                .and_then(|id| id.as_deref())
+                == Some(own.as_str())
+            {
+                claims.entry(own).or_insert_with(|| host.guid.clone());
+            }
+        }
+        for host in tracks.values() {
+            let own = prefix(&host.id);
+            let own_is_live = timeline.tracks.iter().any(|track| track.id == own);
+            let resolved = resolved_by_host.get(&host.guid).cloned().flatten();
+            let mut track_id = match resolved {
+                // 自己的身份与 clip 指向同一条轨：没有歧义。
+                Some(id) if id == own => id,
+                // 自己的 id 是个**陈旧字符串**（上一轮没学会身份、`timeline` 里并没有
+                // 这条轨）：听 clip 的 —— T12 的"先解析、后使用"正是为这一种。
+                Some(id) if !own_is_live => id,
+                // 自己的轨还活着，而 clip 指向**另一条**活轨 ⇒ 宿主刚把 item 拖过来、
+                // ARA 侧还没跟上：宿主清单赢。否则用户拖过去的 item 会留在原轨上。
+                Some(_) => own,
+                None => own,
             };
-            let track_id = resolved.clone().unwrap_or_else(|| prefix(&host.id));
+            if let Some(owner) = claims.get(&track_id) {
+                // 【例外：同一个 folder 里的兄弟轨】REAPER 把 ARA 挂在 folder 母轨上时，
+                // 整组子轨由**同一个**实例处理，它们共用一个参数根是清单的真实形状，
+                // 不是身份没跟上。只有"根级的两条轨抢一个模型轨"才一定是过渡态。
+                let sibling = host.parent_guid.is_some()
+                    && tracks
+                        .get(owner)
+                        .is_some_and(|other| other.parent_guid == host.parent_guid);
+                if owner != &host.guid && !sibling {
+                    // 这条模型轨已经属于别人 ⇒ 退回自己的宿主身份。宁可多一行**空**轨，
+                    // 也不能把两条宿主轨并成一条：并了之后名字、参数根、选中项全跟着错，
+                    // 而且用户没有任何线索能把它拆回去（只有重新加载才恢复）。
+                    let claimed = track_id.clone();
+                    track_id = prefix(&format!("host-track-{}", host.guid));
+                    hifishifter_kernel::log_limiter::emit_limited_key(
+                        log::Level::Warn,
+                        "ara.inventory.track-claim-conflict",
+                        format_args!(
+                            "[ara] host track {guid} wanted model track {claimed}; it already \
+                             belongs to another host track this round — keeping them separate as \
+                             {track_id}",
+                            guid = host.guid
+                        ),
+                    );
+                }
+            }
+            claims.insert(track_id.clone(), host.guid.clone());
             owned.insert(track_id.clone());
             // 宿主 folder 父子 → 时间线参数根。
             //
@@ -854,7 +966,14 @@ impl DocumentSession {
                     // 分叉。此前这里是独立的一份 `serde_json::json!` 字面量，与映射层
                     // 那一份各自维护 —— 两份默认值迟早不同，而表现是"同一个 item 在两个
                     // 前端里字段不一样"。
-                    match materialise_presented_clip(item, &id, &track_id, &prefix) {
+                    // 【先问装配器】它已经为这个 item 产出过 clip ⇒ 直接复用那一条（带源），
+                    // 而不是造一条按构造无源的占位。
+                    let from_assembly = assembled
+                        .get(&format!("ara-item-{}", g.item_id))
+                        .map(|clip| present_document_clip(clip.clone(), &id, &prefix));
+                    match from_assembly
+                        .or_else(|| materialise_presented_clip(item, &id, &track_id, &prefix))
+                    {
                         Some(clip) => timeline.clips.push(clip),
                         None => {
                             log::warn!("[ara] skipping host item {id}: cannot build a clip");
@@ -1491,7 +1610,18 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
             let mut last = self.last_media_diag.lock_or_recover();
             if last.as_deref() != Some(line.as_str()) {
                 *last = Some(line.clone());
-                log::info!("{line}");
+                // 【为什么这条必须是 WARN】`verbosity=low` ⇒ `LevelFilter::Warn`
+                // （`kernel/log_policy.rs`），所以 `log::info!` 在用户的默认档日志里
+                // **一行都没有**。而"哪一条 clip 没有源、为什么"正是"粘贴出来的片段
+                // 一直等宿主音频"这个问题的第一现场 —— 它已经因此查了三轮。
+                //
+                // 内容变才发（上面那道比较），限流器再兜一层（同键 10 s 一行），
+                // 稳态下不会刷屏。
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.media",
+                    format_args!("{line}"),
+                );
             }
         }
         // 被跳过的 playback region（MIDI / 零长度 item…）：只 log 会让它们静默消失。
@@ -2067,8 +2197,8 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
             clip.reversed = item_facts.reversed;
             clip.loop_enabled = item_facts.loop_source;
             clip.channel_mode = item_facts.channel_mode;
-            // 【倒放的镜像坐标复原】ARA 报的 region 时间是**已镜像坐标**（F-4 实测，
-            // 见 `probe/ara/REVERSE-FINDINGS.md`）：倒放 take 的 `D_STARTOFFS` 是
+            // 【倒放的镜像坐标复原】ARA 报的 region 时间是**已镜像坐标**（真机实测）：
+            // 倒放 take 的 `D_STARTOFFS` 是
             // `源长 − 正向起点 − 跨度`，而内核的倒放消费窗口
             // （`clip_playback_window_sec`）要的是**正向**窗口的终点 —— 直接用 ARA
             // 的区间会让内核二次镜像 = 又变正放。
@@ -2375,7 +2505,7 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
         Ok(WorkspaceScope { regions })
     }
     /// 原GUI的多轨快照只扩展查看/编辑范围，不更改任何播放renderer的混音归属。
-    pub(crate) fn workspace_timeline(&self) -> Result<TimelineState, String> {
+    pub fn workspace_timeline(&self) -> Result<TimelineState, String> {
         let _transaction = self.transaction.lock_or_recover();
         self.workspace_timeline_locked()
     }
@@ -2926,6 +3056,115 @@ mod tests {
             vec![item_clip_id.as_str()],
             "残留的 region 形态 clip 必须被剔除，只留下 item 形态的那一条"
         );
+    }
+
+    /// **不变量：一轮呈现里，一条模型轨最多属于一条宿主轨。**
+    ///
+    /// 【现场】两条宿主轨各挂一个实例：轨道 1 有 3 个 item、轨道 2 为空。用户把第 3 个
+    /// item 从轨道 1 拖到轨道 2 之后，REAPER 的 ARA 侧不一定立刻跟随 —— 这条 item 的
+    /// region 仍报**旧序列**，于是它的 clip 仍挂在旧轨的模型 id 上。旧实现把「clip 的
+    /// 模型轨」当唯一权威：轨道 2 的 item 解析出轨道 1 的 id ⇒ 两条宿主轨写进同一条模型
+    /// 轨 ⇒ 用户看到的正是「两条轨折成一条、三条 clip 全在它上面」，而且轨道 1 的名字被
+    /// 轨道 2 覆盖（那段 write-back 只是在改同一条轨）。
+    ///
+    /// 【契约】宿主清单是**轨道的**权威：一条宿主轨在这份呈现里必须有自己的一行。它认领
+    /// 不到**独占**的模型轨时退回自己的宿主身份，并且它名下的 clip 跟着它走 —— 否则
+    /// 用户拖过去的 item 会留在原轨上，比「多一行空轨」更难解释。
+    #[test]
+    fn two_host_tracks_must_not_collapse_into_one_model_track() {
+        let document = DocumentSession::new(41_001);
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        let api = Arc::new(host.client());
+        let base = api.ui_track(&|| true).unwrap();
+
+        let item_a = base.items[0].geometry.item_id.clone();
+        let mut item_b = base.items[0].clone();
+        item_b.geometry.item_id = "{BBBBBBBB-0000-0000-0000-000000000002}".into();
+
+        let mut track_a = base.clone();
+        track_a.guid = "{AAAAAAAA-0000-0000-0000-000000000001}".into();
+        track_a.id = "ara-sequence-a".into();
+        track_a.name = "轨道 1".into();
+        track_a.items = vec![base.items[0].clone()];
+        let mut track_b = base.clone();
+        track_b.guid = "{BBBBBBBB-0000-0000-0000-000000000002}".into();
+        // 从未学到过 ARA 身份 —— 这正是「新建 / 空轨」的常态。
+        track_b.id = "host-track-{BBBBBBBB-0000-0000-0000-000000000002}".into();
+        track_b.name = "轨道 2".into();
+        track_b.items = vec![item_b.clone()];
+        {
+            let mut tracks = document.ui_tracks.lock_or_recover();
+            tracks.insert(track_a.guid.clone(), track_a);
+            tracks.insert(track_b.guid.clone(), track_b);
+        }
+        // ARA 侧滞后：两条 item 的 region 都仍报**第一条**序列。
+        document
+            .clip_ids
+            .lock_or_recover()
+            .insert(11, format!("ara-item-{item_a}"));
+        document
+            .clip_ids
+            .lock_or_recover()
+            .insert(22, format!("ara-item-{}", item_b.geometry.item_id));
+        document
+            .region_items
+            .lock_or_recover()
+            .insert(11, item_a.clone());
+        document
+            .region_items
+            .lock_or_recover()
+            .insert(22, item_b.geometry.item_id.clone());
+
+        let mut timeline: TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"ara-sequence-a","name":"轨道 1","order":0}],
+            "clips":[
+                {"id":format!("ara-item-{item_a}"),"name":"A","track_id":"ara-sequence-a",
+                 "start_sec":0.0,"length_sec":1.0,
+                 "takes":[{"id":"t-a","source_path":"/a.wav","source_start_sec":0.0,"source_end_sec":1.0}]},
+                {"id":format!("ara-item-{}", item_b.geometry.item_id),"name":"B",
+                 "track_id":"ara-sequence-a","start_sec":2.0,"length_sec":1.0,
+                 "takes":[{"id":"t-b","source_path":"/b.wav","source_start_sec":0.0,"source_end_sec":1.0}]}
+            ],
+            "bpm":120,"project_sec":3.0
+        }))
+        .unwrap();
+
+        document.present_host_inventory(&mut timeline, "");
+
+        assert_eq!(
+            timeline.tracks.len(),
+            2,
+            "两条宿主轨必须还是两条：{:?}",
+            timeline
+                .tracks
+                .iter()
+                .map(|track| track.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        let second = timeline
+            .clips
+            .iter()
+            .find(|clip| clip.id == format!("ara-item-{}", item_b.geometry.item_id))
+            .map(|clip| clip.track_id.clone())
+            .expect("第二条 clip 必须还在");
+        assert_ne!(
+            second, "ara-sequence-a",
+            "拖到第二条轨的 item 不得留在第一条轨上"
+        );
+        assert!(
+            timeline.tracks.iter().any(|track| track.id == second),
+            "它落到的轨道必须真的被呈现出来"
+        );
+        // 第一条轨的属性不能被第二条轨覆盖（旧实现里两轮写的是同一行）。
+        let first = timeline
+            .tracks
+            .iter()
+            .find(|track| track.id == "ara-sequence-a")
+            .unwrap();
+        assert_eq!(first.name, "轨道 1", "轨道 1 的名字被轨道 2 覆盖了");
     }
 
     fn fixture() -> (

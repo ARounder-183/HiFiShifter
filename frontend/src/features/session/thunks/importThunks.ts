@@ -191,34 +191,47 @@ async function syncAutoCrossfadeFromLatestTimeline(args: {
         return null;
     }
 
-    const latestTimeline = await webApi.getTimelineState();
-    const allClips = (latestTimeline as { clips?: RawTimelineClip[] }).clips ?? [];
-    // 插件导入回执已确认新item；不能用更早的读快照把它从GUI再次删掉。
-    if (isPluginMode() && newClipIds.some((id) => !allClips.some((clip) => clip.id === id)))
+    // 【善后不许反咬导入本体】走到这里时媒体已经落到后端，本函数只是锦上添花的
+    // 自动交叉淡化。时间线重取的任何失败（IPC 出错、旧后端 / 错误形态的回执缺
+    // `clips` 字段）都不能让 thunk 在导入成功之后拒绝 —— 用户会看到「导入失败」，
+    // 而片段明明已经在时间轴上。整段用 try/catch 收口：失败返回 null，调用方的
+    // `latestTimeline ?? imported` 回退会接管（淡化已由 setClipStateRemote 各自
+    // 应用，UI 最多短暂显示淡化前状态，等下一次后端回声自然对齐）。
+    try {
+        const latestTimeline = await webApi.getTimelineState();
+        const allClips = (latestTimeline as { clips?: RawTimelineClip[] }).clips ?? [];
+        // 插件导入回执已确认新item；不能用更早的读快照把它从GUI再次删掉。
+        if (isPluginMode() && newClipIds.some((id) => !allClips.some((clip) => clip.id === id)))
+            return null;
+        const fadeUpdates = computeAutoCrossfadeFromPayload(allClips, newClipIds);
+        if (fadeUpdates.length > 0) {
+            const fadePromises = fadeUpdates.map((u) =>
+                dispatch(
+                    setClipStateRemote({
+                        clipId: u.clipId,
+                        autoFadeInSec: u.autoFadeInSec,
+                        autoFadeOutSec: u.autoFadeOutSec,
+                        checkpoint: false,
+                    }),
+                ).unwrap(),
+            );
+            await Promise.allSettled(fadePromises);
+            // 淡化更新完成后再重新拉取：上面这份 latestTimeline 是淡化前的
+            // 快照，若直接返回，fulfilled reducer 会把刚应用的自动淡化从
+            // UI 上回滚掉（后端仍保留，前后端就此分叉）。重取失败同样不反咬
+            // 导入：回退到旧快照；`clips` 缺失按空列表处理（与首次取快照的
+            // `?? []` 同一口径，不在这里抛 TypeError）。
+            const refreshed = await webApi.getTimelineState().catch(() => null);
+            const refreshedClips = (refreshed as { clips?: RawTimelineClip[] } | null)?.clips ?? [];
+            return isPluginMode() &&
+                newClipIds.some((id) => !refreshedClips.some((clip) => clip.id === id))
+                ? latestTimeline
+                : (refreshed ?? latestTimeline);
+        }
+        return latestTimeline;
+    } catch {
         return null;
-    const fadeUpdates = computeAutoCrossfadeFromPayload(allClips, newClipIds);
-    if (fadeUpdates.length > 0) {
-        const fadePromises = fadeUpdates.map((u) =>
-            dispatch(
-                setClipStateRemote({
-                    clipId: u.clipId,
-                    autoFadeInSec: u.autoFadeInSec,
-                    autoFadeOutSec: u.autoFadeOutSec,
-                    checkpoint: false,
-                }),
-            ).unwrap(),
-        );
-        await Promise.allSettled(fadePromises);
-        // 淡化更新完成后再重新拉取：上面这份 latestTimeline 是淡化前的
-        // 快照，若直接返回，fulfilled reducer 会把刚应用的自动淡化从
-        // UI 上回滚掉（后端仍保留，前后端就此分叉）。
-        const refreshed = await webApi.getTimelineState();
-        return isPluginMode() &&
-            newClipIds.some((id) => !refreshed.clips.some((clip) => clip.id === id))
-            ? latestTimeline
-            : refreshed;
     }
-    return latestTimeline;
 }
 
 export const importAudioFromDialog = createAsyncThunk(
@@ -721,6 +734,8 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
 
             let lastImported: unknown = null;
             const accumulatedNewClipIds: string[] = [];
+            // across-time 逐文件认领新建片段用的差集（见循环内的说明）。
+            const claimedClipIds = new Set<string>();
 
             if (mode === "as-takes") {
                 const imported = await webApi.importMediaFilesAsTakes({
@@ -768,16 +783,44 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
                     if (!(imported as { ok?: boolean }).ok) continue;
                     lastImported = imported;
                     const result = imported as {
-                        clips?: Array<{ id?: string; start_sec?: number; length_sec?: number }>;
+                        clips?: Array<{
+                            id?: string;
+                            start_sec?: number;
+                            length_sec?: number;
+                        }>;
                     };
                     const allClips = result.clips ?? [];
-                    for (const c of allClips) {
-                        if (c.id) accumulatedNewClipIds.push(c.id);
-                    }
-                    const newClip = allClips.find(
-                        (c) => Math.abs((c.start_sec ?? 0) - cursor) < 0.01,
+                    // 【游标推进必须认**新建**的片段】`allClips` 是后端的**全量**片段
+                    // 表（含既有片段）：按"start 与游标差 < 10ms"挑选会把恰好停在
+                    // 落点上的旧片段当成新片段（播放头 / 点击后常停在既有片段起点
+                    // 上），游标按错误的长度推进，后续文件全部错位；反过来后端把
+                    // 落点钳制 / 吸附到别处时旧写法找不到片段，游标不动，余下文件
+                    // 全部叠在同一点。用 before-id 差集认领真正新建的片段（与
+                    // `importHostBatch` 的处理同一思路），并把游标推进到它的**实际
+                    // 右缘**（start + length）：落点被钳制时按请求位置累加会与真实
+                    // 落点漂移。找不到可认领的新片段时游标原地不动 —— 至少不会把
+                    // 后续文件推进到未知区域。
+                    const newClips = allClips.filter(
+                        (c) =>
+                            typeof c.id === "string" &&
+                            !beforeClipIds.has(c.id) &&
+                            !claimedClipIds.has(c.id as string),
                     );
-                    cursor += newClip?.length_sec ?? 0;
+                    for (const c of newClips) {
+                        // 【不得写回 beforeClipIds】循环结束后的
+                        // `accumulatedNewClipIds.filter(… !beforeClipIds.has(id))`
+                        // 靠原样的 before 集合把新片段认出来；把新 id 写回去会把
+                        // 本批导入全部从 newClipIds 里剔除。已认领的记入独立的
+                        // claimed 集合，防止下一轮迭代把上一轮的片段再认领一遍。
+                        claimedClipIds.add(c.id as string);
+                        accumulatedNewClipIds.push(c.id as string);
+                    }
+                    let newEnd = cursor;
+                    for (const c of newClips) {
+                        const end = (c.start_sec ?? cursor) + (c.length_sec ?? 0);
+                        if (end > newEnd) newEnd = end;
+                    }
+                    cursor = newEnd;
                 }
             } else {
                 // "across-tracks" — start from current track, then use subsequent existing tracks,

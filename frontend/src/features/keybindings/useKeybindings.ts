@@ -22,7 +22,6 @@ import { isShortcutSuppressed } from "../../ui/shortcutScope";
 import {
     matchesKeybinding,
     matchesAnyKeybinding,
-    matchKeybinding,
     matchesKeybindingAllowingFineModifier,
     matchKeybindingAllowingFineModifier,
     normalizeEventKey,
@@ -498,7 +497,6 @@ export {
     isEditableTarget,
     matchesKeybinding,
     matchesAnyKeybinding,
-    matchKeybinding,
     normalizeEventKey,
     matchesKeybindingAllowingFineModifier,
     matchKeybindingAllowingFineModifier,

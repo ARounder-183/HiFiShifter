@@ -55,23 +55,26 @@ export function AppStatusProgressChips() {
                     {folderImport.total > 0 ? ` ${folderImport.done}/${folderImport.total}` : ""}
                 </AppStatusChip>
             ) : null}
-            {/* 【stale 时左侧不显示】右侧 PluginApplyStatus 已经在说"正在合成
-                xx%"，同一件事在两处重复会把状态栏撑成一条跑道。stale=false 但
-                rendering_active=true 时左侧用强调色说明"后台在刷新，当前听到的
-                仍是旧版（或当前版本）" —— 这正是此前完全缺失的那一档。 */}
-            {render.active && (!render.pluginMode || !render.stale) ? (
+            {/* 【百分比只在这一处】右侧 PluginApplyStatus 只说「你听到的是不是当前
+                编辑」，不再拼百分比（见那里的说明）。同一件事在两处重复会把状态栏
+                撑成一条跑道，而两处判据一旦分叉就会出现"左边 40% 右边 100%"。 */}
+            {/* 【为什么不再按 `stale` 让位】旧实现在 stale 时把左侧藏起来，指望右侧
+                说"正在合成 N%" —— 而右侧那条百分比只在 `audible_state === "stale"`
+                时才会出现，那个分支在 ARA 下**恒不成立**（有快照就永远不是 stale）。
+                两边都不显示，于是"渲染中"完全没有百分比。现在百分比归左侧，与
+                stale 无关。 */}
+            {render.active ? (
                 <AppStatusChip
                     // 【必须跟随强调色】状态片是「本插件正在工作」的提示，颜色语义与
-                    // 拉伸 / 波形分析 / 导入完全一致：用户自定义的强调色。此前这里
-                    // 在 stale=false 时切到 neutral，用户看到的是一片灰 —— 既不像
-                    // 同一套状态提示，也丢掉了"跟随强调色"的既有约定。
+                    // 拉伸 / 波形分析 / 导入完全一致：用户自定义的强调色。
                     tone="accent"
                     tooltip={render.pluginMode ? t("plugin_render_background_hint") : undefined}
                 >
                     {t("common_rendering")}
-                    {render.progress != null && render.progress > 0
-                        ? ` ${Math.round(render.progress * 100)}%`
-                        : ""}
+                    {/* 【0% 是真读数】`null` 才是"没有进度可报"（Capture 没有进度
+                        回调；发布阶段也不报）。把 0 也藏起来，等于让"刚开始"与
+                        "不知道"长得一模一样 —— 而后者才是异常。 */}
+                    {render.progress != null ? ` ${Math.round(render.progress * 100)}%` : ""}
                 </AppStatusChip>
             ) : null}
         </>

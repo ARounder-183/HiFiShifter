@@ -195,7 +195,7 @@ export function liveEditWindowMatchesParamView(args: {
  *   正在画的笔画必须**保留**（见 {@link reanchorLiveEditWindow}）。
  *
  * 把两者混为一谈（只看 key 是否相等）正是"画音量 / 动态时轨迹凭空消失"的
- * 机制之一（见 docs/plans/2026-09-26-volume-dyn-drag-trail-fix.md §1.1）。
+ * 机制之一。
  */
 export function parseLiveEditWindowKey(key: string): LiveEditWindowKey {
     const parts = key.split("|");
@@ -236,8 +236,8 @@ export interface ReanchoredLiveEditWindow {
  *
  * 【为什么不能直接 `nextEdit.slice()`】旧实现换窗口时整份丢弃覆盖层，
  * 于是"取数回包换掉 `paramView`（键变了或 `pv.edit` 换了引用）"会让正在画的
- * 笔画瞬间消失 —— 用户报告的现象是"按下那一点画出来了、之后轨迹一点都没有"
- * （见 docs/plans/2026-09-26-volume-dyn-drag-trail-fix.md §1.1）。重锚把已画的
+ * 笔画瞬间消失 —— 用户报告的现象是"按下那一点画出来了、之后轨迹一点没有"。
+ * 重锚把已画的
  * 值按**绝对帧号**搬进新窗口，笔画就不再依赖"窗口恰好没被换掉"这个前提。
  *
  * 【为什么只搬"与旧基准不同"的帧】覆盖层 = 旧基准 + 用户改动。只搬差值，
@@ -293,15 +293,14 @@ function frameToIndex(
  * live 覆盖与新窗口不匹配时的**可观测**告警（仅开发构建）。
  *
  * 【为什么必须有】这处不匹配此前是**静默 return**：不写、不报错，于是
- * "画音量 / 动态时轨迹不画"只能靠肉眼复现、无法从日志定位
- * （见 docs/plans/2026-09-26-volume-dyn-drag-trail-fix.md §1.1 / 阶段 3）。
+ * "画音量 / 动态时轨迹不画"只能靠肉眼复现、无法从日志定位。
  * 重锚（{@link reanchorLiveEditWindow}）之后这条分支应当不可达；保留它作为
  * **不变量哨兵** —— 一旦触发，说明重锚被绕过，开发期立刻可见。
  */
 export function warnLiveEditWindowMismatch(expectedKey: string, actualKey: string | null): void {
     warnDev(
-        "[liveEdit] 覆盖层与当前参数窗口不匹配：本次笔画不会绘制。" +
-            "（重锚逻辑被绕过？见 liveEditWindow.reanchorLiveEditWindow）" +
+        "[liveEdit] the overlay does not match the current param window; this stroke will not be drawn." +
+            " (Was the re-anchor logic bypassed? See liveEditWindow.reanchorLiveEditWindow)" +
             ` expected=${expectedKey} actual=${actualKey ?? "<none>"}`,
     );
 }

@@ -37,8 +37,10 @@ import pathlib
 import re
 import sys
 
-# Windows 的 stdout 跟随 ANSI 代码页（英文系统是 cp1252、中文系统是 GBK），打印中文会
-# UnicodeEncodeError 打死进程 —— 真正的结论一条都进不了日志，红的是编码而不是规则。
+# On Windows, stdout follows the ANSI code page (cp1252 on English systems, GBK
+# on Chinese ones); printing characters outside it raises UnicodeEncodeError and
+# kills the process -- not a single real finding reaches the log, and what shows
+# red is the encoding, not the rule.
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
@@ -48,6 +50,10 @@ APP_LIB = ROOT / "backend" / "src-tauri" / "src" / "lib.rs"
 PLUGIN_ACTOR = ROOT / "backend" / "hifishifter-plugin" / "src" / "editor" / "commands.rs"
 PLUGIN_EDITOR_UI = ROOT / "backend" / "hifishifter-plugin" / "src" / "editor" / "gui" / "client.rs"
 PLUGIN_CAPTURE = ROOT / "backend" / "hifishifter-plugin" / "src" / "capture" / "commands.rs"
+# Comparisons in client.rs such as `request["command"] == protocol::PAGE_READY`
+# use constants; the constant values are declared in protocol.rs (plugin_ready
+# is the page's first sentence, plugin_heap its self-reported memory info).
+PLUGIN_PROTOCOL = ROOT / "backend" / "hifishifter-plugin" / "src" / "editor" / "gui" / "protocol.rs"
 
 
 def read(path: pathlib.Path) -> str:
@@ -89,6 +95,18 @@ def plugin_commands(*sources: str) -> set[str]:
         for group in re.findall(r"Some\((?:command @ )?\(([^)]*)\)\)", source):
             commands |= set(re.findall(r'"([A-Za-z0-9_]+)"', group))
         commands |= set(re.findall(r'Some\("([A-Za-z0-9_]+)"\)\s*\|', source))
+        # `request["command"] == protocol::NAME` constant comparison: use the
+        # `const NAME: &str = "value"` declarations in protocol.rs to resolve
+        # the constant name to a command name. The literal regexes above cannot
+        # catch this form; without it, plugin_ready / plugin_heap would be
+        # misreported as "not dispatched by any backend".
+        for const_name in re.findall(r'request\["command"\]\s*==\s*protocol::([A-Za-z0-9_]+)', source):
+            commands |= set(
+                re.findall(
+                    rf'const\s+{re.escape(const_name)}\s*:\s*&str\s*=\s*"([A-Za-z0-9_]+)"',
+                    read(PLUGIN_PROTOCOL),
+                )
+            )
     return commands
 
 
@@ -114,9 +132,11 @@ def main() -> int:
             "A control that only rejects at runtime is worse than a disabled one."
         )
         return 1
-    # 「复制路径 / 复制链接」不需要 transient user activation；WebView 剪贴板
-    # 在菜单动作经过动态 import + 若干 IPC 后会失去手势。两个宿主都必须保留
-    # 原生纯文本通道，否则这两类复制动作会静默退化成必失败。
+    # "Copy path / copy link" does not need transient user activation; the
+    # WebView clipboard loses its gesture after a menu action goes through a
+    # dynamic import plus several IPC hops. Both hosts must keep the native
+    # plain-text channel, otherwise these two copy actions silently degrade
+    # into guaranteed failures.
     clip = read(ROOT / "backend" / "hifishifter-clipboard" / "src" / "system_clipboard.rs")
     native = [
         "pub fn write_text(text: &str) -> Result<(), String>",

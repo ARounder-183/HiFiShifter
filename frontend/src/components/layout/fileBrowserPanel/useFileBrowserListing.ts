@@ -30,7 +30,10 @@ export function useFileBrowserListing() {
     const view = useAppSelector((state: RootState) => state.session.fileBrowserView);
     const favorites = useAppSelector((state: RootState) => state.session.fileBrowserFavorites);
     const selectedTrackId = useAppSelector((state: RootState) => state.session.selectedTrackId);
-    const playheadSec = useAppSelector((state: RootState) => state.session.playheadSec);
+    // 注意（订阅纪律，与 App.tsx 同一条）：playheadSec 以 ~30Hz 持续变化，而它在
+    // 文件浏览器的唯一消费方是导入/双击动作（见 useFileBrowserActions 的 startSec）
+    // —— 那些回调经 store.getState() 现读即可。订阅它会让整个列表（含虚拟化与
+    // 搜索 UI）随播放头移动每帧重渲。
     /** 轨道列表（DFS 显示顺序）：算目录导入的落点用。 */
     const tracks = useAppSelector((state: RootState) => state.session.tracks);
 
@@ -354,7 +357,6 @@ export function useFileBrowserListing() {
         view,
         favorites,
         selectedTrackId,
-        playheadSec,
         tracks,
         searchInputRef,
         debounceRef,

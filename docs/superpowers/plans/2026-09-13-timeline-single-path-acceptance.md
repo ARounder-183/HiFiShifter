@@ -13,7 +13,7 @@
 |---|---|---|
 | 1 | 5 个旧组件文件已删 | ✓ 全部不存在；`BackgroundGrid.tsx` 保留（参数编辑器依赖） |
 | 2 | 开关残留 | ✓ 无（仅剩 `kernelActiveGroupIds`，是内核分组 id，非已删的 `kernelActive`） |
-| 3 | `featureFlag.ts` 删除；`kernelMount.ts` 处置 | ✓ 前者已删；后者无生产消费者，保留 + 注释记录（见下） |
+| 3 | `featureFlag.ts` 删除；`kernelMount.ts` 处置 | ✓ 两者均已删除；行为守护由 `kernelAvailability.ts` 承接 |
 | 4 | `tsc -b --noEmit` | ✓ 无输出 |
 | 5 | 全量测试 | ✓ `2 failed \| 838 passed (840)` |
 | 6 | eslint | ✓ 0 error / 12 warning（与改动前逐项相同） |
@@ -34,9 +34,8 @@
 
 ## 遗留项（有意保留，非本次范围）
 
-1. `kernelMount.ts` + 其 8 项测试：`enabled` 维度随开关消失后无生产消费者。**不删**的原因：
-   行为守护已由 `kernelAvailability.ts` 承接；且删除会使命中数变 830、与任务 4 验收判据不符。
-   已在该文件头与计划文档中写明"是否删除属独立决策"。
+1. `kernelMount.ts` + 其 8 项测试：`enabled` 维度随开关消失后无生产消费者，已在后续
+   全仓审查中删除；行为守护由 `kernelAvailability.ts` 承接。
 2. 任务 3 删除 5 个旧组件后新孤立的 7 个模块（约 2469 行）：
    `ClipHeader`、`OverlapEditLayer`、`FadeHitLayer`、`ClipEdgeHandles`、`timelineHitTest`、
    `useDebouncedPersist`、`timelineViewportDispatch`。已记录在计划文档「后续清理」一节。

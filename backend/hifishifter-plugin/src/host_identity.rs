@@ -179,6 +179,124 @@ pub fn is_vegas_family() -> bool {
     HOST_IS_VEGAS.load(std::sync::atomic::Ordering::Acquire)
 }
 
+/// VST3 组件是否对本宿主**隐藏** ARA 入口点（`IPlugInEntryPoint` / `IPlugInEntryPoint2`）。
+///
+/// 这是本模块第一个按宿主**分支**的决定，与模块头的「绝不按宿主名分支」并不矛盾：
+/// 那条纪律针对的是**编辑器能力**（没见过的宿主必须完整可用）；而这里 gate 的是
+/// **加载兼容性** —— 一旦被扫描器标成 ARA，这个家族的桥会拒绝加载模块本身，
+/// 插件在宿主里从「ARA 缺失」劣化成「完全不可用」。与 CLAP 侧拒绝 REAPER 的
+/// 私有 ARA 草案 ID（`docs/host-extension-boundary.md` §3.1）同类：宿主显然
+/// 处理不了我们按规范给出的东西，规范让位于「能加载」。
+///
+/// # 证据链（ACID Pro 11.0.2.21 x64，2026-11 现场排查，错误 0x8004E204）
+///
+/// 1. 扫描器按 ARA SDK 规范探测组件上的 `IPlugInEntryPoint`（12814E54-…）与
+///    `IPlugInEntryPoint2`（CD9A5913-…），命中后把插件标记为 ARA（家族插件缓存
+///    `acidpro_bridgeaware_plugincache_x64.xml` 记 `isAra="1"`）；
+/// 2. 把插件添加到轨道时，家族共用的 VST3 桥（`sfvstwrap.dll`，宿主进程内；错误码
+///    `0x8004E204` 的立即数只出现在 sfvstwrap/sfvstserver 一对二进制里）走 **ARA
+///    专用路径**：先打开名为 `plugin_finder_shared_memory` 的 boost::interprocess
+///    共享内存做校验 —— 该映射在 ACID Pro 11 里**不存在**（添加尝试前后与尝试期间
+///    共 1.8 秒 ~4878 万次 `OpenFileMappingW` 竞速捕获 0 次命中）；
+/// 3. 打开失败 ⇒ 立即返回 `0x8004E204`（弹窗文案「消息缺失」= 该错误码在消息表里
+///    没有条目的兜底格式），全程**不加载插件模块**：引擎日志零会话、shim 的
+///    OutputDebugString 零输出、也没有 sfvstserver 进程被拉起；
+/// 4. 与插件内容无关：把缓存记录的版本字段 0→1、二进制不动，错误原样复现；
+///    把缓存记录改成 `isAra="0"` 后，同一插件正常加载，捕获工作流完整可用；
+/// 5. ACID Pro 11 自带的 ARA 插件（Melodyne、acidFX MorphPad）由主程序里的**定制
+///    集成类**承载（RTTI 可见 `MelodynePluginView` / `FXPadPluginView`），不经这条
+///    通用路径；官方口径里 ACID 的 ARA2 即 Melodyne 集成。
+///
+/// 结论：宿主侧基础设施缺失，插件侧无可补救。入口点只由**组件**的 queryInterface
+/// 暴露，在这里对家族隐藏即可让扫描器记 `isAra="0"`，插件以普通插入形态加载。
+/// 只圈定 VEGAS 家族（`is_vegas_family`）：REAPER / Cubase / Studio One 等真 ARA2
+/// 宿主不受影响；Samplitude / Sequoia 不落进这个判定（它们不用 sfvstwrap 壳）。
+/// Sound Forge 同壳同桥，按家族一并隐藏 —— 文档表里它的 ARA2「是」从未验收过。
+pub fn hide_ara_entry_points() -> bool {
+    let no_ara = std::env::var("HIFISHIFTER_NO_ARA").ok();
+    let force_ara = std::env::var("HIFISHIFTER_FORCE_ARA").ok();
+    ara_entry_points_hidden(is_vegas_family(), no_ara.as_deref(), force_ara.as_deref())
+}
+
+/// [`hide_ara_entry_points`] 的纯判定（单元测试用）。
+///
+/// `no_ara` / `force_ara` 是 `HIFISHIFTER_NO_ARA` / `HIFISHIFTER_FORCE_ARA` 的读数
+/// （`None` = 未设置）。优先级：`NO_ARA=1` 是全局杀开关，压过一切；`FORCE_ARA=1`
+/// 只覆盖家族闸门（给未来修好了桥的 MAGIX 版本与现场排查留门）；两者都为 1 时
+/// **隐藏**获胜 —— 显式关闭压过显式开启。
+fn ara_entry_points_hidden(
+    vegas_family: bool,
+    no_ara: Option<&str>,
+    force_ara: Option<&str>,
+) -> bool {
+    if no_ara.map(str::trim) == Some("1") {
+        return true;
+    }
+    if force_ara.map(str::trim) == Some("1") {
+        return false;
+    }
+    vegas_family
+}
+
+/// 宿主应用名的**宿主自报读数**（VST3：`IHostApplication::getName` 的最近一次结果）。
+///
+/// 【为什么单独存一份】报障时最需要的一条信息是"你在哪个宿主里"——而这份信息此前只有
+/// 一个**声明过却从未调用**的 vtable 槽位。存下来供证据链与诊断包读取。
+///
+/// 【为什么在共享层而不是 VST3 外壳】ARA 绑定路径（`render/extension/binding.rs`）在
+/// 绑定窗口里也读它；而"谁写入它"只有 VST3 外壳（`IHostApplication` 握手）—— CLAP
+/// 没有对应接口、不写。读数是进程级事实，写入方是格式细节。
+///
+/// 【为什么绝不用于分支】按宿主名分支会让"没见过的宿主"退化成不可用；一切差异都应由
+/// 能力探测（`BootstrapFlags` / `NativeHost::from_context` 的 Option bundle）决定。
+static HOST_APPLICATION_NAME: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// 登记宿主自报的应用名（VST3 外壳在 `IHostApplication` 握手成功后调用）。
+pub fn note_host_application_name(name: &str) {
+    *HOST_APPLICATION_NAME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(name.to_owned());
+}
+
+/// 读回宿主自报的应用名（未识别为 `None`）。只读，供证据链与诊断输出。
+pub fn host_application_name() -> Option<String> {
+    HOST_APPLICATION_NAME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// 收集全部证据、定出宿主、把日志切到 `plugin-<format>-<host>.log`。
+///
+/// 【为什么住在这里而不是某个外壳】进程证据（映像名、祖先链、环境变量）与格式无关，
+/// 而证据的**追加**是格式的事实：VST3 外壳能在 `IHostApplication::getName` 返回后追加
+/// [`EvidenceSource::Vst3Name`]，CLAP 没有对应接口就只给进程证据。两个外壳调用这**同一个**
+/// 解析与登记流程，`plugin-<format>-<host>.log` 的宿主段才有同一个判据。
+///
+/// 【为什么可以重复调用】Cubase 在加载期只给 unknown，真正使用时的名字更晚才到。
+/// 第一次拿不到就留 unknown，后续调用（首次 process）再解析一次；一旦得到非 unknown
+/// 的结果就不再重算 —— 否则日志文件名会来回跳（`note_identity` 只在首次报告，
+/// `note_host_application` 只在拿到名字时切换）。
+pub fn resolve_and_record(evidence: &[Evidence]) -> HostIdentity {
+    let identity = resolve_identity(evidence);
+    note_identity(&identity);
+    crate::log_line(&identity.describe());
+    if identity.display != "unknown" {
+        // 日志按宿主分文件：拿到名字的这一刻把日志切过去
+        //（此前攒下的行会一起补写进去，见 `diagnostics::note_host_application`）。
+        crate::diagnostics::note_host_application(&identity.display);
+    }
+    identity
+}
+
+/// 只用进程证据解析宿主身份（CLAP 与未来 AU 的入口：没有格式专属证据可追加）。
+///
+/// 【为什么公开】外壳的 `lib.rs::resolve_host_identity` 退化为对本函数的转发；编排
+/// （收集 → 解析 → 登记 → 切日志）只有这一份。
+pub fn resolve_and_record_host_identity() -> HostIdentity {
+    resolve_and_record(&process_evidence())
+}
+
 /// 别名表：**子串**匹配（小写、去扩展名），新增宿主 = 加一行。
 ///
 /// 用子串而不是全等：vegas180.exe / VEGAS Pro 21 / FL64.exe 这些变体必须命中同一条。
@@ -441,6 +559,134 @@ pub fn process_evidence() -> Vec<Evidence> {
     evidence
 }
 
+// ── VEGAS 家族包裹层的 DPI 提升（DllMain 阶段） ──────────────────────────────
+//
+// 【现场事实】ACID Pro 11（125% 缩放）里，承载插件编辑器的包裹窗口是在
+// DPI-unaware 线程上创建的（附着点实测 parent-dpi=96 parent-unaware=true，而
+// 宿主主界面是感知的 —— 截图里 ACID 自己的 UI 清晰、插件面板整体模糊）。
+// unaware 窗口内的所有内容先按 96-DPI 渲染、再被 DWM 整体拉伸 1.25×：这就是
+// "插件面板模糊"；感知宿主按物理像素给包裹窗留位、包裹窗把数字虚拟化，两边
+// 各说一套长度，这就是"溢出 ⇒ 滚动条 + 右/下被裁"。
+//
+// 【为什么在 DllMain 提升线程】包裹窗口与插件模块同进程（`acidpro.exe` 内的
+// sfvstwrap），窗口由**加载我们之前的那个线程**创建则来不及 —— 但若包裹层先
+// LoadLibrary 再开窗（典型顺序：装载插件、问 getSize、再建窗），那么在
+// DLL_PROCESS_ATTACH 把**加载线程**的上下文切成 PMv2，随后创建的包裹窗口与
+// 子窗口就都在感知上下文里：与感知宿主同尺度，无拉伸（清晰）、无虚拟化错位
+// （无溢出）。对已经感知的线程（VEGAS 的 system-aware 包裹层，实测工作正常）
+// 不做任何事 —— 能工作的东西不动。
+//
+// 【为什么只圈 VEGAS 家族】与 `hide_ara_entry_points` 同一条纪律：这是**加载
+// 兼容性**闸门，不是编辑器能力分支。让任意宿主的加载线程永久改上下文是越权
+// 行为；家族包裹层（sfvstwrap）被现场证据钉死了"unaware 包裹 + 感知宿主"这
+// 一种形状，才值得做。
+//
+// 【逃生门】`HIFISHIFTER_NO_DPI_PROMOTE=1` 停用提升，回到包裹层原生行为。
+
+/// 提升结果（`wrapper_thread_dpi_promote_outcome` 的读数；附着点打进日志）。
+#[cfg(windows)]
+static WRAPPER_PROMOTE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(windows)]
+const PROMOTE_NOT_ATTEMPTED: u8 = 0;
+#[cfg(windows)]
+const PROMOTE_APPLIED: u8 = 1;
+#[cfg(windows)]
+const PROMOTE_THREAD_ALREADY_AWARE: u8 = 2;
+#[cfg(windows)]
+const PROMOTE_NOT_VEGAS_FAMILY: u8 = 3;
+#[cfg(windows)]
+const PROMOTE_ESCAPE_HATCH: u8 = 4;
+#[cfg(windows)]
+const PROMOTE_FAILED: u8 = 5;
+
+/// DllMain 阶段调用：把 DPI-unaware 的加载线程提升为 PMv2（仅 VEGAS 家族映像）。
+///
+/// 只做三类调用：进程映像名查询、本线程上下文查询、上下文设置 —— 都是 kernel32
+/// 的无同步标志位操作，loader lock 下安全（不碰 COM / 线程同步 / 其它 DLL）。
+/// 结果只落原子量，日志推迟到附着点（`log_host_dpi_facts`）再打：DllMain 里做
+/// 文件 I/O 是 loader-lock 事故。
+#[cfg(windows)]
+pub fn promote_wrapper_thread_dpi() {
+    use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
+    use windows::Win32::UI::HiDpi::{
+        GetThreadDpiAwarenessContext, SetThreadDpiAwarenessContext,
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, DPI_AWARENESS_CONTEXT_UNAWARE,
+    };
+
+    // 一次进程只试一次：多次 LoadLibrary（扫描 + 实例化）不重复动手。
+    let previous = WRAPPER_PROMOTE.swap(PROMOTE_NOT_ATTEMPTED, std::sync::atomic::Ordering::AcqRel);
+    if previous != PROMOTE_NOT_ATTEMPTED {
+        WRAPPER_PROMOTE.store(previous, std::sync::atomic::Ordering::Release);
+        return;
+    }
+    if std::env::var_os("HIFISHIFTER_NO_DPI_PROMOTE").is_some_and(|value| value == "1") {
+        WRAPPER_PROMOTE.store(PROMOTE_ESCAPE_HATCH, std::sync::atomic::Ordering::Release);
+        return;
+    }
+    // 进程映像名（GetModuleFileNameW(NULL)）比 Toolhelp 快照轻得多 —— 这段跑在
+    // loader lock 里。
+    let mut buffer = [0_u16; 512];
+    let length = unsafe { GetModuleFileNameW(None, &mut buffer) } as usize;
+    let image = String::from_utf16_lossy(&buffer[..length.min(buffer.len())]).to_ascii_lowercase();
+    let in_vegas_family = ["acidpro", "vegas", "soundforge", "sound forge", "sfvst"]
+        .iter()
+        .any(|marker| image.contains(marker));
+    if !in_vegas_family {
+        WRAPPER_PROMOTE.store(
+            PROMOTE_NOT_VEGAS_FAMILY,
+            std::sync::atomic::Ordering::Release,
+        );
+        return;
+    }
+    // SAFETY: 只读查询，伪句柄比较。
+    let thread_context = unsafe { GetThreadDpiAwarenessContext() };
+    let thread_unaware = unsafe {
+        windows::Win32::UI::HiDpi::AreDpiAwarenessContextsEqual(
+            thread_context,
+            DPI_AWARENESS_CONTEXT_UNAWARE,
+        )
+    }
+    .as_bool();
+    if !thread_unaware {
+        // 感知线程（VEGAS 的 system-aware 包裹层 / REAPER 等 PMv2 宿主）不动。
+        WRAPPER_PROMOTE.store(
+            PROMOTE_THREAD_ALREADY_AWARE,
+            std::sync::atomic::Ordering::Release,
+        );
+        return;
+    }
+    // SAFETY: 参数是常量伪句柄；失败返回 null 伪句柄。**刻意不还原**：提升的意义
+    // 就是让本线程此后创建的包裹窗口与子窗口都落在感知上下文里。
+    let switched =
+        unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    let outcome = if switched.0.is_null() {
+        PROMOTE_FAILED
+    } else {
+        PROMOTE_APPLIED
+    };
+    WRAPPER_PROMOTE.store(outcome, std::sync::atomic::Ordering::Release);
+}
+
+/// 提升结果的日志读数（附着点的 `editor DPI facts` 行）。
+pub fn wrapper_thread_dpi_promote_outcome() -> &'static str {
+    #[cfg(windows)]
+    {
+        match WRAPPER_PROMOTE.load(std::sync::atomic::Ordering::Acquire) {
+            PROMOTE_APPLIED => "applied",
+            PROMOTE_THREAD_ALREADY_AWARE => "thread-already-aware",
+            PROMOTE_NOT_VEGAS_FAMILY => "not-vegas-family",
+            PROMOTE_ESCAPE_HATCH => "escape-hatch",
+            PROMOTE_FAILED => "failed",
+            _ => "not-attempted",
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        "not-applicable"
+    }
+}
+
 #[cfg(windows)]
 mod win {
     use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -677,5 +923,37 @@ mod tests {
             Some("VEGAS Creative Software")
         );
         assert_eq!(family_of("fruity-wrapper"), None);
+    }
+
+    /// VEGAS 家族宿主隐藏 ARA 入口点（家族桥拒绝 ARA 标记的模块，ACID Pro 11 实测）。
+    #[test]
+    fn the_vegas_family_hides_ara_entry_points() {
+        assert!(ara_entry_points_hidden(true, None, None));
+    }
+
+    /// 其它宿主保持 ARA 暴露（REAPER / Cubase / Studio One 不受影响）。
+    #[test]
+    fn other_hosts_still_expose_ara_entry_points() {
+        assert!(!ara_entry_points_hidden(false, None, None));
+    }
+
+    /// `HIFISHIFTER_NO_ARA=1` 是全局杀开关：压过家族闸门，也压过 FORCE_ARA。
+    #[test]
+    fn no_ara_wins_over_everything() {
+        assert!(ara_entry_points_hidden(false, Some("1"), None));
+        assert!(ara_entry_points_hidden(true, Some("1"), None));
+        assert!(ara_entry_points_hidden(true, Some("1"), Some("1")));
+        // 值要 trim 后等于 "1"：首尾空白不影响判定，其它值一律视为未设置。
+        assert!(ara_entry_points_hidden(true, Some(" 1 "), None));
+        assert!(ara_entry_points_hidden(false, Some(" 1 "), Some("0")));
+        assert!(!ara_entry_points_hidden(true, Some("on"), Some("1")));
+    }
+
+    /// `HIFISHIFTER_FORCE_ARA=1` 只覆盖家族闸门，给修好的宿主版本与现场排查留门。
+    #[test]
+    fn force_ara_only_overrides_the_family_gate() {
+        assert!(!ara_entry_points_hidden(true, None, Some("1")));
+        assert!(!ara_entry_points_hidden(false, None, Some("1")));
+        assert!(!ara_entry_points_hidden(true, Some("0"), Some("1")));
     }
 }

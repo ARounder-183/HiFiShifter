@@ -382,8 +382,12 @@ fn apply_shifted_params_range(
 ) {
     timeline.ensure_params_for_root(root_track_id);
     let fp = timeline.frame_period_ms().max(0.1);
-    let start_frame = ((start_sec.max(0.0) * 1000.0) / fp).floor() as usize;
-    let frame_count = (((length_sec.max(0.0) * 1000.0) / fp).ceil() as usize).max(1);
+    // 与片段在栅格上的**定位**窗口同一算式（`frame_grid`）：粘贴进来的片段自己占哪
+    // 几帧，就写哪几帧。此前 `floor`+`ceil` 比片段自己的窗口整体早一帧 —— 开头多写
+    // 一帧邻居的数据、末尾漏掉片段自己的最后一帧。
+    let (start_frame, end_frame) =
+        hifishifter_kernel::frame_grid::clip_frame_window(start_sec, length_sec, fp);
+    let frame_count = end_frame - start_frame;
     let Some(entry) = timeline.params_by_root_track.get_mut(root_track_id) else {
         return;
     };

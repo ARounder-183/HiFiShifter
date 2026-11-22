@@ -55,7 +55,10 @@ export function useBrowserDefaultGuards(): void {
                 linuxRightButtonDown = true;
             }
         };
-        let linuxDeferredDispatchTimer: number | null = null;
+        // 未决的延迟派发句柄统一收进 Set：第二次 flush 不能覆盖第一次的句柄 ——
+        // 单变量写法下旧句柄既取消不了，回调里 `= null` 还会把新句柄清掉，
+        // 卸载清理就再也碰不到它（向已拆除的事件树重放合成 contextmenu）。
+        const linuxDeferredDispatchTimers = new Set<number>();
         const flushLinuxDeferredContextMenu = () => {
             const pending = linuxDeferredContextMenu;
             linuxDeferredContextMenu = null;
@@ -63,8 +66,8 @@ export function useBrowserDefaultGuards(): void {
             if (!pending) return;
             // 句柄要留在 effect 里：卸载时清掉这拍延迟派发，避免向已拆除的
             // 事件树重放合成 contextmenu（StrictMode 双挂载窗口尤其如此）。
-            linuxDeferredDispatchTimer = window.setTimeout(() => {
-                linuxDeferredDispatchTimer = null;
+            const timer = window.setTimeout(() => {
+                linuxDeferredDispatchTimers.delete(timer);
                 const clientX = pending.clientX;
                 const clientY = pending.clientY;
                 let target = pending.target;
@@ -83,6 +86,7 @@ export function useBrowserDefaultGuards(): void {
                     }),
                 );
             }, 0);
+            linuxDeferredDispatchTimers.add(timer);
         };
         const cancelLinuxDeferredContextMenu = () => {
             linuxDeferredContextMenu = null;
@@ -251,9 +255,10 @@ export function useBrowserDefaultGuards(): void {
                 window.removeEventListener("pointerup", handleLinuxPointerUp, true);
                 window.removeEventListener("pointercancel", cancelLinuxDeferredContextMenu, true);
             }
-            if (linuxDeferredDispatchTimer !== null) {
-                window.clearTimeout(linuxDeferredDispatchTimer);
+            for (const timer of linuxDeferredDispatchTimers) {
+                window.clearTimeout(timer);
             }
+            linuxDeferredDispatchTimers.clear();
             document.removeEventListener("contextmenu", preventContextMenu, true);
             disposeRightDragContextMenuGuard();
             document.removeEventListener("selectstart", preventNativeTextSelection, true);

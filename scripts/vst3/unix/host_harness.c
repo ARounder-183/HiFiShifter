@@ -1,15 +1,17 @@
-/* host_harness.c —— 一个**最小的 VST3 宿主**，只做 REAPER 打开插件窗口时做的事：
+/* host_harness.c — a **minimal VST3 host** that does only what REAPER does when opening the
+ * plugin's editor window:
  *
  *   createInstance(component) → initialize
  *   createInstance(controller) → initialize
  *   createView("editor") → isPlatformTypeSupported("X11EmbedWindowID")
- *   attached(<真实 X11 窗口>, "X11EmbedWindowID") → onSize → 等几秒 → removed
+ *   attached(<real X11 window>, "X11EmbedWindowID") → onSize → wait a few seconds → removed
  *
- * 【为什么需要它】真 REAPER 无法在这里自动驱动，而"窗口是不是真的嵌进去了"只能由
- * 一个**真实宿主**回答。这个 harness 就是方案 §13 里那个 P0 探针的宿主侧：
- * 它把 X11 窗口交出去，剩下的看插件自己的日志（[gui] 那几行现在是 WARN 级）。
+ * [Why this exists] real REAPER cannot be driven automatically here, and "did the window
+ * really embed" can only be answered by a **real host**. This harness is the host side of
+ * the P0 probe from plan §13: it hands over an X11 window and the rest is judged from the
+ * plugin's own log (the [gui] lines are WARN level now).
  *
- * 用法：GDK_BACKEND=x11 ./host_harness <HiFiShifter.so> [等待秒数]
+ * Usage: GDK_BACKEND=x11 ./host_harness <HiFiShifter.so> [seconds to wait]
  */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -25,15 +27,18 @@ typedef char FIDString[16];
 
 typedef struct { int32_t left, top, right, bottom; } ViewRect;
 
-/* FUnknown / 工厂 / 组件 / 控制器 / 视图的 IID（与 backend/.../vst3.rs 里的常量一致） */
-/* GUID 布局：第 1 个字小端、第 2 个字拆成两个 u16 各自大端、第 3/4 个字大端。
- * 与 backend/hifishifter-plugin/src/vst3.rs 的 uid_guid() 逐字节一致。 */
+/* IIDs for FUnknown / factory / component / controller / view (matching the constants in
+ * backend/.../vst3.rs) */
+/* GUID layout: 1st word little-endian, 2nd word split into two u16s each big-endian,
+ * 3rd/4th words big-endian.
+ * Byte-identical to backend/hifishifter-plugin/src/vst3.rs's uid_guid(). */
 static const unsigned char IID_COMPONENT[16]      = {0x31,0xFF,0x31,0xE8, 0xD5,0xF2, 0x01,0x43, 0x92,0x8E, 0xBB,0xEE, 0x25,0x69,0x78,0x02};
 static const unsigned char IID_EDIT_CONTROLLER[16]= {0xE3,0xBB,0xD7,0xDC, 0x42,0x77, 0x8D,0x44, 0xA8,0x74, 0xAA,0xCC, 0x97,0x9C,0x75,0x9E};
 
-/* 一个最小的 IHostApplication：只为让插件拿到宿主名（日志按宿主分文件）。
+/* A minimal IHostApplication: exists only so the plugin can learn the host name (the log is
+ * split per host into separate files).
  * vtable: QI / addRef / release / getName / createInstance */
-/* IHostApplication 的 IID：58E595CC-DB2D-4969-8BFA-C7CE7E8CAAC0 */
+/* IHostApplication's IID: 58E595CC-DB2D-4969-8BFA-C7CE7E8CAAC0 */
 static const unsigned char IID_IHOST_APPLICATION[16] = {0xCC,0x95,0xE5,0x58, 0xDB,0x2D, 0x49,0x69, 0x8B,0xFA, 0xC7,0xCE,0x7E,0x8C,0xAA,0xC0};
 static const unsigned char IID_FUNKNOWN_B[16]        = {0x00,0x00,0x00,0x00, 0x00,0x00, 0x00,0x00, 0xC0,0x00,0x00,0x00, 0x00,0x00,0x00,0x46};
 static tresult ha_query(void *t, const char *iid, void **obj) {
@@ -148,7 +153,7 @@ int main(int argc, char **argv) {
     printf("isPlatformTypeSupported(\"WaylandSurfaceID\") -> %d\n",
            CALL(view, 3, PlatformFn, view, "WaylandSurfaceID"));
 
-    /* 一个普通 X11 窗口 —— 这正是宿主（REAPER）交给插件的那种东西 */
+    /* An ordinary X11 window — exactly the kind of thing a host (REAPER) hands the plugin */
     Display *dpy = XOpenDisplay(NULL);
     if (!dpy) { printf("cannot open display\n"); return 1; }
     Window host = XCreateSimpleWindow(dpy, DefaultRootWindow(dpy), 0, 0, 900, 600, 0, 0, 0x101010);

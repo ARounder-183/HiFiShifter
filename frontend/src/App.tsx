@@ -276,6 +276,7 @@ const statusKey: Record<string, string> = {
     "VocalShifter imported with skipped files": "vs_import_skipped_header",
     // 播放/停止传输状态
     "Playing original": "status_playing_original",
+    "Playback requested": "status_playback_requested",
     "Play original failed": "status_play_original_failed",
     "Stopping audio...": "status_stopping_audio",
     "Audio stopped": "status_audio_stopped",
@@ -285,6 +286,7 @@ const statusKey: Record<string, string> = {
     "Dropped audio imported": "status_dropped_audio_imported",
     "Clips duplicated": "status_clips_duplicated",
     "Clip edit rejected": "status_clip_edit_rejected",
+    "Track edit rejected": "status_track_edit_rejected",
     "Import done": "status_import_done",
     "Import failed": "status_import_failed",
     "Import audio failed": "status_import_audio_failed",
@@ -360,6 +362,13 @@ const errorCodeKey: Record<string, string> = {
     "Remove take failed": "status_remove_take_failed",
     "Rename take failed": "status_rename_take_failed",
     "Take channel mode rejected": "status_take_channel_mode_rejected",
+    // 打开 / 导入工程与通用 thunk 的兜底失败文案（sessionSlice 写入 error 通道的
+    // 原文；payload.error 存在时写的是后端原因，走上面的码映射或原样展示）
+    "Open project failed": "status_open_failed",
+    "Import project failed": "status_import_project_failed",
+    "Import VocalShifter failed": "status_import_vocalshifter_failed",
+    "Import Reaper failed": "status_import_reaper_failed",
+    "Request failed": "status_request_failed",
 };
 
 // 这些状态表示工程内容刚被替换/导入，需立即执行一次缺失媒体检测，
@@ -555,6 +564,34 @@ function mergeLatestSourceFileChanges(
     }
 
     return merged;
+}
+
+/**
+ * 两轮电平载荷的内容是否完全一致（键集合与每键三个字段）。
+ *
+ * 【为什么是逐字段比较而不是 JSON.stringify】captureStore 的载荷是定键序的 IPC
+ * 对象，序列化即内容指纹；这里的键来自后端 HashMap 的迭代序（engine.rs 的
+ * `meter_state` 每轮重建），序列化结果随顺序抖动，会把"内容相同"误判成"变了"。
+ * 键数量 + 逐键字段比较与顺序无关。缺少的一侧按"内容变了"处理（undefined ≠ any）。
+ */
+function sameMeterContents(
+    previous: Record<string, import("./features/session/sessionTypes").TrackMeterInfo>,
+    next: Record<string, import("./features/session/sessionTypes").TrackMeterInfo>,
+): boolean {
+    const previousIds = Object.keys(previous);
+    if (previousIds.length !== Object.keys(next).length) {
+        return false;
+    }
+    return previousIds.every((trackId) => {
+        const a = previous[trackId];
+        const b = next[trackId];
+        return (
+            b !== undefined &&
+            a.peakLinear === b.peakLinear &&
+            a.maxPeakLinear === b.maxPeakLinear &&
+            a.clipped === b.clipped
+        );
+    });
 }
 
 function AppInner() {
@@ -802,74 +839,74 @@ function AppInner() {
 
     const handleFillGapsChange = useCallback((v: boolean) => {
         setFillGaps(v);
-        settingsApi.saveUiSettings({ midiFillGaps: v });
+        void settingsApi.saveUiSettings({ midiFillGaps: v }).catch(() => {});
     }, []);
 
     const handleAutoReloadModifiedMediaChange = useCallback((v: boolean) => {
         setAutoReloadModifiedMedia(v);
-        settingsApi.saveUiSettings({ autoReloadModifiedMedia: v });
+        void settingsApi.saveUiSettings({ autoReloadModifiedMedia: v }).catch(() => {});
     }, []);
 
     const handleLoopNewClipsChange = useCallback((v: boolean) => {
         setLoopNewClips(v);
-        settingsApi.saveUiSettings({ loopNewClips: v });
+        void settingsApi.saveUiSettings({ loopNewClips: v }).catch(() => {});
     }, []);
 
     const handleMultiTrackMergeChange = useCallback((v: boolean) => {
         setMultiTrackMerge(v);
-        settingsApi.saveUiSettings({ midiMultiTrackMerge: v });
+        void settingsApi.saveUiSettings({ midiMultiTrackMerge: v }).catch(() => {});
     }, []);
 
     const handleImportBpmAsProjectChange = useCallback((v: boolean) => {
         setImportBpmAsProject(v);
-        settingsApi.saveUiSettings({ midiImportBpmAsProject: v });
+        void settingsApi.saveUiSettings({ midiImportBpmAsProject: v }).catch(() => {});
     }, []);
 
     const handleNoteBpmModeChange = useCallback((v: string) => {
         setNoteBpmMode(v);
-        settingsApi.saveUiSettings({ midiNoteBpmMode: v });
+        void settingsApi.saveUiSettings({ midiNoteBpmMode: v }).catch(() => {});
     }, []);
 
     const handleSpecifiedBpmChange = useCallback((v: number) => {
         setSpecifiedBpm(v);
-        settingsApi.saveUiSettings({ midiSpecifiedBpm: v });
+        void settingsApi.saveUiSettings({ midiSpecifiedBpm: v }).catch(() => {});
     }, []);
 
     const handleImportPositionChange = useCallback((position: string) => {
         setImportPosition(position);
-        settingsApi.saveUiSettings({ midiImportPosition: position });
+        void settingsApi.saveUiSettings({ midiImportPosition: position }).catch(() => {});
     }, []);
 
     const handleCloseLeadingGapChange = useCallback((v: boolean) => {
         setCloseLeadingGap(v);
-        settingsApi.saveUiSettings({ midiCloseLeadingGap: v });
+        void settingsApi.saveUiSettings({ midiCloseLeadingGap: v }).catch(() => {});
     }, []);
 
     const handleImportTempoMapEnabledChange = useCallback((v: boolean) => {
         setImportTempoMapEnabled(v);
-        settingsApi.saveUiSettings({ midiImportAsTempoMap: v });
+        void settingsApi.saveUiSettings({ midiImportAsTempoMap: v }).catch(() => {});
     }, []);
     const handleImportTempoMapTempoChange = useCallback((v: boolean) => {
         setImportTempoMapTempo(v);
-        settingsApi.saveUiSettings({ midiImportTempoMapTempo: v });
+        void settingsApi.saveUiSettings({ midiImportTempoMapTempo: v }).catch(() => {});
     }, []);
     const handleImportTempoMapTimeSignatureChange = useCallback((v: boolean) => {
         setImportTempoMapTimeSignature(v);
-        settingsApi.saveUiSettings({ midiImportTempoMapTimeSignature: v });
+        void settingsApi.saveUiSettings({ midiImportTempoMapTimeSignature: v }).catch(() => {});
     }, []);
     const handleImportTempoMapKeySignatureChange = useCallback((v: boolean) => {
         setImportTempoMapKeySignature(v);
-        settingsApi.saveUiSettings({ midiImportTempoMapKeySignature: v });
+        void settingsApi.saveUiSettings({ midiImportTempoMapKeySignature: v }).catch(() => {});
     }, []);
 
     const handleImportTargetMenuChange = useCallback((v: string) => {
         setMidiImportTargetMenu(v);
-        settingsApi.saveUiSettings({ midiImportTargetMenu: v });
+        void settingsApi.saveUiSettings({ midiImportTargetMenu: v }).catch(() => {});
     }, []);
 
     const handleImportTargetDragDropChange = useCallback((v: string) => {
         setMidiImportTargetDragDrop(v);
-        settingsApi.saveUiSettings({ midiImportTargetDragDrop: v });
+        void settingsApi.saveUiSettings({ midiImportTargetDragDrop: v }).catch(() => {});
     }, []);
 
     /**
@@ -987,6 +1024,11 @@ function AppInner() {
     useEffect(() => {
         let disposed = false;
         let unlisten: null | (() => void) = null;
+        // 上一轮电平内容（去重用）：同内容事件不进 Redux。
+        let previousMeters: Record<
+            string,
+            import("./features/session/sessionTypes").TrackMeterInfo
+        > = {};
 
         async function setup() {
             try {
@@ -1040,6 +1082,19 @@ function AppInner() {
                             };
                         }
 
+                        // 【内容不变就不派发】电平事件播放中每 33ms 一发，而暂停回落
+                        // 完成后、或全部轨道静音时，连续多次事件的**内容**完全相同；
+                        // 照发会让 Redux 引用必换、两个面板跟着空重渲染（与
+                        // `captureStore.withStatus` 同一条纪律）。
+                        //
+                        // 【为什么逐字段比较而不是 JSON.stringify】captureStore 的载荷
+                        // 是定键序的 IPC 对象；这里的键来自后端 HashMap 的迭代序
+                        // （engine.rs 的 meter_state 每轮重建），序列化结果随顺序抖动，
+                        // 会把"内容相同"误判成"变了"。键数量 + 逐键字段比较与顺序无关。
+                        if (sameMeterContents(previousMeters, next)) {
+                            return;
+                        }
+                        previousMeters = next;
                         dispatch(setTrackMeters(next));
                     },
                 );
@@ -1251,8 +1306,12 @@ function AppInner() {
                         // 独立 App 没有这份快照（`state` 为 null）⇒ 行为不变。
                         const active = Boolean(payload?.active);
                         const pRaw = payload?.progress;
+                        // 【结束事件不携带进度】后端在 `active:false` 时如实报 `null`；
+                        // 这里再兜一层：即便某个旧后端仍然带 `1.0`，也一律当成"没有进度"。
+                        // 否则完成事件会把高水位写回 100%，状态片在作业结束后还亮着
+                        // "渲染中 100%"，直到下一次 250 ms 快照才熄。
                         const p =
-                            typeof pRaw === "number" && Number.isFinite(pRaw)
+                            active && typeof pRaw === "number" && Number.isFinite(pRaw)
                                 ? Math.max(0, Math.min(1, pRaw))
                                 : null;
                         const target = typeof payload?.target === "string" ? payload.target : null;
@@ -1364,15 +1423,22 @@ function AppInner() {
             const state = getPluginApplySnapshot().state;
             if (!state) return;
             const active = state.rendering_active === true;
-            const stale = state.render_audible_stale === true;
             // 【进度也以快照为准】事件只是快速更新；轮询每 250 ms 会把当前进度
             // 带回来。`rendering_active` 从 false → true 时清掉上一轮的高水位，
             // 否则新一轮的 0% 会被旧的 100% 挡住。
+            // 【新的一轮作业 ⇒ 高水位清零】`render_pass` 就是后端那张作业票据。
+            // 没有它，一次被取消的作业留下的 60% 会挡住下一个作业的 0~59% ——
+            // 用户看到的就是"卡在某个百分比不动"或"一直 100%"。
+            const pass = typeof state.render_pass === "number" ? state.render_pass : null;
+            const passChanged = pass != null && renderPassRef.current !== pass;
+            if (pass != null) renderPassRef.current = pass;
             if (!active) {
                 renderProgressRef.current = 0;
                 appStatusProgressBus.setRenderingProgress(null);
             } else {
-                if (!backgroundRenderActiveRef.current) renderProgressRef.current = 0;
+                if (!backgroundRenderActiveRef.current || passChanged) {
+                    renderProgressRef.current = 0;
+                }
                 const raw = state.render_progress;
                 const progress =
                     typeof raw === "number" && Number.isFinite(raw)
@@ -1400,23 +1466,25 @@ function AppInner() {
                 );
                 return;
             }
-            // 【stale 时不熄灭】此时右侧 PluginApplyStatus 正在显示"正在合成"，
-            // 左侧那片由它单点承担；事件/快照的 active:false 只说明任务刚结束，
-            // 而 audible_state 仍可能是 stale。
-            if (!stale) {
-                if (!originalRenderActiveRef.current && !backgroundRenderActiveRef.current) {
-                    return;
-                }
-                originalRenderActiveRef.current = false;
-                backgroundRenderActiveRef.current = false;
-                dispatch(
-                    setPlaybackRenderingState({
-                        active: false,
-                        target: "background",
-                        blocking: false,
-                    }),
-                );
+            // 【stale 不再让位】旧约定是"stale 时右侧 PluginApplyStatus 显示正在合成，
+            // 左侧让位"—— 而 7ce4c0216 之后状态片只读快照的 `rendering_active`
+            // （见 useRenderStatus / AppStatusProgressChips 的说明），stale 只作为
+            // 独立读数保留。这里若仍按 stale 拒绝熄灭，被取消的渲染会让
+            // originalRenderActiveRef 永远为 true —— blocking 镜像不落，下方播放轮询
+            // 的 blocking 守卫就再也不采样传输态，直到下一次渲染成功为止。快照说
+            // "不在渲染"就必须熄灭。
+            if (!originalRenderActiveRef.current && !backgroundRenderActiveRef.current) {
+                return;
             }
+            originalRenderActiveRef.current = false;
+            backgroundRenderActiveRef.current = false;
+            dispatch(
+                setPlaybackRenderingState({
+                    active: false,
+                    target: "background",
+                    blocking: false,
+                }),
+            );
         };
         const unsubscribeApply = isPluginMode()
             ? (() => {

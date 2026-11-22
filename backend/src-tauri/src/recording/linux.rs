@@ -142,7 +142,14 @@ pub fn run_app_capture(
 // ---------------------------------------------------------------------------
 
 fn dump_audio_nodes() -> Option<Vec<Value>> {
-    let output = Command::new("pw-dump").arg("--monitor").output().ok()?;
+    // 【为什么绝不能带 --monitor】`pw-dump --monitor` 在打印首份全量 dump 后**常驻**
+    // 持续输出状态变化（与 pw-mon 同型），进程永不退出；`Command::output()` 要读到
+    // stdout EOF 并等进程结束 —— 两者组合就是永久阻塞。调用方全在关键路径上：
+    // `get_recording_apps` 直接跑在 WebView IPC 线程上，`start_recording` 的
+    // `resolve_application_pid` 也在 join 的线程里 —— 应用捕获选择器一打开整个应用
+    // 就冻死。裸 `pw-dump` 打一份全量状态后退出，正是下面这段"单个 JSON 数组"
+    // 解析器期望的形态。
+    let output = Command::new("pw-dump").output().ok()?;
     if !output.status.success() {
         return None;
     }

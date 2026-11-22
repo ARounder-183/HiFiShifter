@@ -660,7 +660,7 @@ pub fn import_midi_to_pitch(
 /// 它**会**把该帧上已有的 run 切掉。而导入算完的这条曲线就是"导入之后应该显示的
 /// 样子"，所以窗口内逐帧照它的值判定：真音高 ⇒ 写，0（未设置）⇒ 清。
 /// 窗口本身由差分定界 —— 窗口之外一个 run 都不碰。
-fn pitch_write_window(before: &[f32], after: &[f32]) -> Option<(u32, Vec<f32>, Vec<bool>)> {
+pub fn pitch_write_window(before: &[f32], after: &[f32]) -> Option<(u32, Vec<f32>, Vec<bool>)> {
     use crate::editor::param_authority::{default_value_for_key, is_edited_value, PITCH_EDIT};
     let len = before.len().min(after.len());
     let first = (0..len).find(|index| before[*index] != after[*index])?;

@@ -339,6 +339,67 @@ pub struct PlaybackEndpoint {
     pub supersession: std::sync::Arc<crate::editor::host_threads::SupersessionDomain>,
 }
 
+/// 因"两份输入不同代"而推迟发布的上界。
+///
+/// 【为什么是 2 s】拖动一个 item 期间，清单每 100 ms 就可能发布一代新的，于是
+/// "输入动过 ⇒ 再等等"会一直成立。2 s 足够覆盖任何一次真实的两份输入错位
+/// （现场日志里是 40~120 ms），又远短于用户能接受"我拖完了它还没更新"的时间。
+/// 预算耗尽后照常发布（不能饿死界面），但会把两个代次写进 WARN。
+const ASSEMBLY_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// "这一轮的 `unbound` 该不该推迟发布" —— 纯判据（可单测）。
+///
+/// 参数是四个**已经读到**的事实，因此它不碰锁、不碰宿主、不看时间以外的任何状态：
+///
+/// * `unbound` —— 这一轮没挂上任何 item 的 region 条数；
+/// * `consumed` —— 上一次装配尝试消费的那一对输入代次（`None` = 还没有过上一次）；
+/// * `inputs` —— 这一轮读到的代次；
+/// * `deferred_since` —— 当前这串推迟的起点（`None` = 没有在推迟）；
+/// * `now` —— 由调用方给出，测试因此不必睡觉。
+///
+/// 【三条判据，每条都对应一次真实的误判】
+///
+/// 1. `unbound == 0` ⇒ 不推迟。这一轮就是答案，推迟只会白白晚一帧；
+/// 2. `consumed == Some(inputs)` ⇒ 不推迟。两份输入与上一次尝试**逐位相同**，再试一次
+///    只会得到同一个结论 —— 此时推迟是纯损失（界面停在旧时间线上）；
+/// 3. `consumed == None` ⇒ 不推迟。没有上一次可比，"输入动过"无从谈起；而第一轮装配
+///    必须产出点东西（否则冷启动永远空白）。
+///
+/// 剩下的唯一情形 —— `unbound > 0` 且输入动过 —— 才是"两份输入可能还没对齐"。
+/// 预算（[`ASSEMBLY_RETRY_BUDGET`]）封住上界：拖动 item 期间清单每一代都在变，
+/// 没有预算就会一直推迟到用户松手。
+pub(crate) fn should_defer_assembly(
+    unbound: usize,
+    consumed: Option<(u64, u64)>,
+    inputs: (u64, u64),
+    deferred_since: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    if unbound == 0 {
+        return false;
+    }
+    let Some(consumed) = consumed else {
+        return false;
+    };
+    if consumed == inputs {
+        return false;
+    }
+    deferred_since.is_none_or(|since| now.duration_since(since) < ASSEMBLY_RETRY_BUDGET)
+}
+
+/// 一次装配尝试的结局。
+///
+/// 【为什么不是一个 `bool`】"推迟发布"与"发布了"必须被**区别对待**：推迟时
+/// `assembly_dirty` 要留着（下一个安全点再来），发布时它要清掉。用布尔表达这件事，
+/// 唯一可能的写法是"调用方再去读一次标记" —— 而两次读写之间正好是产生新竞态的地方。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssemblyOutcome {
+    /// 这一轮的输入被消费了：时间线已发布（或确认无需改动）。
+    Published,
+    /// 两份输入还没对齐：**保留上一轮已发布的时间线**，下一个安全点重试。
+    Deferred,
+}
+
 #[derive(Default)]
 pub struct DocumentSession {
     controller: AtomicUsize,
@@ -367,8 +428,7 @@ pub struct DocumentSession {
     pub region_items: Mutex<HashMap<u64, String>>,
     /// ARA 授权那一刻，每个 region 对应 item 的 **active take GUID**（region_key → take GUID）。
     ///
-    /// 【为什么需要】ARA 只授权 active take 的 PCM（见 `probe/ara/MULTI-TAKE-FINDINGS.md`
-    /// 与 plan Part 2 的授权边界）。宿主清单重建 take 列表时（`sync_host_takes`），
+    /// 【为什么需要】ARA 只授权 active take 的 PCM（真机实测）。宿主清单重建 take 列表时（`sync_host_takes`），
     /// 只有 GUID 与这里相等的那一个 take 可以带上授权媒体；其余 take 必须保持无源。
     ///
     /// 【为什么记 GUID 而不是"就是 active 那个"】用户在 REAPER 里切换 active take 后，
@@ -537,6 +597,42 @@ pub struct DocumentSession {
     pub assembly_spans: Mutex<std::collections::BTreeMap<String, Vec<usize>>>,
     /// 最近一次装配里**没挂上任何 item** 的 region 行（不产生 clip，只进读数）。
     pub assembly_unbound: Mutex<Vec<usize>>,
+    /// 装配的**输入 A**（`region_rows`）写了几次。
+    ///
+    /// 【为什么要一个计数而不是"读一下内容变没变"】两份输入是**两张表**，逐字段比较
+    /// 的代价与"它们是不是同一时刻的事实"这个问题根本不对等：一个代次就够回答
+    /// "这一轮装配读到的和上一轮是不是同一对"。见 [`Self::assembly_consumed`]。
+    pub(crate) region_rows_stamp: AtomicU64,
+    /// 装配的**输入 B**（`ui_tracks`）发布了几次。
+    pub(crate) ui_tracks_stamp: AtomicU64,
+    /// 上一次装配尝试消费的那一对代次 `(ui_tracks_stamp, region_rows_stamp)`。
+    ///
+    /// 【它回答什么】"这一轮读到的两份输入，与上一轮相比**动过**吗"。动了就说明
+    /// 其中至少一份可能还没跟上另一份 —— 那正是 `unbound` 最可能的成因（item 已经
+    /// 挪到新位置、region 表还是旧的，或反过来）。没动则说明再试一次也只会得到同一个
+    /// 答案：那就是结论，该发布（并报警）。
+    pub(crate) assembly_consumed: Mutex<Option<(u64, u64)>>,
+    /// 当前这一串"推迟发布"的起点（`None` = 没有在推迟）。
+    ///
+    /// 【为什么必须有上界】清单在**拖动 item** 期间每 100 ms 就可能发布一代新的，
+    /// 于是"输入动过 ⇒ 再等等"会一直成立。没有预算的话界面会停在上一份时间线上直到
+    /// 用户松手 —— 那比"少一条片段"糟得多。
+    pub(crate) assembly_deferred_since: Mutex<Option<std::time::Instant>>,
+    /// 装配的输入变过、还没被消费。
+    ///
+    /// 【为什么必须有这个标记】装配有两份输入：ARA 侧的 region 表（模型回调写）与宿主
+    /// 侧的 item 清单（20 ms 定时器写）。此前只有一个调用点（模型收口），于是**清单自己
+    /// 的变化永远不会触发装配** —— 而在 REAPER 里复制/粘贴一个 item 时，清单先看到新
+    /// item、模型收口那一轮又可能因为宿主工程正在变化而拿不到新清单。结果是新 item 只能
+    /// 以"无源占位"出现：没有波形、没有原始音高线、永远显示"正在等待宿主完成音频分配"，
+    /// 直到下一次重新加载（那次模型收口带上了完整清单）才正确。用户报障的正是这一条。
+    ///
+    /// 【为什么是"标记 + 单一冲刷点"而不是就地重装】装配要写 `clip_ids`，而清单刷新会
+    /// 被 `host_geometries_locked` / `clip_for_host_item` 调到（那两处正持有 `clip_ids`，
+    /// `std::sync::Mutex` 不可重入），也可能被持有 `transaction` 的路径调到。就地重装
+    /// 实测会让两个 bound 用例永久挂起。标记把"该重装"与"现在能重装"分开：任何写输入的
+    /// 地方只置位，真正重装只发生在**不持任何相关锁**的定时器/收口点。
+    pub(crate) assembly_dirty: AtomicBool,
     /// ARA 模型是否**已经交付过**至少一次。
     ///
     /// 【为什么需要】`rebuild_timeline_locked` 会在每次清单刷新后跑。而清单可能先于
@@ -609,6 +705,13 @@ pub struct DocumentSession {
     /// 宿主给本**文档**的播放控制租约，连同它被创建时所在的那条线程。
     pub playback: Mutex<Option<PlaybackEndpoint>>,
     pub host_undo: crate::host::undo::HostUndo,
+
+    /// 渲染输入失效的"一秒钟里发生了几次"（诊断用，见 `invalidate_render_input`）。
+    ///
+    /// 【为什么需要它】"渲染停不下来"这个症状在日志里此前**完全不可见**：每次失效都只
+    /// 推进一个原子计数，而重算发生在另一条线程上。于是"某个判据把每 tick 都当成变化"
+    /// 这种缺陷只能靠读代码发现。这里只记一个窗口内的次数，超阈值发一条 WARN。
+    render_epoch_window: Mutex<(Option<std::time::Instant>, u32)>,
     /// 宿主 BPM / 拍号读数（VST3 进程上下文）。
     ///
     /// 【为什么记在文档上】Tempo Map 的音阶点需要宿主轴：0 位置点**必须**显式带拍号
@@ -923,6 +1026,277 @@ mod tests {
         document
             .reconcile_parameter_geometry_locked(&frame, &mut edits)
             .expect("a well-formed frame must reconcile")
+    }
+
+    /// **装配的两份输入里，任何一份变了都必须在安全点上重装。**
+    ///
+    /// 【为什么这条是用户报障的可执行形式】REAPER 复制/粘贴一个 item 时，宿主清单先看到
+    /// 新 item，而模型收口那一轮的清单刷新可能因为"宿主工程正在变化"被放弃。此前装配
+    /// 只在模型收口跑，于是新 item 永远进不了装配：它只能以无源占位出现 —— 没有波形、
+    /// 没有原始音高线、一直显示"正在等待宿主完成音频分配"，直到下一次重新加载。
+    ///
+    /// 这里钉住三件事：
+    /// 1. 没有输入变化时，安全点什么都不做（不允许每 20 ms 白跑一次装配）；
+    /// 2. 标记置位后，安全点必须产出 region → clip 的身份边；
+    /// 3. clip 集合真的变了就必须推进 model 版本 —— 否则编辑器与渲染都不会重读，
+    ///    装配发生了却等于没发生。
+    #[test]
+    fn a_changed_assembly_input_is_rebuilt_at_the_next_safe_point() {
+        use hifishifter_kernel::editor::assembly::{RegionRow, TrackRow};
+        use std::sync::atomic::Ordering;
+        let document = document_with_one_empty_track(0.0);
+        document.ara_model_seen.store(true, Ordering::Release);
+        *document.region_tracks.lock_or_recover() = vec![TrackRow {
+            id: "track".into(),
+            name: "track".into(),
+            order: 0,
+            color: String::new(),
+        }];
+        *document.region_rows.lock_or_recover() = vec![RegionRow {
+            key: 7,
+            clip_id: "ara-region-7".into(),
+            track_id: "track".into(),
+            start_sec: 0.0,
+            duration_sec: 2.0,
+            source_start_sec: 0.0,
+            source_end_sec: 2.0,
+            playback_rate: 1.0,
+            name: "vocal".into(),
+            source_id: "src".into(),
+            modification_id: "mod".into(),
+            source_sample_rate: 48_000.0,
+            source_duration_sec: 2.0,
+            source_channels: 1,
+        }];
+        // ① 没有任何输入变化 ⇒ 一个安全点都不该动它。
+        document.flush_pending_assembly();
+        assert!(
+            document.clip_ids.lock_or_recover().is_empty(),
+            "no input changed, so nothing may be assembled"
+        );
+        let revision = document.revision.load(Ordering::Acquire);
+        // ② 输入变了（清单发布 / region 表发布）⇒ 下一个安全点必须把装配跑掉。
+        document.note_assembly_input_changed();
+        document.flush_pending_assembly();
+        assert_eq!(
+            document
+                .clip_ids
+                .lock_or_recover()
+                .get(&7)
+                .map(String::as_str),
+            Some("ara-region-7"),
+            "the new input must reach the clip set at the next safe point"
+        );
+        // ③ clip 集合变了 ⇒ model 版本前进（读者据此重读）。
+        assert_eq!(
+            document.revision.load(Ordering::Acquire),
+            revision + 1,
+            "a changed clip set must advance the model revision"
+        );
+        // ④ 标记已被消费：再冲一次不会重复推进版本。
+        document.flush_pending_assembly();
+        assert_eq!(
+            document.revision.load(Ordering::Acquire),
+            revision + 1,
+            "the flag is consumed by one flush"
+        );
+    }
+
+    /// **`unbound` 什么时候该推迟发布、什么时候就是结论。**
+    ///
+    /// 【为什么这条判据值得单测】它决定"一条本来有源的 clip 会不会被写成永久无源"。
+    /// 判错的方向有两个，代价完全不同：
+    ///   * 该推迟而不推迟 ⇒ 一次 100 ms 的竞态被写成终局（用户看到"一直在等宿主音频"，
+    ///     重开工程才好）；
+    ///   * 不该推迟而推迟 ⇒ 界面晚一帧（20 ms），且预算封住上界。
+    ///
+    /// 所以只有"输入确实动过"这一种情形才推迟，其余一律发布。
+    #[test]
+    fn assembly_defers_only_while_the_two_inputs_are_moving() {
+        let now = std::time::Instant::now();
+        let previous = Some((3_u64, 4_u64));
+        // 输入动过 + 有 unbound ⇒ 推迟（这是"item 挪了、region 表还没跟上"的形状）。
+        assert!(should_defer_assembly(1, previous, (4, 4), None, now));
+        assert!(should_defer_assembly(1, previous, (3, 5), None, now));
+        // 没有 unbound ⇒ 这一轮就是答案。
+        assert!(!should_defer_assembly(0, previous, (4, 5), None, now));
+        // 输入与上一次尝试逐位相同 ⇒ 再试一百次也是同一个结论。
+        assert!(!should_defer_assembly(1, previous, (3, 4), None, now));
+        // 还没有过上一次尝试 ⇒ 无从判断，先把这一轮发布出去（冷启动不能永远空白）。
+        assert!(!should_defer_assembly(1, None, (0, 0), None, now));
+    }
+
+    /// 拖动 item 期间清单每一代都在变：预算必须封住上界，不能饿死界面。
+    #[test]
+    fn assembly_publishes_after_the_retry_budget() {
+        let now = std::time::Instant::now();
+        let started = now - ASSEMBLY_RETRY_BUDGET - std::time::Duration::from_millis(1);
+        // 预算内：继续推迟。
+        assert!(should_defer_assembly(
+            2,
+            Some((1, 1)),
+            (2, 2),
+            Some(now - std::time::Duration::from_millis(10)),
+            now
+        ));
+        // 预算耗尽：照常发布（`unbound` 会连同两个代次进 WARN）。
+        assert!(!should_defer_assembly(
+            2,
+            Some((1, 1)),
+            (2, 2),
+            Some(started),
+            now
+        ));
+    }
+
+    /// 文档级的旁通结论是**派生**的：没有实例 ⇒ 未知；实例的读数怎么合成由
+    /// `fx_state::combine` 负责（它的用例钉住"只有全部确定被旁通才算旁通"）。
+    ///
+    /// 【为什么这里不再存一格】`DocumentSession` 是**每个 ARA 文档（工程）一份**，
+    /// 而旁通是**每个 FX** 的事实。存一格等于让不同轨道的结论互相覆盖 —— 那会让读数
+    /// 每轮在 `active` / `bypassed` 之间跳，每次跳都让渲染输入失效 ⇒ 每 100 ms 重算
+    /// 一整次神经合成（"无限渲染"），而且一条轨被旁通会把另一条轨一起静音。
+    #[test]
+    fn the_document_bypass_verdict_is_derived_from_the_instances() {
+        use crate::host::reaper::FxBypass;
+        let document = DocumentSession::new(9_003);
+        assert_eq!(
+            document.host_bypass(),
+            FxBypass::Unknown,
+            "没有任何渲染实例时无从判断（必须等于改动前的行为：照常渲染）"
+        );
+    }
+
+    /// **一条轨被旁通，不许把另一条轨一起静音。**
+    ///
+    /// 【为什么这是本轮最重要的一条回归】`DocumentSession` 每**文档**一份，而旁通是每
+    /// **FX** 的事实。把结论存进文档那一格，等于让两条轨道的读数互相覆盖：
+    ///   * 谁最后采样谁说了算 ⇒ 轨 2 会在轨 1 被旁通时一起静音（用户听到"整轨没声音"）；
+    ///   * 两个结论每 100 ms 互相覆盖一次 ⇒ 每次覆盖都让渲染输入失效 ⇒ 每个实例每
+    ///     tick 重算一整次神经合成（用户看到"无限渲染"）。
+    ///
+    /// 所以结论必须**派生**：只有全部播放实例都确定被旁通，才算这份工程不会出声。
+    #[test]
+    fn one_bypassed_track_never_silences_another() {
+        use crate::host::reaper::FxBypass;
+        let document = DocumentSession::new(9_004);
+        let bypassed = Arc::new(ExtensionOwner::default());
+        let other = Arc::new(ExtensionOwner::default());
+        for owner in [&bypassed, &other] {
+            owner
+                .bind_to_document(
+                    document.clone(),
+                    ApiGeneration::V2Final,
+                    ara2_bridge::plugin::ExtensionRoles::all(),
+                    ara2_bridge::plugin::ExtensionRoles::PLAYBACK_RENDERER
+                        | ara2_bridge::plugin::ExtensionRoles::EDITOR_RENDERER,
+                    None,
+                )
+                .expect("两个实例都必须能绑到同一个文档");
+        }
+        bypassed.set_host_bypass_for_tests(FxBypass::Bypassed);
+        other.set_host_bypass_for_tests(FxBypass::Active);
+        assert_eq!(
+            document.host_bypass(),
+            FxBypass::Active,
+            "一条轨被旁通时另一条轨必须照常渲染"
+        );
+        // 全部旁通才是"这份工程不会出声"。
+        other.set_host_bypass_for_tests(FxBypass::Bypassed);
+        assert_eq!(document.host_bypass(), FxBypass::Bypassed);
+        // 【没有读数 = 弃权，不是否决】REAPER 的播放实例是宿主按 item 现建的：它既没有
+        // 视图定时器也没有模型收口，用户按下旁通的那一刻它很可能一次都没被采样过。
+        // 把它当否决票，门就永远关着 —— 用户报的"旁通了还在渲染"。
+        other.set_host_bypass_for_tests(FxBypass::Unknown);
+        assert_eq!(
+            document.host_bypass(),
+            FxBypass::Bypassed,
+            "从没读到过读数的实例不得否决别人已经确定的旁通结论"
+        );
+    }
+
+    /// **播放实例从没报过读数时，编辑实例的那一票必须算数（REAPER 的真实形态）。**
+    ///
+    /// 【现场证据】2026-11-19 13:14 的 REAPER 会话里，用户按下旁通之后日志只有一行
+    /// `writer 1 host bypass: active -> bypassed` —— 那是**编辑**实例（视图定时器每
+    /// 100 ms 采一次）。播放实例（同一文档、同一 FX，由宿主按需现建）从头到尾**一行
+    /// 都没有**：它没有视图定时器，而模型收口只在宿主改模型时发生。
+    ///
+    /// 【为什么会变成"旁通了还在渲染"】上一版的门只让 `renders_playback()` 的实例投票，
+    /// 而唯一的播放实例读数永远是初始的 `Unknown` ⇒ 文档结论永远是 `Unknown` ⇒ 门
+    /// 永远开着。这条用例把那个形态原样钉住。
+    #[test]
+    fn an_editor_bypass_reading_counts_when_the_playback_instance_never_reported() {
+        use crate::host::reaper::FxBypass;
+        let document = DocumentSession::new(9_006);
+        let editor = Arc::new(ExtensionOwner::default());
+        let playback = Arc::new(ExtensionOwner::default());
+        editor
+            .bind_to_document(
+                document.clone(),
+                ApiGeneration::V2Final,
+                ara2_bridge::plugin::ExtensionRoles::all(),
+                ara2_bridge::plugin::ExtensionRoles::EDITOR_RENDERER,
+                None,
+            )
+            .expect("编辑实例必须能绑到文档");
+        playback
+            .bind_to_document(
+                document.clone(),
+                ApiGeneration::V2Final,
+                ara2_bridge::plugin::ExtensionRoles::all(),
+                ara2_bridge::plugin::ExtensionRoles::PLAYBACK_RENDERER,
+                None,
+            )
+            .expect("播放实例必须能绑到同一个文档");
+        // 让"编辑实例是 editor-only、播放实例才是渲染者"这件事成立（与宿主一致）。
+        document.report_playback_ownership();
+        assert!(!editor.renders_playback(), "编辑实例不应被当作渲染者");
+        assert!(playback.renders_playback(), "播放实例才是渲染者");
+        // 编辑实例读到了旁通；播放实例一次都没被采样过（缓存仍是初始的 `Unknown`）。
+        editor.set_host_bypass_for_tests(FxBypass::Bypassed);
+        assert_eq!(playback.host_bypass(), FxBypass::Unknown);
+        assert_eq!(
+            document.host_bypass(),
+            FxBypass::Bypassed,
+            "唯一能说话的那一票必须算数，否则门永远关不上"
+        );
+        // 播放实例真的读到 `active` 时，仍然必须照常渲染。
+        playback.set_host_bypass_for_tests(FxBypass::Active);
+        assert_eq!(document.host_bypass(), FxBypass::Active);
+    }
+
+    /// **过期读数不得再投票。**
+    ///
+    /// 【为什么这条与上一条不矛盾】"没有读数"与"读数过期"都必须回到"照常渲染"：
+    /// 过期读数若继续阻止渲染，用户解除旁通之后就没有声音；若要它继续**允许**渲染，
+    /// 就是"旁通了还在渲染"。所以它一律弃权 —— 而弃权在门上的表现就是 `Unknown`。
+    #[test]
+    fn an_expired_reading_stops_counting_as_a_bypass() {
+        use crate::host::reaper::FxBypass;
+        let document = DocumentSession::new(9_005);
+        let owner = Arc::new(ExtensionOwner::default());
+        owner
+            .bind_to_document(
+                document.clone(),
+                ApiGeneration::V2Final,
+                ara2_bridge::plugin::ExtensionRoles::all(),
+                ara2_bridge::plugin::ExtensionRoles::PLAYBACK_RENDERER,
+                None,
+            )
+            .expect("实例必须能绑到文档");
+        owner.set_host_bypass_for_tests(FxBypass::Bypassed);
+        assert_eq!(document.host_bypass(), FxBypass::Bypassed);
+        // 做旧到远超有效期：这一票作废，门回到"照常渲染"。
+        owner.age_host_bypass_for_tests(std::time::Duration::from_secs(60));
+        assert_eq!(
+            document.host_bypass(),
+            FxBypass::Unknown,
+            "过期读数必须弃权（`Unknown` = 照常渲染），而不是继续挡住渲染"
+        );
+        // 重新采到 ⇒ 立刻恢复投票权。
+        owner.set_host_bypass_for_tests(FxBypass::Bypassed);
+        assert_eq!(document.host_bypass(), FxBypass::Bypassed);
     }
 
     /// **分割一个循环源 item，参数线一根都不许动（插件侧粘合层）。**
@@ -1432,15 +1806,33 @@ impl DocumentSession {
             match result {
                 Ok(pcm) => {
                     let pcm = Arc::new(pcm);
-                    self.edit_sources
-                        .lock_or_recover()
-                        .insert(id.clone(), pcm.clone());
-                    self.sources.lock_or_recover().insert(id.clone(), pcm);
+                    // 【同一代内容不重复发布】宿主每次重新授予样本访问（起播、前台恢复、
+                    // 重同步）都会让插件把源**重读一遍**；读回来的是同一代内容
+                    // （`version` 只在宿主通知内容变更时才前进），却不加区别地推进
+                    // `editor_audio_revision` ⇒ 指纹必变 ⇒ 排一轮输出完全相同的重渲染
+                    // ⇒ 状态栏"渲染中"随每次播放开始闪一下（REAPER 23:40:34 实测）。
+                    // 同代重读是幂等的：留着手上这份，只把读数状态修好。
+                    let superseded = match self.edit_sources.lock_or_recover().get(&id) {
+                        Some(existing) if Self::same_pcm_generation(existing, &pcm) => {
+                            log::debug!(
+                                "[ara] source {id} re-read the same content generation {}; keeping the published PCM",
+                                pcm.version
+                            );
+                            true
+                        }
+                        _ => false,
+                    };
+                    if !superseded {
+                        self.edit_sources
+                            .lock_or_recover()
+                            .insert(id.clone(), pcm.clone());
+                        self.sources.lock_or_recover().insert(id.clone(), pcm);
+                        self.editor_audio_revision.fetch_add(1, Ordering::AcqRel);
+                    }
                     self.source_states
                         .lock_or_recover()
                         .insert(id.clone(), SourceState::Published);
                     self.source_failures.lock_or_recover().remove(&id);
-                    self.editor_audio_revision.fetch_add(1, Ordering::AcqRel);
                 }
                 Err(error) => {
                     self.source_states
@@ -1485,11 +1877,40 @@ impl DocumentSession {
 
     pub(crate) fn publish_source_pcm(&self, id: String, pcm: Arc<super::source::SourcePcm>) {
         let _transaction = self.transaction.lock_or_recover();
+        // 【同一代内容不重复发布】见 `publish_source_read_result` 的说明：重读幂等。
+        if let Some(existing) = self.edit_sources.lock_or_recover().get(&id) {
+            if Self::same_pcm_generation(existing, &pcm) {
+                return;
+            }
+        }
         self.edit_sources
             .lock_or_recover()
             .insert(id.clone(), pcm.clone());
         self.sources.lock_or_recover().insert(id, pcm);
         self.editor_audio_revision.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// 两份源 PCM 是否同一代内容（同代重读 ⇒ 幂等，见发布点的说明）。
+    ///
+    /// 【为什么用内容代次指纹判】`version` 契约是"宿主改了内容必然通知"，但系统
+    /// 既有口径（`refresh_source_fingerprints`）本来就承认"代次没变但内容被就地
+    /// 改写"这一兜底形状 —— 去重只按 version+几何判会把它吞掉（late-PCM 测试
+    /// `late_host_pcm_refreshes_existing_editor_without_model_change` 的形状：同
+    /// version、内容不同，必须照常发布）。指纹与键刷新同源
+    /// （`render::source::source_content_stamp`），两处口径永不漂移。
+    fn same_pcm_generation(
+        existing: &super::source::SourcePcm,
+        incoming: &super::source::SourcePcm,
+    ) -> bool {
+        super::source::source_content_stamp(existing)
+            == super::source::source_content_stamp(incoming)
+            && existing.sample_rate == incoming.sample_rate
+            && existing.planes.len() == incoming.planes.len()
+            && existing
+                .planes
+                .iter()
+                .zip(&incoming.planes)
+                .all(|(a, b)| a.len() == b.len())
     }
 
     /// 宿主清单 → 装配器的**输入 B**（一条 item 一行）。
@@ -1511,6 +1932,56 @@ impl DocumentSession {
             .collect()
     }
 
+    /// 记一次"装配的输入变了"（见 [Self::assembly_dirty]）。
+    ///
+    /// 唯一职责是置位；重装由 [Self::flush_pending_assembly] 在安全点上完成。
+    pub(crate) fn note_assembly_input_changed(&self) {
+        self.assembly_dirty.store(true, Ordering::Release);
+    }
+
+    /// 在安全点上把挂起的装配跑掉（不持任何相关锁时调用）。
+    ///
+    /// 【为什么用 `try_transaction` 而不是阻塞】调用方是 20 ms 的 UI 定时器与宿主写回
+    /// 路径；后台 actor 正持事务时阻塞会把它要等的那次宿主泵堵死（见
+    /// [Self::try_transaction] 的说明）。拿不到就留到下一个 tick —— 标记还在。
+    ///
+    /// 【为什么拿不到事务也要留标记】"这一轮没装上"不是"不需要装"：清掉标记会让一次
+    /// 真正的输入变化永久丢失，而那正是本函数要消灭的那类缺陷。
+    pub(crate) fn flush_pending_assembly(&self) {
+        if !self.assembly_dirty.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(_transaction) = self.try_transaction() else {
+            return;
+        };
+        if !self.is_alive() {
+            return;
+        }
+        let before = self.clip_ids.lock_or_recover().clone();
+        match self.rebuild_timeline_locked() {
+            Ok(AssemblyOutcome::Published) => {}
+            // 【推迟不是失败，也不是"做完了"】标记必须留着：它表达的正是"这份输入
+            // 还没被消费"。清掉它等于把一次真正的输入变化永久丢失 —— 而那正是本函数
+            // 要消灭的那类缺陷。
+            Ok(AssemblyOutcome::Deferred) => return,
+            Err(error) => {
+                log::warn!("[ara] deferred timeline assembly failed: {error}");
+                return;
+            }
+        }
+        // 【clip 集合真的变了才算一次模型变化】`clip_ids` 是装配产物里唯一的身份投影
+        // （region key → clip id）；它一变，读者必须重读：编辑器按 `revision` 判"要不要
+        // 重新加载"，渲染按 `revision` 判"已发布的快照还对不对"。少了这一句，界面会
+        // 一直显示上一次装配的片段 —— 而装配本身已经发生，症状与"没重装"一模一样。
+        //
+        // 【为什么在这里直接加而不是调 `clear_renderers`】本函数持有 `transaction`，
+        // 而那个入口要取同一把不可重入的锁。这里只需要"版本前进一步"这一半语义：
+        // 已发布的快照继续可听，下一次 `prepare_job` 会因为版本不匹配而重算。
+        if *self.clip_ids.lock_or_recover() != before {
+            self.revision.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
     /// **唯一**的时间线重建入口 —— clip 集合只在这里产生。
     ///
     /// 【为什么必须只有一个入口】此前 clip 有两个生产者：`ara/mapping.rs` 按 playback
@@ -1526,8 +1997,8 @@ impl DocumentSession {
     /// 【锁序】调用方必须已持有 `transaction`。本函数先取两张输入表（宿主事实层级），
     /// 立刻释放，再取 `timeline` / `clip_ids` —— 与 `transaction → timeline → edits →
     /// host facts` 同向。
-    pub(crate) fn rebuild_timeline_locked(&self) -> Result<(), String> {
-        use hifishifter_kernel::editor::assembly::{assemble, attach};
+    pub(crate) fn rebuild_timeline_locked(&self) -> Result<AssemblyOutcome, String> {
+        use hifishifter_kernel::editor::assembly::{assemble, attach, inherit_media};
         // 【模型没交付过 ⇒ 不动已发布的时间线】见 `ara_model_seen` 的说明。装配器的
         // 输入只有两份，缺了 ARA 那一份时它只能给出"没有源窗口的占位" —— 用那份占位
         // 盖掉一份真实的图，比不刷新糟得多。
@@ -1540,8 +2011,18 @@ impl DocumentSession {
                 .as_ref()
                 .is_some_and(|timeline| !timeline.clips.is_empty())
         {
-            return Ok(());
+            // 这一轮什么也没做：清掉标记，等模型真正交付时由收口路径重装。
+            self.assembly_dirty.store(false, Ordering::Release);
+            return Ok(AssemblyOutcome::Published);
         }
+        // 【代次必须在读表**之前**取】两个写者各自把计数 +1 再写表，所以"先取后读"
+        // 只可能让记下的那一对比读到的**更旧** —— 那种情况下下一轮会被判成"输入动过"
+        // 而多推迟一次，代价是一轮 20 ms；反过来（先读后取）会把"读表期间到达的新一代"
+        // 记成已消费，于是那份输入永远等不到装配。
+        let inputs = (
+            self.ui_tracks_stamp.load(Ordering::Acquire),
+            self.region_rows_stamp.load(Ordering::Acquire),
+        );
         let rows = self.region_rows.lock_or_recover().clone();
         let tracks = self.region_tracks.lock_or_recover().clone();
         let mut items = self.collect_item_rows();
@@ -1568,7 +2049,57 @@ impl DocumentSession {
                 }
             }
         }
-        let assembly = assemble(&items, &rows);
+        let mut assembly = assemble(&items, &rows);
+        // 【"有源"不许被一次竞态降级成"无源"】
+        //
+        // 上面那次 `attach` 用的是**这一轮**的两份输入。它们不是同一时刻的事实：
+        // item 已经挪到新位置、region 表还是旧的（或反过来）时，一条本来挂得好好的
+        // region 会落在 item 的**旧**矩形之外 ⇒ `unbound` ⇒ 这个 item 的 clip 被
+        // `clip_for_item(item, track, None)` 写成无源 ⇒ 界面上波形与原始音高线一起
+        // 消失，只剩一句"正在等待宿主完成音频分配"。
+        //
+        // 但"这条 item 用哪个源"是**文档级事实**：它不会因为 item 挪了 0.39 s 而改变。
+        // 所以这里把上一轮已发布的媒体身份借回来（几何仍然取 item，判据见
+        // `assembly::inherit_media`）。借不到的那些仍然是无源 —— 那是真的没有。
+        let live_sources: std::collections::BTreeSet<String> = rows
+            .iter()
+            .map(|row| row.source_id.clone())
+            .filter(|id| !id.is_empty())
+            .collect();
+        let previous_clips = self
+            .timeline
+            .lock_or_recover()
+            .as_ref()
+            .map(|timeline| timeline.clips.clone())
+            .unwrap_or_default();
+        let inherited = inherit_media(&mut assembly.clips, &previous_clips, &live_sources);
+        // 【`unbound` 不是结论，是"两份输入还没对齐"】
+        //
+        // 判据只有一条：**这一轮读到的两份输入，与上一次尝试相比动过吗**。
+        //   * 动过 ⇒ 其中至少一份可能还没跟上另一份，值得在下一个安全点再看一眼；
+        //   * 没动 ⇒ 再试一百次也是同一个答案：那就是结论，该发布（并报 WARN）。
+        //
+        // 推迟的代价是"界面晚 20~120 ms 才看到新片段"，收益是"不会把一次 100 ms 的
+        // 竞态写成一条永久无源的 clip"。预算（[`ASSEMBLY_RETRY_BUDGET`]）保证拖动
+        // item 期间（清单每一代都在变）不会无限推迟。
+        {
+            let now = std::time::Instant::now();
+            let consumed = *self.assembly_consumed.lock_or_recover();
+            let mut since = self.assembly_deferred_since.lock_or_recover();
+            let defer =
+                should_defer_assembly(assembly.unbound.len(), consumed, inputs, *since, now);
+            if defer {
+                if since.is_none() {
+                    *since = Some(now);
+                }
+                drop(since);
+                // 【"输入动过"这一轮也算被消费了】否则同一个代次会被反复判成"动过" ——
+                // 下一次尝试就会带着同样的输入再推迟一次，预算被白白烧掉。
+                *self.assembly_consumed.lock_or_recover() = Some(inputs);
+                self.log_item_map(&assembly, &rows, inputs, true);
+                return Ok(AssemblyOutcome::Deferred);
+            }
+        }
         // region key → clip id：由 `spans` 反算。**这是唯一写 `clip_ids` 的地方** ——
         // 此前它由映射层与清单层各写一次，于是"身份升级"窗口里两边各说一套，
         // `workspace_timeline_locked` 按 id 过滤会把全部 clip 滤掉。
@@ -1583,7 +2114,17 @@ impl DocumentSession {
             }
         }
         let mut timeline = assembly.timeline(&tracks, crate::ara::mapping::default_bpm());
-        self.log_item_map(&assembly, &rows);
+        self.log_item_map(&assembly, &rows, inputs, false);
+        // 这一轮真的发布了 ⇒ 推迟窗口结束（下一次竞态重新计时）。
+        *self.assembly_consumed.lock_or_recover() = Some(inputs);
+        *self.assembly_deferred_since.lock_or_recover() = None;
+        if inherited > 0 {
+            // 解释性跟踪：拖动 item 期间它每一轮都可能 > 0 —— 那正是这条继承在起作用，
+            // 属于竞态的自愈，用户不需要为此做任何事，所以不是 WARN。
+            log::debug!("[ara] inherited the media identity of {inherited} clip(s) this round");
+        }
+        // 这一轮已经把**当前**两份输入都消费掉了（含中途到达的那一份）。
+        self.assembly_dirty.store(false, Ordering::Release);
         *self.clip_ids.lock_or_recover() = ids;
         *self.assembly_spans.lock_or_recover() = assembly.spans.clone();
         *self.assembly_unbound.lock_or_recover() = assembly.unbound.clone();
@@ -1625,7 +2166,7 @@ impl DocumentSession {
             }
             *slot = Some(timeline);
         }
-        Ok(())
+        Ok(AssemblyOutcome::Published)
     }
 
     /// `[ara] item map` —— **真读数**。
@@ -1638,6 +2179,8 @@ impl DocumentSession {
         &self,
         assembly: &hifishifter_kernel::editor::assembly::Assembly,
         rows: &[hifishifter_kernel::editor::assembly::RegionRow],
+        inputs: (u64, u64),
+        deferred: bool,
     ) {
         let items = assembly.clips.len();
         let attached: usize = assembly.spans.values().map(Vec::len).sum();
@@ -1657,6 +2200,27 @@ impl DocumentSession {
             rows.len(),
             assembly.unbound.len()
         );
+        // 【为什么这条读数必须出现在默认档】`verbosity=low` ⇒ `LevelFilter::Warn`
+        // （`kernel/log_policy.rs`），所以上面那行 `info!` 在真机上**一行都没有**。
+        // 而"一个 item 到底吃掉了几条 region、有几条挂不上"正是"粘贴出来的片段一直
+        // 等宿主音频"这个问题的第一现场 —— 查了三轮才拿到实锤，就是因为这个。
+        //
+        // 只在**不干净**时发：稳态（每条 region 都挂上、每条 item 只吃一条）下这行
+        // 没有任何信息量，而它会随每次清单刷新重跑。带上两个代次，是为了让"哪一份
+        // 输入是旧的"从此不必再推。
+        if !assembly.unbound.is_empty() || multi > 0 {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.item-map",
+                format_args!(
+                    "[ara] item map: items={items} regions={} unbound={} multi={multi}                      items_stamp={} regions_stamp={} deferred={deferred}",
+                    rows.len(),
+                    assembly.unbound.len(),
+                    inputs.0,
+                    inputs.1,
+                ),
+            );
+        }
         // 【为什么循环要单独一行】周期未知时内核会退化成"完全不循环、后半段静音"，
         // 而那在插件里无法与"宿主没给音频"区分 —— 用户只会以为素材坏了。
         for clip in assembly.clips.iter().filter(|clip| clip.loop_enabled) {
@@ -1682,7 +2246,10 @@ impl DocumentSession {
         }
         // 【挂不上的 region 必须能归因】它们不画、不渲染，只进读数；不报出来就等于
         // "宿主给了、我们丢了"，而用户看到的只是"某一段不见了"。
-        for index in &assembly.unbound {
+        // 【推迟的那一轮不逐条报】下一轮要么已经挂上（这些 region 就不该再报），要么在
+        // 发布时统一报一次（上面的汇总行）。逐条报会让同一条 region 每 20 ms 刷一行，
+        // 而它恰好是"清单每一代都在变"的拖动期间。
+        for index in assembly.unbound.iter().filter(|_| !deferred) {
             let Some(row) = rows.get(*index) else {
                 continue;
             };
@@ -1898,7 +2465,7 @@ impl DocumentSession {
         Ok(())
     }
     /// 文档惰性持有唯一原编辑actor；actor只弱引用文档，组件不持第二份history。
-    pub(crate) fn editor_session(
+    pub fn editor_session(
         self: &Arc<Self>,
     ) -> Result<Arc<crate::editor::session::EditorSession>, String> {
         // UI command routing must not acquire the PCM/geometry transaction.
@@ -2781,13 +3348,27 @@ impl DocumentSession {
             return Err("automatic apply superseded".into());
         }
         let mut prepared = Vec::new();
-        for (owner, keys, mut input) in inputs {
+        // 【一个作业要渲染多个 owner 时，进度必须**分段聚合**】
+        //
+        // 每个 owner 的 `render_with_progress` 都从 0 走到 1。此前它们共用一个回调，
+        // 而回调侧有一条"不得回退"的判据（那是对的：回退对用户是纯粹的故障信号）——
+        // 于是第二个 owner 的 0 被挡掉、随后每个中间值也被挡掉，显示**一直停在 100%**
+        // 直到作业结束。把第 i 个 owner 的 0..1 折算到 `[i/n, (i+1)/n)` 之后，整份作业
+        // 天然单调，且最后一个 owner 的 1.0 恰好等于整份作业的 1.0。
+        let owners = inputs.len().max(1);
+        for (index, (owner, keys, mut input)) in inputs.into_iter().enumerate() {
             for publisher in &owner.snapshots {
                 publisher.collect_retired();
             }
             let window = self.plan_render_window(&input, owner.as_ref());
             input.window = window;
-            let snapshots = input.render_with_progress(cancel.clone(), progress.clone())?;
+            let slice = progress.clone().map(|callback| {
+                hifishifter_kernel::mixdown::ProgressCallback::new(move |value: f64| {
+                    let value = value.clamp(0.0, 1.0);
+                    callback.call((index as f64 + value) / owners as f64);
+                })
+            });
+            let snapshots = input.render_with_progress(cancel.clone(), slice)?;
             prepared.push((owner, keys, snapshots));
         }
         let _transaction = self.transaction.lock_or_recover();
@@ -4664,10 +5245,53 @@ impl DocumentSession {
                     "busy": busy,
                     "error": error,
                     "prepared": owner.prepared_snapshot(),
+                    // 宿主是否仍在读我们的输出。它是"编辑完没有声音 / 算了但没人要"这类
+                    // 报障里最先要排除的一格：bypassed 说明渲染被有意跳过（见 prepare）。
+                    "host_bypass": owner.host_bypass().as_str(),
+                    // 【读数有多旧】`Unknown` 与"很久没采过"是两件不同的事：前者是
+                    // 宿主不提供这一族 API（非 REAPER），后者是本插件没找到采样时机。
+                    // 报障时这一格能直接分开它们（"旁通了还在渲染"最常见的原因就是
+                    // 这一格一直是 `None`）。
+                    "host_bypass_age_ms": owner.host_bypass_age().map(|age| age.as_millis() as u64),
+                    // 【确定读数有多旧】`None` = 从来没读到过。它与上面那一格合起来能
+                    // 分开"没采过"（两格都是 None）与"采了但没读到"（上面有值、这里 None）。
+                    "host_bypass_verdict_age_ms": owner
+                        .host_bypass_verdict_age()
+                        .map(|age| age.as_millis() as u64),
+                    // 这一票到底算不算数（确定 + 新鲜）。渲染门的判据就是它。
+                    "host_bypass_vote": owner.fresh_host_bypass().map(|verdict| verdict.as_str()),
+                    // 【我挂在哪条链上】`track-fx` / `take-fx` / `unbound`。旁通读的
+                    // 是哪条链、清单枚举了哪一段、能力位关掉了哪几项，全由它派生 ——
+                    // "旁通了还在渲染"的第一格要排除的就是它是不是被读错了位置。
+                    "host_placement": owner.host_placement().as_str(),
                 })
             })
             .collect::<Vec<_>>();
-        serde_json::json!({ "renderers": renderers })
+        let placements = self
+            .renderer_owners()
+            .into_iter()
+            .map(|owner| owner.host_placement().as_str())
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "renderers": renderers,
+            // 每个活实例的放置位置（顺序与 `renderers` 无关，仅供总览）。
+            "placements": placements,
+            // 【文档级的门此刻是怎么算出来的】渲染门只看这一格。它等于
+            // `combine(renderers[].host_bypass_vote)`，把两个数组放在一起就能一眼看出
+            // "为什么门没关上"：是没人投票，还是有人投了 `active`。
+            "bypass_verdict": self.host_bypass().as_str(),
+            // 【装配的两份输入各写到第几代】见 `assembly_consumed`：两者不同步时
+            // `unbound` 会先被推迟一轮，而这一对数字就是"谁还没跟上"的答案。
+            "assembly_inputs": {
+                "ui_tracks_stamp": self.ui_tracks_stamp.load(Ordering::Acquire),
+                "region_rows_stamp": self.region_rows_stamp.load(Ordering::Acquire),
+                "consumed": self.assembly_consumed.lock_or_recover().map(|(items, regions)| {
+                    serde_json::json!({ "ui_tracks_stamp": items, "region_rows_stamp": regions })
+                }),
+                "deferred": self.assembly_deferred_since.lock_or_recover().is_some(),
+                "unbound": self.assembly_unbound.lock_or_recover().len(),
+            },
+        })
     }
 
     /// 记一次"宿主侧发生了变化，渲染许可随之失效"。
@@ -4992,6 +5616,7 @@ clips_src={clips_src} dupes={dupes}}}"
 
     pub fn invalidate_render_input(&self) {
         self.render_epoch.fetch_add(1, Ordering::AcqRel);
+        self.note_render_epoch_pressure();
         let owners = self
             .renderers
             .lock_or_recover()
@@ -5000,7 +5625,137 @@ clips_src={clips_src} dupes={dupes}}}"
             .filter(|owner| !owner.is_closed())
             .collect::<Vec<_>>();
         for owner in owners {
+            // 【先刷新旁通缓存，再通知重排】重排是否真的发生取决于各 owner 自己缓存里的
+            // 旁通读数；缓存还是旧的时，刚被解除旁通的那个实例会以"我被旁通了"为由
+            // 直接返回，用户解除旁通后仍然没有声音。
+            owner.refresh_host_bypass_cache();
             owner.prepare();
+        }
+    }
+
+    /// **这份工程**此刻还会不会出声（三态，见 `FxBypass`）。
+    ///
+    /// 【为什么是"派生"而不是"存一格"】旁通是**每个 FX** 的属性，而一个 ARA 文档里可以
+    /// 有多条轨道、每轨一个实例（`ModelHandle` 每文档一份，所有实例绑到同一个文档）。
+    /// 把结论写进共享格子，等于让"轨 1 被旁通"与"轨 2 没被旁通"互相覆盖：读数每轮都在
+    /// 两个值之间跳，而每次跳都让渲染输入失效 ⇒ 每个实例每 100 ms 重算一整次神经合成
+    /// （用户看到的就是"无限渲染"），而且轨 2 会跟着轨 1 一起静音。
+    ///
+    /// 所以这里**只读各实例自己的读数**，用 `fx_state::combine` 合成：只有全部**有读数**
+    /// 的实例都确定被旁通，才算这份工程不会出声。
+    ///
+    /// 【为什么读数的"有没有"也算一票】上一版把"从没采到过"的实例也算成否决票
+    /// （`Unknown` ⇒ 照常渲染）。而 REAPER 的播放实例是宿主按 item 现建的，它们既没有
+    /// 视图定时器，也不会在用户按下旁通时被模型收口扫到 —— 于是一份**所有实例都被
+    /// 旁通**的工程里，只要有一个刚建好的播放实例还没被采样，结论就永远是 `Unknown`，
+    /// 门永远开着。用户看到的就是"旁通了还在渲染"。现在"没有读数"= 弃权
+    /// （见 [`crate::render::extension::ExtensionOwner::fresh_host_bypass`]），
+    /// 而不是否决。
+    pub(crate) fn host_bypass(&self) -> crate::host::reaper::FxBypass {
+        self.bypass_sample().0
+    }
+
+    /// 结论 + 每一票的来源：`(writer, 是否播放实例, 最后一次确定读数, 读数年龄 ms)`。
+    ///
+    /// 【为什么要把票源带出来】"旁通了还在渲染"只有这张表能回答：到底是**没人投出旁通**
+    /// （实例没被采样）、**有人投了反票**（读数是 `active`）、还是**票过期了**（年龄超过
+    /// `BYPASS_VERDICT_TTL`）。三种成因的治疗完全不同，而在旧日志里它们长得一模一样：
+    /// 同一个限流键、同一行 `[throttled]`，什么都看不出来。
+    ///
+    /// 【表格是给日志/诊断包的，不是判据】判据只有 [`Self::host_bypass`]。
+    pub(crate) fn bypass_sample(
+        &self,
+    ) -> (
+        crate::host::reaper::FxBypass,
+        Vec<(u64, bool, crate::host::reaper::FxBypass, Option<u64>)>,
+    ) {
+        let owners = self.renderer_owners();
+        let mut table = Vec::with_capacity(owners.len());
+        let mut votes = Vec::with_capacity(owners.len());
+        for owner in &owners {
+            let verdict = owner.host_bypass();
+            let age = owner
+                .host_bypass_verdict_age()
+                .map(|age| age.as_millis() as u64);
+            table.push((owner.writer_id(), owner.renders_playback(), verdict, age));
+            if let Some(fresh) = owner.fresh_host_bypass() {
+                votes.push(fresh);
+            }
+        }
+        // 【为什么不分"播放实例 / 编辑实例"】旁通是**这个 FX** 的属性，而一个 FX 的编辑
+        // 实例与播放实例读的是同一条 TrackFX 记录。按角色筛掉编辑实例，等于在"播放实例
+        // 还没被采样"时把唯一能说话的那一票丢掉 —— 那正是上一版的门失效的地方。
+        // 多轨工程里"轨 1 旁通、轨 2 正常"仍然成立：轨 2 的实例会说 `active`。
+        (crate::host::reaper::combine_fx_bypass(&votes), table)
+    }
+
+    /// 会话心跳：把**最该重采**的那一个实例采一次。
+    ///
+    /// 【为什么必须有这条通道】三个采样点里有两个只覆盖**可见**实例：视图定时器
+    /// （`poll_host_bypass`，要开窗口）与模型收口（`refresh_host_state_for_model`，
+    /// 要宿主改模型）。REAPER 的播放实例两样都没有 —— 用户按下旁通之后，它的缓存可以
+    /// 一直停在"上一次采样时的 active"，而渲染门正是拿它做的判据（用户报的"旁通了
+    /// 还在渲染"）。
+    ///
+    /// 【为什么一轮只采一个】实例数由宿主决定，而每次采样都是一次宿主线程往返（最坏
+    /// 250 ms）。一轮一个 + 750 ms 的间隔，几个实例就在几秒内轮一遍，而音频线程与 UI
+    /// 线程都不会被它拖住。轮不到的那些由有效期兜底：读数过期 = 弃权（照常渲染），
+    /// 绝不因为"排队没轮到"而把一条轨静音。
+    pub(crate) fn service_host_bypass_samples(&self) {
+        /// 有读数的实例：按 750 ms 保鲜（有效期 5 s，留足六次机会）。
+        const INTERVAL_MS: u64 = 750;
+        /// 从没读到过读数的实例：退到 3 s 一次。
+        ///
+        /// 【为什么要退】这类实例要么是宿主根本没给这一族 API（每次都白花一次宿主
+        /// 往返），要么这条轨上找不到本 FX。而心跳跑在会话 actor 上 —— 每 750 ms 付
+        /// 一次最坏 250 ms 的阻塞，就足以让 UI 命令排队。真正需要"随时知道"的是**已经
+        /// 读到过**的实例（旁通的跃迁）；从没读到过的那些，慢一点没有代价。
+        const NEVER_READ_MS: u64 = 3_000;
+        let owners = self.renderer_owners();
+        let Some(owner) = owners
+            .iter()
+            .filter(|owner| owner.renders_playback())
+            .max_by_key(|owner| owner.host_bypass_sample_age_ms())
+        else {
+            return;
+        };
+        let interval = if owner.host_bypass_verdict_age().is_none() {
+            NEVER_READ_MS
+        } else {
+            INTERVAL_MS
+        };
+        if owner.host_bypass_sample_age_ms() < interval {
+            return;
+        }
+        // 【为什么用 `sample_host_bypass` 而不是 `refresh_host_bypass_cache`】旁通跃迁的
+        // 两个动作（进入旁通丢队列、离开旁通重排）必须与采样在同一处发生，否则"解除
+        // 旁通之后没有声音"会以另一种形式回来。
+        owner.sample_host_bypass();
+    }
+
+    /// 一秒钟内失效太多次 ⇒ 报一次（"渲染停不下来"的唯一可查痕迹）。
+    ///
+    /// 【阈值为什么是 8】正常编辑一轮最多两三次（源物化 / 事实变化 / 旁通跃迁）；
+    /// 8 次/秒已经说明有个判据把"没变"读成了"变了"，而每一次都意味着一次完整重算。
+    fn note_render_epoch_pressure(&self) {
+        const WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+        const THRESHOLD: u32 = 8;
+        let mut window = self.render_epoch_window.lock_or_recover();
+        let now = std::time::Instant::now();
+        let (since, count) = &mut *window;
+        if since.is_none_or(|at| now.duration_since(at) >= WINDOW) {
+            *since = Some(now);
+            *count = 0;
+        }
+        *count += 1;
+        if *count == THRESHOLD {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.render.epoch-storm",
+                format_args!(
+                    "[render] the render input was invalidated {THRESHOLD} times within one second;                      something re-invalidates it every tick, so the published snapshot can never be                      reused — this is what a render that never stops looks like from the inside"
+                ),
+            );
         }
     }
 

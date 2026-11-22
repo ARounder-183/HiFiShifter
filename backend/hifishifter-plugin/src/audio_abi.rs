@@ -4,7 +4,7 @@ use std::ffi::c_void;
 
 /// SDK union 的两个成员都是同尺寸指针；只在 kSample32 下解引用。
 #[repr(C)]
-pub(crate) struct AudioBusBuffers {
+pub struct AudioBusBuffers {
     pub num_channels: i32,
     pub silence_flags: u64,
     pub channel_buffers: *mut *mut f32,
@@ -13,7 +13,7 @@ pub(crate) struct AudioBusBuffers {
 /// SDK ProcessData 的完整结构，不把可选指针字段省略为自定义前缀。
 #[repr(C)]
 #[derive(Default)]
-pub(crate) struct ProcessData {
+pub struct ProcessData {
     pub process_mode: i32,
     pub symbolic_sample_size: i32,
     pub num_samples: i32,
@@ -30,7 +30,7 @@ pub(crate) struct ProcessData {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub(crate) struct Chord {
+pub struct Chord {
     pub key_note: u8,
     pub root_note: u8,
     pub chord_mask: i16,
@@ -38,7 +38,7 @@ pub(crate) struct Chord {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub(crate) struct FrameRate {
+pub struct FrameRate {
     pub frames_per_second: u32,
     pub flags: u32,
 }
@@ -50,42 +50,42 @@ pub(crate) struct FrameRate {
 /// 之后**有没有东西进来**。面板据此把"按了录制却没有声音"的原因说清楚。
 ///
 /// 取值来自 SDK `ivstprocesscontext.h` 的 `StatesAndFlags::kPlaying = 1 << 1`。
-pub(crate) const PROCESS_CONTEXT_PLAYING: u32 = 1 << 1;
+pub const PROCESS_CONTEXT_PLAYING: u32 = 1 << 1;
 
 /// `ProcessContext::state` 的 `kRecording` 位（SDK `ivstprocesscontext.h:104`）。
 ///
 /// 捕获选举用它优先实时流：录音轨上的真实输入在实时路径上，prefetch 可能只是
 /// 预计算。它仍只是提示；缺席时由连续块与非静音证据决定。
-pub(crate) const PROCESS_CONTEXT_RECORDING: u32 = 1 << 3;
+pub const PROCESS_CONTEXT_RECORDING: u32 = 1 << 3;
 
 /// `ProcessContext::state` 的 `kCycleActive` 位（SDK `ivstprocesscontext.h:105`）。
-pub(crate) const PROCESS_CONTEXT_CYCLE_ACTIVE: u32 = 1 << 2;
+pub const PROCESS_CONTEXT_CYCLE_ACTIVE: u32 = 1 << 2;
 
 /// `projectTimeMusic` 是否有效（SDK `ivstprocesscontext.h:111`）。
-pub(crate) const PROCESS_CONTEXT_PROJECT_TIME_MUSIC_VALID: u32 = 1 << 9;
+pub const PROCESS_CONTEXT_PROJECT_TIME_MUSIC_VALID: u32 = 1 << 9;
 
 /// `tempo` 是否有效（SDK `ivstprocesscontext.h:112`）。
-pub(crate) const PROCESS_CONTEXT_TEMPO_VALID: u32 = 1 << 10;
+pub const PROCESS_CONTEXT_TEMPO_VALID: u32 = 1 << 10;
 
 /// `cycleStartMusic` / `cycleEndMusic` 是否有效（SDK `ivstprocesscontext.h:114`）。
-pub(crate) const PROCESS_CONTEXT_CYCLE_VALID: u32 = 1 << 12;
+pub const PROCESS_CONTEXT_CYCLE_VALID: u32 = 1 << 12;
 
 /// `continuousTimeSamples` 是否有效（SDK `ivstprocesscontext.h:113`）。
-pub(crate) const PROCESS_CONTEXT_CONTINUOUS_VALID: u32 = 1 << 17;
+pub const PROCESS_CONTEXT_CONTINUOUS_VALID: u32 = 1 << 17;
 
 /// `systemTime` 是否有效（SDK `ivstprocesscontext.h`，`kSystemTimeValid = 1 << 8`）。
 ///
 /// 【为什么现在才给它起名】它此前是 `transport.rs` 里的一处 `1 << 8`。把它和其余
 /// 状态位放在一起，解码 VST3 的 `state` 才只剩 `BlockContext::from_vst3` 这一处。
-pub(crate) const PROCESS_CONTEXT_SYSTEM_TIME_VALID: u32 = 1 << 8;
+pub const PROCESS_CONTEXT_SYSTEM_TIME_VALID: u32 = 1 << 8;
 
 /// `timeSigNumerator` / `timeSigDenominator` 是否有效（`kTimeSigValid = 1 << 13`）。
-pub(crate) const PROCESS_CONTEXT_TIME_SIG_VALID: u32 = 1 << 13;
+pub const PROCESS_CONTEXT_TIME_SIG_VALID: u32 = 1 << 13;
 
 /// 完整 SDK 时间上下文；project_time_samples 始终有效，不依赖音乐时间有效位。
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub(crate) struct ProcessContext {
+pub struct ProcessContext {
     pub state: u32,
     pub sample_rate: f64,
     pub project_time_samples: i64,
@@ -102,6 +102,23 @@ pub(crate) struct ProcessContext {
     pub smpte_offset_subframes: i32,
     pub frame_rate: FrameRate,
     pub samples_to_next_clock: i32,
+}
+
+/// `Vst::ProcessSetup`。
+///
+/// 【为什么和缓冲结构住在一起】它同样是"以锁定 SDK 的原生布局为契约"的镜像结构，
+/// 且布局基准（`expected_layout`）要逐项枚举它 —— 放在 VST3 外壳里会让共享层的
+/// 布局清单反向引用壳（壳提取后那是另一个 crate）。
+#[repr(C)]
+pub struct ProcessSetup {
+    /// `Vst::ProcessModes`。
+    pub process_mode: i32,
+    /// `Vst::SymbolicSampleSizes`。
+    pub symbolic_sample_size: i32,
+    /// 单块最大样本数。
+    pub max_samples_per_block: i32,
+    /// 采样率。
+    pub sample_rate: f64,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -139,7 +156,7 @@ fn validate_bus(bus: &AudioBusBuffers) -> Result<(), BufferError> {
 /// # Safety
 /// 宿主须提供合法对齐的 SDK 结构、声明数量的总线/通道数组与至少 num_samples 帧的
 /// 可写非空 plane。inactive plane 可以为 null。指针只在当前回调使用，不保留。
-pub(crate) unsafe fn validate(data: *mut ProcessData) -> Result<(), BufferError> {
+pub unsafe fn validate(data: *mut ProcessData) -> Result<(), BufferError> {
     if data.is_null() {
         return Err(BufferError::InvalidArgument);
     }
@@ -195,7 +212,7 @@ pub(crate) unsafe fn validate(data: *mut ProcessData) -> Result<(), BufferError>
 /// # Safety
 /// 与 [`validate`] 相同：`data` 指向本回调独占的合法 SDK 结构，非空 plane 至少含
 /// `num_samples` 帧。
-pub(crate) unsafe fn block_from_vst3<'a>(
+pub unsafe fn block_from_vst3<'a>(
     data: *mut ProcessData,
 ) -> Option<crate::audio_block::AudioBlock<'a>> {
     if data.is_null() {
@@ -242,7 +259,7 @@ pub(crate) unsafe fn block_from_vst3<'a>(
 /// 【为什么单独暴露】[`block_from_vst3`] 用它拼整块描述；只关心输出平面的调用点
 /// （分层拷贝、接缝去咔的用例）也用它，从而不必各自复述“指针数组在哪、静音掩码写回
 /// 哪里”。
-pub(crate) fn output_bus<'a>(bus: &'a mut AudioBusBuffers) -> crate::audio_block::OutputBus<'a> {
+pub fn output_bus<'a>(bus: &'a mut AudioBusBuffers) -> crate::audio_block::OutputBus<'a> {
     let pointers: &'a mut [*mut f32] = if bus.num_channels > 0 && !bus.channel_buffers.is_null() {
         // SAFETY: 调用方保证 `num_channels` 个平面指针在本回调期间有效且独占。
         unsafe { std::slice::from_raw_parts_mut(bus.channel_buffers, bus.num_channels as usize) }
@@ -254,7 +271,7 @@ pub(crate) fn output_bus<'a>(bus: &'a mut AudioBusBuffers) -> crate::audio_block
 /// 仅在完整校验后清输出；playback renderer失败/停播仍清零，纯editor不走此入口。
 /// # Safety
 /// 与validate相同，非空output plane必须有至少num_samples可写帧。
-pub(crate) unsafe fn clear_outputs(data: *mut ProcessData) -> Result<(), BufferError> {
+pub unsafe fn clear_outputs(data: *mut ProcessData) -> Result<(), BufferError> {
     unsafe {
         validate(data)?;
     }
@@ -298,7 +315,7 @@ pub(crate) fn silence_mask(declared: usize) -> u64 {
 /// # Safety
 /// 调用方保证 `data` 指向当前回调独占的 SDK 结构；非空 plane 至少含 `num_samples` 个
 /// 宿主声明宽度的样本。
-pub(crate) unsafe fn silence_unsupported_sample_size(data: *mut ProcessData) -> bool {
+pub unsafe fn silence_unsupported_sample_size(data: *mut ProcessData) -> bool {
     if data.is_null() {
         return false;
     }
@@ -409,7 +426,7 @@ pub(crate) unsafe fn capture_view<'a>(
 /// 可以共用一份基准。
 #[cfg(test)]
 fn abi_layout_entries() -> Vec<(&'static str, usize)> {
-    use crate::vst3::ProcessSetup;
+    use crate::audio_abi::ProcessSetup;
     use std::mem::{align_of, offset_of, size_of};
 
     macro_rules! kind {
@@ -574,7 +591,7 @@ mod abi_baseline {
 #[cfg(all(test, target_os = "windows", target_arch = "x86_64"))]
 mod layout_tests {
     use super::*;
-    use crate::vst3::ProcessSetup;
+    use crate::audio_abi::ProcessSetup;
     use std::mem::{align_of, offset_of, size_of};
     use std::path::PathBuf;
     use std::process::Command;

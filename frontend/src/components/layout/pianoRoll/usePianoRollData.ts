@@ -77,8 +77,7 @@ export function usePianoRollData(args: {
      * 笔画期间**统一推迟** `paramView` 的后端驱动变更的台账。
      *
      * 【为什么必须统一】`paramView` 一旦在笔画中途被换掉，live 覆盖层要么被重锚、
-     * 要么被清空，正在画的轨迹随之消失（见
-     * docs/plans/2026-09-26-volume-dyn-drag-trail-fix.md）。此前只在取数 effect 与
+     * 要么被清空，正在画的轨迹随之消失。此前只在取数 effect 与
      * 部分**落地**处设了守卫，三处入口没有覆盖：
      *
      * 1. `refreshNow` / `refreshSecondaryNow` 的**发起**（显式立即取数）；
@@ -279,8 +278,7 @@ export function usePianoRollData(args: {
     // 【笔画期间为什么推迟】`paramsEpoch` 由**任何** timeline 更新递增（十余处），
     // 因此这个 effect 会在笔画进行中重跑。置空 `paramView` 的后果不是"闪一下"而是
     // **整条轨迹消失**：live 覆盖层随窗口键变化被撤下，后续 pointermove 读到的
-    // `paramViewRef.current` 变成 null，什么都不再画（见
-    // docs/plans/2026-09-26-volume-dyn-drag-trail-fix.md）。故与取数同一契约：
+    // `paramViewRef.current` 变成 null，什么都不再画。故与取数同一契约：
     // 笔画期间只记待办（`force` —— 数据确实变了，补触发必须强制取数），pointer-up
     // 由 `notifyLiveEditEnded()` 补触发。
     //

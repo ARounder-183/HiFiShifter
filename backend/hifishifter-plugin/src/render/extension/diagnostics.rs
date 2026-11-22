@@ -25,6 +25,7 @@ impl ExtensionOwner {
     pub(crate) fn note_buffer_audit(
         &self,
         audit: crate::audio_block::BufferAudit,
+        scrubbed: usize,
         aliased: usize,
         in_place: bool,
         frames: usize,
@@ -35,6 +36,8 @@ impl ExtensionOwner {
             .store(frames as u32, Ordering::Relaxed);
         self.buffer_audit_unwritten
             .fetch_max(audit.unwritten as u64, Ordering::Relaxed);
+        self.buffer_audit_scrubbed
+            .fetch_max(scrubbed as u64, Ordering::Relaxed);
         self.buffer_audit_aliased
             .fetch_max(aliased as u32, Ordering::Relaxed);
         self.buffer_audit_in_place
@@ -51,10 +54,14 @@ impl ExtensionOwner {
         // 【aliased / in_place 为什么必须进日志】它们是"这一块本来就不该预填"的
         // 现场证据：in-place 宿主上 unwritten=0 + aliased=2 是健康形状，而
         // unwritten>0 才是真的漏写。没有这两栏，现场只能看到一条无法归因的 0。
+        // scrubbed 是漏写发生时被清成 0 的非有限样本数（见 `render_block`）——
+        // 它曾经由音频线程当场 log::debug!，但那正是漏写引发的掉线现场，
+        // 抢日志锁只会放大故障；改由这里随周期行带出。
         let line = format!(
-            "[buf] audit: channels={} frames={} unwritten={unwritten} aliased={} in_place={} output={}",
+            "[buf] audit: channels={} frames={} unwritten={unwritten} scrubbed={} aliased={} in_place={} output={}",
             self.buffer_audit_channels.load(Ordering::Acquire),
             self.buffer_audit_frames.load(Ordering::Acquire),
+            self.buffer_audit_scrubbed.load(Ordering::Acquire),
             self.buffer_audit_aliased.load(Ordering::Acquire),
             self.buffer_audit_in_place.load(Ordering::Acquire),
             self.capture_output().as_str(),
@@ -71,8 +78,15 @@ impl ExtensionOwner {
     }
 
     /// 门控清掉一块（诊断用）。按流分开计数：prefetch/offline 的清零必须是 0。
-    pub(crate) fn note_gate_cleared(&self, stream: ProcessStream) {
+    ///
+    /// `rolling` = 本块所在的传输相位是 `Rolling`（位置确实在推进）。那种块"会被
+    /// 播出来"，门关掉它就是一次真正的静音断点，因此单独计数（见
+    /// `gate_cleared_rolling` 的说明）。
+    pub(crate) fn note_gate_cleared(&self, stream: ProcessStream, rolling: bool) {
         self.gate_cleared.fetch_add(1, Ordering::Relaxed);
+        if rolling {
+            self.gate_cleared_rolling.fetch_add(1, Ordering::Relaxed);
+        }
         self.stream_gate_cleared[stream.index()].fetch_add(1, Ordering::Relaxed);
     }
 
@@ -199,7 +213,7 @@ impl ExtensionOwner {
     }
 
     /// 块级诊断的 JSON（非音频线程）。`trace_limit` 控制环形记录条数。
-    pub(crate) fn block_diagnostics_json(&self, trace_limit: usize) -> serde_json::Value {
+    pub fn block_diagnostics_json(&self, trace_limit: usize) -> serde_json::Value {
         let capture = self.capture.capture_diagnostics().map(|capture| {
             serde_json::json!({
                 "preroll_frames_dropped": capture.preroll_frames_dropped,
@@ -277,6 +291,7 @@ impl ExtensionOwner {
             "blocks_playing": self.blocks_playing.load(Ordering::Acquire),
             "blocks_flow_without_playing": self.blocks_flow_without_playing.load(Ordering::Acquire),
             "gate_cleared": self.gate_cleared.load(Ordering::Acquire),
+            "gate_cleared_rolling": self.gate_cleared_rolling.load(Ordering::Acquire),
             "bound_snapshot_fallback": self.bound_snapshot_fallback.load(Ordering::Acquire),
             "continuous_used": self.continuous_used.load(Ordering::Acquire),
             "music_used": self.music_used.load(Ordering::Acquire),

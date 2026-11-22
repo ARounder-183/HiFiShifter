@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""跳过清单里的每个测试名都必须在当前 Rust 源码中可解析。
+"""Every test name in the skip list must be resolvable in the current Rust sources.
 
-cargo test --skip 对不存在的名字是静默 no-op；清单因此会在测试被删除或重命名后
-继续看起来像一条有效豁免。这里用源码全文检索做最低成本的自校验。
+`cargo test --skip` is a silent no-op for names that do not exist, so the list
+keeps looking like a valid exemption after a test is deleted or renamed. A
+full-text search of the sources is the cheapest possible self-check here.
 
-退出码：0 = 全部可解析，1 = 存在悬空条目。
+Exit codes: 0 = all names resolve, 1 = dangling entries exist.
 """
 
 from __future__ import annotations

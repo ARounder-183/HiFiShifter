@@ -27,7 +27,11 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "$repo_root/backend/src-tauri"
+# The measurement lives in the kernel crate's streaming_pitch module, so the
+# `cargo test --lib` below must resolve to hifishifter-kernel's lib target.
+# From backend/src-tauri it would select the app crate's lib, match zero tests,
+# and still exit 0 -- measuring nothing while looking green.
+cd "$repo_root/backend/hifishifter-kernel"
 
 echo "==> measuring pitch-analysis peak working set"
 cargo test --lib -- --ignored --test-threads=1 pitch_memory --nocapture

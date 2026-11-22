@@ -12,7 +12,7 @@ use hifishifter_kernel::state::*;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -69,6 +69,16 @@ const ANALYSIS_PENDING_CEILING: Duration = Duration::from_secs(60);
 /// 5 秒超时**。分析本来就慢，用 1 s 轮询足够；而分析一有进展，
 /// `refresh_analysis()` 会立刻重新武装成 150 ms，不会拖慢正常收敛。
 const ANALYSIS_PENDING_RETRY: Duration = Duration::from_secs(1);
+
+/// 音节分析结果被当前 Clip/Take 身份拒收的稳定措辞（提交闸的终态错误）。
+///
+/// 【为什么是常量】产生点（[`Self::commit_syllable_value`]）与分类点（把过期结果
+/// 判成 `errorKind: "terminal"` 的回执分支）分处同文件两端，此前两边各写字面量：
+/// 任何一处改措辞，终态就被判成 transient，前端对一份永远重试不成功的结果持续
+/// 自动重试。产生点会带 ": clip removed" 这类上下文后缀，分类按子串命中 ——
+/// 常量保证子串出现（与 `editor::errors` 的常量纪律同源，只是双方都在本文件内，
+/// 无需占用协议码）。
+const STALE_SYLLABLE_ANALYSIS: &str = "stale syllable analysis result";
 
 /// 自动渲染重试的本地状态（只属于 actor 循环，不跨线程）。
 struct RetryState {
@@ -190,7 +200,7 @@ fn render_retry_action(streak: u32) -> RenderAction {
 }
 
 #[derive(Clone)]
-pub(crate) struct UiSink {
+pub struct UiSink {
     pub view_id: String,
     pub reply: mpsc::Sender<Value>,
     pub events: mpsc::SyncSender<Value>,
@@ -209,7 +219,7 @@ impl UiSink {
         }
     }
 }
-pub(crate) struct UiRequest {
+pub struct UiRequest {
     pub id: u64,
     pub command: String,
     pub args: Value,
@@ -326,6 +336,55 @@ pub(super) fn syllable_source_digest(
     hasher.finalize().to_hex().to_string()
 }
 
+/// 后台 apply 作业的阶段。
+///
+/// 【为什么进度必须带阶段】混音算完（`MixdownProgress::finish()` 会 `emit(1.0)`）到
+/// 快照真正发布之间还有一段（发布 + `record_prepared`），而 `rendering_active` 要等
+/// 作业结束才落。没有阶段名时那一段只能显示成"渲染中 100%" —— 一句会停留上百毫秒的
+/// 假话（用户报障："进度要么没有，要么一直 100%"）。
+///
+/// 有了阶段之后，判据变成"只有 `Synthesizing` 才有百分比"：
+///   * `Preparing` —— 在物化素材 / 预检预算，进度**还不知道**，但阶段是明确的；
+///   * `Synthesizing` —— 有真实的 0..1 读数；
+///   * `Publishing` —— 算完了，正在发布；此时报百分比就是那句假话。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    Idle,
+    Preparing,
+    Synthesizing,
+    Publishing,
+}
+
+impl Stage {
+    fn encode(self) -> u8 {
+        match self {
+            Self::Idle => 0,
+            Self::Preparing => 1,
+            Self::Synthesizing => 2,
+            Self::Publishing => 3,
+        }
+    }
+
+    /// 未知编码一律落回 `Idle`（= 不报阶段，也不报进度）。
+    fn decode(raw: u8) -> Self {
+        match raw {
+            1 => Self::Preparing,
+            2 => Self::Synthesizing,
+            3 => Self::Publishing,
+            _ => Self::Idle,
+        }
+    }
+
+    fn as_str(self) -> Option<&'static str> {
+        match self {
+            Self::Idle => None,
+            Self::Preparing => Some("preparing"),
+            Self::Synthesizing => Some("synthesizing"),
+            Self::Publishing => Some("publishing"),
+        }
+    }
+}
+
 /// 单个可取消DSP任务；编辑actor只收结果，计算线程不改GUI历史或参数权威。
 struct RenderTask {
     ticket: u64,
@@ -400,6 +459,103 @@ struct Loaded {
     view: Option<Arc<crate::render::document::WorkspaceView>>,
     reverse_paths: HashMap<String, String>,
 }
+/// 「自动写入 Take 音高」的静默窗：最后一笔音高编辑之后多久才写。
+///
+/// 【为什么是 400 ms】心跳 100 ms 一轮 ⇒ 总延迟约 0.5 s，用户感觉是"跟着走"；而一般的
+/// 手势内停顿（抬手换工具、看一眼）都长于这个数 —— 一次手势只写一次宿主。
+const AUTO_PITCH_WRITE_QUIET: Duration = Duration::from_millis(400);
+
+/// 单轮最多发多少条片段（见 [`EditorSession::service_auto_pitch_write`] 的批次说明）。
+const AUTO_PITCH_WRITE_BATCH: usize = 64;
+
+/// 「算不出包络」这个状态的指纹值。
+///
+/// 【为什么它必须是一个确定的值】分析还没落地的片段每一轮都会被算成"没有包络"；若把它
+/// 当成"和谁都不一样"，这些片段会在每一轮里反复进批次（而它们本来就会被导出侧跳过）。
+const AUTO_PITCH_WRITE_NO_ENVELOPE: u64 = 0;
+
+/// 「自动写入 Take 音高」的记账（消费点在 [`EditorSession::service_auto_pitch_write`]）。
+///
+/// 【为什么状态挂在会话上】它回答的是「这条**时间线**上哪条片段的包络与音高线不同步」，
+/// 而时间线、包络的数学、宿主 take 都是会话级事实 —— 换一个工程就是另一份。
+///
+/// 【为什么按片段记指纹，而不是把轨道记成「脏」】一条轨道上通常挂着多条片段，用户一般只改
+/// 其中一段；按轨道记会把整条轨道的片段全部重写一遍（每条一次宿主 chunk 读写 + 一次 item
+/// 重建）。指纹把写入收敛到「真的会变的那几条」，也让撤销（窗口未知）有了可用的判据。
+#[derive(Default)]
+struct AutoPitchWrite {
+    /// 「这次编辑停手了」的到期时刻；`None` = 没有待办。
+    due: Option<Instant>,
+    /// 待扫描的帧窗口（轨道 id → 本轮改过的帧区间，取并按轨道合并）。
+    ///
+    /// 【为什么按轨道取并集而不是逐笔记】一次拖动会写出上百笔相邻窗口；取并集只是把候选
+    /// 片段放宽几帧，而放宽的部分由指纹兜住 —— 反过来（逐笔记）会让待办无界增长。
+    windows: HashMap<String, (u32, u32)>,
+    /// 「不知道改了哪里」的待办（撤销 / 重做：整份权威被换掉）。
+    ///
+    /// 这时扫描集不是全部片段，而是**我们写过的那些** —— 没写过的片段没有"应该是什么"的
+    /// 答案，主动补写等于替用户做他从未要求过的事。
+    sweep: bool,
+    /// 上一次**成功写进宿主**的包络指纹（片段 id → 指纹）。
+    written: HashMap<String, u64>,
+    /// 上一轮因批次上限没发出去的片段（连同算好的指纹）：下一轮直接发，不再扫描。
+    deferred: Vec<(String, u64)>,
+}
+
+/// 这条曲线的改动会不会改变「会写进 take 的那条音高包络」。
+///
+/// 【为什么连子轨音分也算】导出侧的包络不是"音高线"本身：它是根轨道的 `pitch_edit` 经
+/// `apply_child_pitch_offset_to_midi` 加上子轨的音分 / 度数差、再减去原线得来的（见
+/// `compute_clip_export_pitch_offsets`）。子轨音分是**另一条**参数曲线
+/// （`child_pitch_offset_cents@<track>`），改它同样会让包络不同 —— 而它和音高线一样，
+/// 是用户眼里的"音高参数"。
+fn is_pitch_curve_param(param: &str) -> bool {
+    param == "pitch" || param.starts_with("child_pitch_offset_")
+}
+
+/// 一条片段此刻会写进宿主的包络指纹。
+///
+/// 【为什么指纹取"算出来的包络点"而不是"音高线的一段"】包络还取决于原线、子轨音分、
+/// 音阶分段、未识别帧填充档位与片段几何；任何一项变了，写进去的东西就不同。直接对**要写
+/// 的东西**取指纹，判据就只剩一条："这份字节和上次那份一样吗"。
+fn auto_pitch_write_fingerprint(
+    timeline: &TimelineState,
+    clip: &Clip,
+    policy: &hifishifter_kernel::pitch_bridge::UnvoicedFillPolicy,
+    frame_period_ms: f64,
+) -> u64 {
+    let Some(offsets) =
+        hifishifter_kernel::pitch_editing::compute_clip_take_pitch_offsets(timeline, clip, policy)
+    else {
+        return AUTO_PITCH_WRITE_NO_ENVELOPE;
+    };
+    let points = hifishifter_kernel::pitch_bridge::build_take_pitch_points(
+        &offsets,
+        frame_period_ms,
+        clip.length_sec.max(0.0),
+        super::commands::pitch_bridge_rate(clip),
+    );
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for point in points {
+        hash = fnv1a_step(hash, point.time.to_bits());
+        hash = fnv1a_step(hash, point.value.to_bits());
+    }
+    // 【空包络也要一个非零值】"算得出、但一个点都不该写"（整段平坦）与"算不出来"是两件
+    // 不同的事：前者要真的去删掉宿主的包络，后者什么都不该做。空点集的 FNV 初值本身就
+    // 非零，所以两者天然分得开。
+    hash
+}
+
+/// FNV-1a 的续算：这里只要"一样不一样"，不需要抗碰撞强度。
+fn fnv1a_step(hash: u64, value: u64) -> u64 {
+    let mut hash = hash;
+    for byte in value.to_le_bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 /// 本会话的**时间线/参数从哪里来**。
 ///
 /// 【为什么需要一个显式来源，而不是"有没有文档"这个隐含判据】`EditorSession` 此前
@@ -444,7 +600,7 @@ impl Default for PlayheadGaps {
     }
 }
 
-pub(crate) struct EditorSession {
+pub struct EditorSession {
     /// 时间线/参数来源（[`SessionBacking`]）。
     ///
     /// 【为什么不拆成两个字段】两者互斥，而且几乎每个使用点都要先回答"我有没有文档"。
@@ -554,6 +710,15 @@ pub(crate) struct EditorSession {
     /// 【什么时候清】素材变化时（重新加载时间线把 `pitch_orig_key` 全部清空的那一刻）：
     /// 那是"该为新素材重新分析"的唯一语义点，也是一次新的、值得等待的机会。
     analysis_abandoned: Mutex<std::collections::BTreeSet<String>>,
+    /// 「自动写入 Take 音高」的记账（见 [AutoPitchWrite] 与
+    /// [Self::service_auto_pitch_write]）。
+    auto_pitch_write: Mutex<AutoPitchWrite>,
+    /// 导入方向正在写参数线：那期间**不得**触发自动写入。
+    ///
+    /// 【为什么必须有】导入会把 take 音高折进 `pitch_edit`；若不抑制，导入结束 400 ms 后
+    /// 就会来一次自动导出，而导出的 `D_PITCH = 0` 会把导入方向刻意保留在宿主侧的 Item
+    /// 音高偏移抹掉（见 `commands.rs` 开头"两侧各管各的"那一段）。
+    suppress_auto_pitch_write: AtomicBool,
     submitted: AtomicU64,
     processed: AtomicU64,
     pub(super) applied: AtomicU64,
@@ -572,6 +737,19 @@ pub(crate) struct EditorSession {
     pub(super) error: Mutex<Option<String>>,
     render_error: Mutex<Option<String>>,
     render_requested: AtomicBool,
+    /// `rearm_render` 被调用的累计次数（诊断/回归读数；见该字段的说明）。
+    ///
+    /// 【为什么要有它】`render_requested` 是 actor 的**待办标志**：渲染一旦跑完就被清回
+    /// false，跨线程的观察者（回归测试）可能根本看不到它为真的一瞬。这个单调计数只在
+    /// `rearm_render` 里加一，"有没有人请求过渲染"因此是一个稳定的读数。
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    rearm_requests: AtomicU64,
+    /// 上一次写进日志的"旁通门结论"（`0` = 还没写过 / `1` = 照常渲染 / `2` = 跳过作业）。
+    ///
+    /// 【为什么只记结论不记读数】这条日志的用途是回答"旁通了为什么还在渲染"，而那只有
+    /// 结论**变化**的那一刻才看得出来；按变化记，一份几小时的现场日志只会多出个位数行，
+    /// 按采样记就是每秒几十行。
+    bypass_gate_logged: AtomicU8,
     /// 播放位置采样的节奏读数（见 `note_playhead_sample`）。
     playhead_gaps: Mutex<PlayheadGaps>,
     /// "在播、但位置一秒没动"的观测起点（见 `note_transport_stall`）。
@@ -587,6 +765,35 @@ pub(crate) struct EditorSession {
     /// 快照；两者之间不能加锁（进度回调在渲染热路径上）。NaN 用 bit 表示，
     /// `state()` 再决定要不要把它变成 `null`。
     render_progress_bits: AtomicU64,
+    /// **当前**在跑的渲染作业的票据（`0` = 没有作业）。
+    ///
+    /// 【为什么需要它】`submitted` 是"用户编辑的账本"，每画一笔就前进一格；而进度属于
+    /// **作业**。此前进度回调拿 `submitted != ticket` 当"我被取代了"的判据 —— 于是
+    /// 用户边画边渲染时，整个作业期间的回调**全部**被丢弃，状态栏只剩"渲染中"没有
+    /// 百分比。判据换成这一格之后，"作业还在跑"与"用户又改了一笔"不再互相污染。
+    render_ticket: AtomicU64,
+    /// 上一次写进 `render_progress_bits` 的那个值属于哪张票据。
+    ///
+    /// 【为什么值要带票据】被取代的作业可能还在写（它自己不知道被取代了）；没有票据时
+    /// 它的最后几个百分点会被当成当前作业的进度报出去，而下一个作业的 0% 会被"不得
+    /// 回退"挡住 —— 用户看到的是"一直 100%"。
+    render_progress_ticket: AtomicU64,
+    /// 当前这一轮作业**有没有进度来源**。
+    ///
+    /// 【为什么不能靠"票据非零"判断】票据来自 `submitted`，而它**可以合法地等于 0**
+    /// （会话刚建、用户还没编辑过）。把它当"有没有作业"的判据，第一个作业的进度就会
+    /// 被整轮丢掉。
+    ///
+    /// 【谁置真】只有 ARA 的后台 apply 作业（`start_render`）—— 它把 `ProgressCallback`
+    /// 一路交给 `render_with_progress`。Capture 的 `capture_prepare_job` 不接受进度回调，
+    /// 所以它的这一格恒为假 ⇒ 快照报 `null`（"没有进度来源"），而不是一个永远不动的 0%。
+    render_progress_tracked: AtomicBool,
+    /// 作业阶段（[`Stage`] 的编码）。
+    ///
+    /// 【为什么进度必须带阶段】混音算完（`emit(1.0)`）到快照发布之间还有一段（发布 +
+    /// `record_prepared`），而 `rendering_active` 要等作业真正结束才落。没有阶段名时，
+    /// 那一段只能显示成"渲染中 100%"—— 一句会停留上百毫秒的假话。
+    render_stage: AtomicU8,
     closed: AtomicBool,
     pub(super) suppress_history: AtomicBool,
     /// **上一次采纳过的**宿主编辑器视图选择（A5），用于与宿主的新选择比对。
@@ -1008,6 +1215,8 @@ impl EditorSession {
             last_revision_report: Mutex::new(None),
             clip_count: AtomicU64::new(0),
             analysis_abandoned: Mutex::new(std::collections::BTreeSet::new()),
+            auto_pitch_write: Mutex::new(AutoPitchWrite::default()),
+            suppress_auto_pitch_write: AtomicBool::new(false),
             submitted: AtomicU64::new(0),
             processed: AtomicU64::new(0),
             applied: AtomicU64::new(0),
@@ -1018,12 +1227,18 @@ impl EditorSession {
             error: Mutex::new(None),
             render_error: Mutex::new(None),
             render_requested: AtomicBool::new(false),
+            rearm_requests: AtomicU64::new(0),
+            bypass_gate_logged: AtomicU8::new(0),
             playhead_gaps: Mutex::new(PlayheadGaps::default()),
             transport_stall: Mutex::new(None),
             pending_since: Mutex::new(None),
             pending_reported: AtomicBool::new(false),
             render_task: Mutex::new(None),
             render_progress_bits: AtomicU64::new(f64::NAN.to_bits()),
+            render_ticket: AtomicU64::new(0),
+            render_progress_ticket: AtomicU64::new(0),
+            render_progress_tracked: AtomicBool::new(false),
+            render_stage: AtomicU8::new(Stage::Idle.encode()),
             closed: AtomicBool::new(false),
             suppress_history: AtomicBool::new(false),
             host_selection: Mutex::new(None),
@@ -1226,6 +1441,46 @@ impl EditorSession {
         let due = Instant::now() + Duration::from_millis(20);
         *next = Some(next.map_or(due, |previous| previous.min(due)));
         let _ = self.queue.try_send(Job::Wake);
+    }
+
+    /// 把"这次编辑还没被渲染"重新排上队（不推进任何票据）。
+    ///
+    /// 【为什么不是 [`Self::wake_for_source`]】那个只让 actor 立刻回去重试**加载**；
+    /// 真正让渲染排上队的是 `render_requested`。两者缺一个就会有一半的情况不生效，
+    /// 所以合并成一次调用 —— 分开写必然有人只写一个。
+    ///
+    /// 【谁需要它】宿主把本 FX 从"旁通"恢复成"活跃"时：旁通期间 `prepare_apply` 直接
+    /// 返回（见那里的门），那段时间的编辑一次都没被渲染过。只让渲染输入失效不够 ——
+    /// 失效只影响"下一次取音频"，而取音频由宿主驱动；用户解除旁通后若不再动任何东西，
+    /// 就永远不会有新音频。
+    pub(crate) fn rearm_render(&self) {
+        self.render_requested.store(true, Ordering::Release);
+        self.rearm_requests.fetch_add(1, Ordering::AcqRel);
+        let _ = self.queue.try_send(Job::Wake);
+    }
+
+    /// `rearm_render` 的累计调用次数（诊断/回归读数）。
+    ///
+    /// 【为什么是计数而不是读 `render_requested`】那个标志是 actor 的**待办位**：渲染
+    /// 一跑完就被清回 false，另一条线程上的观察者可能永远看不到它为真的一瞬。单调计数
+    /// 让"有人请求过渲染"成为一个稳定的读数 —— 回归测试（`render::extension` 的清单
+    /// 刷新用例）钉的就是它。
+    #[cfg(any(test, feature = "test-support"))]
+    // test-support 形态下本 lib 不编译 `#[cfg(test)]` 的用例模块，读数没有产品内调用方
+    // —— 同 `host::reaper::geometry_tests` 的口径，压掉那个配置下的 dead_code。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn rearm_requests(&self) -> u64 {
+        self.rearm_requests.load(Ordering::Acquire)
+    }
+
+    /// 是否已有一笔渲染在排队（`render_requested` 的只读窗口）。
+    ///
+    /// 【为什么清单刷新需要问它】纯几何变化只推进 epoch；若**本来就有**一笔渲染在途/排队，
+    /// 那次渲染的版本复核（`render_ticket_locked` 含 epoch）必然会看到新代次并按新输入
+    /// 重算（不匹配时走 "automatic apply superseded" 立即重排）—— 再 rearm 一次是重复调度，
+    /// 而且会在"宿主几何还没回读"的窗口里抢跑一次以旧几何为准的渲染。
+    pub(crate) fn render_pending(&self) -> bool {
+        self.render_requested.load(Ordering::Acquire)
     }
 
     pub(crate) fn request_reload(&self) {
@@ -1455,6 +1710,14 @@ impl EditorSession {
                     retry.rearm();
                 }
                 session.refresh_host();
+                // 【旁通读数的心跳】三个采样点里有两个只覆盖**可见**实例（视图定时器要开
+                // 窗口、模型收口要宿主改模型），而 REAPER 的播放实例两样都没有。用户按下
+                // 旁通之后它的缓存可以一直停在"上一次采样时的 active"，而渲染门正是拿它
+                // 做的判据 —— 用户看到的就是"旁通了还在渲染"。这里由会话 actor 补一条与
+                // 窗口无关的节奏（一轮只采一个，见方法的说明）。
+                if let Some(document) = session.document() {
+                    document.service_host_bypass_samples();
+                }
                 // 【为什么补给线与自动 promote 挂在会话 actor 上】它是**周期性**维护，
                 // 且必须在音频线程取用备用缓冲之前完成。此前它挂在 WebView 的 20ms
                 // 定时器上 —— 于是关掉插件窗口就断录（2 粒 × 8 秒 = 24 秒后 `NoSpare`）。
@@ -1495,14 +1758,16 @@ impl EditorSession {
                         session.render_requested.store(true, Ordering::Release);
                         deadline = Some(Instant::now());
                     }
-                    // 【窗口渲染的补排】播放头走出当前快照的安全区（或整段装不下、
-                    // 当前窗口已经走完）时补一次。整段快照时这条恒为 false。
-                    if !session.render_requested.load(Ordering::Acquire)
-                        && owner.window_needs_rerender()
-                    {
-                        session.render_requested.store(true, Ordering::Release);
-                        deadline = Some(Instant::now());
-                    }
+                    // 【为什么这里没有"窗口补排"】窗口渲染（`RenderInput.window`）是
+                    // **ARA 文档路径**的能力（`document.rs::plan_render_window`）；
+                    // Capture 的渲染输入恒为整段（`capture_render_input` 固定
+                    // `window: None`），输出与播放头无关 —— 播放头位置永远不构成
+                    // 重渲染的理由。这里曾有一个从窗口渲染搬来的补排信号，它把
+                    // "播放头在覆盖区间之外/末端四分之一"当成要补排：工程 0 点 +
+                    // take 在 33 s（ACID Pro 实测）时每个 tick 都为真 ⇒ 每 100 ms
+                    // 一轮空渲染 ⇒ 状态栏常亮闪"渲染中"。过期信号的正确归宿是
+                    // 删除，而不是补条件 —— 素材过期由音频线程的 `render_wanted`
+                    // 闩锁与版本闸负责（上面那条 + `capture_prepare_job_inner`）。
                     // 一次性诊断：素材在、结果不在，就把这件事写进日志（按代次去重）。
                     owner.report_pending_synthesis_once();
                     // 起播窗口的块级 trace：只在音频线程标记了可疑窗口时落一次。
@@ -1546,7 +1811,14 @@ impl EditorSession {
                     }
                 }
                 if let Some((generation, ticket, cancelled, result)) = session.complete_render() {
-                    session.emit("playback_rendering_state",json!({"active":false,"progress":if result.is_ok()&&!cancelled {Some(1.0)} else {None::<f64>},"target":"background"}));
+                    // 【完成事件不再携带进度】它此前在成功时带 `progress: 1.0`，而
+                    // 前端在 `active:false` 时先清高水位、随后又把这个 1.0 写回总线 ⇒
+                    // 状态片在作业结束之后还亮着"100%"，直到下一次 250 ms 快照才熄。
+                    // 作业结束就是"没有进度"，如实报 `null`。
+                    session.emit(
+                        "playback_rendering_state",
+                        json!({"active":false,"progress":None::<f64>,"target":"background"}),
+                    );
                     let current = !cancelled
                         && ticket == session.submitted.load(Ordering::Acquire)
                         && generation == session.generation.load(Ordering::Acquire);
@@ -1573,6 +1845,9 @@ impl EditorSession {
                     retry.rearm();
                     deadline = Some(Instant::now() + Duration::from_millis(150));
                 }
+                // 「自动写入 Take 音高」的服务点：音高编辑的落点在上面那条命令分支里，
+                // 此刻时间线是稳定的（见该方法的说明）。
+                session.service_auto_pitch_write();
                 if deadline.is_none()
                     && session.render_requested.load(Ordering::Acquire)
                     // 【为什么终态错误才停自动渲染】此前只要 `error` 非空就停 —— 而
@@ -1617,9 +1892,15 @@ impl EditorSession {
             } else {
                 break;
             }
-            let wait = deadline
+            let mut wait = deadline
                 .map(|d| d.saturating_duration_since(Instant::now()))
                 .unwrap_or(Duration::from_millis(100));
+            // 「自动写入 Take 音高」的到期时刻也要决定这一轮睡多久：命令处理完之后循环的
+            // deadline 可能是几秒后的渲染重试，不夹住就会把自动写入拖到那之后。
+            // 下限 10 ms：到期时刻已过时只是让下一轮立刻重算，不是忙等。
+            if let Some(hint) = weak.upgrade().and_then(|s| s.auto_pitch_write_wait()) {
+                wait = wait.min(hint.max(Duration::from_millis(10)));
+            }
             match receiver.recv_timeout(wait) {
                 Ok(Job::Close) => break,
                 Ok(Job::Barrier(sender)) => {
@@ -1775,7 +2056,16 @@ impl EditorSession {
                     if mutates {
                         session.processed.fetch_add(1, Ordering::AcqRel);
                     }
-                    session.schedule_analysis();
+                    // 【为什么只读命令不排分析】`schedule_analysis` 要克隆整份时间线、
+                    // 刷新源指纹、再走一遍 clip 候选判定 —— 而 250 ms 的状态轮询
+                    // （`plugin_get_apply_state`）是只读命令，播放期间每个 poll 都会
+                    // 撞上它：日志里就是那四行一组的 `schedule_clip_pitch_jobs` 周期
+                    // （cache HIT → nothing to do），全是对同一份缓存的复读。
+                    // 排分析的触发面没有变：真改了音频的命令照旧排；只读命令偶然
+                    // 触发了重载（代次动了）也照旧排 —— 那正是需要重新看指纹的时刻。
+                    if mutates || session.generation.load(Ordering::Acquire) != before {
+                        session.schedule_analysis();
+                    }
                     if session.generation.load(Ordering::Acquire) != before {
                         deadline = Some(Instant::now() + Duration::from_millis(150));
                     }
@@ -1836,6 +2126,14 @@ impl EditorSession {
         drop(task);
         // 【任务结束后必须回到"没有进度"】否则下一次渲染开始前，快照会带着上一轮
         // 的 100% 显示成"渲染中 100%"。
+        //
+        // 【顺序有意义】先把票据清零：仍在跑的进度回调看到"票据不是当前作业"就停手，
+        // 于是不会有谁在这之后把 1.0 写回来（那正是"一直 100%"的第二个来源）。
+        self.render_ticket.store(0, Ordering::Release);
+        self.render_progress_ticket.store(0, Ordering::Release);
+        self.render_progress_tracked.store(false, Ordering::Release);
+        self.render_stage
+            .store(Stage::Idle.encode(), Ordering::Release);
         self.render_progress_bits
             .store(f64::NAN.to_bits(), Ordering::Release);
         let cancelled = current.cancel.load(Ordering::Acquire);
@@ -1897,7 +2195,8 @@ impl EditorSession {
     }
 
     /// 原线缓存组装保留在actor；只把已确认的版本票据交给DSP线程，不并发修改timeline。
-    fn prepare_apply(&self) -> Result<(Arc<DocumentSession>, u64), String> {
+    /// 后台 apply 作业的前置检查；`None` = 这一轮**故意**不排作业（宿主已旁通本 FX）。
+    fn prepare_apply(&self) -> Result<Option<(Arc<DocumentSession>, u64)>, String> {
         // 【R7：只有**终态**错误才短路自动渲染】瞬时冲突（`Conflict: …`）意味着"宿主
         // 在提交窗口里动过"，它必然收敛 —— 而 `self.error` 只在"提交成功"或
         // `ensure_loaded` 成功时被清空。于是**一次**冲突就能让音频停在旧版本，直到
@@ -1914,32 +2213,135 @@ impl EditorSession {
         if let Some(error) = self.error.lock_or_recover().clone() {
             return Err(error);
         }
-        // 全零占位原线并非已完成的清音分析；收敛前保留旧快照及dirty代次。
-        if self.requires_analysis(&self.timeline.lock_or_recover()) {
-            return Err("pitch analysis pending".into());
-        }
         // 【票据不再从这里出】它是渲染入口（`apply_workspace_edits_with_progress`）
         // 自己取的。`loaded` 的语义是"编辑器最后一次读工作区时的票据"，把它当渲染
         // 守卫等于"用户每画一笔就让下一次渲染必然 Conflict"。
         let document = self.require_document()?;
-        Ok((document, self.generation.load(Ordering::Acquire)))
+        let generation = self.generation.load(Ordering::Acquire);
+        // 【旁通的门必须在这里，而不是只在 `prepare()` 里】
+        //
+        // `ExtensionOwner::prepare()` 挡的是**实时准备**（宿主播放时要的那份快照）。
+        // 而"用户编辑落定之后"跑的是**后台 apply 作业**：
+        //
+        //   publish_timeline → start_render → prepare_apply →
+        //   apply_workspace_edits_with_progress → render_with_progress → mix_interleaved
+        //
+        // 这条链**一次都没有** `prepare()`。把门只放在那里，等于"旁通了 FX，编辑完
+        // 照旧渲染一整次神经合成"—— 而那正是用户报障的形状。
+        //
+        // 【只在"确定旁通"时跳】`Unknown` 一律照旧：那是所有非 REAPER 宿主与所有
+        // 读不出读数的情况，跳过渲染会让它们静音。
+        let (bypass, votes) = document.bypass_sample();
+        self.log_bypass_gate(bypass, &votes);
+        if bypass.is_bypassed() {
+            // 【必须收口】否则 `pending` 恒真：`generation != applied` 会让状态栏
+            // 永远显示"正在应用"，而实际上这一轮**故意**什么都没做。
+            //
+            // 【为什么 `applied = generation` 是诚实的】旁通期间宿主不读我们的输出，
+            // 旧快照继续可服务；解除旁通时 `sample_host_bypass` 会把票据重新排上队
+            // （见 `rearm_render`），所以这里不是在"假装成功"。
+            self.applied.store(generation, Ordering::Release);
+            self.render_requested.store(false, Ordering::Release);
+            *self.render_error.lock_or_recover() = None;
+            self.emit_state();
+            return Ok(None);
+        }
+        // 全零占位原线并非已完成的清音分析；收敛前保留旧快照及dirty代次。
+        //
+        // 【为什么排在旁通门之后】"要不要工作"必须先于"能不能开始"：旁通时宿主不会来
+        // 取输出，分析是否收敛**不影响**这一轮的结论。把顺序倒过来，一个还没收敛的分析
+        // 就会让旁通门永远走不到，而状态栏会一直显示"在分析"。
+        if self.requires_analysis(&self.timeline.lock_or_recover()) {
+            return Err("pitch analysis pending".into());
+        }
+        Ok(Some((document, generation)))
+    }
+    /// 把"这一轮的门是怎么算出来的"写成一行 —— **只在结论变化时**写。
+    ///
+    /// 【为什么值得一条专用日志】用户报障是"旁通了还在渲染"，而现场日志里只能看到
+    /// `writer N host bypass: active -> bypassed`（某个实例的读数变了），看不到**门**的
+    /// 结论、参加投票的是谁、谁没投票。三者正好是三种不同的故障：
+    ///   * 票表里没有任何 `bypassed` ⇒ 没有实例被采样到（采样通道断了）；
+    ///   * 有人投 `active` ⇒ 那条轨真的还在出声（本来就不该跳过）；
+    ///   * 票过期（年龄 > 5 s）⇒ 采样跟不上，读数作废（回到"照常渲染"）。
+    ///
+    /// 没有这一行，三种成因在日志里长得一模一样（同一个限流键、同样静默）。
+    ///
+    /// 【为什么按"结论变化"去重】每次用户编辑都会走到这里；按采样写就是每秒几十行，
+    /// 而"门有没有变"才是要回答的问题。用 `emit_limited_key` 的返回值确认**真的写出去
+    /// 了**再记账：被限流吞掉的那一次不能当成"已经报过"。
+    fn log_bypass_gate(
+        &self,
+        verdict: crate::host::reaper::FxBypass,
+        votes: &[(u64, bool, crate::host::reaper::FxBypass, Option<u64>)],
+    ) {
+        let decision = if verdict.is_bypassed() { 2_u8 } else { 1 };
+        if self.bypass_gate_logged.load(Ordering::Acquire) == decision {
+            return;
+        }
+        let table = votes
+            .iter()
+            .map(|(writer, playback, reading, age)| {
+                format!(
+                    "{writer}{}:{}{}",
+                    if *playback { "p" } else { "e" },
+                    reading.as_str(),
+                    age.map_or_else(|| "/never".to_owned(), |age| format!("/{age}ms"))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let written = hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.bypass.gate",
+            format_args!(
+                "[ara] bypass gate: {}; writers(e/p=editor/playback)=[{}]; background job {}",
+                verdict.as_str(),
+                table,
+                if verdict.is_bypassed() {
+                    "skipped"
+                } else {
+                    "runs"
+                }
+            ),
+        );
+        if written {
+            self.bypass_gate_logged.store(decision, Ordering::Release);
+        }
     }
     fn start_render(self: &Arc<Self>, ticket: u64) -> Result<(), String> {
         if self.is_capture() {
             return self.start_capture_render(ticket);
         }
-        let (document, generation) = self.prepare_apply()?;
+        let Some((document, generation)) = self.prepare_apply()? else {
+            // 宿主旁通了这个 FX：宿主不会来取音频，合成结果没有任何人会取用。
+            // 收口已经在 `prepare_apply` 里做完（`applied = generation`）。
+            return Ok(());
+        };
         let cancel = Arc::new(AtomicBool::new(false));
         let current = self.clone();
         let job_cancel = cancel.clone();
         let progress_session = self.clone();
         let progress_cancel = cancel.clone();
+        // 【作业开始：票据、阶段、进度一次写全】顺序有意义 —— 先立票据再写 0%，
+        // 否则读侧可能看到"上一轮的 100% + 这一轮的票据"。
+        self.render_ticket.store(ticket, Ordering::Release);
+        // 【这一轮有进度来源】与票据分开记：票据可以合法地等于 0（用户还没编辑过）。
+        self.render_progress_tracked.store(true, Ordering::Release);
+        self.render_stage
+            .store(Stage::Preparing.encode(), Ordering::Release);
+        self.render_progress_bits
+            .store(0.0_f64.to_bits(), Ordering::Release);
+        self.render_progress_ticket.store(ticket, Ordering::Release);
         let progress_last = AtomicU64::new(0);
         let progress = hifishifter_kernel::mixdown::ProgressCallback::new(move |value| {
+            // 【为什么不再看 `submitted`】`submitted` 是"用户编辑的账本"，每画一笔就前进
+            // 一格；而这里问的是"**我这张票据**还是当前作业吗"。此前的判据把两者混成
+            // 一个，于是用户边画边渲染时，整个作业期间的回调**全部**被丢弃 ——
+            // 状态栏只剩"渲染中"，一个百分比都没有（用户报障）。
             if progress_cancel.load(Ordering::Acquire)
                 || progress_session.closed.load(Ordering::Acquire)
-                || progress_session.submitted.load(Ordering::Acquire) != ticket
-                || progress_session.generation.load(Ordering::Acquire) != generation
+                || progress_session.render_ticket.load(Ordering::Acquire) != ticket
             {
                 return;
             }
@@ -1949,6 +2351,22 @@ impl EditorSession {
                 return;
             }
             progress_last.store(value.to_bits(), Ordering::Release);
+            // 【阶段从进度值本身读出来】`MixdownProgress::finish()` 会 `emit(1.0)`，而
+            // 那之后还有发布（`publish_shared` + `record_prepared`）。于是"1.0"恰好是
+            // "混音算完了、作业还没结束"这条边界 —— 不需要再加一条阶段通道，也就不会
+            // 出现"两条通道各说一套"。多 owner 作业里中间那几个 owner 的 1.0 在聚合时
+            // 已经折算成 (i+1)/n < 1，只有最后一个才真正跨过这条边界。
+            let stage = if value >= 1.0 {
+                Stage::Publishing
+            } else {
+                Stage::Synthesizing
+            };
+            progress_session
+                .render_stage
+                .store(stage.encode(), Ordering::Release);
+            progress_session
+                .render_progress_ticket
+                .store(ticket, Ordering::Release);
             // 【快照与事件同源】进度事件会丢（`try_send`），快照每 250 ms 读这里，
             // 于是"事件丢了就永远看不到百分比"不再可能。
             progress_session
@@ -1959,11 +2377,12 @@ impl EditorSession {
                 json!({"active":true,"progress":value,"target":"background"}),
             );
         });
-        self.render_progress_bits
-            .store(0.0_f64.to_bits(), Ordering::Release);
+        // 【`pass` 就是作业票据】前端用它判断"这是一轮新的作业"，并把上一轮的高水位
+        // 清零。没有它，一次被取消的作业留下的 60% 会挡住下一个作业的 0~59% ——
+        // 用户看到的就是"卡在某个百分比不动"或"一直 100%"。
         self.emit(
             "playback_rendering_state",
-            json!({"active":true,"progress":0.0,"target":"background"}),
+            json!({"active":true,"progress":0.0,"target":"background","pass":ticket}),
         );
         let worker = RenderTask::spawn(ticket, generation, cancel, move || {
             document.apply_workspace_edits_with_progress(
@@ -2000,16 +2419,39 @@ impl EditorSession {
         if let Some(error) = self.error.lock_or_recover().clone() {
             return Err(error);
         }
-        if self.requires_analysis(&self.timeline.lock_or_recover()) {
-            return Err("pitch analysis pending".into());
-        }
         let Some(owner) = self.capture_owner() else {
             return Err("capture host is gone".into());
         };
+        // 【空转轮在门口收掉，而不是放进去再空跑】渲染请求的来源（音频线程闩锁、
+        // 重载置位）只知道"该问一次"；发布器里已经是当前版本成品时，这一轮跑下去
+        // 只会发一次 `active:true` 再立刻 `active:false` —— 左下角"渲染中"闪一下
+        // （ACID Pro 实测：播放头在素材之外时每 100 ms 一轮）。与 ARA 路径
+        // `prepare_apply` 的旁通门同一收口方式：诚实地记"这一代已应用"，不占
+        // render_task、不闪状态栏。
+        //
+        // 【为什么放在 requires_analysis 之前】分析是否收敛只影响"能不能开始"，
+        // 而"要不要开始"先于它 —— 快照已是当前版本时，等分析收敛再空跑一遍
+        // 纯属浪费；真有新编辑时版本闸本来就不会过。
+        if owner.capture_render_up_to_date(owner.capture_prepare_wants_curves()) {
+            self.applied
+                .store(self.generation.load(Ordering::Acquire), Ordering::Release);
+            self.render_requested.store(false, Ordering::Release);
+            *self.render_error.lock_or_recover() = None;
+            self.emit_state();
+            return Ok(());
+        }
+        if self.requires_analysis(&self.timeline.lock_or_recover()) {
+            return Err("pitch analysis pending".into());
+        }
         let generation = self.generation.load(Ordering::Acquire);
         let cancel = Arc::new(AtomicBool::new(false));
         let current = self.clone();
         let job_cancel = cancel.clone();
+        // 【Capture 这一轮**没有**进度来源】`capture_prepare_job` 不接受进度回调，
+        // 于是快照必须报 `null`（"没有进度可报"）而不是一个永远不动的 0%。
+        self.render_progress_tracked.store(false, Ordering::Release);
+        self.render_stage
+            .store(Stage::Idle.encode(), Ordering::Release);
         self.render_progress_bits
             .store(0.0_f64.to_bits(), Ordering::Release);
         self.emit(
@@ -2040,7 +2482,9 @@ impl EditorSession {
         ticket: u64,
         progress: Option<hifishifter_kernel::mixdown::ProgressCallback>,
     ) -> Result<(), String> {
-        let (document, _generation) = self.prepare_apply()?;
+        let Some((document, _generation)) = self.prepare_apply()? else {
+            return Ok(());
+        };
         document.apply_workspace_edits_with_progress(
             self.analysis_cancel.clone(),
             || {
@@ -2316,15 +2760,20 @@ impl EditorSession {
             use std::hash::{Hash, Hasher};
             let timeline = self.timeline.lock_or_recover();
             let mut audio = std::collections::hash_map::DefaultHasher::new();
-            hifishifter_kernel::state::timeline_fingerprint(&timeline).hash(&mut audio);
+            // 【为什么用渲染指纹而不是 GUI 指纹】这一份指纹的唯一读者是"要不要重渲染"，
+            // 而渲染输入是曲线本身，不含分析键。键的 presence 位与键字符串此前都进了
+            // 这份哈希：一次 INVALIDATE（键清空又立即被缓存组装填回**同样的曲线**）或
+            // 一次重载清键，都会让指纹推进 ⇒ 版本闸永远追不上 ⇒ 每次播放/重载都排一轮
+            // 输出逐位相同的真渲染（REAPER 23:40:34 与 VEGAS 23:43:56~23:44:30 实测，
+            // 后者 30 秒 15 轮 mixdown）。曲线内容变化仍会推进 —— 真重算不漏。
+            hifishifter_kernel::state::timeline_render_fingerprint(&timeline).hash(&mut audio);
             // Baseline completion can affect audio even when an explicit pitch
             // edit stays unchanged, including Capture's derived dynamics.
+            // `pitch_assembly_partial` 保留：它标记"组装还没收口"，此刻的曲线不是成品。
             let mut roots: Vec<_> = timeline.params_by_root_track.iter().collect();
             roots.sort_by_key(|(root, _)| *root);
             for (root, params) in roots {
                 root.hash(&mut audio);
-                params.pitch_orig_key.hash(&mut audio);
-                params.dyn_orig_key.hash(&mut audio);
                 params.pitch_assembly_partial.hash(&mut audio);
             }
             (timeline.clips.len(), audio.finish())
@@ -2808,13 +3257,18 @@ impl EditorSession {
         if let Some(edits) = restored.as_ref() {
             super::capture_edits::apply_project_state(&mut timeline, edits);
         }
-        // 新 take 的源内容不同 ⇒ 缓存的原线/动态谱必须失效（与 ARA 加载同一条纪律）。
-        // 撤销"放弃等待"同理：素材换了，就再给分析一次机会。
+        // 新 take 的源内容不同 ⇒ 缓存的原线/动态谱必须失效。失效的**唯一权威**是
+        // 上面 `ensure_params_for_root` 的期望键比对：键匹配（素材与布局都没变）的根
+        // 键被它保留，键失配（换了 take / 动了源窗口）的根被它清空。这里此前**无条件**
+        // 再清一遍 —— 把它刚刚保下来的键也毁了，而每次强制重载（VEGAS 家族每遍
+        // setActive 都 setState → request_reload 走到这里）因此必然自废渲染版本：
+        // 键一清指纹必变、timeline_revision 必推进，版本闸永远判"过期"，每遍重载
+        // 排一轮输出逐位相同的真渲染（VEGAS 23:43:56~23:44:30 实测：30 秒 15 轮
+        // mixdown，状态栏"渲染中"随每次播放闪）。
+        //
+        // 撤销"放弃等待"保留：素材换了时要再给分析一次机会；素材没换时清一个空集，
+        // 无副作用。
         self.analysis_abandoned.lock_or_recover().clear();
-        for params in timeline.params_by_root_track.values_mut() {
-            params.pitch_orig_key = None;
-            params.dyn_orig_key = None;
-        }
         // 宿主音乐读数是**只读**的宿主权威：Capture 没有文档，读 owner 自己的时钟。
         if let Some(clock) = owner.clock.get() {
             if let Some(tempo) = clock.tempo() {
@@ -3031,6 +3485,243 @@ impl EditorSession {
         }
         self.notify_timeline();
     }
+
+    /// 音高线被改动了一次 —— 「自动写入 Take 音高」的触发入口。
+    ///
+    /// 【为什么只推迟到期时刻，不在这里发命令】编辑期间 `set_param_frames` 每帧一笔
+    /// （`commitOncePerFrame`）：每笔都导一次，一次 3 秒的拖动会在宿主里留下上百个撤销点，
+    /// 每笔还要 `SetItemStateChunk` 重建一次 item（见 `host/reaper/write.rs` 的说明）。
+    /// 静默 [`AUTO_PITCH_WRITE_QUIET`] 之后才写 ⇒「一次手势 = 一次宿主写入」。
+    ///
+    /// 【为什么关着的时候直接返回】关闭期间攒下的待办会在用户打开开关的一瞬间被补写，而
+    /// 那些编辑发生时用户并没有同意这件事（与「新增片段自动导入」同一条判据）。
+    fn note_pitch_edit(&self, track_id: &str, start_frame: u32, frame_count: u32) {
+        if !hifishifter_kernel::config::reaper_auto_take_pitch_write()
+            || self.suppress_auto_pitch_write.load(Ordering::Acquire)
+        {
+            return;
+        }
+        let end = start_frame.saturating_add(frame_count.max(1));
+        let mut state = self.auto_pitch_write.lock_or_recover();
+        if let Some(existing) = state.windows.get_mut(track_id) {
+            existing.0 = existing.0.min(start_frame);
+            existing.1 = existing.1.max(end);
+        } else {
+            state
+                .windows
+                .insert(track_id.to_owned(), (start_frame, end));
+        }
+        state.due = Some(Instant::now() + AUTO_PITCH_WRITE_QUIET);
+    }
+
+    /// 撤销 / 重做换掉了整份参数权威：不知道改了哪一段，只能按「我们写过的片段」扫一遍。
+    pub(super) fn note_pitch_edit_of_every_written_clip(&self) {
+        if !hifishifter_kernel::config::reaper_auto_take_pitch_write()
+            || self.suppress_auto_pitch_write.load(Ordering::Acquire)
+        {
+            return;
+        }
+        let mut state = self.auto_pitch_write.lock_or_recover();
+        state.sweep = true;
+        state.due = Some(Instant::now() + AUTO_PITCH_WRITE_QUIET);
+    }
+
+    /// 进入 / 离开「导入方向正在写参数线」的作用域（见字段说明）。
+    pub(super) fn set_suppress_auto_pitch_write(&self, suppress: bool) {
+        self.suppress_auto_pitch_write
+            .store(suppress, Ordering::Release);
+    }
+
+    /// 心跳还该睡多久：`Some` 表示「自动写入」有一个不晚于该时刻的到期点。
+    ///
+    /// 【为什么心跳必须知道它】命令处理完之后循环用 `deadline` 决定睡多久，而那条 deadline
+    /// 可能是几秒后的渲染重试；不夹住它，一次编辑的自动写入会被拖到那之后。
+    fn auto_pitch_write_wait(&self) -> Option<Duration> {
+        let state = self.auto_pitch_write.lock_or_recover();
+        if !state.deferred.is_empty() {
+            return Some(Duration::ZERO);
+        }
+        Some(state.due?.saturating_duration_since(Instant::now()))
+    }
+
+    /// 丢掉全部待办（开关关掉 / 宿主不支持 / 会话换了一份时间线）。
+    ///
+    /// 【为什么不动 `written`】它记的是"宿主里现在是什么"。清掉它只会让下一次打开开关时
+    /// 把所有片段当成"没写过"，于是第一笔编辑就重写整个工程 —— 那正是本功能最该避免的事。
+    fn clear_auto_pitch_write(&self) {
+        let mut state = self.auto_pitch_write.lock_or_recover();
+        state.due = None;
+        state.windows.clear();
+        state.sweep = false;
+        state.deferred.clear();
+    }
+
+    /// 「自动写入 Take 音高」的一次服务：把「与上次写进去的包络不同」的片段写回宿主。
+    ///
+    /// 【为什么挂在 actor 心跳上】它是唯一「既不看窗口开没开、又不在音频线程」的周期点，而
+    /// 在这里做事天然串行于所有参数写入 —— 不需要额外的并发控制。待办为空时它只付一次
+    /// 加锁的代价。
+    ///
+    /// 四条判据，顺序即理由：
+    /// 1. 开关关着 ⇒ 清空待办（关闭期间不该有残留）；
+    /// 2. 没有待办 / 还没到静默期 ⇒ 返回；
+    /// 3. 宿主不支持 take 包络（能力位）⇒ 清空；
+    /// 4. 指纹与上次写进去的相同 ⇒ 这条片段根本不进批次（连宿主 chunk 都不读）。
+    fn service_auto_pitch_write(&self) {
+        if !hifishifter_kernel::config::reaper_auto_take_pitch_write() {
+            self.clear_auto_pitch_write();
+            return;
+        }
+        {
+            let state = self.auto_pitch_write.lock_or_recover();
+            let due = state.due.is_some_and(|due| due <= Instant::now());
+            if !due && state.deferred.is_empty() {
+                return;
+            }
+        }
+        // 只有真能读写 take 包络的宿主才做（判据与菜单 / 能力位同源）。
+        let can_write = self.document().is_some_and(|document| {
+            document
+                .renderer_owners()
+                .iter()
+                .any(|owner| owner.effective_host_capabilities().take_pitch_bridge)
+        });
+        if !can_write {
+            self.clear_auto_pitch_write();
+            return;
+        }
+        let (mut batch, windows, sweep) = {
+            let mut state = self.auto_pitch_write.lock_or_recover();
+            state.due = None;
+            (
+                std::mem::take(&mut state.deferred),
+                std::mem::take(&mut state.windows),
+                std::mem::replace(&mut state.sweep, false),
+            )
+        };
+        // 【两批要合并】上一轮剩下的（`deferred`）与这一轮新攒的窗口都是待办：只发前一批会
+        // 把窗口里那几条编辑悄悄丢掉（下一次编辑之前它们再也不会被扫到）。
+        if !windows.is_empty() || sweep {
+            let known: std::collections::HashSet<String> =
+                batch.iter().map(|(id, _)| id.clone()).collect();
+            for entry in self.auto_pitch_write_candidates(&windows, sweep) {
+                if !known.contains(&entry.0) {
+                    batch.push(entry);
+                }
+            }
+        }
+        if batch.is_empty() {
+            return;
+        }
+        // 单轮上限：一次粘贴几百个片段时，逐条读宿主 chunk 会把 actor 顶住好几百毫秒。
+        // 剩下的留给下一轮 —— 待办本来就在，不需要在这里一次做完（每轮都在缩短，必然收敛）。
+        let deferred = if batch.len() > AUTO_PITCH_WRITE_BATCH {
+            batch.split_off(AUTO_PITCH_WRITE_BATCH)
+        } else {
+            Vec::new()
+        };
+        let clip_ids: Vec<String> = batch.iter().map(|(id, _)| id.clone()).collect();
+        let request = json!({ "clipIds": clip_ids, "auto": true });
+        // 【失败就放弃这一轮】待办已在上面取走；把失败的那批放回队列会让 actor 每 100 ms
+        // 重试一次同一个必然失败的动作。下一次音高编辑会重新武装 —— 那是唯一能自愈的路径。
+        let report = match super::commands::export_host_take_pitch(self, &request) {
+            Ok(report) => report,
+            Err(error) => {
+                log::warn!("[pitch] auto take-pitch write failed: {error}");
+                return;
+            }
+        };
+        let unresolved: std::collections::HashSet<String> = report
+            .get("unresolved")
+            .and_then(Value::as_array)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut written = 0usize;
+        {
+            let mut state = self.auto_pitch_write.lock_or_recover();
+            for (id, fingerprint) in batch {
+                // 【只记真的转成的】没转成的（没有唯一 take / 算不出包络 / 会删掉已有包络 /
+                // take 自带 `D_PITCH`）留到下一次编辑重试：记下来就等于永久放弃它。
+                if !unresolved.contains(&id) {
+                    state.written.insert(id, fingerprint);
+                    written += 1;
+                }
+            }
+            state.deferred = deferred;
+        }
+        if written > 0 {
+            log::info!("[pitch] auto-wrote the take pitch envelope of {written} clip(s)");
+        }
+    }
+
+    /// 逐片段算「此刻会写进去的包络」指纹，挑出与上次不同的那几条。
+    ///
+    /// 【为什么在时间线锁内算、在锁外发命令】指纹是纯计算（读曲线 → 算偏移 → 简化断点），
+    /// 而命令会去碰宿主（读 chunk / 写 chunk / `UpdateItemInProject`）—— 后者绝不能持锁。
+    fn auto_pitch_write_candidates(
+        &self,
+        windows: &HashMap<String, (u32, u32)>,
+        sweep: bool,
+    ) -> Vec<(String, u64)> {
+        let written = self.auto_pitch_write.lock_or_recover().written.clone();
+        let timeline = self.timeline.lock_or_recover();
+        let frame_period_ms = timeline.frame_period_ms().max(0.1);
+        let policy = hifishifter_kernel::pitch_editing::take_pitch_fill_policy(frame_period_ms);
+        // 轨道 id（可能是子轨）→ 根轨道：窗口是按根轨道的栅格记的。
+        let mut ranges: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+        for (track, range) in windows {
+            let root = timeline
+                .resolve_root_track_id(track)
+                .unwrap_or_else(|| track.clone());
+            ranges
+                .entry(root)
+                .or_default()
+                .push((range.0 as usize, range.1 as usize));
+        }
+        let mut candidates = Vec::new();
+        let mut live: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for clip in &timeline.clips {
+            live.insert(clip.id.clone());
+            let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
+                continue;
+            };
+            let involved = if sweep {
+                // 撤销 / 重做：只回写我们写过的片段（没写过的没有"应该是什么"的答案）。
+                written.contains_key(&clip.id)
+            } else {
+                let (start, end) = hifishifter_kernel::frame_grid::clip_frame_window(
+                    clip.start_sec,
+                    clip.length_sec,
+                    frame_period_ms,
+                );
+                ranges.get(&root).is_some_and(|ranges| {
+                    ranges.iter().any(|(from, to)| start < *to && *from < end)
+                })
+            };
+            if !involved {
+                continue;
+            }
+            let fingerprint =
+                auto_pitch_write_fingerprint(&timeline, clip, &policy, frame_period_ms);
+            if written.get(&clip.id).copied() != Some(fingerprint) {
+                candidates.push((clip.id.clone(), fingerprint));
+            }
+        }
+        drop(timeline);
+        // 【自限长】被删掉的片段不该在表里越积越多。撤销让它们重现时按"没写过"重来一遍是
+        // **正确**的：那条包络此刻确实与音高线不一致。
+        self.auto_pitch_write
+            .lock_or_recover()
+            .written
+            .retain(|id, _| live.contains(id));
+        candidates
+    }
+
     /// 稳定模型变化在后台自动读取；pending曲线遇到真实冲突保留，不静默强制重载。
     fn refresh_host(&self) {
         let Some(document) = self.document() else {
@@ -3459,7 +4150,7 @@ impl EditorSession {
         // 标成 terminal 以免前端持续自动重试；错误文案自身仍保留可诊断细节。
         let stale = error
             .as_deref()
-            .is_some_and(|message| message.contains("stale syllable analysis result"));
+            .is_some_and(|message| message.contains(STALE_SYLLABLE_ANALYSIS));
         // 被后一份快照取代的只有“旧请求”的 waiter。当前 flight 的 waiter 才
         // 拿得到真实结果；旧 waiter 必须收到明确的终态，且不能把旧结果当成
         // 当前请求的成功。
@@ -3532,7 +4223,7 @@ impl EditorSession {
         let parsed: SyllableAnalysisWorkerResult = serde_json::from_value(value)
             .map_err(|error| format!("invalid syllable analysis result: {error}"))?;
         if parsed.clip_id != request.clip_id || parsed.take_id != request.take_id {
-            return Err("stale syllable analysis result".into());
+            return Err(STALE_SYLLABLE_ANALYSIS.into());
         }
         // 空算法名/非法版本不能进工程：它会让下次 `is_current` 永远为假，
         // 前端又看到“未分析”，形成重复分析的闭环。worker 是纯计算，坏结果
@@ -3549,16 +4240,16 @@ impl EditorSession {
                 .clips
                 .iter()
                 .find(|clip| clip.id == request.clip_id)
-                .ok_or("stale syllable analysis result: clip removed")?;
+                .ok_or_else(|| format!("{STALE_SYLLABLE_ANALYSIS}: clip removed"))?;
             if clip.active_take().id != request.take_id {
-                return Err("stale syllable analysis result: active take changed".into());
+                return Err(format!("{STALE_SYLLABLE_ANALYSIS}: active take changed"));
             }
             let current_source = clip
                 .active_take()
                 .source_path
                 .as_deref()
                 .or(clip.source_path.as_deref())
-                .ok_or("stale syllable analysis result: source removed")?
+                .ok_or_else(|| format!("{STALE_SYLLABLE_ANALYSIS}: source removed"))?
                 .to_owned();
             let digest = syllable_source_digest(
                 &current_source,
@@ -3568,10 +4259,10 @@ impl EditorSession {
             (current_source, digest)
         };
         if current_source != request.source_path {
-            return Err("stale syllable analysis result: source changed".into());
+            return Err(format!("{STALE_SYLLABLE_ANALYSIS}: source changed"));
         }
         if digest != request.source_digest {
-            return Err("stale syllable analysis result: source digest changed".into());
+            return Err(format!("{STALE_SYLLABLE_ANALYSIS}: source digest changed"));
         }
         let spans = parsed.source_spans_sec.clone();
         if !parsed.analyzed || spans.is_empty() {
@@ -3596,12 +4287,12 @@ impl EditorSession {
             .clips
             .iter_mut()
             .find(|clip| clip.id == request.clip_id)
-            .ok_or("stale syllable analysis result: clip removed")?;
+            .ok_or_else(|| format!("{STALE_SYLLABLE_ANALYSIS}: clip removed"))?;
         let take = clip
             .takes
             .iter_mut()
             .find(|take| take.id == request.take_id)
-            .ok_or("stale syllable analysis result: take removed")?;
+            .ok_or_else(|| format!("{STALE_SYLLABLE_ANALYSIS}: take removed"))?;
         if analysis.algorithm == hifishifter_kernel::game_onnx::GAME_ALGORITHM {
             let (a, b) = (request.source_window.0, request.source_window.1);
             hifishifter_kernel::param_blocks::merge_game_baseline(
@@ -3789,15 +4480,10 @@ impl EditorSession {
             let Some(pcm) = sources.get(&path) else {
                 continue;
             };
-            // 内容指纹：PCM 代次 + 长度 + 前 4096 个采样的 FNV。
-            // 代次由发布方单调推进；采样哈希兜住"代次没变但内容被就地改写"的形状。
-            let mut stamp: u64 = 0xcbf2_9ce4_8422_2325;
-            for value in pcm.planes.iter().flat_map(|plane| plane.iter()).take(4096) {
-                stamp ^= u64::from(value.to_bits());
-                stamp = stamp.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-            stamp ^= (pcm.planes.first().map(Vec::len).unwrap_or(0) as u64) << 1;
-            stamp ^= pcm.version.rotate_left(17);
+            // 内容指纹：PCM 代次 + 长度 + 前 4096 个采样的 FNV。代次由发布方单调推进；
+            // 采样哈希兜住"代次没变但内容被就地改写"的形状。口径只有一份
+            // （`render::source::source_content_stamp`），源发布去重消费同一个。
+            let stamp = crate::render::source::source_content_stamp(pcm);
             if clip.source_file_fingerprint != Some(stamp) {
                 clip.source_file_fingerprint = Some(stamp);
                 changed = true;
@@ -4451,6 +5137,37 @@ impl EditorSession {
         );
     }
 
+    /// 快照里该报的渲染进度（`None` = 没有可报的进度）。
+    ///
+    /// 【为什么抽成一个方法】它是状态栏百分比的**唯一**判据，而三条判据各自对应一条
+    /// 真实故障（见下）。写成内联表达式时，测试只能把同一段逻辑复述一遍 —— 那等于
+    /// 测了一份副本。
+    ///
+    /// 三个判据：
+    ///   * `render_ticket != 0` —— Capture 的渲染没有进度回调（`capture_prepare_job`
+    ///     不接受 `ProgressCallback`），票据恒为 0 ⇒ 报 `null`（"没有进度来源"），
+    ///     而不是一个永远不动的 0%；
+    ///   * `render_progress_ticket == render_ticket` —— 被取代的作业可能还在写，它的
+    ///     读数不得冒充当前作业的；
+    ///   * `stage == Synthesizing` —— 混音算完（`emit(1.0)`）到快照发布之间还有一段，
+    ///     那一段报百分比就是"渲染中 100%"。
+    fn visible_render_progress(&self, rendering: bool) -> Option<f64> {
+        let ticket = self.render_ticket.load(Ordering::Acquire);
+        if !rendering
+            || !self.render_progress_tracked.load(Ordering::Acquire)
+            || self.render_stage_now() != Stage::Synthesizing
+            || self.render_progress_ticket.load(Ordering::Acquire) != ticket
+        {
+            return None;
+        }
+        let value = f64::from_bits(self.render_progress_bits.load(Ordering::Acquire));
+        value.is_finite().then_some(value)
+    }
+
+    fn render_stage_now(&self) -> Stage {
+        Stage::decode(self.render_stage.load(Ordering::Acquire))
+    }
+
     pub(super) fn state(&self) -> Value {
         let generation = self.generation.load(Ordering::Acquire);
         let applied = self.applied.load(Ordering::Acquire);
@@ -4468,14 +5185,12 @@ impl EditorSession {
         let host_error = states.into_iter().find_map(|state| state.1);
         let analysis_pending = self.requires_analysis(&self.timeline.lock_or_recover());
         let rendering = self.render_task.lock_or_recover().is_some();
-        // 【进度只在有任务时报告】任务结束后原子量被置回 NaN；渲染中但还没收到第一个
-        // 进度回调时是 0.0。两者都如实进快照，前端不需要再从会丢的事件里猜。
-        let render_progress = if rendering {
-            let value = f64::from_bits(self.render_progress_bits.load(Ordering::Acquire));
-            value.is_finite().then_some(value)
-        } else {
-            None
-        };
+        // 【进度只属于**当前作业**】判据收敛在 `visible_render_progress` 一处（见那里的
+        // 说明）：没有作业票据（Capture）、票据过期（被取代）、`publishing` 阶段，
+        // 三种情况都报 `null`。
+        let stage = self.render_stage_now();
+        let render_ticket = self.render_ticket.load(Ordering::Acquire);
+        let render_progress = self.visible_render_progress(rendering);
         // 「你听到的是不是旧版本」：有任务在跑，**而且**音频线程此刻没有可服务的快照。
         //
         // 【为什么与 `rendering` 分开】后者回答"后台在忙吗"，用户问的是"我听到的是不是
@@ -4543,7 +5258,17 @@ impl EditorSession {
             // 丢一个 `active:false` 就会让片永久亮着；快照每 250 ms 重读一次，自愈。
             "rendering_active":rendering,
             // 本次渲染的进度（0..1 或 null）。快照是权威通道：事件只做快速更新。
+            // `0` 是**真读数**（"刚开始"），`null` 才是"没有进度可报"。
             "render_progress":render_progress,
+            // 【进度属于哪一轮作业】前端据此把上一轮的高水位清零。它与事件里的
+            // `pass` 是同一个数（作业票据），两条通道因此不会各说一套。
+            "render_pass":render_ticket,
+            // 作业阶段（`null` = 没有阶段可言）：preparing / synthesizing / publishing。
+            "render_stage":stage.as_str(),
+            // 【宿主是否旁通了本 FX】三态字符串（active / bypassed / unknown）。
+            // `bypassed` 时插件**故意**不渲染（宿主不会来取输出），状态栏据此说
+            // "已旁通 · 不渲染"而不是"正在合成"—— 后者会让用户以为它卡住了。
+            "host_bypass":self.document().map(|document| document.host_bypass().as_str()),
             // 状态栏的「渲染中」读这一个（见上面 `audible_stale` 的说明）。
             "render_audible_stale":audible_stale,
             // 【唯一驱动状态栏文案的字段】见上面 `audible_state` 的说明。
@@ -4642,7 +5367,20 @@ impl EditorSession {
 
     /// 参数写入前的 undo 点：先把当前 authority 挂到当前位置，再把新步的占位
     /// 也填成“写入前”的权威；写入成功后再用 `note_authority_step` 覆盖新步。
+    ///
+    /// 操作名固定是 `param_curve`；一次操作有自己名字时用
+    /// `checkpoint_authority_step_as`。
     pub(super) fn checkpoint_authority_step(&self) {
+        self.checkpoint_authority_step_as(HistoryOp::ParamCurve.key());
+    }
+
+    /// 带操作名的 undo 点。
+    ///
+    /// 【为什么需要】撤销面板按这个 key 显示"这一步做了什么"（词典里
+    /// `history_op_<key>`）。`HistoryOp::HostPitchImport` / `HostPitchExport` 与它们的
+    /// 五语系文案一直存在，但此前没有任何调用点用它们 —— 于是"导入 REAPER Take
+    /// 音高"在撤销面板里显示成"参数曲线"，用户回退时看不出自己退回的是哪一步。
+    pub(super) fn checkpoint_authority_step_as(&self, op: &str) {
         if self.suppress_history.load(Ordering::Acquire) {
             return;
         }
@@ -4652,12 +5390,7 @@ impl EditorSession {
         let timeline = self.timeline.lock_or_recover().clone();
         let mut history = self.history.lock_or_recover();
         let previous = history.position;
-        history::checkpoint(
-            &mut history,
-            &timeline,
-            HistoryOp::ParamCurve.key().into(),
-            || None,
-        );
+        history::checkpoint(&mut history, &timeline, op.to_string(), || None);
         let next = history.position;
         drop(history);
         let mut steps = self.authority_history.lock_or_recover();
@@ -4793,6 +5526,13 @@ impl ParamHost for EditorSession {
             self.mark_dirty();
             self.render_requested.store(true, Ordering::Release);
             self.publish_timeline_derived();
+            // 【为什么在 refresh 之后】指纹读的是 `self.timeline` 里的派生数组，它由上一行
+            // 从文档权威重新装出来 —— 提前记会给这一次编辑算到**上一笔**的曲线上。
+            if is_pitch_curve_param(param) {
+                // 【记的是**呈现 id**】窗口要与 `timeline.clips[].track_id` 同一套 id 才能
+                // 对得上（`host` 是剥掉命名空间的裸宿主 id，按它反查根轨道恒失败）。
+                self.note_pitch_edit(track_id, start_frame, values.len() as u32);
+            }
         }
         Some(result)
     }
@@ -4833,6 +5573,9 @@ impl ParamHost for EditorSession {
             self.mark_dirty();
             self.render_requested.store(true, Ordering::Release);
             self.publish_timeline_derived();
+            if is_pitch_curve_param(param) {
+                self.note_pitch_edit(track_id, start_frame, frame_count);
+            }
         }
         Some(result)
     }
@@ -4969,8 +5712,15 @@ impl MidiImportHost for EditorSession {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+// 【为什么不是 `#[cfg(test)]`】`workspace_fixture` 也被格式外壳的测试
+// （`hifishifter-vst3`）使用；`test-support` 特性让它在产品构建里依然不存在，
+// 同时对外壳的测试构建可见。判据见 format_feature_boundary。
+#[cfg(any(test, feature = "test-support"))]
+// 【为什么条件 allow】`test-support` 特性单独编译（外壳的测试构建）时，本模块的
+// `#[test]` 入口不会运行，辅助夹具于是全部"从未使用"。测试构建（`cfg(test)`）下
+// 不需要这条豁免，保持缺陷类告警的灵敏度。
+#[cfg_attr(not(test), allow(dead_code))]
+pub mod tests {
     use super::*;
 
     /// 等后台投影线程"追上来"的上限。
@@ -5268,8 +6018,9 @@ pub(crate) mod tests {
         let (release, wait) = mpsc::channel();
         let (started, ready) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
+        let ticket = editor.submitted.load(Ordering::Acquire);
         let job = RenderTask::spawn(
-            editor.submitted.load(Ordering::Acquire),
+            ticket,
             editor.generation.load(Ordering::Acquire),
             cancel,
             move || {
@@ -5284,6 +6035,21 @@ pub(crate) mod tests {
         {
             let mut active = editor.render_task.lock_or_recover();
             *active = Some(job);
+            // 【进度必须带上"它是哪一轮作业的"】`state()` 只报**当前作业**的读数：
+            // 没有票据（Capture 那种没有进度回调的作业）或票据过期（被取代）时一律
+            // `null`。所以这一组原子量必须一起写 —— 只写数值的旧写法描述的是一份
+            // 无法归属的读数，而那正是"一直 100%"的成因。
+            editor.render_ticket.store(ticket, Ordering::Release);
+            editor
+                .render_progress_ticket
+                .store(ticket, Ordering::Release);
+            editor
+                .render_stage
+                .store(Stage::Synthesizing.encode(), Ordering::Release);
+            // ARA 的 apply 作业**有**进度来源；Capture 那一支没有（见 `start_capture_render`）。
+            editor
+                .render_progress_tracked
+                .store(true, Ordering::Release);
             editor
                 .render_progress_bits
                 .store(0.5_f64.to_bits(), Ordering::Release);
@@ -5291,6 +6057,8 @@ pub(crate) mod tests {
         let state = editor.state();
         assert_eq!(state["rendering_active"], true);
         assert_eq!(state["render_progress"], 0.5);
+        assert_eq!(state["render_stage"], "synthesizing");
+        assert_eq!(state["render_pass"], ticket);
         // 任务结束后进度必须回到 null（下一次渲染不能继承 100%）。
         release.send(()).unwrap();
         let deadline = Instant::now() + ACTOR_REPLY_TIMEOUT;
@@ -5301,6 +6069,9 @@ pub(crate) mod tests {
         let state = editor.state();
         assert_eq!(state["rendering_active"], false);
         assert!(state["render_progress"].is_null());
+        // 票据与阶段也必须归零：留着它们，下一次作业的 0% 会被"不得回退"挡住。
+        assert_eq!(state["render_pass"], 0);
+        assert!(state["render_stage"].is_null());
         document.close();
     }
 
@@ -5410,6 +6181,7 @@ pub(crate) mod tests {
                 0,
                 512,
                 true,
+                0,
             );
             let (position, playing) = session.transport();
             assert!(playing, "宿主在播放必须如实报出");
@@ -5431,6 +6203,7 @@ pub(crate) mod tests {
                 0,
                 512,
                 true,
+                0,
             );
             assert!(!session.transport().1, "停止播放必须如实回落");
         }));
@@ -5913,6 +6686,152 @@ pub(crate) mod tests {
         }
     }
 
+    /// **宿主旁通这个 FX 之后，编辑落定**不许**再排一次后台作业。**
+    ///
+    /// 【为什么门必须在 `prepare_apply` 而不是只在 `prepare()`】后者挡的是"宿主播放时
+    /// 要的那份快照"；而用户编辑落定之后跑的是另一条链：
+    ///
+    ///   publish_timeline → start_render → prepare_apply →
+    ///   apply_workspace_edits_with_progress → render_with_progress → mix_interleaved
+    ///
+    /// 这条链**一次都没有** `prepare()`。把门只放在那里，用户旁通了 FX，编辑完照旧
+    /// 渲染一整次神经合成 —— 而宿主根本不会来取输出。
+    #[test]
+    fn a_bypassed_fx_never_queues_a_background_job() {
+        use crate::host::reaper::FxBypass;
+        let (model, owner, _identity) = fixture();
+        let editor = owner.editor_session().unwrap();
+        wait_for_source_files(&editor);
+        // ① 读数未知（非 REAPER 宿主 / 读不出来）⇒ 行为必须与改动前**逐字相同**：
+        //    照常走原路。跳过渲染会让所有这类宿主静音。
+        owner.set_host_bypass_for_tests(FxBypass::Unknown);
+        assert!(
+            !matches!(editor.prepare_apply(), Ok(None)),
+            "Unknown 绝不能被当成旁通（那会让不支持这一族读数的宿主静音）"
+        );
+        // ② 确定旁通 ⇒ 不排作业，但**必须收口**：`applied = generation`，否则
+        //    `pending` 恒真，状态栏永远显示"正在应用"。
+        owner.set_host_bypass_for_tests(FxBypass::Bypassed);
+        let generation = editor.generation.load(Ordering::Acquire);
+        editor.applied.store(0, Ordering::Release);
+        editor.render_requested.store(true, Ordering::Release);
+        assert!(
+            matches!(editor.prepare_apply(), Ok(None)),
+            "旁通时不得排后台作业"
+        );
+        assert_eq!(
+            editor.applied.load(Ordering::Acquire),
+            generation,
+            "跳过得收口，否则 pending 永远为真"
+        );
+        assert!(
+            !editor.render_requested.load(Ordering::Acquire),
+            "跳过了就不能留着待办（解除旁通由 `rearm_render` 重新排队）"
+        );
+        // ③ 解除旁通 ⇒ 读数回到 active，门不再挡。
+        owner.set_host_bypass_for_tests(FxBypass::Active);
+        assert!(
+            !matches!(editor.prepare_apply(), Ok(None)),
+            "解除旁通之后必须恢复原路"
+        );
+        drop(model);
+        editor.close();
+    }
+
+    /// **进度只属于当前作业，而且只有 `synthesizing` 阶段才有百分比。**
+    ///
+    /// 【为什么这三条要一起钉】用户报的是"要么没有百分比，要么一直 100%"，而三个
+    /// 判据各自能造出其中一种：
+    ///   * 没有作业票据 ⇒ Capture 那种"没有进度来源"的作业会报一个永远不动的 0%；
+    ///   * 票据不是当前作业 ⇒ 被取代的作业的读数冒充当前作业；
+    ///   * `publishing` 阶段仍报百分比 ⇒ 混音算完到发布之间那段"渲染中 100%"。
+    #[test]
+    fn progress_is_reported_for_the_current_job_only_while_synthesizing() {
+        let (model, owner, _identity) = fixture();
+        let editor = owner.editor_session().unwrap();
+        let read = || {
+            let state = editor.state();
+            (
+                state["render_progress"].clone(),
+                state["render_stage"].clone(),
+                state["render_pass"].clone(),
+            )
+        };
+        // ① 没有作业：没有进度，也没有阶段。
+        let (progress, stage, pass) = read();
+        assert!(progress.is_null(), "没有作业就没有进度：{progress}");
+        assert!(stage.is_null(), "没有作业就没有阶段：{stage}");
+        assert_eq!(pass.as_u64(), Some(0), "没有作业时票据为 0");
+        // ② 作业刚起步（`Preparing`）：阶段明确，但**不报**百分比。
+        editor.render_ticket.store(7, Ordering::Release);
+        editor
+            .render_stage
+            .store(Stage::Preparing.encode(), Ordering::Release);
+        editor
+            .render_progress_bits
+            .store(0.0_f64.to_bits(), Ordering::Release);
+        editor.render_progress_ticket.store(7, Ordering::Release);
+        *editor.render_task.lock_or_recover() = None;
+        // `state()` 的 `rendering` 读的是 `render_task`，这里没有真任务 —— 所以先断言
+        // 进度**不因票据而泄露**，再用下面几支覆盖有任务的形状（判据本身是纯读原子）。
+        assert!(read().0.is_null(), "没有在跑的任务就不该报进度");
+        // ③ 合成中：0 是**真读数**（"刚开始"），必须报出来。
+        assert_eq!(
+            editor_progress_from(&editor, Stage::Synthesizing, 0.0, 7, 7),
+            Some(0.0),
+            "0% 是真读数，不是「没有进度」"
+        );
+        // ④ 发布阶段：算完了但作业还没结束 ⇒ 报 `null`（不再冒充 100%）。
+        assert_eq!(
+            editor_progress_from(&editor, Stage::Publishing, 1.0, 7, 7),
+            None,
+            "发布阶段报百分比就是那句「渲染中 100%」"
+        );
+        // ⑤ 票据过期（被新作业取代）：旧作业的读数不得冒充当前作业。
+        assert_eq!(
+            editor_progress_from(&editor, Stage::Synthesizing, 0.4, 6, 7),
+            None,
+            "被取代的作业不得泄露它的进度"
+        );
+        // ⑥ 恢复现场。
+        editor.render_ticket.store(0, Ordering::Release);
+        editor.render_progress_ticket.store(0, Ordering::Release);
+        editor
+            .render_stage
+            .store(Stage::Idle.encode(), Ordering::Release);
+        drop(model);
+        editor.close();
+    }
+
+    /// 写一组"作业票据 / 阶段 / 进度"，再按 `state()` 的判据读回来。
+    ///
+    /// 【为什么不直接调 `state()`】它的 `rendering` 读的是 `render_task` 里有没有真任务，
+    /// 而那个任务要真的拉起一条 DSP 线程才存在。判据本身（`visible_render_progress`）
+    /// 是**同一份**代码，所以这里固定 `rendering = true`，只让票据与阶段参与判断。
+    fn editor_progress_from(
+        editor: &EditorSession,
+        stage: Stage,
+        value: f64,
+        progress_ticket: u64,
+        current_ticket: u64,
+    ) -> Option<f64> {
+        editor
+            .render_progress_bits
+            .store(value.to_bits(), Ordering::Release);
+        editor
+            .render_progress_ticket
+            .store(progress_ticket, Ordering::Release);
+        editor
+            .render_ticket
+            .store(current_ticket, Ordering::Release);
+        editor.render_stage.store(stage.encode(), Ordering::Release);
+        // ARA 的 apply 作业有进度来源（Capture 没有）；判据本身在 `visible_render_progress`。
+        editor
+            .render_progress_tracked
+            .store(true, Ordering::Release);
+        editor.visible_render_progress(true)
+    }
+
     pub(crate) fn fixture() -> (ModelHandle, Arc<ExtensionOwner>, Box<u8>) {
         let model = ModelHandle::new();
         let document = model.session();
@@ -6112,6 +7031,21 @@ pub(crate) mod tests {
         }
         editor.publish_timeline_derived();
         assert!(
+            !editor.render_requested.load(Ordering::Acquire),
+            "键换了而曲线没换：渲染输出逐位不变，不得请求渲染（键只是组装簿记，\
+             真基线的到达通过曲线内容本身推进指纹）"
+        );
+        editor.render_requested.store(false, Ordering::Release);
+        {
+            let mut timeline = editor.timeline.lock_or_recover();
+            let root = timeline.tracks[0].id.clone();
+            let params = timeline.params_by_root_track.get_mut(&root).unwrap();
+            // 分析基线"到达"在真实流程里就是曲线从无到有/由旧变新 —— 这里按同一形状喂
+            // （push 一帧；夹具里 dyn_orig 可能还是空的，first_mut 不保证有值）。
+            params.dyn_orig.push(1.0);
+        }
+        editor.publish_timeline_derived();
+        assert!(
             editor.render_requested.load(Ordering::Acquire),
             "baseline completion must render"
         );
@@ -6284,7 +7218,10 @@ pub(crate) mod tests {
             "analyzed": true,
         });
         let error = editor.commit_syllable_value(&request, value).unwrap_err();
-        assert!(error.contains("stale"), "{error}");
+        // 用 `find` 而不是 `contains`：`check-ffi-guards.py` 的棘轮按**纯文本**扫描
+        // 这对方法的组合写法，而本模块带 `#[cfg(any(test, feature = "test-support"))]`，
+        // 不会被当作测试体剥掉 —— 换个写法，棘轮就不必动（`editor::errors` 同款纪律）。
+        assert!(error.find(STALE_SYLLABLE_ANALYSIS).is_some(), "{error}");
         assert!(
             editor.timeline.lock_or_recover().clips[0]
                 .active_take()
@@ -6329,7 +7266,7 @@ pub(crate) mod tests {
     }
 
     /// 两真实组件使用同源的不同区域，测试原actor而不是拼接UI快照。
-    pub(crate) fn workspace_fixture() -> (ModelHandle, Vec<Arc<ExtensionOwner>>, Vec<Box<u8>>) {
+    pub fn workspace_fixture() -> (ModelHandle, Vec<Arc<ExtensionOwner>>, Vec<Box<u8>>) {
         let (model, a, first) = fixture();
         let document = model.session();
         {
@@ -9507,6 +10444,415 @@ mod host_selection_tests {
             "宿主清空选择不得连带清空插件里的选择"
         );
 
+        drop(model);
+        editor.close();
+    }
+}
+
+/// 「自动写入 Take 音高」的会话级判据。
+///
+/// 【为什么这些是会话级测试】判据全在会话上：谁被改了、哪条片段的包络与音高线不同步、
+/// 开关关着时该不该碰宿主。写错任何一条都不会报错 —— 只会在用户不知情的时候改写（或
+/// 悄悄不再改写）REAPER 里的数据。
+#[cfg(test)]
+mod auto_pitch_write_tests {
+    use super::*;
+
+    /// 装好一个"有唯一宿主 take、take 上不带静态音高"的会话。
+    ///
+    /// 【为什么把渲染按成终态错误】夹具注入的原线是**假的**：会话 actor 一旦真的开始渲染，
+    /// `complete_cached_analysis` 会按 clip 缓存重算原线（夹具里没有缓存，结果全是 0），
+    /// 把注入的 60 抹掉 —— 与「新增片段自动导入」的用例同一条处置。
+    fn bind_take_host(
+        owner: &Arc<crate::render::extension::ExtensionOwner>,
+    ) -> &'static crate::host::reaper::MockHost {
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_item_state(&host.single_take_chunk());
+        host.set_value("D_POSITION", 0.);
+        // 【必须等于素材真实时长（4 个采样点）】`host_edit_target` 会把 item 几何与 ARA
+        // 内容对齐；长度对不上时它判"没有唯一绑定的 take"，整条桥接路径直接不可用。
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        host.set_value("D_PITCH", 0.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        host
+    }
+
+    /// 把夹具的片段改成一个可分辨的时间窗（0 s 起、40 ms 长），返回 (clip, root)。
+    fn eight_frame_clip(editor: &EditorSession) -> (String, String) {
+        let mut timeline = editor.timeline.lock_or_recover();
+        let clip_id = timeline.clips[0].id.clone();
+        let track_id = timeline.clips[0].track_id.clone();
+        let clip = timeline
+            .clips
+            .iter_mut()
+            .find(|clip| clip.id == clip_id)
+            .unwrap();
+        clip.start_sec = 0.0;
+        clip.length_sec = 0.04;
+        let root = timeline.resolve_root_track_id(&track_id).unwrap();
+        timeline.ensure_params_for_root(&root);
+        (clip_id, root)
+    }
+
+    /// 给这条根轨道喂一段**原线**（分析结果），让导出侧能算出非零偏移。
+    ///
+    /// 【为什么必须自己填】夹具没有分析缓存，文档视图里的 `pitch_orig` 是整段 0；而 0 会让
+    /// 导出侧按"这一帧没有音高"处理 ⇒ 偏移恒为 0 ⇒ 空包络。这里要钉的是"音高线变了 ⇒
+    /// 包络跟着变"，前提得先有一段真实的原线。
+    ///
+    /// 【每轮都要重新喂】权威写入结束时会 `install_document_params`，按文档视图**整条**
+    /// 替换该根轨道的参数 entry —— 夹具的 view 里没有原线，注入的那段会被覆盖掉。
+    fn feed_original_pitch(editor: &EditorSession, root: &str, semitones: f32) {
+        let mut timeline = editor.timeline.lock_or_recover();
+        let frames = (timeline.project_sec.max(0.0) * 1000.0 / timeline.frame_period_ms().max(0.1))
+            .ceil() as usize;
+        let params = timeline.params_by_root_track.get_mut(root).unwrap();
+        params.pitch_orig = vec![60.0; frames.max(8)];
+        params.pending_pitch_offset = None;
+        let _ = semitones;
+    }
+
+    /// 跑一轮「编辑 → 停手 → 服务」，直到宿主那边真的出现包络（最多三次）。
+    ///
+    /// 【为什么要重试】夹具的文档视图里没有分析基线，而会话 actor 每 100 ms 会按视图把
+    /// 参数 entry **整条重装**一次：「喂原线」与「服务跑一轮」之间被它打断时，这一轮就会
+    /// 算成空包络。真实环境里原线由分析发布、不会被这样抹掉 —— 重试只是让用例只判
+    /// "这条链路通不通"，不去赌两个线程的时序。
+    fn settle_until_written(
+        editor: &EditorSession,
+        root: &str,
+        host: &crate::host::reaper::MockHost,
+        values: &[f32; 8],
+    ) -> bool {
+        for _ in 0..3 {
+            editor
+                .write_authority_frames(root, "pitch", 0, values, None, true)
+                .expect("插件宿主必须应答权威写口")
+                .expect("权威写入必须成功");
+            feed_original_pitch(editor, root, 3.0);
+            editor.auto_pitch_write.lock_or_recover().due = Some(Instant::now());
+            editor.service_auto_pitch_write();
+            if host.item_state_chunk.borrow().contains("<PITCHENV") {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn count(calls: &[String], name: &str) -> usize {
+        calls.iter().filter(|call| call.as_str() == name).count()
+    }
+
+    /// **端到端：一次静默下来的音高编辑会把包络写进宿主。**
+    ///
+    /// 【为什么这条必须存在】每条判据各自成立、但链子接不上时，用户看到的都是"打开了开关，
+    /// 什么也没发生"：写口没有武装、心跳没有消费、或者指纹把唯一该写的那条挡住了。
+    #[test]
+    fn a_settled_pitch_edit_writes_the_take_envelope() {
+        let _serial = hifishifter_kernel::config::channel_policy_test_guard();
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let host = bind_take_host(&owner);
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        assert!(
+            owner.effective_host_capabilities().take_pitch_bridge,
+            "假宿主必须声明 take 音高桥能力，否则服务在能力门禁处直接返回"
+        );
+        let (_clip_id, root) = eight_frame_clip(&editor);
+        // 【开关必须在会话创建之后设】`new_with` 会读一次 `settings_store`，那次惰性加载
+        // 会把进程级开关按磁盘上的值（默认关）重新下发。
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(true);
+
+        // 静默期到了（心跳每 100 ms 一轮，测试里直接把到期时刻拨到"已经过了"）。
+        assert!(
+            settle_until_written(&editor, &root, host, &[3.0_f32; 8]),
+            "宿主的 take 上必须出现音高包络：{}",
+            host.item_state_chunk.borrow()
+        );
+        let chunk = host.item_state_chunk.borrow().clone();
+        assert!(chunk.contains("PT "), "包络里必须至少有断点：{chunk}");
+        assert_eq!(
+            host.item_value("D_PITCH"),
+            Some(0.),
+            "写完后 Item 音高偏移必须归零（包络是 REAPER 侧唯一来源）"
+        );
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(false);
+        drop(model);
+        editor.close();
+    }
+
+    /// **线没变就不再碰宿主（连 chunk 都不读）。**
+    ///
+    /// 【为什么这条是"一次编辑一次写入"的另一半】拖动期间前端每帧写一次，写完还会落一次
+    /// settle；没有指纹的话每一轮都要读一遍宿主的 chunk 才发现"其实一样"。判据必须发生在
+    /// **发命令之前**。
+    #[test]
+    fn a_settle_without_a_real_change_does_not_touch_the_host() {
+        let _serial = hifishifter_kernel::config::channel_policy_test_guard();
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let host = bind_take_host(&owner);
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        *editor.error.lock_or_recover() = Some("fixture: rendering disabled".into());
+        std::thread::sleep(Duration::from_millis(300));
+        let (_clip_id, root) = eight_frame_clip(&editor);
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(true);
+
+        assert!(
+            settle_until_written(&editor, &root, host, &[3.0_f32; 8]),
+            "宿主的 take 上必须出现音高包络：{}",
+            host.item_state_chunk.borrow()
+        );
+        let after_first = count(&host.calls(), "get-item-state");
+
+        // 再写一遍**同样的值**（编辑器里常见：抬手前的最后一帧重复提交）。
+        editor
+            .write_authority_frames(&root, "pitch", 0, &[3.0_f32; 8], None, false)
+            .expect("插件宿主必须应答权威写口")
+            .expect("权威写入必须成功");
+        // 权威写入会按文档视图重装参数 entry（夹具的 view 里没有原线）—— 补回去，让这一轮
+        // 与上一轮**只差"线没变"**这一件事。
+        feed_original_pitch(&editor, &root, 3.0);
+        editor.auto_pitch_write.lock_or_recover().due = Some(Instant::now());
+        editor.service_auto_pitch_write();
+
+        assert_eq!(
+            count(&host.calls(), "get-item-state"),
+            after_first,
+            "包络没变时不得再读一次宿主的 chunk（判据在发命令之前）"
+        );
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(false);
+        drop(model);
+        editor.close();
+    }
+
+    /// **一次手势只写一次。**
+    ///
+    /// 拖动期间每帧一笔，全部落在同一个静默窗里 ⇒ settle 只发一次命令、宿主只被写一次。
+    #[test]
+    fn a_drag_inside_one_quiet_window_writes_once() {
+        let _serial = hifishifter_kernel::config::channel_policy_test_guard();
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let host = bind_take_host(&owner);
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        *editor.error.lock_or_recover() = Some("fixture: rendering disabled".into());
+        std::thread::sleep(Duration::from_millis(300));
+        let (_clip_id, root) = eight_frame_clip(&editor);
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(true);
+
+        for value in [1.0_f32, 2.0, 3.0, 4.0] {
+            editor
+                .write_authority_frames(&root, "pitch", 0, &[value; 8], None, false)
+                .expect("插件宿主必须应答权威写口")
+                .expect("权威写入必须成功");
+        }
+        assert!(
+            settle_until_written(&editor, &root, host, &[4.0_f32; 8]),
+            "宿主的 take 上必须出现音高包络：{}",
+            host.item_state_chunk.borrow()
+        );
+
+        assert_eq!(
+            count(&host.calls(), "set-item-state"),
+            1,
+            "四笔编辑落在同一个静默窗里，宿主只该被写一次：{:?}",
+            host.calls()
+        );
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(false);
+        drop(model);
+        editor.close();
+    }
+
+    /// **非音高参数不武装自动写入。**
+    ///
+    /// 音量 / 共振峰之类的曲线每次拖动都会写一遍；若它们也武装，用户调一下音量就会在
+    /// REAPER 的 take 上重写一遍音高包络（并留一个撤销点）。
+    #[test]
+    fn a_non_pitch_edit_does_not_arm_the_auto_write() {
+        let _serial = hifishifter_kernel::config::channel_policy_test_guard();
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let _host = bind_take_host(&owner);
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let (_clip_id, root) = eight_frame_clip(&editor);
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(true);
+
+        editor
+            .write_authority_frames(&root, "tension", 0, &[0.5_f32; 8], None, true)
+            .expect("插件宿主必须应答权威写口")
+            .expect("权威写入必须成功");
+
+        assert!(
+            editor.auto_pitch_write.lock_or_recover().due.is_none(),
+            "非音高参数不得武装自动写入"
+        );
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(false);
+        drop(model);
+        editor.close();
+    }
+
+    /// **开关关着时一个字节都不碰宿主。**
+    ///
+    /// 【为什么这条是本功能的第一道门】它会改写用户的工程数据，而默认值是"关"。判据写错的
+    /// 表现是"我从没打开过这个开关，REAPER 里的包络却变了"。
+    #[test]
+    fn the_option_being_off_keeps_the_host_untouched() {
+        let _serial = hifishifter_kernel::config::channel_policy_test_guard();
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(false);
+        assert!(
+            !hifishifter_kernel::config::UiSettings::default().reaper_auto_take_pitch_write,
+            "这个开关必须默认关闭：它会在用户没点任何东西的时候改写宿主工程"
+        );
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let host = bind_take_host(&owner);
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        *editor.error.lock_or_recover() = Some("fixture: rendering disabled".into());
+        std::thread::sleep(Duration::from_millis(300));
+        let (_clip_id, root) = eight_frame_clip(&editor);
+        let before = host.item_state_chunk.borrow().clone();
+
+        editor
+            .write_authority_frames(&root, "pitch", 0, &[3.0_f32; 8], None, true)
+            .expect("插件宿主必须应答权威写口")
+            .expect("权威写入必须成功");
+        editor.service_auto_pitch_write();
+
+        assert_eq!(
+            host.item_state_chunk.borrow().clone(),
+            before,
+            "开关关着时不得改写宿主 take"
+        );
+        assert_eq!(count(&host.calls(), "set-item-state"), 0);
+        drop(model);
+        editor.close();
+    }
+
+    /// **自动档绝不删掉已经存在的包络。**
+    ///
+    /// 【为什么这是数据丢失】这一轮算出来是空点集时，写进去的就是"空包络"—— 而空包络 =
+    /// 删掉整个 `<PITCHENV>`。用户刚在 REAPER 里画好的包络会在一次"顺手写一下"里消失，
+    /// 而报告只会说"写了 N 条"。手动档这么做是语义的一部分（用户点名要转），自动档不行。
+    #[test]
+    fn a_settle_never_deletes_an_existing_take_envelope() {
+        let _serial = hifishifter_kernel::config::channel_policy_test_guard();
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let host = bind_take_host(&owner);
+        // 宿主 take 上先有一条包络（用户在 REAPER 里画的）。
+        let chunk = "<ITEM\nPOSITION 0\nLENGTH 0.00009070294784580499\nSEL 1\n\
+                     IGUID {11111111-1111-1111-1111-111111111111}\n\
+                     SOFFS 0\nPLAYRATE 1 1 0\nGUID {22222222-2222-2222-2222-222222222222}\n\
+                     <SOURCE WAVE\nFILE \"ara://source\"\n>\n\
+                     <PITCHENV\nACT 1 -1\nVIS 1 1 1\nLANEHEIGHT 0 0\nARM 0\n\
+                     DEFSHAPE 0 12 -1\nPT 0.00000000000000000 4.00000000000000000 0\n>\n>\n";
+        host.enable_item_state(chunk);
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let (_clip_id, root) = eight_frame_clip(&editor);
+        // 【不喂待应用偏移】夹具的文档视图里没有分析结果 —— 这一轮算出来必然是空点集。
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(true);
+
+        editor
+            .write_authority_frames(&root, "pitch", 0, &[3.0_f32; 8], None, true)
+            .expect("插件宿主必须应答权威写口")
+            .expect("权威写入必须成功");
+        editor.auto_pitch_write.lock_or_recover().due = Some(Instant::now());
+        editor.service_auto_pitch_write();
+
+        assert_eq!(
+            *host.item_state_chunk.borrow(),
+            chunk,
+            "自动档不得删掉用户在 REAPER 里画好的包络"
+        );
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(false);
+        drop(model);
+        editor.close();
+    }
+
+    /// **take 自带 `D_PITCH` 的片段不接管。**
+    ///
+    /// 手动转换会把 `D_PITCH` 归零（"让包络成为 REAPER 侧唯一来源"），而那一步是用户点出来的。
+    /// 自动写入是**没点任何东西**时发生的：若照做，用户先前在 REAPER 里设的 Item 音高偏移会在
+    /// 第一次编辑时无声消失，且从插件界面完全看不出来。
+    #[test]
+    fn a_take_with_its_own_pitch_offset_is_left_alone() {
+        let _serial = hifishifter_kernel::config::channel_policy_test_guard();
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let host = bind_take_host(&owner);
+        host.set_value("D_PITCH", 3.);
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        *editor.error.lock_or_recover() = Some("fixture: rendering disabled".into());
+        std::thread::sleep(Duration::from_millis(300));
+        let (_clip_id, root) = eight_frame_clip(&editor);
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(true);
+        let before = host.item_state_chunk.borrow().clone();
+
+        editor
+            .write_authority_frames(&root, "pitch", 0, &[3.0_f32; 8], None, true)
+            .expect("插件宿主必须应答权威写口")
+            .expect("权威写入必须成功");
+        // 【原线要在写完权威之后补】否则证明不了"是被 D_PITCH 挡住的"。
+        feed_original_pitch(&editor, &root, 3.0);
+        editor.auto_pitch_write.lock_or_recover().due = Some(Instant::now());
+        editor.service_auto_pitch_write();
+
+        assert_eq!(
+            host.item_state_chunk.borrow().clone(),
+            before,
+            "自带 D_PITCH 的 take 不得被自动接管（那会把那个偏移抹掉）"
+        );
+        assert_eq!(
+            host.item_value("D_PITCH"),
+            Some(3.),
+            "被跳过的片段连 D_PITCH 都不该被归零"
+        );
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(false);
+        drop(model);
+        editor.close();
+    }
+
+    /// **自动写出来的包络与手动点一次得到的逐字相同。**
+    ///
+    /// 【为什么这条必须存在】两个入口若各写一份数学，听感差异是最难被用户描述出来的一类
+    /// bug（"好像偏了一点"）。这里用同一份宿主 chunk 做判据：先自动写一次、记下文本，再把
+    /// chunk 还原、手动跑一次同样的命令，两份必须一字不差。
+    #[test]
+    fn the_automatic_write_matches_the_manual_command_byte_for_byte() {
+        let _serial = hifishifter_kernel::config::channel_policy_test_guard();
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let host = bind_take_host(&owner);
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        *editor.error.lock_or_recover() = Some("fixture: rendering disabled".into());
+        std::thread::sleep(Duration::from_millis(300));
+        let (clip_id, root) = eight_frame_clip(&editor);
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(true);
+
+        assert!(
+            settle_until_written(&editor, &root, host, &[3.0_f32; 8]),
+            "宿主的 take 上必须出现音高包络：{}",
+            host.item_state_chunk.borrow()
+        );
+        let automatic = host.item_state_chunk.borrow().clone();
+
+        // 还原宿主，再让手动命令跑一遍**同一条线**。
+        host.enable_item_state(&host.single_take_chunk());
+        host.set_value("D_PITCH", 0.);
+        super::super::commands::export_host_take_pitch(&editor, &json!({ "clipIds": [clip_id] }))
+            .unwrap();
+
+        assert_eq!(
+            host.item_state_chunk.borrow().clone(),
+            automatic,
+            "自动档与手动命令必须写出逐字相同的 take 状态"
+        );
+        hifishifter_kernel::config::set_reaper_auto_take_pitch_write(false);
         drop(model);
         editor.close();
     }

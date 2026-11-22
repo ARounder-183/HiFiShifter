@@ -1,32 +1,41 @@
-; HiFiShifter 合并安装器（NSIS）：独立 App + VST3/ARA 插件 + 共享模型库。
+; HiFiShifter merged installer (NSIS): standalone App + VST3/ARA plugins + shared model library.
 ;
-; 【为什么是自研脚本，而不是 Tauri 的 NSIS 模板或 installerHooks】
+; [Why a hand-written script instead of Tauri's NSIS template or installerHooks]
 ;
-; - bundle.windows.nsis.installerHooks 只能往 Tauri 生成的脚本里**插代码**，
-;   加不了组件页，也加不了"第二个安装目录"（VST3 目录）。模型仍然会被 Tauri 的
-;   payload 打进 App 目录 —— 那正是要消除的第二份 150 MB。
-; - 自定义 nsis.template 要把 700 行模板连同它的全部 !define 隐式契约一起抄下来，
-;   然后跟着 tauri-cli 的版本漂移。模板里的每一处升级都会变成一次手工合并。
+; - bundle.windows.nsis.installerHooks can only **inject code** into the script Tauri
+;   generates; it cannot add a components page, nor a "second install directory" (the VST3
+;   directory). The models would still be packed into the App directory by Tauri's payload —
+;   exactly the second full copy of the weights this is meant to eliminate.
+; - A custom nsis.template means copying out the 700-line template together with all of its
+;   implicit !define contracts, then drifting along with tauri-cli versions. Every upstream
+;   template upgrade would turn into a manual merge.
 ;
-; 所以这里自己写一份：页面、组件、目录、模型段、卸载段都在眼前，构建脚本用 /D 把
-; 每一个路径传进来（脚本里不出现任何相对路径猜测）。
+; So this file is its own script: pages, components, directories, the models section and the
+; uninstall section are all in plain view, and the build script passes every path in via /D
+; (no relative-path guessing appears anywhere in the script).
 ;
-; 【覆盖安装】.onInit 若发现本机已有安装，把 $INSTDIR 设回旧版目录，并让用户在
-; 选项页决定是否删除共享模型库/缓存；点下"安装"后由**本安装器自己**移除上一版
-; （删目录 / 插件 / 卸载项 / 快捷方式），绝不执行旧版 uninstall.exe —— 那个 exe 属于
-; 上一版，它在 /S 下是否真的静默（语言选择框、宿主占用提示）不由我们决定，执行它
-; 就等于在安装过程中额外弹出一个"HiFiShifter 卸载"窗口。
+; [Reinstall over an existing version] If .onInit finds an existing install on this machine,
+; it points $INSTDIR back at the old directory and lets the user decide on the options page
+; whether to delete the shared model library / caches; after "Install" is clicked, **this
+; installer itself** removes the previous version (directories / plugins / uninstall entry /
+; shortcuts) and never executes the old uninstall.exe — that exe belongs to the previous
+; version, whether it is really silent under /S (language selection dialog, host-busy prompt)
+; is not for us to decide, and executing it amounts to popping an extra "HiFiShifter
+; uninstall" window in the middle of installation.
 ;
-; 【文案】不在这里：全部来自 $(HFS_*)，取值由
-; scripts/release/build-installer-strings.mjs 从五语词表抽出。要改文案请改词表。
+; [UI strings] Live elsewhere: they all come from $(HFS_*), whose values are extracted from
+; the five-language string tables by scripts/release/build-installer-strings.mjs.
+; To change wording, edit the string tables.
 ;
-; 【必须原样保留的三段（都来自旧插件安装器，且是踩过的坑）】
-;   1. 宿主运行守卫：安装与卸载都查（已加载插件的 DAW 会锁住 DLL，覆盖 = 宿主崩溃）；
-;   2. 目录对账：Vite 的 chunk 带内容哈希，File /r 只写不删，重装会单调增长；
-;   3. ARP 注册：没有它，Windows「已安装的应用」里根本没有本产品。
+; [Three segments that must be preserved verbatim (all from the old plugin installer, all hard-won lessons)]
+;   1. Host-running guard: checked on both install and uninstall (a DAW that has loaded the
+;      plugin locks the DLL; overwrite = host crash);
+;   2. Directory reconciliation: Vite chunks carry content hashes and File /r only writes,
+;      never deletes, so reinstalls grow monotonically;
+;   3. ARP registration: without it the product does not appear in Windows "Installed apps" at all.
 ;
-; 【从 Tauri 模板移植的三段】
-;   WebView2 运行时检测 / 安装（内嵌 bootstrapper）、主程序运行中检测、快捷方式。
+; [Three segments ported from the Tauri template]
+;   WebView2 runtime detection / install (embedded bootstrapper), main-app-running detection, shortcuts.
 
 Unicode true
 !include "MUI2.nsh"
@@ -35,16 +44,18 @@ Unicode true
 !include "x64.nsh"
 !include "Sections.nsh"
 !include "StrFunc.nsh"
-; 安装器需要 StrStr（进程名过滤）与 StrTrimNewLines（读回文件大小时去掉行尾）。
-; 卸载器只需要 StrStr（卸载器里的字符串函数前缀是 un.）。
+; The installer needs StrStr (process-name filtering) and StrTrimNewLines (to strip the
+; trailing newline when reading a file size back).
+; The uninstaller only needs StrStr (string functions in the uninstaller carry the un. prefix).
 ${StrStr}
 ${UnStrStr}
 ${StrTrimNewLines}
 
-; ── 构建期参数（全部由 scripts/build/build.ps1 以 /D 传入）──────────────────
+; ── Build-time parameters (all passed by scripts/build/build.ps1 via /D) ────
 ;
-; 【为什么全部强制】缺一个参数时 File /r 只会报一句 "no files found"，那是最难定位
-; 的一类构建错误。!error 让它在编译的第一秒就停下并说清楚缺了什么。
+; [Why all are mandatory] With one parameter missing, File /r only reports "no files found" —
+; one of the hardest build errors to locate. !error stops compilation in its first second and
+; says exactly what is missing.
 !ifndef APP_DIR
   !error "APP_DIR is required (staged standalone app payload)"
 !endif
@@ -88,18 +99,20 @@ ${StrTrimNewLines}
   !error "HFS_ICON is required (HiFiShifter icon.ico from the Tauri app icons)"
 !endif
 
-; 组件索引：自定义页函数写在 Section 声明**之前**，那时 NSIS 自动生成的
-; ${SEC_*} 符号还不存在（实测会报 "unknown variable/constant"），所以这里仍用
-; 显式数字。SectionGroup 自身也会占一个索引，且末尾的 SectionGroupEnd 再占一个
-; —— 实测顺序为 0=组、1/2/3/4=子项、5=组结束、6=组、7/8=子项。
-; 【改动声明顺序必须同步改这里】漏改不会编译失败，只会让 VST3/CLAP 目录页判断错
-; 组件是否被勾选 —— 那是最难从 UI 上察觉的一类回归。
+; Component indexes: the custom page functions appear **before** the Section declarations,
+; when the ${SEC_*} symbols NSIS auto-generates do not exist yet (tested: it reports
+; "unknown variable/constant"), so explicit numbers are still used here. A SectionGroup also
+; occupies an index itself, and its closing SectionGroupEnd occupies another one —
+; the measured order is 0=group, 1/2/3/4=children, 5=group end, 6=group, 7/8=children.
+; [Changing declaration order requires changing these numbers in step] A missed update does
+; not fail compilation; it only makes the VST3/CLAP directory pages misjudge whether a
+; component is checked — the class of regression that is hardest to notice in the UI.
 !define SECGRP_APP 0
 !define SEC_APP 1
 !define SEC_MODELS 2
 !define SEC_SHORTCUTS 3
 !define SEC_FILEASSOC 4
-; 5 = 第一个 SectionGroupEnd
+; 5 = the first SectionGroupEnd
 !define SECGRP_PLUGINS 6
 !define SEC_VST3 7
 !define SEC_CLAP 8
@@ -108,138 +121,168 @@ ${StrTrimNewLines}
 !define VST3_SUBDIR "HiFiShifter.vst3"
 !define CLAP_FILENAME "HiFiShifter.clap"
 !define CLAP_RESOURCES "HiFiShifter-resources"
-; 文件关联的稳定 ProgID；扩展名默认值只指向它，不直接写 exe 路径。
+; Stable ProgID for the file associations; extension default values point only at it,
+; never directly at the exe path.
 !define FILEASSOC_PROGID "HiFiShifter.Project"
 !define ARP_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\HiFiShifter"
-; 旧版插件安装器留下的卸载项：本安装器接管模型库与插件目录，成功后把它清掉。
+; Uninstall entry left behind by the old plugin installer: this installer takes over the
+; model library and plugin directories and clears it after success.
 !define LEGACY_VST3_ARP_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\HiFiShifterVST3"
 !define UNINSTALLER "$INSTDIR\uninstall.exe"
-; WebView2 Evergreen Runtime 的产品 GUID（微软固定值，与语言无关）。
+; Product GUID of the WebView2 Evergreen Runtime (fixed by Microsoft, language-independent).
 !define WEBVIEW2_GUID "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 
-; ── 本地测试开关（发布构建绝不定义）────────────────────────────────────────
+; ── Local testing switch (never defined for release builds) ────────────────
 ;
-; 【为什么需要它】安装器真的会写 Program Files 与 HKLM，而没有管理员权限的机器
-; 跑不了它、也常有 DAW 正开着（那正是安装器要拒绝的情形）。没有这个开关，
-; "安装 → 查 ARP → 重装（幂等）→ /repair → 卸载"这条闭环完全无法在测试机上跑一遍，
-; 而未经执行的安装器正是最容易出错的东西。
+; [Why this exists] The installer really writes Program Files and HKLM; machines without
+; admin rights cannot run it, and a DAW is often open (exactly what the installer refuses).
+; Without this switch, the full loop "install → check ARP → reinstall (idempotent) → /repair
+; → uninstall" cannot be exercised even once on a test machine, and an installer that has
+; never been run is precisely the easiest thing to get wrong.
 ;
-; 打开后：装到当前用户的临时目录、不要求提权、ARP 写 HKCU、跳过宿主运行检查。
-; 其余逻辑（目录对账、卸载段、注册表字段、页面与文案）与发布构建逐字相同。
-; scripts/checks/check-product-consistency.ps1 断言默认分支仍是 admin / HKLM /
-; Common Files —— 防止有人把测试分支误当默认。
+; When enabled: install into the current user's temp directory, no elevation required, ARP
+; written to HKCU, host-running checks skipped.
+; The rest of the logic (directory reconciliation, uninstall section, registry fields, pages
+; and strings) is word-for-word identical to the release build.
+; scripts/checks/check-product-consistency.ps1 asserts the default branch is still admin /
+; HKLM / Common Files — so nobody mistakes the test branch for the default.
 !ifdef HFS_TEST_MODE
   InstallDir "$LOCALAPPDATA\HiFiShifterInstallerTest\App"
   RequestExecutionLevel user
   !define HFS_ARP_ROOT HKCU
-  ; 测试模式写 HKCU\Software\Classes，门禁不会污染真实用户的 HKLM 关联。
+  ; Test mode writes HKCU\Software\Classes, so gate checks never pollute real users' HKLM associations.
   !define HFS_CLASSES_ROOT HKCU
   !define HFS_DEFAULT_VST3_DIR "$LOCALAPPDATA\HiFiShifterInstallerTest\VST3"
   !define HFS_DEFAULT_CLAP_DIR "$LOCALAPPDATA\HiFiShifterInstallerTest\CLAP"
-  ; 【为什么测试模式换模型根】测试安装器是 user 权限，写 %ProgramData% 会触发 UAC
-  ; 虚拟化：File/SetOutPath 落到 VirtualStore，而 Rename/FileExists 走真实路径 ——
-  ; 模型永远停在 <版本>.staging，安装与卸载都判错。改用 current 上下文的 $APPDATA
-  ; （用户漫游目录）就不虚拟化，门禁才能真实验证模型闭环。
+  ; [Why test mode switches the model root] The test installer runs as user; writing
+  ; %ProgramData% triggers UAC virtualization: File/SetOutPath lands in the VirtualStore while
+  ; Rename/FileExists hit the real path — the models stay stuck in <version>.staging and both
+  ; install and uninstall misjudge them. Using the current context's $APPDATA (the user's
+  ; roaming profile) avoids virtualization, so the gate checks can truly exercise the model
+  ; round-trip.
   !define HFS_MODEL_ROOT "$APPDATA\HiFiShifterTest\models"
   !define HFS_MODEL_ROOT_CONTEXT current
-  ; 【CLAP 资源放哪】CLAP 的公共插件目录（Common Files\CLAP）按规范只放 .clap 文件本身，
-  ; 资源目录不能摆在那里（见下面 CLAP 段）。测试模式同样用当前用户目录，避免 UAC 虚拟化。
+  ; [Where CLAP resources go] Per the spec, the public CLAP plugin directory
+  ; (Common Files\CLAP) holds only the .clap files themselves; the resource directory cannot
+  ; live there (see the CLAP section below). Test mode likewise uses the current user's
+  ; directory to avoid UAC virtualization.
   !define HFS_CLAP_RES_DIR "$LOCALAPPDATA\HiFiShifterInstallerTest\CLAPResources"
   !define HFS_CLAP_RES_CONTEXT current
 !else
   InstallDir "$PROGRAMFILES64\HiFiShifter"
   RequestExecutionLevel admin
   !define HFS_ARP_ROOT HKLM
-  ; 发布安装器按 per-machine 注册文件关联。
+  ; The release installer registers file associations per-machine.
   !define HFS_CLASSES_ROOT HKLM
   !define HFS_DEFAULT_VST3_DIR "$COMMONFILES64\VST3"
   !define HFS_DEFAULT_CLAP_DIR "$COMMONFILES64\CLAP"
-  ; 发布安装器是 admin，写 %ProgramData% 不虚拟化；all 上下文的 $APPDATA 正是它。
+  ; The release installer is admin; writes to %ProgramData% are not virtualized, and the all
+  ; context's $APPDATA is exactly that directory.
   !define HFS_MODEL_ROOT "$APPDATA\HiFiShifter\models"
   !define HFS_MODEL_ROOT_CONTEXT all
-  ; 发布安装器：插件资源与共享模型库同一个全机根（%ProgramData%\HiFiShifter），
-  ; 公共 CLAP 目录里因此只剩 HiFiShifter.clap 一个条目。
+  ; Release installer: plugin resources share the machine-wide root with the shared model
+  ; library (%ProgramData%\HiFiShifter), so the public CLAP directory ends up containing only
+  ; one entry, HiFiShifter.clap.
   !define HFS_CLAP_RES_DIR "$APPDATA\HiFiShifter\plugin-resources"
   !define HFS_CLAP_RES_CONTEXT all
   !define HFS_HOST_GUARD
 !endif
 
-; SetCompressor 必须在语言声明之前：语言文件一加载就已经有数据被压缩。
+; SetCompressor must come before the language declarations: as soon as a language file is
+; loaded, data is already being compressed.
 OutFile "${OUTPUT_FILE}"
 SetCompressor /SOLID lzma
 ShowInstDetails show
 !define MUI_ABORTWARNING
 
-; 【为什么安装器用自己的图标】MUI2 默认用 NSIS 自带的 modern-install.ico ——
-; 右上角那个与产品无关的圆形 logo。HiFiShifter 的图标随 Tauri App 一起维护在
-; backend\src-tauri\icons\icon.ico，由构建脚本以 /D 传入（与其它路径一样不在
-; 脚本里猜相对位置）。安装器与卸载器都换成它，打开向导就能认出是本产品。
+; [Why the installer uses its own icon] MUI2 defaults to NSIS's built-in modern-install.ico —
+; the product-agnostic round logo in the top-right corner. HiFiShifter's icon is maintained
+; together with the Tauri App at backend\src-tauri\icons\icon.ico and passed in by the build
+; script via /D (like every other path, no relative location is guessed in the script).
+; Both installer and uninstaller switch to it, so the wizard is recognizable as this product
+; the moment it opens.
 !define MUI_ICON "${HFS_ICON}"
 !define MUI_UNICON "${HFS_ICON}"
 
-; 【为什么这些文案必须在页面宏之前定义】MUI 在 !insertmacro MUI_PAGE_* 时就把
-; 页面文案烘进界面函数；$(HFS_...) 是 LangString 的前向引用，运行时才取值，
-; 因此定义放在语言声明之前没有问题（已用最小脚本验证）。此前没有定义，欢迎页、
-; 组件页与目录页都退回 MUI 自带的英文默认文案，五语词表里的文案从未被显示。
+; [Why these strings must be defined before the page macros] MUI bakes the page strings into
+; the UI functions at !insertmacro MUI_PAGE_* time; $(HFS_...) is a forward reference to a
+; LangString whose value is resolved at runtime, so defining them before the language
+; declarations is fine (verified with a minimal script). Previously they were not defined,
+; and the welcome, components and directory pages all fell back to MUI's built-in English
+; defaults — the strings from the five-language tables were never displayed.
 !define MUI_WELCOMEPAGE_TITLE "$(HFS_WELCOME_TITLE)"
 !define MUI_WELCOMEPAGE_TEXT "$(HFS_WELCOME_TEXT)"
 !define MUI_COMPONENTSPAGE_TEXT_TOP "$(HFS_COMPONENTS_TOP)"
 !define MUI_DIRECTORYPAGE_TEXT_TOP "$(HFS_APP_DIR_TEXT)"
 
-; ── 页面 ────────────────────────────────────────────────────────────────
-; 安装器与卸载器的页面都必须在语言声明之前（MUI 在加载第一个语言时插入界面函数，
-; 那一刻它要知道有没有卸载器）。
+; ── Pages ───────────────────────────────────────────────────────────────
+; Pages of both installer and uninstaller must come before the language declarations
+; (MUI inserts the UI functions when the first language is loaded, and at that moment it
+; needs to know whether an uninstaller exists).
 !insertmacro MUI_PAGE_WELCOME
-; 【为什么覆盖安装要有独立一页】重装同一个产品时，先移除旧版再装才不会留下
-; 新旧混杂的目录。这一页与卸载选项页一致：可分别选择是否删除共享模型库
-; （默认勾选）和缓存/日志（默认不勾），**它就是用户的唯一一次确认**，不再另弹
-; "要卸载吗？"。真正的移除发生在 INSTFILES 页的 PRE 回调，由安装器自己在进程内
-; 完成（不执行旧版 uninstall.exe），用户中途取消时旧版仍完好无损。
-; 没检测到旧版时这一页在 Create 回调里 Abort，向导完全不受影响。
+; [Why reinstalling gets its own page] When reinstalling the same product, the old version
+; must be removed before installing, otherwise directories end up mixing old and new files.
+; This page matches the uninstall options page: the shared model library (checked by default)
+; and caches/logs (unchecked by default) can be selected separately, and **it is the user's
+; one and only confirmation** — no extra "Do you want to uninstall?" dialog. The actual
+; removal happens in the INSTFILES page's PRE callback, completed in-process by the installer
+; itself (it never runs the old uninstall.exe), so the old version stays intact if the user
+; cancels midway.
+; When no previous version is detected, this page Aborts in its Create callback and the
+; wizard is completely unaffected.
 Page custom HfsReinstallPageCreate HfsReinstallPageLeave
 
-; 【为什么许可页看的不是随包的那份 LICENSE】NSIS 的 LicenseData 在**编译期**把文件读成
-; UTF-16 存进安装器：文件带 BOM 才按 UTF-8 解码，不带就按**编译所在机器的 ANSI 代码页**
-; 解码。LICENSE 是无 BOM 的 UTF-8，于是在中文 Windows 上编译出来的安装包里 θ 变成"胃"、
-; 日文假名整段丢失 —— 而且编译一声不响，只有打开许可页才看得见。
-; 所以 build.ps1 另写一份带 BOM 的 license-page.txt 专供这一页；HFS_LICENSE 仍是与仓库
-; 逐字节相同的那份，负责装进用户磁盘。
+; [Why the license page does not show the bundled LICENSE] NSIS's LicenseData reads the file
+; into the installer as UTF-16 **at compile time**: with a BOM it decodes as UTF-8, without
+; one it decodes using **the ANSI code page of the machine doing the compiling**. LICENSE is
+; UTF-8 without BOM, so in installers compiled on Chinese Windows θ turned into the hanzi
+; for "stomach" and entire runs of Japanese kana went missing — silently at compile time,
+; visible only when the license page opened.
+; So build.ps1 writes a separate BOM'd license-page.txt dedicated to this page; HFS_LICENSE
+; remains the byte-identical copy from the repository, the one installed onto the user's disk.
 !insertmacro MUI_PAGE_LICENSE "${HFS_LICENSE_PAGE}"
 !define MUI_PAGE_CUSTOMFUNCTION_SHOW HfsComponentsPageShow
-; ── 组件页布局：按客户区尺寸重排，文字行给足高度 ────────────────────
+; ── Components page layout: reflow by client size, tall text rows ───
 ;
-; 【为什么必须改】MUI2 自带的 IDD_SELCOM 把树挤在左半边（147px），中文组件名
-; 被截断；此前用硬编码 434x210 的 MoveWindow 重排又把「选定安装的组件」
-; 「所需空间」压成 10px 高，字被裁掉，描述标题还与所需空间挤在同一行。
-; 固定像素在 125% DPI 下也会失配，所以这里全部按**真实客户区**计算。
+; [Why this must change] MUI2's built-in IDD_SELCOM squeezes the tree into the left half
+; (147px), truncating CJK component names; an earlier reflow with a hardcoded 434x210
+; MoveWindow squeezed "Select the components to install" and "Space required" down to 10px
+; high, clipping the text, and jammed the description title onto the same line as space
+; required. Fixed pixels also mismatch at 125% DPI, so everything here is computed from the
+; **real client area**.
 ;
-; 【为什么不换 SMALLDESC / 自定义 UI 资源】SMALLDESC 会把树压到 5 行，
-; 底部两个组件直接看不见；改 .exe 里的对话框模板则要维护二进制资源。
-; 控件 ID 与 MUI2 的 GetDlgItem 一致（1006/1022/1023/1032/1042/1043）：
-;   说明(28) → 列表标签(14) → 组件树(剩余高的大头) →
-;   所需空间(独立一行 14) → 组件描述标题(独立一行 14) → 描述通栏(30~48)
-; 「安装类型」下拉框(1017)与其标签(1021)本安装器不用，隐藏以腾出整行宽度。
-; 14px 来自默认 8pt 字体的实测行高，10px 正是旧版把字裁掉的原因。
+; [Why not SMALLDESC / a custom UI resource] SMALLDESC crushes the tree to 5 rows and the
+; bottom two components become invisible; patching the dialog template inside the .exe means
+; maintaining a binary resource. Control IDs match MUI2's GetDlgItem
+; (1006/1022/1023/1032/1042/1043):
+;   description(28) → list label(14) → components tree (the bulk of the remaining height) →
+;   space required (own row, 14) → description title (own row, 14) → description band (30~48)
+; The "Installation type" dropdown (1017) and its label (1021) are unused by this installer
+; and hidden to free up the full row width.
+; 14px comes from the measured line height of the default 8pt font; 10px is exactly why the
+; old version clipped the text.
 Function HfsComponentsPageShow
   FindWindow $0 "#32770" "" $HWNDPARENT
   ${If} $0 == 0
     Return
   ${EndIf}
-  ; $R0 = 左右各留 8px 后的内容宽度；$R1 = 去掉上下边距后的可用高度。
+  ; $R0 = content width after leaving 8px on each side; $R1 = usable height after removing
+  ; the top/bottom margins.
   System::Call 'user32::GetClientRect(p $0, @r1)'
   System::Call '*$1(i,i,i.r2,i.r3)'
   IntOp $R0 $2 - 16
   IntOp $R1 $3 - 6
-  ; 固定占用：说明 28 + 标签 14 + 所需空间 14 + 描述标题 14 + 五行间隔 10 = 80。
-  IntOp $R2 $R1 - 80      ; 树 + 描述框可以分的总高度
-  IntOp $R4 $R2 / 5       ; 描述框先取 20%
+  ; Fixed usage: description 28 + label 14 + space required 14 + description title 14 +
+  ; five row gaps 10 = 80.
+  IntOp $R2 $R1 - 80      ; total height to split between the tree and the description box
+  IntOp $R4 $R2 / 5       ; description box takes 20% first
   ${If} $R4 < 30
     StrCpy $R4 30
   ${EndIf}
   ${If} $R4 > 48
     StrCpy $R4 48
   ${EndIf}
-  IntOp $R3 $R2 - $R4     ; 其余全给组件树（450x228 客户区下约 112px / 7 行）
+  IntOp $R3 $R2 - $R4     ; the rest all goes to the components tree (about 112px / 7 rows at a 450x228 client area)
   ${If} $R3 < 70
     StrCpy $R3 70
     IntOp $R4 $R2 - $R3
@@ -247,7 +290,8 @@ Function HfsComponentsPageShow
 
   GetDlgItem $1 $0 1006
   System::Call 'user32::MoveWindow(p $1, i 8, i 2, i $R0, i 28, i 1)'
-  ; 安装类型下拉与标签：本安装器没有 InstType，隐藏后标签行不会被它挤窄。
+  ; Installation type dropdown and label: this installer has no InstType; hiding them keeps
+  ; the label row from being squeezed narrower by them.
   GetDlgItem $1 $0 1017
   System::Call 'user32::ShowWindow(p $1, i 0)'
   GetDlgItem $1 $0 1021
@@ -259,7 +303,7 @@ Function HfsComponentsPageShow
 
   IntOp $R5 48 + $R3
   IntOp $R5 $R5 + 2
-  ; 所需空间单独占一行，不再和「组件描述」标题并排。
+  ; Space required gets its own row, no longer side by side with the "Description" title.
   GetDlgItem $1 $0 1023
   System::Call 'user32::MoveWindow(p $1, i 8, i $R5, i $R0, i 14, i 1)'
   IntOp $R5 $R5 + 16
@@ -279,14 +323,16 @@ Page custom HfsClapPage HfsClapPageLeave
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
-; 【为什么用 UninstPage custom 而不是 MUI 的组件页】卸载器只需要两个可勾选项，
-; 复用安装侧的组件页会带来整套 section 索引与组件页布局回调；两复选框的自定义页
-; 更轻，而且 un.onInit 里的默认值在静默卸载时不经页面直接生效；覆盖安装
-; 还会通过 /DeleteModels= /DeleteCache= 把安装器选项页的选择传进来。
+; [Why UninstPage custom instead of MUI's components page] The uninstaller only needs two
+; checkboxes; reusing the installer-side components page would drag in the whole set of
+; section indexes plus the page-layout callback. A custom page with two checkboxes is
+; lighter, and the defaults in un.onInit take effect directly on silent uninstall without
+; any page; reinstalling over an existing version also passes the installer options page's
+; choices through /DeleteModels= /DeleteCache=.
 UninstPage custom un.HfsUninstallOptionsCreate un.HfsUninstallOptionsLeave
 !insertmacro MUI_UNPAGE_INSTFILES
 
-; 第一个是默认语言（系统语言不匹配任何一个时回退到它）。
+; The first one is the default language (the fallback when the system language matches none).
 !insertmacro MUI_LANGUAGE "English"
 !insertmacro MUI_LANGUAGE "SimpChinese"
 !insertmacro MUI_LANGUAGE "TradChinese"
@@ -303,25 +349,31 @@ Var HfsVst3Dir
 Var HfsClapDialog
 Var HfsClapInput
 Var HfsClapDir
-; 插件资源目录（安装时登记，卸载时按它删）：新版在 %ProgramData%，与共享模型库同根。
+; Plugin resource directory (recorded at install time, deleted against it at uninstall): the
+; new layout keeps it in %ProgramData%, sharing the root with the shared model library.
 Var HfsClapResDir
 Var HfsIsRepair
 Var HfsModelRoot
 Var HfsVerifyRoot
 Var HfsListFile
-; 卸载选项页：两个复选框的状态（1 = 清理）。un.onInit 把「删除模型」置 1、
-; 「清理缓存」置 0；静默卸载不走选项页，因此这两个值直接生效。
+; Uninstall options page: state of the two checkboxes (1 = clean up). un.onInit sets "delete
+; models" to 1 and "clean caches" to 0; silent uninstall skips the options page, so these two
+; values take effect directly.
 Var HfsUnOptModels
 Var HfsUnOptCache
 Var HfsUnChkModels
 Var HfsUnChkCache
 Var HfsUnOtherInstall
-; 覆盖安装：旧版安装目录、旧版登记过的模型库根、两项清理选择、是否确实检测到旧版。
-; 【刻意不保存 uninstall.exe 路径】覆盖安装不执行旧版卸载器（见 HfsRemovePreviousInstall），
-; 存下来只会有"顺手 ExecWait 一下"的诱惑 —— 那正是会弹第二个窗口的写法。
+; Reinstall over an existing version: old install directory, model library root recorded by
+; the old version, the two cleanup choices, and whether a previous version was really detected.
+; [Deliberately not saving the uninstall.exe path] Reinstall never runs the old uninstaller
+; (see HfsRemovePreviousInstall); storing the path would only dangle the temptation of a
+; "quick ExecWait" — exactly the pattern that pops a second window.
 Var HfsOldInstallDir
-; 【为什么还要记旧模型根】共享库的落点随安装器版本变过（Tauri 时期在安装目录里，
-; 现在在 %ProgramData%）。只按本版常量删/留，就会留下旧版的一份 150 MB 幽灵副本。
+; [Why the old model root is recorded too] The shared library's location has changed across
+; installer versions (in the install directory during the Tauri era, now in %ProgramData%).
+; Deleting/keeping only by this version's constant would leave behind a ghost copy of
+; the old version's weights.
 Var HfsOldModelRoot
 Var HfsReinstallRemoveModels
 Var HfsReinstallRemoveCache
@@ -330,10 +382,11 @@ Var HfsReinstallChkModels
 Var HfsReinstallChkCache
 Var HfsReinstallDialog
 
-; ── VST3 目录页 ─────────────────────────────────────────────────────────
-; 【为什么单独一页】App 与插件装在两个完全不同的地方（Program Files 与
-; Common Files\VST3）。只给一个目录页会让另一半落在用户没预期的地方。
-; 组件页里没勾 VST3 时这一页直接跳过。
+; ── VST3 directory page ─────────────────────────────────────────────────
+; [Why a separate page] The App and the plugins install into two completely different places
+; (Program Files and Common Files\VST3). A single directory page would leave the other half
+; in a place the user never expected.
+; When VST3 is unchecked on the components page, this page is skipped entirely.
 Function HfsVst3Page
   SectionGetFlags ${SEC_VST3} $0
   IntOp $0 $0 & ${SF_SELECTED}
@@ -386,25 +439,28 @@ Function HfsVst3PageLeave
   ${EndIf}
 FunctionEnd
 
-; ── 宿主运行检查（安装与卸载都要查）────────────────────────────────────
+; ── Host-running check (run on both install and uninstall) ─────────────
 ;
-; 【为什么不再按 DAW 名字枚举进程】本项目的目标是让所有支持 VST3 / CLAP 的宿主
-; 都能用；写死某个 DAW 的进程名等于告诉别的用户"这个提示与你无关"，也会漏掉
-; 那些把插件放在独立宿主进程里的 DAW。改为**按模块名**查：谁加载了本插件的
-; DLL，谁就是要先退出的宿主，与它叫什么名字无关。
+; [Why processes are no longer enumerated by DAW name] This project aims to work with every
+; host that supports VST3 / CLAP; hardcoding one DAW's process name tells every other user
+; "this warning does not concern you" and also misses DAWs that run plugins in a separate
+; host process. Instead the check is **by module name**: whoever has loaded this plugin's DLL
+; is the host that must exit first, regardless of what it is called.
 ;
-; 【为什么用 Sysnative】NSIS 是 32 位进程，直接调 tasklist.exe 会被 WOW64 重定向
-; 到 SysWOW64 的 32 位版本，而 32 位 tasklist 列不出 64 位 DAW 加载的模块 ——
-; 检查会静默失效。Sysnative 是 WOW64 给 32 位进程访问原生 System32 的虚拟别名
-; （32 位系统上不存在，因此下面先判文件是否存在，再退回 System32）。
+; [Why Sysnative] NSIS is a 32-bit process; calling tasklist.exe directly gets WOW64-
+; redirected to the 32-bit copy in SysWOW64, and 32-bit tasklist cannot list the modules
+; loaded by 64-bit DAWs — the check would silently fail. Sysnative is WOW64's virtual alias
+; that lets a 32-bit process reach the native System32 (it does not exist on 32-bit Windows,
+; hence the file-existence test below before falling back to System32).
 ;
-; 【为什么用 /FI 而不是把输出接给 findstr】nsExec::ExecToStack 只保留输出的
-; 前 1023 字节，进程一多就截断；/FI 让 tasklist 自己过滤，输出只剩命中行，
-; 也不依赖本地化的"未找到"文案。三个模块名覆盖 VST3 / CLAP 两种形态：
-; HiFiShifter.vst3 是 VST3 外壳加载器，HiFiShifter.clap 是 CLAP 模块，
-; HiFiShifterEngine.dll 是两者共同加载的核心（有些宿主只列出后者）。
+; [Why /FI instead of piping the output to findstr] nsExec::ExecToStack keeps only the first
+; 1023 bytes of output, which truncates as soon as several processes match; /FI makes
+; tasklist filter by itself so the output is only the hit line, and it does not depend on the
+; localized "not found" text. The three module names cover both plugin formats:
+; HiFiShifter.vst3 is the VST3 shell loader, HiFiShifter.clap is the CLAP module, and
+; HiFiShifterEngine.dll is the core that both load (some hosts list only the latter).
 ;
-; 结果写进 $0：1 = 仍有宿主加载着本插件。
+; Result goes into $0: 1 = a host is still loading this plugin.
 Function HfsHostRunning
   StrCpy $0 0
   StrCpy $R6 "$WINDIR\Sysnative\tasklist.exe"
@@ -423,7 +479,7 @@ Function HfsHostRunning
   ${EndIf}
 FunctionEnd
 
-; $R7 = 模块名，$R6 = tasklist 路径；命中时把 $0 置 1。
+; $R7 = module name, $R6 = tasklist path; on a hit, $0 is set to 1.
 Function HfsHostModuleProbe
   nsExec::ExecToStack /TIMEOUT=20000 '"$R6" /FI "MODULES eq $R7" /FO CSV /NH'
   Pop $1
@@ -434,7 +490,8 @@ Function HfsHostModuleProbe
   ${EndIf}
 FunctionEnd
 
-; 卸载器的同款检查（字符串函数前缀是 un.，因此必须另写一份）。
+; The same check for the uninstaller (string functions there carry the un. prefix, so a
+; separate copy is required).
 Function un.HfsHostRunning
   StrCpy $0 0
   StrCpy $R6 "$WINDIR\Sysnative\tasklist.exe"
@@ -464,11 +521,13 @@ Function un.HfsHostModuleProbe
 FunctionEnd
 
 
-; ── 文件关联：卸载时只解除属于本安装的绑定 ─────────────────────────────
+; ── File associations: uninstall unbinds only this install ─────────────
 ;
-; 与安装器同名函数同构；字符串函数前缀是 un.，因此必须另写一份。
-; 所有删除都先确认 ProgID / Applications 的 open command 指向 $INSTDIR，
-; 避免把别的安装或别的程序的默认关联误删。
+; Mirrors the installer's same-named function; string functions there carry the un. prefix,
+; so a separate copy is required.
+; Every deletion first confirms the ProgID / Applications open command points at $INSTDIR,
+; so the default associations of other installs or other programs are never removed by
+; mistake.
 Function un.HfsRemoveFileAssociations
   ReadRegStr $R1 ${HFS_CLASSES_ROOT} "Software\Classes\${FILEASSOC_PROGID}\shell\open\command" ""
   StrCpy $R2 ""
@@ -510,9 +569,10 @@ Function un.HfsRemoveFileAssociations
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
 FunctionEnd
 
-; ── 主程序运行检查（移植自 Tauri 模板）────────────────────────────────────
+; ── Main app running check (ported from the Tauri template) ───────────────
 ;
-; 【为什么用 /FI 而不是把 tasklist 输出接给 findstr】同上：只取一行，不依赖本地化文案。
+; [Why /FI instead of piping tasklist output to findstr] Same as above: only one line is
+; taken, with no dependence on localized text.
 Function HfsAppRunning
   StrCpy $0 0
   nsExec::ExecToStack /TIMEOUT=10000 '"$SYSDIR\tasklist.exe" /FI "IMAGENAME eq HiFiShifter.exe" /FO CSV /NH'
@@ -524,14 +584,15 @@ Function HfsAppRunning
   ${EndIf}
 FunctionEnd
 
-; ── WebView2 运行时（移植自 Tauri 模板的 embedBootstrapper 分支）──────────
+; ── WebView2 runtime (embedBootstrapper branch of the Tauri template) ─────
 ;
-; 【为什么安装器必须自己管这件事】没有 WebView2 的 Windows 10 上，装完打开就是一片
-; 空白窗口 —— 没有任何错误对话框，用户只会说"你们的软件打不开"。Windows 11 自带
-; 运行时，但 Win10 未必。
+; [Why the installer must handle this itself] On Windows 10 without WebView2, the app opens
+; to a blank window right after install — no error dialog at all, and the user only says
+; "your software won't open". Windows 11 ships the runtime; Windows 10 may not.
 Function HfsEnsureWebView2
   SetRegView 64
-  ; 三处注册表：per-machine（WOW6432Node）、per-user、以及 64 位视图下的 per-machine。
+  ; Three registry locations: per-machine (WOW6432Node), per-user, and per-machine in the
+  ; 64-bit view.
   ReadRegStr $0 HKLM "SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\${WEBVIEW2_GUID}" "pv"
   ${If} $0 != ""
   ${AndIf} $0 != "0.0.0.0"
@@ -570,13 +631,14 @@ Function HfsEnsureWebView2
 FunctionEnd
 
 
-; ── 文件关联（可选组件）────────────────────────────────────────────────
+; ── File associations (optional component) ─────────────────────────────
 ;
-; 【为什么用 ProgID 而不是直接写 exe 路径】扩展名默认值必须指向一个稳定的
-; ProgID；直接写 exe 会让“默认程序”与“打开方式”两套 UI 读到不同形状。
-; Windows 10/11 的 UserChoice 受系统保护，安装器不能伪造哈希；这里只注册
-; ProgID、扩展名默认值、OpenWithProgids 与 Applications，系统在无 UserChoice
-; 时采用我们的 ProgID，已有 UserChoice 时至少能在“打开方式”里列出本程序。
+; [Why a ProgID instead of writing the exe path directly] Extension default values must point
+; at a stable ProgID; writing the exe directly makes the “Default apps” and “Open with” UIs
+; read different shapes. Windows 10/11 UserChoice is system-protected and the installer
+; cannot forge the hash; only the ProgID, the extension default values, OpenWithProgids and
+; Applications are registered here. Without a UserChoice the system adopts our ProgID; with
+; one already set, this program at least appears in the “Open with” list.
 Function HfsWriteFileAssociations
   WriteRegStr ${HFS_CLASSES_ROOT} "Software\Classes\${FILEASSOC_PROGID}" "" "$(HFS_FILEASSOC_TYPE_NAME)"
   WriteRegStr ${HFS_CLASSES_ROOT} "Software\Classes\${FILEASSOC_PROGID}\DefaultIcon" "" '"$INSTDIR\HiFiShifter.exe",0'
@@ -592,12 +654,14 @@ Function HfsWriteFileAssociations
   WriteRegStr ${HFS_CLASSES_ROOT} "Software\Classes\.hsp" "" "${FILEASSOC_PROGID}"
   WriteRegStr ${HFS_CLASSES_ROOT} "Software\Classes\.hsp\OpenWithProgids" "${FILEASSOC_PROGID}" ""
 
-  ; 通知资源管理器刷新图标 / 打开方式缓存。
+  ; Notify Explorer to refresh its icon / "Open with" caches.
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
 FunctionEnd
 
-; 读 ProgID 的打开命令，判断它是否指向**本次安装**。结果写入 $0（1 = 是）。
-; 卸载 / 取消勾选都必须过这一道：别的安装可能还在用同名 ProgID。
+; Reads the ProgID's open command and decides whether it points at **this install**.
+; Result goes into $0 (1 = yes).
+; Both uninstall and unchecking the component must pass through this: another install may
+; still be using the same ProgID.
 Function HfsFileAssocCommandIsOurs
   ReadRegStr $R1 ${HFS_CLASSES_ROOT} "Software\Classes\${FILEASSOC_PROGID}\shell\open\command" ""
   StrCpy $R2 ""
@@ -609,13 +673,15 @@ Function HfsFileAssocCommandIsOurs
   ${EndIf}
 FunctionEnd
 
-; 只在“当前绑定确实指向本安装”时解除，避免卸载时误删别的程序的关联。
+; Removes bindings only when the current one truly points at this install, so uninstalling
+; never deletes another program's associations by mistake.
 Function HfsRemoveFileAssociationsIfOurs
   Call HfsFileAssocCommandIsOurs
 
-  ; .hshp / .hsp 的默认 ProgID 只有在命令确实指向本安装时才清；默认值
-  ; 指向别的程序时保持原样。OpenWithProgids 里的本 ProgID 值只在确认
-  ; 本安装拥有该 ProgID 时移除，避免把另一个安装的“打开方式”条目删掉。
+  ; The default ProgIDs of .hshp / .hsp are cleared only when the command truly points at
+  ; this install; when the default points at another program it is left as is. This ProgID's
+  ; value under OpenWithProgids is removed only after confirming this install owns the
+  ; ProgID, so another install's “Open with” entry is never deleted.
   ReadRegStr $R0 ${HFS_CLASSES_ROOT} "Software\Classes\.hshp" ""
   ${If} $R0 == "${FILEASSOC_PROGID}"
   ${AndIf} $0 == 1
@@ -634,12 +700,13 @@ Function HfsRemoveFileAssociationsIfOurs
     DeleteRegValue ${HFS_CLASSES_ROOT} "Software\Classes\.hsp\OpenWithProgids" "${FILEASSOC_PROGID}"
   ${EndIf}
 
-  ; ProgID 只在命令确实指向本安装时删除；别的安装可能还在用同名 ProgID。
+  ; The ProgID is deleted only when the command truly points at this install; another install
+  ; may still be using the same ProgID.
   ${If} $0 == 1
     DeleteRegKey ${HFS_CLASSES_ROOT} "Software\Classes\${FILEASSOC_PROGID}"
   ${EndIf}
 
-  ; Applications 注册同理：命令指向别的安装时保留。
+  ; Same for the Applications registration: kept when the command points at another install.
   ReadRegStr $R1 ${HFS_CLASSES_ROOT} "Software\Classes\Applications\HiFiShifter.exe\shell\open\command" ""
   StrCpy $R2 ""
   ${StrStr} $R2 $R1 "$INSTDIR\HiFiShifter.exe"
@@ -650,14 +717,17 @@ Function HfsRemoveFileAssociationsIfOurs
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
 FunctionEnd
 
-; ── 模型库：完整性校验（与运行时 looks_complete 同一判据）──────────────────
+; ── Model library: integrity check (mirrors runtime looks_complete) ────────
 ;
-; 【为什么按"清单里每个文件的字节数"校验】运行时的 model_store::looks_complete 就是
-; 这么判的。安装器若用另一套判据（比如只看目录存在），就会出现"安装器说装好了、
-; 运行时说不可用"——用户看到的只是"推理不可用"，而模型目录看起来完全正常。
-; 期望值由 build.ps1 从 models.json 生成到 MODELS_VERIFY 里（逐文件一行）。
+; [Why validate "the byte size of every file in the manifest"] The runtime's
+; model_store::looks_complete judges exactly this way. If the installer used a different rule
+; (say, only checking that the directory exists), the result would be "the installer says
+; installed, the runtime says unavailable" — all the user sees is "inference unavailable"
+; while the model directory looks perfectly normal.
+; The expected values are generated by build.ps1 from models.json into MODELS_VERIFY
+; (one line per file).
 Function HfsCheckModelFile
-  ; $R0 = 相对路径，$R1 = 期望字节数，$R2 = 1（目前仍然完整）
+  ; $R0 = relative path, $R1 = expected byte count, $R2 = 1 (still complete so far)
   StrCpy $R3 "$HfsVerifyRoot\$R0"
   ${IfNot} ${FileExists} "$R3"
     StrCpy $R2 0
@@ -672,7 +742,7 @@ Function HfsCheckModelFile
   ${EndIf}
 FunctionEnd
 
-; 校验 $HfsVerifyRoot；结果写进 $0（1 = 完整）。
+; Validates $HfsVerifyRoot; result goes into $0 (1 = complete).
 Function HfsVerifyModels
   StrCpy $R2 1
   Call HfsVerifyModelFiles
@@ -681,11 +751,13 @@ FunctionEnd
 
 !include "${MODELS_VERIFY}"
 
-; ── 模型库：GC（保留当前版本与另一个版本）──────────────────────────────────
+; ── Model library: GC (keep the current version and one other) ─────────────
 ;
-; 【策略】只保留**当前版本**与**最近修改的另一个版本**（正常情况就是上一版）：
-; 多留一个目录才能覆盖"回退到上一版 App"的现实场景；而版本号是内容哈希、无法排序，
-; 所以用 dir /o-d 的修改时间排序取第一个别的版本。其余目录删除并 DetailPrint。
+; [Policy] Keep only **the current version** and **the most recently modified other version**
+; (normally the previous one): one extra directory is what covers the real-world "roll back
+; to the previous App version" scenario; and since version numbers are content hashes that
+; cannot be sorted, the first other version is taken from dir /o-d's modification-time
+; ordering. Every other directory is deleted with a DetailPrint.
 Function HfsModelsGc
   StrCpy $HfsListFile "$TEMP\hfs_models_gc.txt"
   nsExec::ExecToStack /TIMEOUT=10000 'cmd /c dir /b /ad /o-d "$HfsModelRoot" > "$HfsListFile" 2>nul'
@@ -695,7 +767,7 @@ Function HfsModelsGc
     Return
   ${EndIf}
 
-  StrCpy $R0 ""   ; 保留的"另一个版本"
+  StrCpy $R0 ""   ; the kept "other version"
   FileOpen $R1 "$HfsListFile" r
   ${Do}
     FileRead $R1 $R2
@@ -741,21 +813,24 @@ Function HfsModelsGc
   Delete "$HfsListFile"
 FunctionEnd
 
-; ── 覆盖安装：读回旧版安装位置，就地移除上一版 ─────────────────────────
+; ── Reinstall: read back the old install dir, remove it in place ───────
 ;
-; 【为什么不再执行旧版 uninstall.exe】那个 exe 是**上一版**编译出来的二进制，它在 /S
-; 下到底会不会显示界面，不由本脚本决定：Tauri 时期的卸载器在 un.onInit 里
-; !insertmacro MUI_UNGETLANGUAGE，静默模式照样弹出语言选择框；它的"宿主仍占用插件"
-; 提示是不带 /SD 的 MessageBox，/S 下也照常显示。于是用户点下"安装"之后，桌面上会
-; 突然多出一个标题为"HiFiShifter 卸载"的窗口 —— 这正是要彻底消灭的东西。子进程的
-; UI 既改不了也拦不住，唯一可靠的做法是**不执行它**：卸载该做的事由本安装器自己
-; 在进程内完成（见 HfsRemovePreviousInstall）。覆盖安装路径上因此不再有第二个窗口，
-; 也不再有第二个卸载器进程。
+; [Why the old uninstall.exe is no longer executed] That exe is a binary built by the
+; **previous version**; whether it shows any UI under /S is not up to this script: the
+; Tauri-era uninstaller calls !insertmacro MUI_UNGETLANGUAGE in un.onInit, so the language
+; selection dialog pops up even in silent mode, and its "host still has the plugin loaded"
+; prompt is a MessageBox without /SD that shows under /S as well. So after the user clicks
+; "Install", a window titled "HiFiShifter uninstall" suddenly appears on the desktop —
+; exactly the thing to eliminate for good. A child process's UI can neither be changed nor
+; blocked; the only reliable answer is **not to run it**: whatever uninstall has to do, this
+; installer does itself in-process (see HfsRemovePreviousInstall). The reinstall path
+; therefore no longer has a second window, nor a second uninstaller process.
 Function HfsDetectPreviousInstall
   StrCpy $HfsHasPrevious 0
   StrCpy $HfsOldInstallDir ""
-  ; 与卸载选项页同一组默认值：删模型=1、清缓存=0。
-  ; 两个开关让静默/无人值守升级能表达选择；交互安装由选项页覆盖。
+  ; Same defaults as the uninstall options page: delete models=1, clean caches=0.
+  ; The two switches let silent/unattended upgrades express a choice; interactive installs
+  ; are overridden by the options page.
   StrCpy $HfsReinstallRemoveModels 1
   StrCpy $HfsReinstallRemoveCache 0
   ${StrStr} $0 $CMDLINE "/DeleteModels=0"
@@ -776,43 +851,55 @@ Function HfsDetectPreviousInstall
   ${EndIf}
   ${If} $HfsIsRepair == 0
     ReadRegStr $HfsOldInstallDir ${HFS_ARP_ROOT} "${ARP_KEY}" "InstallLocation"
-    ; 旧版把共享库写在哪儿，只能问它自己留下的记录；读不到才退回本版常量。
+    ; Where the old version wrote the shared library can only be asked from the record it
+    ; left behind; only if unreadable do we fall back to this version's constant.
     ReadRegStr $HfsOldModelRoot ${HFS_ARP_ROOT} "${ARP_KEY}" "ModelRoot"
     ${If} $HfsOldInstallDir != ""
-      ; 【为什么以 HiFiShifter.exe 为准，而不是以存在卸载项为准】InstallLocation 可能是
-      ; 用户手工改过的路径，也可能是上一次安装失败留下的空目录。目录里真的有主程序
-      ; 才算"上一版还在"，否则按全新安装处理。
+      ; [Why HiFiShifter.exe is the criterion, not the existence of the uninstall entry]
+      ; InstallLocation may be a path the user edited by hand, or an empty directory left by a
+      ; failed install. "The previous version is still here" only holds if the main executable
+      ; really exists in the directory; otherwise treat this as a fresh install.
       ${If} ${FileExists} "$HfsOldInstallDir\HiFiShifter.exe"
         StrCpy $HfsHasPrevious 1
-        ; 【为什么先设目录再移除】MUI 的目录页在 .onInit 之后才创建，此时改 $INSTDIR
-        ; 就是"尝试设为旧版同一路径"；用户仍可在目录页里改回别处。
+        ; [Why the directory is set before removal] MUI's directory page is created after
+        ; .onInit, so changing $INSTDIR here means "try to preselect the old version's path";
+        ; the user can still change it to somewhere else on the directory page.
         StrCpy $INSTDIR "$HfsOldInstallDir"
-        ; 【为什么这里不弹确认框】紧随其后的「覆盖安装选项」页就是用户确认：用户已经
-        ; 在那里选过是否删除模型/缓存，再弹一次"要卸载吗？"只会多出一个窗口。
+        ; [Why no confirmation dialog here] The "reinstall options" page right after this is
+        ; the user's confirmation: the user already chose there whether to delete models and
+        ; caches; one more "Do you want to uninstall?" would just add another window.
       ${Else}
-        ; 只剩注册表残项：清掉，本次按全新安装处理，否则用户会永远卡在"无法卸载上一版"。
+        ; Only a leftover registry entry remains: clear it and treat this as a fresh install,
+        ; otherwise the user stays stuck on "cannot uninstall the previous version" forever.
         DeleteRegKey ${HFS_ARP_ROOT} "${ARP_KEY}"
         StrCpy $HfsOldInstallDir ""
       ${EndIf}
     ${EndIf}
   ${EndIf}
-  ; ARP 键不存在时 ReadRegStr/DeleteRegKey 会置位全局错误标志；后面的 Rename/
-  ; ${If} ${Errors} 会误判成模型库发布失败。函数返回前清掉，不要泄漏给安装段。
+  ; When the ARP key does not exist, ReadRegStr/DeleteRegKey set the global error flag; the
+  ; later Rename/${If} ${Errors} would misread it as a model library publish failure. Clear it
+  ; before returning; do not leak it into the install sections.
   ClearErrors
 FunctionEnd
 
-; 覆盖安装的"卸载"：全部在本进程内完成，不启动任何子进程。
+; The "uninstall" half of reinstalling: done entirely in this process, no child process started.
 ;
-; 需要做的事与卸载段一致：
-;   1. 旧版 App 目录（整个目录都属于本产品，与卸载段的 RMDir /r "$INSTDIR" 同一判据）；
-;   2. 旧版登记过的 VST3 / CLAP 产物（只删本产品自己的子目录，公共插件目录不能整删）；
-;   3. ARP 卸载项、旧插件安装器遗留项、开始菜单与桌面快捷方式；
-;   4. 用户在选项页勾选的共享模型库与可再生成缓存（沿用原有两段清理）。
+; The work matches the uninstall section:
+;   1. The old App directory (the whole directory belongs to this product — same criterion as
+;      the uninstall section's RMDir /r "$INSTDIR");
+;   2. The VST3 / CLAP artifacts the old version registered (only this product's own
+;      subdirectories are deleted; public plugin directories must not be wiped whole);
+;   3. The ARP uninstall entry, the old plugin installer's leftover, Start menu and desktop
+;      shortcuts;
+;   4. The shared model library and regenerable caches the user checked on the options page
+;      (reusing the two existing cleanup routines).
 ;
-; 【为什么不 kill 进程】静默升级时强杀正在运行的 App 会丢用户没保存的工程。改成
-; "发现主程序仍在运行就明确失败"，与 Tauri 安装器的行为一致：让用户先关掉它。
-; 【为什么先判文件再整目录删】InstallLocation 来自本产品的 ARP 写入，但用户也可能
-; 手工改注册表。目录里必须真的有本产品产物，才允许 RMDir /r。
+; [Why processes are not killed] Force-killing a running App during a silent upgrade loses the
+; user's unsaved projects. Instead, "fail explicitly when the main app is still running" —
+; consistent with the Tauri installer's behavior: make the user close it first.
+; [Why the file is checked before deleting the whole directory] InstallLocation comes from
+; this product's own ARP write, but the user may also have edited the registry by hand.
+; RMDir /r is allowed only when this product's artifacts really exist in the directory.
 Function HfsRemovePreviousInstall
   ${If} $HfsHasPrevious != 1
     Return
@@ -831,14 +918,19 @@ Function HfsRemovePreviousInstall
   ${EndIf}
 
   DetailPrint "$(HFS_REINSTALL_UNINSTALLING)"
-  ; 先记下旧版登记的插件目录：新版可能被用户指到别处，只删新位置会把旧插件留在原地。
+  ; First record the plugin directories the old version registered: the user may have pointed
+  ; the new version elsewhere, and deleting only the new location would leave the old plugins
+  ; in place.
   ReadRegStr $R5 ${HFS_ARP_ROOT} "${ARP_KEY}" "Vst3Dir"
   ReadRegStr $R6 ${HFS_ARP_ROOT} "${ARP_KEY}" "ClapDir"
-  ; 插件资源目录同样按旧版登记值清：旧版摆在 CLAP 目录同级，新版在全机共享目录。
+  ; The plugin resource directory is likewise cleared against the old version's registered
+  ; value: the old version kept it next to the CLAP directory, the new one in the machine-wide
+  ; shared directory.
   ReadRegStr $R8 ${HFS_ARP_ROOT} "${ARP_KEY}" "ClapResDir"
 
-  ; 逐个判断而不是 If + OrIf：LogicLib 的 FileExists 条件是跳转式宏，
-  ; 与 OrIf 混用容易生成错误的分支，这里用显式标志位最稳。
+  ; Separate ${If} checks instead of If + OrIf: LogicLib's FileExists conditions are
+  ; jump-based macros that mix badly with OrIf and can generate wrong branches; an explicit
+  ; flag is the most robust here.
   StrCpy $R7 0
   ${If} ${FileExists} "$HfsOldInstallDir\HiFiShifter.exe"
     StrCpy $R7 1
@@ -850,8 +942,9 @@ Function HfsRemovePreviousInstall
     RMDir /r "$HfsOldInstallDir"
   ${EndIf}
 
-  ; 只删本产品自己的 VST3 子目录与 CLAP 模块 + 资源目录：$R5/$R6 是公共插件目录，
-  ; 里面还有别人的插件，整删等于毁别人的安装。
+  ; Delete only this product's own VST3 subdirectory and CLAP module + resource directory:
+  ; $R5/$R6 are public plugin directories holding other vendors' plugins; wiping them whole
+  ; would amount to destroying other vendors' installs.
   ${If} $R5 != ""
     RMDir /r "$R5\${VST3_SUBDIR}"
   ${EndIf}
@@ -872,8 +965,9 @@ Function HfsRemovePreviousInstall
   Delete "$DESKTOP\HiFiShifter.lnk"
   SetShellVarContext current
 
-  ; 删不掉说明 exe 还被锁着（DAW 或用户手动打开）：此时继续装只会得到一个新旧混杂的
-  ; 目录，宁可明确失败让用户先关掉占用者。
+  ; If it cannot be deleted, the exe is still locked (a DAW, or the user opened it by hand):
+  ; continuing would only produce a directory mixing old and new files, so prefer failing
+  ; explicitly and let the user close whatever holds it first.
   ${If} ${FileExists} "$HfsOldInstallDir\HiFiShifter.exe"
     ${IfNot} ${Silent}
       MessageBox MB_OK|MB_ICONSTOP|MB_DEFBUTTON1 "$(HFS_REINSTALL_FAILED)" /SD IDOK
@@ -882,10 +976,12 @@ Function HfsRemovePreviousInstall
     Quit
   ${EndIf}
 
-  ; $HfsModelRoot 在 .onInit 已按发布/测试模式展开；模型段稍后会重新写入。
+  ; $HfsModelRoot was expanded per release/test mode in .onInit; the models section writes it
+  ; again later.
   ${If} $HfsReinstallRemoveModels == 1
-    ; 旧版可能把共享库写在另一个根（版本差异）：同一份选择必须对它一起生效，
-    ; 否则"删了模型"之后磁盘上还躺着一份 150 MB。
+    ; The old version may have written the shared library under a different root (version
+    ; differences): the same choice must apply to it as well, otherwise a full copy of the
+    ; weights is still sitting on disk after "deleted the models".
     Call HfsPurgeLegacyModelRoot
     FindFirst $R3 $R4 "$HfsModelRoot\*"
     StrCmp $R4 "" hfs_prev_models_done
@@ -907,8 +1003,9 @@ Function HfsRemovePreviousInstall
     RMDir /r "$HfsModelRoot"
     RMDir "$HfsModelRoot\.."
   ${Else}
-    ; 用户选择保留：若上一版把库写在别的根，把它并进本版根 —— 否则"保留"只是留下
-    ; 一份新版根本不会去读的副本，用户既没省下磁盘，也没省下重新解包的时间。
+    ; The user chose to keep them: if the previous version wrote the library under another
+    ; root, merge it into this version's root — otherwise "keep" only leaves a copy the new
+    ; version will never read, saving the user neither disk space nor re-unpacking time.
     Call HfsAdoptLegacyModelRoot
   ${EndIf}
   ${If} $HfsReinstallRemoveCache == 1
@@ -916,10 +1013,12 @@ Function HfsRemovePreviousInstall
   ${EndIf}
 FunctionEnd
 
-; 旧根里是不是真有本产品的模型库（版本目录里有 models.json）。
-; 【为什么要判】ARP 里的 ModelRoot 理论上由本安装器写入，但用户可能手工改注册表、
-; 或从别处导入一份卸载项。没有这条判据，一个被改坏的路径会被整目录 RMDir /r。
-; 入：$R0 = 根目录。出：$R7 = 1 表示是本产品的模型库。
+; Does the old root really contain this product's model library (a version directory holding
+; models.json)?
+; [Why check] ModelRoot in the ARP entry is in theory written by this installer, but the user
+; may have edited the registry by hand or imported an uninstall entry from somewhere else.
+; Without this guard, a corrupted path would get a whole-directory RMDir /r.
+; In: $R0 = root directory. Out: $R7 = 1 means it is this product's model library.
 Function HfsLibraryHasVersions
   StrCpy $R7 0
   FindFirst $R3 $R4 "$R0\*"
@@ -940,7 +1039,7 @@ Function HfsLibraryHasVersions
   FindClose $R3
 FunctionEnd
 
-; 「删除模型」时把上一版登记过的模型根一并清掉。
+; When "delete models" is chosen, also clear the model root the previous version registered.
 Function HfsPurgeLegacyModelRoot
   ${If} $HfsOldModelRoot == ""
     Return
@@ -960,10 +1059,12 @@ Function HfsPurgeLegacyModelRoot
   RMDir /r "$HfsOldModelRoot"
 FunctionEnd
 
-; 「保留模型」时把上一版登记过的模型根并入本版根。
+; When "keep models" is chosen, merge the model root the previous version registered into this
+; version's root.
 ;
-; 【为什么是搬而不是留】运行时只认一个根（shared_store_dir）。留在旧根里的副本不会被
-; 读到，等于白占 150 MB；搬过来之后 HfsVerifyModels 能命中，连解包都省了。
+; [Why move instead of leave] The runtime recognizes only one root (shared_store_dir). A copy
+; left in the old root is never read — dead weight on disk; once moved over,
+; HfsVerifyModels hits and even the unpacking step is saved.
 Function HfsAdoptLegacyModelRoot
   ${If} $HfsOldModelRoot == ""
     Return
@@ -991,17 +1092,20 @@ Function HfsAdoptLegacyModelRoot
       ClearErrors
       Rename "$HfsOldModelRoot\$R4" "$HfsModelRoot\$R4"
       ${If} ${Errors}
-        ; 跨卷时 Rename 会失败：robocopy /MOVE 走同一件事，nsExec 保证没有窗口。
+        ; Rename fails across volumes: robocopy /MOVE does the same job, and nsExec guarantees
+        ; there is no window.
         nsExec::ExecToStack '"$SYSDIR\robocopy.exe" "$HfsOldModelRoot\$R4" "$HfsModelRoot\$R4" /E /MOVE /NFL /NDL /NJH /NJS /NP'
         Pop $0
         Pop $1
       ${EndIf}
     ${Else}
-      ; 新根已经有同一版本：旧的那份是重复副本，删掉才是"不重复占 150 MB"。
+      ; The new root already has this version: the old copy is a duplicate; deleting it is what
+      ; "not storing the weights twice" means.
       RMDir /r "$HfsOldModelRoot\$R4"
     ${EndIf}
   ${Else}
-    ; 版本目录的残留（*.staging / *.publishing / 半截目录）：不并进去，直接清。
+    ; Leftover version-directory remains (*.staging / *.publishing / half-written directories):
+    ; not merged in, just cleared.
     RMDir /r "$HfsOldModelRoot\$R4"
   ${EndIf}
   hfs_adopt_next:
@@ -1011,12 +1115,15 @@ Function HfsAdoptLegacyModelRoot
   StrCmp $R4 "" hfs_adopt_done hfs_adopt_loop
   hfs_adopt_done:
   FindClose $R3
-  ; 只在旧根真的空了时才删得掉；删不掉说明里面还有别人的东西，留着。
+  ; Deletion succeeds only when the old root is truly empty; if it fails, other things are
+  ; still inside and are kept.
   RMDir "$HfsOldModelRoot"
 FunctionEnd
 
-; 静默安装没有页面，在 .onInit 里直接移除；交互安装留到用户点下"安装"之后。
-; 清 $HfsHasPrevious 防止 .onInit 与 INSTFILES 的 PRE 各跑一次。
+; Silent installs have no pages, so removal happens directly in .onInit; interactive installs
+; defer it until after the user clicks "Install".
+; $HfsHasPrevious is cleared so the removal does not run twice (once from .onInit, once from
+; the INSTFILES PRE callback).
 Function HfsRemovePreviousInstallIfAny
   ${If} $HfsHasPrevious == 1
     Call HfsRemovePreviousInstall
@@ -1024,9 +1131,11 @@ Function HfsRemovePreviousInstallIfAny
   ${EndIf}
 FunctionEnd
 
-; 【为什么与卸载选项页保持一致】覆盖安装本质上就是"卸载旧版 + 安装新版"，
-; 用户能清理的东西也应当完全一样：共享模型库（默认勾选）与缓存/日志（默认
-; 不勾）。两项文案直接复用 $(HFS_UNINSTALL_OPT_*)，不另造一套词表。
+; [Why this stays in step with the uninstall options page] Reinstalling over an existing
+; version is essentially "uninstall the old version + install the new one", so what the user
+; can clean up should be exactly the same: the shared model library (checked by default) and
+; caches/logs (unchecked by default). The two strings reuse $(HFS_UNINSTALL_OPT_*) directly
+; instead of building a second string table.
 Function HfsReinstallPageCreate
   ${If} $HfsHasPrevious != 1
     Abort
@@ -1061,13 +1170,15 @@ Function HfsReinstallPageLeave
   ${NSD_GetState} $HfsReinstallChkCache $HfsReinstallRemoveCache
 FunctionEnd
 
-; 【为什么在 INSTFILES 的 PRE 里移除】走到这一页说明用户已经点下"安装"，此前任何一页
-; 按取消都不会动旧版。
+; [Why removal happens in INSTFILES's PRE] Reaching this page means the user has clicked
+; "Install"; cancelling on any earlier page never touches the old version.
 Function HfsInstFilesPagePre
   Call HfsRemovePreviousInstallIfAny
 FunctionEnd
-; 覆盖安装专用的派生物清理：与 un.HfsSweepDisposableDirs 的白名单逐字一致。
-; 卸载器那一份带 un. 前缀，安装器不能 Call，因此这里放一份安装器版本。
+; Disposable-data cleanup for the reinstall path: the whitelist matches
+; un.HfsSweepDisposableDirs verbatim.
+; The uninstaller's copy carries the un. prefix and cannot be Call'ed from the installer, so
+; an installer-side copy lives here.
 Function HfsSweepDisposableDirs
   SetShellVarContext current
   StrCpy $R0 "$LOCALAPPDATA\HiFiShifter"
@@ -1101,13 +1212,14 @@ Function HfsSweepDisposableDirs
   ${If} ${FileExists} "$R0\plugin-content-v1\*"
     RMDir /r "$R0\plugin-content-v1"
   ${EndIf}
-  ; 目录空了才删根；删不掉说明还有用户数据要留。
+  ; The root is removed only when empty; if it cannot be deleted, user data remains to keep.
   RMDir "$R0"
 FunctionEnd
 
 Function .onInit
   ${IfNot} ${RunningX64}
-    ; 唯一一条无法本地化的提示：此时还不知道用户选了哪种语言。
+    ; The one message that cannot be localized: at this point the user's language choice is
+    ; not known yet.
     !insertmacro HFS_FATAL_NOT_X64
     Abort
   ${EndIf}
@@ -1116,26 +1228,32 @@ Function .onInit
   StrCpy $HfsModelRoot "${HFS_MODEL_ROOT}"
   SetShellVarContext current
   StrCpy $HfsVst3Dir "${HFS_DEFAULT_VST3_DIR}"
-  ; 【为什么两个目录都要在 .onInit 初始化】自定义页的 Leave 回调只在用户
-  ; 真正走过那一页时运行；静默安装（/S）跳过所有页面。此前只初始化了 VST3，
-  ; CLAP 目录因此是空串，File 会落到当前目录（VirtualStore）而不是目标目录。
+  ; [Why both directories are initialized in .onInit] A custom page's Leave callback runs only
+  ; when the user actually walks through that page; silent installs (/S) skip all pages.
+  ; Previously only VST3 was initialized, leaving the CLAP directory an empty string, so File
+  ; landed in the current directory (the VirtualStore) instead of the target directory.
   StrCpy $HfsClapDir "${HFS_DEFAULT_CLAP_DIR}"
 
   StrCpy $HfsIsRepair 0
-  ; /repair：只做校验与补齐，不弹任何页面（文件是幂等覆盖，模型段自己会跳过）。
+  ; /repair: verify and fill in only, no pages shown (files are idempotent overwrites, and the
+  ; models section skips on its own).
   ${StrStr} $0 $CMDLINE "/repair"
   ${If} $0 != ""
     StrCpy $HfsIsRepair 1
     SetSilent silent
   ${EndIf}
 
-  ; 语言选择：MUI 会把选择记在注册表里，下次直接沿用。必须在覆盖安装选项页
-  ; 之前完成 —— 那一页的五语文案靠 $(HFS_REINSTALL_*) 取值。
+  ; Language selection: MUI records the choice in the registry and reuses it next time. Must
+  ; happen before the reinstall options page — that page's five-language strings resolve via
+  ; $(HFS_REINSTALL_*).
   !insertmacro MUI_LANGDLL_DISPLAY
 
-  ; 语言确定之后再检测旧版：静默安装没有页面，当场移除上一版；交互安装先走
-  ; 覆盖安装选项页（用户在这里做唯一一次确认），到 INSTFILES 页才真正移除。
-  ; 两条路径都**不启动**旧版卸载器，因此正式安装过程中不会再有第二个卸载窗口。
+  ; Detect the previous version only after the language is fixed: silent installs have no
+  ; pages and remove it on the spot; interactive installs walk the reinstall options page
+  ; first (the user's one and only confirmation happens here) and remove it for real at the
+  ; INSTFILES page.
+  ; Neither path **starts** the old uninstaller, so no second uninstall window can appear
+  ; during the actual install.
   Call HfsDetectPreviousInstall
   ${If} ${Silent}
     Call HfsRemovePreviousInstallIfAny
@@ -1153,14 +1271,17 @@ Function .onInit
 FunctionEnd
 
 Function un.onInit
-  ; 【为什么「删除模型」默认勾选】150 MB 的共享模型库只由本产品写入；默认删掉
-  ; 才不会在"我已经卸载了"之后继续占着磁盘。想保留（例如打算立刻重装同版本）
-  ; 的用户在选项页取消勾选即可。缓存与日志仍默认保留：缓存运行时会自行回收，
-  ; 日志是定位上次故障的唯一线索，"干净卸载"不该顺手毁掉证据。
+  ; [Why "delete models" is checked by default] Only this product writes the shared
+  ; model library; deleting it by default is the only way the disk does not stay occupied after
+  ; "I already uninstalled it". Users who want to keep it (e.g. planning to reinstall the same
+  ; version right away) simply uncheck it on the options page. Caches and logs stay kept by
+  ; default: the runtime reclaims caches on its own, and logs are the only clue for locating
+  ; the last failure — a "clean uninstall" should not destroy the evidence as a side effect.
   ;
-  ; 静默卸载（/S）不走选项页，这里的默认值直接生效。覆盖安装会带
-  ; /DeleteModels= 与 /DeleteCache=，把用户在**安装器**选项页里的选择原样带过来
-  ; （卸载器自己的选项页在 /S 下不显示）。
+  ; Silent uninstalls (/S) skip the options page, so the defaults here apply directly.
+  ; Reinstalling over an existing version passes /DeleteModels= and /DeleteCache=, carrying
+  ; the user's choices from the **installer's** options page over verbatim (the uninstaller's
+  ; own options page is not shown under /S).
   StrCpy $HfsUnOptModels 1
   StrCpy $HfsUnOptCache 0
   ${UnStrStr} $0 $CMDLINE "/DeleteModels=0"
@@ -1180,9 +1301,10 @@ Function un.onInit
     StrCpy $HfsUnOptCache 1
   ${EndIf}
   SetRegView 64
-  ; 【为什么不能直接用 $INSTDIR】卸载器会把自己复制到临时目录再运行，并传入 _?=
-  ; —— 那个值是**卸载器所在目录**，不是可信来源。从安装时写下的 InstallLocation
-  ; 读回来才是权威值；读不到时退回卸载器所在目录。
+  ; [Why $INSTDIR cannot be used directly] The uninstaller copies itself to a temporary
+  ; directory and runs from there, passing _?= — that value is **the uninstaller's own
+  ; directory**, not a trusted source. Reading back the InstallLocation written at install
+  ; time is the authoritative value; if unreadable, fall back to the uninstaller's directory.
   ReadRegStr $INSTDIR ${HFS_ARP_ROOT} "${ARP_KEY}" "InstallLocation"
   ${If} $INSTDIR == ""
     StrCpy $INSTDIR "$EXEDIR"
@@ -1195,19 +1317,23 @@ Function un.onInit
   ${If} $HfsClapDir == ""
     StrCpy $HfsClapDir "${HFS_DEFAULT_CLAP_DIR}"
   ${EndIf}
-  ; 插件资源目录同理：安装时写下的才是权威值（旧版可能摆在 CLAP 目录里）。
+  ; Same for the plugin resource directory: the value written at install time is the
+  ; authoritative one (the old version may have kept it inside the CLAP directory).
   ReadRegStr $HfsClapResDir ${HFS_ARP_ROOT} "${ARP_KEY}" "ClapResDir"
   ${If} $HfsClapResDir == ""
     SetShellVarContext ${HFS_CLAP_RES_CONTEXT}
     StrCpy $HfsClapResDir "${HFS_CLAP_RES_DIR}"
     SetShellVarContext current
   ${EndIf}
-  ; 【为什么模型库根也从卸载项读】共享库的落点随安装器版本变过。拿本版常量去删，
-  ; 遇到旧版写在别处的那一份就是"卸载了，模型还在"。读安装时写下的值才是权威；
-  ; 老版本没写过这个值时才退回本版常量。
+  ; [Why the model library root is also read from the uninstall entry] The shared library's
+  ; location has changed across installer versions. Deleting by this version's constant alone
+  ; means "uninstalled, but the models are still there" for a copy the old version wrote
+  ; elsewhere. The value written at install time is authoritative; only when an old version
+  ; never wrote this value do we fall back to this version's constant.
   ReadRegStr $HfsModelRoot ${HFS_ARP_ROOT} "${ARP_KEY}" "ModelRoot"
   ${If} $HfsModelRoot == ""
-    ; $HfsModelRoot 已在 un.onInit 从卸载项读回（缺省才用本版常量），这里不再重算。
+    ; $HfsModelRoot was already read back from the uninstall entry in un.onInit (this version's
+    ; constant only as the fallback); it is not recomputed here.
   ${EndIf}
 
   !ifdef HFS_HOST_GUARD
@@ -1221,17 +1347,19 @@ Function un.onInit
   !endif
 FunctionEnd
 
-; ═══ 组件 ═══════════════════════════════════════════════════════════════
+; ═══ Components ═════════════════════════════════════════════════════════
 ;
-; 【为什么分两组】此前五个条目平铺，App、共享模型库、快捷方式与两种插件格式
-; 混在一起，用户看不出哪些是主程序、哪些是给 DAW 用的。现在按用途分成两棵可
-; 展开的树：主程序一组，DAW 插件一组。分组节点也占一个 section 索引（见文件
-; 顶部 SECGRP_* 的编号说明）。
+; [Why two groups] Previously the five entries were laid out flat, mixing the App, the shared
+; model library, shortcuts and both plugin formats so users could not tell which were the main
+; program and which were for DAWs. They are now two expandable trees by purpose: one for the
+; main program, one for DAW plugins. Group nodes also occupy a section index (see the
+; SECGRP_* numbering notes at the top of the file).
 ;
-; 【必装项放进分组是安全的】实测：把分组整体取消勾选时，带 SectionIn RO 的
-; App 与共享模型库仍保持选中并照常执行，只有可选的快捷方式被连带取消。
+; [Putting mandatory items inside groups is safe] Verified by testing: unchecking a whole
+; group leaves the SectionIn RO App and shared model library selected and executing as normal;
+; only the optional shortcuts get unchecked along with it.
 ;
-; ── 主程序 ───────────────────────────────────────────────────────────
+; ── Main app ─────────────────────────────────────────────────────────
 SectionGroup /e "$(HFS_GROUP_APP)"
 Section "$(HFS_COMPONENT_APP)"
   SectionIn RO
@@ -1255,14 +1383,16 @@ Section "$(HFS_COMPONENT_APP)"
   DetailPrint "$(HFS_INSTALLING)"
   Call HfsEnsureWebView2
 
-  ; ── 目录对账：先清掉上一代产物，再写入 ──────────────────────────────
+  ; ── Directory reconciliation: purge old output first, then write ────
   ;
-  ; 【为什么必须清 $INSTDIR\models】旧安装器（Tauri 模板）把 150 MB 权重装在这里；
-  ; 新布局只在这里放 models.json（权重进 ProgramData 的共享库）。不删就等于升级后
-  ; 悄悄多占 150 MB，而且 App 还会优先读到这份旧权重。
+  ; [Why $INSTDIR\models must be cleared] The old installer (the Tauri template) installed
+  ; the weights here; the new layout keeps only models.json here (weights go to the
+  ; shared library in ProgramData). Not deleting means quietly keeping a second full copy of
+  ; the weights after an upgrade, and the App would still preferentially read those old weights.
   ;
-  ; 【为什么删 licenses 与 LICENSE】旧版本把它们放在安装根；现在整组随 App 重装，
-  ; 先删可以保证"文档少了一份"不会靠覆盖而静默延续。
+  ; [Why licenses and LICENSE are deleted] Old versions put them in the install root; they now
+  ; ship as a whole with the App. Deleting first guarantees that a "document went missing"
+  ; does not silently survive via overwrite.
   RMDir /r "$INSTDIR\models"
   RMDir /r "$INSTDIR\licenses"
   Delete "$INSTDIR\LICENSE"
@@ -1270,24 +1400,27 @@ Section "$(HFS_COMPONENT_APP)"
   SetOutPath "$INSTDIR"
   File /r "${APP_DIR}\*"
 
-  ; 许可全文：App 与插件各自带一份完整副本（用户可能只装其中一个）。
+  ; Full license texts: the App and the plugins each carry a complete copy (the user may
+  ; install only one of them).
   SetOutPath "$INSTDIR"
   File "${HFS_LICENSE}"
   SetOutPath "$INSTDIR\licenses"
   File /r "${HFS_LICENSES}\*"
 
-  ; 升级时用户可能取消勾选“文件关联”：上一版留下的、仍指向本安装的绑定
-  ; 必须在这一版安装时解除，否则用户的选择不生效。
+  ; On upgrade the user may have unchecked "file associations": bindings left behind by the
+  ; previous version that still point at this install must be removed during this install,
+  ; otherwise the user's choice has no effect.
   SectionGetFlags ${SEC_FILEASSOC} $0
   IntOp $0 $0 & ${SF_SELECTED}
   ${If} $0 == 0
     Call HfsRemoveFileAssociationsIfOurs
   ${EndIf}
 
-  ; ── 卸载信息 ────────────────────────────────────────────────────────
+  ; ── Uninstall info ──────────────────────────────────────────────────
   ;
-  ; 【为什么复用 \Uninstall\HiFiShifter 这个键】旧版 App（Tauri 的 NSIS 安装器）
-  ; 用的就是它。复用之后升级是"接管"，而不是在「已安装的应用」里出现两个 HiFiShifter。
+  ; [Why the \Uninstall\HiFiShifter key is reused] The old App (Tauri's NSIS installer) used
+  ; exactly this key. Reusing it makes an upgrade an "adoption" instead of two HiFiShifter
+  ; entries appearing in "Installed apps".
   WriteUninstaller "${UNINSTALLER}"
   WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "DisplayName" "$(HFS_NAME)"
   WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "DisplayVersion" "${APP_VERSION}"
@@ -1296,10 +1429,13 @@ Section "$(HFS_COMPONENT_APP)"
   WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "Vst3Dir" "$HfsVst3Dir"
   WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "ClapDir" "$HfsClapDir"
-  ; 【为什么把模型库根写进卸载项】共享库的落点不是永久常量：换了目录布局之后，卸载器
-  ; 与下一次覆盖安装都必须能问出"上一版把 150 MB 放在哪"，而不是拿本版常量去猜。
+  ; [Why the model library root is written into the uninstall entry] The shared library's
+  ; location is not a permanent constant: after the directory layout changed, the uninstaller
+  ; and the next reinstall must both be able to ask "where did the previous version put its
+  ; model library" instead of guessing from this version's constant.
   WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "ModelRoot" "$HfsModelRoot"
-  ; 不带 _?=：让卸载器按默认行为把自己复制到临时目录再运行，从而能删掉自身。
+  ; Without _?=: the uninstaller copies itself to a temporary directory by default before
+  ; running, which is what lets it delete itself.
   WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "UninstallString" '"${UNINSTALLER}"'
   WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "QuietUninstallString" '"${UNINSTALLER}" /S'
   WriteRegDWORD ${HFS_ARP_ROOT} "${ARP_KEY}" "NoModify" 1
@@ -1316,8 +1452,9 @@ Section "$(HFS_COMPONENT_MODELS)"
   ${EndIf}
 
   DetailPrint "$(HFS_COMPONENT_MODELS_INSTALL)"
-  ; 先写 staging 再整体改名：中途失败不会留下一个"看起来存在但缺文件"的库，那会让
-  ; 运行时误判为可用（与 model_store::publish 是同一套做法）。
+  ; Write into staging first, then rename as a whole: a mid-way failure never leaves behind a
+  ; library that "looks present but misses files", which would make the runtime misjudge it as
+  ; usable (the same approach as model_store::publish).
   RMDir /r "$HfsModelRoot\${MODELS_VERSION}.staging"
   CreateDirectory "$HfsModelRoot\${MODELS_VERSION}.staging"
   SetOutPath "$HfsModelRoot\${MODELS_VERSION}.staging"
@@ -1332,14 +1469,17 @@ Section "$(HFS_COMPONENT_MODELS)"
     ${EndIf}
     Abort
   ${EndIf}
-  ; 【为什么必须先切走 SetOutPath】NSIS 的 SetOutPath 会 SetCurrentDirectory；
-  ; 上面 File /r 把当前目录设成了 .staging，直接 Rename 它就是"重命名当前工作目录"，
-  ; Windows 必然失败且 Rename 不报错 —— 模型库永远停在 .staging，安装显示成功、
-  ; 运行时却读不到权重（实测 RenameError=1）。先切回 $INSTDIR 再改名。
+  ; [Why SetOutPath must be switched away first] NSIS's SetOutPath calls SetCurrentDirectory;
+  ; the File /r above made .staging the current directory, and renaming it directly means
+  ; "rename the current working directory" — Windows always fails at that and Rename reports no
+  ; error, so the model library would stay in .staging forever: install reports success while
+  ; the runtime cannot read the weights (observed as RenameError=1). Switch back to $INSTDIR
+  ; before renaming.
   SetOutPath "$INSTDIR"
   RMDir /r "$HfsModelRoot\${MODELS_VERSION}"
-  ; RMDir 删除不存在的目录、以及前面 ARP 查询失败都会置位全局错误标志；
-  ; Rename 成功时不会清掉它。只让 Rename 自己的结果决定下面的 ${If} ${Errors}。
+  ; RMDir on a nonexistent directory, and the failed ARP queries before it, both set the global
+  ; error flag; a successful Rename does not clear it. Let only Rename's own result decide the
+  ; ${If} ${Errors} below.
   ClearErrors
   Rename "$HfsModelRoot\${MODELS_VERSION}.staging" "$HfsModelRoot\${MODELS_VERSION}"
   ${If} ${Errors}
@@ -1349,8 +1489,9 @@ Section "$(HFS_COMPONENT_MODELS)"
     Abort
   ${EndIf}
   hfs_models_done:
-  ; 权限：ProgramData 的继承在部分机器上不完整，显式给 Users 读权限。用 SID
-  ; （S-1-5-32-545 = Users）而不是本地化的组名 —— 组名在非英文系统上匹配不到。
+  ; Permissions: ProgramData inheritance is incomplete on some machines, so grant Users read
+  ; access explicitly. Use the SID (S-1-5-32-545 = Users) instead of the localized group name —
+  ; group names do not match on non-English systems.
   nsExec::ExecToLog 'icacls "$HfsModelRoot" /grant *S-1-5-32-545:(OI)(CI)RX /T /Q'
   Call HfsModelsGc
 
@@ -1372,7 +1513,7 @@ Section "$(HFS_COMPONENT_FILE_ASSOC)"
 SectionEnd
 SectionGroupEnd
 
-; ── DAW 插件 ─────────────────────────────────────────────────────────
+; ── DAW plugins ──────────────────────────────────────────────────────
 SectionGroup /e "$(HFS_GROUP_PLUGINS)"
 Section "$(HFS_COMPONENT_VST3)"
   !ifdef HFS_HOST_GUARD
@@ -1387,22 +1528,26 @@ Section "$(HFS_COMPONENT_VST3)"
 
   DetailPrint "$(HFS_INSTALLING)"
 
-  ; ── 目录对账（与旧插件安装器逐字相同）──────────────────────────────
+  ; ── Directory reconciliation (verbatim, old plugin installer) ──────
   ;
-  ; 【为什么必须清】Vite 给每个 chunk 加了内容哈希，内容一变文件名就变；而 File /r
-  ; 只写不删。于是每次重装都会再堆一层，目录单调增长。这两个目录是**纯构建产出**，
-  ; 删除是幂等且安全的。
+  ; [Why this must be cleared] Vite stamps every chunk with a content hash, so the filename
+  ; changes the moment content does, and File /r only writes, never deletes. Every reinstall
+  ; therefore stacks another layer and the directory grows monotonically. These two directories
+  ; are **pure build output**; deleting them is idempotent and safe.
   RMDir /r "$HfsVst3Dir\${VST3_SUBDIR}\Contents\Resources\frontend"
   RMDir /r "$HfsVst3Dir\${VST3_SUBDIR}\Contents\x86_64-win"
-  ; 【为什么还要清别平台架构】dist\HiFiShifter.vst3 是跨平台共用的 bundle，早期
-  ; 打包逻辑用 Copy-Item * -Recurse，把 Linux 构建留下的 x86_64-linux（约 57 MB
-  ; 的 .so）一起装到了 Windows 上。File /r 只写不删，重装时这些旧目录会一直留着；
-  ; 明确删掉已知的非 Windows 架构目录，才能让已经中招的用户升级后恢复干净。
+  ; [Why other platforms' architectures are cleared too] dist\HiFiShifter.vst3 is a
+  ; cross-platform shared bundle, and the early packaging logic used Copy-Item * -Recurse,
+  ; which installed the x86_64-linux left behind by Linux builds (about 57 MB of .so) onto
+  ; Windows as well. File /r only writes and never deletes, so those stale directories survive
+  ; every reinstall; explicitly deleting the known non-Windows architecture directories is the
+  ; only way already-affected users come out clean after upgrading.
   RMDir /r "$HfsVst3Dir\${VST3_SUBDIR}\Contents\x86_64-linux"
   RMDir /r "$HfsVst3Dir\${VST3_SUBDIR}\Contents\aarch64-linux"
   RMDir /r "$HfsVst3Dir\${VST3_SUBDIR}\Contents\MacOS"
   RMDir /r "$HfsVst3Dir\${VST3_SUBDIR}\Contents\Frameworks"
-  ; 早期版本把许可全文与变更说明放在 Resources 根目录；它们已不再交付。
+  ; Early versions kept the full license texts and change notes in the Resources root; they are
+  ; no longer shipped.
   Delete "$HfsVst3Dir\${VST3_SUBDIR}\Contents\Resources\COPYING.LGPL-2.1"
   Delete "$HfsVst3Dir\${VST3_SUBDIR}\Contents\Resources\SOUNDTOUCH-CHANGES.md"
   Delete "$HfsVst3Dir\${VST3_SUBDIR}\Contents\Resources\VST3-BUILD.md"
@@ -1417,22 +1562,27 @@ Section "$(HFS_COMPONENT_VST3)"
   SetOutPath "$HfsVst3Dir\${VST3_SUBDIR}\Contents\Resources\licenses"
   File /r "${HFS_LICENSES}\*"
 
-  ; 旧版插件安装器有自己的卸载项（\Uninstall\HiFiShifterVST3）。本安装器接管了插件
-  ; 的安装位置与模型库，成功后把它清掉，避免「已安装的应用」里出现两条。
+  ; The old plugin installer had its own uninstall entry (\Uninstall\HiFiShifterVST3). This
+  ; installer has taken over the plugins' install locations and the model library, so it clears
+  ; that entry on success to avoid two entries in "Installed apps".
   DeleteRegKey HKLM "${LEGACY_VST3_ARP_KEY}"
   DeleteRegKey HKCU "${LEGACY_VST3_ARP_KEY}"
 SectionEnd
 Section "$(HFS_COMPONENT_CLAP)"
-  ; 【为什么公共 CLAP 目录里只放 .clap 一个文件】%COMMONFILES%\CLAP 是全机共享的插件
-  ; 目录：规范里那里只该出现插件二进制本身，别人的插件也在这里。把前端与 models.json
-  ; 摆成一个通用名的兄弟目录，用户看到的是"一个插件 + 一个不知道谁的文件夹"，删起来
-  ; 也不敢动。资源改放 %ProgramData%\HiFiShifter\plugin-resources（与共享模型库同一个
-  ; 根），运行时按「模块同级 → 全机共享」的顺序解析（见 resource_root.rs）。
+  ; [Why the public CLAP directory gets only the .clap file] %COMMONFILES%\CLAP is the
+  ; machine-wide shared plugin directory: per the spec only plugin binaries belong there, and
+  ; other vendors' plugins live alongside. Putting the frontend and models.json into a
+  ; generically named sibling directory shows the user "one plugin plus one folder of unknown
+  ; origin" that nobody dares to delete. Resources instead go to
+  ; %ProgramData%\HiFiShifter\plugin-resources (the same root as the shared model library), and
+  ; the runtime resolves them in "module sibling → machine-wide shared" order (see
+  ; resource_root.rs).
   SetOutPath "$HfsClapDir"
   Delete "$HfsClapDir\${CLAP_FILENAME}"
   File "/oname=${CLAP_FILENAME}" "${CLAP_FILE}"
-  ; 升级自旧版：把当年摆在 CLAP 目录里的资源目录清掉。否则两份资源并存，而"同级优先"
-  ; 会让旧的那份一直被读到 —— 新版前端永远不生效。
+  ; Upgrading from the old layout: clear the resource directory that used to sit in the CLAP
+  ; directory. Otherwise both copies coexist and "sibling first" keeps reading the old one —
+  ; the new frontend would never take effect.
   RMDir /r "$HfsClapDir\${CLAP_RESOURCES}"
   SetShellVarContext ${HFS_CLAP_RES_CONTEXT}
   SetOutPath "${HFS_CLAP_RES_DIR}"
@@ -1443,11 +1593,13 @@ Section "$(HFS_COMPONENT_CLAP)"
 SectionEnd
 SectionGroupEnd
 
-; ── 组件悬停描述 ─────────────────────────────────────────────────────
-; 【为什么这一段非有不可】MUI2 的组件页默认带描述框，但描述内容只来自
-; .onMouseOverSection 回调；脚本此前完全没有 MUI_FUNCTION_DESCRIPTION_*，
-; 于是悬停时描述框始终只显示 MUI 自带的静态提示（截图里的"将光标悬停…"）。
-; 每个 section 与每个分组都登记一条，五语文案来自 installer_desc_* 词表。
+; ── Component hover descriptions ─────────────────────────────────────
+; [Why this block is indispensable] MUI2's components page comes with a description box, but
+; its content comes only from the .onMouseOverSection callback; this script previously had no
+; MUI_FUNCTION_DESCRIPTION_* at all, so hovering always showed MUI's built-in static hint
+; (the "Hover your mouse over a component..." text in the screenshot).
+; Every section and every group registers one entry; the five-language strings come from the
+; installer_desc_* tables.
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SECGRP_APP} "$(HFS_DESC_GROUP_APP)"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_APP} "$(HFS_DESC_APP)"
@@ -1460,12 +1612,14 @@ SectionGroupEnd
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 
-; ── 卸载选项页 ─────────────────────────────────────────────────────────
-; 「清理共享模型库」默认勾选（un.onInit 置 1），「清理缓存与日志」默认不勾：
-;   - 清理共享模型库（约 150 MB，所有安装共用）
-;   - 清理缓存与日志（波形/渲染缓存、日志、WebView 数据、临时文件）
-; 无论怎么勾，设置与未保存工程始终保留；若还有别的 HiFiShifter 安装，
-; 这两项都不生效（避免卸载 App 把仍在用的插件数据扫掉）。
+; ── Uninstall options page ─────────────────────────────────────────────
+; "Clean shared model library" is checked by default (set to 1 in un.onInit);
+; "Clean caches and logs" is unchecked by default:
+;   - Clean shared model library (shared by all installs)
+;   - Clean caches and logs (waveform/render caches, logs, WebView data, temporary files)
+; However the checkboxes are set, settings and unsaved projects are always kept; if another
+; HiFiShifter install exists, neither option takes effect (so uninstalling the App never
+; sweeps away data the plugins still use).
 Function un.HfsUninstallOptionsCreate
   !insertmacro MUI_HEADER_TEXT "$(HFS_UNINSTALL_OPTIONS_TITLE)" "$(HFS_UNINSTALL_OPTIONS_SUBTITLE)"
   nsDialogs::Create 1018
@@ -1498,16 +1652,20 @@ Function un.HfsUninstallOptionsLeave
 FunctionEnd
 
 Section "Uninstall"
-  ; 只解除“当前绑定指向本安装”的关联；别的程序的默认程序保持不变。
+  ; Removes only associations whose current binding points at this install; other programs'
+  ; defaults stay untouched.
   Call un.HfsRemoveFileAssociations
-  ; 只删自己：$HfsVst3Dir 是 Common Files\VST3，里面还有别人的插件。
+  ; Delete only our own: $HfsVst3Dir is Common Files\VST3, which holds other vendors' plugins too.
   RMDir /r "$HfsVst3Dir\${VST3_SUBDIR}"
   Delete "$HfsClapDir\${CLAP_FILENAME}"
-  ; 只删本产品的资源目录：$HfsClapDir 是公共 CLAP 目录，里面有别人的插件。
-  ; 两种布局都要清：旧版摆在模块同级，新版在全机共享目录（安装时登记在 ClapResDir）。
+  ; Delete only this product's resource directory: $HfsClapDir is the public CLAP directory,
+  ; which holds other vendors' plugins.
+  ; Both layouts must be cleared: the old version kept it next to the module, the new one in
+  ; the machine-wide shared directory (recorded in ClapResDir at install time).
   RMDir /r "$HfsClapDir\${CLAP_RESOURCES}"
   RMDir /r "$HfsClapResDir"
-  ; App 目录整个属于本产品（与 Tauri 安装器的行为一致）。
+  ; The App directory belongs entirely to this product (consistent with the Tauri installer's
+  ; behavior).
   RMDir /r "$INSTDIR"
 
   SetShellVarContext all
@@ -1516,29 +1674,35 @@ Section "Uninstall"
   SetShellVarContext current
 
   DeleteRegKey ${HFS_ARP_ROOT} "${ARP_KEY}"
-  ; 旧版安装器可能还留着键（本安装器成功时会删，但用户可能先卸载再手动清理）。
+  ; The old installer's key may still be around (this installer deletes it on success, but the
+  ; user may have uninstalled first and cleaned up by hand).
   DeleteRegKey HKLM "${LEGACY_VST3_ARP_KEY}"
   DeleteRegKey HKCU "${LEGACY_VST3_ARP_KEY}"
 
-  ; ── 可选清理：只有"没有别的 HiFiShifter 安装"时才可能生效 ──────────────
-  ; App 与仍在使用的 VST3/CLAP 插件共享模型库与缓存目录；卸载 App 时不该把
-  ; 插件还在用的数据扫掉。判定结果存进专用变量，避免被 LogicLib 宏复用 $0。
+  ; ── Optional cleanup: only when no other HiFiShifter install exists ────
+  ; The App and the still-in-use VST3/CLAP plugins share the model library and cache
+  ; directories; uninstalling the App must not sweep away data the plugins still use. The
+  ; verdict is stored in a dedicated variable so LogicLib macros cannot clobber $0.
   Call un.HfsOtherInstallExists
   StrCpy $HfsUnOtherInstall $0
 
-  ; ── 模型库：勾了「清理共享模型库」且没有别的安装才删 ──────────────────
-  ; 【为什么删整个根，而不是只删 ${MODELS_VERSION}】安装时 HfsModelsGc 会刻意保留
-  ; 当前版本 + 上一个版本，升级过的机器上必然有两个版本目录；失败的安装还会留下
-  ; <版本>.staging。只删一个版本目录时，剩下的会让 RMDir "$HfsModelRoot" 永远失败
-  ; —— 表现为"卸载了但模型文件还在"。整个根目录都是本产品写的，没有别的程序会在
-  ; 这里放东西，因此整目录删除是安全的。
+  ; ── Model library: removed only when checked and no other install ─────
+  ; [Why delete the whole root instead of only ${MODELS_VERSION}] At install time HfsModelsGc
+  ; deliberately keeps the current version + the previous one, so any upgraded machine
+  ; necessarily has two version directories; a failed install also leaves <version>.staging
+  ; behind. Deleting just one version directory would leave the rest making
+  ; RMDir "$HfsModelRoot" fail forever — showing up as "uninstalled, but the model files are
+  ; still there". The whole root is written by this product and no other program puts anything
+  ; here, so deleting the whole directory is safe.
   ${If} $HfsUnOptModels == 1
   ${AndIf} $HfsUnOtherInstall == 0
     SetShellVarContext ${HFS_MODEL_ROOT_CONTEXT}
     StrCpy $HfsModelRoot "${HFS_MODEL_ROOT}"
     SetShellVarContext current
-    ; 【为什么先逐子目录删，再删根】RMDir /r 遇到被占用或权限异常的子目录会**静默跳过**
-    ; —— 整个卸载显示成功，模型文件却还留在磁盘上。先逐个删，某个失败也不影响其它。
+    ; [Why children are deleted one by one before the root] RMDir /r **silently skips**
+    ; subdirectories that are locked or have unusual permissions — the whole uninstall reports
+    ; success while model files remain on disk. Deleting them individually means one failure
+    ; does not affect the others.
     FindFirst $R3 $R4 "$HfsModelRoot\*"
     StrCmp $R4 "" hfs_models_children_done
     hfs_models_children_loop:
@@ -1557,19 +1721,25 @@ Section "Uninstall"
     hfs_models_children_done:
     FindClose $R3
     RMDir /r "$HfsModelRoot"
-    ; 删掉模型根的上级空壳（只在它真的空了才成功），两种模式都适用。
+    ; Remove the empty shell above the model root (succeeds only when it is truly empty);
+    ; applies in both modes.
     RMDir "$HfsModelRoot\.."
   ${EndIf}
 
-  ; ── 缓存与日志：勾了「清理缓存与日志」才删，按可再生成性分级 ──────────
-  ; 【为什么不是"全删"也不是"全留"】%APPDATA%\HiFiShifter 里是设置、快捷键、
-  ; 最近工程 —— 删了不可恢复；%LOCALAPPDATA%\HiFiShifter 里既有几 GB 可重新生成的
-  ; 缓存/日志/WebView profile，也有用户尚未保存的工程素材与插件记事本。白名单只列
-  ; app_paths.rs / temp_sweep.rs 明确定义为派生物的子目录，其余默认保留。
+  ; ── Caches and logs: only when checked; tiered by regenerability ──────
+  ; [Why neither "delete everything" nor "keep everything"] %APPDATA%\HiFiShifter holds
+  ; settings, keyboard shortcuts and recent projects — unrecoverable once deleted;
+  ; %LOCALAPPDATA%\HiFiShifter holds both gigabytes of regenerable caches/logs/WebView profile
+  ; and the user's unsaved project material and plugin notebooks. The whitelist lists only the
+  ; subdirectories that app_paths.rs / temp_sweep.rs explicitly define as disposable; everything
+  ; else is kept by default.
   ${If} $HfsUnOptCache == 1
   ${AndIf} $HfsUnOtherInstall == 0
     Call un.HfsSweepDisposableDirs
-    DetailPrint "Removed caches, logs and temporary data. Settings and any unsaved work were kept in %APPDATA%\HiFiShifter and %LOCALAPPDATA%\HiFiShifter."
+    ; [Why $APPDATA instead of %APPDATA%] NSIS strings do not do cmd-style environment
+    ; expansion; %VAR% would appear literally in the uninstall log. The shell folder constants
+    ; are $APPDATA / $LOCALAPPDATA.
+    DetailPrint "Removed caches, logs and temporary data. Settings and any unsaved work were kept in $APPDATA\HiFiShifter and $LOCALAPPDATA\HiFiShifter."
   ${ElseIf} $HfsUnOtherInstall == 1
     DetailPrint "Another HiFiShifter installation is still present; shared data was kept."
   ${Else}
@@ -1577,22 +1747,27 @@ Section "Uninstall"
   ${EndIf}
 SectionEnd
 
-; 删除 %LOCALAPPDATA%\HiFiShifter 下**明确可再生成**的子目录。
-; 这份清单与 backend/hifishifter-kernel/src/app_paths.rs 的 cache_dir()/log_dir()/
-; local_data_subdir() 以及 hifishifter-plugin/src/editor/temp_sweep.rs 的回收目标一一对应：
-;   cache / logs —— 缓存与日志（app_paths.rs 明确说"删掉只会变慢，不会丢数据"）
-;   EBWebView / webview —— WebView2 用户数据目录（TempSweep 自己也在回收）
-;   pcm / capture / transfer / links —— PCM 暂存、捕获、传输、host-link 工作区标记
-;   plugin-content-v1 —— 宿主 PCM 缓存（host_pcm_cache.rs）
-; 【刻意保留】unsaved（未保存工程素材）、plugin-notebook（插件记事本正文与附件）、
-; ara-content-v1 / ara-instances（宿主写入的 ARA 内容）、以及任何源码未列出的新目录。
+; Deletes the subdirectories of %LOCALAPPDATA%\HiFiShifter that are **explicitly regenerable**.
+; This list maps one-to-one to backend/hifishifter-kernel/src/app_paths.rs's cache_dir()/
+; log_dir()/local_data_subdir() and to hifishifter-plugin/src/editor/temp_sweep.rs's sweep
+; targets:
+;   cache / logs — caches and logs (app_paths.rs says outright: "deleting only slows things
+;   down, no data is lost")
+;   EBWebView / webview — WebView2 user data directories (TempSweep reclaims them too)
+;   pcm / capture / transfer / links — PCM staging, capture, transfer and host-link workspace
+;   markers
+;   plugin-content-v1 — host PCM cache (host_pcm_cache.rs)
+; [Deliberately kept] unsaved (unsaved project material), plugin-notebook (plugin notebook
+; bodies and attachments), ara-content-v1 / ara-instances (ARA content written by the host),
+; and any new directory the source does not list.
 Function un.HfsSweepDisposableDirs
   SetShellVarContext current
   StrCpy $R0 "$LOCALAPPDATA\HiFiShifter"
   ${IfNot} ${FileExists} "$R0\*"
     Return
   ${EndIf}
-  ; 逐个删：某个目录被占用/权限异常时 RMDir /r 会静默跳过，但不影响其它目录。
+  ; Delete one by one: when a directory is locked or has unusual permissions, RMDir /r silently
+  ; skips it, but the other directories are unaffected.
   ${If} ${FileExists} "$R0\cache\*"
     DetailPrint "Removing disposable data: cache"
     RMDir /r "$R0\cache"
@@ -1629,11 +1804,12 @@ Function un.HfsSweepDisposableDirs
     DetailPrint "Removing disposable data: plugin-content-v1"
     RMDir /r "$R0\plugin-content-v1"
   ${EndIf}
-  ; 目录空了才删根；删不掉说明还有用户数据要留，RMDir 不带 /r 会安静地什么也不做。
+  ; The root is removed only when empty; if it cannot be deleted, user data remains to keep —
+  ; RMDir without /r quietly does nothing in that case.
   RMDir "$R0"
 FunctionEnd
 
-; 还有别的 HiFiShifter 安装项吗？结果写进 $0（1 = 有）。
+; Is there another HiFiShifter install? Result goes into $0 (1 = yes).
 Function un.HfsOtherInstallExists
   StrCpy $0 0
   StrCpy $R1 "HKLM"
@@ -1657,10 +1833,12 @@ Function un.HfsScanUninstallRoot
       ${ExitDo}
     ${EndIf}
     IntOp $R2 $R2 + 1
-    ; 只认"其它形态"的键：本产品自己的键名（HiFiShifter）明确排除。
-    ; 【为什么必须排除自己】DeleteRegKey 可能因权限失败没删掉自己的键；若把它也算作
-    ; "还有别的安装"，模型库就会永远被保留 —— 正是"卸载了模型还在"的表现。
-    ; 旧版插件安装器留下的 HiFiShifterVST3、以及将来拆出的其它形态才算数。
+    ; Only "other variant" keys count: this product's own key name (HiFiShifter) is explicitly
+    ; excluded.
+    ; [Why the self key must be excluded] DeleteRegKey may fail to remove our own key due to
+    ; permissions; counting it as "another install" would keep the model library forever —
+    ; exactly the "uninstalled, but the models remain" symptom. Only the HiFiShifterVST3 left
+    ; by the old plugin installer, and other variants split out in the future, count.
     ${If} $R3 == "HiFiShifter"
       ${Continue}
     ${EndIf}

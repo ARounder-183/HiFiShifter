@@ -422,9 +422,16 @@ describe("长度预算（状态片与 tooltip）", () => {
         // 被拒绝的快捷键会把这些当理由显示在状态栏上。
         "cap_reason_host_owns",
         "cap_reason_unsupported_by_host",
+        "cap_reason_not_in_plugin",
         "cap_reason_app_only",
         "cap_reason_plugin_only",
         "cap_reason_piano_roll_only",
+        // REAPER 音高互转的收尾报告（导入 / 导出 / 跳过 / 失败）。
+        "status_pitch_bridge_imported",
+        "status_pitch_bridge_exported",
+        "status_pitch_bridge_failed",
+        "pitch_bridge_nothing_converted",
+        "pitch_bridge_skipped_clips",
     ]);
 
     /**

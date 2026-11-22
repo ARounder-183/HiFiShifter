@@ -368,7 +368,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                         const partition = partitionDroppedPaths(paths, { directories });
                         if (partition.rejectedPaths.length > 0) {
                             dndLog.info(
-                                "[dnd] 已拒绝拖放（类型不在准入白名单）:",
+                                "[dnd] rejected the drop (type not in the accepted allowlist):",
                                 partition.rejectedPaths,
                             );
                         }

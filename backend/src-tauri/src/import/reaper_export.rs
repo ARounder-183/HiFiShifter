@@ -80,27 +80,27 @@ fn reaper_source_type(path: &str) -> &'static str {
     }
 }
 
-fn audio_source(take: &ClipTake, _rate: f64, source_span_sec: f64) -> ReaperSource {
+/// 构造 take 的 `<SOURCE>` 块。
+///
+/// `section` = `Some((mode, start, length))` ⇒ 写成 `SECTION` 包装；`None` ⇒ 裸媒体源。
+/// `MODE` 的位语义见 `hifishifter_kernel::take_geometry`（真机读数表）。
+fn audio_source(take: &ClipTake, section: Option<(i32, f64, f64)>) -> ReaperSource {
     let path = take.source_path.clone().unwrap_or_default();
-    let (start, _) = source_bounds(take, 0.0);
-
-    if take.reversed {
-        let mut source = ReaperSource::new();
-        source.source_type = "SECTION".to_string();
-        source.file_path = path.clone();
-        source.section_mode = 1;
-        source.section_start_sec = Some(start);
-        source.section_length_sec = Some(source_span_sec.max(0.0));
-        source
-    } else {
-        let mut source = ReaperSource::new();
-        source.source_type = reaper_source_type(&path).to_string();
-        source.file_path = path;
-        source.section_mode = 0;
-        source.section_start_sec = None;
-        source.section_length_sec = None;
-        source
+    let mut source = ReaperSource::new();
+    match section {
+        Some((mode, start_sec, length_sec)) => {
+            source.source_type = "SECTION".to_string();
+            source.file_path = path;
+            source.section_mode = mode;
+            source.section_start_sec = Some(start_sec);
+            source.section_length_sec = Some(length_sec.max(0.0));
+        }
+        None => {
+            source.source_type = reaper_source_type(&path).to_string();
+            source.file_path = path;
+        }
     }
+    source
 }
 
 fn midi_source(take: &ClipTake, bpm: f64) -> ReaperSource {
@@ -178,7 +178,7 @@ fn fill_reaper_take(
     dest.play_rate = vec![rate, 1.0, 0.0, -1.0, 0.0, 0.0025];
     // 声道模式回写（0..=4 与 REAPER CHANMODE 一一对应）：
     // 导入时 ≥5 的多声道编码已降级为本工程五模式，导出无法还原原始编码，
-    // 属预期行为（见 docs/plans/2026-09-19-stereo-channel-support-design.md §5）。
+    // 属预期行为。
     dest.chan_mode = crate::channel_mode::TakeChannelMode::to_reaper_chanmode(take.channel_mode);
 
     if let Some(ref midi_data) = take.midi_note_data {
@@ -195,29 +195,32 @@ fn fill_reaper_take(
         return false;
     }
 
+    // 媒体总长：倒放镜像轴的唯一来源（take 自带时长优先，其次帧数 ÷ 采样率）。
+    let media_dur = take
+        .duration_sec
+        .filter(|d| d.is_finite() && *d > 1e-9)
+        .or_else(|| {
+            take.duration_frames
+                .zip(take.source_sample_rate)
+                .filter(|(frames, sr)| *sr > 0 && *frames > 0)
+                .map(|(frames, sr)| frames as f64 / sr as f64)
+        });
+
     if take.reversed && take.loop_enabled {
-        // 倒放 + Loop：回绕发生在整个媒体文件上（与引擎及正放 Loop 的
-        // "循环原始音频文件"语义一致）。用覆盖全媒体的 SECTION 承载回绕域，
-        // SOFFS 承载倒放相位锚点。
-        let media_dur = take
-            .duration_sec
-            .filter(|d| d.is_finite() && *d > 1e-9)
-            .or_else(|| {
-                take.duration_frames
-                    .zip(take.source_sample_rate)
-                    .filter(|(frames, sr)| *sr > 0 && *frames > 0)
-                    .map(|(frames, sr)| frames as f64 / sr as f64)
-            });
         if let Some(d) = media_dur {
+            // 倒放 + Loop：宿主的 `MODE 3` 让**源就是整份媒体**（回绕域天然正确，
+            // 与引擎"循环原始音频文件"语义一致），相位由镜像 `SOFFS` 承载。
             let anchor = take.source_end_sec.min(d).rem_euclid(d);
-            let mut source = ReaperSource::new();
-            source.source_type = "SECTION".to_string();
-            source.file_path = source_path.to_string();
-            source.section_mode = 1;
-            source.section_start_sec = Some(0.0);
-            source.section_length_sec = Some(d);
             dest.s_offs = (d - anchor).rem_euclid(d);
-            dest.source = Some(source);
+            dest.source = Some(audio_source(
+                take,
+                Some((
+                    hifishifter_kernel::take_geometry::SECTION_MODE_WHOLE_SOURCE
+                        | hifishifter_kernel::take_geometry::SECTION_MODE_REVERSED,
+                    0.0,
+                    anchor,
+                )),
+            ));
             return true;
         }
         // 媒体时长未知：退化为下方通用反向路径（尽力而为）。
@@ -226,19 +229,33 @@ fn fill_reaper_take(
     let (start, end) = source_bounds(take, clip_length_sec);
     let source_span = (end - start).max(0.0);
 
-    let mut source = audio_source(take, rate, source_span);
     if take.reversed {
-        // 反向：SECTION MODE 1 承载源窗口，SOFFS 置 0。
-        dest.s_offs = 0.0;
+        // 倒放（非 Loop）：宿主自己的编码 —— `MODE 3`（整份媒体 + 反向）+
+        // 镜像 `SOFFS = D − 正向窗口终点`（REAPER 7.85 的 `Toggle take reverse`）。
+        // 媒体总长读不出来时退回 `MODE 2`（段内反向、`SOFFS 0`）：同样是宿主认得的
+        // 结构，只是镜像轴改由段端点自己承担。
+        let (mode, section_start, s_offs) = match media_dur.filter(|d| end <= *d + 1e-9) {
+            Some(axis) => (
+                hifishifter_kernel::take_geometry::SECTION_MODE_WHOLE_SOURCE
+                    | hifishifter_kernel::take_geometry::SECTION_MODE_REVERSED,
+                0.0,
+                (axis - end).max(0.0),
+            ),
+            None => (
+                hifishifter_kernel::take_geometry::SECTION_MODE_REVERSED,
+                start,
+                0.0,
+            ),
+        };
+        dest.s_offs = s_offs;
+        dest.source = Some(audio_source(take, Some((mode, section_start, source_span))));
     } else {
         // 正向：plain SOURCE + SOFFS 承载进入锚点（可为负 = 前导静音）。
         // Loop 的回绕发生在整个媒体文件上（REAPER 原生 Loop source 语义），
         // 无需 SECTION；非 Loop 超出媒体的 LENGTH 部分由 REAPER 渲染静音。
-        source.section_start_sec = None;
-        source.section_length_sec = None;
         dest.s_offs = start;
+        dest.source = Some(audio_source(take, None));
     }
-    dest.source = Some(source);
     true
 }
 
@@ -352,10 +369,12 @@ fn build_item(
 
 // ─── 参数线 → REAPER 包络 ────────────────────────────────────────────────────
 
-/// 精简容差。
-const SIMPLIFY_TOLERANCE_VOLUME: f64 = 0.005;
-const SIMPLIFY_TOLERANCE_PAN: f64 = 0.005;
-const SIMPLIFY_TOLERANCE_PITCH: f64 = 0.02;
+// 精简容差与断点算法**只有一份**：`hifishifter_kernel::pitch_bridge`。
+// 导出与插件桥接共用同一份，否则"导出听起来对、插件里听起来不对"。
+use hifishifter_kernel::pitch_bridge::{
+    simplify_breakpoints, SIMPLIFY_TOLERANCE_PAN, SIMPLIFY_TOLERANCE_PITCH,
+    SIMPLIFY_TOLERANCE_VOLUME,
+};
 
 /// 每个导出 Clip 的参数线视图（命令层从 live timeline 预解析后传入）。
 ///
@@ -386,8 +405,11 @@ fn curve_default_value(key: &str) -> f32 {
     }
 }
 
-/// 曲线切片（帧 0 = clip 起点），不足处补参数默认值（与
-/// `extract_linked_params_from_root_range` 的切片语义一致）。
+/// 曲线切片（帧 0 = clip 起点），不足处补参数默认值。
+///
+/// 【`start_frame` 必须来自 `frame_grid::clip_frame_window`】与
+/// `extract_linked_params_from_root_range` 同一个**定位**窗口：帧 k 代表 k·fp。
+/// 自己写一遍 `floor` 会让整条曲线早一帧（见 `frame_grid` 模块文档）。
 fn slice_curve_with_default(
     curve: &[f32],
     start_frame: usize,
@@ -419,12 +441,14 @@ pub fn build_clip_export_curves(timeline: &TimelineState, clip: &Clip) -> ClipEx
     let frame_period_ms = root_entry
         .map(|entry| entry.frame_period_ms.max(0.1))
         .unwrap_or(5.0);
-    let start_frame = ((clip.start_sec.max(0.0) * 1000.0) / frame_period_ms)
-        .floor()
-        .max(0.0) as usize;
-    let frame_count = (((clip.length_sec.max(0.0) * 1000.0) / frame_period_ms)
-        .ceil()
-        .max(1.0)) as usize;
+    // 与音高同一条换算（`frame_grid`）：音量/声像切片也要落在组装侧写入的那几帧上，
+    // 否则导出包络与音高包络相差一帧 —— 同一个片段的两条包络对不上。
+    let (start_frame, end_frame) = hifishifter_kernel::frame_grid::clip_frame_window(
+        clip.start_sec,
+        clip.length_sec,
+        frame_period_ms,
+    );
+    let frame_count = end_frame - start_frame;
 
     let merged_curve = |key: &str| -> Option<Vec<f32>> {
         // 渲染同款合并：clip.extra_curves[key] 覆盖 root[key]（整 key 覆盖）；
@@ -456,9 +480,16 @@ pub fn build_clip_export_curves(timeline: &TimelineState, clip: &Clip) -> ClipEx
         frame_period_ms,
         volume: merged_curve("volume"),
         pan: merged_curve("pan"),
+        // 【未识别帧的填充只装在这一个接缝上】REAPER 剪贴板与 `.rpp` 导出都经本
+        // 函数（事实：`build_clip_export_curves` 的调用者只有 `build_reaper_clipboard`
+        // 与 `build_item`）。因此 `build_take_pitch_envelope` 保持"只负责写"，
+        // 它收到的已经是填好的曲线 —— 写点逻辑与填充逻辑各自可测。
         pitch_offset: if root_compose_enabled {
-            crate::pitch_editing::compute_clip_export_pitch_offsets(timeline, clip)
-                .map(|p| p.offsets)
+            crate::pitch_editing::compute_clip_take_pitch_offsets(
+                timeline,
+                clip,
+                &crate::pitch_editing::take_pitch_fill_policy(frame_period_ms),
+            )
         } else {
             None
         },
@@ -471,156 +502,16 @@ pub fn build_clip_export_curves(timeline: &TimelineState, clip: &Clip) -> ClipEx
 /// - 端点强制：恒写 range_start 与 range_end 两端点（不得依赖 hold 语义
 ///   跨 Item / 段边界）；
 /// - 平坦非默认 → 恰好 2 点；斜线 → 仅折点。
-fn simplify_breakpoints(
-    samples: &[(f64, f64)],
-    range_start: f64,
-    range_end: f64,
-    default_value: f64,
-    tolerance: f64,
-) -> Vec<(f64, f64)> {
-    if samples.is_empty() || range_end <= range_start {
-        return Vec::new();
-    }
-    if samples
-        .iter()
-        .all(|(_, v)| (v - default_value).abs() <= tolerance)
-    {
-        return Vec::new();
-    }
-
-    // 单样本：无折线可言，端点强制（区间两端同值）。
-    // （低于一个帧周期的短 clip 可达此处，此前 samples[1] 越界 panic。）
-    if samples.len() == 1 {
-        let v = samples[0].1;
-        let first_t = samples[0].0.clamp(range_start, range_end);
-        return vec![(first_t, v), (range_end, v)];
-    }
-
-    // O(n) 快速通道，消除最坏输入（恒平坦 / 全程线性 —— 也是最常见形态）
-    // 在下方贪心扫描里的 O(n²) 逐帧重扫：
-    // - 全部样本在容差内等于首样本值 → 平坦；
-    // - 全部样本在容差内落在首末样本连线上 → 直线；
-    // 两者都输出恰好 2 个端点。真实曲线几乎必然违背其一，落到贪心扫描
-    // （单段越界即 break，实际复杂度接近 O(n)）。
-    {
-        let (t0, v0) = samples[0];
-        let (tn, vn) = samples[samples.len() - 1];
-        let span = tn - t0;
-        let slope = if span > 1e-12 { (vn - v0) / span } else { 0.0 };
-        let mut flat = true;
-        let mut linear = true;
-        for (tj, vj) in samples.iter() {
-            if (vj - v0).abs() > tolerance {
-                flat = false;
-            }
-            if (vj - (v0 + slope * (tj - t0))).abs() > tolerance {
-                linear = false;
-            }
-            if !flat && !linear {
-                break;
-            }
-        }
-        if flat || linear {
-            let first_t = t0.max(range_start);
-            let last_t = range_end.max(first_t);
-            return vec![
-                (first_t, v0 + slope * (first_t - t0)),
-                (last_t, v0 + slope * (last_t - t0)),
-            ];
-        }
-    }
-
-    let value_at = |t: f64| -> f64 {
-        let idx = samples.partition_point(|s| s.0 < t);
-        if idx == 0 {
-            return samples[0].1;
-        }
-        if idx >= samples.len() {
-            return samples[samples.len() - 1].1;
-        }
-        let (t0, v0) = samples[idx - 1];
-        let (t1, v1) = samples[idx];
-        if (t1 - t0).abs() < 1e-12 {
-            return v0;
-        }
-        let frac = ((t - t0) / (t1 - t0)).clamp(0.0, 1.0);
-        v0 + (v1 - v0) * frac
-    };
-
-    // 折线 a→f 是否容纳 (a, f) 内全部样本（端点精确）。
-    let line_fits = |a: usize, f: usize| -> bool {
-        let (ta, va) = samples[a];
-        let (tf, vf) = samples[f];
-        let span = tf - ta;
-        if span <= 1e-12 {
-            return (vf - va).abs() <= tolerance;
-        }
-        let slope = (vf - va) / span;
-        samples[a + 1..f]
-            .iter()
-            .all(|(tj, vj)| (vj - (va + slope * (tj - ta))).abs() <= tolerance)
-    };
-
-    let mut out: Vec<(f64, f64)> = Vec::new();
-    let push_point = |t: f64, v: f64, out: &mut Vec<(f64, f64)>| {
-        if let Some(last) = out.last_mut() {
-            if (last.0 - t).abs() <= 1e-9 {
-                last.1 = v;
-                return;
-            }
-        }
-        out.push((t, v));
-    };
-
-    // 首端点（强制）。
-    let first_t = samples[0].0.max(range_start);
-    push_point(first_t, value_at(first_t), &mut out);
-
-    let mut anchor = 0usize;
-    loop {
-        // 找从 anchor 出发能容纳税入的最远样本。
-        let mut f = anchor + 1;
-        let mut farthest = anchor + 1;
-        while f < samples.len() {
-            if line_fits(anchor, f) {
-                farthest = f;
-                f += 1;
-            } else {
-                break;
-            }
-        }
-        let (t, v) = samples[farthest];
-        push_point(t, v, &mut out);
-        anchor = farthest;
-        if anchor + 1 >= samples.len() {
-            break;
-        }
-    }
-
-    // 末端点（强制）。若末点值与端值在容差内相等（帧网格取不到精确 range_end
-    // 的常态），把末点延伸到 range_end 而不是追加第四点——最后一段的偏差
-    // 仍在容差内，且保持"线性段只有端点"的精简不变式。
-    let end_t = range_end;
-    let end_v = value_at(end_t);
-    if let Some(last) = out.last_mut() {
-        if (last.1 - end_v).abs() <= tolerance {
-            last.0 = end_t;
-            last.1 = end_v;
-        } else {
-            push_point(end_t, end_v, &mut out);
-        }
-    } else {
-        push_point(end_t, end_v, &mut out);
-    }
-    out
-}
-
 /// 音高参数线 → 活跃 take 的 PITCHENV（default take 的 ITEM 直属块）。
 ///
 /// - 坐标 u = t_rel × 组合速率（`item_time_to_take_env_u` 唯一转换点）；
 /// - 端点强制（u=0 与 u=item_length×rate）；值为 0 的帧 = 不做音高修正
-///  （显式 0 落点，不得依赖 hold 语义跨界或桥接邻近帧）；
+///  （显式 0 落点，不得依赖 hold 语义跨界）；
 /// - 值不钳制（REAPER PIT 值域无限制）；DEFSHAPE 范围按最大偏移写入。
+///
+/// 【本函数**不做**任何填充】未识别帧的填充在上游 `build_clip_export_curves`
+/// （`compute_clip_take_pitch_offsets`）里完成，这里收到的已经是最终值。这样"填什么"
+/// 与"怎么写点"各自可测，也不必让写出层知道策略的存在。
 fn build_take_pitch_envelope(
     curves: &ClipExportCurves,
     item_length_sec: f64,
@@ -939,23 +830,12 @@ pub(crate) fn parse_for_test(bytes: &[u8]) -> crate::reaper_parser::ReaperData {
     crate::reaper_parser::parse_clipboard_bytes(bytes).expect("parse exported REAPER clipboard")
 }
 
-/// 测试辅助：按导入端约定从 SECTION take 还原倒放锚点（区间末端 − SOFFS）。
-#[cfg(test)]
-fn compute_anchor_from_section_for_test(take: &crate::reaper_parser::ReaperTake) -> f64 {
-    let src = take.source.as_ref().expect("source present");
-    let end = src.section_start_sec.unwrap_or(0.0)
-        + src
-            .section_length_sec
-            .filter(|len| len.is_finite() && *len > 0.0)
-            .unwrap_or(0.0);
-    end - take.s_offs.max(0.0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::midi_import::MidiNoteEvent;
     use crate::state::TimelineState;
+    use hifishifter_kernel::pitch_bridge::{UnvoicedFill, UnvoicedFillPolicy};
 
     #[test]
     fn multi_take_export_uses_reaper_takevolpan_layout() {
@@ -1255,6 +1135,124 @@ mod tests {
     }
 
     #[test]
+    fn reversed_clip_exports_the_host_own_mirror_encoding() {
+        // 倒放（非 Loop）：`MODE 3` + 镜像 `SOFFS = D − 正向终点` + `LENGTH = 跨度`。
+        // 夹具：媒体 10 s，正向窗口 [2, 5) ⇒ SOFFS = 10 − 5 = 5。
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(track_id),
+            Some("Reversed".to_string()),
+            Some(0.0),
+            Some(3.0),
+            Some("C:/audio/reverse.wav".to_string()),
+        );
+        if let Some(clip) = timeline.clips.iter_mut().find(|clip| clip.id == clip_id) {
+            clip.duration_sec = Some(10.0);
+            clip.reversed = true;
+            clip.loop_enabled = false;
+            clip.source_start_sec = 2.0;
+            clip.source_end_sec = 5.0;
+            clip.sync_take_from_flat();
+        }
+
+        let export = build_reaper_clipboard(&timeline, &[clip_id], &BTreeMap::new()).unwrap();
+        let parsed = parse_for_test(&export.bytes);
+        let item = &parsed.tracks[0].items[0];
+        let source = item.default_take.source.as_ref().unwrap();
+        assert_eq!(
+            source.section_mode,
+            hifishifter_kernel::take_geometry::SECTION_MODE_WHOLE_SOURCE
+                | hifishifter_kernel::take_geometry::SECTION_MODE_REVERSED
+        );
+        assert_eq!(source.section_start_sec, Some(0.0));
+        assert!((source.section_length_sec.unwrap_or(-1.0) - 3.0).abs() < 1e-9);
+        assert!(
+            (item.default_take.s_offs - 5.0).abs() < 1e-9,
+            "镜像起点必须是 D − 正向终点 = 5，got {}",
+            item.default_take.s_offs
+        );
+    }
+
+    /// 【u 域是播放时间，不是媒体时间】源起点 30 s 的 clip：`SOFFS` 必须落在媒体
+    /// 时间 30 s，而 PITCHENV 的点仍然从 `u = 0` 起、止于 `长度 × 速率`。补一个
+    /// `SOFFS` 就整条平移（真机渲染实测确认）。
+    #[test]
+    fn pitch_envelope_stays_in_playback_time_when_the_source_starts_late() {
+        let mut timeline = TimelineState::default();
+        // 音高曲线受根轨道 Compose 门控（`TimelineState::default()` 是关的）。
+        timeline.tracks[0].compose_enabled = true;
+        let root_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(root_id.clone()),
+            Some("Late".to_string()),
+            Some(0.0),
+            Some(2.0),
+            Some("C:/audio/late.wav".to_string()),
+        );
+        {
+            let clip = timeline
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == clip_id)
+                .expect("clip exists");
+            clip.duration_sec = Some(60.0);
+            clip.source_start_sec = 30.0;
+            clip.source_end_sec = 32.0;
+            clip.playback_rate = 1.0;
+            clip.sync_take_from_flat();
+        }
+        timeline.params_by_root_track.insert(
+            root_id,
+            crate::state::TrackParamsState {
+                frame_period_ms: 5.0,
+                pitch_orig: vec![60.0; 400],
+                pitch_edit: vec![62.0; 400],
+                pitch_edit_user_modified: true,
+                ..crate::state::TrackParamsState::default()
+            },
+        );
+
+        // 【曲线要显式喂进来】`build_reaper_clipboard` 不会自己算参数线；缺省是
+        // `ClipExportCurves::default()`（没有音高 ⇒ 不写 PITCHENV）。
+        let clip = timeline
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .expect("clip exists");
+        let curves = build_clip_export_curves(&timeline, clip);
+        assert!(curves.pitch_offset.is_some(), "夹具必须带音高曲线");
+        let mut curves_by_clip = BTreeMap::new();
+        curves_by_clip.insert(clip_id.clone(), curves);
+
+        let export =
+            build_reaper_clipboard(&timeline, std::slice::from_ref(&clip_id), &curves_by_clip)
+                .unwrap();
+        let parsed = parse_for_test(&export.bytes);
+        let item = &parsed.tracks[0].items[0];
+        assert!(
+            (item.default_take.s_offs - 30.0).abs() < 1e-9,
+            "SOFFS 必须落在媒体时间 30 s，got {}",
+            item.default_take.s_offs
+        );
+        let env = item
+            .default_take
+            .envelopes
+            .iter()
+            .find(|env| env.env_type == "PITCHENV")
+            .expect("PITCHENV");
+        assert!(
+            env.points[0][0].abs() < 1e-9,
+            "首点必须是 u=0：源起点不得进入坐标"
+        );
+        assert!(
+            (env.points[1][0] - 2.0).abs() < 1e-9,
+            "末点 = 长度 × 速率 = 2，got {}",
+            env.points[1][0]
+        );
+    }
+
+    #[test]
     fn reversed_loop_clip_exports_whole_file_section_with_anchor() {
         // 倒放 + Loop：SECTION 必须覆盖整个媒体文件（回绕域），
         // SOFFS 承载倒放相位锚点：SOFFS = D − floor_mod(min(source_end, D), D)。
@@ -1283,26 +1281,32 @@ mod tests {
         let item = &parsed.tracks[0].items[0];
         assert!(item.is_loop, "loop flag must be exported");
         let source = item.default_take.source.as_ref().unwrap();
+        // 宿主自己的编码：`MODE 3`（整份媒体 + 反向）+ 镜像 SOFFS。
         assert_eq!(
-            source.section_mode, 1,
-            "reversal must be expressed via SECTION MODE"
+            source.section_mode,
+            hifishifter_kernel::take_geometry::SECTION_MODE_WHOLE_SOURCE
+                | hifishifter_kernel::take_geometry::SECTION_MODE_REVERSED,
+            "倒放必须写成 MODE 3（读侧的证据见 take_geometry 的模块文档）"
         );
-        assert!(
-            source.section_start_sec == Some(0.0) && source.section_length_sec == Some(4.0),
-            "SECTION must cover the whole media file, got {:?}..{:?}",
+        assert_eq!(
             source.section_start_sec,
-            source.section_length_sec
+            Some(0.0),
+            "MODE 3 下 STARTPOS 不参与解算，宿主自己写 0"
         );
-        // φ = mod(min(1, 4), 4) = 1 ⇒ SOFFS = 4 − 1 = 3。
+        // φ = mod(min(1, 4), 4) = 1 ⇒ SOFFS = 4 − 1 = 3，LENGTH = 回绕跨度 φ。
         assert!(
             (item.default_take.s_offs - 3.0).abs() < 1e-9,
             "reverse anchor phase must round-trip, got {}",
             item.default_take.s_offs
         );
+        assert!(
+            (source.section_length_sec.unwrap_or(-1.0) - 1.0).abs() < 1e-9,
+            "LENGTH 必须是正向跨度（= 锚点），got {:?}",
+            source.section_length_sec
+        );
 
-        // 导入端按同一约定还原倒放锚点：anchor = 区间末端 − SOFFS = 4 − 3 = 1 = φ。
-        let take = &item.default_take;
-        let anchor = super::compute_anchor_from_section_for_test(take);
+        // 导入端按同一约定还原锚点：MODE 3 的轴是媒体总长 ⇒ anchor = D − SOFFS = 1 = φ。
+        let anchor = 4.0 - item.default_take.s_offs;
         assert!((anchor - 1.0).abs() < 1e-9);
     }
 
@@ -1737,11 +1741,244 @@ mod tests {
         );
         // 随后显式升到 +2 并保持到段末。
         assert!((env.points[1][1] - 2.0).abs() < 1e-6);
+        // 【本函数只负责写】上游 `build_clip_export_curves` 会先把"未识别帧"填成
+        // 邻域值，因此真实导出里通常见不到这种曲线。这条用例钉的是**写出层**的契约：
+        // 给它 0 就必须写 0 —— 不要在这里补桥接，那会让"填充"与"写点"又搅在一起。
+    }
+
+    /// 辅音间隙不再掉到 0：填充后的包络跟随邻域，写出的点里没有"由 unvoiced 造成的 0"。
+    ///
+    /// 【回归对象】导出侧曾把 `pitch_orig == 0` 的帧显式写成 0 点，于是 REAPER 拿到一条
+    /// `+2 → 0 → +2` 的折线，在每个辅音处把比率拉回 1 再拉上去。填充只作用于导出
+    /// 边界，渲染端不受影响。
+    #[test]
+    fn a_consonant_gap_no_longer_dips_to_zero() {
+        let mut timeline = TimelineState::default();
+        timeline.tracks[0].compose_enabled = true;
+        let root_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(root_id.clone()),
+            Some("Consonant".to_string()),
+            Some(0.0),
+            Some(0.2),
+            Some("C:/audio/voice.wav".to_string()),
+        );
+        // 40 帧 = 0.2 s：10..16 是 6 帧（30 ms）无 F0 的辅音，正好在阈值上。
+        let mut pitch_orig = vec![60.0f32; 40];
+        let mut pitch_edit = vec![62.0f32; 40];
+        for frame in 10..16 {
+            pitch_orig[frame] = 0.0;
+            pitch_edit[frame] = 0.0;
+        }
+        timeline.params_by_root_track.insert(
+            root_id,
+            crate::state::TrackParamsState {
+                frame_period_ms: 5.0,
+                pitch_orig,
+                pitch_edit,
+                pitch_edit_user_modified: true,
+                ..crate::state::TrackParamsState::default()
+            },
+        );
+        let clip = timeline.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let curves = build_clip_export_curves(&timeline, clip);
+        let values = curves.pitch_offset.clone().expect("pitch curve");
+        assert_eq!(values.len(), 40);
+        assert!(
+            values[10..16]
+                .iter()
+                .all(|value| (value - 2.0).abs() < 1e-6),
+            "辅音间隙必须被填成邻域值，实际 {:?}",
+            &values[10..16]
+        );
+        // 整条曲线现在是平的 +2 ⇒ 恰好 2 个端点，且没有任何 0 点。
+        let env = build_take_pitch_envelope(&curves, 0.2, 1.0).expect("envelope");
+        assert_eq!(env.points.len(), 2, "{:?}", env.points);
+        assert!(
+            env.points.iter().all(|point| point[1] > 1.9),
+            "包络里不得出现由 unvoiced 造成的 0 点：{:?}",
+            env.points
+        );
+    }
+
+    // ─── 未识别帧填充的回归保险 ─────────────────────────────────────────────
+
+    /// 一根根轨（已开 Compose）+ 一个 clip + 指定原线/编辑线的导出夹具。
+    ///
+    /// `length_sec` 由原线长度反算，保证导出窗口正好是 `orig.len()` 帧。
+    fn pitch_timeline(orig: Vec<f32>, edit: Vec<f32>) -> (TimelineState, String) {
+        let mut timeline = TimelineState::default();
+        timeline.tracks[0].compose_enabled = true;
+        let root_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(root_id.clone()),
+            Some("Pitch".to_string()),
+            Some(0.0),
+            Some(orig.len() as f64 * 0.005),
+            Some("C:/audio/voice.wav".to_string()),
+        );
+        timeline.params_by_root_track.insert(
+            root_id,
+            crate::state::TrackParamsState {
+                frame_period_ms: 5.0,
+                pitch_orig: orig,
+                pitch_edit: edit,
+                pitch_edit_user_modified: true,
+                ..crate::state::TrackParamsState::default()
+            },
+        );
+        (timeline, clip_id)
+    }
+
+    fn policy_for(fill: UnvoicedFill) -> UnvoicedFillPolicy {
+        UnvoicedFillPolicy::for_frame_period(fill, 5.0)
+    }
+
+    /// `zero` 档必须与"完全不填充"逐点相同 —— 它是回归开关，不是第五种行为。
+    ///
+    /// 【为什么比 `points` 而不是格式化字符串】浮点格式化会把差异藏起来（1e-17 与 0
+    /// 打印成同一个 `0`）。这里比的是写出层最终的 `Vec<Vec<f64>>`。
+    #[test]
+    fn the_zero_policy_exports_the_same_points_as_before_the_fill() {
+        let mut orig = vec![60.0f32; 40];
+        let mut edit = vec![62.0f32; 40];
+        for frame in 10..16 {
+            orig[frame] = 0.0;
+            edit[frame] = 0.0;
+        }
+        let (timeline, clip_id) = pitch_timeline(orig, edit);
+        let clip = timeline.clips.iter().find(|c| c.id == clip_id).unwrap();
+
+        let raw = crate::pitch_editing::compute_clip_export_pitch_offsets(&timeline, clip)
+            .expect("offsets")
+            .offsets;
+        let zero = crate::pitch_editing::compute_clip_take_pitch_offsets(
+            &timeline,
+            clip,
+            &policy_for(UnvoicedFill::Zero),
+        )
+        .expect("filled");
+        assert_eq!(zero, raw, "zero 档必须逐元素等于不填充");
+
+        let envelope = |values: Vec<f32>| {
+            build_take_pitch_envelope(
+                &ClipExportCurves {
+                    frame_period_ms: 5.0,
+                    pitch_offset: Some(values),
+                    volume: None,
+                    pan: None,
+                },
+                0.2,
+                1.0,
+            )
+            .expect("envelope")
+        };
+        assert_eq!(
+            envelope(zero).points,
+            envelope(raw).points,
+            "zero 档写出的点必须与改动前逐点相同"
+        );
+    }
+
+    /// 填充不得增加断点预算（§5.5）：同一份素材，`bridge` 的点数 ≤ `zero`。
+    #[test]
+    fn filling_never_increases_the_envelope_point_count() {
+        // "整句人声"形态：缓慢上行的音高线 + 长短不一的 unvoiced 间隙。
+        let frames = 400usize;
+        let mut orig = vec![60.0f32; frames];
+        let mut edit: Vec<f32> = (0..frames).map(|i| 60.0 + i as f32 * 0.01).collect();
+        for (start, len) in [(20usize, 4usize), (60, 8), (150, 40), (300, 3)] {
+            for frame in start..start + len {
+                orig[frame] = 0.0;
+                edit[frame] = 0.0;
+            }
+        }
+        let (timeline, clip_id) = pitch_timeline(orig, edit);
+        let clip = timeline.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let count = |fill: UnvoicedFill| {
+            let values = crate::pitch_editing::compute_clip_take_pitch_offsets(
+                &timeline,
+                clip,
+                &policy_for(fill),
+            )
+            .expect("filled");
+            build_take_pitch_envelope(
+                &ClipExportCurves {
+                    frame_period_ms: 5.0,
+                    pitch_offset: Some(values),
+                    volume: None,
+                    pan: None,
+                },
+                2.0,
+                1.0,
+            )
+            .map_or(0, |env| env.points.len())
+        };
+        assert!(
+            count(UnvoicedFill::Bridge) <= count(UnvoicedFill::Zero),
+            "填充把断点从 {} 涨到 {}",
+            count(UnvoicedFill::Zero),
+            count(UnvoicedFill::Bridge)
+        );
+    }
+
+    /// 端点强制必须穿过填充：段首/段尾的 unvoiced run 被 hold 之后，包络仍然从
+    /// `u = 0` 起、止于 `u = 长度 × 速率`（不得依赖宿主的 hold 语义跨界）。
+    #[test]
+    fn the_forced_endpoints_survive_the_fill() {
+        // 段首 6 帧与段尾 6 帧都是 unvoiced（辅音 + 收尾气声）。
+        let frames = 100usize;
+        let mut orig = vec![60.0f32; frames];
+        let mut edit = vec![62.0f32; frames];
+        for frame in 0..6 {
+            orig[frame] = 0.0;
+            edit[frame] = 0.0;
+        }
+        for frame in frames - 6..frames {
+            orig[frame] = 0.0;
+            edit[frame] = 0.0;
+        }
+        let (timeline, clip_id) = pitch_timeline(orig, edit);
+        let clip = timeline.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let curves = build_clip_export_curves(&timeline, clip);
+        // 0.5 s × 0.5 速率 ⇒ u 域 0..0.25。
+        let env = build_take_pitch_envelope(&curves, 0.5, 0.5).expect("envelope");
+        let first = env.points.first().expect("first point");
+        let last = env.points.last().expect("last point");
+        assert!(first[0].abs() < 1e-9, "首点必须在 u = 0，实际 {}", first[0]);
+        assert!(
+            (last[0] - 0.25).abs() < 1e-9,
+            "末点必须在 u = 长度 × 速率 = 0.25，实际 {}",
+            last[0]
+        );
+        // 段首的 unvoiced run 被 hold 成 +2（而不是回到 0）。
+        assert!((first[1] - 2.0).abs() < 1e-6, "段首必须 hold 邻域值");
+    }
+
+    /// 整条曲线都是 unvoiced（全 0）⇒ 填充没有来源 ⇒ 仍然不写包络。
+    ///
+    /// 【为什么这条重要】"填充"很容易顺手把"没有包络"变成"有一条平包络" —— 那会在
+    /// REAPER 里给一个从没编辑过音高的片段加上一条自动化，用户看到的是凭空的点。
+    #[test]
+    fn a_clip_whose_curve_is_all_zero_still_writes_no_envelope() {
+        let (timeline, clip_id) = pitch_timeline(vec![0.0; 40], vec![0.0; 40]);
+        let clip = timeline.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let curves = build_clip_export_curves(&timeline, clip);
+        let values = curves.pitch_offset.clone().expect("曲线仍在（全 0）");
+        assert!(
+            values.iter().all(|value| *value == 0.0),
+            "没有可填的来源时不得凭空造值：{values:?}"
+        );
+        assert!(
+            build_take_pitch_envelope(&curves, 0.2, 1.0).is_none(),
+            "全 0 曲线不得因为填充而写出包络"
+        );
     }
 
     #[test]
     fn pitch_env_u_domain_independent_of_clip_position() {
-        // Take 包络为 u 域（媒体时间），与 clip 的工程位置无关：
+        // Take 包络的 u 是**播放时间 × 速率**（不是媒体文件时间，真机实测确认），
+        // 与 clip 的工程位置无关：
         // clip 在 45s 的导出必须与 clip 在 0s 完全一致（PT 0..len×rate），
         // 端点强制落在 item 起止（不得被工程位置污染，也不得依赖 hold）。
         let make_curves = |values: Vec<f32>| ClipExportCurves {

@@ -11,8 +11,8 @@
 
 本次交付包含跨轨曲线/气声/音高自动应用、宿主渐变显示、播放控制与播放头同步、
 编辑状态保存恢复、正向线性拉伸及 HiFiGAN 缓存/分块处理。相关源码与模型证据见
-`probe/ara/EDITOR-SYNC-FINDINGS.md`、`SOURCE-AUTHORITY-FINDINGS.md`、
-`NEURAL-CACHE-FINDINGS.md`、`MULTITRACK-RESOURCE-FINDINGS.md`。
+当时探针工作区的 FINDINGS 记录（EDITOR-SYNC / SOURCE-AUTHORITY /
+NEURAL-CACHE / MULTITRACK-RESOURCE；探针目录未入库，已随探针完结移除）。
 
 用户已要求停止重复全量测试/新增 review。本次整理与推送不重新执行测试或构建。
 最后一次集中回归已完成 frontend 2729、kernel App配置587/插件配置585、App245及

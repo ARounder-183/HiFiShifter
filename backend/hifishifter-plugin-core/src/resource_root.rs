@@ -131,16 +131,26 @@ pub fn resources_dir_for(module_path: &Path, layout: ResourceLayout) -> Result<P
 /// 共享目录只是安装器版的兜底。
 #[cfg(windows)]
 fn shared_plugin_resources_at(programdata: &Path) -> PathBuf {
-    programdata
-        .join(crate::CLASS_NAME)
-        .join("plugin-resources")
+    programdata.join(crate::CLASS_NAME).join("plugin-resources")
+}
+
+#[cfg(windows)]
+fn shared_programdata_root() -> PathBuf {
+    // PROGRAMDATA 在正常 Windows 上一定存在，但极简环境（测试宿主 /  stripped env）
+    // 可能没有环境块。内核的 shared_data_dirs() 对同一场景有 SystemDrive 兜底；插件
+    // 必须与之逐字一致，否则安装到共享目录的 CLAP 会在这种环境下找不到 frontend/
+    // 而给宿主一片空白窗口。
+    std::env::var_os("PROGRAMDATA")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("SystemDrive").map(|drive| PathBuf::from(drive).join("ProgramData"))
+        })
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
 }
 
 #[cfg(windows)]
 fn shared_plugin_resources() -> Option<PathBuf> {
-    Some(shared_plugin_resources_at(Path::new(
-        &std::env::var_os("PROGRAMDATA")?,
-    )))
+    Some(shared_plugin_resources_at(&shared_programdata_root()))
 }
 
 /// 当前进程登记后的资源根。
@@ -214,6 +224,21 @@ mod tests {
         assert_eq!(
             dir,
             Path::new("C:/ProgramData/HiFiShifter/plugin-resources")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shared_programdata_root_falls_back_when_env_is_missing() {
+        // 不依赖真实环境：只锁定与 app_paths::shared_data_dirs() 相同的兜底顺序。
+        // 真机有 PROGRAMDATA 时走它；否则至少落在系统盘的 ProgramData，而不是空路径。
+        let root = shared_programdata_root();
+        assert!(root.is_absolute(), "{root:?}");
+        assert!(
+            root.to_string_lossy()
+                .to_ascii_lowercase()
+                .ends_with("programdata"),
+            "{root:?}"
         );
     }
 

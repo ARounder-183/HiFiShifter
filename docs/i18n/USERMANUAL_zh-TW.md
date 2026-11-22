@@ -11,13 +11,13 @@ HiFiShifter 是一款圖形化人聲編輯與合成工具。它支援多軌道�
 - Windows 版本提供的是 NSIS 安裝包版（`installer`）和可攜版壓縮包（`portable`）這兩版。對於一般使用者，直接選擇安裝包版並安裝即可。  
   如果你是 Windows 使用者，且不知道 `x86_64` 與 `arm64` 有什麼區別，請選擇 `x86_64` 版本。只有你清楚地了解 `arm64` 是什麼，並且你確實擁有一台 Windows ARM 裝置，則可以下載使用 `arm64` 版。
 
-- macOS 版本提供的是未經過簽名的 dmg 安裝包。因為暫未簽名，安裝時需要經過一個比較複雜的步驟來允許安裝。  
+- macOS 版本提供的是未經過簽名的三合一 `pkg` 安裝包：一次裝上 `/Applications/HiFiShifter.app`、VST3/CLAP 外掛與共享模型庫。因為暫未簽名，安裝時需要經過一個比較複雜的步驟來允許安裝。  
   M 晶片的 macOS 使用者請安裝 `arm64` 版本。只有較老的 Intel 使用者需要安裝 `x86_64` 版本。  
   如果按兩下 dmg 安裝後提示檔案已損毀，按以下步驟操作：
     1. 終端機輸入 `xattr -cr /Applications/HiFiShifter.app`；
     2. 透過系統設定允許執行 `系統設定` -> `隱私權與安全性` -> 點選 `仍要打開`。
 
-- Linux 版本提供的是 AppImage 程式包。AppImage 程式包需要在檔案的 `屬性 -> 權限` 中，勾選 `允許將檔案作為程式執行`，之後便可以直接執行。執行前請確認系統已提供 **WebKitGTK 4.1**（見下方「關於 WebView 的說明」），它是 AppImage 唯一需要系統額外提供的大型相依套件。
+- Linux 版本提供的是三合一 `.tar.gz`，內含 AppImage、VST3/CLAP 外掛、共享模型庫與 `install.sh`。解壓後執行 `./install.sh` 裝進目前使用者，或 `sudo ./install.sh --system` 裝到系統。執行前請確認系統已提供 **WebKitGTK 4.1**（見下方「關於 WebView 的說明」），它是 AppImage 唯一需要系統額外提供的大型相依套件。
 
 **關於 GPU 加速**：HiFiShifter 為各平台提供了多種 GPU 加速方案：
 
@@ -37,7 +37,7 @@ HiFiShifter 是一款圖形化人聲編輯與合成工具。它支援多軌道�
 
 在 Windows 上，HiFiShifter 已停用 WebView2 自帶的瀏覽器快捷鍵（如 `Ctrl + F`、`Ctrl + P`、`F5` 以及 `Ctrl` 搭配 `+` / `-` 的頁面縮放），因此這些按鍵會正常交給 HiFiShifter 處理，不會打斷你的編輯操作。
 
-**關於外掛**：除獨立 App 外，HiFiShifter 還提供 VST3 與 CLAP 兩種外掛形態，可以把同一套編輯介面直接開在 REAPER 的專案裡。在 REAPER 裡請用 VST3 形態接入 ARA；CLAP 形態可作為一般插入效果器。目前外掛為 Windows x64 版本，且只針對 REAPER 驗證過；安裝與使用見 [VST3 ARA 外掛與 CLAP 外掛](#八vst3-ara-外掛與-clap-外掛reaper)章節。
+**關於外掛**：除獨立 App 外，HiFiShifter 還提供 VST3 與 CLAP 兩種外掛形態，可以把同一套編輯介面直接開在 REAPER 的專案裡。在 REAPER 裡請用 VST3 形態接入 ARA；CLAP 形態可作為一般插入效果器。三個平台的三合一安裝包都包含 VST3 與 CLAP 外掛；目前主要針對 REAPER 驗證。安裝與使用見 [VST3 ARA 外掛與 CLAP 外掛](#八vst3-ara-外掛與-clap-外掛reaper)章節。
 
 ## 二、選單
 
@@ -746,7 +746,7 @@ App**，編輯結果隨 REAPER 專案一起儲存。
 因此本外掛只對依 ARA SDK 定稿協定實作的 CLAP 宿主提供 ARA。在 REAPER 裡需要 ARA 時，
 請使用 VST3 形態。
 
-目前外掛為 Windows x64 版本，且只針對 REAPER 驗證過；Linux / macOS 暫無外掛交付。
+三個平台的三合一安裝包都包含 VST3 與 CLAP 外掛；目前主要針對 REAPER 驗證。
 
 ### 安裝與接入
 
@@ -775,10 +775,10 @@ REAPER 按**軌道**管理 ARA 外掛：它只會把外掛所在**那一條軌�
 
 ### 模型檔案與共享
 
-外掛需要 FCPE、HNSEP 與 HiFiGAN 三個模型（合計約 150 MB）。安裝程式把模型裝進**全機共享庫**（`%ProgramData%\HiFiShifter\models\<模型版本>`），獨立 App 讀的是同一份 —— 同時使用外掛與獨立 App 不會重複佔用這 150 MB。手動複製的版本自帶一份模型，不依賴共享庫。
+外掛需要 FCPE、HNSEP 與 HiFiGAN 等模型（目前合計約 200 MB）。三合一安裝程式把模型裝進平台共享庫（Windows `%ProgramData%\HiFiShifter\models\<模型版本>`；macOS `/Library/Application Support/HiFiShifter/models/<模型版本>`；Linux `$XDG_DATA_HOME/HiFiShifter/models/<模型版本>` 或 `/usr/local/share/HiFiShifter/models/<模型版本>`），獨立 App 與所有外掛讀同一份 —— 不會重複佔用這 200 MB。手動複製的純外掛包自帶一份模型，不依賴共享庫。
 
 - 模型版本由模型內容派生：升級後新版本落在新目錄，同版本的重複安裝會被跳過。
-- 解除安裝外掛**不會**刪除共享模型庫（獨立 App 也在用）。確實需要清理時，手動刪除 `%ProgramData%\HiFiShifter\models`。
+- 解除安裝外掛**不會**刪除共享模型庫（獨立 App 也在用）。確實需要清理時，手動刪除對應平台的共享模型目錄。
 - 用環境變數 `HIFISHIFTER_MODELS_DIR` 可以指定模型目錄，優先於共享庫。
 
 ### 外掛模式下的分工
@@ -791,9 +791,12 @@ REAPER 按**軌道**管理 ARA 外掛：它只會把外掛所在**那一條軌�
 - 當宿主開放控制能力時，`停止` 與 `播放 / 暫停` 按鈕用於控制 REAPER 的播放；播放頭以 REAPER 專案的位置為準，BPM 也由 REAPER 決定。宿主不提供播放控制時整組按鈕不出現。
 - 工具列上的 `BPM` / 拍號輸入框、節拍器按鈕與錄音按鈕在外掛裡不出現 —— 它們是宿主的權威讀數或宿主的命令，REAPER 自己的介面就在顯示與操作它們。
 - 片段上的漸變聲音由 REAPER 處理；介面裡顯示的是 HiFiShifter 自己的示意包絡。懸停提示與獨立 App 一樣只給三個量（形狀 / 長度 / 曲率），不顯示宿主的 `c=` / `S=` 讀數 —— 那對使用者沒有可採取行動的資訊。曲線不要求與 REAPER 逐點一致。
-- 速度映射在外掛裡**可用，但只編輯音階那一軸**：速度映射就是「隨時間變化的音階」的儲存，而音階是 HiFiShifter 自有的（REAPER 沒有工程調號概念）。變化點裡的 `BPM` 與拍號是宿主的權威讀數，在對話框裡顯示為唯讀；外掛也不會自動匹配宿主的速度映射（REAPER 不向 ARA 外掛提供速度 / 拍號內容，實測見 `probe/ara/README.md` 的 F-2）。音階變化點存在外掛自己的設定裡。
+- 速度映射在外掛裡**可用，但只編輯音階那一軸**：速度映射就是「隨時間變化的音階」的儲存，而音階是 HiFiShifter 自有的（REAPER 沒有工程調號概念）。變化點裡的 `BPM` 與拍號是宿主的權威讀數，在對話框裡顯示為唯讀；外掛也不會自動匹配宿主的速度映射（REAPER 不向 ARA 外掛提供速度 / 拍號內容，真機實測確認）。音階變化點存在外掛自己的設定裡。
 - 循環源（REAPER 的「循環源」開關）會被如實讀入並寫回：外掛按 REAPER 的循環語意渲染，右鍵選單裡的 `循環` / `取消循環` 可用。
-- 倒放**不參與**外掛處理：ARA 不提供反向音訊，外掛渲染不出正確內容。這類片段照常顯示（帶倒放標記），右鍵選單的倒放項停用並說明原因，請在 REAPER 裡操作。
+- 倒放**參與**外掛處理：讀取時依 REAPER 的方向位反向渲染；右鍵選單的 `倒放` / `取消倒放` 會**寫回 REAPER**（把 take 的來源包進一個反向 `SECTION` 並同步 `SOFFS`），一步復原即可退回。寫回只涵蓋單一 take 的音訊 item：帶拉伸標記、或來源不是 WAVE 的片段會被明確拒絕，而不是寫壞。
+- `REAPER 音高` 的兩條一次性轉換：`匯入 REAPER Take 音高` 把 Item 音高偏移（`D_PITCH`）與 Take 音高包絡複製到音高參數線，`轉換為 REAPER Take 音高包絡` 反過來把參數線寫成 Take 音高包絡（並把 Item 音高偏移歸零，讓包絡成為 REAPER 側唯一的音高來源）。兩者都是**複製**：兩側各留一份，誰也不會被疊加兩次 —— Take 音高只在外掛被旁路 / 移除時才作用於那段音訊。
+- 轉換的入口有兩處：片段右鍵的 `REAPER 音高` 子選單（對選取的片段）與**參數編輯器工具列**上的同名按鈕（對整條軌道 / 參數選取範圍內 / 全部片段）。後者是外掛裡較常用的那一個 —— 調音高時人就在參數編輯器裡；它與同一排的其他按鈕遵循同一條操作約定：**左鍵直接匯出目前軌道，右鍵選擇方向與作用範圍**。選單裡每一項都帶片段計數，執行前就能看出這一下會動多少條；`全部片段` 會自動分批執行，復原堆疊上仍然只留**一步**。沒有 Take 音高的片段、以及還沒分析完的片段會被略過並在狀態列如實回報，不會被悄悄重設。
+- `自動寫入 Take 音高`（參數編輯器工具列同一枚按鈕右鍵選單最底下一項，預設關閉）：開啟後，參數編輯器裡**每一次音高編輯**都會在停手約 0.4 秒後自動寫成對應片段的 Take 音高包絡，不需要再點一次轉換。它只在編輯**停手之後**寫一次（一次手勢 = 一次宿主寫入），線沒變時一個位元組都不碰宿主；分析還沒落地的片段、以及 take 自帶 Item 音高偏移（`D_PITCH`）的片段會被略過並在日誌裡說明 —— 後者需要手動轉換一次（那一步由你點名，才會把偏移折進包絡）。復原 / 重做同樣會觸發一次寫回，因此宿主包絡始終跟著 HiFiShifter 的音高線走。
 - 片段沒有音訊時，提示會說明**原因**：`正在等待 REAPER 完成音訊分配`（剛分割 / 裁切 / 貼上後的正常在途）、`等待 REAPER 提供音訊`（該片段拿不到音訊，例如 FX 掛在軌道組父軌上）、`由 REAPER 倒放；HiFiShifter 不處理這一條`。分割出來的片段會立刻繼承父段的音訊，不會長時間停在佔位。
 - 片段浮標只顯示名稱，不顯示檔案路徑。
 - 片段右鍵選單與獨立 App 是**同一份**：Take 子選單、聲道模式、循環、淡變形狀列都會出現；外掛裡做不到的項顯示為停用並說明原因（例如膠合、靜音偵測），而不是整項消失。
@@ -816,7 +819,7 @@ REAPER 按**軌道**管理 ARA 外掛：它只會把外掛所在**那一條軌�
 - 這些設定與獨立 App **共用同一份設定**：在獨立 App 裡調好的外觀與快捷鍵，外掛裡直接生效，反之亦然。
 - 重新開啟專案後，外掛需要重新從宿主取得音訊並完成背景準備，狀態列會先回到 `等待宿主音訊`。
 - 升級外掛前請先儲存專案並完全結束 REAPER，不要在宿主執行時覆寫已載入的外掛資料夾。
-- 只支援正向、**線性**拉伸：倒放與非線性拉伸不在支援範圍內，介面會明確標註 `不支援倒放`。
+- 只支援**線性**拉伸：非線性拉伸不在支援範圍內，介面會明確標註。
 - 氣聲分離（HNSEP）按整段處理，很長的素材在開啟 `氣聲分離` 後可能佔用大量記憶體；HiFiGAN 推理則是分塊進行的。
 
 ### 常見問題
@@ -859,7 +862,7 @@ HiFiShifter 會自動把執行日誌寫入系統標準日誌目錄，無需任�
 | 設定 | `%APPDATA%\HiFiShifter` | `~/Library/Application Support/HiFiShifter` | `$XDG_CONFIG_HOME/HiFiShifter`（預設 `~/.config/HiFiShifter`） |
 | 快取（波形 / 整段算圖） | `%LOCALAPPDATA%\HiFiShifter\cache` | `~/Library/Caches/HiFiShifter` | `$XDG_CACHE_HOME/HiFiShifter`（預設 `~/.cache/HiFiShifter`） |
 | 未儲存工作階段的匯入素材 | `%LOCALAPPDATA%\HiFiShifter\unsaved\<工作階段>` | `~/Library/Application Support/HiFiShifter/unsaved/<工作階段>` | `$XDG_DATA_HOME/HiFiShifter/unsaved/<工作階段>` |
-| 共用模型庫（僅 Windows，由安裝程式寫入） | `%PROGRAMDATA%\HiFiShifter\models\<版本>` | — | — |
+| 共用模型庫（由安裝程式寫入） | `%PROGRAMDATA%\HiFiShifter\models\<版本>` | `/Library/Application Support/HiFiShifter/models/<版本>` | `$XDG_DATA_HOME/HiFiShifter/models/<版本>` 或 `/usr/local/share/HiFiShifter/models/<版本>` |
 
 - 已儲存工程的匯入素材放在工程檔旁的 `<工程名>_media` 目錄裡，連同工程一起拷走即可。
 - 從舊版升級時，首次啟動會自動把原本的 `com.arounder.hifishifter` 目錄搬到新位置；若新舊目錄同時存在則**不合併**（兩邊原樣保留），並在日誌留下一行說明。

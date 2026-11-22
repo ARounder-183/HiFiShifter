@@ -11,12 +11,22 @@ sudo add-apt-repository -y universe || true
 sudo apt-get update -y || true
 
 # Core packages used by native crates
-# Also install libfuse2 and fuse so AppImages can run in CI (provides libfuse.so.2)
-# 【为什么这一组不许 || true】其余安装都是"尽力而为的兼容探测"（不同发行版包名
-# 不同、AppImage 运行时工具可选）。但 cmake / pkg-config / build-essential / glib /
-# ssl / gtk / alsa 是**编译期硬依赖**：装不上却继续跑，失败会推迟到几十分钟后的
-# Rust build script，报一个和依赖毫无关系的错误。核心组失败必须当场停。
-sudo apt-get install -y pkg-config cmake libglib2.0-dev libgirepository1.0-dev gobject-introspection libssl-dev build-essential libgtk-3-dev libgdk-pixbuf2.0-dev libasound2-dev libfuse2 fuse
+# [Why this group must not get || true] Every other install here is a
+# "best-effort compatibility probe" (package names differ per distribution, the
+# AppImage runtime tools are optional). But cmake / pkg-config / build-essential /
+# glib / ssl / gtk / alsa are **hard compile-time dependencies**: if installing
+# them fails and the script keeps going, the failure surfaces tens of minutes
+# later in the Rust build script as an error unrelated to dependencies. A failure
+# in the core group must stop right here.
+# [Why FUSE is not in the hard dependency group] Since Ubuntu 24.04 (noble),
+# libfuse2 has been replaced by libfuse2t64 and the old name removed from the
+# archive -- putting it in this group makes the whole apt command end with
+# exit 100 and none of the core dependencies get installed. FUSE is only a
+# runtime convenience for "running an AppImage directly": CI uses
+# APPIMAGE_EXTRACT_AND_RUN=1 (so does the AppImage packaging in scripts/build),
+# nothing in this repo hard-depends on it at build time, and the probe group at
+# the bottom of this script already tries both old and new package names.
+sudo apt-get install -y pkg-config cmake libglib2.0-dev libgirepository1.0-dev gobject-introspection libssl-dev build-essential libgtk-3-dev libgdk-pixbuf2.0-dev libasound2-dev
 
 # Additional dev packages commonly required by linuxdeploy and the GTK/GStreamer plugins
 # (helps Tauri's bundler find webkit/gstreamer and related girs at build time)
@@ -63,8 +73,9 @@ if ! PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1 pkg-config --modversion webkit2gtk-4.1 >/d
   ls -la /usr/lib/*/pkgconfig | grep webkit || true
   ls -la /usr/lib*/pkgconfig | grep webkit || true
   echo "[install_deps_linux] Showing pkg-config search path: $PKG_CONFIG_PATH"
-  # Tauri 的 build script 一定要 webkit2gtk-4.1；缺了它后面必挂，而且报错在
-  # 几分钟后的 cmake 里。这里带着上面打印的诊断信息直接失败，定位快得多。
+  # Tauri's build script hard-requires webkit2gtk-4.1; without it everything after
+  # this fails, with the error surfacing minutes later inside cmake. Failing here
+  # with the diagnostics printed above makes root-causing much faster.
   echo "[install_deps_linux] FATAL: webkit2gtk-4.1 is required but unavailable" >&2
   exit 1
 fi
@@ -91,8 +102,9 @@ node_is_new_enough() {
 if ! node_is_new_enough; then
   echo "[install_deps_linux] Node is missing or older than ${NODE_MIN_MAJOR}.${NODE_MIN_MINOR} (found: $(node --version 2>/dev/null || echo none))"
   echo "[install_deps_linux] Installing Node ${NODE_INSTALL_VERSION} into \$HOME/.local/opt (no sudo required)"
-  # 【为什么按架构分发】Node 官方 tarball 的目录名带架构后缀；在 ARM64 Linux
-  # 上硬编码 linux-x64 会装错二进制（执行时 "cannot execute binary file"）。
+  # [Why per-architecture downloads] Node's official tarball directory name carries
+  # an architecture suffix; hardcoding linux-x64 on ARM64 Linux installs the wrong
+  # binary ("cannot execute binary file" at run time).
   case "$(uname -m)" in
     aarch64|arm64) NODE_ARCH="arm64" ;;
     *)             NODE_ARCH="x64" ;;

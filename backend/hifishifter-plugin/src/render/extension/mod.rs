@@ -67,9 +67,12 @@ use types::*;
 // 这些类型本来就是 `pub(crate)`（别的模块按 `render::extension::X` 引用），搬家后
 // 必须在本模块名下重新导出，否则它们的可见面会静默窄一层。
 pub use render_block::RenderOutcome;
+// BlockEvidence / InstanceMode 进了壳的 process/测试 API 面（capture_observe /
+// render_block 的签名与音频边界测试），随方法一起 pub。
+pub use types::{BlockEvidence, InstanceMode};
 pub(crate) use types::{
-    BlockEvidence, CaptureOutput, CaptureStage, HostAudioState, InstanceMode,
-    RestoreIdentityVerdict, ScopeSource, SnapshotSource,
+    CaptureOutput, CaptureStage, HostAudioState, RestoreIdentityVerdict, ScopeSource,
+    SnapshotSource,
 };
 
 /// 原生接口与只读元数据属于真实组件，缓存不跨其文档/分配/host变更复用。
@@ -194,6 +197,42 @@ pub struct ExtensionOwner {
     host_geometry: Mutex<Option<CachedHostGeometry>>,
     /// 每个真实单region播放实例的有效mute；process仅读原子，不查询宿主或清修音参数。
     host_item_muted: std::sync::atomic::AtomicBool,
+    /// 宿主此刻是否把本实例的音频放进了信号链（[crate::host::reaper::FxBypass] 的编码）。
+    ///
+    /// 【为什么是原子】`prepare` 可能由会话 actor、模型线程、UI 定时器任一处触发，而它要
+    /// 在这一句上决定"要不要花几秒做神经合成"。为读一个三态量取锁毫无必要。
+    ///
+    /// 【为什么默认 0（未知）】未知必须等于改动前的行为：照常渲染。默认成"已旁通"会让
+    /// 所有不支持这一读数的宿主（Cubase / Studio One / 任何非 REAPER 宿主）静音。
+    ///
+    /// 【为什么翻转时还要让渲染输入失效】旁通解除的那一刻宿主会立刻来取音频；快照若还
+    /// 停在旁通期间那一版（或根本没算过），用户会先听到一段旧声音。失效由
+    /// [Self::sample_host_bypass] 在**同一处**完成，两个方向才不会各自漂移。
+    ///
+    /// 【为什么这里只存"确定"的读数】读失败（超时 / 找不到这个 FX）不是结论。把失败
+    /// 写成 `Unknown` 会让"用户已经旁通"这件事凭空消失 —— 下一次渲染门重新打开，
+    /// 用户看到的就是"旁通了还在渲染"。失败时保留上一次的结论，作废与否由时间戳
+    /// （`host_bypass_verdict_ms`）与 [Self::fresh_host_bypass] 决定。
+    host_bypass: AtomicU8,
+    /// 上一次**确定**读到旁通结论的时刻（毫秒，进程启动起算；`0` = 从未）。
+    ///
+    /// 【为什么要时间戳而不是布尔】"读到过"与"还作数"是两件事：宿主换轨、切工程、
+    /// 卸载 FX 之后，旧读数必须**弃权**而不是继续说话（见
+    /// [Self::fresh_host_bypass]）。
+    host_bypass_verdict_ms: AtomicU64,
+    /// 上一次**尝试**采样旁通读数的时刻（毫秒；`0` = 从未）。
+    ///
+    /// 【为什么单独限流】几何/清单枚举在结构性失败时会退避到 4 秒一次，而"用户按了
+    /// 旁通"必须在一次 UI tick 的量级内被看见：否则旁通之后插件还会再算一整次合成。
+    host_bypass_sample_ms: AtomicU64,
+    /// 测试用：把旁通读数**做旧**多少毫秒（`0` = 不做旧）。
+    ///
+    /// 【为什么不能直接把时间戳往前挪】时间戳是"进程启动以来的毫秒数"，它不可能比
+    /// 进程启动更早 —— 于是在刚启动的测试进程里"做旧 60 秒"会饱和成"刚刚采过"，
+    /// 用例会以"过期读数居然还在投票"的假失败告终。用一个独立的偏移量模拟时间流逝，
+    /// 才真的在测那个判据。
+    #[cfg(test)]
+    bypass_age_override_ms: AtomicU64,
     /// 宿主在 `setupProcessing` 声明的采样率（Hz；`0` = 尚未声明）。
     ///
     /// 【为什么必须记下来】`process` 此前用 `ProcessContext::sample_rate` 选快照，且只认
@@ -295,6 +334,20 @@ pub struct ExtensionOwner {
     blocks_playing: AtomicU64,
     blocks_flow_without_playing: AtomicU64,
     gate_cleared: AtomicU64,
+    /// 门控在**传输正在推进**（`TransportPhase::Rolling`）的块上关掉门的次数。
+    ///
+    /// 【为什么它必须单独存在】`gate_cleared` 在停播时每块都会涨（那是正确行为：
+    /// 停播就该淡出），因此它既不能进读数判据、也不能当缺陷证据。而"位置在走、
+    /// 我们却整块写零"是**结构性错误**：它意味着一个会被真的播出来的块被丢掉了。
+    /// 位置判据（`emit_allowed`）成立时门必须开，所以这个数应当恒为 0；一旦非零，
+    /// 就是又出现了一条"记 bookkeeping 而制造静音"的路径。
+    gate_cleared_rolling: AtomicU64,
+    /// 是否已经尝试过"在宿主问到第一块音频之前就把第一份快照发布出去"。
+    ///
+    /// 【为什么需要一次性闸门】那次发布是**同步**的（见 `publish_first_snapshot_inline`），
+    /// 会占住调用线程一次完整合成的时长。它必须只发生在"这个实例还没有任何可听快照"
+    /// 的那一刻；失败时不重试，把后续留给后台队列 —— 否则宿主每问一次就阻塞一次。
+    first_snapshot_inlined: AtomicBool,
     /// ARA 实例在快照未就绪时退到 layered（宿主原声兜底）的块数。
     ///
     /// 【为什么必须是诊断】它等于"本该由我们出声、实际让宿主原声顶替"的次数。
@@ -366,6 +419,12 @@ pub struct ExtensionOwner {
     buffer_audit_channels: AtomicU32,
     buffer_audit_frames: AtomicU32,
     buffer_audit_unwritten: AtomicU64,
+    /// 因漏写而被清成 0 的非有限样本数（见 `render_block` 的写满审计；音频线程只写原子）。
+    ///
+    /// 【为什么只记原子不记日志】漏写发生时音频线程正处于最需要省时的场景（多半正是
+    /// 那次漏写引发的掉线），此刻去抢日志锁、做文件 I/O 只会放大故障。读数由
+    /// `log_buffer_audit` 的周期行带出。
+    buffer_audit_scrubbed: AtomicU64,
     /// 因与输入平面共享内存而被跳过的输出平面数（见 `AudioBlock::poison_outputs`）。
     buffer_audit_aliased: AtomicU32,
     /// 本块输入与输出是否是同一份总线（in-place 宿主）。

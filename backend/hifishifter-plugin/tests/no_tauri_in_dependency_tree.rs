@@ -18,6 +18,7 @@ use std::process::Command;
 const PLUGIN_CRATES: &[&str] = &[
     "hifishifter-plugin",
     "hifishifter-plugin-core",
+    "hifishifter-vst3",
     "hifishifter-clap",
 ];
 

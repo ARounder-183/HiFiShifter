@@ -347,68 +347,68 @@ export function useMidiImport(deps: MidiImportDeps) {
     // 导入位置变更时持久化保存
     const handleImportPositionChange = useCallback((position: string) => {
         setImportPosition(position);
-        void settingsApi.saveUiSettings({ midiImportPosition: position });
+        void settingsApi.saveUiSettings({ midiImportPosition: position }).catch(() => {});
     }, []);
 
     // 填补空隙选项变更时持久化保存
     const handleFillGapsChange = useCallback((value: boolean) => {
         setFillGaps(value);
-        void settingsApi.saveUiSettings({ midiFillGaps: value });
+        void settingsApi.saveUiSettings({ midiFillGaps: value }).catch(() => {});
     }, []);
 
     // BPM 选项变更时持久化保存
     const handleImportBpmAsProjectChange = useCallback((v: boolean) => {
         setImportBpmAsProject(v);
-        void settingsApi.saveUiSettings({ midiImportBpmAsProject: v });
+        void settingsApi.saveUiSettings({ midiImportBpmAsProject: v }).catch(() => {});
     }, []);
 
     const handleNoteBpmModeChange = useCallback((v: string) => {
         setNoteBpmMode(v);
-        void settingsApi.saveUiSettings({ midiNoteBpmMode: v });
+        void settingsApi.saveUiSettings({ midiNoteBpmMode: v }).catch(() => {});
     }, []);
 
     const handleSpecifiedBpmChange = useCallback((v: number) => {
         setSpecifiedBpm(v);
-        void settingsApi.saveUiSettings({ midiSpecifiedBpm: v });
+        void settingsApi.saveUiSettings({ midiSpecifiedBpm: v }).catch(() => {});
     }, []);
 
     const handleMultiTrackMergeChange = useCallback((v: boolean) => {
         setMultiTrackMerge(v);
-        void settingsApi.saveUiSettings({ midiMultiTrackMerge: v });
+        void settingsApi.saveUiSettings({ midiMultiTrackMerge: v }).catch(() => {});
     }, []);
 
     const handleCloseLeadingGapChange = useCallback((v: boolean) => {
         setCloseLeadingGap(v);
-        void settingsApi.saveUiSettings({ midiCloseLeadingGap: v });
+        void settingsApi.saveUiSettings({ midiCloseLeadingGap: v }).catch(() => {});
     }, []);
 
     const handleImportTempoMapEnabledChange = useCallback((v: boolean) => {
         setImportTempoMapEnabled(v);
-        void settingsApi.saveUiSettings({ midiImportAsTempoMap: v });
+        void settingsApi.saveUiSettings({ midiImportAsTempoMap: v }).catch(() => {});
     }, []);
 
     const handleImportTempoMapTempoChange = useCallback((v: boolean) => {
         setImportTempoMapTempo(v);
-        void settingsApi.saveUiSettings({ midiImportTempoMapTempo: v });
+        void settingsApi.saveUiSettings({ midiImportTempoMapTempo: v }).catch(() => {});
     }, []);
 
     const handleImportTempoMapTimeSignatureChange = useCallback((v: boolean) => {
         setImportTempoMapTimeSignature(v);
-        void settingsApi.saveUiSettings({ midiImportTempoMapTimeSignature: v });
+        void settingsApi.saveUiSettings({ midiImportTempoMapTimeSignature: v }).catch(() => {});
     }, []);
 
     const handleImportTempoMapKeySignatureChange = useCallback((v: boolean) => {
         setImportTempoMapKeySignature(v);
-        void settingsApi.saveUiSettings({ midiImportTempoMapKeySignature: v });
+        void settingsApi.saveUiSettings({ midiImportTempoMapKeySignature: v }).catch(() => {});
     }, []);
 
     const handleImportTargetChange = useCallback((v: string) => {
         if (midiDialogSourceRef.current === "reaperClipboard") {
             setImportTargetReaperClipboard(v);
-            void settingsApi.saveUiSettings({ midiImportTargetReaperClipboard: v });
+            void settingsApi.saveUiSettings({ midiImportTargetReaperClipboard: v }).catch(() => {});
         } else {
             setImportTargetParamEditor(v);
-            void settingsApi.saveUiSettings({ midiImportTargetParamEditor: v });
+            void settingsApi.saveUiSettings({ midiImportTargetParamEditor: v }).catch(() => {});
         }
     }, []);
 

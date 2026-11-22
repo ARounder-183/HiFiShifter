@@ -127,6 +127,62 @@ fn the_clap_module_entry_point_is_exported() {
     );
 }
 
+/// 本壳产物**不得导出任何 VST3 模块入口**。
+///
+/// 【为什么钉死缺席】壳提取之前，VST3 的模块入口随共享 rlib 被链接进 CLAP 产物并被默认导出 —— 实测
+/// `dumpbin /EXPORTS dist/HiFiShifter.clap` 返回 4 个符号（`clap_entry` 之外还有
+/// `GetPluginFactory` / `InitDll` / `ExitDll`）。它们在 CLAP 里没有任何意义；
+/// 若它们重新出现，说明有人把某个格式壳塞回了共享层（`hifishifter-plugin`）。
+#[test]
+fn the_clap_module_never_exports_vst3_entry_points() {
+    let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/debug");
+    let dll = if cfg!(windows) {
+        "hifishifter_clap.dll"
+    } else if cfg!(target_os = "macos") {
+        "libhifishifter_clap.dylib"
+    } else {
+        "libhifishifter_clap.so"
+    };
+    let artifact = target.join(dll);
+    assert!(
+        artifact.is_file(),
+        "缺少 {} —— 先跑 cargo build -p hifishifter-clap",
+        artifact.display()
+    );
+    let output = if cfg!(windows) {
+        Command::new("dumpbin")
+            .args(["/exports"])
+            .arg(&artifact)
+            .output()
+    } else {
+        Command::new("nm")
+            .args(["-D", "--defined-only"])
+            .arg(&artifact)
+            .output()
+    }
+    .expect("symbol listing tool must run");
+    assert!(output.status.success(), "symbol listing failed: {output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    // VST3 三平台的全部模块入口：Windows 的 InitDll/ExitDll、Linux 的
+    // ModuleEntry/ModuleExit、macOS 的 bundleEntry/bundleExit，以及三平台共用的
+    // GetPluginFactory。逐一缺席，而不是只查一个。
+    for symbol in [
+        "GetPluginFactory",
+        "InitDll",
+        "ExitDll",
+        "ModuleEntry",
+        "ModuleExit",
+        "bundleEntry",
+        "bundleExit",
+    ] {
+        assert!(
+            !text.contains(symbol),
+            "{dll} 导出了 VST3 模块入口 {symbol}：格式壳的实现泄漏回了共享层，\
+             每个外壳的产物都会重新带上别人的入口符号"
+        );
+    }
+}
+
 /// **CLAP 必须链接真正的 FCPE 估计器，而不是 onnx 关闭时的 stub。**
 ///
 /// 【为什么这条是那次报障的正身】`default-features = false` 曾把内核的 `onnx` 一起

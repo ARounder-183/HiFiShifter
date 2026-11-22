@@ -763,18 +763,26 @@ pub fn save_auto_backup_settings(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn run_timed_auto_backup(
-    state: State<'_, AppState>,
+pub async fn run_timed_auto_backup(
+    app: tauri::AppHandle,
     path_template: String,
 ) -> serde_json::Value {
+    // 【为什么必须异步 + 阻塞池】定时自动备份 = 整个 TimelineState 的深拷贝 +
+    // 全量 msgpack/JSON 序列化 + fsync 落盘（大工程含 base64 笔记附件）。
+    // 同步命令在 WebView IPC 线程内联执行，这是**周期性**触发的：大工程每次
+    // 定时备份都会把窗口与全部 IPC 卡住一小段。与 save_project 同一设计约定；
+    // 任务 panic 由 spawn_blocking 汇聚为 JoinError，等价旧 guard_command 语义。
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        project::run_timed_auto_backup(state, path_template)
+    })
+    .await
     {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
-        common::guard_command(
-            "run_timed_auto_backup",
-            serde_json::json!({ "ok": false, "error": "panic in command: run_timed_auto_backup" }),
-            || project::run_timed_auto_backup(state, path_template),
-        )
+        Ok(result) => result,
+        Err(error) => serde_json::json!({
+            "ok": false,
+            "error": format!("Failed to join auto backup task: {error}"),
+        }),
     }
 }
 
@@ -941,29 +949,32 @@ pub fn import_project_dialog() -> serde_json::Value {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn import_project(
-    state: State<'_, AppState>,
+pub async fn import_project(
+    app: tauri::AppHandle,
     window: Window,
     project_path: String,
     place_at_playhead: Option<bool>,
     import_tempo_map: Option<bool>,
 ) -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
-        common::guard_command(
-            "import_project",
-            serde_json::json!({ "ok": false, "error": "panic in command: import_project" }),
-            || {
-                project_import::import_project(
-                    state,
-                    window,
-                    project_path,
-                    place_at_playhead,
-                    import_tempo_map,
-                )
-            },
+    // 【为什么必须异步 + 阻塞池】与 open_project 同类：读入并解析整个工程文件、
+    // 每个 take 的源文件存在性检查、新 clip 的文件元数据回填（exists/metadata/
+    // 指纹/头探测）—— 网络盘上可能极慢。同步命令在 WebView IPC 线程内联执行，
+    // 会冻结窗口与其余 IPC。任务 panic 由 spawn_blocking 汇聚为 JoinError，
+    // 等价旧 guard_command 的遏制语义。
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        project_import::import_project(
+            state,
+            window,
+            project_path,
+            place_at_playhead,
+            import_tempo_map,
         )
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => serde_json::json!({ "ok": false, "error": "panic in command: import_project" }),
     }
 }
 
@@ -2095,12 +2106,28 @@ pub fn replace_clip_source(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn check_source_files_changed(
-    state: State<'_, AppState>,
+pub async fn check_source_files_changed(
+    app: tauri::AppHandle,
 ) -> crate::models::CheckSourceFilesChangedPayload {
-    common::guarded("check_source_files_changed", || {
-        timeline::check_source_files_changed(state)
+    // 【为什么必须异步 + 阻塞池】前端在窗口每次重新聚焦时调用；实现虽然已经
+    // 两段式（锁内只克隆清单、IO 在锁外），但同步命令会把 exists/metadata/
+    // 指纹读取跑在 WebView IPC 线程上 —— 断连/冷缓存的网络盘上一次 exists()
+    // 就能卡住数秒。卸载到阻塞线程池；panic 由 JoinError 收敛为空结果，
+    // 等价旧 guard_command 的遏制语义。
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        common::guarded("check_source_files_changed", || {
+            timeline::check_source_files_changed(state)
+        })
     })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            <crate::models::CheckSourceFilesChangedPayload as common::PanicFallback>::panic_fallback(
+            )
+        }
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2907,14 +2934,14 @@ pub fn open_log_folder(app: tauri::AppHandle) -> serde_json::Value {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn pick_diagnostics_output_path() -> serde_json::Value {
+pub fn pick_diagnostics_output_path(dialog_title: Option<String>) -> serde_json::Value {
     {
         // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
         // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
         common::guard_command(
             "pick_diagnostics_output_path",
             serde_json::json!({ "ok": false, "error": "panic in command: pick_diagnostics_output_path" }),
-            diagnostics::pick_diagnostics_output_path,
+            || diagnostics::pick_diagnostics_output_path(dialog_title),
         )
     }
 }
@@ -3247,16 +3274,20 @@ pub async fn delete_paths(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_audio_file_info(file_path: String) -> Result<file_browser::AudioFileInfo, String> {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+pub async fn get_audio_file_info(file_path: String) -> Result<file_browser::AudioFileInfo, String> {
+    // 【为什么不是同步命令】缺少时长元数据的媒体（MPEG-TS、部分 MKV/AVI）要
+    // 遍历整条 packet 流来测量时长（与 get_media_audio_streams 同类），同步
+    // 命令会在 WebView IPC 线程（即 UI 主线程）内联执行，大文件直接冻结窗口。
+    // 卸载到阻塞线程池；panic 由 JoinError 收敛成 Err，不再越过 FFI 边界。
+    tauri::async_runtime::spawn_blocking(move || {
         common::guard_command(
             "get_audio_file_info",
             Err("panic in command: get_audio_file_info".to_string()),
             || file_browser::get_audio_file_info(file_path),
         )
-    }
+    })
+    .await
+    .map_err(|error| format!("audio info task failed: {error}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]

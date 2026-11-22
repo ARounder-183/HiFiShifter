@@ -1,8 +1,9 @@
 //! 核对官方REAPER SDK的原生宿主适配：只在原始UI/model线程读所属project的真实位置。
 //! ABI依据 justinfrankel/reaper-sdk c0eafe87863b2bf69c5c822760f1b32a753b211b，
 //! sdk/reaper_vst3_interfaces.h 与 reaper_plugin_functions.h。手写适配，不是SDK原文件。
-use crate::editor::connection::UnknownVtbl;
-use crate::vst3::{alternate_iid, platform_iid, K_RESULT_OK};
+use crate::sync::MutexExt;
+use crate::vst3_abi::UnknownVtbl;
+use crate::vst3_abi::{alternate_iid, platform_iid, K_RESULT_OK};
 use std::ffi::{c_char, c_void};
 pub(super) mod item_chunk;
 pub(crate) use item_chunk::RewrittenItem;
@@ -11,14 +12,32 @@ pub(crate) use write::{HostClipTarget, HostUndoBlock};
 mod media;
 pub(crate) use media::HostTrackTarget;
 mod ui_inventory;
-pub(crate) use ui_inventory::{UiItem, UiTrack};
+pub(crate) use ui_inventory::{inventory_content_matches, UiItem, UiTrack};
 mod folder;
+/// FX 旁通 / 离线读数（宿主是否仍在读我们的输出）。
+mod fx_state;
+/// 宿主**自己的动作**：借它的动作表做那两件"没有 setter"的事（建 take 包络、换方向）。
+mod host_action;
+/// 本实例在宿主里挂在哪里（轨道 FX 链 / take FX 链 / 没有）。
+mod placement;
+/// take 的 Pitch **包络对象**：读写走 Envelope API（item chunk 在 take FX 下写不进去）。
+mod take_env;
+/// 把多个实例的旁通读数合成"这份工程还会不会出声"（判据见 [fx_state::combine]）。
+pub(crate) use fx_state::combine as combine_fx_bypass;
+pub(crate) use fx_state::FxBypass;
+pub(crate) use placement::HostPlacement;
 mod host_timer;
 // 宿主原生执行层：写回 / 分割 / 剪贴板 / Undo 调度。它们直接调用 REAPER API，
 // 因此整体住在本模块内；通用层只经 `crate::host` 的中立门面访问。
 pub(crate) mod clipboard;
 pub(crate) mod host_edit;
 pub(crate) mod host_split;
+/// take 方向（倒放）的结构写回：REAPER 没有反向 setter，倒放是 SOURCE SECTION。
+mod source_direction;
+/// item state chunk 里"一条 take 的字段区"的解析（单 take / 多 take 同一套）。
+mod take_chunk;
+/// take 音高包络（PITCHENV）在 item state chunk 里的读写。
+mod take_pitch;
 pub(crate) mod undo;
 
 const IID: [u32; 4] = [0x79655E36, 0x77EE4267, 0xA573FEF7, 0x4912C27C];
@@ -171,6 +190,24 @@ pub(crate) struct NativeHost {
     take_enum: Option<TakeEnumApi>,
     /// 轨道组（folder）只读入口；与建轨能力束解耦，见 `folder` 模块文档。
     folder: Option<folder::FolderApi>,
+    /// FX 旁通读数入口；缺省时旁通状态恒为 `Unknown`（照改动前照常渲染）。
+    fx_state: Option<fx_state::FxStateApi>,
+    /// 本实例的放置位置缓存（见 [`placement`]）。**每次绑定后重算**。
+    placement: std::sync::Mutex<placement::PlacementCache>,
+    /// 上一次输出的放置位置诊断指纹（只在变化时再打一行）。
+    placement_reported: std::sync::Mutex<Option<String>>,
+    /// 上一次旁通读数的"凭什么"（`take-fx; take chain: found=1/1 …`）。
+    ///
+    /// 【为什么留在宿主适配器上】它由读取点（[`Self::fx_bypass_state`]）写入、由日志点
+    /// （`roles::refresh_host_bypass_cache`）读出，两处之间只隔一次函数返回；放进共享
+    /// 状态机反而要新增一条跨线程通道。结论变化时读一次即可，稳态下无人访问。
+    bypass_note: std::sync::Mutex<String>,
+    /// `GetMediaItem_Track`：item → 宿主轨。
+    ///
+    /// 【为什么单独留一份】take FX 下"我的轨道"只能沿 take → item → track 这条边取，
+    /// 而这条边是清单作用域与 track 目标的唯一来源。`write` 那一束是"能写才齐备"的
+    /// 能力束，读路径不该被写能力拖下水。
+    item_track: Option<write::Track>,
     /// 本实例创建的 Undo 条目的**时间戳缓存**（条目索引 → Unix 毫秒）。
     ///
     /// 【为什么需要】REAPER 的 `Undo_GetEntryDesc` 只给标签，**没有时间**。此前
@@ -198,6 +235,11 @@ pub(crate) struct NativeHost {
     host_timer_retry_at: std::sync::Mutex<Option<std::time::Instant>>,
     /// 到这个时刻（Unix 毫秒）之前不再尝试投递 —— 见 `on_host` 的熔断说明。
     host_unreachable_until: std::sync::atomic::AtomicU64,
+    /// 已解析的宿主动作号（键 = 登记的回退命令号）。
+    ///
+    /// 【为什么必须缓存】解析一次要枚举几千条动作（每条一次宿主调用）；而"建一条 take
+    /// 音高包络"是用户点一次就走的路径，不该每次都把动作表扫一遍。动作表在进程内是静态的。
+    action_ids: std::sync::Mutex<std::collections::BTreeMap<i32, i32>>,
 }
 
 impl NativeHost {
@@ -300,15 +342,45 @@ impl hifishifter_kernel::editor::host::EditorHost for NativeHost {
     }
 
     fn capabilities(&self) -> hifishifter_kernel::editor::host::HostCapabilities {
+        // 读缓存里的位置（不发宿主调用）：能力位由 bootstrap 与每个命令分派点读取，
+        // 频率远高于清单枚举，而位置在同一条刷新链上刚刚求值过（见 `resolve_placement`）。
+        self.capabilities_for(self.placement())
+    }
+
+    fn app_version(&self) -> Option<&str> {
+        self.app_version.as_deref()
+    }
+}
+
+impl NativeHost {
+    /// 按**放置位置**派生的能力位：同一份宿主 API 在两种位置下能做的事不同。
+    ///
+    /// 【为什么必须按位置派生】能力位此前只看"这族 API 在不在"，于是 take FX 下前端
+    /// 仍然露出导入 / 建轨 / 剪贴板入口 —— 而这三条的**目标对象**（本轨、新轨、item
+    /// 副本）对 take FX 实例根本不成立：导入的 item 不属于本实例的 ARA 内容，剪贴板
+    /// 复制还会把 `<TAKEFX>` 块整块复制出去（宿主会在目标 item 上新建第二个实例）。
+    /// 露出一个注定失败的入口，比藏起来更坏：用户会以为是插件坏了。
+    ///
+    /// 【take 音高为什么**不**关】真机实测：take 音高在源级生效、早于 take FX，**不会**再对 take FX 的输出移调，也不会
+    /// 叠加到插件自己的渲染上。于是"转换成 take 包络"在两种位置下是同一条语义 ——
+    /// 只复制、不补偿。关掉它等于凭空砍掉一个本来正确的功能。
+    pub(crate) fn capabilities_for(
+        &self,
+        placement: HostPlacement,
+    ) -> hifishifter_kernel::editor::host::HostCapabilities {
+        let take_fx = placement.is_take_fx();
         hifishifter_kernel::editor::host::HostCapabilities {
             transport: self.transport.is_some(),
             clip_geometry: self.geometry.is_some(),
             clip_write: self.can_edit_clips(),
             split: self.can_split_clips(),
             undo_stack: self.has_project_history(),
-            media_import: self.can_import_audio(),
-            track_create: self.can_create_audio_track(),
-            item_clipboard: self.can_clipboard_items(),
+            // 【take FX 下为什么关掉这三项】见上面说明：目标对象不成立。
+            media_import: self.can_import_audio() && !take_fx,
+            track_create: self.can_create_audio_track() && !take_fx,
+            item_clipboard: self.can_clipboard_items() && !take_fx,
+            clip_reverse: self.can_reverse_clips(),
+            take_pitch_bridge: self.can_bridge_take_pitch(),
             fade_axes: self.fade_axes_v2.is_some(),
             // 导出与宿主无关：两条后端都只读授权 PCM 再写用户选定的文件。
             export_audio: true,
@@ -320,13 +392,12 @@ impl hifishifter_kernel::editor::host::EditorHost for NativeHost {
             capture: false,
         }
     }
-
-    fn app_version(&self) -> Option<&str> {
-        self.app_version.as_deref()
-    }
 }
 /// 每次外部调用前后重检；Arc/FUnknown引用不保活project/item/take。
-fn checked<T>(authorized: &impl Fn() -> bool, call: impl FnOnce() -> T) -> Result<T, String> {
+fn checked<T>(
+    authorized: &(impl Fn() -> bool + ?Sized),
+    call: impl FnOnce() -> T,
+) -> Result<T, String> {
     if !authorized() {
         return Err("host query authorization revoked".into());
     }
@@ -337,6 +408,108 @@ fn checked<T>(authorized: &impl Fn() -> bool, call: impl FnOnce() -> T) -> Resul
     Ok(value)
 }
 impl NativeHost {
+    /// 本实例在宿主里此刻是否被旁通（判据与三态语义见 [fx_state]）。
+    ///
+    /// 【为什么必须回到宿主线程】`TrackFX_*` 与 `GetMediaTrackInfo_Value` 只认宿主自己的
+    /// 线程；在别的线程上调用会投递并原地等它完成 —— 与其余宿主查询同一纪律。
+    ///
+    /// 【为什么找不到就报 Unknown】"这条轨上没有本插件的 FX"可能是宿主改了显示名，
+    /// 也可能这个实例根本不是挂在轨道上的（Capture 形态）。两种情况下替用户断言
+    /// "你旁通了"都会让本该出声的实例静音。
+    pub(crate) fn fx_bypass_state(&self, authorized: &impl Fn() -> bool) -> FxBypass {
+        if std::thread::current().id() != self.thread {
+            return self
+                .on_host(|| self.fx_bypass_state(authorized))
+                .unwrap_or(FxBypass::Unknown);
+        }
+        let Some(api) = self.fx_state.as_ref() else {
+            return FxBypass::Unknown;
+        };
+        // 【为什么这里可能要求值】旁通采样是**最高频**的那条路径（100 ms），而放置位置
+        // 平时由绑定/清单刷新求值。二者之间可能隔着一个"用户刚把 FX 从轨道剪到 take 上"
+        // 的窗口 —— 那时缓存还是旧的，读到的会是另一条链。惰性求值把那个窗口关掉：
+        // 没求值过就先探一次（只探一次，之后走缓存）。
+        let placement = if self.placement_resolved() {
+            self.placement()
+        } else {
+            self.resolve_placement(&[], authorized)
+        };
+        // 【为什么每条链都重取一次直接 parent】缓存里存的是求值那一刻的指针，而宿主
+        // 可能已经把 item/take 删掉。两个选择器恰好都是"强身份"：轨道 FX 的直接父是
+        // 轨道、take FX 的直接父是 take —— 重取一次拿到的对象与缓存指向**同一个**，
+        // 但一定还活着（取不到就退回缓存值，并多半在 `ValidatePtr2` 之后读成 Unknown，
+        // 绝不会去读另一条链）。
+        let pointer = self._interface.0 as *mut c_void;
+        let table = unsafe { &**pointer.cast::<*const HostVtbl>() };
+        let fresh = |selector: u32, fallback: usize| -> *mut c_void {
+            let parent = checked(authorized, || unsafe { (table.parent)(pointer, selector) })
+                .unwrap_or(std::ptr::null_mut());
+            if parent.is_null() {
+                fallback as *mut c_void
+            } else {
+                parent
+            }
+        };
+        match placement {
+            HostPlacement::TrackFx { track } => {
+                let track = self.live_chain_owner(fresh(1, track), c"MediaTrack*", authorized);
+                let Some(track) = track else {
+                    return FxBypass::Unknown;
+                };
+                let chain = fx_state::TrackChain::new(&api.track, track, authorized);
+                self.record_bypass_reading("track", placement, &chain)
+            }
+            HostPlacement::TakeFx { take, .. } => {
+                // 【为什么查不到就直接 Unknown】不得回退到轨道链 —— 那是"读别人的开关"。
+                let Some(take_api) = api.take.as_ref() else {
+                    return FxBypass::Unknown;
+                };
+                let take = self.live_chain_owner(fresh(2, take), c"MediaItem_Take*", authorized);
+                let Some(take) = take else {
+                    return FxBypass::Unknown;
+                };
+                let chain = fx_state::TakeChain::new(take_api, take, authorized);
+                self.record_bypass_reading("take", placement, &chain)
+            }
+            HostPlacement::Unbound => FxBypass::Unknown,
+        }
+    }
+
+    /// 读一条链并把"凭什么"记下来，供日志与诊断回答"为什么是这个结论"。
+    ///
+    /// 【为什么要把四位事实存下来】旁通门判错的两种后果（静音 / 白跑 CPU）在日志里都只
+    /// 表现为一行结论差异。结论一致但事实不同（例如 `gate=unknown` 与 `gate=open`）
+    /// 恰恰是排查的分岔点 —— take FX 那次静音的全部证据就是"整链总开关读到 0"。
+    fn record_bypass_reading(
+        &self,
+        chain_kind: &str,
+        placement: HostPlacement,
+        chain: &dyn fx_state::FxChain,
+    ) -> FxBypass {
+        let reading = match fx_state::read_chain(chain, crate::CLASS_NAME) {
+            Ok(reading) => reading,
+            Err(error) => {
+                *self.bypass_note.lock_or_recover() = format!("{chain_kind} chain: {error}");
+                return FxBypass::Unknown;
+            }
+        };
+        *self.bypass_note.lock_or_recover() = format!(
+            "{}; {} chain: {}",
+            placement.as_str(),
+            chain_kind,
+            reading.summary()
+        );
+        reading.verdict
+    }
+
+    /// 上一次旁通读数的"凭什么"，形如
+    /// `take-fx; take chain: found=1/1 enabled=1 offline=0 gate=unknown`。
+    ///
+    /// 只在结论变化时被 `render::extension::roles` 写进日志，于是稳态下仍然只有一行。
+    pub(crate) fn host_bypass_note(&self) -> String {
+        self.bypass_note.lock_or_recover().clone()
+    }
+
     /// 从真实host context QI；parent(3)是所属project，不使用当前活动project或按轨名猜归属。
     /// # Safety
     /// context是初始化期间可读的活FUnknown；host在该 owning reference期间保持接口/API有效。
@@ -381,7 +554,7 @@ impl NativeHost {
             crate::log_line(&format!(
                 "[reaper-host] QI result={result} interface={} (iid layout={}, tried both)",
                 !pointer.is_null(),
-                crate::vst3::iid_layout()
+                crate::vst3_abi::iid_layout()
             ));
             return None;
         }
@@ -580,11 +753,14 @@ impl NativeHost {
             }
             _ => None,
         };
+        // item → 宿主轨：写能力束要用它，**读**路径（take FX 的清单作用域）也要它，
+        // 因此单独留一份，不跟着写能力一起消失。
+        let item_track = lookup!(c"GetMediaItem_Track", write::Track);
         let write = match (
             lookup!(c"SetMediaItemInfo_Value", write::SetValue),
             lookup!(c"SetMediaItemTakeInfo_Value", write::SetValue),
             lookup!(c"GetSetMediaItemTakeInfo_String", write::SetString),
-            lookup!(c"GetMediaItem_Track", write::Track),
+            item_track,
             lookup!(c"MoveMediaItemToTrack", write::Move),
             lookup!(c"Undo_BeginBlock2", write::Begin),
             lookup!(c"Undo_EndBlock2", write::End),
@@ -665,6 +841,52 @@ impl NativeHost {
             }
             _ => None,
         };
+        // FX 旁通读数：**每条链**各自四件，缺一不可（缺了就整体降级为 Unknown）。
+        //
+        // 【为什么 take 侧独立可选】`TakeFX_*` 是后来才进宿主的一族。缺它时 take 链上
+        // 的实例一律 `Unknown` ⇒ 照常渲染（与改动前一致）；把它与轨道侧绑在一起，
+        // 会让一个老宿主连轨道 FX 的旁通都读不出来。
+        let track_chain = match (
+            lookup!(c"TrackFX_GetCount", fx_state::FxCount),
+            lookup!(c"TrackFX_GetEnabled", fx_state::FxEnabled),
+            lookup!(c"TrackFX_GetOffline", fx_state::FxOffline),
+            lookup!(c"TrackFX_GetFXName", fx_state::FxName),
+            lookup!(c"GetMediaTrackInfo_Value", fx_state::TrackValue),
+        ) {
+            (Some(count), Some(enabled), Some(offline), Some(name), Some(track_value)) => {
+                Some(fx_state::TrackChainApi {
+                    count,
+                    enabled,
+                    offline,
+                    name,
+                    track_value,
+                })
+            }
+            _ => None,
+        };
+        // 【take 侧只要四件】整链总开关**不在**这一族里（take 没有 `I_FXEN` 的对应物，
+        // 见 `fx_state` 的模块文档）。少读一个不存在的参数，就少一次"宿主返回 0 ⇒ 我们
+        // 当真的"的机会 —— take FX 下的整段静音正是这么来的。
+        let take_chain = match (
+            lookup!(c"TakeFX_GetCount", fx_state::FxCount),
+            lookup!(c"TakeFX_GetEnabled", fx_state::FxEnabled),
+            lookup!(c"TakeFX_GetOffline", fx_state::FxOffline),
+            lookup!(c"TakeFX_GetFXName", fx_state::FxName),
+        ) {
+            (Some(count), Some(enabled), Some(offline), Some(name)) => {
+                Some(fx_state::TakeChainApi {
+                    count,
+                    enabled,
+                    offline,
+                    name,
+                })
+            }
+            _ => None,
+        };
+        let fx_state = track_chain.map(|track| fx_state::FxStateApi {
+            track,
+            take: take_chain,
+        });
         let plugin_register = lookup!(c"plugin_register", PluginRegister);
         // 【为什么要在这里挂节拍】`from_context` 只在宿主的 model/UI 线程上被调用
         // （`setActive` / 初始化），而 `plugin_register` 的注册动作本身要求宿主线程。
@@ -696,10 +918,41 @@ impl NativeHost {
             app_version,
             take_enum,
             folder,
+            fx_state,
+            placement: std::sync::Mutex::new(placement::PlacementCache::default()),
+            placement_reported: std::sync::Mutex::new(None),
+            bypass_note: std::sync::Mutex::new(String::new()),
+            item_track,
             undo_entry_times: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             undo_ends: std::sync::Mutex::new(Vec::new()),
+            action_ids: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         })
     }
+    /// 取一个宿主原生函数入口（用到才取，取不到就报错）。
+    ///
+    /// 【为什么按需查而不是在 `from_context` 里一次查齐】这些入口只服务"结构写回"那几条
+    /// 冷路径（建 take 包络、翻方向、读包络），把它们塞进启动期的大 `match` 会让"缺一个
+    /// 可选入口"决定整个适配器能不能建起来。这里反过来：缺了就只让那一条路失败。
+    pub(super) fn native_api<T: Copy>(
+        &self,
+        name: &std::ffi::CStr,
+        authorized: &(impl Fn() -> bool + ?Sized),
+    ) -> Result<T, String> {
+        let pointer = self._interface.0 as *mut c_void;
+        // SAFETY: 接口在本对象生命周期内有效；函数表按 `HostVtbl` 的布局读取。
+        let table = unsafe { &**pointer.cast::<*const HostVtbl>() };
+        let function = checked(authorized, || unsafe {
+            (table.api)(pointer, name.as_ptr())
+        })?;
+        if function.is_null() {
+            return Err(format!(
+                "REAPER API unavailable: {}",
+                name.to_string_lossy()
+            ));
+        }
+        Ok(unsafe { std::mem::transmute_copy::<*mut c_void, T>(&function) })
+    }
+
     /// 当前线程是不是宿主绑定线程（model/UI 线程）。
     pub(crate) fn on_host_thread(&self) -> bool {
         std::thread::current().id() == self.thread
@@ -1112,8 +1365,8 @@ impl NativeHost {
             return Err("invalid REAPER length".into());
         }
         // 【为什么保留符号】负速率是宿主表达倒放的**两个来源之一**（另一个是
-        // `SECTION MODE 1` / `PCM_Source_GetSectionInfo` 的方向位）。独立 App 的判据
-        // 是 `play_rate < 0 || section_mode > 0`；插件此前把符号 `.abs()` 掉、只认方向位，
+        // `SECTION` 的 `MODE` 反向位 / `PCM_Source_GetSectionInfo` 的方向位）。独立 App
+        // 的判据是 `play_rate < 0 || section_mode_reversed`；插件此前把符号 `.abs()` 掉、只认方向位，
         // 于是"只用负速率表达倒放"的 take 被**静默按正放渲染** —— 输出错的音频。
         // 幅值仍单独保留（`playback_rate`）：窗口宽度、缓存键这些与方向无关的消费者用它。
         // 拒绝 0 与非有限值：此前直接拒绝 `<= 0` 会让**整个 item 从清单里消失**，
@@ -1269,7 +1522,7 @@ const MAX_MARKERS: i32 = 16_384;
 ///                            determine shape in v7.81 and later)
 /// ```
 /// 所以 `(7, 81)` 是官方文档化的区间边界，不是"我们测过的版本"。
-/// 取头文件的方法见 `probe/ara/README.md`；pin 见 `REAPER-SDK-NOTICE.md`。
+/// pin 见本目录的 `REAPER-SDK-NOTICE.md`。
 const NEW_FADE_AXES_SINCE: (u32, u32) = (7, 81);
 
 /// 比较官方版本的整数分量（7.100不能按浮点误判为7.10）。
@@ -1291,11 +1544,12 @@ fn new_fade_axes(version: &str) -> Option<bool> {
     Some((major, minor) >= NEW_FADE_AXES_SINCE)
 }
 
-#[cfg(test)]
 #[path = "tests.rs"]
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(not(test), allow(dead_code))]
 mod geometry_tests;
-#[cfg(test)]
-pub(crate) use geometry_tests::Fixture as MockHost;
+#[cfg(any(test, feature = "test-support"))]
+pub use geometry_tests::Fixture as MockHost;
 
 #[cfg(test)]
 mod tests {
@@ -1347,7 +1601,7 @@ mod tests {
                     0x12, 0xc2, 0x7c,
                 ];
                 if unsafe { std::slice::from_raw_parts(iid, 16) } != expected {
-                    return crate::vst3::K_NO_INTERFACE;
+                    return crate::vst3_abi::K_NO_INTERFACE;
                 }
                 unsafe {
                     add(this);

@@ -5,6 +5,13 @@ use crate::sync::MutexExt;
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::Arc;
 
+/// 宿主拒绝重建这个 item 时的**原文**错误（`SetItemStateChunk` 返回 false）。
+///
+/// 【为什么单独一个常量】它不是"写坏了"，而是宿主的一条策略：带**在线 ARA FX** 的 item
+/// 一律不接受整份 chunk 重建（真机取证见 [`super::take_env`]）。调用方要靠它区分
+/// "这条路在宿主上不存在"与"我们的 chunk 拼错了"，前者才允许退到宿主动作。
+pub(crate) const ITEM_STATE_REFUSED: &str = "REAPER rejected the item state";
+
 pub(super) type SetValue = unsafe extern "C" fn(*mut c_void, *const c_char, f64) -> bool;
 pub(super) type SetString =
     unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_char, bool) -> bool;
@@ -112,36 +119,14 @@ impl HostClipTarget {
             .as_ref()
             .ok_or("host item state API unavailable")?;
         let version = self.host.geometry_revision(authorized)?;
-        let mut capacity = 16 * 1024;
-        while capacity <= super::item_chunk::MAX_ITEM_CHUNK_BYTES {
-            self.verify(authorized)?;
-            let mut bytes = vec![0_u8; capacity];
-            let read = checked(authorized, || unsafe {
-                (api.get)(
-                    self.item as *mut c_void,
-                    bytes.as_mut_ptr().cast(),
-                    capacity as i32,
-                    false,
-                )
-            })?;
-            if read {
-                let end = bytes
-                    .iter()
-                    .position(|value| *value == 0)
-                    .ok_or("unterminated item state")?;
-                if end == 0 {
-                    return Err("empty host item state".into());
-                }
-                self.verify(authorized)?;
-                if self.host.geometry_revision(authorized)? != version {
-                    return Err("host item changed during clipboard capture".into());
-                }
-                bytes.truncate(end);
-                return String::from_utf8(bytes).map_err(|_| "host item state is not UTF-8".into());
-            }
-            capacity *= 2;
+        self.verify(authorized)?;
+        let text =
+            read_complete_item_state(api, self.item as *mut c_void, 16 * 1024, false, authorized)?;
+        self.verify(authorized)?;
+        if self.host.geometry_revision(authorized)? != version {
+            return Err("host item changed during clipboard capture".into());
         }
-        Err("host item state exceeds clipboard budget".into())
+        Ok(text)
     }
 
     /// 冻结UI对象不保活item，写入前按GUID查验并重新读取当前几何。
@@ -198,6 +183,28 @@ impl NativeHost {
     }
     pub(crate) fn has_project_history(&self) -> bool {
         self.history.is_some() && self.can_edit_clips()
+    }
+    /// take 的**播放方向**（倒放）能否写回。
+    ///
+    /// 【为什么不需要 `geometry`】倒放只改结构（SOURCE SECTION + SOFFS），与逐字段
+    /// setter 无关。要求 `geometry` 会把一条本来可用的路径挡在门外（反之亦然）。
+    ///
+    /// 【为什么判据仍是 `item_state`】真正落地的是**两条**实现：chunk 整份改写，以及
+    /// 宿主自己的 toggle 动作（见 `host_edit::write_take_direction`）。后者是前者被宿主
+    /// 拒绝时的退路，而"现在到底是哪个方向"的核对（`PCM_Source_GetSectionInfo` 之外的第二
+    /// 判据）与 item chunk 那条主路都在这一族 API 上 —— 缺它就没有可信的起点。
+    pub(crate) fn can_reverse_clips(&self) -> bool {
+        self.item_state.is_some()
+    }
+    /// take 的**音高包络**能否读写（REAPER 的 PITCHENV）。
+    ///
+    /// 【为什么与倒放同一条判据】写的那一步有更近的路（`GetTakeEnvelopeByName` +
+    /// `SetEnvelopeStateChunk`，让写回绕开 chunk），但没有包络时"建一条"要借宿主动作，
+    /// 而"到底有没有包络、有没有点"的判据、以及没有包络 API 时的整条退路，都建在 item
+    /// state 上。缺 `Get/SetItemStateChunk` 时两条路一起不可用，有它时两条路一起可用 ——
+    /// 拆成两位只会制造两个必然同值的布尔。
+    pub(crate) fn can_bridge_take_pitch(&self) -> bool {
+        self.can_edit_clips() && self.item_state.is_some()
     }
     /// 参数和几何共用所属project历史；没有item时也能为首次导入/参数编辑开启Undo。
     pub(crate) fn begin_project_undo(
@@ -468,6 +475,73 @@ impl NativeHost {
     }
 }
 
+/// 读一份 item state，直到拿到**一整份** chunk。
+///
+/// 【为什么"宿主说读成功"不等于"读完了"】`GetItemStateChunk` 能写多少由调用方给的
+/// 缓冲区决定。宿主对"放不下"有两种表现：返回 `false`（调用方据此扩容），或者把前缀
+/// 写满后**照常返回 true**。后者是这次 take 音高转换失败的根：一份 200 KB 的 item chunk
+/// （长片段上千个 `PITCHENV` 点，或 take FX 里那坨插件状态）被当成"宿主给的 chunk 坏了"，
+/// 于是每一次读写都在解析阶段失败 —— 而用户看到的只是"转换没反应"。
+///
+/// 判据只能是**结构**：能不能解析成一整份 `<ITEM>` 块（见 `take_chunk`）。截断必然
+/// 留下未闭合的块，完好的 chunk 一定闭合 —— 这比再猜一个字节数可靠得多，也不会因为
+/// 宿主换了写法（多一个自闭合叶子块）而误判。
+///
+/// 【为什么两种失败一起重试】把"`!ok`"也当成"可能太小"是唯一不依赖宿主文档的选择：
+/// 真的读不出来时最多多读几次（最后一次仍在预算内），而误判成"坏了"会让一个完好的
+/// item 永久写不进去。
+fn read_complete_item_state(
+    api: &super::item_chunk::ItemStateApi,
+    item: *mut c_void,
+    initial_capacity: usize,
+    is_undo: bool,
+    authorized: &(impl Fn() -> bool + ?Sized),
+) -> Result<String, String> {
+    let mut capacity = initial_capacity.max(1024);
+    let mut observed: Option<String> = None;
+    loop {
+        let mut buffer = vec![0_u8; capacity];
+        let ok = checked(authorized, || unsafe {
+            (api.get)(item, buffer.as_mut_ptr().cast(), capacity as i32, is_undo)
+        })?;
+        if ok {
+            // 宿主把 chunk 写成 NUL 结尾的 C 串；没有 NUL 就说明这一段没有边界。
+            if let Some(end) = buffer.iter().position(|byte| *byte == 0) {
+                if end > 0 {
+                    if let Ok(text) = std::str::from_utf8(&buffer[..end]) {
+                        // 【判据只有结构这一条】不引入"NUL 之前还有余量就算完整"这类启发式：
+                        // 一旦成立就把完整性押在"宿主不会悄悄截断"上，而这次的故障正是它。
+                        // 扫描是 O(字节)，读一次 chunk 本来就要整份解析；item chunk 的常见
+                        // 尺寸是几十 KB，take FX 那份大的也只有**一个** clip 会走到这里。
+                        if super::take_chunk::is_complete_item_state(text) {
+                            return Ok(text.to_owned());
+                        }
+                        observed = Some(text.to_owned());
+                    }
+                }
+            }
+        }
+        if capacity >= super::item_chunk::MAX_ITEM_CHUNK_BYTES {
+            break;
+        }
+        capacity = (capacity * 2).min(super::item_chunk::MAX_ITEM_CHUNK_BYTES);
+    }
+    // 【失败时留下形状，而不是只留一句话】"读不出来"有三种完全不同的成因：宿主截断、
+    // 宿主改了写法（多一种块）、指针早已失效。三者只能从"拿到了什么"里分开，而这条
+    // 日志是用户下一次报障时唯一的一手证据。限流：同一个键只留一行。
+    if let Some(text) = observed {
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.item-chunk",
+            format_args!(
+                "[ara] the host item state is unusable: {}",
+                super::take_chunk::describe_shape(&text)
+            ),
+        );
+    }
+    Err("host item state is not a complete item chunk within the supported budget".into())
+}
+
 impl HostClipTarget {
     /// 按已验证item在绝对项目秒域分割；返回两个真实GUID与几何，不猜新片段身份。
     pub(crate) fn split_at(
@@ -498,10 +572,7 @@ impl HostClipTarget {
             return Err("REAPER rejected item split".into());
         }
         current.valid(right as usize, c"MediaItem*", authorized)?;
-        let take = checked(authorized, || unsafe { (api.active_take)(right) })?;
-        if take.is_null() {
-            return Err("split item has no active take; host Undo remains available".into());
-        }
+        let take = self.split_right_take(right, position, authorized)?;
         let right_geometry = self.host.geometry_for_take(take, authorized)?;
         let right_target = HostClipTarget {
             host: self.host.clone(),
@@ -519,9 +590,123 @@ impl HostClipTarget {
             right_target.current(authorized)?.geometry,
         ))
     }
+    /// 分割后右半段的 take：按"同一序号 + 源起点连续"解析。
+    ///
+    /// 【为什么不能直接取 active take】`SplitMediaItem` 之后 `GetActiveTake(right)`
+    /// 给的是**宿主选中的**那条 take。take FX 恰好可以挂在非 active 的 take 上 ——
+    /// 那时旧代码会把右半段的写回目标指到别人的 take，用户看到的是"分割后音高/方向
+    /// 落到了另一条 take 上"。
+    ///
+    /// 【判据】REAPER 在分割出的两个 item 上保持 take 的**顺序**，因此"本条 take 在原
+    /// item 里的序号"是最强的身份证据；再用源起点连续性（右 = 左 + 位移 × 播放速率）
+    /// 复核一次。序号对得上、连续性也对得上才写；否则拒绝（宿主 Undo 仍然可用），
+    /// 因为"猜一个 take"等于改错别人的音频。
+    fn split_right_take(
+        &self,
+        right: *mut c_void,
+        position: f64,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<*mut c_void, String> {
+        let left = self.current(authorized)?;
+        let delta = position - left.geometry.start_sec;
+        let Some(api) = self.host.take_enum() else {
+            return self.single_take_after_split(right, authorized);
+        };
+        let count = checked(authorized, || unsafe {
+            (api.count)(left.item as *mut c_void)
+        })?;
+        if !(0..=1024).contains(&count) {
+            return Err("split item has an implausible take count".into());
+        }
+        let mut index = None;
+        for slot in 0..count {
+            let candidate = checked(authorized, || unsafe {
+                (api.at)(left.item as *mut c_void, slot)
+            })?;
+            if candidate as usize == left.take {
+                index = Some(slot);
+                break;
+            }
+        }
+        let Some(index) = index else {
+            return Err("split item no longer holds the bound take".into());
+        };
+        let candidate = checked(authorized, || unsafe { (api.at)(right, index) })?;
+        if candidate.is_null() {
+            return Err("split item has no take at the bound index".into());
+        }
+        // 源起点连续性：右侧的 SOFFS 必须等于"左侧 SOFFS + 位移 × 播放速率"。
+        // 这条读数由宿主自己算出来，改错了一条 take 就会对不上。
+        let rate = if left.geometry.play_rate_signed.is_finite() {
+            left.geometry.play_rate_signed
+        } else {
+            1.0
+        };
+        let expected = left.geometry.source_start_sec + delta * rate;
+        let actual = self.read_take_start_offs(candidate, authorized)?;
+        if (actual - expected).abs() > 1e-3 {
+            return Err("split take sequence does not match the bound take".into());
+        }
+        Ok(candidate)
+    }
+
+    /// 读一条 take 的 `D_STARTOFFS`。
+    fn read_take_start_offs(
+        &self,
+        take: *mut c_void,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<f64, String> {
+        let geometry = self
+            .host
+            .geometry
+            .as_ref()
+            .ok_or("REAPER geometry API unavailable")?;
+        let value = checked(authorized, || unsafe {
+            (geometry.take_value)(take, c"D_STARTOFFS".as_ptr())
+        })?;
+        if !value.is_finite() {
+            return Err("host take start offset is not finite".into());
+        }
+        Ok(value)
+    }
+
+    /// 宿主没有多 take 枚举接口时：退回改动前的行为（取 active take）。
+    ///
+    /// 【为什么这里诚实退化而不是拒绝】没有 `GetMediaItemNumTakes` 的宿主上，插件连
+    /// "一个 item 有几条 take"都看不到 —— 多 take 的 take FX 在那样的宿主上本来也
+    /// 绑不出正确结果。此时保留旧行为，等于把改动的影响面限制在"宿主确实提供了枚举
+    /// 接口"的那一档。
+    fn single_take_after_split(
+        &self,
+        right: *mut c_void,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<*mut c_void, String> {
+        let api = self
+            .host
+            .split
+            .as_ref()
+            .ok_or("REAPER split API unavailable")?;
+        let take = checked(authorized, || unsafe { (api.active_take)(right) })?;
+        if take.is_null() {
+            return Err("split item has no active take; host Undo remains available".into());
+        }
+        Ok(take)
+    }
+
     /// 同批所有对象须来自同一project，不以“当前活动项目”或相同轨名推断。
     pub(crate) fn same_project(&self, other: &Self) -> bool {
         self.project == other.project
+    }
+    /// 这个 target 所在的宿主能不能写回 take 方向。
+    ///
+    /// 【为什么委托给 host】能力位是**宿主级**的（`Get/SetItemStateChunk` 存不存在），
+    /// 不是 item 级的；target 只是"这个宿主上的一个对象"。
+    pub(crate) fn can_reverse_clips(&self) -> bool {
+        self.host.can_reverse_clips()
+    }
+    /// 是不是同一个宿主 item（回滚时用来避免同一对象被撤两次）。
+    pub(crate) fn same_item(&self, other: &Self) -> bool {
+        self.project == other.project && self.item == other.item
     }
     pub(crate) fn import_target(
         &self,
@@ -710,12 +895,19 @@ impl HostClipTarget {
         self.verify(authorized)?;
         if !matches!(
             name.to_bytes(),
-            b"D_STARTOFFS" | b"D_PLAYRATE" | b"B_PPITCH" | b"I_CHANMODE"
+            b"D_STARTOFFS" | b"D_PLAYRATE" | b"B_PPITCH" | b"I_CHANMODE" | b"D_PITCH"
         ) {
             return Err("unsupported host take field".into());
         }
         if !value.is_finite() {
             return Err("nonfinite host take edit".into());
+        }
+        // 【为什么要给 D_PITCH 设上界】音高迁移要把宿主侧清零；而清零是一个**写**。
+        // 没有上界时一次误算（例如把"音分"当半音）会把 take 推到几十个八度之外 ——
+        // 用户听到的是噪声，看不出是一个单位错误。±240 半音 = ±20 八度，
+        // 远超任何音乐用途，又足以拦住量级错误。
+        if name == c"D_PITCH" && value.abs() > 240. {
+            return Err("take pitch outside the supported range -240..240 semitones".into());
         }
         let api = self.api()?;
         if !checked(authorized, || unsafe {
@@ -728,6 +920,396 @@ impl HostClipTarget {
         }
         Ok(())
     }
+    /// 读取该 item 的完整 state chunk（写回结构前必须先在宿主线程拿到原文）。
+    ///
+    /// 【为什么在 target 上而不是直接拿 host 的 API】item 指针是冻结并校验过的
+    /// （`verify` 会核对 GUID）；绕开它去拿"当前选中 item"的 chunk 会写错对象。
+    pub(crate) fn item_state_chunk(
+        &self,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<String, String> {
+        if std::thread::current().id() != self.host.thread {
+            return self.host.on_host(|| self.item_state_chunk(authorized))?;
+        }
+        self.verify(authorized)?;
+        let api = self
+            .host
+            .item_state
+            .as_ref()
+            .ok_or("REAPER item state API unavailable")?;
+        read_complete_item_state(api, self.item as *mut c_void, 64 * 1024, true, authorized)
+    }
+    /// 把改写后的 state chunk 交回宿主。
+    ///
+    /// 与 `item_state_chunk` 成对出现：调用方必须先读原文、只在**确实要改**时才写，
+    /// 因为 `SetItemStateChunk` 会让宿主重建这个 item（选择态、undo 点都会受影响）。
+    pub(crate) fn set_item_state_chunk(
+        &self,
+        chunk: &str,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<(), String> {
+        if std::thread::current().id() != self.host.thread {
+            return self
+                .host
+                .on_host(|| self.set_item_state_chunk(chunk, authorized))?;
+        }
+        self.verify(authorized)?;
+        if chunk.is_empty()
+            || chunk.len() > super::item_chunk::MAX_ITEM_CHUNK_BYTES
+            || chunk.contains('\0')
+        {
+            return Err("invalid item state to write".into());
+        }
+        let api = self
+            .host
+            .item_state
+            .as_ref()
+            .ok_or("REAPER item state API unavailable")?;
+        let text = std::ffi::CString::new(chunk).map_err(|_| "item state contains NUL")?;
+        if !checked(authorized, || unsafe {
+            (api.set)(self.item as *mut c_void, text.as_ptr(), true)
+        })? {
+            return Err(ITEM_STATE_REFUSED.into());
+        }
+        Ok(())
+    }
+    /// 读该 take 的音高包络。
+    ///
+    /// 【为什么优先读包络对象】take FX 放置下，要读的那个 item 恰好就是挂着本插件的 item，
+    /// 而它的 item chunk 里塞着整个插件状态（真机工程里是几百 KB）。包络自己的 chunk 只有
+    /// 几十个点、几十字节 —— 而且这条读数在"item chunk 写回被宿主拒绝"时仍然可用。
+    pub(crate) fn take_pitch_points(
+        &self,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<super::take_pitch::TakePitch, String> {
+        if let Some(envelope) = self
+            .host
+            .take_pitch_envelope(self.take as *mut c_void, authorized)?
+        {
+            let text = self.host.envelope_state_chunk(envelope, authorized)?;
+            return super::take_pitch::read_block(&text);
+        }
+        let chunk = self.item_state_chunk(authorized)?;
+        super::take_pitch::read_take_pitch(&chunk, &self.geometry.take_id)
+    }
+    /// 用 `points` 整块替换该 take 的音高包络（空列表 = 删除）。
+    ///
+    /// 【三条路径，按"最不打扰宿主"排序】
+    /// 1. **包络对象已存在** ⇒ `SetEnvelopeStateChunk`。真机实测这条路在 take FX（本插件
+    ///    在线、item chunk 写回被拒）时仍然成功，而且不重建 item —— 轨道 FX 下也更快、
+    ///    更安全（不会顺手重建同一条 item 上的别的 take FX）。
+    /// 2. **没有包络** ⇒ 借宿主自己的动作建一条（[`super::host_action`]）再走 1。
+    ///    两种放置通用，同样不重建 item。
+    /// 3. 动作不可用（老宿主/精简导出）⇒ 回到 item chunk 的逐字节路径。这条是历史行为，
+    ///    也是唯一不依赖宿主动作的"创建"，因此必须留着。
+    ///
+    /// 【为什么不再"先试 chunk、失败再建包络"】那条顺序在 take FX 下每次都要读一份几百 KB
+    /// 的 chunk 再吃一次必然的拒绝（宿主不允许重建带在线 ARA FX 的 item），最后才走包络 ——
+    /// 用户看到的是几秒钟的卡顿加一条吓人的日志。现在失败的那条路只在最后兜底。
+    pub(crate) fn write_take_pitch_points(
+        &self,
+        points: &[hifishifter_kernel::pitch_bridge::EnvelopePoint],
+        authorized: &impl Fn() -> bool,
+    ) -> Result<(), String> {
+        let take = self.take as *mut c_void;
+        if let Some(envelope) = self.host.take_pitch_envelope(take, authorized)? {
+            return self.host.set_envelope_state_chunk(
+                envelope,
+                &super::take_pitch::block_text(points),
+                authorized,
+            );
+        }
+        if points.is_empty() {
+            // 没有包络就没有可删的东西：连 item chunk 都不必读。
+            return Ok(());
+        }
+        let created =
+            self.host
+                .create_take_pitch_envelope(self.item as *mut c_void, take, authorized);
+        match created {
+            Ok(envelope) => self.host.set_envelope_state_chunk(
+                envelope,
+                &super::take_pitch::block_text(points),
+                authorized,
+            ),
+            Err(action_error) => {
+                let chunk = self.item_state_chunk(authorized).and_then(|chunk| {
+                    let rewritten = super::take_pitch::rewrite_take_pitch(
+                        &chunk,
+                        &self.geometry.take_id,
+                        points,
+                    )?;
+                    if rewritten == chunk {
+                        return Ok(());
+                    }
+                    self.set_item_state_chunk(&rewritten, authorized)
+                });
+                chunk.map_err(|chunk_error| format!("{action_error}; {chunk_error}"))
+            }
+        }
+    }
+    /// 宿主此刻报告的方向位（`PCM_Source_GetSectionInfo`）。
+    ///
+    /// 写回之后必须用它做一次"写→读→比"自校验：SECTION MODE 的取值属于宿主，
+    /// 仓库里没有第二份证据能替代这次实测。
+    pub(crate) fn reversed_now(&self, authorized: &impl Fn() -> bool) -> Result<bool, String> {
+        if std::thread::current().id() != self.host.thread {
+            return self.host.on_host(|| self.reversed_now(authorized))?;
+        }
+        self.verify(authorized)?;
+        // 【读不到方向位 = 正放，不是错误】`PCM_Source_GetSectionInfo` 对**没有
+        // SECTION/REVERSE 包装**的 take 返回 false —— 那是"从未倒放过"的正常形态，
+        // 与几何读取侧（`project_host_take_facts_locked` 对 `None` 按正放处理）是
+        // 同一条纪律。把它当错误会让 take FX 的动作路径在第一步（读 `before`）就
+        // 整批失败：真机日志 "the host did not report the take direction" 正是它，
+        // 而轨道 FX 走 chunk 路径没有这次预读，所以"轨道正常、take FX 被拒"。
+        //
+        // 方向判定与读取侧同一口径：方向位（若有）**或**负速率（REAPER 表达倒放的
+        // 另一个来源，见 `HostClipGeometry::play_rate_signed`）。
+        if let Some(facts) = self
+            .host
+            .take_direction_facts(self.take as *mut c_void, authorized)
+        {
+            return Ok(facts.reversed);
+        }
+        let geometry = self
+            .host
+            .geometry
+            .as_ref()
+            .ok_or("REAPER geometry API unavailable")?;
+        let rate = checked(authorized, || unsafe {
+            (geometry.take_value)(self.take as *mut c_void, c"D_PLAYRATE".as_ptr())
+        })?;
+        Ok(rate.is_finite() && rate < 0.0)
+    }
+    /// 这个 item 是不是**本实例自己挂着的那个**（take FX 下必然如此）。
+    ///
+    /// 【为什么它就是"item chunk 写不进去"的判据】真机取证（REAPER 7.85，见
+    /// [`super::take_env`] 的模块文档）：一个带着**在线 ARA FX** 的 item，
+    /// `SetItemStateChunk` 连"原样写回"都拒绝。take FX 放置下我们要改方向/包络的那个
+    /// item 正是挂着本插件的那个 —— 判据来自放置位置缓存（`placement().item()`），
+    /// 不需要再往宿主跑一趟，也不会把"其它 ARA 实例的 item"误判成自己的。
+    ///
+    /// 【读的是缓存】`Unbound`（还没求值）时返回 `false`：那就照历史路径先写 chunk，
+    /// 真被拒绝时调用方还有动作那条退路 —— 两条判据叠起来不会漏。
+    pub(crate) fn hosts_this_instance(&self) -> bool {
+        self.host.placement().item() == Some(self.item)
+    }
+
+    /// 借宿主自己的动作把这条 take 的**播放方向**切到 `reversed`（已经是它就不动）。
+    ///
+    /// 【为什么不自己写结构】倒放没有 setter：它是 `<SOURCE SECTION MODE 3>` 这层包装，
+    /// 而 chunk 那条路在 take FX 下被宿主拒绝。宿主的 `Item properties: Toggle take
+    /// reverse` 写出的结构与我们的编码逐字节一致（真机对照过，见
+    /// [`super::source_direction`]），于是"借它的动作"与"写同一份结构"等价。
+    ///
+    /// 【为什么先比再动】动作是 toggle：已经是对的方向时再跑一次会把用户刚改的倒放翻回去。
+    pub(crate) fn apply_take_direction(
+        &self,
+        reversed: bool,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<(), String> {
+        if self.reversed_now(authorized)? == reversed {
+            return Ok(());
+        }
+        self.host.run_item_action(
+            self.item as *mut c_void,
+            self.take as *mut c_void,
+            &super::host_action::TAKE_REVERSE,
+            authorized,
+        )
+    }
+
+    /// 按 take GUID 在**同一 item**上解析另一条 take 的指针（逐 take 写回用）。
+    ///
+    /// 【为什么在写回时才解析】UI 清单的 `UiItem.takes` 只保存几何、不保存指针；
+    /// 而且 take 指针在两次清单刷新之间可能已被宿主重建。写回时刻逐槽枚举、按
+    /// GUID 认领 —— 与 `verify` 对 item/take 的"GUID 相等才算同一个对象"同一条
+    /// 纪律。找不到唯一匹配就报错：猜错 take 是工程损坏。
+    pub(crate) fn take_pointer_by_guid(
+        &self,
+        guid: &str,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<usize, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            let guid = guid.to_owned();
+            return self
+                .host
+                .on_host(move || self.take_pointer_by_guid(&guid, authorized))?;
+        }
+        self.valid(self.project, c"ReaProject*", authorized)?;
+        self.valid(self.item, c"MediaItem*", authorized)?;
+        let enum_api = self
+            .host
+            .take_enum()
+            .ok_or("REAPER take enumeration API unavailable")?;
+        let count = checked(authorized, || unsafe {
+            (enum_api.count)(self.item as *mut c_void)
+        })?;
+        if !(0..=super::ui_inventory::MAX_TAKES).contains(&count) {
+            return Err("take inventory budget exceeded".into());
+        }
+        let geometry = self
+            .host
+            .geometry
+            .as_ref()
+            .ok_or("REAPER geometry API unavailable")?;
+        if guid.len() != 38 {
+            return Err("invalid captured host take GUID".into());
+        }
+        for slot in 0..count {
+            let take = checked(authorized, || unsafe {
+                (enum_api.at)(self.item as *mut c_void, slot)
+            })?;
+            if take.is_null() {
+                continue;
+            }
+            let mut bytes = [0_u8; 64];
+            let matched = checked(authorized, || unsafe {
+                (geometry.take_guid)(take, c"GUID".as_ptr(), bytes.as_mut_ptr().cast(), false)
+            })? && bytes[..guid.len()] == *guid.as_bytes()
+                && bytes[guid.len()] == 0;
+            if matched {
+                return Ok(take as usize);
+            }
+        }
+        Err("the requested take is gone from the host item".to_string())
+    }
+
+    /// 对**任意一条 take**（按指针）写白名单数值字段。
+    ///
+    /// 与 [`Self::set_take`] 的差别只有目标：那是绑定 take，这一条服务逐 take 写回
+    /// （声道模式落在用户点的那一条上，而不是永远落在 active take）。字段白名单
+    /// 两侧同源，指针在使用前由 [`Self::take_pointer_by_guid`] 按 GUID 现场认领。
+    pub(crate) fn set_take_pointer_value(
+        &self,
+        take: usize,
+        name: &CStr,
+        value: f64,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<(), String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            let name = name.to_owned();
+            return self
+                .host
+                .on_host(move || self.set_take_pointer_value(take, &name, value, authorized))?;
+        }
+        self.valid(self.project, c"ReaProject*", authorized)?;
+        self.valid(self.item, c"MediaItem*", authorized)?;
+        self.valid(take, c"MediaItem_Take*", authorized)?;
+        if !matches!(name.to_bytes(), b"I_CHANMODE" | b"D_STARTOFFS") {
+            return Err("unsupported host take field".into());
+        }
+        if !value.is_finite() {
+            return Err("nonfinite host take edit".into());
+        }
+        let api = self.api()?;
+        if !checked(authorized, || unsafe {
+            (api.1.set_take)(take as *mut c_void, name.as_ptr(), value)
+        })? {
+            return Err(format!(
+                "REAPER rejected take field {}",
+                name.to_string_lossy()
+            ));
+        }
+        Ok(())
+    }
+
+    /// 读**任意一条 take**此刻的方向位（逐 take 倒放的自校验用）。
+    ///
+    /// 与 [`Self::reversed_now`] 同一口径：方向位（若有）或负速率；读不到方向位
+    /// 按正放处理（"从未倒放过"是正常形态，不是错误）。
+    pub(crate) fn take_reversed_now(
+        &self,
+        take: usize,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<bool, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            return self
+                .host
+                .on_host(move || self.take_reversed_now(take, authorized))?;
+        }
+        self.valid(take, c"MediaItem_Take*", authorized)?;
+        if let Some(facts) = self
+            .host
+            .take_direction_facts(take as *mut c_void, authorized)
+        {
+            return Ok(facts.reversed);
+        }
+        let geometry = self
+            .host
+            .geometry
+            .as_ref()
+            .ok_or("REAPER geometry API unavailable")?;
+        let rate = checked(authorized, || unsafe {
+            (geometry.take_value)(take as *mut c_void, c"D_PLAYRATE".as_ptr())
+        })?;
+        Ok(rate.is_finite() && rate < 0.0)
+    }
+
+    /// 借宿主自己的动作把**任意一条 take**的方向切到 `reversed`（已经是它就不动）。
+    ///
+    /// [`Self::apply_take_direction`] 只作用于绑定 take；逐 take 倒放的目标是兄弟
+    /// take —— 宿主动作作用于 item 的 active take，所以入口先把 `I_CURTAKE` 切到
+    /// 目标、跑完切回来（[`super::host_action::NativeHost::run_item_action`] 的
+    /// 既有纪律，音高包络创建走的就是同一条路）。
+    pub(crate) fn apply_take_direction_on(
+        &self,
+        take: usize,
+        reversed: bool,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<(), String> {
+        if self.take_reversed_now(take, authorized)? == reversed {
+            return Ok(());
+        }
+        self.host.run_item_action(
+            self.item as *mut c_void,
+            take as *mut c_void,
+            &super::host_action::TAKE_REVERSE,
+            authorized,
+        )
+    }
+
+    /// 宿主几何 API 读数束（兄弟 take 的 SOFFS/LENGTH/PLAYRATE/I_CHANMODE 读用）。
+    ///
+    /// 【为什么不是 `api()`】`api()` 还要求写 API 存在；兄弟 take 的**读数**在
+    /// 只读宿主上也成立，不该被写能力门挡住。
+    pub(crate) fn host_geometry_api(&self) -> Option<&super::GeometryApi> {
+        self.host.geometry.as_ref()
+    }
+
+    /// 读任意一条 take 的方向事实（`PCM_Source_GetSectionInfo`）。
+    pub(crate) fn host_take_direction_facts(
+        &self,
+        take: *mut c_void,
+        authorized: &impl Fn() -> bool,
+    ) -> Option<super::TakeDirectionFacts> {
+        self.host.take_direction_facts(take, authorized)
+    }
+
+    /// 读任意一条 take 的媒体总时长（`GetMediaSourceLength`）。
+    pub(crate) fn host_take_source_length(
+        &self,
+        take: *mut c_void,
+        authorized: &impl Fn() -> bool,
+    ) -> Option<f64> {
+        self.host.take_source_length(take, authorized)
+    }
+
+    /// 绑定 take 的指针（回滚要区分"这条写的是绑定 take 还是兄弟 take"）。
+    pub(crate) fn bound_take(&self) -> usize {
+        self.take
+    }
+
+    /// 宿主是否具备 take 字段写能力（逐 take 声道模式预检用；语义同
+    /// `NativeHost::can_edit_clips`）。
+    pub(crate) fn host_can_write_take_fields(&self) -> bool {
+        self.host.can_edit_clips()
+    }
+
     /// 只重命名当前真实active take；字符串通过REAPER官方setter写入，不改HFS孤立名称。
     pub(crate) fn set_take_name(
         &self,

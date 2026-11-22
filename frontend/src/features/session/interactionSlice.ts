@@ -129,20 +129,12 @@ interface InteractionRoot {
 
 export const selectClipGeometryPreview = (state: InteractionRoot) =>
     state.interaction.clipGeometryPreview;
-export const selectClipGeometryPreviewOrigin = (state: InteractionRoot) =>
-    state.interaction.clipGeometryPreview?.origin ?? null;
 export const selectClipGeometryPreviewClips = (state: InteractionRoot) =>
     state.interaction.clipGeometryPreview?.clips ?? null;
-export const selectLoudnessFetchHeld = (state: InteractionRoot) =>
-    state.interaction.loudnessFetchHeld;
 export const selectPianoRollSelection = (state: InteractionRoot) =>
     state.interaction.pianoRollSelection;
-export const selectPianoRollLoadingById = (state: InteractionRoot) =>
-    state.interaction.pianoRollLoadingById;
 export const selectAnyPianoRollLoading = (state: InteractionRoot): boolean =>
     Object.values(state.interaction.pianoRollLoadingById).some(Boolean);
-export const selectActiveEditorWindow = (state: InteractionRoot) =>
-    state.interaction.activeEditorWindow;
 export const selectFolderImportProgress = (state: InteractionRoot) =>
     state.interaction.folderImportProgress;
 

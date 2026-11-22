@@ -52,16 +52,22 @@ export function resolveStatusText(status: string, statusKey: StatusKeyMap, t: Tr
     }
 
     // 假立体声扫描：分数形计数（{m}=已折叠/可折叠数，{n}=总数）+ 试扫/实扫两种
-    // 变体。形如 "Fake-stereo scan: 3/5 folded"。
-    const scan = status.match(/^Fake-stereo scan: (\d+)\/(\d+) (foldable|folded)$/);
+    // 变体。形如 "Fake-stereo scan: 3/5 folded"；"扫描过但读不出音频"的尾部计数
+    // （clipState 写作 ", N unreadable"）可选出现 —— 同一条扫描既可能只报分数，
+    // 也可能带上未读数，两段要各自成句（未读数走复数模板）。
+    const scan = status.match(
+        /^Fake-stereo scan: (\d+)\/(\d+) (foldable|folded)(?:, (\d+) unreadable)?$/,
+    );
     if (scan) {
         const key =
             scan[3] === "foldable"
                 ? "status_fake_stereo_scan_foldable"
                 : "status_fake_stereo_scan_folded";
-        return t(key)
+        const main = t(key)
             .replace("{m}", scan[1] ?? "0")
             .replace("{n}", scan[2] ?? "0");
+        if (scan[4] === undefined) return main;
+        return main + t("status_fake_stereo_scan_unreadable", Number(scan[4]));
     }
 
     // 目录导入的收尾汇总：两个数量（成功 / 失败）。失败数让用户知道"有东西没进来"，
@@ -71,6 +77,17 @@ export function resolveStatusText(status: string, statusKey: StatusKeyMap, t: Tr
         return t("status_folder_import_summary")
             .replace("{m}", folderImport[1] ?? "0")
             .replace("{n}", folderImport[2] ?? "0");
+    }
+
+    // 分轨导出的收尾汇总：路径（数据，原样保留）+ 轨道数（UI 文案，回填 {n}）。
+    // audio.ts 写作 "Export separated done — <dir> (N tracks)"；没有输出目录时
+    // 只有前缀，走 statusKey 前缀匹配。不带 {count} 复数形态：目录收尾汇总里
+    // 数字几乎总是 >1，且 {path} 占位符在复数模板里不被目录完整性测试允许。
+    const separated = status.match(/^Export separated done — (.+) \((\d+) tracks\)$/);
+    if (separated) {
+        return t("status_export_separated_summary")
+            .replace("{path}", separated[1] ?? "")
+            .replace("{n}", separated[2] ?? "0");
     }
 
     // 带数量的状态：提取数字回填占位符模板（如 "Waveform cache cleared (3 files)"）。

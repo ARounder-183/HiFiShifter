@@ -180,7 +180,7 @@ export function useLiveParamEditing(args: {
         //
         // 【未提交的覆盖层必须重锚】它承载的是**用户正在画的笔画**。旧实现在这里
         // 无条件 `pv.edit.slice()` —— 窗口被换掉时笔画整份清零，正是"轨迹不画"
-        // 的直接原因（见 docs/plans/2026-09-26-volume-dyn-drag-trail-fix.md §1.1）。
+        // 的直接原因。
         // 重锚把已画的帧按绝对帧号搬进新窗口；未动的帧自动跟随新基准。
         //
         // 【已提交的覆盖层不重锚】它只是"等快照追上"的占位（值就是刚提交的曲线），
@@ -272,8 +272,7 @@ export function useLiveParamEditing(args: {
                 // 【不可达的不变量哨兵】`ensureLiveEditBase` 负责让覆盖层与新窗口
                 // 对齐（同键复用、换窗口重锚），所以这里本不该命中。旧实现在此
                 // **静默 return** —— 不写、不报错，于是"画音量 / 动态时轨迹不画"
-                // 只能靠肉眼复现（见 docs/plans/2026-09-26-volume-dyn-drag-trail-fix.md
-                // 的 §1.1 与阶段 3）。改为可观测，任何回归在开发期立刻暴露。
+                // 只能靠肉眼复现。改为可观测，任何回归在开发期立刻暴露。
                 warnLiveEditWindowMismatch(pv.key, cur?.key ?? null);
                 return;
             }

@@ -189,6 +189,8 @@ pub(crate) mod alloc_probe {
 #[global_allocator]
 static TEST_ALLOCATOR: alloc_probe::CountingAllocator = alloc_probe::CountingAllocator;
 
+#[path = "import/paths.rs"]
+mod import_paths;
 #[cfg(target_os = "linux")]
 mod linux_clipboard;
 mod project_fragment;

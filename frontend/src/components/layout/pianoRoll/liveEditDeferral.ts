@@ -4,7 +4,7 @@
  * ## 为什么要有这份台账
  *
  * 笔画进行中绝不能换掉 `paramView`：live 覆盖层一旦失去窗口，正在画的轨迹就会
- * 消失（见 docs/plans/2026-09-26-volume-dyn-drag-trail-fix.md）。因此所有
+ * 消失。因此所有
  * 后端驱动的变更入口（取数发起 / 落地、显式立即取数、`paramsEpoch` 触发的重取）
  * 都改为"**只记待办、不做动作**"，等 pointer-up 由
  * `usePianoRollData.notifyLiveEditEnded()` 统一补触发。

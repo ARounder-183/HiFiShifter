@@ -474,6 +474,14 @@ fn hann_window(len: usize) -> Vec<f32> {
 /// 25 cents 的量化误差远低于人耳对共振峰位置的 JND。
 const KEY_SHIFT_QUANTUM_SEMITONES: f32 = 0.25;
 
+/// 共振峰偏移曲线值的合法范围（cents）。
+///
+/// UI 描述符与工程值域钉在 ±1200（`synth_clip_cache` 的 v5 失效说明），内核在
+/// **唯一的 cents→keyShift 换算点**（[`formant_shifts_for_frames`])再钉一次：
+/// 工程文件是外部输入，一个越界值会被换算成极端 keyShift，把受影响帧的分析窗
+/// 退化到 [`shift_n_fft`] 的下限 n_fft=4，静默产出垃圾 mel。
+const FORMANT_SHIFT_CENTS_LIMIT: f32 = 1200.0;
+
 /// 量化 keyShift 到有限档位。
 ///
 /// 【为什么必须量化】连续曲线会让每帧产出不同的 `n_fft`，导致逐帧重建 FFT plan。
@@ -2096,7 +2104,16 @@ pub fn formant_shifts_for_frames(
     (0..frames)
         .map(|i| {
             let abs_t = start_sec + (i as f64) * hop_sec;
-            quantize_key_shift(formant_shift_at_time(abs_t) / 100.0)
+            // 【越界值在换算入口钉住】UI 描述符把共振峰偏移钉在 ±1200 cents，但工程
+            // 文件是外部输入（JSON 允许 1e9）：一个越界值会被换算成极端 keyShift，
+            // 把受影响帧的分析窗退化到 `shift_n_fft` 的下限 n_fft=4（bin_scale 放大
+            // 数百倍），静默产出垃圾 mel。在唯一的 cents→keyShift 换算点拉回合法
+            // 档位，非有限值交给 [`quantize_key_shift`] 归零。
+            quantize_key_shift(
+                formant_shift_at_time(abs_t)
+                    .clamp(-FORMANT_SHIFT_CENTS_LIMIT, FORMANT_SHIFT_CENTS_LIMIT)
+                    / 100.0,
+            )
         })
         .collect()
 }
@@ -3696,6 +3713,27 @@ mod tests {
                 "n_fft must shrink for -12"
             );
         }
+    }
+
+    /// 越界/非有限曲线值必须在换算入口拉回合法档位。
+    ///
+    /// 【为什么必须钉住】工程文件是外部输入：1e9 cents 换算成极端 keyShift 后，
+    /// `shift_n_fft` 把分析窗退化到下限 n_fft=4（bin_scale 放大数百倍），受影响
+    /// 帧静默产出垃圾 mel —— 拉回 ±1200 档位后同样的曲线只会给出最大合法偏移。
+    #[test]
+    fn formant_shifts_clamp_out_of_range_curve_values() {
+        let curve_up = |_: f64| -> f32 { 1.0e9 };
+        let shifts = formant_shifts_for_frames(&curve_up, 0.0, 0.01, 4);
+        assert!(shifts.iter().all(|&s| (s - 12.0).abs() < 1e-4));
+
+        let curve_down = |_: f64| -> f32 { -1.0e9 };
+        let shifts = formant_shifts_for_frames(&curve_down, 0.0, 0.01, 4);
+        assert!(shifts.iter().all(|&s| (s + 12.0).abs() < 1e-4));
+
+        // 非有限值归零（quantize_key_shift 的既有语义），不得产出极端档位。
+        let curve_nan = |_: f64| -> f32 { f32::NAN };
+        let shifts = formant_shifts_for_frames(&curve_nan, 0.0, 0.01, 4);
+        assert!(shifts.iter().all(|&s| s == 0.0));
     }
 
     /// 曲线按绝对时间采样，且量化生效。

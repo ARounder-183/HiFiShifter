@@ -237,6 +237,8 @@ impl ExtensionOwner {
             prune_before: 0,
             // 预览 cursor 是本 pass 的本地时间轴，从第一块起就可信。
             position_trusted: true,
+            // 预览/离线 pass 没有"喂入领先播放头"的形状：位置就是发布位置。
+            playhead_offset: 0,
             publish_deferred: false,
             transport_generation: self.transport_generation.load(Ordering::Acquire),
             preview: !offline,
@@ -348,6 +350,7 @@ impl ExtensionOwner {
                 prune_before: 0,
                 // 零帧块不写样本：位置也不该发布（否则一次参数 flush 会把光标推到 raw）。
                 position_trusted: false,
+                playhead_offset: geometry.playhead_offset.load(Ordering::Acquire),
                 publish_deferred: true,
                 transport_generation: self.transport_generation.load(Ordering::Acquire),
                 preview: false,
@@ -361,7 +364,10 @@ impl ExtensionOwner {
         let last_raw = geometry.last_raw_start.load(Ordering::Acquire);
         let last_continuous = geometry.last_continuous.load(Ordering::Acquire);
         let last_music = f64::from_bits(geometry.last_music_bits.load(Ordering::Acquire));
-        let last_source = PositionSource::from_code(geometry.last_source.load(Ordering::Acquire))
+        // 【读后未用】它此前参与 resync 的旁证判定；判据换成 `advance_before` 之后
+        // 只剩诊断读数。保留加载会让"这块的来源是什么"永远可见（trace/ring 还在读），
+        // 但本函数不再引用 —— 前缀下划线以免未用告警。
+        let _last_source = PositionSource::from_code(geometry.last_source.load(Ordering::Acquire))
             .unwrap_or(PositionSource::Project);
         let anchor_before = geometry.anchor.load(Ordering::Acquire);
         let advance_before = geometry.frames_since_anchor.load(Ordering::Acquire);
@@ -463,6 +469,28 @@ impl ExtensionOwner {
         // 【首块起播容差的唯一正证据】见下面 `playing_rising` 的说明：只有本块真的
         // 有信号，才允许“kPlaying 滞后”的宿主在第一块上打开有界起点窗口。
         let audio_evidence = !geometry.last_block_silent.load(Ordering::Acquire);
+        // 【停播重复投递的判据先于窗口合成】同一条事实在下面还有一处读（块级诊断）；
+        // 窗口合成必须先问它，否则 FL Studio 式的"停播反复送同一份非零内容"会逐块
+        // 重开起点窗口。
+        let silent = geometry.last_block_silent.load(Ordering::Acquire);
+        let repeated_nonzero = geometry.unchanged_run.load(Ordering::Acquire) > 0 && !silent;
+        // 【kPlaying 滞后不止发生在首块】VEGAS 的 Capture 起播窗口实测延续 ~0.66 s：
+        // 音频按块长流入、raw 钉在播放头、kPlaying 迟迟不置位。`!had` 只覆盖流几何
+        // 重置后的第一块（现场 2026-11-22 take 3：武装块先到 ⇒ `had=true` ⇒ 整个窗口
+        // 一次都没开 ⇒ 32768 帧真实内容全部门控丢弃，take 只剩旗标升起后的正文）。
+        // 所以除了首块，还允许"武装且有内容"的块重开窗口：内容非静音 + 非重复投递
+        // （排除 FL Studio 形状）+ 传输会话已收口（Idle/Paused/Stopped，排除正在播放
+        // 中的波动）。窗口本身有 1 s 上限，误开的代价有界。
+        //
+        // 【为什么要求武装或有素材】停播状态下"有内容的块"还有一种完全不同的成因：
+        // 输入监听（宿主没播，FX 实时返回输入）。监听时位置**不该**前进 —— 冻结才是
+        // 正确的。武装（用户正在录）或有素材（捕获模式回放监听宿主的起播）才有理由
+        // 把这段流动当作播放时间。
+        let stream_window_eligible = !playing
+            && !is_offline
+            && audio_evidence
+            && !repeated_nonzero
+            && (self.capture().is_armed() || self.capture().has_material());
         let decision = session.observe(SessionInput {
             // 离线 pass 有自己的 cursor；它不需要 kPlaying 也必须在走。
             playing: playing || is_offline,
@@ -480,7 +508,12 @@ impl ExtensionOwner {
             // 这次容差只影响“没播放”的那段，不会吞掉任何一帧真实音频。
             playing_rising: playing_rising
                 || recording_rising
-                || (!had && !playing && !is_offline && audio_evidence),
+                || (!had && !playing && !is_offline && audio_evidence)
+                || (stream_window_eligible
+                    && matches!(
+                        phase_before,
+                        SessionPhase::Idle | SessionPhase::Paused | SessionPhase::Stopped
+                    )),
             recording_rising,
             // 域切换不是 seek：不能让它触发 host_reset 的新 epoch。
             host_reset: host_rewound && !clock.switched,
@@ -518,9 +551,8 @@ impl ExtensionOwner {
 
         // 【停播重复投递的判据】同一份**非零**内容逐块重复 ⇒ 宿主在停播时反复送同一
         // 段缓冲，那不是播放时间。它与 VEGAS 起播窗口的区分点是内容：窗口送的是静音，
-        // FL Studio 停播送的是同一份非零内容。
-        let silent = geometry.last_block_silent.load(Ordering::Acquire);
-        let repeated_nonzero = geometry.unchanged_run.load(Ordering::Acquire) > 0 && !silent;
+        // FL Studio 停播送的是同一份非零内容。（`silent` / `repeated_nonzero` 已在
+        // 会话判定之前读出 —— 见 `stream_window_eligible` —— 此处直接复用。）
 
         let mut position = clock.local_start;
         let mut source = if time.cycle_active {
@@ -776,6 +808,78 @@ impl ExtensionOwner {
             geometry.clock_deltas.fetch_add(1, Ordering::Relaxed);
         }
 
+        // ── UI 播放头修正量（`playhead_offset`）───────────────────────
+        //
+        // 【喂入位置 ≠ 宿主 UI 播放头】VEGAS 的渲染缓存让 FX 的喂入位置领先宿主自己的
+        // 播放头：按下播放后先把 ~0.66 s 音频灌进 FX（kPlaying=0、raw 钉在按下点），
+        // 随后 kPlaying 连同**前进了 Δ 的传输位**一起交给插件（现场 Δ=36016~38084 帧）。
+        // 宿主光标在这段时间里从按下点往前走了一段 —— 走多远取决于宿主启动播放的耗时，
+        // 插件读不到。所以修正量**不是** Δ，也不是简单的 Δ−W：
+        //
+        //   * 预热窗内（kPlaying=0、raw 钉住、位置在推进）：offset = position − raw。
+        //     发布位 = raw —— 光标钉在按下点；
+        //   * 停播那一块：宿主把光标停在 raw_start，而喂入位已经走到 last_position。
+        //     两者之差就是**实测的渲染领先量** `render_lead`（只在"上一块还在播"的
+        //     停播跃迁上可信；seek 落点不算），下一次升起直接用它；
+        //   * kPlaying 升起那一块：有实测领先量就用它；没有（本次会话还没停过播）
+        //     就发布**预热窗中点** —— 光标落在 [按下点, 窗口终点] 之间的无偏估计。
+        //     扣整个 Δ 会左偏（现场 -0.6 s），按窗口终点发布会右偏（现场 +0.3 s）；
+        //   * 新 pass / 新流 / 停播假位置：归零（喂入域重新对齐，无窗口证据不修正）。
+        //     播放中保持不变（两边都按 1× 前进，差值恒定）。
+        //
+        // 【为什么只在 UI 发布上生效】磁带记账必须留在**喂入域** —— 捕获素材落点的
+        // 正确性（昨天修的"起拍错位"）就建立在"位置 = 宿主喂这块内容的工程位置"上。
+        // 修正量只跟着 `publish_capture_block` 与 realtime 通道的 UI 读数走。
+        let was_playing = geometry.last_playing.load(Ordering::Acquire);
+        // 【先量领先量，再处理"停播归零"】停播那一块本身 `transport_active=false`，
+        // 走不到下面的 `!playing` 分支；但它正是唯一能测出宿主渲染领先量的时刻：
+        // 宿主把光标停在 raw_start，而喂入位已经走到 last_position。只在"上一块还在播"
+        // 的停播跃迁上量（seek 落点不是领先量），且必须落在上一次预热窗之内。
+        // 【为什么允许 new_pass】停播的位置回退本身就可能被时钟判成 seek/new pass；
+        // 那不影响"这是停播"这个事实 —— `was_playing && !playing` 才是判据。
+        if had && !playing && was_playing && raw_start != last_raw {
+            let lead = last_position.saturating_sub(raw_start);
+            let window = geometry.pre_roll_window.load(Ordering::Acquire);
+            if lead >= 0 && lead <= window {
+                geometry.render_lead.store(lead, Ordering::Release);
+                geometry.render_lead_valid.store(true, Ordering::Release);
+            }
+        }
+        let mut playhead_offset = geometry.playhead_offset.load(Ordering::Acquire);
+        if !had || new_pass || !transport_active {
+            // 新流 / 新 pass / 停播：喂入域与宿主读数对齐，修正量作废。
+            playhead_offset = 0;
+        } else if !playing {
+            if raw_start == last_raw && position != last_position {
+                // 预热窗：raw 钉住而位置按块推进（计数器或 continuous/music 回退），
+                // 宿主光标此刻停在 raw 上 —— 修正量就是位置领先它的量。窗口宽度同时
+                // 记下来，作为停播时实测领先量的合理上界。
+                let window = position.saturating_sub(raw_start).max(0);
+                if window > 0 {
+                    geometry.pre_roll_window.store(window, Ordering::Release);
+                }
+                playhead_offset = window;
+            } else if raw_start != last_raw {
+                // 停播假位置（VEGAS 停播报远处位置，已被冻结拒收）：不是窗口证据。
+                playhead_offset = 0;
+            }
+        } else if playing_rising && playhead_offset != 0 {
+            // 升起：喂入位一次性跳到 按下点+Δ。宿主光标从按下点走了多远只有宿主知道；
+            // 有实测领先量就用它，没有就取预热窗中点。发布位 = raw_start − offset，
+            // 因此 offset = Δ − 光标走过的距离。
+            let delta = raw_start.saturating_sub(last_raw).max(0);
+            let window = last_position.saturating_sub(last_raw).max(0);
+            let lead = if geometry.render_lead_valid.load(Ordering::Acquire) {
+                geometry.render_lead.load(Ordering::Acquire)
+            } else {
+                // 中点：发布位 = 按下点 + W/2。
+                delta.saturating_sub(window / 2)
+            };
+            // 缓存设置变化会让旧领先量落在本次窗口之外；夹回 [Δ−W, Δ] 保证发布位
+            // 仍在 [按下点, 按下点+W] 内（W=0 时退化为不修正）。
+            playhead_offset = lead.clamp(delta.saturating_sub(window), delta);
+        }
+
         geometry.seen.store(true, Ordering::Release);
         geometry.last_start.store(position, Ordering::Release);
         geometry.last_frames.store(frames32, Ordering::Release);
@@ -784,6 +888,9 @@ impl ExtensionOwner {
             .store(position.saturating_add(frames as i64), Ordering::Release);
         geometry.last_position.store(position, Ordering::Release);
         geometry.last_raw_start.store(raw_start, Ordering::Release);
+        geometry
+            .playhead_offset
+            .store(playhead_offset, Ordering::Release);
         geometry.last_continuous.store(
             time.continuous.unwrap_or(last_continuous),
             Ordering::Release,
@@ -828,16 +935,19 @@ impl ExtensionOwner {
 
         // 【resync：宿主纠正了我们数出来的位置】这不是 seek，是记账纠正 —— 真正的
         // 差值判定在捕获侧（它才持有 `expected_next`），这里只给上限与意图。
+        //
+        // 【上限为什么取 `counted_before ∨ advance_before`】捕获侧要回答的是"我们的
+        // 时钟最多可能错过多少帧"。那个数是**我们自己推进过的全部帧**——无论是
+        // 计数器（R2）还是 continuous/music 回退推进的；只数计数器会在"窗口由 music
+        // 回退推进"的形状里读出 0（VEGAS 起播窗口正是这个形状：位置回退被 music
+        // 表接管，counted_run 被清零），于是 ~5.3k 帧的记账差被判成 Gap，take 在
+        // 接缝处断开。`advance_before` 正是"锚点以来我们自己加的帧数"，两者取大。
         let resync = had
             && !time.cycle_active
             && !new_pass
             && !time_base_switch
             && host_moved
-            && (counted_before > 0
-                || matches!(
-                    last_source,
-                    PositionSource::Continuous | PositionSource::Music
-                ));
+            && (counted_before > 0 || advance_before > 0);
         StreamBlock {
             position,
             raw_start,
@@ -847,7 +957,7 @@ impl ExtensionOwner {
             new_pass,
             activity_moving,
             resync,
-            resync_limit_frames: counted_before,
+            resync_limit_frames: counted_before.max(advance_before),
             preceding_silent_frames,
             counted,
             discard_pre_roll,
@@ -862,6 +972,7 @@ impl ExtensionOwner {
             rebase_frames,
             prune_before: clock.prune_before,
             position_trusted: clock.position_trusted,
+            playhead_offset,
             publish_deferred: clock.publish_deferred,
             transport_generation: self.transport_generation.load(Ordering::Acquire),
             preview: false,
@@ -957,9 +1068,17 @@ impl ExtensionOwner {
 
     /// 门控问“本块是否可以不清空”。
     ///
-    /// 【真值表】ARA 实例：`false`（保持“停播即静音”的既有语义，由调用方的
-    /// `!kPlaying` 决定）。未绑定实例：offline/prefetch 恒真（它们的输出稍后才被
-    /// 播放，不能用此刻的传输状态挖洞）；实时流看本块证据。
+    /// 【真值表】offline / prefetch：恒真（它们的输出稍后才被播放，不能用此刻的传输
+    /// 状态挖洞）。实时流：`kPlaying` **或** 位置判据（[`Self::emit_allowed`]）任一成立就
+    /// 出声 —— 两者都是"这一块会被真的播出来"的证据，缺一个就整块写零。
+    ///
+    /// 【为什么实时流不能只看 `kPlaying`】`kPlaying` 与 `projectTimeSamples` 不是原子
+    /// 更新的（见 [`Self::capture_transport_running`] 的说明），而且宿主会在**预取 / 擦洗 /
+    /// 循环折返**这些"输出稍后照播"的块上合法地报 `kPlaying == 0`。此前 bound 实例的
+    /// 实时流只读 `kPlaying`：那些块被 `apply_gate_fade_out` 写满整块零 —— 用户听到的就是
+    /// "每隔一小会儿一个静音断点，又恢复正常"。位置判据是宿主无关的硬事实（真在播就必然
+    /// 前进），把它加进来之后，只有"既没有播放位、位置也不推进"才会静音，而那正是
+    /// "停播光标反复重写同一小段"的嗡鸣形态。
     pub(crate) fn capture_should_emit(
         &self,
         evidence: Option<BlockEvidence>,
@@ -967,15 +1086,16 @@ impl ExtensionOwner {
     ) -> bool {
         if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
             // 【为什么 ARA 实例也要区分流】REAPER 在预取 / 擦洗 / 循环折返时会
-            // **合法地**以 `kPlaying == 0` 调用 `process`，而预取块会被它缓存并真的
-            // 播出来 —— 按 `kPlaying` 清零等于往缓存里写静音（"有概率完全没声音"）。
+            // **合法地**以 `kPlaying == 0` 调用 `process`，而这些块会被它缓存并真的播
+            // 出来 —— 按 `kPlaying` 清零等于往缓存里写静音（"有概率完全没声音"）。
             // offline / prefetch 与 Capture 实例同一判据：输出稍后才被播放，此刻的
-            // 传输状态不适用。实时流仍保持 ARA 的"停播即静音"语义：光标处的重复块
-            // 不该循环出声，而真实起播由 `kPlaying` 与捕获侧证据驱动。
+            // 传输状态不适用。实时流保留"停播即静音"：光标处的重复块不该循环出声，
+            // 但判据换成"`kPlaying` 或位置在推进"（见函数文档）—— 只认播放位会让
+            // 上面那三种块在一部分宿主上照样被清成零。
             return match evidence {
                 Some(evidence) => match evidence.stream {
                     ProcessStream::Offline | ProcessStream::Prefetch => true,
-                    ProcessStream::Realtime => playing,
+                    ProcessStream::Realtime => playing || Self::emit_allowed(Some(evidence)),
                 },
                 None => playing,
             };
@@ -1332,8 +1452,15 @@ impl ExtensionOwner {
                 // 保持上一位置，等域解析完成再发布。
                 clock.hold_capture();
             } else {
+                // 【发布 UI 播放头，不是喂入位置】`position` 是宿主喂这块内容的工程
+                // 位置（磁带记账域）；VEGAS 的渲染缓存喂入领先它自己的播放头一个预热
+                // 窗（见 `playhead_offset` 的维护说明），UI 必须减掉它才能与宿主光标
+                // 对齐。无窗口的宿主（REAPER 等）修正量恒为 0，行为不变。
                 clock.publish_capture_block(
-                    stream_block.position as f64 / rate.max(1.0),
+                    (stream_block
+                        .position
+                        .saturating_sub(stream_block.playhead_offset)) as f64
+                        / rate.max(1.0),
                     recording || stream == ProcessStream::Offline || stream_block.preview,
                     stream == ProcessStream::Offline,
                     stream_block.preview,
@@ -1386,6 +1513,7 @@ impl ExtensionOwner {
             capture_epoch: self.capture().capture_epoch(),
             processing: processing.map_or(0, |block| block.kind.code()),
             position_trusted: stream_block.position_trusted,
+            playhead_offset: stream_block.playhead_offset,
             publish_deferred: stream_block.publish_deferred,
             prune_before: stream_block.prune_before,
             pass_sequence: self.pass_sequence.load(Ordering::Acquire),
@@ -1399,7 +1527,10 @@ impl ExtensionOwner {
     /// 【为什么留着它】它是 VST3 音频回调唯一认识的形状；真正的观察在
     /// [`Self::capture_observe_block`] 里。CLAP 侧从 `clap_audio_buffer_t` 直接造
     /// `InputBlock`，两边之后走的是同一段代码。
-    pub(crate) fn capture_observe(
+    /// # Safety
+    /// `data` 必须指向宿主本次音频回调传入、且本次调用期间可读的
+    /// `ProcessData`（与 [`crate::audio_abi::validate`] 的前提一致）。
+    pub unsafe fn capture_observe(
         &self,
         data: *mut crate::audio_abi::ProcessData,
         context: crate::block_context::BlockContext,
@@ -1560,13 +1691,13 @@ impl ExtensionOwner {
         playing_rising: bool,
         recording_rising: bool,
     ) -> bool {
-        // 【为什么 bound 实例不参与这里的判据】它的"停播即静音"由
-        // `capture_should_emit` 直接读 `kPlaying` 决定（见那里的说明：预取/offline
-        // 恒真、实时流看播放位）。若这里也参与，`evidence.allow_output` 会在"停播
-        // 光标处的重复块"上翻假，把 ARA 的既有语义改掉。
-        if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
-            return true;
-        }
+        // 【bound 实例必须一起参与】此前这里对 ARA 实例直接返回真，理由是"它的
+        // 停播即静音由 `capture_should_emit` 读 `kPlaying` 决定"。而 `kPlaying` 在
+        // 预取 / 擦洗 / 循环折返上会被宿主合法地报成 0（见那里的说明），于是那条
+        // 通路既没有位置判据、又依赖一个不可靠的位 —— 每一块被误判的块都被整块
+        // 淡成零。现在两条通路共用同一个谓词（这也是 `emit_allowed` 文档要求的
+        // "三道门只认一个判据"）：位置在推进 ⇒ 这是新内容，绝不能因为播放位缺席
+        // 就丢掉；位置钉住且反复到达同一处 ⇒ 才是该淡出的嗡鸣形态。
         // 【零帧块不参与门控】它是参数 flush，不代表时间轴在走；把它算进
         // "连续多少块没推进"会让紧随其后的真实块被吞掉 10–20 ms。
         if block.frames == 0 {
@@ -1824,9 +1955,30 @@ impl ExtensionOwner {
             CaptureOutput::Untouched => {
                 let ready = self.processed_snapshot_ready();
                 self.note_bound_snapshot_fallback(!ready);
+                // 【layered 恒为真：bound 实例不得凭空写出静音】
+                //
+                // 这一支是 ARA 实例唯一会走到的输出通路。旧写法是 `layered: !ready`
+                // —— 快照没就绪时回退宿主输入，就绪之后改成"快照之外逐样本写 0"。
+                // 于是只要请求位置落在已发布快照的范围之外（越界预取、包尾对齐、
+                // 快照重建瞬间的旧原点），那一块就变成一串**真正的零**，而宿主会把它
+                // 烘进自己的 ARA 渲染缓存：之后每次播放都原样重放那些零，只有整段重渲
+                // （用户说的"重新加载"）才清掉。
+                //
+                // 【为什么"回退宿主输入"才是 ARA 的正确语义】ARA 的播放渲染器本来就
+                // 会收到这条 item 的**原始音频**作为输入总线，插件只负责"改哪一段"。
+                // 实测（REAPER 7.85，快照尚未发布的那一段）：我们写出去的每一块都与
+                // 源文件逐块峰值相同 —— 那就是这条输入总线。所以"我们没有内容"的地方，
+                // 宿主原声恰好就是宿主本来会播的东西；写 0 等于我们单方面把它吞掉。
+                // 反过来，宿主若在输入总线上给静音（ARA-only 宿主常这样），回退结果与
+                // 旧行为**逐样本相同** —— 这个改动只可能把静音换成原声，不可能把原声
+                // 换成静音。
+                //
+                // 【为什么这也让读数变真】`uncovered` / `input_peak` 只由分层拷贝记录。
+                // `layered == false` 时它们恒为 `0` / `n/a`，于是"这一块有多少帧不是我们"
+                // 在 ARA 通路上**从来不可见**——那正是"断断续续"查了三轮都没有读数的原因。
                 CaptureStage::Snapshot {
                     source: SnapshotSource::Processed,
-                    layered: !ready,
+                    layered: true,
                 }
             }
             CaptureOutput::Recording => {

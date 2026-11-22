@@ -70,6 +70,8 @@ export const initialState: SessionState = {
     showClipboardPreview: true,
     showParamValuePopup: true,
     showClipPitchOverlay: true,
+    // 自动改写宿主工程的功能默认关（见 SessionState 上的字段说明）。
+    reaperAutoTakePitchWrite: false,
     // 空映射 = 全部参数按倍率显示（历史行为）。
     paramAxisUnits: {},
     paramAxisDirections: {},

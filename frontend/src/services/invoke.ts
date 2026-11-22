@@ -240,6 +240,16 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             return { force: args[0] ?? false };
         case "plugin_refresh":
             return { force: args[0] ?? false };
+        case "plugin_heap":
+        case "import_native_audio_file":
+            // 两条都仅走 PluginHost 桥（后者还携带 File 附件，根本无法进 Tauri
+            // IPC；后端分别在 protocol::PAGE_HEAP / client.rs 的
+            // Some("import_native_audio_file") 与平台改写器处理）：载荷本身就是
+            // 命名参数对象，原样透传。运行时不会经 buildTauriArgs，登记是为
+            // 布线门禁的穷举契约服务 —— 调用点扫描现已覆盖 `?.invoke(` /
+            // 跨行 `.invoke(`，这三处（含 plugin_ready / undo_parameter_edit /
+            // redo_parameter_edit）此前全部漏扫。
+            return { ...((args[0] ?? {}) as Record<string, unknown>) };
         case "emit_ui_event":
             return { event: args[0], payload: args[1] };
 
@@ -534,6 +544,18 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
 
         case "update_pitch_reference":
             return { clipIds: args[0] };
+
+        case "import_host_take_pitch":
+        case "export_host_take_pitch":
+            // `tolerant` 只给"批量作用域"用（见 `useHostPitchBridge`）：单条片段走
+            // 时间轴右键时，映射不到宿主 take 必须**报错**而不是静默跳过 —— 用户点的是
+            // 那一条，跳过它等于什么都没发生。
+            return args[1] === undefined
+                ? { clipIds: args[0] }
+                : {
+                      clipIds: args[0],
+                      tolerant: (args[1] as { tolerant?: boolean }).tolerant === true,
+                  };
 
         case "select_clip":
             return { clipId: args[0] };
@@ -985,6 +1007,11 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 ...(args[1] !== undefined ? { frontendSettings: args[1] } : {}),
             };
 
+        case "pick_diagnostics_output_path":
+            // 保存对话框标题由前端按当前语言传入（与 open_audio_dialog_for_source
+            // 的 dialog_title 同一约定）；后端空串时回退系统默认标题。
+            return { dialogTitle: args[0] ?? null };
+
         case "export_layout_json":
             return { json: args[0] };
 
@@ -1060,6 +1087,9 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "mark_frontend_ready",
     "plugin_get_apply_state",
     "plugin_health",
+    // 插件形态页面首句话（仅走 PluginHost 桥，见 App.tsx 的 plugin_ready effect；
+    // 后端 protocol::PAGE_READY）。同样无参。
+    "plugin_ready",
     // 插件形态的 UI 就绪信号（无参，见 mount.tsx；后端 client.rs 的
     // plugin_ui_ready 分支）。此前漏登记，靠 invoke 的"零参 __unwired 兜底"
     // 恰好不炸，但违反布线纪律，且带参调用会直接抛 method not wired yet。
@@ -1121,19 +1151,22 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "open_project_dialog",
     "open_reaper_dialog",
     "open_vocalshifter_dialog",
-    "pick_diagnostics_output_path",
     "pick_directory",
     "pick_midi_output_path",
     "ping",
     // 播放从**引擎当前位置**起播：命令本身不再携带起播点（起播点是引擎事实，
     // 见 commands/playback.rs 的 resolve_play_start_sec），因此是无参命令。
     "play_original",
+    // 参数线撤销 / 重做（仅插件形态走 PluginHost 桥；后端在 editor/commands.rs
+    // 与 undo_timeline 同臂处理）。无参。
+    "redo_parameter_edit",
     "redo_timeline",
     "run_vocoder_benchmark",
     "start_background_render",
     "stop_audio",
     "stop_recording",
     "synthesize",
+    "undo_parameter_edit",
     "undo_timeline",
 ]);
 

@@ -69,6 +69,17 @@ const _: () = assert!(VOCODER_SMOKE_FRAMES < PITCH_SMOKE_FRAMES);
 /// （差 2000 倍）。烟测只需证明"EP 能跑通一次推理"，不需要真实批量。
 ///
 /// 取值须满足各模型对帧轴的整除约束：HNSEP 要求 `n_frames % 32 == 0`。
+///
+/// 【为什么按目标门控】整族烟测辅助函数只服务于**有 GPU 后端**的构建
+/// （Windows DirectML / linux-x86_64 与 macos-aarch64 的 WebGPU）。在没有 GPU
+/// 后端的目标（如 linux-aarch64）上它们是死代码，不门控就会在 CI 里刷出
+/// `never used` 警告。`test` 也在集合里：帧数约定由单元测试在任何目标上钉住。
+#[cfg(any(
+    test,
+    target_os = "windows",
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 fn smoke_probe_frames(role: OrtSessionRole) -> usize {
     match role {
         // 32 帧 = 一个完整 segment，是模型要求的最小合法长度。
@@ -93,11 +104,23 @@ fn smoke_probe_frames(role: OrtSessionRole) -> usize {
 /// 成功后烟测永不返回），而烟测在构建路径内 —— 超时值直接决定"渲染进度
 /// 卡在 0%"的时长。旧值 60s（且 strict 与回退两次尝试累计 120s）会让用户
 /// 以为应用永久卡死（实测用户在 20s 后强杀应用）。
+///
+/// 与 [`smoke_probe_frames`] 同属 GPU 烟测族：只在有 GPU 后端的目标上被引用。
+#[cfg(any(
+    target_os = "windows",
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 const SMOKE_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// 各 EP 的烟测超时：CoreML 的 MLProgram 首次推理包含图编译，健康路径也
 /// 可能长达数十秒，必须保持宽松；DirectML/WebGPU 的健康首次推理在秒级，
 /// 挂起必须快速检出。
+#[cfg(any(
+    target_os = "windows",
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 fn smoke_test_timeout(ep_name: &str) -> std::time::Duration {
     if ep_name == "CoreML" {
         std::time::Duration::from_secs(60)
@@ -392,7 +415,20 @@ pub fn set_async_session_prewarm(enabled: bool) {
 }
 
 /// 后台会话预热是否允许启动。
+///
+/// 【本 crate 的测试进程一律关掉】见 [`ASYNC_SESSION_PREWARM`] 的说明：测试进程
+/// 结束时没有收尾钩子，预热线程会在"建会话"的中途被拆掉。宿主侧（插件 / vst3 /
+/// clap）各自显式调 `set_async_session_prewarm(false)`；内核自己的测试二进制没有
+/// 这样的初始化点，于是任何一条**会走下发路径**的用例（例如 `ui_settings_apply` 里
+/// 验证"设置真的落到进程级单元"的那条）都会顺手放出几个构建线程 —— 它们抢的是
+/// `vocoder_ort_session` 的全局构建租约，而租约用例的 5 秒预算正好被一次 DML 会话
+/// 构建吃掉，表现为"空闲时租约必须可得"随机失败。
+///
+/// 关掉它不损失任何覆盖：会话仍然在首次真正使用时**惰性构建**。
 pub fn async_session_prewarm_enabled() -> bool {
+    if cfg!(test) {
+        return false;
+    }
     ASYNC_SESSION_PREWARM.load(std::sync::atomic::Ordering::Acquire)
 }
 
@@ -1516,6 +1552,14 @@ fn build_session_inner(
 /// platforms (WSL2 with Lavapipe, misconfigured drivers, headless
 /// systems) the EP registers successfully but runtime inference fails
 /// — this catches that early so we can fall back to CPU.
+///
+/// 与 [`smoke_probe_frames`] 同一族：调用点全在 GPU 构建分支里，没有 GPU
+/// 后端的目标（如 linux-aarch64）不编译它，免得死代码警告。
+#[cfg(any(
+    target_os = "windows",
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 fn smoke_test_gpu_session(
     mut session: Session,
     role: OrtSessionRole,

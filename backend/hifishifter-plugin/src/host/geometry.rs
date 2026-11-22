@@ -40,8 +40,8 @@ pub(crate) struct HostClipGeometry {
     /// 宿主 `D_PLAYRATE` 的**原始带符号**读数。
     ///
     /// 【为什么保留符号，而不是像 `playback_rate` 那样取幅值】REAPER 用**两种**
-    /// 方式表达倒放：负速率、或 `SECTION MODE 1`。独立 App 的方向判据是
-    /// `play_rate < 0 || section_mode > 0`（两个来源都要）；插件此前把符号
+    /// 方式表达倒放：负速率、或 `SECTION` 的 `MODE` 反向位（宿主自己写 `MODE 3`）。
+    /// 独立 App 的方向判据是 `play_rate < 0 || section_mode_reversed`（两个来源都要）；插件此前把符号
     /// `.abs()` 掉、只认方向位，于是"只用负速率表达倒放"的 take 被**静默按正放
     /// 渲染** —— 输出错的音频，而不是报错。
     ///
@@ -147,7 +147,7 @@ pub(crate) struct RenderFacts {
 /// 把两者放进同一个结构，是因为它们的作用相同（都会改变渲染结果、都必须推进
 /// `render_epoch`），而不是因为它们来自同一个 API。任何"ARA 能给出"的渲染输入都应在
 /// 这里登记，避免又出现"某一处忘了手动 bump"的缺口。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct RenderItemFacts {
     /// 方向（`PCM_Source_GetSectionInfo` 的 revOut）；读不到即正放。**仅原生扩展**。
     pub reversed: bool,
@@ -188,8 +188,8 @@ impl RenderFacts {
 /// 归装配器（`hifishifter_kernel::editor::assembly`）。
 ///
 /// 【为什么没有 take 时也要造一条】宿主没有 take 枚举接口时 `UiItem::geometry` 仍是
-/// **active take 的权威几何**（见该结构的说明）。空 take 列表会让装配器拿不到源窗口，
-/// 于是这条 clip 会显示成"偏移待定"——而它明明有几何。
+/// **本实例写入的那条 take 的权威几何**（见该结构的说明）。空 take 列表会让装配器拿不到
+/// 源窗口，于是这条 clip 会显示成"偏移待定"——而它明明有几何。
 pub(crate) fn item_row_from_host(
     item: &crate::host::UiItem,
     track_id: &str,
@@ -222,7 +222,17 @@ pub(crate) fn item_row_from_host(
         .iter()
         .map(|take| take_of(&take.geometry, &take.name, take.active, take.reversed))
         .collect();
-    let active_take = item.takes.iter().position(|take| take.active);
+    // 【本实例绑定的那条 take 优先】轨道 FX 下 `bound_take` 是 `None`，行为与改动前
+    // 完全一致（取宿主选中的 active take）。take FX 下它指向 `parent(2)` 那条 ——
+    // 而 clip 的 `active_take_id` / 循环周期 / 扁平投影都描述"本实例渲染的那条 take"，
+    // 取 active 会把它们指到**另一条** take 上（多 take item 上这正是"转换成功了但音高
+    // 落在别的 take"的另一半成因）。
+    let bound_take = item.bound_take.as_deref().and_then(|guid| {
+        item.takes
+            .iter()
+            .position(|take| take.geometry.take_id == guid)
+    });
+    let active_take = bound_take.or_else(|| item.takes.iter().position(|take| take.active));
     if takes.is_empty() {
         takes.push(take_of(
             &item.geometry,

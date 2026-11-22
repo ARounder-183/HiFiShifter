@@ -1,29 +1,32 @@
-﻿# 产品构建：前端 → App → VST3 bundle → 安装器暂存 → 合并安装器 / 便携包。
+﻿# Product build: frontend → App → VST3 bundle → installer staging → merged installer / portable zip.
 #
-# 产物只有一处：dist\。没有中间交付目录、没有构建清单、没有源码指纹 —— 构建产物的身份
-# 由它来自的那个 git 提交决定，不需要再写一份 JSON 去证明。
+# There is exactly one output location: dist\. No intermediate delivery directories, no build
+# manifests, no source fingerprints — an artifact's identity is decided by the git commit it came
+# from; there is no need to also write a JSON file to prove it.
 #
-#   .\scripts\build\build.ps1                     # App + VST3 + 合并安装器 + 便携包
-#   .\scripts\build\build.ps1 -Target App         # 只出 App 可执行文件（不打安装器）
-#   .\scripts\build\build.ps1 -Target Plugin      # 只出 VST3 bundle
-#   .\scripts\build\build.ps1 -Target Installer   # 只重打安装器（复用 dist\_stage）
-#   .\scripts\build\build.ps1 -SkipFrontend       # frontend\dist 已是最新
-#   .\scripts\build\build.ps1 -SkipVerify         # CI 只构建：跳过插件的黑盒自检
-#   .\scripts\build\build.ps1 -Configuration Debug   # debug 产物，不打包
+#   .\scripts\build\build.ps1                     # App + VST3 + merged installer + portable zip
+#   .\scripts\build\build.ps1 -Target App         # App executable only (no installer)
+#   .\scripts\build\build.ps1 -Target Plugin      # VST3 bundle only
+#   .\scripts\build\build.ps1 -Target Installer   # re-run the installer only (reuses dist\_stage)
+#   .\scripts\build\build.ps1 -SkipFrontend       # frontend\dist is already up to date
+#   .\scripts\build\build.ps1 -SkipVerify         # CI build-only: skip plugin black-box self-checks
+#   .\scripts\build\build.ps1 -Configuration Debug   # debug artifacts, no packaging
 #
-# 【为什么 Windows 只有一个安装器】独立 App 与 VST3 插件的用户是同一批人，而它们要用的
-# 是同一批 150 MB 模型。分成两个安装包就只有两种结局：要么用户为完全相同的权重付两次
-# 磁盘，要么两个包各写半套逻辑去猜对方装没装。合并之后模型只写一次，卸载也只有一个入口。
+# [Why Windows has a single installer] The standalone App and the VST3 plugin serve the same
+# users, and both use the same shared model weights. Splitting into two installers has only two
+# outcomes: the user pays for identical weights twice on disk, or the two packages each write
+# half the logic to guess whether the other is installed. Merged, the models are written once
+# and uninstall has a single entry point.
 #
-# 需要：MSVC（cl.exe）、cargo、npm、NSIS。见 scripts/setup/install_deps_windows.ps1。
+# Requires: MSVC (cl.exe), cargo, npm, NSIS. See scripts/setup/install_deps_windows.ps1.
 [CmdletBinding()]
 param(
     [ValidateSet('All', 'App', 'Plugin', 'Clap', 'Installer')][string]$Target = 'All',
     [switch]$SkipFrontend,
-    # CI 只构建时跳过插件的黑盒自检（其中 CLAP 自检会跑 cargo test ABI oracle）。
+    # CI build-only: skip the plugin black-box self-checks (the CLAP one runs cargo test ABI oracle).
     [switch]$SkipVerify,
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release',
-    # 离线 / 受控环境可以显式指定已下载好的 WebView2 bootstrapper（见 Get-WebView2Bootstrapper）。
+    # Offline / controlled environments can point at an already downloaded WebView2 bootstrapper (see Get-WebView2Bootstrapper).
     [string]$WebView2Bootstrapper = ''
 )
 
@@ -35,45 +38,49 @@ Set-Location $root
 . .\scripts\env\sdk-env.ps1
 Set-SdkEnvironment
 
-# 【为什么再算一次 $root】上面两份 env 脚本是**点源**的：它们的顶层变量会落在这个作用域里。
-# 真实事故：msvc-env.ps1 里有一个 `foreach ($root in ...)`，把这里的 `$root`（仓库根）
-# 覆盖成 Visual Studio 安装目录，于是 `Join-Path $root 'backend\...'` 指向
-# `C:\Program Files\Microsoft Visual Studio\2022\Community\backend\...`，
-# 构建在"找不到 models.json"处失败。env 脚本已改成函数（不再泄漏变量），这里再算一次是
-# 第二道闸 —— 代价一行，收益是同类回归再也不会把产物写到仓库外。
+# [Why $root is computed again] The two env scripts above are **dot-sourced**: their top-level
+# variables land in this scope. Real incident: msvc-env.ps1 had a `foreach ($root in ...)` that
+# overwrote this `$root` (the repo root) with the Visual Studio install directory, so
+# `Join-Path $root 'backend\...'` pointed at
+# `C:\Program Files\Microsoft Visual Studio\2022\Community\backend\...`,
+# and the build failed at "models.json not found". The env scripts have since become functions
+# (no more leaking variables); computing $root again here is the second gate — one line of cost,
+# in exchange for this class of regression never again writing artifacts outside the repo.
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 Set-Location $root
 
 function Assert-Ok($what) {
-    if ($LASTEXITCODE) { throw "$what 失败（退出码 $LASTEXITCODE）" }
+    if ($LASTEXITCODE) { throw "$what failed (exit code $LASTEXITCODE)" }
 }
 
-# 【为什么组装完还要逐字节比一次】"拷进载荷的"必须就是"刚编出来的"那一份字节。
-# 这条判据拦的不是编译错误，而是**顺序缺陷**：只要在组装之后还有别的 cargo 调用碰过
-# 同一个 target 目录，载荷里就会悄悄换成另一版引擎，而构建一切正常、产物也能加载 ——
-# 只有事后比对哈希才发现对不上，那时已经无从追溯它到底来自哪次构建。
+# [Why compare byte-for-byte once more after assembly] What is "copied into the payload" must be
+# exactly the bytes that were "just built". This check does not catch compile errors; it catches
+# **ordering bugs**: if any other cargo call touches the same target directory after assembly,
+# the payload silently swaps in a different engine build while the build looks fine and the
+# artifact still loads — only a post-hoc hash comparison reveals the mismatch, when it is no
+# longer traceable which build it came from.
 function Assert-SameBytes([string]$Expected, [string]$Actual) {
-    if (!(Test-Path -LiteralPath $Expected)) { throw "缺少构建产物：$Expected" }
-    if (!(Test-Path -LiteralPath $Actual)) { throw "缺少已组装的载荷：$Actual" }
+    if (!(Test-Path -LiteralPath $Expected)) { throw "Missing build artifact: $Expected" }
+    if (!(Test-Path -LiteralPath $Actual)) { throw "Missing assembled payload: $Actual" }
     $wanted = (Get-FileHash -LiteralPath $Expected -Algorithm SHA256).Hash
     $shipped = (Get-FileHash -LiteralPath $Actual -Algorithm SHA256).Hash
     if ($wanted -ne $shipped) {
-        throw ("载荷与构建产物不一致：{0}（构建 {1}）vs {2}（载荷 {3}）；" +
-            "说明组装之后还有别的构建重写过 target 目录") -f $Expected, $wanted, $Actual, $shipped
+        throw ("Payload does not match the build artifact: {0} (build {1}) vs {2} (payload {3});" +
+            " some other build rewrote the target directory after assembly") -f $Expected, $wanted, $Actual, $shipped
     }
 }
 
-# 构建需要的外部工具：缺失时给一句能照做的错误，而不是让 PowerShell 抛
-# "无法将 xxx 项识别为 cmdlet"（那对新克隆仓库的人没有任何指向性）。
+# External tools the build needs: when missing, give an actionable error instead of letting
+# PowerShell throw "The term 'xxx' is not recognized" (which gives a fresh clone no direction).
 foreach ($tool in 'cargo', 'npm') {
     if (!(Get-Command $tool -ErrorAction SilentlyContinue)) {
-        throw "找不到 $tool。先跑 scripts\setup\install_deps_windows.ps1 装齐工具链，或把它的目录加进 PATH。"
+        throw "Cannot find $tool. Run scripts\setup\install_deps_windows.ps1 first to install the toolchain, or add its directory to PATH."
     }
 }
 
-# 【为什么不能直接调 `python`】Windows 上有三种常见形态：`python.exe` 在 PATH、只有
-# `py` 启动器、以及 Microsoft Store 的 `python.exe` 别名（存在但一运行就弹应用商店）。
-# 判据是"能真的跑起来并且是 3.x"，而不是"PATH 上有个叫 python 的文件"。
+# [Why not just call `python`] Three common shapes exist on Windows: `python.exe` on PATH, only
+# the `py` launcher, and the Microsoft Store `python.exe` alias (present, but running it opens
+# the Store). The test is "it actually runs and is 3.x", not "a file named python is on PATH".
 function Resolve-Python {
     $candidates = @(
         @{ Exe = 'python'; Prefix = @() },
@@ -94,7 +101,7 @@ function Resolve-Python {
             return @{ Exe = $found.Source; Prefix = @($candidate.Prefix) }
         }
     }
-    throw '找不到可用的 Python 3：装好后确保 python.exe（或 py 启动器）在 PATH 上，见 scripts\setup\install_deps_windows.ps1'
+    throw 'No usable Python 3 found: install it, make sure python.exe (or the py launcher) is on PATH; see scripts\setup\install_deps_windows.ps1'
 }
 
 function Reset-Directory([string]$path) {
@@ -105,42 +112,45 @@ function Reset-Directory([string]$path) {
     New-Item -ItemType Directory -Force $resolved | Out-Null
 }
 
-# 【哪些 DLL 不属于独立 App 的运行时载荷】`backend\target\<profile>` 里同时躺着
-# 三种格式的产物：独立 App、VST3 引擎（`hifishifter_plugin.dll`）与 CLAP 模块
-# （`hifishifter_clap.dll`），以及 App crate 自己编出的 `backend_lib.dll`。
-# 它们与通用运行时 DLL 混在同一个目录，于是 `Get-ChildItem *.dll` 一把抓会把这些
-# 既非运行时、也非 App 所需的模块一并塞进安装包与便携包。插件只经由两条专门通路
-# 分发：VST3 bundle（见 Write-Vst3Stage）与 CLAP 目录（见 Write-ClapStage）；
-# App 载荷与它们没有任何交集。
+# [Which DLLs are not part of the standalone App's runtime payload] `backend\target\<profile>`
+# holds artifacts for three formats at once: the standalone App, the VST3 engine
+# (`hifishifter_vst3.dll`) and the CLAP module (`hifishifter_clap.dll`), plus the
+# `backend_lib.dll` that the App crate builds itself. They share one directory with the generic
+# runtime DLLs, so a blanket `Get-ChildItem *.dll` would sweep these modules — neither runtime
+# nor App-required — into the installer and the portable zip. Plugins ship only through two
+# dedicated paths: the VST3 bundle (see Write-Vst3Stage) and the CLAP directory (see
+# Write-ClapStage); the App payload has no overlap with them.
 $pluginModuleDlls = @(
-    'hifishifter_plugin.dll',
+    'hifishifter_vst3.dll',
     'hifishifter_clap.dll',
     'backend_lib.dll'
 )
 
 function Copy-AppRuntimeDlls([string]$Destination) {
-    # 0 字节的 DLL 是 arm64 上的占位符（vslib 是 x86_64 专用），不进产物。
+    # Zero-byte DLLs are arm64 placeholders (vslib is x86_64-only); they do not ship.
     Get-ChildItem $built -Filter *.dll |
         Where-Object { $_.Length -gt 0 -and $pluginModuleDlls -notcontains $_.Name } |
         Copy-Item -Destination $Destination
-    # 【为什么拷完还要再查一遍】上面的过滤条件是"排除式"的：将来新增一种插件格式
-    # （比如 AUv2）时，只改 `$pluginModuleDlls` 一处就够；但只要有人把它写错、或把
-    # `Get-ChildItem` 换成别的写法，产物就会静默变大 40 MB 而构建照样成功。
-    # 判据放在这里，错误在构建期就变成一句能读懂的失败。
+    # [Why check again after copying] The filter above is "exclusion-style": when a new plugin
+    # format is added later (say AUv2), changing `$pluginModuleDlls` in one place is enough; but
+    # if anyone writes it wrong, or swaps `Get-ChildItem` for some other approach, the artifact
+    # silently grows 40 MB while the build still succeeds. With the check here, the mistake
+    # becomes a readable failure at build time.
     foreach ($module in $pluginModuleDlls) {
         if (Test-Path (Join-Path $Destination $module)) {
-            throw "App 载荷混入了宿主插件模块：$(Join-Path $Destination $module)"
+            throw "App payload picked up a host plugin module: $(Join-Path $Destination $module)"
         }
     }
 }
 
-# 模型权重不在仓库里（见 scripts/setup/fetch-models.py）：缺了就取，已有则是一次
-# 目录扫描。CI 用 actions/cache 以清单哈希为键缓存解压结果，因此这里通常什么都不做。
+# Model weights are not in the repo (see scripts/setup/fetch-models.py): fetch if missing, and a
+# run over existing files is just a directory scan. CI caches the extracted result in
+# actions/cache keyed by the manifest hash, so this usually does nothing here.
 $python = Resolve-Python
 & $python.Exe @($python.Prefix) (Join-Path $PSScriptRoot '..\setup\fetch-models.py')
-Assert-Ok '模型权重'
+Assert-Ok 'model weights'
 & $python.Exe @($python.Prefix) (Join-Path $PSScriptRoot '..\setup\fetch-models.py') --fetch-game
-Assert-Ok 'GAME 模型权重'
+Assert-Ok 'GAME model weights'
 
 $profile = $Configuration.ToLowerInvariant()
 $cargoTarget = Join-Path $root 'backend\target'
@@ -153,30 +163,32 @@ $dist = Join-Path $root 'dist'
 $stage = Join-Path $dist '_stage\installer'
 $version = (Get-Content backend\src-tauri\tauri.conf.json -Raw | ConvertFrom-Json).version
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
-# 发行物随附的许可：根 LICENSE（MIT + 第三方清单）与 licenses\ 目录（各许可全文与声明）。
-# 只有一处清单，App 与插件共用，避免两套打包路径各记一份。
+# Licenses shipped with the artifacts: the root LICENSE (MIT + third-party list) and the
+# licenses\ directory (full texts and notices of each license). One list only, shared by App and
+# plugins, so the two packaging paths never keep separate copies.
 $licenses = @('LICENSE', 'licenses')
 $modelsSource = Join-Path $root 'backend\src-tauri\resources\models'
 $modelsManifest = Get-Content (Join-Path $modelsSource 'models.json') -Raw | ConvertFrom-Json
 $modelsVersion = $modelsManifest.version
 New-Item -ItemType Directory -Force $dist | Out-Null
 
-# ── 前端 ────────────────────────────────────────────────────────────────────
-# App 与插件共用 frontend\dist，只构建一次。tauri 的 beforeBuildCommand 会再跑一遍，
-# 所以下面用一份空配置把它置空 —— 内联 JSON 在 Windows PowerShell 传给原生进程时会被
-# 剥掉内层引号，只能写成文件传路径。
+# ── Frontend ────────────────────────────────────────────────────────────────
+# App and plugins share frontend\dist; build it once. tauri's beforeBuildCommand would run the
+# build again, so the code below blanks it with an empty config — inline JSON gets its inner
+# quotes stripped when Windows PowerShell passes it to a native process, so it must be written
+# to a file and passed as a path.
 if ($Target -ne 'Installer' -and !$SkipFrontend) {
     npm --prefix frontend run build
-    Assert-Ok '前端构建'
+    Assert-Ok 'frontend build'
 }
 if ($Target -ne 'Installer' -and !(Test-Path frontend\dist\plugin.html)) {
-    throw 'frontend\dist 里没有 plugin.html：去掉 -SkipFrontend 重新构建'
+    throw 'frontend\dist has no plugin.html: rebuild without -SkipFrontend'
 }
 
 # ── App ─────────────────────────────────────────────────────────────────────
-# 【为什么是 --no-bundle】安装器由我们自己打（scripts/release/merged-installer.nsi）：
-# 它要装两个位置、要独占模型库，Tauri 的打包器给不了这些。--no-bundle 只负责把 exe
-# 与它依赖的 DLL 编出来。
+# [Why --no-bundle] The installer is built by us (scripts/release/merged-installer.nsi): it
+# installs two locations and takes exclusive ownership of the model store, which Tauri's bundler
+# cannot provide. --no-bundle only compiles the exe and the DLLs it depends on.
 if ($Target -eq 'All' -or $Target -eq 'App') {
     $blank = Join-Path ([IO.Path]::GetTempPath()) ("hfs-build-" + [Guid]::NewGuid().ToString('N') + '.json')
     [IO.File]::WriteAllText($blank, '{"build":{"beforeBuildCommand":""}}')
@@ -185,7 +197,7 @@ if ($Target -eq 'All' -or $Target -eq 'App') {
         $tauriArgs = @('tauri', 'build', '--ci', '--no-bundle', '--config', $blank)
         if ($Configuration -eq 'Debug') { $tauriArgs += '--debug' }
         cargo @tauriArgs
-        Assert-Ok 'App 构建'
+        Assert-Ok 'App build'
     }
     finally {
         Pop-Location
@@ -193,24 +205,24 @@ if ($Target -eq 'All' -or $Target -eq 'App') {
     }
 }
 
-# ── 插件引擎与 CLAP 模块：一次编译，两处组装 ────────────────────────────────
+# ── Plugin engine and CLAP module: one compile, two assemblies ──────────────
 #
-# 【为什么两种格式必须在**同一次** cargo 调用里编完，再分别组装载荷】
-# `hifishifter-clap` 依赖 `hifishifter-plugin`，而 cargo 会把同一次调用里
-# `ara2-bridge` 的 feature 合并成 `vst3 + clap`。于是"先组装 VST3、再编译 CLAP"
-# 会让 CLAP 那一步在同一个 target 目录里把 `hifishifter_plugin.dll` 原样重写一遍：
-# 内容等价，但安装包里的引擎从此不再由"组装它的那次构建"产出 —— 事后比对哈希、
-# 追溯来源都对不上。并成一次调用之后，两个产物来自同一个构建计划，顺序不再影响结果；
-# 这也是 `hifishifter-clap` 的 Cargo.toml 里"必须与 VST3/App 使用同一份 feature"
-# 那句话唯一可靠的落法。
+# [Why both shells must finish compiling in the **same** cargo call, then be assembled separately]
+# The two shells share one target directory; within a single call, the `ara2-bridge` features are
+# unioned (`vst3 + clap`, a union within the contract — see the format_feature_boundary notes).
+# Split into two calls, the second rebuilds the dependency tree with a different feature plan,
+# and the two artifacts may come from different build plans — post-hoc hash comparison and
+# provenance tracing both break. Merged into one call, order no longer affects the result; the
+# features of `hifishifter-plugin` (rlib-only) and `hifishifter-kernel` are also resolved only
+# once, so CLAP/VST3 still compile the same kernel code.
 if ($Target -eq 'All' -or $Target -eq 'Plugin' -or $Target -eq 'Clap') {
     $pluginBuild = @(
         'build', '--manifest-path', 'backend\Cargo.toml',
-        '-p', 'hifishifter-plugin', '-p', 'hifishifter-clap'
+        '-p', 'hifishifter-vst3', '-p', 'hifishifter-clap'
     )
     if ($Configuration -eq 'Release') { $pluginBuild += '--release' }
     cargo @pluginBuild
-    Assert-Ok '插件引擎与 CLAP 模块构建'
+    Assert-Ok 'plugin engine and CLAP module build'
 }
 
 # ── VST3 ────────────────────────────────────────────────────────────────────
@@ -218,173 +230,189 @@ if ($Target -eq 'All' -or $Target -eq 'Plugin') {
     $bundle = Join-Path $dist 'HiFiShifter.vst3'
     $module = Join-Path $bundle 'Contents\x86_64-win'
     $resources = Join-Path $bundle 'Contents\Resources'
-    # 【为什么两个目录都要整个重建，而不是往里补】两条原因叠在一起：
-    #   1. Vite 的 chunk 带内容哈希，Copy-Item 只写不删 —— 不清空就会把上一轮的 chunk
-    #      再留一份，bundle 随每次构建单调增长（安装器在用户机器上做的正是同一件事）；
-    #   2. Copy-Item 的语义坑：目标目录已存在时，它把**源目录本身**拷进去，于是第二次
-    #      构建得到 assets\assets，第三次得到 assets\assets\assets —— 直接报"项已经存在"。
-    # 先 Reset 再拷内容，两个问题一起消失，构建因此是幂等的。
+    # [Why both directories are rebuilt wholesale instead of updated in place] Two reasons stack:
+    #   1. Vite chunks carry content hashes and Copy-Item only writes, never deletes — without
+    #      clearing, chunks from the previous round linger and the bundle grows monotonically
+    #      with every build (exactly what the installer does on the user's machine);
+    #   2. Copy-Item's semantic trap: when the destination directory already exists, it copies
+    #      **the source directory itself** into it, so the second build yields assets\assets and
+    #      the third assets\assets\assets — or fails outright with "item already exists".
+    # Reset first, then copy contents; both problems disappear and the build is idempotent.
     Reset-Directory $module
     Reset-Directory "$resources\frontend"
     Reset-Directory "$resources\models"
 
-    Copy-Item "$built\hifishifter_plugin.dll" "$module\HiFiShifterEngine.dll"
-    Assert-SameBytes "$built\hifishifter_plugin.dll" "$module\HiFiShifterEngine.dll"
-    # DLL 白名单刻意不含 vslib：它是独立 App 的闭源运行时，插件不分发。
+    Copy-Item "$built\hifishifter_vst3.dll" "$module\HiFiShifterEngine.dll"
+    Assert-SameBytes "$built\hifishifter_vst3.dll" "$module\HiFiShifterEngine.dll"
+    # The DLL whitelist deliberately excludes vslib: it is the standalone App's closed-source
+    # runtime and is not distributed with plugins.
     foreach ($dll in 'onnxruntime.dll', 'DirectML.dll', 'SoundTouchDLL.dll') {
         if (Test-Path "$built\$dll") { Copy-Item "$built\$dll" $module }
     }
 
-    # 静态入口与公共资源一起复制，SDK 类型声明不属于运行时载荷。
+    # Static entries and shared assets are copied together; SDK type declarations are not runtime payload.
     Get-ChildItem -LiteralPath frontend\dist |
         Where-Object { $_.Name -ne 'sdk' } |
         Copy-Item -Destination "$resources\frontend" -Recurse
     Copy-Item backend\src-tauri\icons\icon.ico "$resources\frontend"
 
-    # 【为什么 bundle 里只有清单、没有权重】安装器把权重写进
-    # %PROGRAMDATA%\HiFiShifter\models\<版本>，独立 App 与插件都从那一份读
-    # （见 backend/hifishifter-kernel/src/model_store.rs）。bundle 里再留一份，
-    # 用户就要为完全相同的 152 MB 付第二次磁盘。手动拷贝安装时请改用便携包。
+    # [Why the bundle holds only the manifest, not the weights] The installer writes the weights
+    # to %PROGRAMDATA%\HiFiShifter\models\<version>, and both the standalone App and the plugin
+    # read that one copy (see backend/hifishifter-kernel/src/model_store.rs). Keeping another
+    # copy in the bundle would charge the user's disk a second time for the same 152 MB. For
+    # manual-copy installs, use the portable zip instead.
     Copy-Item "$modelsSource\models.json" "$resources\models"
 
-    # 原生 loader：宿主加载的是这个薄 DLL，它再按绝对路径拉起邻接的 Rust 引擎。
+    # Native loader: the host loads this thin DLL, which in turn pulls up the adjacent Rust engine by absolute path.
     $objDir = Join-Path ([IO.Path]::GetTempPath()) ("hfs-loader-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force $objDir | Out-Null
     cl.exe /nologo /utf-8 /std:c++17 /LD /MT /EHsc /O2 backend\hifishifter-plugin\native\module_loader.cpp "/Fo:$objDir\module_loader.obj" /link "/OUT:$module\HiFiShifter.vst3" "/IMPLIB:$objDir\HiFiShifterLoader.lib"
-    Assert-Ok '原生 VST3 loader 构建'
+    Assert-Ok 'native VST3 loader build'
     $resolvedObjects = [IO.Path]::GetFullPath($objDir)
     $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
     if (!$resolvedObjects.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unexpected loader cleanup path' }
     Remove-Item -LiteralPath $resolvedObjects -Recurse -Force
 
-    # 编译成功不等于能被宿主加载。本地构建默认跑一次黑盒门禁；CI 只构建时跳过。
+    # Compiling successfully is not the same as being loadable by a host. Local builds run a
+    # black-box gate by default; CI build-only runs skip it.
     if (!$SkipVerify) { & .\scripts\vst3\windows\verify.ps1 -BundleDirectory $bundle }
 }
 
 if ($Configuration -eq 'Debug') {
-    Write-Host "debug 产物已就绪：$dist" -ForegroundColor Green
+    Write-Host "debug artifacts ready: $dist" -ForegroundColor Green
     return
 }
 
 if ($Target -eq 'All' -or $Target -eq 'Plugin' -or $Target -eq 'Clap') {
     $clapModule = Join-Path $built 'hifishifter_clap.dll'
-    if (!(Test-Path $clapModule)) { throw "缺少 $clapModule" }
+    if (!(Test-Path $clapModule)) { throw "Missing $clapModule" }
     Copy-Item $clapModule (Join-Path $dist 'HiFiShifter.clap') -Force
     Assert-SameBytes $clapModule (Join-Path $dist 'HiFiShifter.clap')
-    # 单文件 CLAP 的资源必须与模块同级（ResourceLayout::Sibling）：前端产物 +
-    # 模型清单。少了任何一个，宿主能扫描到插件却只会得到一块空白窗口。
+    # The single-file CLAP's resources must sit next to the module (ResourceLayout::Sibling):
+    # frontend output + model manifest. Missing either one, the host scans the plugin but only
+    # ever gets a blank window.
     $clapRes = Join-Path $dist 'HiFiShifter-resources'
     Reset-Directory (Join-Path $clapRes 'frontend')
     Reset-Directory (Join-Path $clapRes 'models')
-    # 与 VST3 bundle 同一份公共资源：宿主插件与浮动编辑器共用 chunk，SDK 类型声明
-    # 不是运行时载荷。只拷 plugin.html 会让 detached.html 在插件窗口里 404。
+    # The same shared assets as the VST3 bundle: the host plugin and the floating editor share
+    # chunks, and SDK type declarations are not runtime payload. Copying only plugin.html would
+    # 404 detached.html inside the plugin window.
     Get-ChildItem -LiteralPath frontend\dist |
         Where-Object { $_.Name -ne 'sdk' } |
         Copy-Item -Destination (Join-Path $clapRes 'frontend') -Recurse
     Copy-Item (Join-Path $modelsSource 'models.json') (Join-Path $clapRes 'models')
-    # 【为什么 CLAP 资源目录里也要放 SoundTouchDLL.dll】三种格式现在编译同一份内核：
-    # SoundTouch 由 `#[link]` 改成运行期 libloading，候选路径包含模块同级与同级的
-    # `<stem>-resources`。VST3 把 DLL 放在引擎旁、App 放在 exe 旁；CLAP 是公共目录里的
-    # 单文件模块，不能往那儿塞通用名 DLL，因此放进自己的私有资源目录。缺这份 DLL
-    # 不算错误（is_available()=false → 已有的 Signalsmith 降级），但带上它才能与
-    # VST3/App 行为一致 —— 用户的拉伸算法设置不该因插件格式而变。
+    # [Why SoundTouchDLL.dll also goes into the CLAP resource directory] All three formats now
+    # compile the same kernel: SoundTouch switched from `#[link]` to runtime libloading, whose
+    # candidate paths include next to the module and the sibling `<stem>-resources`. VST3 puts
+    # the DLL next to the engine and the App next to the exe; CLAP is a single-file module in a
+    # public directory where a generically named DLL must not be dropped, so it goes into its own
+    # private resource directory. Missing this DLL is not an error (is_available()=false → the
+    # existing Signalsmith fallback), but shipping it keeps behavior consistent with VST3/App —
+    # the user's time-stretch algorithm setting must not change with the plugin format.
     $soundtouch = Join-Path $built 'SoundTouchDLL.dll'
     if (Test-Path $soundtouch) { Copy-Item $soundtouch (Join-Path $clapRes 'SoundTouchDLL.dll') -Force }
-    # 【为什么要显式删掉 webview】WebView2 的用户数据目录是**运行期状态**（缓存、
-    # 锁文件、本机 profile），它曾经因为落在资源目录里而被打进安装包，也会让下一个
-    # 用户拿到一份被占用的 profile。资源目录里只允许有 frontend、models 与
-    # 运行期可选加载的 SoundTouchDLL.dll —— 绝不留下 WebView2 用户数据。
+    # [Why webview is deleted explicitly] The WebView2 user data directory is **runtime state**
+    # (cache, lock files, a local profile); it once landed inside the resource directory and got
+    # packed into an installer, and it would hand the next user an occupied profile. The resource
+    # directory may contain only frontend, models and the optionally loaded-at-runtime
+    # SoundTouchDLL.dll — never WebView2 user data.
     Remove-Item -LiteralPath (Join-Path $clapRes 'webview') -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host "CLAP 资源已组装：$clapRes" -ForegroundColor Green
+    Write-Host "CLAP resources assembled: $clapRes" -ForegroundColor Green
     if (!$SkipVerify) { & .\scripts\clap\windows\verify.ps1 -ModulePath (Join-Path $dist 'HiFiShifter.clap') }
 }
 
-# ── 安装器暂存 ──────────────────────────────────────────────────────────────
+# ── Installer staging ───────────────────────────────────────────────────────
 #
-# 【为什么暂存目录是"可复用"的】-Target Installer 只重打安装器（改一句文案、换一个
-# WebView2 bootstrapper）时不该重新编译 Rust。约定：dist\_stage\installer 里放
-# app\ / vst3\ / models\ / LICENSE / license-page.txt / licenses\ / models-verify.nsh，全部由本脚本产出。
+# [Why the staging directory is "reusable"] -Target Installer only re-runs the installer (one
+# string change, a different WebView2 bootstrapper) and must not recompile Rust. Convention:
+# dist\_stage\installer holds
+# app\ / vst3\ / models\ / LICENSE / license-page.txt / licenses\ / models-verify.nsh, all produced by this script.
 
 function Write-AppPayload {
     $app = Join-Path $stage 'app'
     Reset-Directory $app
     Copy-Item "$built\HiFiShifter.exe" $app
-    # 运行时 DLL 与"哪些模块属于插件载荷"由 Copy-AppRuntimeDlls 一处判定，
-    # 与便携包共用同一判据（此前两处各写一遍，加 CLAP 时只改了一处）。
+    # Runtime DLLs and "which modules belong to the plugin payload" are decided in one place,
+    # Copy-AppRuntimeDlls, shared with the portable zip (previously written in two places; adding
+    # CLAP only updated one of them).
     Copy-AppRuntimeDlls $app
     New-Item -ItemType Directory -Force "$app\models" | Out-Null
     Copy-Item "$modelsSource\models.json" "$app\models"
-    Write-Host "App 载荷：$app" -ForegroundColor Green
+    Write-Host "App payload: $app" -ForegroundColor Green
 }
 
 function Write-Vst3Stage {
     $vst3 = Join-Path $stage 'vst3'
     Reset-Directory $vst3
-    # 【为什么拷的是 bundle 的内容，而不是 HiFiShifter.vst3 这个目录】安装器的落点是
-    # $HfsVst3Dir\${VST3_SUBDIR}，再用 File /r "${VST3_DIR}\*" 把暂存区的东西铺进去。
-    # 若整个目录进暂存区，用户机器上就会多套一层
-    # （…\VST3\HiFiShifter.vst3\HiFiShifter.vst3\Contents），而宿主只认
-    # <名字>.vst3\Contents\<架构>\<名字>.vst3 —— 插件会安静地"装好了但扫不到"。
+    # [Why copy the bundle's contents rather than the HiFiShifter.vst3 directory itself] The
+    # installer's landing spot is $HfsVst3Dir\${VST3_SUBDIR}, then File /r "${VST3_DIR}\*" lays
+    # down what is in staging. If the whole directory went into staging, the user's machine would
+    # gain an extra layer
+    # (…\VST3\HiFiShifter.vst3\HiFiShifter.vst3\Contents), while the host only recognizes
+    # <name>.vst3\Contents\<arch>\<name>.vst3 — the plugin would quietly "install but never be scanned".
     #
-    # 【为什么按架构白名单拷，而不是 Copy-Item * -Recurse】dist\HiFiShifter.vst3 是
-    # 跨平台共用的 bundle：Linux/macOS 构建往 Contents\x86_64-linux 或 Contents\MacOS
-    # 写，Windows 构建往 Contents\x86_64-win 写，两端都共用同一个 Contents\Resources。
-    # 直接 -Recurse 会把上一次别平台留下的整个架构目录（约 57 MB 的 .so/.dylib）一起
-    # 拷进 Windows 安装器，宿主扫描时看到的是一堆无法加载的二进制。只取本平台需要的
-    # 两个目录，别的架构无论谁留下的都进不了暂存区。
+    # [Why copy by per-architecture whitelist instead of Copy-Item * -Recurse] dist\HiFiShifter.vst3
+    # is a bundle shared across platforms: Linux/macOS builds write Contents\x86_64-linux or
+    # Contents\MacOS, Windows builds write Contents\x86_64-win, and both ends share the same
+    # Contents\Resources. A bare -Recurse would sweep the entire architecture directory left by
+    # the previous other-platform build (about 57 MB of .so/.dylib) into the Windows installer,
+    # and the host would see a pile of unloadable binaries during its scan. Take only the two
+    # directories this platform needs; nothing left behind by any other architecture reaches staging.
     $bundle = Join-Path $dist 'HiFiShifter.vst3'
     $contents = Join-Path $bundle 'Contents'
     $winModule = Join-Path $contents 'x86_64-win'
     $resources = Join-Path $contents 'Resources'
     foreach ($required in $winModule, $resources) {
         if (!(Test-Path -LiteralPath $required)) {
-            throw "VST3 bundle 缺少 $required：先跑 .\scripts\build\build.ps1 -Target Plugin"
+            throw "VST3 bundle is missing ${required}: run .\scripts\build\build.ps1 -Target Plugin first"
         }
     }
     New-Item -ItemType Directory -Force (Join-Path $vst3 'Contents') | Out-Null
     Copy-Item $winModule (Join-Path $vst3 'Contents\x86_64-win') -Recurse
     Copy-Item $resources (Join-Path $vst3 'Contents\Resources') -Recurse
-    # 安装器打进去的就是这两个目录里的一切：载荷边界上再比一次字节。
-    Assert-SameBytes "$built\hifishifter_plugin.dll" (Join-Path $vst3 'Contents\x86_64-win\HiFiShifterEngine.dll')
+    # Everything the installer ships comes from these two directories: compare bytes once more at the payload boundary.
+    Assert-SameBytes "$built\hifishifter_vst3.dll" (Join-Path $vst3 'Contents\x86_64-win\HiFiShifterEngine.dll')
 
-    # 兜底：暂存区里只允许出现 x86_64-win 这一个架构目录。若将来新增别的本平台架构，
-    # 要在这里显式加入白名单，而不是把 Copy-Item * 放回来。
+    # Backstop: only x86_64-win may appear as an architecture directory in staging. If another
+    # platform-native architecture is added later, whitelist it explicitly here instead of
+    # restoring Copy-Item *.
     $foreign = @(Get-ChildItem (Join-Path $vst3 'Contents') -Directory |
         Where-Object { $_.Name -ne 'Resources' -and $_.Name -ne 'x86_64-win' })
     if ($foreign.Count) {
-        throw "VST3 暂存区混入了非 Windows 架构目录：$($foreign.Name -join ', ')"
+        throw "VST3 staging picked up a non-Windows architecture directory: $($foreign.Name -join ', ')"
     }
-    Write-Host "VST3 载荷：$vst3" -ForegroundColor Green
+    Write-Host "VST3 payload: $vst3" -ForegroundColor Green
 }
 
 function Write-ClapStage {
     $clap = Join-Path $stage 'HiFiShifter.clap'
     Copy-Item (Join-Path $dist 'HiFiShifter.clap') $clap -Force
     Assert-SameBytes (Join-Path $built 'hifishifter_clap.dll') $clap
-    Write-Host "CLAP 载荷：$clap" -ForegroundColor Green
-    # 【为什么必须连资源目录一起暂存】CLAP 在 Windows 上是单文件模块，前端与
-    # 模型清单按 ResourceLayout::Sibling 放在同级的 HiFiShifter-resources。
-    # 只装 .clap 时 frontend_dir() 必然失败，宿主看到的是一块空白窗口。
+    Write-Host "CLAP payload: $clap" -ForegroundColor Green
+    # [Why the resource directory must be staged along with it] On Windows, CLAP is a single-file
+    # module; the frontend and the model manifest sit in the sibling HiFiShifter-resources per
+    # ResourceLayout::Sibling. Installing only the .clap makes frontend_dir() fail and the host
+    # sees a blank window.
     $resources = Join-Path $dist 'HiFiShifter-resources'
-    if (!(Test-Path $resources)) { throw "缺少 CLAP 资源目录：$resources" }
-    # 暂存前再挡一次：运行期状态绝不能进安装包（判据同 build.ps1 的组装段）。
+    if (!(Test-Path $resources)) { throw "Missing CLAP resource directory: $resources" }
+    # One more gate before staging: runtime state must never enter the installer (same criterion as the assembly section of build.ps1).
     if (Test-Path (Join-Path $resources 'webview')) {
-        throw "CLAP 资源目录里混进了 WebView2 运行期目录：$(Join-Path $resources 'webview')"
+        throw "CLAP resource directory picked up a WebView2 runtime directory: $(Join-Path $resources 'webview')"
     }
     $staged = Join-Path $stage 'HiFiShifter-resources'
     Reset-Directory $staged
     Copy-Item "$resources\*" $staged -Recurse -Force
     if (!(Test-Path (Join-Path $staged 'frontend\plugin.html'))) {
-        throw "CLAP 资源目录里缺少 frontend\plugin.html"
+        throw "CLAP resource directory is missing frontend\plugin.html"
     }
-    Write-Host "CLAP 资源：$staged" -ForegroundColor Green
+    Write-Host "CLAP resources: $staged" -ForegroundColor Green
 }
 
 function Write-ModelsStage {
     $models = Join-Path $stage 'models'
     Reset-Directory $models
     Copy-Item "$modelsSource\*" $models -Recurse
-    Write-Host "模型载荷（$modelsVersion）：$models" -ForegroundColor Green
+    Write-Host "Model payload ($modelsVersion): $models" -ForegroundColor Green
 }
 
 function Write-LicenseStage {
@@ -393,43 +421,47 @@ function Write-LicenseStage {
     Copy-Item LICENSE $license
     $dir = Join-Path $stage 'licenses'
     Reset-Directory $dir
-    # 拷内容而不是目录：Reset-Directory 已经把 $dir 建好了，再拷 licenses 目录本身
-    # 会变成 licenses\licenses\README.md —— 而 LICENSE 里写的路径是 licenses/README.md。
+    # Copy the contents, not the directory: Reset-Directory already created $dir, and copying the
+    # licenses directory itself would produce licenses\licenses\README.md — while LICENSE
+    # references the path licenses/README.md.
     Copy-Item 'licenses\*' $dir -Recurse
 
-    # 【为什么许可页要单独一份带 BOM 的副本】NSIS 的 LicenseData 在**编译期**把文件读成
-    # UTF-16 存进安装器：文件带 BOM 才按 UTF-8 解码，不带就按编译所在机器的 ANSI 代码页
-    # 解码。LICENSE 是无 BOM 的 UTF-8，于是中文 Windows 上编出来的安装包会把 θ 显示成
-    # "胃"、把日文假名整段丢掉，而编译不报错（只有打开许可页才看得见）。
-    # 随包的 LICENSE 必须与仓库逐字节相同（用户和工具都会比对），所以这几 K 字节的副本
-    # 只喂给许可页：读取用严格 UTF-8（LICENSE 若不是合法 UTF-8，这里当场失败），写出带 BOM。
+    # [Why the license page needs its own BOM-carrying copy] NSIS's LicenseData reads the file
+    # into UTF-16 **at compile time**: with a BOM it decodes as UTF-8, without one it decodes with
+    # the ANSI code page of the machine doing the compile. LICENSE is BOM-less UTF-8, so an
+    # installer built on a Chinese-locale Windows would display θ as a garbled hanzi and drop
+    # whole runs of Japanese kana — with no compile error (it is only visible once the license
+    # page opens). The shipped LICENSE must stay byte-identical to the repo (users and tools both
+    # compare it), so this few-KB copy feeds only the license page: read with strict UTF-8 (fails
+    # right here if LICENSE is not valid UTF-8), written with a BOM.
     $page = Join-Path $stage 'license-page.txt'
     $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
     [IO.File]::WriteAllText($page, [IO.File]::ReadAllText((Join-Path $root 'LICENSE'), $strictUtf8),
         (New-Object Text.UTF8Encoding($true)))
 
-    Write-Host "许可载荷：$stage" -ForegroundColor Green
+    Write-Host "License payload: $stage" -ForegroundColor Green
 }
 
-# 安装器的完整性校验清单：逐文件列出相对路径与字节数。
+# The installer's integrity checklist: relative path and byte size for every file.
 #
-# 【为什么要生成而不是在 NSIS 里解析 JSON】NSIS 没有 JSON 解析器，而"只看目录存在"
-# 的判据与运行时 model_store::looks_complete 不一致 —— 那会造出"安装器说装好了、
-# 运行时说不可用"，用户只看到"推理不可用"。这里把清单拍平成 NSIS 语句，
-# 两边用的是同一份数据、同一个判据。
+# [Why generate it instead of parsing JSON inside NSIS] NSIS has no JSON parser, and a "the
+# directory exists" criterion would disagree with the runtime model_store::looks_complete —
+# producing "installer says installed, runtime says unavailable", where the user only sees
+# "inference unavailable". Here the manifest is flattened into NSIS statements so both sides use
+# the same data and the same criterion.
 function Write-ModelsVerifyInclude {
     $path = Join-Path $stage 'models-verify.nsh'
     $lines = New-Object System.Collections.Generic.List[string]
-    $lines.Add('; 本文件由 scripts/build/build.ps1 生成 —— 不要手工编辑。')
-    $lines.Add('; 逐文件列出模型清单里的相对路径与字节数：安装器用它判断"库是否已完整"，')
-    $lines.Add('; 判据与运行时 model_store::looks_complete 完全一致（文件存在 + 字节数相等）。')
+    $lines.Add('; Generated by scripts/build/build.ps1 — do not edit by hand.')
+    $lines.Add('; Lists the relative path and byte size of every file in the model manifest: the installer uses')
+    $lines.Add('; it to decide whether the store is complete, matching runtime model_store::looks_complete exactly (file exists + byte count equal).')
     $lines.Add('Function HfsVerifyModelFiles')
     foreach ($file in $modelsManifest.files) {
         $relative = ($file.path -replace '/', '\')
         $lines.Add(('  StrCpy $R0 "{0}"' -f $relative))
         $lines.Add(('  StrCpy $R1 "{0}"' -f $file.bytes))
         $lines.Add('  Call HfsCheckModelFile')
-        # $R2 = 0 表示这一项不符：立刻返回（后面的检查没有意义）。
+        # $R2 = 0 means this entry failed: return immediately (the remaining checks are pointless).
         $lines.Add('  StrCmp $R2 0 0 +2')
         $lines.Add('  Return')
     }
@@ -439,28 +471,29 @@ function Write-ModelsVerifyInclude {
 
 function Get-WebView2Bootstrapper {
     if ($WebView2Bootstrapper) {
-        if (!(Test-Path $WebView2Bootstrapper)) { throw "找不到 WebView2 bootstrapper：$WebView2Bootstrapper" }
+        if (!(Test-Path $WebView2Bootstrapper)) { throw "WebView2 bootstrapper not found: $WebView2Bootstrapper" }
         return (Resolve-Path $WebView2Bootstrapper).Path
     }
     $cache = Join-Path $dist '_cache'
     New-Item -ItemType Directory -Force $cache | Out-Null
     $target = Join-Path $cache 'MicrosoftEdgeWebview2Setup.exe'
     if (Test-Path $target) {
-        # 缓存命中同样要做体积极值校验：上次下载中途断掉会留下半截文件
-        #（-OutFile 不清理），无条件信任缓存等于把损坏的 bootstrapper 打进安装包。
+        # Cache hits get the same minimal-size check: a download interrupted halfway leaves a
+        # truncated file (-OutFile does not clean up), and trusting the cache unconditionally
+        # packs a broken bootstrapper into the installer.
         $cachedSize = (Get-Item $target).Length
         if ($cachedSize -lt 1MB) {
             Remove-Item $target -Force
-            Write-Host "缓存的 WebView2 bootstrapper 不完整（只有 $cachedSize 字节），已删除并重新下载。" -ForegroundColor Yellow
+            Write-Host "Cached WebView2 bootstrapper is incomplete (only $cachedSize bytes); deleted and re-downloading." -ForegroundColor Yellow
         } else {
             return $target
         }
     }
-    Write-Host '下载 WebView2 bootstrapper（约 1.7 MB）...' -ForegroundColor Cyan
+    Write-Host 'Downloading WebView2 bootstrapper (about 1.7 MB)...' -ForegroundColor Cyan
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $target -UseBasicParsing
     $size = (Get-Item $target).Length
-    if ($size -lt 1MB) { throw "WebView2 bootstrapper 下载异常（只有 $size 字节）" }
+    if ($size -lt 1MB) { throw "WebView2 bootstrapper download looks wrong (only $size bytes)" }
     return $target
 }
 
@@ -468,9 +501,10 @@ if ($Target -eq 'All' -or $Target -eq 'App') { Write-AppPayload }
 if ($Target -eq 'All' -or $Target -eq 'Plugin') { Write-Vst3Stage }
 if ($Target -eq 'All' -or $Target -eq 'Plugin' -or $Target -eq 'Clap') { Write-ClapStage }
 
-# 模型 / 许可只进安装器暂存区：单一目标的产物（App 可执行文件 / VST3 bundle /
-# CLAP 文件）不消费它们。此前它们对 -Target App/Plugin/Clap 也无条件执行，
-# 白白拷贝几百 MB，更重要的是让下面的"安装器段"看起来对所有目标都成立。
+# Models / licenses go only into the installer staging area: single-target artifacts (the App
+# executable / VST3 bundle / CLAP file) do not consume them. They used to run unconditionally for
+# -Target App/Plugin/Clap as well, copying hundreds of MB for nothing and — more importantly —
+# making the "installer section" below look valid for every target.
 if ($Target -eq 'All') {
     Write-ModelsStage
     Write-LicenseStage
@@ -480,23 +514,27 @@ if ($Target -eq 'All') {
 if ($Target -eq 'Installer') {
     foreach ($required in 'app', 'vst3', 'HiFiShifter.clap', 'HiFiShifter-resources', 'models', 'licenses', 'LICENSE', 'license-page.txt', 'models-verify.nsh') {
         if (!(Test-Path (Join-Path $stage $required))) {
-            throw "dist\_stage\installer 缺少 $required：先跑 .\scripts\build\build.ps1 -Target All"
+            throw "dist\_stage\installer is missing ${required}: run .\scripts\build\build.ps1 -Target All first"
         }
     }
 }
 
-# 【为什么安装器段必须按目标门控】文件头承诺 -Target App "不打安装器"、-Target
-# Plugin / Clap 同理，但此前字节比对与 makensis 对**所有**目标无条件执行：单一目标
-# 没有组装完整载荷（-Target App 没有 vst3\、-Target Clap 没有 app\），暂存区里留下
-# 的旧文件让字节比对当场 throw，或 makensis 拿着不存在的目录报 NSIS 编译错 ——
-# 两个文档承诺的入口实际一跑就红。只有 All / Installer 真的产安装器。
+# [Why the installer section is gated by target] The file header promises -Target App "builds no
+# installer", likewise -Target Plugin / Clap, but the byte comparison and makensis used to run
+# unconditionally for **every** target: a single target never assembles a full payload (-Target
+# App has no vst3\, -Target Clap has no app\), so stale files left in staging made the byte
+# comparison throw on the spot, or makensis reported NSIS compile errors over directories that
+# do not exist — both documented entry points failed the moment they ran. Only All / Installer
+# actually produce an installer.
 if ($Target -eq 'All' -or $Target -eq 'Installer') {
-    # 【打安装器之前的最后一道：暂存区的插件载荷必须就是 target 里那一份字节】
-    # 这条判据专门覆盖"只重建了某一种格式"的用法：哪怕只跑 -Target Clap，只要 target 里
-    # 存在引擎，就在这里比对一次 —— 顺序缺陷不会再以"安装包带着上一版引擎"的形式溜过去。
-    # （-Target Installer 有意复用既有暂存区，那时 target 可能为空，比对自动跳过。）
+    # [The last gate before the installer: the staged plugin payload must be the exact bytes in target]
+    # This check specifically covers the "rebuilt only one format" usage: even a bare -Target
+    # Clap run compares here as long as the engine exists in target — an ordering bug can no
+    # longer slip through as "the installer carries the previous engine". (-Target Installer
+    # intentionally reuses the existing staging area; target may be empty then, and the
+    # comparison skips itself.)
     foreach ($payload in @(
-        @{ Built = (Join-Path $built 'hifishifter_plugin.dll'); Staged = (Join-Path $stage 'vst3\Contents\x86_64-win\HiFiShifterEngine.dll') },
+        @{ Built = (Join-Path $built 'hifishifter_vst3.dll'); Staged = (Join-Path $stage 'vst3\Contents\x86_64-win\HiFiShifterEngine.dll') },
         @{ Built = (Join-Path $built 'hifishifter_clap.dll'); Staged = (Join-Path $stage 'HiFiShifter.clap') }
     )) {
         if (Test-Path -LiteralPath $payload.Built) {
@@ -504,13 +542,15 @@ if ($Target -eq 'All' -or $Target -eq 'Installer') {
         }
     }
 
-    # ── 安装器 ──────────────────────────────────────────────────────────────────
+    # ── Installer ───────────────────────────────────────────────────────────────
     $makensis = (Get-Command makensis -ErrorAction SilentlyContinue).Source
     if (!$makensis) {
-        # 【为什么不读 `ProgramFiles(x86)` 环境变量】它在部分宿主里根本不存在，而
-        # `msvc-env.ps1` 导入 vcvars 环境时会把空值写回（.NET 把空值当"删除"），于是
-        # 构建尾部会以一个和 NSIS 毫无关系的报错失败："无法将自变量绑定到参数 'Path'"。
-        # 目录只能问系统 API（与 `scripts/env/msvc-env.ps1` 的 `Get-ProgramFilesRoots` 同源）。
+        # [Why not read the `ProgramFiles(x86)` environment variable] It does not exist in some
+        # hosts at all, and `msvc-env.ps1` writes empty values back when importing the vcvars
+        # environment (.NET treats an empty value as "delete"), so the tail of the build would
+        # fail with an error unrelated to NSIS: "Cannot bind argument to parameter 'Path'".
+        # The directory can only be asked of the system API (same source as `Get-ProgramFilesRoots`
+        # in `scripts/env/msvc-env.ps1`).
         foreach ($kind in 'ProgramFilesX86', 'ProgramFiles') {
             $base = [Environment]::GetFolderPath($kind)
             if (!$base) { continue }
@@ -519,18 +559,20 @@ if ($Target -eq 'All' -or $Target -eq 'Installer') {
         }
     }
     if (!$makensis) {
-        throw '找不到 makensis：先跑 scripts\setup\install_deps_windows.ps1（Windows 只交付这一个安装器，缺它等于没有产物）'
+        throw 'makensis not found: run scripts\setup\install_deps_windows.ps1 first (Windows ships only this one installer; without it there is no artifact)'
     }
 
-    # 安装器文案由五语词表生成；先重新生成一次，漏翻译在这里就失败。
+    # Installer strings are generated from the five-language table; regenerate first so a missing
+    # translation fails here.
     node (Join-Path $PSScriptRoot '..\release\build-installer-strings.mjs')
-    Assert-Ok '安装器文案生成'
+    Assert-Ok 'installer string generation'
 
     $bootstrapper = Get-WebView2Bootstrapper
     $setup = Join-Path $dist ('HiFiShifter_v' + $version + '_windows-' + $arch + '-setup.exe')
     Remove-Item $setup -Force -ErrorAction SilentlyContinue
 
-    # 每一个路径都以 /D 传入，脚本里不出现任何相对路径猜测（值带引号：路径里可能有空格）。
+    # Every path is passed as a /D define; the script never guesses relative paths (values are
+    # quoted: paths may contain spaces).
     & $makensis /INPUTCHARSET UTF8 `
         "/DAPP_DIR=$(Join-Path $stage 'app')" `
         "/DVST3_DIR=$(Join-Path $stage 'vst3')" `
@@ -547,58 +589,13 @@ if ($Target -eq 'All' -or $Target -eq 'Installer') {
         "/DWEBVIEW2_BOOTSTRAPPER=$bootstrapper" `
         "/DHFS_ICON=$(Join-Path $root 'backend\src-tauri\icons\icon.ico')" `
         (Join-Path $PSScriptRoot '..\release\merged-installer.nsi')
-    Assert-Ok '安装器编译'
-    Write-Host "安装器：$setup" -ForegroundColor Green
+    Assert-Ok 'installer compile'
+    Write-Host "Installer: $setup" -ForegroundColor Green
 }
 
-# ── 安装器 ──────────────────────────────────────────────────────────────────
-$makensis = (Get-Command makensis -ErrorAction SilentlyContinue).Source
-if (!$makensis) {
-    # 【为什么不读 `ProgramFiles(x86)` 环境变量】它在部分宿主里根本不存在，而
-    # `msvc-env.ps1` 导入 vcvars 环境时会把空值写回（.NET 把空值当"删除"），于是
-    # 构建尾部会以一个和 NSIS 毫无关系的报错失败："无法将自变量绑定到参数 'Path'"。
-    # 目录只能问系统 API（与 `scripts/env/msvc-env.ps1` 的 `Get-ProgramFilesRoots` 同源）。
-    foreach ($kind in 'ProgramFilesX86', 'ProgramFiles') {
-        $base = [Environment]::GetFolderPath($kind)
-        if (!$base) { continue }
-        $candidate = Join-Path $base 'NSIS\makensis.exe'
-        if (Test-Path -LiteralPath $candidate) { $makensis = $candidate; break }
-    }
-}
-if (!$makensis) {
-    throw '找不到 makensis：先跑 scripts\setup\install_deps_windows.ps1（Windows 只交付这一个安装器，缺它等于没有产物）'
-}
-
-# 安装器文案由五语词表生成；先重新生成一次，漏翻译在这里就失败。
-node (Join-Path $PSScriptRoot '..\release\build-installer-strings.mjs')
-Assert-Ok '安装器文案生成'
-
-$bootstrapper = Get-WebView2Bootstrapper
-$setup = Join-Path $dist ('HiFiShifter_v' + $version + '_windows-' + $arch + '-setup.exe')
-Remove-Item $setup -Force -ErrorAction SilentlyContinue
-
-# 每一个路径都以 /D 传入，脚本里不出现任何相对路径猜测（值带引号：路径里可能有空格）。
-& $makensis /INPUTCHARSET UTF8 `
-    "/DAPP_DIR=$(Join-Path $stage 'app')" `
-    "/DVST3_DIR=$(Join-Path $stage 'vst3')" `
-    "/DCLAP_FILE=$(Join-Path $stage 'HiFiShifter.clap')" `
-    "/DCLAP_RES_DIR=$(Join-Path $stage 'HiFiShifter-resources')" `
-    "/DMODELS_DIR=$(Join-Path $stage 'models')" `
-    "/DMODELS_VERSION=$modelsVersion" `
-    "/DMODELS_VERIFY=$(Join-Path $stage 'models-verify.nsh')" `
-    "/DHFS_LICENSE=$(Join-Path $stage 'LICENSE')" `
-    "/DHFS_LICENSE_PAGE=$(Join-Path $stage 'license-page.txt')" `
-    "/DHFS_LICENSES=$(Join-Path $stage 'licenses')" `
-    "/DOUTPUT_FILE=$setup" `
-    "/DAPP_VERSION=$version" `
-    "/DWEBVIEW2_BOOTSTRAPPER=$bootstrapper" `
-    "/DHFS_ICON=$(Join-Path $root 'backend\src-tauri\icons\icon.ico')" `
-    (Join-Path $PSScriptRoot '..\release\merged-installer.nsi')
-Assert-Ok '安装器编译'
-Write-Host "安装器：$setup" -ForegroundColor Green
-
-# ── 便携包 ──────────────────────────────────────────────────────────────────
-# 便携包**自包含**：模型全量随包，解压即用，不依赖安装器与 ProgramData。
+# ── Portable zip ────────────────────────────────────────────────────────────
+# The portable zip is **self-contained**: the full models ship inside it, unpack and run, with no
+# dependency on the installer or ProgramData.
 if ($Target -ne 'All') {
     return
 }
@@ -606,7 +603,7 @@ if ($Target -ne 'All') {
 $portable = Join-Path $dist 'HiFiShifter'
 Reset-Directory $portable
 Copy-Item "$built\HiFiShifter.exe" $portable
-# 与安装器的 App 载荷走同一个判据：插件模块不随独立 App 分发。
+# Same criterion as the installer's App payload: plugin modules do not ship with the standalone App.
 Copy-AppRuntimeDlls $portable
 Copy-Item $modelsSource "$portable\models" -Recurse
 Copy-Item $licenses $portable -Recurse
@@ -615,4 +612,4 @@ $portableZip = Join-Path $dist "HiFiShifter-v$version-portable-win-$arch.zip"
 Remove-Item $portableZip -Force -ErrorAction SilentlyContinue
 Compress-Archive -Path $portable -DestinationPath $portableZip -CompressionLevel Optimal
 Remove-Item $portable -Recurse -Force
-Write-Host "便携包：$portableZip" -ForegroundColor Green
+Write-Host "Portable zip: $portableZip" -ForegroundColor Green

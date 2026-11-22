@@ -28,9 +28,10 @@ pub(super) fn export_json_file(
     title: &str,
     log_tag: &str,
 ) -> serde_json::Value {
+    let file_type = &hifishifter_kernel::file_types::HIFISHIFTER_JSON;
     let Some(path) = rfd::FileDialog::new()
         .set_title(title)
-        .add_filter("JSON", &["json"])
+        .add_filter(file_type.name(), &file_type.extension_refs())
         .set_file_name(default_file_name)
         .save_file()
     else {

@@ -342,6 +342,62 @@ fn a_take_level_fact_change_survives_the_change_count_early_return() {
     document.close();
 }
 
+/// **不变量：纯几何变化（清单令牌变、渲染事实不变）必须把自动渲染重新排上队。**
+///
+/// 【为什么这是回归】`refresh_ui_inventory` 的纯几何分支此前只推进
+/// `render_epoch`（注释声称"下一次 20 ms 定时器驱动的 prepare 会重算"），而全代码库
+/// **没有**任何周期性的 `prepare()`：20 ms 节拍只做时钟采样 / 清单枚举 / 装配冲刷，
+/// 播放实例没有视图定时器。于是把一个启用循环源的 item 拖长（产生循环节）之后，
+/// 波形立刻画出循环，音频快照却停在旧版本 —— 直到用户碰巧做一次别的编辑。真机
+/// 症状正是它。修复后这一支经 `rearm_render` 把渲染重新排上队（与旁通恢复同一条
+/// 通路），快照在下一次 actor 轮里发布。
+#[test]
+fn a_geometry_only_inventory_change_rearms_the_auto_render() {
+    let (model, owner, _identity) = crate::editor::session::tests::fixture();
+    let document = model.session();
+    let host = crate::host::MockHost::new();
+    host.enable_takes(0);
+    host.enable_media();
+    host.clear_markers();
+    // SAFETY: 夹具与 owner 在整个用例期间存活。
+    unsafe {
+        owner.bind_host_adapter(host.context());
+    }
+    // 第一轮完整采集：确立"事实已发布"的基线（渲染事实不变是本用例的前提）。
+    owner.refresh_host_transport();
+    let epoch_before = document.render_epoch.load(Ordering::Acquire);
+    let facts_before = document.render_facts.lock_or_recover().clone();
+    // rearm 计数的基线：夹具建立过程自身可能 rearm 过，只看**增量**。
+    let editor = owner.editor_session().expect("编辑会话必须能够创建");
+    let rearm_before = editor.rearm_requests();
+    // 前提：此刻没有在途渲染（否则 token_changed 分支会正确地跳过重复调度）。
+    assert!(!editor.render_pending(), "夹具不得带着在途渲染进入本用例");
+
+    // 宿主只改变**几何**：把 item 拖长（循环节由此产生）⇒ 清单令牌变、facts 不变。
+    // `set_value` 自带一次 change-count 推进（这正是"宿主改了 item"的真实形状）。
+    host.set_value("D_LENGTH", 8. / 44100.);
+
+    owner.refresh_ui_inventory();
+
+    assert!(
+        document.render_epoch.load(Ordering::Acquire) > epoch_before,
+        "纯几何变化仍必须推进 render_epoch（快照版本失配）"
+    );
+    assert_eq!(
+        &*document.render_facts.lock_or_recover(),
+        &facts_before,
+        "前提：渲染事实未变（本用例测的是 token_changed 分支）"
+    );
+    // 【修复的核心】纯几何变化必须让编辑会话把渲染重新排上队；否则 epoch 推进之后
+    // 没有任何调度者会再跑一次 prepare，快照永远停在旧版本。用累计计数判：渲染可能
+    // 在断言之前已被 actor 消化（`render_requested` 被清回 false），计数不会丢。
+    assert!(
+        editor.rearm_requests() > rearm_before,
+        "纯几何变化必须 rearm 自动渲染，否则循环节延长后音频停在旧版本"
+    );
+    document.close();
+}
+
 /// GUI 载荷只带**编辑器实例**的读数：playback 实例没有 GUI，它的读数不该出现在
 /// 用户的窗口里（那会让一个正常工作的实例替另一个实例"背锅"）。
 #[test]

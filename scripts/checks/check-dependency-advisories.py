@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
-"""依赖漏洞扫描门禁：把两份锁文件逐包送 OSV，只放行"已评估过"的通告。
+"""Dependency vulnerability scan gate: feed both lockfiles to OSV package by
+package, and only let through advisories that have already been reviewed.
 
-【为什么要单独一个脚本】`npm audit` 只覆盖 npm，`cargo audit` 需要装工具链；
-而本仓的依赖面是"两份锁文件"——`backend/Cargo.lock` 与
-`frontend/package-lock.json`。OSV 同时收录 crates.io 与 npm，一次批量查询就能
-把两边都扫完，且不需要在本地安装任何东西。
+[Why a separate script] `npm audit` only covers npm, and `cargo audit` requires
+installing a toolchain, while this repo's dependency surface is "two lockfiles" -
+`backend/Cargo.lock` and `frontend/package-lock.json`. OSV indexes both
+crates.io and npm, so a single batch query scans both sides and needs nothing
+installed locally.
 
-【为什么要有白名单】本仓有 5 条"修不动"的通告（上游把版本钉死 / 不再维护）。
-没有白名单，门禁永远是红的；有了白名单，**新增**的通告才是一次真正的告警。
-每条都必须写理由（见 `advisory-allowlist.json`），并定期复审。
+[Why an allowlist exists] This repo carries 5 advisories that "cannot be fixed"
+(upstream pins the version / the project is unmaintained). Without an allowlist
+the gate stays red forever; with one, a **newly added** advisory becomes a real
+alarm. Every entry must state a reason (see `advisory-allowlist.json`) and be
+reviewed periodically.
 
-【退出码】
-- 0：没有白名单之外的通告（网络失败也走这里，但会打印醒目的 WARN —— 定时任务
-  不该因为 OSV 抖一下就变红；真正重要的是"扫到了新东西"）。
-- 1：存在白名单之外的通告。
-- 2：参数/文件错误。
+[Exit codes]
+- 0: no advisories outside the allowlist (network failure also lands here, but
+  prints a loud WARN - a scheduled job must not go red because OSV hiccuped;
+  what really matters is "something new was found").
+- 1: advisories exist outside the allowlist.
+- 2: argument/file error.
 
-用法：
+Usage:
     python scripts/checks/check-dependency-advisories.py
     python scripts/checks/check-dependency-advisories.py --verbose
 """
@@ -32,8 +37,10 @@ import time
 import urllib.error
 import urllib.request
 
-# Windows 的 stdout 跟随 ANSI 代码页（英文系统是 cp1252、中文系统是 GBK），打印中文会
-# UnicodeEncodeError 打死进程 —— 真正的结论一条都进不了日志，红的是编码而不是规则。
+# On Windows, stdout follows the ANSI code page (cp1252 on English systems, GBK on
+# Chinese ones); printing Chinese raises UnicodeEncodeError and kills the process -
+# not a single real verdict makes it into the log, and what turns red is the
+# encoding, not the rule.
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
@@ -46,10 +53,11 @@ CHUNK = 200
 
 
 def cargo_packages() -> list[tuple[str, str]]:
-    """从 Cargo.lock 里取 (name, version)。
+    """Extract (name, version) pairs from Cargo.lock.
 
-    Cargo.lock 是 TOML，但每个 `[[package]]` 段的头两行固定是 name/version；
-    为这点信息引一个 TOML 解析器不值得，也不该让门禁依赖额外包。
+    Cargo.lock is TOML, but the first two lines of every `[[package]]` block are
+    always name/version; pulling in a TOML parser for that little information is
+    not worth it, and the gate should not depend on extra packages anyway.
     """
     text = CARGO_LOCK.read_text(encoding="utf-8")
     packages: list[tuple[str, str]] = []
@@ -69,10 +77,10 @@ def cargo_packages() -> list[tuple[str, str]]:
 
 
 def npm_packages() -> list[tuple[str, str]]:
-    """从 package-lock.json 的 `packages` 表里取 (name, version)。
+    """Extract (name, version) pairs from the `packages` table of package-lock.json.
 
-    嵌套安装会出现 `node_modules/a/node_modules/b` 这类键：包名取最后一个
-    `node_modules/` 之后的部分。
+    Nested installs produce keys like `node_modules/a/node_modules/b`: the package
+    name is the part after the last `node_modules/`.
     """
     lock = json.loads(NPM_LOCK.read_text(encoding="utf-8"))
     packages: list[tuple[str, str]] = []
@@ -87,7 +95,7 @@ def npm_packages() -> list[tuple[str, str]]:
 
 
 def query_osv(ecosystem: str, packages: list[tuple[str, str]]) -> dict[tuple[str, str], list[dict]]:
-    """批量查询；返回 {(name, version): [vuln, ...]}，只保留有命中的条目。"""
+    """Batch query; returns {(name, version): [vuln, ...]}, keeping only entries with hits."""
     hits: dict[tuple[str, str], list[dict]] = {}
     for start in range(0, len(packages), CHUNK):
         chunk = packages[start : start + CHUNK]
@@ -165,7 +173,8 @@ def main() -> int:
         hits = query_osv("crates.io", crates)
         hits.update(query_osv("npm", modules))
     except RuntimeError as error:
-        # 网络问题不该让定时任务变红（见文件头注释），但必须留下痕迹。
+        # A network problem must not turn the scheduled job red (see the file-header
+        # comment), but it must leave a trace.
         print(f"WARN: {error}")
         print("WARN: advisory scan skipped -- re-run when the network is back")
         return 0
@@ -174,10 +183,13 @@ def main() -> int:
     unexpected: list[tuple[str, str, list[str]]] = []
     for (name, version), vulns in sorted(hits.items()):
         ids = [vuln.get("id", "?") for vuln in vulns]
-        # 【按 ID 逐个裁决，不能整包一刀切】allowlist 的键是 (package, id)。
-        # 旧写法 `any(一条 id 被允许 -> 整包 accepted)` 会让同一个包上新披露的
-        # 公告被那条旧豁免一起吞掉 —— 安全门禁于是长期全绿，而真正需要评审的
-        # 新漏洞连日志都不出现。分别收集：允许的进 accepted，其余进 unexpected。
+        # [Adjudicate per ID; never green-light a whole package in one stroke] The
+        # allowlist key is (package, id). The old form, `any(one id allowed ->
+        # whole package accepted)`, let a newly disclosed advisory on the same
+        # package be swallowed by that older waiver - the security gate stayed
+        # green for ages, while a new vulnerability that actually needed review
+        # never even appeared in the log. Collect separately: allowed ids go into
+        # accepted, the rest into unexpected.
         allowed_ids = [vuln_id for vuln_id in ids if (name, vuln_id) in allowed]
         unallowed_ids = [vuln_id for vuln_id in ids if (name, vuln_id) not in allowed]
         if allowed_ids:

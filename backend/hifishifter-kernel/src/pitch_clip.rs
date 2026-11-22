@@ -489,6 +489,36 @@ fn file_exists_cached(path: &Path) -> bool {
     len > 0
 }
 
+/// 插件物化分析副本的文件名前缀（`host_pcm::materialize_impl` 写出的
+/// `source-{blake3}.wav`）。blake3 的 hex 编码固定 64 个小写十六进制字符，
+/// 因此物化文件名的**完整形态**是 `source-{64 位小写 hex}.wav`。
+const MATERIALIZED_SOURCE_PREFIX: &str = "source-";
+const MATERIALIZED_TOKEN_LEN: usize = 64;
+
+/// 判断文件名是否为物化分析副本的**完整**形态；命中时返回内容令牌。
+///
+/// 【为什么必须精确匹配而不是只认前缀】前缀判定会把恰好叫 `source-*.wav` 的
+/// **真实用户文件**（`source-1.wav`、`source-vocal.wav` 这类常见命名）也当成
+/// "文件名即内容令牌"，于是两个目录里同名的两份不同音频落到同一个缓存键上 ——
+/// 其中一份会拿到另一份的 F0（错误共享，无声地出错）。物化器只写出上述唯一
+/// 形态（见 `host_pcm::materialize_impl`），按完整形态匹配即可把两者分开：
+/// 令牌长度不对、含大写或非十六进制字符、扩展名不是 `.wav` 的一律按普通文件
+/// 处理（路径 + 文件签名建键）。
+fn materialized_source_token(file_name: &str) -> Option<&str> {
+    let stem = file_name.strip_suffix(".wav")?;
+    let token = stem.strip_prefix(MATERIALIZED_SOURCE_PREFIX)?;
+    if token.len() != MATERIALIZED_TOKEN_LEN {
+        return None;
+    }
+    if !token
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return None;
+    }
+    Some(token)
+}
+
 fn resample_curve_linear(values: &[f32], out_len: usize) -> Vec<f32> {
     if out_len == 0 {
         return vec![];
@@ -553,10 +583,30 @@ fn build_clip_pitch_key(
         hasher.update(b"(content)");
         hasher.update(content_id.as_bytes());
     } else if let Some(source_path) = source_path {
-        hasher.update(source_path.as_bytes());
-        let (len, mtime) = file_sig(Path::new(source_path));
-        hasher.update(&len.to_le_bytes());
-        hasher.update(&mtime.to_le_bytes());
+        // 【物化副本按**内容令牌**建键】插件的分析源是私有副本
+        // `…/sources/source-{blake3}.wav`：文件名本身就是整份内容的哈希。
+        // 把**完整路径 + 文件签名**哈希进键有两个真实代价，且都在真机日志里出现过：
+        // ① 命名空间含会话序号 ⇒ 宿主重绑一次组件（REAPER 在播放/弹窗时反复做）就换一个
+        //    pcm_dir ⇒ 同一份音频换个路径 ⇒ 缓存必 miss ⇒ 每次绑完整重分析（真机
+        //    01:18–01:23 的 17 次 `starting analysis` 全是同一份 Vocal 文件）；
+        // ② mtime 进键 ⇒ 同路径原子重建（tmp+rename）一次，键就变 ⇒ 又一轮重分析。
+        // 文件名令牌已经回答了"内容变没变"：内容变 ⇒ blake3 变 ⇒ 文件名变 ⇒ 键变。
+        // 因此物化形态只哈希**文件名**；真实用户文件（App / 外部拖入）保持原判据
+        // （路径 + 文件签名），那里路径本身就是身份。
+        let path = Path::new(source_path);
+        let name = path.file_name().and_then(|name| name.to_str());
+        match name.and_then(materialized_source_token) {
+            Some(token) => {
+                hasher.update(b"(materialized)");
+                hasher.update(token.as_bytes());
+            }
+            None => {
+                hasher.update(source_path.as_bytes());
+                let (len, mtime) = file_sig(path);
+                hasher.update(&len.to_le_bytes());
+                hasher.update(&mtime.to_le_bytes());
+            }
+        }
     } else {
         hasher.update(b"(no_source)");
     }
@@ -1771,7 +1821,10 @@ pub fn trim_and_resample_midi(
             );
         }
     }
-    log::warn!(
+    // 【为什么不是 warn】这条是逐 clip、逐渲染趟都触发的追踪探针，不是异常：
+    // 走 warn 会让默认日志级别下每次渲染都格式化 8 个值并刷屏。上面的 CLAMP /
+    // MISMATCH 才是真异常（保留 warn）；这条降为热路径调试日志。
+    debug_eprintln!(
         "[pitch:trim] src_start={:.3}s src_end={:.3}s rate={:.2} tl_len={:.3}s \
          full_midi_len={} trimmed=[{}..{}]={} → target_frames={}",
         source_start_sec,
@@ -1879,10 +1932,14 @@ mod tests {
         analyze_whole_source, assemble_nonloop_pitch_from_window, build_clip_pitch_key,
         cached_pitch_bytes, clip_pitch_cache_budget_bytes, clip_pitch_cache_entry_limit,
         clip_pitch_cache_max_entries, compute_frame_levels, dyn_needs_level_analysis,
-        dyn_panel_open_roots, global_cache, store_clip_pitch_cache, trim_and_resample_midi,
-        CachedClipPitch, UNBOUNDED_ENTRY_CAPACITY,
+        dyn_panel_open_roots, global_cache, materialized_source_token, store_clip_pitch_cache,
+        trim_and_resample_midi, CachedClipPitch, UNBOUNDED_ENTRY_CAPACITY,
     };
     use crate::state::{Clip, TimelineState};
+
+    /// 与 blake3 hex 编码同长度的两个不同令牌（64 位小写十六进制）。
+    const TOKEN_A: &str = "3f79bb7b435b05321651daefd374cdc681dc06faa65e374e38337b88ca004e00";
+    const TOKEN_B: &str = "aa26f6c988afea56a7b48ee8a3e003d39ba7fac9a596bff75fa9c28d5fce3c33";
 
     /// **内容身份优先于会话私有物化路径。**
     ///
@@ -1930,12 +1987,103 @@ mod tests {
         );
 
         // 没有内容身份时退回路径 + 文件签名（老工程 / 外部拖入），行为与改动前一致。
-        let d = clip("C:/pcm/hfs-ui-1-1-/sources/source-aaa.wav", None);
-        let e = clip("C:/pcm/hfs-ui-9-2-/sources/source-bbb.wav", None);
+        // 物化副本例外：文件名 `source-{64 位小写 hex}.wav` 即内容令牌 —— 只哈希文件名。
+        let d = clip(
+            &format!("C:/pcm/hfs-ui-1-1-/sources/source-{TOKEN_A}.wav"),
+            None,
+        );
+        let e = clip(
+            &format!("C:/pcm/hfs-ui-9-2-/sources/source-{TOKEN_B}.wav"),
+            None,
+        );
         assert_ne!(
             build_clip_pitch_key(&tl, &d, "root", 5.0).unwrap().key,
             build_clip_pitch_key(&tl, &e, "root", 5.0).unwrap().key,
             "没有内容身份时键必须仍然区分不同的源"
+        );
+
+        // 【回归：会话私有目录换名不得换键】宿主重绑组件 ⇒ 新 EditorSession ⇒ 新
+        // 命名空间目录；同一份音频物化到不同目录。完整路径入键的旧实现每次绑都
+        // 整份重分析（真机日志里同一份 Vocal 文件 17 次 `starting analysis`）。
+        // 物化形态只认文件名令牌：目录变了、键不变。
+        let session_one = clip(
+            &format!("C:/pcm/hfs-ui-1-1-/sources/source-{TOKEN_A}.wav"),
+            None,
+        );
+        let session_two = clip(
+            &format!("C:/pcm/hfs-ui-9-2-/sources/source-{TOKEN_A}.wav"),
+            None,
+        );
+        assert_eq!(
+            build_clip_pitch_key(&tl, &session_one, "root", 5.0)
+                .unwrap()
+                .key,
+            build_clip_pitch_key(&tl, &session_two, "root", 5.0)
+                .unwrap()
+                .key,
+            "物化副本换个会话目录必须命中同一份分析结果"
+        );
+
+        // 非物化形态（真实用户文件）仍然按完整路径区分：两个不同路径的两个文件
+        // 即便文件名相同也必须得到不同的键。
+        let real_a = clip("C:/music/Vocal-1-2.wav", None);
+        let real_b = clip("C:/other/Vocal-1-2.wav", None);
+        assert_ne!(
+            build_clip_pitch_key(&tl, &real_a, "root", 5.0).unwrap().key,
+            build_clip_pitch_key(&tl, &real_b, "root", 5.0).unwrap().key,
+            "真实文件按路径区分"
+        );
+
+        // 【回归：非完整形态的 `source-*.wav` 用户文件不得被当作物化副本】物化器只
+        // 写出 `source-{64 位小写 hex}.wav`；令牌长度 / 字符集 / 扩展名任一不符的
+        // 名字必须退回路径 + 文件签名建键。前缀判定会把两个目录里同名的
+        // `source-1.wav` 并到同一个键上 —— 错误共享，其中一份拿到另一份的 F0。
+        let user_a = clip("C:/music/source-1.wav", None);
+        let user_b = clip("C:/other/source-1.wav", None);
+        assert_ne!(
+            build_clip_pitch_key(&tl, &user_a, "root", 5.0).unwrap().key,
+            build_clip_pitch_key(&tl, &user_b, "root", 5.0).unwrap().key,
+            "同名的非物化用户文件必须按路径区分"
+        );
+        // 大写十六进制与长度不符的令牌同样不算物化形态。
+        let upper_a = clip("C:/music/source-AAAA.wav", None);
+        let upper_b = clip("C:/other/source-AAAA.wav", None);
+        assert_ne!(
+            build_clip_pitch_key(&tl, &upper_a, "root", 5.0)
+                .unwrap()
+                .key,
+            build_clip_pitch_key(&tl, &upper_b, "root", 5.0)
+                .unwrap()
+                .key,
+            "大写十六进制的 source-*.wav 不是物化形态"
+        );
+        let short_a = clip("C:/music/source-abc.wav", None);
+        let short_b = clip("C:/other/source-abc.wav", None);
+        assert_ne!(
+            build_clip_pitch_key(&tl, &short_a, "root", 5.0)
+                .unwrap()
+                .key,
+            build_clip_pitch_key(&tl, &short_b, "root", 5.0)
+                .unwrap()
+                .key,
+            "令牌长度不符的 source-*.wav 不是物化形态"
+        );
+        // 精确形态判定本身：只有 64 位小写 hex 命中。
+        assert_eq!(
+            materialized_source_token(&format!("source-{TOKEN_A}.wav")),
+            Some(TOKEN_A),
+            "完整物化形态命中令牌"
+        );
+        assert_eq!(materialized_source_token("source-.wav"), None);
+        assert_eq!(materialized_source_token("source-1.wav"), None);
+        assert_eq!(materialized_source_token("source-VOCAL.wav"), None);
+        assert_eq!(materialized_source_token("source-mixed-123abc.wav"), None);
+        assert_eq!(materialized_source_token("sources-1.wav"), None);
+        assert_eq!(materialized_source_token("source-1.flac"), None);
+        assert_eq!(
+            materialized_source_token(&format!("source-{}X.wav", "a".repeat(64))),
+            None,
+            "超长令牌不是物化形态"
         );
     }
 

@@ -545,6 +545,15 @@ fn build_mel_from_waveform(
     if hop == 0 || n_fft == 0 || win_size == 0 || n_mels == 0 {
         return Err("fcpe mel config invalid".to_string());
     }
+    // win_size 与 n_fft 来自两个独立的环境变量，必须交叉校验：
+    // win_size > n_fft 时下方 `fft_buf[i]`（0..win_size 覆盖到 n_fft 之外）
+    // 与 `fft_buf[win_size..]` 都会直接越界 panic —— 环境变量是用户可配的
+    // 输入，这里必须把它变成一条可恢复的 Err。
+    if win_size > n_fft {
+        return Err(format!(
+            "fcpe mel config invalid: HIFISHIFTER_FCPE_WIN_SIZE ({win_size}) must not exceed HIFISHIFTER_FCPE_N_FFT ({n_fft})"
+        ));
+    }
 
     let y = crate::mel_utils::linear_resample_mono(waveform, in_sr, target_sr);
     let pad_left = ((win_size as isize - hop as isize) / 2).max(0) as usize;
@@ -731,13 +740,46 @@ fn build_waveform_tensor_for_rank(rank: usize, waveform: Vec<f32>) -> Result<Ten
     }
 }
 
-fn run_with_named_inputs(
-    session: &mut Session,
-    waveform: &[f32],
-    sample_rate: u32,
-    f0_floor: f64,
-    f0_ceil: f64,
-) -> Result<Vec<f64>, String> {
+/// FCPE 模型的 I/O 元数据快照。
+struct FcpeModelIo {
+    /// 输入插口的 (名称, 张量秩, 元素类型)。
+    input_meta: Vec<(String, usize, Option<TensorElementType>)>,
+    /// 首个输入的声明形状（mel 输入用它判断 M=128 落在哪条轴）。
+    mel_shape: Vec<i64>,
+    /// 人类可读的 I/O 概要，进错误信息与调试日志。
+    io_summary: String,
+}
+
+/// 双输入模型的具名标量副输入（sr 或占位 config）。
+enum FcpeScalarInput {
+    Int64(Tensor<i64>),
+    Int32(Tensor<i32>),
+    Aux(Tensor<f32>),
+}
+
+/// 已构建完毕、等待推理的 FCPE 输入。
+enum PreparedFcpeInput {
+    Single {
+        name: String,
+        tensor: Tensor<f32>,
+        /// 进 "FCPE run failed (...)" 错误信息的分支标签。
+        label: &'static str,
+    },
+    WithSecond {
+        name: String,
+        tensor: Tensor<f32>,
+        second_name: String,
+        second: FcpeScalarInput,
+        label: &'static str,
+    },
+}
+
+/// 读取 FCPE 模型的 I/O 元数据（会话对象初始化后固定不变）。
+///
+/// 【为什么单独一趟】把它从推理里拆出来，重 CPU 的 mel STFT 与输入张量
+/// 构建就能在**共享会话锁外**完成 —— 旧实现把整段 STFT 放在锁内，
+/// 多个分析线程会为一次与 ORT 无关的纯 CPU 计算互相排队。
+fn read_fcpe_model_io(session: &Session) -> FcpeModelIo {
     let input_meta: Vec<(String, usize, Option<TensorElementType>)> = session
         .inputs()
         .iter()
@@ -750,9 +792,12 @@ fn run_with_named_inputs(
         })
         .collect();
 
-    if input_meta.is_empty() {
-        return Err("FCPE model has no inputs".to_string());
-    }
+    let mel_shape: Vec<i64> = session
+        .inputs()
+        .first()
+        .and_then(|o| o.dtype().tensor_shape())
+        .map(|s| s.iter().copied().collect())
+        .unwrap_or_else(|| vec![-1, -1, 128]);
 
     let io_summary = {
         let ins: Vec<String> = session
@@ -796,63 +841,60 @@ fn run_with_named_inputs(
         log::warn!("fcpe_onnx: model io = {io_summary}");
     }
 
+    FcpeModelIo {
+        input_meta,
+        mel_shape,
+        io_summary,
+    }
+}
+
+/// 按模型元数据构建全部输入张量（mel STFT / 波形拷贝 / 标量副输入）。
+///
+/// 纯 CPU 计算，不触碰 ORT 会话 —— 调用方必须在**共享会话锁外**执行它。
+/// 错误信息与旧实现逐字一致（含 io_summary 与分支标签），任何测试或日志
+/// 匹配都不受影响。
+fn prepare_fcpe_input(
+    io: &FcpeModelIo,
+    waveform: &[f32],
+    sample_rate: u32,
+) -> Result<PreparedFcpeInput, String> {
+    let input_meta = &io.input_meta;
+    if input_meta.is_empty() {
+        return Err("FCPE model has no inputs".to_string());
+    }
+
+    // 直接按模型期望的轴序产出 mel，省掉一次整块转置拷贝。
+    let build_mel = || -> Result<Tensor<f32>, String> {
+        let mel_axis = io.mel_shape.iter().position(|&d| d == 128).unwrap_or(2);
+        let n_mels = 128usize;
+        let time_major = mel_axis == 2;
+        let (mel, t) = build_mel_from_waveform(waveform, sample_rate, n_mels, time_major)
+            .map_err(|e| format!("{e}; {}", io.io_summary))?;
+        if time_major {
+            Tensor::from_array(([1usize, t, n_mels], mel.into_boxed_slice()))
+                .map_err(|e| format!("build FCPE mel tensor [B,T,M] failed: {e}"))
+        } else {
+            Tensor::from_array(([1usize, n_mels, t], mel.into_boxed_slice()))
+                .map_err(|e| format!("build FCPE mel tensor [B,M,T] failed: {e}"))
+        }
+    };
+
     if input_meta.len() == 1 {
         let (first_name, rank, _) = &input_meta[0];
         if first_name.eq_ignore_ascii_case("mel") && *rank == 3 {
-            let mel_shape: Vec<i64> = session
-                .inputs()
-                .first()
-                .and_then(|o| o.dtype().tensor_shape())
-                .map(|s| s.iter().copied().collect())
-                .unwrap_or_else(|| vec![-1, -1, 128]);
-
-            let mel_axis = mel_shape.iter().position(|&d| d == 128).unwrap_or(2);
-            let n_mels = 128usize;
-
-            // 直接按模型期望的轴序产出 mel，省掉一次整块转置拷贝。
-            let time_major = mel_axis == 2;
-            let (mel, t) = build_mel_from_waveform(waveform, sample_rate, n_mels, time_major)
-                .map_err(|e| format!("{e}; {io_summary}"))?;
-
-            let mel_tensor = if time_major {
-                // Model expects [B, T, M] where M=128.
-                Tensor::from_array(([1usize, t, n_mels], mel.into_boxed_slice()))
-                    .map_err(|e| format!("build FCPE mel tensor [B,T,M] failed: {e}"))?
-            } else {
-                // Fallback to [B, M, T].
-                Tensor::from_array(([1usize, n_mels, t], mel.into_boxed_slice()))
-                    .map_err(|e| format!("build FCPE mel tensor [B,M,T] failed: {e}"))?
-            };
-
-            let outputs = session
-                .run(ort::inputs![first_name.as_str() => mel_tensor])
-                .map_err(|e| format!("FCPE run failed (mel-input): {e}; {io_summary}"))?;
-            let first_out = outputs
-                .into_iter()
-                .next()
-                .ok_or_else(|| "FCPE returned no outputs".to_string())?;
-            let (_shape, data) = first_out
-                .1
-                .try_extract_tensor::<f32>()
-                .map_err(|e| format!("extract FCPE output failed: {e}"))?;
-            let hz = decode_model_output_to_f0_hz(_shape, data, f0_floor, f0_ceil);
-            return Ok(hz);
+            let tensor = build_mel()?;
+            return Ok(PreparedFcpeInput::Single {
+                name: first_name.clone(),
+                tensor,
+                label: "mel-input",
+            });
         }
-
-        let audio = build_waveform_tensor_for_rank(*rank, waveform.to_vec())?;
-        let outputs = session
-            .run(ort::inputs![first_name.as_str() => audio])
-            .map_err(|e| format!("FCPE run failed (single-input): {e}; {io_summary}"))?;
-        let first_out = outputs
-            .into_iter()
-            .next()
-            .ok_or_else(|| "FCPE returned no outputs".to_string())?;
-        let (_shape, data) = first_out
-            .1
-            .try_extract_tensor::<f32>()
-            .map_err(|e| format!("extract FCPE output failed: {e}"))?;
-        let hz = decode_model_output_to_f0_hz(_shape, data, f0_floor, f0_ceil);
-        return Ok(hz);
+        let tensor = build_waveform_tensor_for_rank(*rank, waveform.to_vec())?;
+        return Ok(PreparedFcpeInput::Single {
+            name: first_name.clone(),
+            tensor,
+            label: "single-input",
+        });
     }
 
     if input_meta.len() == 2 {
@@ -860,146 +902,125 @@ fn run_with_named_inputs(
         let (second_name, _, second_ty) = &input_meta[1];
 
         if first_name.eq_ignore_ascii_case("mel") && *first_rank == 3 {
-            let mel_shape: Vec<i64> = session
-                .inputs()
-                .first()
-                .and_then(|o| o.dtype().tensor_shape())
-                .map(|s| s.iter().copied().collect())
-                .unwrap_or_else(|| vec![-1, -1, 128]);
-            let mel_axis = mel_shape.iter().position(|&d| d == 128).unwrap_or(2);
-            let n_mels = 128usize;
-
-            // 同上：按模型期望的轴序直接产出，免去转置拷贝。
-            let time_major = mel_axis == 2;
-            let (mel, t) = build_mel_from_waveform(waveform, sample_rate, n_mels, time_major)
-                .map_err(|e| format!("{e}; {io_summary}"))?;
-
-            let mel_tensor = if time_major {
-                Tensor::from_array(([1usize, t, n_mels], mel.into_boxed_slice()))
-                    .map_err(|e| format!("build FCPE mel tensor [B,T,M] failed: {e}"))?
-            } else {
-                Tensor::from_array(([1usize, n_mels, t], mel.into_boxed_slice()))
-                    .map_err(|e| format!("build FCPE mel tensor [B,M,T] failed: {e}"))?
+            let tensor = build_mel()?;
+            let (second, label) = match second_ty {
+                Some(TensorElementType::Int64) => (
+                    FcpeScalarInput::Int64(
+                        Tensor::from_array(((), vec![env_fcpe_sr() as i64]))
+                            .map_err(|e| format!("build FCPE sr(int64) failed: {e}"))?,
+                    ),
+                    "mel+sr:int64",
+                ),
+                Some(TensorElementType::Int32) => (
+                    FcpeScalarInput::Int32(
+                        Tensor::from_array(((), vec![env_fcpe_sr() as i32]))
+                            .map_err(|e| format!("build FCPE sr(int32) failed: {e}"))?,
+                    ),
+                    "mel+sr:int32",
+                ),
+                _ => (
+                    FcpeScalarInput::Aux(
+                        Tensor::from_array(((), vec![0.0f32]))
+                            .map_err(|e| format!("build FCPE aux(float32) failed: {e}"))?,
+                    ),
+                    "mel+aux",
+                ),
             };
-
-            match second_ty {
-                Some(TensorElementType::Int64) => {
-                    let sr = Tensor::from_array(((), vec![env_fcpe_sr() as i64]))
-                        .map_err(|e| format!("build FCPE sr(int64) failed: {e}"))?;
-                    let outputs = session
-                        .run(ort::inputs![first_name.as_str() => mel_tensor, second_name.as_str() => sr])
-                        .map_err(|e| format!("FCPE run failed (mel+sr:int64): {e}; {io_summary}"))?;
-                    let first_out = outputs
-                        .into_iter()
-                        .next()
-                        .ok_or_else(|| "FCPE returned no outputs".to_string())?;
-                    let (_shape, data) = first_out
-                        .1
-                        .try_extract_tensor::<f32>()
-                        .map_err(|e| format!("extract FCPE output failed: {e}"))?;
-                    let hz = decode_model_output_to_f0_hz(_shape, data, f0_floor, f0_ceil);
-                    return Ok(hz);
-                }
-                Some(TensorElementType::Int32) => {
-                    let sr = Tensor::from_array(((), vec![env_fcpe_sr() as i32]))
-                        .map_err(|e| format!("build FCPE sr(int32) failed: {e}"))?;
-                    let outputs = session
-                        .run(ort::inputs![first_name.as_str() => mel_tensor, second_name.as_str() => sr])
-                        .map_err(|e| format!("FCPE run failed (mel+sr:int32): {e}; {io_summary}"))?;
-                    let first_out = outputs
-                        .into_iter()
-                        .next()
-                        .ok_or_else(|| "FCPE returned no outputs".to_string())?;
-                    let (_shape, data) = first_out
-                        .1
-                        .try_extract_tensor::<f32>()
-                        .map_err(|e| format!("extract FCPE output failed: {e}"))?;
-                    let hz = decode_model_output_to_f0_hz(_shape, data, f0_floor, f0_ceil);
-                    return Ok(hz);
-                }
-                _ => {
-                    let aux = Tensor::from_array(((), vec![0.0f32]))
-                        .map_err(|e| format!("build FCPE aux(float32) failed: {e}"))?;
-                    let outputs = session
-                        .run(ort::inputs![first_name.as_str() => mel_tensor, second_name.as_str() => aux])
-                        .map_err(|e| format!("FCPE run failed (mel+aux): {e}; {io_summary}"))?;
-                    let first_out = outputs
-                        .into_iter()
-                        .next()
-                        .ok_or_else(|| "FCPE returned no outputs".to_string())?;
-                    let (_shape, data) = first_out
-                        .1
-                        .try_extract_tensor::<f32>()
-                        .map_err(|e| format!("extract FCPE output failed: {e}"))?;
-                    let hz = decode_model_output_to_f0_hz(_shape, data, f0_floor, f0_ceil);
-                    return Ok(hz);
-                }
-            }
+            return Ok(PreparedFcpeInput::WithSecond {
+                name: first_name.clone(),
+                tensor,
+                second_name: second_name.clone(),
+                second,
+                label,
+            });
         }
 
-        let audio = build_waveform_tensor_for_rank(*first_rank, waveform.to_vec())?;
-
+        let tensor = build_waveform_tensor_for_rank(*first_rank, waveform.to_vec())?;
         // Common FCPE exports use (audio, sr) where sr is int scalar/tensor.
-        match second_ty {
-            Some(TensorElementType::Int64) => {
-                let sr = Tensor::from_array(((), vec![sample_rate as i64]))
-                    .map_err(|e| format!("build FCPE sr(int64) failed: {e}"))?;
-                let outputs = session
-                    .run(ort::inputs![first_name.as_str() => audio, second_name.as_str() => sr])
-                    .map_err(|e| format!("FCPE run failed (audio+sr:int64): {e}; {io_summary}"))?;
-                let first_out = outputs
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| "FCPE returned no outputs".to_string())?;
-                let (_shape, data) = first_out
-                    .1
-                    .try_extract_tensor::<f32>()
-                    .map_err(|e| format!("extract FCPE output failed: {e}"))?;
-                let hz = decode_model_output_to_f0_hz(_shape, data, f0_floor, f0_ceil);
-                return Ok(hz);
-            }
-            Some(TensorElementType::Int32) => {
-                let sr = Tensor::from_array(((), vec![sample_rate as i32]))
-                    .map_err(|e| format!("build FCPE sr(int32) failed: {e}"))?;
-                let outputs = session
-                    .run(ort::inputs![first_name.as_str() => audio, second_name.as_str() => sr])
-                    .map_err(|e| format!("FCPE run failed (audio+sr:int32): {e}; {io_summary}"))?;
-                let first_out = outputs
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| "FCPE returned no outputs".to_string())?;
-                let (_shape, data) = first_out
-                    .1
-                    .try_extract_tensor::<f32>()
-                    .map_err(|e| format!("extract FCPE output failed: {e}"))?;
-                let hz = decode_model_output_to_f0_hz(_shape, data, f0_floor, f0_ceil);
-                return Ok(hz);
-            }
-            _ => {
-                // Fallback: pass zero scalar as second input for models expecting threshold/config.
-                let aux = Tensor::from_array(((), vec![0.0f32]))
-                    .map_err(|e| format!("build FCPE aux(float32) failed: {e}"))?;
-                let outputs = session
-                    .run(ort::inputs![first_name.as_str() => audio, second_name.as_str() => aux])
-                    .map_err(|e| format!("FCPE run failed (audio+aux): {e}; {io_summary}"))?;
-                let first_out = outputs
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| "FCPE returned no outputs".to_string())?;
-                let (_shape, data) = first_out
-                    .1
-                    .try_extract_tensor::<f32>()
-                    .map_err(|e| format!("extract FCPE output failed: {e}"))?;
-                let hz = decode_model_output_to_f0_hz(_shape, data, f0_floor, f0_ceil);
-                return Ok(hz);
-            }
-        }
+        let (second, label) = match second_ty {
+            Some(TensorElementType::Int64) => (
+                FcpeScalarInput::Int64(
+                    Tensor::from_array(((), vec![sample_rate as i64]))
+                        .map_err(|e| format!("build FCPE sr(int64) failed: {e}"))?,
+                ),
+                "audio+sr:int64",
+            ),
+            Some(TensorElementType::Int32) => (
+                FcpeScalarInput::Int32(
+                    Tensor::from_array(((), vec![sample_rate as i32]))
+                        .map_err(|e| format!("build FCPE sr(int32) failed: {e}"))?,
+                ),
+                "audio+sr:int32",
+            ),
+            _ => (
+                FcpeScalarInput::Aux(
+                    Tensor::from_array(((), vec![0.0f32]))
+                        .map_err(|e| format!("build FCPE aux(float32) failed: {e}"))?,
+                ),
+                "audio+aux",
+            ),
+        };
+        return Ok(PreparedFcpeInput::WithSecond {
+            name: first_name.clone(),
+            tensor,
+            second_name: second_name.clone(),
+            second,
+            label,
+        });
     }
 
     Err(format!(
         "Unsupported FCPE input arity: {} (expected 1 or 2); {}",
         input_meta.len(),
-        io_summary
+        io.io_summary
+    ))
+}
+
+/// 持锁推理已构建好的输入（唯一的锁内工作就是 `session.run`）。
+fn run_prepared_fcpe_input(
+    session: &mut Session,
+    prepared: PreparedFcpeInput,
+    f0_floor: f64,
+    f0_ceil: f64,
+    io_summary: &str,
+) -> Result<Vec<f64>, String> {
+    let outputs = match prepared {
+        PreparedFcpeInput::Single {
+            name,
+            tensor,
+            label,
+        } => session
+            .run(ort::inputs![name.as_str() => tensor])
+            .map_err(|e| format!("FCPE run failed ({label}): {e}; {io_summary}"))?,
+        PreparedFcpeInput::WithSecond {
+            name,
+            tensor,
+            second_name,
+            second,
+            label,
+        } => match second {
+            FcpeScalarInput::Int64(sr) => session
+                .run(ort::inputs![name.as_str() => tensor, second_name.as_str() => sr])
+                .map_err(|e| format!("FCPE run failed ({label}): {e}; {io_summary}"))?,
+            FcpeScalarInput::Int32(sr) => session
+                .run(ort::inputs![name.as_str() => tensor, second_name.as_str() => sr])
+                .map_err(|e| format!("FCPE run failed ({label}): {e}; {io_summary}"))?,
+            FcpeScalarInput::Aux(aux) => session
+                .run(ort::inputs![name.as_str() => tensor, second_name.as_str() => aux])
+                .map_err(|e| format!("FCPE run failed ({label}): {e}; {io_summary}"))?,
+        },
+    };
+
+    let first_out = outputs
+        .into_iter()
+        .next()
+        .ok_or_else(|| "FCPE returned no outputs".to_string())?;
+    let (_shape, data) = first_out
+        .1
+        .try_extract_tensor::<f32>()
+        .map_err(|e| format!("extract FCPE output failed: {e}"))?;
+    Ok(decode_model_output_to_f0_hz(
+        _shape, data, f0_floor, f0_ceil,
     ))
 }
 
@@ -1029,11 +1050,27 @@ pub fn infer_f0_hz_f32(
         .max(1.0) as usize;
 
     let shared = get_or_init_shared_session()?;
+
+    // 第一段（短暂持锁）：读取模型 I/O 元数据。会话对象初始化后元数据固定
+    // 不变；即使共享会话随后被重建（设备切换），同一路模型文件的元数据也一致。
+    let io = {
+        let session = shared
+            .lock()
+            .map_err(|e| format!("FCPE session lock poisoned: {e}"))?;
+        read_fcpe_model_io(&session)
+    };
+
+    // 第二段（锁外）：构建输入张量。mel STFT 是纯 CPU 计算、与 ORT 无关，
+    // 放在共享会话锁内会让所有分析线程为它排队（旧实现的问题）。
+    let prepared = prepare_fcpe_input(&io, mono, sample_rate)?;
+
+    // 第三段（持锁）：推理。锁内只剩 session.run 本身。
     let mut session = shared
         .lock()
         .map_err(|e| format!("FCPE session lock poisoned: {e}"))?;
 
-    let output_values = run_with_named_inputs(&mut session, mono, sample_rate, f0_floor, f0_ceil)?;
+    let output_values =
+        run_prepared_fcpe_input(&mut session, prepared, f0_floor, f0_ceil, &io.io_summary)?;
 
     if output_values.is_empty() {
         return Ok(vec![0.0; target_frames]);

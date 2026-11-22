@@ -15,18 +15,18 @@ HiFiShifter is a graphical vocal editing and synthesis tool. It supports multi-t
 - **Three vocoder algorithms**: nsf-hifigan (PC-NSF-HiFiGAN), World and VsLib — see [Algorithms](#algorithms).
 - **Interoperability**: import REAPER (`.rpp`) and VocalShifter (`.vshp` / `.vsp`) projects, with two-way read/write of the REAPER and VocalShifter clipboards; MIDI can be imported as pitch reference clips / pitch parameters / tempo maps, and audio clips and pitch lines can be exported to MIDI.
 - **Import & export**: import common audio / video formats (the audio track is extracted from videos automatically); export the project and stems as `wav` / `mp3` / `flac`.
-- **VST3 ARA plug-in and CLAP plug-in**: besides the standalone app, Windows x64 VST3 and CLAP plug-ins are provided. The VST3 plug-in opens the same editing interface directly inside REAPER through ARA: the host handles clip geometry, BPM and fade audio, HiFiShifter handles parameter curves, and edits are applied back to the host automatically. The CLAP plug-in is the insert-effect form of the same editor (no ARA binding with REAPER). See the [plug-in chapter](USERMANUAL_en.md#8-vst3-ara-plug-in-and-clap-plug-in-reaper) of the user manual for details.
+- **VST3 ARA plug-in and CLAP plug-in**: besides the standalone app, the unified installers for all three platforms include VST3 and CLAP plug-ins. The VST3 plug-in opens the same editing interface directly inside REAPER through ARA: the host handles clip geometry, BPM and fade audio, HiFiShifter handles parameter curves, and edits are applied back to the host automatically. The CLAP plug-in is the insert-effect form of the same editor (no ARA binding with REAPER). See the [plug-in chapter](USERMANUAL_en.md#8-vst3-ara-plug-in-and-clap-plug-in-reaper) of the user manual for details.
 - **Miscellaneous**: built-in file browser and quick search, notepad, auto backup, multi-language UI (简体中文 / 繁體中文 / English / 日本語 / 한국어), light and dark themes, inference device selection and benchmarking.
 
 ## Installation
 
 Download the package for your operating system and architecture from the [Releases](https://github.com/ARounder-183/HiFiShifter/releases) page:
 
-- **Windows**: NSIS installer (`installer`) or portable zip archive (`portable`), available for x86_64 and arm64.
-- **macOS**: unsigned dmg (Apple Silicon → `arm64`, Intel → `x86_64`). The first launch requires manual approval; if macOS reports the file as "damaged", follow the steps in the [user manual](USERMANUAL_en.md#1-installation).
-- **Linux**: AppImage (x86_64 / arm64). Requires `webkit2gtk-4.1` from the system (shipped by Arch/CachyOS, Ubuntu 24.04+, Fedora 39+, Debian 13+, …; Ubuntu 22.04 only has `webkit2gtk-4.0` and is not supported).
+- **Windows**: NSIS installer (`installer`) or portable zip archive (`portable`), available for x86_64 and arm64. The installer includes the standalone app, VST3/CLAP plug-ins, and the shared model library.
+- **macOS**: unsigned unified `pkg` (Apple Silicon → `arm64`, Intel → `x86_64`) that installs the app, VST3/CLAP plug-ins, and the shared model library. The first launch requires manual approval; if macOS reports the file as "damaged", follow the steps in the [user manual](USERMANUAL_en.md#1-installation).
+- **Linux**: unified `.tar.gz` (x86_64 / arm64) containing the AppImage, VST3/CLAP plug-ins, shared model library, and `install.sh`. Run `./install.sh` for a per-user install, or `sudo ./install.sh --system`. Requires `webkit2gtk-4.1` from the system (shipped by Arch/CachyOS, Ubuntu 24.04+, Fedora 39+, Debian 13+, …; Ubuntu 22.04 only has `webkit2gtk-4.0` and is not supported).
 
-**VST3 ARA plug-in and CLAP plug-in**: Windows x64 has both forms. Use the VST3 plug-in as an embedded ARA interface inside REAPER (currently verified against REAPER only); the CLAP plug-in works as an ordinary insert effect there. See the [plug-in chapter](USERMANUAL_en.md#8-vst3-ara-plug-in-and-clap-plug-in-reaper) of the user manual for installation, runtime dependencies and usage limitations.
+**VST3 ARA plug-in and CLAP plug-in**: all three platforms include both forms. Use the VST3 plug-in as an embedded ARA interface inside REAPER (currently verified primarily against REAPER); the CLAP plug-in works as an ordinary insert effect there. See the [plug-in chapter](USERMANUAL_en.md#8-vst3-ara-plug-in-and-clap-plug-in-reaper) of the user manual for installation, runtime dependencies and usage limitations.
 
 GPU acceleration: Windows uses DirectML (DirectX 12), macOS (Apple Silicon) uses CoreML + WebGPU, and Linux x86_64 uses WebGPU (Dawn/Vulkan); other platforms fall back to CPU. You can switch the device and run the benchmark in-app via `Options → Inference Device`.
 

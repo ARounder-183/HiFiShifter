@@ -42,7 +42,7 @@ impl ExtensionOwner {
     /// 需要宿主扩展的操作都从这里取、并显式处理 `None`，让"这一步依赖原生扩展"写在
     /// 调用点上，而不是藏在字段类型里。`NativeHost` 自身不带品牌：它只是一组宿主扩展
     /// API 的适配器，当前实现是 REAPER，但通用层从不命名具体宿主。
-    pub(crate) fn native_host(&self) -> Option<Arc<crate::host::NativeHost>> {
+    pub fn native_host(&self) -> Option<Arc<crate::host::NativeHost>> {
         self.host
             .lock_or_recover()
             .clone()
@@ -70,6 +70,20 @@ impl ExtensionOwner {
             caps.media_import = host.can_import_audio();
             caps.track_create = host.can_create_audio_track();
             caps.undo_stack = host.has_project_history();
+            // 【为什么这两位也走同一个 host】它们是**结构**写回（item state chunk /
+            // take 包络），判据是那束 API 在不在，而不是"能不能拖片段"。
+            caps.clip_reverse = host.can_reverse_clips();
+            caps.take_pitch_bridge = host.can_bridge_take_pitch();
+        }
+        // 【放置位置是**本实例**的事实，覆盖不得把它抹掉】上面那段读的是"文档里任一持有
+        // 历史 API 的实例"—— take FX 下它可能是一个轨道 FX 实例。而下面这三项对 take FX
+        // **目标对象不成立**：导入的 item 不属于本实例的 ARA 内容、新建的轨道更不属于，
+        // 复制 item 还会把 `<TAKEFX>` 块整块带出去（宿主会在目标 item 上再建一个实例）。
+        // 露出一个注定失败的入口，比藏起来更坏。
+        if self.host_placement().is_take_fx() {
+            caps.media_import = false;
+            caps.track_create = false;
+            caps.item_clipboard = false;
         }
         caps
     }
@@ -156,6 +170,19 @@ impl ExtensionOwner {
         self.refresh_ui_inventory();
         let document = self.editor_document()?;
         if let Some(item) = clip_id.strip_prefix("ara-item-") {
+            // 【take FX：先用强身份】`parent(2)` 就是本实例绑定的那条 take，比清单更直接
+            // （清单是"上一次枚举的结论"，而宿主可能刚把 item 挪走）。解析到**同一个**
+            // item 才接受，否则退回清单 —— 绝不把另一条 item 的 take 冒充成本条 clip。
+            if self.host_placement().is_take_fx() {
+                if let Some(host) = self.native_host() {
+                    let authorized = || !self.is_closed() && document.is_alive();
+                    if let Ok(target) = host.clip_target(authorized) {
+                        if target.geometry.item_id == item {
+                            return Ok(target);
+                        }
+                    }
+                }
+            }
             let target = document
                 .ui_tracks
                 .lock_or_recover()
@@ -213,7 +240,7 @@ impl ExtensionOwner {
     /// 宿主复用处理器实例重开工程时，重绑后 `native_host()` 永远是 `None`，
     /// 于是不枚举 item、不填 `region_items`、界面停在"等待宿主音频"。
     /// 文档关闭必须走 [`Self::stop_editor_for_document`]。
-    pub(crate) fn stop_editor(&self) {
+    pub fn stop_editor(&self) {
         self.stop_editor_inner(false);
     }
 
@@ -357,8 +384,8 @@ impl ExtensionOwner {
     }
     /// 组件释放/文档关闭前结束后台服务，避免DLL卸载后线程仍执行插件代码。
     /// 未绑定时暂存组件state；绑定后所有处理器读取同一文档的参数权威。
-    // 组件state访问器保留，供未绑定路径读取。
-    #[cfg(test)]
+    // 组件state访问器保留，供未绑定路径读取（含 test-support 下的外壳测试）。
+    #[cfg(any(test, feature = "test-support"))]
     pub fn edit_state(&self) -> Arc<Mutex<crate::state_channel::EditState>> {
         self.document
             .lock_or_recover()

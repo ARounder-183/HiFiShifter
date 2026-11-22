@@ -2633,8 +2633,9 @@ fn import_vsp_clipboard_selected_tracks(
 /// 将相对路径解析为绝对路径。
 fn resolve_audio_path(raw_path: &str, vsp_dir: &Path) -> String {
     let p = Path::new(raw_path);
-    if p.is_absolute() {
-        // 规范化路径分隔符
+    // 【跨平台绝对路径必须原样放行】VSP 可能来自别的平台：`/Users/…` 在 Windows
+    // 上不是绝对路径，join 后会变成一条必然不存在的伪造路径（见 `import_paths`）。
+    if crate::import_paths::is_cross_platform_absolute(raw_path) {
         return raw_path.to_string();
     }
     // 相对路径：基于 .vshp/.vsp 所在目录拼接

@@ -5,8 +5,9 @@ use std::ffi::CStr;
 use std::sync::Arc;
 
 /// 单个 item 的 take 数量上限。REAPER 实际远低于此；设上限只为把畸形/竞态下的
-/// `GetMediaItemNumTakes` 返回值挡在枚举循环之外。
-const MAX_TAKES: i32 = 1024;
+/// `GetMediaItemNumTakes` 返回值挡在枚举循环之外。`pub(super)`：逐 take 写回
+/// （`write.rs` 按 GUID 认领 take 指针）用同一道预算。
+pub(super) const MAX_TAKES: i32 = 1024;
 
 #[derive(Clone)]
 pub(crate) struct UiTake {
@@ -24,13 +25,21 @@ pub(crate) struct UiTake {
 
 #[derive(Clone)]
 pub(crate) struct UiItem {
-    /// active take 的几何。既有消费者（淡化装饰、item→clip 反查）都读它，
-    /// 保持"每个 item 一份权威几何"的语义不变。
+    /// **本实例写入的那条 take** 的几何。轨道 FX 下它就是 active take（与改动前一致）；
+    /// take FX 下它是 `parent(2)` 那一条 —— 否则"非 active take 上的实例"会把几何、
+    /// 名称与写回目标一起指到别人的 take 上。
     pub geometry: super::super::geometry::HostClipGeometry,
     pub name: String,
     pub target: HostClipTarget,
     /// 全部 take（含 active）。宿主没有枚举接口时恰好一个元素。
     pub takes: Vec<UiTake>,
+    /// 本实例**绑定**的那条 take 的 GUID；`None` = 与 active take 相同（改动前的语义）。
+    ///
+    /// 【为什么它与 `takes` 里那个 `active` 标记分开】`active` 是**宿主**的选择
+    /// （用户按 T 切换的那一条），绑定的 take 是**实例**的归属（take FX 挂在谁身上）。
+    /// 轨道 FX 下两者恰好同一条，take FX 下则经常不是 —— 把两者合成一位，就回到了
+    /// "非 active take 的实例写到别人的 take 上"。
+    pub bound_take: Option<String>,
 }
 #[derive(Clone)]
 pub(crate) struct UiTrack {
@@ -51,6 +60,73 @@ pub(crate) struct UiTrack {
     pub target: HostTrackTarget,
 }
 
+impl UiTrack {
+    /// 与另一份枚举结果的**内容**逐字比较（不含指针类 target 与死字段）。
+    fn content_matches(&self, other: &Self) -> bool {
+        self.guid == other.guid
+            && self.id == other.id
+            && self.name == other.name
+            && self.order == other.order
+            && self.parent_guid == other.parent_guid
+            && self.items.len() == other.items.len()
+            && self
+                .items
+                .iter()
+                .zip(other.items.iter())
+                .all(|(a, b)| a.content_matches(b))
+    }
+}
+
+impl UiItem {
+    fn content_matches(&self, other: &Self) -> bool {
+        self.geometry == other.geometry
+            && self.name == other.name
+            && self.bound_take == other.bound_take
+            && self.takes.len() == other.takes.len()
+            && self
+                .takes
+                .iter()
+                .zip(other.takes.iter())
+                .all(|(a, b)| a.content_matches(b))
+    }
+}
+
+impl UiTake {
+    fn content_matches(&self, other: &Self) -> bool {
+        self.geometry == other.geometry
+            && self.name == other.name
+            && self.active == other.active
+            && self.reversed == other.reversed
+    }
+}
+
+/// 两轮清单枚举的**内容**是否逐字相同。
+///
+/// 【为什么需要它】"宿主工程状态计数器推进了"（`GetProjectStateChangeCount`）只是
+/// 一条**提示**：REAPER 里 item 的选中、视图缩放、光标移动都会推进它，而清单枚举
+/// 出的内容可能一字未变。把提示当真相 ⇒ 点选任何 item（包括与本插件无关的）都会
+/// 推进 `render_epoch` 并 rearm 渲染 —— 空闲工程也会被这条假变更通道搅出一轮又一轮
+/// 全量 mixdown（2026-11-22 现场实测：81 次 mixdown / 7 分钟，全部 `cache_reused=0`）。
+/// 枚举结果才是真相：与已发布清单逐字相同 ⇒ 这一轮只记令牌，渲染管线一概不动。
+///
+/// 【为什么手写字段清单而不是 derive】`target`（item/take/track 的宿主裸地址）与
+/// `change`（无读取方的死字段）不参与比较 —— 前者是宿主内部实现细节，比较它会把
+/// "内容没变"误判成"变了"。渲染与装配消费的一切都在其余字段里：几何全量
+/// （`HostClipGeometry` 的 `PartialEq`）、take 结构、名称、轨道身份与顺序。新增
+/// 渲染相关字段时**必须**同步加进来，否则真实变更会被这道闸门吞掉。
+pub(crate) fn inventory_content_matches(
+    published: &std::collections::BTreeMap<String, UiTrack>,
+    enumerated: &std::collections::BTreeMap<String, UiTrack>,
+) -> bool {
+    published.len() == enumerated.len()
+        && published.iter().zip(enumerated.iter()).all(
+            |((published_guid, published_track), (enumerated_guid, enumerated_track))| {
+                published_guid == enumerated_guid
+                    && published_track.content_matches(enumerated_track)
+            },
+        )
+}
+
 impl NativeHost {
     /// 所有查询都在所属UI线程并逐调用授权；没有region也不代表轨道或item已被删除。
     pub(crate) fn ui_track(
@@ -68,7 +144,49 @@ impl NativeHost {
         let pointer = self._interface.0 as *mut c_void;
         let table = unsafe { &**pointer.cast::<*const HostVtbl>() };
         let track = checked(authorized, || unsafe { (table.parent)(pointer, 1) })?;
-        self.ui_track_at(project, track, None, authorized)
+        self.ui_track_at(project, track, None, None, authorized)
+    }
+
+    /// 本实例**绑定**在这个 item 上的那条 take（指针）；轨道 FX 或别的 item 都是 `None`。
+    ///
+    /// 【判据为什么只能是指针相等】take 的 GUID 要再问一次宿主才能拿到，而这里已经有
+    /// `parent(2)` 那个指针（`HostPlacement::TakeFx` 记的就是它）。同一份 chunk 里
+    /// 指针的归属由 `ValidatePtr2` 在探测时核实过。
+    fn bound_take_for(&self, item: *mut c_void) -> Option<usize> {
+        match self.placement() {
+            HostPlacement::TakeFx {
+                item: bound_item,
+                take,
+                ..
+            } if bound_item == item as usize => Some(take),
+            _ => None,
+        }
+    }
+
+    /// 本实例的清单作用域。
+    ///
+    /// * 轨道 FX：本轨 + folder 全部后代 + 自己建出来的轨道（与改动前完全一致）；
+    /// * take FX：**只有**自己绑定的那条 take 所属的 item —— 实例只渲染这一条 take，
+    ///   把整轨（或整组 folder）列出来会让界面出现大量"看得见、改不了、也不会出声"的
+    ///   片段；同一轨上两个 take 实例时，两份清单还会完全相同、互相争同一批 clip。
+    ///
+    /// 位置读不出来（`Unbound`）时退回轨道语义：那是改动前的行为，宁可多列也不丢。
+    pub(crate) fn ui_scope(
+        self: &Arc<Self>,
+        authorized: &impl Fn() -> bool,
+        adopted: &[String],
+    ) -> Result<Vec<UiTrack>, String> {
+        let placement = self.placement();
+        if let HostPlacement::TakeFx { item, track, .. } = placement {
+            if !self.on_host_thread() {
+                return self.on_host(|| self.ui_scope(authorized, adopted))?;
+            }
+            let project = self.project(authorized)?;
+            let track =
+                self.ui_track_at(project, track as *mut c_void, None, Some(item), authorized)?;
+            return Ok(vec![track]);
+        }
+        self.ui_folder_tracks(authorized, adopted)
     }
 
     /// FX 所在轨道 +（若它是 folder）其全部后代轨道。
@@ -110,7 +228,13 @@ impl NativeHost {
         for node in tree.descendant_nodes(&own_guid) {
             // 父级取自重建出的树，而不是一律挂到 FX 轨上 —— 否则嵌套 folder 会被压平。
             let parent_guid = tree.parent_of(&node.guid).flatten();
-            match self.ui_track_at(project, node.track as *mut c_void, parent_guid, authorized) {
+            match self.ui_track_at(
+                project,
+                node.track as *mut c_void,
+                parent_guid,
+                None,
+                authorized,
+            ) {
                 Ok(track) => tracks.push(track),
                 // 单条后代读不到不该让整组消失；如实记账并继续。
                 Err(error) => crate::log_line(&format!(
@@ -131,7 +255,13 @@ impl NativeHost {
                 continue;
             };
             let parent_guid = tree.parent_of(guid).flatten();
-            match self.ui_track_at(project, node.track as *mut c_void, parent_guid, authorized) {
+            match self.ui_track_at(
+                project,
+                node.track as *mut c_void,
+                parent_guid,
+                None,
+                authorized,
+            ) {
                 Ok(track) => tracks.push(track),
                 Err(error) => crate::log_line(&format!(
                     "[reaper-folder] adopted track {guid} unavailable: {error}"
@@ -172,11 +302,14 @@ impl NativeHost {
         project: *mut c_void,
         track: *mut c_void,
         parent_guid: Option<String>,
+        only_item: Option<usize>,
         authorized: &impl Fn() -> bool,
     ) -> Result<UiTrack, String> {
         // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
         if std::thread::current().id() != self.thread {
-            return self.on_host(|| self.ui_track_at(project, track, parent_guid, authorized))?;
+            return self.on_host(|| {
+                self.ui_track_at(project, track, parent_guid, only_item, authorized)
+            })?;
         }
         let pointer = self._interface.0 as *mut c_void;
         let table = unsafe { &**pointer.cast::<*const HostVtbl>() };
@@ -258,6 +391,11 @@ impl NativeHost {
             valid(track, c"MediaTrack*")?;
             let item = checked(authorized, || unsafe { get_item(track, index) })?;
             valid(item, c"MediaItem*")?;
+            // 【take FX 的作用域】只枚举本实例绑定的那个 item —— 这条过滤是本实例
+            // "只渲染一条 take"在清单层的唯一体现。其余 item 连元数据都不读。
+            if only_item.is_some_and(|only| only != item as usize) {
+                continue;
+            }
             // active take 是本实例唯一可能持有 ARA PCM 的那个；其余 take 只取元数据。
             let active = checked(authorized, || unsafe { active_take(item) })?;
             if active.is_null() {
@@ -303,24 +441,43 @@ impl NativeHost {
                             continue;
                         }
                         valid(take, c"MediaItem_Take*")?;
-                        takes.push(read_take(take, take == active)?);
+                        takes.push((read_take(take, take == active)?, take as usize));
                     }
                     takes
                 }
                 None => Vec::new(),
             };
-            if !takes.iter().any(|take| take.active) {
-                takes.insert(0, read_take(active, true)?);
+            if !takes.iter().any(|(take, _)| take.active) {
+                takes.insert(0, (read_take(active, true)?, active as usize));
             }
-            let active_index = takes.iter().position(|take| take.active).unwrap_or(0);
-            let g = takes[active_index].geometry.clone();
-            let name = takes[active_index].name.clone();
+            // 【本实例绑定的那条 take】take FX 下 `parent(2)` 就是它；轨道 FX 下没有
+            // 绑定 take（写回沿用 active take，与改动前一致）。
+            let bound = self.bound_take_for(item);
+            let bound_index = match bound {
+                Some(bound) => {
+                    // 宿主没有枚举接口时绑定的 take 可能不在集合里 —— 直接读它，
+                    // 而不是退回 active（退回就是把写回指到别人的 take 上）。
+                    let position = takes.iter().position(|(_, pointer)| *pointer == bound);
+                    match position {
+                        Some(position) => position,
+                        None => {
+                            let entry = read_take(bound as *mut c_void, false)?;
+                            takes.insert(0, (entry, bound));
+                            0
+                        }
+                    }
+                }
+                None => takes.iter().position(|(take, _)| take.active).unwrap_or(0),
+            };
+            let g = takes[bound_index].0.geometry.clone();
+            let name = takes[bound_index].0.name.clone();
+            let bound_take = (bound.is_some()).then(|| g.take_id.clone());
             let target = super::write::inventory_target(
                 self.clone(),
                 project as usize,
                 track as usize,
                 item as usize,
-                active as usize,
+                takes[bound_index].1,
                 g.clone(),
                 authorized,
             )?;
@@ -328,7 +485,8 @@ impl NativeHost {
                 geometry: g,
                 name,
                 target,
-                takes,
+                takes: takes.into_iter().map(|(take, _)| take).collect(),
+                bound_take,
             });
         }
         if change != checked(authorized, || unsafe { (geometry.change)(project) })? {
@@ -476,10 +634,74 @@ mod tests {
         assert!(!host.ui_track(&|| true).unwrap().items[0].takes[0].reversed);
     }
 
+    /// **清单内容比对：宿主一字未改必须判"相同"，任何真实变更必须被认出来。**
+    ///
+    /// 【回归的现场】2026-11-22：REAPER 的工程状态计数器会为 item 选中、视图缩放、
+    /// 光标移动推进，而清单枚举出的内容一字不变。此前"令牌变了"就被当成"几何变了"，
+    /// 点选任何 item（包括与本插件无关的）都推进 `render_epoch` 并 rearm 渲染 ——
+    /// 状态栏"渲染中"随每次点选常亮，空闲工程也被搅出一轮轮全量 mixdown。
+    /// 闸门契约：内容逐字相同 ⇒ 不动渲染管线；几何 / take 结构任一变化 ⇒ 放行。
+    #[test]
+    fn inventory_content_gate_passes_only_real_changes() {
+        let fixture = super::super::MockHost::new();
+        fixture.enable_writer();
+        fixture.enable_media();
+        fixture.inventory_enabled.set(true);
+        let host = Arc::new(fixture.client());
+        let first = host.ui_track(&|| true).unwrap();
+        let second = host.ui_track(&|| true).unwrap();
+        let mut published = std::collections::BTreeMap::new();
+        published.insert(first.guid.clone(), first);
+        let mut enumerated = std::collections::BTreeMap::new();
+        enumerated.insert(second.guid.clone(), second);
+        assert!(
+            inventory_content_matches(&published, &enumerated),
+            "宿主一字未改 ⇒ 两轮枚举逐字相同（target 指针与死字段的差异必须被排除）"
+        );
+        // 真实变更一：mute 翻转（几何字段）必须放行。
+        fixture.set_value("B_MUTE", 1.);
+        let muted = host.ui_track(&|| true).unwrap();
+        let mut with_mute = std::collections::BTreeMap::new();
+        with_mute.insert(muted.guid.clone(), muted);
+        assert!(
+            !inventory_content_matches(&published, &with_mute),
+            "mute 翻转是真实变更，必须放行发布与失效路径"
+        );
+        // 真实变更二：take 结构变化必须放行（增删 take 都算）。直接对克隆出的清单
+        // 做 take 变异 —— 比对器必须覆盖 take 数组。
+        let mut with_takes = std::collections::BTreeMap::new();
+        let mut extra_take_track = published.values().next().unwrap().clone();
+        let one_more = extra_take_track.items[0].takes[0].clone();
+        extra_take_track.items[0].takes.push(one_more);
+        with_takes.insert(extra_take_track.guid.clone(), extra_take_track);
+        assert!(
+            !inventory_content_matches(&published, &with_takes),
+            "take 结构变化是真实变更"
+        );
+        // 真实变更三：item 名称变化（GUI 与装配都消费）必须放行。
+        let mut renamed = std::collections::BTreeMap::new();
+        let mut renamed_track = published.values().next().unwrap().clone();
+        renamed_track.items[0].name.push('!');
+        renamed.insert(renamed_track.guid.clone(), renamed_track);
+        assert!(
+            !inventory_content_matches(&published, &renamed),
+            "item 名称变化是真实变更"
+        );
+        // 轨道集合不同（增删轨）也必须放行。
+        let mut extra_track = published.clone();
+        let another = host.ui_track(&|| true).unwrap();
+        extra_track.insert(format!("{}-extra", another.guid), another);
+        assert!(
+            !inventory_content_matches(&published, &extra_track),
+            "轨道集合变化是真实变更"
+        );
+    }
+
     /// **回归：负 `D_PLAYRATE` 也是倒放的一种表达，必须与方向位等价。**
     ///
     /// 【为什么这是回归测试】REAPER 用**两种**方式表达倒放：负速率、或
-    /// `SECTION MODE 1`。独立 App 的判据是 `play_rate < 0 || section_mode > 0`；
+    /// `SECTION` 的 `MODE` 反向位（宿主写 `MODE 3`）。独立 App 的判据是
+    /// `play_rate < 0 || section_mode_reversed`；
     /// 插件此前把速率符号 `.abs()` 掉、只认方向位 —— 于是"只用负速率表达倒放"的
     /// take 被**静默按正放渲染**：输出错的音频，而不是报错。
     #[test]

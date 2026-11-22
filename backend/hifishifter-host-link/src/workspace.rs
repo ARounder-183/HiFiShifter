@@ -38,6 +38,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// 这里只需要唯一性，不需要任何跨线程的先后可见性）。
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// `.tmp` 清扫的年龄阈值。
+///
+/// 【为什么留一小时】正在写的临时文件活不过几分钟（写完立刻改名），留足余量的
+/// 同时不会误删**另一个进程**此刻正在写的文件（同一工作区的写入者被打开标记
+/// 互斥，但只读消费者可以与写入者并存）。
+const TEMP_SWEEP_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
 /// 一次音频写入的结果。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AudioRef {
@@ -314,7 +321,40 @@ impl Workspace {
 
     fn prepare(&self) -> Result<(), String> {
         std::fs::create_dir_all(&self.root).map_err(|error| error.to_string())?;
-        std::fs::create_dir_all(self.temp_dir()).map_err(|error| error.to_string())
+        std::fs::create_dir_all(self.temp_dir()).map_err(|error| error.to_string())?;
+        self.sweep_temp_dir();
+        Ok(())
+    }
+
+    /// 按 mtime 清扫 `.tmp` 里遗留的孤儿临时文件。
+    ///
+    /// 【为什么需要】[`Self::write_bytes_atomic`] 先写临时文件再改名；进程在两者
+    /// 之间被杀（宿主崩溃、断电）会留下一个孤儿，而改名失败路径只删自己那一个。
+    /// `write_audio` 走的是**全尺寸 WAV** —— 一次崩溃可能留下上百 MB，反复发生
+    /// 就会在用户工作区里持续堆积。改名成功的文件不会出现在这里，所以清扫的
+    /// 对象只有崩溃残留。
+    fn sweep_temp_dir(&self) {
+        let Ok(entries) = std::fs::read_dir(self.temp_dir()) else {
+            return;
+        };
+        let cutoff = std::time::SystemTime::now()
+            .checked_sub(TEMP_SWEEP_AGE)
+            .unwrap_or(std::time::UNIX_EPOCH);
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if !metadata.is_file() {
+                continue;
+            }
+            if metadata
+                .modified()
+                .ok()
+                .is_some_and(|modified| modified < cutoff)
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
     }
 
     fn write_json_atomic<T: serde::Serialize>(&self, path: &Path, value: &T) -> Result<(), String> {
@@ -485,14 +525,33 @@ impl Workspace {
                         return Err(format!("open mark at {} is held", path.display()));
                     }
                     // 过期就接管；没过期就如实拒绝，并把持有者告诉调用方。
-                    if self.open_mark(stale_after_ms).is_some() {
-                        let holder = self
-                            .open_mark(stale_after_ms)
+                    // 读出的字节留作"核验后再删"的凭据（见下）。
+                    let Some(observed) = std::fs::read(&path).ok() else {
+                        return Err(format!("open mark at {} is held", path.display()));
+                    };
+                    let mark: Option<OpenMark> = serde_json::from_slice(&observed).ok();
+                    let stale = mark.as_ref().is_none_or(|mark| {
+                        crate::now_ms().saturating_sub(mark.since_unix_ms) > stale_after_ms
+                    });
+                    if !stale {
+                        let holder = mark
                             .map(|mark| format!("pid {}", mark.pid))
                             .unwrap_or_else(|| "another window".into());
                         return Err(format!("already open by {holder}"));
                     }
-                    let _ = std::fs::remove_file(&path);
+                    // 【核验后再删，不能无条件删】竞态：两个进程同时读到同一份过期
+                    // 标记，A 删旧建新之后，B 若无条件删除就会删掉 **A 刚写下的新
+                    // 标记**，随后 B 的 create_new 成功 —— 两个窗口同时"独占"同一
+                    // 工作区，各自写 edits.hfsedit，谁都不知道对方存在。删除前重读
+                    // 一遍：内容必须仍是我们观察到的**同一份**过期标记；变了就退回
+                    // 循环，attempt 1 的 create_new 会因 AlreadyExists 失败，把"有人
+                    // 抢先"如实报出。
+                    match std::fs::read(&path) {
+                        Ok(current) if current == observed => {
+                            let _ = std::fs::remove_file(&path);
+                        }
+                        _ => return Err(format!("open mark at {} is held", path.display())),
+                    }
                 }
                 Err(error) => return Err(error.to_string()),
             }
@@ -869,6 +928,35 @@ mod tests {
         );
         drop(taken);
         assert!(workspace.open_mark(60_000).is_none());
+        let _ = std::fs::remove_dir_all(workspace.root());
+    }
+
+    /// 崩溃残留的孤儿临时文件在打开工作区时被清扫，新鲜文件不得误删。
+    #[test]
+    fn stale_temp_files_are_swept_on_open() {
+        let workspace = temp_workspace("sweep");
+        workspace.write_manifest(&manifest_for(Vec::new())).unwrap();
+        let temp_dir = workspace.root().join(TMP_DIR);
+        let fresh = temp_dir.join("fresh.tmp");
+        let stale = temp_dir.join("stale.tmp");
+        std::fs::write(&fresh, b"fresh").unwrap();
+        std::fs::write(&stale, b"stale").unwrap();
+        // 把 stale 的 mtime 拨回两小时前（阈值是一小时）。
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&stale)
+            .unwrap();
+        let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+        file.set_times(std::fs::FileTimes::new().set_modified(two_hours_ago))
+            .unwrap();
+        drop(file);
+        // 任何写路径都会走 prepare → 清扫。
+        workspace.write_manifest(&manifest_for(Vec::new())).unwrap();
+        assert!(!stale.exists(), "超过阈值的孤儿临时文件必须被清扫");
+        assert!(
+            fresh.exists(),
+            "新鲜临时文件可能是另一个进程正在写的，不得误删"
+        );
         let _ = std::fs::remove_dir_all(workspace.root());
     }
 

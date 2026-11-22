@@ -42,6 +42,30 @@ export interface PluginApplyState {
      */
     render_progress?: number | null;
     /**
+     * 这一轮作业的票据（后端 `render_pass`）。
+     *
+     * 【为什么需要它】进度的高水位（`renderProgressRef`）只在"没有任何渲染在活跃"时清零。
+     * 而一次被取消的作业留下的 60% 会挡住下一个作业的 0~59% —— 用户看到的就是
+     * "卡在某个百分比不动"或"一直 100%"。票据一变就说明是**新的一轮**，高水位必须
+     * 跟着清零。它与事件里的 `pass` 是同一个数，两条通道因此不会各说一套。
+     */
+    render_pass?: number;
+    /**
+     * 作业阶段：`preparing` / `synthesizing` / `publishing`（`null` = 没有阶段）。
+     *
+     * 【为什么百分比要跟着它】`publishing` 意味着"混音算完了、还在发布"：此时报
+     * 100% 就是一句会停留上百毫秒的假话（用户报障："一直 100%"）。只有
+     * `synthesizing` 才有真实百分比。
+     */
+    render_stage?: "preparing" | "synthesizing" | "publishing" | null;
+    /**
+     * 宿主是否旁通了本 FX（三态；`null` = 没有文档，例如 Capture）。
+     *
+     * 【为什么要显示出来】`bypassed` 时插件**故意**不渲染（宿主不会来取输出）。
+     * 不说出来，用户看到的是"编辑之后什么都没发生"，与"卡住了"无法区分。
+     */
+    host_bypass?: "active" | "bypassed" | "unknown" | null;
+    /**
      * 「你听到的是不是旧版本」（后端 `render_audible_stale`）。
      *
      * 【为什么与 `rendering_active` 分开】后者回答「后台在忙吗」，用户问的是「我听到的
@@ -133,6 +157,9 @@ function sameState(a: PluginApplyState | null, b: PluginApplyState | null): bool
         a.ready === b.ready &&
         a.rendering_active === b.rendering_active &&
         a.render_progress === b.render_progress &&
+        a.render_pass === b.render_pass &&
+        a.render_stage === b.render_stage &&
+        a.host_bypass === b.host_bypass &&
         a.render_audible_stale === b.render_audible_stale &&
         a.analysis_pending === b.analysis_pending &&
         // 【为什么必须在比较表里】`publish` 在"内容相同"时保留旧引用，订阅者因此

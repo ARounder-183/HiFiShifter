@@ -141,7 +141,14 @@ function schedule(delayMs: number): void {
 }
 
 async function refresh(): Promise<void> {
-    timer = undefined;
+    // 【为什么这里也要 clearTimeout】外部手动刷新（`refreshHostLinkStatus`，或
+    // 面板打开时的那一次）可能落在链式定时器已武装的窗口里：只把变量置空而
+    // 不取消，旧定时器仍在计时，到点再 refresh 一次 —— 于是两条链并存，轮询
+    // 频率永久翻倍。定时器回调里调用时，`clearTimeout` 对已触发的句柄是空操作。
+    if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timer = undefined;
+    }
     if (running <= 0 || snapshot.ended || inFlight) return;
     inFlight = true;
     try {

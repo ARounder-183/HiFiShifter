@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq)]
-pub(crate) struct TrackGroups {
+pub struct TrackGroups {
     pub nodes: BTreeMap<String, GroupNode>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

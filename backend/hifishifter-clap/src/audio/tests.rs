@@ -83,6 +83,33 @@ fn a_host_without_transport_gives_no_context_instead_of_position_zero() {
 }
 
 #[test]
+fn a_transport_without_either_timeline_gives_no_context_instead_of_position_zero() {
+    // 【为什么 transport 在场也要这条判据】CLAP 允许宿主只报速度/拍号而不给任何位置轴
+    // （两条轴都缺席）：此时“位置”不可知，把它编造成 0 与空 transport 编造成 0 是
+    // 同一个数据正确性失败 —— 离线块照样会从快照开头取音频。只给速度的 transport
+    // 必须与空 transport 一样映射成 `None`。
+    let state = AudioState::default();
+    state.set_sample_rate(48_000.0);
+    state.set_render_mode(0);
+    let event = transport(transport_flags::HAS_TEMPO, 0.0);
+    let process = clap_process_t {
+        steady_time: 100,
+        frames_count: 128,
+        transport: &event,
+        audio_inputs: std::ptr::null(),
+        audio_outputs: std::ptr::null_mut(),
+        audio_inputs_count: 0,
+        audio_outputs_count: 0,
+        in_events: std::ptr::null(),
+        out_events: std::ptr::null(),
+    };
+    assert!(
+        state.block_context(&process).is_none(),
+        "没有位置轴的 transport 必须映射成“没有时间事实”"
+    );
+}
+
+#[test]
 fn offline_render_is_only_reported_when_the_host_says_so() {
     let state = AudioState::default();
     state.set_sample_rate(48_000.0);

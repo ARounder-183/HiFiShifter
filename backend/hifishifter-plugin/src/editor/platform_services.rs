@@ -42,29 +42,51 @@ pub(crate) fn pick_directory() -> Result<Option<PathBuf>, String> {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) fn pick_open_path(
-    filter_name: &str,
-    extension: &str,
+    file_type: &hifishifter_kernel::file_types::FileType,
 ) -> Result<Option<PathBuf>, String> {
     use gtk::prelude::*;
+    if !file_type.is_usable() {
+        return Err("file dialog filter has no usable extension".into());
+    }
     let dialog = gtk::FileChooserNative::new(
-        Some(filter_name),
+        Some(file_type.name()),
         None::<&gtk::Window>,
         gtk::FileChooserAction::Open,
         Some("Open"),
         Some("Cancel"),
     );
-    let filter = gtk::FileFilter::new();
-    filter.set_name(Some(filter_name));
-    filter.add_pattern(&format!("*.{extension}"));
-    dialog.add_filter(filter);
+    dialog.add_filter(gtk_filter(file_type));
     Ok(run_dialog(&dialog))
 }
 
+/// 把词表里的一条交给 GTK。
+///
+/// 【为什么名字与 pattern 必须分开取】此前这里把**名字**写成了 "*.mid"，
+/// 于是下拉框里显示的是通配符而不是「MIDI File」—— 用户看到的是一个模式串，
+/// 不是一个文件类型。
 #[cfg(all(unix, not(target_os = "macos")))]
-pub(crate) fn pick_save_path(file_name: &str, extension: &str) -> Result<Option<PathBuf>, String> {
+fn gtk_filter(file_type: &hifishifter_kernel::file_types::FileType) -> gtk::FileFilter {
+    // 这里只用 `FileFilter` 的固有方法（`new` / `set_name` / `add_pattern`），
+    // 引 prelude 是多余的 —— aarch64 构建会把它报成 unused import。
+    let filter = gtk::FileFilter::new();
+    filter.set_name(Some(file_type.name()));
+    for pattern in file_type.patterns() {
+        filter.add_pattern(&pattern);
+    }
+    filter
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn pick_save_path(
+    file_name: &str,
+    file_type: &hifishifter_kernel::file_types::FileType,
+) -> Result<Option<PathBuf>, String> {
     use gtk::prelude::*;
+    if !file_type.is_usable() {
+        return Err("file dialog filter has no usable extension".into());
+    }
     let dialog = gtk::FileChooserNative::new(
-        Some("Save as"),
+        Some(file_type.name()),
         None::<&gtk::Window>,
         gtk::FileChooserAction::Save,
         Some("Save"),
@@ -72,10 +94,7 @@ pub(crate) fn pick_save_path(file_name: &str, extension: &str) -> Result<Option<
     );
     dialog.set_current_name(file_name);
     dialog.set_do_overwrite_confirmation(true);
-    let filter = gtk::FileFilter::new();
-    filter.set_name(Some(&format!("*.{extension}")));
-    filter.add_pattern(&format!("*.{extension}"));
-    dialog.add_filter(filter);
+    dialog.add_filter(gtk_filter(file_type));
     Ok(run_dialog(&dialog))
 }
 
@@ -160,8 +179,14 @@ mod macos {
     /// `UTType`，那会把 `objc2-uniform-type-identifiers` 拉进依赖树 —— 为一个过滤器
     /// 多一个 crate 不值得。这个 API 在 macOS 12+ 标了废弃但仍然工作。
     #[allow(deprecated)]
-    fn apply_filter(panel: &NSSavePanel, extension: &str) {
-        let types = NSArray::from_retained_slice(&[NSString::from_str(extension)]);
+    fn apply_filter(panel: &NSSavePanel, file_type: &hifishifter_kernel::file_types::FileType) {
+        let types = NSArray::from_retained_slice(
+            &file_type
+                .extensions()
+                .iter()
+                .map(|extension| NSString::from_str(extension))
+                .collect::<Vec<_>>(),
+        );
         panel.setAllowedFileTypes(Some(&types));
     }
 
@@ -185,16 +210,18 @@ mod macos {
     }
 
     pub(crate) fn pick_open_path(
-        filter_name: &str,
-        extension: &str,
+        file_type: &hifishifter_kernel::file_types::FileType,
     ) -> Result<Option<PathBuf>, String> {
         let marker = main_thread()?;
+        if !file_type.is_usable() {
+            return Err("file dialog filter has no usable extension".into());
+        }
         let panel = NSOpenPanel::openPanel(marker);
-        panel.setTitle(Some(&NSString::from_str(filter_name)));
+        panel.setTitle(Some(&NSString::from_str(file_type.name())));
         panel.setCanChooseFiles(true);
         panel.setCanChooseDirectories(false);
         panel.setAllowsMultipleSelection(false);
-        apply_filter(&panel, extension);
+        apply_filter(&panel, file_type);
         if panel.runModal() != NSModalResponseOK {
             return Ok(None);
         }
@@ -203,13 +230,18 @@ mod macos {
 
     pub(crate) fn pick_save_path(
         file_name: &str,
-        extension: &str,
+        file_type: &hifishifter_kernel::file_types::FileType,
     ) -> Result<Option<PathBuf>, String> {
         let marker = main_thread()?;
+        if !file_type.is_usable() {
+            return Err("file dialog filter has no usable extension".into());
+        }
         let panel = NSSavePanel::savePanel(marker);
+        // 与另外两个平台对齐：标题写类型名，而不是只留系统默认的「Save」。
+        panel.setTitle(Some(&NSString::from_str(file_type.name())));
         panel.setNameFieldStringValue(&NSString::from_str(file_name));
         panel.setCanCreateDirectories(true);
-        apply_filter(&panel, extension);
+        apply_filter(&panel, file_type);
         if panel.runModal() != NSModalResponseOK {
             return Ok(None);
         }

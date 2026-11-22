@@ -224,7 +224,7 @@ Windows物理/提交空间、Linux MemAvailable与失败信息合同通过；短
 仍通过。没有改变HNSEP分块范围或模型。峰值降到普通机器可用、macOS资源查询与GPU
 VRAM并未验证，不勾Task40。详细原始节点与保护边界见MULTITRACK-RESOURCE-FINDINGS。
 
-Task45-46新增tools/build-hifishifter.ps1与docs/ara-build-and-sync.md：同源frontend、
+Task45-46新增tools/build-hifishifter.ps1与安装器文档：同源frontend、
 App与插件分开的Cargo调用、全新交付名、MSVC后TEMP、锁定SDK、模型/DLL打包及可选
 集中Verify。语法/PlanOnly exit0，不勾完整交付门。
 随后真实All Debug paired-build-01 exit0；构建入口修复MSVC dot-source变量$name与

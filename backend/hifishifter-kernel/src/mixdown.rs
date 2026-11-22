@@ -936,8 +936,19 @@ fn apply_host_pitch_edit(
     // 因此必须按 `clip.start_sec` 把 offsets 的起点平移到曲线的帧号上。
     // 少这一项，App 路径的子轨偏移会整段前置 `clip.start_sec` 秒；
     // 多这一项（旧代码在 ARA 上），则整段后置一个分割点。
+    //
+    // 【刻意**不**读 `ExportPitchOffsetFrames::voiced`，也刻意不调
+    // `compute_clip_take_pitch_offsets`】渲染端对"这一帧没有 F0"的语义就是
+    // **不变换**（下面的 `filter(|value| **value > 0.0)` 就是这个语义），而导出侧的
+    // 未识别帧填充是"为了让宿主的连续控制信号不跳变"才存在的补偿。把填充搬到渲染端
+    // 等于改掉插件自己听到的声音 —— 那是另一个变更，不属于导出格式的修正。
     if let Some(offsets) = crate::pitch_editing::compute_clip_export_pitch_offsets(timeline, clip) {
-        let origin = (clip.start_sec.max(0.0) * 1000.0 / fp).floor() as usize;
+        // 【必须与 `compute_clip_export_pitch_offsets` 的起点同一算式】那边按
+        // `frame_grid::clip_frame_window` 读的是工程帧 `round(start)+local`，这里就
+        // 必须写到同一个帧号上。两侧各写一份取整（此前这里是 `floor`）时，
+        // 写进去的是"这一帧的原值 + 下一帧的偏移量"—— 一帧的基线配上另一帧的编辑，
+        // 结果既不是这一帧的目标也不是邻居的目标，而是一个都不对的中间值。
+        let origin = crate::frame_grid::frame_at_time(clip.start_sec, fp);
         for (local, offset) in offsets.offsets.iter().enumerate() {
             let frame = origin + local;
             // 【为什么越界帧直接跳过】`pitch_orig` 越界时回退 0.0 会让目标音高
@@ -1116,6 +1127,67 @@ fn decode_cache_key(path: &str) -> String {
 #[cfg(not(windows))]
 fn decode_cache_key(path: &str) -> String {
     path.to_string()
+}
+
+/// 混音段缓冲：owned PCM 或共享的缓存条目。
+///
+/// 【为什么不是恒 `Vec<f32>`】共振峰缓存（`formant_cache`）命中时返回
+/// `Arc<Vec<f32>>`；后续只读的路径（时间拉伸输入、混音循环、渲染缓存回填）
+/// 直接共享即可 —— 旧实现无条件 `.clone()`，每个命中 clip 都白付一次
+/// 整段立体声 PCM 的深拷贝。只有真正要可变（pitch edit、气声混入）时才
+/// `into_owned()` 物化。
+enum SegmentBuf {
+    Owned(Vec<f32>),
+    Shared(Arc<Vec<f32>>),
+}
+
+impl SegmentBuf {
+    fn as_slice(&self) -> &[f32] {
+        match self {
+            SegmentBuf::Owned(v) => v,
+            SegmentBuf::Shared(a) => a,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    /// 可变访问：共享条目先物化为 owned。
+    ///
+    /// 【为什么必须物化而不是就地改】`Shared` 的 Arc 与共振峰缓存共享同一块
+    /// 缓冲，就地修改会毒化缓存条目；`try_unwrap` 成功（缓存已逐出、只此一份）
+    /// 时才允许零拷贝就地改。
+    fn as_mut(&mut self) -> &mut Vec<f32> {
+        match self {
+            SegmentBuf::Owned(v) => v,
+            SegmentBuf::Shared(a) => {
+                let owned =
+                    Arc::try_unwrap(std::mem::take(a)).unwrap_or_else(|a| a.as_ref().clone());
+                *self = SegmentBuf::Owned(owned);
+                match self {
+                    SegmentBuf::Owned(v) => v,
+                    SegmentBuf::Shared(_) => unreachable!("just materialized above"),
+                }
+            }
+        }
+    }
+
+    /// 物化为 owned：唯一持有共享缓冲时零拷贝，否则退回深拷贝。
+    fn into_owned(self) -> Vec<f32> {
+        match self {
+            SegmentBuf::Owned(v) => v,
+            SegmentBuf::Shared(a) => Arc::try_unwrap(a).unwrap_or_else(|a| a.as_ref().clone()),
+        }
+    }
+
+    /// 供渲染缓存回填：共享时直接克隆 Arc，避免再拷贝整段 PCM。
+    fn to_shared(&self) -> Arc<Vec<f32>> {
+        match self {
+            SegmentBuf::Owned(v) => Arc::new(v.clone()),
+            SegmentBuf::Shared(a) => Arc::clone(a),
+        }
+    }
 }
 
 fn render_mixdown_internal(
@@ -1492,16 +1564,19 @@ fn render_mixdown_internal(
             in_channels,
             clip.take_channel_mode(),
         );
-        let mut segment = segment;
+        let mut segment = SegmentBuf::Owned(segment);
 
         if let Some(params) = clip
             .formant_morph
             .as_ref()
             .filter(|params| params.enabled && sources.is_some())
         {
-            segment = crate::formant_morph::apply_formant_morph_interleaved(
-                &segment, out_rate, 2, params,
-            )?;
+            segment = SegmentBuf::Owned(crate::formant_morph::apply_formant_morph_interleaved(
+                segment.as_slice(),
+                out_rate,
+                2,
+                params,
+            )?);
         }
         if let Some(params) = clip
             .formant_morph
@@ -1545,10 +1620,15 @@ fn render_mixdown_internal(
                 params,
             );
             match crate::formant_cache::get_or_compute_formant_audio(
-                key, &segment, out_rate, params,
+                key,
+                segment.as_slice(),
+                out_rate,
+                params,
             ) {
                 Ok(entry) => {
-                    segment = entry.pcm_stereo.as_ref().clone();
+                    // 共享缓存条目，不深拷贝：后续只读路径直接用 Arc；
+                    // 真要可变时（apply_pitch_edit）才 into_owned 物化。
+                    segment = SegmentBuf::Shared(Arc::clone(&entry.pcm_stereo));
                 }
                 Err(err) => {
                     if debug {
@@ -1578,7 +1658,13 @@ fn render_mixdown_internal(
         {
             let seg_frames_in = segment.len() / 2;
             let target_frames = ((seg_frames_in as f64) / playback_rate).round().max(2.0) as usize;
-            segment = time_stretch_interleaved(&segment, 2, out_rate, target_frames, opts.stretch);
+            segment = SegmentBuf::Owned(time_stretch_interleaved(
+                segment.as_slice(),
+                2,
+                out_rate,
+                target_frames,
+                opts.stretch,
+            ));
         }
 
         // Loop（循环源）：整文件回绕已在片段构建阶段完成（见上方 build_loop_tiled_segment），
@@ -1655,7 +1741,7 @@ fn render_mixdown_internal(
 
         if opts.apply_pitch_edit {
             let seg_start_sec = clip_start_sec + pre_silence_sec + loop_seg_local_start_sec;
-            let mut seg = segment;
+            let mut seg = segment.into_owned();
             let mut rendered_ok = false;
             let mut used_cache = false;
 
@@ -1720,7 +1806,7 @@ fn render_mixdown_internal(
                     }
                 }
             }
-            segment = seg;
+            segment = SegmentBuf::Owned(seg);
 
             // 【气声层混入】仅在使用缓存时做：未命中时链内已经按 breath_gain 混好，
             // 再混一次会重复。公式与播放侧逐字一致：
@@ -1729,7 +1815,8 @@ fn render_mixdown_internal(
             // 曲线采样边界上与监听出现亚采样级分歧。
             if let Some(stem) = breath_stem.as_ref() {
                 let clip_start_frame = (clip_start_sec * out_rate as f64).round() as u64;
-                for frame in 0..(segment.len() / 2) {
+                let seg_slice = segment.as_mut();
+                for frame in 0..(seg_slice.len() / 2) {
                     let idx = frame * 2;
                     if idx + 1 >= stem.len() {
                         break;
@@ -1741,8 +1828,8 @@ fn render_mixdown_internal(
                         breath_frame_period_ms,
                         1.0,
                     );
-                    segment[idx] += stem[idx] * gain;
-                    segment[idx + 1] += stem[idx + 1] * gain;
+                    seg_slice[idx] += stem[idx] * gain;
+                    seg_slice[idx + 1] += stem[idx + 1] * gain;
                 }
             }
 
@@ -1757,7 +1844,7 @@ fn render_mixdown_internal(
                     crate::render_cache::store_rendered(
                         key,
                         &crate::synth_clip_cache::RenderedClipCacheEntry {
-                            pcm_stereo: Arc::new(segment.clone()),
+                            pcm_stereo: segment.to_shared(),
                             breath_noise_stereo: None,
                             frames: (segment.len() / 2) as u64,
                             sample_rate: out_rate,
@@ -1845,6 +1932,9 @@ fn render_mixdown_internal(
         };
 
         let seg_frames = segment.len() / 2;
+        // 混音循环里逐帧读 `segment`：先解出切片与总长，避免热循环内反复 match。
+        let seg_buf = segment.as_slice();
+        let seg_buf_len = seg_buf.len();
         // `clip_total_frames` 已在上方（clip 几何处）定义 —— 复用门禁与这里必须是同一个值。
         let pre_silence_frames = (pre_silence_sec * out_rate as f64).round().max(0.0) as usize;
 
@@ -1955,7 +2045,7 @@ fn render_mixdown_internal(
 
             // 内容耗尽：fade 激活时保持末帧按淡出增益继续衰减（E 处及其后
             // 增益从 ~1 平滑走到 0）；不激活时维持“越界静音”语义。
-            let seg_avail = si + 1 < segment.len();
+            let seg_avail = si + 1 < seg_buf_len;
             if !seg_avail {
                 if fade_out_frames > 0
                     && local_in_clip >= fade_zone_start
@@ -2003,8 +2093,8 @@ fn render_mixdown_internal(
                 }
                 continue;
             }
-            last_l = segment[si];
-            last_r = segment[si + 1];
+            last_l = seg_buf[si];
+            last_r = seg_buf[si + 1];
             has_last = true;
 
             // 只有真存在曲线时才计算
@@ -3158,6 +3248,102 @@ mod tests {
         tl.clips.push(clip);
         tl.normalize_clip_takes();
         tl
+    }
+
+    /// ★★ 未画 DYN 不得成为"静音门"：基线的 0 只表示"这一帧没分析到内容"，
+    /// 绝不能被当成增益 0（用户报告的"每隔一小会儿一个静音断点"）。
+    ///
+    /// 【现场形状】真实 31.8 s 人声（4 段数字静音）上，把一份**含 0 缺口**的电平基线
+    /// 与一条**全线未画**的 `dyn` 曲线一起交给混音：静音段从 4 段变成 38 段、静音总量
+    /// 63k → 221k 帧，洞全部落在有内容的帧上（听感即"每隔一小会儿一个静音断点"，
+    /// 且倒放/取消倒放后洞会跟着上一次渲染的静音区走）。
+    /// 根因是未画帧被解析成"目标 = 基线"，`compute_dyn_gain` 于是退化成
+    /// `no_content_fade(基线)` —— 一个由响度分析曲线驱动的静音门。
+    ///
+    /// 【正对照为什么必须有】没有它，这条用例在"夹具根本没让 DYN 生效"时也会通过。
+    /// 把同一区间画成目标 1.0（基线 0.5）后，该区间必须被放大成两倍 —— 证明 DYN 确实
+    /// 接在这条夹具上。
+    #[test]
+    fn an_unset_dyn_curve_never_gates_the_audio_against_its_baseline() {
+        let identity = "ara://dyn-gate";
+        let plain = reuse_test_timeline(identity, "host-pcm-clip", false);
+        let root = plain.tracks[0].id.clone();
+        const FRAMES: usize = 100; // 0.5 s @ 5 ms
+        const GAP: std::ops::Range<usize> = 40..60;
+        // 基线在 GAP 里是 0（"这里没分析到内容"），其余 0.5。
+        let mut baseline_with_holes = vec![0.5f32; FRAMES];
+        for value in &mut baseline_with_holes[GAP] {
+            *value = 0.0;
+        }
+        let with_dyn = |baseline: Vec<f32>, curve: Vec<f32>| {
+            let mut view = plain.clone();
+            let entry = view.params_by_root_track.get_mut(&root).unwrap();
+            entry.frame_period_ms = 5.0;
+            entry.dyn_orig = baseline;
+            entry.extra_curves.insert("dyn".to_string(), curve);
+            view
+        };
+        // 0.5 s / 44.1 kHz 的谐波音（纯正弦会被分析判为清音，见 host_pcm::tone 的说明）。
+        let samples: Vec<f32> = (0..22_050)
+            .flat_map(|i| {
+                let phase = 2.0 * std::f64::consts::PI * 220.0 * i as f64 / 44_100.0;
+                let sample = (1..=16)
+                    .map(|harmonic| (phase * harmonic as f64).sin() * 0.2 / harmonic as f64)
+                    .sum::<f64>() as f32;
+                [sample, sample * 0.6]
+            })
+            .collect();
+        let src = HashMap::from([(
+            identity.to_string(),
+            MixdownPcm {
+                sample_rate: 44_100,
+                channels: 2,
+                samples: Arc::new(samples),
+            },
+        )]);
+        let options = MixdownOptions {
+            sample_rate: 44_100,
+            start_sec: 0.0,
+            end_sec: None,
+            stretch: StretchAlgorithm::LinearResample,
+            apply_pitch_edit: false,
+            output: OutputSpec::default(),
+            quality_preset: QualityPreset::Export,
+            cancel_flag: None,
+            progress: None,
+            cache_stats: None,
+        };
+        let run = |tl: &TimelineState| {
+            render_mixdown_with_pcm(tl, options.clone(), &src)
+                .unwrap()
+                .3
+        };
+        // 帧 → 交错样本：一帧 5 ms ⇒ 每帧 220.5 个样本，两声道交错 ⇒ ×2。
+        let gap_start = GAP.start * 5 * 44_100 / 1000 * 2;
+        let gap_end = GAP.end * 5 * 44_100 / 1000 * 2;
+        let peak = |buf: &[f32], lo: usize, hi: usize| -> f32 {
+            buf[lo..hi].iter().fold(0.0f32, |acc, v| acc.max(v.abs()))
+        };
+
+        let reference = run(&plain);
+        let unset = with_dyn(baseline_with_holes.clone(), vec![-1.0f32; FRAMES]);
+        assert_eq!(
+            run(&unset),
+            reference,
+            "全线未画的 DYN 必须逐样本旁路：基线里的 0 不是增益 0"
+        );
+
+        // 正对照：同一区间改成"目标 1.0 / 基线 0.5" ⇒ 必须放大成两倍。
+        let mut drawn = vec![-1.0f32; FRAMES];
+        for value in &mut drawn[GAP] {
+            *value = 1.0;
+        }
+        let boosted = run(&with_dyn(vec![0.5f32; FRAMES], drawn));
+        let ratio = peak(&boosted, gap_start, gap_end) / peak(&reference, gap_start, gap_end);
+        assert!(
+            (ratio - 2.0).abs() < 0.05,
+            "对照：画成目标 1.0 / 基线 0.5 后该区间应放大两倍，实测 {ratio}"
+        );
     }
 
     #[test]

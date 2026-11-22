@@ -504,6 +504,22 @@ pub struct UiSettings {
     /// 只有它还能表达「每个 Clip 原本的音高」。纯展示开关，不进工程。
     #[serde(default = "default_true")]
     pub show_clip_pitch_overlay: bool,
+    /// 「自动写入 Take 音高」：插件里**每一次对音高参数的编辑**是否自动写成 REAPER 的
+    /// take 音高包络（`D_PITCH` 归零、`PITCHENV` 整块替换，与手动转换同一条命令）。
+    ///
+    /// 【为什么默认关闭】它是本仓库里唯一会在用户**没点任何东西**的情况下改写宿主工程
+    /// 数据的开关。自动化的边界只能由用户自己划：默认关、明确打开才生效；关着的时候
+    /// 一个字节都不碰宿主，也不留待办（免得打开开关的一瞬间补写历史编辑）。
+    ///
+    /// 【为什么不在这里判断宿主】字段是纯存储：只有 REAPER 能表达 take 音高
+    /// （其他宿主上 `takePitchBridge` 能力位恒假，消费方自己会短路），把宿主判断塞进
+    /// 配置层会让"这个值是什么"依赖"谁在读它"。
+    ///
+    /// 【为什么消费方读进程级副本而不是这个字段】它由会话 actor 的心跳每 100 ms 读一次，
+    /// 而 `UiSettings` 有几十个字段（含若干 `Value` 与 `Vec`）。见
+    /// [`reaper_auto_take_pitch_write`]。
+    #[serde(default)]
+    pub reaper_auto_take_pitch_write: bool,
     /// 纵轴标尺的展示单位（参数 id → `"ratio"` / `"db"`）。
     ///
     /// 只对音量 / 动态这类线性幅值倍率参数有意义（`1× = 0 dB`）：同一个值既能读成
@@ -752,6 +768,18 @@ pub struct UiSettings {
     /// 导入媒体时的声道处理策略（假立体声 → 单声道）。
     #[serde(default)]
     pub channel_import_policy: ChannelImportPolicy,
+    /// take 音高包络里**未识别帧**（辅音、气口、静音）的填充策略。
+    ///
+    /// `"zero"` | `"hold"` | `"bridge"` | `"dry"`，缺省 `"bridge"`。语义见
+    /// [`crate::pitch_bridge::UnvoicedFill`]：宿主包络是**连续控制信号**，把逐帧的
+    /// "这一帧没有音高"写成显式 0 点，等于让宿主的移调器在每个辅音处把比率从 +12
+    /// 拉到 0 再拉回 +12。
+    ///
+    /// 【为什么是字符串而不是 serde 枚举】配置是手可编辑的文本，一个拼写错误不该
+    /// 让整份设置加载失败（与 `ExportSettings` 的既有惯例一致）。解析走
+    /// `UnvoicedFill::from_name`，非法值回退 `bridge`。
+    #[serde(default = "default_unvoiced_pitch_policy")]
+    pub unvoiced_pitch_policy: String,
     /// 记事本（Notebook）设置。
     ///
     /// **后端只做透传存储**：字段语义、取值合法性与默认值都在前端收口
@@ -852,6 +880,27 @@ pub fn set_sync_edits_across_takes(enabled: bool) {
     SYNC_EDITS_ACROSS_TAKES.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// 「自动写入 Take 音高」的进程级生效值（默认关闭）。
+///
+/// 与 `SYNC_EDITS_ACROSS_TAKES` / `CHANNEL_IMPORT_POLICY` 同款：由
+/// `ui_settings_apply::apply` 在加载与保存设置时同步。
+///
+/// 【为什么不能直接读 `UiSettings`】消费方是**会话 actor 的心跳**（100 ms 一轮），
+/// 每轮克隆整份设置只为读一个布尔，代价与收益完全不成比例（与
+/// `REAPER_AUTO_TAKE_PITCH` 的自动导入同一条理由）。
+pub static REAPER_AUTO_TAKE_PITCH_WRITE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 当前是否开启「自动写入 Take 音高」。
+pub fn reaper_auto_take_pitch_write() -> bool {
+    REAPER_AUTO_TAKE_PITCH_WRITE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 同步「自动写入 Take 音高」的进程级生效值。
+pub fn set_reaper_auto_take_pitch_write(enabled: bool) {
+    REAPER_AUTO_TAKE_PITCH_WRITE.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// 导入声道处理策略的进程级生效值（默认"智能转换"）。
 ///
 /// 与 `LOOP_NEW_CLIPS_DEFAULT` / `SYNC_EDITS_ACROSS_TAKES` 同款：由
@@ -880,6 +929,37 @@ pub fn set_channel_import_policy(policy: &ChannelImportPolicy) {
         .unwrap_or_else(|e| e.into_inner()) = normalized;
 }
 
+/// take 音高包络里未识别帧填充策略的进程级生效值（默认 `bridge`）。
+///
+/// 与 `CHANNEL_IMPORT_POLICY` 同款：由 `ui_settings_apply::apply` 下发，供导出边界
+/// （`pitch_editing::take_pitch_fill_policy`）读取。插件与独立 App 共用同一份
+/// `app_config.json`，因此这一个单元格同时决定两侧的导出行为 —— 不需要第二套机制。
+static UNVOICED_PITCH_POLICY: std::sync::OnceLock<
+    std::sync::RwLock<crate::pitch_bridge::UnvoicedFill>,
+> = std::sync::OnceLock::new();
+
+fn unvoiced_pitch_policy_cell() -> &'static std::sync::RwLock<crate::pitch_bridge::UnvoicedFill> {
+    UNVOICED_PITCH_POLICY
+        .get_or_init(|| std::sync::RwLock::new(crate::pitch_bridge::UnvoicedFill::default()))
+}
+
+/// 读取当前生效的未识别帧填充策略。
+pub fn unvoiced_pitch_policy() -> crate::pitch_bridge::UnvoicedFill {
+    *unvoiced_pitch_policy_cell()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// 同步未识别帧填充策略的进程级生效值（**宽松解析**，非法值回退默认）。
+///
+/// 【为什么不做去重、不做校验失败上报】它是一次纯赋值，代价为零；而"配置里写了
+/// `dry`、导出却按 `bridge` 跑"这类不一致没有任何别的信号能暴露出来。
+pub fn set_unvoiced_pitch_policy(value: &str) {
+    *unvoiced_pitch_policy_cell()
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = crate::pitch_bridge::UnvoicedFill::from_name(value);
+}
+
 /// 测试专用：串行化所有会改写**进程级设置**的测试。
 ///
 /// 这些设置（导入声道策略、Loop 默认值、同步编辑所有 Take…）是进程级单例，
@@ -896,6 +976,19 @@ pub fn channel_policy_test_guard() -> std::sync::MutexGuard<'static, ()> {
 
 fn default_ort_ep() -> String {
     "auto".to_string()
+}
+
+/// take 音高包络未识别帧填充的缺省档位。
+///
+/// 【为什么默认 `bridge`】它是"短间隙插值 + 长可闻间隙 hold"的折中：既消掉辅音处
+/// 的比率跳变，又不在长气口里凭空造出一个谁也没画过的中间调。另外三档取决于素材
+/// 与算法，靠本配置项或 `HIFISHIFTER_TAKE_PITCH_UNVOICED` A/B，不需要重新编译。
+///
+/// 名字取自枚举本身（`as_name`）而不是手写字符串：默认值只能有一个来源。
+fn default_unvoiced_pitch_policy() -> String {
+    crate::pitch_bridge::UnvoicedFill::default()
+        .as_name()
+        .to_string()
 }
 
 /// 导出音频设置（持久化到 app_config.json）
@@ -1778,6 +1871,8 @@ impl Default for UiSettings {
             show_clipboard_preview: true,
             show_param_value_popup: true,
             show_clip_pitch_overlay: true,
+            // 自动改写用户数据的功能默认关（见字段说明）。
+            reaper_auto_take_pitch_write: false,
             param_axis_units: std::collections::HashMap::new(),
             param_axis_directions: std::collections::HashMap::new(),
             last_project_save_format: default_project_save_format(),
@@ -1839,6 +1934,7 @@ impl Default for UiSettings {
             sync_edits_across_takes: true,
             render_cache: RenderCacheSettings::default(),
             channel_import_policy: ChannelImportPolicy::default(),
+            unvoiced_pitch_policy: default_unvoiced_pitch_policy(),
             notebook: serde_json::Value::Null,
             dock: serde_json::Value::Null,
             dock_plugin: serde_json::Value::Null,
@@ -2242,6 +2338,51 @@ mod tests {
             assert_eq!(scan.mono_target_mode, 3, "{mode}: 目标模式必须保留");
             assert_eq!(scan.tolerance, 1e-2, "{mode}: 容差必须保留");
         }
+    }
+
+    /// 未识别帧填充策略：缺省 `bridge`、宽松解析、`set` 之后 `get` 立刻反映。
+    #[test]
+    fn unvoiced_pitch_policy_defaults_and_parses_loosely() {
+        let _guard = super::channel_policy_test_guard();
+        let original = super::unvoiced_pitch_policy();
+        assert_eq!(
+            super::default_unvoiced_pitch_policy(),
+            "bridge",
+            "缺省档位必须是 bridge（唯一被论证过的折中）"
+        );
+        for (text, expected) in [
+            ("zero", crate::pitch_bridge::UnvoicedFill::Zero),
+            ("HOLD", crate::pitch_bridge::UnvoicedFill::Hold),
+            (" dry ", crate::pitch_bridge::UnvoicedFill::Dry),
+            ("bridge", crate::pitch_bridge::UnvoicedFill::Bridge),
+            // 手改配置写错一个字母不该让整份设置加载失败，也不该静默换到别的档。
+            ("brodge", crate::pitch_bridge::UnvoicedFill::Bridge),
+            ("", crate::pitch_bridge::UnvoicedFill::Bridge),
+        ] {
+            super::set_unvoiced_pitch_policy(text);
+            assert_eq!(
+                super::unvoiced_pitch_policy(),
+                expected,
+                "配置值 {text:?} 解析错"
+            );
+        }
+        super::set_unvoiced_pitch_policy(original.as_name());
+    }
+
+    /// 旧配置（没有这个键）必须落到 `bridge`，而不是空串或 `zero`。
+    ///
+    /// 【为什么这条比看起来重要】`zero` 是"今天的行为"，把它当缺省会让升级后的
+    /// 用户一个字节的变化都看不到 —— 功能等于没上线；而空串会让 `from_name` 之外
+    /// 的所有读取点拿到一个不存在的档位。
+    #[test]
+    fn a_config_without_the_unvoiced_policy_key_defaults_to_bridge() {
+        let settings: super::UiSettings = serde_json::from_str("{}").expect("deserialize");
+        assert_eq!(settings.unvoiced_pitch_policy, "bridge");
+        assert_eq!(
+            settings.unvoiced_pitch_policy,
+            super::UiSettings::default().unvoiced_pitch_policy,
+            "serde 缺省与 Default 必须一致"
+        );
     }
 
     #[test]

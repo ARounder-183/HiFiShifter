@@ -318,11 +318,6 @@ fn owned_fade_shape_changes_kernel_pcm_and_state_roundtrip_and_undo_clears_it() 
     );
     document.close();
 }
-use crate::ara_entry::HostEntry;
-use ara2_bridge::companion::vst3::ffi::{ara2_vst3_plugin_entry_bind, ARA2_VST3_OK};
-use ara2_bridge::companion::{CompanionFactory, CompanionRoles};
-use ara2_bridge::plugin::{FactoryBuilder, PluginBuilder};
-use ara2_bridge::sys::*;
 
 /// 有宿主fade缓存后，快照/活actor装饰自动变化；不推进音频generation，不再烘焙普通fade。
 #[test]
@@ -1318,116 +1313,6 @@ fn native_assignment_observer_serializes_with_snapshot_publication_transaction()
     drop(model);
 }
 
-/// 真实空文档绑定也必须收到销毁；不依赖 first region assignment 猜 document。
-#[test]
-fn bound_native_entry_is_tombstoned_by_actual_document_teardown() {
-    let factory = Box::leak(Box::new(
-        FactoryBuilder::new("org.hfs.bound", "org.hfs.bound.archive")
-            .display(
-                "bound",
-                "HiFiShifter",
-                "https://github.com/ARounder-183/HiFiShifter",
-                "1",
-            )
-            .document_controller(|| {
-                let model = crate::ara::model::ModelHandle::new();
-                let session = model.session();
-                PluginBuilder::new(model)
-                    .controller_identity(move |key| session.register(key))
-                    .build()
-            })
-            .build()
-            .unwrap(),
-    ));
-    factory
-        .entry()
-        .initialize(ApiGeneration::V2Final, crate::test_host::assert_address())
-        .unwrap();
-    let mut fixture = crate::test_host::HostFixture::new(vec![]);
-    let host = fixture.instance();
-    let properties = ARADocumentProperties {
-        structSize: std::mem::size_of::<ARADocumentProperties>(),
-        name: c"bound empty".as_ptr(),
-    };
-    // SAFETY: test host、factory 和 properties 保持到实际 controller 终止。
-    let raw = unsafe {
-        (factory
-            .raw_copy()
-            .createDocumentControllerWithDocument
-            .unwrap())(&host, &properties)
-    };
-    assert!(!raw.is_null());
-    // SAFETY: 原生工厂返回完整 packed 实例。
-    let controller = unsafe { raw.read_unaligned() };
-    let document =
-        crate::render::document::DocumentSession::lookup(controller.documentControllerRef as usize)
-            .unwrap();
-    // SAFETY: test factory backing 已保留到进程结束。
-    let association = unsafe { CompanionFactory::from_raw("bound", &*factory.as_raw()) }.unwrap();
-    let owner = Arc::new(ExtensionOwner::default());
-    // `HostEntry` 现在自己建 companion（重开工程时要能重建），所以传原始 factory。
-    let entry = HostEntry::new(association, CompanionRoles::all(), "bound", owner.clone()).unwrap();
-    // 探针必须指向**真正被绑定**的那一份 (HostEntry 内部的绑定)。
-    let probe = entry
-        .lifetime_probe()
-        .expect("HostEntry 必须持有初始绑定探针");
-    let mut extension_raw = std::ptr::null();
-    // SAFETY: real C++ shim 调真实产品 bind，controller 存活且已登记。
-    assert_eq!(
-        unsafe {
-            ara2_vst3_plugin_entry_bind(
-                entry.as_raw(),
-                controller.documentControllerRef.cast(),
-                7,
-                1,
-                1,
-                &raw mut extension_raw,
-            )
-        },
-        ARA2_VST3_OK
-    );
-    assert!(!extension_raw.is_null());
-    assert!(probe.controller_alive());
-    let identity = Box::new(0_u8);
-    let key = (&*identity as *const u8) as u64;
-    region_owners()
-        .lock_or_recover()
-        .register(key, document.id, 0)
-        .unwrap();
-    // SAFETY: extension 与 controller 保留；region 仅作为不透明身份。
-    unsafe {
-        let extension = extension_raw
-            .cast::<ARAPlugInExtensionInstance>()
-            .read_unaligned();
-        ((*extension.playbackRendererInterface)
-            .addPlaybackRegion
-            .unwrap())(extension.playbackRendererRef, key as *mut _);
-    }
-    assert_eq!(owner.assignments.lock_or_recover().get(&1).unwrap(), &[key]);
-    // SAFETY: actual controller destructor invokes ModelHandle::destroy_document。
-    unsafe {
-        ((*controller.documentControllerInterface)
-            .destroyDocumentController
-            .unwrap())(controller.documentControllerRef)
-    };
-    assert!(owner.assignments.lock_or_recover().is_empty());
-    assert!(owner.assigned_regions().is_err());
-    assert!(!probe.controller_alive());
-    // SAFETY: native entry 仍保留 companion storage；销毁文档后回调必须被 tombstone 拒绝。
-    unsafe {
-        let extension = extension_raw
-            .cast::<ARAPlugInExtensionInstance>()
-            .read_unaligned();
-        ((*extension.playbackRendererInterface)
-            .addPlaybackRegion
-            .unwrap())(extension.playbackRendererRef, key as *mut _);
-    }
-    assert!(owner.assignments.lock_or_recover().is_empty());
-    drop(entry);
-    drop(owner);
-    factory.entry().uninitialize().unwrap();
-}
-
 /// sequence 预览只展开本 sequence；显式区域重复分配不能导致双倍混音。
 #[test]
 fn editor_sequence_selection_is_expanded_and_deduplicated() {
@@ -1679,123 +1564,6 @@ fn an_instance_whose_ara_session_ended_does_not_fall_back_to_capture() {
     session.close();
 }
 
-/// **重开工程：上一份文档关闭后，同一实例必须能重新绑定。**
-///
-/// 【为什么这是问题二的主回归】companion 的 `bound` 是一次性的：`Drop` 都不复位它。
-/// 宿主重开工程复用同一个处理器实例，于是第二次 `bind` 必然被 "already bound" 拒绝。
-/// 上一版把这条误当成"宿主重复绑定"，把 null 扩展实例交给宿主 —— 插件加载了却永远
-/// 不绑，既有 ARA 数据与新导入音频都不加载，只有删掉插件再添加才好。
-///
-/// 本用例走真实 C++ shim：第一次绑定成功 → 关闭文档（`closed = true`，binding 保留）
-/// → 再次绑定必须**复位 companion 后成功**，而不是返回 null。
-#[test]
-fn a_reopened_document_rebinds_through_a_reset_companion() {
-    use ara2_bridge::companion::CompanionFactory;
-    use ara2_bridge::plugin::PluginBuilder;
-
-    let factory = Box::leak(Box::new(
-        FactoryBuilder::new("org.hfs.rebind", "org.hfs.rebind.archive")
-            .display(
-                "rebind",
-                "HiFiShifter",
-                "https://github.com/ARounder-183/HiFiShifter",
-                "1",
-            )
-            .document_controller(|| {
-                let model = crate::ara::model::ModelHandle::new();
-                let session = model.session();
-                PluginBuilder::new(model)
-                    .controller_identity(move |key| session.register(key))
-                    .build()
-            })
-            .build()
-            .unwrap(),
-    ));
-    factory
-        .entry()
-        .initialize(ApiGeneration::V2Final, crate::test_host::assert_address())
-        .unwrap();
-    let mut fixture = crate::test_host::HostFixture::new(vec![]);
-    let host = fixture.instance();
-    let properties = ARADocumentProperties {
-        structSize: std::mem::size_of::<ARADocumentProperties>(),
-        name: c"rebind".as_ptr(),
-    };
-    // SAFETY: test host、factory 与 properties 保持到 controller 终止。
-    let raw = unsafe {
-        (factory
-            .raw_copy()
-            .createDocumentControllerWithDocument
-            .unwrap())(&host, &properties)
-    };
-    assert!(!raw.is_null());
-    // SAFETY: 原生工厂返回完整 packed 实例。
-    let controller = unsafe { raw.read_unaligned() };
-    // SAFETY: test factory backing 保留到进程结束。
-    let association = unsafe { CompanionFactory::from_raw("rebind", &*factory.as_raw()) }.unwrap();
-    let owner = Arc::new(ExtensionOwner::default());
-    let entry =
-        HostEntry::new(association, CompanionRoles::all(), "rebind", owner.clone()).unwrap();
-
-    let mut first = std::ptr::null();
-    // SAFETY: controller 存活且已登记。
-    assert_eq!(
-        unsafe {
-            ara2_vst3_plugin_entry_bind(
-                entry.as_raw(),
-                controller.documentControllerRef.cast(),
-                7,
-                1,
-                1,
-                &raw mut first,
-            )
-        },
-        ARA2_VST3_OK
-    );
-    assert!(!first.is_null(), "第一次绑定必须成功");
-    assert_eq!(owner.companion_reset_count(), 0);
-
-    // 工程关闭：文档撤销 lease，实例被关闭（binding 仍保留给宿主最后几次回调）。
-    owner.document_closed();
-    assert!(owner.was_bound_before(), "历史事实不回落");
-    assert!(
-        owner.existing_binding_raw().is_none(),
-        "关闭后不再复用旧实例指针"
-    );
-
-    let mut second = std::ptr::null();
-    // SAFETY: 同一 controller，宿主重开工程会这样调用。
-    assert_eq!(
-        unsafe {
-            ara2_vst3_plugin_entry_bind(
-                entry.as_raw(),
-                controller.documentControllerRef.cast(),
-                7,
-                1,
-                1,
-                &raw mut second,
-            )
-        },
-        ARA2_VST3_OK
-    );
-    assert!(
-        !second.is_null(),
-        "重开工程必须重新拿到非空扩展实例，而不是 null"
-    );
-    assert_eq!(owner.companion_reset_count(), 1, "必须复位一次 companion");
-    assert_eq!(owner.rebind_generation_count(), 1, "必须走重绑路径");
-
-    // SAFETY: 真实 controller 析构会撤销文档。
-    unsafe {
-        ((*controller.documentControllerInterface)
-            .destroyDocumentController
-            .unwrap())(controller.documentControllerRef)
-    };
-    drop(entry);
-    drop(owner);
-    factory.entry().uninitialize().unwrap();
-}
-
 /// **关闭后的准备队列必须被替换，重绑的实例才排得出快照。**
 ///
 /// 【为什么是问题二 2b】`stop_editor()` 会 `close()` 队列（永久），而旧实现用
@@ -1881,4 +1649,113 @@ fn a_live_document_does_not_block_rebinding_to_another_document() {
     assert_eq!(second.renderer_owners().len(), 1);
     first.close();
     second.close();
+}
+
+/// **同步发布第一份快照的前提：源 PCM 必须已经在手上。**
+///
+/// 【为什么这条是"每隔一小会儿一个静音断点"的一半】**宿主不会等我们的后台队列**：
+/// 实例建好之后 REAPER 立刻按 region 一块块渲染（实测 21 个块 ≈225 ms 里我们还没有
+/// 快照，于是逐样本写零，而宿主把那些零烘进自己的 ARA 缓存）。所以第一份快照必须在
+/// 宿主问第一块之前就发布 —— 这也意味着"什么时候可以同步发布"必须判准：源 PCM 由
+/// 宿主异步授权，素材没到时同步渲染必然 `MissingSource`，白烧掉那次机会。
+///
+/// 本用例钉的就是这个前提：没有 PCM 时不许认为"可以算了"，PCM 到手之后必须是。
+#[test]
+fn the_inline_first_snapshot_sees_the_host_pcm_and_publishes() {
+    let (model, owner, _identity) = crate::editor::session::tests::fixture();
+    let document = model.session();
+    assert!(owner.is_bound(), "夹具的实例绑定在 ARA 文档上");
+    // 夹具只塞了 `edit_sources`（内核渲染读的那一份）；直通通路读的是 `sources`。
+    document.sources.lock_or_recover().insert(
+        "ara://source".into(),
+        Arc::new(crate::render::source::SourcePcm {
+            covered: Vec::new(),
+            sample_rate: 44100,
+            planes: vec![vec![0.1, 0.2, 0.3, 0.4]],
+            version: 0,
+            _reservation: None,
+        }),
+    );
+    assert!(
+        owner.has_pending_render_sources(),
+        "PCM 到手之后必须认为可以渲染，否则第一份快照永远发不出去"
+    );
+    // 并证明这条前提确实通向"能发布"：素材在就是能算出来。
+    owner
+        .prepare_job(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )))
+        .expect("素材在手时第一份快照必须能算出并发布");
+    assert!(
+        owner.snapshots.iter().all(|snapshot| snapshot.is_ready()),
+        "算完就必须有可播的快照"
+    );
+    document.close();
+}
+
+/// **ARA 回退的渲染事实必须与原生写者同身份、同口径（合并，不许整表替换）。**
+///
+/// 现场形状（2026-11-22 02:06:22）：REAPER 按轨道管理 ARA 实例——持有原生适配器的
+/// 编辑实例整表重建 render_facts（item GUID 键、`B_LOOPSRC=true`），而**没有**原生
+/// 适配器的播放实例走 `refresh_ara_render_facts`。此前那里用 `ara-region-*` 键 +
+/// 原生字段硬编码 false 整表替换 —— 两个写者逐轮翻转 `loops=1↔0`，render_epoch 每
+/// 轮推进，`prepare_job` 的版本闸永远失配 ⇒ 一次光标移动连出 4 轮全量 mixdown
+/// （状态栏"渲染中"随清单刷新闪烁）。
+#[test]
+fn the_ara_render_fact_fallback_merges_with_native_facts_instead_of_replacing_them() {
+    use crate::host::geometry::{RenderFacts, RenderItemFacts};
+
+    let owner = ExtensionOwner::default();
+    let document = crate::render::document::DocumentSession::new(202);
+    // 原生写者的产物：item GUID 键 + 原生真值（循环源开、声道模式 2）。
+    document.render_facts.lock_or_recover().items.insert(
+        "item-A".to_string(),
+        RenderItemFacts {
+            reversed: false,
+            loop_enabled: true,
+            channel_mode: 2,
+            timestretch: false,
+            content_fade_head: false,
+            content_fade_tail: false,
+        },
+    );
+    // ARA 侧：region 1 已认领到 item-A，时间拉伸开启。
+    let identity = Box::new(0_u8);
+    let key = (&*identity as *const u8) as u64;
+    document.regions.lock_or_recover().insert(
+        key,
+        crate::ara::AraPlaybackRegion {
+            audio_source_persistent_id: "source".into(),
+            is_timestretch_enabled: true,
+            ..Default::default()
+        },
+    );
+    document
+        .region_items
+        .lock_or_recover()
+        .insert(key, "item-A".to_string());
+
+    let stamp = (
+        document.clone(),
+        document.revision.load(Ordering::Acquire),
+        document.scope_revision.load(Ordering::Acquire),
+        Vec::new(),
+    );
+    owner.refresh_ara_render_facts(&stamp);
+
+    let facts: &RenderFacts = &document.render_facts.lock_or_recover();
+    assert_eq!(
+        facts.items.len(),
+        1,
+        "不许出现 ara-region-* 的并行身份：键必须与原生写者一致"
+    );
+    let entry = facts
+        .items
+        .get("item-A")
+        .expect("item-A 必须仍在（同一身份被更新，而不是被默认表覆盖）");
+    assert!(
+        entry.loop_enabled && entry.channel_mode == 2,
+        "读不到的原生字段必须保留上一轮的真值，不许被安全默认覆盖"
+    );
+    assert!(entry.timestretch, "ARA 能给出的字段必须照实更新");
 }

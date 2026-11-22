@@ -177,6 +177,8 @@ export const enUS = {
     history_op_param_block_edit: "Edit parameter blocks",
     history_op_import_midi: "Import MIDI",
     history_op_edit_midi: "Edit MIDI data",
+    history_op_host_pitch_import: "Import REAPER take pitch",
+    history_op_host_pitch_export: "Convert to REAPER take pitch",
     history_op_import_vocalshifter: "Import VocalShifter project",
     history_op_recording: "Recording",
     history_op_batch: "Batch operation",
@@ -340,6 +342,9 @@ export const enUS = {
 
     panel_editor: "Editor",
     panel_unavailable: "Panel unavailable",
+    panel_render_failed: "Panel failed to render",
+    error_boundary_copy_details: "Copy details",
+    error_boundary_reload: "Reload",
     detached_shortcut_unavailable: "This shortcut is not available in a detached window",
     panel_timeline: "Timeline",
     panel_io: "I/O",
@@ -357,7 +362,7 @@ export const enUS = {
     dock_expand: "Expand",
     dock_collapse: "Collapse to a tab strip",
     dock_rename_tab: "Rename...",
-    dock_drag_rearrange: "Drag to rearrange",
+    dock_drag_float: "Drag to float",
     dock_dock_hint: "Hold {modifier} to dock",
     dock_dock_hint_always: "Drop on a target to dock",
     dock_hint_dock: "Dock here",
@@ -710,10 +715,12 @@ export const enUS = {
     status_export_done: "Export completed",
     status_export_failed: "Export failed",
     status_export_separated_done: "Separated export completed",
+    status_export_separated_summary: "Separated export completed — {path} ({n} tracks)",
     status_export_separated_failed: "Separated export failed",
     status_clipboard_copy_failed: "Copy failed: cannot access the system clipboard.",
     status_clipboard_cut_failed: "Cut failed: cannot access the system clipboard.",
     status_playing_original: "Playing original",
+    status_playback_requested: "Playback requested",
     status_play_original_failed: "Play original failed",
     status_stopping_audio: "Stopping audio...",
     status_audio_stopped: "Audio stopped",
@@ -722,11 +729,16 @@ export const enUS = {
     status_dropped_audio_imported: "Dropped audio imported",
     status_clips_duplicated: "Clips duplicated",
     status_clip_edit_rejected: "Clip edit rejected",
+    status_track_edit_rejected: "Track edit rejected",
     status_import_done: "Import done",
     status_import_failed: "Import failed",
     status_project_imported: "Project imported",
     status_vocalshifter_project_imported: "VocalShifter project imported",
     status_reaper_project_imported: "REAPER project imported",
+    status_import_project_failed: "Import project failed",
+    status_import_vocalshifter_failed: "Import VocalShifter failed",
+    status_import_reaper_failed: "Import REAPER failed",
+    status_request_failed: "Request failed",
     status_pasted_vocalshifter_clipboard: "Pasted VocalShifter clipboard data",
     status_pasted_reaper_clipboard: "Pasted REAPER clipboard data",
     status_timeline_clipboard_pasted: "Timeline clipboard pasted",
@@ -790,6 +802,7 @@ export const enUS = {
 
     menu_open_log_folder: "Open Log Folder",
     menu_export_diagnostics: "Export Diagnostics...",
+    export_diagnostics_dialog_title: "Export Diagnostics",
     menu_open_log_folder_failed: "Could not open the log folder",
     menu_open_log_folder_copy_path: "Copy path",
     menu_open_log_folder_copied: "Copied to clipboard",
@@ -854,8 +867,6 @@ export const enUS = {
     ctx_channel_mode: "Channel Mode",
     ctx_group: "Grouping",
     ctx_scan_fake_stereo: "Scan for Fake Stereo and Convert",
-    ctx_scan_fake_stereo_hint:
-        "Material whose left and right channels match can be folded to mono: identical sound, half the render time. A batch run becomes a single undo step.",
     clip_channel_import_dialog_title: "Import Channel Handling",
     clip_channel_import_dialog_desc:
         'Fold "fake stereo" material, where both channels carry the same content, to mono on import.',
@@ -936,6 +947,9 @@ export const enUS = {
     status_param_block_write_failed: "Failed to write parameter blocks",
     status_param_block_not_ready:
         "The parameter block layer is not ready yet. Please try again shortly.",
+    status_param_block_conflict_curve_changed:
+        "Conflict: parameter curve changed during block read",
+    status_param_block_edit_set_not_loaded: "Parameter block edit set is not loaded",
     kb_param_block_split: "Split Parameter Block",
     kb_param_block_delete: "Delete parameter block",
     kb_param_block_group: "Group parameter blocks",
@@ -977,6 +991,9 @@ export const enUS = {
     fb_searching: "Searching...",
     fb_loading: "Loading...",
     fb_error: "Error loading directory",
+    fb_error_load_directory: "Failed to load directory",
+    fb_error_search_failed: "Search failed",
+    fb_error_unknown: "Unknown error",
 
     ctx_selected_n: "{n} selected",
     ctx_delete_all: "Delete All",
@@ -993,8 +1010,6 @@ export const enUS = {
     ctx_replace_midi: "Replace MIDI",
     ctx_replace_midi_all: "Replace MIDI All",
     ctx_split_at_playhead: "Split at Playhead",
-    ctx_split_multi_reason: "Every selected clip must be splittable at the playhead",
-    ctx_split_playhead_reason: "The playhead must be inside the clip",
     ctx_silence_detection: "Silence Detection...",
     silence_method: "Detection",
     silence_method_rms: "RMS (energy)",
@@ -1024,7 +1039,6 @@ export const enUS = {
     silence_preview_clip: "{n} regions, {dur}s",
     silence_skipped: "Skipped",
     silence_more_clips: "...and {n} more clips",
-    silence_no_audio_source: "No audio source in the selected clips",
     silence_apply: "Apply",
     silence_double_click_reset: "Double-click a parameter to reset it to its default",
     silence_applying: "Applying...",
@@ -1974,6 +1988,7 @@ export const enUS = {
     status_fake_stereo_scan_rejected: "Fake-stereo scan rejected",
     status_fake_stereo_scan_foldable: "Fake-stereo: {m}/{n} foldable",
     status_fake_stereo_scan_folded: "Fake-stereo: {m}/{n} folded",
+    status_fake_stereo_scan_unreadable: ", 1 unreadable|, {count} unreadable",
     status_channel_scan_folded:
         "Folded {count} clip to mono automatically|Folded {count} clips to mono automatically",
     status_channel_scan_pending:
@@ -2276,9 +2291,6 @@ export const enUS = {
     plugin_transport_stop: "Stop playback in the host",
     plugin_transport_play: "Play or pause in the host",
     plugin_transport_host_only: "Playback belongs to the host; play keys are handed to it.",
-    plugin_feature_unavailable: "Not available in the VST/ARA plugin yet",
-    plugin_reverse_unavailable:
-        "Reversing is a host item operation; use the host to reverse this clip",
     // ── Capture (hosts without ARA: record what the host is playing) ──────
     capture_settings_title: "Capture settings",
     capture_settings_desc:
@@ -2329,6 +2341,7 @@ export const enUS = {
     plugin_apply_analyzing_hint:
         "This step runs with the length of the material; seconds to minutes. The raw take plays meanwhile.",
     plugin_apply_rendering: "Synthesising...",
+    plugin_apply_bypassed: "Bypassed · not rendering",
     plugin_render_background_hint:
         "A new version is rendering in the background; you are still hearing the previous one.",
     plugin_daw_controlled_reason:
@@ -2338,6 +2351,31 @@ export const enUS = {
     cap_reason_app_only: "Only available in the standalone app",
     cap_reason_plugin_only: "Only available in the plug-in",
     cap_reason_piano_roll_only: "Only applies to the parameter editor",
+    cap_reason_not_in_plugin: "Not available in the plug-in",
+    // ── 片段菜单：REAPER take 音高互转 ─────────────────────────────
+    ctx_host_pitch: "REAPER Pitch",
+    ctx_host_pitch_import: "Import REAPER Take Pitch",
+    ctx_host_pitch_export: "Convert to REAPER Take Pitch Envelope",
+
+    // ── 参数编辑器：REAPER 音高互转菜单（按作用域）──────────────────
+    // 【为什么作用域写在这里】它只在参数编辑器里出现（时间轴的片段菜单是逐片段的）。
+    pitch_bridge_menu_tooltip: "REAPER take pitch bridge",
+    pitch_bridge_import_heading: "Import take pitch",
+    pitch_bridge_export_heading: "Convert to take pitch envelope",
+    pitch_bridge_scope_track: "Current track",
+    pitch_bridge_scope_selection: "In selection",
+    pitch_bridge_scope_all: "All clips",
+    pitch_bridge_scope_item: "{scope} ({count})",
+    pitch_bridge_auto_write: "Auto-write take pitch",
+    pitch_bridge_tooltip_export_track: "Take pitch bridge: Export current track",
+    pitch_bridge_nothing_converted: "Nothing to convert",
+    pitch_bridge_skipped_clips: "{count} clip skipped|{count} clips skipped",
+    pitch_bridge_skipped_tooltip: "Clips without convertible pitch data were left untouched",
+    status_pitch_bridge_imported:
+        "Take pitch imported ({count} clip)|Take pitch imported ({count} clips)",
+    status_pitch_bridge_exported:
+        "Take pitch envelope written ({count} clip)|Take pitch envelope written ({count} clips)",
+    status_pitch_bridge_failed: "Pitch bridge failed",
 
     // ── 宿主淡入淡出 tooltip 的补充说明 ─────────────────────────────
     fade_shape_axes_owned_by_host:
@@ -2392,15 +2430,17 @@ export const enUS = {
     installer_uninstall_options_top:
         "Also remove the data below. Your settings and unsaved work are always kept.",
     installer_uninstall_opt_models: "Remove the shared model library",
-    installer_uninstall_opt_models_desc:
-        "Frees about 150 MB. Shared by every HiFiShifter installation.",
+    installer_uninstall_opt_models_desc: "Shared by every HiFiShifter installation.",
     installer_uninstall_opt_cache: "Remove caches and logs",
     installer_uninstall_opt_cache_desc:
         "Waveform/render caches, logs, WebView data and temporary files.",
     installer_repair_done: "Repair complete.",
     installer_reinstall_options_title: "Remove the previous version",
-    installer_reinstall_options_subtitle: "Choose whether to delete shared model files before installing.",
-    installer_reinstall_options_top: "A previous version of HiFiShifter was found. It will be uninstalled first. The new version will use the same install folder.",
+    installer_reinstall_options_subtitle:
+        "Choose whether to delete shared model files before installing.",
+    installer_reinstall_options_top:
+        "A previous version of HiFiShifter was found. It will be uninstalled first. The new version will use the same install folder.",
     installer_reinstall_uninstalling: "Uninstalling the previous version...",
-    installer_reinstall_failed: "Could not uninstall the previous version. Uninstall it manually and try again.",
+    installer_reinstall_failed:
+        "Could not uninstall the previous version. Uninstall it manually and try again.",
 } as const;

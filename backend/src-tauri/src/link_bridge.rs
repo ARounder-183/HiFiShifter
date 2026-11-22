@@ -529,6 +529,14 @@ pub(crate) fn refresh(app: &tauri::AppHandle, force: bool) -> Result<serde_json:
         (carried_params, carried_tracks)
     };
     state.bump_timeline_version();
+    // 【搬回了用户编辑就要置脏】refresh 的 open() 已把工程重置成 clean 的默认态，
+    // 随后搬回的参数曲线与轨道增益/静音/独奏是**未提交给宿主的内容**：不清这条
+    // 脏标记，关窗时"未保存修改"提示不会出现，搬回的编辑随进程退出静默丢失。
+    // 与 submit 的语义对齐（宿主接受提交后才清 dirty）；零搬运（宿主工程与本地
+    // 完全一致）不置脏。
+    if carried_params > 0 || carried_tracks > 0 {
+        state.mark_project_dirty_and_retitle();
+    }
     // 【为什么要如实报出"搬过去了多少"】重新导入会重建时间轴，用户最怕的是
     // "我的曲线是不是没了"。搬过去的条数是**事实**，说出来比让他自己数可靠。
     result["carriedParams"] = serde_json::json!(carried_params);
@@ -593,7 +601,22 @@ fn guard_replace(state: &AppState, force: bool) -> Result<(), String> {
 /// 本地工程读数；提交时用它确认"提交之后本地有没有又变了"。
 fn project_projection(project: &crate::state::ProjectState) -> serde_json::Value {
     serde_json::json!({
-        "name": project.name, "path": project.path, "notes": project.notes_markdown,
+        "name": project.name, "path": project.path,
+        "content": project_content_fingerprint(project),
+    })
+}
+
+/// 工程内容指纹：name/path 之外的工程读数。
+///
+/// 【为什么单独存在】保存路径也要问"快照之后内容有没有又变"，但**保存本身就是
+/// 改 name/path 的地方** —— 把这两个字段算进去，刚完成的保存会永远"看起来变了"，
+/// dirty 永远清不掉。此处的字段与工程文件实际写入的内容一一对应（同
+/// `commands::project` 快照构建的读数）；字段增减时两处要一起改。
+pub(crate) fn project_content_fingerprint(
+    project: &crate::state::ProjectState,
+) -> serde_json::Value {
+    serde_json::json!({
+        "notes": project.notes_markdown,
         "assets": project.notebook_assets, "base_scale": project.base_scale,
         "use_custom_scale": project.use_custom_scale, "custom_scale": project.custom_scale,
         "beats_per_bar": project.beats_per_bar, "denominator": project.time_signature_denominator,

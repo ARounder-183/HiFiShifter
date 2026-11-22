@@ -47,75 +47,14 @@ pub(crate) fn is_audio_path(path: &Path) -> bool {
     crate::media::is_media_extension(path)
 }
 
-fn read_wav_f32_interleaved(path: &Path) -> Option<(u32, u16, Vec<f32>)> {
-    use hound::{SampleFormat, WavReader};
-
-    let mut reader = WavReader::open(path).ok()?;
-    let spec = reader.spec();
-    if spec.sample_rate == 0 || spec.channels == 0 {
-        return None;
-    }
-
-    let channels = spec.channels;
-    let sample_rate = spec.sample_rate;
-
-    // duration() 来自 WAV 头字段，损坏/恶意文件可声称数十 GB —— 直接
-    // with_capacity 会一次性分配失败 abort 进程。按文件大小钳制上界
-    // （交错样本数 ≤ 文件字节 / 最少每样本字节）；metadata 不可得时用
-    // 64M 样本的兜底上界。
-    let min_bytes_per_sample = (spec.bits_per_sample as usize / 8).max(1);
-    let file_bound = std::fs::metadata(path)
-        .map(|m| (m.len() as usize).saturating_div(min_bytes_per_sample))
-        .unwrap_or(1 << 22);
-    let declared = reader.duration() as usize;
-    let mut out: Vec<f32> = Vec::with_capacity(declared.min(file_bound));
-
-    match (spec.sample_format, spec.bits_per_sample) {
-        (SampleFormat::Int, 16) => {
-            for s in reader.samples::<i16>() {
-                let v = s.ok()? as f32 / i16::MAX as f32;
-                out.push(v);
-            }
-        }
-        (SampleFormat::Int, 24) => {
-            let denom = (1u32 << 23) as f32;
-            for s in reader.samples::<i32>() {
-                let v = s.ok()? as f32 / denom;
-                out.push(v);
-            }
-        }
-        (SampleFormat::Int, 32) => {
-            for s in reader.samples::<i32>() {
-                let v = s.ok()? as f32 / i32::MAX as f32;
-                out.push(v);
-            }
-        }
-        (SampleFormat::Float, 32) => {
-            for s in reader.samples::<f32>() {
-                out.push(s.ok()?);
-            }
-        }
-        _ => return None,
-    }
-
-    Some((sample_rate, channels, out))
-}
-
+/// 解码任意媒体文件为交错 f32 PCM（声道数以 `usize` 返回，音频引擎内部的习惯）。
+///
+/// 【为什么这里只剩一次转发】WAV 的 hound 快路径曾经在这里也有一份。多份转换函数
+/// 的代价是"只修其中一份"——音高分析与波形镜像走的不是这条路，于是它们对着同一个
+/// 文件整条失败。容错现在统一在 `media` 里（见那里关于 RIFF 长度的说明）。
 pub(crate) fn decode_audio_f32_interleaved(path: &Path) -> Result<(u32, usize, Vec<f32>), String> {
-    // Fast-path WAV via hound.
-    if path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("wav"))
-        .unwrap_or(false)
-    {
-        if let Some((sr, ch, pcm)) = read_wav_f32_interleaved(path) {
-            return Ok((sr, ch as usize, pcm));
-        }
-    }
-
     crate::media::decode_media_audio_f32_interleaved(path, None)
-        .map(|(sr, ch, pcm)| (sr, ch as usize, pcm))
+        .map(|(sample_rate, channels, pcm)| (sample_rate, channels as usize, pcm))
 }
 
 pub(crate) fn decode_resampled_stereo(path: &Path, out_rate: u32) -> Option<ResampledStereo> {

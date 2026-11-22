@@ -62,7 +62,11 @@ import {
 } from "../../../renderKernel/gl/polylineProgram";
 import { buildPolylineVertices } from "../../../renderKernel/gl/polylineGeometry";
 import { buildSelectionBandInstances } from "../scene/selectionBandInstances";
-import { buildParamBlockScene, snapParamBlockRect } from "../scene/blockInstances";
+import {
+    buildParamBlockScene,
+    snapParamBlockRect,
+    type ParamBlockRectInput,
+} from "../scene/blockInstances";
 import {
     blockRowHeightPx,
     projectParamBlockCenterY,
@@ -683,18 +687,8 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     if (args.glSceneEnabled === true && args.glCanvas != null) {
         try {
             glHandle = createGlCanvas(args.glCanvas);
-            if (glHandle !== null) {
-                // 【为什么恢复后必须自己重绘】浏览器不会替我们重新调度一帧；而恢复时
-                // 全部 GL 资源（program / buffer / 图集）都已失效。不重绘，画布就
-                // 一直空白到下一次用户操作 —— 那正是"切走再切回来是空白的"。
-                teardown.push(
-                    glHandle.onRestored(() => {
-                        invalidateFull();
-                    }),
-                );
-            }
             if (glHandle === null) {
-                glFailureReason = "WebGL2 不可用";
+                glFailureReason = "WebGL2 unavailable";
             } else {
                 glProgram = createSdfBoxProgram(glHandle.gl);
             }
@@ -843,10 +837,100 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     /** 上一次构建几何用的**内容签名**（变化才重建，见 `gridGeometrySignature`）。 */
     let lastGridSignature = "";
     /**
-     * 本帧是否**只需要**叠加层。由 `invalidatePlayhead()` 置位、`invalidate()`
-     * （以及尺寸 / dpr / 滚动订阅）清位；`draw()` 读取后立即复位。
+     * 本帧是否**只需要**叠加层。由 `invalidatePlayhead()` 置位、`draw()` 读取后立即复位。
      */
     let playheadOnlyFrame = false;
+    /**
+     * 最近一次请求是否要求**完整**重绘（`invalidateFull` 置位、`draw()` 读取后复位）。
+     *
+     * 【为什么需要这个闩锁】`playheadOnlyFrame` 是单布尔、后写者胜：播放期间共享视觉
+     * 时钟（`useVisualPlayhead` 的模块级 rAF）每帧调用 `invalidatePlayhead()`，而它
+     * 在每次 tick **末尾**才重新注册下一帧的 rAF —— 于是"帧间到达的完整失效"（曲线
+     * 数据到位、选区变化、切换参数、主题 / DPR 变化）注册得更晚，却在时钟 tick
+     * **之前**执行：`invalidateFull()` 先清位、时钟 tick 再置位，随后本帧绘制按
+     * "只画叠加层"消费掉这个标记 —— 完整失效被静默丢弃，且没有任何机制重发：GL
+     * 各层（网格 / 键盘 / 选区带 / 参数块 / 曲线）在播放停止前一直显示旧内容。
+     * 闩锁让完整失效**存活**过后续的 playhead-only 请求：draw 按
+     * `playheadOnlyFrame && !fullFramePending` 判定，时钟的置位降级不了完整帧。
+     */
+    let fullFramePending = false;
+
+    // ── 上下文恢复：重建全部 GL 资源 ─────────────────────────────────
+    //
+    // 【为什么 invalidateFull 不够】`webglcontextrestored` 之后规范规定 context
+    // 等同新建 —— program / VAO / buffer / texture 句柄**全部失效**，旧实现的
+    // 恢复回调只作废重绘，用死句柄画出来的仍是空白（且永久如此，直到卸载）。
+    // 与 WaveformSurface 的正确姿势一致：恢复 = 释放旧资源 + 走与首次挂载相同
+    // 的创建路径 + 全量作废重绘。
+    //
+    // 【失效的不只是句柄】签名缓存的几何（`lastGridSignature` /
+    // `lastKeyboardSignature`）还留在**旧 program 的缓冲里**；新 program 是空的，
+    // 签名不变就不会重新上传 —— 表现为网格/键盘/文字永久缺失。恢复时把签名
+    // 缓存清零，强制下一帧全量重建。
+    const disposeGlResources = (): void => {
+        glProgram?.dispose();
+        glProgram = null;
+        glAxisProgram?.dispose();
+        glAxisProgram = null;
+        mainGlyphSurface?.dispose();
+        mainGlyphSurface = null;
+        axisGlyphSurface?.dispose();
+        axisGlyphSurface = null;
+        glCurveProgram?.dispose();
+        glCurveProgram = null;
+        glSelectionProgram?.dispose();
+        glSelectionProgram = null;
+        glOverlayProgram?.dispose();
+        glOverlayProgram = null;
+    };
+    const recreateGlResources = (): void => {
+        disposeGlResources();
+        if (glHandle !== null) {
+            try {
+                glProgram = createSdfBoxProgram(glHandle.gl);
+                glCurveProgram = createPolylineProgram(glHandle.gl);
+                glSelectionProgram = createSdfBoxProgram(glHandle.gl);
+                mainGlyphSurface = createSurfaceFor(glHandle.gl);
+            } catch (error) {
+                glFailureReason = error instanceof Error ? error.message : String(error);
+                glProgram = null;
+                glCurveProgram = null;
+                glSelectionProgram = null;
+                mainGlyphSurface = null;
+            }
+        }
+        if (glAxisHandle !== null) {
+            try {
+                glAxisProgram = createSdfBoxProgram(glAxisHandle.gl);
+                axisGlyphSurface = createSurfaceFor(glAxisHandle.gl);
+            } catch {
+                glAxisProgram = null;
+                axisGlyphSurface = null;
+            }
+        }
+        if (glOverlayHandle !== null) {
+            try {
+                glOverlayProgram = createSdfBoxProgram(glOverlayHandle.gl);
+            } catch {
+                glOverlayProgram = null;
+            }
+        }
+        // 新 program 的缓冲是空的：签名缓存与上传状态全部复位，下一帧
+        // （恢复回调 → invalidateFull 调度的全量帧）重建几何与字形图集。
+        lastGridSignature = "";
+        lastKeyboardSignature = "";
+        glTextQuads = [];
+        glBlockTextQuads = [];
+        glGeometryUploaded = false;
+        glAxisGeometryUploaded = false;
+        // 浏览器不会替我们重新调度一帧；全量作废是恢复后内容重现的唯一入口。
+        invalidateFull();
+    };
+    for (const handle of [glHandle, glAxisHandle, glOverlayHandle]) {
+        if (handle !== null) {
+            teardown.push(handle.onRestored(recreateGlResources));
+        }
+    }
 
     /**
      * 解析**本帧的实时视口**（中心与跨度都取自实时来源，不用 render 期快照）。
@@ -1238,153 +1322,159 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         const visibleStart = blockAxis.scrollLeftPx / blockAxis.pxPerSec;
         const visibleEnd =
             (blockAxis.scrollLeftPx + blockAxis.viewportWidthPx) / blockAxis.pxPerSec;
-        let liveBlocks = spec.blocks
-            .filter((block) => block.endSec > visibleStart && block.startSec < visibleEnd)
-            .map((block) => {
-                const value = renderFrame
-                    ? resolveParamEditorBlockValue(renderFrame, block)
-                    : resolveParamBlockFrameValue({
-                          block,
-                          samples,
-                          param,
-                          curveOwned: spec.curveOwned,
-                      });
-                /*
-                 * A block in the derived view must always be drawn. Its own
-                 * source note, panel fallback or the live value center are
-                 * display-only fallbacks; never use the viewport midpoint and
-                 * never write a fallback into the parameter curve.
-                 */
-                const fallbackValue =
-                    param === "pitch" && Number.isFinite(block.sourceNote)
-                        ? (block.sourceNote as number)
-                        : Number.isFinite(block.fallbackValue)
-                          ? (block.fallbackValue as number)
-                          : null;
-                const boundsMidpoint =
-                    Number.isFinite(spec.valueMin) && Number.isFinite(spec.valueMax)
-                        ? (spec.valueMin + spec.valueMax) / 2
-                        : null;
-                // A derived view block must always get geometry. The midpoint is
-                // only a last-resort pixel position, never a curve value.
-                const liveCenter =
-                    liveView !== null && Number.isFinite(liveView.center) ? liveView.center : null;
-                const displayValue =
-                    value ??
-                    block.averageValue ??
-                    fallbackValue ??
-                    liveCenter ??
-                    boundsMidpoint ??
-                    0;
-                const geometryFallback =
-                    value == null &&
-                    block.averageValue == null &&
-                    fallbackValue === null &&
-                    (liveView === null ||
-                        !Number.isFinite(liveView.center) ||
-                        !Number.isFinite(liveView.span) ||
-                        liveView.span <= 1e-9);
-                const usedFallback =
-                    (value === null || value === undefined) &&
-                    (block.averageValue === null || block.averageValue === undefined) &&
-                    (fallbackValue !== null || geometryFallback);
-                /*
-                 * 块中心的唯一投影口径：交给共用函数处理 pitch 的 +0.5，
-                 * 再走与曲线同一个 valueToY。这里不能自己展开 normalized：
-                 * 那样既会漏半键补偿，也会在非整数行高时和曲线错位。
-                 */
-                const centerYPx = projectParamBlockCenterY({
-                    param,
-                    value: displayValue,
-                    heightPx: viewportHeightPx,
-                    valueToY:
-                        spec.valueToY ?? data().grid?.valueToY ?? (() => viewportHeightPx / 2),
-                    /* 实时拖动 / 过渡预览必须连续；普通显示吸附到行心。 */
-                    snapToSemitone:
-                        block.centerPolicy === "locked" || spec.curveOwned
-                            ? false
-                            : block.displayCenterSnapToSemitone !== false,
-                });
-                /*
-                 * 块高恒为当前参数一行的 1.2 倍，由**本帧**投影求值；纵向缩放
-                 * 会同时改变键高、曲线与块高。不沿用 React 快照里的 heightPx。
-                 */
-                const heightPx = blockRowHeightPx(
-                    spec.valueToY ?? data().grid?.valueToY,
-                    viewportHeightPx,
-                    param,
-                );
-                /*
-                 * 时间伸缩 / 过渡预览期间，面板传入手势起点的块高快照。
-                 * 它必须覆盖“按当前实时行高重算”，否则曲线预览改变代表值时
-                 * 块会随视觉重心上下漂移；持久化仍只保存时间区间。
-                 */
-                const displayHeightPx =
-                    Number.isFinite(block.displayHeightPx) && (block.displayHeightPx as number) > 0
-                        ? (block.displayHeightPx as number)
-                        : Number.isFinite(spec.rowHeightPx) && (spec.rowHeightPx as number) > 0
-                          ? (spec.rowHeightPx as number) * PARAM_BLOCK_ROW_HEIGHT_MULTIPLIER
-                          : heightPx;
-                /*
-                 * 只由 live 曲线的代表值决定纵向位置；不叠加指针像素位移。
-                 * 拖动已把预览写进 live 曲线，再叠加会与最终值错位。
-                 */
-                const rawTopPx = centerYPx - displayHeightPx / 2;
-                const snappedRect = snapParamBlockRect({
-                    x0: secToViewportPx(blockAxis, block.startSec),
-                    x1: secToViewportPx(blockAxis, block.endSec),
-                    rawTop: rawTopPx,
-                    rawBottom: rawTopPx + displayHeightPx,
-                    viewportWidthPx: blockAxis.viewportWidthPx,
-                    viewportHeightPx,
-                    dpr: blockAxis.dpr,
-                });
-                const topPx = snappedRect?.top ?? rawTopPx;
-                const hitHeightPx = snappedRect?.height ?? displayHeightPx;
-                hitRects.push({
-                    id: block.id,
-                    startSec: block.startSec,
-                    endSec: block.endSec,
-                    topPx,
-                    heightPx: hitHeightPx,
-                    averageValue: displayValue,
-                    selected: block.selected === true,
-                    hovered: (block as { hovered?: boolean }).hovered === true,
-                    centerYPx,
-                    transitionHandle: block.transitionHandle ?? null,
-                });
-                return {
-                    ...block,
-                    averageValue: displayValue,
-                    heightPx: hitHeightPx,
-                    topPx,
-                    ...(usedFallback ? { centerPolicy: "fallback" as const } : {}),
-                };
-            });
-        blockHitRects = hitRects;
         /*
-         * 块与曲线的纵向位置都取**本帧实时值域**。宿主重算之后再做一次视口拼接：
-         * 完全离开上下视口的块直接丢掉，绝不把 top 夹到边缘画成假条。
+         * 【分配纪律】本函数在滚动 / 缩放 / 拖动的每一帧运行，属于 GC 关键路径
+         * （见 geometry.ts 的实测注释）。旧实现三趟：filter+map（每可见块一次
+         * 展开拷贝）、filter（又一次数组）、map（再一次展开拷贝）。这里融合成
+         * 一趟：可见性判断前移（视口外的块不再付展开拷贝的成本），行高兜底与
+         * fallback 派生直接在 pass 1 算出最终值，视口剔除用写指针就地压缩本帧
+         * 临时数组 —— 最终交给 `buildParamBlockScene` 的字段值与旧实现逐项一致。
          */
-        liveBlocks = liveBlocks.filter(
-            (block) =>
-                (block.topPx ?? 0) + (block.heightPx ?? 0) > 0 &&
-                (block.topPx ?? 0) < viewportHeightPx,
-        ) as typeof liveBlocks;
         const defaultBlockHeightPx = blockRowHeightPx(
             spec.valueToY ?? data().grid?.valueToY,
             viewportHeightPx,
             param,
         );
-        const drawableBlocks = liveBlocks.map((block) => ({
-            ...block,
-            topPx: block.topPx ?? 0,
-            heightPx:
-                Number.isFinite(block.heightPx) && (block.heightPx as number) > 0
-                    ? (block.heightPx as number)
-                    : defaultBlockHeightPx,
-            fallback: block.centerPolicy === "fallback",
-        }));
+        const liveBlocks: Array<ParamBlockRectInput & { averageValue: number }> = [];
+        for (const block of spec.blocks) {
+            if (!(block.endSec > visibleStart && block.startSec < visibleEnd)) continue;
+            const value = renderFrame
+                ? resolveParamEditorBlockValue(renderFrame, block)
+                : resolveParamBlockFrameValue({
+                      block,
+                      samples,
+                      param,
+                      curveOwned: spec.curveOwned,
+                  });
+            /*
+             * A block in the derived view must always be drawn. Its own
+             * source note, panel fallback or the live value center are
+             * display-only fallbacks; never use the viewport midpoint and
+             * never write a fallback into the parameter curve.
+             */
+            const fallbackValue =
+                param === "pitch" && Number.isFinite(block.sourceNote)
+                    ? (block.sourceNote as number)
+                    : Number.isFinite(block.fallbackValue)
+                      ? (block.fallbackValue as number)
+                      : null;
+            const boundsMidpoint =
+                Number.isFinite(spec.valueMin) && Number.isFinite(spec.valueMax)
+                    ? (spec.valueMin + spec.valueMax) / 2
+                    : null;
+            // A derived view block must always get geometry. The midpoint is
+            // only a last-resort pixel position, never a curve value.
+            const liveCenter =
+                liveView !== null && Number.isFinite(liveView.center) ? liveView.center : null;
+            const displayValue =
+                value ?? block.averageValue ?? fallbackValue ?? liveCenter ?? boundsMidpoint ?? 0;
+            const geometryFallback =
+                value == null &&
+                block.averageValue == null &&
+                fallbackValue === null &&
+                (liveView === null ||
+                    !Number.isFinite(liveView.center) ||
+                    !Number.isFinite(liveView.span) ||
+                    liveView.span <= 1e-9);
+            const usedFallback =
+                (value === null || value === undefined) &&
+                (block.averageValue === null || block.averageValue === undefined) &&
+                (fallbackValue !== null || geometryFallback);
+            /*
+             * 块中心的唯一投影口径：交给共用函数处理 pitch 的 +0.5，
+             * 再走与曲线同一个 valueToY。这里不能自己展开 normalized：
+             * 那样既会漏半键补偿，也会在非整数行高时和曲线错位。
+             */
+            const centerYPx = projectParamBlockCenterY({
+                param,
+                value: displayValue,
+                heightPx: viewportHeightPx,
+                valueToY: spec.valueToY ?? data().grid?.valueToY ?? (() => viewportHeightPx / 2),
+                /* 实时拖动 / 过渡预览必须连续；普通显示吸附到行心。 */
+                snapToSemitone:
+                    block.centerPolicy === "locked" || spec.curveOwned
+                        ? false
+                        : block.displayCenterSnapToSemitone !== false,
+            });
+            /*
+             * 块高恒为当前参数一行的 1.2 倍，由**本帧**投影求值；纵向缩放
+             * 会同时改变键高、曲线与块高。不沿用 React 快照里的 heightPx。
+             */
+            const heightPx = blockRowHeightPx(
+                spec.valueToY ?? data().grid?.valueToY,
+                viewportHeightPx,
+                param,
+            );
+            /*
+             * 时间伸缩 / 过渡预览期间，面板传入手势起点的块高快照。
+             * 它必须覆盖“按当前实时行高重算”，否则曲线预览改变代表值时
+             * 块会随视觉重心上下漂移；持久化仍只保存时间区间。
+             */
+            const displayHeightPx =
+                Number.isFinite(block.displayHeightPx) && (block.displayHeightPx as number) > 0
+                    ? (block.displayHeightPx as number)
+                    : Number.isFinite(spec.rowHeightPx) && (spec.rowHeightPx as number) > 0
+                      ? (spec.rowHeightPx as number) * PARAM_BLOCK_ROW_HEIGHT_MULTIPLIER
+                      : heightPx;
+            /*
+             * 只由 live 曲线的代表值决定纵向位置；不叠加指针像素位移。
+             * 拖动已把预览写进 live 曲线，再叠加会与最终值错位。
+             */
+            const rawTopPx = centerYPx - displayHeightPx / 2;
+            const snappedRect = snapParamBlockRect({
+                x0: secToViewportPx(blockAxis, block.startSec),
+                x1: secToViewportPx(blockAxis, block.endSec),
+                rawTop: rawTopPx,
+                rawBottom: rawTopPx + displayHeightPx,
+                viewportWidthPx: blockAxis.viewportWidthPx,
+                viewportHeightPx,
+                dpr: blockAxis.dpr,
+            });
+            const topPx = snappedRect?.top ?? rawTopPx;
+            const hitHeightPx = snappedRect?.height ?? displayHeightPx;
+            hitRects.push({
+                id: block.id,
+                startSec: block.startSec,
+                endSec: block.endSec,
+                topPx,
+                heightPx: hitHeightPx,
+                averageValue: displayValue,
+                selected: block.selected === true,
+                hovered: (block as { hovered?: boolean }).hovered === true,
+                centerYPx,
+                transitionHandle: block.transitionHandle ?? null,
+            });
+            liveBlocks.push({
+                ...block,
+                averageValue: displayValue,
+                // 最终可绘高度：快照无效时兜底当前行高（旧第三趟 map 的逻辑）。
+                heightPx:
+                    Number.isFinite(hitHeightPx) && hitHeightPx > 0
+                        ? hitHeightPx
+                        : defaultBlockHeightPx,
+                topPx,
+                // 旧第三趟 map：centerPolicy 被覆写成 "fallback"，或本来
+                // 就是 "fallback" 的块按 display-only 兜底样式绘制。
+                fallback: usedFallback || block.centerPolicy === "fallback",
+                ...(usedFallback ? { centerPolicy: "fallback" as const } : {}),
+            });
+        }
+        blockHitRects = hitRects;
+        /*
+         * 块与曲线的纵向位置都取**本帧实时值域**。宿主重算之后再做一次视口拼接：
+         * 完全离开上下视口的块直接丢掉，绝不把 top 夹到边缘画成假条。
+         * 【就地压缩】写指针前移保留存活项，不再分配第二个数组。
+         */
+        let keptCount = 0;
+        for (let i = 0; i < liveBlocks.length; i += 1) {
+            const block = liveBlocks[i];
+            if (block.topPx + block.heightPx > 0 && block.topPx < viewportHeightPx) {
+                liveBlocks[keptCount] = block;
+                keptCount += 1;
+            }
+        }
+        liveBlocks.length = keptCount;
+        const drawableBlocks = liveBlocks;
         const scene = buildParamBlockScene({
             axis: currentAxis(),
             viewportHeightPx,
@@ -2220,8 +2310,15 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         // 播放头前进不改变曲线几何（几何是视口坐标，视口没动），因此这些图层可以
         // 整层跳过 —— GL 画布保留上一帧内容，与 timeline host 的 `invalidatePlayhead`
         // 同一机制。见接口处 `invalidatePlayhead` 的说明。
-        const playheadOnly = playheadOnlyFrame;
+        //
+        // 【完整失效必须赢过播放头的置位】播放期间共享视觉时钟每帧调用
+        // `invalidatePlayhead()`，且它先于本循环的帧回调执行（时钟在 tick 末尾
+        // 重新注册，见 `fullFramePending` 的注释）。单布尔的 `playheadOnlyFrame`
+        // 后写者胜 —— 没有 `fullFramePending` 闩锁，帧间到达的完整失效会被时钟
+        // 置位覆盖并随本帧消费，GL 各层在播放停止前一直显示旧内容。
+        const playheadOnly = playheadOnlyFrame && !fullFramePending;
         playheadOnlyFrame = false;
+        fullFramePending = false;
 
         // GL 几何重建：只在内容签名变化时做（滚动 / 播放不触发重建）。
         if (!playheadOnly && glProgram !== null) {
@@ -2528,6 +2625,10 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      * 时不会漏。
      */
     function invalidateFull(): void {
+        // 【闩锁语义】置位 `fullFramePending` 而不只是清 `playheadOnlyFrame`：
+        // 播放期间时钟 tick 可能在本调用之后、绘制之前再次置位 playhead-only，
+        // 闩锁保证这次完整失效在 draw 里仍被判定为完整帧（见其声明处注释）。
+        fullFramePending = true;
         playheadOnlyFrame = false;
         loop.invalidate();
     }
@@ -2681,23 +2782,11 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             teardown.length = 0;
             // GL 资源最后释放：program 持有 VAO / buffer / shader，漏掉会随
             // 反复挂载（StrictMode 双挂载 / HMR）累积并最终耗尽上下文。
-            glProgram?.dispose();
-            glProgram = null;
+            // 与上下文恢复共用同一份释放清单（`recreateGlResources` 的前置步骤）。
+            disposeGlResources();
             glHandle = null;
-            glAxisProgram?.dispose();
-            glAxisProgram = null;
-            mainGlyphSurface?.dispose();
-            mainGlyphSurface = null;
-            axisGlyphSurface?.dispose();
-            axisGlyphSurface = null;
             glAxisHandle = null;
-            glOverlayProgram?.dispose();
-            glOverlayProgram = null;
             glOverlayHandle = null;
-            glCurveProgram?.dispose();
-            glCurveProgram = null;
-            glSelectionProgram?.dispose();
-            glSelectionProgram = null;
         },
     };
 }

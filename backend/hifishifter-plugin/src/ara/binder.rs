@@ -84,8 +84,10 @@ impl CompanionSlot {
     }
 
     /// 当前绑定的生命周期探针（仅测试）。
-    #[cfg(test)]
-    fn lifetime_probe(&self) -> Option<ara2_bridge::companion::CompanionLifetimeProbe<'static>> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn lifetime_probe(
+        &self,
+    ) -> Option<ara2_bridge::companion::CompanionLifetimeProbe<'static>> {
         let mut slot = self.binding.lock_or_recover();
         if slot.is_none() {
             *slot =
@@ -293,8 +295,8 @@ impl AraBinder {
         }
     }
 
-    /// 初始 companion 绑定的生命周期探针（测试）。
-    #[cfg(test)]
+    /// 初始 companion 绑定的生命周期探针（测试；含 test-support 下的外壳测试）。
+    #[cfg(any(test, feature = "test-support"))]
     pub fn lifetime_probe(
         &self,
     ) -> Option<ara2_bridge::companion::CompanionLifetimeProbe<'static>> {

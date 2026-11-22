@@ -269,6 +269,9 @@ export const koKR = {
 
     panel_editor: "에디터",
     panel_unavailable: "패널을 사용할 수 없음",
+    panel_render_failed: "패널을 렌더링하지 못했습니다",
+    error_boundary_copy_details: "세부 정보 복사",
+    error_boundary_reload: "다시 불러오기",
     detached_shortcut_unavailable: "이 단축키는 분리된 창에서 사용할 수 없습니다",
     panel_timeline: "타임라인",
     panel_io: "입출력",
@@ -286,7 +289,7 @@ export const koKR = {
     dock_expand: "펼치기",
     dock_collapse: "탭 바 접기",
     dock_rename_tab: "이름 바꾸기...",
-    dock_drag_rearrange: "드래그하여 재배치",
+    dock_drag_float: "드래그하여 플로팅",
     dock_dock_hint: "{modifier}를 누르면 도킹",
     dock_dock_hint_always: "대상에 놓으면 도킹",
     dock_hint_dock: "여기에 도킹",
@@ -639,10 +642,12 @@ export const koKR = {
     status_export_done: "내보내기 완료",
     status_export_failed: "내보내기에 실패했습니다",
     status_export_separated_done: "트랙별 내보내기 완료",
+    status_export_separated_summary: "트랙별 내보내기 완료 — {path} ({n}개 트랙)",
     status_export_separated_failed: "트랙별 내보내기에 실패했습니다",
     status_clipboard_copy_failed: "복사 실패: 시스템 클립보드에 접근할 수 없습니다",
     status_clipboard_cut_failed: "잘라내기 실패: 시스템 클립보드에 접근할 수 없습니다",
     status_playing_original: "오리지널 재생 중",
+    status_playback_requested: "호스트에 재생을 요청했습니다",
     status_play_original_failed: "오리지널 재생에 실패했습니다",
     status_stopping_audio: "오디오 정지 중...",
     status_audio_stopped: "오디오가 정지되었습니다",
@@ -651,11 +656,16 @@ export const koKR = {
     status_dropped_audio_imported: "드롭한 오디오를 가져왔습니다",
     status_clips_duplicated: "클립을 복제했습니다",
     status_clip_edit_rejected: "클립 편집이 거부되었습니다",
+    status_track_edit_rejected: "트랙 편집이 거부되었습니다",
     status_import_done: "가져오기 완료",
     status_import_failed: "가져오기 실패",
     status_project_imported: "프로젝트를 가져왔습니다",
     status_vocalshifter_project_imported: "VocalShifter 프로젝트를 가져왔습니다",
     status_reaper_project_imported: "REAPER 프로젝트를 가져왔습니다",
+    status_import_project_failed: "프로젝트 가져오기 실패",
+    status_import_vocalshifter_failed: "VocalShifter 프로젝트 가져오기 실패",
+    status_import_reaper_failed: "REAPER 프로젝트 가져오기 실패",
+    status_request_failed: "요청이 실패했습니다",
     status_pasted_vocalshifter_clipboard: "VocalShifter 클립보드 데이터를 붙여넣었습니다",
     status_pasted_reaper_clipboard: "REAPER 클립보드 데이터를 붙여넣었습니다",
     status_timeline_clipboard_pasted: "타임라인 클립보드를 붙여넣었습니다",
@@ -719,6 +729,7 @@ export const koKR = {
 
     menu_open_log_folder: "로그 폴더 열기",
     menu_export_diagnostics: "진단 정보 내보내기...",
+    export_diagnostics_dialog_title: "진단 정보 내보내기",
     menu_open_log_folder_failed: "로그 폴더를 열 수 없습니다",
     menu_open_log_folder_copy_path: "경로 복사",
     menu_open_log_folder_copied: "클립보드에 복사됨",
@@ -783,8 +794,6 @@ export const koKR = {
     ctx_channel_mode: "채널 모드",
     ctx_group: "그룹",
     ctx_scan_fake_stereo: "가짜 스테레오 검사 후 변환",
-    ctx_scan_fake_stereo_hint:
-        "좌우 내용이 같은 소재는 모노로 접으면 들리는 소리는 그대로이고 렌더링 시간이 절반으로 줄어듭니다. 일괄 처리는 실행 취소 한 단계로 묶입니다.",
     clip_channel_import_dialog_title: "가져오기 채널 처리",
     clip_channel_import_dialog_desc:
         "가져올 때 좌우 채널 내용이 같은 “가짜 스테레오” 소재를 모노로 접습니다.",
@@ -866,6 +875,8 @@ export const koKR = {
     status_param_block_write_failed: "파라미터 블록 쓰기에 실패했습니다",
     status_param_block_not_ready:
         "파라미터 블록 레이어가 아직 준비되지 않았습니다. 잠시 후 다시 시도하세요.",
+    status_param_block_conflict_curve_changed: "충돌: 읽는 중에 파라미터 커브가 변경되었습니다",
+    status_param_block_edit_set_not_loaded: "파라미터 블록 편집 세트가 로드되지 않았습니다",
     kb_param_block_split: "파라미터 블록 분할",
     kb_param_block_delete: "파라미터 블록 삭제",
     kb_param_block_group: "파라미터 블록 그룹",
@@ -908,6 +919,9 @@ export const koKR = {
     fb_searching: "검색 중...",
     fb_loading: "로딩 중...",
     fb_error: "디렉토리 로딩 오류",
+    fb_error_load_directory: "디렉터리를 불러오지 못했습니다",
+    fb_error_search_failed: "검색에 실패했습니다",
+    fb_error_unknown: "알 수 없는 오류",
 
     ctx_selected_n: "{n}개 선택됨",
     ctx_delete_all: "모두 삭제",
@@ -924,8 +938,6 @@ export const koKR = {
     ctx_replace_midi: "MIDI 교체",
     ctx_replace_midi_all: "모든 MIDI 교체",
     ctx_split_at_playhead: "재생 위치에서 분할",
-    ctx_split_multi_reason: "선택한 모든 클립이 재생 위치에서 분할 가능해야 합니다",
-    ctx_split_playhead_reason: "재생 위치가 클립 범위 안에 있어야 합니다",
     ctx_silence_detection: "무음 감지...",
     silence_method: "감지 방식",
     silence_method_rms: "RMS(에너지)",
@@ -955,7 +967,6 @@ export const koKR = {
     silence_preview_clip: "{n}구간, 총 {dur}s",
     silence_skipped: "건너뜀",
     silence_more_clips: "...외 {n}개 클립",
-    silence_no_audio_source: "선택한 클립에 오디오 소스가 없습니다",
     silence_apply: "적용",
     silence_double_click_reset: "파라미터를 더블클릭하면 기본값으로 재설정됩니다",
     silence_applying: "적용 중...",
@@ -1829,6 +1840,7 @@ export const koKR = {
     status_fake_stereo_scan_rejected: "가짜 스테레오 검사가 거부되었습니다",
     status_fake_stereo_scan_foldable: "가짜 스테레오: {m}/{n}개 접기 가능",
     status_fake_stereo_scan_folded: "가짜 스테레오: {m}/{n}개 접음",
+    status_fake_stereo_scan_unreadable: ", {count}개를 읽지 못했습니다",
     status_channel_scan_folded: "{count}개 클립을 자동으로 모노로 접었습니다",
     status_channel_scan_pending: "{count}개 소스 미읽음(다음 실행 시 재시도)",
     status_importing: "가져오는 중...",
@@ -1995,6 +2007,8 @@ export const koKR = {
     history_op_param_block_edit: "파라미터 블록 편집",
     history_op_import_midi: "MIDI 가져오기",
     history_op_edit_midi: "MIDI 데이터 편집",
+    history_op_host_pitch_import: "REAPER 테이크 피치 가져오기",
+    history_op_host_pitch_export: "REAPER 테이크 피치로 변환",
     history_op_import_vocalshifter: "VocalShifter 프로젝트 가져오기",
     history_op_recording: "녹음",
     history_op_batch: "일괄 작업",
@@ -2263,9 +2277,6 @@ export const koKR = {
     plugin_transport_play: "호스트에서 재생/일시 정지",
     plugin_transport_host_only:
         "재생은 호스트가 제어합니다. 플러그인의 재생 키는 호스트로 전달됩니다.",
-    plugin_feature_unavailable: "이 기능은 아직 VST/ARA 플러그인에서 제공되지 않습니다",
-    plugin_reverse_unavailable:
-        "ARA는 역재생 오디오를 제공하지 않습니다. 역재생은 호스트에서 하세요",
     // ── 캡처（ARA 미지원 호스트에서 호스트 재생음을 가져오기）─────────────
     capture_settings_title: "캡처 설정",
     capture_settings_desc:
@@ -2314,6 +2325,7 @@ export const koKR = {
     plugin_apply_analyzing_hint:
         "이 단계는 소재 길이에 따라 몇 초에서 몇 분 걸립니다. 분석 중에는 원본 녹음을 재생합니다.",
     plugin_apply_rendering: "합성 중...",
+    plugin_apply_bypassed: "바이패스됨 · 렌더링 안 함",
     plugin_render_background_hint:
         "백그라운드에서 새 버전을 생성 중입니다. 지금 들리는 것은 이전 버전입니다.",
     plugin_daw_controlled_reason:
@@ -2323,6 +2335,30 @@ export const koKR = {
     cap_reason_app_only: "독립 실행형 앱에서만 사용할 수 있습니다",
     cap_reason_plugin_only: "플러그인에서만 사용할 수 있습니다",
     cap_reason_piano_roll_only: "매개변수 편집기에서만 적용됩니다",
+    cap_reason_not_in_plugin: "플러그인에서는 사용할 수 없습니다",
+    // ── 클립 메뉴: REAPER 테이크 피치 변환 ─────────────────────────
+    ctx_host_pitch: "REAPER 피치",
+    ctx_host_pitch_import: "REAPER 테이크 피치 가져오기",
+    ctx_host_pitch_export: "REAPER 테이크 피치 엔벨로프로 변환",
+
+    // ── 파라미터 편집기: REAPER 피치 상호 변환 메뉴 ──────────────────
+    // 【왜 여기에 범위를 두는가】파라미터 편집기에서만 나온다(타임라인의 클립 메뉴는
+    // 클립 1개 단위).
+    pitch_bridge_menu_tooltip: "REAPER 테이크 피치 상호 변환",
+    pitch_bridge_import_heading: "테이크 피치 가져오기",
+    pitch_bridge_export_heading: "테이크 피치 엔벨로프로 변환",
+    pitch_bridge_scope_track: "현재 트랙",
+    pitch_bridge_scope_selection: "선택 범위 안",
+    pitch_bridge_scope_all: "모든 클립",
+    pitch_bridge_scope_item: "{scope} ({count})",
+    pitch_bridge_auto_write: "테이크 피치 자동 쓰기",
+    pitch_bridge_tooltip_export_track: "테이크 피치 변환: 현재 트랙 내보내기",
+    pitch_bridge_nothing_converted: "변환할 클립이 없습니다",
+    pitch_bridge_skipped_clips: "{count}개 클립 건너뜀",
+    pitch_bridge_skipped_tooltip: "변환할 피치 데이터가 없는 클립은 그대로 두었습니다",
+    status_pitch_bridge_imported: "{count}개 클립에 테이크 피치를 가져왔습니다",
+    status_pitch_bridge_exported: "{count}개 클립에 피치 엔벨로프를 기록했습니다",
+    status_pitch_bridge_failed: "피치 변환에 실패했습니다",
 
     // ── 호스트 페이드 tooltip 보충 설명 ─────────────────────────────
     fade_shape_axes_owned_by_host:
@@ -2374,13 +2410,14 @@ export const koKR = {
     installer_uninstall_options_top:
         "아래 데이터를 함께 정리할 수 있습니다. 설정과 저장하지 않은 작업은 항상 유지됩니다.",
     installer_uninstall_opt_models: "공유 모델 라이브러리 삭제",
-    installer_uninstall_opt_models_desc: "약 150 MB 확보. 모든 HiFiShifter 설치가 공유합니다.",
+    installer_uninstall_opt_models_desc: "모든 HiFiShifter 설치가 공유합니다.",
     installer_uninstall_opt_cache: "캐시 및 로그 삭제",
     installer_uninstall_opt_cache_desc: "파형/렌더 캐시, 로그, WebView 데이터 및 임시 파일.",
     installer_repair_done: "복구가 완료되었습니다.",
     installer_reinstall_options_title: "이전 버전 제거",
     installer_reinstall_options_subtitle: "설치 전에 공유 모델 파일을 삭제할지 선택하세요.",
-    installer_reinstall_options_top: "이전 버전의 HiFiShifter가 있습니다. 새 버전을 설치하기 전에 먼저 제거하며 같은 설치 폴더를 사용합니다.",
+    installer_reinstall_options_top:
+        "이전 버전의 HiFiShifter가 있습니다. 새 버전을 설치하기 전에 먼저 제거하며 같은 설치 폴더를 사용합니다.",
     installer_reinstall_uninstalling: "이전 버전을 제거하는 중...",
     installer_reinstall_failed: "이전 버전을 제거하지 못했습니다. 직접 제거한 뒤 다시 시도하세요.",
 } as const;

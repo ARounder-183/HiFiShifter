@@ -31,6 +31,73 @@
 
 ---
 
+## 1.5 同一份 API，两种**放置位置**
+
+REAPER 的 ARA 支持两种插入位置，而它们对上面那张能力表给出的答案**并不一样**：
+
+| 放置位置 | 插件挂在哪 | ARA 内容覆盖 | 首次绑定拿到的角色 |
+|---|---|---|---|
+| 轨道 FX | `MediaTrack` 的 FX 链 | 这条轨（及其 folder 后代）的 item | `[editor, view]` |
+| 媒体项 take FX | `MediaItem_Take` 的 FX 链 | **这一条 take** | `[playback, view]` |
+
+插件把这件事收成一个显式的值（`host::reaper::HostPlacement`：`track-fx` / `take-fx` /
+`unbound`），并在**每次绑定后重新求值**（宿主复用同一个处理器实例重开工程、或用户把 FX
+拖到某条 take 上，位置都会变）。四条判据从它派生：
+
+| 判据 | 轨道 FX | take FX |
+|---|---|---|
+| 读哪条 FX 链（旁通 / 离线） | `TrackFX_*` + `I_FXEN` | 只有 `TakeFX_*`（take 侧**没有**整链总开关，见下） |
+| 清单枚举哪一段 | 本轨 + folder 后代 + 自己建的轨 | **只有** `parent(2)` 那条 take 的 item |
+| 写回用哪个 take | item 的 active take | `parent(2)` 那条 take（按 GUID 定位，多 take 也成立） |
+| 导入 / 建轨 / item 剪贴板 | 可用 | **不可用**（目标对象不成立，见下） |
+
+**为什么 take FX 下关掉那三项**：导入的 item 不属于本实例的 ARA 内容（实例只绑定它原本
+那条 take 的源）；新建轨道更不属于；复制 item 会把 `<TAKEFX>` 块整块带出去，宿主会在目标
+item 上新建**第二个实例**。露出一个注定失败的入口，比藏起来更坏。
+
+**take 音高互转在两种位置下同一条语义**：真机实测证明 take 音高在源级生效、早于 take FX，不会再对 take FX 的输出移调。因此
+"转换成 take 包络"是**复制**，不需要按位置做反向补偿。
+
+**绝不跨链回退**：take 链上查不到本插件的 FX 就是 `Unknown`（照常渲染），不得转头去读
+同一条轨的轨道链 —— 那正是"读到另一个实例的旁通开关"的那条路。
+
+**两条链并不对称，别把它抹平**：轨道有 `I_FXEN`（"fx enabled, 0=bypassed"），take 侧
+**没有**对应物 —— `GetMediaItemTakeInfo_Value` 的字段表里没有整链开关（`TAKEFX_NCH` 只是
+内部通道数），`TakeFX_*` 也没有 `GetChainEnabled`。按轨道的形状去读一个不存在的
+`B_TAKEFX` 会得到宿主对未知参数的标准答复 **0.0**，于是"整链被关掉"成立 ⇒ 判旁通 ⇒
+`prepare()` 直接返回 ⇒ **take FX 下一点声音都没有**。读不到就是读不到：`ChainGate::Unknown`
+是一位不投票的读数，不是"关"。
+
+**"读成功了"不等于"读完了"**：`GetItemStateChunk` 能写多少由调用方给的缓冲区决定，
+宿主对放不下有两种表现（返回 `false`，或把前缀写满后照常返回 `true`）。读取端因此以
+**结构**为准：能不能解析成一整份 `<ITEM>` 块才算读完，否则扩容重试。旧实现按"读到 NUL
+为止"当读完，于是长片段（上千个 `PITCHENV` 点）或 take FX 里带着插件状态的 item 永远
+读不全 —— 每一次"转换为 take 包络"都在解析阶段失败，用户看到的只是"点了没反应"。
+
+**"写成功了"也有它的反面：带在线 ARA FX 的 item，chunk 一律写不进去。** 真机实测
+（REAPER 7.85）：`SetItemStateChunk` 对"挂着在线 ARA FX 的 item"连**原样写回**都返回
+`false`（`isundo`、undo 块、改一个字节，三种写法全 false）；同一份 chunk 在没有本插件
+take FX 的 item 上成功，把本插件设成 offline 之后也成功。宿主显然不允许扩展在 ARA 实例
+在线时重建它的 FX 链 —— 而 take FX 放置下，"要改的那个 item"恰好就是挂着本插件的那个。
+于是**所有靠重写 item chunk 的结构写回**（take 音高、倒放）都必须另找入口：
+
+| 结构 | 没有 setter，只能… | 真机可用的入口 |
+|---|---|---|
+| take 音高包络 | 建一条 `<PITCHENV>` | 已有包络 ⇒ `SetEnvelopeStateChunk`；没有 ⇒ 宿主动作 `Take: Toggle take pitch envelope` 建一条再写 |
+| take 播放方向 | 写 `<SOURCE SECTION MODE 3>` 包装 | 宿主动作 `Item properties: Toggle take reverse`（写出的结构与我们的编码逐字节一致） |
+
+**宿主动作表是一条正式通道，但它有两条硬约束**：动作作用于**选中项**与**active take**。
+所以调用前快照**原来选中的那几条**、清空选区、只选中目标，必要时用 `I_CURTAKE` 把目标
+take 切成 active，跑完原样回填 —— 否则"转换一次"就等于给用户整条选区都动了手。按名字
+解析命令号（`SectionFromUniqueID(0)` + `kbd_enumerateActions`，签名是
+`KbdSectionInfo*,int,const char**`：出参是**指针的指针**），本地化宿主上还要吃掉
+`本地化 |||||| English` 这层前缀。
+
+诊断：位置变化时输出一行 `[ara] placement: …`（含两条链的 `总数/匹配数`），
+诊断包的 `renderer_diagnostics()` 里也有 `host_placement` 一格。
+
+---
+
 ## 2. 只能靠宿主扩展的部分
 
 以下能力 ARA 2.0 **没有**对应接口，只有原生扩展能给。ARA-only 后端上它们是**诚实的
@@ -167,8 +234,7 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 > **现状勘误（2026-11-08，第二次修订）**：本节先写作「Capture-only 外壳」，随后一度
 > 改为「REAPER 7.85 已跑通 CLAP ARA」。**后一结论是错的**：那次验证只覆盖了空工程，
 > 一旦时间线上有音频 item，REAPER 7.85 就会崩在自己的代码里
-> （`reaper.exe+0x5a677`，`0xC0000005`，读地址 `0x8`）。取证见
-> [报告](2026-11-08-reaper-clap-ara-crash-analysis.md)。
+> （`reaper.exe+0x5a677`，`0xC0000005`，读地址 `0x8`）。
 >
 > 根因是 **REAPER 的 2022 私有草案实现不完整**，不是插件侧可修补的：该崩溃函数在
 > `test rbx,rbx` 之后仍解引用 `rbx`（空的是它自己的 playback 渲染器槽位）；强制本
@@ -276,7 +342,7 @@ MultitrackStudio）的 CLAP ARA 仍需逐个真机验收。
   `get_waveform_mipmap_binary` / `batch_get_waveform_mipmap` 由共享会话按 `WFPK` v2 协议
   从捕获 PCM 编码（分块 min/max，三级除数 16/512/4096）并按源缓存 —— 与 VST3 同一个函数。
 - **捕获运行时是共享的**：`recorder` / `sidecar` / `store` / `timeline` / `transport`
-  从 VST3 crate 搬进 `backend/hifishifter-capture/`（纯机械搬迁 + 中性类型转换），VST3 与
+  从（当时的）VST3 crate 搬进 `backend/hifishifter-capture/`（纯机械搬迁 + 中性类型转换），VST3 与
   CLAP 两个外壳都只是它的适配层：VST3 把 `ProcessContext` 变成 `InputBlock`，CLAP 把
   `clap_event_transport_t` 变成同一个形状。因此 "CLAP 能录" 与 "VST3 能录" 是同一条
   代码路径 —— 不是一份为 CLAP 重写的简化版。
@@ -295,10 +361,8 @@ MultitrackStudio）的 CLAP ARA 仍需逐个真机验收。
   必须返回 0。打印 "absent" 后照常返回成功的老判据不再成立。
 
 REAPER 7.85 / Windows x64 的 CLAP 扫描、实例化与 Capture 形态已由隔离真机复测覆盖
-（含音频 item 场景，退出码 0）；**CLAP ARA 在该宿主不可用**，取证与结论见
-[崩溃分析报告](2026-11-08-reaper-clap-ara-crash-analysis.md)。其余宿主
-（Bitwig / Studio One / MultitrackStudio）与保存重开、WebView 编辑仍按
-`docs/plugin-host-survey.md` 保持「未测」。
+（含音频 item 场景，退出码 0）；**CLAP ARA 在该宿主不可用**（上文勘误即取证与结论）。其余宿主
+（Bitwig / Studio One / MultitrackStudio）与保存重开、WebView 编辑仍保持「未测」。
 
 ### CLAP ↔ VST3 覆盖对照（2026-11 全量审查 + 第二轮收敛）
 
@@ -333,6 +397,7 @@ REAPER 7.85 / Windows x64 的 CLAP 扫描、实例化与 Capture 形态已由隔
 | 编辑器链路心跳 | `EditController::new` → `register_heartbeat` | `EditorLink::for_owner` → 同一个 `register_heartbeat` | `live_links()` → `host_tick`（私有状态通知 / 宿主 Undo 收口） |
 | 总线 / 端口名 | `BusInfo::name` | `clap_audio_port_info_t::name` | `hifishifter_plugin_core::MAIN_BUS_NAME` |
 | 模块加载诊断 | `GetPluginFactory` / `InitDll` | `clap_entry.init` | `hifishifter_plugin::log_module_loaded` |
+| 模块入口与导出表 | `hifishifter-vst3` 壳（恰好 3 个符号） | `hifishifter-clap` 壳（恰好 1 个符号） | 各壳自持入口；`clap_exports` 钉死 VST3 符号缺席、`vst3_exports` 钉死入口齐全 |
 
 ### 第二轮审查（2026-11 上旬）：又收敛掉的九处
 
@@ -463,12 +528,16 @@ companion 的 `clap` feature 只挂在 `[dev-dependencies]`：它是纯 checked-
 归属规则：
 
 - `fade`（校验 `hifishifter_kernel::fade_curves` 的形状接受域）与
-  `host_identity`（Windows ToolHelp 进程探测 / VST3 宿主名证据）是 **VST3 专属**，
-  留在 `hifishifter-plugin`；core 曾把它们连同 WebView2 / Windows API / ONNX /
-  SoundTouch 一起机械复制进来，结果一个只做字节转发的 CLAP 外壳也要链接整个推理内核。
+  `host_identity`（Windows ToolHelp 进程探测 / 宿主名证据链）住在 `hifishifter-plugin`
+  （共享实现层）——它们被两种格式的路径共同消费；core 曾把它们连同 WebView2 /
+  Windows API / ONNX / SoundTouch 一起机械复制进来，结果一个只做字节转发的 CLAP
+  外壳也要链接整个推理内核。**VST3 专属的东西只有两处**：ABI 词汇（`vst3_abi`，
+  被 REAPER 原生扩展等共享代码消费而被迫留在共享层，见其模块文档）与壳体本身
+  （`backend/hifishifter-vst3/`）。
 - 格式 crate 不得因为「core 有了」就继承宿主专属依赖。新增格式时先问"这个模块是否
-  被至少一个非 VST3 格式消费"，答不出就留在 VST3。`no_tauri_in_dependency_tree.rs`
-  与 `cargo tree -p <格式>` 是这条边界的判据。
+  被至少一个非 VST3 格式消费"，答不出就归 `hifishifter-vst3` 壳。
+  `no_tauri_in_dependency_tree.rs`（含 `hifishifter-vst3`）与
+  `format_feature_boundary.rs` 是这条边界的判据。
 
 ---
 
@@ -485,10 +554,42 @@ companion 的 `clap` feature 只挂在 `[dev-dependencies]`：它是纯 checked-
 |---|---|---|
 | Studio One / Cubase / Nuendo / Samplitude / Sequoia / Pyramix / Sonar | 是 | 读 + 渲染 + 调音；**不可写**、无 take、无 folder、无宿主撤销栈 |
 | Logic Pro（10.8+，ARA 面较薄） | 是 | 读 + 渲染 |
-| WaveLab / Sound Forge / Acoustica | 是 | 读 + 渲染；transport 可能缺席 |
+| WaveLab / Acoustica | 是 | 读 + 渲染；transport 可能缺席 |
+| **ACID Pro（11.0.2.21 实测）** | **否（§5.1）** | 普通插入 FX：捕获工作流完整可用 |
+| Sound Forge / 其它 VEGAS 家族壳宿主 | 预期否（同族桥） | 普通插入 FX |
+
+原表中 Sound Forge 的 ARA2「是」从未验收过；它与 ACID Pro 共用同一 VST 桥
+（`sfvstwrap`），按 §5.1 的同一条拒绝路径预期一致，故移出 ARA2 行。
 
 **没有任何一家暴露 `GetMediaItemInfo_Value`。** 所以产品必须在原生扩展调用全部为 0 时
 依然完整。
+
+### 5.1 ACID Pro 11：宿主桥在加载前拒绝 ARA 插件（2026-11 实测）
+
+**症状**：扫描、列表、供应商页一切正常；把 "HiFiShifter (VST3)" 添加到轨道 FX 弹
+「添加轨道插件时发生错误。错误 0x8004e204（消息缺失）——插件加载失败。
+未成功加载任何插件」。
+
+**证据链**（对应 `hide_ara_entry_points` 的注释，这里只列现场可复核的事实）：
+
+1. 错误码 `0x8004E204` 的立即数只出现在家族桥 `sfvstwrap.dll` / `sfvstserver.exe`
+   （各 3 处）；「消息缺失」是错误表查无此码时的兜底格式串，不是错误语义。
+2. 添加失败时**插件模块从未被加载**：引擎日志零会话、shim 的 OutputDebugString
+   零输出、也没有 `sfvstserver.exe` / `audio_plugin_server_x64.exe` 被拉起 ——
+   拒绝发生在 `sfvstwrap`（宿主进程内）读自家运行时缓存时。
+3. 该路径先打开 boost::interprocess 共享内存 `plugin_finder_shared_memory`，该映射
+   在 ACID Pro 11 里不存在（添加尝试前后与期间共 1.8 秒 ~4878 万次
+   `OpenFileMappingW` 竞速捕获 0 次）。
+4. 与插件内容无关：改缓存记录里的版本字段（0→1）错误原样复现；把缓存记录改成
+   `isAra="0"` 后同一插件立即正常加载。
+5. ACID Pro 11 自带的 ARA 插件（Melodyne、acidFX MorphPad）由主程序的定制集成类
+   承载（RTTI：`MelodynePluginView` / `FXPadPluginView`），不走这条通用桥路径；
+   官方口径中 ACID 的 ARA2 即 Melodyne 集成。
+
+**对策**：`hifishifter_plugin::host_identity::hide_ara_entry_points()` 对 VEGAS
+家族（`is_vegas_family`）让组件的 queryInterface 不应答 ARA 入口点 → 扫描器记
+`isAra="0"` → 插件以普通插入 FX 加载（捕获工作流完整）。`HIFISHIFTER_FORCE_ARA=1`
+是逃生门；`HIFISHIFTER_NO_ARA=1` 仍是全局探针。
 
 ---
 
@@ -503,3 +604,5 @@ companion 的 `clap` feature 只挂在 `[dev-dependencies]`：它是纯 checked-
 | 丢失字段登记 | `backend/hifishifter-plugin/src/ara/mapping.rs`（`LOST_FIELDS`） |
 | 渲染事实 | `backend/hifishifter-plugin/src/host/geometry.rs` |
 | CLAP 外壳 | `backend/hifishifter-clap/` |
+| VST3 外壳 | `backend/hifishifter-vst3/`（模块入口、工厂/组件/处理器、IPlugView、IConnectionPoint、ARA COM 入口） |
+| VST3 ABI 词汇 | `backend/hifishifter-plugin/src/vst3_abi.rs` |

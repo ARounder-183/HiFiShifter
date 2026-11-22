@@ -8,6 +8,17 @@ use super::*;
 /// 也要定期补一行 —— 10 秒足够让人看见"宿主把位置钉在 7.375 s"，又不至于刷屏。
 const CONTEXT_SUMMARY_MS: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Capture 渲染输入的版本键：`(素材代次, 编辑代次, 带不带用户曲线)`。
+///
+/// 【为什么必须只有一份实现】版本闸（`capture_prepare_job_inner`）、离线就绪读数
+/// （`capture_offline_ready`）与空转预检（`capture_render_up_to_date`）答的是同一个
+/// 问题：“这份输入还需要准备吗”。三处各写一个位运算表达式，改版本键时漏掉任何
+/// 一处，预检就会与真闸对不上 —— 该重算的被跳过（用户听到旧曲线），不该重算的在
+/// 空转。`with_curves` 位的存在理由见 `capture_render_input` 的文档。
+fn capture_render_version(revision: u64, edit: u64, with_curves: bool) -> u64 {
+    revision ^ (edit << 32) ^ if with_curves { 0 } else { 1 << 63 }
+}
+
 impl ExtensionOwner {
     /// Capture 形态的渲染准备（不经过 ARA 文档）。
     ///
@@ -128,23 +139,33 @@ impl ExtensionOwner {
         }
     }
 
-    pub(crate) fn capture_prepare_job(
+    pub fn capture_prepare_job(
         &self,
         cancel: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<(), String> {
-        // 【离线块之后的实时准备也必须带曲线】宿主可能用 setup mode=0 进入离线
-        // 预览（VEGAS 的“应用非实时事件 FX”就是一例）。只看 setup mode 会漏掉；
-        // `offline_pass_active` 由第一个 mode=2 块置位，随后 actor 的普通准备
-        // 就必须走 require_curves 版本，不能再发布“只有几何”的快照。
-        let require_curves = self.offline_pass_active()
-            || self.processing_pass.is_preview()
-            || self.setup_process_mode() == 2;
+        let require_curves = self.capture_prepare_wants_curves();
         if require_curves {
             if let Some(session) = self.capture_session_if_initialized() {
                 session.request_reload();
             }
         }
         self.capture_prepare_job_inner(cancel, require_curves)
+    }
+
+    /// 这一轮实时准备要不要**带用户曲线**。
+    ///
+    /// 【离线块之后的实时准备也必须带曲线】宿主可能用 setup mode=0 进入离线
+    /// 预览（VEGAS 的“应用非实时事件 FX”就是一例）。只看 setup mode 会漏掉；
+    /// `offline_pass_active` 由第一个 mode=2 块置位，随后 actor 的普通准备
+    /// 就必须走 require_curves 版本，不能再发布“只有几何”的快照。
+    ///
+    /// 【为什么单独成方法】渲染的**空转预检**（`capture_render_up_to_date`）必须与
+    /// 真正执行时的 `require_curves` 判定完全一致，否则“预检说空转、执行说要等”
+    /// 会各自漂移 —— 唯一的定义只有一份。
+    pub(crate) fn capture_prepare_wants_curves(&self) -> bool {
+        self.offline_pass_active()
+            || self.processing_pass.is_preview()
+            || self.setup_process_mode() == 2
     }
 
     /// 离线准备：**要求**这一份结果带着用户曲线（见 `capture_render_input`）。
@@ -170,9 +191,61 @@ impl ExtensionOwner {
         if !with_curves {
             return Ok(false);
         }
-        let version = revision ^ (edit << 32);
-        Ok(self.capture_prepared.load(Ordering::Acquire) == version
+        Ok(self.capture_prepared.load(Ordering::Acquire)
+            == capture_render_version(revision, edit, with_curves)
             && self.snapshots.iter().all(|snapshot| snapshot.is_ready()))
+    }
+
+    /// 这一轮渲染是否**注定空转**：发布器里的快照已经是“当前 (素材代次, 编辑代次,
+    /// 曲线) 组合”的成品，再跑一遍也不会改变任何输出。
+    ///
+    /// 【为什么要在门口问这一句】渲染请求的来源只知道“该问一次”，不知道“问出来的
+    /// 这一轮有没有活”：音频线程的 `render_wanted` 闩锁、重载后的无条件置位……
+    /// 没有这道闸，一次空转轮也会发 `playback_rendering_state {active:true}` 并
+    /// spawn 一个 worker —— 左下角“渲染中”闪一下，代价是整轮线程往返。播放头停在
+    /// 素材之外（工程 0 点、take 在 33 s）时，ACID Pro 实测就是每 100 ms 一轮的
+    /// 常亮闪烁。UI 的口径应当是“有一轮真的会产出结果的渲染在进行”。
+    ///
+    /// 【为什么判定与 `capture_prepare_job_inner` 的版本闸共用一份实现】两个闸答的
+    /// 是同一个问题（“这份输入还需要准备吗”），分开写必然漂移 —— 见
+    /// [`capture_render_version`]。
+    ///
+    /// 【为什么返回值偏保守（“不空转”）而不是偏乐观】这里只省成本，不出正确性：
+    /// 预检漏判 ⇒ 这一轮照常执行，里面还有版本闸兜底；预检误判 ⇒ 真需要的一轮被
+    /// 跳过 ⇒ 声音停在旧版本。所以判定必须**只会漏判（返回 false）、不会误判**。
+    pub(crate) fn capture_render_up_to_date(&self, require_curves: bool) -> bool {
+        if !self.capture.has_material() {
+            return true;
+        }
+        if require_curves && self.capture_session_pending() {
+            // 会话还在加载：这一轮要等（离线渲染只有一次机会，见
+            // `capture_render_input`）—— 无论如何都不是“空转”。
+            return false;
+        }
+        // 【为什么不用构建完整输入】版本键只由三个原子/锁内读数决定；把
+        // `capture_render_input` 的整份 RenderInput（时间线、源表）建一遍只为算
+        // 一个版本号，是每轮空转预检都要白付的拷贝。
+        let session = self
+            .capture_session
+            .get()
+            .and_then(|session| session.as_ref().ok())
+            .filter(|session| session.is_loaded());
+        let (edit, with_curves) = match session {
+            Some(session) => {
+                // 【为什么还要看 clips 是否为空】版本闸之前还有一道“空时间线直接
+                // 返回”的门（那份输入不会推进 `capture_prepared`）；不把这一支算进
+                // 来，空时间线的会话会在这里永远“不空转”。
+                if session.timeline.lock_or_recover().clips.is_empty() {
+                    return true;
+                }
+                (session.timeline_revision(), true)
+            }
+            None => (0, false),
+        };
+        let revision = self.capture.revision();
+        self.capture_prepared.load(Ordering::Acquire)
+            == capture_render_version(revision, edit, with_curves)
+            && self.snapshots.iter().all(|snapshot| snapshot.is_ready())
     }
 
     fn capture_prepare_job_inner(
@@ -205,7 +278,7 @@ impl ExtensionOwner {
         // 的几何（`edit` 恒为 0）。若把它算作"已准备"，会话加载之后版本不变 ⇒ 这次
         // 渲染被跳过 ⇒ 用户画完线永远听不到变化。把这个事实编进版本号，会话一加载
         // 版本就变，于是恰好补一次渲染，而没加载时也不会反复重算。
-        let version = revision ^ (edit << 32) ^ if with_curves { 0 } else { 1 << 63 };
+        let version = capture_render_version(revision, edit, with_curves);
         if self.capture_prepared.load(Ordering::Acquire) == version
             && self.snapshots.iter().all(|snapshot| snapshot.is_ready())
         {
@@ -619,8 +692,22 @@ impl ExtensionOwner {
         } else {
             (energy / f64::from(energy_frames)).sqrt() as f32
         };
+        // 【本块读的位置】快照发布器已经记下了它（`copy_block_at` 的第一次 relaxed
+        // store）。账本按块带着它，"这一下静音在工程第几秒"就不必再靠块序号推算 ——
+        // 而块序号只在块严格相接时才等价于时间（`RecordedBlock::jump` 回答这件事）。
+        let rate = self.setup_sample_rate();
+        let publisher = &self.snapshots[self.snapshot_index_for_rate(rate)];
+        let pos = publisher.last_sample_position();
+        let pos_sec =
+            if pos == crate::render::click::NO_POSITION || !rate.is_finite() || rate <= 0.0 {
+                f32::NAN
+            } else {
+                (pos as f64 / rate) as f32
+            };
         self.click.record(crate::render::click::BlockSample {
             stream: stream.index() as u8,
+            pos,
+            pos_sec,
             kind,
             seam,
             fade_len: self.declick[stream.index()]
@@ -647,6 +734,53 @@ impl ExtensionOwner {
         for line in self.click.drain_suspicious() {
             log::warn!("[click] {line}");
         }
+    }
+
+    /// 把"读快照时到底有没有拿到内容"打成一行（非实时线程；由 `prepare()` 驱动）。
+    ///
+    /// 【为什么这一行必须存在】"播放时断断续续的静音断点"有两种完全不同的成因，而在
+    /// 现场日志里此前**完全不可区分**：
+    ///
+    ///   * **渲染内容里就有洞** —— 导出同样能听到，问题在合成；
+    ///   * **播放时读不到内容** —— `copy_block_at` 在快照范围之外逐样本返回 `0.0`，
+    ///     问题在"这一块没内容"而不是"内容错了"。
+    ///
+    /// 内核侧已经用逐帧对拍排除了第一种（倒放 / 循环 / 倒放+循环三档渲染的最长连续
+    /// 静音都是 1 帧）。第二种此前**没有任何读数**：`SnapshotPublisher::misses` 只增
+    /// 不读，`bound_snapshot_fallback` 也已无读者。两个数一起打出来，下一次报障就能
+    /// 直接回答"这一下静音是我们没内容，还是内容本身静音"。
+    pub(crate) fn log_snapshot_readout(&self) {
+        let misses: u64 = self
+            .snapshots
+            .iter()
+            .map(|publisher| publisher.misses.load(Ordering::Relaxed))
+            .sum();
+        let past_end: u64 = self
+            .snapshots
+            .iter()
+            .map(|publisher| publisher.past_end.load(Ordering::Relaxed))
+            .sum();
+        let fallback = self.bound_snapshot_fallback.load(Ordering::Relaxed);
+        // 【为什么要带出门控计数】前两项只回答"读快照时有没有内容"；而整块被
+        // `apply_gate_fade_out` 写满零的那条路径**根本不经过读快照**，因此在前两类
+        // 读数里完全不存在 —— 现场"听到静音、读数为零"的僵局正是这么来的。把它并列
+        // 写在同一行里，"这一下是我们没内容、还是我们自己把门关了、还是下游掉帧"
+        // 才是一次就能分开的三件事。
+        //
+        // 【为什么只报 Rolling 那一档】停播时的淡出是正确的，每块都会涨；只有
+        // "位置在走、门却关了"才是缺陷证据（那个块会被真的播出来）。结构上线之
+        // 后它应当恒为 0。
+        let gate = self.gate_cleared_rolling.load(Ordering::Relaxed);
+        if misses == 0 && fallback == 0 && past_end == 0 && gate == 0 {
+            return;
+        }
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.snapshot.readout",
+            format_args!(
+                "[ara] snapshot readout: misses={misses} past_end={past_end} fallback_blocks={fallback} gate_rolling={gate}                  (misses>0 = 没有快照; past_end>0 = 播放头越过了已发布快照的末尾;                 这两种是逐样本的 0; gate_rolling>0 = 位置在走却把整块门成了零)"
+            ),
+        );
     }
 
     /// 把**最近一块**的宿主上下文打成一行（非实时线程；由会话 actor 驱动）。
@@ -753,10 +887,13 @@ impl ExtensionOwner {
         // `counted=` 是"位置由计数器推进的块数"，`jumps=` 是"宿主报的位置与计数器
         // 不同"的次数。两者都大而 `rewinds` 为 0 是**健康**的：说明宿主确实钉住过
         // 位置，而每次它恢复报告时我们都跟上了。
+        // `ui_offset=` / `lead=` / `window=` 是 UI 播放头域的读数：offset 是当前
+        // 喂入位与光标之间的差；lead 是停播时实测到的宿主渲染领先量（`none` = 本次
+        // 会话还没停过播，升起时会退回预热窗中点）；window 是最近一次预热窗宽度。
         let line = format!(
             "[capture] clock: stream={} blocks={blocks} pass={} counted={} frames={} \
              jumps={} last_jump={} rewinds={} delta_min={} delta_max={} resyncs={} \
-             rising={} continuous={} music={}",
+             rising={} continuous={} music={} ui_offset={} lead={} window={}",
             stream.as_str(),
             geometry.pass.load(Ordering::Acquire),
             geometry.counted_blocks.load(Ordering::Acquire),
@@ -770,6 +907,13 @@ impl ExtensionOwner {
             geometry.rising_edges.load(Ordering::Acquire),
             geometry.continuous_used.load(Ordering::Acquire),
             geometry.music_used.load(Ordering::Acquire),
+            geometry.playhead_offset.load(Ordering::Acquire),
+            if geometry.render_lead_valid.load(Ordering::Acquire) {
+                geometry.render_lead.load(Ordering::Acquire).to_string()
+            } else {
+                "none".to_string()
+            },
+            geometry.pre_roll_window.load(Ordering::Acquire),
         );
         let mut last = self.last_clock_diag.lock_or_recover();
         if last.as_deref() != Some(line.as_str()) {

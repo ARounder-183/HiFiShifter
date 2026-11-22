@@ -24,6 +24,10 @@ export function araOnlyCaps(overrides: Partial<HostCaps> = {}): HostCaps {
         // 因此两条后端都为 true —— 见 `hostCapabilities.ts` 的 canExportAudio。
         exportAudio: true,
         exportData: true,
+        // 倒放写回与 take 音高包络都是**宿主原生结构**能力，ARA-only 宿主上不成立；
+        // 需要它们的用例显式覆盖（与写能力同一手法）。
+        clipReverse: false,
+        takePitchBridge: false,
         ...overrides,
     };
 }

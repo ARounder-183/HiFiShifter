@@ -1,23 +1,27 @@
-﻿# 安装器闭环门禁：装 → 查 → 卸载 → 查。
+﻿# Installer closed-loop gate: install → inspect → uninstall → inspect.
 #
-# 【为什么必须在 CI 里真装一遍】安装器的失败方式几乎都不报错：模型少一个文件
-# （运行时只是"推理不可用"）、bundle 里又混进一份权重（磁盘悄悄多 150 MB）、
-# 卸载没删干净（用户重装后看到两套文件）。这些只有真的跑一遍再逐条断言才看得见。
+# [Why CI must run a real install] Almost none of the installer's failure modes raise an error: the
+# model bundle is missing a file (the runtime just reports "inference unavailable"), a copy of the
+# weights sneaks back into the bundle (disk quietly grows by a full second copy), or uninstall leaves files
+# behind (the user sees two copies after reinstalling). These are only visible by actually running
+# the installer and asserting each item one by one.
 #
-# 【为什么装的是"测试模式"的安装器】发布分支要 RequestExecutionLevel admin 并写
-# HKLM / Program Files，而 CI runner 上的提权会把脚本卡在 UAC 上。HFS_TEST_MODE 只把
-# 安装位置与注册表根换成当前用户，**其余逻辑逐字相同**（页面、目录对账、模型段、
-# 卸载段）。发布分支仍是 admin / HKLM / Common Files —— 那一条由
-# check-product-consistency.ps1 静态钉住。
+# [Why the "test mode" installer is what gets installed] The release branch requires
+# RequestExecutionLevel admin and writes HKLM / Program Files, while elevation on a CI runner gets
+# the script stuck at UAC. HFS_TEST_MODE only swaps the install location and registry root for the
+# current user; **everything else is verbatim identical** (pages, directory reconciliation, models
+# section, uninstall section). The release branch stays admin / HKLM / Common Files — that part is
+# pinned statically by check-product-consistency.ps1.
 #
 #   .\scripts\checks\check-installer.ps1
 #   .\scripts\checks\check-installer.ps1 -ReleaseInstallerPath dist\HiFiShifter_v..._setup.exe
 [CmdletBinding()]
 param(
-    # 发布安装器（体积断言用）。缺省取 dist\*-setup.exe 里最新的一个。
+    # Release installer (used for the size assertion). Defaults to the newest dist\*-setup.exe.
     [string]$ReleaseInstallerPath = '',
-    # 安装器体积上限（MB）。旧的 App setup 169.8 MB + VST3 setup 166.7 MB 是两份
-    # 各自带权重的产物；合并后权重只进安装器一次，230 MB 是"确实只有一份"的判据。
+    # Installer size cap (MB). The old App setup 169.8 MB + VST3 setup 166.7 MB were two artifacts
+    # each carrying its own weights; after the merge the weights go into the installer only once,
+    # so 230 MB is the "there really is only one copy" criterion.
     [int]$MaxSizeMb = 230
 )
 
@@ -38,15 +42,15 @@ function Assert-That($name, [scriptblock]$body) {
     }
 }
 
-# 【为什么不用 Start-Process -Wait】安装 / 重装 / 卸载一旦卡在 UAC 或安装器
-# 内部死锁，`-Wait` 会一直挂到 job 级超时，日志里什么线索都没有。这里显式
-# 等有限时间、超时杀掉并抛出可定位的错误（与 vst3/windows/verify.ps1 的
-# 加载探针同一纪律）。
+# [Why not Start-Process -Wait] If install / reinstall / uninstall gets stuck at UAC or deadlocks
+# inside the installer, `-Wait` hangs until the job-level timeout with no clue in the logs. Here we
+# wait a bounded time, kill on timeout, and throw a locatable error (same discipline as the load
+# probe in vst3/windows/verify.ps1).
 function Invoke-InstallerProcess([string]$path, [string[]]$arguments, [int]$timeoutSeconds = 180) {
     $proc = Start-Process -FilePath $path -ArgumentList $arguments -WindowStyle Hidden -PassThru
     if (!$proc.WaitForExit($timeoutSeconds * 1000)) {
         $proc.Kill()
-        throw "$path 在 $timeoutSeconds 秒内未返回（UAC / 安装器死锁），已终止"
+        throw "$path did not return within $timeoutSeconds seconds (UAC / installer deadlock); killed"
     }
     return $proc
 }
@@ -54,15 +58,16 @@ function Invoke-InstallerProcess([string]$path, [string[]]$arguments, [int]$time
 function Get-Makensis {
     $cmd = (Get-Command makensis -ErrorAction SilentlyContinue).Source
     if ($cmd) { return $cmd }
-    # 【为什么不读 `ProgramFiles(x86)` 环境变量】见 build.ps1 同名处：它可能不存在，
-    # 也可能被 vcvars 的导入删掉（空值 = 删除），报错却指向 `-Path` 参数。
+    # [Why not read the `ProgramFiles(x86)` env var] See the same spot in build.ps1: it may be absent,
+    # or deleted by the vcvars import (empty value = deletion), while the error points at the `-Path`
+    # parameter.
     foreach ($kind in 'ProgramFilesX86', 'ProgramFiles') {
         $base = [Environment]::GetFolderPath($kind)
         if (!$base) { continue }
         $candidate = Join-Path $base 'NSIS\makensis.exe'
         if (Test-Path -LiteralPath $candidate) { return $candidate }
     }
-    throw '找不到 makensis：先跑 scripts\setup\install_deps_windows.ps1'
+    throw 'makensis not found: run scripts\setup\install_deps_windows.ps1 first'
 }
 
 function Remove-GateDirectory([string]$path) {
@@ -70,7 +75,8 @@ function Remove-GateDirectory([string]$path) {
     $allowed = @(
         [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'HiFiShifterInstallerTest')),
         [IO.Path]::GetFullPath((Join-Path $env:APPDATA 'HiFiShifterTest')),
-        # 覆盖安装"旧模型根"用例的模拟目录：必须是固定名字，且只在 $env:APPDATA 下。
+        # Simulated directories covering the overwrite-install "legacy model root" case: they must be
+        # fixed names and exist only under $env:APPDATA.
         [IO.Path]::GetFullPath((Join-Path $env:APPDATA 'HiFiShifterTestLegacy')),
         [IO.Path]::GetFullPath((Join-Path $env:APPDATA 'HiFiShifterTestLegacy2'))
     )
@@ -82,68 +88,73 @@ Write-Host 'Installer gate' -ForegroundColor Cyan
 
 if (!$ReleaseInstallerPath) {
     $found = @(Get-ChildItem (Join-Path $root 'dist') -Filter '*-setup.exe' -ErrorAction SilentlyContinue)
-    if ($found.Count -eq 0) { throw 'dist 下没有安装器：先跑 scripts\build\build.ps1 -Target All' }
+    if ($found.Count -eq 0) { throw 'no installer in dist: run scripts\build\build.ps1 -Target All first' }
     $ReleaseInstallerPath = ($found | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
 }
 $releaseInstaller = (Resolve-Path $ReleaseInstallerPath).Path
 $sizeMb = [math]::Round((Get-Item $releaseInstaller).Length / 1MB, 1)
-Assert-That "安装器体积小于 $MaxSizeMb MB（模型只装一份）" {
-    if ($sizeMb -ge $MaxSizeMb) { throw "安装器 $sizeMb MB ≥ $MaxSizeMb MB" }
+Assert-That "installer size below $MaxSizeMb MB (weights installed only once)" {
+    if ($sizeMb -ge $MaxSizeMb) { throw "installer is $sizeMb MB ≥ $MaxSizeMb MB" }
     "$sizeMb MB"
 }
 
-# ── 编译测试模式安装器（与发布安装器同一份脚本、同一份载荷）─────────────────
+# ── Compile the test-mode installer (same payload)
 foreach ($required in 'app', 'vst3', 'HiFiShifter.clap', 'HiFiShifter-resources', 'models', 'licenses', 'LICENSE', 'license-page.txt', 'models-verify.nsh') {
-    if (!(Test-Path (Join-Path $stage $required))) { throw "dist\_stage\installer 缺少 $required" }
+    if (!(Test-Path (Join-Path $stage $required))) { throw "dist\_stage\installer missing $required" }
 }
 
-# 【为什么钉死架构白名单】dist\HiFiShifter.vst3 是跨平台共用的 bundle，Linux/macOS
-# 构建会往 Contents 里留下 x86_64-linux / MacOS 等目录。Windows 打包若用 Copy-Item *
-# -Recurse，这些别平台的 .so/.dylib（约 57 MB）就会被 NSIS 一起打进安装器。
-# 编译前先查暂存区：只要出现白名单以外的架构目录就失败，别等装到用户机器上才发现。
-Assert-That 'VST3 暂存区只含 Windows 架构' {
+# [Why the architecture whitelist is pinned] dist\HiFiShifter.vst3 is a bundle shared across
+# platforms; Linux/macOS builds leave x86_64-linux / MacOS and similar directories inside Contents.
+# If Windows packaging used Copy-Item * -Recurse, those other platforms' .so/.dylib files (about
+# 57 MB) would end up in the installer via NSIS too. Check the staging area before compiling: any
+# architecture directory outside the whitelist fails right away, rather than being discovered on a
+# user's machine.
+Assert-That 'VST3 staging area contains only Windows architectures' {
     $contents = Join-Path $stage 'vst3\Contents'
-    if (!(Test-Path -LiteralPath $contents)) { throw "缺少 $contents" }
+    if (!(Test-Path -LiteralPath $contents)) { throw "missing $contents" }
     $allowed = @('Resources', 'x86_64-win')
     $foreign = @(Get-ChildItem -LiteralPath $contents -Directory |
         Where-Object { $allowed -notcontains $_.Name })
-    if ($foreign.Count) { throw "暂存区混入非 Windows 架构目录：$($foreign.Name -join ', ')" }
+    if ($foreign.Count) { throw "staging area picked up non-Windows architecture directories: $($foreign.Name -join ', ')" }
     $allowed -join ', '
 }
 $manifest = Get-Content (Join-Path $root 'backend\src-tauri\resources\models\models.json') -Raw | ConvertFrom-Json
 $bootstrapper = Join-Path $root 'dist\_cache\MicrosoftEdgeWebview2Setup.exe'
-if (!(Test-Path $bootstrapper)) { throw "缺少 WebView2 bootstrapper：$bootstrapper（先跑 build.ps1）" }
+if (!(Test-Path $bootstrapper)) { throw "missing WebView2 bootstrapper: $bootstrapper (run build.ps1 first)" }
 
 $testInstaller = Join-Path $env:TEMP ('hfs-installer-gate-' + [Guid]::NewGuid().ToString('N') + '.exe')
 $makensis = Get-Makensis
 
-# ── 许可页的编码 ────────────────────────────────────────────────────────────
+# ── License page encoding ───────────────────────────────────────────────
 #
-# 【为什么这条判据是"编译产物里的字节"】NSIS 的 LicenseData 在**编译期**把文件读成
-# UTF-16 存进安装器：文件带 BOM 才按 UTF-8 解码，不带就按**编译所在机器的 ANSI 代码页**
-# 解码。后者编译零告警、装完也能打开，只是许可页里 θ 变成"胃"、日文假名整段丢失 ——
-# 只有真的把产物拆开看才拦得住，所以下面用一个不压缩的空安装器复现这条路径。
+# [Why the criterion is "bytes inside the compiled artifact"] NSIS LicenseData reads the file into
+# UTF-16 **at compile time** and stores it in the installer: with a BOM the file is decoded as
+# UTF-8, without one it is decoded using **the ANSI code page of the machine doing the compile**.
+# The latter compiles with zero warnings and opens fine after install — it just turns θ in the
+# license page into mojibake and drops whole runs of Japanese kana — and only taking the artifact
+# apart can catch it, so an uncompressed empty installer below reproduces this path.
 $licensePage = Join-Path $stage 'license-page.txt'
 
-Assert-That '许可页用的是带 BOM 的副本，而不是随包的 LICENSE' {
+Assert-That 'license page uses the BOM-carrying copy, not the bundled LICENSE' {
     $bom = [IO.File]::ReadAllBytes($licensePage)
     if ($bom.Length -lt 3 -or $bom[0] -ne 0xEF -or $bom[1] -ne 0xBB -or $bom[2] -ne 0xBF) {
-        throw 'license-page.txt 没有 UTF-8 BOM：NSIS 会按 ANSI 解码，非 ASCII 字符全部丢失'
+        throw 'license-page.txt has no UTF-8 BOM: NSIS would decode it as ANSI and every non-ASCII character would be lost'
     }
     $nsi = [IO.File]::ReadAllText((Join-Path $root 'scripts\release\merged-installer.nsi'),
         (New-Object Text.UTF8Encoding($false)))
     if (!$nsi.Contains('MUI_PAGE_LICENSE "${HFS_LICENSE_PAGE}"')) {
-        throw 'merged-installer.nsi 的许可页不再使用 ${HFS_LICENSE_PAGE}'
+        throw 'merged-installer.nsi license page no longer uses ${HFS_LICENSE_PAGE}'
     }
     'BOM + HFS_LICENSE_PAGE'
 }
 
-Assert-That '许可页把 LICENSE 原样嵌成 UTF-16（一个字符都不丢）' {
+Assert-That 'license page embeds LICENSE verbatim as UTF-16 (not one character lost)' {
     $text = [IO.File]::ReadAllText($licensePage, (New-Object Text.UTF8Encoding($false)))
     $probe = Join-Path $env:TEMP ('hfs-license-probe-' + [Guid]::NewGuid().ToString('N'))
     $probeNsi = $probe + '.nsi'
     $probeExe = $probe + '.exe'
-    # 探针：只有许可页、不压缩（压缩后的数据块没法按字节搜）、零载荷，几百毫秒。
+    # Probe: license page only, uncompressed (compressed data blocks cannot be searched byte-wise),
+    # zero payload, a few hundred milliseconds.
     $probeScript = @(
         'Unicode true'
         'SetCompress off'
@@ -161,9 +172,9 @@ Assert-That '许可页把 LICENSE 原样嵌成 UTF-16（一个字符都不丢）
     [IO.File]::WriteAllText($probeNsi, $probeScript, (New-Object Text.UTF8Encoding($true)))
     try {
         & $makensis /V1 $probeNsi | Out-Null
-        if ($LASTEXITCODE) { throw "许可页探针编译失败（退出码 $LASTEXITCODE）" }
+        if ($LASTEXITCODE) { throw "license-page probe failed to compile (exit code $LASTEXITCODE)" }
         $bytes = [IO.File]::ReadAllBytes($probeExe)
-        # 文本块落在奇数偏移上也是合法的，两种对齐各解一遍。
+        # The text block may legally sit at an odd offset; decode both alignments.
         $oddLength = ($bytes.Length - 1) - (($bytes.Length - 1) % 2)
         $views = @(
             [Text.Encoding]::Unicode.GetString($bytes),
@@ -178,17 +189,18 @@ Assert-That '许可页把 LICENSE 原样嵌成 UTF-16（一个字符都不丢）
             foreach ($view in $views) {
                 if ($view.IndexOf($needle, [StringComparison]::Ordinal) -ge 0) { $found = $true; break }
             }
-            if (!$found) { throw "安装器里丢了这一行（编译期按 ANSI 解码了）：$needle" }
+            if (!$found) { throw "this line was lost inside the installer (decoded as ANSI at compile time): $needle" }
         }
-        "$checked 行含非 ASCII 的文本原样嵌入"
+        "$checked non-ASCII lines embedded verbatim"
     }
     finally {
         Remove-Item $probeNsi, $probeExe -Force -ErrorAction SilentlyContinue
     }
 }
 
-# 【为什么用参数数组而不是续行符】PowerShell 的续行符是反引号，脚本里出现得越多，
-# 就越容易被编辑器 / 格式化工具吃掉一个空格而变成"命令在行尾无声结束"。
+# [Why an argument array instead of line continuations] PowerShell's continuation character is a
+# backtick; the more of them a script contains, the easier it is for an editor / formatter to eat
+# one space and turn it into "the command silently ends at end of line".
 $nsisArgs = @(
     '/INPUTCHARSET', 'UTF8', '/DHFS_TEST_MODE',
     "/DAPP_DIR=$(Join-Path $stage 'app')",
@@ -208,30 +220,33 @@ $nsisArgs = @(
     (Join-Path $root 'scripts\release\merged-installer.nsi')
 )
 & $makensis @nsisArgs
-if ($LASTEXITCODE) { throw "测试模式安装器编译失败（退出码 $LASTEXITCODE）" }
+if ($LASTEXITCODE) { throw "test-mode installer failed to compile (exit code $LASTEXITCODE)" }
 
-# 测试模式的安装根：InstallDir = %LOCALAPPDATA%\HiFiShifterInstallerTest\App
+# Test-mode install root: InstallDir = %LOCALAPPDATA%\HiFiShifterInstallerTest\App
 $testRoot = Join-Path $env:LOCALAPPDATA 'HiFiShifterInstallerTest'
 $installDir = Join-Path $testRoot 'App'
 $vst3Dir = Join-Path $testRoot 'VST3'
 $clapDir = Join-Path $testRoot 'CLAP'
-# 插件资源不进公共 CLAP 目录（那里只放 .clap 本身），测试模式落在同级的产品目录里。
+# Plugin resources do not go into the public CLAP directory (only the .clap itself lives there);
+# in test mode they land in the product's sibling directory.
 $clapResDir = Join-Path $testRoot 'CLAPResources'
-# 测试模式的模型根由 HFS_MODEL_ROOT 指定（user 权限不触发 UAC 虚拟化）；
-# 发布模式仍是 %ProgramData%\HiFiShifter\models，由 admin 安装器写入。
+# The test-mode model root is set via HFS_MODEL_ROOT (user privileges do not trigger UAC
+# virtualization); release mode still uses %ProgramData%\HiFiShifter\models, written by the admin
+# installer.
 $modelRoot = Join-Path $env:APPDATA 'HiFiShifterTest\models'
 $modelDir = Join-Path $modelRoot $manifest.version
 $arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\HiFiShifter'
 
-# ── 文件关联的保存 / 恢复 ───────────────────────────────────────────────
+# ── File association save / restore ──────────────────────────────
 #
-# 测试模式把 .hshp/.hsp 写到 HKCU\Software\Classes。开发机上可能已经有真实
-# 关联，门禁不能把它们覆盖后不还原。这里用 reg.exe 对四个键做**整键快照**：
-# 比逐值恢复更完整（OpenWithProgids、Content Type 等用户值都原样回来），也
-# 不会把测试期间新建的空键留在系统里。
+# Test mode writes .hshp/.hsp under HKCU\Software\Classes. A dev machine may already carry real
+# associations, and the gate must not overwrite them without restoring them. Here reg.exe takes a
+# **whole-key snapshot** of the four keys: more complete than per-value restore (OpenWithProgids,
+# Content Type and other user values come back verbatim), and it leaves no empty keys created
+# during the test behind in the system.
 $classesRoot = 'HKCU:\Software\Classes'
 $classesRegPath = 'HKCU\Software\Classes'
-# 每次运行用唯一 ProgID，避免与开发机上同名测试键互相覆盖。
+# Use a unique ProgID per run so same-named test keys on the dev machine cannot clobber each other.
 $foreignProgId = 'HfsInstallerGateForeign.' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
 $assocKeys = @('.hshp', '.hsp', 'HiFiShifter.Project', 'Applications\HiFiShifter.exe')
 $assocBackupDir = Join-Path $env:TEMP ('hfs-assoc-backup-' + [Guid]::NewGuid().ToString('N'))
@@ -243,7 +258,7 @@ foreach ($rel in $assocKeys) {
     $existed = Test-Path -LiteralPath $full
     if ($existed) {
         & reg.exe export "HKCU\Software\Classes\$rel" $file /y | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "无法备份注册表键 $full（reg export 退出码 $LASTEXITCODE）" }
+        if ($LASTEXITCODE -ne 0) { throw "cannot back up registry key $full (reg export exit code $LASTEXITCODE)" }
     }
     $assocBackup[$rel] = [pscustomobject]@{ Existed = $existed; File = $file }
 }
@@ -269,7 +284,7 @@ function Restore-AssociationBackups {
         if ($entry -and $entry.Existed -and (Test-Path -LiteralPath $entry.File)) {
             & reg.exe import $entry.File | Out-Null
             if ($LASTEXITCODE -ne 0) {
-                Write-Warning "恢复文件关联注册表键失败：$full"
+                Write-Warning "failed to restore file-association registry key: $full"
             }
         }
     }
@@ -277,275 +292,303 @@ function Restore-AssociationBackups {
     $script:assocBackupDir = $null
 }
 
-# 默认卸载保留缓存/用户数据的测试标记：只创建两个以本次 run 唯一命名的文件，
-# 绝不删用户的整个目录。一个放派生物目录（logs）、一个放用户数据目录（unsaved），
-# 静默卸载默认只勾选「删除模型」，两者都应保留。模型库由下面的 marker 单独验
-# "默认删除"；"取消勾选才保留"的分支由独立的卸载选项探针验证。
+# Test markers for the uninstall default that keeps cache/user data: create only two files named
+# uniquely for this run, never delete the user's whole directories. One goes in the derivatives
+# directory (logs), one in the user data directory (unsaved); the silent uninstall default only
+# checks "Delete models", so both should survive. The model library is verified separately by the
+# marker below for "deleted by default"; the "kept only when unchecked" branch is verified by a
+# dedicated uninstall-option probe.
 $userProfileRoot = Join-Path $env:LOCALAPPDATA 'HiFiShifter'
 $gateTag = 'hfs-uninstall-gate-' + [Guid]::NewGuid().ToString('N').Substring(0, 12)
 $disposableMarker = Join-Path $userProfileRoot "logs\$gateTag.txt"
 $userDataMarker = Join-Path $userProfileRoot "unsaved\$gateTag.txt"
-# 模型库标记：断言静默卸载默认删掉共享模型库（不依赖安装阶段是否成功建库）。
+# Model library marker: asserts the silent uninstall deletes the shared model library by default
+# (independent of whether the install phase managed to build it).
 $modelMarker = Join-Path $modelDir "$gateTag.txt"
 
 Remove-GateDirectory $testRoot
-# 上一轮失败可能留下"只有 ARP 键、没有 uninstall.exe"的残键；清掉它，门禁才能
-# 每次都从真正的全新安装开始（安装器自己也处理这种残键，这里是不依赖它的保险）。
+# A previous failed run may leave a stale key with "only the ARP key, no uninstall.exe"; clear it so
+# the gate starts from a genuinely fresh install every time (the installer handles such stale keys
+# itself; this is a safety net that does not rely on it).
 Remove-Item -LiteralPath $arpKey -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $disposableMarker, $userDataMarker -Force -ErrorAction SilentlyContinue
-# 测试模式专用的模型根：每次跑都从干净状态开始，避免上一轮的 .staging 让安装器
-# 误判"已完整"而跳过写库。绝不碰发布模式的 %ProgramData%\HiFiShifter。
+# Test-mode-only model root: every run starts from a clean state so a leftover .staging cannot make
+# the installer misjudge "already complete" and skip writing the library. Never touches the release
+# mode's %ProgramData%\HiFiShifter.
 if (Test-Path (Join-Path $env:APPDATA 'HiFiShifterTest')) {
     Remove-GateDirectory (Join-Path $env:APPDATA 'HiFiShifterTest')
 }
-# 旧模型根的模拟目录（覆盖安装时"旧版把共享库写在别处"的场景）：同样只清这两个
-# 门禁自己的固定名字。
+# Simulated directories for the legacy model root (the overwrite-install scenario "the old version
+# wrote the shared library somewhere else"): likewise only these two fixed gate-owned names.
 foreach ($stale in 'HiFiShifterTestLegacy', 'HiFiShifterTestLegacy2') {
     $path = Join-Path $env:APPDATA $stale
     if (Test-Path $path) { Remove-GateDirectory $path }
 }
 
 try {
-    Write-Host '  安装（静默）...' -ForegroundColor DarkGray
+    Write-Host '  Installing (silent)...' -ForegroundColor DarkGray
     $proc = Invoke-InstallerProcess $testInstaller @('/S')
-    if ($proc.ExitCode -ne 0) { throw "安装器退出码 $($proc.ExitCode)" }
+    if ($proc.ExitCode -ne 0) { throw "installer exit code $($proc.ExitCode)" }
 
-    Assert-That 'ARP 注册了卸载项' {
-        if (!(Test-Path $arpKey)) { throw "缺少注册表键 $arpKey" }
+    Assert-That 'ARP registers an uninstall entry' {
+        if (!(Test-Path $arpKey)) { throw "missing registry key $arpKey" }
         (Get-ItemProperty $arpKey).DisplayVersion
     }
 
-    Assert-That '文件关联指向安装的主程序' {
+    Assert-That 'file associations point at the installed main executable' {
         $hshp = Get-RegDefault "$classesRoot\.hshp"
-        if ($hshp -ne 'HiFiShifter.Project') { throw ".hshp 默认 ProgID = $hshp" }
+        if ($hshp -ne 'HiFiShifter.Project') { throw ".hshp default ProgID = $hshp" }
         $command = Get-RegDefault "$classesRoot\HiFiShifter.Project\shell\open\command"
         if (!$command -or !$command.Contains("$installDir\HiFiShifter.exe")) {
-            throw "打开命令未指向 $installDir：$command"
+            throw "open command does not point at ${installDir}: $command"
         }
         $hsp = Get-RegDefault "$classesRoot\.hsp"
-        if ($hsp -ne 'HiFiShifter.Project') { throw ".hsp 默认 ProgID = $hsp" }
+        if ($hsp -ne 'HiFiShifter.Project') { throw ".hsp default ProgID = $hsp" }
         if ($null -eq (Get-RegValue "$classesRoot\.hshp\OpenWithProgids" 'HiFiShifter.Project')) {
-            throw '.hshp\OpenWithProgids 没有登记 HiFiShifter.Project'
+            throw '.hshp\OpenWithProgids does not register HiFiShifter.Project'
         }
         if ($null -eq (Get-RegValue "$classesRoot\Applications\HiFiShifter.exe\SupportedTypes" '.hshp')) {
-            throw 'Applications\HiFiShifter.exe\SupportedTypes 没有登记 .hshp'
+            throw 'Applications\HiFiShifter.exe\SupportedTypes does not register .hshp'
         }
         'HiFiShifter.Project → HiFiShifter.exe'
     }
 
-    Assert-That 'App 目录里没有模型权重（只有清单）' {
+    Assert-That 'no model weights in the App directory (manifest only)' {
         $onnx = @(Get-ChildItem $installDir -Recurse -Filter *.onnx -ErrorAction SilentlyContinue)
-        if ($onnx.Count -gt 0) { throw "安装目录里还有 $($onnx.Count) 个 .onnx 文件" }
-        if (!(Test-Path (Join-Path $installDir 'models\models.json'))) { throw '缺少 models\models.json' }
+        if ($onnx.Count -gt 0) { throw "install directory still contains $($onnx.Count) .onnx file(s)" }
+        if (!(Test-Path (Join-Path $installDir 'models\models.json'))) { throw 'missing models\models.json' }
         'no .onnx under INSTDIR'
     }
 
-    # 【为什么连"插件模块不在 App 目录"也要断言】插件与独立 App 编译在同一个
-    # `backend\target\<profile>` 目录里，打包脚本靠一条排除判据把它们分开。判据写错时
-    # 安装包只是"大了 40~80 MB"，装完一切照常工作 —— 只有对着装出来的目录看才认得出来。
-    # 所以判据必须落在安装后的真实落地点上，而不是只信 build.ps1 里那句注释。
-    Assert-That 'App 目录里没有宿主插件模块' {
-        foreach ($module in 'hifishifter_plugin.dll', 'hifishifter_clap.dll') {
+    # [Why even "no plugin modules in the App directory" is asserted] The plugins and the standalone
+    # App build into the same `backend\target\<profile>` directory, and the packaging script separates
+    # them with a single exclusion criterion. When that criterion is wrong, the installer is merely
+    # "40-80 MB bigger" and everything works normally after install — you only notice by looking at
+    # the installed directory. So the criterion must land on the real post-install location, not on a
+    # comment inside build.ps1.
+    Assert-That 'no host plugin modules in the App directory' {
+        foreach ($module in 'hifishifter_vst3.dll', 'hifishifter_clap.dll') {
             if (Test-Path (Join-Path $installDir $module)) {
-                throw "App 安装目录混入了插件模块：$module"
+                throw "plugin module leaked into the App install directory: $module"
             }
         }
-        'no hifishifter_plugin.dll / hifishifter_clap.dll under INSTDIR'
+        'no hifishifter_vst3.dll / hifishifter_clap.dll under INSTDIR'
     }
 
-    Assert-That '许可全文与声明落到 LICENSE 里写的路径' {
+    Assert-That 'license texts and notices land at the paths written in LICENSE' {
         foreach ($rel in 'LICENSE', 'licenses\README.md', 'licenses\COPYING.LGPL-2.1', 'licenses\Apache-2.0.txt') {
-            if (!(Test-Path (Join-Path $installDir $rel))) { throw "App 缺少 $rel" }
+            if (!(Test-Path (Join-Path $installDir $rel))) { throw "App missing $rel" }
         }
         $vst3Resources = Join-Path $vst3Dir 'HiFiShifter.vst3\Contents\Resources'
         foreach ($rel in 'LICENSE', 'licenses\README.md') {
-            if (!(Test-Path (Join-Path $vst3Resources $rel))) { throw "VST3 缺少 $rel" }
+            if (!(Test-Path (Join-Path $vst3Resources $rel))) { throw "VST3 missing $rel" }
         }
-        if (Test-Path (Join-Path $installDir 'licenses\licenses')) { throw '许可目录多套了一层：licenses\licenses' }
-        'App 与 VST3 各一份 LICENSE + licenses\'
+        if (Test-Path (Join-Path $installDir 'licenses\licenses')) { throw 'license directory gained an extra level: licenses\licenses' }
+        'LICENSE + licenses\ present in both App and VST3'
     }
 
-    Assert-That 'CLAP 目录里只有插件模块，资源不与它并排' {
-        if (!(Test-Path (Join-Path $clapDir 'HiFiShifter.clap'))) { throw 'CLAP 模块没有安装到选定目录' }
-        # 规范：公共 CLAP 目录只放 .clap 文件本身。多一个通用名的资源文件夹，用户既
-        # 分不清归属，删的时候也不敢动；这里把"只剩一个文件"钉成判据。
+    Assert-That 'CLAP directory holds only the plugin module, no resources beside it' {
+        if (!(Test-Path (Join-Path $clapDir 'HiFiShifter.clap'))) { throw 'CLAP module not installed into the chosen directory' }
+        # Spec: the public CLAP directory holds only the .clap file itself. One more generically named
+        # resource folder and users can neither tell ownership apart nor dare delete it; pinned here as
+        # the "exactly one file" criterion.
         $stray = @(Get-ChildItem -LiteralPath $clapDir -Force | Where-Object { $_.Name -ne 'HiFiShifter.clap' })
-        if ($stray.Count) { throw "CLAP 目录里混入了非插件文件：$($stray.Name -join ', ')" }
+        if ($stray.Count) { throw "non-plugin files leaked into the CLAP directory: $($stray.Name -join ', ')" }
         'only HiFiShifter.clap'
     }
-    Assert-That 'CLAP 前端与模型清单落在共享资源目录' {
+    Assert-That 'CLAP frontend and model manifest land in the shared resource directory' {
         $clapFrontend = Join-Path $clapResDir 'frontend\plugin.html'
-        if (!(Test-Path $clapFrontend)) { throw "CLAP 前端资源没有落地：$clapFrontend" }
+        if (!(Test-Path $clapFrontend)) { throw "CLAP frontend resource missing: $clapFrontend" }
         $clapManifest = Join-Path $clapResDir 'models\models.json'
-        if (!(Test-Path $clapManifest)) { throw "CLAP 模型清单没有落地：$clapManifest" }
+        if (!(Test-Path $clapManifest)) { throw "CLAP model manifest missing: $clapManifest" }
         'frontend + manifest in shared dir'
     }
-    # 安装器真的把别平台二进制装进来了也会在这里被抓到（编译前查暂存区、装完查落地）。
-    Assert-That 'VST3 落地点只含 Windows 架构' {
+    # If the installer really shipped other platforms' binaries, this catches it too (staging checked
+    # before compile, installed location checked after).
+    Assert-That 'installed VST3 location contains only Windows architectures' {
         $installedContents = Join-Path $vst3Dir 'HiFiShifter.vst3\Contents'
         $allowed = @('Resources', 'x86_64-win')
         $foreign = @(Get-ChildItem -LiteralPath $installedContents -Directory |
             Where-Object { $allowed -notcontains $_.Name })
-        if ($foreign.Count) { throw "落地目录混入非 Windows 架构目录：$($foreign.Name -join ', ')" }
+        if ($foreign.Count) { throw "installed directory picked up non-Windows architecture directories: $($foreign.Name -join ', ')" }
         $allowed -join ', '
     }
-    Assert-That 'VST3 的 Resources\models 只有 models.json' {
+    Assert-That 'VST3 Resources\models contains only models.json' {
         $models = Join-Path $vst3Dir 'HiFiShifter.vst3\Contents\Resources\models'
-        if (!(Test-Path $models)) { throw "缺少 $models" }
+        if (!(Test-Path $models)) { throw "missing $models" }
         $entries = @(Get-ChildItem $models -Recurse -File)
-        if ($entries.Count -ne 1) { throw "期望只有 1 个文件，实际 $($entries.Count) 个" }
+        if ($entries.Count -ne 1) { throw "expected exactly 1 file, found $($entries.Count)" }
         $entries[0].Name
     }
 
-    Assert-That '共享模型库按清单齐全' {
-        if (!(Test-Path (Join-Path $modelDir 'models.json'))) { throw "缺少 $modelDir\models.json" }
+    Assert-That 'shared model library complete per the manifest' {
+        if (!(Test-Path (Join-Path $modelDir 'models.json'))) { throw "missing $modelDir\models.json" }
         foreach ($file in $manifest.files) {
             $path = Join-Path $modelDir ($file.path -replace '/', '\')
-            if (!(Test-Path $path)) { throw "缺少 $($file.path)" }
-            if ((Get-Item $path).Length -ne $file.bytes) { throw "$($file.path) 字节数不符" }
+            if (!(Test-Path $path)) { throw "missing $($file.path)" }
+            if ((Get-Item $path).Length -ne $file.bytes) { throw "$($file.path) byte count mismatch" }
         }
-        "$($manifest.files.Count) 个文件"
+        "$($manifest.files.Count) files"
     }
 
-    # 覆盖安装：先移除上一版再装回来。移除由安装器自己在进程内完成（不执行旧版
-    # uninstall.exe，否则会弹出第二个卸载窗口）。选项与卸载页一致（删模型默认勾选、
-    # 清缓存默认不勾），两个开关分别验证"选择确实生效"。缓存 marker 放在 logs
-    # （派生物白名单里）与 unsaved（刻意保留）两处，确保只清可再生的。
+    # Overwrite install: remove the previous version first, then install again. Removal is done
+    # in-process by the installer itself (the old uninstall.exe is not executed, which would pop a
+    # second uninstall window). Options match the uninstall page (Delete models checked by default,
+    # Delete cache unchecked by default); the two switches verify separately that "the choice really
+    # takes effect". Cache markers sit in both logs (inside the derivatives whitelist) and unsaved
+    # (deliberately kept) so only the regenerable ones get cleaned.
     New-Item -ItemType Directory -Force (Split-Path $modelMarker -Parent) | Out-Null
     New-Item -ItemType Directory -Force (Split-Path $disposableMarker -Parent) | Out-Null
     New-Item -ItemType Directory -Force (Split-Path $userDataMarker -Parent) | Out-Null
     Set-Content -LiteralPath $modelMarker -Value 'old'
     Set-Content -LiteralPath $disposableMarker -Value 'old'
     Set-Content -LiteralPath $userDataMarker -Value 'keep'
-    Assert-That '覆盖安装先卸载上一版（默认删除模型、保留缓存）' {
+    Assert-That 'overwrite install uninstalls the previous version first (models deleted, cache kept by default)' {
         $before = Get-Item -LiteralPath (Join-Path $installDir 'HiFiShifter.exe')
         $again = Invoke-InstallerProcess $testInstaller @('/S')
-        if ($again.ExitCode -ne 0) { throw "覆盖安装退出码 $($again.ExitCode)" }
-        if (!(Test-Path (Join-Path $installDir 'HiFiShifter.exe'))) { throw '重装后主程序不见了' }
-        if (!(Test-Path (Join-Path $modelDir 'models.json'))) { throw '重装后模型库没有被重新写入' }
-        if (Test-Path -LiteralPath $modelMarker) { throw '卸载器没有按默认勾选删掉旧模型库' }
-        if (!(Test-Path -LiteralPath $disposableMarker)) { throw '默认不该清理缓存与日志' }
-        if (!(Test-Path -LiteralPath $userDataMarker)) { throw '用户数据被误删' }
+        if ($again.ExitCode -ne 0) { throw "overwrite install exit code $($again.ExitCode)" }
+        if (!(Test-Path (Join-Path $installDir 'HiFiShifter.exe'))) { throw 'main executable missing after reinstall' }
+        if (!(Test-Path (Join-Path $modelDir 'models.json'))) { throw 'model library not rewritten after reinstall' }
+        if (Test-Path -LiteralPath $modelMarker) { throw 'uninstaller did not delete the old model library as the default checkbox dictates' }
+        if (!(Test-Path -LiteralPath $disposableMarker)) { throw 'cache and logs must not be cleaned by default' }
+        if (!(Test-Path -LiteralPath $userDataMarker)) { throw 'user data was wrongly deleted' }
         $mtime = (Get-Item -LiteralPath (Join-Path $modelDir 'models.json')).LastWriteTimeUtc
-        "重写于 $mtime（旧 exe $($before.LastWriteTimeUtc)）"
+        "rewritten at $mtime (old exe $($before.LastWriteTimeUtc))"
     }
 
-    # 重建 marker，验「取消勾选删除模型 + 勾选清理缓存」两个分支。
+    # Rebuild markers to verify the two branches "keep models unchecked + clean cache checked".
     New-Item -ItemType Directory -Force (Split-Path $modelMarker -Parent) | Out-Null
     Set-Content -LiteralPath $modelMarker -Value 'keep'
     Set-Content -LiteralPath $disposableMarker -Value 'old'
-    Assert-That '覆盖安装可以保留模型、并按选择清理缓存' {
+    Assert-That 'overwrite install can keep models and clean cache per the choice' {
         $keep = Invoke-InstallerProcess $testInstaller @('/S', '/DeleteModels=0', '/DeleteCache=1')
-        if ($keep.ExitCode -ne 0) { throw "覆盖安装退出码 $($keep.ExitCode)" }
-        if (!(Test-Path -LiteralPath $modelMarker)) { throw '用户选择保留，模型库 marker 却被删了' }
-        if (!(Test-Path (Join-Path $installDir 'HiFiShifter.exe'))) { throw '重装后主程序不见了' }
-        if (Test-Path -LiteralPath $disposableMarker) { throw '用户勾选了清理缓存，logs marker 却还在' }
-        if (!(Test-Path -LiteralPath $userDataMarker)) { throw '清理缓存误删了 unsaved 用户数据' }
-        '模型保留 / 缓存清理 / 用户数据保留'
+        if ($keep.ExitCode -ne 0) { throw "overwrite install exit code $($keep.ExitCode)" }
+        if (!(Test-Path -LiteralPath $modelMarker)) { throw 'user chose to keep, yet the model library marker was deleted' }
+        if (!(Test-Path (Join-Path $installDir 'HiFiShifter.exe'))) { throw 'main executable missing after reinstall' }
+        if (Test-Path -LiteralPath $disposableMarker) { throw 'user checked clean cache, yet the logs marker is still there' }
+        if (!(Test-Path -LiteralPath $userDataMarker)) { throw 'cache cleanup wrongly deleted the unsaved user data' }
+        'models kept / cache cleaned / user data kept'
     }
-    # ── 共享模型库的"旧根"（版本差异）────────────────────────────────────
-    # 共享库的落点会随安装器版本变。安装器把根写进卸载项的 ModelRoot；升级时必须按
-    # 记录处理旧根：选择保留 → 并入新根（同版本重复就删掉旧副本）；选择删除 → 连旧根
-    # 一起清掉。否则磁盘上会留下一份运行时根本不读的 150 MB。
+    # ── Shared model library "legacy root" (version drift)
+    # The shared library's location changes with the installer version. The installer writes the root
+    # into the uninstall entry's ModelRoot; on upgrade the recorded root must be handled: keep → merge
+    # into the new root (drop the old copy when the version duplicates); delete → clear the legacy
+    # root too. Otherwise a weights copy the runtime never reads stays on disk.
     $legacyModelRoot = Join-Path $env:APPDATA 'HiFiShifterTestLegacy\models'
     $legacyModelRoot2 = Join-Path $env:APPDATA 'HiFiShifterTestLegacy2\models'
     $arpRegPath = 'HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\HiFiShifter'
     New-Item -ItemType Directory -Force (Join-Path $legacyModelRoot $manifest.version) | Out-Null
     Set-Content -LiteralPath (Join-Path $legacyModelRoot "$($manifest.version)\models.json") -Value '{}'
     & reg.exe add $arpRegPath /v ModelRoot /t REG_SZ /d $legacyModelRoot /f | Out-Null
-    Assert-That '覆盖安装“保留模型”会把旧根的重复副本清掉' {
+    Assert-That 'overwrite install with "keep models" clears the duplicate copy in the legacy root' {
         $keep2 = Invoke-InstallerProcess $testInstaller @('/S', '/DeleteModels=0')
-        if ($keep2.ExitCode -ne 0) { throw "覆盖安装退出码 $($keep2.ExitCode)" }
-        if (Test-Path -LiteralPath $legacyModelRoot) { throw "旧模型根仍在：$legacyModelRoot" }
-        if (!(Test-Path (Join-Path $modelDir 'models.json'))) { throw '模型库没有被保留' }
+        if ($keep2.ExitCode -ne 0) { throw "overwrite install exit code $($keep2.ExitCode)" }
+        if (Test-Path -LiteralPath $legacyModelRoot) { throw "legacy model root still exists: $legacyModelRoot" }
+        if (!(Test-Path (Join-Path $modelDir 'models.json'))) { throw 'model library was not kept' }
         'legacy root merged and de-duplicated'
     }
 
     New-Item -ItemType Directory -Force (Join-Path $legacyModelRoot2 $manifest.version) | Out-Null
     Set-Content -LiteralPath (Join-Path $legacyModelRoot2 "$($manifest.version)\models.json") -Value '{}'
     & reg.exe add $arpRegPath /v ModelRoot /t REG_SZ /d $legacyModelRoot2 /f | Out-Null
-    Assert-That '覆盖安装“删除模型”会把旧模型根一起清掉' {
+    Assert-That 'overwrite install with "delete models" clears the legacy model root too' {
         $purge = Invoke-InstallerProcess $testInstaller @('/S', '/DeleteModels=1')
-        if ($purge.ExitCode -ne 0) { throw "覆盖安装退出码 $($purge.ExitCode)" }
-        if (Test-Path -LiteralPath $legacyModelRoot2) { throw "旧模型根仍在：$legacyModelRoot2" }
-        if (!(Test-Path (Join-Path $modelDir 'models.json'))) { throw '模型库没有被重新写入' }
+        if ($purge.ExitCode -ne 0) { throw "overwrite install exit code $($purge.ExitCode)" }
+        if (Test-Path -LiteralPath $legacyModelRoot2) { throw "legacy model root still exists: $legacyModelRoot2" }
+        if (!(Test-Path (Join-Path $modelDir 'models.json'))) { throw 'model library was not rewritten' }
         'legacy root purged'
     }
 
-    # 最后一次独立卸载也用全新的 marker 验「默认删除模型、保留缓存」。
-    # /DeleteCache=1 可能已经删空 logs 目录，重建父目录再写 marker。
+    # The final standalone uninstall also uses fresh markers to verify "delete models, keep cache"
+    # defaults. /DeleteCache=1 may have emptied the logs directory; recreate the parent directories
+    # before writing markers.
     New-Item -ItemType Directory -Force (Split-Path $modelMarker -Parent) | Out-Null
     New-Item -ItemType Directory -Force (Split-Path $disposableMarker -Parent) | Out-Null
     Set-Content -LiteralPath $modelMarker -Value 'old'
     Set-Content -LiteralPath $disposableMarker -Value 'old'
 
-    Write-Host '  卸载（静默）...' -ForegroundColor DarkGray
-    # 把 .hsp 模拟成别的程序：卸载器只能清掉仍指向本安装的 .hshp，不能碰它。
-    # 用 reg.exe 而不是 RegistryKey.SetValue：Get-Item 返回的键是只读句柄。
+    Write-Host '  Uninstalling (silent)...' -ForegroundColor DarkGray
+    # Pretend .hsp belongs to another program: the uninstaller may only clear .hshp entries still
+    # pointing at this install, and must not touch it. Use reg.exe instead of RegistryKey.SetValue:
+    # keys returned by Get-Item are read-only handles.
     & reg.exe add "$classesRegPath\$foreignProgId\shell\open\command" /ve /d '"C:\Other\Other.exe" "%1"' /f | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "无法创建外来 ProgID（reg add 退出码 $LASTEXITCODE）" }
+    if ($LASTEXITCODE -ne 0) { throw "cannot create the foreign ProgID (reg add exit code $LASTEXITCODE)" }
     & reg.exe add "$classesRegPath\.hsp" /ve /d $foreignProgId /f | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "无法写入 .hsp 外来关联（reg add 退出码 $LASTEXITCODE）" }
+    if ($LASTEXITCODE -ne 0) { throw "cannot write the foreign .hsp association (reg add exit code $LASTEXITCODE)" }
 
     New-Item -ItemType Directory -Force (Split-Path $disposableMarker -Parent) | Out-Null
     New-Item -ItemType Directory -Force (Split-Path $userDataMarker -Parent) | Out-Null
     Set-Content -LiteralPath $disposableMarker -Value 'disposable'
     Set-Content -LiteralPath $userDataMarker -Value 'keep'
     $uninstaller = Join-Path $installDir 'uninstall.exe'
-    if (!(Test-Path $uninstaller)) { throw '缺少 uninstall.exe' }
+    if (!(Test-Path $uninstaller)) { throw 'missing uninstall.exe' }
     Invoke-InstallerProcess $uninstaller @('/S') | Out-Null
-    # 卸载器把自己复制到临时目录再运行，退出码在 -Wait 下并不可靠；用目录与注册表判定。
-    Start-Sleep -Seconds 3
+    # The uninstaller copies itself to a temp directory before running, so its exit code is not
+    # reliable under -Wait; judge by directory and registry state instead.
+    # [Why poll instead of a fixed 3-second sleep] On slow machines / under real-time antivirus
+    # scanning, 3 seconds may only get halfway through the uninstall, and the later assertions would
+    # misread "not finished deleting yet" as "not fully deleted". Poll until both the App directory
+    # and the ARP key are gone (60-second cap) before continuing; on timeout, do not throw — the
+    # itemized assertions below produce a failure precise to the entry.
+    $uninstallDone = $false
+    for ($i = 0; $i -lt 120; $i++) {
+        if (!(Test-Path $installDir) -and !(Test-Path $arpKey)) { $uninstallDone = $true; break }
+        Start-Sleep -Milliseconds 500
+    }
+    if (!$uninstallDone) {
+        Write-Warning 'uninstall still left residue after 60 seconds (App directory / ARP key); continuing with assertions to locate the specific items.'
+    }
 
-    Assert-That '卸载后 App 目录消失' {
-        if (Test-Path $installDir) { throw "目录仍存在：$installDir" }
+    Assert-That 'App directory gone after uninstall' {
+        if (Test-Path $installDir) { throw "directory still exists: $installDir" }
         'gone'
     }
-    Assert-That '卸载后 CLAP 文件消失' {
-        if (Test-Path (Join-Path $clapDir 'HiFiShifter.clap')) { throw 'HiFiShifter.clap 仍存在' }
-        if (Test-Path $clapResDir) { throw "插件资源目录仍存在：$clapResDir" }
+    Assert-That 'CLAP files gone after uninstall' {
+        if (Test-Path (Join-Path $clapDir 'HiFiShifter.clap')) { throw 'HiFiShifter.clap still exists' }
+        if (Test-Path $clapResDir) { throw "plugin resource directory still exists: $clapResDir" }
         'module + shared resources gone'
     }
-    Assert-That '卸载后 VST3 目录消失' {
-        if (Test-Path (Join-Path $vst3Dir 'HiFiShifter.vst3')) { throw '插件目录仍存在' }
+    Assert-That 'VST3 directory gone after uninstall' {
+        if (Test-Path (Join-Path $vst3Dir 'HiFiShifter.vst3')) { throw 'plugin directory still exists' }
         'gone'
     }
-    Assert-That '卸载后 ARP 键消失' {
-        if (Test-Path $arpKey) { throw "注册表键仍存在：$arpKey" }
+    Assert-That 'ARP key gone after uninstall' {
+        if (Test-Path $arpKey) { throw "registry key still exists: $arpKey" }
         'gone'
     }
-    Assert-That '卸载只解除自己的关联，保留别人的默认程序' {
+    Assert-That 'uninstall removes only its own associations, keeping foreign default programs' {
         $hshp = Get-RegDefault "$classesRoot\.hshp"
-        if ($hshp -eq 'HiFiShifter.Project') { throw '.hshp 仍绑定 HiFiShifter.Project' }
+        if ($hshp -eq 'HiFiShifter.Project') { throw '.hshp still bound to HiFiShifter.Project' }
         if (Test-Path -LiteralPath "$classesRoot\HiFiShifter.Project") {
-            throw 'HiFiShifter.Project ProgID 仍存在'
+            throw 'HiFiShifter.Project ProgID still exists'
         }
         if (Test-Path -LiteralPath "$classesRoot\Applications\HiFiShifter.exe") {
-            throw 'Applications\HiFiShifter.exe 仍存在'
+            throw 'Applications\HiFiShifter.exe still exists'
         }
         $hsp = Get-RegDefault "$classesRoot\.hsp"
-        if ($hsp -ne $foreignProgId) { throw ".hsp 被误改：$hsp" }
+        if ($hsp -ne $foreignProgId) { throw ".hsp wrongly modified: $hsp" }
         if (!(Test-Path -LiteralPath "$classesRoot\$foreignProgId")) {
-            throw "$foreignProgId 被误删"
+            throw "$foreignProgId wrongly deleted"
         }
         if ($null -ne (Get-RegValue "$classesRoot\.hshp\OpenWithProgids" 'HiFiShifter.Project')) {
-            throw '.hshp\OpenWithProgids 仍残留 HiFiShifter.Project'
+            throw '.hshp\OpenWithProgids still contains HiFiShifter.Project'
         }
         if ($null -ne (Get-RegValue "$classesRoot\.hsp\OpenWithProgids" 'HiFiShifter.Project')) {
-            throw '.hsp\OpenWithProgids 仍残留 HiFiShifter.Project'
+            throw '.hsp\OpenWithProgids still contains HiFiShifter.Project'
         }
         'own removed, foreign kept'
     }
-    # 【为什么模型库默认断言是"删除"】「删除模型」默认勾选：150 MB 只由本产品
-    # 写入，卸载后继续占磁盘不符合用户预期。缓存与日志仍默认保留（重装排障
-    # 时要复用缓存，日志是定位上次故障的唯一线索）。
-    Assert-That '卸载默认删除共享模型库（取消勾选才保留）' {
-        if (Test-Path -LiteralPath $modelMarker) { throw "模型库标记没有被删除：$modelMarker" }
+    # [Why the model library default assertion is "deleted"] "Delete models" is checked by default:
+    # the model library is written only by this product, and it keeping occupying disk after uninstall
+    # defies user expectations. Cache and logs stay kept by default (a reinstall reuses the cache
+    # while troubleshooting, and the logs are the only clue for locating the last failure).
+    Assert-That 'uninstall deletes the shared model library by default (kept only when unchecked)' {
+        if (Test-Path -LiteralPath $modelMarker) { throw "model library marker was not deleted: $modelMarker" }
         'deleted'
     }
-    Assert-That '卸载默认保留缓存与日志' {
-        if (!(Test-Path -LiteralPath $disposableMarker)) { throw "派生物标记被误删：$disposableMarker" }
-        if (!(Test-Path -LiteralPath $userDataMarker)) { throw "用户数据标记被误删：$userDataMarker" }
+    Assert-That 'uninstall keeps cache and logs by default' {
+        if (!(Test-Path -LiteralPath $disposableMarker)) { throw "derivatives marker wrongly deleted: $disposableMarker" }
+        if (!(Test-Path -LiteralPath $userDataMarker)) { throw "user data marker wrongly deleted: $userDataMarker" }
         'kept'
     }
 }
@@ -555,7 +598,7 @@ finally {
     Remove-GateDirectory $testRoot
     Remove-Item $testInstaller -Force -ErrorAction SilentlyContinue
     Remove-Item $disposableMarker, $userDataMarker -Force -ErrorAction SilentlyContinue
-    # 测试模式模型根是门禁专用的，整目录清掉，不留 .staging。
+    # The test-mode model root is gate-only; clear the whole directory, leaving no .staging.
     Remove-GateDirectory (Join-Path $env:APPDATA 'HiFiShifterTest')
 }
 

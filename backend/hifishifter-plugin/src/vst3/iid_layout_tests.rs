@@ -4,6 +4,11 @@
 //! 任何一次"顺手把 `platform_iid` 改成 `uid_guid`"的改动，都会让 Linux / macOS 上
 //! 所有"插件 → 宿主"的 `queryInterface` 静默失败（宿主回 null 指针，日志只剩一行
 //! `available=false`），而 Windows 上一切正常 —— 是最难在 CI 里被发现的一类回归。
+//!
+//! 【为什么挂在 `vst3_abi` 而不是 VST3 壳】它测的是词汇层的布局约定；壳搬走之后，
+//! 这份约定仍由
+//! 共享层自己钉住 —— `editor/routing.rs` / `editor/gui/linux.rs` / `host/reaper/`
+//! 都在用它。
 
 use super::*;
 
@@ -55,24 +60,4 @@ fn the_alternate_iid_is_the_other_layout_of_the_same_words() {
 
     assert_eq!(alternate_iid(WORDS), expected);
     assert_ne!(platform_iid(WORDS), alternate_iid(WORDS));
-}
-
-/// 类 ID **不能**跟着平台变：它们已经写进用户工程，换布局等于让所有实例"插件丢失"。
-///
-/// 【为什么在这里钉】`platform_iid` 的存在很容易被误读成"所有 TUID 都该走它"。
-/// 这条用例把边界画出来：只有"发给宿主去比较的接口 IID"跟着平台走。
-#[test]
-fn class_ids_stay_in_one_layout_on_every_platform() {
-    assert_eq!(
-        PROCESSOR_CID,
-        uid_guid([0x9C3A_4F17, 0x1E8B, 0x4D02, 0xB7A1_3C6E])
-    );
-    assert_eq!(
-        CONTROLLER_CID,
-        uid_guid([0x9C3A_4F18, 0x1E8B, 0x4D02, 0xB7A1_3C6E])
-    );
-    assert_eq!(
-        FACTORY_CID,
-        uid_guid([0x9C3A_4F19, 0x1E8B, 0x4D02, 0xB7A1_3C6E])
-    );
 }

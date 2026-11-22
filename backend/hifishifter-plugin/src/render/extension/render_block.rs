@@ -50,7 +50,7 @@ impl ExtensionOwner {
     /// # Safety
     /// `block` 的平面由宿主提供，非空平面至少含 `frames` 帧；本函数只在本回调内使用
     /// 它们，不保留任何指针。
-    pub(crate) unsafe fn render_block(
+    pub unsafe fn render_block(
         &self,
         block: &mut crate::audio_block::AudioBlock<'_>,
         context: Option<crate::block_context::BlockContext>,
@@ -69,13 +69,16 @@ impl ExtensionOwner {
         let outcome = unsafe { self.render_block_inner(block, context, evidence) };
         if auditing {
             let audit = block.count_unwritten();
-            if audit.unwritten > 0 {
-                // 【诊断可以暴露 bug，但不能让宿主收到 NaN】漏写一旦发生，返回宿主前
-                // 把非有限样本清成 0。unwritten 仍然如实记录，所以 bug 没有被掩盖。
-                let scrubbed = block.sanitize_non_finite_outputs();
-                log::debug!("[buf] scrubbed {scrubbed} non-finite output sample(s)");
-            }
-            self.note_buffer_audit(audit, aliased, block.in_place, block.frames);
+            // 【诊断可以暴露 bug，但不能让宿主收到 NaN】漏写一旦发生，返回宿主前
+            // 把非有限样本清成 0。计数进审计读数由非实时线程带出（`log_buffer_audit`）：
+            // 漏写发生时多半正是掉线现场，音频线程此刻抢日志锁、做文件 I/O 只会放大
+            // 故障 —— 与"音频线程不能写文件、不能抢日志锁"的同一条纪律（audio_stats）。
+            let scrubbed = if audit.unwritten > 0 {
+                block.sanitize_non_finite_outputs()
+            } else {
+                0
+            };
+            self.note_buffer_audit(audit, scrubbed, aliased, block.in_place, block.frames);
         }
         outcome
     }
@@ -121,6 +124,16 @@ impl ExtensionOwner {
                 RenderOutcome::Done
             };
         };
+        // 【未知 process_mode 必须拒绝】SDK 只定义 0/1/2；把它当成 Realtime 会把
+        // 离线/未知流写进实时捕获与门控状态。透传是最诚实的降级。
+        // 【为什么排在停播门控**之前**】门控分支会把 `evidence.stream` 缺省成
+        // Realtime 并去清实时门的尾巴/去咔状态 —— 对未知流做这套写入，正是上面
+        // 这条注释禁止的污染；停播 + 未知流的组合会先落进门控分支。透传不写任何
+        // 状态，必须先判。
+        if ProcessStream::from_mode(block.mode).is_none() {
+            let _ = unsafe { block.pass_through() };
+            return RenderOutcome::Done;
+        }
         // REAPER 停播也会 process 固定光标位置；只离线导出允许没有 kPlaying 的供音。
         //
         // 【为什么这一支必须排在 `capture_stage` **之前**】门控判“要静音”时若已经
@@ -128,14 +141,13 @@ impl ExtensionOwner {
         // 小块**新位置**的音频。先判、后写，“清输出”才是真的清。
         if !block.is_offline() && !self.capture_should_emit(evidence, context.playing) {
             let stream = evidence.map_or(ProcessStream::Realtime, |evidence| evidence.stream);
-            self.note_gate_cleared(stream);
+            // 【为什么把相位一起报上去】"位置在走却把门关了"是结构性错误（那个块会被
+            // 真的播出来），而停播时的淡出是正确行为。两者混在一个计数里就没有判据。
+            self.note_gate_cleared(
+                stream,
+                evidence.is_some_and(|evidence| evidence.phase == TransportPhase::Rolling),
+            );
             self.apply_gate_fade_out(stream, &mut block.output, block.frames);
-            return RenderOutcome::Done;
-        }
-        // 【未知 process_mode 必须拒绝】SDK 只定义 0/1/2；把它当成 Realtime 会把
-        // 离线/未知流写进实时捕获与门控状态。透传是最诚实的降级。
-        if ProcessStream::from_mode(block.mode).is_none() {
-            let _ = unsafe { block.pass_through() };
             return RenderOutcome::Done;
         }
         // 【Capture 通路】在快照输出之前插入。它要么自己写完输出（`Handled`），要么
@@ -350,7 +362,7 @@ impl ExtensionOwner {
     /// 此前这三步各写一份：VST3 在外壳里顺序调用，CLAP 只走了其中一部分 ——
     /// 于是 CLAP 的离线导出永远拿不到本地起点（offline_pass_active 恒假 ⇒
     /// 离线准备不要求用户曲线 ⇒ 产物里是"没处理"的声音），而且从未记过精度。
-    pub(crate) fn observe_input_block(
+    pub fn observe_input_block(
         &self,
         mut input: crate::capture::recorder::InputBlock<'_>,
         context: crate::block_context::BlockContext,
@@ -371,6 +383,9 @@ impl ExtensionOwner {
             stream.index() as i32,
             input.frames,
             evidence.is_some_and(|evidence| evidence.position_trusted),
+            evidence
+                .as_ref()
+                .map_or(0, |evidence| evidence.playhead_offset),
         );
         evidence
     }

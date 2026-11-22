@@ -191,8 +191,8 @@ export function resolveViewportReplay(input: ViewportReplayInput): ViewportRepla
  */
 export function warnViewportReplayButtonsLost(lastMoveButtons: number | null): void {
     warnDev(
-        "[pianoRoll] 拖拽中却没有观测到按下的按键，本次视口重放已跳过" +
-            "（重放载荷的按键状态取「此刻」而非最近一次事件，见 viewportReplay.ts）" +
+        "[pianoRoll] a drag is in progress but no pressed buttons were observed; this viewport replay is skipped" +
+            ' (the replay payload reads the button state "right now" instead of the last event, see viewportReplay.ts)' +
             ` lastMoveButtons=${lastMoveButtons ?? "<none>"}`,
     );
 }

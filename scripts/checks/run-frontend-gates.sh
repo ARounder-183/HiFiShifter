@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
-# 前端门禁的唯一入口：lint 预算 / 格式 / 单测 / 生产构建。
+# The single entry point for the frontend gates: lint budget / formatting / unit tests /
+# production build.
 #
-# 【为什么合并成一条】同一组命令此前写在 build.yml 与 vst3.yml 两处，参数还不一样
-# （后者只跑 lint:budget + format:check + test，不跑 build）。于是"前端能不能构建"
-# 只有在 build.yml 上被验证过，而插件流水线用的正是同一份 frontend/dist。
+# [Why merged into one] The same commands used to live in build.yml and vst3.yml with
+# differing arguments (the latter ran only lint:budget + format:check + test, not build).
+# So "can the frontend build" was only ever verified on build.yml — while the plugin
+# pipelines consume the very same frontend/dist.
 #
 #   bash scripts/checks/run-frontend-gates.sh
 #
-# 依赖已安装（工作流里先跑 npm ci）：本脚本只做门禁，不做安装。
+# Dependencies are already installed (workflows run npm ci first): this script only gates,
+# it does not install.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-# ESLint 10 / Vite 8 / Vitest 5 都要求 Node >= 22.12（见 frontend/package.json engines）。
-# 混合环境（Windows 安装的 node_modules 被 WSL 的 node 解释）会报 util.styleText 缺失或
-# ESM 解析错误；显式校验版本，把环境问题与源码回归区分开。
-# 【为什么比较到 minor】只查 major>=22 会放过 22.0–22.11：这几个版本没有
-# util.styleText，会在 rolldown 里直接崩，报错看起来像源码回归。
+# ESLint 10 / Vite 8 / Vitest 5 all require Node >= 22.12 (see frontend/package.json engines).
+# Mixed environments (node_modules installed on Windows but interpreted by WSL's node) fail
+# with a missing util.styleText or ESM parse errors; checking the version explicitly
+# separates environment problems from source regressions.
+# [Why compare down to the minor] Checking only major >= 22 would let 22.0-22.11 slip
+# through: those versions lack util.styleText and crash outright in rolldown, with errors
+# that look like source regressions.
 if ! command -v node >/dev/null 2>&1; then
     echo "run-frontend-gates: node not found on PATH; install Node >= 22.12" >&2
     exit 1
@@ -28,14 +33,17 @@ if [ "$NODE_MAJOR" -lt 22 ] || { [ "$NODE_MAJOR" -eq 22 ] && [ "$NODE_MINOR" -lt
     exit 1
 fi
 
-# lint:budget / format:check / typecheck 的判据已经绑在 npm test 内的
-# buildGates.test.ts 与 lintBudget.test.ts（见 frontend/README.md）：直接跑测试时
-# 也绕不开它们。这里不再重复调用，避免 CI 把同一组命令各跑两遍（实测每轮各约 70 秒）。
-# 单元测试（含 i18n 完整性、lint 预算、格式/类型检查、文件体积预算等门禁型用例）。
+# The lint:budget / format:check / typecheck criteria are already bound inside npm test's
+# buildGates.test.ts and lintBudget.test.ts (see frontend/README.md): running the tests
+# cannot bypass them either. They are not invoked again here, so CI does not run the same
+# commands twice (measured ~70 seconds each per round).
+# Unit tests (including gate-style cases: i18n completeness, lint budget, format/type
+# checks, file size budgets, and more).
 npm --prefix frontend run test
 
-# 生产构建：typecheck + vite build + SDK 类型产物。
+# Production build: typecheck + vite build + SDK type artifacts.
 npm --prefix frontend run build
 
-# 体积预算：构建完 dist 才能测量；不再只作为没人调用的 package.json 脚本存在。
+# Size budget: only measurable once dist is built; no longer exists merely as an uncalled
+# package.json script.
 npm --prefix frontend run check:bundle

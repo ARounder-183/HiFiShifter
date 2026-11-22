@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug)]
 #[repr(u8)]
-pub(crate) enum Stage {
+pub enum Stage {
     Component,
     AraBind,
     ViewRequested,

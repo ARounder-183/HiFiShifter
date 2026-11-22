@@ -22,8 +22,8 @@ function assert(condition: boolean, label: string): void {
 /** 与真实语言包同形的文案（键名一致，值取 zh-CN）。 */
 function translate(key: string): string {
     switch (key) {
-        case "dock_drag_rearrange":
-            return "拖拽以重排";
+        case "dock_drag_float":
+            return "拖拽以浮动";
         case "dock_dock_hint":
             return "按住 {modifier} 可停靠";
         case "dock_dock_hint_always":
@@ -61,14 +61,15 @@ test("components/dock/dockTooltips.test.ts scripted checks", async () => {
     // ── 抓手提示：两行 + 修饰键文本 ────────────────────────────────
     {
         const hint = dockDragHint("primary", translate);
-        assertEqual(hint, "拖拽以重排" + "\n" + "按住 Ctrl 可停靠", "modifier is interpolated");
+        assertEqual(hint, "拖拽以浮动" + "\n" + "按住 Ctrl 可停靠", "modifier is interpolated");
         assert(hint.includes("\n"), "the hint is two lines (the custom tooltip renders pre-line)");
         assert(!hint.includes("{modifier}"), "no placeholder is left behind");
+        assert(!hint.includes("重排"), "a single tab has no order to rearrange");
 
         // `dockModifier: "none"`（始终停靠）→ 换一句不带修饰键的提示。
         assertEqual(
             dockDragHint("none", translate),
-            "拖拽以重排" + "\n" + "拖到目标位置即可停靠",
+            "拖拽以浮动" + "\n" + "拖到目标位置即可停靠",
             "the always-dock variant omits the modifier",
         );
     }

@@ -159,17 +159,26 @@ pub enum SkipReason {
     TooLarge,
     /// 磁盘可用空间低于保留值。
     LowDiskSpace,
+    /// 产物含非有限采样（NaN / ±Inf）。
+    ///
+    /// 【为什么是硬门】声码器的 STFT/ISTFT 与 ONNX 推理都存在产生 NaN 的路径
+    /// （`seam.rs` 的契约），而 NaN 一旦落盘就是**永久毒化**：重启后 `load_rendered`
+    /// 照样命中，导出（MP3 编码器对 NaN 不安全）跟着坏。生产侧的净化
+    /// （`sanitize_finite_in_place`）负责让产物有限，这道门负责**证明**它 ——
+    /// 任何一条没来得及净化的新生产路径，坏产物在这里止步，而不是进磁盘。
+    NonFinite,
 }
 
 impl SkipReason {
     /// 全部原因，按固定顺序（统计输出稳定，便于比对与测试）。
-    pub const ALL: [SkipReason; 6] = [
+    pub const ALL: [SkipReason; 7] = [
         SkipReason::Disabled,
         SkipReason::Empty,
         SkipReason::TooShort,
         SkipReason::TooSmall,
         SkipReason::TooLarge,
         SkipReason::LowDiskSpace,
+        SkipReason::NonFinite,
     ];
 
     /// 稳定标识（日志 / JSON 键，勿随文案改动）。
@@ -181,6 +190,7 @@ impl SkipReason {
             SkipReason::TooSmall => "tooSmall",
             SkipReason::TooLarge => "tooLarge",
             SkipReason::LowDiskSpace => "lowDiskSpace",
+            SkipReason::NonFinite => "nonFinite",
         }
     }
 
@@ -193,6 +203,7 @@ impl SkipReason {
             SkipReason::TooSmall => 3,
             SkipReason::TooLarge => 4,
             SkipReason::LowDiskSpace => 5,
+            SkipReason::NonFinite => 6,
         }
     }
 }
@@ -243,7 +254,11 @@ impl AdmissionCounters {
 }
 
 static SESSION_ACCEPTED: AtomicU64 = AtomicU64::new(0);
-static SESSION_SKIPPED: [AtomicU64; 6] = [
+// 【长度钉在 SkipReason::ALL 上】此前硬编码 6：新增原因时这里不会跟着变，
+// `note_skipped` 就会越界索引 panic。类型跟着 `ALL.len()` 走，初始化器少了
+// 一个直接编译失败。
+static SESSION_SKIPPED: [AtomicU64; SkipReason::ALL.len()] = [
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -254,6 +269,15 @@ static SESSION_SKIPPED: [AtomicU64; 6] = [
 
 fn note_accepted() {
     SESSION_ACCEPTED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// 磁盘缓存的有限性不变量：给出的每一条 payload 都不得含非有限采样（NaN / ±Inf）。
+///
+/// 【为什么是纯函数】`store_*` 的门槛要可单测 —— 直接调 `store_rendered` 会真往
+/// 磁盘投递（Immediate 模式）并污染会话级准入计数；这条不变量本身的判据
+/// （"NaN 进磁盘 = 永久毒化"）值得一条不依赖全局状态的回归测试。
+fn payload_is_finite(bufs: &[&[f32]]) -> bool {
+    bufs.iter().all(|buf| buf.iter().all(|v| v.is_finite()))
 }
 
 fn note_skipped(reason: SkipReason) {
@@ -501,6 +525,16 @@ pub fn store_rendered(key: &RenderedClipCacheKey, entry: &RenderedClipCacheEntry
         note_skipped(reason);
         return;
     }
+    // 有限性扫描放在许可检查之后：缓存关闭/条目超限时不必白扫一遍大缓冲。
+    // 这是磁盘缓存的唯一入口（`store_*`），在这里把非有限产物挡在门外。
+    let secondary_finite = entry
+        .breath_noise_stereo
+        .as_ref()
+        .is_none_or(|n| payload_is_finite(&[n]));
+    if !payload_is_finite(&[&entry.pcm_stereo]) || !secondary_finite {
+        note_skipped(SkipReason::NonFinite);
+        return;
+    }
     note_accepted();
     dispatch(
         writer::PendingEntry {
@@ -523,6 +557,11 @@ pub fn store_noise(key: &BreathNoiseCacheKey, entry: &BreathNoiseCacheEntry) {
     let rt = runtime_snapshot();
     if let Err(reason) = admit(&rt, entry.frames, entry.sample_rate, payload_bytes) {
         note_skipped(reason);
+        return;
+    }
+    // 与 store_rendered 同一条磁盘不变量（见 SkipReason::NonFinite）。
+    if !payload_is_finite(&[&entry.noise_stereo]) {
+        note_skipped(SkipReason::NonFinite);
         return;
     }
     note_accepted();
@@ -863,6 +902,19 @@ mod tests {
         assert_eq!(admit(&rt, 48_000, 48_000, 384_000), Ok(()));
     }
 
+    /// NaN / ±Inf 一律不得进磁盘缓存：NaN 一旦落盘就是永久毒化（重启后照样命中，
+    /// 导出跟着坏），这条不变量必须能在不触碰全局计数与真实落盘的情况下被验证。
+    #[test]
+    fn non_finite_payloads_fail_the_finiteness_invariant() {
+        assert!(payload_is_finite(&[&[0.0, 0.5, -0.5]]));
+        assert!(payload_is_finite(&[&[0.0; 8], &[0.25; 8]]));
+        assert!(!payload_is_finite(&[&[0.0, f32::NAN]]));
+        assert!(!payload_is_finite(&[&[0.0, f32::INFINITY]]));
+        assert!(!payload_is_finite(&[&[0.0], &[f32::NEG_INFINITY]]));
+        // 空缓冲没有坏样本：不是拒绝理由（空产物由 admit 的 Empty 判据负责）。
+        assert!(payload_is_finite(&[&[]]));
+    }
+
     #[test]
     fn degenerate_entries_are_rejected_as_too_small() {
         let rt = snapshot();
@@ -925,12 +977,12 @@ mod tests {
         let earlier = AdmissionCounters {
             accepted: 10,
             skipped: 3,
-            skipped_by_reason: [0, 0, 3, 0, 0, 0],
+            skipped_by_reason: [0, 0, 3, 0, 0, 0, 0],
         };
         let later = AdmissionCounters {
             accepted: 12,
             skipped: 180,
-            skipped_by_reason: [0, 0, 175, 5, 0, 0],
+            skipped_by_reason: [0, 0, 175, 5, 0, 0, 0],
         };
         let delta = later.since(&earlier);
         assert_eq!(delta.accepted, 2);

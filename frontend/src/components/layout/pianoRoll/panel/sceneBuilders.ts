@@ -33,7 +33,6 @@ import { DYN_DEFAULT_VIEW, DYN_VALUE_MAX, isDynParam, VOLUME_DEFAULT_VIEW } from
 import { supportsParamAxisUnit } from "../paramAxisUnits";
 import { isPanParam, resolvePanAxisDirection } from "../paramPan";
 import { framesToTime } from "../utils";
-import { viewportEndSec, viewportStartSec } from "../../renderKernel/timelineAxis.js";
 import {
     CHILD_PITCH_OFFSET_CENTS_RANGE,
     CHILD_PITCH_OFFSET_DEGREES_RANGE,
@@ -102,6 +101,7 @@ export function buildGridSpec(
     deps: Pick<
         ModelDeps,
         | "clampViewport"
+        | "dynamicProjectSec"
         | "editParam"
         | "editParamAxisUnit"
         | "effectiveProjectScale"
@@ -109,7 +109,6 @@ export function buildGridSpec(
         | "getCurrentViewportForScrollbar"
         | "getParamValueBoundsForScrollbar"
         | "paramAxisDirectionsRef"
-        | "prAxis"
         | "processorParamsRef"
         | "s"
         | "themeMode"
@@ -118,6 +117,7 @@ export function buildGridSpec(
 ): PianoRollGridSpec | null {
     const {
         clampViewport,
+        dynamicProjectSec: projectSec,
         editParam,
         editParamAxisUnit,
         effectiveProjectScale,
@@ -125,7 +125,6 @@ export function buildGridSpec(
         getCurrentViewportForScrollbar,
         getParamValueBoundsForScrollbar,
         paramAxisDirectionsRef,
-        prAxis,
         processorParamsRef,
         s,
         themeMode,
@@ -216,11 +215,19 @@ export function buildGridSpec(
     //   时间轴，见 `buildPitchGridInstances` 的说明）。
     // - **均匀**（默认）：整宽一条线，只高亮工程音阶的音级。
     //
-    // 范围取「可见区间 ± 5s」并按 0.02s 量化（与旧实现同一取法）：量化让滚动
-    // 在 0.02s 内不改变段边界，减少几何重建；±5s 保证视口边缘的段完整。
+    // 范围取「全工程 + 5s 外延」并按 0.02s 量化（量化与旧实现同一取法）。
+    //
+    // 【为什么不能按可见区间裁剪段】网格镜像 effect 只在低频输入变化时重跑（其中
+    // 一步是 `parseRgbaColor` 的 DOM 探针），视口刻意不在它的依赖里 —— 按可见区间
+    // 裁剪会把段边界**冻结在构建时刻**：滚出 ±5s 窗口后，新进入视野的行不再有任何
+    // 分段高亮（分段存在时均匀路径被禁用，没有回退）。全工程范围让"哪些段可见"
+    // 完全由宿主的逐帧投影 + 实例层裁剪决定（见
+    // `pianoRollKernelHost.projectScaleSegments` 与 `buildPitchGridInstances`），
+    // 段数上界是 Tempo Map 的变化点数，成本可忽略。5s 外延保证最后一段覆盖工程
+    // 末尾之后的余白；量化让工程时长的微抖不改动段边界。
     const highlightActive = s.scaleHighlightMode === "always";
-    const segStartSec = Math.round(Math.max(0, viewportStartSec(prAxis) - 5) / 0.02) * 0.02;
-    const segEndSec = Math.round((viewportEndSec(prAxis) + 5) / 0.02) * 0.02;
+    const segStartSec = 0;
+    const segEndSec = Math.round((Math.max(0, projectSec) + 5) / 0.02) * 0.02;
     const scaleSegments = highlightActive
         ? (buildScaleSegments(s.tempoMap, effectiveProjectScale, segStartSec, segEndSec) ?? [])
               .map((segment) => ({

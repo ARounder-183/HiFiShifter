@@ -20,6 +20,9 @@
 use super::client::{self, EditorClient};
 use super::port::{EditorHost, EditorPort, GuiFidelity, NativeWindow};
 use super::protocol;
+// `IPlugFrame` 查 `IRunLoop` 是共享视图栈消费 VST3 ABI 的唯一位置；词汇来自
+// 共享层的 `vst3_abi`（REAPER 原生扩展同理，见该模块文档）。
+use crate::vst3_abi::{platform_iid, UnknownVtbl};
 use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
@@ -1192,18 +1195,6 @@ fn close_view(token: usize) {
 /// 要拆），也不是 Linux/macOS 的"每字大端"，于是这一探测在任何平台都恒为 false。
 const IID_RUN_LOOP: [u32; 4] = [0x18C35366, 0x97764F1A, 0x9C5B8385, 0x7A871389];
 
-/// `FUnknown` 的三项（`IPlugFrame` 与 `IRunLoop` 都从它派生，vtable 前缀一致）。
-#[repr(C)]
-struct UnknownVtbl {
-    query: unsafe extern "system" fn(
-        *mut std::ffi::c_void,
-        *const u8,
-        *mut *mut std::ffi::c_void,
-    ) -> i32,
-    add: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
-    release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
-}
-
 /// 宿主给的 `IPlugFrame*` 上有没有 `Linux::IRunLoop`。
 ///
 /// 【为什么拿到就立刻 `release`】探测不该改变任何引用计数；宿主在 `attached` 之后
@@ -1221,7 +1212,7 @@ fn probe_run_loop(frame: usize) -> bool {
             return false;
         }
         let mut out: *mut std::ffi::c_void = std::ptr::null_mut();
-        let iid = crate::vst3::platform_iid(IID_RUN_LOOP);
+        let iid = platform_iid(IID_RUN_LOOP);
         let result = ((*vtbl).query)(object, iid.as_ptr().cast(), &mut out);
         if result != 0 || out.is_null() {
             return false;
@@ -1830,7 +1821,7 @@ mod tests {
             0x9C, 0x5B, 0x83, 0x85, // 0x9C5B8385
             0x7A, 0x87, 0x13, 0x89, // 0x7A871389
         ];
-        assert_eq!(crate::vst3::platform_iid(IID_RUN_LOOP), expected);
+        assert_eq!(platform_iid(IID_RUN_LOOP), expected);
     }
 
     /// 没有 frame 时探测必须直接说"没有"，不能解引用空指针。

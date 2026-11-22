@@ -14,6 +14,7 @@ members = [
     "hifishifter-plugin",
     "hifishifter-plugin-core",
     "hifishifter-ara",
+    "hifishifter-vst3",
     "hifishifter-clap",
     "hifishifter-capture",
     "hifishifter-host-link",
@@ -23,6 +24,7 @@ members = [
 # `cargo test --workspace` 拉进来）。testkit 同理：它是独立工作区根，
 # 且 cpp-interop 会拉 C++ SDK 构建，绝不能被常规 `--workspace` 连带编译。
 exclude = [
+    "third-party/ara2-bridge",
     "third-party/ara2-bridge-core",
     "third-party/ara2-bridge-plugin",
     "third-party/ara2-bridge-testkit",
@@ -37,6 +39,12 @@ exclude = [
 # 补丁是纯增量的（只加读访问器），细节与撤销步骤见
 # `third-party/ara2-bridge-core/PATCHED.md`。
 [patch.crates-io]
+# 聚合门面的补丁：补一个裸 `companion` 特性（只启用格式中立的 binding 层，不触发
+# 任何 SDK 检出）。没有它，`hifishifter-plugin` 只能经 `vst3` 格式特性拿到
+# companion 的 binding 类型，于是每个格式外壳都被迫携带 VST3 companion 并检出
+# VST3 SDK —— 与 plugin-core 声明的"feature 由最终 cdylib 决定"矛盾。
+# 详见 third-party/ara2-bridge/PATCHED.md。
+ara2-bridge = { path = "third-party/ara2-bridge" }
 ara2-bridge-core = { path = "third-party/ara2-bridge-core" }
 ara2-bridge-plugin = { path = "third-party/ara2-bridge-plugin" }
 

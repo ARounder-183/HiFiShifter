@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 const RECLAIM_SPIN_LIMIT: u32 = 4096;
 
 #[derive(Debug)]
-pub(crate) struct PlaybackSnapshot {
+pub struct PlaybackSnapshot {
     pub sample_rate: u32,
     pub origin_sample: i64,
     pub left: Vec<f32>,
@@ -140,7 +140,7 @@ impl LayeredProbe {
 }
 
 #[derive(Debug, PartialEq)]
-pub(crate) enum SnapshotError {
+pub enum SnapshotError {
     InvalidGeometry,
     MissingSource,
     UnsupportedTransform,
@@ -336,7 +336,7 @@ struct RetainedSnapshot {
     snapshot: Arc<PlaybackSnapshot>,
 }
 
-pub(crate) struct SnapshotPublisher {
+pub struct SnapshotPublisher {
     retained: Mutex<(Vec<Box<RetainedSnapshot>>, usize)>,
     current: AtomicPtr<RetainedSnapshot>,
     /// 正在"载入当前指针并登记到该快照"的读者数。
@@ -348,6 +348,13 @@ pub(crate) struct SnapshotPublisher {
     registering: AtomicUsize,
     limit: usize,
     pub misses: AtomicU64,
+    /// 有多少个音频块的**请求区间越过了**当前快照的末尾（快照在、但这一段不在里面）。
+    ///
+    /// 【为什么它与 `misses` 必须分开】`misses` 只在"完全没有快照"时前进；而"快照
+    /// 有、播放头已经走出它的覆盖范围"是另一回事：那一块逐样本返回 `0.0`，听起来
+    /// 就是一次静音断点，却在旧读数里**完全不存在**。两者混在一起，现场只能猜
+    /// "是没算完还是走过头了"。
+    pub past_end: AtomicU64,
     /// 快照内容代次：每次 `publish` / `clear` 前进。
     ///
     /// 【它回答的是"发布过几次"，不是"内容变了没有"】需要后者时用 `content`。
@@ -430,12 +437,20 @@ impl SnapshotPublisher {
             registering: AtomicUsize::new(0),
             limit,
             misses: AtomicU64::new(0),
+            past_end: AtomicU64::new(0),
             generation: AtomicU64::new(0),
             content: AtomicU64::new(0),
             last_sample: AtomicI64::new(i64::MIN),
         }
     }
 
+    /// 音频线程最后一次请求的工程样本位置（帧）。`i64::MIN` = 还没请求过。
+    ///
+    /// 【为什么原始帧也要取出来】`[click]` 账本要给每块标出"这一下在第几秒"，而
+    /// 它同时需要帧号去判"这块与上一块接不接得上"。秒只给人看，帧才是判据。
+    pub(crate) fn last_sample_position(&self) -> i64 {
+        self.last_sample.load(Ordering::Relaxed)
+    }
     /// 音频线程最后一次请求的工程样本位置（秒）。`None` = 还没请求过。
     pub(crate) fn last_sample_seconds(&self, rate: f64) -> Option<f64> {
         let sample = self.last_sample.load(Ordering::Relaxed);
@@ -443,20 +458,6 @@ impl SnapshotPublisher {
             return None;
         }
         Some(sample as f64 / rate)
-    }
-    /// 当前快照覆盖的工程秒区间（`None` = 没有快照）。
-    pub(crate) fn current_span_seconds(&self, rate: f64) -> Option<(f64, f64)> {
-        if !(rate.is_finite() && rate > 0.0) {
-            return None;
-        }
-        let read = self.enter();
-        let snapshot = read.snapshot()?;
-        if snapshot.sample_rate == 0 || snapshot.left.is_empty() {
-            return None;
-        }
-        let start = snapshot.origin_sample as f64 / rate;
-        let end = (snapshot.origin_sample + snapshot.left.len() as i64) as f64 / rate;
-        Some((start, end))
     }
     /// 当前快照代次（测试断言用；接缝淡化问的是下面的 `content`）。
     #[cfg(test)]
@@ -762,6 +763,14 @@ impl SnapshotPublisher {
             }
         }
         output.set_silence_flags(silence);
+        // 【越界读的一处记账】见 `past_end` 的说明：快照在、但本块的末尾越过了它。
+        if let Some(snapshot) = snapshot {
+            let last = (sample.saturating_add(frames as i64)) as f64 * ratio
+                - snapshot.origin_sample as f64;
+            if last > snapshot.left.len() as f64 {
+                self.past_end.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         snapshot.is_some()
     }
 
@@ -860,6 +869,9 @@ impl SnapshotPublisher {
         if output.num_channels == 0 {
             return false;
         }
+        // 【窗口渲染的锚点】与 `copy_block_at` 同一份记账：分层拷贝也是"音频线程读了
+        // 某个工程位置"，漏记会让账本的位置读数在这条通路上停在上一块。
+        self.last_sample.store(sample, Ordering::Relaxed);
         let read_guard = self.enter();
         // SAFETY: 本读区登记的快照在 `read_guard` 存活期间不会被回收（逐快照读者计数非零）。
         let snapshot = read_guard.snapshot();
@@ -1207,6 +1219,16 @@ impl SnapshotPublisher {
             }
         }
         output.set_silence_flags(silence);
+        // 【越界读的记账与 `copy_block_at` 同一口径】`layered` 对 bound 实例恒为真
+        // （见 `capture_stage`），越界帧回退宿主输入而不是零；读数仍要如实记下
+        // "这一块越过了已发布快照的末尾"，否则包尾那一段会从读数里彻底消失。
+        if let Some(snapshot) = snapshot {
+            let last = (sample.saturating_add(frames as i64)) as f64 * ratio
+                - snapshot.origin_sample as f64;
+            if last > snapshot.left.len() as f64 {
+                self.past_end.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         snapshot.is_some()
     }
 }

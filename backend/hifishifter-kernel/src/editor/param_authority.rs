@@ -1167,9 +1167,10 @@ pub fn compose_clip_params(
     } else {
         view.params.frame_period_ms
     };
-    let start = ((clip.start_sec.max(0.0) * 1000.0 / fp).floor()) as usize;
-    let count = ((clip.length_sec.max(0.0) * 1000.0 / fp).ceil() as usize).max(1);
-    let end = start.saturating_add(count);
+    // 【切窗必须与写入同源】根数组的片段内容由 `schedule.rs` 写在
+    // `round(start)` 起的那几帧上；这里用 `floor` 切，渲染器拿到的基线就整体早一帧
+    // （表现为"原始线"与音频差 5 ms，且在 App 路径才出现 —— ARA 路径 start 恒为 0）。
+    let (start, end) = crate::frame_grid::clip_frame_window(clip.start_sec, clip.length_sec, fp);
     let slice = |values: &[f32], pad: f32| -> Vec<f32> {
         (start..end)
             .map(|index| values.get(index).copied().unwrap_or(pad))

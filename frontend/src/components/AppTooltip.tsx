@@ -351,12 +351,9 @@ export function AppTooltipProvider({
             ) != null;
 
         const tooltipObserver = new MutationObserver((mutations) => {
-            // 菜单挂载/卸载属于结构变化 —— 浮标必须【立即】消失，
-            // 不能等下一次指针移动才触发 updateFromEvent 清理。
-            if (currentElement && hasOpenMenuNow()) {
-                clearForMenu();
-                return;
-            }
+            // 【剪枝必须排在菜单早退之前】被跳过的那一批 removedNodes 不会再来
+            // 第二次（发布方从不撤销注册），元素与 ReactNode 就成了永久孤儿 ——
+            // 而"菜单打开着"恰好是编辑密度最高的时刻。先回收，再处理浮标自身。
             for (const mutation of mutations) {
                 if (mutation.type === "childList" && mutation.removedNodes.length > 0) {
                     // 富内容注册表的剪枝：发布方只负责"发布"，不负责"撤销"——
@@ -373,6 +370,14 @@ export function AppTooltipProvider({
                         }
                     }
                 }
+            }
+            // 菜单挂载/卸载属于结构变化 —— 浮标必须【立即】消失，
+            // 不能等下一次指针移动才触发 updateFromEvent 清理。
+            if (currentElement && hasOpenMenuNow()) {
+                clearForMenu();
+                return;
+            }
+            for (const mutation of mutations) {
                 if (
                     mutation.type === "attributes" &&
                     mutation.attributeName === "data-tooltip" &&

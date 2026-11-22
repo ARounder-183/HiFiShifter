@@ -1,7 +1,8 @@
 //! 经真实VST3 connection消息关联实例；只接受本进程登记的活令牌，不猜最后一轨。
-use crate::editor::connection::UnknownVtbl;
 use crate::render::extension::ExtensionOwner;
-use crate::vst3::{platform_iid, TResult, K_RESULT_OK};
+// `IComponentHandler2` 是 VST3 宿主独有的接口；词汇来自共享层的 `vst3_abi`
+// （REAPER 原生扩展同理，见该模块文档）。
+use crate::vst3_abi::{platform_iid, TResult, UnknownVtbl, K_RESULT_OK};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -169,7 +170,10 @@ fn release_handler(pointer: usize) {
 }
 impl EditorLink {
     /// 登记到心跳表（`Arc` 建成后调用一次）。重复登记同一链路不会重复计数。
-    pub(crate) fn register_heartbeat(self: &Arc<Self>) {
+    ///
+    /// 【为什么 pub】两个外壳各在自己的控制器/链路创建处登记（VST3 的
+    /// `EditController::new`、CLAP 的 `EditorLink::for_owner`）。
+    pub fn register_heartbeat(self: &Arc<Self>) {
         let mut all = links().lock().unwrap_or_else(|e| e.into_inner());
         if all
             .iter()
@@ -187,7 +191,16 @@ impl Drop for EditorLink {
 }
 impl EditorLink {
     /// 保存宿主IComponentHandler2的独立COM引用；不能把裸IComponentHandler指针跨线程调用。
-    pub(crate) fn set_component_handler(&self, handler: *mut c_void) -> Result<(), String> {
+    /// 保存宿主 `IComponentHandler2` 的独立 COM 引用（VST3 外壳专用入口）。
+    ///
+    /// 【为什么 pub】CLAP 没有对应宿主接口；只有 `hifishifter-vst3` 调它。
+    /// 词汇（IID / `platform_iid`）来自共享层 [`crate::vst3_abi`]。
+    ///
+    /// # Safety
+    /// `handler` 必须指向一个存活的 `IComponentHandler`（宿主在
+    /// `IEditController::setComponentHandler` 契约下传入），且本次调用期间可读；
+    /// 本函数只做 `queryInterface` 与引用计数，不保存裸指针本身。
+    pub unsafe fn set_component_handler(&self, handler: *mut c_void) -> Result<(), String> {
         let next = if handler.is_null() {
             0
         } else {
@@ -645,14 +658,16 @@ mod tests {
         });
         let pointer = (&*handler as *const FakeHandler) as *mut c_void;
         let link = EditorLink::default();
-        link.set_component_handler(pointer).unwrap();
+        // SAFETY: pointer 指向本测试构造的 FakeHandler，本次调用期间存活。
+        unsafe { link.set_component_handler(pointer) }.unwrap();
         link.mark_dirty();
         assert_eq!(handler.dirty.load(Ordering::Acquire), 0);
         link.flush_dirty();
         assert_eq!(handler.dirty.load(Ordering::Acquire), 1);
         link.flush_dirty();
         assert_eq!(handler.dirty.load(Ordering::Acquire), 1);
-        let _ = link.set_component_handler(std::ptr::null_mut());
+        // SAFETY: null 是显式清除路径。
+        let _ = unsafe { link.set_component_handler(std::ptr::null_mut()) };
         assert!(handler.refs.load(Ordering::Acquire) >= 1);
         drop(link);
         drop(handler);

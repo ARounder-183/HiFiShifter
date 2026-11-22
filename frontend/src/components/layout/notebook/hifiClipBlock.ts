@@ -22,6 +22,8 @@
  * 节点扩展、markdown-it 渲染规则都复用它。
  */
 
+import { pluralOutsideReact, translateOutsideReact } from "../../../i18n/I18nProvider";
+
 /** 围栏语言标记。 */
 export const HIFI_CLIP_FENCE_LANG = "hifi-clip";
 
@@ -165,14 +167,28 @@ export function formatClipDuration(seconds: number): string {
     return `${minutes}:${rest.toFixed(3).padStart(6, "0")}`;
 }
 
-/** 暂存块的默认标题。 */
+/**
+ * 暂存块的默认标题。
+ *
+ * 本模块其余部分只给文案键、翻译交给调用方；这里是唯一的例外 —— 默认标题
+ * 在**落盘**时生成（粘贴暂存 / 用户清空标题），生成时刻没有组件上下文，
+ * 因此走组件外的 `translateOutsideReact` / `pluralOutsideReact`，与界面语言同源。
+ */
 export function defaultClipTitle(attrs: HifiClipBlockAttrs): string {
     if (attrs.kind === "param") {
-        const name = attrs.param || "参数线";
-        return attrs.frameCount ? `${name} · ${attrs.frameCount} 帧` : name;
+        const name = attrs.param || translateOutsideReact("notebook_clip_kind_param");
+        return attrs.frameCount
+            ? `${name} · ${attrs.frameCount} ${pluralOutsideReact("notebook_clip_unit_frames", attrs.frameCount)}`
+            : name;
     }
-    const parts = [`${attrs.clipCount} clips`];
-    if (attrs.trackCount > 1) parts.push(`${attrs.trackCount} tracks`);
+    const parts = [
+        `${attrs.clipCount} ${pluralOutsideReact("notebook_clip_unit_clips", attrs.clipCount)}`,
+    ];
+    if (attrs.trackCount > 1) {
+        parts.push(
+            `${attrs.trackCount} ${pluralOutsideReact("notebook_clip_unit_tracks", attrs.trackCount)}`,
+        );
+    }
     parts.push(formatClipDuration(attrs.durationSec));
     return parts.join(" · ");
 }

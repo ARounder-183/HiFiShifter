@@ -319,8 +319,7 @@ mod tests {
     ///
     /// 【为什么钉死】入口 A 的键按定义都在占用集合里（两者来自同一份键位表）；
     /// 闸门若不分入口，Space/方向键的"能力被拒就还给宿主"就会被 100% 拒死，
-    /// 让路的主场景整体失效 —— 这是真实的回归形状（见
-    /// `docs/plans/2026-10-27-audit-repair-round2.md` §1.2），必须由测试钉住。
+    /// 让路的主场景整体失效 —— 这是真实的回归形状，必须由测试钉住。
     #[test]
     fn the_gate_blocks_unbound_relays_only() {
         let space = Stroke {

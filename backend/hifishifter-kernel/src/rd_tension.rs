@@ -97,6 +97,7 @@ impl RdTension {
             return vec![0.0; x.len()];
         }
         let bin_hz = sample_rate as f64 / N_FFT as f64;
+        let bins = N_FFT / 2 + 1;
 
         // ── 1. 逐帧拟合源 Rd ──────────────────────────────────────────────
         let mut rd = vec![0.0f64; frames];
@@ -114,7 +115,8 @@ impl RdTension {
             if harmonics < 2 {
                 continue;
             }
-            let amplitudes = Self::harmonic_peaks(&spec[m], f0, bin_hz, harmonics);
+            let amplitudes =
+                Self::harmonic_peaks(&spec[m * bins..(m + 1) * bins], f0, bin_hz, harmonics);
             if amplitudes.len() < 2 {
                 continue;
             }
@@ -152,7 +154,7 @@ impl RdTension {
             // `MAX_HARMONICS` 只用于**拟合**路径（与 `MaxFitHarmonics` 对应）。
             let n = ((sample_rate as f64 / 2.0 / target) as usize).max(1);
             let gains = GlottalRd::gains(rd[m], GlottalRd::tense_rd(rd[m], t), target, n);
-            let frame = &mut spec[m];
+            let frame = &mut spec[m * bins..(m + 1) * bins];
             for (k, bin) in frame.iter_mut().enumerate() {
                 *bin *= GlottalRd::gain_at(&gains, target, k as f64 * bin_hz);
             }
@@ -264,11 +266,16 @@ fn reflect_index(i: isize, len: usize) -> usize {
     }
 }
 
-/// STFT：`center=True` 反射填充 + 周期 Hann 窗。返回 (每帧频谱, 帧数)。
+/// STFT：`center=True` 反射填充 + 周期 Hann 窗。返回 (扁平频谱, 帧数)。
 ///
 /// 与 `torch.stft(center=True, pad_mode="reflect")` 的帧数与对齐方式一致：
 /// 填充 `N_FFT/2` 后按 `HOP` 取帧，帧数 `1 + (padded - N_FFT)/HOP`。
-fn stft_spectrum(signal: &[f64], window: &[f64]) -> (Vec<Vec<Complex<f64>>>, usize) {
+///
+/// 【为什么是扁平缓冲而不是每帧一个 Vec】一帧 5.8 ms 音频（HOP=256 @ 44.1k）就
+/// 分配 + 拷贝一次，3 分钟的张力片段是三万次分配与碎片化的堆布局；扁平缓冲
+/// 一次分配（与 `hnsep_dsp` 的既有写法同源），帧 `m` 的频谱取
+/// `[m*bins..(m+1)*bins]`。
+fn stft_spectrum(signal: &[f64], window: &[f64]) -> (Vec<Complex<f64>>, usize) {
     let pad = N_FFT / 2;
     let len = signal.len();
     if len == 0 {
@@ -284,7 +291,7 @@ fn stft_spectrum(signal: &[f64], window: &[f64]) -> (Vec<Vec<Complex<f64>>>, usi
     let fft: Arc<dyn rustfft::Fft<f64>> = planner.plan_fft_forward(N_FFT);
     let bins = N_FFT / 2 + 1;
 
-    let mut out = Vec::with_capacity(frames);
+    let mut out = vec![Complex::new(0.0, 0.0); frames * bins];
     let mut buf = vec![Complex::new(0.0, 0.0); N_FFT];
     for m in 0..frames {
         let start = m * HOP;
@@ -299,7 +306,7 @@ fn stft_spectrum(signal: &[f64], window: &[f64]) -> (Vec<Vec<Complex<f64>>>, usi
             buf[i] = Complex::new(sample * window[i], 0.0);
         }
         fft.process(&mut buf);
-        out.push(buf[..bins].to_vec());
+        out[m * bins..(m + 1) * bins].copy_from_slice(&buf[..bins]);
     }
     (out, frames)
 }
@@ -308,7 +315,7 @@ fn stft_spectrum(signal: &[f64], window: &[f64]) -> (Vec<Vec<Complex<f64>>>, usi
 ///
 /// 返回长度 = `N_FFT + HOP*(frames-1) - N_FFT`，即 `HOP*(frames-1)`；
 /// 调用方按原始长度截取。
-fn istft(spec: &[Vec<Complex<f64>>], frames: usize, window: &[f64]) -> Vec<f64> {
+fn istft(spec: &[Complex<f64>], frames: usize, window: &[f64]) -> Vec<f64> {
     if frames == 0 {
         return Vec::new();
     }
@@ -322,10 +329,10 @@ fn istft(spec: &[Vec<Complex<f64>>], frames: usize, window: &[f64]) -> Vec<f64> 
     let mut wsum = vec![0.0f64; total];
     let mut buf = vec![Complex::new(0.0, 0.0); N_FFT];
 
-    for (m, frame) in spec.iter().enumerate().take(frames) {
+    for m in 0..frames {
+        let frame = &spec[m * bins..(m + 1) * bins];
         buf.fill(Complex::new(0.0, 0.0));
-        let n = frame.len().min(bins);
-        buf[..n].copy_from_slice(&frame[..n]);
+        buf[..bins].copy_from_slice(frame);
 
         // ── Hermitian 对称重建（关键，易漏）────────────────────────────────
         // rustfft 的**复数**逆变换不会自行补出负频率：若 bins[N/2+1..] 保持 0，
@@ -485,7 +492,9 @@ mod tests {
         let (spec, frames) = stft_spectrum(&sig, &window);
         assert!(frames > 0);
         let bin_hz = sr as f64 / N_FFT as f64;
-        let peaks = RdTension::harmonic_peaks(&spec[frames / 2], f0, bin_hz, 8);
+        let bins = N_FFT / 2 + 1;
+        let mid = frames / 2;
+        let peaks = RdTension::harmonic_peaks(&spec[mid * bins..(mid + 1) * bins], f0, bin_hz, 8);
         assert!(
             peaks.len() >= 2,
             "expected several harmonics, got {}",

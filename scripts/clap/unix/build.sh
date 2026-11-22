@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# HiFiShifter CLAP —— macOS / Linux 构建入口。
+# HiFiShifter CLAP — macOS / Linux build entry point.
 #
-#     scripts/clap/unix/build.sh                  # 编译 → 组装 → 自检 → tar.gz
-#     scripts/clap/unix/build.sh --reuse-frontend # 只改 Rust 时跳过 npm
-#     scripts/clap/unix/build.sh --stage=bundle   # 只重装 bundle（不打包）
+#     scripts/clap/unix/build.sh                  # build → assemble → verify → tar.gz
+#     scripts/clap/unix/build.sh --reuse-frontend # skip npm when only Rust changed
+#     scripts/clap/unix/build.sh --stage=bundle   # re-assemble the bundle only (no packaging)
 #
-# 布局（宿主按这个位置找文件，不是我们自选的）：
-#   Linux   dist/clap/HiFiShifter.clap              单文件模块
-#           dist/clap/HiFiShifter-resources/        <stem>-resources，与模块同级
-#   macOS   dist/clap/HiFiShifter.clap/Contents/…   bundle（Info.plist + MacOS + Frameworks + Resources）
+# Layout (hosts look for files in these spots; it is not our choice):
+#   Linux   dist/clap/HiFiShifter.clap              single-file module
+#           dist/clap/HiFiShifter-resources/        <stem>-resources, beside the module
+#   macOS   dist/clap/HiFiShifter.clap/Contents/…   bundle (Info.plist + MacOS + Frameworks + Resources)
 #
-# 三条硬规则与 VST3 那条流水线相同：不依赖 PowerShell；产物里的每条动态依赖都能在
-# 包内解析（$ORIGIN / @loader_path）；没有真的 dlopen 过一次的产物不算产物。
+# The three hard rules match the VST3 pipeline: no PowerShell; every dynamic dependency in
+# the artifact must resolve inside the package ($ORIGIN / @loader_path); an artifact that
+# never really dlopened is not an artifact.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -38,15 +39,15 @@ die()  { printf '[clap] ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat <<'USAGE'
-用法：scripts/clap/unix/build.sh [选项]
+Usage: scripts/clap/unix/build.sh [options]
 
   --stage=all|build|bundle|verify|package
-                                     只跑到某个阶段（默认 all）
-  --profile=release|dist|dev         cargo profile（默认 release）
-  --out=DIR                          产物目录（默认 dist）
-  --reuse-frontend                   复用已有 frontend/dist（要求它已存在）
-  --no-verify                        跳过自检
-  -h, --help                         显示本说明
+                                     stop after a given stage (default all)
+  --profile=release|dist|dev         cargo profile (default release)
+  --out=DIR                          artifact directory (default dist)
+  --reuse-frontend                   reuse the existing frontend/dist (it must already exist)
+  --no-verify                        skip self-checks
+  -h, --help                         show this help
 USAGE
 }
 
@@ -60,13 +61,13 @@ while [ $# -gt 0 ]; do
         --reuse-frontend) REUSE_FRONTEND=1; shift ;;
         --no-verify)      SKIP_VERIFY=1; shift ;;
         -h|--help)        usage; exit 0 ;;
-        *)                die "未知参数：$1（--help 看用法）" ;;
+        *)                die "unknown option: $1 (see --help)" ;;
     esac
 done
 
 case "$STAGE" in
     all|build|bundle|verify|package) ;;
-    *) die "--stage 只能是 all|build|bundle|verify|package，收到：$STAGE" ;;
+    *) die "--stage must be one of all|build|bundle|verify|package, got: $STAGE" ;;
 esac
 
 hfs_detect_platform
@@ -91,63 +92,65 @@ else
 fi
 ARTIFACT="$OUT_DIR/${API_NAME}_v${PRODUCT_VERSION}_${HFS_TAG}-clap.tar.gz"
 
-log "平台 ${HFS_TAG}｜版本 ${PRODUCT_VERSION}｜profile ${PROFILE}｜输出 $OUT_DIR"
+log "platform ${HFS_TAG} | version ${PRODUCT_VERSION} | profile ${PROFILE} | output $OUT_DIR"
 
-# ── 阶段 1：编译 ─────────────────────────────────────────────────────────────
+# ── Stage 1: compile ─────────────────────────────────────────────────────────
 stage_build() {
-    step "编译 hifishifter-clap（profile=${PROFILE}）"
-    command -v cargo >/dev/null 2>&1 || die "缺少 cargo"
+    step "building hifishifter-clap (profile=${PROFILE})"
+    command -v cargo >/dev/null 2>&1 || die "cargo missing"
     mkdir -p "$OUT_DIR"
     local cargo_log="$TARGET_DIR/cargo-clap.log"
     mkdir -p "$(dirname "$cargo_log")"
-    # 退出码单独取、颜色强制关掉、失败时按 error 行定位：原因见 lib.sh 的
-    # hfs_report_build_failure 与 vst3/unix/build.sh 的同名注释。
+    # Exit code captured separately, color forcibly off, failures located by error line:
+    # see hfs_report_build_failure in lib.sh and the matching comments in vst3/unix/build.sh.
     local status=0
     CARGO_TERM_COLOR=never cargo build --manifest-path "$BACKEND_DIR/Cargo.toml" \
         -p hifishifter-clap --profile "$PROFILE" --locked >"$cargo_log" 2>&1 || status=$?
     if [ "$status" -ne 0 ]; then
         hfs_report_build_failure "$cargo_log" "$status"
-        die "编译失败（exit ${status}），完整日志：$cargo_log"
+        die "build failed (exit ${status}); full log: $cargo_log"
     fi
     local lib="$TARGET_DIR/$PROFILE_DIR/$CARGO_LIB"
-    [ -f "$lib" ] || die "编译成功但找不到产物：$lib"
-    log "产物 ${lib}（$(du -h "$lib" | cut -f1)）"
+    [ -f "$lib" ] || die "build succeeded but the artifact is missing: $lib"
+    log "artifact ${lib} ($(du -h "$lib" | cut -f1))"
 }
 
-# ── 阶段 2：前端产物 ─────────────────────────────────────────────────────────
+# ── Stage 2: frontend artifacts ──────────────────────────────────────────────
 stage_frontend() {
     if [ "$REUSE_FRONTEND" = "1" ]; then
-        [ -s "$FRONTEND_DIST/plugin.html" ] || die "--reuse-frontend 但 $FRONTEND_DIST/plugin.html 不存在"
-        log "按 --reuse-frontend 复用已有前端产物"
+        [ -s "$FRONTEND_DIST/plugin.html" ] || die "--reuse-frontend given, but $FRONTEND_DIST/plugin.html does not exist"
+        log "reusing existing frontend artifacts per --reuse-frontend"
         return
     fi
-    step "构建前端（vite，含 plugin.html 入口）"
-    command -v node >/dev/null 2>&1 || die "缺少 node：需要 ^20.19.0 或 >=22.12.0"
+    step "building the frontend (vite, with the plugin.html entry)"
+    command -v node >/dev/null 2>&1 || die "node missing: need ^20.19.0 or >=22.12.0"
     if [ ! -d "$REPO_ROOT/frontend/node_modules" ]; then
         ( cd "$REPO_ROOT/frontend" && npm ci --include=dev --no-audit --no-fund ) \
-            || die "npm ci 失败（检查网络与 frontend/package-lock.json）"
+            || die "npm ci failed (check the network and frontend/package-lock.json)"
     fi
-    ( cd "$REPO_ROOT/frontend" && npm run build ) || die "前端构建失败"
-    [ -s "$FRONTEND_DIST/plugin.html" ] || die "前端构建完成但 $FRONTEND_DIST/plugin.html 不存在"
-    log "前端产物就绪：$FRONTEND_DIST"
+    ( cd "$REPO_ROOT/frontend" && npm run build ) || die "frontend build failed"
+    [ -s "$FRONTEND_DIST/plugin.html" ] || die "frontend build finished, but $FRONTEND_DIST/plugin.html does not exist"
+    log "frontend artifacts ready: $FRONTEND_DIST"
 }
 
 stage_models_fetch() {
-    step "模型权重"
-    python3 "$REPO_ROOT/scripts/setup/fetch-models.py" || die "模型权重获取失败"
-    python3 "$REPO_ROOT/scripts/setup/fetch-models.py" --fetch-game || die "GAME 模型获取失败"
+    step "model weights"
+    python3 "$REPO_ROOT/scripts/setup/fetch-models.py" || die "failed to fetch model weights"
+    python3 "$REPO_ROOT/scripts/setup/fetch-models.py" --fetch-game || die "failed to fetch the GAME model"
 }
 
-# ── 阶段 3：组装 ─────────────────────────────────────────────────────────────
+# ── Stage 3: assemble ────────────────────────────────────────────────────────
 #
-# 【为什么必须带运行时依赖】hifishifter-clap/build.rs 声明了 -Wl,-rpath,$ORIGIN
-# （macOS 是 @loader_path/../Frameworks）。那是"允许在模块旁边找库"，不是"库会在那里"。
-# 之前的 CLAP 脚本只拷了模块，于是 ldd 报 not found、macOS 的 dlopen 直接
-# Library not loaded: @rpath/libSoundTouchDLL.dylib —— 承诺在代码里，兑现没人做。
+# [Why runtime dependencies must come along] hifishifter-clap/build.rs declares
+# -Wl,-rpath,$ORIGIN (macOS: @loader_path/../Frameworks). That means "libraries are allowed
+# to be found next to the module", not "the libraries will be there". The old CLAP script
+# copied only the module, so ldd reported not found and macOS dlopen failed outright with
+# Library not loaded: @rpath/libSoundTouchDLL.dylib — the promise lived in code, nobody
+# kept it.
 stage_bundle() {
-    step "组装 CLAP（${HFS_TAG}）"
+    step "assembling CLAP (${HFS_TAG})"
     local lib="$TARGET_DIR/$PROFILE_DIR/$CARGO_LIB"
-    [ -f "$lib" ] || die "缺少编译产物：${lib}（先跑 --stage=build）"
+    [ -f "$lib" ] || die "build artifact missing: ${lib} (run --stage=build first)"
 
     rm -rf "$OUT_DIR/clap"
     if [ "$HFS_OS" = "linux" ]; then
@@ -170,25 +173,27 @@ stage_bundle() {
     fi
     hfs_assert_rpath "$MODULE"
     hfs_check_no_dangling "$OUT_DIR/clap"
-    log "bundle 就绪：$BUNDLE_DIR"
+    log "bundle ready: $BUNDLE_DIR"
 }
 
-# ── 阶段 4：自检 ─────────────────────────────────────────────────────────────
+# ── Stage 4: verify ──────────────────────────────────────────────────────────
 stage_verify() {
-    step "验证 CLAP 产物"
-    # 【为什么先跑 ABI oracle】verify.sh 的黑盒探针和 Rust 的 #[repr(C)] 是同一份
-    # 布局假设的两份拷贝：两者以同一种方式写错时，dlopen 与直通照样通过，而真实
-    # 宿主按官方头文件传进来的结构会被错位解读。让钉住的 CLAP SDK 头文件自己算
-    # size/align/offset，是唯一能打破这个闭环的证据。CLAP 工作流已经把 SDK 取到
-    # third_party/sdk/clap，cargo test 里的 clap_layout 用例会编译并比对它。
-    step "CLAP 1.1.9 ABI 布局 oracle"
+    step "verifying the CLAP artifact"
+    # [Why the ABI oracle runs first] verify.sh's black-box probe and Rust's #[repr(C)] are
+    # two copies of the same layout assumption: when both are wrong in the same way, dlopen
+    # and passthrough still succeed while a real host — feeding in structs built from the
+    # official headers — reads them misaligned. Letting the pinned CLAP SDK headers compute
+    # size/align/offset themselves is the only evidence that breaks this loop. The CLAP
+    # workflow already fetches the SDK into third_party/sdk/clap, and the clap_layout test
+    # in cargo test compiles and compares it.
+    step "CLAP 1.1.9 ABI layout oracle"
     (cd "$BACKEND_DIR" && cargo test -p hifishifter-clap --test clap_layout --locked -- --nocapture)
     bash "$SCRIPT_DIR/../verify.sh" "$MODULE"
 }
 
-# ── 阶段 5：打包 ─────────────────────────────────────────────────────────────
+# ── Stage 5: package ─────────────────────────────────────────────────────────
 stage_package() {
-    step "打包 $(basename "$ARTIFACT")"
+    step "packaging $(basename "$ARTIFACT")"
     local stage="$OUT_DIR/stage-clap"
     rm -rf "$stage"
     mkdir -p "$stage"
@@ -212,9 +217,9 @@ case "$STAGE" in
     package) stage_build; stage_frontend; stage_models_fetch; stage_bundle; stage_verify; stage_package ;;
     all)
         stage_build; stage_frontend; stage_models_fetch; stage_bundle
-        if [ "$SKIP_VERIFY" = "1" ]; then log "按 --no-verify 跳过自检"; else stage_verify; fi
+        if [ "$SKIP_VERIFY" = "1" ]; then log "skipping self-checks per --no-verify"; else stage_verify; fi
         stage_package
         ;;
 esac
 
-log "完成"
+log "done"

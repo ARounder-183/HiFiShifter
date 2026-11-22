@@ -6,8 +6,36 @@ use std::ffi::CStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 thread_local! {static ACTIVE:Cell<usize>=const {Cell::new(0)};}
+
+/// 假宿主里的一条 FX 链项（名字 / 启用 / 离线）。
+///
+/// 【为什么用 `&'static str` 而不是 `String`】夹具是 `Cell`/`RefCell` 里的**常量**
+/// 数据，用例在断言里写的名字必须与宿主读到的一字不差；静态串让"名字写错"变成编译期
+/// 问题，而不是一条永远匹配不上的运行时谜题。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FxEntry {
+    pub name: &'static str,
+    pub enabled: bool,
+    pub offline: bool,
+}
+
+impl FxEntry {
+    /// 本插件的 FX（类名匹配 `HiFiShifter`）。
+    pub const HFS: Self = Self {
+        name: "VST3: HiFiShifter",
+        enabled: true,
+        offline: false,
+    };
+    /// 一个与本插件无关的原生 FX。
+    pub const OTHER: Self = Self {
+        name: "VST3: ReaEQ",
+        enabled: true,
+        offline: false,
+    };
+}
+
 #[repr(C)]
-pub(crate) struct Fixture {
+pub struct Fixture {
     table: *const HostVtbl,
     refs: AtomicU32,
     take_token: u8,
@@ -32,6 +60,11 @@ pub(crate) struct Fixture {
     pub take_reversed: Cell<bool>,
     /// `PCM_Source_GetSectionInfo` 是否返回成功（false = 读不出方向 → `None`）。
     pub section_reports: Cell<bool>,
+    /// `PCM_Source_GetSectionInfo` 报告的段边界（`SetItemStateChunk` 按 `MODE` 位
+    /// 更新，与 REAPER 同一条规则：`MODE 3` 报整份媒体、`MODE 0/2` 报
+    /// `STARTPOS`/`LENGTH`、非段块报 0/0）。
+    pub take_section_start: Cell<f64>,
+    pub take_section_length: Cell<f64>,
     /// `GetMediaSourceFileName` 报告的路径；`None` = 读不出文件名（回退身份不可用）。
     pub source_file_name: RefCell<Option<String>>,
     undo_records: RefCell<Vec<std::ffi::CString>>,
@@ -69,6 +102,39 @@ pub(crate) struct Fixture {
     /// 的用例必须显式设置它。
     pub track_value: Cell<f64>,
     pub hook: RefCell<Option<(String, Box<dyn Fn()>)>>,
+    /// `TrackFX_*` / `TakeFX_*` / `I_FXEN` 这部分读数是否注册。
+    ///
+    /// 【为什么单独一个开关】旁通读数是**可选**能力：不注册时 `fx_bypass_state` 恒为
+    /// `Unknown`（照改动前照常渲染）。把它挂在 `media_enabled` 上会让"能不能导入音频"
+    /// 决定"能不能读旁通"，两组用例互相牵连。
+    pub fx_api: Cell<bool>,
+    /// 轨道 FX 链的内容（`TrackFX_*`）。
+    pub fx_track_chain: RefCell<Vec<FxEntry>>,
+    /// take FX 链的内容（`TakeFX_*`）。
+    pub fx_take_chain: RefCell<Vec<FxEntry>>,
+    /// `I_FXEN`（轨道整链总开关）。
+    pub fx_chain_on: Cell<bool>,
+    /// 是否注册 `TakeFX_*` 一族（缺省关：老宿主形态）。
+    pub take_fx_api: Cell<bool>,
+    /// 动作表里"Take: Toggle take pitch envelope"报的命令号（缺省 41612）。
+    ///
+    /// 【为什么要能改】"按名字解析"这条纪律只有在**名字与命令号对不上**时才能被验证：
+    /// 用例把它改成一个只在夹具里存在的号码，实现却仍然跑对了，才说明它读的是名字。
+    pub pitch_action_id: Cell<i32>,
+    /// `parent(2)` 报哪条 take；0 = 主 take（多 take 用例把它指到别的 take 上）。
+    pub parent_take: Cell<usize>,
+    /// `GetItemStateChunk` / `SetItemStateChunk` 是否注册。
+    pub item_state_enabled: Cell<bool>,
+    /// `SetItemStateChunk` 是否像 take FX 下的真机那样**拒绝**写回。
+    pub item_state_write_refused: Cell<bool>,
+    /// take 包络那一族（`GetTakeEnvelopeByName` / `*EnvelopeStateChunk` / 动作）是否注册。
+    pub take_env_enabled: Cell<bool>,
+    /// 当前那条 take 的 Pitch 包络 chunk；`None` = 没有包络。
+    pub take_env_chunk: RefCell<Option<String>>,
+    /// item 的选择位（`B_UISEL`），动作路径会临时改它又改回来。
+    pub item_ui_selected: Cell<bool>,
+    /// 夹具当前持有的 item state chunk（`SetItemStateChunk` 会写进这里）。
+    pub item_state_chunk: RefCell<String>,
 }
 impl Fixture {
     /// 夹具的指针会交给 `NativeHost` 持有（`IMainFactory` 那条 QI 通路），而
@@ -101,6 +167,8 @@ impl Fixture {
             extra_takes: RefCell::new(Vec::new()),
             take_reversed: Cell::new(false),
             section_reports: Cell::new(false),
+            take_section_start: Cell::new(0.),
+            take_section_length: Cell::new(0.),
             source_file_name: RefCell::new(None),
             undo_records: RefCell::new(vec![std::ffi::CString::new("Initial state").unwrap()]),
             undo_position: Cell::new(0),
@@ -130,6 +198,8 @@ impl Fixture {
                 ("D_SNAPOFFSET", 0.),
                 ("I_GROUPID", 0.),
                 ("D_STARTOFFS", 0.),
+                // 动作路径会临时切 active take（多 take item 上"给这条 take 建包络"）。
+                ("I_CURTAKE", 0.),
                 ("D_PLAYRATE", 0.5),
                 ("B_PPITCH", 1.),
                 ("I_CHANMODE", 2.),
@@ -160,6 +230,20 @@ impl Fixture {
             change: Cell::new(-9),
             track_value: Cell::new(1.),
             hook: RefCell::new(None),
+            fx_api: Cell::new(false),
+            fx_track_chain: RefCell::new(Vec::new()),
+            fx_take_chain: RefCell::new(Vec::new()),
+            fx_chain_on: Cell::new(true),
+
+            take_fx_api: Cell::new(false),
+            pitch_action_id: Cell::new(41612),
+            parent_take: Cell::new(0),
+            item_state_enabled: Cell::new(false),
+            item_state_write_refused: Cell::new(false),
+            take_env_enabled: Cell::new(false),
+            take_env_chunk: RefCell::new(None),
+            item_ui_selected: Cell::new(false),
+            item_state_chunk: RefCell::new(String::new()),
         }));
         ACTIVE.set(value as *const Self as usize);
         value
@@ -189,6 +273,15 @@ impl Fixture {
     fn take(&self) -> *mut c_void {
         (&self.take_token as *const u8 as *mut u8).cast()
     }
+    /// `parent(2)` 此刻报的那条 take（默认为主 take）。
+    fn parent_take(&self) -> *mut c_void {
+        let override_ = self.parent_take.get();
+        if override_ == 0 {
+            self.take()
+        } else {
+            override_ as *mut c_void
+        }
+    }
     fn item(&self) -> *mut c_void {
         (&self.item_token as *const u8 as *mut u8).cast()
     }
@@ -197,6 +290,28 @@ impl Fixture {
     }
     pub fn enable_writer(&self) {
         self.writer_enabled.set(true);
+    }
+    /// 启用结构读写（`Get/SetItemStateChunk`）并装入一份初始 chunk。
+    ///
+    /// 【为什么顺带打开媒体与多 take 枚举】方向写回要三样东西：chunk 文本、
+    /// 媒体总长（镜像轴）、以及 `PCM_Source_GetSectionInfo` 的方向位（写后自校验）。
+    /// 缺任何一个都只会得到"能力不可用"，测不到真正的写回路径。
+    pub fn enable_item_state(&self, chunk: &str) {
+        self.enable_media();
+        self.takes_enabled.set(true);
+        self.take_source.set(0x1000);
+        self.section_reports.set(true);
+        self.clear_markers();
+        self.item_state_chunk.replace(chunk.to_string());
+        self.item_state_enabled.set(true);
+    }
+    /// 一键装好"单 take 音频 item"的 chunk（GUID 与夹具的 take 身份一致）。
+    pub fn single_take_chunk(&self) -> String {
+        "<ITEM\nPOSITION 0\nLENGTH 0.00009070294784580499\nSEL 1\n\
+         IGUID {11111111-1111-1111-1111-111111111111}\n\
+         SOFFS 0\nPLAYRATE 1 1 0\nGUID {22222222-2222-2222-2222-222222222222}\n\
+         <SOURCE WAVE\nFILE \"ara://source\"\n>\n>\n"
+            .to_string()
     }
     pub fn enable_media(&self) {
         self.enable_writer();
@@ -212,6 +327,11 @@ impl Fixture {
         for _ in 0..extra {
             self.extra_takes.borrow_mut().push(Box::new(11));
         }
+    }
+    /// 模拟"宿主把同一个处理器搬到另一条链上"：take 链清空、轨道链上放本插件。
+    pub fn forget_and_rearm_as_track_fx(&self) {
+        self.fx_take_chain.borrow_mut().clear();
+        *self.fx_track_chain.borrow_mut() = vec![FxEntry::HFS];
     }
     pub fn num_takes(&self) -> i32 {
         self.take_count_override
@@ -322,16 +442,16 @@ unsafe extern "system" fn query(this: *mut c_void, iid: *const u8, out: *mut *mu
     // 夹具默认照这个来；`force_alternate_iid_layout` 把它换成"另一套"，用来验证
     // `from_context` 的兜底重试不是摆设。
     let own_iid = if f.alternate_iid_layout.get() {
-        crate::vst3::alternate_iid(IID)
+        crate::vst3_abi::alternate_iid(IID)
     } else {
-        crate::vst3::platform_iid(IID)
+        crate::vst3_abi::platform_iid(IID)
     };
-    let host_iid = crate::vst3::platform_iid([0x58E595CC, 0xDB2D4969, 0x8B6AAF8C, 0x36A664E5]);
+    let host_iid = crate::vst3_abi::platform_iid([0x58E595CC, 0xDB2D4969, 0x8B6AAF8C, 0x36A664E5]);
     if requested != own_iid && !(f.connection_host.get() && requested == host_iid) {
         unsafe {
             *out = std::ptr::null_mut();
         }
-        return crate::vst3::K_NO_INTERFACE;
+        return crate::vst3_abi::K_NO_INTERFACE;
     }
     unsafe {
         *out = this;
@@ -360,7 +480,7 @@ unsafe extern "system" fn parent(this: *mut c_void, selector: u32) -> *mut c_voi
     f.record(format!("parent:{selector}"));
     match selector {
         3 if !f.no_project.get() => f.project(),
-        2 if !f.no_take.get() => f.take(),
+        2 if !f.no_take.get() => f.parent_take(),
         1 if f.media_enabled.get() => f.track(),
         _ => std::ptr::null_mut(),
     }
@@ -419,9 +539,26 @@ unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_voi
         "GetMediaItemTake_Source" if f.takes_enabled.get() => take_source as *const (),
         "PCM_Source_GetSectionInfo" if f.takes_enabled.get() => section_info as *const (),
         "GetMediaSourceFileName" if f.takes_enabled.get() => source_file_name as *const (),
-        "GetMediaTrackInfo_Value" if f.inventory_enabled.get() => {
+        "GetMediaTrackInfo_Value" if f.inventory_enabled.get() || f.fx_api.get() => {
             inventory_track_value as *const ()
         }
+        "GetItemStateChunk" if f.item_state_enabled.get() => get_item_state as *const (),
+        "GetTakeEnvelopeByName" if f.take_env_enabled.get() => get_take_envelope as *const (),
+        "GetEnvelopeStateChunk" if f.take_env_enabled.get() => get_envelope_state as *const (),
+        "SetEnvelopeStateChunk" if f.take_env_enabled.get() => set_envelope_state as *const (),
+        "kbd_enumerateActions" if f.take_env_enabled.get() => enumerate_actions as *const (),
+        "CountSelectedMediaItems" if f.take_env_enabled.get() => count_selected as *const (),
+        "GetSelectedMediaItem" if f.take_env_enabled.get() => selected_item as *const (),
+        "SelectAllMediaItems" if f.take_env_enabled.get() => select_all as *const (),
+        "SetMediaItemSelected" if f.take_env_enabled.get() => set_item_selected as *const (),
+        "IsMediaItemSelected" if f.take_env_enabled.get() => item_is_selected as *const (),
+        "SectionFromUniqueID" if f.take_env_enabled.get() => section_from_unique_id as *const (),
+        "kbd_getTextFromCmd" if f.take_env_enabled.get() => action_text as *const (),
+        "Main_OnCommandEx" if f.take_env_enabled.get() => run_command_ex as *const (),
+        "Main_OnCommand" if f.take_env_enabled.get() => run_command as *const (),
+        "SetItemStateChunk" if f.item_state_enabled.get() => set_item_state as *const (),
+        "genGuid" if f.item_state_enabled.get() => gen_guid as *const (),
+        "guidToString" if f.item_state_enabled.get() => guid_to_string as *const (),
         "GetUserFileNameForRead" if f.media_enabled.get() => media_picker as *const (),
         "GetUserFileName" if f.media_enabled.get() => multi_picker as *const (),
         "InsertTrackInProject" if f.media_enabled.get() => insert_track as *const (),
@@ -430,8 +567,19 @@ unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_voi
         "TrackFX_AddByName" if f.media_enabled.get() => add_fx as *const (),
         "DeleteTrack" if f.media_enabled.get() => delete_track as *const (),
         "CountTrackMediaItems" if f.media_enabled.get() => count_track_items as *const (),
-        "TrackFX_GetCount" if f.media_enabled.get() => fx_count as *const (),
+        "TrackFX_GetCount" if f.fx_api.get() || f.media_enabled.get() => fx_count as *const (),
         "TrackFX_GetFXGUID" if f.media_enabled.get() => fx_guid as *const (),
+        "TrackFX_GetEnabled" if f.fx_api.get() => fx_enabled as *const (),
+        "TrackFX_GetOffline" if f.fx_api.get() => fx_offline as *const (),
+        "TrackFX_GetFXName" if f.fx_api.get() => fx_name as *const (),
+        "TakeFX_GetCount" if f.fx_api.get() && f.take_fx_api.get() => take_fx_count as *const (),
+        "TakeFX_GetEnabled" if f.fx_api.get() && f.take_fx_api.get() => {
+            take_fx_enabled as *const ()
+        }
+        "TakeFX_GetOffline" if f.fx_api.get() && f.take_fx_api.get() => {
+            take_fx_offline as *const ()
+        }
+        "TakeFX_GetFXName" if f.fx_api.get() && f.take_fx_api.get() => take_fx_name as *const (),
         _ => std::ptr::null(),
     };
     p as *mut c_void
@@ -554,6 +702,17 @@ fn value(object: *mut c_void, name: *const c_char, is_take: bool) -> f64 {
         f.record("D_VOL");
         return f.take_volume.get();
     }
+    // 【宿主对**未知**参数一律返回 0.0】这不是夹具偷懒，而是 REAPER 的真实行为：take FX 那次
+    // "没被旁通却一点声音都没有"，根因就是 `B_TAKEFX` 这个参数在 take 上根本不存在，宿主
+    // 照例回了 0，于是"整链总开关"读成"关"，渲染入口整段跳过。夹具照抄这条行为，这样
+    // "再按轨道的形状去读一个 take 参数"会被用例当场抓住，而不是等下一次真机报障。
+    if is_take {
+        let name = unsafe { CStr::from_ptr(name) }.to_str().unwrap();
+        if !f.values.borrow().contains_key(name) {
+            f.record(format!("unknown-take-param:{name}"));
+            return 0.0;
+        }
+    }
     if object
         == if is_take {
             f.right_take()
@@ -575,6 +734,10 @@ fn value(object: *mut c_void, name: *const c_char, is_take: bool) -> f64 {
     assert_eq!(object, if is_take { f.take() } else { f.item() });
     let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_str().unwrap();
     f.record(name);
+    // 动作路径会读/写 item 的选择位（`B_UISEL`）：夹具按一个可断言的开关回答。
+    if !is_take && name == "B_UISEL" {
+        return if f.item_ui_selected.get() { 1. } else { 0. };
+    }
     f.values.borrow()[name]
 }
 unsafe extern "C" fn item_value(object: *mut c_void, name: *const c_char) -> f64 {
@@ -589,6 +752,10 @@ unsafe extern "C" fn set_item(object: *mut c_void, name: *const c_char, value: f
     assert_eq!(object, f.item());
     let name = unsafe { CStr::from_ptr(name) }.to_str().unwrap();
     f.record(format!("write-item:{name}"));
+    if name == "B_UISEL" {
+        f.item_ui_selected.set(value != 0.0);
+        return true;
+    }
     let mut values = f.values.borrow_mut();
     let key = values.keys().find(|key| **key == name).copied();
     if let Some(key) = key {
@@ -599,7 +766,13 @@ unsafe extern "C" fn set_item(object: *mut c_void, name: *const c_char, value: f
 }
 unsafe extern "C" fn set_take(object: *mut c_void, name: *const c_char, value: f64) -> bool {
     let f = fixture();
-    assert_eq!(object, f.take());
+    // 逐 take 写回（兄弟 take 的声道模式）走同一个入口：额外 take 与主 take 共用
+    // 同一份数值表，与读路径（`value`）同一注释 —— 本组用例不靠逐 take 不同的
+    // 数值伪造结论，只验证"写到了那条 take 的指针上"。
+    assert!(
+        object == f.take() || f.extra_take_index(object).is_some(),
+        "take field writes must target an enumerated take"
+    );
     let name = unsafe { CStr::from_ptr(name) }.to_str().unwrap();
     f.record(format!("write-take:{name}"));
     let mut values = f.values.borrow_mut();
@@ -944,19 +1117,40 @@ unsafe extern "C" fn inventory_take(item: *mut c_void) -> *mut c_void {
 unsafe extern "C" fn inventory_name(_take: *mut c_void) -> *const c_char {
     c"short voice".as_ptr()
 }
-unsafe extern "C" fn inventory_track_value(track: *mut c_void, _name: *const c_char) -> f64 {
+unsafe extern "C" fn inventory_track_value(track: *mut c_void, name: *const c_char) -> f64 {
     let f = fixture();
     assert_eq!(track, f.track());
+    // 【为什么在这里分流】`GetMediaTrackInfo_Value` 同时服务 folder 读数与整链总开关；
+    // 夹具按**字段名**回答，才能让"folder 深度"与"FX 链被关掉"是两个独立的事实。
+    if unsafe { CStr::from_ptr(name) } == c"I_FXEN" {
+        f.record("fx-chain-enabled");
+        return if f.fx_chain_on.get() { 1. } else { 0. };
+    }
     f.track_value.get()
 }
 unsafe extern "C" fn num_takes(item: *mut c_void) -> i32 {
     let f = fixture();
+    // 分割出来的右半段与左半段 take 数相同（REAPER 两个新 item 各带全部 take）。
+    if item == f.right_item() {
+        f.record("num-takes-right");
+        return f.num_takes();
+    }
     assert_eq!(item, f.item());
     f.record("num-takes");
     f.num_takes()
 }
 unsafe extern "C" fn take_at(item: *mut c_void, index: i32) -> *mut c_void {
     let f = fixture();
+    if item == f.right_item() {
+        f.record(format!("take-at-right:{index}"));
+        // 夹具只造**一条**右半段 take：它占据与本条序号相同的那一格（本组用例把实例
+        // 挂在最后一条 take 上），其余序号返回空 —— 调用方必须据此拒绝，而不是退回
+        // active take。
+        if index == f.num_takes() - 1 {
+            return f.right_take();
+        }
+        return std::ptr::null_mut();
+    }
     assert_eq!(item, f.item());
     f.record(format!("take-at:{index}"));
     if index < 0 || index >= f.num_takes() {
@@ -968,15 +1162,15 @@ unsafe extern "C" fn take_source(take: *mut c_void) -> *mut c_void {
     let f = fixture();
     f.record("take-source");
     assert!(
-        take == f.take() || f.extra_take_index(take).is_some(),
+        take == f.take() || f.extra_take_index(take).is_some() || take == f.right_take(),
         "source read must be for an enumerated take"
     );
     f.take_source.get() as *mut c_void
 }
 unsafe extern "C" fn section_info(
     source: *mut c_void,
-    _offset: *mut f64,
-    _length: *mut f64,
+    offset: *mut f64,
+    length: *mut f64,
     reversed: *mut bool,
 ) -> bool {
     let f = fixture();
@@ -985,8 +1179,306 @@ unsafe extern "C" fn section_info(
     if !f.section_reports.get() {
         return false;
     }
-    unsafe { *reversed = f.take_reversed.get() };
+    unsafe {
+        *offset = f.take_section_start.get();
+        *length = f.take_section_length.get();
+        *reversed = f.take_reversed.get();
+    }
     true
+}
+
+/// 夹具里的包络句柄：只要非空就代表"这条 take 有 Pitch 包络"。
+const ENVELOPE_HANDLE: usize = 0xE70E;
+
+/// `GetTakeEnvelopeByName(MediaItem_Take*, const char*) -> TrackEnvelope*`。
+unsafe extern "C" fn get_take_envelope(
+    take: *mut c_void,
+    name: *const std::ffi::c_char,
+) -> *mut c_void {
+    let f = fixture();
+    assert_eq!(take, f.take());
+    let name = unsafe { CStr::from_ptr(name) }.to_str().unwrap();
+    f.record(format!("get-take-envelope:{name}"));
+    if f.take_env_chunk.borrow().is_some() {
+        ENVELOPE_HANDLE as *mut c_void
+    } else {
+        std::ptr::null_mut()
+    }
+}
+
+/// `GetEnvelopeStateChunk(TrackEnvelope*, char*, int, bool)`。
+unsafe extern "C" fn get_envelope_state(
+    envelope: *mut c_void,
+    buffer: *mut std::ffi::c_char,
+    size: i32,
+    _is_undo: bool,
+) -> bool {
+    let f = fixture();
+    assert_eq!(envelope as usize, ENVELOPE_HANDLE);
+    f.record("get-envelope-state");
+    let stored = f.take_env_chunk.borrow().clone();
+    let Some(text) = stored else {
+        return false;
+    };
+    let bytes = text.as_bytes();
+    if size <= 0 || bytes.len() + 1 > size as usize {
+        return false;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            bytes.as_ptr().cast::<std::ffi::c_char>(),
+            buffer,
+            bytes.len(),
+        );
+        *buffer.add(bytes.len()) = 0;
+    }
+    true
+}
+
+/// `SetEnvelopeStateChunk(TrackEnvelope*, const char*, bool)`。
+///
+/// 【为什么"只有头没有点"要存成 `None`】真机行为：这样的块会让宿主删掉整条包络。
+unsafe extern "C" fn set_envelope_state(
+    envelope: *mut c_void,
+    text: *const std::ffi::c_char,
+    _is_undo: bool,
+) -> bool {
+    let f = fixture();
+    assert_eq!(envelope as usize, ENVELOPE_HANDLE);
+    f.record("set-envelope-state");
+    if text.is_null() {
+        return false;
+    }
+    let chunk = unsafe { CStr::from_ptr(text) }
+        .to_string_lossy()
+        .to_string();
+    let has_points = chunk
+        .lines()
+        .any(|line| line.split_whitespace().next() == Some("PT"));
+    f.take_env_chunk
+        .replace(if has_points { Some(chunk) } else { None });
+    true
+}
+
+/// 夹具里的主动作段句柄。
+const SECTION_HANDLE: usize = 0x5EC7;
+
+/// 夹具的动作表：一条无关动作 + 本插件要的两条。
+///
+/// 【为什么"无关动作"必须在最前面】真实现是按索引逐条枚举、按名字匹配；只有表里存在
+/// 不匹配的条目，"匹配错位置"才会被用例抓住。
+fn action_table() -> [(&'static std::ffi::CStr, i32); 3] {
+    [
+        (c"File: New project", 40023),
+        (
+            c"Take: Toggle take pitch envelope",
+            fixture().pitch_action_id.get(),
+        ),
+        (c"Item properties: Toggle take reverse", 41051),
+    ]
+}
+
+/// `KbdSectionInfo* SectionFromUniqueID(int uniqueID)`：只认主动作段（0）。
+unsafe extern "C" fn section_from_unique_id(unique: i32) -> *mut c_void {
+    if unique == 0 {
+        SECTION_HANDLE as *mut c_void
+    } else {
+        std::ptr::null_mut()
+    }
+}
+
+/// `int kbd_enumerateActions(KbdSectionInfo*, int idx, const char** nameOut)`。
+///
+/// 【签名为什么要照真机】出参是**指向名字的指针**（`const char**`），不是字符缓冲区。
+/// 夹具照抄这一点，才可能抓住"把出参当缓冲区读"的写法（真机上的现场就是它）。
+unsafe extern "C" fn enumerate_actions(
+    section: *mut c_void,
+    index: i32,
+    name_out: *mut *const std::ffi::c_char,
+) -> i32 {
+    let f = fixture();
+    assert_eq!(section as usize, SECTION_HANDLE, "必须传主动作段的指针");
+    f.record(format!("enumerate:{index}"));
+    let table = action_table();
+    let Some((name, command)) = table.get(index as usize) else {
+        return 0;
+    };
+    if !name_out.is_null() {
+        unsafe { *name_out = name.as_ptr() };
+    }
+    *command
+}
+
+/// 夹具里的选择态只有一个 item（`item_ui_selected`），足以验证"只影响目标 item"。
+unsafe extern "C" fn count_selected(_project: *mut c_void) -> i32 {
+    i32::from(fixture().item_ui_selected.get())
+}
+
+unsafe extern "C" fn selected_item(_project: *mut c_void, index: i32) -> *mut c_void {
+    let f = fixture();
+    if index == 0 && f.item_ui_selected.get() {
+        f.item()
+    } else {
+        std::ptr::null_mut()
+    }
+}
+
+unsafe extern "C" fn select_all(_project: *mut c_void, selected: bool) {
+    fixture().item_ui_selected.set(selected);
+}
+
+unsafe extern "C" fn set_item_selected(item: *mut c_void, selected: bool) {
+    let f = fixture();
+    assert_eq!(item, f.item());
+    f.item_ui_selected.set(selected);
+}
+
+unsafe extern "C" fn item_is_selected(item: *mut c_void) -> bool {
+    let f = fixture();
+    assert_eq!(item, f.item());
+    f.item_ui_selected.get()
+}
+
+/// `const char* kbd_getTextFromCmd(int cmd, KbdSectionInfo* section)`。
+unsafe extern "C" fn action_text(command: i32, _section: *mut c_void) -> *const std::ffi::c_char {
+    for (name, id) in action_table() {
+        if id == command {
+            return name.as_ptr();
+        }
+    }
+    std::ptr::null()
+}
+
+/// 动作的**效果**：建一条 take pitch 包络 / 翻转 take 方向。
+fn action_effect(command: i32) {
+    let f = fixture();
+    if command == f.pitch_action_id.get() && f.take_env_chunk.borrow().is_none() {
+        f.take_env_chunk.replace(Some(
+            "<PITCHENV\nACT 1 -1\nVIS 1 1 1\nLANEHEIGHT 0 0\nARM 0\nDEFSHAPE 0 -1 -1\nPT 0 0 0\n>\n"
+                .to_string(),
+        ));
+    }
+    if command == 41051 {
+        let reversed = !f.take_reversed.get();
+        f.take_reversed.set(reversed);
+        // 【与真机一致】宿主的 toggle 会把 take 的源包上 SECTION/REVERSE（真机对照：
+        // 动作之后 `PCM_Source_GetSectionInfo` 的 isSection/rev 立即可读）。此后方向位
+        // 从"缺席"变为"可读"—— 正放 take 被倒放的那次 toggle 正是这条转变。
+        f.section_reports.set(true);
+    }
+}
+
+/// `Main_OnCommandEx(int command, int flag, ReaProject* proj)`。
+unsafe extern "C" fn run_command_ex(command: i32, _flag: i32, project: *mut c_void) {
+    let f = fixture();
+    assert_eq!(project, f.project(), "动作必须落在本实例的工程上");
+    f.record(format!("run-command-ex:{command}"));
+    action_effect(command);
+}
+
+/// `Main_OnCommand(int, int)`：老宿主形态。
+unsafe extern "C" fn run_command(command: i32, _flag: i32) {
+    let f = fixture();
+    f.record(format!("run-command:{command}"));
+    action_effect(command);
+}
+
+/// `GetItemStateChunk(MediaItem*, char* buf, int size, bool isUndo)`。
+unsafe extern "C" fn get_item_state(
+    item: *mut c_void,
+    buffer: *mut std::ffi::c_char,
+    size: i32,
+    _is_undo: bool,
+) -> bool {
+    let f = fixture();
+    assert!(item == f.item() || item == f.right_item());
+    f.record("get-item-state");
+    let chunk = f.item_state_chunk.borrow().clone();
+    let bytes = chunk.as_bytes();
+    // 与 REAPER 一致：放不下就返回 false（调用方据此扩容重试）。
+    if size <= 0 || bytes.len() + 1 > size as usize {
+        return false;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            bytes.as_ptr().cast::<std::ffi::c_char>(),
+            buffer,
+            bytes.len(),
+        );
+        *buffer.add(bytes.len()) = 0;
+    }
+    true
+}
+
+/// `SetItemStateChunk(MediaItem*, const char* chunk, bool isUndo)`。
+///
+/// 【为什么夹具要"解析"方向】写回之后调用方会立刻用
+/// `PCM_Source_GetSectionInfo` 做一次"写→读→比"。夹具若只是存下文本，
+/// 那一步永远读到旧值，自校验就成了摆设 —— 只有真的按 chunk 里的 MODE 更新
+/// 方向位，这条回归才有意义。
+unsafe extern "C" fn set_item_state(
+    item: *mut c_void,
+    text: *const std::ffi::c_char,
+    _is_undo: bool,
+) -> bool {
+    let f = fixture();
+    assert!(item == f.item() || item == f.right_item());
+    f.record("set-item-state");
+    // 【take FX 下的真机行为】宿主拒绝重写一个挂着本实例的 item（见 `take_env` 的模块文档）。
+    if f.item_state_write_refused.get() {
+        return false;
+    }
+    if text.is_null() {
+        return false;
+    }
+    let chunk = unsafe { CStr::from_ptr(text) }
+        .to_string_lossy()
+        .to_string();
+    if chunk.is_empty() {
+        return false;
+    }
+    let sectioned = chunk.contains("<SOURCE SECTION");
+    let field = |name: &str| -> Option<f64> {
+        chunk
+            .lines()
+            .find(|line| line.trim_start().starts_with(&format!("{name} ")))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<f64>().ok())
+    };
+    let mode = field("MODE").map_or(0, |value| value as i32);
+    // 与 REAPER 7.85 一致：`MODE` 是位 —— 1 = 段边界无效（整份媒体）、2 = 反向。
+    f.take_reversed.set(sectioned && mode & 2 != 0);
+    if sectioned && mode & 1 == 0 {
+        f.take_section_start.set(field("STARTPOS").unwrap_or(0.));
+        f.take_section_length.set(field("LENGTH").unwrap_or(0.));
+    } else if sectioned {
+        // `MODE 1/3`：宿主报的是整份媒体（见 `source_direction` 的真机读数表）。
+        f.take_section_start.set(0.);
+        f.take_section_length.set(2.);
+    } else {
+        f.take_section_start.set(0.);
+        f.take_section_length.set(0.);
+    }
+    f.item_state_chunk.replace(chunk);
+    f.change.set(f.change.get().wrapping_add(1));
+    true
+}
+
+/// `genGuid(GUID*)`：夹具不需要真 GUID，给一个确定的零值即可（身份校验走
+/// `GetSetMediaItem*Info_String`，不读这里）。
+unsafe extern "C" fn gen_guid(out: *mut super::item_chunk::NativeGuid) {
+    unsafe { std::ptr::write(out, super::item_chunk::NativeGuid::default()) };
+}
+
+/// `guidToString(const GUID*, char*)`。
+unsafe extern "C" fn guid_to_string(
+    _guid: *const super::item_chunk::NativeGuid,
+    buffer: *mut std::ffi::c_char,
+) {
+    let text = c"{00000000-0000-0000-0000-000000000000}";
+    unsafe {
+        std::ptr::copy_nonoverlapping(text.as_ptr(), buffer, text.to_bytes_with_nul().len());
+    }
 }
 
 /// `GetMediaSourceFileName(PCM_source*, char* buf, int sz)`：把夹具里记的路径写进缓冲。
@@ -1041,7 +1533,91 @@ fn folder_depth_is_read_from_the_fx_track_alone() {
     }
 }
 unsafe extern "C" fn fx_count(track: *mut c_void) -> i32 {
-    i32::from(fixture().new_fx.borrow().contains(&(track as usize)))
+    let f = fixture();
+    // 【两套语义】`fx_api` 打开时按显式的链内容回答（旁通用例）；否则沿用"新建轨道
+    // 自带一个 FX"的旧行为（建轨用例）。
+    if f.fx_api.get() {
+        f.record("track-fx-count");
+        return f.fx_track_chain.borrow().len() as i32;
+    }
+    i32::from(f.new_fx.borrow().contains(&(track as usize)))
+}
+
+unsafe extern "C" fn fx_enabled(track: *mut c_void, index: i32) -> bool {
+    let f = fixture();
+    assert_eq!(track, f.track());
+    f.record(format!("track-fx-enabled:{index}"));
+    f.fx_track_chain.borrow()[index as usize].enabled
+}
+
+unsafe extern "C" fn fx_offline(track: *mut c_void, index: i32) -> bool {
+    let f = fixture();
+    assert_eq!(track, f.track());
+    f.record(format!("track-fx-offline:{index}"));
+    f.fx_track_chain.borrow()[index as usize].offline
+}
+
+unsafe extern "C" fn fx_name(
+    track: *mut c_void,
+    index: i32,
+    buffer: *mut c_char,
+    size: i32,
+) -> bool {
+    let f = fixture();
+    assert_eq!(track, f.track());
+    f.record(format!("track-fx-name:{index}"));
+    copy_fx_name(f.fx_track_chain.borrow()[index as usize].name, buffer, size)
+}
+
+unsafe extern "C" fn take_fx_count(take: *mut c_void) -> i32 {
+    let f = fixture();
+    assert_eq!(
+        take,
+        f.parent_take(),
+        "take FX chain read must use the bound take"
+    );
+    f.record("take-fx-count");
+    f.fx_take_chain.borrow().len() as i32
+}
+
+unsafe extern "C" fn take_fx_enabled(take: *mut c_void, index: i32) -> bool {
+    let f = fixture();
+    assert_eq!(take, f.parent_take());
+    f.record(format!("take-fx-enabled:{index}"));
+    f.fx_take_chain.borrow()[index as usize].enabled
+}
+
+unsafe extern "C" fn take_fx_offline(take: *mut c_void, index: i32) -> bool {
+    let f = fixture();
+    assert_eq!(take, f.parent_take());
+    f.record(format!("take-fx-offline:{index}"));
+    f.fx_take_chain.borrow()[index as usize].offline
+}
+
+unsafe extern "C" fn take_fx_name(
+    take: *mut c_void,
+    index: i32,
+    buffer: *mut c_char,
+    size: i32,
+) -> bool {
+    let f = fixture();
+    assert_eq!(take, f.parent_take());
+    f.record(format!("take-fx-name:{index}"));
+    copy_fx_name(f.fx_take_chain.borrow()[index as usize].name, buffer, size)
+}
+
+/// 把 FX 显示名写进宿主缓冲（NUL 结尾，放不下就截断 —— 与宿主同一条纪律）。
+fn copy_fx_name(name: &str, buffer: *mut c_char, size: i32) -> bool {
+    if buffer.is_null() || size <= 0 {
+        return false;
+    }
+    let bytes = name.as_bytes();
+    let count = bytes.len().min(size as usize - 1);
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.cast::<u8>(), count);
+        *buffer.add(count) = 0;
+    }
+    true
 }
 unsafe extern "C" fn fx_guid(track: *mut c_void, index: i32) -> *const u8 {
     let f = fixture();
@@ -1624,4 +2200,437 @@ fn task38a_geometry_and_transport_reject_worker_threads_without_host_calls() {
     f.valid.set(false);
     assert!(f.geometry(&client).is_err());
     assert!(f.calls.borrow().is_empty());
+}
+
+/// take FX 夹具：轨道链**为空**，take 链上有本插件与一个原生 FX。
+fn take_fx_fixture() -> &'static Fixture {
+    let fixture = Fixture::new();
+    fixture.enable_media();
+    fixture.fx_api.set(true);
+    fixture.take_fx_api.set(true);
+    *fixture.fx_take_chain.borrow_mut() = vec![FxEntry::HFS, FxEntry::OTHER];
+    fixture
+}
+
+/// **轨道链的整链开关（`I_FXEN`）仍然会关门。**
+///
+/// 【为什么与 take 侧成对存在】take 侧修的是"读了一个**不存在**的读数"，不是"整链开关不
+/// 重要"。轨道侧那个读数是真的：用户把整条轨道 FX 链关掉时插件必须停下，否则白烧 CPU
+/// —— 而这条路径的判据与 take 侧共用同一份 `decide()`，所以它必须一直有覆盖。
+#[test]
+fn a_track_chain_toggle_still_closes_the_gate() {
+    let f = Fixture::new();
+    f.enable_media();
+    f.fx_api.set(true);
+    *f.fx_track_chain.borrow_mut() = vec![FxEntry::HFS];
+    let host = std::sync::Arc::new(f.client());
+    assert_eq!(host.fx_bypass_state(&|| true), FxBypass::Active);
+    f.fx_chain_on.set(false);
+    assert_eq!(host.fx_bypass_state(&|| true), FxBypass::Bypassed);
+    f.fx_chain_on.set(true);
+    assert_eq!(host.fx_bypass_state(&|| true), FxBypass::Active);
+}
+
+/// **take FX 实例必须读 take 链，而不是轨道链。**
+///
+/// 【为什么这条是本次修复的主验收】改动前 `fx_bypass_state` 只认 `parent(1)` +
+/// `TrackFX_*`：take 链上的实例永远匹配不到（`found == 0` ⇒ `Unknown`），于是
+/// "旁通了还在渲染"在 take FX 下**必然复发**。这条用例同时钉住两个方向：
+/// 用户旁通 take 链上的那个 FX ⇒ 必须报 `Bypassed`；恢复 ⇒ 必须报 `Active`。
+#[test]
+fn a_take_fx_instance_reads_the_take_chain_not_the_track_chain() {
+    let f = take_fx_fixture();
+    let host = std::sync::Arc::new(f.client());
+    assert_eq!(
+        host.resolve_placement(&[], &|| true),
+        HostPlacement::TakeFx {
+            track: f.track() as usize,
+            item: f.item() as usize,
+            take: f.take() as usize,
+        }
+    );
+    assert_eq!(host.fx_bypass_state(&|| true), FxBypass::Active);
+    // 用户旁通 take 链上的本插件。
+    f.fx_take_chain.borrow_mut()[0].enabled = false;
+    assert_eq!(host.fx_bypass_state(&|| true), FxBypass::Bypassed);
+    // 恢复。
+    f.fx_take_chain.borrow_mut()[0].enabled = true;
+    assert_eq!(host.fx_bypass_state(&|| true), FxBypass::Active);
+    // 【绝不按轨道的形状去读 take 的"整链总开关"】take 没有这个参数；宿主对未知参数
+    // 回 0.0（夹具照抄这条行为）。旧实现把它读成"链被关掉" ⇒ 判旁通 ⇒ 一点声音都没有，
+    // 而这一整段用例从头到尾都能跑通 —— 判据本身不认识"没有这个读数"，那才是根因。
+}
+
+/// **轨道 FX 实例绝不读同轨另一条 take 链。**
+///
+/// 【为什么这是反方向的同一条边界】同一条轨上可以同时有轨道 FX 实例与 take FX 实例。
+/// 若轨道实例越过自己的链去看 take 链，它会把"某个 take 上的实例被旁通"当成自己
+/// 被旁通 —— 用户听不到声音，而日志里只有一条 `active -> bypassed`。
+#[test]
+fn a_track_fx_instance_never_reads_a_sibling_take_chain() {
+    let f = Fixture::new();
+    f.enable_media();
+    f.fx_api.set(true);
+    f.take_fx_api.set(true);
+    // 轨道链上的本插件被旁通；take 链上的那个是启用的。
+    *f.fx_track_chain.borrow_mut() = vec![FxEntry {
+        enabled: false,
+        ..FxEntry::HFS
+    }];
+    *f.fx_take_chain.borrow_mut() = vec![FxEntry::HFS];
+    let host = std::sync::Arc::new(f.client());
+    // region 落在 item 之外 ⇒ 没有"这组 region 全在 take 里"的证据 ⇒ 判轨道 FX。
+    assert_eq!(
+        host.resolve_placement(&[(0.0, 0.5)], &|| true),
+        HostPlacement::TrackFx {
+            track: f.track() as usize
+        }
+    );
+    assert_eq!(host.fx_bypass_state(&|| true), FxBypass::Bypassed);
+    // 反过来：轨道链启用、take 链旁通，轨道实例仍报活跃（没有被 take 链带偏）。
+    f.fx_track_chain.borrow_mut()[0].enabled = true;
+    f.fx_take_chain.borrow_mut()[0].enabled = false;
+    assert_eq!(host.fx_bypass_state(&|| true), FxBypass::Active);
+}
+
+/// 两条链都有本插件、且 region 全在 take 的 item 内 ⇒ 判 take FX（歧义裁决的正例）。
+#[test]
+fn both_chains_are_disambiguated_by_the_bound_item_span() {
+    let f = take_fx_fixture();
+    *f.fx_track_chain.borrow_mut() = vec![FxEntry::HFS];
+    let host = std::sync::Arc::new(f.client());
+    // item 的区间是 [1, 5)（夹具的 D_POSITION / D_LENGTH）。
+    assert_eq!(
+        host.resolve_placement(&[(1.0, 4.0), (4.0, 5.0)], &|| true),
+        HostPlacement::TakeFx {
+            track: f.track() as usize,
+            item: f.item() as usize,
+            take: f.take() as usize,
+        }
+    );
+    // 有一条 region 落在 item 之外 ⇒ 退回轨道 FX。
+    assert_eq!(
+        host.resolve_placement(&[(1.0, 4.0), (5.5, 9.0)], &|| true),
+        HostPlacement::TrackFx {
+            track: f.track() as usize
+        }
+    );
+}
+
+/// 宿主不提供 `TakeFX_*` 一族时，take 实例必须报 `Unknown`，**不得**回退去读轨道链。
+#[test]
+fn a_take_fx_instance_without_the_take_api_stays_unknown() {
+    let f = Fixture::new();
+    f.enable_media();
+    f.fx_api.set(true);
+    // take 侧 API 缺席（老宿主形态），轨道链上有一个**已旁通**的本插件。
+    *f.fx_track_chain.borrow_mut() = vec![FxEntry {
+        enabled: false,
+        ..FxEntry::HFS
+    }];
+    let host = std::sync::Arc::new(f.client());
+    assert_eq!(host.fx_bypass_state(&|| true), FxBypass::Bypassed);
+    // 同一条链缺席时的手动确认：探不到 take 链 ⇒ 只可能落在轨道或 Unbound。
+    assert!(host.probe_placement(&|| true).take.is_none());
+}
+
+/// 放置位置在重绑后必须**重新求值**，不能把上一次的结论带到下一次。
+#[test]
+fn the_placement_is_recomputed_after_a_rebind() {
+    let f = take_fx_fixture();
+    let host = std::sync::Arc::new(f.client());
+    assert!(host.resolve_placement(&[], &|| true).is_take_fx());
+    assert!(host.placement_resolved());
+    // 重绑：适配器丢掉旧结论，宿主把同一个处理器搬到另一条链上。
+    host.forget_placement();
+    f.forget_and_rearm_as_track_fx();
+    assert_eq!(host.placement(), HostPlacement::Unbound);
+    assert!(!host.placement_resolved());
+    assert_eq!(
+        host.resolve_placement(&[], &|| true),
+        HostPlacement::TrackFx {
+            track: f.track() as usize
+        }
+    );
+}
+
+/// take FX 下"目标 item 就是本实例挂着的那个 item"必须被认出来。
+///
+/// 【为什么这是一个断言而不是注释】它是"方向/包络不重写 item chunk"的**唯一**判据：
+/// 认错了，倒放就会去撞那次必然被拒的 chunk 写回（然后才退到动作）；认反了，轨道 FX
+/// 实例会把别人的 item 当成自己的、绕开精确的 chunk 路径。
+#[test]
+fn a_take_fx_item_is_recognised_as_the_one_hosting_this_instance() {
+    let f = take_fx_fixture();
+    f.enable_item_state(&f.single_take_chunk());
+    let host = std::sync::Arc::new(f.client());
+    assert_eq!(host.placement().item(), None, "还没求值前不许瞎认");
+    let target = host.clip_target(|| true).expect("bound take");
+    assert!(!target.hosts_this_instance(), "Unbound 时按历史路径走");
+    assert!(host.resolve_placement(&[], &|| true).is_take_fx());
+    assert!(
+        target.hosts_this_instance(),
+        "take FX 下目标 item 就是本实例挂着的那个"
+    );
+    // 轨道 FX 的实例不拥有任何 item。
+    f.forget_and_rearm_as_track_fx();
+    host.forget_placement();
+    assert!(host.resolve_placement(&[], &|| true).track().is_some());
+    let target = host.clip_target(|| true).expect("bound take");
+    assert!(!target.hosts_this_instance());
+}
+
+/// take FX 的清单只有**自己那条 take 的 item**，且写回目标绑在那条 take 上。
+///
+/// 【为什么非 active take 是关键】take FX 恰好最适合挂在多 take item 的某一条上，而
+/// `GetActiveTake` 恒指向**宿主选中**的那条。绑定一旦取错，写回（音高/方向/淡变）
+/// 全部落到别人的 take。
+#[test]
+fn a_take_fx_inventory_lists_only_the_bound_take() {
+    let f = take_fx_fixture();
+    f.enable_takes(2);
+    f.parent_take.set(f.take_at(2) as usize);
+    let host = std::sync::Arc::new(f.client());
+    assert!(host.resolve_placement(&[], &|| true).is_take_fx());
+    let tracks = host.ui_scope(&|| true, &[]).unwrap();
+    assert_eq!(tracks.len(), 1, "take FX 只属于一条轨道");
+    assert_eq!(tracks[0].items.len(), 1, "take FX 只列自己那个 item");
+    let item = &tracks[0].items[0];
+    assert_eq!(item.takes.len(), 3, "全部 take 仍然供界面展示");
+    // 绑定的是第 3 条 take（非 active），而几何与写回目标都跟着它走。
+    assert_eq!(
+        item.bound_take.as_deref(),
+        Some("{55555555-5555-5555-5555-000000000002}")
+    );
+    assert_eq!(
+        item.geometry.take_id,
+        "{55555555-5555-5555-5555-000000000002}"
+    );
+    assert_eq!(
+        item.takes.iter().filter(|take| take.active).count(),
+        1,
+        "active 标记仍然且只有一个"
+    );
+}
+
+/// take FX 下导入 / 建轨 / 剪贴板这三个入口必须关掉，其余能力不受影响。
+#[test]
+fn a_take_fx_instance_never_offers_track_level_entries() {
+    let f = Fixture::new();
+    f.enable_media();
+    f.enable_split();
+    f.enable_item_state(&f.single_take_chunk());
+    let host = std::sync::Arc::new(f.client());
+    let track_fx = host.capabilities_for(HostPlacement::TrackFx { track: 1 });
+    assert!(track_fx.media_import, "轨道 FX 下导入仍然可用");
+    assert!(track_fx.track_create, "轨道 FX 下建轨仍然可用");
+    assert!(track_fx.item_clipboard, "轨道 FX 下剪贴板仍然可用");
+    let take_fx = host.capabilities_for(HostPlacement::TakeFx {
+        track: 1,
+        item: 2,
+        take: 3,
+    });
+    assert!(!take_fx.media_import, "take FX 下导入的目标对象不成立");
+    assert!(!take_fx.track_create, "take FX 下建轨的目标对象不成立");
+    assert!(!take_fx.item_clipboard, "复制 item 会连带复制出第二个实例");
+    // 写能力本身不受影响：take FX 照样能拖片段、切分、写音高包络。
+    assert!(take_fx.clip_write);
+    assert!(take_fx.split);
+    assert!(take_fx.take_pitch_bridge);
+    assert!(take_fx.clip_reverse);
+}
+
+/// 有包络对象时，音高写回**只**碰包络，绝不重写 item chunk。
+///
+/// 【为什么这条是 take FX 的核心】真机实测：挂着本插件（ARA）的 take FX 的那个 item，
+/// `SetItemStateChunk` 连"原样写回"都拒绝。包络对象那条路不受这条限制 —— 而且它不重建
+/// item，轨道 FX 下也顺带避免了"写一次包络、把同一条 item 上的别的 take FX 重建一遍"。
+#[test]
+fn a_take_pitch_write_uses_the_envelope_object_when_it_exists() {
+    let f = Fixture::new();
+    f.enable_item_state(&f.single_take_chunk());
+    f.inventory_enabled.set(true);
+    f.take_env_enabled.set(true);
+    f.take_env_chunk.replace(Some(
+        "<PITCHENV\nACT 1 -1\nVIS 1 1 1\nLANEHEIGHT 0 0\nARM 0\nDEFSHAPE 0 -1 -1\nPT 0 0 0\n>\n"
+            .to_string(),
+    ));
+    let host = std::sync::Arc::new(f.client());
+    let target = host.clip_target(|| true).expect("bound take");
+    let points = vec![
+        hifishifter_kernel::pitch_bridge::EnvelopePoint::new(0.0, 3.0),
+        hifishifter_kernel::pitch_bridge::EnvelopePoint::new(1.5, -2.0),
+    ];
+    target
+        .write_take_pitch_points(&points, &|| true)
+        .expect("write through the envelope");
+    assert!(
+        !f.calls().iter().any(|call| call == "set-item-state"),
+        "不得重写 item chunk"
+    );
+    assert!(f.calls().iter().any(|call| call == "set-envelope-state"));
+    // 读回也走包络对象，且点集逐字一致。
+    let read = target.take_pitch_points(&|| true).expect("read");
+    assert_eq!(read.points, points);
+    assert!(read.present);
+}
+
+/// 没有包络时**先**借宿主动作建一条，而不是先去撞 item chunk。
+///
+/// 【为什么顺序本身是断言】真机上那条"先写 chunk"的路在 take FX 下必然失败：每次转换都要
+/// 读一份几百 KB 的 item chunk、再吃一次宿主拒绝，然后才建包络 —— 用户看到的是几秒卡顿
+/// 加一条吓人的日志。所以这里不仅要求结果对，还要求**根本没去碰** item chunk。
+#[test]
+fn a_missing_envelope_is_created_through_the_host_action_first() {
+    let f = Fixture::new();
+    f.enable_item_state(&f.single_take_chunk());
+    f.inventory_enabled.set(true);
+    f.take_env_enabled.set(true);
+    // 宿主此刻确实会拒绝 chunk 写回（take FX 下的真机行为）—— 但这条路径不该走到那里。
+    f.item_state_write_refused.set(true);
+    let host = std::sync::Arc::new(f.client());
+    let target = host.clip_target(|| true).expect("bound take");
+    let points = vec![hifishifter_kernel::pitch_bridge::EnvelopePoint::new(
+        0.0, 5.0,
+    )];
+    target
+        .write_take_pitch_points(&points, &|| true)
+        .expect("write through a created envelope");
+    assert!(
+        f.calls().iter().any(|call| call == "run-command-ex:41612"),
+        "必须借宿主自己的动作建包络"
+    );
+    assert!(
+        !f.calls().iter().any(|call| call == "get-item-state"),
+        "建包络不该先读一份 item chunk"
+    );
+    let stored = f.take_env_chunk.borrow().clone().expect("envelope created");
+    assert!(stored.contains("PT 0.00000000000000000 5.00000000000000000 0"));
+    // 选择位必须恢复到进入时的样子（动作只该影响目标 item，不该改用户的选区）。
+    assert!(!f.item_ui_selected.get(), "选择位要还原");
+}
+
+/// **按名字解析动作号，不认死号码**：夹具把命令号改成 99999，实现仍要跑对。
+///
+/// 【为什么这条是回归】真机上第一次尝试"借宿主动作"时，枚举函数的出参被当成字符缓冲区
+/// 读，名字永远匹配不上 —— 用户看到的是"宿主里找不到该动作，请手动打开一次音高包络"。
+/// 那时日志里其实连动作表都没读到。判据必须是"名字 → 命令号"，而不是记忆里的数字。
+#[test]
+fn the_action_is_resolved_by_name_not_by_a_remembered_number() {
+    let f = Fixture::new();
+    f.enable_item_state(&f.single_take_chunk());
+    f.inventory_enabled.set(true);
+    f.take_env_enabled.set(true);
+    f.pitch_action_id.set(99_999);
+    let host = std::sync::Arc::new(f.client());
+    let target = host.clip_target(|| true).expect("bound take");
+    let points = vec![hifishifter_kernel::pitch_bridge::EnvelopePoint::new(
+        0.0, 1.0,
+    )];
+    target
+        .write_take_pitch_points(&points, &|| true)
+        .expect("write through the enumerated action");
+    assert!(
+        f.calls().iter().any(|call| call == "run-command-ex:99999"),
+        "用的是动作表里的命令号：{:?}",
+        f.calls()
+    );
+    assert!(f.take_env_chunk.borrow().is_some());
+}
+
+/// 空点集 = 删掉整条包络，而且**不碰** item chunk。
+#[test]
+fn an_empty_point_set_clears_the_envelope_without_touching_the_item() {
+    let f = Fixture::new();
+    f.enable_item_state(&f.single_take_chunk());
+    f.inventory_enabled.set(true);
+    f.take_env_enabled.set(true);
+    f.take_env_chunk.replace(Some(
+        "<PITCHENV\nACT 1 -1\nVIS 1 1 1\nLANEHEIGHT 0 0\nARM 0\nDEFSHAPE 0 -1 -1\nPT 0 0 0\n>\n"
+            .to_string(),
+    ));
+    let host = std::sync::Arc::new(f.client());
+    let target = host.clip_target(|| true).expect("bound take");
+    target
+        .write_take_pitch_points(&[], &|| true)
+        .expect("clear");
+    assert!(
+        f.take_env_chunk.borrow().is_none(),
+        "只有头的块 = 宿主删掉整条包络"
+    );
+    assert!(!f.calls().iter().any(|call| call == "set-item-state"));
+}
+
+/// **超过第一次读取缓冲区的 item chunk 必须整份读回、整份写回。**
+///
+/// 【为什么这条是"take 音高转换永远失败"的回归】`GetItemStateChunk` 能写多少由调用方给的
+/// 缓冲区决定：放不下时宿主返回 `false`（真机也把前缀写满后照常返回 `true`）。旧实现
+/// 第一次就只要 64 KiB，且把"读到 NUL 为止"当成读完 —— 于是一份带几千个 `PITCHENV` 点
+/// （长片段）或带着 take FX 插件状态的 chunk 永远读不全，每一次转换都在解析阶段失败，
+/// 而用户看到的只是"点了没反应"。判据必须是结构（能不能解析成一整份 `<ITEM>`），
+/// 不是字节数猜测。
+#[test]
+fn a_chunk_larger_than_the_first_read_is_read_whole() {
+    let f = Fixture::new();
+    f.enable_media();
+    let mut chunk = String::from(
+        "<ITEM\nPOSITION 0\nLENGTH 1\nSEL 1\n\
+         IGUID {11111111-1111-1111-1111-111111111111}\n\
+         GUID {22222222-2222-2222-2222-222222222222}\n\
+         <SOURCE WAVE\nFILE \"ara://source\"\n>\n<PITCHENV\nACT 1 -1\n",
+    );
+    for index in 0..6000 {
+        chunk.push_str(&format!("PT {:.17} {:.17} 0\n", index as f64 * 0.01, 0.0));
+    }
+    chunk.push_str(">\n>\n");
+    assert!(chunk.len() > 64 * 1024, "chunk is {} bytes", chunk.len());
+    f.enable_item_state(&chunk);
+    let host = std::sync::Arc::new(f.client());
+    let target = host.clip_target(|| true).expect("bound take");
+    // 读：旧实现在第一次（64 KiB）就停手，把半份 chunk 当整份交出去。
+    let read = target.item_state_chunk(&|| true).expect("whole chunk");
+    assert_eq!(read.len(), chunk.len());
+    // 写：整块替换后仍然是一份完整 chunk，新点集在里面。
+    let points = vec![
+        hifishifter_kernel::pitch_bridge::EnvelopePoint::new(0.0, 3.0),
+        hifishifter_kernel::pitch_bridge::EnvelopePoint::new(1.0, -2.0),
+    ];
+    target
+        .write_take_pitch_points(&points, &|| true)
+        .expect("write");
+    let written = target.item_state_chunk(&|| true).expect("reread");
+    let parsed =
+        super::take_pitch::read_take_pitch(&written, "{22222222-2222-2222-2222-222222222222}")
+            .expect("parse");
+    assert_eq!(parsed.points, points);
+}
+
+/// **多 take item 分割后，右半段的写回目标仍是"同一条 take"。**
+///
+/// 【为什么这是本轮必须钉住的一条】`SplitMediaItem` 之后旧代码取 `GetActiveTake(right)`：
+/// 那是宿主**选中**的 take，而 take FX 恰好可以挂在非 active 的那条上。一旦取错，
+/// 右半段的音高/方向/淡变全部落到别人的 take 上 —— 用户看到的是"分割一次，另一条 take
+/// 的音高变了"。
+#[test]
+fn a_multi_take_split_keeps_the_bound_take() {
+    let f = Fixture::new();
+    f.enable_split();
+    f.enable_takes(1);
+    // 实例挂在第 2 条 take 上（不是 active 的第 1 条）。
+    f.parent_take.set(f.take_at(1) as usize);
+    let host = std::sync::Arc::new(f.client());
+    let target = host.clip_target(|| true).expect("bound take");
+    let (left, right) = target.split_at(2.0, &|| true).expect("split");
+    assert_eq!(left.item_id, "{11111111-1111-1111-1111-111111111111}");
+    // 右半段的身份来自"同一序号"，不是 active take。
+    assert_eq!(right.take_id, "{44444444-4444-4444-4444-444444444444}");
+    assert_eq!(right.item_id, "{33333333-3333-3333-3333-333333333333}");
+    // 两段都真的写回宿主（update-item 各一次）。
+    assert_eq!(
+        f.calls()
+            .iter()
+            .filter(|call| call.as_str() == "update-item")
+            .count(),
+        2
+    );
 }

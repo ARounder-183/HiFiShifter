@@ -5,7 +5,7 @@
 > 分支：`codex/ara-plugin`
 > 上位文档：[ARA 桥接产品设计](2026-10-04-ara-bridge-design.md)（**冲突时以它为准**）
 > 实测边界：[内核边界](2026-10-04-ara-kernel-boundary.md)
-> 探针结论：[HANDOFF](../../../probe/ara/HANDOFF.md) · [ledger](../../../probe/ara/EXECUTION-LEDGER.md)
+> 探针结论：探针工作区的 HANDOFF 与执行台账（探针目录未入库，已随探针完结移除）
 
 ---
 
@@ -48,10 +48,10 @@
 
 | # | 事实 | 证据 |
 | --- | --- | --- |
-| F1 | Rust 能以可接受成本接触 ARA：`ara2-bridge` 0.3.0 + 自写 VST3 外壳即可被 REAPER 加载并绑定 ARA | [rust-path FINDINGS](../../../probe/ara/rust-path/FINDINGS.md) |
-| F2 | ARA 模型 → `TimelineState` 在渲染所需字段上无损；丢失项是 7 条**显式降级** | [roundtrip FINDINGS](../../../probe/ara/captures/roundtrip/FINDINGS.md) |
+| F1 | Rust 能以可接受成本接触 ARA：`ara2-bridge` 0.3.0 + 自写 VST3 外壳即可被 REAPER 加载并绑定 ARA | 探针 FINDINGS（探针目录未入库） |
+| F2 | ARA 模型 → `TimelineState` 在渲染所需字段上无损；丢失项是 7 条**显式降级** | 同上（roundtrip FINDINGS） |
 | F3 | 映射后的时间线在逐样本口径上与手工构造的参考一致（阈值 1e-6，已通过） | 同上 §7 的补做（`hifishifter-plugin` 测试） |
-| F4 | 基线：app `762 passed / 4 failed / 1 ignored`，内核 `10 passed`；4 个失败是既有 `/tmp` 路径环境性失败 | [plan](../../plans/2026-10-04-ara-bridge-probe.md) 环境前提 |
+| F4 | 基线：app `762 passed / 4 failed / 1 ignored`，内核 `10 passed`；4 个失败是既有 `/tmp` 路径环境性失败 | [探针计划](../plans/2026-10-04-ara-bridge-probe.md) 环境前提 |
 | F5 | `sampleAccessEnabled: false` 是**撤销**语义，不是拒绝（`enable=true` 在绑定后、`false` 在停用时） | ledger "Task 2 Step 3" |
 | F6 | 一个 ARA 实例 = 一条轨道；REAPER 为一条轨道建 3 个 `IAudioProcessor` 实例，**每实例必须有自己的 companion 绑定** | 同上 |
 | F7 | 内核抽取的真实依赖闭包是 **43 模块 / 2.57 MB**，其中只有 5 个模块碰 `tauri::`（`state` 10 处、`pitch_clip` 4、`pitch_analysis` 2、`recording` 2、`audio_engine` 10） | 本次实测（见 §4.2） |
@@ -65,7 +65,7 @@
 | U3 | **R4：渲染窗口内能否稳定供音**。探针的 `process()` 是空实现 | 失败表现为可听见的空洞 | Phase 3 |
 | U4 | **源内容版本与缓存键**：宿主在插件未运行时改源内容、且几何字段不变时，是否会给缓存造成过期命中 | 静默复用过期渲染 | Phase 3 实验 |
 
-Task 11 的原始日志与退路见 [Task 2 FINDINGS](../../../probe/ara/rust-path/FINDINGS.md) §9。
+Task 11 的原始日志与退路记录在探针工作区的 rust-path FINDINGS §9（探针目录未入库）。
 
 ### 2.2 一个必须记住的探针更正
 
@@ -563,5 +563,5 @@ Phase 3b 再引入宿主 PCM 注入式内核渲染、内容指纹、修音差异
 | --- | --- |
 | [产品设计](2026-10-04-ara-bridge-design.md) | 上位。本文不推翻它的任何决定；§4.6 是对它 §5.4 的收敛 |
 | [内核边界](2026-10-04-ara-kernel-boundary.md) | 本文 §4.2 修正了它的一处判断：**先拆 `state` 再算闭包**，否则闭包被 `AppState` 污染 |
-| [探针计划](../../plans/2026-10-04-ara-bridge-probe.md) | 探针已完结（Task 1–3 全部有结论）；本文接手它的四个未决项 |
-| [EXECUTION-LEDGER](../../../probe/ara/EXECUTION-LEDGER.md) | 历史 Ruling 的唯一记录处；本文产生的新 Ruling 追加在那里 |
+| [探针计划](../plans/2026-10-04-ara-bridge-probe.md) | 探针已完结（Task 1–3 全部有结论）；本文接手它的四个未决项 |
+| 探针执行台账（探针目录未入库） | 历史 Ruling 的唯一记录处；本文产生的新 Ruling 追加在那里 |

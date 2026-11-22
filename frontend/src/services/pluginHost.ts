@@ -73,6 +73,20 @@ export type PluginBootstrap = {
         exportAudio: boolean;
         /** 插件能否导出纯数据文件（布局 / 主题 / 颤音预设）。 */
         exportData: boolean;
+        /**
+         * 插件能否把**倒放**写回宿主 item。
+         *
+         * 【为什么不是一个"是不是 REAPER"的判断】倒放写回要求
+         * `Get/SetItemStateChunk` 与可解析的 WAVE 源同时可得；缺任一项就必须整项
+         * 不出现。后端据真实 API 存在性算出这一位，前端不按宿主名猜。
+         */
+        clipReverse: boolean;
+        /**
+         * 插件能否读写宿主 take 的**音高包络**（REAPER 的 PITCHENV）。
+         *
+         * 读点、写点、排序三个 API 缺一即整束不可用（与方向读取同一降级纪律）。
+         */
+        takePitchBridge: boolean;
     };
     /**
      * Capture 通路的**观察位**（`hostKind === "capture"` 时才有值，否则 `null`）。

@@ -49,7 +49,14 @@ const SLOW_PENDING_TTL: std::time::Duration = std::time::Duration::from_secs(30 
 /// 【为什么必须有上限】回复泵由 20 ms 定时器驱动。没有上限时，一个**永不收敛**的
 /// 等待会以 50 Hz 空转到 `until`（30 s ≈ 1500 次 `get_timeline_state`），每次都争
 /// 同一把文档事务。有了预算，失败在几秒内转成明确的终态错误，用户可以据此处置。
-const HOST_REPLY_RETRY_BUDGET: u32 = 24;
+///
+/// 【为什么是 64 而不是 24】预算与 `until` 是一双必须一起取值的参数：退避序列
+/// 20/40/80/160/320ms 之后封顶 500ms，24 次的饱和总时长 ≈ 9.6 s —— **比它要服务的
+/// 30 s 窗口先死**。真机（REAPER + take FX 倒放）恰恰落在这个缝里：宿主侧写回已成功，
+/// ARA 文档再同步在 +11 s 才到，完成门在 10.6 s 就报了终态错误。64 次的饱和总时长
+/// ≈ 30.1 s ≥ 30 s 窗口：只要判据仍有等待的意义，预算就不再先于窗口耗尽；
+/// 永不收敛的等待仍会在窗口结束时转成同一条终态错误（`until` 才是真正的上限）。
+const HOST_REPLY_RETRY_BUDGET: u32 = 64;
 
 /// 第 `attempt` 次重投前的等待：20 ms 起指数退避，上限 500 ms。
 ///
@@ -1453,8 +1460,7 @@ struct BootstrapFlags {
     /// 上没有形状号可写，界面得把预设翻译成 `(curvature, S)` 一对分量。`None` =
     /// 版本读不出来 → 前端整块保持只读（不猜）。
     ///
-    /// 这套翻译的映射是实测的（`hifishifter_kernel::fade_axes`，证据
-    /// `docs/2026-10-09-fade-axis-findings.md`），所以新轴宿主上**也**摆七个预设按钮；
+    /// 这套翻译的映射是实测的（`hifishifter_kernel::fade_axes`），所以新轴宿主上**也**摆七个预设按钮；
     /// 此前这里的注释写着"预设映射尚未校准，所以只给连续滑杆"，那条限制已随实测消失。
     fade_axes: Option<&'static str>,
     /// 撤销历史由谁承载：`"host"`（宿主权威栈）或 `"local"`（插件自管栈）。
@@ -1700,6 +1706,13 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
             .cloned()
             .unwrap_or_default();
         if ids.is_empty() || ids.len() > 512 || ids.iter().any(|id| id.as_str().is_none()) {
+            // 【为什么给明确错误而不是静默丢弃】`invoke` 是请求-响应通道：不回执
+            // 就是让那个 promise 挂到 30 s 超时 —— "编组点了没反应"与"从未发送"
+            // 在日志里完全同形（本函数头部的三处早退注释是同一条纪律）。
+            state.borrow_mut().post(
+                serde_json::json!({"version":1,"viewId":view_id,"id":id,"ok":false,
+                "error":"group_clips requires 1..512 string clip ids"}),
+            );
             return;
         }
         let group = if request["command"] == "ungroup_clips" {
@@ -1769,6 +1782,33 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 }
             }
         }
+    }
+    // 逐 take 的方向（倒放）与声道模式可以按 take GUID 精确落盘：方向是
+    // `<SOURCE SECTION MODE>` 结构（chunk 改写 / 宿主动作），声道模式是 take 指针上
+    // 的 `I_CHANMODE` —— 两者都不改 take 结构，ARA region ↔ item 的一一对应不受影响。
+    // 重写成 `set_clip_state` 的宿主侧字段，让 plan/write 的一套预检、Undo、回滚与
+    // 完成门照常生效（active take 在 plan 里折进 clip 级补丁，兄弟 take 走逐 take 路）。
+    if matches!(
+        request["command"].as_str(),
+        Some("set_clip_take_reversed") | Some("set_clip_take_channel_mode")
+    ) {
+        let clip_id = request["args"]["clipId"].as_str().unwrap_or("").to_owned();
+        let take_id = request["args"]["takeId"].as_str().unwrap_or("").to_owned();
+        let checkpoint = request["args"]["checkpoint"].clone();
+        let mut patch = serde_json::json!({"clipId": clip_id, "checkpoint": checkpoint});
+        if request["command"] == "set_clip_take_reversed" {
+            patch["hostTakeReversed"] = serde_json::json!({
+                "takeId": take_id,
+                "reversed": request["args"]["reversed"].as_bool().unwrap_or(false),
+            });
+        } else {
+            patch["hostTakeChannelMode"] = serde_json::json!({
+                "takeId": take_id,
+                "channelMode": request["args"]["channelMode"].as_f64().unwrap_or(0.0),
+            });
+        }
+        request["command"] = serde_json::json!("set_clip_state");
+        request["args"] = patch;
     }
     // 拖入的真实磁盘文件由**平台**在进入本函数之前解析成路径（见 `gui/windows.rs`）：
     // WebKit 的 `File` 没有磁盘路径（沙箱），macOS/Linux 走原生拖放事件 + `import_audio_item`。
@@ -1974,7 +2014,7 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
             (||->Result<serde_json::Value,String>{
                 let identity=interaction_identity(&link)?;
                 let name=crate::editor::plugin_diagnostics::default_file_name();
-                let path=crate::editor::browser_files::pick_save_path(window,&name,"zip")?;
+                let path=crate::editor::browser_files::pick_save_path(window,&name,&hifishifter_kernel::file_types::DIAGNOSTICS_ZIP)?;
                 // 对话框期间用户可能关窗/切实例；租约变了就不再交付这个路径。
                 if !interaction_unchanged(&link,&identity) {return Err("diagnostics picker editor lease changed".into());}
                 match path {Some(path)=>Ok(serde_json::json!({"ok":true,"path":path.to_string_lossy()})),
@@ -1990,7 +2030,7 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
             let (link,window)={let state=state.borrow();(state.link.clone(),state.window)};
             (||->Result<serde_json::Value,String>{
                 let identity=interaction_identity(&link)?;
-                let path=crate::editor::browser_files::pick_save_path(window,"export.mid","mid")?;
+                let path=crate::editor::browser_files::pick_save_path(window,"export.mid",&hifishifter_kernel::file_types::MIDI)?;
                 // 对话框期间用户可能关窗/切实例；租约变了就不再交付这个路径。
                 if !interaction_unchanged(&link,&identity) {return Err("MIDI picker editor lease changed".into());}
                 match path {
@@ -2009,7 +2049,9 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
             let (link,window)={let state=state.borrow();(state.link.clone(),state.window)};
             (||->Result<serde_json::Value,String>{
                 let identity=interaction_identity(&link)?;
-                let path=crate::editor::browser_files::pick_open_path(window,"MIDI","mid")?;
+                // 【为什么现在也认 .midi】词表里 MIDI 有两条扩展名，与独立 App 一致；
+                // 此前插件只认 .mid，用户按 App 习惯起的 .midi 文件在这里选不到。
+                let path=crate::editor::browser_files::pick_open_path(window,&hifishifter_kernel::file_types::MIDI)?;
                 // 对话框期间用户可能关窗/切实例；租约变了就不再交付这个路径。
                 if !interaction_unchanged(&link,&identity) {return Err("MIDI picker editor lease changed".into());}
                 match path {
@@ -2147,7 +2189,7 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
             (||->Result<serde_json::Value,String>{
                 // 对话框是模态的：期间用户可能关窗或切实例，所以前后各核对一次租约。
                 let identity=interaction_identity(&link)?;
-                let path=crate::editor::browser_files::pick_save_path(window,&name,"json")?;
+                let path=crate::editor::browser_files::pick_save_path(window,&name,&hifishifter_kernel::file_types::HIFISHIFTER_JSON)?;
                 if !interaction_unchanged(&link,&identity) {return Err("json export dialog editor lease changed".into());}
                 let Some(path)=path else {return Ok(serde_json::json!({"ok":false,"canceled":true}))};
                 std::fs::write(&path,json.as_bytes()).map_err(|e|e.to_string())?;

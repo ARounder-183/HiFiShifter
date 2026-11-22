@@ -228,21 +228,20 @@ const TrackHeaderPlayheadTime = React.memo(function TrackHeaderPlayheadTime() {
     const digitProbeRef = useRef<HTMLSpanElement | null>(null);
     const [boxWidth, setBoxWidth] = useState<number | null>(null);
     const [digitWidth, setDigitWidth] = useState<number | null>(null);
+    // 【为什么按整秒量化】这条读数只用来**预留宽度**（"最长可能文本"），而
+    // playheadSec 以 ~30Hz 持续增长 —— 不量化的话，前进播放的每一帧都要重跑一次
+    // formatCursorTime 并重挂 ResizeObserver。宽度只随整数秒变化（且量化只会
+    // 向上取整，预留只会更宽、不会裁字），把 memo 的键钉在整秒上，重算频率从
+    // 每帧一次降到每秒一次。
+    const maxLabelSec = Math.ceil(Math.max(1, selector.projectSec, selector.playheadSec));
     const maxLabel = React.useMemo(() => {
-        const maxSec = Math.max(1, selector.projectSec, selector.playheadSec);
         return formatCursorTime(
             selector.primaryTimeUnit,
             selector.secondaryTimeUnit,
-            maxSec,
+            maxLabelSec,
             timeContext,
         ).combined;
-    }, [
-        selector.primaryTimeUnit,
-        selector.secondaryTimeUnit,
-        selector.projectSec,
-        selector.playheadSec,
-        timeContext,
-    ]);
+    }, [selector.primaryTimeUnit, selector.secondaryTimeUnit, maxLabelSec, timeContext]);
 
     const updateDigitWidth = React.useCallback(() => {
         const probe = digitProbeRef.current;
@@ -408,7 +407,6 @@ function meterFillClass(peakLinear: number, clipped: boolean): string {
 type TrackListProps = {
     t: (key: MessageKey) => string;
     tracks: TrackInfo[];
-    trackMeters: Record<string, TrackMeterInfo>;
     selectedTrackId: string | null;
     rowHeight: number;
     setRowHeight?: React.Dispatch<React.SetStateAction<number>>;
@@ -454,7 +452,6 @@ type TrackListProps = {
 const TrackListInner: React.FC<TrackListProps> = ({
     t,
     tracks,
-    trackMeters,
     selectedTrackId,
     rowHeight,
     setRowHeight,
@@ -483,6 +480,12 @@ const TrackListInner: React.FC<TrackListProps> = ({
     bottomGutterHeightPx = 0,
 }) => {
     const listRef = useRef<HTMLDivElement | null>(null);
+    // 电平表数据由本组件**自行订阅**：电平条是 trackMeters 的唯一消费方，播放中
+    // 每 33ms 一事件。此前它从 TimelinePanel 一路传下来，面板选择器因此把它纳入
+    // 浅比较 —— 每次事件连 2000 行的面板主体一起重渲染。改成本组件叶子订阅后
+    // （同文件 TrackHeaderPlayheadTime 的先例），重渲染范围收敛到轨道头本身，
+    // 面板主体不再陪跑。
+    const trackMeters = useAppSelector((state) => state.session.trackMeters, shallowEqual);
     /** 当前 dpr：渲染期写出的物理像素细线用它，并在 dpr 变化时触发重渲染。 */
     const dpr = useDevicePixelRatio();
     // 轨道头色条/取色预览需要和时间线画布同一套主题化轨道色。

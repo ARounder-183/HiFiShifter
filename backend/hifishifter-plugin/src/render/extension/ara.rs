@@ -1,5 +1,32 @@
 //! ARA 文档绑定、region 分配与离线准备。
 use super::*;
+
+/// 实例 **writer 身份**的发号器（诊断 / 日志读数，不参与任何行为判定 —— 旁通表决
+/// 看的是输入读数，不是身份）。
+///
+/// 【为什么是模块级而不是函数内 static】此前 ARA 绑定（`bind_to_document`）与
+/// Capture 激活（`arm_capture_rendering`）各养了一个计数器 —— 两种形态共存的会话里，
+/// 第一个 ARA 实例与第一个 Capture 实例都是 1，旁通表决表、`[ara] writer N …` 日志
+/// 与诊断包把两个实例混成同一个身份。
+///
+/// 【为什么只在 0 时发号】`writer_id` 的语义是"实例身份"，不是"绑定序号"：
+/// `arm_capture_rendering` 虽自称幂等，宿主在总线 / 采样率重配时确实会重调
+/// `setupProcessing` —— 每次都发新号会让实例身份中途改变，诊断读数前后对不上。
+/// 已有身份（非 0）的实例保持不变；发号过程中真正的竞态由 CAS 兜底（输掉的候选
+/// 号作废，序列出现空洞 —— 身份互异才是目的，连续并不重要）。
+static NEXT_WRITER_ID: AtomicU64 = AtomicU64::new(1);
+
+/// 给本实例发一个一次性 writer 身份（详见 [`NEXT_WRITER_ID`]）。
+fn assign_writer_id(owner: &ExtensionOwner) {
+    if owner.writer_id.load(Ordering::Acquire) != 0 {
+        return;
+    }
+    let candidate = NEXT_WRITER_ID.fetch_add(1, Ordering::Relaxed);
+    let _ = owner
+        .writer_id
+        .compare_exchange(0, candidate, Ordering::Release, Ordering::Relaxed);
+}
+
 impl ExtensionOwner {
     /// 把租约关联到真实文档；关闭文档时由其同步撤销。
     pub fn bind_to_document(
@@ -63,6 +90,12 @@ impl ExtensionOwner {
             self.sequences.lock_or_recover().clear();
             self.document.lock_or_recover().take();
             self.rebind_generation.fetch_add(1, Ordering::Relaxed);
+            // 【放置位置是"这次绑定"的事实】同一个处理器实例被复用到另一份文档时，
+            // 宿主也可能把它从轨道 FX 挪到某条 take 上（用户拖 FX 就会）。留着上一次的
+            // 结论，下一次旁通采样会去读**另一条链**。
+            if let Some(host) = self.native_host() {
+                host.forget_placement();
+            }
             self.closed.store(false, Ordering::Release);
         }
         let owner = Arc::downgrade(self);
@@ -131,8 +164,24 @@ impl ExtensionOwner {
                             role.bits()
                         );
                     }
-                    owner.cancel_preparation();
-                    owner.snapshots.iter().for_each(|snapshot| snapshot.clear());
+                    // 【只有"分配真的变了"才作废】宿主会在一次编辑里把**同一份**分配重发很多遍
+                    // （begin_editing 之后、endEditing 收口之前，实测 1 ms 内三次）。而下面这两句的
+                    // 代价是"整条轨静音 + 一次完整重渲"：此前这里无条件 clear()，于是每一次重发
+                    // 都把可听快照撤成空指针 ⇒ copy_block_at 逐样本写零 —— 用户听到的正是
+                    // "每隔一小会儿一次静音断点，又恢复正常"，随后还要再跑一次整条人声的神经合成。
+                    // 分配没变 ⇒ 这一轮的渲染输入也没变 ⇒ 什么都不该作废。
+                    if changed {
+                        owner.cancel_preparation();
+                        // 【为什么是 invalidate_generation 而不是 clear】与
+                        // DocumentSession::clear_renderers 同一条结论：clear 之后 copy_block_at
+                        // 逐样本返回 0.0，而 bound 实例固定 layered == false，没有兜底 —— 那一整段
+                        // 就是纯静音。分配变化只该让"这份快照是不是当前内容"失效，不该让它停止可听；
+                        // 真正该清空的是"这个实例从此不再渲染"（stop_editor / close）。
+                        owner
+                            .snapshots
+                            .iter()
+                            .for_each(|snapshot| snapshot.invalidate_generation());
+                    }
                     let owners = document.renderer_owners();
                     for renderer in &owners {
                         if let Err(error) = renderer.merge_pending_restore(&document) {
@@ -183,11 +232,7 @@ impl ExtensionOwner {
         // 只登记weak供宿主回调排队；后台计算不形成owner自循环。
         *self.prepare_owner.lock_or_recover() = Some(weak);
         let _ = self.clock.set(document.clock.clone());
-        static NEXT_WRITER: AtomicU64 = AtomicU64::new(1);
-        self.writer_id.store(
-            NEXT_WRITER.fetch_add(1, Ordering::Relaxed),
-            Ordering::Release,
-        );
+        assign_writer_id(self);
         *current = Some(owned.0);
         self.bound_document_id.store(document.id, Ordering::Release);
         // 【T-B0-1】账本里的 `bound` 此前没有任何写者，于是它恒为 false —— 读数在说谎。
@@ -314,11 +359,9 @@ impl ExtensionOwner {
         let _ = self
             .clock
             .set(Arc::new(super::transport::TransportClock::default()));
-        static NEXT_WRITER: AtomicU64 = AtomicU64::new(1);
-        self.writer_id.store(
-            NEXT_WRITER.fetch_add(1, Ordering::Relaxed),
-            Ordering::Release,
-        );
+        // 身份只发一次：重复调用（宿主重配 / UI 定时器）不得改变实例身份，
+        // 见模块级 NEXT_WRITER_ID 的说明。
+        assign_writer_id(self);
         // 【为什么在这里也要把会话立起来】处理结果的**唯一**生产者是会话 actor
         // （`start_capture_render` → `capture_prepare_job`），而会话此前只在
         // `webview.rs` 的命令分发里惰性创建 —— 于是"从未打开过插件窗口"的会话里
@@ -343,7 +386,20 @@ impl ExtensionOwner {
         // `renders()` 为假，而那正是"刚录完、播放中"这个最需要读数的时刻。
         self.log_click_report();
         self.log_capture_report();
+        self.log_snapshot_readout();
         if self.is_closed() || !self.renders() {
+            return;
+        }
+        // 【旁通即不渲染】宿主已经把这个 FX 旁通（或离线 / 关掉整条 FX 链）时，
+        // 合成结果**没有任何人会取用** —— ARA 的播放渲染器在旁通期间根本不会被调用。
+        // 判据只认宿主自己报的读数（见 `sample_host_bypass`）：非 REAPER 宿主恒为
+        // Unknown，走的是改动前的行为。
+        //
+        // 【为什么用 `fresh_host_bypass`】`host_bypass` 给的是"最后一次确定读到的
+        // 结论"，它可能已经过期（宿主换轨 / 切工程 / 卸载 FX）。拿过期读数挡渲染，
+        // 用户解除旁通后就没有声音了；而"从没读到过"更不是旁通。两者都必须回到
+        // 改动前的行为（照常渲染）。
+        if self.fresh_host_bypass() == Some(crate::host::reaper::FxBypass::Bypassed) {
             return;
         }
         // 源/assignment撤销在文档事务内清理；此函数只排队，不能在事务外clear旧任务刚发布的音频。
@@ -369,6 +425,8 @@ impl ExtensionOwner {
                 return;
             }
         }
+        // 【第一次必须是同步的】见 `publish_first_snapshot_inline`。
+        self.publish_first_snapshot_inline();
         self.ensure_preparation();
         if let Some(worker) = self.preparation() {
             if let Err(error) = worker.request(Box::new(move |cancel| {
@@ -498,6 +556,115 @@ impl ExtensionOwner {
             worker.wait_idle_until(deadline)?;
         }
     }
+    /// 宿主拿到 region 之后**立刻**开始渲染，而渲染线程不会等后台队首的任务。
+    ///
+    /// 【为什么必须同步】实测（REAPER，48 kHz）：实例建好到第一份快照发布之间，宿主
+    /// 已经渲染了 21 个块（≈225 ms），那段窗口里 `copy_block_at` 没有快照 ⇒ 逐样本
+    /// 写零。ARA 宿主把渲染结果**存进自己的缓存**，那 225 ms 的零于是成了时间轴上
+    /// 的一段：此后每次播放都在同一处断一次，只有让宿主整段重渲（重载）才好。
+    /// 队列化解决不了这件事 —— 它保证"最终会发布"，而宿主问的是"现在这一块有没有
+    /// 内容"。第一块之前必须有内容，所以这一次只能在调用线程上算完。
+    ///
+    /// 【为什么只破例一次】同步渲染会占住调用线程一次完整合成的时长。它只在"已绑定、
+    /// 已分配到 region、且一份快照都没发布过"时发生，一个实例的整个生命周期至多
+    /// 一次；之后的每一次编辑都有一份可听的旧快照兜底，走后台队列即可。失败会把
+    /// 闸门放回去（素材晚到、文档正忙都还有下一次机会），但同一次调用里绝不循环 ——
+    /// 绝不演变成"宿主每问一次就阻塞一次"。
+    fn publish_first_snapshot_inline(&self) {
+        if !self.is_bound() {
+            return;
+        }
+        // 【为什么只在有原生扩展时做】会提前渲染的宿主，就是会按 region 抢在播放头
+        // 之前把音频烘进自己缓存的宿主（REAPER 的 ARA 渲染器实测 100% 走 prefetch）。
+        // 没有原生扩展就没有这条渲染通路，"第一块之前必须有内容"也就无从谈起 —— 那
+        // 一侧保持改动前的行为，别为一条用不上的前提在别处多算一次完整合成。
+        if self.native_host().is_none() {
+            return;
+        }
+        if self.first_snapshot_inlined.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if self.snapshots.iter().all(|snapshot| snapshot.is_ready()) {
+            return;
+        }
+        // 【素材还没到就别把这一次机会用掉】宿主授权源 PCM 是异步的（实测 32 ms），
+        // 而 `prepare_job` 在源还没到时会以 `MissingSource` 失败。同步发布只能成功
+        // 一次 —— 在素材到达之前就失败，等于等宿主真正开始问音频时我们再没有机会。
+        if !self.has_pending_render_sources() {
+            self.first_snapshot_inlined.store(false, Ordering::Release);
+            return;
+        }
+        let Some(weak) = self.prepare_owner.lock_or_recover().clone() else {
+            self.first_snapshot_inlined.store(false, Ordering::Release);
+            return;
+        };
+        self.ensure_preparation();
+        let Some(worker) = self.preparation() else {
+            self.first_snapshot_inlined.store(false, Ordering::Release);
+            return;
+        };
+        if let Err(error) = worker.request(Box::new(move |cancel| {
+            weak.upgrade()
+                .ok_or("renderer closed".to_owned())?
+                .prepare_job(cancel)
+        })) {
+            log::warn!("[ara] the inline first snapshot could not be queued: {error}");
+            self.first_snapshot_inlined.store(false, Ordering::Release);
+            return;
+        }
+        // 【为什么是"有界等待"而不是"直接调"】这一次必须发生在宿主问第一块之前，所以
+        // 调用线程得等它做完；但一次完整合成在长素材上可以到秒级，而无界的等待会把
+        // "第一块有内容"换成"宿主/界面卡死"。上界之内拿不到内容就把请求留给后台继续跑
+        // —— 最坏情况退回改动前的行为，绝不比它更糟。
+        //
+        // 【为什么不是同步 `prepare_job`】它会在版本不匹配时回调 `prepare()`，而那条
+        // 路径可能正持着文档事务：同线程再取一次就是自锁。让 worker 做，顺带避开这一点。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let _ = worker.wait_idle_until(deadline);
+        if self.snapshots.iter().all(|snapshot| snapshot.is_ready()) {
+            log::info!("[ara] the first snapshot is ready before the host can ask for audio");
+            return;
+        }
+        self.first_snapshot_inlined.store(false, Ordering::Release);
+        log::warn!("[ara] the first snapshot did not finish within the inline budget; the background worker keeps going");
+    }
+    /// 已分配的 region 里，是否至少有一条的源 PCM 已经在手上。
+    ///
+    /// 【为什么这件事要单独判】见 `publish_first_snapshot_inline`：没有源 PCM 的
+    /// 同步渲染必然 `MissingSource`，而那次尝试只允许成功一次。三个表分开取锁，
+    /// 顺序与 `ara_render_input` 一致（regions → sources → edit_sources），不制造新的
+    /// 交叉持锁。
+    pub(crate) fn has_pending_render_sources(&self) -> bool {
+        let Ok(keys) = self.assigned_regions() else {
+            return false;
+        };
+        let Ok(document) = self.editor_document() else {
+            return false;
+        };
+        let ids: Vec<String> = {
+            let regions = document.regions.lock_or_recover();
+            keys.iter()
+                .filter_map(|key| {
+                    regions
+                        .get(key)
+                        .map(|region| region.audio_source_persistent_id.clone())
+                })
+                .collect()
+        };
+        if ids.is_empty() {
+            return false;
+        }
+        let live = {
+            let sources = document.sources.lock_or_recover();
+            ids.iter().any(|id| sources.contains_key(id))
+        };
+        if live {
+            return true;
+        }
+        let edits = document.edit_sources.lock_or_recover();
+        ids.iter().any(|id| edits.contains_key(id))
+    }
+
     /// 后台冻结/计算/发布三阶段；撤销标记和全部版本在发布短事务内重新验证。
     pub(super) fn prepare_job(
         &self,
@@ -557,6 +724,7 @@ impl ExtensionOwner {
             publisher.collect_retired();
         }
         let snapshots = input.render(cancel.clone())?;
+        Self::log_snapshot_integrity(&snapshots);
         let _transaction = document.transaction.lock_or_recover();
         if cancel.load(Ordering::Acquire) || !document.ready.load(Ordering::Acquire) {
             return Ok(());
@@ -569,6 +737,24 @@ impl ExtensionOwner {
         {
             // 跨轨接受新参数不一定有新的model callback；丢弃后补排最新任务，不能永久留空且假idle。
             self.prepare();
+            return Ok(());
+        }
+        // 【空分配不是内容变成静音】ara_render_input 在没有任何被分配 region 时返回一份空的
+        // 渲染输入，而它渲出来的是一份 len == 0 的快照。把那份快照发布出去有两个直接后果：
+        // is_ready() 变成真（于是 processed_snapshot_ready 也真、layered 退化成 false），而
+        // copy_block_at 在这份空快照上逐样本返回 0.0 —— 整条轨就是纯静音，直到下一次真正的
+        // 分配把快照换回来。宿主在一次编辑里会短暂地给出空分配
+        // （renderer assignment ... regions=0），这段时间用户听到的正是静音断点。
+        //
+        // 【判据为什么是"文档里还有 region"】自己也一条都没有、文档里也一条都没有 ⇒ 真的没
+        // 内容可播，此时发布空快照才是诚实的（否则删掉全部片段之后还在播上一版）。文档里有
+        // region、只是这一刻没分配给我们 ⇒ 只是记账上的空窗，保留上一份可听快照。
+        if keys.is_empty() && !document.regions.lock_or_recover().is_empty() {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Debug,
+                "ara.prepare.empty-assignment",
+                format_args!("[ara] no region is assigned to this renderer right now; the published snapshot is kept instead of replacing it with an empty one"),
+            );
             return Ok(());
         }
         if !self
@@ -592,4 +778,98 @@ impl ExtensionOwner {
         );
         Ok(())
     }
+
+    /// 发布前扫一遍快照**内容**：短洞（2 ~ 250 ms、两侧都有信号）是"断断续续"的直接证据。
+    ///
+    /// 【为什么这个读数必须存在】"播放时有静音断点"有两种成因，而它们在播放侧的所有
+    /// 读数里逐样本相同：**内容里就有洞**（快照那几帧真的是零）与**播放没读到内容**
+    /// （读指针越界 → 写零）。前者要在合成里修，后者要在拷贝里修 —— 方向完全相反。
+    /// 快照是两条路唯一的汇合点，所以判据放在这里：发布时扫一次，把"洞在哪一秒、多宽"
+    /// 直接写进日志。
+    ///
+    /// 【为什么不报正常静音】只看**两侧 100 ms 内都有 >= -40 dBFS 信号**的短洞：
+    /// 一句唱完的换气、间奏、句尾收音都长得多或一侧没有信号，不该进这份读数。
+    fn log_snapshot_integrity(
+        snapshots: &[std::sync::Arc<crate::render::snapshot::PlaybackSnapshot>],
+    ) {
+        let Some(snapshot) = snapshots.first() else {
+            return;
+        };
+        if snapshot.left.is_empty() || snapshot.sample_rate == 0 {
+            return;
+        }
+        let rate = f64::from(snapshot.sample_rate);
+        let frames = snapshot.left.len();
+        let level = |index: usize| -> f32 {
+            let left = snapshot.left[index].abs();
+            let right = snapshot.right.get(index).copied().unwrap_or(0.0).abs();
+            left.max(right)
+        };
+        let has_signal = |lo: usize, hi: usize| -> bool {
+            let hi = hi.min(frames);
+            lo < hi && (lo..hi).any(|index| level(index) >= SNAPSHOT_HOLE_SIGNAL)
+        };
+        let mut holes = 0usize;
+        let mut silent_frames = 0usize;
+        let mut places: Vec<f64> = Vec::new();
+        // 【为什么用 `is_finite && <= 地板` 而不是 `> 地板` 取反】NaN 与地板的比较
+        // 两边都假：写成 `if value > FLOOR { 前进 } else { 进入静音段 }` 时，一个
+        // 非有限采样会让内层循环**一步都不前进** —— 那就是一次不返回的发布
+        // （实测：带 NaN 的夹具把整条测试运行卡死）。判据必须先问"这一帧确实是零"。
+        let is_silent = |index: usize| -> bool {
+            let value = level(index);
+            value.is_finite() && value <= SNAPSHOT_HOLE_FLOOR
+        };
+        let mut index = 0usize;
+        while index < frames {
+            if !is_silent(index) {
+                index += 1;
+                continue;
+            }
+            let start = index;
+            while index < frames && is_silent(index) {
+                index += 1;
+            }
+            let len = index - start;
+            if !(SNAPSHOT_HOLE_MIN_FRAMES..=SNAPSHOT_HOLE_MAX_FRAMES).contains(&len) {
+                continue;
+            }
+            let before = start.saturating_sub(SNAPSHOT_HOLE_LOOKAROUND);
+            if !has_signal(before, start) || !has_signal(index, index + SNAPSHOT_HOLE_LOOKAROUND) {
+                continue;
+            }
+            holes += 1;
+            silent_frames += len;
+            if places.len() < 8 {
+                places.push((snapshot.origin_sample + start as i64) as f64 / rate);
+            }
+        }
+        if holes > 0 {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.snapshot.integrity",
+                format_args!(
+                    "[ara] the published snapshot has {holes} short silent run(s) inside signal ({silent_frames} frames); first at {places:?}s — the content itself is chopped, not the playback path",
+                ),
+            );
+        } else {
+            log::info!(
+                "[ara] snapshot integrity: no short silent run inside signal ({} frames @ {} Hz, origin={})",
+                frames,
+                snapshot.sample_rate,
+                snapshot.origin_sample
+            );
+        }
+    }
 }
+
+/// 判"静音"的地板：低于它就是数字零（或残余噪声底）。
+const SNAPSHOT_HOLE_FLOOR: f32 = 1e-6;
+/// 判"两侧确实有信号"的门限（满幅 = 1.0）：约 −40 dBFS。
+const SNAPSHOT_HOLE_SIGNAL: f32 = 0.01;
+/// 短于 2 ms 的洞不可闻（48 kHz 下 96 帧），不报。
+const SNAPSHOT_HOLE_MIN_FRAMES: usize = 96;
+/// 长于 250 ms 的洞是正常静音（换气 / 间奏），不报。
+const SNAPSHOT_HOLE_MAX_FRAMES: usize = 12_000;
+/// 两侧看多远（100 ms @ 48 kHz）。
+const SNAPSHOT_HOLE_LOOKAROUND: usize = 4_800;

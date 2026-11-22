@@ -10,7 +10,7 @@
             "path": "frontend/package-lock.json",
             "pattern": "(\"version\"\\s*:\\s*\")([^\"]+)(\")",
             "occurrences": 2,
-            "why": "顶层 version 与 packages[\"\"].version 是产品版本；其余 version 都是依赖"
+            "why": "the top-level version and packages[\"\"].version are the product version; every other version field is a dependency"
         },
         {
             "path": "backend/src-tauri/tauri.conf.json",
@@ -26,13 +26,13 @@
             "path": "backend/src-tauri/Cargo.toml",
             "pattern": "(?ms)(\\[package\\].*?^\\s*version\\s*=\\s*\")([^\"]+)(\")",
             "occurrences": 1,
-            "why": "只认 [package] 段里的 version；[dependencies] 里也有同名字段"
+            "why": "only the version inside the [package] section counts; [dependencies] has same-named fields"
         },
         {
             "path": "backend/hifishifter-kernel/Cargo.toml",
             "pattern": "(?ms)(\\[package\\].*?^\\s*version\\s*=\\s*\")([^\"]+)(\")",
             "occurrences": 1,
-            "why": "内核此前停留 0.1.0 且未纳入清单，诊断包里的 kernel 版本与插件链不同步"
+            "why": "the kernel previously stayed at 0.1.0 and was absent from this manifest, so diagnostic packages showed a kernel version out of sync with the plugin chain"
         },
         {
             "path": "backend/hifishifter-plugin/Cargo.toml",
@@ -55,6 +55,11 @@
             "occurrences": 1
         },
         {
+            "path": "backend/hifishifter-vst3/Cargo.toml",
+            "pattern": "(?ms)(\\[package\\].*?^\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1
+        },
+        {
             "path": "backend/hifishifter-clap/Cargo.toml",
             "pattern": "(?ms)(\\[package\\].*?^\\s*version\\s*=\\s*\")([^\"]+)(\")",
             "occurrences": 1
@@ -63,7 +68,7 @@
             "path": "backend/Cargo.lock",
             "pattern": "(?ms)(\\[\\[package\\]\\]\\s*name\\s*=\\s*\"HiFiShifter\"\\s*version\\s*=\\s*\")([^\"]+)(\")",
             "occurrences": 1,
-            "why": "锁文件里两个自有 package 各一条，插件那条在下面",
+            "why": "one entry per own package in the lock file; the plugin one is further down",
             "id": "backend/Cargo.lock (HiFiShifter)"
         },
         {
@@ -95,6 +100,12 @@
             "pattern": "(?ms)(\\[\\[package\\]\\]\\s*name\\s*=\\s*\"hifishifter-clap\"\\s*version\\s*=\\s*\")([^\"]+)(\")",
             "occurrences": 1,
             "id": "backend/Cargo.lock (hifishifter-clap)"
+        },
+        {
+            "path": "backend/Cargo.lock",
+            "pattern": "(?ms)(\\[\\[package\\]\\]\\s*name\\s*=\\s*\"hifishifter-vst3\"\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "id": "backend/Cargo.lock (hifishifter-vst3)"
         },
         {
             "path": "backend/hifishifter-clipboard/Cargo.toml",

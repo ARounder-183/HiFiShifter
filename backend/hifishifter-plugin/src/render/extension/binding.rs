@@ -2,13 +2,18 @@
 use super::*;
 const HOST_QUERY_BUSY: &str = "host query deferred: document transaction busy";
 impl ExtensionOwner {
-    pub(crate) fn startup_stage(&self, stage: crate::startup::Stage) {
+    /// 登记实例的启动阶段读数（诊断时序用；VST3 外壳在组件创建时调用）。
+    ///
+    /// 【为什么 pub】外壳是另一个 crate（`hifishifter-vst3`），它持有
+    /// `ExtensionOwner` 并在组件创建时打点；共享层内部的打点（ARA 绑定、视图等）
+    /// 仍走各自模块。
+    pub fn startup_stage(&self, stage: crate::startup::Stage) {
         self.startup
             .mark(stage, self.bound_document_id.load(Ordering::Acquire));
     }
 
     /// 组件终止独立于Arc尚存与否，旧native entry不能维持可编辑授权。
-    pub(crate) fn is_closed(&self) -> bool {
+    pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
     }
     /// 已绑定且实例仍存活时的扩展实例指针。
@@ -24,7 +29,7 @@ impl ExtensionOwner {
     /// 宿主随后对新文档调用 `addPlaybackRegion`，却落在旧文档的 observer 上。
     /// 调用方必须比对文档身份；`existing_binding_raw()` 只保留给"同文档重复绑定"
     /// 的诊断/测试路径。
-    pub(crate) fn existing_binding_raw(
+    pub fn existing_binding_raw(
         &self,
     ) -> Option<*const ara2_bridge::sys::ARAPlugInExtensionInstance> {
         if self.is_closed() {
@@ -63,7 +68,7 @@ impl ExtensionOwner {
     /// 同一文档"（幂等复用即可），也可能是"宿主重开工程、同一实例要求绑新文档"
     /// （必须复位 companion 再绑）。前者复用，后者复位 —— 两种处理不能互换：
     /// 复用会把已销毁文档的绑定交给宿主，复位则会把还在用的绑定拆掉。
-    pub(crate) fn was_bound_before(&self) -> bool {
+    pub fn was_bound_before(&self) -> bool {
         self.bound_once.load(Ordering::Acquire)
     }
     /// 实时流此刻是否在推进（供"内容更新要不要撤渲染许可"判断）。
@@ -94,7 +99,24 @@ impl ExtensionOwner {
         self.companion_resets.fetch_add(1, Ordering::Relaxed);
     }
     /// companion 绑定复位的累计次数（诊断）。
-    pub(crate) fn companion_reset_count(&self) -> u64 {
+    /// 测试与诊断用：读回某个实例槽位的 region 键表（快照；不暴露内部锁）。
+    ///
+    /// 【为什么不是 `pub` 字段】`assignments` 的锁与键表是协作内部状态；外壳测试
+    /// 只需要"这一槽位现在认了哪些 region"这一个读数。
+    /// 是否当前**没有任何** region 认领（测试断言用；全实例口径）。
+    pub fn has_no_assignments(&self) -> bool {
+        self.assignments.lock_or_recover().is_empty()
+    }
+
+    pub fn assignments_snapshot(&self, instance: i32) -> Vec<u64> {
+        self.assignments
+            .lock_or_recover()
+            .get(&instance)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn companion_reset_count(&self) -> u64 {
         self.companion_resets.load(Ordering::Relaxed)
     }
     /// 记录"有一份持久化状态待恢复"。
@@ -209,7 +231,7 @@ impl ExtensionOwner {
         self.host_backend()
             .app_name()
             .map(str::to_owned)
-            .or_else(crate::editor::connection::host_application_name)
+            .or_else(crate::host_identity::host_application_name)
             .or_else(|| self.host_self_report().map(|(name, _)| name))
     }
 
@@ -291,7 +313,7 @@ impl ExtensionOwner {
     ///
     /// 与 `bound_once` 的区别：那个是"曾经绑定过"的单调历史，这个是"此刻有效"。
     /// 诊断（"宿主是否走了 ARA 路径"）要的是后者。
-    pub(crate) fn is_ara_bound(&self) -> bool {
+    pub fn is_ara_bound(&self) -> bool {
         self.document
             .lock_or_recover()
             .as_ref()
@@ -317,7 +339,7 @@ impl ExtensionOwner {
     /// 已被测试覆盖的读数，而 `binding_mode` 是本轮新增的。取"任一说 ARA 就是 ARA"
     /// 的交集语义，让新字段在任何写入点漏掉时**退化成旧行为**（AraOnly），
     /// 而不是退化成 Capture —— 后者会让一个正常绑定的实例去录制自己的输出。
-    pub(crate) fn mode(&self) -> InstanceMode {
+    pub fn mode(&self) -> InstanceMode {
         if self.bound_once.load(Ordering::Acquire) {
             return InstanceMode::Ara;
         }
@@ -343,7 +365,7 @@ impl ExtensionOwner {
     /// `setActive` 之后过了宽限期（见 [`Self::note_editor_tick`]），那需要读
     /// `set_active_at` 这个锁下的值。这里只负责**写入结论**，判定留在唯一的调用点，
     /// 避免同一判据出现两份。
-    pub(crate) fn note_binding_window_closed_without_ara(&self) {
+    pub fn note_binding_window_closed_without_ara(&self) {
         // 已经绑过就不回落：那会把一个正常工作的 ARA 实例降级成 Capture。
         if self.bound_once.load(Ordering::Acquire) {
             return;
@@ -440,7 +462,7 @@ impl ExtensionOwner {
             .unwrap_or_default();
         // 【为什么措辞变了、级别也变了】此前这条是 `warn` 且说"宿主把本插件当普通插入
         // 效果器运行"，并把用户引向"请从 ARA 入口插入"。现在普通插入是**受支持**的
-        // 形态（Capture 通路，见 `docs/plans/2026-10-15-vst-capture-mode.md`）：
+        // 形态（Capture 通路）：
         // 音频从输入总线捕获、按工程时间对到插件时间轴、处理后输出。
         // 因此这不再是一条错误，而是一条**形态说明** —— 级别降到 `info`，
         // 内容改为"本实例走 Capture；想直接编辑宿主片段就从 ARA 入口插入"。
@@ -456,7 +478,7 @@ impl ExtensionOwner {
     /// 初始化在宿主UI/model线程保存有引用的typed扩展，不在actor或process调用REAPER API。
     /// # Safety
     /// context须为宿主初始化期间活FUnknown。
-    pub(crate) unsafe fn bind_host_adapter(&self, context: *mut std::ffi::c_void) {
+    pub unsafe fn bind_host_adapter(&self, context: *mut std::ffi::c_void) {
         // SAFETY: 调用方保证 context 是宿主初始化期间存活的 FUnknown。
         unsafe { self.bind_host_adapter_inner(context, false) }
     }
@@ -471,13 +493,22 @@ impl ExtensionOwner {
     ///
     /// # Safety
     /// `context` 必须是本组件持有的、在组件生命周期内有效的宿主接口。
-    pub(crate) unsafe fn rebind_host_adapter(&self, context: *mut std::ffi::c_void) {
+    pub unsafe fn rebind_host_adapter(&self, context: *mut std::ffi::c_void) {
         // SAFETY: 同 `bind_host_adapter`。
         unsafe { self.bind_host_adapter_inner(context, true) }
     }
 
     /// 当前宿主适配器是否与调用线程不匹配（`false` = 没有适配器或线程一致）。
-    pub(crate) fn host_adapter_thread_mismatch(&self) -> bool {
+    /// 是否缺少可用的宿主原生适配器（没绑上，或绑在别的线程上）。
+    ///
+    /// 【为什么收窄成一个谓词】VST3 外壳在 `setActive` 时只需要这个布尔；暴露
+    /// [`NativeHost`] 类型本身会把整个 REAPER 模块提升成壳可见的 API
+    /// （`render/extension/session.rs::native_host` 保持 pub(crate)）。
+    pub fn native_adapter_unavailable(&self) -> bool {
+        self.native_host().is_none() || self.host_adapter_thread_mismatch()
+    }
+
+    pub fn host_adapter_thread_mismatch(&self) -> bool {
         self.native_host()
             .is_some_and(|host| host.bound_thread() != std::thread::current().id())
     }
@@ -769,8 +800,12 @@ impl ExtensionOwner {
         }
         let host = self.native_host().ok_or("host extension unavailable")?;
         let authorized = || self.host_query_authorized(&stamp);
+        // 【候选集按放置位置收窄】`ui_scope` 对 take FX 只返回本实例绑定的那条 take 的
+        // item；轨道 FX 仍返回"本轨 + folder 后代 + 自己建的"。此前这里无条件扫 folder，
+        // take FX 于是可能按几何匹配绑到**同位置的兄弟 item** 上（folder 里两条轨同一
+        // 时间点各放一条很常见），后续移动/切分/淡变全部写到别的 item。
         let candidates = host
-            .ui_folder_tracks(&authorized, &stamp.0.adopted_track_ids())?
+            .ui_scope(&authorized, &stamp.0.adopted_track_ids())?
             .into_iter()
             .flat_map(|track| track.items.into_iter().map(|item| item.geometry))
             .collect::<Vec<_>>();
@@ -850,6 +885,24 @@ impl ExtensionOwner {
             &format!("ara:binding-report:{detail}"),
             format_args!("[ara] region→item binding: {detail}"),
         );
+    }
+
+    /// 本实例这一轮分配到的 region 的**播放时间区间**（`(起点, 终点)`）。
+    ///
+    /// 【为什么需要区间而不是 key】放置位置的歧义裁决问的是"这些 region 是不是都落在
+    /// `parent(2)` 那条 take 的 item 里" —— 那是一个几何问题，key 回答不了。
+    pub(super) fn assigned_region_ranges(
+        document: &super::document::DocumentSession,
+        keys: &[u64],
+    ) -> Vec<(f64, f64)> {
+        let regions = document.regions.lock_or_recover();
+        keys.iter()
+            .filter_map(|key| regions.get(key))
+            .map(|region| {
+                let start = region.start_in_playback_time;
+                (start, start + region.duration_in_playback_time)
+            })
+            .collect()
     }
 
     /// 这份读数是否**尚未报告过**；是则记下它。纯状态判定，可独立单测。
@@ -1036,7 +1089,7 @@ impl ExtensionOwner {
     }
 
     /// 完整刷新：时钟 + 几何 + 清单。写回路径与测试用这个（必须**同步**生效）。
-    pub(crate) fn refresh_host_transport(&self) {
+    pub fn refresh_host_transport(&self) {
         self.refresh_host_transport_inner(false);
     }
 
@@ -1075,6 +1128,9 @@ impl ExtensionOwner {
     /// 变成"下次再看"。所以节流只属于定时器这一个调用方。
     pub(crate) fn refresh_host_transport_tick(&self) {
         let _query_scope = super::document::HostQueryScope::nonblocking();
+        // 【旁通读数必须在枚举之前】它决定"这次编辑要不要合成"，而枚举可能正在退避；
+        // 两者同一 tick 内都要，但只有旁通是"用户刚按了一下"级别的时效。
+        self.poll_host_bypass();
         // 【T5：前台恢复的本地信号】编辑器窗口是 `WS_CHILD`，收不到 `WM_ACTIVATEAPP`；
         // 而 `resume_resync()` 的唯一调用点是 `setActive(true)`，宿主切窗口焦点时不会重发。
         // 于是"后台→前台"没有任何入口。这里用**定时器自身的间隔**补上：20 ms 的定时器
@@ -1276,6 +1332,9 @@ impl ExtensionOwner {
             }
         }
         self.refresh_ui_inventory();
+        // 清单是装配的输入之一（见 `DocumentSession::assembly_dirty`）：它一变就必须重装，
+        // 否则新出现的 item 只能以无源占位出现 —— 那正是"粘贴出来的片段一直等宿主音频"。
+        stamp.0.flush_pending_assembly();
     }
     /// GUI清单按项目change/model/scope代次刷新，不每20ms枚举所有item，也不借活动工程。
     pub(crate) fn refresh_ui_inventory(&self) {
@@ -1348,6 +1407,17 @@ impl ExtensionOwner {
         stamp.0.inventory_incomplete.store(true, Ordering::Release);
         let mut tracks = std::collections::BTreeMap::new();
         let mut seen = std::collections::BTreeSet::new();
+        // 上一轮已经发布的宿主轨身份（`ui_tracks[guid].id` → 它的 guid 与父轨）。用来
+        // 回答"这条 id 是不是别人的"：宿主轨第一次学身份时只准学没人占的 id（见下面的
+        // "身份只学一次"）。带上父轨是为了认出**同一个 folder 里的兄弟轨** —— 它们由
+        // 同一个实例处理、共用一个参数根，互相"占用"是正常的。
+        let known_owner: std::collections::HashMap<String, (String, Option<String>)> = stamp
+            .0
+            .ui_tracks
+            .lock_or_recover()
+            .iter()
+            .map(|(guid, track)| (track.id.clone(), (guid.clone(), track.parent_guid.clone())))
+            .collect();
         // 诊断计数：多少 item 认领到了 region（没认领的只能是无源占位）。
         let mut item_count = 0usize;
         let mut claimed_items = 0usize;
@@ -1376,13 +1446,18 @@ impl ExtensionOwner {
                 fx_folder_depth = parent.folder_depth(&own_allowed).ok();
             }
             // 父轨已枚举过 ⇒ 它的全部后代也已经在 `tracks` 里，不必重走一遍。
-            if seen.contains(parent.inventory_guid()) {
+            // 【take FX 是例外】每个 take 实例的清单只含**自己那条 take 的 item**，
+            // 同一轨道上的两个实例共享 track GUID 而内容不同 —— 按轨跳过会让第二个
+            // 实例的片段整条不出现（见下面的按 GUID 合并）。
+            if !owner.host_placement().is_take_fx() && seen.contains(parent.inventory_guid()) {
                 continue;
             }
             // FX 挂在 folder 轨上时，folder 轨自身通常没有 item：连同后代一起枚举，
             // 否则整组在插件里"看不见"（ARA 侧没有 folder 概念，只能从宿主清单取）。
             let adopted = stamp.0.adopted_track_ids();
-            let Ok(own_tracks) = host.ui_folder_tracks(&own_allowed, &adopted) else {
+            // 【位置必须在枚举之前求值】清单作用域与能力位都按放置位置派生；
+            // 位置是"这一轮宿主对象是谁"的唯一来源，读旧值会让 take 实例去枚举整轨。
+            let Ok(own_tracks) = host.ui_scope(&own_allowed, &adopted) else {
                 continue;
             };
             for mut track in own_tracks {
@@ -1394,7 +1469,9 @@ impl ExtensionOwner {
                 // 的正序共存，构成真实的死锁窗口。
                 let timeline = stamp.0.timeline.lock_or_recover();
                 let ids = stamp.0.clip_ids.lock_or_recover();
-                item_count += track.items.len();
+
+                // 这条宿主轨能从 clip 学到的模型身份（见下面的"只学一次"）。
+                let mut learned: Option<String> = None;
                 for candidate in stamp.0.renderer_owners() {
                     // 该 owner 可能同时持有多个 region（folder 轨上的 FX）：只要本轨有
                     // 任一 item 被它的某个 region 绑定，就把轨道身份认领到那个 clip 上。
@@ -1419,7 +1496,7 @@ impl ExtensionOwner {
                                 .as_ref()
                                 .and_then(|t| t.clips.iter().find(|c| &c.id == id))
                             {
-                                track.id = clip.track_id.clone();
+                                learned = Some(clip.track_id.clone());
                                 break;
                             }
                         }
@@ -1427,12 +1504,69 @@ impl ExtensionOwner {
                 }
                 drop(timeline);
                 drop(ids);
+                // 【身份只学一次，而且不许抢】此前这里无条件 `track.id = clip.track_id`：
+                // 宿主把 item 从轨道 1 拖到轨道 2 之后，轨道 2 从**这条 clip** 学到的是
+                // 轨道 1 的模型 id —— 于是 `ui_tracks` 里两条宿主轨共用一个身份，
+                // `present_host_inventory` 再忠实地把两条并成一条（用户报的"两条轨折成
+                // 一条"）。身份是**参数根**的键，一旦被抢，轨道 1 的曲线就挂到了轨道 2 上。
+                //
+                // 现在：已经学过的轨道绝不重学（`ui_tracks` 里记着它）；第一次学也不许
+                // 选一个已经被别的宿主轨占用的 id —— 学不到就保留自己的宿主身份，
+                // 宁可多一行空轨，也不能把两条轨并成一条。
                 if track.id.starts_with("host-track-") {
-                    if let Some(old) = stamp.0.ui_tracks.lock_or_recover().get(&track.guid) {
-                        track.id = old.id.clone();
+                    let previous = stamp
+                        .0
+                        .ui_tracks
+                        .lock_or_recover()
+                        .get(&track.guid)
+                        .map(|old| old.id.clone());
+                    let own_guid = track.guid.clone();
+                    let own_parent = track.parent_guid.clone();
+                    let taken_by_other = |id: &str| {
+                        known_owner.get(id).is_some_and(|(guid, parent)| {
+                            guid != &own_guid && !(parent.is_some() && parent == &own_parent)
+                        })
+                    };
+                    let next = match previous {
+                        Some(id) if !id.starts_with("host-track-") => id,
+                        _ => learned
+                            .filter(|id| !taken_by_other(id))
+                            .unwrap_or_else(|| track.id.clone()),
+                    };
+                    track.id = next;
+                }
+                // 【为什么按 GUID 合并而不是覆盖】take FX 下同一轨道可以有多个实例，
+                // 各自的清单只含自己那条 take 的 item；直接覆盖会让后一个实例把前一个
+                // 的片段顶掉。轨道 FX 下两份清单内容相同，合并是空操作。
+                match tracks.entry(track.guid.clone()) {
+                    std::collections::btree_map::Entry::Vacant(slot) => {
+                        item_count += track.items.len();
+                        slot.insert(track);
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut slot) => {
+                        let existing = slot.get_mut();
+                        for item in track.items {
+                            let known = existing
+                                .items
+                                .iter_mut()
+                                .find(|known| known.geometry.item_id == item.geometry.item_id);
+                            match known {
+                                // 【同一 item 被两种实例枚举到】轨道 FX 那一份的写回目标是
+                                // active take，take FX 那一份指向实例自己绑的 take —— 后者
+                                // 更具体，保留它；反过来会把写回指到别人的 take 上。
+                                Some(slot) => {
+                                    if item.bound_take.is_some() && slot.bound_take.is_none() {
+                                        *slot = item;
+                                    }
+                                }
+                                None => {
+                                    existing.items.push(item);
+                                    item_count += 1;
+                                }
+                            }
+                        }
                     }
                 }
-                tracks.insert(track.guid.clone(), track);
             }
         }
         // 分类只用可核实的事实（见 `classify_host_audio`）。folder 结构读不出来时
@@ -1533,31 +1667,56 @@ impl ExtensionOwner {
             *stamp.0.ui_inventory_sampled_at.lock_or_recover() = Some(std::time::Instant::now());
             return;
         }
+        // 【令牌动了 ≠ 内容动了】令牌是**提示**（`GetProjectStateChangeCount` 会为
+        // item 选中、视图缩放、光标移动推进），枚举出的清单才是真相。此前只要令牌
+        // 变了就发布 + bump 代次 + 推进 `render_epoch` + rearm 渲染 —— REAPER 里点选
+        // 任何 item（包括与本插件无关的）都会点亮"渲染中"，空闲工程也被它搅出一轮轮
+        // 全量 mixdown（2026-11-22 现场：81 次 mixdown / 7 分钟，枚举内容逐轮相同）。
+        // 内容与已发布清单逐字相同时，这一轮只把令牌记下，渲染管线一概不动；真变了
+        // （几何、take、名称、facts 任一）才走下面的发布与失效路径。
+        if !facts_changed
+            && crate::host::reaper::inventory_content_matches(
+                &stamp.0.ui_tracks.lock_or_recover(),
+                &tracks,
+            )
+        {
+            *stamp.0.ui_inventory_stamp.lock_or_recover() = Some(token);
+            *stamp.0.ui_inventory_sampled_at.lock_or_recover() = Some(std::time::Instant::now());
+            // 枚举完整地走完了，且结论是"与已发布的完整清单一致" —— 缺席证据继续有效。
+            stamp.0.inventory_incomplete.store(false, Ordering::Release);
+            return;
+        }
         stamp
             .0
             .ui_known_tracks
             .lock_or_recover()
             .extend(tracks.values().map(|track| track.id.clone()));
         *stamp.0.ui_tracks.lock_or_recover() = tracks;
+        // 【装配输入 B 的代次】装配器用它与 region 表的代次一起判断"这一轮读到的两份
+        // 输入，与上一次尝试相比动过吗"。见 `DocumentSession::assembly_consumed`：
+        // `unbound` 非空且输入动过 ⇒ 推迟发布、下一个安全点重试（那是"粘贴 / 拖动之后
+        // 片段一直没有源"的唯一自愈路径）。
+        stamp.0.ui_tracks_stamp.fetch_add(1, Ordering::AcqRel);
         *stamp.0.ui_inventory_stamp.lock_or_recover() = Some(token);
         // 完整采集已完成：记下时刻，让"令牌不动但 take 级事实变了"这条兜底路径
         // 在下一次 `FACTS_REFRESH_INTERVAL` 到期时强制重采（见 `ui_inventory_sampled_at`）。
         *stamp.0.ui_inventory_sampled_at.lock_or_recover() = Some(std::time::Instant::now());
         stamp.0.ui_geometry_revision.fetch_add(1, Ordering::AcqRel);
-        // 【为什么这里**不**重新装配】
+        // 【为什么不在这里就地重装，而是置位】
         //
-        // clip 集合由装配器在 `remap_and_log` 收口时产出，而那一轮之前会先调一次
-        // `refresh_ui_inventory`（见 `remap_and_log`）—— 清单的最新结果因此已经在
-        // 装配输入里。在这里再装配一次有两个代价：本函数会被
-        // `host_geometries_locked` → `fade_items_locked` / `clip_for_host_item`
-        // 调到（那两处正持有 `clip_ids`，而装配要写它，`std::sync::Mutex` 不可重入），
-        // 也会被 `refresh_host_transport` 调到（那条路可能正持有 `transaction`）。
-        // 实测两个 `bound_tests` 用例因此永久挂起。
+        // 装配要写 `clip_ids`，而本函数会被 `host_geometries_locked` → `fade_items_locked` /
+        // `clip_for_host_item` 调到（那两处正持有 `clip_ids`，`std::sync::Mutex` 不可重入），
+        // 也可能被持有 `transaction` 的路径调到 —— 就地重装实测让两个 bound 用例永久挂起。
         //
-        // 清单变化本身仍然立即生效：`present_host_inventory` 会把宿主的
-        // `D_POSITION` / `D_LENGTH` 投影到既有 clip 上，`project_host_item_geometry_locked`
-        // 会让渲染读到同一份几何。只有"item 的**增删**"需要重新装配，而那在 REAPER 里
-        // 必然伴随 region 的增删 ⇒ 必然收口。
+        // 但"**不**重装"是错的：清单是装配的两份输入之一，它变了就必须重装。此前这里
+        // 依据的是"item 的增删必然伴随 region 的增删 ⇒ 必然模型收口"，而这条在 REAPER 的
+        // **复制/粘贴**上不成立：清单先看到新 item，而收口那一轮的清单刷新可能因为宿主
+        // 工程正在变化被放弃 —— 于是新 item 永远进不了装配，只能以无源占位出现（没有
+        // 波形、没有原始音高线、一直显示"正在等待宿主完成音频分配"），直到下一次重新加载。
+        //
+        // 现在：这里只置位，重装由 `flush_pending_assembly` 在**不持任何相关锁**的
+        // 定时器/收口点完成（见该函数的说明）。
+        stamp.0.note_assembly_input_changed();
         *self.host_audio.lock_or_recover() = status;
         // 用户报障时最需要的一行：宿主清单里有多少 item，其中多少被 ARA region 认领。
         // 认领不到的那些只能以无源占位出现（见方案 Task 5.1 / R4）。
@@ -1612,11 +1771,30 @@ impl ExtensionOwner {
             // 会调每个 owner 的 `prepare()`，而 `prepare()` 要投递到会话 actor。
             // 本函数可能正跑在**那条 actor 线程**上（`ensure_loaded` 的清单刷新），
             // 于是"投递并等自己"就是一次必然的自锁 —— 实测整份测试套件挂死在这里。
-            //
-            // 只推进 `render_epoch` 已经足够：`PreparedVersion` 含它，下一次
-            // 20 ms 定时器驱动的 prepare 会看到版本不匹配并重算。位置/长度这类纯几何
-            // 变化只需要"让已发布的快照失效"，不需要当场重排。
             stamp.0.note_render_geometry_changed();
+            // 【但"等下一次定时器驱动的 prepare"是一句空话】全代码库**没有**任何周期性的
+            // `prepare()`：`refresh_host_transport_tick`（20 ms 节拍）只做时钟采样 /
+            // 清单枚举 / 装配冲刷，从不调 prepare；播放实例没有视图定时器；音频线程只在
+            // `render_wanted`（Capture）与"窗口越界"（窗口渲染）时补排。于是纯几何变化
+            // 推进 epoch 之后，`PreparedVersion` 永不匹配、重排也永不被排队 —— 快照停
+            // 在旧版本，直到**碰巧**有别的编辑触发收口。真机症状正是它：把一个启用了
+            // 循环源的 item 拖长（产生循环节），波形立刻画出循环，音频却要等下一次编辑
+            // 或重载才更新。
+            //
+            // 通知的载体用编辑会话的自动渲染链（`rearm_render` →
+            // `apply_workspace_edits_with_progress` → 逐 playback owner 渲染并发布）。
+            // 它与"旁通恢复"（`sample_host_bypass` 的 `InvalidateAndRearm`）是同一条
+            // 通路，本身就带在途检查、票据复核与重试预算；这里只是置位原子 + `try_send`
+            // 一个 Wake，不做任何阻塞等待 —— 在 actor 线程上调用它也是安全的（这正是
+            // 旁通恢复路径已有的用法）。
+            if let Some(editor) = stamp.0.existing_editor_session() {
+                // 【已有一笔渲染排队时不再重复调度】`render_requested` 在途意味着那一轮
+                // 渲染的版本复核（票据含 epoch）必然按新代次重算；此刻再 rearm 是重复调度，
+                // 而且会在"宿主几何尚未回读"的窗口抢跑一次以旧几何为准的渲染。
+                if !editor.render_pending() {
+                    editor.rearm_render();
+                }
+            }
         }
     }
     /// ARA-only 后端的渲染事实来源：只登记 ARA region 自己能给出的字段。
@@ -1628,22 +1806,52 @@ impl ExtensionOwner {
         &self,
         stamp: &(Arc<super::document::DocumentSession>, u64, u64, Vec<u64>),
     ) {
-        let facts = {
+        // ARA 能给出的渲染事实只有三项（时间拉伸 / 头尾内容淡化）；方向、循环源与
+        // 声道模式是**原生扩展专属**（ARA 表达不到，见 `ara::mapping::LOST_FIELDS`）。
+        //
+        // 【为什么按 item 身份合并而不是整表替换】本文档可能有**两个**实例在写
+        // `render_facts`：REAPER 按轨道管理 ARA 实例，持有原生扩展的编辑实例每次清单
+        // 刷新都会整表重建（item GUID 键、原生字段是真值），而**没有**原生适配器的
+        // 播放实例走本函数。此前这里用 `ara-region-{key}` 键、原生字段硬编码 false
+        // 整表替换 —— 两个写者交替 ⇒ 事实在 `loops=1`（真值）与 `loops=0`（默认值）
+        // 之间逐轮翻转 ⇒ `invalidate_render_input` 每轮触发 ⇒ `prepare_job` 的版本
+        // 闸永远失配 ⇒ 一次光标移动引发一串**全量**重渲染（现场 2026-11-22 02:06:22：
+        // 0.6 s 内 4 轮 mixdown，状态栏"渲染中"随之闪现）。合并口径：ARA 字段照实
+        // 更新，读不到的原生字段**保留上一轮的值** —— 两个写者从此产出同一张表。
+        //
+        // 【为什么 ARA-only 宿主仍整表替换】没有原生写者时"上一次的值"无从谈起，
+        // region 消失也必须能删行；region 键在那种宿主上是唯一可用身份。
+        let region_facts: Vec<(String, bool, bool, bool)> = {
             let regions = stamp.0.regions.lock_or_recover();
-            crate::host::geometry::RenderFacts::from_items(regions.iter().map(|(key, region)| {
-                (
-                    format!("ara-region-{key}"),
-                    crate::host::geometry::RenderItemFacts {
-                        // 方向 / 循环 / 声道是**原生扩展专属**事实，ARA 表达不到 ⇒ 恒为安全默认。
-                        reversed: false,
-                        loop_enabled: false,
-                        channel_mode: 0,
-                        timestretch: region.is_timestretch_enabled,
-                        content_fade_head: region.has_content_based_fade_at_head,
-                        content_fade_tail: region.has_content_based_fade_at_tail,
-                    },
-                )
-            }))
+            let items = stamp.0.region_items.lock_or_recover();
+            let mapped = items
+                .iter()
+                .filter_map(|(key, item_id)| {
+                    let region = regions.get(key)?;
+                    Some((
+                        item_id.clone(),
+                        region.is_timestretch_enabled,
+                        region.has_content_based_fade_at_head,
+                        region.has_content_based_fade_at_tail,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            if !mapped.is_empty() {
+                mapped
+            } else {
+                // ARA-only 宿主（没有原生清单）：region 键是唯一可用身份。
+                regions
+                    .iter()
+                    .map(|(key, region)| {
+                        (
+                            format!("ara-region-{key}"),
+                            region.is_timestretch_enabled,
+                            region.has_content_based_fade_at_head,
+                            region.has_content_based_fade_at_tail,
+                        )
+                    })
+                    .collect()
+            }
         };
         let Some(_transaction) = stamp.0.host_query_transaction() else {
             return;
@@ -1657,12 +1865,23 @@ impl ExtensionOwner {
         }
         let changed = {
             let mut previous = stamp.0.render_facts.lock_or_recover();
-            if *previous != facts {
-                *previous = facts;
-                true
-            } else {
-                false
+            let mut changed = false;
+            for (identity, timestretch, head, tail) in region_facts {
+                let entry = previous
+                    .items
+                    .entry(identity)
+                    .or_insert_with(crate::host::geometry::RenderItemFacts::default);
+                if entry.timestretch != timestretch
+                    || entry.content_fade_head != head
+                    || entry.content_fade_tail != tail
+                {
+                    entry.timestretch = timestretch;
+                    entry.content_fade_head = head;
+                    entry.content_fade_tail = tail;
+                    changed = true;
+                }
             }
+            changed
         };
         drop(_transaction);
         if changed {
@@ -1672,6 +1891,28 @@ impl ExtensionOwner {
     /// 元数据单独采集，不让每个隐藏实例重复写工程clock；宿主调用始终不持内部锁。
     pub(crate) fn refresh_host_state_for_model(&self) {
         self.refresh_host_geometry();
+        // 【收口就是"用户刚编辑完"】旁通读数必须在这一刻是最新的：否则 `prepare` 会为
+        // 一个已经被旁通的实例排队一整次神经合成，而那正是本读数要消除的浪费。
+        // 窗口关着时 UI 定时器不跑，这条路径就是唯一的采样点。
+        self.sample_host_bypass();
+        // 【挂起的装配不能只有视图定时器一个节拍】
+        //
+        // `flush_pending_assembly` 此前只有一个周期调用点：20 ms 的视图定时器
+        // （`refresh_host_transport_inner` 的末尾）。窗口关着时它**完全不跑**，于是
+        // "清单变了 ⇒ 置脏 ⇒ 下一个安全点重装"这条链在关窗状态下断了 —— 界面上看不见
+        // （窗口关着），但渲染侧同样吃这份装配结果（`workspace_timeline_locked`），
+        // 表现为"粘贴出来的片段没声音"。
+        //
+        // 模型收口是"宿主刚改完"的最强信号，而且它已经在这条路径上做几何刷新与旁通
+        // 采样 —— 补一次"把挂起的装配跑掉"不增加任何宿主调用（`flush` 自己会在没有
+        // 脏标记时立刻返回）。
+        //
+        // 【为什么不在这里补一次清单刷新】`remap_and_log` 在**同一条路径**上已经对每个
+        // owner 调了 `refresh_ui_inventory`（见那里的注释）；在这里再加一次只会把一次
+        // 完整枚举变成两次，而枚举本身有代次门，重复调用并不便宜。
+        if let Ok(document) = self.editor_document() {
+            document.flush_pending_assembly();
+        }
     }
     pub(super) fn refresh_host_geometry(&self) {
         let Ok(stamp) = self.host_query_stamp() else {
@@ -1688,6 +1929,13 @@ impl ExtensionOwner {
             return;
         }
         let authorized = || self.host_query_authorized(&stamp);
+        // 【为什么几何刷新要重新求值位置】这一轮绑定的候选集、写回目标与旁通读的链
+        // 全部取决于"我挂在哪条链上"。位置在每次绑定后重算是**必须**的（宿主复用同一
+        // 个处理器实例重开工程时也可能换位置），而这里是全部刷新路径的共同入口。
+        if let Some(host) = host.as_ref() {
+            let ranges = Self::assigned_region_ranges(&stamp.0, &stamp.3);
+            host.resolve_placement(&ranges, &authorized);
+        }
         let before = host
             .as_ref()
             .and_then(|host| host.geometry_revision(authorized).ok());
@@ -1936,7 +2184,7 @@ mod host_identity_tests {
         owner.note_host_self_report(Some("Cubase"), Some("13.0"));
         // 进程级探针是进程全局状态（同进程里别的用例可能已经写过），所以只在它确实
         // 没有读数时断言最终结果 —— 这里要钉的是"自报不会被丢掉"，不是探针的优先级。
-        if crate::editor::connection::host_application_name().is_none() {
+        if crate::host_identity::host_application_name().is_none() {
             assert_eq!(owner.host_app_name().as_deref(), Some("Cubase"));
             assert_eq!(owner.host_app_version().as_deref(), Some("13.0"));
         }

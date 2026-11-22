@@ -25,8 +25,10 @@ import os
 import re
 import sys
 
-# Windows 的 stdout 跟随 ANSI 代码页（英文系统是 cp1252、中文系统是 GBK），打印中文会
-# UnicodeEncodeError 打死进程 —— 真正的结论一条都进不了日志，红的是编码而不是规则。
+# On Windows, stdout follows the ANSI code page (cp1252 on English systems, GBK on
+# Chinese ones); printing Chinese raises UnicodeEncodeError and kills the process -
+# not a single real verdict makes it into the log, and what turns red is the
+# encoding, not the rule.
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
@@ -121,13 +123,34 @@ def count_braces(src, start):
     raise ValueError('unbalanced braces')
 
 
-# 【为什么不是一句 `#[cfg(test)]\s*mod \w+`】那样只认裸 `mod`。测试模块普遍写成
-# `#[cfg(test)]\n pub(crate) mod tests {`（`editor/session.rs` 就是），带可见性的那一种
-# 匹配不上，整个模块体于是被当成**生产代码**扫描 —— 里面每一句断言都会被算成违规。
-# 这个门禁曾经因此对着一个只出现在 `assert!` 里的 `error.contains(` 报红，而基线允许 0。
+# [Why not just `#[cfg(test)]`] The shared-layer test fixtures (test_host /
+# test_allocator) are declared with `#[cfg(any(test, feature = "test-support"))]`:
+# in product builds the whole block does not exist, and only the format shells'
+# test builds see them through that feature (see the `test_support` docs in
+# lib.rs). Accepting only cfg(test) would flag all 27 `extern "C"` callbacks in
+# test_host.rs one by one as host boundaries - yet they never enter a real host
+# process, which is exactly the class of test doubles this gate is designed to
+# exempt.
+TEST_ONLY_ATTR = (
+    r'#\[cfg\(test\)\]',
+    r'#\[cfg\(any\(test,\s*feature\s*=\s*"test-support"\)\)\]',
+)
+
+# [Why not a single `#[cfg(test)]\s*mod \w+`] That form only matches a bare `mod`.
+# Test modules are commonly written as `#[cfg(test)]\n pub(crate) mod tests {`
+# (`editor/session.rs` is one), and the visibility-decorated variant would not
+# match, so the entire module body would be scanned as **production code** - every
+# assertion inside it would count as a violation. This gate once went red over an
+# `error.contains(` that only appeared inside an `assert!`, while the baseline
+# allowed 0.
+# [Why the attribute chain also swallows `//` comments] This repo's habit is to put
+# "why" comment blocks between the cfg attribute and the mod item (`editor/session.rs`'s
+# `pub mod tests` separates two attributes with three comment lines); without
+# swallowing comments, that class of module body would likewise be scanned as
+# production code.
 CFG_TEST_MOD = re.compile(
-    r'#\[cfg\(test\)\]'                 # the attribute itself
-    r'(?:\s*#\[[^\]]*\])*'              # any further attributes on the item
+    r'(?:' + r'|'.join(TEST_ONLY_ATTR) + r')'  # the attribute itself
+    r'(?:\s*(?://[^\n]*|#[^\]]*\]))*'   # comments between the attributes
     r'\s*(?:pub(?:\s*\([^)]*\))?\s+)?'  # optional visibility (pub / pub(crate) / …)
     r'mod\s+\w+\s*\{'                    # the module body
 )
@@ -159,7 +182,14 @@ def test_only_modules(root):
     list here would rot; reading the parent's declaration cannot.
     """
     declared = set()
-    pattern = re.compile(r'#\[cfg\(test\)\]\s*mod\s+(\w+)\s*;')
+    # Same attribute forms as CFG_TEST_MOD above (see its why-comment for the
+    # `test-support` half); a declaration file may carry why-comments between
+    # the cfg attribute and the `mod` item.
+    pattern = re.compile(
+        r'(?:' + r'|'.join(TEST_ONLY_ATTR) + r')'
+        r'(?:\s*(?://[^\n]*|#[^\]]*\]))*'
+        r'\s*mod\s+(\w+)\s*;'
+    )
     for dirpath, _dirs, files in os.walk(root):
         for fn in files:
             if not fn.endswith('.rs'):

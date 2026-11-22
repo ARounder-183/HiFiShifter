@@ -157,12 +157,6 @@ function renderMenuEntries(
                             ? (onTrigger) => onHoverItem(onTrigger && !item.disabled ? index : -1)
                             : undefined
                     }
-                    // 嵌套子菜单时，子面板自己也不能裁切（同一条约束，逐层适用）。
-                    panelClassName={
-                        item.items.some((sub) => (sub.items?.length ?? 0) > 0)
-                            ? "hs-menu--no-scroll"
-                            : undefined
-                    }
                 >
                     {renderMenuEntries(item.items, -1, reserveIcon, null, null, onClose)}
                 </AppSubMenu>
@@ -362,24 +356,14 @@ export function AppContextMenu({
         return () => window.removeEventListener("resize", reclamp);
     }, [x, y, items]);
 
-    /**
-     * 本层是否有子菜单 —— 决定壳能不能裁切内容。
-     *
-     * 【为什么这是硬约束，不是样式偏好】子面板必须留在父壳**内部**（它要靠百分比
-     * 相对触发项定位），而壳默认 `max-height` + `overflow-y: auto` 会**把它裁掉**：
-     * `overflow-y: auto` 会把 `overflow-x` 一并变成 `auto`，于是伸出壳右边的子面板
-     * 被裁到只剩贴着壳右缘的那几像素。实测（表格菜单 + 「行」子菜单）：壳右缘
-     * 1332px、子面板左缘 1327px —— **可见宽度 5px**，子面板中心点上命中的是它背后
-     * 的面板工具栏，也就是**子菜单完全看不见**。
-     *
-     * 【为什么之前没被发现】`getBoundingClientRect()` 给的是**布局几何**，与裁切
-     * 无关：它照样报出 1327..1517 的完整矩形。只量几何的检查会给出假绿灯，
-     * 必须用 `elementFromPoint` 判"那里真的是不是子面板"（见浏览器验证脚本）。
-     *
-     * `hs-menu--no-scroll` 正是为此存在的（`max-height: none; overflow: visible`），
-     * 仓库里所有带子菜单的手写菜单都挂着它。
+    /*
+     * 【壳始终滚动，子菜单不再要求壳放手】子面板（`AppSubMenu`）现在以
+     * `position: fixed` 相对视口定位，不再是被 `overflow-y: auto` 裁切的
+     * 绝对定位后代 —— 因此带子菜单的壳也能保持 `max-height` + 滚动条
+     * （窗口高度不够时整张菜单可滚，与无子菜单的菜单同一行为）。
+     * 历史约束与实测证据已随定位模型移入 `src/index.css` 的
+     * `.hs-menu--submenu` 说明。
      */
-    const hasSubmenu = useMemo(() => items.some((item) => (item.items?.length ?? 0) > 0), [items]);
 
     const step = useCallback(
         (delta: 1 | -1) => {
@@ -531,6 +515,22 @@ export function AppContextMenu({
             ? `${menuId}-item-${activeIndex}`
             : undefined;
 
+    /*
+     * 键盘高亮滚动跟随。
+     *
+     * 【为什么需要】壳是 `max-height` + `overflow-y: auto` 的滚动容器：菜单项多到
+     * 超出视口高度时，方向键走到可视区之外的项上，高亮存在（`data-active` 已写）
+     * 却看不见 —— 键盘用户等于在盲走。滚动跟随让可视区始终跟上高亮。
+     * 鼠标悬停不需要它：能被指到的项必然已在可视区里。
+     */
+    useEffect(() => {
+        if (activeIndex < 0) return;
+        // `?.` 兜底 jsdom（无此方法）；浏览器里它必然存在。
+        document
+            .getElementById(`${menuId}-item-${activeIndex}`)
+            ?.scrollIntoView?.({ block: "nearest" });
+    }, [activeIndex, menuId]);
+
     return (
         <div
             ref={ref}
@@ -539,10 +539,9 @@ export function AppContextMenu({
             aria-activedescendant={activeDescendant}
             data-hs-context-menu="1"
             data-hs-floating-menu={floating ? "1" : undefined}
+            className="hs-menu"
             // 只有需要收焦点时才可聚焦（`tabIndex=-1` 不进 Tab 序列，仅可编程聚焦）。
             tabIndex={autoFocus ? -1 : undefined}
-            // 有子菜单就不能裁切（见 `hasSubmenu` 的说明）。
-            className={cx("hs-menu", hasSubmenu && "hs-menu--no-scroll")}
             style={{
                 left: position.left,
                 top: position.top,
@@ -698,9 +697,10 @@ export interface AppSubMenuProps {
     /**
      * 子面板的追加类。
      *
-     * 【为什么需要】壳默认 `max-height: var(--qt-menu-max-h)` + `overflow-y: auto`。
-     * 子面板里若要放**自带滚动**的内容（长列表 + 钉住的页脚），壳再滚一次就是
-     * 双滚动条；此时需要 `hs-menu--no-scroll` 让壳放手，由内容自己约束高度。
+     * 【为什么需要】子面板默认与主菜单同一套壳（`max-height` + `overflow-y: auto`）。
+     * 子面板里若要放**自带滚动**的内容（长列表 + 钉住的页脚，如颤音预设的飞行面板），
+     * 面板再滚一次就是双滚动条；此时需要 `hs-menu--no-scroll` 让面板放手，由内容
+     * 自己约束高度。
      */
     panelClassName?: string;
     /**
@@ -739,6 +739,7 @@ export function AppSubMenu({
 }: AppSubMenuProps) {
     const [open, setOpen] = useState(false);
     const panelRef = useRef<HTMLDivElement>(null);
+    const wrapperRef = useRef<HTMLDivElement>(null);
     // 子面板是**条件渲染**的：挂载瞬间 `panelRef.current` 还是 null。把 `open`
     // 作为钩子的 `active` 传下去，面板真正出现时 effect 才会重跑并注册导航
     // （否则只跑一次就命中 `if (!container) return`，方向键永远由外层菜单响应）。
@@ -747,41 +748,78 @@ export function AppSubMenu({
     useLayoutEffect(() => {
         if (!open) return;
         const panel = panelRef.current;
-        if (!panel) return;
-        panel.style.left = "calc(100% - 4px)";
-        panel.style.right = "auto";
-        panel.style.top = "-5px";
-        panel.style.bottom = "auto";
-        // 宽度随内容展开：绝对定位面板的宽度默认被包含块（触发项宽度）封顶，
-        // 长文本会因此换行。max-content 展开后若超出视口，按最终锚定侧的可用
-        // 空间收口 —— 行内标签以 truncate 兜底。
-        panel.style.width = "max-content";
-        panel.style.maxWidth = "none";
+        const wrapper = wrapperRef.current;
+        if (!panel || !wrapper) return;
+        /*
+         * 【为什么面板是 fixed 定位】子面板以 `position: fixed` 相对**视口**展开
+         * （见 `index.css` 的 `.hs-menu--submenu`）：它不再是父壳里被
+         * `overflow-y: auto` 裁切的绝对定位后代，因此父壳可以保持
+         * `max-height` + 滚动条 —— 带子菜单的菜单与扁平菜单在窗口高度不够时
+         * 行为一致（都能滚）。代价是面板不再跟随壳滚动，由下面的滚动收起兜住。
+         *
+         * 坐标全部从触发项的**视口矩形**推出，量与夹的循环与壳的定位同一套纪律：
+         * 每一步都实测 `getBoundingClientRect`，不估算。
+         */
+        const place = () => {
+            const trigger = wrapper.getBoundingClientRect();
+            // 与触发项重叠 4px 展开：指针从触发项滑进面板时中间不能出现"两者都
+            // 不在"的缝隙 —— 缝隙里 mouseleave 会把面板收掉（与旧的
+            // `calc(100% - 4px)` 同一个理由）。
+            panel.style.left = `${trigger.right - 4}px`;
+            panel.style.top = `${trigger.top - 5}px`;
+            // 宽度随内容展开：fixed 定位面板的宽度默认由内容决定，长文本以
+            // max-content 展开后若超出视口，按最终锚定侧的可用空间收口 ——
+            // 行内标签以 truncate 兜底。
+            panel.style.width = "max-content";
+            panel.style.maxWidth = "none";
 
-        const vw = window.innerWidth;
-        const vh = window.innerHeight;
-        let rect = panel.getBoundingClientRect();
-        // 右侧放不下就翻到左侧（菜单贴着视口右缘时必然如此）。
-        if (rect.right > vw - 4) {
-            panel.style.left = "auto";
-            panel.style.right = "calc(100% - 4px)";
+            const vw = window.innerWidth;
+            const vh = window.innerHeight;
+            let rect = panel.getBoundingClientRect();
+            // 右侧放不下就翻到左侧（菜单贴着视口右缘时必然如此）。
+            let anchoredLeft = true;
+            if (rect.right > vw - 4) {
+                panel.style.left = `${trigger.left - rect.width + 4}px`;
+                anchoredLeft = false;
+            }
+            rect = panel.getBoundingClientRect();
+            const availableWidth = anchoredLeft ? vw - 8 - rect.left : rect.right - 8;
+            if (rect.width > availableWidth) {
+                panel.style.maxWidth = `${Math.max(160, Math.floor(availableWidth))}px`;
+                rect = panel.getBoundingClientRect();
+            }
+            // 下方放不下就向上对齐（面板底边与触发项底边齐平）。
+            if (rect.bottom > vh - 4) {
+                panel.style.top = `${trigger.bottom - rect.height + 5}px`;
+            }
+        };
+        place();
+        // 打开期间视口可能变小（窗口 resize / 缩放）：壳会重夹紧、触发项会移动，
+        // 面板跟着重摆一次。
+        window.addEventListener("resize", place);
+        return () => window.removeEventListener("resize", place);
+    }, [open]);
+
+    /*
+     * 【滚动即收起】面板不再随壳滚动：壳（或任何祖先滚动容器）滚动时，触发项
+     * 移走了而面板停在原地 —— 指针与键盘都会"指着空气"。原生菜单在宿主滚动时
+     * 同样收起子菜单，取舍一致：滚动一次 = 子菜单收起，再悬停即可重新展开。
+     * 面板**自己**的滚动除外 —— 长列表（Take、预设）在面板内滚动是正常操作，
+     * 不该把面板收掉。
+     */
+    useEffect(() => {
+        if (!open) return;
+        function onScroll(event: Event) {
+            if (panelRef.current?.contains(event.target as Node)) return;
+            setOpen(false);
         }
-        rect = panel.getBoundingClientRect();
-        const anchoredLeft = panel.style.left !== "auto";
-        const availableWidth = anchoredLeft ? vw - 8 - rect.left : rect.right - 8;
-        if (rect.width > availableWidth) {
-            panel.style.maxWidth = `${Math.max(160, Math.floor(availableWidth))}px`;
-        }
-        // 下方放不下就向上对齐（与触发项底边齐平）。
-        rect = panel.getBoundingClientRect();
-        if (rect.bottom > vh - 4) {
-            panel.style.top = "auto";
-            panel.style.bottom = "-5px";
-        }
+        document.addEventListener("scroll", onScroll, true);
+        return () => document.removeEventListener("scroll", onScroll, true);
     }, [open]);
 
     return (
         <div
+            ref={wrapperRef}
             className="relative"
             onMouseEnter={() => {
                 // 指针在触发项上 —— 父层的"当前项"也要跟过来，否则它会留在
@@ -847,7 +885,8 @@ export function AppSubMenu({
                     data-hs-context-menu="1"
                     // 子面板与主菜单**共用同一个表面**；定位由上面的 layout effect
                     // 逐条覆盖（翻左 / 对齐 / 收宽），因此只借 `--submenu` 的
-                    // `position: absolute`（它是唯一必须留在父壳里的面板）。
+                    // `position: fixed`（相对视口展开，不被父壳裁切 —— 见
+                    // `index.css` 的 `.hs-menu--submenu`）。
                     className={cx("hs-menu hs-menu--submenu", panelClassName)}
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => e.stopPropagation()}

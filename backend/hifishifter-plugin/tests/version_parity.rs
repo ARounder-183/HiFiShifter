@@ -80,6 +80,7 @@ fn every_version_source_agrees_with_the_plugin_crate() {
         "backend/hifishifter-plugin-core/Cargo.toml",
         "backend/hifishifter-ara/Cargo.toml",
         "backend/hifishifter-capture/Cargo.toml",
+        "backend/hifishifter-vst3/Cargo.toml",
         "backend/hifishifter-clap/Cargo.toml",
         "frontend/package.json",
         "frontend/package-lock.json",
@@ -116,6 +117,7 @@ fn version_sources_cover_the_ara_and_capture_crates() {
     for relative in [
         "backend/hifishifter-ara/Cargo.toml",
         "backend/hifishifter-capture/Cargo.toml",
+        "backend/hifishifter-vst3/Cargo.toml",
     ] {
         assert!(
             manifest.contains(&format!("\"path\": \"{relative}\"")),

@@ -1,7 +1,8 @@
-﻿# 产品一致性守卫：几条"必须同时成立"、又没有编译期保护的跨文件约定。
+﻿# Product consistency guard: cross-file conventions that "must all hold at once" and that have no
+# compile-time protection.
 #
-# 每一条被破坏时都不会报错，只会在用户那里表现为"版本显示不对""模型读了旧的"
-# "控件点了没反应"。这里把它们搬到 CI。
+# When any of them breaks, nothing reports an error — the user just sees "wrong version shown",
+# "models loaded the old ones", "controls do nothing when clicked". This script moves them into CI.
 #
 #   .\scripts\checks\check-product-consistency.ps1
 [CmdletBinding()]
@@ -28,55 +29,60 @@ function Get-RepoText($relative) {
     Get-Content -LiteralPath (Join-Path $root $relative) -Raw
 }
 
-# 统一的外部工具调用：工具没装时给一句可行动的话（而不是一条原生报错），退出码检查
-# 也搬到这里 —— 此前每个调用点各写一遍 `if ($LASTEXITCODE)`，漏一处就是静默通过。
+# Unified external tool invocation: when the tool is not installed, give one actionable sentence
+# (instead of a raw error), and move the exit-code check here too — previously every call site wrote
+# its own `if ($LASTEXITCODE)`, and missing one meant a silent pass.
 #
-# 【为什么 -RequireOutput】Windows 上 `python` 可能是 Microsoft Store 的 App Execution
-# Alias：命令存在、退出 0、却什么也不打印（只弹应用商店）。此时 `$output` 为空，
-# `Test-Invariant` 的 `($output | Select-Object -Last 1)` 得到 $null，界面照样打 [OK]，
-# 所有 python 判据全部"空通过"。校验型脚本必须留下结论行，没有输出即视为失败。
+# [Why -RequireOutput] On Windows `python` may be the Microsoft Store App Execution Alias: the
+# command exists, exits 0, and prints nothing (it just pops the Store). Then `$output` is empty,
+# `Test-Invariant`'s `($output | Select-Object -Last 1)` gets $null, the UI still prints [OK],
+# and every python criterion "passes vacuously". Validation scripts must leave a conclusion line;
+# no output counts as failure.
 function Invoke-Tool([string]$tool, [string[]]$arguments, [switch]$RequireOutput) {
     $command = Get-Command $tool -ErrorAction SilentlyContinue
     if (!$command) {
-        throw "找不到 $tool（见 scripts/setup/install_deps_windows.ps1 / install_deps_macos.sh / install_deps_linux.sh）"
+        throw "$tool not found (see scripts/setup/install_deps_windows.ps1 / install_deps_macos.sh / install_deps_linux.sh)"
     }
     $output = & $command.Source @arguments 2>&1
     if ($LASTEXITCODE) {
-        throw "$tool 失败（退出码 $LASTEXITCODE）：$($output -join ' | ')"
+        throw "$tool failed (exit code $LASTEXITCODE): $($output -join ' | ')"
     }
     if ($RequireOutput -and !($output | Where-Object { "$_".Trim() })) {
-        throw "$tool 没有输出结论（可能是 Microsoft Store 的 python 别名，没真正执行脚本）"
+        throw "$tool produced no conclusion (possibly the Microsoft Store python alias; the script never really ran)"
     }
     $output
 }
 
 Write-Host 'Product consistency checks' -ForegroundColor Cyan
 
-# 版本号散在多个文件里（清单见 scripts/release/version-sources.json），漏改一处不会编译
-# 失败，只会让某个界面报出别的版本 —— 或者让插件在「程序和功能」里显示另一个版本号。
-# 写入与校验共用 scripts/release/version.py，按清单里的 occurrences 逐处比对：
-# package-lock 的第二处、Cargo.lock 的两条都算数。
-Test-Invariant '产品版本在全部来源中一致' {
+# Version numbers are scattered across several files (see scripts/release/version-sources.json);
+# missing one does not break the build, it just makes some UI report a different version — or makes
+# the plugin show another version number in "Programs and Features". Writes and checks share
+# scripts/release/version.py, comparing each occurrence listed in the manifest: the second spot in
+# package-lock and the two entries in Cargo.lock all count.
+Test-Invariant 'product version consistent across all sources' {
     $output = Invoke-Tool 'python' @((Join-Path $root 'scripts/release/version.py'), '--check') -RequireOutput
     ($output | Where-Object { $_ } | Select-Object -Last 1)
 }
 
-# models.json 的版本号由模型内容派生，运行时靠它判断共享模型库里的那一份能不能用。
-# 权重不在干净 clone 里时，--check-manifest 会打印"检查跳过"并返回 0 —— 那是正常状态，
-# 不是回归（清单与权重的对账只在取到权重之后才可能）。
-Test-Invariant '模型清单与真实模型文件一致' {
+# models.json's version is derived from the model contents; at runtime it decides whether the copy
+# in the shared model library is usable. When the weights are not in a clean clone, --check-manifest
+# prints "check skipped" and returns 0 — that is the normal state, not a regression (reconciling the
+# manifest with the weights is only possible once the weights have been fetched).
+Test-Invariant 'model manifest matches the real model files' {
     $output = Invoke-Tool 'python' @((Join-Path $root 'scripts/setup/fetch-models.py'), '--check-manifest') -RequireOutput
     ($output | Where-Object { $_ } | Select-Object -Last 1)
 }
 
-Test-Invariant '安装器文案与五语词表一致' {
+Test-Invariant 'installer strings match the five-language glossary' {
     Invoke-Tool 'node' @((Join-Path $root 'scripts/release/build-installer-strings.mjs'), '--check') | Out-Null
     'scripts/release/installer/installer_strings.nsh'
 }
 
-# 许可全文是"少一份也不报错"的那类东西：打包脚本只拷目录，文件名只在 README 里出现。
-# 改名或漏文件的结果是某个发行物静默少一份义务披露 —— 因此在这里钉死清单。
-Test-Invariant '随包许可清单齐全（LICENSE + licenses\ 目录）' {
+# The license texts are the "missing one and nothing errors" kind: the packaging script just copies
+# a directory, and the file names appear only in the README. A rename or a missing file means some
+# artifact silently drops a required attribution — so the manifest is pinned here.
+Test-Invariant 'bundled license manifest complete (LICENSE + licenses\ directory)' {
     $required = @(
         'LICENSE',
         'licenses\README.md',
@@ -86,141 +92,150 @@ Test-Invariant '随包许可清单齐全（LICENSE + licenses\ 目录）' {
         'licenses\GAME-NOTICE.txt'
     )
     foreach ($file in $required) {
-        if (!(Test-Path -LiteralPath (Join-Path $root $file))) { throw "缺少随包许可文件：$file" }
+        if (!(Test-Path -LiteralPath (Join-Path $root $file))) { throw "missing bundled license file: $file" }
     }
     $nsi = Get-RepoText 'scripts/release/merged-installer.nsi'
     if ($nsi -notmatch '(?m)^\s*File\s+/r\s+"\$\{HFS_LICENSES\}\\\*"\s*$') {
-        throw 'merged-installer.nsi 不再安装完整 licenses\ 目录'
+        throw 'merged-installer.nsi no longer installs the full licenses\ directory'
     }
     $license = Get-RepoText 'LICENSE'
-    if ($license -notmatch 'CLAP \(CLever Audio Plugin\) headers') { throw 'LICENSE 未登记 CLAP SDK 的第三方许可' }
+    if ($license -notmatch 'CLAP \(CLever Audio Plugin\) headers') { throw 'LICENSE does not credit the CLAP SDK third-party license' }
     if ($license -notmatch 'GAME - Generative Adaptive MIDI Extractor') {
-        throw 'GAME 模型许可未登记到 LICENSE'
+        throw 'GAME model license not credited in LICENSE'
     }
-    'LICENSE + licenses\（LGPL-2.1 / Apache-2.0 / CC BY-NC-SA 声明）'
+    'LICENSE + licenses\ (LGPL-2.1 / Apache-2.0 / CC BY-NC-SA notices)'
 }
 
-# 这几条都是"手改回去就静默丢一个用户可见能力"的地方：没有卸载项、重复安装堆积资产、
-# 模型又回到 bundle 里各存一份。
-# 覆盖安装**绝不允许**再执行旧版卸载器：旧版 uninstall.exe 是上一版编译出来的二进制，
-# 它在 /S 下是否真的静默不由本脚本决定（Tauri 卸载器会弹语言选择框、宿主占用提示是
-# 不带 /SD 的 MessageBox）。执行它 = 用户安装过程中额外看到一个"HiFiShifter 卸载"窗口。
-# 卸载动作必须由本安装器在进程内完成（HfsRemovePreviousInstall），覆盖安装路径上不能
-# 出现任何子进程窗口。
-Test-Invariant '覆盖安装不执行旧版卸载器（没有第二个卸载窗口）' {
+# These are all places where hand-reverting silently drops a user-visible capability: no uninstall
+# entry, repeated installs piling up assets, models going back to one copy per bundle.
+# An overwrite install must **never** run the old uninstaller again: the old uninstall.exe is a
+# binary built by the previous version, and whether it is truly silent under /S is not for this
+# script to decide (the Tauri uninstaller pops a language picker, and the host-in-use prompt is a
+# MessageBox without /SD). Running it = the user sees an extra "HiFiShifter uninstall" window during
+# install. The uninstall action must be done in-process by this installer (HfsRemovePreviousInstall);
+# no child-process window may appear anywhere on the overwrite-install path.
+Test-Invariant 'overwrite install never runs the old uninstaller (no second uninstall window)' {
     $nsi = Get-RepoText 'scripts/release/merged-installer.nsi'
-    # 只看非注释行：注释里提到 ExecWait 是在解释"为什么不能这么做"。
+    # Only non-comment lines: the comment mentioning ExecWait is explaining "why this must not be done".
     $code = @(($nsi -split "`n") | Where-Object { $_ -notmatch '^\s*;' })
     $launchers = @($code | Where-Object { $_ -match '^\s*(ExecWait|ExecShell|Exec)\b.*(uninstall|Uninstaller)' })
     if ($launchers.Count) {
-        throw "merged-installer.nsi 仍在启动旧版卸载器：$($launchers[0].Trim())"
+        throw "merged-installer.nsi still launches the old uninstaller: $($launchers[0].Trim())"
     }
     foreach ($forbidden in 'HfsOldUninstaller', 'HfsParseUninstallString') {
-        if ($nsi -match $forbidden) { throw "merged-installer.nsi 仍在引用 $forbidden" }
+        if ($nsi -match $forbidden) { throw "merged-installer.nsi still references $forbidden" }
     }
-    # 共享模型库的落点会随安装器版本变：根必须写进卸载项、卸载器必须读回来，
-    # 否则"卸载了模型还在"或"保留的模型新版根本不读"。
+    # The shared model library's location changes with the installer version: the root must be written
+    # into the uninstall entry and the uninstaller must read it back, otherwise "uninstalled but the
+    # models are still there" or "the kept models are never read by the new version".
     if ($nsi -notmatch '"ModelRoot"') {
-        throw 'merged-installer.nsi 没有把共享模型库根写进卸载项（ModelRoot）'
+        throw 'merged-installer.nsi does not write the shared model library root into the uninstall entry (ModelRoot)'
     }
     if ($nsi -notmatch 'ReadRegStr \$HfsModelRoot') {
-        throw 'merged-installer.nsi 的卸载器没有从卸载项读回共享模型库根'
+        throw 'merged-installer.nsi uninstaller does not read the shared model library root back from the uninstall entry'
     }
     if ($nsi -notmatch 'Function HfsRemovePreviousInstall') {
-        throw 'merged-installer.nsi 缺少进程内移除上一版的 HfsRemovePreviousInstall'
+        throw 'merged-installer.nsi lacks HfsRemovePreviousInstall, the in-process removal of the previous version'
     }
     if ($nsi -match 'HFS_REINSTALL_CONFIRM|MB_YESNO') {
-        throw 'merged-installer.nsi 仍在覆盖安装选项页之外弹确认框'
+        throw 'merged-installer.nsi still pops a confirmation box outside the overwrite-install options page'
     }
-    # 静默安装/卸载里任何 MessageBox 都必须有 /SD 默认值，否则 NSIS 会停在一个
-    # 看不见的对话框上，表现成"安装器/卸载器卡住"。
+    # Every MessageBox in silent install/uninstall must carry an /SD default, otherwise NSIS stops on
+    # an invisible dialog and it shows up as "installer/uninstaller hangs".
     $boxes = @(($nsi -split "`n") | Where-Object { $_ -match '^\s*MessageBox' })
     $unguarded = @($boxes | Where-Object { $_ -notmatch '/SD' })
-    if ($unguarded.Count) { throw "merged-installer.nsi 有 $($unguarded.Count) 个 MessageBox 缺 /SD" }
-    '进程内移除、无确认框、所有 MessageBox 有 /SD'
+    if ($unguarded.Count) { throw "merged-installer.nsi has $($unguarded.Count) MessageBox(es) missing /SD" }
+    'in-process removal, no confirmation box, all MessageBoxes carry /SD'
 }
 
-# CLAP 的公共插件目录（Common Files\CLAP）是全机共享的：规范里只该出现 .clap 文件本身。
-# 把 frontend/ 与 models.json 摆成通用名的兄弟目录，用户分不清归属、删也不敢删，
-# 而且和别人的插件混在同一个目录里。资源必须落在产品自己的共享目录。
-Test-Invariant 'CLAP 公共目录里只放插件模块' {
+# CLAP's public plugin directory (Common Files\CLAP) is machine-wide: the spec says only the .clap
+# file itself should appear there. Putting frontend/ and models.json next to it under generic names
+# means users cannot tell ownership apart and dare not delete them — and they mix with other
+# people's plugins in the same directory. Resources must land in the product's own shared directory.
+Test-Invariant 'CLAP public directory holds only the plugin module' {
     $nsi = Get-RepoText 'scripts/release/merged-installer.nsi'
     if ($nsi -notmatch 'HFS_CLAP_RES_DIR') {
-        throw 'merged-installer.nsi 没有把插件资源指到产品自己的目录（HFS_CLAP_RES_DIR）'
+        throw 'merged-installer.nsi does not point plugin resources at the product-shared directory (HFS_CLAP_RES_DIR)'
     }
     if ($nsi -match 'SetOutPath "\$HfsClapDir\\\$\{CLAP_RESOURCES\}"') {
-        throw 'merged-installer.nsi 仍把资源装进公共 CLAP 目录'
+        throw 'merged-installer.nsi still installs resources into the public CLAP directory'
     }
     if ($nsi -notmatch 'RMDir /r "\$HfsClapDir\\\$\{CLAP_RESOURCES\}"') {
-        throw 'merged-installer.nsi 升级时没有清掉旧版留在公共 CLAP 目录里的资源文件夹'
+        throw 'merged-installer.nsi does not clean up the resource folder the old version left in the public CLAP directory on upgrade'
     }
     'only HiFiShifter.clap in Common Files\CLAP'
 }
 
-Test-Invariant '合并安装器注册卸载项、清理受管目录、模型走共享库' {
+Test-Invariant 'merged installer registers the uninstall entry, cleans managed directories, models use the shared library' {
     $nsi = Get-RepoText 'scripts/release/merged-installer.nsi'
     foreach ($required in 'WriteUninstaller', 'UninstallString', 'InstallLocation', 'ModelRoot', 'MODELS_VERSION', 'APP_VERSION', 'FILEASSOC_PROGID', 'Software\Classes') {
-        if ($nsi -notmatch [regex]::Escape($required)) { throw "merged-installer.nsi 缺少 $required" }
+        if ($nsi -notmatch [regex]::Escape($required)) { throw "merged-installer.nsi missing $required" }
     }
     if ($nsi -notmatch 'RMDir /r .*Resources\\frontend') {
-        throw 'merged-installer.nsi 不再清理 Contents\Resources\frontend —— 重复安装会重新堆积资产'
+        throw 'merged-installer.nsi no longer cleans Contents\Resources\frontend — repeated installs pile up assets again'
     }
     if ($nsi -notmatch 'RMDir /r "\$INSTDIR\\models"') {
-        throw 'merged-installer.nsi 不再清理安装目录里的 models\ —— 从旧安装器升级会永久多占 150 MB'
+        throw 'merged-installer.nsi no longer cleans models\ inside the install directory — upgrading from the old installer permanently keeps a second weights copy'
     }
-    'WriteUninstaller / UninstallString / 目录对账 / 共享模型库'
+    'WriteUninstaller / UninstallString / directory reconciliation / shared model library'
 }
 
-# 合并安装器的默认分支必须是"提权 + HKLM + Common Files"：HFS_TEST_MODE 那一段是给
-# 测试模式跑闭环用的（装到当前用户、ARP 写 HKCU）。谁把测试分支写成默认，发布产物就会
-# 装到用户目录、且在"程序和功能"里查不到。
-Test-Invariant '合并安装器默认走 per-machine 安装' {
+# The merged installer's default branch must be "elevated + HKLM + Common Files": the HFS_TEST_MODE
+# branch exists for the test-mode closed loop (installs to the current user, ARP goes to HKCU). If
+# anyone makes the test branch the default, the release artifact installs into the user profile and
+# cannot be found in "Programs and Features".
+Test-Invariant 'merged installer defaults to per-machine install' {
     $nsi = Get-RepoText 'scripts/release/merged-installer.nsi'
     $ifdef = $nsi.IndexOf('!ifdef HFS_TEST_MODE')
     $else = $nsi.IndexOf('!else', $ifdef)
     $endif = $nsi.IndexOf('!endif', $else)
-    if ($ifdef -lt 0 -or $else -lt 0 -or $endif -lt 0) { throw 'merged-installer.nsi 的 HFS_TEST_MODE 分支不完整' }
+    if ($ifdef -lt 0 -or $else -lt 0 -or $endif -lt 0) { throw 'merged-installer.nsi HFS_TEST_MODE branch is incomplete' }
     $release = $nsi.Substring($else, $endif - $else)
     foreach ($required in 'RequestExecutionLevel admin', '!define HFS_ARP_ROOT HKLM', '!define HFS_CLASSES_ROOT HKLM', 'COMMONFILES64') {
-        if ($release -notmatch [regex]::Escape($required)) { throw "发布分支缺少 $required" }
+        if ($release -notmatch [regex]::Escape($required)) { throw "release branch missing $required" }
     }
     'admin / HKLM / CommonFiles64 / Classes'
 }
 
-# Windows 只交付一个安装器：构建脚本必须用 --no-bundle 自打安装器，且 bundle 里只带
-# models.json（权重由安装器写进 ProgramData）。这两个条件任一破掉，用户就会为同一份
-# 152 MB 权重付第二次磁盘 —— 而产物看起来完全正常。
-Test-Invariant 'Windows 只有一个安装器且模型只装一份' {
+# Windows ships a single installer: the build script must invoke the installer itself with
+# --no-bundle, and the bundle carries only models.json (the installer writes the weights into
+# ProgramData). If either condition breaks, the user pays for the same 152 MB of weights twice on
+# disk — while the artifact looks perfectly normal.
+Test-Invariant 'Windows has one installer and the models install only once' {
     $build = Get-RepoText 'scripts/build/build.ps1'
-    if ($build -notmatch '--no-bundle') { throw 'build.ps1 不再用 --no-bundle（Tauri 打包器会把模型塞回 App 目录）' }
-    if ($build -notmatch 'merged-installer\.nsi') { throw 'build.ps1 不再调用 merged-installer.nsi' }
+    if ($build -notmatch '--no-bundle') { throw 'build.ps1 no longer uses --no-bundle (the Tauri bundler would push the models back into the App directory)' }
+    if ($build -notmatch 'merged-installer\.nsi') { throw 'build.ps1 no longer calls merged-installer.nsi' }
     if ($build -match 'Copy-Item\s+"\$modelsSource\\\$(model|\*)') {
-        throw 'build.ps1 又把模型权重拷进 bundle 了'
+        throw 'build.ps1 is copying model weights into the bundle again'
     }
-    'build.ps1 → merged-installer.nsi（--no-bundle）'
+    'build.ps1 → merged-installer.nsi (--no-bundle)'
 }
 
-# 判据只允许存在于脚本里。工作流的 YAML 里出现 --skip / --test-threads / --offline，
-# 就说明有人又在那里"就地打补丁" —— 而那正是跳过失控的起点（同一个测试在一条流水线
-# 被跳过、在另一条没被跳过，而没人知道哪条算数）。
-Test-Invariant '工作流里没有内联的测试判据' {
+# Criteria are allowed to live only in scripts. Seeing --skip / --test-threads / --offline in
+# workflow YAML means someone is "patching in place" again — which is exactly where skip drift
+# starts (the same test skipped on one pipeline and not on another, with nobody knowing which one
+# counts). `--skip` must stand alone: build-tool flags like build.sh's `--skip-frontend` are not
+# test criteria and were false-positives here since 3ae1e1048 introduced them.
+Test-Invariant 'workflows contain no inline test criteria' {
     $offenders = @()
     foreach ($file in Get-ChildItem (Join-Path $root '.github\workflows') -Filter *.yml -File) {
         foreach ($line in Get-Content -LiteralPath $file.FullName) {
-            # 注释里提到这些词是允许的（说明历史原因），判据只看代码。
+            # Mentioning these words in comments is allowed (explaining history); the criterion only
+            # looks at code.
             $code = ($line -split '#', 2)[0]
-            if ($code -match '--skip|--test-threads|--offline') { $offenders += "$($file.Name): $($line.Trim())" }
+            if ($code -match '--skip(?!-)|--test-threads|--offline') { $offenders += "$($file.Name): $($line.Trim())" }
         }
     }
-    if ($offenders.Count) { throw ('判据必须写进 scripts/checks/：' + ($offenders -join ' | ')) }
+    if ($offenders.Count) { throw ('criteria belong in scripts/checks/: ' + ($offenders -join ' | ')) }
     '.github/workflows'
 }
 
-# GitHub 的表达式只认单引号字符串。写成 `if: runner.os == "Windows"` 时**整个工作流
-# 文件被判无效**：触发时只得到一条 0 秒、名字显示成文件路径的失败记录，任何 step 都没跑。
-# 这个坑已经踩过三次（build.yml / vst3-unix.yml / clap.yml），所以判据是"if: 行里不许出现
-# 双引号"—— 条件里本来也没有需要双引号的场合。
-Test-Invariant '工作流条件用单引号字符串' {
+# GitHub expressions only accept single-quoted strings. Written as `if: runner.os == "Windows"`,
+# the **entire workflow file is judged invalid**: triggering it yields only a 0-second failure
+# record whose name is the file path, with no step ever run. This pit has been hit three times
+# (build.yml / vst3-unix.yml / clap.yml), so the criterion is "no double quotes on if: lines" —
+# the conditions never need them anyway.
+Test-Invariant 'workflow conditions use single-quoted strings' {
     $offenders = @()
     foreach ($file in Get-ChildItem (Join-Path $root '.github\workflows') -Filter *.yml -File) {
         foreach ($line in Get-Content -LiteralPath $file.FullName) {
@@ -228,22 +243,25 @@ Test-Invariant '工作流条件用单引号字符串' {
             if ($line.Contains('"')) { $offenders += "$($file.Name): $($line.Trim())" }
         }
     }
-    if ($offenders.Count) { throw ('if: 里的字符串必须用单引号：' + ($offenders -join ' | ')) }
+    if ($offenders.Count) { throw ('strings on if: lines must be single-quoted: ' + ($offenders -join ' | ')) }
     '.github/workflows'
 }
 
 
-# 前端 invoke.ts 的 switch 是前端能发出的全部方法名。其中任何一个若两边后端都不派发，
-# 症状是"控件能点、点了没反应"——静默失效，且不会有编译错误。
-Test-Invariant '前端 invoke 面都有后端命令承接' {
+# The frontend invoke.ts switch is the full set of method names the frontend can send. If the
+# backend on either side fails to dispatch any one of them, the symptom is "the control is
+# clickable but nothing happens" — silent breakage, with no compile error either.
+Test-Invariant 'every frontend invoke surface is backed by a backend command' {
     $output = Invoke-Tool 'python' @((Join-Path $root 'scripts/checks/check-command-gating.py')) -RequireOutput
     ($output | Select-Object -First 1)
 }
 
-# Windows PowerShell 5.1 读无 BOM 的 UTF-8 文件时按 ANSI 解码：中文注释的最后一个字节会和
-# 行尾换行配成双字节字符 —— 换行被吃掉，下一行代码变成注释的一部分。症状是"某个变量莫名
-# 奇妙是 null"，报错指向再下一行。纯 ASCII 的脚本不需要 BOM，所以判据是"含非 ASCII 且无 BOM"。
-Test-Invariant '含非 ASCII 的 PowerShell 脚本都带 UTF-8 BOM' {
+# Windows PowerShell 5.1 decodes BOM-less UTF-8 files as ANSI: the last byte of a Chinese comment
+# pairs with the trailing newline into a double-byte character — the newline is swallowed, and the
+# next line of code becomes part of the comment. The symptom is "some variable is mysteriously
+# null", with the error pointing one line further down. Pure-ASCII scripts do not need a BOM, so
+# the criterion is "contains non-ASCII and has no BOM".
+Test-Invariant 'PowerShell scripts containing non-ASCII all carry a UTF-8 BOM' {
     $offenders = @()
     foreach ($file in Get-ChildItem (Join-Path $root 'scripts') -Recurse -File -Include *.ps1, *.psm1, *.psd1) {
         $bytes = [IO.File]::ReadAllBytes($file.FullName)
@@ -252,22 +270,29 @@ Test-Invariant '含非 ASCII 的 PowerShell 脚本都带 UTF-8 BOM' {
         foreach ($byte in $bytes) { if ($byte -gt 0x7F) { $nonAscii = $true; break } }
         if ($nonAscii) { $offenders += $file.FullName.Substring($root.Length + 1) }
     }
-    if ($offenders.Count) { throw ('以下脚本含非 ASCII 却没有 UTF-8 BOM：' + ($offenders -join ' | ')) }
+    if ($offenders.Count) { throw ('these scripts contain non-ASCII without a UTF-8 BOM: ' + ($offenders -join ' | ')) }
     'scripts/'
 }
 
-# Python 在 Windows 上的 stdout 跟随 ANSI 代码页（英文 runner 是 cp1252、中文系统是 GBK）。
-# 打印一句中文就会 UnicodeEncodeError 打死进程，真正的结论一条也进不了日志 —— 门禁红的是
-# 编码，不是它要守的规则。这个坑已经踩过两次（限流日志门禁、版本号门禁），判据因此写成
-# "源码里有非 ASCII 就必须把 stdout 钉成 UTF-8"，而不是逐个脚本去记。
-Test-Invariant '含非 ASCII 的 Python 脚本把 stdout 钉成 UTF-8' {
+# Python's stdout on Windows follows the ANSI code page (cp1252 on English runners, GBK on Chinese
+# systems). Printing one Chinese sentence kills the process with UnicodeEncodeError, and not a
+# single real conclusion reaches the log — the gate goes red over encoding, not over the rule it
+# guards. This pit has been hit twice (the rate-limit log gate, the version gate), so the criterion
+# is written as "any non-ASCII in the source means stdout must be pinned to UTF-8", instead of
+# remembering it per script.
+Test-Invariant 'Python scripts containing non-ASCII pin stdout to UTF-8' {
     $offenders = @()
     foreach ($file in Get-ChildItem (Join-Path $root 'scripts') -Recurse -File -Include *.py) {
         $text = [IO.File]::ReadAllText($file.FullName, [Text.Encoding]::UTF8)
         if ($text -notmatch '[^\x00-\x7f]') { continue }
-        if ($text -notmatch "reconfigure\(encoding='utf-8'") { $offenders += $file.FullName.Substring($root.Length + 1) }
+        # [Why both quote styles count] The invariant is "stdout pinned to UTF-8", not "which quote
+        # style was used to pin it": both styles coexist in the repo (check-ffi-guards.py single
+        # quotes, check-dialog-filters.py double quotes); accepting only single quotes would
+        # false-positive an already-pinned script as unpinned — the gate would go red over quotes,
+        # not encoding.
+        if ($text -notmatch 'reconfigure\(encoding=[''"]utf-8[''"]') { $offenders += $file.FullName.Substring($root.Length + 1) }
     }
-    if ($offenders.Count) { throw ('以下脚本含非 ASCII 却没有把 stdout 钉成 UTF-8：' + ($offenders -join ' | ')) }
+    if ($offenders.Count) { throw ('these scripts contain non-ASCII without pinning stdout to UTF-8: ' + ($offenders -join ' | ')) }
     'scripts/**/*.py'
 }
 

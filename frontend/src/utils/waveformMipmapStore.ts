@@ -31,9 +31,6 @@ import { frontendLog } from "../services/frontendLog";
 
 // ============== 常量 ==============
 
-/** 三级 mipmap 的除数因子 */
-const DIV_FACTORS = [16, 512, 4096] as const;
-
 /**
  * "尚未就绪"重试冷却（毫秒）。
  *
@@ -1341,17 +1338,3 @@ wfDiag_setMipmapSizeFn(() => waveformMipmapStore.size);
 
 // ── 诊断：注册 interleaved 池 ──
 wfDiag_poolRegister("interleaved", () => waveformMipmapStore["interleavedPool"].length);
-
-/**
- * 获取三级 mipmap 的除数因子表
- */
-export function getDivisionFactors(): readonly [number, number, number] {
-    return DIV_FACTORS;
-}
-
-/**
- * 获取 spp 阈值表
- */
-export function getSppThresholds(): readonly [number, number] {
-    return SPP_THRESHOLDS;
-}

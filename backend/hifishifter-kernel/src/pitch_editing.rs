@@ -1354,6 +1354,201 @@ mod tests {
         ));
     }
 
+    /// **导出窗口 = 组装窗口**：片段起点落在两帧之间时，导出必须读组装写进去的那几帧。
+    ///
+    /// 【回归对象】导出侧曾用 `floor(start·1000/fp)` 而组装侧用 `round`。小数部分 ≥ 0.5
+    /// 时两者差一帧 ⇒ 导出的 PIT 包络整体晚 5 ms，而参数编辑器的参考线是准的 ——
+    /// 用户看到的是"导出的和界面上不一样"，却查不出差在哪一帧上。
+    #[test]
+    fn the_export_reads_the_frames_the_assembly_wrote() {
+        let mut timeline = TimelineState::default();
+        let root = timeline.add_track(Some("root".to_string()), None, None);
+        let mut clip = make_clip();
+        clip.track_id = root.clone();
+        // 1.0026 s × 200 = 200.52 ⇒ 组装写在工程帧 201（`floor` 会给 200）。
+        clip.start_sec = 1.0026;
+        clip.length_sec = 1.0;
+        timeline.clips.push(clip.clone());
+
+        // 偏移 = edit − orig = k × 0.01 ⇒ `offsets[0]` 直接暴露"读的是第几帧"。
+        let frames = 600usize;
+        timeline.params_by_root_track.insert(
+            root,
+            TrackParamsState {
+                frame_period_ms: 5.0,
+                pitch_orig: vec![60.0; frames],
+                pitch_edit: (0..frames).map(|k| 60.0 + k as f32 * 0.01).collect(),
+                ..Default::default()
+            },
+        );
+
+        let offsets = super::compute_clip_export_pitch_offsets(&timeline, &clip)
+            .expect("export offsets")
+            .offsets;
+        assert!(
+            (offsets[0] - 2.01).abs() < 1e-4,
+            "必须从第 201 帧读（offsets[0] = 2.01），实际 {} ≈ 第 {} 帧",
+            offsets[0],
+            (offsets[0] / 0.01).round()
+        );
+        // 长度 = `round(1.0 s × 200)` = 200（不是 `ceil` 的 201）：多读的那一帧
+        // 属于下一个片段，会在包络末尾造出一个与内容无关的点。
+        assert_eq!(offsets.len(), 200);
+    }
+
+    // ─── 导出的 `voiced` 口径 ───────────────────────────────────────────────
+    //
+    // 这一组用例钉的是**唯一**容易做错的那一步：`voiced` 回答"这一帧有没有音高"，
+    // 不回答"偏移是不是 0"。用 `orig > 0 && edit > 0` 判会把"用户从未编辑过的
+    // 有声帧"（`edit == 0`，偏移本来就是 0）全部判成 unvoiced 并填成邻居的值 ——
+    // 等于凭空给它们加了移调。
+
+    /// 一根根轨 + 一个 clip + 指定原线/编辑线的导出夹具。
+    ///
+    /// `length_sec` 由原线长度反算，保证导出窗口正好是 `orig.len()` 帧。
+    fn export_fixture(orig: Vec<f32>, edit: Vec<f32>) -> (TimelineState, Clip) {
+        let mut timeline = TimelineState::default();
+        let root = timeline.add_track(Some("root".to_string()), None, None);
+        let mut clip = make_clip();
+        clip.track_id = root.clone();
+        clip.start_sec = 0.0;
+        clip.length_sec = orig.len() as f64 * 0.005;
+        timeline.clips.push(clip.clone());
+        timeline.params_by_root_track.insert(
+            root,
+            TrackParamsState {
+                frame_period_ms: 5.0,
+                pitch_orig: orig,
+                pitch_edit: edit,
+                ..Default::default()
+            },
+        );
+        (timeline, clip)
+    }
+
+    /// 有声但用户没编辑过（`edit == 0`）⇒ **有定义**，偏移保持 0。
+    #[test]
+    fn voiced_marks_frames_with_an_original_pitch() {
+        let (timeline, clip) = export_fixture(vec![60.0, 61.0], vec![0.0, 0.0]);
+        let frames = super::compute_clip_export_pitch_offsets(&timeline, &clip).expect("frames");
+        assert_eq!(frames.offsets, vec![0.0, 0.0], "没有编辑 ⇒ 偏移 0");
+        assert_eq!(
+            frames.voiced,
+            vec![true, true],
+            "有声帧必须算「有定义」，否则填充会把它们移调"
+        );
+    }
+
+    /// 原线与编辑线都为 0 ⇒ 没有音高（这正是要填的那一类）。
+    #[test]
+    fn unvoiced_frames_have_no_original_pitch() {
+        let (timeline, clip) = export_fixture(vec![0.0, 60.0], vec![0.0, 62.0]);
+        let frames = super::compute_clip_export_pitch_offsets(&timeline, &clip).expect("frames");
+        assert_eq!(frames.offsets, vec![0.0, 2.0]);
+        assert_eq!(frames.voiced, vec![false, true]);
+    }
+
+    /// 没有原线但用户手绘了目标 ⇒ 与 `is_voiced_at_time` 同义：算"有定义"。
+    ///
+    /// 【为什么不能算 unvoiced】那一帧是用户**明确点过**的。把它填成邻居的值等于
+    /// 覆盖用户的意思；保持 0 至少与今天一致。
+    #[test]
+    fn a_painted_frame_without_an_original_pitch_counts_as_defined() {
+        let (timeline, clip) = export_fixture(vec![0.0, 60.0], vec![62.0, 62.0]);
+        let frames = super::compute_clip_export_pitch_offsets(&timeline, &clip).expect("frames");
+        assert_eq!(frames.voiced, vec![true, true]);
+        // 偏移仍是 0：没有原线就无从算差值，渲染端也不做变换。
+        assert_eq!(frames.offsets, vec![0.0, 2.0]);
+    }
+
+    /// 未分析（`pitch_orig` 为空）走 pending 回退 ⇒ 全部标成"有定义"。
+    ///
+    /// 没有 F0 信息 ⇒ 没有任何一帧可以被称为"未识别"，填充因此是恒等变换。
+    /// 反过来（全标 `false`）会让填充在"还没分析"的片段上凭空造出一条包络。
+    #[test]
+    fn the_pending_offset_fallback_marks_every_frame_as_defined() {
+        let mut timeline = TimelineState::default();
+        let root = timeline.add_track(Some("root".to_string()), None, None);
+        let mut clip = make_clip();
+        clip.track_id = root.clone();
+        clip.start_sec = 0.0;
+        clip.length_sec = 0.02; // 4 帧
+        timeline.clips.push(clip.clone());
+        timeline.params_by_root_track.insert(
+            root,
+            TrackParamsState {
+                frame_period_ms: 5.0,
+                pending_pitch_offset: Some(vec![0.0, 1.0, 0.0, 2.0]),
+                ..Default::default()
+            },
+        );
+        let frames = super::compute_clip_export_pitch_offsets(&timeline, &clip).expect("frames");
+        assert_eq!(frames.offsets, vec![0.0, 1.0, 0.0, 2.0]);
+        assert_eq!(frames.voiced, vec![true; 4]);
+    }
+
+    /// 逐帧电平比导出窗口**短** ⇒ 按"未知"处理（hold），不是按静音处理（插值）。
+    ///
+    /// 【为什么这条最容易写错】"没有电平数据"看起来像"电平是 0"，而 0 低于静音门 ⇒
+    /// 判成静音 ⇒ 插值。于是"不知道"被悄悄翻译成"确定的静音"，一条本该 hold 的长间隙
+    /// 开始凭空造中间调。补 0 是这里唯一**不能**做的"容错"。
+    #[test]
+    fn a_short_level_curve_is_unknown_not_silent() {
+        // 10 帧：0 与 9 有声（+2 / +3），1..9 是无 F0 的 8 帧间隙（40 ms > 默认 30 ms）。
+        let mut orig = vec![0.0f32; 10];
+        orig[0] = 60.0;
+        orig[9] = 60.0;
+        let mut edit = vec![0.0f32; 10];
+        edit[0] = 62.0;
+        edit[9] = 63.0;
+        let (mut timeline, clip) = export_fixture(orig, edit);
+        let policy = crate::pitch_bridge::UnvoicedFillPolicy::for_frame_period(
+            crate::pitch_bridge::UnvoicedFill::Bridge,
+            5.0,
+        );
+        let root = clip.track_id.clone();
+
+        // 电平齐全且整段低于静音门 ⇒ 插值。
+        timeline
+            .params_by_root_track
+            .get_mut(&root)
+            .expect("entry")
+            .dyn_orig = vec![0.0; 10];
+        let filled =
+            super::compute_clip_take_pitch_offsets(&timeline, &clip, &policy).expect("filled");
+        assert!((filled[1] - 2.0 - 1.0 / 9.0).abs() < 1e-5, "{filled:?}");
+        assert!((filled[8] - 2.0 - 8.0 / 9.0).abs() < 1e-5, "{filled:?}");
+
+        // 电平只有前 5 帧 ⇒ 尾部"不知道" ⇒ hold 前值。
+        timeline
+            .params_by_root_track
+            .get_mut(&root)
+            .expect("entry")
+            .dyn_orig = vec![0.0; 5];
+        let filled =
+            super::compute_clip_take_pitch_offsets(&timeline, &clip, &policy).expect("filled");
+        assert!(
+            filled[1..9].iter().all(|value| (value - 2.0).abs() < 1e-6),
+            "未知必须 hold 而不是插值：{filled:?}"
+        );
+    }
+
+    /// 全 voiced ⇒ 填充是恒等变换（导出侧新增的那一层不得改动任何值）。
+    #[test]
+    fn the_fill_is_identity_when_every_frame_is_voiced() {
+        let (timeline, clip) = export_fixture(vec![60.0; 8], vec![62.0; 8]);
+        let raw = super::compute_clip_export_pitch_offsets(&timeline, &clip)
+            .expect("frames")
+            .offsets;
+        let filled = super::compute_clip_take_pitch_offsets(
+            &timeline,
+            &clip,
+            &crate::pitch_bridge::UnvoicedFillPolicy::default(),
+        )
+        .expect("filled");
+        assert_eq!(filled, raw);
+    }
+
     /// 开关**缺失**等同关闭（`extra_param_enabled` 的既有语义）。
     #[test]
     fn missing_switch_behaves_as_off() {
@@ -1788,6 +1983,22 @@ pub struct ExportPitchOffsetFrames {
     /// 无声/未分析/未编辑帧，与渲染端"值 ≤ 0 不变换"语义一致）。
     /// 帧周期与根轨道 entry 一致（调用方切片同源）。
     pub offsets: Vec<f32>,
+    /// 哪些帧**至少有一侧定义了音高**：`(pitch_orig > 0) || (pitch_edit > 0)`。
+    ///
+    /// 【它回答的是"这一帧有没有音高"，不是"偏移是不是 0"】`offsets` 为 0 有两种
+    /// 来源：这一帧没有音高（这里 `false`），或者用户把音高画回原调 / 整段画成 0
+    /// （这里 `true`）。导出侧的未识别帧填充**只允许动前者** —— 后者是用户的意思。
+    ///
+    /// 【口径与 `PitchCurvesSnapshot::is_voiced_at_time` 逐字同义】那里也是
+    /// `(orig > 0) || (edit > 0)`，两处必须一起改。
+    ///
+    /// 【为什么不能用 `orig > 0 && edit > 0`】整条没编辑过的有声帧 `edit == 0`
+    /// （用户没碰过 ⇒ 不需要偏移）。那样判会把**用户从未编辑过的整段**判成
+    /// unvoiced 并填成邻居的值 —— 等于凭空给它们加了移调。
+    ///
+    /// 【越界帧是 `false`，这是对的】`pitch_orig` 可能比导出窗口短，越界帧本来就
+    /// 没有依据。不要把它"修"成 `true`。
+    pub voiced: Vec<bool>,
 }
 
 /// 计算 clip 时间范围内的总音高偏移（REAPER take PITCHENV 的值源）。
@@ -1796,8 +2007,10 @@ pub struct ExportPitchOffsetFrames {
 /// - 根轨道编辑线：`pitch_edit − pitch_orig`（读取规则与 `get_param_frames`
 ///   / MIDI 导出一致）；
 /// - **`pitch_orig ≤ 0` 或 `pitch_edit ≤ 0` 的帧一律偏移 = 0（"不做音高
-///   修正"）**——渲染端对值 ≤ 0 的帧不应用编辑与子轨变换，导出必须同款
-///   处理，不得用邻近帧桥接（否则无声区会被相邻有声帧的修正值污染）；
+///   修正"）**——渲染端对值 ≤ 0 的帧不应用编辑与子轨变换，导出必须同款处理。
+///   本函数**不做任何桥接**：哪些帧"没有音高"由 `voiced` 如实标出，桥接是上层
+///   （[`compute_clip_take_pitch_offsets`]）的职责 —— 混在这一层就等于顺手改掉
+///   渲染端的输入；
 /// - 子轨音分差/度数差：作用在**编辑后**音高上的再变换（度数差先、音分差
 ///   后，root → 父 → 子逐层），度数差为依赖音阶的非线性换算；
 /// - 总偏移 = 子轨变换后的有效音高 − 原始音高（可超过 ±24，REAPER PIT
@@ -1809,23 +2022,22 @@ pub fn compute_clip_export_pitch_offsets(
     timeline: &TimelineState,
     clip: &crate::state::Clip,
 ) -> Option<ExportPitchOffsetFrames> {
-    let root_track_id = timeline.resolve_root_track_id(&clip.track_id)?;
-    let entry = timeline.params_by_root_track.get(&root_track_id)?;
+    let (entry, start_frame, end_frame) = clip_export_frame_range(timeline, clip)?;
     let frame_period_ms = entry.frame_period_ms.max(0.1);
-
-    let clip_start = clip.start_sec.max(0.0);
-    let clip_length = clip.length_sec.max(0.0);
-    let start_frame = ((clip_start * 1000.0) / frame_period_ms).floor().max(0.0) as usize;
-    let frame_count = (((clip_length * 1000.0) / frame_period_ms).ceil().max(1.0)) as usize;
-    let end_frame = start_frame + frame_count;
+    let frame_count = end_frame - start_frame;
 
     let child_cfg = active_child_pitch_offset_config(timeline, &clip.track_id);
     let scale_segments = timeline.scale_segments();
 
     let mut offsets: Vec<f32> = Vec::with_capacity(frame_count);
+    let mut voiced: Vec<bool> = Vec::with_capacity(frame_count);
 
     if entry.pitch_orig.is_empty() {
         // 未分析：回退 pending（REAPER 导入的待应用偏移）；缺失帧 = 0。
+        //
+        // 【全部标成"有定义"】没有 F0 信息 ⇒ 没有任何一帧可以被称为"未识别"，填充
+        // 因此是恒等变换。反过来（全标 false）会让填充在"还没分析"的片段上凭空
+        // 造出一条包络。
         let pending = entry.pending_pitch_offset.as_ref()?;
         for frame_idx in start_frame..end_frame {
             let value = pending
@@ -1834,17 +2046,23 @@ pub fn compute_clip_export_pitch_offsets(
                 .filter(|v| v.is_finite())
                 .unwrap_or(0.0);
             offsets.push(value);
+            voiced.push(true);
         }
-        return Some(ExportPitchOffsetFrames { offsets });
+        debug_assert_eq!(offsets.len(), voiced.len());
+        return Some(ExportPitchOffsetFrames { offsets, voiced });
     }
 
     let mut scale_cursor = ScaleSegmentsCursor::new(&scale_segments);
     for frame_idx in start_frame..end_frame {
         let orig = entry.pitch_orig.get(frame_idx).copied().unwrap_or(0.0) as f64;
         let edit_raw = entry.pitch_edit.get(frame_idx).copied().unwrap_or(0.0) as f64;
+        let orig_defined = orig.is_finite() && orig > 0.0;
+        let edit_defined = edit_raw.is_finite() && edit_raw > 0.0;
+        // 口径见 `ExportPitchOffsetFrames::voiced`：**至少有一侧**定义了音高。
+        voiced.push(orig_defined || edit_defined);
         // 原始音高或当前音高为 0 → "不做音高修正"（偏移 0）。
         // 渲染端对 ≤ 0 的帧不应用编辑与子轨变换，导出保持一致。
-        if !(orig.is_finite() && orig > 0.0) || !(edit_raw.is_finite() && edit_raw > 0.0) {
+        if !orig_defined || !edit_defined {
             offsets.push(0.0);
             continue;
         }
@@ -1863,7 +2081,80 @@ pub fn compute_clip_export_pitch_offsets(
         offsets.push((effective - orig) as f32);
     }
 
-    Some(ExportPitchOffsetFrames { offsets })
+    debug_assert_eq!(offsets.len(), voiced.len());
+    Some(ExportPitchOffsetFrames { offsets, voiced })
+}
+
+/// 导出窗口（`frame_grid` 的**定位**窗口）与它所属根轨道的参数 entry。
+///
+/// 【为什么单独一个函数】"算偏移"与"取逐帧电平"必须落在**同一个**窗口上。各写一遍
+/// `clip_frame_window` 迟早一处改了口径，而"两条曲线差一帧"正是最难查的那类 bug。
+/// 换算本身仍然只有 `frame_grid` 一个来源。
+fn clip_export_frame_range<'a>(
+    timeline: &'a TimelineState,
+    clip: &crate::state::Clip,
+) -> Option<(&'a crate::state::TrackParamsState, usize, usize)> {
+    let root_track_id = timeline.resolve_root_track_id(&clip.track_id)?;
+    let entry = timeline.params_by_root_track.get(&root_track_id)?;
+    let frame_period_ms = entry.frame_period_ms.max(0.1);
+    // 【窗口 = 组装侧写进去的那几帧】起点必须 `round`：栅格是点采样，帧 k 代表
+    // t = k·fp，而 `schedule.rs` 就是把片段第 0 帧写在 `round(start)` 上。此前这里
+    // 用 `floor`，当 `start·1000/fp` 的小数部分 ≥ 0.5 时读到的每个值都属于**前一帧**
+    // —— 导出的 PIT 包络整体晚 5 ms，而参数编辑器的参考线是准的。
+    let (start_frame, end_frame) =
+        crate::frame_grid::clip_frame_window(clip.start_sec, clip.length_sec, frame_period_ms);
+    Some((entry, start_frame, end_frame))
+}
+
+/// 导出侧的**唯一**入口：逐帧偏移 + 未识别帧填充。
+///
+/// 【为什么要有这一层】两个导出调用点（REAPER 剪贴板 / `.rpp`、插件桥接）如果各自
+/// 写一遍"算完再填"，迟早一处改了另一处没改 —— 而两处的听感差异恰恰是最难被察觉的
+/// 那类 bug。渲染端（`mixdown`）继续调 [`compute_clip_export_pitch_offsets`]：
+/// 那边对无 F0 帧的语义就是"不变换"，填充只属于导出。
+///
+/// `energy` 取自 `entry.dyn_orig` —— 它与 `pitch_orig` **同一栅格**（同一批后台
+/// 任务按同一套 `frame_grid` 窗口组装），只用于判断"这段长间隙可不可闻"。缺失时传
+/// `None`（= 未知 ⇒ 保守 hold），**绝不补 0**：补 0 等于把"不知道"判成"确定的静音"，
+/// 长间隙会走插值路径。
+///
+/// 【口径的保守方向】`dyn_orig` 是整条根轨组**融合后**的电平，不是"本 take 的电平"。
+/// 用它判断"这段 unvoiced 区可不可闻"会偏保守（别的 clip 在响 ⇒ 判为可闻 ⇒ 走
+/// hold）。保守方向正确：宁可少插值，也不要凭空造中间调。
+pub fn compute_clip_take_pitch_offsets(
+    timeline: &TimelineState,
+    clip: &crate::state::Clip,
+    policy: &crate::pitch_bridge::UnvoicedFillPolicy,
+) -> Option<Vec<f32>> {
+    let frames = compute_clip_export_pitch_offsets(timeline, clip)?;
+    let (entry, start_frame, end_frame) = clip_export_frame_range(timeline, clip)?;
+    let frame_count = end_frame - start_frame;
+    // 【长度对不上就是"未知"】`dyn_orig` 部分命中时返回的是"当前可得的部分"
+    // （`dyn_analysis::assemble_dyn_orig_from_cache`），可能短于工程帧数 —— 那种
+    // 情况下尾部帧"可不可闻"没有依据。**不补 0**。
+    let energy = entry
+        .dyn_orig
+        .get(start_frame..end_frame)
+        .filter(|slice| !slice.is_empty() && slice.len() == frame_count);
+    Some(crate::pitch_bridge::fill_unvoiced_offsets(
+        &frames.offsets,
+        &frames.voiced,
+        energy,
+        policy,
+    ))
+}
+
+/// 导出侧的策略来源：配置档位 + 帧周期换算 + 环境变量 A/B 覆盖。
+///
+/// 【为什么收成一个函数】两条导出路径（REAPER 剪贴板 / `.rpp`、插件桥接）各拼一次
+/// "读配置 + 换算 + 环境变量"，迟早一处漏了其中一步 —— 而 A/B 时恰恰靠环境变量区分
+/// 两档听感，漏掉就等于"改了环境变量没反应"，那是最难查的一种"没生效"。
+pub fn take_pitch_fill_policy(frame_period_ms: f64) -> crate::pitch_bridge::UnvoicedFillPolicy {
+    crate::pitch_bridge::UnvoicedFillPolicy::for_frame_period(
+        crate::config::unvoiced_pitch_policy(),
+        frame_period_ms,
+    )
+    .with_env_overrides()
 }
 
 pub fn build_clip_input_pitch_curve(
@@ -1918,7 +2209,7 @@ pub fn build_clip_input_pitch_curve(
 
     let timeline_midi = if let Some(ref cfg) = child_offset_cfg {
         let fp = frame_period_ms.max(0.1);
-        let start_idx = ((clip_start_sec.max(0.0) * 1000.0) / fp).floor().max(0.0) as usize;
+        let start_idx = crate::frame_grid::frame_at_time(clip_start_sec, fp);
         // Tempo Map 感知：按帧时刻解析生效音阶（帧时间单调递增，使用游标）。
         let scale_segments = timeline.scale_segments();
         let mut cursor = ScaleSegmentsCursor::new(&scale_segments);
@@ -2444,7 +2735,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
 
         if is_vslib && !timeline_midi.is_empty() {
             let fp = frame_period_ms.max(0.1);
-            let start_idx = ((clip_start_sec.max(0.0) * 1000.0) / fp).floor().max(0.0) as usize;
+            let start_idx = crate::frame_grid::frame_at_time(clip_start_sec, fp);
             for (local_idx, midi) in timeline_midi.iter().copied().enumerate() {
                 if !(midi.is_finite() && midi > 0.0) {
                     continue;
@@ -2687,6 +2978,14 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     if pcm_stereo.len() > expected_out_frames * 2 {
         pcm_stereo.truncate(expected_out_frames * 2);
     }
+
+    // 【写出前统一净化】seam.rs 的契约：声码器的 STFT/ISTFT 与 ONNX 推理都存在
+    // 产生 NaN 的路径（0 除、log(0)、非有限权重），在写出前统一净化，而不是指望
+    // 每条上游路径都保证有限。实时混音路径（audio_engine/mix.rs）已经这么做；
+    // 此前这条离线合并路径没有 —— 一个 NaN 会同时进内存缓存、磁盘渲染缓存
+    // （重启后照样命中）与导出（MP3 编码器对 NaN 不安全）。净化语义与实时路径
+    // 完全一致：非有限归零 + 夹到 [-1, 1]。
+    crate::seam::sanitize_finite_in_place(pcm_stereo);
 
     Ok(true)
 }

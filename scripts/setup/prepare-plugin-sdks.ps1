@@ -1,7 +1,8 @@
-﻿# 按 scripts/env/plugin-sdks.json 钉死的 revision 准备 ARA / VST3 SDK 检出。
+﻿# Prepare the ARA / VST3 SDK checkouts at the revisions pinned by scripts/env/plugin-sdks.json.
 #
-# 顺序：缓存里已是 pin 的那份 → 本地镜像（离网可用）→ 联网浅克隆。
-# 「是 pin 的那份」= commit、tree、工作区干净、子模块身份全部一致。
+# Order: the cache already holds the pinned copy -> local mirror (works offline) ->
+# shallow clone over the network.
+# "Holds the pinned copy" = commit, tree, clean worktree, and submodule identity all match.
 [CmdletBinding()]
 param([switch]$WithTestkit, [switch]$Offline)
 
@@ -21,37 +22,37 @@ function Test-SdkIdentity($path, $commit, $tree) {
 
 function Test-SdkPin($path, $pin) {
     if (!(Test-SdkIdentity $path $pin.commit $pin.tree)) { return $false }
-    # CLAP 是纯头文件 SDK，没有子模块；缺该字段时只校验主检出。
+    # CLAP is a header-only SDK with no submodules; when the field is absent, only the main checkout is verified.
     if (!$pin.submodule) { return $true }
     Test-SdkIdentity (Join-Path $path $pin.submodule) $pin.submoduleCommit $pin.submoduleTree
 }
 
 function Invoke-Git($what, $arguments) {
     & git @arguments
-    if ($LASTEXITCODE) { throw "$what 失败" }
+    if ($LASTEXITCODE) { throw "$what failed" }
 }
 
 function Get-SdkCheckout($name, $pin) {
     $target = Join-Path $sdkCache $name
     if (Test-SdkPin $target $pin) {
-        Write-Host "SDK 就绪（缓存）：$name"
+        Write-Host "SDK ready (cache): $name"
         return
     }
 
     $mirrored = Join-Path $sdkMirror $name
     if (Test-SdkPin $mirrored $pin) {
-        Write-Host "SDK 从本地镜像导入：$mirrored"
+        Write-Host "SDK imported from local mirror: $mirrored"
         Remove-Item $target -Recurse -Force -ErrorAction SilentlyContinue
         Copy-Item $mirrored $target -Recurse
-        if (!(Test-SdkPin $target $pin)) { throw "镜像导入后与 pin 不一致：$name" }
+        if (!(Test-SdkPin $target $pin)) { throw "Mirror import does not match the pin: $name" }
         return
     }
 
     if ($sdkOffline) {
-        throw "离网模式下没有 $name 的可用检出：缓存与镜像里都没有 pin 的那一份（见 README「第三方源码」）。"
+        throw "No usable ${name} checkout in offline mode: neither the cache nor the mirror holds the pinned copy (see README 'Third-party Sources')."
     }
 
-    Write-Host "SDK 下载：$name @ $($pin.commit)"
+    Write-Host "Downloading SDK: $name @ $($pin.commit)"
     Remove-Item $target -Recurse -Force -ErrorAction SilentlyContinue
     Invoke-Git 'git init' @('init', $target)
     Invoke-Git 'git remote add' @('-C', $target, 'remote', 'add', 'origin', $pin.repository)
@@ -60,32 +61,33 @@ function Get-SdkCheckout($name, $pin) {
     if ($pin.submodule) {
         Invoke-Git 'git submodule' @('-C', $target, '-c', 'core.autocrlf=false', 'submodule', 'update', '--init', '--depth', '1', '--', $pin.submodule)
     }
-    if (!(Test-SdkPin $target $pin)) { throw "下载的检出与 pin 不一致：$name" }
+    if (!(Test-SdkPin $target $pin)) { throw "Downloaded checkout does not match the pin: $name" }
 }
 
 foreach ($entry in @(@('ARA_SDK', $sdkPins.ara), @('vst3sdk', $sdkPins.vst3), @('clap', $sdkPins.clap))) {
     Get-SdkCheckout $entry[0] $entry[1]
 }
 
-# 只有 ara2-bridge-testkit 的 cpp-interop 需要 ARA_Library / ARA_Examples；
-# 产品构建不需要，所以默认不拉。--recursive 连带 ARA_Examples 嵌套的 3rdParty。
+# Only ara2-bridge-testkit's cpp-interop needs ARA_Library / ARA_Examples;
+# product builds do not, so they are not fetched by default. --recursive also
+# pulls in ARA_Examples' nested 3rdParty.
 if ($WithTestkit) {
     $araPath = Join-Path $sdkCache 'ARA_SDK'
     $araPin = $sdkPins.ara
     if ($sdkOffline) {
         foreach ($sub in $araPin.testkitSubmodules) {
             if (!(Test-SdkIdentity (Join-Path $araPath $sub.path) $sub.commit $sub.tree)) {
-                throw "离网模式下 ARA testkit 子模块缺失或不在 pin 上：$($sub.path)（用 -WithTestkit 导出镜像）"
+                throw "Offline mode: ARA testkit submodule is missing or off its pin: $($sub.path) (export the mirror with -WithTestkit)"
             }
         }
     }
     else {
         $roots = @($araPin.testkitSubmodules | Where-Object { $_.path -notmatch '/' } | ForEach-Object { $_.path })
         $updateArgs = @('-C', $araPath, '-c', 'core.autocrlf=false', 'submodule', 'update', '--init', '--depth', '1', '--recursive', '--') + $roots
-        Invoke-Git 'testkit 子模块下载' $updateArgs
+        Invoke-Git 'testkit submodule update' $updateArgs
         foreach ($sub in $araPin.testkitSubmodules) {
             if (!(Test-SdkIdentity (Join-Path $araPath $sub.path) $sub.commit $sub.tree)) {
-                throw "ARA testkit 子模块与 pin 不一致：$($sub.path)"
+                throw "ARA testkit submodule does not match the pin: $($sub.path)"
             }
         }
     }

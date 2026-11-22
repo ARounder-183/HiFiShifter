@@ -179,8 +179,8 @@ function compile(gl: WebGL2RenderingContext, type: number, source: string): WebG
     if (!shader) {
         throw new Error(
             gl.isContextLost()
-                ? "WebGL 上下文已丢失（GPU 进程异常或资源耗尽），请刷新页面"
-                : "无法创建着色器对象（GPU 资源不足）",
+                ? "WebGL context lost (GPU process failure or resource exhaustion); please restart the app"
+                : "Failed to create shader object (GPU resources exhausted)",
         );
     }
     gl.shaderSource(shader, source);
@@ -203,7 +203,7 @@ export function createPolylineProgram(gl: WebGL2RenderingContext): PolylineProgr
     const vertexShader = compile(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
     const fragmentShader = compile(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER);
     const program = gl.createProgram();
-    if (!program) throw new Error("无法创建 polyline program");
+    if (!program) throw new Error("Failed to create the polyline program");
     gl.attachShader(program, vertexShader);
     gl.attachShader(program, fragmentShader);
     gl.linkProgram(program);
@@ -240,7 +240,7 @@ export function createPolylineProgram(gl: WebGL2RenderingContext): PolylineProgr
 
     const vao = gl.createVertexArray();
     const buffer = gl.createBuffer();
-    if (!vao || !buffer) throw new Error("无法创建 polyline 缓冲");
+    if (!vao || !buffer) throw new Error("Failed to create polyline GPU buffers");
 
     // 容量以 **float 数** 记账，交给 `resolveBufferFloats` 统一增长策略
     // （与 glyph/sdf-box program 同一口径；字节数在写缓冲时再乘 4）。

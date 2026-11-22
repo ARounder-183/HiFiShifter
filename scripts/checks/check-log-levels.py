@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-"""限流日志允许 Warn / Error / Debug，禁止 Info。
+"""Throttled logs may use Warn / Error / Debug; Info is forbidden.
 
-【为什么要放宽到 Debug】用户现在可以在「帮助 → 日志详细程度」里选四档
-（无 / 低 / 中 / 高，默认低）。逐回调、逐块的跟踪点按语义归 Debug，
-只在「高」档输出；但它们仍必须限流，否则一次排障会话就能把 8 MiB × 5
-的轮转额度刷满。过去"限流只允许 Warn/Error"的规则建立在
-"默认级别是 Warn"之上 —— 那句话已经不成立，四档由用户选择。
+[Why Debug is now allowed] Users can pick one of four verbosity levels under
+"Help -> Log verbosity" (None / Low / Medium / High, default Low). Per-callback,
+per-block trace points are semantically Debug and are only emitted at the
+"High" level; but they must still be throttled, otherwise a single debugging
+session can burn through the entire 8 MiB x 5 rotation budget. The old rule
+"throttling only allows Warn/Error" was built on "the default level is Warn" --
+that statement no longer holds; the four levels are user-selected.
 
-【为什么仍然禁止 Info + 限流】Info 是会话叙事（打开工程、开始渲染、档位
-变更），一会话最多几十条，套上限流只会在窗口内静默吞掉关键面包屑。
+[Why Info + throttling is still forbidden] Info is session narrative (opening a
+project, starting a render, changing the verbosity level) -- at most a few
+dozen entries per session. Throttling it would silently swallow key
+breadcrumbs inside the window.
 
-规则：
-  * 故障信号 → Warn / Error + 限流；
-  * 高频跟踪 → Debug + 限流（「高」档才输出）；
-  * 会话叙事 → 直接 log::info!，不限流。
+Rules:
+  * Fault signals -> Warn / Error + throttling;
+  * High-frequency tracing -> Debug + throttling (only emitted at "High");
+  * Session narrative -> call log::info! directly, without throttling.
 
-退出码：0 = 合规，1 = 发现违规。
+Exit code: 0 = compliant, 1 = violations found.
 """
 
 from __future__ import annotations
@@ -58,11 +62,11 @@ def main() -> int:
             violations.append(f'{relative}:{line}: throttled log at Level::{level.group(1)}')
 
     if violations:
-        print('限流日志只允许 Warn / Error / Debug（见本脚本头部）：')
+        print('throttled logs only allow Warn / Error / Debug (see the header of this script):')
         for violation in violations:
             print('  ' + violation)
         print()
-        print('Info 是会话叙事，请直接用 log::info! 且不要限流。')
+        print('Info is session narrative: call log::info! directly and do not throttle it.')
         return 1
 
     print(f'log levels ok ({len(sources())} files scanned)')
