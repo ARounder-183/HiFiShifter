@@ -887,10 +887,13 @@ impl ExtensionOwner {
         // `counted=` 是"位置由计数器推进的块数"，`jumps=` 是"宿主报的位置与计数器
         // 不同"的次数。两者都大而 `rewinds` 为 0 是**健康**的：说明宿主确实钉住过
         // 位置，而每次它恢复报告时我们都跟上了。
+        // `ui_offset=` / `lead=` / `window=` 是 UI 播放头域的读数：offset 是当前
+        // 喂入位与光标之间的差；lead 是停播时实测到的宿主渲染领先量（`none` = 本次
+        // 会话还没停过播，升起时会退回预热窗中点）；window 是最近一次预热窗宽度。
         let line = format!(
             "[capture] clock: stream={} blocks={blocks} pass={} counted={} frames={} \
              jumps={} last_jump={} rewinds={} delta_min={} delta_max={} resyncs={} \
-             rising={} continuous={} music={}",
+             rising={} continuous={} music={} ui_offset={} lead={} window={}",
             stream.as_str(),
             geometry.pass.load(Ordering::Acquire),
             geometry.counted_blocks.load(Ordering::Acquire),
@@ -904,6 +907,13 @@ impl ExtensionOwner {
             geometry.rising_edges.load(Ordering::Acquire),
             geometry.continuous_used.load(Ordering::Acquire),
             geometry.music_used.load(Ordering::Acquire),
+            geometry.playhead_offset.load(Ordering::Acquire),
+            if geometry.render_lead_valid.load(Ordering::Acquire) {
+                geometry.render_lead.load(Ordering::Acquire).to_string()
+            } else {
+                "none".to_string()
+            },
+            geometry.pre_roll_window.load(Ordering::Acquire),
         );
         let mut last = self.last_clock_diag.lock_or_recover();
         if last.as_deref() != Some(line.as_str()) {

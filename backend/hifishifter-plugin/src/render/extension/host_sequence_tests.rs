@@ -391,16 +391,20 @@ fn vegas_start_window_is_captured_and_stays_one_take() {
 
 /// **UI 播放头必须落在宿主播放头域，而不是喂入域。**
 ///
-/// 【回归的现场】2026-11-22 09:10 的 VEGAS（用户报障"插件光标比宿主右偏 ~0.6 s"）：
+/// 【回归的现场】2026-11-22 的 VEGAS（用户报障"插件光标比宿主右偏 ~0.6 s"）：
 /// 渲染缓存让 FX 的**喂入位置**领先宿主自己的播放头一个预热窗 —— 按下播放后先灌
-/// 31920 帧音频（kPlaying=0、raw 钉在按下点 786000），宿主光标在这段时间里从按下点
-/// 走到预热窗终点 W；随后 kPlaying 连同**前进了 Δ=36016 帧的传输位**一起交给插件。
-/// UI 若发布喂入位置，光标就领先宿主；若在升起时扣掉整个 Δ，又会把 W 一并抹掉 ——
-/// 2026-11-22 12:22 现场（同一天第二次报障）正是后者：插件光标比宿主**左偏 ~0.6 s**。
+/// 31920 帧音频（kPlaying=0、raw 钉在按下点 786000），随后 kPlaying 连同**前进了
+/// Δ=36016 帧的传输位**一起交给插件。宿主光标在这段时间里从按下点往前走了一段，
+/// 但走多远只有宿主知道：
+///   * 发布喂入位置 ⇒ 右偏（2026-11-22 第一次报障）；
+///   * 升起时扣整个 Δ ⇒ 左偏 ~0.6 s（同日第二次报障）；
+///   * 升起时按预热窗终点发布 ⇒ 右偏 ~0.3 s（同日第三次报障 —— 光标并没有走满 W）。
+///
 /// 契约（与上一条测试同一条现场序列，读数换 TransportClock 的发布位）：
 ///   * 预热窗内：发布位**钉在按下点**（窗口期 UI 由 hold 冻结）；
-///   * kPlaying 升起那一块：发布位 = **预热窗终点**（按下点 + W），与窗口连续；
-///   * 播放推进：发布位 = 预热窗终点 + 播放时长，与宿主光标同速；
+///   * kPlaying 升起那一块（还没停过播、没有实测领先量）：发布位 = **预热窗中点**
+///     —— 光标落在 [按下点, 窗口终点] 之间的无偏估计；
+///   * 播放推进：发布位 = 升起落点 + 播放时长，与宿主光标同速；
 ///   * 磁带记账不受影响（素材仍落在喂入域 —— 上一条测试负责它）。
 #[test]
 fn the_ui_playhead_tracks_the_host_cursor_not_the_feed_position() {
@@ -489,9 +493,12 @@ fn the_ui_playhead_tracks_the_host_cursor_not_the_feed_position() {
     // 预热窗终点 = 最后一块的**起点**（发布的是块起始时刻的播放头）：
     // 按下点 + 总帧数 − 末块帧数。
     let pre_roll_end = (press + window_frames - last_window_frames) as f64 / 48_000.0;
+    // 还没有停过播 ⇒ 没有实测领先量；升起时发布预热窗中点（无偏估计）。
+    let pre_roll_window = window_frames - last_window_frames;
+    let midpoint = (press + pre_roll_window / 2) as f64 / 48_000.0;
 
-    // kPlaying 置位：raw 一次性跳到 按下点+38072。发布位必须与窗口终点**连续**
-    // （停在 W），不许跟着跳进喂入域；也不许退回到按下点（那是上一版的左偏）。
+    // kPlaying 置位：raw 一次性跳到 按下点+38072。发布位必须落在预热窗中点，
+    // 不许跟着跳进喂入域；也不许退回到按下点（那是"扣整个 Δ"的左偏）。
     let delta = 38_072_i64;
     raw = press + delta;
     let first = feed(&owner, raw, 848, true, 0.4, 100.0, &mut music, None);
@@ -501,13 +508,13 @@ fn the_ui_playhead_tracks_the_host_cursor_not_the_feed_position() {
     );
     let view = clock.read_view();
     assert!(
-        (view.position_sec - pre_roll_end).abs() < 1e-6,
-        "升起时刻：UI 光标必须停在预热窗终点 {pre_roll_end}，实际 {}（不许退回按下点，也不许跳到喂入域）",
+        (view.position_sec - midpoint).abs() < 1e-6,
+        "升起时刻：UI 光标必须落在预热窗中点 {midpoint}，实际 {}（不许退回按下点，也不许跳到喂入域）",
         view.position_sec
     );
 
-    // 播放推进：发布位 = 预热窗终点 + 已播放时长（发布的是**块起始时刻**的播放头；
-    // 升起块本身已播 848 帧，所以第 index 个后续块开头，宿主光标在 W+848·index）。
+    // 播放推进：发布位 = 预热窗中点 + 已播放时长（发布的是**块起始时刻**的播放头；
+    // 升起块本身已播 848 帧，所以第 index 个后续块开头，宿主光标在中点+848·index）。
     for index in 1..6usize {
         raw += 848;
         let _ = feed(
@@ -521,10 +528,199 @@ fn the_ui_playhead_tracks_the_host_cursor_not_the_feed_position() {
             None,
         );
         let view = clock.read_view();
-        let expected = pre_roll_end + 848.0 * index as f64 / 48_000.0;
+        let expected = midpoint + 848.0 * index as f64 / 48_000.0;
         assert!(
             (view.position_sec - expected).abs() < 1e-6,
             "播放第 {index} 块：UI 光标必须与宿主同速（{expected}），实际 {}",
+            view.position_sec
+        );
+    }
+    // 预热窗终点只在这里用于诊断断言：中点必须严格落在 [按下点, 终点] 内。
+    assert!(
+        press_sec < midpoint && midpoint < pre_roll_end,
+        "中点估计必须落在预热窗内：press={press_sec} mid={midpoint} end={pre_roll_end}"
+    );
+}
+
+/// **停播那一块能量出宿主渲染领先量，下一次升起直接用它。**
+///
+/// 首次播放只能取预热窗中点（无偏估计）；但停播时宿主把光标停在 `raw_stop`，
+/// 而喂入位已经走到 `last_position` —— 差值就是"渲染在前、光标在后"的真实距离。
+/// 它比任何基于 Δ/W 的估计都可靠，且跨 pass 保留（宿主音频引擎的属性）。
+/// 本用例把这条链走完：播放 → 停播（lead=20000）→ 再播放，第二次升起必须落在
+/// `按下点 + Δ − lead`，而不是中点。
+#[test]
+fn a_stop_measures_the_host_render_lead_and_the_next_rise_uses_it() {
+    let owner = Arc::new(ExtensionOwner::default());
+    owner.capture().note_project_rate(48_000.0);
+    owner.arm_capture_rendering();
+    owner.capture().start().unwrap();
+
+    let mut music = 8.9_f64;
+    let feed = |owner: &ExtensionOwner,
+                raw: i64,
+                frames: usize,
+                playing: bool,
+                amp: f32,
+                seed: f32,
+                music: &mut f64,
+                pinned_raw: Option<i64>| {
+        let samples: Vec<f32> = (0..frames)
+            .map(|n| ((n as f32 * 0.013 + seed).sin() * amp).clamp(-0.9, 0.9))
+            .collect();
+        let plane0 = samples.clone();
+        let plane1 = samples;
+        *music += frames as f64 / 48_000.0 / 60.0 * 120.0;
+        let context = crate::block_context::BlockContext {
+            sample_rate: 48_000.0,
+            project_time_samples: pinned_raw.unwrap_or(raw),
+            playing,
+            recording: false,
+            continuous: None,
+            music: Some(*music),
+            tempo: Some(120.0),
+            system_time: None,
+            time_signature: None,
+            cycle_valid: false,
+            cycle_active: false,
+            cycle_start_music: 0.0,
+            cycle_end_music: 0.0,
+        };
+        let input = crate::capture::InputBlock {
+            start: pinned_raw.unwrap_or(raw),
+            frames,
+            sample_rate: 48_000.0,
+            planes: [Some(plane0.as_slice()), Some(plane1.as_slice())],
+            playing,
+        };
+        owner.observe_input_block(input, context, ProcessStream::Realtime)
+    };
+
+    // 停播武装。
+    let _ = feed(&owner, 0, 1, false, 0.0, 0.0, &mut music, None);
+    let clock = owner
+        .clock
+        .get()
+        .expect("arm_capture_rendering 之后时钟必须已装载");
+
+    // ── 第一次播放：预热窗 → 升起 → 若干播放块 ─────────────────────────
+    let press = 179_512_i64;
+    let mut raw = 0_i64;
+    for index in 0..32usize {
+        let frames = if index % 2 == 0 { 1200 } else { 848 };
+        let _ = feed(
+            &owner,
+            raw,
+            frames,
+            false,
+            0.3,
+            index as f32 * 0.31,
+            &mut music,
+            Some(press),
+        );
+        raw += frames as i64;
+    }
+    let delta = 38_072_i64;
+    raw = press + delta;
+    let _ = feed(&owner, raw, 848, true, 0.4, 100.0, &mut music, None);
+    for index in 1..5usize {
+        raw += 848;
+        let _ = feed(
+            &owner,
+            raw,
+            848,
+            true,
+            0.4,
+            100.0 + index as f32 * 0.37,
+            &mut music,
+            None,
+        );
+    }
+    let last_feed = raw;
+    let window = {
+        let geometry = &owner.streams[ProcessStream::Realtime.index()];
+        geometry
+            .pre_roll_window
+            .load(std::sync::atomic::Ordering::Acquire)
+    };
+    assert!(window > 0, "第一次播放必须记下预热窗宽度");
+
+    // ── 停播：宿主把光标停在喂入位之后 lead 帧 ───────────────────────────
+    let lead = 20_000_i64;
+    assert!(lead <= window, "用例的领先量必须落在预热窗内");
+    let stop_raw = last_feed - lead;
+    let _ = feed(
+        &owner,
+        stop_raw,
+        848,
+        false,
+        0.0,
+        200.0,
+        &mut music,
+        Some(stop_raw),
+    );
+    let geometry = &owner.streams[ProcessStream::Realtime.index()];
+    assert!(
+        geometry
+            .render_lead_valid
+            .load(std::sync::atomic::Ordering::Acquire),
+        "停播跃迁必须量到渲染领先量"
+    );
+    assert_eq!(
+        geometry
+            .render_lead
+            .load(std::sync::atomic::Ordering::Acquire),
+        lead,
+        "领先量 = 最后喂入位 − 宿主停播光标"
+    );
+
+    // ── 第二次播放：升起必须用实测领先量，而不是中点 ─────────────────────
+    let press2 = stop_raw;
+    let mut raw2 = 0_i64;
+    for index in 0..32usize {
+        let frames = if index % 2 == 0 { 1200 } else { 848 };
+        let _ = feed(
+            &owner,
+            raw2,
+            frames,
+            false,
+            0.3,
+            300.0 + index as f32 * 0.31,
+            &mut music,
+            Some(press2),
+        );
+        raw2 += frames as i64;
+    }
+    let delta2 = 38_072_i64;
+    let rise2 = press2 + delta2;
+    let _ = feed(&owner, rise2, 848, true, 0.4, 400.0, &mut music, None);
+    let view = clock.read_view();
+    let expected = (rise2 - lead) as f64 / 48_000.0;
+    assert!(
+        (view.position_sec - expected).abs() < 1e-6,
+        "第二次升起：UI 光标必须用实测领先量 {lead}（发布 {expected}），实际 {}",
+        view.position_sec
+    );
+
+    // 播放推进保持同速。
+    let mut raw2 = rise2;
+    for index in 1..4usize {
+        raw2 += 848;
+        let _ = feed(
+            &owner,
+            raw2,
+            848,
+            true,
+            0.4,
+            400.0 + index as f32 * 0.37,
+            &mut music,
+            None,
+        );
+        let view = clock.read_view();
+        let expected = expected + 848.0 * index as f64 / 48_000.0;
+        assert!(
+            (view.position_sec - expected).abs() < 1e-6,
+            "第二次播放第 {index} 块：UI 光标必须与宿主同速（{expected}），实际 {}",
             view.position_sec
         );
     }

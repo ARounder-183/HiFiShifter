@@ -811,27 +811,40 @@ impl ExtensionOwner {
         // ── UI 播放头修正量（`playhead_offset`）───────────────────────
         //
         // 【喂入位置 ≠ 宿主 UI 播放头】VEGAS 的渲染缓存让 FX 的喂入位置领先宿主自己的
-        // 播放头：按下播放后先把 ~0.66 s 音频**一次性**灌进 FX（kPlaying=0、raw 钉在
-        // 按下点），宿主光标在这段时间里从按下点按 1× 走到 `position`（预热窗终点 W）；
+        // 播放头：按下播放后先把 ~0.66 s 音频灌进 FX（kPlaying=0、raw 钉在按下点），
         // 随后 kPlaying 连同**前进了 Δ 的传输位**一起交给插件（现场 Δ=36016~38084 帧）。
-        // 宿主光标在升起那一刻停在 **W**，而喂入位已经到 按下点+Δ —— 两者差的
-        // `Δ−W`（现场 4096~6144 帧）才是渲染缓存额外超前的量，不是整个 Δ。
-        //
-        // 【上一版为什么把光标推到左边】旧规则在升起时扣掉整个 Δ，等于把宿主光标已经
-        // 走完的预热窗 W 也一并抹掉 —— 现场表现就是"插件光标比宿主左偏 ~0.6 s"。
-        // 三条维护规则（按块）：
+        // 宿主光标在这段时间里从按下点往前走了一段 —— 走多远取决于宿主启动播放的耗时，
+        // 插件读不到。所以修正量**不是** Δ，也不是简单的 Δ−W：
         //
         //   * 预热窗内（kPlaying=0、raw 钉住、位置在推进）：offset = position − raw。
-        //     发布位 = raw —— 光标钉在按下点（窗口期 UI 由 hold 冻结，这个值就是
-        //     hold 的落点）；
-        //   * kPlaying 升起那一块：offset = raw_start − last_position。`last_position`
-        //     是预热窗走到的 W；发布位 = W，与窗口终点**连续**，此后按 1× 前进；
+        //     发布位 = raw —— 光标钉在按下点；
+        //   * 停播那一块：宿主把光标停在 raw_start，而喂入位已经走到 last_position。
+        //     两者之差就是**实测的渲染领先量** `render_lead`（只在"上一块还在播"的
+        //     停播跃迁上可信；seek 落点不算），下一次升起直接用它；
+        //   * kPlaying 升起那一块：有实测领先量就用它；没有（本次会话还没停过播）
+        //     就发布**预热窗中点** —— 光标落在 [按下点, 窗口终点] 之间的无偏估计。
+        //     扣整个 Δ 会左偏（现场 -0.6 s），按窗口终点发布会右偏（现场 +0.3 s）；
         //   * 新 pass / 新流 / 停播假位置：归零（喂入域重新对齐，无窗口证据不修正）。
         //     播放中保持不变（两边都按 1× 前进，差值恒定）。
         //
         // 【为什么只在 UI 发布上生效】磁带记账必须留在**喂入域** —— 捕获素材落点的
         // 正确性（昨天修的"起拍错位"）就建立在"位置 = 宿主喂这块内容的工程位置"上。
         // 修正量只跟着 `publish_capture_block` 与 realtime 通道的 UI 读数走。
+        let was_playing = geometry.last_playing.load(Ordering::Acquire);
+        // 【先量领先量，再处理"停播归零"】停播那一块本身 `transport_active=false`，
+        // 走不到下面的 `!playing` 分支；但它正是唯一能测出宿主渲染领先量的时刻：
+        // 宿主把光标停在 raw_start，而喂入位已经走到 last_position。只在"上一块还在播"
+        // 的停播跃迁上量（seek 落点不是领先量），且必须落在上一次预热窗之内。
+        // 【为什么允许 new_pass】停播的位置回退本身就可能被时钟判成 seek/new pass；
+        // 那不影响"这是停播"这个事实 —— `was_playing && !playing` 才是判据。
+        if had && !playing && was_playing && raw_start != last_raw {
+            let lead = last_position.saturating_sub(raw_start);
+            let window = geometry.pre_roll_window.load(Ordering::Acquire);
+            if lead >= 0 && lead <= window {
+                geometry.render_lead.store(lead, Ordering::Release);
+                geometry.render_lead_valid.store(true, Ordering::Release);
+            }
+        }
         let mut playhead_offset = geometry.playhead_offset.load(Ordering::Acquire);
         if !had || new_pass || !transport_active {
             // 新流 / 新 pass / 停播：喂入域与宿主读数对齐，修正量作废。
@@ -839,17 +852,32 @@ impl ExtensionOwner {
         } else if !playing {
             if raw_start == last_raw && position != last_position {
                 // 预热窗：raw 钉住而位置按块推进（计数器或 continuous/music 回退），
-                // 宿主光标此刻停在 raw 上 —— 修正量就是位置领先它的量。
-                playhead_offset = position.saturating_sub(raw_start);
+                // 宿主光标此刻停在 raw 上 —— 修正量就是位置领先它的量。窗口宽度同时
+                // 记下来，作为停播时实测领先量的合理上界。
+                let window = position.saturating_sub(raw_start).max(0);
+                if window > 0 {
+                    geometry.pre_roll_window.store(window, Ordering::Release);
+                }
+                playhead_offset = window;
             } else if raw_start != last_raw {
                 // 停播假位置（VEGAS 停播报远处位置，已被冻结拒收）：不是窗口证据。
                 playhead_offset = 0;
             }
         } else if playing_rising && playhead_offset != 0 {
-            // 升起：喂入位一次性跳到 按下点+Δ，而宿主光标停在预热窗终点 last_position。
-            // 只扣掉**超出**宿主光标的那一段（Δ−W）；扣整个 Δ 会把窗口走完的时间也
-            // 抹掉，光标就左偏一个 W（现场 2026-11-22 的 -0.6 s）。
-            playhead_offset = raw_start.saturating_sub(last_position).max(0);
+            // 升起：喂入位一次性跳到 按下点+Δ。宿主光标从按下点走了多远只有宿主知道；
+            // 有实测领先量就用它，没有就取预热窗中点。发布位 = raw_start − offset，
+            // 因此 offset = Δ − 光标走过的距离。
+            let delta = raw_start.saturating_sub(last_raw).max(0);
+            let window = last_position.saturating_sub(last_raw).max(0);
+            let lead = if geometry.render_lead_valid.load(Ordering::Acquire) {
+                geometry.render_lead.load(Ordering::Acquire)
+            } else {
+                // 中点：发布位 = 按下点 + W/2。
+                delta.saturating_sub(window / 2)
+            };
+            // 缓存设置变化会让旧领先量落在本次窗口之外；夹回 [Δ−W, Δ] 保证发布位
+            // 仍在 [按下点, 按下点+W] 内（W=0 时退化为不修正）。
+            playhead_offset = lead.clamp(delta.saturating_sub(window), delta);
         }
 
         geometry.seen.store(true, Ordering::Release);
