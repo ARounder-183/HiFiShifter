@@ -283,23 +283,23 @@ fn dpi_popup_requested() -> bool {
 ///
 /// 返回 popup 应用的缩放读数（仅用于日志）；`None` = 走默认的子窗口路径。
 fn popup_scale_for(parent: HWND) -> Option<f64> {
-    let context = unsafe { GetWindowDpiAwarenessContext(parent) };
-    let unaware =
-        unsafe { AreDpiAwarenessContextsEqual(context, DPI_AWARENESS_CONTEXT_UNAWARE) }.as_bool();
-    if !unaware {
+    if !window_is_unaware(parent) {
         return None;
     }
-    // 屏幕缩放 = 显示器有效 DPI / 96。窗口 DPI（unaware 恒 96）只是确认读数。
-    let monitor = unsafe { MonitorFromWindow(parent, MONITOR_DEFAULTTONEAREST) };
+    monitor_scale_for(parent).filter(|scale| *scale > 1.0)
+}
+
+/// 窗口所在显示器的有效缩放（`DPI / 96`）。
+///
+/// 【为什么不能只用 `GetDpiForWindow`】它对 DPI-unaware 窗口恒回 96 —— 那正是
+/// ACID 包裹层的形态，而 DWM 实际按 125% 合成它。显示器缩放是**物理事实**，
+/// 与窗口/线程的感知上下文无关；`GetDpiForMonitor` 只回答 PMv2 上下文里的调用，
+/// 所以查询前后要切一次（见 `HostContextScope::force_pm_v2`）。
+fn monitor_scale_for(window: HWND) -> Option<f64> {
+    let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) };
     if monitor.is_invalid() {
         return None;
     }
-    // 【为什么查询前切 PMv2】`GetDpiForMonitor` 只回答 per-monitor 感知的线程：ACID
-    // 重开插件时附着线程已被守卫匹配成包裹层的 unaware 上下文（首开恰好落在感知
-    // 宿主线程上，所以首开正常）——在 unaware 上下文里这个调用直接报错，判据退化成
-    // None，于是"第二次起永远走子窗口路径"，症状回到滚动条 + 裁切 + 模糊。屏幕
-    // 缩放是显示器的物理事实，与线程上下文无关；临时切 PMv2 只是让它肯回答（与
-    // `wrapper_physical_client` 同一手法）。
     let _scope = HostContextScope::force_pm_v2()?;
     let mut dpi_x = 0_u32;
     let mut dpi_y = 0_u32;
@@ -307,7 +307,7 @@ fn popup_scale_for(parent: HWND) -> Option<f64> {
     if unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }.is_err() {
         return None;
     }
-    (dpi_y > 96).then(|| f64::from(dpi_y) / 96.0)
+    (dpi_y > 0).then(|| f64::from(dpi_y) / 96.0)
 }
 
 /// 参照窗口的父级（嵌入形态里就是宿主包裹窗口）；拿不到时退回自身。
@@ -396,12 +396,12 @@ fn profile_directory() -> Result<Vec<u16>, String> {
     Ok(wide(&profile.to_string_lossy()))
 }
 
-/// 父窗口是不是 DPI-unaware（子窗口的感知上下文必须与它同尺，见 `HostContextScope`）。
-fn parent_is_unaware(parent: HWND) -> bool {
+/// 窗口是不是 DPI-unaware（子窗口的感知上下文必须与父窗口同尺，见 `HostContextScope`）。
+fn window_is_unaware(window: HWND) -> bool {
     // SAFETY: 只读查询；伪句柄比较对任意 HWND 安全。
     unsafe {
         AreDpiAwarenessContextsEqual(
-            GetWindowDpiAwarenessContext(parent),
+            GetWindowDpiAwarenessContext(window),
             DPI_AWARENESS_CONTEXT_UNAWARE,
         )
     }
@@ -418,7 +418,7 @@ fn take_parked_window(
     parent: HWND,
 ) -> Option<ParkedWindow> {
     let thread = unsafe { GetCurrentThreadId() };
-    let adopt_unaware = parent_is_unaware(parent);
+    let adopt_unaware = window_is_unaware(parent);
     let popup_wanted = dpi_popup_requested() && popup_scale_for(parent).is_some();
     let mut dead = Vec::new();
     let taken = {
@@ -503,7 +503,7 @@ fn park_window(hwnd: HWND, thread: u32, token: usize) -> bool {
     let Ok(parent) = (unsafe { GetParent(hwnd) }) else {
         return false;
     };
-    let unaware_parent = parent_is_unaware(parent);
+    let unaware_parent = window_is_unaware(parent);
     let link = client.borrow().link.clone();
     let port = unsafe { (*pointer).port.clone() };
     // 先让页面停止渲染，再隐藏并挂走：宿主随后销毁父窗口时，窗口树里已经没有我们。
@@ -654,6 +654,12 @@ pub(super) struct WindowsPort {
     hwnd: Cell<HWND>,
     /// 控制器是**异步**到的；它到达之前一切投递都只能报"投不出去"。
     controller: RefCell<Option<ICoreWebView2Controller>>,
+    /// 最近一次真的交给 WebView2 的（物理宽、物理高、rasterization scale 位）。
+    ///
+    /// 【为什么缓存】`WM_SIZE` 在宿主拖动面板时每像素来一次；尺寸没变就不要再
+    /// `SetBounds`/`SetRasterizationScale`，否则每次重排都要多一次跨进程 COM。
+    /// 控制器重建时 `attach` 会清空它（新控制器必须重新收一遍边界）。
+    bounds: Cell<Option<(i32, i32, u64)>>,
     /// 错误提示用的 `STATIC` 子窗口（自有 child 没有标题栏，不能只写 window text）。
     error_window: RefCell<Option<HWND>>,
 }
@@ -991,6 +997,7 @@ impl WindowsHost {
         let port = Rc::new(WindowsPort {
             hwnd: Cell::new(HWND::default()),
             controller: RefCell::new(None),
+            bounds: Cell::new(None),
             error_window: RefCell::new(None),
         });
         let capturered = Rc::new(Cell::new(false));
@@ -1065,6 +1072,26 @@ impl WindowsHost {
             )
         };
         drop(_dpi_scope);
+        // 【几何现场】包裹层不感知时，宿主上下文里的客户区与屏幕上实际合成的矩形
+        // 差一个屏幕缩放（ACID：1100×720 → 1375×900）。这两个数字直接回答"WebView
+        // 应该按哪个尺子铺满"，也是下一次现场排查的第一行证据。
+        let parent_physical = {
+            let mut rect = RECT::default();
+            let _scope = HostContextScope::force_pm_v2();
+            if unsafe { GetClientRect(parent, &mut rect) }.is_ok()
+                && rect.right > 0
+                && rect.bottom > 0
+            {
+                format!("{}x{}", rect.right, rect.bottom)
+            } else {
+                "unavailable".to_string()
+            }
+        };
+        crate::gui_log_line(&format!(
+            "editor embed: parent-client={create_width}x{create_height} \
+             parent-physical={parent_physical} parent-unaware={}",
+            window_is_unaware(parent)
+        ));
         let hwnd = match result {
             Ok(hwnd) => hwnd,
             Err(error) => {
@@ -1272,6 +1299,48 @@ fn fit_child_to_parent(hwnd: HWND, fallback: Option<(i32, i32)>) -> Result<bool,
         .map_err(|error| error.to_string())
 }
 
+/// 编辑器子窗口的三套尺寸读数：窗口坐标里的客户区、物理客户区、显示器缩放。
+///
+/// 【为什么物理值要在 PMv2 上下文里量】窗口坐标按**窗口自己的感知上下文**解释，
+/// 而 DWM 合成按显示器缩放。ACID 的 `sfvstwrap` 是 DPI-unaware：它的客户区在
+/// 96-DPI 空间里是 1100×720，屏幕上是 1375×900（125%）。WebView2 的
+/// `USE_RAW_PIXELS` 边界要的是后者；只给前者，页面视口就只剩 80%，右/下永远滚不到
+/// （2026-11-22 现场）。PMv2 上下文里 `GetClientRect` 会被系统虚拟化成物理值 ——
+/// 与 `wrapper_physical_client` 同一手法；感知窗口里物理值与窗口值相等。
+///
+/// 返回 `(窗口宽, 窗口高, 物理宽, 物理高, 缩放)`。
+fn editor_geometry(window: HWND) -> Option<(i32, i32, i32, i32, f64)> {
+    // 【窗口自己的坐标】诊断用；unaware 窗口里它是 96-DPI 逻辑值。
+    let mut client = RECT::default();
+    {
+        let _scope = HostContextScope::enter(window);
+        if unsafe { GetClientRect(window, &mut client) }.is_err() {
+            return None;
+        }
+    }
+    // 【DWM 实际合成的物理值】从 PMv2 看同一个 unaware 窗口，系统会把逻辑矩形
+    // 按屏幕缩放换算回来。逃生门（`HIFISHIFTER_NO_DPI_AWARE=1`）下退回当前上下文，
+    // 行为与改动前一致。
+    let mut physical = RECT::default();
+    {
+        let _scope = HostContextScope::force_pm_v2();
+        if unsafe { GetClientRect(window, &mut physical) }.is_err() {
+            return None;
+        }
+    }
+    if client.right <= 0 || client.bottom <= 0 || physical.right <= 0 || physical.bottom <= 0 {
+        return None;
+    }
+    let scale = monitor_scale_for(window).unwrap_or(1.0);
+    Some((
+        client.right,
+        client.bottom,
+        physical.right,
+        physical.bottom,
+        scale,
+    ))
+}
+
 /// 把 popup 逐拍摆回**宿主留给插件那块矩形**的物理客户区；返回是否发生了摆放。
 ///
 /// 【为什么是"变了才摆"】SetWindowPos 即使矩形不变也会打扰窗口（窗口消息、可能
@@ -1394,6 +1463,12 @@ unsafe extern "system" fn window_proc(
                 port.focus_page();
                 return LRESULT(0);
             } else if message == WM_SIZE {
+                let port = (*pointer).port.clone();
+                port.sync_bounds(hwnd);
+            } else if message == WM_DPICHANGED || message == WM_DPICHANGED_AFTERPARENT {
+                // 【为什么 DPI 变化也要重下边界】raw-pixels 边界不变，但
+                // RasterizationScale 变了（窗口被拖到另一块缩放不同的显示器）。子窗口
+                // 收到的是 `WM_DPICHANGED_AFTERPARENT`；顶层窗口是 `WM_DPICHANGED`。
                 let port = (*pointer).port.clone();
                 port.sync_bounds(hwnd);
             } else if message == WM_CLOSE {
@@ -1641,6 +1716,8 @@ fn rebuild_page(state: &Rc<RefCell<EditorClient>>, port: &Rc<WindowsPort>) -> Re
 impl WindowsPort {
     fn attach(&self, controller: ICoreWebView2Controller) {
         *self.controller.borrow_mut() = Some(controller);
+        // 新控制器还没有收过任何边界：下一次 sync_bounds 必须真的下发一次。
+        self.bounds.set(None);
     }
 
     /// 撤掉错误提示。
@@ -1663,19 +1740,66 @@ impl WindowsPort {
         }
     }
 
-    /// 子窗口尺寸变了：把同一个矩形交给控制器（客户区坐标，物理像素）。
+    /// 子窗口尺寸变了：把**物理**客户区交给控制器，并显式固定渲染比例。
+    ///
+    /// 【为什么不能直接把 `GetClientRect` 的结果交出去】WebView2 的 `Bounds` 默认按
+    /// `BoundsMode` 解释；`USE_RAW_PIXELS` 要物理像素，`USE_RASTERIZATION_SCALE`
+    /// 要逻辑像素。宿主的包裹层是否感知 DPI 决定这个子窗口拿到的是哪一种数字
+    /// （ACID：unaware 包裹层报 1100×720 逻辑，DWM 实际合成 1375×900 物理）。
+    /// 此前直接交客户区原值，在不感知窗口里就少了 1.25×，页面视口只有
+    /// 1100/1375 = 80% —— 用户滚动到最右下仍然缺一条，且内容被 DWM 二次拉伸发糊。
+    /// 现在两边都显式：BoundsMode=RAW_PIXELS、Bounds=物理客户区、
+    /// RasterizationScale=显示器缩放。页面始终拿到 `物理 / 缩放` 的 CSS 视口，
+    /// 与宿主/窗口的感知上下文无关；渲染面又与窗口物理像素 1:1。
     fn sync_bounds(&self, hwnd: HWND) {
         let controller = self.controller.borrow().clone();
-        if let Some(controller) = controller {
-            // 【为什么切上下文】`GetClientRect` 会把坐标换算到**调用线程**的上下文：
-            // 与子窗口自身上下文不一致的线程拿到的是换算过的值，交出去的 WebView
-            // 边界就会与窗口差一截（页面右/下留白或溢出）。见 `HostContextScope`。
-            let _dpi_scope = HostContextScope::enter(context_reference(hwnd));
+        let Some(controller) = controller else {
+            return;
+        };
+        let Some((client_width, client_height, width, height, scale)) = editor_geometry(hwnd)
+        else {
+            return;
+        };
+        let key = (width, height, scale.to_bits());
+        let previous = self.bounds.get();
+        if previous == Some(key) {
+            return;
+        }
+        let Ok(controller3) = controller.cast::<ICoreWebView2Controller3>() else {
+            // 【旧运行时没有 BoundsMode】保持改动前的语义：交窗口上下文里的客户区
+            // 原值。它不能修不感知包裹层的裁切，但也不会把已知可用的宿主弄坏。
             let mut bounds = RECT::default();
-            let ok = unsafe { GetClientRect(hwnd, &mut bounds) }.is_ok();
-            drop(_dpi_scope);
-            if ok {
+            let _scope = HostContextScope::enter(hwnd);
+            if unsafe { GetClientRect(hwnd, &mut bounds) }.is_ok() {
                 let _ = unsafe { controller.SetBounds(bounds) };
+            }
+            return;
+        };
+        // 【为什么关掉自动检测】不感知窗口的 `GetDpiForWindow` 恒为 96，自动检测
+        // 会把 RasterizationScale 拉回 1.0，页面重新缩成 80%。缩放由我们按
+        // 显示器事实显式给。
+        let _ = unsafe { controller3.SetShouldDetectMonitorScaleChanges(false) };
+        let _ = unsafe { controller3.SetBoundsMode(COREWEBVIEW2_BOUNDS_MODE_USE_RAW_PIXELS) };
+        let _ = unsafe { controller3.SetRasterizationScale(scale) };
+        let bounds = RECT {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        };
+        if unsafe { controller.SetBounds(bounds) }.is_ok() {
+            self.bounds.set(Some(key));
+            // 尺寸变化在拖动分隔条时会来很多次；只在首次配置 / 缩放变化时留一行，
+            // 诊断"子窗口跟随了没有、WebView 拿到了多大的物理面"已经足够。
+            let scale_changed = previous.is_none_or(|previous| previous.2 != key.2);
+            if scale_changed {
+                let css_width = (f64::from(width) / scale).round() as i32;
+                let css_height = (f64::from(height) / scale).round() as i32;
+                crate::gui_log_line(&format!(
+                    "editor webview bounds: client={client_width}x{client_height} \
+                     physical={width}x{height} css={css_width}x{css_height} \
+                     scale={scale:.2} mode=raw-pixels"
+                ));
             }
         }
     }
@@ -1759,15 +1883,7 @@ fn configure_browser(
     folder: &std::path::Path,
 ) -> windows::core::Result<()> {
     let hwnd = port.hwnd.get();
-    let mut bounds = RECT::default();
     {
-        // 【为什么切上下文】与 `sync_bounds` 同一条理由：客户区读数按调用线程的上下文
-        // 换算，与子窗口不一致的线程会把 WebView 初始边界给错（见 `HostContextScope`）。
-        let _dpi_scope = HostContextScope::enter(context_reference(hwnd));
-        unsafe {
-            GetClientRect(hwnd, &mut bounds)?;
-        }
-        drop(_dpi_scope);
         // 【深色加载底】控制器刚创建、页面还没画第一帧时 WebView2 用的是默认白底；
         // 把它设成编辑器主题色，等待期不再闪白屏（与窗口类背景同一个颜色）。
         if let Ok(controller2) = controller.cast::<ICoreWebView2Controller2>() {
@@ -1779,8 +1895,12 @@ fn configure_browser(
             };
             let _ = unsafe { controller2.SetDefaultBackgroundColor(color) };
         }
+        // 【初始边界走与 WM_SIZE 完全相同的一条路】raw-pixels + 显式缩放的决定只该
+        // 有一份；在这里重写一遍 `GetClientRect/SetBounds` 会让第二次打开（不感知
+        // 包裹层）重新落回"逻辑值当物理值"的错误。`sync_bounds` 在控制器刚 attach
+        // 时缓存为空，因此这里一定会真的下发一次。
+        port.sync_bounds(hwnd);
         unsafe {
-            controller.SetBounds(bounds)?;
             controller.SetIsVisible(true)?;
         }
     }
