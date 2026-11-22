@@ -6181,6 +6181,7 @@ pub mod tests {
                 0,
                 512,
                 true,
+                0,
             );
             let (position, playing) = session.transport();
             assert!(playing, "宿主在播放必须如实报出");
@@ -6202,6 +6203,7 @@ pub mod tests {
                 0,
                 512,
                 true,
+                0,
             );
             assert!(!session.transport().1, "停止播放必须如实回落");
         }));

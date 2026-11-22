@@ -237,6 +237,8 @@ impl ExtensionOwner {
             prune_before: 0,
             // 预览 cursor 是本 pass 的本地时间轴，从第一块起就可信。
             position_trusted: true,
+            // 预览/离线 pass 没有"喂入领先播放头"的形状：位置就是发布位置。
+            playhead_offset: 0,
             publish_deferred: false,
             transport_generation: self.transport_generation.load(Ordering::Acquire),
             preview: !offline,
@@ -348,6 +350,7 @@ impl ExtensionOwner {
                 prune_before: 0,
                 // 零帧块不写样本：位置也不该发布（否则一次参数 flush 会把光标推到 raw）。
                 position_trusted: false,
+                playhead_offset: geometry.playhead_offset.load(Ordering::Acquire),
                 publish_deferred: true,
                 transport_generation: self.transport_generation.load(Ordering::Acquire),
                 preview: false,
@@ -805,6 +808,43 @@ impl ExtensionOwner {
             geometry.clock_deltas.fetch_add(1, Ordering::Relaxed);
         }
 
+        // ── UI 播放头修正量（`playhead_offset`）───────────────────────
+        //
+        // 【喂入位置 ≠ 宿主 UI 播放头】VEGAS 的渲染缓存让 FX 的喂入位置领先宿主自己的
+        // 播放头一个预热窗：按下播放后先把 ~0.66 s 音频灌进 FX（kPlaying=0、raw 钉在
+        // 按下点），再把 kPlaying 连同**前进了 Δ 的传输位**一起交给插件（现场
+        // Δ=36016~38084 帧）。UI 若发布喂入位置，光标就全程领先宿主一个 Δ —— 用户报
+        // 的"插件光标比宿主右偏 ~0.6 s"。三条维护规则（按块）：
+        //
+        //   * 预热窗内（kPlaying=0、raw 钉住、位置在推进）：offset = position − raw。
+        //     发布位 = position − offset = raw —— 光标钉在按下点，与宿主一致；
+        //   * kPlaying 升起那一块：offset = raw_start − last_raw（= Δ）。发布位从按下
+        //     点**连续**地起步 —— 窗口里钉在哪，播放就从哪走；
+        //   * 新 pass / 新流 / 停播假位置：归零（喂入域重新对齐，无窗口证据不修正）。
+        //     播放中保持不变（两边都按 1× 前进，差值恒定）。
+        //
+        // 【为什么只在 UI 发布上生效】磁带记账必须留在**喂入域** —— 捕获素材落点的
+        // 正确性（昨天修的"起拍错位"）就建立在"位置 = 宿主喂这块内容的工程位置"上。
+        // 修正量只跟着 `publish_capture_block` 与 realtime 通道的 UI 读数走。
+        let mut playhead_offset = geometry.playhead_offset.load(Ordering::Acquire);
+        if !had || new_pass || !transport_active {
+            // 新流 / 新 pass / 停播：喂入域与宿主读数对齐，修正量作废。
+            playhead_offset = 0;
+        } else if !playing {
+            if raw_start == last_raw && position != last_position {
+                // 预热窗：raw 钉住而位置按块推进（计数器或 continuous/music 回退），
+                // 宿主光标此刻停在 raw 上 —— 修正量就是位置领先它的量。
+                playhead_offset = position.saturating_sub(raw_start);
+            } else if raw_start != last_raw {
+                // 停播假位置（VEGAS 停播报远处位置，已被冻结拒收）：不是窗口证据。
+                playhead_offset = 0;
+            }
+        } else if playing_rising && playhead_offset != 0 {
+            // 升起：喂入位一次性跳到 按下点+Δ。Δ 只有在"窗口确实存在"（修正量非 0）
+            // 时才是预热推进；REAPER 这类直接起播（无窗口）的宿主修正量是 0，不修正。
+            playhead_offset = raw_start.saturating_sub(last_raw).max(0);
+        }
+
         geometry.seen.store(true, Ordering::Release);
         geometry.last_start.store(position, Ordering::Release);
         geometry.last_frames.store(frames32, Ordering::Release);
@@ -813,6 +853,9 @@ impl ExtensionOwner {
             .store(position.saturating_add(frames as i64), Ordering::Release);
         geometry.last_position.store(position, Ordering::Release);
         geometry.last_raw_start.store(raw_start, Ordering::Release);
+        geometry
+            .playhead_offset
+            .store(playhead_offset, Ordering::Release);
         geometry.last_continuous.store(
             time.continuous.unwrap_or(last_continuous),
             Ordering::Release,
@@ -894,6 +937,7 @@ impl ExtensionOwner {
             rebase_frames,
             prune_before: clock.prune_before,
             position_trusted: clock.position_trusted,
+            playhead_offset,
             publish_deferred: clock.publish_deferred,
             transport_generation: self.transport_generation.load(Ordering::Acquire),
             preview: false,
@@ -1373,8 +1417,15 @@ impl ExtensionOwner {
                 // 保持上一位置，等域解析完成再发布。
                 clock.hold_capture();
             } else {
+                // 【发布 UI 播放头，不是喂入位置】`position` 是宿主喂这块内容的工程
+                // 位置（磁带记账域）；VEGAS 的渲染缓存喂入领先它自己的播放头一个预热
+                // 窗（见 `playhead_offset` 的维护说明），UI 必须减掉它才能与宿主光标
+                // 对齐。无窗口的宿主（REAPER 等）修正量恒为 0，行为不变。
                 clock.publish_capture_block(
-                    stream_block.position as f64 / rate.max(1.0),
+                    (stream_block
+                        .position
+                        .saturating_sub(stream_block.playhead_offset)) as f64
+                        / rate.max(1.0),
                     recording || stream == ProcessStream::Offline || stream_block.preview,
                     stream == ProcessStream::Offline,
                     stream_block.preview,
@@ -1427,6 +1478,7 @@ impl ExtensionOwner {
             capture_epoch: self.capture().capture_epoch(),
             processing: processing.map_or(0, |block| block.kind.code()),
             position_trusted: stream_block.position_trusted,
+            playhead_offset: stream_block.playhead_offset,
             publish_deferred: stream_block.publish_deferred,
             prune_before: stream_block.prune_before,
             pass_sequence: self.pass_sequence.load(Ordering::Acquire),

@@ -388,3 +388,135 @@ fn vegas_start_window_is_captured_and_stays_one_take() {
         timeline.clips.len()
     );
 }
+
+/// **UI 播放头必须落在宿主播放头域，而不是喂入域。**
+///
+/// 【回归的现场】2026-11-22 09:10 的 VEGAS（用户报障"插件光标比宿主右偏 ~0.6 s"）：
+/// 渲染缓存让 FX 的**喂入位置**领先宿主自己的播放头一个预热窗 —— 按下播放后先灌
+/// 31920 帧音频（kPlaying=0、raw 钉在按下点 786000），再把 kPlaying 连同**前进了
+/// Δ=36016 帧的传输位**一起交给插件。UI 若发布喂入位置，光标就全程领先宿主一个 Δ。
+/// 契约（与上一条测试同一条现场序列，读数换 TransportClock 的发布位）：
+///   * 预热窗内：发布位**钉在按下点**（宿主光标此刻还没动）；
+///   * kPlaying 升起那一块：发布位**连续** —— 仍停在按下点，不许跳到喂入域；
+///   * 播放推进：发布位 = 按下点 + 播放时长，与宿主光标同速；
+///   * 磁带记账不受影响（素材仍落在喂入域 —— 上一条测试负责它）。
+#[test]
+fn the_ui_playhead_tracks_the_host_cursor_not_the_feed_position() {
+    let owner = Arc::new(ExtensionOwner::default());
+    owner.capture().note_project_rate(48_000.0);
+    // 时钟装载点与生产一致：`arm_capture_rendering` 给 Capture 实例自备一份时钟。
+    owner.arm_capture_rendering();
+    owner.capture().start().unwrap();
+
+    let mut music = 8.9_f64;
+    let mut raw = 0_i64;
+    let feed = |owner: &ExtensionOwner,
+                raw: i64,
+                frames: usize,
+                playing: bool,
+                amp: f32,
+                seed: f32,
+                music: &mut f64,
+                pinned_raw: Option<i64>| {
+        let samples: Vec<f32> = (0..frames)
+            .map(|n| ((n as f32 * 0.013 + seed).sin() * amp).clamp(-0.9, 0.9))
+            .collect();
+        let plane0 = samples.clone();
+        let plane1 = samples;
+        *music += frames as f64 / 48_000.0 / 60.0 * 120.0;
+        let context = crate::block_context::BlockContext {
+            sample_rate: 48_000.0,
+            project_time_samples: pinned_raw.unwrap_or(raw),
+            playing,
+            recording: false,
+            continuous: None,
+            music: Some(*music),
+            tempo: Some(120.0),
+            system_time: None,
+            time_signature: None,
+            cycle_valid: false,
+            cycle_active: false,
+            cycle_start_music: 0.0,
+            cycle_end_music: 0.0,
+        };
+        let input = crate::capture::InputBlock {
+            start: pinned_raw.unwrap_or(raw),
+            frames,
+            sample_rate: 48_000.0,
+            planes: [Some(plane0.as_slice()), Some(plane1.as_slice())],
+            playing,
+        };
+        owner.observe_input_block(input, context, ProcessStream::Realtime)
+    };
+
+    // 停播武装：宿主送一个 1 帧块（raw=0）。
+    let _ = feed(&owner, 0, 1, false, 0.0, 0.0, &mut music, None);
+    let clock = owner
+        .clock
+        .get()
+        .expect("arm_capture_rendering 之后时钟必须已装载");
+
+    // 预热窗：raw 钉在按下点 179512，kPlaying=0。域还是 PendingAbsolute ⇒ 位置
+    // 暂不发布（hold）—— UI 光标必须停在原地，绝不许跟着喂入位置往前跑。
+    let press = 179_512_i64;
+    let press_sec = press as f64 / 48_000.0;
+    for index in 0..32usize {
+        let frames = if index % 2 == 0 { 1200 } else { 848 };
+        let _ = feed(
+            &owner,
+            raw,
+            frames,
+            false,
+            0.3,
+            index as f32 * 0.31,
+            &mut music,
+            Some(press),
+        );
+        raw += frames as i64;
+        let view = clock.read_view();
+        assert!(
+            view.position_sec <= press_sec + 1e-6,
+            "预热窗第 {index} 块：UI 光标不得越过按下点（宿主还没动），实际 {}",
+            view.position_sec
+        );
+    }
+
+    // kPlaying 置位：raw 一次性跳到 按下点+38072。发布位必须**连续**（仍在按下点），
+    // 不许跟着跳进喂入域 —— 那一跳正是用户看到的 0.6~0.8 s 超前。
+    let delta = 38_072_i64;
+    raw = press + delta;
+    let first = feed(&owner, raw, 848, true, 0.4, 100.0, &mut music, None);
+    assert!(
+        first.is_some_and(|evidence| evidence.transport_active),
+        "正文首块必须继续有权推进"
+    );
+    let view = clock.read_view();
+    assert!(
+        (view.position_sec - press_sec).abs() < 1e-6,
+        "升起时刻：UI 光标必须从按下点连续起步 {press_sec}，实际 {}（不许跳到喂入域）",
+        view.position_sec
+    );
+
+    // 播放推进：发布位 = 按下点 + 已播放时长（发布的是**块起始时刻**的播放头；
+    // 升起块本身已播 848 帧，所以第 index 个后续块开头，宿主光标在 press+848·index）。
+    for index in 1..6usize {
+        raw += 848;
+        let _ = feed(
+            &owner,
+            raw,
+            848,
+            true,
+            0.4,
+            100.0 + index as f32 * 0.37,
+            &mut music,
+            None,
+        );
+        let view = clock.read_view();
+        let expected = (press + 848 * index as i64) as f64 / 48_000.0;
+        assert!(
+            (view.position_sec - expected).abs() < 1e-6,
+            "播放第 {index} 块：UI 光标必须与宿主同速（{expected}），实际 {}",
+            view.position_sec
+        );
+    }
+}

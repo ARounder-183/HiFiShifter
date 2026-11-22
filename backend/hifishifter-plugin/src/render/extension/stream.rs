@@ -116,6 +116,16 @@ pub(super) struct StreamGeometry {
     /// 于是 `position = raw_start + domain_offset`，整条 take 落在新域里（Event 起点
     /// = 工程起点），而音频一帧不丢。`new_pass` 时清零（新一次播放，宿主的域是权威）。
     pub(super) domain_offset: AtomicI64,
+    /// **UI 播放头修正量**（帧）：喂入位置与宿主 UI 播放头之间的当前差。
+    ///
+    /// 【为什么 UI 光标不能直接用喂入位置】VEGAS 的渲染缓存让 FX 的**喂入位置**领先
+    /// 它自己的 UI 播放头一个预热窗：按下播放后先灌 ~0.66 s 音频（kPlaying=0、raw 钉在
+    /// 按下点），然后把 kPlaying 连同**前进了 Δ 的传输位**一起交给插件（现场
+    /// Δ=36016~38084 帧）。UI 发布喂入位置 = 播放全程领先宿主光标一个 Δ —— 用户报的
+    /// "插件光标比宿主右偏 ~0.6 s"。维护规则见 `observe_input_block` 里
+    /// `playhead_offset` 的三条分支；它**只**改 UI 发布（捕获发布与 realtime 通道），
+    /// 不碰磁带记账 —— 磁带必须留在喂入域，捕获放置的正确性在它身上。
+    pub(super) playhead_offset: AtomicI64,
     /// 上一块的 `kPlaying`（"停播很久之后的上升沿"需要它）。
     pub(super) last_playing: AtomicBool,
     /// 传输会话的相位（见 `transport_session::SessionPhase`）。
@@ -576,6 +586,10 @@ pub(super) struct StreamBlock {
     pub(super) prune_before: i64,
     /// 本块位置可以发布给 UI / 输出仲裁。
     pub(super) position_trusted: bool,
+    /// **UI 播放头修正量**（帧）：喂入位置与宿主 UI 播放头的当前差。UI 发布
+    /// （捕获通道与 realtime 通道）用 `position - playhead_offset`，磁带记账仍用
+    /// `position`（喂入域）。维护规则见 `note_stream_geometry` 调用侧的说明。
+    pub(super) playhead_offset: i64,
     /// 本块位置暂不发布（`PendingAbsolute`）。
     pub(super) publish_deferred: bool,
     /// 本块所属的传输代次（`reset_transport_session` 推进）。

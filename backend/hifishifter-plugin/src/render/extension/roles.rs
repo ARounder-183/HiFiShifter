@@ -249,12 +249,17 @@ impl ExtensionOwner {
         self.is_non_playback() && self.playback_covered.load(Ordering::Acquire)
     }
     /// process只写有界原子诊断，JSON/日志全部由actor读取，暂不把候选计数当作根因。
+    ///
+    /// `playhead_offset` 是本块的 UI 播放头修正量（见 `StreamBlock::playhead_offset`）：
+    /// 喂入位置领先宿主 UI 播放头的帧数（VEGAS 渲染缓存的预热窗）。它**只**作用于
+    /// 写给 UI 的位置（`clock.update`），诊断通道（`clock.observe`）仍记录宿主原值。
     pub(crate) fn observe_transport(
         &self,
         context: &crate::block_context::BlockContext,
         mode: i32,
         frames: usize,
         position_trusted: bool,
+        playhead_offset: i64,
     ) {
         // 【为什么这条判据在共享方法里】离线 pass 的块是"渲染进度"，不是播放位置，
         // 不能驱动光标。它属于语义、不属于某个外壳，所以两种格式一视同仁 ——
@@ -282,7 +287,16 @@ impl ExtensionOwner {
                 // 【块长必须先记】播放位的寿命由它决定（见 `block_playing_ttl_ms`）。
                 clock.note_block_length(frames, context.sample_rate);
                 if position_trusted {
-                    clock.update(context);
+                    // 【发布的是播放头域，不是喂入域】未武装实例的 UI 由 realtime
+                    // 通道驱动；VEGAS 的喂入位置领先它的播放头一个预热窗，不减掉
+                    // 修正量，光标就全程领先宿主（用户报的"右偏 ~0.6 s"）。定位结算
+                    // （settle_seek）也用修正后的值 —— seek 目标本来就是用户在
+                    // 播放头域里点的。无窗口宿主的修正量恒为 0，行为不变。
+                    let mut playhead_context = *context;
+                    playhead_context.project_time_samples = playhead_context
+                        .project_time_samples
+                        .saturating_sub(playhead_offset);
+                    clock.update(&playhead_context);
                 } else {
                     // 【证据不足不写位置】PendingAbsolute 期间宿主报的是绝对域预卷
                     // （现场 60.000 s）。写进去就是用户看到的光标跳变；只冻结。
