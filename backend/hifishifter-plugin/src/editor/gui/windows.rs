@@ -261,7 +261,19 @@ fn wrapper_physical_client(parent: HWND) -> Option<RECT> {
     }
 }
 
-/// 嵌入 popup 化的判据：包裹窗 DPI-unaware 且屏幕缩放 > 1。
+/// 是否**显式**要求 DPI popup 形态（`HIFISHIFTER_DPI_POPUP=1`）。
+///
+/// 【为什么默认关闭】popup 是顶层窗口，不在宿主的窗口树里：它换来了 125% 缩放下的
+/// 清晰度，代价是**脱离宿主裁剪与布局** —— 现场（ACID Pro 2026-11-22）表现为覆盖
+/// 宿主 FX 链/预设栏、宿主缩放面板时它停在原地。作为插件窗口，这比"宿主包裹层被
+/// DWM 拉伸导致的模糊"更不可接受：模糊是宿主的 DPI 虚拟化对**所有**子窗口的统一
+/// 结果，而覆盖宿主控件直接让用户无法管理 FX。默认形态因此是宿主父窗口里的普通
+/// 子窗口；需要清晰度的用户显式打开这个逃生门，并接受浮窗行为。
+fn dpi_popup_requested() -> bool {
+    std::env::var_os("HIFISHIFTER_DPI_POPUP").is_some_and(|value| value == "1")
+}
+
+/// popup 形态的判据：宿主显式要求，且包裹窗 DPI-unaware、屏幕缩放 > 1。
 ///
 /// 【为什么要这一层】ACID 的 `sfvstwrap` 在不感知上下文里创建包裹窗，宿主进程本身
 /// 是感知的。子窗口无论跟包裹层走（96 DPI 渲染 + DWM 1.25× 拉伸 = 模糊）还是强制
@@ -269,7 +281,7 @@ fn wrapper_physical_client(parent: HWND) -> Option<RECT> {
 /// 是**包裹窗的 DWM surface 只有 96 DPI**，子窗口共享它的 surface。popup 是顶层
 /// 窗口：它有自己的 surface、自己的感知上下文，是包裹层不感知时唯一能锐利的形态。
 ///
-/// 返回 popup 应用的缩放读数（仅用于日志）；`None` = 走既有子窗口路径。
+/// 返回 popup 应用的缩放读数（仅用于日志）；`None` = 走默认的子窗口路径。
 fn popup_scale_for(parent: HWND) -> Option<f64> {
     let context = unsafe { GetWindowDpiAwarenessContext(parent) };
     let unaware =
@@ -407,8 +419,7 @@ fn take_parked_window(
 ) -> Option<ParkedWindow> {
     let thread = unsafe { GetCurrentThreadId() };
     let adopt_unaware = parent_is_unaware(parent);
-    let popup_wanted =
-        std::env::var_os("HIFISHIFTER_NO_DPI_POPUP").is_none() && popup_scale_for(parent).is_some();
+    let popup_wanted = dpi_popup_requested() && popup_scale_for(parent).is_some();
     let mut dead = Vec::new();
     let taken = {
         let mut parked = PARKED.lock().unwrap_or_else(|e| e.into_inner());
@@ -778,29 +789,15 @@ impl WindowKey {
             sync_popup_to_anchor(hwnd, anchor);
             return Ok(());
         }
-        let _dpi_scope = HostContextScope::enter(context_reference(hwnd));
         // 【为什么按父窗口客户区收口，而不是宿主给的 (width, height)】嵌入子窗口的
         // 正确尺寸是"填满父窗口客户区"。宿主给的数字在**宿主的上下文**里有意义，
         // 换一层上下文就换一种长度：ACID 的包裹窗在不感知上下文里把感知宿主按
         // 物理像素留出的客户区虚拟化成 96 值，`onSize` 传下来的数字因此比实际
         // 客户区大 1.25× —— 按它移动，子窗口必然溢出（实测：宿主滚动条、右/下被裁；
-        // 2026-11 第一份现场截图正是这个形状）。在守卫上下文里量父窗口客户区，量出
-        // 的数字与 MoveWindow 的解释**同一把尺子**，量多大就占多大。感知宿主
+        // 2026-11 第一份现场截图正是这个形状）。`fit_child_to_parent` 在守卫上下文
+        // 里量父窗口客户区，量出的数字与 MoveWindow 的解释**同一把尺子**；感知宿主
         // （REAPER / VEGAS）里父窗口客户区与宿主数字一致，行为不变。
-        let parent = context_reference(hwnd);
-        let mut client = RECT::default();
-        let fitted = parent != hwnd
-            && unsafe { GetClientRect(parent, &mut client) }.is_ok()
-            && client.right > 0
-            && client.bottom > 0;
-        let (fit_width, fit_height) = if fitted {
-            (client.right, client.bottom)
-        } else {
-            (width, height)
-        };
-        let result = unsafe { MoveWindow(hwnd, 0, 0, fit_width, fit_height, true) };
-        drop(_dpi_scope);
-        result.map_err(|e| e.to_string())
+        fit_child_to_parent(hwnd, Some((width, height))).map(|_| ())
     }
 }
 impl EditorHost for WindowsHost {
@@ -1004,21 +1001,26 @@ impl WindowsHost {
             token,
             popup_anchor: Cell::new(HWND::default()),
         }));
-        // ── popup 分支：包裹窗 DPI-unaware 且屏幕缩放 > 1（ACID 的 sfvstwrap 形态）──
+        // ── 默认形态：宿主父窗口里的普通子窗口 ──────────────────────────────
         //
-        // 【为什么子窗口修不了模糊】模糊的根源是**包裹窗（顶层）的 DWM surface 只有
-        // 96 DPI**：DWM 把整棵窗口树（含任何子窗口）按 1.25× 拉伸上屏。子窗口无论
-        // 什么感知上下文，都渲染进同一个 surface —— PMv2 子窗口实测（2026-11）只改
-        // 儿何、不改清晰度。popup 是**顶层**窗口：独立 surface + 独立感知上下文，
-        // 以物理像素渲染，DWM 不拉伸 —— 这是不改宿主的前提下唯一能锐利的形态。
+        // 【为什么默认不再 popup】宿主交给 `attached` 的父窗口就是"插件的那块矩形"：
+        // 子窗口天然跟随宿主的裁剪、移动、缩放与 z 序，这是插件窗口唯一可靠的形态。
+        // 曾经的默认 popup 只在"包裹窗 DPI-unaware + 屏幕缩放 > 1"（ACID 的
+        // `sfvstwrap`）时启用，用独立顶层 surface 换清晰度；但顶层窗口不被宿主裁剪、
+        // 也不随宿主布局 —— 现场（2026-11-22）就是覆盖宿主 FX 链/预设栏、宿主缩放
+        // 面板时停在原地，用户连删除 FX 都做不到。这比模糊更不可接受。
         //
-        // 【代价与纪律】popup 不被 owner 裁剪、也不随宿主窗口移动，所以必须**逐拍
-        // 同步**到宿主留给插件那块矩形的物理客户区（见 `sync_popup_to_anchor`，挂在
-        // 既有 20 ms 定时器上）。**几何参照 = 宿主给的父窗口**（插件区域），**owner =
-        // 它的顶层祖先**（z 序/最小化跟随）—— 两者必须分开：拿顶层祖先的客户区当
-        // 几何参照会把宿主自己的 FX 链/预设栏一起盖住（现场：插件"替换"了宿主窗口）。
-        // 逃生门 `HIFISHIFTER_NO_DPI_POPUP=1` 回到子窗口路径。
-        if std::env::var_os("HIFISHIFTER_NO_DPI_POPUP").is_none() {
+        // 【模糊的归属】包裹窗不感知时，DWM 把整棵窗口树（含子窗口）按屏幕缩放拉伸；
+        // 任何子窗口形态都共享这个 surface。它不是本插件能修的 —— 宿主自己创建的
+        // 包裹窗决定了 surface 的 DPI。要清晰度就得离开窗口树，而离开窗口树就不再是
+        // 插件窗口。因此默认选宿主集成，popup 只作为显式逃生门
+        // （`HIFISHIFTER_DPI_POPUP=1`，见 `dpi_popup_requested`）。
+        //
+        // 【子窗口的尺寸纪律】`resize` 与 20 ms 定时器都把子窗口收口到**父窗口客户区**
+        // （见 `fit_child_to_parent`）：宿主给的 `onSize` 数字属于宿主的坐标语义，
+        // 包裹层与宿主上下文不一致时按它摆放会溢出；量父窗口客户区与 `MoveWindow`
+        // 是同一把尺子。定时器兜底还覆盖"宿主缩放了包裹窗却没调用 `onSize`"的宿主。
+        if dpi_popup_requested() {
             if let Some(scale) = popup_scale_for(parent) {
                 return Self::attach_popup(
                     parent, data, port, client, capturered, scale, token, thread, instance, width,
@@ -1098,7 +1100,8 @@ impl WindowsHost {
         Ok(host)
     }
 
-    /// popup 形态的附着：顶层窗口 + 逐拍同步到**宿主留给插件那块矩形**的物理客户区。
+    /// popup 形态的附着（**显式 opt-in**，见 `dpi_popup_requested`）：顶层窗口 +
+    /// 逐拍同步到**宿主留给插件那块矩形**的物理客户区。
     ///
     /// 【为什么初始尺寸不取 (width, height)】那两个数是宿主 `getSize` 协商出的，属于
     /// **宿主**的坐标语义；popup 按物理像素摆放，唯一的正确初始值就是宿主父窗口
@@ -1216,6 +1219,59 @@ impl WindowsHost {
     }
 }
 
+/// 把嵌入形态的子窗口收口到**宿主父窗口客户区**；`Ok(true)` = 发生了摆放。
+///
+/// 【为什么是父窗口客户区，而不是宿主 `onSize` 的数字】两者在宿主自己的上下文里
+/// 一致，但在"感知宿主 + 不感知包裹窗"的混合形态里不是同一把尺子（ACID 现场）：
+/// `onSize` 的数字会被系统按另一层上下文解释，按它摆放必然溢出（宿主滚动条 +
+/// 右/下被裁）。在父窗口的上下文里量客户区、在同一个上下文里 `MoveWindow`，
+/// 量多大就占多大。
+///
+/// 【为什么定时器也要做】`WM_SIZE` 只会在**我们自己的**窗口尺寸变化时到来；宿主
+/// 缩放了包裹窗却没调用 `IPlugView::onSize`（或调用晚于布局）时，子窗口就停在
+/// 旧尺寸上。20 ms 一拍的空查询是两次 `GetClientRect`，只有真变了才 `MoveWindow`。
+///
+/// `fallback` 是"量不到父窗口客户区"时的退路（`resize` 用宿主给的协商值；定时器
+/// 不传，直接放弃这一拍）。
+fn fit_child_to_parent(hwnd: HWND, fallback: Option<(i32, i32)>) -> Result<bool, String> {
+    let parent = match unsafe { GetParent(hwnd) } {
+        Ok(parent) if !parent.0.is_null() => parent,
+        _ => {
+            return match fallback {
+                Some((width, height)) => unsafe { MoveWindow(hwnd, 0, 0, width, height, true) }
+                    .map(|_| true)
+                    .map_err(|error| error.to_string()),
+                None => Ok(false),
+            };
+        }
+    };
+    // 子窗口的感知上下文在创建时已按父窗口匹配（见 `attach`），这里再切一次是为了
+    // 让"量客户区"与"MoveWindow"都落在与父窗口一致的坐标语义里（宿主线程的上下文
+    // 可能已被宿主改过）。
+    let _dpi_scope = HostContextScope::enter(parent);
+    let mut client = RECT::default();
+    let (width, height) = if unsafe { GetClientRect(parent, &mut client) }.is_ok()
+        && client.right > 0
+        && client.bottom > 0
+    {
+        (client.right, client.bottom)
+    } else if let Some(size) = fallback {
+        size
+    } else {
+        return Ok(false);
+    };
+    let mut current = RECT::default();
+    if unsafe { GetClientRect(hwnd, &mut current) }.is_ok()
+        && current.right == width
+        && current.bottom == height
+    {
+        return Ok(false);
+    }
+    unsafe { MoveWindow(hwnd, 0, 0, width, height, true) }
+        .map(|_| true)
+        .map_err(|error| error.to_string())
+}
+
 /// 把 popup 逐拍摆回**宿主留给插件那块矩形**的物理客户区；返回是否发生了摆放。
 ///
 /// 【为什么是"变了才摆"】SetWindowPos 即使矩形不变也会打扰窗口（窗口消息、可能
@@ -1291,13 +1347,20 @@ unsafe extern "system" fn window_proc(
             if message == WM_TIMER && wparam.0 == 0x4853 {
                 // 宿主 getter 可能重入并关闭窗口：先持 Rc，不再在调用后解引用 WindowData。
                 let client = (*pointer).client.clone();
-                client::tick(&client);
-                // 【popup 逐拍同步】popup 不在宿主窗口树里，宿主移动/缩放面板不会通知
-                // 我们 —— 参照**宿主留给插件那块矩形**的物理客户区，把 popup 摆回去
-                // （见 `sync_popup_to_anchor` 的"变了才摆"纪律）。
+                // 【几何参照也在 tick 之前取】tick 可能重入宿主并销毁本窗口
+                // （WM_NCDESTROY 会释放 WindowData）；之后再解引用 pointer 就是 UAF。
                 let anchor = (*pointer).popup_anchor.get();
+                client::tick(&client);
+                // 【几何跟随】popup 不在宿主窗口树里，宿主移动/缩放面板不会通知
+                // 我们 —— 参照**宿主留给插件那块矩形**的物理客户区，把 popup 摆回去
+                // （见 `sync_popup_to_anchor` 的"变了才摆"纪律）。嵌入形态是宿主窗口
+                // 树里的子窗口，裁剪/移动天然跟随，但**尺寸**仍可能停在旧值上：宿主
+                // 缩放了包裹窗却没调用 `IPlugView::onSize`。定时器用同一个"变了才摆"
+                // 的判据兜底（见 `fit_child_to_parent`）。
                 if !anchor.0.is_null() {
                     sync_popup_to_anchor(hwnd, anchor);
+                } else {
+                    let _ = fit_child_to_parent(hwnd, None);
                 }
                 // 【为什么先重建而不是直接关窗】页面进程崩溃 / OOM 之后所有投递都会
                 // 失败，界面已是一张死图。此前唯一的处置是**关掉窗口** —— 用户看到的
@@ -1945,9 +2008,9 @@ mod focus_tests {
     #[test]
     fn native_editor_is_a_tab_stop_in_its_host_parent() {
         // 【为什么在 PMv2 作用域里建夹具父窗】本用例验证的是**感知包裹窗里的 child
-        // 焦点语义**（宿主 Tab 链）。不感知包裹窗在 >96 DPI 屏幕上会命中 popup 分支
-        // （ACID 形态，见 `popup_scale_for`）—— 那时编辑器是顶层 popup，Tab 链属于
-        // 它自己，宿主父窗里的断言不再适用。PMv2 父窗正是"child 路径正确"的宿主形态。
+        // 焦点语义**（宿主 Tab 链）。默认形态已经是宿主父窗口里的子窗口（popup 只在
+        // 显式 `HIFISHIFTER_DPI_POPUP=1` 时启用，见 `dpi_popup_requested`），这里仍用
+        // PMv2 父窗，覆盖"感知宿主 + 子窗口"这条最常见路径。
         // SAFETY: 夹具父窗口仅在本线程创建/销毁，不操作任何用户或REAPER窗口。
         let parent = {
             let _dpi_scope = HostContextScope::force_pm_v2();
