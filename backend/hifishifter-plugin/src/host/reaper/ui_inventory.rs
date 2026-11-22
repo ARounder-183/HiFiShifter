@@ -119,12 +119,12 @@ pub(crate) fn inventory_content_matches(
     enumerated: &std::collections::BTreeMap<String, UiTrack>,
 ) -> bool {
     published.len() == enumerated.len()
-        && published
-            .iter()
-            .zip(enumerated.iter())
-            .all(|((published_guid, published_track), (enumerated_guid, enumerated_track))| {
-                published_guid == enumerated_guid && published_track.content_matches(enumerated_track)
-            })
+        && published.iter().zip(enumerated.iter()).all(
+            |((published_guid, published_track), (enumerated_guid, enumerated_track))| {
+                published_guid == enumerated_guid
+                    && published_track.content_matches(enumerated_track)
+            },
+        )
 }
 
 impl NativeHost {
