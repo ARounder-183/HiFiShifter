@@ -393,12 +393,14 @@ fn vegas_start_window_is_captured_and_stays_one_take() {
 ///
 /// 【回归的现场】2026-11-22 09:10 的 VEGAS（用户报障"插件光标比宿主右偏 ~0.6 s"）：
 /// 渲染缓存让 FX 的**喂入位置**领先宿主自己的播放头一个预热窗 —— 按下播放后先灌
-/// 31920 帧音频（kPlaying=0、raw 钉在按下点 786000），再把 kPlaying 连同**前进了
-/// Δ=36016 帧的传输位**一起交给插件。UI 若发布喂入位置，光标就全程领先宿主一个 Δ。
+/// 31920 帧音频（kPlaying=0、raw 钉在按下点 786000），宿主光标在这段时间里从按下点
+/// 走到预热窗终点 W；随后 kPlaying 连同**前进了 Δ=36016 帧的传输位**一起交给插件。
+/// UI 若发布喂入位置，光标就领先宿主；若在升起时扣掉整个 Δ，又会把 W 一并抹掉 ——
+/// 2026-11-22 12:22 现场（同一天第二次报障）正是后者：插件光标比宿主**左偏 ~0.6 s**。
 /// 契约（与上一条测试同一条现场序列，读数换 TransportClock 的发布位）：
-///   * 预热窗内：发布位**钉在按下点**（宿主光标此刻还没动）；
-///   * kPlaying 升起那一块：发布位**连续** —— 仍停在按下点，不许跳到喂入域；
-///   * 播放推进：发布位 = 按下点 + 播放时长，与宿主光标同速；
+///   * 预热窗内：发布位**钉在按下点**（窗口期 UI 由 hold 冻结）；
+///   * kPlaying 升起那一块：发布位 = **预热窗终点**（按下点 + W），与窗口连续；
+///   * 播放推进：发布位 = 预热窗终点 + 播放时长，与宿主光标同速；
 ///   * 磁带记账不受影响（素材仍落在喂入域 —— 上一条测试负责它）。
 #[test]
 fn the_ui_playhead_tracks_the_host_cursor_not_the_feed_position() {
@@ -460,6 +462,8 @@ fn the_ui_playhead_tracks_the_host_cursor_not_the_feed_position() {
     // 暂不发布（hold）—— UI 光标必须停在原地，绝不许跟着喂入位置往前跑。
     let press = 179_512_i64;
     let press_sec = press as f64 / 48_000.0;
+    let mut window_frames = 0_i64;
+    let mut last_window_frames = 0_i64;
     for index in 0..32usize {
         let frames = if index % 2 == 0 { 1200 } else { 848 };
         let _ = feed(
@@ -473,6 +477,8 @@ fn the_ui_playhead_tracks_the_host_cursor_not_the_feed_position() {
             Some(press),
         );
         raw += frames as i64;
+        window_frames += frames as i64;
+        last_window_frames = frames as i64;
         let view = clock.read_view();
         assert!(
             view.position_sec <= press_sec + 1e-6,
@@ -480,9 +486,12 @@ fn the_ui_playhead_tracks_the_host_cursor_not_the_feed_position() {
             view.position_sec
         );
     }
+    // 预热窗终点 = 最后一块的**起点**（发布的是块起始时刻的播放头）：
+    // 按下点 + 总帧数 − 末块帧数。
+    let pre_roll_end = (press + window_frames - last_window_frames) as f64 / 48_000.0;
 
-    // kPlaying 置位：raw 一次性跳到 按下点+38072。发布位必须**连续**（仍在按下点），
-    // 不许跟着跳进喂入域 —— 那一跳正是用户看到的 0.6~0.8 s 超前。
+    // kPlaying 置位：raw 一次性跳到 按下点+38072。发布位必须与窗口终点**连续**
+    // （停在 W），不许跟着跳进喂入域；也不许退回到按下点（那是上一版的左偏）。
     let delta = 38_072_i64;
     raw = press + delta;
     let first = feed(&owner, raw, 848, true, 0.4, 100.0, &mut music, None);
@@ -492,13 +501,13 @@ fn the_ui_playhead_tracks_the_host_cursor_not_the_feed_position() {
     );
     let view = clock.read_view();
     assert!(
-        (view.position_sec - press_sec).abs() < 1e-6,
-        "升起时刻：UI 光标必须从按下点连续起步 {press_sec}，实际 {}（不许跳到喂入域）",
+        (view.position_sec - pre_roll_end).abs() < 1e-6,
+        "升起时刻：UI 光标必须停在预热窗终点 {pre_roll_end}，实际 {}（不许退回按下点，也不许跳到喂入域）",
         view.position_sec
     );
 
-    // 播放推进：发布位 = 按下点 + 已播放时长（发布的是**块起始时刻**的播放头；
-    // 升起块本身已播 848 帧，所以第 index 个后续块开头，宿主光标在 press+848·index）。
+    // 播放推进：发布位 = 预热窗终点 + 已播放时长（发布的是**块起始时刻**的播放头；
+    // 升起块本身已播 848 帧，所以第 index 个后续块开头，宿主光标在 W+848·index）。
     for index in 1..6usize {
         raw += 848;
         let _ = feed(
@@ -512,7 +521,7 @@ fn the_ui_playhead_tracks_the_host_cursor_not_the_feed_position() {
             None,
         );
         let view = clock.read_view();
-        let expected = (press + 848 * index as i64) as f64 / 48_000.0;
+        let expected = pre_roll_end + 848.0 * index as f64 / 48_000.0;
         assert!(
             (view.position_sec - expected).abs() < 1e-6,
             "播放第 {index} 块：UI 光标必须与宿主同速（{expected}），实际 {}",

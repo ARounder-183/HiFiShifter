@@ -811,15 +811,21 @@ impl ExtensionOwner {
         // ── UI 播放头修正量（`playhead_offset`）───────────────────────
         //
         // 【喂入位置 ≠ 宿主 UI 播放头】VEGAS 的渲染缓存让 FX 的喂入位置领先宿主自己的
-        // 播放头一个预热窗：按下播放后先把 ~0.66 s 音频灌进 FX（kPlaying=0、raw 钉在
-        // 按下点），再把 kPlaying 连同**前进了 Δ 的传输位**一起交给插件（现场
-        // Δ=36016~38084 帧）。UI 若发布喂入位置，光标就全程领先宿主一个 Δ —— 用户报
-        // 的"插件光标比宿主右偏 ~0.6 s"。三条维护规则（按块）：
+        // 播放头：按下播放后先把 ~0.66 s 音频**一次性**灌进 FX（kPlaying=0、raw 钉在
+        // 按下点），宿主光标在这段时间里从按下点按 1× 走到 `position`（预热窗终点 W）；
+        // 随后 kPlaying 连同**前进了 Δ 的传输位**一起交给插件（现场 Δ=36016~38084 帧）。
+        // 宿主光标在升起那一刻停在 **W**，而喂入位已经到 按下点+Δ —— 两者差的
+        // `Δ−W`（现场 4096~6144 帧）才是渲染缓存额外超前的量，不是整个 Δ。
+        //
+        // 【上一版为什么把光标推到左边】旧规则在升起时扣掉整个 Δ，等于把宿主光标已经
+        // 走完的预热窗 W 也一并抹掉 —— 现场表现就是"插件光标比宿主左偏 ~0.6 s"。
+        // 三条维护规则（按块）：
         //
         //   * 预热窗内（kPlaying=0、raw 钉住、位置在推进）：offset = position − raw。
-        //     发布位 = position − offset = raw —— 光标钉在按下点，与宿主一致；
-        //   * kPlaying 升起那一块：offset = raw_start − last_raw（= Δ）。发布位从按下
-        //     点**连续**地起步 —— 窗口里钉在哪，播放就从哪走；
+        //     发布位 = raw —— 光标钉在按下点（窗口期 UI 由 hold 冻结，这个值就是
+        //     hold 的落点）；
+        //   * kPlaying 升起那一块：offset = raw_start − last_position。`last_position`
+        //     是预热窗走到的 W；发布位 = W，与窗口终点**连续**，此后按 1× 前进；
         //   * 新 pass / 新流 / 停播假位置：归零（喂入域重新对齐，无窗口证据不修正）。
         //     播放中保持不变（两边都按 1× 前进，差值恒定）。
         //
@@ -840,9 +846,10 @@ impl ExtensionOwner {
                 playhead_offset = 0;
             }
         } else if playing_rising && playhead_offset != 0 {
-            // 升起：喂入位一次性跳到 按下点+Δ。Δ 只有在"窗口确实存在"（修正量非 0）
-            // 时才是预热推进；REAPER 这类直接起播（无窗口）的宿主修正量是 0，不修正。
-            playhead_offset = raw_start.saturating_sub(last_raw).max(0);
+            // 升起：喂入位一次性跳到 按下点+Δ，而宿主光标停在预热窗终点 last_position。
+            // 只扣掉**超出**宿主光标的那一段（Δ−W）；扣整个 Δ 会把窗口走完的时间也
+            // 抹掉，光标就左偏一个 W（现场 2026-11-22 的 -0.6 s）。
+            playhead_offset = raw_start.saturating_sub(last_position).max(0);
         }
 
         geometry.seen.store(true, Ordering::Release);
