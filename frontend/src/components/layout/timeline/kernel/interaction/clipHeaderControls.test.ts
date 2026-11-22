@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { hitClipHeaderControl, type ClipHeaderControlStyle } from "./clipHeaderControls";
+import { buildTimelineClipVisualStyle } from "../../runtime/timelineCanvasStyle";
 
 /**
  * 构造一个「全控件可见」的样式，偏移规则与 `buildTimelineClipVisualStyle` 一致：
@@ -200,5 +201,28 @@ describe("hitClipHeaderControl", () => {
                 trailingHeaderOverlapPx: 60,
             }),
         ).toBe("name");
+    });
+    it("MIDI Take hides the formant badge from hit testing but keeps gain/mute", () => {
+        const style = buildTimelineClipVisualStyle({
+            widthPx: 220,
+            trackColor: "#4f8ef7",
+            selected: false,
+            muted: false,
+            gain: 1,
+            playbackRate: 1,
+            name: "MIDI Take",
+            contentKind: "midi_take",
+        });
+        expect(style.showFormantBadge).toBe(false);
+        expect(style.showGainKnob).toBe(true);
+        expect(style.showMuteBadge).toBe(true);
+        expect(
+            hitClipHeaderControl({
+                localX: style.formantBadgeOffsetX + 10,
+                localY: 10,
+                clipWidthPx: 220,
+                style,
+            }),
+        ).not.toBe("formant");
     });
 });

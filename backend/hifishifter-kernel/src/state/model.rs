@@ -61,6 +61,16 @@ fn is_false(value: &bool) -> bool {
 /// 最大结束时间 —— 使其循环逻辑与普通媒体 Clip **完全一致**：Loop 回绕
 /// 整个音符内容（而非窗口跨度），窗口之外的部分为静音/无音高。
 pub fn clip_source_media_duration_sec(clip: &Clip) -> Option<f64> {
+    // 纯 MIDI Clip 没有音频元数据；MIDI 内容的 length_sec 是权威回绕周期，
+    // 不能让陈旧的 durationSec/durationFrames（来自旧 take/宿主 item 长度）抢先。
+    if clip.source_path.is_none() {
+        if let Some(data) = clip.midi_take.as_ref() {
+            let length = data.effective_length_sec();
+            if length.is_finite() && length > 0.0 {
+                return Some(length);
+            }
+        }
+    }
     if let (Some(frames), Some(sample_rate)) = (clip.duration_frames, clip.source_sample_rate) {
         if sample_rate > 0 && frames > 0 {
             return Some(frames as f64 / sample_rate as f64);
@@ -114,6 +124,63 @@ pub fn clip_loop_period_sec(clip: &Clip) -> Option<f64> {
     clip.loop_period_sec
         .filter(|value| value.is_finite() && *value > 1e-9)
         .or_else(|| clip_source_media_duration_sec(clip))
+}
+
+/// 一条轨道的**有效输出状态**（含父链音量、静音与 solo 的最终结果）。
+///
+/// 这是“轨道推子/静音/solo 如何作用于声音”的唯一语义。App 播放快照、离线
+/// 混音与 MIDI 试听都必须从同一份结果取值 —— 三处各写一份父子链与 solo
+/// 优先规则，迟早会出现“推子一样、试听却不一样响”的相位差。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrackOutputGain {
+    /// 沿父链逐节点钳制后相乘的线性增益。
+    pub gain: f32,
+    /// 父链静音与 solo 规则合并后的最终静音。
+    pub muted: bool,
+    /// 当前工程存在 solo 时，该轨道是否属于被 solo 的分支。
+    pub solo_ok: bool,
+}
+
+/// 计算全部轨道的有效输出状态。
+///
+/// 规则与音频引擎历史实现逐字一致：
+/// - 增益沿 parent 链相乘（folder 推子天然串联）；
+/// - 任一祖先静音即静音；
+/// - 存在任何 solo 时，只有被 solo 的分支可听；且 solo 覆盖自身/祖先的 mute。
+pub fn compute_track_output_gains(tracks: &[Track]) -> HashMap<String, TrackOutputGain> {
+    let by_id: HashMap<&str, &Track> = tracks.iter().map(|t| (t.id.as_str(), t)).collect();
+    let any_solo = tracks.iter().any(|t| t.solo);
+    let mut out = HashMap::with_capacity(tracks.len());
+
+    for track in tracks {
+        let mut gain = 1.0f32;
+        let mut muted = false;
+        let mut soloed = false;
+        let mut cursor = Some(track.id.as_str());
+        let mut safety = 0usize;
+        while let Some(id) = cursor {
+            let Some(node) = by_id.get(id) else {
+                break;
+            };
+            gain *= crate::gain::clamp_gain(node.volume);
+            muted |= node.muted;
+            soloed |= node.solo;
+            cursor = node.parent_id.as_deref();
+            safety += 1;
+            if safety > 2048 {
+                break;
+            }
+        }
+        out.insert(
+            track.id.clone(),
+            TrackOutputGain {
+                gain,
+                muted: if any_solo && soloed { false } else { muted },
+                solo_ok: !any_solo || soloed,
+            },
+        );
+    }
+    out
 }
 
 /// 非 Loop 正放 Clip 的**派生源终点**（REAPER 派生窗口模型）：
@@ -1398,7 +1465,19 @@ impl ClipTake {
     pub fn set_midi_take(&mut self, mut data: MidiTakeData) {
         data.normalize();
         data.refresh_hash();
+        let content_length = data.effective_length_sec();
         self.midi_take = Some(data);
+        // 纯 MIDI Take 的 duration_sec 是内容长度投影，不是音频文件时长。
+        // 它与 midi_take.length_sec 同源，供 Loop 周期与前端内容时长读取；
+        // 有源媒体的音高参考/转换路径保留原音频元数据。
+        if self.source_path.is_none() && content_length.is_finite() && content_length > 0.0 {
+            self.duration_sec = Some(content_length);
+            self.duration_frames = None;
+            self.source_sample_rate = None;
+            // 纯 MIDI Take 的源域终点就是内容长度；旧数据/空窗口若留着
+            // 0 或旧 item 长度，倒放 Loop 的锚点会把整段相位折错。
+            self.source_end_sec = content_length;
+        }
         self.sync_legacy_midi_mirror();
     }
 
@@ -1510,6 +1589,15 @@ impl ClipTake {
 
 /// Take 自身媒体内容的总时长；Loop 回绕周期优先使用该值。
 fn clip_take_media_duration_sec(take: &ClipTake) -> Option<f64> {
+    // 纯 MIDI Take 的内容长度是权威；duration_sec/duration_frames 可能来自旧音频 take。
+    if take.source_path.is_none() {
+        if let Some(data) = take.midi_take.as_ref() {
+            let length = data.effective_length_sec();
+            if length.is_finite() && length > 0.0 {
+                return Some(length);
+            }
+        }
+    }
     if let (Some(frames), Some(sample_rate)) = (take.duration_frames, take.source_sample_rate) {
         if sample_rate > 0 && frames > 0 {
             return Some(frames as f64 / sample_rate as f64);
@@ -1828,6 +1916,15 @@ pub struct Clip {
     /// 合成一个数之后无论导出到哪一层都会与用户的另一层设置对不上。
     #[serde(default = "default_gain")]
     pub clip_gain: f32,
+    /// 片段级静音：**该片段不贡献任何输出**。
+    ///
+    /// 它不是一个“音频静音开关”，而是内容级门禁，按角色解释：
+    /// - 音频 Clip：不参与播放/导出；
+    /// - 音高参考块：不覆盖原始音高线（旧版语义原样保留）；
+    /// - 普通 MIDI Take：不产生试听声音。
+    ///
+    /// 因此不需要迁移旧工程的静音含义，也不需要第二个 muted 属性；角色已经
+    /// 是“输出是什么”的唯一判据。
     #[serde(default)]
     pub muted: bool,
     #[serde(alias = "trim_start_sec", default, skip_serializing)]
@@ -2103,6 +2200,9 @@ impl Clip {
     /// 【为什么要一个入口】两层增益相乘这件事若散落在渲染、混音、导出、波形各处，
     /// 漏乘一处的表现是"某个环节声音大了/小了一半"，而这类偏差在单测里几乎看不出来。
     /// 统一走这里，谁要增益谁调它。
+    ///
+    /// MIDI Take 的试听也乘这一项；音高参考的“输出”是音高覆盖而非声音，
+    /// 因此增益对它没有可听效果（其试听若开启仍沿同一路径）。
     pub fn audible_gain(&self) -> f32 {
         crate::gain::clamp_gain(self.clip_gain.max(0.0) * self.gain.max(0.0))
     }

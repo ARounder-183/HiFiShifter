@@ -60,8 +60,10 @@ export interface HitTestClip {
     readonly name?: string;
     /** 分组 id（决定链徽标是否显示，进而决定静音徽标的 x 偏移）。 */
     readonly groupId?: string;
-    /** 是否为 MIDI clip（`isPitchAdjustment`：会隐藏部分 header 控件）。 */
+    /** 是否为 MIDI clip（旧字段；仅用于兼容旧测试夹具）。 */
     readonly isMidiClip?: boolean;
+    /** 内容类型：header 控件可见性必须与绘制端使用同一判据。 */
+    readonly contentKind?: import("../../../../../utils/clipContentKind").ClipContentKind;
     /**
      * 淡变参数。
      *

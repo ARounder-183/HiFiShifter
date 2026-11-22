@@ -1,4 +1,5 @@
 // 时间轴内核淡变 hover / 预览 / 提交与右键菜单。拆自 TimelinePanel。
+import { isMidiContentClip } from "../../../../utils/clipContentKind";
 import React from "react";
 import { isPluginMode, canEditFadeCurvature } from "../../../../services/hostCapabilities";
 import { hostMediaState, hostMediaReason } from "../../../../features/ara/hostAudio";
@@ -165,10 +166,9 @@ export function useTimelineKernelFade({
                 case "name": {
                     // 名称行只给名字，不给路径（见 `clipTooltipTitle`）。
                     const label = clipTooltipTitle(clip);
-                    const base =
-                        clip.midiNoteCount != null
-                            ? `${t("clip_type_midi_prefix")} ${label}`.trim()
-                            : label;
+                    const base = isMidiContentClip(clip)
+                        ? `${t("clip_type_midi_prefix")} ${label}`.trim()
+                        : label;
                     // 插件不渲染非线性拉伸 / take 包络。事先在浮标里说清楚，而不是让用户
                     // 点了分割/拖边再撞一个"operation refused"（独立 App 会物化它们，
                     // 因此只在插件模式下提示）。

@@ -56,6 +56,9 @@ export interface ClipSourceTake {
     readonly syllableAnalysisWindowSec?: [number, number];
     readonly gameBlockBaseline?: ClipSourceGameBaseline;
     readonly midiNoteData?: Array<ClipSourceMidiNote>;
+    readonly midiTakeNoteData?: Array<ClipSourceMidiNote>;
+    readonly midiTakeLengthSec?: number | null;
+    readonly midiRole?: "midi_take" | "pitch_reference";
 }
 
 /**
@@ -125,6 +128,9 @@ export interface ClipSourceGeometry {
     readonly syllableAnalysisWindowSec?: [number, number];
     readonly gameBlockBaseline?: ClipSourceGameBaseline;
     readonly midiNoteData?: Array<ClipSourceMidiNote>;
+    readonly midiTakeNoteData?: Array<ClipSourceMidiNote>;
+    readonly midiTakeLengthSec?: number | null;
+    readonly midiRole?: "midi_take" | "pitch_reference";
 }
 
 function cloneSpans(
@@ -198,6 +204,7 @@ export function toClipSourceGeometry(clip: ClipSourceGeometry): ClipSourceGeomet
             syllableAnalysisWindowSec: cloneWindow(take.syllableAnalysisWindowSec),
             gameBlockBaseline: cloneGameBaseline(take.gameBlockBaseline),
             midiNoteData: cloneMidiNotes(take.midiNoteData),
+            midiTakeNoteData: cloneMidiNotes(take.midiTakeNoteData),
         })),
         syllableSpansSec: cloneSpans(clip.syllableSpansSec),
         syllableNotes: cloneNumbers(clip.syllableNotes),
@@ -205,5 +212,8 @@ export function toClipSourceGeometry(clip: ClipSourceGeometry): ClipSourceGeomet
         syllableAnalysisWindowSec: cloneWindow(clip.syllableAnalysisWindowSec),
         gameBlockBaseline: cloneGameBaseline(clip.gameBlockBaseline),
         midiNoteData: cloneMidiNotes(clip.midiNoteData),
+        midiTakeNoteData: cloneMidiNotes(clip.midiTakeNoteData),
+        midiTakeLengthSec: clip.midiTakeLengthSec ?? null,
+        midiRole: clip.midiRole,
     };
 }

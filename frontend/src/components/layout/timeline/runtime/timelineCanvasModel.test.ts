@@ -392,3 +392,42 @@ test("components/layout/timeline/runtime/timelineCanvasModel.test.ts 重叠检�
         }
     }
 });
+
+test("MIDI Take loop renders one note block per cycle", () => {
+    const clip = {
+        id: "midi",
+        trackId: "track",
+        name: "MIDI",
+        startSec: 0,
+        lengthSec: 3,
+        gain: 1,
+        playbackRate: 1,
+        muted: false,
+        fadeInSec: 0,
+        fadeOutSec: 0,
+        fadeInShape: 0,
+        fadeOutShape: 0,
+        fadeInDir: 0,
+        fadeOutDir: 0,
+        midiRole: "midi_take" as const,
+        midiTakeNoteCount: 1,
+        midiTakeLengthSec: 1,
+        midiTakeNoteData: [{ startSec: 0, endSec: 0.5, note: 60 }],
+        loopEnabled: true,
+        sourceStartSec: 0,
+        sourceEndSec: 1,
+    };
+    const model = buildSparseClipRenderModel({
+        visibleTracks: [{ id: "track" }],
+        startTrackIndex: 0,
+        visibleTrackClipsById: { track: [clip] },
+        axis: createTimelineAxis({ pxPerSec: 100, viewportWidthPx: 600 }),
+        rowHeight: 96,
+        selectedClipId: null,
+        multiSelectedClipIds: [],
+        renamingClipId: null,
+    });
+    expect(model.drawClips[0]?.contentKind).toBe("midi_take");
+    expect(model.drawClips[0]?.midiTakeNotesPx).toHaveLength(3);
+    expect(model.drawClips[0]?.midiTakeNotesPx?.map((note) => note.x)).toEqual([0, 100, 200]);
+});

@@ -708,7 +708,13 @@ mod tests {
     }
 
     fn write_midi(name: &str) -> String {
-        let path = midi_dir().join(name);
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        // 测试并行运行；固定文件名会让一个测试读到自己/别的测试尚未写完的
+        // 字节时偶发 "not a midi file"。文件名只需在本进程内唯一。
+        let counter = NEXT.fetch_add(1, Ordering::Relaxed);
+        let stem = name.strip_suffix(".mid").unwrap_or(name);
+        let path = midi_dir().join(format!("{stem}-{}-{counter}.mid", std::process::id()));
         std::fs::write(&path, minimal_midi()).unwrap();
         path.to_string_lossy().into_owned()
     }

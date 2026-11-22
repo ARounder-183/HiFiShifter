@@ -100,4 +100,18 @@ test("components/layout/timeline/runtime/timelineClipHeaderVisibility.test.ts sc
         },
         "pitch-adjustment clips hide formant badge and gain knob",
     );
+    assertEqual(
+        resolveTimelineClipHeaderVisibility(160, "midi_take"),
+        {
+            showAny: true,
+            showChain: true,
+            showMute: true,
+            showFormant: false,
+            showGainKnob: true,
+            showGainLabel: true,
+            showPlaybackRate: true,
+            showName: true,
+        },
+        "MIDI Take keeps gain/mute controls but hides the formant badge",
+    );
 });

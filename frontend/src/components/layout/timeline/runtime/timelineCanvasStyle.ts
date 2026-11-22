@@ -20,7 +20,10 @@
  */
 import { gainToDb } from "../math.js";
 import { clampGainDb, formatGainDbValue, gainKnobAngleDeg } from "../../../../utils/gainDb";
-import { resolveTimelineClipHeaderVisibility } from "./timelineClipHeaderVisibility.js";
+import {
+    resolveTimelineClipHeaderVisibility,
+    type TimelineClipHeaderContentKind,
+} from "./timelineClipHeaderVisibility.js";
 
 // ── Font helpers ─────────────────────────────────────────────────────────
 //
@@ -522,6 +525,11 @@ export function buildTimelineClipVisualStyle(args: {
     playbackRate: number;
     name: string;
     fontFamily?: string;
+    /**
+     * 片段内容类型。缺省 audio；isPitchAdjustment 仅保留给旧调用点。
+     */
+    contentKind?: TimelineClipHeaderContentKind;
+    /** @deprecated 使用 contentKind。true 等价于 pitch_reference。 */
     isPitchAdjustment?: boolean;
     groupId?: string;
     isGroupActive?: boolean;
@@ -623,7 +631,8 @@ export function buildTimelineClipVisualStyle(args: {
         darkMode ? -HEADER_LUMINANCE_STEP : HEADER_LUMINANCE_STEP,
     );
 
-    const isPitchAdj = args.isPitchAdjustment === true;
+    const contentKind: TimelineClipHeaderContentKind =
+        args.contentKind ?? (args.isPitchAdjustment === true ? "pitch_reference" : "audio");
     const {
         showChain,
         showMute,
@@ -632,7 +641,7 @@ export function buildTimelineClipVisualStyle(args: {
         showPlaybackRate,
         showGainLabel,
         showName,
-    } = resolveTimelineClipHeaderVisibility(args.widthPx, isPitchAdj);
+    } = resolveTimelineClipHeaderVisibility(args.widthPx, contentKind);
     const showChainBadge = showChain && args.groupId != null;
 
     // Compute labels early so we can measure their widths with the correct font

@@ -12,46 +12,20 @@ use super::types::{EngineClip, EngineSnapshot, ResampledStereo, StretchJob, Stre
 use super::util::{quantize_i64, quantize_u32};
 
 pub(crate) fn compute_track_gains(tracks: &[Track]) -> HashMap<&str, (f32, bool, bool)> {
-    let by_id: HashMap<&str, &Track> = tracks.iter().map(|t| (t.id.as_str(), t)).collect();
-    let any_solo = tracks.iter().any(|t| t.solo);
-
-    let mut out = HashMap::with_capacity(tracks.len());
-
-    for t in tracks {
-        let mut gain = 1.0f32;
-        let mut muted = false;
-        let mut soloed = false;
-
-        let mut cur = Some(t.id.as_str());
-        let mut safety = 0;
-
-        while let Some(id) = cur {
-            if let Some(node) = by_id.get(id) {
-                gain *= crate::gain::clamp_gain(node.volume);
-                muted |= node.muted;
-                soloed |= node.solo;
-                cur = node.parent_id.as_deref();
-            } else {
-                break;
-            }
-
-            safety += 1;
-            if safety > 2048 {
-                break;
-            }
-        }
-
-        // Solo overrides mute: when a track (or its ancestor) is soloed,
-        // its own mute flag is ignored so that solo always wins.
-        let effective_muted = if any_solo && soloed { false } else { muted };
-
-        out.insert(
-            t.id.as_str(),
-            (gain, effective_muted, if any_solo { soloed } else { true }),
-        );
-    }
-
-    out
+    // 唯一语义在 kernel：这里只把拥有所有权的 map 投影成借用键，避免快照
+    // 与离线混音 / MIDI 试听各维护一份父子链与 solo 规则。
+    let outputs = hifishifter_kernel::state::compute_track_output_gains(tracks);
+    tracks
+        .iter()
+        .filter_map(|track| {
+            outputs.get(&track.id).map(|output| {
+                (
+                    track.id.as_str(),
+                    (output.gain, output.muted, output.solo_ok),
+                )
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn source_bounds_frames(

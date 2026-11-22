@@ -58,10 +58,15 @@ export function readSlipClip(clip: SessionState["clips"][number]): SlipClipView 
         reversed: !!clip.reversed,
         loopEnabled: !!clip.loopEnabled,
         isContentBearing:
-            !!clip.sourcePath || !!(clip.midiNoteData && clip.midiNoteData.length > 0),
+            !!clip.sourcePath ||
+            !!(clip.midiNoteData && clip.midiNoteData.length > 0) ||
+            !!(clip.midiTakeNoteData && clip.midiTakeNoteData.length > 0) ||
+            (clip.midiTakeLengthSec ?? 0) > 1e-9,
         contentDurSec: resolveClipContentDurationSec({
             sourcePath: clip.sourcePath,
             midiNoteData: clip.midiNoteData ?? null,
+            midiTakeNoteData: clip.midiTakeNoteData ?? null,
+            midiTakeLengthSec: clip.midiTakeLengthSec,
             durationFrames: clip.durationFrames,
             sourceSampleRate: clip.sourceSampleRate,
             durationSec: clip.durationSec,

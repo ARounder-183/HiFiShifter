@@ -168,6 +168,7 @@ function clip(overrides: Partial<TimelineCanvasClipModel> = {}): TimelineCanvasC
         gain: 1,
         playbackRate: 1,
         isMidiClip: false,
+        contentKind: "audio",
         isRenaming: false,
         snapOffsetPx: 0,
         leadingOverlapPx: 0,

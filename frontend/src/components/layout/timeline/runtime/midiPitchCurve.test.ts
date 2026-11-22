@@ -17,7 +17,11 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { generateMidiCurveFromNotes, resolveLoopCycleDescriptor } from "./midiPitchCurve";
+import {
+    generateMidiCurveFromNotes,
+    resolveClipLoopMarkerOffsetsSec,
+    resolveLoopCycleDescriptor,
+} from "./midiPitchCurve";
 
 const NOTES = [
     { startSec: 0, endSec: 1, note: 60 },
@@ -127,5 +131,22 @@ describe("resolveLoopCycleDescriptor", () => {
                 sourceEndSec: 3,
             }),
         ).toBeNull();
+    });
+});
+
+describe("resolveClipLoopMarkerOffsetsSec", () => {
+    it("uses MIDI take content length as the loop cycle when source media is absent", () => {
+        const markers = resolveClipLoopMarkerOffsetsSec({
+            loopEnabled: true,
+            reversed: false,
+            lengthSec: 3,
+            playbackRate: 1,
+            sourceStartSec: 0,
+            sourceEndSec: 0,
+            sourcePath: null,
+            midiTakeNoteData: [{ endSec: 0.5 }],
+            midiTakeLengthSec: 1,
+        });
+        expect(markers).toEqual([1, 2]);
     });
 });

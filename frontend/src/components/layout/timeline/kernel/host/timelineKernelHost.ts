@@ -56,6 +56,7 @@ import type { Keybinding } from "../../../../../features/keybindings/types";
 import { isPrimaryModifierDown } from "../../../../../utils/platform";
 import { WHEEL_LINE_HEIGHT_PX } from "../../../../../utils/pinchGesture";
 import { armRightDragContextMenuGuard } from "../../../../../utils/rightDragContextMenuGuard";
+import { resolveClipContentKind } from "../../../../../utils/clipContentKind";
 
 import { getTimelineWheelAction, type ScrollbarZone } from "../../../wheelGesture";
 import { buildTimelineTicks, type TimelineTick } from "../../runtime/buildTimelineTicks";
@@ -2356,7 +2357,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 playbackRate: clip.playbackRate,
                 name: clip.name,
                 groupId: clip.groupId,
-                isMidiClip: clip.midiNoteCount != null,
+                isMidiClip: resolveClipContentKind(clip) !== "audio",
+                contentKind: resolveClipContentKind(clip),
                 fadeInSec: clip.fadeInSec,
                 autoFadeInSec: clip.autoFadeInSec,
                 fadeInShape: clip.fadeInShape,
@@ -4003,7 +4005,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             playbackRate: clip.playbackRate ?? 1,
             name: clip.name ?? "",
             fontFamily: resolveFontFamily(),
-            isPitchAdjustment: clip.isMidiClip === true,
+            contentKind: clip.contentKind,
             groupId: clip.groupId,
             isGroupActive: clip.groupId != null && d.activeGroupIds.includes(clip.groupId),
             isGroupDisabled: clip.groupId != null && d.disabledGroupIds.includes(clip.groupId),
@@ -6294,7 +6296,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     playbackRate: clip.playbackRate,
                     name: clip.name,
                     groupId: clip.groupId,
-                    isMidiClip: clip.midiNoteCount != null,
+                    isMidiClip: resolveClipContentKind(clip) !== "audio",
+                    contentKind: resolveClipContentKind(clip),
                 },
                 clipWidthPx,
             );
@@ -6311,7 +6314,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     playbackRate: clip.playbackRate,
                     name: clip.name,
                     groupId: clip.groupId,
-                    isMidiClip: clip.midiNoteCount != null,
+                    isMidiClip: resolveClipContentKind(clip) !== "audio",
+                    contentKind: resolveClipContentKind(clip),
                 };
                 const headerLayout = resolveClipHeaderLayout({
                     clipWidthPx,

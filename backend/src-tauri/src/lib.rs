@@ -94,7 +94,7 @@ pub use hifishifter_kernel::fade_curves;
 pub(crate) use hifishifter_kernel::{
     audio_utils, channel_decision, channel_mode, channel_policy, clip_rendering_state, config,
     dml_adapters, encode, formant_cache, gain, gpu_info, hnsep_chunk, hnsep_resources, media,
-    midi_export, midi_import, midi_preview, midi_take, mixdown, models, note_blocks, notebook_assets, pitch_analysis, pitch_clip,
+    midi_export, midi_import, midi_take, mixdown, models, note_blocks, notebook_assets, pitch_analysis, pitch_clip,
     pitch_editing, project, render_cache, render_key, renderer, seam, stereo_detect,
     synth_clip_cache, temp_manager,
 };

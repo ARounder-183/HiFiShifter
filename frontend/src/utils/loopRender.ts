@@ -147,18 +147,22 @@ export function resolveClipContentDurationSec(clip: {
         return d > 1e-9 ? d : null;
     }
     // 无源媒体（纯 MIDI / 音高参考块）：与后端 clip_source_media_duration_sec
-    // 保持**同一取值链** —— durationFrames/sourceSampleRate 优先，durationSec
-    // 次之，最后才是音符内容最大结束时间。取值链不一致会让前端曲线/标记的
-    // 回绕周期与引擎音频/音符放置（emit / assemble / fallback）错相。
+    // 保持**同一取值链**。MIDI 内容长度是权威回绕周期；旧 durationSec 可能是
+    // 宿主 item 长度，不能抢先。之后才退回音频元数据/音符最大结束时间。
+    if (!clip.sourcePath) {
+        if (
+            Number.isFinite(Number(clip.midiTakeLengthSec)) &&
+            Number(clip.midiTakeLengthSec) > 1e-9
+        ) {
+            return Number(clip.midiTakeLengthSec);
+        }
+    }
     const metadataDur = resolveLoopMediaDurationSec({
         durationFrames: clip.durationFrames,
         sourceSampleRate: clip.sourceSampleRate,
         durationSec: clip.durationSec,
     });
     if (metadataDur > 1e-9) return metadataDur;
-    if (Number.isFinite(Number(clip.midiTakeLengthSec)) && Number(clip.midiTakeLengthSec) > 1e-9) {
-        return Number(clip.midiTakeLengthSec);
-    }
     const notes = clip.midiTakeNoteData ?? clip.midiNoteData;
     if (notes && notes.length > 0) {
         let maxEnd = 0;

@@ -16,6 +16,7 @@ import {
     normalizeChannelMode,
 } from "../../../utils/channelMode";
 import { sharedFadeShape, sortAndFilterFadedClips } from "./clipFadeContext";
+import { resolveClipContentKind } from "../../../utils/clipContentKind";
 
 // ── 条目类型 ────────────────────────────────────────────────────────────────
 
@@ -207,11 +208,15 @@ export function collapseClipMenuEntries(entries: readonly ClipMenuEntry[]): Clip
 // ── 纯判定 ──────────────────────────────────────────────────────────────────
 
 export const isPitchClip = (clip: ClipInfo): boolean =>
-    clip.midiRole === "pitch_reference" || (clip.midiRole == null && clip.midiNoteCount != null);
+    resolveClipContentKind(clip) === "pitch_reference";
 
 /** 普通 MIDI Take：有 MIDI 内容，但不覆盖原声。 */
 export const isMidiTakeClip = (clip: ClipInfo): boolean =>
-    clip.midiRole === "midi_take" || (clip.midiRole == null && clip.midiTakeNoteCount != null);
+    resolveClipContentKind(clip) === "midi_take";
+
+/** 任一 MIDI 内容（音高参考或普通 MIDI Take）。 */
+export const isMidiContentClip = (clip: ClipInfo): boolean =>
+    resolveClipContentKind(clip) !== "audio";
 
 /** 某个片段是否至少有一个 take 带音频源（静音检测的前提）。 */
 export const hasAudioTake = (clip: ClipInfo): boolean =>
@@ -258,7 +263,9 @@ export function buildClipMenuModel(input: ClipMenuInput): ClipMenuEntry[] {
 
     const allPitch = selectedClips.length > 0 && selectedClips.every(isPitchClip);
     const anyPitch = selectedClips.some(isPitchClip);
-    const hasMixedTypes = anyPitch && !allPitch;
+    const allMidiContent = selectedClips.length > 0 && selectedClips.every(isMidiContentClip);
+    const anyMidiContent = selectedClips.some(isMidiContentClip);
+    const hasMixedTypes = anyMidiContent && !allMidiContent;
 
     const allMuted = isMulti ? selectedClips.every((c) => c.muted) : clip.muted;
     const allReversed = isMulti ? selectedClips.every((c) => c.reversed) : clip.reversed;
@@ -273,6 +280,7 @@ export function buildClipMenuModel(input: ClipMenuInput): ClipMenuEntry[] {
     const glueDisabled =
         !isMulti ||
         hasMixedTypes ||
+        anyMidiContent ||
         !selectedClips[0]?.trackId ||
         selectedClips.some((c) => c.trackId !== selectedClips[0].trackId);
 
@@ -415,7 +423,7 @@ export function buildClipMenuModel(input: ClipMenuInput): ClipMenuEntry[] {
                 );
             }
             // 替换素材：作用对象是**活跃 take** 的源媒体，因此归入 Take 范畴。
-            if (!allPitch) {
+            if (!allMidiContent) {
                 takeChildren.push(
                     item(
                         isMulti ? "replace-all" : "replace",
@@ -443,7 +451,7 @@ export function buildClipMenuModel(input: ClipMenuInput): ClipMenuEntry[] {
     });
 
     // ── 声道模式 / 倒放 / 循环 ─────────────────────────────────────────────
-    if (available.channelMode && caps.editClips) {
+    if (available.channelMode && caps.editClips && !anyMidiContent) {
         const channelChildren: ClipMenuEntry[] = CHANNEL_MODE_OPTIONS.map((option) =>
             item(
                 "channel-mode-" + String(option.value),
@@ -522,13 +530,15 @@ export function buildClipMenuModel(input: ClipMenuInput): ClipMenuEntry[] {
                 }),
             );
         }
-        out.push(
-            item(
-                isMulti ? "normalize-all" : "normalize",
-                isMulti ? t("ctx_normalize_all") : t("ctx_normalize"),
-                { shortcut: shortcuts.normalize },
-            ),
-        );
+        if (!allMidiContent) {
+            out.push(
+                item(
+                    isMulti ? "normalize-all" : "normalize",
+                    isMulti ? t("ctx_normalize_all") : t("ctx_normalize"),
+                    { shortcut: shortcuts.normalize },
+                ),
+            );
+        }
         if (available.addToParamSelection) {
             out.push(
                 item("add-to-param-selection", t("ctx_add_to_param_selection"), {
@@ -577,7 +587,7 @@ export function buildClipMenuModel(input: ClipMenuInput): ClipMenuEntry[] {
 
     // ── 音高参考 ───────────────────────────────────────────────────────────
     section(() => {
-        if (!allPitch && available.convertToPitchRef) {
+        if (!allPitch && !allMidiContent && available.convertToPitchRef) {
             return [item("pitch-reference-convert", t("ctx_convert_to_pitch_ref"))];
         }
         if (allPitch && available.updatePitchRef) {
@@ -589,7 +599,8 @@ export function buildClipMenuModel(input: ClipMenuInput): ClipMenuEntry[] {
     // ── 导出 ───────────────────────────────────────────────────────────────
     section(() => {
         const out: ClipMenuEntry[] = [];
-        if (!allPitch && caps.quickExport) out.push(item("quick-export", t("ctx_quick_export")));
+        if (!allMidiContent && caps.quickExport)
+            out.push(item("quick-export", t("ctx_quick_export")));
         if (available.exportMidi) out.push(item("export-midi", t("ctx_export_midi")));
         return out;
     });

@@ -9,6 +9,7 @@ import { hostMode, isPluginMode } from "../../../../services/hostCapabilities";
 import { coreApi } from "../../../../services/api/core";
 import { paramsApi } from "../../../../services/api/params";
 import { resolveRootTrackId } from "../../../../features/session/trackUtils";
+import { isMidiTakeClip } from "../../../../utils/clipContentKind";
 import { SCALE_NOTES } from "../../../../utils/musicalScales";
 import type { TimelineSessionSlice } from "./useTimelineState";
 import type { AppDispatch } from "../../../../app/store";
@@ -172,11 +173,7 @@ export function useTimelineMidiActions({
 
             const s = sessionRef.current;
             const single = clipIds.length === 1 ? s.clips.find((c) => c.id === clipIds[0]) : null;
-            if (
-                single &&
-                !isPluginMode() &&
-                (single.midiRole === "midi_take" || single.midiTakeNoteCount != null)
-            ) {
+            if (single && !isPluginMode() && isMidiTakeClip(single)) {
                 await paramsApi.exportMidiTake(single.id, saveResult.path);
                 return;
             }

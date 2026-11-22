@@ -250,15 +250,6 @@ impl<'a> MixdownProgress<'a> {
     }
 }
 
-/// 轨道推子的有效增益。
-///
-/// 【为什么转发到 `gain::clamp_gain`】推子与 clip 增益共用一个值域（REAPER 的
-/// +24.08 dB）。此前这里是独立的字面量 `4.0`，于是"把推子推到底"在混音里是 +12 dB、
-/// 在界面上却可以显示 +24 —— 同一个数在两处有不同的含义。
-fn clamp_track_volume(x: f32) -> f32 {
-    crate::gain::clamp_gain(x)
-}
-
 fn clamp11(x: f32) -> f32 {
     x.clamp(-1.0, 1.0)
 }
@@ -473,62 +464,12 @@ pub fn build_loop_tiled_segment(
     out
 }
 
-fn build_parent_map(tracks: &[Track]) -> HashMap<String, Option<String>> {
-    let mut map = HashMap::new();
-    for t in tracks {
-        map.insert(t.id.clone(), t.parent_id.clone());
-    }
-    map
-}
-
-fn track_lineage(track_id: &str, parent_map: &HashMap<String, Option<String>>) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = Some(track_id.to_string());
-    let mut safety = 0;
-    while let Some(id) = cur {
-        out.push(id.clone());
-        cur = parent_map.get(&id).and_then(|p| p.clone());
-        safety += 1;
-        if safety > 2048 {
-            break;
-        }
-    }
-    out
-}
-
 fn compute_track_gains(tracks: &[Track]) -> HashMap<String, (f32, bool, bool)> {
-    let parent_map = build_parent_map(tracks);
-    let by_id: HashMap<&str, &Track> = tracks.iter().map(|t| (t.id.as_str(), t)).collect();
-
-    let any_solo = tracks.iter().any(|t| t.solo);
-    let mut out = HashMap::new();
-
-    for t in tracks {
-        let lineage = track_lineage(&t.id, &parent_map);
-
-        let mut gain = 1.0f32;
-        let mut muted = false;
-        let mut soloed = false;
-        for id in &lineage {
-            if let Some(node) = by_id.get(id.as_str()) {
-                gain *= clamp_track_volume(node.volume);
-                muted |= node.muted;
-                soloed |= node.solo;
-            }
-        }
-
-        // Solo overrides mute: when a track (or its ancestor) is soloed,
-        // its own mute flag is ignored so that solo always wins.
-        let effective_muted = if any_solo && soloed { false } else { muted };
-
-        if any_solo {
-            out.insert(t.id.clone(), (gain, effective_muted, soloed));
-        } else {
-            out.insert(t.id.clone(), (gain, effective_muted, true));
-        }
-    }
-
-    out
+    // 与实时播放 / MIDI 试听共用 kernel 的唯一实现。
+    crate::state::compute_track_output_gains(tracks)
+        .into_iter()
+        .map(|(id, output)| (id, (output.gain, output.muted, output.solo_ok)))
+        .collect()
 }
 
 pub fn clip_duration_sec_from_wav(sample_rate: u32, channels: u16, pcm: &[f32]) -> Option<f64> {

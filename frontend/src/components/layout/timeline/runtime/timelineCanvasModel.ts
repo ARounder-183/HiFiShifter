@@ -47,6 +47,8 @@ import {
     type TimelineAxis,
 } from "../../renderKernel/timelineAxis.js";
 import { isAwaitingHostAudio } from "../../../../features/ara/hostAudio.js";
+import { resolveClipContentKind, type ClipContentKind } from "../../../../utils/clipContentKind.js";
+import { buildMidiNoteOccurrences } from "./midiNoteGeometry.js";
 import { compareClipLayerOrder } from "../trackOverlap";
 
 type SparseRenderClip = {
@@ -100,6 +102,8 @@ type SparseRenderClip = {
     reversed?: boolean;
     /** Loop（循环源）：延伸超出源媒体区间时按周期回绕。 */
     loopEnabled?: boolean;
+    /** 宿主给出的 Loop 回绕周期（秒）；优先于媒体/内容时长。 */
+    loopPeriodSec?: number | null;
     sourcePath?: string;
     durationSec?: number;
     durationFrames?: number;
@@ -107,7 +111,14 @@ type SparseRenderClip = {
     /** MIDI 音符数据（音高参考块的权威来源）。 */
     midiNoteData?: Array<{ startSec: number; endSec: number; note: number }>;
     /** 新 MIDI Take：复调音符（与音高参考的压平数据分开）。 */
-    midiTakeNoteData?: Array<{ startSec: number; endSec: number; note: number; velocity?: number; channel?: number }>;
+    midiTakeNoteData?: Array<{
+        startSec: number;
+        endSec: number;
+        note: number;
+        velocity?: number;
+        channel?: number;
+        muted?: boolean;
+    }>;
     midiTakeNoteCount?: number;
     midiTakeLengthSec?: number;
     midiRole?: "midi_take" | "pitch_reference";
@@ -146,6 +157,8 @@ export type TimelineCanvasClipModel = {
     playbackRate: number;
     groupId?: string;
     isMidiClip: boolean;
+    /** 内容类型：决定 header 控件与 body 细节的语义。 */
+    contentKind: ClipContentKind;
     /**
      * 该 clip 是**无源占位**：宿主尚未把音频交给插件（未分配 ARA region）。
      *
@@ -234,6 +247,8 @@ export type TimelineCanvasClipModel = {
         heightPx: number;
         velocity: number;
         channel: number;
+        muted: boolean;
+        note: number;
     }>;
 };
 
@@ -342,8 +357,8 @@ function buildMidiPitchCurvePx(args: {
     pitchRange?: { min: number; max: number };
 }): Array<{ x: number; y: number }> | undefined {
     const clip = args.clip;
-    // 只有 MIDI / 音高参考块有音高内容（音频 clip 画波形）。
-    if (clip.midiNoteCount == null) return undefined;
+    // 折线只属于音高参考；普通 MIDI Take 画复调音符块。
+    if (resolveClipContentKind(clip) !== "pitch_reference") return undefined;
     const clipLengthSec = Number(clip.lengthSec) || 0;
     if (!(clipLengthSec > 0)) return undefined;
 
@@ -354,13 +369,20 @@ function buildMidiPitchCurvePx(args: {
     const notes = clip.midiNoteData;
 
     // 每 clip 只算一次内容时长 D（曲线与回绕标记共用）。
-    const contentDurSec = resolveClipContentDurationSec({
+    const resolvedContentDurSec = resolveClipContentDurationSec({
         sourcePath: clip.sourcePath,
         midiNoteData: notes ?? null,
+        midiTakeNoteData: clip.midiTakeNoteData ?? null,
+        midiTakeLengthSec: clip.midiTakeLengthSec ?? null,
         durationFrames: clip.durationFrames,
         sourceSampleRate: clip.sourceSampleRate,
         durationSec: clip.durationSec,
     });
+    const hostLoopPeriod = Number(clip.loopPeriodSec);
+    const contentDurSec =
+        Number.isFinite(hostLoopPeriod) && hostLoopPeriod > 1e-9
+            ? hostLoopPeriod
+            : resolvedContentDurSec;
 
     if (notes && notes.length > 0) {
         // 曲线消费窗口：非 Loop 正放 = 起点+长度×速率（派生），倒放 =
@@ -479,25 +501,83 @@ function buildMidiTakeNotesPx(args: {
     axis: TimelineAxis;
     clip: SparseRenderClip;
     bodyHeightPx: number;
-    pitchRange?: { min: number; max: number };
-}): Array<{
-    x: number;
-    y: number;
-    widthPx: number;
-    heightPx: number;
-    velocity: number;
-    channel: number;
-}> | undefined {
+}):
+    | Array<{
+          x: number;
+          y: number;
+          widthPx: number;
+          heightPx: number;
+          velocity: number;
+          channel: number;
+          muted: boolean;
+          note: number;
+      }>
+    | undefined {
+    if (resolveClipContentKind(args.clip) !== "midi_take") return undefined;
     const notes = args.clip.midiTakeNoteData;
     if (!notes || notes.length === 0) return undefined;
     const clipLengthSec = Math.max(0, Number(args.clip.lengthSec) || 0);
     if (clipLengthSec <= 1e-9) return undefined;
-    const rate = Math.abs(Number(args.clip.playbackRate) || 1) || 1;
-    const sourceStart = Number(args.clip.sourceStartSec) || 0;
-    const pitchMin = args.pitchRange?.min ?? 0;
-    const pitchMax = args.pitchRange?.max ?? 127;
+    const sourceStartSec = Number(args.clip.sourceStartSec) || 0;
+    const contentDurSec = resolveClipContentDurationSec({
+        sourcePath: args.clip.sourcePath,
+        midiTakeNoteData: notes,
+        midiTakeLengthSec: args.clip.midiTakeLengthSec,
+        durationFrames: args.clip.durationFrames,
+        sourceSampleRate: args.clip.sourceSampleRate,
+        durationSec: args.clip.durationSec,
+    });
+    const hostLoopPeriod = Number(args.clip.loopPeriodSec);
+    const loopContentDurationSec =
+        Number.isFinite(hostLoopPeriod) && hostLoopPeriod > 1e-9 ? hostLoopPeriod : contentDurSec;
+    const rawSourceEnd = Number(args.clip.sourceEndSec);
+    const seRaw =
+        Number.isFinite(rawSourceEnd) && rawSourceEnd > 1e-9
+            ? rawSourceEnd
+            : (loopContentDurationSec ?? (Number.isFinite(rawSourceEnd) ? rawSourceEnd : 0));
+    const srcEnd = resolveSourceEndSec({
+        loopEnabled: Boolean(args.clip.loopEnabled),
+        reversed: Boolean(args.clip.reversed),
+        sourceStartSec,
+        playbackRate: Math.abs(Number(args.clip.playbackRate) || 1) || 1,
+        lengthSec: clipLengthSec,
+        sourceEndSec: seRaw,
+    });
+    const loopCycle = resolveLoopCycleDescriptor({
+        loopEnabled: Boolean(args.clip.loopEnabled),
+        contentDurationSec: loopContentDurationSec,
+        sourceStartSec,
+        sourceEndSec: srcEnd,
+    });
+    const occurrences = buildMidiNoteOccurrences({
+        notes,
+        clipLengthSec,
+        playbackRate: Number(args.clip.playbackRate) || 1,
+        reversed: Boolean(args.clip.reversed),
+        loopEnabled: Boolean(args.clip.loopEnabled),
+        sourceStartSec,
+        sourceEndSec: srcEnd,
+        loopCycle,
+    });
+    if (occurrences.length === 0) return undefined;
+
+    // MIDI Take 的纵轴必须来自**自身音符**。音频的 pitch_range 是半音偏移，
+    // 拿它当绝对 MIDI 音高会把整段压成一条线。
+    let pitchMin = 127;
+    let pitchMax = 0;
+    for (const note of notes) {
+        if (!Number.isFinite(Number(note.note))) continue;
+        const value = Number(note.note);
+        if (value < pitchMin) pitchMin = value;
+        if (value > pitchMax) pitchMax = value;
+    }
+    if (pitchMax < pitchMin) return undefined;
+    const pitchPad = Math.max(1, (pitchMax - pitchMin) * 0.06);
+    pitchMin -= pitchPad;
+    pitchMax += pitchPad;
     const span = Math.max(1, pitchMax - pitchMin);
-    const pad = Math.max(2, args.bodyHeightPx * 0.08);
+    const noteHeight = Math.max(2.5, Math.min(7, args.bodyHeightPx * 0.12));
+    const pad = Math.max(noteHeight / 2 + 1, args.bodyHeightPx * 0.06);
     const usable = Math.max(1, args.bodyHeightPx - pad * 2);
     const out: Array<{
         x: number;
@@ -506,32 +586,23 @@ function buildMidiTakeNotesPx(args: {
         heightPx: number;
         velocity: number;
         channel: number;
+        muted: boolean;
+        note: number;
     }> = [];
-    for (const note of notes) {
-        let localStart = (note.startSec - sourceStart) / rate;
-        let localEnd = (note.endSec - sourceStart) / rate;
-        if (args.clip.reversed) {
-            const total = clipLengthSec;
-            const mirroredStart = total - localEnd;
-            const mirroredEnd = total - localStart;
-            localStart = mirroredStart;
-            localEnd = mirroredEnd;
-        }
-        localStart = Math.max(0, localStart);
-        localEnd = Math.min(clipLengthSec, localEnd);
-        if (localEnd <= localStart + 1e-9) continue;
-        const left = secToSpanPx(args.axis, localStart);
-        const width = Math.max(1.5, secToSpanPx(args.axis, localEnd - localStart) - 0.8);
+    for (const note of occurrences) {
+        const left = secToSpanPx(args.axis, note.startSec);
+        const width = Math.max(1.25, secToSpanPx(args.axis, note.endSec - note.startSec) - 0.6);
         const normalized = Math.max(0, Math.min(1, (note.note - pitchMin) / span));
-        const heightPx = Math.max(2, Math.min(6, args.bodyHeightPx * 0.07));
-        const y = pad + (1 - normalized) * usable - heightPx;
+        const y = pad + (1 - normalized) * usable - noteHeight / 2;
         out.push({
             x: left,
             y,
             widthPx: width,
-            heightPx,
-            velocity: note.velocity ?? 100,
-            channel: note.channel ?? 0,
+            heightPx: noteHeight,
+            velocity: note.velocity,
+            channel: note.channel,
+            muted: note.muted,
+            note: note.note,
         });
     }
     return out.length > 0 ? out : undefined;
@@ -542,7 +613,7 @@ function buildMidiLoopMarkerOffsetsPx(args: {
     clip: SparseRenderClip;
 }): number[] | undefined {
     const clip = args.clip;
-    if (clip.midiNoteCount == null) return undefined;
+    if (resolveClipContentKind(clip) === "audio") return undefined;
     const clipStartSec = Number(clip.startSec) || 0;
     // 只从视口左缘之前一点开始产出标记：`resolveClipLoopMarkerOffsetsSec` 会用
     // 它直接跳到可视范围内的第一个回绕点。不跳会从 clip 入口逐周期空转，长循环
@@ -550,15 +621,34 @@ function buildMidiLoopMarkerOffsetsPx(args: {
     // margin 取内核的水平预构建边距量级（512px），保证窗口左侧的标记也在。
     const marginSec = 512 / Math.max(1e-9, args.axis.pxPerSec);
     const fromLocalSec = Math.max(0, viewportStartSec(args.axis) - marginSec - clipStartSec);
+    const sourceStartSec = Number(clip.sourceStartSec) || 0;
+    const storedSourceEnd = Number(clip.sourceEndSec) || 0;
+    const contentDurSec = resolveClipContentDurationSec({
+        sourcePath: clip.sourcePath,
+        midiNoteData: clip.midiNoteData ?? null,
+        midiTakeNoteData: clip.midiTakeNoteData ?? null,
+        midiTakeLengthSec: clip.midiTakeLengthSec ?? null,
+        durationFrames: clip.durationFrames,
+        sourceSampleRate: clip.sourceSampleRate,
+        durationSec: clip.durationSec,
+    });
+    const hostLoopPeriod = Number(clip.loopPeriodSec);
+    const fallbackEnd =
+        Number.isFinite(hostLoopPeriod) && hostLoopPeriod > 1e-9 ? hostLoopPeriod : contentDurSec;
+    const sourceEndSec =
+        storedSourceEnd > 1e-9 ? storedSourceEnd : (fallbackEnd ?? storedSourceEnd);
     const offsets = resolveClipLoopMarkerOffsetsSec({
         loopEnabled: Boolean(clip.loopEnabled),
         reversed: Boolean(clip.reversed),
         lengthSec: Number(clip.lengthSec) || 0,
         playbackRate: Number(clip.playbackRate) || 1,
-        sourceStartSec: Number(clip.sourceStartSec) || 0,
-        sourceEndSec: Number(clip.sourceEndSec) || 0,
+        sourceStartSec,
+        sourceEndSec,
         sourcePath: clip.sourcePath,
         midiNoteData: clip.midiNoteData ?? null,
+        midiTakeNoteData: clip.midiTakeNoteData ?? null,
+        midiTakeLengthSec: clip.midiTakeLengthSec ?? null,
+        loopPeriodSec: clip.loopPeriodSec ?? null,
         durationFrames: clip.durationFrames,
         sourceSampleRate: clip.sourceSampleRate,
         durationSec: clip.durationSec,
@@ -846,7 +936,8 @@ export function buildSparseClipRenderModel(args: {
             gain: clipItemGain(clip),
             playbackRate: clip.playbackRate,
             groupId: clip.groupId,
-            isMidiClip: clip.midiNoteCount != null || clip.midiTakeNoteCount != null,
+            isMidiClip: resolveClipContentKind(clip) !== "audio",
+            contentKind: resolveClipContentKind(clip),
             awaitingHostAudio: isAwaitingHostAudio(clip),
             trackColor: track.color,
             isRenaming: clip.id === args.renamingClipId,
@@ -907,7 +998,9 @@ export function buildSparseClipRenderModel(args: {
             // 描边色只在真有折线时才产出（与「缺省即不画」的约定一致，
             // 不为音频 clip 白写一个字段）。
             midiPitchStroke:
-                clip.midiNoteCount != null ? resolveMidiPitchStrokeColor(clip) : undefined,
+                resolveClipContentKind(clip) !== "audio"
+                    ? resolveMidiPitchStrokeColor(clip)
+                    : undefined,
             midiTakeNotesPx: buildMidiTakeNotesPx({
                 axis: args.axis,
                 clip,
@@ -915,7 +1008,6 @@ export function buildSparseClipRenderModel(args: {
                     1,
                     args.rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT,
                 ),
-                pitchRange: args.clipPitchRanges?.[clip.id],
             }),
             midiLoopMarkerOffsetsPx: buildMidiLoopMarkerOffsetsPx({
                 axis: args.axis,

@@ -377,6 +377,9 @@ export function resolveClipLoopMarkerOffsetsSec(args: {
     sourceEndSec: number;
     sourcePath?: string | null;
     midiNoteData?: ReadonlyArray<{ endSec: number }> | null;
+    midiTakeNoteData?: ReadonlyArray<{ endSec: number }> | null;
+    midiTakeLengthSec?: number | null;
+    loopPeriodSec?: number | null;
     durationFrames?: number | null;
     sourceSampleRate?: number | null;
     durationSec?: number | null;
@@ -385,13 +388,20 @@ export function resolveClipLoopMarkerOffsetsSec(args: {
     const lengthSec = Math.max(0, Number(args.lengthSec) || 0);
     if (!(lengthSec > 1e-9)) return [];
     const markers: number[] = [];
-    const contentDurSec = resolveClipContentDurationSec({
+    const resolvedContentDurSec = resolveClipContentDurationSec({
         sourcePath: args.sourcePath,
         midiNoteData: args.midiNoteData ?? null,
+        midiTakeNoteData: args.midiTakeNoteData ?? null,
+        midiTakeLengthSec: args.midiTakeLengthSec ?? null,
         durationFrames: args.durationFrames,
         sourceSampleRate: args.sourceSampleRate,
         durationSec: args.durationSec,
     });
+    const hostLoopPeriod = Number(args.loopPeriodSec);
+    const contentDurSec =
+        Number.isFinite(hostLoopPeriod) && hostLoopPeriod > 1e-9
+            ? hostLoopPeriod
+            : resolvedContentDurSec;
     const rateRaw = Math.abs(Number(args.playbackRate ?? 1) || 1);
     const rate = rateRaw < 1e-6 ? 1 : rateRaw;
 

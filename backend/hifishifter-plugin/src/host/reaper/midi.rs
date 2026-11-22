@@ -40,7 +40,6 @@ pub(super) type TrackFxInstrument = unsafe extern "C" fn(*mut c_void) -> i32;
 pub(crate) struct MidiTakeSnapshot {
     pub hash: String,
     pub data: MidiTakeData,
-    pub diagnostics: Vec<String>,
 }
 
 pub(super) struct MidiApi {
@@ -397,11 +396,7 @@ impl NativeHost {
             preview: Default::default(),
         };
         data.normalize();
-        Some(Arc::new(MidiTakeSnapshot {
-            hash,
-            data,
-            diagnostics,
-        }))
+        Some(Arc::new(MidiTakeSnapshot { hash, data }))
     }
 
     /// 是否有 MIDI 读取能力。

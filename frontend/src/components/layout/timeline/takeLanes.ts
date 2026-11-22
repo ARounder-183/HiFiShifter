@@ -23,12 +23,16 @@ export const MIN_TAKE_LANE_HEIGHT_PX = 14;
  * `sourcePath` 当判据会让插件里的多 Take item 一条 lane 都展不开 —— 而"这个 item 有
  * 3 个 take、哪个是 active、哪个倒放"恰恰是宿主已经告诉我们、用户最想看到的信息。
  *
- * 音符判据同时覆盖了原实现想表达的那条边界：MIDI Take 有 `midiNoteData`，音频 Take 没有。
+ * 音符判据同时覆盖 `midiNoteData`（旧音高参考镜像）与 `midiTakeNoteData`（新 MIDI Take），
+ * 并显式拒绝带 MIDI 角色/内容长度的空 take；空 MIDI item 不能退化成音频 lane。
  */
 function isAudioTake(take: ClipTakeInfo): boolean {
     return (
+        take.midiRole !== "pitch_reference" &&
+        take.midiRole !== "midi_take" &&
         (!take.midiNoteData || take.midiNoteData.length === 0) &&
-        (!take.midiTakeNoteData || take.midiTakeNoteData.length === 0)
+        (!take.midiTakeNoteData || take.midiTakeNoteData.length === 0) &&
+        (take.midiTakeLengthSec ?? 0) <= 1e-9
     );
 }
 

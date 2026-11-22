@@ -513,6 +513,8 @@ function addClipEdgeCandidates(
         const mediaDur = resolveClipContentDurationSec({
             sourcePath: clip.sourcePath,
             midiNoteData: clip.midiNoteData ?? null,
+            midiTakeNoteData: clip.midiTakeNoteData ?? null,
+            midiTakeLengthSec: clip.midiTakeLengthSec,
             durationFrames: clip.durationFrames,
             sourceSampleRate: clip.sourceSampleRate,
             durationSec: clip.durationSec,

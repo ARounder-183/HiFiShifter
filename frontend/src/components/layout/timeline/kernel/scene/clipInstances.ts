@@ -60,6 +60,7 @@ export interface ClipInstanceClip {
     /** header 尾部被后序同轨 Clip 覆盖的宽度（绘制的标签收边用）。 */
     readonly trailingHeaderOverlapPx?: number;
     readonly isMidiClip?: boolean;
+    readonly contentKind?: import("../../../../../utils/clipContentKind").ClipContentKind;
 }
 
 /** 实例构建参数。 */
@@ -175,8 +176,8 @@ function computeSeamClipIds(clips: readonly ClipInstanceClip[]): Set<string> {
  * 特殊说明：
  * - 样式模块在 node 测试环境下走 DOM 兜底（`typeof document === "undefined"` 分支），
  *   因此本构建器可在无 DOM 环境单测。
- * - `isPitchAdjustment` 沿用既有渲染路径的传法（`isMidiClip`），保持视觉一致；
- *   该命名与语义的偏差属于既有代码的历史约定，不在本次 Spike 修正范围内。
+ * - `contentKind` 决定 header 的可见控件；它来自与 Canvas2D 细节层同一个
+ *   `resolveClipContentKind` 判据，避免 GL 块面与命中/细节尺寸分叉。
  *
  * @returns 构建器实例；内部缓冲跨帧复用，须长生命周期持有。
  */
@@ -213,7 +214,7 @@ export function createClipInstanceBuilder(): ClipInstanceBuilder {
                     playbackRate: clip.playbackRate,
                     name: clip.name,
                     fontFamily: args.fontFamily,
-                    isPitchAdjustment: clip.isMidiClip === true,
+                    contentKind: clip.contentKind,
                     groupId: clip.groupId,
                     isGroupActive,
                     isGroupDisabled,

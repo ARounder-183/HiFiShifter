@@ -294,6 +294,7 @@ export function drawTimelineCanvas(
             groupId?: string;
             name: string;
             isMidiClip?: boolean;
+            contentKind?: import("../../../../utils/clipContentKind").ClipContentKind;
             /**
              * 该 clip 是**无源占位**：宿主尚未把音频交给插件（未分配 ARA region）。
              *
@@ -339,6 +340,8 @@ export function drawTimelineCanvas(
                 heightPx: number;
                 velocity: number;
                 channel: number;
+                muted: boolean;
+                note: number;
             }>;
         }>;
         /** 轨道横向分界线（延伸到工程末尾之后）。 */
@@ -588,7 +591,7 @@ export function drawTimelineCanvas(
             playbackRate: clip.playbackRate,
             name: clip.name,
             fontFamily,
-            isPitchAdjustment: clip.isMidiClip,
+            contentKind: clip.contentKind,
             groupId: clip.groupId,
             isGroupActive,
             isGroupDisabled,
@@ -1282,6 +1285,8 @@ export function drawTimelineCanvas(
             heightPx: number;
             velocity: number;
             channel: number;
+            muted: boolean;
+            note: number;
         }>;
         muted: boolean;
         clip: { left: number; top: number; width: number; height: number };
@@ -1440,16 +1445,10 @@ export function drawTimelineCanvas(
 
     // ── MIDI Take 的复调音符块 ────────────────────────────────────────
     if (midiTakeNotes.length > 0) {
-        const channelColors = [
-            "#60a5fa",
-            "#34d399",
-            "#fbbf24",
-            "#f472b6",
-            "#a78bfa",
-            "#22d3ee",
-            "#fb923c",
-            "#4ade80",
-        ];
+        // 通道色相保持可区分，但饱和度/明度收敛到与 clip 色块同一视觉层，
+        // 不再用高饱和纯色把时间轴变成玩具钢琴。
+        const channelHues = [205, 158, 42, 330, 264, 190, 24, 132];
+        const blackKeys = new Set([1, 3, 6, 8, 10]);
         ctx.save();
         for (const block of midiTakeNotes) {
             ctx.save();
@@ -1457,14 +1456,36 @@ export function drawTimelineCanvas(
             ctx.rect(block.clip.left, block.clip.top, block.clip.width, block.clip.height);
             ctx.clip();
             for (const note of block.notes) {
-                ctx.globalAlpha = (block.muted ? 0.35 : 0.75) * (0.45 + 0.55 * (note.velocity / 127));
-                ctx.fillStyle = channelColors[note.channel % channelColors.length]!;
-                ctx.fillRect(
-                    block.clip.left + note.x,
-                    block.clip.top + note.y,
-                    note.widthPx,
-                    note.heightPx,
-                );
+                const velocity = Math.max(0, Math.min(127, note.velocity)) / 127;
+                const alpha = (block.muted ? 0.28 : 0.9) * (0.38 + 0.62 * velocity);
+                if (note.muted) {
+                    ctx.globalAlpha = alpha * 0.55;
+                    ctx.fillStyle = "rgb(148, 163, 184)";
+                } else {
+                    const hue = channelHues[Math.abs(note.channel) % channelHues.length]!;
+                    const lightness = blackKeys.has(Math.round(note.note) % 12) ? 46 : 60;
+                    ctx.globalAlpha = alpha;
+                    ctx.fillStyle = "hsl(" + hue + ", 58%, " + lightness + "%)";
+                }
+                const x = block.clip.left + note.x;
+                const y = block.clip.top + note.y;
+                const w = Math.max(1, note.widthPx);
+                const h = Math.max(1.5, note.heightPx);
+                if (w <= 1.6 || h <= 2.2) {
+                    ctx.fillRect(x, y, w, h);
+                    continue;
+                }
+                const radius = Math.min(2, w / 2, h / 2);
+                ctx.beginPath();
+                ctx.roundRect(x, y, w, h, radius);
+                ctx.fill();
+                if (w > 4) {
+                    // 顶部 1px 高光给音符一点“实体感”，比纯色小方块更接近
+                    // 钢琴卷帘的 note 视觉，同时不增加描边负担。
+                    ctx.globalAlpha = alpha * 0.32;
+                    ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
+                    ctx.fillRect(x + 0.8, y + 0.6, Math.max(0, w - 1.6), 0.8);
+                }
             }
             ctx.restore();
         }
