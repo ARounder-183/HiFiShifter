@@ -1,33 +1,31 @@
-name: HiFiShifter VST3 (macOS / Linux)
+name: HiFiShifter VST3 (linux-aarch64 / macos-x86_64 check)
 
-# Runs **in parallel** with build.yml (the Windows merged installer): this pipeline owns
-# only the Unix plugin artifacts.
+# build.yml is the single build and distribution pipeline: PRs build three platforms
+# (windows-x86_64 / macos-arm64 / linux-x86_64) and tag/manual runs build all six, always
+# including the VST3 + CLAP plugins in each platform's package.
 #
-# [Why a separate pipeline] The Windows one is organized around MSVC env imports + WebView2
-# + an NSIS installer; nothing on the Unix side is shared: the build script is bash, the
-# artifacts are a .vst3 bundle + tar.gz. Forcing both into one matrix only yields a pile of
-# `if: runner.os == ...` branches, each exercised on exactly one platform.
+# [Why this workflow still exists] Two Unix architectures are release-only in build.yml:
+# linux-aarch64 and macos-x86_64. Without an early check, a cross-architecture compile
+# error (the `c_char` signedness mismatch on aarch64 is the concrete example) would only
+# surface when a tag is pushed. This workflow compiles the VST3 shell for exactly those two
+# architectures on every PR, so that gap is covered without rebuilding anything build.yml
+# already builds.
 #
-# The two pipelines share only two conventions: artifact naming
-# (HiFiShifter_v<version>_<os>-<arch>-vst3) and "CI builds only".
-
-# [CI builds only] This workflow runs no unit tests / integration tests / testkit; run
-# scripts/checks/run-rust-gates.ps1 locally for tests.
+# [Why it uploads no artifact] It is a compile gate, not a distribution path; users get the
+# unified packages from build.yml. Only failure diagnostics are uploaded.
 #
-# [Why not on push] The Unix pipeline is a four-platform matrix + SDK fetches; a push
-# trigger costs disproportionately much, so it stays PR/tag-triggered.
+# [Why not on tags] build.yml's full matrix builds both platforms on tags; running this
+# again would be exactly the duplication this workflow exists to avoid.
 on:
   workflow_dispatch:
   pull_request:
     branches: [main, develop]
-  push:
-    tags: ["v*"]
 
 permissions:
   contents: read
 
 concurrency:
-  group: vst3-unix-${{ github.workflow }}-${{ github.ref }}
+  group: vst3-unix-check-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -38,35 +36,23 @@ jobs:
     uses: ./.github/workflows/frontend-build.yml
 
   vst3-unix:
-    name: VST3 ${{ matrix.name }}
+    name: VST3 ${{ matrix.name }} (compile check)
     needs: frontend
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        # [Why there is no exclude here] This workflow once used
-        # `exclude: [{name: ${{ github.event_name == 'pull_request' && 'linux-aarch64' || '' }}}]`
-        # to run only two platforms on PRs. The result was **no job instance created at all**:
-        # the run log showed only frontend, without a single line for vst3-unix, while the same
-        # construct worked fine in build.yml. Rather than keep guessing GitHub's matrix
-        # expansion rules, all four platforms now run — this workflow only starts on PR /
-        # tag / manual dispatch, and two extra parallel legs cost far less than "nothing ran
-        # yet everything looked green".
+        # The two platforms build.yml leaves to its tag/manual matrix. Keep this list in
+        # sync with that matrix: adding a platform there without removing it here means the
+        # same plugin is compiled twice on every PR.
         include:
-          - name: linux-x86_64
-            os: ubuntu-24.04
-            platform: linux-x86_64
           - name: linux-aarch64
             os: ubuntu-24.04-arm
             platform: linux-aarch64
-          # The two macOS architectures package separately, no universal2: arm64 uses
-          # CoreML + WebGPU, x86_64 uses ort-tract(CPU), linking **different** ONNX backends;
-          # lipo would only stuff two static inference runtimes into one file (double the
-          # size) with no performance gain for either architecture.
-          - name: macos-arm64
-            os: macos-15
-            platform: macos-arm64
+          # macOS arm64 uses CoreML + WebGPU; x86_64 uses ort-tract(CPU) and links a
+          # different ONNX backend, so the two architectures must be compiled separately
+          # (no universal2 — lipo would only duplicate the static inference runtimes).
           - name: macos-x86_64
             os: macos-15-intel
             platform: macos-x86_64
@@ -109,10 +95,6 @@ jobs:
         run: |
           brew install cmake || true
 
-      # [Why the Node version must be pinned] The frontend inside the bundle is produced by
-      # `npm run build`, and the vite 8 frontend artifact is built once by frontend-build.yml
-      # and distributed as an artifact — the same frontend/dist should not be built again on
-      # four pipelines (with differing versions, no less).
       - name: Download frontend artifact
         uses: actions/download-artifact@v8
         with:
@@ -128,9 +110,9 @@ jobs:
           # `dist/` (frontend-build.yml packages from inside the frontend directory).
           # Extracting to the repo root drops the output into `$GITHUB_WORKSPACE/dist` —
           # this workflow's own build-output directory — effectively discarding the built
-          # frontend; build.sh is not given `--skip-frontend`, so all four platforms would
-          # each run the full npm ci + build again, making the "share one frontend artifact"
-          # comment pointless. Aligned with the build.yml / clap.yml solution (-d frontend).
+          # frontend; build.sh is not given `--skip-frontend`, so both platforms would each
+          # run the full npm ci + build again, making the "share one frontend artifact"
+          # comment pointless.
           unzip -o frontend-dist/$ZIP -d frontend
 
       # The bridge script is **hand-written JS**; a syntax error shows up as a blank plugin
@@ -156,25 +138,8 @@ jobs:
       # CI does not reimplement any step.
       - name: Build and package
         # The frontend artifact comes from frontend-build.yml (extracted to frontend/dist
-        # above): --skip-frontend makes build.sh reuse it, so the four legs no longer each
-        # rerun the npm build.
+        # above): --skip-frontend makes build.sh reuse it instead of rerunning npm.
         run: bash scripts/vst3/unix/build.sh --skip-frontend --no-verify
-
-      # The file name already carries the version and platform (generated by build.sh);
-      # this just reads it out so the four platforms do not look identical in the artifact list.
-      - name: Determine artifact name
-        id: artifact-name
-        run: echo "base=$(basename dist/*.tar.gz .tar.gz)" >> "$GITHUB_OUTPUT"
-
-      - name: Upload VST3 bundle
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ steps.artifact-name.outputs.base }}
-          path: |
-            dist/*.tar.gz
-            dist/*.sha256
-          if-no-files-found: error
-          retention-days: 30
 
       - name: Upload build diagnostics on failure
         if: failure()
