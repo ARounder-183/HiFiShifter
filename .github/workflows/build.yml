@@ -576,8 +576,10 @@ jobs:
       #
       # [Why they ship on the same leg as the App] The App and plugins share the document
       # format, the model manifest version, and the frontend artifact; producing both from
-      # one build makes a version mismatch impossible. The formats' own builds remain with
-      # vst3-unix.yml and clap.yml — they only answer "can it be produced", not distribution.
+      # one build makes a version mismatch impossible. This workflow is the sole build path
+      # for every platform's App and plugins. The only remaining standalone plugin job is
+      # `vst3-unix.yml`: a PR-only compile check for the two Unix architectures that this
+      # PR matrix leaves to tag builds. It produces no distribution artifact.
       - name: Package unified installer (Unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -717,9 +719,10 @@ jobs:
         with:
           name: ${{ steps.artifact-name-nonwindows.outputs.artifact-name }}
           # package.sh's naming literal is
-          # `HiFiShifter_v<version>_<os>-<arch>-unified.{pkg,tar.gz}`.
+          # `HiFiShifter_v<version>_<os>-<arch>-unified.{pkg,tar.gz}` — note the **underscore**
+          # before `<os>-<arch>` (the tag is appended to the version, not hyphenated onto it).
           # One artifact carries one installer; each platform has its own leg, so they cannot mix.
-          path: dist/HiFiShifter_*-${{ matrix.name }}-unified.*
+          path: dist/HiFiShifter_*_${{ matrix.name }}-unified.*
           if-no-files-found: error
 
       - name: Dump diagnostics on failure (Linux)
