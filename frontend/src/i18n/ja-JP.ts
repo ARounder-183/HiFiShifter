@@ -222,7 +222,7 @@ export const jaJP = {
     dock_expand: "展開",
     dock_collapse: "タブバーに折りたたむ",
     dock_rename_tab: "名前を変更...",
-    dock_drag_rearrange: "ドラッグで並べ替え",
+    dock_drag_float: "ドラッグでフロート",
     dock_dock_hint: "{modifier} を押しながらでドック",
     dock_dock_hint_always: "ドロップ先でドック",
     dock_hint_dock: "ここにドック",

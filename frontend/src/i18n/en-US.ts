@@ -362,7 +362,7 @@ export const enUS = {
     dock_expand: "Expand",
     dock_collapse: "Collapse to a tab strip",
     dock_rename_tab: "Rename...",
-    dock_drag_rearrange: "Drag to rearrange",
+    dock_drag_float: "Drag to float",
     dock_dock_hint: "Hold {modifier} to dock",
     dock_dock_hint_always: "Drop on a target to dock",
     dock_hint_dock: "Dock here",

@@ -209,7 +209,7 @@ export const zhCN = {
     dock_expand: "展开",
     dock_collapse: "折叠为标签条",
     dock_rename_tab: "重命名...",
-    dock_drag_rearrange: "拖拽以重排",
+    dock_drag_float: "拖拽以浮动",
     dock_dock_hint: "按住 {modifier} 可停靠",
     dock_dock_hint_always: "拖到目标位置即可停靠",
     dock_hint_dock: "停靠到此处",

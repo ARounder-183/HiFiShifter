@@ -1,7 +1,7 @@
 /*
  * 停靠系统的 tooltip 文案。
  *
- * 【为什么要一个模块】"拖拽以重排 / 按住 Ctrl 可停靠"这句提示需要把**当前生效的
+ * 【为什么要一个模块】"拖拽以浮动 / 按住 Ctrl 可停靠"这句提示需要把**当前生效的
  * 停靠修饰键**渲染进去（Windows/Linux 是 Ctrl、macOS 是 ⌘、也可被用户改成 Alt /
  * Shift / 不按修饰键）。修饰键的可读名称由快捷键系统统一提供（`formatKeybinding`
  * 已经处理了平台差异与符号），这里只是把它取出来填进模板 —— 平台判断不能在本
@@ -54,7 +54,11 @@ export function dockModifierHint(
 }
 
 /**
- * 停靠抓手的悬停提示（两行）：`拖拽以重排` + `按住 {修饰键} 可停靠`。
+ * 停靠抓手的悬停提示（两行）：`拖拽以浮动` + `按住 {修饰键} 可停靠`。
+ *
+ * 【为什么第一行不是"重排"】紧凑抓手只在单标签组里出现，而单标签没有顺序可调
+ * （`inReorderBand` 要求 `tabCount > 1`）；它拖出去的实际动作是浮动、按住修饰键
+ * 则停靠。提示必须说用户真正会发生什么。
  *
  * 文案里带换行符，由自定义 tooltip 的 `white-space: pre-line` 渲染为两行
  * （见 `AppTooltip`）。**不要**改用原生 `title`：原生 tooltip 无法保证换行与
@@ -67,6 +71,6 @@ export function dockDragHint(
     modifier: DockSettings["dockModifier"] | undefined,
     translate: (key: string) => string,
 ): string {
-    // 两行：第一行说明"这是拖拽重排"，第二行给出停靠方式（与幽灵提示同源）。
-    return [translate("dock_drag_rearrange"), dockModifierHint(modifier, translate)].join("\n");
+    // 两行：第一行说明"这是拖拽浮动"，第二行给出停靠方式（与幽灵提示同源）。
+    return [translate("dock_drag_float"), dockModifierHint(modifier, translate)].join("\n");
 }

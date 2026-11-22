@@ -890,6 +890,14 @@ export interface TabDragArgs {
     tabsetId: string;
     tabCount: number;
     tabBarElement: HTMLElement | null;
+    /**
+     * 拆出浮窗时，指针相对浮窗左上角的偏移。
+     *
+     * 标签的缺省值是 48/12：指针落在浮窗标题栏左侧，像"从标签上拎起来"。
+     * 紧凑抓手的左上角只有 24px 宽，沿用 48 会让浮窗跑到指针左侧甚至屏幕外；
+     * 它传入指针在抓手内的偏移，使浮窗左上角贴住抓手。
+     */
+    offset?: { x: number; y: number };
 }
 
 /** 从一个标签开始拖拽。 */
@@ -928,9 +936,9 @@ export function beginTabDrag(event: React.PointerEvent, args: TabDragArgs): void
         pointerId: event.pointerId,
         startX: event.clientX,
         startY: event.clientY,
-        // 拆成浮窗时把指针放在标题栏左侧一点，符合"从标签上抓起来"的直觉。
-        offsetX: 48,
-        offsetY: 12,
+        // 缺省按"从标签上抓起来"的手感；左上角抓手传入自己的指针偏移。
+        offsetX: args.offset?.x ?? 48,
+        offsetY: args.offset?.y ?? 12,
         tabsetId: args.tabsetId,
         tabBarRect: tabBarRect
             ? { x: tabBarRect.x, y: tabBarRect.y, w: tabBarRect.width, h: tabBarRect.height }

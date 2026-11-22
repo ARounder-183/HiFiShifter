@@ -289,7 +289,7 @@ export const koKR = {
     dock_expand: "펼치기",
     dock_collapse: "탭 바 접기",
     dock_rename_tab: "이름 바꾸기...",
-    dock_drag_rearrange: "드래그하여 재배치",
+    dock_drag_float: "드래그하여 플로팅",
     dock_dock_hint: "{modifier}를 누르면 도킹",
     dock_dock_hint_always: "대상에 놓으면 도킹",
     dock_hint_dock: "여기에 도킹",
