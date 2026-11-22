@@ -174,7 +174,12 @@ impl ChainGate {
 pub(super) trait FxChain {
     fn count(&self) -> Result<i32, String>;
     /// `index` 处的 FX 显示名写进 `buffer`；宿主拒绝时返回 `false`。
-    fn name(&self, index: i32, buffer: &mut [i8]) -> Result<bool, String>;
+    ///
+    /// 【为什么缓冲是 `c_char` 而不是 `i8`】`char` 的符号性是**目标平台**决定的：
+    /// x86_64 上是 `i8`，而 aarch64 Linux 上是 `u8`。写死 `i8` 只在 x86_64 上
+    /// 恰好等于 `c_char`，交叉编译到 linux-aarch64 时就会和 [`FxName`] 的签名
+    /// 对不上（`*mut i8` vs `*mut u8`）。缓冲区必须跟随 `c_char` 本身。
+    fn name(&self, index: i32, buffer: &mut [c_char]) -> Result<bool, String>;
     fn enabled(&self, index: i32) -> Result<bool, String>;
     fn offline(&self, index: i32) -> Result<bool, String>;
     /// 整条链的总开关。没有这个读数的链返回 [`ChainGate::Unknown`]。
@@ -206,7 +211,7 @@ impl FxChain for TrackChain<'_> {
     fn count(&self) -> Result<i32, String> {
         checked(self.authorized, || unsafe { (self.api.count)(self.track) })
     }
-    fn name(&self, index: i32, buffer: &mut [i8]) -> Result<bool, String> {
+    fn name(&self, index: i32, buffer: &mut [c_char]) -> Result<bool, String> {
         let size = buffer.len() as i32;
         checked(self.authorized, || unsafe {
             (self.api.name)(self.track, index, buffer.as_mut_ptr(), size)
@@ -259,7 +264,7 @@ impl FxChain for TakeChain<'_> {
     fn count(&self) -> Result<i32, String> {
         checked(self.authorized, || unsafe { (self.api.count)(self.take) })
     }
-    fn name(&self, index: i32, buffer: &mut [i8]) -> Result<bool, String> {
+    fn name(&self, index: i32, buffer: &mut [c_char]) -> Result<bool, String> {
         let size = buffer.len() as i32;
         checked(self.authorized, || unsafe {
             (self.api.name)(self.take, index, buffer.as_mut_ptr(), size)
@@ -307,7 +312,7 @@ pub(super) fn probe(chain: &dyn FxChain, class_name: &str) -> Result<ChainFacts,
         });
     }
     let needle = class_name.to_ascii_lowercase();
-    let mut buffer = [0_i8; 256];
+    let mut buffer = [0 as c_char; 256];
     let mut matching = 0_usize;
     for index in 0..count {
         if !chain.name(index, &mut buffer)? {
@@ -389,7 +394,7 @@ pub(super) fn read_chain(chain: &dyn FxChain, class_name: &str) -> Result<ChainR
     let mut found = 0_usize;
     let mut enabled = 0_usize;
     let mut offline = 0_usize;
-    let mut buffer = [0_i8; 256];
+    let mut buffer = [0 as c_char; 256];
     for index in 0..count {
         if !chain.name(index, &mut buffer)? {
             continue;
@@ -512,12 +517,12 @@ mod tests {
         fn count(&self) -> Result<i32, String> {
             Ok(self.entries.len() as i32)
         }
-        fn name(&self, index: i32, buffer: &mut [i8]) -> Result<bool, String> {
+        fn name(&self, index: i32, buffer: &mut [c_char]) -> Result<bool, String> {
             for (slot, byte) in buffer
                 .iter_mut()
                 .zip(self.entries[index as usize].0.as_bytes())
             {
-                *slot = *byte as i8;
+                *slot = *byte as c_char;
             }
             Ok(true)
         }
