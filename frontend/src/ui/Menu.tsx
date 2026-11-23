@@ -34,10 +34,11 @@
  *   - 无值：常驻的**锚点**容器（工具栏按钮的 `position: relative` 外壳），只表示
  *     "这里会长出菜单"。`AppTooltip` 的注释记录了为什么不能把两者混为一谈。
  *
- * 【菜单表面必须挂在 `document.body`】`AppContextMenu` 由调用方 portal，
+ * 【菜单表面必须挂在主题作用域、且在文档流之外】`AppContextMenu` 由调用方 portal，
  * `AppAnchoredMenu` 自己 portal。留在触发它的布局盒里会被沿途任何一层
  * `overflow: hidden` 裁掉 —— 实测参数编辑器工具栏下拉要穿过 9 层，可视高度 0px
- * （详见 `src/index.css` 的 `.hs-menu--submenu`）。新增菜单表面时请沿用这条。
+ * （详见 `src/index.css` 的 `.hs-menu--submenu`）。挂载目标用
+ * `menuPortalContainer()`：优先 `.radix-themes` 以拿全 Radix 令牌，无主题时退回 body。
  */
 import {
     Fragment,
