@@ -31,11 +31,27 @@ if [ "$(uname -s)" != "Darwin" ]; then
   exit 1
 fi
 
+# `cargo tauri` is what this repository uses for desktop builds; a clean CI runner only
+# has npm. `npx tauri` is not an option -- no such executable exists on npm.
+if command -v cargo-tauri >/dev/null 2>&1; then
+  tauri_cli=(cargo tauri)
+else
+  tauri_cli=(npx --yes --package @tauri-apps/cli@2 tauri)
+fi
+
+# gen/apple is produced by `tauri ios init` and cannot be generated on a non-macOS
+# host, so unlike gen/android it is not committed. `ios build` stops with "iOS project
+# not found" when it is missing, which does not say how to create one.
+if [ ! -d "backend/src-tauri/gen/apple" ]; then
+  echo "== gen/apple is missing; initialising the iOS project"
+  ( cd backend && "${tauri_cli[@]}" ios init --ci )
+fi
+
 if [ "$simulator" -eq 1 ]; then
   rust_target="aarch64-apple-ios-sim"
   echo "== simulator build ($rust_target); signing skipped"
   rustup target add "$rust_target" >/dev/null
-  ( cd backend && npx tauri ios build --target "$rust_target" --features onnx --debug )
+  ( cd backend && "${tauri_cli[@]}" ios build --target "$rust_target" --features onnx --debug )
   exit $?
 fi
 
@@ -48,4 +64,4 @@ fi
 rust_target="aarch64-apple-ios"
 rustup target add "$rust_target" >/dev/null
 echo "== device build ($rust_target), team $APPLE_DEVELOPMENT_TEAM"
-( cd backend && npx tauri ios build --target "$rust_target" --features onnx )
+( cd backend && "${tauri_cli[@]}" ios build --target "$rust_target" --features onnx )

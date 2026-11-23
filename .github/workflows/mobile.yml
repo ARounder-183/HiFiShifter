@@ -56,12 +56,27 @@ jobs:
       # The NDK version is pinned: AGP picks the newest installed NDK, and an
       # unpinned one silently changes the C++ toolchain between runs (WORLD and
       # Signalsmith are compiled by it).
+      #
+      # [Why the platform and build-tools are named explicitly] setup-android
+      # installs only cmdline-tools and platform-tools. The generated project asks
+      # for compileSdk 36 (see backend/src-tauri/gen/android/app/build.gradle.kts),
+      # and a missing platform fails as "failed to find target with hash string
+      # android-36" -- a message that names a hash, not a package.
+      #
+      # [Why cmake] libopus (via opusic-sys) is built by CMake, and the NDK
+      # toolchain file cannot drive the Visual Studio generator; the SDK's cmake
+      # also ships the ninja binary the build needs. scripts/build/android.sh
+      # prepends it to PATH and sets CMAKE_GENERATOR=Ninja.
       - name: Set up Android SDK + NDK
         uses: android-actions/setup-android@v3
-      - name: Install NDK 27
+      - name: Install SDK packages and NDK 27
         run: |
           set -euo pipefail
-          sdkmanager --install "ndk;27.0.12077973"
+          sdkmanager --install \
+            "ndk;27.0.12077973" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "cmake;3.31.6"
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v5
