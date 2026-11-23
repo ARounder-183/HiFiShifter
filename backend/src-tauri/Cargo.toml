@@ -38,7 +38,6 @@ rmp-serde = "1"
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-rfd = "0.17"
 hound = "3"
 cpal = "0.18"
 rubato = "5"
@@ -64,6 +63,18 @@ rusty_flac = "=0.1.3"
 id3 = "1"
 
 ndarray = { version = "0.17", optional = true }
+
+# ── 只在桌面形态存在的依赖 ───────────────────────────────────────────────────
+#
+# 【为什么 rfd 必须搬到这里】`rfd` 0.17 的后端只有 gtk3 / linux / macos / wasm /
+# win32 —— **没有任何 android / ios 实现**。留在全局 `[dependencies]` 里，移动目标
+# 会直接编译失败（失败点在链接期，错误信息指向一个与本项目无关的 crate）。
+# 调用点已全部改走 `platform::dialog::FileDialog`，移动分支不使用它。
+#
+# `trash` 同理：回收站是三个桌面平台的系统集成（`IFileOperation` / `NSFileManager` /
+# XDG trash），移动端没有对应 API。移动分支走 `platform::trash` 的永久删除。
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+rfd = "0.17"
 trash = "5.2.9"
 
 [target.'cfg(windows)'.dependencies]
@@ -154,3 +165,23 @@ ort = { version = "2.0.0-rc.13", optional = true, default-features = false, feat
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
 ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "alternative-backend"] }
 ort-tract = { version = "0.4.0", optional = true }
+
+# ── 移动目标 ─────────────────────────────────────────────────────────────────
+#
+# 【为什么必须写这两段】`ort` 是可选依赖，而 `onnx` feature 是默认开启的。
+# 一个目标若没有任何一段 `ort` 声明，`dep:ort` 在该目标上就不存在，
+# `--features onnx` 会直接报 "feature onnx includes dep:ort, but ort is not an
+# optional dependency"。桌面有 6 段、移动必须有这 2 段。
+#
+# 【NNAPI 而不是 WebGPU】`ort-sys` 2.0.0-rc.13 的 `download-binaries` 只为
+# `aarch64-linux-android` 提供 `+nnapi` 分发；`+wgpu` 没有 Android 构建。
+# iOS 侧是 `+coreml`，与 macOS ARM 同一套 EP（且要求 iOS ≥ 15.1 —— 见
+# `tauri.ios.conf.json` 的 minimumSystemVersion）。
+#
+# 【为什么没有 x86_64-linux-android】预编译分发里根本没有这一项。模拟器因此
+# 必须用真机 ABI（arm64），或改用 `load-dynamic` 自行提供 .so，见设计文档 §7 R15。
+[target.'cfg(target_os = "android")'.dependencies]
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "nnapi", "copy-dylibs"] }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "coreml", "copy-dylibs"] }

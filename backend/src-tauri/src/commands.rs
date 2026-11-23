@@ -459,17 +459,23 @@ pub fn new_project(
     }
 }
 
+// 【为什么这一组对话框命令必须是 async】见下方 "===================== dialogs" 的
+// 长注释：系统文件对话框是阻塞调用，同步命令会让 WebView 的 IPC 线程在模态期间
+// 完全停摆 —— 桌面上的症状是"弹着对话框，进度条与状态栏都不再刷新"，移动端则是
+// 直接死锁。panic 守卫搬进阻塞任务内部，语义不变（panic 仍被拦成失败值）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_project_dialog() -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+pub async fn open_project_dialog() -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(|| {
         common::guard_command(
             "open_project_dialog",
             serde_json::json!({ "ok": false, "error": "panic in command: open_project_dialog" }),
             project::open_project_dialog,
         )
-    }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        serde_json::json!({ "ok": false, "error": format!("open_project_dialog task failed: {error}") })
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -704,39 +710,45 @@ pub fn seal_project_notes_history(state: State<'_, AppState>) -> serde_json::Val
 
 /// 导出记事本正文（.md / .html）：图片以 data URI 内嵌，产物自包含。
 #[tauri::command(rename_all = "camelCase")]
-pub fn notebook_export_document(
-    state: State<'_, AppState>,
+pub async fn notebook_export_document(
+    app: tauri::AppHandle,
     suggested_name: String,
     extension: String,
     content: String,
 ) -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
         common::guard_command(
             "notebook_export_document",
             serde_json::json!({ "ok": false, "error": "panic in command: notebook_export_document" }),
             || notebook::export_document(state, suggested_name, extension, content),
         )
-    }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        serde_json::json!({ "ok": false, "error": format!("notebook_export_document task failed: {error}") })
+    })
 }
 
 /// 把一条附件另存为独立文件。
 #[tauri::command(rename_all = "camelCase")]
-pub fn notebook_save_asset_as(
-    state: State<'_, AppState>,
+pub async fn notebook_save_asset_as(
+    app: tauri::AppHandle,
     asset_id: String,
     suggested_name: Option<String>,
 ) -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
         common::guard_command(
             "notebook_save_asset_as",
             serde_json::json!({ "ok": false, "error": "panic in command: notebook_save_asset_as" }),
             || notebook::save_asset_as(state, asset_id, suggested_name),
         )
-    }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        serde_json::json!({ "ok": false, "error": format!("notebook_save_asset_as task failed: {error}") })
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -936,16 +948,18 @@ pub fn set_project_timeline_settings(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn import_project_dialog() -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+pub async fn import_project_dialog() -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(|| {
         common::guard_command(
             "import_project_dialog",
             serde_json::json!({ "ok": false, "error": "panic in command: import_project_dialog" }),
             project_import::import_project_dialog,
         )
-    }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        serde_json::json!({ "ok": false, "error": format!("import_project_dialog task failed: {error}") })
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1001,102 +1015,128 @@ pub fn set_project_stretch_settings(
     }
 }
 
+// ===================== surface =====================
+
+/// 当前形态的能力剖面。
+///
+/// 【为什么是一条命令而不是若干个谓词】前端在**挂载期**就需要它（决定外壳、令牌、
+/// 停靠剖面），逐条查询会变成 N 次 IPC，而且必然有人在第 N 次返回之前就读到了
+/// "还没有值"。一次给全，前端只需要等一次。
+///
+/// 【为什么没有参数、也没有 panic 守卫】它只读编译期常量与两张静态表，没有可失败的
+/// 分支，也没有可 panic 的锁 —— 加一层守卫只会掩盖"剖面算不出来"这种不可能事件。
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_surface_profile() -> crate::platform::SurfaceProfile {
+    crate::platform::profile()
+}
+
 // ===================== dialogs =====================
+//
+// 【为什么这一组必须是 async + spawn_blocking】系统文件对话框是**阻塞**调用：它自己
+// 开一个模态消息循环，直到用户选完才返回。同步命令在 WebView 的 IPC 线程内联执行 ——
+// 在 Windows 上那就是 UI 主线程；在 Android 上更是**同一个线程**（WebView 的 JS 线程
+// 就是主线程）。后者是致命的：系统选择器的回调必须回到主线程，而主线程正卡在等待里，
+// 于是永久死锁（社区 fork 实测）。改成 async + 阻塞池之后主线程全程可响应，而桌面的
+// 行为不变 —— 对话框照样模态，只是不再挡住其余 IPC。
+//
+// 【为什么 `save_project` 早就是这么做的】它在无路径分支里同样会弹 rfd，且已经在
+// `spawn_blocking` 里跑了很多版本。这一组只是把同一条已经验证过的路径补齐。
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_audio_dialog() -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
-        common::guard_command(
-            "open_audio_dialog",
-            serde_json::json!({ "ok": false, "error": "panic in command: open_audio_dialog" }),
-            dialogs::open_audio_dialog,
-        )
-    }
+pub async fn open_audio_dialog() -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(dialogs::open_audio_dialog)
+        .await
+        .unwrap_or_else(|error| {
+            serde_json::json!({
+                "ok": false,
+                "canceled": false,
+                "error": format!("open_audio_dialog task failed: {error}"),
+            })
+        })
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_audio_dialog_multi() -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
-        common::guard_command(
-            "open_audio_dialog_multi",
-            serde_json::json!({ "ok": false, "error": "panic in command: open_audio_dialog_multi" }),
-            dialogs::open_audio_dialog_multi,
-        )
-    }
+pub async fn open_audio_dialog_multi() -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(dialogs::open_audio_dialog_multi)
+        .await
+        .unwrap_or_else(|error| {
+            serde_json::json!({
+                "ok": false,
+                "canceled": false,
+                "error": format!("open_audio_dialog_multi task failed: {error}"),
+            })
+        })
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_audio_dialog_for_source(
+pub async fn open_audio_dialog_for_source(
     source_path: String,
     dialog_title: String,
 ) -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
-        common::guard_command(
-            "open_audio_dialog_for_source",
-            serde_json::json!({ "ok": false, "error": "panic in command: open_audio_dialog_for_source" }),
-            || dialogs::open_audio_dialog_for_source(source_path, dialog_title),
-        )
-    }
+    tauri::async_runtime::spawn_blocking(move || {
+        dialogs::open_audio_dialog_for_source(source_path, dialog_title)
+    })
+    .await
+    .unwrap_or_else(|error| {
+        serde_json::json!({
+            "ok": false,
+            "canceled": false,
+            "error": format!("open_audio_dialog_for_source task failed: {error}"),
+        })
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn pick_output_path() -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
-        common::guard_command(
-            "pick_output_path",
-            serde_json::json!({ "ok": false, "error": "panic in command: pick_output_path" }),
-            dialogs::pick_output_path,
-        )
-    }
+pub async fn pick_output_path(app: tauri::AppHandle) -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(move || dialogs::pick_output_path(&app, None))
+        .await
+        .unwrap_or_else(|error| {
+            serde_json::json!({
+                "ok": false,
+                "canceled": false,
+                "error": format!("pick_output_path task failed: {error}"),
+            })
+        })
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn pick_directory() -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
-        common::guard_command(
-            "pick_directory",
-            serde_json::json!({ "ok": false, "error": "panic in command: pick_directory" }),
-            dialogs::pick_directory,
-        )
-    }
+pub async fn pick_directory(app: tauri::AppHandle) -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(move || dialogs::pick_directory(&app))
+        .await
+        .unwrap_or_else(|error| {
+            serde_json::json!({
+                "ok": false,
+                "canceled": false,
+                "error": format!("pick_directory task failed: {error}"),
+            })
+        })
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_midi_dialog() -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
-        common::guard_command(
-            "open_midi_dialog",
-            serde_json::json!({ "ok": false, "error": "panic in command: open_midi_dialog" }),
-            dialogs::open_midi_dialog,
-        )
-    }
+pub async fn open_midi_dialog() -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(dialogs::open_midi_dialog)
+        .await
+        .unwrap_or_else(|error| {
+            serde_json::json!({
+                "ok": false,
+                "canceled": false,
+                "error": format!("open_midi_dialog task failed: {error}"),
+            })
+        })
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn pick_midi_output_path() -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
-        common::guard_command(
-            "pick_midi_output_path",
-            serde_json::json!({ "ok": false, "error": "panic in command: pick_midi_output_path" }),
-            dialogs::pick_midi_output_path,
-        )
-    }
+pub async fn pick_midi_output_path(app: tauri::AppHandle) -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(move || dialogs::pick_midi_output_path(&app, None))
+        .await
+        .unwrap_or_else(|error| {
+            serde_json::json!({
+                "ok": false,
+                "canceled": false,
+                "error": format!("pick_midi_output_path task failed: {error}"),
+            })
+        })
 }
-
 // ===================== waveform =====================
 //
 // 波形命令涉及重计算（mixdown 渲染 / 音频解码 + 峰值统计）。
@@ -2934,16 +2974,18 @@ pub fn open_log_folder(app: tauri::AppHandle) -> serde_json::Value {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn pick_diagnostics_output_path(dialog_title: Option<String>) -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+pub async fn pick_diagnostics_output_path(dialog_title: Option<String>) -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(move || {
         common::guard_command(
             "pick_diagnostics_output_path",
             serde_json::json!({ "ok": false, "error": "panic in command: pick_diagnostics_output_path" }),
             || diagnostics::pick_diagnostics_output_path(dialog_title),
         )
-    }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        serde_json::json!({ "ok": false, "error": format!("pick_diagnostics_output_path task failed: {error}") })
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2969,10 +3011,8 @@ pub async fn export_diagnostics(
 /// 视图 → 布局 → 「导出布局...」：原生保存对话框 + 后端写文件（WebView 内
 /// 的 `<a download>` 被拦截，见 `commands/json_export.rs` 的模块说明）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn export_layout_json(json: String) -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+pub async fn export_layout_json(json: String) -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(move || {
         common::guard_command(
             "export_layout_json",
             serde_json::json!({ "ok": false, "error": "panic in command: export_layout_json" }),
@@ -2985,7 +3025,11 @@ pub fn export_layout_json(json: String) -> serde_json::Value {
                 )
             },
         )
-    }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        serde_json::json!({ "ok": false, "error": format!("export_layout_json task failed: {error}") })
+    })
 }
 
 /// 视图 → 外观设置 → 「导出」：把当前外观主题存成 JSON。
@@ -2993,10 +3037,8 @@ pub fn export_layout_json(json: String) -> serde_json::Value {
 /// 与布局导出共用一个实现 —— 外观这条路径此前用的是浏览器下载，因此**完全不起作用**
 /// （wry 拦截 `<a download>`）。默认文件名由前端给（主题名是用户起的，含非 ASCII）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn export_theme_json(json: String, default_file_name: String) -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+pub async fn export_theme_json(json: String, default_file_name: String) -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(move || {
         common::guard_command(
             "export_theme_json",
             serde_json::json!({ "ok": false, "error": "panic in command: export_theme_json" }),
@@ -3009,7 +3051,11 @@ pub fn export_theme_json(json: String, default_file_name: String) -> serde_json:
                 json_export::export_json_file(json, &file_name, "Export theme", "theme")
             },
         )
-    }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        serde_json::json!({ "ok": false, "error": format!("export_theme_json task failed: {error}") })
+    })
 }
 
 /// 前端把 invoke 失败 / 全局异常回传到后端统一日志（fire-and-forget）。
@@ -3018,10 +3064,11 @@ pub fn export_theme_json(json: String, default_file_name: String) -> serde_json:
 /// 与布局 / 主题导出共用 `json_export::export_json_file` —— 命令名是 invoke 的
 /// 稳定契约，因此**每处一个命令**（标题与日志前缀随业务变化），实现只有一份。
 #[tauri::command(rename_all = "camelCase")]
-pub fn export_vibrato_presets_json(json: String, default_file_name: String) -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+pub async fn export_vibrato_presets_json(
+    json: String,
+    default_file_name: String,
+) -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(move || {
         common::guard_command(
             "export_vibrato_presets_json",
             serde_json::json!({ "ok": false, "error": "panic in command: export_vibrato_presets_json" }),
@@ -3039,7 +3086,11 @@ pub fn export_vibrato_presets_json(json: String, default_file_name: String) -> s
                 )
             },
         )
-    }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        serde_json::json!({ "ok": false, "error": format!("export_vibrato_presets_json task failed: {error}") })
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -3396,16 +3447,18 @@ pub fn transliterate(
 // ===================== vocalshifter =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_vocalshifter_dialog() -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+pub async fn open_vocalshifter_dialog() -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(|| {
         common::guard_command(
             "open_vocalshifter_dialog",
             serde_json::json!({ "ok": false, "error": "panic in command: open_vocalshifter_dialog" }),
             vocalshifter::open_vocalshifter_dialog,
         )
-    }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        serde_json::json!({ "ok": false, "error": format!("open_vocalshifter_dialog task failed: {error}") })
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -3460,16 +3513,18 @@ pub fn paste_vocalshifter_clipboard(
 // ===================== reaper =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_reaper_dialog() -> serde_json::Value {
-    {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
+pub async fn open_reaper_dialog() -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(|| {
         common::guard_command(
             "open_reaper_dialog",
             serde_json::json!({ "ok": false, "error": "panic in command: open_reaper_dialog" }),
             reaper::open_reaper_dialog,
         )
-    }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        serde_json::json!({ "ok": false, "error": format!("open_reaper_dialog task failed: {error}") })
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]

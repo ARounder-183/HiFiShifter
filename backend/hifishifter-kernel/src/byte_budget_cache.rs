@@ -3,21 +3,55 @@
 //! Wraps `lru::LruCache` with byte-weight tracking. When the total estimated
 //! bytes exceeds the budget, the least-recently-used entries are evicted.
 //!
-//! Default budget: 1 GB (configurable via `HIFISHIFTER_PCM_CACHE_BUDGET_MB`).
+//! Default budget: 1 GB on desktop, 160 MB on mobile (both overridable via
+//! `HIFISHIFTER_PCM_CACHE_BUDGET_MB`).
 
 use lru::LruCache;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Default byte budget for all PCM caches combined (1 GB).
-const DEFAULT_BUDGET_BYTES: u64 = 1024 * 1024 * 1024;
+/// 桌面形态的默认预算（1 GB）。
+pub const DESKTOP_DEFAULT_BUDGET_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// 移动形态的默认预算（160 MB）。
+///
+/// 【为什么是 160 MB 而不是"1 GB 除以几"】这个数字来自移动端的**硬约束**，不是比例：
+/// iOS 给单个应用的常驻内存上限大致在 1~1.5 GB（机型相关），超过即被 jetsam 直接杀掉
+/// —— 没有异常、没有日志，用户看到的是"应用闪退"。而 PCM 缓存只是进程里的一份**派生
+/// 数据**，它旁边还要放：ORT 会话（百 MB 级）、WebGL 纹理（几十 MB）、解码后的工程
+/// 音频。把派生数据压在 160 MB 以内，剩下的预算才留给"不缓存就会算错"的东西。
+///
+/// 缓存变小不会改变正确性：`ByteBudgetCache` 只是更早地淘汰，淘汰后按需重算。
+pub const MOBILE_DEFAULT_BUDGET_BYTES: u64 = 160 * 1024 * 1024;
+
+/// 进程级默认预算。
+///
+/// 【为什么是运行期设置而不是 `cfg(target_os)`】内核是"设备无关"的（见 crate 文档），
+/// 里面出现平台判断会让它在插件形态下也要猜自己在哪。宿主在启动时用
+/// [`set_default_budget_bytes`] 声明一次，内核只管读 —— 于是"移动端用多少内存"这个
+/// 决策留在收敛层（`src-tauri/src/platform/`）里，只有一处。
+static DEFAULT_BUDGET_BYTES: AtomicU64 = AtomicU64::new(DESKTOP_DEFAULT_BUDGET_BYTES);
+
+/// 由宿主在启动时声明默认预算；传 0 或异常值被忽略。
+pub fn set_default_budget_bytes(bytes: u64) {
+    if bytes > 0 {
+        DEFAULT_BUDGET_BYTES.store(bytes, Ordering::Relaxed);
+    }
+}
+
+/// 当前生效的默认预算（字节）。
+pub fn default_budget_bytes() -> u64 {
+    DEFAULT_BUDGET_BYTES.load(Ordering::Relaxed)
+}
 
 /// Read `HIFISHIFTER_PCM_CACHE_BUDGET_MB` or return default budget in bytes.
 pub fn env_cache_budget_bytes() -> u64 {
+    let fallback_mb = (default_budget_bytes() / (1024 * 1024)).max(1);
     let mb = std::env::var("HIFISHIFTER_PCM_CACHE_BUDGET_MB")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .filter(|v| *v > 0)
-        .unwrap_or(DEFAULT_BUDGET_BYTES / (1024 * 1024));
+        .unwrap_or(fallback_mb);
     mb.saturating_mul(1024 * 1024)
 }
 

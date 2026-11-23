@@ -829,6 +829,20 @@ pub struct UiSettings {
     /// 的共享**（locale / 快捷键 / 主题 / 设备选择仍然共用）。
     #[serde(default)]
     pub dock_plugin: serde_json::Value,
+    /// 移动形态的停靠布局（与 `dock` / `dock_plugin` **同形**，三者互不干扰）。
+    ///
+    /// 【为什么需要第三个槽位】移动端不是"更小的桌面"：390×844 上文件浏览器一开就
+    /// 只剩 134px 给时间轴（实测最小可用宽度是 684px），用户必然把面板全关掉、只留
+    /// 一个标签组。那份布局放到桌面上是"只剩一个面板"，放到插件里是"6 个面板全关"，
+    /// 都不是用户想要的。三个形态各留一份，谁也不覆盖谁。
+    ///
+    /// 判据与 `dock_plugin` 完全一致：**凡是"正确取值取决于视口有多少像素"的设置
+    /// 分形态**；locale / 快捷键 / 主题 / 设备选择仍然共用。
+    ///
+    /// 同样必须在 `editor::settings::DEEP_MERGE_KEYS` 里，否则一次"只改一个行为
+    /// 开关"的部分保存会把 `layout` 子键整块抹掉。
+    #[serde(default)]
+    pub dock_mobile: serde_json::Value,
     /// 插件形态的音乐上下文。
     ///
     /// 【为什么必须存在】REAPER **没有工程调号概念**（`src-tauri/src/import/reaper_import.rs`
@@ -1948,6 +1962,7 @@ impl Default for UiSettings {
             notebook: serde_json::Value::Null,
             dock: serde_json::Value::Null,
             dock_plugin: serde_json::Value::Null,
+            dock_mobile: serde_json::Value::Null,
             plugin_musical_context: PluginMusicalContext::default(),
             pen_input: serde_json::Value::Null,
         }

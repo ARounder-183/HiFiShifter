@@ -288,6 +288,10 @@ pub(crate) fn delete_paths(
             errors.push(format!("protected path: {trimmed}"));
             continue;
         }
+        // 【为什么走收敛层】`trash` crate 只覆盖三个桌面平台的回收站；移动端没有
+        // 可编程的回收站（Android 的 MediaStore 回收站只管相册，iOS 根本没有面向
+        // 第三方应用的 API），因此收敛层在那里退化为永久删除并留一条 warn。
+        // 界面的文案由 `platform::trash::is_recoverable()` 决定，不该在这里猜。
         let result = if permanent {
             if path.is_dir() {
                 std::fs::remove_dir_all(path)
@@ -295,7 +299,7 @@ pub(crate) fn delete_paths(
                 std::fs::remove_file(path)
             }
         } else {
-            trash::delete(path).map_err(|e| std::io::Error::other(e.to_string()))
+            crate::platform::trash::delete(path)
         };
         match result {
             Ok(()) => deleted += 1,

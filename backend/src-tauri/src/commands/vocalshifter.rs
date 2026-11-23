@@ -20,7 +20,7 @@ fn update_window_title(window: &Window, name: &str, dirty: bool) {
 
 /// 弹出文件选择对话框，选择 .vshp / .vsp 文件。
 pub(super) fn open_vocalshifter_dialog() -> serde_json::Value {
-    let picked = rfd::FileDialog::new()
+    let picked = crate::platform::dialog::FileDialog::new()
         .add_filter("VocalShifter Project", &["vshp", "vsp"])
         .pick_file();
 

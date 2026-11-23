@@ -90,8 +90,62 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+/// iOS 应用容器的根。
+///
+/// 【为什么 `HOME` 在这里就是容器根】iOS 上每个应用进程的 `HOME` 被沙箱重定向到
+/// `.../Data/Application/<UUID>`，不是 `/var/mobile`。于是 `Library/...` 的既有
+/// 拼法**原样成立**，只是根的语义从"用户主目录"变成"应用容器"——这正是我们想要的：
+/// 设置落 `Library/Application Support`，缓存落 `Library/Caches`，日志落
+/// `Library/Logs`，与 macOS 逐字一致，两个苹果平台不需要两套解释。
+#[cfg(target_os = "ios")]
+fn ios_container() -> Option<PathBuf> {
+    home_dir()
+}
+
+/// Android 应用沙箱的根。
+///
+/// 【为什么不读 `HOME`】Android 上 `HOME` 通常**根本没有设置**（进程 uid 没有
+/// passwd 条目），此前本文件因此把 Android 判进 XDG 分支、算出 `None`，
+/// `apply_app_directories_override` 只能退回 Tauri 的默认目录。
+///
+/// 【为什么 `TMPDIR` 是可靠锚点】Android 运行时给每个应用进程设置
+/// `TMPDIR=<sandbox>/cache`（`ActivityThread` 注入），这是官方支持的约定，不是
+/// 某台设备上的巧合。从它退一级即得沙箱根 `/data/user/<uid>/<pkg>`。
+///
+/// 【拿不到时返回 None 而不是猜】猜错目录的后果是设置写到一个没人读的位置 ——
+/// 症状是"改了设置，重启又变回去"，比直接回退 Tauri 的目录难查得多。
+#[cfg(target_os = "android")]
+fn android_sandbox() -> Option<PathBuf> {
+    let raw = std::env::var_os("TMPDIR")?;
+    let path = PathBuf::from(raw);
+    // 标准形态 `<root>/cache`；个别定制 ROM 会给出更深或更浅的路径，此时
+    // 原样使用 `TMPDIR`（宁可落在 cache 下，也不要拿不到目录）。
+    if path.file_name().is_some_and(|name| name == "cache") {
+        if let Some(parent) = path.parent() {
+            return Some(parent.to_path_buf());
+        }
+    }
+    Some(path)
+}
+
+/// 移动端沙箱根（Android / iOS 各一条实现）。
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn mobile_root() -> Option<PathBuf> {
+    #[cfg(target_os = "android")]
+    {
+        android_sandbox()
+    }
+    #[cfg(target_os = "ios")]
+    {
+        ios_container()
+    }
+}
+
 /// XDG 目录：环境变量优先，缺省 `~/<fallback>`。
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "ios"))
+))]
 fn xdg_base(variable: &str, fallback: &str) -> Option<PathBuf> {
     std::env::var_os(variable)
         .map(PathBuf::from)
@@ -116,7 +170,25 @@ pub fn config_dir() -> Option<PathBuf> {
                 .join(PRODUCT_DIR),
         )
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(target_os = "android")]
+    {
+        // `files/` 是 Android 上"应用私有、卸载即删、不需要任何权限"的那一层，
+        // 与桌面的 `APPDATA` 语义最接近。
+        Some(mobile_root()?.join("files").join(PRODUCT_DIR))
+    }
+    #[cfg(target_os = "ios")]
+    {
+        Some(
+            mobile_root()?
+                .join("Library")
+                .join("Application Support")
+                .join(PRODUCT_DIR),
+        )
+    }
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "android", target_os = "ios"))
+    ))]
     {
         Some(xdg_base("XDG_CONFIG_HOME", ".config")?.join(PRODUCT_DIR))
     }
@@ -145,7 +217,25 @@ pub fn local_data_dir() -> Option<PathBuf> {
                 .join(PRODUCT_DIR),
         )
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(target_os = "android")]
+    {
+        Some(mobile_root()?.join("files").join(PRODUCT_DIR))
+    }
+    #[cfg(target_os = "ios")]
+    {
+        // 与 `config_dir` 同一个家：移动端没有"漫游"这个概念，分成两份只会让
+        // "设置到底写在哪"多出一种可能。
+        Some(
+            mobile_root()?
+                .join("Library")
+                .join("Application Support")
+                .join(PRODUCT_DIR),
+        )
+    }
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "android", target_os = "ios"))
+    ))]
     {
         Some(xdg_base("XDG_DATA_HOME", ".local/share")?.join(PRODUCT_DIR))
     }
@@ -165,7 +255,23 @@ pub fn cache_dir() -> Option<PathBuf> {
     {
         Some(home_dir()?.join("Library").join("Caches").join(PRODUCT_DIR))
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(target_os = "android")]
+    {
+        Some(mobile_root()?.join("cache").join(PRODUCT_DIR))
+    }
+    #[cfg(target_os = "ios")]
+    {
+        Some(
+            mobile_root()?
+                .join("Library")
+                .join("Caches")
+                .join(PRODUCT_DIR),
+        )
+    }
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "android", target_os = "ios"))
+    ))]
     {
         Some(xdg_base("XDG_CACHE_HOME", ".cache")?.join(PRODUCT_DIR))
     }
@@ -184,7 +290,23 @@ pub fn log_dir() -> Option<PathBuf> {
     {
         Some(home_dir()?.join("Library").join("Logs").join(PRODUCT_DIR))
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(target_os = "android")]
+    {
+        Some(mobile_root()?.join("files").join(PRODUCT_DIR).join("logs"))
+    }
+    #[cfg(target_os = "ios")]
+    {
+        Some(
+            mobile_root()?
+                .join("Library")
+                .join("Logs")
+                .join(PRODUCT_DIR),
+        )
+    }
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "android", target_os = "ios"))
+    ))]
     {
         Some(
             xdg_base("XDG_STATE_HOME", ".local/state")?
@@ -238,7 +360,17 @@ pub fn shared_data_dirs() -> Vec<PathBuf> {
         }
         dirs
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        // 【为什么移动端没有共享库】"共享"的前提是同一台机器上有**多个进程**要读
+        // 同一份只读载荷（独立 App + 若干插件）。移动端只有一个进程，且模型随包
+        // 分发在应用沙箱内 —— 一个候选路径都没有，返回空表就是事实。
+        Vec::new()
+    }
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "android", target_os = "ios"))
+    ))]
     {
         let mut dirs = Vec::new();
         if let Some(base) = xdg_base("XDG_DATA_HOME", ".local/share") {
@@ -392,7 +524,10 @@ pub fn legacy_roots() -> Vec<LegacyRoot> {
         }
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "android", target_os = "ios"))
+    ))]
     {
         if let Some(to) = config_dir() {
             roots.push(LegacyRoot {
@@ -565,7 +700,10 @@ mod tests {
             dirs[0]
         );
 
-        #[cfg(all(unix, not(target_os = "macos")))]
+        #[cfg(all(
+            unix,
+            not(any(target_os = "macos", target_os = "android", target_os = "ios"))
+        ))]
         assert!(
             dirs.iter().any(|dir| dir.ends_with(PRODUCT_DIR)),
             "Linux 缺少共享库候选：{dirs:?}"

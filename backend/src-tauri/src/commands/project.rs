@@ -1171,7 +1171,7 @@ pub(super) fn new_project(
 }
 
 pub(super) fn open_project_dialog() -> serde_json::Value {
-    let picked = rfd::FileDialog::new()
+    let picked = crate::platform::dialog::FileDialog::new()
         .add_filter("HiFiShifter Project", &["hshp", "hsp"])
         .add_filter("HiFiShifter Backup Project", &["hshp-bak", "hsp-bak"])
         .add_filter("JSON Project", &["json"])
@@ -1432,12 +1432,15 @@ fn default_project_save_name(state: &AppState) -> String {
     }
 }
 
-fn project_save_dialog(format: ProjectSaveFormat, default_name: &str) -> rfd::FileDialog {
+fn project_save_dialog(
+    format: ProjectSaveFormat,
+    default_name: &str,
+) -> crate::platform::dialog::FileDialog {
     let stem = Path::new(default_name)
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or("Untitled");
-    rfd::FileDialog::new()
+    crate::platform::dialog::FileDialog::new()
         .add_filter(format.filter_name(), format.extensions())
         .set_file_name(format!("{}.{}", stem, format.extension()))
 }

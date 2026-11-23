@@ -481,7 +481,7 @@ pub(super) fn export_document(
 
     // 类型名与扩展名同源（内核词表），不再在这里按扩展名手抄一份标签。
     let file_type = hifishifter_kernel::file_types::notebook_document(&ext);
-    let picked = rfd::FileDialog::new()
+    let picked = crate::platform::dialog::FileDialog::new()
         .add_filter(file_type.name(), &file_type.extension_refs())
         .set_file_name(format!("{base_name}.{ext}"))
         .save_file();
@@ -566,7 +566,7 @@ pub(super) fn save_asset_as(
     // 【为什么这里此前没有过滤器】附件另存为是唯一一处"只设文件名"的保存对话框，
     // 于是可以存成任意扩展名 —— 与插件侧同一个缺口。类型名由资产扩展名派生。
     let file_type = hifishifter_kernel::file_types::FileType::asset(&asset.ext);
-    let picked = rfd::FileDialog::new()
+    let picked = crate::platform::dialog::FileDialog::new()
         .set_file_name(name)
         .add_filter(file_type.name(), &file_type.extension_refs())
         .save_file();

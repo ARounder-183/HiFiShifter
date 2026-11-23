@@ -40,6 +40,30 @@ use std::process::Command;
 /// 路径可以稳定到达它。这是**构建期**耦合，不影响运行期依赖方向。
 const THIRD_PARTY: &str = "../src-tauri/third_party";
 
+/// **目标**操作系统的编译期事实。
+///
+/// 【为什么不能用 `cfg!(target_os)`】build script 是给**宿主**编译的，脚本里的
+/// `cfg!(target_os = ...)` 回答的是"我在哪台机器上构建"，不是"我在为谁构建"。
+/// 交叉编译时两者不同：在 Windows 上构建 Android 包时
+/// `cfg!(target_os = "windows")` 为真，于是 `-fPIC` 会被**跳过** ——
+/// 而 Android 的 .so 必须有位置无关代码，症状是一串与 PIC 无关的链接错误。
+/// 唯一正确的来源是 cargo 注入的 `CARGO_CFG_TARGET_OS`。
+fn target_os() -> String {
+    std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default()
+}
+
+/// 目标是否是移动形态（Android / iOS）。
+///
+/// 【为什么需要它】内核里两处原生依赖是**桌面专属**的：
+/// - SoundTouchDLL 是 CMake 构建的桌面动态库（Android/iOS 上根本没有 CMake 工具链，
+///   也没有 `.so`/`.dylib` 的打包位置）；
+/// - vslib 是 Windows 闭源 DLL。
+/// 移动端只保留 WORLD（C++ 静态）与 Signalsmith（header-only）—— 这两者用 NDK 的
+/// clang 就能编。缺少这道闸门，移动目标会卡在 build script 里，错误信息指向 cmake。
+fn is_mobile_target() -> bool {
+    matches!(target_os().as_str(), "android" | "ios")
+}
+
 fn main() {
     // ── 构建身份（必须**先于**任何早退）────────────────────────────────
     //
@@ -58,6 +82,14 @@ fn main() {
     );
 
     // 与 app 的 build.rs 共用同一个跳过开关：CI 只做类型检查时可以整体跳过原生构建。
+    //
+    // 【为什么必须有 rerun-if-env-changed】cargo 默认只在源码变化时重跑 build script。
+    // 少了这一行，"先在 `HIFISHIFTER_SKIP_NATIVE_BUILD=1` 下跑过一次类型检查、再正常
+    // 构建"这条最常见的本地流程会**复用那份没有原生库的产物**，随后在链接期报
+    // 找不到 sstretch / world 的符号 —— 而真正的根因是 build script 没重跑。
+    println!("cargo:rerun-if-env-changed=HIFISHIFTER_SKIP_NATIVE_BUILD");
+    println!("cargo:rerun-if-env-changed=HIFISHIFTER_OFFLINE");
+    println!("cargo:rerun-if-env-changed=HIFISHIFTER_SDK_MIRROR");
     let skip_native = std::env::var("HIFISHIFTER_SKIP_NATIVE_BUILD").unwrap_or_default();
     if skip_native == "1" {
         println!(
@@ -282,7 +314,7 @@ fn build_signalsmith_stretch() {
         build.flag("/utf-8");
     } else {
         build.flag("-std=c++14");
-        if !cfg!(target_os = "windows") {
+        if target_os() != "windows" {
             build.flag("-fPIC");
         }
         build.flag("-O2");
@@ -484,6 +516,28 @@ const RC_SHIM_AFXRES_H: &str = r#"/* Generated at build time by backend/hifishif
 "#;
 
 fn build_soundtouch() {
+    // ── 三道早退（顺序有意义）────────────────────────────────────────────
+    //
+    // 1. **移动目标**：SoundTouchDLL 是桌面动态库，移动端没有它的打包位置，也没有
+    //    CMake 工具链。移动端只保留 WORLD + Signalsmith 两条链。
+    // 2. **feature 关闭**：`soundtouch` 是**可选的运行期依赖**（模块用 libloading
+    //    按绝对路径加载，见 soundtouch.rs 的模块头）。关掉它时不该再跑一遍 cmake ——
+    //    此前这里无条件执行，于是"不要 SoundTouch 的构建"仍然会去联网克隆上游源码。
+    // 3. **跳过开关**：由 main() 处理。
+    if is_mobile_target() {
+        println!(
+            "cargo:warning=[soundtouch] target {} is mobile; skipping SoundTouchDLL (desktop-only)",
+            target_os()
+        );
+        return;
+    }
+    if std::env::var_os("CARGO_FEATURE_SOUNDTOUCH").is_none() {
+        println!(
+            "cargo:warning=[soundtouch] feature 'soundtouch' is off; skipping SoundTouchDLL build"
+        );
+        return;
+    }
+
     println!("cargo:warning=[kernel-native] starting build_soundtouch...");
 
     let st_src = format!("{}/soundtouch-static/soundtouch", THIRD_PARTY);
