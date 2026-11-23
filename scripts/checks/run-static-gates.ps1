@@ -63,4 +63,20 @@ Invoke-Gate 'SoundTouch generator gate' { python scripts/checks/check-soundtouch
 # Test names in the skip manifest must still resolve against the Rust sources.
 Invoke-Gate 'Test skip gate' { python scripts/checks/check-test-skips.py }
 
+# The mobile adaptation's central rule: cfg(target_os) is allowed in exactly one
+# directory (backend/src-tauri/src/platform/). A stray one raises no error on the
+# developer's machine; it only shows up as an unrelated failure when somebody
+# builds for a target they are not on.
+Invoke-Gate 'Platform boundary gate' { python scripts/checks/check-platform-boundary.py }
+
+# And its frontend counterpart: the application form has one answer (appForm).
+# A second answer (window width / user agent / pointer media query) is right on
+# the developer's device and wrong on somebody else's.
+#
+# [Why there is no separate "mobile bundle size" gate] frontend/scripts/check-bundle-size.mjs
+# already pins the first-paint chunk and the CSS total, and the mobile budget is
+# the same budget -- a second file would be a second source of truth for one
+# number. Run it with "npm run check:bundle" after a build.
+Invoke-Gate 'Mobile form gate' { python scripts/checks/check-mobile-form-gate.py }
+
 Write-Host 'All static gates passed.' -ForegroundColor Green

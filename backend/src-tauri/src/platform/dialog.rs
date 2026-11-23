@@ -149,7 +149,9 @@ impl FileDialog {
 /// "这个入口在移动端走系统选择器"而不是静默什么都不发生。
 pub fn unavailable_reason() -> Option<&'static str> {
     if crate::platform::is_mobile() {
-        Some("surface_reason_use_system_picker")
+        // 理由键由 `platform::mod` 统一定义（前端 `surfaceCapabilities.ts` 的白名单
+        // 与它逐字一致，由 `surfaceProfileContract.test.ts` 守住）。
+        Some(super::REASON_USE_SYSTEM_PICKER)
     } else {
         None
     }

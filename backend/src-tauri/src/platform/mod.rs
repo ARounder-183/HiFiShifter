@@ -208,6 +208,9 @@ const CAP_DIALOG_NATIVE_PICKER: &str = "dialog.nativeFilePicker";
 const REASON_TOUCH_INPUT: &str = "surface_reason_touch_input";
 const REASON_NO_PATH_ACCESS: &str = "surface_reason_no_path_access";
 const REASON_NOT_ON_THIS_SURFACE: &str = "surface_reason_not_on_this_surface";
+/// 移动端的文件选取走系统选择器（WebView 的 `<input type="file">`），
+/// 原生对话框命令因此不该被调用。
+pub(crate) const REASON_USE_SYSTEM_PICKER: &str = "surface_reason_use_system_picker";
 
 /// 当前形态的完整剖面。
 pub fn profile() -> SurfaceProfile {

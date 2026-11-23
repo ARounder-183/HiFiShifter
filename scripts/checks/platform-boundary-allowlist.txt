@@ -1,0 +1,78 @@
+# cfg(target_os = ...) sites that predate the platform convergence layer and
+# cannot move without a larger refactor. Format:
+#
+#   <path relative to the repo root> :: <trimmed source line>
+#
+# Every group needs a reason. The gate fails on stale entries, so a line that
+# stops matching must be deleted here in the same change.
+#
+# The rule itself: backend/src-tauri/src/platform/ is the only place allowed to
+# ask "what machine is this". Everything below is a compile-time wiring
+# decision (which module exists, which closed-source DLL is linked) or a
+# low-level per-OS implementation -- not a form decision.
+
+# -- backend/src-tauri/src/commands/project.rs
+# Windows drive-letter path comparison (case-insensitive). A pure string rule with
+# no platform facade of its own.
+backend/src-tauri/src/commands/project.rs :: if cfg!(target_os = "windows") {
+
+# -- backend/src-tauri/src/commands/reaper_clipboard.rs
+# REAPER clipboard exchange is three disjoint implementations (Win32 clipboard /
+# NSPasteboard / X11). A facade would rename them without removing a single line.
+backend/src-tauri/src/commands/reaper_clipboard.rs :: #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+backend/src-tauri/src/commands/reaper_clipboard.rs :: #[cfg(target_os = "linux")]
+backend/src-tauri/src/commands/reaper_clipboard.rs :: #[cfg(target_os = "macos")]
+backend/src-tauri/src/commands/reaper_clipboard.rs :: #[cfg(target_os = "windows")]
+
+# -- backend/src-tauri/src/commands/synth.rs
+# Windows path normalisation before handing a file to vslib. Same rule as
+# commands/project.rs.
+backend/src-tauri/src/commands/synth.rs :: if cfg!(target_os = "windows") {
+
+# -- backend/src-tauri/src/commands/vslib_status.rs
+# vslib is a closed-source Windows x86_64 DLL. These are feature-availability
+# conditions, not runtime form decisions -- they must sit next to the report they
+# shape, or the report and its precondition drift apart.
+backend/src-tauri/src/commands/vslib_status.rs :: #[cfg(all(feature = "vslib", target_os = "windows", target_arch = "x86_64"))]
+backend/src-tauri/src/commands/vslib_status.rs :: #[cfg(not(all(feature = "vslib", target_os = "windows", target_arch = "x86_64")))]
+
+# -- backend/src-tauri/src/launch_args.rs
+# macOS LaunchServices URLs (RunEvent::Opened) are a different input channel, not
+# a different form. The test arm keeps the parser testable on every host.
+backend/src-tauri/src/launch_args.rs :: #[cfg(any(target_os = "macos", test))]
+
+# -- backend/src-tauri/src/lib.rs
+# Module declarations and feature-gated re-exports. linux_desktop / macos_menu
+# cannot move into platform/: that would make the convergence layer depend on the
+# desktop-only module it is meant to abstract. The vslib re-export is the same
+# shape one level down (a closed-source Windows x86_64 DLL).
+backend/src-tauri/src/lib.rs :: #[cfg(all(feature = "vslib", target_os = "windows"))]
+backend/src-tauri/src/lib.rs :: #[cfg(target_os = "linux")]
+backend/src-tauri/src/lib.rs :: #[cfg(target_os = "macos")]
+backend/src-tauri/src/lib.rs :: #[cfg(target_os = "windows")]
+
+# -- backend/src-tauri/src/main.rs
+# The desktop entry point; not compiled for mobile at all (Tauri's mobile entry is
+# run() in lib.rs). The Linux arms translate the AppImage escape hatch into
+# GTK/WebKit environment variables, which must happen before GTK initialises --
+# there is no other process-level place for them.
+backend/src-tauri/src/main.rs :: #[cfg(target_os = "linux")]
+
+# -- backend/src-tauri/src/recording.rs
+# Module declaration for the per-OS capture backend (see capture.rs).
+backend/src-tauri/src/recording.rs :: #[cfg(target_os = "linux")]
+backend/src-tauri/src/recording.rs :: #[cfg(target_os = "windows")]
+
+# -- backend/src-tauri/src/recording/capture.rs
+# Loopback capture (WASAPI / PulseAudio / ScreenCaptureKit) is three unrelated
+# implementations behind one API. The cfg blocks are the per-OS modules.
+backend/src-tauri/src/recording/capture.rs :: #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+backend/src-tauri/src/recording/capture.rs :: #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+backend/src-tauri/src/recording/capture.rs :: #[cfg(not(target_os = "windows"))]
+backend/src-tauri/src/recording/capture.rs :: #[cfg(target_os = "linux")]
+backend/src-tauri/src/recording/capture.rs :: #[cfg(target_os = "macos")]
+backend/src-tauri/src/recording/capture.rs :: #[cfg(target_os = "windows")]
+
+# -- backend/src-tauri/src/state/app.rs
+# macOS-only window/menu hooks that must run inside the state initialiser.
+backend/src-tauri/src/state/app.rs :: #[cfg(target_os = "macos")]
