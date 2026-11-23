@@ -1199,3 +1199,40 @@ describe("菜单表面必须挂在文档流之外", () => {
         ).toEqual([]);
     });
 });
+
+/*
+ * portal 与旧滑块的最后防线。
+ *
+ * Radix Themes 的 --accent-9 只定义在 .radix-themes 上。任何含 Radix 控件的
+ * 弹出面必须挂 menuPortalContainer()；旧 .qt-range 若仍被 body portal 使用，
+ * thumb 背景必须带 fallback，否则会再次出现"看得见轨道、看不见滑块头"。
+ */
+describe("菜单 portal 与 .qt-range fallback", () => {
+    test("FadeContextMenu 使用 menuPortalContainer()，不再直接 portal 到 body", () => {
+        const source = readFileSync(
+            join("src", "components", "layout", "timeline", "FadeContextMenu.tsx"),
+            "utf8",
+        );
+        expect(source).toContain("menuPortalContainer()");
+        expect(source).not.toContain("document.body");
+        expect(source).not.toContain('type="range"');
+    });
+
+    test(".qt-range 的 thumb 背景引用 Radix 变量时必须自带 fallback", () => {
+        const css = readFileSync(TOKEN_CSS, "utf8");
+        const offenders: string[] = [];
+        for (const block of cssBlocks(css)) {
+            if (!block.selector.includes(".qt-range")) continue;
+            if (!block.selector.includes("thumb")) continue;
+            for (const match of block.body.matchAll(/background(?:-color)?:\s*([^;]+);/g)) {
+                const value = match[1].trim();
+                if (!value.includes("var(--accent-")) continue;
+                if (!hasVarFallback(value)) offenders.push(`${block.selector} → ${value}`);
+            }
+        }
+        expect(
+            offenders,
+            "旧 range 的 thumb 若不慎挂在 body portal 下，无 fallback 的 var(--accent-9) 会整条失效",
+        ).toEqual([]);
+    });
+});
