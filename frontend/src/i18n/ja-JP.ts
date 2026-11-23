@@ -2374,6 +2374,16 @@ export const jaJP = {
     cap_reason_plugin_only: "プラグインでのみ使用できます",
     cap_reason_piano_roll_only: "パラメータエディタでのみ有効です",
     cap_reason_not_in_plugin: "プラグインでは利用できません",
+    // ── 形態能力（surface capabilities）─────────────────────────────
+    surface_reason_touch_input: "タッチ入力にはこのチャンネルがありません",
+    surface_reason_no_path_access: "このプラットフォームでは任意のフォルダーを参照できません",
+    surface_reason_not_on_this_surface: "このプラットフォームでは利用できません",
+    surface_reason_use_system_picker: "このプラットフォームではシステムの選択画面を使います",
+    mobile_section_playback: "再生",
+    mobile_section_mode: "モード",
+    mobile_section_clip: "クリップ",
+    mobile_section_param_block: "パラメータブロック",
+    mobile_section_project: "プロジェクト",
     // ── クリップメニュー：REAPER テイクのピッチ変換 ────────────────
     ctx_host_pitch: "REAPER ピッチ",
     ctx_host_pitch_import: "REAPER テイクのピッチを読み込む",

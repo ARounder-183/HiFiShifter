@@ -2359,6 +2359,21 @@ export const enUS = {
     cap_reason_plugin_only: "Only available in the plug-in",
     cap_reason_piano_roll_only: "Only applies to the parameter editor",
     cap_reason_not_in_plugin: "Not available in the plug-in",
+    // ── 形态能力（surface capabilities）─────────────────────────────
+    // 移动端与桌面端的差异不是"功能少一点"，而是**输入通道不同**：没有悬停、
+    // 没有滚轮、没有右键。界面必须说清"为什么这里没有这个入口"，否则用户看到的
+    // 只是"这个按钮不见了"。
+    surface_reason_touch_input: "Touch input has no such channel",
+    surface_reason_no_path_access: "Apps cannot browse arbitrary folders on this platform",
+    surface_reason_not_on_this_surface: "Not available on this platform",
+    surface_reason_use_system_picker: "This platform picks files through the system picker",
+    // 移动端抽屉的分段标题。桌面用菜单栏（文件/编辑/视图…），移动端没有菜单栏，
+    // 但分组的**语义**要一致，否则同一批功能在两个形态里归到了不同的类。
+    mobile_section_playback: "Playback",
+    mobile_section_mode: "Mode",
+    mobile_section_clip: "Clips",
+    mobile_section_param_block: "Parameter blocks",
+    mobile_section_project: "Project",
     // ── 片段菜单：REAPER take 音高互转 ─────────────────────────────
     ctx_host_pitch: "REAPER Pitch",
     ctx_host_pitch_import: "Import REAPER Take Pitch",

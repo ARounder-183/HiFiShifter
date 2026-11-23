@@ -22,6 +22,8 @@
  * `--qt-*` 令牌同样能继承主题（见 `src/index.css` 的度量令牌块）。
  */
 import { Box, Button, IconButton } from "@radix-ui/themes";
+
+import { useDensity, radixSizeFor } from "./density";
 import {
     cloneElement,
     isValidElement,
@@ -106,11 +108,18 @@ export function AppButton({
     ...rest
 }: AppButtonProps) {
     const base = INTENT_PROPS[intent];
+    /*
+     * 尺寸仍由调用方的语义档决定，但**触摸形态下会被密度层抬到 40px**（Radix size="3"）。
+     * 【为什么不再写死 `size="2" | "1"`】触摸上 24/32px 都点不中（iOS HIG 的下限是
+     * 44px，Radix size=3 是 40px + 4px 内边距，实测命中区足够）。密度层是唯一判据，
+     * 于是"哪些按钮该变大"不需要在这里逐个判断 —— 见 `ui/density.ts`。
+     */
+    const density = useDensity(size === "md" ? "form" : "compact");
     return (
         <Button
             {...base}
             variant={emphasis === undefined ? base.variant : emphasis}
-            size={size === "md" ? "2" : "1"}
+            size={radixSizeFor(density)}
             className={cx("app-button", className)}
             {...rest}
         />
@@ -231,11 +240,17 @@ export function AppIconButton({
      * 这与它替换掉的旧写法逐字节一致，因此那 18 个开关恢复原色。
      */
     const color = intent === "danger" ? "red" : emphasis === "accent" ? undefined : "gray";
+    /*
+     * 【为什么图标按钮也读密度】它的硬编码 `size="1"`（24px）是桌面上的正确值，
+     * 但在触摸上 24px 的图标按钮**必然点错** —— 而它恰恰是移动端最主要的控件
+     * （传输栏、工具栏、抽屉）。"图标按钮固定 24px"这条约定只在有光标精度的设备上成立。
+     */
+    const density = useDensity("compact");
     return (
         <IconButton
             variant={active ? "solid" : surface}
             color={color}
-            size="1"
+            size={radixSizeFor(density)}
             data-tooltip={tooltip}
             aria-label={tooltip}
             aria-pressed={active || undefined}

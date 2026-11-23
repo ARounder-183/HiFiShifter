@@ -37,7 +37,14 @@ import { radixSizeFor, useDensity, type AppDensity } from "./density";
  * 横向的余量走 `padding-inline`，纵向的焦点环走内嵌（见 `index.css` 的
  * `.hs-slider-box`）。
  */
-const DECORATION_BOX_PX: Record<"1" | "2", number> = { "1": 13, "2": 16 };
+/**
+ * 各尺寸档的装饰盒高度（px）。
+ *
+ * `"3"` 是**触摸形态**用的档（Radix size=3，40px 控件）—— 它需要比桌面两档更高的
+ * 装饰盒，否则滑块头在 40px 的控件里显得贴边。桌面永远用不到这一档
+ * （`radixSizeFor` 只在触摸输入下返回 "3"）。
+ */
+const DECORATION_BOX_PX: Record<"1" | "2" | "3", number> = { "1": 13, "2": 16, "3": 24 };
 
 export interface AppSliderProps {
     value: number;

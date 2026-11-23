@@ -1,0 +1,137 @@
+/**
+ * 移动端抽屉的条目来源。
+ *
+ * 【为什么不抄一份 `MenuBar` 的菜单定义】`MenuBar` 有 700+ 行手写菜单树，每一项都
+ * 带着自己的 onClick、禁用条件与图标。再抄一份给移动端，意味着**每个新功能都要在
+ * 两个地方登记**，而漏掉的那一处只会表现为"手机上找不到这个功能"—— 没有任何报错。
+ *
+ * 这里改从 `ACTION_META` 生成：它是全仓**唯一**的动作注册表（135 条），快捷键、
+ * 设置页、菜单栏的快捷键提示全都读它。移动端读同一份，于是"新增动作"这件事只需要
+ * 加一条 `ACTION_META` 记录。
+ *
+ * 【为什么按 `group` 分段】`ACTION_META.group` 本来就是"按使用场景分组"（播放 / 模式 /
+ * 编辑 / 片段 / 工程…），与设置页的分组一致。移动端抽屉直接复用这个分组，用户在两处
+ * 看到的是同一个心智模型。
+ *
+ * 【为什么要有排除表】有些动作在移动端**结构上做不到**，而不是"暂时没接"：
+ * 从任意路径导入（沙箱不给路径）、把键盘交给宿主（没有宿主）。把它们摆出来，用户
+ * 点下去只会得到一个失败或一条静默 no-op —— 本仓明令禁止的形状。
+ */
+
+import { ACTION_META } from "../features/keybindings/defaultKeybindings";
+import type { ActionId } from "../features/keybindings/types";
+import type { MessageKey } from "../i18n/messages";
+import { surfaceAllows, type SurfaceCapabilityId } from "../services/surfaceCapabilities";
+
+/** 抽屉里的一条动作。 */
+export interface MobileActionItem {
+    id: ActionId;
+    /** 已本地化的名称。 */
+    label: string;
+    /** 当前绑定的快捷键（无绑定时为 `null`）。移动端只作为"这是个常用动作"的旁证。 */
+    shortcut: string | null;
+}
+
+/** 抽屉里的一段。 */
+export interface MobileActionSection {
+    id: string;
+    title: string;
+    items: MobileActionItem[];
+}
+
+/**
+ * 移动端**不提供**的动作，以及为什么。
+ *
+ * 键是动作 id，值是它所缺的能力位（`null` 表示"与能力无关，是这个形态本身没有
+ * 意义"）。这条信息会出现在抽屉的隐藏统计里 —— 排查"为什么手机上找不到 XX"时，
+ * 不需要再去读一遍代码。
+ */
+const MOBILE_UNAVAILABLE: Partial<Record<ActionId, SurfaceCapabilityId | null>> = {
+    // 从任意路径导入：移动端没有可浏览的目录树（见 platform/paths.rs 的存储模型）。
+    "project.open": "fs.pathAccess",
+    "project.importHifishifter": "fs.pathAccess",
+    "project.importReaper": "fs.pathAccess",
+    "project.importVocalShifter": "fs.pathAccess",
+    "edit.pasteVocalShifter": "fs.pathAccess",
+    "project.importMidi": "fs.pathAccess",
+    // 宿主相关：移动端没有 DAW。
+    "host.handKeyboardToHost": null,
+    // 快速搜索的导航键属于弹窗内部，不该出现在抽屉里。
+    "quickSearch.navigate.up": null,
+    "quickSearch.navigate.down": null,
+    "quickSearch.preview": null,
+    "quickSearch.confirm": null,
+    "quickSearch.close": null,
+};
+
+/** 抽屉的分段顺序。与 `MenuBar` 的菜单顺序一致：先"我要做什么"，最后"界面怎么摆"。 */
+const SECTION_ORDER: Array<{ id: string; titleKey: MessageKey }> = [
+    { id: "playback", titleKey: "mobile_section_playback" },
+    { id: "mode", titleKey: "mobile_section_mode" },
+    // 编辑 / 视图沿用桌面菜单的标题键：语义完全一致，另起一个键只会让两个形态
+    // 对同一件事用两个词。
+    { id: "edit", titleKey: "menu_edit" },
+    { id: "clip", titleKey: "mobile_section_clip" },
+    { id: "paramBlock", titleKey: "mobile_section_param_block" },
+    { id: "project", titleKey: "mobile_section_project" },
+    { id: "layout", titleKey: "menu_view" },
+];
+
+/**
+ * 生成抽屉内容。
+ *
+ * @param translate 本地化函数（由调用方从 `useI18n` 取，本模块不碰 React）。
+ * @param shortcutFor 取某动作的主绑定显示文本；没有绑定时返回 `null`。
+ */
+export function buildMobileActionSections(
+    translate: (key: MessageKey) => string,
+    shortcutFor: (id: ActionId) => string | null,
+): MobileActionSection[] {
+    const buckets = new Map<string, MobileActionItem[]>();
+
+    for (const [rawId, meta] of Object.entries(ACTION_META) as Array<[ActionId, (typeof ACTION_META)[ActionId]]>) {
+        // 修饰键动作是**手势的修饰**，不是可执行命令 —— 它们去修饰键行（ModifierRail）。
+        if (meta.group.startsWith("mod")) continue;
+        if (rawId in MOBILE_UNAVAILABLE) {
+            const capability: SurfaceCapabilityId | null | undefined = MOBILE_UNAVAILABLE[rawId];
+            // `null` / `undefined` = 形态上没意义，永远不出现；否则按能力位判断
+            // （能力为真时出现 —— 例如 `fs.pathAccess` 在移动端恒为假，因此那些
+            // 走路径的动作实际总是隐藏）。
+            if (capability === null || capability === undefined) continue;
+            if (!surfaceAllows(capability)) continue;
+        }
+        const bucket = buckets.get(meta.group) ?? [];
+        bucket.push({
+            id: rawId,
+            label: translate(meta.labelKey),
+            shortcut: shortcutFor(rawId),
+        });
+        buckets.set(meta.group, bucket);
+    }
+
+    const sections: MobileActionSection[] = [];
+    for (const { id, titleKey } of SECTION_ORDER) {
+        const items = buckets.get(id);
+        if (!items || items.length === 0) continue;
+        sections.push({ id, title: translate(titleKey), items });
+    }
+    return sections;
+}
+
+/**
+ * 修饰键动作（给 `ModifierRail` 用）。
+ *
+ * 【为什么单独导出】它们是**状态**（按住/锁定）而不是**命令**，交互模型与抽屉里的
+ * 条目完全不同（一次点击 vs 切换）。混在同一个列表里会让两种语义在同一个 UI 里
+ * 长得一样 —— 而它们的区别恰恰是"点完之后会发生什么"。
+ */
+export function buildModifierChips(
+    translate: (key: MessageKey) => string,
+): Array<{ id: ActionId; label: string; group: string }> {
+    const chips: Array<{ id: ActionId; label: string; group: string }> = [];
+    for (const [rawId, meta] of Object.entries(ACTION_META) as Array<[ActionId, (typeof ACTION_META)[ActionId]]>) {
+        if (!meta.group.startsWith("mod")) continue;
+        chips.push({ id: rawId, label: translate(meta.labelKey), group: meta.group });
+    }
+    return chips;
+}

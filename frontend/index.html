@@ -3,7 +3,16 @@
     <head>
         <meta charset="UTF-8" />
         <link rel="icon" type="image/png" href="/icon.png" />
-        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <!--
+          viewport-fit=cover 是移动端"安全区"生效的前提：没有它，iOS 会把整页
+          挤进安全区内（刘海两侧留白、底部手势条上方留白），`env(safe-area-inset-*)`
+          恒为 0；有了它，页面铺满整屏，由 `index.css` 里的
+          `padding: env(safe-area-inset-*)` 自己让位。桌面浏览器忽略该参数。
+        -->
+        <meta
+          name="viewport"
+          content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+        />
         <title>HiFiShifter</title>
     </head>
     <body>

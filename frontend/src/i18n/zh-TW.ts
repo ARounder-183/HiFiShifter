@@ -2290,6 +2290,16 @@ export const zhTW = {
     cap_reason_plugin_only: "僅在外掛中可用",
     cap_reason_piano_roll_only: "僅適用於參數編輯器",
     cap_reason_not_in_plugin: "外掛裡沒有這個功能",
+    // ── 形態能力（surface capabilities）─────────────────────────────
+    surface_reason_touch_input: "觸控輸入沒有這個通道",
+    surface_reason_no_path_access: "本平台不允許應用程式瀏覽任意目錄",
+    surface_reason_not_on_this_surface: "本平台不提供此功能",
+    surface_reason_use_system_picker: "本平台透過系統選擇器選取檔案",
+    mobile_section_playback: "播放",
+    mobile_section_mode: "模式",
+    mobile_section_clip: "音訊片段",
+    mobile_section_param_block: "參數區塊",
+    mobile_section_project: "專案",
     // ── 片段菜單：REAPER take 音高互轉 ─────────────────────────────
     ctx_host_pitch: "REAPER 音高",
     ctx_host_pitch_import: "匯入 REAPER Take 音高",

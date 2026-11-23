@@ -1128,6 +1128,8 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "get_recording_settings",
     "get_recording_state",
     "get_runtime_info",
+    // 形态剖面（能力表）。前端在挂载之前拉一次，见 `services/surfaceProfileStore.ts`。
+    "get_surface_profile",
     "get_timeline_state",
     "get_ui_settings",
     "ui_kv_dump",

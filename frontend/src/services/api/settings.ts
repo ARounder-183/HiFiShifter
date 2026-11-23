@@ -308,6 +308,15 @@ export interface UiSettings {
      * 覆盖对方的排布，谁都留不住（见 `hifishifter_kernel::config::UiSettings::dock_plugin`）。
      */
     dockPlugin?: DockPersistedSettings;
+    /**
+     * 移动形态的停靠布局。与 `dock` / `dockPlugin` **同形**，三者互不干扰。
+     *
+     * 【为什么需要第三个槽位】移动端不是"更小的桌面"：390×844 上文件浏览器一开，
+     * 时间轴只剩 134px，而它的最小可用宽度实测是 684px。用户必然把面板全关掉、
+     * 只留一个标签组。那份布局放到桌面上是"只剩一个面板"，放到插件里是"六个面板
+     * 全关" —— 都不是用户想要的。见 `hifishifter_kernel::config::UiSettings::dock_mobile`。
+     */
+    dockMobile?: DockPersistedSettings;
     /** 导入媒体时的声道处理策略（假立体声 → 单声道）。 */
     channelImportPolicy?: ChannelImportPolicy;
     /** 指针设备（触控板 / 数位板 / 触控笔 / 触摸）的输入偏好。 */

@@ -122,6 +122,8 @@ const AppearanceSettingsPanel = lazy(() =>
 );
 import { UndoHistoryPanel } from "./components/layout/UndoHistoryPanel";
 import { DockRoot } from "./components/dock/DockRoot";
+import { AppChrome } from "./shell/AppChrome";
+import { DesktopChrome } from "./shell/DesktopChrome";
 import { registerBuiltinPanels } from "./components/dock/registerBuiltinPanels";
 import { attachBuiltinPanelComponents } from "./components/dock/attachBuiltinPanelComponents";
 import {
@@ -596,6 +598,26 @@ function sameMeterContents(
     });
 }
 
+/**
+ * 移动外壳派发动作时用的**合成按键**。
+ *
+ * 【为什么需要一个假的 stroke】动作的派发器（`handleKeybindingAction`）签名要求一个
+ * 按键，因为它需要知道"用户按的是哪个键"来决定要不要把这次操作让给宿主
+ * （见 `hostKeyRelay`）。移动端没有按键 —— 而这个入口**永远不需要让路**：插件形态
+ * 不可能跑在移动端（插件由 DAW 加载，DAW 只在桌面）。
+ *
+ * 用一个显式的 `"__mobile__"` 而不是随便造一个 `"Space"`：万一将来有按 code 分支的
+ * 逻辑，它读到的会是一个一眼能看出"这不是键盘"的值，而不是一个会被误当成空格键的
+ * 字符串。
+ */
+const MOBILE_ACTION_STROKE: HostKeyStroke = {
+    code: "__mobile__",
+    ctrl: false,
+    shift: false,
+    alt: false,
+    meta: false,
+};
+
 function AppInner() {
     useSyllableAnalysisEvents();
     const dispatch = useAppDispatch();
@@ -610,6 +632,12 @@ function AppInner() {
     const toolMode = useAppSelector((state) => state.session.toolMode);
     const drawToolMode = useAppSelector((state) => state.session.drawToolMode);
     const projectDirty = useAppSelector((state) => state.session.project.dirty);
+    // 移动外壳的顶栏标题：工程名。空名按 "Untitled" 显示（与窗口标题同一口径）。
+    const projectName = useAppSelector((state) => state.session.project.name || "Untitled");
+    // 撤销/重做可用性。移动端没有菜单栏，按钮的置灰状态是**唯一**的可用性提示 ——
+    // 桌面还能靠菜单项灰掉来表达，移动端只能靠这两枚按钮。
+    const historyUndoDepth = useAppSelector((state) => state.session.historyUndoDepth);
+    const historyRedoDepth = useAppSelector((state) => state.session.historyRedoDepth);
     // playheadSec / selectedTrackId 均只在 handleImportMidiFromMenu 打开对话框
     // 的瞬间需要快照，经 store.getState() 读取即可 —— 订阅它们会让 AppInner
     // 随播放头移动 / seek 高频重渲。
@@ -4047,10 +4075,142 @@ function AppInner() {
         </Suspense>
     ));
 
+    // ── 外壳装配（见 `shell/AppChrome.tsx`）─────────────────────────────────
+    /**
+     * 移动外壳派发一条动作。
+     *
+     * 【为什么复用 `handleKeybindingAction`】它是全仓**唯一**的动作派发器：
+     * 快捷键、独立窗口的转发、以及现在的移动抽屉，走的都是同一条路径。
+     * 另写一个"执行动作"的 switch 会让移动端与桌面端在某些动作上分叉 ——
+     * 而那类分叉只会表现为"这个功能在手机上行为不一样"，很难被注意到。
+     */
+    const handleMobileAction = useCallback(
+        (actionId: ActionId) => handleKeybindingAction(actionId, MOBILE_ACTION_STROKE),
+        [handleKeybindingAction],
+    );
+
+    /*
+     * 状态栏内容。
+     *
+     * 【为什么抽成变量而不是复制两份 JSX】桌面把它放在底部状态条、移动端放在底栏
+     * 最后一行 —— 容器不同、内容相同。复制一份是最容易漂移的写法（改一处忘一处），
+     * 而漂移的症状是"手机上看到的状态和桌面上说的不是一回事"。
+     */
+    const desktopStatusBarContent = (
+        <>
+            <Flex align="center" gap="1" className="truncate min-w-0">
+                {/* 排列规则：**长时效的提示在前，短时效的进度片在后**。
+                    绿色提示位（后台缓存统计 / 自动声道折叠）会挂十几秒，而
+                    紫色进度片（拉伸、波形分析、渲染…）只是几百毫秒的过客。
+                    若把进度片放在前面，它每出现/消失一次，后面所有片就整体
+                    横移一次 —— 用户视线里"提示在乱动"。把长时效的钉在最左，
+                    短的插在它右侧，左侧位置就永远稳定。 */}
+                {noticeText ? (
+                    <AppStatusChip tone={noticeTone} tooltip={noticeTooltip || undefined}>
+                        {noticeText}
+                    </AppStatusChip>
+                ) : null}
+                {importBusy ? (
+                    <AppStatusChip tone="accent">{t("status_importing")}</AppStatusChip>
+                ) : null}
+                <PitchAnalysisStatusChip />
+                <ParamBlockAnalysisStatus enabled />
+                <ParamBlockFeedbackChip />
+                <ParamDataLoadingChip />
+                <AppStatusProgressChips />
+                <span
+                    className="hs-type-label truncate"
+                    style={{
+                        ...(error ? { color: "var(--qt-danger-text)" } : {}),
+                        ...(statusDetailText ? { cursor: "help" } : {}),
+                    }}
+                    title={statusDetailText}
+                    data-status-detail={statusDetailText ? "1" : undefined}
+                >
+                    {errorText}
+                </span>
+            </Flex>
+            <PlayheadTimeReadoutSlot slot="statusBar" />
+            {isPluginMode() ? (
+                <>
+                    <PluginApplyStatus
+                        onTimelineChanged={async () => {
+                            await dispatch(fetchTimeline()).unwrap();
+                        }}
+                    />
+                    <CaptureHostLinkExportControl />
+                </>
+            ) : null}
+        </>
+    );
+
+    /*
+     * 移动端的状态栏：只留**两件事** —— 一条长时效提示、一条错误。
+     *
+     * 【为什么不是同一份内容】桌面状态条有 24px 高、整行宽，能摆 6 个进度片；
+     * 移动端底栏那一行还要容纳修饰键行与传输按钮，390px 宽装不下 6 个片。而进度
+     * 本身在画布上已有反馈（渲染中/分析中会改变光标与波形），这里只留"用户需要
+     * 读一句话才能决定下一步"的两类。
+     */
+    const mobileStatusBar = (
+        <div
+            className="flex items-center gap-1 truncate px-1 text-qt-micro"
+            style={{ minHeight: "var(--qt-bar-status)" }}
+        >
+            {noticeText ? <AppStatusChip tone={noticeTone}>{noticeText}</AppStatusChip> : null}
+            <span className="truncate text-qt-text-muted">{errorText}</span>
+        </div>
+    );
+
     return (
-        <Flex
-            direction="column"
-            className="h-screen w-screen bg-qt-window text-qt-text overflow-hidden font-sans text-qt-md selection:bg-qt-highlight selection:text-white"
+        <AppChrome
+            /*
+             * 【为什么外壳只有一个装配点】见 `shell/AppChrome.tsx` 的说明：
+             * 形态分支、根容器度量（dvh / 安全区 / overflow）、抽屉生命周期必须同时
+             * 成立。分散在三处时，漏掉任何一条的症状都是"底部工具栏被手势条盖住 8px"
+             * 这种肉眼要盯很久才发现的问题。
+             */
+            desktopHeader={
+                <DesktopChrome
+                    menuBar={
+                        <MenuBar
+                            onNewProject={handleNewProject}
+                            onOpenProject={handleOpenProject}
+                            onOpenRecentProject={handleOpenRecentProject}
+                            onRecaptureMissingMedia={handleRecaptureMissingMedia}
+                            onImportProject={handleImportProject}
+                            onExit={handleExitApp}
+                            onImportMidiFromMenu={handleImportMidiFromMenu}
+                            autoBackupSettings={autoBackupSettings}
+                            onAutoBackupSettingsSaved={handleAutoBackupSettingsSaved}
+                            autoReloadModifiedMedia={autoReloadModifiedMedia}
+                            onAutoReloadModifiedMediaChange={handleAutoReloadModifiedMediaChange}
+                            loopNewClips={loopNewClips}
+                            onLoopNewClipsChange={handleLoopNewClipsChange}
+                        />
+                    }
+                    actionBar={<ActionBar />}
+                    notice={isPluginMode() ? <HostAudioNotice status={hostAudio} restore={hostAudioRestore} /> : null}
+                />
+            }
+            desktopFooter={
+                <Flex
+                    align="center"
+                    justify="between"
+                    className="h-qt-bar-status bg-qt-window border-t border-qt-border px-1 select-none gap-2"
+                >
+                    {desktopStatusBarContent}
+                </Flex>
+            }
+            mobileTitle={projectName}
+            mobileDirty={projectDirty}
+            canUndo={historyUndoDepth > 0}
+            canRedo={historyRedoDepth > 0}
+            isPlaying={Boolean(runtimeIsPlaying)}
+            onTogglePlay={() => handleMobileAction("playback.toggle")}
+            onStop={() => handleMobileAction("playback.stop")}
+            onMobileAction={handleMobileAction}
+            mobileStatusBar={mobileStatusBar}
         >
             <AppDialog
                 open={Boolean(vocalShifterSkippedFilesDialog?.length)}
@@ -4680,32 +4840,10 @@ function AppInner() {
                 onConfirm={handleImportProjectConfirmed}
             />
 
-            <MenuBar
-                onNewProject={handleNewProject}
-                onOpenProject={handleOpenProject}
-                onOpenRecentProject={handleOpenRecentProject}
-                onRecaptureMissingMedia={handleRecaptureMissingMedia}
-                onImportProject={handleImportProject}
-                onExit={handleExitApp}
-                onImportMidiFromMenu={handleImportMidiFromMenu}
-                autoBackupSettings={autoBackupSettings}
-                onAutoBackupSettingsSaved={handleAutoBackupSettingsSaved}
-                autoReloadModifiedMedia={autoReloadModifiedMedia}
-                onAutoReloadModifiedMediaChange={handleAutoReloadModifiedMediaChange}
-                loopNewClips={loopNewClips}
-                onLoopNewClipsChange={handleLoopNewClipsChange}
-            />
-            <ActionBar />
-
             {/*
-             * 宿主音频提示条：只在"插件挂在 REAPER 轨道组（folder）父轨上、因此拿不到
-             * 组内子轨音频"时出现（见 `HostAudioNotice`）。放在工作区**之上**而不是
-             * 状态栏里：这条提示要给出原因与下一步，状态栏那个高度装不下；而它出现时
-             * 用户看到的正是一片没有内容的片段，提示必须紧挨着那片区域。
+             * 菜单栏 / 动作栏 / 宿主提示条已经搬到 `desktopHeader`（见 return 处）。
+             * 移动形态根本不渲染它们 —— 移动端的外壳是顶栏 + 抽屉 + 底栏。
              */}
-            {isPluginMode() ? (
-                <HostAudioNotice status={hostAudio} restore={hostAudioRestore} />
-            ) : null}
 
             {/*
              * 工作区：全部可停靠窗体由布局树驱动。
@@ -4726,82 +4864,8 @@ function AppInner() {
             */}
             <FolderImportHost />
 
-            {/* Status Bar */}
-            <Flex
-                align="center"
-                justify="between"
-                className="h-qt-bar-status bg-qt-window border-t border-qt-border px-1 select-none gap-2"
-            >
-                <Flex align="center" gap="1" className="truncate min-w-0">
-                    {/* 排列规则：**长时效的提示在前，短时效的进度片在后**。
-                        绿色提示位（后台缓存统计 / 自动声道折叠）会挂十几秒，而
-                        紫色进度片（拉伸、波形分析、渲染…）只是几百毫秒的过客。
-                        若把进度片放在前面，它每出现/消失一次，后面所有片就整体
-                        横移一次 —— 用户视线里"提示在乱动"。把长时效的钉在最左，
-                        短的插在它右侧，左侧位置就永远稳定。 */}
-                    {noticeText ? (
-                        <AppStatusChip tone={noticeTone} tooltip={noticeTooltip || undefined}>
-                            {noticeText}
-                        </AppStatusChip>
-                    ) : null}
-                    {/* 导入等待提示：只在真慢时点亮（见 IMPORT_BUSY_DELAY_MS），
-                        位置紧跟长时效提示位之后、短时效进度片之前。 */}
-                    {importBusy ? (
-                        <AppStatusChip tone="accent">{t("status_importing")}</AppStatusChip>
-                    ) : null}
-                    {/* 音高分析进度片：**独立订阅** PitchAnalysisContext，
-                        逐 clip 的进度事件不参与本组件重渲染
-                        （见 PitchAnalysisStatusChip 的说明）。 */}
-                    <PitchAnalysisStatusChip />
-                    {/* 音符块（GAME / VAD）分析：与音高进度同一状态栏槽位。 */}
-                    <ParamBlockAnalysisStatus enabled />
-                    {/* 参数块编辑反馈：错误 / 拒绝 / 需要用户处置的提示统一走状态栏。 */}
-                    <ParamBlockFeedbackChip />
-                    {/* 参数曲线取数提示：**独立订阅**外部 store，不参与本组件重渲染
-                        （见 ParamDataLoadingChip 的说明）。 */}
-                    <ParamDataLoadingChip />
-                    {/* 高频进度三片（拉伸 / 波形分析 / 渲染进度）：**独立订阅**外部
-                        store，不参与本组件重渲染（见 AppStatusProgressChips 的说明）。 */}
-                    <AppStatusProgressChips />
-                    <span
-                        className="hs-type-label truncate"
-                        style={{
-                            ...(error ? { color: "var(--qt-danger-text)" } : {}),
-                            ...(statusDetailText ? { cursor: "help" } : {}),
-                        }}
-                        title={statusDetailText}
-                        data-status-detail={statusDetailText ? "1" : undefined}
-                    >
-                        {errorText}
-                    </span>
-                </Flex>
-                {/*
-                  状态栏右侧槽位：插件宿主的「自动应用」状态。
-                  它曾经是 `ActionBar` 与工作区之间的一整行横条 —— 在插件那个小窗口里
-                  一整行高度很贵，而这段内容本来就是状态读数，归状态栏。
-                  （见 `PluginApplyStatus`：片独立订阅外部 store，250 ms 的轮询不会
-                  带动本组件重渲染。）
-                */}
-                {/* 播放光标时间：放置策略指向状态栏时才出现（见 PlayheadTimeReadoutSlot）。
-                    它排在插件状态片**之前**，这样插件状态变化不会把时间挤到最右。 */}
-                <PlayheadTimeReadoutSlot slot="statusBar" />
-                {isPluginMode() ? (
-                    <>
-                        <PluginApplyStatus
-                            onTimelineChanged={async () => {
-                                await dispatch(fetchTimeline()).unwrap();
-                            }}
-                        />
-                        {/*
-                          「导出到 HiFiShifter」：插件把工作区导出到磁盘，用户再在独立
-                          App 里打开它编辑。它同样是一段状态读数 + 一个动作，归状态栏
-                          （见 `HostLinkExportControl` 的文件头）。
-                        */}
-                        <CaptureHostLinkExportControl />
-                    </>
-                ) : null}
-            </Flex>
-        </Flex>
+            {/* 状态栏内容已上移到 `desktopFooter` / `mobileStatusBar`（见 return 处）。 */}
+        </AppChrome>
     );
 }
 

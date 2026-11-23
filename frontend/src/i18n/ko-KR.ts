@@ -2343,6 +2343,16 @@ export const koKR = {
     cap_reason_plugin_only: "플러그인에서만 사용할 수 있습니다",
     cap_reason_piano_roll_only: "매개변수 편집기에서만 적용됩니다",
     cap_reason_not_in_plugin: "플러그인에서는 사용할 수 없습니다",
+    // ── 形態能力（surface capabilities）─────────────────────────────
+    surface_reason_touch_input: "터치 입력에는 이 채널이 없습니다",
+    surface_reason_no_path_access: "이 플랫폼에서는 임의의 폴더를 탐색할 수 없습니다",
+    surface_reason_not_on_this_surface: "이 플랫폼에서는 제공되지 않습니다",
+    surface_reason_use_system_picker: "이 플랫폼은 시스템 선택기를 통해 파일을 고릅니다",
+    mobile_section_playback: "재생",
+    mobile_section_mode: "모드",
+    mobile_section_clip: "클립",
+    mobile_section_param_block: "파라미터 블록",
+    mobile_section_project: "프로젝트",
     // ── 클립 메뉴: REAPER 테이크 피치 변환 ─────────────────────────
     ctx_host_pitch: "REAPER 피치",
     ctx_host_pitch_import: "REAPER 테이크 피치 가져오기",

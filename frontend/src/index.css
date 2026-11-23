@@ -1650,3 +1650,156 @@ textarea {
     max-width: calc(100vw - 16px);
     tab-size: 4;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 形态层：触摸令牌与安全区
+ *
+ * 【为什么是"令牌覆写"而不是"另一套样式表"】移动端真正需要改的不是布局结构，
+ * 而是**一组尺寸**：控件要 44px（iOS HIG 的最小可点面积）、菜单项要 44px、滚动条
+ * 要让位更宽（手指比鼠标光标粗）、字号下限要抬起来（小于 12px 在 3x 屏上也看不清）。
+ * 这些全部已经是令牌（`--qt-ctl-*` / `--qt-menu-item-h` / `--qt-scrollbar-gutter`），
+ * 所以形态差异只需要在 `<html data-input="touch">` 下**重新赋值** —— 不需要给每个
+ * 组件写移动变体，也不会出现"某个组件忘了适配"。
+ *
+ * 【为什么判据是 `data-input` 而不是 `data-form`】桌面可以有触摸屏（Windows 平板），
+ * 移动端也可以接鼠标。尺寸该跟着**输入通道**走。`data-input` 由 `mount.tsx` 按
+ * 后端剖面写入，与 `inputProfile.ts` 的 `primary` 同一个来源。
+ *
+ * 【为什么不用 `@media (pointer: coarse)`】WebView 的该媒体特性在 Android 上恒为
+ * coarse（即使接了鼠标），在桌面触摸屏上却可能报 fine —— 两端都不准。而"后端已经
+ * 告诉我们这是什么设备"是**确定**的信息，没有理由再让浏览器猜一次。
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+html[data-input="touch"] {
+    /* 控件高度：44 / 44 / 48。桌面是 20 / 24 / 32。
+     *
+     * 【为什么 sm 直接跳到 44 而不是 32】sm 档的消费者是"紧凑面板里的按钮"
+     * （文件浏览器、记事本工具栏、轨道头）。在触摸上"紧凑"不是一个可选项：
+     * 任何小于 44px 的目标都会有一半概率点错，而点错的代价是"打开了错误的片段"
+     * 或"删掉了错误的轨道"。宁可让这些面板多占 20px 高度。 */
+    --qt-ctl-sm: 44px;
+    --qt-ctl-md: 44px;
+    --qt-ctl-lg: 48px;
+
+    /* 菜单项：与控件同高。菜单是移动端最主要的操作入口（抽屉 + 长按菜单），
+     * 它的项高必须与按钮一致，否则用户会在两个几乎相同的列表间产生"手感差异"。 */
+    --qt-menu-item-h: 44px;
+
+    /* chrome 条：顶栏 48（容纳 44px 按钮 + 边框）、状态栏 28（一行 12px 文字）。 */
+    --qt-bar-main: 48px;
+    --qt-bar-status: 28px;
+    --qt-bar-compact: 40px;
+    --qt-bar-title: 44px;
+
+    /* 滚动条让位：手指滑动时滑块会盖住内容右缘，14px 比桌面的 8px 更安全。 */
+    --qt-scrollbar-gutter: 14px;
+
+    /* 触摸不显示滚动条轨道（系统本来也不给），但保留 `scrollbar-gutter` 的布局预留，
+     * 避免内容在滚动条出现/消失时左右跳动。 */
+    scrollbar-width: none;
+
+    /* 关闭 iOS 的"点一下闪一片灰"：它会在拖动开始时整块变色，
+     * 而我们的画布本来就有自己的按下反馈。 */
+    -webkit-tap-highlight-color: transparent;
+}
+
+html[data-input="touch"] ::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+}
+
+/* ── 安全区 ────────────────────────────────────────────────────────────────
+ *
+ * 【为什么写在 `html`/`body` 而不是根组件上】`env(safe-area-inset-*)` 只有在
+ * `viewport-fit=cover`（见 `index.html`）下才非零；而一旦非零，**页面本身**会铺到
+ * 刘海与手势条底下。让位必须发生在最外层容器上，否则内部的 `position: fixed`
+ * 弹层、Toast、下拉菜单仍然会跑到安全区外。
+ */
+html[data-form="mobile"] {
+    --qt-safe-top: env(safe-area-inset-top, 0px);
+    --qt-safe-right: env(safe-area-inset-right, 0px);
+    --qt-safe-bottom: env(safe-area-inset-bottom, 0px);
+    --qt-safe-left: env(safe-area-inset-left, 0px);
+}
+
+html[data-form="mobile"] body {
+    /* `dvh` 而不是 `vh`：移动端浏览器的 `100vh` 是"地址栏收起时"的高度，
+     * 首次渲染会让页面比可视区高出一截，底部工具栏被推到屏幕外。 */
+    height: 100dvh;
+    overflow: hidden;
+    /* 移动端不允许整页橡皮筋：画布手势自己处理平移，
+     * 系统级的 overscroll 会把画布拖出边界并回弹。 */
+    overscroll-behavior: none;
+}
+
+/* 根容器的安全区内边距。由 `AppChrome` 挂 `.hs-surface-root`。
+ *
+ * 【为什么用 padding 而不是 margin】padding 让背景色延伸到安全区之下（刘海两侧
+ * 与手势条区域仍是应用自己的底色），margin 会露出 WebView 的白底。 */
+html[data-form="mobile"] .hs-surface-root {
+    padding-top: var(--qt-safe-top);
+    padding-right: var(--qt-safe-right);
+    padding-bottom: var(--qt-safe-bottom);
+    padding-left: var(--qt-safe-left);
+}
+
+/* ── 触摸下的文本选择 ──────────────────────────────────────────────────────
+ *
+ * 【为什么必须放开】`useBrowserDefaultGuards` 会全局关掉 `user-select` 以防拖动时
+ * 选中文字。但触摸上**长按**的默认行为就是选词 —— 一旦被关掉，长按就只剩我们自己
+ * 合成的 contextmenu，用户再也无法从记事本里复制一段文字。
+ *
+ * 因此：画布类区域仍然禁止选择（拖动不能选词），文本类区域显式放开。
+ */
+html[data-input="touch"] {
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+html[data-input="touch"] input,
+html[data-input="touch"] textarea,
+html[data-input="touch"] [contenteditable="true"],
+html[data-input="touch"] .hs-selectable-text {
+    -webkit-user-select: text;
+    user-select: text;
+}
+
+/* ── 移动形态的对话框：底部 sheet ─────────────────────────────────────────
+ *
+ * 【为什么是 sheet 而不是居中小窗】390×844 上，居中对话框的两侧会浪费约 40px，
+ * 而拇指自然活动区在屏幕下半部。底部 sheet 同时解决"够得着"与"内容宽"。
+ */
+html[data-form="mobile"] .rt-DialogContent.hs-dialog-sheet {
+    top: auto;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    transform: none;
+    width: 100vw;
+    max-width: 100vw !important;
+    margin: 0;
+    /* 底部留出安全区（手势条）。`padding` 而不是 `margin`：背景色要铺到屏幕边缘。 */
+    padding-bottom: calc(var(--qt-space-4) + var(--qt-safe-bottom));
+    border-bottom-left-radius: 0 !important;
+    border-bottom-right-radius: 0 !important;
+    border-top-left-radius: var(--qt-radius-lg) !important;
+    border-top-right-radius: var(--qt-radius-lg) !important;
+}
+
+/* 页脚按钮在触摸上并排会挤成两个小方块：改成**等宽撑满**，
+ * 主操作靠右（与桌面一致），但两者都拿到足够的宽度。 */
+html[data-form="mobile"] .app-dialog__footer {
+    gap: var(--qt-space-2);
+}
+
+html[data-form="mobile"] .app-dialog__footer .app-button {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+/* 移动端底栏里的修饰键芯片。 */
+.hs-modifier-chip {
+    font-size: var(--qt-fs-sm);
+    line-height: 1;
+}
+

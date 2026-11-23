@@ -106,13 +106,35 @@ export function normalizeTabPosition(value: unknown): DockTabPosition {
  * 切到时间轴时，看到的位置与独立 App 的上下关系对得上。
  */
 export function createDefaultDockLayout(mode: DockMode = "standalone"): DockLayout {
-    return mode === "plugin"
-        ? createPluginDefaultDockLayout()
-        : createStandaloneDefaultDockLayout();
+    if (mode === "plugin") return createPluginDefaultDockLayout();
+    if (mode === "mobile") return createMobileDefaultDockLayout();
+    return createStandaloneDefaultDockLayout();
 }
 
-/** 布局所属的运行形态（决定出厂排布）。 */
-export type DockMode = "standalone" | "plugin";
+/**
+ * 布局所属的运行形态（决定出厂排布）。
+ *
+ * 【为什么是三值而不是"桌面 / 插件"两值】移动端不是"更小的桌面"：390×844 上
+ * 打开文件浏览器后时间轴只剩 134px，而时间轴的最小可用宽度实测是 684px（标尺 +
+ * 轨道头 256 + 一屏可见的波形）。用户因此必然把面板全关掉、只留一个标签组。
+ * 那份布局放到桌面上是"只剩一个面板"，放到插件里是"六个面板全关"—— 三个形态
+ * 各留一份，谁也不覆盖谁。
+ */
+export type DockMode = "standalone" | "plugin" | "mobile";
+
+/**
+ * 应用形态 → 停靠剖面。
+ *
+ * 【为什么单独一个函数】`dockSlice` 的初始 state 在**模块求值期**就算好了，而它
+ * 必须与 `dockThunks` 之后读到的剖面一致。两处各写一次三元式，改一处就会分叉
+ * （症状：初始布局是移动版，hydrate 之后却按桌面槽位读写）。收敛成一个函数，
+ * 分叉在类型层面就不可能发生。
+ */
+export function dockModeForForm(form: "desktop" | "plugin" | "mobile"): DockMode {
+  if (form === "plugin") return "plugin";
+  if (form === "mobile") return "mobile";
+  return "standalone";
+}
 
 /** 独立 App 的出厂布局：上时间轴 / 下参数编辑器（与重构前的默认视觉一致）。 */
 function createStandaloneDefaultDockLayout(): DockLayout {
@@ -197,6 +219,59 @@ function createPluginDefaultDockLayout(): DockLayout {
         presets: {},
         activePreset: null,
     };
+}
+
+/**
+ * 移动形态的轨道头宽度。
+ *
+ * 【为什么是下限而不是某个"好看的值"】移动端时间轴的可视宽度只有 390px；默认的
+ * 256px 会吃掉 66%，波形区几乎不存在。取 `GUTTER_LIMITS` 的下限（120px）：它同时
+ * 是"轨道头里还能放下静音/独奏两枚 44px 按钮"的下限。用户仍可拖动加宽。
+ */
+export const MOBILE_DEFAULT_TRACK_HEADER_PX = 120;
+
+/**
+ * 移动形态的出厂布局：**单个标签组**，活动标签是时间轴。
+ *
+ * 【为什么与插件形态同构、但活动标签不同】两者的结构约束相同（视口窄，两个面板
+ * 不能上下堆叠），因此都是"一个位置、两个视图"。但插件里活动标签是参数编辑器 ——
+ * 因为宿主自己的轨道区已经承担了"看得见素材"的职责；而移动端**没有宿主**，时间轴
+ * 是唯一的素材入口（导入落在这里、片段在这里、选中片段才谈得上编辑）。把空白的
+ * 参数编辑器摆在首屏，用户看到的是一片什么都没有的画布。
+ *
+ * 【为什么没有独立的"文件浏览器"标签】移动端的文件浏览器是**工作区浏览器**
+ * （见 `platform/paths.rs` 的存储模型），它由顶栏的抽屉打开、以全屏 sheet 呈现，
+ * 不占标签位 —— 在 390px 上给它一个标签位等于永远少一个主工作区。
+ */
+function createMobileDefaultDockLayout(): DockLayout {
+  const tree: DockTabsetNode = {
+    t: "tabset",
+    id: "z1",
+    tabs: [MAIN_FORM_TIMELINE, MAIN_FORM_PARAM_EDITOR],
+    active: MAIN_FORM_TIMELINE,
+  };
+  return {
+    schema: DOCK_LAYOUT_SCHEMA,
+    roots: { [MAIN_ROOT_ID]: tree },
+    forms: {
+      [MAIN_FORM_TIMELINE]: {
+        id: MAIN_FORM_TIMELINE,
+        panelId: MAIN_FORM_TIMELINE,
+        float: null,
+      },
+      [MAIN_FORM_PARAM_EDITOR]: {
+        id: MAIN_FORM_PARAM_EDITOR,
+        panelId: MAIN_FORM_PARAM_EDITOR,
+        float: null,
+      },
+    },
+    order: [MAIN_FORM_TIMELINE, MAIN_FORM_PARAM_EDITOR],
+    floatOrder: [],
+    gutters: { ...DEFAULT_GUTTER_SIZES, timelineTrackHeaderPx: MOBILE_DEFAULT_TRACK_HEADER_PX },
+    tabPosition: "bottom",
+    presets: {},
+    activePreset: null,
+  };
 }
 
 /**

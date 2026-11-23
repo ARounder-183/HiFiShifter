@@ -46,6 +46,33 @@ export interface GlRasterTarget {
 }
 
 /**
+ * 进程级的 DPR 上限。
+ *
+ * 【为什么是模块级而不是每个上下文的参数】全应用有 6 个 WebGL2 上下文（时间轴主画布、
+ * 标尺、叠加层、钢琴卷帘的三个）。逐个改调用点意味着"新增一个上下文就漏一次"，
+ * 而漏掉的那一个在移动端就是 36 MB —— 症状是"切到某个面板后应用被杀"，且与那个
+ * 面板看起来毫无关系。
+ *
+ * 一个进程级上限，所有上下文自动生效。设置它的地方只有一处（`mount.tsx`，按后端
+ * 剖面），因此不存在两个上下文用了不同上限的可能。
+ */
+let globalMaxDpr = Number.POSITIVE_INFINITY;
+
+/**
+ * 设置进程级 DPR 上限。
+ *
+ * @param limit 上限；`Infinity` 表示不限制（桌面默认）。
+ */
+export function setGlRasterMaxDpr(limit: number): void {
+    globalMaxDpr = Number.isFinite(limit) && limit > 0 ? limit : Number.POSITIVE_INFINITY;
+}
+
+/** 当前生效的进程级 DPR 上限（诊断 / 测试用）。 */
+export function glRasterMaxDpr(): number {
+    return globalMaxDpr;
+}
+
+/**
  * 计算光栅化目标。
  *
  * 流程：归一化 DPR（非法 → 1）与 CSS 尺寸（非法 → 1，且不小于 1）→ 物理尺寸取整
@@ -54,17 +81,31 @@ export interface GlRasterTarget {
  * 特殊说明：物理尺寸恒 >= 1——`canvas.width = 0` 会让 WebGL 上下文报错并丢弃后续
  * 绘制调用，宿主尚未量出尺寸时也不能让画布进入非法状态。
  *
+ * 【为什么要有 `maxDpr`】移动端旗舰机的 DPR 是 3。390×844 的画布在 DPR 3 下是
+ * 1170×2532 ≈ 9.0 Mpx，单个 RGBA 帧缓冲 36 MB —— 而时间轴与钢琴卷帘**各自**持有
+ * 多个上下文（实测全应用 6 个）。iOS 给单进程的内存上限在 1~1.5 GB，几张这样的
+ * 帧缓冲加上 ORT 会话就会触发 jetsam（无异常、无日志、进程直接消失）。
+ *
+ * 视觉上，DPR 从 3 降到 2 的差别在 6 英寸屏上几乎不可见（波形与曲线都是低频内容），
+ * 而像素量直接降到 44%。这是一笔非常划算的交换。
+ *
  * @param cssWidthPx 宿主 CSS 宽（px）。
  * @param cssHeightPx 宿主 CSS 高（px）。
  * @param dpr 设备像素比。
+ * @param maxDpr DPR 上限；`Infinity`（默认）= 不限制，桌面行为逐字节不变。
  * @returns 光栅化目标；`cssWidthPx` / `cssHeightPx` 为**回算值**（物理 / dpr）。
  */
 export function resolveGlRasterTarget(
     cssWidthPx: number,
     cssHeightPx: number,
     dpr: number,
+    maxDpr: number = Number.POSITIVE_INFINITY,
 ): GlRasterTarget {
-    const safeDpr = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+    const rawDpr = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+    // 上限本身也要归一化：调用方可能从设置里读到一个坏值（0 / NaN / 负数）。
+    // 那种情况下退回"不限制"而不是把画布压成 1×1 —— 画面模糊比画面消失好。
+    const explicitLimit = Number.isFinite(maxDpr) && maxDpr > 0 ? maxDpr : Number.POSITIVE_INFINITY;
+    const safeDpr = Math.min(rawDpr, explicitLimit, globalMaxDpr);
     const cssWidth = Number.isFinite(cssWidthPx) ? Math.max(1, cssWidthPx) : 1;
     const cssHeight = Number.isFinite(cssHeightPx) ? Math.max(1, cssHeightPx) : 1;
     const physicalWidthPx = Math.max(1, Math.round(cssWidth * safeDpr));

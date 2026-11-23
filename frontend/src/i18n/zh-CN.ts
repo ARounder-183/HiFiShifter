@@ -2286,6 +2286,16 @@ export const zhCN = {
     cap_reason_plugin_only: "只在插件中可用",
     cap_reason_piano_roll_only: "只适用于参数编辑器",
     cap_reason_not_in_plugin: "插件里没有这个功能",
+    // ── 形态能力（surface capabilities）─────────────────────────────
+    surface_reason_touch_input: "触摸输入没有这个通道",
+    surface_reason_no_path_access: "本平台不允许应用浏览任意目录",
+    surface_reason_not_on_this_surface: "本平台不提供此功能",
+    surface_reason_use_system_picker: "本平台通过系统选择器选取文件",
+    mobile_section_playback: "播放",
+    mobile_section_mode: "模式",
+    mobile_section_clip: "音频块",
+    mobile_section_param_block: "参数块",
+    mobile_section_project: "工程",
     // ── 片段菜单：REAPER take 音高互转 ─────────────────────────────
     ctx_host_pitch: "REAPER 音高",
     ctx_host_pitch_import: "导入 REAPER Take 音高",

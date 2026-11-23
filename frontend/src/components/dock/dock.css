@@ -680,3 +680,48 @@ body[data-dock-dragging="true"] iframe {
     font-size: var(--qt-fs-xs);
     border-radius: 2px 0 2px 0;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 触摸形态的停靠变体
+ *
+ * 【为什么这里只有三条规则】停靠系统的绝大多数尺寸已经走令牌
+ * （`--qt-bar-compact` / `--qt-menu-item-h` / `--qt-scrollbar-gutter`），
+ * 而令牌层（`index.css` 的 `html[data-input="touch"]`）已经把它们抬到触摸尺寸。
+ * 这里只处理三件**令牌管不到**的事：
+ *   1. 标签条的高度是"内容撑开"而不是固定令牌，需要给一个最小可点高度；
+ *   2. 标签上的关闭按钮是 18px 的图标位，手指点不中；
+ *   3. 分割条在桌面上是 6px 的细缝（靠光标精度），触摸上必须有更宽的命中区。
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+html[data-input="touch"] .hs-dock-tabbar {
+    height: auto;
+    min-height: var(--qt-bar-compact);
+}
+
+html[data-input="touch"] .hs-dock-tab {
+    min-height: 44px;
+    padding-left: 10px;
+    padding-right: 10px;
+}
+
+/* 关闭按钮：可见图形仍是 12px 的小叉，但**命中盒**扩到 28px 见方。
+ * 【为什么不是直接放大图标】标签条只有一行，放大会让标签整体变高、挤掉可视行数；
+ * 扩命中盒是"看着没变、点着变大"的标准做法。 */
+html[data-input="touch"] .hs-dock-tab-close {
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* 分割条：桌面 6px、触摸 20px。它是**拖动**目标而不是点击目标 ——
+ * 20px 是"手指能稳稳按住、又不会误触相邻面板"的经验下限。 */
+html[data-input="touch"] .hs-dock-splitter[data-dir="row"] {
+    width: 20px;
+}
+
+html[data-input="touch"] .hs-dock-splitter[data-dir="col"] {
+    height: 20px;
+}
+
