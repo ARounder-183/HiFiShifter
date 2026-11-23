@@ -1352,8 +1352,6 @@ export const zhTW = {
     kernel_unavailable_copied: "已複製",
     ruler_label_spacing: "標籤間距",
     playhead_time_readout: "播放游標時間",
-    playhead_time_toolbar_hint:
-        "選擇讀數出現的位置（工具列 / 狀態列 / 軌道標題列）。也可以直接右鍵時間讀數切換；軌道標題列的緊湊讀數只顯示主單位。",
     playhead_time_placement: "播放游標時間位置",
     playhead_time_placement_auto: "自動",
     playhead_time_placement_toolbar: "工具列",

@@ -28,6 +28,26 @@ export const TIME_UNITS: readonly TimeUnit[] = [
 
 export const TIME_UNIT_CHOICES: readonly TimeUnitChoice[] = ["none", ...TIME_UNITS] as const;
 
+/**
+ * 时间单位的本地化标签键。
+ *
+ * 【为什么在这里而不是各调用点】标尺右键菜单、时间读数右键菜单与"时间轴显示设置"
+ * 三处都要把同一个单位翻成同一个词；各写一份 switch 的下场是三处文案迟早分叉
+ * （此前正是两份逐字相同的副本）。
+ */
+export function timeUnitLabelKey(unit: TimeUnit): string {
+    switch (unit) {
+        case "barBeats":
+            return "time_unit_bar_beats";
+        case "barDivisions":
+            return "time_unit_bar_divisions";
+        case "seconds":
+            return "time_unit_seconds";
+        case "clock":
+            return "time_unit_clock";
+    }
+}
+
 export interface TimeFormatContext {
     bpm: number;
     beatsPerBar: number;

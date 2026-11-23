@@ -1350,8 +1350,6 @@ export const zhCN = {
     kernel_unavailable_copied: "已复制",
     ruler_label_spacing: "标签间距",
     playhead_time_readout: "播放光标时间",
-    playhead_time_toolbar_hint:
-        "选择读数出现的位置（工具栏 / 状态栏 / 轨道头）。也可以直接右键时间读数切换；轨道头的紧凑读数只显示主单位。",
     playhead_time_placement: "播放光标时间位置",
     playhead_time_placement_auto: "自动",
     playhead_time_placement_toolbar: "工具栏",

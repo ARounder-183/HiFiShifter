@@ -15,23 +15,10 @@ import {
     playheadTimePlacementLabelKey,
 } from "../../features/session/playheadTimePlacement";
 import type { TimeUnit, TimeUnitChoice } from "../../features/session/sessionTypes";
-import { TIME_UNITS, TIME_UNIT_CHOICES } from "./timeline/timeFormat";
+import { TIME_UNITS, TIME_UNIT_CHOICES, timeUnitLabelKey } from "./timeline/timeFormat";
 import { AppSelect, AppSlider, AppSliderReadout } from "../../ui";
 import { AppDialog } from "../../ui/Dialog";
 import { AppField, AppForm } from "../../ui/Field";
-
-function unitLabelKey(unit: TimeUnit): string {
-    switch (unit) {
-        case "barBeats":
-            return "time_unit_bar_beats";
-        case "barDivisions":
-            return "time_unit_bar_divisions";
-        case "seconds":
-            return "time_unit_seconds";
-        case "clock":
-            return "time_unit_clock";
-    }
-}
 
 interface Props {
     open: boolean;
@@ -74,7 +61,7 @@ export function TimelineDisplaySettingsDialog({ open, onOpenChange }: Props) {
                         }}
                         options={TIME_UNITS.map((unit) => ({
                             value: unit,
-                            label: tf(unitLabelKey(unit)),
+                            label: tf(timeUnitLabelKey(unit)),
                         }))}
                     />
                 </AppField>
@@ -91,7 +78,7 @@ export function TimelineDisplaySettingsDialog({ open, onOpenChange }: Props) {
                             label:
                                 unit === "none"
                                     ? tf("time_unit_none")
-                                    : tf(unitLabelKey(unit as TimeUnit)),
+                                    : tf(timeUnitLabelKey(unit as TimeUnit)),
                         }))}
                     />
                 </AppField>
@@ -133,9 +120,6 @@ export function TimelineDisplaySettingsDialog({ open, onOpenChange }: Props) {
                         }))}
                     />
                 </AppField>
-                <div className="hs-type-caption text-qt-text-muted" style={{ marginTop: 4 }}>
-                    {tf("playhead_time_toolbar_hint")}
-                </div>
             </AppForm>
         </AppDialog>
     );

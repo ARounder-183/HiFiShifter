@@ -1403,8 +1403,6 @@ export const jaJP = {
     kernel_unavailable_copied: "コピーしました",
     ruler_label_spacing: "ラベル間隔",
     playhead_time_readout: "再生ヘッド時間",
-    playhead_time_toolbar_hint:
-        "表示位置（ツールバー / ステータスバー / トラックヘッダー）を選択します。時間表示を右クリックして切り替えることもできます。トラックヘッダーの表示は主単位のみです。",
     playhead_time_placement: "再生ヘッド時間の位置",
     playhead_time_placement_auto: "自動",
     playhead_time_placement_toolbar: "ツールバー",

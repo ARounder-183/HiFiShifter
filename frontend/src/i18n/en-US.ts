@@ -1526,8 +1526,6 @@ export const enUS = {
     kernel_unavailable_copied: "Copied",
     ruler_label_spacing: "Label Spacing",
     playhead_time_readout: "Playhead time",
-    playhead_time_toolbar_hint:
-        "Choose where the readout appears (toolbar / status bar / track header). You can also right-click the readout to move it; the track-header copy shows the primary unit only.",
     playhead_time_placement: "Playhead time position",
     playhead_time_placement_auto: "Automatic",
     playhead_time_placement_toolbar: "Toolbar",

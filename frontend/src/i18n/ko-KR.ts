@@ -1455,8 +1455,6 @@ export const koKR = {
     kernel_unavailable_copied: "복사됨",
     ruler_label_spacing: "라벨 간격",
     playhead_time_readout: "재생 헤드 시간",
-    playhead_time_toolbar_hint:
-        "표시 위치(툴바 / 상태 표시줄 / 트랙 헤더)를 선택합니다. 시간 표시를 마우스 오른쪽 버튼으로 클릭해 전환할 수도 있습니다. 트랙 헤더 표시는 주 단위만 보여 줍니다.",
     playhead_time_placement: "재생 헤드 시간 위치",
     playhead_time_placement_auto: "자동",
     playhead_time_placement_toolbar: "툴바",
