@@ -1084,9 +1084,15 @@ describe("上下文菜单共用同一个样式模型", () => {
         ];
         expect(defined.length, "没有找到任何 --qt-menu-* 令牌，正则已失效").toBeGreaterThan(5);
 
-        const files = sourceFiles(/\.(tsx?|css)$/);
+        /*
+         * 【为什么先读进内存再比对】原先按"每个令牌 × 每个文件"各读一次 —— 令牌有
+         * 二十来个，一次门禁就要几千次同步 I/O。单跑 1.5s 尚可，整仓并行跑满时它会
+         * 撞上 5s 的默认超时，表现为一条与改动无关的随机失败。读一遍再比对是同一判据，
+         * 但只走一次磁盘。
+         */
+        const sources = sourceFiles(/\.(tsx?|css)$/).map((file) => readFileSync(file, "utf8"));
         const missing = defined.filter(
-            (token) => !files.some((file) => readFileSync(file, "utf8").includes(`var(${token}`)),
+            (token) => !sources.some((source) => source.includes(`var(${token}`)),
         );
         expect(missing, "以下菜单令牌没有任何消费者 —— 令牌层在空转，删掉或接上：").toEqual([]);
     });
