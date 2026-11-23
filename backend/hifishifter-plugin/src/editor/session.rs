@@ -3439,7 +3439,16 @@ impl EditorSession {
         // 宿主清单已经换成这一轮几何：先做一次参数几何事务，再读派生视图。
         // 失败时不推进版本，下一轮重试同一 delta。
         if let Err(error) = document.reconcile_parameter_geometry() {
-            log::warn!("[ara] parameter geometry deferred: {error}");
+            // 【为什么必须限流】这条路径由 20 ms 的视图定时器驱动，而"工作区轨道身份
+            // 还没长成"会连续成立几百毫秒到几秒。逐轮 `warn!` 在一份现场日志里留下过
+            // 3493 行同一条消息 —— 它把真正有用的那几行淹掉了，而它要表达的信息只是
+            // "还在等，还没好"。改成按 key 限流之后，同一个窗口内只出现一条，并在下一条
+            // 真的写出去时带上"期间被压掉了多少条"的计数（见 `emit_limited_key`）。
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.geometry.deferred",
+                format_args!("[ara] parameter geometry deferred: {error}"),
+            );
             return;
         }
         // 【版本号必须在 adopt **成功之后**才推进】否则一次失败的 adopt 会把

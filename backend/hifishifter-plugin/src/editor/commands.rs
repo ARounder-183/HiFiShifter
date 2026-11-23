@@ -1985,6 +1985,59 @@ pub(super) fn dispatch(
             session.emit(event, input["payload"].clone());
             return Ok(Value::Null);
         }
+        // ── 只读状态 / 能力探测：**不经过 ensure_loaded** ──
+        //
+        // 【为什么必须挪到这里】它们回答的是"现在有什么进度 / 这个能力在不在"，
+        // 与时间线是否就绪**无关**。放在加载闸之后，宿主还在准备素材时每一次轮询都会
+        // 拿到 `source files are preparing` / `missing host PCM` —— 前端于是每 250 ms
+        // 记一条错误，而界面上什么都不会变。用户看到的是"应用一直在报错"。
+        //
+        // 【vslib】闭源库，插件包**刻意不随附**（见 `hifishifter-plugin/Cargo.toml`
+        // 的说明）。如实回答"没编进来 + 为什么"，算法列表才能按能力过滤掉它。
+        "get_vslib_status" => {
+            return Ok(json!({
+                "compiled": false,
+                "available": false,
+                "version": serde_json::Value::Null,
+                "error": "vslib is not bundled with the plug-in",
+            }))
+        }
+        // 【推理设备】插件与独立 App 共用同一份设置、同一个内核，所以这几条读数在插件里
+        // 同样成立。三个读数都**不初始化 ORT**（`is_available` 是只读快照，GPU/DXGI
+        // 枚举是纯查询），不会在 DAW 进程里触发重量级会话重建。
+        "get_onnx_status" => {
+            let compiled = hifishifter_kernel::nsf_hifigan_onnx::compiled();
+            return Ok(json!({
+                "compiled": compiled,
+                "available": compiled && hifishifter_kernel::nsf_hifigan_onnx::is_available(),
+                "error": hifishifter_kernel::nsf_hifigan_onnx::model_load_error(),
+                "epChoice": hifishifter_kernel::nsf_hifigan_onnx::ep_choice(),
+            }));
+        }
+        // 【长分析进度】事件通道（`pitch_orig_analysis_progress`）在正常情况下就够了，
+        // 但事件可能在窗口尚未挂载时发出 —— 那时前端只能靠轮询把"正在分析第 3/8 个
+        // 片段"补回来。`null` = 现在没有可报告的进度（既有契约）。
+        "get_pitch_analysis_progress" => {
+            return Ok(
+                match hifishifter_kernel::pitch_clip::get_clip_pitch_batch_progress() {
+                    Some(batch) => json!({
+                        "rootTrackId": "",
+                        "progress": batch.progress,
+                        "currentClipName": batch.current_clip_name,
+                        "completedClips": batch.completed_clips,
+                        "totalClips": batch.total_clips,
+                    }),
+                    None => Value::Null,
+                },
+            )
+        }
+        "get_syllable_analysis_progress" => {
+            return Ok(
+                hifishifter_kernel::pitch_analysis::syllable_analysis_progress()
+                    .map(|progress| serde_json::to_value(progress).unwrap_or(Value::Null))
+                    .unwrap_or(Value::Null),
+            )
+        }
         _ => {}
     }
     if let Err(error) = session.ensure_loaded(false) {
@@ -2195,34 +2248,6 @@ pub(super) fn dispatch(
         }
         "get_timeline_state_lite" => payload(session, true),
         "get_project_meta" => Ok(payload(session, true)?["project"].clone()),
-        // vslib 是闭源库，插件包**刻意不随附**（见 `hifishifter-plugin/Cargo.toml` 的
-        // 说明）。此前这条落到 `Command unavailable`，于是每次启动都有一次失败
-        // invoke，前端只能把 vslib 显示成"未知"。如实回答"没编进来 + 为什么"，
-        // 算法列表才能按能力过滤掉它。
-        "get_vslib_status" => Ok(json!({
-            "compiled": false,
-            "available": false,
-            "version": serde_json::Value::Null,
-            "error": "vslib is not bundled with the plug-in",
-        })),
-        // 推理设备（ORT Execution Provider）只读状态。插件与独立 App **共用同一份设置、
-        // 同一个内核**：`ui_settings_apply::apply` 已把 `ort_ep` / `ort_device_key` 下发给
-        // 会话，所以这几条读数在插件里同样成立。
-        //
-        // 【为什么必须补】此前它们落到 `Command unavailable`，于是 `MenuBar` 把整个
-        // 推理设备子菜单禁用（`disabled={isPluginMode()}`）—— 用户能在独立 App 里选
-        // GPU，在插件里却只能看着 CPU。三个读数都**不初始化 ORT**（`is_available` 是
-        // 只读快照，GPU/DXGI 枚举是纯查询），不会像 `run_vocoder_benchmark` 那样在
-        // DAW 进程里触发重量级会话重建。
-        "get_onnx_status" => {
-            let compiled = hifishifter_kernel::nsf_hifigan_onnx::compiled();
-            Ok(json!({
-                "compiled": compiled,
-                "available": compiled && hifishifter_kernel::nsf_hifigan_onnx::is_available(),
-                "error": hifishifter_kernel::nsf_hifigan_onnx::model_load_error(),
-                "epChoice": hifishifter_kernel::nsf_hifigan_onnx::ep_choice(),
-            }))
-        }
         "get_gpu_devices" => value(hifishifter_kernel::gpu_info::enumerate_gpus()),
         "get_dml_adapters" => value(hifishifter_kernel::dml_adapters::enumerate_dml_adapters()),
         // 记事本正文：独立 App 把它写进工程文件；插件没有工程文件，写进插件自己的
@@ -2452,27 +2477,6 @@ pub(super) fn dispatch(
             after_write(session, json!({"ok":true}))?;
             payload(session, true)
         }
-        // 长分析的轮询兜底。事件通道（`pitch_orig_analysis_progress`）在正常情况下
-        // 就够了，但事件可能在窗口尚未挂载时发出 —— 那时前端只能靠轮询这条把
-        // "正在分析第 3/8 个片段"补回来。此前这里恒回 `null`，于是**首次**分析
-        // 期间界面完全没有进度，看起来像卡死。
-        "get_pitch_analysis_progress" => Ok(
-            match hifishifter_kernel::pitch_clip::get_clip_pitch_batch_progress() {
-                Some(batch) => json!({
-                    "rootTrackId": "",
-                    "progress": batch.progress,
-                    "currentClipName": batch.current_clip_name,
-                    "completedClips": batch.completed_clips,
-                    "totalClips": batch.total_clips,
-                }),
-                None => Value::Null,
-            },
-        ),
-        "get_syllable_analysis_progress" => Ok(
-            hifishifter_kernel::pitch_analysis::syllable_analysis_progress()
-                .map(|progress| serde_json::to_value(progress).unwrap_or(Value::Null))
-                .unwrap_or(Value::Null),
-        ),
         // 把编辑后的音高曲线导出成 MIDI。
         //
         // 【为什么插件里能做】整条链路是纯变换（读音高数据 → 写文件），不需要任何
@@ -2965,6 +2969,64 @@ pub(super) fn dispatch(
             )
         }
         _ => Err(format!("Command unavailable in plug-in mode: {command}")),
+    }
+}
+
+#[cfg(test)]
+mod status_probe_tests {
+    use super::*;
+
+    /// **回归：加载窗口里的只读状态命令必须给中性值，不是错误。**
+    ///
+    /// 【为什么这条是用户报障的可执行形式】`get_syllable_analysis_progress` /
+    /// `get_pitch_analysis_progress` / `get_vslib_status` / `get_onnx_status` 都是
+    /// **只读探针**：它们回答"现在有什么进度、这个能力在不在"，与时间线是否就绪无关。
+    /// 放在 `ensure_loaded` 闸之后就变成"宿主还在准备素材时，每一次轮询都返回
+    /// `source files are preparing` / `missing host PCM`" —— 前端每 250 ms 记一条
+    /// 错误，而界面上什么都不变。现场日志里那一片 `missing host PCM` 就是这条缺陷。
+    ///
+    /// 【怎么把"闸门失败"变成一个确定的夹具】夹具里的素材太小，`ensure_loaded` 会当场
+    /// 成功 —— 于是"等待窗口"复现不出来。这里改用**更强**的判据：把会话关掉（此时任何
+    /// 依赖会话的命令都必然失败），四个探针仍然必须答得出来。它们能答，就证明它们真的
+    /// 走在那道闸**之前**；将来谁把它们挪回闸后，这条用例会当场红。
+    #[test]
+    fn status_probes_answer_before_the_load_gate() {
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let editor = owner.editor_session().unwrap();
+        editor.close();
+        for command in [
+            "get_vslib_status",
+            "get_onnx_status",
+            "get_pitch_analysis_progress",
+            "get_syllable_analysis_progress",
+        ] {
+            let result = dispatch(&editor, command, Value::Null);
+            assert!(
+                result.is_ok(),
+                "{command} 必须在加载闸之前作答（只读探针与时间线是否就绪无关）：{result:?}"
+            );
+        }
+        // 【对照：顺序】"答得出来"只说明它们不碰会话；真正要钉的是它们排在
+        // `ensure_loaded` 闸**之前** —— 那才是"加载窗口里不再刷错误"的机制。
+        let source = include_str!("commands.rs");
+        let gate = source
+            .find("if let Err(error) = session.ensure_loaded(false)")
+            .expect("加载闸必须存在于本文件");
+        for command in [
+            "get_vslib_status",
+            "get_onnx_status",
+            "get_pitch_analysis_progress",
+            "get_syllable_analysis_progress",
+        ] {
+            let at = source
+                .find(&format!("\"{command}\" =>"))
+                .unwrap_or_else(|| panic!("{command} 的匹配臂必须存在"));
+            assert!(
+                at < gate,
+                "{command} 必须排在加载闸之前：排在闸后会在素材准备期间每次轮询都报错"
+            );
+        }
+        drop(model);
     }
 }
 
