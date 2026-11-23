@@ -80,7 +80,7 @@ export function installTimelineViewportBridge(): () => void {
 
     const broadcast = () => {
         frame = null;
-        if (disposed || !canBroadcast()) return;
+        if (disposed || !canBroadcast() || !timelineViewportSync.isSeeded()) return;
         const now = typeof performance !== "undefined" ? performance.now() : Date.now();
         if (now - lastBroadcastAt < 33) {
             frame = requestAnimationFrame(broadcast);
