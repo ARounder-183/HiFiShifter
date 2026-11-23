@@ -169,6 +169,16 @@ export interface AppIconButtonProps extends Omit<
      */
     emphasis?: "neutral" | "accent";
     /**
+     * 填充家族（不激活时的变体）。
+     *
+     * 【为什么需要它】`active` 只能表达"实心 / 幽灵"两档，而传输栏与录音键需要
+     * **soft**（半透明强调色，例如待机态的 Stop）这一档。没有这个属性时，调用方只能
+     * 绕过原语直接写 `IconButton`，于是同一个工具栏里又出现两套盒模型。
+     *
+     * 缺省 `ghost`：与既有全部调用点逐字一致，升级不会改变任何现网按钮。
+     */
+    surface?: "ghost" | "soft" | "solid";
+    /**
      * 右下角小三角：提示"这枚按钮还有右键菜单"。
      *
      * 【为什么由原语承担】它是**交互协议**的一部分（"右键还有东西"），不是某一枚
@@ -196,6 +206,7 @@ export function AppIconButton({
     active = false,
     intent = "default",
     emphasis = "neutral",
+    surface = "ghost",
     size = "md",
     menuCaret = false,
     className,
@@ -208,7 +219,7 @@ export function AppIconButton({
     const color = intent === "danger" ? "red" : emphasis === "accent" ? undefined : "gray";
     return (
         <IconButton
-            variant={active ? "solid" : "ghost"}
+            variant={active ? "solid" : surface}
             color={color}
             size="1"
             data-tooltip={tooltip}

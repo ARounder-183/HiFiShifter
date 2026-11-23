@@ -31,7 +31,8 @@ import {
 } from "@radix-ui/react-icons";
 
 import { useI18n } from "../../i18n/I18nProvider";
-import { AppIconButton, AppStatusChip, SlotText } from "../../ui";
+import { AppStatusChip, SlotText } from "../../ui";
+import { TransportIconButton } from "../../components/layout/transport/TransportIconButton";
 import { framesToSeconds } from "./captureApi";
 import { CaptureSettingsDialog } from "./CaptureSettingsDialog";
 import {
@@ -110,9 +111,10 @@ export function CaptureControl() {
                     openCaptureSettings();
                 }}
             >
-                <AppIconButton
-                    size="sm"
-                    intent={armed ? "danger" : "default"}
+                {/* 与传输栏同一原语：捕获键就长在传输栏旁边，盒模型必须一致。 */}
+                <TransportIconButton
+                    tone={armed ? "danger" : "neutral"}
+                    fill="ghost"
                     active={armed}
                     icon={armed ? <StopIcon /> : <DotFilledIcon />}
                     tooltip={tooltip}
@@ -123,8 +125,8 @@ export function CaptureControl() {
             {/* 取消：只在武装期出现。捕获键就在工具栏上，误触很便宜 —— 而没有取消的话，
                 唯一的出路是"先停止（产生一个 take）再删掉它"。 */}
             {armed ? (
-                <AppIconButton
-                    size="sm"
+                <TransportIconButton
+                    fill="ghost"
                     icon={<Cross2Icon />}
                     tooltip={t("capture_cancel_hint")}
                     disabled={busy}

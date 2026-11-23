@@ -1,7 +1,7 @@
 // hs-interaction-exempt: 主工具栏是紧凑 chrome（size 1、内联底色、BPM 有手势累加器），能力层原语是表单尺寸；本文件的滚轮与精细调整接线已完备（BPM/节拍器音量/三个下拉均有），故刻意保留。
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { isPluginMode, canControlHostTransport } from "../../services/hostCapabilities";
-import { Flex, Select, TextField, Button, IconButton, Box } from "@radix-ui/themes";
+import { Flex, Select, TextField, Box } from "@radix-ui/themes";
 import { CheckIcon, PauseIcon, Pencil1Icon, PlayIcon, StopIcon } from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { shallowEqual } from "react-redux";
@@ -9,6 +9,7 @@ import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import { CaptureControl } from "../../features/capture/CaptureControl";
 import { PlayheadTimeReadoutSlot } from "./transport/PlayheadTimeReadoutSlot";
+import { TransportIconButton } from "./transport/TransportIconButton";
 import { PitchSnapSettingsDialog } from "./PitchSnapSettingsDialog";
 import { SnapGridSettingsDialog } from "./SnapGridSettingsDialog";
 import { SplitTransitionSettingsDialog } from "./SplitTransitionSettingsDialog";
@@ -1290,38 +1291,31 @@ export function ActionBar() {
                 const inert = isPluginMode() && !hostTransport;
                 return (
                     <AppToolbarGroup>
-                        <Button
-                            variant="soft"
-                            color="gray"
-                            size="1"
-                            aria-disabled={inert || undefined}
-                            onClick={() => {
-                                if (inert) return;
-                                dispatch(stopAudioPlayback({ restoreAnchor: true }));
-                            }}
-                            data-tooltip={
+                        {/* 传输组统一走 TransportIconButton：同一 size / 盒模型 / 填充家族。
+                            此前 Stop 是文字 Button、Play 是 IconButton、Record 是 Box 包裹的
+                            IconButton —— 三套盒子并排，填充边界必然不齐。 */}
+                        <TransportIconButton
+                            tone="neutral"
+                            fill="soft"
+                            icon={<StopIcon />}
+                            tooltip={
                                 inert
                                     ? t("plugin_transport_host_only")
                                     : isPluginMode()
                                       ? t("plugin_transport_stop")
                                       : t("action_stop")
                             }
-                        >
-                            <StopIcon />
-                        </Button>
-                        <IconButton
-                            variant="solid"
-                            size="1"
-                            aria-disabled={inert || undefined}
+                            disabled={inert}
                             onClick={() => {
                                 if (inert) return;
-                                if (isPlaying) {
-                                    dispatch(stopAudioPlayback());
-                                    return;
-                                }
-                                dispatch(playOriginal());
+                                dispatch(stopAudioPlayback({ restoreAnchor: true }));
                             }}
-                            data-tooltip={
+                        />
+                        <TransportIconButton
+                            tone="accent"
+                            fill="solid"
+                            icon={isPlaying ? <PauseIcon /> : <PlayIcon />}
+                            tooltip={
                                 inert
                                     ? t("plugin_transport_host_only")
                                     : isPluginMode()
@@ -1330,22 +1324,52 @@ export function ActionBar() {
                                         ? tf("action_pause")
                                         : t("action_play_out")
                             }
-                        >
-                            {isPlaying ? <PauseIcon /> : <PlayIcon />}
-                        </IconButton>
+                            disabled={inert}
+                            onClick={() => {
+                                if (inert) return;
+                                if (isPlaying) {
+                                    dispatch(stopAudioPlayback());
+                                    return;
+                                }
+                                dispatch(playOriginal());
+                            }}
+                        />
                         {!isPluginMode() && (
                             <Box
                                 ref={recordingMenuAnchorRef}
                                 style={{ position: "relative" }}
                                 data-hs-context-menu
                             >
-                                <IconButton
-                                    size="1"
-                                    /* 录音语义色：待机态就用 soft 红点（旧版待机是灰色 ghost 点，
-                                   录音键的"红"只在录制中才出现，语义色缺失） */
-                                    variant={recording.active ? "solid" : "soft"}
-                                    color="red"
-                                    data-tooltip={recordingTooltip}
+                                <TransportIconButton
+                                    /* 录音语义色：**固定实心危险色**。待机 soft / 录制中 solid
+                                       会让按下那一刻盒子变宽 1px（soft 是半透明强调色、solid 是
+                                       不透明强调色），而"红色填充与播放键不齐"正是它。录制状态
+                                       只换图标与 aria-pressed，不换盒模型。 */
+                                    tone="danger"
+                                    fill="solid"
+                                    active={recording.active}
+                                    icon={
+                                        recording.active ? (
+                                            <svg
+                                                width="15"
+                                                height="15"
+                                                viewBox="0 0 15 15"
+                                                fill="currentColor"
+                                            >
+                                                <rect x="4" y="4" width="7" height="7" rx="1.2" />
+                                            </svg>
+                                        ) : (
+                                            <svg
+                                                width="15"
+                                                height="15"
+                                                viewBox="0 0 15 15"
+                                                fill="currentColor"
+                                            >
+                                                <circle cx="7.5" cy="7.5" r="4.2" />
+                                            </svg>
+                                        )
+                                    }
+                                    tooltip={recordingTooltip}
                                     disabled={recording.busy && recording.countdownRemaining === 0}
                                     onClick={() => {
                                         if (recording.active) {
@@ -1366,27 +1390,7 @@ export function ActionBar() {
                                         void dispatch(loadRecordingDevices({ force: true }));
                                         void dispatch(loadRecordingApps({ force: true }));
                                     }}
-                                >
-                                    {recording.active ? (
-                                        <svg
-                                            width="15"
-                                            height="15"
-                                            viewBox="0 0 15 15"
-                                            fill="currentColor"
-                                        >
-                                            <rect x="4" y="4" width="7" height="7" rx="1.2" />
-                                        </svg>
-                                    ) : (
-                                        <svg
-                                            width="15"
-                                            height="15"
-                                            viewBox="0 0 15 15"
-                                            fill="currentColor"
-                                        >
-                                            <circle cx="7.5" cy="7.5" r="4.2" />
-                                        </svg>
-                                    )}
-                                </IconButton>
+                                />
                                 <AppAnchoredMenu
                                     open={recordingMenuOpen}
                                     anchorRef={recordingMenuAnchorRef}
@@ -1624,13 +1628,13 @@ export function ActionBar() {
                 独立成组、两侧以分隔线与其他按钮隔开；右键打开「操作记录」
                 （非模态浮动窗口，打开期间照常编辑轨道，条目实时刷新）。 */}
             <AppToolbarGroup>
-                <IconButton
+                <TransportIconButton
                     ref={undoButtonRef}
-                    size="1"
-                    variant="ghost"
+                    fill="ghost"
+                    icon={<UndoIcon />}
+                    tooltip={`${t("menu_undo")} (${formatKeybindingList(undoShortcutKb, "")})`}
                     disabled={s.historyUndoDepth <= 0}
                     tabIndex={-1}
-                    data-tooltip={`${t("menu_undo")} (${formatKeybindingList(undoShortcutKb, "")})`}
                     onClick={() => {
                         void dispatch(undoRemote());
                     }}
@@ -1638,15 +1642,13 @@ export function ActionBar() {
                         event.preventDefault();
                         openHistoryPanel();
                     }}
-                >
-                    <UndoIcon />
-                </IconButton>
-                <IconButton
-                    size="1"
-                    variant="ghost"
+                />
+                <TransportIconButton
+                    fill="ghost"
+                    icon={<RedoIcon />}
+                    tooltip={`${t("menu_redo")} (${formatKeybindingList(redoShortcutKb, "")})`}
                     disabled={s.historyRedoDepth <= 0}
                     tabIndex={-1}
-                    data-tooltip={`${t("menu_redo")} (${formatKeybindingList(redoShortcutKb, "")})`}
                     onClick={() => {
                         void dispatch(redoRemote());
                     }}
@@ -1654,9 +1656,7 @@ export function ActionBar() {
                         event.preventDefault();
                         openHistoryPanel();
                     }}
-                >
-                    <RedoIcon />
-                </IconButton>
+                />
             </AppToolbarGroup>
 
             {/* File Browser Toggle */}
