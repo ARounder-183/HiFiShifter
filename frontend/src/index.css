@@ -1562,7 +1562,7 @@ textarea {
     height: 12px;
     border: none;
     border-radius: 50%;
-    background: var(--accent-9);
+    background: var(--qt-accent, var(--qt-highlight));
 }
 .qt-range::-moz-range-track {
     height: 4px;
@@ -1575,7 +1575,7 @@ textarea {
     height: 12px;
     border: none;
     border-radius: 50%;
-    background: var(--accent-9);
+    background: var(--qt-accent, var(--qt-highlight));
 }
 
 .rt-DropdownMenuItem,

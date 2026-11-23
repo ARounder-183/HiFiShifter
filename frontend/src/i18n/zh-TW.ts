@@ -1136,6 +1136,7 @@ export const zhTW = {
     kb_modifier_copy_drag: "複製拖動（拖動音訊塊主體時按住）",
     kb_modifier_crossfade_grip: "交叉淡化反向模式（拖動交叉點手柄時按住）",
     kb_modifier_fade_curvature: "淡化曲率（拖動淡化包絡線 / 交叉點時按住）",
+    fade_axis_s: "S 軸",
     fade_menu_curvature_hint: "淡化曲率（按住 {keys} 並拖動包絡線）",
     kb_modifier_fade_shape_cycle: "循環切換淡化形狀（點擊淡化包絡線時按住）",
     kb_modifier_horizontal_zoom: "畫布水平縮放（時間軸 / 鋼琴捲簾 / 琴鍵區滾輪）",

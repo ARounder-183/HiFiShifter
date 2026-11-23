@@ -1165,6 +1165,7 @@ export const jaJP = {
     kb_modifier_crossfade_grip:
         "クロスフェード反転モード（クロスフェードグリップドラッグ中に押す）",
     kb_modifier_fade_curvature: "フェードカーブ（フェード包絡線 / 交点をドラッグ中に押す）",
+    fade_axis_s: "S 軸",
     fade_menu_curvature_hint: "フェードカーブ（{keys} を押しながらドラッグ）",
     kb_modifier_fade_shape_cycle: "フェード形状を切り替え（フェード包絡線をクリック中に押す）",
     kb_modifier_horizontal_zoom:

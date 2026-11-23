@@ -1224,6 +1224,7 @@ export const koKR = {
     kb_modifier_copy_drag: "복사 드래그 (클립 본체 드래그 중 누르기)",
     kb_modifier_crossfade_grip: "크로스페이드 반전 모드 (크로스페이드 그립 드래그 중 누르기)",
     kb_modifier_fade_curvature: "페이드 곡률 (페이드 엔벨로프 / 교차점 드래그 중 누르기)",
+    fade_axis_s: "S 축",
     fade_menu_curvature_hint: "곡률({keys}를 누른 채 드래그)",
     kb_modifier_fade_shape_cycle: "페이드 형태 순환 (페이드 엔벨로프 클릭 중 누르기)",
     kb_modifier_horizontal_zoom: "캔버스 수평 줌 (타임라인 / 피아노 롤 / 피아노 키 휠)",

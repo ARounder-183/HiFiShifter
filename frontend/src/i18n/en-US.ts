@@ -1293,6 +1293,7 @@ export const enUS = {
     kb_modifier_copy_drag: "Copy Drag (hold while dragging clip body)",
     kb_modifier_crossfade_grip: "Crossfade Reverse Mode (hold while dragging crossfade grip)",
     kb_modifier_fade_curvature: "Fade Curvature (hold while dragging fade envelope / crossfade)",
+    fade_axis_s: "S axis",
     fade_menu_curvature_hint: "Curvature (hold {keys} and drag the envelope)",
     kb_modifier_fade_shape_cycle: "Cycle Fade Shape (hold while clicking fade envelope)",
     kb_modifier_horizontal_zoom:

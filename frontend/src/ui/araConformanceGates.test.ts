@@ -263,8 +263,6 @@ describe("表单控件：走设计系统原语", () => {
             [join("src", "components", "layout", "pianoRoll", "panel", "SmoothingSlider.tsx")]:
                 "边缘平滑度的裸 range（带 .qt-range），早于 AppSlider；迁移要单独核对步长语义。" +
                 "该控件原先在 ParamToolbar.tsx 里，拆分为独立组件后随之移动——数量没有变化，仍是这一处。",
-            [join("src", "components", "layout", "timeline", "FadeContextMenu.tsx")]:
-                "淡变曲率的裸 range，早于 AppSlider；迁移要单独核对步长语义。",
         };
         const files = consumerFiles().filter((file) => !(file in ALLOWED));
         const { offenders, scanned } = scan(files, (source) => {
