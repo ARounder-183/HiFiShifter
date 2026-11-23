@@ -180,13 +180,36 @@ fn write_fragment(
 fn read_fragment() -> Result<ProjectFragment, String> {
     let bytes =
         system_clipboard::read_bytes()?.ok_or_else(|| "timeline_clipboard_empty".to_string())?;
-    // 槽位内容无法按时间轴载荷解析（被参数线复制覆盖 / 损坏 / 未知版本）时，
-    // 一律按"没有可粘贴的内容"处理并继续上层 REAPER 回退；解析细节仅进日志，
-    // 不把裸 serde 错误透给用户。
+    // 【先判别**格式**，再谈"解析失败"】槽位里可能躺着两种**本来就不归这里管**的
+    // JSON：参数线载荷，以及插件（ARA/VST3 形态）写出的宿主 item 剪贴板
+    // （`format: "hifishifter-host-items-2"`）。把它们的字节硬塞进 msgpack 解码器，
+    // 只会得到一句 `invalid type: integer 123, expected struct ProjectFragment`
+    // —— 123 是 `{` 的首字节。那不是错误，是**问错了问题**：用户看到的是日志里
+    // 每粘贴一次就多一条"载荷不可用"，而界面上一切正常（上层会回退到 REAPER 媒体）。
+    if is_param_payload(&bytes) || is_plugin_host_clip_payload(&bytes) {
+        return Err("timeline_clipboard_empty".to_string());
+    }
+    // 其余无法按时间轴载荷解析的内容（损坏 / 未知版本）同样按"没有可粘贴的内容"
+    // 处理并继续上层 REAPER 回退；解析细节仅进日志，不把裸 serde 错误透给用户。
     ProjectFragment::decode(&bytes).map_err(|error| {
         log::warn!("[hifishifter] timeline clipboard payload unusable: {error}");
         "timeline_clipboard_empty".to_string()
     })
+}
+
+/// 判断槽位字节是否为**插件形态**的宿主 item 剪贴板载荷。
+///
+/// 【为什么独立进程也要认得它】插件与独立 App 共用同一个系统剪贴板：用户在插件里
+/// 复制一个 Clip，再切到独立 App 里粘贴，是完全正常的一串操作。插件写的是 JSON
+/// （`format` + `version` + `kind`，见 `host/reaper/clipboard.rs`），而独立 App
+/// 的时间轴剪贴板是 msgpack `ProjectFragment` —— 两者**不是**同一种载荷，也不该
+/// 互相解析。认出来之后走"没有本类内容"的正常路径即可。
+fn is_plugin_host_clip_payload(bytes: &[u8]) -> bool {
+    const PLUGIN_FORMAT: &str = "hifishifter-host-items-2";
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    value.get("format").and_then(|entry| entry.as_str()) == Some(PLUGIN_FORMAT)
 }
 
 /// 判断槽位字节是否为参数线载荷（前端 `writeSystemClipboardObject` 写入的
@@ -613,5 +636,40 @@ mod tests {
         assert!(!is_param_payload(b"{\"kind\": \"param\"")); // 截断 JSON
         assert!(!is_param_payload(&[0x7b, 0x00, 0xff])); // 二进制
         assert!(!is_param_payload(b""));
+    }
+
+    /// **插件写出的宿主 item 剪贴板必须被认出来，而不是当成损坏的 msgpack。**
+    ///
+    /// 【为什么这是回归】插件与独立 App 共用系统剪贴板：在插件里复制一个 Clip、切到
+    /// 独立 App 粘贴，是完全正常的一串操作。插件写的是 JSON，而这里的时间轴剪贴板是
+    /// msgpack —— 把 `{` 的字节塞进 msgpack 解码器，得到的是
+    /// `invalid type: integer 123, expected struct ProjectFragment`。用户看到的是
+    /// 日志里每粘贴一次就多一条"载荷不可用"，而界面上一切正常。
+    #[test]
+    fn a_plugin_host_clipboard_payload_is_recognized_not_decoded() {
+        let plugin = serde_json::json!({
+            "format": "hifishifter-host-items-2",
+            "version": 1,
+            "kind": "clips",
+            "items": [],
+        });
+        let bytes = plugin.to_string().into_bytes();
+        assert!(
+            is_plugin_host_clip_payload(&bytes),
+            "插件载荷必须被识别（否则会走 msgpack 解码并报 123）"
+        );
+        // 它也不是参数线载荷 —— 两条判别互不重叠。
+        assert!(!is_param_payload(&bytes));
+        // 首字节确实是 123（'{'），正是日志里那个数字的来源。
+        assert_eq!(bytes.first().copied(), Some(b'{'));
+    }
+
+    #[test]
+    fn other_payloads_are_not_mistaken_for_a_plugin_clipboard() {
+        let param = serde_json::json!({ "version": 2, "kind": "param", "segments": [] });
+        assert!(!is_plugin_host_clip_payload(param.to_string().as_bytes()));
+        assert!(!is_plugin_host_clip_payload(b"{\"format\": \"something-else\"}"));
+        assert!(!is_plugin_host_clip_payload(b"not json"));
+        assert!(!is_plugin_host_clip_payload(b""));
     }
 }
