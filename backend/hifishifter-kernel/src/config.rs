@@ -2524,8 +2524,9 @@ mod tests {
     /// 状态栏 —— 脏数据不该改变用户的既有选择。
     #[test]
     fn ui_settings_rejects_an_unknown_playhead_time_placement() {
-        let legacy: UiSettings = serde_json::from_value(serde_json::json!({ "autoCrossfade": true }))
-            .expect("旧配置必须能读");
+        let legacy: UiSettings =
+            serde_json::from_value(serde_json::json!({ "autoCrossfade": true }))
+                .expect("旧配置必须能读");
         assert_eq!(
             legacy.playhead_time_placement, None,
             "缺字段必须读成 None（= 交给前端按旧布尔迁移）"
