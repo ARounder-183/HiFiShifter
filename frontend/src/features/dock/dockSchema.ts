@@ -31,7 +31,9 @@ import {
     pinChildSize,
     pruneTree,
     removeForm,
+    resolveFormRelation,
     rootOfForm,
+    type DockFormRelation,
     splitRootWith,
     type DockInsertTarget,
 } from "./dockTree";
@@ -783,7 +785,13 @@ export function resolveSyncOffsetForms(
     paramPanelId: string,
     /** 本参数编辑器窗体的 id（多实例时由面板注入）；不属于该面板时忽略。 */
     paramFormId?: string,
-): { timelineFormId: string; paramFormId: string; sameTabset: boolean } | null {
+): {
+    timelineFormId: string;
+    paramFormId: string;
+    /** 兼容字段：等价于 relation === "tabbed"。 */
+    sameTabset: boolean;
+    relation: DockFormRelation;
+} | null {
     const timelineFormId = findVisibleFormForPanel(layout, timelinePanelId);
     if (!timelineFormId) return null;
 
@@ -794,11 +802,23 @@ export function resolveSyncOffsetForms(
     // 同一个窗体（参数写反的典型后果）：偏移没有意义，且必然算错。
     if (resolvedParamFormId === timelineFormId) return null;
 
-    const root = layout.roots[MAIN_ROOT_ID];
-    const timelineTabset = root ? findTabsetOfForm(root, timelineFormId) : null;
-    const paramTabset = root ? findTabsetOfForm(root, resolvedParamFormId) : null;
+    // 【必须按各自 root 查】此前只查 MAIN_ROOT_ID；两个面板作为标签页身处面板子根时
+    // 会被误判成"不同标签组"，进而走屏幕坐标测量并在停泊区拿到 null，同步静默失效。
+    const timelineRoot = rootOfForm(layout, timelineFormId);
+    const paramRoot = rootOfForm(layout, resolvedParamFormId);
+    const timelineTabset =
+        timelineRoot === null
+            ? null
+            : findTabsetOfForm(layout.roots[timelineRoot]!, timelineFormId);
+    const paramTabset =
+        paramRoot === null ? null : findTabsetOfForm(layout.roots[paramRoot]!, resolvedParamFormId);
     const sameTabset =
-        timelineTabset !== null && paramTabset !== null && timelineTabset.id === paramTabset.id;
+        timelineRoot !== null &&
+        timelineRoot === paramRoot &&
+        timelineTabset !== null &&
+        paramTabset !== null &&
+        timelineTabset.id === paramTabset.id;
+    const relation = resolveFormRelation(layout, timelineFormId, resolvedParamFormId);
 
     if (!sameTabset) {
         // 不同标签组时必须两者都真的在屏幕上，否则测不到绝对坐标。
@@ -806,7 +826,7 @@ export function resolveSyncOffsetForms(
         if (!isFormActiveVisible(layout, resolvedParamFormId)) return null;
     }
 
-    return { timelineFormId, paramFormId: resolvedParamFormId, sameTabset };
+    return { timelineFormId, paramFormId: resolvedParamFormId, sameTabset, relation };
 }
 
 /** 找出该面板已关闭的窗体 id（用于重开时复用记录，保住标题与 props）。 */

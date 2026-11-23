@@ -194,6 +194,7 @@ import {
     installWindowEventBridge,
     KEYBINDING_ACTION_EVENT,
 } from "./features/dock/windowEventBridge";
+import { installTimelineViewportBridge } from "./utils/timelineViewportBridge";
 import { setActiveEditorWindow } from "./features/session/interactionSlice";
 import {
     classifyHostKeyRelay,
@@ -3751,6 +3752,7 @@ function AppInner() {
     // 阶段位于传播链最前端，子元素的 preventDefault / stopPropagation 均
     // 无法逃过解析（时间轴正是靠 preventDefault 自管焦点的）。
     useEffect(() => installWindowEventBridge(), []);
+    useEffect(() => installTimelineViewportBridge(), []);
     useEffect(
         () =>
             installFocusSurfaceTracking(() => {

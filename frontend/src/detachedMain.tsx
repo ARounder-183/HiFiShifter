@@ -24,6 +24,7 @@ import { I18nProvider } from "./i18n/I18nProvider";
 import { AppThemeProvider } from "./theme/AppThemeProvider";
 import { installGlobalErrorReporting, installFrontendLogPolicy } from "./services/frontendErrorLog";
 import { installWindowEventBridge } from "./features/dock/windowEventBridge";
+import { installTimelineViewportBridge } from "./utils/timelineViewportBridge";
 
 /*
  * 全局兜底：独立窗口是另一个 JS 上下文，主入口的 `installGlobalErrorReporting()`
@@ -39,6 +40,8 @@ installGlobalErrorReporting();
  * 命令也要能以本卫星窗口为目标。必须在 React 挂载前注册，避免极早的事件丢失。
  */
 installWindowEventBridge();
+/* 视口桥必须与 UI 命令桥同时安装：卫星窗口启动时立刻发一次请求，主窗口才能播种。 */
+installTimelineViewportBridge();
 
 /*
  * 【为什么这里不做偏好 hydrate】独立窗口与主窗口同源，共用同一份 `localStorage`；

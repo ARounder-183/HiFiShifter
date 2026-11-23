@@ -10,6 +10,8 @@
  * 使网格/时间轴在两个面板中按同一全局屏幕位置对齐。
  */
 
+import type { DockFormRelation } from "../features/dock/dockTree";
+
 export interface TimelineViewportState {
     scrollLeft: number;
     pxPerSec: number;
@@ -123,6 +125,57 @@ export const timelineViewportSync = {
     },
 };
 
+/** 同步时采用的几何语义。 */
+export type SyncViewportAlignment = "screen-x" | "left-start" | "tabbed";
+
+/** 两个视口在屏幕上的几何：偏移与 x 区间重叠长度。 */
+export interface TimelineViewportGeometry {
+    /** 轨道视口左缘 − 参数视口左缘。 */
+    offsetPx: number;
+    /** 两个视口 x 区间的重叠长度（0 = 左右不重叠）。 */
+    overlapXPx: number;
+}
+
+/**
+ * 关系 → 对齐语义。
+ *
+ * 屏幕 x 对齐只在两个视口共享一段屏幕 x 时才有意义；左右并排/独立窗口的窗口位置
+ * 由用户任意摆放，同一屏幕 x 没有共同参照，必须改为"左侧起点对齐"（offset 0）。
+ * 24px 死区避免浮动窗边界处模式反复切换。
+ */
+export function resolveSyncViewportAlignment(args: {
+    relation: DockFormRelation;
+    geometry: { overlapXPx: number } | null;
+    minOverlapXPx?: number;
+}): SyncViewportAlignment {
+    const { relation, geometry } = args;
+    const minOverlapXPx = args.minOverlapXPx ?? 24;
+    if (relation === "tabbed") return "tabbed";
+    if (relation === "detached") return "left-start";
+    if (geometry !== null) {
+        return geometry.overlapXPx >= minOverlapXPx ? "screen-x" : "left-start";
+    }
+    if (relation === "stacked") return "screen-x";
+    return "left-start";
+}
+
+/** 由两个视口矩形算出偏移与 x 重叠；任一矩形缺失/不可信时返回 null。 */
+export function resolveViewportGeometry(args: {
+    trackRect: Pick<DOMRect, "left" | "right" | "width" | "height"> | null;
+    paramRect: Pick<DOMRect, "left" | "right" | "width" | "height"> | null;
+}): TimelineViewportGeometry | null {
+    const { trackRect, paramRect } = args;
+    if (!trackRect || !paramRect) return null;
+    if (trackRect.width < 1 || trackRect.height < 1 || paramRect.width < 1 || paramRect.height < 1)
+        return null;
+    if (!Number.isFinite(trackRect.left) || !Number.isFinite(paramRect.left)) return null;
+    const overlapXPx = Math.max(
+        0,
+        Math.min(trackRect.right, paramRect.right) - Math.max(trackRect.left, paramRect.left),
+    );
+    return { offsetPx: trackRect.left - paramRect.left, overlapXPx };
+}
+
 /**
  * 由两个视口元素的左缘算出同步偏移（纯函数，便于单测）。
  *
@@ -150,52 +203,35 @@ export function resolveViewportOffsetPx(args: {
     return track - param;
 }
 
-/**
- * 测量轨道视图时间线区域与参数编辑器绘制区域之间的全局水平偏移（像素）。
- *
- * 轨道视图左侧有“轨道头”区域，参数编辑器左侧只有较窄的钢琴卷帘/参数刻度，
- * 因此即使两者的 scrollLeft / pxPerSec 相同，网格线也不会在屏幕上垂直对齐。
- * 该偏移 = 轨道时间线区左缘 - 参数编辑器画布区左缘（恒为正）。
- *
- * 特殊说明：任一视口元素尚未挂载时返回 `null`（而不是 0），调用方据此保持上一次的
- * 有效偏移并重试——见 `resolveViewportOffsetPx` 的说明。
- *
- * @returns 偏移（CSS px）；元素缺失 / 无 DOM 环境时为 null。
- */
-export function measureTimelineViewportOffsetPx(): number | null {
-    if (typeof document === "undefined") return null;
-    return resolveViewportOffsetPx({
-        trackLeftPx: readableLeftPx(
-            document.querySelector<HTMLElement>("[data-timeline-scroller]"),
-        ),
-        paramLeftPx: readableLeftPx(
-            document.querySelector<HTMLElement>("[data-piano-roll-scroller]"),
-        ),
-    });
-}
-
-/**
- * 取元素左缘，但**拒绝**那些"存在却不可信"的元素。
- *
- * 【为什么必须拒绝】面板可停靠/浮动之后，非活动标签的 DOM 宿主被停在视口外
- * （`left: -20000px`，见 `panelHostRegistry`），折叠/隐藏时尺寸为 0。这些元素
- * 依然能被 `querySelector` 找到，但它们的左缘是 −20000 或任意值 —— 一旦被当成
- * 测量结果，参数编辑器的同步偏移就会离谱到几千像素，两个面板彻底错位。
- * 返回 null 会让调用方保持上一次的有效值并重试。
- */
-function readableLeftPx(element: HTMLElement | null): number | null {
+/** 取元素矩形，但拒绝"存在却不可信"的停泊区 / 隐藏 / 视口外元素。 */
+function readableRect(
+    element: HTMLElement | null,
+): Pick<DOMRect, "left" | "right" | "width" | "height"> | null {
     if (element === null) return null;
-    // 【身份判据优先于坐标判据】停泊区的元素坐标是 −20000，但它**是什么**比它在哪
-    // 更可靠：`data-dock-parking` 由 `panelHostRegistry.ensureParking` 写在容器上，
-    // 而"坐标小于 −1000"只是一个恰好成立的巧合 —— 浮动窗允许适度出屏，多显示器
-    // 布局下也可能出现合法的负坐标。先按身份拒绝，再按坐标兜底。
     if (element.closest("[data-dock-parking]") !== null) return null;
     const rect = element.getBoundingClientRect();
     if (rect.width < 1 || rect.height < 1) return null;
-    // 停泊区在视口外约 −20000；浮动窗允许适度出屏，因此阈值放到 1000。
     if (rect.right < -1000) return null;
     if (rect.left > (window.innerWidth || 0) + 1000) return null;
-    return rect.left;
+    return rect;
+}
+
+/**
+ * 测量轨道视图与参数编辑器视口的几何（偏移 + x 重叠）。
+ *
+ * 任一视口元素尚未挂载时返回 null（而不是 0），调用方据此保持上一次有效值并重试。
+ */
+export function measureTimelineViewportGeometry(): TimelineViewportGeometry | null {
+    if (typeof document === "undefined") return null;
+    return resolveViewportGeometry({
+        trackRect: readableRect(document.querySelector<HTMLElement>("[data-timeline-scroller]")),
+        paramRect: readableRect(document.querySelector<HTMLElement>("[data-piano-roll-scroller]")),
+    });
+}
+
+/** 兼容包装：只要偏移，不要重叠信息。 */
+export function measureTimelineViewportOffsetPx(): number | null {
+    return measureTimelineViewportGeometry()?.offsetPx ?? null;
 }
 
 /**
@@ -216,7 +252,7 @@ export function timelineViewportNativeToState(nativeScrollLeft: number, offsetPx
  * 内容左缘相对**本面板宿主**的偏移（CSS px）。
  *
  * 【为什么这个量比"屏幕左缘"可靠】面板宿主在非活动标签上会被搬到停泊区
- * （`left: -20000px`）。此时它的绝对坐标没有意义（`readableLeftPx` 必须拒绝它），
+ * （`left: -20000px`）。此时它的绝对坐标没有意义（`readableRect` 必须拒绝它），
  * 但"内容相对宿主"的差值是面板**内部**几何 —— 宿主与内容一起被搬走，差值不变。
  * 于是并排标签页（同一时刻只有一个可见）也能算出正确偏移。
  */
