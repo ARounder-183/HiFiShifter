@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 
-import type { ClipInfo } from "../sessionTypes";
+import type { ClipInfo } from "./sessionTypes";
 import type { HostFadeMetadata } from "../../types/api";
 import sessionReducer, { setClipFades } from "./sessionSlice";
 import { initialState } from "./sessionSlice/initialState";

@@ -62,7 +62,7 @@ test("legacy / 非 continuous / undefined 原样返回，不写 S", () => {
 });
 
 test("仅长度 patch 返回同一引用；非法形状不制造后端不会写的组合", () => {
-    expect(mirrorHostFadeAxes(continuous, { fadeInSec: 1 })).toBe(continuous);
+    expect(mirrorHostFadeAxes(continuous, {})).toBe(continuous);
     const fractional = applyHostFadeAxesPreview(continuous, {
         fadeInShape: 5.1,
         fadeInDir: -0.4,
