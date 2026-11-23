@@ -668,7 +668,9 @@ mod tests {
     fn other_payloads_are_not_mistaken_for_a_plugin_clipboard() {
         let param = serde_json::json!({ "version": 2, "kind": "param", "segments": [] });
         assert!(!is_plugin_host_clip_payload(param.to_string().as_bytes()));
-        assert!(!is_plugin_host_clip_payload(b"{\"format\": \"something-else\"}"));
+        assert!(!is_plugin_host_clip_payload(
+            b"{\"format\": \"something-else\"}"
+        ));
         assert!(!is_plugin_host_clip_payload(b"not json"));
         assert!(!is_plugin_host_clip_payload(b""));
     }
