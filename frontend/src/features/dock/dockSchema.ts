@@ -131,9 +131,9 @@ export type DockMode = "standalone" | "plugin" | "mobile";
  * 分叉在类型层面就不可能发生。
  */
 export function dockModeForForm(form: "desktop" | "plugin" | "mobile"): DockMode {
-  if (form === "plugin") return "plugin";
-  if (form === "mobile") return "mobile";
-  return "standalone";
+    if (form === "plugin") return "plugin";
+    if (form === "mobile") return "mobile";
+    return "standalone";
 }
 
 /** 独立 App 的出厂布局：上时间轴 / 下参数编辑器（与重构前的默认视觉一致）。 */
@@ -244,34 +244,34 @@ export const MOBILE_DEFAULT_TRACK_HEADER_PX = 120;
  * 不占标签位 —— 在 390px 上给它一个标签位等于永远少一个主工作区。
  */
 function createMobileDefaultDockLayout(): DockLayout {
-  const tree: DockTabsetNode = {
-    t: "tabset",
-    id: "z1",
-    tabs: [MAIN_FORM_TIMELINE, MAIN_FORM_PARAM_EDITOR],
-    active: MAIN_FORM_TIMELINE,
-  };
-  return {
-    schema: DOCK_LAYOUT_SCHEMA,
-    roots: { [MAIN_ROOT_ID]: tree },
-    forms: {
-      [MAIN_FORM_TIMELINE]: {
-        id: MAIN_FORM_TIMELINE,
-        panelId: MAIN_FORM_TIMELINE,
-        float: null,
-      },
-      [MAIN_FORM_PARAM_EDITOR]: {
-        id: MAIN_FORM_PARAM_EDITOR,
-        panelId: MAIN_FORM_PARAM_EDITOR,
-        float: null,
-      },
-    },
-    order: [MAIN_FORM_TIMELINE, MAIN_FORM_PARAM_EDITOR],
-    floatOrder: [],
-    gutters: { ...DEFAULT_GUTTER_SIZES, timelineTrackHeaderPx: MOBILE_DEFAULT_TRACK_HEADER_PX },
-    tabPosition: "bottom",
-    presets: {},
-    activePreset: null,
-  };
+    const tree: DockTabsetNode = {
+        t: "tabset",
+        id: "z1",
+        tabs: [MAIN_FORM_TIMELINE, MAIN_FORM_PARAM_EDITOR],
+        active: MAIN_FORM_TIMELINE,
+    };
+    return {
+        schema: DOCK_LAYOUT_SCHEMA,
+        roots: { [MAIN_ROOT_ID]: tree },
+        forms: {
+            [MAIN_FORM_TIMELINE]: {
+                id: MAIN_FORM_TIMELINE,
+                panelId: MAIN_FORM_TIMELINE,
+                float: null,
+            },
+            [MAIN_FORM_PARAM_EDITOR]: {
+                id: MAIN_FORM_PARAM_EDITOR,
+                panelId: MAIN_FORM_PARAM_EDITOR,
+                float: null,
+            },
+        },
+        order: [MAIN_FORM_TIMELINE, MAIN_FORM_PARAM_EDITOR],
+        floatOrder: [],
+        gutters: { ...DEFAULT_GUTTER_SIZES, timelineTrackHeaderPx: MOBILE_DEFAULT_TRACK_HEADER_PX },
+        tabPosition: "bottom",
+        presets: {},
+        activePreset: null,
+    };
 }
 
 /**

@@ -17,6 +17,7 @@ import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 
 import type { ActionId } from "../features/keybindings/types";
 import {
+    consumeOnceModifiers,
     modifierLatch,
     subscribeModifierState,
     toggleModifierLock,
@@ -34,6 +35,31 @@ export interface ModifierRailProps {
     chips: Array<{ id: ActionId; label: string }>;
 }
 
+/**
+ * 「一次性」修饰的消费时机：**下一次在修饰键行之外按下**。
+ *
+ * 【为什么不能在手势结束时消费】用户点一下芯片（这是一次 `pointerup`），如果按
+ * "手势结束即消费"来清，那次点按本身就会立刻把它清掉 —— 芯片看起来按了没反应。
+ *
+ * 【为什么是"按下"而不是"松开"】修饰键的语义是"**接下来这一下**带上我"。
+ * 按下那一刻用户已经决定了这次交互，此时消费才与物理键盘的体验一致。
+ *
+ * 【为什么排除行内按下】用户在行内连续点两个芯片（例如"精细"+"不吸附"）时，
+ * 第二次按下不该把第一个清掉。
+ */
+function useConsumeOnceOnOutsidePointerDown(enabled: boolean): void {
+    useEffect(() => {
+        if (!enabled) return;
+        const onPointerDown = (event: PointerEvent) => {
+            const target = event.target;
+            if (target instanceof Element && target.closest("[data-modifier-rail]")) return;
+            consumeOnceModifiers();
+        };
+        document.addEventListener("pointerdown", onPointerDown, { capture: true });
+        return () => document.removeEventListener("pointerdown", onPointerDown, { capture: true });
+    }, [enabled]);
+}
+
 export function ModifierRail({ chips }: ModifierRailProps) {
     const activeKey = useSyncExternalStore(
         subscribeModifierState,
@@ -43,8 +69,12 @@ export function ModifierRail({ chips }: ModifierRailProps) {
         () => "",
     );
 
+    // 有任何芯片处于「一次性」时才开始监听；空闲时零开销。
+    useConsumeOnceOnOutsidePointerDown(activeKey.includes(":once"));
+
     return (
         <div
+            data-modifier-rail="1"
             className="hs-scroll-gutter flex shrink-0 items-center gap-1 overflow-x-auto px-1"
             // 这一行本身可横向滚动：`pan-x` 把纵向手势留给外层，避免与时间轴抢手势。
             style={{ touchAction: "pan-x" }}

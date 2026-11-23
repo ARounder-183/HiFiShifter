@@ -105,9 +105,7 @@ export async function mountApp(): Promise<void> {
     // 低频内容）。
     //
     // 桌面传 Infinity：行为与引入这个上限之前**逐字节相同**。
-    setGlRasterMaxDpr(
-        surfaceProfile().form === "mobile" ? 2 : Number.POSITIVE_INFINITY,
-    );
+    setGlRasterMaxDpr(surfaceProfile().form === "mobile" ? 2 : Number.POSITIVE_INFINITY);
 
     createRoot(document.getElementById("root")!).render(
         <StrictMode>

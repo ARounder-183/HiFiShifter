@@ -1,6 +1,23 @@
 #[path = "../build-support/product_version.rs"]
 mod product_version;
 
+/// **目标**操作系统的编译期事实。
+///
+/// 【为什么不能写 `cfg!(target_os = ...)`】build script 是给**宿主**编译的，所以
+/// 脚本里的 `cfg!(target_os)` 回答的是"我在哪台机器上构建"，不是"我在为谁构建"。
+/// 交叉编译时这两者不同：在 Windows 上构建 Android 包时 `cfg!(target_os="windows")`
+/// 为真，于是 `stage_ort_linux_so` 会跳过、`copy_directml_dll` 会执行、MSVC 的
+/// `/DELAYLOAD` 会被塞进 Android 的链接行 —— 每一条都以"与本项目无关的链接错误"
+/// 的形式暴露出来。唯一正确的来源是 cargo 注入的 `CARGO_CFG_TARGET_OS`。
+fn target_os() -> String {
+    std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default()
+}
+
+/// **目标**环境的编译期事实（`msvc` / `gnu` / `musl` / 空）。
+fn target_env() -> String {
+    std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default()
+}
+
 /// 让可执行文件在运行时能找到随包分发的共享库。
 ///
 /// 【为什么必须写在这里】`hifishifter-kernel` 的 build script 确实打印了
@@ -23,23 +40,6 @@ mod product_version;
 ///   * `../Resources` —— SoundTouch 回退（bundle.macOS.files）；
 ///   * `../Resources/macos` —— ORT dylib（stage_ort_macos_dylibs 的暂存区）；
 ///   * `@executable_path` —— 纯 cargo 运行（target/<triple>/release）。
-/// **目标**操作系统的编译期事实。
-///
-/// 【为什么不能写 `cfg!(target_os = ...)`】build script 是给**宿主**编译的，所以
-/// 脚本里的 `cfg!(target_os)` 回答的是"我在哪台机器上构建"，不是"我在为谁构建"。
-/// 交叉编译时这两者不同：在 Windows 上构建 Android 包时 `cfg!(target_os="windows")`
-/// 为真，于是 `stage_ort_linux_so` 会跳过、`copy_directml_dll` 会执行、MSVC 的
-/// `/DELAYLOAD` 会被塞进 Android 的链接行 —— 每一条都以"与本项目无关的链接错误"
-/// 的形式暴露出来。唯一正确的来源是 cargo 注入的 `CARGO_CFG_TARGET_OS`。
-fn target_os() -> String {
-    std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default()
-}
-
-/// **目标**环境的编译期事实（`msvc` / `gnu` / `musl` / 空）。
-fn target_env() -> String {
-    std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default()
-}
-
 fn link_runtime_search_paths() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if matches!(target_os.as_str(), "linux" | "freebsd" | "android") {

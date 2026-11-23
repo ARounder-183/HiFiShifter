@@ -124,14 +124,15 @@ export function inertiaDisplacement(velocity: number, elapsedMs: number): number
     // 指数衰减的积分：v(t) = v0 · 2^(-t/h) ⇒ ∫ = v0 · h/ln2 · (1 - 2^(-t/h))
     const h = INERTIA_HALF_LIFE_MS;
     const decay = Math.pow(2, -elapsedMs / h);
-    return (velocity * h) / Math.LN2 * (1 - decay);
+    return ((velocity * h) / Math.LN2) * (1 - decay);
 }
 
 /** 惯性是否已经衰减到可以停止。 */
 export function inertiaFinished(velocity: number, elapsedMs: number): boolean {
     if (elapsedMs >= 1200) return true;
-    return Math.abs(velocity) * Math.pow(2, -elapsedMs / INERTIA_HALF_LIFE_MS) <
-        INERTIA_STOP_VELOCITY;
+    return (
+        Math.abs(velocity) * Math.pow(2, -elapsedMs / INERTIA_HALF_LIFE_MS) < INERTIA_STOP_VELOCITY
+    );
 }
 
 /**

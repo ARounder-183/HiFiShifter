@@ -129,7 +129,10 @@ export function createLongPressTracker(
         move(pointerId, point) {
             if (pointerId !== activePointerId || origin === null) return;
             if (timer === null) return; // 已触发：后续移动不再影响判定
-            const distance = Math.hypot(point.clientX - origin.clientX, point.clientY - origin.clientY);
+            const distance = Math.hypot(
+                point.clientX - origin.clientX,
+                point.clientY - origin.clientY,
+            );
             if (distance > tolerance) {
                 // 移动超限 = 用户想拖，不是想长按。释放仲裁，让拖动层接手。
                 config.onCancel?.();
@@ -228,7 +231,11 @@ export function installTouchContextMenu(): () => void {
             tracker.cancel();
             return;
         }
-        tracker.start(event.pointerId, { clientX: event.clientX, clientY: event.clientY }, event.pointerType);
+        tracker.start(
+            event.pointerId,
+            { clientX: event.clientX, clientY: event.clientY },
+            event.pointerType,
+        );
     };
     const onPointerMove = (event: PointerEvent) => {
         tracker.move(event.pointerId, { clientX: event.clientX, clientY: event.clientY });
@@ -252,6 +259,21 @@ export function installTouchContextMenu(): () => void {
     };
     /** 页面开始滚动时取消：滚动与长按不可能同时是用户的意图。 */
     const onScroll = () => tracker.cancel();
+    /**
+     * 窗口失焦时取消。
+     *
+     * 【为什么必须有】用户在按住不放的中途 Alt+Tab 切走（或下拉通知栏、接电话），
+     * WebView 不会把 `pointerup` 送回本窗口 —— 计时器照常到点，于是**在别的应用
+     * 前面**弹出一个上下文菜单。这不只是残留：菜单里的动作会作用在用户已经看不见的
+     * 对象上。
+     *
+     * 这是 `utils/gestureFocusGuard` 那条门禁要求的同一件事（"装了 pointermove 的
+     * 手势必须处理失焦"），本模块自己接，不登记进豁免清单。
+     */
+    const onFocusLost = () => tracker.cancel();
+    const onVisibilityChange = () => {
+        if (document.visibilityState === "hidden") tracker.cancel();
+    };
 
     document.addEventListener("pointerdown", onPointerDown, { capture: true, passive: true });
     document.addEventListener("pointermove", onPointerMove, { capture: true, passive: true });
@@ -259,6 +281,8 @@ export function installTouchContextMenu(): () => void {
     document.addEventListener("pointercancel", onPointerCancel, { capture: true, passive: true });
     document.addEventListener("contextmenu", onNativeContextMenu, { capture: true, passive: true });
     window.addEventListener("scroll", onScroll, { capture: true, passive: true });
+    window.addEventListener("blur", onFocusLost);
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     return () => {
         document.removeEventListener("pointerdown", onPointerDown, { capture: true });
@@ -267,6 +291,8 @@ export function installTouchContextMenu(): () => void {
         document.removeEventListener("pointercancel", onPointerCancel, { capture: true });
         document.removeEventListener("contextmenu", onNativeContextMenu, { capture: true });
         window.removeEventListener("scroll", onScroll, { capture: true });
+        window.removeEventListener("blur", onFocusLost);
+        document.removeEventListener("visibilitychange", onVisibilityChange);
         // 卸载时清空仲裁：否则下一次挂载会继承一个"被占用"的单槽。
         resetLongPressArbiter();
     };

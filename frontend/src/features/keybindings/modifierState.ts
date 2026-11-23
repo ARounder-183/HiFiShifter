@@ -120,6 +120,11 @@ export function clearModifierState(): void {
  * （见 `defaultKeybindings.ts` 的 `modifier.*` 段）。屏幕上的芯片不区分物理键，
  * 因此统一合成到 `ctrl`：语义是"这个修饰生效了"，而不是"用户按下了 Ctrl"。
  */
-export function virtualModifierFlags(): { ctrl: boolean; shift: boolean; alt: boolean; meta: boolean } {
+export function virtualModifierFlags(): {
+    ctrl: boolean;
+    shift: boolean;
+    alt: boolean;
+    meta: boolean;
+} {
     return { ctrl: hasActiveModifier(), shift: false, alt: false, meta: false };
 }

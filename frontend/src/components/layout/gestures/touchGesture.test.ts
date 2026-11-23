@@ -190,7 +190,11 @@ describe("手势识别器", () => {
         let pinches = 0;
         const recognizer = createTouchGestureRecognizer(
             "both",
-            { onPinchEnd: () => { pinches += 1; } },
+            {
+                onPinchEnd: () => {
+                    pinches += 1;
+                },
+            },
             clock.now,
         );
         recognizer.start(1, { x: 0, y: 0 });

@@ -115,10 +115,7 @@ export function MobileBottomBar({
     return (
         <div className="flex shrink-0 flex-col border-t border-qt-border bg-qt-window">
             <ModifierRail chips={modifierChips} />
-            <div
-                className="flex items-center gap-1 px-1"
-                style={{ height: "var(--qt-bar-main)" }}
-            >
+            <div className="flex items-center gap-1 px-1" style={{ height: "var(--qt-bar-main)" }}>
                 <AppIconButton
                     icon={isPlaying ? <PauseIcon /> : <PlayIcon />}
                     tooltip={t("kb_playback_toggle")}
@@ -126,7 +123,11 @@ export function MobileBottomBar({
                     emphasis="accent"
                     onClick={onTogglePlay}
                 />
-                <AppIconButton icon={<StopIcon />} tooltip={t("kb_playback_stop")} onClick={onStop} />
+                <AppIconButton
+                    icon={<StopIcon />}
+                    tooltip={t("kb_playback_stop")}
+                    onClick={onStop}
+                />
                 {/*
                  * 录音按钮用实心圆点而不是 `RecordIcon`：Radix 的图标集里没有
                  * "录音"这个语义（`RecordIcon` 不存在），而实心圆点是音频软件里

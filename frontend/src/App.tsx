@@ -4190,7 +4190,11 @@ function AppInner() {
                         />
                     }
                     actionBar={<ActionBar />}
-                    notice={isPluginMode() ? <HostAudioNotice status={hostAudio} restore={hostAudioRestore} /> : null}
+                    notice={
+                        isPluginMode() ? (
+                            <HostAudioNotice status={hostAudio} restore={hostAudioRestore} />
+                        ) : null
+                    }
                 />
             }
             desktopFooter={

@@ -89,9 +89,17 @@ export function buildMobileActionSections(
 ): MobileActionSection[] {
     const buckets = new Map<string, MobileActionItem[]>();
 
-    for (const [rawId, meta] of Object.entries(ACTION_META) as Array<[ActionId, (typeof ACTION_META)[ActionId]]>) {
+    for (const [rawId, meta] of Object.entries(ACTION_META) as Array<
+        [ActionId, (typeof ACTION_META)[ActionId]]
+    >) {
         // 修饰键动作是**手势的修饰**，不是可执行命令 —— 它们去修饰键行（ModifierRail）。
-        if (meta.group.startsWith("mod")) continue;
+        //
+        // 【判据是 `modifierOperationType` 而不是 group 前缀】"mode" 与 "mod*" 都以
+        // "mod" 开头，用前缀判断会把整个「模式」分组（选择/绘制/直线/颤音工具）
+        // 一并当成修饰键丢掉 —— 移动端抽屉里就再也切不了工具，而界面上看不出
+        // 任何异常。`modifierOperationType` 是类型定义里"存在即表示这是修饰键绑定"
+        // 的**语义**标记（见 `features/keybindings/types.ts`）。
+        if (meta.modifierOperationType !== undefined) continue;
         if (rawId in MOBILE_UNAVAILABLE) {
             const capability: SurfaceCapabilityId | null | undefined = MOBILE_UNAVAILABLE[rawId];
             // `null` / `undefined` = 形态上没意义，永远不出现；否则按能力位判断
@@ -129,8 +137,10 @@ export function buildModifierChips(
     translate: (key: MessageKey) => string,
 ): Array<{ id: ActionId; label: string; group: string }> {
     const chips: Array<{ id: ActionId; label: string; group: string }> = [];
-    for (const [rawId, meta] of Object.entries(ACTION_META) as Array<[ActionId, (typeof ACTION_META)[ActionId]]>) {
-        if (!meta.group.startsWith("mod")) continue;
+    for (const [rawId, meta] of Object.entries(ACTION_META) as Array<
+        [ActionId, (typeof ACTION_META)[ActionId]]
+    >) {
+        if (meta.modifierOperationType === undefined) continue;
         chips.push({ id: rawId, label: translate(meta.labelKey), group: meta.group });
     }
     return chips;
