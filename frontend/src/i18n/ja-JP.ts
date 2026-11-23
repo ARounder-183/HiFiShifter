@@ -1402,6 +1402,9 @@ export const jaJP = {
     kernel_unavailable_diagnostics: "診断情報をコピー",
     kernel_unavailable_copied: "コピーしました",
     ruler_label_spacing: "ラベル間隔",
+    playhead_time_readout: "再生ヘッド時間",
+    playhead_time_toolbar_hint:
+        "メインツールバーのトランスポート時間は常に表示されます。このスイッチはトラックヘッダーのコンパクト表示（主単位のみ）だけを切り替えます。",
     show_playhead_time_in_track_header: "トラックヘッダーに再生ヘッド時間を表示",
     copy_playhead_time: "再生ヘッド時間をコピー",
     sync_timeline_view: "タイムライン表示に同期",

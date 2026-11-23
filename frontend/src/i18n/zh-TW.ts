@@ -1351,6 +1351,9 @@ export const zhTW = {
     kernel_unavailable_diagnostics: "複製診斷資訊",
     kernel_unavailable_copied: "已複製",
     ruler_label_spacing: "標籤間距",
+    playhead_time_readout: "播放游標時間",
+    playhead_time_toolbar_hint:
+        "主工具列的傳輸時間始終顯示；此開關只控制軌道標題列中的緊湊讀數（僅主單位）。",
     show_playhead_time_in_track_header: "在軌道標題列顯示播放游標時間",
     copy_playhead_time: "複製播放游標時間",
     sync_timeline_view: "同步時間軸檢視",

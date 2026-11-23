@@ -122,6 +122,9 @@ export function TimelineDisplaySettingsDialog({ open, onOpenChange }: Props) {
                         {tf("show_playhead_time_in_track_header")}
                     </span>
                 </label>
+                <div className="hs-type-caption text-qt-text-muted" style={{ marginTop: 4 }}>
+                    {tf("playhead_time_toolbar_hint")}
+                </div>
             </AppForm>
         </AppDialog>
     );

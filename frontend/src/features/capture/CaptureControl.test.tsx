@@ -298,11 +298,37 @@ test("ARA 宿主里如实说明不需要捕获", async () => {
 });
 
 /** 捕获中必须有一个"在动"的读数：没有它，用户无法判断插件到底有没有在收音频。 */
-test("捕获中显示已捕获时长", async () => {
+test("捕获中显示已捕获时长，并按 1800s 预留固定宽度", async () => {
     invokeMock.mockResolvedValue(recording());
     await render();
     expect(text()).toContain("1.0");
+    const elapsed = container.querySelector<HTMLElement>("[data-testid='capture-elapsed']");
+    expect(elapsed).toBeTruthy();
+    expect(elapsed?.querySelector("[data-reserve-text]")?.getAttribute("data-reserve-text")).toBe(
+        "1800.0s",
+    );
     expect(iconButton(enUS.capture_stop), "捕获中键的语义是停止").toBeTruthy();
+});
+
+test("捕获到 100s 时 reserveText 与槽位结构不变", async () => {
+    invokeMock.mockResolvedValue(
+        recording({
+            recording: {
+                capturedFrames: 4_800_000,
+                sealedSegments: 0,
+                position: 4_800_000,
+                peak: [0.1, 0.1],
+                gaps: 0,
+                spares: 2,
+            },
+        }),
+    );
+    await render();
+    expect(text()).toContain("100.0");
+    const elapsed = container.querySelector<HTMLElement>("[data-testid='capture-elapsed']");
+    expect(elapsed?.querySelector("[data-reserve-text]")?.getAttribute("data-reserve-text")).toBe(
+        "1800.0s",
+    );
 });
 
 test("捕获中给出取消的退路", async () => {

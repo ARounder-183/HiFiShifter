@@ -1349,6 +1349,9 @@ export const zhCN = {
     kernel_unavailable_diagnostics: "复制诊断信息",
     kernel_unavailable_copied: "已复制",
     ruler_label_spacing: "标签间距",
+    playhead_time_readout: "播放光标时间",
+    playhead_time_toolbar_hint:
+        "主工具栏的传输时间始终显示；此开关只控制轨道头中的紧凑读数（仅主单位）。",
     show_playhead_time_in_track_header: "在轨道头显示播放光标时间",
     copy_playhead_time: "复制播放光标时间",
     sync_timeline_view: "同步时间轴视图",

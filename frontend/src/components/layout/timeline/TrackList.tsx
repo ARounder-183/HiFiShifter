@@ -21,8 +21,6 @@ import type { Keybinding } from "../../../features/keybindings/types";
 import type { MessageKey } from "../../../i18n/messages";
 import { formatTemplate } from "../../../i18n/format";
 import { useAppSelector } from "../../../app/hooks";
-import { useVisualPlayhead } from "../../../hooks/useVisualPlayhead";
-import { isTransportAdvancing } from "../../../features/session/selectors/transport";
 import { useDevicePixelRatio } from "../../../hooks/useDevicePixelRatio";
 import { wholeDevicePxLength } from "../../../utils/devicePixelLine";
 import {
@@ -32,8 +30,6 @@ import {
     GAIN_TAPER_FLOOR_DB,
     formatGainDbValue,
 } from "../../../utils/gainDb";
-import { formatCursorTime } from "./timeFormat";
-import type { TimeFormatContext } from "./timeFormat";
 import {
     MAX_ROW_HEIGHT,
     MIN_ROW_HEIGHT,
@@ -52,6 +48,7 @@ import { advanceFineAxisDrag, type FineAxisDragState } from "../../../utils/fine
 import { shouldSuppressHoverSideEffects } from "../../../utils/penInput";
 import { AppTooltipBubble } from "../../AppTooltip";
 import { TempoMapCornerButton } from "./TempoMapCornerButton";
+import { PlayheadTimeReadout } from "../transport/PlayheadTimeReadout";
 import { computeVisibleTrackWindow } from "./runtime/timelineWindowing";
 import { resolveScrollCommitStepPx, shouldCommitScroll } from "./scrollCommit";
 import { normalizedTrackColorCss } from "./runtime/timelineCanvasStyle";
@@ -74,267 +71,6 @@ const TRACK_COLOR_PALETTE_KEYS: { value: string; key: MessageKey }[] = [
     { value: "#d4bc55", key: "color_yellow" },
     { value: "#cf5252", key: "color_red" },
 ];
-function splitDigitRuns(text: string): Array<{ text: string; digits: boolean }> {
-    const parts: Array<{ text: string; digits: boolean }> = [];
-    let current = "";
-    let currentDigits = false;
-    const flush = () => {
-        if (current.length > 0) {
-            parts.push({ text: current, digits: currentDigits });
-            current = "";
-        }
-    };
-    for (const ch of text) {
-        const isDigit = ch >= "0" && ch <= "9";
-        if (isDigit !== currentDigits) {
-            flush();
-            currentDigits = isDigit;
-        }
-        current += ch;
-    }
-    flush();
-    return parts;
-}
-
-/**
- * 将时间文本中的每个数字放入固定宽度的槽位（宽度按当前字体测量），
- * 非数字字符保持自然宽度。这样即使使用不等宽字体，数字变化时文本也不会左右晃动。
- */
-const SlotTimeText = React.memo(function SlotTimeText({
-    text,
-    digitWidthPx,
-    className,
-    style,
-    tooltip,
-    selectable = false,
-}: {
-    text: string;
-    digitWidthPx: number | null;
-    className?: string;
-    style?: React.CSSProperties;
-    tooltip?: string;
-    /** 允许用户选择这段文本（显式覆盖全局 DAW 禁用文本选择的策略） */
-    selectable?: boolean;
-}) {
-    const parts = React.useMemo(() => splitDigitRuns(text), [text]);
-    return (
-        <span
-            className={`hs-type-body font-medium ${selectable ? `${className ?? ""} cursor-text` : (className ?? "")}`}
-            style={
-                selectable
-                    ? {
-                          ...style,
-                          userSelect: "text",
-                          WebkitUserSelect: "text",
-                      }
-                    : style
-            }
-            data-tooltip={tooltip}
-            data-hs-selectable={selectable ? "true" : undefined}
-            onDoubleClick={
-                selectable
-                    ? (event) => {
-                          // 文本被拆成了多个数字槽位 span，原生双击只会选中一个词；
-                          // 这里显式选中整个时间字符串，保证"双击全选"在 WebView 中稳定工作。
-                          event.preventDefault();
-                          event.stopPropagation();
-                          const selection = window.getSelection();
-                          if (!selection) return;
-                          const range = document.createRange();
-                          range.selectNodeContents(event.currentTarget);
-                          selection.removeAllRanges();
-                          selection.addRange(range);
-                      }
-                    : undefined
-            }
-        >
-            {parts.map((part, index) =>
-                part.digits && digitWidthPx != null && digitWidthPx > 0 ? (
-                    <React.Fragment key={index}>
-                        {part.text.split("").map((ch, chIndex) => (
-                            <span
-                                key={chIndex}
-                                style={{
-                                    display: "inline-block",
-                                    width: digitWidthPx,
-                                    textAlign: "center",
-                                }}
-                            >
-                                {ch}
-                            </span>
-                        ))}
-                    </React.Fragment>
-                ) : (
-                    <span key={index}>{part.text}</span>
-                ),
-            )}
-        </span>
-    );
-});
-
-const TrackHeaderPlayheadTime = React.memo(function TrackHeaderPlayheadTime() {
-    const selector = useAppSelector(
-        (state) => ({
-            playheadSec: state.session.playheadSec,
-            playheadSampledAtMs: state.session.playheadSampledAtMs,
-            isPlaying: state.session.runtime.isPlaying,
-            playbackWaitingForRender: state.session.runtime.playbackWaitingForRender,
-            playbackPositionSec: state.session.runtime.playbackPositionSec,
-            positionAdvancing: state.session.runtime.positionAdvancing,
-            positionAgeMs: state.session.runtime.positionAgeMs,
-            primaryTimeUnit: state.session.primaryTimeUnit,
-            secondaryTimeUnit: state.session.secondaryTimeUnit,
-            bpm: state.session.bpm,
-            beats: state.session.beats,
-            grid: state.session.grid,
-            projectSec: state.session.projectSec,
-            show: state.session.showPlayheadTimeInTrackHeader,
-            tempoMap: state.session.tempoMap,
-        }),
-        shallowEqual,
-    );
-    const [visualSec, setVisualSec] = useState(selector.playheadSec);
-    // 【唯一判据在 selector 里】见 `isTransportAdvancing`：三处三个公式，恰好在
-    // "位置冻结"这个场景互相分歧 —— 那正是"停止后光标还在走"。
-    const transportAdvancing = isTransportAdvancing(selector);
-    useVisualPlayhead({
-        syncedPlayheadSec: selector.playheadSec,
-        syncedAtMs: selector.playheadSampledAtMs,
-        isTransportAdvancing: transportAdvancing,
-        onFrame: React.useCallback((sec: number) => setVisualSec(sec), []),
-    });
-    const timeContext = React.useMemo<TimeFormatContext>(
-        () => ({
-            bpm: selector.bpm,
-            beatsPerBar: Math.max(1, Math.round(selector.beats || 4)),
-            grid: selector.grid,
-            tempoMap: selector.tempoMap,
-        }),
-        [selector.bpm, selector.beats, selector.grid, selector.tempoMap],
-    );
-    const formatted = React.useMemo(
-        () =>
-            formatCursorTime(
-                selector.primaryTimeUnit,
-                selector.secondaryTimeUnit,
-                visualSec,
-                timeContext,
-            ),
-        [selector.primaryTimeUnit, selector.secondaryTimeUnit, visualSec, timeContext],
-    );
-    // 为光标时间文本预留固定宽度，并把每个数字放进等宽槽位：
-    // 宽度按“当前时间单位下的最长可能文本”用真实字体度量，字体仍完全跟随用户自定义字体。
-    const maxLabelSpanRef = useRef<HTMLSpanElement | null>(null);
-    const digitProbeRef = useRef<HTMLSpanElement | null>(null);
-    const [boxWidth, setBoxWidth] = useState<number | null>(null);
-    const [digitWidth, setDigitWidth] = useState<number | null>(null);
-    // 【为什么按整秒量化】这条读数只用来**预留宽度**（"最长可能文本"），而
-    // playheadSec 以 ~30Hz 持续增长 —— 不量化的话，前进播放的每一帧都要重跑一次
-    // formatCursorTime 并重挂 ResizeObserver。宽度只随整数秒变化（且量化只会
-    // 向上取整，预留只会更宽、不会裁字），把 memo 的键钉在整秒上，重算频率从
-    // 每帧一次降到每秒一次。
-    const maxLabelSec = Math.ceil(Math.max(1, selector.projectSec, selector.playheadSec));
-    const maxLabel = React.useMemo(() => {
-        return formatCursorTime(
-            selector.primaryTimeUnit,
-            selector.secondaryTimeUnit,
-            maxLabelSec,
-            timeContext,
-        ).combined;
-    }, [selector.primaryTimeUnit, selector.secondaryTimeUnit, maxLabelSec, timeContext]);
-
-    const updateDigitWidth = React.useCallback(() => {
-        const probe = digitProbeRef.current;
-        if (!probe) return;
-        const font = window.getComputedStyle(probe).font;
-        const probeWidth = probe.getBoundingClientRect().width;
-        const canvas = document.createElement("canvas");
-        const ctx = canvas.getContext("2d");
-        if (!ctx) {
-            setDigitWidth(probeWidth);
-            return;
-        }
-        ctx.font = font;
-        let max = 0;
-        for (const digit of "0123456789") {
-            max = Math.max(max, ctx.measureText(digit).width);
-        }
-        // 槽位宽度至少不能小于页面中“0”的真实渲染宽度，避免个别字体下墨迹溢出。
-        const slotWidth = Math.max(max, probeWidth);
-        setDigitWidth((prev) =>
-            prev != null && Math.abs(prev - slotWidth) < 0.01 ? prev : slotWidth,
-        );
-    }, []);
-
-    useLayoutEffect(() => {
-        const el = maxLabelSpanRef.current;
-        if (!el) return;
-        const update = () => {
-            const width = el.getBoundingClientRect().width;
-            // 预留缓冲：既避免亚像素/墨迹溢出被裁掉，也让时间文本两侧不显得拥挤。
-            const paddedWidth = Math.ceil(width) + 12;
-            setBoxWidth((prev) =>
-                prev != null && Math.abs(prev - paddedWidth) < 0.01 ? prev : paddedWidth,
-            );
-        };
-        update();
-        if (typeof ResizeObserver !== "undefined") {
-            const observer = new ResizeObserver(update);
-            observer.observe(el);
-            return () => observer.disconnect();
-        }
-    }, [maxLabel]);
-
-    useLayoutEffect(() => {
-        const probe = digitProbeRef.current;
-        if (!probe) return;
-        updateDigitWidth();
-        if (typeof ResizeObserver !== "undefined") {
-            const observer = new ResizeObserver(updateDigitWidth);
-            observer.observe(probe);
-            return () => observer.disconnect();
-        }
-        if (document.fonts?.ready) {
-            void document.fonts.ready.then(updateDigitWidth);
-        }
-    }, [updateDigitWidth]);
-
-    if (!selector.show) return null;
-    return (
-        // `pr-5` 为右下角的速度映射按钮让位：该按钮绝对定位在右 3px、宽 16px，
-        // 时间读数右对齐后若不内缩，末位数字会与按钮图标叠在一起。
-        <div
-            className="min-w-0 flex-1 flex justify-end pr-5"
-            data-playhead-sec={visualSec.toFixed(6)}
-        >
-            <span
-                ref={maxLabelSpanRef}
-                aria-hidden
-                className="absolute invisible whitespace-nowrap"
-            >
-                <SlotTimeText text={maxLabel} digitWidthPx={digitWidth} className="tabular-nums" />
-            </span>
-            <span
-                ref={digitProbeRef}
-                aria-hidden
-                className="hs-type-body font-medium absolute invisible whitespace-nowrap tabular-nums"
-            >
-                0
-            </span>
-            <SlotTimeText
-                text={formatted.combined}
-                digitWidthPx={digitWidth}
-                selectable
-                className="tabular-nums text-qt-text text-right leading-none whitespace-nowrap shrink-0"
-                style={
-                    boxWidth != null ? { minWidth: boxWidth, display: "inline-block" } : undefined
-                }
-                tooltip={formatted.combined}
-            />
-        </div>
-    );
-});
-
 const TRACK_METER_MIN_DB = -48;
 const TRACK_METER_MAX_DB = 3;
 // 推子与 clip 增益共用同一个值域（见 `utils/gainDb`）。此前这里的上界是 12，
@@ -447,6 +183,11 @@ type TrackListProps = {
      * 实测传入）。轨道头列表底部留出同高空间后，两侧竖直滚动范围一致，
      * 滚动到底时轨道行与时间轴区域严格对齐。 */
     bottomGutterHeightPx?: number;
+    /**
+     * 是否在轨道头显示播放光标时间（TimelinePanel 从 session 传入；缺省 true
+     * 以保持旧行为）。工具栏始终显示时间，这个开关只控制轨道头附加读数。
+     */
+    showPlayheadTime?: boolean;
 };
 
 const TrackListInner: React.FC<TrackListProps> = ({
@@ -478,12 +219,13 @@ const TrackListInner: React.FC<TrackListProps> = ({
     listScrollRef,
     headerHeight = 48,
     bottomGutterHeightPx = 0,
+    showPlayheadTime = true,
 }) => {
     const listRef = useRef<HTMLDivElement | null>(null);
     // 电平表数据由本组件**自行订阅**：电平条是 trackMeters 的唯一消费方，播放中
     // 每 33ms 一事件。此前它从 TimelinePanel 一路传下来，面板选择器因此把它纳入
     // 浅比较 —— 每次事件连 2000 行的面板主体一起重渲染。改成本组件叶子订阅后
-    // （同文件 TrackHeaderPlayheadTime 的先例），重渲染范围收敛到轨道头本身，
+    // （同文件电平表叶子订阅的先例），重渲染范围收敛到轨道头本身，
     // 面板主体不再陪跑。
     const trackMeters = useAppSelector((state) => state.session.trackMeters, shallowEqual);
     /** 当前 dpr：渲染期写出的物理像素细线用它，并在 dpr 变化时触发重渲染。 */
@@ -1422,8 +1164,13 @@ const TrackListInner: React.FC<TrackListProps> = ({
                 className="border-b border-qt-border px-2 bg-qt-window shadow-xs z-10 relative"
                 style={{ height: headerHeight }}
             >
-                <span className="hs-type-label font-semibold shrink-0">{t("common_tracks")}</span>
-                <TrackHeaderPlayheadTime />
+                {showPlayheadTime ? (
+                    <PlayheadTimeReadout variant="trackHeader" compact />
+                ) : (
+                    <span className="hs-type-label font-semibold shrink-0">
+                        {t("common_tracks")}
+                    </span>
+                )}
                 {/* 速度映射小按钮（右下角）：显示/创建 或 清空/隐藏。 */}
                 <TempoMapCornerButton />
             </Flex>

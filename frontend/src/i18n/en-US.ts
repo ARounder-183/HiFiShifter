@@ -1525,6 +1525,9 @@ export const enUS = {
     kernel_unavailable_diagnostics: "Copy diagnostics",
     kernel_unavailable_copied: "Copied",
     ruler_label_spacing: "Label Spacing",
+    playhead_time_readout: "Playhead time",
+    playhead_time_toolbar_hint:
+        "The transport time in the main toolbar is always shown. This switch only controls the compact readout in track headers (primary unit only).",
     show_playhead_time_in_track_header: "Show playhead time in track header",
     copy_playhead_time: "Copy Playhead Time",
     sync_timeline_view: "Sync Timeline View",

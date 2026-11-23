@@ -240,6 +240,11 @@ export interface UseVisualPlayheadArgs {
      */
     syncedAtMs?: number;
     onFrame?: (playheadSec: number) => void;
+    /**
+     * 是否参与共享视觉时钟。独立窗口读数传 false：它直接用 Redux 的 30Hz
+     * playheadSec，避免把主窗口的 performance.now() 时间戳带进另一个时钟原点。
+     */
+    enabled?: boolean;
 }
 
 /**
@@ -256,6 +261,7 @@ export function useVisualPlayhead({
     isTransportAdvancing,
     syncedAtMs,
     onFrame,
+    enabled = true,
 }: UseVisualPlayheadArgs): MutableRefObject<number> {
     const ownedVisualPlayheadSecRef = useRef(readSharedVisualPlayheadSec());
     const visualPlayheadSecRef = externalVisualPlayheadSecRef ?? ownedVisualPlayheadSecRef;
@@ -269,14 +275,17 @@ export function useVisualPlayhead({
     // 必须先于采样 effect：挂载 / 恢复播放时共享时钟要已经处于"在走"的状态，
     // 采样 effect 才能走外推而不是把光标硬复位到旧采样。
     useEffect(() => {
+        if (!enabled) return;
         setVisualPlayheadAdvancing(isTransportAdvancing);
-    }, [isTransportAdvancing]);
+    }, [enabled, isTransportAdvancing]);
 
     useEffect(() => {
+        if (!enabled) return;
         updateVisualPlayheadSample({ syncedPlayheadSec, syncedAtMs, hostControlled });
-    }, [syncedPlayheadSec, syncedAtMs, hostControlled]);
+    }, [enabled, syncedPlayheadSec, syncedAtMs, hostControlled]);
 
     useEffect(() => {
+        if (!enabled) return;
         return subscribeVisualPlayhead({
             setValue: (sec) => {
                 visualPlayheadSecRef.current = sec;
@@ -284,7 +293,7 @@ export function useVisualPlayhead({
             onFrame: (sec) => onFrameRef.current?.(sec),
         });
         // 外部 ref 身份若变化（正常调用不会）需要重新绑定订阅；内部 ref 恒稳定。
-    }, [visualPlayheadSecRef]);
+    }, [enabled, visualPlayheadSecRef]);
 
     return visualPlayheadSecRef;
 }

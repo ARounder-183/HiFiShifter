@@ -1454,6 +1454,9 @@ export const koKR = {
     kernel_unavailable_diagnostics: "진단 정보 복사",
     kernel_unavailable_copied: "복사됨",
     ruler_label_spacing: "라벨 간격",
+    playhead_time_readout: "재생 헤드 시간",
+    playhead_time_toolbar_hint:
+        "메인 툴바의 전송 시간은 항상 표시됩니다. 이 스위치는 트랙 헤더의 간략 표시(주 단위만)만 제어합니다.",
     show_playhead_time_in_track_header: "트랙 헤더에 재생 헤드 시간 표시",
     copy_playhead_time: "재생 헤드 시간 복사",
     sync_timeline_view: "타임라인 뷰 동기화",

@@ -126,7 +126,7 @@ function useSlotMetrics(
             });
         }
         return () => observer?.disconnect();
-    }, [measureDigitWidth, measureWidth, reserveText, text]);
+    }, [measureDigitWidth, measureWidth, reserveText, text.length]);
 
     const setTextProbe = useCallback((node: HTMLSpanElement | null) => {
         textProbeRef.current = node;
