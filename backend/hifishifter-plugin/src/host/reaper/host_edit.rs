@@ -2057,6 +2057,76 @@ mod tests {
         );
         editor.close();
     }
+    /// **回归：自动淡化的写回必须能在**一轮**内被完成门确认。**
+    ///
+    /// 【为什么这条是用户报障的可执行形式】自动交叉淡化走的是 `D_FADE*LEN_AUTO`
+    /// 两个 **item 级** 读数，而它们**不推进** `GetProjectStateChangeCount`。
+    /// 写回之后若不清几何缓存，`refresh_host_geometry` 会命中"令牌未变"的早退，
+    /// 完成门读回的仍是**写前**那份几何 —— 于是它一直等到重试预算耗尽，报出
+    /// "clip was edited in the host but its ARA geometry has not caught up"。
+    /// 用户看到的就是"自动交叉淡化没有执行"。
+    ///
+    /// 这里同时钉住两件事：① 两个 AUTO 字段确实被写到宿主且能读回原值；
+    /// ② 完成门按**同一份载荷**立刻匹配（不需要等下一轮几何刷新）。
+    #[test]
+    fn host_edit_auto_fade_round_trips_and_the_receipt_matches_at_once() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_writer();
+        host.clear_markers();
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        let plan = editor
+            .plan_host_edit(
+                "set_clip_state",
+                &json!({
+                    "clipId": clip.id,
+                    "autoFadeInSec": 0.2,
+                    "autoFadeOutSec": 0.25,
+                }),
+            )
+            .unwrap();
+        let receipt = plan.receipt(&editor.namespace, owner.host_fade_axes());
+        host.reset();
+        execute(&owner, plan, || document.is_alive()).unwrap();
+        // ① 宿主上真的写下了这两个值。
+        assert_eq!(host.item_value("D_FADEINLEN_AUTO"), Some(0.2));
+        assert_eq!(host.item_value("D_FADEOUTLEN_AUTO"), Some(0.25));
+        // ② 完成门用同一份载荷**立刻**匹配：不需要等下一轮几何刷新。
+        let payload = json!({"clips":[{
+            "id": clip.id,
+            "start_sec": clip.start_sec,
+            "length_sec": clip.length_sec,
+            "source_start_sec": clip.source_start_sec,
+            "playback_rate": clip.playback_rate,
+            "track_id": clip.track_id,
+            "clip_gain": clip.clip_gain,
+            "gain": clip.gain,
+            "reversed": clip.reversed,
+            "loop_enabled": clip.loop_enabled,
+            "auto_fade_in_sec": 0.2,
+            "auto_fade_out_sec": 0.25,
+        }]});
+        assert!(
+            receipt.matches(&payload),
+            "自动淡化的完成门必须一轮内匹配：{receipt:?} vs {payload}"
+        );
+        // 对照：旧值不得通过（否则这条门对 auto fade 形同虚设）。
+        let mut stale = payload;
+        stale["clips"][0]["auto_fade_in_sec"] = json!(0.0);
+        assert!(!receipt.matches(&stale), "自动淡化的陈旧回显必须被门拦下");
+        document.close();
+    }
+
     /// 宽度patch冗余带着原shape不要求委托；实际改shape仍保持明确的责任门。
     #[test]
     fn host_edit_fade_width_writes_reaper_without_delegation_or_redundant_shape() {
