@@ -22,7 +22,13 @@
  * `--qt-*` 令牌同样能继承主题（见 `src/index.css` 的度量令牌块）。
  */
 import { Box, Button, IconButton } from "@radix-ui/themes";
-import { cloneElement, isValidElement, type ComponentPropsWithoutRef, type ReactNode } from "react";
+import {
+    cloneElement,
+    isValidElement,
+    type ComponentPropsWithoutRef,
+    type ReactNode,
+    type Ref,
+} from "react";
 
 import { cx } from "./cx";
 
@@ -141,6 +147,14 @@ export interface AppIconButtonProps extends Omit<
     ComponentPropsWithoutRef<typeof IconButton>,
     "variant" | "color" | "size" | "children"
 > {
+    /**
+     * 转发到原生 `<button>` 的 ref。
+     *
+     * 【为什么要显式声明】React 19 允许 `ref` 作为普通 prop 传递，但**类型**上仍然
+     * 需要组件自己把它写进 props —— 否则 `tsc -b`（项目引用那套配置）会报
+     * "Property 'ref' does not exist"。撤销/重做按钮就靠它把锚点交给右键历史面板。
+     */
+    ref?: Ref<HTMLButtonElement>;
     /** 图标节点。尺寸由本组件统一注入，调用方不要自己写 width/height。 */
     icon: ReactNode;
     /**
