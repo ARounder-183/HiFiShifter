@@ -79,6 +79,7 @@ import {
     MAX_TRACK_VOLUME,
 } from "./sessionSlice/settings";
 import { clamp, normalizeClipColor } from "./sessionSlice/helpersCore";
+import { applyHostFadeAxesPreviewToClip } from "./fadeAxesPreview";
 import { getClipRateMultiplier, updateActiveTakeFromFlat } from "./sessionSlice/helpersTakes";
 import { initialState } from "./sessionSlice/initialState";
 import { applyClipSyllableAnalysisReducer } from "./sessionSlice/syllableMetadata";
@@ -1077,6 +1078,10 @@ const sessionSlice = createSlice({
             if (action.payload.fadeOutS !== undefined) {
                 clip.fadeOutS = Math.min(1, Math.max(-1, Number(action.payload.fadeOutS) || 0));
             }
+            // hostFades 是显示投影，不是持久化字段：本地镜像只服务当前编辑，
+            // 下一次权威 TimelineState 快照会整份替换它。形状补丁还会把本地
+            // dir/S 纠正成后端实际写入的预设轴，保证下一次拖拽从画面上的轴起步。
+            applyHostFadeAxesPreviewToClip(clip, action.payload);
         },
         /** 自动交叉淡化长度（与手动 fade 分离，见 autoCrossfade.ts 的模型说明）。 */
         setClipAutoFades(

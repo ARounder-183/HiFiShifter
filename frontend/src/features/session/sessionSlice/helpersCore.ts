@@ -9,6 +9,7 @@ import { resolveRootTrackId } from "../trackUtils";
 import type { ClipColor, SessionState } from "./types";
 import { MAX_TRACK_VOLUME } from "./settings";
 import { applyTimelineState } from "./helpersTimeline";
+import { applyHostFadeAxesPreviewToClip } from "../fadeAxesPreview";
 import {
     getClipRateMultiplier,
     flipSourceWindowForDirection,
@@ -472,6 +473,7 @@ export function applyOptimisticClipState(
     if (payload.fadeOutS !== undefined) {
         clip.fadeOutS = Math.min(1, Math.max(-1, Number(payload.fadeOutS) || 0));
     }
+    applyHostFadeAxesPreviewToClip(clip, payload);
     if (payload.autoFadeInSec !== undefined) {
         clip.autoFadeInSec = Math.max(0, Number(payload.autoFadeInSec) || 0);
     }
@@ -598,6 +600,7 @@ export function applyOptimisticBulkClipState(
         if (update.fadeOutS !== undefined) {
             clip.fadeOutS = Math.min(1, Math.max(-1, Number(update.fadeOutS) || 0));
         }
+        applyHostFadeAxesPreviewToClip(clip, update);
         if (update.autoFadeInSec !== undefined) {
             clip.autoFadeInSec = Math.max(0, Number(update.autoFadeInSec) || 0);
         }

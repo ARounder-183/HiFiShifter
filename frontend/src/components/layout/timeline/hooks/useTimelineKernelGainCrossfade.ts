@@ -459,6 +459,8 @@ export function useTimelineKernelGainCrossfade({
                 fadeOutShape: number;
                 fadeInDir: number;
                 fadeOutDir: number;
+                fadeInS: number;
+                fadeOutS: number;
             }
         >;
     } | null>(null);
@@ -523,6 +525,8 @@ export function useTimelineKernelGainCrossfade({
                         fadeOutShape: number;
                         fadeInDir: number;
                         fadeOutDir: number;
+                        fadeInS: number;
+                        fadeOutS: number;
                     }
                 >();
                 for (const clip of [earlier, later]) {
@@ -539,6 +543,8 @@ export function useTimelineKernelGainCrossfade({
                         fadeOutShape: Number(clip.fadeOutShape) || 0,
                         fadeInDir: Number(clip.fadeInDir) || 0,
                         fadeOutDir: Number(clip.fadeOutDir) || 0,
+                        fadeInS: Number(clip.fadeInS) || 0,
+                        fadeOutS: Number(clip.fadeOutS) || 0,
                     });
                 }
                 kernelCrossfadeOriginRef.current = {
@@ -747,20 +753,24 @@ export function useTimelineKernelGainCrossfade({
                 // 本分支逐帧覆写以保持求解连续，不能当基准。
                 const curveBaseA = origin.baseById.get(earlier.id);
                 const curveBaseB = origin.baseById.get(later.id);
+                const liveEarlierA = sessionRef.current.clips.find(
+                    (item) => item.id === earlier.id,
+                );
+                const liveLaterB = sessionRef.current.clips.find((item) => item.id === later.id);
                 publishFadeGripInfo(
                     fadeTooltipAnchor(),
                     {
                         shape: curveBaseA?.fadeOutShape ?? 0,
                         dir: dirA,
                         lengthSec: origin.earlierFadeOutSec,
-                        hostFades: earlier.hostFades,
+                        hostFades: liveEarlierA?.hostFades ?? earlier.hostFades,
                         delta: { dir: dirA - (curveBaseA?.fadeOutDir ?? 0) },
                     },
                     {
                         shape: curveBaseB?.fadeInShape ?? 0,
                         dir: dirB,
                         lengthSec: origin.laterFadeInSec,
-                        hostFades: later.hostFades,
+                        hostFades: liveLaterB?.hostFades ?? later.hostFades,
                         delta: { dir: dirB - (curveBaseB?.fadeInDir ?? 0) },
                     },
                 );
@@ -910,6 +920,8 @@ export function useTimelineKernelGainCrossfade({
             // 两侧位移各不相同，因此各自从自己的按下时生效长度算起。
             const gripBaseA = origin.baseById.get(earlier.id);
             const gripBaseB = origin.baseById.get(later.id);
+            const liveEarlier = sessionRef.current.clips.find((item) => item.id === earlier.id);
+            const liveLater = sessionRef.current.clips.find((item) => item.id === later.id);
             const fadeOf = (clipId: string) => result.fades.find((fade) => fade.clipId === clipId);
             const fadeA = fadeOf(earlier.id);
             const fadeB = fadeOf(later.id);
@@ -921,14 +933,14 @@ export function useTimelineKernelGainCrossfade({
                     shape: gripBaseA?.fadeOutShape ?? 0,
                     dir: gripBaseA?.fadeOutDir ?? 0,
                     lengthSec: lengthA,
-                    hostFades: earlier.hostFades,
+                    hostFades: liveEarlier?.hostFades ?? earlier.hostFades,
                     delta: { lengthSec: lengthA - origin.earlierFadeOutSec },
                 },
                 {
                     shape: gripBaseB?.fadeInShape ?? 0,
                     dir: gripBaseB?.fadeInDir ?? 0,
                     lengthSec: lengthB,
-                    hostFades: later.hostFades,
+                    hostFades: liveLater?.hostFades ?? later.hostFades,
                     delta: { lengthSec: lengthB - origin.laterFadeInSec },
                 },
             );
@@ -993,11 +1005,27 @@ export function useTimelineKernelGainCrossfade({
                                 sourceEndSec: base.sourceEndSec,
                             }),
                         );
+                        const clip = sessionRef.current.clips.find((item) => item.id === clipId);
+                        const continuous = clip?.hostFades?.curve_mode === "continuous";
+                        // 与单侧取消同源：先还原形状（按后端口径纠正连续轴），
+                        // 再单独还原精确的 dir/S，避免表外曲率被预设值覆盖。
                         dispatch(
                             setClipFades({
                                 clipId,
                                 fadeInSec: base.fadeInSec,
                                 fadeOutSec: base.fadeOutSec,
+                                fadeInShape: base.fadeInShape,
+                                fadeOutShape: base.fadeOutShape,
+                            }),
+                        );
+                        dispatch(
+                            setClipFades({
+                                clipId,
+                                fadeInDir: base.fadeInDir,
+                                fadeOutDir: base.fadeOutDir,
+                                ...(continuous
+                                    ? { fadeInS: base.fadeInS, fadeOutS: base.fadeOutS }
+                                    : {}),
                             }),
                         );
                         dispatch(

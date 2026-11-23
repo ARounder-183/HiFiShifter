@@ -101,6 +101,8 @@ export function useTimelineKernelFade({
                 fadeOutDir: number;
                 fadeInShape: number;
                 fadeOutShape: number;
+                fadeInS: number;
+                fadeOutS: number;
             }
         >;
         /**
@@ -364,6 +366,8 @@ export function useTimelineKernelFade({
                         fadeOutDir: number;
                         fadeInShape: number;
                         fadeOutShape: number;
+                        fadeInS: number;
+                        fadeOutS: number;
                     }
                 >();
                 const autoBaseById = new Map<
@@ -387,6 +391,8 @@ export function useTimelineKernelFade({
                         fadeOutDir: Number(item.fadeOutDir) || 0,
                         fadeInShape: Number(item.fadeInShape) || 0,
                         fadeOutShape: Number(item.fadeOutShape) || 0,
+                        fadeInS: Number(item.fadeInS) || 0,
+                        fadeOutS: Number(item.fadeOutS) || 0,
                     });
                 }
                 // 自动交叉淡化：受影响集合 = 参与者；可调整侧 = 本次拖拽的那一侧
@@ -613,15 +619,28 @@ export function useTimelineKernelFade({
                 // 放回去，否则按一次 Esc 会让那条自动交叉淡化永久消失。
                 batch(() => {
                     for (const [clipId, base] of origin.baseById) {
+                        const clip = sessionRef.current.clips.find((item) => item.id === clipId);
+                        const continuous = clip?.hostFades?.curve_mode === "continuous";
+                        // 先还原形状（reducer 会按后端口径把连续轴纠正为预设值），
+                        // 再单独还原精确的 dir/S —— 不能合在一个 patch 里，否则
+                        // continuous 的形状优先级会把用户原有的表外曲率覆盖成预设值。
                         dispatch(
                             setClipFades({
                                 clipId,
                                 fadeInSec: base.fadeInSec,
                                 fadeOutSec: base.fadeOutSec,
-                                fadeInDir: base.fadeInDir,
-                                fadeOutDir: base.fadeOutDir,
                                 fadeInShape: base.fadeInShape,
                                 fadeOutShape: base.fadeOutShape,
+                            }),
+                        );
+                        dispatch(
+                            setClipFades({
+                                clipId,
+                                fadeInDir: base.fadeInDir,
+                                fadeOutDir: base.fadeOutDir,
+                                ...(continuous
+                                    ? { fadeInS: base.fadeInS, fadeOutS: base.fadeOutS }
+                                    : {}),
                             }),
                         );
                     }
