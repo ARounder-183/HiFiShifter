@@ -16,7 +16,6 @@ import {
     pasteTimelineClipboardRemote,
     removeClipsRemote,
     selectClipRemote,
-    setClipAutoFades,
     setClipGain,
     setClipMuted,
     setClipStateRemote,
@@ -46,7 +45,11 @@ import {
 } from "../../../../services/hostCapabilities";
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
 import { snapTimelinePosition } from "../../../../utils/timelineSnapping";
-import { computeAutoCrossfadeFromPayload } from "./autoCrossfade";
+import {
+    autoFadeSnapshot,
+    computeAutoCrossfadeFromPayload,
+    persistAutoFadeUpdates,
+} from "./autoCrossfade";
 import { getBulkEditableClipIds } from "./bulkClipEdit";
 import { getGroupClipIds } from "./useGroupExpansion";
 import { isClipSplittableAtSec, resolveSplitTargetsWithSnap } from "../splitTargets";
@@ -760,24 +763,19 @@ export function useTimelineClipActions(
                                         allClips,
                                         created,
                                     );
-                                    if (fadeUpdates.length > 0) {
-                                        // 粘贴后的自动交叉淡化写入“自动 fade”（与手动 fade 分离）。
-                                        for (const u of fadeUpdates) {
-                                            dispatch(
-                                                setClipAutoFades({
-                                                    clipId: u.clipId,
-                                                    autoFadeInSec: u.autoFadeInSec,
-                                                    autoFadeOutSec: u.autoFadeOutSec,
-                                                }),
-                                            );
-                                            await webApi.setClipState({
-                                                clipId: u.clipId,
-                                                autoFadeInSec: u.autoFadeInSec,
-                                                autoFadeOutSec: u.autoFadeOutSec,
-                                                checkpoint: false,
-                                            });
-                                        }
-                                    }
+                                    // 粘贴后的自动交叉淡化写入“自动 fade”（与手动 fade 分离），
+                                    // 且**整批一次写回**：N 条 Clip 不能变成 N 个宿主写回请求、
+                                    // N 个撤销点 —— 那正是"自动交叉淡化看起来没执行"的来源。
+                                    await persistAutoFadeUpdates(fadeUpdates, dispatch, {
+                                        checkpoint: false,
+                                        previous: autoFadeSnapshot(
+                                            sessionRef.current,
+                                            fadeUpdates.map((u) => u.clipId),
+                                        ),
+                                        requirePresent: new Set(
+                                            sessionRef.current.clips.map((clip) => clip.id),
+                                        ),
+                                    });
                                 }
                             }
                         } catch {

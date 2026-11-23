@@ -1,7 +1,9 @@
 import type { AppDispatch } from "../../../../app/store";
+import { classifyClipEditFailure } from "../../../../features/session/clipEditFailure";
 import type { SessionState } from "../../../../features/session/sessionSlice";
 import { setClipAutoFades } from "../../../../features/session/sessionSlice";
-import { webApi } from "../../../../services/webviewApi";
+import { setClipsStateBulkRemote } from "../../../../features/session/thunks/timelineThunks";
+import { frontendLog } from "../../../../services/frontendLog";
 
 /**
  * 编辑前某 clip 每侧是否有同轨重叠。
@@ -291,6 +293,121 @@ function sessionClipsToLike(session: SessionState): AutoCrossfadeClipLike[] {
     }));
 }
 
+/** 一次自动淡化写回的结局。 */
+export type AutoFadePersistOutcome = "ok" | "transient" | "permanent";
+
+/**
+ * 记下这些 clip **写回之前**的自动淡化值（失败回滚用）。
+ *
+ * 【为什么要显式快照】`setClipAutoFades` 是乐观更新：值一写进本地状态，调用方就再也
+ * 读不到"原来的那个数"。而失败回滚需要的恰恰是它 —— 否则界面上会留下一份宿主根本
+ * 没有的淡化，用户下次打开工程才发现"淡化全没了"。
+ */
+export function autoFadeSnapshot(
+    session: SessionState,
+    clipIds: readonly string[],
+): Map<string, { in: number; out: number }> {
+    const byId = new Map(session.clips.map((clip) => [clip.id, clip] as const));
+    const snapshot = new Map<string, { in: number; out: number }>();
+    for (const id of clipIds) {
+        const clip = byId.get(id);
+        snapshot.set(id, {
+            in: Number(clip?.autoFadeInSec ?? 0),
+            out: Number(clip?.autoFadeOutSec ?? 0),
+        });
+    }
+    return snapshot;
+}
+
+export interface PersistAutoFadeOptions {
+    /** 是否在这一批写入里压一个撤销点。粘贴/复制/导入的收尾都传 false。 */
+    checkpoint?: boolean;
+    /** 写回前的值；缺省时不回滚（调用方本来就没有可回滚的基线）。 */
+    previous?: ReadonlyMap<string, { in: number; out: number }>;
+    /**
+     * 只写**当前会话里确实存在**的 clip。
+     *
+     * 【为什么需要】粘贴/导入回执与本地时间线之间有一个短暂窗口：回执已经给出新
+     * clip 的 id，而整份时间线还没回流。此时对着一个本地不存在的 clip 发写回，
+     * 后端会因为"找不到这条 clip"整批失败 —— 于是**同批里本来能写的那几条**也一起
+     * 被回滚。跳过它们比让整批失败好得多；下一次时间线到达时调用方会重算。
+     */
+    requirePresent?: ReadonlySet<string>;
+}
+
+/**
+ * **自动淡化写回的唯一入口**：一次批量、一个撤销点、一个完成门。
+ *
+ * 【为什么必须是批量的】旧实现把自动淡化拆成 N 次 `setClipState`：
+ *   * N 条 Clip 就有 N 个宿主写回请求、N 次完成门、N 个撤销点；
+ *   * 部分成功时一半 Clip 有淡化、一半没有，用户看到的是"自动交叉淡化没执行"；
+ *   * 每次写回都可能撞上"宿主几何还没跟上"，只要有一条失败，整次操作就看起来失败了。
+ * 批量之后，它在宿主里是**一次**编辑：一次成功、一次撤销、一次完成门。
+ *
+ * 【为什么失败要分两类】
+ *   * `permanent`（真的被拒绝）⇒ 回滚本地，否则界面留下一份宿主没有的淡化；
+ *   * `transient`（宿主还在追上几何/媒体，后端自己会收敛）⇒ **保留**乐观值并静默，
+ *     下一次宿主回声会把它对齐 —— 回滚反而会让用户看到"刚出现的淡化闪一下又没了"。
+ */
+export async function persistAutoFadeUpdates(
+    updates: readonly AutoFadeUpdate[],
+    dispatch: AppDispatch,
+    opts?: PersistAutoFadeOptions,
+): Promise<AutoFadePersistOutcome> {
+    const targets = opts?.requirePresent
+        ? updates.filter((u) => opts.requirePresent?.has(u.clipId))
+        : [...updates];
+    if (targets.length === 0) return "ok";
+
+    // ① 乐观更新（一次 dispatch 一个 clip；reducer 是纯赋值，代价可以忽略）。
+    for (const u of targets) {
+        dispatch(
+            setClipAutoFades({
+                clipId: u.clipId,
+                autoFadeInSec: u.autoFadeInSec,
+                autoFadeOutSec: u.autoFadeOutSec,
+            }),
+        );
+    }
+
+    // ② 一次批量写回。
+    try {
+        await dispatch(
+            setClipsStateBulkRemote({
+                updates: targets.map((u) => ({
+                    clipId: u.clipId,
+                    autoFadeInSec: u.autoFadeInSec,
+                    autoFadeOutSec: u.autoFadeOutSec,
+                })),
+                checkpoint: Boolean(opts?.checkpoint),
+            }),
+        ).unwrap();
+        return "ok";
+    } catch (error) {
+        const kind = classifyClipEditFailure(error);
+        if (kind === "permanent" && opts?.previous) {
+            // ③ 永久失败：整批回滚到写前值。
+            for (const u of targets) {
+                const before = opts.previous.get(u.clipId);
+                if (!before) continue;
+                dispatch(
+                    setClipAutoFades({
+                        clipId: u.clipId,
+                        autoFadeInSec: before.in,
+                        autoFadeOutSec: before.out,
+                    }),
+                );
+            }
+        }
+        frontendLog(
+            kind === "permanent" ? "warn" : "debug",
+            `auto crossfade write-back ${kind}`,
+            `${targets.length} clip(s): ${String(error)}`,
+        );
+        return kind;
+    }
+}
+
 /**
  * 计算自动交叉淡化（拖拽/裁剪：预览与提交共用同一套判定，保证二者一致）。
  *
@@ -333,28 +450,19 @@ export function applyAutoCrossfade(
         editSides?: Record<string, CrossfadeAffectedClip>;
     },
 ): Promise<void> {
-    const checkpoint = Boolean(opts?.checkpoint);
     const updates = computeAutoCrossfadeUpdates(
         session,
         movedIds,
         opts?.affectedSides,
         opts?.editSides,
     );
-
-    if (updates.length === 0) return Promise.resolve();
-
-    for (const u of updates) {
-        dispatch(setClipAutoFades(u));
-    }
-    const remotePromises = updates.map((u) =>
-        webApi.setClipState({
-            clipId: u.clipId,
-            autoFadeInSec: u.autoFadeInSec,
-            autoFadeOutSec: u.autoFadeOutSec,
-            checkpoint,
-        }),
-    );
-    return Promise.allSettled(remotePromises).then(() => undefined);
+    return persistAutoFadeUpdates(updates, dispatch, {
+        checkpoint: Boolean(opts?.checkpoint),
+        previous: autoFadeSnapshot(
+            session,
+            updates.map((u) => u.clipId),
+        ),
+    }).then(() => undefined);
 }
 
 /**
@@ -395,21 +503,13 @@ export function applyDetachedAutoCrossfadeClears(
     editSides?: Record<string, CrossfadeAffectedClip>,
 ): Promise<void> {
     const updates = computeDetachedAutoCrossfadeClears(session, movedIds, affectedSides, editSides);
-
-    if (updates.length === 0) return Promise.resolve();
-
-    for (const u of updates) {
-        dispatch(setClipAutoFades(u));
-    }
-    const remotePromises = updates.map((u) =>
-        webApi.setClipState({
-            clipId: u.clipId,
-            autoFadeInSec: u.autoFadeInSec,
-            autoFadeOutSec: u.autoFadeOutSec,
-            checkpoint: false,
-        }),
-    );
-    return Promise.allSettled(remotePromises).then(() => undefined);
+    return persistAutoFadeUpdates(updates, dispatch, {
+        checkpoint: false,
+        previous: autoFadeSnapshot(
+            session,
+            updates.map((u) => u.clipId),
+        ),
+    }).then(() => undefined);
 }
 
 /**

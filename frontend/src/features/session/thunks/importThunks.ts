@@ -15,7 +15,11 @@ import {
     isImportCancelled,
     registerImportRun,
 } from "./importCancellation";
-import { computeAutoCrossfadeFromPayload } from "../../../components/layout/timeline/hooks/autoCrossfade";
+import {
+    autoFadeSnapshot,
+    computeAutoCrossfadeFromPayload,
+    persistAutoFadeUpdates,
+} from "../../../components/layout/timeline/hooks/autoCrossfade";
 import { computeClipNormalizationGain } from "../clipNormalization";
 import { trackNameForMedia } from "../mediaTrackName";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
@@ -205,17 +209,14 @@ async function syncAutoCrossfadeFromLatestTimeline(args: {
             return null;
         const fadeUpdates = computeAutoCrossfadeFromPayload(allClips, newClipIds);
         if (fadeUpdates.length > 0) {
-            const fadePromises = fadeUpdates.map((u) =>
-                dispatch(
-                    setClipStateRemote({
-                        clipId: u.clipId,
-                        autoFadeInSec: u.autoFadeInSec,
-                        autoFadeOutSec: u.autoFadeOutSec,
-                        checkpoint: false,
-                    }),
-                ).unwrap(),
-            );
-            await Promise.allSettled(fadePromises);
+            // 导入后的自动交叉淡化同样**整批一次写回**（见 persistAutoFadeUpdates）。
+            await persistAutoFadeUpdates(fadeUpdates, dispatch as never, {
+                checkpoint: false,
+                previous: autoFadeSnapshot(
+                    session,
+                    fadeUpdates.map((u) => u.clipId),
+                ),
+            });
             // 淡化更新完成后再重新拉取：上面这份 latestTimeline 是淡化前的
             // 快照，若直接返回，fulfilled reducer 会把刚应用的自动淡化从
             // UI 上回滚掉（后端仍保留，前后端就此分叉）。重取失败同样不反咬
