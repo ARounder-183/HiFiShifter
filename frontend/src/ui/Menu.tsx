@@ -55,6 +55,7 @@ import { CheckIcon } from "@radix-ui/react-icons";
 
 import { EDGE_GAP, clampAxisPosition } from "../components/appTooltipPosition";
 import { cx } from "./cx";
+import { menuPortalContainer } from "./portalContainer";
 import { ownsArrowKeys, useMenuKeyboard } from "./useMenuKeyboard";
 
 export interface AppMenuItemSpec {
@@ -903,25 +904,6 @@ export function AppSubMenu({
     );
 }
 
-/**
- * 弹出面该挂到哪个容器。
- *
- * 【为什么不是 `document.body`】Radix Themes 把整套组件令牌（`--accent-9`、
- * `--gray-a5`、`--space-*` …）定义在 `.radix-themes` 元素上。挂到 `body` 的弹出面
- * 落在那个元素**之外**，里面的 Radix 组件拿不到任何令牌 —— 滑块轨道与滑块头的
- * 背景色整条失效（计算成 `transparent`），于是节拍器菜单里出现一行
- * "看得见 60% 读数、看不见滑块"的空白（用户报告的「滑块不见了」）。
- *
- * 挂进主题作用域同时得到两件事：布局盒的裁切照旧被绕过（弹出面是 `position: fixed`，
- * 祖先的 `overflow: hidden` 不裁它），而令牌全部可见。
- *
- * 【为什么仍然可以挂到 body 兜底】`.radix-themes` 不存在时（极端早期的渲染、
- * 或没有套主题的单元测试）退回 `document.body` —— 那时也没有 Radix 组件可放。
- */
-function portalContainer(): HTMLElement {
-    return document.querySelector<HTMLElement>(".radix-themes") ?? document.body;
-}
-
 /** 锚定菜单与触发元素之间的呼吸（与 `--qt-space-2` 同一个值）。 */
 const ANCHORED_MENU_GAP_PX = 4;
 
@@ -1120,6 +1102,6 @@ export function AppAnchoredMenu({
                   )
                 : children}
         </div>,
-        portalContainer(),
+        menuPortalContainer(),
     );
 }

@@ -18,7 +18,7 @@ import { Slider } from "@radix-ui/themes";
 import type { ReactNode } from "react";
 
 import { cx } from "./cx";
-import { stepValue, type StepUnit } from "./stepPolicy";
+import { stepFor, stepValue, type StepUnit } from "./stepPolicy";
 import { useFineAdjustModifier } from "./useFineAdjustModifier";
 import { useNonPassiveWheel } from "../utils/useNonPassiveWheel";
 import { useFrameCommitter, useWheelStepAccumulator } from "./useFrameCommit";
@@ -50,12 +50,17 @@ export interface AppSliderProps {
     onCommit?: (next: number) => void;
     /**
      * 单位语义，决定滚轮步长。
-     * 注意：拖动步长固定为 1（与 `Slider` 的 `step` 一致），滚轮才用粗/精步长
-     * —— 原实现里两者不一致（`step={1}` 但滚轮滚 5），手感割裂。
+     * 拖动/方向键默认步长为 1；连续轴用 `step` 显式覆盖（例如曲率 0.01）。
+     * 滚轮仍走粗/精步长：例如曲率的粗调 0.05、精调 0.01。
      */
     unit: StepUnit;
     min: number;
     max: number;
+    /**
+     * 拖动 / 方向键的数值步长；缺省 1（保持所有既有调用点不变）。
+     * 需要小数连续轴时显式传入，例如曲率 0.01。
+     */
+    step?: number;
     disabled?: boolean;
     ariaLabel?: string;
     /** 密度覆盖，默认继承容器。 */
@@ -84,6 +89,7 @@ export function AppSlider({
     unit,
     min,
     max,
+    step,
     disabled = false,
     density,
     ariaLabel,
@@ -91,6 +97,15 @@ export function AppSlider({
 }: AppSliderProps) {
     const size = radixSizeFor(useDensity(density));
     const isFine = useFineAdjustModifier();
+    const resolvedStep = typeof step === "number" && Number.isFinite(step) && step > 0 ? step : 1;
+    const decimals = stepFor(unit).decimals;
+    /** 按 step 网格量化并收敛小数位，避免 0.1 + 0.2 类噪声写进工程数据。 */
+    const quantize = (value: number): number => {
+        const clamped = Math.min(max, Math.max(min, value));
+        const snapped = min + Math.round((clamped - min) / resolvedStep) * resolvedStep;
+        const factor = 10 ** decimals;
+        return Math.round(snapped * factor) / factor;
+    };
 
     /*
      * 滚轮走帧合并 + 手势累积（见 useFrameCommit.ts）。拖动本身由 Radix 以帧率
@@ -153,11 +168,11 @@ export function AppSlider({
                 size={size}
                 min={min}
                 max={max}
-                step={1}
+                step={resolvedStep}
                 disabled={disabled}
                 aria-label={ariaLabel}
-                onValueChange={(values) => onChange(values[0] ?? value)}
-                onValueCommit={(values) => onCommit?.(values[0] ?? value)}
+                onValueChange={(values) => onChange(quantize(values[0] ?? value))}
+                onValueCommit={(values) => onCommit?.(quantize(values[0] ?? value))}
                 style={{ width: "100%" }}
             />
         </span>
