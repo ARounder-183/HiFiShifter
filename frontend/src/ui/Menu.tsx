@@ -66,6 +66,16 @@ export interface AppMenuItemSpec {
     onSelect?: () => void;
     /** 展示用快捷键文本（不参与绑定，与 `data-tooltip` 同源）。 */
     shortcut?: string;
+    /**
+     * 尾部**弱化标注**（不是快捷键）。
+     *
+     * 【它解决什么】有些项自身说不清会发生什么，需要一处"结果预告"跟在标签后面：
+     * "自动"要说明它此刻会落到哪一处，"默认（当前）"要说明默认值是什么。塞进
+     * `label` 会让标注跟着标签一起被截断，也会被读屏念成名字的一部分；塞进
+     * `shortcut` 则是在借一个语义不同的字段（那列还承担"按什么键"的约定）。
+     * 与 `shortcut` 同列、同样式，但语义独立。
+     */
+    hint?: string;
     /** 破坏性操作：悬停变红底红字。 */
     danger?: boolean;
     disabled?: boolean;
@@ -639,6 +649,7 @@ function AppContextMenuItem({
                     </span>
                 ) : null}
                 {item.shortcut ? <span>{item.shortcut}</span> : null}
+                {item.hint ? <span>{item.hint}</span> : null}
             </span>
         </button>
     );

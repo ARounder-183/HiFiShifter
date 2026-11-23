@@ -4,7 +4,7 @@
  * 四个挂载槽位（同一时刻**只有一个**主实例，由 `PlayheadTimeReadoutSlot` 决定）：
  * - toolbar：主窗口 ActionBar 的 BPM & Time 组；
  * - statusBar：主窗口底部状态栏右侧；
- * - trackHeader：轨道头的紧凑副本，只显示主单位；
+ * - trackHeader：轨道头的紧凑副本（字号更小，但**同样显示主副两段**）；
  * - detached：独立窗口顶部条，直接用 30Hz Redux 采样，不做跨窗口视觉插值。
  *
  * 【为什么改成单行】两行块在工具栏里是**高度**上的浪费：主工具栏按功能组换行，
@@ -14,8 +14,12 @@
  * 【为什么副单位不再用 `text-qt-text-muted`】它此前被压到近背景色：用户看到的是
  * "副单位不见了"，而不是"它是次要信息"。次要由**分隔符**表达，不由降低对比度表达 ——
  * 低对比度在这个界面上已经承担了"禁用"的语义。
+ *
+ * 【为什么轨道头也显示副单位】主/副单位是用户**分别**设定的：设了两段就说明两段都
+ * 要看。曾经轨道头只显示主单位（当时叫 `compact`），结果是同一个偏好在不同位置
+ * 给出不同的信息 —— 用户挪一下读数就少了一半内容，却没有任何提示说这是故意的。
  */
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useState } from "react";
 import { shallowEqual } from "react-redux";
 
 import { useAppSelector } from "../../../app/hooks";
@@ -23,13 +27,10 @@ import { isTransportAdvancing } from "../../../features/session/selectors/transp
 import { useI18n } from "../../../i18n/I18nProvider";
 import { useVisualPlayhead } from "../../../hooks/useVisualPlayhead";
 import { SlotText } from "../../../ui/SlotText";
-import { formatCursorTime, formatCursorUnit } from "../timeline/timeFormat";
-import type { TimeFormatContext } from "../timeline/timeFormat";
+import { usePlayheadTimeFormat } from "./usePlayheadTimeFormat";
 
 export interface PlayheadTimeReadoutProps {
     variant: "toolbar" | "statusBar" | "trackHeader" | "detached";
-    /** 只显示主单位（轨道头 / 独立窗口）。 */
-    compact?: boolean;
     /** 是否使用共享视觉播放头插值；独立窗口与轨道头传 false。 */
     interpolate?: boolean;
     /** 右键菜单等外部交互（读数本身不认识"放置位置"这件事）。 */
@@ -38,7 +39,6 @@ export interface PlayheadTimeReadoutProps {
 
 export function PlayheadTimeReadout({
     variant,
-    compact = false,
     interpolate = true,
     onContextMenu,
 }: PlayheadTimeReadoutProps) {
@@ -52,13 +52,6 @@ export function PlayheadTimeReadout({
             playbackPositionSec: state.session.runtime.playbackPositionSec,
             positionAdvancing: state.session.runtime.positionAdvancing,
             positionAgeMs: state.session.runtime.positionAgeMs,
-            primaryTimeUnit: state.session.primaryTimeUnit,
-            secondaryTimeUnit: state.session.secondaryTimeUnit,
-            bpm: state.session.bpm,
-            beats: state.session.beats,
-            grid: state.session.grid,
-            projectSec: state.session.projectSec,
-            tempoMap: state.session.tempoMap,
         }),
         shallowEqual,
     );
@@ -73,48 +66,9 @@ export function PlayheadTimeReadout({
     });
     const visualSec = interpolate ? interpolatedSec : selector.playheadSec;
 
-    const timeContext = useMemo<TimeFormatContext>(
-        () => ({
-            bpm: selector.bpm,
-            beatsPerBar: Math.max(1, Math.round(selector.beats || 4)),
-            grid: selector.grid,
-            tempoMap: selector.tempoMap,
-        }),
-        [selector.bpm, selector.beats, selector.grid, selector.tempoMap],
-    );
-    const formatted = useMemo(
-        () =>
-            formatCursorTime(
-                selector.primaryTimeUnit,
-                selector.secondaryTimeUnit,
-                visualSec,
-                timeContext,
-            ),
-        [selector.primaryTimeUnit, selector.secondaryTimeUnit, visualSec, timeContext],
-    );
-
-    // 至少预留 1 小时（或当前工程/光标更大者）的宽度；超长工程只会在首次跨过
-    // 预留值时变宽一次，不会每秒抖动。
-    const reserveSec = Math.max(
-        3600,
-        Math.ceil(selector.projectSec),
-        Math.ceil(selector.playheadSec),
-    );
-    const reservePrimary = useMemo(
-        () => formatCursorUnit(selector.primaryTimeUnit, reserveSec, timeContext),
-        [selector.primaryTimeUnit, reserveSec, timeContext],
-    );
-    const reserveSecondary = useMemo(
-        () =>
-            selector.secondaryTimeUnit !== "none" &&
-            selector.secondaryTimeUnit !== selector.primaryTimeUnit
-                ? formatCursorUnit(selector.secondaryTimeUnit, reserveSec, timeContext)
-                : null,
-        [selector.primaryTimeUnit, selector.secondaryTimeUnit, reserveSec, timeContext],
-    );
-
+    const { formatted, reservePrimary, reserveSecondary } = usePlayheadTimeFormat(visualSec);
     const ariaLabel = t("playhead_time_readout") + ": " + formatted.combined;
-    const showSecondary = !compact && formatted.secondaryLabel !== null;
+    const showSecondary = formatted.secondaryLabel !== null;
 
     if (variant === "toolbar" || variant === "statusBar") {
         return (
@@ -153,6 +107,17 @@ export function PlayheadTimeReadout({
     }
 
     if (variant === "trackHeader") {
+        /*
+         * 【为什么比工具栏小一号】轨道头列宽是用户可拖的（出厂 256px，插件首用 140px），
+         * 而两段时间串在 13px 下已经接近这个宽度。11px + 等宽数字让两段在出厂宽度下
+         * 一次放下，用户把列拖窄时也还有余量。
+         *
+         * 【为什么主单位 `shrink-0`、副单位可收缩】列再窄下去总得裁掉一点：裁主单位
+         * 会连"这是第几小节"都读不出来，裁副单位只是少了那一段。因此主单位永不收缩，
+         * 副单位按剩余宽度收缩并在尾部裁切（全文始终在气泡与 `aria-label` 里）。
+         *
+         * 【为什么不预留宽度】预留会把两段一起顶到裁切边缘，反而先牺牲主单位。
+         */
         return (
             <div
                 className="min-w-0 flex flex-1 justify-end overflow-hidden pr-5"
@@ -162,20 +127,45 @@ export function PlayheadTimeReadout({
                 aria-label={ariaLabel}
                 onContextMenu={onContextMenu}
             >
-                <SlotText
-                    text={formatted.primaryLabel}
-                    reserveText={reservePrimary}
-                    tooltip={formatted.combined}
-                    selectable
-                    className="hs-type-body font-medium tabular-nums text-qt-text text-right leading-none whitespace-nowrap shrink-0"
-                />
+                <span className="flex min-w-0 items-baseline justify-end gap-1">
+                    <SlotText
+                        text={formatted.primaryLabel}
+                        tooltip={formatted.combined}
+                        selectable
+                        className="text-qt-xs font-medium tabular-nums text-qt-text text-right leading-none whitespace-nowrap shrink-0"
+                    />
+                    {showSecondary ? (
+                        <>
+                            <span
+                                aria-hidden="true"
+                                className="text-qt-border text-qt-xs leading-none shrink-0"
+                            >
+                                ·
+                            </span>
+                            {/*
+                              副单位外面多一层可收缩的盒子：`SlotText` 用内联
+                              `min-width` 钉住自己的宽度（那是它防抖的机制），
+                              所以收缩只能发生在它**外面**——外层收窄，内层照旧
+                              等宽，多出来的部分被裁掉。
+                            */}
+                            <span className="flex min-w-0 overflow-hidden">
+                                <SlotText
+                                    text={formatted.secondaryLabel ?? ""}
+                                    tooltip={formatted.combined}
+                                    selectable
+                                    className="text-qt-xs font-normal tabular-nums text-qt-text text-right leading-none whitespace-nowrap"
+                                />
+                            </span>
+                        </>
+                    ) : null}
+                </span>
             </div>
         );
     }
 
     return (
         <div
-            className="flex h-qt-bar-status items-center justify-end px-2"
+            className="flex h-qt-bar-status items-center justify-end gap-1.5 px-2"
             data-playhead-time-readout="detached"
             data-playhead-sec={visualSec.toFixed(6)}
             data-tooltip={formatted.combined}
@@ -186,8 +176,21 @@ export function PlayheadTimeReadout({
                 text={formatted.primaryLabel}
                 reserveText={reservePrimary}
                 tooltip={formatted.combined}
-                className="hs-type-mono text-qt-xs tabular-nums"
+                className="hs-type-mono text-qt-xs tabular-nums text-qt-text"
             />
+            {showSecondary ? (
+                <>
+                    <span aria-hidden="true" className="text-qt-border text-qt-xs leading-none">
+                        ·
+                    </span>
+                    <SlotText
+                        text={formatted.secondaryLabel ?? ""}
+                        reserveText={reserveSecondary ?? undefined}
+                        tooltip={formatted.combined}
+                        className="hs-type-mono text-qt-xs tabular-nums text-qt-text"
+                    />
+                </>
+            ) : null}
         </div>
     );
 }

@@ -6798,13 +6798,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         paramBlockToolIcon,
     } = buildToolIcons(currentDrawTool, s.selectToolMode);
 
-    // 标尺刻度 / 时间格式 / 单位切换 / 复制播放头时间整块在
-    // `useTimelineDisplayControls` 里（见该文件头）。它们只依赖会话切片与刻度轴。
+    // 标尺刻度 / 时间格式 / 复制播放头时间整块在 `useTimelineDisplayControls` 里
+    // （见该文件头）。它们只依赖会话切片与刻度轴。
     const {
         timelineTicks,
         timeContext,
-        handlePrimaryUnitChange,
-        handleSecondaryUnitChange,
         handleTempoMapChange,
         handleTempoMapCommit,
         handleCopyPlayheadTime,
@@ -7050,9 +7048,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         gridLayerRef,
         hScrollbarThumbRef,
         handleCopyPlayheadTime,
-        handlePrimaryUnitChange,
         handleRulerWheel,
-        handleSecondaryUnitChange,
         handleTempoMapChange,
         handleTempoMapCommit,
         interactions,

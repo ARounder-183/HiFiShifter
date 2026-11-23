@@ -59,9 +59,7 @@ type Props = {
         | "gridLayerRef"
         | "hScrollbarThumbRef"
         | "handleCopyPlayheadTime"
-        | "handlePrimaryUnitChange"
         | "handleRulerWheel"
-        | "handleSecondaryUnitChange"
         | "handleTempoMapChange"
         | "handleTempoMapCommit"
         | "interactions"
@@ -120,9 +118,7 @@ export function EditorArea({ m }: Props) {
         gridLayerRef,
         hScrollbarThumbRef,
         handleCopyPlayheadTime,
-        handlePrimaryUnitChange,
         handleRulerWheel,
-        handleSecondaryUnitChange,
         handleTempoMapChange,
         handleTempoMapCommit,
         interactions,
@@ -260,8 +256,6 @@ export function EditorArea({ m }: Props) {
                         timeContext={timeContext}
                         primaryUnit={s.primaryTimeUnit}
                         secondaryUnit={s.secondaryTimeUnit}
-                        onPrimaryUnitChange={handlePrimaryUnitChange}
-                        onSecondaryUnitChange={handleSecondaryUnitChange}
                         onOpenSettings={() => setTimeDisplaySettingsOpen(true)}
                         onCopyPlayheadTime={() => void handleCopyPlayheadTime()}
                         t={tf}

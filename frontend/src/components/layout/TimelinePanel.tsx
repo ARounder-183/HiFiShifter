@@ -396,8 +396,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         projectScale,
         handleTempoMapChange,
         handleTempoMapCommit,
-        handlePrimaryUnitChange,
-        handleSecondaryUnitChange,
         handleRulerOpenSettings,
         handleRulerCopyPlayheadTime,
         handleRulerMouseDown,
@@ -1061,8 +1059,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             timeContext={timeContext}
             primaryUnit={s.primaryTimeUnit}
             secondaryUnit={s.secondaryTimeUnit}
-            onPrimaryUnitChange={handlePrimaryUnitChange}
-            onSecondaryUnitChange={handleSecondaryUnitChange}
             onOpenSettings={handleRulerOpenSettings}
             onCopyPlayheadTime={handleRulerCopyPlayheadTime}
             t={tf}

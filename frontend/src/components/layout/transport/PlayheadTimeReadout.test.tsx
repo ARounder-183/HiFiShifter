@@ -7,6 +7,7 @@ import { afterEach, beforeEach, expect, test } from "vitest";
 
 import sessionReducer from "../../../features/session/sessionSlice";
 import { I18nProvider } from "../../../i18n/I18nProvider";
+import { formatCursorTime } from "../timeline/timeFormat";
 import { PlayheadTimeReadout } from "./PlayheadTimeReadout";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -33,7 +34,27 @@ afterEach(() => {
 
 type Variant = "toolbar" | "statusBar" | "trackHeader" | "detached";
 
-function renderReadout(variant: Variant, compact = false): void {
+/** 主/副两段的期望文本（从 store 的默认值推出，不在用例里写死格式）。 */
+function expectedLabels(store: ReturnType<typeof configureStore>): {
+    primary: string;
+    secondary: string;
+} {
+    const s = (store.getState() as { session: Record<string, unknown> }).session;
+    const formatted = formatCursorTime(
+        s.primaryTimeUnit as never,
+        s.secondaryTimeUnit as never,
+        0,
+        {
+            bpm: s.bpm as number,
+            beatsPerBar: Math.max(1, Math.round((s.beats as number) || 4)),
+            grid: s.grid as string,
+            tempoMap: null,
+        },
+    );
+    return { primary: formatted.primaryLabel, secondary: formatted.secondaryLabel ?? "" };
+}
+
+function renderReadout(variant: Variant): ReturnType<typeof configureStore> {
     const store = configureStore({ reducer: { session: sessionReducer } });
     act(() => {
         root.render(
@@ -41,7 +62,6 @@ function renderReadout(variant: Variant, compact = false): void {
                 <I18nProvider>
                     <PlayheadTimeReadout
                         variant={variant}
-                        compact={compact}
                         interpolate={
                             variant === "detached" || variant === "trackHeader" ? false : undefined
                         }
@@ -50,6 +70,7 @@ function renderReadout(variant: Variant, compact = false): void {
             </Provider>,
         );
     });
+    return store;
 }
 
 test("toolbar 读数挂载并保留 data-playhead-sec", () => {
@@ -77,21 +98,30 @@ test("状态栏读数：单行、副单位不再变淡", () => {
     expect(classes.some((value) => value.includes("text-qt-text-muted"))).toBe(false);
 });
 
-test("compact 轨道头读数只显示主单位，不渲染副单位", () => {
-    renderReadout("trackHeader", true);
+/**
+ * 【回归】轨道头曾经是"紧凑副本"：只显示主单位。主/副单位是用户**分别**设定的，
+ * 设了两段就说明两段都要看 —— 挪一下读数就少一半内容，是同一个偏好在不同位置
+ * 给出不同的信息。
+ */
+test("轨道头读数同样显示主副两段", () => {
+    const store = renderReadout("trackHeader");
     const readout = document.querySelector<HTMLElement>(
         "[data-playhead-time-readout='trackHeader']",
     );
     expect(readout).toBeTruthy();
-    expect(readout?.textContent).not.toContain("·");
+    const labels = expectedLabels(store);
+    expect(readout?.textContent).toContain(labels.primary);
+    expect(readout?.textContent).toContain(labels.secondary);
+    expect(readout?.textContent).toContain("·");
 });
 
-test("detached 读数使用非插值模式也能渲染主单位", () => {
-    renderReadout("detached", true);
+test("独立窗口读数同样显示主副两段", () => {
+    const store = renderReadout("detached");
     const readout = document.querySelector<HTMLElement>("[data-playhead-time-readout='detached']");
     expect(readout).toBeTruthy();
-    expect(readout?.textContent?.length).toBeGreaterThan(0);
-    expect(readout?.textContent).not.toContain("·");
+    const labels = expectedLabels(store);
+    expect(readout?.textContent).toContain(labels.primary);
+    expect(readout?.textContent).toContain(labels.secondary);
 });
 
 test("ActionBar 通过槽位挂载工具栏读数（不再无条件渲染）", async () => {
@@ -111,7 +141,7 @@ test("TrackList 始终渲染“轨道”标签，读数作为附加槽位", asyn
         fs.readFileSync("src/components/layout/timeline/TrackList.tsx", "utf8"),
     );
     expect(source).toContain('{t("common_tracks")}');
-    expect(source).toContain('<PlayheadTimeReadoutSlot slot="trackHeader" compact />');
+    expect(source).toContain('<PlayheadTimeReadoutSlot slot="trackHeader" />');
     expect(source).not.toContain('<PlayheadTimeReadout variant="trackHeader"');
 });
 

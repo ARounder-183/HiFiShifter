@@ -1,16 +1,11 @@
 // 时间轴标尺：时间格式上下文、主/副单位、Tempo Map、播放头复制与拖拽 seek。
 import { type TimeValueFormatContext } from "../timeValueText";
 import { planSeekGesture } from "../kernel/interaction/seekGesture";
-import {
-    persistUiSettings,
-    setPrimaryTimeUnit,
-    setSecondaryTimeUnit,
-    setTempoMap,
-} from "../../../../features/session/sessionSlice";
+import { setTempoMap } from "../../../../features/session/sessionSlice";
 import { setTempoMapRemote } from "../../../../features/session/thunks/tempoMapThunks";
 import { registerDragAbort } from "../../../../utils/gestureFocusGuard";
-import { formatCursorTime } from "../../timeline";
-import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "../../timeline";
+import type { TimeFormatContext } from "../../timeline";
+import { copyPlayheadTimeToClipboard } from "../../timeline/playheadTimeClipboard";
 import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../../../utils/snapHighlight";
 import type { TempoMap } from "../../../../utils/tempoMap";
 import type { ScaleLike } from "../../../../utils/musicalScales";
@@ -87,44 +82,11 @@ export function useTimelineRuler({
         },
         [dispatch],
     );
-    const handlePrimaryUnitChange = React.useCallback(
-        (unit: TimeUnit) => {
-            dispatch(setPrimaryTimeUnit(unit));
-            void dispatch(persistUiSettings());
-        },
-        [dispatch],
-    );
-    const handleSecondaryUnitChange = React.useCallback(
-        (unit: TimeUnitChoice) => {
-            dispatch(setSecondaryTimeUnit(unit));
-            void dispatch(persistUiSettings());
-        },
-        [dispatch],
-    );
-    const handleCopyPlayheadTime = React.useCallback(async () => {
-        const text = formatCursorTime(
-            s.primaryTimeUnit,
-            s.secondaryTimeUnit,
-            Number(s.playheadSec ?? 0) || 0,
-            timeContext,
-        ).combined;
-        try {
-            await navigator.clipboard.writeText(text);
-        } catch {
-            try {
-                const textarea = document.createElement("textarea");
-                textarea.value = text;
-                textarea.style.position = "fixed";
-                textarea.style.opacity = "0";
-                document.body.appendChild(textarea);
-                textarea.select();
-                document.execCommand("copy");
-                textarea.remove();
-            } catch {
-                // 忽略复制失败
-            }
-        }
-    }, [s.primaryTimeUnit, s.secondaryTimeUnit, s.playheadSec, timeContext]);
+    // 单位切换不在这里：右键菜单里那一组（含读数位置）由 `useTimeContextMenuItems`
+    // 直接接会话切片，标尺与读数共用同一份实现（见 TimeRuler 的同名说明）。
+    const handleCopyPlayheadTime = React.useCallback(() => {
+        copyPlayheadTimeToClipboard();
+    }, []);
 
     // TimeRuler 是 React.memo 组件：传给它的 handler 必须是稳定引用，内联箭头
     // 函数会让 memo 每次渲染都失效（拖拽 / 滚动期间标尺子树整棵重渲）。
@@ -132,7 +94,7 @@ export function useTimelineRuler({
         setTimeDisplaySettingsOpen(true);
     }, [setTimeDisplaySettingsOpen]);
     const handleRulerCopyPlayheadTime = React.useCallback(() => {
-        void handleCopyPlayheadTime();
+        handleCopyPlayheadTime();
     }, [handleCopyPlayheadTime]);
     const handleRulerMouseDown = React.useCallback(
         (e: React.MouseEvent<HTMLDivElement>) => {
@@ -240,8 +202,6 @@ export function useTimelineRuler({
         projectScale,
         handleTempoMapChange,
         handleTempoMapCommit,
-        handlePrimaryUnitChange,
-        handleSecondaryUnitChange,
         handleCopyPlayheadTime,
         handleRulerOpenSettings,
         handleRulerCopyPlayheadTime,

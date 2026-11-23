@@ -145,7 +145,7 @@ export function DetachedRoot() {
         >
             {showEditorTimeBar ? (
                 <div className="shrink-0 border-b border-qt-border bg-qt-window">
-                    <PlayheadTimeReadout variant="detached" compact interpolate={false} />
+                    <PlayheadTimeReadout variant="detached" interpolate={false} />
                 </div>
             ) : null}
             <div className="relative min-h-0 flex-1">

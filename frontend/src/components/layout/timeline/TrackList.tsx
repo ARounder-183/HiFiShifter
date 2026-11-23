@@ -1162,7 +1162,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                     看不到这一列是什么。读数只能是标签旁的附加槽位（见 PlayheadTimeReadoutSlot），
                     而且只在放置策略指向轨道头时才出现。 */}
                 <span className="hs-type-label font-semibold shrink-0">{t("common_tracks")}</span>
-                <PlayheadTimeReadoutSlot slot="trackHeader" compact />
+                <PlayheadTimeReadoutSlot slot="trackHeader" />
                 {/* 速度映射小按钮（右下角）：显示/创建 或 清空/隐藏。 */}
                 <TempoMapCornerButton />
             </Flex>
