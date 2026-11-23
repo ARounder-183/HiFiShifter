@@ -86,7 +86,11 @@ export function PlayheadTimeReadout({
 
     // 至少预留 1 小时（或当前工程/光标更大者）的宽度；超长工程只会在首次跨过
     // 预留值时变宽一次，不会每秒抖动。
-    const reserveSec = Math.max(3600, selector.projectSec, selector.playheadSec);
+    const reserveSec = Math.max(
+        3600,
+        Math.ceil(selector.projectSec),
+        Math.ceil(selector.playheadSec),
+    );
     const reservePrimary = useMemo(
         () => formatCursorUnit(selector.primaryTimeUnit, reserveSec, timeContext),
         [selector.primaryTimeUnit, reserveSec, timeContext],
@@ -141,7 +145,7 @@ export function PlayheadTimeReadout({
                     reserveText={reservePrimary}
                     tooltip={formatted.combined}
                     selectable
-                    className="tabular-nums text-qt-text text-right leading-none whitespace-nowrap shrink-0"
+                    className="hs-type-body font-medium tabular-nums text-qt-text text-right leading-none whitespace-nowrap shrink-0"
                 />
             </div>
         );

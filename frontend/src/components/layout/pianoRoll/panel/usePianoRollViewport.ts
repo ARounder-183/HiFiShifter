@@ -159,8 +159,9 @@ export function usePianoRollViewport({
      */
     const dockLayout = useAppSelector((state) => state.dock.layout);
     /**
-     * 同步所需的两个窗体。`sameTabset` 决定偏移怎么算：
-     * 同一标签组时用"内容内边距之差"（两个宿主同槽位），否则用屏幕左缘之差。
+     * 同步所需的两个窗体及布局关系。
+     * tabbed → 内容内边距之差；stacked / x 重叠 → 屏幕左缘之差；
+     * sideBySide / detached / 不重叠浮动 → 左侧起点对齐（offset 0）。
      */
     const syncPair = useMemo(
         () => resolveSyncOffsetForms(dockLayout, PANEL_TIMELINE, PANEL_PARAM_EDITOR, dockFormId),

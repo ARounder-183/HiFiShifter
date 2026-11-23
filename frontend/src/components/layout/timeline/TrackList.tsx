@@ -1165,7 +1165,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                 style={{ height: headerHeight }}
             >
                 {showPlayheadTime ? (
-                    <PlayheadTimeReadout variant="trackHeader" compact />
+                    <PlayheadTimeReadout variant="trackHeader" compact interpolate={false} />
                 ) : (
                     <span className="hs-type-label font-semibold shrink-0">
                         {t("common_tracks")}

@@ -85,5 +85,6 @@ test("TrackList 显示时间时不再渲染“轨道”标签", async () => {
         fs.readFileSync("src/components/layout/timeline/TrackList.tsx", "utf8"),
     );
     expect(source).toContain("showPlayheadTime ?");
-    expect(source).toContain('<PlayheadTimeReadout variant="trackHeader" compact />');
+    expect(source).toContain('variant="trackHeader"');
+    expect(source).toContain("interpolate={false}");
 });
