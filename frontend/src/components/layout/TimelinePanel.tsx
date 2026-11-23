@@ -1115,11 +1115,17 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             }}
         >
             <Flex
-                className="h-full w-full bg-qt-graph-bg overflow-hidden"
+                // 【顶部 hairline 是主编辑面板的共同契约】参数编辑器（PianoRollPanel）
+                // 根节点一直有 `border-t border-qt-border`，时间轴没有 —— 于是两个面板
+                // 并排时，上半部分的窗口拖动条与标尺之间少一条分隔线（用户报障）。
+                // 这条线属于**面板根节点**，不是标尺自己的装饰：标尺高度会随 Tempo Map
+                // 行变化，挂在那里会让线跟着上下跳。
+                className="h-full w-full bg-qt-graph-bg border-t border-qt-border overflow-hidden"
                 // 编辑表面声明：文档级 pointerdown/focusin 捕获据此把本面板
                 // 解析为「timeline」表面（轨道列在其内部以 trackHeader 就近
                 // 覆盖，见 focusSurface.ts / data-hs-surface）。
                 data-hs-surface="timeline"
+                data-panel-hairline="timeline"
                 onPointerDownCapture={(e) => {
                     // 点击轨道背景等非输入区域时，主动失焦当前聚焦的输入框，
                     // 让名称/速率/增益/轨道增益等行内编辑器走各自的 onBlur
