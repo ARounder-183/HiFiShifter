@@ -28,6 +28,11 @@ import {
 } from "../fileBrowser/folderImportOptions";
 import { clampGain } from "../../utils/gainDb";
 import {
+    isPlayheadTimePlacement,
+    resolvePlayheadTimePlacement,
+    type PlayheadTimePlacement,
+} from "./playheadTimePlacement";
+import {
     type ChannelImportPolicy,
     type PenInputSettings,
     type RenderCacheSettings,
@@ -344,8 +349,19 @@ const sessionSlice = createSlice({
                 Math.min(320, Math.round(Number(action.payload) || 110)),
             );
         },
+        setPlayheadTimePlacement(state, action: PayloadAction<PlayheadTimePlacement>) {
+            if (isPlayheadTimePlacement(action.payload)) {
+                state.playheadTimePlacement = action.payload;
+                // 旧字段跟着走：旧后端 / 旧前端读它时才不会与新的放置策略打架。
+                state.showPlayheadTimeInTrackHeader =
+                    resolvePlayheadTimePlacement(action.payload) === "trackHeader";
+            }
+        },
         setShowPlayheadTimeInTrackHeader(state, action: PayloadAction<boolean>) {
             state.showPlayheadTimeInTrackHeader = Boolean(action.payload);
+            // 【迁移入口】旧调用点（设置页的历史复选框、外部脚本）仍然只给一个布尔：
+            // 打开 = 放到轨道头，关闭 = 回到自动（状态栏），而不是"什么都不显示"。
+            state.playheadTimePlacement = action.payload ? "trackHeader" : "auto";
         },
         setParamEditorSyncTimeline(state, action: PayloadAction<boolean>) {
             state.paramEditorSyncTimeline = Boolean(action.payload);
@@ -1250,6 +1266,7 @@ export const {
     setPrimaryTimeUnit,
     setSecondaryTimeUnit,
     setRulerLabelSpacingPx,
+    setPlayheadTimePlacement,
     setShowPlayheadTimeInTrackHeader,
     setParamEditorSyncTimeline,
     toggleAutoCrossfade,

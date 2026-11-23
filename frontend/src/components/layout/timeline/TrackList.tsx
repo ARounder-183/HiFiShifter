@@ -48,7 +48,7 @@ import { advanceFineAxisDrag, type FineAxisDragState } from "../../../utils/fine
 import { shouldSuppressHoverSideEffects } from "../../../utils/penInput";
 import { AppTooltipBubble } from "../../AppTooltip";
 import { TempoMapCornerButton } from "./TempoMapCornerButton";
-import { PlayheadTimeReadout } from "../transport/PlayheadTimeReadout";
+import { PlayheadTimeReadoutSlot } from "../transport/PlayheadTimeReadoutSlot";
 import { computeVisibleTrackWindow } from "./runtime/timelineWindowing";
 import { resolveScrollCommitStepPx, shouldCommitScroll } from "./scrollCommit";
 import { normalizedTrackColorCss } from "./runtime/timelineCanvasStyle";
@@ -183,11 +183,6 @@ type TrackListProps = {
      * 实测传入）。轨道头列表底部留出同高空间后，两侧竖直滚动范围一致，
      * 滚动到底时轨道行与时间轴区域严格对齐。 */
     bottomGutterHeightPx?: number;
-    /**
-     * 是否在轨道头显示播放光标时间（TimelinePanel 从 session 传入；缺省 true
-     * 以保持旧行为）。工具栏始终显示时间，这个开关只控制轨道头附加读数。
-     */
-    showPlayheadTime?: boolean;
 };
 
 const TrackListInner: React.FC<TrackListProps> = ({
@@ -219,7 +214,6 @@ const TrackListInner: React.FC<TrackListProps> = ({
     listScrollRef,
     headerHeight = 48,
     bottomGutterHeightPx = 0,
-    showPlayheadTime = true,
 }) => {
     const listRef = useRef<HTMLDivElement | null>(null);
     // 电平表数据由本组件**自行订阅**：电平条是 trackMeters 的唯一消费方，播放中
@@ -1164,13 +1158,11 @@ const TrackListInner: React.FC<TrackListProps> = ({
                 className="border-b border-qt-border px-2 bg-qt-window shadow-xs z-10 relative"
                 style={{ height: headerHeight }}
             >
-                {showPlayheadTime ? (
-                    <PlayheadTimeReadout variant="trackHeader" compact interpolate={false} />
-                ) : (
-                    <span className="hs-type-label font-semibold shrink-0">
-                        {t("common_tracks")}
-                    </span>
-                )}
+                {/* 【“轨道”标签永远在】它此前被时间读数**替换**掉了：读数一开，用户就再也
+                    看不到这一列是什么。读数只能是标签旁的附加槽位（见 PlayheadTimeReadoutSlot），
+                    而且只在放置策略指向轨道头时才出现。 */}
+                <span className="hs-type-label font-semibold shrink-0">{t("common_tracks")}</span>
+                <PlayheadTimeReadoutSlot slot="trackHeader" compact />
                 {/* 速度映射小按钮（右下角）：显示/创建 或 清空/隐藏。 */}
                 <TempoMapCornerButton />
             </Flex>

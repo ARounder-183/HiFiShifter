@@ -11,7 +11,7 @@
  * 2. **永久失败回滚**：本地值回到写前，界面不再撒谎；
  * 3. **瞬时失败不回滚**：宿主还在追几何/媒体时，回滚只会让淡化"闪一下又没了"。
  */
-import { describe, expect, test, vi } from "vitest";
+import { describe, expect, test } from "vitest";
 
 import type { AppDispatch } from "../../../../app/store";
 import { persistAutoFadeUpdates, autoFadeSnapshot } from "./autoCrossfade";

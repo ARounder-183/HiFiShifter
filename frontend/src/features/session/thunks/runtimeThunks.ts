@@ -8,6 +8,7 @@ import { webApi } from "../../../services/webviewApi";
 import { settingsApi } from "../../../services/api";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
 import type { SessionState } from "../sessionSlice";
+import { resolvePlayheadTimePlacement } from "../playheadTimePlacement";
 
 export const refreshRuntime = createAsyncThunk("session/refreshRuntime", async () => {
     return webApi.getRuntimeInfo();
@@ -63,7 +64,11 @@ export const persistUiSettings = createAsyncThunk(
             primaryTimeUnit: s.primaryTimeUnit,
             secondaryTimeUnit: s.secondaryTimeUnit,
             rulerLabelSpacingPx: s.rulerLabelSpacingPx,
-            showPlayheadTimeInTrackHeader: s.showPlayheadTimeInTrackHeader,
+            playheadTimePlacement: s.playheadTimePlacement,
+            // 【旧字段继续写】旧后端 / 旧前端只认它；取值按放置策略派生，
+            // 两边读到的语义才不会互相矛盾。
+            showPlayheadTimeInTrackHeader:
+                resolvePlayheadTimePlacement(s.playheadTimePlacement) === "trackHeader",
             paramEditorSyncTimeline: s.paramEditorSyncTimeline,
             paramEditorTimelineClickSelectTrack: s.paramEditorTimelineClickSelectTrackEnabled,
             pitchSnap: s.pitchSnapEnabled,

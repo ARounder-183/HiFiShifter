@@ -1,13 +1,19 @@
 /**
  * 播放光标时间读数。
  *
- * 三处挂载点：
- * - toolbar：主窗口 ActionBar 的 BPM & Time 组。始终存在，不依赖面板布局；
- * - trackHeader：轨道头里的可选紧凑副本，只显示主单位；
+ * 四个挂载槽位（同一时刻**只有一个**主实例，由 `PlayheadTimeReadoutSlot` 决定）：
+ * - toolbar：主窗口 ActionBar 的 BPM & Time 组；
+ * - statusBar：主窗口底部状态栏右侧；
+ * - trackHeader：轨道头的紧凑副本，只显示主单位；
  * - detached：独立窗口顶部条，直接用 30Hz Redux 采样，不做跨窗口视觉插值。
  *
- * 时间选择器与旧 TrackHeaderPlayheadTime 同源（isTransportAdvancing 的统一判据），
- * 只是把读数从“轨道面板的属性”提升成了传输层信息。
+ * 【为什么改成单行】两行块在工具栏里是**高度**上的浪费：主工具栏按功能组换行，
+ * 一个两行读数会把整条工具栏顶高一行，而它显示的信息与一行完全相同。单行还让
+ * "主单位 · 副单位"读起来是一句话，而不是两段互不相干的数字。
+ *
+ * 【为什么副单位不再用 `text-qt-text-muted`】它此前被压到近背景色：用户看到的是
+ * "副单位不见了"，而不是"它是次要信息"。次要由**分隔符**表达，不由降低对比度表达 ——
+ * 低对比度在这个界面上已经承担了"禁用"的语义。
  */
 import { useCallback, useMemo, useState } from "react";
 import { shallowEqual } from "react-redux";
@@ -21,17 +27,20 @@ import { formatCursorTime, formatCursorUnit } from "../timeline/timeFormat";
 import type { TimeFormatContext } from "../timeline/timeFormat";
 
 export interface PlayheadTimeReadoutProps {
-    variant: "toolbar" | "trackHeader" | "detached";
+    variant: "toolbar" | "statusBar" | "trackHeader" | "detached";
     /** 只显示主单位（轨道头 / 独立窗口）。 */
     compact?: boolean;
-    /** 是否使用共享视觉播放头插值；独立窗口传 false。 */
+    /** 是否使用共享视觉播放头插值；独立窗口与轨道头传 false。 */
     interpolate?: boolean;
+    /** 右键菜单等外部交互（读数本身不认识"放置位置"这件事）。 */
+    onContextMenu?: (event: React.MouseEvent<HTMLDivElement>) => void;
 }
 
 export function PlayheadTimeReadout({
     variant,
     compact = false,
     interpolate = true,
+    onContextMenu,
 }: PlayheadTimeReadoutProps) {
     const { t } = useI18n();
     const selector = useAppSelector(
@@ -105,27 +114,39 @@ export function PlayheadTimeReadout({
     );
 
     const ariaLabel = t("playhead_time_readout") + ": " + formatted.combined;
+    const showSecondary = !compact && formatted.secondaryLabel !== null;
 
-    if (variant === "toolbar") {
+    if (variant === "toolbar" || variant === "statusBar") {
         return (
             <div
-                className="flex flex-col justify-center px-1 leading-none"
-                data-playhead-time-readout="toolbar"
+                className={
+                    variant === "statusBar"
+                        ? "flex h-qt-bar-status shrink-0 items-center gap-1.5 px-2 leading-none"
+                        : "flex shrink-0 items-center gap-1.5 px-1 leading-none"
+                }
+                data-playhead-time-readout={variant}
                 data-playhead-sec={visualSec.toFixed(6)}
                 data-tooltip={formatted.combined}
                 aria-label={ariaLabel}
+                onContextMenu={onContextMenu}
             >
                 <SlotText
                     text={formatted.primaryLabel}
                     reserveText={reservePrimary}
-                    className="hs-type-mono text-qt-sm font-medium tabular-nums"
+                    className="hs-type-mono text-qt-sm font-medium tabular-nums text-qt-text"
                 />
-                {!compact && formatted.secondaryLabel !== null ? (
-                    <SlotText
-                        text={formatted.secondaryLabel}
-                        reserveText={reserveSecondary ?? undefined}
-                        className="hs-type-caption text-qt-text-muted tabular-nums"
-                    />
+                {showSecondary ? (
+                    <>
+                        {/* 分隔符只做视觉切分：用边框色，不用低对比文字。 */}
+                        <span aria-hidden="true" className="text-qt-border">
+                            ·
+                        </span>
+                        <SlotText
+                            text={formatted.secondaryLabel ?? ""}
+                            reserveText={reserveSecondary ?? undefined}
+                            className="hs-type-mono text-qt-sm font-normal tabular-nums text-qt-text"
+                        />
+                    </>
                 ) : null}
             </div>
         );
@@ -134,11 +155,12 @@ export function PlayheadTimeReadout({
     if (variant === "trackHeader") {
         return (
             <div
-                className="min-w-0 flex-1 flex justify-end overflow-hidden pr-5"
+                className="min-w-0 flex flex-1 justify-end overflow-hidden pr-5"
                 data-playhead-time-readout="trackHeader"
                 data-playhead-sec={visualSec.toFixed(6)}
                 data-tooltip={formatted.combined}
                 aria-label={ariaLabel}
+                onContextMenu={onContextMenu}
             >
                 <SlotText
                     text={formatted.primaryLabel}
@@ -158,6 +180,7 @@ export function PlayheadTimeReadout({
             data-playhead-sec={visualSec.toFixed(6)}
             data-tooltip={formatted.combined}
             aria-label={ariaLabel}
+            onContextMenu={onContextMenu}
         >
             <SlotText
                 text={formatted.primaryLabel}

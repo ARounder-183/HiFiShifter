@@ -165,9 +165,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const trackHeaderWidthPx = useAppSelector(
         (state) => state.dock.layout.gutters.timelineTrackHeaderPx,
     );
-    const showPlayheadTimeInTrackHeader = useAppSelector(
-        (state) => state.session.showPlayheadTimeInTrackHeader,
-    );
     const trackHeaderRef = React.useRef<HTMLDivElement | null>(null);
     const ignoreGrouping = useAppSelector((state) => state.session.ignoreGrouping);
     const disabledGroupIds = useAppSelector((state) => state.session.disabledGroupIds);
@@ -1195,7 +1192,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 s.tempoMap && s.tempoMap.points.length > 0 && s.tempoMapVisible,
                             ),
                         )}
-                        showPlayheadTime={showPlayheadTimeInTrackHeader}
                         bottomGutterHeightPx={horizontalScrollbarGutterPx}
                     />
                 </div>

@@ -1527,8 +1527,13 @@ export const enUS = {
     ruler_label_spacing: "Label Spacing",
     playhead_time_readout: "Playhead time",
     playhead_time_toolbar_hint:
-        "The transport time in the main toolbar is always shown. This switch only controls the compact readout in track headers (primary unit only).",
-    show_playhead_time_in_track_header: "Show playhead time in track header",
+        "Choose where the readout appears (toolbar / status bar / track header). You can also right-click the readout to move it; the track-header copy shows the primary unit only.",
+    playhead_time_placement: "Playhead time position",
+    playhead_time_placement_auto: "Automatic",
+    playhead_time_placement_toolbar: "Toolbar",
+    playhead_time_placement_status_bar: "Status bar",
+    playhead_time_placement_track_header: "Track header",
+    playhead_time_placement_hidden: "Hidden",
     copy_playhead_time: "Copy Playhead Time",
     sync_timeline_view: "Sync Timeline View",
     sync_timeline_view_tooltip:

@@ -31,7 +31,9 @@ afterEach(() => {
     document.body.innerHTML = "";
 });
 
-function renderReadout(variant: "toolbar" | "trackHeader" | "detached", compact = false): void {
+type Variant = "toolbar" | "statusBar" | "trackHeader" | "detached";
+
+function renderReadout(variant: Variant, compact = false): void {
     const store = configureStore({ reducer: { session: sessionReducer } });
     act(() => {
         root.render(
@@ -40,7 +42,9 @@ function renderReadout(variant: "toolbar" | "trackHeader" | "detached", compact 
                     <PlayheadTimeReadout
                         variant={variant}
                         compact={compact}
-                        interpolate={variant === "detached" ? false : undefined}
+                        interpolate={
+                            variant === "detached" || variant === "trackHeader" ? false : undefined
+                        }
                     />
                 </I18nProvider>
             </Provider>,
@@ -48,7 +52,7 @@ function renderReadout(variant: "toolbar" | "trackHeader" | "detached", compact 
     });
 }
 
-test("toolbar 读数始终挂载并保留 data-playhead-sec", () => {
+test("toolbar 读数挂载并保留 data-playhead-sec", () => {
     renderReadout("toolbar");
     const readout = document.querySelector<HTMLElement>("[data-playhead-time-readout='toolbar']");
     expect(readout).toBeTruthy();
@@ -56,13 +60,30 @@ test("toolbar 读数始终挂载并保留 data-playhead-sec", () => {
     expect(readout?.textContent?.length).toBeGreaterThan(0);
 });
 
-test("compact 轨道头读数只显示主单位，不渲染副单位斜杠", () => {
+/**
+ * 【为什么这条是用户报障的可执行形式】副单位此前用 `text-qt-text-muted`，被压到近
+ * 背景色 —— 用户看到的是"副单位不见了"。次要由**分隔符**表达，不由降低对比度表达。
+ */
+test("状态栏读数：单行、副单位不再变淡", () => {
+    renderReadout("statusBar");
+    const readout = document.querySelector<HTMLElement>("[data-playhead-time-readout='statusBar']");
+    expect(readout).toBeTruthy();
+    // 单行：容器必须是横向 flex，不能是 flex-col。
+    expect(readout?.className).toContain("items-center");
+    expect(readout?.className).not.toContain("flex-col");
+    expect(readout?.querySelector(".text-qt-text-muted")).toBeNull();
+    const spans = readout?.querySelectorAll("span") ?? [];
+    const classes = Array.from(spans).map((span) => span.className);
+    expect(classes.some((value) => value.includes("text-qt-text-muted"))).toBe(false);
+});
+
+test("compact 轨道头读数只显示主单位，不渲染副单位", () => {
     renderReadout("trackHeader", true);
     const readout = document.querySelector<HTMLElement>(
         "[data-playhead-time-readout='trackHeader']",
     );
     expect(readout).toBeTruthy();
-    expect(readout?.textContent).not.toContain("/");
+    expect(readout?.textContent).not.toContain("·");
 });
 
 test("detached 读数使用非插值模式也能渲染主单位", () => {
@@ -70,21 +91,31 @@ test("detached 读数使用非插值模式也能渲染主单位", () => {
     const readout = document.querySelector<HTMLElement>("[data-playhead-time-readout='detached']");
     expect(readout).toBeTruthy();
     expect(readout?.textContent?.length).toBeGreaterThan(0);
-    expect(readout?.textContent).not.toContain("/");
+    expect(readout?.textContent).not.toContain("·");
 });
 
-test("ActionBar 的 BPM & Time 组包含全局传输时间", async () => {
+test("ActionBar 通过槽位挂载工具栏读数（不再无条件渲染）", async () => {
     const source = await import("node:fs").then((fs) =>
         fs.readFileSync("src/components/layout/ActionBar.tsx", "utf8"),
     );
-    expect(source).toContain('<PlayheadTimeReadout variant="toolbar" />');
+    expect(source).toContain('<PlayheadTimeReadoutSlot slot="toolbar" />');
+    expect(source).not.toContain('<PlayheadTimeReadout variant="toolbar" />');
 });
 
-test("TrackList 显示时间时不再渲染“轨道”标签", async () => {
+/**
+ * 【回归】读数曾经**替换**掉"轨道"标签：开关一开，用户再也看不到这一列是什么。
+ * 现在标签永远在，读数只是标签旁的附加槽位。
+ */
+test("TrackList 始终渲染“轨道”标签，读数作为附加槽位", async () => {
     const source = await import("node:fs").then((fs) =>
         fs.readFileSync("src/components/layout/timeline/TrackList.tsx", "utf8"),
     );
-    expect(source).toContain("showPlayheadTime ?");
-    expect(source).toContain('variant="trackHeader"');
-    expect(source).toContain("interpolate={false}");
+    expect(source).toContain('{t("common_tracks")}');
+    expect(source).toContain('<PlayheadTimeReadoutSlot slot="trackHeader" compact />');
+    expect(source).not.toContain('<PlayheadTimeReadout variant="trackHeader"');
+});
+
+test("状态栏通过槽位挂载读数", async () => {
+    const source = await import("node:fs").then((fs) => fs.readFileSync("src/App.tsx", "utf8"));
+    expect(source).toContain('<PlayheadTimeReadoutSlot slot="statusBar" />');
 });

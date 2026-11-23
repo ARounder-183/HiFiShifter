@@ -8,7 +8,7 @@ import { shallowEqual } from "react-redux";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import { CaptureControl } from "../../features/capture/CaptureControl";
-import { PlayheadTimeReadout } from "./transport/PlayheadTimeReadout";
+import { PlayheadTimeReadoutSlot } from "./transport/PlayheadTimeReadoutSlot";
 import { PitchSnapSettingsDialog } from "./PitchSnapSettingsDialog";
 import { SnapGridSettingsDialog } from "./SnapGridSettingsDialog";
 import { SplitTransitionSettingsDialog } from "./SplitTransitionSettingsDialog";
@@ -751,8 +751,8 @@ export function ActionBar() {
         >
             {/* BPM & Time */}
             <AppToolbarGroup>
-                {/* 传输时间：始终存在，不依赖时间轴/参数编辑器面板是否可见。 */}
-                <PlayheadTimeReadout variant="toolbar" />
+                {/* 传输时间：由放置策略决定是否出现在本组（见 PlayheadTimeReadoutSlot）。 */}
+                <PlayheadTimeReadoutSlot slot="toolbar" />
                 {/* Metronome */}
                 {/*
                  * 【为什么插件里整块不渲染】节拍器由宿主播放（REAPER 自己的 metronome

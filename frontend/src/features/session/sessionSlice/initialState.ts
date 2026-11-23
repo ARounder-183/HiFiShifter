@@ -33,6 +33,7 @@ export const initialState: SessionState = {
     primaryTimeUnit: DEFAULT_PRIMARY_TIME_UNIT,
     secondaryTimeUnit: DEFAULT_SECONDARY_TIME_UNIT,
     rulerLabelSpacingPx: DEFAULT_RULER_LABEL_SPACING_PX,
+    playheadTimePlacement: "auto",
     showPlayheadTimeInTrackHeader: true,
     paramEditorSyncTimeline: true,
 

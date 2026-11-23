@@ -108,6 +108,7 @@ import { ParamDataLoadingChip } from "./components/layout/ParamDataLoadingChip";
 import { AppStatusProgressChips } from "./components/layout/AppStatusProgressChips";
 import { ParamBlockAnalysisStatus } from "./components/layout/pianoRoll/panel/ParamBlockAnalysisStatus";
 import { ParamBlockFeedbackChip } from "./components/layout/pianoRoll/panel/ParamBlockFeedbackChip";
+import { PlayheadTimeReadoutSlot } from "./components/layout/transport/PlayheadTimeReadoutSlot";
 import { appStatusProgressBus } from "./utils/appStatusProgressBus";
 const FileBrowserPanel = lazy(() =>
     import("./components/layout/FileBrowserPanel").then((module) => ({
@@ -4781,6 +4782,9 @@ function AppInner() {
                   （见 `PluginApplyStatus`：片独立订阅外部 store，250 ms 的轮询不会
                   带动本组件重渲染。）
                 */}
+                {/* 播放光标时间：放置策略指向状态栏时才出现（见 PlayheadTimeReadoutSlot）。
+                    它排在插件状态片**之前**，这样插件状态变化不会把时间挤到最右。 */}
+                <PlayheadTimeReadoutSlot slot="statusBar" />
                 {isPluginMode() ? (
                     <>
                         <PluginApplyStatus

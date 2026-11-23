@@ -1,15 +1,19 @@
-import { Checkbox, Flex } from "@radix-ui/themes";
+import { Flex } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { shallowEqual } from "react-redux";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
     persistUiSettings,
+    setPlayheadTimePlacement,
     setPrimaryTimeUnit,
     setRulerLabelSpacingPx,
     setSecondaryTimeUnit,
-    setShowPlayheadTimeInTrackHeader,
 } from "../../features/session/sessionSlice";
+import {
+    PLAYHEAD_TIME_PLACEMENTS,
+    playheadTimePlacementLabelKey,
+} from "../../features/session/playheadTimePlacement";
 import type { TimeUnit, TimeUnitChoice } from "../../features/session/sessionTypes";
 import { TIME_UNITS, TIME_UNIT_CHOICES } from "./timeline/timeFormat";
 import { AppSelect, AppSlider, AppSliderReadout } from "../../ui";
@@ -45,7 +49,7 @@ export function TimelineDisplaySettingsDialog({ open, onOpenChange }: Props) {
             primaryTimeUnit: state.session.primaryTimeUnit,
             secondaryTimeUnit: state.session.secondaryTimeUnit,
             rulerLabelSpacingPx: state.session.rulerLabelSpacingPx,
-            showPlayheadTimeInTrackHeader: state.session.showPlayheadTimeInTrackHeader,
+            playheadTimePlacement: state.session.playheadTimePlacement,
         }),
         shallowEqual,
     );
@@ -109,19 +113,26 @@ export function TimelineDisplaySettingsDialog({ open, onOpenChange }: Props) {
                     </Flex>
                 </AppField>
 
-                <label className="flex items-center gap-2 cursor-pointer">
-                    <Checkbox
-                        size="2"
-                        checked={s.showPlayheadTimeInTrackHeader}
-                        onCheckedChange={(checked) => {
-                            dispatch(setShowPlayheadTimeInTrackHeader(Boolean(checked)));
+                {/* 【为什么是下拉而不是复选框】旧复选框只能表达"轨道头里显不显示"，
+                    而读数的主实例一直在工具栏 —— 用户既挪不走也关不掉。位置是一个
+                    五选一的放置策略，不是一个布尔。 */}
+                <AppField label={tf("playhead_time_placement")}>
+                    <AppSelect
+                        value={s.playheadTimePlacement}
+                        onValueChange={(value) => {
+                            dispatch(
+                                setPlayheadTimePlacement(
+                                    value as (typeof PLAYHEAD_TIME_PLACEMENTS)[number],
+                                ),
+                            );
                             void dispatch(persistUiSettings());
                         }}
+                        options={PLAYHEAD_TIME_PLACEMENTS.map((placement) => ({
+                            value: placement,
+                            label: tf(playheadTimePlacementLabelKey(placement)),
+                        }))}
                     />
-                    <span className="hs-type-label">
-                        {tf("show_playhead_time_in_track_header")}
-                    </span>
-                </label>
+                </AppField>
                 <div className="hs-type-caption text-qt-text-muted" style={{ marginTop: 4 }}>
                     {tf("playhead_time_toolbar_hint")}
                 </div>

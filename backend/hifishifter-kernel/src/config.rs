@@ -460,8 +460,17 @@ pub struct UiSettings {
     pub secondary_time_unit: String,
     #[serde(default = "default_ruler_label_spacing_px")]
     pub ruler_label_spacing_px: u32,
+    /// 旧字段：只作为**迁移来源**保留（读盘时仍要能认出旧配置）。
     #[serde(default = "default_true")]
     pub show_playhead_time_in_track_header: bool,
+    /// 播放光标时间读数的放置位置：`auto` / `toolbar` / `statusBar` /
+    /// `trackHeader` / `hidden`。`None` = 旧配置（前端按旧布尔迁移）。
+    ///
+    /// 【为什么是 Option 而不是带默认值的字符串】"没有这个字段"与"用户选了 auto"
+    /// 是两件事：前者要按旧布尔迁移（轨道头 / 自动），后者是用户明确的决定。
+    /// 用默认值填平这个差别，会让所有老用户的读数从轨道头被悄悄挪到状态栏。
+    #[serde(default)]
+    pub playhead_time_placement: Option<String>,
     #[serde(default = "default_true")]
     pub param_editor_sync_timeline: bool,
     #[serde(default = "default_true")]
@@ -1856,6 +1865,7 @@ impl Default for UiSettings {
             secondary_time_unit: default_secondary_time_unit(),
             ruler_label_spacing_px: default_ruler_label_spacing_px(),
             show_playhead_time_in_track_header: true,
+            playhead_time_placement: None,
             param_editor_sync_timeline: true,
             param_editor_timeline_click_select_track: true,
             pitch_snap: false,
@@ -1986,6 +1996,7 @@ impl UiSettings {
             self.split_transition_overlap_crossfade = default_split_transition_overlap_crossfade();
         }
         self.normalize_time_display();
+        self.normalize_playhead_time_placement();
         self.timeline_snap.normalize();
         self.normalize_ripple_mode();
         self.normalize_auto_scroll_mode();
@@ -2025,6 +2036,22 @@ impl UiSettings {
     pub fn normalize_auto_scroll_mode(&mut self) {
         if !["scroll", "page"].contains(&self.auto_scroll_mode.as_str()) {
             self.auto_scroll_mode = default_auto_scroll_mode();
+        }
+    }
+
+    /// 规范化播放光标时间读数的放置位置。
+    ///
+    /// 【为什么非法值置 None 而不是默认值】`None` 是"没有这一项"，前端据此走**旧布尔
+    /// 迁移**；把非法值改写成 `"auto"` 会让一份手改坏的配置把老用户的读数从轨道头
+    /// 挪到状态栏 —— 脏数据不该改变用户的既有选择。
+    pub fn normalize_playhead_time_placement(&mut self) {
+        const VALID: [&str; 5] = ["auto", "toolbar", "statusBar", "trackHeader", "hidden"];
+        if self
+            .playhead_time_placement
+            .as_deref()
+            .is_some_and(|value| !VALID.contains(&value))
+        {
+            self.playhead_time_placement = None;
         }
     }
 
@@ -2488,6 +2515,37 @@ mod tests {
         assert_eq!(migrate("exponential"), "lateSlight");
         assert_eq!(migrate("logarithmic"), "convexSlight");
         assert_eq!(migrate("bogus"), "keep");
+    }
+
+    /// **放置策略的脏值必须回到"没有这一项"，而不是被改写成默认值。**
+    ///
+    /// 【为什么这条重要】`None` 是"旧配置"，前端据此按旧布尔迁移（轨道头 / 自动）；
+    /// 把非法值改写成 `"auto"` 会让一份手改坏的配置把老用户的读数从轨道头悄悄挪到
+    /// 状态栏 —— 脏数据不该改变用户的既有选择。
+    #[test]
+    fn ui_settings_rejects_an_unknown_playhead_time_placement() {
+        let legacy: UiSettings = serde_json::from_value(serde_json::json!({ "autoCrossfade": true }))
+            .expect("旧配置必须能读");
+        assert_eq!(
+            legacy.playhead_time_placement, None,
+            "缺字段必须读成 None（= 交给前端按旧布尔迁移）"
+        );
+
+        let mut bogus = UiSettings {
+            playhead_time_placement: Some("somewhere".to_string()),
+            ..UiSettings::default()
+        };
+        bogus.normalize_split_transition();
+        assert_eq!(bogus.playhead_time_placement, None, "非法值必须置 None");
+
+        for valid in ["auto", "toolbar", "statusBar", "trackHeader", "hidden"] {
+            let mut settings = UiSettings {
+                playhead_time_placement: Some(valid.to_string()),
+                ..UiSettings::default()
+            };
+            settings.normalize_split_transition();
+            assert_eq!(settings.playhead_time_placement.as_deref(), Some(valid));
+        }
     }
 
     #[test]

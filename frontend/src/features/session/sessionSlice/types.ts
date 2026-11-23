@@ -21,6 +21,7 @@ import type {
     TrackInfo,
 } from "../sessionTypes";
 import type { SearchSettings } from "../../search/searchSettings";
+import type { PlayheadTimePlacement } from "../playheadTimePlacement";
 import type { FileBrowserViewOptions } from "../../fileBrowser/fileBrowserViewOptions";
 import type { FolderImportOptions } from "../../fileBrowser/folderImportOptions";
 import type {
@@ -81,6 +82,15 @@ export interface SessionState {
     primaryTimeUnit: TimeUnit;
     secondaryTimeUnit: TimeUnitChoice;
     rulerLabelSpacingPx: number;
+    /**
+     * 播放光标时间读数放在哪里。
+     *
+     * 【为什么是"放置"而不是一个布尔】旧字段只能表达"轨道头里显不显示"，而读数的
+     * 主实例一直在工具栏 —— 用户既不能把它挪走，也不能关掉。放置策略是一个用户偏好，
+     * 取值见 `playheadTimePlacement.ts`。
+     */
+    playheadTimePlacement: PlayheadTimePlacement;
+    /** 旧字段：只作为**迁移来源**与写回兼容保留，不再是主判据。 */
     showPlayheadTimeInTrackHeader: boolean;
     paramEditorSyncTimeline: boolean;
 

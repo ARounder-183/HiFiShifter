@@ -9,6 +9,7 @@ import type {
 } from "../../sessionTypes";
 import { TOOL_MODES, normalizeSplitTransitionCurve } from "../../sessionTypes";
 import { normalizeSearchSettings } from "../../../search/searchSettings";
+import { isPlayheadTimePlacement, resolvePlayheadTimePlacement } from "../../playheadTimePlacement";
 import {
     migrateLegacyMediaOnly,
     normalizeFileBrowserViewOptions,
@@ -202,7 +203,18 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
             if (Number.isFinite(loadedSpacing)) {
                 state.rulerLabelSpacingPx = Math.max(40, Math.min(320, Math.round(loadedSpacing)));
             }
-            if (s.showPlayheadTimeInTrackHeader != null) {
+            // 【放置策略优先，旧布尔只作迁移来源】
+            // 旧配置里只有 showPlayheadTimeInTrackHeader：true ⇒ 轨道头，false ⇒ auto。
+            // 新字段合法时以它为准；非法值（手改坏的配置 / 旧后端）同样回退到迁移，
+            // 而不是把读数藏起来 —— "看不见"永远不该是脏数据的默认结果。
+            if (isPlayheadTimePlacement(s.playheadTimePlacement)) {
+                state.playheadTimePlacement = s.playheadTimePlacement;
+                state.showPlayheadTimeInTrackHeader =
+                    resolvePlayheadTimePlacement(s.playheadTimePlacement) === "trackHeader";
+            } else if (s.showPlayheadTimeInTrackHeader != null) {
+                state.playheadTimePlacement = s.showPlayheadTimeInTrackHeader
+                    ? "trackHeader"
+                    : "auto";
                 state.showPlayheadTimeInTrackHeader = Boolean(s.showPlayheadTimeInTrackHeader);
             }
             if (s.paramEditorSyncTimeline != null) {

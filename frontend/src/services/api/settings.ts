@@ -147,6 +147,9 @@ export interface UiSettings {
     primaryTimeUnit?: string;
     secondaryTimeUnit?: string;
     rulerLabelSpacingPx?: number;
+    /** 播放光标时间读数的放置位置（`auto` / `toolbar` / `statusBar` / `trackHeader` / `hidden`）。 */
+    playheadTimePlacement?: string;
+    /** 旧字段：只作迁移来源与写回兼容。 */
     showPlayheadTimeInTrackHeader?: boolean;
     paramEditorSyncTimeline?: boolean;
     paramEditorTimelineClickSelectTrack?: boolean;
