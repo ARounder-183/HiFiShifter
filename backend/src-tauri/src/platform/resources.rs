@@ -95,7 +95,16 @@ fn materialize_from_apk(target: &Path) -> Result<(), String> {
                 continue;
             }
         };
-        let Some(relative) = entry.name().strip_prefix("assets/models/") else {
+        // 【为什么不是直接 strip_prefix】zip 9 的 `ZipFile::name` 返回
+        // `Result<Cow<str>, ZipError>`（非 UTF-8 条目名被报告，而不是有损转换）。
+        // `into_owned` 同时结束了 `entry` 的不可变借用 —— 下面的
+        // `std::io::copy(&mut entry, ..)` 需要可变借用。
+        let Ok(name) = entry.name() else {
+            log::warn!("[resources] apk entry #{index} has a non-UTF-8 name; skipped");
+            continue;
+        };
+        let name = name.into_owned();
+        let Some(relative) = name.strip_prefix("assets/models/") else {
             continue;
         };
         if relative.is_empty() || relative.ends_with('/') {
@@ -153,15 +162,31 @@ fn android_apk_path() -> Option<PathBuf> {
         let Some(candidate) = line.split_whitespace().last() else {
             continue;
         };
-        if !candidate.contains("base.apk") {
+
+        // 形态一：**APK 内嵌**（`extractNativeLibs=false`，AGP 8 的默认）。动态链接器直接
+        // mmap APK 里的 .so，映射表里出现的路径就是安装包本身。
+        if let Some(index) = candidate.find("base.apk") {
+            let path = PathBuf::from(&candidate[..index + "base.apk".len()]);
+            if path.is_file() {
+                return Some(path);
+            }
             continue;
         }
-        // maps 里的路径是 `<apk>!/lib/...`（未压缩的 .so）或 `<apk>`（已解压的
-        // .so 所在目录的同级）。两种情况都只要 `base.apk` 之前那一段。
-        let apk = candidate.split("!/").next().unwrap_or(candidate);
-        let path = PathBuf::from(apk);
-        if path.is_file() {
-            return Some(path);
+
+        // 形态二：**已解压**（`extractNativeLibs=true`，或旧设备）。映射路径形如
+        // `/data/app/~~<hash>/<pkg>-<n>/lib/arm64/libbackend_lib.so` —— 安装包在同一
+        // 个安装目录里。只从 .so 往上找有限层数：沙箱里目录层级固定，无限上溯没有意义，
+        // 也不该在启动路径上做。
+        if candidate.ends_with(".so") {
+            let mut dir = std::path::Path::new(candidate).parent();
+            for _ in 0..6 {
+                let Some(current) = dir else { break };
+                let apk = current.join("base.apk");
+                if apk.is_file() {
+                    return Some(apk);
+                }
+                dir = current.parent();
+            }
         }
     }
     None

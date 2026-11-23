@@ -85,7 +85,11 @@ fn local_base() -> Option<PathBuf> {
         })
 }
 
-#[cfg(not(windows))]
+// 【为什么要把 Android 排除在外】这个函数的每个调用点都落在 macOS / iOS / 非苹果
+// 的 Unix 分支里；Android 走 `TMPDIR` 锚点（见 `android_sandbox`），一个都不用。
+// 只留 `not(windows)` 会让 Android 构建出一条 "function is never used" 警告 ——
+// 而警告噪声会掩盖真正的问题。
+#[cfg(all(not(windows), not(target_os = "android")))]
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
@@ -446,6 +450,11 @@ impl LegacyRoot {
 /// 只列出确实存在的形态：环境变量缺失（例如没有 `APPDATA`）时对应项直接不出现，
 /// 调用方不需要再判空。
 pub fn legacy_roots() -> Vec<LegacyRoot> {
+    // 【为什么这里要放行 unused_mut】每一个 push 都在平台 cfg 块里，而移动端（Android /
+    // iOS）没有任何历史布局 —— 它从未发布过旧版本，沙箱里也不存在 `%APPDATA%` 或
+    // XDG 那几种形态。于是这个 `mut` 在移动目标上没有使用者。返回空表本身就是答案：
+    // 迁移与读时重映射都会变成空操作，而不是去沙箱里扫一遍不存在的路径。
+    #[allow(unused_mut)]
     let mut roots: Vec<LegacyRoot> = Vec::new();
 
     #[cfg(windows)]

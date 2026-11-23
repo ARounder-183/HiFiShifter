@@ -58,6 +58,7 @@ fn target_os() -> String {
 /// - SoundTouchDLL 是 CMake 构建的桌面动态库（Android/iOS 上根本没有 CMake 工具链，
 ///   也没有 `.so`/`.dylib` 的打包位置）；
 /// - vslib 是 Windows 闭源 DLL。
+///
 /// 移动端只保留 WORLD（C++ 静态）与 Signalsmith（header-only）—— 这两者用 NDK 的
 /// clang 就能编。缺少这道闸门，移动目标会卡在 build script 里，错误信息指向 cmake。
 fn is_mobile_target() -> bool {

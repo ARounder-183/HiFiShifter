@@ -639,13 +639,13 @@ pub fn run() {
                         }
                     }
 
-                    if ws.fullscreen.unwrap_or(false) {
-                        let _ = win.set_fullscreen(true);
-                    } else if ws.maximized.unwrap_or(false) {
-                        let _ = win.maximize();
-                    } else {
-                        let _ = win.set_fullscreen(false);
-                    }
+                    // 模式位交给收敛层：`set_fullscreen` / `maximize` 在移动目标上
+                    // 不参与编译（见 `platform::window::apply_window_mode`）。
+                    platform::window::apply_window_mode(
+                        &win,
+                        ws.fullscreen.unwrap_or(false),
+                        ws.maximized.unwrap_or(false),
+                    );
                 }
             }
             } // `platform::window::supports_window_state()`

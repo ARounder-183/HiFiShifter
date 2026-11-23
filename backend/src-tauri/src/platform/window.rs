@@ -6,8 +6,6 @@
 //! 里，就会变成一串 `if !mobile` 把 300 行窗口恢复逻辑包起来；收在这里之后，
 //! `lib.rs` 只需要问一句 [`supports_window_state`]。
 
-use tauri::Manager;
-
 /// 主窗口是否需要"恢复上次的几何状态"。
 ///
 /// 【为什么移动端必须是 false】移动端的窗口几何由系统决定，`set_size` / `set_position`
@@ -24,22 +22,40 @@ pub fn resizable() -> bool {
 }
 
 /// 启动期的窗口准备。
-pub fn prepare_main_window(app: &tauri::AppHandle) {
-    if !crate::platform::is_mobile() {
-        // 桌面：几何由 `tauri.conf.json` 与 setup 里的恢复逻辑决定，这里不碰。
-        return;
+///
+/// 【为什么移动分支几乎什么都不做】`tauri` 在移动目标上**根本不编译** `set_fullscreen`
+/// 与 `maximize`（它们是 `#[cfg(desktop)]`）—— "移动端没有全屏这个概念"由上游的 API
+/// 面本身表达，不需要我们再补一次。窗口尺寸与位置同样由系统决定，`set_resizable` 在
+/// 那里也没有意义。这里留一行日志，让"窗口几何归谁管"在用户报障时有据可查。
+pub fn prepare_main_window(_app: &tauri::AppHandle) {
+    if crate::platform::is_mobile() {
+        log::debug!("[window] mobile surface: window geometry is owned by the system");
     }
-    let Some(window) = app.get_webview_window("main") else {
-        log::warn!("[window] main webview not found during mobile setup");
-        return;
-    };
-    // 移动端的窗口应当**始终**是整屏：配置里若残留桌面尺寸（例如 1200x800），
-    // 某些设备会按逻辑像素摆放它，右侧与底部留下一圈黑边。这里显式改回全屏。
-    if let Err(error) = window.set_fullscreen(true) {
-        log::warn!("[window] set_fullscreen(true) failed: {error}");
+}
+
+/// 应用从窗口状态里恢复出来的"模式位"（全屏 / 最大化 / 普通）。
+///
+/// 【为什么必须收进收敛层】`set_fullscreen` 与 `maximize` 在移动目标上**不存在**，
+/// 而 `is_fullscreen` 却存在 —— 上游没有提供"移动端调用会被忽略"的退路，代码必须在
+/// **编译期**分叉。分叉留在 `lib.rs` 里就是业务代码里的平台判断（见 `platform` 模块
+/// 的三条纪律），因此收在这里。
+pub fn apply_window_mode(window: &tauri::WebviewWindow, fullscreen: bool, maximized: bool) {
+    #[cfg(desktop)]
+    {
+        if fullscreen {
+            let _ = window.set_fullscreen(true);
+        } else if maximized {
+            let _ = window.maximize();
+        } else {
+            let _ = window.set_fullscreen(false);
+        }
     }
-    if let Err(error) = window.set_resizable(false) {
-        log::warn!("[window] set_resizable(false) failed: {error}");
+    #[cfg(not(desktop))]
+    {
+        // 【为什么移动端是空操作】移动端的窗口永远整屏、由系统摆放，没有"最大化"这个
+        // 状态。调用点照常把恢复出来的布尔值传进来，这里只是没有可做的动作 —— 这样
+        // 调用点就不必知道移动端不存在这些 API。
+        let _ = (window, fullscreen, maximized);
     }
 }
 // ── 应用菜单与 WebView 快捷键 ────────────────────────────────────────────────

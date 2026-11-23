@@ -71,7 +71,7 @@ impl FileDialog {
 
     pub fn pick_file(self) -> Option<PathBuf> {
         #[cfg(desktop)]
-        let picked = self.to_rfd().pick_file();
+        let picked = self.into_rfd().pick_file();
         #[cfg(not(desktop))]
         let picked = {
             self.log_unsupported("pick_file");
@@ -82,7 +82,7 @@ impl FileDialog {
 
     pub fn pick_files(self) -> Option<Vec<PathBuf>> {
         #[cfg(desktop)]
-        let picked = self.to_rfd().pick_files();
+        let picked = self.into_rfd().pick_files();
         #[cfg(not(desktop))]
         let picked = {
             self.log_unsupported("pick_files");
@@ -93,7 +93,7 @@ impl FileDialog {
 
     pub fn pick_folder(self) -> Option<PathBuf> {
         #[cfg(desktop)]
-        let picked = self.to_rfd().pick_folder();
+        let picked = self.into_rfd().pick_folder();
         #[cfg(not(desktop))]
         let picked = {
             self.log_unsupported("pick_folder");
@@ -104,7 +104,7 @@ impl FileDialog {
 
     pub fn save_file(self) -> Option<PathBuf> {
         #[cfg(desktop)]
-        let picked = self.to_rfd().save_file();
+        let picked = self.into_rfd().save_file();
         #[cfg(not(desktop))]
         let picked = {
             self.log_unsupported("save_file");
@@ -114,7 +114,7 @@ impl FileDialog {
     }
 
     #[cfg(desktop)]
-    fn to_rfd(self) -> rfd::FileDialog {
+    fn into_rfd(self) -> rfd::FileDialog {
         let mut dialog = rfd::FileDialog::new();
         for (name, extensions) in &self.filters {
             let refs: Vec<&str> = extensions.iter().map(String::as_str).collect();

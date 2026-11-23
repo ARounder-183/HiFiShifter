@@ -66,7 +66,7 @@ RFD_TERMINATORS = (".save_file(", ".pick_file(", ".pick_files(", ".pick_folder("
 
 # rfd facades that *replay* caller-supplied filters instead of spelling them out.
 #
-# [Why this is not a loophole] `platform::dialog::FileDialog::to_rfd` iterates its
+# [Why this is not a loophole] `platform::dialog::FileDialog::into_rfd` iterates its
 # own `filters` vector and calls `.add_filter(name, refs)` once per entry. The
 # vocabulary check already happened at every real call site (each builder in
 # `commands/dialogs.rs` names a FileType or an explicit extension list, and the
@@ -74,7 +74,7 @@ RFD_TERMINATORS = (".save_file(", ".pick_file(", ".pick_files(", ".pick_folder("
 # by accident). Requiring the literal token here would only ask the loop to spell
 # out something it cannot know -- and the pressure would be to inline a fake
 # filter, which is worse than no gate.
-RFD_FORWARDERS = {"to_rfd"}
+RFD_FORWARDERS = {"into_rfd"}
 
 SKIP_DIRS = {"target", "node_modules", ".git", "third-party", "gen"}
 

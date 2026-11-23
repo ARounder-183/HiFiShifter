@@ -119,6 +119,12 @@ pub enum CapturePlan {
         sample_rate: u32,
         channels: u16,
     },
+    // 【为什么移动端放行 dead_code】`Application` 是"捕获**另一个应用**的声音"，只有
+    // Windows（WASAPI 进程回环）与 Linux（PipeWire 节点）有对应引擎；移动端的
+    // `run_application_capture` 直接回 `recording_error_app_capture_unsupported`，
+    // 因此这个变体的载荷在移动目标上"构造得出、无人读取"。放行的是**载荷字段**，
+    // 不是逻辑 —— 变体本身仍然参与匹配，用户选择该模式时照样拿到明确的错误码。
+    #[cfg_attr(mobile, allow(dead_code))]
     Application {
         pid: u32,
         sample_rate: u32,

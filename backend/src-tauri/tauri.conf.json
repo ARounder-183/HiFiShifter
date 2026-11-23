@@ -33,6 +33,9 @@
             }
         },
         "licenseFile": "../../LICENSE",
+        "android": {
+            "minSdkVersion": 26
+        },
         "resources": {
             "../../LICENSE": "LICENSE",
             "../../licenses": "licenses/",
