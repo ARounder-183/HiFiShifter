@@ -3,7 +3,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test } from "vitest";
 
-import { SlotText, splitDigitRuns } from "./SlotText";
+import { SlotText } from "./SlotText";
+import { splitDigitRuns } from "./slotTextUtils";
 
 let host: HTMLDivElement;
 let root: Root;
