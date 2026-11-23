@@ -72,7 +72,8 @@ export function CaptureControl() {
         : null;
     // 预留上限：至少 1800s（后端当前的最大档位）。字符串位数变化只发生在槽位里，
     // AppStatusChip 的宽度不会随 0.0 → 100.0 → 1000.0 逐位增长。
-    const maxCaptureSec = Math.max(1800, status?.options?.maxDurationSec ?? 0);
+    const configuredMaxSec = Number(status?.options?.maxDurationSec);
+    const maxCaptureSec = Math.max(1800, Number.isFinite(configuredMaxSec) ? configuredMaxSec : 0);
     const elapsedText = recording
         ? tVars("capture_recording_elapsed", { seconds: captured ?? "0.0" })
         : "";
