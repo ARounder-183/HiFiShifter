@@ -637,8 +637,9 @@ pub(crate) fn execute_paste(
         }
         created.push((target.inventory_guid().to_owned(), actual));
     }
-    // 原生setter在Undo块内不保证立即推进项目change计数；本批写完必须重新采集清单。
-    *document.ui_inventory_stamp.lock_or_recover() = None;
+    // 原生setter在Undo块内不保证立即推进项目change计数；本批写完必须重新采集清单，
+    // 并清掉几何缓存与呈现代次 —— 否则新 Clip 的媒体身份/几何要等下一次偶发刷新。
+    ExtensionOwner::note_host_write_completed(&document);
     owner.refresh_host_transport();
     for track in &mut new_tracks {
         track.commit();
@@ -694,7 +695,7 @@ pub(crate) fn execute_delete(
         deleted.push((target.geometry.item_id.clone(), id));
     }
     let document = owner.editor_document()?;
-    *document.ui_inventory_stamp.lock_or_recover() = None;
+    ExtensionOwner::note_host_write_completed(&document);
     owner.refresh_host_transport();
     Ok(MediaReceipt {
         created: Vec::new(),

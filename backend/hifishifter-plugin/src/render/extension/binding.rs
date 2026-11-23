@@ -182,6 +182,41 @@ impl ExtensionOwner {
     pub(crate) fn restore_failed(&self) -> bool {
         self.restore_status.load(Ordering::Acquire) == RESTORE_FAILED
     }
+    /// 丢掉本实例的宿主几何缓存。
+    ///
+    /// 【为什么写回宿主之后**必须**清】`refresh_host_geometry` 的早退判据是
+    /// "缓存令牌没变 + 宿主 `GetProjectStateChangeCount` 没动"。而 fade 长度、
+    /// 方向位这类**item 级**读数不推进项目 change count —— 于是写回之后的那次刷新
+    /// 会命中早退，完成门（`HostEditReceipt`）读回的仍是**写前**那份几何，
+    /// 一直等到重试预算耗尽，报出"clip was edited in the host but its ARA geometry
+    /// has not caught up"。用户看到的则是"淡化没生效 / 自动交叉淡化没执行"。
+    pub(crate) fn invalidate_host_geometry_cache(&self) {
+        self.host_geometry.lock_or_recover().take();
+    }
+
+    /// 清掉**所有** renderer 实例的几何缓存（见 [Self::invalidate_host_geometry_cache]）。
+    ///
+    /// 【为什么不是只清自己】几何清单是**文档级**共享状态：一个实例写宿主、另一个实例
+    /// 读完成门是常态（编辑器实例与播放实例并存）。只清自己那份，等于让另一个实例
+    /// 继续用写前快照回答"宿主有没有跟上"。
+    pub(crate) fn invalidate_all_host_geometry_caches(document: &super::document::DocumentSession) {
+        for owner in document.renderer_owners() {
+            owner.invalidate_host_geometry_cache();
+        }
+    }
+
+    /// 宿主写回成功后的**唯一**收尾：清清单采样时刻、清几何缓存、推进呈现代次。
+    ///
+    /// 【为什么收敛成一个入口】此前每个写回路径各自记得清**一个**字段
+    /// （`ui_inventory_stamp` 或 `ui_inventory_sampled_at`），而真正决定"完成门能不能
+    /// 收口"的是**几何缓存**。三条路径各写一份的结果，就是三条都漏了同一件事。
+    pub(crate) fn note_host_write_completed(document: &super::document::DocumentSession) {
+        *document.ui_inventory_stamp.lock_or_recover() = None;
+        *document.ui_inventory_sampled_at.lock_or_recover() = None;
+        Self::invalidate_all_host_geometry_caches(document);
+        document.note_presentation_changed();
+    }
+
     pub(crate) fn editor_document(&self) -> Result<Arc<super::document::DocumentSession>, String> {
         if self.is_closed() {
             return Err(crate::editor::errors::FX_PROCESSOR_CLOSED.error());
@@ -2188,5 +2223,51 @@ mod host_identity_tests {
             assert_eq!(owner.host_app_name().as_deref(), Some("Cubase"));
             assert_eq!(owner.host_app_version().as_deref(), Some("13.0"));
         }
+    }
+}
+
+#[cfg(test)]
+mod host_geometry_cache_tests {
+    use super::*;
+
+    /// **回归：写回宿主之后必须丢掉几何缓存，并推进呈现代次。**
+    ///
+    /// 【为什么这是"淡化没生效 / 自动交叉淡化没执行"的根因之一】`refresh_host_geometry`
+    /// 的早退判据是"缓存令牌没变 + 宿主 `GetProjectStateChangeCount` 没动"。而 fade
+    /// 长度、方向位这类 **item 级** 读数不推进项目 change count —— 写回之后那次刷新于是
+    /// 命中早退，完成门（`HostEditReceipt`）读回的仍是**写前**那份几何，一直等到重试
+    /// 预算耗尽，报出 "clip was edited in the host but its ARA geometry has not caught up"。
+    ///
+    /// 这条用例钉两件事：① 写回收尾真的把缓存清空了；② 它同时推进呈现代次，
+    /// 于是界面会重新投影（而不是等下一次偶发几何变化）。
+    #[test]
+    fn a_host_write_drops_the_geometry_cache_and_advances_the_presentation() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_writer();
+        host.clear_markers();
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        assert!(
+            owner.host_geometry.lock_or_recover().is_some(),
+            "夹具前提：一次成功的几何刷新必须留下一份缓存，否则这条用例证明不了“清掉了”"
+        );
+        let before = document.presentation_revision.load(Ordering::Acquire);
+        ExtensionOwner::note_host_write_completed(&document);
+        assert!(
+            owner.host_geometry.lock_or_recover().is_none(),
+            "写回后必须丢掉几何缓存：否则完成门读回的是写前那份几何"
+        );
+        assert!(
+            document.presentation_revision.load(Ordering::Acquire) > before,
+            "写回后必须推进呈现代次：否则界面不会重新投影新的 fade/几何"
+        );
+        document.close();
     }
 }

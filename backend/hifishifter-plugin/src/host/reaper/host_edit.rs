@@ -1598,7 +1598,11 @@ pub(crate) fn execute_managed(
     // `get_timeline_state` 就能对上。
     if result.is_ok() {
         if let Ok(document) = owner.editor_document() {
-            *document.ui_inventory_sampled_at.lock_or_recover() = None;
+            // 【为什么收敛到这一个入口】写回成功只落在**宿主**上；完成门比对的却是
+            // **编辑器时间线**。清单采样时刻、几何缓存、呈现代次三者必须一起失效 ——
+            // 少任何一个，`HostEditReceipt` 都会读到写前那份几何，把一次成功的写回
+            // 报成"宿主没跟上"（用户看到的正是"淡化/自动交叉淡化没生效"）。
+            ExtensionOwner::note_host_write_completed(&document);
         }
         owner.refresh_host_transport();
     }

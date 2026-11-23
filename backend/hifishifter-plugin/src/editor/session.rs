@@ -733,6 +733,14 @@ pub struct EditorSession {
     /// 指纹把"要不要通知"从"谁调用了"换成"内容变了没有"。
     notified_fingerprint: Mutex<Option<u64>>,
     ui_geometry_version: AtomicU64,
+    /// 上一次把**呈现代次**（`DocumentSession::presentation_revision`）投影进
+    /// `self.timeline` 时的读数。
+    ///
+    /// 【为什么与 `ui_geometry_version` 并存】两者回答不同的问题：前者是"宿主清单的
+    /// 几何变了没有"，后者是"编辑器该看的内容变了没有"。装配发布、源状态变化、宿主
+    /// 写回后的 fade 重新投影都只推进后者 —— 只看几何会让这些变化被"早退"吞掉，
+    /// 用户看到的就是"新粘贴的 Clip 一直等宿主音频，重开工程才恢复"。
+    ui_presentation_version: AtomicU64,
     project_duration: AtomicU64,
     pub(super) error: Mutex<Option<String>>,
     render_error: Mutex<Option<String>>,
@@ -1223,6 +1231,7 @@ impl EditorSession {
             host_version: AtomicU64::new(0),
             notified_fingerprint: Mutex::new(None),
             ui_geometry_version: AtomicU64::new(0),
+            ui_presentation_version: AtomicU64::new(0),
             project_duration: AtomicU64::new(0),
             error: Mutex::new(None),
             render_error: Mutex::new(None),
@@ -3145,6 +3154,7 @@ impl EditorSession {
         self.peaks.lock_or_recover().clear();
         // snapshot返回后UI缓存可能再次更新，强制下一轮按短事务版本同步，不能吞掉该变化。
         self.ui_geometry_version.store(0, Ordering::Release);
+        self.ui_presentation_version.store(0, Ordering::Release);
         self.complete_cached_analysis();
         self.schedule_analysis();
         // 【只有 GUI 真的会看到区别时才请求合成、才通知】见 `notified_fingerprint`。
@@ -3379,7 +3389,12 @@ impl EditorSession {
     /// 重复取一次只是白做一次投影。
     pub(super) fn refresh_ui_geometry(&self, document: &DocumentSession, adopt_view: bool) {
         let version = document.ui_geometry_revision.load(Ordering::Acquire);
-        if version == self.ui_geometry_version.load(Ordering::Acquire) {
+        let presentation = document.presentation_revision.load(Ordering::Acquire);
+        // 【两个代次都要比】几何没变而内容变了（装配发布 / 源状态变化 / 宿主写回后的
+        // fade 投影）恰恰是本轮要修的那一类：只看几何会让它永远等不到重画。
+        if version == self.ui_geometry_version.load(Ordering::Acquire)
+            && presentation == self.ui_presentation_version.load(Ordering::Acquire)
+        {
             return;
         }
         // 先冻结可用fade，再合并清单；只确认开始时的代次，期间的新变化留到下一轮。
@@ -3481,7 +3496,12 @@ impl EditorSession {
             }
         }
         if adopted {
+            // 与 `ui_geometry_version` 同一条纪律：**投影成功之后**才推进，失败留给下一轮。
+            // 这里重新读一次呈现代次而不是用函数开头那个快照：投影期间到来的新一代必须
+            // 留到下一轮（否则那一代会被静默吞掉，界面上永远差一次更新）。
             self.ui_geometry_version.store(version, Ordering::Release);
+            self.ui_presentation_version
+                .store(presentation, Ordering::Release);
         }
         self.notify_timeline();
     }
@@ -3772,6 +3792,12 @@ impl EditorSession {
             return;
         }
         *self.initial_retry_at.lock_or_recover() = None;
+        // 【先收口装配，再投影】`refresh_ui_geometry` 读的是文档时间线（装配产物）；
+        // 而装配是"标记 + 安全点"两段式：这一轮标记可能刚被置位、安全点还没跑。
+        // 顺序反过来的话，投影会拿到**上一代**装配结果并把呈现代次推到最新 ——
+        // 那一代变化从此再也等不到重画。`flush_pending_assembly` 内部用
+        // `try_transaction`：拿不到事务就原样留着，下一个 tick 再来。
+        document.flush_pending_assembly();
         self.refresh_ui_geometry(&document, true);
         // 原生媒体写入的短Undo窗口先回执GUI结构；音频物化留给写入收尾后的后台加载。
         if !document.host_undo.pending.load(Ordering::Acquire)
@@ -10853,6 +10879,46 @@ mod auto_pitch_write_tests {
             "自动档与手动命令必须写出逐字相同的 take 状态"
         );
         hifishifter_kernel::config::set_reaper_auto_take_pitch_write(false);
+        drop(model);
+        editor.close();
+    }
+
+    /// **回归：只有"呈现代次"变了，也必须重新投影。**
+    ///
+    /// 【为什么这条是用户报障的可执行形式】粘贴后装配发布了新 clip，但宿主清单的
+    /// **几何**早就在那里了（`ui_geometry_revision` 不动）。旧实现只看几何 ⇒ 早退 ⇒
+    /// 已经画成占位的 clip 永远等不到媒体身份，只能靠重新加载工程恢复。
+    ///
+    /// 这里钉两件事：① 只推进 `presentation_revision` 时投影必须真的跑；
+    /// ② 投影成功后两个读数都要被记住 —— 否则同一代变化会被每一轮重复投影。
+    #[test]
+    fn a_presentation_only_change_is_projected_without_a_geometry_change() {
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let editor = owner.editor_session().unwrap();
+        crate::editor::session::tests::wait_for_source_files(&editor);
+        editor.ensure_loaded(true).unwrap();
+        let geometry = document.ui_geometry_revision.load(Ordering::Acquire);
+        // 只推进"编辑器可见内容"：几何一个字都不动。
+        document.note_presentation_changed();
+        let presentation = document.presentation_revision.load(Ordering::Acquire);
+        editor.refresh_ui_geometry(&document, false);
+        assert_eq!(
+            document.ui_geometry_revision.load(Ordering::Acquire),
+            geometry,
+            "夹具前提：这一轮没有几何变化"
+        );
+        assert_eq!(
+            editor.ui_geometry_version.load(Ordering::Acquire),
+            geometry,
+            "夹具前提：投影必须真的成功（失败时两个读数都不推进，留给下一轮）"
+        );
+        assert_eq!(
+            editor.ui_presentation_version.load(Ordering::Acquire),
+            presentation,
+            "只推进呈现代次也必须重新投影，否则新粘贴的 Clip 永远等不到源"
+        );
+        document.close();
         drop(model);
         editor.close();
     }

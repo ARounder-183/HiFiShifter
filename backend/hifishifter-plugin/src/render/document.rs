@@ -646,6 +646,20 @@ pub struct DocumentSession {
     pub scope_revision: AtomicU64,
     /// 纯GUI宿主装饰版本，不改变编辑曲线或神经合成代次。
     pub ui_geometry_revision: AtomicU64,
+    /// 编辑器**可见内容**的代次：装配发布、源状态变化、宿主写回后的投影变化都推进它。
+    ///
+    /// 【为什么不能复用 `ui_geometry_revision`】那个读数的语义是"宿主清单的几何变了"，
+    /// 而本轮用户报障的三种情形**都不改宿主几何**：
+    ///   * 粘贴后装配发布了新 clip（几何早就在清单里了，变的是媒体身份）；
+    ///   * 宿主重新授权样本访问，源从 Revoked 回到 Published（同代重读，PCM 一模一样）；
+    ///   * 宿主写回成功、fade 需要重新投影（fade 长度不推进 `GetProjectStateChangeCount`）。
+    /// 复用几何代次会让"几何没变"变成"不用重画"，而真正该重画的正是那些情形 ——
+    /// 用户看到的就是"新粘贴的 Clip 一直等宿主音频，重开工程才恢复"。
+    ///
+    /// 【为什么是独立原子量而不是布尔】`refresh_ui_geometry` 是**读-比较-投影-写回**
+    /// 的循环：它必须在投影成功后记住"我投影的是哪一代"。布尔只能表达"脏了"，
+    /// 无法回答"我投影的这一份是不是最新的" —— 投影期间到来的新一代会被静默吞掉。
+    pub presentation_revision: AtomicU64,
     /// 最近一次把图集重投影进 `edits.params` 时的 `ui_geometry_revision`。
     ///
     /// 【为什么需要它】视图重建只应发生在**几何真的变了**之后。没有这个读数时，
@@ -1833,12 +1847,21 @@ impl DocumentSession {
                         .lock_or_recover()
                         .insert(id.clone(), SourceState::Published);
                     self.source_failures.lock_or_recover().remove(&id);
+                    // 【同代重读也必须推进呈现代次】宿主每次重新授予样本访问都会重读一遍，
+                    // 读回的是同一代内容（`superseded == true`）—— 于是
+                    // `editor_audio_revision` 不动。但**界面**要的恰恰是这一次：
+                    // 源从 Revoked 回到 Published，占位应当立刻变成波形。少了这一句，
+                    // 日志里就是"re-read the same content generation 0"之后仍然 pending。
+                    self.note_presentation_changed();
                 }
                 Err(error) => {
                     self.source_states
                         .lock_or_recover()
                         .insert(id.clone(), SourceState::Failed);
                     self.source_failures.lock_or_recover().insert(id, error);
+                    // 真因同样要出现在界面上（`source_read_failed`），否则它要等到
+                    // 下一次几何刷新才被看见 —— 而那时用户早已把"还在等"当成结论。
+                    self.note_presentation_changed();
                 }
             }
         }
@@ -1880,6 +1903,9 @@ impl DocumentSession {
         // 【同一代内容不重复发布】见 `publish_source_read_result` 的说明：重读幂等。
         if let Some(existing) = self.edit_sources.lock_or_recover().get(&id) {
             if Self::same_pcm_generation(existing, &pcm) {
+                // 内容没变，但"这一轮有 PCM 了"是界面要的事实（见
+                // `publish_source_read_result` 的同一条说明）。
+                self.note_presentation_changed();
                 return;
             }
         }
@@ -1939,6 +1965,16 @@ impl DocumentSession {
         self.assembly_dirty.store(true, Ordering::Release);
     }
 
+    /// 记一次"编辑器可见内容变了"（见 [Self::presentation_revision]）。
+    ///
+    /// 【为什么装配发布也要调】装配产出的 clip 集合/媒体身份是编辑器呈现的第一来源；
+    /// 它变了而 `ui_geometry_revision` 不变（清单早就枚举到这个 item 了）时，旧实现
+    /// 让 `refresh_ui_geometry` 早退 —— 已经画在画布上的无源占位永远不会被升级成
+    /// 有源 clip。这正是"粘贴后一直显示正在等待宿主完成音频分配"的那条断链。
+    pub(crate) fn note_presentation_changed(&self) {
+        self.presentation_revision.fetch_add(1, Ordering::AcqRel);
+    }
+
     /// 在安全点上把挂起的装配跑掉（不持任何相关锁时调用）。
     ///
     /// 【为什么用 `try_transaction` 而不是阻塞】调用方是 20 ms 的 UI 定时器与宿主写回
@@ -1980,6 +2016,11 @@ impl DocumentSession {
         if *self.clip_ids.lock_or_recover() != before {
             self.revision.fetch_add(1, Ordering::AcqRel);
         }
+        // 【为什么无条件推进】装配发布就是"编辑器该看的那份 clip 集合/媒体身份换了"。
+        // 只在 `clip_ids` 变化时推进会漏掉最要命的一类：**clip 集合没变、媒体身份变了**
+        // （占位 → 有源）。那正是粘贴后卡在"正在等待宿主完成音频分配"的形状 ——
+        // id 一直是 `ara-item-{guid}`，变的是它背后的 `source_path`。
+        self.note_presentation_changed();
     }
 
     /// **唯一**的时间线重建入口 —— clip 集合只在这里产生。
@@ -5879,5 +5920,105 @@ mod input_verdict_tests {
     fn a_partial_failure_degrades_a_usable_document() {
         assert_eq!(InputVerdict::decide(3, 2, 1, 2), InputVerdict::Degraded);
         assert_eq!(InputVerdict::decide(1, 0, 1, 0), InputVerdict::Degraded);
+    }
+}
+
+#[cfg(test)]
+mod presentation_revision_tests {
+    use super::*;
+
+    fn pcm(version: u64) -> crate::render::source::SourcePcm {
+        crate::render::source::SourcePcm {
+            covered: Vec::new(),
+            sample_rate: 44_100,
+            planes: vec![vec![0.25, -0.25, 0.5, -0.5]],
+            version,
+            _reservation: None,
+        }
+    }
+
+    /// **回归：同代重读也必须推进呈现代次。**
+    ///
+    /// 【为什么这条是用户报障的原形】宿主每次重新授予样本访问（起播、前台恢复、
+    /// 重同步）都会让插件把源重读一遍；读回来的是同一代内容，于是
+    /// `editor_audio_revision` 刻意**不**推进（否则每次播放开始都会排一轮输出完全
+    /// 相同的重渲染）。但界面要的恰恰是这一次：源从 `Revoked` 回到 `Published`，
+    /// 已经画成占位的 clip 应当立刻拿到波形。
+    ///
+    /// 旧实现两者都不推进 ⇒ 日志里就是 "re-read the same content generation 0"
+    /// 之后仍然 `media ready=3 pending=2`，直到用户重新加载工程。
+    #[test]
+    fn a_same_generation_reread_still_refreshes_the_presentation() {
+        let document = DocumentSession::new(50_001);
+        let cancelled = AtomicBool::new(false);
+        let id = "ara://source".to_owned();
+        document.publish_source_read_result(id.clone(), Ok(pcm(0)), &cancelled);
+        let after_first = document.presentation_revision.load(Ordering::Acquire);
+        assert!(after_first > 0, "首次发布必须推进呈现代次");
+        document.publish_source_read_result(id.clone(), Ok(pcm(0)), &cancelled);
+        assert!(
+            document.presentation_revision.load(Ordering::Acquire) > after_first,
+            "同代重读不得让界面停在旧投影上"
+        );
+        document.close();
+    }
+
+    /// **失败同样要上屏。**
+    ///
+    /// 源读不出来时界面必须立刻报 `source_read_failed`，而不是等下一次几何刷新 ——
+    /// 那段等待正是"所有 Clip 都在等宿主音频"的一部分。
+    #[test]
+    fn a_failed_read_also_refreshes_the_presentation() {
+        let document = DocumentSession::new(50_002);
+        let cancelled = AtomicBool::new(false);
+        document.publish_source_read_result(
+            "ara://broken".to_owned(),
+            Err("sample access denied".to_owned()),
+            &cancelled,
+        );
+        assert!(
+            document.presentation_revision.load(Ordering::Acquire) > 0,
+            "读取失败必须推进呈现代次，界面才能报出真因"
+        );
+        document.close();
+    }
+
+    /// **装配发布 = 编辑器该看的内容变了。**
+    ///
+    /// 这里钉的是"代次只在 `clip_ids` 变化时才推进"会漏掉的那一类：clip 集合没变、
+    /// 媒体身份变了（占位 → 有源）。它正是粘贴后卡在"正在等待宿主完成音频分配"的形状。
+    fn document_with_one_empty_track(project_sec: f64) -> Arc<DocumentSession> {
+        let document = DocumentSession::new(50_003);
+        *document.timeline.lock_or_recover() = Some(
+            serde_json::from_value(serde_json::json!({
+                "tracks": [{"id": "track", "name": "t", "order": 0}],
+                "clips": [],
+                "bpm": 120.0,
+                "project_sec": project_sec,
+            }))
+            .unwrap(),
+        );
+        document
+    }
+
+    #[test]
+    fn publishing_an_assembly_always_advances_the_presentation() {
+        let document = document_with_one_empty_track(1.0);
+        // 没有 ARA 模型 ⇒ 装配器按既有纪律不动已发布的时间线，本函数直接返回。
+        let before = document.presentation_revision.load(Ordering::Acquire);
+        document.flush_pending_assembly();
+        assert_eq!(
+            document.presentation_revision.load(Ordering::Acquire),
+            before,
+            "没有脏标记时不得白跑一次呈现"
+        );
+        // 模型交付过之后，同样的清单刷新就是一次真正的发布。
+        document.ara_model_seen.store(true, Ordering::Release);
+        document.note_assembly_input_changed();
+        document.flush_pending_assembly();
+        assert!(
+            document.presentation_revision.load(Ordering::Acquire) > before,
+            "装配发布必须推进呈现代次（clip 集合没变、媒体身份变了的情形也要推进）"
+        );
     }
 }

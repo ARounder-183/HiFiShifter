@@ -389,6 +389,60 @@ fn present_document_clip(
     clip
 }
 
+/// 装配结果 → 编辑器占位：**只**补媒体身份，不动任何几何。
+///
+/// 【为什么需要】`present_host_inventory` 的兜底占位是**按构造无源**的（它拿不到
+/// region，也就拿不到 ARA 源身份）。而"先画占位、后装配出有源 clip"是粘贴/分割后的
+/// 常态顺序：清单先看到新 item，装配在下一个安全点才产出结果。旧实现只在
+/// `timeline.clips` **找不到**这条 id 时才用装配结果，于是已经画上去的占位永远
+/// 不会被升级 —— 用户看到的就是"新 Clip 一直显示正在等待宿主完成音频分配，重开工程
+/// 才恢复"。
+///
+/// 【为什么只补媒体身份】源窗口 / 方向 / 倍率 / 名字都是宿主几何（由清单提供），
+/// 用装配的几何覆盖它们会把用户刚拖过的 item 弹回旧位置。
+///
+/// 【为什么 take 身份必须对上】`authorized_takes` 的纪律是"宁可显示占位，也不把
+/// 上一个 take 的采样挂到新 take 上" —— 挂错采样是**听不见的错**，占位是看得见的。
+/// 这里沿用同一条判据：active take 对不上就什么都不借。
+fn adopt_assembled_media(
+    clip: &mut hifishifter_kernel::state::Clip,
+    assembled: Option<&hifishifter_kernel::state::Clip>,
+    prefix: &impl Fn(&str) -> String,
+) -> bool {
+    let Some(assembled) = assembled else {
+        return false;
+    };
+    // 已经有源 ⇒ 不覆盖（装配结果不是"更权威"，只是"另一条来源"）。
+    if clip.source_path.is_some() || assembled.takes.is_empty() {
+        return false;
+    }
+    let media = assembled.active_take();
+    if media.source_path.is_none() {
+        return false;
+    }
+    // 呈现域与文档域的 take id 只差命名空间前缀（见 `present_document_clip`）。
+    if let Some(active) = clip.active_take_id.as_deref() {
+        let expected = assembled.active_take_id.as_deref().map(prefix);
+        if expected.as_deref() != Some(active) {
+            return false;
+        }
+    }
+    if clip.takes.is_empty() {
+        let mut take = hifishifter_kernel::state::ClipTake::from_clip(clip);
+        apply_take_media(&mut take, media);
+        // 装配产物与这条 item 是同一份源内容：音节缓存可以直接继承，
+        // 否则新 Clip 要等一次重新分析才有块（与 `derive_split_media` 同一理由）。
+        take.syllable_analysis = media.syllable_analysis.clone();
+        clip.takes.push(take);
+        clip.active_take_id = clip.takes.first().map(|take| take.id.clone());
+    } else {
+        let index = clip.active_take_index().min(clip.takes.len() - 1);
+        apply_take_media(&mut clip.takes[index], media);
+    }
+    clip.normalize_takes();
+    true
+}
+
 fn materialise_presented_clip(
     item: &crate::host::UiItem,
     id: &str,
@@ -506,18 +560,80 @@ impl DocumentSession {
             .retain(|root, _| roots.contains(root));
         Ok((flat, grouped))
     }
-    /// UI可显示宿主尚未分配给ARA的静音item；这些占位不进入任何renderer或源PCM读取。
+    /// item GUID → 它播放的 ARA 音频源（**显示用**的媒体身份边）。
+    ///
+    /// 【为什么装配的 spans 优先】`region_items` 是"region key → item GUID"的**几何**
+    /// 换算边，它的唯一写者要求几何缓存、宿主 change count、region 唯一匹配、owner
+    /// 分配同时成立 —— 新粘贴 / 拖动 / 循环延伸 / folder 父轨上它都可能晚一拍甚至
+    /// 缺席。而 `assembly_spans` 是装配器**已经算出来**的 clip id → region 行下标，
+    /// 它才是"这条 item 的音频来自哪个源"的稳定边。
+    ///
+    /// 把显示身份继续只挂在 `region_items` 上，就会在新粘贴的那几秒里让
+    /// `pcm_by_item` 为空 ⇒ 占位拿不到媒体身份 ⇒ 用户看到"正在等待宿主完成音频分配"，
+    /// 直到下一次重新加载。
+    ///
+    /// 【只用于显示】这条边不改变 PCM 授权：真正读采样仍走
+    /// `edit_sources` / `source_states`（见 `present_host_inventory` 的说明）。
     fn item_source_pairs(&self) -> Vec<(String, String)> {
-        let regions = self.regions.lock_or_recover();
-        let items = self.region_items.lock_or_recover();
-        items
-            .iter()
-            .filter_map(|(key, item)| {
-                regions
-                    .get(key)
-                    .map(|region| (item.clone(), region.audio_source_persistent_id.clone()))
-            })
-            .collect()
+        // 【锁序】两张装配表只 clone 一次就释放，不与 `regions` / `region_items`
+        // 同时持有 —— 不给锁序图加新边（`regions → region_items → …` 是既有顺序）。
+        let (spans, rows) = {
+            let spans = self.assembly_spans.lock_or_recover().clone();
+            let rows = self.region_rows.lock_or_recover().clone();
+            (spans, rows)
+        };
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        let mut by_item: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for (clip_id, indices) in &spans {
+            let Some(item) = host_item_guid(clip_id) else {
+                continue;
+            };
+            let Some(source) = indices
+                .iter()
+                .filter_map(|index| rows.get(*index))
+                .map(|row| row.source_id.clone())
+                .find(|id| !id.is_empty())
+            else {
+                continue;
+            };
+            by_item.insert(item.to_owned(), source);
+        }
+        pairs.extend(
+            by_item
+                .iter()
+                .map(|(item, source)| (item.clone(), source.clone())),
+        );
+        // 映射侧作为回退/补充：它同时覆盖 ARA-only 宿主（没有 item 清单、没有 spans）。
+        {
+            let regions = self.regions.lock_or_recover();
+            let items = self.region_items.lock_or_recover();
+            for (key, item) in items.iter() {
+                let Some(region) = regions.get(key) else {
+                    continue;
+                };
+                let source = &region.audio_source_persistent_id;
+                if source.is_empty() {
+                    continue;
+                }
+                match by_item.get(item) {
+                    // 【冲突以装配为准】两个来源各说一套时，装配器那份来自"同一刻的两份
+                    // 输入"，映射侧那份可能还停在上一代几何上。
+                    Some(known) if known != source => {
+                        hifishifter_kernel::log_limiter::emit_limited_key(
+                            log::Level::Warn,
+                            "ara.media.identity.conflict",
+                            format_args!(
+                                "[ara] media identity conflict for item {item}: assembly says                                  {known}, region mapping says {source}; keeping the assembly edge"
+                            ),
+                        );
+                    }
+                    Some(_) => {}
+                    None => pairs.push((item.clone(), source.clone())),
+                }
+            }
+        }
+        pairs
     }
 
     pub(crate) fn present_host_inventory(&self, timeline: &mut TimelineState, namespace: &str) {
@@ -987,6 +1103,21 @@ impl DocumentSession {
                     present.remove(&id);
                     continue;
                 };
+                // 【占位 → 有源：只补媒体身份】装配器可能**晚于**清单一步才产出这条
+                // clip（粘贴/分割后的常态顺序）。此时画布上已经有一条无源占位，而
+                // `assembled` 里有同一 id 的有源产物 —— 借它的媒体身份，几何仍由下面
+                // 的清单投影决定。没有这一步，占位就永远停在"正在等待宿主完成音频分配"。
+                if adopt_assembled_media(
+                    clip,
+                    assembled.get(&format!("ara-item-{}", g.item_id)),
+                    &prefix,
+                ) {
+                    log::debug!(
+                        "[ara] adopted assembled media for item {} source={}",
+                        g.item_id,
+                        clip.source_path.as_deref().unwrap_or("-")
+                    );
+                }
                 sync_host_takes(
                     clip,
                     item,
@@ -3818,5 +3949,188 @@ mod tests {
         );
         document.close();
         drop(model);
+    }
+
+    /// **回归：装配的 spans 必须能独立供给媒体身份。**
+    ///
+    /// 【为什么这是用户报障的可执行形式】新粘贴的 item 先出现在宿主清单里，而
+    /// `region_items`（region key → item GUID 的**几何**换算边）要等几何缓存、
+    /// change count、region 唯一匹配同时成立才写得上。那段窗口里旧实现的
+    /// `pcm_by_item` 是空的 ⇒ 已经画在画布上的占位拿不到媒体身份 ⇒ 用户看到
+    /// "正在等待宿主完成音频分配"，直到重新加载。
+    ///
+    /// 装配器**已经算出来**了同一条边（`assembly_spans`），它才是稳定来源。
+    #[test]
+    fn assembly_spans_supply_media_identity_without_region_items() {
+        use hifishifter_kernel::editor::assembly::RegionRow;
+        let document = DocumentSession::new(40_010);
+        assert!(
+            document.item_source_pairs().is_empty(),
+            "夹具必须先是一个没有任何映射的文档"
+        );
+        document.region_rows.lock_or_recover().push(RegionRow {
+            key: 0x77,
+            clip_id: "ara-item-{SPAN}".into(),
+            track_id: "track".into(),
+            start_sec: 0.0,
+            duration_sec: 1.0,
+            source_start_sec: 0.0,
+            source_end_sec: 1.0,
+            playback_rate: 1.0,
+            name: "span".into(),
+            source_id: "ara://span-source".into(),
+            modification_id: "mod".into(),
+            source_sample_rate: 48_000.0,
+            source_duration_sec: 1.0,
+            source_channels: 2,
+        });
+        document
+            .assembly_spans
+            .lock_or_recover()
+            .insert("ara-item-{SPAN}".into(), vec![0]);
+        // region_items 故意保持为空：这正是粘贴后那几百毫秒的形状。
+        assert!(document.region_items.lock_or_recover().is_empty());
+        assert_eq!(
+            document.item_source_pairs(),
+            vec![("{SPAN}".to_owned(), "ara://span-source".to_owned())],
+            "装配 spans 必须能独立给出 item → 源 的显示边"
+        );
+        document.close();
+    }
+
+    /// **回归：映射侧的边仍然是回退，且与装配冲突时以装配为准。**
+    #[test]
+    fn region_items_remain_the_fallback_media_edge() {
+        use crate::ara::AraPlaybackRegion;
+        let document = DocumentSession::new(40_011);
+        let key = 0x88_u64;
+        let mut region = AraPlaybackRegion::default();
+        region.audio_source_persistent_id = "ara://mapped".into();
+        document.regions.lock_or_recover().insert(key, region);
+        document
+            .region_items
+            .lock_or_recover()
+            .insert(key, "{MAPPED}".into());
+        assert_eq!(
+            document.item_source_pairs(),
+            vec![("{MAPPED}".to_owned(), "ara://mapped".to_owned())],
+            "没有装配结果时映射边必须照旧生效（ARA-only 宿主走的就是这一支）"
+        );
+        document.close();
+    }
+
+    /// **回归：先画占位、后装配出源 —— 占位必须被升级，而不是永远等下去。**
+    ///
+    /// 【为什么这条是用户报障的原形】REAPER 里复制/粘贴一个 item 时，清单先看到新
+    /// item（`present_host_inventory` 于是先造了一条无源占位），装配器在下一个安全点
+    /// 才产出有源 clip。旧实现只在 `timeline.clips` **找不到**这条 id 时才用装配结果，
+    /// 于是占位永久保留 —— 界面一直显示"正在等待宿主完成音频分配"，只有重新加载
+    /// （`workspace_timeline_locked` 直接给完整装配结果）才恢复。
+    #[test]
+    fn a_pending_placeholder_adopts_the_assembled_source() {
+        let document = DocumentSession::new(40_012);
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        let api = Arc::new(host.client());
+        let mut track = api.ui_track(&|| true).unwrap();
+        track.id = "track".into();
+        let mut item = track.items[0].clone();
+        item.geometry.start_sec = 0.0;
+        item.geometry.duration_sec = 1.0;
+        item.geometry.item_id = "{PASTE-1}".into();
+        track.items = vec![item.clone()];
+        let guid = track.guid.clone();
+        document.ui_tracks.lock_or_recover().insert(guid, track);
+
+        // ① 第一轮：装配还没有这条 clip ⇒ 只能画无源占位。
+        let mut editor = TimelineState::default();
+        document.present_host_inventory(&mut editor, "");
+        let id = format!("ara-item-{}", item.geometry.item_id);
+        assert_eq!(editor.clips.len(), 1);
+        assert_eq!(editor.clips[0].id, id);
+        assert!(
+            editor.clips[0].source_path.is_none(),
+            "夹具前提：第一轮必须是占位（装配还没产出这条 clip）"
+        );
+
+        // ② 装配完成：同一条 item 已经有源。
+        let row = crate::host::geometry::item_row_from_host(&item, "track");
+        let mut assembled =
+            hifishifter_kernel::editor::assembly::clip_for_item(&row, "track", None).unwrap();
+        assembled.track_id = "track".into();
+        for take in &mut assembled.takes {
+            take.source_path = Some("ara://pasted".into());
+        }
+        assembled.normalize_takes();
+        let mut host_timeline = TimelineState::default();
+        host_timeline.clips.push(assembled);
+        *document.timeline.lock_or_recover() = Some(host_timeline);
+
+        // ③ 下一轮清单刷新必须把它升级成有源 clip。
+        document.present_host_inventory(&mut editor, "");
+        assert_eq!(editor.clips.len(), 1, "升级不得再造一条副本 clip");
+        assert_eq!(
+            editor.clips[0].source_path.as_deref(),
+            Some("ara://pasted"),
+            "占位必须采用装配结果里的媒体身份，否则界面永远显示“正在等待宿主完成音频分配”"
+        );
+
+        // ④ 宿主媒体分类也必须跟着变成 ready。
+        //
+        // 【为什么手工拼载荷】`Clip::source_path` 是 `skip_serializing` 的内存投影
+        // （权威值在 take 上），生产路径的载荷由 take 补出这一层；这里按同一形状拼。
+        let mut payload = serde_json::json!({"clips": editor
+            .clips
+            .iter()
+            .map(|clip| {
+                serde_json::json!({
+                    "id": clip.id,
+                    "source_path": clip.active_take().source_path,
+                    "takes": clip.takes,
+                })
+            })
+            .collect::<Vec<_>>()});
+        document.decorate_host_media_locked(&mut payload, "");
+        assert_eq!(
+            payload["clips"][0]["host_media"], "ready",
+            "媒体身份补上之后，逐 clip 分类不能还停在 pending"
+        );
+        document.close();
+    }
+
+    /// **安全底线：active take 对不上时一个字段都不借。**
+    ///
+    /// 把另一条 take 的采样挂上来是**听不见的错**（渲染读的是同一条 source_path）；
+    /// 占位则是看得见的。`authorized_takes` 与 `choose_link` 已经按这条纪律写了，
+    /// 装配侧的补位必须沿用同一条。
+    #[test]
+    fn adoption_never_borrows_across_a_take_switch() {
+        let mut placeholder: hifishifter_kernel::state::Clip =
+            serde_json::from_value(serde_json::json!({
+                "id": "ara-item-{X}", "track_id": "track", "name": "p",
+                "start_sec": 0.0, "length_sec": 1.0,
+                "takes": [{"id": "take-host", "source_start_sec": 0.0, "source_end_sec": 1.0}]
+            }))
+            .unwrap();
+        placeholder.normalize_takes();
+        let mut assembled: hifishifter_kernel::state::Clip =
+            serde_json::from_value(serde_json::json!({
+                "id": "ara-item-{X}", "track_id": "track", "name": "a",
+                "start_sec": 0.0, "length_sec": 1.0,
+                "takes": [{"id": "take-other", "source_path": "ara://wrong",
+                           "source_start_sec": 0.0, "source_end_sec": 1.0}]
+            }))
+            .unwrap();
+        assembled.normalize_takes();
+        let adopted = adopt_assembled_media(&mut placeholder, Some(&assembled), &|id: &str| {
+            id.to_owned()
+        });
+        assert!(!adopted, "active take 不同就不许借");
+        assert!(
+            placeholder.source_path.is_none(),
+            "宁可显示占位，也不能把另一条 take 的采样挂上来"
+        );
     }
 }
