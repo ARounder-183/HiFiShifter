@@ -2377,6 +2377,10 @@ export const enUS = {
     mobile_section_project: "Project",
     mobile_section_param_editor: "Parameter editor",
     mobile_section_piano_roll: "Piano roll",
+    mobile_project_library: "Project Library",
+    mobile_project_import: "Import from device...",
+    mobile_project_loading: "Loading...",
+    mobile_project_empty: "No projects yet. Save one to see it here.",
     log_file_disabled_hint:
         "Log verbosity is set to None, so no log file is being written. Set Help → Log verbosity to Low or higher, then restart the app.",
     mobile_menu_title: "Menu",

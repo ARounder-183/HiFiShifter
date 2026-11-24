@@ -2387,6 +2387,10 @@ export const jaJP = {
     mobile_section_project: "プロジェクト",
     mobile_section_param_editor: "パラメータエディタ",
     mobile_section_piano_roll: "ピアノロール",
+    mobile_project_library: "プロジェクトライブラリ",
+    mobile_project_import: "デバイスから読み込む...",
+    mobile_project_loading: "読み込み中...",
+    mobile_project_empty: "プロジェクトはまだありません。保存するとここに表示されます。",
     log_file_disabled_hint:
         "ログの詳細度が「なし」のため、ログファイルは書き出されていません。「低」以上に変更してアプリを再起動してください。",
     mobile_menu_title: "メニュー",

@@ -70,6 +70,7 @@ mod common;
 mod core;
 #[path = "commands/diagnostics.rs"]
 mod diagnostics;
+pub mod render_stats;
 #[path = "commands/dialogs.rs"]
 mod dialogs;
 #[path = "commands/file_browser.rs"]
@@ -553,6 +554,16 @@ pub async fn save_project(
             "error": format!("Failed to join save task: {error}"),
         }),
     }
+}
+
+/// 列出工程库（移动端「打开工程」的入口）。
+///
+/// 【为什么不需要 spawn_blocking】它只读目录元数据，不解析工程内容 —— 20 个
+/// 工程的列表在毫秒级返回（见 `project_library_entries` 的说明）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn list_projects(app: tauri::AppHandle) -> serde_json::Value {
+    let state: State<'_, AppState> = app.state();
+    project::list_projects(&app, state)
 }
 
 // ===================== 记事本（附件 / 剪贴板暂存 / 导出） =====================

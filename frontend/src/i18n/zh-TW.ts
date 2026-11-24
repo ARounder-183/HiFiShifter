@@ -2303,6 +2303,10 @@ export const zhTW = {
     mobile_section_project: "專案",
     mobile_section_param_editor: "參數編輯器",
     mobile_section_piano_roll: "鋼琴捲簾",
+    mobile_project_library: "專案庫",
+    mobile_project_import: "從裝置匯入...",
+    mobile_project_loading: "正在載入...",
+    mobile_project_empty: "還沒有專案。儲存一個就會出現在這裡。",
     log_file_disabled_hint:
         "日誌詳細程度是「無」，沒有寫入任何日誌檔。把它改成「低」或更高，並重新啟動應用程式。",
     mobile_menu_title: "選單",

@@ -179,6 +179,8 @@ import { FolderImportHost } from "./components/layout/FolderImportHost";
 import { useKeybindings } from "./features/keybindings/useKeybindings";
 import { selectMergedKeybindings } from "./features/keybindings/keybindingsSlice";
 import { beginHoldRepeat } from "./features/keybindings/holdRepeat";
+import { ProjectLibrarySheet } from "./components/layout/ProjectLibrarySheet";
+import { appForm } from "./services/hostDetect";
 import {
     DEFAULT_DISPATCH,
     MOBILE_DISPATCH,
@@ -1912,7 +1914,23 @@ function AppInner() {
         });
     }, [dispatch, runOrPromptUnsavedAction]);
 
+    /**
+     * 工程库（移动端「打开工程」的入口）。
+     *
+     * 【为什么移动端不再走 SAF】保存是写进固定目录、打开却要用户自己找一个
+     * `.hshp` —— 用户看不到那个目录，于是「我保存的工程去哪了」与「我该打开
+     * 哪个文件」两个问题都回答不了。库把打开变成「从列表里点一条」；SAF 保留
+     * 给「从设备导入…」。
+     */
+    const [projectLibraryOpen, setProjectLibraryOpen] = useState(false);
+
     const handleOpenProject = useCallback(() => {
+        if (appForm() === "mobile") {
+            // 未保存改动的确认发生在**真正打开**那一步（`handleOpenRecentProject`），
+            // 因此这里只负责把库打开。
+            setProjectLibraryOpen(true);
+            return;
+        }
         runOrPromptUnsavedAction("switch", async () => {
             const result = await dispatch(openProjectFromDialog()).unwrap();
             showProjectVersionConfirmationIfNeeded(result);
@@ -4914,6 +4932,16 @@ function AppInner() {
               不同位置 —— 只有一份对话框状态，才不会出现"两个面板各弹一个"。
             */}
             <FolderImportHost />
+            {/* 工程库：移动端「打开工程」的列表表面（见 `handleOpenProject`）。 */}
+            <ProjectLibrarySheet
+                open={projectLibraryOpen}
+                onClose={() => setProjectLibraryOpen(false)}
+                onOpenProject={(path) => handleOpenRecentProject(path)}
+                onImportFromDevice={() => {
+                    setProjectLibraryOpen(false);
+                    void handleImportProject();
+                }}
+            />
 
             {/* 状态栏内容已上移到 `desktopFooter` / `mobileStatusBar`（见 return 处）。 */}
         </AppChrome>

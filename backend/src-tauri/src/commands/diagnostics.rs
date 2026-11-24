@@ -144,8 +144,17 @@ pub(super) fn export_diagnostics(
 
     let _ = crate::logging::flush_logs();
     let settings = build_settings_info(&state, frontend_settings);
-    let result = write_base_zip(&out, &build_system_info(&state), &settings)
-        .and_then(|()| append_benchmark(&out));
+    let result = write_base_zip(&out, &build_system_info(&state), &settings);
+    // 【基准失败不得让整包导出失败】旧实现把 `append_benchmark` 串在 `and_then` 上：
+    // 基准一报错（ORT 会话建不起来、模型缺失、驱动异常），整个 `export_diagnostics`
+    // 返回 `ok:false`，**用户连日志包都拿不到** —— 而日志恰恰是排查那个错误最需要
+    // 的东西。现在基准单独失败，错误写进包里（`benchmark.json` 的 `error` 字段），
+    // 基础包照常返回成功。
+    if result.is_ok() {
+        if let Err(error) = append_benchmark(&out) {
+            log::warn!("[diagnostics] benchmark failed (bundle kept): {error}");
+        }
+    }
 
     match result {
         Ok(()) => {
@@ -168,6 +177,9 @@ pub(super) fn export_diagnostics(
 fn build_system_info(state: &State<'_, AppState>) -> serde_json::Value {
     let rt = state.runtime_info();
     serde_json::json!({
+        // 真实渲染耗时（最近 256 次后台渲染的 p50/p95）：零成本、贴近体感，
+        // 比合成基准更能回答「这台机器慢不慢」。
+        "render_stats": super::render_stats::snapshot(),
         "app": {
             "name": env!("CARGO_PKG_NAME"),
             "version": crate::build_info::version(),
@@ -372,14 +384,68 @@ fn write_base_zip(
     Ok(())
 }
 
+/// 移动端的 benchmark.json：一次短跑 + 环境快照。
+///
+/// 字段与桌面版**同名同义**（`availableProviders` / `ortBuildInfo` / `cpuMedianMs`
+/// 等），下游解析器因此不需要为两种形态各写一条分支；差异只有两条：
+/// `skipped: true`（说明「没有跑全量」）与 `smoke`（说明「短跑的结果」）。
+///
+/// 【为什么连 `skipped` 都要写】诊断包是**给人看的**。一个只有 `smoke` 而没有
+/// 全量字段的包，看起来像「导出被截断了」；写明 `skipped` + `reason` 之后，
+/// 它变成一条**结论**：这台设备上没有可比较的第二条推理通路。
+fn build_mobile_benchmark_json() -> String {
+    // 环境快照复用既有的 ONNX 诊断出口（不新开一条读取通路）：它已经处理了
+    // 「onnx feature 未编译」「模型未加载」等情形，并且与 `onnx_status` 命令
+    // 返回的是同一份事实。
+    let info = crate::nsf_hifigan_onnx::diagnose_onnx_availability();
+    let providers = info.providers.unwrap_or_default();
+    let ort_build_info = info.onnx_version.unwrap_or_else(|| "unknown".to_string());
+    // 128 帧 ≈ 1.5 秒音频：足以建会话、跑通一次真实推理，又能在 1 秒内出结果。
+    const SMOKE_FRAMES: usize = 128;
+    let smoke = match crate::nsf_hifigan_onnx::run_benchmark_smoke(SMOKE_FRAMES, 1) {
+        Ok(elapsed_ms) => serde_json::json!({
+            "ok": true,
+            "frames": SMOKE_FRAMES,
+            "runs": 1,
+            "elapsedMs": elapsed_ms,
+        }),
+        Err(error) => serde_json::json!({
+            "ok": false,
+            "frames": SMOKE_FRAMES,
+            "runs": 1,
+            "error": error,
+        }),
+    };
+    serde_json::json!({
+        "skipped": true,
+        "reason": "mobile_single_provider",
+        "note": "Android/iOS expose a single execution provider; the full 5-run benchmark cannot change any decision and costs ~80s.",
+        "smoke": smoke,
+        "availableProviders": providers,
+        "ortBuildInfo": ort_build_info,
+        "gpuAvailable": false,
+        "dmlAvailable": false,
+        "benchmarkSamples": 0,
+    })
+    .to_string()
+}
+
 /// 运行推理设备基准测试并把结果追加进 zip；失败也写入错误信息（这本身就是
 /// 有价值的诊断数据）。
 fn append_benchmark(zip_path: &Path) -> Result<(), String> {
-    log::info!("[diagnostics] running inference-device benchmark (this may take a while)...");
-    let benchmark = match super::onnx_status::run_vocoder_benchmark() {
-        Ok(results) => serde_json::to_string_pretty(&results)
-            .map_err(|e| format!("serialize benchmark failed: {e}"))?,
-        Err(error) => serde_json::json!({ "error": error }).to_string(),
+    // 【移动端不跑全量基准】见 `run_benchmark_smoke` 的文件头：Android / iOS 只
+    // 暴露一个执行提供者，全量基准的决策空间在那里恒为空集，代价却是 80 秒。
+    // 换成一次短跑 + 环境快照：既证明「这个包里的模型在这台机器上真能推理」，
+    // 又不会让用户以为导出卡死了。
+    let benchmark = if crate::platform::is_mobile() {
+        build_mobile_benchmark_json()
+    } else {
+        log::info!("[diagnostics] running inference-device benchmark (this may take a while)...");
+        match super::onnx_status::run_vocoder_benchmark() {
+            Ok(results) => serde_json::to_string_pretty(&results)
+                .map_err(|e| format!("serialize benchmark failed: {e}"))?,
+            Err(error) => serde_json::json!({ "error": error }).to_string(),
+        }
     };
 
     let file = std::fs::OpenOptions::new()

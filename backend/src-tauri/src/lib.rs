@@ -823,6 +823,7 @@ pub fn run() {
             commands::notebook_export_document,
             commands::notebook_save_asset_as,
             commands::save_project,
+            commands::list_projects,
             commands::project_save_commands::save_project_as,
             commands::project_save_commands::pick_project_save_path,
             commands::project_save_commands::save_project_to_path,

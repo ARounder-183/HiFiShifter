@@ -2299,6 +2299,10 @@ export const zhCN = {
     mobile_section_project: "工程",
     mobile_section_param_editor: "参数编辑器",
     mobile_section_piano_roll: "钢琴卷帘",
+    mobile_project_library: "工程库",
+    mobile_project_import: "从设备导入...",
+    mobile_project_loading: "正在加载...",
+    mobile_project_empty: "还没有工程。保存一个就会出现在这里。",
     log_file_disabled_hint:
         "日志详细程度是「无」，没有写入任何日志文件。把它改成「低」或更高，并重启应用。",
     mobile_menu_title: "菜单",

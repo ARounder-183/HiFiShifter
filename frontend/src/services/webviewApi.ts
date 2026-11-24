@@ -58,6 +58,7 @@ export const webApi = {
     openProjectDialog: projectApi.openProjectDialog,
     openProject: projectApi.openProject,
     saveProject: projectApi.saveProject,
+    listProjects: projectApi.listProjects,
     saveProjectAs: projectApi.saveProjectAs,
     pickProjectSavePath: projectApi.pickProjectSavePath,
     saveProjectToPath: projectApi.saveProjectToPath,

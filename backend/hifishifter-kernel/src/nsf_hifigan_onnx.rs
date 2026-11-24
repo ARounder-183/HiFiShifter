@@ -2851,6 +2851,52 @@ fn benchmark_gpu_ep(
     Ok((median, rtf, ep))
 }
 
+/// 移动端的「基准」：只回答一个问题 —— **声码器能不能建会话、能不能推理**。
+///
+/// 【为什么不跑全量基准】Android / iOS 只暴露一个执行提供者（CPU）。全量基准的
+/// 决策空间（CPU vs GPU vs DirectML）在那里**恒为空集**：跑完 5 轮 × 13.8 秒
+/// 得到的结论永远是「用 CPU」，而那本来就是唯一选项。代价是用户等 80 秒、
+/// 设备发烫、日志被淹没。
+///
+/// 保留一次**短跑**（默认 128 帧 ≈ 1.5 秒音频、1 轮）不是为了测速，而是为了
+/// 证明「这个包里的模型在这台机器上真的能推理」—— 那是诊断包唯一真正需要的
+/// 结论，而且它能在 1 秒内给出。
+///
+/// @param frames 帧数（缺省 128 = `BENCHMARK_FRAMES / 8`）。
+/// @param runs   推理轮数（缺省 1）。
+/// @returns 本次短跑的耗时（毫秒）；失败时返回可读原因。
+pub fn run_benchmark_smoke(frames: usize, runs: usize) -> Result<u128, String> {
+    let _busy = crate::diagnostics_busy::enter("benchmark-smoke");
+    // 与全量基准同一个线程预算：诊断期间不能把实时音频线程挤没。
+    let _budget = crate::vocoder_ort_session::DiagnosticBudget::enter(2);
+    let run = crate::vocoder_ort_session::begin_diagnostic_run("benchmark-smoke")?;
+    ensure_ort_init()?;
+    let (onnx_path, cfg_path) = resolve_model_paths()?;
+    let cfg = read_config(&cfg_path)?;
+    let frames = frames.max(16);
+    let (mut session, _) = crate::vocoder_ort_session::build_ort_session_with_ep(
+        &onnx_path,
+        crate::vocoder_ort_session::OrtSessionRole::Vocoder,
+        Some("cpu"),
+    )?;
+    let mel = vec![0.0f32; cfg.num_mels * frames];
+    let f0 = vec![440.0f32; frames];
+    let started = std::time::Instant::now();
+    for _ in 0..runs.max(1) {
+        run.heartbeat();
+        let mt = Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice()))
+            .map_err(|error| format!("smoke tensor build failed: {error}"))?;
+        let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice()))
+            .map_err(|error| format!("smoke tensor build failed: {error}"))?;
+        session
+            .run(ort::inputs![mt, ft])
+            .map_err(|error| format!("smoke inference failed: {error}"))?;
+    }
+    let elapsed = started.elapsed().as_millis();
+    log::info!("[benchmark] smoke ok frames={frames} runs={} elapsed={elapsed}ms", runs.max(1));
+    Ok(elapsed)
+}
+
 pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     // 【为什么在这里就上静音】见 `hifishifter_kernel::diagnostics_busy`：诊断期间实时
     // 通路没有任何时间片保证，唯一诚实的做法是**静音但不停钟**。guard 活在函数体里，

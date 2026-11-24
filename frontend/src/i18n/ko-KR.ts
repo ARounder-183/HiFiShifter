@@ -2356,6 +2356,10 @@ export const koKR = {
     mobile_section_project: "프로젝트",
     mobile_section_param_editor: "파라미터 편집기",
     mobile_section_piano_roll: "피아노 롤",
+    mobile_project_library: "프로젝트 라이브러리",
+    mobile_project_import: "기기에서 가져오기...",
+    mobile_project_loading: "불러오는 중...",
+    mobile_project_empty: "아직 프로젝트가 없습니다. 저장하면 여기에 표시됩니다.",
     log_file_disabled_hint:
         "로그 상세 수준이 '없음'이므로 로그 파일이 기록되지 않습니다. '낮음' 이상으로 변경한 뒤 앱을 다시 시작하세요.",
     mobile_menu_title: "메뉴",

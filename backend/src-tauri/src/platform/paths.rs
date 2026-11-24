@@ -65,6 +65,25 @@ pub fn export_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(base.join("exports"))
 }
 
+/// 工程库的落点（移动端）。
+///
+/// 【为什么工程要有一个「库」而不是继续用 SAF 选路径】移动端的「保存」与
+/// 「打开」此前是**不对称**的：保存写死到一个固定目录，打开却要用户自己走
+/// SAF 找一个 `.hshp`。用户看不到那个固定目录，于是「我保存的工程去哪了」
+/// 与「我该打开哪个文件」成了两个都无法回答的问题。
+///
+/// 库把它变成**一个列表**：保存进库、打开时看库。SAF 仍然保留，但只用于
+/// 「从设备导入…」（把外部 `.hshp` 收编进库）与「导出 / 分享」。
+///
+/// 【为什么放在 `export_dir` 之下】那是移动端唯一**用户看得见**的应用目录
+/// （见 [`export_dir`] 的说明）。放在 `app_data_dir` 里，工程文件会与导出物
+/// 分居两处，而其中一处谁也打不开。
+pub fn projects_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = export_dir(app)?.join("projects");
+    ensure_dir(&dir)?;
+    Ok(dir)
+}
+
 /// "用户能看到的文档目录"。
 ///
 /// 【为什么需要这一层】全应用有若干处默认落点（导出对话框的默认输出目录、
