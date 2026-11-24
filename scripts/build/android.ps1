@@ -317,14 +317,18 @@ function Sync-BundleResources {
 }
 
 function Invoke-SelfStagedPackage {
-    param([string]$Profile, [string]$CargoProfile)
+    param([string]$Profile, [string]$CargoProfile, [string]$Triple, [string]$JniAbi)
 
-    $built = Join-Path $root "backend\target\aarch64-linux-android\$CargoProfile\libbackend_lib.so"
+    $built = Join-Path $root "backend\target\$Triple\$CargoProfile\libbackend_lib.so"
     if (-not (Test-Path -LiteralPath $built)) {
         throw "The Rust library was not built: $built is missing. Fix the cargo error above first."
     }
 
-    $jniDir = Join-Path $androidProject "app\src\main\jniLibs\arm64-v8a"
+    # [Why the ABI directory is a parameter] It is the only thing that ties a library to a
+    # device: an x86_64 build dropped into arm64-v8a installs fine and then dies at
+    # System.loadLibrary with "library not found", because the loader only looks in the
+    # directory matching the device's ABI.
+    $jniDir = Join-Path $androidProject "app\src\main\jniLibs\$JniAbi"
     New-Item -ItemType Directory -Force -Path $jniDir | Out-Null
     Copy-Item -LiteralPath $built -Destination (Join-Path $jniDir "libbackend_lib.so") -Force
     Write-Host ("== staged libbackend_lib.so ({0:N0} bytes)" -f (Get-Item $built).Length) -ForegroundColor DarkGray
@@ -343,8 +347,8 @@ function Invoke-SelfStagedPackage {
     }
 }
 
-if ($Target -ne "aarch64") {
-    throw "Only -Target aarch64 is supported: ONNX Runtime ships no prebuilt for '$Target' (see the file header)."
+if ($Target -notin @("aarch64", "x86_64")) {
+    throw "Only -Target aarch64 (phones) and x86_64 (emulator) are supported: ONNX Runtime ships no prebuilt for '$Target' (see the file header)."
 }
 
 $cli = @()
@@ -361,7 +365,8 @@ $buildExit = 0
 
 Push-Location "backend"
 try {
-    rustup target add aarch64-linux-android | Out-Null
+    $rustTarget = if ($Target -eq "x86_64") { "x86_64-linux-android" } else { "aarch64-linux-android" }
+    rustup target add $rustTarget | Out-Null
 
     # gen/android is committed, so this only runs on a checkout that was never
     # initialised (or after someone deleted it). Without it, "android build" stops with
@@ -395,8 +400,13 @@ try {
     # while libbackend_lib.so exists only for arm64 -- on an x86 device the installer would
     # pick the x86 directory and System.loadLibrary would fail with "not an ELF file".
     # Ship one ABI: the one ONNX Runtime has a prebuilt for (see the file header).
+    # [Why x86_64 is here at all] Google's emulator images are x86_64, and an arm64 image
+    # cannot run on an x86_64 host (qemu/windows-x86_64 ships no aarch64 target). The
+    # x86_64 build links ort-tract instead of the native runtime -- see the Cargo.toml
+    # note -- so it exists for exactly one purpose: running the app on an emulator.
     $abiMap = @{
         "aarch64" = @{ Jni = "arm64-v8a"; Triple = "aarch64-linux-android" }
+        "x86_64"  = @{ Jni = "x86_64"; Triple = "x86_64-linux-android" }
     }
     $abi = $abiMap[$Target]
     if (-not $abi) { throw "No ABI mapping for target '$Target'." }
@@ -483,7 +493,7 @@ then run with -Bundle again.
     }
 
     Write-Host "== tauri-cli could not create the staging symlink; packaging from the built library instead" -ForegroundColor Yellow
-    Invoke-SelfStagedPackage -Profile $profile -CargoProfile $cargoProfile
+    Invoke-SelfStagedPackage -Profile $profile -CargoProfile $cargoProfile -Triple $rustTarget -JniAbi $abi.Jni
 }
 
 # -- Artefact integrity -------------------------------------------------------

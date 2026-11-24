@@ -1028,18 +1028,24 @@ pub(crate) fn ensure_ort_backend() {
     register_alternative_backend();
 }
 
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "x86_64"),
+    all(target_os = "android", target_arch = "x86_64")
+))]
 fn register_alternative_backend() {
     static BACKEND: std::sync::Once = std::sync::Once::new();
     BACKEND.call_once(|| {
         ort::set_api(ort_tract::api());
-        log::info!("[ort] registered the ort-tract CPU backend (macOS x86_64)");
+        log::info!("[ort] registered the ort-tract CPU backend (no native ORT binary for this target)");
     });
 }
 
 /// On every other target `ort` links the native ONNX Runtime directly, so
 /// there is no alternative API to install.
-#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+#[cfg(not(any(
+    all(target_os = "macos", target_arch = "x86_64"),
+    all(target_os = "android", target_arch = "x86_64")
+)))]
 fn register_alternative_backend() {}
 
 /// The global env var, defaulting to `"auto"`.  Only used for diagnostics.

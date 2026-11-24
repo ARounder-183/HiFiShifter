@@ -178,10 +178,20 @@ ort-tract = { version = "0.4.0", optional = true }
 # iOS 侧是 `+coreml`，与 macOS ARM 同一套 EP（且要求 iOS ≥ 15.1 —— 见
 # `tauri.ios.conf.json` 的 minimumSystemVersion）。
 #
-# 【为什么没有 x86_64-linux-android】预编译分发里根本没有这一项。模拟器因此
-# 必须用真机 ABI（arm64），或改用 `load-dynamic` 自行提供 .so，见设计文档 §7 R15。
-[target.'cfg(target_os = "android")'.dependencies]
+# 【x86_64-linux-android 为什么单独一段】预编译分发里没有这一项，带
+# `download-binaries` 会直接失败："no prebuilt binaries available for target
+# x86_64-linux-android"。它唯一的用途是 **模拟器**（Google 的 x86_64 系统镜像；
+# arm64 镜像只能在 arm64 宿主上跑），而 macOS Intel 早就是同一个处境 —— 那里用
+# `alternative-backend` + `ort-tract`（纯 Rust 的 CPU 实现）绕过去了。这里复用同一条路：
+# 结果是一个真能跑、只是没有 NNAPI 加速的模拟器包，而不是"没有模拟器可用"。
+# 真机（arm64-v8a）仍然走下面的 NNAPI 分发，一个字节都没变。
+[target.'cfg(all(target_os = "android", not(target_arch = "x86_64")))'.dependencies]
 ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "nnapi", "copy-dylibs"] }
+
+# Android x86_64 —— 模拟器专用，CPU only via ort-tract（与 macOS Intel 同一套机制）。
+[target.'cfg(all(target_os = "android", target_arch = "x86_64"))'.dependencies]
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "alternative-backend"] }
+ort-tract = { version = "0.4.0", optional = true }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "coreml", "copy-dylibs"] }
