@@ -23,12 +23,23 @@ describe("ActionBar 传输组", () => {
         expect(source).not.toMatch(/<Button[\s>]/);
     });
 
-    test("录音键不再被 Box 包裹，且固定实心危险色", async () => {
+    /**
+     * 录音键的填充是**语义**：待机 soft 红、录制中 solid 红。
+     *
+     * 【为什么钉的是"不要把它固定成 solid"】这条曾经反过来钉过 —— 那时的问题是
+     * "红色填充与播放键不齐"，而 fix 选的是把变体固定成 solid。真正的原因是三个
+     * 按钮各用一套盒模型：fix 落错了层，还顺手改掉了用户已习惯的配色（待机看着
+     * 像"一直在录"）。盒模型已由下面那条 CSS 归一到全部变体，因此这里只钉配色：
+     * 常态 soft、`active` 交给原语强制实心。
+     */
+    test("录音键：常态 soft 红，录制中由 active 转实心", async () => {
         const source = stripComments(await read("src/components/layout/ActionBar.tsx"));
         const recordAt = source.indexOf('tone="danger"');
         expect(recordAt).toBeGreaterThan(-1);
-        // 录音键必须是**固定** fill：待机 soft / 录制中 solid 会让盒子变宽 1px。
-        expect(source.slice(recordAt, recordAt + 400)).toContain('fill="solid"');
+        const record = source.slice(recordAt, recordAt + 400);
+        expect(record).toContain('fill="soft"');
+        expect(record).toContain("active={recording.active}");
+        // 不再绕回手写三元变体：那会重新把盒模型交回给调用点。
         expect(source).not.toMatch(/variant=\{recording\.active \? "solid" : "soft"\}/);
     });
 });

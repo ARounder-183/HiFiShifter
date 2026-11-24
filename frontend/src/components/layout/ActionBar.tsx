@@ -1341,12 +1341,18 @@ export function ActionBar() {
                                 data-hs-context-menu
                             >
                                 <TransportIconButton
-                                    /* 录音语义色：**固定实心危险色**。待机 soft / 录制中 solid
-                                       会让按下那一刻盒子变宽 1px（soft 是半透明强调色、solid 是
-                                       不透明强调色），而"红色填充与播放键不齐"正是它。录制状态
-                                       只换图标与 aria-pressed，不换盒模型。 */
+                                    /* 录音语义色：待机 **soft 红**、录制中 **solid 红** —— 与
+                                       改动前逐字一致（原先就是 `variant={active ? "solid" : "soft"}`
+                                       + `color="red"`）。红色在待机时就出现，是因为"这是一个录音
+                                       键"必须一眼可辨；录制中加实心只是把"正在录"再放大一档。
+
+                                       曾把这里固定成 solid 来治"填充边界不齐"——那是**诊断错了
+                                       病**：不齐来自三个按钮各用一套盒模型，不是来自 soft/solid
+                                       的填充色。盒模型现在由 index.css 的
+                                       `[data-hs-transport-button].rt-IconButton` 对所有变体归一化，
+                                       因此变体可以自由切换而盒子不动。 */
                                     tone="danger"
-                                    fill="solid"
+                                    fill="soft"
                                     active={recording.active}
                                     icon={
                                         recording.active ? (

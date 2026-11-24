@@ -8,9 +8,15 @@
  * 用户看到的"录音键的红色填充与播放键不齐"就是这三套盒模型的直接后果 ——
  * 它不是一个颜色值的问题，只改 `--red-9` 永远修不掉。
  *
- * 【为什么录音键固定实心】待机 soft、录制中 solid 意味着**按下那一刻盒子会变**：
- * soft 是半透明强调色、solid 是不透明强调色，两者的填充边界差 1px，而按钮宽度
- * 也跟着变体走。录制状态只需要换**图标**与 `aria-pressed`，不该换盒模型。
+ * 【为什么 `fill` 与 `active` 是两个维度】`fill` 是**常态**该长什么样（录音键待机是
+ * soft 红），`active` 是**这一刻**是否处于开态（录制中是 solid 红）。此前把录音键
+ * 固定成 solid 是为了治"红色填充与播放键不齐"—— 那是误诊：不齐来自三个按钮各用
+ * 一套盒模型（文字 Button / 图标 IconButton / Box 包裹的 IconButton），与 soft↔solid
+ * 的填充色无关。盒模型归一化落在 `index.css` 的 `[data-hs-transport-button]` 规则里，
+ * 覆盖全部变体，因此变体可以自由切换而盒子不动。
+ *
+ * 这两件事分开之后，"待机 soft / 录制中 solid"就是安全的：它只改填充色，
+ * 宽度、高度、内边距、负 margin 都仍由那条 CSS 规则钉死。
  *
  * 【为什么用 `data-hs-transport-button` 而不是给每个实例写 className】
  * `index.css` 里有一条针对该属性的盒模型规则，覆盖 ghost / soft / solid **全部**
@@ -31,7 +37,7 @@ export interface TransportIconButtonProps {
     onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void;
     onContextMenu?: (event: React.MouseEvent<HTMLButtonElement>) => void;
     disabled?: boolean;
-    /** 切换态的"开"：只影响 `aria-pressed` 与实心填充，不改变盒模型。 */
+    /** 切换态的"开"：强制实心并置 `aria-pressed`，不改变盒模型。 */
     active?: boolean;
     /** 语义色：`danger` 是录音这类破坏性/捕获动作的固定红。 */
     tone?: TransportTone;

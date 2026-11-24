@@ -1436,8 +1436,9 @@ textarea {
  *
  * 【为什么不能只归一化 ghost】上面那条规则让"ghost ↔ solid 切换"不再抖，却留下
  * "soft vs solid 的填充边界不一致"：同一行里的 Stop（soft）比 Play（solid）宽一圈，
- * 而 Record 曾经在 soft / solid 之间切换 —— 用户看到的就是"录音键的红色填充与播放
- * 键不齐"。填充色不同是**语义**（危险/强调），盒子不同是**缺陷**。
+ * 而 Record 在 soft / solid 之间切换 —— 用户看到的就是"录音键的红色填充与播放键
+ * 不齐"。填充色不同是**语义**（危险/强调），盒子不同是**缺陷**：因此这里治的是盒子，
+ * 不是把 Record 的变体固定下来（它按语义该在待机 soft / 录制中 solid 之间切）。
  *
  * 因此这条规则按属性选择，覆盖 ghost / soft / solid 三种变体：宽度、高度、内边距、
  * 负 margin 全部取同一个值。新加的传输按钮只要带 data-hs-transport-button 就自动
