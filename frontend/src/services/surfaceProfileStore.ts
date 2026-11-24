@@ -37,7 +37,17 @@ export interface SurfaceProfile {
         secondary_button: boolean;
         modifier_keys: boolean;
         pressure: boolean;
+        /** 硬件能否同时报多个触点（两端都为真）。 */
         multi_touch: boolean;
+        /**
+         * 画布是否实现了双指捏合缩放 + 平移（**产品**能力，不是硬件能力）。
+         *
+         * 触摸输入层（`features/touch/*`）只认这一位：为假时不注册任何监听器，
+         * 桌面交互路径因此逐字节不变。
+         */
+        two_finger_gesture: boolean;
+        /** 长按是否等价于右键（移动端为真；桌面长按左键是拖拽，绝不能弹菜单）。 */
+        long_press_menu: boolean;
     };
     viewport: {
         safe_area: boolean;
@@ -86,6 +96,9 @@ export const DESKTOP_FALLBACK_PROFILE: SurfaceProfile = {
         modifier_keys: true,
         pressure: true,
         multi_touch: true,
+        // 桌面：触摸输入层不挂载。
+        two_finger_gesture: false,
+        long_press_menu: false,
     },
     viewport: {
         safe_area: false,
@@ -160,6 +173,29 @@ export function formOverrideFromLocation(search: string): DeclaredForm | null {
 }
 
 /**
+ * 把一份剖面改写成「移动形态」（`?form=mobile` 调试入口用）。
+ *
+ * 【为什么连输入能力一起改】调试入口的目的就是**在桌面上复现移动形态的代码
+ * 路径**。只改 `form` 而保留桌面的输入能力位，触摸输入层就不会挂载 —— 于是
+ * 「桌面上试一下手势」这件事永远做不到，每次都要等真机。
+ *
+ * 【为什么不改 `primary` / `hover` / `wheel`】那三项描述的是**这台机器的真实
+ * 输入设备**（桌面还有鼠标）。改掉它们会让滚轮、悬停、右键在浏览器里失效，
+ * 调试入口自己先坏掉。产品能力位才是形态的函数。
+ */
+function withMobileForm(profile: SurfaceProfile): SurfaceProfile {
+    return {
+        ...profile,
+        form: "mobile",
+        input: {
+            ...profile.input,
+            two_finger_gesture: true,
+            long_press_menu: true,
+        },
+    };
+}
+
+/**
  * 灌入后端剖面。失败时**保持桌面后备值**并留一条 debug 日志。
  *
  * 【为什么失败不抛】这是启动路径上的一步：抛出去会让整个应用挂不起来，而"形态拿不到"
@@ -171,12 +207,12 @@ export async function hydrateSurfaceProfile(fetcher: () => Promise<unknown>): Pr
         const raw = await fetcher();
         const profile = normalizeSurfaceProfile(raw);
         const override = formOverrideFromLocation(window.location.search);
-        setSurfaceProfile(override ? { ...profile, form: override } : profile);
+        setSurfaceProfile(override ? withMobileForm(profile) : profile);
     } catch (error) {
         // 不 console.warn：浏览器预览下每次启动都会有一条，而它不是问题。
         void error;
         const override = formOverrideFromLocation(window.location.search);
-        if (override) setSurfaceProfile({ ...DESKTOP_FALLBACK_PROFILE, form: override });
+        if (override) setSurfaceProfile(withMobileForm(DESKTOP_FALLBACK_PROFILE));
     }
 }
 
@@ -230,7 +266,26 @@ export function normalizeSurfaceProfile(raw: unknown): SurfaceProfile {
     return {
         form,
         os,
-        input: { ...fallback.input, ...(value.input ?? {}) },
+        input: {
+            ...fallback.input,
+            ...(value.input ?? {}),
+            /*
+             * 两个**产品**能力位在旧后端上缺省：按形态推断。
+             *
+             * 【为什么不是一律 false】它们是形态的必然属性 —— 触摸屏一定
+             * 能双指、长按一定没有右键可替代。旧后端不报时按形态推断，行为
+             * 与新后端一致；反过来（一律 false）会让「后端还没跟上」变成
+             * 「手机上突然不能缩放了」，而且没有任何日志能指向它。
+             */
+            two_finger_gesture:
+                typeof value.input?.two_finger_gesture === "boolean"
+                    ? value.input.two_finger_gesture
+                    : form === "mobile",
+            long_press_menu:
+                typeof value.input?.long_press_menu === "boolean"
+                    ? value.input.long_press_menu
+                    : form === "mobile",
+        },
         viewport: { ...fallback.viewport, ...(value.viewport ?? {}), insets },
         storage: { ...fallback.storage, ...(value.storage ?? {}) },
         audio: { ...fallback.audio, ...(value.audio ?? {}) },

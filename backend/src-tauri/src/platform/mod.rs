@@ -132,7 +132,22 @@ pub struct InputSurface {
     pub secondary_button: bool,
     pub modifier_keys: bool,
     pub pressure: bool,
+    /// 设备能否同时报多个触点（硬件事实，两端都为真）。
     pub multi_touch: bool,
+    /// 画布是否实现了**双指捏合缩放 + 平移**（软件事实）。
+    ///
+    /// 【为什么与 `multi_touch` 分开】`multi_touch` 说的是「屏幕能不能同时
+    /// 报出两根手指」，那是硬件事实，桌面触摸屏也有。这一位说的是「我们的
+    /// 画布有没有实现那套手势」—— 它是**产品决定**，移动端为真、桌面为假。
+    /// 前端的触摸输入层只认这一位：桌面因此不注册任何手势监听器，
+    /// 交互路径逐字节不变。
+    pub two_finger_gesture: bool,
+    /// 长按是否等价于右键（弹出对象菜单）。移动端为真。
+    ///
+    /// 【为什么要单独一位】长按合成 `contextmenu` 的实现早已存在
+    /// （`utils/useLongPress.ts`），但「长按算不算右键」是形态约定，
+    /// 不是实现细节：桌面长按左键是拖拽，绝不能弹菜单。
+    pub long_press_menu: bool,
 }
 
 /// 视口剖面。
@@ -365,6 +380,9 @@ fn profile_with_insets(insets: native::Insets) -> SurfaceProfile {
             // 前端沿用既有的"设备自报"判定（`penInput.ts`），不要在这里二次判断。
             pressure: true,
             multi_touch: true,
+            // 触摸输入层（平移 / 捏合 / 长按菜单）只在移动形态挂载。
+            two_finger_gesture: mobile,
+            long_press_menu: mobile,
         },
         viewport: ViewportSurface {
             safe_area: mobile,

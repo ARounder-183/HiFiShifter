@@ -92,4 +92,9 @@ Invoke-Gate 'Mobile form gate' { python scripts/checks/check-mobile-form-gate.py
 # Only reproducible under latency, so it needs a machine to remember it.
 Invoke-Gate 'Timeline payload gate' { python scripts/checks/check-timeline-payload-gate.py }
 
+# And the layer that made the phone unusable: both canvases must be able to answer
+# "is this input a finger?". Zero occurrences of "touch" in either canvas directory
+# is what "scrolling is unusable on the phone" looked like in the source.
+Invoke-Gate 'Touch coverage gate' { python scripts/checks/check-touch-coverage.py }
+
 Write-Host 'All static gates passed.' -ForegroundColor Green

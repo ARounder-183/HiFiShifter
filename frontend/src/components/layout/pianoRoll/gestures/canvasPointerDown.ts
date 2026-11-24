@@ -28,6 +28,7 @@ import type { ParamBlockPointerDownResult, PointerDeps } from "./pointerDeps";
 import { handleFreehandPointerDown } from "./freehandPointerDown";
 import { handleVibratoPointerDown } from "./vibratoPointerDown";
 import { handleSelectPointerDown } from "./selectPointerDown";
+import { surfaceProfile } from "../../../../services/surfaceProfileStore";
 
 /** 指针按下所需的上下文。 */
 type CanvasPointerDownDeps = Pick<
@@ -768,6 +769,93 @@ export function handleCanvasPointerDown(
             )
         ) {
             return;
+        }
+        /*
+         * 触摸：选择工具在**空白处**按下 = 平移视图。
+         *
+         * 【为什么只有这一种组合】单指在参数编辑器里有十几种语义（画线 / 框选 /
+         * 拉伸 / 颤音 / 块拖动），把其中任何一种改成平移都会破坏编辑。而
+         * 「选择工具 + 什么都没命中」这一种情况本来**什么都不做**（松手时只是
+         * 清掉选区），把它改成平移不占用任何既有语义 —— 而它恰好是手机上
+         * 「我想滚一下看看」最自然的起手式。
+         *
+         * 【为什么读能力位而不是 pointerType】触摸屏笔记本同样会发
+         * `pointerType === "touch"`。能力位是后端按形态下发的产品决定，
+         * 桌面为假 ⇒ 这条分支在桌面上根本不存在。
+         */
+        if (
+            e.pointerType === "touch" &&
+            e.button === 0 &&
+            !isStylusLike(e.nativeEvent) &&
+            surfaceProfile().input.two_finger_gesture
+        ) {
+            const scroller = scrollerRef.current;
+            if (scroller) {
+                e.preventDefault();
+                setCanvasCursor("grabbing");
+                const pid = e.pointerId;
+                panRef.current = {
+                    pointerId: pid,
+                    startClientX: e.clientX,
+                    startClientY: e.clientY,
+                    startScrollLeft: scroller.scrollLeft,
+                    startView:
+                        editParam === "pitch"
+                            ? pitchViewRef.current
+                            : (paramViewsRef.current[editParam] ?? { center: 0.5, span: 1 }),
+                    startRectH:
+                        (canvasRef.current?.getBoundingClientRect().height ??
+                            viewSizeRef.current.h) ||
+                        1,
+                };
+                const onMove = (ev: globalThis.PointerEvent) => {
+                    // 触摸没有 buttons 位可读（抬起时是 0），只能按 pointerId 认人。
+                    if (ev.pointerId !== pid) return;
+                    const pan = panRef.current;
+                    if (!pan) return;
+                    const dx = ev.clientX - pan.startClientX;
+                    const dy = ev.clientY - pan.startClientY;
+                    scroller.scrollLeft = Math.max(0, pan.startScrollLeft - dx);
+                    syncScrollLeft(scroller);
+                    const hPx = Math.max(1, pan.startRectH);
+                    const deltaCenter = (dy / hPx) * pan.startView.span;
+                    if (editParam === "pitch") {
+                        setPitchView(
+                            clampViewport("pitch", {
+                                span: pan.startView.span,
+                                center: centerForPanDelta({
+                                    param: editParam,
+                                    directions: paramAxisDirectionsRef.current,
+                                    center: pan.startView.center,
+                                    deltaCenter,
+                                }),
+                            }),
+                        );
+                    } else {
+                        setParamViewport(
+                            editParam,
+                            clampViewport(editParam, {
+                                span: pan.startView.span,
+                                center: pan.startView.center + deltaCenter,
+                            }),
+                        );
+                    }
+                    invalidate();
+                };
+                const onEnd = () => {
+                    panRef.current = null;
+                    setCanvasCursor(getDefaultCanvasCursor());
+                };
+                startPointerGesture({
+                    pointerId: pid,
+                    captureTarget: e.currentTarget,
+                    onMove,
+                    onEnd,
+                    registerEnd: setActivePointerGestureEnd,
+                    clearEnd: clearActivePointerGestureEnd,
+                });
+                return;
+            }
         }
     }
 

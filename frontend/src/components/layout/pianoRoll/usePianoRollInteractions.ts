@@ -30,6 +30,7 @@ import type {
     ValueViewport,
 } from "./types";
 import { computeDynGeometricMean } from "./selectionTransforms";
+import { centerForPanDelta } from "./paramAxisProjection";
 import { framesToTime } from "./utils";
 import { isDynParam, restoreDynSentinels } from "./paramRanges";
 import {
@@ -2888,6 +2889,75 @@ export function usePianoRollInteractions(args: {
         [getCurveValueNearPointer, onParamValuePreviewChange, paramValuePopupEnabled],
     );
 
+    /**
+     * 触摸平移（双指拖动 / 选择工具在空白处单指拖动）。
+     *
+     * 【为什么是「按增量」而不是「按起点」】触摸手势层给的是逐帧位移，
+     * 与中键平移同一种算术：横向写原生 scroller（再由 `syncScrollLeft`
+     * 同任务重绘各图层），纵向写值域中心（与边缘自动滚屏同一落点）。
+     *
+     * 【为什么不走 dispatch】视口是命令式的（见 `pianoRollViewportBus`），
+     * 每帧派发 Redux 会把 60fps 的手势变成 60 次 React 提交。
+     */
+    const onTouchPanBy = useCallback(
+        (dx: number, dy: number) => {
+            const scroller = scrollerRef.current;
+            if (!scroller) return;
+            if (dx !== 0) {
+                scroller.scrollLeft = Math.max(0, scroller.scrollLeft - dx);
+                syncScrollLeft(scroller);
+            }
+            if (dy !== 0) {
+                const hPx = Math.max(1, viewSizeRef.current.h);
+                const view =
+                    editParam === "pitch"
+                        ? pitchViewRef.current
+                        : (paramViewsRef.current[editParam] ?? { center: 0.5, span: 1 });
+                // 与中键平移同一符号约定：手指向下拖 = 值域窗口向上移动。
+                const deltaCenter = (dy / hPx) * view.span;
+                const next = clampViewport(editParam, {
+                    span: view.span,
+                    center: centerForPanDelta({
+                        param: editParam,
+                        directions: paramAxisDirectionsRef.current,
+                        center: view.center,
+                        deltaCenter,
+                    }),
+                });
+                if (editParam === "pitch") {
+                    setPitchView(next);
+                } else {
+                    setParamViewport(editParam, next);
+                }
+                invalidate();
+            }
+        },
+        [
+            clampViewport,
+            editParam,
+            invalidate,
+            paramAxisDirectionsRef,
+            paramViewsRef,
+            pitchViewRef,
+            scrollerRef,
+            setParamViewport,
+            setPitchView,
+            syncScrollLeft,
+            viewSizeRef,
+        ],
+    );
+
+    /**
+     * 取消当前正在进行的编辑手势（触摸第二根手指落下时调用）。
+     *
+     * 走既有的「登记收尾」通道：每个编辑手势在开始时都把收尾登记到
+     * `activePointerGestureEndRef`，身份匹配才清除。因此这里调一次就等于
+     * 用户按了 Esc —— 回滚乐观值、不提交、释放指针捕获。
+     */
+    const cancelActivePointerGesture = useCallback(() => {
+        activePointerGestureEndRef.current?.();
+    }, [activePointerGestureEndRef]);
+
     return {
         onRulerMouseDown,
         onScrollerAuxClick,
@@ -2903,5 +2973,9 @@ export function usePianoRollInteractions(args: {
         refreshParamValuePreview,
         /** 本工具的默认光标（块层的空白分支与通用处理器共用同一判据）。 */
         getDefaultCanvasCursor,
+        /** 触摸平移（双指拖动 / 空白处单指拖动）。 */
+        onTouchPanBy,
+        /** 取消当前编辑手势（第二根手指落下）。 */
+        cancelActivePointerGesture,
     };
 }

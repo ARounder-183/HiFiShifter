@@ -50,6 +50,12 @@ import {
     type TimelineKernelInteractions,
 } from "./host/timelineKernelHost";
 import { frontendLog } from "../../../../services/frontendLog";
+import {
+    useViewportGestures,
+    dispatchPinchWheel,
+} from "../../../../features/touch/useViewportGestures";
+import { resolveTouchIntent } from "../../../../features/touch/touchIntent";
+import { surfaceProfile, subscribeSurfaceProfile } from "../../../../services/surfaceProfileStore";
 
 /** `activeGroupIds` / `disabledGroupIds` 缺省时的稳定空数组（`?? []` 每渲染换新引用）。 */
 const NO_GROUP_IDS: readonly string[] = [];
@@ -789,6 +795,63 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         // 只在挂载时创建：宿主是长生命周期运行时对象，数据经 dataRef 流入。
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    // ── 触摸视口手势（平移 / 捏合）──────────────────────────────────
+    //
+    // 【为什么挂在这里而不是面板】手势必须比编辑手势**更早**看到 pointerdown：
+    // 宿主把编辑手势挂在容器的冒泡阶段，本 hook 用 capture 阶段拦截并在平移
+    // 成立时 stopPropagation，编辑手势因此完全看不到那一次按下（不会「边滚边
+    // 拖 Clip」）。容器就是这个组件的根节点，挂载点天然稳定。
+    //
+    // 【能力位为假时零注册】桌面 `input.two_finger_gesture === false`，hook 连
+    // 监听器都不装 —— 桌面交互路径逐字节不变（含触摸屏笔记本）。
+    const touchGesturesEnabled = React.useSyncExternalStore(
+        subscribeSurfaceProfile,
+        () => surfaceProfile().input.two_finger_gesture,
+        () => false,
+    );
+    const gestureAdapter = React.useMemo(
+        () => ({
+            panBy(dx: number, dy: number) {
+                const host = localHostRef.current;
+                if (host === null) return;
+                const view = host.getViewport();
+                // 手指向右拖 = 内容跟着走 = 视口向左滚。
+                host.setScrollLeft(view.scrollLeft - dx);
+                host.setScrollTop(view.scrollTop - dy);
+            },
+            zoomBy(factor: number, clientX: number, clientY: number) {
+                const host = localHostRef.current;
+                const container = containerRef.current;
+                if (host === null || container === null) return;
+                // 复用内核既有的滚轮缩放通道：锚点换算、上下限钳制、与参数编辑器
+                // 的共享视口同步全部已在里面，捏合只是换了个输入源。
+                dispatchPinchWheel(container, clientX, clientY, factor);
+            },
+            cancelActiveEdit() {
+                localHostRef.current?.cancelActiveGesture();
+            },
+        }),
+        [],
+    );
+    const shouldPanOnPress = React.useCallback((event: PointerEvent) => {
+        const host = localHostRef.current;
+        if (host === null) return false;
+        const hit = host.hitTestAt(event.clientX, event.clientY);
+        const intent = resolveTouchIntent({
+            hit: hit === "clip" ? "clip-body" : "empty",
+            pointerCount: 1,
+            tool: "select",
+            gestureEnabled: true,
+        });
+        return intent === "pan";
+    }, []);
+    useViewportGestures({
+        elementRef: containerRef,
+        enabled: touchGesturesEnabled,
+        adapter: gestureAdapter,
+        shouldPanOnPress,
+    });
 
     /**
      * 内容域（工程时长 / 轨道数）变化后重新钳制滚动位置。
