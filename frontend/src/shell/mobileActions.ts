@@ -14,8 +14,13 @@
  * 看到的是同一个心智模型。
  *
  * 【为什么要有排除表】有些动作在移动端**结构上做不到**，而不是"暂时没接"：
- * 从任意路径导入（沙箱不给路径）、把键盘交给宿主（没有宿主）。把它们摆出来，用户
- * 点下去只会得到一个失败或一条静默 no-op —— 本仓明令禁止的形状。
+ * 从 VocalShifter 剪贴板粘贴（移动端还没有系统剪贴板通道）、把键盘交给宿主
+ * （没有宿主）。把它们摆出来，用户点下去只会得到一个失败或一条静默 no-op ——
+ * 本仓明令禁止的形状。
+ *
+ * 【为什么"从任意路径导入"不在排除表里了】它此前被排除的理由是"移动端没有可浏览
+ * 的目录树"。现在导入走系统选择器（SAF），选中的文件被收编进工作区，路径对下游
+ * 完全有效 —— 继续排除等于把已经能用的功能藏起来。
  */
 
 import { ACTION_META } from "../features/keybindings/defaultKeybindings";
@@ -47,13 +52,10 @@ export interface MobileActionSection {
  * 不需要再去读一遍代码。
  */
 const MOBILE_UNAVAILABLE: Partial<Record<ActionId, SurfaceCapabilityId | null>> = {
-    // 从任意路径导入：移动端没有可浏览的目录树（见 platform/paths.rs 的存储模型）。
-    "project.open": "fs.pathAccess",
-    "project.importHifishifter": "fs.pathAccess",
-    "project.importReaper": "fs.pathAccess",
-    "project.importVocalShifter": "fs.pathAccess",
-    "edit.pasteVocalShifter": "fs.pathAccess",
-    "project.importMidi": "fs.pathAccess",
+    // 系统剪贴板：移动端的剪贴板读写还没有原生通道（hifishifter-clipboard 在
+    // Android/iOS 上返回 `clipboard_unsupported_platform`），粘贴 VocalShifter
+    // 载荷必然失败。
+    "edit.pasteVocalShifter": null,
     // 宿主相关：移动端没有 DAW。
     "host.handKeyboardToHost": null,
     // 快速搜索的导航键属于弹窗内部，不该出现在抽屉里。

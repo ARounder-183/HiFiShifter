@@ -46,7 +46,6 @@ const REASON_KEYS = [
     "surface_reason_touch_input",
     "surface_reason_no_path_access",
     "surface_reason_not_on_this_surface",
-    "surface_reason_use_system_picker",
 ] as const satisfies readonly MessageKey[];
 
 type SurfaceReasonKey = (typeof REASON_KEYS)[number];

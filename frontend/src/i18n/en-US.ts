@@ -200,6 +200,7 @@ export const enUS = {
     export_dialog_browse: "Browse",
     export_dialog_example_path: "Example output path: {path}",
     export_dialog_open_folder: "Open Folder",
+    export_dialog_save_to_location: "Save to...",
     export_dialog_name_pattern: "Track Name Pattern",
     export_pattern_placeholders: "Placeholders:",
     import_files_selected: "{count} file selected|{count} files selected",
@@ -2366,7 +2367,6 @@ export const enUS = {
     surface_reason_touch_input: "Touch input has no such channel",
     surface_reason_no_path_access: "Apps cannot browse arbitrary folders on this platform",
     surface_reason_not_on_this_surface: "Not available on this platform",
-    surface_reason_use_system_picker: "This platform picks files through the system picker",
     // 移动端抽屉的分段标题。桌面用菜单栏（文件/编辑/视图…），移动端没有菜单栏，
     // 但分组的**语义**要一致，否则同一批功能在两个形态里归到了不同的类。
     mobile_section_playback: "Playback",
