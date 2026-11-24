@@ -180,6 +180,7 @@ import { useKeybindings } from "./features/keybindings/useKeybindings";
 import { selectMergedKeybindings } from "./features/keybindings/keybindingsSlice";
 import { beginHoldRepeat } from "./features/keybindings/holdRepeat";
 import { ProjectLibrarySheet } from "./components/layout/ProjectLibrarySheet";
+import { useEditTelemetryFlush } from "./shell/useEditTelemetryFlush";
 import { appForm } from "./services/hostDetect";
 import {
     DEFAULT_DISPATCH,
@@ -1923,6 +1924,9 @@ function AppInner() {
      * 给「从设备导入…」。
      */
     const [projectLibraryOpen, setProjectLibraryOpen] = useState(false);
+
+    // 编辑链路埋点的唯一出口（快照被丢弃 / 被推迟都会在这里留下证据）。
+    useEditTelemetryFlush();
 
     const handleOpenProject = useCallback(() => {
         if (appForm() === "mobile") {
