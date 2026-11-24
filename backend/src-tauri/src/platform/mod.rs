@@ -26,6 +26,7 @@ use serde::Serialize;
 pub mod audio_session;
 pub mod dialog;
 pub mod logging;
+pub mod mime;
 pub mod native;
 pub mod paths;
 pub mod resources;

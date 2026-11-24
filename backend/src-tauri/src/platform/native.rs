@@ -263,9 +263,14 @@ struct PickFilesResponse {
 }
 
 /// 打开系统文件选择器；用户取消时返回空列表。
+///
+/// 【参数是扩展名，不是 MIME】调用方（`platform::dialog` 与 `pick_files_bytes`）
+/// 手里只有 rfd 风格的扩展名列表。把扩展名直接塞进 SAF 的 `EXTRA_MIME_TYPES` 会让
+/// DocumentsUI 认为没有任何文件匹配 —— 选择器里每一项都是灰的、点不动，也没有任何提示。
+/// 翻译在这里做一次，两个调用点因此都不必知道 SAF 的口味。见 `platform::mime`。
 pub fn pick_files(
     app: &tauri::AppHandle,
-    mime_types: &[String],
+    extensions: &[String],
     multiple: bool,
 ) -> Result<Vec<PathBuf>, String> {
     #[cfg(target_os = "android")]
@@ -274,7 +279,7 @@ pub fn pick_files(
             return Err("native file picker is unavailable on this build".to_string());
         };
         let request = PickFilesRequest {
-            mime_types: mime_types.to_vec(),
+            mime_types: super::mime::for_extensions(extensions),
             multiple,
         };
         // 【为什么这里会阻塞】用户要在系统选择器里做选择，Rust 侧必须等结果。
@@ -293,7 +298,7 @@ pub fn pick_files(
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = (app, mime_types, multiple);
+        let _ = (app, extensions, multiple);
         Err("native file picker is unavailable on this platform".to_string())
     }
 }

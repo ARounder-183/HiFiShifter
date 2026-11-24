@@ -268,22 +268,8 @@ fn mime_type_for(file_name: &str) -> &'static str {
     let extension = Path::new(file_name)
         .extension()
         .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    match extension.as_str() {
-        "wav" => "audio/x-wav",
-        "flac" => "audio/flac",
-        "mp3" => "audio/mpeg",
-        "ogg" | "oga" => "audio/ogg",
-        "opus" => "audio/opus",
-        "m4a" | "aac" => "audio/mp4",
-        "aif" | "aiff" => "audio/aiff",
-        "mid" | "midi" => "audio/midi",
-        "zip" => "application/zip",
-        "json" => "application/json",
-        "md" => "text/markdown",
-        "txt" => "text/plain",
-        "hshp" => "application/octet-stream",
-        _ => "application/octet-stream",
-    }
+        .unwrap_or_default();
+    // 同一张表也决定"系统选择器里哪些文件可选"（见 `platform::mime`）：
+    // 导出与导入各写一份，迟早会有一边漏掉某种格式。
+    super::mime::for_extension(extension).unwrap_or("application/octet-stream")
 }
