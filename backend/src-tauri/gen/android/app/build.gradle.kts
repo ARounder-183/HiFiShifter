@@ -13,6 +13,31 @@ val tauriProperties = Properties().apply {
     }
 }
 
+// ── Release signing ──────────────────────────────────────────────────────────
+//
+// [Why this file and not a hardcoded keystore] An unsigned APK cannot be installed at
+// all -- the package manager rejects it with INSTALL_PARSE_FAILED_NO_CERTIFICATES
+// before any "unknown sources" setting is even consulted. tauri-cli leaves the release
+// APK unsigned on purpose (a store re-signs it / uploads an AAB), which is correct for
+// Play and useless for side-loading, so the gradle project has to own a key.
+//
+// [Why keystore.properties is not committed] It contains the store and key passwords.
+// The file lives next to this project's root (gen/android/keystore.properties) and is
+// ignored by .gitignore; scripts/build/android.ps1 creates it together with the key on
+// first release build. Losing the key means the next build is a *different app* to
+// Android: it can only be installed after uninstalling the current one.
+//
+// [Why the build still works without it] CI that signs elsewhere (Play App Signing,
+// jarsigner in a later step) gets an unsigned APK and the same output as before. The
+// build script only refuses to *ship* an unsigned APK, not to produce one.
+val releaseKeystore = Properties().apply {
+    val propFile = rootProject.file("keystore.properties")
+    if (propFile.exists()) {
+        propFile.inputStream().use { load(it) }
+    }
+}
+val hasReleaseSigning = releaseKeystore.getProperty("storeFile") != null
+
 android {
     compileSdk = 36
     namespace = "com.arounder.hifishifter"
@@ -31,6 +56,18 @@ android {
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
     }
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                // rootProject, not this module: keystore.properties is written next to
+                // settings.gradle, so a relative storeFile resolves from gen/android.
+                storeFile = rootProject.file(releaseKeystore.getProperty("storeFile"))
+                storePassword = releaseKeystore.getProperty("storePassword")
+                keyAlias = releaseKeystore.getProperty("keyAlias")
+                keyPassword = releaseKeystore.getProperty("keyPassword")
+            }
+        }
+    }
     buildTypes {
         getByName("debug") {
             manifestPlaceholders["usesCleartextTraffic"] = "true"
@@ -44,6 +81,9 @@ android {
             }
         }
         getByName("release") {
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = true
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }

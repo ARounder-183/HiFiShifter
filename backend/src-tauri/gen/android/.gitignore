@@ -15,6 +15,10 @@ build
 local.properties
 key.properties
 keystore.properties
+# The release signing key created by scripts/build/android.ps1. A signing key must
+# never be committed: anyone holding it can publish an update that Android accepts as
+# this app. Back it up like a password.
+/keystore
 
 /.tauri
 /tauri.settings.gradle

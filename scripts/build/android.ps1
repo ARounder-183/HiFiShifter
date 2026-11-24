@@ -1,9 +1,21 @@
 ﻿# Build the Android package.
 #
-#   .\scripts\build\android.ps1                   # release APK (standalone)
+#   .\scripts\build\android.ps1                   # release APK (standalone, signed)
+#   .\scripts\build\android.ps1 -Run              # ...and install + launch it
 #   .\scripts\build\android.ps1 -Bundle           # AAB (Play)
 #   .\scripts\build\android.ps1 -DebugBuild       # debug APK (dev server required)
 #   .\scripts\build\android.ps1 -DebugBuild -Run  # ...and install + launch it
+#
+# [Why a release build is signed by this script] Android refuses to install a package
+# without a signature -- the error is INSTALL_PARSE_FAILED_NO_CERTIFICATES, and it has
+# nothing to do with "unknown sources": no toggle can make an unsigned APK installable.
+# tauri-cli deliberately leaves the release APK unsigned (a store is expected to sign
+# it), which is right for Play and useless for a phone, so this script owns a key:
+# gen/android/keystore/release.jks plus gen/android/keystore.properties, both ignored by
+# git. It is created on the first release build and reused after that. Keep it: a new
+# key makes the APK a different app to Android, and installing it over the old one fails
+# with INSTALL_FAILED_UPDATE_INCOMPATIBLE until the old one is uninstalled (-Reinstall
+# does that, and wipes the app's data along with it).
 #
 # [Why the switch is called -DebugBuild and not -Debug] `[CmdletBinding()]` already gives
 # the script a common `-Debug` parameter (it sets `$DebugPreference`). Declaring our own
@@ -55,7 +67,12 @@ param(
     [switch]$DebugBuild,
     [string]$Target = "aarch64",
     # Install the package on the attached device and launch it.
-    [switch]$Run
+    [switch]$Run,
+    # Throw the release signing key away and create a new one (the old APK then needs
+    # uninstalling first -- a different key means a different signing identity).
+    [switch]$NewSigningKey,
+    # Uninstall the installed package before installing (needed after -NewSigningKey).
+    [switch]$Reinstall
 )
 
 $ErrorActionPreference = "Stop"
@@ -71,6 +88,160 @@ Write-Host "== JDK:         $($toolchain.JdkRoot)" -ForegroundColor Cyan
 $androidProject = Join-Path $root "backend\src-tauri\gen\android"
 $profile = if ($DebugBuild) { "Debug" } else { "Release" }
 $cargoProfile = if ($DebugBuild) { "debug" } else { "release" }
+
+# ── Release signing ──────────────────────────────────────────────────────────
+#
+# [Why the key lives here and not in the user profile] It is project state, not machine
+# state: it belongs next to the gradle project that consumes it, in a directory git
+# ignores, so a fresh clone on another machine can regenerate it with one command and
+# nobody accidentally commits it. This is also the Android SDK's own convention (a
+# keystore beside keystore.properties).
+$keystoreDir = Join-Path $androidProject "keystore"
+$keystorePath = Join-Path $keystoreDir "release.jks"
+$keystoreProperties = Join-Path $androidProject "keystore.properties"
+$keystoreAlias = "hifishifter"
+
+# [Why this helper exists] `2>&1` on a native command turns every stderr line into an
+# ErrorRecord, and this script runs with `$ErrorActionPreference = "Stop"` -- so the
+# *informational* output keytool and apksigner write to stderr aborted the build before
+# it did anything. The exit code is the only thing that carries the real result.
+function Invoke-NativeCapture {
+    param([string]$FilePath, [string[]]$Arguments)
+
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $output = & $FilePath @Arguments 2>&1
+        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = @($output) }
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+}
+
+function Get-ApkSigner {
+    $buildTools = Get-ChildItem (Join-Path $toolchain.SdkRoot "build-tools") -Directory -ErrorAction SilentlyContinue |
+        Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+    if (-not $buildTools) { throw "No build-tools under $($toolchain.SdkRoot)\build-tools; cannot sign or verify." }
+    $apksigner = Join-Path $buildTools.FullName "apksigner.bat"
+    if (-not (Test-Path -LiteralPath $apksigner)) { throw "apksigner not found at $apksigner" }
+    return $apksigner
+}
+
+function New-ReleaseSigningKey {
+    $keytool = Join-Path $toolchain.JdkRoot "bin\keytool.exe"
+    if (-not (Test-Path -LiteralPath $keytool)) { throw "keytool not found at $keytool" }
+
+    New-Item -ItemType Directory -Force -Path $keystoreDir | Out-Null
+    if (Test-Path -LiteralPath $keystorePath) { Remove-Item -LiteralPath $keystorePath -Force }
+
+    # [Why a generated password] The key only ever has to be unlocked by this script;
+    # asking a human for one produces "123456" or whatever they use everywhere else.
+    # 40 characters from an unambiguous alphabet, stored next to the key in a file git
+    # ignores. Losing both files is recoverable only by shipping a new app identity.
+    $alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    $bytes = New-Object byte[] 40
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    $password = -join ($bytes | ForEach-Object { $alphabet[$_ % $alphabet.Length] })
+
+    # [Why an argument array] PowerShell backtick line continuation inside a wrapper
+    # script is a common source of "the command silently ran with half its arguments";
+    # an array is one value and cannot be split by the parser.
+    $keytoolArgs = @(
+        "-genkeypair", "-v",
+        "-keystore", $keystorePath,
+        "-alias", $keystoreAlias,
+        "-keyalg", "RSA",
+        "-keysize", "4096",
+        "-validity", "10000",
+        "-storepass", $password,
+        "-keypass", $password,
+        "-dname", "CN=HiFiShifter, O=ARounder, C=CN"
+    )
+    $generated = Invoke-NativeCapture -FilePath $keytool -Arguments $keytoolArgs
+    if ($generated.ExitCode) {
+        throw ("keytool failed to create " + $keystorePath + " (exit " + $generated.ExitCode + "):" +
+            [Environment]::NewLine + ($generated.Output -join [Environment]::NewLine))
+    }
+
+    # [Why forward slashes] java.util.Properties treats a backslash as an escape, so
+    # "keystore\release.jks" is read back as "keystorerelease.jks" and gradle then fails
+    # with "keystore file not found" long after the real cause.
+    @(
+        "# Created by scripts/build/android.ps1. Do not commit; back this file and"
+        "# keystore/release.jks up together -- they are the app's signing identity."
+        "storeFile=keystore/release.jks"
+        "storePassword=$password"
+        "keyAlias=$keystoreAlias"
+        "keyPassword=$password"
+    ) | Set-Content -LiteralPath $keystoreProperties -Encoding ascii
+
+    Write-Host "== created a release signing key: $keystorePath" -ForegroundColor Yellow
+    Write-Host "   credentials in $keystoreProperties (both are gitignored)" -ForegroundColor Yellow
+    Write-Host "   back them up. Losing them means the next build cannot update this app." -ForegroundColor Yellow
+}
+
+function Initialize-ReleaseSigning {
+    if ($DebugBuild) { return }          # the debug build type signs with the debug key
+
+    if ($NewSigningKey) {
+        New-ReleaseSigningKey
+    }
+    elseif (-not (Test-Path -LiteralPath $keystoreProperties)) {
+        New-ReleaseSigningKey
+    }
+    elseif (-not (Test-Path -LiteralPath $keystorePath)) {
+        # Properties without the key is the state left behind by deleting the keystore
+        # (or by checking the properties out without the ignored key). Regenerating
+        # silently would ship a differently-signed build without anyone noticing.
+        throw @"
+The signing key is missing but its properties file still exists:
+
+  key:        $keystorePath
+  properties: $keystoreProperties
+
+Either restore the key from your backup, or run with -NewSigningKey to replace both
+(a new key means the installed app must be uninstalled first: -Reinstall).
+"@
+    }
+
+    # [Why the fingerprint is printed] It is the only way to tell two builds apart once
+    # they are on a phone, and the first thing a store or an issue report asks for.
+    $keytool = Join-Path $toolchain.JdkRoot "bin\keytool.exe"
+    $props = @{}
+    Get-Content -LiteralPath $keystoreProperties |
+        Where-Object { $_ -match '^[A-Za-z]+=' } |
+        ForEach-Object {
+            $name, $value = $_ -split '=', 2
+            $props[$name] = $value
+        }
+    $listing = Invoke-NativeCapture -FilePath $keytool -Arguments @(
+        "-list", "-v", "-keystore", $keystorePath,
+        "-storepass", $props['storePassword'], "-alias", $props['keyAlias']
+    )
+    $fingerprint = ($listing.Output | Select-String -Pattern 'SHA256:' | Select-Object -First 1).Line
+    if ($fingerprint) { Write-Host ("== signing key " + $fingerprint.Trim()) -ForegroundColor DarkGray }
+}
+
+function Assert-ApkSigned {
+    param([System.IO.FileInfo]$Apk)
+
+    $signer = Get-ApkSigner
+    $verification = Invoke-NativeCapture -FilePath $signer -Arguments @("verify", "--print-certs", $Apk.FullName)
+    $report = $verification.Output
+    if ($verification.ExitCode) {
+        throw @"
+$($Apk.FullName) is not signed, so no Android device will install it.
+
+$($report | Select-Object -First 4 | Out-String)
+
+An unsigned release APK means gradle found no keystore.properties. Run this script
+without -DebugBuild; it creates the key on first use. Do not hand this file to a phone.
+"@
+    }
+    $dn = ($report | Select-String -Pattern 'certificate DN' | Select-Object -First 1).Line
+    Write-Host ("== {0} is signed ({1})" -f $Apk.Name, ($dn -replace '^.*certificate DN:\s*', '')) -ForegroundColor Green
+}
 
 # ── Windows symlink privilege ─────────────────────────────────────────────────
 #
@@ -273,6 +444,10 @@ try {
         if (Test-Path -LiteralPath $stale) { Remove-Item -LiteralPath $stale -Recurse -Force }
     }
 
+    # Before the build: gradle reads keystore.properties at configuration time, so a key
+    # created later in this run would not be picked up until the next build.
+    Initialize-ReleaseSigning
+
     Write-Host ("== " + (($cli + $buildArgs) -join " ")) -ForegroundColor Cyan
     # [Why the preference is relaxed around this call] `2>&1` on a native command turns
     # every stderr line into an ErrorRecord under Windows PowerShell, and this script runs
@@ -349,6 +524,13 @@ $packages = @()
 foreach ($pattern in @("*.apk", "*.aab")) {
     $packages += @(Get-ChildItem -LiteralPath $outputs -Recurse -Filter $pattern -File -ErrorAction SilentlyContinue)
 }
+# [Why before the size check] An unsigned APK is the one failure that wastes a whole
+# side-load attempt on the phone, and "is it signed" is answered in 200 ms. It also
+# catches a stale unsigned file left behind by an earlier run.
+foreach ($apkFile in $packages | Where-Object { $_.Extension -eq '.apk' }) {
+    Assert-ApkSigned -Apk $apkFile
+}
+
 foreach ($package in $packages) {
     $zip = [IO.Compression.ZipFile]::OpenRead($package.FullName)
     try {
@@ -368,6 +550,15 @@ $($package.FullName)
   backend\src-tauri\gen\android\app\build and build again; do not ship this file.
 "@
     }
+}
+
+# [Why the absolute path is printed] The file is the deliverable; "BUILD SUCCESSFUL" plus
+# a relative gradle path has sent more than one person looking in the wrong directory.
+foreach ($package in $packages) {
+    Write-Host ("== artifact: " + $package.FullName + " (" + [math]::Round($package.Length / 1MB, 1) + " MiB)") -ForegroundColor Cyan
+}
+if (-not $Run -and $packages.Count -gt 0) {
+    Write-Host "   copy it to the phone, or run with -Run to install and launch it" -ForegroundColor DarkGray
 }
 
 # -- Run on the device --------------------------------------------------------
@@ -392,24 +583,6 @@ if ($Run) {
     $apk = Get-ChildItem -LiteralPath $outputs -Recurse -Filter "*.apk" -File |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if (-not $apk) { throw "No APK was produced under $outputs" }
-
-    if ($apk.Name -like '*-unsigned.apk') {
-        # [Why the debug keystore] A release APK is unsigned until a store signs it, and an
-        # unsigned package cannot be installed at all. For side-loading the debug key that
-        # already exists on every machine is the right one: it is disposable, it is not a
-        # distribution identity, and using it keeps a real signing config (key.properties)
-        # out of the local loop.
-        $keystore = Join-Path $env:USERPROFILE ".android\debug.keystore"
-        if (-not (Test-Path -LiteralPath $keystore)) { throw "No debug keystore at $keystore" }
-        $buildTools = Get-ChildItem (Join-Path $toolchain.SdkRoot "build-tools") -Directory |
-            Sort-Object Name -Descending | Select-Object -First 1
-        $apksigner = Join-Path $buildTools.FullName "apksigner.bat"
-        $signedPath = $apk.FullName -replace '-unsigned\.apk$', '-signed.apk'
-        Write-Host "== signing with the debug keystore (side-load only)" -ForegroundColor DarkGray
-        & $apksigner sign --ks $keystore --ks-pass pass:android --key-pass pass:android --ks-key-alias androiddebugkey --out $signedPath $apk.FullName
-        if ($LASTEXITCODE) { throw "apksigner failed (exit $LASTEXITCODE)" }
-        $apk = Get-Item -LiteralPath $signedPath
-    }
 
     if ($DebugBuild) {
         # [Why the dev server is started here] Without it the APK installs and then shows the
@@ -441,8 +614,34 @@ if ($Run) {
         Write-Host "== device localhost:5173 -> this machine's dev server" -ForegroundColor DarkGray
     }
 
-    & $adb -s $serial install -r $apk.FullName
-    if ($LASTEXITCODE) { throw "adb install failed (exit $LASTEXITCODE)" }
+    # [Why the retry] Android identifies an app by package name *and* signing
+    # certificate. Installing a build signed with a different key over an existing one
+    # fails with INSTALL_FAILED_UPDATE_INCOMPATIBLE -- which reads like a device policy
+    # but is really "this is, to Android, a different app". Uninstalling first is the
+    # only way forward, and it deletes the app's data, so it is opt-in via -Reinstall.
+    $install = & $adb -s $serial install -r $apk.FullName 2>&1
+    $installText = ($install | Out-String)
+    if ($LASTEXITCODE -and ($Reinstall -or $installText -match 'INSTALL_FAILED_UPDATE_INCOMPATIBLE|signatures do not match')) {
+        Write-Host "== the installed app was signed with a different key; uninstalling it first" -ForegroundColor Yellow
+        Write-Host "   (this deletes the app's data: projects, settings, imported media)" -ForegroundColor Yellow
+        & $adb -s $serial uninstall com.arounder.hifishifter | Out-Null
+        $install = & $adb -s $serial install $apk.FullName 2>&1
+        $installText = ($install | Out-String)
+    }
+    if ($LASTEXITCODE) {
+        throw @"
+adb install failed (exit $LASTEXITCODE):
+
+$installText
+
+If the message mentions INSTALL_FAILED_USER_RESTRICTED or asks for confirmation on the
+phone, the device is blocking side-loading:
+  - MIUI / HyperOS: Settings -> Developer options -> "Install via USB" and
+    "USB debugging (Security settings)" must both be on, and the phone asks for
+    confirmation on screen for each install.
+  - Otherwise allow "Install unknown apps" for the shell/File Manager you use.
+"@
+    }
     & $adb -s $serial shell am start -n "com.arounder.hifishifter/.MainActivity"
     if ($LASTEXITCODE) { throw "am start failed (exit $LASTEXITCODE)" }
     Write-Host "== launched" -ForegroundColor Green
