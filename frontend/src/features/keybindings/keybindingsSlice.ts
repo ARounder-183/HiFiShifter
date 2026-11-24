@@ -1,3 +1,4 @@
+import { modifierView } from "./modifierState";
 import {
     createListenerMiddleware,
     createSlice,
@@ -493,9 +494,23 @@ export function isModifierActive(
     const required = getModifierFlags(kb);
     if (!hasAnyModifierFlags(required)) return false;
 
-    const pressedCtrl = isPrimaryModifierDown(event);
-    const pressedShift = Boolean(event.shiftKey);
-    const pressedAlt = Boolean(event.altKey);
+    /*
+     * 虚拟修饰键（移动端屏幕上的芯片）在这里统一并入 —— 这是**唯一**能让 160 处
+     * 既有读取点一行不改就支持触摸的接缝。
+     *
+     * 【为什么只对指针事件生效】`isModifierActive` 同时服务键盘路径（菜单快捷键、
+     * 修饰键绑定）。若把锁存的芯片也算进键盘事件，用户点一下「slip」之后按 Ctrl+Z
+     * 就会变成一次「按住 slip 的撤销」—— 语义串台，而且没有任何报错。判据是
+     * 「这个事件带不带 `key` 字段」：指针 / 滚轮事件没有，键盘事件一定有。
+     *
+     * 【桌面恒等】没有锁存时 `modifierView` 原样返回入参，下面三个布尔与改动前
+     * 逐字段相同。
+     */
+    const view = "key" in (event as object) ? event : modifierView(event);
+
+    const pressedCtrl = isPrimaryModifierDown(view);
+    const pressedShift = Boolean(view.shiftKey);
+    const pressedAlt = Boolean(view.altKey);
 
     return (
         (!required.ctrl || pressedCtrl) &&

@@ -22,6 +22,7 @@
  * 是**或**关系（⌘ 与 Ctrl 都算命中）。
  */
 
+import { modifierView } from "../../../features/keybindings/modifierState";
 import type { Keybinding } from "../../../features/keybindings/types";
 
 /** 判定所需的事件字段（结构化子集：PointerEvent / React 合成事件都能直接传入）。 */
@@ -55,9 +56,12 @@ export function isFadeShapeCycleModifierHeld(
     const requiredCtrl = modifierOnly && kb.key === "control" ? true : Boolean(kb.ctrl);
     const requiredAlt = modifierOnly && kb.key === "alt" ? true : Boolean(kb.alt);
     const requiredShift = modifierOnly && kb.key === "shift" ? true : Boolean(kb.shift);
+    // 走 `modifierView`：移动端没有物理修饰键，屏幕上的芯片就是「按住」。
+    // 少了这一层，「循环切换淡变形状」在触摸形态下永远判成未按住。
+    const view = modifierView(event);
     return (
-        (!requiredCtrl || event.ctrlKey || event.metaKey) &&
-        (!requiredAlt || event.altKey) &&
-        (!requiredShift || event.shiftKey)
+        (!requiredCtrl || view.ctrlKey || view.metaKey === true) &&
+        (!requiredAlt || view.altKey) &&
+        (!requiredShift || view.shiftKey)
     );
 }

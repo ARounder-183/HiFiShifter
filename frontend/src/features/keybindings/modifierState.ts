@@ -106,6 +106,44 @@ export function clearModifierState(): void {
     emit();
 }
 
+/** 事件上的四个修饰键字段（`PointerEvent` / `WheelEvent` / `KeyboardEvent` 都满足）。 */
+export interface ModifierView {
+    ctrlKey: boolean;
+    shiftKey: boolean;
+    altKey: boolean;
+    metaKey?: boolean;
+}
+
+/**
+ * 把「物理修饰键 ∪ 虚拟锁存」合并成一份可读的修饰键视图。
+ *
+ * 【这是全仓唯一允许回答「修饰键生效了吗」的地方】桌面上的答案是「用户按着
+ * Ctrl」，移动端的答案是「用户点了那枚芯片」。两者在**所有下游代码**里必须是
+ * 同一件事 —— 否则 slip 编辑 / 复制拖动 / 边缘拉伸 / 不吸附 / 精细调整 / 参数
+ * 形变 / 多选 / 块创建这八类操作在手机上就是不存在（此前正是如此：29 枚芯片
+ * 只会自己高亮，`virtualModifierFlags()` 全仓零消费者）。
+ *
+ * 【桌面恒等】没有虚拟锁存时**原样返回入参**（同一个对象引用）。这不是省一次
+ * 分配，而是零回归的锚点：桌面路径拿到的对象与改动前逐字段相同，任何依赖
+ * 引用相等的代码也不会被扰动。
+ *
+ * 【为什么不是给事件对象塞字段】原生 `PointerEvent` 的 `ctrlKey` 是只读
+ * getter，写不进去；React 合成事件虽然可写，但内核宿主用的是**原生监听器**。
+ * 两套事件对象、两种行为 = 又一个「只在某条路径上坏」的坑。显式传值是唯一
+ * 不会分叉的做法。
+ */
+export function modifierView(e: ModifierView): ModifierView {
+    if (!hasActiveModifier()) return e;
+    // 虚拟修饰键统一映射到 `ctrl`：语义是「这个修饰生效了」，而不是「用户按下
+    // 了 Ctrl」（见 `virtualModifierFlags` 的映射表说明）。
+    return {
+        ctrlKey: true,
+        shiftKey: e.shiftKey,
+        altKey: e.altKey,
+        metaKey: e.metaKey,
+    };
+}
+
 /**
  * 把虚拟修饰键合成为"物理修饰键"的形状，供既有读取点复用。
  *

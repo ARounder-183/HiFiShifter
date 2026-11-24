@@ -25,6 +25,7 @@ import {
     type ModifierLatch,
 } from "../features/keybindings/modifierState";
 import { cx } from "../ui/cx";
+import { haptic } from "../features/touch/touchHaptics";
 
 /** 长按锁定修饰键的判定时长（毫秒）。 */
 const MODIFIER_LOCK_LONG_PRESS_MS = 500;
@@ -120,6 +121,9 @@ function ModifierChip({
         timerRef.current = window.setTimeout(() => {
             longPressedRef.current = true;
             toggleModifierLock(id);
+            // 锁定是一次「状态改变」，给一次轻震确认 —— 触摸屏上没有其它反馈
+            // 能告诉用户「这次是按住了，不是点了一下」。
+            haptic("long-press");
         }, MODIFIER_LOCK_LONG_PRESS_MS);
     };
 
@@ -142,6 +146,7 @@ function ModifierChip({
         // 长按已经处理过锁定，抬起时不能再补一次点按（否则"锁定"会立刻被解除）。
         if (wasLongPress) return;
         toggleModifierOnce(id);
+        haptic("snap");
     };
 
     const onPointerCancel = () => {

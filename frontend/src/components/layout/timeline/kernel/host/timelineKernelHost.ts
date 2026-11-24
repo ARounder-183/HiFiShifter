@@ -52,6 +52,7 @@ import {
     isNoneBinding,
 } from "../../../../../features/keybindings/keybindingsSlice";
 import { resolveClipSelectionModifiers } from "../../../../../features/keybindings/clipSelectionModifiers";
+import { modifierView } from "../../../../../features/keybindings/modifierState";
 import type { Keybinding } from "../../../../../features/keybindings/types";
 import { isPrimaryModifierDown } from "../../../../../utils/platform";
 import { WHEEL_LINE_HEIGHT_PX } from "../../../../../utils/pinchGesture";
@@ -4110,11 +4111,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
          * resolveHeaderControl 单独识别，不进入重叠区解析。
          */
         const rawHit = hitAt(event.clientX, event.clientY);
+        const pressModifiers = modifierView(event);
         const press = resolveOverlapPressTarget(rawHit, {
-            altKey: event.altKey,
-            ctrlKey: event.ctrlKey,
-            metaKey: event.metaKey,
-            shiftKey: event.shiftKey,
+            altKey: pressModifiers.altKey,
+            ctrlKey: pressModifiers.ctrlKey,
+            metaKey: pressModifiers.metaKey === true,
+            shiftKey: pressModifiers.shiftKey,
         });
         const hit = press.hit;
         const overlapClickClipId = press.plainControlClick
@@ -5058,11 +5060,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         altKey: boolean;
         metaKey: boolean;
     }): KernelDragModifiers {
+        // 走 `modifierView`：移动端的虚拟修饰键（屏幕上的芯片）必须与桌面上
+        // 按住的 Ctrl 产生**同一份**快照。这里是内核所有拖拽（移动 / 修剪 /
+        // 淡变 / 增益 / 交叉淡化抓手）的**唯一**修饰键入口 —— 换掉这一处，
+        // 复制拖动、slip 编辑、边缘拉伸在触摸形态下才第一次可达。
+        const view = modifierView(event);
         return {
-            ctrlKey: event.ctrlKey,
-            shiftKey: event.shiftKey,
-            altKey: event.altKey,
-            metaKey: event.metaKey,
+            ctrlKey: view.ctrlKey,
+            shiftKey: view.shiftKey,
+            altKey: view.altKey,
+            metaKey: view.metaKey === true,
         };
     }
 
@@ -5083,7 +5090,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     function resolveSelectionMods(event: PointerEvent | MouseEvent) {
         const kb = data().keybindings;
         return resolveClipSelectionModifiers({
-            event,
+            // 与 `dragModifiersOf` 同一口径：虚拟修饰键必须参与「多选切换 /
+            // 范围选择」的判定，否则手机上永远只能单选。
+            event: modifierView(event),
             multiSelectToggleKb: kb.clipMultiSelectToggle ?? { key: "Control" },
             rangeSelectKb: kb.clipRangeSelect ?? { key: "Shift" },
         });

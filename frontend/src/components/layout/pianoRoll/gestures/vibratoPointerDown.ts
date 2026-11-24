@@ -1,3 +1,4 @@
+import { modifierView } from "../../../../features/keybindings/modifierState";
 import { startPointerGesture, type PointerGesture } from "./pointerGesture";
 import {
     cycleVibratoChoice,
@@ -215,9 +216,14 @@ export function handleVibratoPointerDown(
         lastLineSample = {
             clientX: ev.clientX,
             clientY: ev.clientY,
-            ctrlKey: ev.ctrlKey,
-            shiftKey: ev.shiftKey,
-            altKey: ev.altKey,
+            // 虚拟修饰键参与「精细调整 / 吸附切换」的判定：桌面靠按住 Ctrl，
+            // 移动端靠屏幕上的芯片。两者必须在同一份快照里。
+            ...modifierView({
+                ctrlKey: ev.ctrlKey,
+                shiftKey: ev.shiftKey,
+                altKey: ev.altKey,
+                metaKey: false,
+            }),
         };
         const adjusted = getFineAdjustedPointerPosition(finePointerState, ev);
         const f2 = timeToFrame(pointerSec(adjusted.clientX), fp);
