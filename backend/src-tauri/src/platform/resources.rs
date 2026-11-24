@@ -65,6 +65,22 @@ pub fn models_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Err("models root unresolved on this surface".to_string())
 }
 
+/// 诊断用：本次物化读的是哪个 APK。
+///
+/// 【为什么要暴露它】"模型不可用"有两类完全不同的原因：**包里没有**（构建没把
+/// 资源 stage 进 `assets/`）与**物化失败**（APK 路径没认出来）。诊断包里没有
+/// 这一条时，两者在用户机器上看起来一模一样。
+pub fn apk_path_for_diagnostics() -> Option<PathBuf> {
+    #[cfg(target_os = "android")]
+    {
+        android_apk_path()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        None
+    }
+}
+
 /// 物化 APK 里的 `assets/models/**` 到 `target`。
 ///
 /// 【幂等判据是"逐文件长度相等"】Android 的系统清理不会动 `files/`，但用户在设置里

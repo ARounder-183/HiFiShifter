@@ -189,11 +189,79 @@ fn build_system_info(state: &State<'_, AppState>) -> serde_json::Value {
             "playbackTarget": rt.playback_target,
         },
         "gpuDevices": super::onnx_status::get_gpu_devices(),
+        "models": build_models_info(state),
         "dmlAdapters": super::onnx_status::get_dml_adapters(),
         "memory": build_memory_info(),
         "logVerbosity": hifishifter_kernel::log_policy::current().as_str(),
         "sessionId": hifishifter_kernel::log_policy::session_id(),
     })
+}
+
+/// 模型库的现场：目录、APK、已登记项、实际文件。
+///
+/// 【为什么必须进诊断包】"音高画了没反应"最常见的根因是声码器权重不在设备上
+/// （没进包、物化失败、被系统的"清除存储"删掉）。此前诊断包只有
+/// `runtime.modelLoaded` 一个布尔 —— 它只能说明"没加载"，说不出**为什么**。
+/// 这里把"目录在哪、从哪个 APK 解出来的、登记了哪些、实际有哪些文件多大"
+/// 一次列清：这三条互相独立，缺哪条都能一眼定位。
+fn build_models_info(state: &State<'_, AppState>) -> serde_json::Value {
+    use hifishifter_kernel as kernel;
+
+    let (root, root_error) = match state.app_handle.get() {
+        Some(app) => match crate::platform::resources::models_root(app) {
+            Ok(dir) => (Some(dir), None),
+            Err(error) => (None, Some(error)),
+        },
+        None => (None, Some("app handle unavailable".to_string())),
+    };
+
+    let mut files = Vec::new();
+    if let Some(dir) = &root {
+        collect_model_files(dir, dir, 0, &mut files);
+    }
+
+    serde_json::json!({
+        "root": root.as_ref().map(|p| p.display().to_string()),
+        "rootError": root_error,
+        "apk": crate::platform::resources::apk_path_for_diagnostics()
+            .map(|p| p.display().to_string()),
+        "registered": {
+            "fcpe": kernel::fcpe_onnx_path().map(|p| p.display().to_string()),
+            "nsfHifigan": kernel::nsf_hifigan_model_dir().map(|p| p.display().to_string()),
+            "hnsep": kernel::hnsep_model_dir().map(|p| p.display().to_string()),
+            "game": kernel::game_model_dir().map(|p| p.display().to_string()),
+        },
+        "files": files,
+    })
+}
+
+/// 递归列出模型目录（深度 ≤3、最多 64 条）：相对路径 + 字节数。
+///
+/// 【为什么有上限】模型目录正常只有十几个文件；上限防的是用户把整个模型树
+/// 塞进 `models-user/`（那会把诊断包撑到几百 MB，而它要能贴进 issue）。
+fn collect_model_files(root: &Path, dir: &Path, depth: usize, out: &mut Vec<serde_json::Value>) {
+    const MAX_ENTRIES: usize = 64;
+    if depth > 3 || out.len() >= MAX_ENTRIES {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if out.len() >= MAX_ENTRIES {
+            break;
+        }
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.is_dir() {
+            collect_model_files(root, &path, depth + 1, out);
+        } else if meta.is_file() {
+            let relative = path.strip_prefix(root).unwrap_or(&path).display().to_string();
+            out.push(serde_json::json!({ "path": relative, "bytes": meta.len() }));
+        }
+    }
 }
 
 /// 内存相关诊断：进程级缓存的驻留规模。
