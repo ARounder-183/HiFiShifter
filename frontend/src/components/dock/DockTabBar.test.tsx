@@ -253,6 +253,33 @@ test("Delete 关闭当前标签，焦点顺序随之收敛", async () => {
     expect(m.tab(activeTabId(m.store)).tabIndex).toBe(0);
 });
 
+/*
+ * 触摸形态的关闭入口：动作区里的那个按钮。
+ *
+ * 【为什么它必须存在】触摸下标签上的小叉被 CSS 隐藏了（切换标签时的误触全部来自
+ * "叉长在标签上"，见 dock.css 的说明）。如果只删不补，关闭就只剩长按菜单一条路 ——
+ * 那不是一个能靠肉眼发现的入口。
+ *
+ * 【为什么它关闭的是"活动标签"】动作区不属于任何一个标签，它只能作用于当前选中的
+ * 那一个。这与"先选中、再关闭"的两步操作是同一条契约。
+ */
+test("动作区的关闭按钮关闭当前活动标签（触摸形态的唯一关闭入口）", async () => {
+    const m = await mount();
+
+    const button = m.host.querySelector<HTMLElement>("[data-dock-tab-close-action]");
+    if (!button) throw new Error("动作区关闭按钮未渲染");
+    // 桌面隐藏、触摸显示由 CSS 完成；结构必须始终在（见 dock.css 的 data-touch-only）。
+    expect(button.getAttribute("data-touch-only")).toBe("1");
+    expect(button.getAttribute("aria-label")).toBeTruthy();
+
+    await act(async () => {
+        button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    // 活动标签是 alpha：只有它被关掉，其余两个原样保留。
+    expect(tabIds(m.store)).toEqual(["beta", "gamma"]);
+});
+
 test("关闭按钮可用 Enter / Space 触发（role=button 的键盘等价操作）", async () => {
     const m = await mount();
 

@@ -4162,6 +4162,35 @@ function AppInner() {
         </div>
     );
 
+    /*
+     * 菜单栏节点**只构造一次**，桌面与移动共用同一个实例。
+     *
+     * 【为什么必须是同一个实例】`MenuBar` 内部持有十几套对话框的开关状态，并在
+     * `useEffect` 里监听 `hifi:openEditDialog` / `hifi:importMediaFromMenu`。
+     * 渲染两份会让同一个事件触发两次、同一个对话框被打开两次；而移动端此前
+     * `display:none` 挂载它的理由（对话框宿主）也要求它只有一份。
+     *
+     * 桌面把它放进 `DesktopChrome` 的菜单槽位；移动端把它放进菜单 sheet
+     * （见 `AppChrome` 的 `mobileMenu`）—— 同一时刻只会出现在其中一处。
+     */
+    const menuBarNode = (
+        <MenuBar
+            onNewProject={handleNewProject}
+            onOpenProject={handleOpenProject}
+            onOpenRecentProject={handleOpenRecentProject}
+            onRecaptureMissingMedia={handleRecaptureMissingMedia}
+            onImportProject={handleImportProject}
+            onExit={handleExitApp}
+            onImportMidiFromMenu={handleImportMidiFromMenu}
+            autoBackupSettings={autoBackupSettings}
+            onAutoBackupSettingsSaved={handleAutoBackupSettingsSaved}
+            autoReloadModifiedMedia={autoReloadModifiedMedia}
+            onAutoReloadModifiedMediaChange={handleAutoReloadModifiedMediaChange}
+            loopNewClips={loopNewClips}
+            onLoopNewClipsChange={handleLoopNewClipsChange}
+        />
+    );
+
     return (
         <AppChrome
             /*
@@ -4170,25 +4199,10 @@ function AppInner() {
              * 成立。分散在三处时，漏掉任何一条的症状都是"底部工具栏被手势条盖住 8px"
              * 这种肉眼要盯很久才发现的问题。
              */
+            mobileMenu={menuBarNode}
             desktopHeader={
                 <DesktopChrome
-                    menuBar={
-                        <MenuBar
-                            onNewProject={handleNewProject}
-                            onOpenProject={handleOpenProject}
-                            onOpenRecentProject={handleOpenRecentProject}
-                            onRecaptureMissingMedia={handleRecaptureMissingMedia}
-                            onImportProject={handleImportProject}
-                            onExit={handleExitApp}
-                            onImportMidiFromMenu={handleImportMidiFromMenu}
-                            autoBackupSettings={autoBackupSettings}
-                            onAutoBackupSettingsSaved={handleAutoBackupSettingsSaved}
-                            autoReloadModifiedMedia={autoReloadModifiedMedia}
-                            onAutoReloadModifiedMediaChange={handleAutoReloadModifiedMediaChange}
-                            loopNewClips={loopNewClips}
-                            onLoopNewClipsChange={handleLoopNewClipsChange}
-                        />
-                    }
+                    menuBar={menuBarNode}
                     actionBar={<ActionBar />}
                     notice={
                         isPluginMode() ? (

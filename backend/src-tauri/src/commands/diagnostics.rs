@@ -43,6 +43,34 @@ pub(super) fn open_log_folder(app: tauri::AppHandle) -> serde_json::Value {
         return serde_json::json!({ "ok": false, "error": format!("create log dir failed: {e}") });
     }
 
+    /*
+     * ── 移动端：没有"用文件管理器打开这个目录"这个动作 ────────────────────
+     *
+     * 用户在这里真正需要的是**路径**（复制给我们），而不是一个打不开的目录。
+     * Android 上 `open_path` 对应用私有目录只会失败：`files/` 是沙箱内路径，
+     * 系统文件应用看不到它，而 Android 11 起连 `Android/data` 都被隐藏。
+     * 直接尝试打开的代价是用户拿到一句"open folder failed"，而**路径本身
+     * 没有出现在任何地方** —— 那正是他最需要的信息。
+     *
+     * 想真正把日志带出去，走「导出诊断信息」：它写进 `Android/media/<pkg>`，
+     * 文件管理器与 USB 都可见（见 `platform::paths::export_dir`）。
+     */
+    if crate::platform::is_mobile() {
+        let file = logging::log_file().map(|p| p.to_string_lossy().into_owned());
+        log::info!(
+            "[diagnostics] log folder requested on mobile (not openable): {}",
+            dir.display()
+        );
+        return serde_json::json!({
+            "ok": true,
+            "path": dir.to_string_lossy(),
+            "file": file,
+            // `opened: false` = "没有打开文件管理器，只是把位置告诉你"。
+            // 前端据此把路径显示成可复制的文本（见 `logFolderNotice`）。
+            "opened": false,
+        });
+    }
+
     match app.opener().open_path(dir.to_string_lossy(), None::<&str>) {
         Ok(()) => serde_json::json!({ "ok": true, "path": dir.to_string_lossy() }),
         Err(e) => serde_json::json!({ "ok": false, "error": format!("open folder failed: {e}") }),
@@ -288,6 +316,16 @@ fn append_benchmark(zip_path: &Path) -> Result<(), String> {
 
 fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
     // 在系统文件管理器中定位导出的 zip；失败不影响导出结果本身。
+    //
+    // 【移动端不尝试】`reveal_item_in_dir` 在 Android/iOS 上是空实现（见
+    // `platform::share` 的文件头）：调用"成功"但屏幕上什么都不会发生，属于
+    // 本仓明令禁止的静默失效。导出的落点本身已经是用户可见的位置
+    // （Android `Android/media/<pkg>/HiFiShifter`、iOS 文件 App），前端会把
+    // 路径直接显示出来 —— 那才是移动端的"交付"。
+    if crate::platform::is_mobile() {
+        log::info!("[diagnostics] exported to {}", path.display());
+        return Ok(());
+    }
     tauri_plugin_opener::reveal_item_in_dir(path).map_err(|e| format!("reveal failed: {e}"))
 }
 

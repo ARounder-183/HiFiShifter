@@ -110,6 +110,7 @@ const BenchmarkDialog = lazy(() =>
 );
 import { AboutDialog } from "./AboutDialog";
 import { LogVerbosityMenuItems } from "./LogVerbosityMenuItems";
+import { isMobileForm } from "../../services/hostDetect";
 
 import {
     isChildPitchOffsetCentsParam,
@@ -572,6 +573,22 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 setNotice({
                     title: tf("status_error_prefix"),
                     message: res.error || tf("menu_export_diagnostics_failed"),
+                });
+                return;
+            }
+            /*
+             * 移动端：把落点**直接说出来**。
+             *
+             * 桌面导出成功后由后端在资源管理器里定位文件，用户看得见；移动端没有
+             * 这个动作（见 `platform::share`），而导出物落在
+             * `Android/media/<pkg>/HiFiShifter` —— 那是文件管理器与 USB 都可见的
+             * 位置，但用户不会知道。只报"成功"等于让他自己去找。
+             */
+            if (isMobileForm() && res.path) {
+                setNotice({
+                    title: tf("menu_export_diagnostics"),
+                    message: <span data-hs-selectable="true">{res.path}</span>,
+                    copyText: res.path,
                 });
             }
         } catch (e) {

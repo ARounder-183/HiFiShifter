@@ -21,7 +21,7 @@
  * 快捷键做不了"这类分叉从结构上不会出现。
  */
 
-import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { DropdownMenu, TextField } from "@radix-ui/themes";
 
 import { store } from "../../app/store";
@@ -51,14 +51,9 @@ import { AppDialog } from "../../ui/Dialog";
 import { AppConfirmDialog, AppNoticeDialog } from "../../ui";
 
 /* ── 二级菜单 → 对话框宿主的通信 ─────────────────────────────────
- * 二级菜单在菜单关闭时卸载，持有不了对话框的开关状态；把三份状态提升到
- * `MenuBar` 又会让停靠 UI 的细节漏进菜单栏。这里用模块级单值桥接：菜单项
- * 置位、常驻宿主订阅。快照是原始值，`useSyncExternalStore` 不会抖。 */
-type DockDialogKind =
-    "settings" | "namePrompt" | "resetConfirm" | "deletePresetConfirm" | "notice" | null;
-
-let dockDialogKind: DockDialogKind = null;
-const dockDialogListeners = new Set<() => void>();
+ * 桥本身住在 `dockLayoutDialogBridge`（移动端抽屉也要用它，而本文件只导出组件）。
+ * 这里只保留**本文件私有**的两份载荷：待删除的预设名与通知正文。 */
+import { setDockDialogKind, useDockDialogKind } from "./dockLayoutDialogBridge";
 
 /**
  * 待删除的预设名。与 `dockNoticeMessage` 同理：快照仍是原始值（kind），
@@ -73,12 +68,6 @@ let dockPresetToDelete: string | null = null;
  */
 let dockNoticeMessage: string | null = null;
 
-function setDockDialogKind(kind: DockDialogKind) {
-    if (dockDialogKind === kind) return;
-    dockDialogKind = kind;
-    dockDialogListeners.forEach((listener) => listener());
-}
-
 /** 打开错误通知（取代此前的 `window.alert`）。 */
 function setDockNotice(message: string) {
     dockNoticeMessage = message;
@@ -89,18 +78,6 @@ function setDockNotice(message: string) {
 function requestDeletePreset(name: string) {
     dockPresetToDelete = name;
     setDockDialogKind("deletePresetConfirm");
-}
-
-function useDockDialogKind(): DockDialogKind {
-    return useSyncExternalStore(
-        (onStoreChange) => {
-            dockDialogListeners.add(onStoreChange);
-            return () => {
-                dockDialogListeners.delete(onStoreChange);
-            };
-        },
-        () => dockDialogKind,
-    );
 }
 
 /** 导入布局的隐藏 `<input>` 由常驻的对话框宿主持有，菜单项经此引用触发点击。

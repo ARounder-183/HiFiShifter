@@ -1758,6 +1758,53 @@ html[data-form="mobile"] .hs-mobile-drawer {
     padding-left: var(--qt-safe-left);
 }
 
+/* 移动形态的菜单 sheet（`MobileMenuSheet`）。
+ *
+ * 【为什么是 fixed 而不是像抽屉那样 absolute】抽屉挂在工作区里（`absolute inset-0`
+ * 以工作区为界），而菜单 sheet 要盖住顶栏与底栏 —— 它的内容就是"整个应用的菜单"，
+ * 留一条底栏在下面只会让下拉菜单与底栏抢层级。`fixed` 以视口为界，也顺带绕开
+ * 了祖先 `overflow: hidden` 的裁剪。
+ *
+ * 【为什么要自己补安全区】`.hs-surface-root` 的 padding 只推开流内子元素；
+ * `fixed` 元素的包含块是视口，不享受那层 padding（与抽屉同一条理由）。
+ */
+html[data-form="mobile"] .hs-mobile-menu-sheet {
+    position: fixed;
+    inset: 0;
+    z-index: var(--qt-z-dialog);
+    display: flex;
+    flex-direction: column;
+    background: var(--qt-window);
+    padding-top: var(--qt-safe-top);
+    padding-right: var(--qt-safe-right);
+    padding-bottom: var(--qt-safe-bottom);
+    padding-left: var(--qt-safe-left);
+}
+
+html[data-form="mobile"] .hs-mobile-menu-sheet-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+/* 菜单栏的一级触发器：触摸下抬到 44px。
+ *
+ * 【为什么选择器是 [aria-haspopup="menu"] 而不是 button】Radix Themes 的
+ * `DropdownMenu.Trigger` 渲染的是 **`<span type="button">`**，不是真正的
+ * `<button>`（`MenuBar` 的注释里记着这条：它不支持 `asChild`，直接用 Trigger
+ * 才不会嵌套按钮）。按 `button` 选会一条都命中不了 —— 症状是"菜单项在手机上
+ * 仍然只有 24px 高、手指点不中"，而且看不出任何报错。
+ *
+ * 【为什么只作用于触发器】下拉内容由 Radix portal 到 body，不在这个子树里；
+ * 那些条目的高度已经由 `--qt-menu-item-h`（触摸 44px）统一控制。这里补的是
+ * `MenuBar` 自己写死的紧凑触发器（桌面 24px 高、`text-qt-xs`）。 */
+html[data-form="mobile"] .hs-mobile-menu-sheet-body [aria-haspopup="menu"] {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    font-size: var(--qt-fs-sm);
+}
+
 /* 根容器的安全区内边距。由 `AppChrome` 挂 `.hs-surface-root`。
  *
  * 【为什么用 padding 而不是 margin】padding 让背景色延伸到安全区之下（刘海两侧

@@ -19,13 +19,26 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { ActionId } from "../features/keybindings/types";
 import { appForm } from "../services/hostDetect";
 import { registerBackHandler } from "../services/backGesture";
-import { MobileActionDrawer, MobileBottomBar, MobileTopBar } from "./MobileChrome";
+import { MobileActionDrawer, MobileBottomBar, MobileMenuSheet, MobileTopBar } from "./MobileChrome";
 import { buildModifierChips } from "./mobileActions";
 import { useI18n } from "../i18n/I18nProvider";
 
 export interface AppChromeProps {
     /** 桌面顶栏（菜单栏 + 动作栏 + 宿主提示条）。移动形态不渲染。 */
     desktopHeader?: ReactNode;
+    /**
+     * 移动形态的「菜单」内容（桌面菜单栏本体）。
+     *
+     * 【为什么与 `desktopHeader` 分开】移动端只需要菜单栏 —— 动作栏（ActionBar）
+     * 是桌面密度的一整排工具条，在 390px 上既放不下也没有对应交互（它的高频项
+     * 已经在移动底栏与动作抽屉里）。把整个 `desktopHeader` 塞进 sheet 会把两件事
+     * 混在一起，而且动作栏的键盘监听在触摸设备上没有意义。
+     *
+     * 【为什么必须由外部传同一个节点】它必须是**同一个 `MenuBar` 实例**：
+     * 对话框状态、事件监听、菜单展开状态都住在组件内部，渲染第二份会让同一个
+     * 对话框被打开两次。
+     */
+    mobileMenu?: ReactNode;
     /** 桌面状态栏。移动形态不渲染 —— 那里的同一份内容归底栏。 */
     desktopFooter?: ReactNode;
 
@@ -48,6 +61,7 @@ export interface AppChromeProps {
 
 export function AppChrome({
     desktopHeader,
+    mobileMenu,
     desktopFooter,
     mobileTitle,
     mobileDirty,
@@ -64,6 +78,7 @@ export function AppChrome({
     const isMobile = form === "mobile";
     const { t } = useI18n();
     const [drawerOpen, setDrawerOpen] = useState(false);
+    const [menuOpen, setMenuOpen] = useState(false);
     const modifierChips = useMemo(() => buildModifierChips(t), [t]);
     /*
      * 抽屉里的快捷键提示在移动端**不显示**：触摸设备上没有键盘，标出 "Ctrl+Shift+Z"
@@ -89,6 +104,20 @@ export function AppChrome({
         });
     }, [drawerOpen, isMobile]);
 
+    /*
+     * 菜单 sheet 的返回键。注册在抽屉之后 —— `registerBackHandler` 是栈，
+     * 后注册的先被询问，因此"菜单盖着抽屉"时先关菜单（菜单打开时抽屉已经被关掉，
+     * 这条顺序仍然成立：两者互斥，见下面的两个 onOpen）。
+     */
+    useEffect(() => {
+        if (!isMobile) return;
+        return registerBackHandler(() => {
+            if (!menuOpen) return false;
+            setMenuOpen(false);
+            return true;
+        });
+    }, [menuOpen, isMobile]);
+
     return (
         <div
             data-form={form}
@@ -101,36 +130,42 @@ export function AppChrome({
                     canUndo={canUndo}
                     canRedo={canRedo}
                     onAction={onMobileAction}
-                    onOpenDrawer={() => setDrawerOpen(true)}
+                    onOpenDrawer={() => {
+                        setMenuOpen(false);
+                        setDrawerOpen(true);
+                    }}
+                    onOpenMenu={() => {
+                        setDrawerOpen(false);
+                        setMenuOpen(true);
+                    }}
                 />
             ) : (
                 desktopHeader
             )}
 
             {/*
-             * 移动端仍然**挂载**桌面顶栏，只是不显示。
+             * 移动端挂载的顶栏：**菜单 sheet**。
              *
-             * 【为什么必须这样】导入媒体、导出音频、转调/设置音高/平滑/量化这一整套
-             * 对话框，实现都住在 `MenuBar` 里：抽屉与面板只派发
-             * `hifi:importMediaFromMenu` / `hifi:openEditDialog` 这两个 DOM 事件，
-             * 而**唯一的监听者**是 MenuBar 自己的 `useEffect`。移动形态不渲染
-             * MenuBar，于是这些动作全部变成"点了没反应"—— 没有报错、没有日志，
-             * 抽屉里的「导入媒体文件」和「导出音频」都是死按钮（2026-11-24 在模拟器上
-             * 逐个点击、监听 IPC 调用确认：一次 invoke 都没有发生）。
+             * 【它同时解决了两件事】
+             * 1. 对话框的宿主：导入媒体、导出音频、转调/设置音高/平滑/量化这一整套
+             *    对话框，实现都住在 `MenuBar` 里：抽屉与面板只派发
+             *    `hifi:importMediaFromMenu` / `hifi:openEditDialog` 这两个 DOM 事件，
+             *    而**唯一的监听者**是 MenuBar 自己的 `useEffect`。移动形态不渲染
+             *    MenuBar，于是这些动作全部变成"点了没反应"—— 没有报错、没有日志。
+             * 2. 菜单本身：设置对话框、帮助里的日志与诊断、「视图 → 窗口 / 布局」，
+             *    这些**不是动作**（不在 `ACTION_META` 里）的条目此前在移动端根本
+             *    没有入口。现在它们就是桌面菜单栏本体（同一个实例，见 `mobileMenu`）。
              *
-             * 【为什么不是重构成 App 级】这些对话框的 state 与 `dispatch` 调用
-             * 和 MenuBar 的其余部分缠在一起（导入要弹"多轨选择""选音频流"两个后续
-             * 对话框）。把它们整体搬出来是一次高风险的大重构；而 MenuBar 的
-             * `display:none` 挂载已经能让**所有**动作恢复，且不改动任何桌面代码。
-             * 这是"先让它正确，再让它漂亮"。
-             *
-             * 【代价】隐藏的 MenuBar 会随应用状态重渲染。它的对话框都是按需加载
-             * （`Suspense` + 条件渲染），菜单内容只有几十个节点，实测不影响滑动。
+             * 【为什么关闭时是 display:none 而不是不渲染】`MenuBar` 里的对话框与
+             * 事件监听必须常驻 —— 卸载它，上面第 1 条就退回到"点了没反应"。
+             * 它的对话框都 portal 到 body，因此父级 `display:none` 不影响它们。
              */}
             {isMobile ? (
-                <div className="hidden" aria-hidden>
-                    {desktopHeader}
-                </div>
+                <MobileMenuSheet
+                    open={menuOpen}
+                    onClose={() => setMenuOpen(false)}
+                    menu={mobileMenu ?? desktopHeader}
+                />
             ) : null}
 
             {/*

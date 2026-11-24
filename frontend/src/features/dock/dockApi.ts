@@ -22,6 +22,7 @@ import { findMainTabset, normalizeDockLayout } from "./dockSchema";
 import { collectTabsets, findTabsetOfForm, isFormVisible, isPanelForm } from "./dockTree";
 import { displayTitleOf, synthesizePanelDefinition } from "./dockPanel";
 import { getPanel, listPanels } from "./panelRegistry";
+import type { MessageKey } from "../../i18n/messages";
 import type { DockForm } from "./dockTypes";
 import {
     applyDockPreset,
@@ -651,7 +652,15 @@ export function importLayoutJson(dispatch: AppDispatch, json: string): boolean {
 
 export interface DockPanelEntry {
     panelId: string;
-    titleKey: string;
+    /**
+     * 面板标题的 i18n 键。
+     *
+     * 【为什么从 `string` 收紧成 `MessageKey`】注册表里本来就是 `MessageKey`
+     * （见 `PanelDefinition.titleKey` 的注释），但这条清单把它拓宽成了 `string`，
+     * 于是"菜单标题拼错键名"在编译期无感 —— 而那正是 `undo_history_title` 与
+     * `notebook` 两次线上缺陷的形状。清单是菜单/抽屉的输入，必须守住同一个约束。
+     */
+    titleKey: MessageKey;
     visible: boolean;
     formId: string | null;
 }

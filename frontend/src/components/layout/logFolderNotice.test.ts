@@ -47,3 +47,18 @@ test("the directory is used when no file path is reported", () => {
 test("nothing is shown when there is no path to show", () => {
     expect(logFolderNotice({ ok: true, opened: false }, true)).toEqual({ kind: "none" });
 });
+
+/*
+ * 移动端：独立 App 也可能"打不开文件夹"。
+ *
+ * 【为什么这条必须存在】`open_log_folder` 在 Android/iOS 上**不尝试**打开文件
+ * 管理器（应用私有目录打不开，Android 11 起连 `Android/data` 都被隐藏），
+ * 而是返回 `opened: false` + 路径。判定不能写成"独立 App 就一定静默" ——
+ * 那会让用户点完菜单什么都没看到，而路径正是他要复制给我们的东西。
+ */
+test("the standalone app hands over the path when it could not open the folder", () => {
+    expect(logFolderNotice({ ok: true, path: PATH, file: FILE, opened: false }, false)).toEqual({
+        kind: "path",
+        path: FILE,
+    });
+});

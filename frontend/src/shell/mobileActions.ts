@@ -66,6 +66,40 @@ const MOBILE_UNAVAILABLE: Partial<Record<ActionId, SurfaceCapabilityId | null>> 
     "quickSearch.close": null,
 };
 
+/**
+ * 抽屉顶部的「窗口」分区 id。
+ *
+ * 【为什么它不在 `SECTION_ORDER` 里】那一份顺序只决定 `ACTION_META` 生成的分段；
+ * 窗口分区的条目来自**停靠布局**（哪个面板开着、哪个关了），是运行期状态而不是
+ * 动作注册表。两者混在同一个生成函数里会让"动作清单"依赖停靠状态。
+ */
+export const MOBILE_WINDOW_SECTION_ID = "windows";
+
+/**
+ * 按搜索词过滤抽屉内容。
+ *
+ * 【为什么必须有搜索】抽屉在移动端是**唯一**的功能入口：135 条动作加上窗口分区
+ * 之后接近 150 行，而 390px 宽的屏幕一次只能显示 8 行。没有搜索时，"打开日志
+ * 文件夹"这类低频项要滑十几屏才看得到 —— 与"根本没有这个功能"没有区别。
+ *
+ * 【匹配规则】只做大小写无关的子串匹配，且**只匹配已本地化的标签**：用户输入的
+ * 是他屏幕上看到的字，拿内部 id 去匹配只会命中他看不见的东西。
+ * 空查询原样返回（保持引用，避免无谓重渲染）。
+ */
+export function filterMobileSections(
+    sections: MobileActionSection[],
+    query: string,
+): MobileActionSection[] {
+    const needle = query.trim().toLowerCase();
+    if (needle === "") return sections;
+    const filtered: MobileActionSection[] = [];
+    for (const section of sections) {
+        const items = section.items.filter((item) => item.label.toLowerCase().includes(needle));
+        if (items.length > 0) filtered.push({ ...section, items });
+    }
+    return filtered;
+}
+
 /** 抽屉的分段顺序。与 `MenuBar` 的菜单顺序一致：先"我要做什么"，最后"界面怎么摆"。 */
 const SECTION_ORDER: Array<{ id: string; titleKey: MessageKey }> = [
     { id: "playback", titleKey: "mobile_section_playback" },
