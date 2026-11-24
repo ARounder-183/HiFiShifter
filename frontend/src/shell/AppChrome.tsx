@@ -108,6 +108,32 @@ export function AppChrome({
             )}
 
             {/*
+             * 移动端仍然**挂载**桌面顶栏，只是不显示。
+             *
+             * 【为什么必须这样】导入媒体、导出音频、转调/设置音高/平滑/量化这一整套
+             * 对话框，实现都住在 `MenuBar` 里：抽屉与面板只派发
+             * `hifi:importMediaFromMenu` / `hifi:openEditDialog` 这两个 DOM 事件，
+             * 而**唯一的监听者**是 MenuBar 自己的 `useEffect`。移动形态不渲染
+             * MenuBar，于是这些动作全部变成"点了没反应"—— 没有报错、没有日志，
+             * 抽屉里的「导入媒体文件」和「导出音频」都是死按钮（2026-11-24 在模拟器上
+             * 逐个点击、监听 IPC 调用确认：一次 invoke 都没有发生）。
+             *
+             * 【为什么不是重构成 App 级】这些对话框的 state 与 `dispatch` 调用
+             * 和 MenuBar 的其余部分缠在一起（导入要弹"多轨选择""选音频流"两个后续
+             * 对话框）。把它们整体搬出来是一次高风险的大重构；而 MenuBar 的
+             * `display:none` 挂载已经能让**所有**动作恢复，且不改动任何桌面代码。
+             * 这是"先让它正确，再让它漂亮"。
+             *
+             * 【代价】隐藏的 MenuBar 会随应用状态重渲染。它的对话框都是按需加载
+             * （`Suspense` + 条件渲染），菜单内容只有几十个节点，实测不影响滑动。
+             */}
+            {isMobile ? (
+                <div className="hidden" aria-hidden>
+                    {desktopHeader}
+                </div>
+            ) : null}
+
+            {/*
              * 工作区。`relative` 是为了让抽屉的 `absolute inset-0` 以**工作区**为界 ——
              * 抽屉盖住顶栏与底栏是刻意的（见 MobileActionDrawer 的说明），因此抽屉
              * 实际挂在下面那一层，这里只提供定位上下文给面板内的浮层。
