@@ -72,7 +72,10 @@ param(
     # uninstalling first -- a different key means a different signing identity).
     [switch]$NewSigningKey,
     # Uninstall the installed package before installing (needed after -NewSigningKey).
-    [switch]$Reinstall
+    [switch]$Reinstall,
+    # Keep DWARF in the staged library. Only matters for the x86_64 (emulator) build,
+    # which strips by default -- see Invoke-SelfStagedPackage.
+    [switch]$KeepDebugSymbols
 )
 
 $ErrorActionPreference = "Stop"
@@ -330,8 +333,30 @@ function Invoke-SelfStagedPackage {
     # directory matching the device's ABI.
     $jniDir = Join-Path $androidProject "app\src\main\jniLibs\$JniAbi"
     New-Item -ItemType Directory -Force -Path $jniDir | Out-Null
-    Copy-Item -LiteralPath $built -Destination (Join-Path $jniDir "libbackend_lib.so") -Force
-    Write-Host ("== staged libbackend_lib.so ({0:N0} bytes)" -f (Get-Item $built).Length) -ForegroundColor DarkGray
+    $staged = Join-Path $jniDir "libbackend_lib.so"
+    Copy-Item -LiteralPath $built -Destination $staged -Force
+
+    # [Why the emulator copy is stripped and the phone copy is not] A debug build carries
+    # DWARF for every crate: 440 MB of it here, 240 MB of that from the pure-Rust ONNX
+    # backend that only the x86_64 target links. On a phone those symbols are the
+    # difference between "native crash" and a readable backtrace, so they stay. On an
+    # emulator the app is not the thing being debugged -- the UI and the IPC are -- and
+    # every install pays the transfer. Stripping the *staged copy only* leaves the
+    # original in target/ intact for llvm-symbolizer.
+    $stripped = $false
+    if ($JniAbi -eq "x86_64" -and -not $KeepDebugSymbols) {
+        $strip = Join-Path $toolchain.NdkBin "llvm-strip.exe"
+        if (Test-Path -LiteralPath $strip) {
+            & $strip --strip-debug $staged
+            if ($LASTEXITCODE) { throw "llvm-strip failed (exit $LASTEXITCODE)" }
+            $stripped = $true
+        }
+        else {
+            Write-Host "== llvm-strip not found; shipping the library with debug info" -ForegroundColor Yellow
+        }
+    }
+    $suffix = if ($stripped) { ", debug info stripped" } else { "" }
+    Write-Host ("== staged libbackend_lib.so ({0:N0} bytes{1})" -f (Get-Item $staged).Length, $suffix) -ForegroundColor DarkGray
 
     $assets = Join-Path $androidProject "app\src\main\assets"
     $copied = Sync-BundleResources -TauriDir (Join-Path $root "backend\src-tauri") -AssetsRoot $assets
@@ -544,12 +569,29 @@ foreach ($apkFile in $packages | Where-Object { $_.Extension -eq '.apk' }) {
 foreach ($package in $packages) {
     $zip = [IO.Compression.ZipFile]::OpenRead($package.FullName)
     try {
-        $payload = ($zip.Entries | Measure-Object -Property CompressedLength -Sum).Sum
+        $entries = @($zip.Entries)
+        $payload = ($entries | Measure-Object -Property CompressedLength -Sum).Sum
+        # [Why the breakdown is printed] "798 MiB" is not actionable; "500 MiB of it is
+        # one unstripped library" is. Every time this number has surprised someone, the
+        # answer was in the split -- a package no longer reused (all zeroes), an ABI that
+        # should not be there, or debug info that the target does not need.
+        $breakdown = $entries |
+            Group-Object { ($_.FullName -split '/')[0] } |
+            ForEach-Object {
+                [pscustomobject]@{
+                    Name  = $_.Name
+                    Bytes = ($_.Group | Measure-Object -Property CompressedLength -Sum).Sum
+                }
+            } |
+            Sort-Object Bytes -Descending
     }
     finally { $zip.Dispose() }
     if (-not $payload) { $payload = 0 }
     $slack = $package.Length - $payload
     Write-Host ("== {0}: {1:N1} MiB of entries, {2:N0} B of slack" -f $package.Name, ($payload / 1MB), $slack) -ForegroundColor Green
+    foreach ($group in $breakdown) {
+        Write-Host ("     {0,-10} {1,8:N1} MiB" -f $group.Name, ($group.Bytes / 1MB)) -ForegroundColor DarkGray
+    }
     if ($slack -gt 16MB) {
         throw @"
 $($package.FullName)
