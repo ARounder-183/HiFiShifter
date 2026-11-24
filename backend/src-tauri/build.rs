@@ -42,6 +42,24 @@ fn target_env() -> String {
 ///   * `@executable_path` —— 纯 cargo 运行（target/<triple>/release）。
 fn link_runtime_search_paths() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "android" {
+        /*
+         * 16 KB 页对齐。
+         *
+         * 【为什么必须有】Android 15 起，设备可以配置成 16 KB 页大小；Play 对
+         * targetSdk >= 35 的应用**要求**原生库支持 16 KB 页（2025-11 起硬性）。
+         * NDK r27 的 aarch64 链接器默认仍是 4 KB（`llvm-readelf -l` 里 LOAD 段
+         * `Align 0x1000`），于是库在 16 KB 页的设备上根本加载不起来
+         * （`dlopen failed`），而构建期毫无提示。NDK r28 才把默认值改成 16 KB。
+         *
+         * 【为什么写在这里而不是 .cargo/config.toml 的 rustflags】本仓的
+         * `.cargo/config.toml` 已经记过这条教训：per-target rustflags 会被烤进
+         * **每一个依赖 crate** 的指纹，改一次就全量重编。`cargo:rustc-link-arg`
+         * 只作用于本 crate 自己产出的目标（`libbackend_lib.so` 正是它），
+         * 且只在 android 目标上打印 —— 桌面链接行一个字节都不变。
+         */
+        println!("cargo:rustc-link-arg=-Wl,-z,max-page-size=16384");
+    }
     if matches!(target_os.as_str(), "linux" | "freebsd" | "android") {
         println!("cargo:rustc-link-arg=-Wl,--enable-new-dtags");
         println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");

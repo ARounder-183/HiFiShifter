@@ -19,10 +19,11 @@ fn update_window_title(window: &Window, name: &str, dirty: bool) {
 }
 
 /// 弹出文件选择对话框，选择 .vshp / .vsp 文件。
-pub(super) fn open_vocalshifter_dialog() -> serde_json::Value {
+pub(super) fn open_vocalshifter_dialog(app: &tauri::AppHandle) -> serde_json::Value {
     let picked = crate::platform::dialog::FileDialog::new()
         .add_filter("VocalShifter Project", &["vshp", "vsp"])
-        .pick_file();
+        .set_import_target(crate::platform::paths::ImportTarget::Document)
+        .pick_file(app);
 
     match picked {
         None => serde_json::json!({"ok": true, "canceled": true}),

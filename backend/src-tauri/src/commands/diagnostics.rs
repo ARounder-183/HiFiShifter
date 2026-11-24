@@ -55,7 +55,10 @@ pub(super) fn open_log_folder(app: tauri::AppHandle) -> serde_json::Value {
 ///
 /// 对话框标题由前端按当前语言传入（与 `open_audio_dialog_for_source` 的
 /// `dialog_title` 同一约定）；空串 / 缺省时回退系统默认标题。
-pub(super) fn pick_diagnostics_output_path(dialog_title: Option<String>) -> serde_json::Value {
+pub(super) fn pick_diagnostics_output_path(
+    app: &tauri::AppHandle,
+    dialog_title: Option<String>,
+) -> serde_json::Value {
     let default_name = format!(
         "HiFiShifter-diagnostics-{}.zip",
         chrono::Local::now().format("%Y%m%d-%H%M%S")
@@ -71,7 +74,7 @@ pub(super) fn pick_diagnostics_output_path(dialog_title: Option<String>) -> serd
     if !title.is_empty() {
         dialog = dialog.set_title(title);
     }
-    let picked = dialog.save_file();
+    let picked = dialog.save_file(app);
     match picked {
         Some(path) => serde_json::json!({ "ok": true, "path": path.to_string_lossy() }),
         None => serde_json::json!({ "ok": false, "canceled": true }),

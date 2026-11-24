@@ -464,12 +464,12 @@ pub fn new_project(
 // 完全停摆 —— 桌面上的症状是"弹着对话框，进度条与状态栏都不再刷新"，移动端则是
 // 直接死锁。panic 守卫搬进阻塞任务内部，语义不变（panic 仍被拦成失败值）。
 #[tauri::command(rename_all = "camelCase")]
-pub async fn open_project_dialog() -> serde_json::Value {
-    tauri::async_runtime::spawn_blocking(|| {
+pub async fn open_project_dialog(app: tauri::AppHandle) -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(move || {
         common::guard_command(
             "open_project_dialog",
             serde_json::json!({ "ok": false, "error": "panic in command: open_project_dialog" }),
-            project::open_project_dialog,
+            || project::open_project_dialog(&app),
         )
     })
     .await
@@ -543,7 +543,7 @@ pub async fn save_project(
 ) -> serde_json::Value {
     match tauri::async_runtime::spawn_blocking(move || {
         let state: State<'_, AppState> = app.state();
-        project::save_project(state, window, notes_markdown)
+        project::save_project(&app, state, window, notes_markdown)
     })
     .await
     {
@@ -721,7 +721,7 @@ pub async fn notebook_export_document(
         common::guard_command(
             "notebook_export_document",
             serde_json::json!({ "ok": false, "error": "panic in command: notebook_export_document" }),
-            || notebook::export_document(state, suggested_name, extension, content),
+            || notebook::export_document(&app, state, suggested_name, extension, content),
         )
     })
     .await
@@ -742,7 +742,7 @@ pub async fn notebook_save_asset_as(
         common::guard_command(
             "notebook_save_asset_as",
             serde_json::json!({ "ok": false, "error": "panic in command: notebook_save_asset_as" }),
-            || notebook::save_asset_as(state, asset_id, suggested_name),
+            || notebook::save_asset_as(&app, state, asset_id, suggested_name),
         )
     })
     .await
@@ -948,12 +948,12 @@ pub fn set_project_timeline_settings(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn import_project_dialog() -> serde_json::Value {
-    tauri::async_runtime::spawn_blocking(|| {
+pub async fn import_project_dialog(app: tauri::AppHandle) -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(move || {
         common::guard_command(
             "import_project_dialog",
             serde_json::json!({ "ok": false, "error": "panic in command: import_project_dialog" }),
-            project_import::import_project_dialog,
+            || project_import::import_project_dialog(&app),
         )
     })
     .await
@@ -1023,11 +1023,48 @@ pub fn set_project_stretch_settings(
 /// 停靠剖面），逐条查询会变成 N 次 IPC，而且必然有人在第 N 次返回之前就读到了
 /// "还没有值"。一次给全，前端只需要等一次。
 ///
-/// 【为什么没有参数、也没有 panic 守卫】它只读编译期常量与两张静态表，没有可失败的
-/// 分支，也没有可 panic 的锁 —— 加一层守卫只会掩盖"剖面算不出来"这种不可能事件。
+/// 【为什么没有 panic 守卫】它只读编译期常量、两张静态表与一次同步的原生查询
+/// （安全区内边距），没有可失败的分支，也没有可 panic 的锁 —— 加一层守卫只会掩盖
+/// "剖面算不出来"这种不可能事件。
+///
+/// 【为什么现在需要 `app`】`viewport.insets` 必须来自真实的 `WindowInsets`
+/// （见 `platform::native` 的说明）；那是运行期事实，编译期常量给不出来。
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_surface_profile() -> crate::platform::SurfaceProfile {
-    crate::platform::profile()
+pub async fn get_surface_profile(app: tauri::AppHandle) -> crate::platform::SurfaceProfile {
+    // 【为什么必须 async + 阻塞池】剖面里的安全区内边距要问原生桥，而
+    // `run_mobile_plugin` 会阻塞调用线程、把工作排到主线程 —— 同步命令**就在**
+    // 主线程上执行，等于自己等自己。见 `platform::native` 的线程约束。
+    tauri::async_runtime::spawn_blocking(move || crate::platform::profile(&app))
+        .await
+        .unwrap_or_else(|error| {
+            log::error!("get_surface_profile join failed: {error}");
+            crate::platform::profile_fallback()
+        })
+}
+
+/// 当前窗口的安全区内边距（CSS px）。
+///
+/// 【为什么与 `get_surface_profile` 分开】剖面在启动期取一次就定型（形态不会变），
+/// 而内边距会随**旋转 / 分屏 / 折叠屏展开**改变。让前端在 `resize` 时只重取这四
+/// 个数，比重新取一整份剖面便宜得多，也不会让"形态"这种本应稳定的东西跟着抖动。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_surface_insets(app: tauri::AppHandle) -> crate::platform::native::Insets {
+    tauri::async_runtime::spawn_blocking(move || crate::platform::native::insets(&app))
+        .await
+        .unwrap_or_default()
+}
+
+/// 按应用主题切换状态栏/导航栏图标的明暗。
+///
+/// 【为什么由前端驱动】"现在是深色还是浅色"是应用自己的主题（用户可在设置里选），
+/// 与系统夜间模式无关；原生侧无从得知，只有渲染主题的 WebView 知道。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn set_system_bars(app: tauri::AppHandle, dark: bool) {
+    // 同 `get_surface_profile`：原生桥不能在主线程上调用。
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        crate::platform::native::set_system_bars(&app, dark);
+    })
+    .await;
 }
 
 // ===================== dialogs =====================
@@ -1043,8 +1080,8 @@ pub fn get_surface_profile() -> crate::platform::SurfaceProfile {
 // `spawn_blocking` 里跑了很多版本。这一组只是把同一条已经验证过的路径补齐。
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn open_audio_dialog() -> serde_json::Value {
-    tauri::async_runtime::spawn_blocking(dialogs::open_audio_dialog)
+pub async fn open_audio_dialog(app: tauri::AppHandle) -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(move || dialogs::open_audio_dialog(&app))
         .await
         .unwrap_or_else(|error| {
             serde_json::json!({
@@ -1056,8 +1093,8 @@ pub async fn open_audio_dialog() -> serde_json::Value {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn open_audio_dialog_multi() -> serde_json::Value {
-    tauri::async_runtime::spawn_blocking(dialogs::open_audio_dialog_multi)
+pub async fn open_audio_dialog_multi(app: tauri::AppHandle) -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(move || dialogs::open_audio_dialog_multi(&app))
         .await
         .unwrap_or_else(|error| {
             serde_json::json!({
@@ -1070,11 +1107,12 @@ pub async fn open_audio_dialog_multi() -> serde_json::Value {
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn open_audio_dialog_for_source(
+    app: tauri::AppHandle,
     source_path: String,
     dialog_title: String,
 ) -> serde_json::Value {
     tauri::async_runtime::spawn_blocking(move || {
-        dialogs::open_audio_dialog_for_source(source_path, dialog_title)
+        dialogs::open_audio_dialog_for_source(&app, source_path, dialog_title)
     })
     .await
     .unwrap_or_else(|error| {
@@ -1088,7 +1126,7 @@ pub async fn open_audio_dialog_for_source(
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn pick_output_path(app: tauri::AppHandle) -> serde_json::Value {
-    tauri::async_runtime::spawn_blocking(move || dialogs::pick_output_path(&app, None))
+    tauri::async_runtime::spawn_blocking(move || dialogs::pick_output_path(&app))
         .await
         .unwrap_or_else(|error| {
             serde_json::json!({
@@ -1113,8 +1151,8 @@ pub async fn pick_directory(app: tauri::AppHandle) -> serde_json::Value {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn open_midi_dialog() -> serde_json::Value {
-    tauri::async_runtime::spawn_blocking(dialogs::open_midi_dialog)
+pub async fn open_midi_dialog(app: tauri::AppHandle) -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(move || dialogs::open_midi_dialog(&app))
         .await
         .unwrap_or_else(|error| {
             serde_json::json!({
@@ -1127,13 +1165,52 @@ pub async fn open_midi_dialog() -> serde_json::Value {
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn pick_midi_output_path(app: tauri::AppHandle) -> serde_json::Value {
-    tauri::async_runtime::spawn_blocking(move || dialogs::pick_midi_output_path(&app, None))
+    tauri::async_runtime::spawn_blocking(move || dialogs::pick_midi_output_path(&app))
         .await
         .unwrap_or_else(|error| {
             serde_json::json!({
                 "ok": false,
                 "canceled": false,
                 "error": format!("pick_midi_output_path task failed: {error}"),
+            })
+        })
+}
+
+/// 打开系统文件选择器并把选中的文件读成 base64（移动端 `<input type="file">` 的替代）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn pick_files_bytes(
+    app: tauri::AppHandle,
+    extensions: Vec<String>,
+    multiple: bool,
+    max_bytes: Option<u64>,
+) -> serde_json::Value {
+    let limit = max_bytes.unwrap_or(8 * 1024 * 1024);
+    tauri::async_runtime::spawn_blocking(move || {
+        dialogs::pick_files_bytes(&app, extensions, multiple, limit)
+    })
+    .await
+    .unwrap_or_else(|error| {
+        serde_json::json!({
+            "ok": false,
+            "canceled": false,
+            "error": format!("pick_files_bytes task failed: {error}"),
+        })
+    })
+}
+
+/// 把已经写好的产物交给用户选定的位置（移动端走 SAF 创建文档）。
+///
+/// 【为什么它必须也是 async + spawn_blocking】系统"保存到"对话框同样是阻塞调用，
+/// 与上面几个命令完全同源（见本组开头的说明）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn save_output_to_location(app: tauri::AppHandle, path: String) -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(move || dialogs::save_output_to_location(&app, path))
+        .await
+        .unwrap_or_else(|error| {
+            serde_json::json!({
+                "ok": false,
+                "canceled": false,
+                "error": format!("save_output_to_location task failed: {error}"),
             })
         })
 }
@@ -2974,12 +3051,15 @@ pub fn open_log_folder(app: tauri::AppHandle) -> serde_json::Value {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn pick_diagnostics_output_path(dialog_title: Option<String>) -> serde_json::Value {
+pub async fn pick_diagnostics_output_path(
+    app: tauri::AppHandle,
+    dialog_title: Option<String>,
+) -> serde_json::Value {
     tauri::async_runtime::spawn_blocking(move || {
         common::guard_command(
             "pick_diagnostics_output_path",
             serde_json::json!({ "ok": false, "error": "panic in command: pick_diagnostics_output_path" }),
-            || diagnostics::pick_diagnostics_output_path(dialog_title),
+            || diagnostics::pick_diagnostics_output_path(&app, dialog_title),
         )
     })
     .await
@@ -3011,13 +3091,14 @@ pub async fn export_diagnostics(
 /// 视图 → 布局 → 「导出布局...」：原生保存对话框 + 后端写文件（WebView 内
 /// 的 `<a download>` 被拦截，见 `commands/json_export.rs` 的模块说明）。
 #[tauri::command(rename_all = "camelCase")]
-pub async fn export_layout_json(json: String) -> serde_json::Value {
+pub async fn export_layout_json(app: tauri::AppHandle, json: String) -> serde_json::Value {
     tauri::async_runtime::spawn_blocking(move || {
         common::guard_command(
             "export_layout_json",
             serde_json::json!({ "ok": false, "error": "panic in command: export_layout_json" }),
             || {
                 json_export::export_json_file(
+                    &app,
                     json,
                     "hifishifter-layout.json",
                     "Export layout",
@@ -3037,7 +3118,11 @@ pub async fn export_layout_json(json: String) -> serde_json::Value {
 /// 与布局导出共用一个实现 —— 外观这条路径此前用的是浏览器下载，因此**完全不起作用**
 /// （wry 拦截 `<a download>`）。默认文件名由前端给（主题名是用户起的，含非 ASCII）。
 #[tauri::command(rename_all = "camelCase")]
-pub async fn export_theme_json(json: String, default_file_name: String) -> serde_json::Value {
+pub async fn export_theme_json(
+    app: tauri::AppHandle,
+    json: String,
+    default_file_name: String,
+) -> serde_json::Value {
     tauri::async_runtime::spawn_blocking(move || {
         common::guard_command(
             "export_theme_json",
@@ -3048,7 +3133,7 @@ pub async fn export_theme_json(json: String, default_file_name: String) -> serde
                 } else {
                     default_file_name
                 };
-                json_export::export_json_file(json, &file_name, "Export theme", "theme")
+                json_export::export_json_file(&app, json, &file_name, "Export theme", "theme")
             },
         )
     })
@@ -3065,6 +3150,7 @@ pub async fn export_theme_json(json: String, default_file_name: String) -> serde
 /// 稳定契约，因此**每处一个命令**（标题与日志前缀随业务变化），实现只有一份。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn export_vibrato_presets_json(
+    app: tauri::AppHandle,
     json: String,
     default_file_name: String,
 ) -> serde_json::Value {
@@ -3079,6 +3165,7 @@ pub async fn export_vibrato_presets_json(
                     default_file_name
                 };
                 json_export::export_json_file(
+                    &app,
                     json,
                     &file_name,
                     "Export vibrato preset",
@@ -3447,12 +3534,12 @@ pub fn transliterate(
 // ===================== vocalshifter =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn open_vocalshifter_dialog() -> serde_json::Value {
-    tauri::async_runtime::spawn_blocking(|| {
+pub async fn open_vocalshifter_dialog(app: tauri::AppHandle) -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(move || {
         common::guard_command(
             "open_vocalshifter_dialog",
             serde_json::json!({ "ok": false, "error": "panic in command: open_vocalshifter_dialog" }),
-            vocalshifter::open_vocalshifter_dialog,
+            || vocalshifter::open_vocalshifter_dialog(&app),
         )
     })
     .await
@@ -3513,12 +3600,12 @@ pub fn paste_vocalshifter_clipboard(
 // ===================== reaper =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn open_reaper_dialog() -> serde_json::Value {
-    tauri::async_runtime::spawn_blocking(|| {
+pub async fn open_reaper_dialog(app: tauri::AppHandle) -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(move || {
         common::guard_command(
             "open_reaper_dialog",
             serde_json::json!({ "ok": false, "error": "panic in command: open_reaper_dialog" }),
-            reaper::open_reaper_dialog,
+            || reaper::open_reaper_dialog(&app),
         )
     })
     .await

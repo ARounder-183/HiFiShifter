@@ -14,7 +14,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use tauri::{Manager, State, Window};
+use tauri::{State, Window};
 
 /// 归一化音阶键名。清单只有一份，在 `hifishifter_kernel::state::model` 里 ——
 /// 此前 App 与插件各抄了一份，改一处就会让两边接受的取值分叉。
@@ -295,8 +295,9 @@ pub(crate) fn sanitize_file_name_segment(raw: &str) -> String {
 }
 
 fn resolve_documents_dir(state: &AppState) -> Option<PathBuf> {
+    // 同 `commands/synth.rs`：移动端指向用户可见的目录（`platform::paths::documents_dir`）。
     if let Some(handle) = state.app_handle.get() {
-        if let Ok(dir) = handle.path().document_dir() {
+        if let Some(dir) = crate::platform::paths::documents_dir(handle) {
             return Some(dir);
         }
     }
@@ -1170,12 +1171,14 @@ pub(super) fn new_project(
     get_timeline_state(state)
 }
 
-pub(super) fn open_project_dialog() -> serde_json::Value {
+pub(super) fn open_project_dialog(app: &tauri::AppHandle) -> serde_json::Value {
     let picked = crate::platform::dialog::FileDialog::new()
         .add_filter("HiFiShifter Project", &["hshp", "hsp"])
         .add_filter("HiFiShifter Backup Project", &["hshp-bak", "hsp-bak"])
         .add_filter("JSON Project", &["json"])
-        .pick_file();
+        // 工程是文档，不是素材：移动端收编进 imports/，不污染媒体面板。
+        .set_import_target(crate::platform::paths::ImportTarget::Document)
+        .pick_file(app);
     match picked {
         None => serde_json::json!({"ok": true, "canceled": true}),
         Some(path) => {
@@ -1396,6 +1399,7 @@ pub(super) fn open_project(
 }
 
 pub(super) fn save_project(
+    app: &tauri::AppHandle,
     state: State<'_, AppState>,
     window: Window,
     notes_markdown: Option<String>,
@@ -1420,7 +1424,7 @@ pub(super) fn save_project(
         );
     }
     // No path yet -> Save As
-    save_project_as(state, window, None, None)
+    save_project_as(app, state, window, None, None)
 }
 
 fn default_project_save_name(state: &AppState) -> String {
@@ -1459,6 +1463,7 @@ fn resolve_save_dialog_format(raw: Option<&str>) -> Result<ProjectSaveFormat, ()
 }
 
 pub(super) fn pick_project_save_path(
+    app: &tauri::AppHandle,
     state: State<'_, AppState>,
     format: String,
     default_name: Option<String>,
@@ -1469,7 +1474,7 @@ pub(super) fn pick_project_save_path(
     let default_name = default_name
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| default_project_save_name(state.inner()));
-    match project_save_dialog(format, &default_name).save_file() {
+    match project_save_dialog(format, &default_name).save_file(app) {
         None => serde_json::json!({"ok": true, "canceled": true}),
         Some(path) => serde_json::json!({
             "ok": true,
@@ -1480,6 +1485,7 @@ pub(super) fn pick_project_save_path(
 }
 
 pub(super) fn save_project_as(
+    app: &tauri::AppHandle,
     state: State<'_, AppState>,
     window: Window,
     format: Option<String>,
@@ -1493,7 +1499,7 @@ pub(super) fn save_project_as(
     let Ok(format) = resolve_save_dialog_format(format.as_deref()) else {
         return serde_json::json!({"ok": false, "error": "unsupported_project_format"});
     };
-    let picked = project_save_dialog(format, &default_name).save_file();
+    let picked = project_save_dialog(format, &default_name).save_file(app);
     match picked {
         None => serde_json::json!({"ok": true, "canceled": true}),
         Some(path) => {

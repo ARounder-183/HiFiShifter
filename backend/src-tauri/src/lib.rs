@@ -391,6 +391,16 @@ pub fn run() {
         .manage(state::AppState::default())
         .manage(link_bridge::LinkBridge::default())
         .plugin(tauri_plugin_opener::init())
+        /*
+         * 原生桥（Android：系统文件选择器 / 安全区 / 系统栏）。
+         *
+         * 【为什么无条件注册】它在桌面上是一个**空插件** —— 只有
+         * `#[cfg(target_os = "android")]` 分支里才会实例化 Kotlin 类，桌面构建
+         * 既不链接任何原生依赖，也不暴露任何 JS 命令。注册与不注册的差别只有
+         * "句柄是否存在"，而那正是移动端拿不到时应当降级的情形（见
+         * `platform::native` 的说明）。
+         */
+        .plugin(platform::native::init())
         .setup(|app| {
             // macOS 的应用菜单（含"关于/退出"的本地化与位置）。收敛层内部判断平台，
             // 业务代码不出现 `cfg`。
@@ -959,6 +969,8 @@ pub fn run() {
             commands::import_midi_as_clip,
             commands::replace_midi_clip_data,
             commands::pick_midi_output_path,
+    commands::save_output_to_location,
+    commands::pick_files_bytes,
             commands::export_pitch_to_midi,
             commands::get_ui_settings,
             commands::save_ui_settings,
@@ -968,6 +980,8 @@ pub fn run() {
             commands::get_log_settings,
             commands::set_log_settings,
             commands::get_surface_profile,
+    commands::set_system_bars,
+    commands::get_surface_insets,
         ])
         .build(context)
         .expect("error while building tauri application")

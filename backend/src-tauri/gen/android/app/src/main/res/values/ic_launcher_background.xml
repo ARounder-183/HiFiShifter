@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Adaptive icon background (Android 8+).
+
+    [Why this is not the #fff that `cargo tauri icon` writes] The source artwork
+    (src-tauri/icons/icon.png) is a dark rounded square on a transparent canvas. The
+    generated foreground keeps that rounded square, so the launcher mask would show a
+    white ring in the four corners — a dark sticker on a white circle. Painting the
+    background with the artwork's own colour (#172530, sampled from the source) makes
+    the masked area uniformly dark and the logo appear to float on it, which is the
+    intended adaptive-icon look.
+
+    Re-running `cargo tauri icon` overwrites this file with #fff; put the colour back
+    when you do.
+-->
+<resources>
+    <color name="ic_launcher_background">#172530</color>
+</resources>

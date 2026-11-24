@@ -9,24 +9,26 @@
 //! 而全部调用点改为经过本门面。桌面分支是**逐字节的转发**（同一个 `rfd::FileDialog`、
 //! 同一串方法调用），所以桌面上这次重构的行为差异为零。
 //!
-//! ## 移动端为什么没有原生选择器
+//! ## 移动端：系统选择器 + 导入即拷贝
 //!
-//! 系统选择器在移动端当然存在（SAF / UIDocumentPicker），但把它的结果交回 Rust 需要
-//! 一个原生桥（Tauri 移动插件 + Kotlin/Swift）。而**导入**这条路上根本不需要它：
-//! WebView 的 `<input type="file">` 由系统接管，选完之后 JS 直接拿到 `File` 对象的
-//! 字节，随后走既有的 `import_audio_bytes` 命令 —— 零原生代码、零权限声明。
+//! 移动端没有 `rfd`，但有系统选择器（SAF / UIDocumentPicker），由 [`super::native`]
+//! 的原生桥发起。两者语义的差别只有一条：**系统选择器给出的是 `content://` URI，
+//! 不是路径**。应用其余部分全部按路径工作（导入、工程、波形缓存、编码器），
+//! 因此在边界处一次性物化：
 //!
-//! 于是移动端的策略是：
-//! - **导入**：前端用 `<input type="file">`（见 `services/mobileFilePicker.ts`），
-//!   根本不调用本门面；
-//! - **导出**：`pick_output_path` 在移动端直接返回 `export_dir` 里的默认路径
-//!   （[\`default_export_path\`]），文件落进系统可见的文档目录；
-//! - **选目录**：返回工作区根（`media_root`），文件浏览器因此变成工作区浏览器。
+//! - **打开**（导入媒体、打开工程、导入 MIDI…）：原生桥把 URI 拷到 `cacheDir`，
+//!   本模块再把结果收编进工作区（[`super::paths::adopt_import`]，同一文件系统上
+//!   是一次 `rename`）。下游拿到的是一条**稳定、可长期引用**的路径。
+//! - **保存**（导出音频、另存为…）：给出 `export_dir` 下的确定路径。移动端没有
+//!   "任意可写目录树"，让用户在一个沙箱路径上做文件系统导航是没有意义的；
+//!   需要交给别的应用时走"保存到其它位置 / 分享"（[`save_output_to_location`]）。
+//! - **选目录**：返回 `export_dir`（导出目标）或工作区根（文件浏览器起点）。
 //!
-//! 也就是说：移动端**永远不会**走到"弹一个不存在的对话框"这条路上 —— 门面在移动端
-//! 的 `pick_*` 返回 `None` 只是最后一道防线，而不是正常路径。
+//! 也就是说：移动端**永远不会**走到"弹一个不存在的对话框"这条路上。
 
 use std::path::{Path, PathBuf};
+
+use super::paths::ImportTarget;
 
 /// 一个文件对话框请求。
 ///
@@ -39,6 +41,8 @@ pub struct FileDialog {
     directory: Option<PathBuf>,
     file_name: Option<String>,
     filters: Vec<(String, Vec<String>)>,
+    /// 移动端导入的归类目标（桌面忽略）。
+    target: ImportTarget,
 }
 
 impl FileDialog {
@@ -69,48 +73,124 @@ impl FileDialog {
         self
     }
 
-    pub fn pick_file(self) -> Option<PathBuf> {
+    /// 移动端：导入结果归到哪一类目录。桌面上是空操作（桌面不拷贝）。
+    pub fn set_import_target(mut self, target: ImportTarget) -> Self {
+        self.target = target;
+        self
+    }
+
+    pub fn pick_file(self, app: &tauri::AppHandle) -> Option<PathBuf> {
         #[cfg(desktop)]
-        let picked = self.into_rfd().pick_file();
+        let picked = {
+            let _ = app;
+            self.into_rfd().pick_file()
+        };
+        #[cfg(not(desktop))]
+        let picked = self.pick_mobile(app, false).and_then(|mut paths| {
+            if paths.is_empty() {
+                None
+            } else {
+                Some(paths.remove(0))
+            }
+        });
+        picked
+    }
+
+    pub fn pick_files(self, app: &tauri::AppHandle) -> Option<Vec<PathBuf>> {
+        #[cfg(desktop)]
+        let picked = {
+            let _ = app;
+            self.into_rfd().pick_files()
+        };
+        #[cfg(not(desktop))]
+        let picked = self
+            .pick_mobile(app, true)
+            .filter(|paths| !paths.is_empty());
+        picked
+    }
+
+    pub fn pick_folder(self, app: &tauri::AppHandle) -> Option<PathBuf> {
+        #[cfg(desktop)]
+        let picked = {
+            let _ = app;
+            self.into_rfd().pick_folder()
+        };
         #[cfg(not(desktop))]
         let picked = {
-            self.log_unsupported("pick_file");
-            None
+            let _ = self;
+            super::paths::export_dir(app).ok()
         };
         picked
     }
 
-    pub fn pick_files(self) -> Option<Vec<PathBuf>> {
+    pub fn save_file(self, app: &tauri::AppHandle) -> Option<PathBuf> {
         #[cfg(desktop)]
-        let picked = self.into_rfd().pick_files();
+        let picked = {
+            let _ = app;
+            self.into_rfd().save_file()
+        };
         #[cfg(not(desktop))]
         let picked = {
-            self.log_unsupported("pick_files");
-            None
+            // 移动端没有"任意可写目录"，但**必须**有一个用户找得到、且我们能写的
+            // 落点。`export_dir` 就是那个落点（Android 上是
+            // `Android/media/<pkg>/HiFiShifter`，文件管理器可见）。
+            let name = self
+                .file_name
+                .clone()
+                .unwrap_or_else(|| "output".to_string());
+            match super::paths::export_dir(app) {
+                Ok(dir) => {
+                    if let Err(error) = super::paths::ensure_dir(&dir) {
+                        log::error!("[dialog] save_file: {error}");
+                        return None;
+                    }
+                    Some(dir.join(name))
+                }
+                Err(error) => {
+                    log::error!("[dialog] save_file: {error}");
+                    None
+                }
+            }
         };
         picked
     }
 
-    pub fn pick_folder(self) -> Option<PathBuf> {
-        #[cfg(desktop)]
-        let picked = self.into_rfd().pick_folder();
-        #[cfg(not(desktop))]
-        let picked = {
-            self.log_unsupported("pick_folder");
-            None
+    /// 移动端的打开流程：系统选择器 → 收编进工作区。
+    #[cfg(not(desktop))]
+    fn pick_mobile(self, app: &tauri::AppHandle, multiple: bool) -> Option<Vec<PathBuf>> {
+        let extensions: Vec<String> = self
+            .filters
+            .iter()
+            .flat_map(|(_, extensions)| extensions.iter().cloned())
+            .collect();
+        let picked = match super::native::pick_files(app, &extensions, multiple) {
+            Ok(paths) => paths,
+            Err(error) => {
+                log::error!("[dialog] the system file picker failed: {error}");
+                return None;
+            }
         };
-        picked
-    }
-
-    pub fn save_file(self) -> Option<PathBuf> {
-        #[cfg(desktop)]
-        let picked = self.into_rfd().save_file();
-        #[cfg(not(desktop))]
-        let picked = {
-            self.log_unsupported("save_file");
-            None
+        if picked.is_empty() {
+            return None;
+        }
+        let Some(root) = super::paths::import_root(app, self.target) else {
+            // 没有工作区（不该发生：移动端一定有）→ 退回缓存里的临时路径，
+            // 至少本次会话能用；比"什么都不返回"好。
+            log::warn!("[dialog] workspace unavailable; using the cache copy as-is");
+            return Some(picked);
         };
-        picked
+        let mut adopted = Vec::with_capacity(picked.len());
+        for source in picked {
+            match super::paths::adopt_import(&source, &root) {
+                Ok(path) => adopted.push(path),
+                Err(error) => {
+                    // 单个文件失败不能连累同批次其余文件（多选导入时用户会一次选
+                    // 十几首）。
+                    log::error!("[dialog] could not adopt {}: {error}", source.display());
+                }
+            }
+        }
+        Some(adopted)
     }
 
     #[cfg(desktop)]
@@ -131,39 +211,79 @@ impl FileDialog {
         }
         dialog
     }
-
-    #[cfg(not(desktop))]
-    fn log_unsupported(&self, action: &str) {
-        // 【为什么是 warn 而不是 error】移动端的正常路径根本不调用这里（见模块头）。
-        // 走到这里说明某个调用点漏了能力判断 —— 值得留痕，但不是用户可见的故障。
-        log::warn!(
-            "[dialog] {action} is not available on this surface (mobile uses the web picker); request dropped"
-        );
-    }
-}
-
-/// 取消原因。
-///
-/// 桌面返回 `None`：用户按了取消就是取消，没有别的解释，命令的 JSON 里也不该多出
-/// 一个字段（那会破坏"桌面逐字节不变"）。移动端返回一个原因键，界面才能说
-/// "这个入口在移动端走系统选择器"而不是静默什么都不发生。
-pub fn unavailable_reason() -> Option<&'static str> {
-    if crate::platform::is_mobile() {
-        // 理由键由 `platform::mod` 统一定义（前端 `surfaceCapabilities.ts` 的白名单
-        // 与它逐字一致，由 `surfaceProfileContract.test.ts` 守住）。
-        Some(super::REASON_USE_SYSTEM_PICKER)
-    } else {
-        None
-    }
 }
 
 /// 移动端导出的默认落点。
 ///
 /// 【为什么是"默认落点"而不是"让用户选"】移动端没有可以任意写的目录树，让用户在
-/// 一个沙箱路径上做文件系统导航是没有意义的。产物统一进文档目录，界面告诉用户
-/// 去哪找（以及"用其它应用打开"）。
+/// 一个沙箱路径上做文件系统导航是没有意义的。产物统一进 [`super::paths::export_dir`]，
+/// 界面告诉用户去哪找（以及"保存到其它位置"）。
 pub fn default_export_path(app: &tauri::AppHandle, file_name: &str) -> Result<PathBuf, String> {
     let dir = super::paths::export_dir(app)?;
     super::paths::ensure_dir(&dir)?;
     Ok(dir.join(file_name))
+}
+
+/// 把已经写好的产物交给用户选定的位置（移动端：SAF 创建文档）。
+///
+/// 【为什么是"先写后拷"】本应用的导出/保存全部按路径写（`std::fs`、编码器、zip），
+/// 无法直接写 `content://`。倒过来做只需一次文件到文件的拷贝，而且拷贝发生在
+/// 导出**成功之后** —— 不会出现"用户选好了位置、导出却失败，目标处留下一个空文件"。
+///
+/// 桌面上返回 `Ok(None)`：桌面本来就有保存对话框，不需要二次交付。
+pub fn save_output_to_location(
+    app: &tauri::AppHandle,
+    source: &Path,
+    file_name: Option<&str>,
+) -> Result<Option<String>, String> {
+    #[cfg(desktop)]
+    {
+        let _ = (app, source, file_name);
+        Ok(None)
+    }
+    #[cfg(not(desktop))]
+    {
+        if !crate::platform::is_mobile() {
+            return Ok(None);
+        }
+        let name = file_name
+            .map(str::to_string)
+            .or_else(|| {
+                source
+                    .file_name()
+                    .map(|value| value.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "output".to_string());
+        super::native::save_to_location(app, source, &name, mime_type_for(&name))
+    }
+}
+
+/// 按扩展名猜 MIME 类型。SAF 用它决定目标文档的后缀提示。
+///
+/// 【为什么只覆盖这几种】它是**提示**，不是校验：猜错只会让系统选择器少一个默认
+/// 后缀，而导出本身的正确性不依赖它。覆盖音频/MIDI/工程/JSON 就够本应用的全部
+/// 产出了。
+#[cfg(not(desktop))]
+fn mime_type_for(file_name: &str) -> &'static str {
+    let extension = Path::new(file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "wav" => "audio/x-wav",
+        "flac" => "audio/flac",
+        "mp3" => "audio/mpeg",
+        "ogg" | "oga" => "audio/ogg",
+        "opus" => "audio/opus",
+        "m4a" | "aac" => "audio/mp4",
+        "aif" | "aiff" => "audio/aiff",
+        "mid" | "midi" => "audio/midi",
+        "zip" => "application/zip",
+        "json" => "application/json",
+        "md" => "text/markdown",
+        "txt" => "text/plain",
+        "hshp" => "application/octet-stream",
+        _ => "application/octet-stream",
+    }
 }

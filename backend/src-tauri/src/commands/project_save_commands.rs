@@ -16,7 +16,7 @@ pub async fn save_project_as(
 ) -> serde_json::Value {
     match tauri::async_runtime::spawn_blocking(move || {
         let state: State<'_, AppState> = app.state();
-        project::save_project_as(state, window, format, notes_markdown)
+        project::save_project_as(&app, state, window, format, notes_markdown)
     })
     .await
     {
@@ -44,7 +44,7 @@ pub async fn pick_project_save_path(
         common::guard_command(
             "pick_project_save_path",
             serde_json::json!({ "ok": false, "error": "panic in command: pick_project_save_path" }),
-            || project::pick_project_save_path(state, format, default_name),
+            || project::pick_project_save_path(&app, state, format, default_name),
         )
     })
     .await

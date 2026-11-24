@@ -26,6 +26,7 @@ use serde::Serialize;
 pub mod audio_session;
 pub mod dialog;
 pub mod logging;
+pub mod native;
 pub mod paths;
 pub mod resources;
 pub mod share;
@@ -138,6 +139,16 @@ pub struct InputSurface {
 pub struct ViewportSurface {
     /// 是否存在需要让位的系统安全区（刘海 / 手势条 / 状态栏）。
     pub safe_area: bool,
+    /// 真实的安全区内边距（CSS px）。
+    ///
+    /// 【为什么必须由后端给，而不是只用 CSS 的 `env(safe-area-inset-*)`】
+    /// Android WebView 的 `env()` 只反映**刘海**（display cutout），不反映状态栏与
+    /// 导航栏的高度。`enableEdgeToEdge()` 之后 WebView 铺到系统栏底下，而 CSS 拿到的
+    /// 内边距是 0 —— 于是汉堡菜单、抽屉的关闭按钮、对话框标题全都压在状态栏下面，
+    /// 既看不见也点不到。真实值只能从 `WindowInsets` 取（见 [`native`]）。
+    ///
+    /// 桌面与 iOS 恒为零：桌面没有系统栏，iOS 的 `env()` 是准的。
+    pub insets: native::Insets,
     /// 用户能否自由改变窗口尺寸。
     pub resizable: bool,
     /// 能否再开第二个窗口。
@@ -208,12 +219,29 @@ const CAP_DIALOG_NATIVE_PICKER: &str = "dialog.nativeFilePicker";
 const REASON_TOUCH_INPUT: &str = "surface_reason_touch_input";
 const REASON_NO_PATH_ACCESS: &str = "surface_reason_no_path_access";
 const REASON_NOT_ON_THIS_SURFACE: &str = "surface_reason_not_on_this_surface";
-/// 移动端的文件选取走系统选择器（WebView 的 `<input type="file">`），
-/// 原生对话框命令因此不该被调用。
-pub(crate) const REASON_USE_SYSTEM_PICKER: &str = "surface_reason_use_system_picker";
 
 /// 当前形态的完整剖面。
-pub fn profile() -> SurfaceProfile {
+pub fn profile(app: &tauri::AppHandle) -> SurfaceProfile {
+    // 【为什么要问原生】只有它知道状态栏与导航栏的真实高度（见 [`native`]）。
+    // 桌面与 iOS 直接给零值 —— 那里的 `env(safe-area-inset-*)` 本来就是准的。
+    let insets = if is_mobile() {
+        native::insets(app)
+    } else {
+        native::Insets::default()
+    };
+    profile_with_insets(insets)
+}
+
+/// 不访问原生桥的剖面（安全区按零处理）。
+///
+/// 【为什么需要它】`profile()` 要问原生，而原生桥不能在主线程上调用（见
+/// [`native`] 的线程约束）。取剖面的命令因此在阻塞池里跑；万一那个任务 panic，
+/// 返回值仍然要是**一份完整的剖面**，而不是让启动路径上少一个字段。
+pub fn profile_fallback() -> SurfaceProfile {
+    profile_with_insets(native::Insets::default())
+}
+
+fn profile_with_insets(insets: native::Insets) -> SurfaceProfile {
     let mobile = is_mobile();
     let mut capabilities = std::collections::BTreeMap::new();
 
@@ -318,15 +346,10 @@ pub fn profile() -> SurfaceProfile {
 
     // ── 原生文件选择器 ──────────────────────────────────────────────────
     // 移动端不用 `rfd`（它在移动目标上**编译不过**，见 `dialog.rs` 的说明），
-    // 而是走 WebView 的 `<input type="file">`，它由系统接管、无需任何原生桥。
-    capabilities.insert(
-        CAP_DIALOG_NATIVE_PICKER,
-        if mobile {
-            CapabilityDecision::no(REASON_NOT_ON_THIS_SURFACE)
-        } else {
-            CapabilityDecision::yes()
-        },
-    );
+    // 而是走 SAF（`ACTION_OPEN_DOCUMENT` / `ACTION_CREATE_DOCUMENT`），由
+    // [`native`] 的原生桥发起。两端都有真正的系统选择器，因此这条能力两端都为真 ——
+    // 它回答的是"这个形态有没有系统选择器"，而不是"是不是 rfd"。
+    capabilities.insert(CAP_DIALOG_NATIVE_PICKER, CapabilityDecision::yes());
 
     SurfaceProfile {
         form: form(),
@@ -344,6 +367,7 @@ pub fn profile() -> SurfaceProfile {
         },
         viewport: ViewportSurface {
             safe_area: mobile,
+            insets,
             resizable: !mobile,
             multi_window: !mobile,
         },

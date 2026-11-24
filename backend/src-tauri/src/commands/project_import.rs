@@ -21,12 +21,13 @@ fn update_window_title(window: &Window, name: &str, dirty: bool) {
     let _ = window.set_title(&title);
 }
 
-pub(super) fn import_project_dialog() -> serde_json::Value {
+pub(super) fn import_project_dialog(app: &tauri::AppHandle) -> serde_json::Value {
     let picked = crate::platform::dialog::FileDialog::new()
         .add_filter("HiFiShifter Project", &["hshp", "hsp"])
         .add_filter("HiFiShifter Backup Project", &["hshp-bak", "hsp-bak"])
         .add_filter("JSON Project", &["json"])
-        .pick_file();
+        .set_import_target(crate::platform::paths::ImportTarget::Document)
+        .pick_file(app);
     match picked {
         None => serde_json::json!({"ok": true, "canceled": true}),
         Some(path) => {
