@@ -112,24 +112,108 @@ fn ios_container() -> Option<PathBuf> {
 /// passwd 条目），此前本文件因此把 Android 判进 XDG 分支、算出 `None`，
 /// `apply_app_directories_override` 只能退回 Tauri 的默认目录。
 ///
-/// 【为什么 `TMPDIR` 是可靠锚点】Android 运行时给每个应用进程设置
-/// `TMPDIR=<sandbox>/cache`（`ActivityThread` 注入），这是官方支持的约定，不是
-/// 某台设备上的巧合。从它退一级即得沙箱根 `/data/user/<uid>/<pkg>`。
+/// 【为什么不能只信 `TMPDIR`】它确实是最省事的锚点（Android 运行时通常给应用
+/// 进程设成 `<sandbox>/cache`），但**不是所有版本、所有机型都有**。实测在部分
+/// 设备上该变量缺失或指向 `/data/local/tmp`（shell 的临时目录，应用不可写）——
+/// 于是沙箱根算错或算不出，症状是"改了设置重启就还原""日志菜单给了一个空目录"，
+/// 而这两件事看起来毫无关系。
 ///
-/// 【拿不到时返回 None 而不是猜】猜错目录的后果是设置写到一个没人读的位置 ——
-/// 症状是"改了设置，重启又变回去"，比直接回退 Tauri 的目录难查得多。
+/// 因此这里有两级来源，且**每一级都要校验**：
+/// 1. `TMPDIR` 的父目录（形态必须是 `<sandbox>/cache`）；
+/// 2. `/proc/self/cmdline` 里的包名 + 本进程 uid 推出的 `/data/user/<userId>/<pkg>`。
+///
+/// 【为什么要校验"这个目录是我们的"】`/data/local/tmp` 是存在的、是目录，但属于
+/// shell（uid 2000），应用写不进去。校验 uid 能在**这里**就失败，而不是等到几秒后
+/// 某个保存动作报一个与路径无关的错误。
 #[cfg(target_os = "android")]
 fn android_sandbox() -> Option<PathBuf> {
-    let raw = std::env::var_os("TMPDIR")?;
-    let path = PathBuf::from(raw);
-    // 标准形态 `<root>/cache`；个别定制 ROM 会给出更深或更浅的路径，此时
-    // 原样使用 `TMPDIR`（宁可落在 cache 下，也不要拿不到目录）。
-    if path.file_name().is_some_and(|name| name == "cache") {
-        if let Some(parent) = path.parent() {
-            return Some(parent.to_path_buf());
+    if let Some(root) = std::env::var_os("TMPDIR")
+        .as_deref()
+        .and_then(sandbox_root_from_tmpdir)
+    {
+        if is_our_directory(&root) {
+            return Some(root);
         }
     }
-    Some(path)
+    android_package_sandbox()
+}
+
+/// `<sandbox>/cache` → `<sandbox>`；形态不符时返回 `None`。
+///
+/// 【为什么带 `test` 条件】它只在 Android 与单测里用；不加会在桌面构建上留下
+/// 一条 dead_code 警告，而警告噪声会掩盖真正的问题。
+///
+/// 【为什么不"原样使用 TMPDIR"】旧实现把不符合 `*/cache` 的 `TMPDIR` 直接当成
+/// 沙箱根。遇到 `/data/local/tmp` 时会算出 `/data/local/tmp/files/HiFiShifter`
+/// —— 一个永远建不出来的目录，而错误要到很久以后才以"保存失败"的形式出现。
+#[cfg(any(target_os = "android", test))]
+fn sandbox_root_from_tmpdir(raw: &std::ffi::OsStr) -> Option<PathBuf> {
+    let path = PathBuf::from(raw);
+    // `has_root` 而不是 `is_absolute`：后者在 Windows 上对 `/data/...` 为假，
+    // 而这个函数要在宿主上跑单测（见文件末尾的测试）。
+    if !path.has_root() {
+        return None;
+    }
+    if path.file_name()? != std::ffi::OsStr::new("cache") {
+        return None;
+    }
+    path.parent().map(std::path::Path::to_path_buf)
+}
+
+/// 从 `/proc/self/cmdline` 推出包名。
+///
+/// 【为什么要去掉 `:` 后缀】Android 会给进程改名（`<pkg>:service`、`:remote`），
+/// 但数据目录只按包名算。
+#[cfg(any(target_os = "android", test))]
+fn package_name_from_cmdline(raw: &[u8]) -> Option<String> {
+    let first = raw.split(|byte| *byte == 0).next()?;
+    let text = std::str::from_utf8(first).ok()?;
+    let name = text.split(':').next()?.trim();
+    // 包名至少形如 `com.example`；读到别的东西（空、无点）时宁可返回 None。
+    if name.is_empty() || !name.contains('.') {
+        return None;
+    }
+    Some(name.to_owned())
+}
+
+/// `/data/user/<userId>/<pkg>`：**不依赖任何环境变量**的沙箱根。
+#[cfg(target_os = "android")]
+fn android_package_sandbox() -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+
+    let uid = std::fs::metadata("/proc/self").ok()?.uid();
+    let name = std::fs::read("/proc/self/cmdline")
+        .ok()
+        .and_then(|raw| package_name_from_cmdline(&raw))?;
+    // Android 的 uid 分配规则：uid = userId * 100000 + appId。工作资料（user 10）
+    // 因此也能算对 —— 那正是 `/data/data` 这种"只指向 user 0"的写法覆盖不到的。
+    let user_id = uid / 100_000;
+    let candidate = PathBuf::from(format!("/data/user/{user_id}")).join(name);
+    if is_our_directory(&candidate) {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+/// 这个目录存在、是目录，且属于本进程的 uid。
+#[cfg(target_os = "android")]
+fn is_our_directory(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_dir() {
+        return false;
+    }
+    match std::fs::metadata("/proc/self") {
+        Ok(own) => meta.uid() == own.uid(),
+        // 拿不到 /proc/self 的属主时**不否决**：宁可接受一个可能不属于我们的
+        // 目录，也不要因为一次 stat 失败把整个沙箱判死 —— 那会让所有设置都
+        // 存不住，而症状（"改了重启就还原"）与这里毫无关系。
+        Err(_) => true,
+    }
 }
 
 /// 移动端沙箱根（Android / iOS 各一条实现）。
@@ -748,5 +832,50 @@ mod tests {
         );
         // 不在旧根之下的路径一个字都不动。
         assert_eq!(root.remap(Path::new("/home/user/Music/take.wav")), None);
+    }
+
+    /*
+     * ── Android 沙箱根的两级来源 ────────────────────────────────────────
+     *
+     * 这两个纯函数是"设置存不进去"那个缺陷的判据。它们在**宿主上**也能测，
+     * 因为只做字符串解析 —— Android 专属的只剩"读 /proc + 校验 uid"那两步。
+     */
+
+    #[test]
+    fn tmpdir_must_look_like_the_app_cache_dir() {
+        use std::ffi::OsStr;
+
+        assert_eq!(
+            sandbox_root_from_tmpdir(OsStr::new("/data/user/0/com.example.app/cache")),
+            Some(PathBuf::from("/data/user/0/com.example.app"))
+        );
+        // 工作资料的 user id 不是 0：照样成立（这正是"只认 /data/data"做不到的）。
+        assert_eq!(
+            sandbox_root_from_tmpdir(OsStr::new("/data/user/10/com.example.app/cache")),
+            Some(PathBuf::from("/data/user/10/com.example.app"))
+        );
+        // `/data/local/tmp` 是 shell 的临时目录：**不能**当沙箱根。
+        // 旧实现把它原样当成根，于是算出 /data/local/tmp/files/... —— 永远建不出来。
+        assert_eq!(sandbox_root_from_tmpdir(OsStr::new("/data/local/tmp")), None);
+        // 相对路径、空值、以 cache 结尾但层级不对的路径一律拒绝。
+        assert_eq!(sandbox_root_from_tmpdir(OsStr::new("cache")), None);
+        assert_eq!(sandbox_root_from_tmpdir(OsStr::new("")), None);
+    }
+
+    #[test]
+    fn package_name_comes_from_the_process_cmdline() {
+        assert_eq!(
+            package_name_from_cmdline(b"com.example.app\0--flag\0"),
+            Some("com.example.app".to_string())
+        );
+        // Android 会重命名子进程，但数据目录只按包名算。
+        assert_eq!(
+            package_name_from_cmdline(b"com.example.app:remote\0"),
+            Some("com.example.app".to_string())
+        );
+        // 读到的不是应用进程（`/system/bin/app_process64` 之类）：宁可 None。
+        assert_eq!(package_name_from_cmdline(b"app_process64\0"), None);
+        assert_eq!(package_name_from_cmdline(b"\0"), None);
+        assert_eq!(package_name_from_cmdline(b""), None);
     }
 }

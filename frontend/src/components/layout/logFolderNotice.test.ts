@@ -62,3 +62,27 @@ test("the standalone app hands over the path when it could not open the folder",
         path: FILE,
     });
 });
+
+/*
+ * 日志功能本身关着（档位「无」）：路径照给，但必须先说清"里面不会有东西"。
+ *
+ * 【为什么这条重要】目录存在不等于里面有日志。只显示路径 = 让用户去一个
+ * 空文件夹里找一个永远不会出现的文件。
+ */
+test("a disabled file log reports the reason instead of pretending", () => {
+    expect(
+        logFolderNotice(
+            { ok: true, path: PATH, file: FILE, opened: false, fileEnabled: false },
+            false,
+        ),
+    ).toEqual({ kind: "disabled", path: FILE });
+});
+
+test("an enabled file log keeps the plain path notice", () => {
+    expect(
+        logFolderNotice(
+            { ok: true, path: PATH, file: FILE, opened: false, fileEnabled: true },
+            false,
+        ),
+    ).toEqual({ kind: "path", path: FILE });
+});

@@ -507,13 +507,25 @@ pub fn run() {
             // 否则两个形态各写一份设置 —— 用户在 App 里调好的外观、快捷键、语言
             // 在插件里全部失效。让内核算一次、两边都调用，就没有第二处可以算错。
             // 算出来的路径与 Tauri 的历史布局逐一对应（见 config_location 的模块注释）。
-            if let Ok(cfg_dir) = hifishifter_kernel::config_location::resolve_and_create(None) {
-                let recent = crate::config::load_recent(&cfg_dir);
-                {
-                    let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
-                    p.recent = recent;
+            match hifishifter_kernel::config_location::resolve_and_create(None) {
+                Ok(cfg_dir) => {
+                    let recent = crate::config::load_recent(&cfg_dir);
+                    {
+                        let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+                        p.recent = recent;
+                    }
+                    let _ = state.config_dir.set(cfg_dir);
                 }
-                let _ = state.config_dir.set(cfg_dir);
+                /*
+                 * 【为什么必须喊出来】配置目录解析失败时，所有"保存设置"的路径都是
+                 * `if let Some(dir) = state.config_dir.get()` —— 静默跳过。用户看到的是
+                 * "改了什么，重启就还原"，而日志里一个字都没有。移动端真实发生过：
+                 * Android 沙箱根算不出来（见 `app_paths::android_sandbox`），
+                 * 于是首选项全部存不住，连日志详细程度都改不了。
+                 */
+                Err(error) => log::error!(
+                    "user config directory unavailable: {error} — settings will NOT persist in this session"
+                ),
             }
 
             // 启动即同步"为新的音频块启用循环"的进程级默认值：拖放导入、

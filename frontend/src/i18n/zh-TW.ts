@@ -2300,6 +2300,8 @@ export const zhTW = {
     mobile_section_clip: "音訊片段",
     mobile_section_param_block: "參數區塊",
     mobile_section_project: "專案",
+    log_file_disabled_hint:
+        "日誌詳細程度是「無」，沒有寫入任何日誌檔。把它改成「低」或更高，並重新啟動應用程式。",
     mobile_menu_title: "選單",
     mobile_actions_title: "操作",
     mobile_windows_section: "視窗",

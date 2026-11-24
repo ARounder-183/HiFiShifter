@@ -2296,6 +2296,8 @@ export const zhCN = {
     mobile_section_clip: "音频块",
     mobile_section_param_block: "参数块",
     mobile_section_project: "工程",
+    log_file_disabled_hint:
+        "日志详细程度是「无」，没有写入任何日志文件。把它改成「低」或更高，并重启应用。",
     mobile_menu_title: "菜单",
     mobile_actions_title: "操作",
     mobile_windows_section: "窗口",

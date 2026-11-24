@@ -2353,6 +2353,8 @@ export const koKR = {
     mobile_section_clip: "클립",
     mobile_section_param_block: "파라미터 블록",
     mobile_section_project: "프로젝트",
+    log_file_disabled_hint:
+        "로그 상세 수준이 '없음'이므로 로그 파일이 기록되지 않습니다. '낮음' 이상으로 변경한 뒤 앱을 다시 시작하세요.",
     mobile_menu_title: "메뉴",
     mobile_actions_title: "작업",
     mobile_windows_section: "창",

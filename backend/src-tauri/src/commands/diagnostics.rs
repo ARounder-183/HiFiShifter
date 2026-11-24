@@ -29,11 +29,20 @@ const FRONTEND_MESSAGE_MAX_CHARS: usize = 512;
 
 // ===================== open_log_folder =====================
 
-/// 打开日志所在文件夹。文件日志被显式关闭（`--log-file=-`）时回退到
-/// Tauri 的 `app_log_dir`，保证菜单入口始终可用。
+/// 打开日志所在文件夹。
+///
+/// 【目录来源必须与 logger 同源】优先用 `logging::log_dir()`（本次会话实际写入
+/// 的那个目录），未启用文件日志时退到 `logfile::log_dir()`（同一套路径解析）。
+///
+/// **不用 Tauri 的 `app_log_dir` 作为首选兜底**：那个目录本应用从来不写 ——
+/// 桌面是 `%LOCALAPPDATA%\<identifier>\logs`、Android 是 `<sandbox>/logs`，
+/// 而真正的日志在 `<sandbox>/files/HiFiShifter/logs`。把用户指过去，他会打开
+/// 一个空文件夹，然后合理地认为"日志丢了"。（它只在两处都解析不出时兜底，
+/// 那种情况下应用连配置目录都没有，是更严重的环境问题。）
 pub(super) fn open_log_folder(app: tauri::AppHandle) -> serde_json::Value {
     let dir: Option<PathBuf> = logging::log_dir()
         .map(Path::to_path_buf)
+        .or_else(hifishifter_kernel::logfile::log_dir)
         .or_else(|| app.path().app_log_dir().ok());
     let Some(dir) = dir else {
         return serde_json::json!({ "ok": false, "error": "log directory unavailable" });
@@ -57,8 +66,12 @@ pub(super) fn open_log_folder(app: tauri::AppHandle) -> serde_json::Value {
      */
     if crate::platform::is_mobile() {
         let file = logging::log_file().map(|p| p.to_string_lossy().into_owned());
+        // 【为什么要报 fileEnabled】目录存在不等于里面有日志：用户可能把
+        // 「日志详细程度」选成了「无」，此时 `init_logging` 直接返回、一个字节
+        // 都不写。只给路径会让他在空文件夹里找半天，而真实原因是"没开日志"。
+        let enabled = hifishifter_kernel::log_policy::policy().file_enabled;
         log::info!(
-            "[diagnostics] log folder requested on mobile (not openable): {}",
+            "[diagnostics] log folder requested on mobile (not openable): {} (file_enabled={enabled})",
             dir.display()
         );
         return serde_json::json!({
@@ -68,6 +81,9 @@ pub(super) fn open_log_folder(app: tauri::AppHandle) -> serde_json::Value {
             // `opened: false` = "没有打开文件管理器，只是把位置告诉你"。
             // 前端据此把路径显示成可复制的文本（见 `logFolderNotice`）。
             "opened": false,
+            "fileEnabled": enabled,
+            "loggingHealthy": hifishifter_kernel::log_policy::logging_healthy(),
+            "lastError": hifishifter_kernel::log_policy::last_error(),
         });
     }
 

@@ -2384,6 +2384,8 @@ export const jaJP = {
     mobile_section_clip: "クリップ",
     mobile_section_param_block: "パラメータブロック",
     mobile_section_project: "プロジェクト",
+    log_file_disabled_hint:
+        "ログの詳細度が「なし」のため、ログファイルは書き出されていません。「低」以上に変更してアプリを再起動してください。",
     mobile_menu_title: "メニュー",
     mobile_actions_title: "操作",
     mobile_windows_section: "ウィンドウ",

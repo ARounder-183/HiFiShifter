@@ -2374,6 +2374,8 @@ export const enUS = {
     mobile_section_clip: "Clips",
     mobile_section_param_block: "Parameter blocks",
     mobile_section_project: "Project",
+    log_file_disabled_hint:
+        "Log verbosity is set to None, so no log file is being written. Set Help → Log verbosity to Low or higher, then restart the app.",
     mobile_menu_title: "Menu",
     mobile_actions_title: "Actions",
     mobile_windows_section: "Windows",

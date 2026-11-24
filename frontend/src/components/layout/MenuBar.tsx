@@ -1590,6 +1590,28 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                     });
                                     return;
                                 }
+                                /*
+                                 * 日志没在写：**先说原因，再给路径**。
+                                 *
+                                 * 用户点这个菜单时默认假设"那里有我刚才那次崩溃的
+                                 * 记录"。档位是「无」时目录是空的 —— 只显示路径
+                                 * 等于让他去找一个永远不会出现的文件。
+                                 */
+                                if (outcome.kind === "disabled") {
+                                    setNotice({
+                                        title: tf("menu_open_log_folder"),
+                                        message: (
+                                            <>
+                                                <div>{tf("log_file_disabled_hint")}</div>
+                                                <span data-hs-selectable="true">
+                                                    {outcome.path}
+                                                </span>
+                                            </>
+                                        ),
+                                        copyText: outcome.path,
+                                    });
+                                    return;
+                                }
                                 // 打不开时把路径摆出来，并且**必须能复制**：路径最容易
                                 // 手抄错，而"打不开"正是用户最需要把它交给我们的时候。
                                 setNotice({
