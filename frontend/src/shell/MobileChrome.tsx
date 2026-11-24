@@ -32,7 +32,7 @@ import {
     PlayIcon,
     StopIcon,
 } from "@radix-ui/react-icons";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { useAppDispatch, useAppSelector } from "../app/hooks";
 import { store } from "../app/store";
@@ -71,6 +71,67 @@ export interface MobileChromeProps {
 }
 
 /** 顶栏。 */
+/**
+ * 按住连续执行的动作按钮（撤销 / 重做）。
+ *
+ * 【为什么不用 `holdRepeat`】那套机制靠 `keyup` 终止，而触摸屏没有 `keyup`：
+ * 点一下就会变成「每 50ms 一次，永不停止」—— 用户报的「撤销几乎不可用」
+ * 有一半来自这里（一次点击撤掉整个历史）。这里改成**真长按**：
+ * `pointerdown` 立即执行一次，按住 400ms 后每 50ms 一次，`pointerup` /
+ * `pointercancel` / 移出按钮即停。节奏与桌面 `holdRepeat` 一致，但终止条件
+ * 是「手指还在不在」，而不是「有没有键松开」。
+ */
+const HOLD_REPEAT_INITIAL_MS = 400;
+const HOLD_REPEAT_INTERVAL_MS = 50;
+
+function MobileRepeatActionButton({
+    icon,
+    tooltip,
+    disabled,
+    onFire,
+}: {
+    icon: ReactNode;
+    tooltip: string;
+    disabled: boolean;
+    onFire: () => void;
+}) {
+    const timers = useRef<{ initial: number | null; repeat: number | null }>({
+        initial: null,
+        repeat: null,
+    });
+    const stop = useCallback(() => {
+        if (timers.current.initial != null) {
+            window.clearTimeout(timers.current.initial);
+            timers.current.initial = null;
+        }
+        if (timers.current.repeat != null) {
+            window.clearInterval(timers.current.repeat);
+            timers.current.repeat = null;
+        }
+    }, []);
+    useEffect(() => stop, [stop]);
+    return (
+        <span
+            className="contents"
+            onPointerDown={() => {
+                if (disabled) return;
+                stop();
+                onFire();
+                timers.current.initial = window.setTimeout(() => {
+                    timers.current.initial = null;
+                    timers.current.repeat = window.setInterval(onFire, HOLD_REPEAT_INTERVAL_MS);
+                }, HOLD_REPEAT_INITIAL_MS);
+            }}
+            onPointerUp={stop}
+            onPointerCancel={stop}
+            onPointerLeave={stop}
+        >
+            {/* `onClick` 留空：真正的执行在 pointerdown 上 —— 用 onClick 会让
+                「按住」的第一次与「抬起」的第二次重复执行同一个动作。 */}
+            <AppIconButton icon={icon} tooltip={tooltip} disabled={disabled} onClick={() => {}} />
+        </span>
+    );
+}
 export function MobileTopBar({
     title,
     dirty,
@@ -112,17 +173,18 @@ export function MobileTopBar({
                     {dirty ? <span aria-hidden> *</span> : null}
                 </div>
             </div>
-            <AppIconButton
+            {/* 撤销 / 重做：按下即执行 + 按住连续（见 `MobileRepeatActionButton`）。 */}
+            <MobileRepeatActionButton
                 icon={<span aria-hidden>↶</span>}
                 tooltip={t("kb_edit_undo")}
                 disabled={!canUndo}
-                onClick={() => onAction("edit.undo")}
+                onFire={() => onAction("edit.undo")}
             />
-            <AppIconButton
+            <MobileRepeatActionButton
                 icon={<span aria-hidden>↷</span>}
                 tooltip={t("kb_edit_redo")}
                 disabled={!canRedo}
-                onClick={() => onAction("edit.redo")}
+                onFire={() => onAction("edit.redo")}
             />
             <AppIconButton
                 icon={<LightningBoltIcon />}

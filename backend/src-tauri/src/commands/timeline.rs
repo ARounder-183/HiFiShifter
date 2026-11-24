@@ -2597,6 +2597,20 @@ pub(super) fn glue_clips(
     clip_ids: Vec<String>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    // 【先判后打点】不足两片时 `glue_clips` 什么都不做，而打点已经发生 ——
+    // 空操作在历史里留一步，撤销要按两次才退到真正的上一步。
+    let glueable = {
+        let live = clip_ids
+            .iter()
+            .filter(|id| tl.clips.iter().any(|c| c.id == **id))
+            .count();
+        live >= 2
+    };
+    if !glueable {
+        let mut payload = state.timeline_payload(&tl);
+        payload.project = Some(state.project_meta_payload());
+        return payload;
+    }
     state.checkpoint_timeline(&tl, crate::state::HistoryOp::GlueClip);
     // Collect root track IDs before gluing
     let root_ids: Vec<String> = clip_ids

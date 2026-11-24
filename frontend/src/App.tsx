@@ -180,6 +180,11 @@ import { useKeybindings } from "./features/keybindings/useKeybindings";
 import { selectMergedKeybindings } from "./features/keybindings/keybindingsSlice";
 import { beginHoldRepeat } from "./features/keybindings/holdRepeat";
 import {
+    DEFAULT_DISPATCH,
+    MOBILE_DISPATCH,
+    type ActionDispatchContext,
+} from "./features/keybindings/dispatchContext";
+import {
     ACTION_TO_EDIT_OP,
     PARAM_BLOCK_ACTION_TO_OP,
     resolveCopyCutRoute,
@@ -2769,7 +2774,16 @@ function AppInner() {
 
     // 统一快捷键处理（通过 keybindings 模块管理，用户可自定义）
     const handleKeybindingAction = useCallback(
-        (actionId: ActionId, stroke: HostKeyStroke, surfaceOverride?: EditSurfaceId | null) => {
+        (
+            actionId: ActionId,
+            stroke: HostKeyStroke,
+            surfaceOverride?: EditSurfaceId | null,
+            dispatchContext: ActionDispatchContext = DEFAULT_DISPATCH,
+        ) => {
+            // 【长按重复只属于真键盘】合成派发（菜单 / 抽屉 / 快捷面板 / 独立窗口）
+            // 没有 `keyup` 可等，一旦布防就永不停止 —— 用户「点一下撤销」会变成
+            // 「每 50ms 撤一次」。判据集中在 dispatchContext，不散在 8 个调用点。
+            const allowHoldRepeat = dispatchContext.repeat;
             // 独立窗口交回的快捷键带 sourceSurface：不能再用主窗口自己的 getActiveSurface，
             // 否则会把卫星参数编辑器的操作误路由到主窗口时间轴。
             const activeSurface = surfaceOverride ?? getActiveSurface();
@@ -2845,16 +2859,17 @@ function AppInner() {
                     let channel: EditOpChannel | null = null;
                     const pasteKb = selectMergedKeybindings(store.getState())["clip.paste"];
                     if (pasteKb) {
-                        beginHoldRepeat(pasteKb, () => {
-                            if (
-                                channel === "hifi:timelineEditOp" &&
-                                pluginAllowsEditChannel(channel, "paste")
-                            ) {
-                                window.dispatchEvent(
-                                    new CustomEvent(channel, { detail: { op: "paste" } }),
-                                );
-                            }
-                        });
+                        if (allowHoldRepeat)
+                            beginHoldRepeat(pasteKb, () => {
+                                if (
+                                    channel === "hifi:timelineEditOp" &&
+                                    pluginAllowsEditChannel(channel, "paste")
+                                ) {
+                                    window.dispatchEvent(
+                                        new CustomEvent(channel, { detail: { op: "paste" } }),
+                                    );
+                                }
+                            });
                     }
                     void (async () => {
                         let kind: string | null = null;
@@ -3012,7 +3027,7 @@ function AppInner() {
                         );
                         return hasUndoableStep;
                     };
-                    if (fire()) {
+                    if (fire() && allowHoldRepeat) {
                         beginHoldRepeat(
                             selectMergedKeybindings(store.getState())["edit.undo"],
                             fire,
@@ -3031,7 +3046,7 @@ function AppInner() {
                         );
                         return hasRedoableStep;
                     };
-                    if (fire()) {
+                    if (fire() && allowHoldRepeat) {
                         beginHoldRepeat(
                             selectMergedKeybindings(store.getState())["edit.redo"],
                             fire,
@@ -3144,7 +3159,12 @@ function AppInner() {
                         return true;
                     };
                     fire();
-                    beginHoldRepeat(selectMergedKeybindings(store.getState())["track.add"], fire);
+                    if (allowHoldRepeat) {
+                        beginHoldRepeat(
+                            selectMergedKeybindings(store.getState())["track.add"],
+                            fire,
+                        );
+                    }
                     break;
                 }
                 case "track.clone": {
@@ -3157,7 +3177,7 @@ function AppInner() {
                         void dispatch(duplicateTrackRemote(selectedId));
                         return true;
                     };
-                    if (fire()) {
+                    if (fire() && allowHoldRepeat) {
                         beginHoldRepeat(
                             selectMergedKeybindings(store.getState())["track.clone"],
                             fire,
@@ -3459,7 +3479,7 @@ function AppInner() {
                         })();
                         return true;
                     };
-                    if (fire()) {
+                    if (fire() && allowHoldRepeat) {
                         beginHoldRepeat(selectMergedKeybindings(store.getState())[actionId], fire);
                     }
                     break;
@@ -3500,7 +3520,7 @@ function AppInner() {
                         );
                         return true;
                     };
-                    if (fire()) {
+                    if (fire() && allowHoldRepeat) {
                         beginHoldRepeat(selectMergedKeybindings(store.getState())[actionId], fire);
                     }
                     break;
@@ -3535,10 +3555,12 @@ function AppInner() {
                         return true;
                     };
                     fire();
-                    beginHoldRepeat(
-                        selectMergedKeybindings(store.getState())["edit.pasteTracks"],
-                        fire,
-                    );
+                    if (allowHoldRepeat) {
+                        beginHoldRepeat(
+                            selectMergedKeybindings(store.getState())["edit.pasteTracks"],
+                            fire,
+                        );
+                    }
                     break;
                 }
                 // 注：edit.pasteVocalShifter（文件型剪贴板）未启用长按重复 ——
@@ -3578,7 +3600,13 @@ function AppInner() {
                 }>
             ).detail;
             if (!detail?.actionId || !detail.stroke) return;
-            handleKeybindingAction(detail.actionId, detail.stroke, detail.surface ?? null);
+            // 独立窗口转发：**不布防长按重复**。`holdRepeat` 的终止靠主窗口的
+            // `keyup`，而用户是在**那个**窗口按的键 —— 松手事件永远到不了这里，
+            // 布防就等于一次点击变无限重复（与移动端抽屉同一类缺陷）。
+            handleKeybindingAction(detail.actionId, detail.stroke, detail.surface ?? null, {
+                source: "shortcut",
+                repeat: false,
+            });
         };
         window.addEventListener(KEYBINDING_ACTION_EVENT, onDetachedShortcut as EventListener);
         return () =>
@@ -4085,7 +4113,12 @@ function AppInner() {
      * 而那类分叉只会表现为"这个功能在手机上行为不一样"，很难被注意到。
      */
     const handleMobileAction = useCallback(
-        (actionId: ActionId) => handleKeybindingAction(actionId, MOBILE_ACTION_STROKE),
+        // 移动端抽屉 / 顶栏按钮：合成派发，**永不**布防长按重复。
+        // 这正是用户报的「点一下撤销，它自己一直撤」的直接成因：抽屉走的是
+        // 同一条派发器，而 `beginHoldRepeat` 只由 `keyup`/`blur` 终止 ——
+        // 触摸屏上没有 `keyup`。
+        (actionId: ActionId) =>
+            handleKeybindingAction(actionId, MOBILE_ACTION_STROKE, null, MOBILE_DISPATCH),
         [handleKeybindingAction],
     );
 

@@ -2369,6 +2369,24 @@ pub fn group_clips(
             common::timeline_error_payload("panic in command: group_clips"),
             || {
                 let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+                // 【先判后打点】不足两片（或全都已在同一组）时 `group_clips` 什么
+                // 都不改，而 `checkpoint_timeline` 已经往撤销栈里塞了一步 —— 用户
+                // 多按几次「编组」就要多按几次撤销才能回到上一步。判据与内核的
+                // 实际写入条件一致：至少两片**存活且尚未同组**。
+                let groupable = {
+                    let live: Vec<&crate::state::Clip> = clip_ids
+                        .iter()
+                        .filter_map(|id| tl.clips.iter().find(|c| c.id == *id))
+                        .collect();
+                    let distinct_groups: std::collections::HashSet<Option<String>> =
+                        live.iter().map(|c| c.group_id.clone()).collect();
+                    live.len() >= 2 && distinct_groups.len() > 1
+                };
+                if !groupable {
+                    let payload = state.timeline_payload(&tl);
+                    drop(tl);
+                    return payload;
+                }
                 state.checkpoint_timeline(&tl, crate::state::HistoryOp::GroupClips);
                 tl.group_clips(&clip_ids);
                 let payload = state.timeline_payload(&tl);
@@ -2392,6 +2410,18 @@ pub fn ungroup_clips(
             common::timeline_error_payload("panic in command: ungroup_clips"),
             || {
                 let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+                // 【先判后打点】所选片段一个都不在组里时，`ungroup_clips` 是空操作。
+                let any_grouped = clip_ids.iter().any(|id| {
+                    tl.clips
+                        .iter()
+                        .find(|c| c.id == *id)
+                        .is_some_and(|c| c.group_id.is_some())
+                });
+                if !any_grouped {
+                    let payload = state.timeline_payload(&tl);
+                    drop(tl);
+                    return payload;
+                }
                 state.checkpoint_timeline(&tl, crate::state::HistoryOp::UngroupClips);
                 tl.ungroup_clips(&clip_ids);
                 let payload = state.timeline_payload(&tl);
