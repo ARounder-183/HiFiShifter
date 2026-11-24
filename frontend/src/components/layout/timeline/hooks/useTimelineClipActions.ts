@@ -154,7 +154,12 @@ export interface UseTimelineClipActionsResult {
     toggleGroupDisabled: (groupId: string) => void;
     normalizeClips: (ids: string[]) => void;
     replaceClipSources: (ids: string[]) => Promise<void>;
-    splitClipIdsAtPlayhead: (clipIds: string[]) => string[];
+    /**
+     * 在 `splitSecOverride` 处分割；缺省用播放头位置。
+     *
+     * @returns 真正送进后端的 Clip id（已按 1e-6 边沿过滤）。
+     */
+    splitClipIdsAtPlayhead: (clipIds: string[], splitSecOverride?: number) => string[];
     splitSelectedAtPlayhead: () => void;
     selectClipRangeByRect: (
         targetClipId: string,

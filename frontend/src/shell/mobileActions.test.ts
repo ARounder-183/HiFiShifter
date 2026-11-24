@@ -1,64 +1,70 @@
-/*
- * 移动抽屉的搜索过滤。
- *
- * 【为什么值得单独测】抽屉在移动端是唯一的功能入口，150 行条目里没有搜索就等于
- * "低频功能不存在"。而这条逻辑有两个容易写错的点：
- * 1. **空查询必须原样返回同一个数组**（每次返回新数组会让抽屉在输入框每次
- *    重渲染时都重建整份列表）；
- * 2. 过滤后**整段没有命中的分区要消失**（否则用户会看到一串空标题）。
- */
+// 抽屉完整性：**每一条非修饰键动作都必须能在抽屉里被找到**。
+//
+// 【为什么要一条枚举式断言】抽屉是移动端**唯一**的功能入口。而它的分段来自
+// `SECTION_ORDER` 这张手写表：`buildMobileActionSections` 只输出表里列出的
+// 分组，表里没有的分组会被**静默丢掉**。这不是假设 —— `paramEditor`（9 条）与
+// `pianoRoll`（22 条）就曾整段消失，其中 12 条 `pianoRoll.shiftParam*` 更是
+// 没有任何按钮，只有键盘能触发。症状是"手机上找不到平滑 / 移调"，界面上却
+// 看不出任何异常，也没有任何日志。
+//
+// 断言写法与 `ACTION_META` 直接挂钩：以后新增一个动作而忘了给它一个分组，
+// 这条会红。
+import { describe, expect, it } from "vitest";
+import { ACTION_META } from "../features/keybindings/defaultKeybindings";
+import type { ActionId } from "../features/keybindings/types";
+import { buildMobileActionSections } from "./mobileActions";
 
-import { expect, test } from "vitest";
+/** 形态上**不该**出现在抽屉里的动作（与 `MOBILE_UNAVAILABLE` 同一口径）。 */
+const EXPECTED_ABSENT = new Set<string>([
+    // 系统剪贴板：移动端没有原生通道。
+    "edit.pasteVocalShifter",
+    // 宿主相关：移动端没有 DAW。
+    "host.handKeyboardToHost",
+    // 快速搜索弹窗内部的导航键。
+    // 抽屉自己就是搜索面板：再摆一个「打开快速搜索」等于让用户从一个搜索框
+    // 跳到另一个搜索框。
+    "quickSearch.open",
+    "quickSearch.navigate.up",
+    "quickSearch.navigate.down",
+    "quickSearch.preview",
+    "quickSearch.confirm",
+    "quickSearch.close",
+]);
 
-import { filterMobileSections, type MobileActionSection } from "./mobileActions";
+const sections = buildMobileActionSections(
+    (key) => String(key),
+    () => null,
+);
+const rendered = new Set(sections.flatMap((section) => section.items.map((item) => item.id)));
 
-const SECTIONS: MobileActionSection[] = [
-    {
-        id: "edit",
-        title: "编辑",
-        items: [
-            { id: "edit.undo", label: "撤销", shortcut: "Ctrl+Z" },
-            { id: "edit.redo", label: "重做", shortcut: "Ctrl+Y" },
-        ],
-    },
-    {
-        id: "project",
-        title: "工程",
-        items: [{ id: "project.save", label: "保存工程", shortcut: "Ctrl+S" }],
-    },
-];
+describe("移动端抽屉完整性", () => {
+    it("★ 覆盖全部非修饰键动作（除白名单）", () => {
+        const missing: string[] = [];
+        for (const [id, meta] of Object.entries(ACTION_META) as Array<
+            [ActionId, (typeof ACTION_META)[ActionId]]
+        >) {
+            // 修饰键动作去修饰键行（ModifierRail），不是可执行命令。
+            if (meta.modifierOperationType !== undefined) continue;
+            if (EXPECTED_ABSENT.has(id)) continue;
+            if (!rendered.has(id)) missing.push(id);
+        }
+        expect(missing, `抽屉里缺失的动作：${missing.join(", ")}`).toEqual([]);
+    });
 
-test("空查询原样返回（保持引用，避免无谓重渲染）", () => {
-    expect(filterMobileSections(SECTIONS, "")).toBe(SECTIONS);
-    expect(filterMobileSections(SECTIONS, "   ")).toBe(SECTIONS);
-});
+    it("修饰键动作不出现在抽屉里（它们是状态，不是命令）", () => {
+        for (const [id, meta] of Object.entries(ACTION_META) as Array<
+            [ActionId, (typeof ACTION_META)[ActionId]]
+        >) {
+            if (meta.modifierOperationType === undefined) continue;
+            expect(rendered.has(id), `${id} 不该出现在抽屉里`).toBe(false);
+        }
+    });
 
-test("按标签子串匹配", () => {
-    const hit = filterMobileSections(SECTIONS, "保存");
-    expect(hit).toHaveLength(1);
-    expect(hit[0].id).toBe("project");
-    expect(hit[0].items.map((item) => item.id)).toEqual(["project.save"]);
-});
-
-test("大小写无关（英文界面下的实际输入）", () => {
-    const english: MobileActionSection[] = [
-        {
-            id: "project",
-            title: "Project",
-            items: [{ id: "project.export", label: "Export Audio...", shortcut: null }],
-        },
-    ];
-    expect(filterMobileSections(english, "export")).toHaveLength(1);
-    expect(filterMobileSections(english, "EXPORT")).toHaveLength(1);
-    expect(filterMobileSections(english, "export audio")).toHaveLength(1);
-});
-
-test("整段没有命中时分段消失", () => {
-    const hit = filterMobileSections(SECTIONS, "撤销");
-    expect(hit.map((section) => section.id)).toEqual(["edit"]);
-    expect(hit[0].items).toHaveLength(1);
-});
-
-test("没有命中时返回空数组", () => {
-    expect(filterMobileSections(SECTIONS, "不存在的动作")).toEqual([]);
+    it("参数编辑器与钢琴卷帘两段真的出现了（这两段曾经整段消失）", () => {
+        const ids = sections.map((section) => section.id);
+        expect(ids).toContain("paramEditor");
+        expect(ids).toContain("pianoRoll");
+        const pianoRoll = sections.find((section) => section.id === "pianoRoll");
+        expect(pianoRoll?.items.length ?? 0).toBeGreaterThan(0);
+    });
 });

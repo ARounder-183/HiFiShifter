@@ -232,6 +232,13 @@ export const ClipContextMenu: React.FC<{
     /** 播放头是否在 clip 范围内（用于分割按钮启用判断）*/
     playheadInClip: boolean;
     canSplitSelected: boolean;
+    /**
+     * 右键 / 长按位置的工程时间（秒）。
+     *
+     * 触摸形态下这是「用户指着哪里」的**唯一**表达：没有光标就没有播放头
+     * 可言，而长按位置天然就是落点。为 `null` 时菜单不出现「在此处分割」。
+     */
+    timeSec?: number | null;
     onClose: () => void;
     onDelete: (ids: string[]) => void;
     onMute: (ids: string[], muted: boolean) => void;
@@ -241,6 +248,8 @@ export const ClipContextMenu: React.FC<{
     onReplaceMidi?: (ids: string[]) => void;
     onQuickExport: (ids: string[]) => void;
     onSplit: (clipIds: string[]) => void;
+    /** 在指定时间点分割（落点 = 右键 / 长按位置）。 */
+    onSplitHere?: (clipIds: string[], splitSec: number) => void;
     onGlue: (ids: string[]) => void;
     onGroup?: (ids: string[]) => void;
     onUngroup?: (ids: string[]) => void;
@@ -280,6 +289,7 @@ export const ClipContextMenu: React.FC<{
     overlappingClips = [],
     playheadInClip,
     canSplitSelected,
+    timeSec = null,
     onClose,
     onDelete,
     onMute,
@@ -289,6 +299,7 @@ export const ClipContextMenu: React.FC<{
     onReplaceMidi,
     onQuickExport,
     onSplit,
+    onSplitHere,
     onGlue,
     onGroup,
     onUngroup,
@@ -376,6 +387,7 @@ export const ClipContextMenu: React.FC<{
         overlappingClips,
         playheadInClip,
         canSplitSelected,
+        pressSec: timeSec,
         pluginMode: pluginMode,
         caps: {
             // 【为什么每条都带 `!pluginMode ||`】这些能力位在独立 App **同样成立**：
@@ -481,6 +493,10 @@ export const ClipContextMenu: React.FC<{
         cut: () => onCut(ids),
         "cut-all": () => onCut(ids),
         split: () => onSplit(ids),
+        "split-here": () => {
+            if (timeSec == null || !Number.isFinite(timeSec)) return;
+            onSplitHere?.(ids, timeSec);
+        },
         normalize: () => onNormalize(ids),
         "normalize-all": () => onNormalize(ids),
         "add-to-param-selection": () => onAddToParamSelection?.(ids),

@@ -1023,6 +1023,55 @@ textarea {
 }
 
 /*
+ * 移动端：对象菜单改成**底部 sheet**。
+ *
+ * 【为什么只改 CSS】菜单的 40+ 个条目、分组、禁用条件、子菜单全部由
+ * `clipMenuModel` 生成，与形态无关；在 390px 上真正难受的是**表面**——
+ * 一列 24px 行高的条目排下来是一屏半，贴着手指弹出还会被屏幕边缘截断。
+ * 换成一个从底部升起、最高 70dvh、内部可滚的面板，内容一行都不用改。
+ *
+ * 【为什么可以只靠 `html[data-form]`】形态是 CSS 令牌层的一等公民（见
+ * `services/hostDetect.ts` 与 `check-mobile-form-gate.py`）。用一个 JS 分支去
+ * 选两套布局，等于给「这是哪种形态」开第二个答案 —— 而那正是本仓明令禁止的。
+ *
+ * 【为什么要 !important】菜单的锚点坐标由组件以**内联样式**写在壳上
+ * （`style={{ left: x, top: y }}`），内联样式只有 !important 能覆盖。
+ * 这两个属性在 sheet 里本来就没有意义（sheet 贴底、通栏），覆盖掉不会丢失
+ * 任何信息 —— 桌面形态下这条规则根本不命中。
+ */
+html[data-form="mobile"] [data-hs-context-menu] {
+    left: 0 !important;
+    right: 0;
+    top: auto !important;
+    bottom: 0;
+    min-width: 0;
+    max-height: 70dvh;
+    border-radius: 16px 16px 0 0;
+    border-bottom: 0;
+    padding-bottom: calc(var(--qt-space-2) + env(safe-area-inset-bottom, 0px));
+    box-shadow: 0 -12px 32px rgb(0 0 0 / 45%);
+    /* 底部 sheet 从下往上滑入：120ms 足够"是它出现了"，再长就像卡了。 */
+    animation: hs-menu-sheet-in 120ms ease-out;
+}
+
+@keyframes hs-menu-sheet-in {
+    from {
+        transform: translateY(24px);
+        opacity: 0;
+    }
+    to {
+        transform: translateY(0);
+        opacity: 1;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    html[data-form="mobile"] [data-hs-context-menu] {
+        animation: none;
+    }
+}
+
+/*
  * 壳不接管滚动的例外。
  *
  * 两种情形用同一条：① 面板/菜单内部自带滚动区，且需要固定页脚不随列表滚动

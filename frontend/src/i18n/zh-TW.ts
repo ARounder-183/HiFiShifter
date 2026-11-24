@@ -844,6 +844,7 @@ export const zhTW = {
     ctx_replace_midi: "取代 MIDI",
     ctx_replace_midi_all: "取代全部 MIDI",
     ctx_split_at_playhead: "在播放頭處分割",
+    ctx_split_here: "在此處分割",
     ctx_silence_detection: "靜音偵測...",
     silence_method: "偵測方式",
     silence_method_rms: "RMS（能量）",
@@ -2300,6 +2301,8 @@ export const zhTW = {
     mobile_section_clip: "音訊片段",
     mobile_section_param_block: "參數區塊",
     mobile_section_project: "專案",
+    mobile_section_param_editor: "參數編輯器",
+    mobile_section_piano_roll: "鋼琴捲簾",
     log_file_disabled_hint:
         "日誌詳細程度是「無」，沒有寫入任何日誌檔。把它改成「低」或更高，並重新啟動應用程式。",
     mobile_menu_title: "選單",

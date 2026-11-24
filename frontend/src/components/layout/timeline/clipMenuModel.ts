@@ -8,6 +8,7 @@
 // 【为什么分隔线由模型收敛】「隐藏不可用项」落地后最常见的回归是空段与连续两条
 // 分隔线（旧代码里有 6 处 Divider 是无条件写的）。把收敛做在模型里，渲染端
 // 不需要知道任何规则，也不可能忘掉。
+import { isClipSplittableAtSec } from "./splitTargets";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
 import type { MessageKey } from "../../../i18n/messages";
 import {
@@ -163,6 +164,15 @@ export interface ClipMenuInput {
     /** 播放头是否落在片段内（分割的**情境性**前提）。 */
     playheadInClip: boolean;
     canSplitSelected: boolean;
+    /**
+     * 右键 / 长按的位置（工程秒）。`null` / 缺省 = 不知道落点。
+     *
+     * 【为什么菜单需要它】「在播放头处分割」在触摸屏上不可用 —— 手机上
+     * 没有光标，用户无法表达「切这里」。长按位置**就是**用户指着的地方，
+     * 它必须能作为落点传给后端（`splitClipIdsAtPlayhead(ids, splitSecOverride)`
+     * 早已支持显式落点，只是此前没有任何调用点传它）。
+     */
+    pressSec?: number | null;
     /** 插件形态。**只**用于「take 子菜单的结构项收起、行点击禁用」这一件事。 */
     pluginMode: boolean;
     caps: ClipMenuCaps;
@@ -237,6 +247,7 @@ export function buildClipMenuModel(input: ClipMenuInput): ClipMenuEntry[] {
         overlappingClips = [],
         playheadInClip,
         canSplitSelected,
+        pressSec = null,
         pluginMode,
         caps,
         available,
@@ -505,6 +516,20 @@ export function buildClipMenuModel(input: ClipMenuInput): ClipMenuEntry[] {
             );
         }
         if (caps.split) {
+            // 「在此处分割」：落点 = 右键 / 长按位置。
+            //
+            // 【为什么它是第一条】触摸屏上没有光标，用户唯一能表达「切这里」的
+            // 方式就是**指着那里**。把这条放在「在播放头处分割」之上，是为了让
+            // 手机上第一眼看到的就是可用的那一条（播放头在手机上通常离手指很远）。
+            const pressInClip =
+                pressSec != null && Number.isFinite(pressSec)
+                    ? isMulti
+                        ? selectedClips.some((c) => isClipSplittableAtSec(c, pressSec))
+                        : isClipSplittableAtSec(clip, pressSec)
+                    : false;
+            if (pressSec != null && Number.isFinite(pressSec)) {
+                out.push(item("split-here", t("ctx_split_here"), { disabled: !pressInClip }));
+            }
             // 【为什么这里只禁用、不隐藏】播放头不在片段内是**用户一步就能改**的状态；
             // 结构性的「宿主没有分割通道」已经由 caps.split 挡在上面。
             out.push(

@@ -108,6 +108,13 @@ const SECTION_ORDER: Array<{ id: string; titleKey: MessageKey }> = [
     // 对同一件事用两个词。
     { id: "edit", titleKey: "menu_edit" },
     { id: "clip", titleKey: "mobile_section_clip" },
+    // 【这两段曾经整段消失】`paramEditor`（9 条）与 `pianoRoll`（22 条）在
+    // `SECTION_ORDER` 里没有对应条目，于是 `buildMobileActionSections` 把这两个
+    // bucket 直接丢掉 —— 31 条动作在抽屉里**搜都搜不到**，其中
+    // `pianoRoll.shiftParam*` 那 12 条更是**没有任何按钮**（只有键盘能触发）。
+    // 症状是"手机上找不到平滑 / 移调"，而界面上看不出任何异常。
+    { id: "paramEditor", titleKey: "mobile_section_param_editor" },
+    { id: "pianoRoll", titleKey: "mobile_section_piano_roll" },
     { id: "paramBlock", titleKey: "mobile_section_param_block" },
     { id: "project", titleKey: "mobile_section_project" },
     { id: "layout", titleKey: "menu_view" },

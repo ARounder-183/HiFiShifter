@@ -843,6 +843,7 @@ export const zhCN = {
     ctx_replace_midi: "替换 MIDI",
     ctx_replace_midi_all: "替换全部 MIDI",
     ctx_split_at_playhead: "在播放头处分割",
+    ctx_split_here: "在此处分割",
     ctx_silence_detection: "静音检测...",
     silence_method: "检测方式",
     silence_method_rms: "RMS（能量）",
@@ -2296,6 +2297,8 @@ export const zhCN = {
     mobile_section_clip: "音频块",
     mobile_section_param_block: "参数块",
     mobile_section_project: "工程",
+    mobile_section_param_editor: "参数编辑器",
+    mobile_section_piano_roll: "钢琴卷帘",
     log_file_disabled_hint:
         "日志详细程度是「无」，没有写入任何日志文件。把它改成「低」或更高，并重启应用。",
     mobile_menu_title: "菜单",

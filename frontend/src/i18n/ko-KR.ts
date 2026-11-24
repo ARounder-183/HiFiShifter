@@ -939,6 +939,7 @@ export const koKR = {
     ctx_replace_midi: "MIDI 교체",
     ctx_replace_midi_all: "모든 MIDI 교체",
     ctx_split_at_playhead: "재생 위치에서 분할",
+    ctx_split_here: "여기서 분할",
     ctx_silence_detection: "무음 감지...",
     silence_method: "감지 방식",
     silence_method_rms: "RMS(에너지)",
@@ -2353,6 +2354,8 @@ export const koKR = {
     mobile_section_clip: "클립",
     mobile_section_param_block: "파라미터 블록",
     mobile_section_project: "프로젝트",
+    mobile_section_param_editor: "파라미터 편집기",
+    mobile_section_piano_roll: "피아노 롤",
     log_file_disabled_hint:
         "로그 상세 수준이 '없음'이므로 로그 파일이 기록되지 않습니다. '낮음' 이상으로 변경한 뒤 앱을 다시 시작하세요.",
     mobile_menu_title: "메뉴",

@@ -1562,6 +1562,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                       selectedClips={selectedClips}
                                       overlappingClips={overlappingFadeClips}
                                       playheadInClip={playheadInClip}
+                                      timeSec={contextTimeSec}
                                       canSplitSelected={selectedClips.some((c) =>
                                           isClipSplittableAtSec(c, currentPlayheadSec),
                                       )}
@@ -1631,6 +1632,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                       onSplit={(clipIds) => {
                                           setContextMenu(null);
                                           splitClipIdsAtPlayhead(clipIds);
+                                      }}
+                                      onSplitHere={(clipIds, splitSec) => {
+                                          // 落点 = 右键 / 长按位置：这是触摸形态下唯一
+                                          // 能表达「切这里」的通道（没有光标就没有播放头）。
+                                          // `splitClipIdsAtPlayhead` 的第二参早已支持
+                                          // 显式落点，只是此前没有任何调用点传它。
+                                          setContextMenu(null);
+                                          splitClipIdsAtPlayhead(clipIds, splitSec);
                                       }}
                                       onGroup={(ids) => {
                                           setContextMenu(null);

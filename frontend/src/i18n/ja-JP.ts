@@ -877,6 +877,7 @@ export const jaJP = {
     ctx_replace_midi: "MIDIを置換",
     ctx_replace_midi_all: "すべてのMIDIを置換",
     ctx_split_at_playhead: "再生ヘッドで分割",
+    ctx_split_here: "ここで分割",
     ctx_silence_detection: "無音検出...",
     silence_method: "検出方式",
     silence_method_rms: "RMS（エネルギー）",
@@ -2384,6 +2385,8 @@ export const jaJP = {
     mobile_section_clip: "クリップ",
     mobile_section_param_block: "パラメータブロック",
     mobile_section_project: "プロジェクト",
+    mobile_section_param_editor: "パラメータエディタ",
+    mobile_section_piano_roll: "ピアノロール",
     log_file_disabled_hint:
         "ログの詳細度が「なし」のため、ログファイルは書き出されていません。「低」以上に変更してアプリを再起動してください。",
     mobile_menu_title: "メニュー",

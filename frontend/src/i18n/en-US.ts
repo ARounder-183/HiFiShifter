@@ -1011,6 +1011,7 @@ export const enUS = {
     ctx_replace_midi: "Replace MIDI",
     ctx_replace_midi_all: "Replace MIDI All",
     ctx_split_at_playhead: "Split at Playhead",
+    ctx_split_here: "Split Here",
     ctx_silence_detection: "Silence Detection...",
     silence_method: "Detection",
     silence_method_rms: "RMS (energy)",
@@ -2374,6 +2375,8 @@ export const enUS = {
     mobile_section_clip: "Clips",
     mobile_section_param_block: "Parameter blocks",
     mobile_section_project: "Project",
+    mobile_section_param_editor: "Parameter editor",
+    mobile_section_piano_roll: "Piano roll",
     log_file_disabled_hint:
         "Log verbosity is set to None, so no log file is being written. Set Help → Log verbosity to Low or higher, then restart the app.",
     mobile_menu_title: "Menu",
