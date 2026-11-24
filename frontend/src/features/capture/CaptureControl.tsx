@@ -164,7 +164,10 @@ export function CaptureControl() {
                         cursor: "pointer",
                     }}
                 >
-                    <ExclamationTriangleIcon width="var(--qt-icon-sm)" height="var(--qt-icon-sm)" />
+                    {/* 尺寸走 style：width 是 SVG 的 presentation attribute，解析不了 CSS 变量。 */}
+                    <ExclamationTriangleIcon
+                        style={{ width: "var(--qt-icon-sm)", height: "var(--qt-icon-sm)" }}
+                    />
                 </button>
             ) : null}
             <CaptureSettingsDialog

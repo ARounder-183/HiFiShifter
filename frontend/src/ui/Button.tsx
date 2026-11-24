@@ -28,6 +28,7 @@ import {
     cloneElement,
     isValidElement,
     type ComponentPropsWithoutRef,
+    type CSSProperties,
     type ReactNode,
     type Ref,
 } from "react";
@@ -145,11 +146,27 @@ const ICON_PX: Record<AppIconSize, string> = {
  * 非合法元素（字符串、null）原样返回，允许调用方传任意节点。
  */
 function withIconSize(icon: ReactNode, size: AppIconSize): ReactNode {
-    if (!isValidElement<{ width?: number | string; height?: number | string }>(icon)) return icon;
+    if (
+        !isValidElement<{
+            width?: number | string;
+            height?: number | string;
+            style?: CSSProperties;
+        }>(icon)
+    )
+        return icon;
     const px = ICON_PX[size];
     // 调用方显式传了尺寸则以调用方为准：有些图标（如带角标的复合图）需要特例。
     if (icon.props.width !== undefined || icon.props.height !== undefined) return icon;
-    return cloneElement(icon, { width: px, height: px });
+    /*
+     * 【为什么写在 style 而不是 width/height 属性】令牌的值是 `var(--qt-icon-md)`，
+     * 而 `<svg width>` 是 **presentation attribute**：它只接受长度字面量，解析不了
+     * CSS 变量。浏览器于是每渲染一个按钮就在控制台报两条
+     *     Error: <svg> attribute width: Expected length, "var(--qt-icon-md…".
+     * 尺寸也不会生效（退回 24px）。CSS 属性则正常解析变量，且优先级高于
+     * presentation attribute —— 同样的令牌、同样的意图，只是写在了能被解析的地方。
+     * 这是模拟器 + DevTools 协议抓到的控制台错误，桌面端只是没人翻控制台。
+     */
+    return cloneElement(icon, { style: { width: px, height: px, ...icon.props.style } });
 }
 
 export interface AppIconButtonProps extends Omit<
