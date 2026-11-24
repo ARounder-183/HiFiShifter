@@ -1514,11 +1514,38 @@ fn confirmed_unavailable() -> Option<String> {
     }
 }
 
+/// 模型文件是否**在磁盘上**（不代表能建会话）。
+///
+/// 【为什么要单独判这一条】"乐观"只该覆盖"还没试过"，不能覆盖"文件根本不在"。
+/// 打包漏带权重时（见 `tauri.conf.json` 的 `bundle.resources` 与
+/// `scripts/checks/check-model-bundle.py`）会话构建必然失败，而 `is_available()`
+/// 在预热给出结论之前一直返回 true —— 界面因此照常显示"可编辑"，用户画完整条
+/// 音高线才在渲染时得到一片静音，日志里只有一行 `model not found`。
+///
+/// 【为什么缓存"命中"而不缓存"未命中"】命中是终态（同一进程内权重不会凭空出现
+/// 又消失），缓存它让热路径退化成一次原子读；未命中则每次都重新探一次，
+/// 这样用户在设置里补上模型目录后无需重启即可恢复（见 `model_store` 的
+/// 用户自备目录）。
+fn model_files_present() -> bool {
+    static PRESENT: OnceLock<()> = OnceLock::new();
+    if PRESENT.get().is_some() {
+        return true;
+    }
+    if resolve_model_paths().is_ok() {
+        let _ = PRESENT.set(());
+        return true;
+    }
+    false
+}
+
 /// **非阻塞**可用性查询：绝不构建会话（构建交给后台预热 / 显式加载路径）。
 ///
 /// 尚未预热完成时返回 true（乐观）—— 调用方在 false 时会**跳过处理器渲染**
 ///（产出未处理音频）或跳过分离/分析，乐观是安全侧；真实失败会在首次实际
 /// 使用（load / 预热完成）时暴露并缓存为 false。
+///
+/// 【例外：权重不在磁盘上就不乐观】见 [`model_files_present`]：那一种失败
+/// 不可能靠"再试一次"变好，继续上报可用只会把失败推给用户（画完线没有声音）。
 pub fn is_available() -> bool {
     // 可用性只读：快照/参数查询不应偷偷启动ORT线程。App已在登记模型后显式预热，
     // 插件真实worker使用get_or_init路径加载；避免短查询结束时线程撞上进程/DLL退出。
@@ -1530,7 +1557,18 @@ pub fn is_available() -> bool {
             }
             false
         }
-        None => true,
+        None => {
+            if model_files_present() {
+                return true;
+            }
+            if !LOGGED_UNAVAILABLE.swap(true, Ordering::Relaxed) {
+                log::error!(
+                    "nsf_hifigan_onnx: unavailable: model weights are not on disk ({})",
+                    resolve_model_paths().err().unwrap_or_default()
+                );
+            }
+            false
+        }
     }
 }
 

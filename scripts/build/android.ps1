@@ -319,6 +319,40 @@ function Sync-BundleResources {
     return $copied
 }
 
+function Assert-BundleModels {
+    param([string]$AssetsRoot)
+
+    # [Why this exists] The model manifest and tauri.conf.json list the models in two
+    # different places, and a file that is in the first but not the second is copied by
+    # neither: the APK ships without it, the app starts normally, and the only trace is
+    # "NSF-HiGAN ONNX model not found" in a log nobody reads -- while the UI keeps
+    # reporting the pitch backend as available (availability is optimistic until a build
+    # fails). That is exactly how the 56 MB vocoder went missing from every artefact and
+    # pitch edits stopped producing any sound. A missing weight must fail the build, not
+    # the user's session. The static gate (scripts/checks/check-model-bundle.py) catches
+    # the configuration half; this catches a copy that silently did not happen.
+    $manifestPath = Join-Path $AssetsRoot "models\models.json"
+    if (-not (Test-Path -LiteralPath $manifestPath)) { return }
+
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $missing = @()
+    foreach ($file in $manifest.files) {
+        $expected = Join-Path (Join-Path $AssetsRoot "models") ($file.path -replace '/', '\')
+        if (-not (Test-Path -LiteralPath $expected -PathType Leaf)) {
+            $missing += ("{0} (missing)" -f $file.path)
+            continue
+        }
+        $actual = (Get-Item -LiteralPath $expected).Length
+        if ($file.bytes -and $actual -ne [int64]$file.bytes) {
+            $missing += ("{0} ({1:N0} B, expected {2:N0} B)" -f $file.path, $actual, $file.bytes)
+        }
+    }
+    if ($missing.Count -gt 0) {
+        throw ("The packaged model set is incomplete -- these files in models.json are not in the APK assets: " + ($missing -join ', ') + ". Add the missing source to bundle.resources in tauri.conf.json (or fix the copy) before shipping.")
+    }
+    Write-Host ("== verified {0} bundled model file(s) against models.json" -f $manifest.files.Count) -ForegroundColor DarkGray
+}
+
 function Invoke-SelfStagedPackage {
     param([string]$Profile, [string]$CargoProfile, [string]$Triple, [string]$JniAbi)
 
@@ -361,6 +395,7 @@ function Invoke-SelfStagedPackage {
     $assets = Join-Path $androidProject "app\src\main\assets"
     $copied = Sync-BundleResources -TauriDir (Join-Path $root "backend\src-tauri") -AssetsRoot $assets
     Write-Host "== synced $copied bundle resource(s) into app/src/main/assets" -ForegroundColor DarkGray
+    Assert-BundleModels -AssetsRoot $assets
 
     Push-Location $androidProject
     try {
