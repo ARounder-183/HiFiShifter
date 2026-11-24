@@ -19,6 +19,7 @@
 //! 因此这组用例把**槽位布局**本身钉死，而不只是测返回值。
 
 use super::*;
+use hifishifter_plugin::vst3_abi::uid_guid;
 use std::sync::atomic::Ordering;
 
 /// 子对象指针必须真的指向对象内嵌的 vtbl 字段，且能反解回拥有者。

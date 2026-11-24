@@ -9,6 +9,7 @@
 //! 现在三者共用 [`super::class_declaration`]，这组用例把"同源"这件事钉住。
 
 use super::*;
+use hifishifter_plugin::vst3_abi::uid_guid;
 use ara2_bridge::companion::vst3::ffi::ara2_vst3_release;
 use ara2_bridge::core::ApiGeneration;
 use std::ffi::CStr;
