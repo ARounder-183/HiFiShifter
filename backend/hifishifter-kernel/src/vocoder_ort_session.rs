@@ -1036,7 +1036,9 @@ fn register_alternative_backend() {
     static BACKEND: std::sync::Once = std::sync::Once::new();
     BACKEND.call_once(|| {
         ort::set_api(ort_tract::api());
-        log::info!("[ort] registered the ort-tract CPU backend (no native ORT binary for this target)");
+        log::info!(
+            "[ort] registered the ort-tract CPU backend (no native ORT binary for this target)"
+        );
     });
 }
 
