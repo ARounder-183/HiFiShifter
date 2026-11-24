@@ -95,15 +95,20 @@ test("active 强制实心，但不改变盒模型标记", () => {
     expect(active.ariaPressed).toBe("true");
 });
 
-test("录音键：固定实心危险色，待机与录制中盒子不变", () => {
-    const idle = renderButton({ tone: "danger", fill: "solid", active: false });
-    const armed = renderButton({ tone: "danger", fill: "solid", active: true });
-    expect(idle.className).toContain("rt-variant-solid");
+/**
+ * 【这条钉的是"配色不被盒模型修复带偏"】录音键待机是 soft 红（与改动前一致），
+ * 录制中才转实心。此前为了治"红色填充不齐"把待机也固定成 solid —— 那让待机看着
+ * 像已经开录，而真正的原因是盒模型（已由 `[data-hs-transport-button]` 归一化）。
+ */
+test("录音键：待机 soft 红，录制中 solid 红，盒模型标记不变", () => {
+    const idle = renderButton({ tone: "danger", fill: "soft", active: false });
+    const armed = renderButton({ tone: "danger", fill: "soft", active: true });
+    expect(idle.className).toContain("rt-variant-soft");
     expect(armed.className).toContain("rt-variant-solid");
-    expect(idle.className).not.toContain("rt-variant-soft");
-    expect(armed.className).not.toContain("rt-variant-soft");
+    // 变体变了，但"这是传输按钮"的盒模型标记没变 —— 归一化规则照旧命中。
+    expect(idle.transport).toBe("");
+    expect(armed.transport).toBe("");
 });
-
 test("tooltip 同时是 aria-label", () => {
     const snapshot = renderButton({});
     expect(snapshot.ariaLabel).toBe("play");
