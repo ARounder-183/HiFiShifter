@@ -38,6 +38,50 @@ fn empty_snapshots() -> Vec<Arc<PlaybackSnapshot>> {
     vec![Arc::clone(&empty), empty]
 }
 
+/// 渲染前把"源还没发布"的 clip 摘掉；返回 `(要用的时间线, 第一个缺源 id)`。
+///
+/// 【为什么需要它】此前渲染对时间线上**每一个** `source_path` 都要求 `sources` 里有
+/// PCM，缺一个就 `Err("host PCM unavailable: <id>")`。而 `sources` 是按宿主授权进度
+/// **逐条**发布的：同一条轨上只要还有一条 clip 的源没读到（宿主没授权 / 读失败 /
+/// 在别的 take 上），**正在编辑的这一条**也永远渲不出来。macOS 实测的形状正是：
+/// 选中的是 `…-ARA-test.wav`，界面报的却是同轨另一条 `Default_5.wav`。
+///
+/// 【为什么返回 `Option<TimelineState>` 而不是总是克隆】绝大多数渲染没有任何缺源，
+/// 那时必须原样借用调用方的时间线（零拷贝）；只有真的要摘 clip 才克隆一份。
+///
+/// 【为什么"一条都不剩"不在这里报错】错误措辞属于调用方（渲染要 `host PCM unavailable`，
+/// 导出要它自己的上下文）。这里只如实回答"还剩几条、第一个缺的是谁"。
+fn without_unpublished_sources(
+    timeline: &TimelineState,
+    sources: &HashMap<String, Arc<SourcePcm>>,
+) -> (Option<TimelineState>, Option<String>) {
+    let missing_source = timeline
+        .clips
+        .iter()
+        .filter_map(|clip| clip.source_path.as_ref())
+        .find(|id| !sources.contains_key(*id))
+        .cloned();
+    if missing_source.is_none() {
+        return (None, None);
+    }
+    let mut view = timeline.clone();
+    let before = view.clips.len();
+    view.clips.retain(|clip| match clip.source_path.as_ref() {
+        Some(id) => sources.contains_key(id),
+        None => true,
+    });
+    hifishifter_kernel::log_limiter::emit_limited_key(
+        log::Level::Warn,
+        "ara.render.missing-source",
+        format_args!(
+            "[ara] render skipped {} clip(s) whose host PCM is not published yet; \
+             the rest of the timeline still renders",
+            before - view.clips.len()
+        ),
+    );
+    (Some(view), missing_source)
+}
+
 pub(crate) struct RenderInput {
     pub timeline: Option<TimelineState>,
     pub regions: Vec<AraPlaybackRegion>,
@@ -305,6 +349,18 @@ impl RenderInput {
                 view
             });
         let timeline = sanitized.as_ref().unwrap_or(timeline);
+        // ── 源缺席只静音**那一条 clip** ──────────────────────────────────────────
+        //
+        // 见 `without_unpublished_sources`：判据与理由都在那里，这里只负责"一条都不剩
+        // 就是真故障"这一条 —— 界面靠它继续报 `source_read_failed`。
+        let (view, missing_source) = without_unpublished_sources(timeline, &self.sources);
+        let timeline = view.as_ref().unwrap_or(timeline);
+        if timeline.clips.is_empty() {
+            return Err(match missing_source {
+                Some(id) => format!("{}: {id}", crate::editor::errors::HOST_PCM_UNAVAILABLE),
+                None => "timeline has no renderable clip".to_owned(),
+            });
+        }
         if let Some(view) = &sanitized {
             hifishifter_kernel::log_limiter::emit_limited_key(
                 log::Level::Warn,
@@ -492,10 +548,13 @@ impl RenderInput {
         timeline: &TimelineState,
     ) -> Result<HashMap<String, MixdownPcm>, String> {
         let mut sources = HashMap::new();
+        // 【与 `render_with_progress` 同一条纪律】导出也按"源缺席=该 clip 静音"处理：
+        // 导出比预览更不能因为同轨上一条还没授权的 clip 就整份失败。
         for id in timeline
             .clips
             .iter()
             .filter_map(|clip| clip.source_path.as_ref())
+            .filter(|id| self.sources.contains_key(*id))
             .collect::<BTreeSet<_>>()
         {
             let pcm = self
@@ -1663,4 +1722,5 @@ mod tests {
         }
         let _ = std::fs::remove_file(&path);
     }
+
 }
