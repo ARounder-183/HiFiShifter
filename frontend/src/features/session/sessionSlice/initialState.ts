@@ -234,6 +234,11 @@ export const initialState: SessionState = {
     _paramSelectionRestoreSeq: 0,
     hostAudio: null,
     _latestEditRequestId: null,
+    timelineRevision: -1,
+    _gestureDepth: 0,
+    _gestureKind: null,
+    _gestureBaseRevision: -1,
+    _deferredSnapshot: null,
     _transportEpoch: 0,
     _stopInterruptedPlayback: false,
 };

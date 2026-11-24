@@ -6431,6 +6431,55 @@ mod tests {
         assert!((right.source_start_sec - 2.0).abs() < 1e-9);
     }
 
+    // ── can_split_at ─────────────────────────────────────────────
+    /// **不变量：`can_split_at` 与 `split_clip` 的判据逐点一致。**
+    ///
+    /// 命令层靠 `can_split_at` 决定「要不要打撤销点」（空操作分割不得在历史里
+    /// 留下一步），前端靠它决定「在此处分割」是否可点。三者只要有一处漂移，
+    /// 就会重现用户报的两种症状之一：按了没反应，或撤销栈里塞满空步。
+    ///
+    /// 这里用**同一批采样点**分别跑两个函数，断言二者同真同假 —— 比各自写死
+    /// 期望值更能防住将来的常数改动（比如把 1e-6 改成 1e-3）。
+    #[test]
+    fn can_split_at_matches_split_clip_edge_convention() {
+        let mut tl = TimelineState::default();
+        let tid = tl.add_track(Some("T1".into()), None, None);
+        let clip = tl.add_clip(Some(tid), Some("A".into()), Some(1.0), Some(2.0), None);
+        // 片段覆盖 [1.0, 3.0]。
+        let samples = [
+            -1.0, 0.0, 0.999, 1.0, 1.0 + 1e-9, 1.0 + 1e-7, 1.0 + 1e-5, 1.5,
+            3.0 - 1e-5, 3.0 - 1e-7, 3.0 - 1e-9, 3.0, 3.5, 10.0, f64::NAN,
+            f64::INFINITY,
+        ];
+        for t in samples {
+            let mut probe = tl.clone();
+            let cut = probe.split_clip(&clip, t).is_some();
+            assert_eq!(
+                tl.can_split_at(&clip, t),
+                cut,
+                "can_split_at 与 split_clip 在 t={t} 处不一致"
+            );
+        }
+        // 不存在的 clip 一律不可分割（命令层据此直接返回，不打点）。
+        assert!(!tl.can_split_at("no-such-clip", 1.5));
+    }
+
+    /// 空操作分割必须**零副作用**：不能新建 clip、不能改几何、不能动工程长度。
+    #[test]
+    fn split_at_edge_is_noop() {
+        let mut tl = TimelineState::default();
+        let tid = tl.add_track(Some("T1".into()), None, None);
+        let clip = tl.add_clip(Some(tid), Some("A".into()), Some(1.0), Some(2.0), None);
+        let before_clips = tl.clips.len();
+        let before_project_sec = tl.project_sec;
+        for t in [1.0, 3.0, 0.5, 99.0] {
+            assert!(!tl.can_split_at(&clip, t), "t={t} 不该可分割");
+            assert!(tl.split_clip(&clip, t).is_none(), "t={t} 不该产生右段");
+        }
+        assert_eq!(tl.clips.len(), before_clips);
+        assert_eq!(tl.project_sec, before_project_sec);
+    }
+
     // ── split_clips_at tests ──────────────────────────────────────
     /// Split a grouped clip: left half keeps original group_id, right half gets new group_id.
     #[test]
@@ -8334,6 +8383,9 @@ impl TimelineState {
             redo_depth: None,
             notes_markdown: None,
             param_selection_restore: None,
+            // 版本号由命令层（`AppState::timeline_payload`）填：内核不认识
+            // 「现在是第几版」，保持 None，由 serde 省略该字段。
+            revision: None,
         }
     }
 
@@ -8429,6 +8481,9 @@ impl TimelineState {
             redo_depth: None,
             notes_markdown: None,
             param_selection_restore: None,
+            // 版本号由命令层（`AppState::timeline_payload`）填：内核不认识
+            // 「现在是第几版」，保持 None，由 serde 省略该字段。
+            revision: None,
         }
     }
 
@@ -11002,6 +11057,32 @@ impl TimelineState {
         }
     }
 
+    /// 该 Clip 能否在 `split_sec` 处被切开（不修改任何状态）。
+    ///
+    /// 【为什么要单独成方法】分割是**命令层先判后打点**的前提：
+    /// `checkpoint_timeline` 一旦执行就必然产生一个撤销步，而「在片段边界上
+    /// 分割」是一个**不改变任何字节**的操作 —— 用户按十次就在历史里留下十个
+    /// 空步，撤销要按十次才退回到真正的上一步。把判据抽出来之后，命令层可以
+    /// 在打点之前就把这类请求挡掉（见 `commands/timeline.rs::split_clip`）。
+    ///
+    /// 【边沿容差必须与 `split_clip` 完全一致】这里是 `1e-6`（秒），
+    /// `split_clip` 内部是同一个常数；前端 `splitTargets.ts` 的
+    /// `SPLIT_EDGE_EPSILON_SEC` 也是它。三处任何一处漂移，都会出现
+    /// 「前端说能切、后端说切不动」或反之 —— 因此这个判据**只允许**有这一份
+    /// 后端实现，前端不得再自行推导。
+    pub fn can_split_at(&self, clip_id: &str, split_sec: f64) -> bool {
+        let Some(clip) = self.clips.iter().find(|c| c.id == clip_id) else {
+            return false;
+        };
+        if !split_sec.is_finite() {
+            return false;
+        }
+        let start = clip.start_sec;
+        let end = start + clip.length_sec;
+        let split = split_sec.clamp(start, end);
+        split > start + 1e-6 && split < end - 1e-6
+    }
+
     pub fn split_clip(&mut self, clip_id: &str, split_sec: f64) -> Option<String> {
         let idx = self.clips.iter().position(|c| c.id == clip_id)?;
 
@@ -11013,6 +11094,14 @@ impl TimelineState {
         left.sync_take_from_flat();
         let start = left.start_sec;
         let end = start + left.length_sec;
+        // 【NaN 必须挡在这里】`f64::clamp` 对 NaN 返回 NaN，而下面两个比较
+        // 对 NaN 都是 false —— 于是 NaN 会**穿过**边沿判据，造出一段长度为
+        // NaN 的 clip（几何从此全是 NaN，渲染与音频调度都读不懂）。
+        // 这个入口同时被命令层（鼠标/触摸落点）与撤销重做路径复用，
+        // 任何一个上游把除零/空值算成 NaN 都会走到这里，因此守在最里面。
+        if !split_sec.is_finite() {
+            return None;
+        }
         let split = split_sec.clamp(start, end);
         if split <= start + 1e-6 || split >= end - 1e-6 {
             return None;

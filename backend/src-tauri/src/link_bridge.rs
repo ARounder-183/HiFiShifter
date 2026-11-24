@@ -211,11 +211,11 @@ pub(crate) fn open(
     for root in roots {
         crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root);
     }
-    let mut payload = state
-        .timeline
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .to_payload();
+    let mut payload = {
+        // 版本号必须在**持锁期间**取：见 `AppState::timeline_payload` 的调用约定。
+        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        state.timeline_payload(&tl)
+    };
     payload.project = Some(state.project_meta_payload());
     let mut result = session_payload_open;
     result["timeline"] = serde_json::to_value(payload).map_err(|e| e.to_string())?;

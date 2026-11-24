@@ -41,10 +41,6 @@ export function registerClipState(builder: ActionReducerMapBuilder<SessionState>
             state._latestEditRequestId = action.meta.requestId;
         })
         .addCase(convertClipsToPitchReferenceRemote.fulfilled, (state, action) => {
-            // 乱序守卫：见 setClipStateRemote.fulfilled。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as {
                 ok?: boolean;
             } & TimelineState;
@@ -58,10 +54,6 @@ export function registerClipState(builder: ActionReducerMapBuilder<SessionState>
             state._latestEditRequestId = action.meta.requestId;
         })
         .addCase(updatePitchReferenceRemote.fulfilled, (state, action) => {
-            // 乱序守卫：见 setClipStateRemote.fulfilled。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as {
                 ok?: boolean;
             } & TimelineState;
@@ -72,21 +64,21 @@ export function registerClipState(builder: ActionReducerMapBuilder<SessionState>
         })
 
         .addCase(setClipStateRemote.fulfilled, (state, action) => {
-            // 乱序守卫：只采纳最近一次编辑请求的响应（见 _latestEditRequestId）。
-            // 多选批量松手时若旧请求的中间状态快照迟到，会被这里丢弃，
-            // 避免"闪回原状/部分 Clip 还原"；最新响应（含此前全部已提交
-            // 变更）总是最后一个生效。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
+            // 【这里**不**传 force】这是全仓唯一的**逐帧**编辑回包（拖动/裁切/淡变/
+            // 滑动时每帧一次），也是「拖着拖着弹回去」的直接来源：手势期间它携带的
+            // 是用户手指**还没做完**的那个状态，落地就会把乐观预览按回旧值。
+            // 交给 `applyTimelineState` 的会话闸门推迟到手势结束即可 —— 那时后端
+            // 已经回了一份提交后的权威快照，被推迟的这份通常直接被它取代。
+            //
+            // 乱序仲裁同样已下沉：带 `revision` 的载荷按版本号比较（旧的丢弃、
+            // 新的落地），`requestId` 只在旧后端（无版本号）时作为兼容判据。
             const payload = action.payload as {
                 ok?: boolean;
             } & TimelineState;
             if (!payload.ok) {
                 return;
             }
-            // force：重设尺寸（右缘位移）的权威结果含波纹平移，交互锁期间不能丢弃。
-            applyTimelineState(state, payload, { force: true });
+            applyTimelineState(state, payload, { requestId: action.meta.requestId });
         })
 
         .addCase(setClipStateRemote.pending, (state, action) => {
@@ -120,18 +112,14 @@ export function registerClipState(builder: ActionReducerMapBuilder<SessionState>
         })
 
         .addCase(setClipsStateBulkRemote.fulfilled, (state, action) => {
-            // 乱序守卫：见 setClipStateRemote.fulfilled。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
+            // 同上：多选批量拖拽也是逐帧回包，必须走会话闸门（不传 force）。
             const payload = action.payload as {
                 ok?: boolean;
             } & TimelineState;
             if (!payload.ok) {
                 return;
             }
-            // force：批量状态（含未来尺寸波纹路径）的权威结果，交互锁期间不能丢弃。
-            applyTimelineState(state, payload, { force: true });
+            applyTimelineState(state, payload, { requestId: action.meta.requestId });
         })
 
         .addCase(setClipsStateBulkRemote.pending, (state, action) => {
@@ -499,10 +487,6 @@ export function registerClipState(builder: ActionReducerMapBuilder<SessionState>
             state._latestEditRequestId = action.meta.requestId;
         })
         .addCase(replaceClipSourceRemote.fulfilled, (state, action) => {
-            // 乱序守卫：见 setClipStateRemote.fulfilled。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as {
                 ok?: boolean;
             } & TimelineState;
@@ -516,10 +500,6 @@ export function registerClipState(builder: ActionReducerMapBuilder<SessionState>
             state._latestEditRequestId = action.meta.requestId;
         })
         .addCase(replaceMidiClipDataRemote.fulfilled, (state, action) => {
-            // 乱序守卫：见 setClipStateRemote.fulfilled。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as {
                 ok?: boolean;
             } & TimelineState;

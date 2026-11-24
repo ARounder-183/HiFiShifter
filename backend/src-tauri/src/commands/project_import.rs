@@ -209,7 +209,7 @@ pub(super) fn import_project(
         state.audio_engine.update_timeline(tl.clone());
         let scale_signature_after = tl.render_scale_signature();
 
-        let mut payload = tl.to_payload();
+        let mut payload = state.timeline_payload(&tl);
         payload.created_clip_ids = Some(merge.created_clip_ids.clone());
         payload.created_track_ids = Some(merge.created_track_ids.clone());
         payload.project = Some(state.project_meta_payload());

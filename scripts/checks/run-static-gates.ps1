@@ -85,4 +85,11 @@ Invoke-Gate 'Platform boundary gate' { python scripts/checks/check-platform-boun
 # number. Run it with "npm run check:bundle" after a build.
 Invoke-Gate 'Mobile form gate' { python scripts/checks/check-mobile-form-gate.py }
 
+# Every timeline payload must come from AppState::timeline_payload so it carries a
+# monotonic revision. A payload built with a bare tl.to_payload() compiles, runs, and
+# silently drops the frontend back onto the legacy single-slot requestId arbitration --
+# where two different actions invalidate each other ("I split it and it did not split").
+# Only reproducible under latency, so it needs a machine to remember it.
+Invoke-Gate 'Timeline payload gate' { python scripts/checks/check-timeline-payload-gate.py }
+
 Write-Host 'All static gates passed.' -ForegroundColor Green

@@ -172,7 +172,7 @@ fn import_finished_recording(
 
     state.audio_engine.update_timeline(timeline.clone());
 
-    let mut payload = timeline.to_payload();
+    let mut payload = state.timeline_payload(&timeline);
     payload.project = Some(state.project_meta_payload());
     Ok(payload)
 }

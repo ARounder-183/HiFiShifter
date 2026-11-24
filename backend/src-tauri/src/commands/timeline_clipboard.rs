@@ -349,7 +349,7 @@ fn paste_fragment(
         }
         state.audio_engine.update_timeline(tl.clone());
 
-        let mut payload = tl.to_payload();
+        let mut payload = state.timeline_payload(&tl);
         payload.created_clip_ids = Some(merge.created_clip_ids.clone());
         payload.created_track_ids = Some(merge.created_track_ids.clone());
         payload.project = Some(state.project_meta_payload());

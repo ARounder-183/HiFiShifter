@@ -369,6 +369,8 @@ pub(crate) fn timeline_error_payload(error: &str) -> crate::models::TimelineStat
         redo_depth: None,
         notes_markdown: None,
         param_selection_restore: None,
+        // 合成载荷（错误/占位）：不带版本号，前端不会拿它去覆盖真实状态。
+        revision: None,
     }
 }
 

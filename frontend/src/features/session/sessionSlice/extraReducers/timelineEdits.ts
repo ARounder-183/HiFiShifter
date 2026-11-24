@@ -34,10 +34,6 @@ export function registerTimelineEdits(builder: ActionReducerMapBuilder<SessionSt
             state._latestEditRequestId = action.meta.requestId;
         })
         .addCase(addClipOnTrack.fulfilled, (state, action) => {
-            // 乱序守卫：见 setClipStateRemote.fulfilled（撤销/打开工程会作废在途响应）。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as {
                 ok?: boolean;
             } & TimelineState;
@@ -62,10 +58,6 @@ export function registerTimelineEdits(builder: ActionReducerMapBuilder<SessionSt
             state._latestEditRequestId = action.meta.requestId;
         })
         .addCase(createClipsRemote.fulfilled, (state, action) => {
-            // 乱序守卫：见 setClipStateRemote.fulfilled。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as {
                 ok?: boolean;
             } & TimelineState;
@@ -84,9 +76,6 @@ export function registerTimelineEdits(builder: ActionReducerMapBuilder<SessionSt
             state.busy = false;
             // 乱序守卫：粘贴含多次往返，窗口最宽；迟到的粘贴快照不得覆盖
             // 更新的撤销/重做/工程切换结果（见 setClipStateRemote.fulfilled）。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as {
                 ok?: boolean;
                 timeline?: TimelineState;
@@ -128,10 +117,6 @@ export function registerTimelineEdits(builder: ActionReducerMapBuilder<SessionSt
             state._latestEditRequestId = action.meta.requestId;
         })
         .addCase(duplicateClipsBulkRemote.fulfilled, (state, action) => {
-            // 乱序守卫：见 setClipStateRemote.fulfilled。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as {
                 ok?: boolean;
             } & TimelineState;
@@ -146,10 +131,6 @@ export function registerTimelineEdits(builder: ActionReducerMapBuilder<SessionSt
             state._latestEditRequestId = action.meta.requestId;
         })
         .addCase(removeClipRemote.fulfilled, (state, action) => {
-            // 乱序守卫：见 setClipStateRemote.fulfilled。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as {
                 ok?: boolean;
             } & TimelineState;
@@ -163,10 +144,6 @@ export function registerTimelineEdits(builder: ActionReducerMapBuilder<SessionSt
             state._latestEditRequestId = action.meta.requestId;
         })
         .addCase(removeClipsRemote.fulfilled, (state, action) => {
-            // 乱序守卫：见 setClipStateRemote.fulfilled。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as {
                 ok?: boolean;
             } & TimelineState;
@@ -180,10 +157,6 @@ export function registerTimelineEdits(builder: ActionReducerMapBuilder<SessionSt
             state._latestEditRequestId = action.meta.requestId;
         })
         .addCase(removeSelectedClipRemote.fulfilled, (state, action) => {
-            // 乱序守卫：见 setClipStateRemote.fulfilled。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as {
                 ok?: boolean;
             } & TimelineState;
@@ -197,10 +170,6 @@ export function registerTimelineEdits(builder: ActionReducerMapBuilder<SessionSt
             state._latestEditRequestId = action.meta.requestId;
         })
         .addCase(moveClipRemote.fulfilled, (state, action) => {
-            // 乱序守卫：只采纳最近一次编辑请求的响应（见 _latestEditRequestId）。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as {
                 ok?: boolean;
             } & TimelineState;
@@ -227,10 +196,6 @@ export function registerTimelineEdits(builder: ActionReducerMapBuilder<SessionSt
             state._latestEditRequestId = action.meta.requestId;
         })
         .addCase(moveClipsRemote.fulfilled, (state, action) => {
-            // 乱序守卫：只采纳最近一次编辑请求的响应（见 _latestEditRequestId）。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as {
                 ok?: boolean;
             } & TimelineState;
@@ -254,10 +219,6 @@ export function registerTimelineEdits(builder: ActionReducerMapBuilder<SessionSt
             state._latestEditRequestId = action.meta.requestId;
         })
         .addCase(closeTrackGapsRemote.fulfilled, (state, action) => {
-            // 乱序守卫：见 setClipStateRemote.fulfilled。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as {
                 ok?: boolean;
             } & TimelineState;
@@ -300,10 +261,6 @@ export function registerTimelineEdits(builder: ActionReducerMapBuilder<SessionSt
             state._latestEditRequestId = action.meta.requestId;
         })
         .addCase(removeSilenceRemote.fulfilled, (state, action) => {
-            // 乱序守卫：见 setClipStateRemote.fulfilled。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as unknown as {
                 ok?: boolean;
                 timeline?: TimelineState;
@@ -334,10 +291,6 @@ export function registerTimelineEdits(builder: ActionReducerMapBuilder<SessionSt
             state._latestEditRequestId = action.meta.requestId;
         })
         .addCase(splitClipRemote.fulfilled, (state, action) => {
-            // 乱序守卫：见 setClipStateRemote.fulfilled。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as {
                 ok?: boolean;
                 created_clip_ids?: string[] | null;
@@ -352,10 +305,6 @@ export function registerTimelineEdits(builder: ActionReducerMapBuilder<SessionSt
             state._latestEditRequestId = action.meta.requestId;
         })
         .addCase(splitClipsAtRemote.fulfilled, (state, action) => {
-            // 乱序守卫：见 setClipStateRemote.fulfilled。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as {
                 ok?: boolean;
                 created_clip_ids?: string[] | null;
@@ -370,10 +319,6 @@ export function registerTimelineEdits(builder: ActionReducerMapBuilder<SessionSt
             state._latestEditRequestId = action.meta.requestId;
         })
         .addCase(glueClipsRemote.fulfilled, (state, action) => {
-            // 乱序守卫：见 setClipStateRemote.fulfilled。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as {
                 ok?: boolean;
             } & TimelineState;
@@ -388,10 +333,6 @@ export function registerTimelineEdits(builder: ActionReducerMapBuilder<SessionSt
             state._latestEditRequestId = action.meta.requestId;
         })
         .addCase(groupClipsRemote.fulfilled, (state, action) => {
-            // 乱序守卫：见 setClipStateRemote.fulfilled。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as {
                 ok?: boolean;
             } & TimelineState;
@@ -405,10 +346,6 @@ export function registerTimelineEdits(builder: ActionReducerMapBuilder<SessionSt
             state._latestEditRequestId = action.meta.requestId;
         })
         .addCase(ungroupClipsRemote.fulfilled, (state, action) => {
-            // 乱序守卫：见 setClipStateRemote.fulfilled。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as {
                 ok?: boolean;
             } & TimelineState;
@@ -422,10 +359,6 @@ export function registerTimelineEdits(builder: ActionReducerMapBuilder<SessionSt
             state._latestEditRequestId = action.meta.requestId;
         })
         .addCase(toggleGroupDisabledRemote.fulfilled, (state, action) => {
-            // 乱序守卫：见 setClipStateRemote.fulfilled。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as {
                 ok?: boolean;
             } & TimelineState;

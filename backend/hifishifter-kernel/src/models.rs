@@ -481,6 +481,20 @@ pub struct TimelineStatePayload {
     /// （这一步与选区无关）是两种不同的语义，前端据此区分。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub param_selection_restore: Option<Vec<[f32; 2]>>,
+
+    /// 这份载荷对应的**时间线版本号**（单调递增，见 `AppState::timeline_payload`）。
+    ///
+    /// 【为什么载荷要自带版本】前端同时存在「轮询取数」和「编辑回包」两条通路，
+    /// 它们在 WebView 里**乱序到达**（移动端尤其明显：单线程 JS 桥 + 主线程
+    /// 阻塞）。旧实现用一个全局槽 `_latestEditRequestId` 近似「谁更新」，
+    /// 代价是**不同动作互相作废** —— 分割的回包会被随后一个改音量的回包
+    /// 挤掉，用户看到「切了但没切」。版本号让判断退化成一次大小比较：
+    /// 旧载荷丢弃、新载荷落地，与「是谁发的请求」无关。
+    ///
+    /// 【为什么是可选的】旧后端不填 ⇒ 前端走兼容分支；新后端多填一个没人读
+    /// 的字段对旧前端也无害。字段缺省时**不得**当作 0 处理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
 }
 
 /// `open_project` 的返回载荷。

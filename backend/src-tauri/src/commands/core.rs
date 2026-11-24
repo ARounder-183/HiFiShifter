@@ -64,23 +64,17 @@ pub(super) fn set_ui_locale(state: State<'_, AppState>, locale: String) -> serde
 pub(super) fn get_timeline_state(
     state: State<'_, AppState>,
 ) -> crate::models::TimelineStatePayload {
-    let tl = state
-        .timeline
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    let mut payload = tl.to_payload();
-    payload.project = Some(state.project_meta_payload());
-    payload
+    get_timeline_state_from_ref(&state)
 }
 
 pub(crate) fn get_timeline_state_from_ref(state: &AppState) -> crate::models::TimelineStatePayload {
-    let tl = state
-        .timeline
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    let mut payload = tl.to_payload();
+    // 【为什么在锁内构建载荷】版本号的单调性依赖「自增 + 读状态」是原子的：
+    // 先 clone 再放锁再构建，会让另一线程的编辑夹在中间，拿到「旧内容 + 新版本号」
+    // —— 那份载荷会在前端赢过真正的更新，把状态回退。见 `AppState::timeline_payload`。
+    let mut payload = {
+        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        state.timeline_payload(&tl)
+    };
     payload.project = Some(state.project_meta_payload());
     payload
 }
@@ -96,7 +90,7 @@ pub(super) fn get_timeline_state_lite(
     // 省掉整棵 TimelineState（含全部参数曲线）的深克隆。
     let mut payload = {
         let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-        tl.to_payload_lite()
+        state.timeline_payload_lite(&tl)
     };
     payload.project = Some(state.project_meta_payload());
     payload

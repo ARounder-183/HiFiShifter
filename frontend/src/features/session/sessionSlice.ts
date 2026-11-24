@@ -1,6 +1,12 @@
 // Session 同步 reducers。拆自 sessionSlice，按原顺序汇总。
 import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import { isPluginMode } from "../../services/hostCapabilities";
+import {
+    beginGestureReducer,
+    endGestureReducer,
+    flushDeferredSnapshot,
+} from "./sessionSlice/gestureReducers";
+import { beginGestureSession, endGestureSession } from "./gestureSession";
 import type { HistoryRecordSummary, TimelineState } from "../../types/api";
 import type {
     ClipFormantAnalysisState,
@@ -239,6 +245,10 @@ const sessionSlice = createSlice({
         beginInteraction(state) {
             state._interactionLockCount = Math.max(0, state._interactionLockCount) + 1;
             if (isPluginMode()) state._pluginTimelineEpoch += 1;
+            // 交互锁与手势会话是**同一段生命周期**的两个视角：前者给「哪些回包要
+            // 跳过」用（轨道列表、插件纪元等旁路），后者给「快照推迟到何时」用。
+            // 一起入账，才不会出现「锁在但会话不在」的半开状态。
+            beginGestureSession(state, { kind: "interaction" }, state.timelineRevision);
         },
         /**
          * 标记连续交互结束。计数器归零后恢复正常的后端状态同步。
@@ -246,7 +256,19 @@ const sessionSlice = createSlice({
         endInteraction(state) {
             state._interactionLockCount = Math.max(0, state._interactionLockCount - 1);
             if (isPluginMode()) state._pluginTimelineEpoch += 1;
+            const deferred = endGestureSession(state);
+            if (deferred) {
+                // 交互锁已归零，此时落地不再被手势会话挡住。
+                flushDeferredSnapshot(state, deferred);
+            }
         },
+        /**
+         * 开始一次手势会话（任意画布）。参数编辑器用它声明「正在画参数线」，
+         * 从而让 `applyTimelineState` 在笔画期间不落地任何后端快照。
+         */
+        beginGesture: beginGestureReducer,
+        /** 结束一次手势会话；深度归零时落地被推迟的最新快照。 */
+        endGesture: endGestureReducer,
         /** 乐观更新轨道名称（立即反映到 UI，不等后端响应） */
         setTrackName(state, action: PayloadAction<{ trackId: string; name: string }>) {
             const track = state.tracks.find((entry) => entry.id === action.payload.trackId);
@@ -1250,6 +1272,8 @@ export const {
     setParamBlockFollowPitch,
     beginInteraction,
     endInteraction,
+    beginGesture,
+    endGesture,
     setTrackName,
     setTrackMeters,
     clearTrackMeters,

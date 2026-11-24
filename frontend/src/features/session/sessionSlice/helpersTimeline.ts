@@ -18,13 +18,75 @@ import {
 import { parseClipTakes } from "./helpersTakes";
 import { intentPlayheadSec } from "./playheadIntent";
 import { VALID_GRID_SIZES } from "./settings";
+import { deferSnapshot, isGestureActive, readPayloadRevision } from "../gestureSession";
+import { emitEditTelemetry } from "../editTelemetry";
+/**
+ * 把后端的时间线载荷应用到会话状态。
+ *
+ * 三道闸，顺序不能换：
+ *
+ * ① **手势会话**（`_gestureDepth > 0`）：不落地，只把最新一份推迟到手势结束。
+ *    这是「拖着拖着弹回去」的根治点 —— 手势期间的任何后端快照都描述的是
+ *    用户手指**还没做完**的那个状态。
+ * ② **版本号仲裁**（`payload.revision`）：比手上那份旧就丢。它替代了原先按
+ *    「请求身份」判新旧的单槽 `_latestEditRequestId` —— 后者会让不同动作互相
+ *    作废（分割的回包被随后一个改音量的回包挤掉）。
+ * ③ **兼容分支**：载荷没有版本号（旧后端 / 插件宿主快照）时退回单槽 requestId
+ *    比对。这条分支只在混跑旧后端时生效，不是新逻辑的一部分。
+ *
+ * @param opts.force          跳过①（工程生命周期 / 撤销重做 / 录音导入等**必须**
+ *                            立刻生效**的载荷）。这些路径都不在手势中发生；万一
+ *                            真的发生（用户从菜单打开工程而某个指针事件丢了），
+ *                            也必须让用户看到新工程而不是卡在旧时间线上。
+ * @param opts.requestId      兼容分支用的请求身份（`action.meta.requestId`）。
+ * @param opts.preserveProjectNotes / adoptPlayhead 语义不变。
+ */
 export function applyTimelineState(
     state: SessionState,
     timeline: TimelineState,
-    opts?: { force?: boolean; preserveProjectNotes?: boolean; adoptPlayhead?: boolean },
+    opts?: {
+        force?: boolean;
+        preserveProjectNotes?: boolean;
+        adoptPlayhead?: boolean;
+        requestId?: string;
+    },
 ) {
-    // 交互锁守卫：拖动/滑动期间跳过非强制的全量覆写
-    if (state._interactionLockCount > 0 && !opts?.force) {
+    const revision = readPayloadRevision(timeline);
+
+    // ① 手势会话期间：只推迟，不落地。
+    if (!opts?.force && isGestureActive(state)) {
+        const replaced = deferSnapshot(state, { revision, payload: timeline });
+        emitEditTelemetry("debug", "snapshot.deferred", {
+            revision: revision ?? -1,
+            gestureKind: state._gestureKind ?? "none",
+            depth: state._gestureDepth,
+            replaced,
+        });
+        return;
+    }
+
+    // ② 版本号仲裁：旧快照直接丢弃（这就是「迟到的旧回包不能覆盖新状态」）。
+    if (revision != null) {
+        if (revision < state.timelineRevision) {
+            emitEditTelemetry("warn", "snapshot.dropped", {
+                revision,
+                currentRevision: state.timelineRevision,
+                reason: "stale-revision",
+            });
+            return;
+        }
+        state.timelineRevision = revision;
+    } else if (
+        // ③ 兼容分支：旧后端不带版本号时，退回「最近一次编辑请求」的单槽比对。
+        opts?.requestId != null &&
+        state._latestEditRequestId != null &&
+        state._latestEditRequestId !== opts.requestId
+    ) {
+        emitEditTelemetry("debug", "snapshot.dropped", {
+            revision: -1,
+            currentRevision: state.timelineRevision,
+            reason: "stale-request-id",
+        });
         return;
     }
 

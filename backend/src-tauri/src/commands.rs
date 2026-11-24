@@ -1551,7 +1551,7 @@ pub fn add_track_tree(
                 state.checkpoint_timeline(&tl, crate::state::HistoryOp::AddTrack);
                 let created_track_ids = tl.add_track_tree(&nodes, insert_index);
                 state.audio_engine.update_timeline(tl.clone());
-                let mut payload = tl.to_payload();
+                let mut payload = state.timeline_payload(&tl);
                 payload.project = Some(state.project_meta_payload());
                 serde_json::json!({
                     "timeline": payload,
@@ -2371,7 +2371,7 @@ pub fn group_clips(
                 let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
                 state.checkpoint_timeline(&tl, crate::state::HistoryOp::GroupClips);
                 tl.group_clips(&clip_ids);
-                let payload = tl.to_payload();
+                let payload = state.timeline_payload(&tl);
                 drop(tl);
                 payload
             },
@@ -2394,7 +2394,7 @@ pub fn ungroup_clips(
                 let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
                 state.checkpoint_timeline(&tl, crate::state::HistoryOp::UngroupClips);
                 tl.ungroup_clips(&clip_ids);
-                let payload = tl.to_payload();
+                let payload = state.timeline_payload(&tl);
                 drop(tl);
                 payload
             },
@@ -2417,7 +2417,7 @@ pub fn toggle_group_disabled(
                 let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
                 state.checkpoint_timeline(&tl, crate::state::HistoryOp::ToggleGroupDisabled);
                 tl.toggle_group_disabled(&group_id);
-                let payload = tl.to_payload();
+                let payload = state.timeline_payload(&tl);
                 drop(tl);
                 payload
             },

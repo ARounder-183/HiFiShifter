@@ -278,7 +278,7 @@ pub(super) fn remove_clip_silence(
         link,
     );
     state.audio_engine.update_timeline(tl.clone());
-    let mut timeline_payload: TimelineStatePayload = tl.to_payload();
+    let mut timeline_payload: TimelineStatePayload = state.timeline_payload(&tl);
     timeline_payload.project = Some(state.project_meta_payload());
     drop(tl);
 

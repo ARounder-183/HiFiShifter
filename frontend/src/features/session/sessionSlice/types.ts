@@ -1,4 +1,5 @@
 // Session 状态类型。拆自 sessionSlice，供 reducer / helper / thunk 共享。
+import type { DeferredSnapshot, GestureKind } from "../gestureSession";
 import type { HistoryRecordSummary, HostAudioPayload } from "../../../types/api";
 import type {
     ClipInfo,
@@ -655,6 +656,35 @@ export interface SessionState {
      * 独立 App 从不产生该字段，因此缺省 `null` 即"不显示任何宿主音频提示"。
      */
     hostAudio: HostAudioPayload | null;
+
+    /**
+     * 最近一次**已落地**的时间线载荷版本号（后端 `TimelineStatePayload.revision`）。
+     *
+     * 【为什么需要它】后端给每份时间线载荷盖一个单调版本号（见
+     * `AppState::timeline_payload`）。前端据此判断「这份快照比我手上那份新吗」，
+     * 而不是判断「这份快照是不是我最近一次请求的回包」。旧做法（单槽
+     * `_latestEditRequestId`）把**请求身份**当成**状态新旧**，代价是不同动作
+     * 互相作废：分割的回包会被随后一个改音量的回包挤掉，用户看到「切了但没切」。
+     *
+     * `-1` = 还没落地过任何带版本号的载荷（旧后端 / 插件宿主快照），此时
+     * 仲裁回落到单槽 requestId 的兼容分支。
+     */
+    timelineRevision: number;
+
+    /**
+     * 手势会话深度（可嵌套）。> 0 时到达的时间线快照**不落地**，只保留最新一份
+     * 到 `_deferredSnapshot`，等深度归零时落地一次。见 `features/session/gestureSession.ts`。
+     */
+    _gestureDepth: number;
+
+    /** 当前手势的种类（诊断用；深度为 0 时为 null）。 */
+    _gestureKind: GestureKind | null;
+
+    /** 手势开始时的 `timelineRevision`（诊断用）。 */
+    _gestureBaseRevision: number;
+
+    /** 手势期间被推迟的最新一份快照（深度归零时落地一次后清空）。 */
+    _deferredSnapshot: DeferredSnapshot | null;
 
     /**
      * 最近一次**编辑类**请求的 requestId（setClipState / bulk / move 族）。
