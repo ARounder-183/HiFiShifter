@@ -57,13 +57,31 @@ async function main() {
         throw new Error(`Unsupported TAURI_UI_MODE: ${mode}. Expected \"dev\" or \"build\".`);
     }
 
+    // [Why the host is not hardcoded to loopback] `tauri android dev` does not use
+    // `adb reverse`: it rewrites the dev URL to this machine's LAN address (for
+    // example http://192.168.1.6:5173) and expects the dev server to answer there.
+    // Bound to 127.0.0.1 that URL is unreachable, and the CLI then sits on
+    // "Waiting for your frontend dev server to start on http://192.168.1.6:5173/"
+    // forever -- the app is never installed, and nothing says why.
+    //
+    // TAURI_DEV_HOST is the address the CLI itself picked; TAURI_ENV_PLATFORM
+    // names the target. Desktop keeps loopback: nothing outside this machine has
+    // any business reaching a dev server, and widening it by default would put a
+    // source-mapped app on the LAN for every `tauri dev`.
+    const platform = (process.env.TAURI_ENV_PLATFORM || "").toLowerCase();
+    const mobileTarget = platform === "android" || platform === "ios";
+    const host = process.env.TAURI_DEV_HOST || (mobileTarget ? "0.0.0.0" : "127.0.0.1");
+    console.log(
+        `[tauri-before-dev] platform=${platform || "-"} TAURI_DEV_HOST=${process.env.TAURI_DEV_HOST || "-"} -> listening on ${host}`,
+    );
+
     if (mode === "build") {
         await runCommand("npm run build");
-        await runCommand("npm run preview -- --host 127.0.0.1 --port 5173 --strictPort");
+        await runCommand(`npm run preview -- --host ${host} --port 5173 --strictPort`);
         return;
     }
 
-    await runCommand("npm run dev -- --host 127.0.0.1 --port 5173 --strictPort");
+    await runCommand(`npm run dev -- --host ${host} --port 5173 --strictPort`);
 }
 
 main().catch((err) => {
