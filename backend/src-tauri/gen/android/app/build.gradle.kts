@@ -75,4 +75,40 @@ dependencies {
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.0")
 }
 
+// ── Never let the packager reuse a previous APK ──────────────────────────────
+//
+// [Why] AGP's packager (zipflinger) **updates an existing archive in place** and
+// never truncates it. When a native library changes it writes the new entry and
+// leaves the old bytes behind as a hole, so the file grows by the size of the
+// library on every rebuild. Measured on this project: a 463 MB debug APK became
+// 917 MB after a single rebuild that only replaced libbackend_lib.so, and the
+// 901 MB one before it carried ~437 MB of zeros between entries. The archive
+// stays *valid* (the central directory is rewritten, so the app still installs),
+// which is what makes it dangerous: nothing fails, the download just doubles.
+//
+// [Why in taskGraph.whenReady and not in the task's own doFirst] The packager
+// keeps an inventory of what the archive already contains in
+// build/intermediates/incremental/package<Variant>/tmp. Deleting the archive from
+// inside doFirst leaves that inventory intact, so the packager writes only what it
+// believes is missing -- measured: the APK ended up holding the native library and
+// nothing else, while still reporting BUILD SUCCESSFUL. Deleting before the graph
+// executes makes the packaging task genuinely out of date, which is the same
+// situation as a clean build (verified twice: 930 entries, correct size).
+//
+// [Why the whole outputs directory] The packaging task declares directories, not
+// files, and only the archives inside them go stale -- dex, resources.arsc and the
+// merged native libraries all live under build/intermediates and are untouched.
+// Re-packaging costs ~7 s, which is what packaging already cost.
+gradle.taskGraph.whenReady {
+    val packagesArchive = allTasks.any { task ->
+        (task.name.startsWith("package") || task.name.startsWith("bundle")) &&
+            !task.name.endsWith("Resources")
+    }
+    if (packagesArchive) {
+        listOf("apk", "bundle").forEach { dir ->
+            file("build/outputs/" + dir).deleteRecursively()
+        }
+    }
+}
+
 apply(from = "tauri.build.gradle.kts")

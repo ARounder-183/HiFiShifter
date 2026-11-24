@@ -171,6 +171,23 @@ try {
     if ($Bundle) { $buildArgs += "--aab" } else { $buildArgs += "--apk" }
     if ($DebugBuild) { $buildArgs += "--debug" }
 
+    # ── Stale package output ─────────────────────────────────────────────────
+    #
+    # [Why this is here as well as in build.gradle.kts] The gradle script deletes
+    # the package output before writing it, but that only runs when the packaging
+    # task is *out of date*. An APK that already carries the packager's holes is a
+    # perfectly valid task output, so gradle reports the task UP-TO-DATE and ships
+    # the same bloated file again. Removing it first costs nothing and makes "the
+    # APK on disk is the APK this run produced" true.
+    #
+    # [Why only the package outputs] Everything else under app/build (dex,
+    # resources.arsc, merged jniLibs) is still valid; deleting the whole build
+    # directory would turn an 8 s package into a several-minute rebuild.
+    foreach ($dir in @("apk", "bundle")) {
+        $stale = Join-Path $androidProject "app\build\outputs\$dir"
+        if (Test-Path -LiteralPath $stale) { Remove-Item -LiteralPath $stale -Recurse -Force }
+    }
+
     Write-Host ("== " + (($cli + $buildArgs) -join " ")) -ForegroundColor Cyan
     & $cli[0] @($cliPrefix + $buildArgs)
     if ($LASTEXITCODE) { throw "tauri android build failed (exit $LASTEXITCODE)" }
@@ -202,3 +219,39 @@ if (Test-Path -LiteralPath $jniLibs) {
 else {
     Write-Host "== $jniLibs not found; skipping artefact integrity check" -ForegroundColor Yellow
 }
+
+# -- Package size sanity ------------------------------------------------------
+#
+# [Why] See the comment in gen/android/app/build.gradle.kts: the packager updates
+# the archive in place and can leave hundreds of megabytes of dead bytes between
+# entries *without* invalidating it. Nothing downstream would notice -- the APK
+# installs and a store would happily accept a file twice the size it should be.
+# Comparing the file length with the sum of its compressed entries catches that
+# (and any future cause) with one subtraction.
+$outputs = Join-Path $root "backend\src-tauri\gen\android\app\build\outputs"
+Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+$packages = @()
+foreach ($pattern in @("*.apk", "*.aab")) {
+    $packages += @(Get-ChildItem -LiteralPath $outputs -Recurse -Filter $pattern -File -ErrorAction SilentlyContinue)
+}
+foreach ($package in $packages) {
+    $zip = [IO.Compression.ZipFile]::OpenRead($package.FullName)
+    try {
+        $payload = ($zip.Entries | Measure-Object -Property CompressedLength -Sum).Sum
+    }
+    finally { $zip.Dispose() }
+    if (-not $payload) { $payload = 0 }
+    $slack = $package.Length - $payload
+    Write-Host ("== {0}: {1:N1} MiB of entries, {2:N0} B of slack" -f $package.Name, ($payload / 1MB), $slack) -ForegroundColor Green
+    if ($slack -gt 16MB) {
+        throw @"
+$($package.FullName)
+  is $([math]::Round($package.Length / 1MB, 1)) MiB but only carries $([math]::Round($payload / 1MB, 1)) MiB of entries.
+
+  That gap is the Android packager reusing an older archive instead of writing a
+  fresh one (see the comment in gen/android/app/build.gradle.kts). Delete
+  backend\src-tauri\gen\android\app\build and build again; do not ship this file.
+"@
+    }
+}
+
