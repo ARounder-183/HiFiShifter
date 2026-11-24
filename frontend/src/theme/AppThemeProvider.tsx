@@ -37,6 +37,8 @@ import {
     THEME_MODE_SETTINGS,
 } from "./themeTypes";
 import { isValidCssColor, loadAppearance, saveAppearance, loadCustomThemes } from "./themeStorage";
+import { appForm } from "../services/hostDetect";
+import { invoke } from "../services/invoke";
 
 /** 实际渲染用的主题模式（由设置解析而来；auto 已解析为当前系统偏好）。 */
 export type ThemeMode = "dark" | "light";
@@ -233,6 +235,21 @@ export function AppThemeProvider({ children }: PropsWithChildren) {
     document.documentElement.style.setProperty("--qt-font-family", fontFamily);
     document.documentElement.style.setProperty("--default-font-family", fontFamily);
     document.body.style.fontFamily = fontFamily;
+
+    /*
+     * 系统栏图标的明暗跟随**应用**主题。
+     *
+     * 【为什么必须显式告诉系统】`enableEdgeToEdge()` 装的是 `SystemBarStyle.auto`，
+     * 它跟随**系统**夜间模式；而本应用的主题是用户自己选的（还有 auto → 系统这一档）。
+     * 两者不一致时，浅色主题 + 深色系统 = 状态栏白底白图标，电量与时间直接消失。
+     *
+     * 【为什么在 effect 里】它是 IPC，不能在渲染期发；而 `mode` 一旦变化就要重发，
+     * 依赖数组正好表达这一点。非移动形态直接返回 —— 桌面没有系统栏。
+     */
+    useEffect(() => {
+        if (appForm() !== "mobile") return;
+        void invoke("set_system_bars", mode === "dark").catch(() => undefined);
+    }, [mode]);
 
     const applyPreviewFromStorage = useCallback(() => {
         try {

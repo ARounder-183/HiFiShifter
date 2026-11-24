@@ -1714,12 +1714,23 @@ html[data-input="touch"] ::-webkit-scrollbar {
  * `viewport-fit=cover`（见 `index.html`）下才非零；而一旦非零，**页面本身**会铺到
  * 刘海与手势条底下。让位必须发生在最外层容器上，否则内部的 `position: fixed`
  * 弹层、Toast、下拉菜单仍然会跑到安全区外。
+ *
+ * 【为什么要和 `--qt-inset-*` 取较大者，而不是只用 `env()`】两个来源各覆盖一半
+ * 事实，缺一不可：
+ *
+ * - `env(safe-area-inset-*)` —— 刘海（display cutout）。iOS 上它连状态栏一起给，
+ *   是完整的；Android WebView 上**只**给刘海，状态栏与导航栏的高度不在其中。
+ * - `--qt-inset-*` —— 原生的 `WindowInsets`（见 `services/surfaceInsets.ts`）。
+ *   它给的是真实系统栏高度，但拿不到刘海在横屏时可能伸出的那部分。
+ *
+ * 取 `max()` 让两者互相补齐：任何一边更大就用哪一边。桌面形态下两个变量都不存在，
+ * 整条规则不生效 —— 桌面布局一个像素都不变。
  */
 html[data-form="mobile"] {
-    --qt-safe-top: env(safe-area-inset-top, 0px);
-    --qt-safe-right: env(safe-area-inset-right, 0px);
-    --qt-safe-bottom: env(safe-area-inset-bottom, 0px);
-    --qt-safe-left: env(safe-area-inset-left, 0px);
+    --qt-safe-top: max(var(--qt-inset-top, 0px), env(safe-area-inset-top, 0px));
+    --qt-safe-right: max(var(--qt-inset-right, 0px), env(safe-area-inset-right, 0px));
+    --qt-safe-bottom: max(var(--qt-inset-bottom, 0px), env(safe-area-inset-bottom, 0px));
+    --qt-safe-left: max(var(--qt-inset-left, 0px), env(safe-area-inset-left, 0px));
 }
 
 html[data-form="mobile"] body {
@@ -1730,6 +1741,20 @@ html[data-form="mobile"] body {
     /* 移动端不允许整页橡皮筋：画布手势自己处理平移，
      * 系统级的 overscroll 会把画布拖出边界并回弹。 */
     overscroll-behavior: none;
+}
+
+/* 全屏抽屉（`MobileActionDrawer`）的安全区内边距。
+ *
+ * 【为什么它自己也要一份】`.hs-surface-root` 上的 `padding` 只推开**在流内**的
+ * 子元素。抽屉是 `position: absolute; inset: 0`，而绝对定位的包含块是祖先的
+ * **padding box** —— 也就是说 `inset-0` 连 padding 那一圈一起盖住了。于是抽屉的
+ * 标题行（含右上角的关闭按钮）正好落在状态栏下方，被系统栏吃掉触摸。
+ * 背景色相同，所以这里的 padding 在视觉上是不可见的，只是把内容推回可达区域。 */
+html[data-form="mobile"] .hs-mobile-drawer {
+    padding-top: var(--qt-safe-top);
+    padding-right: var(--qt-safe-right);
+    padding-bottom: var(--qt-safe-bottom);
+    padding-left: var(--qt-safe-left);
 }
 
 /* 根容器的安全区内边距。由 `AppChrome` 挂 `.hs-surface-root`。

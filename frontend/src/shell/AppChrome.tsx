@@ -14,10 +14,11 @@
  * 【为什么 `App.tsx` 只换 render 尾部】它有 4800 行、持有约 40 个对话框状态与 20+
  * 个 effect。抽状态是高风险无收益的重构；抽外壳是低风险高收益 —— 见设计文档 §5.5。
  */
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import type { ActionId } from "../features/keybindings/types";
 import { appForm } from "../services/hostDetect";
+import { registerBackHandler } from "../services/backGesture";
 import { MobileActionDrawer, MobileBottomBar, MobileTopBar } from "./MobileChrome";
 import { buildModifierChips } from "./mobileActions";
 import { useI18n } from "../i18n/I18nProvider";
@@ -71,6 +72,22 @@ export function AppChrome({
      * （`?form=mobile`）仍然有意义，那里确实有键盘。
      */
     const shortcutFor = useMemo(() => () => null as string | null, []);
+
+    /*
+     * 返回键先关抽屉。
+     *
+     * 【为什么抽屉要自己注册】Radix 的浮层靠"收到 Escape"关闭（见
+     * `services/backGesture`），而抽屉是自绘的全屏层，没有这套机制。不注册的话，
+     * 抽屉打开时按返回键会直接退出应用 —— 而用户的本意是"关掉这个列表"。
+     */
+    useEffect(() => {
+        if (!isMobile) return;
+        return registerBackHandler(() => {
+            if (!drawerOpen) return false;
+            setDrawerOpen(false);
+            return true;
+        });
+    }, [drawerOpen, isMobile]);
 
     return (
         <div

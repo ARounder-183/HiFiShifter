@@ -706,6 +706,22 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "pick_midi_output_path":
             return {};
 
+        case "save_output_to_location":
+            return { path: args[0] };
+
+        case "get_surface_insets":
+            return {};
+
+        case "set_system_bars":
+            return { dark: args[0] === true };
+
+        case "pick_files_bytes":
+            return {
+                extensions: args[0] ?? [],
+                multiple: args[1] === true,
+                ...(args[2] !== undefined ? { maxBytes: args[2] } : {}),
+            };
+
         case "export_pitch_to_midi":
             return { request: args[0] };
 

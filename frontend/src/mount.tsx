@@ -34,6 +34,8 @@ import { SessionUnavailable } from "./features/ara/SessionUnavailable";
 import { probeSession } from "./services/sessionProbe";
 import { appForm, isPluginMode } from "./services/hostDetect";
 import { surfaceProfile } from "./services/surfaceProfileStore";
+import { installSurfaceInsets } from "./services/surfaceInsets";
+import { installBackGesture } from "./services/backGesture";
 import { invoke } from "./services/invoke";
 import { installTouchContextMenu } from "./utils/useLongPress";
 import { setGlRasterMaxDpr } from "./components/layout/renderKernel/gl/glRaster";
@@ -84,6 +86,26 @@ export async function mountApp(): Promise<void> {
     // 另外这两个属性是**调试入口**：`?form=mobile` 之后 DevTools 里一眼能看出
     // 当前跑的是哪个形态，不必去翻 store。
     applySurfaceMarkers();
+
+    // ── 安全区内边距写进 CSS 变量 ──────────────────────────────────────────
+    //
+    // 【为什么在这里而不是某个组件里】`--qt-safe-*` 的消费点遍布全应用（外壳、
+    // 抽屉、对话框、菜单），它们分属不同的 React 子树与 portal 容器，只有
+    // `<html>` 是共同祖先。而"首帧就要对"是硬要求：晚一帧，顶栏会先画在状态栏
+    // 底下再跳下来，用户看到的是闪一下。
+    //
+    // 传剖面里的值而不是只订阅事件：`main.tsx` 已经在挂载前取到了剖面，
+    // 这里用同一份数据，第一次绘制就是对的。
+    void installSurfaceInsets(surfaceProfile().viewport.insets);
+
+    // ── 返回键 / 返回手势 ──────────────────────────────────────────────────
+    //
+    // 【为什么只在移动形态装】原生侧只有 Android 会执行 `window.__HFS_HANDLE_BACK__`。
+    // 桌面上装一个没人调用的全局函数既无意义，也让"桌面路径不变"这条纪律多一个
+    // 需要解释的例外。
+    if (appForm() === "mobile") {
+        installBackGesture();
+    }
 
     // ── 触摸的长按 → 上下文菜单 ────────────────────────────────────────────
     //

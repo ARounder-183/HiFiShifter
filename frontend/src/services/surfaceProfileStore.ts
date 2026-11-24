@@ -41,6 +41,14 @@ export interface SurfaceProfile {
     };
     viewport: {
         safe_area: boolean;
+        /**
+         * 真实的系统栏内边距（CSS px）。
+         *
+         * 【为什么后端要给这个】Android WebView 的 `env(safe-area-inset-*)` 只反映
+         * 刘海，不反映状态栏/导航栏 —— 而 `enableEdgeToEdge()` 让内容画到它们底下。
+         * 真实值只能从原生的 `WindowInsets` 取（见 `services/surfaceInsets.ts`）。
+         */
+        insets: { top: number; right: number; bottom: number; left: number };
         resizable: boolean;
         multi_window: boolean;
     };
@@ -79,7 +87,12 @@ export const DESKTOP_FALLBACK_PROFILE: SurfaceProfile = {
         pressure: true,
         multi_touch: true,
     },
-    viewport: { safe_area: false, resizable: true, multi_window: true },
+    viewport: {
+        safe_area: false,
+        insets: { top: 0, right: 0, bottom: 0, left: 0 },
+        resizable: true,
+        multi_window: true,
+    },
     storage: {
         path_access: true,
         sandboxed: false,
@@ -199,11 +212,26 @@ export function normalizeSurfaceProfile(raw: unknown): SurfaceProfile {
             reason: typeof decision.reason === "string" ? decision.reason : null,
         };
     }
+    /*
+     * `insets` 逐字段兜底而不是整体替换：后端少给一个边（或旧后端根本没有这个
+     * 字段）时，其余三边仍然是有效值。整体替换会让"缺一个字段"退化成"安全区全丢"。
+     */
+    const rawInsets = (value.viewport?.insets ?? {}) as Record<string, unknown>;
+    const inset = (candidate: unknown): number => {
+        const number = typeof candidate === "number" ? candidate : Number(candidate);
+        return Number.isFinite(number) && number > 0 ? number : 0;
+    };
+    const insets = {
+        top: inset(rawInsets.top),
+        right: inset(rawInsets.right),
+        bottom: inset(rawInsets.bottom),
+        left: inset(rawInsets.left),
+    };
     return {
         form,
         os,
         input: { ...fallback.input, ...(value.input ?? {}) },
-        viewport: { ...fallback.viewport, ...(value.viewport ?? {}) },
+        viewport: { ...fallback.viewport, ...(value.viewport ?? {}), insets },
         storage: { ...fallback.storage, ...(value.storage ?? {}) },
         audio: { ...fallback.audio, ...(value.audio ?? {}) },
         capabilities,

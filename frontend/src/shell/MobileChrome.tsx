@@ -184,7 +184,7 @@ export function MobileActionDrawer({
 
     if (!open) return null;
     return (
-        <div className="absolute inset-0 z-[var(--qt-z-dialog)] flex flex-col bg-qt-window">
+        <div className="hs-mobile-drawer absolute inset-0 z-[var(--qt-z-dialog)] flex flex-col bg-qt-window">
             <div
                 className="flex shrink-0 items-center justify-between border-b border-qt-border px-2"
                 style={{ height: "var(--qt-bar-main)" }}
