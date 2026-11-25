@@ -195,6 +195,22 @@ describe("projectCurvePoints", () => {
         expect(points.map((p) => p.y)).toContain(64.5);
     });
 
+    it("尾部的 NaN 直接结束折线（缺口处不画点，也不补一个 0）", () => {
+        // 【为什么钉这条】绘制工具滚到取数窗口之外时，窗口外那一段由笔画缓冲供给；
+        // 缓冲没覆盖到的帧写的是 NaN（见 `extendCurveViewToViewport`）。它们必须
+        // **不产出点** —— 折线在缺口处停下，而不是贴着底边画一条假曲线（写 0 的形状）。
+        const points = projectCurvePoints({
+            values: [60, 61, 62, Number.NaN, Number.NaN, Number.NaN],
+            param: "pitch",
+            startFrame: 0,
+            stride: 1,
+            framePeriodMs: 5,
+            axis: makeAxis(),
+            valueToY: (v) => v,
+        });
+        expect(points.map((p) => p.y)).toEqual([60.5, 61.5, 62.5]);
+    });
+
     it("stride > 1 时按步长取样", () => {
         const values = Array.from({ length: 100 }, (_, i) => i);
         const points = projectCurvePoints({

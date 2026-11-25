@@ -42,6 +42,9 @@
  * 比截断更糟：用户会以为那一笔生效了。
  */
 
+import type { ParamViewSegment } from "./types";
+import { reportParamBlockDiagnostic } from "./paramBlockDiagnostics";
+
 /** 单笔长度上限（帧）。5 ms 帧周期下 200 万帧 ≈ 2.8 小时，正常操作不可能达到。 */
 export const MAX_STROKE_FRAMES = 2_000_000;
 
@@ -495,4 +498,115 @@ export function liveEditCaughtUp(
         if (Math.abs(left - right) > tolerance) return false;
     }
     return true;
+}
+
+/** 视口覆盖的帧区间（含端点，绝对帧号）。 */
+export interface CurveViewport {
+    readonly startFrame: number;
+    readonly endFrame: number;
+}
+
+/**
+ * 把"取数窗口视图"扩展到覆盖视口；窗口外的那一段由笔画缓冲直接供给。
+ *
+ * ## 为什么需要
+ *
+ * 曲线的 GL 顶点由 `projectCurvePoints` 产出，而它的循环是**遍历传入的数组**
+ * （`if (tSec > visibleEndSec) break` 只裁右缘、从不补右缘）。于是"数组到哪儿，线就到
+ * 哪儿"：取样域不是"用户在看什么"，而是"上一次取回了哪一段"。
+ *
+ * 笔画改成绝对帧缓冲之后，滚出取数窗口只是"暂时看不见"—— 那句话在**渲染域恰好等于
+ * 窗口**时是假的：缓冲里已经画到第 N 帧、窗口只到第 M 帧（M < N）时，`[M, N]` 既不在
+ * 数组里也不在画面上，直到下一个 256 px 提交台阶换来新窗口，才整段补画出来。用户看到
+ * 的就是"拖到一定距离后参数线没了，再拖一会儿才出现"。
+ *
+ * ## 契约
+ *
+ * * 定义域 = 视口 ∩ (窗口 ∪ 笔画域)，与"上一次取回哪一段"无关（I-D1）；
+ * * 窗口内的帧取窗口值（`view.edit`），窗口外且被笔画覆盖的帧取 `buffer.valueAt`，
+ *   两者都不覆盖的帧写 `NaN` —— `projectCurvePoints` 对非有限值 skip，折线在缺口处
+ *   自然断开。**写 0 会画出一条贴着底边的假曲线**。
+ * * 不需要扩展时返回 `null`：调用方据此保留原对象身份，避免每帧换新数组（GL 侧按
+ *   引用做去重，换引用等于每帧重建整条曲线）。
+ *
+ * @param args.view 已 resolve 过的帧视图（窗口投影）
+ * @param args.live 绝对帧缓冲（`LiveEditOverride`）
+ * @param args.viewport 视口覆盖的帧区间（含端点）
+ * @param args.maxFrames 预算上界，缺省 `MAX_STROKE_FRAMES`
+ */
+export function extendCurveViewToViewport(args: {
+    readonly view: ParamViewSegment;
+    readonly live: LiveEditOverride;
+    readonly viewport: CurveViewport;
+    readonly maxFrames?: number;
+}): ParamViewSegment | null {
+    const { view, live, viewport } = args;
+    const stride = Math.max(1, Math.floor(view.stride));
+    const viewEnd = view.startFrame + Math.max(0, view.edit.length - 1) * stride;
+    const strokeRange = live.buffer.range();
+
+    let start = Math.min(view.startFrame, viewport.startFrame);
+    let end = Math.max(viewEnd, viewport.endFrame);
+    if (strokeRange !== null) {
+        start = Math.min(start, strokeRange.start);
+        end = Math.max(end, strokeRange.end - 1);
+    }
+    // 【为什么只延伸半屏】一次超长笔画（用户真的从工程头画到尾）不该让每一帧的投影变成
+    // O(工程时长)。视口之外再给半屏，足够覆盖"刚滚过去、取数还没回来"的那一段；
+    // 更远的空白是取数的责任（`usePianoRollData` 的视口订阅），不是渲染的。
+    const halfSpan = Math.max(stride, Math.round((viewport.endFrame - viewport.startFrame) / 2));
+    start = Math.max(start, Math.min(view.startFrame, viewport.startFrame - halfSpan));
+    end = Math.min(end, Math.max(viewEnd, viewport.endFrame + halfSpan));
+    // 帧号从 0 起；lattice 必须与窗口同一格（两者都是 stride 的整数倍）。
+    start = Math.max(0, Math.floor(start / stride) * stride);
+    if (start === view.startFrame && end === viewEnd) return null;
+    if (end < start) return null;
+
+    const count = Math.floor((end - start) / stride) + 1;
+    const budget = args.maxFrames ?? MAX_STROKE_FRAMES;
+    if (!Number.isFinite(count) || count <= 0) return null;
+    if (count > budget) {
+        // 宁可退回旧行为（只画窗口那一段），也不许一次超长笔画把每帧的投影变成
+        // O(工程时长)。诊断只报一次/秒，见 `reportParamBlockDiagnostic` 的限频。
+        reportParamBlockDiagnostic({
+            code: "curve_domain_budget",
+            gesture: "layout",
+            rootTrackId: null,
+            blockId: null,
+            frame: count,
+            detail: `curve view needs ${count} frames (budget ${budget})`,
+        });
+        return null;
+    }
+
+    const edit = new Array<number>(count);
+    const orig = new Array<number>(count);
+    const edited = view.edited === undefined ? null : new Array<boolean>(count);
+    for (let index = 0; index < count; index += 1) {
+        const frame = start + index * stride;
+        const source = (frame - view.startFrame) / stride;
+        if (Number.isInteger(source) && source >= 0 && source < view.edit.length) {
+            edit[index] = view.edit[source];
+            const base = view.orig[source];
+            orig[index] = Number.isFinite(base) ? base : Number.NaN;
+            if (edited !== null && view.edited !== undefined) {
+                edited[index] = view.edited[source] === true;
+            }
+            continue;
+        }
+        const value = live.buffer.valueAt(frame);
+        // 【没有数据写 NaN，不写 0】NaN 让折线在缺口处断开；0 会画出一条贴底的假线。
+        edit[index] = value === undefined ? Number.NaN : value;
+        orig[index] = Number.NaN;
+        if (edited !== null) edited[index] = false;
+    }
+    return {
+        ...view,
+        // 与 `projectLiveEdit` 的缓存键分开：那张缓存的键是窗口，这里是"窗口 + 扩展域"。
+        key: `${view.key}|live:${start}:${end}`,
+        startFrame: start,
+        edit,
+        orig,
+        ...(edited === null ? {} : { edited }),
+    };
 }

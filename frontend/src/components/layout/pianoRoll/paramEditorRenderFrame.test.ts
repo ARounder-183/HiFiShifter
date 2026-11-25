@@ -127,3 +127,40 @@ test("a late different sampling window cannot change the gesture's original doma
     expect(frame.view?.edit).toEqual([64, 64, 60, 60, 66, 66, 66, 66]);
     expect(resolveParamEditorBlockValue(frame, blocks[1])).toBe(66);
 });
+
+test("a curve view wider than the sampling window feeds curves but not block samples", () => {
+    // 【回归】曲线与块取值必须用**两份**视图：曲线要画到视口边缘（窗口外由笔画缓冲供给），
+    // 块的中心值只能从真实采样里算。把两者混成一份，块高会在滚动时抖动。
+    const wide: ParamViewSegment = {
+        ...view,
+        key: "wide",
+        startFrame: 0,
+        edit: [60, 60, 60, 60, 66, 66, 66, 66, Number.NaN, Number.NaN],
+        orig: [60, 60, 60, 60, 66, 66, 66, 66, Number.NaN, Number.NaN],
+    };
+    const frame = createParamEditorRenderFrame({
+        param: "pitch",
+        view,
+        curveView: wide,
+        blocks: spec,
+        curves: (normalized) => [
+            {
+                values: normalized!.edit,
+                param: "pitch",
+                startFrame: normalized!.startFrame,
+                stride: normalized!.stride,
+                framePeriodMs: normalized!.framePeriodMs,
+                rgba: [1, 1, 1, 1],
+                lineWidthPx: 2.6,
+                projection: "curve",
+                valueToY: (value) => value,
+            },
+        ],
+    });
+    expect(frame.samples?.values).toBe(view.edit);
+    expect(frame.view?.edit).toBe(view.edit);
+    expect(frame.curves[0].values).toBe(wide.edit);
+    expect(frame.curves[0].values).toHaveLength(10);
+    // 块取值仍走窗口：宽视图里的 NaN 不能进 averageParamValueInSpan。
+    expect(resolveParamEditorBlockValue(frame, blocks[1])).toBe(66);
+});

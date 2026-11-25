@@ -42,6 +42,8 @@ import {
 } from "../childPitchOffsetParams";
 import type { ParamName, ParamViewSegment, ValueViewport } from "../types";
 import { resolveParamBlockFrameView } from "../paramBlockFrame";
+import { timeToFrame } from "../utils";
+import { viewportEndSec, viewportStartSec } from "../../renderKernel/timelineAxis.js";
 import { verticalScrollTopFromCenter } from "../verticalScrollMapping";
 import { resolveClipboardPreviewColor, resolveSecondaryCurveColor } from "../colors";
 import { resolveClipPitchOverlayVisual } from "../clipPitchOverlay";
@@ -692,12 +694,23 @@ export function buildCurveLayers(
     }
 
     // ── ④⑤⑥ 主参数曲线（原始 / 编辑 / 选区高亮）─────────────────
+    // 【兜底路径也要把取样域扩到视口】生产路径（`drawFrame`）会把已经解析好的曲线视图
+    // 直接传进来；这条分支服务「没有 override」的调用方。它同样需要把窗口外、被笔画覆盖
+    // 的那一段补上 —— 否则两种调用方式的线长不同，缺陷只会在其中一条路径上复发。
     const frameView =
         frameViewOverride === undefined
             ? resolveParamBlockFrameView({
                   interaction: interactionParamViewRef?.current ?? null,
                   live: liveEditOverrideRef.current,
                   paramView,
+                  viewport: {
+                      startFrame: timeToFrame(
+                          viewportStartSec(axis),
+                          paramView?.framePeriodMs ?? 5,
+                      ),
+                      endFrame:
+                          timeToFrame(viewportEndSec(axis), paramView?.framePeriodMs ?? 5) + 1,
+                  },
               })
             : frameViewOverride;
     const pv = pitchEnabled ? frameView : null;

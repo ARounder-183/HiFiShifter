@@ -8,8 +8,8 @@ import {
 import type { ParamViewSegment } from "./types";
 import { reportParamBlockDiagnostic } from "./paramBlockDiagnostics";
 import { paramWindowScope } from "./paramWindowKey";
-import { projectLiveEdit } from "./strokeBuffer";
-import type { LiveEditOverride } from "./strokeBuffer";
+import { extendCurveViewToViewport, projectLiveEdit } from "./strokeBuffer";
+import type { CurveViewport, LiveEditOverride } from "./strokeBuffer";
 
 /** Block boundaries are shared; every non-auto block may carry an explicit center. */
 export function resolveParamBlockPanelValues(args: {
@@ -123,6 +123,15 @@ export function resolveParamBlockFrameView(args: {
     readonly live: LiveEditOverride | null;
     readonly paramView: ParamViewSegment | null;
     readonly param?: string;
+    /**
+     * 视口覆盖的帧区间。给了它，返回的就是**曲线用**的扩展视图：窗口之外、被笔画覆盖
+     * 的帧由缓冲直接供给（见 `extendCurveViewToViewport`）。
+     *
+     * 【为什么挂在同一个解析器上】曲线、块高、拖动中心都从这里取视图。渲染域只对
+     * **曲线**扩展：块的中心值必须只在"有真实采样"的区间里算，把窗口外的帧喂进去会让
+     * 块高在滚动时抖动。所以调用方按用途各取一份：给 `viewport` = 画线，不给 = 取块值。
+     */
+    readonly viewport?: CurveViewport;
 }): ParamViewSegment | null {
     const interaction = args.interaction;
     const sameScope =
@@ -144,10 +153,20 @@ export function resolveParamBlockFrameView(args: {
         args.paramView !== null &&
         args.live.scope === paramWindowScope(args.paramView.key)
     ) {
-        return {
+        const projected = {
             ...args.paramView,
             edit: projectLiveEdit(args.live, args.paramView),
         } as ParamViewSegment;
+        if (args.viewport === undefined) return projected;
+        // 取样域 = 视口 ∩ (窗口 ∪ 笔画域)。窗口够不着视口时，由缓冲把那一段补上；
+        // 补不上（缓冲没覆盖）的帧写 NaN，折线在缺口处断开 —— 不画假线、也不画 0。
+        return (
+            extendCurveViewToViewport({
+                view: projected,
+                live: args.live,
+                viewport: args.viewport,
+            }) ?? projected
+        );
     }
     return args.paramView;
 }

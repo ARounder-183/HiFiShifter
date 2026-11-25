@@ -13,7 +13,12 @@
 import { drawPianoRoll } from "../render";
 import type { MainCanvasSignature } from "../mainCanvasSignature";
 import { isDynParam } from "../paramRanges";
-import { createTimelineAxis } from "../../renderKernel/timelineAxis.js";
+import {
+    createTimelineAxis,
+    viewportEndSec,
+    viewportStartSec,
+} from "../../renderKernel/timelineAxis.js";
+import { timeToFrame } from "../utils";
 import { getCaptureBandsAt } from "../../../../features/capture/captureRange";
 import { resolvePanelRenderViewport } from "../kernel/viewportSource";
 import { resolvePlayheadRgba } from "./panelHelpers";
@@ -130,15 +135,33 @@ export function drawPianoRollFrame(deps: DrawFrameDeps): void {
     //
     // 【必须是唯一来源】曲线已归 GL（Canvas2D 侧 `skipCurves` 恒为 true），
     // 置 null 等于曲线无人绘制。
+    // 【取样域 = 视口 ∩ (窗口 ∪ 笔画域)，见 I-D1】解析器给两份额度不同的视图：
+    //   * 不带 viewport ⇒ 取数窗口视图，喂 samples（块高只在有真实采样的区间里算）；
+    //   * 带 viewport   ⇒ 曲线视图，窗口外由笔画缓冲补上，喂 curves。
+    // 曲线此前拿到的是**窗口**视图，而 GL 的顶点数组就是"数组到哪儿线到哪儿"：
+    // 于是笔画已经画到窗口之外时，那一段既不进数组也不进画面，直到下一个 256 px 的
+    // 滚动提交换来新窗口才整段补画出来（用户报的"拖到一定距离后参数线没了"）。
+    const curveViewport = {
+        startFrame: timeToFrame(viewportStartSec(drawAxis), paramView?.framePeriodMs ?? 5),
+        endFrame: timeToFrame(viewportEndSec(drawAxis), paramView?.framePeriodMs ?? 5) + 1,
+    };
     const blockFrameView = resolveParamBlockFrameView({
         interaction: paramBlockInteractionCurveRef.current,
         live: liveEditOverrideRef.current,
         paramView,
         param: editParam,
     });
+    const blockCurveView = resolveParamBlockFrameView({
+        interaction: paramBlockInteractionCurveRef.current,
+        live: liveEditOverrideRef.current,
+        paramView,
+        param: editParam,
+        viewport: curveViewport,
+    });
     const frame = createParamEditorRenderFrame({
         param: editParam,
         view: blockFrameView,
+        curveView: blockCurveView,
         blocks: kernelDataRef.current.paramBlocks ?? null,
         currentParamDefaultValue,
         curves: (view) => buildCurveLayers(drawAxis, view),

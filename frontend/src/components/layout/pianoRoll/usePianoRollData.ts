@@ -12,6 +12,7 @@ import { isDynParam } from "./paramRanges";
 import { resolveParamFetchWindow } from "./paramFetchWindow";
 import { framesToTime } from "./utils";
 import { frontendLog, getFrontendLogPolicy } from "../../../services/frontendLog";
+import { pianoRollViewportBus } from "./pianoRollViewportBus";
 const paramFramePeriodCache = new Map<string, number>();
 
 const pianoRollDebug = createDebugLogger("pianoRoll");
@@ -1132,6 +1133,36 @@ export function usePianoRollData(args: {
         }
     }
 
+    // ── 视口真值驱动的取数（不是 256 px 的量化 state）───────────────────────
+    //
+    // 【为什么需要第二条触发源】上面那条 effect 依赖 React 的 `scrollLeft`，而它只是
+    // 内核真值**每 256 px 一次**的量化提交（`SCROLL_COMMIT_STEP_PX`）。滚动热路径上逐帧
+    // 可信的是 `pianoRollViewportBus`。只靠量化 state，"视口已滚出取数窗口"这件事要等到
+    // 下一个台阶才被发现 —— 那一段时间里曲线上就是一段空白（绘制的兜底见
+    // `extendCurveViewToViewport`，它只救得了被笔画覆盖的那一段，普通滚动救不了）。
+    //
+    // 【为什么用 ref 转发】`computeVisibleRequest` / `refreshVisible` 都是本次渲染的函数，
+    // 直接写进依赖会让订阅在滚动期每帧重建 —— 那是把一个逐帧回调变成一次 React effect
+    // 调度。ref 保持订阅稳定，内容每渲染刷新。
+    const viewportFetchRef = useRef<(() => void) | null>(null);
+    const lastViewportRequestRef = useRef<string | null>(null);
+    useEffect(() => {
+        viewportFetchRef.current = () => {
+            const request = computeVisibleRequest();
+            if (!request || request.paramCoversVisible) return;
+            // 【必须去重】总线是同步逐帧派发的；按 `paramKey`（窗口的身份）记住"上一次
+            // 请求的就是这一段"，否则同一窗口会在 60 Hz 下打出几十次 IPC。
+            if (lastViewportRequestRef.current === request.paramKey) return;
+            lastViewportRequestRef.current = request.paramKey;
+            void refreshVisible();
+        };
+    });
+    useEffect(() => {
+        const unsubscribe = pianoRollViewportBus.subscribe(() => {
+            viewportFetchRef.current?.();
+        });
+        return unsubscribe;
+    }, []);
     useEffect(() => {
         if (!rootTrackId) return;
 
