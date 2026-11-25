@@ -108,4 +108,10 @@ Invoke-Gate 'Timeline payload gate' { python scripts/checks/check-timeline-paylo
 # is what "scrolling is unusable on the phone" looked like in the source.
 Invoke-Gate 'Touch coverage gate' { python scripts/checks/check-touch-coverage.py }
 
+# REAPER has two gain knobs per clip -- the item D_VOL and the active take D_VOL -- and
+# they sit one word apart in every payload. A bare `gain` names neither: the kernel read
+# it as the take layer while the UI wrote it as the item layer, so a +12 dB knob came
+# back as -12 dB and both layers ended up wrong. Every one of those mistakes compiles.
+Invoke-Gate 'Gain layer gate' { python scripts/checks/check-gain-layers.py }
+
 Write-Host 'All static gates passed.' -ForegroundColor Green
