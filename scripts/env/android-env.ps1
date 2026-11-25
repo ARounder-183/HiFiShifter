@@ -31,6 +31,14 @@
 
 $ErrorActionPreference = 'Stop'
 
+# [Why the generator goes through the shared module] The NDK toolchain file cannot drive the
+# Visual Studio generator, so Android must use Ninja -- but the assignment used to be a bare
+# "$env:CMAKE_GENERATOR = 'Ninja'" here, which (because this file is dot-sourced) survived into
+# whatever ran next in the same shell, desktop builds included. Set-NativeToolchain writes the
+# same variable while also recording it in HFS_NATIVE_GENERATOR, so the next env script can see
+# what was decided instead of re-guessing.
+. (Join-Path $PSScriptRoot 'native-toolchain.ps1')
+
 function Get-AndroidSdkRoot {
     # An override wins even when it is unconventional: the caller knows its own layout.
     foreach ($name in @('HIFISHIFTER_ANDROID_SDK', 'ANDROID_SDK_ROOT', 'ANDROID_HOME')) {
@@ -381,7 +389,10 @@ function Set-AndroidEnvironment {
     # "VCTargetsPath.vcxproj" errors that name no Android concept at all. Ninja is the
     # generator the NDK documents and the one the SDK ships a binary for.
     if ($cmakeBin) {
-        $env:CMAKE_GENERATOR = 'Ninja'
+        # The SDK's cmake directory also carries the ninja binary the NDK toolchain needs, and
+        # it is already first on PATH at this point, so the probe inside Set-NativeToolchain
+        # finds it. Passing -Generator explicitly makes the choice independent of PATH order.
+        Set-NativeToolchain -Generator Ninja
     }
 
     # [Why CPATH carries the fdk-aac shim] fdk-aac-sys includes AOSP's internal log/log.h

@@ -66,6 +66,11 @@ Invoke-Gate 'Source UTF-8 gate' { python scripts/checks/check-utf8.py }
 # SoundTouch build generator and cache self-healing.
 Invoke-Gate 'SoundTouch generator gate' { python scripts/checks/check-soundtouch-generator.py }
 
+# The same discipline for every other CMake consumer in the build: one environment, one
+# generator, and a cache recorded under another one is deleted instead of fatal. Without it,
+# "the build works on my machine" depends on whether ninja happens to be on PATH.
+Invoke-Gate 'Native toolchain gate' { & (Join-Path $PSScriptRoot 'check-native-toolchain.ps1') }
+
 # Test names in the skip manifest must still resolve against the Rust sources.
 Invoke-Gate 'Test skip gate' { python scripts/checks/check-test-skips.py }
 

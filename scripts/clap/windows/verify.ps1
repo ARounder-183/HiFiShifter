@@ -1,6 +1,13 @@
 ﻿# CLAP Windows artifact self-check: exported symbols, black-box load, ARA capabilities.
 param([Parameter(Mandatory=$true)][string]$ModulePath)
 $ErrorActionPreference = "Stop"
+# [Why this script imports the MSVC environment itself] It ends with a cargo command (the ABI
+# layout oracle), so it needs cl.exe AND a pinned CMake generator. It used to import only
+# sdk-env.ps1, which meant the generator was whatever the caller's shell happened to have --
+# and the oracle is exactly the command that failed with "generator : Ninja does not match the
+# generator used previously: NMake Makefiles".
+$root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\.."))
+. (Join-Path $root "scripts\env\msvc-env.ps1")
 if (!(Test-Path -LiteralPath $ModulePath)) { throw "CLAP module missing: $ModulePath" }
 # A single-file CLAP's resources directory must sit beside the module; a missing plugin.html
 # shows up as the host scanning the plugin yet showing only a blank window (the frontend was
@@ -50,9 +57,10 @@ try {
 # the hand-written #[repr(C)] field offsets must be compared against the official headers
 # once more, otherwise alignment differences under cl.exe / the MSVC ABI (e.g. clap_process_t's
 # 8-byte padding) would go unnoticed.
-$root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\.."))
 . (Join-Path $root "scripts\env\sdk-env.ps1"); Set-SdkEnvironment
-Push-Location (Join-Path $root "backend")
+$backendDir = Join-Path $root "backend"
+$null = Clear-StaleCmakeCaches -TargetDir (Get-NativeCargoTargetDir -BackendDir $backendDir)
+Push-Location $backendDir
 try { cargo test -p hifishifter-clap --test clap_layout --locked -- --nocapture }
 finally { Pop-Location }
 if ($LASTEXITCODE) { throw "CLAP ABI layout oracle failed" }

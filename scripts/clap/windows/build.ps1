@@ -15,18 +15,11 @@ $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\.."))
 # failed the copy on machines with CARGO_TARGET_DIR set, or something worse: silently
 # packaging the **previous build's stale DLL** from default-target as the "new" plugin.
 $backendDir = Join-Path $root "backend"
-if ($env:CARGO_TARGET_DIR) {
-    if ([IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
-        $cargoTarget = [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
-    }
-    else {
-        $cargoTarget = [IO.Path]::GetFullPath((Join-Path $backendDir $env:CARGO_TARGET_DIR))
-    }
-    $env:CARGO_TARGET_DIR = $cargoTarget
-}
-else {
-    $cargoTarget = Join-Path $backendDir "target"
-}
+# Shared with scripts/build/build.ps1 so the two cannot drift (see scripts/env/native-toolchain.ps1).
+$cargoTarget = Get-NativeCargoTargetDir -BackendDir $backendDir
+if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR = $cargoTarget }
+# A CMake cache recorded under another generator fails the first native build script; sweep first.
+$null = Clear-StaleCmakeCaches -TargetDir $cargoTarget
 Push-Location $backendDir
 try { cargo build -p hifishifter-clap --release --locked } finally { Pop-Location }
 # PowerShell does not throw on a native command's non-zero exit ($ErrorActionPreference
