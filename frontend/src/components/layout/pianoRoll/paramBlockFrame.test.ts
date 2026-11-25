@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ParamViewSegment } from "./types";
+import { createLiveEditOverride } from "./strokeBuffer";
 import {
     buildParamBlockFrameCenters,
     resolveParamBlockFrameValue,
@@ -23,12 +24,12 @@ const authoritative: ParamViewSegment = {
 describe("param block visual frame", () => {
     it("uses the interaction curve as the only source for lines and block sampling", () => {
         const interaction = { ...authoritative, edit: [64, 64, 64, 64] };
+        // live 覆盖按绝对帧投影到当前窗口：只画了 4 帧，正好覆盖 authoritative 的窗口。
+        const live = createLiveEditOverride("v2|track|pitch", 1);
+        live.buffer.write(authoritative.startFrame, [62, 62, 62, 62]);
         const frameView = resolveParamBlockFrameView({
             interaction,
-            live: {
-                key: authoritative.key,
-                edit: [62, 62, 62, 62],
-            },
+            live,
             paramView: authoritative,
         });
 

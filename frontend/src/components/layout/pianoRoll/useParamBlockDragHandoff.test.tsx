@@ -6,6 +6,7 @@ import { createTimelineAxis } from "../renderKernel/timelineAxis";
 import { buildCurveLayers } from "./panel/sceneBuilders";
 import type { ParamViewSegment } from "./types";
 import { useLiveParamEditing } from "./useLiveParamEditing";
+import { projectLiveEdit } from "./strokeBuffer";
 import {
     useParamBlockDragHandoff,
     type ParamBlockDragHandoffInputs,
@@ -76,7 +77,6 @@ async function harness() {
             editParam: "pitch",
             pitchEnabled: true,
             paramView,
-            setParamView: () => {},
             bumpRefreshToken: () => {},
             invalidate: () => {},
         });
@@ -152,7 +152,11 @@ describe("block drag release and live curve handoff", () => {
             h.getLive().resetLiveEditPreview(oldView);
             h.getLive().markLiveEditCommitted();
         });
-        expect(h.getLive().liveEditOverrideRef.current?.edit).toEqual(oldView.edit);
+        // resetLiveEditPreview 擦掉了这一笔 → 覆盖层的投影退回已提交曲线。
+        const override = h.getLive().liveEditOverrideRef.current;
+        expect(override === null ? null : Array.from(projectLiveEdit(override, oldView))).toEqual(
+            oldView.edit,
+        );
         expect(h.editedLine()).toEqual(targetView.edit);
         await h.render(targetView, 2, 6);
         expect(h.editedLine(targetView)).toEqual(targetView.edit);

@@ -7,11 +7,9 @@ import {
 } from "./paramBlocks";
 import type { ParamViewSegment } from "./types";
 import { reportParamBlockDiagnostic } from "./paramBlockDiagnostics";
-
-type LiveEdit = {
-    readonly key: string;
-    readonly edit: readonly number[];
-};
+import { paramWindowScope } from "./paramWindowKey";
+import { projectLiveEdit } from "./strokeBuffer";
+import type { LiveEditOverride } from "./strokeBuffer";
 
 /** Block boundaries are shared; every non-auto block may carry an explicit center. */
 export function resolveParamBlockPanelValues(args: {
@@ -122,17 +120,15 @@ export function resolveParamBlockPanelValues(args: {
  */
 export function resolveParamBlockFrameView(args: {
     readonly interaction: ParamViewSegment | null;
-    readonly live: LiveEdit | null;
+    readonly live: LiveEditOverride | null;
     readonly paramView: ParamViewSegment | null;
     readonly param?: string;
 }): ParamViewSegment | null {
-    const scope = (key: string) =>
-        key.startsWith("v2|") ? key.split("|").slice(0, 3).join("|") : key;
     const interaction = args.interaction;
     const sameScope =
         interaction !== null &&
         args.paramView !== null &&
-        scope(interaction.key) === scope(args.paramView.key);
+        paramWindowScope(interaction.key) === paramWindowScope(args.paramView.key);
     if (
         interaction !== null &&
         sameScope &&
@@ -141,8 +137,17 @@ export function resolveParamBlockFrameView(args: {
             interaction.key.split("|")[2] === args.param)
     )
         return interaction;
-    if (args.live !== null && args.live.key === args.paramView?.key) {
-        return { ...args.paramView, edit: args.live.edit } as ParamViewSegment;
+    // live 覆盖是绝对帧缓冲：只要作用域对得上，就按**当前窗口**投影出来。
+    // 旧实现要求 key 完全相同，于是"取数回包换了窗口"会让正在画的曲线整条消失。
+    if (
+        args.live !== null &&
+        args.paramView !== null &&
+        args.live.scope === paramWindowScope(args.paramView.key)
+    ) {
+        return {
+            ...args.paramView,
+            edit: projectLiveEdit(args.live, args.paramView),
+        } as ParamViewSegment;
     }
     return args.paramView;
 }

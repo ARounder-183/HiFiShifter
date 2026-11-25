@@ -20,6 +20,9 @@
 
 import { createDebugLogger } from "../../../utils/debugLog";
 import type { ParamMorphOverlay, ParamName, ParamViewSegment, ValueViewport } from "./types";
+import { paramWindowScope } from "./paramWindowKey";
+import { projectLiveEdit } from "./strokeBuffer";
+import type { LiveEditOverride } from "./strokeBuffer";
 import type { ParamSelection } from "./paramSelection";
 import { frameRangeEndCut, frameRangeStartCut, selectionToFrameRanges } from "./paramSelection";
 import { clipboardPreviewSpans, type ParamClipboardData } from "./paramClipboardMapping";
@@ -411,7 +414,8 @@ export function drawPianoRoll(args: {
     secondaryParamIds: ParamName[];
     showSecondaryParam: boolean;
     overlayText?: string | null;
-    liveEditOverride: { key: string; edit: number[] } | null;
+    /** 绘制中的 live 覆盖（绝对帧缓冲，按当前窗口投影，见 strokeBuffer）。 */
+    liveEditOverride: LiveEditOverride | null;
     /** 多选区（有序、互不相交的帧区间列表；null = 无选区） */
     selection: ParamSelection | null;
     /**
@@ -1111,8 +1115,8 @@ export function drawPianoRoll(args: {
 
     if (paramView) {
         const editValues =
-            liveEditOverride && liveEditOverride.key === paramView.key
-                ? liveEditOverride.edit
+            liveEditOverride !== null && liveEditOverride.scope === paramWindowScope(paramView.key)
+                ? projectLiveEdit(liveEditOverride, paramView)
                 : paramView.edit;
 
         if (!skipCurves && paramView.orig.length >= 2) {

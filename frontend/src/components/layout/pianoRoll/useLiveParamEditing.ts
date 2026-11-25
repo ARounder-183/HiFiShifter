@@ -1,59 +1,84 @@
 import { useCallback, useEffect, useRef } from "react";
 
 import { paramsApi } from "../../../services/api";
-
-import { clampParamWriteValue } from "./paramRanges";
-
-import {
-    liveEditWindowMatchesParamView,
-    parseLiveEditWindowKey,
-    reanchorLiveEditWindow,
-    restoreLiveEditRange,
-    warnLiveEditWindowMismatch,
-    writeDenseIntoLiveWindow,
-} from "./liveEditWindow";
-import type { ParamName, ParamViewSegment, StrokeMode, StrokePoint } from "./types";
 import { frontendLog } from "../../../services/frontendLog";
+
+import { paramWindowScope } from "./paramWindowKey";
+import { clampParamWriteValue } from "./paramRanges";
+import { createLiveEditOverride, liveEditCaughtUp } from "./strokeBuffer";
+import type { LiveEditOverride, StrokeBuffer } from "./strokeBuffer";
+import type { ParamName, ParamViewSegment, StrokeMode, StrokePoint } from "./types";
+
+// 覆盖层类型住在 strokeBuffer（纯逻辑、可单测）；这里转出一次，调用方继续从本模块取。
+export type { LiveEditOverride } from "./strokeBuffer";
+
+/**
+ * 单次 IPC 允许的最大帧数。
+ *
+ * 【为什么必须分段】一次 `set_param_frames` 会把 values / present 两份数组整体序列化过
+ * IPC 边界。一笔画过整首歌（5 ms 帧周期、3 分钟 ≈ 3.6 万帧）尚可，但用户把视口缩到最小
+ * 再画满屏时，绝对帧区间可以是几十万帧 —— 一次性发出去会构造出几十 MB 的 JSON。
+ * 65536 是"一次往返够快、序列化又不失控"的经验分界；分段之间用 `checkpoint: false`
+ * 合并成**一次撤销**，所以用户按一次 Ctrl+Z 仍然是回到画之前。
+ */
+export const MAX_FRAMES_PER_WRITE = 65536;
 
 /**
  * 绘制中的参数曲线**覆盖层**（live override）。
  *
- * 【为什么不进 React 状态】它在指针频率上更新，走 state 会让整块面板以指针
- * 频率重渲染。波形面与曲线层都以 ref + 修订号的方式消费它。
+ * 【为什么不进 React 状态】它在指针频率上更新，走 state 会让整块面板以指针频率重渲染。
+ * 波形面与曲线层都以 ref + 版本号的方式消费它。
  *
- * 【为什么原地更新 + 全局版本号】
- * - `edit` 由 {@link
- *   useLiveParamEditing} 的 `ensureLiveEditBase` 造出一份**私有副本**（不指向
- *   React state），因此可以原地改写。此前每次采样都 `slice()` 出一份新数组 ——
- *   典型窗口 ~6400 个元素，宽视口 / 最小缩放下可达数十万帧（`usePianoRollData`
- *   的取数窗口按可见区 3 倍计算）⇒ 单次数 MB，高刷笔一帧数个采样就是数十 MB 的
- *   年轻代垃圾。
- * - 但"引用变了"此前同时承担了"内容变了"的通知职责。改为原地更新后必须显式
- *   给出这一信号，否则**主画布的内容签名会误判为未变**、绘制中的曲线不再刷新
- *  （见 `mainCanvasSignature.ts` 的约束说明）。故每次写入都取一个**全局单调
- *   递增**的版本号：`version` 单调且永不复用，任何一次内容变化都必然改变签名。
+ * 【为什么坐标是绝对帧】见 `strokeBuffer.ts` 的模块头：窗口是后端驱动的，把它当坐标系
+ * 就必须在笔画期间冻结取数（`liveEditDeferral`）并把边缘滚屏夹在窗口末端 —— 两处补丁
+ * 合起来正是"绘制工具拖到水平边缘自动滚屏，滚过一定距离后参数线不再更新"。
  */
-export interface LiveEditOverride {
-    /** 窗口键（`v2|track|param|start|count|stride`）。 */
-    key: string;
-    /** 造出本覆盖所用的已提交曲线（`paramView.edit` 的引用，用于检测基准变更）。 */
-    base: number[];
-    /** 与键中窗口对齐的曲线值（手势内原地更新）。 */
-    edit: number[];
-    /** 内容版本：每次写入自增（全局单调，不复用）。 */
-    version: number;
-    /**
-     * `true` = 本次编辑**已提交**，覆盖层只是"等整工程快照追上"的占位。
-     *
-     * 【为什么需要】提交成功后若立刻撤下覆盖层，波形的幅度因子就退回**尚未刷新**
-     * 的旧快照 —— 波形先跳回旧形状、等快照到达再跳到新形状（用户报告的"松手闪
-     * 一下"）。保留覆盖层直到快照带着本次提交值到达，撤下时逐像素无损。
-     *
-     * 【为什么不会遮挡后续变化】撤下时机绑定在**快照引用变化**上（见
-     * `PianoRollPanel` 的 effect），因此撤销 / 切轨等任何来源的快照更新都会让
-     * 覆盖层退场，不会出现"旧覆盖层盖住撤销结果"。
-     */
-    committed?: boolean;
+
+/** 把笔画点按时间序去重（相邻同帧只留最后一个值），并规整为整数帧。 */
+export function normalizeStrokePoints(points: readonly StrokePoint[]): StrokePoint[] {
+    const uniq: StrokePoint[] = [];
+    for (const point of points) {
+        if (!Number.isFinite(point.frame) || !Number.isFinite(point.value)) continue;
+        const frame = Math.max(0, Math.floor(point.frame));
+        const last = uniq[uniq.length - 1];
+        if (last !== undefined && last.frame === frame) last.value = point.value;
+        else uniq.push({ frame, value: point.value });
+    }
+    return uniq;
+}
+
+/**
+ * 用点序列回放出一段稠密曲线写进缓冲。
+ *
+ * 【什么时候用】只提交、不预览的路径（某些工具在 pointer-up 才第一次拿到整条点序列）。
+ * 插值规则与旧实现逐值相同：以首点的值铺底，再按相邻点线性插值。
+ */
+export function replayStrokePoints(
+    buffer: StrokeBuffer,
+    points: readonly StrokePoint[],
+    clamp?: (value: number) => number,
+): void {
+    if (points.length === 0) return;
+    let minF = Number.POSITIVE_INFINITY;
+    let maxF = 0;
+    for (const point of points) {
+        minF = Math.min(minF, point.frame);
+        maxF = Math.max(maxF, point.frame);
+    }
+    const dense = new Array<number>(maxF - minF + 1).fill(points[0].value);
+    for (let index = 0; index < points.length - 1; index += 1) {
+        const a = points[index];
+        const b = points[index + 1];
+        const lo = Math.min(a.frame, b.frame);
+        const hi = Math.max(a.frame, b.frame);
+        const denom = b.frame - a.frame;
+        for (let frame = lo; frame <= hi; frame += 1) {
+            if (frame < minF || frame > maxF) continue;
+            const t = denom === 0 ? 1 : (frame - a.frame) / denom;
+            dense[frame - minF] = a.value + (b.value - a.value) * t;
+        }
+    }
+    buffer.write(minF, dense, { clamp });
 }
 
 export function useLiveParamEditing(args: {
@@ -62,36 +87,18 @@ export function useLiveParamEditing(args: {
     pitchEnabled: boolean;
 
     paramView: ParamViewSegment | null;
-    setParamView: (next: ParamViewSegment | null) => void;
 
     bumpRefreshToken: () => void;
     invalidate: () => void;
 }) {
-    const {
-        rootTrackId,
-        editParam,
-        pitchEnabled,
-        paramView,
-        setParamView,
-        bumpRefreshToken,
-        invalidate,
-    } = args;
+    const { rootTrackId, editParam, pitchEnabled, paramView, bumpRefreshToken, invalidate } = args;
 
     const liveEditOverrideRef = useRef<LiveEditOverride | null>(null);
     /**
-     * 当前参数窗口（**最新**的一份，供提交回写校验窗口是否还是同一个）。
+     * 当前参数窗口（**最新**的一份，供提交回写与投影使用）。
      *
-     * 【为什么不能用 `paramView` 闭包】提交回写（`commitStroke` 的
-     * `applyToParamViewDense`）是按**指针按下那一刻**的 `paramView` 算出的下标对齐
-     * —— `onUp` 捕获的是 pointerdown 时的 `commitStroke`。写回本地 state 前必须确认
-     * 窗口没被换掉，否则会把按旧窗口算出的 `edit` 以错误的帧对齐盖到新窗口上
-     * （见 `applyToParamViewDense`）。
-     *
-     * 【为什么用 effect 而不是渲染期赋值】写入 ref 属于"渲染副作用"，eslint 的
-     * `react-hooks/refs` 会拦下渲染期赋值。effect 在本组件提交后立刻执行，而
-     * pointerup 是离散事件 —— React 会在派发它之前冲刷掉待处理的被动 effect，
-     * 因此事件处理器里读到的必然是最后一次提交的窗口（与 `PianoRollPanel` /
-     * `usePianoRollInteractions` 的 `paramViewRef` 同一契约）。
+     * 【为什么不能用 `paramView` 闭包】`commitStroke` 捕获的是 pointerdown 那一刻的
+     * `paramView`；投影必须按**当前**窗口做，否则会把按旧窗口算出的数组当成新窗口的值。
      */
     const paramViewRef = useRef<ParamViewSegment | null>(paramView);
     useEffect(() => {
@@ -100,18 +107,28 @@ export function useLiveParamEditing(args: {
     /**
      * live 覆盖的**全局单调**版本号（跨手势、跨轨道都不复用）。
      *
-     * 用全局计数而非"每个覆盖自增"：这样 `null → 覆盖` 与 `覆盖 → 覆盖` 的
-     * 过渡都必然改变主画布签名的数值项，不必为"无覆盖"再约定一个哨兵值。
+     * 用全局计数而非"每个覆盖自增"：这样 `null → 覆盖` 与 `覆盖 → 覆盖` 的过渡都必然
+     * 改变主画布签名的数值项，不必为"无覆盖"再约定一个哨兵值。
      */
     const liveEditVersionRef = useRef(0);
     /**
-     * 自上次 `resetLiveEditPreview` 以来写过的**索引区间并集**（当前覆盖的 key）。
+     * 自上次 `resetLiveEditPreview` 以来写过的**绝对帧**区间并集（开区间）。
      *
-     * 直线 / 颤音工具的预览每帧都要"先擦掉上一帧、再画本帧"，擦除范围必须覆盖
-     * 上一帧写过的全部下标（端点会来回移动）。记录并集即可：每帧一次擦除 +
-     * 一次写入，并集恰好等于上一帧的写入范围。
+     * 直线 / 颤音工具的预览每帧都要"先擦掉上一帧、再画本帧"，擦除范围必须覆盖上一帧
+     * 写过的全部帧（端点会来回移动）。并集即可：每帧一次擦除 + 一次写入，并集恰好等于
+     * 上一帧的写入范围。旧实现记的是**窗口下标**，换窗口即失效；绝对帧不存在这个问题。
      */
-    const liveEditWrittenRangeRef = useRef<{ key: string; lo: number; hi: number } | null>(null);
+    const liveEditWrittenRangeRef = useRef<{ scope: string; start: number; end: number } | null>(
+        null,
+    );
+    /** 单笔超长只提示一次（见 MAX_STROKE_FRAMES）。 */
+    const strokeTruncationReportedRef = useRef(false);
+
+    /** 推进覆盖层的全局版本号（缓冲原地更新后必须显式通知画布签名）。 */
+    const touchLiveEdit = useCallback((live: LiveEditOverride) => {
+        liveEditVersionRef.current += 1;
+        live.version = liveEditVersionRef.current;
+    }, []);
 
     /** 丢弃 live 覆盖（连同其写过的区间记录）。 */
     const clearLiveEditOverride = useCallback(() => {
@@ -121,8 +138,8 @@ export function useLiveParamEditing(args: {
 
     /**
      * 把当前覆盖标记为"已提交"——**保留**其值，只等快照追上（见
-     * `LiveEditOverride.committed` 的说明）。提交成功路径用它替代
-     * `clearLiveEditOverride`，以消除"松手闪回旧波形"。
+     * `LiveEditOverride.committed`）。提交成功路径用它替代 `clearLiveEditOverride`，
+     * 以消除"松手闪回旧波形"。
      */
     const markLiveEditCommitted = useCallback(() => {
         const cur = liveEditOverrideRef.current;
@@ -144,88 +161,44 @@ export function useLiveParamEditing(args: {
      * 响度快照和曲线快照是两路独立 IPC；不能因为响度先回来就把曲线覆盖撤掉。
      */
     const clearCommittedLiveEditOverrideIfCaughtUp = useCallback(
-        (paramView: ParamViewSegment): boolean => {
+        (pv: ParamViewSegment): boolean => {
             const cur = liveEditOverrideRef.current;
-            if (
-                cur === null ||
-                cur.committed !== true ||
-                !liveEditWindowMatchesParamView({ live: cur, paramView })
-            ) {
-                return false;
+            if (cur === null || cur.committed !== true) return false;
+            if (cur.scope !== paramWindowScope(pv.key)) {
+                // 换了参数 / 轨道：这份占位已经与画面无关。
+                clearLiveEditOverride();
+                return true;
             }
+            if (!liveEditCaughtUp(cur, pv)) return false;
             clearLiveEditOverride();
             return true;
         },
         [clearLiveEditOverride],
     );
 
+    /**
+     * 保证覆盖层属于 `pv` 的作用域，且处于"正在画"的状态。
+     *
+     * 【为什么不再重锚】缓冲是绝对帧的，换窗口天然无损 —— 旧实现那套
+     * `reanchorLiveEditWindow` 正是"坐标是窗口下标"逼出来的补偿。
+     *
+     * 【为什么"已提交"要换新缓冲】上一笔的值已经交给后端，它作为占位只负责撑到快照追上；
+     * 用户又落笔时继续往同一份缓冲里追加，会让上一笔的值被当成这一笔的一部分提交。
+     */
     const ensureLiveEditBase = useCallback((pv: ParamViewSegment) => {
+        const scope = paramWindowScope(pv.key);
         const cur = liveEditOverrideRef.current;
-        // 键相同 = 同一个窗口；再确认底层已提交曲线的**引用**未换（`pv.edit` 变化
-        // 说明期间发生过提交/刷新，必须重新取基准，否则预览会建立在一份过期
-        // 数据上）。引用在拖动期稳定，故稳态下不触发拷贝。
-        if (cur && cur.key === pv.key && cur.base === pv.edit) return;
+        if (cur !== null && cur.scope === scope && cur.committed !== true) return;
         liveEditVersionRef.current += 1;
-        const next: LiveEditOverride = {
-            key: pv.key,
-            base: pv.edit,
-            edit: pv.edit.slice(),
-            version: liveEditVersionRef.current,
-        };
-        // "已提交"的占位层不该因为重建而失去"等快照追上"的身份 —— 否则它既不会
-        // 被快照到达的规则撤下（那个规则只认 `committed`），也不该被用户当成
-        // 正在编辑的笔画（见 LiveEditOverride.committed）。
-        if (cur?.committed === true) next.committed = true;
-        // 重建基准（整份拷贝）只此一次，之后一路原地改写。
-        //
-        // 【未提交的覆盖层必须重锚】它承载的是**用户正在画的笔画**。旧实现在这里
-        // 无条件 `pv.edit.slice()` —— 窗口被换掉时笔画整份清零，正是"轨迹不画"
-        // 的直接原因。
-        // 重锚把已画的帧按绝对帧号搬进新窗口；未动的帧自动跟随新基准。
-        //
-        // 【已提交的覆盖层不重锚】它只是"等快照追上"的占位（值就是刚提交的曲线），
-        // 不是用户输入。此时若外部改动（撤销 / 别的编辑）换了基准，就该让新基准
-        // 生效 —— 重锚反而会拿陈旧值把外部改动盖住。
-        if (cur !== null && cur.committed !== true) {
-            const old = parseLiveEditWindowKey(cur.key);
-            const reanchored = reanchorLiveEditWindow({
-                edit: cur.edit,
-                base: cur.base,
-                startFrame: old.startFrame,
-                stride: old.stride,
-                nextEdit: pv.edit,
-                nextStartFrame: pv.startFrame,
-                nextStride: pv.stride,
-            });
-            next.edit = reanchored.values;
-            // 已画值的下标区间同样要重锚：直线 / 颤音工具每帧"先擦上一帧、再画本帧"，
-            // 区间若还是旧窗口的下标，擦除会落在错误的帧上（残留旧预览）。
-            liveEditWrittenRangeRef.current =
-                reanchored.drawnRange === null
-                    ? null
-                    : { key: pv.key, lo: reanchored.drawnRange.lo, hi: reanchored.drawnRange.hi };
-        } else {
-            liveEditWrittenRangeRef.current = null;
-        }
-        liveEditOverrideRef.current = next;
+        liveEditOverrideRef.current = createLiveEditOverride(scope, liveEditVersionRef.current);
+        liveEditWrittenRangeRef.current = null;
     }, []);
 
     /**
-     * 窗口键变化时的处置：**合法换窗口**丢弃笔画，**意外换窗口**重锚保留。
+     * 窗口变化时的处置：作用域变了才丢弃笔画。
      *
-     * 【为什么不能一律清空】旧实现是"键不等就 `clearLiveEditOverride()`"。键同时
-     * 承载作用域（轨道 + 参数）与窗口参数（起帧 / 帧数 / 步长），而"取数回包"这条
-     * 意外路径会把 `paramView` 换成一个**同作用域、不同窗口**的对象 —— 一律清空
-     * 就等于把正在画的笔画扔掉（"按下画了一点、之后轨迹全不画"的机制之一）。
-     *
-     * 故按 {@link parseLiveEditWindowKey} 的 `scope` 分流：
-     * - 作用域变了（切参数 / 切轨）→ 调用方语义上本就该丢弃笔画，清空；
-     * - 只有窗口参数变了 → 立即重锚（不等下一次 pointermove），已画的值按帧搬进
-     *   新窗口。
-     *
-     * 同键但 `pv.edit` 换了引用（同窗口重取数）不在这里处理：键相同则渲染层仍按
-     * 本覆盖绘制（见 `PianoRollPanel` 的 `buildCurveLayers`，它按 `key === pv.key`
-     * 判定），下一次写入时由 {@link ensureLiveEditBase} 重锚即可，不会错帧。
+     * 【为什么换窗口什么都不做】覆盖层按绝对帧投影，换窗口只是换了个观察角度。这正是
+     * 旧实现做不到、只能靠 `liveEditDeferral` 冻结取数来回避的那件事。
      */
     useEffect(() => {
         if (!paramView) {
@@ -233,15 +206,10 @@ export function useLiveParamEditing(args: {
             return;
         }
         const cur = liveEditOverrideRef.current;
-        if (cur === null || cur.key === paramView.key) return;
-        const curScope = parseLiveEditWindowKey(cur.key).scope;
-        const nextScope = parseLiveEditWindowKey(paramView.key).scope;
-        if (curScope !== nextScope) {
-            clearLiveEditOverride();
-            return;
-        }
-        ensureLiveEditBase(paramView);
-    }, [paramView, ensureLiveEditBase, clearLiveEditOverride]);
+        if (cur === null) return;
+        if (cur.scope === paramWindowScope(paramView.key)) return;
+        clearLiveEditOverride();
+    }, [paramView, clearLiveEditOverride]);
 
     /**
      * live 覆盖写入的值域钳制（与后端写入入口同构，见
@@ -268,65 +236,59 @@ export function useLiveParamEditing(args: {
         ) => {
             ensureLiveEditBase(pv);
             const cur = liveEditOverrideRef.current;
-            if (!cur || cur.key !== pv.key) {
-                // 【不可达的不变量哨兵】`ensureLiveEditBase` 负责让覆盖层与新窗口
-                // 对齐（同键复用、换窗口重锚），所以这里本不该命中。旧实现在此
-                // **静默 return** —— 不写、不报错，于是"画音量 / 动态时轨迹不画"
-                // 只能靠肉眼复现。改为可观测，任何回归在开发期立刻暴露。
-                warnLiveEditWindowMismatch(pv.key, cur?.key ?? null);
-                return;
-            }
+            if (cur === null) return;
             // 重新进入"编辑中"：提交值可能还没进快照，但用户已经又画了，
             // 此时覆盖层必须跟着手走（不能再被快照到达时的清理规则撤下）。
             cur.committed = false;
-            // 写入的遍历与下标反解收口在 `liveEditWindow`（纯函数、可单测）；
-            // 见该模块的文件头说明（为什么从 O(窗口) 降到 O(受影响)）。
-            const range = writeDenseIntoLiveWindow({
-                edit: cur.edit,
-                orig: pv.orig,
-                startFrame: pv.startFrame,
-                stride: pv.stride,
-                dense,
-                denseStartFrame,
-                minF,
-                maxF,
-                mode,
-                clampValue: clampLiveValue,
-            });
-            // 原地写入 ⇒ 引用不变，必须显式推进版本号（波形面的几何缓存与主画布
-            // 的内容签名都依赖它）。
-            liveEditVersionRef.current += 1;
-            cur.version = liveEditVersionRef.current;
-            // 记下写过的下标区间**并集**（供"擦掉上一帧预览"精确回滚，见
+            if (mode === "restore" || dense === null) {
+                cur.buffer.erase(minF, maxF + 1);
+            } else {
+                // 写入的坐标是**绝对帧**；`minF` / `maxF` 之外的值即使出现在 dense 里也不写
+                // （手势按窗口算 dense 时可能带上邻域的填充值）。
+                cur.buffer.write(denseStartFrame, dense, {
+                    clamp: clampLiveValue,
+                    from: minF,
+                    to: maxF,
+                });
+            }
+            if (cur.buffer.truncated && !strokeTruncationReportedRef.current) {
+                strokeTruncationReportedRef.current = true;
+                frontendLog(
+                    "warn",
+                    "[liveEdit] stroke exceeded the frame budget and was truncated:",
+                    cur.buffer.frameCount,
+                );
+            }
+            touchLiveEdit(cur);
+            // 记下写过的绝对帧区间**并集**（供"擦掉上一帧预览"精确回滚，见
             // resetLiveEditPreview）：一次擦除 + 一次写入为一帧，故并集恰好等于
-            // 本帧写过的范围。空区间不记（窗口与受影响帧不相交）。
-            if (range !== null && range.lo <= range.hi) {
+            // 本帧写过的范围。空区间不记。
+            if (maxF >= minF) {
                 const written = liveEditWrittenRangeRef.current;
-                if (written !== null && written.key === pv.key) {
-                    if (range.lo < written.lo) written.lo = range.lo;
-                    if (range.hi > written.hi) written.hi = range.hi;
+                if (written !== null && written.scope === cur.scope) {
+                    if (minF < written.start) written.start = minF;
+                    if (maxF + 1 > written.end) written.end = maxF + 1;
                 } else {
                     liveEditWrittenRangeRef.current = {
-                        key: pv.key,
-                        lo: range.lo,
-                        hi: range.hi,
+                        scope: cur.scope,
+                        start: minF,
+                        end: maxF + 1,
                     };
                 }
             }
         },
-        [clampLiveValue, ensureLiveEditBase],
+        [clampLiveValue, ensureLiveEditBase, touchLiveEdit],
     );
 
     /**
-     * 擦除上一帧的 live 预览（回到**已提交曲线** `pv.edit` 的状态）。
+     * 擦除上一帧的 live 预览（这些帧回到**已提交曲线**）。
      *
-     * 【为什么需要】直线 / 颤音工具的预览是"每帧按当前端点重算整段"：第 N 帧
-     * 写入 `[起点, 端点_N]`，第 N+1 帧必须先把第 N 帧写过的点擦掉，否则端点往
-     * 回拖时旧的预览会残留在图上。旧实现是 `覆盖 = null` + `ensureLiveEditBase`
-     * —— 即**每帧整份拷贝一次参数窗口**（典型 ~6400 个元素/帧）。这里改为只把
-     * **上一帧写过的区间**逐点还原，成本降为 O(上一帧笔刷宽度)。
+     * 【为什么需要】直线 / 颤音工具的预览是"每帧按当前端点重算整段"：第 N 帧写入
+     * `[起点, 端点_N]`，第 N+1 帧必须先把第 N 帧写过的点擦掉，否则端点往回拖时旧的
+     * 预览会残留在图上。旧实现是逐下标还原成 `pv.edit`；缓冲里"擦除"就是这个语义
+     * （投影时未覆盖的帧取基准值），而且不需要知道当前窗口在哪。
      *
-     * @param pv 当前参数窗口。
+     * @param pv 当前参数窗口（只用来校验作用域）。
      * @param opts.keepWrittenRange 保留"写过的区间并集"不清零。用于选区平移这类
      *   窗口逐帧移动的手势：第 N 帧还原时必须把**之前所有帧**写过的区间一起擦掉
      *   （窗口移动后，上一帧的并集盖不住更早的写入），并集在整个手势内持续累积。
@@ -334,19 +296,16 @@ export function useLiveParamEditing(args: {
     const resetLiveEditPreview = useCallback(
         (pv: ParamViewSegment, opts?: { keepWrittenRange?: boolean }) => {
             const cur = liveEditOverrideRef.current;
-            if (!cur || cur.key !== pv.key) return;
+            if (cur === null || cur.scope !== paramWindowScope(pv.key)) return;
             const range = liveEditWrittenRangeRef.current;
-            if (range !== null && range.key === pv.key) {
-                if (restoreLiveEditRange({ edit: cur.edit, committed: pv.edit, range })) {
-                    liveEditVersionRef.current += 1;
-                    cur.version = liveEditVersionRef.current;
-                }
+            if (range !== null && range.scope === cur.scope) {
+                if (cur.buffer.erase(range.start, range.end)) touchLiveEdit(cur);
             }
             if (opts?.keepWrittenRange !== true) {
                 liveEditWrittenRangeRef.current = null;
             }
         },
-        [],
+        [touchLiveEdit],
     );
 
     const commitStroke = useCallback(
@@ -363,68 +322,29 @@ export function useLiveParamEditing(args: {
             //   user slightly backtracks in X, causing the committed curve to differ from
             //   what was previewed (often perceived as "spikes" / "glitches").
             // So: keep stroke order, only de-dupe consecutive same-frame samples.
-            const ordered = points.filter(
-                (p) => Number.isFinite(p.frame) && Number.isFinite(p.value),
-            );
-            const uniq: StrokePoint[] = [];
-            for (const p of ordered) {
-                const f = Math.max(0, Math.floor(p.frame));
-                const v = p.value;
-                const last = uniq[uniq.length - 1];
-                if (last && last.frame === f) {
-                    last.value = v;
-                } else {
-                    uniq.push({ frame: f, value: v });
-                }
-            }
+            const uniq = normalizeStrokePoints(points);
             if (uniq.length < 1) return;
 
             let minF = Number.POSITIVE_INFINITY;
             let maxF = 0;
-            for (const p of uniq) {
-                minF = Math.min(minF, p.frame);
-                maxF = Math.max(maxF, p.frame);
+            for (const point of uniq) {
+                minF = Math.min(minF, point.frame);
+                maxF = Math.max(maxF, point.frame);
             }
             minF = Math.max(0, Math.floor(minF));
             maxF = Math.max(minF, Math.floor(maxF));
 
             const pv = paramView;
-
-            function applyToParamViewDense(denseStartFrame: number, dense: number[] | null) {
-                if (!pv) return;
-                if (pv.stride <= 0) return;
-                // 【本地回显的窗口守卫】`pv` 是指针**按下那一刻**闭包捕获的窗口
-                // （`onUp` 拿到的是 pointerdown 时的 `commitStroke`），而 `nextEdit`
-                // 又是按 `pv.startFrame` 算出的下标对齐。若窗口期间被换掉，这份
-                // `edit` 写进去就会以错误的帧对齐盖住新窗口的曲线。此时**丢弃**本地
-                // 回显：提交本身照常发后端，权威数据由 pointer-up 的补取带回
-                // （`commitStroke` 结尾的 `bumpRefreshToken` → `notifyLiveEditEnded`）。
-                const liveWindow = paramViewRef.current;
-                if (liveWindow === null || liveWindow.key !== pv.key) return;
-                const step = liveWindow.stride;
-                /*
-                 * 以**当前**窗口为基底，避免拖动期间 paramView 被替换时
-                 * 用按下时那份旧数组构造出陈旧快照。
-                 */
-                const nextEdit = liveWindow.edit.slice();
-                for (let i = 0; i < nextEdit.length; i += 1) {
-                    const f = liveWindow.startFrame + i * step;
-                    if (f < minF || f > maxF) continue;
-                    if (mode === "restore") {
-                        nextEdit[i] = pv.orig[i] ?? nextEdit[i];
-                    } else if (dense) {
-                        const j = f - denseStartFrame;
-                        if (j >= 0 && j < dense.length) nextEdit[i] = dense[j] ?? nextEdit[i];
-                    }
-                }
-                setParamView({ ...liveWindow, edit: nextEdit });
-            }
+            const scope = pv === null ? null : paramWindowScope(pv.key);
+            const live = liveEditOverrideRef.current;
 
             // 提交是 fire-and-forget 调用（调用方不 await），任何 IPC 失败都必须
             // 在此兜底：否则 unhandledrejection，且 live 预览层会冻结在半提交状态。
             try {
                 if (mode === "restore") {
-                    applyToParamViewDense(minF, null);
+                    if (live !== null && scope !== null && live.scope === scope) {
+                        if (live.buffer.erase(minF, maxF + 1)) touchLiveEdit(live);
+                    }
                     invalidate();
                     await paramsApi.restoreParamFrames(
                         trackId,
@@ -440,59 +360,52 @@ export function useLiveParamEditing(args: {
                     return;
                 }
 
-                const len = maxF - minF + 1;
-                const out = new Array<number>(len);
-
-                // Prefer committing the exact dense values that were shown in the live preview.
-                // This keeps the committed curve identical to what the user saw.
-                const pvEdit = (() => {
-                    const pvNow = paramView;
-                    if (!pvNow) return null;
-                    const live = liveEditOverrideRef.current;
-                    if (live && live.key === pvNow.key) return live.edit;
-                    return pvNow.edit;
-                })();
-                const pvStart = paramView?.startFrame ?? 0;
-                const pvStride = paramView?.stride ?? 1;
-
-                const canSliceFromPv =
-                    Boolean(paramView) &&
-                    pvStride === 1 &&
-                    Array.isArray(pvEdit) &&
-                    pvEdit.length > 0;
-
-                if (canSliceFromPv) {
-                    for (let f = minF; f <= maxF; f += 1) {
-                        const i = f - pvStart;
-                        out[f - minF] =
-                            i >= 0 && i < (pvEdit as number[]).length
-                                ? ((pvEdit as number[])[i] ?? 0)
-                                : 0;
-                    }
-                } else {
-                    // Fallback: replay the stroke in time order onto a dense buffer.
-                    for (let i = 0; i < len; i += 1) out[i] = uniq[0].value;
-                    for (let sIdx = 0; sIdx < uniq.length - 1; sIdx += 1) {
-                        const a = uniq[sIdx];
-                        const b = uniq[sIdx + 1];
-                        const minSeg = Math.min(a.frame, b.frame);
-                        const maxSeg = Math.max(a.frame, b.frame);
-                        const denom = b.frame - a.frame;
-                        for (let f = minSeg; f <= maxSeg; f += 1) {
-                            if (f < minF || f > maxF) continue;
-                            const t = denom === 0 ? 1 : (f - a.frame) / denom;
-                            out[f - minF] = a.value + (b.value - a.value) * t;
-                        }
-                    }
+                // 【为什么提交的数据源是缓冲而不是点序列】缓冲就是**用户看到的曲线**
+                // （手势在 pointer-move 里逐帧写进去的）。按点序列重新插值会与预览产生
+                // 细微差异 —— 用户报告为"松手后曲线跳一下"。
+                let source: StrokeBuffer | null =
+                    live !== null && scope !== null && live.scope === scope ? live.buffer : null;
+                if (source === null || source.frameCount === 0) {
+                    // 只提交、不预览的路径：用点序列回放出一份等价缓冲，走同一条提交路径。
+                    const replayed = createLiveEditOverride(scope ?? "", 0).buffer;
+                    replayStrokePoints(replayed, uniq, clampLiveValue);
+                    source = replayed;
                 }
-
-                // 这一笔完整覆盖 [minF, maxF]：present 全 true。显式位图让后端
-                // 不需要从显示数组差分猜测用户改了什么。
-                const present = new Array<boolean>(len).fill(true);
-                await paramsApi.setParamFrames(trackId, editParam, minF, out, true, present);
-                applyToParamViewDense(minF, out);
+                // 分段提交之前先取快照：段间有 await，期间用户可能已经开始下一笔，
+                // 那时缓冲会继续增长，不该被算进这一笔。
+                const segments = source.segments(MAX_FRAMES_PER_WRITE);
+                const sourceVersion = source.version;
+                if (segments.length === 0) {
+                    bumpRefreshToken();
+                    return;
+                }
+                for (let index = 0; index < segments.length; index += 1) {
+                    const segment = segments[index];
+                    // 这一笔完整覆盖该段的每一帧：present 全 true。显式位图让后端
+                    // 不需要从显示数组差分猜测用户改了什么。
+                    const present = new Array<boolean>(segment.values.length).fill(true);
+                    await paramsApi.setParamFrames(
+                        trackId,
+                        editParam,
+                        segment.startFrame,
+                        segment.values,
+                        // 只有第一段开一个撤销检查点：一次 Ctrl+Z 回到画之前，
+                        // 而不是按段回退（用户报告过"撤销一次只退一段"）。
+                        index === 0,
+                        present,
+                    );
+                }
                 // 同上：不立刻撤下覆盖层，避免波形先退回旧快照再跳到新快照。
-                markLiveEditCommitted();
+                // 只有缓冲没被下一笔动过，才把它标记为"已提交" —— 否则会把正在画的
+                // 那一笔一起冻结成占位。
+                const current = liveEditOverrideRef.current;
+                if (
+                    current !== null &&
+                    current.buffer === source &&
+                    current.buffer.version === sourceVersion
+                ) {
+                    markLiveEditCommitted();
+                }
                 invalidate();
                 bumpRefreshToken();
             } catch (err) {
@@ -513,11 +426,12 @@ export function useLiveParamEditing(args: {
             editParam,
             pitchEnabled,
             paramView,
-            setParamView,
+            clampLiveValue,
             invalidate,
             bumpRefreshToken,
             clearLiveEditOverride,
             markLiveEditCommitted,
+            touchLiveEdit,
         ],
     );
 

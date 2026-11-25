@@ -624,44 +624,33 @@ export function handleCanvasPointerDown(
     } = { current: null };
 
     /**
-     * 滚动上界：工程末端与**已取数窗口末端**取小。
+     * 滚动上界：**工程末端**。
      *
-     * 【为什么绘制类要额外受窗口约束】`usePianoRollData` 的取数窗口是
-     * "可见区 ± 一个可见时长"，而笔画期间取数被 `liveEditDeferral` 推迟到
-     * pointer-up（换窗口会让正在画的轨迹消失）。滚出窗口后
-     * 提交仍会写进后端，但**画面上什么都不会出现** —— 用户对着空白拖一条
-     * 看不见的线。窗口自带一整个视口宽的余量，因此这个上限足够一次边缘
-     * 滚屏走完一屏，用户感知不到限制。
+     * 【为什么不再按"已取数窗口末端"夹紧】这里曾经是绘制类工具的上界，理由写得很
+     * 直白："笔画期间取数被 `liveEditDeferral` 推迟，滚出窗口后提交仍会写进后端，
+     * 但画面上什么都不会出现 —— 用户对着空白拖一条看不见的线。"
      *
-     * 选择工具不受此限：选区是纯视觉范围，不依赖已取数的曲线。
+     * 那段推理的前半句是**对的**，后半句是补丁：真正的问题是笔画被"窗口下标"
+     * 寻址，于是窗口外的帧既画不出来、提交时还会被写成 0（见 `strokeBuffer`）。
+     * 笔画改成绝对帧缓冲之后，滚出窗口只是"暂时看不见"，新窗口一到就立刻补上，
+     * 提交永远不丢帧 —— 这个夹紧因此失去存在理由，而它本身正是用户报告的
+     * "滚过一定距离后参数线不再更新"里的那个"一定距离"。
+     *
+     * 选择工具与绘制类工具现在共用同一个上界。
      */
-    const maxScrollLeftFor = (limitToLoadedWindow: boolean): number => {
+    const maxScrollLeftFor = (): number => {
         const scroller = scrollerRef.current;
         if (!scroller) return 0;
         const axis = axisFromRefs();
         const nativeOffsetPx = syncTimelineEnabled ? timelineOffsetRef.current : 0;
         const projectEndFrame = Math.max(0, timeToFrame(dynamicProjectSec, framePeriodMs));
-        const projectMax = edgeScrollMaxLeftPx({
+        return edgeScrollMaxLeftPx({
             pxPerSec: axis.pxPerSec,
             framePeriodMs,
             maxFrame: projectEndFrame,
             viewportWidthPx: scroller.clientWidth,
             nativeOffsetPx,
         });
-        if (!limitToLoadedWindow) return projectMax;
-
-        const pv = paramViewRef.current;
-        if (!pv || pv.edit.length === 0) return 0;
-        const stride = Math.max(1, Math.floor(pv.stride));
-        const windowEndFrame = pv.startFrame + (pv.edit.length - 1) * stride;
-        const windowMax = edgeScrollMaxLeftPx({
-            pxPerSec: axis.pxPerSec,
-            framePeriodMs,
-            maxFrame: windowEndFrame,
-            viewportWidthPx: scroller.clientWidth,
-            nativeOffsetPx,
-        });
-        return Math.min(projectMax, windowMax);
     };
 
     const edgeScroll = createEdgeScrollDriver({
@@ -687,7 +676,7 @@ export function handleCanvasPointerDown(
                 },
                 // 上界同为绘制坐标（`edgeScrollMaxLeftPx` 已含 nativeOffset 平移）。
                 // block 已收进 select 族，滚动上界与 range 选择完全同源。
-                getMaxScrollLeft: () => maxScrollLeftFor(toolMode !== "select"),
+                getMaxScrollLeft: () => maxScrollLeftFor(),
                 // ★ 下界必须也是绘制坐标且可为负：开启同步时绘制域是
                 // `[−偏移, 内容宽 − 偏移]`，左侧那片预留的对齐留白是**合法的负区间**。
                 // 传 0 会让"向左滚"每帧都被夹回 0，与内核自己的下界（−偏移）打架 ——

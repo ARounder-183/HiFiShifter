@@ -30,6 +30,7 @@ import { describe, test } from "vitest";
 
 import { makeLoudnessAmplitudeMap } from "./PianoRollWaveformSurface";
 import { createLiveOverrideReader } from "./liveLoudnessOverride";
+import { createLiveEditOverride } from "./strokeBuffer";
 import { buildWaveformGeometry, type WaveformAmplitudeMap } from "../../../waveform/geometry";
 import { buildWaveformScene, type WaveformSceneRow } from "../../../waveform/sceneBuilder";
 import { createTimelineAxis } from "../renderKernel/timelineAxis";
@@ -113,15 +114,27 @@ const snapshot = {
     dynBaseline,
 };
 
-/** 拖动期间的 live 覆盖（**同一个对象**：edit 数组原地更新）。 */
-const LIVE = { key: `v2|track-1|volume|0|${FRAME_COUNT}|1`, edit: volume };
+/**
+ * 拖动期间的 live 覆盖（**同一个对象**：缓冲原地增长）。
+ *
+ * 【为什么用缓冲而不是数组】笔画现在按绝对帧存储（见 strokeBuffer），基准测试必须
+ * 走同一条投影路径，否则测的是一个已经不存在的实现。
+ */
+const LIVE = createLiveEditOverride("v2|track-1|volume", 1);
+LIVE.buffer.write(0, volume);
+const LIVE_WINDOW = {
+    key: `v2|track-1|volume|0|${FRAME_COUNT}|1`,
+    edit: volume,
+    startFrame: 0,
+    stride: 1,
+};
 const reader = createLiveOverrideReader();
 
 const loudnessLive = makeLoudnessAmplitudeMap(
     snapshot,
     {
-        volume: () => reader.read("volume", LIVE),
-        dyn: () => reader.read("dyn", LIVE),
+        volume: () => reader.read("volume", LIVE, LIVE_WINDOW),
+        dyn: () => reader.read("dyn", LIVE, LIVE_WINDOW),
     },
     () => 0,
 ) as WaveformAmplitudeMap;
