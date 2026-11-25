@@ -296,10 +296,13 @@ async function normalizeImportedClips(args: {
             },
         );
         if (gain == null) continue;
+        // 【写 item 层，与菜单里的"规格化"同一层】`normalizeClips` 走
+        // `itemGainChange`：clip header 的旋钮读的就是 item 层（`clip_gain`），
+        // 写 take 层会让"勾了导入后规格化"的 clip 音量变小而旋钮停在 0 dB。
         latest = await dispatch(
             setClipStateRemote({
                 clipId,
-                takeGain: gain,
+                itemGain: gain,
                 checkpoint: false,
             }),
         ).unwrap();
