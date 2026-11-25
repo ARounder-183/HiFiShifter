@@ -1013,13 +1013,12 @@ fn push_transport(state: &Rc<RefCell<EditorClient>>) {
             ),
         );
     } else if let Some(since) = state.borrow_mut().transport_pinned_since.take() {
-        hifishifter_kernel::log_limiter::emit_limited_key(
-            log::Level::Info,
-            "transport.frozen.recovered",
-            format_args!(
-                "[transport] pinned: reason=recovered after_ms={} (the position is advancing again)",
-                since.elapsed().as_millis()
-            ),
+        // 【为什么这里**不用**限流】这一行每次"卡住 → 恢复"只出现一次（起点被 `take`
+        // 掉了）。限流键会把"恢复了又卡住"的第二次恢复吞掉 —— 而那正是最需要看的
+        // 那一次。限流的规则也只允许 Warn/Error/Debug，Info 是会话叙事。
+        log::info!(
+            "[transport] pinned: reason=recovered after_ms={} (the position is advancing again)",
+            since.elapsed().as_millis()
         );
     }
     // 【载荷与 `get_playback_state` 同形】见 `TransportView::to_json`：缺 `ok` 的那一版
