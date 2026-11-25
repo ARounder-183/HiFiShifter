@@ -730,6 +730,8 @@ mod extension_roles_tests;
 #[cfg(test)]
 mod host_audio_state_tests;
 #[cfg(test)]
+mod health_tests;
+#[cfg(test)]
 mod host_geometries_tests;
 #[cfg(test)]
 mod host_sequence_tests;

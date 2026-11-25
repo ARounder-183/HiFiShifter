@@ -306,6 +306,19 @@ impl ExtensionOwner {
     /// （以及曾经的同步临时目录清扫）可能远超 30 s IPC 超时，于是用户看到
     /// `Backend invoke failed: plugin:get_runtime_info`。探活只需要回答"会话还在不在、
     /// 形态是什么、有没有片段"，这些都能从原子读数得到。
+    ///
+    /// 【允许读什么（这条清单就是"无锁"的定义）】
+    ///   * 原子：`is_closed` / `is_bound` / `bound_once` / `mode` / `is_alive`；
+    ///   * `OnceLock::get`：捕获会话、文档上的编辑器会话（**不创建**）；
+    ///   * 会话里的**原子**读数：`clip_count`（见 `EditorSession::clip_count` 的说明，
+    ///     它由发布路径维护，不取时间线锁）；
+    ///   * 两个只包一层 `Option`/`Weak` 的短锁：`self.document`、`self.host`。它们内部
+    ///     只有 `clone` / `take` / 赋值，从不在持锁期间做任何 I/O、宿主调用或等待。
+    ///
+    /// 【绝不允许读什么】`editor.state()`、`timeline`、`render_task`、文档事务 —— 任何
+    /// 一样都会让 GUI 线程与 actor 撞上 ABBA（见 `plugin_get_apply_state` 的同一条说明）。
+    /// `render/extension/bound_tests.rs` 的两条用例（时间线被持锁时仍立刻回答、探活不创建
+    /// 会话）钉的就是这份清单。
     pub(crate) fn health_snapshot(&self) -> serde_json::Value {
         let capture = self.capture_session_if_initialized();
         let document = self
