@@ -37,6 +37,12 @@ import re
 import sys
 from pathlib import Path
 
+# Windows' stdout follows the ANSI code page; every message below is Chinese and would raise
+# UnicodeEncodeError before a single conclusion reaches the log. Pinned here for the same reason
+# the gate scripts pin it (see check-product-consistency.ps1).
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 # 两个平台的文本形式。它们只在这里出现一次：任何一处改动都必须同时改测试。
 MACOS_UID = "174F3A9C00008B1E00004D02B7A13C6E"
 WINDOWS_UID = "9C3A4F1700001E8B00004D02B7A13C6E"
