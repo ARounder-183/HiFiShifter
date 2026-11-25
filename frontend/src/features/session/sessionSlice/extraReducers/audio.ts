@@ -173,6 +173,8 @@ export function registerAudio(builder: ActionReducerMapBuilder<SessionState>) {
                 imported?: TimelineState;
                 newClipIds?: string[];
                 playheadSec?: number;
+                /** 待定导入：item 已建成，宿主还没建 region（见 PendingImportRecord）。 */
+                pending?: boolean;
             };
             // 用户在导入在途时撤销 / 切换工程 → thunk 回取消结果且不带快照。
             if (payload.canceled) {
@@ -181,7 +183,9 @@ export function registerAudio(builder: ActionReducerMapBuilder<SessionState>) {
             }
             const ok = Boolean(payload.ok);
             if (ok) {
-                state.status = "Import done";
+                // 【待定 ≠ 失败】item 已经建成，只是宿主还没建 region —— 状态栏如实说"在等"，
+                // 而不是"完成"（用户会以为音频已经可用）或"失败"（那是上一轮的错）。
+                state.status = payload.pending ? "Import waiting for the host" : "Import done";
             } else {
                 state.status = "Import failed";
                 // 合成错误码：让状态栏走红色 error 通道（原版失败只写灰色 status）

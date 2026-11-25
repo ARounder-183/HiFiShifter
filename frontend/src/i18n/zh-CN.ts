@@ -570,6 +570,9 @@ export const zhCN = {
     status_clip_edit_rejected: "音频块编辑被拒绝",
     status_track_edit_rejected: "轨道编辑被拒绝",
     status_import_done: "导入完成",
+    status_import_waiting_host: "等待宿主提供音频",
+    status_import_audio_stalled:
+        "宿主的 Item 已建立，但插件没有收到它的音频；请在宿主里重做一次编辑，或撤销这次导入",
     status_import_failed: "导入失败",
     status_project_imported: "工程已导入",
     status_vocalshifter_project_imported: "VocalShifter 工程已导入",

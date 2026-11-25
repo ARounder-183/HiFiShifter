@@ -598,6 +598,9 @@ export const jaJP = {
     status_clip_edit_rejected: "クリップ編集が拒否されました",
     status_track_edit_rejected: "トラック編集が拒否されました",
     status_import_done: "インポート完了",
+    status_import_waiting_host: "ホストからの音声を待機中",
+    status_import_audio_stalled:
+        "ホストの Item は作成されましたが、その音声を受け取れませんでした。ホスト側で編集をやり直すか、インポートを元に戻してください",
     status_import_failed: "インポートに失敗しました",
     status_project_imported: "プロジェクトをインポートしました",
     status_vocalshifter_project_imported: "VocalShifter プロジェクトをインポートしました",

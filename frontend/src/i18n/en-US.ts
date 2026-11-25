@@ -732,6 +732,9 @@ export const enUS = {
     status_clip_edit_rejected: "Clip edit rejected",
     status_track_edit_rejected: "Track edit rejected",
     status_import_done: "Import done",
+    status_import_waiting_host: "Waiting for the host to hand over audio",
+    status_import_audio_stalled:
+        "The host created the item but never handed over its audio; redo the edit in the host or undo the import",
     status_import_failed: "Import failed",
     status_project_imported: "Project imported",
     status_vocalshifter_project_imported: "VocalShifter project imported",

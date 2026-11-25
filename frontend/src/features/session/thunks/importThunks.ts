@@ -5,6 +5,8 @@ import { isVideoFilePath } from "../../../components/layout/timeline/dnd";
 import {
     checkpointHistory,
     applyTimelinePayload,
+    importPendingAdded,
+    importReady,
     setAudioPath,
     type SessionState,
 } from "../sessionSlice";
@@ -235,6 +237,106 @@ async function syncAutoCrossfadeFromLatestTimeline(args: {
     }
 }
 
+/** `normalizeImportedClips` 需要的派发形状（与既有 thunk 内部 dispatch 的用法一致）。 */
+type NormalizeDispatch = (action: unknown) => Promise<unknown> & {
+    unwrap: () => Promise<unknown>;
+};
+
+/**
+ * 给刚导入的 clip 做一次「导入后规格化」。
+ *
+ * 【为什么抽成函数】同一步要在两个时刻跑：回执里已经能拿到源音频时（普通导入），
+ * 以及待定导入转正之后（`import_ready`，那一刻 clip 才有 `source_path`）。抄两份必然
+ * 漂移，而这里的判据（拿不到源就跳过）正是「勾了规格化却什么也没发生」的成因。
+ */
+async function normalizeImportedClips(args: {
+    dispatch: NormalizeDispatch;
+    timeline: unknown;
+    clipIds: string[];
+    cancelled: () => boolean;
+}) {
+    const { dispatch, clipIds, cancelled } = args;
+    let latest: unknown = args.timeline;
+    const clips = (
+        args.timeline as {
+            clips?: Array<{
+                id?: string;
+                source_path?: string;
+                duration_sec?: number;
+                length_sec?: number;
+                source_start_sec?: number;
+                source_end_sec?: number;
+                playback_rate?: number;
+            }>;
+        }
+    )?.clips;
+    for (const clipId of clipIds) {
+        if (cancelled()) break;
+        const clip = clips?.find((entry) => entry.id === clipId);
+        if (!clip) continue;
+        const gain = computeClipNormalizationGain(
+            {
+                sourcePath: clip.source_path,
+                durationSec: Number(clip.duration_sec ?? 0) || undefined,
+                lengthSec: Math.max(0, Number(clip.length_sec ?? 0) || 0),
+                sourceStartSec: Number(clip.source_start_sec ?? 0) || 0,
+                sourceEndSec: Number(clip.source_end_sec ?? 0) || 0,
+                playbackRate: Number(clip.playback_rate ?? 1) || 1,
+            },
+            {
+                getInterleavedSlice: (sourcePath, _channel, sourceStartSec, sourceSpanSec) =>
+                    waveformMipmapStore.getInterleavedSlice(
+                        sourcePath,
+                        0,
+                        sourceStartSec,
+                        sourceSpanSec,
+                    ),
+                releaseInterleaved: (data) =>
+                    waveformMipmapStore.releaseInterleaved(data as Float32Array),
+            },
+        );
+        if (gain == null) continue;
+        latest = await dispatch(
+            setClipStateRemote({
+                clipId,
+                gain,
+                checkpoint: false,
+            }),
+        ).unwrap();
+    }
+    return latest;
+}
+
+/**
+ * 宿主终于认领了那条待定导入：清账、重取时间线、补做延后的规格化。
+ *
+ * 【为什么必须重取】这一刻 clip 才第一次带 `source_path`（波形与规格化都要它）。
+ * 事件本身只带 id，不携带时间线 —— 让后端推一份整图会把「一次事件」变成「一次全量
+ * 往返」，而这次重取本来就已经在 `plugin_host_changed` 的路径上发生过。
+ */
+export const completePendingImport = createAsyncThunk(
+    "session/completePendingImport",
+    async (payload: { item: string; clipId?: string }, { dispatch, getState }) => {
+        const session = (getState() as { session: SessionState }).session;
+        const record = session.pendingImports.find((entry) => entry.item === payload.item);
+        const clipId = payload.clipId ?? record?.clipId;
+        const timeline = await webApi.getTimelineState().catch(() => null);
+        if (timeline?.ok) {
+            dispatch(applyTimelinePayload(timeline));
+        }
+        if (clipId && record?.normalizeAfterImport) {
+            await normalizeImportedClips({
+                dispatch: dispatch as unknown as NormalizeDispatch,
+                timeline: timeline ?? undefined,
+                clipIds: [clipId],
+                cancelled: () => false,
+            });
+        }
+        dispatch(importReady({ item: payload.item, clipId }));
+        return { ok: true, clipId };
+    },
+);
+
 export const importAudioFromDialog = createAsyncThunk(
     "session/importAudioFromDialog",
     async (_, { dispatch, rejectWithValue, getState }) => {
@@ -450,10 +552,33 @@ export const importAudioAtPosition = createAsyncThunk(
                 );
             }
 
+            // 【宿主已建 item、ARA 还没认领】回执照旧成功，只是这一条要等一条事件。
+            const pendingReply = imported as {
+                import_pending?: boolean;
+                imported_item?: string;
+                imported_clip_id?: string;
+            };
+            const importPending = pendingReply.import_pending === true;
+
             const result = imported as { clips?: Array<{ id?: string }> };
             const newClipIds = (result.clips ?? [])
                 .map((c) => c.id)
                 .filter((id): id is string => !!id && !beforeClipIds.has(id));
+
+            if (importPending && pendingReply.imported_item) {
+                // 【为什么要登记而不是就地等一下】宿主的 ARA 图什么时候发布不由我们决定
+                // （现场 212~299 ms，且只发生在它自己的编辑会话边界上）。把这条记进会话
+                // 状态，规格化就能等到 `import_ready` 那一刻再做 —— 那时 clip 才有
+                // `source_path`，而"拿不到源就静默跳过"正是用户勾了规格化却什么也没发生的成因。
+                dispatch(
+                    importPendingAdded({
+                        item: pendingReply.imported_item,
+                        clipId: pendingReply.imported_clip_id,
+                        normalizeAfterImport: payload.normalizeAfterImport === true,
+                        sourcePath: payload.audioPath,
+                    }),
+                );
+            }
 
             let latestTimeline = await syncAutoCrossfadeFromLatestTimeline({
                 dispatch: dispatch as unknown as (
@@ -467,65 +592,16 @@ export const importAudioAtPosition = createAsyncThunk(
                 return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
             }
 
-            if (payload.normalizeAfterImport && newClipIds.length > 0) {
-                const timelineForNormalization = (latestTimeline ?? imported) as {
-                    clips?: Array<{
-                        id?: string;
-                        source_path?: string;
-                        duration_sec?: number;
-                        length_sec?: number;
-                        source_start_sec?: number;
-                        source_end_sec?: number;
-                        playback_rate?: number;
-                    }>;
-                };
-                for (const clipId of newClipIds) {
-                    if (isImportCancelled(importGen)) {
-                        return {
-                            ok: true,
-                            canceled: true,
-                            imported: null,
-                            newClipIds: [] as string[],
-                        };
-                    }
-                    const clip = timelineForNormalization.clips?.find(
-                        (entry) => entry.id === clipId,
-                    );
-                    if (!clip) continue;
-                    const gain = computeClipNormalizationGain(
-                        {
-                            sourcePath: clip.source_path,
-                            durationSec: Number(clip.duration_sec ?? 0) || undefined,
-                            lengthSec: Math.max(0, Number(clip.length_sec ?? 0) || 0),
-                            sourceStartSec: Number(clip.source_start_sec ?? 0) || 0,
-                            sourceEndSec: Number(clip.source_end_sec ?? 0) || 0,
-                            playbackRate: Number(clip.playback_rate ?? 1) || 1,
-                        },
-                        {
-                            getInterleavedSlice: (
-                                sourcePath,
-                                _channel,
-                                sourceStartSec,
-                                sourceSpanSec,
-                            ) =>
-                                waveformMipmapStore.getInterleavedSlice(
-                                    sourcePath,
-                                    0,
-                                    sourceStartSec,
-                                    sourceSpanSec,
-                                ),
-                            releaseInterleaved: (data) =>
-                                waveformMipmapStore.releaseInterleaved(data as Float32Array),
-                        },
-                    );
-                    if (gain == null) continue;
-                    latestTimeline = (await dispatch(
-                        setClipStateRemote({
-                            clipId,
-                            gain,
-                            checkpoint: false,
-                        }),
-                    ).unwrap()) as typeof latestTimeline;
+            if (payload.normalizeAfterImport && newClipIds.length > 0 && !importPending) {
+                latestTimeline = (await normalizeImportedClips({
+                    dispatch: dispatch as unknown as NormalizeDispatch,
+                    timeline: latestTimeline ?? imported,
+                    clipIds: newClipIds,
+                    cancelled: () => isImportCancelled(importGen),
+                })) as typeof latestTimeline;
+                // 规格化在途期间被撤销：不得把快照带回去。
+                if (isImportCancelled(importGen)) {
+                    return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
                 }
             }
 
@@ -538,6 +614,10 @@ export const importAudioAtPosition = createAsyncThunk(
                 ok: true,
                 imported: importedResult,
                 newClipIds,
+                // 待定的那一条要等 `import_ready`：前端据此显示「等待宿主提供音频」
+                // 而不是红色错误条（回执本身是成功的）。只在为真时出现，
+                // 老调用点（单测）不必为了一个布尔补字段。
+                ...(importPending ? { pending: true as const } : {}),
                 playheadSec:
                     !isPluginMode() && typeof payload.startSec === "number"
                         ? payload.startSec

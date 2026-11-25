@@ -8,6 +8,7 @@ import {
 } from "./sessionSlice/gestureReducers";
 import { beginGestureSession, endGestureSession } from "./gestureSession";
 import type { HistoryRecordSummary, TimelineState } from "../../types/api";
+import type { PendingImportRecord } from "./sessionSlice/types";
 import type {
     ClipFormantAnalysisState,
     EditParam,
@@ -120,7 +121,11 @@ export type {
     ToolMode,
     TrackInfo,
 } from "./sessionTypes";
-export type { ParamSelectionSnapshot, SessionState } from "./sessionSlice/types";
+export type {
+    ParamSelectionSnapshot,
+    PendingImportRecord,
+    SessionState,
+} from "./sessionSlice/types";
 export {
     undoRemote,
     redoRemote,
@@ -310,6 +315,41 @@ const sessionSlice = createSlice({
                 }));
             }
         },
+        /**
+         * 记下一条「item 已建成、等宿主交付音频」的导入。
+         *
+         * 【为什么按 item 去重】回执可能被重投（视图重连、媒体文档重开）；同一个 item
+         * 记两次会让「导入后规格化」执行两遍，用户看到的是增益被叠了两次。
+         */
+        importPendingAdded(state, action: PayloadAction<PendingImportRecord>) {
+            const index = state.pendingImports.findIndex(
+                (entry) => entry.item === action.payload.item,
+            );
+            if (index >= 0) state.pendingImports[index] = action.payload;
+            else state.pendingImports.push(action.payload);
+            state.status = "Import waiting for the host";
+        },
+        /** 宿主终于认领了它：清掉待定记录（此刻 clip 已经能解析出真 clip id）。 */
+        importReady(state, action: PayloadAction<{ item?: string; clipId?: string }>) {
+            if (!action.payload.item) {
+                state.pendingImports = [];
+                return;
+            }
+            state.pendingImports = state.pendingImports.filter(
+                (entry) => entry.item !== action.payload.item,
+            );
+            state.status = "Import done";
+        },
+        /**
+         * 等太久（60 s）：升级成错误条。
+         *
+         * 【为什么不删记录、不删占位】宿主的 Item 是既成事实，插件没有资格替它撤回；
+         * 能做的只有把「音频没来」这件事说出来，让用户去宿主里重做一次编辑或撤销。
+         */
+        importStalled(state, _action: PayloadAction<{ item?: string }>) {
+            state.error = "import_audio_stalled";
+        },
+
         markProjectEdited(state) {
             markProjectDirty(state.project);
         },
@@ -1402,6 +1442,9 @@ export const {
     setClipFormantToolWindowPosition,
     closeClipFormantToolWindow,
     bumpParamsEpoch,
+    importPendingAdded,
+    importReady,
+    importStalled,
 } = sessionSlice.actions;
 
 export default sessionSlice.reducer;

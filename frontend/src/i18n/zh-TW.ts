@@ -571,6 +571,9 @@ export const zhTW = {
     status_clip_edit_rejected: "音訊塊編輯被拒絕",
     status_track_edit_rejected: "軌道編輯被拒絕",
     status_import_done: "匯入完成",
+    status_import_waiting_host: "等待宿主提供音訊",
+    status_import_audio_stalled:
+        "宿主的 Item 已建立，但外掛沒有收到它的音訊；請在宿主裡重做一次編輯，或復原這次匯入",
     status_import_failed: "匯入失敗",
     status_project_imported: "專案已匯入",
     status_vocalshifter_project_imported: "VocalShifter 專案已匯入",

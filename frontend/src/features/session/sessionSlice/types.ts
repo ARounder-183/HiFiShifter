@@ -70,6 +70,23 @@ type ClipFormantToolWindowState = {
  */
 export type ParamSelectionSnapshot = Array<{ startFrame: number; frameCount: number }>;
 
+/**
+ * 一条「宿主已建好 item、ARA 还没认领」的导入。
+ *
+ * 【它回答什么】`item` 是回执与 `import_ready` 之间的唯一关联键（GUID 由宿主给出，
+ * 与位置、名字都无关）；`normalizeAfterImport` 是用户勾了但**必须延后**执行的那一步。
+ */
+export interface PendingImportRecord {
+    /** 宿主 item GUID。 */
+    item: string;
+    /** 回执里已经能解析出的 clip id（解析不出来时由 `import_ready` 补上）。 */
+    clipId?: string;
+    /** 导入时勾选的「导入后规格化」：要等到有源音频才做。 */
+    normalizeAfterImport?: boolean;
+    /** 导入的源路径（诊断与规格化都要用）。 */
+    sourcePath?: string;
+}
+
 export interface SessionState {
     toolMode: ToolMode;
     /** 选择族的当前 / 上次子模式；block 只在选择族激活时参与派生。 */
@@ -392,6 +409,14 @@ export interface SessionState {
     tracks: TrackInfo[];
     trackMeters: Record<string, TrackMeterInfo>;
     clips: ClipInfo[];
+    /**
+     * 还在等宿主交付音频的导入（item 已建成，ARA 还没认领）。
+     *
+     * 【为什么放在会话状态里】它跨越多条命令的生命周期：回执只活几十毫秒，而宿主
+     * 发布 ARA 图要几百毫秒（现场实测 212~299 ms）。这份账本让「导入后规格化」这类
+     * 需要源音频的后续动作等到真正就绪的那一刻再做，而不是在回执里静默跳过。
+     */
+    pendingImports: PendingImportRecord[];
     selectedTrackId: string | null;
     selectedClipId: string | null;
     /** 多选 clip 的 id 列表（框选 / 主修饰键 + 点击） */

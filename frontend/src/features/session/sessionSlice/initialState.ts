@@ -142,6 +142,8 @@ export const initialState: SessionState = {
     ],
     trackMeters: {},
     clips: [],
+    // 还没有任何导入在等宿主交付音频（见 SessionState.pendingImports）。
+    pendingImports: [],
     selectedTrackId: "track_main",
     selectedClipId: null,
     multiSelectedClipIds: [],

@@ -659,6 +659,9 @@ export const koKR = {
     status_clip_edit_rejected: "클립 편집이 거부되었습니다",
     status_track_edit_rejected: "트랙 편집이 거부되었습니다",
     status_import_done: "가져오기 완료",
+    status_import_waiting_host: "호스트의 오디오를 기다리는 중",
+    status_import_audio_stalled:
+        "호스트의 Item은 만들어졌지만 그 오디오를 받지 못했습니다. 호스트에서 편집을 다시 하거나 가져오기를 취소하세요",
     status_import_failed: "가져오기 실패",
     status_project_imported: "프로젝트를 가져왔습니다",
     status_vocalshifter_project_imported: "VocalShifter 프로젝트를 가져왔습니다",

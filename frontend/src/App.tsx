@@ -25,6 +25,7 @@ import {
 } from "./features/session/sessionSlice/extraReducers/transport";
 import { getPluginHost } from "./services/pluginHost";
 import {
+    completePendingImport,
     importAudioAtPosition,
     importMultipleAudioAtPosition,
 } from "./features/session/thunks/importThunks";
@@ -83,6 +84,7 @@ import {
     openReaperFromDialog,
     importAudioFromPath,
     saveProjectRemote,
+    importStalled,
     setTrackMeters,
     setVslibAvailable,
     setPlaybackRenderingState,
@@ -300,6 +302,7 @@ const statusKey: Record<string, string> = {
     "Clip edit rejected": "status_clip_edit_rejected",
     "Track edit rejected": "status_track_edit_rejected",
     "Import done": "status_import_done",
+    "Import waiting for the host": "status_import_waiting_host",
     "Import failed": "status_import_failed",
     "Import audio failed": "status_import_audio_failed",
     "Project imported": "status_project_imported",
@@ -363,6 +366,8 @@ const errorCodeKey: Record<string, string> = {
     import_parse_failed: "vs_import_parse_failed",
     /* 前端合成码：音频导入 fulfilled 但 ok=false（原版只写灰色 status，失败不可辨） */
     import_audio_failed: "status_import_audio_failed",
+    /* 前端合成码：待定导入 60 s 仍未被宿主认领（见 import_stalled 事件） */
+    import_audio_stalled: "status_import_audio_stalled",
     // Take 操作被拒绝 / 失败（sessionSlice 以原文写入 error 通道）
     "Take switch rejected": "status_take_switch_rejected",
     "Take cycle rejected": "status_take_cycle_rejected",
@@ -1149,6 +1154,52 @@ function AppInner() {
         return () => {
             disposed = true;
             if (unlisten) unlisten();
+        };
+    }, [dispatch]);
+
+    // 宿主终于认领了一条待定导入（`import_ready`），或者等太久（`import_stalled`）。
+    //
+    // 【为什么必须有这条监听】回执的成功判据是「item 存在」，而宿主建 region 在它之后
+    // 几百毫秒。这期间「导入后规格化」不能做（那时还拿不到 source_path），做早了就是
+    // 静默跳过。这条事件是两件事之间唯一的汇合点。
+    useEffect(() => {
+        let disposed = false;
+        const unlisteners: Array<() => void> = [];
+
+        async function setup() {
+            try {
+                const mod = await import("./services/hostEvents");
+                unlisteners.push(
+                    await mod.listen(
+                        "import_ready",
+                        (event: { payload?: { item?: string; clipId?: string } }) => {
+                            if (disposed) return;
+                            const item = event?.payload?.item;
+                            if (typeof item !== "string" || !item) return;
+                            void dispatch(
+                                completePendingImport({ item, clipId: event.payload?.clipId }),
+                            );
+                        },
+                    ),
+                );
+                unlisteners.push(
+                    await mod.listen("import_stalled", (event: { payload?: { item?: string } }) => {
+                        if (disposed) return;
+                        dispatch(importStalled({ item: event?.payload?.item }));
+                    }),
+                );
+                if (disposed) {
+                    for (const off of unlisteners.splice(0)) off();
+                }
+            } catch {
+                // Safe no-op for non-Tauri builds.
+            }
+        }
+
+        void setup();
+        return () => {
+            disposed = true;
+            for (const off of unlisteners.splice(0)) off();
         };
     }, [dispatch]);
 
