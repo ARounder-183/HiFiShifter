@@ -120,6 +120,80 @@ pub fn log_field(text: &str, max_chars: usize) -> String {
     out
 }
 
+/// 剥掉一行**已经带前缀**的日志原文的前缀（`[ts] [LVL ] target: `）。
+///
+/// 【为什么必须剥】前端把自己的格式化行整行回传，后端再经 `log` 门面写一次 ——
+/// 同一行于是有两个时间戳、两个级别、两个 target。现场 `hifishifter.log` 的 13 586
+/// 行里有 1 841 行如此（13.5%），其中 1 448 行落在
+/// `backend_lib::commands::diagnostics` 这个**假 target** 下。双前缀不只是难看：
+/// 按行 grep 出来的次数与真实发生次数不再一致，按 target 统计也会把前端行算进后端。
+///
+/// 【为什么是"剥前缀"而不是"重新格式化"】我们只能确定**自己写出来的那种前缀**
+/// （`format_record` 的形状）该剥；其余一律原样保留，宁可多留一个方括号，也不猜。
+pub fn strip_prefix(line: &str) -> &str {
+    let mut rest = line.trim_start();
+    let Some(after_open) = rest.strip_prefix('[') else {
+        return rest;
+    };
+    let Some((stamp, tail)) = after_open.split_once(']') else {
+        return rest;
+    };
+    if !looks_like_timestamp(stamp) {
+        return rest;
+    }
+    rest = tail.trim_start();
+    if let Some(after_level_open) = rest.strip_prefix('[') {
+        if let Some((level, tail)) = after_level_open.split_once(']') {
+            if is_level_tag(level.trim()) {
+                rest = tail.trim_start();
+                // 【必须按 ": " 切】target 自己带 `::`（`crate::module`），
+                // 按第一个 `:` 切会把 `hifishifter_kernel` 当成 target，
+                // 剩下的 `::vocoder…` 就留在"消息"里了。target 不含空格，
+                // 因此第一个 ": " 一定落在 target 与消息之间。
+                if let Some((target, tail)) = rest.split_once(": ") {
+                    if is_target_tag(target) {
+                        rest = tail.trim_start();
+                    }
+                }
+            }
+        }
+    }
+    rest
+}
+
+/// `YYYY-MM-DD HH:MM:SS.mmm`（`TIMESTAMP_FORMAT`）—— 只认形状，不解析时间。
+fn looks_like_timestamp(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if bytes.len() < 19 {
+        return false;
+    }
+    let digits = |range: std::ops::Range<usize>| bytes[range].iter().all(u8::is_ascii_digit);
+    digits(0..4)
+        && bytes[4] == b'-'
+        && digits(5..7)
+        && bytes[7] == b'-'
+        && digits(8..10)
+        && bytes[10] == b' '
+        && digits(11..13)
+        && bytes[13] == b':'
+        && digits(14..16)
+        && bytes[16] == b':'
+        && digits(17..19)
+}
+
+fn is_level_tag(text: &str) -> bool {
+    matches!(text, "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR")
+}
+
+/// target 是 `crate::module` 形状：不含空白、只由标识符字符与 `::` 组成。
+fn is_target_tag(text: &str) -> bool {
+    !text.is_empty()
+        && !text.contains(char::is_whitespace)
+        && text
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | ':' | '-' | '.'))
+}
+
 /// 带策略自证的会话头（旧 `session_banner` 保持同形，见其单测）。
 ///
 /// 追加的 `session / verbosity / source / policy / file` 段回答排障第一问：
@@ -476,6 +550,35 @@ mod tests {
         assert_eq!(stamp.len(), 23, "{stamp}");
         assert_eq!(&stamp[4..5], "-", "{stamp}");
         assert_eq!(&stamp[10..11], " ", "{stamp}");
+    }
+
+    /// **回归：回放的前端行不许带两个前缀。**
+    ///
+    /// 现场 `hifishifter.log` 的 13 586 行里有 1 841 行是
+    /// `[ts] [ts] [WARN ] target: …`，其中 1 448 行落在
+    /// `backend_lib::commands::diagnostics` 这个假 target 下。剥掉既有前缀之后，
+    /// 按行 grep 出来的次数才等于真实发生次数。
+    #[test]
+    fn an_already_formatted_line_loses_its_prefix() {
+        let formatted = format_record(
+            log::Level::Warn,
+            "hifishifter_kernel::vocoder_ort_session",
+            "session open failed",
+        );
+        assert_eq!(strip_prefix(&formatted), "session open failed");
+        // 空格对齐的级别（`[WARN ]`）与更宽的（`[ERROR]`）都要认。
+        assert_eq!(
+            strip_prefix("[2026-11-25 20:07:17.054] [ERROR] backend_lib: boom"),
+            "boom"
+        );
+        // 没有前缀的行原样返回：宁可多留一个方括号，也不猜。
+        assert_eq!(strip_prefix("[frontend] boom"), "[frontend] boom");
+        assert_eq!(strip_prefix("plain message"), "plain message");
+        // 形状不对（不是时间戳）时不许剥：那可能是用户消息本身。
+        assert_eq!(
+            strip_prefix("[2026-11-25] [WARN ] x: y"),
+            "[2026-11-25] [WARN ] x: y"
+        );
     }
 
     /// 时间戳必须**带日期**：跨天、轮转、进诊断包之后，只有时刻无法定位。

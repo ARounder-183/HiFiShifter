@@ -270,7 +270,11 @@ fn collect_model_files(root: &Path, dir: &Path, depth: usize, out: &mut Vec<serd
         if meta.is_dir() {
             collect_model_files(root, &path, depth + 1, out);
         } else if meta.is_file() {
-            let relative = path.strip_prefix(root).unwrap_or(&path).display().to_string();
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
             out.push(serde_json::json!({ "path": relative, "bytes": meta.len() }));
         }
     }
@@ -485,6 +489,33 @@ fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
 // CWE-117 防护，且长度上限由用户选择的档位决定。
 use hifishifter_kernel::logfile::log_field;
 
+/// 每个进程回放的前端行上限（见 `frontend_replay_budget`）。
+const FRONTEND_REPLAY_MAX_LINES: u64 = 500;
+
+static FRONTEND_REPLAY_LINES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FRONTEND_REPLAY_SUPPRESSED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// 回放预算：`true` = 这一行照常写；`false` = 已超预算，只可能补一条汇总。
+///
+/// 【为什么封顶】见调用点。汇总行在**第一条**被压下的行上就出现（用户不会以为日志
+/// 还完整），之后每 `FRONTEND_REPLAY_MAX_LINES` 条再补一次 —— 既不静默，也不刷屏。
+fn frontend_replay_budget() -> bool {
+    use std::sync::atomic::Ordering;
+    let written = FRONTEND_REPLAY_LINES.fetch_add(1, Ordering::Relaxed);
+    if written < FRONTEND_REPLAY_MAX_LINES {
+        return true;
+    }
+    let suppressed = FRONTEND_REPLAY_SUPPRESSED.fetch_add(1, Ordering::Relaxed) + 1;
+    if suppressed == 1 || suppressed % FRONTEND_REPLAY_MAX_LINES == 0 {
+        log::warn!(
+            target: "frontend",
+            "[frontend] {suppressed} line(s) suppressed (replay budget {FRONTEND_REPLAY_MAX_LINES} per session)"
+        );
+    }
+    false
+}
+
 /// 前端错误回传入口：写入统一日志文件，便于和后端日志按时间轴对齐。
 pub(super) fn log_frontend_error(
     message: String,
@@ -503,7 +534,13 @@ pub(super) fn log_frontend_error(
         // 「无」档严格零产出：命令本身是只读的，不写日志。
         return serde_json::json!({ "ok": true, "suppressed": true });
     }
-    let message = log_field(message.trim(), FRONTEND_MESSAGE_MAX_CHARS);
+    // 【剥掉前端自带的前缀】前端回传的是它自己格式化过的整行，后端再经 `log` 门面
+    // 写一次就会出现两个时间戳、两个级别、两个 target（现场占 App 日志的 13.5%）。
+    // 见 `logfile::strip_prefix`：剥掉的只是**我们自己写出来的那种前缀**。
+    let message = log_field(
+        hifishifter_kernel::logfile::strip_prefix(message.trim()),
+        FRONTEND_MESSAGE_MAX_CHARS,
+    );
     let detail = detail
         .map(|d| d.trim().to_string())
         .filter(|d| !d.is_empty())
@@ -512,12 +549,21 @@ pub(super) fn log_frontend_error(
         Some(detail) => format!("[frontend] {message} | detail: {detail}"),
         None => format!("[frontend] {message}"),
     };
-    match requested {
-        "warn" => log::warn!("{line}"),
-        "info" => log::info!("{line}"),
-        "debug" => log::debug!("{line}"),
-        _ => log::error!("{line}"),
+    // 【回放有预算】前端一旦陷入"报错 → 触发上报 → 再报错"的循环，日志会被它写满。
+    // 每个进程最多回放 [`FRONTEND_REPLAY_MAX_LINES`] 行，之后只补汇总行 —— 不静默丢弃，
+    // 也不让一行错误变成一万行日志。
+    if !frontend_replay_budget() {
+        return serde_json::json!({ "ok": true, "suppressed": true });
     }
+    // 【target 用 `frontend`】此前落在 `backend_lib::commands::diagnostics` 下，按 target
+    // 统计时前端行被算成后端行（现场 1 448 行）。
+    let level = match requested {
+        "warn" => log::Level::Warn,
+        "info" => log::Level::Info,
+        "debug" => log::Level::Debug,
+        _ => log::Level::Error,
+    };
+    log::log!(target: "frontend", level, "{line}");
     serde_json::json!({ "ok": true })
 }
 
