@@ -342,6 +342,15 @@ pub(crate) struct ProcessingPass {
     run_tail_pass_frames: AtomicI64,
     /// 本 run 累计写下的帧数（只用于 `run end` 的诊断行）。
     render_run_frames: AtomicI64,
+    /// 本 run 的**第一块**是否存在，以及它的 `(raw, local)`。
+    ///
+    /// 【为什么要"第一块"这个读数】`run end … frames=0` 是个需要判读的形状：它可能是
+    /// "run 开了但一块都没写"（预览 pass 立刻被播放打断），也可能是"写了却记错账"。
+    /// 现场那条 `run end id=1 passes=1 frames=0 reason=play` 就分不清是哪一种。
+    /// 有了第一块的 raw/local，"0 帧"立刻能区分"还没开始"与"开始了但没写"。
+    run_first_seen: AtomicBool,
+    run_first_raw: AtomicI64,
+    run_first_local: AtomicI64,
     /// 最近一块的帧数（尾巴的容差换算要用）。
     last_block_frames: AtomicI64,
     /// 本 pass 开始时的本地游标（`begin` 写入）。
@@ -496,14 +505,41 @@ impl ProcessingPass {
         let passes = self.run_passes.load(Ordering::Acquire);
         let frames = self.render_run_frames.load(Ordering::Acquire);
         if self.is_preview() || self.kind() == ProcessingKind::Offline {
+            // 【`first_block` 与 `ended_at_pass_local` 是给 `frames=0` 用的】前者回答
+            // "这个 run 到底写过块没有"，后者回答"本 pass 结束时游标停在哪" —— 两个数
+            // 一起看，"开了 pass 却 0 帧"就不会再是一句需要猜的话。
+            let first_block = if self.run_first_seen.load(Ordering::Acquire) {
+                format!(
+                    "{}:{}",
+                    self.run_first_raw.load(Ordering::Acquire),
+                    self.run_first_local.load(Ordering::Acquire)
+                )
+            } else {
+                "none".to_string()
+            };
+            let ended_at = self.cursor_frames.load(Ordering::Acquire);
             log::info!(
-                "[capture] run end id={run} passes={passes} frames={frames} reason={reason}"
+                "[capture] run end id={run} passes={passes} frames={frames} first_block={first_block} ended_at_pass_local={ended_at} reason={reason}"
             );
         }
         self.end();
         self.invalidate_render_run();
         self.run_passes.store(0, Ordering::Release);
         self.render_run_frames.store(0, Ordering::Release);
+        self.run_first_seen.store(false, Ordering::Release);
+    }
+
+    /// 记下本 run 的**第一块**（只在第一次生效）。
+    ///
+    /// 【为什么用"见过"这一位而不是哨兵值】`raw` 与 `local` 都可能合法地等于 0，
+    /// 拿 0 当"没写过"会让"第一块正好在 0"的 run 报成 `none`。
+    fn note_run_first_block(&self, raw: i64, local: i64) {
+        if self.run_first_seen.load(Ordering::Acquire) {
+            return;
+        }
+        self.run_first_raw.store(raw, Ordering::Release);
+        self.run_first_local.store(local, Ordering::Release);
+        self.run_first_seen.store(true, Ordering::Release);
     }
 
     /// 非音频线程的诊断读数：`(phase, origin, cursor)`。
@@ -553,6 +589,7 @@ impl ProcessingPass {
                 self.continues_render_run()
             );
         }
+        self.note_run_first_block(raw_start, position);
         self.cursor_frames
             .fetch_add(frames as i64, Ordering::AcqRel);
         self.render_run_frames
@@ -700,6 +737,7 @@ impl ProcessingPass {
                     }
                     .max(0);
                     let local = base.saturating_add(prior as i64);
+                    self.note_run_first_block(raw_start, local);
                     self.cursor_frames
                         .store(local.saturating_add(frames as i64), Ordering::Release);
                     self.render_run_frames
@@ -737,6 +775,7 @@ impl ProcessingPass {
             }
 
             let position = self.cursor_frames.load(Ordering::Acquire);
+            self.note_run_first_block(raw_start, position);
             self.last_block_frames
                 .store(frames as i64, Ordering::Release);
             self.cursor_frames
@@ -900,6 +939,7 @@ impl ProcessingPass {
             self.run_id.fetch_add(1, Ordering::AcqRel);
             self.run_passes.store(0, Ordering::Release);
             self.render_run_frames.store(0, Ordering::Release);
+            self.run_first_seen.store(false, Ordering::Release);
         }
         // R-run-2：同一次 run 内本地游标接着走，**不是**从 0 重新开始。
         let cursor = match (continues && render_run_enabled(), tail) {
