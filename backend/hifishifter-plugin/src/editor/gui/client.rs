@@ -298,6 +298,12 @@ pub(crate) struct EditorClient {
     last_transport_move_at: std::time::Instant,
     /// 上一次推送的位置（判断"动没动"用）。
     last_transport_position: f64,
+    /// "宿主说在播、位置不动"这一段从什么时候开始（`None` = 现在没卡住）。
+    ///
+    /// 【为什么要记起点】只报"卡了 2408 ms"回答不了"这是第一次还是第 N 次"。有了
+    /// 起点与恢复行（`reason=recovered after_ms=…`），这一对行才构成一段**有始有终**
+    /// 的事实，而不是一堆散落的告警。
+    transport_pinned_since: Option<std::time::Instant>,
     /// 就绪之后累计投递给页面的字节数。
     ///
     /// 【为什么这条读数必须存在】一条消息的体积是渲染进程内存的直接输入，而它此前
@@ -615,6 +621,7 @@ impl EditorClient {
             last_transport_at: std::time::Instant::now(),
             last_transport_move_at: std::time::Instant::now(),
             last_transport_position: f64::NAN,
+            transport_pinned_since: None,
             outbound_bytes: 0,
             outbound_reported: 0,
             outbound_at: std::time::Instant::now(),
@@ -986,17 +993,32 @@ fn push_transport(state: &Rc<RefCell<EditorClient>>) {
         state.last_transport_at = now;
         frozen
     };
+    // 【这是"宿主未推进"，不是一句 trace】"光标卡住"的三种成因（来源停摆 / 来源一直在
+    // 给同一个值 / 前端没消费）在日志里同形。这一行把**来源、年龄、定位窗口**一起写
+    // 出来，一次现场就能定死是哪一种；恢复时再补一行带 `after_ms` 的收尾，于是
+    // "卡了多久、恢复没有"成为一对有始有终的事实。限流由 `emit_limited_key` 负责。
     if frozen_for >= TRANSPORT_FROZEN {
-        // 【为什么这一行值得存在】"光标卡住"的三种成因（来源停摆 / 来源一直在给
-        // 同一个值 / 前端没消费）在日志里同形。这一行把**来源、年龄、定位窗口**
-        // 一起写出来，一次现场就能定死是哪一种。限流由 `emit_limited_key` 负责。
+        let first = state.borrow_mut().transport_pinned_since.is_none();
+        if first {
+            state.borrow_mut().transport_pinned_since =
+                Some(std::time::Instant::now() - frozen_for);
+        }
         hifishifter_kernel::log_limiter::emit_limited_key(
             log::Level::Warn,
             "transport.frozen",
             format_args!(
-                "[transport] trace: the host reports playing but the position has not moved for {} ms ({}); the editor keeps extrapolating at 1x",
+                "[transport] pinned: the host reports playing but the position has not moved for {} ms ({}); the editor keeps extrapolating at 1x",
                 frozen_for.as_millis(),
                 view.to_json(clock.duration(), true)
+            ),
+        );
+    } else if let Some(since) = state.borrow_mut().transport_pinned_since.take() {
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Info,
+            "transport.frozen.recovered",
+            format_args!(
+                "[transport] pinned: reason=recovered after_ms={} (the position is advancing again)",
+                since.elapsed().as_millis()
             ),
         );
     }
