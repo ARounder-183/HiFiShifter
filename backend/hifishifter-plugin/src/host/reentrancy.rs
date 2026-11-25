@@ -20,6 +20,7 @@
 //! 都是），成对调用迟早会漏一个 `leave`，而漏掉的后果是**永久**认为自己在重入：
 //! 此后所有准备都只排队、不执行，表现是"编辑之后永远不生效"。
 
+use super::stall_watch::{mark, StallTicket};
 use std::cell::Cell;
 use std::time::{Duration, Instant};
 
@@ -59,6 +60,10 @@ pub(crate) fn watchdog_enabled() -> bool {
 pub(crate) struct HostCallGuard {
     kind: &'static str,
     started: Instant,
+    /// 【为什么守卫要顺带登记到停滞表里】`Drop` 只看得见"返回了但很慢"，看不见
+    /// "永远不返回"。而后者才是宿主失去响应的那一种。登记与归还都在这里，两件事
+    /// 共享同一个生命周期 —— 分成两处写必然有一天只改了一处。
+    _stall: StallTicket,
 }
 
 impl HostCallGuard {
@@ -68,7 +73,17 @@ impl HostCallGuard {
         Self {
             kind,
             started: Instant::now(),
+            _stall: StallTicket::enter(kind),
         }
+    }
+
+    /// 本调用现在走到哪个阶段（写进停滞看门狗的表）。
+    ///
+    /// 【为什么是方法而不是自由函数】读方永远希望"这个阶段属于**这一次**调用"。
+    /// 写成方法，调用点就必须先拿到守卫，于是"没有守卫却在写标记"变得不可能。
+    #[allow(dead_code)]
+    pub(crate) fn mark(&self, stage: &'static str) {
+        mark(stage);
     }
 }
 
@@ -113,6 +128,8 @@ pub(crate) fn in_host_call() -> bool {
 pub(crate) struct AraCallbackGuard {
     name: &'static str,
     started: Instant,
+    /// 同 `HostCallGuard` 的那一格：ARA 回调才是宿主主线程被我们占住的那条路。
+    _stall: StallTicket,
 }
 
 impl AraCallbackGuard {
@@ -120,7 +137,14 @@ impl AraCallbackGuard {
         Self {
             name,
             started: Instant::now(),
+            _stall: StallTicket::enter(name),
         }
+    }
+
+    /// 本回调现在走到哪个阶段（写进停滞看门狗的表）。
+    #[allow(dead_code)]
+    pub(crate) fn mark(&self, stage: &'static str) {
+        mark(stage);
     }
 }
 

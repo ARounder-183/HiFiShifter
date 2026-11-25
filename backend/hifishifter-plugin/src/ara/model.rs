@@ -1163,12 +1163,16 @@ impl DocumentLifecycle for ModelHandle {
         // 线程。超过 1 s 就会让 Windows 把窗口画成"未响应"，而日志里此前只有"发布了
         // 什么"，没有"花了多久"。
         let _callback = crate::host::AraCallbackGuard::enter("end_editing");
+        crate::host::mark_progress("end_editing:prune_source_reads");
         self.source_reads.retain(|_, job| !job.finished());
         self.retired_source_reads.retain(|(_, job)| !job.finished());
         self.service_model_thread();
         self.editing = false;
         self.session.set_in_edit_session(false);
         self.session.note_editing_finished();
+        // 【停滞看门狗的阶段标记】这一句是全插件最长的一段"宿主主线程被我们占住"：
+        // 全量重映射 + 装配 + 发布。它必须能在挂起现场被单独点名（见 host::stall_watch）。
+        crate::host::mark_progress("end_editing:remap_and_log");
         self.remap_and_log();
         Ok(())
     }
@@ -1188,6 +1192,7 @@ impl DocumentLifecycle for ModelHandle {
             return false;
         }
         log::info!("[ara] flushing pending model changes without endEditing");
+        crate::host::mark_progress("flush_pending_model_updates:remap_and_log");
         self.remap_and_log();
         true
     }
