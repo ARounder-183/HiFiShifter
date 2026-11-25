@@ -672,6 +672,14 @@ impl NativeHost {
             picker: lookup!(c"GetUserFileName", media::MultiPicker),
             tracks,
         });
+        // 【为什么先取再配对】`lookup!` 内部用 `?` 提前返回，写进 match 臂里会把
+        // "可选符号缺失" 变成"整个媒体 API 不可用"。这三个是**增强项**：缺任何一个，
+        // 导入本身仍然成立，只是少了 take 侧的自检。
+        let take_extras = (
+            lookup!(c"SetActiveTake", media::SetActiveTake),
+            lookup!(c"CountTakes", media::CountTakes),
+            lookup!(c"GetSetMediaItemTakeInfo_String", media::TakeString),
+        );
         let media = match (
             lookup!(c"PCM_Source_CreateFromFileEx", media::CreateSource),
             lookup!(c"PCM_Source_Destroy", media::DestroySource),
@@ -703,6 +711,9 @@ impl NativeHost {
                 delete_item,
                 track_guid,
                 picker,
+                set_active_take: take_extras.0,
+                count_takes: take_extras.1,
+                take_string: take_extras.2,
             }),
             _ => None,
         };

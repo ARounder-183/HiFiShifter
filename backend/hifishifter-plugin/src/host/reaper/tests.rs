@@ -1841,6 +1841,17 @@ unsafe extern "C" fn item_guid(o: *mut c_void, n: *const c_char, b: *mut c_char,
     guid(o, n, b, w, false)
 }
 unsafe extern "C" fn take_guid(o: *mut c_void, n: *const c_char, b: *mut c_char, w: bool) -> bool {
+    // 导入会给 take 起名（`P_NAME`）。名字是**可写**的，与只读的 GUID 走不同分支 ——
+    // 判据与 `media_track_guid` 的 P_NAME 分支同形。
+    if w {
+        assert_eq!(unsafe { CStr::from_ptr(n) }, c"P_NAME");
+        fixture().record("take-name");
+        return true;
+    }
+    if unsafe { CStr::from_ptr(n) } == c"P_NAME" {
+        fixture().record("take-name-read");
+        return true;
+    }
     guid(o, n, b, w, true)
 }
 unsafe extern "C" fn count(take: *mut c_void) -> i32 {

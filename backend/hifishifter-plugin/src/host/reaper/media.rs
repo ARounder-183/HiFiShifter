@@ -10,6 +10,10 @@ pub(super) type CreateItem = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
 pub(super) type CreateTake = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
 pub(super) type TakeInfo =
     unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_void) -> *mut c_void;
+pub(super) type SetActiveTake = unsafe extern "C" fn(*mut c_void);
+pub(super) type CountTakes = unsafe extern "C" fn(*mut c_void) -> i32;
+pub(super) type TakeString =
+    unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_char, bool) -> bool;
 pub(super) type DeleteItem = unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool;
 pub(super) type FilePicker =
     unsafe extern "C" fn(*mut c_char, *const c_char, *const c_char) -> bool;
@@ -48,6 +52,16 @@ pub(super) struct MediaApi {
     pub delete_item: DeleteItem,
     pub track_guid: Guid,
     pub picker: FilePicker,
+    /// `SetActiveTake`：把某个 take 设为 item 的**活动** take。
+    ///
+    /// 【为什么是 Option】缺了它整条媒体创建链仍要能用（旧宿主 / 未来改名），
+    /// 代价只是导入后的 take 可能不是活动 take —— 那一点由下面的自检日志显式说出来，
+    /// 不静默降级。
+    pub set_active_take: Option<SetActiveTake>,
+    /// `CountTakes`：只服务 `[import]` 诊断行（"这个 item 到底有几个 take"）。
+    pub count_takes: Option<CountTakes>,
+    /// `GetSetMediaItemTakeInfo_String`：给 take 起名（`P_NAME`）。
+    pub take_string: Option<TakeString>,
 }
 pub(super) struct ExtendedMedia {
     pub picker: Option<MultiPicker>,
@@ -665,6 +679,13 @@ impl HostTrackTarget {
         {
             return Err("absolute audio path and nonnegative finite start required".into());
         }
+        // take 的名字（`P_NAME`）。在 path 被移进 CString 之前取出来：现场看到
+        // "take 是空的"，而一个没有名字的 take 在宿主的 take 列表里就是一行空白，
+        // 与"音频没挂上"完全无法区分。
+        let file_stem = std::path::Path::new(path)
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| String::from("imported audio"));
         let path = CString::new(path).map_err(|_| "audio path contains NUL")?;
         let media = self
             .host
@@ -752,12 +773,82 @@ impl HostTrackTarget {
         })?;
         verify()?;
         // 此setter无bool失败返回；调用发生即把新源交给宿主，随后租约失效也不能双重释放。
+        // 交接出去的指针值留一份：下面的自检要证明"活动 take 的 source 就是它"。
+        let handed_over = source.pointer;
         unsafe { (media.take_info)(take, c"P_SOURCE".as_ptr(), source.pointer) };
         source.pointer = std::ptr::null_mut();
         if !old.is_null() {
             unsafe { (media.destroy_source)(old) };
         }
         verify()?;
+        // ── take 的写后自检 ────────────────────────────────────────────────
+        //
+        // 【为什么必须做】现场观察到"item 建出来了、take 却是空的"。此前的日志只能证明
+        // **item** 的 GUID —— 而音频真正挂上去的地方是 **take**，它的状态从来没有被读过。
+        // 于是"导入失败"与"take 没填"只能靠猜。这三步把 take 变成**可读的事实**：
+        // 活动 take 是谁、名字是什么、P_SOURCE 是不是我们刚交出去的那个指针。
+        //
+        // 【为什么还要 SetActiveTake】新建 item 只有一个 take，但"存在"不等于"活动"：
+        // 宿主侧读 take 的路径（渲染、状态块、拷贝）取的是 active take，不设的话它可能
+        // 指向别处（或为空），表现为"item 在、音频不在"。
+        if let Some(set_active_take) = media.set_active_take {
+            checked(authorized, || unsafe { set_active_take(take) })?;
+        } else {
+            log::warn!(
+                "[import] SetActiveTake is unavailable; the created take may not be the active one"
+            );
+        }
+        if let Some(set_string) = media.take_string {
+            if let Ok(name) = CString::new(file_stem.clone()) {
+                verify()?;
+                checked(authorized, || unsafe {
+                    set_string(take, c"P_NAME".as_ptr(), name.as_ptr() as *mut c_char, true)
+                })?;
+            }
+        }
+        verify()?;
+        // 活动 take 优先按宿主自己的答案取（GetActiveTake 已在 SplitApi 里）；
+        // 没有这个 API 时退回刚创建的那个 take —— 那正是我们唯一建过的 take。
+        let active = match self.host.split.as_ref() {
+            Some(split) => checked(authorized, || unsafe { (split.active_take)(item) })?,
+            None => take,
+        };
+        let active_source = if active.is_null() {
+            std::ptr::null_mut()
+        } else {
+            checked(authorized, || unsafe {
+                (media.take_info)(active, c"P_SOURCE".as_ptr(), std::ptr::null_mut())
+            })?
+        };
+        let takes = match media.count_takes {
+            Some(count) => checked(authorized, || unsafe { count(item) })?,
+            None => 1,
+        };
+        let active_guid = if active.is_null() {
+            String::from("-")
+        } else {
+            read_guid(api.take_guid, active, authorized).unwrap_or_else(|_| String::from("-"))
+        };
+        let source_state = if active_source.is_null() {
+            "none"
+        } else if active_source == handed_over {
+            "match"
+        } else {
+            "mismatch"
+        };
+        if source_state != "match" {
+            // 自检不过 = 这一笔导入在宿主侧是坏的。删掉它（CreatedItem 的 Drop 会做），
+            // 不留一个"看起来有 item、实际没有音频"的残骸 —— 那正是用户看到的现场。
+            log::warn!(
+                "[import] item={guid} takes={takes} active={active_guid} source={source_state} len={length:.6} name={file_stem} verdict=rolled-back"
+            );
+            return Err("imported take did not keep the audio source".into());
+        }
+        // 一行日志回答"item / take / source 各是什么状态"。区域是否绑定由插件的回执
+        // 泵另行记录（那一层才知道 ARA 图），这里只报宿主侧的事实。
+        log::info!(
+            "[import] item={guid} takes={takes} active={active_guid} source={source_state} len={length:.6} name={file_stem} verdict=ok"
+        );
         checked(authorized, || unsafe { (write.update)(item) })?;
         checked(authorized, || unsafe { (write.arrange)() })?;
         created.committed = true;

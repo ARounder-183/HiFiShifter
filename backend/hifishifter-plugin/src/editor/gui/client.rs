@@ -523,6 +523,23 @@ struct HostReply {
     action: Option<MediaAction>,
 }
 
+/// 导入回执的**三态**（见 `ImportState` 的说明与计划 §4）。
+///
+/// 【为什么是三种而不是两种】旧判据只有"区域已绑定 / 还没绑定"，把"宿主 item 已经
+/// 建出来、只是 ARA 区域还没建"这一**正常中间态**归进了失败。而 REAPER 建区域的时机
+/// 是 `beginEditing` 边界 —— 导入命令永远跑在那个边界之外，所以这一态不是"还没好"，
+/// 是"已经好了，只是插件看不到"。
+enum ImportState {
+    /// 本次回执与导入无关。
+    Idle,
+    /// ARA 区域已绑定：最完整的一态，直接给 clip id。
+    Bound(String),
+    /// 宿主 item 已在 GUI 清单里、ARA 区域还没建。**正常状态**，不是错误。
+    Inventory(String),
+    /// 宿主侧还看不到这个 item：只有这一态值得重投。
+    Absent,
+}
+
 impl EditorClient {
     /// 建一个视图的判定状态，并把它交给调用方的 `Rc`。
     ///
@@ -1168,8 +1185,37 @@ pub(crate) fn pump(state: &Rc<RefCell<EditorClient>>) {
         let mut state=state.borrow_mut();
         if let Some(host)=state.host_replies.get(&id) {
             let error=reply["error"].as_str().unwrap_or("").to_owned();
-            let imported=host.imported.as_ref().and_then(|item|host.document.upgrade().and_then(|doc|doc.clip_for_host_item(item))).map(|clip|host.editor.ui_clip_id(&clip));
-            let waiting=host.imported.is_some()&&(imported.is_none()||!reply["value"]["clips"].as_array().is_some_and(|clips|clips.iter().any(|clip|Some(clip["id"].as_str().unwrap_or(""))==imported.as_deref())));
+            // 【三态判据】导入的成功判据必须是"宿主**已经确认**的事实"，而不是"只在某个
+            // 会话边界才出现的事实"。
+            //
+            // 旧判据只认 `clip_for_host_item`（ARA 区域 → clip 的映射）。而 REAPER 不是
+            // "item 一出现就建区域"，是**在 beginEditing 边界重建图时才补**：原生文件对话框
+            // 让插件窗口失焦、编辑会话结束，导入命令全程跑在编辑会话之外，于是区域必然晚于
+            // 命令 —— 现场日志里是"报错后 32~45 ms 开始编辑会话，再 60~73 ms 新 region 出现"。
+            // item、take、source 其实都建对了，命令只是用一个**还没发生**的事实判了它失败。
+            let import_state=match host.imported.as_ref(){
+                None=>ImportState::Idle,
+                Some(item)=>match host.document.upgrade(){
+                    None=>ImportState::Absent,
+                    Some(doc)=>match doc.clip_for_host_item(item){
+                        Some(clip)=>ImportState::Bound(host.editor.ui_clip_id(&clip)),
+                        None=>match doc.gui_clip_for_host_item(item){
+                            Some(clip)=>ImportState::Inventory(host.editor.ui_clip_id(&clip)),
+                            None=>ImportState::Absent,
+                        },
+                    },
+                },
+            };
+            let imported=match &import_state{ImportState::Bound(clip)|ImportState::Inventory(clip)=>Some(clip.clone()),_=>None};
+            let in_payload=|clip:&str|reply["value"]["clips"].as_array().is_some_and(|clips|clips.iter().any(|entry|entry["id"].as_str()==Some(clip)));
+            let waiting=match &import_state{
+                ImportState::Absent=>true,
+                ImportState::Bound(clip)=>!in_payload(clip),
+                // 【库存态不重投】重投等的是"区域出现"，而区域只在编辑会话边界出现 ——
+                // 20 ms 一次的轮询改不了宿主的节奏，只会把一条正常状态熬成超时错误。
+                ImportState::Inventory(_)=>false,
+                ImportState::Idle=>false,
+            };
             let geometry_waiting=reply["ok"]==true&&host.geometry.as_ref().is_some_and(|geometry|!geometry.matches(&reply["value"]));
             let split_waiting=reply["ok"]==true&&host.split.as_ref().is_some_and(|split|!host.document.upgrade().is_some_and(|doc|split.matches(&doc,&host.editor.namespace,&mut reply["value"])));
             let media_waiting=reply["ok"]==true&&host.media.as_ref().is_some_and(|media|!host.document.upgrade().is_some_and(|doc|media.matches(&doc,&host.editor.namespace,&mut reply["value"])));
@@ -1223,7 +1269,30 @@ pub(crate) fn pump(state: &Rc<RefCell<EditorClient>>) {
             if geometry_waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("clip was edited in the host but its ARA geometry has not caught up; host Undo remains available");}
             if split_waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("item was split in the host but both clips have not caught up; host Undo remains available");}
             if media_waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("media was edited in the host but its GUI/ARA identities have not caught up; host Undo remains available");}
-            if !waiting&&host.imported.is_some() {reply["value"]["imported_clip_id"]=serde_json::json!(imported);}
+            // 导入回执的终态：成功（可能带 pending）+ 明确的 clip id。
+            match &import_state {
+                ImportState::Bound(clip)=>{reply["value"]["imported_clip_id"]=serde_json::json!(clip);}
+                // 只在回包本身成功时才这么判：失败的回包（取数失败 / 会话已换）不能被
+                // "导入状态"这一层改写成成功。
+                ImportState::Inventory(clip) if reply["ok"]==true =>{
+                    // 成功，但宿主还没把它并入 ARA。前端据此显示"进行中"而不是红色错误条；
+                    // 时间线里已经是 `present_host_inventory` 的占位 clip（画着"等待宿主
+                    // 提供音频"的斜纹），区域一到自动转正。
+                    reply["ok"]=serde_json::json!(true);
+                    reply["value"]["imported_clip_id"]=serde_json::json!(clip);
+                    reply["value"]["import_pending"]=serde_json::json!(true);
+                }
+                _=>{}
+            }
+            if host.imported.is_some() {
+                log::info!(
+                    "[import] state={} clip={} ok={} pending={}",
+                    match &import_state{ImportState::Bound(_)=>"region-bound",ImportState::Inventory(_)=>"inventory-only",ImportState::Absent=>"absent",ImportState::Idle=>"idle"},
+                    imported.as_deref().unwrap_or("-"),
+                    reply["ok"],
+                    reply["value"]["import_pending"],
+                );
+            }
         }
         let done_history=state.history_requests.remove(&id);let view_id=state.view_id.clone();
         let finished_undo=state.undo_requests.remove(&id).and_then(|document|document.upgrade());
