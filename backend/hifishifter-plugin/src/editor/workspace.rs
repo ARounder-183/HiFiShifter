@@ -17,39 +17,51 @@ use std::sync::atomic::Ordering;
 /// 读取失败 / 超期）把状态永久钉在"进行中"。
 pub(crate) const PENDING_MEDIA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// 把宿主的 **item 增益**投影成"插件内可听增益为 1"的那个别名。
+/// 把宿主的 **item 增益**投影成 DSP 别名（`clip.gain`）。
 ///
-/// 【契约：本函数**只**写 DSP 别名，绝不写 `clip_gain`】宿主已经在这个 item 上
-/// 施加过 `D_VOL` 了，插件再乘一次就等于把同一个旋钮乘两遍
-/// （`Clip::audible_gain() = clip_gain × gain`，见 `state/model.rs`）。
-/// 而"用户在时间轴旋钮上看到的那个数"是 `clip_gain` —— 它在**载荷**里的唯一写者
-/// 是下面的 `decorate_item_gain`（`gain` 带 `skip_serializing`，序列化时根本不出门）。
+/// 【契约：本函数**只**写 clip 层，绝不写 `clip_gain`，也绝不写 take 层】宿主已经在
+/// 这个 item 上施加过 `D_VOL` 了，插件再乘一次就等于把同一个旋钮乘两遍
+/// （`Clip::audible_gain() = clip_gain × gain`，见 `state/model.rs`）。而"用户在时间轴
+/// 旋钮上看到的那个数"是 `clip_gain` —— 它在**载荷**里的唯一写者是下面的
+/// `decorate_item_gain`。
 ///
-/// 【为什么这两件事必须分开】此前只有本函数写过增益，而它写的正是那个不出门的别名：
-/// 于是每一次 `D_VOL` 变化之后，载荷里的 `clip_gain` 都还是旧值 —— 前端把旋钮与
-/// 波形峰值整份回灌成旧值（用户报的"调完增益回弹"），完成门又拿同一栏当判据，
-/// 于是连"写入成功"都被判成失败。两处都写 `clip_gain` 会让 `audible_gain` 变成平方，
-/// 所以只能各有分工：**别名归本函数，载荷归 `decorate_item_gain`**。
+/// 【为什么不许顺手写 take 层】take 增益是**另一个旋钮**（REAPER 的 take 属性面板），
+/// 它的权威值是 `ClipTake::gain`。把 item 增益刷进每一条 take 有两个后果，现场都出现过：
+/// 用户在 take 属性里改过的音量在下一轮几何刷新时被静默抹掉；载荷的 `gain` /
+/// `takes[].gain` 永远是 item 层的副本 —— 于是回执拿"item 增益"去比"take 层期望值"，
+/// 只要 item 增益不是 1 就**必然**报分歧（用户复现的 +12 dB → 归零那两条互为镜像的
+/// `write echo diverged` 就是它喊出来的）。
 fn display_item_gain(clip: &mut hifishifter_kernel::state::Clip, gain: f64) {
     clip.gain = gain as f32;
-    for take in &mut clip.takes {
-        take.gain = gain as f32;
-    }
 }
-/// JSON装饰与actor投影同源；host_gain额外保留真实take音量/极性用于现场排查。
+
+/// 把宿主的**两层增益**各自投影到自己那一层。
 ///
 /// 【为什么 `clip_gain` 必须在这里写】它才是前端读的那一栏
-/// （`timeline/clipGain.ts`，画布与旋钮都用它）。而 `display_item_gain` 只写
-/// `gain` —— 那是 `skip_serializing` 的 DSP 别名，序列化时不出门。缺了这一行，
-/// 任何一次 `D_VOL` 变化之后载荷都回吐旧值：旋钮与波形峰值回弹，完成门也永远
-/// 对不上（"clip was edited in the host but its ARA geometry has not caught up"）。
-/// 见 `display_item_gain` 的契约说明：**两处都写会让可听增益变成平方**。
+/// （`timeline/clipGain.ts`，画布与旋钮都用它）。而 `clip.gain` 是
+/// `skip_serializing` 的 DSP 别名，序列化时不出门。缺了这一行，任何一次 `D_VOL`
+/// 变化之后载荷都回吐旧值：旋钮与波形峰值回弹，回执也永远对不上
+/// （"clip was edited in the host but its ARA geometry has not caught up"）。
+///
+/// 【take 层为什么取 `g.take_gain` 而不是 `g.item_gain`】`HostClipGeometry` 同时带着
+/// 两层读数（`item_gain` = item 的 `D_VOL`，`take_gain` = 这条 take 的 `D_VOL`）。
+/// 拿 item 层顶替 take 层，等于让"载荷里的 take 音量"变成 item 音量的副本：用户在 take
+/// 属性面板里改的音量在界面上看不到，回执还会拿它当期望值报出必然的分歧。
+///
+/// 【为什么只写几何描述的那一条 take】一个 item 可以有多条 take，各自的 `D_VOL` 互不
+/// 相干；`g` 只描述本实例绑定的那一条（`g.take_id`）。载荷里的 take id 带命名空间
+/// 前缀，因此按**后缀**认领；认不到就**不写这一栏**，而不是拿 item 增益顶上。
 fn decorate_item_gain(clip: &mut serde_json::Value, g: &crate::host::geometry::HostClipGeometry) {
     clip["clip_gain"] = serde_json::json!(g.item_gain);
-    clip["gain"] = serde_json::json!(g.item_gain);
+    clip["gain"] = serde_json::json!(g.take_gain);
     if let Some(takes) = clip["takes"].as_array_mut() {
-        for take in takes {
-            take["gain"] = serde_json::json!(g.item_gain);
+        if let Some(take) = takes.iter_mut().find(|take| {
+            !g.take_id.is_empty()
+                && take["id"]
+                    .as_str()
+                    .is_some_and(|id| id.ends_with(g.take_id.as_str()))
+        }) {
+            take["gain"] = serde_json::json!(g.take_gain);
         }
     }
     clip["host_gain"] = serde_json::json!({"item":g.item_gain,"take":g.take_gain});
@@ -337,14 +349,19 @@ fn sync_host_takes(
     if let Some((index, media)) = media {
         apply_take_media(&mut rebuilt[index], &media);
     }
-    // take 级音量在宿主侧是 item 音量（`display_item_gain` 会把两者对齐）；
-    // 这里先按当前投影播种，紧接着的 display_item_gain 会统一覆盖。
-    for take in &mut rebuilt {
-        take.gain = clip.gain;
-    }
     clip.takes = rebuilt;
     clip.active_take_id = active;
     clip.normalize_takes();
+    // 【take 增益按**每一条 take 自己的** `D_VOL` 播种，且必须落在 `normalize_takes` 之后】
+    // 此前这里是 `take.gain = clip.gain` —— 而 `clip.gain` 是 item 层的 DSP 别名，
+    // 于是 take 层永远是 item 层的副本：用户在 REAPER 的 take 属性面板里改过音量，
+    // 下一轮几何刷新就把它抹掉（"载荷里的 take 音量"从此再也读不出真值）。
+    // 放在 normalize 之后是必需的：`migrate_gain_split` 会把"所有 take 增益相同、
+    // item 层仍是 1.0"判成**旧工程**，把那个值提升到 item 层并把 take 置 1 —— 那条
+    // 迁移是给独立 App 的老工程准备的，在插件里会把宿主的 take 音量搬进 item 层。
+    for (take, host_take) in clip.takes.iter_mut().zip(item.takes.iter()) {
+        take.gain = host_take.geometry.take_gain as f32;
+    }
 }
 
 /// 文档级 clip id（无命名空间）→ 本回合**呈现**用的 id（带命名空间）。
@@ -3064,14 +3081,86 @@ mod tests {
             serde_json::json!(1.7),
             "前端读的是 clip_gain；漏写它等于让旋钮与波形峰值回弹"
         );
-        assert_eq!(payload["gain"], serde_json::json!(1.7));
-        assert_eq!(payload["takes"][0]["gain"], serde_json::json!(1.7));
+        assert_eq!(
+            payload["gain"],
+            serde_json::json!(geometry.take_gain),
+            "载荷的 gain 是 take 层：写 item 增益会让回执拿它当 take 层期望值报分歧"
+        );
         assert_eq!(payload["host_gain"]["item"], serde_json::json!(1.7));
         assert_eq!(
             payload["host_gain"]["take"],
             serde_json::json!(geometry.take_gain),
             "真实 take 音量必须原样保留，不能被 item 增益覆盖"
         );
+    }
+
+    /// **回归：两层增益在载荷里各占各的栏，谁也不许顶替谁。**
+    ///
+    /// 【现场】REAPER ARA 里把 Clip 增益 +12 dB 再归零，日志里恰好两条互为镜像的行：
+    /// `gain=4.0 expected 1.0` / `gain=1.0 expected 4.0`。两次写入都没有失败 ——
+    /// 是**投影**把 item 增益写进了 take 层（`clip["gain"]` 与每一条 `takes[].gain`），
+    /// 于是"载荷里的 take 音量"永远是 item 音量的副本。
+    #[test]
+    fn the_payload_keeps_the_take_layer_separate_from_the_item_layer() {
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        let api = Arc::new(host.client());
+        let mut geometry = api.ui_track(&|| true).unwrap().items[0].geometry.clone();
+        geometry.item_gain = 4.0;
+        geometry.take_gain = 0.5;
+        // take id 在载荷里带命名空间前缀，投影按后缀认领（见 `decorate_item_gain`）。
+        let namespaced = format!("hfs-test-take-{}", geometry.take_id);
+        let mut payload = serde_json::json!({
+            "clip_gain": 1.0,
+            "gain": 1.0,
+            "takes": [
+                {"id": namespaced, "gain": 1.0},
+                {"id": "hfs-test-take-sibling", "gain": 0.25},
+            ],
+        });
+        decorate_item_gain(&mut payload, &geometry);
+        assert_eq!(
+            payload["clip_gain"],
+            serde_json::json!(4.0),
+            "item 层只写 clip_gain"
+        );
+        assert_eq!(
+            payload["gain"],
+            serde_json::json!(0.5),
+            "take 层取 g.take_gain，不许拿 item 增益顶上"
+        );
+        assert_eq!(
+            payload["takes"][0]["gain"],
+            serde_json::json!(0.5),
+            "几何描述的那条 take 必须投影它自己的 D_VOL"
+        );
+        assert_eq!(
+            payload["takes"][1]["gain"],
+            serde_json::json!(0.25),
+            "别的 take 有自己的音量，不许被同一条几何覆盖"
+        );
+    }
+
+    /// **回归：认不到 take 时不写 take 层，而不是拿 item 增益顶上。**
+    #[test]
+    fn a_take_the_geometry_does_not_describe_keeps_its_own_gain() {
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        let api = Arc::new(host.client());
+        let mut geometry = api.ui_track(&|| true).unwrap().items[0].geometry.clone();
+        geometry.item_gain = 2.0;
+        geometry.take_gain = 0.5;
+        let mut payload = serde_json::json!({
+            "clip_gain": 1.0,
+            "gain": 1.0,
+            "takes": [{"id": "someone-elses-take", "gain": 0.25}],
+        });
+        decorate_item_gain(&mut payload, &geometry);
+        assert_eq!(payload["takes"][0]["gain"], serde_json::json!(0.25));
     }
 
     /// **回归：`display_item_gain` 只写 DSP 别名，绝不动 `clip_gain`。**
@@ -3104,6 +3193,37 @@ mod tests {
         assert!(
             (clip.audible_gain() - audible_before * 1.7).abs() < 1e-6,
             "可听增益必须恰好等于宿主那一份；再写一遍 clip_gain 就会平方"
+        );
+    }
+
+    /// **回归：item 别名不许改写 take 增益。**
+    ///
+    /// take 增益是另一个旋钮（REAPER take 属性面板），权威值在 `ClipTake::gain`。
+    /// 此前 `display_item_gain` 会把它刷成 item 增益 —— 用户在 take 属性里改的音量
+    /// 在下一轮几何刷新时被静默抹掉，且 `audible_gain` 里出现两层互相顶替。
+    #[test]
+    fn the_item_alias_never_rewrites_a_take_gain() {
+        let mut clip: hifishifter_kernel::state::Clip = serde_json::from_value(serde_json::json!({
+            "id": "c1",
+            "track_id": "t1",
+            "name": "c",
+            "start_sec": 0.0,
+            "length_sec": 1.0,
+            "clip_gain": 1.0,
+            "gain": 1.0,
+            "takes": [{"id": "k1", "gain": 0.5}],
+        }))
+        .unwrap();
+        clip.normalize_takes();
+        let take_gain_before = clip.takes[0].gain;
+        display_item_gain(&mut clip, 4.0);
+        assert!(
+            (clip.gain - 4.0).abs() < 1e-6,
+            "DSP 别名必须跟上宿主 item 增益"
+        );
+        assert_eq!(
+            clip.takes[0].gain, take_gain_before,
+            "take 层是另一个旋钮；别名不许顺手覆盖它"
         );
     }
 

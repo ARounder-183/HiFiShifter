@@ -1273,6 +1273,15 @@ pub(crate) fn pump(state: &Rc<RefCell<EditorClient>>) {
                             ),
                         );
                     }
+                    // 【增益分歧要能指出是哪一层】两层增益（item / take）加上载荷投影共三层，
+                    // "clip X gain=4 expected 1"读不出错在哪一层。只在出现增益类分歧时输出。
+                    if let Some(layers) = geometry.gain_layers(&reply["value"]) {
+                        hifishifter_kernel::log_limiter::emit_limited_key(
+                            log::Level::Warn,
+                            "host.gain.layers",
+                            format_args!("[host] gain layers: {layers}"),
+                        );
+                    }
                     geometry.overlay(&mut reply["value"]);
                 }
             }

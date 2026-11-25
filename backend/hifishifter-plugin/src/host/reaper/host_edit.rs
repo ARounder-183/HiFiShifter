@@ -80,6 +80,12 @@ struct ClipReceipt {
     fields: Vec<(&'static str, Value, bool)>,
     /// 逐 take 期望：键为内核 take id（与载荷 `takes[].id` 同一空间）。
     takes: Vec<(String, Vec<(&'static str, Value)>)>,
+    /// 增益三层对账用的**内核**快照：`(clip_gain, gain, 各 take 增益)`。
+    ///
+    /// 【为什么回执要留一份】增益有两层（item / take），而"载荷里的 `gain`"是第三条
+    /// 投影。分歧出现时只报"载荷 X 期望 Y"回答不了"是三层里的哪一层错了" —— 现场那两条
+    /// 互为镜像的行就是证据：看上去像写入失败，其实是投影把 item 增益写进了 take 层。
+    gain_layers: (f32, f32, Vec<f32>),
 }
 impl HostEditPlan {
     /// 冻结本次确切clip及预期宿主几何，单独的fade宽度也必须进入完成门。
@@ -271,6 +277,11 @@ impl HostEditPlan {
                         id: edit.before.id.clone(),
                         fields,
                         takes,
+                        gain_layers: (
+                            after.clip_gain,
+                            after.gain,
+                            after.takes.iter().map(|take| take.gain).collect(),
+                        ),
                     }
                 })
                 .collect(),
@@ -298,13 +309,24 @@ impl HostEditReceipt {
             return vec!["payload has no clips array".to_string()];
         };
         let mut out = Vec::new();
-        for ClipReceipt { id, fields, takes } in &self.clips {
+        for ClipReceipt {
+            id, fields, takes, ..
+        } in &self.clips
+        {
             let Some(clip) = clips.iter().find(|clip| clip["id"] == *id) else {
                 // 载荷里找不到这条 clip 是最强的一种分歧：整条缺席。
                 out.push(format!("clip {id} missing from the payload"));
                 continue;
             };
-            for (key, expected, _) in fields {
+            // 【只比"这次补丁真的写过"的位】`fields` 里始终包含 `start_sec` / `clip_gain`
+            // 这类结构性字段，而 `after` 是"补丁前的快照 + 本补丁"。拿**没写过**的字段去比
+            // `after`，等于让补丁前的旧值去对一个补丁后的载荷 —— 两边必然差一步。
+            // 用户复现的 +12 dB → 归零那两条互为镜像的行正是这样产生的：旋钮写的是
+            // `item_gain`，`gain`（take 层）一位没动，期望值停在补丁前，载荷却是写完之后的值。
+            for (key, expected, touched) in fields {
+                if !touched {
+                    continue;
+                }
                 if !value_compatible(&clip[*key], expected) {
                     out.push(format!(
                         "clip {id} {key}={} expected {expected}",
@@ -334,6 +356,53 @@ impl HostEditReceipt {
         out
     }
 
+    /// 增益**三层对账**：内核层 / 载荷投影 / 宿主读数各是什么，一条命令行说完。
+    ///
+    /// 【为什么需要它】增益有两条独立的层（item 的 `D_VOL` 与 take 的 `D_VOL`），而
+    /// 载荷里还多出一条**投影**。分歧出现时"clip X gain=4 expected 1"这种话回答不了
+    /// "错在哪一层"：可能是宿主没写进去、可能是内核状态没跟上、也可能是投影写错了层。
+    /// 现场那一轮（+12 dB → 归零，两条互为镜像）就花了一整轮才定位到是**投影**。
+    ///
+    /// 【只在出现增益类分歧时才产出】每个 clip 一行会把日志撑爆；没有分歧时它没有信息量。
+    pub(crate) fn gain_layers(&self, payload: &Value) -> Option<String> {
+        let diverged = self.divergences(payload);
+        if !diverged.iter().any(|line| line.contains("gain")) {
+            return None;
+        }
+        let clips = payload["clips"].as_array()?;
+        let mut lines = Vec::new();
+        for receipt in &self.clips {
+            let Some(clip) = clips.iter().find(|clip| clip["id"] == receipt.id) else {
+                continue;
+            };
+            let take_gains: Vec<String> = clip["takes"]
+                .as_array()
+                .map(|takes| takes.iter().map(|take| take["gain"].to_string()).collect())
+                .unwrap_or_default();
+            let (kernel_clip, kernel_take, kernel_takes) = &receipt.gain_layers;
+            lines.push(format!(
+                "clip={} kernel{{clip_gain={kernel_clip} gain={kernel_take} take_gains=[{}]}} \
+                 payload{{clip_gain={} gain={} takes=[{}]}} host{{item={} take={}}}",
+                receipt.id,
+                kernel_takes
+                    .iter()
+                    .map(|gain| gain.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                clip["clip_gain"],
+                clip["gain"],
+                take_gains.join(","),
+                clip["host_gain"]["item"],
+                clip["host_gain"]["take"],
+            ));
+        }
+        if lines.is_empty() {
+            None
+        } else {
+            Some(lines.join(" | "))
+        }
+    }
+
     /// 把"本次补丁真正写过的字段"按 `after` 覆盖进载荷。
     ///
     /// 【I-E2】一次成功写入的权威是**我们写下的值**，不是宿主模型的回声。载荷是前端
@@ -347,7 +416,10 @@ impl HostEditReceipt {
         let Some(clips) = payload["clips"].as_array_mut() else {
             return;
         };
-        for ClipReceipt { id, fields, takes } in &self.clips {
+        for ClipReceipt {
+            id, fields, takes, ..
+        } in &self.clips
+        {
             let Some(clip) = clips.iter_mut().find(|clip| clip["id"] == *id) else {
                 continue;
             };
@@ -1791,9 +1863,10 @@ fn write_take_direction(
 /// 把已写入的片段**按编辑前的几何**写回去。
 ///
 /// 范围刻意限定为几何（位置 / 长度 / 源起点）：批量移动只改这些，回滚它们才能让
-/// "拒绝 = 没改"成立。音量与淡变**不回滚** —— 在 item / take 两层增益模型落地前，
-/// 它们的"原值"是含糊的（patch.gain 目前写 item 的 D_VOL，而 before.gain 是 take 级），
-/// 用错的来源写回去比不写更糟。这类失败仍会如实报告，并保留 Undo 块。
+/// "拒绝 = 没改"成立。音量与淡变**不回滚** —— 它们的"原值"分布在两个宿主字段上
+/// （`patch.item_gain` 写 item 的 `D_VOL`、`patch.gain` 写 take 的 `D_VOL`），
+/// 而本函数只拿着内核 Clip 的 `before`，读不到宿主那两层各自的原始读数；用错的来源
+/// 写回去比不写更糟。这类失败仍会如实报告，并保留 Undo 块。
 fn restore_applied_geometry(
     applied: &[(&ClipEdit, &HostClipTarget)],
     authorized: &impl Fn() -> bool,
@@ -1959,6 +2032,53 @@ mod tests {
             remaining.iter().all(|line| line.contains("start_sec")),
             "覆盖只碰本次写过的位：{remaining:?}"
         );
+        document.close();
+    }
+
+    /// **回归：没被补丁写过的字段不许报分歧。**
+    ///
+    /// 【现场】REAPER ARA 里把 Clip 增益 +12 dB 再归零，日志里恰好两条互为镜像的行：
+    /// `gain=4.0 expected 1.0` / `gain=1.0 expected 4.0`。两次写入都成功了 —— 旋钮写的是
+    /// `item_gain`，`gain`（take 层）一位没动，而回执拿"补丁前的 take 增益"去比"写完
+    /// 之后的载荷"，于是必然差一步。回执只该回答"我写下的那几位，载荷跟上了没有"。
+    #[test]
+    fn an_untouched_field_never_reports_a_divergence() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_writer();
+        host.clear_markers();
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        let plan = editor
+            .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"itemGain":4.0}))
+            .unwrap();
+        let receipt = plan.receipt(&editor.namespace, owner.host_fade_axes());
+        let mut payload = crate::editor::commands::payload(&editor, false).unwrap();
+        // 载荷是"写完之后"的投影：take 层与补丁前的模型值不同（那是宿主真实的 take 音量）。
+        payload["clips"][0]["gain"] = json!(0.5);
+        let diverged = receipt.divergences(&payload);
+        assert!(
+            !diverged.iter().any(|line| line.contains(" gain=")),
+            "take 层没被这次补丁写过，不得拿它报分歧：{diverged:?}"
+        );
+        assert!(
+            diverged.iter().any(|line| line.contains("clip_gain")),
+            "写过的位仍然必须被看见：{diverged:?}"
+        );
+        let layers = receipt
+            .gain_layers(&payload)
+            .expect("增益分歧必须带三层对账行");
+        assert!(layers.contains("kernel{"), "{layers}");
+        assert!(layers.contains("payload{"), "{layers}");
         document.close();
     }
 
