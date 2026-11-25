@@ -90,7 +90,7 @@ function Get-CargoCommand([string]$kind, [int]$Threads = 0) {
     # self-healing; see scripts/env/native-toolchain.ps1.
     if ($onWindows -and (Test-Path $msvc)) {
         $prefix += ". '$msvc';"
-        $prefix += " $null = Clear-StaleCmakeCaches -TargetDir (Get-NativeCargoTargetDir -BackendDir '$backendDir');"
+        $prefix += " [void](Clear-StaleCmakeCaches -TargetDir (Get-NativeCargoTargetDir -BackendDir '$backendDir'));"
     }
     # [Why also check whether the SDK directory exists] The fmt tier (Linux) installs no SDK
     # and compiles nothing; Set-SdkEnvironment would then push two empty paths into the env
