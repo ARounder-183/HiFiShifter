@@ -116,6 +116,72 @@ impl FeedKind {
     }
 }
 
+/// "第一块 raw 未知"的哨兵。
+///
+/// 【为什么不用 0】工程 0 是合法起点；用 0 当哨兵会让「首块在工程 0」被读成「未知」。
+pub const NO_RAW: i64 = i64::MIN;
+
+/// 一条钉住喂入流**自己的**时间轴。
+///
+/// 【为什么需要它】FeedKind::Pinned 只回答了「谁有权推进位置」，没有回答「位置从哪
+/// 起算」。位置此前仍然锚在 raw_start（= 宿主的 projectTimeSamples），而 VEGAS 在
+/// Render As 期间把它留在**最后的播放头**：现场 r3 的 raw=893720（18.62 s）直接把
+/// 整段渲染平移了 18.62 s，r1 平移 1.85 s，只有 r2（raw=0）是对的。用户的描述正是
+/// 「最后播放/停止的位置会极大地影响渲染输出的偏移」。
+///
+/// 【为什么 origin 恒为 0】钉住流的定义就是「宿主不报传输、只按块喂内容」，于是它喂
+/// 的第一帧就是这条时间轴的第一帧。渲染范围从工程起点开始时，那正是喂入域的 0。
+/// 环境变量 HFS_PINNED_ORIGIN=raw 可以强制回退到首块 raw，供现场对比。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeedTimeline {
+    /// 这条喂入流的第一帧在**喂入域**里的位置（帧）。
+    pub origin: i64,
+    /// 从 origin 起已经喂进来的帧数（含起点窗口里的块）。
+    pub frames: u64,
+    /// 第一块的宿主 raw（只用于诊断；NO_RAW = 未知）。
+    pub first_raw: i64,
+    /// 是否已经完成 0.5 s 提级。
+    pub promoted: bool,
+}
+
+impl Default for FeedTimeline {
+    fn default() -> Self {
+        Self {
+            origin: 0,
+            frames: 0,
+            first_raw: NO_RAW,
+            promoted: false,
+        }
+    }
+}
+
+impl FeedTimeline {
+    /// 本块在喂入域里的起点（帧）。
+    ///
+    /// 【为什么这是唯一的位置来源】见类型文档：钉住流的坐标只能由它自己数出来。
+    pub fn position(&self, frames_before: u64) -> i64 {
+        self.origin
+            .saturating_add(i64::try_from(frames_before).unwrap_or(i64::MAX))
+    }
+
+    /// 归零（传输事件 / 复位）。
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// 钉住喂入流的 origin 判据（环境变量 HFS_PINNED_ORIGIN=raw 强制用首块 raw）。
+///
+/// 【为什么要这个开关】origin=0 改变的是「读快照的起点」。判据本身有三道，但「某个
+/// 宿主的块序列恰好长得像钉住流」这种误判在离线环境里无法穷举。留一个开关，现场就能
+/// 一键对比「按喂入域从 0 起算」与「按宿主 raw 起算」的差别，不必重新出包。
+pub fn pinned_origin_uses_raw() -> bool {
+    static USES_RAW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *USES_RAW.get_or_init(|| {
+        std::env::var("HFS_PINNED_ORIGIN").is_ok_and(|value| value == "raw")
+    })
+}
+
 /// 一个传输会话的纯状态。
 #[derive(Clone, Copy, Debug)]
 pub struct TransportSession {
@@ -131,6 +197,12 @@ pub struct TransportSession {
     /// "raw 被钉住 + 没有 kPlaying"期间收到的、彼此不同的有信号帧数。
     /// 到 [`FEED_PROMOTE_SEC`] 就把窗口提级成 [`FeedKind::Pinned`]。
     pub pinned_signal_frames: u64,
+    /// 这条钉住喂入流自己的时间轴（见 [`FeedTimeline`]）。
+    ///
+    /// 【为什么它必须跨块存活】本结构体每块都是临时重建的（见 playback.rs 的构造），
+    /// 所以它像 feed / window_spent / pinned_signal_frames 一样持久化在流几何里，
+    /// 在构造时读入、observe 之后写回。
+    pub feed_timeline: FeedTimeline,
 }
 
 impl Default for TransportSession {
@@ -144,6 +216,7 @@ impl Default for TransportSession {
             feed: FeedKind::Transport,
             window_spent: false,
             pinned_signal_frames: 0,
+            feed_timeline: FeedTimeline::default(),
         }
     }
 }
@@ -186,6 +259,13 @@ pub struct SessionInput {
     pub signal: bool,
     /// 捕获已武装：录制中绝不发明时间（录制的时间只能来自宿主）。
     pub armed: bool,
+    /// 宿主这一块报的原始位置（帧）。只用于给 [`FeedTimeline`] 记首块诊断值。
+    pub raw_start: i64,
+    /// 本块之前这条流已经有块了（`!had` 的反面）。
+    ///
+    /// 【为什么要显式传】"首块"是喂入流起点的唯一可用证据：首块上 `pinned` 天然为假
+    /// （没有上一块可比），而漏掉它会让整条时间轴晚一块才开始。
+    pub had_previous: bool,
 }
 
 /// 状态机结论。
@@ -201,6 +281,15 @@ pub struct SessionDecision {
     pub feed: FeedKind,
     /// 本块刚刚完成了"窗口 → 钉住的喂入流"的提级。
     pub promoted: bool,
+    /// 本块属于「钉住候选」，但还没到 0.5 s 提级。
+    ///
+    /// 【为什么候选也要算进喂入域】候选块已经按块长推进位置了（起点窗口）。若只有
+    /// 提级之后的块走 FeedTimeline，前 0.5 s 就会留在 raw 域里，接缝处出现一个洞。
+    pub candidate: bool,
+    /// 本块**之前**已经喂进来的帧数（喂入域，含起点窗口里的块）。
+    pub feed_frames_before: u64,
+    /// 这条喂入流的起点（喂入域）。渲染流恒为 0。
+    pub feed_origin: i64,
 }
 
 impl TransportSession {
@@ -234,10 +323,17 @@ impl TransportSession {
         self.feed = FeedKind::Transport;
         self.window_spent = false;
         self.pinned_signal_frames = 0;
+        // 【为什么连时间轴一起归零】规则 1 的语义是「钉住流到此结束」。留着 frames 会
+        // 让下一条钉住流从上一条的末尾接着数 —— 一次渲染就凭空多出几十秒的偏移。
+        self.feed_timeline.reset();
     }
 
     /// 前进一步。host_reset = 宿主位置倒退或跳变；它是新会话的强证据之一。
     pub fn observe(&mut self, input: SessionInput) -> SessionDecision {
+        // 【本块之前已经喂进来多少帧】必须在任何分支之前读：下面 `note_transport` 会
+        // 在传输事件上把它清零。
+        let feed_frames_before = self.feed_timeline.frames;
+        let mut candidate = false;
         let mut new_epoch = false;
         let mut transport_active = false;
         let mut start_window_open = false;
@@ -265,6 +361,9 @@ impl TransportSession {
                 start_window_open: false,
                 feed: self.feed,
                 promoted,
+                candidate: false,
+                feed_frames_before,
+                feed_origin: self.feed_timeline.origin,
             };
         }
 
@@ -329,7 +428,16 @@ impl TransportSession {
         // 彼此不同的音频（排除 FL Studio 式的"停播反复送同一份缓冲"）；`!armed` 说明
         // 用户没有在录（录制的时间只能来自宿主，插件绝不发明）。三条同时成立，才承认
         // "这是一条钉住的时间轴"。
-        if start_window_open && input.pinned && input.signal && !input.armed {
+        // 【首块也是这条喂入流的第一帧】`pinned` 在首块上天然为假（没有上一块可比），
+        // 但"宿主没在播放 + 块里有内容 + 没在录"已经足以说明它是一条喂入流的开头：
+        // 真实播放的 kPlaying 会同时到达，那时 `start_window_open` 根本不成立。
+        // 少算这一块，整条时间轴就从第 1 块之后才开始 —— 位置在提级处跳回 0。
+        if start_window_open
+            && (input.pinned || !input.had_previous)
+            && input.signal
+            && !input.armed
+        {
+            candidate = true;
             self.pinned_signal_frames = self
                 .pinned_signal_frames
                 .saturating_add(u64::from(input.frames));
@@ -341,6 +449,24 @@ impl TransportSession {
                 transport_active = true;
                 start_window_open = false;
             }
+        }
+        // 【喂入域的推进】候选块与钉住块都算 —— 它们喂进来的就是这条时间轴的连续内容。
+        // 提级本身不改变 origin：一次渲染只有一个起点，提级只是「认出它是时间轴」。
+        if candidate || self.feed == FeedKind::Pinned {
+            if self.feed_timeline.first_raw == NO_RAW {
+                self.feed_timeline.first_raw = input.raw_start;
+                // 【origin 的唯一决定点】见 `FeedTimeline` 与 `pinned_origin_uses_raw`。
+                self.feed_timeline.origin = if pinned_origin_uses_raw() {
+                    input.raw_start
+                } else {
+                    0
+                };
+            }
+            self.feed_timeline.frames = self
+                .feed_timeline
+                .frames
+                .saturating_add(u64::from(input.frames));
+            self.feed_timeline.promoted |= self.feed == FeedKind::Pinned;
         }
 
         // 【窗口用掉】跑到上限就是"用掉了"：此后不再重开，直到规则 1 复原它。
@@ -362,6 +488,9 @@ impl TransportSession {
             start_window_open,
             feed: self.feed,
             promoted,
+            candidate,
+            feed_frames_before,
+            feed_origin: self.feed_timeline.origin,
         }
     }
 }
@@ -383,6 +512,8 @@ mod tests {
             pinned: false,
             signal: true,
             armed: false,
+            raw_start: 0,
+            had_previous: true,
         }
     }
 
@@ -583,5 +714,118 @@ mod tests {
             playing_rising: true,
             ..pinned_block(frames)
         }
+    }
+
+    /// **不变量：钉住喂入流的起点是喂入域的 0，不是宿主的播放头。**
+    ///
+    /// 【为什么钉死】VEGAS Render As 把 `projectTimeSamples` 留在**最后播放/停止**的
+    /// 位置（现场 r3 = 893720 = 18.62 s）。此前位置锚在它上面，于是整段渲染被平移了
+    /// 18.62 s；三次渲染互不相同，而用户看到的正是"最后播放位置影响偏移"。
+    #[test]
+    fn a_pinned_feed_starts_at_zero_regardless_of_the_host_playhead() {
+        const RAW: i64 = 893_720;
+        let mut session = TransportSession::with_rate(48_000.0);
+        let mut first = pinned_block(1200);
+        // 起点窗口由"kPlaying 还来不及置位、但音频已经在流动"打开（见 playback.rs）。
+        first.playing_rising = true;
+        first.raw_start = RAW;
+        let decision = session.observe(first);
+        assert!(decision.candidate, "第一块必须被认成钉住候选");
+        assert_eq!(decision.feed_origin, 0, "起点是喂入域的 0，不是宿主播放头");
+        assert_eq!(decision.feed_frames_before, 0);
+        assert_eq!(decision.feed, FeedKind::Transport, "0.5 s 之内还没提级");
+
+        let mut promoted = None;
+        for index in 1..=40u64 {
+            let mut next = pinned_block(1200);
+            next.raw_start = RAW;
+            let decision = session.observe(next);
+            if decision.promoted {
+                promoted = Some((index, decision));
+                break;
+            }
+        }
+        let (index, decision) = promoted.expect("钉住喂入流必须在 0.5 s 内提级");
+        assert_eq!(decision.feed, FeedKind::Pinned);
+        assert_eq!(decision.feed_frames_before, index * 1200);
+        assert_eq!(decision.feed_origin, 0);
+        assert_eq!(
+            session.feed_timeline.position(decision.feed_frames_before),
+            (index * 1200) as i64,
+            "整条时间轴从 0 起算；raw 只作诊断"
+        );
+        assert_eq!(session.feed_timeline.first_raw, RAW);
+    }
+
+    /// **不变量：宿主一报传输，喂入时间轴立刻结束并归零。**
+    #[test]
+    fn a_pinned_feed_ends_when_the_host_reports_transport() {
+        let mut session = TransportSession::with_rate(48_000.0);
+        let mut first = pinned_block(1200);
+        first.playing_rising = true;
+        first.raw_start = 5_000;
+        session.observe(first);
+        for _ in 0..30 {
+            let mut block = pinned_block(1200);
+            block.raw_start = 5_000;
+            session.observe(block);
+        }
+        assert_eq!(session.feed, FeedKind::Pinned);
+        assert!(session.feed_timeline.frames > 0);
+
+        let mut playing = input(true, true, 1200);
+        playing.raw_start = 999_000;
+        let decision = session.observe(playing);
+        assert_eq!(decision.feed, FeedKind::Transport);
+        assert_eq!(session.feed_timeline.frames, 0, "传输事件必须把喂入时间轴归零");
+        assert_eq!(session.feed_timeline.first_raw, NO_RAW);
+        assert_eq!(session.feed_timeline.origin, 0);
+    }
+
+    /// **不变量：候选期间 raw 变了，就不是同一条钉住流。**
+    ///
+    /// 【为什么它必须重开】宿主在预卷之后把播放头移到渲染起点，是正常形状。把两段
+    /// 接成一条，位置就从预卷的位置接着数 —— 那正是"偏移一个预卷长度"的来源。
+    #[test]
+    fn a_pre_roll_that_changes_raw_restarts_the_feed_timeline() {
+        let mut session = TransportSession::with_rate(48_000.0);
+        let mut first = pinned_block(1200);
+        first.playing_rising = true;
+        first.raw_start = 100;
+        session.observe(first);
+        let mut next = pinned_block(1200);
+        next.raw_start = 100;
+        session.observe(next);
+        assert_eq!(session.feed_timeline.frames, 2_400);
+
+        let mut moved = pinned_block(1200);
+        moved.raw_start = 48_000;
+        // 真实判据是「本块 raw 与上一块相同」；raw 变了就不是钉住块。
+        moved.pinned = false;
+        let decision = session.observe(moved);
+        assert!(!decision.candidate, "raw 变了就不是同一条钉住流");
+        assert_eq!(session.feed_timeline.frames, 0);
+        assert_eq!(
+            decision.feed_frames_before, 2_400,
+            "本块之前的帧数是读数，不因归零而变"
+        );
+    }
+
+    /// `FeedTimeline` 的位置就是"起点 + 已喂帧数"，没有第二项。
+    #[test]
+    fn the_feed_position_is_origin_plus_frames() {
+        let timeline = FeedTimeline {
+            origin: 0,
+            frames: 960,
+            first_raw: 893_720,
+            promoted: true,
+        };
+        assert_eq!(timeline.position(0), 0);
+        assert_eq!(timeline.position(960), 960);
+        let raw_origin = FeedTimeline {
+            origin: 893_720,
+            ..timeline
+        };
+        assert_eq!(raw_origin.position(960), 894_680);
     }
 }

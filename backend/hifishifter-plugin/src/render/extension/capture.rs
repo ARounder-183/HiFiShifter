@@ -298,6 +298,33 @@ impl ExtensionOwner {
         // 处理结果晚到）在这一个数上就能分开：若 `render_ms` 与用户听到的时间同量级，
         // 那一段就是"素材在、结果还没算出来"；若它远大于 0.7 s，那 0.4 s 只能来自
         // 起播窗口。没有这个数时，两者在日志里完全同形。
+        // 【这一行是先于代码修改的判定实验】渲染错位有两个互相独立的成因，而它们在
+        // 产物上**完全同形**：
+        //
+        //   * 输出**读位置**错了（喂入域的时间轴，见 `FeedTimeline`）；
+        //   * 快照的**源窗口**本身就从偏移处开始（`source_start_sec > 0`）。
+        //
+        // 只有"这次渲染到底喂了什么"能把两者分开。它只在版本变化时打一次，不进音频
+        // 线程 —— 与 `[capture] prepared material` 同一条纪律。
+        if let Some(timeline) = input.timeline.as_ref() {
+            let clips = timeline
+                .clips
+                .iter()
+                .take(8)
+                .map(|clip| {
+                    format!(
+                        "{{start={:.3}, source_start={:.3}, length={:.3}}}",
+                        clip.start_sec, clip.source_start_sec, clip.length_sec
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            log::info!(
+                "[capture] render input: clips=[{clips}], project_sec={:.3}, rate={}",
+                timeline.project_sec,
+                self.setup_sample_rate(),
+            );
+        }
         let render_started = std::time::Instant::now();
         let snapshots = input.render(cancel)?;
         let render_ms = render_started.elapsed().as_millis() as u64;

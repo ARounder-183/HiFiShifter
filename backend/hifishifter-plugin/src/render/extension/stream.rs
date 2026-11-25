@@ -237,6 +237,18 @@ pub(super) struct StreamGeometry {
     pub(super) window_spent: AtomicBool,
     /// "钉住 + 有信号"已经累积了多少帧（提级的判据，见 `FEED_PROMOTE_SEC`）。
     pub(super) pinned_signal_frames: AtomicU64,
+    /// 钉住喂入流的**起点**（喂入域，帧）。渲染流恒为 0。
+    ///
+    /// 【为什么必须存在几何里】`TransportSession` 每块都是临时重建的，而这条时间轴
+    /// 要跨块存活（见 `FeedTimeline`）。`origin=0` 是本轮的修复点：此前位置锚在
+    /// `raw_start`（= 宿主最后播放头），VEGAS 渲染因此整段平移了 18.62 s。
+    pub(super) feed_origin: AtomicI64,
+    /// 这条喂入流从起点起已经喂进来的帧数。
+    pub(super) feed_frames_total: AtomicU64,
+    /// 第一块的宿主 raw（只用于诊断；`NO_POSITION` = 未知）。
+    pub(super) feed_first_raw: NoPosition,
+    /// 这条喂入流是否已经完成 0.5 s 提级。
+    pub(super) feed_promoted: AtomicBool,
     /// 锚点那一刻 `continuousTimeSamples` / `projectTimeMusic` 的读数。
     ///
     /// 【为什么存锚而不是累加增量】两者都是**绝对**读数（相对工程起点）。把"本块与

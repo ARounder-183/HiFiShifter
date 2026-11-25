@@ -471,6 +471,14 @@ impl ExtensionOwner {
             feed: FeedKind::from_code(geometry.feed.load(Ordering::Acquire)),
             window_spent: geometry.window_spent.load(Ordering::Acquire),
             pinned_signal_frames: geometry.pinned_signal_frames.load(Ordering::Acquire),
+            // 【喂入流自己的时间轴也要跨块】见 `FeedTimeline`。它和上面三格同一理由：
+            // 本结构体每块重建，几何才是它真正的家。
+            feed_timeline: hifishifter_capture::transport::FeedTimeline {
+                origin: geometry.feed_origin.load(Ordering::Acquire),
+                frames: geometry.feed_frames_total.load(Ordering::Acquire),
+                first_raw: geometry.feed_first_raw.load(Ordering::Acquire),
+                promoted: geometry.feed_promoted.load(Ordering::Acquire),
+            },
         };
         // 【首块起播容差的唯一正证据】见下面 `playing_rising` 的说明：只有本块真的
         // 有信号，才允许“kPlaying 滞后”的宿主在第一块上打开有界起点窗口。
@@ -494,6 +502,10 @@ impl ExtensionOwner {
         // 把这段流动当作播放时间。
         // 【为什么 ARA 实例不参与】它的输出语义由 ARA 通路决定，捕获仲裁对它是
         // 无意义的；`log_capture_report` 早已用同一条守卫跳过它。
+        // 【钉住流的身份要在这块判定**之前**读】`host_reset` 是 `observe` 的输入，
+        // 而它必须被钉住流抑制（见下面的 `host_reset:` 实参）。
+        let pinned_before =
+            FeedKind::from_code(geometry.feed.load(Ordering::Acquire)) == FeedKind::Pinned;
         let stream_window_eligible = !playing
             && !is_offline
             && !self.is_bound()
@@ -525,7 +537,8 @@ impl ExtensionOwner {
                     )),
             recording_rising,
             // 域切换不是 seek：不能让它触发 host_reset 的新 epoch。
-            host_reset: host_rewound && !clock.switched,
+            // 【钉住流里也没有 seek】它没有宿主位置可言，raw 的抖动只是宿主自己的记账。
+            host_reset: host_rewound && !clock.switched && !pinned_before,
             offline: is_offline,
             frames: frames32,
             // 【钉住 = 宿主这一块报的位置与上一块相同】它不是"宿主在走"的反证，
@@ -540,6 +553,9 @@ impl ExtensionOwner {
             signal: !silent && !repeated_nonzero,
             // 【录制中绝不发明时间】录制的时间只能来自宿主。
             armed: self.capture().is_armed(),
+            // 【喂入域的起点要用它记一次诊断】见 `FeedTimeline::first_raw`。
+            raw_start,
+            had_previous: had,
         });
         // 【这三格必须写回】它们跨块存活（见上面 `TransportSession` 的构造）。
         geometry
@@ -548,6 +564,18 @@ impl ExtensionOwner {
         geometry
             .pinned_signal_frames
             .store(session.pinned_signal_frames, Ordering::Release);
+        geometry
+            .feed_origin
+            .store(session.feed_timeline.origin, Ordering::Release);
+        geometry
+            .feed_frames_total
+            .store(session.feed_timeline.frames, Ordering::Release);
+        geometry
+            .feed_first_raw
+            .store(session.feed_timeline.first_raw, Ordering::Release);
+        geometry
+            .feed_promoted
+            .store(session.feed_timeline.promoted, Ordering::Release);
         // 【预览候选也算有权推进】候选期间宿主 kPlaying=0，但它送来的正是预览
         // 要录的音频；不把候选算进来，起播窗口一过位置就冻结，预览只剩 1 秒。
         let preview_candidate = self.processing_pass.phase() == PreviewPhase::Candidate;
@@ -568,7 +596,17 @@ impl ExtensionOwner {
             // 切成两遍 —— 现场正是每 1.024 s 切一次。真正的 kPlaying 升起会让
             // `playing=true`，那时 feed 已经被规则 1 复位成 Transport，不会被这一条挡住。
             && decision.feed == FeedKind::Transport;
-        let new_pass = new_epoch || clock.seek || cycle_wrap || playing_edge_new_pass;
+        // 【钉住喂入流有自己的时间轴】它的位置不来自宿主读数，而来自这条流已经喂进来的
+        // 帧数。候选块也算 —— 否则前 0.5 s 会留在 raw 域里，接缝处出现一个洞。
+        let feed_local = decision.feed == FeedKind::Pinned || decision.candidate;
+        // 【一次喂入流只有一个 pass】钉住流里"新一遍"这个概念不成立：宿主只是在按块
+        // 交付一条连续内容。允许 seek / 循环 / 上升沿在这里宣布新 pass，就会把同一条
+        // 时间轴切成几段（现场 31 次"每 1.024 s 重来一遍"正是这样来的）。
+        let new_pass = if feed_local {
+            !had
+        } else {
+            new_epoch || clock.seek || cycle_wrap || playing_edge_new_pass
+        };
         // 【这一遍是被哪一闸宣布的】四个候选闸各一位。没有这一位，现场只能靠把产物
         // 切块算互相关来猜是哪一闸 —— 本轮就是这么查出问题的，不该让下一个人再走一遍。
         let pass_reason = if new_epoch {
@@ -765,6 +803,24 @@ impl ExtensionOwner {
             );
         }
 
+        // ── 钉住的喂入流：位置由它**自己的**时间轴给出 ────────────────
+        //
+        // 【为什么必须在既有记账之后覆盖】上面那一段回答的是"宿主给了什么位置"，而
+        // 钉住流的宿主**没有**给出位置：它要么把 raw 钉住不动，要么停在最后一次播放/
+        // 停止的播放头（VEGAS Render As 实测 r3 = 893720 = 18.62 s）。它给出的只有
+        // **内容顺序** —— 于是位置只能是"起点 + 已经喂进来的帧数"。
+        //
+        // 【为什么锚点也要跟着写】`last_position` 是下一块判"续接 / 回退"的依据；
+        // 留着 raw 会让每一块都被记成一次跳变（`clock_rewinds` 虚高，`pass_rewinds`
+        // 也就看不出真相）。
+        if feed_local {
+            position = decision
+                .feed_origin
+                .saturating_add(i64::try_from(decision.feed_frames_before).unwrap_or(i64::MAX));
+            geometry.anchor.store(position, Ordering::Release);
+            geometry.frames_since_anchor.store(frames as u64, Ordering::Release);
+        }
+
         // ── 前导静音（诊断 + 门控）────────────────────────────────────
         let mut preceding_silent_frames = geometry.trailing_silent_frames.load(Ordering::Acquire);
         let mut discard_pre_roll = false;
@@ -891,14 +947,28 @@ impl ExtensionOwner {
                 if decision.feed == FeedKind::Pinned {
                     geometry.feed_blocks.store(1, Ordering::Release);
                     geometry.feed_frames.store(frames as u64, Ordering::Release);
+                    // 【钉住流的 UI 修正量必须归零】见下面 `playhead_offset` 的说明。
+                    geometry.render_lead_valid.store(false, Ordering::Release);
+                    // 【origin / first_raw 是这一轮的关键读数】它们回答"这条时间轴从哪
+                    // 起算"。origin 恒为 0 是本轮的修复点；first_raw 只作诊断，它可以是
+                    // 任意值（VEGAS 会把它留在最后播放头），**不参与**读位置。
                     log::info!(
-                        "[capture] feed begin kind=pinned raw={} local={} frames={}",
+                        "[capture] feed begin kind=pinned raw={} local={} frames={} origin={} first_raw={} feed_frames={}",
                         raw_start,
                         position,
-                        frames
+                        frames,
+                        decision.feed_origin,
+                        session.feed_timeline.first_raw,
+                        decision.feed_frames_before,
                     );
                 } else {
-                    log::info!("[capture] feed end blocks={blocks} frames={fed} reason=transport");
+                    log::info!(
+                        "[capture] feed end blocks={blocks} frames={fed} reason=transport origin={} first_raw={} last_raw={} passes={}",
+                        session.feed_timeline.origin,
+                        session.feed_timeline.first_raw,
+                        raw_start,
+                        geometry.pass.load(Ordering::Acquire),
+                    );
                 }
             } else if decision.feed == FeedKind::Pinned {
                 geometry.feed_blocks.fetch_add(1, Ordering::Relaxed);
@@ -946,7 +1016,9 @@ impl ExtensionOwner {
             }
         }
         let mut playhead_offset = geometry.playhead_offset.load(Ordering::Acquire);
-        if !had || new_pass || !transport_active {
+        // 【钉住流没有 UI 播放头可言】修正量的全部依据是"喂入位置领先宿主光标多少"，
+        // 而钉住流根本没有宿主光标在走。留一个非零值只会把 UI 读数也一起推歪。
+        if !had || new_pass || !transport_active || feed_local {
             // 新流 / 新 pass / 停播：喂入域与宿主读数对齐，修正量作废。
             playhead_offset = 0;
         } else if !playing {
@@ -1123,9 +1195,13 @@ impl ExtensionOwner {
             // 会被当成上一遍的延续，位置从头一块就开始错。
             if geometry.feed.load(Ordering::Acquire) == FeedKind::Pinned.code() {
                 log::info!(
-                    "[capture] feed end blocks={} frames={} reason=reset",
+                    "[capture] feed end blocks={} frames={} reason=reset origin={} first_raw={} last_raw={} passes={}",
                     geometry.feed_blocks.load(Ordering::Acquire),
-                    geometry.feed_frames.load(Ordering::Acquire)
+                    geometry.feed_frames.load(Ordering::Acquire),
+                    geometry.feed_origin.load(Ordering::Acquire),
+                    geometry.feed_first_raw.load(Ordering::Acquire),
+                    geometry.last_raw_start.load(Ordering::Acquire),
+                    geometry.pass.load(Ordering::Acquire),
                 );
             }
             geometry
@@ -1135,6 +1211,12 @@ impl ExtensionOwner {
             geometry.feed_frames.store(0, Ordering::Release);
             geometry.window_spent.store(false, Ordering::Release);
             geometry.pinned_signal_frames.store(0, Ordering::Release);
+            // 【时间轴必须跟着清】留着 frames 会让下一次起播从上一条喂入流的末尾接着数
+            // —— 一次复位就凭空多出几十秒的偏移。
+            geometry.feed_origin.store(0, Ordering::Release);
+            geometry.feed_frames_total.store(0, Ordering::Release);
+            geometry.feed_first_raw.store(NO_POSITION, Ordering::Release);
+            geometry.feed_promoted.store(false, Ordering::Release);
             geometry
                 .timebase_kind
                 .store(TimebaseKind::Unknown.code(), Ordering::Release);

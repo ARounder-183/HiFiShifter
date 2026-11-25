@@ -2895,3 +2895,67 @@ fn a_pass_boundary_never_re_anchors_a_pinned_feed() {
     );
     assert_eq!(geometry.pass_rewinds.load(Ordering::Acquire), 0);
 }
+
+/// **回归：渲染位置从喂入域的 0 起算，不是宿主的最后播放头。**
+///
+/// 【现场原形】VEGAS Render As 期间 `kPlaying` 全程为 0，而 `projectTimeSamples`
+/// 停在用户**最后一次播放/停止**的位置（现场三次渲染分别是 0、0、893720 = 18.62 s）。
+/// 旧实现把位置锚在它上面，于是整段产物被平移了同样的长度 —— 三次渲染因此互不相同，
+/// 而用户的描述正是"最后播放/停止的位置会极大地影响渲染输出的偏移"。
+///
+/// 【这条用例钉的是结果】它只关心三件事：位置从 0 起算并逐块续接、整段只有一个 pass、
+/// 首块 raw 只作诊断（可以任意大）。
+#[test]
+fn a_pinned_render_starts_at_zero_even_when_the_host_playhead_is_stale() {
+    const STALE_RAW: i64 = 893_720; // 18.62 s
+    let owner = insert_owner();
+    let context = crate::block_context::BlockContext {
+        sample_rate: 48_000.0,
+        project_time_samples: STALE_RAW,
+        playing: false,
+        ..Default::default()
+    };
+    const BLOCK: usize = 24_576;
+    let mut fed = 0usize;
+    let mut next_position = Some(0i64);
+    let mut index = 0usize;
+    while fed < 480_000 {
+        host_is_feeding_changing_audio(&owner);
+        index += 1;
+        let block = owner.note_stream_block_at(
+            ProcessStream::Realtime,
+            context,
+            BLOCK,
+            // 只有首块由 `playback` 合成一个起播上升沿。
+            index == 1,
+            false,
+            None,
+        );
+        if let Some(expected) = next_position {
+            assert_eq!(
+                block.position, expected,
+                "第 {index} 块的位置必须从喂入域的 0 起算，而不是宿主播放头"
+            );
+        }
+        next_position = Some(block.position + BLOCK as i64);
+        fed += BLOCK;
+    }
+    let geometry = &owner.streams[ProcessStream::Realtime.index()];
+    assert_eq!(
+        geometry.pass.load(Ordering::Acquire),
+        1,
+        "整段渲染只许有一个 pass"
+    );
+    assert_eq!(geometry.pass_rewinds.load(Ordering::Acquire), 0);
+    assert_eq!(
+        geometry.feed_origin.load(Ordering::Acquire),
+        0,
+        "origin 必须是 0，不是 893720"
+    );
+    assert_eq!(
+        geometry.feed_first_raw.load(Ordering::Acquire),
+        STALE_RAW,
+        "首块 raw 只作诊断，可以任意大"
+    );
+    assert_eq!(next_position, Some(fed as i64));
+}
