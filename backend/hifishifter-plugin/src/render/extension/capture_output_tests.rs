@@ -2808,7 +2808,7 @@ fn a_vegas_render_feeds_the_whole_take_once() {
         let rising = fed == 0;
         let block = owner.note_stream_block_at(
             ProcessStream::Realtime,
-            &context,
+            context,
             frames,
             rising,
             false,
@@ -2865,7 +2865,7 @@ fn a_pass_boundary_never_re_anchors_a_pinned_feed() {
         let frames = 24_576.min(49_152 - fed);
         owner.note_stream_block_at(
             ProcessStream::Realtime,
-            &context,
+            context,
             frames,
             rising,
             false,
@@ -2883,7 +2883,7 @@ fn a_pass_boundary_never_re_anchors_a_pinned_feed() {
     // 注入边界：这一块"又升起了一次"。
     host_is_feeding_changing_audio(&owner);
     let block =
-        owner.note_stream_block_at(ProcessStream::Realtime, &context, 24_576, true, false, None);
+        owner.note_stream_block_at(ProcessStream::Realtime, context, 24_576, true, false, None);
     assert_eq!(
         geometry.pass.load(Ordering::Acquire),
         1,
