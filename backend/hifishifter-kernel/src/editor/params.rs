@@ -212,8 +212,12 @@ pub fn get_param_frames(
             },
         };
     }
+    // 【这是探针，不是告警】每一次参数取数都打一行 WARN，现场 App 日志里它占 850 行
+    // （该文件 WARN 共 5 734 行，占 15%），把真告警压在里面。它回答的是"界面刚才取了
+    // 哪一段"，属于开发期读数，因此降到 DEBUG —— 探针开关（`probes_enabled`）本身
+    // 仍然保留：需要读数时打开它就能逐条看到，不需要时它不该出现。
     if crate::log_policy::probes_enabled() {
-        log::warn!(
+        log::debug!(
             "get_param_frames(track_id={}, param={}, start_frame={}, frame_count={}, stride={:?} binary={:?})",
             track_id, param, start_frame, frame_count, stride, binary
         );
