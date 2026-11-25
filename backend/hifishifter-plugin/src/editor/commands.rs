@@ -1571,13 +1571,25 @@ fn after_musical_context_write(session: &EditorSession) {
     document.project_plugin_musical_context_locked(&mut session.timeline.lock_or_recover());
     document.render_epoch.fetch_add(1, Ordering::AcqRel);
 }
+/// 一条源的峰值文件；`Ok(None)` = **还没轮到它**（宿主尚未授权这条刚导入的源）。
+///
+/// 【为什么返回值多了一层 Option】"尚未就绪"与"拒绝"在协议里必须用不同的答案：
+/// 前者由空载荷表达（前端有冷却与有界重试），后者是安全边界，必须报错。把两者都
+/// 折成一个 Err 会让前端把瞬时状态记成永久失败 —— 那正是"新导入的 Clip 要重载才
+/// 显示波形"的成因。
 fn peaks(
     session: &EditorSession,
     path: &str,
-) -> Result<std::sync::Arc<hifishifter_kernel::hfspeaks_v2::HfsPeakFile>, String> {
-    session.check_source(path)?;
+) -> Result<Option<std::sync::Arc<hifishifter_kernel::hfspeaks_v2::HfsPeakFile>>, String> {
+    match session.check_source(path) {
+        crate::editor::session::SourceCheck::Ready => {}
+        crate::editor::session::SourceCheck::NotYetAuthorized => return Ok(None),
+        crate::editor::session::SourceCheck::Denied => {
+            return Err("source is not authorized by this ARA session".into())
+        }
+    }
     if let Some(found) = session.peaks.lock_or_recover().get(path).cloned() {
-        return Ok(found);
+        return Ok(Some(found));
     }
     let result = std::sync::Arc::new(hifishifter_kernel::hfspeaks_v2::compute_mipmap_peaks(
         std::path::Path::new(path),
@@ -1588,7 +1600,7 @@ fn peaks(
         cache.clear();
     }
     cache.insert(path.into(), result.clone());
-    Ok(result)
+    Ok(Some(result))
 }
 
 /// Read-only startup data has no document/PCM dependency and can bypass the actor.
@@ -2782,9 +2794,13 @@ pub(super) fn dispatch(
         "get_waveform_mipmap_binary" => {
             let path = input["sourcePath"].as_str().ok_or("sourcePath missing")?;
             let level = input["level"].as_u64().unwrap_or(2).min(2) as usize;
+            // 空串 = 尚未就绪（见 `peaks`）：前端对它有 3 s 冷却 + 有界重试，
+            // 绝不会把它记成永久失败。
+            let Some(data) = peaks(session, path)? else {
+                return Ok(Value::String(String::new()));
+            };
             Ok(Value::String(
-                base64::engine::general_purpose::STANDARD
-                    .encode(peaks(session, path)?.to_binary_level(level)),
+                base64::engine::general_purpose::STANDARD.encode(data.to_binary_level(level)),
             ))
         }
         "preload_waveform_mipmap" => {
@@ -2802,7 +2818,14 @@ pub(super) fn dispatch(
             }
             let mut result = serde_json::Map::new();
             for path in paths {
-                let data = peaks(session, &path)?;
+                // 【为什么一条没就绪的源不许打死整批】一次导入会触发一次批量预取，
+                // 同一批里通常还有别的 clip。此前任意一条 `?` 上抛就让**整批**失败，
+                // 其余路径只能退回逐个重试 —— 自己给自己制造故障。
+                // 空串 = 尚未就绪：该路径这一栏留空，其余路径照常返回。
+                let Some(data) = peaks(session, &path)? else {
+                    result.insert(path, json!(["", "", ""]));
+                    continue;
+                };
                 let encoded: Vec<_> = (0..3)
                     .map(|level| {
                         if levels

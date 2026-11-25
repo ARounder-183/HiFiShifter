@@ -156,6 +156,17 @@ export type LoadCallback = (
 
 // ============== 核心实现 ==============
 
+/**
+ * 后端回答"这条源还没被本会话授权"（旧后端用错误表达"还没轮到"）。
+ *
+ * 【为什么按字符串判】协议没有错误码，只有一句话；这句话是 `check_source` 的固定
+ * 返回。新后端已经改用空载荷表达同一件事，这条分支只为旧后端兜底 —— 但它必须存在，
+ * 否则一次版本错配就足以让波形永久消失。
+ */
+function isSourceNotAuthorizedYet(message: string): boolean {
+    return message.includes("not authorized by this ARA session");
+}
+
 class WaveformMipmapStoreImpl {
     /** sourcePath → FileMipmapCache */
     private cache = new Map<string, FileMipmapCache>();
@@ -1141,6 +1152,16 @@ class WaveformMipmapStoreImpl {
                 }
             } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
+                if (isSourceNotAuthorizedYet(msg)) {
+                    // 旧后端用一条**错误**回答"这条源还没被授权"。它与"文件真的不可用"
+                    // 不是一回事：写成 failedLevels 会让波形永久消失到重载为止 —— 用户
+                    // 报的"新导入的 Clip 不显示波形、重载后才恢复"正是这条路径。按
+                    // "尚未就绪"处理，与新后端的空载荷走同一条冷却 + 有界重试。
+                    this.retryCooldownUntil.set(retryKey, Date.now() + RETRY_NOT_READY_COOLDOWN_MS);
+                    this.notify(sourcePath, "loading");
+                    this.scheduleNotReadyRetry(sourcePath, level);
+                    return;
+                }
                 const current = this.cache.get(sourcePath);
                 if (current) current.failedLevels.add(level);
                 this.notify(sourcePath, "error", msg);

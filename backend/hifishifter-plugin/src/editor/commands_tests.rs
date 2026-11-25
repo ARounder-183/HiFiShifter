@@ -834,3 +834,97 @@ fn source_preparation_returns_inventory_before_files_and_preserves_history() {
     );
     document.close();
 }
+
+/// **回归：刚导入、还没被 ARA 授权的源不是"授权失败"。**
+///
+/// 【现场原形】REAPER 的文件 → 导入音频：item 在 +89 ms 建成，波形请求在 +358 ms
+/// 到达，而宿主到 +299 ms 才发布 region。旧实现把"还没轮到"报成"这个源不属于本会话"，
+/// 前端把那条错误记成永久失败，波形一直空着 —— 用户的原话是"重新加载以后才恢复"。
+#[test]
+fn a_pending_import_source_is_not_an_authorization_failure() {
+    let (model, owner, _identity) = crate::editor::session::tests::fixture();
+    let editor = owner.editor_session().unwrap();
+    editor.ensure_loaded(false).unwrap();
+    let path = "C:/pending/import.wav";
+    model
+        .session()
+        .begin_pending_import(crate::render::document::PendingImport {
+            item: "{PENDING-1}".into(),
+            source_path: path.into(),
+            landed_track: None,
+            requested_at: std::time::Instant::now(),
+            rounds: 0,
+            stall_reported: false,
+        });
+    let value = dispatch(
+        &editor,
+        "get_waveform_mipmap_binary",
+        json!({"sourcePath": path, "level": 2}),
+    )
+    .expect("尚未就绪必须是空载荷，而不是错误");
+    assert_eq!(
+        value,
+        json!(""),
+        "空串 = 前端按未就绪重试，绝不写 failedLevels"
+    );
+    model.session().close();
+}
+
+/// **安全底线：与本会话无关的路径照旧拒绝。**
+#[test]
+fn an_unknown_source_is_still_denied() {
+    let (model, owner, _identity) = crate::editor::session::tests::fixture();
+    let editor = owner.editor_session().unwrap();
+    editor.ensure_loaded(false).unwrap();
+    let error = dispatch(
+        &editor,
+        "get_waveform_mipmap_binary",
+        json!({"sourcePath": "C:/elsewhere/private.wav", "level": 2}),
+    )
+    .expect_err("未登记的路径必须被拒绝：JS 不能借这条通路读本地文件");
+    assert!(
+        error.contains("not authorized"),
+        "拒绝的理由必须与原句一致，前端按它分类: {error}"
+    );
+    model.session().close();
+}
+
+/// **回归：批量预取里一条"还没就绪"不许打死整批。**
+///
+/// 【为什么要紧】一次导入会触发一次 `batchPreload`，同一批里通常还有别的 clip。
+/// 此前任意一条路径 `?` 上抛就让整批失败，其余路径退回逐个重试 —— 自己给自己制造故障。
+/// 反过来，批次里出现**真正的拒绝**时仍然必须整体报错：那是安全边界，不是时序。
+#[test]
+fn a_batch_with_one_pending_source_still_returns_the_others() {
+    let (model, owner, _identity) = crate::editor::session::tests::fixture();
+    let editor = owner.editor_session().unwrap();
+    editor.ensure_loaded(false).unwrap();
+    for (index, path) in ["C:/pending/a.wav", "C:/pending/b.wav"].iter().enumerate() {
+        model
+            .session()
+            .begin_pending_import(crate::render::document::PendingImport {
+                item: format!("{{PENDING-B{index}}}"),
+                source_path: (*path).into(),
+                landed_track: None,
+                requested_at: std::time::Instant::now(),
+                rounds: 0,
+                stall_reported: false,
+            });
+    }
+    let batch = dispatch(
+        &editor,
+        "batch_get_waveform_mipmap",
+        json!({"sourcePaths": ["C:/pending/a.wav", "C:/pending/b.wav"], "levels": [2]}),
+    )
+    .expect("两条都只是尚未就绪，批次本身必须成功");
+    assert_eq!(batch["C:/pending/a.wav"], json!(["", "", ""]));
+    assert_eq!(batch["C:/pending/b.wav"], json!(["", "", ""]));
+    let error = dispatch(
+        &editor,
+        "batch_get_waveform_mipmap",
+        json!({"sourcePaths": ["C:/pending/a.wav", "C:/elsewhere/private.wav"], "levels": [2]}),
+    )
+    .expect_err("批次里的拒绝仍然是错误");
+    assert!(error.contains("not authorized"), "{error}");
+    model.session().close();
+}

@@ -48,6 +48,20 @@ const RENDER_RETRY_BACKOFF: Duration = Duration::from_secs(5);
 /// 预算内的快速重试间隔。
 const RENDER_RETRY_INTERVAL: Duration = Duration::from_millis(150);
 
+/// 波形授权判定的三个答案（见 `EditorSession::check_source`）。
+///
+/// 【为什么必须三态】`Ready` 与 `Denied` 之间那一段不是错误，是**时序**：我们刚
+/// 导入的源要等宿主建 region 才被授权。把它报成拒绝，前端就只能永久记失败。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SourceCheck {
+    /// 已授权，可以读。
+    Ready,
+    /// 这是我们自己刚导入、宿主还没授权的那条源：**尚未就绪**，按空载荷回答。
+    NotYetAuthorized,
+    /// 与本会话的任何一个宿主 item 都无关 —— 安全边界，照旧拒绝。
+    Denied,
+}
+
 /// 一条待定导入等多久还没被 ARA 认领，就该告诉用户"宿主的 Item 建了，音频没来"。
 ///
 /// 【为什么是 60 秒】现场 100~300 ms 就追上了；60 s 只会在"用户已经在宿主里撤销了
@@ -3933,7 +3947,18 @@ impl EditorSession {
     }
 
     /// 波形入口只接受本会话从宿主PCM生成的路径，不能让JS任意读取本地文件。
-    pub(super) fn check_source(&self, path: &str) -> Result<(), String> {
+    ///
+    /// 【为什么是三个答案】这个函数此前把两种完全不同的情形压成同一个 `Err`：
+    ///
+    ///   * **尚未授权**：这就是我们刚导入、宿主还没建 region 的那个源。它是**瞬时**
+    ///     状态，下一秒就会自己好；
+    ///   * **拒绝**：这条路径与本会话任何一个宿主 item 都无关 —— 安全边界。
+    ///
+    /// 压成一个之后，前端只能把两种都记成"永久失败"（`failedLevels`），于是"还没轮到"
+    /// 变成"永远没有波形，直到重载" —— 用户报的原话就是"重新加载以后才恢复正常"。
+    /// 协议里其实早就区分开了：空载荷 = 尚未就绪（前端有 3 s 冷却 + 有界重试），
+    /// 缺的只是后端用对它的那一步。
+    pub(super) fn check_source(&self, path: &str) -> SourceCheck {
         if self
             .loaded
             .lock_or_recover()
@@ -3945,10 +3970,22 @@ impl EditorSession {
                 .values()
                 .any(|(_, clip)| clip.source_path.as_deref() == Some(path))
         {
-            Ok(())
-        } else {
-            Err("source is not authorized by this ARA session".into())
+            return SourceCheck::Ready;
         }
+        // 【为什么这一条不是放松安全边界】它只承认"我们自己刚为某个宿主 item 写下的
+        // 路径"，而那条记录是导入命令在**宿主的 item 已经建成之后**才写的 —— 证据来自
+        // 宿主，不是来自调用方。
+        if self
+            .document()
+            .is_some_and(|document| document.pending_import_for_source(path))
+        {
+            // 【为什么直接 info 不套限流】门禁（`check-log-levels.py`）的规则是"Info 是
+            // 叙事，不许限流"；而这里每次请求只有一行，且只在"待定导入还活着"的那几百
+            // 毫秒里出现 —— 它本来就该被看见，不该被折进一条 `[throttled]` 汇总。
+            log::info!("[waveform] not-yet-authorized path={path} (a pending import owns it)");
+            return SourceCheck::NotYetAuthorized;
+        }
+        SourceCheck::Denied
     }
 
     /// 为一次音节分析冻结 owned 快照，并把请求登记为在途。
@@ -3975,7 +4012,13 @@ impl EditorSession {
             .clone()
             .or_else(|| clip.source_path.clone())
             .ok_or("source_not_authorized")?;
-        self.check_source(&source_path)?;
+        // 音节分析要真的读这条 PCM：**尚未授权**在这里不能当成"再等等"——
+        // worker 一旦拿到路径就会去解文件。所以只有 `Ready` 放行。
+        match self.check_source(&source_path) {
+            SourceCheck::Ready => {}
+            SourceCheck::NotYetAuthorized => return Err("source_not_ready".into()),
+            SourceCheck::Denied => return Err("source_not_authorized".into()),
+        }
         let frame_period_ms = timeline.frame_period_ms().max(0.1);
         let source_digest = syllable_source_digest(&source_path, take, frame_period_ms);
         let audible_window = clip_audible_window(clip);
@@ -8637,7 +8680,11 @@ pub mod tests {
         assert_eq!(editor.timeline.lock_or_recover().tracks[0].volume, 1.);
         assert!(editor.history.lock_or_recover().records.is_empty());
         assert_eq!(editor.generation.load(Ordering::Acquire), 0);
-        assert!(editor.check_source("C:/Users/user/private.wav").is_err());
+        assert_eq!(
+            editor.check_source("C:/Users/user/private.wav"),
+            SourceCheck::Denied,
+            "未登记的路径必须仍然是拒绝，不能因为新增了\"尚未就绪\"就放宽"
+        );
         editor.close();
     }
     /// 原前端以base+position消费；停播seek也必须得到宿主绝对位置。
@@ -8884,7 +8931,7 @@ pub mod tests {
                 source.ends_with(".wav"),
                 "inventory replaced the authorized PCM path: {source}"
             );
-            assert!(editor.check_source(&source).is_ok());
+            assert_eq!(editor.check_source(&source), SourceCheck::Ready);
             document.ui_geometry_revision.fetch_add(1, Ordering::AcqRel);
             editor.refresh_ui_geometry(&document, false);
             assert_eq!(
@@ -9303,7 +9350,7 @@ pub mod tests {
         editor.retain_display_waveforms(&mut visible, true);
         assert!(visible.clips[0].muted);
         assert_eq!(visible.clips[0].source_path.as_ref(), Some(&path));
-        assert!(editor.check_source(&path).is_ok());
+        assert_eq!(editor.check_source(&path), SourceCheck::Ready);
         track.items[0].geometry.take_id = "different-take".into();
         document
             .ui_tracks
@@ -9353,9 +9400,11 @@ pub mod tests {
             "媒体路径应指向物化后的本地 PCM：{source}"
         );
         // 波形与渲染输入共用同一份授权 PCM：能取到源即证明两者都可用。
-        editor
-            .check_source(&source)
-            .expect("授权 PCM 必须已物化，波形/渲染输入才可用");
+        assert_eq!(
+            editor.check_source(&source),
+            SourceCheck::Ready,
+            "授权 PCM 必须已物化，波形/渲染输入才可用"
+        );
         document.close();
     }
     /// 真实宿主正向倍率不再被GUI挡住；take的源窗口和项目时长保留各自坐标。

@@ -436,6 +436,19 @@ pub(crate) struct ResolvedImport {
     pub elapsed: std::time::Duration,
 }
 
+/// 两个源路径是不是同一个文件。
+///
+/// 【为什么要一个比较函数】路径来自两条不同的通路：用户选中的路径（导入命令）与宿主
+/// 回报的 persistentID（ARA / 清单）。在 Windows 上两者的大小写与分隔符都可能不同，
+/// 而这条判据只决定"这次波形请求该不该等"，放宽一点是安全的 —— 它只能放宽到
+/// **我们自己登记过的那几个文件**。
+fn same_source_path(left: &str, right: &str) -> bool {
+    fn normalised(value: &str) -> String {
+        value.replace('/', "\\").to_ascii_lowercase()
+    }
+    !left.is_empty() && !right.is_empty() && normalised(left) == normalised(right)
+}
+
 #[derive(Default)]
 pub struct DocumentSession {
     controller: AtomicUsize,
@@ -2850,6 +2863,17 @@ impl DocumentSession {
                 .any(|entry| entry.geometry.item_id == item)
         });
         in_inventory.then(|| format!("ara-item-{item}"))
+    }
+
+    /// 这条路径是不是一条**还没到**的导入所写下的源？
+    ///
+    /// 【它为什么不是放松安全边界】它只承认"我们自己刚为某个宿主 item 写下的路径"，
+    /// 而那条记录是导入命令在宿主**已经建成 item 之后**才写的 —— 证据来自宿主。
+    pub(crate) fn pending_import_for_source(&self, path: &str) -> bool {
+        self.pending_imports
+            .lock_or_recover()
+            .iter()
+            .any(|entry| same_source_path(&entry.source_path, path))
     }
 
     /// 取走"等了太久、还没转正"的导入（每一条只报一次，**不改回执、不删占位**）。
