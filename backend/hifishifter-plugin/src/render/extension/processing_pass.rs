@@ -125,6 +125,65 @@ pub(crate) const PREVIEW_REPEAT_TOLERANCE: u32 = 2;
 /// 回调中断超过这个间隔就结束预览（毫秒）。**只由非音频线程使用**。
 pub(crate) const PREVIEW_QUIET_MS: u64 = 2_000;
 
+/// 渲染 run 的间隔上界（毫秒）：两次 pass 之间超过这个时长就不再算同一次渲染。
+///
+/// 【为什么是 2 秒】VEGAS 的 chunk 之间只隔几十毫秒（现场 39 个 pass / 21 秒 ≈ 0.54 s
+/// 一个）；而"用户停手 → 再按渲染"之间至少是几秒。2 秒把两者分开，又不会因为一次
+/// 慢磁盘写入把同一次渲染切成两段。
+pub(crate) const RENDER_RUN_GAP_MS: u64 = 2_000;
+
+/// 相邻 pass 的宿主位置差容差（以**块**为单位）。见 R-run-1。
+pub(crate) const RENDER_RUN_BLOCK_TOLERANCE: i64 = 2;
+
+/// 上一段渲染 run 的尾巴：判"新 pass 是否延续它"的全部输入。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RenderRunTail {
+    /// 上一个 pass 最后一块的宿主位置。
+    pub(crate) raw_start: i64,
+    /// 上一个 pass 结束时的本地游标（= 下一次的起点）。
+    pub(crate) cursor_end: i64,
+    /// 采样率（取整）。
+    pub(crate) sample_rate: u32,
+    /// 上一个 pass 最后一块的帧数（容差按它换算）。
+    pub(crate) block_frames: i64,
+    /// 上一个 pass 结束的时刻（`now_ms`）。
+    pub(crate) ended_ms: u64,
+}
+
+/// **R-run-1 / R-run-2**：新 pass 是否延续上一次渲染 run。
+///
+/// 【为什么单独成纯函数】这条判据决定"渲染出来的音频对不对"：判错一次，整个文件就是
+/// 重复的前几秒。纯函数可单测，也能在 `[capture] pass begin` 的诊断行里直接复现。
+///
+/// * 没有尾巴 / 间隔超过 {@link RENDER_RUN_GAP_MS} / 采样率变了 ⇒ 新 run（R-run-3 的一部分）；
+/// * 宿主位置**被钉住**（与上一 pass 相同）⇒ 同一次 run，游标必须接着走（R-run-2）；
+/// * 位置**连续**（|Δ| ≤ {@link RENDER_RUN_BLOCK_TOLERANCE} 块）⇒ 同一次 run（R-run-1）。
+///
+/// 位置跳变（真 seek）不满足上面任何一条 ⇒ 新 run。
+pub(crate) fn render_run_continues(
+    tail: Option<RenderRunTail>,
+    raw_start: i64,
+    sample_rate: f64,
+    now_ms: u64,
+) -> bool {
+    let Some(tail) = tail else { return false };
+    if tail.ended_ms == 0 || now_ms.saturating_sub(tail.ended_ms) > RENDER_RUN_GAP_MS {
+        return false;
+    }
+    let rate = sane_rate(sample_rate).round().max(1.0) as u32;
+    if rate != tail.sample_rate {
+        return false;
+    }
+    if raw_start == tail.raw_start {
+        return true;
+    }
+    let tolerance = tail
+        .block_frames
+        .saturating_mul(RENDER_RUN_BLOCK_TOLERANCE)
+        .max(1);
+    raw_start.saturating_sub(tail.raw_start).abs() <= tolerance
+}
+
 /// 处理 pass 的 epoch 高位。
 ///
 /// 【为什么需要】`Capture::begin_transport_pass` 只比较 epoch 数值，而处理 pass 与
@@ -231,6 +290,34 @@ pub(crate) struct ProcessingPass {
     /// 代表候选块当时写在哪。存住它，确认才能算出正确的本地起点与是否需要平移。
     candidate_local: AtomicBool,
     candidate_offset: AtomicI64,
+    // ── 渲染 run（见 render_run_continues）────────────────────────────────
+    /// 当前 run 的序号（新 run 才自增）。
+    run_id: AtomicU64,
+    /// 本 pass 是否延续了上一次 run。
+    run_continues: AtomicBool,
+    /// 上一段 run 的尾巴；字段语义见 {@link RenderRunTail}。
+    run_tail_raw: AtomicI64,
+    run_tail_cursor: AtomicI64,
+    run_tail_rate: AtomicU32,
+    run_tail_frames: AtomicI64,
+    run_tail_ms: AtomicU64,
+    /// 最近一块的帧数（尾巴的容差换算要用）。
+    last_block_frames: AtomicI64,
+}
+
+/// 渲染 run 的**行为**开关（环境变量 HFS_RENDER_RUN=1）。
+///
+/// 【为什么默认关闭】这条改动会改变输出的时间轴，而现场取证（[capture] pass begin 里的
+/// run= / same_run=）必须先证明"每个 pass 都从 0 读快照"。取证到位后打开即可，不需要改
+/// 逻辑 —— 关闭时音频路径与今天逐字节相同。
+///
+/// 【为什么用 OnceLock 而不是每次读环境变量】本函数在音频线程上被调用；getenv 只在
+/// 第一次（进程内首个处理块）发生一次，之后是一次原子读。
+pub(crate) fn render_run_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("HFS_RENDER_RUN").is_ok_and(|value| value == "1" || value == "true")
+    })
 }
 
 impl ProcessingPass {
@@ -275,6 +362,58 @@ impl ProcessingPass {
         self.pass_id.load(Ordering::Acquire)
     }
 
+    /// 当前渲染 run 的序号（诊断）。
+    pub(crate) fn run_id(&self) -> u64 {
+        self.run_id.load(Ordering::Acquire)
+    }
+
+    /// 本 pass 是否延续了上一次渲染 run（诊断；与行为开关无关，永远如实反映判据）。
+    pub(crate) fn continues_render_run(&self) -> bool {
+        self.run_continues.load(Ordering::Acquire)
+    }
+
+    /// 取出并清空上一段 run 的尾巴。
+    fn take_run_tail(&self) -> Option<RenderRunTail> {
+        let raw = self.run_tail_raw.swap(NO_POSITION, Ordering::AcqRel);
+        if raw == NO_POSITION {
+            return None;
+        }
+        Some(RenderRunTail {
+            raw_start: raw,
+            cursor_end: self.run_tail_cursor.load(Ordering::Acquire),
+            sample_rate: self.run_tail_rate.load(Ordering::Acquire),
+            block_frames: self.run_tail_frames.load(Ordering::Acquire),
+            ended_ms: self.run_tail_ms.load(Ordering::Acquire),
+        })
+    }
+
+    /// 记下本段 run 的尾巴（end / suspend 时调用）。
+    fn record_run_tail(&self) {
+        let raw = self.last_raw.load(Ordering::Acquire);
+        if raw == NO_POSITION {
+            // 一个块都没见过：没有可延续的位置，不记。
+            return;
+        }
+        self.run_tail_raw.store(raw, Ordering::Release);
+        self.run_tail_cursor.store(
+            self.cursor_frames.load(Ordering::Acquire),
+            Ordering::Release,
+        );
+        self.run_tail_rate
+            .store(self.sample_rate.load(Ordering::Acquire), Ordering::Release);
+        self.run_tail_frames.store(
+            self.last_block_frames.load(Ordering::Acquire).max(1),
+            Ordering::Release,
+        );
+        self.run_tail_ms.store(now_ms(), Ordering::Release);
+    }
+
+    /// 不再延续上一段 run（R-run-3：组件失活 / 时间线编辑）。
+    pub(crate) fn invalidate_render_run(&self) {
+        self.run_tail_raw.store(NO_POSITION, Ordering::Release);
+        self.run_tail_ms.store(0, Ordering::Release);
+    }
+
     /// 非音频线程的诊断读数：`(phase, origin, cursor)`。
     pub(crate) fn preview_state(&self) -> (u8, Option<i64>, i64) {
         let origin = self.origin_raw.load(Ordering::Acquire);
@@ -303,10 +442,25 @@ impl ProcessingPass {
             }
             return None;
         }
-        if !self.is_active() || self.kind() != ProcessingKind::Offline {
+        let new_pass = !self.is_active() || self.kind() != ProcessingKind::Offline;
+        if new_pass {
             self.begin_offline(raw_start, sample_rate, pass_sequence);
         }
         let position = self.cursor_frames.load(Ordering::Acquire);
+        self.last_block_frames
+            .store(frames as i64, Ordering::Release);
+        // 尾巴要用它：离线块同样有"最后一块的宿主位置"。
+        self.last_raw.store(raw_start, Ordering::Release);
+        if new_pass {
+            log::info!(
+                "[capture] pass begin run={} kind=offline raw={} local={} frames={} same_run={}",
+                self.run_id(),
+                raw_start,
+                position,
+                frames,
+                self.continues_render_run()
+            );
+        }
         self.cursor_frames
             .fetch_add(frames as i64, Ordering::AcqRel);
         self.last_at_ms.store(now_ms(), Ordering::Release);
@@ -474,6 +628,8 @@ impl ProcessingPass {
             }
 
             let position = self.cursor_frames.load(Ordering::Acquire);
+            self.last_block_frames
+                .store(frames as i64, Ordering::Release);
             self.cursor_frames
                 .fetch_add(frames as i64, Ordering::AcqRel);
             self.last_at_ms.store(now, Ordering::Release);
@@ -513,6 +669,19 @@ impl ProcessingPass {
             clock_offset,
             pass_sequence,
         );
+        // 【取证】每个 pass 的第一块一行：run 序号、判据结论、宿主位置与本地起点。
+        // 现场判据是"hash 按 pass 周期性重复且 local 每 pass 从 0 开始"（见计划 §5.3.3）。
+        log::info!(
+            "[capture] pass begin run={} kind=frozen raw={} local={} frames={} silent={} same_run={}",
+            self.run_id(),
+            raw_start,
+            self.cursor_frames.load(Ordering::Acquire),
+            frames,
+            silent,
+            self.continues_render_run()
+        );
+        self.last_block_frames
+            .store(frames as i64, Ordering::Release);
         self.candidate_signal.store(!silent, Ordering::Release);
         self.fingerprint_valid.store(true, Ordering::Release);
         self.last_fingerprint.store(fingerprint, Ordering::Release);
@@ -572,6 +741,21 @@ impl ProcessingPass {
         cursor: i64,
         pass_sequence: &AtomicU64,
     ) {
+        // ── 渲染 run：这一 pass 是不是上一次渲染的延续 ──────────────────────
+        //
+        // 判据永远算（诊断要如实），**行为**由 HFS_RENDER_RUN 决定（见
+        // render_run_enabled）。关闭时下面的 cursor 原样使用 —— 与今天逐字节相同。
+        let tail = self.take_run_tail();
+        let continues = render_run_continues(tail, origin_raw, sample_rate, now_ms());
+        self.run_continues.store(continues, Ordering::Release);
+        if !continues {
+            self.run_id.fetch_add(1, Ordering::AcqRel);
+        }
+        // R-run-2：同一次 run 内本地游标接着走，**不是**从 0 重新开始。
+        let cursor = match (continues && render_run_enabled(), tail) {
+            (true, Some(tail)) => tail.cursor_end,
+            _ => cursor,
+        };
         let sequence = pass_sequence.fetch_add(1, Ordering::AcqRel) + 1;
         self.pass_id
             .store(PROCESSING_PASS_BIT | sequence, Ordering::Release);
@@ -600,6 +784,9 @@ impl ProcessingPass {
     pub(crate) fn suspend(&self) {
         let phase = self.phase();
         if matches!(phase, PreviewPhase::Candidate | PreviewPhase::Active) {
+            // 挂起时游标与 origin 都保留，尾巴也照记：chunk 之间的 setProcessing(false)
+            // 不能让下一次 begin 以为"这是全新的一次渲染"。
+            self.record_run_tail();
             self.suspended_phase.store(phase.code(), Ordering::Release);
             self.phase
                 .store(PreviewPhase::Suspended.code(), Ordering::Release);
@@ -640,6 +827,8 @@ impl ProcessingPass {
     }
 
     pub(crate) fn end(&self) {
+        // 先记尾巴再清状态：清了就再也算不出"下一个 pass 能不能接上"。
+        self.record_run_tail();
         self.phase
             .store(PreviewPhase::Idle.code(), Ordering::Release);
         self.kind
@@ -657,6 +846,7 @@ impl ProcessingPass {
         self.last_mode.store(0, Ordering::Release);
         self.last_at_ms.store(0, Ordering::Release);
         self.suspended_phase.store(0, Ordering::Release);
+        self.last_block_frames.store(0, Ordering::Release);
     }
 }
 
@@ -713,6 +903,9 @@ impl ExtensionOwner {
 
     /// 组件失活：预览只挂起（保留 cursor），其它通路与停止处理同一处置。
     pub(crate) fn note_component_deactivated(&self) {
+        // R-run-3：组件失活是"这次渲染结束"的硬信号，之后即使位置连续也不该续跑 ——
+        // 否则下一次渲染会把上一次的游标当成自己的起点。
+        self.processing_pass.invalidate_render_run();
         if self.processing_pass.is_preview() {
             self.suspend_processing_preview("component_deactivated");
         } else {
@@ -1206,5 +1399,112 @@ mod tests {
         assert_ne!(first & PROCESSING_PASS_BIT, 0);
         assert_ne!(second & PROCESSING_PASS_BIT, 0);
         assert!(first > 1 << 32);
+    }
+
+    // ── 渲染 run（R-run-1 / R-run-2 / R-run-3）────────────────────────────
+    //
+    // 判据判错的后果不是"慢一点"，而是**渲染出来的音频整段重复**：每个 pass 的本地
+    // 游标都从 0 开始，输出就一遍遍读前几秒。所以这些用例钉的是判据本身。
+
+    fn tail(raw: i64, cursor: i64, ended_ms: u64) -> RenderRunTail {
+        RenderRunTail {
+            raw_start: raw,
+            cursor_end: cursor,
+            sample_rate: 48_000,
+            block_frames: 512,
+            ended_ms,
+        }
+    }
+
+    #[test]
+    fn a_render_run_needs_a_previous_tail() {
+        assert!(!render_run_continues(None, 0, 48_000.0, 1_000));
+    }
+
+    #[test]
+    fn a_render_run_does_not_survive_a_long_gap() {
+        let previous = tail(0, 24_000, 1_000);
+        assert!(!render_run_continues(
+            Some(previous),
+            0,
+            48_000.0,
+            1_000 + RENDER_RUN_GAP_MS + 1
+        ));
+        assert!(render_run_continues(
+            Some(previous),
+            0,
+            48_000.0,
+            1_000 + RENDER_RUN_GAP_MS
+        ));
+    }
+
+    #[test]
+    fn a_render_run_does_not_survive_a_sample_rate_change() {
+        let previous = tail(0, 24_000, 1_000);
+        assert!(!render_run_continues(Some(previous), 0, 44_100.0, 1_100));
+    }
+
+    #[test]
+    fn a_pinned_host_position_continues_the_run() {
+        // VEGAS 的形态：raw 恒为 0，位置全在本地游标里。
+        let previous = tail(0, 24_000, 1_000);
+        assert!(render_run_continues(Some(previous), 0, 48_000.0, 1_100));
+    }
+
+    #[test]
+    fn a_contiguous_host_position_continues_the_run() {
+        let previous = tail(24_000, 48_000, 1_000);
+        assert!(render_run_continues(
+            Some(previous),
+            24_512,
+            48_000.0,
+            1_100
+        ));
+    }
+
+    #[test]
+    fn a_real_seek_starts_a_new_run() {
+        let previous = tail(0, 48_000, 1_000);
+        assert!(!render_run_continues(
+            Some(previous),
+            48_000 * 30,
+            48_000.0,
+            1_100
+        ));
+    }
+
+    #[test]
+    fn consecutive_offline_passes_with_a_pinned_raw_share_one_run() {
+        let pass = ProcessingPass::default();
+        let sequence = sequence();
+        let _ = pass.note_offline_block(2, 0, 512, 48_000.0, &sequence);
+        let first_run = pass.run_id();
+        pass.end();
+        let _ = pass.note_offline_block(2, 0, 512, 48_000.0, &sequence);
+        assert!(pass.continues_render_run());
+        assert_eq!(pass.run_id(), first_run);
+    }
+
+    #[test]
+    fn a_seek_between_offline_passes_starts_a_new_run() {
+        let pass = ProcessingPass::default();
+        let sequence = sequence();
+        let _ = pass.note_offline_block(2, 0, 512, 48_000.0, &sequence);
+        let first_run = pass.run_id();
+        pass.end();
+        let _ = pass.note_offline_block(2, 48_000 * 30, 512, 48_000.0, &sequence);
+        assert!(!pass.continues_render_run());
+        assert_ne!(pass.run_id(), first_run);
+    }
+
+    #[test]
+    fn invalidating_a_run_breaks_the_continuation() {
+        let pass = ProcessingPass::default();
+        let sequence = sequence();
+        let _ = pass.note_offline_block(2, 0, 512, 48_000.0, &sequence);
+        pass.end();
+        pass.invalidate_render_run();
+        let _ = pass.note_offline_block(2, 0, 512, 48_000.0, &sequence);
+        assert!(!pass.continues_render_run());
     }
 }
