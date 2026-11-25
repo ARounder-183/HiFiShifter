@@ -155,6 +155,22 @@ impl Default for TransportSession {
 /// 否则位置已经冻结过一段，再推进就出现了洞。
 pub const FEED_PROMOTE_SEC: f64 = 0.5;
 
+/// 钉住喂入流的**行为**开关（环境变量 `HFS_PINNED_FEED=0` 关闭）。
+///
+/// 【为什么要有开关】这条判据改变的是"位置由谁决定"：开着时我们不再把位置拉回锚点，
+/// 输出随宿主喂入的顺序走。判据本身有三道（pinned + 有信号 + 未布防），但"某个宿主
+/// 的块序列恰好长得像钉住"这种误判在离线环境里无法穷举。留一个开关，现场就能一键退回
+/// 旧行为，不必重新出包 —— 与 `HFS_RENDER_RUN` 同一条纪律。
+///
+/// 【为什么用 OnceLock 而不是每次读环境变量】它在音频线程上被调用；getenv 只在进程内
+/// 第一次发生，之后是一次原子读。
+pub fn pinned_feed_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !std::env::var("HFS_PINNED_FEED").is_ok_and(|value| value == "0" || value == "false")
+    })
+}
+
 /// 本块看到的传输事实。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SessionInput {

@@ -530,7 +530,11 @@ impl ExtensionOwner {
             frames: frames32,
             // 【钉住 = 宿主这一块报的位置与上一块相同】它不是"宿主在走"的反证，
             // 而是"宿主没在报"的正证 —— 提级成喂入流的判据之一。
-            pinned: had && raw_start == last_raw,
+            // 开关见 `hifishifter_capture::transport::pinned_feed_enabled`（`HFS_PINNED_FEED=0`
+            // 一键退回旧行为）。
+            pinned: had
+                && raw_start == last_raw
+                && hifishifter_capture::transport::pinned_feed_enabled(),
             // 【有信号 = 内容彼此不同且非静音】停播反复投递同一份缓冲（FL Studio 形状）
             // 在这一位上恒为假，于是它永远不会被误认成时间轴。
             signal: !silent && !repeated_nonzero,
