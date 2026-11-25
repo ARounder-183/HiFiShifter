@@ -449,6 +449,13 @@ fn same_source_path(left: &str, right: &str) -> bool {
     !left.is_empty() && !right.is_empty() && normalised(left) == normalised(right)
 }
 
+/// 一条 region 连续多少轮未认领才值得 WARN。
+///
+/// 【为什么是 3】ARA 的认领是分轮的，现场实测一轮的间隔是几十毫秒、正常中间态在
+/// 213 ms 内自愈；3 轮已经覆盖"宿主慢一拍"，又不至于把真正挂不上的 region 拖到
+/// 用户看不见。低于它的一律 DEBUG。
+const UNBOUND_WARN_STREAK: u32 = 3;
+
 #[derive(Default)]
 pub struct DocumentSession {
     controller: AtomicUsize,
@@ -620,6 +627,13 @@ pub struct DocumentSession {
     pub source_failures: Mutex<HashMap<String, String>>,
     /// 已经建成、但 ARA 还没认领的导入（见 `PendingImport`）。
     pub(crate) pending_imports: Mutex<Vec<PendingImport>>,
+    /// 未认领 region 的**连续轮次**（region key → `(轮次, 首次未认领时刻)`）。
+    ///
+    /// 【为什么需要"连续多少轮"】region → item 的认领是**分轮**完成的：一轮里还没轮到
+    /// 的那条 region，下一轮就认领了（现场实测 213 ms 自愈）。把这种正常中间态记成
+    /// WARN，等于让每份日志都背着一堆假告警，真告警被压在里面。只有连续
+    /// [`UNBOUND_WARN_STREAK`] 轮仍未认领才值得 WARN，并带上 streak 与首次出现时刻。
+    pub(crate) unbound_streaks: Mutex<HashMap<u64, (u32, std::time::Instant)>>,
     /// 本插件拒绝创建 region 的原因（有界环形缓冲，最新的在尾部）。
     ///
     /// 【为什么要单独一张表】"等待宿主音频"是用户可见的唯一状态，而它把两种截然
@@ -1165,6 +1179,65 @@ mod tests {
             revision + 1,
             "the flag is consumed by one flush"
         );
+    }
+
+    /// **回归：正常的"这一轮还没认领"不许记成 WARN。**
+    ///
+    /// 【现场】20:04:15.431 一轮里 `attached=3 unbound=1`，15.647（213 ms 后）
+    /// `attached=4 unbound=0`。这是 ARA 分轮认领的正常中间态，却以 WARN 出现，
+    /// 而且不带"已经持续了多久"这个量 —— 与"把还没轮到写成出错了"是同一个病根。
+    /// 现在只有连续 [`UNBOUND_WARN_STREAK`] 轮仍未认领才 WARN。
+    #[test]
+    fn an_unbound_region_only_warns_after_repeated_rounds() {
+        use hifishifter_kernel::editor::assembly::{Assembly, RegionRow};
+        let document = DocumentSession::new(900123);
+        let rows = vec![RegionRow {
+            key: 7,
+            clip_id: "ara-region-7".into(),
+            track_id: "track".into(),
+            start_sec: 0.0,
+            duration_sec: 2.0,
+            source_start_sec: 0.0,
+            source_end_sec: 2.0,
+            playback_rate: 1.0,
+            name: "vocal".into(),
+            source_id: "src".into(),
+            modification_id: "mod".into(),
+            source_sample_rate: 48_000.0,
+            source_duration_sec: 2.0,
+            source_channels: 1,
+        }];
+        let mut assembly = Assembly::default();
+        assembly.unbound = vec![0];
+        // 前两轮是中间态（DEBUG 档），第三轮才够 WARN。
+        assert_eq!(
+            document.track_unbound_streaks(&assembly, &rows, false)[0].1,
+            1
+        );
+        assert_eq!(
+            document.track_unbound_streaks(&assembly, &rows, false)[0].1,
+            2
+        );
+        assert_eq!(
+            document.track_unbound_streaks(&assembly, &rows, false)[0].1,
+            UNBOUND_WARN_STREAK,
+            "第三轮才够 WARN 档"
+        );
+        // 认领上了 ⇒ 账必须清掉；否则"失败 → 成功 → 又失败"会继承旧轮次直接报 WARN。
+        assert!(document
+            .track_unbound_streaks(&Assembly::default(), &rows, false)
+            .is_empty());
+        assert!(document.unbound_streaks.lock_or_recover().is_empty());
+        assert_eq!(
+            document.track_unbound_streaks(&assembly, &rows, false)[0].1,
+            1,
+            "清账之后重新从第一轮数起"
+        );
+        // 推迟的那一轮没有真的判定过：不计数，也不清账。
+        assert!(document
+            .track_unbound_streaks(&assembly, &rows, true)
+            .is_empty());
+        assert_eq!(document.unbound_streaks.lock_or_recover()[&7].0, 1);
     }
 
     /// **`unbound` 什么时候该推迟发布、什么时候就是结论。**
@@ -2287,8 +2360,16 @@ impl DocumentSession {
             .iter()
             .filter(|clip| clip.loop_enabled)
             .count();
+        // 【连续未认领的轮次】见 `unbound_streaks`：只有"这一轮还没轮到"与"一直轮不到"
+        // 分开，中间态才不会被记成故障。推迟的那一轮不计数（它没有真的判定过）。
+        let unbound = self.track_unbound_streaks(assembly, rows, deferred);
+        let max_streak = unbound
+            .iter()
+            .map(|(_, streak, _)| *streak)
+            .max()
+            .unwrap_or(0);
         log::info!(
-            "[ara] item map: items={items} regions={} attached={attached} unbound={}                  multi={multi} max_regions_per_item={max} loops={loops}",
+            "[ara] item map: items={items} regions={} attached={attached} unbound={}                  multi={multi} max_regions_per_item={max} loops={loops} unmatched_max_streak={max_streak}",
             rows.len(),
             assembly.unbound.len()
         );
@@ -2305,7 +2386,7 @@ impl DocumentSession {
                 log::Level::Warn,
                 "ara.item-map",
                 format_args!(
-                    "[ara] item map: items={items} regions={} unbound={} multi={multi}                      items_stamp={} regions_stamp={} deferred={deferred}",
+                    "[ara] item map: items={items} regions={} unbound={} multi={multi}                      items_stamp={} regions_stamp={} deferred={deferred} unmatched_max_streak={max_streak}",
                     rows.len(),
                     assembly.unbound.len(),
                     inputs.0,
@@ -2341,19 +2422,64 @@ impl DocumentSession {
         // 【推迟的那一轮不逐条报】下一轮要么已经挂上（这些 region 就不该再报），要么在
         // 发布时统一报一次（上面的汇总行）。逐条报会让同一条 region 每 20 ms 刷一行，
         // 而它恰好是"清单每一代都在变"的拖动期间。
-        for index in assembly.unbound.iter().filter(|_| !deferred) {
-            let Some(row) = rows.get(*index) else {
+        for (index, streak, age_ms) in unbound {
+            let Some(row) = rows.get(index) else {
                 continue;
             };
+            // 【分档：中间态 DEBUG，连续多轮才 WARN】见 `unbound_streaks`。
+            if streak < UNBOUND_WARN_STREAK {
+                log::debug!(
+                    "[ara] playback region {} (start={:.6} duration={:.6} source={}) is not inside any host item this round (streak={streak} age_ms={age_ms}); it produces no clip",
+                    row.key,
+                    row.start_sec,
+                    row.duration_sec,
+                    row.source_id
+                );
+                continue;
+            }
             hifishifter_kernel::log_limiter::emit_limited_key(
                 log::Level::Warn,
                 "ara.region.unbound",
                 format_args!(
-                    "[ara] playback region {} (start={:.6} duration={:.6} source={}) is not                      inside any host item this round; it produces no clip",
+                    "[ara] playback region {} (start={:.6} duration={:.6} source={}) is still not inside any host item after {streak} rounds (first seen {age_ms} ms ago); it produces no clip",
                     row.key, row.start_sec, row.duration_sec, row.source_id
                 ),
             );
         }
+    }
+
+    /// 更新每个未认领 region 的连续轮次，返回 `(region 行下标, 轮次, 已持续毫秒)`。
+    ///
+    /// 【为什么把计数与输出分开】计数是纯状态判定，必须能脱离日志后端被断言 ——
+    /// 与 `binding_report_is_new` 同一手法。它决定"正常中间态"会不会又被写成告警。
+    fn track_unbound_streaks(
+        &self,
+        assembly: &hifishifter_kernel::editor::assembly::Assembly,
+        rows: &[hifishifter_kernel::editor::assembly::RegionRow],
+        deferred: bool,
+    ) -> Vec<(usize, u32, u128)> {
+        // 推迟的那一轮没有真的判定过（清单还在变），不计数、也不清账。
+        if deferred {
+            return Vec::new();
+        }
+        let mut streaks = self.unbound_streaks.lock_or_recover();
+        let mut live = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for index in &assembly.unbound {
+            let Some(row) = rows.get(*index) else {
+                continue;
+            };
+            let entry = streaks
+                .entry(row.key)
+                .or_insert_with(|| (0, std::time::Instant::now()));
+            entry.0 = entry.0.saturating_add(1);
+            live.insert(row.key);
+            out.push((*index, entry.0, entry.1.elapsed().as_millis()));
+        }
+        // 【认领上了就必须清账】否则"失败 → 成功 → 又失败"会继承旧轮次，把一次新的
+        // 中间态直接报成 WARN，而那条 region 其实刚刚好过。
+        streaks.retain(|key, _| live.contains(key));
+        out
     }
 
     /// region key → clip id；`clip_ids` 缺席时按映射层同一算式补出来。
