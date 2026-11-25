@@ -81,8 +81,8 @@ jobs:
         # fields map 1:1 onto the old include (cargo_extra carried over verbatim).
         include: >-
           ${{ fromJSON(github.event_name == 'pull_request'
-          && '[{"name":"windows-x86_64","os":"windows-latest","cargo_target":"x86_64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist"},{"name":"macos-arm64","os":"macos-latest","cargo_target":"aarch64-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx"},{"name":"linux-x86_64","os":"ubuntu-24.04","cargo_target":"x86_64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx"}]'
-          || '[{"name":"windows-x86_64","os":"windows-latest","cargo_target":"x86_64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist"},{"name":"windows-arm64","os":"windows-11-arm","cargo_target":"aarch64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx"},{"name":"macos-arm64","os":"macos-latest","cargo_target":"aarch64-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx"},{"name":"macos-x86_64","os":"macos-15-intel","cargo_target":"x86_64-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx"},{"name":"linux-x86_64","os":"ubuntu-24.04","cargo_target":"x86_64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx"},{"name":"linux-arm64","os":"ubuntu-24.04-arm","cargo_target":"aarch64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx"}]') }}
+          && '[{"name":"windows-x86_64","os":"windows-latest","cargo_target":"x86_64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist","tauri_extra":""},{"name":"macos-arm64","os":"macos-latest","cargo_target":"aarch64-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""},{"name":"linux-x86_64","os":"ubuntu-24.04","cargo_target":"x86_64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--config tauri.linux.x86_64.conf.json"}]'
+          || '[{"name":"windows-x86_64","os":"windows-latest","cargo_target":"x86_64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist","tauri_extra":""},{"name":"windows-arm64","os":"windows-11-arm","cargo_target":"aarch64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""},{"name":"macos-arm64","os":"macos-latest","cargo_target":"aarch64-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""},{"name":"macos-x86_64","os":"macos-15-intel","cargo_target":"x86_64-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""},{"name":"linux-x86_64","os":"ubuntu-24.04","cargo_target":"x86_64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--config tauri.linux.x86_64.conf.json"},{"name":"linux-arm64","os":"ubuntu-24.04-arm","cargo_target":"aarch64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""}]') }}
     steps:
       - uses: actions/checkout@v6
 
@@ -291,7 +291,10 @@ jobs:
           HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
         with:
           projectPath: backend/src-tauri
-          args: ${{ matrix.cargo_extra }}
+          # [Why tauri_extra comes before cargo_extra] The first `--` in the argument list ends the
+          # tauri CLI's own flags; everything after it is handed to cargo. A per-architecture
+          # config file has to land on the tauri side of that boundary.
+          args: ${{ matrix.tauri_extra }} ${{ matrix.cargo_extra }}
 
       - name: Build and bundle (macOS)
         if: runner.os == 'macOS'
@@ -304,7 +307,7 @@ jobs:
           # The unified macOS pkg needs the .app kept as the pkg payload; the DMG is no
           # longer produced separately. Only app is requested, preventing tauri-bundler
           # from cleaning up intermediate artifacts after generating a DMG.
-          args: --bundles app ${{ matrix.cargo_extra }}
+          args: --bundles app ${{ matrix.tauri_extra }} ${{ matrix.cargo_extra }}
 
       - name: Set LD_LIBRARY_PATH for linuxdeploy (Linux)
         if: runner.os == 'Linux'
@@ -333,7 +336,7 @@ jobs:
           NO_APPSTREAM: "1"
         with:
           projectPath: backend/src-tauri
-          args: --bundles appimage ${{ matrix.cargo_extra }}
+          args: --bundles appimage ${{ matrix.tauri_extra }} ${{ matrix.cargo_extra }}
 
       - name: Resolve Tauri release directory
         if: always()

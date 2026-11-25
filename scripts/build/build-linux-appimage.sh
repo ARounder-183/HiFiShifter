@@ -37,6 +37,20 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 PROJECT_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 BACKEND_DIR="$PROJECT_DIR/backend"
 
+# [Why the Tauri config file is per-architecture] tauri.linux.conf.json declares only what
+# **every** Linux target really produces. libwebgpu_dawn.so is an x86_64 artefact -- ORT on Linux
+# ARM64 deliberately ships no dawn -- so declaring it unconditionally makes tauri-build abort with
+# "resource path resources/linux/libwebgpu_dawn.so doesn't exist" before a single line compiles,
+# and the AppDir is never created. The split is the same one Windows makes for DirectML.dll.
+# CI passes the same file (see the tauri_extra matrix field in .github/workflows/build.yml), so a
+# local pass still means the CI artifact is the same shape.
+# An absolute path because this script runs cargo from backend/, while the tauri project directory
+# is backend/src-tauri; the two make a relative --config ambiguous.
+TAURI_CONFIG_ARG=""
+case "$(uname -m)" in
+    x86_64 | amd64) TAURI_CONFIG_ARG="--config $BACKEND_DIR/src-tauri/tauri.linux.x86_64.conf.json" ;;
+esac
+
 echo "=== HiFiShifter Linux AppImage Build ==="
 echo "Project: $PROJECT_DIR"
 echo "Profile: $PROFILE"
@@ -56,8 +70,10 @@ BUILD_STAMP="$(mktemp)"
 trap 'rm -f "$BUILD_STAMP"' EXIT
 cd "$BACKEND_DIR"
 set +e
+# shellcheck disable=SC2086  # TAURI_CONFIG_ARG is a deliberately word-split flag pair ("" on arm64).
 HIFISHIFTER_SKIP_FRONTEND_BUILD=1 APPIMAGE_EXTRACT_AND_RUN=1 cargo tauri build \
     --bundles appimage \
+    $TAURI_CONFIG_ARG \
     -- --locked --no-default-features --features onnx \
     ${CARGO_PROFILE:+--profile "$CARGO_PROFILE"} 2>&1 | tail -5
 build_rc=${PIPESTATUS[0]}

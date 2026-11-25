@@ -66,6 +66,12 @@ Invoke-Gate 'Source UTF-8 gate' { python scripts/checks/check-utf8.py }
 # SoundTouch build generator and cache self-healing.
 Invoke-Gate 'SoundTouch generator gate' { python scripts/checks/check-soundtouch-generator.py }
 
+# Tauri validates bundle.resources while the app crate's build script runs, so a resource that the
+# target does not produce kills the compile with a message that names neither the file nor the
+# platform ("ERROR: AppDir not found" is all CI shows). Architecture-scoped config files keep the
+# declaration honest; this gate keeps them honest and referenced.
+Invoke-Gate 'Bundle resource gate' { python scripts/checks/check-tauri-resources.py }
+
 # The same discipline for every other CMake consumer in the build: one environment, one
 # generator, and a cache recorded under another one is deleted instead of fatal. Without it,
 # "the build works on my machine" depends on whether ninja happens to be on PATH.

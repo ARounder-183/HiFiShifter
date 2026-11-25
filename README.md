@@ -234,7 +234,8 @@ cargo tauri dev
 cargo tauri build
 
 # Linux AppImage（vslib 仅限 Windows，需排除默认 feature）
-cargo tauri build --bundles appimage -- --no-default-features --features onnx
+cargo tauri build --bundles appimage --config tauri.linux.x86_64.conf.json -- --no-default-features --features onnx  # x86_64
+cargo tauri build --bundles appimage -- --no-default-features --features onnx  # arm64 (no dawn resource)
 # 或使用辅助脚本：bash scripts/build/build-linux-appimage.sh
 
 # Linux 三合一（AppImage + VST3/CLAP + 共享模型库）：

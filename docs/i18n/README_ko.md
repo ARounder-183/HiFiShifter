@@ -209,7 +209,8 @@ cargo tauri dev
 cargo tauri build
 
 # Linux AppImage (vslib은 Windows 전용이므로 기본 feature 제외)
-cargo tauri build --bundles appimage -- --no-default-features --features onnx
+cargo tauri build --bundles appimage --config tauri.linux.x86_64.conf.json -- --no-default-features --features onnx  # x86_64
+cargo tauri build --bundles appimage -- --no-default-features --features onnx  # arm64 (no dawn resource)
 # 또는 보조 스크립트 사용: bash scripts/build/build-linux-appimage.sh
 
 # Windows: 통합 설치 프로그램(App + VST3 + 모델 라이브러리) + 포터블 ZIP

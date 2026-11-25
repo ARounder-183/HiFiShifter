@@ -209,7 +209,8 @@ cargo tauri dev
 cargo tauri build
 
 # Linux AppImage (vslib is Windows-only; exclude the default feature)
-cargo tauri build --bundles appimage -- --no-default-features --features onnx
+cargo tauri build --bundles appimage --config tauri.linux.x86_64.conf.json -- --no-default-features --features onnx  # x86_64
+cargo tauri build --bundles appimage -- --no-default-features --features onnx  # arm64 (no dawn resource)
 # Or use the helper script: bash scripts/build/build-linux-appimage.sh
 
 # Windows: merged installer (app + VST3 + model library) and portable ZIP
