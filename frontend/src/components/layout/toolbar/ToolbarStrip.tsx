@@ -1658,14 +1658,16 @@ export function ToolbarStrip({ variant }: ToolbarStripProps) {
 
             {/* Capture：插件形态下"录制宿主音频"的入口。它长在传输栏上，因为用户对
                 "录制"的心智模型就是一个传输栏上的键（见 `CaptureControl` 的文件头）。 */}
-            {/* 【插槽常在、控件按形态决定】`data-toolbar-control` 声明的是"这里有捕获
-                控制"这一**位置**；插件形态下宿主才有可录的音频，独立 App 里不渲染按钮。
-                让插槽常驻，移动端覆盖测试才能拿同一份清单去比。 */}
-            <AppToolbarGroup>
-                <span data-toolbar-control="capture" className="contents">
-                    {isPluginMode() ? <CaptureControl /> : null}
-                </span>
-            </AppToolbarGroup>
+            {/* 捕获控制：只有插件形态有可录的宿主音频。独立 App 里连这一组都不渲染 ——
+                空组会留下一条孤立的分隔线（`AppToolbarGroup` 的分隔线挂在组尾），
+                桌面像素会因此改变。 */}
+            {isPluginMode() ? (
+                <AppToolbarGroup>
+                    <span data-toolbar-control="capture" className="contents">
+                        <CaptureControl />
+                    </span>
+                </AppToolbarGroup>
+            ) : null}
 
             {/* ── 撤销 / 重做 ──────────────────────────────────────────
                 独立成组、两侧以分隔线与其他按钮隔开；右键打开「操作记录」

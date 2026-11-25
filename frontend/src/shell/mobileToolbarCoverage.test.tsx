@@ -36,7 +36,10 @@ import {
 } from "../services/surfaceProfileStore";
 import { AppThemeProvider } from "../theme/AppThemeProvider";
 import { ToolbarStrip } from "../components/layout/toolbar/ToolbarStrip";
-import { TOOLBAR_CONTROL_IDS } from "../components/layout/toolbar/toolbarControls";
+import {
+    PLUGIN_ONLY_TOOLBAR_CONTROLS,
+    TOOLBAR_CONTROL_IDS,
+} from "../components/layout/toolbar/toolbarControls";
 import { AppChrome } from "./AppChrome";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -136,7 +139,11 @@ test("移动端工具栏 sheet 里的控件清单与 TOOLBAR_CONTROL_IDS 完全�
     await renderChrome();
     const panel = sheet();
     expect(panel, "移动外壳必须挂载工具栏 sheet").not.toBeNull();
-    expect(controlIds(panel as HTMLElement)).toEqual([...TOOLBAR_CONTROL_IDS].sort());
+    // 插件专属控件在独立 App 里不渲染（见 `PLUGIN_ONLY_TOOLBAR_CONTROLS`）。
+    const expected = TOOLBAR_CONTROL_IDS.filter(
+        (id) => !PLUGIN_ONLY_TOOLBAR_CONTROLS.includes(id),
+    ).sort();
+    expect(controlIds(panel as HTMLElement)).toEqual(expected);
 });
 
 test("工具栏 sheet 关闭时仍挂载（那批对话框的开关状态住在里面）", async () => {
@@ -145,7 +152,9 @@ test("工具栏 sheet 关闭时仍挂载（那批对话框的开关状态住在�
     expect(sheet()?.className).toContain("hidden");
     // 关闭时控件仍在 DOM 里：卸载 ToolbarStrip 会让吸附网格 / 分割过渡等对话框
     // 退回到"点了没反应"。
-    expect(controlIds(sheet() as HTMLElement).length).toBe(TOOLBAR_CONTROL_IDS.length);
+    expect(controlIds(sheet() as HTMLElement).length).toBe(
+        TOOLBAR_CONTROL_IDS.length - PLUGIN_ONLY_TOOLBAR_CONTROLS.length,
+    );
 });
 
 test("顶栏的工具栏按钮打开 sheet，且三个入口互斥", async () => {

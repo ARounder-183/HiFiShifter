@@ -26,3 +26,12 @@ export const TOOLBAR_CONTROL_IDS = [
 ] as const;
 
 export type ToolbarControlId = (typeof TOOLBAR_CONTROL_IDS)[number];
+
+/**
+ * 只在**插件形态**渲染的控件（宿主才有可录的音频）。
+ *
+ * 【为什么要单列】覆盖测试在独立 App 里跑，这些控件不在 DOM 里；把它们从期望集合里
+ * 显式减掉，比让它们"看起来永远缺失"要诚实。它们与形态无关 —— 桌面与移动用的是
+ * 同一个 `ToolbarStrip`，因此不会出现"桌面有、手机没有"。
+ */
+export const PLUGIN_ONLY_TOOLBAR_CONTROLS: readonly ToolbarControlId[] = ["capture"];
