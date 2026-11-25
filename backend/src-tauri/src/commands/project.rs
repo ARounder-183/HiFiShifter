@@ -1501,7 +1501,7 @@ fn project_library_entries(
         ));
     }
     // 最近修改的排前面：库列表的第一条应当就是用户刚保存的那个。
-    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     entries.into_iter().map(|(_, value)| value).collect()
 }
 

@@ -91,7 +91,7 @@ mod tests {
         let p50 = filled["p50"].as_f64().unwrap();
         let p95 = filled["p95"].as_f64().unwrap();
         assert!(p50 <= p95);
-        assert!(p50 >= 45.0 && p50 <= 300.0);
+        assert!((45.0..=300.0).contains(&p50));
     }
 
     #[test]

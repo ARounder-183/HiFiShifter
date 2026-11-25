@@ -507,7 +507,7 @@ fn frontend_replay_budget() -> bool {
         return true;
     }
     let suppressed = FRONTEND_REPLAY_SUPPRESSED.fetch_add(1, Ordering::Relaxed) + 1;
-    if suppressed == 1 || suppressed % FRONTEND_REPLAY_MAX_LINES == 0 {
+    if suppressed == 1 || suppressed.is_multiple_of(FRONTEND_REPLAY_MAX_LINES) {
         log::warn!(
             target: "frontend",
             "[frontend] {suppressed} line(s) suppressed (replay budget {FRONTEND_REPLAY_MAX_LINES} per session)"
