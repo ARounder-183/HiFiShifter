@@ -2819,7 +2819,10 @@ fn a_vegas_render_feeds_the_whole_take_once() {
             "第 {index} 块没有推进权：位置会冻结，渲染里就是一个洞"
         );
         if let Some(expected) = next_position {
-            assert_eq!(block.position, expected, "位置必须逐块续接（第 {index} 块）");
+            assert_eq!(
+                block.position, expected,
+                "位置必须逐块续接（第 {index} 块）"
+            );
         }
         next_position = Some(block.position + frames as i64);
         fed += frames;
@@ -2872,22 +2875,23 @@ fn a_pass_boundary_never_re_anchors_a_pinned_feed() {
         fed += frames;
     }
     let geometry = &owner.streams[ProcessStream::Realtime.index()];
-    assert_eq!(geometry.pass.load(Ordering::Acquire), 1, "前提：窗口已经提级");
+    assert_eq!(
+        geometry.pass.load(Ordering::Acquire),
+        1,
+        "前提：窗口已经提级"
+    );
     // 注入边界：这一块"又升起了一次"。
     host_is_feeding_changing_audio(&owner);
-    let block = owner.note_stream_block_at(
-        ProcessStream::Realtime,
-        &context,
-        24_576,
-        true,
-        false,
-        None,
-    );
+    let block =
+        owner.note_stream_block_at(ProcessStream::Realtime, &context, 24_576, true, false, None);
     assert_eq!(
         geometry.pass.load(Ordering::Acquire),
         1,
         "钉住的喂入流里，起播上升沿不许再开一个 pass"
     );
-    assert_eq!(block.position, 49_152, "位置必须从上一块终点继续，而不是回到 0");
+    assert_eq!(
+        block.position, 49_152,
+        "位置必须从上一块终点继续，而不是回到 0"
+    );
     assert_eq!(geometry.pass_rewinds.load(Ordering::Acquire), 0);
 }
