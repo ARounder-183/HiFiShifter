@@ -885,10 +885,11 @@ impl ProcessingPass {
         let tail = self.take_run_tail();
         let mut continues = render_run_continues(tail, origin_raw, sample_rate);
         // 【pass 数上界】判据失效时（例如"同一段渲染两次"且位置恰好连续）不能让一个 run
-        // 无限接下去：超过 $RENDER_RUN_MAX_PASSES 就开新 run 并留下一条 Warn。
+        // 无限接下去：超过 `RENDER_RUN_MAX_PASSES` 就开新 run 并留下一条 Warn。
         if continues && self.run_passes.load(Ordering::Acquire) >= RENDER_RUN_MAX_PASSES {
             log::warn!(
-                "[capture] render run {run} reached {RENDER_RUN_MAX_PASSES} passes; starting a new                  run (the continuation predicate is no longer trusted)",
+                "[capture] render run {run} reached {RENDER_RUN_MAX_PASSES} passes; \
+                 starting a new run (the continuation predicate is no longer trusted)",
                 run = self.run_id.load(Ordering::Acquire)
             );
             continues = false;
