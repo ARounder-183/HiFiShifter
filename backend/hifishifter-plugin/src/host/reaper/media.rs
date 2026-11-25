@@ -285,6 +285,10 @@ impl NativeHost {
             return self.on_host(|| self.pick_audio_paths(multiple, authorized))?;
         }
         self.project(authorized)?;
+        // 【为什么选文件也要包住】宿主的选择器是**模态**的：它跑在自己的消息循环里，
+        // 期间可能把挂起的事件泵进来（包括 ARA 回调）。守卫让那些回调知道自己在一次
+        // 宿主调用里 —— 否则它们会在模态循环内部去等准备 worker，把选择器一起拖死。
+        let _call = crate::host::HostCallGuard::enter("host.pick_audio");
         if let Some(picker) = self.extended_media.as_ref().and_then(|m| m.picker) {
             let mut bytes = vec![0_u8; 65536];
             if !checked(authorized, || unsafe {
@@ -368,6 +372,9 @@ impl NativeHost {
             Ok(result)
         };
         let before = enumerate()?;
+        // 【为什么要包住插入】插入轨道会改变工程的轨道集合，宿主的 ARA 文档随之重建
+        // （region 重新分配 / `beginEditing`）。这次重入比一次字段写入重得多。
+        let _call = crate::host::HostCallGuard::enter("track.create");
         // `IP_TRACKNUMBER` 是 1-based；`InsertTrackInProject` 的 idx 是 0-based，且
         // 插入后新轨道占据 idx。因此"插在 IP_TRACKNUMBER=N 的轨道之后" = `idx = N`。
         let insert_at = match after_track_order {
@@ -615,6 +622,7 @@ impl HostTrackTarget {
             return Err("copied active take identity differs from prepared state".into());
         }
         created.verify(authorized)?;
+        let _call = crate::host::HostCallGuard::enter("item.paste");
         checked(authorized, || unsafe { (write.update)(item) })?;
         checked(authorized, || unsafe { (write.arrange)() })?;
         created.committed = true;
@@ -672,6 +680,11 @@ impl HostTrackTarget {
                 .on_host(|| self.import_audio(path, start_sec, authorized))?;
         }
         self.verify(authorized)?;
+        // 【为什么整笔导入都要包住】它在宿主里连续做四件会触发重入的事：建 source、
+        // 建 item、建 take、`UpdateItem`+`UpdateArrange`。现场就是在这里挂起的 ——
+        // 最后的 `UpdateArrange` 同步触发 ARA `endEditing`，而那次回调去等了 2 s 的
+        // 准备 worker。守卫的覆盖范围必须包含**整笔**，否则前面几步触发的回调照样会等。
+        let _call = crate::host::HostCallGuard::enter("import_audio");
         if !std::path::Path::new(path).is_absolute()
             || path.len() > 32767
             || !start_sec.is_finite()

@@ -822,6 +822,22 @@ pub struct EditorSession {
     /// `record_prepared`），而 `rendering_active` 要等作业真正结束才落。没有阶段名时，
     /// 那一段只能显示成"渲染中 100%"—— 一句会停留上百毫秒的假话。
     render_stage: AtomicU8,
+    /// **状态快照的叶子缓存**：`plugin_get_apply_state` 唯一的读源。
+    ///
+    /// 【为什么需要它】这条命令每 250 ms 由 GUI 线程轮询一次，而 `state()` 要取
+    /// `timeline`、`render_task` 与文档侧的多张表。只要 actor 在某个命令里持着
+    /// `timeline` 锁、同时正在向 WebView 投递，GUI 线程就卡在那把锁上；而 actor 的
+    /// 投递又需要 GUI 线程泵消息 —— 这就是 ABBA。现场表现是状态栏红条
+    /// `BackendInvokeError: Backend invoke failed: plugin:plugin_get_apply_state`，
+    /// 而用户此刻什么都没做错。
+    ///
+    /// 【为什么是"算完之后再存"而不是"读的时候现算"】一个只读状态命令没有理由和编辑
+    /// 命令争同一把时间线锁。把计算留在**唯一本来就要算它的地方**（actor 每次命令收尾
+    /// 的 `emit_state`），GUI 只做一次 `Arc` 克隆。
+    ///
+    /// 【为什么它不参与锁序】写入方在**算完之后**才取这把锁，读方只克隆一个 `Arc`。
+    /// 没有任何代码在持有别的锁时取它，也没有任何代码在持有它时取别的锁 —— 它是叶子。
+    apply_cache: std::sync::RwLock<Option<std::sync::Arc<Value>>>,
     closed: AtomicBool,
     pub(super) suppress_history: AtomicBool,
     /// **上一次采纳过的**宿主编辑器视图选择（A5），用于与宿主的新选择比对。
@@ -1268,6 +1284,7 @@ impl EditorSession {
             render_progress_ticket: AtomicU64::new(0),
             render_progress_tracked: AtomicBool::new(false),
             render_stage: AtomicU8::new(Stage::Idle.encode()),
+            apply_cache: std::sync::RwLock::new(None),
             closed: AtomicBool::new(false),
             suppress_history: AtomicBool::new(false),
             host_selection: Mutex::new(None),
@@ -1281,6 +1298,9 @@ impl EditorSession {
             .map_err(|e| format!("create editor command worker: {e}"))?;
         *session.worker.lock_or_recover() = Some(worker);
         super::events::register(&session);
+        // 【为什么创建时就发布一次】状态栏的第一拍轮询可能早于任何命令；缓存空着
+        // 会答 `busy`（正确但没必要），而这一份就是真实的初始读数。
+        session.publish_apply_state();
         Ok(session)
     }
 
@@ -5430,11 +5450,72 @@ impl EditorSession {
                 })
             }).unwrap_or(serde_json::Value::Null),
             "host_version":self.host_version.load(Ordering::Acquire),
+            // 【为什么要有这一位】`plugin_get_apply_state` 在没有缓存时答的是同形
+            // 的 `busy` 载荷；前端据此把"还没算出来"当 transient，而不是红色错误。
+            "busy":false,
             "error":self.error.lock_or_recover().clone().or_else(||self.render_error.lock_or_recover().clone()).or(host_error),"connected":!self.closed.load(Ordering::Acquire),
             "ready":self.loaded.lock_or_recover().initialized})
     }
     fn emit_state(&self) {
-        self.emit("plugin_apply_state", self.state());
+        let state = self.state();
+        // 【顺序：先存缓存、再投递事件】事件投递可能失败（队列满 / 视图已关），
+        // 而缓存是状态栏 250 ms 轮询的唯一读源 —— 它必须总是有值可答。
+        self.store_apply_state(&state);
+        self.emit("plugin_apply_state", state);
+    }
+
+    /// 立刻重算一次状态并放进缓存（构造、命令收尾、渲染阶段变化时调用）。
+    pub(crate) fn publish_apply_state(&self) {
+        let state = self.state();
+        self.store_apply_state(&state);
+    }
+
+    /// 把一份算好的状态放进叶子缓存。
+    fn store_apply_state(&self, state: &Value) {
+        let mut cache = self
+            .apply_cache
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        *cache = Some(std::sync::Arc::new(state.clone()));
+    }
+
+    /// 状态快照的**无锁**读源（GUI 线程用）。
+    ///
+    /// 【为什么是 "没有就答 busy" 而不是 "没有就现算"】现算就是回到 `state()`，
+    /// 也就是回到那组会与编辑命令互锁的时间线/文档锁。宁可让前端多等一拍（它本来
+    /// 就 250 ms 轮询一次），也不要在 GUI 线程上制造一次 ABBA。
+    pub(crate) fn apply_state(&self) -> Value {
+        let cached = self
+            .apply_cache
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        match cached {
+            Some(state) => (*state).clone(),
+            None => Self::busy_apply_state(),
+        }
+    }
+
+    /// "状态还没算出来"的同形载荷。
+    ///
+    /// 【为什么它是 `busy` 而不是一个错误】一个刚插上、还没有任何命令跑过的
+    /// 会话**不是**故障。把它答成 Err，状态栏就会画一条红条
+    /// （`尚未应用：BackendInvokeError: ...`），而用户什么都没做错。
+    /// 同形载荷让前端不需要任何特判：它只多认一个 `busy` 位。
+    pub(crate) fn busy_apply_state() -> Value {
+        json!({
+            "mode": "ara",
+            "generation": 0,
+            "applied_generation": 0,
+            "pending": false,
+            "analysis_pending": false,
+            "rendering_active": false,
+            "host_version": 0,
+            "error": Value::Null,
+            "connected": true,
+            "ready": false,
+            "busy": true,
+        })
     }
 }
 impl EditorSession {
@@ -11034,5 +11115,86 @@ mod auto_pitch_write_tests {
         document.close();
         drop(model);
         editor.close();
+    }
+}
+
+#[cfg(test)]
+mod apply_state_cache_tests {
+    use super::*;
+
+    /// **不变量：状态缓存可以在一把被占住的时间线锁之外被读到。**
+    ///
+    /// 【为什么钉死】`plugin_get_apply_state` 是 GUI 线程上的 4 Hz 轮询，而 `state()`
+    /// 要取 `timeline` / `render_task` 与文档侧的多张表。actor 持着 `timeline` 锁、
+    /// 同时正在向 WebView 投递时，GUI 线程就卡在那把锁上 —— 而 actor 的投递又需要
+    /// GUI 线程泵消息，这是 ABBA。现场表现就是状态栏红条
+    /// `BackendInvokeError: Backend invoke failed: plugin:plugin_get_apply_state`。
+    ///
+    /// 【为什么读方开一条线程】同线程重取一把 `std::sync::Mutex` 是死锁而不是 panic；
+    /// 开线程 + `recv_timeout` 把"卡住"变成一条**有超时**的断言，CI 不会挂死。
+    #[test]
+    fn the_apply_state_is_readable_while_the_timeline_is_locked() {
+        let (model, _owners, _ids) = super::tests::workspace_fixture();
+        let document = model.session();
+        let editor = document.editor_session().unwrap();
+        editor.publish_apply_state();
+
+        let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let holder = {
+            let editor = editor.clone();
+            let released = released.clone();
+            std::thread::spawn(move || {
+                let _guard = editor.timeline.lock_or_recover();
+                let _ = ready_tx.send(());
+                while !released.load(Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            })
+        };
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("持锁线程必须起来");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = {
+            let editor = editor.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(editor.apply_state());
+            })
+        };
+        let payload = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("apply_state 不得等待时间线锁");
+        assert_eq!(payload["busy"], serde_json::json!(false));
+        reader.join().unwrap();
+        released.store(true, Ordering::Release);
+        holder.join().unwrap();
+        document.close();
+    }
+
+    /// **不变量：没有缓存时答的是 `busy`，不是错误。**
+    ///
+    /// 【为什么钉死】会话刚插上、还没有任何命令跑过时，`state()` 还没算过。把那一刻
+    /// 答成 Err，状态栏就会画一条红条（"尚未应用：BackendInvokeError: ..."），而用户
+    /// 什么都没做错。同形载荷让前端只多认一个 `busy` 位，不需要任何特判。
+    #[test]
+    fn the_apply_cache_reports_busy_instead_of_an_invoke_error() {
+        let payload = EditorSession::busy_apply_state();
+        assert_eq!(payload["busy"], serde_json::json!(true));
+        assert_eq!(payload["connected"], serde_json::json!(true));
+        assert_eq!(payload["error"], serde_json::Value::Null);
+        assert_eq!(payload["ready"], serde_json::json!(false));
+
+        // 【同形】真载荷的每一个字段都必须在这份降级载荷里有对应项 —— 否则前端
+        // 在"刚插上"那一拍读到的形状与之后读到的形状不同，就得写特判。
+        let (model, _owners, _ids) = super::tests::workspace_fixture();
+        let document = model.session();
+        let editor = document.editor_session().unwrap();
+        let real = editor.state();
+        for key in payload.as_object().unwrap().keys() {
+            assert!(real.get(key).is_some(), "真载荷缺少字段 {key}");
+        }
+        document.close();
     }
 }

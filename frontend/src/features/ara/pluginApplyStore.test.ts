@@ -313,3 +313,37 @@ test("the terminal protocol code is carried through to the snapshot", async () =
     expect(getPluginApplySnapshot().sessionEnded).toBe(true);
     expect(getPluginApplySnapshot().sessionCode).toBe(9);
 });
+
+test("a busy apply state is transient, not an error, and never refetches the timeline", async () => {
+    // 后端缓存还没发布时答的是同形载荷 + `busy: true`（见 `EditorSession::busy_apply_state`）。
+    // 它不是故障：把它当错误就会画一条红条（"尚未应用：BackendInvokeError: ..."），
+    // 而用户此刻什么都没做错。
+    const busy = readyState({
+        generation: 0,
+        applied_generation: 0,
+        host_version: 0,
+        ready: false,
+        busy: true,
+    });
+    invokeMock.mockResolvedValue(busy);
+    let refetches = 0;
+    stop = startPluginApplyPolling(async () => {
+        refetches += 1;
+    });
+    await flush();
+
+    const snapshot = getPluginApplySnapshot();
+    expect(snapshot.state?.busy).toBe(true);
+    expect(snapshot.failure).toBe("");
+    expect(snapshot.sessionEnded).toBe(false);
+    // 【为什么这一条比"不显示红条"更重要】降级载荷的 `host_version` 是 0，而真实值
+    // 可能是 7 —— 直接比较会把每一拍都判成"宿主版本变了"，于是每 250 ms 重取一次
+    // 整份时间线，直到缓存就绪为止。
+    expect(refetches).toBe(0);
+
+    // 仍按正常间隔继续轮询：缓存就绪之后下一拍就会拿到真读数。
+    const calls = invokeMock.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(300);
+    await flush();
+    expect(invokeMock.mock.calls.length).toBeGreaterThan(calls);
+});

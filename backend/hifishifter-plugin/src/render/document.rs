@@ -5238,7 +5238,11 @@ impl DocumentSession {
         self.log_diag_if_changed();
         for owner in owners {
             owner.refresh_host_state_for_model();
-            owner.prepare();
+            // 【这里**绝不**能等】本函数的主要调用者是 ARA 的 `end_editing`（`remap_and_log`
+            // 的尾巴）与存档回调 —— 两者都在宿主线程上，且都是宿主**同步**进入我们的代码。
+            // 传 `None` 让首快照只排队：等它就是把宿主的消息泵扣在这里，现场 REAPER 因此
+            // 被判 `AppHangB1`（`reaper.exe stopped interacting with Windows`）。
+            owner.prepare_with_budget(None);
         }
     }
 

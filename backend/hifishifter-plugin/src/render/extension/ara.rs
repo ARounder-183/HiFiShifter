@@ -381,7 +381,26 @@ impl ExtensionOwner {
         }
     }
 
+    /// 首快照同步发布的等待预算。
+    ///
+    /// 【为什么从 2 s 降到 250 ms】那个上界的本意是"第一块之前必须有内容"，但它支付
+    /// 的是**宿主消息泵**的时间。现场一次导入的挂起里，2 s 的上界意味着宿主每问一次
+    /// 就卡满两秒，Windows 直接判 `AppHangB1`。250 ms 覆盖实测的宿主预渲染窗口
+    /// （REAPER ≈225 ms），超过它的合成本来也不可能在宿主问第一块之前完成 —— 继续等
+    /// 只会把宿主拖死，而实时通路的 `layered` 回退已经保证那一段不是静音。
+    pub(crate) const FIRST_SNAPSHOT_BUDGET: std::time::Duration =
+        std::time::Duration::from_millis(250);
+
     pub fn prepare(&self) {
+        self.prepare_with_budget(Some(Self::FIRST_SNAPSHOT_BUDGET));
+    }
+
+    /// 与 [`Self::prepare`] 相同，但可以指定首快照的等待预算（`None` = 只排队）。
+    ///
+    /// 【谁传 `None`】所有**宿主回调链**：`DocumentSession::prepare_renderers` 从
+    /// `end_editing` 进来，写回/分割/剪贴板从宿主命令进来。那些线程上一律不许等 ——
+    /// 这是本轮的主题（见 `host::reentrancy` 的模块文档）。
+    pub(crate) fn prepare_with_budget(&self, budget: Option<std::time::Duration>) {
         // 【B0】先报告上一批可疑块。放在早退**之前**：Capture 实例在没有素材时
         // `renders()` 为假，而那正是"刚录完、播放中"这个最需要读数的时刻。
         self.log_click_report();
@@ -425,8 +444,8 @@ impl ExtensionOwner {
                 return;
             }
         }
-        // 【第一次必须是同步的】见 `publish_first_snapshot_inline`。
-        self.publish_first_snapshot_inline();
+        // 【第一次只是"抢一拍"，不再同步】见 `request_first_snapshot`。
+        self.request_first_snapshot(budget);
         self.ensure_preparation();
         if let Some(worker) = self.preparation() {
             if let Err(error) = worker.request(Box::new(move |cancel| {
@@ -558,19 +577,46 @@ impl ExtensionOwner {
     }
     /// 宿主拿到 region 之后**立刻**开始渲染，而渲染线程不会等后台队首的任务。
     ///
-    /// 【为什么必须同步】实测（REAPER，48 kHz）：实例建好到第一份快照发布之间，宿主
-    /// 已经渲染了 21 个块（≈225 ms），那段窗口里 `copy_block_at` 没有快照 ⇒ 逐样本
-    /// 写零。ARA 宿主把渲染结果**存进自己的缓存**，那 225 ms 的零于是成了时间轴上
-    /// 的一段：此后每次播放都在同一处断一次，只有让宿主整段重渲（重载）才好。
-    /// 队列化解决不了这件事 —— 它保证"最终会发布"，而宿主问的是"现在这一块有没有
-    /// 内容"。第一块之前必须有内容，所以这一次只能在调用线程上算完。
+    /// 【为什么要在 `prepare()` 里抢这一拍】实测（REAPER，48 kHz）：实例建好到第一份
+    /// 快照发布之间，宿主已经渲染了 21 个块（≈225 ms），那段窗口里 `copy_block_at`
+    /// 没有快照。抢一拍的价值是把这段窗口尽量压短。
     ///
-    /// 【为什么只破例一次】同步渲染会占住调用线程一次完整合成的时长。它只在"已绑定、
-    /// 已分配到 region、且一份快照都没发布过"时发生，一个实例的整个生命周期至多
-    /// 一次；之后的每一次编辑都有一份可听的旧快照兜底，走后台队列即可。失败会把
-    /// 闸门放回去（素材晚到、文档正忙都还有下一次机会），但同一次调用里绝不循环 ——
-    /// 绝不演变成"宿主每问一次就阻塞一次"。
-    fn publish_first_snapshot_inline(&self) {
+    /// 【为什么**不再**在调用线程上等它做完】旧实现在这里 `wait_idle_until(2 s)`，理由是
+    /// "第一块之前必须有内容"。那个理由本身没错，但代价选错了支付方：`prepare()` 的调用者
+    /// 几乎全部在**宿主线程**上（ARA 模型回调、写回、视图节拍），于是那 2 秒花掉的是
+    /// 宿主的消息泵。现场（2026-11-25，REAPER 7.8.5）`文件 → 导入媒体` 之后主线程就停在
+    /// 这里，Windows 记录 `AppHangB1` ——"stopped interacting with Windows and was closed"。
+    ///
+    /// 【那"第一块之前必须有内容"怎么办】它有两个**不需要阻塞宿主**的替代：
+    ///
+    ///   1. 实时通路：快照未就绪时 `CaptureOutput::Untouched` 以 `layered: true` 输出，
+    ///      回退取宿主输入总线（`snapshot.rs` 的 `input_at`）—— 那是宿主本来会播的东西，
+    ///      比一串零诚实得多，也不会被烘进宿主的 ARA 缓存；
+    ///   2. 离线/导出通路：`prepare_offline_until` 显式地等（它有一次性的预算与自己的
+    ///      收敛判据），那条路不在宿主的消息泵上。
+    ///
+    /// 【为什么保留一次性闸门】`has_pending_render_sources()` 要取三张表；把它挂在 20 ms
+    /// 节拍上没有必要。抢过一拍之后，后续的排队由 `prepare()` 末尾那次 `worker.request`
+    /// 负责 —— 它本来就是每拍都在做的。
+    /// 首快照这一次允许等多久（`None` = 只排队）。
+    ///
+    /// 【判据只有一条】**宿主回调链上不许等**。`in_host_call()` 为真说明这条线程是
+    /// 宿主同步进入我们的（`UpdateItem` / `UpdateArrange` / `SetItemStateChunk` /
+    /// 撤销跳转 / 导入……），它此刻唯一的职责是把控制权还给宿主的消息泵。
+    ///
+    /// 【为什么抽成纯函数】它是这一轮的核心纪律，必须能被直接断言 —— 藏在
+    /// `request_first_snapshot` 里就只能靠"跑一遍再量耗时"来间接证明。
+    pub(crate) fn first_snapshot_budget(
+        requested: Option<std::time::Duration>,
+    ) -> Option<std::time::Duration> {
+        if crate::host::in_host_call() {
+            None
+        } else {
+            requested
+        }
+    }
+
+    fn request_first_snapshot(&self, budget: Option<std::time::Duration>) {
         if !self.is_bound() {
             return;
         }
@@ -588,8 +634,8 @@ impl ExtensionOwner {
             return;
         }
         // 【素材还没到就别把这一次机会用掉】宿主授权源 PCM 是异步的（实测 32 ms），
-        // 而 `prepare_job` 在源还没到时会以 `MissingSource` 失败。同步发布只能成功
-        // 一次 —— 在素材到达之前就失败，等于等宿主真正开始问音频时我们再没有机会。
+        // 而 `prepare_job` 在源还没到时会以 `MissingSource` 失败。这一拍只允许抢一次 ——
+        // 在素材到达之前就花掉，等于等宿主真正开始问音频时我们再没有机会。
         if !self.has_pending_render_sources() {
             self.first_snapshot_inlined.store(false, Ordering::Release);
             return;
@@ -603,34 +649,45 @@ impl ExtensionOwner {
             self.first_snapshot_inlined.store(false, Ordering::Release);
             return;
         };
+        // 【为什么是排队而不是直接调 `prepare_job`】它会在这条线程上跑一次完整合成，
+        // 而这条线程是宿主的。让 worker 做；`prepare()` 末尾还会再排一次，两处都只是
+        // 排队，不会叠加成"每问一次就阻塞一次"。
         if let Err(error) = worker.request(Box::new(move |cancel| {
             weak.upgrade()
                 .ok_or("renderer closed".to_owned())?
                 .prepare_job(cancel)
         })) {
-            log::warn!("[ara] the inline first snapshot could not be queued: {error}");
+            log::warn!("[ara] the first snapshot could not be queued: {error}");
             self.first_snapshot_inlined.store(false, Ordering::Release);
             return;
         }
-        // 【为什么是"有界等待"而不是"直接调"】这一次必须发生在宿主问第一块之前，所以
-        // 调用线程得等它做完；但一次完整合成在长素材上可以到秒级，而无界的等待会把
-        // "第一块有内容"换成"宿主/界面卡死"。上界之内拿不到内容就把请求留给后台继续跑
-        // —— 最坏情况退回改动前的行为，绝不比它更糟。
-        //
-        // 【为什么不是同步 `prepare_job`】它会在版本不匹配时回调 `prepare()`，而那条
-        // 路径可能正持着文档事务：同线程再取一次就是自锁。让 worker 做，顺带避开这一点。
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        // 【纪律的读数】`in_host_call()` 为真 = 我们正处在一次宿主调用里（宿主 API
+        // 同步回调进来的）。那种线程上**任何**等待都是在扣宿主的消息泵，所以只排队。
+        // `HFS_HOST_WATCHDOG=0` 只关掉看门狗日志，不影响这条判据。
+        let budget = Self::first_snapshot_budget(budget);
+        let Some(budget) = budget else {
+            log::debug!(
+                "[ara] the first snapshot was queued; in_host_call={} (this thread must not wait)",
+                crate::host::in_host_call()
+            );
+            return;
+        };
+        let deadline = std::time::Instant::now() + budget;
         let _ = worker.wait_idle_until(deadline);
         if self.snapshots.iter().all(|snapshot| snapshot.is_ready()) {
             log::info!("[ara] the first snapshot is ready before the host can ask for audio");
             return;
         }
         self.first_snapshot_inlined.store(false, Ordering::Release);
-        log::warn!("[ara] the first snapshot did not finish within the inline budget; the background worker keeps going");
+        log::warn!(
+            "[ara] the first snapshot did not finish within {} ms; the background worker keeps going",
+            budget.as_millis()
+        );
     }
+
     /// 已分配的 region 里，是否至少有一条的源 PCM 已经在手上。
     ///
-    /// 【为什么这件事要单独判】见 `publish_first_snapshot_inline`：没有源 PCM 的
+    /// 【为什么这件事要单独判】见 `request_first_snapshot`：没有源 PCM 的
     /// 同步渲染必然 `MissingSource`，而那次尝试只允许成功一次。三个表分开取锁，
     /// 顺序与 `ara_render_input` 一致（regions → sources → edit_sources），不制造新的
     /// 交叉持锁。
@@ -725,58 +782,105 @@ impl ExtensionOwner {
         }
         let snapshots = input.render(cancel.clone())?;
         Self::log_snapshot_integrity(&snapshots);
-        let _transaction = document.transaction.lock_or_recover();
-        if cancel.load(Ordering::Acquire) || !document.ready.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        if document.revision.load(Ordering::Acquire) != model
-            || document.edits.lock_or_recover().revision != edit
-            || document.render_epoch.load(Ordering::Acquire) != epoch
-            || document.scope_revision.load(Ordering::Acquire) != scope
-            || self.assigned_regions().map_err(|e| e.to_string())? != keys
-        {
-            // 跨轨接受新参数不一定有新的model callback；丢弃后补排最新任务，不能永久留空且假idle。
-            self.prepare();
-            return Ok(());
-        }
-        // 【空分配不是内容变成静音】ara_render_input 在没有任何被分配 region 时返回一份空的
-        // 渲染输入，而它渲出来的是一份 len == 0 的快照。把那份快照发布出去有两个直接后果：
-        // is_ready() 变成真（于是 processed_snapshot_ready 也真、layered 退化成 false），而
-        // copy_block_at 在这份空快照上逐样本返回 0.0 —— 整条轨就是纯静音，直到下一次真正的
-        // 分配把快照换回来。宿主在一次编辑里会短暂地给出空分配
-        // （renderer assignment ... regions=0），这段时间用户听到的正是静音断点。
-        //
-        // 【判据为什么是"文档里还有 region"】自己也一条都没有、文档里也一条都没有 ⇒ 真的没
-        // 内容可播，此时发布空快照才是诚实的（否则删掉全部片段之后还在播上一版）。文档里有
-        // region、只是这一刻没分配给我们 ⇒ 只是记账上的空窗，保留上一份可听快照。
-        if keys.is_empty() && !document.regions.lock_or_recover().is_empty() {
-            hifishifter_kernel::log_limiter::emit_limited_key(
+        // 【重排必须发生在**出锁之后**】`prepare()` 会走一串取锁路径（诊断行、形态
+        // 判定、准备队列）。在持有 `document.transaction` 时调用它，就是让"文档事务 →
+        // 任意其它锁"这条隐藏锁序成立；而 `prepare_job` 自己的 `Retry` 又会被 worker
+        // 立刻再跑一遍 —— 两条加起来就是现场那"2 s × N"的空转。
+        let superseded = {
+            let _transaction = document.transaction.lock_or_recover();
+            if cancel.load(Ordering::Acquire) || !document.ready.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            if document.revision.load(Ordering::Acquire) != model
+                || document.edits.lock_or_recover().revision != edit
+                || document.render_epoch.load(Ordering::Acquire) != epoch
+                || document.scope_revision.load(Ordering::Acquire) != scope
+                || self.assigned_regions().map_err(|e| e.to_string())? != keys
+            {
+                // 跨轨接受新参数不一定有新的 model callback；丢弃后补排最新任务，
+                // 不能永久留空且假 idle。
+                true
+            } else {
+                // 【空分配不是内容变成静音】ara_render_input 在没有任何被分配 region 时返回一份空的
+                // 渲染输入，而它渲出来的是一份 len == 0 的快照。把那份快照发布出去有两个直接后果：
+                // is_ready() 变成真（于是 processed_snapshot_ready 也真、layered 退化成 false），而
+                // copy_block_at 在这份空快照上逐样本返回 0.0 —— 整条轨就是纯静音，直到下一次真正的
+                // 分配把快照换回来。宿主在一次编辑里会短暂地给出空分配
+                // （renderer assignment ... regions=0），这段时间用户听到的正是静音断点。
+                //
+                // 【判据为什么是"文档里还有 region"】自己也一条都没有、文档里也一条都没有 ⇒ 真的没
+                // 内容可播，此时发布空快照才是诚实的（否则删掉全部片段之后还在播上一版）。文档里有
+                // region、只是这一刻没分配给我们 ⇒ 只是记账上的空窗，保留上一份可听快照。
+                if keys.is_empty() && !document.regions.lock_or_recover().is_empty() {
+                    hifishifter_kernel::log_limiter::emit_limited_key(
                 log::Level::Debug,
                 "ara.prepare.empty-assignment",
                 format_args!("[ara] no region is assigned to this renderer right now; the published snapshot is kept instead of replacing it with an empty one"),
             );
-            return Ok(());
+                    return Ok(());
+                }
+                if !self
+                    .snapshots
+                    .iter()
+                    .zip(&snapshots)
+                    .all(|(p, s)| p.has_capacity(s))
+                {
+                    return Err("retired snapshot budget exhausted".into());
+                }
+                for (publisher, snapshot) in self.snapshots.iter().zip(snapshots) {
+                    publisher
+                        .publish_shared(snapshot)
+                        .map_err(|e| format!("snapshot publish failed: {e:?}"))?;
+                }
+                self.record_prepared(model, edit, epoch, scope, keys.clone());
+                log::info!(
+                "[ara] background snapshot ready role={} revision={edit} model={model} regions={}",
+                self.role.load(Ordering::Relaxed),
+                keys.len()
+            );
+                false
+            }
+        };
+        if superseded {
+            self.requeue_superseded_prepare();
         }
-        if !self
-            .snapshots
-            .iter()
-            .zip(&snapshots)
-            .all(|(p, s)| p.has_capacity(s))
-        {
-            return Err("retired snapshot budget exhausted".into());
-        }
-        for (publisher, snapshot) in self.snapshots.iter().zip(snapshots) {
-            publisher
-                .publish_shared(snapshot)
-                .map_err(|e| format!("snapshot publish failed: {e:?}"))?;
-        }
-        self.record_prepared(model, edit, epoch, scope, keys.clone());
-        log::info!(
-            "[ara] background snapshot ready role={} revision={edit} model={model} regions={}",
-            self.role.load(Ordering::Relaxed),
-            keys.len()
-        );
         Ok(())
+    }
+
+    /// 版本被取代后的补排 —— **只排队**，且同一批版本变化最多补排几次。
+    ///
+    /// 【为什么要收敛闸】一次导入会连续触发多条 region 创建/更新，每一条都推进
+    /// `document.revision`。没有闸时这条链是：发布成功 → 版本已变 → 补排 → 又变 →
+    /// …，每次都完整合成一遍。现场 22:58:08–11 的 6 次 `mixdown` 与 22:58:56 的 3 次
+    /// 全是它的脚印，而一行 `[ara] prepared` 都没有 —— 每次都在版本重检处被丢弃。
+    ///
+    /// 【为什么只记一行就停】继续排不会收敛：宿主那一轮编辑还没结束，版本必然还会变。
+    /// 停下来的代价是"这一版快照暂时是旧的"，而下一轮 `endEditing` 会重新驱动它；
+    /// 不停下来的代价是宿主线程与 worker 一起被拖死。
+    fn requeue_superseded_prepare(&self) {
+        let allowed = {
+            let mut gate = self.prepare_retry.lock_or_recover();
+            gate.allow(std::time::Instant::now())
+        };
+        if !allowed {
+            let report = {
+                let mut gate = self.prepare_retry.lock_or_recover();
+                gate.should_report()
+            };
+            if report {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.prepare.non-convergent",
+                    format_args!(
+                        "[ara] prepare did not converge ({} requeues within {} ms); waiting for the next model change instead of spinning",
+                        crate::render::extension::PREPARE_RETRY_LIMIT,
+                        crate::render::extension::PREPARE_RETRY_WINDOW.as_millis()
+                    ),
+                );
+            }
+            return;
+        }
+        self.prepare();
     }
 
     /// 发布前扫一遍快照**内容**：短洞（2 ~ 250 ms、两侧都有信号）是"断断续续"的直接证据。

@@ -8,6 +8,9 @@ pub(crate) mod history;
 /// 只认它自己的 model/UI 线程。
 pub(crate) mod marshal;
 pub(crate) mod reaper;
+/// 宿主调用的重入守卫与看门狗：让"本线程正在一次宿主调用里"成为可读的事实。
+/// 见模块文档 —— ARA 回调据此决定"能不能等"。
+pub(crate) mod reentrancy;
 
 // 中立门面：通用层（`editor/`、`render/`）只经这里访问宿主原生执行层，不直接命名
 // `reaper`。REAPER 专有的 API / 类型字符串 / 键名全部封在 `reaper/` 内。
@@ -17,4 +20,5 @@ pub(crate) use reaper::{
     clipboard, host_edit, host_split, undo, HostClipTarget, HostTrackTarget, NativeHost, UiItem,
     UiTrack,
 };
+pub(crate) use reentrancy::{in_host_call, AraCallbackGuard, HostCallGuard};
 pub(crate) mod work_budget;

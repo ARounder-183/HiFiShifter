@@ -2051,25 +2051,20 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
         // 刷一条 `Backend invoke failed: plugin_plugin_get_apply_state`。
         Some("plugin_get_apply_state") => {
             let link = state.borrow().link.clone();
+            // 【为什么读缓存而不是 `editor.state()`】这是 GUI 线程上的 4 Hz 轮询，
+            // 而 `state()` 要取 `timeline` / `render_task` 与文档侧的多张表。actor 在
+            // 某个命令里持着 `timeline` 锁、同时正在向 WebView 投递时，GUI 线程就卡在
+            // 那把锁上；而 actor 的投递又需要 GUI 线程泵消息 —— 这是 ABBA，现场表现
+            // 是状态栏红条 `BackendInvokeError: ... plugin_get_apply_state`。
+            // 缓存由 actor 在每次命令收尾的 `emit_state` 里写入，读方只克隆一个 Arc。
             let payload = match link
                 .owner()
                 .ok()
                 .and_then(|owner| owner.existing_editor_session())
             {
-                Some(editor) => editor.state(),
-                // 与 `EditorSession::state()` 逐字段同形，只是"什么都没有"。
-                None => serde_json::json!({
-                    "mode": "ara",
-                    "generation": 0,
-                    "applied_generation": 0,
-                    "pending": false,
-                    "analysis_pending": false,
-                    "rendering_active": false,
-                    "host_version": 0,
-                    "error": serde_json::Value::Null,
-                    "connected": true,
-                    "ready": false,
-                }),
+                Some(editor) => editor.apply_state(),
+                // 与 `EditorSession::busy_apply_state()` 逐字段同形，只是"什么都没有"。
+                None => crate::editor::session::EditorSession::busy_apply_state(),
             };
             Ok(payload)
         }
@@ -2131,7 +2126,17 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 let requested=if new_track { "new" } else { track.as_deref().unwrap_or("none") }.to_owned();
                 let existing=if new_track {None} else {Some(owner.audio_import_target(track.as_deref(),&allowed)?)};
                 state.borrow_mut().undo_document=Some(Arc::downgrade(&document));
-                document.host_undo.begin_request(&view_id,id,true,true,&host,&allowed)?;
+                // 【RAII：undo 组必须与宿主写入同生共死】见 `UndoRequestGuard` 的说明 ——
+                // 中间那条路径上 `?` 满地都是，漏一次收尾就让宿主 undo 块永久开着，
+                // 而 `HostUndo::pending` 恒真会把自动合成一起挂起。
+                let _undo = crate::host::undo::UndoRequestGuard::begin(
+                    &document.host_undo,&view_id,id,true,true,&host,&allowed)?;
+                // 【整段宿主写入都包在重入守卫里】`create_audio_track` 与 `import_audio`
+                // 都会让宿主**同步**回调 ARA（`beginEditing` / `endEditing`）。没有这一层，
+                // 那次回调会去等准备 worker —— 现场就是在这里挂起（`AppHangB1`）。
+                // 守卫必须在 `_undo` **之后**声明：Drop 逆序，于是宿主调用先结束、
+                // undo 组后关闭 —— 宿主写入期间那个组必须仍然开着。
+                let _call = crate::host::HostCallGuard::enter("import_item");
                 let result=(||->Result<(String,Option<String>),String>{
                     let mut created=if new_track {Some(host.create_audio_track(std::path::Path::new(path).file_stem().and_then(|name|name.to_str()).unwrap_or("Imported audio"),None,&allowed)?)} else {None};
                     // 【I-P1：新建轨必须在**同一次请求里**进入本实例作用域】
@@ -2163,7 +2168,9 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                         }
                     }
                 })();
-                document.host_undo.finish_request(&view_id,id);let (imported,landed)=result?;
+                // 守卫在作用域结束时收尾（`_call` 先于 `_undo` 释放：先结束宿主调用，
+                // 再关 undo 组 —— 宿主写入期间那个组必须仍然开着）。
+                let (imported,landed)=result?;
                 // 【为什么这一行单独记】`[import] state=…` 那一行只能回答"判据是什么"，
                 // 回答不了"这次导入**落到**哪条轨"。三态 + 落点 + item GUID 才是一条完整
                 // 的证据链（与回执那行按 item 关联）。

@@ -90,6 +90,7 @@ impl HostClipTarget {
             return self.host.on_host(|| self.delete_item(authorized))?;
         }
         self.verify(authorized)?;
+        let _call = crate::host::HostCallGuard::enter("item.delete");
         let api = self
             .host
             .media
@@ -402,6 +403,10 @@ impl NativeHost {
         if can.is_null() {
             return Ok(false);
         }
+        // 【为什么要包住撤销/重做】一次 undo 会让宿主把整段工程改动回滚 —— 其中包含
+        // ARA 的 region 创建/销毁与 `beginEditing`/`endEditing`，全部同步发生在这条
+        // 调用里。没有守卫时那次回调会去等准备 worker，而 worker 又要回到宿主线程。
+        let _call = crate::host::HostCallGuard::enter("history.jump");
         let done = checked(authorized, || unsafe {
             if redo {
                 (history.redo)(project)
@@ -429,6 +434,7 @@ impl NativeHost {
         if target >= checked(authorized, || unsafe { (history.count)(project) })? {
             return Err("host history position does not exist".into());
         }
+        let _call = crate::host::HostCallGuard::enter("history.jump_to");
         for _ in 0..10000 {
             let current = self.history_token(authorized)?.1;
             if current == target {
@@ -869,6 +875,7 @@ impl HostClipTarget {
         if name == c"D_VOL" && value < 0. {
             return Err("negative item volume is not supported".into());
         }
+        let _call = crate::host::HostCallGuard::enter("item.set");
         let api = self.api()?;
         if !checked(authorized, || unsafe {
             (api.1.set_item)(self.item as *mut c_void, name.as_ptr(), value)
@@ -909,6 +916,7 @@ impl HostClipTarget {
         if name == c"D_PITCH" && value.abs() > 240. {
             return Err("take pitch outside the supported range -240..240 semitones".into());
         }
+        let _call = crate::host::HostCallGuard::enter("take.set");
         let api = self.api()?;
         if !checked(authorized, || unsafe {
             (api.1.set_take)(self.take as *mut c_void, name.as_ptr(), value)
@@ -966,6 +974,9 @@ impl HostClipTarget {
             .as_ref()
             .ok_or("REAPER item state API unavailable")?;
         let text = std::ffi::CString::new(chunk).map_err(|_| "item state contains NUL")?;
+        // 【为什么必须包住】`SetItemStateChunk` 会让宿主**重建**这个 item，
+        // 因而同步回调 ARA 的 region 创建/销毁 —— 那是比 `UpdateItem` 更重的一次重入。
+        let _call = crate::host::HostCallGuard::enter("item.state");
         if !checked(authorized, || unsafe {
             (api.set)(self.item as *mut c_void, text.as_ptr(), true)
         })? {
@@ -1358,6 +1369,8 @@ impl HostClipTarget {
             return Err("cannot move item across host projects".into());
         }
         self.valid(destination.track, c"MediaTrack*", authorized)?;
+        // 跨轨移动会改变 item 的父轨 ⇒ 宿主的 ARA 图跟着变（同一次调用里回调）。
+        let _call = crate::host::HostCallGuard::enter("item.move");
         let api = self.api()?;
         if !checked(authorized, || unsafe {
             (api.1.move_item)(self.item as *mut c_void, destination.track as *mut c_void)
@@ -1373,6 +1386,11 @@ impl HostClipTarget {
             return self.host.on_host(|| self.update(authorized))?;
         }
         self.verify(authorized)?;
+        // 【为什么这一对必须包在重入守卫里】`UpdateItem` + `UpdateArrange` 会让宿主
+        // **同步**回调 ARA（`beginEditing` / `endEditing`）。守卫让那次回调知道
+        // 自己正处在一次宿主调用里，于是它只标记脏、只排队 —— 不再等准备 worker。
+        // 现场那 2 s 的 `wait_idle_until` 与随后的 `AppHangB1` 就是漏了这一层。
+        let _call = crate::host::HostCallGuard::enter("item.update");
         let api = self.api()?;
         checked(authorized, || unsafe {
             (api.1.update)(self.item as *mut c_void)

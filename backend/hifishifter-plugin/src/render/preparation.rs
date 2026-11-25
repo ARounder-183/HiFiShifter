@@ -18,6 +18,13 @@ struct State {
 pub(crate) struct PreparationQueue {
     state: Arc<State>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// 测试专用：`wait_idle_until` 被调用的次数。
+    ///
+    /// 【为什么需要这个读数】"宿主回调链上不许等"是本轮的核心纪律，而它唯一的
+    /// 可观测后果就是"有人调了 `wait_idle_until`"。没有这个计数器，那条不变量只能
+    /// 靠"跑一遍再量耗时"间接证明 —— 而耗时在 CI 上从来不稳定。
+    #[cfg(test)]
+    waits: std::sync::atomic::AtomicU64,
 }
 impl PreparationQueue {
     /// worker不持renderer/document强引用；job只在运行时借出它们。
@@ -56,6 +63,8 @@ impl PreparationQueue {
         Ok(Self {
             state,
             worker: Mutex::new(Some(worker)),
+            #[cfg(test)]
+            waits: std::sync::atomic::AtomicU64::new(0),
         })
     }
     /// 只保存最新待办，旧任务的取消标记立即置位；不在宿主线程执行任务或等待计算。
@@ -98,6 +107,8 @@ impl PreparationQueue {
     }
     /// 仅VST3离线setup的UI线程使用；Condvar等待后台工作，process/setProcessing不得调用。
     pub fn wait_idle_until(&self, deadline: std::time::Instant) -> Result<(), String> {
+        #[cfg(test)]
+        self.waits.fetch_add(1, Ordering::Relaxed);
         let mut mailbox = self.state.mailbox.lock_or_recover();
         loop {
             if mailbox.closed {
@@ -113,6 +124,12 @@ impl PreparationQueue {
             mailbox = next;
         }
     }
+    /// 测试专用：`wait_idle_until` 被调用的次数。
+    #[cfg(test)]
+    pub(crate) fn waits(&self) -> u64 {
+        self.waits.load(Ordering::Relaxed)
+    }
+
     /// 源/模型撤销取消当前与待办，但不终止worker，下一次授权可再次排队。
     pub fn cancel(&self) {
         let mut mailbox = self.state.mailbox.lock_or_recover();

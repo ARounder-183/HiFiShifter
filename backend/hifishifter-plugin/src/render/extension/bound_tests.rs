@@ -1759,3 +1759,59 @@ fn the_ara_render_fact_fallback_merges_with_native_facts_instead_of_replacing_th
     );
     assert!(entry.timestretch, "ARA 能给出的字段必须照实更新");
 }
+
+/// **不变量：宿主回调链上的首快照只排队，绝不等待 worker。**
+///
+/// 【为什么钉死】现场 REAPER 7.8.5 的 `AppHangB1` 就是这条：`endEditing` 里等了 2 s
+/// 的 `wait_idle_until`，Windows 判主线程"不再与窗口交互"并关掉它。上界不是零 ——
+/// 只要宿主在必须立刻返回的回调里等，它就已经在挂起的路上了。
+#[test]
+fn a_host_callback_never_asks_the_worker_to_wait() {
+    let budget = std::time::Duration::from_millis(250);
+    // 守卫外：预算照用（离线/测试这类非宿主线程可以等一个有界的时间）。
+    assert_eq!(
+        ExtensionOwner::first_snapshot_budget(Some(budget)),
+        Some(budget)
+    );
+    assert_eq!(ExtensionOwner::first_snapshot_budget(None), None);
+    {
+        let _call = crate::host::HostCallGuard::enter("test");
+        assert_eq!(
+            ExtensionOwner::first_snapshot_budget(Some(budget)),
+            None,
+            "宿主调用里必须降级成\"只排队\""
+        );
+    }
+    // 守卫退出后立刻恢复：一次宿主调用不能永久关掉这条能力。
+    assert_eq!(
+        ExtensionOwner::first_snapshot_budget(Some(budget)),
+        Some(budget)
+    );
+}
+
+/// **不变量：`prepare_renderers` 走的是"只排队"那条。**
+///
+/// 【为什么单独一条】`DocumentSession::prepare_renderers` 的主要调用者是 ARA 的
+/// `end_editing`（`remap_and_log` 的尾巴）与存档回调 —— 两者都在宿主线程上。
+/// 它一旦传预算，`first_snapshot_budget` 就只剩 `in_host_call()` 一道保险；
+/// 而宿主**自己**触发的编辑（用户在 REAPER 里拖 item）根本不经过我们的守卫。
+#[test]
+fn the_document_prepare_never_waits_for_the_worker() {
+    let (model, _owners, _ids) = crate::editor::session::tests::workspace_fixture();
+    let document = model.session();
+    let owner = Arc::new(ExtensionOwner::default());
+    owner
+        .bind_to_document(
+            document.clone(),
+            ApiGeneration::V2Final,
+            ExtensionRoles::all(),
+            ExtensionRoles::PLAYBACK_RENDERER,
+            None,
+        )
+        .unwrap();
+    // 走的是与 `end_editing` 完全相同的入口。
+    document.prepare_renderers();
+    let waits = owner.preparation().map_or(0, |queue| queue.waits());
+    assert_eq!(waits, 0, "文档收口路径不得等准备 worker");
+    document.close();
+}

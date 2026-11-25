@@ -344,10 +344,18 @@ pub struct ExtensionOwner {
     gate_cleared_rolling: AtomicU64,
     /// 是否已经尝试过"在宿主问到第一块音频之前就把第一份快照发布出去"。
     ///
-    /// 【为什么需要一次性闸门】那次发布是**同步**的（见 `publish_first_snapshot_inline`），
-    /// 会占住调用线程一次完整合成的时长。它必须只发生在"这个实例还没有任何可听快照"
-    /// 的那一刻；失败时不重试，把后续留给后台队列 —— 否则宿主每问一次就阻塞一次。
+    /// 【为什么需要一次性闸门】它只在"这个实例还没有任何可听快照"的那一刻抢一拍
+    /// （见 `request_first_snapshot`）。抢过之后后续的排队由 `prepare()` 末尾的
+    /// `worker.request` 负责 —— 那里的判据是"版本变了没有"，与这一位无关。
+    /// 抢失败（素材还没到）时把闸门放回去，让下一拍再试。
     first_snapshot_inlined: AtomicBool,
+    /// 版本被取代后的重排闸门（见 `prepare_job` 的 `Retry` 分支）。
+    ///
+    /// 【为什么需要闸门】一次导入会连续触发多条 region 创建/更新，每一条都推进
+    /// `document.revision`。没有闸时 `prepare_job` 会"发布成功 → 版本已变 → 重排 →
+    /// 又变 → …"一直空转：现场 22:58:08–11 的 6 次 mixdown 与 22:58:56 的 3 次全是
+    /// 这条链的脚印，而**一行** `[ara] prepared` 都没有。
+    prepare_retry: Mutex<PrepareRetryGate>,
     /// ARA 实例在快照未就绪时退到 layered（宿主原声兜底）的块数。
     ///
     /// 【为什么必须是诊断】它等于"本该由我们出声、实际让宿主原声顶替"的次数。
@@ -647,6 +655,55 @@ const GATE_SETTLE_BLOCKS: u32 = 2;
 /// 的尝试次数上限提前退出，不必空等到这个上限。
 pub(crate) const OFFLINE_PREPARE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// 一个窗口内允许 `prepare_job` 补排几次。
+///
+/// 【为什么是 3】一次真实的编辑通常只推进 1–2 次版本（region 创建 + 清单刷新）；
+/// 第三次之后还在变，说明宿主那一轮编辑根本还没结束 —— 再排只会继续被丢弃。
+pub(crate) const PREPARE_RETRY_LIMIT: u32 = 3;
+
+/// 补排闸门的窗口。
+///
+/// 【为什么是 1 秒】与宿主一次编辑事务的典型时长同量级（REAPER 实测 0.3–0.8 s）。
+/// 窗口太长会把两次**独立**编辑并成一批、第二次编辑反而被挡住；太短则失去收敛作用。
+pub(crate) const PREPARE_RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// `prepare_job` 版本被取代后的补排闸门。
+///
+/// 【为什么需要它】发布成功之后才发现版本已变，是这条链上**唯一**的自旋点：
+/// 补排 → 又变 → 补排。没有闸时一次导入就能让它转上十几圈（现场 6 + 3 次
+/// `mixdown`、零行 `[ara] prepared`）。
+#[derive(Default)]
+pub(crate) struct PrepareRetryGate {
+    window: Option<std::time::Instant>,
+    attempts: u32,
+    reported: bool,
+}
+
+impl PrepareRetryGate {
+    /// 记一次"版本被取代"，返回这一次还允不允许补排。
+    pub(crate) fn allow(&mut self, now: std::time::Instant) -> bool {
+        let expired = self
+            .window
+            .is_none_or(|start| now.duration_since(start) > PREPARE_RETRY_WINDOW);
+        if expired {
+            self.window = Some(now);
+            self.attempts = 0;
+            self.reported = false;
+        }
+        self.attempts = self.attempts.saturating_add(1);
+        self.attempts <= PREPARE_RETRY_LIMIT
+    }
+
+    /// 本窗口是不是第一次"放弃补排"（每个窗口只记一行）。
+    pub(crate) fn should_report(&mut self) -> bool {
+        if self.reported {
+            return false;
+        }
+        self.reported = true;
+        true
+    }
+}
+
 /// 一份合法的空 `EditState` 字节；编码失败时返回空块（`restore` 把空块当 no-op）。
 fn default_edit_state_bytes() -> Vec<u8> {
     crate::state_channel::EditState::default()
@@ -672,3 +729,50 @@ mod host_geometries_tests;
 mod host_sequence_tests;
 #[cfg(test)]
 mod region_geometry_match_tests;
+
+#[cfg(test)]
+mod prepare_retry_tests {
+    use super::*;
+
+    /// **不变量：同一个窗口里最多补排 `PREPARE_RETRY_LIMIT` 次，之后停下来。**
+    ///
+    /// 【为什么钉死】补排是这条链上唯一会自旋的地方：发布成功 → 版本已变 → 补排 →
+    /// 又变 → ……。现场一次导入就转了 6 + 3 圈，而**一行** `[ara] prepared` 都没有。
+    #[test]
+    fn a_prepare_that_never_converges_stops_after_the_limit() {
+        let mut gate = PrepareRetryGate::default();
+        let now = std::time::Instant::now();
+        for attempt in 1..=PREPARE_RETRY_LIMIT {
+            assert!(gate.allow(now), "第 {attempt} 次补排必须放行");
+        }
+        assert!(!gate.allow(now), "超过上限之后必须停下来，等下一次模型变化");
+    }
+
+    /// 窗口过期之后重新开闸：一次长时间编辑不能让后续**独立**编辑永远补排不了。
+    #[test]
+    fn a_new_window_reopens_the_gate() {
+        let mut gate = PrepareRetryGate::default();
+        let start = std::time::Instant::now();
+        for _ in 0..=PREPARE_RETRY_LIMIT {
+            gate.allow(start);
+        }
+        assert!(!gate.allow(start));
+        let later = start + PREPARE_RETRY_WINDOW + std::time::Duration::from_millis(1);
+        assert!(gate.allow(later), "新窗口必须重新放行");
+    }
+
+    /// "没有收敛"每个窗口只报一行：它是限流键的另一半，不能靠限流器兜住。
+    #[test]
+    fn the_non_convergence_line_is_reported_once_per_window() {
+        let mut gate = PrepareRetryGate::default();
+        let start = std::time::Instant::now();
+        for _ in 0..=PREPARE_RETRY_LIMIT {
+            gate.allow(start);
+        }
+        assert!(gate.should_report());
+        assert!(!gate.should_report(), "同一窗口不得重复报");
+        let later = start + PREPARE_RETRY_WINDOW + std::time::Duration::from_millis(1);
+        gate.allow(later);
+        assert!(gate.should_report(), "新窗口重新获得一次上报机会");
+    }
+}
