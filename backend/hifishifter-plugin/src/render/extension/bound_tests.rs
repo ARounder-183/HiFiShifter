@@ -57,7 +57,7 @@ fn offline_empty_renderer_prepares_silence_without_a_periodic_worker() {
     owner.prepare();
     assert!(owner.preparation().is_none());
     owner
-        .prepare_offline_until(std::time::Instant::now() + std::time::Duration::from_secs(3))
+        .prepare_offline_blocking(std::time::Instant::now() + std::time::Duration::from_secs(3))
         .unwrap();
     let mut left = [9.0; 4];
     let mut right = [9.0; 4];

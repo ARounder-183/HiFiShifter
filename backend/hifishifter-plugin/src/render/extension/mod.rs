@@ -463,6 +463,12 @@ pub struct ExtensionOwner {
     /// 这里只是一次原子写；真正的调度仍由会话 actor 的渲染任务完成 —— 它自带
     /// 在途检查、取消与重试预算，比从音频线程另开一条合成通路安全得多。
     render_wanted: AtomicBool,
+    /// 是否已有一个离线准备 worker 在跑（见 `ExtensionOwner::prepare_offline_now`）。
+    ///
+    /// 【为什么需要它】离线准备从"在宿主回调里同步等"改成"排一次 + 后台收尾"之后，
+    /// 宿主会在很短时间内连续调 `setupProcessing` 与 `setProcessing(true)` —— 每次调用
+    /// 都起一条线程的话，最坏情况是几十条线程同时抢同一份合成。这里只放行一条。
+    offline_prepare_worker: AtomicBool,
     pub(crate) edits: Arc<Mutex<crate::state_channel::EditState>>,
     pending_restore: Mutex<Option<crate::state_channel::EditState>>,
     /// 等待账：起点与签名（见 [`RestoreProgress`]）。**唯一**的时间来源。

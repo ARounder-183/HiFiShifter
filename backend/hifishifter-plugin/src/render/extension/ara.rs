@@ -16,6 +16,31 @@ use super::*;
 /// 号作废，序列出现空洞 —— 身份互异才是目的，连续并不重要）。
 static NEXT_WRITER_ID: AtomicU64 = AtomicU64::new(1);
 
+/// 一次离线准备尝试的结论。
+///
+/// 【为什么要有第三态而不是 `bool`】"没准备好"与"准备好了"之间的区别对现场毫无
+/// 意义 —— 用户看到的是"导出静音"。带上**是哪一段**没准备好（捕获会话/曲线，还是
+/// 渲染快照），下一次报障就不必再猜是曲线没加载还是快照没发布。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OfflineReadiness {
+    Ready,
+    /// 还没准备好，附带未就绪的那一段（只用于日志/错误文本）。
+    NotReady(&'static str),
+}
+
+impl OfflineReadiness {
+    pub(crate) fn is_ready(self) -> bool {
+        matches!(self, Self::Ready)
+    }
+
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::NotReady(reason) => reason,
+        }
+    }
+}
+
 /// 给本实例发一个一次性 writer 身份（详见 [`NEXT_WRITER_ID`]）。
 fn assign_writer_id(owner: &ExtensionOwner) {
     if owner.writer_id.load(Ordering::Acquire) != 0 {
@@ -477,17 +502,102 @@ impl ExtensionOwner {
             queue.acknowledge_idle_success();
         }
     }
-    /// 仅SDK规定UI线程的kOffline setup调用；不在事务锁内等待，不把旧快照当最新版本。
-    pub(crate) fn prepare_offline_until(
+    /// 离线准备**尝试一次**，不等任何合成。
+    ///
+    /// 【为什么它必须是非阻塞的】调用者是 VST3 `setupProcessing` / `setProcessing(true)`
+    /// 与 CLAP 的对应入口 —— 它们都在**宿主的 UI 线程**上。旧实现在这里 `sleep(20ms)`
+    /// 轮询到 15 s：合成一旦不收敛，宿主就冻满 15 秒，导出以"宿主未响应"收场。
+    /// 现在只做两件事：把"该准备"排进各自的队列，然后如实回答**此刻**有没有准备好。
+    pub(crate) fn try_prepare_offline_once(self: &Arc<Self>) -> Result<OfflineReadiness, String> {
+        if self.is_closed() {
+            return Err("offline renderer closed".into());
+        }
+        // 【判据与 `prepare_job` 同一份】离线只跑一趟，没有第二次机会，所以这里更不能
+        // 因为"窗口没开过 ⇒ 形态未落定"就把静音烘焙进产物。与实时通路共用
+        // "未绑定 + 有素材"这条证据（理由见 `prepare_job` 的同名分支）。
+        let needs_capture = !self.is_bound()
+            && (self.capture.has_material()
+                || self.pending_capture_edits.lock_or_recover().is_some());
+        if needs_capture {
+            // 【关键：先确保会话存在】离线实例可能从未打开过 GUI，曲线只在
+            // `pending_capture_edits` 里。没有会话时捕获通路会退回"只有几何"的时间线，
+            // 并把 with_curves=false 发布出去 —— 那正是"参数线不生效"。
+            if let Ok(session) = self.clone().capture_session() {
+                session.request_reload();
+                // 【合成的落点是 actor，不是这条线程】`rearm_render` 只置一个待办位并
+                // 唤醒 actor；真正数秒的合成由 actor 的渲染任务执行（它自带在途检查、
+                // 取消与重试预算）。
+                session.rearm_render();
+            }
+            if !self.capture_offline_ready()? {
+                return Ok(OfflineReadiness::NotReady("capture session/curves"));
+            }
+        }
+        if !self.renders_playback() {
+            return Ok(OfflineReadiness::Ready);
+        }
+        // SDK 离线 setup 在 UI 线程；无 GUI 时也要刷新真实 item 状态，不能依赖 WebView timer。
+        self.refresh_host_geometry();
+        let document = self.editor_document()?;
+        {
+            let _transaction = document.transaction.lock_or_recover();
+            if !document.is_alive() {
+                return Err("offline renderer closed".into());
+            }
+            if !document.ready.load(Ordering::Acquire) {
+                return Err("offline host model/PCM not ready".into());
+            }
+            let keys = self.assigned_regions().map_err(|e| e.to_string())?;
+            let version = PreparedVersion {
+                model: document.revision.load(Ordering::Acquire),
+                edit: document.edits.lock_or_recover().revision,
+                epoch: document.render_epoch.load(Ordering::Acquire),
+                scope: document.scope_revision.load(Ordering::Acquire),
+                keys,
+            };
+            if self.prepared.lock_or_recover().as_ref() == Some(&version)
+                && self.snapshots.iter().all(|snapshot| snapshot.is_ready())
+            {
+                return Ok(OfflineReadiness::Ready);
+            }
+        }
+        // 【排一次，不等它】与 `prepare()` 同一个入口：`ensure_preparation` 起队列，
+        // `worker.request` 排队；在途时不再重复排队（那一轮会自己看到新版本）。
+        self.ensure_preparation();
+        let worker = self
+            .preparation()
+            .ok_or("offline preparation worker missing")?;
+        if !worker.state().0 {
+            let owner = Arc::downgrade(self);
+            worker.request(Box::new(move |cancel| {
+                owner
+                    .upgrade()
+                    .ok_or("renderer closed".to_owned())?
+                    .prepare_job(cancel)
+            }))?;
+        }
+        Ok(OfflineReadiness::NotReady("renderer snapshots"))
+    }
+
+    /// 离线准备**阻塞等到**就绪（或 deadline / 不收敛）。
+    ///
+    /// 【只允许在专用 worker 上调用】这是全插件唯一会 `sleep` 的离线入口，而它睡的是
+    /// **调用线程**。`in_host_call()` 为真时直接拒绝：那条线程是宿主的消息泵，在这里
+    /// 睡满 15 s 就是一次 `AppHangB1`（见 `host::reentrancy` 的模块文档）。
+    ///
+    /// 【为什么 Capture 要在这里同步准备】bounce / 导出是 Capture 的**第二条通路**，
+    /// 而它是宿主跑得最快的一次 —— 插件没有第二次机会，所以后台收尾线程允许自己把
+    /// 合成做完（`deadline` 对它无意义：没有文档事务可等，合成本身有界）。
+    pub(crate) fn prepare_offline_blocking(
         self: &Arc<Self>,
         deadline: std::time::Instant,
     ) -> Result<(), String> {
-        // 【为什么 Capture 要在这里同步准备】bounce / 导出是 Capture 的**第二条通路**，
-        // 而它是宿主跑得最快的一次 —— 插件没有第二次机会。这里必须同步把结果准备好，
-        // 否则产物里是静音。`deadline` 对它无意义：没有文档事务可等，合成本身有界。
-        // 【为什么判据与 `prepare_job` 同一份】离线只跑一趟，没有第二次机会，所以这里
-        // 更不能因为"窗口没开过 ⇒ 形态未落定"就把静音烘焙进产物。与实时通路共用
-        // "未绑定 + 有素材"这条证据（理由见 `prepare_job` 的同名分支）。
+        if crate::host::in_host_call() {
+            return Err(
+                "offline preparation must not block a host callback; it belongs on a worker"
+                    .into(),
+            );
+        }
         let needs_capture = !self.is_bound()
             && (self.capture.has_material()
                 || self.pending_capture_edits.lock_or_recover().is_some());
