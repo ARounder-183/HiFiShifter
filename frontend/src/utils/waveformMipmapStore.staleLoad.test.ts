@@ -112,7 +112,13 @@ describe("waveformMipmapStore 在途响应作废", () => {
 
         // 此时批量响应才落地：带有效 L2。
         pendingBatch.resolve([
-            { path: "/loop.wav", ok: true, pending: false, data: ["", "", encodeMipmap(2)], error: null },
+            {
+                path: "/loop.wav",
+                ok: true,
+                pending: false,
+                data: ["", "", encodeMipmap(2)],
+                error: null,
+            },
         ]);
         await flush();
 

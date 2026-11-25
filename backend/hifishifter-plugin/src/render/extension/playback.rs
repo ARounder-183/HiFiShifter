@@ -818,7 +818,9 @@ impl ExtensionOwner {
                 .feed_origin
                 .saturating_add(i64::try_from(decision.feed_frames_before).unwrap_or(i64::MAX));
             geometry.anchor.store(position, Ordering::Release);
-            geometry.frames_since_anchor.store(frames as u64, Ordering::Release);
+            geometry
+                .frames_since_anchor
+                .store(frames as u64, Ordering::Release);
         }
 
         // ── 前导静音（诊断 + 门控）────────────────────────────────────
@@ -1215,7 +1217,9 @@ impl ExtensionOwner {
             // —— 一次复位就凭空多出几十秒的偏移。
             geometry.feed_origin.store(0, Ordering::Release);
             geometry.feed_frames_total.store(0, Ordering::Release);
-            geometry.feed_first_raw.store(NO_POSITION, Ordering::Release);
+            geometry
+                .feed_first_raw
+                .store(NO_POSITION, Ordering::Release);
             geometry.feed_promoted.store(false, Ordering::Release);
             geometry
                 .timebase_kind

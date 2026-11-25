@@ -177,9 +177,7 @@ impl FeedTimeline {
 /// 一键对比「按喂入域从 0 起算」与「按宿主 raw 起算」的差别，不必重新出包。
 pub fn pinned_origin_uses_raw() -> bool {
     static USES_RAW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *USES_RAW.get_or_init(|| {
-        std::env::var("HFS_PINNED_ORIGIN").is_ok_and(|value| value == "raw")
-    })
+    *USES_RAW.get_or_init(|| std::env::var("HFS_PINNED_ORIGIN").is_ok_and(|value| value == "raw"))
 }
 
 /// 一个传输会话的纯状态。
@@ -777,7 +775,10 @@ mod tests {
         playing.raw_start = 999_000;
         let decision = session.observe(playing);
         assert_eq!(decision.feed, FeedKind::Transport);
-        assert_eq!(session.feed_timeline.frames, 0, "传输事件必须把喂入时间轴归零");
+        assert_eq!(
+            session.feed_timeline.frames, 0,
+            "传输事件必须把喂入时间轴归零"
+        );
         assert_eq!(session.feed_timeline.first_raw, NO_RAW);
         assert_eq!(session.feed_timeline.origin, 0);
     }

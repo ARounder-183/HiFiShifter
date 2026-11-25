@@ -942,7 +942,11 @@ fn a_batch_reports_each_source_separately() {
         json!(false),
         "被拒绝是终态：前端不该对它重试"
     );
-    assert_eq!(entries[1]["data"], json!(null), "拒绝的源一个字节都不许出去");
+    assert_eq!(
+        entries[1]["data"],
+        json!(null),
+        "拒绝的源一个字节都不许出去"
+    );
     let reason = entries[1]["error"].as_str().unwrap_or_default();
     assert!(
         reason.contains("not authorized"),

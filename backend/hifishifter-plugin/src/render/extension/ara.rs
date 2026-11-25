@@ -594,8 +594,7 @@ impl ExtensionOwner {
     ) -> Result<(), String> {
         if crate::host::in_host_call() {
             return Err(
-                "offline preparation must not block a host callback; it belongs on a worker"
-                    .into(),
+                "offline preparation must not block a host callback; it belongs on a worker".into(),
             );
         }
         let needs_capture = !self.is_bound()

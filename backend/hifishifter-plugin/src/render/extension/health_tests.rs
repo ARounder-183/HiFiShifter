@@ -80,4 +80,3 @@ fn the_health_snapshot_never_creates_an_editor_session() {
     );
     document.close();
 }
-
