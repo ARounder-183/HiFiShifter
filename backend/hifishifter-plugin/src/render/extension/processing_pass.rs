@@ -1844,9 +1844,7 @@ mod tests {
     fn a_quiet_preview_only_waits_long_when_a_run_is_open() {
         assert_eq!(preview_idle_limit(false), PREVIEW_QUIET_MS);
         assert_eq!(preview_idle_limit(true), RENDER_RUN_IDLE_MS);
-        assert!(
-            RENDER_RUN_IDLE_MS > 16_600,
-            "现场最长的 chunk 间隔是 16.6 s，阈值必须高于它"
-        );
+        // 现场最长的 chunk 间隔是 16.6 s，阈值必须高于它。（常量比较，编译期断言即可。）
+        const { assert!(RENDER_RUN_IDLE_MS > 16_600) };
     }
 }
