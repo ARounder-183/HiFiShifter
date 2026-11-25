@@ -112,6 +112,9 @@ Invoke-Gate 'Touch coverage gate' { python scripts/checks/check-touch-coverage.p
 # they sit one word apart in every payload. A bare `gain` names neither: the kernel read
 # it as the take layer while the UI wrote it as the item layer, so a +12 dB knob came
 # back as -12 dB and both layers ended up wrong. Every one of those mistakes compiles.
+# The gate also holds the command boundary (take_gain <-> takeGain) and refuses a
+# ClipStatePatch literal that kept the old field name -- that one is a compile error
+# only when the crate holding it is built, and src-tauri is not in the fast test loop.
 Invoke-Gate 'Gain layer gate' { python scripts/checks/check-gain-layers.py }
 
 Write-Host 'All static gates passed.' -ForegroundColor Green

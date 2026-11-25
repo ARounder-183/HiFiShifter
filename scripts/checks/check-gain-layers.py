@@ -29,7 +29,15 @@ The rules, and what each one protects:
   * `ClipStatePatch::take_gain` keeps `alias = "gain"` (old projects and old
     frontends still send the bare key; dropping the alias silently ignores them);
   * the `[host] gain layers` diagnostic prints both layers by name (the next
-    incident must not need a source read to answer "which one is which").
+    incident must not need a source read to answer "which one is which");
+  * the IPC boundary names the layer too (`take_gain` on the `set_clip_state`
+    command, which Tauri maps to the `takeGain` key the frontend sends);
+  * no `ClipStatePatch` literal in the backend passes a bare `gain` field.
+
+[Why the last one is a gate and not just a compile error] Renaming the kernel field
+left one construction site behind in `src-tauri` -- a crate that the fast test loop
+never compiles. The compiler does catch it, but only after a full app build; the
+gate catches it in a tenth of a second, and it names the field that has to change.
 
 Exit code 0 when every rule holds.
 """
@@ -49,6 +57,13 @@ PAYLOAD_TYPE = "frontend/src/components/layout/timeline/hooks/bulkClipRemotePayl
 WORKSPACE = "backend/hifishifter-plugin/src/editor/workspace.rs"
 PATCH = "backend/hifishifter-kernel/src/state/model.rs"
 HOST_EDIT = "backend/hifishifter-plugin/src/host/reaper/host_edit.rs"
+# The IPC surface: the command wrapper (`#[tauri::command(rename_all = "camelCase")]`,
+# so `take_gain` is the `takeGain` key the frontend sends) and its implementation.
+COMMAND_SURFACE = "backend/src-tauri/src/commands.rs"
+COMMAND_IMPL = "backend/src-tauri/src/commands/timeline.rs"
+
+# Where a `ClipStatePatch` literal can be written: every workspace member's source tree.
+CONSTRUCTION_SITES = ("backend/*/src/**/*.rs",)
 
 # Inline escape hatch, same convention as check-mobile-form-gate.py.
 ESCAPE = "gain-gate: allow"
@@ -105,6 +120,17 @@ REQUIRED = (
         r"item=\{.*\}.*take=",
         "the [host] gain layers line must print both layers by name",
     ),
+    (
+        COMMAND_SURFACE,
+        r"^\s*take_gain:\s*Option<f32>,",
+        "the set_clip_state command must name the take layer take_gain (the frontend "
+        "sends it as takeGain)",
+    ),
+    (
+        COMMAND_IMPL,
+        r"^\s*take_gain:\s*Option<f32>,",
+        "the command implementation must name the take layer take_gain as well",
+    ),
 )
 
 # (file, regex, why) -- every one of these must stay absent.
@@ -122,7 +148,19 @@ FORBIDDEN = (
         r'\["gain"\]\s*=\s*serde_json::json!\(\s*[a-z_.]*(item_gain|clip_gain)',
         "the take-layer gain field must never be written from the item layer",
     ),
+    (
+        COMMAND_SURFACE,
+        r"^\s*gain:\s*Option<f32>,",
+        "the set_clip_state command must not take a bare gain: it names no layer",
+    ),
 )
+
+# A bare `gain` field inside a ClipStatePatch literal is not a style problem: the
+# struct has no such field, so the line is a compile error that only surfaces when the
+# crate that holds it is built.  `src-tauri` is not part of the fast test loop, which
+# is exactly how a kernel rename left one behind.
+BARE_GAIN_FIELD = re.compile(r"^\s*gain\s*[,:]")
+PATCH_LITERAL = re.compile(r"ClipStatePatch\s*\{")
 
 
 def read(relative: str) -> str:
@@ -131,6 +169,39 @@ def read(relative: str) -> str:
         return path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as error:
         raise SystemExit("check-gain-layers: cannot read %s: %s" % (path, error))
+
+
+def patch_literals(text: str) -> list[tuple[int, str]]:
+    """Return (first line number, literal text) for every ClipStatePatch literal.
+
+    Brace counting is enough: the fields of a struct literal are identifiers, so no
+    literal here contains an unbalanced brace inside a string.
+    """
+    blocks: list[tuple[int, str]] = []
+    for match in PATCH_LITERAL.finditer(text):
+        depth = 0
+        end = None
+        for index in range(match.end() - 1, len(text)):
+            char = text[index]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    end = index + 1
+                    break
+        if end is None:
+            continue
+        blocks.append((text.count("\n", 0, match.start()) + 1, text[match.start():end]))
+    return blocks
+
+
+def construction_sites() -> list[str]:
+    paths: set[str] = set()
+    for pattern in CONSTRUCTION_SITES:
+        for path in ROOT.glob(pattern):
+            paths.add(str(path.relative_to(ROOT)).replace("\\", "/"))
+    return sorted(paths)
 
 
 def escaped_lines(text: str) -> set[int]:
@@ -161,6 +232,23 @@ def main() -> int:
                 continue
             if re.search(pattern, line):
                 findings.append("%s:%d: %s -- %s" % (relative, number, line.strip(), why))
+    seen: set[str] = set()
+    for relative in construction_sites():
+        text = read(relative)
+        skipped = escaped_lines(text)
+        for start, block in patch_literals(text):
+            for offset, line in enumerate(block.splitlines()):
+                number = start + offset
+                if number in skipped or not BARE_GAIN_FIELD.match(line):
+                    continue
+                finding = (
+                    "%s:%d: %s -- a ClipStatePatch literal cannot carry a bare gain: "
+                    "the take layer is take_gain, the item layer is item_gain"
+                    % (relative, number, line.strip())
+                )
+                if finding not in seen:
+                    seen.add(finding)
+                    findings.append(finding)
 
     if findings:
         print("check-gain-layers: %d gain-layer violation(s):" % len(findings))
