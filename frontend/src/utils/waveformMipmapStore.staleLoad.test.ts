@@ -21,6 +21,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { BatchWaveformMipmapEntry } from "../services/api/waveform";
 import { waveformApi } from "../services/api/waveform";
 
 import { waveformMipmapStore } from "./waveformMipmapStore.js";
@@ -30,7 +31,7 @@ vi.mock("../services/api/waveform", () => ({
     waveformApi: {
         getWaveformMipmapBinary: vi.fn(),
         preloadWaveformMipmap: vi.fn(async () => ({ ok: true })),
-        batchGetWaveformMipmap: vi.fn(async () => ({})),
+        batchGetWaveformMipmap: vi.fn(async () => []),
         getRootMixWaveformPeaksSegment: vi.fn(),
         getTrackMixWaveformPeaksSegment: vi.fn(),
     },
@@ -85,7 +86,7 @@ function flush(): Promise<void> {
 beforeEach(() => {
     waveformMipmapStore.clear();
     vi.clearAllMocks();
-    batchMock.mockResolvedValue({});
+    batchMock.mockResolvedValue([]);
 });
 
 describe("waveformMipmapStore 在途响应作废", () => {
@@ -94,7 +95,7 @@ describe("waveformMipmapStore 在途响应作废", () => {
         // App 把它转成 refresh()。若 refresh() 在批量响应落地前 invalidate，
         // 批量响应按代次被丢弃 → L2 永远写不进缓存 → batchPreload 再发 →
         // 后端再 emit `cached` → 再 refresh() …… 波形永不出现且 IPC 风暴。
-        const pendingBatch = deferred<Record<string, [string, string, string]>>();
+        const pendingBatch = deferred<BatchWaveformMipmapEntry[]>();
         batchMock.mockReturnValue(pendingBatch.promise);
         // 首次抢跑拿空串（后端忙）：落地后只剩冷却，无任何在途请求。
         singleMock.mockResolvedValue("");
@@ -110,7 +111,9 @@ describe("waveformMipmapStore 在途响应作废", () => {
         waveformMipmapStore.refresh("/loop.wav");
 
         // 此时批量响应才落地：带有效 L2。
-        pendingBatch.resolve({ "/loop.wav": ["", "", encodeMipmap(2)] });
+        pendingBatch.resolve([
+            { path: "/loop.wav", ok: true, pending: false, data: ["", "", encodeMipmap(2)], error: null },
+        ]);
         await flush();
 
         // L2 必须成功写入缓存（旧实现会被代次作废整包丢弃 → 死循环）。
@@ -181,7 +184,7 @@ describe("waveformMipmapStore 在途响应作废", () => {
 
         // 2) 作废后该文件又被重新登记（模拟紧随其后的 batchPreload / 下一帧
         //    draw），但批量响应里没有它 —— 条目存在、无数据、无在途请求。
-        batchMock.mockResolvedValue({});
+        batchMock.mockResolvedValue([]);
         await waveformMipmapStore.batchPreload(["/d.wav"]);
         expect(waveformMipmapStore.hasLevel("/d.wav", 2)).toBe(false);
 
@@ -242,10 +245,16 @@ describe("waveformMipmapStore 在途响应作废", () => {
         // 便捷解码的契约：无效数据返回 null（不抛）。
         expect(decodeWaveformFromBase64(corrupt)).toBeNull();
 
-        batchMock.mockResolvedValue({
-            "/good.wav": ["", "", encodeMipmap(2)],
-            "/bad.wav": ["", "", corrupt],
-        });
+        batchMock.mockResolvedValue([
+            {
+                path: "/good.wav",
+                ok: true,
+                pending: false,
+                data: ["", "", encodeMipmap(2)],
+                error: null,
+            },
+            { path: "/bad.wav", ok: true, pending: false, data: ["", "", corrupt], error: null },
+        ]);
         const errors: Array<{ path: string; error?: string }> = [];
         const unsubscribe = waveformMipmapStore.addListener((path, status, error) => {
             if (status === "error") errors.push({ path, error });
@@ -265,6 +274,51 @@ describe("waveformMipmapStore 在途响应作废", () => {
         expect(singleMock).not.toHaveBeenCalled();
         expect(preloadMock).not.toHaveBeenCalled();
         expect(batchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("被拒绝的源是终态：只标记它自己，且不排重试", async () => {
+        // 旧协议下"一条源被拒绝"只能整批报错：其余文件退回逐个重试，而被拒绝的那条
+        // 每次都会再把整批拖垮一次。逐源结果之后，三种结局各走各的路：
+        // 成功落地 / 终态失败记负缓存 / 尚未就绪进冷却重试。
+        batchMock.mockResolvedValue([
+            {
+                path: "/ok.wav",
+                ok: true,
+                pending: false,
+                data: ["", "", encodeMipmap(2)],
+                error: null,
+            },
+            {
+                path: "/denied.wav",
+                ok: false,
+                pending: false,
+                data: null,
+                error: "source is not authorized by this ARA session",
+            },
+            { path: "/pending.wav", ok: false, pending: true, data: null, error: null },
+        ]);
+        const errors: Array<{ path: string; error?: string }> = [];
+        const unsubscribe = waveformMipmapStore.addListener((path, status, error) => {
+            if (status === "error") errors.push({ path, error });
+        });
+        try {
+            await waveformMipmapStore.batchPreload(["/ok.wav", "/denied.wav", "/pending.wav"]);
+        } finally {
+            unsubscribe();
+        }
+
+        expect(waveformMipmapStore.hasLevel("/ok.wav", 2)).toBe(true);
+        expect(waveformMipmapStore.hasLevel("/denied.wav", 2)).toBe(false);
+        // 终态失败必须把**后端给的原因**原样带给 UI，而不是一句泛泛的失败。
+        expect(errors).toEqual([
+            { path: "/denied.wav", error: "source is not authorized by this ARA session" },
+        ]);
+        // 被拒绝的源不得触发任何重试通路（单发 / 预载 / 第二轮批量）。
+        expect(singleMock).not.toHaveBeenCalled();
+        expect(preloadMock).not.toHaveBeenCalled();
+        expect(batchMock).toHaveBeenCalledTimes(1);
+        // 收尾：清掉"尚未就绪"那条的重试定时器，避免跨测试触发。
+        waveformMipmapStore.clear();
     });
 
     it("clear() 仍然作废全部在途响应，已清空的缓存不得复活", async () => {

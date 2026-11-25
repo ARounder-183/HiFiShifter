@@ -2816,32 +2816,59 @@ pub(super) fn dispatch(
             if paths.len() > 64 {
                 return Err("too many waveform sources".into());
             }
-            let mut result = serde_json::Map::new();
+            // 【为什么是逐源结果数组，而不是一张 path→数据的表】表里没有"这一条怎么了"
+            // 的位置：一条源没就绪只能用空串表达，一条源被拒绝（未授权 / 读不出来）只能
+            // 整批上抛。于是任何一条硬错误都会让同批其余路径全部退回逐个重试 —— 自己给
+            // 自己制造故障，而前端除了"整批失败"读不出第二种信息。
+            //
+            // 现在每条源各带 `ok` / `pending` / `error`：调用方按源更新，一个坏源只影响
+            // 它自己。`pending` 与 `error` 必须分开 —— 前者是瞬时（宿主尚未授权这条刚导入
+            // 的源、峰值还没算完），前端对它有冷却与有界重试；后者是终态，不该重试。
+            let mut results = Vec::with_capacity(paths.len());
             for path in paths {
-                // 【为什么一条没就绪的源不许打死整批】一次导入会触发一次批量预取，
-                // 同一批里通常还有别的 clip。此前任意一条 `?` 上抛就让**整批**失败，
-                // 其余路径只能退回逐个重试 —— 自己给自己制造故障。
-                // 空串 = 尚未就绪：该路径这一栏留空，其余路径照常返回。
-                let Some(data) = peaks(session, &path)? else {
-                    result.insert(path, json!(["", "", ""]));
-                    continue;
+                let entry = match peaks(session, &path) {
+                    Ok(Some(data)) => {
+                        let encoded: Vec<_> = (0..3)
+                            .map(|level| {
+                                if levels
+                                    .as_ref()
+                                    .is_none_or(|l| l.is_empty() || l.contains(&level))
+                                {
+                                    base64::engine::general_purpose::STANDARD
+                                        .encode(data.to_binary_level(level))
+                                } else {
+                                    String::new()
+                                }
+                            })
+                            .collect();
+                        json!({
+                            "path": path,
+                            "ok": true,
+                            "pending": false,
+                            "data": encoded,
+                            "error": null,
+                        })
+                    }
+                    // 尚未就绪：`ok=false` + `pending=true`，`error` 为空。
+                    Ok(None) => json!({
+                        "path": path,
+                        "ok": false,
+                        "pending": true,
+                        "data": null,
+                        "error": null,
+                    }),
+                    // 硬错误：只记在这一条上，`pending=false` 让前端**不要**重试。
+                    Err(error) => json!({
+                        "path": path,
+                        "ok": false,
+                        "pending": false,
+                        "data": null,
+                        "error": error,
+                    }),
                 };
-                let encoded: Vec<_> = (0..3)
-                    .map(|level| {
-                        if levels
-                            .as_ref()
-                            .is_none_or(|l| l.is_empty() || l.contains(&level))
-                        {
-                            base64::engine::general_purpose::STANDARD
-                                .encode(data.to_binary_level(level))
-                        } else {
-                            String::new()
-                        }
-                    })
-                    .collect();
-                result.insert(path, json!(encoded));
+                results.push(entry);
             }
-            Ok(Value::Object(result))
+            Ok(Value::Array(results))
         }
         "get_root_mix_waveform_peaks_segment" | "get_track_mix_waveform_peaks_segment" => {
             let a: Segment = args(input)?;

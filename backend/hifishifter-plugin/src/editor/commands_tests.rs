@@ -889,13 +889,14 @@ fn an_unknown_source_is_still_denied() {
     model.session().close();
 }
 
-/// **回归：批量预取里一条"还没就绪"不许打死整批。**
+/// **回归：批量预取逐源报告结果，一条坏源不许打死整批。**
 ///
 /// 【为什么要紧】一次导入会触发一次 `batchPreload`，同一批里通常还有别的 clip。
 /// 此前任意一条路径 `?` 上抛就让整批失败，其余路径退回逐个重试 —— 自己给自己制造故障。
-/// 反过来，批次里出现**真正的拒绝**时仍然必须整体报错：那是安全边界，不是时序。
+/// 现在每条源各带 `ok` / `pending` / `error`：坏源只影响它自己，而"尚未就绪"（可重试）
+/// 与"被拒绝"（终态）在协议里是两个不同的答案。
 #[test]
-fn a_batch_with_one_pending_source_still_returns_the_others() {
+fn a_batch_reports_each_source_separately() {
     let (model, owner, _identity) = crate::editor::session::tests::fixture();
     let editor = owner.editor_session().unwrap();
     editor.ensure_loaded(false).unwrap();
@@ -917,14 +918,35 @@ fn a_batch_with_one_pending_source_still_returns_the_others() {
         json!({"sourcePaths": ["C:/pending/a.wav", "C:/pending/b.wav"], "levels": [2]}),
     )
     .expect("两条都只是尚未就绪，批次本身必须成功");
-    assert_eq!(batch["C:/pending/a.wav"], json!(["", "", ""]));
-    assert_eq!(batch["C:/pending/b.wav"], json!(["", "", ""]));
-    let error = dispatch(
+    let entries = batch.as_array().expect("逐源结果数组");
+    assert_eq!(entries.len(), 2, "每个请求的源都必须各占一条：{batch}");
+    for (entry, path) in entries.iter().zip(["C:/pending/a.wav", "C:/pending/b.wav"]) {
+        assert_eq!(entry["path"], json!(path));
+        assert_eq!(entry["ok"], json!(false));
+        assert_eq!(entry["pending"], json!(true), "尚未就绪是可重试的瞬时态");
+        assert_eq!(entry["error"], json!(null));
+        assert_eq!(entry["data"], json!(null));
+    }
+    // 拒绝只落在**它自己**那一条上：同批其余路径照常返回，理由原样带出。
+    let mixed = dispatch(
         &editor,
         "batch_get_waveform_mipmap",
         json!({"sourcePaths": ["C:/pending/a.wav", "C:/elsewhere/private.wav"], "levels": [2]}),
     )
-    .expect_err("批次里的拒绝仍然是错误");
-    assert!(error.contains("not authorized"), "{error}");
+    .expect("一条被拒绝不许拖垮整批");
+    let entries = mixed.as_array().expect("逐源结果数组");
+    assert_eq!(entries[0]["pending"], json!(true));
+    assert_eq!(entries[1]["ok"], json!(false));
+    assert_eq!(
+        entries[1]["pending"],
+        json!(false),
+        "被拒绝是终态：前端不该对它重试"
+    );
+    assert_eq!(entries[1]["data"], json!(null), "拒绝的源一个字节都不许出去");
+    let reason = entries[1]["error"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("not authorized"),
+        "拒绝的理由必须与原句一致，前端按它分类: {reason}"
+    );
     model.session().close();
 }
