@@ -2764,3 +2764,130 @@ fn event_relative_switch_maps_the_event_start_to_local_zero() {
     );
     assert_eq!(switched.timebase, TimebaseKind::EventRelative);
 }
+
+/// 让几何认为"宿主这一块送来了彼此不同的音频"。
+///
+/// 【为什么测试里要手工置位】这一位在生产路径由 `capture_observe` 按内容指纹写；
+/// 本组用例只驱动**位置记账**（不喂样本），所以直接把结论写进去 —— 它等价于
+/// "宿主在送变化的音频"，而这正是渲染现场的事实（素材不是周期信号，产物却周期）。
+fn host_is_feeding_changing_audio(owner: &Arc<ExtensionOwner>) {
+    let geometry = &owner.streams[ProcessStream::Realtime.index()];
+    geometry.activity_changed.store(1, Ordering::Release);
+    geometry.last_block_silent.store(false, Ordering::Release);
+}
+
+/// **回归：一次 VEGAS `Render As` 只喂一条时间轴，位置一路向前。**
+///
+/// 【现场原形】宿主不报 kPlaying、位置钉在 0，却持续把彼此不同的音频按块喂进来。
+/// 旧实现把"起点窗口"当成"条件成立就重开"，于是每 49 152 帧（1.024 s）开一个新 epoch，
+/// 而新 epoch 把位置重锚回 `raw_start` = 0 —— 产物就是前一秒复读 31 遍。
+///
+/// 【这条用例钉的是结果而不是机制】它只关心三件事：整段只有一个 pass、位置严格向前、
+/// 读游标一次都没有被纠正。任何"边界重开窗口"的改动都会让第一个断言变红。
+#[test]
+fn a_vegas_render_feeds_the_whole_take_once() {
+    let owner = insert_owner();
+    // 宿主不报传输（kPlaying = 0）、位置钉在 0：这正是渲染现场的形状。
+    let context = crate::block_context::BlockContext {
+        sample_rate: 48_000.0,
+        project_time_samples: 0,
+        playing: false,
+        ..Default::default()
+    };
+    // 与现场产物同长（31.798562 s），块长按渲染的实际节奏混合。
+    const TOTAL: usize = 1_526_331;
+    const SIZES: [usize; 6] = [512, 1_024, 2_048, 4_096, 16_384, 960];
+    let mut fed = 0usize;
+    let mut next_position = Some(0i64);
+    let mut index = 0usize;
+    while fed < TOTAL {
+        host_is_feeding_changing_audio(&owner);
+        let frames = SIZES[index % SIZES.len()].min(TOTAL - fed);
+        index += 1;
+        // 只有首块由 `playback` 合成一个起播上升沿（`!had && !playing && audio_evidence`）。
+        let rising = fed == 0;
+        let block = owner.note_stream_block_at(
+            ProcessStream::Realtime,
+            &context,
+            frames,
+            rising,
+            false,
+            None,
+        );
+        assert!(
+            block.transport_active,
+            "第 {index} 块没有推进权：位置会冻结，渲染里就是一个洞"
+        );
+        if let Some(expected) = next_position {
+            assert_eq!(block.position, expected, "位置必须逐块续接（第 {index} 块）");
+        }
+        next_position = Some(block.position + frames as i64);
+        fed += frames;
+    }
+    let geometry = &owner.streams[ProcessStream::Realtime.index()];
+    assert_eq!(
+        geometry.pass.load(Ordering::Acquire),
+        1,
+        "整段渲染只许有一个 pass：多一个就说明位置被重锚过"
+    );
+    assert_eq!(geometry.pass_rewinds.load(Ordering::Acquire), 0);
+    assert_eq!(
+        owner.position_corrections.load(Ordering::Acquire),
+        0,
+        "位置从没被纠正过，读游标就不该有一次修正"
+    );
+    assert_eq!(next_position, Some(TOTAL as i64));
+}
+
+/// **回归：pass 边界不许重锚一条钉住的喂入流。**
+///
+/// 【为什么单独一条】上一轮修完"渲染 run"之后，问题仍然复现，因为凶手不是 run 而是
+/// 位置记账：每一次"窗口用尽"都会开新 epoch，而新 epoch 把位置拉回 `raw_start`。
+/// 这里在 49 152 帧处**人为注入**一次起播上升沿（旧实现每一块都会合成它），断言：
+/// pass 仍然只有一个，位置继续向下。
+#[test]
+fn a_pass_boundary_never_re_anchors_a_pinned_feed() {
+    let owner = insert_owner();
+    let context = crate::block_context::BlockContext {
+        sample_rate: 48_000.0,
+        project_time_samples: 0,
+        playing: false,
+        ..Default::default()
+    };
+    // 先喂满一个 1.024 s 的现场周期（49 152 帧 = 2 × 24 576）。
+    let mut fed = 0usize;
+    let mut rising = true;
+    while fed < 49_152 {
+        host_is_feeding_changing_audio(&owner);
+        let frames = 24_576.min(49_152 - fed);
+        owner.note_stream_block_at(
+            ProcessStream::Realtime,
+            &context,
+            frames,
+            rising,
+            false,
+            None,
+        );
+        rising = false;
+        fed += frames;
+    }
+    let geometry = &owner.streams[ProcessStream::Realtime.index()];
+    assert_eq!(geometry.pass.load(Ordering::Acquire), 1, "前提：窗口已经提级");
+    // 注入边界：这一块"又升起了一次"。
+    host_is_feeding_changing_audio(&owner);
+    let block = owner.note_stream_block_at(
+        ProcessStream::Realtime,
+        &context,
+        24_576,
+        true,
+        false,
+        None,
+    );
+    assert_eq!(
+        geometry.pass.load(Ordering::Acquire),
+        1,
+        "钉住的喂入流里，起播上升沿不许再开一个 pass"
+    );
+    assert_eq!(block.position, 49_152, "位置必须从上一块终点继续，而不是回到 0");
+    assert_eq!(geometry.pass_rewinds.load(Ordering::Acquire), 0);
+}

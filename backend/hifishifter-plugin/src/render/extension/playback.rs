@@ -556,8 +556,14 @@ impl ExtensionOwner {
         // 上升沿则是新一次起播（宿主可能没有先送 kPlaying=0 的块）。
         // 【域切换不是新 pass】VEGAS Event FX 的 kPlaying 上升沿同时是域切换；
         // 把它当新 pass 会把一条连续演奏切成两段（第一段留在绝对域）。
-        let playing_edge_new_pass =
-            playing_rising && phase_before != SessionPhase::Starting && !clock.switched;
+        let playing_edge_new_pass = playing_rising
+            && phase_before != SessionPhase::Starting
+            && !clock.switched
+            // 【钉住的喂入流里没有"起播"这回事】这一位可能来自宿主，也可能来自我们
+            // 自己合成的容差上升沿。只要宿主在喂一条钉住的时间轴，它就不许把连续音频
+            // 切成两遍 —— 现场正是每 1.024 s 切一次。真正的 kPlaying 升起会让
+            // `playing=true`，那时 feed 已经被规则 1 复位成 Transport，不会被这一条挡住。
+            && decision.feed == FeedKind::Transport;
         let new_pass = new_epoch || clock.seek || cycle_wrap || playing_edge_new_pass;
         // 【这一遍是被哪一闸宣布的】四个候选闸各一位。没有这一位，现场只能靠把产物
         // 切块算互相关来猜是哪一闸 —— 本轮就是这么查出问题的，不该让下一个人再走一遍。
