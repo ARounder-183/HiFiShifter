@@ -10,9 +10,9 @@
  * 新增一个按钮不可能只出现在桌面。
  *
  * 【为什么 `variant` 只决定排版】内容一旦按形态分叉，两边就会漂移（"桌面有、手机没有"
- * 正是这样长出来的）。形态差异全部落在 CSS（`index.css` 的 `.hs-toolbar` 与
- * `[data-form="mobile"] .hs-toolbar-sheet`）：桌面是顶栏一行、按功能组换行；
- * 移动端是 sheet 里的可换行、可竖向滚动的面板，每个可点控件抬到 44px。
+ * 正是这样长出来的）。形态差异全部落在 CSS（`index.css` 的 `html[data-form="mobile"]
+ * .hs-toolbar`）：桌面是顶栏一行、按功能组换行；移动端是 sheet 里的可换行、
+ * 可竖向滚动的面板，每个可点控件抬到 `--qt-hit-min`（触摸 44px）。
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { isPluginMode, canControlHostTransport } from "../../../services/hostCapabilities";
