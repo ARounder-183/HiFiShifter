@@ -299,7 +299,7 @@ async function normalizeImportedClips(args: {
         latest = await dispatch(
             setClipStateRemote({
                 clipId,
-                gain,
+                takeGain: gain,
                 checkpoint: false,
             }),
         ).unwrap();

@@ -376,7 +376,7 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 name: args[1],
                 startSec: args[2],
                 lengthSec: args[3],
-                gain: args[4],
+                takeGain: args[4],
                 muted: args[5],
                 sourceStartSec: args[6],
                 sourceEndSec: args[7],

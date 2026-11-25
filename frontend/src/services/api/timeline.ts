@@ -356,7 +356,8 @@ export const timelineApi = {
         name?: string;
         startSec?: number;
         lengthSec?: number;
-        gain?: number;
+        /** Take 级增益（take 属性面板；REAPER 的 take `D_VOL`）。 */
+        takeGain?: number;
         muted?: boolean;
         sourceStartSec?: number;
         sourceEndSec?: number;
@@ -395,7 +396,7 @@ export const timelineApi = {
             payload.name,
             payload.startSec,
             payload.lengthSec,
-            payload.gain,
+            payload.takeGain,
             payload.muted,
             payload.sourceStartSec,
             payload.sourceEndSec,
@@ -504,7 +505,7 @@ export const timelineApi = {
         updates: Array<{
             clipId: string;
             /** Take 级增益（take 面板）。 */
-            gain?: number;
+            takeGain?: number;
             /** Item 级增益（时间轴旋钮；REAPER 的 `D_VOL`）。 */
             itemGain?: number;
             muted?: boolean;

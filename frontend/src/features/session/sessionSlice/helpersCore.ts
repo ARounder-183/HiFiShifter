@@ -337,9 +337,15 @@ export function applyOptimisticClipState(
         color?: string;
         startSec?: number;
         lengthSec?: number;
-        /** Take 级增益（take 面板）。 */
-        gain?: number;
-        /** Item 级增益（时间轴旋钮）。 */
+        /**
+         * Take 级增益（take 面板）。
+         *
+         * 【载荷键名带层，状态字段仍叫 `gain`】写入的是 `clip.gain` —— 状态里的
+         * `gain` 就是 take 层的投影（与 `ClipStatePatch::take_gain` 写 `c.gain`
+         * 同一口径）。键名带层是为了让调用点无法"顺手"把它当成 item 层。
+         */
+        takeGain?: number;
+        /** Item 级增益（时间轴旋钮；写入 `clip.clip_gain`）。 */
         itemGain?: number;
         muted?: boolean;
         sourceStartSec?: number;
@@ -384,8 +390,8 @@ export function applyOptimisticClipState(
     if (payload.itemGain !== undefined) {
         clip.clip_gain = clampGain(Number(payload.itemGain));
     }
-    if (payload.gain !== undefined) {
-        clip.gain = clampGain(Number(payload.gain));
+    if (payload.takeGain !== undefined) {
+        clip.gain = clampGain(Number(payload.takeGain));
     }
     if (payload.muted !== undefined) {
         clip.muted = Boolean(payload.muted);
@@ -495,9 +501,9 @@ export function applyOptimisticBulkClipState(
     state: SessionState,
     updates: Array<{
         clipId: string;
-        /** Take 级增益（take 面板）。 */
-        gain?: number;
-        /** Item 级增益（时间轴旋钮）。 */
+        /** Take 级增益（take 面板；写入 `clip.gain`）。 */
+        takeGain?: number;
+        /** Item 级增益（时间轴旋钮；写入 `clip.clip_gain`）。 */
         itemGain?: number;
         muted?: boolean;
         startSec?: number;
@@ -531,8 +537,8 @@ export function applyOptimisticBulkClipState(
         if (update.itemGain !== undefined) {
             clip.clip_gain = clampGain(Number(update.itemGain));
         }
-        if (update.gain !== undefined) {
-            clip.gain = clampGain(Number(update.gain));
+        if (update.takeGain !== undefined) {
+            clip.gain = clampGain(Number(update.takeGain));
         }
         if (update.muted !== undefined) {
             clip.muted = Boolean(update.muted);

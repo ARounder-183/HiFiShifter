@@ -1866,7 +1866,10 @@ pub fn set_clip_state(
     name: Option<String>,
     start_sec: Option<f64>,
     length_sec: Option<f64>,
-    gain: Option<f32>,
+    // 【名字必须带层】Take 级增益（take 属性面板；REAPER 的 take `D_VOL`）。
+    // 此前叫裸 `gain`，而 item 级增益也走同一个字段名 —— 写入层与显示层错位，
+    // 现场留下 `gain=4.0 expected 1.0` 与 `gain=1.0 expected 4.0` 这对镜像读数。
+    take_gain: Option<f32>,
     muted: Option<bool>,
     source_start_sec: Option<f64>,
     source_end_sec: Option<f64>,
@@ -1906,7 +1909,7 @@ pub fn set_clip_state(
                 name,
                 start_sec,
                 length_sec,
-                gain,
+                take_gain,
                 muted,
                 source_start_sec,
                 source_end_sec,

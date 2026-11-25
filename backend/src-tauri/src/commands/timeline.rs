@@ -962,7 +962,9 @@ pub(super) fn set_clip_state(
     name: Option<String>,
     start_sec: Option<f64>,
     length_sec: Option<f64>,
-    gain: Option<f32>,
+    // Take 级增益（take 属性面板）。与 `item_gain` 分开：REAPER 里它们是两个
+    // 旋钮，合成一个数就再也分不回去（见 `ClipStatePatch::take_gain`）。
+    take_gain: Option<f32>,
     muted: Option<bool>,
     source_start_sec: Option<f64>,
     source_end_sec: Option<f64>,
@@ -1003,7 +1005,7 @@ pub(super) fn set_clip_state(
             name,
             start_sec,
             length_sec,
-            gain,
+            take_gain,
             item_gain,
             muted,
             source_start_sec,
