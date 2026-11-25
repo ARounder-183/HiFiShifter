@@ -891,16 +891,21 @@ impl ExtensionOwner {
         // 喂入位与光标之间的差；lead 是停播时实测到的宿主渲染领先量（`none` = 本次
         // 会话还没停过播，升起时会退回预热窗中点）；window 是最近一次预热窗宽度。
         let line = format!(
-            "[capture] clock: stream={} blocks={blocks} pass={} counted={} frames={} \
-             jumps={} last_jump={} rewinds={} delta_min={} delta_max={} resyncs={} \
-             rising={} continuous={} music={} ui_offset={} lead={} window={}",
+            "[capture] clock: stream={} blocks={blocks} pass={} pass_reason={} counted={} frames={} \
+             jumps={} last_jump={} rewinds={} pass_rewinds={} delta_min={} delta_max={} \
+             resyncs={} rising={} continuous={} music={} ui_offset={} lead={} window={} feed={}",
             stream.as_str(),
             geometry.pass.load(Ordering::Acquire),
+            PassReason::from_code(geometry.pass_reason.load(Ordering::Acquire))
+                .map_or("none", |reason| reason.as_str()),
             geometry.counted_blocks.load(Ordering::Acquire),
             geometry.counted_frames.load(Ordering::Acquire),
             geometry.jumps.load(Ordering::Acquire),
             geometry.last_jump.load(Ordering::Acquire),
             geometry.clock_rewinds.load(Ordering::Acquire),
+            // 【为什么必须与 `rewinds` 并排】那一位不数 pass 边界，于是"每 1.024 s
+            // 重锚一次"在旧读数里完全不可见（现场 passes 20→51 而 rewinds=1）。
+            geometry.pass_rewinds.load(Ordering::Acquire),
             geometry.clock_delta_min.load(Ordering::Acquire),
             geometry.clock_delta_max.load(Ordering::Acquire),
             geometry.position_resyncs.load(Ordering::Acquire),
@@ -914,6 +919,10 @@ impl ExtensionOwner {
                 "none".to_string()
             },
             geometry.pre_roll_window.load(Ordering::Acquire),
+            match geometry.feed.load(Ordering::Acquire) {
+                1 => "pinned",
+                _ => "transport",
+            },
         );
         let mut last = self.last_clock_diag.lock_or_recover();
         if last.as_deref() != Some(line.as_str()) {

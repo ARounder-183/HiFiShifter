@@ -66,6 +66,52 @@ impl std::ops::Deref for NoMusic {
     }
 }
 
+/// 一次 `new_pass` 是被哪一闸宣布的。
+///
+/// 【为什么只有这五种】`playback.rs` 里能让位置重锚的入口就这几个；捕获侧的
+/// "窗口用尽 / 提级"刻意**不在**其中 —— 本轮的整个要点就是：一条钉住的时间轴
+/// 不许被窗口边界重锚。一个永远不会产生的理由码不该出现在词表里。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PassReason {
+    /// 新一次播放 / 新一次离线 pass。
+    Epoch = 1,
+    /// 宿主报了新位置（真 seek）。
+    Seek = 2,
+    /// 循环回卷。
+    Cycle = 4,
+    /// 宿主停顿后重新升起 kPlaying（中间没有 kPlaying=0 的块）。
+    Edge = 8,
+    /// 传输会话被复位（`setProcessing(false)` / 组件停止）。
+    Reset = 16,
+}
+
+impl PassReason {
+    pub(super) fn code(self) -> u32 {
+        self as u32
+    }
+
+    pub(super) fn from_code(code: u32) -> Option<Self> {
+        match code {
+            1 => Some(Self::Epoch),
+            2 => Some(Self::Seek),
+            4 => Some(Self::Cycle),
+            8 => Some(Self::Edge),
+            16 => Some(Self::Reset),
+            _ => None,
+        }
+    }
+
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Epoch => "epoch",
+            Self::Seek => "seek",
+            Self::Cycle => "cycle",
+            Self::Edge => "edge",
+            Self::Reset => "reset",
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct StreamGeometry {
     pub(super) seen: AtomicBool,
@@ -170,6 +216,27 @@ pub(super) struct StreamGeometry {
     pub(super) rebase_count: AtomicU64,
     /// 本流的 pass 序号（R1 递增）。`0` = 还没有过任何一块。
     pub(super) pass: AtomicU64,
+    /// 宣布最近一次 `new_pass` 的**理由**（[`PassReason`] 的位码）。
+    ///
+    /// 【为什么必须记】`[capture] pass begin` 此前只报 run/pass/gap_ms/raw/local，
+    /// 不报"为什么"。于是"每 1.024 s 重开一次"这种灾难在现场只能靠把产物切块算互相关
+    /// 才能发现，而无法直接点名是哪一闸（新 epoch / seek / 循环回卷 / 起播上升沿）。
+    pub(super) pass_reason: AtomicU32,
+    /// 位置**倒退**且带 `new_pass` 的次数。
+    ///
+    /// 【它补的是 `clock_rewinds` 的洞】那一位带 `&& !new_pass`（见 `playback.rs`），
+    /// 而每一次重锚都伴随 `new_pass` —— 于是 31 次回退一次都没被计数，读数看起来
+    /// 完全健康。同一个现象的两种数法，必然让其中一种骗人。
+    pub(super) pass_rewinds: AtomicU64,
+    /// 本流此刻属于哪一类时间轴（`FeedKind::code`：0 = transport、1 = pinned）。
+    pub(super) feed: AtomicU8,
+    /// 本次喂入流已经走了多少块 / 多少帧（`feed end` 的读数）。
+    pub(super) feed_blocks: AtomicU64,
+    pub(super) feed_frames: AtomicU64,
+    /// 起点窗口是否已经用掉（一次性）。跨块存在，所以必须是文档级原子。
+    pub(super) window_spent: AtomicBool,
+    /// "钉住 + 有信号"已经累积了多少帧（提级的判据，见 `FEED_PROMOTE_SEC`）。
+    pub(super) pinned_signal_frames: AtomicU64,
     /// 锚点那一刻 `continuousTimeSamples` / `projectTimeMusic` 的读数。
     ///
     /// 【为什么存锚而不是累加增量】两者都是**绝对**读数（相对工程起点）。把"本块与

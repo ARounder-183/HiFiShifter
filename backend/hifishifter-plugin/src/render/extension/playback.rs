@@ -1,7 +1,7 @@
 //! 播放记账：流位置、门控、块分割与输出放行，以及它自己的两个切片助手。
 use super::host_clock::{ClockDomain, ClockInput};
 use super::timebase::TimebaseKind;
-use super::transport_session::{SessionInput, SessionPhase, TransportSession};
+use super::transport_session::{FeedKind, SessionInput, SessionPhase, TransportSession};
 use super::*;
 impl ExtensionOwner {
     /// 取走"该重新合成一次"的意图（非音频线程调用；见 [`Self::render_wanted`]）。
@@ -465,6 +465,12 @@ impl ExtensionOwner {
             session_frames: session_frames_before,
             last_playing: geometry.last_playing.load(Ordering::Acquire),
             max_start_window_frames: pre_roll_cap,
+            // 【这三格必须跨块存活】它们回答的是"这条喂入流从哪一刻开始、走到了哪"，
+            // 而每次调用都会重建一个 `TransportSession`。放在几何里而不是 `self` 上，
+            // 是因为它本来就是**每条流**的属性（realtime 与 prefetch 的节奏不同）。
+            feed: FeedKind::from_code(geometry.feed.load(Ordering::Acquire)),
+            window_spent: geometry.window_spent.load(Ordering::Acquire),
+            pinned_signal_frames: geometry.pinned_signal_frames.load(Ordering::Acquire),
         };
         // 【首块起播容差的唯一正证据】见下面 `playing_rising` 的说明：只有本块真的
         // 有信号，才允许“kPlaying 滞后”的宿主在第一块上打开有界起点窗口。
@@ -486,8 +492,11 @@ impl ExtensionOwner {
         // 输入监听（宿主没播，FX 实时返回输入）。监听时位置**不该**前进 —— 冻结才是
         // 正确的。武装（用户正在录）或有素材（捕获模式回放监听宿主的起播）才有理由
         // 把这段流动当作播放时间。
+        // 【为什么 ARA 实例不参与】它的输出语义由 ARA 通路决定，捕获仲裁对它是
+        // 无意义的；`log_capture_report` 早已用同一条守卫跳过它。
         let stream_window_eligible = !playing
             && !is_offline
+            && !self.is_bound()
             && audio_evidence
             && !repeated_nonzero
             && (self.capture().is_armed() || self.capture().has_material());
@@ -519,7 +528,22 @@ impl ExtensionOwner {
             host_reset: host_rewound && !clock.switched,
             offline: is_offline,
             frames: frames32,
+            // 【钉住 = 宿主这一块报的位置与上一块相同】它不是"宿主在走"的反证，
+            // 而是"宿主没在报"的正证 —— 提级成喂入流的判据之一。
+            pinned: had && raw_start == last_raw,
+            // 【有信号 = 内容彼此不同且非静音】停播反复投递同一份缓冲（FL Studio 形状）
+            // 在这一位上恒为假，于是它永远不会被误认成时间轴。
+            signal: !silent && !repeated_nonzero,
+            // 【录制中绝不发明时间】录制的时间只能来自宿主。
+            armed: self.capture().is_armed(),
         });
+        // 【这三格必须写回】它们跨块存活（见上面 `TransportSession` 的构造）。
+        geometry
+            .window_spent
+            .store(session.window_spent, Ordering::Release);
+        geometry
+            .pinned_signal_frames
+            .store(session.pinned_signal_frames, Ordering::Release);
         // 【预览候选也算有权推进】候选期间宿主 kPlaying=0，但它送来的正是预览
         // 要录的音频；不把候选算进来，起播窗口一过位置就冻结，预览只剩 1 秒。
         let preview_candidate = self.processing_pass.phase() == PreviewPhase::Candidate;
@@ -535,6 +559,19 @@ impl ExtensionOwner {
         let playing_edge_new_pass =
             playing_rising && phase_before != SessionPhase::Starting && !clock.switched;
         let new_pass = new_epoch || clock.seek || cycle_wrap || playing_edge_new_pass;
+        // 【这一遍是被哪一闸宣布的】四个候选闸各一位。没有这一位，现场只能靠把产物
+        // 切块算互相关来猜是哪一闸 —— 本轮就是这么查出问题的，不该让下一个人再走一遍。
+        let pass_reason = if new_epoch {
+            Some(PassReason::Epoch)
+        } else if clock.seek {
+            Some(PassReason::Seek)
+        } else if cycle_wrap {
+            Some(PassReason::Cycle)
+        } else if playing_edge_new_pass {
+            Some(PassReason::Edge)
+        } else {
+            None
+        };
 
         let time_base_switch = clock.switched;
         let rebase_frames = clock.rebase_frames;
@@ -600,6 +637,25 @@ impl ExtensionOwner {
                     clock.local_start
                 };
                 geometry.pass.fetch_add(1, Ordering::Relaxed);
+                // 【两个读数】`pass_reason` 回答"为什么"，`pass_rewinds` 回答"有没有
+                // 把位置拉回去"。后者补的是 `clock_rewinds` 的洞：那一位带
+                // `&& !new_pass`，于是"每一遍都重锚回同一个点"在旧读数里完全不可见。
+                let reason = pass_reason.unwrap_or(PassReason::Reset);
+                geometry.pass_reason.store(reason.code(), Ordering::Release);
+                if had && position < last_position {
+                    geometry.pass_rewinds.fetch_add(1, Ordering::Relaxed);
+                }
+                // 【为什么敢在音频线程 log】与 `processing_pass` 的同名行同一条纪律：
+                // 一次 pass 只有一行（现场 1/s），不是一块一行。
+                log::info!(
+                    "[capture] pass begin stream={} pass={} reason={} raw={} local={} frames={}",
+                    stream.as_str(),
+                    geometry.pass.load(Ordering::Acquire),
+                    reason.as_str(),
+                    raw_start,
+                    position,
+                    frames,
+                );
             } else if time_base_switch {
                 // 【时间基切换：把整条流挪到新域里】不是 seek，不能新开段。
                 geometry
@@ -806,6 +862,40 @@ impl ExtensionOwner {
                 .clock_delta_max
                 .fetch_max(magnitude, Ordering::Relaxed);
             geometry.clock_deltas.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // ── 喂入流的起止（一次渲染应当只有一条 begin + 一条 end）────────
+        //
+        // 【为什么要单独记】`[capture] clock` 每 20 ms 一行、按内容去重，看不清"这条
+        // 时间轴是什么时候开始被当成时间轴的"。而"一次渲染有几条 begin"正是本轮要修的
+        // 那个病：不止一条就说明位置被重锚过。
+        {
+            let before = geometry.feed.load(Ordering::Acquire);
+            let now = decision.feed.code();
+            if before != now {
+                let blocks = geometry.feed_blocks.load(Ordering::Acquire);
+                let fed = geometry.feed_frames.load(Ordering::Acquire);
+                geometry.feed.store(now, Ordering::Release);
+                geometry.feed_blocks.store(0, Ordering::Release);
+                geometry.feed_frames.store(0, Ordering::Release);
+                if decision.feed == FeedKind::Pinned {
+                    geometry.feed_blocks.store(1, Ordering::Release);
+                    geometry.feed_frames.store(frames as u64, Ordering::Release);
+                    log::info!(
+                        "[capture] feed begin kind=pinned raw={} local={} frames={}",
+                        raw_start,
+                        position,
+                        frames
+                    );
+                } else {
+                    log::info!("[capture] feed end blocks={blocks} frames={fed} reason=transport");
+                }
+            } else if decision.feed == FeedKind::Pinned {
+                geometry.feed_blocks.fetch_add(1, Ordering::Relaxed);
+                geometry
+                    .feed_frames
+                    .fetch_add(frames as u64, Ordering::Relaxed);
+            }
         }
 
         // ── UI 播放头修正量（`playhead_offset`）───────────────────────
@@ -1019,6 +1109,22 @@ impl ExtensionOwner {
             geometry
                 .session_phase
                 .store(SessionPhase::Idle.code(), Ordering::Release);
+            // 【喂入流在这次复位里结束】不复位它就是一条跨会话的"钉住"：下一次起播
+            // 会被当成上一遍的延续，位置从头一块就开始错。
+            if geometry.feed.load(Ordering::Acquire) == FeedKind::Pinned.code() {
+                log::info!(
+                    "[capture] feed end blocks={} frames={} reason=reset",
+                    geometry.feed_blocks.load(Ordering::Acquire),
+                    geometry.feed_frames.load(Ordering::Acquire)
+                );
+            }
+            geometry
+                .feed
+                .store(FeedKind::Transport.code(), Ordering::Release);
+            geometry.feed_blocks.store(0, Ordering::Release);
+            geometry.feed_frames.store(0, Ordering::Release);
+            geometry.window_spent.store(false, Ordering::Release);
+            geometry.pinned_signal_frames.store(0, Ordering::Release);
             geometry
                 .timebase_kind
                 .store(TimebaseKind::Unknown.code(), Ordering::Release);
@@ -1027,9 +1133,13 @@ impl ExtensionOwner {
         }
         // pass 号必须推进：所有按 pass 锁存的状态（rung / read_position_jump）都以它
         // 为“是不是同一次播放”的判据。
-        self.streams[ProcessStream::Realtime.index()]
-            .pass
-            .fetch_add(1, Ordering::AcqRel);
+        let realtime = &self.streams[ProcessStream::Realtime.index()];
+        realtime.pass.fetch_add(1, Ordering::AcqRel);
+        // 【这一次 pass 是"复位"宣布的】见 `PassReason`：`[capture] clock` 会把它读出来，
+        // 于是"这一遍为什么从头开始"在同一行里就有答案。
+        realtime
+            .pass_reason
+            .store(PassReason::Reset.code(), Ordering::Release);
         for flag in &self.stream_recording {
             flag.store(false, Ordering::Release);
         }
