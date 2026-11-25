@@ -6,3 +6,6 @@
 pub mod model;
 
 pub use model::*;
+
+#[cfg(test)]
+mod gain_layer_tests;

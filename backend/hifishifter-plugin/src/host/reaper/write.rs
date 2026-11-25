@@ -902,7 +902,11 @@ impl HostClipTarget {
         self.verify(authorized)?;
         if !matches!(
             name.to_bytes(),
-            b"D_STARTOFFS" | b"D_PLAYRATE" | b"B_PPITCH" | b"I_CHANMODE" | b"D_PITCH"
+            // 【为什么 take 的 `D_VOL` 必须在这个白名单里】take 层增益是独立于 item 层
+            // 的第二个旋钮（`host_edit` 的 `write-take:D_VOL`）。它此前**不在**名单里，
+            // 于是"take 增益"这条写在宿主上永远以 `unsupported host take field` 收场：
+            // 而时间轴的行内编辑恰好把值发在这个键上，用户看到的就是"改完回弹"。
+            b"D_STARTOFFS" | b"D_PLAYRATE" | b"B_PPITCH" | b"I_CHANMODE" | b"D_PITCH" | b"D_VOL"
         ) {
             return Err("unsupported host take field".into());
         }
@@ -915,6 +919,11 @@ impl HostClipTarget {
         // 远超任何音乐用途，又足以拦住量级错误。
         if name == c"D_PITCH" && value.abs() > 240. {
             return Err("take pitch outside the supported range -240..240 semitones".into());
+        }
+        // 【与 item 的 `D_VOL` 同一条判据】负增益没有意义：反相是 take 极性，不是增益。
+        // 写一个负数进去宿主会静默取绝对值或拒收，两种结果都比显式报错更难查。
+        if name == c"D_VOL" && value < 0. {
+            return Err("negative take volume is not supported".into());
         }
         let _call = crate::host::HostCallGuard::enter("take.set");
         let api = self.api()?;

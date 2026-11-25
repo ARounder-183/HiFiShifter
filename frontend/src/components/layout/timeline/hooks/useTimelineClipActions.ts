@@ -53,7 +53,11 @@ import {
 import { getBulkEditableClipIds } from "./bulkClipEdit";
 import { getGroupClipIds } from "./useGroupExpansion";
 import { isClipSplittableAtSec, resolveSplitTargetsWithSnap } from "../splitTargets";
-import { buildBulkClipStateUpdates } from "./bulkClipRemotePayloads";
+import {
+    buildBulkClipStateUpdates,
+    itemGainChange,
+    type BulkClipRemoteChange,
+} from "./bulkClipRemotePayloads";
 import { computeClipNormalizationGain } from "../../../../features/session/clipNormalization";
 import type { TimelineViewportAccess } from "./timelineViewportAccess";
 
@@ -451,7 +455,7 @@ export function useTimelineClipActions(
     // ── normalizeClips ───────────────────────────────────────
     const normalizeClips = React.useCallback(
         (ids: string[]) => {
-            const changesById = new Map<string, { gain: number }>();
+            const changesById = new Map<string, BulkClipRemoteChange>();
             for (const id of ids) {
                 const clip = sessionRef.current.clips.find((c) => c.id === id);
                 if (!clip) continue;
@@ -467,8 +471,10 @@ export function useTimelineClipActions(
                         waveformMipmapStore.releaseInterleaved(data as Float32Array),
                 });
                 if (newGain == null) continue;
+                // 【乐观更新写 item 层，远程写入也必须写 item 层】见
+                // `BulkClipRemoteChange.itemGain` 的说明。
                 dispatch(setClipGain({ clipId: id, gain: newGain }));
-                changesById.set(id, { gain: newGain });
+                changesById.set(id, itemGainChange(newGain));
             }
             if (changesById.size === 0) return;
             const clipIds = [...changesById.keys()];
@@ -1012,7 +1018,12 @@ export function useTimelineClipActions(
                 multiSelectedClipIds: multiSelectedClipIdsRef.current,
                 multiSelectedSet: multiSelectedSetRef.current,
             });
-            const changesById = new Map(targetIds.map((targetId) => [targetId, { gain }] as const));
+            // 【同一层：乐观更新与远程写入】行内编辑 / 双击复位改的是时间轴旋钮，
+            // 也就是 item 层（REAPER 的 `D_VOL`）。此前这里发的是裸 `gain`，被后端
+            // 读成 take 层 —— 用户看到的正是"旋钮先到 +12 dB，随后被权威载荷拉回"。
+            const changesById = new Map(
+                targetIds.map((targetId) => [targetId, itemGainChange(gain)] as const),
+            );
             for (const targetId of targetIds) {
                 dispatch(setClipGain({ clipId: targetId, gain }));
             }

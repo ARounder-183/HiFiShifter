@@ -775,6 +775,19 @@ unsafe extern "C" fn set_take(object: *mut c_void, name: *const c_char, value: f
     );
     let name = unsafe { CStr::from_ptr(name) }.to_str().unwrap();
     f.record(format!("write-take:{name}"));
+    // 【take 音量有自己的一格】见 `take_volume` 的说明：它必须独立于 item 的
+    // `D_VOL`，否则"改 clip 音量顺带改了 take 极性"这类回归在夹具里看不见。
+    // 写入也要落到那一格上，否则 `take_gain` 的读数永远停在夹具初值 —— 而
+    // "写进去了没有"正是 take 层唯一的判据。
+    if name == "D_VOL" {
+        f.take_volume.set(value);
+        f.change.set(f.change.get().wrapping_add(1));
+        // 【写完就返回】读数路径对 take 的 D_VOL 是**单独拦截**的（见 `value`），
+        // 所以这一格绝不能同时落进共用的 `values` 表 —— 那张表就是 item 的读数表，
+        // 一旦写进去，"只改 take 层"的用例会看到 item 层跟着变成新值，夹具本身
+        // 伪造出了它正要证伪的那个缺陷。
+        return true;
+    }
     let mut values = f.values.borrow_mut();
     let key = values.keys().find(|key| **key == name).copied();
     if let Some(key) = key {

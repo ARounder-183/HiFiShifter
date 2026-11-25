@@ -2164,11 +2164,20 @@ pub struct ClipStatePatch {
     pub name: Option<String>,
     pub start_sec: Option<f64>,
     pub length_sec: Option<f64>,
-    /// Take 级增益（take 属性面板用）。
-    pub gain: Option<f32>,
+    /// **Take 级**增益（take 属性面板用；REAPER 的 take `D_VOL`）。
+    ///
+    /// 【为什么名字里必须带 `take`】它此前叫裸 `gain`，而前端的"时间轴行内编辑/双击
+    /// 复位"把 **item** 层的值发在这个键上 —— 写入层与显示层从此错位。现场的表现是
+    /// 一对镜像读数：`gain=4.0 expected 1.0` 与 `gain=1.0 expected 4.0`（+12 dB 与
+    /// 0 dB 各错一次）。字段名自己说明层，这类错位在写代码时就看得见。
+    ///
+    /// 【`alias = "gain"` 只服务旧前端/旧工程】新代码一律发 `takeGain`；别名存在的
+    /// 意义是"不因为一次改名把已经保存的载荷读丢"，不是"裸 gain 也可以继续用"。
+    #[serde(default, alias = "gain")]
+    pub take_gain: Option<f32>,
     /// **Item 级增益**（时间轴旋钮用；REAPER 的 `D_VOL`）。
     ///
-    /// 与 `gain` 分开：两者在 REAPER 里是两个旋钮，合成一个数就再也分不回去。
+    /// 与 `take_gain` 分开：两者在 REAPER 里是两个旋钮，合成一个数就再也分不回去。
     pub item_gain: Option<f32>,
     pub muted: Option<bool>,
     pub source_start_sec: Option<f64>,
@@ -5373,7 +5382,7 @@ mod tests {
             BulkClipStatePatch {
                 clip_id: ids[0].clone(),
                 patch: ClipStatePatch {
-                    gain: Some(1.5),
+                    take_gain: Some(1.5),
                     ..Default::default()
                 },
             },
@@ -6022,7 +6031,7 @@ mod tests {
         timeline.patch_clip_state(
             &source_clip_id,
             ClipStatePatch {
-                gain: Some(1.5),
+                take_gain: Some(1.5),
                 muted: Some(true),
                 source_start_sec: Some(0.25),
                 source_end_sec: Some(0.9),
@@ -10023,7 +10032,7 @@ impl TimelineState {
         &mut self,
         clip_id: &str,
         length_sec: Option<f64>,
-        gain: Option<f32>,
+        take_gain: Option<f32>,
         muted: Option<bool>,
         source_start_sec: Option<f64>,
         source_end_sec: Option<f64>,
@@ -10038,7 +10047,7 @@ impl TimelineState {
                 name: None,
                 start_sec: None,
                 length_sec,
-                gain,
+                take_gain,
                 muted,
                 source_start_sec,
                 source_end_sec,
@@ -10079,7 +10088,7 @@ impl TimelineState {
             if let Some(v) = patch.length_sec {
                 c.length_sec = v.max(0.0);
             }
-            if let Some(v) = patch.gain {
+            if let Some(v) = patch.take_gain {
                 // take 级：写投影，并同步进 active take（权威值在那里）。
                 c.gain = crate::gain::clamp_gain(v);
             }
@@ -10238,7 +10247,7 @@ impl TimelineState {
                     };
                 let clip_len_for_sync = c.length_sec;
                 for take in &mut c.takes {
-                    if let Some(v) = content_sync_patch.gain {
+                    if let Some(v) = content_sync_patch.take_gain {
                         take.gain = crate::gain::clamp_gain(v);
                     }
                     if let Some(v) = content_sync_patch.source_start_sec {
@@ -10353,7 +10362,8 @@ impl TimelineState {
                     name: Some(template.name.clone()),
                     start_sec: Some(template.start_sec),
                     length_sec: Some(template.length_sec),
-                    gain: template.gain,
+                    // 模板里的 `gain` 是 take 层（`CreateClipTemplatePayload::gain`）。
+                    take_gain: template.gain,
                     muted: template.muted,
                     source_start_sec: template.source_start_sec,
                     source_end_sec: template.source_end_sec,

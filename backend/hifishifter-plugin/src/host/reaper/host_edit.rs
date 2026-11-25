@@ -158,7 +158,7 @@ impl HostEditPlan {
                         (
                             "gain",
                             serde_json::json!(after.gain),
-                            edit.patch.gain.is_some(),
+                            edit.patch.take_gain.is_some(),
                         ),
                         // 【为什么方向与循环源也必须进门】倒放 / 循环都是**只改这一位**的
                         // 补丁：整段媒体上的位置、长度、源窗口一位都不动，于是没有这两项时
@@ -329,7 +329,8 @@ impl HostEditReceipt {
                 }
                 if !value_compatible(&clip[*key], expected) {
                     out.push(format!(
-                        "clip {id} {key}={} expected {expected}",
+                        "clip {id} {}={} expected {expected}",
+                        gain_layer_label(key),
                         clip[*key]
                     ));
                 }
@@ -346,7 +347,8 @@ impl HostEditReceipt {
                 for (key, expected) in take_fields {
                     if !value_compatible(&take[*key], expected) {
                         out.push(format!(
-                            "clip {id} take {take_id} {key}={} expected {expected}",
+                            "clip {id} take {take_id} {}={} expected {expected}",
+                            gain_layer_label(key),
                             take[*key]
                         ));
                     }
@@ -380,9 +382,12 @@ impl HostEditReceipt {
                 .map(|takes| takes.iter().map(|take| take["gain"].to_string()).collect())
                 .unwrap_or_default();
             let (kernel_clip, kernel_take, kernel_takes) = &receipt.gain_layers;
+            // 【三层各自带层名】`item=` 是时间轴旋钮（REAPER 的 item `D_VOL`），
+            // `take=` 是 take 属性面板。此前这一行只有 `clip_gain` / `gain` 两个裸键，
+            // 而现场那对镜像读数正是"哪一层错了"—— 名字里带层之后，一眼可判。
             lines.push(format!(
-                "clip={} kernel{{clip_gain={kernel_clip} gain={kernel_take} take_gains=[{}]}} \
-                 payload{{clip_gain={} gain={} takes=[{}]}} host{{item={} take={}}}",
+                "clip={} kernel{{item={kernel_clip} take={kernel_take} takes=[{}]}} \
+                 payload{{item={} take={} takes=[{}]}} host{{item={} take={}}}",
                 receipt.id,
                 kernel_takes
                     .iter()
@@ -452,6 +457,19 @@ impl HostEditReceipt {
     #[cfg(test)]
     pub(crate) fn matches(&self, payload: &Value) -> bool {
         self.divergences(payload).is_empty()
+    }
+}
+
+/// 载荷键 → 增益层的名字（其它字段原样返回）。
+///
+/// 【为什么消息里要带层名】现场那两条互为镜像的行（`gain=4.0 expected 1.0` 与
+/// `gain=1.0 expected 4.0`）花了一整轮才定位到"写错了层"。名字里带上层之后，一眼
+/// 就能看出是 item 还是 take 对不上 —— 而这两个字段在载荷里只差一个前缀。
+fn gain_layer_label(key: &str) -> &str {
+    match key {
+        "clip_gain" => "item(clip_gain)",
+        "gain" => "take(gain)",
+        other => other,
     }
 }
 
@@ -542,7 +560,10 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
                 | "sourceEndSec"
                 | "playbackRate"
                 | "clipPlaybackRate"
-                // 两层增益：`itemGain` 写宿主 item 的 D_VOL，`gain` 写 take 的 D_VOL。
+                // 两层增益：`itemGain` 写宿主 item 的 D_VOL，`takeGain` 写 take 的
+                // D_VOL。裸 `gain` 只为旧前端保留（后端把它读成 take 层，见
+                // `ClipStatePatch::take_gain` 的别名说明）。
+                | "takeGain"
                 | "gain"
                 | "itemGain"
                 | "muted"
@@ -669,7 +690,11 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
             if key == "channelMode" && (number.fract() != 0. || number > 4.) {
                 return Err("invalid host channel mode".into());
             }
-            if key == "gain" && number > f64::from(hifishifter_kernel::gain::GAIN_MAX) {
+            // 【两层都要校验】`takeGain` 是新的 take 层键名，`gain` 是它的旧名；
+            // 漏掉前者会让新前端把一个越界值直接写进宿主。
+            if matches!(key.as_str(), "gain" | "takeGain" | "itemGain")
+                && number > f64::from(hifishifter_kernel::gain::GAIN_MAX)
+            {
                 return Err(format!(
                     "clip volume outside the supported range 0..{}",
                     hifishifter_kernel::gain::GAIN_MAX
@@ -1469,7 +1494,7 @@ pub(crate) fn execute_managed(
             // 【为什么必须分开写】两者在 REAPER 里是两个字段、两个旋钮。此前只有
             // 一个 `gain` 且写向 item，take 侧永远写不到；反过来（早期）又把一个
             // 值写进 take，用户在时间轴拧的旋钮就跑到 take 上去了。
-            if let Some(value) = edit.patch.gain {
+            if let Some(value) = edit.patch.take_gain {
                 target.set_take(c"D_VOL", value as f64, &authorized)?;
             }
             if let Some(enabled) = edit.patch.loop_enabled {
@@ -1957,6 +1982,60 @@ mod tests {
         assert!(patch(&json!({"clipId":clip.id,"gain":17.})).is_err());
         document.close();
     }
+
+    /// **不变量：`takeGain` 只写 take 层，item 层一位都不动。**
+    ///
+    /// 【为什么必须有这条】两层在 REAPER 里是两个旋钮（item 的 `D_VOL` 与 take 的
+    /// `D_VOL`），而在载荷里只差一个前缀。此前只有一个裸 `gain`，它被读成 take 层，
+    /// 于是"时间轴旋钮"这个动作实际改的是 take —— 用户看到旋钮回弹，而日志里是一对
+    /// 互为镜像的读数。
+    #[test]
+    fn the_take_gain_key_writes_only_the_take_layer() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_writer();
+        host.clear_markers();
+        host.set_take_volume(0.25);
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        // 【先记 item 层】这一条要证明的是"item 层一位都没动"，所以基准必须来自
+        // 写之前的宿主读数，而不是内核里的 clip 值（两者在夹具里本来就可以不同）。
+        let native = clip.id.strip_prefix(&editor.namespace).unwrap();
+        let item_before = owner.host_edit_target(native).unwrap().geometry.item_gain;
+        let plan = editor
+            .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"takeGain":4.0}))
+            .unwrap();
+        host.reset();
+        execute(&owner, plan, || document.is_alive()).unwrap();
+        assert!(
+            host.calls().contains(&"write-take:D_VOL".into()),
+            "take 层必须走 take 的 D_VOL：{:?}",
+            host.calls()
+        );
+        assert!(
+            !host.calls().iter().any(|call| call == "write-item:D_VOL"),
+            "item 层一位都不许动：{:?}",
+            host.calls()
+        );
+        let g = owner.host_edit_target(native).unwrap().geometry;
+        assert_eq!(g.take_gain, 4.0);
+        assert!(
+            (g.item_gain - item_before).abs() < 1e-9,
+            "item 层保持原值：{} -> {}",
+            item_before,
+            g.item_gain
+        );
+        document.close();
+    }
     /// **回归：陈旧回声必须在交给前端之前被 `after` 修正，且不得波及没写过的位。**
     ///
     /// 【现场】ARA 里调 item 增益：REAPER 的 item 收到了，HiFiShifter 的 Clip 却回弹。
@@ -2066,19 +2145,23 @@ mod tests {
         // 载荷是"写完之后"的投影：take 层与补丁前的模型值不同（那是宿主真实的 take 音量）。
         payload["clips"][0]["gain"] = json!(0.5);
         let diverged = receipt.divergences(&payload);
+        // 【消息里带层名】`take(gain)` 与 `item(clip_gain)` 在载荷里只差一个前缀，
+        // 而现场那两条镜像读数花了一整轮才定位到"哪一层错了"。
         assert!(
-            !diverged.iter().any(|line| line.contains(" gain=")),
+            !diverged.iter().any(|line| line.contains("take(gain)")),
             "take 层没被这次补丁写过，不得拿它报分歧：{diverged:?}"
         );
         assert!(
-            diverged.iter().any(|line| line.contains("clip_gain")),
-            "写过的位仍然必须被看见：{diverged:?}"
+            diverged.iter().any(|line| line.contains("item(clip_gain)")),
+            "写过的位仍然必须被看见，且必须带层名：{diverged:?}"
         );
         let layers = receipt
             .gain_layers(&payload)
             .expect("增益分歧必须带三层对账行");
-        assert!(layers.contains("kernel{"), "{layers}");
-        assert!(layers.contains("payload{"), "{layers}");
+        assert!(layers.contains("kernel{item="), "{layers}");
+        assert!(layers.contains("take="), "{layers}");
+        assert!(layers.contains("payload{item="), "{layers}");
+        assert!(layers.contains("host{item="), "{layers}");
         document.close();
     }
 
