@@ -2309,6 +2309,7 @@ export const zhCN = {
     log_file_disabled_hint:
         "日志详细程度是「无」，没有写入任何日志文件。把它改成「低」或更高，并重启应用。",
     mobile_menu_title: "菜单",
+    mobile_toolbar_title: "工具栏",
     mobile_actions_title: "操作",
     mobile_windows_section: "窗口",
     mobile_window_shown: "显示中",

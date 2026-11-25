@@ -37,7 +37,9 @@ const EXEMPT_MARKER = "hs-interaction-exempt";
  * 不是"能力缺失"。
  */
 const ACCEPTED_EXEMPTIONS = [
-    join("src", "components", "layout", "ActionBar.tsx"),
+    // 主工具栏的渲染体在 `toolbar/ToolbarStrip.tsx`（桌面与移动共用同一份）；
+    // `ActionBar.tsx` 只剩一行薄壳，不再含任何取值控件。
+    join("src", "components", "layout", "toolbar", "ToolbarStrip.tsx"),
     join("src", "components", "layout", "timeline", "TempoMapRulerRow.tsx"),
     join("src", "components", "layout", "pianoRoll", "panel", "ParamToolbar.tsx"),
 ];

@@ -1,0 +1,2264 @@
+// hs-interaction-exempt: 主工具栏是紧凑 chrome（size 1、内联底色、BPM 有手势累加器），能力层原语是表单尺寸；本文件的滚轮与精细调整接线已完备（BPM/节拍器音量/三个下拉均有），故刻意保留。
+/**
+ * 主工具栏的**唯一**定义：桌面顶栏的一行，与移动端工具栏 sheet，共用这一份。
+ *
+ * 【为什么必须只有一份】移动端此前看不到工具栏 —— 外壳只渲染了菜单 sheet 与动作
+ * 抽屉，而 `ACTION_META` 的 135 条动作里**没有一条**叫 autoScroll / ripple / snap /
+ * dragDirection / playheadZoom。于是"自动滚屏"在手机上既没有按钮、也没有动作，
+ * 用户报的"大部分工具栏功能用不了"就是这么来的。把渲染体抽到这里之后，
+ * `ActionBar`（桌面）与 `MobileToolbarSheet`（移动）渲染的是**同一份控件定义**，
+ * 新增一个按钮不可能只出现在桌面。
+ *
+ * 【为什么 `variant` 只决定排版】内容一旦按形态分叉，两边就会漂移（"桌面有、手机没有"
+ * 正是这样长出来的）。形态差异全部落在 CSS（`index.css` 的 `.hs-toolbar` 与
+ * `[data-form="mobile"] .hs-toolbar-sheet`）：桌面是顶栏一行、按功能组换行；
+ * 移动端是 sheet 里的可换行、可竖向滚动的面板，每个可点控件抬到 44px。
+ */
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { isPluginMode, canControlHostTransport } from "../../../services/hostCapabilities";
+import { Flex, Select, TextField, Box } from "@radix-ui/themes";
+import { CheckIcon, PauseIcon, Pencil1Icon, PlayIcon, StopIcon } from "@radix-ui/react-icons";
+import { useAppDispatch, useAppSelector } from "../../../app/hooks";
+import { shallowEqual } from "react-redux";
+import type { RootState } from "../../../app/store";
+import { useI18n } from "../../../i18n/I18nProvider";
+import { CaptureControl } from "../../../features/capture/CaptureControl";
+import { PlayheadTimeReadoutSlot } from "../transport/PlayheadTimeReadoutSlot";
+import { TransportIconButton } from "../transport/TransportIconButton";
+import { PitchSnapSettingsDialog } from "../PitchSnapSettingsDialog";
+import { SnapGridSettingsDialog } from "../SnapGridSettingsDialog";
+import { SplitTransitionSettingsDialog } from "../SplitTransitionSettingsDialog";
+import { AutoScrollButton } from "../AutoScrollButton";
+import { RIPPLE_SCOPES, type RippleScope } from "../../../features/session/rippleMode";
+import { CustomScaleDialog } from "../CustomScaleDialog";
+import { AppAnchoredMenu } from "../../../ui/Menu";
+import { AppToolbarGroup } from "../../../ui/Toolbar";
+import { useDevicePixelRatio } from "../../../hooks/useDevicePixelRatio";
+import { wholeDevicePxLength } from "../../../utils/devicePixelLine";
+import { AppIconButton, AppSlider, AppSliderReadout, SlotText } from "../../../ui";
+
+import {
+    playOriginal,
+    stopAudioPlayback,
+    setBpm,
+    updateTransportBpm,
+    setProjectTimelineSettingsRemote,
+    toggleAutoCrossfade,
+    toggleSplitTransition,
+    toggleSnap,
+    togglePlayheadZoom,
+    toggleAutoScroll,
+    setAutoScrollMode,
+    toggleIgnoreGrouping,
+    toggleRippleEnabled,
+    setRippleScope,
+    toggleParamEditorSeekPlayhead,
+    toggleParamEditorTimelineClickSelectTrack,
+    persistUiSettings,
+    setProjectBaseScaleRemote,
+    setProjectCustomScaleRemote,
+    setTempoMap,
+    undoRemote,
+    redoRemote,
+} from "../../../features/session/sessionSlice";
+import { setTempoMapRemote } from "../../../features/session/thunks/tempoMapThunks";
+import { updateMetronome } from "../../../features/session/thunks/transportThunks";
+import {
+    computeEffectiveSnap,
+    isSnapGestureActive,
+    subscribeSnapGesture,
+} from "../../../utils/timelineSnapping";
+import type { TempoMapScaleData, TempoTimeSignature } from "../../../utils/tempoMap";
+import {
+    clampBpm,
+    effectiveScaleAtSec,
+    pointIndexAtSec,
+    scaleLikeToScaleData,
+    TEMPO_DENOMINATORS,
+    tempoAtSec,
+    updateTempoPoint,
+} from "../../../utils/tempoMap";
+import { SCALE_KEYS, SCALE_LABELS, type ScaleLike } from "../../../utils/musicalScales";
+import { applySelectWheelChange } from "../../../utils/selectWheel";
+import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
+import { createFrameCommitter } from "../../../utils/commitOncePerFrame";
+import {
+    formatKeybindingList,
+    isModifierActive,
+    selectKeybinding,
+    selectKeybindings,
+} from "../../../features/keybindings/keybindingsSlice";
+import {
+    openPanelById,
+    selectPanelVisible,
+    togglePanelVisible,
+} from "../../../features/dock/dockApi";
+import {
+    PANEL_FILE_BROWSER,
+    PANEL_NOTEBOOK,
+    PANEL_UNDO_HISTORY,
+} from "../../dock/registerBuiltinPanels";
+import { store } from "../../../app/store";
+import {
+    cancelRecordingCountdown,
+    loadRecordingApps,
+    loadRecordingDevices,
+    loadRecordingSettings,
+    saveRecordingSettings,
+    startRecordingFlow,
+    stopRecordingFlow,
+} from "../../../features/recording/recordingSlice";
+import type { RecordingSettings } from "../../../services/api/recording";
+import { RecordingSettingsDialog } from "../RecordingSettingsDialog";
+
+/** 节拍器图标（机身 + 摆锤；与 TempoMapCornerButton 的节拍器造型一致）。 */
+function MetronomeIcon() {
+    return (
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            {/* 节拍器机身（梯形轮廓） */}
+            <path
+                d="M5.6 2.2 H10.4 L13 13.4 H3 Z"
+                stroke="currentColor"
+                strokeWidth="1.1"
+                strokeLinejoin="round"
+            />
+            {/* 摆锤 */}
+            <path
+                d="M8 11.2 L11 4.4"
+                stroke="currentColor"
+                strokeWidth="1.2"
+                strokeLinecap="round"
+            />
+            {/* 配重圆点 */}
+            <circle cx="11" cy="4.4" r="1.1" fill="currentColor" />
+        </svg>
+    );
+}
+
+/** 撤销图标：钩形弧线箭头（左向），DAW 惯用造型（Lucide undo-2）。 */
+function UndoIcon() {
+    return (
+        <svg
+            width="15"
+            height="15"
+            viewBox="0 0 24 24"
+            fill="none"
+            aria-hidden="true"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+        >
+            <path d="M9 14 4 9l5-5" />
+            <path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11" />
+        </svg>
+    );
+}
+
+/** 重做图标：撤销的镜像（右向钩形，Lucide redo-2）。 */
+function RedoIcon() {
+    return (
+        <svg
+            width="15"
+            height="15"
+            viewBox="0 0 24 24"
+            fill="none"
+            aria-hidden="true"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+        >
+            <path d="m15 14 5-5-5-5" />
+            <path d="M20 9H9.5A5.5 5.5 0 0 0 4 14.5A5.5 5.5 0 0 0 9.5 20H13" />
+        </svg>
+    );
+}
+
+/** ActionBar 实际消费的 session 字段子集（配合 shallowEqual 阻断播放轮询的重渲染）。
+ *  新增消费字段时必须同步补充到这里。 */
+const selectActionBarSession = (state: RootState) => {
+    const session = state.session;
+    return {
+        // 撤销/重做按钮的可用性（后端 history_state 事件驱动的镜像）
+        historyRedoDepth: session.historyRedoDepth,
+        historyUndoDepth: session.historyUndoDepth,
+        autoCrossfadeEnabled: session.autoCrossfadeEnabled,
+        autoScrollEnabled: session.autoScrollEnabled,
+        autoScrollMode: session.autoScrollMode,
+        beats: session.beats,
+        bpm: session.bpm,
+        grid: session.grid,
+        ignoreGrouping: session.ignoreGrouping,
+        metronomeAccent: session.metronomeAccent,
+        metronomeEnabled: session.metronomeEnabled,
+        metronomeGain: session.metronomeGain,
+        metronomeMode: session.metronomeMode,
+        metronomeSound: session.metronomeSound,
+        paramEditorSeekPlayheadEnabled: session.paramEditorSeekPlayheadEnabled,
+        paramEditorTimelineClickSelectTrackEnabled:
+            session.paramEditorTimelineClickSelectTrackEnabled,
+        playheadSec: session.playheadSec,
+        playheadZoomEnabled: session.playheadZoomEnabled,
+        project: session.project,
+        rippleEnabled: session.rippleEnabled,
+        rippleScope: session.rippleScope,
+        snapEnabled: session.snapEnabled,
+        splitTransitionEnabled: session.splitTransitionEnabled,
+        tempoMap: session.tempoMap,
+    };
+};
+
+export interface ToolbarStripProps {
+    /** desktop = 桌面顶栏的一行；sheet = 移动端工具栏 sheet（可换行、可竖向滚动）。 */
+    variant: "desktop" | "sheet";
+}
+
+export function ToolbarStrip({ variant }: ToolbarStripProps) {
+    const dispatch = useAppDispatch();
+    // 与 `AppToolbar` 同一口径：分隔线宽度取整数个物理像素。
+    // 主工具栏没有套 `AppToolbar`（它需要按功能组换行），因此必须自己把
+    // `--hs-toolbar-hairline` 放在根上；否则 `AppToolbarSeparator` 会退回 1px
+    // CSS —— 在 Windows 125% / 150% 下就是 1.25 / 1.5 个物理像素，边缘发虚。
+    const dpr = useDevicePixelRatio();
+    // 只选取本组件实际消费的字段子集并以 shallowEqual 比较：播放期间
+    // runtime.playbackPositionSec 每 ~33ms 变一次，整片 session 的对象引用
+    // 随之失效，若直接订阅 state.session，本组件（含全部子菜单定义）会以
+    // ≥30Hz 重渲染。
+    const s = useAppSelector(selectActionBarSession, shallowEqual);
+    // runtime 的两个标量单独订阅：runtime 对象随播放轮询每 tick 新建，
+    // 但 isPlaying 本身只在播放/暂停时变化。
+    const isPlaying = useAppSelector((state: RootState) => state.session.runtime.isPlaying);
+    const fileBrowserVisible = useAppSelector(selectPanelVisible(PANEL_FILE_BROWSER));
+    const notebookVisible = useAppSelector(selectPanelVisible(PANEL_NOTEBOOK));
+    const recording = useAppSelector((state: RootState) => state.recording);
+    const paramFineAdjustKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.paramFineAdjust"),
+    );
+    const { t, tf } = useI18n();
+
+    const [pitchSnapOpen, setPitchSnapOpen] = useState(false);
+    const [snapSettingsOpen, setSnapSettingsOpen] = useState(false);
+    const [splitTransitionOpen, setSplitTransitionOpen] = useState(false);
+    const [customScaleOpen, setCustomScaleOpen] = useState(false);
+    const [recordingSettingsOpen, setRecordingSettingsOpen] = useState(false);
+    /*
+     * 工具栏弹出菜单：**全部**是"锚在按钮下方的菜单"（`AppAnchoredMenu`），
+     * 与参数编辑器的选择/绘制工具菜单同一种表面。
+     *
+     * 【为什么不再按指针坐标弹】同一排按钮上的右键菜单，有的贴按钮、有的飘在光标
+     * 处，用户学到的"右键会从哪里弹出"就是错的。锚定在按钮下方之后，菜单属于
+     * 那枚按钮，与它是不是贴着屏幕右缘无关（夹紧由原语做）。
+     */
+    const [recordingMenuOpen, setRecordingMenuOpen] = useState(false);
+    const recordingMenuAnchorRef = useRef<HTMLDivElement | null>(null);
+    const recordingMenuRef = useRef<HTMLDivElement | null>(null);
+    const [metronomeMenuOpen, setMetronomeMenuOpen] = useState(false);
+    const metronomeMenuAnchorRef = useRef<HTMLDivElement | null>(null);
+    const metronomeMenuRef = useRef<HTMLDivElement | null>(null);
+    // 「操作记录」面板：右键撤销/重做按钮打开。它是**可停靠面板**，显隐由停靠
+    // 布局决定（不再是本组件的局部 state），因此它能被拖到任意位置、与其他面板
+    // 合并成标签页，也能被"布局"菜单统一管理。
+    const undoButtonRef = useRef<HTMLButtonElement | null>(null);
+    const openHistoryPanel = useCallback(() => {
+        // 【落点提示：按钮矩形】从撤销/重做按钮打开时，面板浮在按钮**正下方**
+        // （下方放不下则翻到上方）—— 用户刚点的按钮就是他的注意力所在，把它丢到
+        // 屏幕角落会让人以为没打开。见 `resolveFloatNearRect`。
+        const rect = undoButtonRef.current?.getBoundingClientRect() ?? null;
+        openPanelById(
+            dispatch,
+            store.getState,
+            PANEL_UNDO_HISTORY,
+            rect ? { x: rect.x, y: rect.y, w: rect.width, h: rect.height } : null,
+        );
+    }, [dispatch]);
+    // 按钮 tooltip 里的快捷键提示（跟随用户在快捷键设置中的自定义绑定）。
+    // 重做默认绑了两个键，tooltip 要把两个都写出来（`;` 连接）。
+    const undoShortcutKb = useAppSelector((state: RootState) =>
+        selectKeybindings(state, "edit.undo"),
+    );
+    const redoShortcutKb = useAppSelector((state: RootState) =>
+        selectKeybindings(state, "edit.redo"),
+    );
+
+    // ── "拖动时切换吸附"（modifier.clipNoSnap）────────────────────────
+    // 时间轴拖拽手势进行中且按住该修饰键时，工具栏吸附按钮临时显示为
+    // 取反后的状态（与参数编辑器音高吸附按钮的做法一致）。
+    const noSnapKb = useAppSelector((state: RootState) =>
+        selectKeybinding(state, "modifier.clipNoSnap"),
+    );
+    const [snapToggleHeld, setSnapToggleHeld] = useState(false);
+    const [snapGestureActive, setSnapGestureActive] = useState(isSnapGestureActive());
+
+    useEffect(() => {
+        const kb = noSnapKb;
+        const sync = (e: KeyboardEvent | null) => {
+            setSnapToggleHeld(e ? isModifierActive(kb, e) : false);
+        };
+        const onKey = (e: KeyboardEvent) => sync(e);
+        const onBlur = () => sync(null);
+        window.addEventListener("keydown", onKey as EventListener);
+        window.addEventListener("keyup", onKey as EventListener);
+        window.addEventListener("blur", onBlur);
+        return () => {
+            window.removeEventListener("keydown", onKey as EventListener);
+            window.removeEventListener("keyup", onKey as EventListener);
+            window.removeEventListener("blur", onBlur);
+        };
+    }, [noSnapKb]);
+
+    useEffect(() => subscribeSnapGesture(() => setSnapGestureActive(isSnapGestureActive())), []);
+
+    // 拖拽手势期间按住修饰键 → 吸附按钮临时显示取反后的状态。
+    const effectiveSnapVisual = computeEffectiveSnap(
+        s.snapEnabled,
+        snapGestureActive && snapToggleHeld,
+    );
+
+    const recordingSourceLabel = (() => {
+        switch (recording.settings.captureMode) {
+            case "loopback":
+                return tf("recording_mode_loopback");
+            case "application":
+                return tf("recording_mode_application");
+            default:
+                return tf("recording_mode_device");
+        }
+    })();
+
+    const recordingDeviceLabel = (() => {
+        const { captureMode } = recording.settings;
+        if (captureMode === "device") {
+            // "default" 是后端枚举出的合成项（未本地化），始终显示本地化文案。
+            if (recording.settings.sourceDevice === "default") {
+                return tf("recording_device_default");
+            }
+            const device = recording.devices.find(
+                (item) => !item.isLoopback && item.id === recording.settings.sourceDevice,
+            );
+            return device?.name ?? tf("recording_device_default");
+        }
+        if (captureMode === "loopback") {
+            if (
+                recording.settings.loopbackDevice === "default" ||
+                recording.settings.loopbackDevice === "loopback:default"
+            ) {
+                return tf("recording_loopback_default");
+            }
+            const device = recording.devices.find(
+                (item) => item.isLoopback && item.id === recording.settings.loopbackDevice,
+            );
+            return device?.name ?? tf("recording_loopback_default");
+        }
+        const app = recording.apps.find((item) => item.id === recording.settings.captureAppId);
+        return app?.name || recording.settings.captureAppName || tf("recording_application");
+    })();
+
+    const recordingTooltip = [
+        recording.active
+            ? tf("recording_tooltip_stop")
+            : recording.countdownRemaining > 0
+              ? tf("recording_tooltip_cancel_countdown")
+              : tf("recording_tooltip_start"),
+        `${tf("recording_source_mode")}: ${recordingSourceLabel}`,
+        `${tf("recording_device")}: ${recordingDeviceLabel}`,
+    ].join("\n");
+
+    async function applyRecordingSettings(patch: Partial<RecordingSettings>) {
+        try {
+            await dispatch(saveRecordingSettings({ ...recording.settings, ...patch })).unwrap();
+        } catch {
+            // 快速设置失败时保持菜单关闭；详细错误仍可在录音设置对话框中查看。
+        } finally {
+            setRecordingMenuOpen(false);
+        }
+    }
+
+    function formatBpmValue(value: number): string {
+        const normalized = Number(value);
+        return Number.isFinite(normalized) ? String(normalized) : "120";
+    }
+
+    /** 拍号分子与后端 / Tempo Map 共用的合法区间。 */
+    function clampBeats(value: number): number {
+        return Math.min(32, Math.max(1, Math.round(value)));
+    }
+
+    const [bpmText, setBpmText] = useState(() => formatBpmValue(s.bpm || 120));
+    /** 用户正在输入时置位，阻止显示值变化覆写输入草稿。 */
+    const [bpmDirty, setBpmDirty] = useState(false);
+
+    /** 拍号分子输入草稿 —— 与 BPM 同一套手感：输入中不回写，失焦/回车提交。 */
+    const [beatsText, setBeatsText] = useState(() => String(Math.round(s.beats || 4)));
+    /** 用户正在输入时置位，阻止显示值变化覆写输入草稿。 */
+    const [beatsDirty, setBeatsDirty] = useState(false);
+
+    // Tempo Map 存在时，BPM 显示为播放头位置的生效速度。
+    const displayBpm = useMemo(() => {
+        if (s.tempoMap && s.tempoMap.points.length > 0) {
+            const at = tempoAtSec(s.tempoMap, s.playheadSec, {
+                bpm: s.bpm,
+                beatsPerBar: s.beats || 4,
+            });
+            return at.bpm;
+        }
+        return s.bpm || 120;
+    }, [s.tempoMap, s.playheadSec, s.bpm, s.beats]);
+
+    const displayBeats = useMemo(() => {
+        if (s.tempoMap && s.tempoMap.points.length > 0) {
+            const at = tempoAtSec(s.tempoMap, s.playheadSec, {
+                bpm: s.bpm,
+                beatsPerBar: s.beats || 4,
+            });
+            return at.numerator;
+        }
+        return Math.round(s.beats || 4);
+    }, [s.tempoMap, s.playheadSec, s.bpm, s.beats]);
+
+    // Tempo Map 存在时，拍号分母显示播放头位置的实际值（如 3/8、6/8）；否则为工程基准值。
+    const displayDenominator = useMemo(() => {
+        if (s.tempoMap && s.tempoMap.points.length > 0) {
+            const at = tempoAtSec(s.tempoMap, s.playheadSec, {
+                bpm: s.bpm,
+                beatsPerBar: s.beats || 4,
+            });
+            return at.denominator;
+        }
+        return s.project.timeSignatureDenominator || 4;
+    }, [s.tempoMap, s.playheadSec, s.bpm, s.beats, s.project.timeSignatureDenominator]);
+
+    // 工程音阶（无 Tempo Map 时的显示与回退值）。
+    const projectScaleLike = useMemo<ScaleLike | null>(
+        () =>
+            s.project?.useCustomScale && s.project?.customScale
+                ? s.project.customScale.notes
+                : (s.project?.baseScale ?? "C"),
+        [s.project],
+    );
+
+    // Tempo Map 存在时，基准音阶显示播放头位置及以前最近变化点的生效音阶。
+    const displayScale = useMemo<ScaleLike | null>(() => {
+        if (s.tempoMap && s.tempoMap.points.length > 0) {
+            return (
+                effectiveScaleAtSec(s.tempoMap, s.playheadSec, projectScaleLike ?? undefined) ??
+                null
+            );
+        }
+        return projectScaleLike;
+    }, [s.tempoMap, s.playheadSec, projectScaleLike]);
+
+    /** 播放头位置最近变化点的自定义音阶名称（用于显示）。 */
+    const tempoCustomScaleName = useMemo(() => {
+        if (!s.tempoMap || s.tempoMap.points.length === 0) return null;
+        for (let i = pointIndexAtSec(s.tempoMap, s.playheadSec); i >= 0; i -= 1) {
+            const scale = s.tempoMap.points[i].scale;
+            if (scale?.notes && scale.notes.length > 0) {
+                return scale.name || scale.notes.join(", ");
+            }
+            if (scale?.key) return null;
+        }
+        return null;
+    }, [s.tempoMap, s.playheadSec]);
+
+    /** 当前显示音阶是否即工程自定义音阶（显示/选项归并用）。 */
+    const displayScaleMatchesProjectCustom = useMemo(() => {
+        if (!Array.isArray(displayScale)) return false;
+        if (!s.project?.useCustomScale || !s.project?.customScale) return false;
+        const a = displayScale;
+        const b = s.project.customScale.notes;
+        return a.length === b.length && a.every((v, i) => v === b[i]);
+    }, [displayScale, s.project]);
+
+    const showTempoCustomScaleItem =
+        s.tempoMap != null &&
+        s.tempoMap.points.length > 0 &&
+        Array.isArray(displayScale) &&
+        !displayScaleMatchesProjectCustom;
+
+    const displayScaleSelectValue = Array.isArray(displayScale)
+        ? displayScaleMatchesProjectCustom
+            ? "__custom__"
+            : "__tempo_custom__"
+        : typeof displayScale === "string" &&
+            (SCALE_KEYS as readonly string[]).includes(displayScale)
+          ? displayScale
+          : "__custom__";
+
+    const baseScaleWheelOptions = [
+        ...SCALE_KEYS,
+        ...(s.project?.customScale ? (["__custom__"] as const) : []),
+        ...(showTempoCustomScaleItem ? (["__tempo_custom__"] as const) : []),
+        "__custom_dialog__",
+    ];
+
+    // 显示值变化时同步输入框（渲染期调整，避免 effect 级联渲染）。
+    const displayBpmText = formatBpmValue(displayBpm);
+    if (!bpmDirty && displayBpmText !== bpmText) {
+        setBpmText(displayBpmText);
+    }
+    // 拍号分子同理：store 值（含播放期间 ~30 Hz 的 transport 轮询触发的重渲染）
+    // 不得覆写正在输入的草稿，否则受控输入会把用户键入的中间值顶回去。
+    const displayBeatsText = String(Math.round(displayBeats));
+    if (!beatsDirty && displayBeatsText !== beatsText) {
+        setBeatsText(displayBeatsText);
+    }
+
+    /**
+     * Tempo Map 存在时：更新从播放头位置开始、往前寻找的最近一个变化点
+     * （初始点即工程基准记录，同样参与更新；不再自动新建变化点）。
+     */
+    const updateTempoPointAtPlayhead = useCallback(
+        (patch: {
+            bpm?: number;
+            timeSignature?: TempoTimeSignature | null;
+            scale?: TempoMapScaleData | null;
+        }) => {
+            if (!s.tempoMap || s.tempoMap.points.length === 0) return null;
+            const map = s.tempoMap;
+            const idx = pointIndexAtSec(map, s.playheadSec);
+            const nextMap = updateTempoPoint(map, map.points[idx].id, patch);
+            dispatch(setTempoMap(nextMap));
+            void dispatch(setTempoMapRemote(nextMap));
+            return nextMap;
+        },
+        [s.tempoMap, s.playheadSec, dispatch],
+    );
+
+    /** 基准音阶变更：有 Tempo Map 时写最近变化点，否则写工程音阶。 */
+    const applyBaseScale = useCallback(
+        (next: ScaleLike | null, customName?: string) => {
+            if (s.tempoMap && s.tempoMap.points.length > 0) {
+                updateTempoPointAtPlayhead({ scale: scaleLikeToScaleData(next, customName) });
+                return;
+            }
+            if (next == null) return;
+            if (Array.isArray(next)) {
+                if (s.project?.customScale) {
+                    dispatch(setProjectCustomScaleRemote(s.project.customScale));
+                }
+                return;
+            }
+            if ((SCALE_KEYS as readonly string[]).includes(next as string)) {
+                dispatch(setProjectBaseScaleRemote(next as (typeof SCALE_KEYS)[number]));
+            }
+        },
+        [s.tempoMap, s.project, dispatch, updateTempoPointAtPlayhead],
+    );
+
+    /**
+     * BPM 的**落地提交**（每帧最多一次）。
+     *
+     * 【为什么要合并】一次滚轮手势会产生几十个 wheel 事件，每个事件各提交一次
+     * 意味着订阅方（标尺刻度、网格、波形）全量重算几十次 —— 用户看到的就是标尺
+     * "抽搐"，且滚得越快越明显。合并到帧粒度后，手势期间画面仍然逐帧跟随
+     * （手感不变），但每帧只重算一次。
+     */
+    const applyBpmCommit = useCallback(
+        (value: number) => {
+            if (s.tempoMap && s.tempoMap.points.length > 0) {
+                updateTempoPointAtPlayhead({ bpm: value });
+                return;
+            }
+            dispatch(setBpm(value));
+            void dispatch(updateTransportBpm(value));
+        },
+        [s.tempoMap, updateTempoPointAtPlayhead, dispatch],
+    );
+    /** 提交体经 ref 现读：宿主回调只创建一次，闭包捕获会用到旧的 tempoMap。 */
+    const applyBpmCommitRef = useRef(applyBpmCommit);
+    useEffect(() => {
+        applyBpmCommitRef.current = applyBpmCommit;
+    }, [applyBpmCommit]);
+
+    const [bpmCommitRef] = useState(() =>
+        createFrameCommitter<number>((value) => applyBpmCommitRef.current(value)),
+    );
+    useEffect(() => {
+        return () => {
+            // 卸载即手势结束：挂起帧不该在组件销毁后继续向 store 发命令。
+            bpmCommitRef.cancel();
+        };
+    }, [bpmCommitRef]);
+
+    /**
+     * 拍号分子滚轮的**落地提交**（每帧最多一次）。
+     *
+     * 与 BPM 同一纪律：一次滚轮手势可能带来几十个事件，逐事件各发一条
+     * `set_project_timeline_settings` 会让线程池、撤销组和整棵订阅树跟着
+     * 重算几十次。这里只在帧边界提交最终值，输入文本仍逐事件更新。
+     */
+    const applyBeatsCommit = useCallback(
+        (value: number) => {
+            if (s.tempoMap && s.tempoMap.points.length > 0) {
+                updateTempoPointAtPlayhead({
+                    timeSignature: { numerator: value, denominator: displayDenominator },
+                });
+                return;
+            }
+            void dispatch(
+                setProjectTimelineSettingsRemote({
+                    beatsPerBar: value,
+                    timeSignatureDenominator: displayDenominator,
+                    gridSize: s.grid,
+                }),
+            );
+        },
+        [s.tempoMap, s.grid, displayDenominator, dispatch, updateTempoPointAtPlayhead],
+    );
+    /** 提交体经 ref 现读：原生 wheel 回调只创建一次，闭包捕获会用到旧设置。 */
+    const applyBeatsCommitRef = useRef(applyBeatsCommit);
+    useEffect(() => {
+        applyBeatsCommitRef.current = applyBeatsCommit;
+    }, [applyBeatsCommit]);
+    const [beatsCommitRef] = useState(() =>
+        createFrameCommitter<number>((value) => applyBeatsCommitRef.current(value)),
+    );
+    useEffect(() => {
+        return () => beatsCommitRef.cancel();
+    }, [beatsCommitRef]);
+    /** 同一手势内的当前值；React state 在高频 wheel 之间尚未刷新。 */
+    const wheelBeatsBaseRef = useRef<number | null>(null);
+    const wheelBeatsAtRef = useRef(0);
+    /** Escape 会主动 blur；那一次 blur 不得把刚丢弃的草稿又提交回去。 */
+    const skipBpmBlurCommitRef = useRef(false);
+    const skipBeatsBlurCommitRef = useRef(false);
+
+    /**
+     * 滚轮累积的起点。
+     *
+     * 【为什么不能直接读 `bpmText`】`setBpmText` 是异步的，同一帧内的多个 wheel
+     * 事件会读到同一个旧值，各算出同一个"下一格"，连续滚动因此只前进一格。
+     * 这里用 ref 持有手势内的当前值；手势结束（提交后静默 200ms）或外部改动时失效。
+     */
+    const wheelBpmBaseRef = useRef<number | null>(null);
+    const wheelBpmAtRef = useRef(0);
+
+    /**
+     * BPM 输入的滚轮调值。
+     *
+     * 【为什么用非被动原生监听】React 的 `onWheel` 是 passive 的，里面的
+     * `preventDefault()` 是空操作（本仓库其它数值滚轮控件都用 `useNonPassiveWheel`
+     * 或 `useRangeWheelGuard`）：滚轮调值会同时滚动祖先容器，产生第二路视觉位移，
+     * 并触发浏览器干预告警。
+     */
+    const attachBpmWheel = useNonPassiveWheel<HTMLElement>((e) => {
+        // 【必须调用】换成非被动原生监听的意义正是让这两句生效：滚轮调值不得同时
+        // 滚动祖先容器（ActionBar 自己是 overflow-x-auto），也不得被其它滚轮逻辑
+        // 顺带处理。曾经在改写监听方式时把它们一起删掉，结果滚轮既改 BPM 又滚动
+        // 容器，产生第二路视觉位移 —— 用户报告的"仍然抽搐"。
+        e.preventDefault();
+        e.stopPropagation();
+        const now = performance.now();
+        // 手势起点：距上一次滚轮超过 200ms，或尚未开始过手势。
+        if (wheelBpmBaseRef.current === null || now - wheelBpmAtRef.current > 200) {
+            const current = Number(bpmText);
+            wheelBpmBaseRef.current = Number.isFinite(current) ? current : displayBpm;
+        }
+        wheelBpmAtRef.current = now;
+        const direction = e.deltaY < 0 ? 1 : -1;
+        const step = isModifierActive(paramFineAdjustKb, e) ? 0.1 : 1;
+        const next = Math.round((wheelBpmBaseRef.current + direction * step) * 1000) / 1000;
+        // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
+        const clamped = clampBpm(next);
+        if (Math.abs(clamped - wheelBpmBaseRef.current) < 1e-9) return; // 已到边界
+        wheelBpmBaseRef.current = clamped;
+        // 文本逐事件更新（手感不变，且它不触发标尺重算）；Redux 提交合并到每帧一次。
+        setBpmText(formatBpmValue(clamped));
+        setBpmDirty(false);
+        bpmCommitRef.schedule(clamped);
+    });
+
+    function commitBpm(nextText?: string) {
+        const raw = (nextText ?? bpmText).trim();
+        const next = Number(raw);
+        setBpmDirty(false);
+        // 取消尚未落地的帧提交：否则失焦 / 回车与 rAF 会发两条同样的命令。
+        bpmCommitRef.cancel();
+        // 键盘 / 失焦提交结束当前滚轮手势：下一次滚轮从新值重新累积。
+        wheelBpmBaseRef.current = null;
+        if (!Number.isFinite(next)) {
+            setBpmText(formatBpmValue(displayBpm));
+            return;
+        }
+        // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
+        const clamped = clampBpm(next);
+        applyBpmCommitRef.current(clamped);
+        setBpmText(formatBpmValue(clamped));
+    }
+
+    /**
+     * 拍号分子输入的提交（失焦 / 回车 / 滚轮）。
+     *
+     * 返回提交后的有效值，让滚轮以同一份基准步进，草稿与 store 不分叉。
+     * 滚轮走下面的 `useNonPassiveWheel`：React 的 `onWheel` 是 passive 监听，
+     * `preventDefault()` 不会阻止 ActionBar 自己的横向滚动。
+     */
+    function commitBeats(nextText?: string): number {
+        const raw = (nextText ?? beatsText).trim();
+        const next = Number(raw);
+        setBeatsDirty(false);
+        const fallback = clampBeats(displayBeats);
+        const clamped = Number.isFinite(next) ? clampBeats(next) : fallback;
+        // 取消尚未落地的帧提交：显式提交只发一次，且始终用最终值。
+        beatsCommitRef.cancel();
+        wheelBeatsBaseRef.current = null;
+        setBeatsText(String(clamped));
+        if (clamped !== fallback) applyBeatsCommitRef.current(clamped);
+        return clamped;
+    }
+
+    const attachBeatsWheel = useNonPassiveWheel<HTMLElement>((e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!Number.isFinite(e.deltaY) || e.deltaY === 0) return;
+        const now = performance.now();
+        // 与 BPM 同一套手势累加器：同一帧内的多次 wheel 不能都从旧的
+        // beatsText 起步，否则连续滚动只前进一格。
+        if (wheelBeatsBaseRef.current === null || now - wheelBeatsAtRef.current > 200) {
+            const draft = Number(beatsText);
+            wheelBeatsBaseRef.current = Number.isFinite(draft)
+                ? clampBeats(draft)
+                : clampBeats(displayBeats);
+        }
+        wheelBeatsAtRef.current = now;
+        const direction = e.deltaY < 0 ? 1 : -1;
+        const next = clampBeats(
+            (wheelBeatsBaseRef.current ?? clampBeats(displayBeats)) + direction,
+        );
+        if (next === wheelBeatsBaseRef.current) return;
+        wheelBeatsBaseRef.current = next;
+        setBeatsText(String(next));
+        setBeatsDirty(false);
+        beatsCommitRef.schedule(next);
+    });
+
+    function formatRecordingTime(seconds: number): string {
+        const total = Math.max(0, Math.floor(seconds));
+        const minutes = Math.floor(total / 60);
+        const secs = total % 60;
+        return `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+    }
+
+    function recordingErrorMessage(code: string): string {
+        // Backend errors may carry a `:detail` suffix (e.g.
+        // "recording_error_wasapi_init:0x80004005"); localize the base key.
+        const baseKey = code.split(":")[0] ?? code;
+        const text = tf(baseKey);
+        if (text && text !== baseKey) return text;
+        return tf(
+            code.startsWith("recording_error_stop")
+                ? "recording_error_stop_failed"
+                : "recording_error_start_failed",
+        );
+    }
+
+    // Custom styles for Radix components to match Qt look
+    // Note: Radix Themes handles a lot, but we might need overrides for exact pixel matching if needed.
+    // For now, we use standard Radix "gray" theme which fits well.
+
+    /*
+     * 【两种形态只差排版，不差内容】见文件头。桌面沿用原来的整串类名（像素级不变），
+     * sheet 只留 `hs-toolbar` —— 换行、内边距、44px 命中面积全部由 index.css 决定。
+     */
+    const rootClass =
+        variant === "sheet"
+            ? "hs-toolbar bg-qt-window text-qt-text"
+            : "hs-toolbar min-h-qt-bar-main bg-qt-window border-b border-qt-border px-1 py-1 text-qt-text flex-wrap items-center overflow-hidden";
+
+    return (
+        <Flex
+            align="center"
+            gap="3"
+            // 【为什么是 flex-wrap 而不是横向滚动】滚动条会吃掉横条的高度（26/32px 里
+            // 再扣 10px），而 CSS 规定 `overflow-x: auto` 时 `overflow-y` 计算为 `auto`，
+            // 于是容器成为裁剪上下文 —— 这正是 `AppToolbar` 把 `scrollable` 默认设成
+            // false 的原因（见 ui/Toolbar.tsx）。主工具栏的功能都很重要，不能像参数
+            // 编辑器那样分级隐藏，所以按**功能组**换行：`min-h-` 而不是 `h-`，让条形
+            // 自然长高，下面的内容区自己让位。
+            className={rootClass}
+            data-toolbar-variant={variant}
+            style={
+                {
+                    "--hs-toolbar-hairline": `${wholeDevicePxLength(1, dpr)}px`,
+                } as CSSProperties
+            }
+        >
+            {/* BPM & Time */}
+            <AppToolbarGroup>
+                {/* 传输时间：由放置策略决定是否出现在本组（见 PlayheadTimeReadoutSlot）。 */}
+                <PlayheadTimeReadoutSlot slot="toolbar" />
+                {/* Metronome */}
+                {/*
+                 * 【为什么插件里整块不渲染】节拍器由宿主播放（REAPER 自己的 metronome
+                 * 在主输出上），插件里没有 `set_metronome` 这条命令 —— 点了只会写下一个
+                 * 没人读的值。此前是"禁用 + 说明原因"，但宿主给的 VST 窗口往往很窄，
+                 * 一个永远按不动的按钮只会把界面挤满（用户反馈）。
+                 */}
+                {!isPluginMode() && (
+                    <Box
+                        ref={metronomeMenuAnchorRef}
+                        style={{ position: "relative" }}
+                        data-hs-context-menu
+                    >
+                        <AppIconButton
+                            active={s.metronomeEnabled}
+                            // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                            emphasis="accent"
+                            tooltip={t("action_metronome")}
+                            icon={<MetronomeIcon />}
+                            onClick={() => {
+                                void dispatch(
+                                    updateMetronome({ metronomeEnabled: !s.metronomeEnabled }),
+                                );
+                            }}
+                            onContextMenu={(event) => {
+                                event.preventDefault();
+                                setMetronomeMenuOpen(true);
+                            }}
+                        />
+                        <AppAnchoredMenu
+                            open={metronomeMenuOpen}
+                            anchorRef={metronomeMenuAnchorRef}
+                            menuRef={metronomeMenuRef}
+                            ariaLabel={t("action_metronome")}
+                            onClose={() => setMetronomeMenuOpen(false)}
+                            className="hs-menu--no-scroll"
+                        >
+                            <div className="hs-menu__label">{t("metronome_volume")}</div>
+                            <div className="hs-menu__body flex items-center gap-2">
+                                {/*
+                                 * 用 `AppSlider` 而不是裸 `<input type="range">`：滚轮步进
+                                 * （粗 5% / 精细修饰键 1%）与"滚轮不带动祖先滚动"都由原语
+                                 * 内建，`percent` 单位语义给出的正是这两个步长。
+                                 *
+                                 * 这里**不需要** `onPointerDown` 阻止冒泡：菜单的"点外面
+                                 * 关闭"由 `AppAnchoredMenu` 在文档捕获阶段处理，且先判
+                                 * `contains(target)` 直接放行菜单内部的指针事件。
+                                 *
+                                 * 拖动期间逐帧 dispatch：节拍器音量必须**边拖边听得见**，
+                                 * 而增益只经 `webApi.setMetronome` 到达引擎。调用链本身是
+                                 * 串行的（`metronomeInvokeChain`），因此不会并发压垮 IPC。
+                                 */}
+                                <AppSlider
+                                    value={Math.round(s.metronomeGain * 100)}
+                                    unit="percent"
+                                    min={0}
+                                    max={100}
+                                    ariaLabel={t("metronome_volume")}
+                                    onChange={(next) => {
+                                        void dispatch(
+                                            updateMetronome({ metronomeGain: next / 100 }),
+                                        );
+                                    }}
+                                />
+                                <AppSliderReadout>
+                                    {Math.round(s.metronomeGain * 100)}%
+                                </AppSliderReadout>
+                            </div>
+                            <div className="hs-menu__separator" role="separator" />
+                            <div className="hs-menu__label">{t("metronome_mode")}</div>
+                            {(
+                                [
+                                    ["grid", "metronome_mode_grid"],
+                                    ["beat", "metronome_mode_beat"],
+                                    ["bar", "metronome_mode_bar"],
+                                ] as const
+                            ).map(([mode, key]) => (
+                                <button
+                                    key={mode}
+                                    type="button"
+                                    role="menuitem"
+                                    className="hs-menu__item"
+                                    onClick={() => {
+                                        void dispatch(updateMetronome({ metronomeMode: mode }));
+                                        setMetronomeMenuOpen(false);
+                                    }}
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                >
+                                    <span className="hs-menu__label-text">{t(key)}</span>
+                                    <span className="hs-menu__trail">
+                                        {s.metronomeMode === mode ? (
+                                            <span className="hs-menu__check">
+                                                <CheckIcon />
+                                            </span>
+                                        ) : null}
+                                    </span>
+                                </button>
+                            ))}
+                            <div className="hs-menu__separator" role="separator" />
+                            <div className="hs-menu__label">{t("metronome_sound")}</div>
+                            {(
+                                [
+                                    ["click", "metronome_sound_click"],
+                                    ["woodblock", "metronome_sound_woodblock"],
+                                    ["beep", "metronome_sound_beep"],
+                                ] as const
+                            ).map(([sound, key]) => (
+                                <button
+                                    key={sound}
+                                    type="button"
+                                    role="menuitem"
+                                    className="hs-menu__item"
+                                    onClick={() => {
+                                        void dispatch(updateMetronome({ metronomeSound: sound }));
+                                        setMetronomeMenuOpen(false);
+                                    }}
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                >
+                                    <span className="hs-menu__label-text">{t(key)}</span>
+                                    <span className="hs-menu__trail">
+                                        {s.metronomeSound === sound ? (
+                                            <span className="hs-menu__check">
+                                                <CheckIcon />
+                                            </span>
+                                        ) : null}
+                                    </span>
+                                </button>
+                            ))}
+                            <div className="hs-menu__separator" role="separator" />
+                            <button
+                                type="button"
+                                role="menuitem"
+                                className="hs-menu__item"
+                                onClick={() => {
+                                    void dispatch(
+                                        updateMetronome({
+                                            metronomeAccent: !s.metronomeAccent,
+                                        }),
+                                    );
+                                }}
+                                onPointerDown={(e) => e.stopPropagation()}
+                            >
+                                <span className="hs-menu__label-text">{t("metronome_accent")}</span>
+                                <span className="hs-menu__trail">
+                                    {s.metronomeAccent ? (
+                                        <span className="hs-menu__check">
+                                            <CheckIcon />
+                                        </span>
+                                    ) : null}
+                                </span>
+                            </button>
+                        </AppAnchoredMenu>
+                    </Box>
+                )}
+                {/* BPM 与拍号是**宿主权威读数**，插件里改不了。
+                    此前是两个禁用输入框 —— 宿主窗口本来就窄，一个按不动的输入框
+                    既占位又暗示"本来能改"；REAPER 自己的工具栏上就显示着这两个值。 */}
+                {!isPluginMode() && (
+                    <>
+                        <span className="hs-type-muted">{t("common_bpm")}:</span>
+                        <TextField.Root
+                            ref={attachBpmWheel}
+                            size="1"
+                            value={bpmText}
+                            data-tooltip={
+                                s.tempoMap && s.tempoMap.points.length > 0
+                                    ? tf("tempo_map_actionbar_tip")
+                                    : undefined
+                            }
+                            onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                                setBpmDirty(true);
+                                setBpmText(e.target.value);
+                            }}
+                            onBlur={() => {
+                                if (skipBpmBlurCommitRef.current) {
+                                    skipBpmBlurCommitRef.current = false;
+                                    return;
+                                }
+                                commitBpm();
+                            }}
+                            onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+                                if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    commitBpm();
+                                    skipBpmBlurCommitRef.current = true;
+                                    (e.currentTarget as HTMLInputElement).blur();
+                                } else if (e.key === "Escape") {
+                                    e.preventDefault();
+                                    bpmCommitRef.cancel();
+                                    wheelBpmBaseRef.current = null;
+                                    skipBpmBlurCommitRef.current = true;
+                                    setBpmDirty(false);
+                                    setBpmText(formatBpmValue(displayBpm));
+                                    (e.currentTarget as HTMLInputElement).blur();
+                                }
+                            }}
+                            style={{
+                                width: 60,
+                                textAlign: "center",
+                                backgroundColor: "var(--qt-base)",
+                            }}
+                        />
+                    </>
+                )}
+                {/* 拍号同上：宿主权威读数，插件里改不了，REAPER 自己会显示。 */}
+                {!isPluginMode() && (
+                    <>
+                        <span className="hs-type-muted">{t("time_signature")}:</span>
+                        <Flex align="center" gap="1">
+                            <TextField.Root
+                                ref={attachBeatsWheel}
+                                size="1"
+                                type="number"
+                                value={beatsText}
+                                data-tooltip={
+                                    s.tempoMap && s.tempoMap.points.length > 0
+                                        ? tf("tempo_map_actionbar_tip")
+                                        : undefined
+                                }
+                                onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                                    setBeatsDirty(true);
+                                    setBeatsText(e.target.value);
+                                }}
+                                onBlur={() => {
+                                    if (skipBeatsBlurCommitRef.current) {
+                                        skipBeatsBlurCommitRef.current = false;
+                                        return;
+                                    }
+                                    commitBeats();
+                                }}
+                                onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+                                    if (e.key === "Enter") {
+                                        e.preventDefault();
+                                        commitBeats();
+                                        skipBeatsBlurCommitRef.current = true;
+                                        (e.currentTarget as HTMLInputElement).blur();
+                                    } else if (e.key === "Escape") {
+                                        e.preventDefault();
+                                        beatsCommitRef.cancel();
+                                        wheelBeatsBaseRef.current = null;
+                                        skipBeatsBlurCommitRef.current = true;
+                                        setBeatsDirty(false);
+                                        setBeatsText(String(clampBeats(displayBeats)));
+                                        (e.currentTarget as HTMLInputElement).blur();
+                                    }
+                                }}
+                                style={{
+                                    width: 42,
+                                    textAlign: "center",
+                                    backgroundColor: "var(--qt-base)",
+                                }}
+                            />
+                            <span className="hs-type-muted">/</span>
+                            <Select.Root
+                                size="1"
+                                value={String(displayDenominator)}
+                                onValueChange={(v) => {
+                                    const next = Number(v) || 4;
+                                    if (next === displayDenominator) return;
+                                    if (s.tempoMap && s.tempoMap.points.length > 0) {
+                                        updateTempoPointAtPlayhead({
+                                            timeSignature: {
+                                                numerator: displayBeats,
+                                                denominator: next,
+                                            },
+                                        });
+                                        return;
+                                    }
+                                    void dispatch(
+                                        setProjectTimelineSettingsRemote({
+                                            beatsPerBar: s.beats,
+                                            timeSignatureDenominator: next,
+                                            gridSize: s.grid,
+                                        }),
+                                    );
+                                }}
+                            >
+                                <Select.Trigger
+                                    style={{
+                                        width: 48,
+                                        backgroundColor: "var(--qt-base)",
+                                        justifyContent: "center",
+                                    }}
+                                    onWheel={(event) => {
+                                        applySelectWheelChange({
+                                            event,
+                                            currentValue: String(displayDenominator),
+                                            options: TEMPO_DENOMINATORS.map((d) => String(d)),
+                                            onChange: (v) => {
+                                                const next = Number(v) || 4;
+                                                if (next === displayDenominator) return;
+                                                if (s.tempoMap && s.tempoMap.points.length > 0) {
+                                                    updateTempoPointAtPlayhead({
+                                                        timeSignature: {
+                                                            numerator: displayBeats,
+                                                            denominator: next,
+                                                        },
+                                                    });
+                                                    return;
+                                                }
+                                                void dispatch(
+                                                    setProjectTimelineSettingsRemote({
+                                                        beatsPerBar: s.beats,
+                                                        timeSignatureDenominator: next,
+                                                        gridSize: s.grid,
+                                                    }),
+                                                );
+                                            },
+                                        });
+                                    }}
+                                />
+                                <Select.Content>
+                                    {TEMPO_DENOMINATORS.map((d) => (
+                                        <Select.Item key={d} value={String(d)}>
+                                            {d}
+                                        </Select.Item>
+                                    ))}
+                                </Select.Content>
+                            </Select.Root>
+                        </Flex>
+                    </>
+                )}
+
+                <span className="hs-type-muted">{t("common_grid")}:</span>
+                <Select.Root
+                    value={s.grid}
+                    size="1"
+                    onValueChange={(v) => {
+                        void dispatch(
+                            setProjectTimelineSettingsRemote({
+                                beatsPerBar: s.beats,
+                                timeSignatureDenominator: displayDenominator,
+                                gridSize: v,
+                            }),
+                        );
+                    }}
+                >
+                    <Select.Trigger
+                        style={{ backgroundColor: "var(--qt-base)" }}
+                        onWheel={(event) => {
+                            applySelectWheelChange({
+                                event,
+                                currentValue: s.grid,
+                                options: [
+                                    "1/1",
+                                    "1/2",
+                                    "1/4",
+                                    "1/8",
+                                    "1/16",
+                                    "1/32",
+                                    "1/64",
+                                    "1/2d",
+                                    "1/4d",
+                                    "1/8d",
+                                    "1/16d",
+                                    "1/32d",
+                                    "1/64d",
+                                    "1/2t",
+                                    "1/4t",
+                                    "1/8t",
+                                    "1/16t",
+                                    "1/32t",
+                                    "1/64t",
+                                ],
+                                onChange: (next) => {
+                                    void dispatch(
+                                        setProjectTimelineSettingsRemote({
+                                            beatsPerBar: s.beats,
+                                            timeSignatureDenominator: displayDenominator,
+                                            gridSize: next,
+                                        }),
+                                    );
+                                },
+                            });
+                        }}
+                    />
+                    <Select.Content style={{ maxHeight: "none", overflow: "visible" }}>
+                        <Select.Group>
+                            <Select.Label>{tf("grid_note_normal")}</Select.Label>
+                            <Select.Item value="1/1">1/1</Select.Item>
+                            <Select.Item value="1/2">1/2</Select.Item>
+                            <Select.Item value="1/4">1/4</Select.Item>
+                            <Select.Item value="1/8">1/8</Select.Item>
+                            <Select.Item value="1/16">1/16</Select.Item>
+                            <Select.Item value="1/32">1/32</Select.Item>
+                            <Select.Item value="1/64">1/64</Select.Item>
+                        </Select.Group>
+                        <Select.Separator />
+                        <Select.Group>
+                            <Select.Label>{tf("grid_note_dotted")}</Select.Label>
+                            <Select.Item value="1/2d">1/2.</Select.Item>
+                            <Select.Item value="1/4d">1/4.</Select.Item>
+                            <Select.Item value="1/8d">1/8.</Select.Item>
+                            <Select.Item value="1/16d">1/16.</Select.Item>
+                            <Select.Item value="1/32d">1/32.</Select.Item>
+                            <Select.Item value="1/64d">1/64.</Select.Item>
+                        </Select.Group>
+                        <Select.Separator />
+                        <Select.Group>
+                            <Select.Label>{tf("grid_note_triplet")}</Select.Label>
+                            <Select.Item value="1/2t">1/2t</Select.Item>
+                            <Select.Item value="1/4t">1/4t</Select.Item>
+                            <Select.Item value="1/8t">1/8t</Select.Item>
+                            <Select.Item value="1/16t">1/16t</Select.Item>
+                            <Select.Item value="1/32t">1/32t</Select.Item>
+                            <Select.Item value="1/64t">1/64t</Select.Item>
+                        </Select.Group>
+                    </Select.Content>
+                </Select.Root>
+                <span className="hs-type-muted">{t("base_scale")}:</span>
+                {/* 【为什么插件里也能改】音阶是 HiFiShifter 自有的设置 —— REAPER
+                    没有工程调号概念，宿主不提供它。插件把它持久化在用户设置里
+                    （`set_project_base_scale`），因此这个选择器是真的能用的。
+                    此前按模式一刀切禁用它，等于把一整套锚定音阶的功能（音高吸附、
+                    级数渲染、渲染缓存键）一起关掉了。 */}
+                <Select.Root
+                    value={displayScaleSelectValue}
+                    size="1"
+                    onValueChange={(v) => {
+                        if (v === "__custom_dialog__") {
+                            setCustomScaleOpen(true);
+                            return;
+                        }
+                        if (v === "__custom__") {
+                            if (s.project?.customScale) {
+                                applyBaseScale(
+                                    s.project.customScale.notes,
+                                    s.project.customScale.name,
+                                );
+                            }
+                            return;
+                        }
+                        if (v === "__tempo_custom__") {
+                            if (Array.isArray(displayScale)) {
+                                applyBaseScale(displayScale, tempoCustomScaleName ?? undefined);
+                            }
+                            return;
+                        }
+                        if ((SCALE_KEYS as readonly string[]).includes(v)) {
+                            applyBaseScale(v as (typeof SCALE_KEYS)[number]);
+                        }
+                    }}
+                >
+                    <Select.Trigger
+                        style={{ backgroundColor: "var(--qt-base)" }}
+                        onWheel={(event) => {
+                            applySelectWheelChange({
+                                event,
+                                currentValue: displayScaleSelectValue,
+                                options: baseScaleWheelOptions,
+                                onChange: (next) => {
+                                    if (next === "__custom_dialog__") {
+                                        setCustomScaleOpen(true);
+                                        return;
+                                    }
+                                    if (next === "__custom__") {
+                                        if (s.project?.customScale) {
+                                            applyBaseScale(
+                                                s.project.customScale.notes,
+                                                s.project.customScale.name,
+                                            );
+                                        }
+                                        return;
+                                    }
+                                    if (next === "__tempo_custom__") {
+                                        if (Array.isArray(displayScale)) {
+                                            applyBaseScale(
+                                                displayScale,
+                                                tempoCustomScaleName ?? undefined,
+                                            );
+                                        }
+                                        return;
+                                    }
+                                    if ((SCALE_KEYS as readonly string[]).includes(next)) {
+                                        applyBaseScale(next as (typeof SCALE_KEYS)[number]);
+                                    }
+                                },
+                            });
+                        }}
+                    />
+                    <Select.Content style={{ maxHeight: "none", overflow: "visible" }}>
+                        <Select.Group>
+                            {SCALE_KEYS.map((k) => (
+                                <Select.Item key={k} value={k}>
+                                    {SCALE_LABELS[k]}
+                                </Select.Item>
+                            ))}
+                        </Select.Group>
+                        {showTempoCustomScaleItem ? (
+                            <>
+                                <Select.Separator />
+                                <Select.Group>
+                                    <Select.Item value="__tempo_custom__">
+                                        {tempoCustomScaleName ?? tf("custom_scale_short")}
+                                    </Select.Item>
+                                </Select.Group>
+                            </>
+                        ) : null}
+                        {s.project?.customScale ? (
+                            <>
+                                <Select.Separator />
+                                <Select.Group>
+                                    <Select.Item value="__custom__">
+                                        {`${tf("custom_scale_label")}: ${s.project.customScale.name}`}
+                                    </Select.Item>
+                                </Select.Group>
+                            </>
+                        ) : null}
+                        <Select.Separator />
+                        <Select.Group>
+                            <Select.Item value="__custom_dialog__">
+                                {tf("custom_scale_action")}
+                            </Select.Item>
+                        </Select.Group>
+                    </Select.Content>
+                </Select.Root>
+            </AppToolbarGroup>
+
+            {/* Transport */}
+            {/*
+             * 【插件里为什么不再整组隐藏】此前 `transportControl` 为假时这组按钮**整个
+             * 不渲染**，于是插件里连"宿主现在在不在播放"这个事实都没有任何显示，用户
+             * 面对的是一个光秃秃的界面。按仓库既有纪律（`f8d339fc`）：显示但**说明**
+             * 为什么点不动，而不是静默消失。
+             *
+             * 【为什么用 `aria-disabled` 而不是 `disabled`】原生 `disabled` 的元素不派发
+             * 指针事件，`data-tooltip` 就永远弹不出来 —— 那正是"灰掉了但不说为什么"。
+             * 用 `aria-disabled` 保留提示通道，点击处理里直接早退。
+             *
+             * 录音键在插件里没有对应命令（`recording.*` 全被 `pluginAllowsAction` 拒掉），
+             * 仍然只在独立 App 里出现；插件形态下那个位置是 Capture 控件。
+             */}
+            {(() => {
+                const hostTransport = canControlHostTransport();
+                const inert = isPluginMode() && !hostTransport;
+                return (
+                    <AppToolbarGroup>
+                        {/* 传输组统一走 TransportIconButton：同一 size / 盒模型 / 填充家族。
+                            此前 Stop 是文字 Button、Play 是 IconButton、Record 是 Box 包裹的
+                            IconButton —— 三套盒子并排，填充边界必然不齐。 */}
+                        <TransportIconButton
+                            tone="neutral"
+                            fill="soft"
+                            icon={<StopIcon />}
+                            tooltip={
+                                inert
+                                    ? t("plugin_transport_host_only")
+                                    : isPluginMode()
+                                      ? t("plugin_transport_stop")
+                                      : t("action_stop")
+                            }
+                            disabled={inert}
+                            onClick={() => {
+                                if (inert) return;
+                                dispatch(stopAudioPlayback({ restoreAnchor: true }));
+                            }}
+                        />
+                        <TransportIconButton
+                            tone="accent"
+                            fill="solid"
+                            icon={isPlaying ? <PauseIcon /> : <PlayIcon />}
+                            tooltip={
+                                inert
+                                    ? t("plugin_transport_host_only")
+                                    : isPluginMode()
+                                      ? t("plugin_transport_play")
+                                      : isPlaying
+                                        ? tf("action_pause")
+                                        : t("action_play_out")
+                            }
+                            disabled={inert}
+                            onClick={() => {
+                                if (inert) return;
+                                if (isPlaying) {
+                                    dispatch(stopAudioPlayback());
+                                    return;
+                                }
+                                dispatch(playOriginal());
+                            }}
+                        />
+                        {!isPluginMode() && (
+                            <Box
+                                ref={recordingMenuAnchorRef}
+                                style={{ position: "relative" }}
+                                data-hs-context-menu
+                            >
+                                <TransportIconButton
+                                    /* 录音语义色：待机 **soft 红**、录制中 **solid 红** —— 与
+                                       改动前逐字一致（原先就是 `variant={active ? "solid" : "soft"}`
+                                       + `color="red"`）。红色在待机时就出现，是因为"这是一个录音
+                                       键"必须一眼可辨；录制中加实心只是把"正在录"再放大一档。
+
+                                       曾把这里固定成 solid 来治"填充边界不齐"——那是**诊断错了
+                                       病**：不齐来自三个按钮各用一套盒模型，不是来自 soft/solid
+                                       的填充色。盒模型现在由 index.css 的
+                                       `[data-hs-transport-button].rt-IconButton` 对所有变体归一化，
+                                       因此变体可以自由切换而盒子不动。 */
+                                    tone="danger"
+                                    fill="soft"
+                                    active={recording.active}
+                                    icon={
+                                        recording.active ? (
+                                            <svg
+                                                width="15"
+                                                height="15"
+                                                viewBox="0 0 15 15"
+                                                fill="currentColor"
+                                            >
+                                                <rect x="4" y="4" width="7" height="7" rx="1.2" />
+                                            </svg>
+                                        ) : (
+                                            <svg
+                                                width="15"
+                                                height="15"
+                                                viewBox="0 0 15 15"
+                                                fill="currentColor"
+                                            >
+                                                <circle cx="7.5" cy="7.5" r="4.2" />
+                                            </svg>
+                                        )
+                                    }
+                                    tooltip={recordingTooltip}
+                                    disabled={recording.busy && recording.countdownRemaining === 0}
+                                    onClick={() => {
+                                        if (recording.active) {
+                                            void dispatch(stopRecordingFlow());
+                                        } else if (recording.countdownRemaining > 0) {
+                                            void dispatch(cancelRecordingCountdown());
+                                        } else {
+                                            void dispatch(startRecordingFlow());
+                                        }
+                                    }}
+                                    onContextMenu={(event) => {
+                                        event.preventDefault();
+                                        if (isPluginMode()) return;
+                                        setRecordingMenuOpen(true);
+                                        void dispatch(loadRecordingSettings());
+                                        // 每次打开菜单都强制重新枚举设备/应用，
+                                        // 避免展示上次加载的过时列表（设备热插拔、应用退出等）。
+                                        void dispatch(loadRecordingDevices({ force: true }));
+                                        void dispatch(loadRecordingApps({ force: true }));
+                                    }}
+                                />
+                                <AppAnchoredMenu
+                                    open={recordingMenuOpen}
+                                    anchorRef={recordingMenuAnchorRef}
+                                    menuRef={recordingMenuRef}
+                                    ariaLabel={tf("recording_source_mode")}
+                                    onClose={() => setRecordingMenuOpen(false)}
+                                    items={[
+                                        {
+                                            key: "mode-heading",
+                                            heading: true,
+                                            label: tf("recording_source_mode"),
+                                        },
+                                        {
+                                            key: "mode-device",
+                                            label: tf("recording_mode_device"),
+                                            checked: recording.settings.captureMode === "device",
+                                            onSelect: () =>
+                                                void applyRecordingSettings({
+                                                    captureMode: "device",
+                                                }),
+                                        },
+                                        {
+                                            key: "mode-loopback",
+                                            label: tf("recording_mode_loopback"),
+                                            checked: recording.settings.captureMode === "loopback",
+                                            onSelect: () =>
+                                                void applyRecordingSettings({
+                                                    captureMode: "loopback",
+                                                }),
+                                        },
+                                        {
+                                            key: "mode-application",
+                                            label: tf("recording_mode_application"),
+                                            checked:
+                                                recording.settings.captureMode === "application",
+                                            onSelect: () =>
+                                                void applyRecordingSettings({
+                                                    captureMode: "application",
+                                                }),
+                                        },
+                                        {
+                                            key: "source-heading",
+                                            heading: true,
+                                            separatorBefore: true,
+                                            label: tf(
+                                                recording.settings.captureMode === "application"
+                                                    ? "recording_application"
+                                                    : "recording_device",
+                                            ),
+                                        },
+                                        ...(recording.settings.captureMode === "device"
+                                            ? [
+                                                  {
+                                                      key: "device-default",
+                                                      label: tf("recording_device_default"),
+                                                      checked:
+                                                          recording.settings.sourceDevice ===
+                                                          "default",
+                                                      onSelect: () =>
+                                                          void applyRecordingSettings({
+                                                              sourceDevice: "default",
+                                                          }),
+                                                  },
+                                                  ...recording.devices
+                                                      .filter(
+                                                          (device) =>
+                                                              !device.isLoopback &&
+                                                              device.id !== "default",
+                                                      )
+                                                      .map((device) => ({
+                                                          key: device.id,
+                                                          label: device.name,
+                                                          checked:
+                                                              recording.settings.sourceDevice ===
+                                                              device.id,
+                                                          onSelect: () =>
+                                                              void applyRecordingSettings({
+                                                                  sourceDevice: device.id,
+                                                              }),
+                                                      })),
+                                              ]
+                                            : recording.settings.captureMode === "loopback"
+                                              ? [
+                                                    {
+                                                        key: "loopback-default",
+                                                        label: tf("recording_loopback_default"),
+                                                        checked:
+                                                            recording.settings.loopbackDevice ===
+                                                            "default",
+                                                        onSelect: () =>
+                                                            void applyRecordingSettings({
+                                                                loopbackDevice: "default",
+                                                            }),
+                                                    },
+                                                    ...recording.devices
+                                                        .filter(
+                                                            (device) =>
+                                                                device.isLoopback &&
+                                                                device.id !== "loopback:default",
+                                                        )
+                                                        .map((device) => ({
+                                                            key: device.id,
+                                                            label: device.name,
+                                                            checked:
+                                                                recording.settings
+                                                                    .loopbackDevice === device.id,
+                                                            onSelect: () =>
+                                                                void applyRecordingSettings({
+                                                                    loopbackDevice: device.id,
+                                                                }),
+                                                        })),
+                                                ]
+                                              : [
+                                                    ...(recording.settings.captureAppId &&
+                                                    !recording.apps.some(
+                                                        (app) =>
+                                                            app.id ===
+                                                            recording.settings.captureAppId,
+                                                    )
+                                                        ? [
+                                                              {
+                                                                  key: recording.settings
+                                                                      .captureAppId,
+                                                                  label:
+                                                                      recording.settings
+                                                                          .captureAppName ||
+                                                                      recording.settings
+                                                                          .captureAppId,
+                                                                  checked: true,
+                                                                  onSelect: () =>
+                                                                      void applyRecordingSettings({
+                                                                          captureAppId:
+                                                                              recording.settings
+                                                                                  .captureAppId,
+                                                                          captureAppName:
+                                                                              recording.settings
+                                                                                  .captureAppName,
+                                                                          captureAppProcess:
+                                                                              recording.settings
+                                                                                  .captureAppProcess,
+                                                                      }),
+                                                              },
+                                                          ]
+                                                        : []),
+                                                    ...recording.apps.map((app) => ({
+                                                        key: app.id,
+                                                        label: app.name,
+                                                        checked:
+                                                            recording.settings.captureAppId ===
+                                                            app.id,
+                                                        onSelect: () =>
+                                                            void applyRecordingSettings({
+                                                                captureAppId: app.id,
+                                                                captureAppName: app.name,
+                                                                captureAppProcess: app.processName,
+                                                            }),
+                                                    })),
+                                                ]),
+                                        {
+                                            key: "settings",
+                                            label: tf("recording_context_settings"),
+                                            separatorBefore: true,
+                                            onSelect: () => setRecordingSettingsOpen(true),
+                                        },
+                                    ]}
+                                />
+                            </Box>
+                        )}
+                        {recording.active || recording.countdownRemaining > 0 ? (
+                            <Flex align="center" gap="1" className="shrink-0">
+                                <span
+                                    className="hs-type-label tabular-nums"
+                                    style={
+                                        recording.active
+                                            ? { color: "var(--qt-danger-text)" }
+                                            : undefined
+                                    }
+                                >
+                                    {recording.countdownRemaining > 0 ? (
+                                        <SlotText
+                                            text={`-${recording.countdownRemaining}`}
+                                            reserveText="-99"
+                                            data-testid="recording-countdown"
+                                        />
+                                    ) : (
+                                        formatRecordingTime(recording.elapsedSec)
+                                    )}
+                                </span>
+                                <div
+                                    style={{
+                                        width: 48,
+                                        height: 6,
+                                        borderRadius: "var(--qt-radius-pill)",
+                                        background: "var(--qt-border)",
+                                        overflow: "hidden",
+                                        flexShrink: 0,
+                                    }}
+                                >
+                                    <div
+                                        style={{
+                                            width: `${Math.min(100, Math.round((recording.level || 0) * 100))}%`,
+                                            height: "100%",
+                                            background:
+                                                recording.level > 0.98
+                                                    ? "var(--qt-danger-text)"
+                                                    : "var(--qt-danger-border)",
+                                            transition: "width 80ms linear",
+                                        }}
+                                    />
+                                </div>
+                            </Flex>
+                        ) : null}
+                        {recording.error ? (
+                            <span
+                                className="hs-type-label truncate"
+                                data-tooltip={recording.error}
+                                style={{ maxWidth: 220, color: "var(--qt-danger-text)" }}
+                            >
+                                {recordingErrorMessage(recording.error)}
+                            </span>
+                        ) : null}
+                    </AppToolbarGroup>
+                );
+            })()}
+
+            {/* Capture：插件形态下"录制宿主音频"的入口。它长在传输栏上，因为用户对
+                "录制"的心智模型就是一个传输栏上的键（见 `CaptureControl` 的文件头）。 */}
+            {/* 【插槽常在、控件按形态决定】`data-toolbar-control` 声明的是"这里有捕获
+                控制"这一**位置**；插件形态下宿主才有可录的音频，独立 App 里不渲染按钮。
+                让插槽常驻，移动端覆盖测试才能拿同一份清单去比。 */}
+            <AppToolbarGroup>
+                <span data-toolbar-control="capture" className="contents">
+                    {isPluginMode() ? <CaptureControl /> : null}
+                </span>
+            </AppToolbarGroup>
+
+            {/* ── 撤销 / 重做 ──────────────────────────────────────────
+                独立成组、两侧以分隔线与其他按钮隔开；右键打开「操作记录」
+                （非模态浮动窗口，打开期间照常编辑轨道，条目实时刷新）。 */}
+            <AppToolbarGroup>
+                <TransportIconButton
+                    ref={undoButtonRef}
+                    fill="ghost"
+                    icon={<UndoIcon />}
+                    tooltip={`${t("menu_undo")} (${formatKeybindingList(undoShortcutKb, "")})`}
+                    disabled={s.historyUndoDepth <= 0}
+                    tabIndex={-1}
+                    onClick={() => {
+                        void dispatch(undoRemote());
+                    }}
+                    onContextMenu={(event) => {
+                        event.preventDefault();
+                        openHistoryPanel();
+                    }}
+                />
+                <TransportIconButton
+                    fill="ghost"
+                    icon={<RedoIcon />}
+                    tooltip={`${t("menu_redo")} (${formatKeybindingList(redoShortcutKb, "")})`}
+                    disabled={s.historyRedoDepth <= 0}
+                    tabIndex={-1}
+                    onClick={() => {
+                        void dispatch(redoRemote());
+                    }}
+                    onContextMenu={(event) => {
+                        event.preventDefault();
+                        openHistoryPanel();
+                    }}
+                />
+            </AppToolbarGroup>
+
+            {/* File Browser Toggle */}
+            <AppToolbarGroup>
+                <AppIconButton
+                    data-toolbar-control="fileBrowser"
+                    active={fileBrowserVisible}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
+                    tooltip={tf("fb_title")}
+                    onClick={() => togglePanelVisible(dispatch, store.getState, PANEL_FILE_BROWSER)}
+                    icon={
+                        <svg
+                            width="15"
+                            height="15"
+                            viewBox="0 0 15 15"
+                            fill="none"
+                            xmlns="http://www.w3.org/2000/svg"
+                        >
+                            <path
+                                d="M2 3.5C2 3.22386 2.22386 3 2.5 3H5.29289L6.64645 4.35355C6.74021 4.44732 6.86739 4.5 7 4.5H12.5C12.7761 4.5 13 4.72386 13 5V11.5C13 11.7761 12.7761 12 12.5 12H2.5C2.22386 12 2 11.7761 2 11.5V3.5Z"
+                                fill="currentColor"
+                            />
+                        </svg>
+                    }
+                />
+                <AppIconButton
+                    data-toolbar-control="notebook"
+                    active={notebookVisible}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
+                    tooltip={t("common_notebook")}
+                    onClick={() => togglePanelVisible(dispatch, store.getState, PANEL_NOTEBOOK)}
+                    icon={<Pencil1Icon />}
+                />
+            </AppToolbarGroup>
+
+            {/* Toolbar Toggles */}
+            <>
+                <AppToolbarGroup>
+                    {/* Auto Crossfade */}
+                    <AppIconButton
+                        data-toolbar-control="crossfade"
+                        active={s.autoCrossfadeEnabled}
+                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                        emphasis="accent"
+                        tooltip={tf("auto_crossfade")}
+                        tabIndex={-1}
+                        onClick={() => {
+                            dispatch(toggleAutoCrossfade());
+                            void dispatch(persistUiSettings());
+                        }}
+                        icon={
+                            /* X icon for crossfade */
+                            <svg
+                                width="15"
+                                height="15"
+                                viewBox="0 0 15 15"
+                                fill="none"
+                                xmlns="http://www.w3.org/2000/svg"
+                            >
+                                <path
+                                    d="M2 12L7.5 3L13 12"
+                                    stroke="currentColor"
+                                    strokeWidth="1.2"
+                                    fill="none"
+                                />
+                                <path
+                                    d="M2 3L7.5 12L13 3"
+                                    stroke="currentColor"
+                                    strokeWidth="1.2"
+                                    fill="none"
+                                    opacity="0.5"
+                                />
+                            </svg>
+                        }
+                    />
+
+                    {/* Split Transition */}
+                    <AppIconButton
+                        data-toolbar-control="splitTransition"
+                        active={s.splitTransitionEnabled}
+                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                        emphasis="accent"
+                        tooltip={tf("split_transition_tooltip")}
+                        tabIndex={-1}
+                        onClick={() => {
+                            dispatch(toggleSplitTransition());
+                            void dispatch(persistUiSettings());
+                        }}
+                        onContextMenu={(e) => {
+                            e.preventDefault();
+                            setSplitTransitionOpen(true);
+                        }}
+                        icon={
+                            <svg
+                                width="15"
+                                height="15"
+                                viewBox="0 0 15 15"
+                                fill="none"
+                                xmlns="http://www.w3.org/2000/svg"
+                            >
+                                <path d="M7.5 1.5V13.5" stroke="currentColor" strokeWidth="1.2" />
+                                <path
+                                    d="M3.5 3.5L7.5 5.5L3.5 7.5Z"
+                                    fill="currentColor"
+                                    opacity="0.85"
+                                />
+                                <path
+                                    d="M11.5 7.5L7.5 9.5L11.5 11.5Z"
+                                    fill="currentColor"
+                                    opacity="0.45"
+                                />
+                            </svg>
+                        }
+                    />
+
+                    {/* Snap */}
+                    <AppIconButton
+                        data-toolbar-control="snap"
+                        active={effectiveSnapVisual}
+                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                        emphasis="accent"
+                        tooltip={`${tf("common_snap")}${
+                            snapGestureActive && snapToggleHeld
+                                ? ` · ${tf("common_snap")}: ${tf("snap_toggle_inverted")}`
+                                : ""
+                        }`}
+                        tabIndex={-1}
+                        onClick={() => {
+                            dispatch(toggleSnap());
+                            void dispatch(persistUiSettings());
+                        }}
+                        onContextMenu={(e) => {
+                            e.preventDefault();
+                            setSnapSettingsOpen(true);
+                        }}
+                        icon={
+                            <svg
+                                width="15"
+                                height="15"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                xmlns="http://www.w3.org/2000/svg"
+                            >
+                                <path
+                                    d="m6 15-4-4 6.75-6.77a7.79 7.79 0 0 1 11 11L13 22l-4-4 6.39-6.36a2.14 2.14 0 0 0-3-3L6 15Z"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                />
+                                <path
+                                    d="m5 8 4 4"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                />
+                                <path
+                                    d="m12 15 4 4"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                />
+                            </svg>
+                        }
+                    />
+
+                    {/* 波纹编辑：左键开关，右键选择方向（按轨道 / 全部轨道） */}
+                    <RippleButton
+                        enabled={s.rippleEnabled}
+                        scope={s.rippleScope}
+                        onToggle={() => {
+                            dispatch(toggleRippleEnabled());
+                            void dispatch(persistUiSettings());
+                        }}
+                        onSelectScope={(next) => {
+                            dispatch(setRippleScope(next));
+                            // 选方向 = 立即生效：方向是"要跟进谁"的声明，只有开着才有意义。
+                            if (!s.rippleEnabled) dispatch(toggleRippleEnabled());
+                            void dispatch(persistUiSettings());
+                        }}
+                    />
+                </AppToolbarGroup>
+                <AppToolbarGroup>
+                    {/* Playhead Zoom */}
+                    <AppIconButton
+                        data-toolbar-control="playheadZoom"
+                        active={s.playheadZoomEnabled}
+                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                        emphasis="accent"
+                        tooltip={tf("playhead_zoom")}
+                        tabIndex={-1}
+                        onClick={() => {
+                            dispatch(togglePlayheadZoom());
+                            void dispatch(persistUiSettings());
+                        }}
+                        icon={
+                            <svg
+                                width="15"
+                                height="15"
+                                viewBox="0 0 15 15"
+                                fill="none"
+                                xmlns="http://www.w3.org/2000/svg"
+                            >
+                                <path d="M7.5 2V13" stroke="currentColor" strokeWidth="1.2" />
+                                <path
+                                    d="M6 3.5L7.5 2L9 3.5"
+                                    stroke="currentColor"
+                                    strokeWidth="1"
+                                />
+                                <path
+                                    d="M5.5 5.5L4 7.5L5.5 9.5"
+                                    stroke="currentColor"
+                                    strokeWidth="1.2"
+                                />
+                                <path
+                                    d="M9.5 5.5L11 7.5L9.5 9.5"
+                                    stroke="currentColor"
+                                    strokeWidth="1.2"
+                                />
+                                <path
+                                    d="M3 12H12"
+                                    stroke="currentColor"
+                                    strokeWidth="0.8"
+                                    opacity="0.5"
+                                />
+                            </svg>
+                        }
+                    />
+
+                    {/* 自动滚屏：左键开关，右键选择模式（滚动式 / 翻页式） */}
+                    <AutoScrollButton
+                        enabled={s.autoScrollEnabled}
+                        mode={s.autoScrollMode}
+                        onToggle={() => {
+                            dispatch(toggleAutoScroll());
+                            void dispatch(persistUiSettings());
+                        }}
+                        onSelectMode={(mode) => {
+                            dispatch(setAutoScrollMode(mode));
+                            // 选模式 = 立即生效：模式是"要怎么滚"的声明，只有滚着才有意义。
+                            // 用当前渲染里的 s.autoScrollEnabled 判定即可 —— 本回调由
+                            // 这一次点击同步触发，不存在跨帧的陈旧读。
+                            if (!s.autoScrollEnabled) dispatch(toggleAutoScroll());
+                            void dispatch(persistUiSettings());
+                        }}
+                    />
+                </AppToolbarGroup>
+                <AppToolbarGroup>
+                    <AppIconButton
+                        data-toolbar-control="followPlayhead"
+                        active={s.paramEditorSeekPlayheadEnabled}
+                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                        emphasis="accent"
+                        tooltip={tf("param_editor_seek_playhead")}
+                        tabIndex={-1}
+                        onClick={() => {
+                            dispatch(toggleParamEditorSeekPlayhead());
+                            void dispatch(persistUiSettings());
+                        }}
+                        icon={
+                            <svg
+                                width="15"
+                                height="15"
+                                viewBox="0 0 15 15"
+                                fill="none"
+                                xmlns="http://www.w3.org/2000/svg"
+                            >
+                                <path
+                                    d="M2 2.5H13"
+                                    stroke="currentColor"
+                                    strokeWidth="0.8"
+                                    opacity="0.5"
+                                />
+                                <path
+                                    d="M2 12.5H13"
+                                    stroke="currentColor"
+                                    strokeWidth="0.8"
+                                    opacity="0.5"
+                                />
+                                <path d="M7.5 3.5V11.5" stroke="currentColor" strokeWidth="1.2" />
+                                <path
+                                    d="M6 4.5L7.5 3L9 4.5"
+                                    stroke="currentColor"
+                                    strokeWidth="1"
+                                />
+                                <path
+                                    d="M7.8 8.2C8.9 8.2 9.8 9.1 9.8 10.2C9.8 11.3 8.9 12.2 7.8 12.2C6.9 12.2 6.2 11.6 6 10.8H7.8V8.2Z"
+                                    fill="currentColor"
+                                />
+                            </svg>
+                        }
+                    />
+
+                    {/* Allow timeline clicks to switch the parameter editor track */}
+                    <AppIconButton
+                        data-toolbar-control="clickSelectTrack"
+                        active={s.paramEditorTimelineClickSelectTrackEnabled}
+                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                        emphasis="accent"
+                        tooltip={tf("param_editor_timeline_click_select_track")}
+                        tabIndex={-1}
+                        onClick={() => {
+                            dispatch(toggleParamEditorTimelineClickSelectTrack());
+                            void dispatch(persistUiSettings());
+                        }}
+                        icon={
+                            <svg
+                                width="15"
+                                height="15"
+                                viewBox="0 0 15 15"
+                                fill="none"
+                                xmlns="http://www.w3.org/2000/svg"
+                            >
+                                <defs>
+                                    <marker
+                                        id="hs-track-switch-arrow"
+                                        viewBox="0 0 6 6"
+                                        refX="3"
+                                        refY="3"
+                                        markerWidth="5"
+                                        markerHeight="5"
+                                        orient="auto-start-reverse"
+                                    >
+                                        <path d="M0,0 L6,3 L0,6 Z" fill="currentColor" />
+                                    </marker>
+                                </defs>
+                                <rect
+                                    x="1.5"
+                                    y="2"
+                                    width="8"
+                                    height="3"
+                                    rx="1"
+                                    stroke="currentColor"
+                                    strokeWidth="1"
+                                />
+                                <rect
+                                    x="5.5"
+                                    y="10"
+                                    width="8"
+                                    height="3"
+                                    rx="1"
+                                    stroke="currentColor"
+                                    strokeWidth="1"
+                                />
+                                <line
+                                    x1="9.5"
+                                    y1="4.5"
+                                    x2="5.5"
+                                    y2="10.5"
+                                    stroke="currentColor"
+                                    strokeWidth="1"
+                                    markerStart="url(#hs-track-switch-arrow)"
+                                    markerEnd="url(#hs-track-switch-arrow)"
+                                />
+                            </svg>
+                        }
+                    />
+                </AppToolbarGroup>
+                <AppToolbarGroup divider={false}>
+                    {/* Ignore Grouping (broken chain) */}
+                    <AppIconButton
+                        data-toolbar-control="ignoreGrouping"
+                        active={s.ignoreGrouping}
+                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                        emphasis="accent"
+                        tooltip={tf("ignore_grouping")}
+                        tabIndex={-1}
+                        onClick={() => {
+                            dispatch(toggleIgnoreGrouping());
+                            void dispatch(persistUiSettings());
+                        }}
+                        icon={
+                            <svg
+                                width="15"
+                                height="15"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                            >
+                                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+                                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+                                <line
+                                    x1="2"
+                                    y1="2"
+                                    x2="22"
+                                    y2="22"
+                                    stroke="currentColor"
+                                    strokeWidth="2.5"
+                                    opacity="0.7"
+                                />
+                            </svg>
+                        }
+                    />
+                </AppToolbarGroup>
+            </>
+
+            {/* Pitch Snap Settings Dialog */}
+            {pitchSnapOpen && (
+                <PitchSnapSettingsDialog open={pitchSnapOpen} onOpenChange={setPitchSnapOpen} />
+            )}
+
+            {splitTransitionOpen && (
+                <SplitTransitionSettingsDialog
+                    open={splitTransitionOpen}
+                    onOpenChange={setSplitTransitionOpen}
+                />
+            )}
+
+            {customScaleOpen && (
+                <CustomScaleDialog open={customScaleOpen} onOpenChange={setCustomScaleOpen} />
+            )}
+
+            <RecordingSettingsDialog
+                open={recordingSettingsOpen}
+                onOpenChange={setRecordingSettingsOpen}
+            />
+
+            {snapSettingsOpen && (
+                <SnapGridSettingsDialog
+                    open={snapSettingsOpen}
+                    onOpenChange={setSnapSettingsOpen}
+                />
+            )}
+
+            {/* Snap Context Menu removed: right-click opens the settings dialog above. */}
+        </Flex>
+    );
+}
+
+// ── 波纹编辑（自动跟进）按钮 ──────────────────────────────────────
+
+/**
+ * 波纹编辑图标：一组“被向前推的剪辑块”+ 右侧箭头，表达后续剪辑自动跟进。
+ *
+ * `multiTrack` 为 true（全部轨道方向）时显示两行剪辑块，否则显示单行（按轨道方向）。
+ * 按钮与菜单项共用它 —— 方向与图形的对应关系必须在两处是同一条，否则会出现
+ * "按钮画两行、菜单写着按轨道"这种自相矛盾。
+ *
+ * `data-hs-ripple-icon` 让"当前画的是哪个方向"成为可断言的文本事实（组件测试直接读它，
+ * 而不是比对整段 SVG 字符串）。
+ */
+function RippleIcon({ multiTrack }: { multiTrack: boolean }) {
+    const rows = multiTrack ? [2.9, 6.9] : [4.9];
+    return (
+        <svg
+            width="15"
+            height="15"
+            viewBox="0 0 15 15"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+            aria-hidden="true"
+            data-hs-ripple-icon={multiTrack ? "all" : "track"}
+        >
+            {rows.map((y) => (
+                <g key={y}>
+                    <rect
+                        x="1.6"
+                        y={y}
+                        width="2.9"
+                        height="2.4"
+                        rx="0.6"
+                        fill="currentColor"
+                        opacity="0.45"
+                    />
+                    <rect
+                        x="5.1"
+                        y={y}
+                        width="2.9"
+                        height="2.4"
+                        rx="0.6"
+                        fill="currentColor"
+                        opacity="0.75"
+                    />
+                    <rect x="8.6" y={y} width="2.9" height="2.4" rx="0.6" fill="currentColor" />
+                </g>
+            ))}
+            <path
+                d="M1.6 12.4H11.6"
+                stroke="currentColor"
+                strokeWidth="1.1"
+                strokeLinecap="round"
+            />
+            <path
+                d="M8.9 10.5L11.6 12.4L8.9 14.3"
+                stroke="currentColor"
+                strokeWidth="1.1"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+            />
+        </svg>
+    );
+}
+
+/**
+ * 波纹编辑工具栏按钮：左键开关，右键在**按钮下方**展开方向菜单（按轨道 / 全部轨道）。
+ *
+ * 【为什么菜单只有两项】"关闭"不是一种方向 —— 它是开关的关闭态（左键）。旧版把它
+ * 塞进同一个三值循环，于是"从全部轨道关掉"要先绕到"按轨道"，而菜单里还多出一个与
+ * 开关重复的选项。
+ */
+function RippleButton({
+    enabled,
+    scope,
+    onToggle,
+    onSelectScope,
+}: {
+    enabled: boolean;
+    scope: RippleScope;
+    onToggle: () => void;
+    onSelectScope: (scope: RippleScope) => void;
+}) {
+    const { tf } = useI18n();
+    const [menuOpen, setMenuOpen] = useState(false);
+    const anchorRef = useRef<HTMLDivElement | null>(null);
+    const menuRef = useRef<HTMLDivElement | null>(null);
+
+    return (
+        // 锚点外壳：菜单贴在这个盒子下方展开（与参数编辑器的工具菜单同一种弹出面）。
+        <Box ref={anchorRef} data-hs-context-menu>
+            <AppIconButton
+                data-toolbar-control="ripple"
+                active={enabled}
+                // 激活时用主题强调色（与相邻开关同款；不带 color 时 Radix 回落强调色）
+                emphasis="accent"
+                // 与"自动滚屏"同一格式：功能名：方向名。它同时是 aria-label，
+                // 所以必须自带功能名 —— 只写方向名的话读屏用户听到的是一枚无名按钮。
+                tooltip={tf(`ripple_tooltip_${scope}`)}
+                tabIndex={-1}
+                // 右下角小三角：提示"右键还有方向可选"（与自动滚屏 / 工具族按钮同一个记号）。
+                menuCaret
+                onClick={onToggle}
+                onContextMenu={(e) => {
+                    e.preventDefault();
+                    setMenuOpen(true);
+                }}
+                icon={<RippleIcon multiTrack={scope === "all"} />}
+            />
+            <AppAnchoredMenu
+                open={menuOpen}
+                anchorRef={anchorRef}
+                menuRef={menuRef}
+                ariaLabel={tf("common_ripple")}
+                onClose={() => setMenuOpen(false)}
+                items={RIPPLE_SCOPES.map((value) => ({
+                    key: `ripple-scope-${value}`,
+                    label: tf(`ripple_mode_${value}`),
+                    // 图标随项展示：单行 = 按轨道，双行 = 全部轨道，与按钮同源。
+                    icon: <RippleIcon multiTrack={value === "all"} />,
+                    checked: scope === value,
+                    onSelect: () => onSelectScope(value),
+                }))}
+            />
+        </Box>
+    );
+}

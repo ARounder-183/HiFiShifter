@@ -126,7 +126,7 @@ test("独立窗口读数同样显示主副两段", () => {
 
 test("ActionBar 通过槽位挂载工具栏读数（不再无条件渲染）", async () => {
     const source = await import("node:fs").then((fs) =>
-        fs.readFileSync("src/components/layout/ActionBar.tsx", "utf8"),
+        fs.readFileSync("src/components/layout/toolbar/ToolbarStrip.tsx", "utf8"),
     );
     expect(source).toContain('<PlayheadTimeReadoutSlot slot="toolbar" />');
     expect(source).not.toContain('<PlayheadTimeReadout variant="toolbar" />');

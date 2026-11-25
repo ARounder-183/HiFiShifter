@@ -19,20 +19,32 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { ActionId } from "../features/keybindings/types";
 import { appForm } from "../services/hostDetect";
 import { registerBackHandler } from "../services/backGesture";
-import { MobileActionDrawer, MobileBottomBar, MobileMenuSheet, MobileTopBar } from "./MobileChrome";
+import {
+    MobileActionDrawer,
+    MobileBottomBar,
+    MobileMenuSheet,
+    MobileToolbarSheet,
+    MobileTopBar,
+} from "./MobileChrome";
 import { buildModifierChips } from "./mobileActions";
 import { useI18n } from "../i18n/I18nProvider";
 
 export interface AppChromeProps {
-    /** 桌面顶栏（菜单栏 + 动作栏 + 宿主提示条）。移动形态不渲染。 */
+    /** 桌面顶栏的菜单层（菜单栏 + 宿主提示条）。移动形态不渲染。 */
     desktopHeader?: ReactNode;
     /**
-     * 移动形态的「菜单」内容（桌面菜单栏本体）。
+     * 移动形态的工具栏内容（同一条 `ToolbarStrip` 的 `variant="sheet"`）。
      *
-     * 【为什么与 `desktopHeader` 分开】移动端只需要菜单栏 —— 动作栏（ActionBar）
-     * 是桌面密度的一整排工具条，在 390px 上既放不下也没有对应交互（它的高频项
-     * 已经在移动底栏与动作抽屉里）。把整个 `desktopHeader` 塞进 sheet 会把两件事
-     * 混在一起，而且动作栏的键盘监听在触摸设备上没有意义。
+     * 【为什么它单独一个属性，而不是从 `desktopHeader` 里拆】桌面形态的工具栏必须夹在
+     * **菜单栏与宿主提示条之间**（提示条在描述"你看到的这片区域为什么没有声音"，
+     * 必须紧挨工作区，见 `DesktopChrome`），而外壳只拿到已经拼好的 `desktopHeader`，
+     * 没法在不打乱那个顺序的前提下把它抽出来。因此桌面那一份由 `DesktopChrome` 的
+     * `actionBar` 槽位承载，移动这一份走本属性 —— 两者是**同一个组件**（`ToolbarStrip`），
+     * 只是 `variant` 不同，控件定义仍然只有一份。
+     */
+    mobileToolbar?: ReactNode;
+    /**
+     * 移动形态的「菜单」内容（桌面菜单栏本体）。
      *
      * 【为什么必须由外部传同一个节点】它必须是**同一个 `MenuBar` 实例**：
      * 对话框状态、事件监听、菜单展开状态都住在组件内部，渲染第二份会让同一个
@@ -61,6 +73,7 @@ export interface AppChromeProps {
 
 export function AppChrome({
     desktopHeader,
+    mobileToolbar,
     mobileMenu,
     desktopFooter,
     mobileTitle,
@@ -79,6 +92,7 @@ export function AppChrome({
     const { t } = useI18n();
     const [drawerOpen, setDrawerOpen] = useState(false);
     const [menuOpen, setMenuOpen] = useState(false);
+    const [toolbarOpen, setToolbarOpen] = useState(false);
     const modifierChips = useMemo(() => buildModifierChips(t), [t]);
     /*
      * 抽屉里的快捷键提示在移动端**不显示**：触摸设备上没有键盘，标出 "Ctrl+Shift+Z"
@@ -118,6 +132,19 @@ export function AppChrome({
         });
     }, [menuOpen, isMobile]);
 
+    /*
+     * 工具栏 sheet 的返回键。三者互斥（见上面的三个 onOpen），因此"先关最上面那个"
+     * 不需要额外排序：同一时刻最多只有一个开着。
+     */
+    useEffect(() => {
+        if (!isMobile) return;
+        return registerBackHandler(() => {
+            if (!toolbarOpen) return false;
+            setToolbarOpen(false);
+            return true;
+        });
+    }, [toolbarOpen, isMobile]);
+
     return (
         <div
             data-form={form}
@@ -132,11 +159,18 @@ export function AppChrome({
                     onAction={onMobileAction}
                     onOpenDrawer={() => {
                         setMenuOpen(false);
+                        setToolbarOpen(false);
                         setDrawerOpen(true);
                     }}
                     onOpenMenu={() => {
                         setDrawerOpen(false);
+                        setToolbarOpen(false);
                         setMenuOpen(true);
+                    }}
+                    onOpenToolbar={() => {
+                        setDrawerOpen(false);
+                        setMenuOpen(false);
+                        setToolbarOpen(true);
                     }}
                 />
             ) : (
@@ -165,6 +199,27 @@ export function AppChrome({
                     open={menuOpen}
                     onClose={() => setMenuOpen(false)}
                     menu={mobileMenu ?? desktopHeader}
+                />
+            ) : null}
+
+            {/*
+             * 移动端挂载的第二个顶栏：**工具栏 sheet**。
+             *
+             * 【它补的是"根本不存在"】菜单 sheet 装的是菜单栏（对话框与窗口管理），
+             * 动作抽屉装的是 `ACTION_META` 里的动作 —— 两者都不含工具栏开关
+             * （自动滚屏 / 涟漪 / 吸附 / 拖拽方向…）。没有这个 sheet，"自动滚屏"
+             * 在手机上既没有按钮也没有动作。
+             *
+             * 【为什么也常驻不卸载】`PitchSnapSettingsDialog` / `SnapGridSettingsDialog` /
+             * `SplitTransitionSettingsDialog` / `CustomScaleDialog` /
+             * `RecordingSettingsDialog` 的开关状态住在 `ToolbarStrip` 里；卸载它，
+             * 这些对话框就退回到"点了没反应"（与菜单 sheet 同一条理由）。
+             */}
+            {isMobile ? (
+                <MobileToolbarSheet
+                    open={toolbarOpen}
+                    onClose={() => setToolbarOpen(false)}
+                    toolbar={mobileToolbar}
                 />
             ) : null}
 

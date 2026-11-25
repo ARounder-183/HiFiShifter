@@ -7,10 +7,15 @@
  * 而触摸没有悬停。把它压扁成一行图标并不会变好 —— 135 条动作里能塞进一行的不到
  * 10 条。因此移动端的外壳形态是**抽屉**：一个汉堡按钮换回全部动作，代价是一次点击。
  *
- * 【为什么顶栏只有这几样】菜单、工程名（用户要知道自己在哪）、撤销、重做、操作抽屉。
+ * 【顶栏有哪些东西】菜单、工程名（用户要知道自己在哪）、撤销、重做、**工具栏**、操作抽屉。
  * 传输控制（播放/停止/录音）在**底栏**——拇指活动区，而且它们是高频操作。
  * 撤销/重做留在顶栏是因为它们与"我刚才那一下"直接相关，必须一眼可见；
  * 其余低频动作一律进抽屉（一次点击的代价换取不占常驻空间）。
+ *
+ * 【"工具栏"这个入口为什么必须存在】底栏只有传输四件，抽屉只装 `ACTION_META` 里的
+ * 动作 —— 两者都**不含**工具栏开关（自动滚屏 / 涟漪 / 吸附 / 拖拽方向 / 参数编辑器
+ * 跟随播放头…）。没有它，这些功能在手机上既没有按钮也没有动作：用户报的
+ * "移动端仍然无法访问大部分工具栏功能，比如自动滚屏"就是这条断链。
  *
  * 【为什么底栏还有修饰键行】见 \`ModifierRail\`：没有它，slip 编辑 / 复制拖动 /
  * 范围选择在移动端完全不可达。
@@ -30,6 +35,7 @@ import {
     MagnifyingGlassIcon,
     PauseIcon,
     PlayIcon,
+    SliderIcon,
     StopIcon,
 } from "@radix-ui/react-icons";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -140,6 +146,7 @@ export function MobileTopBar({
     onAction,
     onOpenDrawer,
     onOpenMenu,
+    onOpenToolbar,
 }: {
     title: string;
     dirty: boolean;
@@ -148,6 +155,8 @@ export function MobileTopBar({
     onAction: (actionId: ActionId) => void;
     onOpenDrawer: () => void;
     onOpenMenu: () => void;
+    /** 打开工具栏 sheet（见 `MobileToolbarSheet`）。 */
+    onOpenToolbar: () => void;
 }) {
     const { t } = useI18n();
     return (
@@ -185,6 +194,17 @@ export function MobileTopBar({
                 tooltip={t("kb_edit_redo")}
                 disabled={!canRedo}
                 onFire={() => onAction("edit.redo")}
+            />
+            {/*
+             * 工具栏（滑块图标）放在"操作"左边：三个入口的分工是
+             * **菜单 = 对话框与窗口 / 工具栏 = 开关与模式 / 操作 = 可执行动作**。
+             * 顺序按"离手指最远 → 最近"排：工具栏比抽屉更常用（每个开关都是
+             * 一次点击，而抽屉里多数动作有快捷键或右键等价物）。
+             */}
+            <AppIconButton
+                icon={<SliderIcon />}
+                tooltip={t("mobile_toolbar_title")}
+                onClick={onOpenToolbar}
             />
             <AppIconButton
                 icon={<LightningBoltIcon />}
@@ -551,6 +571,50 @@ export function MobileMenuSheet({
                 <AppIconButton icon={<Cross2Icon />} tooltip={t("close")} onClick={onClose} />
             </div>
             <div className="hs-mobile-menu-sheet-body">{menu}</div>
+        </div>
+    );
+}
+
+/**
+ * 移动形态的**工具栏 sheet**：桌面那一排工具栏开关的触摸形态。
+ *
+ * 【为什么是 sheet 而不是"再塞几个按钮进底栏"】工具栏有 12 组控件（捕获、撤销/重做、
+ * 文件浏览器、交叉淡化、分割过渡、吸附、涟漪、播放头缩放、自动滚屏、跟随播放头、
+ * 点击选轨、忽略编组）。底栏已经装着传输四件与修饰键行，390px 上再塞就是一行点不中
+ * 的小图标。sheet 一次点击换回**全部**开关，与菜单 sheet 同一代价模型。
+ *
+ * 【为什么内容由外部传入】它必须是**同一个 `ToolbarStrip` 实例**（`variant="sheet"`）：
+ * `PitchSnapSettingsDialog` / `SnapGridSettingsDialog` / `SplitTransitionSettingsDialog` /
+ * `CustomScaleDialog` / `RecordingSettingsDialog` 的开关状态住在那个组件里，
+ * 渲染第二份会让同一个对话框有两套状态。与 `MobileMenuSheet` 的说明同一条理由。
+ *
+ * 【为什么关闭时是 display:none 而不是不渲染】同上：卸载它，那批对话框就退回到
+ * "点了没反应"。
+ */
+export function MobileToolbarSheet({
+    open,
+    onClose,
+    toolbar,
+}: {
+    open: boolean;
+    onClose: () => void;
+    toolbar: ReactNode;
+}) {
+    const { t } = useI18n();
+    return (
+        <div
+            className={open ? "hs-mobile-toolbar-sheet" : "hidden"}
+            data-mobile-toolbar-sheet={open ? "open" : "closed"}
+            aria-hidden={!open}
+        >
+            <div
+                className="flex shrink-0 items-center justify-between border-b border-qt-border px-2"
+                style={{ height: "var(--qt-bar-main)" }}
+            >
+                <span className="text-qt-md">{t("mobile_toolbar_title")}</span>
+                <AppIconButton icon={<Cross2Icon />} tooltip={t("close")} onClick={onClose} />
+            </div>
+            <div className="hs-mobile-toolbar-sheet-body">{toolbar}</div>
         </div>
     );
 }

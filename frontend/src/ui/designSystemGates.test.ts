@@ -1097,6 +1097,25 @@ describe("上下文菜单共用同一个样式模型", () => {
         expect(missing, "以下菜单令牌没有任何消费者 —— 令牌层在空转，删掉或接上：").toEqual([]);
     });
 
+    test("触摸形态的最小命中面积是 44px（WCAG 2.5.5）", () => {
+        // 【为什么是一条令牌门禁】移动端工具栏此前**根本不存在**（外壳只渲染菜单
+        // sheet 与动作抽屉），所以"按钮太小"从来没有人报 —— 报的是"功能用不了"。
+        // 把 44px 收进令牌之后，"这个可点区域够不够大"只在一处决定；这条测试钉住
+        // 两件事：令牌存在，且触摸形态真的覆写成 44（桌面仍是紧凑值）。
+        const css = readFileSync(TOKEN_CSS, "utf8");
+        // fallback 是**必须**的：派生令牌在 `:root` 声明，而 portal 里的内容
+        // 不一定继承得到 `--qt-ctl-sm`（见上面"派生令牌在 portal 安全的作用域声明"
+        // 那条门禁）；没有 fallback 时它会静默解析成 0。
+        expect(css, "令牌必须存在（桌面取紧凑控件高度）").toMatch(
+            /--qt-hit-min:\s*var\(--qt-ctl-sm,\s*20px\)/,
+        );
+        const touch = css.slice(css.indexOf('html[data-input="touch"]'));
+        expect(touch, "触摸形态必须覆写成 44px").toMatch(/--qt-hit-min:\s*44px/);
+        // 工具栏 sheet 的控件取的是这个令牌，而不是各自写 44 —— 否则下一个控件
+        // 又会漏掉，而漏掉的症状是"点不中"。
+        expect(css).toContain("min-height: var(--qt-hit-min)");
+    });
+
     test(".hs-menu* 的取值只来自令牌层", () => {
         /*
          * 字号与圆角有各自的门禁，但**颜色**没有一条是专门看菜单的：`#484848`

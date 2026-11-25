@@ -12,6 +12,7 @@ import {
 import { Flex, Button } from "@radix-ui/themes";
 import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
+import { ToolbarStrip } from "./components/layout/toolbar/ToolbarStrip";
 import { HostLinkPanel } from "./features/hostLink/HostLinkPanel";
 import { HostAudioNotice } from "./features/ara/HostAudioNotice";
 import { useSyllableAnalysisEvents } from "./features/session/useSyllableAnalysisEvents";
@@ -4309,6 +4310,12 @@ function AppInner() {
              * 这种肉眼要盯很久才发现的问题。
              */
             mobileMenu={menuBarNode}
+            /*
+             * 工具栏的两个宿主：桌面在 `DesktopChrome` 的第二层（菜单与宿主提示条之间），
+             * 移动端在工具栏 sheet 里。**同一个组件**，只是 `variant` 不同 —— 控件定义
+             * 只有一份，所以"桌面有、手机没有"这类分叉不可能再长出来。
+             */
+            mobileToolbar={<ToolbarStrip variant="sheet" />}
             desktopHeader={
                 <DesktopChrome
                     menuBar={menuBarNode}

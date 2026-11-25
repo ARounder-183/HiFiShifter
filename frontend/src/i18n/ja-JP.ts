@@ -2397,6 +2397,7 @@ export const jaJP = {
     log_file_disabled_hint:
         "ログの詳細度が「なし」のため、ログファイルは書き出されていません。「低」以上に変更してアプリを再起動してください。",
     mobile_menu_title: "メニュー",
+    mobile_toolbar_title: "ツールバー",
     mobile_actions_title: "操作",
     mobile_windows_section: "ウィンドウ",
     mobile_window_shown: "表示中",

@@ -16,7 +16,7 @@ function stripComments(source: string): string {
 
 describe("ActionBar 传输组", () => {
     test("stop / play / record / undo / redo 都走 TransportIconButton", async () => {
-        const source = stripComments(await read("src/components/layout/ActionBar.tsx"));
+        const source = stripComments(await read("src/components/layout/toolbar/ToolbarStrip.tsx"));
         expect(source).toContain("<TransportIconButton");
         // 传输栏里不再出现裸的 Radix 按钮：那是"三套盒模型"的直接来源。
         expect(source).not.toMatch(/<IconButton[\s>]/);
@@ -33,7 +33,7 @@ describe("ActionBar 传输组", () => {
      * 常态 soft、`active` 交给原语强制实心。
      */
     test("录音键：常态 soft 红，录制中由 active 转实心", async () => {
-        const source = stripComments(await read("src/components/layout/ActionBar.tsx"));
+        const source = stripComments(await read("src/components/layout/toolbar/ToolbarStrip.tsx"));
         const recordAt = source.indexOf('tone="danger"');
         expect(recordAt).toBeGreaterThan(-1);
         const record = source.slice(recordAt, recordAt + 400);

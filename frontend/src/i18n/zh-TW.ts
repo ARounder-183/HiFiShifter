@@ -2313,6 +2313,7 @@ export const zhTW = {
     log_file_disabled_hint:
         "日誌詳細程度是「無」，沒有寫入任何日誌檔。把它改成「低」或更高，並重新啟動應用程式。",
     mobile_menu_title: "選單",
+    mobile_toolbar_title: "工具列",
     mobile_actions_title: "操作",
     mobile_windows_section: "視窗",
     mobile_window_shown: "顯示中",

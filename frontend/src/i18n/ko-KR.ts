@@ -2366,6 +2366,7 @@ export const koKR = {
     log_file_disabled_hint:
         "로그 상세 수준이 '없음'이므로 로그 파일이 기록되지 않습니다. '낮음' 이상으로 변경한 뒤 앱을 다시 시작하세요.",
     mobile_menu_title: "메뉴",
+    mobile_toolbar_title: "도구 모음",
     mobile_actions_title: "작업",
     mobile_windows_section: "창",
     mobile_window_shown: "표시 중",

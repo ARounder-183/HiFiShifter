@@ -396,6 +396,9 @@
     --qt-scrollbar-gutter: 8px;
 
     /* chrome 条高度：与上面的控件高度解耦（条要容纳 1px 边框与内边距） */
+    /* 最小命中面积（WCAG 2.5.5 的下限 = 44px）。桌面取紧凑控件高度；
+     * 触摸形态在下面覆写成 44（见 `html[data-input="touch"]` 的同一段）。 */
+    --qt-hit-min: var(--qt-ctl-sm, 20px);
     --qt-bar-title: 28px; /* 浮动窗标题栏 */
     --qt-bar-compact: 26px; /* PanelToolbar / dock 标签栏 */
     --qt-bar-main: 32px; /* MenuBar / ActionBar / PianoRoll 头部 */
@@ -1735,6 +1738,10 @@ html[data-input="touch"] {
      * 它的项高必须与按钮一致，否则用户会在两个几乎相同的列表间产生"手感差异"。 */
     --qt-menu-item-h: 44px;
 
+    /* 最小命中面积：WCAG 2.5.5 要求 44×44。桌面的紧凑控件是 20px，
+     * 触摸上那不是"更紧凑"，是"点不中"。 */
+    --qt-hit-min: 44px;
+
     /* chrome 条：顶栏 48（容纳 44px 按钮 + 边框）、状态栏 28（一行 12px 文字）。 */
     --qt-bar-main: 48px;
     --qt-bar-status: 28px;
@@ -1834,6 +1841,65 @@ html[data-form="mobile"] .hs-mobile-menu-sheet-body {
     flex: 1 1 auto;
     min-height: 0;
     overflow-y: auto;
+}
+
+/* 移动形态的工具栏 sheet（`MobileToolbarSheet`）。
+ *
+ * 【为什么与菜单 sheet 分开一个类】两者的容器契约相同（fixed 全屏、安全区、常驻），
+ * 但**内容**完全不同：菜单是 Radix 的下拉与二级菜单，工具栏是一排排开关。给它们
+ * 同一个类会让"工具栏的换行与 44px 命中"漏进菜单里。
+ */
+html[data-form="mobile"] .hs-mobile-toolbar-sheet {
+    position: fixed;
+    inset: 0;
+    z-index: var(--qt-z-dialog);
+    display: flex;
+    flex-direction: column;
+    background: var(--qt-window);
+    padding-top: var(--qt-safe-top);
+    padding-right: var(--qt-safe-right);
+    padding-bottom: var(--qt-safe-bottom);
+    padding-left: var(--qt-safe-left);
+}
+
+html[data-form="mobile"] .hs-mobile-toolbar-sheet-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+/* 工具栏的触摸排版。
+ *
+ * 【为什么不是给每个控件写移动变体】形态差异只有三条：换行、内边距、命中面积。
+ * 三条都落在 `.hs-toolbar` 这一层，控件本身（`ToolbarStrip`）一个字都不用改 ——
+ * 于是"桌面有、手机没有"这类分叉不可能再长出来。
+ *
+ * 【为什么命中面积用 min-width/min-height 而不是 padding】`AppIconButton` 的盒子
+ * 由原语决定（24px）。加 padding 会把图标挤歪，而 min-* 让盒子长到 44 并保持图标居中。
+ * 下拉与滑块的触发器同理（它们此前是 24px 高，触摸命中率低于可用阈值）。
+ */
+html[data-form="mobile"] .hs-toolbar {
+    flex-wrap: wrap;
+    height: auto;
+    row-gap: var(--qt-space-2);
+    column-gap: var(--qt-space-2);
+    padding: var(--qt-space-2);
+    overflow: visible;
+}
+
+html[data-form="mobile"] .hs-toolbar button,
+html[data-form="mobile"] .hs-toolbar [role="button"],
+html[data-form="mobile"] .hs-toolbar [aria-haspopup="menu"],
+html[data-form="mobile"] .hs-toolbar .rt-SelectTrigger,
+html[data-form="mobile"] .hs-toolbar .rt-SliderRoot {
+    min-width: var(--qt-hit-min);
+    min-height: var(--qt-hit-min);
+}
+
+/* 数值输入（BPM / 拍号 / 节拍器音量）在触摸上同样抬到 44：它们只有 24px 高时，
+ * 点进输入框的成功率低于一半，而每一次失败都会把光标丢到别处。 */
+html[data-form="mobile"] .hs-toolbar .rt-TextFieldRoot {
+    min-height: var(--qt-hit-min);
 }
 
 /* 菜单栏的一级触发器：触摸下抬到 44px。

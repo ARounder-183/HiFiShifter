@@ -2387,6 +2387,7 @@ export const enUS = {
     log_file_disabled_hint:
         "Log verbosity is set to None, so no log file is being written. Set Help → Log verbosity to Low or higher, then restart the app.",
     mobile_menu_title: "Menu",
+    mobile_toolbar_title: "Toolbar",
     mobile_actions_title: "Actions",
     mobile_windows_section: "Windows",
     mobile_window_shown: "Shown",
