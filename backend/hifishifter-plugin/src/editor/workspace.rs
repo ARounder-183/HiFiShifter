@@ -17,7 +17,19 @@ use std::sync::atomic::Ordering;
 /// 读取失败 / 超期）把状态永久钉在"进行中"。
 pub(crate) const PENDING_MEDIA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// gain在原GUI是active-take扁平投影；插件显示item音量，两份显示字段必须一致且不送DSP。
+/// 把宿主的 **item 增益**投影成"插件内可听增益为 1"的那个别名。
+///
+/// 【契约：本函数**只**写 DSP 别名，绝不写 `clip_gain`】宿主已经在这个 item 上
+/// 施加过 `D_VOL` 了，插件再乘一次就等于把同一个旋钮乘两遍
+/// （`Clip::audible_gain() = clip_gain × gain`，见 `state/model.rs`）。
+/// 而"用户在时间轴旋钮上看到的那个数"是 `clip_gain` —— 它在**载荷**里的唯一写者
+/// 是下面的 `decorate_item_gain`（`gain` 带 `skip_serializing`，序列化时根本不出门）。
+///
+/// 【为什么这两件事必须分开】此前只有本函数写过增益，而它写的正是那个不出门的别名：
+/// 于是每一次 `D_VOL` 变化之后，载荷里的 `clip_gain` 都还是旧值 —— 前端把旋钮与
+/// 波形峰值整份回灌成旧值（用户报的"调完增益回弹"），完成门又拿同一栏当判据，
+/// 于是连"写入成功"都被判成失败。两处都写 `clip_gain` 会让 `audible_gain` 变成平方，
+/// 所以只能各有分工：**别名归本函数，载荷归 `decorate_item_gain`**。
 fn display_item_gain(clip: &mut hifishifter_kernel::state::Clip, gain: f64) {
     clip.gain = gain as f32;
     for take in &mut clip.takes {
@@ -25,7 +37,15 @@ fn display_item_gain(clip: &mut hifishifter_kernel::state::Clip, gain: f64) {
     }
 }
 /// JSON装饰与actor投影同源；host_gain额外保留真实take音量/极性用于现场排查。
+///
+/// 【为什么 `clip_gain` 必须在这里写】它才是前端读的那一栏
+/// （`timeline/clipGain.ts`，画布与旋钮都用它）。而 `display_item_gain` 只写
+/// `gain` —— 那是 `skip_serializing` 的 DSP 别名，序列化时不出门。缺了这一行，
+/// 任何一次 `D_VOL` 变化之后载荷都回吐旧值：旋钮与波形峰值回弹，完成门也永远
+/// 对不上（"clip was edited in the host but its ARA geometry has not caught up"）。
+/// 见 `display_item_gain` 的契约说明：**两处都写会让可听增益变成平方**。
 fn decorate_item_gain(clip: &mut serde_json::Value, g: &crate::host::geometry::HostClipGeometry) {
+    clip["clip_gain"] = serde_json::json!(g.item_gain);
     clip["gain"] = serde_json::json!(g.item_gain);
     if let Some(takes) = clip["takes"].as_array_mut() {
         for take in takes {
@@ -3010,6 +3030,78 @@ mod tests {
     use ara2_bridge::core::ApiGeneration;
     use ara2_bridge::plugin::ExtensionRoles;
     use std::sync::Arc;
+
+    /// **回归：载荷里前端读的那一栏（`clip_gain`）必须由宿主投影写出来。**
+    ///
+    /// 【现场】ARA 里拖 Clip 增益旋钮 / 右键"规格化"：REAPER 的 item 收到了增益，
+    /// 插件时间线上的 Clip 却回弹，日志里是 `set_clips_state_bulk` 的
+    /// "clip was edited in the host but its ARA geometry has not caught up"。
+    /// 根因不是宿主慢，而是**字段选错了**：`display_item_gain` 只写 `gain`
+    /// （`skip_serializing`，序列化时根本不出门），载荷里的 `clip_gain` 于是永远是
+    /// 旧值 —— 前端按它整份回灌（旋钮 + 波形峰值回弹），完成门也拿它当判据
+    /// （写入成功被判失败）。
+    #[test]
+    fn the_item_gain_the_ui_reads_is_projected_into_the_payload() {
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        let api = Arc::new(host.client());
+        let mut geometry = api.ui_track(&|| true).unwrap().items[0].geometry.clone();
+        geometry.item_gain = 1.7;
+        let mut payload = serde_json::json!({
+            "clip_gain": 1.0,
+            "gain": 1.0,
+            "takes": [{"id": "t1", "gain": 1.0}],
+        });
+        decorate_item_gain(&mut payload, &geometry);
+        assert_eq!(
+            payload["clip_gain"],
+            serde_json::json!(1.7),
+            "前端读的是 clip_gain；漏写它等于让旋钮与波形峰值回弹"
+        );
+        assert_eq!(payload["gain"], serde_json::json!(1.7));
+        assert_eq!(payload["takes"][0]["gain"], serde_json::json!(1.7));
+        assert_eq!(payload["host_gain"]["item"], serde_json::json!(1.7));
+        assert_eq!(
+            payload["host_gain"]["take"],
+            serde_json::json!(geometry.take_gain),
+            "真实 take 音量必须原样保留，不能被 item 增益覆盖"
+        );
+    }
+
+    /// **回归：`display_item_gain` 只写 DSP 别名，绝不动 `clip_gain`。**
+    ///
+    /// 两处都写 `clip_gain` 会让 `Clip::audible_gain()`（= `clip_gain × gain`）变成
+    /// 平方 —— 用户听到的是"调 6 dB 实际变了 12 dB"。这条把乘积的不变性钉住：
+    /// 别名乘 item 之后必须恰好等于宿主施加的那一份。
+    #[test]
+    fn the_dsp_gain_alias_never_rewrites_the_item_gain() {
+        let mut clip: hifishifter_kernel::state::Clip = serde_json::from_value(serde_json::json!({
+            "id": "c1",
+            "track_id": "t1",
+            "name": "c",
+            "start_sec": 0.0,
+            "length_sec": 1.0,
+            "clip_gain": 1.0,
+            "gain": 1.0,
+        }))
+        .unwrap();
+        let audible_before = clip.audible_gain();
+        display_item_gain(&mut clip, 1.7);
+        assert_eq!(
+            clip.clip_gain, 1.0,
+            "item 增益只属于载荷（decorate_item_gain），不属于内核状态"
+        );
+        assert!(
+            (clip.gain - 1.7).abs() < 1e-6,
+            "DSP 别名必须跟上宿主 item 增益"
+        );
+        assert!(
+            (clip.audible_gain() - audible_before * 1.7).abs() < 1e-6,
+            "可听增益必须恰好等于宿主那一份；再写一遍 clip_gain 就会平方"
+        );
+    }
 
     #[test]
     fn item_source_snapshot_does_not_hold_items_while_waiting_for_regions() {

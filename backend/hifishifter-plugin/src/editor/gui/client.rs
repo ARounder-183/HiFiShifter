@@ -1216,12 +1216,42 @@ pub(crate) fn pump(state: &Rc<RefCell<EditorClient>>) {
                 ImportState::Inventory(_)=>false,
                 ImportState::Idle=>false,
             };
-            let geometry_waiting=reply["ok"]==true&&host.geometry.as_ref().is_some_and(|geometry|!geometry.matches(&reply["value"]));
+            // 【I-E2：一次成功写入的权威是"我们写下的值"，不是宿主回声】
+            //
+            // 此前这里把 `clip_gain` 等字段的**载荷回声**当成写回成功的判据。而载荷是
+            // 另一条异步通路的产物（编辑器时间线 → 图集投影 → 序列化），拿它的进度判定
+            // 一次同步写入，必然出两种错：回声慢 ⇒ 误报"宿主还没跟上"；字段错（本轮修掉的
+            // `clip_gain` 从不被宿主投影写出来）⇒ **永远**对不上 —— 退避重试 24 次（约
+            // 10.6 s）之后仍然落到终态错误，前端按 `rejectWithValue` 回滚乐观更新，用户
+            // 看到的就是"宿主改对了、插件里的 Clip 反而回弹"。
+            //
+            // 现在的分工：
+            //   * 写入是否成功 —— 由 `execute_managed` 的返回码与结构读回核对回答（那是
+            //     宿主的**直接答复**，比任何回声都强）；
+            //   * 回声与 `after` 不一致 —— 只记一条诊断（限流），用于发现"setter 返回 0
+            //     但其实没生效"这类宿主缺陷；
+            //   * 前端拿到载荷之前，把**本次补丁写过的那几位**按 `after` 覆盖上去 ——
+            //     否则前端整份应用一份旧载荷，视觉上仍然会回弹。
+            if reply["ok"] == true {
+                if let Some(geometry) = host.geometry.as_ref() {
+                    let diverged = geometry.divergences(&reply["value"]);
+                    if !diverged.is_empty() {
+                        hifishifter_kernel::log_limiter::emit_limited_key(
+                            log::Level::Warn,
+                            "host.write.echo-divergence",
+                            format_args!(
+                                "[host] write echo diverged from the applied snapshot after a successful write: {}",
+                                diverged.join("; ")
+                            ),
+                        );
+                    }
+                    geometry.overlay(&mut reply["value"]);
+                }
+            }
             let split_waiting=reply["ok"]==true&&host.split.as_ref().is_some_and(|split|!host.document.upgrade().is_some_and(|doc|split.matches(&doc,&host.editor.namespace,&mut reply["value"])));
             let media_waiting=reply["ok"]==true&&host.media.as_ref().is_some_and(|media|!host.document.upgrade().is_some_and(|doc|media.matches(&doc,&host.editor.namespace,&mut reply["value"])));
             let now = std::time::Instant::now();
             let retryable = waiting
-                || geometry_waiting
                 || split_waiting
                 || media_waiting
                 || reply["ok"] == false
@@ -1266,7 +1296,6 @@ pub(crate) fn pump(state: &Rc<RefCell<EditorClient>>) {
                 }
             }
             if waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("item was created in the host but its ARA audio is not ready; use host Undo if canceling");}
-            if geometry_waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("clip was edited in the host but its ARA geometry has not caught up; host Undo remains available");}
             if split_waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("item was split in the host but both clips have not caught up; host Undo remains available");}
             if media_waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("media was edited in the host but its GUI/ARA identities have not caught up; host Undo remains available");}
             // 导入回执的终态：成功（可能带 pending）+ 明确的 clip id。
