@@ -1003,6 +1003,20 @@ impl NativeHost {
                         now.saturating_add(HOST_UNREACHABLE_BACKOFF_MS),
                         std::sync::atomic::Ordering::Release,
                     );
+                    // 【为什么要单独落一行】这条错误会以命令失败的形式回到前端（`[cmd] ...
+                    // failed: host thread did not pick ...`），但它真正描述的是**宿主没在
+                    // 泵**：那条线程正卡在某处（可能正是我们自己）。一行带 `pending` 与
+                    // `kind` 的读数让"谁在等谁"当场可读，而不是等下一次现场复盘。
+                    hifishifter_kernel::log_limiter::emit_limited_key(
+                        log::Level::Warn,
+                        "host.marshal.timeout",
+                        format_args!(
+                            "[host] marshal timeout kind={} waited_ms={} pending={}",
+                            std::thread::current().name().unwrap_or("unnamed"),
+                            crate::host::marshal::host_thread_timeout().as_millis(),
+                            crate::host::marshal::pending()
+                        ),
+                    );
                 }
                 Err(error.message())
             }

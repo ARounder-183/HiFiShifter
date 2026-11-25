@@ -44,7 +44,7 @@ impl HostThreadError {
             ),
             HostThreadError::Unpicked => format!(
                 "host thread did not pick the request up within {} ms ({} still queued)",
-                HOST_THREAD_TIMEOUT.as_millis(),
+                host_thread_timeout().as_millis(),
                 pending()
             ),
             HostThreadError::Panicked => "host thread job panicked".to_owned(),
@@ -55,9 +55,36 @@ impl HostThreadError {
     }
 }
 
-/// 投递方最多等这么久。取值依据：宿主 UI 线程被占用超过 250 ms 时，用户已经在
+/// 投递方默认最多等这么久。取值依据：宿主 UI 线程被占用超过 250 ms 时，用户已经在
 /// 感觉"卡"了，此时返回错误比继续等更诚实。
 pub(crate) const HOST_THREAD_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// 一次 `on_host` 等待的实际上限（`HFS_HOST_WAIT_MS` 可覆盖，见 [`parse_host_wait_ms`]）。
+///
+/// 【为什么读环境变量而不是写死常量】250 ms 是"用户开始觉得卡"的经验值，但现场排障时
+/// 有时需要两个相反的方向：把窗口调大（确认"再等一会儿就好了"，说明宿主只是慢）或调小
+/// （让失败更快暴露，好抓到是谁不泵）。留一个开关与 `HFS_PINNED_FEED` /
+/// `HFS_HOST_WATCHDOG` 同一条纪律：新读数先可关可调，再谈默认值。
+pub(crate) fn host_thread_timeout() -> Duration {
+    static TIMEOUT: OnceLock<Duration> = OnceLock::new();
+    *TIMEOUT.get_or_init(|| {
+        let raw = std::env::var("HFS_HOST_WAIT_MS").ok();
+        parse_host_wait_ms(raw.as_deref())
+    })
+}
+
+/// `HFS_HOST_WAIT_MS` 的解析规则：非数字或缺失一律回落默认值，取值夹在 10 ms–5 s。
+///
+/// 【为什么要有上下界】下界挡住"设成 0 让所有宿主调用立刻失败"这种自伤；上界挡住"设成
+/// 一分钟"，那等于把 `on_host` 变回无界等待 —— 而这条等待的全部意义就是**有界**。
+/// 越界不报错、直接夹住：这是排障开关，不是配置项，失败即静默降级更安全。
+fn parse_host_wait_ms(raw: Option<&str>) -> Duration {
+    const MIN_MS: u64 = 10;
+    const MAX_MS: u64 = 5_000;
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|ms| Duration::from_millis(ms.clamp(MIN_MS, MAX_MS)))
+        .unwrap_or(HOST_THREAD_TIMEOUT)
+}
 
 /// 队列上限。超过就拒绝新的投递 —— 宁可让调用方拿到"繁忙"，也不要把宿主线程
 /// 变成一个无界的任务池。
@@ -328,7 +355,8 @@ pub(crate) fn scoped<R: Send, F: FnOnce() -> R>(
 /// 在 4 核 runner 上偶发失败正是这个（实测 elapsed 不到 250 ms 就返回了）。
 /// 现在只有真的过了 deadline 才放弃；被提前唤醒就重新判状态继续等。
 fn wait(slot: &Slot) -> Result<(), HostThreadError> {
-    let deadline = Instant::now() + HOST_THREAD_TIMEOUT;
+    let timeout = host_thread_timeout();
+    let deadline = Instant::now() + timeout;
     let mut state = slot.state.lock().unwrap_or_else(|error| error.into_inner());
     loop {
         match &*state {
@@ -339,7 +367,7 @@ fn wait(slot: &Slot) -> Result<(), HostThreadError> {
         }
         // 已经开始执行 ⇒ 必须等它跑完（没有 deadline），否则被借用的数据会在执行中途失效。
         let remaining = if matches!(&*state, SlotState::Running) {
-            HOST_THREAD_TIMEOUT
+            timeout
         } else {
             deadline.saturating_duration_since(Instant::now())
         };
@@ -513,6 +541,23 @@ mod tests {
     /// 前提，而不是可选项。
     fn serialize() -> std::sync::MutexGuard<'static, ()> {
         super::serialize_queue_for_tests()
+    }
+
+    /// **不变量：等待预算是可调、有界、且解析失败不炸。**
+    ///
+    /// 【为什么钉这一条】`HFS_HOST_WAIT_MS` 是现场排障用的开关：调大用来确认"再等一会儿
+    /// 就好了"，调小用来让失败更快暴露。它一旦把预算解析成 0 或一分钟，`on_host` 就
+    /// 要么处处立刻失败（编辑器全线报错），要么退回无界等待（本模块存在的理由被抹掉）。
+    #[test]
+    fn the_host_wait_budget_is_bounded_and_falls_back_to_the_default() {
+        assert_eq!(parse_host_wait_ms(None), HOST_THREAD_TIMEOUT);
+        assert_eq!(parse_host_wait_ms(Some("")), HOST_THREAD_TIMEOUT);
+        assert_eq!(parse_host_wait_ms(Some("soon")), HOST_THREAD_TIMEOUT);
+        assert_eq!(parse_host_wait_ms(Some("-5")), HOST_THREAD_TIMEOUT);
+        assert_eq!(parse_host_wait_ms(Some("600")), Duration::from_millis(600));
+        // 越界夹住，而不是照单全收。
+        assert_eq!(parse_host_wait_ms(Some("0")), Duration::from_millis(10));
+        assert_eq!(parse_host_wait_ms(Some("600000")), Duration::from_secs(5));
     }
 
     /// 起一个扮演"宿主线程"的线程，并把它的 ThreadId 交回来。
