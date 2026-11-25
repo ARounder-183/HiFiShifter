@@ -3801,7 +3801,10 @@ function AppInner() {
             if (paths.length === 0) return;
             const session = store.getState().session;
             const startSec = session.playheadSec ?? 0;
-            const trackId = session.selectedTrackId ?? null;
+            // 【"没选中轨" = 未指定，不是"新建轨"】`null` 在这条链上专指"显式新建"
+            // （见 `importAudioAtPosition` 的三态说明）；拖放落点没有指定轨道时必须留空，
+            // 否则插件里每拖一个文件就多一条宿主轨。
+            const trackId = session.selectedTrackId ?? undefined;
             if (paths.length === 1) {
                 void dispatch(importAudioAtPosition({ audioPath: paths[0], trackId, startSec }));
             } else {

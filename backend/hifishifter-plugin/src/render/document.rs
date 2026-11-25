@@ -2685,6 +2685,21 @@ impl DocumentSession {
         }
     }
 
+    /// 撤销一次登记（轨道没建成 / 提交失败 / 被显式删除）。
+    ///
+    /// 【为什么需要显式撤销，而不是"等下一轮枚举自然丢掉"】采纳表是**枚举范围**的输入：
+    /// 一条指向已不存在轨道的 GUID 只是多一次线性扫描，无害；但一次"提交失败却留在表里"
+    /// 的登记会在中途那一轮把一条**半成品轨道**枚举进来，时间线上就凭空多出一行。
+    /// 显式撤销让"撤销"这件事与创建在同一次请求里完成，中间不留窗口。
+    pub(crate) fn unadopt_track(&self, guid: &str) {
+        if guid.is_empty() {
+            return;
+        }
+        self.adopted_tracks
+            .lock_or_recover()
+            .retain(|known| known != guid);
+    }
+
     /// 当前登记表快照（清单枚举用；返回副本以免持锁回调宿主）。
     pub(crate) fn adopted_track_ids(&self) -> Vec<String> {
         self.adopted_tracks.lock_or_recover().clone()

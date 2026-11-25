@@ -1314,8 +1314,11 @@ pub(crate) fn pump(state: &Rc<RefCell<EditorClient>>) {
                 _=>{}
             }
             if host.imported.is_some() {
+                // `item=` 与请求那一行的 `item=` 是同一条证据链：一行说"落到哪条轨"，
+                // 一行说"判据是什么"。缺了它，现场只能靠时间戳猜这两件事说的是同一次导入。
                 log::info!(
-                    "[import] state={} clip={} ok={} pending={}",
+                    "[import] item={} state={} clip={} ok={} pending={}",
+                    host.imported.as_deref().unwrap_or("-"),
                     match &import_state{ImportState::Bound(_)=>"region-bound",ImportState::Inventory(_)=>"inventory-only",ImportState::Absent=>"absent",ImportState::Idle=>"idle"},
                     imported.as_deref().unwrap_or("-"),
                     reply["ok"],
@@ -2045,17 +2048,62 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 let track=input["trackId"].as_str().map(|id|editor.host_track_id(id)).transpose()?;
                 let allowed=||link.authorize(&document).is_ok_and(|current|current==lease);
                 let host=owner.project_history_host().ok_or("import project history missing")?;
+                // 【三态语义：字段缺失 = "宿主决定"，null = "显式新建"】
+                //
+                // 协议的三层曾经各说各话：前端把 `null` 当"交给插件决定（=当前轨）"，
+                // `invoke` 原样透传，而这里把"字段存在且为 null"读成**新建一条宿主轨**。
+                // 于是"文件 → 导入音频"这个最普通的动作在 ARA 里每次都建一条 REAPER 轨，
+                // 而那条轨没有被本实例采纳 ⇒ 它的 item 永远进不了清单 ⇒ 导入的 clip 停在
+                // "等宿主音频"，时间线上还凭空多出一行没有 region 的 sequence。
+                //
+                // 现在 `null` 只有一个意思（显式新建），"未指定"用**字段缺失**表达 ——
+                // 两个后端（这里与独立 App 的 `import_audio_item`）口径一致。
                 let new_track=input["trackId"].is_null()&&input.as_object().is_some_and(|object|object.contains_key("trackId"));
+                let requested=if new_track { "new" } else { track.as_deref().unwrap_or("none") }.to_owned();
                 let existing=if new_track {None} else {Some(owner.audio_import_target(track.as_deref(),&allowed)?)};
                 state.borrow_mut().undo_document=Some(Arc::downgrade(&document));
                 document.host_undo.begin_request(&view_id,id,true,true,&host,&allowed)?;
-                let result=(||->Result<String,String>{
+                let result=(||->Result<(String,Option<String>),String>{
                     let mut created=if new_track {Some(host.create_audio_track(std::path::Path::new(path).file_stem().and_then(|name|name.to_str()).unwrap_or("Imported audio"),None,&allowed)?)} else {None};
-                    let target=existing.as_ref().or_else(||created.as_ref().map(|track|&track.target)).ok_or("import target missing")?;
-                    let id=target.import_audio(path,input["startSec"].as_f64().unwrap_or_else(||owner.clock.get().map(|clock|clock.read().0).unwrap_or(0.)),&allowed)?;
-                    if let Some(track)=&mut created {track.commit();}Ok(id)
+                    // 【I-P1：新建轨必须在**同一次请求里**进入本实例作用域】
+                    //
+                    // `create_audio_track` 把新轨插在锚点之后 —— 那是本轨的**兄弟**，而清单
+                    // 的枚举范围是"本轨 + folder 后代 + 已采纳"（`ui_folder_tracks`）。不登记，
+                    // 它下一轮就会被枚举漏掉：宿主里真实存在、插件里**构造上**永远看不到，
+                    // 于是这条导入的 clip 停在 `state=absent`，而 ARA 侧那条空 region
+                    // sequence 反而被画成一行轨。这正是"导入后多出一条轨、重载才恢复"。
+                    if let Some(track)=&created {document.adopt_track(track.target.inventory_guid());}
+                    let imported=(||->Result<String,String>{
+                        let target=existing.as_ref().or_else(||created.as_ref().map(|track|&track.target)).ok_or("import target missing")?;
+                        target.import_audio(path,input["startSec"].as_f64().unwrap_or_else(||owner.clock.get().map(|clock|clock.read().0).unwrap_or(0.)),&allowed)
+                    })();
+                    match imported {
+                        Ok(item)=>{
+                            let landed=created.as_ref().map(|track|track.target.inventory_guid().to_owned())
+                                .or_else(||track.clone());
+                            if let Some(track)=&mut created {track.commit();}
+                            Ok((item,landed))
+                        }
+                        Err(error)=>{
+                            // 【采纳记录必须与宿主轨同生共死】`CreatedTrack::drop` 只在"仍为空
+                            // 且只含自己新增的 FX"时才删轨；判据不成立时（宿主已经塞进半条
+                            // item、或轨道句柄验证失败）轨道会**留下**。那就更不能把它留在
+                            // 采纳表里 —— 下一轮枚举到它，时间线上又是一条凭空多出来的空轨。
+                            if let Some(track)=&created {document.unadopt_track(track.target.inventory_guid());}
+                            Err(error)
+                        }
+                    }
                 })();
-                document.host_undo.finish_request(&view_id,id);let imported=result?;
+                document.host_undo.finish_request(&view_id,id);let (imported,landed)=result?;
+                // 【为什么这一行单独记】`[import] state=…` 那一行只能回答"判据是什么"，
+                // 回答不了"这次导入**落到**哪条轨"。三态 + 落点 + item GUID 才是一条完整
+                // 的证据链（与回执那行按 item 关联）。
+                log::info!(
+                    "[import] requested={} track={} item={}",
+                    requested,
+                    landed.as_deref().unwrap_or("-"),
+                    imported,
+                );
                 owner.refresh_host_transport();editor.notify_timeline();
                 editor.enqueue(crate::editor::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
                 Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),attempts:0,next_attempt:std::time::Instant::now(),jump:None,imported:Some(imported),geometry:None,split:None,media:None,action:None})

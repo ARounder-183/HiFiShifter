@@ -252,7 +252,9 @@ export const importAudioFromDialog = createAsyncThunk(
         // Use current playhead position as import start and preserve playhead.
         const state = getState() as { session: SessionState };
         const startSec = state.session.playheadSec ?? 0;
-        const trackId = state.session.selectedTrackId ?? null;
+        // 【`?? undefined` 而不是 `?? null`】"没有选中轨"是**未指定**，不是"给我新建
+        // 一条轨"。`null` 在这条链上已经专指"显式新建"（见 `importAudioAtPosition`）。
+        const trackId = state.session.selectedTrackId ?? undefined;
         const firstPath = pickedPaths[0];
 
         dispatch(setAudioPath(firstPath));
@@ -390,6 +392,19 @@ export const importAudioAtPosition = createAsyncThunk(
             if (isImportCancelled(importGen)) {
                 return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
             }
+            // 【三态必须原样透传，谁也不许改写谁】`trackId` 在这条链上有**三个**意思，
+            // 而且三层（业务 → `invoke` → 后端）必须对同一个词给出同一个结论：
+            //   * `undefined` = **未指定** ⇒ 载荷里不出现 `trackId` 键 ⇒ 后端用"当前轨"
+            //     （插件里就是本实例所在的 FX 轨；独立 App 里是选中轨 / 首轨）；
+            //   * `null` = **显式新建** ⇒ 插件由宿主建一条轨并由插件采纳它；独立 App
+            //     在下面先建本地轨，再把它的**具体 id** 发出去；
+            //   * `string` = 指定轨道。
+            //
+            // 【为什么这是一处真实缺陷而不是洁癖】旧实现把插件模式下的 `null` 改写成
+            // `null`（"交给插件决定"），而后端把它读成"新建一条宿主轨"：于是"文件 →
+            // 导入音频"每次都建轨，那条轨还没被采纳 ⇒ 它的 item 永远进不了清单，时间线上
+            // 反而多出一行没有 region 的 sequence。让同一个值在三层有两个意思，迟早还有
+            // 第四处会踩。
             let targetTrackId: string | null | undefined;
             if (payload.trackId === null && !isPluginMode()) {
                 // "插入到新轨道"：新轨道以这个文件命名。
@@ -403,12 +418,7 @@ export const importAudioAtPosition = createAsyncThunk(
                 }
                 targetTrackId = createdId;
             } else {
-                targetTrackId =
-                    isPluginMode() &&
-                    payload.trackId === null &&
-                    (getState() as { session: SessionState }).session.tracks.length > 0
-                        ? null
-                        : (payload.trackId ?? undefined);
+                targetTrackId = payload.trackId;
             }
             // 建轨在途期间被撤销：不要继续往即将消失的轨道上灌 clip。
             if (isImportCancelled(importGen)) {
