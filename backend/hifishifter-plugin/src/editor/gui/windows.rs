@@ -1480,6 +1480,28 @@ fn sync_popup_to_anchor(hwnd: HWND, anchor: HWND) -> bool {
     true
 }
 
+/// 在**可能重入**的窗口消息里安全地触摸一个 `RefCell`。
+///
+/// 【为什么必须是 `try_borrow_mut`】窗口消息会在**任意**时刻插入：宿主调 `setActive(0)`
+/// 时会重排焦点，而那一刻我们可能正持有 `EditorClient` 的借用（例如从一条回调里回调宿主、
+/// 宿主同步又把焦点还回来）。此时 `borrow_mut()` 直接 panic —— 现场日志里两次
+/// `PANIC ... windows.rs:1554: RefCell already borrowed`（11-22 17:43、11-25 16:20）就是它。
+/// `catch_unwind` 虽然兜住了异常，但这一次 `WM_SETFOCUS` 的处理被整段跳过（`focus_page`
+/// 没跑，键盘从此不再进 HTML），而且 panic 钩子每来一次就刷一条日志。
+///
+/// 【为什么丢弃这次更新是安全的】这几条消息携带的都是**幂等的提示**（"焦点回来了"、
+/// "上一个焦点是哪个窗口"）。丢掉一次不会让状态错，下一次消息会再给一遍；而在宿主进程里
+/// panic 代价是整个会话。
+fn try_update<T, R>(cell: &RefCell<T>, update: impl FnOnce(&mut T) -> R) -> Option<R> {
+    match cell.try_borrow_mut() {
+        Ok(mut value) => Some(update(&mut value)),
+        Err(_) => {
+            log::debug!("[gui] skipped a re-entrant editor update while the client was borrowed");
+            None
+        }
+    }
+}
+
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
     message: u32,
@@ -1541,7 +1563,8 @@ unsafe extern "system" fn window_proc(
                 // 【为什么记这里】wParam 是**即将获得焦点**的那个窗口 —— 用户点了宿主
                 // 的哪一块，这里就是哪一块。"把键盘交给宿主"要把焦点还回原处，靠的就是
                 // 这一笔（见 `EditorClient::previous_focus`）。
-                (*pointer).client.borrow_mut().note_previous_focus(wparam.0);
+                let client = (*pointer).client.clone();
+                try_update(&client, |client| client.note_previous_focus(wparam.0));
             } else if message == WM_SETFOCUS {
                 // 宿主 Tab/onFocus 进入自有 HWND 后，使用标准 WebView2 接口进入 HTML 控件。
                 // MoveFocus 可能同步通知宿主；调用前不持任何借用。
@@ -1551,7 +1574,8 @@ unsafe extern "system" fn window_proc(
                 // 只看 `playing` 翻转的探针，会被工程播完 / 循环回卷污染 —— 不清它，
                 // 一次误判就让某个键在整场会话里都送不出去。
                 let client = (*pointer).client.clone();
-                client.borrow_mut().note_focus_regained();
+                // 【重入安全】见 try_update：这一条曾在宿主 setActive 重排焦点时 panic 两次。
+                try_update(&client, |client| client.note_focus_regained());
                 let port = (*pointer).port.clone();
                 port.focus_page();
                 return LRESULT(0);
@@ -2304,5 +2328,36 @@ mod focus_tests {
             assert_eq!(focused, child, "宿主焦点请求必须进入自有窗口");
         }
         assert_eq!(target, Some(child), "宿主Tab顺序必须能到达真实编辑器子窗口");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **回归：重入时跳过更新，而不是 panic。**
+    ///
+    /// 现场两次 `PANIC ... RefCell already borrowed` 都在 `WM_SETFOCUS` 上：宿主
+    /// `setActive(0)` 重排焦点的那一刻，我们正持有 `EditorClient` 的借用。
+    /// 这条钉住"拿不到借用就跳过"这一件事本身 —— 它是整条消息不再 panic 的唯一理由。
+    #[test]
+    fn a_reentrant_update_is_skipped_instead_of_panicking() {
+        let cell = RefCell::new(0_u32);
+        {
+            let _held = cell.borrow_mut();
+            assert!(
+                try_update(&cell, |value| *value += 1).is_none(),
+                "借用被占时不得 panic，只能跳过"
+            );
+        }
+        assert_eq!(*cell.borrow(), 0, "跳过的更新不能留下半个状态");
+        assert_eq!(
+            try_update(&cell, |value| {
+                *value += 1;
+                *value
+            }),
+            Some(1),
+            "借用可用时更新必须照常生效"
+        );
     }
 }
