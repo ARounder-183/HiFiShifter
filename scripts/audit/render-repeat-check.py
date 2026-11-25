@@ -39,11 +39,26 @@ verification separates the two -- every candidate on that take stays at or below
 to fail on a known-bad sample *and* pass on a known-good one; --self-test pins
 both directions.
 
+# The other question: --align
+
+The VEGAS defect did not repeat anything -- the render was the right audio at the
+wrong place, shifted by +1.85 s in one run and +18.6 s in another.  A repeat check
+says nothing about that, so the tool answers the second question too: where does
+the render's audio sit inside its source?
+
+`--align` searches a 10 ms grid exactly, refines on a 1 ms grid, then on full-rate
+samples, and prints the offset together with the correlation that backs it.  The
+offset is `render[i] == source[i + lag]`, so a positive number means the render
+started that far into the take.  Anything above 1 ms is a defect; the tolerance is
+printed with the verdict so a reader never has to guess it.
+
 Usage:
     python scripts/audit/render-repeat-check.py <file.wav> [more.wav ...]
+    python scripts/audit/render-repeat-check.py --align <render.wav> <source.wav>
     python scripts/audit/render-repeat-check.py --self-test
 
-Exit code 0 = no repetition found, 1 = repetition found, 2 = usage/read error.
+Exit code 0 = no repetition found / the render is aligned, 1 = repetition found /
+the render is misaligned, 2 = usage or read error.
 """
 
 from __future__ import annotations
@@ -378,6 +393,40 @@ def _ncc(
     return covariance / math.sqrt(energy_a * energy_b)
 
 
+def _ncc_pair(
+    a: list[float],
+    prefix_a: list[float],
+    square_a: list[float],
+    b: list[float],
+    prefix_b: list[float],
+    square_b: list[float],
+    left: int,
+    right: int,
+    length: int,
+) -> float:
+    """Normalised cross-correlation between a window of `a` and one of `b`.
+
+    Why a second helper instead of `_ncc`: that one takes a single signal and two
+    positions (the repeat check).  Using it for alignment would compare the render
+    with *itself* at two positions -- every lag would look like a perfect match,
+    and the tool would confidently report an offset of zero.
+    """
+    sum_a = prefix_a[left + length] - prefix_a[left]
+    sum_b = prefix_b[right + length] - prefix_b[right]
+    square_aa = square_a[left + length] - square_a[left]
+    square_bb = square_b[right + length] - square_b[right]
+    mean_a = sum_a / length
+    mean_b = sum_b / length
+    energy_a = square_aa - sum_a * sum_a / length
+    energy_b = square_bb - sum_b * sum_b / length
+    if energy_a <= 1e-12 or energy_b <= 1e-12:
+        return 0.0
+    dot = 0.0
+    for index in range(length):
+        dot += a[left + index] * b[right + index]
+    covariance = dot - length * mean_a * mean_b
+    return covariance / math.sqrt(energy_a * energy_b)
+
 def _median(values: list[float]) -> float:
     ordered = sorted(values)
     if not ordered:
@@ -557,6 +606,293 @@ def audit(path: str) -> tuple[Repeat | None, float, float, int]:
     return None, best_seconds, max(best_median, 0.0), rate
 
 
+# -- Render <-> source alignment -------------------------------------------
+
+# Two grids, because one cannot serve both ends: a 10 ms grid keeps the search
+# cheap (a 30 s head is 3 000 samples), and a 1 ms grid is the acceptance
+# tolerance.  The coarse peak is never the answer -- it only says where to look.
+ALIGN_COARSE_RATE = 100
+ALIGN_FINE_RATE = 1000
+# Coarse peaks carried into the fine pass.  More than one, because periodic
+# material produces several near-equal lags and the fine pass is what separates
+# them.
+ALIGN_CANDIDATES = 6
+# Window for the fine pass: half a second at 1 kHz.  Long enough that a quiet
+# passage cannot decide the lag, short enough to stay cheap.
+ALIGN_PROBE_FRAMES = 512
+# Only the head of both files is aligned: the defect is a *start* offset, and
+# scanning a ten minute render costs seconds without changing the answer.
+ALIGN_MAX_SEC = 30.0
+# Default search span.  The two field offsets were +1.85 s and +18.6 s; 30 s
+# covers both with room, and --max-offset widens it.
+DEFAULT_MAX_OFFSET_SEC = 30.0
+# Below this an offset is rounding, not a defect.
+ALIGN_TOLERANCE_SEC = 0.001
+
+
+class AlignResult:
+    """Where the render's audio sits inside the source.
+
+    Convention, and the only one this tool uses:
+
+        render[i] == source[i + lag]
+
+    So `lag > 0` means the render's first sample is source sample `lag`: the
+    render started that far *into* the take (head trimmed, audio played late).
+    `lag < 0` means the render carries that much extra content before the take.
+    """
+
+    def __init__(self, lag: int, rate: int, ncc: float, probes: list[float]) -> None:
+        self.lag = lag
+        self.rate = rate
+        self.ncc = ncc
+        self.probes = probes
+
+    @property
+    def offset_sec(self) -> float:
+        return self.lag / float(self.rate)
+
+    def describe(self) -> str:
+        return "offset=%+.6f s (%+d frames), ncc=%.3f" % (
+            self.offset_sec,
+            self.lag,
+            self.ncc,
+        )
+
+
+def _resample_linear(samples: list[float], source_rate: int, target_rate: int) -> list[float]:
+    """Linear resampling, for alignment only.
+
+    Why linear: nothing here is ever listened to, it is only correlated.  A linear
+    interpolator shifts the waveform by well under one sample while the tolerance
+    is 1 ms, so a windowed-sinc resampler would add code and no accuracy where it
+    matters.  It also means the reported offset is in the *render's* frames.
+    """
+    if source_rate == target_rate:
+        return samples
+    ratio = target_rate / float(source_rate)
+    count = max(1, int(round(len(samples) * ratio)))
+    last = len(samples) - 1
+    out = []
+    for index in range(count):
+        position = index / ratio
+        left = int(position)
+        if left >= last:
+            out.append(samples[last])
+            continue
+        fraction = position - left
+        out.append(samples[left] * (1.0 - fraction) + samples[left + 1] * fraction)
+    return out
+
+
+def _correlate(a: list[float], b: list[float]) -> list[complex]:
+    """Circular correlation whose element k is sum(a[i] * b[i - k]).
+
+    Both inputs are zero padded past `len(a) + len(b)`, which is what makes the
+    circular result equal the linear one for every lag either file can support.
+    """
+    size = 1
+    while size < len(a) + len(b):
+        size <<= 1
+    fa = [complex(value, 0.0) for value in a] + [0.0j] * (size - len(a))
+    fb = [complex(value, 0.0) for value in b] + [0.0j] * (size - len(b))
+    _fft(fa, False)
+    _fft(fb, False)
+    for index in range(size):
+        fa[index] = fa[index] * fb[index].conjugate()
+    _fft(fa, True)
+    return fa
+
+
+def _exact_lag_scores(a: list[float], b: list[float], max_lag: int) -> dict[int, float]:
+    """Normalised cross-correlation for every lag in +-max_lag.
+
+    Why exact rather than "correlate a few windows": an offset gate that samples
+    the file can miss the true lag on material whose loud passages are periodic,
+    and it cannot tell "0.999 at the right lag" from "0.999 at the wrong one".
+    The dot products cost one transform; means and energies come from prefix sums,
+    so every lag after that is O(1).
+    """
+    correlation = _correlate(a, b)
+    size = len(correlation)
+    prefix_a, square_a = _prefix_sums(a)
+    prefix_b, square_b = _prefix_sums(b)
+    # Asymmetric on purpose: a render that starts late is *shorter* than its source,
+    # so the positive side is bounded by the source, not by the render.  Bounding
+    # both by `len(a)` is what makes an 18.6 s offset unsearchable on a 5 s render.
+    low = -min(max_lag, len(a) - 1)
+    high = min(max_lag, len(b) - 1)
+    scores: dict[int, float] = {}
+    for lag in range(low, high + 1):
+        if lag >= 0:
+            length = min(len(a), len(b) - lag)
+            start_a, start_b = 0, lag
+        else:
+            length = min(len(a) + lag, len(b))
+            start_a, start_b = -lag, 0
+        if length < 32:
+            continue
+        # Element k of the correlation is sum(a[i] * b[i - k]), i.e. dot(-k).
+        dot = correlation[(size - lag) % size].real
+        sum_a = prefix_a[start_a + length] - prefix_a[start_a]
+        sum_b = prefix_b[start_b + length] - prefix_b[start_b]
+        energy_a = square_a[start_a + length] - square_a[start_a] - sum_a * sum_a / length
+        energy_b = square_b[start_b + length] - square_b[start_b] - sum_b * sum_b / length
+        if energy_a <= 1e-12 or energy_b <= 1e-12:
+            continue
+        covariance = dot - sum_a * sum_b / length
+        scores[lag] = covariance / math.sqrt(energy_a * energy_b)
+    return scores
+
+
+def _scan_lags(
+    a: list[float], b: list[float], low: int, high: int, count: int
+) -> dict[int, float]:
+    """Median-probe NCC for a small lag window (the fine pass).
+
+    A window of +-20 ms does not justify a transform; direct sums over a few
+    spread probes are both cheaper and easier to read when the number looks wrong.
+    """
+    scores: dict[int, float] = {}
+    prefix_a, square_a = _prefix_sums(a)
+    prefix_b, square_b = _prefix_sums(b)
+    for lag in range(low, high + 1):
+        # A negative lag is the same measurement with the roles swapped:
+        # `a[i] == b[i - L]` is `b[j] == a[j + L]`.  Clamping to zero instead (the
+        # first version did) silently drops every "extra head" case.
+        if lag >= 0:
+            x, px, sx, y, py, sy, shift = a, prefix_a, square_a, b, prefix_b, square_b, lag
+        else:
+            x, px, sx, y, py, sy, shift = b, prefix_b, square_b, a, prefix_a, square_a, -lag
+        room = min(len(x), len(y) - shift)
+        if room < 256:
+            continue
+        length = min(ALIGN_PROBE_FRAMES, room)
+        starts = _even_starts(room - length, count)
+        values = [
+            _ncc_pair(x, px, sx, y, py, sy, start, start + shift, length)
+            for start in starts
+        ]
+        scores[lag] = _median(values)
+    return scores
+
+
+def _verify_lag(render: list[float], source: list[float], lag: int) -> tuple[float, list[float]]:
+    """Median NCC over evenly spread full-length probes at `lag`.
+
+    The negative case is the same measurement with the roles swapped:
+    `render[i] == source[i - L]` is `source[j] == render[j + L]`.
+    """
+    if lag >= 0:
+        a, b, shift = render, source, lag
+        room = min(len(a), len(b) - shift)
+    else:
+        a, b, shift = source, render, -lag
+        room = min(len(a), len(b) - shift)
+    if room < 1024:
+        return 0.0, []
+    length = min(PROBE_FRAMES, room)
+    starts = _even_starts(room - length, PROBE_COUNT)
+    prefix_a, square_a = _prefix_sums(a)
+    prefix_b, square_b = _prefix_sums(b)
+    values = [
+        _ncc_pair(a, prefix_a, square_a, b, prefix_b, square_b, start, start + shift, length)
+        for start in starts
+    ]
+    return _median(values), values
+
+
+def align_to_source(
+    render_path: str, source_path: str, max_offset_sec: float = DEFAULT_MAX_OFFSET_SEC
+) -> tuple[AlignResult, int, int]:
+    """Locate the render inside its source.  Returns (result, render rate, source rate)."""
+    render, render_rate = read_wave(render_path)
+    source, source_rate = read_wave(source_path)
+    # One time base, the render's: every number this tool prints is in its frames.
+    source = _resample_linear(source, source_rate, render_rate)
+    head = int(round(ALIGN_MAX_SEC * render_rate))
+    render_head = render[:head]
+    source_head = source[:head]
+    coarse_factor = max(1, int(round(render_rate / float(ALIGN_COARSE_RATE))))
+    fine_factor = max(1, int(round(render_rate / float(ALIGN_FINE_RATE))))
+    coarse = _exact_lag_scores(
+        decimate(render_head, coarse_factor),
+        decimate(source_head, coarse_factor),
+        int(round(max_offset_sec * ALIGN_COARSE_RATE)),
+    )
+    if not coarse:
+        raise WavReadError("the two files share no usable overlap to align on")
+    # Keep peaks at least one coarse step apart, so one broad peak cannot fill the
+    # whole candidate list.
+    ordered = sorted(coarse.items(), key=lambda item: item[1], reverse=True)
+    picked: list[tuple[int, float]] = []
+    for lag, score in ordered:
+        if all(abs(lag - other) > 1 for other, _score in picked):
+            picked.append((lag, score))
+        if len(picked) >= ALIGN_CANDIDATES:
+            break
+    fine_render = decimate(render_head, fine_factor)
+    fine_source = decimate(source_head, fine_factor)
+    # One coarse step is `coarse_factor / fine_factor` fine steps -- 10 when the
+    # grids are 10 ms and 1 ms.  Dividing the other way rounds every candidate to
+    # lag 0, and the verification then reports a correlation near zero, which reads
+    # like "different audio" instead of like a bug.
+    coarse_to_fine = max(1, coarse_factor // fine_factor)
+    best_lag = picked[0][0] * coarse_to_fine
+    best_score = -2.0
+    for coarse_lag, _score in picked:
+        centre = coarse_lag * coarse_to_fine
+        span = 2 * coarse_to_fine + 2
+        window = _scan_lags(
+            fine_render, fine_source, centre - span, centre + span, SEARCH_PROBE_COUNT
+        )
+        if not window:
+            continue
+        lag, score = max(window.items(), key=lambda item: item[1])
+        if score > best_score:
+            best_score = score
+            best_lag = lag
+    # Full-rate refinement: the 1 ms grid is the *search*, not the answer.
+    centre = best_lag * fine_factor
+    prefix, prefix_square = _prefix_sums(render)
+    source_prefix, source_square = _prefix_sums(source)
+    probe_window = min(SEARCH_PROBE_FRAMES, max(1024, len(render) // 8))
+
+    def scan(lag: int) -> float:
+        # Negative lags are the same measurement with the roles swapped (as in
+        # `_verify_lag`).  Without this branch every "the render carries extra head"
+        # case would be reported as a positive offset.
+        if lag >= 0:
+            x, px, sx = render, prefix, prefix_square
+            y, py, sy, shift = source, source_prefix, source_square, lag
+        else:
+            x, px, sx = source, source_prefix, source_square
+            y, py, sy, shift = render, prefix, prefix_square, -lag
+        room = min(len(x), len(y) - shift)
+        if room < 1024:
+            return -2.0
+        window = min(probe_window, room)
+        starts = _loud_starts(px, room - window, window, SEARCH_PROBE_COUNT)
+        return _median(
+            [
+                _ncc_pair(x, px, sx, y, py, sy, start, start + shift, window)
+                for start in starts
+            ]
+        )
+
+    # Not `_search_lag`: it starts at lag 1 by design (periods are positive), which
+    # would skip zero and every negative lag -- the two cases that matter most here.
+    best_lag = centre
+    best_score = -2.0
+    for lag in range(centre - fine_factor, centre + fine_factor + 1):
+        score = scan(lag)
+        if score > best_score:
+            best_score = score
+            best_lag = lag
+    median, probes = _verify_lag(render, source, best_lag)
+    return AlignResult(best_lag, render_rate, median, probes), render_rate, source_rate
+
+
 # -- Self test -------------------------------------------------------------
 
 
@@ -652,19 +988,131 @@ def self_test() -> int:
         failures += 1
     else:
         print("self-test: ok: noise rejected (best median=%.3f)" % median)
+    failures += _align_self_test(directory, rate)
     return 1 if failures else 0
+
+
+def _align_self_test(directory: str, rate: int) -> int:
+    """A render shifted by a known amount must report that amount.
+
+    Why noise: its correlation peak is a single sharp spike, so the case tests the
+    search itself rather than the material.  Why three cases: an aligner that only
+    ever reports "misaligned" would pass a positive-only check, and one that only
+    ever reports zero would pass a zero-only check.
+
+    The positive offsets are the two the field actually produced (1.85 s and
+    18.6 s); the negative one covers "the render carries extra head", which is what
+    a pre-roll leak looks like.
+    """
+    failures = 0
+    source = _noise(rate * 24, seed=21)
+    source_path = os.path.join(directory, "align-source.wav")
+    _write_wave(source_path, source, rate)
+    cases = (
+        ("align-1.85s.wav", 88800, 0, source_path),
+        ("align-18.6s.wav", 892800, 0, source_path),
+        ("align-zero.wav", 0, 0, source_path),
+        ("align-negative.wav", -24000, 0, source_path),
+    )
+    for name, expected, tolerance, reference in cases:
+        if expected >= 0:
+            samples = source[expected:]
+        else:
+            samples = [0.0] * (-expected) + source[: len(source) + expected]
+        path = os.path.join(directory, name)
+        _write_wave(path, samples, rate)
+        failures += _check_alignment(name, path, reference, expected, tolerance)
+    # Different sample rates: media at 44.1 kHz, project (render) at 48 kHz.  That
+    # is the common case in the field, and it is the only path where the source is
+    # resampled -- so it is the only one where a rate mix-up could hide.
+    media_path = os.path.join(directory, "align-source-44k.wav")
+    _write_wave(media_path, _resample_linear(source, rate, 44100), 44100)
+    mixed_path = os.path.join(directory, "align-44k-render.wav")
+    _write_wave(mixed_path, source, rate)
+    # Two frames of slack: the resampler is linear by design (see `_resample_linear`),
+    # which is far below the 1 ms the tool actually judges.
+    failures += _check_alignment("align-44k-render.wav", mixed_path, media_path, 0, 2)
+    return failures
+
+
+def _check_alignment(
+    name: str, path: str, reference: str, expected: int, tolerance: int
+) -> int:
+    try:
+        result, _render_rate, _source_rate = align_to_source(path, reference)
+    except (OSError, WavReadError) as error:
+        print("self-test: FAIL: %s could not be aligned: %s" % (name, error))
+        return 1
+    if abs(result.lag - expected) > tolerance:
+        print(
+            "self-test: FAIL: %s reported %+d frames, expected %+d (%s)"
+            % (name, result.lag, expected, result.describe())
+        )
+        return 1
+    print("self-test: ok: %s aligned (%s)" % (name, result.describe()))
+    return 0
 
 
 # -- Entry point -----------------------------------------------------------
 
 
+def align_main(argv: list[str]) -> int:
+    """`--align <render> <source> [--max-offset SEC] [--tolerance SEC]`."""
+    max_offset = DEFAULT_MAX_OFFSET_SEC
+    tolerance = ALIGN_TOLERANCE_SEC
+    paths: list[str] = []
+    index = 0
+    while index < len(argv):
+        argument = argv[index]
+        if argument in ("--max-offset", "--tolerance") and index + 1 < len(argv):
+            try:
+                value = float(argv[index + 1])
+            except ValueError:
+                print("error: %s wants a number, got %r" % (argument, argv[index + 1]))
+                return 2
+            if argument == "--max-offset":
+                max_offset = value
+            else:
+                tolerance = value
+            index += 2
+            continue
+        paths.append(argument)
+        index += 1
+    if len(paths) != 2:
+        print(
+            "usage: render-repeat-check.py --align <render.wav> <source.wav> "
+            "[--max-offset SEC] [--tolerance SEC]"
+        )
+        return 2
+    try:
+        result, render_rate, source_rate = align_to_source(paths[0], paths[1], max_offset)
+    except (OSError, WavReadError) as error:
+        print("error: %s: %s" % (paths[0], error))
+        return 2
+    print("align: render=%s (%d Hz)" % (paths[0], render_rate))
+    print("align: source=%s (%d Hz)" % (paths[1], source_rate))
+    print("align: %s" % result.describe())
+    for probe_index, probe in enumerate(result.probes):
+        print("  probe %d: ncc=%.4f" % (probe_index, probe))
+    if abs(result.offset_sec) <= tolerance:
+        print("align: ok (within %g s)" % tolerance)
+        return 0
+    print("align: misaligned (tolerance %g s)" % tolerance)
+    return 1
+
+
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
         print(__doc__.strip().splitlines()[0])
-        print("usage: render-repeat-check.py <file.wav> [more.wav ...] | --self-test")
+        print(
+            "usage: render-repeat-check.py <file.wav> [more.wav ...] | "
+            "--align <render.wav> <source.wav> | --self-test"
+        )
         return 2
     if argv[1] == "--self-test":
         return self_test()
+    if argv[1] == "--align":
+        return align_main(argv[2:])
     failed = False
     for path in argv[1:]:
         try:
