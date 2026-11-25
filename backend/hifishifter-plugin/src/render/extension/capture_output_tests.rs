@@ -2959,3 +2959,67 @@ fn a_pinned_render_starts_at_zero_even_when_the_host_playhead_is_stale() {
     );
     assert_eq!(next_position, Some(fed as i64));
 }
+
+/// **验收：同一段渲染跑三次，读到的帧序列必须逐块相同。**
+///
+/// 【现场原形】VEGAS Render As 连渲三次，得到三个**互不相同**的文件（偏移
+/// +1.85 s / 0.00 s / +18.60 s）。三次之间唯一的差别是宿主在渲染前停在哪儿 ——
+/// `projectTimeSamples` 分别是 0 / 0 / 893720。
+///
+/// 【为什么判据是"读到的帧序列"】磁带与快照三次都是同一份，位置相同就意味着逐样本
+/// 相同；偏移正是唯一能把三个产物区分开的量。真正逐样本比对由
+/// `scripts/audit/render-repeat-check.py --align` 在现场文件上做（它有源文件可比），
+/// 这里钉的是那条因果：位置序列不依赖宿主播放头。
+#[test]
+fn three_renders_of_the_same_range_read_the_same_frames() {
+    const BLOCK: usize = 24_576;
+    const TOTAL: usize = 480_000;
+
+    fn drive(stale_raw: i64) -> Vec<i64> {
+        let owner = insert_owner();
+        let context = crate::block_context::BlockContext {
+            sample_rate: 48_000.0,
+            project_time_samples: stale_raw,
+            playing: false,
+            ..Default::default()
+        };
+        let mut positions = Vec::new();
+        let mut fed = 0usize;
+        let mut index = 0usize;
+        while fed < TOTAL {
+            host_is_feeding_changing_audio(&owner);
+            index += 1;
+            let block = owner.note_stream_block_at(
+                ProcessStream::Realtime,
+                context,
+                BLOCK,
+                index == 1,
+                false,
+                None,
+            );
+            positions.push(block.position);
+            fed += BLOCK;
+        }
+        positions
+    }
+
+    let first = drive(0);
+    let blocks = first.len();
+    assert!(blocks >= 2, "前提：这一遍要跨块");
+    assert_eq!(
+        first,
+        (0..blocks)
+            .map(|index| (index * BLOCK) as i64)
+            .collect::<Vec<_>>(),
+        "首块从 0 起算，此后逐块 +{BLOCK}"
+    );
+    // 三次现场用例的宿主播放头：0、0、893720。这里故意换两个不同的非零值，
+    // 因为"再跑一次 0"会让状态泄漏也看起来是对的。
+    for stale_raw in [893_720i64, 1_800_000] {
+        assert_eq!(
+            drive(stale_raw),
+            first,
+            "宿主播放头 {stale_raw} 不许改变任何一块的读位置"
+        );
+    }
+}
