@@ -1008,6 +1008,10 @@ impl ModelHandle {
             }
         }
         self.session.prepare_renderers();
+        // 【导入转正挂在"发布完成"之后】这一轮 ARA 图已经写进装配输入、清单也已经
+        // 刷新（见上面的 `refresh_ui_inventory`），于是"宿主到底认领了哪些 item"此刻
+        // 才第一次可判定。放在 `prepare_renderers` 之后是为了不与它争同一把事务锁。
+        self.session.publish_pending_imports();
     }
 
     /// 收口之后发一行"读者们拿的是哪一版"的读数。

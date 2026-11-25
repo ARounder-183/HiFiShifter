@@ -1333,6 +1333,10 @@ impl DocumentSession {
         if timeline.selected_track_id.is_none() {
             timeline.selected_track_id = timeline.tracks.first().map(|track| track.id.clone());
         }
+        // 【为什么导入的转正要挂在这一步之后】清单刚把 item 变成一条可见的占位 clip，
+        // 这是"用户现在能看见它了"的第一个时刻。待定导入如果只在 ARA 发布时对账，
+        // 那么"宿主建了 item、但还没建 region"这一段就永远没有转正的观测点。
+        self.publish_pending_imports();
     }
     /// 组件保存/恢复仅操作其实际assigned clips的item GUID，防止另一个轨道的形状串入。
     pub(crate) fn fade_items_locked(
@@ -4224,5 +4228,122 @@ mod tests {
             placeholder.source_path.is_none(),
             "宁可显示占位，也不能把另一条 take 的采样挂上来"
         );
+    }
+
+    /// **回归：待定导入在下一轮清单/发布时必须转正，而不是永远挂着。**
+    ///
+    /// 【现场原形】REAPER 里"文件 → 导入音频"：item 89 ms 就建成了，宿主发布 ARA 图
+    /// 要 212~299 ms。旧的回执用"这一轮图里有没有它"当完成门，于是把一个**已经成功**
+    /// 的写入判成失败（用户看到红色错误条），而波形请求又把"还没轮到"记成永久失败。
+    /// 现在回执只回答"item 在不在"，转正由这张账本负责。
+    #[test]
+    fn a_pending_import_resolves_on_the_next_publish() {
+        let document = DocumentSession::new(40_101);
+        document.begin_pending_import(crate::render::document::PendingImport {
+            item: "{IMPORT-1}".into(),
+            source_path: "C:/audio/one.wav".into(),
+            landed_track: Some("track".into()),
+            requested_at: std::time::Instant::now(),
+            rounds: 0,
+            stall_reported: false,
+        });
+        // ① 清单里还没有这条 item ⇒ 不转正（也不是失败，只是"还没轮到"）。
+        assert!(
+            document.resolve_pending_imports().is_empty(),
+            "清单里没有它的时候不许凭空造一条 clip"
+        );
+        // ② 清单到了 ⇒ 同一轮就对账成功，并且给出的 id 是时间线里那一条。
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        let api = Arc::new(host.client());
+        let mut track = api.ui_track(&|| true).unwrap();
+        track.id = "track".into();
+        let mut item = track.items[0].clone();
+        item.geometry.item_id = "{IMPORT-1}".into();
+        track.items = vec![item];
+        let guid = track.guid.clone();
+        document.ui_tracks.lock_or_recover().insert(guid, track);
+        let resolved = document.resolve_pending_imports();
+        assert_eq!(resolved.len(), 1, "下一轮发布必须把它转正");
+        assert_eq!(resolved[0].item, "{IMPORT-1}");
+        assert_eq!(resolved[0].clip_id, "ara-item-{IMPORT-1}");
+        assert_eq!(resolved[0].landed_track.as_deref(), Some("track"));
+        assert_eq!(resolved[0].source_path, "C:/audio/one.wav");
+        document.close();
+    }
+
+    /// **回归：转正只发生一次。**
+    ///
+    /// 【为什么这条要紧】账本如果只"报"不"划掉"，那么每一轮发布都会再发一条
+    /// `import_ready` —— 前端于是每次都触发一次规格化，用户勾了"导入后规格化"就会
+    /// 得到一串重复的增益。
+    #[test]
+    fn a_pending_import_is_dropped_once_resolved() {
+        let document = DocumentSession::new(40_102);
+        document.begin_pending_import(crate::render::document::PendingImport {
+            item: "{IMPORT-2}".into(),
+            source_path: "C:/audio/two.wav".into(),
+            landed_track: None,
+            requested_at: std::time::Instant::now(),
+            rounds: 0,
+            stall_reported: false,
+        });
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        let api = Arc::new(host.client());
+        let mut track = api.ui_track(&|| true).unwrap();
+        track.id = "track".into();
+        let mut item = track.items[0].clone();
+        item.geometry.item_id = "{IMPORT-2}".into();
+        track.items = vec![item];
+        let guid = track.guid.clone();
+        document.ui_tracks.lock_or_recover().insert(guid, track);
+        assert_eq!(document.resolve_pending_imports().len(), 1);
+        assert!(
+            document.resolve_pending_imports().is_empty(),
+            "同一条导入不许被转正两次"
+        );
+        document.close();
+    }
+
+    /// **回归：等太久只发一次通知，绝不伪造 clip。**
+    ///
+    /// 【为什么不能伪造】宿主的 Item 是用户能看见的既成事实，插件的占位来自宿主清单 ——
+    /// 两者都不是这条账本造的。账本能做的只有"说一声"，超出这句话的任何动作都会让
+    /// 时间线上出现一条宿主里并不存在的片段。
+    #[test]
+    fn a_stalled_import_never_fabricates_a_clip() {
+        let document = DocumentSession::new(40_103);
+        document.begin_pending_import(crate::render::document::PendingImport {
+            item: "{IMPORT-3}".into(),
+            source_path: "C:/audio/three.wav".into(),
+            landed_track: None,
+            requested_at: std::time::Instant::now() - std::time::Duration::from_secs(61),
+            rounds: 0,
+            stall_reported: false,
+        });
+        let timeline = TimelineState::default();
+        assert!(timeline.clips.is_empty());
+        let stalled = document.take_stalled_imports(std::time::Duration::from_secs(60));
+        assert_eq!(stalled.len(), 1, "超过 60 s 必须报一次");
+        assert_eq!(stalled[0].0, "{IMPORT-3}");
+        assert!(
+            document
+                .take_stalled_imports(std::time::Duration::from_secs(60))
+                .is_empty(),
+            "同一条只报一次"
+        );
+        assert!(
+            !document
+                .resolve_pending_imports()
+                .iter()
+                .any(|done| done.item == "{IMPORT-3}"),
+            "没有 region 也没有清单条目时，账本不许把它转正"
+        );
+        document.close();
     }
 }

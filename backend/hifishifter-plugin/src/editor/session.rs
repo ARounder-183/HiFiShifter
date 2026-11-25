@@ -48,6 +48,12 @@ const RENDER_RETRY_BACKOFF: Duration = Duration::from_secs(5);
 /// 预算内的快速重试间隔。
 const RENDER_RETRY_INTERVAL: Duration = Duration::from_millis(150);
 
+/// 一条待定导入等多久还没被 ARA 认领，就该告诉用户"宿主的 Item 建了，音频没来"。
+///
+/// 【为什么是 60 秒】现场 100~300 ms 就追上了；60 s 只会在"用户已经在宿主里撤销了
+/// 这次导入"这类场合触发。它刻意**不改回执、不删占位** —— 那条 item 确实在宿主里。
+const IMPORT_STALL_AFTER: Duration = Duration::from_secs(60);
+
 /// 分析 pending 的**绝对**上限：超过它就**不再等这条原线**，本次渲染直接放行。
 ///
 /// 【为什么只留一个上限，不再有"2 秒没有 worker 就算不收敛"】那条判据问的是本会话
@@ -5119,6 +5125,55 @@ impl EditorSession {
         }
         fingerprint
     }
+    /// 把"待定导入转正"发成一条事件。
+    ///
+    /// 【为什么单独一条事件】`plugin_host_changed` 只说"时间线变了"，前端无法区分
+    /// "这次发布是宿主终于认领了那次导入"与"别处改了一笔"。而导入之后要做的事 ——
+    /// 清 pending 状态、补一次规格化、把斜纹占位换成真 clip —— 全都挂在这一次转正上。
+    pub(crate) fn announce_import_ready(
+        &self,
+        resolved: &[crate::render::document::ResolvedImport],
+    ) {
+        for entry in resolved {
+            self.emit(
+                "import_ready",
+                json!({
+                    "item": entry.item,
+                    "clipId": format!("{}{}", self.namespace, entry.clip_id),
+                    // `trackId` 只是诊断线索：落点来自导入时那一轮清单，宿主可能已经
+                    // 换过它。前端按 clipId 定位，不按这条边。
+                    "trackId": entry
+                        .landed_track
+                        .as_ref()
+                        .map(|id| format!("{}{}", self.namespace, id)),
+                    "pending": false,
+                    "rounds": entry.rounds,
+                    "afterMs": entry.elapsed.as_millis() as u64,
+                }),
+            );
+        }
+    }
+
+    /// 报告"等了太久还没被认领"的导入（20 ms 视图定时器驱动；每一条只报一次）。
+    ///
+    /// 【为什么由定时器问、而不是由发布路径问】宿主如果一直不发布，发布路径就一次都
+    /// 不会跑 —— 那正是需要通知用户的场合。定时器是唯一与宿主节奏无关的观测点。
+    pub(crate) fn report_stalled_imports(&self) {
+        let Some(document) = self.document() else {
+            return;
+        };
+        for (item, elapsed) in document.take_stalled_imports(IMPORT_STALL_AFTER) {
+            log::warn!(
+                "[import] stalled item={item} after_ms={} reason=no-region-after-publish",
+                elapsed.as_millis()
+            );
+            self.emit(
+                "import_stalled",
+                json!({"item": item, "afterMs": elapsed.as_millis() as u64, "pending": true}),
+            );
+        }
+    }
+
     /// 一段 pending 持续多久之后才值得记一行。3 秒：短于它的是正常的一次应用往返。
     const PENDING_REPORT_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
 

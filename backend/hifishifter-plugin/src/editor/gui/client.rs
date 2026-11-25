@@ -69,6 +69,22 @@ fn host_reply_retry_backoff(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(millis)
 }
 
+/// 一条"本该重投、却被闸挡下"的回复必须留下理由。
+///
+/// 【为什么这不是普通诊断】上一轮现场的导入回执是"判据成立、一次重投都没发生、
+/// 日志一个字都没有"—— 也就是一个**不可恢复的判定没有留下"为什么不可恢复"**。
+/// 四个理由各自指向一处：`budget` 用完、`window` 到期、`lease` 编辑租约换了、
+/// `queue` actor 队列拒收。没有这四个词，下一次只能再猜一遍。
+fn report_reply_finalized_without_retry(id: u64, reason: &str, command: &str) {
+    hifishifter_kernel::log_limiter::emit_limited_key(
+        log::Level::Warn,
+        "host.reply.no-retry",
+        format_args!(
+            "[host] reply finalized without retry: id={id} reason={reason} command={command}"
+        ),
+    );
+}
+
 /// 把前端上报的错误文本折成一个**稳定、有界**的限流键片段。
 ///
 /// 【为什么截断】键里带的是运行期数据（方法名、错误摘要、栈）。不截断就等于把
@@ -1054,6 +1070,12 @@ pub(crate) fn ui_tick(state: &Rc<RefCell<EditorClient>>) {
     try_route_fallback(state, &link);
     if let Ok(owner) = link.owner() {
         owner.note_editor_tick();
+        // 【为什么在这里问"导入等了多久"】这是全插件唯一与宿主节奏无关的观测点：
+        // 宿主若一直不发 ARA 图，发布路径一次都不会跑，也就没人能告诉用户
+        // "Item 建了、音频没来"。每一条只报一次（见 `take_stalled_imports`）。
+        if let Some(session) = owner.existing_editor_session() {
+            session.report_stalled_imports();
+        }
         if owner.take_bootstrap_changed() {
             if let Some(session) = owner.existing_editor_session() {
                 let view_id = state.borrow().view_id.clone();
@@ -1208,12 +1230,18 @@ pub(crate) fn pump(state: &Rc<RefCell<EditorClient>>) {
             };
             let imported=match &import_state{ImportState::Bound(clip)|ImportState::Inventory(clip)=>Some(clip.clone()),_=>None};
             let in_payload=|clip:&str|reply["value"]["clips"].as_array().is_some_and(|clips|clips.iter().any(|entry|entry["id"].as_str()==Some(clip)));
-            let waiting=match &import_state{
+            // 【契约：导入成功 = item 存在】回执的职责到"宿主交回 item GUID"为止；
+            // 之后由待定导入账本（`DocumentSession::publish_pending_imports`）负责转正。
+            // 这里不再判"等待"，只回答一件事：要不要让前端先画那条斜纹占位。
+            //
+            // 【为什么曾经是错的】旧代码把这一位当成**完成门**：89 ms 判死，而宿主
+            // 发布 ARA 图要 212~299 ms（现场实测）。判据选的不是"我们观测到的事实"，
+            // 而是"宿主按自己的节奏迟早会做的一件事"，于是宿主的调度延迟变成了我们的
+            // 失败率。同一段注释上面早就写明了这个机理，却仍然留着 `if waiting { ok = false }`。
+            let import_pending=match &import_state{
                 ImportState::Absent=>true,
                 ImportState::Bound(clip)=>!in_payload(clip),
-                // 【库存态不重投】重投等的是"区域出现"，而区域只在编辑会话边界出现 ——
-                // 20 ms 一次的轮询改不了宿主的节奏，只会把一条正常状态熬成超时错误。
-                ImportState::Inventory(_)=>false,
+                ImportState::Inventory(_)=>true,
                 ImportState::Idle=>false,
             };
             // 【I-E2：一次成功写入的权威是"我们写下的值"，不是宿主回声】
@@ -1251,8 +1279,7 @@ pub(crate) fn pump(state: &Rc<RefCell<EditorClient>>) {
             let split_waiting=reply["ok"]==true&&host.split.as_ref().is_some_and(|split|!host.document.upgrade().is_some_and(|doc|split.matches(&doc,&host.editor.namespace,&mut reply["value"])));
             let media_waiting=reply["ok"]==true&&host.media.as_ref().is_some_and(|media|!host.document.upgrade().is_some_and(|doc|media.matches(&doc,&host.editor.namespace,&mut reply["value"])));
             let now = std::time::Instant::now();
-            let retryable = waiting
-                || split_waiting
+            let retryable = split_waiting
                 || media_waiting
                 || reply["ok"] == false
                     && (crate::editor::errors::is_retryable_host_conflict(&error)
@@ -1261,6 +1288,13 @@ pub(crate) fn pump(state: &Rc<RefCell<EditorClient>>) {
             // 退避：只在到点且未超预算时重投。预算与 `until` 双保险 —— 前者挡住
             // "永不收敛的失败"（否则 50 Hz 空转到 30 s），后者挡住"慢宿主"。
             let can_retry = host.attempts < HOST_REPLY_RETRY_BUDGET && now >= host.next_attempt;
+            // 【为什么把命令名提到这里】"重投被闸挡下"那一行要回答"哪条命令没能重投"，
+            // 而它有两个出口（排不进去 / 窗口或预算到期），只有一处算得出来。
+            let command = if host.media.is_some() {
+                "get_timeline_inventory"
+            } else {
+                "get_timeline_state"
+            };
             if retryable && now < host.until && can_retry {
                 let allowed = host.document.upgrade().is_some_and(|doc| {
                     state
@@ -1268,11 +1302,6 @@ pub(crate) fn pump(state: &Rc<RefCell<EditorClient>>) {
                         .authorize(&doc)
                         .is_ok_and(|lease| lease == host.lease)
                 });
-                let command = if host.media.is_some() {
-                    "get_timeline_inventory"
-                } else {
-                    "get_timeline_state"
-                };
                 let editor = host.editor.clone();
                 let sink = state.sink.clone();
                 let link = state.link.clone();
@@ -1294,24 +1323,34 @@ pub(crate) fn pump(state: &Rc<RefCell<EditorClient>>) {
                     }
                     return false;
                 }
+                // 判据成立、却排不进去：租约换了，或 actor 队列拒收。两条都不是"重试
+                // 会好"，必须留下理由（见 `report_reply_finalized_without_retry`）。
+                report_reply_finalized_without_retry(id, if allowed { "queue" } else { "lease" }, command);
+            } else if retryable {
+                report_reply_finalized_without_retry(
+                    id,
+                    if host.attempts >= HOST_REPLY_RETRY_BUDGET { "budget" } else { "window" },
+                    command,
+                );
             }
-            if waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("item was created in the host but its ARA audio is not ready; use host Undo if canceling");}
             if split_waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("item was split in the host but both clips have not caught up; host Undo remains available");}
             if media_waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("media was edited in the host but its GUI/ARA identities have not caught up; host Undo remains available");}
-            // 导入回执的终态：成功（可能带 pending）+ 明确的 clip id。
-            match &import_state {
-                ImportState::Bound(clip)=>{reply["value"]["imported_clip_id"]=serde_json::json!(clip);}
-                // 只在回包本身成功时才这么判：失败的回包（取数失败 / 会话已换）不能被
-                // "导入状态"这一层改写成成功。
-                ImportState::Inventory(clip) if reply["ok"]==true =>{
-                    // 成功，但宿主还没把它并入 ARA。前端据此显示"进行中"而不是红色错误条；
-                    // 时间线里已经是 `present_host_inventory` 的占位 clip（画着"等待宿主
-                    // 提供音频"的斜纹），区域一到自动转正。
-                    reply["ok"]=serde_json::json!(true);
-                    reply["value"]["imported_clip_id"]=serde_json::json!(clip);
-                    reply["value"]["import_pending"]=serde_json::json!(true);
+            // 导入回执的终态：**item 存在就是成功**，`pending` 只是一个状态位。
+            //
+            // 三个字段各有分工：`imported_item` 是这次导入的宿主身份（前端用它把回执与
+            // 后续的 `import_ready` 对上），`imported_clip_id` 能解析就带上（前端据此
+            // 定位乐观更新的目标），`import_pending` 只决定"先画占位还是直接画波形"。
+            //
+            // 只在回包本身成功时写：失败的回包（取数失败 / 会话已换）不能被这一层
+            // 改写成一份"成功但带 pending"的假象。
+            if reply["ok"] == true {
+                if let Some(item) = host.imported.as_deref() {
+                    reply["value"]["imported_item"] = serde_json::json!(item);
+                    reply["value"]["import_pending"] = serde_json::json!(import_pending);
                 }
-                _=>{}
+                if let Some(clip) = imported.as_deref() {
+                    reply["value"]["imported_clip_id"] = serde_json::json!(clip);
+                }
             }
             if host.imported.is_some() {
                 // `item=` 与请求那一行的 `item=` 是同一条证据链：一行说"落到哪条轨"，
@@ -2103,6 +2142,24 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                     requested,
                     landed.as_deref().unwrap_or("-"),
                     imported,
+                );
+                // 【登记待定导入】宿主已经交回 item GUID —— 这就是"成功"的全部证据。
+                // 从这里到"ARA 认领它"之间的那几百毫秒不该由回执来等（见
+                // `PendingImport` 的说明）；账本在每一轮 ARA 发布与清单刷新时对账。
+                document.begin_pending_import(crate::render::document::PendingImport {
+                    item: imported.clone(),
+                    source_path: path.to_owned(),
+                    landed_track: landed.clone(),
+                    requested_at: std::time::Instant::now(),
+                    rounds: 0,
+                    stall_reported: false,
+                });
+                log::info!(
+                    "[import] pending item={} track={} source={} (requested={})",
+                    imported,
+                    landed.as_deref().unwrap_or("-"),
+                    path,
+                    requested,
                 );
                 owner.refresh_host_transport();editor.notify_timeline();
                 editor.enqueue(crate::editor::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;

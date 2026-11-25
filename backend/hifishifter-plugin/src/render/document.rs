@@ -400,6 +400,42 @@ pub(crate) enum AssemblyOutcome {
     Deferred,
 }
 
+/// 一条"item 已在宿主里建成、但 ARA 还没认领"的导入。
+///
+/// 【为什么需要一张独立的账】导入命令能观测到的事实只有一条：宿主给了我们一个 item
+/// GUID。它什么时候被 ARA 图认领，由**宿主的**编辑会话决定 —— 现场实测 125~299 ms，
+/// 而命令的回执只有几十毫秒的生命周期。把两件事绑在同一个超时上，唯一的结局是把
+/// 宿主的调度延迟翻译成我们的失败率（用户看到的就是"导入成功了一半"）。
+///
+/// 这张表是"谁还没到"的唯一账本：导入时登记，任何一轮 ARA 图发布都来对一次账，
+/// 对上了就转正并划掉。
+pub(crate) struct PendingImport {
+    /// 宿主 item GUID。
+    pub item: String,
+    /// 导入时写下的源文件路径（波形授权判定要用，见 `pending_import_for_source`）。
+    pub source_path: String,
+    /// 落点轨道（新建轨时为采纳后的清单 guid）。
+    pub landed_track: Option<String>,
+    /// 登记时刻：`after_ms` 与绊线都从它算。
+    pub requested_at: std::time::Instant,
+    /// 经过了多少轮发布。宿主拖得久时这个数会大 —— 它是唯一能回答"等了多久"的读数。
+    pub rounds: u32,
+    /// 已经报过 `stalled`（每一条只报一次）。
+    pub stall_reported: bool,
+}
+
+/// 一次转正：待定导入终于被某一轮 ARA 图（或宿主清单）认领。
+pub(crate) struct ResolvedImport {
+    pub item: String,
+    /// 导入时写下的源文件路径（日志与前端都可能要用；它来自导入命令，不是宿主）。
+    pub source_path: String,
+    /// **未加命名空间**的 clip id（`ara-item-{guid}`）；调用方按自己的 namespace 加前缀。
+    pub clip_id: String,
+    pub landed_track: Option<String>,
+    pub rounds: u32,
+    pub elapsed: std::time::Duration,
+}
+
 #[derive(Default)]
 pub struct DocumentSession {
     controller: AtomicUsize,
@@ -569,6 +605,8 @@ pub struct DocumentSession {
     /// `host_media_reason` 报成真因（`source_read_failed`），而不是含混的
     /// `awaiting_region`。
     pub source_failures: Mutex<HashMap<String, String>>,
+    /// 已经建成、但 ARA 还没认领的导入（见 `PendingImport`）。
+    pub(crate) pending_imports: Mutex<Vec<PendingImport>>,
     /// 本插件拒绝创建 region 的原因（有界环形缓冲，最新的在尾部）。
     ///
     /// 【为什么要单独一张表】"等待宿主音频"是用户可见的唯一状态，而它把两种截然
@@ -2703,6 +2741,136 @@ impl DocumentSession {
     /// 当前登记表快照（清单枚举用；返回副本以免持锁回调宿主）。
     pub(crate) fn adopted_track_ids(&self) -> Vec<String> {
         self.adopted_tracks.lock_or_recover().clone()
+    }
+
+    /// 登记一条待定导入（导入命令在宿主返回 item GUID **之后**调用）。
+    ///
+    /// 【为什么判重】回执可能被重投（媒体文档重开、视图重连）；同一个 item 登记两次
+    /// 只会让 `rounds` 翻倍，读起来像是两件事。
+    pub(crate) fn begin_pending_import(&self, pending: PendingImport) {
+        let mut imports = self.pending_imports.lock_or_recover();
+        if imports.iter().any(|entry| entry.item == pending.item) {
+            return;
+        }
+        imports.push(pending);
+    }
+
+    /// 对账一次，并把转正的每一条记一行、发一条 `import_ready`。
+    pub(crate) fn publish_pending_imports(&self) {
+        let resolved = self.resolve_pending_imports();
+        if resolved.is_empty() {
+            return;
+        }
+        for done in &resolved {
+            // 【为什么要这一行】`[import] pending` 说"登记了"，这一行说"转正了，
+            // 用了多久"。两者之间没有任何别的观测点，现场只能靠这两行的差判断宿主节奏。
+            log::info!(
+                "[import] ready item={} clip={} rounds={} after_ms={} source={}",
+                done.item,
+                done.clip_id,
+                done.rounds,
+                done.elapsed.as_millis(),
+                done.source_path
+            );
+        }
+        if let Some(editor) = self.existing_editor_session() {
+            editor.announce_import_ready(&resolved);
+        }
+    }
+
+    /// 对账一次：把已经被 ARA 图（或宿主清单）认领的待定导入转正，返回本轮转正的条目。
+    ///
+    /// 【两个判据、一个顺序】活着的 region 认领它 ⇒ 有源；否则退到宿主清单 ⇒ 至少
+    /// 画得出占位。这与 `clip_for_host_item` / `gui_clip_for_host_item` 是同一条边，
+    /// 但**不取事务**：本函数会被 `present_host_inventory` 调用，而那条路径的调用方
+    /// 可能已经持有 `transaction`，`std::sync::Mutex` 不可重入。
+    pub(crate) fn resolve_pending_imports(&self) -> Vec<ResolvedImport> {
+        let candidates: Vec<PendingImport> = {
+            let mut imports = self.pending_imports.lock_or_recover();
+            if imports.is_empty() || !self.is_alive() {
+                return Vec::new();
+            }
+            for entry in imports.iter_mut() {
+                entry.rounds = entry.rounds.saturating_add(1);
+            }
+            imports
+                .iter()
+                .map(|entry| PendingImport {
+                    item: entry.item.clone(),
+                    source_path: entry.source_path.clone(),
+                    landed_track: entry.landed_track.clone(),
+                    requested_at: entry.requested_at,
+                    rounds: entry.rounds,
+                    stall_reported: entry.stall_reported,
+                })
+                .collect()
+        };
+        let mut resolved = Vec::new();
+        for entry in candidates {
+            if let Some(clip_id) = self.presented_clip_for_host_item(&entry.item) {
+                resolved.push(ResolvedImport {
+                    item: entry.item,
+                    source_path: entry.source_path,
+                    clip_id,
+                    landed_track: entry.landed_track,
+                    rounds: entry.rounds,
+                    elapsed: entry.requested_at.elapsed(),
+                });
+            }
+        }
+        if resolved.is_empty() {
+            return resolved;
+        }
+        self.pending_imports
+            .lock_or_recover()
+            .retain(|entry| !resolved.iter().any(|done| done.item == entry.item));
+        resolved
+    }
+
+    /// item GUID → 当前时间线里的 clip id（不取事务；见 `publish_pending_imports`）。
+    fn presented_clip_for_host_item(&self, item: &str) -> Option<String> {
+        // 【先快照、再放锁】`region_items` 与 `clip_ids` 分两次取，避免引入一条新的
+        // 锁序边（装配路径是 `clip_ids → transaction`，反向嵌套会构成 ABBA）。
+        let claimed = {
+            let items = self.region_items.lock_or_recover();
+            items
+                .iter()
+                .find(|(_, bound)| bound.as_str() == item)
+                .map(|(key, _)| *key)
+        };
+        if let Some(key) = claimed {
+            if let Some(clip) = self.clip_ids.lock_or_recover().get(&key) {
+                return Some(clip.clone());
+            }
+        }
+        let in_inventory = self.ui_tracks.lock_or_recover().values().any(|track| {
+            track
+                .items
+                .iter()
+                .any(|entry| entry.geometry.item_id == item)
+        });
+        in_inventory.then(|| format!("ara-item-{item}"))
+    }
+
+    /// 取走"等了太久、还没转正"的导入（每一条只报一次，**不改回执、不删占位**）。
+    pub(crate) fn take_stalled_imports(
+        &self,
+        after: std::time::Duration,
+    ) -> Vec<(String, std::time::Duration)> {
+        let mut imports = self.pending_imports.lock_or_recover();
+        let mut stalled = Vec::new();
+        for entry in imports.iter_mut() {
+            if entry.stall_reported {
+                continue;
+            }
+            let elapsed = entry.requested_at.elapsed();
+            if elapsed < after {
+                continue;
+            }
+            entry.stall_reported = true;
+            stalled.push((entry.item.clone(), elapsed));
+        }
+        stalled
     }
 
     /// scope版本参与投影指纹；区域退出后即便edit/model没动也不能接受旧工作区。
