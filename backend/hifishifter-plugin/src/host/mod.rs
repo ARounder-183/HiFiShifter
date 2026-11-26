@@ -17,6 +17,8 @@ pub(crate) mod reentrancy;
 /// "这一次调用已经多久没归还"。前者的证据在 `Drop` 里，而后者的**全部意义**
 /// 是那条永远不会走到 `Drop` 的路径。
 pub(crate) mod stall_watch;
+/// 宿主线程的角色标记：让"这条线程不许取 GUI 锁"成为可判定的事实。
+pub(crate) mod thread_mark;
 
 // 中立门面：通用层（`editor/`、`render/`）只经这里访问宿主原生执行层，不直接命名
 // `reaper`。REAPER 专有的 API / 类型字符串 / 键名全部封在 `reaper/` 内。
@@ -29,4 +31,5 @@ pub(crate) use reaper::{
 pub(crate) use reentrancy::{in_host_call, AraCallbackGuard, HostCallGuard};
 /// 记录"本线程这次宿主调用现在走到哪个阶段"（见 `stall_watch`）。
 pub(crate) use stall_watch::mark as mark_progress;
+pub(crate) use thread_mark::{host_thread_may_not_lock, HostThreadRole, LongLock, RoleGuard};
 pub(crate) mod work_budget;

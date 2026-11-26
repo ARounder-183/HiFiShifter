@@ -743,6 +743,12 @@ impl EditorSession {
         // 拿它去改 DAW 会把一次局部 panic 升级成工程级损坏（S1）。因此这里在恢复即
         // 拒绝本次写回，让用户走"刷新/重开"这条明确的恢复路径，而不是默默写坏。
         // 【为什么不再是 mut】参数线不再在这里搬（见下面那段注释），这份时间线只被读。
+        // 【宿主线程的探针 / 闸】见 `host::thread_mark`。默认只记一行读数；设
+        // `HFS_HOST_LOCK=refuse` 时这里会拒绝，让"宿主线程等长锁"当场可见。
+        if crate::host::host_thread_may_not_lock(crate::host::LongLock::EditorTimeline) {
+            return Err("the host thread must not take the editor timeline; retry from the actor"
+                .to_owned());
+        }
         let (timeline, recovered) = self.timeline.lock_or_recover_checked();
         if recovered {
             hifishifter_kernel::log_limiter::emit_limited_key(

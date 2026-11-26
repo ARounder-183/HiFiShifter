@@ -620,6 +620,20 @@ impl Default for PlayheadGaps {
     }
 }
 
+/// GUI 线程可读的一段片段（见 EditorSession::ui_clips）。
+///
+/// 【为什么不是整份 TimelineState】宿主线程只需要四个数 + 一个身份。整份时间线
+/// 带着参数曲线数组（几十 MB），克隆一次就是一次卡顿 —— 而这条索引是**每次发布**
+/// 都要重建的。
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct UiClip {
+    pub(crate) id: String,
+    pub(crate) track_id: String,
+    pub(crate) start_sec: f64,
+    pub(crate) length_sec: f64,
+    pub(crate) active_take_id: Option<String>,
+}
+
 pub struct EditorSession {
     /// 时间线/参数来源（[`SessionBacking`]）。
     ///
@@ -720,6 +734,18 @@ pub struct EditorSession {
     /// 不该排在那后面。写入点只有 `publish_timeline` / `load_capture_timeline` /
     /// `ensure_loaded` 三处。
     clip_count: AtomicU64,
+    /// GUI 线程可读的片段索引（**锁只持有一次 `Arc` 交换的时间**）。
+    ///
+    /// 【为什么需要它】宿主 UI 线程上有两条命令需要"当前有哪些片段"：
+    /// `close_track_gaps`（算位移）与 `rename_clip_take`（判断是不是 active take）。
+    /// 它们此前直接取 `timeline` —— 而那把锁会被会话 actor 在整份投影期间持有。
+    /// 宿主线程一旦排在那后面，WebView2 就不再被泵消息，而 actor 的投递又需要它泵：
+    /// 这就是现场那条"导入之后宿主未响应 + `plugin_get_apply_state` 超时"的 ABBA。
+    ///
+    /// 【为什么是 `Mutex<Arc<Vec<..>>>` 而不是直接给 `timeline` 加锁助手】这里要守的
+    /// 不是"不取任何锁"，而是**不等待长临界区**。写方只在发布时构造一次索引，读方
+    /// 只克隆一个 `Arc` —— 两个方向的持有时间都是纳秒级，且**永不跨** `post_message`。
+    ui_clips: Mutex<Arc<Vec<UiClip>>>,
     /// 已经**放弃等待**原线分析的根轨道（见 [`RetryState::classify`] 的上限分支）。
     ///
     /// 【为什么需要这份状态】等待本身是对的（原线是渲染的输入之一），但等待必须**有界**：
@@ -1258,6 +1284,7 @@ impl EditorSession {
             revision_bumps_analysis: AtomicU64::new(0),
             last_revision_report: Mutex::new(None),
             clip_count: AtomicU64::new(0),
+            ui_clips: Mutex::new(Arc::new(Vec::new())),
             analysis_abandoned: Mutex::new(std::collections::BTreeSet::new()),
             auto_pitch_write: Mutex::new(AutoPitchWrite::default()),
             suppress_auto_pitch_write: AtomicBool::new(false),
@@ -1377,6 +1404,30 @@ impl EditorSession {
     /// 已发布片段数；健康探活/状态栏用，不取时间线锁。
     pub(crate) fn clip_count(&self) -> u64 {
         self.clip_count.load(Ordering::Acquire)
+    }
+
+    /// 重建并发布 GUI 线程可读的片段索引。
+    ///
+    /// 【调用点】凡是"时间线内容可能变了"的发布点。多调一次只是重建一份几百字节的
+    /// 索引；漏调一次的表现是"关闭间隙算错位 / 改名说不是 active take"。
+    fn publish_ui_clips(&self, timeline: &hifishifter_kernel::state::TimelineState) {
+        let clips = timeline
+            .clips
+            .iter()
+            .map(|clip| UiClip {
+                id: clip.id.clone(),
+                track_id: clip.track_id.clone(),
+                start_sec: clip.start_sec,
+                length_sec: clip.length_sec,
+                active_take_id: clip.active_take_id.clone(),
+            })
+            .collect::<Vec<_>>();
+        *self.ui_clips.lock_or_recover() = Arc::new(clips);
+    }
+
+    /// GUI 线程可读的片段索引快照（**不会等待投影**）。
+    pub(crate) fn ui_clips(&self) -> Arc<Vec<UiClip>> {
+        self.ui_clips.lock_or_recover().clone()
     }
 
     /// 时间线上是否有**可保存的用户内容**（不要求 `is_loaded`）。
@@ -2825,6 +2876,7 @@ impl EditorSession {
                 root.hash(&mut audio);
                 params.pitch_assembly_partial.hash(&mut audio);
             }
+            self.publish_ui_clips(&timeline);
             (timeline.clips.len(), audio.finish())
         };
         self.clip_count.store(clip_count as u64, Ordering::Release);
@@ -3158,6 +3210,7 @@ impl EditorSession {
         }
         self.apply_host_selection(&mut timeline);
         self.publish_duration(timeline.project_sec);
+        self.publish_ui_clips(&timeline);
         self.clip_count
             .store(timeline.clips.len() as u64, Ordering::Release);
         for owner in document.renderer_owners() {
@@ -3475,6 +3528,7 @@ impl EditorSession {
                 }
             }
             self.publish_duration(timeline.project_sec);
+            self.publish_ui_clips(&timeline);
         }
         // 宿主清单已经换成这一轮几何：先做一次参数几何事务，再读派生视图。
         // 失败时不推进版本，下一轮重试同一 delta。

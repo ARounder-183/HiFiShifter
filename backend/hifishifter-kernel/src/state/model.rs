@@ -9641,59 +9641,13 @@ impl TimelineState {
     /// 返回的 `MoveClipPayload` 列表可直接交给 [`TimelineState::move_clips`]
     /// （锁定参数线联动与撤销检查点由调用方决定）。
     pub fn close_track_gaps_moves(&self, track_id: &str, from_sec: f64) -> Vec<MoveClipPayload> {
-        let from_ok = from_sec.is_finite();
-        let mut clips: Vec<&Clip> = self
+        let rows = self
             .clips
             .iter()
-            .filter(|c| c.track_id == track_id)
-            .collect();
-        // 稳定排序：按 start 升序，同起点保持现有顺序。
-        clips.sort_by(|a, b| {
-            a.start_sec
-                .partial_cmp(&b.start_sec)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        let mut moves: Vec<MoveClipPayload> = Vec::new();
-        // cursor：已就位内容（含未受影响部分）的最大尾端，即下一个带间隙
-        // Clip 的对齐目标；初值 0 = 工程最开头。
-        let mut cursor = 0.0f64;
-        // 前一个 Clip 的原始尾端（用于判定原始间距）与其位移（重叠跟随者
-        // 继承同一位移，保持相对间距）。
-        let mut prev_end = f64::NEG_INFINITY;
-        let mut prev_delta = 0.0f64;
-        for clip in clips {
-            let end = clip.start_sec + clip.length_sec;
-            if !from_ok || clip.start_sec <= from_sec {
-                // 点击位置之前（或恰好包含点击位置）的 Clip：不动，只推进游标。
-                cursor = cursor.max(end);
-                prev_end = end;
-                prev_delta = 0.0;
-                continue;
-            }
-            // 与前一个 Clip 的原始间距：正值 = 间隙（闭合），非正值 =
-            // 重叠/紧贴（继承位移，保持原交叠）。
-            let orig_gap = clip.start_sec - prev_end;
-            let delta = if !prev_end.is_finite() || orig_gap > 1e-9 {
-                cursor - clip.start_sec
-            } else {
-                prev_delta
-            };
-            if delta.abs() > 1e-9 {
-                let target = (clip.start_sec + delta).max(0.0);
-                moves.push(MoveClipPayload {
-                    clip_id: clip.id.clone(),
-                    start_sec: target,
-                    track_id: None,
-                });
-                prev_delta = target - clip.start_sec;
-            } else {
-                prev_delta = 0.0;
-            }
-            cursor = cursor.max(clip.start_sec + delta + clip.length_sec);
-            prev_end = end;
-        }
-        moves
+            .filter(|clip| clip.track_id == track_id)
+            .map(|clip| (clip.id.clone(), clip.start_sec, clip.length_sec))
+            .collect::<Vec<_>>();
+        close_track_gaps_moves_from(&rows, from_sec)
     }
 
     /// 应用静音切除变换：对每个 Clip 在静音边界切分（复用 [`Self::split_clip`]
@@ -13055,4 +13009,58 @@ mod timeline_fingerprint_tests {
         selected.selected_clip_id = Some("ara-item-a".into());
         assert_ne!(timeline_fingerprint(&selected), base);
     }
+}
+
+/// 关闭间隙的**纯**计算：只需要片段的 `(id, start, length)`。
+///
+/// 【为什么把算法抽出来】同一个决定有两个调用点：一是 actor（持着时间线），二是宿主
+/// UI 线程（只能读一份**锁自由**的片段索引 —— 它绝不能去取 actor 的时间线锁，那正是
+/// "宿主线程不取 GUI 锁"这条不变量的落点）。算法留一份，两条路才不可能分叉。
+///
+/// 语义与 [`TimelineState::close_track_gaps_moves`] 逐字相同（见那里的说明）。
+pub fn close_track_gaps_moves_from(
+    clips: &[(String, f64, f64)],
+    from_sec: f64,
+) -> Vec<MoveClipPayload> {
+    let from_ok = from_sec.is_finite();
+    // 稳定排序：按 start 升序，同起点保持现有顺序。
+    let mut ordered = clips.to_vec();
+    ordered.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut moves: Vec<MoveClipPayload> = Vec::new();
+    // cursor：已就位内容（含未受影响部分）的最大尾端，即下一个带间隙 Clip 的对齐目标；
+    // 初值 0 = 工程最开头。
+    let mut cursor = 0.0f64;
+    // 前一个 Clip 的原始尾端（判定原始间距）与其位移（重叠跟随者继承同一位移）。
+    let mut prev_end = f64::NEG_INFINITY;
+    let mut prev_delta = 0.0f64;
+    for (id, start_sec, length_sec) in ordered {
+        let end = start_sec + length_sec;
+        if !from_ok || start_sec <= from_sec {
+            // 点击位置之前（或恰好包含点击位置）的 Clip：不动，只推进游标。
+            cursor = cursor.max(end);
+            prev_end = end;
+            prev_delta = 0.0;
+            continue;
+        }
+        let orig_gap = start_sec - prev_end;
+        let delta = if !prev_end.is_finite() || orig_gap > 1e-9 {
+            cursor - start_sec
+        } else {
+            prev_delta
+        };
+        if delta.abs() > 1e-9 {
+            let target = (start_sec + delta).max(0.0);
+            moves.push(MoveClipPayload {
+                clip_id: id,
+                start_sec: target,
+                track_id: None,
+            });
+            prev_delta = target - start_sec;
+        } else {
+            prev_delta = 0.0;
+        }
+        cursor = cursor.max(start_sec + delta + length_sec);
+        prev_end = end;
+    }
+    moves
 }

@@ -17,7 +17,6 @@
 use super::port::{EditorPort, NativeWindow};
 use super::protocol;
 use crate::editor::host_key_relay;
-use crate::sync::MutexExt;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -1113,6 +1112,9 @@ pub(crate) fn ui_tick(state: &Rc<RefCell<EditorClient>>) {
 }
 
 pub(crate) fn tick(state: &Rc<RefCell<EditorClient>>) {
+    // 视图节拍同样是宿主 UI 线程（见 host::thread_mark）。
+    let _host_thread =
+        crate::host::RoleGuard::enter(crate::host::HostThreadRole::ViewTimer);
     ui_tick(state);
     host_heartbeat();
     push_transport(state);
@@ -1779,6 +1781,10 @@ pub(crate) fn bootstrap_json(
 /// `rename_clip_take` 三条命令的改写只依赖时间线与路由（不依赖任何平台 API），
 /// 而它们改的是**同一条**前端命令的语义。放到平台侧就等于三份拷贝。
 pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
+    // 【宿主线程标记】这里是 WebView2 / WebKit 的消息回调 —— 宿主 UI 线程。有了这一位，
+    // "本线程不得等长锁"就从一条注释变成可判定的事实（见 host::thread_mark）。
+    let _host_thread =
+        crate::host::RoleGuard::enter(crate::host::HostThreadRole::WebView);
     // 【为什么这三处早退各留一行】它们是「命令到底到没到」这个问题上唯一的盲区：
     // 命令既没被接受、也没被拒绝，在日志里与「从未发送」完全同形。此前三处都是裸
     // `return`，于是一次「点了没反应」无从归因。
@@ -1902,12 +1908,20 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
         let track = request["args"]["trackId"].as_str().unwrap_or("").to_owned();
         let from = request["args"]["fromSec"].as_f64().unwrap_or(f64::NAN);
         let link = state.borrow().link.clone();
+        // 【为什么不取 `editor.timeline`】这里是 WebView2 的消息回调 —— **宿主 UI 线程**。
+        // 那把锁会被会话 actor 在整份投影期间持有；宿主线程排在那后面就不再泵消息，
+        // 而 actor 的投递又需要它泵。这正是"导入之后宿主未响应 + plugin_get_apply_state
+        // 超时"那条 ABBA。改成读一份**锁自由**的片段索引：读方只克隆一个 Arc，持有时间
+        // 是纳秒级，且永不跨 `post_message`。
         if let Ok(owner) = link.owner() {
-            if let Ok(editor) = owner.editor_session() {
-                let moves = editor
-                    .timeline
-                    .lock_or_recover()
-                    .close_track_gaps_moves(&track, from);
+            if let Some(editor) = owner.existing_editor_session() {
+                let clips = editor.ui_clips();
+                let rows = clips
+                    .iter()
+                    .filter(|clip| clip.track_id == track)
+                    .map(|clip| (clip.id.clone(), clip.start_sec, clip.length_sec))
+                    .collect::<Vec<_>>();
+                let moves = hifishifter_kernel::state::close_track_gaps_moves_from(&rows, from);
                 request["command"] = if moves.is_empty() {
                     serde_json::json!("get_timeline_state")
                 } else {
@@ -1927,11 +1941,10 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
         let name = request["args"]["name"].as_str().unwrap_or("").to_owned();
         let link = state.borrow().link.clone();
         if let Ok(owner) = link.owner() {
-            if let Ok(editor) = owner.editor_session() {
-                let active = editor
-                    .timeline
-                    .lock_or_recover()
-                    .clips
+            // 【同 `close_track_gaps`：这里也不许取时间线锁】见那里的说明。
+            if let Some(editor) = owner.existing_editor_session() {
+                let clips = editor.ui_clips();
+                let active = clips
                     .iter()
                     .find(|clip| clip.id == clip_id)
                     .and_then(|clip| clip.active_take_id.clone());

@@ -117,4 +117,12 @@ Invoke-Gate 'Touch coverage gate' { python scripts/checks/check-touch-coverage.p
 # only when the crate holding it is built, and src-tauri is not in the fast test loop.
 Invoke-Gate 'Gain layer gate' { python scripts/checks/check-gain-layers.py }
 
+# The host calls us synchronously on its own UI thread, and the WebView2 delivery we wait
+# on only advances while that thread pumps. A handler that takes the session's timeline
+# lock therefore waits for the actor, while the actor's post waits for the host to pump:
+# the field symptom is "REAPER stopped responding" plus a red BackendInvokeError strip,
+# and neither is a compile error. The gate also pins the ARA callbacks, which run on the
+# host's model thread for the same reason.
+Invoke-Gate 'Host thread lock gate' { python scripts/checks/check-host-thread-locks.py }
+
 Write-Host 'All static gates passed.' -ForegroundColor Green

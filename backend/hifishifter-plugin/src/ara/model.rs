@@ -1141,6 +1141,7 @@ impl DocumentLifecycle for ModelHandle {
     /// `destroy/create_playback_region`、`update_audio_source_content` 各自负责。
     /// 会话本身只需要被**记录**下来，供会话侧把"会话中的未就绪窗口"识别为暂缓。
     fn begin_editing(&mut self, _document: &mut Self::Document) -> Result<(), AraError> {
+        let _host_thread = crate::host::RoleGuard::enter(crate::host::HostThreadRole::AraModel);
         let _callback = crate::host::AraCallbackGuard::enter("begin_editing");
         self.service_model_thread();
         self.editing = true;
@@ -1162,6 +1163,7 @@ impl DocumentLifecycle for ModelHandle {
         // 【为什么要量这一层】ARA 回调是宿主**直接**进入我们的代码，占住的正是宿主主
         // 线程。超过 1 s 就会让 Windows 把窗口画成"未响应"，而日志里此前只有"发布了
         // 什么"，没有"花了多久"。
+        let _host_thread = crate::host::RoleGuard::enter(crate::host::HostThreadRole::AraModel);
         let _callback = crate::host::AraCallbackGuard::enter("end_editing");
         crate::host::mark_progress("end_editing:prune_source_reads");
         self.source_reads.retain(|_, job| !job.finished());
@@ -1187,6 +1189,7 @@ impl DocumentLifecycle for ModelHandle {
     }
 
     fn flush_pending_model_updates(&mut self) -> bool {
+        let _host_thread = crate::host::RoleGuard::enter(crate::host::HostThreadRole::AraModel);
         self.service_model_thread();
         if !self.model_dirty {
             return false;
