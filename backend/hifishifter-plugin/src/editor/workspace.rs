@@ -546,7 +546,6 @@ impl FadeProjection {
     pub(crate) fn covered(&self) -> usize {
         self.clips.len()
     }
-
 }
 
 /// 把一份稀疏淡变补丁盖到时间线上。
@@ -4811,7 +4810,10 @@ mod tests {
         };
         apply_fade_projection(&mut timeline, &projection, "ui-");
         assert_eq!(timeline.clips[0].fade_in_sec, 0.9, "覆盖到的那条按宿主更新");
-        assert_eq!(timeline.clips[1].fade_in_sec, 0.25, "没覆盖到的那条一个字都不许动");
+        assert_eq!(
+            timeline.clips[1].fade_in_sec, 0.25,
+            "没覆盖到的那条一个字都不许动"
+        );
         assert_eq!(timeline.clips[1].fade_out_sec, 0.5);
         assert_eq!(timeline.clips[1].auto_fade_in_sec, 0.1);
         assert_eq!(timeline.clips[1].snap_offset_sec, 0.125);
@@ -4855,7 +4857,10 @@ mod tests {
             clips: std::collections::BTreeMap::new(),
         };
         assert_eq!(projection.covered(), 0);
-        assert!(projection.clips.is_empty(), "空补丁必须是空的，不是一份全 0 的时间线");
+        assert!(
+            projection.clips.is_empty(),
+            "空补丁必须是空的，不是一份全 0 的时间线"
+        );
         apply_fade_projection(&mut after, &projection, "ui-");
         for (left, right) in before.clips.iter().zip(after.clips.iter()) {
             assert_eq!(left.fade_in_sec, right.fade_in_sec);

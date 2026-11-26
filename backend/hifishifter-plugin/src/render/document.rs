@@ -2385,7 +2385,9 @@ impl DocumentSession {
         if presented > 0 {
             // 与上面同一档：它是「这一轮有多少条 clip 的淡变靠继承活了下来」。
             // 拖动期间每轮都 > 0 是**正常**的（装配每轮重跑一次），不是故障。
-            log::debug!("[ara] carried the published fades of {presented} clip(s) across this rebuild");
+            log::debug!(
+                "[ara] carried the published fades of {presented} clip(s) across this rebuild"
+            );
         }
         // 这一轮已经把**当前**两份输入都消费掉了（含中途到达的那一份）。
         self.assembly_dirty.store(false, Ordering::Release);

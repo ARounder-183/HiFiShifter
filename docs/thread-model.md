@@ -416,3 +416,59 @@ guard，并在函数末尾调**待定导入对账**；对账为了回答"这条 
 
 判据不是我发明的：`D_FADE*LEN_AUTO` 的定义就是"REAPER 为自动交叉淡化预留的长度"，
 独立 App 的 `.rpp` 解析器早已按同一条语义把 auto 与 manual 分开。
+
+### 10.4 一次发布必须把它推导不出来的东西一起带走
+
+第八轮的两条现象各自都不是"某个判断写错了"，而是**一个发布动作只做了一半**。
+
+#### 淡变：装配不是淡变的权威
+
+装配的输入（`ItemRow`）只有几何与媒体身份 —— `guid / track_id / name / start_sec /
+length_sec / takes / active_take / loop_source / muted / gain`。淡变与吸附偏移**不在
+其中**。而装配在每一次清单刷新后重跑（拖动 item 期间约 4.5 次/秒），于是"发布一条
+clip"这个动作每一轮都把它们的值写成 serde 默认值 0。
+
+修法有两条，缺一不可：
+
+| 规则 | 做法 | 为什么 |
+|---|---|---|
+| A | `assembly::inherit_presentation` 把上一轮**已发布**的同 id clip 的呈现字段借过来 | 装配产出的那十一个字段是"没有观测"，不是"观测到 0" |
+| B | `FadeProjection` 是**稀疏补丁**：只有宿主几何这一轮说得出来的 clip 在里面 | "没有答案"与"答案是 0"必须在类型上分开 |
+| C | `apply_fade_projection` 只改补丁里出现过的 clip | 覆盖不到的保持清单刚写下的宿主真值 |
+
+`ui_fade_projection` 因此不再克隆整份工作区时间线（含全部 clip / take / 参数）只为拷
+十二个浮点数 —— 而那份克隆的淡变值在装配重跑之后正是 0。
+
+#### 锚点：一个数的位置，不能回答它是什么
+
+`AnchorPolicy::Auto` 原先只问一件事：宿主首块 `projectTimeSamples` 落在片段的工程
+窗口里吗。预览里它是播放头，判据成立；`Render As` 里 VEGAS 把它钉在**上一次的光标**
+上，而光标通常正落在片段里 —— 于是判据给出 `project_zero = cursor`，整条渲染平移
+`cursor − 渲染起点`，覆盖不到的部分直通宿主干声。
+
+捕获通路能**量**出位置：录制下来的干声就在我们手上，而 Render As 喂进来的还是同一份。
+
+| 规则 | 做法 | 为什么 |
+|---|---|---|
+| 索引 | `TapeEnvelope`：每 64 帧一格 RMS，`hop < 最小宿主块` | 第七轮把 hop 写成 1024，一块折不出两格，探测一次都不跑 |
+| 同代 | `TapeProbe { envelope, samples }` 一次 `Arc` 换指针 | 包络与样本不同代 ⇒ 一个自洽但错误的偏移 |
+| 判决 | 格级**提名**，样本级**判决** | 15 格 RMS 的相关系数标准差约 0.26；960 个样本是 0.03 |
+| 定稿 | 每条喂入流只赋值一次；静音块不消耗机会 | 中途重锚等于在产物中间切一刀 |
+
+`AnchorSource::Content` 是第三个来源，与 `Playhead` / `Clip` 并列：前两个回答"宿主说的
+这个数落在窗口里吗"，它回答"这段内容在素材的哪一处"。
+
+### 10.5 读数必须能回答"这一次到底发生了什么"
+
+两条现象在现场都只能靠用户复述（"闪了一下"、"偏移跟着光标跑"），因为日志里没有
+任何一行说出"我们发了什么"。第八轮补的三处读数都遵循同一条纪律：**一行日志必须能
+否证一个假设**。
+
+| 读数 | 位置 | 它否证什么 |
+|---|---|---|
+| `[ara] fade projection: N of M` | `refresh_ui_geometry`（部分覆盖 WARN，全零 DEBUG） | "这一轮到底有没有几何" |
+| `[ara] fades: clips=… min_in=…`（`HFS_FADE_TRACE=1`） | 同上 | "发出去的那一帧是不是 0" |
+| `[capture] anchor probe: … verdict=… offset=… score=… second=…@… hint=… policy=…` | `note_stream_probe` | "为什么这次没按内容判" |
+
+`feed begin` 只**增加**一个字段（`probe=score/second@offset`），既有字段一个不动 ——
+现场笔记里已有的判读方法（`project=` / `anchor=`）继续成立。

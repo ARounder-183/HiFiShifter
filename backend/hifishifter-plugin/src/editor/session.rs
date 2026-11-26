@@ -7823,7 +7823,10 @@ pub mod tests {
                 .collect::<Vec<_>>();
             assert!(!zeroed.is_empty(), "装配必须为清单里的 item 产出一条 clip");
             for clip in zeroed {
-                assert_eq!(clip.fade_in_sec, 0.0, "装配产物的淡变是「没有观测」，不是观测到 0");
+                assert_eq!(
+                    clip.fade_in_sec, 0.0,
+                    "装配产物的淡变是「没有观测」，不是观测到 0"
+                );
             }
         }
         let editor = owners[0].editor_session().unwrap();

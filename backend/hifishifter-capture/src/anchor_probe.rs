@@ -297,7 +297,10 @@ pub fn probe_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         !matches!(
-            std::env::var("HFS_CAPTURE_PROBE").ok().as_deref().map(str::trim),
+            std::env::var("HFS_CAPTURE_PROBE")
+                .ok()
+                .as_deref()
+                .map(str::trim),
             Some("off") | Some("0") | Some("false")
         )
     })
@@ -335,17 +338,19 @@ pub fn locate(
     let cells = available / hop;
     let mut block_cells = [0.0_f32; MAX_BLOCK_CELLS];
     let mut peak = 0.0_f32;
-    for index in 0..cells {
+    for (index, cell) in block_cells.iter_mut().enumerate().take(cells) {
         let mut sum = 0.0_f64;
         for offset in 0..hop {
             let value = f64::from(block.mono(index * hop + offset));
             sum += value * value;
         }
         let rms = (sum / hop as f64).sqrt() as f32;
-        block_cells[index] = rms;
+        *cell = rms;
         peak = peak.max(rms);
     }
-    if !(peak >= PROBE_MIN_RMS) {
+    // 【NaN 也算「没有信号」】`peak` 是平方和开根，理论上不会是 NaN；但一旦是，
+    // 任何比较都为假，那时把它当成「有信号」会让后续全部判定失去意义。
+    if peak < PROBE_MIN_RMS || !peak.is_finite() {
         return ProbeVerdict::undecided(ProbeReason::Silent, cells * hop);
     }
     if envelope.values.len() < cells {
@@ -423,9 +428,7 @@ pub fn locate(
     let second_offset = ranking
         .second
         .map_or(0, |(_, cell)| {
-            envelope
-                .origin
-                .saturating_add(cell as i64 * hop as i64)
+            envelope.origin.saturating_add(cell as i64 * hop as i64)
         })
         .saturating_sub(block.frames_before);
     let Some((best_score, best_cell)) = ranking.best else {
@@ -505,7 +508,7 @@ impl Candidates {
         }
         // 【只去重**同一个**格】±1 格是**不同**的候选：样本级评分对 64 帧的位移极其
         // 敏感（相关性直接掉到 0），所以「相邻格反正一样」这个假设在这里是错的。
-        if self.cells[..self.len].iter().any(|known| *known == cell) {
+        if self.cells[..self.len].contains(&cell) {
             return;
         }
         self.cells[self.len] = cell;
@@ -816,7 +819,11 @@ mod tests {
             verdict.offset, ORIGIN,
             "内容说这一块在片段起点，宿主读数（{cursor}）只是上一次的光标"
         );
-        assert!(verdict.score > 0.9, "非周期素材必须高相关：{}", verdict.score);
+        assert!(
+            verdict.score > 0.9,
+            "非周期素材必须高相关：{}",
+            verdict.score
+        );
         assert!(
             verdict.score - verdict.second > PROBE_MIN_MARGIN,
             "次优必须明显更低：{} vs {}",
@@ -895,8 +902,16 @@ mod tests {
             ProbeOutcome::Undecided(ProbeReason::Ambiguous)
         );
         assert_eq!(verdict.reason().map(ProbeReason::as_str), Some("ambiguous"));
-        assert!(verdict.score > 0.0, "相似度读数必须如实给出：{}", verdict.score);
-        assert!(verdict.second > 0.0, "次优读数必须如实给出：{}", verdict.second);
+        assert!(
+            verdict.score > 0.0,
+            "相似度读数必须如实给出：{}",
+            verdict.score
+        );
+        assert!(
+            verdict.second > 0.0,
+            "次优读数必须如实给出：{}",
+            verdict.second
+        );
     }
 
     /// **不变量：洞里的内容永远不算"对上了"。**
@@ -906,10 +921,7 @@ mod tests {
     #[test]
     fn a_tape_with_a_hole_is_never_matched_inside_the_hole() {
         let left = noise(4 * RATE as usize, 17);
-        let covered = vec![
-            ORIGIN..ORIGIN + RATE,
-            ORIGIN + 2 * RATE..ORIGIN + 4 * RATE,
-        ];
+        let covered = vec![ORIGIN..ORIGIN + RATE, ORIGIN + 2 * RATE..ORIGIN + 4 * RATE];
         let tape = tape(left, covered);
         let start = RATE as usize + 24_000;
         let block = block_of(&tape, start, BLOCK);
@@ -918,7 +930,10 @@ mod tests {
             verdict.outcome,
             ProbeOutcome::Undecided(ProbeReason::NoMaterial)
         );
-        assert_eq!(verdict.reason().map(ProbeReason::as_str), Some("no-material"));
+        assert_eq!(
+            verdict.reason().map(ProbeReason::as_str),
+            Some("no-material")
+        );
     }
 
     /// **不变量：太短的块不判。**
@@ -942,8 +957,9 @@ mod tests {
             (HOP_FRAMES as usize) < 848,
             "hop 必须小于 VEGAS 的最小块长 848，否则一块折不出两格"
         );
+        let smallest_host_block = 848_usize;
         assert!(
-            PROBE_MIN_FRAMES <= 848,
+            PROBE_MIN_FRAMES <= smallest_host_block,
             "判定门槛必须能被一个 848 帧的宿主块满足"
         );
     }

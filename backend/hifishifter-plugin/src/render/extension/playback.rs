@@ -280,6 +280,36 @@ impl ExtensionOwner {
         }
     }
 
+    /// 与 [`Self::note_stream_geometry_probed`] 相同，但不给样本。
+    ///
+    /// 【为什么只在测试构建里存在】生产路径只有 `capture_observe_block` 一条，而它永远
+    /// 带着样本。留一个非测试的 `None` 版本等于给下一个人一个「忘传样本也能编译」的
+    /// 入口 —— 那个入口在产物上的表现是「内容判定永远不跑」，与「跑过但没找到」同形。
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn note_stream_geometry(
+        &self,
+        stream: ProcessStream,
+        raw_start: i64,
+        frames: usize,
+        rate: f64,
+        time: StreamTime,
+        playing_rising: bool,
+        recording_rising: bool,
+        playing: bool,
+    ) -> StreamBlock {
+        self.note_stream_geometry_probed(
+            stream,
+            raw_start,
+            frames,
+            rate,
+            time,
+            playing_rising,
+            recording_rising,
+            playing,
+            None,
+        )
+    }
     /// 每流几何 + 有效位置 + 相位。音频线程调用：只读写原子，不分配。
     ///
     /// # 三条规则（没有第四条，也没有任何预算）
@@ -330,36 +360,9 @@ impl ExtensionOwner {
     /// 实测 VEGAS 在 Capture 播放期间会让 `projectTimeSamples` 停住不动。那时
     /// "每块前进 frames"是唯一自洽的换算 —— 它是合法记账，不是猜测。把它删掉不会让
     /// 宿主变好，只会让 take 变成一大片洞。
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn note_stream_geometry(
-        &self,
-        stream: ProcessStream,
-        raw_start: i64,
-        frames: usize,
-        rate: f64,
-        time: StreamTime,
-        playing_rising: bool,
-        recording_rising: bool,
-        playing: bool,
-    ) -> StreamBlock {
-        self.note_stream_geometry_probed(
-            stream,
-            raw_start,
-            frames,
-            rate,
-            time,
-            playing_rising,
-            recording_rising,
-            playing,
-            None,
-        )
-    }
-
-    /// 与 [`Self::note_stream_geometry`] 相同，但把**这一块的样本**交给内容定位。
     ///
-    /// 【为什么与 `note_stream_block_at` 同一手法】`probe` 只有 `capture_observe_block`
-    /// 一条生产路径能提供；把它做成必填参数会让十七个测试调用点各写一个 `None`，而
-    /// 将来某次改签名时那些 `None` 会被静默抄进生产路径。
+    /// 【`probe` 只有一条生产路径能给】`capture_observe_block` 手上才有这一块的样本；
+    /// 其余入口（离线 pass、测试）传 `None`，那时行为与第七轮逐字相同。
     #[allow(clippy::too_many_arguments)]
     pub(super) fn note_stream_geometry_probed(
         &self,
@@ -1437,7 +1440,6 @@ impl ExtensionOwner {
             }
         }
     }
-
 
     /// 本喂入流的锚点：**首块选一次**，之后每块只读原子量。
     ///

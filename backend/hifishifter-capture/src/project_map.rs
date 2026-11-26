@@ -465,7 +465,11 @@ fn earliest_segment(segments: &[ProjectMapSegment]) -> Option<&ProjectMapSegment
 /// 【`feed_end` 怎么算】它回答「这条流还能走多远」，因此必须是**这一片剩余的长度**：
 /// `segment.project_end() - offset`。用片段的整段长度会让流走出片段之后仍然「有映射」，
 /// 输出把片段之后的内容当成片段的一部分继续处理 —— 那比直通糟得多。
-fn anchor_at(segments: &[ProjectMapSegment], offset: i64, frames_before: i64) -> Option<FeedAnchor> {
+fn anchor_at(
+    segments: &[ProjectMapSegment],
+    offset: i64,
+    frames_before: i64,
+) -> Option<FeedAnchor> {
     let here = offset.saturating_add(frames_before);
     let segment = segments
         .iter()
