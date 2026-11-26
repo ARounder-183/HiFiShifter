@@ -423,6 +423,9 @@ impl ExtensionOwner {
             // 没有素材（清空 / 还没录 / 全是静音）：撤掉指针，让仲裁落到透传。
             self.raw_tape.clear();
             self.raw_tape_revision.store(0, Ordering::Release);
+            // 【定位器必须跟着撤】留着它，下一条喂入流会拿**上一份素材**去比对，
+            // 得到的偏移自洽但完全错误 —— 比没有偏移糟得多。
+            self.capture.clear_tape_probe();
             return;
         }
         let revision = self.capture.revision();
@@ -440,8 +443,16 @@ impl ExtensionOwner {
             );
             return;
         }
-        match self.raw_tape.publish(snapshot) {
-            Ok(()) => self.raw_tape_revision.store(revision, Ordering::Release),
+        // 【一次发布，两样东西】包络与样本必须同代（见 `anchor_probe::TapeProbe`）。
+        // `publish_shared` 是这里唯一能同时做到「发布」与「留下一个 Arc 给定位器」的
+        // 入口；`raw_tape()` 已经 `compact_mono` 过，所以不走 `publish` 那条会原地改
+        // 缓冲的路径。
+        let snapshot = std::sync::Arc::new(snapshot);
+        match self.raw_tape.publish_shared(snapshot.clone()) {
+            Ok(()) => {
+                self.raw_tape_revision.store(revision, Ordering::Release);
+                self.capture.publish_tape_probe(snapshot);
+            }
             Err(error) => log::warn!("[capture] raw tape publish failed: {error:?}"),
         }
     }

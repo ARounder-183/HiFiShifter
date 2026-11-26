@@ -205,6 +205,7 @@ pub fn capture_anchor_mode() -> crate::project_map::AnchorPolicy {
         {
             Some("playhead") => AnchorPolicy::Playhead,
             Some("clip") => AnchorPolicy::Clip,
+            Some("content") => AnchorPolicy::Content,
             Some("auto") | None => AnchorPolicy::Auto,
             Some(other) => {
                 log::warn!(

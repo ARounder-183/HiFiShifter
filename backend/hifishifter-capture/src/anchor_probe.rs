@@ -432,12 +432,18 @@ pub fn locate(
         return ProbeVerdict::undecided(ProbeReason::NoMaterial, window);
     };
     let second_score = ranking.second.map_or(0.0, |(score, _)| score.max(0.0));
+    // 【未决也要报出「最像的那一处」】`verdict=undecided` 那一行必须带得动现场标定：
+    // 没有 offset 与分数，阈值就只能靠猜。
+    let best_offset = envelope
+        .origin
+        .saturating_add(best_cell as i64 * hop as i64)
+        .saturating_sub(block.frames_before);
     // ③ 「对不上任何一处」与「对上好几处」是两个不同的结论，必须分开报：
     //    前者说明素材在这一段没有覆盖（洞 / 换了媒体），后者说明素材是周期性的。
     if best_score < probe_min_score() {
         return ProbeVerdict {
             outcome: ProbeOutcome::Undecided(ProbeReason::NoMaterial),
-            offset: 0,
+            offset: best_offset,
             score: best_score,
             second: second_score,
             second_offset,
@@ -447,7 +453,7 @@ pub fn locate(
     if best_score - second_score < PROBE_MIN_MARGIN {
         return ProbeVerdict {
             outcome: ProbeOutcome::Undecided(ProbeReason::Ambiguous),
-            offset: 0,
+            offset: best_offset,
             score: best_score,
             second: second_score,
             second_offset,

@@ -114,6 +114,7 @@ impl ExtensionOwner {
     }
 
     /// 与 note_stream_block 相同，但允许调用方给出**本地有效位置**（离线 cursor）。
+    #[cfg(test)]
     pub(super) fn note_stream_block_at(
         &self,
         stream: ProcessStream,
@@ -123,13 +124,41 @@ impl ExtensionOwner {
         recording_rising: bool,
         effective_position: Option<i64>,
     ) -> StreamBlock {
+        self.note_stream_block_at_probed(
+            stream,
+            context,
+            frames,
+            playing_rising,
+            recording_rising,
+            effective_position,
+            None,
+        )
+    }
+
+    /// 与 [`Self::note_stream_block_at`] 相同，但把**这一块的样本**一起交出去。
+    ///
+    /// 【为什么单独一个入口】`probe` 是内容定位的输入，而它只有一条生产路径
+    /// （`capture_observe_block`）能提供 —— 测试与离线 pass 都没有。把它做成必填参数会
+    /// 让五个测试调用点各自写一个 `None`，而那个 `None` 在将来某一次改签名时会被静默
+    /// 抄成生产路径的值。
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn note_stream_block_at_probed(
+        &self,
+        stream: ProcessStream,
+        context: impl Into<crate::block_context::BlockContext>,
+        frames: usize,
+        playing_rising: bool,
+        recording_rising: bool,
+        effective_position: Option<i64>,
+        probe: Option<hifishifter_capture::anchor_probe::ProbeBlock<'_>>,
+    ) -> StreamBlock {
         let context = context.into();
         let rate = if context.sample_rate.is_finite() && context.sample_rate > 0.0 {
             context.sample_rate
         } else {
             self.setup_sample_rate()
         };
-        self.note_stream_geometry(
+        self.note_stream_geometry_probed(
             stream,
             effective_position.unwrap_or(context.project_time_samples),
             frames,
@@ -140,6 +169,7 @@ impl ExtensionOwner {
             // kPlaying 是 SDK 对"transport 是否在走"的权威回答，与位置、采样率、
             // 样本同属**同一个块**。计数器的推进权必须以它为准（见 may_advance）。
             context.playing,
+            probe,
         )
     }
 
@@ -311,6 +341,37 @@ impl ExtensionOwner {
         playing_rising: bool,
         recording_rising: bool,
         playing: bool,
+    ) -> StreamBlock {
+        self.note_stream_geometry_probed(
+            stream,
+            raw_start,
+            frames,
+            rate,
+            time,
+            playing_rising,
+            recording_rising,
+            playing,
+            None,
+        )
+    }
+
+    /// 与 [`Self::note_stream_geometry`] 相同，但把**这一块的样本**交给内容定位。
+    ///
+    /// 【为什么与 `note_stream_block_at` 同一手法】`probe` 只有 `capture_observe_block`
+    /// 一条生产路径能提供；把它做成必填参数会让十七个测试调用点各写一个 `None`，而
+    /// 将来某次改签名时那些 `None` 会被静默抄进生产路径。
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn note_stream_geometry_probed(
+        &self,
+        stream: ProcessStream,
+        raw_start: i64,
+        frames: usize,
+        rate: f64,
+        time: StreamTime,
+        playing_rising: bool,
+        recording_rising: bool,
+        playing: bool,
+        probe: Option<hifishifter_capture::anchor_probe::ProbeBlock<'_>>,
     ) -> StreamBlock {
         let geometry = &self.streams[stream.index()];
         geometry.blocks.fetch_add(1, Ordering::Relaxed);
@@ -835,11 +896,19 @@ impl ExtensionOwner {
         let mut project_position = position;
         if feed_local {
             let tape_position = i64::try_from(decision.tape_frames_before).unwrap_or(i64::MAX);
-            project_position = self.project_position_for_stream(
+            // 【`frames_before` 就是这一块的喂入域起点】`capture_observe_block` 交上来
+            // 的 `ProbeBlock` 只知道样本，不知道它在喂入域的哪里；那个数只有这里知道
+            // （它是 `TapeCursor` 在**本块之前**的计数）。
+            let probe = probe.map(|probe| hifishifter_capture::anchor_probe::ProbeBlock {
+                frames_before: tape_position,
+                ..probe
+            });
+            project_position = self.project_position_for_stream_probed(
                 stream,
                 tape_position,
                 session.tape.first_raw,
                 raw_start,
+                probe,
             );
             position = tape_position;
             geometry.anchor.store(position, Ordering::Release);
@@ -985,13 +1054,19 @@ impl ExtensionOwner {
                     // —— 于是"这一块到底被当成工程哪一段"只能靠读者自己算。
                     log::info!(
                         "[capture] feed begin kind=pinned raw={} tape={} frames={} project={} \
-                         mapping={} anchor={} first_raw={}",
+                         mapping={} anchor={} probe={} first_raw={}",
                         raw_start,
                         decision.tape_frames_before,
                         frames,
                         format_project_position(project_position),
                         format_project_mapping(project_position),
                         format_anchor_source(geometry.anchor_source.load(Ordering::Acquire)),
+                        format_probe(
+                            geometry.anchor_score.load(Ordering::Acquire),
+                            geometry.anchor_second.load(Ordering::Acquire),
+                            geometry.anchor_probe_offset.load(Ordering::Acquire),
+                            geometry.anchor_source.load(Ordering::Acquire),
+                        ),
                         session.tape.first_raw,
                     );
                 } else {
@@ -1008,6 +1083,12 @@ impl ExtensionOwner {
                     geometry
                         .anchor_first_raw
                         .store(NO_POSITION, Ordering::Release);
+                    // 【探测读数跟着作废】它们描述的是**上一条**喂入流。留着会让下一条流
+                    // 的 `feed begin` 报出一份属于别人的分数。
+                    geometry.anchor_score.store(0, Ordering::Release);
+                    geometry.anchor_second.store(0, Ordering::Release);
+                    geometry.anchor_probe_offset.store(0, Ordering::Release);
+                    geometry.anchor_probe_logged.store(0, Ordering::Release);
                 }
             } else if decision.feed == FeedKind::Pinned {
                 geometry.feed_blocks.fetch_add(1, Ordering::Relaxed);
@@ -1318,6 +1399,7 @@ impl ExtensionOwner {
     ///
     /// 【为什么锚点要按流存】几何是每流一份的（`feed_frames_total` 也是），三条流各有
     /// 自己的喂入流。锚点若只有一份，prefetch / offline 的喂入会复用实时流那一条的零点。
+    #[cfg(test)]
     pub(super) fn project_position_for_stream(
         &self,
         stream: ProcessStream,
@@ -1325,12 +1407,26 @@ impl ExtensionOwner {
         first_raw: i64,
         hint: i64,
     ) -> i64 {
+        self.project_position_for_stream_probed(stream, tape_frame, first_raw, hint, None)
+    }
+
+    /// 与 [`Self::project_position_for_stream`] 相同，但把**这一块的样本**交给内容探测。
+    fn project_position_for_stream_probed(
+        &self,
+        stream: ProcessStream,
+        tape_frame: i64,
+        first_raw: i64,
+        hint: i64,
+        probe: Option<hifishifter_capture::anchor_probe::ProbeBlock<'_>>,
+    ) -> i64 {
         use hifishifter_capture::transport::{capture_map_mode, CaptureMapMode};
         match capture_map_mode() {
-            CaptureMapMode::Clip => self
-                .feed_anchor(stream, first_raw, hint)
-                .and_then(|anchor| anchor.project(tape_frame))
-                .unwrap_or(NO_POSITION),
+            CaptureMapMode::Clip => {
+                let (anchor, _verdict) = self.feed_anchor(stream, first_raw, hint, probe);
+                anchor
+                    .and_then(|anchor| anchor.project(tape_frame))
+                    .unwrap_or(NO_POSITION)
+            }
             CaptureMapMode::Origin => tape_frame,
             CaptureMapMode::Raw => {
                 if first_raw == hifishifter_capture::transport::NO_RAW {
@@ -1341,6 +1437,7 @@ impl ExtensionOwner {
             }
         }
     }
+
 
     /// 本喂入流的锚点：**首块选一次**，之后每块只读原子量。
     ///
@@ -1355,7 +1452,12 @@ impl ExtensionOwner {
         stream: ProcessStream,
         first_raw: i64,
         hint: i64,
-    ) -> Option<hifishifter_capture::project_map::FeedAnchor> {
+        probe: Option<hifishifter_capture::anchor_probe::ProbeBlock<'_>>,
+    ) -> (
+        Option<hifishifter_capture::project_map::FeedAnchor>,
+        Option<hifishifter_capture::anchor_probe::ProbeVerdict>,
+    ) {
+        use hifishifter_capture::anchor_probe::{ProbeOutcome, ProbeReason};
         use hifishifter_capture::project_map::{AnchorSource, FeedAnchor};
         let capture = self.capture();
         let revision = capture.project_map_revision();
@@ -1365,16 +1467,40 @@ impl ExtensionOwner {
             if geometry.anchor_revision.load(Ordering::Acquire) == revision
                 && geometry.anchor_first_raw.load(Ordering::Acquire) == first_raw
             {
-                return Some(FeedAnchor {
-                    project_zero: geometry.anchor_project_zero.load(Ordering::Acquire),
-                    feed_end: geometry.anchor_feed_end.load(Ordering::Acquire),
-                    take: geometry.anchor_take.load(Ordering::Acquire),
-                    source,
-                });
+                // 【定稿之后永不重锚】中途改锚点等于在产物中间切一刀。
+                return (
+                    Some(FeedAnchor {
+                        project_zero: geometry.anchor_project_zero.load(Ordering::Acquire),
+                        feed_end: geometry.anchor_feed_end.load(Ordering::Acquire),
+                        take: geometry.anchor_take.load(Ordering::Acquire),
+                        source,
+                    }),
+                    None,
+                );
             }
         }
-        let anchor =
-            capture.feed_anchor(hint, hifishifter_capture::transport::capture_anchor_mode())?;
+        let outcome = capture.feed_anchor_probed(
+            hint,
+            hifishifter_capture::transport::capture_anchor_mode(),
+            probe,
+        );
+        if let Some(verdict) = outcome.probe {
+            self.note_anchor_probe(stream, verdict, hint);
+            // 【静音 / 太短不消耗这次机会】见 `ProbeReason::Silent`：静音块在任何锚点下
+            // 输出都是静音，它不是「这次机会用掉了」的证据。所以既不建锚、也不定稿，
+            // 等下一个有信号的块再跑。输出这一块退回直通（本来就是静音）。
+            if matches!(
+                verdict.outcome,
+                ProbeOutcome::Undecided(ProbeReason::Silent)
+                    | ProbeOutcome::Undecided(ProbeReason::Short)
+            ) {
+                return (None, Some(verdict));
+            }
+        }
+        let Some(anchor) = outcome.anchor else {
+            // 【表为空 / 正在写】这一轮没有答案，下一块再试（**不定稿**）。
+            return (None, outcome.probe);
+        };
         geometry
             .anchor_project_zero
             .store(anchor.project_zero, Ordering::Release);
@@ -1389,7 +1515,65 @@ impl ExtensionOwner {
         geometry
             .anchor_source
             .store(anchor.source.code(), Ordering::Release);
-        Some(anchor)
+        (Some(anchor), outcome.probe)
+    }
+
+    /// 记一次内容探测的读数，并把**每一条喂入流只该出现一次**的那行日志写出去。
+    ///
+    /// 【为什么按结论分桶】一次探测可能连着给出 `silent` 好几次才定稿（渲染范围从片段
+    /// 之前开始时就是这样），而每条喂入流只该留一行 `silent` 与一行最终结论。位图既不会
+    /// 把重复的刷屏，也不会把「为什么这次没按内容判」吞掉。
+    fn note_anchor_probe(
+        &self,
+        stream: ProcessStream,
+        verdict: hifishifter_capture::anchor_probe::ProbeVerdict,
+        hint: i64,
+    ) {
+        use hifishifter_capture::anchor_probe::{ProbeOutcome, ProbeReason};
+        let geometry = &self.streams[stream.index()];
+        geometry
+            .anchor_score
+            .store(verdict.score.to_bits(), Ordering::Release);
+        geometry
+            .anchor_second
+            .store(verdict.second.to_bits(), Ordering::Release);
+        geometry
+            .anchor_probe_offset
+            .store(verdict.offset, Ordering::Release);
+        let bit = match verdict.outcome {
+            ProbeOutcome::Content => 1_u32 << 5,
+            ProbeOutcome::Undecided(reason) => match reason {
+                ProbeReason::Silent => 1,
+                ProbeReason::Short => 1 << 1,
+                ProbeReason::NoMaterial => 1 << 2,
+                ProbeReason::Ambiguous => 1 << 3,
+                ProbeReason::Busy => 1 << 4,
+            },
+        };
+        if geometry.anchor_probe_logged.fetch_or(bit, Ordering::AcqRel) & bit != 0 {
+            return;
+        }
+        let policy = hifishifter_capture::transport::capture_anchor_mode();
+        let reason = match verdict.outcome {
+            ProbeOutcome::Content => "content".to_owned(),
+            ProbeOutcome::Undecided(reason) => format!("undecided reason={}", reason.as_str()),
+        };
+        // 【这一行必须无条件写】它是「为什么这次没按内容判」的唯一答案。没有它，现场
+        // 只有 `anchor=playhead` 一个词，而那既可能是「内容说就是这里」，也可能是
+        // 「探测一次都没跑」—— 两种完全不同的故障。
+        log::info!(
+            "[capture] anchor probe: stream={} frames={} verdict={} offset={} score={:.3} \
+             second={:.3}@{} hint={} policy={}",
+            stream.as_str(),
+            verdict.frames,
+            reason,
+            verdict.offset,
+            verdict.score,
+            verdict.second,
+            verdict.second_offset,
+            hint,
+            policy.as_str(),
+        );
     }
 
     /// 宿主此刻**确实在推进工程位置**（无锁、无分配，可从音频线程调用）。
@@ -1679,13 +1863,24 @@ impl ExtensionOwner {
             self.note_processing_block(stream, context, block.frames, processing)
         } else {
             self.capture().set_preview_active(false);
-            self.note_stream_block_at(
+            // 【这一块的样本交给内容定位】只有钉住喂入流才值得比（见
+            // `CaptureStore::feed_anchor_probed`），而「值不值得」由 `playback` 侧的
+            // `feed_local` 判 —— 这里只负责把样本原样递过去。
+            // 【空平面就是静音】宿主在 pre-roll 期间给空输入平面是正常形状；`&[]` 会让
+            // 探测回答「太短 / 没信号」，两者都是「这一轮不定稿」。
+            let probe = hifishifter_capture::anchor_probe::ProbeBlock {
+                left: block.planes[0].unwrap_or(&[]),
+                right: block.planes[1].unwrap_or(&[]),
+                frames_before: 0,
+            };
+            self.note_stream_block_at_probed(
                 stream,
                 context,
                 block.frames,
                 playing_rising,
                 recording_rising,
                 Some(effective_position),
+                Some(probe),
             )
         };
         // 【候选期间位置不可发布】HostClock 可能已经把 PendingAbsolute 探针走完
@@ -2469,6 +2664,24 @@ fn format_anchor_source(code: u8) -> &'static str {
     hifishifter_capture::project_map::AnchorSource::from_code(code)
         .map(|source| source.as_str())
         .unwrap_or("none")
+}
+
+/// `feed begin` 的 `probe=` 字段：`主相关/次优相关@实测 offset`。
+///
+/// 【为什么只在 `anchor=content` 时有值】另外两种来源是**位置规则**的结论，它们没有
+/// 分数可言。给它们印一个 0 只会让读者以为「探测跑了但没找到」。
+fn format_probe(score_bits: u32, second_bits: u32, offset: i64, source: u8) -> String {
+    if hifishifter_capture::project_map::AnchorSource::from_code(source)
+        != Some(hifishifter_capture::project_map::AnchorSource::Content)
+    {
+        return "n/a".to_owned();
+    }
+    format!(
+        "{:.3}/{:.3}@{}",
+        f32::from_bits(score_bits),
+        f32::from_bits(second_bits),
+        offset
+    )
 }
 
 /// 工程位置的诊断写法（`n/a` = 映射还没发布）。

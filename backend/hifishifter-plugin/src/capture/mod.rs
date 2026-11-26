@@ -39,6 +39,31 @@ pub(crate) fn snapshot_from_tape(tape: CaptureTape) -> PlaybackSnapshot {
     }
 }
 
+/// 让内容探测读到**已发布的那一份**样本（见 `hifishifter_capture::anchor_probe`）。
+///
+/// 【为什么实现放在这里】`PlaybackSnapshot` 是渲染管线的类型，而 `TapeSamples` 是
+/// 捕获运行时的抽象。这份适配层正是两者之间唯一该有的一道桥 —— 与上面
+/// `snapshot_from_tape` 是同一条纪律：捕获只交出数据，格式外壳只做转换。
+///
+/// 【为什么四个字段就够了】包络要的是「起点 + 两个平面 + 覆盖表」；读者计数、预算
+/// 凭证、内容指纹都属于发布器，与「这一块在哪」无关。
+impl hifishifter_capture::anchor_probe::TapeSamples for PlaybackSnapshot {
+    fn origin(&self) -> i64 {
+        self.origin_sample
+    }
+
+    fn left(&self) -> &[f32] {
+        &self.left
+    }
+
+    fn right(&self) -> &[f32] {
+        &self.right
+    }
+
+    fn covered(&self) -> &[std::ops::Range<i64>] {
+        &self.covered
+    }
+}
 /// 捕获的 1:1 区间 → ARA 形状的播放区间。
 ///
 /// 【为什么可以逐字段搬】字段语义完全相同（秒、源内起点、播放起点、无拉伸/无淡化），

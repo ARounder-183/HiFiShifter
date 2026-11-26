@@ -23,7 +23,10 @@
 //! `FeedTimeline` 的教训。这里用 seqlock：写方（promote / 投影重建，非音频线程）
 //! 极少发生，读方（音频线程）只做有界次数的重试，失败就诚实地回答"没有映射"。
 
+use crate::anchor_probe::{self, ProbeBlock, ProbeOutcome, ProbeVerdict, TapeProbe};
+use hifishifter_plugin_core::sync::MutexExt;
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// 映射表能容纳的片段数。
 ///
@@ -76,6 +79,12 @@ pub enum AnchorPolicy {
     Auto,
     Playhead,
     Clip,
+    /// **只接受内容判定**：探测未决时宁可直接通，也不猜一个位置。
+    ///
+    /// 【为什么需要它】`Auto` 在探测未决时会退回位置规则 —— 那是「宁可近似也不静音」
+    /// 的产品选择。但排查时需要的恰恰相反：一条**不猜**的对照，让「猜错了」与
+    /// 「没猜」在产物上分开。
+    Content,
 }
 
 impl AnchorPolicy {
@@ -84,6 +93,7 @@ impl AnchorPolicy {
             Self::Auto => "auto",
             Self::Playhead => "playhead",
             Self::Clip => "clip",
+            Self::Content => "content",
         }
     }
 }
@@ -98,6 +108,12 @@ pub enum AnchorSource {
     Playhead,
     /// 退回片段起点（渲染 / 宿主读数在窗口之外 / 强制）。
     Clip,
+    /// **内容判定**：把这一块与素材本身逐点比过，`project_zero` 就是实测的那个位置。
+    ///
+    /// 【为什么它必须是一个独立的来源】它与前两个回答的是不同的问题：前两个问
+    /// 「宿主说的这个数落在窗口里吗」（位置），这一个问「这段内容在素材的哪一处」
+    /// （身份）。一个数的位置，不能回答它是什么。
+    Content,
 }
 
 impl AnchorSource {
@@ -105,6 +121,7 @@ impl AnchorSource {
         match self {
             Self::Playhead => "playhead",
             Self::Clip => "clip",
+            Self::Content => "content",
         }
     }
 
@@ -112,6 +129,7 @@ impl AnchorSource {
         match self {
             Self::Playhead => 1,
             Self::Clip => 2,
+            Self::Content => 3,
         }
     }
 
@@ -119,6 +137,7 @@ impl AnchorSource {
         match code {
             1 => Some(Self::Playhead),
             2 => Some(Self::Clip),
+            3 => Some(Self::Content),
             _ => None,
         }
     }
@@ -168,6 +187,13 @@ pub struct ProjectMapCell {
     tape_end: [AtomicI64; PROJECT_MAP_SLOTS],
     project_start: [AtomicI64; PROJECT_MAP_SLOTS],
     take: [AtomicU64; PROJECT_MAP_SLOTS],
+    /// 内容定位器的**叶子槽**（见 [`crate::anchor_probe`]）。
+    ///
+    /// 【为什么是 `Mutex` 而不是原子】它装的是一个 `Arc<TapeProbe>`，而 `Arc` 没有
+    /// 安全的原子换法（`AtomicPtr` 要自己管引用计数）。纪律是**叶子锁**：锁内只做
+    /// 一次 `clone()`，任何相关运算都在锁外。音频线程只在「这条流还没定稿」的块上
+    /// 取一次，定稿之后一次都不取。
+    probe: Mutex<Option<Arc<TapeProbe>>>,
 }
 
 impl Default for ProjectMapCell {
@@ -180,6 +206,7 @@ impl Default for ProjectMapCell {
             tape_end: std::array::from_fn(|_| AtomicI64::new(0)),
             project_start: std::array::from_fn(|_| AtomicI64::new(0)),
             take: std::array::from_fn(|_| AtomicU64::new(0)),
+            probe: Mutex::new(None),
         }
     }
 }
@@ -242,74 +269,223 @@ impl ProjectMapCell {
     ///
     /// 读方撞上写方、或表为空时返回 `None` —— 调用方据此退回直通，而不是猜一个位置。
     pub fn anchor(&self, hint: i64, policy: AnchorPolicy) -> Option<FeedAnchor> {
+        self.anchor_probed(hint, policy, None).anchor
+    }
+
+    /// 与 [`Self::anchor`] 相同，但允许**用内容回答位置**（见 [`crate::anchor_probe`]）。
+    ///
+    /// 【为什么把结论与锚点一起交出去】调用方要写两行日志（`feed begin` 的 `probe=`
+    /// 与独立的 `anchor probe:` 行），而这两行都必须能回答「为什么这次没按内容判」。
+    /// 把 verdict 丢掉，那个问题就只剩「anchor=playhead」一个词 —— 那正是本轮之前的
+    /// 现场。
+    pub fn anchor_probed(
+        &self,
+        hint: i64,
+        policy: AnchorPolicy,
+        block: Option<ProbeBlock<'_>>,
+    ) -> AnchorOutcome {
+        let Some((segments, len)) = self.read_segments() else {
+            return AnchorOutcome::default();
+        };
+        let segments = &segments[..len];
+        // 【强制策略与关闭开关都走位置规则】`HFS_CAPTURE_ANCHOR=playhead|clip` 是现场
+        // 对照用的强制值；`HFS_CAPTURE_PROBE=off` 是一键退回第七轮行为。两者都不该被
+        // 内容判定绕过 —— 否则「一键对照」就不成立了。
+        if matches!(policy, AnchorPolicy::Playhead | AnchorPolicy::Clip)
+            || !anchor_probe::probe_enabled()
+        {
+            return AnchorOutcome {
+                anchor: position_anchor(segments, hint, policy),
+                probe: None,
+            };
+        }
+        if let (Some(block), Some(probe)) = (block, self.probe_snapshot()) {
+            // 【两个假设先测】片段起点与宿主读数 —— 它们覆盖了现场的全部历史用例。
+            let mut hypotheses = [0_i64; 2];
+            let mut count = 0_usize;
+            if let Some(earliest) = earliest_segment(segments) {
+                hypotheses[count] = earliest.project_start;
+                count += 1;
+            }
+            if hint >= 0 {
+                hypotheses[count] = hint;
+                count += 1;
+            }
+            let verdict = anchor_probe::locate(
+                &block,
+                &probe.envelope,
+                probe.samples.left(),
+                probe.samples.right(),
+                &hypotheses[..count],
+            );
+            let anchor = if verdict.outcome == ProbeOutcome::Content {
+                // 【内容说得出位置，但映射表里没有那一片】这不是位置规则能补的，退回
+                // 位置规则并把 verdict 一起交出去（日志里能看到 offset 与分数的矛盾）。
+                anchor_at(segments, verdict.offset, block.frames_before)
+            } else {
+                None
+            };
+            return AnchorOutcome {
+                anchor: anchor.or_else(|| position_anchor(segments, hint, policy)),
+                probe: Some(verdict),
+            };
+        }
+        AnchorOutcome {
+            anchor: position_anchor(segments, hint, policy),
+            probe: None,
+        }
+    }
+
+    /// 发布（或撤销）内容定位器。**只允许非音频线程**，且必须与样本**同一次**发布。
+    pub fn publish_probe(&self, probe: Option<Arc<TapeProbe>>) {
+        *self.probe.lock_or_recover() = probe;
+    }
+
+    /// 取一份定位器的引用（叶子锁：锁内只有一次 `clone()`）。
+    fn probe_snapshot(&self) -> Option<Arc<TapeProbe>> {
+        hifishifter_plugin_core::sync::try_lock_or_recover(&self.probe)
+            .and_then(|slot| slot.clone())
+    }
+
+    /// 一次 seqlock 读：把整张表拷进定长数组（**不在读区里跑探测**）。
+    ///
+    /// 【为什么要把读与算分开】探测要几百微秒；放在读区里会让写方（投影重建）每撞一次
+    /// 就让我们重试一次、重算一遍。表只有 16 段，先拷出来再算，代价是 16 个 i64。
+    fn read_segments(&self) -> Option<([ProjectMapSegment; PROJECT_MAP_SLOTS], usize)> {
         for _ in 0..READ_ATTEMPTS {
             let before = self.epoch.load(Ordering::Acquire);
             if before & 1 == 1 {
                 continue;
             }
             let len = self.len.load(Ordering::Relaxed).min(PROJECT_MAP_SLOTS);
-            let mut earliest: Option<FeedAnchor> = None;
-            let mut containing: Option<FeedAnchor> = None;
-            for index in 0..len {
-                let tape_start = self.tape_start[index].load(Ordering::Relaxed);
-                let tape_end = self.tape_end[index].load(Ordering::Relaxed);
-                let project_start = self.project_start[index].load(Ordering::Relaxed);
-                let take = self.take[index].load(Ordering::Relaxed);
-                let frames = tape_end.saturating_sub(tape_start);
-                if frames <= 0 {
-                    continue;
-                }
-                // 【工程上最早的一片】就是"渲染从片段起点开始"那一条。多 take 时它是
-                // 唯一确定的退路（不能按表里的顺序挑：那是写入顺序，不是工程顺序）。
-                if earliest.is_none_or(|current| {
-                    (project_start, take) < (current.project_zero, current.take)
-                }) {
-                    earliest = Some(FeedAnchor {
-                        project_zero: project_start,
-                        feed_end: frames,
-                        take,
-                        source: AnchorSource::Clip,
-                    });
-                }
-                let project_end = project_start.saturating_add(frames);
-                if hint >= project_start && hint < project_end && containing.is_none() {
-                    containing = Some(FeedAnchor {
-                        project_zero: hint,
-                        feed_end: project_end.saturating_sub(hint),
-                        take,
-                        source: AnchorSource::Playhead,
-                    });
-                }
+            let mut segments = [ProjectMapSegment {
+                tape_start: 0,
+                tape_end: 0,
+                project_start: 0,
+                take: 0,
+            }; PROJECT_MAP_SLOTS];
+            for (index, segment) in segments.iter_mut().take(len).enumerate() {
+                segment.tape_start = self.tape_start[index].load(Ordering::Relaxed);
+                segment.tape_end = self.tape_end[index].load(Ordering::Relaxed);
+                segment.project_start = self.project_start[index].load(Ordering::Relaxed);
+                segment.take = self.take[index].load(Ordering::Relaxed);
             }
             let after = self.epoch.load(Ordering::Acquire);
             if before == after {
-                let playhead = matches!(policy, AnchorPolicy::Playhead) && hint >= 0;
-                return match policy {
-                    AnchorPolicy::Clip => earliest,
-                    // 【强制播放头】没有片段包含它时也要按播放头建锚：那是这条开关的
-                    // 唯一用途 —— 现场对照"渲染是不是也跟着播放头跑"。
-                    AnchorPolicy::Playhead if playhead => {
-                        containing.or_else(|| {
-                            earliest.map(|anchor| FeedAnchor {
-                                project_zero: hint,
-                                // 已经越过片段的起点时，剩余长度就是片段剩余长度；
-                                // 落在起点之前时整片都还没用到（consumed 夹到 0）。
-                                feed_end: anchor.feed_end.saturating_sub(
-                                    hint.saturating_sub(anchor.project_zero).max(0),
-                                ),
-                                take: anchor.take,
-                                source: AnchorSource::Playhead,
-                            })
-                        })
-                    }
-                    AnchorPolicy::Playhead | AnchorPolicy::Auto => containing.or(earliest),
-                };
+                return Some((segments, len));
             }
         }
         None
     }
 }
 
+/// 一次锚点求解的完整产物：锚点 + 内容探测的结论。
+///
+/// 【为什么两者一起交出去】调用方要写两行日志，而它们回答的是两个不同的问题：
+/// 「这一块被当成工程哪一段」与「凭什么」。只要锚点，第二行就只剩一个 `anchor=` 词 ——
+/// 那正是本轮之前的现场。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AnchorOutcome {
+    /// `None` = 这一轮没有锚点（映射表为空 / 正在写 / 静音块还没定稿）。
+    pub anchor: Option<FeedAnchor>,
+    /// `None` = 这一轮没跑内容探测（强制策略 / 关掉开关 / 没有素材）。
+    pub probe: Option<ProbeVerdict>,
+}
+
+/// 「位置规则」的锚点：宿主读数落在片段的工程窗口里 ⇒ 播放头，否则片段起点。
+///
+/// 这是第七轮的全部逻辑，现在只是**内容探测不可用时的回退**（见 `AnchorOutcome`）。
+fn position_anchor(
+    segments: &[ProjectMapSegment],
+    hint: i64,
+    policy: AnchorPolicy,
+) -> Option<FeedAnchor> {
+    let mut earliest: Option<FeedAnchor> = None;
+    let mut containing: Option<FeedAnchor> = None;
+    for segment in segments {
+        let frames = segment.frames();
+        if frames <= 0 {
+            continue;
+        }
+        // 【工程上最早的一片】就是「渲染从片段起点开始」那一条。多 take 时它是唯一
+        // 确定的退路（不能按表里的顺序挑：那是写入顺序，不是工程顺序）。
+        if earliest.is_none_or(|current| {
+            (segment.project_start, segment.take) < (current.project_zero, current.take)
+        }) {
+            earliest = Some(FeedAnchor {
+                project_zero: segment.project_start,
+                feed_end: frames,
+                take: segment.take,
+                source: AnchorSource::Clip,
+            });
+        }
+        let project_end = segment.project_end();
+        if hint >= segment.project_start && hint < project_end && containing.is_none() {
+            containing = Some(FeedAnchor {
+                project_zero: hint,
+                feed_end: project_end.saturating_sub(hint),
+                take: segment.take,
+                source: AnchorSource::Playhead,
+            });
+        }
+    }
+    let playhead = matches!(policy, AnchorPolicy::Playhead) && hint >= 0;
+    match policy {
+        AnchorPolicy::Clip => earliest,
+        // 【强制播放头】没有片段包含它时也要按播放头建锚：那是这条开关的唯一用途 ——
+        // 现场对照「渲染是不是也跟着播放头跑」。
+        AnchorPolicy::Playhead if playhead => containing.or_else(|| {
+            earliest.map(|anchor| FeedAnchor {
+                project_zero: hint,
+                // 已经越过片段的起点时，剩余长度就是片段剩余长度；落在起点之前时整片
+                // 都还没用到（consumed 夹到 0）。
+                feed_end: anchor
+                    .feed_end
+                    .saturating_sub(hint.saturating_sub(anchor.project_zero).max(0)),
+                take: anchor.take,
+                source: AnchorSource::Playhead,
+            })
+        }),
+        AnchorPolicy::Playhead | AnchorPolicy::Auto => containing.or(earliest),
+        // 【只接受内容判定】探测未决时宁可直接通，也不猜一个位置。
+        AnchorPolicy::Content => None,
+    }
+}
+
+/// 工程上最早的那一片（内容探测的「片段起点」假设就用它）。
+fn earliest_segment(segments: &[ProjectMapSegment]) -> Option<&ProjectMapSegment> {
+    segments
+        .iter()
+        .filter(|segment| segment.frames() > 0)
+        .min_by_key(|segment| (segment.project_start, segment.take))
+}
+
+/// 把「喂入流第 0 帧在工程第 `offset` 帧」变成一个 `FeedAnchor`。
+///
+/// 【`feed_end` 怎么算】它回答「这条流还能走多远」，因此必须是**这一片剩余的长度**：
+/// `segment.project_end() - offset`。用片段的整段长度会让流走出片段之后仍然「有映射」，
+/// 输出把片段之后的内容当成片段的一部分继续处理 —— 那比直通糟得多。
+fn anchor_at(segments: &[ProjectMapSegment], offset: i64, frames_before: i64) -> Option<FeedAnchor> {
+    let here = offset.saturating_add(frames_before);
+    let segment = segments
+        .iter()
+        .find(|segment| here >= segment.project_start && here < segment.project_end())
+        .or_else(|| {
+            segments
+                .iter()
+                .find(|segment| offset >= segment.project_start && offset < segment.project_end())
+        })?;
+    let feed_end = segment.project_end().saturating_sub(offset);
+    if feed_end <= 0 {
+        return None;
+    }
+    Some(FeedAnchor {
+        project_zero: offset,
+        feed_end,
+        take: segment.take,
+        source: AnchorSource::Content,
+    })
+}
 #[cfg(test)]
 mod tests {
     use super::*;

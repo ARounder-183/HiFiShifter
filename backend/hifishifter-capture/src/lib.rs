@@ -43,7 +43,9 @@ pub mod timeline;
 pub mod transport;
 pub mod types;
 
-pub use project_map::{AnchorPolicy, AnchorSource, FeedAnchor, ProjectMapCell, ProjectMapSegment};
+pub use project_map::{
+    AnchorOutcome, AnchorPolicy, AnchorSource, FeedAnchor, ProjectMapCell, ProjectMapSegment,
+};
 pub use store::{
     CaptureOptions, CaptureSpan, CaptureStatus, CaptureStore, MaterialSpan, MaterialSummary,
     MissingCapture, RecordingStatus, TakeSummary,

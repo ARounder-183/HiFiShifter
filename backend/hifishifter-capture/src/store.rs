@@ -1945,6 +1945,34 @@ impl CaptureStore {
         self.project_map.anchor(hint, policy)
     }
 
+    /// 与 [`Self::feed_anchor`] 相同，但把**这一块的样本**一起交出去，让内容判定参与。
+    ///
+    /// 【为什么块是可选的】只有钉住喂入流的块才值得比 —— 普通播放里宿主每块都报位置，
+    /// 那个位置是权威的；比对一整份素材只会白烧预算。
+    pub fn feed_anchor_probed(
+        &self,
+        hint: i64,
+        policy: crate::project_map::AnchorPolicy,
+        block: Option<crate::anchor_probe::ProbeBlock<'_>>,
+    ) -> crate::project_map::AnchorOutcome {
+        self.project_map.anchor_probed(hint, policy, block)
+    }
+
+    /// 发布内容定位器（**非音频线程**，必须与 `raw_tape` 同一次发布）。
+    ///
+    /// 【为什么要在这里而不是在发布器里】定位器属于「磁带 → 工程帧」这张表，而那张表
+    /// 就在 `project_map` 里。把它挂到表上，音频线程取它时只碰一个叶子锁，不必回头去
+    /// 问发布器要样本。
+    pub fn publish_tape_probe(&self, samples: Arc<dyn crate::anchor_probe::TapeSamples>) {
+        self.project_map
+            .publish_probe(crate::anchor_probe::TapeProbe::new(samples).map(Arc::new));
+    }
+
+    /// 撤掉内容定位器（清空素材 / 换 take 前的那一帧）。
+    pub fn clear_tape_probe(&self) {
+        self.project_map.publish_probe(None);
+    }
+
     /// 当前映射表的代次（诊断；`0` = 还没发布过）。
     pub fn project_map_revision(&self) -> u64 {
         self.project_map.revision()

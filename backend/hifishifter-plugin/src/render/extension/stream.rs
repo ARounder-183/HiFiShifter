@@ -261,6 +261,22 @@ pub(super) struct StreamGeometry {
     pub(super) anchor_revision: AtomicU64,
     /// 建锚时这条流的首块 raw（换一条喂入流 ⇒ 重选）。
     pub(super) anchor_first_raw: AtomicI64,
+    /// 本喂入流最近一次**内容探测**的读数（f32 位模式）：主候选相关。
+    ///
+    /// 【为什么存在几何里】`feed begin` 那一行要报 `probe=0.997/0.121@720000`，而它
+    /// 只在 `anchor_source == Content` 时有意义。三者同一生命周期：首块算一次、跨块读、
+    /// `feed end` 清掉。
+    pub(super) anchor_score: AtomicU32,
+    /// 次优候选相关（f32 位模式）。
+    pub(super) anchor_second: AtomicU32,
+    /// 内容判定的 `offset`（喂入流第 0 帧的工程帧）。
+    pub(super) anchor_probe_offset: AtomicI64,
+    /// 已经写过日志的探测结论位（见 `playback::note_anchor_probe`）。
+    ///
+    /// 【为什么是位图】一次探测可能连着给出 `silent` 好几次才定稿，而每条喂入流只该留
+    /// 一行 `silent` 与一行最终结论。按结论分桶，既不会把重复的刷屏，也不会把「为什么
+    /// 没按内容判」吞掉。
+    pub(super) anchor_probe_logged: AtomicU32,
     /// 第一块的宿主 raw（只用于诊断；`NO_POSITION` = 未知）。
     pub(super) feed_first_raw: NoPosition,
     /// 这条喂入流是否已经完成 0.5 s 提级。
