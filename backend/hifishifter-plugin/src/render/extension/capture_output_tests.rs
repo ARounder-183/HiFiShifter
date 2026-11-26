@@ -33,6 +33,61 @@ fn record(owner: &Arc<ExtensionOwner>, frames: usize) {
     owner.capture().stop().unwrap();
 }
 
+/// 在工程 start 帧处录一段并 promote 成一个 take。
+///
+/// 【为什么要能指定起点】本轮两个现象都只在「片段不在工程 0」时出现：预览里片段在
+/// 28.000 s、Render As 的窗口也从 28.000 s 起。只录 0 起点的用例永远走不到那条路。
+fn record_at(owner: &Arc<ExtensionOwner>, start: i64, frames: usize) {
+    owner.capture().start().unwrap();
+    let samples: &'static [f32] = Box::leak(vec![0.25_f32; frames].into_boxed_slice());
+    owner.capture().on_block(InputBlock {
+        start,
+        frames,
+        sample_rate: 48_000.0,
+        planes: [Some(samples), Some(samples)],
+        playing: true,
+    });
+    owner.capture().stop().unwrap();
+}
+
+/// **不变量：读位置由片段在工程里的位置决定，不由宿主播放头决定。**
+///
+/// 【现场原形】VEGAS 把捕获片段放在 28.000 s，projectTimeSamples 却停在 18.62 s。
+/// 第三轮把 raw 当起点 ⇒ 整段平移 18.62 s；第四轮把 0 当起点 ⇒ 前 28 s 落在快照
+/// 窗口之外 ⇒ 直通。唯一有证据的答案是**片段自己**。
+#[test]
+fn project_position_follows_the_clip_not_the_playhead() {
+    const RATE: i64 = 48_000;
+    const START: i64 = 28 * RATE;
+    let owner = insert_owner();
+    record_at(&owner, START, RATE as usize);
+    // 宿主读数（893 720 = 18.62 s）只作消歧线索，绝不参与换算。
+    assert_eq!(
+        owner.project_position_for_tape(0, 893_720, 893_720),
+        START,
+        "磁带第 0 帧在工程 28.000 s"
+    );
+    assert_eq!(
+        owner.project_position_for_tape(RATE / 2, 893_720, 893_720),
+        START + RATE / 2,
+        "逐帧跟随，步长就是 1:1"
+    );
+}
+
+/// **不变量：没有映射时读位置是「未知」，不是 0。**
+///
+/// 【为什么必须显式】0 是一个合法的工程位置。把「不知道」答成 0，输出就会去读快照
+/// 的第 0 帧 —— 那正是「前 N 秒是另一段内容」的来源。未知必须是可判定的状态。
+#[test]
+fn no_mapping_means_passthrough_not_garbage() {
+    let owner = insert_owner();
+    assert_eq!(
+        owner.project_position_for_tape(0, 893_720, 893_720),
+        super::NO_POSITION,
+        "没有素材就没有映射，读位置必须是未知"
+    );
+}
+
 /// 一份可发布的最小快照（处理结果的替身）。
 fn processed_snapshot() -> crate::render::snapshot::PlaybackSnapshot {
     crate::render::snapshot::PlaybackSnapshot {
@@ -2947,11 +3002,6 @@ fn a_pinned_render_starts_at_zero_even_when_the_host_playhead_is_stale() {
         "整段渲染只许有一个 pass"
     );
     assert_eq!(geometry.pass_rewinds.load(Ordering::Acquire), 0);
-    assert_eq!(
-        geometry.feed_origin.load(Ordering::Acquire),
-        0,
-        "origin 必须是 0，不是 893720"
-    );
     assert_eq!(
         geometry.feed_first_raw.load(Ordering::Acquire),
         STALE_RAW,

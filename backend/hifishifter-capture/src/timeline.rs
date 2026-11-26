@@ -1452,6 +1452,21 @@ mod tests {
         build(segments, take, 120.0)
     }
 
+    /// **不变量：正起点的片段不被裁剪。**
+    ///
+    /// 【为什么这条必须钉住】裁剪函数的名字里带 "to_project"，很容易被读成"把素材
+    /// 挪到工程 0"。它真正裁的只有**负**工程时间（pre-roll）。一个 28.000 s 起的
+    /// 片段必须原样保留 —— 否则"从 28 s 渲染到 61 s"就会变成"从 0 渲染"。
+    #[test]
+    fn clamp_keeps_a_positive_start() {
+        let segments = [segment(28_000, &[0.5; 100])];
+        let (mut timeline, _) = one(1, &segments);
+        assert_eq!(timeline.clips.len(), 1);
+        let trimmed = clamp_timeline_to_project(&mut timeline);
+        assert_eq!(trimmed, 0, "正起点不是 pre-roll");
+        assert_eq!(timeline.clips[0].start_sec, 28.0);
+    }
+
     /// **不变量：映射跟着片段在工程里的位置走，不跟宿主播放头走。**
     ///
     /// 【现场原形】片段在工程 28.000 s（1000 Hz 下 28 000 帧），长 100 帧。映射必须

@@ -99,10 +99,14 @@ impl ExtensionOwner {
                 }
             }
         }
+        // 【这句日志此前是错的】它写"the material domain starts at project time 0"，
+        // 而片段在工程 28.000 s 的工程里素材域明明从 28.000 s 开始。真正被裁掉的只有
+        // **负**工程时间（`start_sec < 0`）—— 那是 pre-roll，宿主的时间轴里没有它。
+        // 一句错误的注释会让人以为"裁到 0"是设计，而它正是"非零起点整段偏移"的诱因。
         let trimmed = crate::capture::timeline::clamp_timeline_to_project(&mut timeline);
         if trimmed > 0 {
             log::warn!(
-                "[capture] removed pre-roll from {trimmed} clip(s) before rendering; the material domain starts at project time 0"
+                "[capture] trimmed {trimmed} clip(s) that started before project time 0;                  every remaining clip keeps its own start"
             );
         }
         let input = super::input::RenderInput {

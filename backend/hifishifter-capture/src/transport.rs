@@ -121,75 +121,85 @@ impl FeedKind {
 /// 【为什么不用 0】工程 0 是合法起点；用 0 当哨兵会让「首块在工程 0」被读成「未知」。
 pub const NO_RAW: i64 = i64::MIN;
 
-/// 一条钉住喂入流**自己的**时间轴。
+/// 工程位置的来源（环境变量 `HFS_CAPTURE_MAP`）。
 ///
-/// 【为什么需要它】FeedKind::Pinned 只回答了「谁有权推进位置」，没有回答「位置从哪
-/// 起算」。位置此前仍然锚在 raw_start（= 宿主的 projectTimeSamples），而 VEGAS 在
-/// Render As 期间把它留在**最后的播放头**：现场 r3 的 raw=893720（18.62 s）直接把
-/// 整段渲染平移了 18.62 s，r1 平移 1.85 s，只有 r2（raw=0）是对的。用户的描述正是
-/// 「最后播放/停止的位置会极大地影响渲染输出的偏移」。
+/// 【为什么这是一个可切换的判据】"喂入域的第几帧对应工程第几帧"是这一轮唯一改变
+/// 声音位置的决定。它有三种历史答案，而它们在产物上**完全同形**（都是"某段音频
+/// 出现在错误的时间上"）：
 ///
-/// 【为什么 origin 恒为 0】钉住流的定义就是「宿主不报传输、只按块喂内容」，于是它喂
-/// 的第一帧就是这条时间轴的第一帧。渲染范围从工程起点开始时，那正是喂入域的 0。
-/// 环境变量 HFS_PINNED_ORIGIN=raw 可以强制回退到首块 raw，供现场对比。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FeedTimeline {
-    /// 这条喂入流的第一帧在**喂入域**里的位置（帧）。
-    pub origin: i64,
-    /// 从 origin 起已经喂进来的帧数（含起点窗口里的块）。
-    pub frames: u64,
-    /// 第一块的宿主 raw（只用于诊断；NO_RAW = 未知）。
-    pub first_raw: i64,
-    /// 是否已经完成 0.5 s 提级。
-    pub promoted: bool,
+///   * `clip`（默认，本轮）：由捕获片段在工程里的位置决定 —— 唯一有证据的答案；
+///   * `origin`（第四轮）：喂入域的 0 就是工程 0；
+///   * `raw`（第三轮）：喂入域的 0 是首块 `projectTimeSamples`。
+///
+/// 留一个开关，现场就能**一键对照**三种映射，不必重新出包 —— 与 `HFS_PINNED_FEED` /
+/// `HFS_RENDER_RUN` / `HFS_HOST_WAIT_MS` 同一条纪律。判读方法：把同一段素材渲染三次，
+/// 只有正确的那个映射会给出零偏移。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CaptureMapMode {
+    /// 工程位置由捕获片段的位置决定（`project = clip_start + (tape - clip_source_start)`）。
+    #[default]
+    Clip,
+    /// 喂入域的 0 = 工程 0（第四轮行为）。
+    Origin,
+    /// 喂入域的 0 = 首块 `projectTimeSamples`（第三轮行为）。
+    Raw,
 }
 
-impl Default for FeedTimeline {
-    fn default() -> Self {
-        Self {
-            origin: 0,
-            frames: 0,
-            first_raw: NO_RAW,
-            promoted: false,
+impl CaptureMapMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Clip => "clip",
+            Self::Origin => "origin",
+            Self::Raw => "raw",
         }
     }
 }
 
-impl FeedTimeline {
-    /// 本块在喂入域里的起点（帧）。
-    ///
-    /// 【为什么这是唯一的位置来源】见类型文档：钉住流的坐标只能由它自己数出来。
-    pub fn position(&self, frames_before: u64) -> i64 {
-        self.origin
-            .saturating_add(i64::try_from(frames_before).unwrap_or(i64::MAX))
-    }
-
-    /// 归零（传输事件 / 复位）。
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
-}
-
-/// 钉住喂入流的 origin 判据（环境变量 HFS_PINNED_ORIGIN=raw 强制用首块 raw）。
+/// 当前的工程位置来源。
 ///
-/// 【为什么要这个开关】origin=0 改变的是「读快照的起点」。判据本身有三道，但「某个
-/// 宿主的块序列恰好长得像钉住流」这种误判在离线环境里无法穷举。留一个开关，现场就能
-/// 一键对比「按喂入域从 0 起算」与「按宿主 raw 起算」的差别，不必重新出包。
-pub fn pinned_origin_uses_raw() -> bool {
-    static USES_RAW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *USES_RAW.get_or_init(|| std::env::var("HFS_PINNED_ORIGIN").is_ok_and(|value| value == "raw"))
+/// 【为什么 `HFS_PINNED_ORIGIN` 还留着】它是第三轮那个开关的名字。现场脚本与排查
+/// 笔记里都写着它，直接删掉会让"照着旧笔记复现"变成一次静默的无效操作。这里把它
+/// 读成 `HFS_CAPTURE_MAP=raw` 的别名，并在日志里记一条 deprecation。
+pub fn capture_map_mode() -> CaptureMapMode {
+    static MODE: std::sync::OnceLock<CaptureMapMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        let explicit = std::env::var("HFS_CAPTURE_MAP").ok();
+        let mode = match explicit.as_deref().map(str::trim) {
+            Some("origin") => CaptureMapMode::Origin,
+            Some("raw") => CaptureMapMode::Raw,
+            Some("clip") => CaptureMapMode::Clip,
+            Some(other) => {
+                log::warn!(
+                    "[capture] unknown HFS_CAPTURE_MAP={other}; using clip (the mapping follows the clip)"
+                );
+                CaptureMapMode::Clip
+            }
+            None => {
+                if std::env::var("HFS_PINNED_ORIGIN").is_ok_and(|value| value == "raw") {
+                    log::warn!(
+                        "[capture] HFS_PINNED_ORIGIN is deprecated; it now means HFS_CAPTURE_MAP=raw"
+                    );
+                    CaptureMapMode::Raw
+                } else {
+                    CaptureMapMode::Clip
+                }
+            }
+        };
+        log::info!("[capture] project mapping mode: {}", mode.as_str());
+        mode
+    })
 }
 
 /// 一条喂入流**自己的**走带位置。只有一个域。
 ///
 /// 【为什么它必须与工程位置分开】此前同一个 `i64` 同时被当成"喂入流的第几帧"与
 /// "工程第几帧"，于是"钉住流的 0 是不是工程 0"这个问题只能靠一个环境变量回答
-/// （见 `pinned_origin_uses_raw`）。答案是两个都不是：喂入域的 0 是**这条流**的
+/// （见 `CaptureMapMode`）。答案是两个都不是：喂入域的 0 是**这条流**的
 /// 第一帧，它在工程里的位置由 `project_map::ProjectMapping` 给出。
 ///
 /// 【为什么不在这里存 origin】存了它，下一个读代码的人就会拿它当工程起点 ——
 /// 那正是上一轮的错误。本类型只回答"这条流已经喂进来多少帧"，一个纯粹的计数。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TapeCursor {
     /// 本遍已经喂进来的帧数（从 0 起，**提级不重置、不复用**）。
     pub frames: u64,
@@ -197,13 +207,22 @@ pub struct TapeCursor {
     pub first_raw: i64,
 }
 
+impl Default for TapeCursor {
+    /// 【为什么手写而不是 derive】`derive(Default)` 会给 `first_raw` 一个 0，而 0 是
+    /// **合法的宿主读数**（工程 0）。用 0 当"未知"会让"首块在工程 0"被读成"未知"，
+    /// 于是 `note_first_raw` 永远记不下第一块 —— 诊断值静默变成假的。
+    fn default() -> Self {
+        Self {
+            frames: 0,
+            first_raw: NO_RAW,
+        }
+    }
+}
+
 impl TapeCursor {
     /// 归零（传输事件 / 复位）。
     pub fn reset(&mut self) {
-        *self = Self {
-            frames: 0,
-            first_raw: NO_RAW,
-        };
+        *self = Self::default();
     }
 
     /// 记下首块的宿主读数（只诊断，不参与换算）。
@@ -235,12 +254,12 @@ pub struct TransportSession {
     /// "raw 被钉住 + 没有 kPlaying"期间收到的、彼此不同的有信号帧数。
     /// 到 [`FEED_PROMOTE_SEC`] 就把窗口提级成 [`FeedKind::Pinned`]。
     pub pinned_signal_frames: u64,
-    /// 这条钉住喂入流自己的时间轴（见 [`FeedTimeline`]）。
+    /// 这条喂入流自己的走带位置（见 [`TapeCursor`]）。
     ///
     /// 【为什么它必须跨块存活】本结构体每块都是临时重建的（见 playback.rs 的构造），
     /// 所以它像 feed / window_spent / pinned_signal_frames 一样持久化在流几何里，
     /// 在构造时读入、observe 之后写回。
-    pub feed_timeline: FeedTimeline,
+    pub tape: TapeCursor,
 }
 
 impl Default for TransportSession {
@@ -254,7 +273,7 @@ impl Default for TransportSession {
             feed: FeedKind::Transport,
             window_spent: false,
             pinned_signal_frames: 0,
-            feed_timeline: FeedTimeline::default(),
+            tape: TapeCursor::default(),
         }
     }
 }
@@ -297,7 +316,7 @@ pub struct SessionInput {
     pub signal: bool,
     /// 捕获已武装：录制中绝不发明时间（录制的时间只能来自宿主）。
     pub armed: bool,
-    /// 宿主这一块报的原始位置（帧）。只用于给 [`FeedTimeline`] 记首块诊断值。
+    /// 宿主这一块报的原始位置（帧）。只用于给 [`TapeCursor`] 记首块诊断值。
     pub raw_start: i64,
     /// 本块之前这条流已经有块了（`!had` 的反面）。
     ///
@@ -322,12 +341,14 @@ pub struct SessionDecision {
     /// 本块属于「钉住候选」，但还没到 0.5 s 提级。
     ///
     /// 【为什么候选也要算进喂入域】候选块已经按块长推进位置了（起点窗口）。若只有
-    /// 提级之后的块走 FeedTimeline，前 0.5 s 就会留在 raw 域里，接缝处出现一个洞。
+    /// 提级之后的块走 TapeCursor，前 0.5 s 就会留在 raw 域里，接缝处出现一个洞。
     pub candidate: bool,
     /// 本块**之前**已经喂进来的帧数（喂入域，含起点窗口里的块）。
-    pub feed_frames_before: u64,
-    /// 这条喂入流的起点（喂入域）。渲染流恒为 0。
-    pub feed_origin: i64,
+    ///
+    /// 【为什么不再附带一个 origin】工程位置**不在这里**：它由
+    /// `project_map::ProjectMapCell` 从磁带帧号算出来。把 origin 放在这里，下一个读
+    /// 代码的人就会拿它当工程起点 —— 那正是上一轮的错误。
+    pub tape_frames_before: u64,
 }
 
 impl TransportSession {
@@ -363,14 +384,14 @@ impl TransportSession {
         self.pinned_signal_frames = 0;
         // 【为什么连时间轴一起归零】规则 1 的语义是「钉住流到此结束」。留着 frames 会
         // 让下一条钉住流从上一条的末尾接着数 —— 一次渲染就凭空多出几十秒的偏移。
-        self.feed_timeline.reset();
+        self.tape.reset();
     }
 
     /// 前进一步。host_reset = 宿主位置倒退或跳变；它是新会话的强证据之一。
     pub fn observe(&mut self, input: SessionInput) -> SessionDecision {
         // 【本块之前已经喂进来多少帧】必须在任何分支之前读：下面 `note_transport` 会
         // 在传输事件上把它清零。
-        let feed_frames_before = self.feed_timeline.frames;
+        let tape_frames_before = self.tape.frames;
         let mut candidate = false;
         let mut new_epoch = false;
         let mut transport_active = false;
@@ -400,8 +421,7 @@ impl TransportSession {
                 feed: self.feed,
                 promoted,
                 candidate: false,
-                feed_frames_before,
-                feed_origin: self.feed_timeline.origin,
+                tape_frames_before,
             };
         }
 
@@ -490,21 +510,13 @@ impl TransportSession {
         }
         // 【喂入域的推进】候选块与钉住块都算 —— 它们喂进来的就是这条时间轴的连续内容。
         // 提级本身不改变 origin：一次渲染只有一个起点，提级只是「认出它是时间轴」。
+        // 【喂入域的推进】候选块与钉住块都算 —— 它们喂进来的就是这条时间轴的连续内容。
+        // 提级本身不改变走带位置：一次渲染只有一个起点，提级只是「认出它是时间轴」。
+        // 计数从**第一块**就开始，于是提级那一刻位置是连续的（此前候选窗口的 0.489 s
+        // 会被算成一次硬跳变）。
         if candidate || self.feed == FeedKind::Pinned {
-            if self.feed_timeline.first_raw == NO_RAW {
-                self.feed_timeline.first_raw = input.raw_start;
-                // 【origin 的唯一决定点】见 `FeedTimeline` 与 `pinned_origin_uses_raw`。
-                self.feed_timeline.origin = if pinned_origin_uses_raw() {
-                    input.raw_start
-                } else {
-                    0
-                };
-            }
-            self.feed_timeline.frames = self
-                .feed_timeline
-                .frames
-                .saturating_add(u64::from(input.frames));
-            self.feed_timeline.promoted |= self.feed == FeedKind::Pinned;
+            self.tape.note_first_raw(input.raw_start);
+            self.tape.advance(input.frames);
         }
 
         // 【窗口用掉】跑到上限就是"用掉了"：此后不再重开，直到规则 1 复原它。
@@ -527,8 +539,7 @@ impl TransportSession {
             feed: self.feed,
             promoted,
             candidate,
-            feed_frames_before,
-            feed_origin: self.feed_timeline.origin,
+            tape_frames_before,
         }
     }
 }
@@ -754,13 +765,13 @@ mod tests {
         }
     }
 
-    /// **不变量：钉住喂入流的起点是喂入域的 0，不是宿主的播放头。**
+    /// **不变量：钉住喂入流的走带位置从 0 起，宿主播放头只作诊断。**
     ///
     /// 【为什么钉死】VEGAS Render As 把 `projectTimeSamples` 留在**最后播放/停止**的
-    /// 位置（现场 r3 = 893720 = 18.62 s）。此前位置锚在它上面，于是整段渲染被平移了
-    /// 18.62 s；三次渲染互不相同，而用户看到的正是"最后播放位置影响偏移"。
+    /// 位置（现场 r3 = 893720 = 18.62 s）。它既不是工程起点，也不参与换算 —— 工程
+    /// 位置由 `project_map` 从片段位置给出（见 `project_map::tests`）。
     #[test]
-    fn a_pinned_feed_starts_at_zero_regardless_of_the_host_playhead() {
+    fn a_pinned_feed_starts_at_tape_zero_regardless_of_the_host_playhead() {
         const RAW: i64 = 893_720;
         let mut session = TransportSession::with_rate(48_000.0);
         let mut first = pinned_block(1200);
@@ -769,8 +780,7 @@ mod tests {
         first.raw_start = RAW;
         let decision = session.observe(first);
         assert!(decision.candidate, "第一块必须被认成钉住候选");
-        assert_eq!(decision.feed_origin, 0, "起点是喂入域的 0，不是宿主播放头");
-        assert_eq!(decision.feed_frames_before, 0);
+        assert_eq!(decision.tape_frames_before, 0);
         assert_eq!(decision.feed, FeedKind::Transport, "0.5 s 之内还没提级");
 
         let mut promoted = None;
@@ -785,14 +795,41 @@ mod tests {
         }
         let (index, decision) = promoted.expect("钉住喂入流必须在 0.5 s 内提级");
         assert_eq!(decision.feed, FeedKind::Pinned);
-        assert_eq!(decision.feed_frames_before, index * 1200);
-        assert_eq!(decision.feed_origin, 0);
+        assert_eq!(decision.tape_frames_before, index * 1200);
         assert_eq!(
-            session.feed_timeline.position(decision.feed_frames_before),
-            (index * 1200) as i64,
-            "整条时间轴从 0 起算；raw 只作诊断"
+            session.tape.frames,
+            (index + 1) * 1200,
+            "提级之后走带位置就是已喂帧数"
         );
-        assert_eq!(session.feed_timeline.first_raw, RAW);
+        assert_eq!(session.tape.first_raw, RAW);
+    }
+
+    /// **不变量：提级那一刻走带位置是连续的。**
+    ///
+    /// 【为什么这条是"起播 1 s 内错位"的接线端】此前候选块只计进 `frames` 而不被
+    /// 认成喂入域，于是第一次 `feed begin` 报出的位置是 0.489 s（23 488 帧）而不是 0
+    /// —— 提级那一刻位置从宿主域跳到自造域的 0.489 s，一次 0.5 s 的硬跳变。
+    #[test]
+    fn tape_cursor_starts_at_zero_after_promotion() {
+        let mut session = TransportSession::with_rate(48_000.0);
+        let mut first = pinned_block(960);
+        first.playing_rising = true;
+        let mut previous = session.observe(first);
+        assert_eq!(previous.tape_frames_before, 0);
+        let mut advanced = 960_u64;
+        for _ in 0..200 {
+            let decision = session.observe(pinned_block(960));
+            // 相邻两块的位置差恒等于块长 —— 提级那一块也不例外。
+            assert_eq!(
+                decision.tape_frames_before,
+                advanced,
+                "走带位置必须逐块连续，提级不得跳变"
+            );
+            advanced += 960;
+            previous = decision;
+        }
+        assert_eq!(previous.feed, FeedKind::Pinned);
+        assert_eq!(session.tape.frames, 201 * 960);
     }
 
     /// **不变量：宿主一报传输，喂入时间轴立刻结束并归零。**
@@ -809,18 +846,14 @@ mod tests {
             session.observe(block);
         }
         assert_eq!(session.feed, FeedKind::Pinned);
-        assert!(session.feed_timeline.frames > 0);
+        assert!(session.tape.frames > 0);
 
         let mut playing = input(true, true, 1200);
         playing.raw_start = 999_000;
         let decision = session.observe(playing);
         assert_eq!(decision.feed, FeedKind::Transport);
-        assert_eq!(
-            session.feed_timeline.frames, 0,
-            "传输事件必须把喂入时间轴归零"
-        );
-        assert_eq!(session.feed_timeline.first_raw, NO_RAW);
-        assert_eq!(session.feed_timeline.origin, 0);
+        assert_eq!(session.tape.frames, 0, "传输事件必须把走带位置归零");
+        assert_eq!(session.tape.first_raw, NO_RAW);
     }
 
     /// **不变量：候选期间 raw 变了，就不是同一条钉住流。**
@@ -828,7 +861,7 @@ mod tests {
     /// 【为什么它必须重开】宿主在预卷之后把播放头移到渲染起点，是正常形状。把两段
     /// 接成一条，位置就从预卷的位置接着数 —— 那正是"偏移一个预卷长度"的来源。
     #[test]
-    fn a_pre_roll_that_changes_raw_restarts_the_feed_timeline() {
+    fn a_pre_roll_that_changes_raw_restarts_the_tape_cursor() {
         let mut session = TransportSession::with_rate(48_000.0);
         let mut first = pinned_block(1200);
         first.playing_rising = true;
@@ -837,7 +870,7 @@ mod tests {
         let mut next = pinned_block(1200);
         next.raw_start = 100;
         session.observe(next);
-        assert_eq!(session.feed_timeline.frames, 2_400);
+        assert_eq!(session.tape.frames, 2_400);
 
         let mut moved = pinned_block(1200);
         moved.raw_start = 48_000;
@@ -845,28 +878,26 @@ mod tests {
         moved.pinned = false;
         let decision = session.observe(moved);
         assert!(!decision.candidate, "raw 变了就不是同一条钉住流");
-        assert_eq!(session.feed_timeline.frames, 0);
+        assert_eq!(session.tape.frames, 0);
         assert_eq!(
-            decision.feed_frames_before, 2_400,
+            decision.tape_frames_before, 2_400,
             "本块之前的帧数是读数，不因归零而变"
         );
     }
 
-    /// `FeedTimeline` 的位置就是"起点 + 已喂帧数"，没有第二项。
+    /// `TapeCursor` 只回答"已经喂进来多少帧"，没有第二个域。
     #[test]
-    fn the_feed_position_is_origin_plus_frames() {
-        let timeline = FeedTimeline {
-            origin: 0,
-            frames: 960,
-            first_raw: 893_720,
-            promoted: true,
-        };
-        assert_eq!(timeline.position(0), 0);
-        assert_eq!(timeline.position(960), 960);
-        let raw_origin = FeedTimeline {
-            origin: 893_720,
-            ..timeline
-        };
-        assert_eq!(raw_origin.position(960), 894_680);
+    fn the_tape_cursor_counts_frames_and_nothing_else() {
+        let mut cursor = TapeCursor::default();
+        assert_eq!(cursor.frames, 0);
+        assert_eq!(cursor.first_raw, NO_RAW);
+        cursor.note_first_raw(893_720);
+        cursor.note_first_raw(1_000);
+        assert_eq!(cursor.first_raw, 893_720, "首块读数只记一次");
+        assert_eq!(cursor.advance(960), 960);
+        assert_eq!(cursor.advance(960), 1_920);
+        cursor.reset();
+        assert_eq!(cursor.frames, 0);
+        assert_eq!(cursor.first_raw, NO_RAW);
     }
 }

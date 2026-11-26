@@ -237,13 +237,11 @@ pub(super) struct StreamGeometry {
     pub(super) window_spent: AtomicBool,
     /// "钉住 + 有信号"已经累积了多少帧（提级的判据，见 `FEED_PROMOTE_SEC`）。
     pub(super) pinned_signal_frames: AtomicU64,
-    /// 钉住喂入流的**起点**（喂入域，帧）。渲染流恒为 0。
+    /// 这条喂入流从起点起已经喂进来的帧数（喂入域）。
     ///
     /// 【为什么必须存在几何里】`TransportSession` 每块都是临时重建的，而这条时间轴
-    /// 要跨块存活（见 `FeedTimeline`）。`origin=0` 是本轮的修复点：此前位置锚在
-    /// `raw_start`（= 宿主最后播放头），VEGAS 渲染因此整段平移了 18.62 s。
-    pub(super) feed_origin: AtomicI64,
-    /// 这条喂入流从起点起已经喂进来的帧数。
+    /// 要跨块存活（见 `TapeCursor`）。它是**喂入域**的计数：工程位置由
+    /// `capture::project_mapping` 从它换算出来，两者不共用任何一个变量。
     pub(super) feed_frames_total: AtomicU64,
     /// 第一块的宿主 raw（只用于诊断；`NO_POSITION` = 未知）。
     pub(super) feed_first_raw: NoPosition,
@@ -643,8 +641,17 @@ pub(super) fn block_is_silent(block: &crate::capture::recorder::InputBlock<'_>) 
 /// 一条流在本块上的位置/相位结论。
 #[derive(Clone, Copy, Debug)]
 pub(super) struct StreamBlock {
-    /// 本块的有效工程起点（可能来自 continuous/music 回退）。
+    /// 本块的**磁带走带位置**（喂入域；可能来自 continuous/music 回退）。
+    ///
+    /// 【为什么它不再是"工程位置"】捕获通路有两个域（见 `TapeCursor` 与
+    /// `project_map`）。这一位是"这条喂入流走到第几帧"，磁带写入、循环切分与 I-3
+    /// 连续性都以它为准；读快照与 UI 播放头读的是 `project_position`。
     pub(super) position: i64,
+    /// 本块的**工程位置**（工程域）；`NO_POSITION` = 还没有映射。
+    ///
+    /// 【为什么必须与 `position` 分开】两者在钉住喂入流里**不相等**（片段在工程
+    /// 28.000 s、磁带从 0 起）。共用一个变量就是"前 N 秒直通、后段才出声"的全部原因。
+    pub(super) project_position: i64,
     /// 宿主原始 `projectTimeSamples`。
     pub(super) raw_start: i64,
     pub(super) phase: TransportPhase,
@@ -691,6 +698,12 @@ pub(super) struct StreamBlock {
     pub(super) prune_before: i64,
     /// 本块位置可以发布给 UI / 输出仲裁。
     pub(super) position_trusted: bool,
+    /// 本块的工程位置是否有意义（有映射 / 不是钉住流）。
+    ///
+    /// 【为什么单独一位】`NO_POSITION` 是一个合法可比较的整数，把它当"未知"靠
+    /// 比较会让"工程帧恰好等于 i64::MIN"这种不可能的事成为判据的一部分。一个布尔位
+    /// 让"我不知道这一段在工程哪里"成为**显式**状态，输出据此退回直通。
+    pub(super) project_position_valid: bool,
     /// **UI 播放头修正量**（帧）：喂入位置与宿主 UI 播放头的当前差。UI 发布
     /// （捕获通道与 realtime 通道）用 `position - playhead_offset`，磁带记账仍用
     /// `position`（喂入域）。维护规则见 `note_stream_geometry` 调用侧的说明。
