@@ -40,8 +40,13 @@ const MAX_STEP_ABS: f32 = 0.25;
 /// 内容仍然是满幅跳变 —— 用户听到的"咔"一样清楚。
 const MAX_STEP_RATIO: f32 = 8.0;
 
-/// 一次报告最多打印多少行（其余只计数）。
-const REPORT_LIMIT: usize = 8;
+/// 一次排水最多格式化多少条读数（其余只计数）。
+///
+/// 【为什么从 8 提到 32】排放方现在会把同类读数**合并成一行**（见
+/// `capture::log_click_report`），所以"格式化多少条"不再等于"日志里多几行"。
+/// 反过来，8 太小了：界面定时器一拍能攒下十几块，超出的部分会被直接标成
+/// "已报告"而永远消失 —— 一个会静默吞事件的诊断，比没有诊断更坏。
+const REPORT_LIMIT: usize = 32;
 
 /// 一条接缝的种类（与 `extension::Seam` 一一对应，编码成 u8 以便跨线程）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +86,54 @@ impl SeamCode {
             Self::Crossfade => "crossfade",
             Self::WideCrossfade => "wide",
             Self::CoverageEdge => "coverage-edge",
+        }
+    }
+}
+
+/// 一条读数的类别。
+///
+/// 【为什么类名要独立成一个枚举】输出的每一行都要能被"按类过滤"：现场排查时人只会
+/// 看某一类（"有没有换源" / "有没有洞"）。把类名拼进正文里，过滤就只能靠前缀匹配
+/// 字符串 —— 而汇总行（同类合并成一行）又需要它单独存在以便计数。两件事要的是同一个
+/// 事实，它就该有同一个来源。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClickClass {
+    /// 换源 / 首块 / 覆盖边。
+    Switch,
+    /// "有声 → 整块零 → 有声"。
+    Hole,
+    /// 阶跃显著。
+    Step,
+    /// 相邻块能量比离开健康带。
+    Envelope,
+}
+
+impl ClickClass {
+    /// 全部类别（顺序与 [ClickClass::index] 一致）。
+    ///
+    /// 【为什么要有它】输出方按"类别 × 归因"分桶，冲出去时要用下标反查类名。
+    /// 让下标与类名来自同一张表，就不会出现"第 3 个桶印成 step"这种错位。
+    pub(crate) const ALL: [Self; 4] = [Self::Switch, Self::Hole, Self::Step, Self::Envelope];
+
+    /// 类别的总数（数组下标用）。
+    pub(crate) const COUNT: usize = Self::ALL.len();
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Switch => "switch",
+            Self::Hole => "hole",
+            Self::Step => "step",
+            Self::Envelope => "envelope",
+        }
+    }
+
+    /// 数组下标（顺序与 [ClickClass::ALL] 一致）。
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Self::Switch => 0,
+            Self::Hole => 1,
+            Self::Step => 2,
+            Self::Envelope => 3,
         }
     }
 }
@@ -294,9 +347,9 @@ impl ClickLedger {
         self.suspicious.load(Ordering::Acquire)
     }
 
-    /// 取出**尚未报告过**的事件，并格式化成一行的主体（不含级别前缀）。
+    /// 取出**尚未报告过**的读数。
     ///
-    /// 【为什么"报告过"要单独记】本函数由 UI 定时器驱动（20 ms 一次）。没有游标时
+    /// 【为什么"报告过"要单独记】本函数由周期定时器驱动（约 100 ms 一次）。没有游标时
     /// 同一块会在环里存活 2.7 秒、被打印上百遍，日志立刻失去价值。
     ///
     /// # 四类事件，各自回答一个不同的问题
@@ -307,10 +360,17 @@ impl ClickLedger {
     ///   * **源切换**本身就是用户听到那一下的位置，却被"可疑"这个过滤器挡在门外 ——
     ///     只有当它恰好也产生大阶跃时才露头。
     ///
-    /// 现在：`switch` 无条件报告（一次播放本该只有极少几次），`envelope` 看相邻块的
+    /// 现在：`switch` 无条件产出（一次播放本该只有极少几次），`envelope` 看相邻块的
     /// 能量比，`step` 保留原有的阶跃判据，`hole` 抓"上一块有信号、这一块塌到近乎零"
     /// —— 也就是用户说的"静音断点"本身。
-    pub(crate) fn drain_reports(&self) -> Vec<String> {
+    ///
+    /// # 产出的是读数，不是结论
+    ///
+    /// 每条读数都带一个 `blamed`（见 [blames_us]）：**只有**"这一块里有不属于我们的
+    /// 帧"才是账本自己能证明的事。级别由它决定 —— 有证据的升级为 WARN，其余留在
+    /// DEBUG。这个分工是这条账本能长期留在日志里的前提：现场 30 秒的渲染就有 200 多条
+    /// 这一类读数，全部以 WARN 打出来时，真正的故障反而没有人看得见。
+    pub(crate) fn drain_reports(&self) -> Vec<ClickReport> {
         let blocks = self.recorded();
         if blocks.is_empty() {
             return Vec::new();
@@ -330,16 +390,26 @@ impl ClickLedger {
             }
             highest = highest.max(block.seq);
             let sample = &block.sample;
-            // `switch`：源切换 / 首块 / 覆盖边 —— 它们本身就是"边界在哪"，无条件打印。
+            // `switch`：源切换 / 首块 / 覆盖边 —— 它们本身就是"边界在哪"，无条件产出。
             let switching = sample.seam != SeamCode::None || sample.first_of_stream;
             if switching {
                 counted += 1;
-                out.push(format!("switch {}", format_block(block, median)));
+                out.push(report(
+                    ClickClass::Switch,
+                    sample.max_step,
+                    format_block(block, median),
+                    sample,
+                ));
                 continue;
             }
             if is_suspicious(sample.max_step, median) {
                 counted += 1;
-                out.push(format!("step {}", format_block(block, median)));
+                out.push(report(
+                    ClickClass::Step,
+                    sample.max_step,
+                    format_block(block, median),
+                    sample,
+                ));
                 continue;
             }
             // `hole`：上一块有信号、这一块塌到近乎零 —— "有声 → 静音 → 有声"就是用户
@@ -353,7 +423,14 @@ impl ClickLedger {
             if let Some(previous) = previous_peak(&blocks, index) {
                 if previous >= HOLE_PREVIOUS_PEAK && sample.peak < previous * HOLE_RATIO {
                     counted += 1;
-                    out.push(format!("hole {}", format_block(block, median)));
+                    // 掉得越深"更强"（汇总行只留同类里最强的一条）。
+                    let severity = previous / sample.peak.max(1e-9);
+                    out.push(report(
+                        ClickClass::Hole,
+                        severity,
+                        format_block(block, median),
+                        sample,
+                    ));
                     continue;
                 }
             }
@@ -361,9 +438,13 @@ impl ClickLedger {
             if let Some(ratio) = envelope_ratio(&blocks, index) {
                 if !(ENVELOPE_MIN..=ENVELOPE_MAX).contains(&ratio) {
                     counted += 1;
-                    out.push(format!(
-                        "envelope ratio={ratio:.3} {}",
-                        format_block(block, median)
+                    // 离 1 越远越强：0.25 与 4 一样糟。
+                    let severity = ratio.max(1.0 / ratio.max(f32::MIN_POSITIVE));
+                    out.push(report(
+                        ClickClass::Envelope,
+                        severity,
+                        format!("ratio={ratio:.3} {}", format_block(block, median)),
+                        sample,
                     ));
                 }
             }
@@ -376,11 +457,42 @@ impl ClickLedger {
         out.truncate(REPORT_LIMIT);
         out
     }
+}
 
-    /// 兼容入口：只取 `step` 类（既有测试与诊断包的调用方仍可用）。
-    pub(crate) fn drain_suspicious(&self) -> Vec<String> {
-        self.drain_reports()
+/// 一条待输出的读数。
+pub(crate) struct ClickReport {
+    /// 是哪一类事件。
+    pub class: ClickClass,
+    /// 这一条能否**归因于我们自己**（见 [blames_us]）—— 级别由它决定。
+    pub blamed: bool,
+    /// 同类里"更强"的那一条会被留在汇总行里（越大越强）。
+    pub severity: f32,
+    /// 读数主体，**不含**类名（类名由输出方拼，汇总行要用它计数）。
+    pub body: String,
+}
+
+/// 把一条读数连同它的归因判断装起来。
+fn report(class: ClickClass, severity: f32, body: String, sample: &BlockSample) -> ClickReport {
+    ClickReport {
+        class,
+        blamed: blames_us(sample),
+        severity,
+        body,
     }
+}
+
+/// 这一块能否**归因于我们自己**。
+///
+/// 【判据为什么只有这两个位】账本量的是**输出波形**，它手里没有内容的"标准答案"。
+/// 一次起伏既可能是音乐换了口气，也可能是我们换错了源 —— 只看波形永远分不开。唯一
+/// 分得开的事实是**覆盖**：`uncovered > 0`（这一块里有帧不是我们写的）与 `edge`
+/// （覆盖边落在块内，宿主原声与处理结果在块内翻转）。这两件事只可能由我们造成。
+///
+/// 【为什么其余读数一律不升级为 WARN】现场 30 秒的渲染里有 182 条 `envelope` 与 30
+/// 条 `step`，全部来自 0.5~2.0 这条健康带之外的**正常音乐动态**。把"内容在动"当成
+/// "我们出错"，WARN 渠道就失去了检索价值 —— 而它正是现场唯一会被人看的渠道。
+fn blames_us(sample: &BlockSample) -> bool {
+    sample.uncovered > 0 || sample.edge
 }
 
 /// 相邻块能量比的**健康带**。离开它就说明这一块的能量被换掉了。
@@ -511,6 +623,18 @@ fn format_block(block: &RecordedBlock, median: f32) -> String {
 mod tests {
     use super::*;
 
+    /// 把读数还原成与日志同一形状的一行（`<class> <body>`）。
+    ///
+    /// 【为什么测试不直接比对 `ClickReport`】现场读的是**日志行**：类名与主体拼起来
+    /// 才是读者看到的东西。断言那一行，等于断言"读者能不能读懂"。
+    fn lines(ledger: &ClickLedger) -> Vec<String> {
+        ledger
+            .drain_reports()
+            .into_iter()
+            .map(|report| format!("{} {}", report.class.as_str(), report.body))
+            .collect()
+    }
+
     fn sample(max_step: f32) -> BlockSample {
         BlockSample {
             stream: 0,
@@ -554,7 +678,7 @@ mod tests {
             last: 0.0,
             ..sample(0.0)
         });
-        let lines = ledger.drain_suspicious();
+        let lines = lines(&ledger);
         assert_eq!(lines.len(), 1, "只应有那一条：{lines:?}");
         assert!(lines[0].starts_with("hole "), "{}", lines[0]);
         assert!(lines[0].contains("peak=0.0000"), "{}", lines[0]);
@@ -575,7 +699,7 @@ mod tests {
             input_peak: 0.0,
             ..sample(0.8)
         });
-        let lines = ledger.drain_suspicious();
+        let lines = lines(&ledger);
         assert_eq!(lines.len(), 1, "只应有那一条：{lines:?}");
         let line = &lines[0];
         // 每一行都以**事件类**开头：`step` / `envelope` / `switch`。没有这个前缀，
@@ -643,10 +767,10 @@ mod tests {
             seam: SeamCode::WideCrossfade,
             ..sample(0.002)
         });
-        let lines = ledger.drain_reports();
-        assert_eq!(lines.len(), 1, "换源必须报一次：{lines:?}");
-        assert!(lines[0].starts_with("switch "), "{}", lines[0]);
-        assert!(lines[0].contains("seam=wide"), "{}", lines[0]);
+        let reports = ledger.drain_reports();
+        assert_eq!(reports.len(), 1, "换源必须报一次");
+        assert_eq!(reports[0].class, ClickClass::Switch);
+        assert!(reports[0].body.contains("seam=wide"), "{}", reports[0].body);
     }
 
     /// **包络类事件**：20 ms 等功率过渡掉 3 dB 就是这一类。
@@ -666,9 +790,9 @@ mod tests {
             rms: 0.05,
             ..sample(0.001)
         });
-        let lines = ledger.drain_reports();
-        assert_eq!(lines.len(), 1, "包络塌陷必须报一次：{lines:?}");
-        assert!(lines[0].starts_with("envelope "), "{}", lines[0]);
+        let reports = ledger.drain_reports();
+        assert_eq!(reports.len(), 1, "包络塌陷必须报一次");
+        assert_eq!(reports[0].class, ClickClass::Envelope);
     }
 
     /// 同一块只报告一次（UI 定时器 20 ms 一次，环里会存活 2.7 s）。
@@ -676,10 +800,10 @@ mod tests {
     fn a_block_is_reported_once() {
         let ledger = ClickLedger::new();
         ledger.record(sample(0.9));
-        assert_eq!(ledger.drain_suspicious().len(), 1);
-        assert!(ledger.drain_suspicious().is_empty(), "同一块不得重复打印");
+        assert_eq!(lines(&ledger).len(), 1);
+        assert!(lines(&ledger).is_empty(), "同一块不得重复打印");
         ledger.record(sample(0.9));
-        assert_eq!(ledger.drain_suspicious().len(), 1, "新块仍要打印");
+        assert_eq!(lines(&ledger).len(), 1, "新块仍要打印");
         assert_eq!(ledger.suspicious(), 2);
     }
 
@@ -691,7 +815,7 @@ mod tests {
             let step = 0.002 + (index % 7) as f32 * 0.0005;
             ledger.record(sample(step));
         }
-        assert!(ledger.drain_suspicious().is_empty());
+        assert!(lines(&ledger).is_empty());
     }
 
     /// 相对阈值：安静段落里的小阶跃也要报（绝对阈值够不着它）。
@@ -706,6 +830,80 @@ mod tests {
     fn silence_uses_the_absolute_threshold_only() {
         assert!(!is_suspicious(0.01, 0.0));
         assert!(is_suspicious(0.3, 0.0));
+    }
+
+    /// **只有"这一块里有不属于我们的帧"才升级为 WARN。**
+    ///
+    /// 【为什么这条必须钉住】账本量的是输出波形，它分不开"音乐换了口气"与"我们换错
+    /// 了源"。唯一分得开的事实是覆盖：`uncovered > 0` 与 `edge`。现场 30 秒的渲染
+    /// 有 200 多条 `envelope` / `step` 读数，它们全是正常音乐动态 —— 一旦这些也进
+    /// WARN，真正的故障就没人看得见了。
+    #[test]
+    fn only_a_block_that_claims_frames_it_did_not_read_is_blamed() {
+        let ledger = ClickLedger::new();
+        for _ in 0..4 {
+            ledger.record(sample(0.001));
+        }
+        // 完全覆盖、只是内容在动：读数，不是故障。
+        ledger.record(BlockSample {
+            rms: 0.05,
+            ..sample(0.001)
+        });
+        // 同样的形状，但这一块里有 96 帧不是我们写的：证据。
+        // （`rms` 再抬一档，让它在包络判据上同样成立 —— 本条问的是归因，
+        //   不是判据，两块都必须先被产出。）
+        ledger.record(BlockSample {
+            rms: 0.5,
+            uncovered: 96,
+            ..sample(0.001)
+        });
+        let reports = ledger.drain_reports();
+        assert_eq!(reports.len(), 2, "两条都要产出");
+        assert!(
+            !reports[0].blamed,
+            "覆盖完整的包络起伏只是读数：{:?}",
+            reports[0].class
+        );
+        assert!(
+            reports[1].blamed,
+            "有未覆盖帧的块必须能归因于我们：{:?}",
+            reports[1].class
+        );
+    }
+
+    /// 覆盖边落在块内同样是一份证据（宿主原声与处理结果在块内翻转）。
+    #[test]
+    fn a_coverage_edge_inside_the_block_is_blamed() {
+        let ledger = ClickLedger::new();
+        for _ in 0..4 {
+            ledger.record(sample(0.001));
+        }
+        ledger.record(BlockSample {
+            rms: 0.05,
+            edge: true,
+            ..sample(0.001)
+        });
+        let reports = ledger.drain_reports();
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].blamed, "{:?}", reports[0].class);
+    }
+
+    /// 类名与下标必须一一对应：汇总行按 `ClickClass::index` 分桶，错一位就会把
+    /// "洞"记成"阶跃"。
+    #[test]
+    fn every_class_has_its_own_bucket_and_name() {
+        let classes = [
+            ClickClass::Switch,
+            ClickClass::Hole,
+            ClickClass::Step,
+            ClickClass::Envelope,
+        ];
+        assert_eq!(classes.len(), ClickClass::COUNT);
+        for (expected, class) in classes.iter().enumerate() {
+            assert_eq!(class.index(), expected, "{}", class.as_str());
+        }
+        let names: Vec<&str> = classes.iter().map(|class| class.as_str()).collect();
+        assert_eq!(names, vec!["switch", "hole", "step", "envelope"]);
     }
 
     /// 环满之后仍按序号升序返回，且不会重复。

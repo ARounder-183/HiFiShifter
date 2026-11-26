@@ -636,6 +636,22 @@ impl PositionSource {
         }
     }
 
+    /// 语言无关的名字（诊断行用）。
+    ///
+    /// 【为什么它必须可读】`[capture] ctx` 里的 `music=` / `continuous=` 是宿主给的
+    /// 原始读数，而读者要回答的下一个问题是「那我们到底用了哪个」。答案就是这一栏：
+    /// 一个荒谬的 `music=16677.1` 配 `src=project`，意思是「宿主给了，我们没信它」。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::Continuous => "continuous",
+            Self::Music => "music",
+            Self::Cycle => "cycle",
+            Self::Offline => "offline",
+            Self::Preview => "preview",
+        }
+    }
+
     pub fn from_code(code: u8) -> Option<Self> {
         match code {
             1 => Some(Self::Project),

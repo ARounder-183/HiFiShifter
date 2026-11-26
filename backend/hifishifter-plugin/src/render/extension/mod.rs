@@ -280,6 +280,12 @@ pub struct ExtensionOwner {
     /// 淡化、首块原样输出、位置跳变）只能靠**同一块上的多个读数**互相区分。只数
     /// "发生过几次"的计数器永远回答不了"这一次是哪一种"。
     click: crate::render::click::ClickLedger,
+    /// `[click]` 读数的合并器（非实时线程用）。
+    ///
+    /// 【为什么状态留在这里】合并窗口必须**跨**定时器触发存在：一次 30 秒的渲染有
+    /// 200 多条读数，只有把它们按（类别 × 归因）攒进同一个窗口，输出才会是几行而
+    /// 不是几百行（见 `capture::log_click_report`）。
+    click_readout: Mutex<capture::ClickReadout>,
     /// 【B0】本块分层拷贝的覆盖读数（音频线程写，`apply_output_declick` 读走）。
     ///
     /// 【为什么按流分开】prefetch 与 realtime 交替到达；共用一格会让一条流的
@@ -418,6 +424,12 @@ pub struct ExtensionOwner {
     /// `[capture] pass` / `[capture] clock` 两行的去重指纹（非实时线程用）。
     last_pass_diag: Mutex<Option<String>>,
     last_clock_diag: Mutex<Option<String>>,
+    /// 每条流上一次已经报过的「位置倒退」累计数（见 `log_clock_line`）。
+    ///
+    /// 【为什么必须留一份】倒退是**事件**，不是读数：读数每 100 ms 一行，事件只该在
+    /// 计数真的增长的那一拍出现一次。没有这份基线，`rewinds > 0` 会把同一件事每拍
+    /// 重报一遍，直到会话结束。
+    clock_rewinds_seen: [AtomicU64; 3],
     /// `[capture] ctx` 的去重指纹与上一次打印时刻（非实时线程用）。
     ///
     /// 【为什么带时刻】指纹不含位置（见 `BlockTraceRing::last_context`），而位置才是

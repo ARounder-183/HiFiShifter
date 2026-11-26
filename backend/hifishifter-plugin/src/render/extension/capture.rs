@@ -1,6 +1,125 @@
 //! 捕获通路：渲染输入、准备作业、输出仲裁与读数。
 use super::*;
 
+/// `[click]` 读数的合并窗口（不可归因的那一半）。
+///
+/// 【为什么是 5 s】它们描述的是内容，不是故障；人看日志时问的是"这一段里有没有
+/// 异常"，5 秒的粒度正好匹配一次渲染的尺度。窗口里保留**最强**的一条，位置仍在
+/// 行里，所以放大窗口不损失定位。
+const CLICK_READOUT_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// `[click]` 证据的合并窗口（可归因的那一半）。
+///
+/// 【为什么只有 1 s】证据要回答的是"这一下在第几秒"。窗口越短，留在手里的位置越
+/// 多；而 1 s 已经足够把"每一块都中招"这种系统性缺陷压成一行计数。
+const CLICK_BLAME_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// 事件停下这么久就把桶冲出去。
+///
+/// 【为什么必须有】一次渲染的最后一次点击落在窗口末尾时，等不到窗口结束就会随
+/// 会话一起消失 —— 而"最后那一下有没有咔"恰恰是最常被问的问题。
+const CLICK_READOUT_QUIET: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// 一桶待输出的 `[click]` 读数：同类、同归因结论。
+#[derive(Default)]
+struct ClickBucket {
+    /// 桶里第一条的时刻（窗口从它算起）。
+    since: Option<std::time::Instant>,
+    /// 最近一条的时刻（"安静了多久"从它算起）。
+    touched: Option<std::time::Instant>,
+    /// 桶里一共几条。
+    count: u32,
+    /// 桶里最强的一条：severity 与读数主体。
+    best: Option<(f32, String)>,
+}
+
+/// `[click]` 读数按（类别 × 归因）合并的累加器。**只在非实时线程上使用**。
+///
+/// 【为什么合并而不是限流】限流会丢掉"第一条之后的全部位置"，而排查"咔"要的正是
+/// 位置。合并把同一窗口里的 N 条压成一行，但仍留着最强那条的完整读数 —— 计数回答
+/// "有多少"，正文回答"在哪一下"。
+#[derive(Default)]
+pub(super) struct ClickReadout {
+    buckets: [ClickBucket; crate::render::click::ClickClass::COUNT * 2],
+}
+
+impl ClickReadout {
+    /// 记一条读数（非实时线程）。
+    pub(super) fn push(
+        &mut self,
+        report: crate::render::click::ClickReport,
+        now: std::time::Instant,
+    ) {
+        let index = report.class.index() * 2 + usize::from(report.blamed);
+        let Some(bucket) = self.buckets.get_mut(index) else {
+            return;
+        };
+        bucket.count = bucket.count.saturating_add(1);
+        if bucket.since.is_none() {
+            bucket.since = Some(now);
+        }
+        bucket.touched = Some(now);
+        // "更强"的留下：同一条读数里 severity 越大越说明问题（见 ClickReport）。
+        if bucket
+            .best
+            .as_ref()
+            .is_none_or(|(severity, _)| report.severity >= *severity)
+        {
+            bucket.best = Some((report.severity, report.body));
+        }
+    }
+
+    /// 取走到期的桶，每桶一行。
+    ///
+    /// 行的形状：只有一条时与逐条输出完全一致（`[click] envelope ratio=… block=…`），
+    /// 多条时前面加 `xN in T`，正文前标 `worst:`。
+    pub(super) fn flush_due(&mut self, now: std::time::Instant) -> Vec<(log::Level, String)> {
+        let mut out = Vec::new();
+        for (index, bucket) in self.buckets.iter_mut().enumerate() {
+            let (Some(since), Some(touched)) = (bucket.since, bucket.touched) else {
+                continue;
+            };
+            let blamed = index % 2 == 1;
+            let window = if blamed {
+                CLICK_BLAME_WINDOW
+            } else {
+                CLICK_READOUT_WINDOW
+            };
+            let aged = now.duration_since(since) >= window;
+            let quiet = now.duration_since(touched) >= CLICK_READOUT_QUIET;
+            if !aged && !quiet {
+                continue;
+            }
+            let Some((_, body)) = bucket.best.take() else {
+                *bucket = ClickBucket::default();
+                continue;
+            };
+            let class = crate::render::click::ClickClass::ALL
+                .get(index / 2)
+                .copied()
+                .unwrap_or(crate::render::click::ClickClass::Envelope);
+            let line = if bucket.count <= 1 {
+                format!("[click] {} {body}", class.as_str())
+            } else {
+                format!(
+                    "[click] {} x{} in {:.1}s worst: {body}",
+                    class.as_str(),
+                    bucket.count,
+                    now.duration_since(since).as_secs_f32(),
+                )
+            };
+            let level = if blamed {
+                log::Level::Warn
+            } else {
+                log::Level::Debug
+            };
+            out.push((level, line));
+            *bucket = ClickBucket::default();
+        }
+        out
+    }
+}
+
 /// `[capture] ctx` 在形状不变时补一行的间隔。
 ///
 /// 【为什么要有它】这一行的去重键不含位置（位置一直在走 ⇒ 按整行去重等于每块一行，
@@ -767,13 +886,41 @@ impl ExtensionOwner {
         });
     }
 
-    /// 【B0】把尚未报告过的可疑块打印成 `[click]` 行。**非实时线程**（UI 定时器）。
+    /// 【B0】把尚未报告过的读数输出成 `[click]` 行。**非实时线程**（会话 actor / 界面定时器）。
     ///
-    /// 【为什么由 UI 定时器驱动】它是唯一稳定存在、且不在音频线程上的周期点；
+    /// 【为什么由非实时定时器驱动】它是唯一稳定存在、且不在音频线程上的周期点；
     /// 音频线程只负责记录。报告本身是"扫 256 个原子 + 格式化"，与一次界面刷新同量级。
+    ///
+    /// # 为什么不再逐条打 WARN
+    ///
+    /// 现场 30 秒的渲染里有 182 条 `envelope` + 30 条 `step`，而它们全部来自正常
+    /// 音乐动态（见 `click::blames_us`）。逐条以 WARN 打出来时，WARN 渠道就不再是"需要
+    /// 人看一眼的东西"，而成了"全部输出" —— 用户只能靠过滤才看得见有用的行，一个
+    /// 诊断工具走到这一步就不再是诊断。现在分成两条出口：
+    ///
+    ///   * **有证据**（这一块里有不属于我们的帧）⇒ WARN，但同类在 1 s 内合并成一行；
+    ///   * **只是读数**（内容是自己在动）⇒ DEBUG，同类在 5 s 内合并成一行。
+    ///
+    /// 两条出口都保留"最强的那一条"的完整读数（含位置），所以合并**不损失定位**。
     pub(crate) fn log_click_report(&self) {
-        for line in self.click.drain_suspicious() {
-            log::warn!("[click] {line}");
+        let now = std::time::Instant::now();
+        let reports = self.click.drain_reports();
+        let mut readout = self.click_readout.lock_or_recover();
+        for report in reports {
+            readout.push(report, now);
+        }
+        for (level, line) in readout.flush_due(now) {
+            if level >= log::Level::Warn {
+                // 证据也要限流：一个系统性的覆盖缺陷会让每一块都带未覆盖帧，逐条打印
+                // 只会把日志刷满。限流行自带"抑制了多少条"，所以"是系统性的"仍然可见。
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    level,
+                    "capture.click.blame",
+                    format_args!("{line}"),
+                );
+            } else {
+                log::debug!("{line}");
+            }
         }
     }
 
@@ -852,7 +999,11 @@ impl ExtensionOwner {
             return;
         }
         *last = Some((key, now));
-        log::warn!("{line}");
+        // 【为什么是 DEBUG】这一行回答"宿主此刻给了什么形状"，不是"出了什么事"。
+        // 日志档位就是按这个分的（log_policy：High = 逐回调 / 逐块诊断），而它此前以
+        // WARN 打出来 —— 一次 30 秒的渲染里它占 91 行，WARN 渠道里全是读数。位置钉住、
+        // music 冻结这类**形状**，选了 High 的人一定会看到。
+        log::debug!("{line}");
     }
 
     /// 【B0】把 I-2 / I-3 的读数打成两行。**非实时线程**（UI 定时器）。
@@ -899,7 +1050,11 @@ impl ExtensionOwner {
             let mut last = self.last_pass_diag.lock_or_recover();
             if last.as_deref() != Some(line.as_str()) {
                 *last = Some(line.clone());
-                log::warn!("{line}");
+                // 【为什么是 DEBUG】switches 看着像故障计数，其实**不是**：一次正常
+                // 渲染里它一定有值 —— 每个 pass 的第一块都会从上一遍的源切到这一遍的
+                // 源（现场 30 秒 11 次，全部落在 pass 边界）。真正的故障计数在
+                // [capture] clock（位置倒退）与 [click]（未覆盖帧）那两行里。
+                log::debug!("{line}");
             }
         }
         // 【为什么按流遍历而不是挑一个下标】旧实现用 `snapshot_index_for_rate(工程率)`
@@ -965,10 +1120,175 @@ impl ExtensionOwner {
                 _ => "transport",
             },
         );
+        // 【读数归读数，事件归事件】这一行是**周期性读数**：只要 `jumps` 变了它就
+        // 变，而 `jumps` 在正常会话里一直在动（宿主每次恢复报位置都算一次）。于是
+        // 它每 100 ms 就可能打一行，30 秒的渲染里占 110 行 —— 全是 WARN。
+        //
+        // 它真正想报警的只有一件事：**位置倒退**（`rewinds` / `pass_rewinds` 增长）。
+        // 那是「内容被重播一遍」的签名，用户听到的就是一次咔。所以读数降到 DEBUG
+        // （High 档），倒退增长时另发一条 WARN **事件** —— 一次一条，带前后读数。
+        let rewinds = geometry.clock_rewinds.load(Ordering::Acquire)
+            + geometry.pass_rewinds.load(Ordering::Acquire);
+        let seen = self.clock_rewinds_seen[stream.index()].swap(rewinds, Ordering::AcqRel);
+        if rewinds > seen {
+            log::warn!(
+                "[capture] clock regression: stream={} rewinds {}->{} (delta_min={} delta_max={} pass={} feed={}) — content was replayed backwards, a click is audible there",
+                stream.as_str(),
+                seen,
+                rewinds,
+                geometry.clock_delta_min.load(Ordering::Acquire),
+                geometry.clock_delta_max.load(Ordering::Acquire),
+                geometry.pass.load(Ordering::Acquire),
+                match geometry.feed.load(Ordering::Acquire) {
+                    1 => "pinned",
+                    _ => "transport",
+                },
+            );
+        }
         let mut last = self.last_clock_diag.lock_or_recover();
         if last.as_deref() != Some(line.as_str()) {
             *last = Some(line.clone());
-            log::warn!("{line}");
+            log::debug!("{line}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::click::{ClickClass, ClickReport};
+    use std::time::{Duration, Instant};
+
+    fn report(class: ClickClass, blamed: bool, severity: f32, body: &str) -> ClickReport {
+        ClickReport {
+            class,
+            blamed,
+            severity,
+            body: body.to_owned(),
+        }
+    }
+
+    /// **同一窗口里的同类读数合并成一行，且留下最强的那一条。**
+    ///
+    /// 【为什么这条必须钉住】现场 30 秒的渲染有 182 条 `envelope` 读数。逐条打出来时
+    /// 日志只剩噪声；而只计数不保留正文时，「这一下在工程第几秒」就丢了 —— 那正是
+    /// 排查时要的东西。合并必须同时保住这两件事。
+    #[test]
+    fn a_window_of_readings_collapses_into_one_line_that_keeps_the_worst() {
+        let mut readout = ClickReadout::default();
+        let start = Instant::now();
+        for index in 0..40 {
+            readout.push(
+                report(
+                    ClickClass::Envelope,
+                    false,
+                    1.0 + index as f32,
+                    &format!("ratio={:.3} block={index} at=1.000s", 0.5 + index as f32),
+                ),
+                start,
+            );
+        }
+        assert!(
+            readout
+                .flush_due(start + Duration::from_millis(10))
+                .is_empty(),
+            "窗口没到就不许输出"
+        );
+        let lines = readout.flush_due(start + CLICK_READOUT_WINDOW + Duration::from_millis(1));
+        assert_eq!(lines.len(), 1, "同类必须合并成一行：{lines:?}");
+        let (level, line) = &lines[0];
+        assert_eq!(*level, log::Level::Debug, "只是读数：不许进 WARN");
+        assert!(line.contains("x40"), "必须报出一共几条：{line}");
+        assert!(
+            line.contains("block=39"),
+            "必须留下最强那一条的完整读数（含位置）：{line}"
+        );
+    }
+
+    /// **可归因的那一半走 WARN，而且收口更早**：证据要回答「在第几秒」。
+    #[test]
+    fn an_attributable_reading_is_warned_and_closed_sooner() {
+        assert!(
+            CLICK_BLAME_WINDOW < CLICK_READOUT_WINDOW,
+            "证据的窗口必须比读数短：证据的价值随位置精度衰减"
+        );
+        // 持续的证据：桶在 1 s 窗口处收口（不会攒到 5 s 的读数窗口）。
+        let mut readout = ClickReadout::default();
+        let start = Instant::now();
+        let last = CLICK_BLAME_WINDOW - Duration::from_millis(10);
+        readout.push(
+            report(
+                ClickClass::Step,
+                true,
+                0.8,
+                "block=7 at=2.500s uncovered=96",
+            ),
+            start,
+        );
+        readout.push(
+            report(
+                ClickClass::Step,
+                true,
+                0.8,
+                "block=8 at=2.520s uncovered=96",
+            ),
+            start + last,
+        );
+        assert!(
+            readout
+                .flush_due(start + CLICK_BLAME_WINDOW - Duration::from_millis(50))
+                .is_empty(),
+            "窗口没到、也还没安静下来，不许输出"
+        );
+        let lines = readout.flush_due(start + CLICK_BLAME_WINDOW + Duration::from_millis(1));
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0].0, log::Level::Warn);
+        assert!(lines[0].1.contains("uncovered=96"), "{}", lines[0].1);
+    }
+
+    /// **事件停下就把桶冲出去**：否则一次渲染的最后一条会随会话一起消失。
+    #[test]
+    fn a_quiet_bucket_is_flushed_before_its_window_ends() {
+        let mut readout = ClickReadout::default();
+        let start = Instant::now();
+        readout.push(
+            report(ClickClass::Hole, false, 50.0, "block=3 at=9.000s"),
+            start,
+        );
+        let lines = readout.flush_due(start + CLICK_READOUT_QUIET + Duration::from_millis(1));
+        assert_eq!(lines.len(), 1, "安静下来就必须落盘：{lines:?}");
+        assert!(lines[0].1.starts_with("[click] hole "), "{}", lines[0].1);
+    }
+
+    /// 只有一条时，输出必须与逐条打印**逐字同形**（读者不该看出它是被合并的）。
+    #[test]
+    fn a_single_reading_keeps_the_historical_line_shape() {
+        let mut readout = ClickReadout::default();
+        let start = Instant::now();
+        readout.push(
+            report(
+                ClickClass::Switch,
+                false,
+                0.0,
+                "block=2 at=0.000s seam=fade-in",
+            ),
+            start,
+        );
+        let lines = readout.flush_due(start + CLICK_READOUT_QUIET + Duration::from_millis(1));
+        assert_eq!(lines[0].1, "[click] switch block=2 at=0.000s seam=fade-in");
+    }
+
+    /// 不同归因结论各自成桶：一条读数不许把另一条「带上去」或「压下来」。
+    #[test]
+    fn blame_never_leaks_across_the_same_class() {
+        let mut readout = ClickReadout::default();
+        let start = Instant::now();
+        readout.push(report(ClickClass::Envelope, false, 4.0, "a"), start);
+        readout.push(report(ClickClass::Envelope, true, 1.0, "b"), start);
+        let lines = readout.flush_due(start + CLICK_READOUT_WINDOW + Duration::from_millis(1));
+        assert_eq!(lines.len(), 2, "两类各一行：{lines:?}");
+        let levels: Vec<log::Level> = lines.iter().map(|(level, _)| *level).collect();
+        assert!(levels.contains(&log::Level::Warn));
+        assert!(levels.contains(&log::Level::Debug));
     }
 }
