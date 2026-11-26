@@ -219,3 +219,68 @@ ARA 明说播放请求 "typically scheduled and executed with some delay"
 `FocusLoan` 用 `AttachThreadInput` + `SetFocus` 把焦点临时交给目标窗口，
 `Drop` 里无条件还回去。失败路径（`SendInput` 返回的条数不符）也必须经过 `Drop`
 —— 否则插件会"忽然不理人"，而界面上看不出任何异常。
+
+## 9. 宿主线程不取 GUI 锁
+
+本节补在 2026-11-26 的第五轮改造之后。它把"插件为什么会在宿主里失去响应"
+从一条现场猜测变成一条**可执行的不变量**。
+
+### 9.1 不变量
+
+> **宿主 UI 线程不得取任何可能被会话 actor 或工作线程长期持有的锁。**
+
+"宿主 UI 线程"有四个入口，缺一不可：
+
+| 入口 | 位置 | 谁在跑 |
+|---|---|---|
+| WebView 消息回调 | `editor/gui/client.rs::on_message` | WebView2 / WebKit 的消息泵线程 = 宿主 UI 线程 |
+| 视图节拍 | `editor/gui/client.rs::tick`（20 ms） | `plugin_register("timer")` / GTK 定时器 / CLAP timer |
+| ARA 模型回调 | `ara/model.rs`（`beginEditing` / `endEditing` / `notifyModelUpdates`） | 宿主 model 线程（与 UI 线程同一泵） |
+| 显式宿主调用 | `host::HostCallGuard` | 调用方线程 |
+
+四条都由 `host::thread_mark::RoleGuard` 打标，于是"我在不在宿主线程上"
+在运行期可判定，而不是靠读代码推断。
+
+### 9.2 为什么这把锁特别危险
+
+宿主 UI 线程一旦停住，它就不再泵消息；而 WebView2 的 `PostWebMessageAsJson`
+是**同步**调用，页面侧的投递推进依赖同一条线程泵消息。于是：
+
+```text
+actor:      持 timeline 写锁 → ... → post_message（等宿主泵）
+host thread: 在 on_message 里等 timeline 写锁
+```
+
+两边互等。现场的读数是"进程级静默"：最后一行之后连每 60 s 一次的
+`[gui] heap` 都没有了，而 `notifyModelUpdates` 在挂起前 356 次全部正常到达
+—— 宿主的泵没停，是我们把它占住了。
+
+### 9.3 三条落地规则
+
+1. **读快照，不读活对象。** GUI 侧需要的时间线事实由 `EditorSession::ui_clips()`
+   提供：`id / track / start / length / active take`。它在每次发布时重建，读方只克隆
+   一个 `Arc`，写方持有那把锁的时间也只有一次 `Arc` 交换 —— 两个方向都不跨
+   `post_message`。`close_track_gaps` 与 `rename_clip_take` 走这条路。
+2. **算法只留一份。** `close_track_gaps_moves_from(&[(id, start, length)], from)` 是
+   `TimelineState::close_track_gaps_moves` 的实现体。两个调用点（actor 与 GUI）用同一份，
+   于是"两条路算出不同的位移"不可能发生。
+3. **出站先分类再投递。** 回执永不丢、状态只留最新、其余按 256 KB/拍预算。
+   一条 1.9 MB 的消息会把宿主线程按住一次，而 100 条"去重取一次"的提示会让前端
+   取 100 次 —— 两者都是同一条链子。
+
+### 9.4 强制点
+
+| 机制 | 位置 | 管什么 |
+|---|---|---|
+| 角色标记 | `host::thread_mark::RoleGuard` | 让"本线程是宿主线程"可判定 |
+| 长锁闸 | `host::thread_mark::host_thread_may_not_lock` | `HFS_HOST_LOCK=probe`（默认，只记读数）/ `refuse`（拒绝）/ `allow`（静默放行） |
+| 静态门禁 | `scripts/checks/check-host-thread-locks.py` | `on_message` 里出现任何互斥量、ARA 回调里出现 `self.timeline.lock` 即失败；正反两向自检 |
+| 停滞看门狗 | `host::stall_watch` | 采样型：一次**永不返回**的宿主调用也会被点名（`Drop` 型守卫看不见它） |
+| 心跳预算 | `HFS_NOTIFY_BUDGET_MS` | `notifyModelUpdates` 单次调用的时间上界 |
+
+### 9.5 推论：不要用 Drop 型守卫证明"没有挂起"
+
+`HostCallGuard` / `AraCallbackGuard` 都在 `Drop` 里量耗时。一次永不返回的调用
+永远不 `Drop` —— 于是"日志里一条告警都没有"不是"没问题"，是"看不见"。
+判据只能是**另一条线程**定期读表（`stall_watch`），以及"所有线程的日志一起停"
+这个形状本身。
