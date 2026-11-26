@@ -718,6 +718,8 @@ fn default_edit_state_bytes() -> Vec<u8> {
 }
 
 #[cfg(test)]
+mod anchor_probe_tests;
+#[cfg(test)]
 mod assigned_timeline_tests;
 #[cfg(test)]
 mod bound_tests;

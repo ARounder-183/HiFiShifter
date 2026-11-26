@@ -1977,6 +1977,25 @@ impl CaptureStore {
     pub fn project_map_revision(&self) -> u64 {
         self.project_map.revision()
     }
+    /// **诊断 / 测试专用**：直接发布一张映射表（生产路径只能由
+    /// [`Self::publish_project_map`] 从真实 take 算出来）。
+    ///
+    /// 【为什么需要这个钩子】「内容判定把锚点挪到正确位置」这条判据必须能在**没有
+    /// 真实录音**的环境里被断言 —— 而录音需要宿主。表本身是纯数据，直接给它是
+    /// 唯一能让那条判据进 CI 的办法。
+    ///
+    /// 【为什么不是 `#[cfg(test)]`】跨 crate 的测试（`hifishifter-plugin` 的集成用例）
+    /// 把本 crate 当**普通依赖**编译，`cfg(test)` 的项在那里不存在。名字里带 `for_test`
+    /// 与 `#[doc(hidden)]` 是这条边界的替代写法：它在文档里不出现，也不会被误当成
+    /// 生产入口。
+    #[doc(hidden)]
+    pub fn publish_project_map_for_test(
+        &self,
+        revision: u64,
+        segments: &[crate::project_map::ProjectMapSegment],
+    ) {
+        self.project_map.publish(revision, segments);
+    }
 
     /// 立刻重算并发布一次映射（`promote` / `restore_manifest` 之后调用）。
     ///

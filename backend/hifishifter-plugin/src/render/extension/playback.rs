@@ -1411,7 +1411,7 @@ impl ExtensionOwner {
     }
 
     /// 与 [`Self::project_position_for_stream`] 相同，但把**这一块的样本**交给内容探测。
-    fn project_position_for_stream_probed(
+    pub(super) fn project_position_for_stream_probed(
         &self,
         stream: ProcessStream,
         tape_frame: i64,
