@@ -4466,4 +4466,63 @@ mod tests {
         );
         document.close();
     }
+
+    /// **回归：一次导入不许把清单函数锁死。**
+    ///
+    /// 【现场原形】REAPER ARA 里"文件 → 导入音频"：item 建成几百毫秒之后宿主整体未响应，
+    /// Windows 记录 `AppHangB1`，状态栏同时报
+    /// `BackendInvokeError: … plugin_get_apply_state` —— 那是宿主线程停止泵消息 **30 s 之后**
+    /// 的读数，不是原因。
+    ///
+    /// 【为什么这条用例必须走 `present_host_inventory`】缺陷不在对账逻辑里，而在**组合**里：
+    /// `present_host_inventory` 从 `ui_tracks.lock_or_recover()` 那一行起整段持有 guard，
+    /// 并在函数末尾调对账；对账为了回答"这条 item 在不在清单里"**再取一次** `ui_tracks`。
+    /// `std::sync::Mutex` 不可重入 ⇒ 同一线程自锁。单独调 `resolve_pending_imports` 的
+    /// 用例永远看不到它 —— 这正是上一轮四条待定导入用例全绿、现场却必挂的原因。
+    ///
+    /// 【为什么要一个线程加超时】自锁的表现是"永不返回"，直接调用的失败形态是整个测试
+    /// 进程挂死 —— 那在 CI 上只会变成一次超时，看不出是哪一条。这里把"没有返回"本身
+    /// 变成断言。
+    #[test]
+    fn an_import_does_not_deadlock_the_inventory_pass() {
+        let document = Arc::new(DocumentSession::new(40_104));
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        let api = Arc::new(host.client());
+        let mut track = api.ui_track(&|| true).unwrap();
+        track.id = "track".into();
+        let mut item = track.items[0].clone();
+        item.geometry.item_id = "{IMPORT-LOCK}".into();
+        track.items = vec![item];
+        let guid = track.guid.clone();
+        document.ui_tracks.lock_or_recover().insert(guid, track);
+        document.begin_pending_import(crate::render::document::PendingImport {
+            item: "{IMPORT-LOCK}".into(),
+            source_path: "C:/audio/lock.wav".into(),
+            landed_track: Some("track".into()),
+            requested_at: std::time::Instant::now(),
+            rounds: 0,
+            stall_reported: false,
+        });
+
+        let (done, wait) = std::sync::mpsc::channel();
+        let worker = {
+            let document = Arc::clone(&document);
+            std::thread::spawn(move || {
+                let mut timeline = TimelineState::default();
+                document.present_host_inventory(&mut timeline, "");
+                let _ = done.send(());
+                document.close();
+            })
+        };
+        let returned = wait.recv_timeout(std::time::Duration::from_secs(5)).is_ok();
+        // 【不 join】自锁时它会永远停在那把锁上；join 只会把失败形态重新变回"进程挂死"。
+        drop(worker);
+        assert!(
+            returned,
+            "present_host_inventory 在有待定导入时没有返回：它在自己的 ui_tracks 作用域里又取了一次同一把锁"
+        );
+    }
 }
