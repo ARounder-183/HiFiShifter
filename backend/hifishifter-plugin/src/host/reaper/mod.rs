@@ -248,6 +248,16 @@ pub(crate) struct NativeHost {
     /// 重复请求（重试、二次回执）本身无害，但会把这条契约变成噪声。容量很小，见
     /// `KICKED_PEAKS_MEMORY`。
     kicked_peaks: std::sync::Mutex<std::collections::VecDeque<String>>,
+    /// 本会话里**插件为每条 item 写过的自动交叉淡化长度**（item GUID → 两侧秒数）。
+    ///
+    /// 【为什么需要这份记录】REAPER 的 `D_FADEINLEN_AUTO` / `D_FADEOUTLEN_AUTO` 是**同一个
+    /// 位置**：插件写进去的值、和 REAPER 按工程级 auto-crossfade 自己写进去的值，落点
+    /// 完全一样。不记"我上次写的是什么"，回读时就分不出"用户改了"与"REAPER 又自作主张
+    /// 了一次"，只能把后者当真 —— 那正是"关掉自动交叉淡化后包络先闪一下"的成因。
+    ///
+    /// 【为什么不做持久化】冷加载时插件没有任何写入记录，此时宿主值就是工程的真实状态
+    /// （播种而不是覆盖）；一旦本会话里写过，插件就是权威。
+    auto_fade_intent: std::sync::Mutex<std::collections::BTreeMap<String, (f64, f64)>>,
     /// 已解析的宿主动作号（键 = 登记的回退命令号）。
     ///
     /// 【为什么必须缓存】解析一次要枚举几千条动作（每条一次宿主调用）；而"建一条 take
@@ -956,6 +966,7 @@ impl NativeHost {
             undo_entry_times: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             undo_ends: std::sync::Mutex::new(Vec::new()),
             kicked_peaks: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            auto_fade_intent: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             action_ids: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         })
     }
@@ -984,6 +995,38 @@ impl NativeHost {
         Ok(unsafe { std::mem::transmute_copy::<*mut c_void, T>(&function) })
     }
 
+    /// 这条 item 的自动交叉淡化**模型值**：本会话里插件写过就用插件的，否则用宿主播种。
+    fn model_auto_fades(&self, item_id: &str, host_in: f64, host_out: f64) -> (f64, f64) {
+        let Some((model_in, model_out)) = self
+            .auto_fade_intent
+            .lock_or_recover()
+            .get(item_id)
+            .copied()
+        else {
+            // 冷加载：本会话还没写过这条 item，宿主值就是工程的真实状态。
+            return (host_in, host_out);
+        };
+        if (model_in - host_in).abs() > 1e-9 || (model_out - host_out).abs() > 1e-9 {
+            // 【为什么是 Debug】它会在"宿主写了、我们还没写"的那一帧命中，是读数不是故障。
+            // 键里带 item，避免一条 item 的漂移把另一条的读数吞掉。
+            let key = format!("ara.host-auto-fade-drift:{item_id}");
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Debug,
+                &key,
+                format_args!(
+                    "[ara] host auto-fade drifted from the model (item={item_id}, host={host_in:.3}/{host_out:.3}, model={model_in:.3}/{model_out:.3})"
+                ),
+            );
+        }
+        (model_in, model_out)
+    }
+
+    /// 记下"插件为这条 item 写下的自动交叉淡化"。下一次回读以它为准。
+    pub(super) fn remember_auto_fades(&self, item_id: &str, auto_in: f64, auto_out: f64) {
+        self.auto_fade_intent
+            .lock_or_recover()
+            .insert(item_id.to_owned(), (auto_in, auto_out));
+    }
     /// 这条 item 的峰值是不是已经被踢过了（见 `kicked_peaks`）。
     pub(super) fn peaks_kicked(&self, item_guid: &str) -> bool {
         self.kicked_peaks
@@ -1483,8 +1526,11 @@ impl NativeHost {
         };
         let fade_in_sec = length(c"D_FADEINLEN")?;
         let fade_out_sec = length(c"D_FADEOUTLEN")?;
-        let auto_fade_in_sec = length(c"D_FADEINLEN_AUTO")?;
-        let auto_fade_out_sec = length(c"D_FADEOUTLEN_AUTO")?;
+        // 【宿主那一对是镜像，不是用户意图】见 ' + BT + 'HostClipGeometry::auto_fade_in_sec' + BT + '。
+        let auto_fade_in_sec_host = length(c"D_FADEINLEN_AUTO")?;
+        let auto_fade_out_sec_host = length(c"D_FADEOUTLEN_AUTO")?;
+        let (auto_fade_in_sec, auto_fade_out_sec) =
+            self.model_auto_fades(&item_id, auto_fade_in_sec_host, auto_fade_out_sec_host);
         let fade_in_shape = iv(c"C_FADEINSHAPE")?;
         let fade_out_shape = iv(c"C_FADEOUTSHAPE")?;
         let fade_in_dir = iv(c"D_FADEINDIR")?;
@@ -1566,6 +1612,8 @@ impl NativeHost {
             fade_axes_v2: self.fade_axes_v2,
             auto_fade_in_sec,
             auto_fade_out_sec,
+            auto_fade_in_sec_host,
+            auto_fade_out_sec_host,
             source_file_name,
             source_length_sec,
         })

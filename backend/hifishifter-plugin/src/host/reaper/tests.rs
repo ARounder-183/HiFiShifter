@@ -1891,6 +1891,30 @@ fn peaks_fall_back_to_the_host_action_when_the_api_is_absent() {
     assert!(!f.item_ui_selected.get(), "动作路径必须还原用户的选区");
 }
 
+/// 【回归】宿主那一对 `*_AUTO` 是**派生值**，一旦插件写过就以插件为准。
+///
+/// 现场：关掉自动交叉淡化后拖动 clip，REAPER 按工程级 auto-crossfade 给 item 写上
+/// `D_FADEINLEN_AUTO`，插件下一次回读把它镜像进模型 ⇒ 包络先闪成交叉淡化，
+/// 再被写回 0 变回去。模型与宿主镜像分开存之后，这条路径只剩一行 Debug 读数。
+#[test]
+fn a_host_auto_fade_never_overrides_what_the_plugin_wrote() {
+    let f = Fixture::new();
+    f.enable_media();
+    let host = std::sync::Arc::new(f.client());
+    // 冷加载：本会话还没写过这条 item ⇒ 宿主值**播种**进模型（工程的真实状态，不丢）。
+    let cold = f.geometry(&host).unwrap();
+    assert_eq!(cold.auto_fade_in_sec, 0.4);
+    assert_eq!(cold.auto_fade_in_sec_host, 0.4);
+    // 插件写下 0 ⇒ 从此模型是 0，宿主的镜像读数照旧如实。
+    host.remember_auto_fades(&cold.item_id, 0., 0.);
+    f.set_value("D_FADEINLEN_AUTO", 1.0);
+    f.set_value("D_FADEOUTLEN_AUTO", 1.0);
+    let warm = f.geometry(&host).unwrap();
+    assert_eq!(warm.auto_fade_in_sec, 0., "宿主 auto 不许进模型");
+    assert_eq!(warm.auto_fade_out_sec, 0., "宿主 auto 不许进模型");
+    assert_eq!(warm.auto_fade_in_sec_host, 1.0, "镜像读数仍然如实");
+    assert_eq!(warm.auto_fade_out_sec_host, 1.0, "镜像读数仍然如实");
+}
 unsafe extern "C" fn update_item(item: *mut c_void) {
     let f = fixture();
     assert!(item == f.item() || item == f.right_item());

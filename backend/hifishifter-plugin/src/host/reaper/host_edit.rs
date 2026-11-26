@@ -1484,11 +1484,38 @@ pub(crate) fn execute_managed(
                     target.set_take(c"D_STARTOFFS", after_offs, &authorized)?;
                 }
             }
-            if (before.start_sec - after.start_sec).abs() > 1e-9 {
+            let position_moved = (before.start_sec - after.start_sec).abs() > 1e-9;
+            let length_changed = (before.length_sec - after.length_sec).abs() > 1e-9;
+            if position_moved {
                 target.set_item(c"D_POSITION", after.start_sec, &authorized)?;
             }
-            if (before.length_sec - after.length_sec).abs() > 1e-9 {
+            if length_changed {
                 target.set_item(c"D_LENGTH", after.length_sec, &authorized)?;
+            }
+            // 【淡变必须跟着几何**同一次**写下去】REAPER 在 `D_POSITION` 落下的那一刻就会
+            // 按工程级 auto-crossfade 给 item 写上 `D_FADEINLEN_AUTO` / `D_FADEOUTLEN_AUTO`。
+            // 插件紧接着在这里用**模型值**覆盖它 —— 于是那个"已交叉淡化"的中间态从未被
+            // 任何人读到：没有中间态就没有"包络先闪成交叉淡化再变回去"。
+            //
+            // 这不是"再写一次以覆盖"，而是同一次编辑的一部分：
+            // `(start, length, autoIn, autoOut)` 是一组必须同生共死的几何事实。
+            if position_moved || length_changed {
+                for (name, value, host_before) in [
+                    (
+                        c"D_FADEINLEN_AUTO",
+                        after.auto_fade_in_sec,
+                        target.geometry.auto_fade_in_sec_host,
+                    ),
+                    (
+                        c"D_FADEOUTLEN_AUTO",
+                        after.auto_fade_out_sec,
+                        target.geometry.auto_fade_out_sec_host,
+                    ),
+                ] {
+                    if (host_before - value).abs() > 1e-9 {
+                        target.set_item(name, value, &authorized)?;
+                    }
+                }
             }
             if let Some(value) = edit.patch.muted {
                 target.set_item(c"B_MUTE", if value { 1. } else { 0. }, &authorized)?;
@@ -1542,6 +1569,10 @@ pub(crate) fn execute_managed(
                     target.set_item(name, value, &authorized)?;
                 }
             }
+            // 【记下模型值】回读时以它为准（见 ' + BT + 'NativeHost::model_auto_fades' + BT + '）。
+            // 这条记录就是"插件是淡变的唯一权威"那句话的**存储**：宿主那两个字段只是
+            // 我们与 REAPER 共用的落点，不是判据。
+            target.remember_auto_fades(after.auto_fade_in_sec, after.auto_fade_out_sec);
             if let Some(destination) = destination {
                 target.move_to(destination, &authorized)?;
             }
@@ -2520,6 +2551,61 @@ mod tests {
         document.close();
     }
 
+    /// 【回归】几何写入必须**连带**写死两侧 auto，而且写在 `D_POSITION` 之后。
+    ///
+    /// REAPER 在 `D_POSITION` 落下的那一刻就按工程级 auto-crossfade 给 item 写上
+    /// `*_AUTO`。插件必须在**同一次写入**里把它改回模型值 —— 中间态于是从未被
+    /// 任何人读到，包络也就不会"先闪成交叉淡化再变回去"。
+    #[test]
+    fn a_move_writes_the_auto_fades_in_the_same_patch() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_writer();
+        host.clear_markers();
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        // ① 宿主先自作主张了一次（真实形状：REAPER 按工程级 auto-crossfade 写了 1.0）。
+        // 模型此刻是夹具的冷播种值 0.4 —— 插件**没有**写过它，这正是"移动要与几何
+        // 一起把宿主拉回模型值"要覆盖的那一档。
+        host.set_value("D_FADEINLEN_AUTO", 1.0);
+        host.set_value("D_FADEOUTLEN_AUTO", 1.0);
+        host.reset();
+        // ② 插件只改几何 —— 补丁里**没有** auto 字段。
+        let plan = editor
+            .plan_host_edit(
+                "set_clip_state",
+                &json!({"clipId": clip.id, "startSec": 1.0}),
+            )
+            .unwrap();
+        execute(&owner, plan, || document.is_alive()).unwrap();
+        assert_eq!(
+            host.item_value("D_FADEINLEN_AUTO"),
+            Some(0.4),
+            "移动必须把宿主的 auto 拉回**模型**值"
+        );
+        assert_eq!(host.item_value("D_FADEOUTLEN_AUTO"), Some(0.5));
+        let calls = host.calls();
+        let position = calls
+            .iter()
+            .position(|call| call == "write-item:D_POSITION");
+        let auto = calls
+            .iter()
+            .position(|call| call == "write-item:D_FADEINLEN_AUTO");
+        assert!(
+            position.is_some() && auto.is_some() && position < auto,
+            "auto 必须写在 D_POSITION 之后、同一次写入里：{calls:?}"
+        );
+        document.close();
+    }
     /// 宽度patch冗余带着原shape不要求委托；实际改shape仍保持明确的责任门。
     #[test]
     fn host_edit_fade_width_writes_reaper_without_delegation_or_redundant_shape() {

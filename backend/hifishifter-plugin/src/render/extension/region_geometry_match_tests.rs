@@ -46,6 +46,8 @@ fn candidate(
         fade_axes_v2: None,
         auto_fade_in_sec: 0.,
         auto_fade_out_sec: 0.,
+        auto_fade_in_sec_host: 0.,
+        auto_fade_out_sec_host: 0.,
         loop_source: false,
         source_file_name: None,
         source_length_sec: None,

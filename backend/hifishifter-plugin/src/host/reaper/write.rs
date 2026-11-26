@@ -83,6 +83,14 @@ pub(super) fn inventory_target(
     Ok(target)
 }
 impl HostClipTarget {
+    /// 记下"插件为这条 item 写下的自动交叉淡化"（见 `NativeHost::model_auto_fades`）。
+    ///
+    /// 【为什么放在 target 上】它需要 item 身份与宿主适配器两样东西，而这两样都属于
+    /// target；把这层转发放在这里，`host_edit` 就不必穿透到 `NativeHost` 的内部。
+    pub(super) fn remember_auto_fades(&self, auto_in: f64, auto_out: f64) {
+        self.host
+            .remember_auto_fades(&self.geometry.item_id, auto_in, auto_out);
+    }
     /// 删除前核对project/item/take/GUID；删除后不再对已失效对象调用UpdateItem。
     pub(crate) fn delete_item(&self, authorized: &impl Fn() -> bool) -> Result<(), String> {
         // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
