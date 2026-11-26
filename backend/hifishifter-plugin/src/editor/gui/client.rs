@@ -1121,8 +1121,7 @@ pub(crate) fn ui_tick(state: &Rc<RefCell<EditorClient>>) {
 
 pub(crate) fn tick(state: &Rc<RefCell<EditorClient>>) {
     // 视图节拍同样是宿主 UI 线程（见 host::thread_mark）。
-    let _host_thread =
-        crate::host::RoleGuard::enter(crate::host::HostThreadRole::ViewTimer);
+    let _host_thread = crate::host::RoleGuard::enter(crate::host::HostThreadRole::ViewTimer);
     ui_tick(state);
     host_heartbeat();
     push_transport(state);
@@ -1809,8 +1808,7 @@ pub(crate) fn bootstrap_json(
 pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
     // 【宿主线程标记】这里是 WebView2 / WebKit 的消息回调 —— 宿主 UI 线程。有了这一位，
     // "本线程不得等长锁"就从一条注释变成可判定的事实（见 host::thread_mark）。
-    let _host_thread =
-        crate::host::RoleGuard::enter(crate::host::HostThreadRole::WebView);
+    let _host_thread = crate::host::RoleGuard::enter(crate::host::HostThreadRole::WebView);
     // 【为什么这三处早退各留一行】它们是「命令到底到没到」这个问题上唯一的盲区：
     // 命令既没被接受、也没被拒绝，在日志里与「从未发送」完全同形。此前三处都是裸
     // `return`，于是一次「点了没反应」无从归因。
