@@ -630,3 +630,8 @@ companion 的 `clap` feature 只挂在 `[dev-dependencies]`：它是纯 checked-
    顺手做的三件事（全量重映射 / 经宿主读整段音源 / 逐条回推）代价都不可控。
    `HFS_NOTIFY_BUDGET_MS` 是"这一次调用最多占住宿主多久"的上界；超了就把剩下的留给
    下一次心跳。
+4. **读宿主音源这件事搬不到别的线程。** `retry_failed_source_read` 的第二个参数是
+   `HostContentScope<'_, '_>` —— 那个 scope 由宿主在**它自己的回调里**给出，离开回调即失效
+   （见 `ara/model.rs`）。所以"把重试交给 worker"不是一个省事的实现选择，而是一句对宿主
+   API 的误解：没有 scope 就取不到 `IAudioSourceContentReader`。这条重试因此留在
+   `notifyModelUpdates` 里，用 `HFS_SOURCE_RETRY_MS`（默认 1 s）限流、用心跳预算封顶。
