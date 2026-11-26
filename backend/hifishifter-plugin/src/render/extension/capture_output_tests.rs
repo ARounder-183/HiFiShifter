@@ -123,6 +123,73 @@ fn project_position_follows_the_clip_not_the_playhead() {
     );
 }
 
+/// **不变量：预览从播放头起播时，读位置就是播放头，而不是片段起点。**
+///
+/// 【现场原形】VEGAS 预览：片段在 15.000 s，播放头在 33.625 s（1 614 000），预卷从
+/// 播放头开始喂 9 040 帧。第五轮把喂入域 0 锚在片段起点 ⇒ 整段预卷读的是
+/// `[15.000 s, 15.188 s]`，而宿主正在播 `[33.625 s, 33.813 s]`。用户听到的就是
+/// "片段起点的处理结果"，直到 kPlaying 升起、喂入流切回传输域才恢复 —— 这就是
+/// "起播 1 s 内内容完全错误"。
+#[test]
+fn a_preview_that_starts_mid_item_reads_from_the_playhead() {
+    const RATE: i64 = 48_000;
+    const START: i64 = 15 * RATE;
+    let owner = insert_owner();
+    // 片段 15.000 s 起、长 4 s；播放头落在片段中间（17.000 s）。
+    record_at(&owner, START, 4 * RATE as usize);
+    let playhead = 17 * RATE;
+    assert_eq!(
+        owner.project_position_for_tape(0, playhead, playhead),
+        playhead,
+        "喂入域第 0 帧就是播放头那一刻"
+    );
+    assert_eq!(
+        owner.project_position_for_tape(9_040, playhead, playhead),
+        playhead + 9_040,
+        "逐帧跟随，步长 1:1"
+    );
+}
+
+/// **不变量：锚点越过片段末尾就没有映射（退回直通），不许接着数。**
+///
+/// 【为什么要紧】接着数会让读位置落到快照窗口之外，而 `layered` 在那里的行为是
+/// "回退宿主原声" —— 读数说 `processed`、听感是原声，这正是最难诊断的一类错位。
+#[test]
+fn an_anchor_never_runs_past_the_item_end() {
+    const RATE: i64 = 48_000;
+    const START: i64 = 15 * RATE;
+    let owner = insert_owner();
+    record_at(&owner, START, RATE as usize);
+    let playhead = START + RATE / 2;
+    assert_eq!(
+        owner.project_position_for_tape(RATE / 2 - 1, playhead, playhead),
+        playhead + RATE / 2 - 1
+    );
+    assert_eq!(
+        owner.project_position_for_tape(RATE / 2, playhead, playhead),
+        super::NO_POSITION,
+        "片段末尾之后没有映射"
+    );
+}
+
+/// **不变量：锚点对整条喂入流恒定，中途的宿主读数不参与。**
+///
+/// 【为什么必须恒定】钉住流里宿主已经把位置钉住，后面的块报的是同一个数；若每块都按
+/// 它重算，锚点会随读数抖动而抖动——那正是"每一块都跳一下"的来源。
+#[test]
+fn the_anchor_is_chosen_once_per_feed() {
+    const RATE: i64 = 48_000;
+    const START: i64 = 15 * RATE;
+    let owner = insert_owner();
+    record_at(&owner, START, 4 * RATE as usize);
+    let playhead = 17 * RATE;
+    let first = owner.project_position_for_tape(0, playhead, playhead);
+    // 同一块之后宿主报了一个完全不同的位置：首块读数才是这条流的锚点。
+    let later = owner.project_position_for_tape(0, playhead, START);
+    assert_eq!(first, playhead);
+    assert_eq!(later, first, "同一条流中途改读数不许挪动锚点");
+}
+
 /// **不变量：没有映射时读位置是「未知」，不是 0。**
 ///
 /// 【为什么必须显式】0 是一个合法的工程位置。把「不知道」答成 0，输出就会去读快照

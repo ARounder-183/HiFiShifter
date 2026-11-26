@@ -1931,17 +1931,18 @@ impl CaptureStore {
         self.with_projection_cache(|cache| cache.fingerprints.clone())
     }
 
-    /// 磁带帧 → 工程帧的映射（**无锁**，可从音频线程调用）。
+    /// 本喂入流的工程锚点（**无锁**，可从音频线程调用）。
     ///
-    /// 【`hint` 是什么】宿主的原始位置读数。它不可信（VEGAS 的 Render As 会把它
-    /// 留在最后的播放头），只用于多 take 时挑出"这一遍喂的是哪一片"。没有映射时
-    /// 返回 `None` —— 调用方据此退回直通，而不是猜一个位置。
-    pub fn project_mapping(
+    /// 【`hint` 是什么】宿主在**这一块**报的位置。它的可信度取决于宿主在做什么
+    /// （见 `ProjectMapCell::anchor`）：预览里它就是播放头，Render As 里它是上一次的
+    /// 播放头。判据只有一个可观测的问题——它落在片段的工程窗口里吗。没有映射时返回
+    /// `None`，调用方据此退回直通，而不是猜一个位置。
+    pub fn feed_anchor(
         &self,
-        tape_frame: i64,
         hint: i64,
-    ) -> Option<crate::project_map::ProjectMapping> {
-        self.project_map.resolve(tape_frame, hint)
+        policy: crate::project_map::AnchorPolicy,
+    ) -> Option<crate::project_map::FeedAnchor> {
+        self.project_map.anchor(hint, policy)
     }
 
     /// 当前映射表的代次（诊断；`0` = 还没发布过）。

@@ -835,8 +835,12 @@ impl ExtensionOwner {
         let mut project_position = position;
         if feed_local {
             let tape_position = i64::try_from(decision.tape_frames_before).unwrap_or(i64::MAX);
-            project_position =
-                self.project_position_for_tape(tape_position, session.tape.first_raw, raw_start);
+            project_position = self.project_position_for_stream(
+                stream,
+                tape_position,
+                session.tape.first_raw,
+                raw_start,
+            );
             position = tape_position;
             geometry.anchor.store(position, Ordering::Release);
             geometry
@@ -980,12 +984,14 @@ impl ExtensionOwner {
                     // 【为什么必须分开报】此前只有一位 `local`，而它同时被当成两种东西
                     // —— 于是"这一块到底被当成工程哪一段"只能靠读者自己算。
                     log::info!(
-                        "[capture] feed begin kind=pinned raw={} tape={} frames={} project={} mapping={} first_raw={}",
+                        "[capture] feed begin kind=pinned raw={} tape={} frames={} project={} \
+                         mapping={} anchor={} first_raw={}",
                         raw_start,
                         decision.tape_frames_before,
                         frames,
                         format_project_position(project_position),
                         format_project_mapping(project_position),
+                        format_anchor_source(geometry.anchor_source.load(Ordering::Acquire)),
                         session.tape.first_raw,
                     );
                 } else {
@@ -995,6 +1001,13 @@ impl ExtensionOwner {
                         raw_start,
                         geometry.pass.load(Ordering::Acquire),
                     );
+                    // 【喂入流结束，锚点跟着作废】留着它，下一条流在"首块还没到"的那一块
+                    // 就会读到一个属于上一条流的零点 —— 而那条流的内容早就播完了。
+                    geometry.anchor_source.store(0, Ordering::Release);
+                    geometry.anchor_feed_end.store(0, Ordering::Release);
+                    geometry
+                        .anchor_first_raw
+                        .store(NO_POSITION, Ordering::Release);
                 }
             } else if decision.feed == FeedKind::Pinned {
                 geometry.feed_blocks.fetch_add(1, Ordering::Relaxed);
@@ -1245,6 +1258,14 @@ impl ExtensionOwner {
                 .feed_first_raw
                 .store(NO_POSITION, Ordering::Release);
             geometry.feed_promoted.store(false, Ordering::Release);
+            // 【锚点属于这一条喂入流】会话边界之后它没有任何意义：留着它，下一次起播
+            // 的第一块会按上一条流的零点去读快照。
+            geometry.anchor_source.store(0, Ordering::Release);
+            geometry.anchor_feed_end.store(0, Ordering::Release);
+            geometry.anchor_revision.store(0, Ordering::Release);
+            geometry
+                .anchor_first_raw
+                .store(NO_POSITION, Ordering::Release);
             geometry
                 .timebase_kind
                 .store(TimebaseKind::Unknown.code(), Ordering::Release);
@@ -1288,12 +1309,25 @@ impl ExtensionOwner {
         first_raw: i64,
         hint: i64,
     ) -> i64 {
+        self.project_position_for_stream(ProcessStream::Realtime, tape_frame, first_raw, hint)
+    }
+
+    /// 与 [`Self::project_position_for_tape`] 相同，但显式指定**哪一条喂入流**。
+    ///
+    /// 【为什么锚点要按流存】几何是每流一份的（`feed_frames_total` 也是），三条流各有
+    /// 自己的喂入流。锚点若只有一份，prefetch / offline 的喂入会复用实时流那一条的零点。
+    pub(super) fn project_position_for_stream(
+        &self,
+        stream: ProcessStream,
+        tape_frame: i64,
+        first_raw: i64,
+        hint: i64,
+    ) -> i64 {
         use hifishifter_capture::transport::{capture_map_mode, CaptureMapMode};
         match capture_map_mode() {
             CaptureMapMode::Clip => self
-                .capture()
-                .project_mapping(tape_frame, hint)
-                .and_then(|mapping| mapping.project(tape_frame))
+                .feed_anchor(stream, first_raw, hint)
+                .and_then(|anchor| anchor.project(tape_frame))
                 .unwrap_or(NO_POSITION),
             CaptureMapMode::Origin => tape_frame,
             CaptureMapMode::Raw => {
@@ -1304,6 +1338,56 @@ impl ExtensionOwner {
                 }
             }
         }
+    }
+
+    /// 本喂入流的锚点：**首块选一次**，之后每块只读原子量。
+    ///
+    /// 【为什么"选一次"是硬要求】锚点必须对整条喂入流恒定：中途按当前块重算，位置就会
+    /// 跟着宿主读数的抖动而抖动（那正是"每一块都跳一下"的来源）。首块的 `hint` 是这条
+    /// 流上唯一一次可信的读数 —— 之后的块里宿主已经把位置钉住，它不再说明任何事。
+    ///
+    /// 【什么时候重选】① 换了一条喂入流（`first_raw` 变了）；② 映射表重新发布过
+    /// （投影重建，片段可能已经不在了）。两件事都由原子量比对，不取任何锁。
+    fn feed_anchor(
+        &self,
+        stream: ProcessStream,
+        first_raw: i64,
+        hint: i64,
+    ) -> Option<hifishifter_capture::project_map::FeedAnchor> {
+        use hifishifter_capture::project_map::{AnchorSource, FeedAnchor};
+        let capture = self.capture();
+        let revision = capture.project_map_revision();
+        let geometry = &self.streams[stream.index()];
+        let cached = AnchorSource::from_code(geometry.anchor_source.load(Ordering::Acquire));
+        if let Some(source) = cached {
+            if geometry.anchor_revision.load(Ordering::Acquire) == revision
+                && geometry.anchor_first_raw.load(Ordering::Acquire) == first_raw
+            {
+                return Some(FeedAnchor {
+                    project_zero: geometry.anchor_project_zero.load(Ordering::Acquire),
+                    feed_end: geometry.anchor_feed_end.load(Ordering::Acquire),
+                    take: geometry.anchor_take.load(Ordering::Acquire),
+                    source,
+                });
+            }
+        }
+        let anchor =
+            capture.feed_anchor(hint, hifishifter_capture::transport::capture_anchor_mode())?;
+        geometry
+            .anchor_project_zero
+            .store(anchor.project_zero, Ordering::Release);
+        geometry
+            .anchor_feed_end
+            .store(anchor.feed_end, Ordering::Release);
+        geometry.anchor_take.store(anchor.take, Ordering::Release);
+        geometry.anchor_revision.store(revision, Ordering::Release);
+        geometry
+            .anchor_first_raw
+            .store(first_raw, Ordering::Release);
+        geometry
+            .anchor_source
+            .store(anchor.source.code(), Ordering::Release);
+        Some(anchor)
     }
 
     /// 宿主此刻**确实在推进工程位置**（无锁、无分配，可从音频线程调用）。
@@ -2376,6 +2460,13 @@ pub(super) fn live_monitor_allowed(
     }
     let host_is_live = evidence.is_none_or(|evidence| evidence.playing || evidence.start_window);
     host_is_live && (pass_kind == CapturePassKind::Realtime || !pass_kind_enabled())
+}
+
+/// 本块用的锚点来源（`none` = 这一块没有工程位置）。
+fn format_anchor_source(code: u8) -> &'static str {
+    hifishifter_capture::project_map::AnchorSource::from_code(code)
+        .map(|source| source.as_str())
+        .unwrap_or("none")
 }
 
 /// 工程位置的诊断写法（`n/a` = 映射还没发布）。

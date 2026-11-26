@@ -243,6 +243,24 @@ pub(super) struct StreamGeometry {
     /// 要跨块存活（见 `TapeCursor`）。它是**喂入域**的计数：工程位置由
     /// `capture::project_mapping` 从它换算出来，两者不共用任何一个变量。
     pub(super) feed_frames_total: AtomicU64,
+    /// 本喂入流的**工程锚点**（`project_map::FeedAnchor` 的原子形态）。
+    ///
+    /// 【为什么放在几何里而不是 `ExtensionOwner`】它属于**这一条喂入流**，和
+    /// `feed_frames_total` 同一生命周期：首块选一次、跨块读、`reset_transport_session`
+    /// 清掉。三条流各有一条喂入流，所以各存一份。
+    ///
+    /// 【为什么不存成 `Mutex<Option<FeedAnchor>>`】读方是音频回调，每块一次。五个原子
+    /// 读换一把锁 —— 这条通路上的锁已经吃过一次亏（见 `FeedTimeline` 的说明）。
+    pub(super) anchor_project_zero: AtomicI64,
+    /// 本条喂入流还能走多远（帧）；0 = 没有锚点。
+    pub(super) anchor_feed_end: AtomicI64,
+    pub(super) anchor_take: AtomicU64,
+    /// `AnchorSource` 的编码：0 = 没有锚点，1 = 播放头，2 = 片段起点。
+    pub(super) anchor_source: AtomicU8,
+    /// 建锚时映射表的代次（投影重建 ⇒ 这条锚点可能指向已经不在的片段）。
+    pub(super) anchor_revision: AtomicU64,
+    /// 建锚时这条流的首块 raw（换一条喂入流 ⇒ 重选）。
+    pub(super) anchor_first_raw: AtomicI64,
     /// 第一块的宿主 raw（只用于诊断；`NO_POSITION` = 未知）。
     pub(super) feed_first_raw: NoPosition,
     /// 这条喂入流是否已经完成 0.5 s 提级。

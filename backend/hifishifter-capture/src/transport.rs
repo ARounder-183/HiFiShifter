@@ -190,12 +190,41 @@ pub fn capture_map_mode() -> CaptureMapMode {
     })
 }
 
+/// 锚点策略（环境变量 `HFS_CAPTURE_ANCHOR`）。
+///
+/// 【为什么它必须与 `HFS_CAPTURE_MAP` 分开】`MAP` 回答"用哪张表"，`ANCHOR` 回答
+/// "表的零点在哪"。两者正交，而且各自的错误在产物上同形 —— 分开才能一键定位。
+pub fn capture_anchor_mode() -> crate::project_map::AnchorPolicy {
+    use crate::project_map::AnchorPolicy;
+    static MODE: std::sync::OnceLock<AnchorPolicy> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        let mode = match std::env::var("HFS_CAPTURE_ANCHOR")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+        {
+            Some("playhead") => AnchorPolicy::Playhead,
+            Some("clip") => AnchorPolicy::Clip,
+            Some("auto") | None => AnchorPolicy::Auto,
+            Some(other) => {
+                log::warn!(
+                    "[capture] unknown HFS_CAPTURE_ANCHOR={other}; using auto (the playhead when \
+                     it falls inside the item)"
+                );
+                AnchorPolicy::Auto
+            }
+        };
+        log::info!("[capture] feed anchor policy: {}", mode.as_str());
+        mode
+    })
+}
+
 /// 一条喂入流**自己的**走带位置。只有一个域。
 ///
 /// 【为什么它必须与工程位置分开】此前同一个 `i64` 同时被当成"喂入流的第几帧"与
 /// "工程第几帧"，于是"钉住流的 0 是不是工程 0"这个问题只能靠一个环境变量回答
 /// （见 `CaptureMapMode`）。答案是两个都不是：喂入域的 0 是**这条流**的
-/// 第一帧，它在工程里的位置由 `project_map::ProjectMapping` 给出。
+/// 第一帧，它在工程里的位置由 `project_map::FeedAnchor` 给出。
 ///
 /// 【为什么不在这里存 origin】存了它，下一个读代码的人就会拿它当工程起点 ——
 /// 那正是上一轮的错误。本类型只回答"这条流已经喂进来多少帧"，一个纯粹的计数。

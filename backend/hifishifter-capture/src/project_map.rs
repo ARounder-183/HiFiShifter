@@ -60,39 +60,104 @@ impl ProjectMapSegment {
     }
 }
 
-/// 解析出来的**一段**映射（读方拿到的形状）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ProjectMapping {
-    /// `tape_start` 对应的工程帧。
-    pub project_origin: i64,
-    /// 这份映射适用的磁带帧区间 `[tape_start, tape_end)`。
-    pub tape_start: i64,
-    pub tape_end: i64,
-    /// 发布它的投影代次（诊断用；不同代次之间不得混用）。
-    pub revision: u64,
+/// "喂入域的第 0 帧在工程哪里"的**选择策略**（环境变量 `HFS_CAPTURE_ANCHOR`）。
+///
+/// 【为什么这是一个可切换的判据】锚点是本轮唯一改变声音位置的决定，而三种答案在产物上
+/// **完全同形**（都是"某段音频出现在错误的时间上"）：
+///
+///   * `Auto`（默认）：首块宿主读数落在片段的工程窗口内 ⇒ 它就是播放头（VEGAS 的预卷
+///     从播放头开始喂）；否则退回片段起点（Render As 把 `projectTimeSamples` 留在上一次
+///     的播放头，那个值既不是起点也不是范围起点）。
+///   * `Playhead`：强制播放头（现场对照：渲染也会"跟着播放头跑"）。
+///   * `Clip`：强制片段起点（= 第五轮行为，用来一键复现"预览起播读片段起点"）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AnchorPolicy {
+    #[default]
+    Auto,
+    Playhead,
+    Clip,
 }
 
-impl ProjectMapping {
-    /// 这一帧磁带位置是否落在本段里。
-    pub fn covers(&self, tape_frame: i64) -> bool {
-        tape_frame >= self.tape_start && tape_frame < self.tape_end
+impl AnchorPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Playhead => "playhead",
+            Self::Clip => "clip",
+        }
+    }
+}
+
+/// 锚点是从哪条证据来的。
+///
+/// 【为什么必须能在日志里读出来】"这一块被当成工程哪一段"是本轮唯一的判断，而判断的
+/// **依据**与判断本身是两件事：读数相同、依据不同，下一次改动就会把它做错。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnchorSource {
+    /// 宿主在喂入流首块报的位置落在片段的工程窗口里 ⇒ 它就是播放头。
+    Playhead,
+    /// 退回片段起点（渲染 / 宿主读数在窗口之外 / 强制）。
+    Clip,
+}
+
+impl AnchorSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Playhead => "playhead",
+            Self::Clip => "clip",
+        }
     }
 
-    /// 磁带帧 → 工程帧。
-    pub fn project(&self, tape_frame: i64) -> Option<i64> {
-        if !self.covers(tape_frame) {
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Playhead => 1,
+            Self::Clip => 2,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Playhead),
+            2 => Some(Self::Clip),
+            _ => None,
+        }
+    }
+}
+
+/// 一条钉住喂入流的**工程锚点**：喂入域第 0 帧落在工程的哪一帧。
+///
+/// 【为什么必须是一个显式的值】此前"喂入域的 0 在工程哪里"这个答案藏在映射公式里
+/// （隐含假设 = 片段起点），没有人能单独审阅它、断言它，也没有任何一行日志说出它。
+/// 提成一个值之后，它有了三样东西：来源、日志、测试。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeedAnchor {
+    /// 喂入域 0 ⇒ 工程帧。
+    pub project_zero: i64,
+    /// 本条喂入流还能走多远（帧）。越界即"没有映射"（输出退回直通）。
+    pub feed_end: i64,
+    /// 这一片属于哪个 take（多 take 消歧 + 诊断）。
+    pub take: u64,
+    pub source: AnchorSource,
+}
+
+impl FeedAnchor {
+    /// 本帧是否落在这条喂入流的覆盖范围内。
+    pub fn covers(&self, feed_tape: i64) -> bool {
+        feed_tape >= 0 && feed_tape < self.feed_end
+    }
+
+    /// 喂入帧 → 工程帧。越界回答 `None`（调用方据此退回直通）。
+    pub fn project(&self, feed_tape: i64) -> Option<i64> {
+        if !self.covers(feed_tape) {
             return None;
         }
-        Some(
-            self.project_origin
-                .saturating_add(tape_frame.saturating_sub(self.tape_start)),
-        )
+        Some(self.project_zero.saturating_add(feed_tape))
     }
 }
 
 /// 无锁的分段映射表（seqlock）。
 ///
-/// 【为什么不直接存一个 `ProjectMapping`】"当前是哪一片"取决于**这一块**的磁带帧号，
+/// 【为什么不直接存一个 `FeedAnchor`】"当前是哪一片"取决于**这一块**的喂入帧号，
 /// 而磁带帧号每块都在变。表是唯一能一次回答"任意磁带帧落在哪一片"的形状。
 pub struct ProjectMapCell {
     /// 偶数 = 稳定，奇数 = 正在写。
@@ -162,45 +227,83 @@ impl ProjectMapCell {
         self.len() == 0
     }
 
-    /// 解析 `tape_frame` 落在哪一段。
+    /// **本喂入流的工程锚点**：喂入域第 0 帧在工程哪里。
     ///
-    /// `hint` 是宿主的原始位置读数（`projectTimeSamples`）。它**不可信**（VEGAS 的
-    /// Render As 会把它留在最后的播放头），但它在"多 take 时该选哪一片"这一件事上
-    /// 仍然是最便宜的线索：只要它落在某一片的工程区间里，就优先那一片。找不到任何
-    /// 覆盖 `tape_frame` 的段，或读方撞上写方，都返回 `None` —— 调用方据此退回
-    /// 直通，而不是猜一个位置。
-    pub fn resolve(&self, tape_frame: i64, hint: i64) -> Option<ProjectMapping> {
+    /// `hint` 是宿主在**这一块**报的位置（`projectTimeSamples`）。它的可信度取决于
+    /// 宿主此刻在做什么：
+    ///
+    ///   * 播放预览（VEGAS 的预卷）：它**就是播放头** —— 宿主从当前光标开始喂音频，
+    ///     片段起点只是这段内容在工程里的落点，两者只有在"从片段起点起播"时才相等；
+    ///   * Render As：它被留在**上一次的播放头**上，既不是片段起点，也不是渲染范围起点。
+    ///
+    /// 于是判据只能问一个可观测的问题：**它落在片段的工程窗口里吗**。落在里面 ⇒ 它是
+    /// 一个合法的播放头；落在外面 ⇒ 它显然不是"这一段内容现在的位置"，退回片段起点
+    /// （那是 Render As 唯一有证据的答案：渲染的范围起点通常正是片段起点）。
+    ///
+    /// 读方撞上写方、或表为空时返回 `None` —— 调用方据此退回直通，而不是猜一个位置。
+    pub fn anchor(&self, hint: i64, policy: AnchorPolicy) -> Option<FeedAnchor> {
         for _ in 0..READ_ATTEMPTS {
             let before = self.epoch.load(Ordering::Acquire);
             if before & 1 == 1 {
                 continue;
             }
             let len = self.len.load(Ordering::Relaxed).min(PROJECT_MAP_SLOTS);
-            let revision = self.revision.load(Ordering::Relaxed);
-            let mut best: Option<(u8, ProjectMapping)> = None;
+            let mut earliest: Option<FeedAnchor> = None;
+            let mut containing: Option<FeedAnchor> = None;
             for index in 0..len {
                 let tape_start = self.tape_start[index].load(Ordering::Relaxed);
                 let tape_end = self.tape_end[index].load(Ordering::Relaxed);
-                let project_origin = self.project_start[index].load(Ordering::Relaxed);
-                let mapping = ProjectMapping {
-                    project_origin,
-                    tape_start,
-                    tape_end,
-                    revision,
-                };
-                if !mapping.covers(tape_frame) {
+                let project_start = self.project_start[index].load(Ordering::Relaxed);
+                let take = self.take[index].load(Ordering::Relaxed);
+                let frames = tape_end.saturating_sub(tape_start);
+                if frames <= 0 {
                     continue;
                 }
-                // 2 = 宿主读数也落在这片里（多 take 时的强证据）；1 = 只按磁带帧命中。
-                let project_end = project_origin.saturating_add(tape_end - tape_start);
-                let score = u8::from(hint >= project_origin && hint < project_end);
-                if best.is_none_or(|(best_score, _)| score > best_score) {
-                    best = Some((score, mapping));
+                // 【工程上最早的一片】就是"渲染从片段起点开始"那一条。多 take 时它是
+                // 唯一确定的退路（不能按表里的顺序挑：那是写入顺序，不是工程顺序）。
+                if earliest.is_none_or(|current| {
+                    (project_start, take) < (current.project_zero, current.take)
+                }) {
+                    earliest = Some(FeedAnchor {
+                        project_zero: project_start,
+                        feed_end: frames,
+                        take,
+                        source: AnchorSource::Clip,
+                    });
+                }
+                let project_end = project_start.saturating_add(frames);
+                if hint >= project_start && hint < project_end && containing.is_none() {
+                    containing = Some(FeedAnchor {
+                        project_zero: hint,
+                        feed_end: project_end.saturating_sub(hint),
+                        take,
+                        source: AnchorSource::Playhead,
+                    });
                 }
             }
             let after = self.epoch.load(Ordering::Acquire);
             if before == after {
-                return best.map(|(_, mapping)| mapping);
+                let playhead = matches!(policy, AnchorPolicy::Playhead) && hint >= 0;
+                return match policy {
+                    AnchorPolicy::Clip => earliest,
+                    // 【强制播放头】没有片段包含它时也要按播放头建锚：那是这条开关的
+                    // 唯一用途 —— 现场对照"渲染是不是也跟着播放头跑"。
+                    AnchorPolicy::Playhead if playhead => {
+                        containing.or_else(|| {
+                            earliest.map(|anchor| FeedAnchor {
+                                project_zero: hint,
+                                // 已经越过片段的起点时，剩余长度就是片段剩余长度；
+                                // 落在起点之前时整片都还没用到（consumed 夹到 0）。
+                                feed_end: anchor.feed_end.saturating_sub(
+                                    hint.saturating_sub(anchor.project_zero).max(0),
+                                ),
+                                take: anchor.take,
+                                source: AnchorSource::Playhead,
+                            })
+                        })
+                    }
+                    AnchorPolicy::Playhead | AnchorPolicy::Auto => containing.or(earliest),
+                };
             }
         }
         None
@@ -226,29 +329,76 @@ mod tests {
         }
     }
 
-    /// **不变量：工程位置跟着片段走，不跟播放头走。**
+    /// **不变量：宿主读数落在片段之外时，工程位置跟着片段走。**
     ///
     /// 【现场原形】片段起点 28.000 s（= 1 344 000 帧），宿主 `projectTimeSamples` 被
-    /// VEGAS 留在 893 720（18.62 s）。映射必须答 1 344 000，而不是 893 720，也不是 0。
+    /// VEGAS 留在 893 720（18.62 s）。锚点必须答 1 344 000，而不是 893 720，也不是 0。
     #[test]
-    fn project_position_follows_the_clip_not_the_playhead() {
+    fn project_position_follows_the_clip_when_the_playhead_is_outside_it() {
         const RATE: i64 = 48_000;
         let cell = cell(&[segment(0, 1_581_056, 28 * RATE, 1)]);
-        let mapping = cell.resolve(0, 893_720).expect("磁带第 0 帧必须能解析");
-        assert_eq!(mapping.project(0), Some(28 * RATE));
-        assert_eq!(mapping.project(RATE), Some(29 * RATE));
-        // 宿主读数只是消歧线索，绝不参与换算。
+        let anchor = cell.anchor(893_720, AnchorPolicy::Auto).expect("必须有锚点");
+        assert_eq!(anchor.source, AnchorSource::Clip);
+        assert_eq!(anchor.project(0), Some(28 * RATE));
+        assert_eq!(anchor.project(RATE), Some(29 * RATE));
+        // 宿主读数在窗口之外时只是一个无用的数：不参与换算。
         assert_eq!(
-            cell.resolve(0, 0).map(|m| m.project(0)),
+            cell.anchor(0, AnchorPolicy::Auto).map(|a| a.project(0)),
             Some(Some(28 * RATE))
         );
+    }
+
+    /// **不变量：宿主读数是片段内的播放头时，锚点跟着播放头。**
+    ///
+    /// 【现场原形】VEGAS 预览：片段在 15.000 s，播放头在 33.625 s（1 614 000），预卷
+    /// 从播放头开始喂 9 040 帧。第五轮把喂入域 0 锚在片段起点 ⇒ 整段预卷读的是
+    /// `[15.000 s, 15.188 s]`，而宿主正在播 `[33.625 s, 33.813 s]` —— 用户听到的
+    /// 就是"片段起点的处理结果"，直到 kPlaying 升起、喂入流切回传输域才恢复。
+    #[test]
+    fn a_preview_that_starts_mid_item_anchors_on_the_playhead() {
+        const RATE: i64 = 48_000;
+        const CLIP_START: i64 = 15 * RATE;
+        const PLAYHEAD: i64 = 1_614_000; // 33.625 s
+        let cell = cell(&[segment(0, 1_568_768, CLIP_START, 1)]);
+        let anchor = cell.anchor(PLAYHEAD, AnchorPolicy::Auto).expect("必须有锚点");
+        assert_eq!(anchor.source, AnchorSource::Playhead);
+        assert_eq!(anchor.project(0), Some(PLAYHEAD));
+        assert_eq!(anchor.project(9_040), Some(PLAYHEAD + 9_040));
+        assert_eq!(
+            anchor.project(1_568_768),
+            None,
+            "越过片段末尾的帧没有映射，必须退回直通"
+        );
+    }
+
+    /// **不变量：从片段起点起播时，两条判据给出同一个数。**
+    ///
+    /// 【为什么这条要留】它是"新规则不改变旧行为"的那一半：片段起点 = 播放头时，
+    /// 播放头锚点与片段锚点逐帧相同。第五轮的全部现场都是这个形状，所以那批用例
+    /// **不可能**发现缺陷 —— 这条把"为什么"钉在测试里。
+    #[test]
+    fn a_preview_at_the_item_start_is_unchanged() {
+        const RATE: i64 = 48_000;
+        const START: i64 = 15 * RATE;
+        let cell = cell(&[segment(0, 960_000, START, 1)]);
+        let playhead = cell.anchor(START, AnchorPolicy::Auto).unwrap();
+        let clip = cell.anchor(START, AnchorPolicy::Clip).unwrap();
+        assert_eq!(playhead.source, AnchorSource::Playhead);
+        assert_eq!(clip.source, AnchorSource::Clip);
+        for tape in [0_i64, 1, RATE, 960_000 - 1] {
+            assert_eq!(
+                playhead.project(tape),
+                clip.project(tape),
+                "从片段起点起播时两个锚点必须同值（tape={tape}）"
+            );
+        }
     }
 
     /// 没有映射时回答 `None` —— 调用方据此退回直通。
     #[test]
     fn an_empty_table_answers_none() {
         let cell = ProjectMapCell::default();
-        assert!(cell.resolve(0, 0).is_none());
+        assert!(cell.anchor(0, AnchorPolicy::Auto).is_none());
         assert!(cell.is_empty());
     }
 
@@ -256,23 +406,32 @@ mod tests {
     #[test]
     fn a_tape_frame_outside_every_segment_answers_none() {
         let cell = cell(&[segment(0, 960, 5_000, 1)]);
-        assert!(cell.resolve(960, 5_000).is_none());
-        assert!(cell.resolve(-1, 5_000).is_none());
+        let anchor = cell.anchor(5_000, AnchorPolicy::Auto).expect("必须有锚点");
+        assert!(anchor.project(960).is_none(), "片段末尾之外没有映射");
+        assert!(anchor.project(-1).is_none(), "负的喂入帧没有意义");
+        let before = cell.anchor(-1, AnchorPolicy::Auto).expect("必须有锚点");
+        assert_eq!(before.source, AnchorSource::Clip);
+        assert!(before.project(-1).is_none());
     }
 
-    /// 多 take：宿主读数落在哪一片就选哪一片。
+    /// 多 take：宿主读数落在哪一片，就选哪一片；落在两片之外时退回工程上最早的一片。
     #[test]
     fn the_hint_disambiguates_two_takes() {
         // 两个 take 的磁带帧号都从 0 起（各自一份源），工程位置不同。
         let cell = cell(&[segment(0, 1_000, 10_000, 1), segment(0, 1_000, 40_000, 2)]);
-        assert_eq!(
-            cell.resolve(10, 40_500).map(|m| m.project(10)),
-            Some(Some(40_010))
-        );
-        assert_eq!(
-            cell.resolve(10, 10_500).map(|m| m.project(10)),
-            Some(Some(10_010))
-        );
+        let second = cell.anchor(40_500, AnchorPolicy::Auto).unwrap();
+        assert_eq!(second.take, 2, "读数在第二片里，必须选第二片");
+        assert_eq!(second.source, AnchorSource::Playhead);
+        assert_eq!(second.project(0), Some(40_500));
+
+        let first = cell.anchor(10_500, AnchorPolicy::Auto).unwrap();
+        assert_eq!(first.take, 1);
+        assert_eq!(first.project(0), Some(10_500));
+
+        let fallback = cell.anchor(0, AnchorPolicy::Auto).unwrap();
+        assert_eq!(fallback.take, 1, "读数落在两片之外时按工程顺序取最早的一片");
+        assert_eq!(fallback.source, AnchorSource::Clip);
+        assert_eq!(fallback.project(0), Some(10_000));
     }
 
     /// 重新发布之后旧读数立刻失效（代次与内容一起换）。
@@ -283,12 +442,17 @@ mod tests {
         cell.publish(9, &[segment(0, 2_000, 20_000, 2)]);
         assert_eq!(cell.revision(), 9);
         assert_eq!(
-            cell.resolve(1_500, 20_000).map(|m| m.project(1_500)),
+            cell.anchor(20_000, AnchorPolicy::Auto).map(|a| a.project(1_500)),
             Some(Some(21_500))
         );
         // 旧表覆盖磁带 [0, 1000)；新表覆盖 [0, 2000)。2 500 帧只在新表之外 ——
         // 它必须解析不到任何东西，而不是退回旧片段的起点。
-        assert!(cell.resolve(2_500, 10_000).is_none(), "旧片段必须消失");
+        assert!(
+            cell.anchor(10_000, AnchorPolicy::Auto)
+                .and_then(|a| a.project(2_500))
+                .is_none(),
+            "旧片段必须消失"
+        );
     }
 
     /// 表超过容量时截断，而不是越界。
@@ -300,7 +464,36 @@ mod tests {
         let cell = cell(&segments);
         assert_eq!(cell.len(), PROJECT_MAP_SLOTS);
         assert!(cell
-            .resolve(PROJECT_MAP_SLOTS as i64 * 100 + 10, 0)
+            .anchor(0, AnchorPolicy::Auto)
+            .and_then(|a| a.project(PROJECT_MAP_SLOTS as i64 * 100 + 10))
             .is_none());
+    }
+
+    /// **开关的三种取值各自能被观测。** 现场要靠它一键对照"渲染是不是也跟着播放头跑"。
+    #[test]
+    fn the_policy_switches_the_anchor_source() {
+        const RATE: i64 = 48_000;
+        const START: i64 = 15 * RATE;
+        let cell = cell(&[segment(0, 960_000, START, 1)]);
+        let playhead = START + 5 * RATE;
+        assert_eq!(
+            cell.anchor(playhead, AnchorPolicy::Auto).unwrap().source,
+            AnchorSource::Playhead
+        );
+        assert_eq!(
+            cell.anchor(playhead, AnchorPolicy::Clip).unwrap().source,
+            AnchorSource::Clip
+        );
+        assert_eq!(
+            cell.anchor(playhead, AnchorPolicy::Clip)
+                .unwrap()
+                .project(0),
+            Some(START)
+        );
+        // 宿主读数在片段之外时，强制播放头仍然按播放头建锚（那是这条开关的用途）。
+        let outside = START - 100_000;
+        let forced = cell.anchor(outside, AnchorPolicy::Playhead).unwrap();
+        assert_eq!(forced.source, AnchorSource::Playhead);
+        assert_eq!(forced.project(0), Some(outside));
     }
 }
