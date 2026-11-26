@@ -43,7 +43,12 @@ fn a_render_with_monitor_does_not_pass_through() {
     evidence.playing = false;
     evidence.start_window = false;
     assert!(
-        !super::playback::live_monitor_allowed(true, false, super::CapturePassKind::Render, Some(evidence)),
+        !super::playback::live_monitor_allowed(
+            true,
+            false,
+            super::CapturePassKind::Render,
+            Some(evidence)
+        ),
         "被判成渲染的那一遍不得直通"
     );
 }

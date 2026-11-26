@@ -1062,7 +1062,8 @@ impl ProcessingPass {
         }
         self.last_at_ms.store(now_ms(), Ordering::Release);
         // 【这一遍的种类从零开始判】它是"整遍不变"的结论，不能从上一条流继承。
-        self.pass_kind.store(CapturePassKind::Realtime.code(), Ordering::Release);
+        self.pass_kind
+            .store(CapturePassKind::Realtime.code(), Ordering::Release);
         self.feed_window_started_ms.store(0, Ordering::Release);
         self.feed_window_frames.store(0, Ordering::Release);
         self.feed_total_frames.store(0, Ordering::Release);
@@ -1459,7 +1460,9 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(260));
         pass.note_feed_progress(48_000, 48_000.0, false, false);
         assert_eq!(pass.pass_kind(), CapturePassKind::Render);
-        assert!(pass.feed_speed().is_some_and(|speed| speed > RENDER_SPEED_X));
+        assert!(pass
+            .feed_speed()
+            .is_some_and(|speed| speed > RENDER_SPEED_X));
     }
 
     /// **判据：实时播放不是渲染。**

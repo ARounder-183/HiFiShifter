@@ -9,9 +9,9 @@
 //! 现在三者共用 [`super::class_declaration`]，这组用例把"同源"这件事钉住。
 
 use super::*;
-use hifishifter_plugin::vst3_abi::uid_guid;
 use ara2_bridge::companion::vst3::ffi::ara2_vst3_release;
 use ara2_bridge::core::ApiGeneration;
+use hifishifter_plugin::vst3_abi::uid_guid;
 use std::ffi::CStr;
 
 /// 读一个 `[c_char; N]` 字段（Windows 上 `c_char` 是 `i8`，必须先按字节重解释）。

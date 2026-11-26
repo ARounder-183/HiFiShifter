@@ -835,11 +835,8 @@ impl ExtensionOwner {
         let mut project_position = position;
         if feed_local {
             let tape_position = i64::try_from(decision.tape_frames_before).unwrap_or(i64::MAX);
-            project_position = self.project_position_for_tape(
-                tape_position,
-                session.tape.first_raw,
-                raw_start,
-            );
+            project_position =
+                self.project_position_for_tape(tape_position, session.tape.first_raw, raw_start);
             position = tape_position;
             geometry.anchor.store(position, Ordering::Release);
             geometry
@@ -1745,16 +1742,17 @@ impl ExtensionOwner {
                 if !stream_block.project_position_valid {
                     clock.hold_capture();
                 } else {
-                clock.publish_capture_block(
-                    (stream_block
-                        .project_position
-                        .saturating_sub(stream_block.playhead_offset)) as f64
-                        / rate.max(1.0),
-                    recording || stream == ProcessStream::Offline || stream_block.preview,
-                    stream == ProcessStream::Offline,
-                    stream_block.preview,
-                    self.capture().capture_epoch(),
-                );
+                    clock.publish_capture_block(
+                        (stream_block
+                            .project_position
+                            .saturating_sub(stream_block.playhead_offset))
+                            as f64
+                            / rate.max(1.0),
+                        recording || stream == ProcessStream::Offline || stream_block.preview,
+                        stream == ProcessStream::Offline,
+                        stream_block.preview,
+                        self.capture().capture_epoch(),
+                    );
                 }
             }
         }

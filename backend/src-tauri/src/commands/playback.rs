@@ -2260,9 +2260,7 @@ fn render_background_pass(
             let clip_elapsed = clip_started_at.elapsed();
             // 顺手留一份真实渲染耗时（不做额外测量）：诊断包的 `render_stats`
             // 由它算分位数。合成基准回答不了「这台机器渲染卡不卡」，这个能。
-            crate::commands::render_stats::record_render_ms(
-                clip_elapsed.as_secs_f64() * 1000.0,
-            );
+            crate::commands::render_stats::record_render_ms(clip_elapsed.as_secs_f64() * 1000.0);
             if clip_elapsed >= SLOW_CLIP_WARN_THRESHOLD {
                 log::warn!(
                     "[bg_render] clip {}/{} was slow: clip_id={} elapsed_ms={}",

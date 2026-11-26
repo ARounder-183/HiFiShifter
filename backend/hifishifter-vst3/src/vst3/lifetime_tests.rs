@@ -2,8 +2,8 @@
 //! 内联模块纯搬到这里 —— `use super::*` 解析不变，被测代码整文件可读。
 
 use super::*;
-use hifishifter_plugin::vst3_abi::uid_guid;
 use ara2_bridge::companion::vst3::ffi::ara2_vst3_release;
+use hifishifter_plugin::vst3_abi::uid_guid;
 use std::sync::atomic::AtomicU32;
 
 /// 从真实工厂创建组件，返回其宿主 owning COM 引用。

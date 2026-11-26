@@ -2893,7 +2893,10 @@ pub fn run_benchmark_smoke(frames: usize, runs: usize) -> Result<u128, String> {
             .map_err(|error| format!("smoke inference failed: {error}"))?;
     }
     let elapsed = started.elapsed().as_millis();
-    log::info!("[benchmark] smoke ok frames={frames} runs={} elapsed={elapsed}ms", runs.max(1));
+    log::info!(
+        "[benchmark] smoke ok frames={frames} runs={} elapsed={elapsed}ms",
+        runs.max(1)
+    );
     Ok(elapsed)
 }
 

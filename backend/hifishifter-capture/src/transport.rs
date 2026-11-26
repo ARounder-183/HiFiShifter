@@ -821,8 +821,7 @@ mod tests {
             let decision = session.observe(pinned_block(960));
             // 相邻两块的位置差恒等于块长 —— 提级那一块也不例外。
             assert_eq!(
-                decision.tape_frames_before,
-                advanced,
+                decision.tape_frames_before, advanced,
                 "走带位置必须逐块连续，提级不得跳变"
             );
             advanced += 960;

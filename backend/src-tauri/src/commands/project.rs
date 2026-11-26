@@ -1456,10 +1456,7 @@ pub(super) fn save_project(
 /// 【为什么不解析工程内容】20 个几 MB 的 MessagePack 工程逐个解包要 1–2 秒，
 /// 而列表只需要「名字 / 时间 / 大小」。名字取文件名、时间取 mtime —— 三个字段
 /// 全部来自目录元数据，20 个工程在 200ms 内出结果。
-fn project_library_entries(
-    dir: &std::path::Path,
-    current: Option<&str>,
-) -> Vec<serde_json::Value> {
+fn project_library_entries(dir: &std::path::Path, current: Option<&str>) -> Vec<serde_json::Value> {
     let Ok(read_dir) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -1509,7 +1506,13 @@ fn project_library_entries(
 fn unique_project_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     let sanitized: String = name
         .chars()
-        .map(|c| if c.is_control() || "/\\:*?\"<>|".contains(c) { '_' } else { c })
+        .map(|c| {
+            if c.is_control() || "/\\:*?\"<>|".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     let stem = if sanitized.trim().is_empty() {
         "Untitled".to_string()

@@ -238,7 +238,10 @@ mod tests {
         assert_eq!(mapping.project(0), Some(28 * RATE));
         assert_eq!(mapping.project(RATE), Some(29 * RATE));
         // 宿主读数只是消歧线索，绝不参与换算。
-        assert_eq!(cell.resolve(0, 0).map(|m| m.project(0)), Some(Some(28 * RATE)));
+        assert_eq!(
+            cell.resolve(0, 0).map(|m| m.project(0)),
+            Some(Some(28 * RATE))
+        );
     }
 
     /// 没有映射时回答 `None` —— 调用方据此退回直通。
@@ -296,6 +299,8 @@ mod tests {
             .collect::<Vec<_>>();
         let cell = cell(&segments);
         assert_eq!(cell.len(), PROJECT_MAP_SLOTS);
-        assert!(cell.resolve(PROJECT_MAP_SLOTS as i64 * 100 + 10, 0).is_none());
+        assert!(cell
+            .resolve(PROJECT_MAP_SLOTS as i64 * 100 + 10, 0)
+            .is_none());
     }
 }

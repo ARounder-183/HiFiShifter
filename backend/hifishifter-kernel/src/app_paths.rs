@@ -856,7 +856,10 @@ mod tests {
         );
         // `/data/local/tmp` 是 shell 的临时目录：**不能**当沙箱根。
         // 旧实现把它原样当成根，于是算出 /data/local/tmp/files/... —— 永远建不出来。
-        assert_eq!(sandbox_root_from_tmpdir(OsStr::new("/data/local/tmp")), None);
+        assert_eq!(
+            sandbox_root_from_tmpdir(OsStr::new("/data/local/tmp")),
+            None
+        );
         // 相对路径、空值、以 cache 结尾但层级不对的路径一律拒绝。
         assert_eq!(sandbox_root_from_tmpdir(OsStr::new("cache")), None);
         assert_eq!(sandbox_root_from_tmpdir(OsStr::new("")), None);

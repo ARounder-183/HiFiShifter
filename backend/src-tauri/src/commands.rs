@@ -70,7 +70,6 @@ mod common;
 mod core;
 #[path = "commands/diagnostics.rs"]
 mod diagnostics;
-pub mod render_stats;
 #[path = "commands/dialogs.rs"]
 mod dialogs;
 #[path = "commands/file_browser.rs"]
@@ -81,6 +80,7 @@ mod json_export;
 mod log_settings;
 #[path = "commands/midi.rs"]
 mod midi;
+pub mod render_stats;
 // MIDI 导出已搬进内核（`hifishifter_kernel::midi_export`）：整条链路是纯粹的
 // "读音高曲线 → 写文件"，ARA 插件侧要共用同一份实现，不能再留在 app 里。
 pub(crate) use hifishifter_kernel::midi_export;

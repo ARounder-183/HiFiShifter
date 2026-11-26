@@ -41,9 +41,9 @@ pub mod timeline;
 pub mod transport;
 pub mod types;
 
+pub use project_map::{ProjectMapCell, ProjectMapSegment, ProjectMapping};
 pub use store::{
     CaptureOptions, CaptureSpan, CaptureStatus, CaptureStore, MaterialSpan, MaterialSummary,
     MissingCapture, RecordingStatus, TakeSummary,
 };
-pub use project_map::{ProjectMapCell, ProjectMapSegment, ProjectMapping};
 pub use types::{CapturePcm, CaptureRegion, CaptureTape};

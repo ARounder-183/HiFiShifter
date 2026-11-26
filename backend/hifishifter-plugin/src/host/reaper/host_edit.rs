@@ -746,8 +746,10 @@ impl EditorSession {
         // 【宿主线程的探针 / 闸】见 `host::thread_mark`。默认只记一行读数；设
         // `HFS_HOST_LOCK=refuse` 时这里会拒绝，让"宿主线程等长锁"当场可见。
         if crate::host::host_thread_may_not_lock(crate::host::LongLock::EditorTimeline) {
-            return Err("the host thread must not take the editor timeline; retry from the actor"
-                .to_owned());
+            return Err(
+                "the host thread must not take the editor timeline; retry from the actor"
+                    .to_owned(),
+            );
         }
         let (timeline, recovered) = self.timeline.lock_or_recover_checked();
         if recovered {

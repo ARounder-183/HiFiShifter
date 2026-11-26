@@ -823,7 +823,8 @@ impl CaptureStore {
         // 【映射与投影同一次发布】两者都由 `resolved_pieces` 派生，分开发布就会
         // 出现"快照已经是新一代、映射还是上一代"的窗口，而那个窗口里的读位置
         // 恰好是错的。
-        self.project_map.publish(revision, &timeline::project_map(&tapes));
+        self.project_map
+            .publish(revision, &timeline::project_map(&tapes));
         ProjectionCache {
             revision,
             timeline,

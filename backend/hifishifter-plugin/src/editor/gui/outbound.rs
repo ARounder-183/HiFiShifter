@@ -131,7 +131,11 @@ mod tests {
         let (kept, dropped) = coalesce_events(events, OUTBOUND_BATCH_BYTES);
         assert_eq!(kept.len(), 1, "状态消息必须只留一条");
         assert_eq!(dropped, 99);
-        assert_eq!(kept[0]["payload"]["version"], json!(99), "留下的必须是最后一个值");
+        assert_eq!(
+            kept[0]["payload"]["version"],
+            json!(99),
+            "留下的必须是最后一个值"
+        );
     }
 
     /// **不变量：回执永远不被合并、不被丢弃。**
@@ -153,7 +157,10 @@ mod tests {
         let (kept, dropped) = coalesce_events(events, 200);
         assert!(dropped > 0, "超预算必须真的丢掉一些");
         assert!(
-            kept.iter().map(|event| event.to_string().len()).sum::<usize>() <= 200,
+            kept.iter()
+                .map(|event| event.to_string().len())
+                .sum::<usize>()
+                <= 200,
             "留下的事件必须落在预算内"
         );
     }

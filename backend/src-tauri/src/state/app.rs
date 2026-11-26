@@ -76,7 +76,8 @@ pub struct AppState {
     ///   前端的乱序回包仲裁（见 `TimelineStatePayload::revision`）。它按读取
     ///   次数自增，因此在锁内「自增 + 读状态」是一个原子对：先构建的载荷
     ///   版本号必然更小，与内容是否变化无关。
-    pub payload_revision: std::sync::atomic::AtomicU64,    pub param_curve_revision: std::sync::atomic::AtomicU64,
+    pub payload_revision: std::sync::atomic::AtomicU64,
+    pub param_curve_revision: std::sync::atomic::AtomicU64,
     pub timeline_history: std::sync::Mutex<TimelineHistory>,
     pub project: std::sync::Mutex<ProjectState>,
     pub runtime: std::sync::Mutex<RuntimeState>,

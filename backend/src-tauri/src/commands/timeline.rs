@@ -136,9 +136,8 @@ fn schedule_clip_formant_rebuild(state: &AppState, clip: crate::state::Clip) {
 
 /// 构造 import 失败响应：ok=false + missing_files 携带错误原因（沿用既有约定）。
 fn import_audio_bytes_error(message: &str) -> crate::models::TimelineStatePayload {
-    let mut payload = crate::state::unversioned_timeline_payload(
-        &crate::state::TimelineState::default(),
-    );
+    let mut payload =
+        crate::state::unversioned_timeline_payload(&crate::state::TimelineState::default());
     payload.ok = false;
     payload.missing_files = Some(vec![message.to_string()]);
     payload
