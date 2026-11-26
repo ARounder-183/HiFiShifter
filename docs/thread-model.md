@@ -467,7 +467,7 @@ clip"这个动作每一轮都把它们的值写成 serde 默认值 0。
 | 读数 | 位置 | 它否证什么 |
 |---|---|---|
 | `[ara] fade projection: N of M` | `refresh_ui_geometry`（部分覆盖 WARN，全零 DEBUG） | "这一轮到底有没有几何" |
-| `[ara] fades: clips=… min_in=…`（`HFS_FADE_TRACE=1`） | 同上 | "发出去的那一帧是不是 0" |
+| `[ara] fades: clips=… min_in=…`（High 档，限流） | 同上 | "发出去的那一帧是不是 0" |
 | `[capture] anchor probe: … verdict=… offset=… score=… second=…@… hint=… policy=…` | `note_stream_probe` | "为什么这次没按内容判" |
 
 `feed begin` 只**增加**一个字段（`probe=score/second@offset`），既有字段一个不动 ——

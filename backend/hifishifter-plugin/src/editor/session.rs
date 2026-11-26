@@ -975,20 +975,6 @@ struct FadeReadout {
     min_auto_out: f64,
 }
 
-/// `HFS_FADE_TRACE=1`：把每一次淡变发布的最小值写进日志。
-///
-/// 【为什么要有它】验收要求「连续拖动 3 分钟，画布上没有任何一帧淡变包络为 0」。
-/// 肉眼无法判定「一帧」，而这条读数可以：`min_in / min_out` 在整个手势里不下降，
-/// 就等价于「从来没有发布过 0」。
-fn fade_trace_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("HFS_FADE_TRACE").is_ok_and(|value| {
-            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("on")
-        })
-    })
-}
-
 impl EditorSession {
     /// 导入目标只接受当前原GUI已授权轨道；未指定时由native直接parent决定空轨首次导入。
     pub(crate) fn host_track_id(&self, id: &str) -> Result<String, String> {
@@ -3630,16 +3616,25 @@ impl EditorSession {
                 );
             }
         }
-        if !fade_trace_enabled() || readout.clips == 0 {
+        if readout.clips == 0 {
             return;
         }
-        log::info!(
-            "[ara] fades: clips={} min_in={:.3} min_out={:.3} auto={:.3}/{:.3} event=publish",
-            readout.clips,
-            readout.min_in,
-            readout.min_out,
-            readout.min_auto_in,
-            readout.min_auto_out
+        // 【为什么是 Debug + 限流，而不是一个独立开关】它是一块一行的跟踪点（这条路径
+        // 由 20 ms 的视图定时器驱动），按仓库的四档日志策略属于 High 档的 Debug，
+        // 而 High 档也必须限流 —— 一次调试会话足以烧掉整份轮转预算。验收要求「连续
+        // 拖动 3 分钟零帧 0 长度」，肉眼判不了「一帧」，这条读数可以：`min_in /
+        // `min_out` 在整个手势里不下降，就等价于「从来没有发布过 0」。
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Debug,
+            "ara.fades",
+            format_args!(
+                "[ara] fades: clips={} min_in={:.3} min_out={:.3} auto={:.3}/{:.3} event=publish",
+                readout.clips,
+                readout.min_in,
+                readout.min_out,
+                readout.min_auto_in,
+                readout.min_auto_out
+            ),
         );
     }
 
