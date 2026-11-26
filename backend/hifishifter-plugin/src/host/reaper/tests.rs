@@ -1,4 +1,5 @@
 //! 原生QI/vtable/raw函数回归；fixture不是实际REAPER parent/API返回的验收证据。
+#[cfg(test)]
 use super::media::PeakKick;
 use super::*;
 use std::cell::{Cell, RefCell};
