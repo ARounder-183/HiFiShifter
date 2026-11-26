@@ -201,3 +201,87 @@ fn a_forced_policy_skips_the_content_probe() {
         Some(AnchorSource::Clip)
     );
 }
+
+/// 本流最近一次求解锚点时记下的「为什么没有位置」。
+fn absence(owner: &ExtensionOwner) -> AnchorAbsence {
+    AnchorAbsence::from_code(
+        owner.streams[ProcessStream::Realtime.index()]
+            .anchor_absent
+            .load(Ordering::Acquire),
+    )
+}
+
+/// **静音块没有锚点是设计，不是缺陷 —— 而且它必须能说出自己是哪一种。**
+///
+/// 【现场原形】VEGAS 的渲染从片段之前 1.2 s 开始，开头几块是 −102 dBFS 的数字静音，
+/// 接着是一个 128 帧的过短块。探测按设计不为它们定稿（静音块在任何锚点下输出都是
+/// 静音），于是输出退回直通 —— 而当时那条日志以 WARN 打出来，长得与真正的
+/// 「映射表没到」一模一样。区分它们的唯一办法，是把原因**带出求解函数**。
+#[test]
+fn a_silent_head_says_why_it_has_no_anchor() {
+    let (owner, _samples) = fixture();
+    let silence = vec![0.0_f32; BLOCK];
+    assert_eq!(project(&owner, 0, CURSOR, &silence), NO_POSITION);
+    assert_eq!(absence(&owner), AnchorAbsence::Silent);
+    assert!(
+        absence(&owner).is_expected(),
+        "静音是设计：直通输出的是同一份静音，一个样本都没变"
+    );
+}
+
+/// **过短块同理**：128 帧折不出足够的包络格，探测回答 `short`。
+#[test]
+fn a_block_shorter_than_the_probe_needs_says_short() {
+    let (owner, samples) = fixture();
+    let short = samples[0..128].to_vec();
+    assert_eq!(project(&owner, 0, CURSOR, &short), NO_POSITION);
+    assert_eq!(absence(&owner), AnchorAbsence::Short);
+    assert!(absence(&owner).is_expected());
+}
+
+/// **没有映射表是缺陷**：同样的「没有位置」，但它必须留在 WARN 上。
+///
+/// 【为什么这条是这组用例的重点】静音块与空映射表在输出上完全同形（都退回直通）。
+/// 如果两者的原因被压成同一个值，「按设计」的那一种就会把「真的不知道」一起降级 ——
+/// 下一次现场就再也看不见真正的缺陷了。
+#[test]
+fn an_empty_map_is_never_an_expected_absence() {
+    let owner = Arc::new(ExtensionOwner::default());
+    let block = noise(BLOCK, 7);
+    assert_eq!(project(&owner, 0, CURSOR, &block), NO_POSITION);
+    assert_eq!(absence(&owner), AnchorAbsence::Mapping);
+    assert!(
+        !absence(&owner).is_expected(),
+        "映射表没到是缺陷：它必须留在 WARN 上"
+    );
+}
+
+/// 每个原因都有独立的编码与名字，且只有「静音 / 过短」算设计。
+#[test]
+fn every_absence_round_trips_and_only_the_expected_ones_are_quiet() {
+    let all = [
+        AnchorAbsence::None,
+        AnchorAbsence::Mapping,
+        AnchorAbsence::Silent,
+        AnchorAbsence::Short,
+        AnchorAbsence::NoMaterial,
+        AnchorAbsence::Ambiguous,
+        AnchorAbsence::Busy,
+        AnchorAbsence::Unmapped,
+        AnchorAbsence::NoRaw,
+        AnchorAbsence::PastEnd,
+    ];
+    for absence in all {
+        assert_eq!(
+            AnchorAbsence::from_code(absence.code()),
+            absence,
+            "{} 的编码必须能还原",
+            absence.as_str()
+        );
+        let expected = matches!(absence, AnchorAbsence::Silent | AnchorAbsence::Short);
+        assert_eq!(absence.is_expected(), expected, "{}", absence.as_str());
+    }
+    let names: Vec<&str> = all.iter().map(|absence| absence.as_str()).collect();
+    let unique: std::collections::BTreeSet<&str> = names.iter().copied().collect();
+    assert_eq!(unique.len(), names.len(), "每个原因都必须有自己的名字");
+}

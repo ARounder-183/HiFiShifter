@@ -242,6 +242,7 @@ impl ExtensionOwner {
             // 自己的本地时间轴，读快照用的就是它 —— 这里没有"磁带 vs 工程"之分。
             project_position: processing.local_start,
             project_position_valid: true,
+            anchor_absence: AnchorAbsence::None,
             raw_start: context.project_time_samples,
             phase: if processing.new_pass {
                 TransportPhase::Start
@@ -392,6 +393,7 @@ impl ExtensionOwner {
                 // 零帧块不读快照也不发布播放头：工程位置就是它报的那一个。
                 project_position: raw_start,
                 project_position_valid: true,
+                anchor_absence: AnchorAbsence::None,
                 raw_start,
                 phase: if had {
                     TransportPhase::Resting
@@ -897,6 +899,9 @@ impl ExtensionOwner {
         // 留着 raw 会让每一块都被记成一次跳变（`clock_rewinds` 虚高，`pass_rewinds`
         // 也就看不出真相）。
         let mut project_position = position;
+        // 【缺席的原因跟着位置一起走】见 [`AnchorAbsence`]：`project_position_valid`
+        // 只说「有没有」，输出仲裁还要知道「为什么没有」才能决定这条日志的级别。
+        let mut anchor_absence = AnchorAbsence::None;
         if feed_local {
             let tape_position = i64::try_from(decision.tape_frames_before).unwrap_or(i64::MAX);
             // 【`frames_before` 就是这一块的喂入域起点】`capture_observe_block` 交上来
@@ -912,6 +917,11 @@ impl ExtensionOwner {
                 session.tape.first_raw,
                 raw_start,
                 probe,
+            );
+            anchor_absence = AnchorAbsence::from_code(
+                self.streams[stream.index()]
+                    .anchor_absent
+                    .load(Ordering::Acquire),
             );
             position = tape_position;
             geometry.anchor.store(position, Ordering::Release);
@@ -1247,6 +1257,7 @@ impl ExtensionOwner {
             position,
             project_position,
             project_position_valid: project_position != NO_POSITION,
+            anchor_absence,
             raw_start,
             phase,
             had_previous: had,
@@ -1423,22 +1434,32 @@ impl ExtensionOwner {
         probe: Option<hifishifter_capture::anchor_probe::ProbeBlock<'_>>,
     ) -> i64 {
         use hifishifter_capture::transport::{capture_map_mode, CaptureMapMode};
-        match capture_map_mode() {
+        let geometry = &self.streams[stream.index()];
+        // 【一个数 + 它缺席的原因】两者必须由同一次求解写出：分成两处写，任何一条
+        // 返回路径漏掉其中一半，输出仲裁就会拿上一块的结论解释这一块。
+        let (position, absence) = match capture_map_mode() {
             CaptureMapMode::Clip => {
-                let (anchor, _verdict) = self.feed_anchor(stream, first_raw, hint, probe);
-                anchor
-                    .and_then(|anchor| anchor.project(tape_frame))
-                    .unwrap_or(NO_POSITION)
-            }
-            CaptureMapMode::Origin => tape_frame,
-            CaptureMapMode::Raw => {
-                if first_raw == hifishifter_capture::transport::NO_RAW {
-                    NO_POSITION
-                } else {
-                    first_raw.saturating_add(tape_frame)
+                let (anchor, absence) = self.feed_anchor(stream, first_raw, hint, probe);
+                match anchor.and_then(|anchor| anchor.project(tape_frame)) {
+                    Some(position) => (position, AnchorAbsence::None),
+                    // 有锚点但喂入帧已越过这一片的末尾：片尾之后的预取块。
+                    None if absence == AnchorAbsence::None => (NO_POSITION, AnchorAbsence::PastEnd),
+                    None => (NO_POSITION, absence),
                 }
             }
-        }
+            CaptureMapMode::Origin => (tape_frame, AnchorAbsence::None),
+            CaptureMapMode::Raw => {
+                if first_raw == hifishifter_capture::transport::NO_RAW {
+                    (NO_POSITION, AnchorAbsence::NoRaw)
+                } else {
+                    (first_raw.saturating_add(tape_frame), AnchorAbsence::None)
+                }
+            }
+        };
+        geometry
+            .anchor_absent
+            .store(absence.code(), Ordering::Release);
+        position
     }
 
     /// 本喂入流的锚点：**首块选一次**，之后每块只读原子量。
@@ -1457,7 +1478,7 @@ impl ExtensionOwner {
         probe: Option<hifishifter_capture::anchor_probe::ProbeBlock<'_>>,
     ) -> (
         Option<hifishifter_capture::project_map::FeedAnchor>,
-        Option<hifishifter_capture::anchor_probe::ProbeVerdict>,
+        AnchorAbsence,
     ) {
         use hifishifter_capture::anchor_probe::{ProbeOutcome, ProbeReason};
         use hifishifter_capture::project_map::{AnchorSource, FeedAnchor};
@@ -1477,7 +1498,7 @@ impl ExtensionOwner {
                         take: geometry.anchor_take.load(Ordering::Acquire),
                         source,
                     }),
-                    None,
+                    AnchorAbsence::None,
                 );
             }
         }
@@ -1491,17 +1512,25 @@ impl ExtensionOwner {
             // 【静音 / 太短不消耗这次机会】见 `ProbeReason::Silent`：静音块在任何锚点下
             // 输出都是静音，它不是「这次机会用掉了」的证据。所以既不建锚、也不定稿，
             // 等下一个有信号的块再跑。输出这一块退回直通（本来就是静音）。
-            if matches!(
-                verdict.outcome,
-                ProbeOutcome::Undecided(ProbeReason::Silent)
-                    | ProbeOutcome::Undecided(ProbeReason::Short)
-            ) {
-                return (None, Some(verdict));
+            if let ProbeOutcome::Undecided(reason) = verdict.outcome {
+                if matches!(reason, ProbeReason::Silent | ProbeReason::Short) {
+                    return (None, AnchorAbsence::from_reason(reason));
+                }
             }
         }
         let Some(anchor) = outcome.anchor else {
             // 【表为空 / 正在写】这一轮没有答案，下一块再试（**不定稿**）。
-            return (None, outcome.probe);
+            // 【为什么要把原因带出去】见 [`AnchorAbsence`]：静音块与「表还没到」在
+            // 输出上是同一件事（直通），但在日志上是两件完全不同的事。
+            return (
+                None,
+                match outcome.probe.map(|verdict| verdict.outcome) {
+                    Some(ProbeOutcome::Undecided(reason)) => AnchorAbsence::from_reason(reason),
+                    // 内容判出了位置、但表里没有那一片 —— 表与素材不同代。
+                    Some(ProbeOutcome::Content) => AnchorAbsence::Unmapped,
+                    None => AnchorAbsence::Mapping,
+                },
+            );
         };
         geometry
             .anchor_project_zero
@@ -1517,7 +1546,7 @@ impl ExtensionOwner {
         geometry
             .anchor_source
             .store(anchor.source.code(), Ordering::Release);
-        (Some(anchor), outcome.probe)
+        (Some(anchor), AnchorAbsence::None)
     }
 
     /// 记一次内容探测的读数，并把**每一条喂入流只该出现一次**的那行日志写出去。
@@ -2064,6 +2093,7 @@ impl ExtensionOwner {
             position: stream_block.position,
             project_position: stream_block.project_position,
             project_position_valid: stream_block.project_position_valid,
+            anchor_absence: stream_block.anchor_absence,
             frames: block.frames,
             playing,
             recording,
@@ -2480,11 +2510,23 @@ impl ExtensionOwner {
         if matches!(output, CaptureOutput::Processed | CaptureOutput::Raw)
             && evidence.is_some_and(|evidence| !evidence.project_position_valid)
         {
+            // 【级别由原因决定，而不是由"没有位置"这个事实决定】见 [`AnchorAbsence`]：
+            // 渲染开头的 1~4 块是 −102 dBFS 的数字静音与 128 帧的过短块，探测按设计
+            // 不为它们定稿，直通输出的是**同一份静音** —— 一个样本都没变。那既不是
+            // 故障，也不该长得像故障：它在现场与老缺陷同形，只会误导下一次判断。
+            let absence = evidence.map_or(AnchorAbsence::Mapping, |e| e.anchor_absence);
+            let level = if absence.is_expected() {
+                log::Level::Debug
+            } else {
+                log::Level::Warn
+            };
             hifishifter_kernel::log_limiter::emit_limited_key(
-                log::Level::Warn,
+                level,
                 "capture.no-project-mapping",
                 format_args!(
-                    "[capture] no project mapping for this block; passing the host input through                      instead of reading a snapshot at an unknown position"
+                    "[capture] no project mapping for this block (reason={}); passing the host input \
+                     through instead of reading a snapshot at an unknown position",
+                    absence.as_str(),
                 ),
             );
             output = CaptureOutput::PassThrough;

@@ -112,6 +112,101 @@ impl PassReason {
     }
 }
 
+/// 一条喂入流**为什么还没有工程锚点**。
+///
+/// 【为什么必须把「不知道」分类】「这一块没有工程位置」有两种完全不同的含义：
+///
+///   * **我们还没算出来**（映射表为空 / 正在重建 / 内容对上了但表里没有那一片）——
+///     那是缺陷，该报警；
+///   * **按设计就不该有**（这一块是数字静音，或只有 128 帧）—— 此时直通宿主原声是
+///     唯一正确的输出，连日志都不该是 WARN。
+///
+/// 混成一个 `Option::None`，现场就只能看见一串长得像老缺陷的 WARN：渲染开头 1~4 条
+/// `no project mapping`，而它们对应的正是「前 1088 帧是 −102 dBFS 的数字静音」。
+/// 一个和真实缺陷同形的读数，会让下一次现场把它当成回归。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum AnchorAbsence {
+    /// 有锚点（正常）。
+    #[default]
+    None = 0,
+    /// 映射表为空或正在写：**我们不知道**这一块该在哪。
+    Mapping = 1,
+    /// 这一块是静音 —— 探测按设计不消耗这次机会（静音块在任何锚点下都是静音）。
+    Silent = 2,
+    /// 这一块太短（折不出足够的包络格），同上。
+    Short = 3,
+    /// 素材在这一段没有覆盖（洞），或整段比一块还短。
+    NoMaterial = 4,
+    /// 周期性素材：对上了不止一处，不猜。
+    Ambiguous = 5,
+    /// 这一块超了探测的乘加预算。
+    Busy = 6,
+    /// 内容说得出位置，但映射表里没有那一片（表与素材不同代）。
+    Unmapped = 7,
+    /// 映射模式是 raw，而宿主还没给过 raw 起点。
+    NoRaw = 8,
+    /// 喂入帧已经越过这一片能覆盖的末尾（片尾之后的预取块）。
+    PastEnd = 9,
+}
+
+impl AnchorAbsence {
+    pub(super) fn code(self) -> u8 {
+        self as u8
+    }
+
+    pub(super) fn from_code(code: u8) -> Self {
+        match code {
+            1 => Self::Mapping,
+            2 => Self::Silent,
+            3 => Self::Short,
+            4 => Self::NoMaterial,
+            5 => Self::Ambiguous,
+            6 => Self::Busy,
+            7 => Self::Unmapped,
+            8 => Self::NoRaw,
+            9 => Self::PastEnd,
+            _ => Self::None,
+        }
+    }
+
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Mapping => "mapping",
+            Self::Silent => "silent",
+            Self::Short => "short",
+            Self::NoMaterial => "no-material",
+            Self::Ambiguous => "ambiguous",
+            Self::Busy => "busy",
+            Self::Unmapped => "unmapped",
+            Self::NoRaw => "no-raw",
+            Self::PastEnd => "past-end",
+        }
+    }
+
+    /// 从内容探测的「未决原因」映射过来。
+    ///
+    /// 【为什么是映射而不是重新判一次】探测已经回答过「为什么没定稿」，这里再判一次
+    /// 就多了一份会漂移的判据。两边共用同一个词表，`silent` 在日志里就只有一个含义。
+    pub(super) fn from_reason(reason: hifishifter_capture::anchor_probe::ProbeReason) -> Self {
+        use hifishifter_capture::anchor_probe::ProbeReason;
+        match reason {
+            ProbeReason::Silent => Self::Silent,
+            ProbeReason::Short => Self::Short,
+            ProbeReason::NoMaterial => Self::NoMaterial,
+            ProbeReason::Ambiguous => Self::Ambiguous,
+            ProbeReason::Busy => Self::Busy,
+        }
+    }
+    /// 这个原因是否**按设计**（输出直通就是正确答案，不是故障）。
+    ///
+    /// 【只有两个】静音与过短：两者都让「内容定位」无从下手，而两者的输出本来
+    /// 就是静音 —— 直通不会改变任何一个样本。其余原因都意味着**我们本该知道**
+    /// 这一块在哪却没有答案，那才是需要人看一眼的事。
+    pub(super) fn is_expected(self) -> bool {
+        matches!(self, Self::Silent | Self::Short)
+    }
+}
 #[derive(Default)]
 pub(super) struct StreamGeometry {
     pub(super) seen: AtomicBool,
@@ -259,6 +354,12 @@ pub(super) struct StreamGeometry {
     pub(super) anchor_source: AtomicU8,
     /// 建锚时映射表的代次（投影重建 ⇒ 这条锚点可能指向已经不在的片段）。
     pub(super) anchor_revision: AtomicU64,
+    /// 本喂入流最近一次求解锚点时**为什么没拿到**（`AnchorAbsence` 的编码；0 = 有）。
+    ///
+    /// 【为什么按流存】三条流各有自己的喂入流；prefetch 的静音块不该把实时流的
+    /// 读数改掉。写入方是求解那一块的线程（音频线程），读方是同一块的输出仲裁 ——
+    /// 同一个块内读写，没有跨块陈旧窗口。
+    pub(super) anchor_absent: AtomicU8,
     /// 建锚时这条流的首块 raw（换一条喂入流 ⇒ 重选）。
     pub(super) anchor_first_raw: AtomicI64,
     /// 本喂入流最近一次**内容探测**的读数（f32 位模式）：主候选相关。
@@ -738,6 +839,12 @@ pub(super) struct StreamBlock {
     /// 比较会让"工程帧恰好等于 i64::MIN"这种不可能的事成为判据的一部分。一个布尔位
     /// 让"我不知道这一段在工程哪里"成为**显式**状态，输出据此退回直通。
     pub(super) project_position_valid: bool,
+    /// 没有工程位置时的**原因**（`project_position_valid` 为假时才有意义）。
+    ///
+    /// 【为什么一路带到 `BlockEvidence`】输出仲裁要按它决定这条日志的级别：
+    /// 「这一块是静音」是设计，不是缺陷（见 [`AnchorAbsence`]）。把它留在几何里
+    /// 让 `capture_stage` 去读，就会读到**另一条流**或**另一块**的结论。
+    pub(super) anchor_absence: AnchorAbsence,
     /// **UI 播放头修正量**（帧）：喂入位置与宿主 UI 播放头的当前差。UI 发布
     /// （捕获通道与 realtime 通道）用 `position - playhead_offset`，磁带记账仍用
     /// `position`（喂入域）。维护规则见 `note_stream_geometry` 调用侧的说明。
