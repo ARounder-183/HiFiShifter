@@ -89,6 +89,50 @@ struct ControllerAdapter<P: PluginModel> {
     ledger: std::sync::Arc<crate::GraphLedger>,
 }
 
+/// 一次 `notifyModelUpdates` 的时间预算（环境变量 `HFS_NOTIFY_BUDGET_MS`）。
+///
+/// 【为什么必须有一个预算】`notifyModelUpdates` 是 ARA 规范要求的周期性心跳（现场
+/// REAPER 空闲时也按 ~5.4 Hz 调它），它跑在**宿主主线程**上。而这个回调里做了三件
+/// 代价不可控的事：`flush_pending_model_updates`（全量重映射）、
+/// `retry_failed_source_reads`（经宿主读整段音源）与逐条 `notify_*` 回推。
+/// 一次 1.53 M 帧的源读取是几十到几百毫秒 —— 心跳本身不贵，贵的是它顺手做的事。
+///
+/// 【为什么默认 8 ms】一次干净的心跳实测在 1 ms 量级；8 ms 给了抖动余量，又远小于
+/// Windows 把窗口画成"未响应"的量级。超过就把剩下的留给下一次心跳 —— 186 ms 之后
+/// 它还会来，而"晚 186 ms 生效"远好过"宿主卡住 300 ms"。
+///
+/// `0` = 不限制（对照实验用）。
+fn notify_budget() -> Option<std::time::Duration> {
+    static BUDGET: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        let millis = std::env::var("HFS_NOTIFY_BUDGET_MS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(8);
+        (millis > 0).then(|| std::time::Duration::from_millis(millis))
+    })
+}
+
+/// 源读取重试的间隔（环境变量 `HFS_SOURCE_RETRY_MS`，默认 1 s）。
+///
+/// 【为什么它也要能调】那一次读取是心跳里唯一**直接读音频**的动作，代价与素材长度
+/// 成正比。现场若怀疑它是卡顿来源，把这个数调大就能把它从心跳里拿掉，而不必重新出包。
+fn source_retry_interval() -> std::time::Duration {
+    static INTERVAL: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *INTERVAL.get_or_init(|| {
+        let millis = std::env::var("HFS_SOURCE_RETRY_MS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(1_000);
+        std::time::Duration::from_millis(millis)
+    })
+}
+
+/// 预算到了没有（纯函数，可单测）。
+fn budget_expired(started: std::time::Instant, budget: Option<std::time::Duration>) -> bool {
+    budget.is_some_and(|budget| started.elapsed() >= budget)
+}
+
 impl<P: PluginModel> ControllerAdapter<P> {
     /// 图账本（诊断与插件的证据包都读它）。
     #[allow(dead_code)]
@@ -317,7 +361,7 @@ impl<P: PluginModel> ControllerAdapter<P> {
     fn retry_failed_source_reads(&mut self) {
         if self
             .last_source_retry
-            .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1))
+            .is_some_and(|at| at.elapsed() < source_retry_interval())
         {
             return;
         }
@@ -454,6 +498,9 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
     }
 
     fn notify_model_updates(&mut self) {
+        // 【时间预算的起点】见 `notify_budget`。每一次心跳都从零开始计，因为要限制的
+        // 是"这一次调用占住宿主主线程多久"，不是"累计占了多少"。
+        let started = std::time::Instant::now();
         self.ledger.note_notify_model_updates();
         // 【本地补丁 11】宿主用它让插件把待发的更新推回去（ARA 2.0 起替代旧的归档路径），
         // 并且规定"宿主不编辑时须周期性调用"。早退条件与宿主拿不到我们的更新直接相关，
@@ -494,6 +541,14 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
             );
             self.finish_editing();
         }
+        if budget_expired(started, notify_budget()) {
+            log::warn!(
+                "[ara] notifyModelUpdates over budget ({}ms at settle); the rest is left for the \
+                 next heartbeat",
+                started.elapsed().as_millis()
+            );
+            return;
+        }
         if self.runtime().map_or(true, PluginRuntime::is_editing) {
             log::warn!("[ara] notifyModelUpdates skipped: the document is in an editing session");
             return;
@@ -504,6 +559,14 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         // 【为什么在这里 flush】宿主可能在工程加载/后台恢复时直接重建图却不发
         // begin/endEditing。`notifyModelUpdates` 是 SDK 保证的空闲入口；只在
         // 委托方确实有积压变化时重算，避免每个心跳都跑一次全量映射。
+        if budget_expired(started, notify_budget()) {
+            log::warn!(
+                "[ara] notifyModelUpdates over budget ({}ms before flush); the rest is left for \
+                 the next heartbeat",
+                started.elapsed().as_millis()
+            );
+            return;
+        }
         if let Some(runtime) = self.runtime.as_mut() {
             if runtime.flush_pending_model_updates() {
                 log::info!(
@@ -511,6 +574,14 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
                      an editing session"
                 );
             }
+        }
+        if budget_expired(started, notify_budget()) {
+            log::warn!(
+                "[ara] notifyModelUpdates over budget ({}ms before the source retry); the rest is \
+                 left for the next heartbeat",
+                started.elapsed().as_millis()
+            );
+            return;
         }
         self.retry_failed_source_reads();
         let Some(host) = self.host.model_updates() else {
@@ -2417,5 +2488,31 @@ impl<P: PluginModel + 'static> Plugin<P> {
             observer(key);
         }
         Ok(instance)
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    /// **不变量：预算到点就必须放手。**
+    ///
+    /// 【为什么这条必须钉住】`notifyModelUpdates` 跑在宿主主线程上；它的三个重活
+    /// （全量重映射 / 经宿主读整段音源 / 逐条回推）代价不可控。预算就是"这一次调用
+    /// 最多占住宿主多久"的唯一上界，而它一旦失效，现场看到的就是"宿主周期性卡顿"
+    /// —— 与"宿主自己慢"完全同形。
+    #[test]
+    fn the_budget_expires_after_the_deadline() {
+        let started = std::time::Instant::now();
+        assert!(!budget_expired(
+            started,
+            Some(std::time::Duration::from_millis(50))
+        ));
+        assert!(budget_expired(
+            started,
+            Some(std::time::Duration::ZERO)
+        ));
+        // 0 = 不限制：永远不到点。
+        assert!(!budget_expired(started, None));
     }
 }
