@@ -2249,7 +2249,9 @@ impl DocumentSession {
     /// 立刻释放，再取 `timeline` / `clip_ids` —— 与 `transaction → timeline → edits →
     /// host facts` 同向。
     pub(crate) fn rebuild_timeline_locked(&self) -> Result<AssemblyOutcome, String> {
-        use hifishifter_kernel::editor::assembly::{assemble, attach, inherit_media};
+        use hifishifter_kernel::editor::assembly::{
+            assemble, attach, inherit_media, inherit_presentation,
+        };
         // 【模型没交付过 ⇒ 不动已发布的时间线】见 `ara_model_seen` 的说明。装配器的
         // 输入只有两份，缺了 ARA 那一份时它只能给出"没有源窗口的占位" —— 用那份占位
         // 盖掉一份真实的图，比不刷新糟得多。
@@ -2324,6 +2326,12 @@ impl DocumentSession {
             .map(|timeline| timeline.clips.clone())
             .unwrap_or_default();
         let inherited = inherit_media(&mut assembly.clips, &previous_clips, &live_sources);
+        // 【淡变与吸附偏移在同一处继承】见 `assembly::inherit_presentation`。装配的输入
+        // 里根本没有这些字段（`ItemRow` 只有几何与媒体身份），所以「发布一条 clip」
+        // 这个动作必须把推导不出来的东西一起带走 —— 否则每一次清单刷新都会把它们抹成
+        // 0，再由 `project_ui_fades_locked` 补回来，而那一步只在宿主几何缓存这一轮
+        // 有效时才说话，缓存恰好被这次发布本身推进的 `revision` 作废。
+        let presented = inherit_presentation(&mut assembly.clips, &previous_clips);
         // 【`unbound` 不是结论，是"两份输入还没对齐"】
         //
         // 判据只有一条：**这一轮读到的两份输入，与上一次尝试相比动过吗**。
@@ -2373,6 +2381,11 @@ impl DocumentSession {
             // 解释性跟踪：拖动 item 期间它每一轮都可能 > 0 —— 那正是这条继承在起作用，
             // 属于竞态的自愈，用户不需要为此做任何事，所以不是 WARN。
             log::debug!("[ara] inherited the media identity of {inherited} clip(s) this round");
+        }
+        if presented > 0 {
+            // 与上面同一档：它是「这一轮有多少条 clip 的淡变靠继承活了下来」。
+            // 拖动期间每轮都 > 0 是**正常**的（装配每轮重跑一次），不是故障。
+            log::debug!("[ara] carried the published fades of {presented} clip(s) across this rebuild");
         }
         // 这一轮已经把**当前**两份输入都消费掉了（含中途到达的那一份）。
         self.assembly_dirty.store(false, Ordering::Release);
