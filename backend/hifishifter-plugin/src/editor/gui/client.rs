@@ -2168,14 +2168,21 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 // 而 `HostUndo::pending` 恒真会把自动合成一起挂起。
                 let _undo = crate::host::undo::UndoRequestGuard::begin(
                     &document.host_undo,&view_id,id,true,true,&host,&allowed)?;
-                // 【整段宿主写入都包在重入守卫里】`create_audio_track` 与 `import_audio`
-                // 都会让宿主**同步**回调 ARA（`beginEditing` / `endEditing`）。没有这一层，
-                // 那次回调会去等准备 worker —— 现场就是在这里挂起（`AppHangB1`）。
-                // 守卫必须在 `_undo` **之后**声明：Drop 逆序，于是宿主调用先结束、
+                // 【顺序】守卫在 `_undo` **之后**进入：Drop 逆序，于是宿主调用先结束、
                 // undo 组后关闭 —— 宿主写入期间那个组必须仍然开着。
-                let _call = crate::host::HostCallGuard::enter("import_item");
-                let result=(||->Result<(String,Option<String>),String>{
-                    let mut created=if new_track {Some(host.create_audio_track(std::path::Path::new(path).file_stem().and_then(|name|name.to_str()).unwrap_or("Imported audio"),None,&allowed)?)} else {None};
+                // 【守卫的作用域就是**宿主写入**的作用域】它必须覆盖 `create_audio_track` 与
+                // `import_audio`（两者都会让宿主**同步**回调 ARA：`beginEditing` /
+                // `endEditing`）。没有这一层，那次回调会去等准备 worker —— 现场就是在这里
+                // 挂起（`AppHangB1`）。
+                //
+                // 【为什么它必须在这里**结束**】峰值构建是**新的一次**宿主调用：REAPER 把
+                // 峰值作业排进它自己的空闲期，在回调里请求它等于把这一轮空闲用掉 ——
+                // 那正是"导入后没有波形、要切窗口才出现"的成因（见 `host/reaper/media.rs`
+                // 的 `kick_peaks`）。所以 `let (created, imported) = {…}` 这个块就是守卫的
+                // 全部范围，块一结束就踢峰值。
+                let (mut created, imported) = {
+                    let _call = crate::host::HostCallGuard::enter("import_item");
+                    let created=if new_track {Some(host.create_audio_track(std::path::Path::new(path).file_stem().and_then(|name|name.to_str()).unwrap_or("Imported audio"),None,&allowed)?)} else {None};
                     // 【I-P1：新建轨必须在**同一次请求里**进入本实例作用域】
                     //
                     // `create_audio_track` 把新轨插在锚点之后 —— 那是本轨的**兄弟**，而清单
@@ -2188,26 +2195,36 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                         let target=existing.as_ref().or_else(||created.as_ref().map(|track|&track.target)).ok_or("import target missing")?;
                         target.import_audio(path,input["startSec"].as_f64().unwrap_or_else(||owner.clock.get().map(|clock|clock.read().0).unwrap_or(0.)),&allowed)
                     })();
-                    match imported {
-                        Ok(item)=>{
-                            let landed=created.as_ref().map(|track|track.target.inventory_guid().to_owned())
-                                .or_else(||track.clone());
-                            if let Some(track)=&mut created {track.commit();}
-                            Ok((item,landed))
-                        }
-                        Err(error)=>{
-                            // 【采纳记录必须与宿主轨同生共死】`CreatedTrack::drop` 只在"仍为空
-                            // 且只含自己新增的 FX"时才删轨；判据不成立时（宿主已经塞进半条
-                            // item、或轨道句柄验证失败）轨道会**留下**。那就更不能把它留在
-                            // 采纳表里 —— 下一轮枚举到它，时间线上又是一条凭空多出来的空轨。
-                            if let Some(track)=&created {document.unadopt_track(track.target.inventory_guid());}
-                            Err(error)
+                    (created, imported)
+                };
+                // 守卫已经退出：从这里开始是**新的**一次宿主调用。
+                //
+                // 【为什么在错误分支之前】成功才需要建峰值；失败时 item 已经被
+                // `CreatedItem::drop` 删掉，再按 GUID 去踢只会白跑一趟。
+                if let Ok(item)=&imported {
+                    let target=existing.as_ref().or_else(||created.as_ref().map(|track|&track.target));
+                    if let Some(target)=target {
+                        if let Err(error)=target.kick_peaks(item,&allowed) {
+                            log::warn!("[import] peaks guid={item} failed: {error}");
                         }
                     }
-                })();
-                // 守卫在作用域结束时收尾（`_call` 先于 `_undo` 释放：先结束宿主调用，
-                // 再关 undo 组 —— 宿主写入期间那个组必须仍然开着）。
-                let (imported,landed)=result?;
+                }
+                let (imported,landed)=match imported {
+                    Ok(item)=>{
+                        let landed=created.as_ref().map(|track|track.target.inventory_guid().to_owned())
+                            .or_else(||track.clone());
+                        if let Some(track)=&mut created {track.commit();}
+                        (item,landed)
+                    }
+                    Err(error)=>{
+                        // 【采纳记录必须与宿主轨同生共死】`CreatedTrack::drop` 只在"仍为空
+                        // 且只含自己新增的 FX"时才删轨；判据不成立时（宿主已经塞进半条
+                        // item、或轨道句柄验证失败）轨道会**留下**。那就更不能把它留在
+                        // 采纳表里 —— 下一轮枚举到它，时间线上又是一条凭空多出来的空轨。
+                        if let Some(track)=&created {document.unadopt_track(track.target.inventory_guid());}
+                        return Err(error);
+                    }
+                };
                 // 【为什么这一行单独记】`[import] state=…` 那一行只能回答"判据是什么"，
                 // 回答不了"这次导入**落到**哪条轨"。三态 + 落点 + item GUID 才是一条完整
                 // 的证据链（与回执那行按 item 关联）。

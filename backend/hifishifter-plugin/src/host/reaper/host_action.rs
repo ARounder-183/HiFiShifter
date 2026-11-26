@@ -108,6 +108,16 @@ pub(super) const TAKE_REVERSE: HostAction = HostAction {
     fallback_id: 41_051,
 };
 
+/// `Item: Build peaks for selected items` —— 让宿主为选中的 item 建峰值。
+///
+/// 【为什么需要它】`PCM_Source_BuildPeaks` 在部分宿主版本上缺席；那条路要求"先选中、
+/// 再跑动作"。走这里的代价是临时改一次选区，所以它只是**退路**，首选仍是源级入口
+/// （见 `super::media::HostTrackTarget::kick_peaks`）。
+pub(super) const BUILD_PEAKS: HostAction = HostAction {
+    name: c"Item: Build peaks for selected items",
+    fallback_id: 40_047,
+};
+
 /// 动作表里的名字是否就是 `wanted`。
 ///
 /// 【为什么要处理分隔符】REAPER 的动作描述可能是 `本地化文本 |||||| English`（真机上

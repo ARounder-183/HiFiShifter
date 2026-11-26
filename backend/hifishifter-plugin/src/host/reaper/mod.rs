@@ -91,6 +91,13 @@ pub(super) type PluginRegister = unsafe extern "C" fn(*const c_char, *mut c_void
 /// 调用全部快速失败 —— 界面不会因为一次宿主繁忙而卡两秒半。
 const HOST_UNREACHABLE_BACKOFF_MS: u64 = 1000;
 
+/// `kicked_peaks` 记住最近多少条 item。
+///
+/// 【为什么只需要几条】它防的是"同一次导入被请求两次"，而不是"整场会话的去重"：导入是
+/// 用户手势，几十条的量级里留下最近 16 条足够覆盖任何一次重试。取更大会让这份记忆在长
+/// 会话里无限增长，而它唯一的作用是让日志不重复。
+const KICKED_PEAKS_MEMORY: usize = 16;
+
 /// 墙钟毫秒；只用于熔断窗口，不参与任何音视频时序。
 fn unix_millis() -> u64 {
     std::time::SystemTime::now()
@@ -235,6 +242,12 @@ pub(crate) struct NativeHost {
     host_timer_retry_at: std::sync::Mutex<Option<std::time::Instant>>,
     /// 到这个时刻（Unix 毫秒）之前不再尝试投递 —— 见 `on_host` 的熔断说明。
     host_unreachable_until: std::sync::atomic::AtomicU64,
+    /// 已经踢过峰值的 item GUID（最近 [`Self::peaks_kicked`] 记忆的那几条）。
+    ///
+    /// 【为什么记】"每次导入恰好一行 `[import] peaks`"是可读的契约；同一条 item 被
+    /// 重复请求（重试、二次回执）本身无害，但会把这条契约变成噪声。容量很小，见
+    /// `KICKED_PEAKS_MEMORY`。
+    kicked_peaks: std::sync::Mutex<std::collections::VecDeque<String>>,
     /// 已解析的宿主动作号（键 = 登记的回退命令号）。
     ///
     /// 【为什么必须缓存】解析一次要枚举几千条动作（每条一次宿主调用）；而"建一条 take
@@ -672,6 +685,11 @@ impl NativeHost {
             picker: lookup!(c"GetUserFileName", media::MultiPicker),
             tracks,
         });
+        // `PCM_Source_BuildPeaks` 是**增强项**：缺了导入照常成立，只是波形要等宿主自己
+        // 高兴才出现（见 `media::HostTrackTarget::kick_peaks`）。与下面那三个同理，
+        // 它必须在 `match` 之前单独取，否则 `lookup!` 的 `?` 会把"缺一个可选入口"
+        // 升级成"整个媒体 API 不可用"。
+        let build_peaks = lookup!(c"PCM_Source_BuildPeaks", media::BuildPeaks);
         // 【为什么先取再配对】`lookup!` 内部用 `?` 提前返回，写进 match 臂里会把
         // "可选符号缺失" 变成"整个媒体 API 不可用"。这三个是**增强项**：缺任何一个，
         // 导入本身仍然成立，只是少了 take 侧的自检。
@@ -714,6 +732,7 @@ impl NativeHost {
                 set_active_take: take_extras.0,
                 count_takes: take_extras.1,
                 take_string: take_extras.2,
+                build_peaks,
             }),
             _ => None,
         };
@@ -936,6 +955,7 @@ impl NativeHost {
             item_track,
             undo_entry_times: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             undo_ends: std::sync::Mutex::new(Vec::new()),
+            kicked_peaks: std::sync::Mutex::new(std::collections::VecDeque::new()),
             action_ids: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         })
     }
@@ -962,6 +982,25 @@ impl NativeHost {
             ));
         }
         Ok(unsafe { std::mem::transmute_copy::<*mut c_void, T>(&function) })
+    }
+
+    /// 这条 item 的峰值是不是已经被踢过了（见 `kicked_peaks`）。
+    pub(super) fn peaks_kicked(&self, item_guid: &str) -> bool {
+        self.kicked_peaks
+            .lock_or_recover()
+            .iter()
+            .any(|known| known == item_guid)
+    }
+
+    /// 记住"这条 item 的峰值已经踢过"，并丢掉最旧的那条。
+    pub(super) fn remember_peaks_kick(&self, item_guid: &str) {
+        let mut known = self.kicked_peaks.lock_or_recover();
+        if !known.iter().any(|entry| entry == item_guid) {
+            known.push_back(item_guid.to_owned());
+        }
+        while known.len() > KICKED_PEAKS_MEMORY {
+            known.pop_front();
+        }
     }
 
     /// 当前线程是不是宿主绑定线程（model/UI 线程）。
