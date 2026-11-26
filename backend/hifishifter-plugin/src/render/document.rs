@@ -3499,7 +3499,11 @@ impl DocumentSession {
             .filter_map(|id| available.get(id).map(|pcm| (id.clone(), pcm.clone())))
             .collect::<Vec<_>>();
         let projection = self.workspace_projection_locked(&edits)?;
-        self.project_ui_fades_locked(&mut timeline, &edits.fades);
+        // 【与 GUI 路径同一份稀疏补丁】见 `workspace::FadeProjection`：宿主几何这一轮
+        // 说得出来的那几条才在补丁里，其余保持装配继承下来的上一轮发布值。这里的时间线
+        // 是**裸 id**（没有 GUI 命名空间），所以前缀是空串。
+        let fades = self.project_ui_fades_locked(&edits.fades);
+        crate::editor::workspace::apply_fade_projection(&mut timeline, &fades, "");
         self.project_private_group_view(&mut timeline, &edits)?;
         // 【G1】这是编辑器**真正会看到**的那份参数视图 —— 连同它的指纹一起交出去。
         // 冲突重基的唯一基线就是它（见 `accept_workspace_edits_with_groups`）；

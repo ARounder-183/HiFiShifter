@@ -960,6 +960,35 @@ impl Drop for EditorSession {
     }
 }
 
+/// 一次淡变发布的读数（见 [`EditorSession::fade_readout`]）。
+///
+/// 【为什么是一个显式的值】它要跨出 `self.timeline` 的作用域之后才写进日志 ——
+/// `emit_limited_key` 自己有一把锁，而在时间线作用域里再取一把锁是这个仓库踩过两次
+/// 的坑（见 `hifishifter_plugin_core::sync` 的模块文档）。
+struct FadeReadout {
+    covered: usize,
+    expected: usize,
+    clips: usize,
+    min_in: f64,
+    min_out: f64,
+    min_auto_in: f64,
+    min_auto_out: f64,
+}
+
+/// `HFS_FADE_TRACE=1`：把每一次淡变发布的最小值写进日志。
+///
+/// 【为什么要有它】验收要求「连续拖动 3 分钟，画布上没有任何一帧淡变包络为 0」。
+/// 肉眼无法判定「一帧」，而这条读数可以：`min_in / min_out` 在整个手势里不下降，
+/// 就等价于「从来没有发布过 0」。
+fn fade_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("HFS_FADE_TRACE").is_ok_and(|value| {
+            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("on")
+        })
+    })
+}
+
 impl EditorSession {
     /// 导入目标只接受当前原GUI已授权轨道；未指定时由native直接parent决定空轨首次导入。
     pub(crate) fn host_track_id(&self, id: &str) -> Result<String, String> {
@@ -3549,6 +3578,71 @@ impl EditorSession {
         Ok(())
     }
 
+    /// 这一轮发出去的淡变最小值（`HFS_FADE_TRACE` 的读数）。
+    fn fade_readout(
+        timeline: &TimelineState,
+        projection: &crate::editor::workspace::FadeProjection,
+    ) -> FadeReadout {
+        let mut readout = FadeReadout {
+            covered: projection.covered(),
+            expected: projection.expected,
+            clips: timeline.clips.len(),
+            min_in: f64::INFINITY,
+            min_out: f64::INFINITY,
+            min_auto_in: f64::INFINITY,
+            min_auto_out: f64::INFINITY,
+        };
+        for clip in &timeline.clips {
+            readout.min_in = readout.min_in.min(clip.fade_in_sec);
+            readout.min_out = readout.min_out.min(clip.fade_out_sec);
+            readout.min_auto_in = readout.min_auto_in.min(clip.auto_fade_in_sec);
+            readout.min_auto_out = readout.min_auto_out.min(clip.auto_fade_out_sec);
+        }
+        readout
+    }
+
+    /// 两行读数：这一轮覆盖了几条 clip、发出去的最小淡变是多少。
+    ///
+    /// 【为什么必须有第一行】用户说「闪了一下」，而「我们发了一帧 0」与「界面自己闪」
+    /// 在日志里完全同形。这一行把「这一轮到底有没有几何」变成可读的，于是下一次现场
+    /// 只需看一眼就能排除掉一半假设。
+    ///
+    /// 【为什么两档】全零覆盖在 ARA-only 宿主上是**常态**（那里根本没有原生几何，一条
+    /// 都投不出来），把它报成 WARN 会让这些宿主每次刷新刷一行。部分覆盖才是本轮缺陷的
+    /// 签名：几何明明有，却只覆盖了一部分。
+    fn emit_fade_readout(readout: FadeReadout) {
+        if readout.covered < readout.expected {
+            if readout.covered == 0 {
+                log::debug!(
+                    "[ara] fade projection: none of the {} clip(s) has host geometry this round; \
+                     every clip keeps its published values",
+                    readout.expected
+                );
+            } else {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.fade-projection",
+                    format_args!(
+                        "[ara] fade projection: {} of {} clip(s) have host geometry this round; \
+                         the rest keep their published values",
+                        readout.covered, readout.expected
+                    ),
+                );
+            }
+        }
+        if !fade_trace_enabled() || readout.clips == 0 {
+            return;
+        }
+        log::info!(
+            "[ara] fades: clips={} min_in={:.3} min_out={:.3} auto={:.3}/{:.3} event=publish",
+            readout.clips,
+            readout.min_in,
+            readout.min_out,
+            readout.min_auto_in,
+            readout.min_auto_out
+        );
+    }
+
     /// 清单结构与普通fade独立同步；ARA未ready时也通知新增/删除，不清空曲线、选择或历史。
     /// `adopt_view` 只在 `refresh_host` 这条路径上为真：那里补丁之后需要立刻换一份
     /// 基线。`ensure_loaded` 内部那次调用传 false —— 它的末尾会用快照自己的视图覆盖，
@@ -3566,6 +3660,8 @@ impl EditorSession {
         // 先冻结可用fade，再合并清单；只确认开始时的代次，期间的新变化留到下一轮。
         let fades = document.ui_fade_projection().ok();
         let reverse_paths = self.loaded.lock_or_recover().reverse_paths.clone();
+        // 这一轮淡变发布的读数（在时间线作用域里算，出了作用域再写日志）。
+        let mut fade_readout: Option<FadeReadout> = None;
         {
             let mut timeline = self.timeline.lock_or_recover();
             self.retain_display_waveforms(&mut timeline, false);
@@ -3576,32 +3672,31 @@ impl EditorSession {
             document.project_host_take_facts_locked(&mut timeline);
             Self::restore_materialized_source_paths(&mut timeline, &reverse_paths);
             self.retain_display_waveforms(&mut timeline, true);
-            if let Some((_, host)) = fades {
-                for clip in &mut timeline.clips {
-                    if let Some(original) = host
-                        .clips
-                        .iter()
-                        .find(|original| format!("{}{}", self.namespace, original.id) == clip.id)
-                    {
-                        clip.muted = original.muted;
-                        clip.gain = original.gain;
-                        for take in &mut clip.takes {
-                            take.gain = original.gain;
-                        }
-                        clip.snap_offset_sec = original.snap_offset_sec;
-                        clip.fade_in_sec = original.fade_in_sec;
-                        clip.fade_out_sec = original.fade_out_sec;
-                        clip.auto_fade_in_sec = original.auto_fade_in_sec;
-                        clip.auto_fade_out_sec = original.auto_fade_out_sec;
-                        clip.fade_in_shape = original.fade_in_shape;
-                        clip.fade_out_shape = original.fade_out_shape;
-                        clip.fade_in_dir = original.fade_in_dir;
-                        clip.fade_out_dir = original.fade_out_dir;
-                    }
-                }
+            // 【补丁，不是替换】见 `FadeProjection`：只有这一轮宿主几何真的说得出来的
+            // clip 在补丁里。不在里面的 clip **保持清单刚写下的宿主真值** —— 此前这里
+            // 是「整份工作区时间线覆盖上来」，而那份时间线的淡变值在装配重跑之后是 0，
+            // 于是宿主几何缓存一失效（一次装配发布就会让它失效），**所有** clip 的淡变
+            // 包络同时闪回 0 长度。
+            //
+            // 【为什么不再顺手抄 muted / gain / take.gain】`present_host_inventory` 上面
+            // 已经按同一个 `UiItem` 写过 muted 与 gain；而 `take.gain = clip.gain` 那一行
+            // 违反 `decorate_item_gain` 的契约（take 增益是**另一个旋钮**，不该被 item
+            // 增益顶替）。淡变补丁只做它自己那件事。
+            if let Some(projection) = fades {
+                crate::editor::workspace::apply_fade_projection(
+                    &mut timeline,
+                    &projection,
+                    &self.namespace,
+                );
+                fade_readout = Some(Self::fade_readout(&timeline, &projection));
             }
             self.publish_duration(timeline.project_sec);
             self.publish_ui_clips(&timeline);
+        }
+        // 【读数必须在释放时间线之后写】`emit_limited_key` 自己有一把锁，而这里已经
+        // 踩过一次「在时间线作用域里再取一把锁」的亏（见 `sync` 的模块文档）。
+        if let Some(readout) = fade_readout {
+            Self::emit_fade_readout(readout);
         }
         // 宿主清单已经换成这一轮几何：先做一次参数几何事务，再读派生视图。
         // 失败时不推进版本，下一轮重试同一 delta。

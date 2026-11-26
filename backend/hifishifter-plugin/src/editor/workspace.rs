@@ -497,6 +497,97 @@ fn materialise_presented_clip(
 pub(crate) struct WorkspaceScope {
     pub regions: BTreeSet<u64>,
 }
+/// 这一轮**宿主几何确实说得出来**的呈现字段。
+///
+/// 【为什么是一张字段表，而不是一整条 clip】它是本轮的第二个核心类型：一个
+/// **稀疏补丁**。「这一轮宿主没给几何」与「宿主说淡变是 0」在产物上完全同形（都是
+/// 0），但在语义上是相反的两件事。旧实现交出的是一整份时间线，于是「没有答案」
+/// 只能被读成「答案是 0」—— 现场的表现就是所有 clip 的淡变包络同时闪回 0 长度。
+/// 把它做成字段表之后，「不在表里」就是「这一轮没有答案」，类型上无法被误读。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct ClipFadeFields {
+    /// DSP 别名（`Clip::gain`），来自宿主 item 的 `D_VOL`。
+    ///
+    /// 【它为什么在这张表里】它不是淡变，但它与淡变来自**同一次**宿主几何读数
+    /// （`display_item_gain`）。渲染路径（`workspace_snapshot`）不过
+    /// `present_host_inventory`，这份增益只有这一个来源；把它留在补丁里，两条
+    /// 路径才会拿到同一个值。
+    pub gain: f32,
+    pub snap_offset_sec: f64,
+    pub fade_in_sec: f64,
+    pub fade_out_sec: f64,
+    pub auto_fade_in_sec: f64,
+    pub auto_fade_out_sec: f64,
+    pub fade_in_shape: f64,
+    pub fade_out_shape: f64,
+    pub fade_in_dir: f64,
+    pub fade_out_dir: f64,
+    pub fade_in_s: f64,
+    pub fade_out_s: f64,
+}
+
+/// 一次淡变投影的产物：**只有宿主几何覆盖到的 clip 在里面**。
+///
+/// 【为什么需要 `expected`】它让「这一轮覆盖了几条」变成一个可读的数（见
+/// `refresh_ui_geometry` 的读数）。没有它，下一次现场只能靠复述「闪了一下」来
+/// 描述缺陷。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct FadeProjection {
+    /// 取数时的宿主几何代次（诊断用）。
+    pub revision: u64,
+    /// 本文档的 region 身份表里有几条 clip（= 宿主**本可以**说得出来的条数）。
+    pub expected: usize,
+    /// clip id（**不带** GUI 命名空间前缀）→ 这一轮的字段。
+    pub clips: std::collections::BTreeMap<String, ClipFadeFields>,
+}
+
+impl FadeProjection {
+    /// 这一轮覆盖了几条 clip。
+    pub(crate) fn covered(&self) -> usize {
+        self.clips.len()
+    }
+
+}
+
+/// 把一份稀疏淡变补丁盖到时间线上。
+///
+/// 【语义是补丁，不是替换】只有出现在 `projection.clips` 里的 clip 会被改写；
+/// 不在里面的 clip **保持它当前的值**（在 GUI 路径上那是 `present_host_inventory`
+/// 刚写下的宿主真值，在渲染路径上那是装配继承下来的上一轮发布值）。
+///
+/// 【为什么按 `namespace` 剥前缀而不是拼字符串】GUI 时间线里的 id 带命名空间
+/// （`ui-ara-item-{guid}`），而身份表里的是裸 id。拼一遍 `format!` 等于每条 clip
+/// 一次分配，而这条路径每 20 ms 跑一次。
+pub(crate) fn apply_fade_projection(
+    timeline: &mut TimelineState,
+    projection: &FadeProjection,
+    namespace: &str,
+) {
+    if projection.clips.is_empty() {
+        return;
+    }
+    for clip in &mut timeline.clips {
+        let Some(id) = clip.id.strip_prefix(namespace) else {
+            continue;
+        };
+        let Some(fields) = projection.clips.get(id) else {
+            continue;
+        };
+        clip.gain = fields.gain;
+        clip.snap_offset_sec = fields.snap_offset_sec;
+        clip.fade_in_sec = fields.fade_in_sec;
+        clip.fade_out_sec = fields.fade_out_sec;
+        clip.auto_fade_in_sec = fields.auto_fade_in_sec;
+        clip.auto_fade_out_sec = fields.auto_fade_out_sec;
+        clip.fade_in_shape = fields.fade_in_shape;
+        clip.fade_out_shape = fields.fade_out_shape;
+        clip.fade_in_dir = fields.fade_in_dir;
+        clip.fade_out_dir = fields.fade_out_dir;
+        clip.fade_in_s = fields.fade_in_s;
+        clip.fade_out_s = fields.fade_out_s;
+    }
+}
+
 impl DocumentSession {
     /// 参数分组只沿宿主已校验的轨道GUID关联；namespace仅用于当前WebView显示身份。
     pub(crate) fn group_aliases(
@@ -2138,48 +2229,60 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
     }
     /// 普通手动/自动fade和吸附偏移投影到原GUI，内核继续消费未烘焙fade的ARA时间线。
     /// 只沿已核对的唯一真实region key，不按轨名/位置猜关联。
+    ///
+    /// 【为什么返回补丁而不是改写时间线】见 [`FadeProjection`]。改写的版本必须先把整份
+    /// 工作区时间线克隆一遍（含全部 clip / take / 参数），只为拷十个 f64 —— 而那份克隆
+    /// 的淡变值在装配重跑之后是 0。稀疏补丁把这两件事一起解决：不再克隆，也不会把
+    /// 「没有答案」写成 0。
     pub(crate) fn project_ui_fades_locked(
         &self,
-        timeline: &mut TimelineState,
         fades: &std::collections::BTreeMap<String, crate::fade::FadeStyle>,
-    ) {
+    ) -> FadeProjection {
         let identities = self.clip_ids.lock_or_recover().clone();
+        let mut projection = FadeProjection {
+            revision: self.ui_geometry_revision.load(Ordering::Acquire),
+            expected: identities
+                .values()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            clips: std::collections::BTreeMap::new(),
+        };
         for owner in self.renderer_owners() {
             for bound in owner.host_geometries_locked(self) {
                 let Some(id) = identities.get(&bound.region_key) else {
                     continue;
                 };
-                let Some(clip) = timeline.clips.iter_mut().find(|clip| &clip.id == id) else {
-                    continue;
-                };
                 let geometry = bound.geometry;
-                display_item_gain(clip, geometry.item_gain);
-                clip.snap_offset_sec = geometry.snap_offset_sec;
-                clip.fade_in_sec = geometry.fade_in_sec;
-                clip.fade_out_sec = geometry.fade_out_sec;
-                clip.auto_fade_in_sec = geometry.auto_fade_in_sec;
-                clip.auto_fade_out_sec = geometry.auto_fade_out_sec;
-                clip.fade_in_shape = geometry.fade_in_shape;
-                clip.fade_out_shape = geometry.fade_out_shape;
-                // 【为什么按轴分流】"曲率"落在哪个宿主字段取决于宿主版本
+                let mut fields = ClipFadeFields {
+                    gain: geometry.item_gain as f32,
+                    snap_offset_sec: geometry.snap_offset_sec,
+                    fade_in_sec: geometry.fade_in_sec,
+                    fade_out_sec: geometry.fade_out_sec,
+                    auto_fade_in_sec: geometry.auto_fade_in_sec,
+                    auto_fade_out_sec: geometry.auto_fade_out_sec,
+                    fade_in_shape: geometry.fade_in_shape,
+                    fade_out_shape: geometry.fade_out_shape,
+                    ..ClipFadeFields::default()
+                };
+                // 【为什么按轴分流】「曲率」落在哪个宿主字段取决于宿主版本
                 // （≤7.80 `D_FADE*DIR`，≥7.81 `D_FADE*DIR_NEW`）。取错的话滑杆
                 // 显示和编辑的都是**不是权威**的那个值 —— 在 7.81+ 上表现为
-                // "拖了滑杆但淡变没变"。
+                // 「拖了滑杆但淡变没变」。
                 let (in_dir, out_dir) = match geometry.fade_axes_v2 {
                     Some(true) => (geometry.fade_in_dir_new, geometry.fade_out_dir_new),
                     _ => (geometry.fade_in_dir, geometry.fade_out_dir),
                 };
-                clip.fade_in_dir = in_dir;
-                clip.fade_out_dir = out_dir;
+                fields.fade_in_dir = in_dir;
+                fields.fade_out_dir = out_dir;
                 // S 是**新轴才有的第二根轴**（`D_FADE*DIR2_NEW`）。写进 clip 才能让
-                // 载荷、写回去重、以及"未变的 S 不该触发写回"共用同一个权威值；
+                // 载荷、写回去重、以及「未变的 S 不该触发写回」共用同一个权威值；
                 // 旧轴宿主没有这根轴，恒为 0。
                 let (in_s, out_s) = match geometry.fade_axes_v2 {
                     Some(true) => (geometry.fade_in_dir2_new, geometry.fade_out_dir2_new),
                     _ => (0.0, 0.0),
                 };
-                clip.fade_in_s = in_s;
-                clip.fade_out_s = out_s;
+                fields.fade_in_s = in_s;
+                fields.fade_out_s = out_s;
                 if self
                     .regions
                     .lock_or_recover()
@@ -2190,17 +2293,19 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
                     })
                 {
                     // 委托：曲线由 HFS 自己的 `FadeStyle` 渲染，宿主两轴不参与 ——
-                    // S 在 `FadeStyle` 里没有位置，显式归 0（不是"漏了"）。
+                    // S 在 `FadeStyle` 里没有位置，显式归 0（不是「漏了」）。
                     let style = fades.get(&geometry.item_id).cloned().unwrap_or_default();
-                    clip.fade_in_shape = style.in_shape;
-                    clip.fade_out_shape = style.out_shape;
-                    clip.fade_in_dir = style.in_dir;
-                    clip.fade_out_dir = style.out_dir;
-                    clip.fade_in_s = 0.0;
-                    clip.fade_out_s = 0.0;
+                    fields.fade_in_shape = style.in_shape;
+                    fields.fade_out_shape = style.out_shape;
+                    fields.fade_in_dir = style.in_dir;
+                    fields.fade_out_dir = style.out_dir;
+                    fields.fade_in_s = 0.0;
+                    fields.fade_out_s = 0.0;
                 }
+                projection.clips.insert(id.clone(), fields);
             }
         }
+        projection
     }
     /// 只把宿主明确委托的一端写进原kernel；另一端仍归宿主，不能凭能力广告重复烘焙。
     pub(crate) fn project_audio_fades_locked(
@@ -2613,11 +2718,18 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
         }
     }
     /// 无PCM复制或host getter，pending曲线也可独立更新可见宿主fade。
-    pub(crate) fn ui_fade_projection(&self) -> Result<(u64, TimelineState), String> {
+    ///
+    /// 【为什么不再克隆整份工作区时间线】见 [`FadeProjection`]：这一轮只交出「宿主
+    /// 几何确实说得出来」的那几条，所以不需要 `workspace_timeline_locked()` —— 它会把
+    /// 全部 clip / take / 参数整份克隆一遍，只为拷十二个浮点数，而且那份克隆的淡变值
+    /// 在装配重跑之后还是 0。
+    pub(crate) fn ui_fade_projection(&self) -> Result<FadeProjection, String> {
         let _transaction = self.transaction.lock_or_recover();
-        let mut timeline = self.workspace_timeline_locked()?;
-        self.project_ui_fades_locked(&mut timeline, &self.edits.lock_or_recover().fades);
-        Ok((self.ui_geometry_revision.load(Ordering::Acquire), timeline))
+        if !self.is_alive() {
+            return Err(crate::editor::errors::DOCUMENT_CLOSED.error());
+        }
+        let fades = self.edits.lock_or_recover().fades.clone();
+        Ok(self.project_ui_fades_locked(&fades))
     }
     /// 非实时短事务读取完整授权scope；零分配只能返回零区域，不能等同全文档。
     // 非实时诊断入口，保留供授权范围核对。
