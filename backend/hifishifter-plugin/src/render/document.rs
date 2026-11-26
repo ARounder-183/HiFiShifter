@@ -2,7 +2,7 @@
 
 use super::extension::ExtensionOwner;
 use super::ownership::DocumentId;
-use crate::sync::MutexExt;
+use crate::sync::{try_lock_or_recover, MutexExt};
 use ara2_bridge::companion::CompanionControllerBinding;
 use ara2_bridge::core::{ApiGeneration, AraError};
 use ara2_bridge::plugin::ExtensionControllerLease;
@@ -2926,6 +2926,11 @@ impl DocumentSession {
     ///
     /// 【为什么判重】回执可能被重投（媒体文档重开、视图重连）；同一个 item 登记两次
     /// 只会让 `rounds` 翻倍，读起来像是两件事。
+    ///
+    /// 【为什么这里可以阻塞取锁】这是**写**：登记一旦丢掉，这条导入就再也不会转正，
+    /// 用户会在 60 s 后收到一条 `import_stalled`，而 item 明明在宿主里。所以宁可等。
+    /// 等得起的前提是这把锁是**叶子**：它的持有者只做纯计算（见
+    /// `take_resolved_imports`），不取别的锁、不做 I/O、不向 WebView 投递。
     pub(crate) fn begin_pending_import(&self, pending: PendingImport) {
         let mut imports = self.pending_imports.lock_or_recover();
         if imports.iter().any(|entry| entry.item == pending.item) {
@@ -2976,7 +2981,21 @@ impl DocumentSession {
     /// `import_ready`，前端于是重复做一次规格化（用户勾了"导入后规格化"会得到一串增益）。
     /// 返回 `None` = 账本此刻被别人持有，这一轮什么都没做，下一次发布再来。
     fn take_resolved_imports(&self, claims: &ImportClaims) -> Option<Vec<ResolvedImport>> {
-        let mut imports = self.pending_imports.lock_or_recover();
+        // 【为什么拿不到就走】对账是**机会性**的：每一次 ARA 发布、每一次清单刷新都会
+        // 再来一次。拿不到账本只有两种可能：① 有别的线程正在写它（下一个 tick 就好）；
+        // ② 我们自己已经持有它（那是缺陷，但绝不能以"挂死宿主"的形式表现）。
+        // 两种情况都只能得出同一个结论：这一轮不动，留一行可归因的字。
+        let Some(mut imports) = try_lock_or_recover(&self.pending_imports) else {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "import.reconcile.busy",
+                format_args!(
+                    "[import] reconcile skipped: the pending ledger is busy \
+                     (retried on the next publish)"
+                ),
+            );
+            return None;
+        };
         if imports.is_empty() || !self.is_alive() {
             return Some(Vec::new());
         }
@@ -3023,11 +3042,17 @@ impl DocumentSession {
     ///
     /// 【它为什么不是放松安全边界】它只承认"我们自己刚为某个宿主 item 写下的路径"，
     /// 而那条记录是导入命令在宿主**已经建成 item 之后**才写的 —— 证据来自宿主。
+    ///
+    /// 【读不到账本时回答"不是"】这是**安全边界**的一侧：认不出这条路径时只能拒绝。
+    /// 账本被持有是微秒级的事，而拒绝的后果只是"这一拍波形读不到" —— 前端对
+    /// `source is not authorized` 本来就有"未就绪 + 有界重试"的兜底。
+    /// 反过来猜"是"会把一条与本次会话无关的路径放进来。
     pub(crate) fn pending_import_for_source(&self, path: &str) -> bool {
-        self.pending_imports
-            .lock_or_recover()
-            .iter()
-            .any(|entry| same_source_path(&entry.source_path, path))
+        try_lock_or_recover(&self.pending_imports).is_some_and(|imports| {
+            imports
+                .iter()
+                .any(|entry| same_source_path(&entry.source_path, path))
+        })
     }
 
     /// 取走"等了太久、还没转正"的导入（每一条只报一次，**不改回执、不删占位**）。
@@ -3035,7 +3060,12 @@ impl DocumentSession {
         &self,
         after: std::time::Duration,
     ) -> Vec<(String, std::time::Duration)> {
-        let mut imports = self.pending_imports.lock_or_recover();
+        // 【为什么这里也不能阻塞】调用方是宿主 UI 线程上的 20 ms 视图定时器。账本被
+        // 别人持有的那一拍直接跳过 —— 下一条 `ui_tick` 会再来，而"报告超期导入"
+        // 本来就不需要精确到某一块。
+        let Some(mut imports) = try_lock_or_recover(&self.pending_imports) else {
+            return Vec::new();
+        };
         let mut stalled = Vec::new();
         for entry in imports.iter_mut() {
             if entry.stall_reported {

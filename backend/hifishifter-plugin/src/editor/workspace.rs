@@ -503,8 +503,7 @@ impl DocumentSession {
         &self,
         namespace: &str,
     ) -> std::collections::BTreeMap<String, String> {
-        self.ui_tracks
-            .lock_or_recover()
+        self.ui_tracks.lock_or_recover()
             .values()
             .map(|track| (track.guid.clone(), format!("{namespace}{}", track.id)))
             .collect()
@@ -1415,8 +1414,7 @@ impl DocumentSession {
         if let Some(id) = self.clip_for_host_item(item) {
             return Some(id);
         }
-        self.ui_tracks
-            .lock_or_recover()
+        self.ui_tracks.lock_or_recover()
             .values()
             .any(|track| {
                 track
@@ -4480,6 +4478,41 @@ mod tests {
                 .iter()
                 .any(|done| done.item == "{IMPORT-3}"),
             "没有 region 也没有清单条目时，账本不许把它转正"
+        );
+        document.close();
+    }
+
+    /// **回归：账本被持有时，对账必须跳过而不是等它。**
+    ///
+    /// 【为什么这条是"永不挂死"的判据】结构修复让"对账在持锁作用域里跑"这件事不再
+    /// 发生（见 `ImportClaims`）。这一条保证的是**万一它又发生**：`try_lock` 把
+    /// "同一线程自锁"降级成"这一轮不动 + 一行 `[import] reconcile skipped`"，
+    /// 而不是宿主整机未响应。对账本来就是机会性的，跳过一轮没有任何语义代价。
+    #[test]
+    fn a_busy_ledger_skips_the_reconcile() {
+        let document = DocumentSession::new(40_106);
+        document.begin_pending_import(crate::render::document::PendingImport {
+            item: "{IMPORT-BUSY}".into(),
+            source_path: "C:/audio/busy.wav".into(),
+            landed_track: None,
+            requested_at: std::time::Instant::now(),
+            rounds: 0,
+            stall_reported: false,
+        });
+        let claims = document.import_claims();
+        // 同一线程先把账本拿在手上 —— 这正是曾经把宿主卡死的形状。
+        let held = document.pending_imports.lock_or_recover();
+        document.publish_pending_imports(&claims);
+        assert!(
+            document.pending_imports.try_lock().is_err(),
+            "对账不许把别人持有的账本悄悄放掉"
+        );
+        drop(held);
+        // 放掉之后下一轮照常对账：账本还在，只是这一轮什么都没发生。
+        assert!(document.resolve_pending_imports(&claims).is_empty());
+        assert!(
+            document.pending_import_for_source("C:/audio/busy.wav"),
+            "被跳过的那一轮不许划掉任何东西"
         );
         document.close();
     }
