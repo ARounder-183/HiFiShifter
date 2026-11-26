@@ -52,9 +52,20 @@ offset is `render[i] == source[i + lag]`, so a positive number means the render
 started that far into the take.  Anything above 1 ms is a defect; the tolerance is
 printed with the verdict so a reader never has to guess it.
 
+Two more readings answer the questions the offset alone cannot:
+
+* `--expect-offset SEC` replaces "must be zero" with "must be this".  A render of the
+  range [28 s, 61 s] is *aligned* at lag 0 when the mapping is right, and still
+  *aligned* at some other lag when the mapping shifts the whole product.  Only the
+  expectation separates those two.
+* `passthrough` is the length of the leading region that is a sample-for-sample copy
+  of the source.  A processed render answers 0; a render whose head was passed
+  through (the host's original audio written into the product) answers that head.
+
 Usage:
     python scripts/audit/render-repeat-check.py <file.wav> [more.wav ...]
     python scripts/audit/render-repeat-check.py --align <render.wav> <source.wav>
+    python scripts/audit/render-repeat-check.py --align <render.wav> <source.wav> --expect-offset 0
     python scripts/audit/render-repeat-check.py --self-test
 
 Exit code 0 = no repetition found / the render is aligned, 1 = repetition found /
@@ -68,6 +79,12 @@ import os
 import struct
 import sys
 import tempfile
+
+# Windows 的 stdout 跟随 ANSI 代码页（中文系统是 GBK）。本文件含中文注释与中文输出，
+# 一条中文在 GBK 控制台上会直接 UnicodeEncodeError —— 判据还没跑完，进程就死了，
+# 而日志里留下的是一个编码错误，不是结论。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 WAVE_FORMAT_PCM = 0x0001
 WAVE_FORMAT_IEEE_FLOAT = 0x0003
@@ -100,6 +117,13 @@ DECIMATED_PROBE_FRAMES = 2048
 CORRELATION_LIMIT = 0.90
 # A file that is one and a half periods long is not a loop.
 MIN_REPEATS = 2
+# Window for the passthrough probe.  0.1 s is long enough that a quiet passage
+# cannot decide it and short enough that a seam is not averaged away.
+PASSTHROUGH_WINDOW_SEC = 0.1
+# A window at or above this correlation is a *verbatim copy* of the source, not a
+# processed render.  The field symptom it names is "the first N seconds of the
+# product are the host's original audio".
+PASSTHROUGH_LIMIT = 0.995
 
 
 class WavReadError(ValueError):
@@ -802,6 +826,43 @@ def _verify_lag(render: list[float], source: list[float], lag: int) -> tuple[flo
     return _median(values), values
 
 
+def passthrough_prefix(
+    render: list[float], source: list[float], lag: int, rate: int
+) -> float:
+    """Length (seconds) of the leading region that is a verbatim copy of the source.
+
+    Convention matches `AlignResult`: `render[i] == source[i + lag]`.
+
+    Why this reading exists: a processed render is *not* a copy of its source, so a
+    correct product answers 0.  A render whose head was passed through -- the host's
+    original audio written into the product instead of the processed result -- answers
+    the length of that head.  That is exactly the shape of the VEGAS defect this round
+    fixed, and "listen to it" is not an acceptance criterion a script can run.
+    """
+    if lag >= 0:
+        a, b, shift = render, source, lag
+    else:
+        a, b, shift = source, render, -lag
+    room = min(len(a), len(b) - shift)
+    window = max(256, int(round(rate * PASSTHROUGH_WINDOW_SEC)))
+    if room < window:
+        return 0.0
+    prefix_a, square_a = _prefix_sums(a)
+    prefix_b, square_b = _prefix_sums(b)
+    step = max(1, window // 2)
+    covered = 0
+    start = 0
+    while start + window <= room:
+        score = _ncc_pair(
+            a, prefix_a, square_a, b, prefix_b, square_b, start, start + shift, window
+        )
+        if score < PASSTHROUGH_LIMIT:
+            break
+        covered = start + window
+        start += step
+    return covered / float(rate)
+
+
 def align_to_source(
     render_path: str, source_path: str, max_offset_sec: float = DEFAULT_MAX_OFFSET_SEC
 ) -> tuple[AlignResult, int, int]:
@@ -1032,6 +1093,79 @@ def _align_self_test(directory: str, rate: int) -> int:
     # Two frames of slack: the resampler is linear by design (see `_resample_linear`),
     # which is far below the 1 ms the tool actually judges.
     failures += _check_alignment("align-44k-render.wav", mixed_path, media_path, 0, 2)
+    failures += _passthrough_self_test(directory, rate, source)
+    failures += _expected_offset_self_test(directory, rate, source)
+    return failures
+
+
+def _passthrough_self_test(directory: str, rate: int, source: list[float]) -> int:
+    """A head that is a verbatim copy must be reported; a processed file must not be.
+
+    Both directions matter: a check that always reports a prefix would call every
+    correct render broken, and one that never reports it would miss the field
+    symptom this round fixed ("the first N seconds of the product are the host's
+    original audio").
+    """
+    failures = 0
+    boundary = int(round(rate * 1.5))
+    # A "processed" tail: the source scaled and mixed with a quiet tone, so it is
+    # the same material but not a sample-for-sample copy.
+    tail = [
+        source[index] * 0.5 + 0.05 * math.sin(index * 0.01)
+        for index in range(boundary, len(source))
+    ]
+    with_head = source[:boundary] + tail
+    head_path = os.path.join(directory, "passthrough-head.wav")
+    _write_wave(head_path, with_head, rate)
+    samples, _rate = read_wave(head_path)
+    measured = passthrough_prefix(samples, source, 0, rate)
+    if not 1.3 <= measured <= 1.6:
+        print("self-test: FAIL: passthrough head reported %.3f s, expected about 1.5 s" % measured)
+        failures += 1
+    else:
+        print("self-test: ok: passthrough head reported (%.3f s)" % measured)
+    processed_path = os.path.join(directory, "passthrough-none.wav")
+    _write_wave(processed_path, tail, rate)
+    processed, _rate = read_wave(processed_path)
+    none = passthrough_prefix(processed, source[boundary:], 0, rate)
+    if none > 0.0:
+        print("self-test: FAIL: a processed render reported a %.3f s passthrough head" % none)
+        failures += 1
+    else:
+        print("self-test: ok: processed render reported no passthrough head")
+    return failures
+
+
+def _expected_offset_self_test(directory: str, rate: int, source: list[float]) -> int:
+    """`--expect-offset` must accept the true offset and reject a wrong one.
+
+    This is the verdict the acceptance matrix actually runs: "rendered from 28 s to
+    61 s" produces a file whose lag must be 0, and a wrong mapping produces a lag
+    equal to the range start.  Both are *aligned* files; only the expectation
+    separates them.
+    """
+    failures = 0
+    source_path = os.path.join(directory, "expect-source.wav")
+    _write_wave(source_path, source, rate)
+    shifted = source[int(round(rate * 2.0)) :]
+    shifted_path = os.path.join(directory, "expect-2s.wav")
+    _write_wave(shifted_path, shifted, rate)
+    matched = align_main(
+        [shifted_path, source_path, "--expect-offset", "2.0", "--tolerance", "0.001"]
+    )
+    if matched != 0:
+        print("self-test: FAIL: --expect-offset rejected the true offset (exit %d)" % matched)
+        failures += 1
+    else:
+        print("self-test: ok: --expect-offset accepted the true offset")
+    mismatched = align_main(
+        [shifted_path, source_path, "--expect-offset", "0.0", "--tolerance", "0.001"]
+    )
+    if mismatched == 0:
+        print("self-test: FAIL: --expect-offset accepted a wrong offset")
+        failures += 1
+    else:
+        print("self-test: ok: --expect-offset rejected a wrong offset")
     return failures
 
 
@@ -1057,14 +1191,21 @@ def _check_alignment(
 
 
 def align_main(argv: list[str]) -> int:
-    """`--align <render> <source> [--max-offset SEC] [--tolerance SEC]`."""
+    """`--align <render> <source> [--max-offset SEC] [--tolerance SEC] [--expect-offset SEC]`."""
     max_offset = DEFAULT_MAX_OFFSET_SEC
     tolerance = ALIGN_TOLERANCE_SEC
+    # 【为什么要 --expect-offset】`--tolerance` 回答的是"这段音频对齐了吗"，
+    # 而验收要回答的是另一件事："它对齐到了**它应该在的地方**吗"。一次从工程 28 s
+    # 起渲染的产物，正确时 lag 是 0（产物从素材头开始），而"整段平移 28 s"在
+    # 对齐读数上与"素材本来就从 28 s 开始"完全同形。给出期望值，判据才有主语。
+    expect_offset: float | None = None
     paths: list[str] = []
     index = 0
     while index < len(argv):
         argument = argv[index]
-        if argument in ("--max-offset", "--tolerance") and index + 1 < len(argv):
+        if argument in ("--max-offset", "--tolerance", "--expect-offset") and index + 1 < len(
+            argv
+        ):
             try:
                 value = float(argv[index + 1])
             except ValueError:
@@ -1072,8 +1213,10 @@ def align_main(argv: list[str]) -> int:
                 return 2
             if argument == "--max-offset":
                 max_offset = value
-            else:
+            elif argument == "--tolerance":
                 tolerance = value
+            else:
+                expect_offset = value
             index += 2
             continue
         paths.append(argument)
@@ -1081,7 +1224,7 @@ def align_main(argv: list[str]) -> int:
     if len(paths) != 2:
         print(
             "usage: render-repeat-check.py --align <render.wav> <source.wav> "
-            "[--max-offset SEC] [--tolerance SEC]"
+            "[--max-offset SEC] [--tolerance SEC] [--expect-offset SEC]"
         )
         return 2
     try:
@@ -1094,11 +1237,41 @@ def align_main(argv: list[str]) -> int:
     print("align: %s" % result.describe())
     for probe_index, probe in enumerate(result.probes):
         print("  probe %d: ncc=%.4f" % (probe_index, probe))
-    if abs(result.offset_sec) <= tolerance:
-        print("align: ok (within %g s)" % tolerance)
-        return 0
-    print("align: misaligned (tolerance %g s)" % tolerance)
-    return 1
+    # 【直通前缀】产物头部有多少秒是**素材的逐样本副本**。处理过的产物是 0；
+    # "前 N 秒是宿主原声"就是它的长度。判据与读法见 `passthrough_prefix`。
+    try:
+        render_samples, _rate = read_wave(paths[0])
+        source_samples, source_rate = read_wave(paths[1])
+    except (OSError, WavReadError) as error:
+        print("error: %s: %s" % (paths[0], error))
+        return 2
+    source_on_render_rate = _resample_linear(source_samples, source_rate, render_rate)
+    passthrough = passthrough_prefix(
+        render_samples, source_on_render_rate, result.lag, render_rate
+    )
+    print("align: passthrough=%.6f s" % passthrough)
+    # 【期望值取代"必须为 0"，而不是叠加在它上面】一次"从工程 28 s 渲染"的产物
+    # 正确时 lag 是 0；而"整段平移 28 s"的产物 lag 是 -28 s 之外的另一段音频 ——
+    # 两者都可能在"是否对齐"上给出同一个答案。给了期望值时，判据只有一个：
+    # 实测偏移是否等于期望偏移。
+    if expect_offset is not None:
+        delta = abs(result.offset_sec - expect_offset)
+        if delta <= tolerance:
+            print(
+                "align: expected offset %+.6f s confirmed (delta %.6f s)"
+                % (expect_offset, delta)
+            )
+            return 0
+        print(
+            "align: expected offset %+.6f s but measured %+.6f s (delta %.6f s)"
+            % (expect_offset, result.offset_sec, delta)
+        )
+        return 1
+    if abs(result.offset_sec) > tolerance:
+        print("align: misaligned (tolerance %g s)" % tolerance)
+        return 1
+    print("align: ok (within %g s)" % tolerance)
+    return 0
 
 
 def main(argv: list[str]) -> int:
