@@ -249,6 +249,23 @@ pub fn flush_writer_for_diagnostics() {
     flush_writer();
 }
 
+/// 尽力落盘（**不等待**）：给看门狗等"旁路线程"用。
+///
+/// 【为什么是 `try_lock`】调用方不是写日志的那条线程。被观察的线程完全可能正卡在
+/// `FileLogger::log` 里（那时 `WRITER` 被它持有），一次 `lock` 会把唯一的看门狗线程
+/// 也搭进去 —— 于是"进程卡住了"这件事再也不会被写下来。拿不到就放弃这一拍：
+/// 2 秒的年龄闸（见 `logfile::FLUSH_MAX_AGE`）会兜住它。
+pub fn flush_writer_soon() {
+    if !log_policy::file_enabled() {
+        return;
+    }
+    if let Ok(mut guard) = WRITER.try_lock() {
+        if let Some(writer) = guard.as_mut() {
+            let _ = writer.flush_now();
+        }
+    }
+}
+
 fn flush_writer() {
     let mut guard = WRITER.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(writer) = guard.as_mut() {

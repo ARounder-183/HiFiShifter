@@ -1303,6 +1303,8 @@ impl ExtensionOwner {
     /// 【`first_raw` 与 `hint` 是两件事】`first_raw` 是这条喂入流第一块的宿主读数
     /// （`HFS_CAPTURE_MAP=raw` 的回退起点）；`hint` 是**本块**的宿主读数（多 take 时
     /// 用来挑出"这一遍喂的是哪一片"）。两者都不可信，都不参与默认换算。
+    /// 【只给测试】生产路径都带显式的流（见 [`Self::project_position_for_stream`]）。
+    #[cfg(test)]
     pub(super) fn project_position_for_tape(
         &self,
         tape_frame: i64,

@@ -334,6 +334,11 @@ fn ensure_watchdog() {
                         call.thread,
                         call.marker
                     );
+                    // 【为什么必须落盘】挂起现场里最贵的就是"最后那一段"，而 64 KiB 的
+                    // 缓冲正好把它吃掉（两次 AppHangB1 的日志尾都是一行看起来很正常
+                    // 的启动行）。这条判据既然知道"进程正在失去响应"，就必须让已经
+                    // 写下的每一行先落到磁盘上 —— 证据比带宽重要。
+                    crate::diagnostics::flush_writer_soon();
                 }
             });
         if let Err(error) = spawned {

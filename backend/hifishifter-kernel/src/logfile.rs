@@ -37,6 +37,17 @@ pub const DEFAULT_MAX_LINE_CHARS: usize = 4096;
 /// 缓冲写阈值：累积到这个字节数就落一次盘（详见 `RotatingLog` 的说明）。
 pub const FLUSH_THRESHOLD_BYTES: usize = 64 * 1024;
 
+/// 缓冲的**最长存活时间**：到点就落盘，不看字节数。
+///
+/// 【为什么字节阈值一个人不够】"进程被卡住"不是一条日志，它是一个时刻：此后再没有任何
+/// 记录到达，于是 64 KiB 的阈值永远填不满，缓冲里的最后一段随进程一起消失。现场两次
+/// `AppHangB1` 的日志尾都是**一行看起来很正常的启动行**，而真正卡住的那一分钟全在
+/// 缓冲里 —— 那正是唯一能回答"卡在哪把锁上"的证据。
+///
+/// 【为什么是 2 秒】一次挂起判定（`HFS_STALL_MS` 默认 2 s）加上 Windows 把窗口画成
+/// "未响应"的时间量级。2 秒的代价是空闲期每 2 秒一次 `write` + `flush`，可以忽略。
+pub const FLUSH_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// 时间戳格式：**带日期**。
 ///
 /// 【为什么必须带日期】旧实现只写 `%H:%M:%S%.3f`，日期仅存在于会话头。但日志会跨天、
@@ -305,6 +316,10 @@ pub struct RotatingLog {
     file: std::fs::File,
     /// 待落盘字节（会话头/尾也计入，但直接 flush）。
     buffer: Vec<u8>,
+    /// 上一次落盘的时刻。缓冲的存活时间从它算起（见 [`FLUSH_MAX_AGE`]）。
+    last_flush: std::time::Instant,
+    /// 缓冲最长存活多久。发布值是 [`FLUSH_MAX_AGE`]；测试把它缩短。
+    flush_after: std::time::Duration,
     bytes_written: u64,
     lines_since_check: u64,
     lines_written: u64,
@@ -392,6 +407,8 @@ impl RotatingLog {
             source,
             file,
             buffer: Vec::with_capacity(FLUSH_THRESHOLD_BYTES),
+            last_flush: std::time::Instant::now(),
+            flush_after: FLUSH_MAX_AGE,
             bytes_written,
             lines_since_check: 0,
             lines_written: 0,
@@ -453,7 +470,10 @@ impl RotatingLog {
         self.bytes_written += single.len() as u64 + 1;
         self.lines_since_check += 1;
         self.lines_written += 1;
-        if self.buffer.len() >= FLUSH_THRESHOLD_BYTES {
+        // 【两道闸：字节数与时间】字节数挡住"刷屏把磁盘打满"，时间挡住"刷屏之后突然
+        // 什么都不写了" —— 后者正是挂起的形状（见 `FLUSH_MAX_AGE`）。
+        if self.buffer.len() >= FLUSH_THRESHOLD_BYTES || self.last_flush.elapsed() >= self.flush_after
+        {
             self.flush_now()?;
         }
         if self.lines_since_check >= ROTATION_CHECK_INTERVAL && self.bytes_written >= self.max_bytes
@@ -490,6 +510,7 @@ impl RotatingLog {
         self.file.write_all(&self.buffer)?;
         self.file.flush()?;
         self.buffer.clear();
+        self.last_flush = std::time::Instant::now();
         Ok(())
     }
 
@@ -504,6 +525,12 @@ impl RotatingLog {
         );
         self.write_line(&footer)?;
         self.flush_now()
+    }
+
+    /// 测试专用：把"缓冲最长存活多久"缩短到毫秒级。
+    #[cfg(test)]
+    pub fn set_flush_after_for_test(&mut self, after: std::time::Duration) {
+        self.flush_after = after;
     }
 
     /// 当前日志文件路径。
@@ -677,6 +704,33 @@ mod tests {
         assert!(footer.contains("reason=shutdown"), "{footer}");
         assert!(footer.contains("lines=12"), "{footer}");
         assert!(footer.contains("verbosity=medium"), "{footer}");
+    }
+
+    /// **不变量：安静下来之后，缓冲必须自己落盘。**
+    ///
+    /// 【为什么这条是"挂起也能留证据"的判据】挂起的形状是"写完最后一行的两秒内再没有
+    /// 任何记录"。没有这条闸，那一段就永远在缓冲里，用户的日志尾停在一个看起来完全
+    /// 正常的行上 —— 现场两次 `AppHangB1` 都是这样。
+    #[test]
+    fn a_quiet_log_reaches_disk_within_the_deadline() {
+        let dir = std::env::temp_dir().join(format!(
+            "hfs-log-age-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("age.log");
+        let mut log = RotatingLog::open(path.clone(), "HiFiShifter", "1.2.3").unwrap();
+        log.set_flush_after_for_test(std::time::Duration::from_millis(10));
+        log.write_line("first line").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        // 这一行"到达"时才发现已经超时：落盘由写入路径触发，不需要定时器。
+        log.write_line("second line").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("first line"), "超时之后必须已经落盘：{text}");
+        assert!(text.contains("second line"));
+        drop(log);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 缓冲写不得丢内容：flush_now 后文件里必须能读到那一行。

@@ -2969,7 +2969,8 @@ impl DocumentSession {
 
     /// 对账一次：把已经被 ARA 图（或宿主清单）认领的待定导入转正，返回本轮转正的条目。
     ///
-    /// 给测试与"只想知道结果"的调用方用；账本此刻被别人持有时当"这一轮没有"。
+    /// 给测试用；生产路径只有 `publish_pending_imports`（它要顺手把事件播报出去）。
+    #[cfg(test)]
     pub(crate) fn resolve_pending_imports(&self, claims: &ImportClaims) -> Vec<ResolvedImport> {
         self.take_resolved_imports(claims).unwrap_or_default()
     }

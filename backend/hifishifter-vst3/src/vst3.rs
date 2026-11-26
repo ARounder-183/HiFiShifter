@@ -1321,6 +1321,10 @@ unsafe extern "system" fn component_set_active(this: *mut c_void, state: i8) -> 
             } else {
                 owner.component_deactivated();
                 hifishifter_plugin::log_line(&format!("IComponent::setActive({state})"));
+                // 【为什么在这里落盘】`setActive(0)` 是宿主"这次用完了"的时刻，也常常是
+                // 挂起前的最后一站（编辑器关掉、工程被卸载）。日志的 2 秒年龄闸兜不住
+                // "紧接着就冻住"这一类；卸载点主动落一次，成本是一次 write。
+                hifishifter_plugin::diagnostics::flush_pending();
             }
             K_RESULT_OK
         })
