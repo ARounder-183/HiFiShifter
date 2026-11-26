@@ -64,6 +64,35 @@ fn git_is_runnable() -> bool {
         .unwrap_or(false)
 }
 
+/// 这一次构建要不要把"当前 commit"当成**构建输入**（即：让 `git commit` 触发重编）。
+///
+/// 【为什么默认只在 release / dist 里是】commit 不是代码，但它被烘进 `cargo:rustc-env`，
+/// 于是**每提交一次，内核与它所有的依赖方就整体重编一次**。实测这台机器上：
+///
+/// ```text
+/// cargo check -p hifishifter-kernel   提交前 0.1 s（无事可做）→ 提交后 ~13 s
+/// cargo test  -p hifishifter-plugin   再叠加插件重编 ~40 s 与 90 MB 测试二进制重链 ~16 s
+/// ```
+///
+/// 开发循环里这笔开销换不到任何东西：debug 产物的身份是**这棵工作树**（它就在你手上），
+/// 而发出去的产物才需要"这份二进制对应哪个 commit"。判据因此是"会不会被发出去"：
+/// release / dist 逐字带 commit 与脏标志，其余只在**源码变化**时重算一次。
+///
+/// 代价说清楚：开发构建里 `git commit` 之后不重建，二进制里的 commit 就停在
+/// "最后一次源码变化时读到的那一个"。要恢复旧行为（每次提交都重编）设
+/// `HFS_BUILD_STAMP=always`。
+fn stamps_every_commit() -> bool {
+    match std::env::var("HFS_BUILD_STAMP").ok().as_deref() {
+        Some("always") => return true,
+        Some("source-only") => return false,
+        _ => {}
+    }
+    matches!(
+        std::env::var("PROFILE").as_deref(),
+        Ok("release") | Ok("dist")
+    )
+}
+
 /// 声明 rerun-if-changed（路径存在时才声明，避免不存在路径的指令干扰缓存指纹）。
 fn declare_rerun_if_exists(path: &Path) {
     if path.exists() {
@@ -95,6 +124,8 @@ pub fn emit(watched: &[&str]) {
     //
     // 少了这个标记，"没有 commit"在测试里无法与"build script 根本没跑"区分开 ——
     // 而后者正是本仓库此前真实发生过的缺陷（内核 crate 从来没有 build script）。
+    // 切换"要不要把 commit 当构建输入"必须立刻重跑本脚本，否则开关要等到下一次源码变化。
+    println!("cargo:rerun-if-env-changed=HFS_BUILD_STAMP");
     let runnable = git_is_runnable();
 
     // 非 git 构建（如 GitHub 源码 zip）：注入空值，运行时回退为纯版本号。
@@ -125,20 +156,25 @@ pub fn emit(watched: &[&str]) {
     // `--path-format=absolute` 需要 git ≥ 2.31，失败则跳过该指令。
     let common_dir = git_output(&["rev-parse", "--path-format=absolute", "--git-common-dir"]);
 
-    if let Some(dir) = &git_dir {
-        let dir_path = Path::new(dir);
-        for relative in ["HEAD", "logs/HEAD", "packed-refs"] {
-            declare_rerun_if_exists(&dir_path.join(relative));
+    // 【只在"会被发出去"的构建里监视 .git】见 `stamps_every_commit`：这些路径每提交一次
+    // 就变一次，而它们一变 cargo 就重跑本脚本 —— 值一变就重编整个 crate 图。开发构建因此
+    // 不声明它们：`git commit` 不再是构建事件，源码变化仍然是。
+    if stamps_every_commit() {
+        if let Some(dir) = &git_dir {
+            let dir_path = Path::new(dir);
+            for relative in ["HEAD", "logs/HEAD", "packed-refs"] {
+                declare_rerun_if_exists(&dir_path.join(relative));
+            }
         }
-    }
-    if let Some(common) = &common_dir {
-        declare_rerun_if_exists(&Path::new(common).join("packed-refs"));
-    }
-    // 当前分支的 ref 文件：提交时 mtime 变化（松散 ref 在 common dir，
-    // per-worktree ref 在 gitdir，两处都声明）。
-    if let Some(reference) = git_output(&["rev-parse", "--symbolic-full-name", "HEAD"]) {
-        for dir in [&git_dir, &common_dir].into_iter().flatten() {
-            declare_rerun_if_exists(&Path::new(dir).join(&reference));
+        if let Some(common) = &common_dir {
+            declare_rerun_if_exists(&Path::new(common).join("packed-refs"));
+        }
+        // 当前分支的 ref 文件：提交时 mtime 变化（松散 ref 在 common dir，
+        // per-worktree ref 在 gitdir，两处都声明）。
+        if let Some(reference) = git_output(&["rev-parse", "--symbolic-full-name", "HEAD"]) {
+            for dir in [&git_dir, &common_dir].into_iter().flatten() {
+                declare_rerun_if_exists(&Path::new(dir).join(&reference));
+            }
         }
     }
     for path in watched {
