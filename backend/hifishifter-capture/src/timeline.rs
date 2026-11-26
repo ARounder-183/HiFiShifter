@@ -1042,6 +1042,41 @@ pub fn project_tapes(
     (timeline, summary)
 }
 
+/// 磁带帧 → 工程帧的分段映射（与投影同一份覆盖结果）。
+///
+/// 【为什么与投影共用 `resolved_pieces`】映射回答的是"这一帧磁带内容在工程哪里"，
+/// 而"哪一帧属于哪一片"正是覆盖关系本身。另写一套区间运算，就会在"补录盖住前半段"
+/// 这类形状上与投影分叉 —— 于是声音按一个位置读、界面按另一个位置画。
+///
+/// 【顺序】按 take 号、再按带内偏移排序。读方按磁带帧命中，顺序只影响日志可读性。
+pub fn project_map(tapes: &[Tape<'_>]) -> Vec<crate::project_map::ProjectMapSegment> {
+    let mut segments = Vec::new();
+    for piece in resolved_pieces(tapes) {
+        let tape = &tapes[piece.tape];
+        let frames = frames_of(&piece.span);
+        if frames == 0 {
+            continue;
+        }
+        segments.push(crate::project_map::ProjectMapSegment {
+            tape_start: piece.offset as i64,
+            tape_end: (piece.offset + frames) as i64,
+            project_start: piece.span.start,
+            take: tape.take,
+        });
+    }
+    segments.sort_by_key(|segment| (segment.take, segment.tape_start));
+    segments.truncate(crate::project_map::PROJECT_MAP_SLOTS);
+    segments
+}
+
+/// 从投影输入直接算一份映射（`CaptureStore` 在重建投影缓存时用）。
+pub fn project_map_from_takes(
+    takes: &[ProjectionTake<'_>],
+) -> Vec<crate::project_map::ProjectMapSegment> {
+    let (tapes, _) = build_tapes(takes);
+    project_map(&tapes)
+}
+
 /// 素材的**未处理** PCM：把投影出的片段按工程位置原样铺成一份快照（"原始磁带"）。
 ///
 /// 【为什么必须直接拷样本，而不是复用 `mix_plain_regions`】那个函数服务的是 **ARA** 通路，
@@ -1415,6 +1450,53 @@ mod tests {
     /// 单 take 的便利投影。
     fn one(take: u64, segments: &[Segment]) -> (TimelineState, TimelineSummary) {
         build(segments, take, 120.0)
+    }
+
+    /// **不变量：映射跟着片段在工程里的位置走，不跟宿主播放头走。**
+    ///
+    /// 【现场原形】片段在工程 28.000 s（1000 Hz 下 28 000 帧），长 100 帧。映射必须
+    /// 答 `project(0) == 28 000` —— 不是 0（第四轮的自造起点），也不是宿主留在最后
+    /// 播放头的那个读数（第三轮的锚点）。
+    #[test]
+    fn the_project_map_follows_the_clip_start() {
+        let segments = [segment(28_000, &[0.5; 100])];
+        let takes = [ProjectionTake {
+            id: 1,
+            segments: &segments,
+            content_fingerprint: None,
+        }];
+        let map = project_map_from_takes(&takes);
+        assert_eq!(map.len(), 1);
+        assert_eq!(map[0].tape_start, 0);
+        assert_eq!(map[0].tape_end, 100);
+        assert_eq!(map[0].project_start, 28_000);
+        assert_eq!(map[0].project_end(), 28_100);
+    }
+
+    /// **洞把映射切成两段，第二段不是"磁带帧 = 工程帧"。**
+    ///
+    /// 【为什么这条必须钉住】"磁带帧号加一个起点"只能表达一片。有洞的素材上，第二片
+    /// 的磁带偏移与工程起点**不再相等**（这里差 100 帧），任何"起点 + 帧数"的单段
+    /// 映射都会在洞之后整体错位。
+    #[test]
+    fn the_project_map_is_piecewise_across_a_hole() {
+        let segments = [segment(0, &[0.5; 100]), segment(200, &[0.5; 100])];
+        let takes = [ProjectionTake {
+            id: 1,
+            segments: &segments,
+            content_fingerprint: None,
+        }];
+        let map = project_map_from_takes(&takes);
+        assert_eq!(map.len(), 2);
+        assert_eq!(
+            (map[0].tape_start, map[0].tape_end, map[0].project_start),
+            (0, 100, 0)
+        );
+        assert_eq!(
+            (map[1].tape_start, map[1].tape_end, map[1].project_start),
+            (100, 200, 200),
+            "洞之后的磁带偏移是 100，而工程起点是 200"
+        );
     }
 
     /// **桥接出来的洞不能被宣称成"我们录到的素材"。**

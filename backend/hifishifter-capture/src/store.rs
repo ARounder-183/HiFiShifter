@@ -323,6 +323,11 @@ pub struct CaptureStore {
     takes: Mutex<Vec<CaptureTake>>,
     /// 按素材代次缓存的投影产物（见 `ProjectionCache`）。
     projection_cache: Mutex<Option<ProjectionCache>>,
+    /// 磁带帧 → 工程帧的分段映射（无锁；音频线程每块都要读）。
+    ///
+    /// 【为什么不能放在 `ProjectionCache` 里】那份缓存是 `Mutex` 下的，而读它的
+    /// 是音频线程。映射必须是一份**独立发布**的原子表 —— 见 `project_map` 模块头。
+    project_map: crate::project_map::ProjectMapCell,
     /// 上一次恢复时**读不出来**的 take（见 [`MissingCapture`]）。
     ///
     /// 只在 `restore_manifest` 里写；界面据此给出"这些音频不在本地"的提示。
@@ -415,6 +420,7 @@ impl Default for CaptureStore {
             capture: Mutex::new(Capture::default()),
             takes: Mutex::new(Vec::new()),
             projection_cache: Mutex::new(None),
+            project_map: crate::project_map::ProjectMapCell::default(),
             missing: Mutex::new(Vec::new()),
             next_take_id: AtomicU64::new(1),
             material_present: AtomicBool::new(false),
@@ -814,6 +820,10 @@ impl CaptureStore {
         let (timeline, summary) = timeline::project_tapes(&tapes, dropped, 120.0);
         let sources = timeline::sources_from_tapes(&tapes);
         let fingerprints = timeline::fingerprints_from_tapes(&tapes);
+        // 【映射与投影同一次发布】两者都由 `resolved_pieces` 派生，分开发布就会
+        // 出现"快照已经是新一代、映射还是上一代"的窗口，而那个窗口里的读位置
+        // 恰好是错的。
+        self.project_map.publish(revision, &timeline::project_map(&tapes));
         ProjectionCache {
             revision,
             timeline,
@@ -1277,8 +1287,14 @@ impl CaptureStore {
     }
 
     /// 推进素材代次（任何改变 take 集合的动作都要调它）。
+    ///
+    /// 【为什么映射也在这里发布】映射是 take 集合的**派生量**：只要素材变了，哪一片
+    /// 落在工程哪里就可能变。把它挂在"素材代次推进"这一个动作上，就不存在
+    /// "忘了发布映射"的路径 —— 而这个漏项的表现是"输出退回直通"，极难归因。
     fn bump_revision(&self) {
-        self.revision.fetch_add(1, Ordering::AcqRel);
+        let revision = self.revision.fetch_add(1, Ordering::AcqRel) + 1;
+        let segments = self.with_projection(timeline::project_map_from_takes);
+        self.project_map.publish(revision, &segments);
     }
 
     /// 音频线程入口：记录"宿主实际做了什么"，并（若已武装）捕获本块。
@@ -1912,6 +1928,35 @@ impl CaptureStore {
     /// 内容 id -> 稳定的分析指纹（取 BLAKE3 前 8 字节）。
     pub fn content_fingerprints(&self) -> HashMap<String, u64> {
         self.with_projection_cache(|cache| cache.fingerprints.clone())
+    }
+
+    /// 磁带帧 → 工程帧的映射（**无锁**，可从音频线程调用）。
+    ///
+    /// 【`hint` 是什么】宿主的原始位置读数。它不可信（VEGAS 的 Render As 会把它
+    /// 留在最后的播放头），只用于多 take 时挑出"这一遍喂的是哪一片"。没有映射时
+    /// 返回 `None` —— 调用方据此退回直通，而不是猜一个位置。
+    pub fn project_mapping(
+        &self,
+        tape_frame: i64,
+        hint: i64,
+    ) -> Option<crate::project_map::ProjectMapping> {
+        self.project_map.resolve(tape_frame, hint)
+    }
+
+    /// 当前映射表的代次（诊断；`0` = 还没发布过）。
+    pub fn project_map_revision(&self) -> u64 {
+        self.project_map.revision()
+    }
+
+    /// 立刻重算并发布一次映射（`promote` / `restore_manifest` 之后调用）。
+    ///
+    /// 【为什么 promote 之后要显式调一次】映射的读方是音频线程，而它不会去建投影
+    /// 缓存。等某个非音频调用方"顺手"建缓存，等于让第一遍预览在一段未定义的长度里
+    /// 没有映射 —— 那段时间的输出是直通。这里在 promote 的收尾处主动发布一次。
+    pub fn publish_project_map(&self) {
+        let revision = self.revision.load(Ordering::Acquire);
+        let segments = self.with_projection(timeline::project_map_from_takes);
+        self.project_map.publish(revision, &segments);
     }
 
     /// 素材的**未处理** PCM，做成一份可直接发布的快照（"原始磁带"）。

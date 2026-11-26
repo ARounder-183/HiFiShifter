@@ -180,6 +180,46 @@ pub fn pinned_origin_uses_raw() -> bool {
     *USES_RAW.get_or_init(|| std::env::var("HFS_PINNED_ORIGIN").is_ok_and(|value| value == "raw"))
 }
 
+/// 一条喂入流**自己的**走带位置。只有一个域。
+///
+/// 【为什么它必须与工程位置分开】此前同一个 `i64` 同时被当成"喂入流的第几帧"与
+/// "工程第几帧"，于是"钉住流的 0 是不是工程 0"这个问题只能靠一个环境变量回答
+/// （见 `pinned_origin_uses_raw`）。答案是两个都不是：喂入域的 0 是**这条流**的
+/// 第一帧，它在工程里的位置由 `project_map::ProjectMapping` 给出。
+///
+/// 【为什么不在这里存 origin】存了它，下一个读代码的人就会拿它当工程起点 ——
+/// 那正是上一轮的错误。本类型只回答"这条流已经喂进来多少帧"，一个纯粹的计数。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct TapeCursor {
+    /// 本遍已经喂进来的帧数（从 0 起，**提级不重置、不复用**）。
+    pub frames: u64,
+    /// 首块宿主读数（只作诊断；`NO_RAW` = 未知）。
+    pub first_raw: i64,
+}
+
+impl TapeCursor {
+    /// 归零（传输事件 / 复位）。
+    pub fn reset(&mut self) {
+        *self = Self {
+            frames: 0,
+            first_raw: NO_RAW,
+        };
+    }
+
+    /// 记下首块的宿主读数（只诊断，不参与换算）。
+    pub fn note_first_raw(&mut self, raw: i64) {
+        if self.first_raw == NO_RAW {
+            self.first_raw = raw;
+        }
+    }
+
+    /// 本块之后的走带位置（喂入域）。
+    pub fn advance(&mut self, frames: u32) -> u64 {
+        self.frames = self.frames.saturating_add(u64::from(frames));
+        self.frames
+    }
+}
+
 /// 一个传输会话的纯状态。
 #[derive(Clone, Copy, Debug)]
 pub struct TransportSession {

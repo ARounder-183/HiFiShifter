@@ -28,6 +28,8 @@
 #[allow(missing_docs)]
 pub mod budget;
 #[allow(missing_docs)]
+pub mod project_map;
+#[allow(missing_docs)]
 pub mod recorder;
 #[allow(missing_docs)]
 pub mod sidecar;
@@ -43,4 +45,5 @@ pub use store::{
     CaptureOptions, CaptureSpan, CaptureStatus, CaptureStore, MaterialSpan, MaterialSummary,
     MissingCapture, RecordingStatus, TakeSummary,
 };
+pub use project_map::{ProjectMapCell, ProjectMapSegment, ProjectMapping};
 pub use types::{CapturePcm, CaptureRegion, CaptureTape};
