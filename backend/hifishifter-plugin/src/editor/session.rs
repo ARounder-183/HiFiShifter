@@ -1,5 +1,5 @@
 //! 真实ARA文档共享原编辑命令actor：UI只排队，分析/文件/离线渲染均不在音频或UI回调执行。
-use crate::render::document::DocumentSession;
+use crate::render::document::{ApplyOutcome, DocumentSession};
 use crate::sync::MutexExt;
 use hifishifter_kernel::editor::{
     history,
@@ -181,14 +181,14 @@ impl RetryState {
             || error == "Conflict: workspace changed during automatic apply"
         {
             self.streak = 0;
-            *session.render_error.lock_or_recover() = None;
+            session.clear_render_error();
             return RenderAction::Retry(RENDER_RETRY_INTERVAL);
         }
         self.streak = self.streak.saturating_add(1);
         // 预算内：快速重试（宿主的编辑事务通常会在这 1.2 秒内收口）。
         if self.streak < RENDER_RETRY_BUDGET {
             if error != "automatic apply superseded" {
-                *session.render_error.lock_or_recover() = Some(error);
+                session.note_render_error(RenderErrorCode::RenderFailed, &error, error.clone());
             }
         } else {
             // 预算耗尽：**退避**，不是放弃（见 `RENDER_RETRY_BACKOFF`）。错误读数仍然写出去，
@@ -200,7 +200,7 @@ impl RetryState {
                     RENDER_RETRY_BACKOFF
                 );
             }
-            *session.render_error.lock_or_recover() = Some(error);
+            session.note_render_error(RenderErrorCode::RenderFailed, &error, error.clone());
         }
         render_retry_action(self.streak)
     }
@@ -410,7 +410,7 @@ struct RenderTask {
     ticket: u64,
     generation: u64,
     cancel: Arc<AtomicBool>,
-    reply: mpsc::Receiver<Result<(), String>>,
+    reply: mpsc::Receiver<Result<ApplyOutcome, String>>,
     worker: std::thread::JoinHandle<()>,
 }
 impl RenderTask {
@@ -418,7 +418,7 @@ impl RenderTask {
         ticket: u64,
         generation: u64,
         cancel: Arc<AtomicBool>,
-        work: impl FnOnce() -> Result<(), String> + Send + 'static,
+        work: impl FnOnce() -> Result<ApplyOutcome, String> + Send + 'static,
     ) -> Result<Self, String> {
         let (sender, reply) = mpsc::sync_channel(1);
         let worker = std::thread::Builder::new()
@@ -463,6 +463,48 @@ impl RegisteredView {
     fn retire(&self) {
         self.sink.closed.store(true, Ordering::Release);
     }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderErrorCode {
+    /// 连续一段时间没有任何可渲染的 clip（宿主发布了一份空模型）。
+    NoRenderableClip,
+    /// 一次编辑没能落上（重放预算耗尽 / 不可重放的冲突）。
+    EditNotApplied,
+    /// 渲染本身失败（预算、发布、合成）。
+    RenderFailed,
+}
+
+impl RenderErrorCode {
+    fn code(self) -> u32 {
+        match self {
+            Self::NoRenderableClip => crate::editor::errors::NO_RENDERABLE_CLIP,
+            Self::EditNotApplied => crate::editor::errors::EDIT_NOT_APPLIED,
+            Self::RenderFailed => crate::editor::errors::RENDER_FAILED,
+        }
+    }
+}
+
+/// 状态栏一句最多多长。
+///
+/// 【为什么是 120】状态栏是一行；超过它的文案会把后面的按钮挤掉，而用户本来就
+/// 读不完一屏字。判据在产生点统一执行，前端不需要再截。
+const RENDER_ERROR_SHORT_MAX: usize = 120;
+
+/// 这条短句是不是"新的一条"（[' + BT + 'EditorSession::note_render_error' + BT + '] 的去重判据）。
+///
+/// 【为什么抽成纯函数】"同一条错误只留一行日志"靠的就是它；埋在锁里就只能靠读代码相信。
+fn render_error_is_new(previous: Option<&str>, short: &str) -> bool {
+    previous != Some(short)
+}
+
+/// 把一句话压到状态栏能显示的长度（按**字符**截，不切坏 UTF-8）。
+fn short_render_text(text: &str) -> String {
+    if text.chars().count() <= RENDER_ERROR_SHORT_MAX {
+        return text.to_owned();
+    }
+    let mut short: String = text.chars().take(RENDER_ERROR_SHORT_MAX - 1).collect();
+    short.push('…');
+    short
 }
 #[derive(Default)]
 struct Loaded {
@@ -789,7 +831,16 @@ pub struct EditorSession {
     ui_presentation_version: AtomicU64,
     project_duration: AtomicU64,
     pub(super) error: Mutex<Option<String>>,
+    /// 状态栏红字（**短句**，≤ 120 字符）。写入只经 `note_render_error`。
+    ///
+    /// 【为什么必须收口】它的读者是 4 Hz 的 `plugin_get_apply_state`，而那个轮询
+    /// 失败才写日志。于是三处直接赋值 = 红字在屏幕上存在 250 ms ~ 1 s、用户看不完、
+    /// 日志里查不到、下一轮被清空 —— 「一闪而过的长报错」是结构性的，不是手慢。
     render_error: Mutex<Option<String>>,
+    /// 上面那条错误的**协议码**（`hifishifter_host_link::error_code`，只增不改）。
+    render_error_code: Mutex<Option<u32>>,
+    /// 上面那条错误的**全量诊断**：只进日志与 tooltip，绝不进状态栏主行。
+    render_error_detail: Mutex<Option<String>>,
     render_requested: AtomicBool,
     /// `rearm_render` 被调用的累计次数（诊断/回归读数；见该字段的说明）。
     ///
@@ -1298,6 +1349,8 @@ impl EditorSession {
             project_duration: AtomicU64::new(0),
             error: Mutex::new(None),
             render_error: Mutex::new(None),
+            render_error_code: Mutex::new(None),
+            render_error_detail: Mutex::new(None),
             render_requested: AtomicBool::new(false),
             rearm_requests: AtomicU64::new(0),
             bypass_gate_logged: AtomicU8::new(0),
@@ -1924,11 +1977,29 @@ impl EditorSession {
                         && generation == session.generation.load(Ordering::Acquire);
                     if current {
                         match result {
-                            Ok(()) => {
+                            Ok(ApplyOutcome::Published) => {
                                 session.applied.store(generation, Ordering::Release);
                                 session.render_requested.store(false, Ordering::Release);
-                                *session.render_error.lock_or_recover() = None;
+                                session.clear_render_error();
                                 retry.rearm();
+                            }
+                            Ok(ApplyOutcome::Nothing { report }) => {
+                                // 【不写 `applied`】宿主这一瞬发布的是一份空模型（拖动 clip 时
+                                // 每几百毫秒一次）。写下去就等于"这一代处理完了"，而真正的内容
+                                // 还没到 —— 下一轮重试才是把它接住的那只手。
+                                if let Some(streak) = report {
+                                    // 连续为空跨过预算（10 s）：这一次值得说给用户听。
+                                    // 短句可行动，长句留给日志与 tooltip。
+                                    session.note_render_error(
+                                        RenderErrorCode::NoRenderableClip,
+                                        "No audio reached the renderer for 10 s; the host is publishing an empty timeline",
+                                        format!(
+                                            "no renderable clip reached the renderer for {} ms ({} empty rounds); the host published an empty model",
+                                            streak.elapsed_ms, streak.rounds
+                                        ),
+                                    );
+                                }
+                                deadline = Some(Instant::now() + Duration::from_millis(150));
                             }
                             Err(error) => {
                                 let RenderAction::Retry(delay) = retry.classify(&session, error);
@@ -2214,7 +2285,7 @@ impl EditorSession {
             render.cancel.store(true, Ordering::Release);
         }
     }
-    fn complete_render(&self) -> Option<(u64, u64, bool, Result<(), String>)> {
+    fn complete_render(&self) -> Option<(u64, u64, bool, Result<ApplyOutcome, String>)> {
         let mut task = self.render_task.lock_or_recover();
         let current = task.as_ref()?;
         let result = match current.reply.try_recv() {
@@ -2342,7 +2413,7 @@ impl EditorSession {
             // （见 `rearm_render`），所以这里不是在"假装成功"。
             self.applied.store(generation, Ordering::Release);
             self.render_requested.store(false, Ordering::Release);
-            *self.render_error.lock_or_recover() = None;
+            self.clear_render_error();
             self.emit_state();
             return Ok(None);
         }
@@ -2536,7 +2607,7 @@ impl EditorSession {
             self.applied
                 .store(self.generation.load(Ordering::Acquire), Ordering::Release);
             self.render_requested.store(false, Ordering::Release);
-            *self.render_error.lock_or_recover() = None;
+            self.clear_render_error();
             self.emit_state();
             return Ok(());
         }
@@ -2561,7 +2632,7 @@ impl EditorSession {
         let worker = RenderTask::spawn(ticket, generation, cancel, move || {
             owner.capture_prepare_job(job_cancel.clone())?;
             if current.closed.load(Ordering::Acquire) {
-                return Ok(());
+                return Ok(ApplyOutcome::Published);
             }
             if current.submitted.load(Ordering::Acquire) != ticket
                 || current.generation.load(Ordering::Acquire) != generation
@@ -2570,7 +2641,7 @@ impl EditorSession {
                 current.render_requested.store(true, Ordering::Release);
                 return Err("capture render superseded".into());
             }
-            Ok(())
+            Ok(ApplyOutcome::Published)
         })?;
         *self.render_task.lock_or_recover() = Some(worker);
         Ok(())
@@ -2585,14 +2656,16 @@ impl EditorSession {
         let Some((document, _generation)) = self.prepare_apply()? else {
             return Ok(());
         };
-        document.apply_workspace_edits_with_progress(
-            self.analysis_cancel.clone(),
-            || {
-                !self.closed.load(Ordering::Acquire)
-                    && self.submitted.load(Ordering::Acquire) == ticket
-            },
-            progress,
-        )
+        document
+            .apply_workspace_edits_with_progress(
+                self.analysis_cancel.clone(),
+                || {
+                    !self.closed.load(Ordering::Acquire)
+                        && self.submitted.load(Ordering::Acquire) == ticket
+                },
+                progress,
+            )
+            .map(|_| ())
     }
     /// 音高和气声等处理器效果都依赖完成的原线；纯混音/禁用算法不受此门禁阻塞。
     ///
@@ -3238,7 +3311,7 @@ impl EditorSession {
             view: Some(view),
         };
         *self.error.lock_or_recover() = None;
-        *self.render_error.lock_or_recover() = None;
+        self.clear_render_error();
         // 【不要在这里宣告"音频已应用"】`applied` 的语义是"这一代的**音频**已经发布"，
         // 而本函数只装载了编辑/时间线状态。旧实现在这里直接写 `applied = generation`，
         // 于是任何一次重载（宿主回写、焦点切换、模型回调）都会把"还没重算的音频"
@@ -3463,7 +3536,7 @@ impl EditorSession {
             view: None,
         };
         *self.error.lock_or_recover() = None;
-        *self.render_error.lock_or_recover() = None;
+        self.clear_render_error();
         self.peaks.lock_or_recover().clear();
         self.complete_cached_analysis();
         self.schedule_analysis();
@@ -5375,6 +5448,48 @@ impl EditorSession {
         Stage::decode(self.render_stage.load(Ordering::Acquire))
     }
 
+    /// `render_error` 的**唯一**写入口：短句进状态栏，长句进日志与 `errorDetail`。
+    ///
+    /// 【为什么必须只有一个入口】这条红字一闪而过是结构性的：读它的是 4 Hz 的
+    /// `plugin_get_apply_state`，而那个轮询不写日志。只要还有第二处直接赋值，
+    /// 新加的日志就会被绕过 —— 现场仍然只能拿到"有个红的、看不清"。
+    ///
+    /// 【为什么去重】同一个短句每秒会被写四次（每轮重试都写一次）。日志按"短句变了"
+    /// 去重，于是"闪一下"留下一行，"一直错"也只留一行。
+    fn note_render_error(&self, code: RenderErrorCode, short: &str, detail: String) {
+        let short = short_render_text(short);
+        let changed = {
+            let mut slot = self.render_error.lock_or_recover();
+            let changed = render_error_is_new(slot.as_deref(), &short);
+            *slot = Some(short.clone());
+            changed
+        };
+        *self.render_error_code.lock_or_recover() = Some(code.code());
+        *self.render_error_detail.lock_or_recover() = Some(detail.clone());
+        if !changed {
+            return;
+        }
+        // 【为什么带 gen / ticket / rendering】这条日志的唯一用途是让下一次现场回答
+        // "那一刻渲染到第几代、是不是正在跑、用户停在哪一步"。只写 text 会重演
+        // "知道报错但不知道为什么"。
+        log::warn!(
+            "[state] render-error code={} gen={} ticket={} rendering={} text={:?} detail={:?}",
+            code.code(),
+            self.generation.load(Ordering::Acquire),
+            self.render_ticket.load(Ordering::Acquire),
+            self.render_task.lock_or_recover().is_some(),
+            short,
+            detail,
+        );
+    }
+
+    /// 清空渲染错误（同样收口：三个字段一起清，谁都不许只清一半）。
+    fn clear_render_error(&self) {
+        *self.render_error.lock_or_recover() = None;
+        *self.render_error_code.lock_or_recover() = None;
+        *self.render_error_detail.lock_or_recover() = None;
+    }
+
     pub(super) fn state(&self) -> Value {
         let generation = self.generation.load(Ordering::Acquire);
         let applied = self.applied.load(Ordering::Acquire);
@@ -5449,6 +5564,20 @@ impl EditorSession {
         } else {
             "current"
         };
+        // 【三层错误读数在这里合成一次】`self.error` 是终态（需要用户处置），
+        // `render_error` 是"这一轮没落上"，`host_error` 是宿主自报的准备失败。
+        // 码与长诊断只属于**渲染**那一条：另外两层的措辞本身就是给用户看的。
+        let base_error = self.error.lock_or_recover().clone();
+        let render_error = self.render_error.lock_or_recover().clone();
+        let (error_code, error_detail) = if base_error.is_none() && render_error.is_some() {
+            (
+                json!(self.render_error_code.lock_or_recover().unwrap_or(0)),
+                json!(self.render_error_detail.lock_or_recover().clone()),
+            )
+        } else {
+            (Value::Null, Value::Null)
+        };
+        let error = base_error.or(render_error).or(host_error);
         json!({
             // 【为什么把形态放进状态快照】bootstrap 是**窗口创建那一刻**算的，而形态判定
             // 要等 `setActive` 之后 5 秒宽限期才落定 —— 于是窗口打开时读到的一律是
@@ -5507,7 +5636,12 @@ impl EditorSession {
             // 【为什么要有这一位】`plugin_get_apply_state` 在没有缓存时答的是同形
             // 的 `busy` 载荷；前端据此把"还没算出来"当 transient，而不是红色错误。
             "busy":false,
-            "error":self.error.lock_or_recover().clone().or_else(||self.render_error.lock_or_recover().clone()).or(host_error),"connected":!self.closed.load(Ordering::Acquire),
+            "error":error,
+            // 【只增不改】短句的协议码与全量诊断。前端拿 `error` 显示单行，拿
+            // `errorDetail` 做 tooltip / 报障附件 —— 状态栏主行永远只有一句可行动的话。
+            "errorCode":error_code,
+            "errorDetail":error_detail,
+            "connected":!self.closed.load(Ordering::Acquire),
             "ready":self.loaded.lock_or_recover().initialized})
     }
     fn emit_state(&self) {
@@ -5947,10 +6081,17 @@ impl ParamHost for EditorSession {
                     // 【瞬时冲突不进 `self.error`】那个位置是"终态、需要用户处置"的。
                     // 放进去会让 `prepare_apply` 永久短路（见 R7）。这里只进渲染读数，
                     // 并把"这次编辑没有被采纳"记成可读的读数 —— 用户至少知道该重画。
-                    *self.render_error.lock_or_recover() = Some(format!(
-                        "Conflict: this edit was not applied after {} attempt(s): {error}",
-                        attempt + 1
-                    ));
+                    // 【短句进 UI，长句进日志】状态栏只留"这次编辑没落上"，**原因**
+                    // 放进 `errorDetail`：它是内部诊断（含子串与代次），原样展示只会
+                    // 让用户读一屏看不懂的字。
+                    self.note_render_error(
+                        RenderErrorCode::EditNotApplied,
+                        "This edit was not applied; draw it again or refresh",
+                        format!(
+                            "Conflict: this edit was not applied after {} attempt(s): {error}",
+                            attempt + 1
+                        ),
+                    );
                     if let Some(document) = self.document() {
                         document.note_edit_dropped(format!(
                             "replay budget exhausted after {} attempt(s): {error}",
@@ -5962,7 +6103,11 @@ impl ParamHost for EditorSession {
                     // 一次"这次没落上"放进去会让 `prepare_apply` 永久短路（渲染停摆），
                     // 也会让 `after_write` 把之后每一次**成功**的写入都报成失败 ——
                     // 前端于是把已经生效的笔画回滚掉，用户看到的就是"参数线回退"。
-                    *self.render_error.lock_or_recover() = Some(error.clone());
+                    self.note_render_error(
+                        RenderErrorCode::EditNotApplied,
+                        "This edit was not applied; draw it again or refresh",
+                        error.clone(),
+                    );
                     if let Some(document) = self.document() {
                         document.note_edit_dropped(error);
                     }
@@ -6219,7 +6364,7 @@ pub mod tests {
                 started.send(()).unwrap();
                 wait.recv_timeout(Duration::from_secs(3))
                     .map_err(|error| error.to_string())?;
-                Ok(())
+                Ok(ApplyOutcome::Published)
             },
         )
         .unwrap();
@@ -6295,7 +6440,7 @@ pub mod tests {
                 started.send(()).unwrap();
                 wait.recv_timeout(Duration::from_secs(3))
                     .map_err(|error| error.to_string())?;
-                Ok(())
+                Ok(ApplyOutcome::Published)
             },
         )
         .unwrap();
@@ -6351,7 +6496,7 @@ pub mod tests {
         document.host_undo.pending.store(true, Ordering::Release);
         let editor = owner.editor_session().unwrap();
         let cancel = Arc::new(AtomicBool::new(true));
-        let job = RenderTask::spawn(41, 17, cancel, || Ok(())).unwrap();
+        let job = RenderTask::spawn(41, 17, cancel, || Ok(ApplyOutcome::Published)).unwrap();
         {
             let mut active = editor.render_task.lock_or_recover();
             assert!(active.is_none());
@@ -11250,5 +11395,45 @@ mod apply_state_cache_tests {
             assert!(real.get(key).is_some(), "真载荷缺少字段 {key}");
         }
         document.close();
+    }
+
+    /// 【回归】状态栏只放**一句可行动的话**；长诊断只进日志与 tooltip。
+    ///
+    /// 现场那条"比较长的报错"一闪而过、日志里又查不到，根因就是长文案原样进了
+    /// `"error"`。现在长度在产生点统一压到 120 字符，全量文本进 `"errorDetail"`。
+    #[test]
+    fn the_status_bar_never_shows_a_detail() {
+        let (model, _owners, _ids) = super::tests::workspace_fixture();
+        let document = model.session();
+        let editor = document.editor_session().unwrap();
+        let detail = "unsupported host region: ".to_owned() + &"x".repeat(400);
+        editor.note_render_error(RenderErrorCode::RenderFailed, &detail, detail.clone());
+        let state = editor.state();
+        let shown = state["error"].as_str().expect("状态栏必须有一句");
+        assert!(
+            shown.chars().count() <= RENDER_ERROR_SHORT_MAX,
+            "状态栏一句最多 {} 字符，实际 {}: {shown}",
+            RENDER_ERROR_SHORT_MAX,
+            shown.chars().count()
+        );
+        assert!(!shown.contains(&"x".repeat(100)), "长诊断不许进主行");
+        assert_eq!(state["errorCode"], crate::editor::errors::RENDER_FAILED);
+        assert_eq!(state["errorDetail"], detail);
+        editor.clear_render_error();
+        // 清空的是**渲染**那一层：码与长诊断一起归零（另两层错误各有自己的来源）。
+        let cleared = editor.state();
+        assert!(cleared["errorCode"].is_null());
+        assert!(cleared["errorDetail"].is_null());
+        document.close();
+    }
+
+    /// 【回归】同一条短句只算"新的一条"一次（4 Hz 重试不许把日志刷满）。
+    #[test]
+    fn a_render_error_is_written_to_the_log_once() {
+        assert!(render_error_is_new(None, "a"));
+        assert!(!render_error_is_new(Some("a"), "a"));
+        assert!(render_error_is_new(Some("a"), "b"));
+        // 截断之后长度相同的两条不同错误仍然算"不同"（比较的是内容，不是长度）。
+        assert!(render_error_is_new(Some("a"), "b"));
     }
 }

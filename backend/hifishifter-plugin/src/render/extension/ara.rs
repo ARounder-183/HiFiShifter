@@ -889,7 +889,24 @@ impl ExtensionOwner {
         for publisher in &self.snapshots {
             publisher.collect_retired();
         }
-        let snapshots = input.render(cancel.clone())?;
+        // 【"这一轮没有可渲染的 clip"不是失败】宿主在拖动 clip 的那几秒里每几百毫秒
+        // 就会发布一次空模型（`item map: attached=2 unbound=1`、`renderer assignment
+        // regions=0`）。旧实现把这份空输入渲成**空快照**再发布：`is_ready()` 变真、
+        // 播放侧逐样本返回 0 —— 整条轨静音，直到下一次真正的分配把快照换回来。
+        // 现在它有一个自己的名字：什么都不发布，上一份好快照继续可听。
+        let snapshots = match input.render(cancel.clone())? {
+            crate::render::input::RenderOutcome::Snapshots(snapshots) => snapshots,
+            crate::render::input::RenderOutcome::Nothing => {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Debug,
+                    "ara.prepare.empty-round",
+                    format_args!(
+                        "[ara] this round has no renderable clip; the published snapshot is kept"
+                    ),
+                );
+                return Ok(());
+            }
+        };
         Self::log_snapshot_integrity(&snapshots);
         // 【重排必须发生在**出锁之后**】`prepare()` 会走一串取锁路径（诊断行、形态
         // 判定、准备队列）。在持有 `document.transaction` 时调用它，就是让"文档事务 →

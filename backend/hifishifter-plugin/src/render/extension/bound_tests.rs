@@ -275,6 +275,7 @@ fn owned_fade_shape_changes_kernel_pcm_and_state_roundtrip_and_undo_clears_it() 
         input
             .render(Arc::new(std::sync::atomic::AtomicBool::new(false)))
             .unwrap()
+            .into_snapshots()
     };
     let original = render();
     let index = 5512;

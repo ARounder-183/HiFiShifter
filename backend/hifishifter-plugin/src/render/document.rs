@@ -7,7 +7,7 @@ use ara2_bridge::companion::CompanionControllerBinding;
 use ara2_bridge::core::{ApiGeneration, AraError};
 use ara2_bridge::plugin::ExtensionControllerLease;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 thread_local! {
@@ -496,6 +496,43 @@ impl ImportClaims {
     }
 }
 
+/// 一次自动应用（`apply_workspace_edits_with_progress`）的结论。
+///
+/// 【为什么要多一个值】"发布了"与"这一轮没有可渲染内容"必须分开：后者既不能写
+/// `applied`（写了下一轮就不再重试，宿主下一次发布真模型时没人接），也不能算错误
+/// （那正是状态栏闪红字的来源）。见 [`crate::render::input::RenderOutcome`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApplyOutcome {
+    /// 至少发布了一份快照。
+    Published,
+    /// 这一轮没有可渲染的 clip：**什么都不发布**，下一轮再来。
+    ///
+    /// `report` 非空 = 连续为空刚刚跨过预算，这一次值得说给用户听（一次性）。
+    Nothing { report: Option<EmptyStreak> },
+}
+
+/// 连续多少个"空轮"值得说给用户听（≈ 10 s @ 4 Hz，也覆盖一次 Click 的最坏节奏）。
+const EMPTY_ROUNDS_MAX: u32 = 40;
+
+/// 连续为空的墙钟上限：到点就说一次，不再等轮数。
+const EMPTY_BUDGET_MS: u64 = 10_000;
+
+/// 一次"空轮"的累积读数（由 [`DocumentSession::note_empty_round`] 给出，**只在跨过预算
+/// 的那一轮返回一次**）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EmptyStreak {
+    pub rounds: u32,
+    pub elapsed_ms: u64,
+}
+
+/// 墙钟毫秒：只服务"连续为空多久了"这条预算，不参与任何音视频时序。
+fn wall_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 #[derive(Default)]
 pub struct DocumentSession {
     controller: AtomicUsize,
@@ -642,6 +679,15 @@ pub struct DocumentSession {
     /// 音频。用户表现为"波形更新了、声音没变，编辑一下才对"（编辑是唯一能推动
     /// `PreparedVersion.edit` 的手动途径）。见 `host::geometry::RenderFacts`。
     pub render_facts: Mutex<crate::host::geometry::RenderFacts>,
+    /// 连续"这一轮没有可渲染内容"的轮数 / 起点（Unix 毫秒）/ 是否已经说过一次。
+    ///
+    /// 【为什么需要计数】`RenderOutcome::Nothing` 是**常态**：宿主在拖动一条 clip 的
+    /// 那几秒里，每几百毫秒就会发布一次空模型（`item map: attached=2 unbound=1`、
+    /// `renderer assignment regions=0`）。所以"闪一下"永远不该留痕迹；而**持续**为空
+    /// 不是常态，值得说一次。三个量就是这条分界线，且它只在这里定义一次。
+    empty_rounds: AtomicU32,
+    empty_since_ms: AtomicU64,
+    empty_reported: AtomicBool,
     pub sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,
     pub edit_sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,
     /// 每个宿主 item 最近一次观察到的**媒体事实**（item GUID → 源身份）。**只增不减**。
@@ -3706,6 +3752,7 @@ impl DocumentSession {
         current: impl Fn() -> bool,
     ) -> Result<(), String> {
         self.apply_workspace_edits_with_progress(cancel, current, None)
+            .map(|_| ())
     }
     /// 这一轮该渲整段还是只渲播放头附近的一段。
     ///
@@ -3763,12 +3810,44 @@ impl DocumentSession {
         Some((start, start + window_sec))
     }
 
+    /// 记一轮"没有可渲染内容"；**只在刚刚跨过预算的那一轮**返回读数。
+    ///
+    /// 【为什么要"报一次"而不是"每轮都报"】空轮是常态：宿主拖动一条 clip 时每几百毫秒
+    /// 一次。每轮都报会把日志刷满、也会让状态栏一直红着；一次都不报则"真的空了"没有声音。
+    fn note_empty_round(&self) -> Option<EmptyStreak> {
+        let rounds = self.empty_rounds.fetch_add(1, Ordering::AcqRel) + 1;
+        let now = wall_millis();
+        let since =
+            match self
+                .empty_since_ms
+                .compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => now,
+                Err(known) => known,
+            };
+        let elapsed_ms = now.saturating_sub(since);
+        if rounds < EMPTY_ROUNDS_MAX && elapsed_ms < EMPTY_BUDGET_MS {
+            return None;
+        }
+        if self.empty_reported.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        Some(EmptyStreak { rounds, elapsed_ms })
+    }
+
+    /// 发布成功：三个量一起归零（下一次空轮从零开始计）。
+    fn clear_empty_rounds(&self) {
+        self.empty_rounds.store(0, Ordering::Release);
+        self.empty_since_ms.store(0, Ordering::Release);
+        self.empty_reported.store(false, Ordering::Release);
+    }
+
     pub(crate) fn apply_workspace_edits_with_progress(
         &self,
         cancel: Arc<AtomicBool>,
         current: impl Fn() -> bool,
         progress: Option<hifishifter_kernel::mixdown::ProgressCallback>,
-    ) -> Result<(), String> {
+    ) -> Result<ApplyOutcome, String> {
         let (ticket, inputs) = {
             let _transaction = self.transaction.lock_or_recover();
             if !self.is_alive() || !self.ready.load(Ordering::Acquire) {
@@ -3796,6 +3875,8 @@ impl DocumentSession {
             return Err("automatic apply superseded".into());
         }
         let mut prepared = Vec::new();
+        // 这一轮里有没有任何 owner 明确回答"没有可渲染的 clip"。
+        let mut empty = false;
         // 【一个作业要渲染多个 owner 时，进度必须**分段聚合**】
         //
         // 每个 owner 的 `render_with_progress` 都从 0 走到 1。此前它们共用一个回调，
@@ -3816,8 +3897,16 @@ impl DocumentSession {
                     callback.call((index as f64 + value) / owners as f64);
                 })
             });
-            let snapshots = input.render_with_progress(cancel.clone(), slice)?;
-            prepared.push((owner, keys, snapshots));
+            match input.render_with_progress(cancel.clone(), slice)? {
+                crate::render::input::RenderOutcome::Snapshots(snapshots) => {
+                    prepared.push((owner, keys, snapshots))
+                }
+                crate::render::input::RenderOutcome::Nothing => {
+                    // 【为什么不 push 一份空快照】空快照是一个**真实的发布动作**：播放侧
+                    // 随即逐样本读 0，用户听到一次"处理消失"。见 `RenderOutcome`。
+                    empty = true;
+                }
+            }
         }
         let _transaction = self.transaction.lock_or_recover();
         // 复核只看"这份已算好的东西还能不能用"：活着、仍就绪，且票据没有变。
@@ -3843,6 +3932,10 @@ impl DocumentSession {
                 return Err("retired snapshot budget exhausted; reopen instance".into());
             }
         }
+        // 【空轮按"这一轮"记，不按"某条 owner"】一次作业要么发布了内容，要么没有；
+        // 逐 owner 计数会让"两个 renderer 里只有一个空"变成两套时间线。
+        let report = if empty { self.note_empty_round() } else { None };
+        let published = !prepared.is_empty();
         for (owner, keys, snapshots) in prepared {
             for (publisher, snapshot) in owner.snapshots.iter().zip(snapshots) {
                 publisher
@@ -3851,7 +3944,16 @@ impl DocumentSession {
             }
             owner.record_prepared(ticket.model, ticket.edit, ticket.epoch, ticket.scope, keys);
         }
-        Ok(())
+        if published {
+            // 只要这一轮真的发布了东西，连续为空的账就一笔勾销。
+            self.clear_empty_rounds();
+        }
+        if empty {
+            // 【不写 `applied`】下一轮 150 ms 后还会再来一次：宿主把模型补回来时，
+            // 这一次的空轮就是"没人接"的那一半。
+            return Ok(ApplyOutcome::Nothing { report });
+        }
+        Ok(ApplyOutcome::Published)
     }
 
     /// 宿主专属API调用前核对真实文档仍存活，销毁后的view不能沿旧project指针查询。
@@ -6431,5 +6533,47 @@ mod presentation_revision_tests {
             document.presentation_revision.load(Ordering::Acquire) > before,
             "装配发布必须推进呈现代次（clip 集合没变、媒体身份变了的情形也要推进）"
         );
+    }
+
+    /// 【回归】连续为空**跨过预算**才说一次；说过之后不再重复。
+    ///
+    /// 空轮是常态（拖动 clip 时每几百毫秒一次），所以一个都不该留痕迹；但持续为空
+    /// 不是常态，10 s 之后值得让用户看见一条可读的话 —— 而且只看见一次。
+    #[test]
+    fn a_long_empty_streak_surfaces_once() {
+        let document = DocumentSession::new(50_004);
+        let reports = (0..EMPTY_ROUNDS_MAX)
+            .map(|_| document.note_empty_round())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reports.iter().filter(|report| report.is_some()).count(),
+            1,
+            "整段空轮里只该有**一次**播报"
+        );
+        let streak = reports
+            .last()
+            .unwrap()
+            .expect("最后一轮就是跨过预算的那一轮");
+        assert_eq!(streak.rounds, EMPTY_ROUNDS_MAX);
+        assert!(
+            document.note_empty_round().is_none(),
+            "说过一次之后不许刷屏"
+        );
+        document.close();
+    }
+
+    /// 【不回归】一旦发布了内容，连续为空的账就一笔勾销（下一次重新从零开始）。
+    #[test]
+    fn a_published_snapshot_clears_the_empty_streak() {
+        let document = DocumentSession::new(50_005);
+        for _ in 0..10 {
+            assert!(document.note_empty_round().is_none());
+        }
+        document.clear_empty_rounds();
+        assert_eq!(document.empty_rounds.load(Ordering::Acquire), 0);
+        assert_eq!(document.empty_since_ms.load(Ordering::Acquire), 0);
+        // 清零之后重新开始计：单轮空不再是"跨过预算"。
+        assert!(document.note_empty_round().is_none());
+        document.close();
     }
 }

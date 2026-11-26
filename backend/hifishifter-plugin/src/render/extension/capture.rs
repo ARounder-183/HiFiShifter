@@ -330,7 +330,17 @@ impl ExtensionOwner {
             );
         }
         let render_started = std::time::Instant::now();
-        let snapshots = input.render(cancel)?;
+        // 【这一轮没有可渲染内容】上面那道 `clips.is_empty()` 已经挡住最常见的形状；
+        // 这里兜住"有 clip、却没有一条能落进渲染窗口"的退化情形。发布空快照会让
+        // 处理结果整体消失（播放侧逐样本读 0），所以**什么都不发布**：版本号不动，
+        // 下一轮再试。
+        let snapshots = match input.render(cancel)? {
+            crate::render::input::RenderOutcome::Snapshots(snapshots) => snapshots,
+            crate::render::input::RenderOutcome::Nothing => {
+                log::debug!("[capture] this round has no renderable clip; nothing is published");
+                return Ok(());
+            }
+        };
         let render_ms = render_started.elapsed().as_millis() as u64;
         if self.is_closed() {
             return Ok(());

@@ -147,6 +147,15 @@ pub(crate) fn is_retryable_host_conflict(error: &str) -> bool {
     error.starts_with("Conflict:") && !error.starts_with(EDIT_AUTHORITY_POISONED)
 }
 
+/// 连续一段时间的渲染输入都是空的（宿主发布了一份空模型）。
+///
+/// 【为什么它不是终态】空轮是常态；只有**持续**为空才值得说一次，而那时用户
+/// 依然只需要等宿主把模型补回来（或重新点一下窗口）。见 `RenderOutcome::Nothing`。
+pub(crate) const NO_RENDERABLE_CLIP: u32 = error_code::NO_RENDERABLE_CLIP;
+/// 渲染本身失败（预算、发布、合成）。
+pub(crate) const RENDER_FAILED: u32 = error_code::RENDER_FAILED;
+/// 一次编辑没能落上（重放预算耗尽 / 不可重放的冲突）。
+pub(crate) const EDIT_NOT_APPLIED: u32 = error_code::CONFLICT;
 /// 宿主 PCM 尚未就绪（可重试的暂时失败源）。
 pub(crate) const HOST_PCM_UNAVAILABLE: &str = "host PCM unavailable";
 /// 宿主模型尚未就绪（可重试的暂时失败源）。
