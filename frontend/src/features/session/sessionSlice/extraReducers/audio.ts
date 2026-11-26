@@ -191,7 +191,11 @@ export function registerAudio(builder: ActionReducerMapBuilder<SessionState>) {
                 // 合成错误码：让状态栏走红色 error 通道（原版失败只写灰色 status）
                 state.error = "import_audio_failed";
             }
-            if (ok && payload.imported && payload.imported.tracks) {
+            // 【待定导入不许把回执当最终快照】回执里的 `clips` 是"导入请求的回声"：
+            // 这一刻宿主还没建 region，这条 clip 还没进图（现场 101~107 ms 后才发布）。
+            // 套用它等于把"导入前 + 一个占位"写成当前图，而 `import_ready` 紧接着会
+            // 带一份真正的全图 —— 中间这一帧就是"时间线闪回旧状态"的来源。
+            if (ok && !payload.pending && payload.imported && payload.imported.tracks) {
                 applyTimelineStatePreservingPitchVisuals(state, payload.imported);
                 // 导入定位光标：thunk 以独立字段带回的导入起始位置
                 // （对应旧乐观路径 upsertImportedClip 的 playheadSec=startSec）。

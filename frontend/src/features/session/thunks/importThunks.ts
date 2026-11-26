@@ -186,6 +186,15 @@ async function syncAutoCrossfadeFromLatestTimeline(args: {
     dispatch: (action: unknown) => Promise<unknown> & { unwrap: () => Promise<unknown> };
     getState: () => unknown;
     newClipIds: string[];
+    /**
+     * 已经取到、且**确实包含**本次导入那几条 clip 的一份快照。
+     *
+     * 【为什么要有这一格】待定转正那条路在调这里之前刚取过一次时间线（那一刻才有
+     * `source_path`）。不传就等于同一次转正里连取两次同一份快照 —— 多一次往返，
+     * 也可能让两次取到的东西不一样（转正本身就在改图）。立即成功那条路**不传**:
+     * 回执里的 `clips` 是"导入请求的回声"，不是"现在的时间线"，不能当它用。
+     */
+    latest?: unknown;
 }) {
     const { dispatch, getState, newClipIds } = args;
     if (newClipIds.length === 0) {
@@ -204,7 +213,7 @@ async function syncAutoCrossfadeFromLatestTimeline(args: {
     // `latestTimeline ?? imported` 回退会接管（淡化已由 setClipStateRemote 各自
     // 应用，UI 最多短暂显示淡化前状态，等下一次后端回声自然对齐）。
     try {
-        const latestTimeline = await webApi.getTimelineState();
+        const latestTimeline = args.latest ?? (await webApi.getTimelineState());
         const allClips = (latestTimeline as { clips?: RawTimelineClip[] }).clips ?? [];
         // 插件导入回执已确认新item；不能用更早的读快照把它从GUI再次删掉。
         if (isPluginMode() && newClipIds.some((id) => !allClips.some((clip) => clip.id === id)))
@@ -310,6 +319,65 @@ async function normalizeImportedClips(args: {
     return latest;
 }
 
+/** `runPostImportPipeline` 需要的派发形状：两种后处理共用同一份。 */
+type PostImportDispatch = NormalizeDispatch;
+
+/**
+ * 导入之后要做的**全部**事情，只有这一处。
+ *
+ * 【为什么必须是一个具名函数】导入有两条路：**立即成功**（回执里已经有 clip）与
+ * **待定→转正**（`import_pending` → `import_ready`）。此前"导入后处理"是散在两条路上的：
+ * 立即路挂着自动交叉淡化 + 规格化，转正路只补了规格化。于是第三个后处理（自动交叉淡化）
+ * 静默地只属于一条路 —— 而 REAPER 的导入 **100% 走转正那条**（现场 `after_ms=101/107`）。
+ * 两条路各自"差一点"，差的又正好互补，却没有任何一处把它们合起来。
+ *
+ * 顺序本身有意义：
+ * 1. **自动交叉淡化**（`syncAutoCrossfadeFromLatestTimeline`）—— 它读的是**几何**
+ *    （两条 clip 是否重叠），而几何在导入回执那一刻就已经有了（`clipIds` 就是它）；
+ *    它会在写回后重取一次时间线，所以必须排在规格化**之前**，否则规格化读到的是
+ *    淡化前的 `length_sec`。
+ * 2. **导入后规格化**（`normalizeImportedClips`）—— 它需要 `source_path`，因此只能在
+ *    "这条 clip 已经带源"之后跑：立即路天然满足，转正路要等 `import_ready`。
+ *
+ * 将来再加一步后处理，只要加在这里，两条路同时得到。
+ *
+ * @param args.clipIds 本次导入**新出现**的 clip（回执或 `import_ready` 给出的 id）。
+ * @param args.timeline 基线快照：立即路是回执时间线，转正路是刚取的那份。
+ * @param args.latest 已经确认比 `timeline` 新、且包含本次 clip 的快照（转正路）；
+ *   给了就不再重取一次时间线。
+ */
+async function runPostImportPipeline(args: {
+    dispatch: PostImportDispatch;
+    getState: () => unknown;
+    clipIds: string[];
+    timeline: unknown;
+    latest?: unknown;
+    normalize: boolean;
+    cancelled: () => boolean;
+}): Promise<unknown> {
+    const { dispatch, getState, clipIds, normalize, cancelled } = args;
+    let current: unknown = args.latest ?? args.timeline;
+    const crossfaded = await syncAutoCrossfadeFromLatestTimeline({
+        dispatch: dispatch as unknown as (
+            action: unknown,
+        ) => Promise<unknown> & { unwrap: () => Promise<unknown> },
+        getState,
+        newClipIds: clipIds,
+        latest: args.latest,
+    });
+    if (cancelled()) return current;
+    if (crossfaded) current = crossfaded;
+    if (normalize && clipIds.length > 0) {
+        current = await normalizeImportedClips({
+            dispatch,
+            timeline: current,
+            clipIds,
+            cancelled,
+        });
+    }
+    return current;
+}
+
 /**
  * 宿主终于认领了那条待定导入：清账、重取时间线、补做延后的规格化。
  *
@@ -327,13 +395,25 @@ export const completePendingImport = createAsyncThunk(
         if (timeline?.ok) {
             dispatch(applyTimelinePayload(timeline));
         }
-        if (clipId && record?.normalizeAfterImport) {
-            await normalizeImportedClips({
-                dispatch: dispatch as unknown as NormalizeDispatch,
-                timeline: timeline ?? undefined,
+        if (clipId) {
+            // 【与立即成功那条路**同一份**后处理】这里此前只补了规格化，于是"导入后
+            // 自动交叉淡化"在 REAPER 的每一次导入里都缺席（它 100% 走这条路）。
+            // `latest` 传的就是上面刚取的那份：不要为同一次转正取两遍同一份快照。
+            const latest = await runPostImportPipeline({
+                dispatch: dispatch as unknown as PostImportDispatch,
+                getState,
                 clipIds: [clipId],
+                timeline: timeline ?? undefined,
+                latest: timeline ?? undefined,
+                normalize: record?.normalizeAfterImport === true,
                 cancelled: () => false,
             });
+            // 【为什么还要再套一次】管线会写回淡化/增益并**重取**一次时间线；那份快照
+            // 比上面 apply 过的新。直接返回它给 reducer 才能让 UI 与后端同一步，
+            // 否则淡化的回声要等下一次 full-refresh 才追上。
+            if (latest && latest !== timeline && (latest as { ok?: boolean }).ok) {
+                dispatch(applyTimelinePayload(latest as TimelineResult));
+            }
         }
         dispatch(importReady({ item: payload.item, clipId }));
         return { ok: true, clipId };
@@ -583,29 +663,23 @@ export const importAudioAtPosition = createAsyncThunk(
                 );
             }
 
-            let latestTimeline = await syncAutoCrossfadeFromLatestTimeline({
-                dispatch: dispatch as unknown as (
-                    action: unknown,
-                ) => Promise<unknown> & { unwrap: () => Promise<unknown> },
-                getState,
-                newClipIds,
-            });
-            // 自动交叉淡化 / 重取时间线在途期间被撤销：不得把快照带回去。
+            // 【待定时不跑后处理】这一刻时间线里还没有这条 clip（回执只是"宿主已经建了
+            // item"），自动交叉淡化会算在空集合上、规格化拿不到 `source_path`。硬跑
+            // 等于把"导入前 + 一个占位"那份快照当成最终结果带回去 —— 那正是两条路
+            // 语义分叉的起点。转正时 `completePendingImport` 会跑**同一条**管线。
+            const latestTimeline = importPending
+                ? null
+                : await runPostImportPipeline({
+                      dispatch: dispatch as unknown as PostImportDispatch,
+                      getState,
+                      clipIds: newClipIds,
+                      timeline: imported,
+                      normalize: payload.normalizeAfterImport === true,
+                      cancelled: () => isImportCancelled(importGen),
+                  });
+            // 后处理在途期间被撤销：不得把快照带回去。
             if (isImportCancelled(importGen)) {
                 return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
-            }
-
-            if (payload.normalizeAfterImport && newClipIds.length > 0 && !importPending) {
-                latestTimeline = (await normalizeImportedClips({
-                    dispatch: dispatch as unknown as NormalizeDispatch,
-                    timeline: latestTimeline ?? imported,
-                    clipIds: newClipIds,
-                    cancelled: () => isImportCancelled(importGen),
-                })) as typeof latestTimeline;
-                // 规格化在途期间被撤销：不得把快照带回去。
-                if (isImportCancelled(importGen)) {
-                    return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
-                }
             }
 
             // 导入后将光标定位到第一个音频块的起始位置。必须以独立字段交给
