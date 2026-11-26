@@ -7773,6 +7773,102 @@ pub mod tests {
         );
     }
 
+    /// **回归：一次装配发布不许让已经发布的淡变闪回 0。**
+    ///
+    /// 【现场原形】REAPER ARA 拖动 item：`[ara] item map` 在 `unbound=0` 与
+    /// `unbound=1` 之间来回（≈4.5 次/秒）。每来回一次就是一次完整的装配发布，而
+    /// `clip_ids` 跟着变（挂不上的那条 region 从表里消失）⇒ `document.revision` 前进
+    /// 一步 ⇒ `cached_geometry` 的判据失效 ⇒ `ui_fade_projection` 这一轮一条都覆盖
+    /// 不到。旧实现把那份「覆盖 0 条」的时间线**整份**盖到界面上，于是所有 clip 的
+    /// 淡变同时闪回 0 长度，下一拍缓存有效时才恢复。
+    ///
+    /// 【这条用例钉的是组合，不是任何一行】淡变值在装配层就已经丢了（见
+    /// `assembly::inherit_presentation`），而闪回发生在「空投影被当成 0 投影」这一步。
+    /// 两个修法各管一半，缺任何一个这条用例都会红。
+    #[test]
+    fn an_assembly_publish_never_flashes_the_gui_fades_to_zero() {
+        let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
+        let document = model.session();
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        unsafe {
+            owners[0].bind_host_adapter(host.context());
+        }
+        // 清单：一条轨、一个 item。`present_host_inventory` 是 GUI 淡变在非 ARA 侧的
+        // 唯一写者，而它读的就是这份 `UiItem.geometry`。
+        let api = Arc::new(host.client());
+        let mut track = api.ui_track(&|| true).unwrap();
+        track.items.truncate(1);
+        document
+            .ui_tracks
+            .lock_or_recover()
+            .insert(track.guid.clone(), track);
+        document.ui_geometry_revision.fetch_add(1, Ordering::AcqRel);
+        // 让装配真的跑一次：夹具的文档时间线里已经有 clip，而装配器只在
+        // 「ARA 模型交付过」之后才允许覆盖它。
+        document.ara_model_seen.store(true, Ordering::Release);
+        document.note_assembly_input_changed();
+        document.flush_pending_assembly();
+        // 【旧实现盖上去的那个值】装配产出的 clip 淡变恒为 0（输入 `ItemRow` 里没有
+        // 这些字段），而旧实现把整份工作区时间线覆盖到界面上 —— 盖的就是这个 0。
+        {
+            let timeline = document.timeline.lock_or_recover();
+            let timeline = timeline.as_ref().expect("装配必须发布一份时间线");
+            let zeroed = timeline
+                .clips
+                .iter()
+                .filter(|clip| clip.id.starts_with("ara-item-"))
+                .collect::<Vec<_>>();
+            assert!(!zeroed.is_empty(), "装配必须为清单里的 item 产出一条 clip");
+            for clip in zeroed {
+                assert_eq!(clip.fade_in_sec, 0.0, "装配产物的淡变是「没有观测」，不是观测到 0");
+            }
+        }
+        let editor = owners[0].editor_session().unwrap();
+        let read = |editor: &EditorSession| {
+            let timeline = editor.timeline.lock_or_recover();
+            timeline
+                .clips
+                .iter()
+                .map(|clip| {
+                    (
+                        clip.fade_in_sec,
+                        clip.fade_out_sec,
+                        clip.auto_fade_in_sec,
+                        clip.auto_fade_out_sec,
+                        clip.snap_offset_sec,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        editor.refresh_ui_geometry(&document, false);
+        let published = read(&editor);
+        assert!(
+            published
+                .iter()
+                .any(|(fade_in, _, _, _, _)| (*fade_in - 0.2).abs() < 1e-9),
+            "夹具必须先有宿主淡变，否则这条用例什么也没证明：{published:?}"
+        );
+
+        // 一次装配发布：`cached_geometry` 的判据是 `cached.model == document.revision`。
+        document.revision.fetch_add(1, Ordering::AcqRel);
+        document.note_presentation_changed();
+        assert_eq!(
+            document.ui_fade_projection().unwrap().covered(),
+            0,
+            "缓存失效的那一轮，宿主几何一条都说不出 —— 这正是闪回发生的窗口"
+        );
+        editor.refresh_ui_geometry(&document, false);
+
+        let after = read(&editor);
+        assert_eq!(
+            after, published,
+            "宿主几何这一轮一条都说不出时，界面必须保持已经发布的值"
+        );
+        editor.close();
+    }
     /// 两真实组件使用同源的不同区域，测试原actor而不是拼接UI快照。
     pub fn workspace_fixture() -> (ModelHandle, Vec<Arc<ExtensionOwner>>, Vec<Box<u8>>) {
         let (model, a, first) = fixture();

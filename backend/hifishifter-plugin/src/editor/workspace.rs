@@ -4758,4 +4758,126 @@ mod tests {
             "present_host_inventory 在有待定导入时没有返回：它在自己的 ui_tracks 作用域里又取了一次同一把锁"
         );
     }
+    // ── 稀疏淡变补丁（第八轮 §2.4.2 / §2.4.3）────────────────────────────
+
+    /// 两条 clip 的时间线，淡变都非 0 —— 补丁的对照组。
+    fn fade_timeline(ids: &[&str]) -> TimelineState {
+        serde_json::from_value(serde_json::json!({
+            "tracks": [{"id": "t", "name": "t", "order": 0}],
+            "clips": ids
+                .iter()
+                .map(|id| {
+                    serde_json::json!({
+                        "id": *id,
+                        "track_id": "t",
+                        "name": *id,
+                        "start_sec": 0.0,
+                        "length_sec": 1.0,
+                        "fade_in_sec": 0.25,
+                        "fade_out_sec": 0.5,
+                        "auto_fade_in_sec": 0.1,
+                        "snap_offset_sec": 0.125,
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "bpm": 120.0,
+            "project_sec": 1.0,
+        }))
+        .unwrap()
+    }
+
+    fn host_fields(fade_in: f64) -> ClipFadeFields {
+        ClipFadeFields {
+            gain: 1.0,
+            fade_in_sec: fade_in,
+            ..ClipFadeFields::default()
+        }
+    }
+
+    /// **回归：补丁只覆盖它说得出来的那几条。**
+    ///
+    /// 【现场原形】宿主几何缓存这一轮只覆盖了一部分 clip（其余还没求解出来）。旧实现
+    /// 交出的是一整份时间线，于是没覆盖到的那几条被写成装配刚产出的 0 —— 用户看到
+    /// 「只有一部分 clip 的淡变闪了」。
+    #[test]
+    fn a_partial_projection_never_overwrites_an_unprojected_clip() {
+        let mut timeline = fade_timeline(&["ui-ara-item-a", "ui-ara-item-b"]);
+        let projection = FadeProjection {
+            revision: 7,
+            expected: 2,
+            clips: [("ara-item-a".to_string(), host_fields(0.9))]
+                .into_iter()
+                .collect(),
+        };
+        apply_fade_projection(&mut timeline, &projection, "ui-");
+        assert_eq!(timeline.clips[0].fade_in_sec, 0.9, "覆盖到的那条按宿主更新");
+        assert_eq!(timeline.clips[1].fade_in_sec, 0.25, "没覆盖到的那条一个字都不许动");
+        assert_eq!(timeline.clips[1].fade_out_sec, 0.5);
+        assert_eq!(timeline.clips[1].auto_fade_in_sec, 0.1);
+        assert_eq!(timeline.clips[1].snap_offset_sec, 0.125);
+    }
+
+    /// 全覆盖时宿主值必须落地 —— 防止「为了不写 0 干脆不写」。
+    #[test]
+    fn a_full_projection_still_applies_the_host_values() {
+        let mut timeline = fade_timeline(&["ui-ara-item-a", "ui-ara-item-b"]);
+        let projection = FadeProjection {
+            revision: 9,
+            expected: 2,
+            clips: [
+                ("ara-item-a".to_string(), host_fields(0.9)),
+                ("ara-item-b".to_string(), host_fields(0.0)),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        assert_eq!(projection.covered(), 2);
+        apply_fade_projection(&mut timeline, &projection, "ui-");
+        assert_eq!(timeline.clips[0].fade_in_sec, 0.9);
+        assert_eq!(
+            timeline.clips[1].fade_in_sec, 0.0,
+            "宿主**明确说** 0 的时候必须写 0：空补丁与 0 值补丁是两件事"
+        );
+    }
+
+    /// **本轮的契约：空补丁 ≠ 全 0 补丁。**
+    ///
+    /// 【为什么这条是本轮的核心】旧实现把「这一轮没有几何」表达成「一整份淡变为 0 的
+    /// 时间线」，于是「没有答案」被读成「答案是 0」。这条用例把两者钉成不同的类型：
+    /// `clips` 为空 ⇒ 一个字段都不许变。
+    #[test]
+    fn an_empty_projection_is_not_a_zero_projection() {
+        let before = fade_timeline(&["ui-ara-item-a", "ui-ara-item-b"]);
+        let mut after = before.clone();
+        let projection = FadeProjection {
+            revision: 11,
+            expected: 2,
+            clips: std::collections::BTreeMap::new(),
+        };
+        assert_eq!(projection.covered(), 0);
+        assert!(projection.clips.is_empty(), "空补丁必须是空的，不是一份全 0 的时间线");
+        apply_fade_projection(&mut after, &projection, "ui-");
+        for (left, right) in before.clips.iter().zip(after.clips.iter()) {
+            assert_eq!(left.fade_in_sec, right.fade_in_sec);
+            assert_eq!(left.fade_out_sec, right.fade_out_sec);
+            assert_eq!(left.auto_fade_in_sec, right.auto_fade_in_sec);
+            assert_eq!(left.auto_fade_out_sec, right.auto_fade_out_sec);
+            assert_eq!(left.snap_offset_sec, right.snap_offset_sec);
+        }
+    }
+
+    /// 命名空间不匹配的 clip 永远不在补丁的管辖范围内（跨文档 / 跨实例的 id 不许互串）。
+    #[test]
+    fn a_clip_outside_the_namespace_is_never_touched() {
+        let mut timeline = fade_timeline(&["other-ara-item-a"]);
+        let projection = FadeProjection {
+            revision: 3,
+            expected: 1,
+            clips: [("ara-item-a".to_string(), host_fields(0.9))]
+                .into_iter()
+                .collect(),
+        };
+        apply_fade_projection(&mut timeline, &projection, "ui-");
+        assert_eq!(timeline.clips[0].fade_in_sec, 0.25);
+    }
 }
