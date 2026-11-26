@@ -1432,8 +1432,13 @@ fn build_session_inner(
         if role != OrtSessionRole::Game {
             match build_dml_session_inner(onnx_path, role, &choice, true, device) {
                 Ok((session, ep)) => return Ok((session, ep, device)),
-                Err(e) => log::error!(
-                    "ort_session[{role:?}]: strict DirectML failed (will retry with CPU fallback): {e}"
+                // 【为什么不是 ERROR】这是一次**策略尝试**的结果，不是一次失败：
+                // 严格模式要求整张图都能落在 DirectML 上，而只要图里有一个 CPU-only
+                // 节点，它必然被拒 —— 那是预期形状，紧随其后的回退构建通常就成功了。
+                // 用 ERROR 记它，等于把"失败后立刻成功"写进 ERROR 渠道：现场检索
+                // ERROR 的人会看到一条根本不需要行动的记录，而真正的失败在下面那一条。
+                Err(e) => log::info!(
+                    "ort_session[{role:?}]: strict DirectML unavailable, using DirectML with CPU fallback: {e}"
                 ),
             }
         }
