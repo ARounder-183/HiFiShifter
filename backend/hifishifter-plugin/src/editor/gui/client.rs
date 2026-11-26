@@ -234,7 +234,7 @@ pub(crate) struct EditorClient {
     /// 路由兜底是否已经试过（只试一次，见 [`try_route_fallback`]）。
     route_fallback_tried: bool,
     /// 就绪前的待发队列（见 `4.3`）。
-    queue: std::collections::VecDeque<String>,
+    queue: std::collections::VecDeque<(String, super::outbound::OutboundKind)>,
     /// 连续投递失败次数；页面进程死掉后它只增不减，是"视图该自毁"的唯一判据。
     post_failures: u32,
     /// 已经判定为死视图（投递连续失败或平台报告进程崩溃）。
@@ -745,8 +745,8 @@ impl EditorClient {
             "page ready after {}ms ({queued} queued)",
             self.opened_at.elapsed().as_millis()
         ));
-        while let Some(text) = self.queue.pop_front() {
-            if !self.deliver_text(&text) {
+        while let Some((text, kind)) = self.queue.pop_front() {
+            if !self.deliver_text(&text, kind) {
                 // 一条投不出去，后面的也排在同一条通道上；留着队列只会在下次
                 // `on_page_ready` 里重复失败。
                 self.queue.clear();
@@ -764,6 +764,7 @@ impl EditorClient {
             return false;
         }
         let text = value.to_string();
+        let kind = super::outbound::classify(&value);
         if !self.ready {
             if self.queue.len() >= QUEUE_BUDGET {
                 self.queue.pop_front();
@@ -780,14 +781,14 @@ impl EditorClient {
                     }
                 }
             }
-            self.queue.push_back(text);
+            self.queue.push_back((text, kind));
             return true;
         }
-        self.deliver_text(&text)
+        self.deliver_text(&text, kind)
     }
 
     /// 就绪之后的实际投递，顺带维护"连续失败"计数。
-    fn deliver_text(&mut self, text: &str) -> bool {
+    fn deliver_text(&mut self, text: &str, kind: super::outbound::OutboundKind) -> bool {
         let Some(port) = self.port.clone() else {
             // 端口还没接上：与"未就绪"同义，但不要再攒进队列（队列已经刷过了）。
             return false;
@@ -798,10 +799,17 @@ impl EditorClient {
             // 【为什么大消息要单独一行】它是唯一能在"渲染进程被一条消息打死"这类
             // 事故里指出**是哪一条**的读数。
             if text.len() >= BIG_MESSAGE_BYTES {
+                // 【为什么必须带种类与视图】没有这一位，"1.9 MB 是哪条消息"只能靠读源码
+                // 回答 —— 而它正是"渲染进程被一条消息打死"这类事故里唯一能定位的读数。
                 hifishifter_kernel::log_limiter::emit_limited_key(
                     log::Level::Warn,
                     "gui_big_outbound",
-                    format_args!("[gui] outbound big message bytes={}", text.len()),
+                    format_args!(
+                        "[gui] outbound big message bytes={} kind={} view={}",
+                        text.len(),
+                        kind.as_str(),
+                        self.view_id
+                    ),
                 );
             }
             return true;
@@ -1156,15 +1164,33 @@ fn report_outbound(state: &Rc<RefCell<EditorClient>>) {
 
 pub(crate) fn pump(state: &Rc<RefCell<EditorClient>>) {
     let link = state.borrow().link.clone();
-    let (mut replies, events) = {
+    let (mut replies, events, dropped) = {
         let state = state.borrow();
         if state.closed {
             return;
         }
-        let replies = state.replies.try_iter().take(32).collect::<Vec<_>>();
-        let events = state.events.try_iter().take(64).collect::<Vec<_>>();
-        (replies, events)
+        let replies = state
+            .replies
+            .try_iter()
+            .take(super::outbound::OUTBOUND_BATCH_REPLIES)
+            .collect::<Vec<_>>();
+        // 【为什么要把队列抽干】此前只取 64 条。队列积压时，"每拍取 64 条"就等于
+        // 把一份 1.9 MB 的洪峰摊到很多拍里 —— 而每一拍都还在宿主线程上阻塞一次。
+        // 抽干之后合并才有意义：100 条状态事件合成 1 条。
+        let (events, dropped) = super::outbound::coalesce_events(
+            state.events.try_iter().collect::<Vec<_>>(),
+            super::outbound::OUTBOUND_BATCH_BYTES,
+        );
+        (replies, events, dropped)
     };
+    if dropped > 0 {
+        // 【为什么必须报出来】"事件被预算丢掉"与"事件从没产生"在页面上完全同形。
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "gui_outbound_coalesced",
+            format_args!("[gui] outbound coalesced: dropped {dropped} superseded event(s)"),
+        );
+    }
     // 在宿主模型/PCM尚未ready的过渡期，保留原Promise。只排actor读取，不在UI做文件/推理。
     replies.retain_mut(|reply| {
         let Some(id)=reply["id"].as_u64() else {return true;};
@@ -3110,7 +3136,7 @@ mod startup_settings_tests {
                 "startup settings must not enter the session queue"
             );
             let reply: serde_json::Value =
-                serde_json::from_str(client.queue.back().expect("immediate response")).unwrap();
+                serde_json::from_str(&client.queue.back().expect("immediate response").0).unwrap();
             assert_eq!(
                 reply["ok"], true,
                 "{command} must work before the editor route binds"
