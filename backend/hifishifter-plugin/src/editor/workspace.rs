@@ -4384,7 +4384,9 @@ mod tests {
         });
         // ① 清单里还没有这条 item ⇒ 不转正（也不是失败，只是"还没轮到"）。
         assert!(
-            document.resolve_pending_imports(&document.import_claims()).is_empty(),
+            document
+                .resolve_pending_imports(&document.import_claims())
+                .is_empty(),
             "清单里没有它的时候不许凭空造一条 clip"
         );
         // ② 清单到了 ⇒ 同一轮就对账成功，并且给出的 id 是时间线里那一条。
@@ -4437,9 +4439,16 @@ mod tests {
         track.items = vec![item];
         let guid = track.guid.clone();
         document.ui_tracks.lock_or_recover().insert(guid, track);
-        assert_eq!(document.resolve_pending_imports(&document.import_claims()).len(), 1);
+        assert_eq!(
+            document
+                .resolve_pending_imports(&document.import_claims())
+                .len(),
+            1
+        );
         assert!(
-            document.resolve_pending_imports(&document.import_claims()).is_empty(),
+            document
+                .resolve_pending_imports(&document.import_claims())
+                .is_empty(),
             "同一条导入不许被转正两次"
         );
         document.close();
@@ -4536,7 +4545,10 @@ mod tests {
         other.id = "other".into();
         other.items[0].geometry.item_id = "{SOMETHING-ELSE}".into();
         let other_guid = other.guid.clone();
-        document.ui_tracks.lock_or_recover().insert(other_guid, other);
+        document
+            .ui_tracks
+            .lock_or_recover()
+            .insert(other_guid, other);
 
         document.begin_pending_import(crate::render::document::PendingImport {
             item: "{IMPORT-LATE}".into(),

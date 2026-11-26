@@ -337,7 +337,9 @@ mod tests {
     fn project_position_follows_the_clip_when_the_playhead_is_outside_it() {
         const RATE: i64 = 48_000;
         let cell = cell(&[segment(0, 1_581_056, 28 * RATE, 1)]);
-        let anchor = cell.anchor(893_720, AnchorPolicy::Auto).expect("必须有锚点");
+        let anchor = cell
+            .anchor(893_720, AnchorPolicy::Auto)
+            .expect("必须有锚点");
         assert_eq!(anchor.source, AnchorSource::Clip);
         assert_eq!(anchor.project(0), Some(28 * RATE));
         assert_eq!(anchor.project(RATE), Some(29 * RATE));
@@ -360,7 +362,9 @@ mod tests {
         const CLIP_START: i64 = 15 * RATE;
         const PLAYHEAD: i64 = 1_614_000; // 33.625 s
         let cell = cell(&[segment(0, 1_568_768, CLIP_START, 1)]);
-        let anchor = cell.anchor(PLAYHEAD, AnchorPolicy::Auto).expect("必须有锚点");
+        let anchor = cell
+            .anchor(PLAYHEAD, AnchorPolicy::Auto)
+            .expect("必须有锚点");
         assert_eq!(anchor.source, AnchorSource::Playhead);
         assert_eq!(anchor.project(0), Some(PLAYHEAD));
         assert_eq!(anchor.project(9_040), Some(PLAYHEAD + 9_040));
@@ -442,7 +446,8 @@ mod tests {
         cell.publish(9, &[segment(0, 2_000, 20_000, 2)]);
         assert_eq!(cell.revision(), 9);
         assert_eq!(
-            cell.anchor(20_000, AnchorPolicy::Auto).map(|a| a.project(1_500)),
+            cell.anchor(20_000, AnchorPolicy::Auto)
+                .map(|a| a.project(1_500)),
             Some(Some(21_500))
         );
         // 旧表覆盖磁带 [0, 1000)；新表覆盖 [0, 2000)。2 500 帧只在新表之外 ——

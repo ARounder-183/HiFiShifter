@@ -3031,7 +3031,8 @@ impl DocumentSession {
     #[track_caller]
     pub(crate) fn ui_tracks_guard(
         &self,
-    ) -> crate::sync::TrackedGuard<'_, std::collections::BTreeMap<String, crate::host::UiTrack>> {
+    ) -> crate::sync::TrackedGuard<'_, std::collections::BTreeMap<String, crate::host::UiTrack>>
+    {
         crate::sync::lock_tracked(&self.ui_tracks)
     }
 

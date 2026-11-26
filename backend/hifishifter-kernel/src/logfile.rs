@@ -472,7 +472,8 @@ impl RotatingLog {
         self.lines_written += 1;
         // 【两道闸：字节数与时间】字节数挡住"刷屏把磁盘打满"，时间挡住"刷屏之后突然
         // 什么都不写了" —— 后者正是挂起的形状（见 `FLUSH_MAX_AGE`）。
-        if self.buffer.len() >= FLUSH_THRESHOLD_BYTES || self.last_flush.elapsed() >= self.flush_after
+        if self.buffer.len() >= FLUSH_THRESHOLD_BYTES
+            || self.last_flush.elapsed() >= self.flush_after
         {
             self.flush_now()?;
         }
