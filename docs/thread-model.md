@@ -189,6 +189,46 @@ ARA 明说播放请求 "typically scheduled and executed with some delay"
 带退避），并且 `acquire` 只在自己真的加了一个引用时才让调用方在析构里减计数
 —— 否则"宿主拒绝"会被记成"挂上了"，节拍照样没挂却再也不会被摘。
 
+### 7.5 喂入流的工程锚点：一个读数什么时候算数
+
+捕获形态下有两个域，它们不许互相赋值：
+
+* **喂入域**（磁带位置）= 这条喂入流喂进来多少帧，永远从 0 起；
+* **工程域** = 这一帧在工程里落在哪一秒。
+
+把前者翻译成后者需要**一个数**：喂入域第 0 帧在工程第几帧。第六轮之前这个数藏在
+映射公式里（隐含假设 = 片段起点），于是"它到底是什么"没有人能审阅、断言，也没有任何
+一行日志说出来。`FeedAnchor` 把它提成一个有来源、有日志、有测试的值。
+
+| 宿主在做什么 | 首块 `projectTimeSamples` 是什么 | 锚点 |
+|---|---|---|
+| 播放预览（VEGAS 的预卷：`kPlaying=0`、位置钉住、内容在流动） | **播放头** —— 它从当前光标开始喂，片段起点只是这段内容在工程里的落点 | 宿主读数 |
+| Render As | **上一次的播放头** —— 既不是片段起点，也不是渲染范围起点 | 片段起点 |
+| 从片段起点起播 | 两者相同 | 两者同值（逐帧相同） |
+
+判据只有一个可观测的问题：**它落在片段的工程窗口里吗**。落在里面 ⇒ 它是个合法的
+播放头；落在外面 ⇒ 它显然不是"这一段内容现在的位置"。
+
+现场读数（VEGAS，片段在 15.000 s，播放头 33.625 s，预卷 9 040 帧）：
+
+```text
+（第六轮之前：读的是片段起点）
+[capture] feed begin kind=pinned raw=1614000 tape=23488 frames=960 project=743488 mapping=clip anchor=clip first_raw=1614000
+（第六轮：读的是播放头）
+[capture] feed begin kind=pinned raw=1614000 tape=23488 frames=960 project=1637488 mapping=clip anchor=playhead first_raw=1614000
+```
+
+那 743 488（15.489 s）对应的工程位置，而宿主正在播 33.625 s —— 差正好是
+`playhead − clip_start = 894 000` 帧，与 `[click] … jump=894000` 逐帧吻合。
+听感就是"起播 1 s 内放的是片段起点的处理结果"，直到 `kPlaying` 升起、喂入流切回
+传输域才恢复。
+
+`HFS_CAPTURE_ANCHOR=auto|playhead|clip` 让现场一键对照三种答案；`feed begin` 的
+`anchor=` 是"这一块用了哪条证据"的读数。
+
+**这一节和 §9 是同一条纪律的两面**：位置和锁一样，都只能有一个权威，而且那个权威
+必须能被单独指认。
+
 ## 8. 让路：目标、保真度与焦点租借
 
 ### 8.1 三级目标，每一级都有证据
@@ -275,7 +315,8 @@ host thread: 在 on_message 里等 timeline 写锁
 | 角色标记 | `host::thread_mark::RoleGuard` | 让"本线程是宿主线程"可判定 |
 | 长锁闸 | `host::thread_mark::host_thread_may_not_lock` | `HFS_HOST_LOCK=probe`（默认，只记读数）/ `refuse`（拒绝）/ `allow`（静默放行） |
 | 静态门禁 | `scripts/checks/check-host-thread-locks.py` | `on_message` 里出现任何互斥量、ARA 回调里出现 `self.timeline.lock` 即失败；正反两向自检 |
-| 停滞看门狗 | `host::stall_watch` | 采样型：一次**永不返回**的宿主调用也会被点名（`Drop` 型守卫看不见它） |
+| 停滞看门狗 | `host::stall_watch` | 采样型：一次**永不返回**的宿主调用也会被点名（`Drop` 型守卫看不见它）；点名之后立刻落盘 |
+| 重入探针 | `plugin_core::sync::lock_tracked` | 调试构建下同一线程二次取同一把锁**当场点名**（报两处 file:line）；`ui_tracks` 的所有访问都走它 |
 | 心跳预算 | `HFS_NOTIFY_BUDGET_MS` | `notifyModelUpdates` 单次调用的时间上界 |
 
 ### 9.5 推论：不要用 Drop 型守卫证明"没有挂起"
@@ -305,3 +346,26 @@ host thread: 在 on_message 里等 timeline 写锁
 同理，`[gui] outbound big message` 只补了 `kind=` 与 `view=`，没有 `part=i/n`：
 本端口只能投递**整条 JSON 字符串**，切片会让页面收到半个对象。要减小单条消息，
 唯一的办法是让上游少发 / 发小（本轮的做法），而不是在投递层切开。
+
+### 9.7 推论：会取锁的函数不许被持锁的作用域调用
+
+第五轮把"宿主线程不取锁"立成了不变量，但第六轮又栽在同一类形状上，只是换了一条
+线程：`present_host_inventory` 从 `ui_tracks.lock_or_recover()` 那一行起整段持有
+guard，并在函数末尾调**待定导入对账**；对账为了回答"这条 item 在不在清单里"**又取了
+一次同一把表**。`std::sync::Mutex` 不可重入 ⇒ 同一线程自锁 ⇒ 导入成功之后宿主整机
+未响应（Windows 记 `AppHangB1`），状态栏那条 `plugin_get_apply_state` 只是宿主停止
+泵消息 **30 秒之后**才浮现的读数。
+
+这一条不是"小心一点"能防的：自锁的形状与"什么都没发生"完全同形（进程安静地冻住、
+日志里一个字都没有）。所以三层都要有：
+
+| 层 | 做法 | 保证 |
+|---|---|---|
+| 结构 | 对账器的输入是 `ImportClaims`（**数据**：清单里的 item、region→clip、region→item），它手里没有表 | 结构上不可能再取锁 |
+| 防御 | 对账内部每一次取锁都是 `try_lock_or_recover`；拿不到就跳过这一轮并落一行 `[import] reconcile skipped` | 万一又出现嵌套，结果是一行字而不是挂死 |
+| 诊断 | `lock_tracked` 在调试构建里让重入点名；静态门禁禁止"对账器取阻塞锁"与"清单函数在 guard 里对账" | 下一次改动不会静默复发 |
+
+对账**跳过**是安全的：它在每一次 ARA 发布、每一次清单刷新时都会再跑一遍，
+"这一轮不动"没有任何语义代价 —— 这正是它可以用 `try_lock` 的前提。
+`begin_pending_import` 是唯一的例外（阻塞取锁）：它是**写**，丢掉登记就等于丢掉了
+这条导入，而账本是叶子锁（持有者只做算术，不取别的锁、不做 I/O、不投递）。
