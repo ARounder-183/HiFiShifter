@@ -33,6 +33,50 @@ fn record(owner: &Arc<ExtensionOwner>, frames: usize) {
     owner.capture().stop().unwrap();
 }
 
+/// **不变量：渲染那一趟即使开着监听也不直通。**
+///
+/// 【现场原形】VEGAS 的 Render As 不置 kOffline，于是旧判据 monitor && !offline
+/// 在渲染那一趟为真 ⇒ 直通把输入原声写进产物。
+#[test]
+fn a_render_with_monitor_does_not_pass_through() {
+    let mut evidence = super::BlockEvidence::default();
+    evidence.playing = false;
+    evidence.start_window = false;
+    assert!(
+        !super::playback::live_monitor_allowed(true, false, super::CapturePassKind::Render, Some(evidence)),
+        "被判成渲染的那一遍不得直通"
+    );
+}
+
+/// **不变量：实时监听照旧直通。**
+#[test]
+fn a_realtime_monitor_still_passes_through() {
+    let mut evidence = super::BlockEvidence::default();
+    evidence.playing = true;
+    assert!(super::playback::live_monitor_allowed(
+        true,
+        false,
+        super::CapturePassKind::Realtime,
+        Some(evidence)
+    ));
+    // 起播窗口里 kPlaying 还没升起，但窗口本身是"这一块会被播出来"的证据。
+    let mut rising = super::BlockEvidence::default();
+    rising.start_window = true;
+    assert!(super::playback::live_monitor_allowed(
+        true,
+        false,
+        super::CapturePassKind::Realtime,
+        Some(rising)
+    ));
+    // 宿主明说离线：绝不直通。
+    assert!(!super::playback::live_monitor_allowed(
+        true,
+        true,
+        super::CapturePassKind::Realtime,
+        Some(evidence)
+    ));
+}
+
 /// 在工程 start 帧处录一段并 promote 成一个 take。
 ///
 /// 【为什么要能指定起点】本轮两个现象都只在「片段不在工程 0」时出现：预览里片段在

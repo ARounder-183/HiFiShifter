@@ -697,14 +697,23 @@ impl ExtensionOwner {
                 }
                 // 【为什么敢在音频线程 log】与 `processing_pass` 的同名行同一条纪律：
                 // 一次 pass 只有一行（现场 1/s），不是一块一行。
+                // 【这一遍是渲染还是实时监听】见 `CapturePassKind`。`speed=` 是判据的
+                // 直接证据：没有它，"这一遍是不是渲染"永远只能靠猜。
                 log::info!(
-                    "[capture] pass begin stream={} pass={} reason={} raw={} local={} frames={}",
+                    "[capture] pass begin stream={} pass={} reason={} raw={} local={} frames={} \
+                     kind={} speed={} fed={}",
                     stream.as_str(),
                     geometry.pass.load(Ordering::Acquire),
                     reason.as_str(),
                     raw_start,
                     position,
                     frames,
+                    self.processing_pass.pass_kind().as_str(),
+                    self.processing_pass
+                        .feed_speed()
+                        .map(|speed| format!("{speed:.0}x"))
+                        .unwrap_or_else(|| "n/a".to_owned()),
+                    self.processing_pass.feed_total_frames(),
                 );
             } else if time_base_switch {
                 // 【时间基切换：把整条流挪到新域里】不是 seek，不能新开段。
@@ -1521,6 +1530,16 @@ impl ExtensionOwner {
         // 实时流“在前进”的证据（用户听到的开头小段循环）。
         // 【处理 pass 必须先于 HostClock】mode=0 的冻结预览 raw 固定、kPlaying=0；
         // 若先走实时会话，它会在 1 秒起播窗口后被判成 Paused，预览永远只录 1 秒。
+        // 【这一遍是渲染还是实时监听】见 `CapturePassKind`。只喂实时流：prefetch 与
+        // offline 的节奏不是"宿主在按墙钟喂我们"，它们的速度不说明任何事。
+        if stream == ProcessStream::Realtime {
+            self.processing_pass.note_feed_progress(
+                u32::try_from(block.frames).unwrap_or(u32::MAX),
+                rate,
+                self.processing_pass.is_offline(),
+                playing,
+            );
+        }
         let stream_time = StreamTime::from_context(&context);
         let phase_before = SessionPhase::from_code(
             self.streams[stream.index()]
@@ -2276,7 +2295,22 @@ impl ExtensionOwner {
                 // **输入原声**写进产物 —— 而用户会把它当成"处理后的结果"，那是最难发现的一类
                 // 错误。静音是诚实的：这一趟的唯一作用是把素材拿进来；第二趟（解除武装后再
                 // 导出）才是结果。实时播放则照旧监听，因为用户要听到自己正在录的东西。
-                if options.monitor && !offline {
+                //
+                // 【为什么 `!offline` 一个人不够】VEGAS 的 Render As **不置** `kOffline`
+                // （现场整段 `setupProcessing mode=0`），于是"监视"这一位在渲染那一趟也为真
+                // ⇒ 直通把输入原声写进产物。判据补上两条**宿主行为的正证据**：
+                //
+                //   * `pass_kind == Realtime`：这一遍没被速度 / 长度判成渲染；
+                //   * `host_is_live`：宿主说它在播，或起播窗口还开着 —— "这一块会被真的
+                //     播出来"。渲染那一趟 `kPlaying` 全程为 0，窗口 1 秒后就用掉了。
+                //
+                // 两条都成立才监听。`HFS_PASS_KIND=off` 只关掉前一条（回到第三轮的判据）。
+                if live_monitor_allowed(
+                    options.monitor,
+                    offline,
+                    self.processing_pass.pass_kind(),
+                    evidence,
+                ) {
                     // SAFETY: 与上面同一份数据；`pass_through` 自己会校验形状。
                     let _ = unsafe { block.pass_through() };
                     self.note_emitted(evidence);
@@ -2321,6 +2355,31 @@ impl ExtensionOwner {
         }
     }
 }
+/// 录制中这一块该不该直通（= 让用户听到自己正在录的东西）。
+///
+/// 【为什么是一个纯函数】它是"渲染产物里混进输入原声"的唯一判据，而那条缺陷的
+/// 现场读数与正确行为**完全同形**（都是 `output=recording`）。把它提成纯函数，
+/// 三种形状（实时监听 / 渲染 / 宿主明说离线）就能被逐个断言。
+///
+/// 三条同时成立才监听：
+///
+///   * `monitor`：用户打开了监听；
+///   * `!offline`：宿主明说这是离线渲染；
+///   * `host_is_live`：宿主说它在播，或起播窗口还开着 —— "这一块会被真的播出来"；
+///   * `pass_kind == Realtime`：这一遍没有被速度 / 长度判成渲染。
+pub(super) fn live_monitor_allowed(
+    monitor: bool,
+    offline: bool,
+    pass_kind: CapturePassKind,
+    evidence: Option<BlockEvidence>,
+) -> bool {
+    if !monitor || offline {
+        return false;
+    }
+    let host_is_live = evidence.is_none_or(|evidence| evidence.playing || evidence.start_window);
+    host_is_live && (pass_kind == CapturePassKind::Realtime || !pass_kind_enabled())
+}
+
 /// 工程位置的诊断写法（`n/a` = 映射还没发布）。
 fn format_project_position(position: i64) -> String {
     if position == NO_POSITION {

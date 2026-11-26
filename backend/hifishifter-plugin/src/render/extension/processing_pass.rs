@@ -51,6 +51,77 @@ impl ProcessingKind {
     }
 }
 
+/// 这一遍是**渲染**还是**实时监听**。
+///
+/// 【为什么不能只看 `kOffline`】VEGAS 的 Render As **不置** `kOffline`：现场整段渲染
+/// 里 `setupProcessing mode=0`、`stream=realtime`，一次 `mode=2` 都没有。于是
+/// "离线"这一位在渲染那一趟是假的，而它决定的输出是"直通 vs 静音" ——
+/// 直通会把**输入原声**写进产物，用户会把它当成"处理后的结果"。
+///
+/// 【为什么这三个判据是"可观测证据"而不是猜测】三条都是宿主行为的直接读数：
+///
+///   * **喂入速度**：单位墙钟时间内喂进来的帧数 / 采样率。现场一次渲染是
+///     1 520 704 帧 / 365 ms ≈ **4 165 倍实时**；实时播放恒为 1×。
+///   * **喂入长度**：`kPlaying` 全程为 0、而这条喂入流已经超过起点窗口（1 s）。
+///     实时监听不会有这个形状（真播放会升起 `kPlaying`）。
+///   * **宿主置位**：`is_offline` / `setupProcessMode == 2`（愿意说真话的宿主）。
+///
+/// 三条任一成立即判渲染，且**整遍不变**（与 `render_run` 同一生命周期）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum CapturePassKind {
+    #[default]
+    Realtime,
+    Render,
+}
+
+impl CapturePassKind {
+    pub(crate) fn code(self) -> u8 {
+        match self {
+            Self::Realtime => 0,
+            Self::Render => 1,
+        }
+    }
+
+    pub(crate) fn from_code(code: u8) -> Self {
+        match code {
+            1 => Self::Render,
+            _ => Self::Realtime,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Realtime => "realtime",
+            Self::Render => "render",
+        }
+    }
+}
+
+/// 判"这一遍是渲染"的喂入速度阈值（倍实时）。
+///
+/// 【为什么是 4】实时播放的抖动不会超过 2×（宿主缓冲 + 一次 seek 的追赶）；4× 已经
+/// 只可能来自"不按墙钟喂"的渲染。现场实测 4 165×，与 4 之间有三个数量级的余量。
+pub(crate) const RENDER_SPEED_X: f64 = 4.0;
+
+/// 速度判据的采样窗口（毫秒）。太短会被单块抖动放大，太长会让判据迟迟不生效。
+const FEED_SPEED_WINDOW_MS: u64 = 250;
+
+/// 判"这一遍是渲染"的喂入长度（秒）。见 `CapturePassKind` 的第二条判据。
+const RENDER_LENGTH_SEC: f64 = 1.0;
+
+/// 这一组判据的行为开关（环境变量 `HFS_PASS_KIND=off` 关闭）。
+///
+/// 【为什么要有】`CapturePassKind` 决定"录制中的输出是直通还是静音"。判据有三条、
+/// 全部来自宿主读数，但"某个宿主的块序列恰好长得像渲染"这种误判在离线环境里无法
+/// 穷举。留一个一键退回旧判据（只看 `kOffline`）的开关，与 `HFS_PINNED_FEED` /
+/// `HFS_RENDER_RUN` 同一条纪律。
+pub(crate) fn pass_kind_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !std::env::var("HFS_PASS_KIND").is_ok_and(|value| value == "0" || value == "off")
+    })
+}
+
 /// 预览 pass 的相位。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(crate) enum PreviewPhase {
@@ -365,6 +436,17 @@ pub(crate) struct ProcessingPass {
     last_begin_ms: AtomicU64,
     /// 距上一次 `begin` 的间隔（毫秒；`pass begin` 的诊断字段）。
     pass_gap_ms: AtomicU64,
+    // ── 这一遍是渲染还是实时监听（见 `CapturePassKind`）──────────────────
+    /// 本遍的判定结果（`CapturePassKind::code`）。一旦置成 Render 就不再回落。
+    pass_kind: AtomicU8,
+    /// 速度判据的窗口起点（相对进程纪元的毫秒；0 = 窗口还没开）。
+    feed_window_started_ms: AtomicU64,
+    /// 本窗口内已经喂进来的帧数。
+    feed_window_frames: AtomicU64,
+    /// 本遍累计喂进来的帧数（第三条判据与诊断用）。
+    feed_total_frames: AtomicU64,
+    /// 最近一次算出的喂入速度（× 100，即 `416500` = 4165×；0 = 还没算出来）。
+    feed_speed_x100: AtomicU64,
 }
 
 /// 渲染 run 的**行为**开关（环境变量 `HFS_RENDER_RUN=0` 关闭）。
@@ -979,9 +1061,97 @@ impl ProcessingPass {
                 .store(sample_rate.round() as u32, Ordering::Release);
         }
         self.last_at_ms.store(now_ms(), Ordering::Release);
+        // 【这一遍的种类从零开始判】它是"整遍不变"的结论，不能从上一条流继承。
+        self.pass_kind.store(CapturePassKind::Realtime.code(), Ordering::Release);
+        self.feed_window_started_ms.store(0, Ordering::Release);
+        self.feed_window_frames.store(0, Ordering::Release);
+        self.feed_total_frames.store(0, Ordering::Release);
+        self.feed_speed_x100.store(0, Ordering::Release);
         // 离线从 Active 开始；预览由调用方覆盖成 Candidate。
         self.phase
             .store(PreviewPhase::Active.code(), Ordering::Release);
+    }
+
+    /// 本遍是渲染还是实时监听。
+    pub(crate) fn pass_kind(&self) -> CapturePassKind {
+        CapturePassKind::from_code(self.pass_kind.load(Ordering::Acquire))
+    }
+
+    /// 最近一次算出的喂入速度（倍实时；`None` = 还没算出来）。
+    pub(crate) fn feed_speed(&self) -> Option<f64> {
+        let value = self.feed_speed_x100.load(Ordering::Acquire);
+        (value > 0).then(|| value as f64 / 100.0)
+    }
+
+    /// 本遍累计喂进来的帧数。
+    pub(crate) fn feed_total_frames(&self) -> u64 {
+        self.feed_total_frames.load(Ordering::Acquire)
+    }
+
+    /// 记一次喂入进度，并（在有证据时）把这一遍判成渲染。
+    ///
+    /// 【为什么在音频线程上只做原子写】这是每个音频块都会走到的路径。窗口到期时才
+    /// 算一次除法（每 250 ms 一次），其余时候只是两次 `fetch_add`。
+    pub(crate) fn note_feed_progress(
+        &self,
+        frames: u32,
+        sample_rate: f64,
+        offline: bool,
+        playing: bool,
+    ) {
+        // 【实时播放永远不是渲染】这一句必须排在最前：宿主真实播放时 `kPlaying` 是 1，
+        // 而渲染那一趟全程是 0。把它当"可能是渲染"去算速度，会让一次正常的缓冲突发
+        // 把实时监听判成渲染 ⇒ 录制中输出被静音。
+        if playing && !offline {
+            self.pass_kind
+                .store(CapturePassKind::Realtime.code(), Ordering::Release);
+            self.feed_window_started_ms.store(0, Ordering::Release);
+            self.feed_window_frames.store(0, Ordering::Release);
+            self.feed_total_frames.store(0, Ordering::Release);
+            return;
+        }
+        if offline {
+            self.pass_kind
+                .store(CapturePassKind::Render.code(), Ordering::Release);
+        }
+        let frames = u64::from(frames);
+        let total = self.feed_total_frames.fetch_add(frames, Ordering::AcqRel) + frames;
+        let rate = if sample_rate.is_finite() && sample_rate > 0.0 {
+            sample_rate
+        } else {
+            48_000.0
+        };
+        // 【第二条判据：喂入长度】`kPlaying` 全程为 0 的喂入流已经超过 1 秒的起点
+        // 窗口 —— 实时监听不会有这个形状（真播放会升起 kPlaying）。
+        if total as f64 > rate * RENDER_LENGTH_SEC {
+            self.pass_kind
+                .store(CapturePassKind::Render.code(), Ordering::Release);
+        }
+        // 【第一条判据：喂入速度】窗口到期时算一次。
+        let now = now_ms();
+        let started = self.feed_window_started_ms.load(Ordering::Acquire);
+        if started == 0 {
+            self.feed_window_started_ms.store(now, Ordering::Release);
+            self.feed_window_frames.store(frames, Ordering::Release);
+            return;
+        }
+        let window_frames = self
+            .feed_window_frames
+            .fetch_add(frames, Ordering::AcqRel)
+            .saturating_add(frames);
+        let elapsed = now.saturating_sub(started);
+        if elapsed < FEED_SPEED_WINDOW_MS {
+            return;
+        }
+        let speed = window_frames as f64 / (elapsed as f64 / 1000.0) / rate;
+        self.feed_speed_x100
+            .store((speed * 100.0) as u64, Ordering::Release);
+        if speed > RENDER_SPEED_X {
+            self.pass_kind
+                .store(CapturePassKind::Render.code(), Ordering::Release);
+        }
+        self.feed_window_started_ms.store(now, Ordering::Release);
+        self.feed_window_frames.store(0, Ordering::Release);
     }
 
     /// `setProcessing(false)` / 组件失活：保留 cursor 与 origin。
@@ -1274,6 +1444,57 @@ mod tests {
 
     fn sequence() -> AtomicU64 {
         AtomicU64::new(0)
+    }
+
+    /// **判据：喂 30 秒音频只花 1/1000 的墙钟时间 ⇒ 这是渲染。**
+    ///
+    /// 【现场原形】VEGAS Render As 把 1 520 704 帧（31.68 s）在 365 ms 内喂完
+    /// ≈ 4 165 倍实时，而 `kOffline` 全程为假。
+    #[test]
+    fn a_fast_feed_is_a_render() {
+        let pass = ProcessingPass::default();
+        assert_eq!(pass.pass_kind(), CapturePassKind::Realtime);
+        // 250 ms 的窗口里喂进 48 000 × 30 帧 = 30 秒音频 ⇒ 120 倍实时。
+        pass.note_feed_progress(48_000 * 30, 48_000.0, false, false);
+        std::thread::sleep(std::time::Duration::from_millis(260));
+        pass.note_feed_progress(48_000, 48_000.0, false, false);
+        assert_eq!(pass.pass_kind(), CapturePassKind::Render);
+        assert!(pass.feed_speed().is_some_and(|speed| speed > RENDER_SPEED_X));
+    }
+
+    /// **判据：实时播放不是渲染。**
+    ///
+    /// 【为什么这条必须有】把实时播放误判成渲染的代价是**录制中输出被静音** ——
+    /// 用户会听到"一按录制就没声音"。所以 `kPlaying=1` 必须直接把结论钉回实时。
+    #[test]
+    fn a_realtime_feed_is_not_a_render() {
+        let pass = ProcessingPass::default();
+        for _ in 0..40 {
+            pass.note_feed_progress(48_000, 48_000.0, false, true);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(260));
+        pass.note_feed_progress(48_000, 48_000.0, false, true);
+        assert_eq!(pass.pass_kind(), CapturePassKind::Realtime);
+    }
+
+    /// **判据：不报播放、却已经喂满 1 秒以上 ⇒ 这是渲染。**
+    #[test]
+    fn a_long_silent_feed_without_k_playing_is_a_render() {
+        let pass = ProcessingPass::default();
+        // 1 秒 = 48 000 帧；喂 2 秒。
+        pass.note_feed_progress(48_000, 48_000.0, false, false);
+        assert_eq!(pass.pass_kind(), CapturePassKind::Realtime);
+        pass.note_feed_progress(48_000, 48_000.0, false, false);
+        pass.note_feed_progress(48_000, 48_000.0, false, false);
+        assert_eq!(pass.pass_kind(), CapturePassKind::Render);
+    }
+
+    /// 宿主明说离线 ⇒ 立刻是渲染，不需要任何速度证据。
+    #[test]
+    fn an_offline_host_is_a_render_immediately() {
+        let pass = ProcessingPass::default();
+        pass.note_feed_progress(960, 48_000.0, true, false);
+        assert_eq!(pass.pass_kind(), CapturePassKind::Render);
     }
 
     #[allow(clippy::too_many_arguments)]
