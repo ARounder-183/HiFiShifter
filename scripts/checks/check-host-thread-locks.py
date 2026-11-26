@@ -18,7 +18,14 @@ Two shapes are checked:
 
   1. the body of `on_message` in `editor/gui/client.rs` must not mention a mutex at all;
   2. any function in `ara/model.rs` / `render/extension/binding.rs` that enters an
-     `AraCallbackGuard` must not take `self.timeline`.
+     `AraCallbackGuard` must not take `self.timeline`;
+  3. the pending-import reconciler must take **no** table lock at all (`try_lock` only),
+     and `present_host_inventory` must drop the `ui_tracks` guard before it calls it.
+
+Shape 3 is the one that cost a host freeze: the inventory pass held `ui_tracks` for its
+whole body and the reconciler asked the same map a second time. `std::sync::Mutex` is
+not reentrant, so the first inventory pass after an import never returned -- and the
+status bar's `plugin_get_apply_state` error was only the 30 s timeout behind it.
 
 Neither mistake is a compile error, and both look exactly like "the command did nothing"
 in the field. The gate therefore also runs a self-test in both directions: a planted
@@ -35,6 +42,8 @@ ROOT = Path(__file__).resolve().parents[2]
 CLIENT = ROOT / "backend" / "hifishifter-plugin" / "src" / "editor" / "gui" / "client.rs"
 ARA_MODEL = ROOT / "backend" / "hifishifter-plugin" / "src" / "ara" / "model.rs"
 BINDING = ROOT / "backend" / "hifishifter-plugin" / "src" / "render" / "extension" / "binding.rs"
+DOCUMENT = ROOT / "backend" / "hifishifter-plugin" / "src" / "render" / "document.rs"
+WORKSPACE = ROOT / "backend" / "hifishifter-plugin" / "src" / "editor" / "workspace.rs"
 
 # Anything that can block on another thread. `lock_or_recover` is the crate's own helper;
 # `Mutex` covers a freshly created one. `try_lock` is deliberately allowed: it never waits.
@@ -105,11 +114,61 @@ def check_ara_callbacks(text: str, label: str) -> list[str]:
     return problems
 
 
-def run(root_client: Path, root_ara: Path, root_binding: Path) -> list[str]:
+def check_reconciler_takes_no_locks(text: str, label: str) -> list[str]:
+    """The reconciler may only *try* its ledger; taking anything else is the freeze again."""
+    found = function_body(text, "fn take_resolved_imports(")
+    if found is None:
+        return [f"{label}: could not find take_resolved_imports (the reconciler)"]
+    first_line, body = found
+    problems: list[str] = []
+    for match in re.finditer(r"\.lock_or_recover\(", body):
+        line = first_line + body.count("\n", 0, match.start())
+        problems.append(
+            f"{label}:{line}: the pending-import reconciler takes a blocking lock; "
+            "it runs from the inventory pass and from ARA publish, so it may only try"
+        )
+    return problems
+
+
+def check_inventory_drops_the_guard(text: str, label: str) -> list[str]:
+    """`present_host_inventory` must release `tracks` before reconciling."""
+    found = function_body(text, "fn present_host_inventory(")
+    if found is None:
+        return [f"{label}: could not find present_host_inventory"]
+    first_line, body = found
+    call = body.find("publish_pending_imports(")
+    if call < 0:
+        return [
+            f"{label}:{first_line}: present_host_inventory never reconciles the pending "
+            "imports; an imported item would stay pending until some other publish"
+        ]
+    dropped = body.rfind("drop(tracks)", 0, call)
+    if dropped < 0:
+        line = first_line + body.count("\n", 0, call)
+        return [
+            f"{label}:{line}: present_host_inventory reconciles while the ui_tracks guard "
+            "is still alive; std::sync::Mutex is not reentrant, so this is a host freeze"
+        ]
+    return []
+
+
+def run(
+    root_client: Path,
+    root_ara: Path,
+    root_binding: Path,
+    root_document: Path = DOCUMENT,
+    root_workspace: Path = WORKSPACE,
+) -> list[str]:
     problems: list[str] = []
     problems += check_client(root_client.read_text(encoding="utf-8"), str(root_client))
     for path in (root_ara, root_binding):
         problems += check_ara_callbacks(path.read_text(encoding="utf-8"), str(path))
+    problems += check_reconciler_takes_no_locks(
+        root_document.read_text(encoding="utf-8"), str(root_document)
+    )
+    problems += check_inventory_drops_the_guard(
+        root_workspace.read_text(encoding="utf-8"), str(root_workspace)
+    )
     return problems
 
 
@@ -151,11 +210,48 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
     if check_ara_callbacks(clean_ara, "clean"):
         failures.append("a lock-free ARA callback was reported as a violation")
 
+    planted_reconciler = """
+    fn take_resolved_imports(&self, claims: &ImportClaims) -> Option<Vec<ResolvedImport>> {
+        let mut imports = self.pending_imports.lock_or_recover();
+        None
+    }
+"""
+    if not check_reconciler_takes_no_locks(planted_reconciler, "planted"):
+        failures.append("a planted blocking lock in the reconciler was not reported")
+
+    clean_reconciler = """
+    fn take_resolved_imports(&self, claims: &ImportClaims) -> Option<Vec<ResolvedImport>> {
+        let mut imports = try_lock_or_recover(&self.pending_imports)?;
+        None
+    }
+"""
+    if check_reconciler_takes_no_locks(clean_reconciler, "clean"):
+        failures.append("a try-lock reconciler was reported as a violation")
+
+    planted_inventory = """
+    pub(crate) fn present_host_inventory(&self, timeline: &mut TimelineState, namespace: &str) {
+        let tracks = self.ui_tracks.lock_or_recover();
+        self.publish_pending_imports(&claims);
+    }
+"""
+    if not check_inventory_drops_the_guard(planted_inventory, "planted"):
+        failures.append("an inventory pass that reconciles under its guard was not reported")
+
+    clean_inventory = """
+    pub(crate) fn present_host_inventory(&self, timeline: &mut TimelineState, namespace: &str) {
+        let tracks = self.ui_tracks.lock_or_recover();
+        drop(tracks);
+        self.publish_pending_imports(&claims);
+    }
+"""
+    if check_inventory_drops_the_guard(clean_inventory, "clean"):
+        failures.append("an inventory pass that drops the guard first was reported")
+
     for message in failures:
         print(f"self-test: {message}")
     if failures:
         return 1
-    print("host-thread lock gate self-test: 4/4")
+    print("host-thread lock gate self-test: 8/8")
     return 0
 
 

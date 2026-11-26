@@ -2110,7 +2110,7 @@ impl DocumentSession {
     /// 失败模式。这里每次都从同一份清单派生，装配结果因此永远与"用户此刻在宿主里
     /// 看到的东西"一致。
     pub(crate) fn collect_item_rows(&self) -> Vec<hifishifter_kernel::editor::assembly::ItemRow> {
-        let tracks = self.ui_tracks.lock_or_recover();
+        let tracks = self.ui_tracks_guard();
         tracks
             .values()
             .flat_map(|track| {
@@ -3018,6 +3018,20 @@ impl DocumentSession {
             imports.retain(|entry| !resolved.iter().any(|done| done.item == entry.item));
         }
         Some(resolved)
+    }
+
+    /// 取宿主清单（`ui_tracks`）。**本仓对这张表的所有访问都走这里**。
+    ///
+    /// 【为什么要包一层】它是唯一一张"被长时间持有、而且持有期间还要调用别的函数"的
+    /// 表：`present_host_inventory` 拿着它跑完整个投影。一次重入就是宿主级挂死
+    /// （REAPER 现场：导入成功之后整机未响应），而挂死的样子与"什么都没发生"完全同形。
+    /// `lock_tracked` 在调试构建里让重入**当场点名**（见 `hifishifter_plugin_core::sync`），
+    /// 发布构建里与直接取锁逐字等价。
+    #[track_caller]
+    pub(crate) fn ui_tracks_guard(
+        &self,
+    ) -> crate::sync::TrackedGuard<'_, std::collections::BTreeMap<String, crate::host::UiTrack>> {
+        crate::sync::lock_tracked(&self.ui_tracks)
     }
 
     /// 一份对账输入（三张表的快照）。
@@ -5181,7 +5195,7 @@ impl DocumentSession {
         self.region_rejections.lock_or_recover().clear();
         self.pending_since.lock_or_recover().clear();
         self.skipped_regions.lock_or_recover().clear();
-        self.ui_tracks.lock_or_recover().clear();
+        self.ui_tracks_guard().clear();
         self.ui_known_tracks.lock_or_recover().clear();
         *self.ui_inventory_stamp.lock_or_recover() = None;
         *self.ui_inventory_sampled_at.lock_or_recover() = None;
@@ -5846,7 +5860,7 @@ impl DocumentSession {
         let readiness = self.readiness();
         let scope_regions = self.sequence_regions.lock_or_recover().len();
         let assignments = self.renderer_owners().len();
-        let ui_tracks = self.ui_tracks.lock_or_recover().len();
+        let ui_tracks = self.ui_tracks_guard().len();
         let region_items = self.region_items.lock_or_recover().len();
         let editing = self.editing_elapsed().map(|elapsed| elapsed.as_millis());
         // 【T11：图账本进这一行】没有它，"宿主没发图"与"我们拒了图"在这里完全同形 ——

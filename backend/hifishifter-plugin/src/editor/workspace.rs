@@ -503,7 +503,7 @@ impl DocumentSession {
         &self,
         namespace: &str,
     ) -> std::collections::BTreeMap<String, String> {
-        self.ui_tracks.lock_or_recover()
+        self.ui_tracks_guard()
             .values()
             .map(|track| (track.guid.clone(), format!("{namespace}{}", track.id)))
             .collect()
@@ -520,7 +520,7 @@ impl DocumentSession {
     }
     /// 显示参数根可包含无播放区域的空父轨；不创建任何clip或未经授权的源。
     fn add_group_view_tracks(&self, timeline: &mut TimelineState) {
-        for host in self.ui_tracks.lock_or_recover().values() {
+        for host in self.ui_tracks_guard().values() {
             if !timeline.tracks.iter().any(|track| track.id == host.id) {
                 // 【为什么不用 unwrap】这条路径跑在**宿主 UI 线程**的清单刷新里，一次
                 // panic 会带走整个 DAW 会话（与同文件 `present_host_inventory` 的注释
@@ -817,7 +817,7 @@ impl DocumentSession {
             let ids = self.clip_ids.lock_or_recover();
             (PresentedIds::build(&prefix, &ids), ids.clone())
         };
-        let tracks = self.ui_tracks.lock_or_recover();
+        let tracks = self.ui_tracks_guard();
         if tracks.is_empty() {
             // 【为什么在这里整体返回，而不是只跳过两条 retain】`present` / `owned` 两个集合
             // 都由**这份**宿主清单派生，所以清单一空，下面两条 `retain` 的条件就都恒不成立
@@ -1414,7 +1414,7 @@ impl DocumentSession {
         if let Some(id) = self.clip_for_host_item(item) {
             return Some(id);
         }
-        self.ui_tracks.lock_or_recover()
+        self.ui_tracks_guard()
             .values()
             .any(|track| {
                 track
@@ -1435,7 +1435,7 @@ impl DocumentSession {
         let Some(clips) = payload["clips"].as_array_mut() else {
             return;
         };
-        for track in self.ui_tracks.lock_or_recover().values() {
+        for track in self.ui_tracks_guard().values() {
             for item in &track.items {
                 if let Some(clip) = clips.iter_mut().find(|clip| {
                     clip["id"] == format!("{namespace}ara-item-{}", item.geometry.item_id)
@@ -1571,7 +1571,7 @@ impl DocumentSession {
         let Some(clips) = payload["clips"].as_array_mut() else {
             return;
         };
-        for track in self.ui_tracks.lock_or_recover().values() {
+        for track in self.ui_tracks_guard().values() {
             for item in &track.items {
                 let item_id = item.geometry.item_id.clone();
                 let Some(clip) = clips
@@ -2792,7 +2792,7 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
             .iter()
             .map(|clip| clip.track_id.clone())
             .collect::<BTreeSet<_>>();
-        for track in self.ui_tracks.lock_or_recover().values() {
+        for track in self.ui_tracks_guard().values() {
             if timeline.tracks.iter().any(|t| t.id == track.id) {
                 tracks.insert(track.id.clone());
             }
