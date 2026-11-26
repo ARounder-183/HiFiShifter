@@ -456,6 +456,46 @@ fn same_source_path(left: &str, right: &str) -> bool {
 /// 用户看不见。低于它的一律 DEBUG。
 const UNBOUND_WARN_STREAK: u32 = 3;
 
+/// 对账所需的**事实快照**：由调用方在自己取锁之前/之后算好，作为参数传进来。
+///
+/// 【为什么必须是数据而不是方法】上一版的对账会去取 `region_items` / `clip_ids` /
+/// `ui_tracks` 三把锁，而它的调用方 `present_host_inventory` 从头到尾持着 `ui_tracks`。
+/// `std::sync::Mutex` 不可重入，于是"对账"这件小事把整个宿主卡死 —— 现场表现是
+/// REAPER 在导入成功之后整体未响应（`AppHangB1`），而状态栏那条
+/// `plugin_get_apply_state` 只是宿主线程停止泵消息 30 s 之后才浮现的读数。
+///
+/// 把输入变成数据之后，对账器**结构上不可能**再取锁：它手里没有表，只有一份快照。
+/// 这类缺陷不该靠"记得别这么写"来防。
+pub(crate) struct ImportClaims {
+    /// 本轮宿主清单里的 item GUID（`present_host_inventory` 手上那份 `ui_tracks` 的投影）。
+    pub present_items: std::collections::BTreeSet<String>,
+    /// region key → 文档 clip id（`PresentedIds` 的同一份快照）。
+    pub clip_ids: std::collections::HashMap<u64, String>,
+    /// region key → item GUID（`region_items` 的只读克隆）。
+    pub region_items: std::collections::HashMap<u64, String>,
+}
+
+impl ImportClaims {
+    /// item GUID → 当前时间线里的 clip id（**不带命名空间**，命名空间由调用方加）。
+    ///
+    /// 【两条判据、一个顺序】活着的 region 认领它 ⇒ 有源；否则退到宿主清单 ⇒ 至少
+    /// 画得出占位。这与 `clip_for_host_item` / `gui_clip_for_host_item` 是同一条边。
+    fn clip_for_item(&self, item: &str) -> Option<String> {
+        if let Some((key, _)) = self
+            .region_items
+            .iter()
+            .find(|(_, bound)| bound.as_str() == item)
+        {
+            if let Some(clip) = self.clip_ids.get(key) {
+                return Some(clip.clone());
+            }
+        }
+        self.present_items
+            .contains(item)
+            .then(|| format!("ara-item-{item}"))
+    }
+}
+
 #[derive(Default)]
 pub struct DocumentSession {
     controller: AtomicUsize,
@@ -2895,8 +2935,13 @@ impl DocumentSession {
     }
 
     /// 对账一次，并把转正的每一条记一行、发一条 `import_ready`。
-    pub(crate) fn publish_pending_imports(&self) {
-        let resolved = self.resolve_pending_imports();
+    ///
+    /// 【`claims` 是参数不是自取】见 [`ImportClaims`]。这条约束是**结构性**的：本函数
+    /// 不再取任何 `DocumentSession` 的表锁，于是"在持锁的作用域里调它"不可能变成自锁。
+    pub(crate) fn publish_pending_imports(&self, claims: &ImportClaims) {
+        let Some(resolved) = self.take_resolved_imports(claims) else {
+            return;
+        };
         if resolved.is_empty() {
             return;
         }
@@ -2919,76 +2964,59 @@ impl DocumentSession {
 
     /// 对账一次：把已经被 ARA 图（或宿主清单）认领的待定导入转正，返回本轮转正的条目。
     ///
-    /// 【两个判据、一个顺序】活着的 region 认领它 ⇒ 有源；否则退到宿主清单 ⇒ 至少
-    /// 画得出占位。这与 `clip_for_host_item` / `gui_clip_for_host_item` 是同一条边，
-    /// 但**不取事务**：本函数会被 `present_host_inventory` 调用，而那条路径的调用方
-    /// 可能已经持有 `transaction`，`std::sync::Mutex` 不可重入。
-    pub(crate) fn resolve_pending_imports(&self) -> Vec<ResolvedImport> {
-        let candidates: Vec<PendingImport> = {
-            let mut imports = self.pending_imports.lock_or_recover();
-            if imports.is_empty() || !self.is_alive() {
-                return Vec::new();
-            }
-            for entry in imports.iter_mut() {
-                entry.rounds = entry.rounds.saturating_add(1);
-            }
-            imports
-                .iter()
-                .map(|entry| PendingImport {
-                    item: entry.item.clone(),
-                    source_path: entry.source_path.clone(),
-                    landed_track: entry.landed_track.clone(),
-                    requested_at: entry.requested_at,
-                    rounds: entry.rounds,
-                    stall_reported: entry.stall_reported,
-                })
-                .collect()
-        };
-        let mut resolved = Vec::new();
-        for entry in candidates {
-            if let Some(clip_id) = self.presented_clip_for_host_item(&entry.item) {
-                resolved.push(ResolvedImport {
-                    item: entry.item,
-                    source_path: entry.source_path,
-                    clip_id,
-                    landed_track: entry.landed_track,
-                    rounds: entry.rounds,
-                    elapsed: entry.requested_at.elapsed(),
-                });
-            }
-        }
-        if resolved.is_empty() {
-            return resolved;
-        }
-        self.pending_imports
-            .lock_or_recover()
-            .retain(|entry| !resolved.iter().any(|done| done.item == entry.item));
-        resolved
+    /// 给测试与"只想知道结果"的调用方用；账本此刻被别人持有时当"这一轮没有"。
+    pub(crate) fn resolve_pending_imports(&self, claims: &ImportClaims) -> Vec<ResolvedImport> {
+        self.take_resolved_imports(claims).unwrap_or_default()
     }
 
-    /// item GUID → 当前时间线里的 clip id（不取事务；见 `publish_pending_imports`）。
-    fn presented_clip_for_host_item(&self, item: &str) -> Option<String> {
-        // 【先快照、再放锁】`region_items` 与 `clip_ids` 分两次取，避免引入一条新的
-        // 锁序边（装配路径是 `clip_ids → transaction`，反向嵌套会构成 ABBA）。
-        let claimed = {
-            let items = self.region_items.lock_or_recover();
-            items
-                .iter()
-                .find(|(_, bound)| bound.as_str() == item)
-                .map(|(key, _)| *key)
-        };
-        if let Some(key) = claimed {
-            if let Some(clip) = self.clip_ids.lock_or_recover().get(&key) {
-                return Some(clip.clone());
-            }
+    /// 对账的实现：**只取 `pending_imports` 这一把锁**，并在同一次持锁里完成
+    /// "读候选 → 判定 → 划掉"。
+    ///
+    /// 【为什么三步必须在一次持锁里】"报了却没划掉"会让同一条导入在下一轮再发一次
+    /// `import_ready`，前端于是重复做一次规格化（用户勾了"导入后规格化"会得到一串增益）。
+    /// 返回 `None` = 账本此刻被别人持有，这一轮什么都没做，下一次发布再来。
+    fn take_resolved_imports(&self, claims: &ImportClaims) -> Option<Vec<ResolvedImport>> {
+        let mut imports = self.pending_imports.lock_or_recover();
+        if imports.is_empty() || !self.is_alive() {
+            return Some(Vec::new());
         }
-        let in_inventory = self.ui_tracks.lock_or_recover().values().any(|track| {
-            track
-                .items
-                .iter()
-                .any(|entry| entry.geometry.item_id == item)
-        });
-        in_inventory.then(|| format!("ara-item-{item}"))
+        let mut resolved = Vec::new();
+        for entry in imports.iter_mut() {
+            entry.rounds = entry.rounds.saturating_add(1);
+            let Some(clip_id) = claims.clip_for_item(&entry.item) else {
+                continue;
+            };
+            resolved.push(ResolvedImport {
+                item: entry.item.clone(),
+                source_path: entry.source_path.clone(),
+                clip_id,
+                landed_track: entry.landed_track.clone(),
+                rounds: entry.rounds,
+                elapsed: entry.requested_at.elapsed(),
+            });
+        }
+        if !resolved.is_empty() {
+            imports.retain(|entry| !resolved.iter().any(|done| done.item == entry.item));
+        }
+        Some(resolved)
+    }
+
+    /// 一份对账输入（三张表的快照）。
+    ///
+    /// 【调用方不得持有任何 `DocumentSession` 锁】它自己会取三把；而在**已经持有**
+    /// `ui_tracks` 的作用域里调用它就是自锁。需要"边算边用"的路径（`present_host_inventory`）
+    /// 应当自己按 [`ImportClaims`] 的形状就地组一份。
+    pub(crate) fn import_claims(&self) -> ImportClaims {
+        ImportClaims {
+            present_items: self
+                .ui_tracks
+                .lock_or_recover()
+                .values()
+                .flat_map(|track| track.items.iter().map(|item| item.geometry.item_id.clone()))
+                .collect(),
+            clip_ids: self.clip_ids.lock_or_recover().clone(),
+            region_items: self.region_items.lock_or_recover().clone(),
+        }
     }
 
     /// 这条路径是不是一条**还没到**的导入所写下的源？

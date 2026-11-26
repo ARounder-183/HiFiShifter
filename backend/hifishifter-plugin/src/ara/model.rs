@@ -1011,7 +1011,12 @@ impl ModelHandle {
         // 【导入转正挂在"发布完成"之后】这一轮 ARA 图已经写进装配输入、清单也已经
         // 刷新（见上面的 `refresh_ui_inventory`），于是"宿主到底认领了哪些 item"此刻
         // 才第一次可判定。放在 `prepare_renderers` 之后是为了不与它争同一把事务锁。
-        self.session.publish_pending_imports();
+        //
+        // 【为什么先取快照再对账】对账的输入是**数据**（见 `ImportClaims`）：它自己
+        // 不取任何表锁，所以"在某个持锁作用域里调它"不可能变成自锁。这里没有持锁，
+        // 直接向文档要一份快照即可。
+        let claims = self.session.import_claims();
+        self.session.publish_pending_imports(&claims);
     }
 
     /// 收口之后发一行"读者们拿的是哪一版"的读数。

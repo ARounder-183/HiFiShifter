@@ -1,5 +1,5 @@
 //! 工程编辑权限是同一活ARA文档renderer区域并集，音频输出仍按各renderer原分配隔离。
-use crate::render::document::DocumentSession;
+use crate::render::document::{DocumentSession, ImportClaims};
 use crate::render::ownership::region_owners;
 use crate::sync::MutexExt;
 use hifishifter_kernel::state::TimelineState;
@@ -814,7 +814,10 @@ impl DocumentSession {
         // 这里的 `timeline` 是**编辑器**时间线（id 带命名空间），而 `clip_ids` 是
         // **文档**事实（id 无命名空间）。取一次快照之后立刻释放锁，后面所有比较都用它 ——
         // 混用两者正是"同一个 item 被画成两条 clip"的根因（见 `PresentedIds`）。
-        let presented = PresentedIds::build(&prefix, &self.clip_ids.lock_or_recover());
+        let (presented, clip_ids) = {
+            let ids = self.clip_ids.lock_or_recover();
+            (PresentedIds::build(&prefix, &ids), ids.clone())
+        };
         let tracks = self.ui_tracks.lock_or_recover();
         if tracks.is_empty() {
             // 【为什么在这里整体返回，而不是只跳过两条 retain】`present` / `owned` 两个集合
@@ -1353,7 +1356,21 @@ impl DocumentSession {
         // 【为什么导入的转正要挂在这一步之后】清单刚把 item 变成一条可见的占位 clip，
         // 这是"用户现在能看见它了"的第一个时刻。待定导入如果只在 ARA 发布时对账，
         // 那么"宿主建了 item、但还没建 region"这一段就永远没有转正的观测点。
-        self.publish_pending_imports();
+        //
+        // 【为什么必须就地组快照、并且显式放锁】对账要问"这条 item 在不在清单里"，
+        // 而答案正是上面这份 `tracks`。把 guard 带进对账 ⇒ 同一个线程第二次取
+        // `ui_tracks` ⇒ `std::sync::Mutex` 自锁 ⇒ 宿主整机未响应（导入成功之后必现）。
+        // 于是这里先把清单折成一份**数据**，放掉 guard，再交给对账器。
+        let claims = ImportClaims {
+            present_items: tracks
+                .values()
+                .flat_map(|track| track.items.iter().map(|item| item.geometry.item_id.clone()))
+                .collect(),
+            clip_ids,
+            region_items: self.region_items.lock_or_recover().clone(),
+        };
+        drop(tracks);
+        self.publish_pending_imports(&claims);
     }
     /// 组件保存/恢复仅操作其实际assigned clips的item GUID，防止另一个轨道的形状串入。
     pub(crate) fn fade_items_locked(
@@ -4369,7 +4386,7 @@ mod tests {
         });
         // ① 清单里还没有这条 item ⇒ 不转正（也不是失败，只是"还没轮到"）。
         assert!(
-            document.resolve_pending_imports().is_empty(),
+            document.resolve_pending_imports(&document.import_claims()).is_empty(),
             "清单里没有它的时候不许凭空造一条 clip"
         );
         // ② 清单到了 ⇒ 同一轮就对账成功，并且给出的 id 是时间线里那一条。
@@ -4385,7 +4402,7 @@ mod tests {
         track.items = vec![item];
         let guid = track.guid.clone();
         document.ui_tracks.lock_or_recover().insert(guid, track);
-        let resolved = document.resolve_pending_imports();
+        let resolved = document.resolve_pending_imports(&document.import_claims());
         assert_eq!(resolved.len(), 1, "下一轮发布必须把它转正");
         assert_eq!(resolved[0].item, "{IMPORT-1}");
         assert_eq!(resolved[0].clip_id, "ara-item-{IMPORT-1}");
@@ -4422,9 +4439,9 @@ mod tests {
         track.items = vec![item];
         let guid = track.guid.clone();
         document.ui_tracks.lock_or_recover().insert(guid, track);
-        assert_eq!(document.resolve_pending_imports().len(), 1);
+        assert_eq!(document.resolve_pending_imports(&document.import_claims()).len(), 1);
         assert!(
-            document.resolve_pending_imports().is_empty(),
+            document.resolve_pending_imports(&document.import_claims()).is_empty(),
             "同一条导入不许被转正两次"
         );
         document.close();
@@ -4459,10 +4476,69 @@ mod tests {
         );
         assert!(
             !document
-                .resolve_pending_imports()
+                .resolve_pending_imports(&document.import_claims())
                 .iter()
                 .any(|done| done.item == "{IMPORT-3}"),
             "没有 region 也没有清单条目时，账本不许把它转正"
+        );
+        document.close();
+    }
+
+    /// **回归：导入之后的两轮清单 —— 第一轮什么都不报，第二轮才转正。**
+    ///
+    /// 【为什么要走 `present_host_inventory`】这是生产里的真实时序：`import_audio_item`
+    /// 返回时宿主清单里已经有 item，而 region 还要 200~300 ms。于是第一轮对账只能
+    /// 看见"清单里有、region 没有"，第二轮才看得见 region。它同时钉住两件事：
+    /// 第一轮**什么都不许发**（发了就是替用户画一条假的"已就绪"），第二轮**必须**转正。
+    #[test]
+    fn the_first_inventory_pass_after_an_import_reports_nothing() {
+        let document = DocumentSession::new(40_105);
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        let api = Arc::new(host.client());
+        // 清单非空（否则 `present_host_inventory` 在开口就早退），但**不含**这条导入。
+        let mut other = api.ui_track(&|| true).unwrap();
+        other.id = "other".into();
+        other.items[0].geometry.item_id = "{SOMETHING-ELSE}".into();
+        let other_guid = other.guid.clone();
+        document.ui_tracks.lock_or_recover().insert(other_guid, other);
+
+        document.begin_pending_import(crate::render::document::PendingImport {
+            item: "{IMPORT-LATE}".into(),
+            source_path: "C:/audio/late.wav".into(),
+            landed_track: Some("track".into()),
+            requested_at: std::time::Instant::now(),
+            rounds: 0,
+            stall_reported: false,
+        });
+        let mut timeline = TimelineState::default();
+        document.present_host_inventory(&mut timeline, "");
+        assert!(
+            document.pending_import_for_source("C:/audio/late.wav"),
+            "第一轮清单里还没有它：账本必须原样留着，不许提前划掉"
+        );
+
+        // 第二轮：宿主清单到了。
+        let mut track = api.ui_track(&|| true).unwrap();
+        track.id = "track".into();
+        let mut item = track.items[0].clone();
+        item.geometry.item_id = "{IMPORT-LATE}".into();
+        track.items = vec![item];
+        let guid = track.guid.clone();
+        document.ui_tracks.lock_or_recover().insert(guid, track);
+        document.present_host_inventory(&mut timeline, "");
+        assert!(
+            !document.pending_import_for_source("C:/audio/late.wav"),
+            "第二轮必须转正：账本被划掉、`import_ready` 已发出"
+        );
+        assert!(
+            timeline
+                .clips
+                .iter()
+                .any(|clip| clip.id == "ara-item-{IMPORT-LATE}"),
+            "转正之后时间线里必须有这条占位 clip"
         );
         document.close();
     }
