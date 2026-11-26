@@ -213,8 +213,22 @@ function Clear-StaleCmakeCaches {
                 }
                 if (!$recorded -or $recorded -eq $wanted) { continue }
                 Write-Host ('[toolchain] dropped stale cmake cache ({0}) -- recorded {1}, wanted {2}' -f $buildDir.FullName, $recorded, $wanted)
-                Remove-Item -LiteralPath $buildDir.FullName -Recurse -Force -ErrorAction SilentlyContinue
-                $dropped += 1
+                # [Why rename first, then delete] Remove-Item on a tree that another process holds
+                # open deletes *some* of it and then gives up -- leaving a directory that still has
+                # Makefile/Makefile2 and no CMakeCache.txt. CMake then refuses to regenerate it
+                # (Makefile present) and nmake fails on a missing CMakeFiles/*/build.make:
+                #   NMAKE : fatal error U1073: don't know how to make 'CMakeFiles\soundstretch.dir\build.make'
+                # After that the machine cannot build at all, and nothing in the message mentions a
+                # cache. A rename either succeeds completely or leaves the tree untouched, so the
+                # original path is always either a *valid* tree or gone.
+                $tombstone = $buildDir.FullName + '.stale-' + [Guid]::NewGuid().ToString('N')
+                $moved = $false
+                try { Move-Item -LiteralPath $buildDir.FullName -Destination $tombstone -ErrorAction Stop; $moved = $true }
+                catch { Write-Host ('[toolchain] could not drop {0}: {1} (the next configure will retry)' -f $buildDir.FullName, $_.Exception.Message) -ForegroundColor Yellow }
+                if ($moved) {
+                    Remove-Item -LiteralPath $tombstone -Recurse -Force -ErrorAction SilentlyContinue
+                    $dropped += 1
+                }
             }
         }
     }

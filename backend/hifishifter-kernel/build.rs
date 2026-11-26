@@ -32,6 +32,7 @@ mod product_version;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
 
 /// 第三方原生源码目录。
 ///
@@ -39,6 +40,33 @@ use std::process::Command;
 /// 构建脚本的当前工作目录是**包根**（`backend/hifishifter-kernel`），所以从这个相对
 /// 路径可以稳定到达它。这是**构建期**耦合，不影响运行期依赖方向。
 const THIRD_PARTY: &str = "../src-tauri/third_party";
+
+/// 所有原生依赖共用的一处构建根（`<target>/hfs-native`）。
+///
+/// 【为什么不能放在 OUT_DIR】OUT_DIR 的目录名来自 cargo 的**单元指纹**：`cargo check`、
+/// `cargo test`、`cargo clippy`、`-p crate` 与 `--workspace` 各有一份，于是同一份 C++
+/// 会被完整编译很多次。实测这台机器上留下过 **19 份** `target/debug/build/hifishifter-kernel-*`
+/// （每份 7.8–9.6 MB，合计约 170 MB），而它们的源码、编译器、旗标一字不差。
+///
+/// 放在 target 根的固定路径之后，"切 cargo 子命令"不再重编 C++：`cc` 的产物在那里按
+/// mtime 判新鲜，cmake 树在那里按 cache + 输入 mtime 判新鲜。两个 profile 共享同一份
+/// 产物是安全的 —— 这些库一律按 `/O2` / `-O2` 构建，与 cargo 的 profile 无关。
+///
+/// 【为什么从 OUT_DIR 反推 target 根】`OUT_DIR = <target>/<profile>/build/<pkg>-<hash>/out`，
+/// 上跳四级正是 `<target>`。`CARGO_TARGET_DIR` 指向别处时该推导同样成立。
+fn native_build_root() -> PathBuf {
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
+    Path::new(&out_dir)
+        .ancestors()
+        .nth(4)
+        .expect("[kernel-native] unexpected OUT_DIR depth")
+        .join("hfs-native")
+}
+
+/// 目标三元组的稳定短名（目录名用）：`x86_64-pc-windows-msvc` 原样保留。
+fn target_slug() -> String {
+    std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string())
+}
 
 /// **目标**操作系统的编译期事实。
 ///
@@ -156,6 +184,10 @@ fn build_world_static() {
     println!("cargo:rerun-if-changed={}", world_src_dir);
 
     let mut world = cc::Build::new();
+    // 【共享产物】见 `native_build_root`：这条 C++ 不该为每个 cargo 单元重编一遍。
+    let shared = native_build_root().join("world");
+    std::fs::create_dir_all(&shared).expect("[world] failed to create the shared build root");
+    world.out_dir(&shared);
     world.cpp(true).include(&world_src_dir).files(
         required_files
             .iter()
@@ -296,6 +328,10 @@ fn build_signalsmith_stretch() {
     println!("cargo:rerun-if-changed={}", ss_base);
 
     let mut build = cc::Build::new();
+    // 【共享产物】理由同 world：切 cargo 子命令不该重编这份 C++。
+    let shared = native_build_root().join("signalsmith");
+    std::fs::create_dir_all(&shared).expect("[sstretch] failed to create the shared build root");
+    build.out_dir(&shared);
     build
         .cpp(true)
         .warnings(false)
@@ -653,8 +689,36 @@ fn build_soundtouch() {
         is_windows, is_apple
     );
 
+    // 【生成器必须显式钉住】CMake 一旦生成过 CMakeCache.txt，就只会复用缓存里的
+    // CMAKE_GENERATOR:INTERNAL —— 此后 CMAKE_GENERATOR 环境变量改了也不会生效。本机
+    // 实测 8 份旧缓存都写着 Visual Studio 17 2022，而 msvc-env.ps1 给的是
+    // NMake Makefiles；旧缓存让 clippy 门禁死在 build script 里，看起来像源码坏了。
+    // 因此：声明环境变量触发重跑、把生成器显式交给 -G、并在缓存不一致时清理重建。
+    println!("cargo:rerun-if-env-changed=CMAKE_GENERATOR");
+    let requested_generator = std::env::var("CMAKE_GENERATOR")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        // 【没有环境变量时钉一个确定的答案（Windows）】共享构建目录是**跨进程复用**的，
+        // 而"没钉生成器"意味着 cmake 会按 PATH 自己挑 —— vcvars 会把 Visual Studio 自带的
+        // Ninja 放上 PATH，于是同一台机器上 A 进程记 Ninja、B 进程记 NMake，共享目录每次
+        // 都要擦掉重建（实测一次 = 18 个 C++ 文件重编）。Windows 上 nmake 随 MSVC 一起装，
+        // 永远可用，所以它是"没人发话"时的答案；其它平台保持 cmake 默认（Unix Makefiles /
+        // Xcode），因为那边没有这个二义性。
+        .or_else(|| is_windows.then(|| "NMake Makefiles".to_string()));
+
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
-    let build_dir = Path::new(&out_dir).join("soundtouch_build");
+    // 【为什么不再放 OUT_DIR】见 `native_build_root`：`cargo check` / `test` / `clippy`
+    // 各有一份 OUT_DIR，cmake 树因此被完整重建过 19 次。放到 target 根的共享位置之后，
+    // 只有"源码/旗标/生成器真的变了"才重建。
+    // 【目录名带上生成器】否则一次环境变化（Ninja ↔ NMake）会把这棵树整个擦掉重来；
+    // 带上之后两种答案各自保留一份，切换只是换目录。
+    let generator_key = requested_generator
+        .as_deref()
+        .map(|value| value.replace(' ', "-").to_lowercase())
+        .unwrap_or_else(|| "default".to_string());
+    let build_dir =
+        native_build_root().join(format!("soundtouch-{}-{}", target_slug(), generator_key));
     println!(
         "cargo:warning=[soundtouch] build_dir={}",
         build_dir.display()
@@ -679,17 +743,28 @@ fn build_soundtouch() {
         }
     }
 
-    // 【生成器必须显式钉住】CMake 一旦生成过 CMakeCache.txt，就只会复用缓存里的
-    // CMAKE_GENERATOR:INTERNAL —— 此后 CMAKE_GENERATOR 环境变量改了也不会生效。本机
-    // 实测 8 份旧缓存都写着 Visual Studio 17 2022，而 msvc-env.ps1 给的是
-    // NMake Makefiles；旧缓存让 clippy 门禁死在 build script 里，看起来像源码坏了。
-    // 因此：声明环境变量触发重跑、把生成器显式交给 -G、并在缓存不一致时清理重建。
-    println!("cargo:rerun-if-env-changed=CMAKE_GENERATOR");
-    let requested_generator = std::env::var("CMAKE_GENERATOR")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
     let cache_path = build_dir.join("CMakeCache.txt");
+    // 【一个没有 CMakeCache.txt 的非空目录，不是可用的 CMake 树】
+    //
+    // 现场（2026-11-26 20:07，build.ps1 的插件阶段）：
+    //
+    //   NMAKE : fatal error U1073: don't know how to make 'CMakeFiles\soundstretch.dir\build.make'
+    //
+    // 目录里躺着上一次 configure 留下的 `Makefile` / `Makefile2`，而 `CMakeFiles/*/build.make`
+    // 与 `CMakeCache.txt` 已经不在 —— 那是一次**被中断、或被部分删除**的 configure 的残骸
+    // （`Clear-StaleCmakeCaches` 在文件被占用时只删掉一半，留下的正是这个形状）。cmake 见到
+    // `Makefile` 就不再生成，nmake 却按 `Makefile2` 去找已经不存在的 `build.make`，于是
+    // **这台机器再也构建不了**，而错误信息里没有一个字提到"缓存坏了"。
+    //
+    // 判据只用一条：**没有 cache 的目录不能复用**。有 cache 的目录由 cmake 自己保证一致性。
+    if !cache_path.is_file() && has_entries(&build_dir) {
+        println!(
+            "cargo:warning=[soundtouch] {} is a build tree without CMakeCache.txt (an interrupted configure); wiping it",
+            build_dir.display()
+        );
+        remove_tree(&build_dir);
+    }
+
     if let Some(generator) = requested_generator.as_deref() {
         let cached = std::fs::read_to_string(&cache_path).ok();
         let cached_generator = cached.as_deref().and_then(|text| {
@@ -702,86 +777,55 @@ fn build_soundtouch() {
                 cached_generator.unwrap_or("unknown"),
                 generator
             );
-            std::fs::remove_dir_all(&build_dir)
-                .expect("[soundtouch] failed to remove the stale cmake build directory");
-            std::fs::create_dir_all(&build_dir)
-                .expect("[soundtouch] failed to recreate the cmake build directory");
+            remove_tree(&build_dir);
         }
     }
 
-    // Step 1: CMake configure - build SoundTouchDLL as a shared library.
-    let mut cfg = Command::new("cmake");
-    cfg.arg("-S").arg(st_src_path);
-    cfg.arg("-B").arg(&build_dir);
-    cfg.arg("-DCMAKE_POLICY_VERSION_MINIMUM=3.5");
-    // 上游 CMakeLists.txt 的 cmake_minimum_required(VERSION 3.1) 在现代 CMake 上会发
-    // deprecation 警告。上游源码必须保持 pristine（见 verify_soundtouch_checkout），
-    // 所以从调用方关掉这条与构建结果无关的噪音。
-    cfg.arg("-Wno-deprecated");
-    cfg.arg("-DCMAKE_BUILD_TYPE=Release");
-    cfg.arg("-DSOUNDTOUCH_DLL=ON");
-    if let Some(generator) = requested_generator.as_deref() {
-        cfg.arg("-G").arg(generator);
+    // 【已经最新就不必再问 cmake】构建脚本在**每次 `git commit`、每次改 `src/`** 时都会
+    // 重跑；而这段代码是它里面唯一一段"跑子进程"的工作。三条 stat 就能回答"要不要跑"，
+    // 于是那些必然发生的重跑从 0.5–1.5 s 变成 0.1 ms。
+    if soundtouch_is_fresh(
+        &build_dir,
+        st_src_path,
+        requested_generator.as_deref(),
+        is_windows,
+        is_apple,
+    ) {
         println!(
-            "cargo:warning=[soundtouch] using pinned CMAKE_GENERATOR={}",
-            generator
+            "cargo:warning=[soundtouch] reusing {} (up to date)",
+            build_dir.display()
         );
+    } else {
+        // 【为什么要重试一次】上面那条判据能挡住"残骸目录"，但挡不住"configure 本身被中断在
+        // 半路"。一次擦除重来把任何这类残骸都变成一次成功构建 —— 这正是本仓库在别处已经
+        // 用过的纪律（`Clear-StaleCmakeCaches` 的"陈旧缓存自愈"）。重试只做一次：第二次仍
+        // 失败说明问题在源码或工具链，而不是缓存。
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match configure_and_build_soundtouch(
+                &build_dir,
+                st_src_path,
+                requested_generator.as_deref(),
+                &rc_shim_dir,
+                is_windows,
+                is_apple,
+            ) {
+                Ok(()) => break,
+                Err(message) => {
+                    if attempt >= 2 {
+                        panic!("{message}");
+                    }
+                    println!(
+                        "cargo:warning=[soundtouch] {message}; wiping {} and retrying once",
+                        build_dir.display()
+                    );
+                    remove_tree(&build_dir);
+                }
+            }
+        }
+        println!("cargo:warning=[soundtouch] cmake build succeeded");
     }
-    if is_windows {
-        // 引号是给 rc.exe 的：OUT_DIR 可能落在带空格的路径下（用户名里带空格很常见）。
-        cfg.arg(format!(
-            "-DCMAKE_RC_FLAGS:STRING=/I\"{}\"",
-            rc_shim_dir.display()
-        ));
-    }
-
-    if is_apple {
-        cfg.arg("-DCMAKE_INSTALL_NAME_DIR=@rpath");
-        cfg.arg("-DCMAKE_MACOSX_RPATH=ON");
-    }
-
-    println!("cargo:warning=[soundtouch] spawning cmake configure...");
-    let output = cfg
-        .output()
-        .expect("[soundtouch] failed to run cmake configure");
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        println!(
-            "cargo:warning=[soundtouch] cmake configure stderr:\n{}",
-            stderr
-        );
-        println!(
-            "cargo:warning=[soundtouch] cmake configure stdout:\n{}",
-            stdout
-        );
-        panic!(
-            "[soundtouch] CMake configure failed with exit code {:?}",
-            output.status.code()
-        );
-    }
-    println!("cargo:warning=[soundtouch] cmake configure succeeded");
-
-    // Step 2: CMake build - build SoundTouchDLL target
-    let mut bld = Command::new("cmake");
-    bld.arg("--build").arg(&build_dir);
-    bld.arg("--config").arg("Release");
-
-    println!("cargo:warning=[soundtouch] spawning cmake build...");
-    let output = bld
-        .output()
-        .expect("[soundtouch] failed to run cmake build");
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        println!("cargo:warning=[soundtouch] cmake build stderr:\n{}", stderr);
-        println!("cargo:warning=[soundtouch] cmake build stdout:\n{}", stdout);
-        panic!(
-            "[soundtouch] CMake build failed with exit code {:?}",
-            output.status.code()
-        );
-    }
-    println!("cargo:warning=[soundtouch] cmake build succeeded");
 
     // Step 3: Find the built SoundTouchDLL shared library
     let lib_name = "SoundTouchDLL";
@@ -871,7 +915,17 @@ fn build_soundtouch() {
     let src_bytes = std::fs::read(&lib_src).unwrap_or_default();
     let dst_bytes = std::fs::read(&lib_dst_resource).unwrap_or_default();
     if src_bytes != dst_bytes {
-        if let Err(e) = std::fs::write(&lib_dst_resource, &src_bytes) {
+        // 【为什么先写临时文件再改名】这棵树**同时被另一个 target 目录的构建读**：app 的
+        // build.rs 与 tauri 的资源校验都会打开它，而 debug 与 release 共享同一份源码树
+        // （两个 cargo 进程不会互斥，它们的 target 目录不同）。`fs::write` 先截断再写
+        // 57 KB，读到中间态的构建会拿到半个 DLL —— 那是一个只在"两边同时构建"时出现、
+        // 且报错完全指向别处的故障。同目录改名是原子的：读方要么看到旧文件，要么看到新文件。
+        let temp =
+            lib_dst_resource.with_file_name(format!("{}.{}.tmp", lib_filename, std::process::id()));
+        let written = std::fs::write(&temp, &src_bytes)
+            .and_then(|()| std::fs::rename(&temp, &lib_dst_resource));
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&temp);
             println!(
                 "cargo:warning=[soundtouch] could not write {}: {}",
                 lib_dst_resource.display(),
@@ -884,6 +938,210 @@ fn build_soundtouch() {
     // links 键保证本脚本先于它们的 build script 结束 —— mac 打包的资源校验
     // （tauri.conf.json 的 frameworks）因此不再与本回写竞态。
     println!("cargo:soundtouch_dll={}", lib_dst_resource.display());
+}
+
+/// 共享的 SoundTouch 构建树是否已经是最新的。
+///
+/// 判据只有三条，都是**廉价 stat**：
+/// 1. `CMakeCache.txt` 在，且记录的生成器与本次要求一致；
+/// 2. 目标库在构建树里；
+/// 3. 它的 mtime 不早于源码树里的**每一个**输入（`source/`、`include/`、`CMakeLists.txt`）。
+///
+/// 三条同时成立时，configure + build 只会把同一份字节再确认一遍（实测 0.5–1.5 s）。
+/// 不确定时一律返回 false —— "多跑一次 cmake"只是慢，"少跑一次"会拿到旧库。
+fn soundtouch_is_fresh(
+    build_dir: &Path,
+    src: &Path,
+    generator: Option<&str>,
+    is_windows: bool,
+    is_apple: bool,
+) -> bool {
+    let Ok(text) = std::fs::read_to_string(build_dir.join("CMakeCache.txt")) else {
+        return false;
+    };
+    if let Some(wanted) = generator {
+        let recorded = text
+            .lines()
+            .find_map(|line| line.strip_prefix("CMAKE_GENERATOR:INTERNAL="));
+        if recorded.is_some_and(|value| value != wanted) {
+            return false;
+        }
+    }
+    let lib_filename = if is_windows {
+        "SoundTouchDLL.dll"
+    } else if is_apple {
+        "libSoundTouchDLL.dylib"
+    } else {
+        "libSoundTouchDLL.so"
+    };
+    let Some(lib) = find_file(build_dir, lib_filename) else {
+        return false;
+    };
+    let Ok(lib_time) = std::fs::metadata(&lib).and_then(|meta| meta.modified()) else {
+        return false;
+    };
+    // 【只比真正的输入】源码树根上还有 Step 5 回写的 `SoundTouchDLL.dll` —— 它是**产物**，
+    // 拿它当输入会让判据永远为假（刚写的 DLL 永远比构建树里的新），于是每次都重跑 cmake。
+    // 所以比较集合与 `rerun-if-changed` 完全一致：`source/`、`include/`、`CMakeLists.txt`。
+    let inputs = [
+        src.join("source"),
+        src.join("include"),
+        src.join("CMakeLists.txt"),
+    ];
+    let Some(newest_input) = newest_mtime(&inputs) else {
+        return false;
+    };
+    lib_time >= newest_input
+}
+
+/// 一组路径里最新的 mtime（目录会递归；取不到任何时间戳时返回 None）。
+fn newest_mtime(roots: &[PathBuf]) -> Option<SystemTime> {
+    let mut newest: Option<SystemTime> = None;
+    let mut stack: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        if let Ok(modified) = std::fs::metadata(root).and_then(|meta| meta.modified()) {
+            newest = Some(newest.map_or(modified, |current| current.max(modified)));
+        }
+        stack.push(root.clone());
+    }
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                stack.push(entry.path());
+            }
+            if let Ok(modified) = entry.metadata().and_then(|meta| meta.modified()) {
+                newest = Some(newest.map_or(modified, |current| current.max(modified)));
+            }
+        }
+    }
+    newest
+}
+
+/// 目录存在且非空。
+fn has_entries(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false)
+}
+
+/// 删掉一棵构建树（不存在也算成功）。
+///
+/// 【为什么不 expect】这里唯一的调用时机是"已知这棵树坏了"。删不掉（文件被另一个进程占用）
+/// 不该让构建以一个与本问题无关的 panic 结束 —— 让后面的 cmake 去报它自己的错，读日志的人
+/// 才能看到真正的现场。
+fn remove_tree(dir: &Path) {
+    if let Err(error) = std::fs::remove_dir_all(dir) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            println!(
+                "cargo:warning=[soundtouch] could not remove {}: {error}",
+                dir.display()
+            );
+        }
+    }
+    let _ = std::fs::create_dir_all(dir);
+}
+
+/// 配置并构建 SoundTouchDLL；失败时返回**可读的原因**，而不是直接 panic。
+///
+/// 【为什么返回 Result 而不是 panic】调用方要"失败就擦掉重来一次"（见 [`build_soundtouch`]）。
+/// 在这里 panic 会把一次可以自愈的缓存残骸，变成一台再也构建不了的机器。
+#[allow(clippy::too_many_arguments)]
+fn configure_and_build_soundtouch(
+    build_dir: &Path,
+    st_src_path: &Path,
+    requested_generator: Option<&str>,
+    rc_shim_dir: &Path,
+    is_windows: bool,
+    is_apple: bool,
+) -> Result<(), String> {
+    // Step 1: CMake configure - build SoundTouchDLL as a shared library.
+    let mut cfg = Command::new("cmake");
+    cfg.arg("-S").arg(st_src_path);
+    cfg.arg("-B").arg(build_dir);
+    cfg.arg("-DCMAKE_POLICY_VERSION_MINIMUM=3.5");
+    // 上游 CMakeLists.txt 的 cmake_minimum_required(VERSION 3.1) 在现代 CMake 上会发
+    // deprecation 警告。上游源码必须保持 pristine（见 verify_soundtouch_checkout），
+    // 所以从调用方关掉这条与构建结果无关的噪音。
+    cfg.arg("-Wno-deprecated");
+    cfg.arg("-DCMAKE_BUILD_TYPE=Release");
+    cfg.arg("-DSOUNDTOUCH_DLL=ON");
+    // 【为什么不构建 soundstretch】上游的 `SOUNDSTRETCH` 默认 ON：它多编三个 CLI 源文件、
+    // 再链一个我们从不加载的控制台程序。本仓库只 load `SoundTouchDLL`（见 soundtouch.rs），
+    // 多出来的目标既是纯粹的时间，也是 2026-11-26 那次
+    // `U1073: ... soundstretch.dir\build.make` 的落点 —— 不让它进构建图，那条失败路径
+    // 就不存在了。
+    cfg.arg("-DSOUNDSTRETCH=OFF");
+    if let Some(generator) = requested_generator {
+        cfg.arg("-G").arg(generator);
+        println!(
+            "cargo:warning=[soundtouch] using pinned CMAKE_GENERATOR={}",
+            generator
+        );
+    }
+    if is_windows {
+        // 引号是给 rc.exe 的：OUT_DIR 可能落在带空格的路径下（用户名里带空格很常见）。
+        cfg.arg(format!(
+            "-DCMAKE_RC_FLAGS:STRING=/I\"{}\"",
+            rc_shim_dir.display()
+        ));
+    }
+
+    if is_apple {
+        cfg.arg("-DCMAKE_INSTALL_NAME_DIR=@rpath");
+        cfg.arg("-DCMAKE_MACOSX_RPATH=ON");
+    }
+
+    println!("cargo:warning=[soundtouch] spawning cmake configure...");
+    let output = cfg
+        .output()
+        .map_err(|error| format!("[soundtouch] failed to run cmake configure: {error}"))?;
+    if !output.status.success() {
+        println!(
+            "cargo:warning=[soundtouch] cmake configure stderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        println!(
+            "cargo:warning=[soundtouch] cmake configure stdout:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        return Err(format!(
+            "[soundtouch] CMake configure failed with exit code {:?}",
+            output.status.code()
+        ));
+    }
+    println!("cargo:warning=[soundtouch] cmake configure succeeded");
+
+    // Step 2: CMake build - only the DLL target we actually load.
+    let mut bld = Command::new("cmake");
+    bld.arg("--build").arg(build_dir);
+    bld.arg("--target").arg("SoundTouchDLL");
+    bld.arg("--config").arg("Release");
+
+    println!("cargo:warning=[soundtouch] spawning cmake build...");
+    let output = bld
+        .output()
+        .map_err(|error| format!("[soundtouch] failed to run cmake build: {error}"))?;
+    if !output.status.success() {
+        println!(
+            "cargo:warning=[soundtouch] cmake build stderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        println!(
+            "cargo:warning=[soundtouch] cmake build stdout:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        return Err(format!(
+            "[soundtouch] CMake build failed with exit code {:?}",
+            output.status.code()
+        ));
+    }
+    Ok(())
 }
 
 /// Recursively search for a file by name under `dir`.
