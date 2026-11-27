@@ -32,6 +32,14 @@ import { useMenuAutoScroll } from "./useMenuAutoScroll";
  *
  * 【为什么是描边而不是填充三角】填充三角是"工具提示箭头"的语汇；菜单里的方向
  * 提示属于"表面边缘"，描边更轻。
+ *
+ * 【基础形状朝下】两条提示行共用这一支笔画：**下方**提示行不旋转（"下面还有"），
+ * **上方**提示行旋转 180°（"上面还有"）。因此基础路径必须是朝下的
+ * （`M1 1L5 5L9 1`：两端在上、中间在下）。
+ *
+ * 写成朝上的（`M1 5L5 1L9 5`）再加旋转，两条提示行的箭头会**同时指反** ——
+ * 底部那条指回上方、顶部那条指向下方，读起来恰好与"还能往哪滚"相反。这一处
+ * 只有肉眼能发现：几何、命中区、可见性断言全部通过。
  */
 const SCROLL_CARET = (
     <svg
@@ -43,7 +51,7 @@ const SCROLL_CARET = (
         aria-hidden="true"
     >
         <path
-            d="M1 5L5 1L9 5"
+            d="M1 1L5 5L9 1"
             stroke="currentColor"
             strokeWidth="1.4"
             strokeLinecap="round"

@@ -1326,10 +1326,13 @@ export function AppAnchoredMenu({
          * 分支：形态是 CSS 令牌层的一等公民，多一个 JS 分支就等于给"这是哪种
          * 形态"开了第二个答案。
          */
+        // 【属性名对不上是无声的】dataset.menuInline 产出的是 data-menu-inline，
+        // 而 CSS 判的是 data-hs-menu-inline —— 写成前者不会报错，只是规则永不命中，
+        // 表现为"菜单在手机形态下仍然变成底部 sheet"。
         if (anchor.closest("[data-mobile-menu-sheet]") !== null) {
-            el.dataset.menuInline = "1";
+            el.dataset.hsMenuInline = "1";
         } else {
-            delete el.dataset.menuInline;
+            delete el.dataset.hsMenuInline;
         }
         const reclamp = () => {
             const anchorRect = anchor.getBoundingClientRect();

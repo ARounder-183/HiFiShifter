@@ -1127,6 +1127,10 @@ textarea {
     color: var(--qt-text-muted);
     pointer-events: none;
     transition: color var(--qt-dur-fast) linear;
+    /* 【必须在渐变之上】渐变条是宿主的 `::after`，生成内容在**子元素之后**绘制 ——
+       不给箭头抬一层，它的下半截会被 `--qt-window` 那段不透明渐变盖住，看起来像
+       一支褪色的、断掉的箭头。 */
+    z-index: 1;
 }
 
 .hs-menu__scroll-hint--up .hs-menu__scroll-caret {
