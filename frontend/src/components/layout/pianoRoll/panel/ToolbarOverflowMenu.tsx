@@ -10,9 +10,9 @@
  * 分离开关）全部写在组件里。为了"窄的时候换个排布"再抄一份，就等于从此有两套
  * 参数按钮要同步 —— 这正是本仓反复吃过的亏。这里只换**排布方向**。
  *
- * 【为什么菜单内容只在打开时存在】Radix 的 `Content` 关闭即卸载。行内那份被
- * `ToolbarSlot` 用 `display: none` 留在 DOM 里（测量需要它还在），而菜单里的这一份
- * 只在用户真的打开时挂载 —— 于是同一时刻最多只有一份在跑。
+ * 【为什么菜单内容只在打开时存在】菜单关闭即卸载。行内那份被 `ToolbarSlot` 用
+ * `display: none` 留在 DOM 里（测量需要它还在），而菜单里的这一份只在用户真的打开时
+ * 挂载 —— 于是同一时刻最多只有一份在跑。
  *
  * 【菜单里的副本必须"全量"渲染】这些组件都从模型里读 `toolbarTier` 来决定自己要不要
  * 让位。把**行内**的层级原样传进去，等于在菜单里再让位一次：第 11 级时张力 / 气声
@@ -22,12 +22,15 @@
  * 【触发器为什么常挂载】见 `ToolbarSlot.showAt`：若按层级条件渲染，测量第 0-9 级时
  * 按钮仍在 DOM 里、被算进宽度，于是同一宽度会出现两个答案（收窄到 10 级后要再拉宽
  * 28px 才恢复）。
+ *
+ * 【"菜单里再开菜单"】面板里住着 `ReferenceTrackGroup` 与 `ChildPitchGroup`，它们
+ * 各自带一个下拉。点内层下拉的条目时外层**不能**关 —— 这条由 `ui/menuDismissStack`
+ * 的层栈保证（锚定菜单在打开时登记自己）。
  */
-import type React from "react";
-import { DropdownMenu, Flex } from "@radix-ui/themes";
+import { useRef, useState } from "react";
 import { MixerHorizontalIcon } from "@radix-ui/react-icons";
 
-import { AppIconButton } from "../../../../ui";
+import { AppAnchoredMenu, AppIconButton } from "../../../../ui";
 import { ChildPitchGroup } from "./ChildPitchGroup";
 import { ParamButtons } from "./ParamButtons";
 import { ParamStaticControls } from "./ParamStaticControls";
@@ -36,53 +39,61 @@ import { ToolbarSlot } from "./toolbarParts";
 import { NEVER_HIDE_TIER, TIER_ALL_PILLS, TIER_STATIC_PARAMS } from "../toolbarOverflow";
 import type { ParamToolbarModel } from "./ParamToolbar";
 
-/** `DropdownMenu.Trigger` 加一个运行时存在、类型里没声明的 `asChild`。 */
-const TriggerAsChild = DropdownMenu.Trigger as unknown as React.ComponentType<
-    React.ComponentProps<typeof DropdownMenu.Trigger> & { asChild?: boolean }
->;
-
 export function ToolbarOverflowMenu({ m }: { m: ParamToolbarModel }) {
     const { tf, toolbarTier } = m;
     const pillsCollapsed = toolbarTier >= TIER_ALL_PILLS;
     /** 菜单里的副本：不参与让位（见模块头）。 */
     const menuModel: ParamToolbarModel = { ...m, toolbarTier: NEVER_HIDE_TIER };
 
+    const anchorRef = useRef<HTMLButtonElement | null>(null);
+    const menuRef = useRef<HTMLDivElement | null>(null);
+    const [open, setOpen] = useState(false);
+
     return (
-        <DropdownMenu.Root>
+        <>
             {/* 前 9 级只砍冗余、没有东西可收 —— 按钮从第 10 级起才出现。常挂载 +
                 槽位控制显隐（而不是条件渲染），理由见模块头。 */}
             <ToolbarSlot showAt={TIER_STATIC_PARAMS} tier={toolbarTier}>
-                {/* 【为什么是 asChild】`DropdownMenu.Trigger` 默认渲染自己的 `<button>`，把
-                    `AppIconButton`（也是 `<button>`）放进去就成了 `<button><button/></button>` ——
-                    无效 HTML，而且实测点击与键盘都打不开菜单（外层按钮吃掉了事件）。
-                    `asChild` 让 Radix 把 props 合并到 `AppIconButton` 的那一个按钮上。
-
-                    【为什么要 cast】Radix Themes 的 `DropdownMenu.Trigger` 类型没有声明
-                    `asChild`，而它在运行时就是 `DropdownMenuPrimitive.Trigger`（支持
-                    asChild，props 原样透传）。这里只补一个类型，不改行为。 */}
-                <TriggerAsChild>
-                    <AppIconButton
-                        tooltip={tf("param_toolbar_more")}
-                        aria-label={tf("param_toolbar_more")}
-                        tabIndex={-1}
-                        icon={<MixerHorizontalIcon />}
-                    />
-                </TriggerAsChild>
+                {/* 【为什么是 ref 而不是 asChild】Radix 的 Trigger 需要 asChild 才能避免
+                    `<button><button/></button>`（无效 HTML，且实测点击与键盘都打不开
+                    菜单）。换成共享原语后不再有嵌套按钮的问题：触发器就是这一个按钮，
+                    菜单按它的矩形定位。 */}
+                <AppIconButton
+                    ref={anchorRef}
+                    tooltip={tf("param_toolbar_more")}
+                    aria-label={tf("param_toolbar_more")}
+                    tabIndex={-1}
+                    icon={<MixerHorizontalIcon />}
+                    aria-haspopup="menu"
+                    aria-expanded={open}
+                    onClick={() => setOpen((value) => !value)}
+                />
             </ToolbarSlot>
-            <DropdownMenu.Content variant="soft" color="gray" side="bottom" align="end">
-                <Flex direction="column" gap="2" p="1">
+            <AppAnchoredMenu
+                open={open}
+                anchorRef={anchorRef}
+                menuRef={menuRef}
+                onClose={() => setOpen(false)}
+                // 触发器在工具栏最右侧：左对齐展开会横跨整个面板。
+                align="end"
+                ariaLabel={tf("param_toolbar_more")}
+            >
+                {/* 【为什么内边距写在这层 div 上而不是内容层】`.hs-menu__content` 的
+                    `padding` 写在未分层的样式表里，优先级高于 Tailwind 工具类 ——
+                    在内容层写 `p-1` 会被它压掉。 */}
+                <div className="flex flex-col gap-2 p-1">
                     {pillsCollapsed ? (
-                        <Flex direction="column" gap="2" align="start">
+                        <div className="flex flex-col items-start gap-2">
                             <ReferenceTrackGroup m={menuModel} />
                             <ChildPitchGroup m={menuModel} />
-                            <Flex gap="1" wrap="wrap" align="center">
+                            <div className="flex flex-wrap items-center gap-1">
                                 <ParamButtons m={menuModel} />
-                            </Flex>
-                        </Flex>
+                            </div>
+                        </div>
                     ) : null}
                     <ParamStaticControls m={menuModel} />
-                </Flex>
-            </DropdownMenu.Content>
-        </DropdownMenu.Root>
+                </div>
+            </AppAnchoredMenu>
+        </>
     );
 }

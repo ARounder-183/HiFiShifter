@@ -91,6 +91,15 @@ export interface AppButtonProps extends Omit<
     intent?: AppButtonIntent;
     size?: AppButtonSize;
     emphasis?: AppButtonEmphasis;
+    /**
+     * 转发到原生 `<button>` 的 ref。
+     *
+     * 【为什么要显式声明】React 19 允许 `ref` 作为普通 prop 传递，但 `ref` 不在
+     * `ComponentPropsWithoutRef` 的类型里 —— 不写这一行，`tsc -b` 会报
+     * "Property 'ref' does not exist"。与 `AppIconButtonProps` 的同名字段同一理由：
+     * 锚定菜单要把这个按钮当锚点。
+     */
+    ref?: Ref<HTMLButtonElement>;
 }
 
 /**

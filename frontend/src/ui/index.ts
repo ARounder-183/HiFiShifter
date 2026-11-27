@@ -62,6 +62,8 @@ export {
 
 export { MenuScrollScope, type MenuScrollScopeProps } from "./MenuScrollScope";
 
+export { AppMenuBarItem, type AppMenuBarItemProps } from "./AppMenuBarItem";
+
 export {
     AppConfirmDialog,
     AppDialog,

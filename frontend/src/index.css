@@ -1611,17 +1611,20 @@ html[data-form="mobile"]
     z-index: var(--qt-z-dialog) !important;
 }
 
-.rt-DropdownMenuContent,
+/*
+ * 【为什么这里不再有 .rt-DropdownMenuContent / .rt-ContextMenuContent】菜单栏与
+ * 参数工具栏的下拉已经全部迁到共享表面（.hs-menu）。那两条覆盖本身就是"两套
+ * 菜单表面"的证据：背景、圆角、字体、层级、条目高亮各写一遍，改一处另一处不跟随。
+ * 留着它们只会在下一次有人重新引入 Radix 菜单时**静默生效**，把分叉藏起来。
+ * Select 不在此列：它是 role="listbox" 的表单控件，不是命令菜单。
+ */
 .rt-SelectContent,
-.rt-ContextMenuContent,
 .rt-PopoverContent {
     z-index: var(--qt-z-dialog) !important;
 }
 
 .rt-DialogContent,
-.rt-DropdownMenuContent,
 .rt-SelectContent,
-.rt-ContextMenuContent,
 .rt-PopoverContent {
     background: var(--qt-panel) !important;
     color: var(--qt-text) !important;
@@ -1638,10 +1641,8 @@ html[data-form="mobile"]
 .rt-TextFieldInput,
 .rt-TextArea,
 .rt-DialogContent,
-.rt-DropdownMenuContent,
 .rt-SelectContent,
 .rt-SelectItem,
-.rt-ContextMenuContent,
 .rt-PopoverContent,
 .rt-TooltipContent {
     font-family: var(--qt-font-family) !important;
@@ -1838,23 +1839,21 @@ html[data-form="mobile"]
     background: var(--qt-accent, var(--qt-highlight));
 }
 
-.rt-DropdownMenuItem,
-.rt-SelectItem,
-.rt-ContextMenuItem {
-    /* 跟随「圆角风格」：与 Radix 菜单项同档（--radius-3）。 */
+/*
+ * Select 的条目与分隔线仍然需要跟随「圆角风格」与主题分隔色 —— 它是表单控件
+ * （role="listbox"），不参与菜单表面统一。菜单条目的同款取值由 .hs-menu__item /
+ * .hs-menu__separator 自己持有（见上方的「上下文菜单样式模型」块）。
+ */
+.rt-SelectItem {
     border-radius: var(--qt-radius-md) !important;
 }
 
-.rt-DropdownMenuItem[data-highlighted],
-.rt-SelectItem[data-highlighted],
-.rt-ContextMenuItem[data-highlighted] {
+.rt-SelectItem[data-highlighted] {
     background: color-mix(in oklab, var(--qt-highlight) 24%, transparent) !important;
     color: var(--qt-text) !important;
 }
 
-.rt-DropdownMenuSeparator,
-.rt-SelectSeparator,
-.rt-ContextMenuSeparator {
+.rt-SelectSeparator {
     background: var(--qt-divider) !important;
 }
 

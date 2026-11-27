@@ -88,6 +88,15 @@ export interface AppMenuItemSpec {
     /** 展示用快捷键文本（不参与绑定，与 `data-tooltip` 同源）。 */
     shortcut?: string;
     /**
+     * 悬停提示文本，渲染成 `data-tooltip`。
+     *
+     * 【它什么时候有意义】只用于"这一项到底会做什么"说不清的地方（例如「另存为」
+     * 子菜单里每种格式的说明：zip 需要解压后才能打开）。菜单弹出期间项目的自定义
+     * 气泡通道被全局抑制（见 `docs/i18n/style-guide.md` §3.5），因此这条**不能**
+     * 用来承载"为什么点不了" —— 那件事必须走 `description`，它是正立可见的。
+     */
+    tooltip?: string;
+    /**
      * 尾部**弱化标注**（不是快捷键）。
      *
      * 【它解决什么】有些项自身说不清会发生什么，需要一处"结果预告"跟在标签后面：
@@ -100,6 +109,17 @@ export interface AppMenuItemSpec {
     /** 破坏性操作：悬停变红底红字。 */
     danger?: boolean;
     disabled?: boolean;
+    /**
+     * 激活后**不关闭**菜单。
+     *
+     * 【为什么需要】菜单的默认语义是"点一条命令就完事，收起菜单"。但**多选**
+     * 不是一条命令：参考轨道组要连着勾几条轨道、逐条看画布上的曲线变化，
+     * 每勾一次就关掉菜单等于让用户重新打开 N 次。这与原生菜单里复选项不收起
+     * 是同一条约定 —— 复选框是"开关"，不是"命令"。
+     *
+     * 单选（`radio`）与普通条目保持默认收起。
+     */
+    keepOpen?: boolean;
     /** 该项上方加一条分隔线，用于视觉分组。 */
     separatorBefore?: boolean;
     /** 右侧勾选标记（用于"当前选中项"这类菜单）。 */
@@ -123,6 +143,14 @@ export interface AppMenuItemSpec {
      * 调用方拿到事件；而声明式条目模型此前只有 `onSelect`，悬停无从表达。
      */
     onHover?: () => void;
+    /**
+     * 指针离开本项时的回调。
+     *
+     * 【为什么与 `onHover` 成对】只有进入没有离开，高亮会**粘住**：指针从第 3 条
+     * 轨道划到"全部"（那一项没有联动）时，画布上第 3 条曲线仍然亮着，而指针底下
+     * 已经不是它。两者必须成对出现才是一份完整的"悬停联动"契约。
+     */
+    onHoverEnd?: () => void;
     /**
      * 禁用理由，渲染成标签下的**第二行弱化小字**。
      *
@@ -221,7 +249,7 @@ function renderMenuEntries(
                     }
                     onSelect={() => {
                         item.onSelect?.();
-                        onClose();
+                        if (!item.keepOpen) onClose();
                     }}
                 />
             )}
@@ -418,8 +446,21 @@ export function AppContextMenu({
         return () => window.removeEventListener("resize", reclamp);
     }, [x, y, items]);
 
+    /*
+     * 关闭回调走 ref。
+     *
+     * 【为什么不能把它放进 effect 依赖】调用方几乎都传内联箭头函数，它的身份每次
+     * 渲染都变。放进依赖会让"登记 → 注销 → 再登记"跟着每次渲染跑，而**层栈的顺序
+     * 就是"谁在最上面"** —— 外层菜单只要重渲染一次就会排到里层之上，于是点里层
+     * 菜单时外层先被关掉，正是层栈要解决的问题本身。
+     */
+    const closeRef = useRef(onClose);
+    useLayoutEffect(() => {
+        closeRef.current = onClose;
+    });
+
     /**
-     * 登记到 dismiss 层栈。
+     * 登记到 dismiss 层栈（只在挂载时登记一次）。
      *
      * 【为什么右键菜单也要登记】"菜单里住着另一个菜单的触发器"确实存在（参数编辑器
      * 工具栏的「⋯」溢出面板里就放着两个自带下拉的组件）。层栈让"点内层不关外层"
@@ -428,8 +469,8 @@ export function AppContextMenu({
     useEffect(() => {
         const el = ref.current;
         if (!el) return;
-        return pushMenuDismissLayer(el, onClose);
-    }, [onClose]);
+        return pushMenuDismissLayer(el, () => closeRef.current());
+    }, []);
 
     const step = useCallback(
         (delta: 1 | -1) => {
@@ -719,6 +760,7 @@ function AppContextMenuItem({
     onActive?: () => void;
     onSelect: () => void;
 }) {
+    /* 见 `AppMenuItemSpec.onHover` / `onHoverEnd`：调用方的联动与"本层高亮"是两件事。 */
     if (item.heading) {
         return <div className="hs-menu__label">{item.label}</div>;
     }
@@ -745,6 +787,7 @@ function AppContextMenuItem({
             // `:hover` 并列），因此这里只需如实标出"当前高亮的是这一项"。
             data-active={active && !item.disabled ? "1" : undefined}
             data-danger={item.danger ? "1" : undefined}
+            data-tooltip={item.tooltip}
             className="hs-menu__item"
             onMouseEnter={() => {
                 onActive?.();
@@ -752,6 +795,7 @@ function AppContextMenuItem({
                 // 前者即使在没有 activeIndex 的子面板里也要照常触发。
                 item.onHover?.();
             }}
+            onMouseLeave={() => item.onHoverEnd?.()}
             onClick={() => {
                 if (item.disabled) return;
                 onSelect();
@@ -1195,6 +1239,12 @@ export function AppAnchoredMenu({
         const close = onClose;
         function onPointerDown(event: PointerEvent) {
             if (menuRef.current?.contains(event.target as Node)) return;
+            /*
+             * 【触发器自己不算"外面"】点触发器是**切换**（开着就关、关着就开），
+             * 由触发器自己的 onClick 负责。若这里先关一次，切换就会变成"关了再
+             * 开"——用户看到菜单闪一下又回来。
+             */
+            if (anchorRef.current?.contains(event.target as Node)) return;
             if (menuDismissLayerCount() === 0) close();
             else handleMenuDismissPointerDown(event.target as Node);
         }
@@ -1210,15 +1260,24 @@ export function AppAnchoredMenu({
             document.removeEventListener("pointerdown", onPointerDown, true);
             document.removeEventListener("keydown", onKeyDown, true);
         };
-    }, [open, onClose, menuRef]);
+    }, [open, onClose, menuRef, anchorRef]);
 
-    /* 进层栈：让"点内层菜单不关外层"对锚定菜单同样成立。 */
+    /*
+     * 进层栈：让"点内层菜单不关外层"对锚定菜单同样成立。
+     *
+     * 【依赖只有 open】与 AppContextMenu 同一理由：onClose 的身份每次渲染都变，
+     * 放进依赖会让层栈顺序跟着渲染次数抖 —— 而顺序就是"谁在最上面"。
+     */
+    const anchoredCloseRef = useRef(onClose);
+    useLayoutEffect(() => {
+        anchoredCloseRef.current = onClose;
+    });
     useEffect(() => {
-        if (!open || !onClose) return;
+        if (!open) return;
         const element = menuRef.current;
         if (!element) return;
-        return pushMenuDismissLayer(element, onClose);
-    }, [open, onClose, menuRef]);
+        return pushMenuDismissLayer(element, () => anchoredCloseRef.current?.());
+    }, [open, menuRef]);
 
     /*
      * 关闭时把焦点还给触发它的元素。

@@ -53,3 +53,51 @@ export function useDockDialogKind(): DockDialogKind {
 export function openDockLayoutSettingsDialog(): void {
     setDockDialogKind("settings");
 }
+
+/** 待删除的预设名。菜单项置位，常驻宿主在弹确认框时读取。 */
+let dockPresetToDelete: string | null = null;
+
+export function setDockPresetToDelete(name: string | null): void {
+    dockPresetToDelete = name;
+}
+
+export function getDockPresetToDelete(): string | null {
+    return dockPresetToDelete;
+}
+
+/**
+ * 纯通知对话框的正文。
+ *
+ * 【为什么与 kind 分开存放】快照仍是原始字符串（`useSyncExternalStore` 不会因对象
+ * 不稳定而反复重渲染），正文在 kind 变化触发的那次重渲染里直接读取即可。
+ */
+let dockNoticeMessage: string | null = null;
+
+export function setDockNoticeMessage(message: string | null): void {
+    dockNoticeMessage = message;
+}
+
+export function getDockNoticeMessage(): string | null {
+    return dockNoticeMessage;
+}
+
+/**
+ * 导入布局用的隐藏 `<input>`。
+ *
+ * 【为什么由桥持有】输入框必须由**常驻宿主**（`DockLayoutDialogs`）渲染：若它随菜单
+ * 内容一起卸载，文件选择期间的 `change` 事件就没人接了。菜单项只需要一个"点它"的
+ * 入口，因此这里共享同一个 ref 对象。
+ */
+export const dockImportInputRef: { current: HTMLInputElement | null } = { current: null };
+
+/** 打开错误通知（取代此前的 `window.alert`）。 */
+export function setDockNotice(message: string): void {
+    setDockNoticeMessage(message);
+    setDockDialogKind("notice");
+}
+
+/** 请求删除预设：菜单项只置位（记下待删名字），常驻宿主弹确认框。 */
+export function requestDeletePreset(name: string): void {
+    setDockPresetToDelete(name);
+    setDockDialogKind("deletePresetConfirm");
+}

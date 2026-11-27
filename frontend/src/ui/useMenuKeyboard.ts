@@ -214,12 +214,44 @@ export function useMenuKeyboard(
                     const item = items[current];
                     if (item.getAttribute("aria-haspopup") !== "menu") return;
                     event.preventDefault();
-                    if (item.getAttribute("aria-expanded") === "true") return;
+                    if (item.getAttribute("aria-expanded") === "true") {
+                        // 已经展开：把焦点交给面板的第一项（原生菜单的行为）。
+                        // 面板此刻已经挂载，是触发项那个包装盒的子元素。
+                        const panel =
+                            item.parentElement?.querySelector<HTMLElement>('[role="menu"]');
+                        const first = panel ? menuItemsOf(panel)[0] : null;
+                        if (first) focusItem(first);
+                        return;
+                    }
                     item.click();
                     return;
                 }
                 case "ArrowLeft": {
+                    /*
+                     * 两种情况，顺序要紧：
+                     *
+                     * 1. 焦点停在**已展开的触发项**上 → 左键收起它（与右键展开对称）。
+                     *    不处理这一条时，键盘用户用 ArrowRight 展开子菜单后没有任何
+                     *    办法把它收回去（焦点并没有进入面板）。
+                     * 2. 焦点在**子面板内部** → 左键退出本层。
+                     *
+                     * 焦点在外层菜单、而某个子面板恰好开着时，第 1 条会命中触发项；
+                     * 若命中的是普通项，则什么都不做 —— 外层菜单没有"左边"可去。
+                     */
+                    if (current >= 0) {
+                        const item = items[current];
+                        if (
+                            item.getAttribute("aria-haspopup") === "menu" &&
+                            item.getAttribute("aria-expanded") === "true"
+                        ) {
+                            event.preventDefault();
+                            item.click();
+                            return;
+                        }
+                    }
                     if (!nestedRef.current) return;
+                    // 焦点不在本层里时，左键属于**外层**（由外层的处理器裁决）。
+                    if (!(focused instanceof HTMLElement) || !container.contains(focused)) return;
                     event.preventDefault();
                     dismissRef.current?.();
                     return;
