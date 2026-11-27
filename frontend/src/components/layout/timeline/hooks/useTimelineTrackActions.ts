@@ -129,19 +129,20 @@ export function useTimelineTrackActions({
         [setTrackVolumeUi],
     );
     const handleTrackVolumeCommit = React.useCallback(
-        (trackId: string, nextVolume: number) => {
+        (trackId: string, nextVolume: number, previewGestureId?: string): Promise<unknown> => {
             dispatch(setTrackVolume({ trackId, volume: nextVolume }));
             setTrackVolumeUi((prev) => {
                 const copy = { ...prev };
                 delete copy[trackId];
                 return copy;
             });
-            dispatch(
+            return dispatch(
                 setTrackStateRemote({
                     trackId,
                     volume: nextVolume,
+                    previewGestureId,
                 }),
-            );
+            ).unwrap();
         },
         [dispatch, setTrackVolumeUi],
     );

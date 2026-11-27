@@ -40,6 +40,7 @@ import { buildReferencePitchStrokeColor } from "../referenceRootTracks";
 import type { ParamViewSegment, ValueViewport } from "../types";
 import { useClipsPeaksForPianoRoll } from "../useClipsPeaksForPianoRoll";
 import { useLiveParamEditing } from "../useLiveParamEditing";
+import { useGainAudition } from "../../timeline/hooks/useGainAudition";
 import { paramWindowScope } from "../paramWindowKey";
 import type { LiveEditFlag } from "../liveEditFlag";
 import { drawPianoRollFrame } from "./drawFrame";
@@ -255,6 +256,7 @@ export function usePianoRollFrameAssembly({
         paramViewRef.current = paramView;
     }, [paramView]);
 
+    const gainAudition = useGainAudition();
     const {
         liveEditOverrideRef,
         ensureLiveEditBase,
@@ -271,6 +273,7 @@ export function usePianoRollFrameAssembly({
         paramView,
         bumpRefreshToken,
         invalidate,
+        audition: gainAudition,
     });
 
     /**

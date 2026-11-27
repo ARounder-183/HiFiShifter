@@ -59,6 +59,7 @@ import { normalizedTrackColorCss } from "./runtime/timelineCanvasStyle";
 import { useAppTheme } from "../../../theme/AppThemeProvider";
 import { AppContextMenu } from "../../../ui/Menu";
 import { AppSelect, useMenuShortcut } from "../../../ui";
+import type { GainAudition } from "../../../features/session/gainAudition";
 
 /** Color palette options shown when creating a new track.
  * 色值选取与归一化带（s 0.30-0.46、感知亮度 0.50-0.60）对齐：暖色系
@@ -142,7 +143,13 @@ type TrackListProps = {
     onToggleSolo: (trackId: string, nextSolo: boolean) => void;
     onToggleCompose: (trackId: string, nextComposeEnabled: boolean) => void;
     onVolumeUiChange: (trackId: string, nextVolume: number) => void;
-    onVolumeCommit: (trackId: string, nextVolume: number) => void;
+    onVolumeCommit: (
+        trackId: string,
+        nextVolume: number,
+        previewGestureId?: string,
+    ) => Promise<unknown> | void;
+    /** 拖动/滚轮期间的可丢弃试听；缺省 = 只写 Redux（测试/旧调用方）。 */
+    audition?: GainAudition;
     onAddTrack: () => void;
     onCreateTrackBelow?: (trackId: string) => void;
     onTrackColorChange?: (trackId: string, color: string) => void;
@@ -179,6 +186,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
     onToggleCompose,
     onVolumeUiChange,
     onVolumeCommit,
+    audition,
     onAddTrack,
     onCreateTrackBelow,
     onTrackColorChange,
@@ -492,8 +500,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
                 window.clearTimeout(timerId);
             }
             volumeCommitTimersRef.current = {};
+            audition?.cancel();
         };
-    }, []);
+    }, [audition]);
 
     function clearPendingVolumeCommit(trackId: string) {
         const timerId = volumeCommitTimersRef.current[trackId];
@@ -503,11 +512,16 @@ const TrackListInner: React.FC<TrackListProps> = ({
         }
     }
 
+    function commitVolumeWithAudition(trackId: string, nextVolume: number) {
+        const result = onVolumeCommit(trackId, nextVolume, audition?.gestureId ?? undefined);
+        if (audition) void audition.commit(Promise.resolve(result));
+    }
+
     function scheduleVolumeCommit(trackId: string, nextVolume: number) {
         clearPendingVolumeCommit(trackId);
         const timerId = window.setTimeout(() => {
             delete volumeCommitTimersRef.current[trackId];
-            onVolumeCommit(trackId, nextVolume);
+            commitVolumeWithAudition(trackId, nextVolume);
         }, TRACK_GAIN_WHEEL_COMMIT_DEBOUNCE_MS);
         volumeCommitTimersRef.current[trackId] = timerId;
     }
@@ -731,6 +745,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                             );
                             const nextVolume = dbToGain(nextDb);
                             onVolumeUiChange(trackId, nextVolume);
+                            audition?.preview([{ kind: "track", trackId, volume: nextVolume }]);
                             scheduleVolumeCommit(trackId, nextVolume);
                             e.preventDefault();
                             e.stopPropagation();
@@ -816,6 +831,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
         // eslint-disable-next-line react-hooks/exhaustive-deps -- scheduleVolumeCommit 为渲染期新建的普通函数，加入依赖会让 wheel 监听每次渲染重建（既有模式）
     }, [
         currentTrackVolumeById,
+        audition,
         onScrollTopChange,
         onVolumeCommit,
         onVolumeUiChange,
@@ -917,6 +933,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
             if (Math.abs(gainToDb(next) - gainToDb(lastGain)) < 0.01) return;
             lastGain = next;
             onVolumeUiChange(trackId, next);
+            audition?.preview([{ kind: "track", trackId, volume: next }]);
         };
 
         // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，blur 时以
@@ -932,7 +949,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                 tooltipRafId = null;
             }
             setVolumeDrag(null);
-            onVolumeCommit(trackId, lastGain);
+            commitVolumeWithAudition(trackId, lastGain);
         };
         const finish = () => {
             if (finished) return;

@@ -98,6 +98,7 @@ import { useTimelineKernelTrim } from "./timeline/hooks/useTimelineKernelTrim";
 import { useTimelineKernelFade } from "./timeline/hooks/useTimelineKernelFade";
 import { useTimelineKernelSelection } from "./timeline/hooks/useTimelineKernelSelection";
 import { useTimelineKernelGainCrossfade } from "./timeline/hooks/useTimelineKernelGainCrossfade";
+import { useGainAudition } from "./timeline/hooks/useGainAudition";
 import { useTimelineTrackActions } from "./timeline/hooks/useTimelineTrackActions";
 import { useTimelineRuler } from "./timeline/hooks/useTimelineRuler";
 import { useTimelineMidiActions } from "./timeline/hooks/useTimelineMidiActions";
@@ -692,6 +693,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         endKernelGestureInteraction,
     });
 
+    const gainAudition = useGainAudition();
     const {
         handleKernelClipHover,
         handleKernelFadePreview,
@@ -707,6 +709,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         tVars,
         beginKernelGestureInteraction,
         endKernelGestureInteraction,
+        audition: gainAudition,
     });
 
     const {
@@ -762,6 +765,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         fadeTooltipAnchor,
         beginKernelGestureInteraction,
         endKernelGestureInteraction,
+        audition: gainAudition,
     });
     const kernelInteractions = React.useMemo(
         () => ({
@@ -1182,6 +1186,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         onToggleCompose={handleToggleTrackCompose}
                         onVolumeUiChange={handleTrackVolumeUiChange}
                         onVolumeCommit={handleTrackVolumeCommit}
+                        audition={gainAudition}
                         onAddTrack={handleAddTrack}
                         onTrackColorChange={handleTrackColorChange}
                         onAlgoChange={handleTrackAlgoChange}

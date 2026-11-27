@@ -8,6 +8,7 @@ import type {
     RemoveSilenceResult,
 } from "../../types/api";
 import type { LinkedParamCurves } from "../../features/session/sessionTypes";
+import type { GainPreviewTarget } from "../../features/session/gainAudition";
 
 import { invoke } from "../invoke";
 import type { ClipTemplate } from "../../features/session/sessionTypes";
@@ -184,6 +185,16 @@ export const timelineApi = {
 
     getTimelineState: () => invoke<TimelineResult>("get_timeline_state"),
 
+    // Gain audition (transient; never writes timeline/undo)
+    setGainPreview: (payload: {
+        gestureId: string;
+        seq: number;
+        targets: readonly GainPreviewTarget[];
+    }) => invoke<void>("set_gain_preview", payload),
+
+    clearGainPreview: (payload: { gestureId: string }) =>
+        invoke<void>("clear_gain_preview", payload),
+
     // Transport
     setTransport: (payload: { playheadSec?: number; bpm?: number }) =>
         invoke<{ ok: boolean; playhead_sec?: number; bpm?: number }>(
@@ -289,6 +300,8 @@ export const timelineApi = {
         pitchAnalysisAlgo?: string;
         color?: string;
         name?: string;
+        /** 手势结束时随权威提交一起清掉同名试听帧。 */
+        previewGestureId?: string;
     }) =>
         invoke<TimelineResult>(
             "set_track_state",
@@ -300,6 +313,7 @@ export const timelineApi = {
             payload.pitchAnalysisAlgo,
             payload.color,
             payload.name,
+            payload.previewGestureId,
         ),
 
     selectTrack: (trackId: string) => invoke<TimelineResult>("select_track", trackId),
@@ -534,7 +548,15 @@ export const timelineApi = {
             channelMode?: number;
         }>;
         checkpoint?: boolean;
-    }) => invoke<TimelineResult>("set_clips_state_bulk", payload.updates, payload.checkpoint),
+        /** 手势结束时随权威提交一起清掉同名试听帧。 */
+        previewGestureId?: string;
+    }) =>
+        invoke<TimelineResult>(
+            "set_clips_state_bulk",
+            payload.updates,
+            payload.checkpoint,
+            payload.previewGestureId,
+        ),
 
     setClipActiveTake: (payload: { clipId: string; takeId: string; checkpoint?: boolean }) =>
         invoke<TimelineResult>(

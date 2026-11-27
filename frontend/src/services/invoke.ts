@@ -303,6 +303,7 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 pitchAnalysisAlgo: args[5],
                 color: args[6],
                 name: args[7],
+                ...(args[8] !== undefined ? { previewGestureId: args[8] } : {}),
             };
 
         case "select_track":
@@ -406,6 +407,7 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             return {
                 updates: args[0],
                 checkpoint: args[1],
+                ...(args[2] !== undefined ? { previewGestureId: args[2] } : {}),
             };
 
         case "set_clip_active_take":
@@ -1074,6 +1076,11 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         // 帮助菜单的四档日志详细程度：唯一的新增带参命令。
         case "set_log_settings":
             return { verbosity: args[0] };
+
+        // 增益试听：调用点传的是单个命名参数对象（gestureId / seq / targets）。
+        case "set_gain_preview":
+        case "clear_gain_preview":
+            return { ...((args[0] ?? {}) as Record<string, unknown>) };
 
         default:
             // 无参命令白名单：不携带参数的命令在此统一登记（invoke 时以空

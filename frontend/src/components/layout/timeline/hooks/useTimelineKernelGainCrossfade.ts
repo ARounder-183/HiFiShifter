@@ -53,6 +53,7 @@ import { activeClipTakeName } from "../../../../features/session/sessionTypes";
 import type { useTimelineState } from "../hooks/useTimelineState";
 import type { useI18n } from "../../../../i18n/I18nProvider";
 import type { AppDispatch } from "../../../../app/store";
+import type { GainAudition } from "../../../../features/session/gainAudition";
 
 type Deps = {
     state: ReturnType<typeof useTimelineState>;
@@ -72,6 +73,7 @@ type Deps = {
     fadeTooltipAnchor: () => HTMLElement | null;
     beginKernelGestureInteraction: () => void;
     endKernelGestureInteraction: () => void;
+    audition: GainAudition;
 };
 
 export function useTimelineKernelGainCrossfade({
@@ -88,6 +90,7 @@ export function useTimelineKernelGainCrossfade({
     fadeTooltipAnchor,
     beginKernelGestureInteraction,
     endKernelGestureInteraction,
+    audition,
 }: Deps) {
     const {
         sessionRef,
@@ -185,6 +188,14 @@ export function useTimelineKernelGainCrossfade({
                     dispatch(setClipGain({ clipId: update.clipId, gain: update.linear }));
                 }
             });
+            audition.preview([
+                { kind: "clip", clipId: args.clipId, itemGain: result.anchorLinear },
+                ...result.others.map((update) => ({
+                    kind: "clip" as const,
+                    clipId: update.clipId,
+                    itemGain: update.linear,
+                })),
+            ]);
             // 拖动中的实时浮标（旧实现 `ClipHeader` 的 `gainTooltip` 拖动变体）：
             // 普通悬停只显示当前值，拖动时还要显示**本次拖动的增量**。内容逐帧
             // 更新——浮标的锚点仍是内核容器，AppTooltip 自己跟随指针。
@@ -213,6 +224,7 @@ export function useTimelineKernelGainCrossfade({
             }
         },
         [
+            audition,
             beginKernelGestureInteraction,
             dispatch,
             multiSelectedClipIds,
@@ -234,10 +246,12 @@ export function useTimelineKernelGainCrossfade({
             kernelGainOriginRef.current = null;
             // 未越起手阈值的单击（`changed = false`）没有远程写入：交互锁直接释放。
             if (origin === null || !args.changed) {
+                audition.cancel();
                 endKernelGestureInteraction();
                 return;
             }
             if (args.cancelled) {
+                audition.cancel();
                 batch(() => {
                     for (const [clipId, gain] of origin.baseGainById) {
                         dispatch(setClipGain({ clipId, gain }));
@@ -250,20 +264,21 @@ export function useTimelineKernelGainCrossfade({
             // 提交值取 Redux 当前值（预览已写入钳制后的结果）——用基准 + 位移重算
             // 会绕开钳制，表现为"预览到 ±12dB 上限、落库却超出"。
             const session = sessionRef.current;
-            void dispatch(
+            const persist = dispatch(
                 setClipsStateBulkRemote({
                     updates: origin.clipIds.map((clipId) => {
                         // 旋钮写 item 层（REAPER 的 D_VOL）；take 层由 take 面板负责。
                         const clip = session.clips.find((item) => item.id === clipId);
                         return { clipId, itemGain: clipItemGain(clip) };
                     }),
+                    previewGestureId: audition.gestureId ?? undefined,
                 }),
             )
                 .unwrap()
-                .catch(() => undefined)
-                .finally(endKernelGestureInteraction);
+                .catch(() => undefined);
+            void audition.commit(persist).finally(endKernelGestureInteraction);
         },
-        [dispatch, endKernelGestureInteraction, sessionRef],
+        [audition, dispatch, endKernelGestureInteraction, sessionRef],
     );
 
     /** 内核双击旋钮 → 恢复 0 dB（复用旧实现的增益提交入口，含乐观更新与落库）。 */

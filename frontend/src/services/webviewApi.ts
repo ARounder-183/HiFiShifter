@@ -99,6 +99,8 @@ export const webApi = {
 
     // Timeline
     getTimelineState: timelineApi.getTimelineState,
+    setGainPreview: timelineApi.setGainPreview,
+    clearGainPreview: timelineApi.clearGainPreview,
     importAudioItem: timelineApi.importAudioItem,
     importAudioBytes: timelineApi.importAudioBytes,
     importMidiAsClip: paramsApi.importMidiAsClip,

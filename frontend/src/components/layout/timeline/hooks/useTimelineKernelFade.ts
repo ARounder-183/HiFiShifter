@@ -51,6 +51,7 @@ import {
 import type { useTimelineState } from "../hooks/useTimelineState";
 import type { useI18n } from "../../../../i18n/I18nProvider";
 import type { AppDispatch } from "../../../../app/store";
+import type { GainAudition } from "../../../../features/session/gainAudition";
 
 type Deps = {
     state: ReturnType<typeof useTimelineState>;
@@ -61,6 +62,7 @@ type Deps = {
     tVars: ReturnType<typeof useI18n>["tVars"];
     beginKernelGestureInteraction: () => void;
     endKernelGestureInteraction: () => void;
+    audition: GainAudition;
 };
 
 type FadeSideInfo = {
@@ -81,6 +83,7 @@ export function useTimelineKernelFade({
     tVars,
     beginKernelGestureInteraction,
     endKernelGestureInteraction,
+    audition,
 }: Deps) {
     const { sessionRef, fadeCurvatureKb, pxPerSecRef } = state;
     const kernelFadeOriginRef = React.useRef<{
@@ -523,6 +526,18 @@ export function useTimelineKernelFade({
                               ...(solved ? { fadeOutS: solved.s } : {}),
                           }),
                 );
+                audition.preview([
+                    {
+                        kind: "clip",
+                        clipId: args.clipId,
+                        fadeInSec: effectiveFadeSec(clip.fadeInSec, clip.autoFadeInSec),
+                        fadeOutSec: effectiveFadeSec(clip.fadeOutSec, clip.autoFadeOutSec),
+                        fadeInShape: clip.fadeInShape,
+                        fadeInDir: args.side === "in" ? nextDir : clip.fadeInDir,
+                        fadeOutShape: clip.fadeOutShape,
+                        fadeOutDir: args.side === "out" ? nextDir : clip.fadeOutDir,
+                    },
+                ]);
                 // 曲率拖拽的实时浮标：曲率行带 `[±增量]`，长度行只给当前值。
                 // 增量基准必须取**按下时**的 dir（`origin.baseById`）—— `baseDir`
                 // 上面那个变量是本帧从 Redux 读的"上一帧值"，用它会让增量逐帧归零。
@@ -576,6 +591,33 @@ export function useTimelineKernelFade({
                     );
                 }
             });
+            audition.preview(
+                origin.participants.map((participant) => {
+                    const clip = sessionRef.current.clips.find(
+                        (item) => item.id === participant.clipId,
+                    );
+                    const update = updates.find((item) => item.clipId === participant.clipId);
+                    return {
+                        kind: "clip" as const,
+                        clipId: participant.clipId,
+                        fadeInSec:
+                            args.side === "in"
+                                ? (update?.fadeInSec ?? args.fadeSec)
+                                : effectiveFadeSec(clip?.fadeInSec ?? 0, clip?.autoFadeInSec ?? 0),
+                        fadeOutSec:
+                            args.side === "out"
+                                ? (update?.fadeOutSec ?? args.fadeSec)
+                                : effectiveFadeSec(
+                                      clip?.fadeOutSec ?? 0,
+                                      clip?.autoFadeOutSec ?? 0,
+                                  ),
+                        fadeInShape: clip?.fadeInShape ?? 0,
+                        fadeInDir: clip?.fadeInDir ?? 0,
+                        fadeOutShape: clip?.fadeOutShape ?? 0,
+                        fadeOutDir: clip?.fadeOutDir ?? 0,
+                    };
+                }),
+            );
             // 长度拖拽的实时浮标：长度行带 `[±位移]`，曲率行只给当前值。
             //
             // 【位移基准取"按下时用户看到的长度"】绘制端按「自动 > 0 时自动赢」取值，
@@ -601,6 +643,7 @@ export function useTimelineKernelFade({
             });
         },
         [
+            audition,
             beginKernelGestureInteraction,
             dispatch,
             fadeCurvatureKb,
@@ -621,6 +664,7 @@ export function useTimelineKernelFade({
             kernelFadeOriginRef.current = null;
             if (origin === null) return;
             if (args.cancelled) {
+                audition.cancel();
                 // 取消：全部参与者一起还原（多选淡变只还原锚点会让其余 clip 留在半途）。
                 // **包括自动交叉淡化**：预览期把它清零了（手动值必须赢），取消就必须
                 // 放回去，否则按一次 Esc 会让那条自动交叉淡化永久消失。
@@ -722,18 +766,24 @@ export function useTimelineKernelFade({
                 }
             }
             if (updates.length === 0) {
+                audition.cancel();
                 endKernelGestureInteraction();
                 return;
             }
             // 淡变手势**不做** `applyAutoCrossfade` 收尾：手动 fade 拖拽的结果就是
             // 手动值 + 该侧自动清零（旧实现同样不在这里重算自动交叉淡化——重算会
             // 立刻把手动值覆盖回自动值，等于拖拽无效）。
-            void dispatch(setClipsStateBulkRemote({ updates }))
+            const persist = dispatch(
+                setClipsStateBulkRemote({
+                    updates,
+                    previewGestureId: audition.gestureId ?? undefined,
+                }),
+            )
                 .unwrap()
-                .catch(() => undefined)
-                .finally(endKernelGestureInteraction);
+                .catch(() => undefined);
+            void audition.commit(persist).finally(endKernelGestureInteraction);
         },
-        [dispatch, endKernelGestureInteraction, sessionRef],
+        [audition, dispatch, endKernelGestureInteraction, sessionRef],
     );
 
     /** 内核框选：拖动前的选择快照（合并与回滚的基准）。 */

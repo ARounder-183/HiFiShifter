@@ -5,9 +5,10 @@ import { frontendLog } from "../../../services/frontendLog";
 
 import { paramWindowScope } from "./paramWindowKey";
 import { clampParamWriteValue } from "./paramRanges";
-import { createLiveEditOverride, liveEditCaughtUp } from "./strokeBuffer";
+import { createLiveEditOverride, liveEditCaughtUp, projectLiveEdit } from "./strokeBuffer";
 import type { LiveEditOverride, StrokeBuffer } from "./strokeBuffer";
 import type { ParamName, ParamViewSegment, StrokeMode, StrokePoint } from "./types";
+import type { GainAudition } from "../../../features/session/gainAudition";
 
 // 覆盖层类型住在 strokeBuffer（纯逻辑、可单测）；这里转出一次，调用方继续从本模块取。
 export type { LiveEditOverride } from "./strokeBuffer";
@@ -90,8 +91,18 @@ export function useLiveParamEditing(args: {
 
     bumpRefreshToken: () => void;
     invalidate: () => void;
+    /** 音量自动化笔画的瞬时试听（可选；测试/纯编辑路径不传）。 */
+    audition?: GainAudition;
 }) {
-    const { rootTrackId, editParam, pitchEnabled, paramView, bumpRefreshToken, invalidate } = args;
+    const {
+        rootTrackId,
+        editParam,
+        pitchEnabled,
+        paramView,
+        bumpRefreshToken,
+        invalidate,
+        audition,
+    } = args;
 
     const liveEditOverrideRef = useRef<LiveEditOverride | null>(null);
     /**
@@ -123,6 +134,22 @@ export function useLiveParamEditing(args: {
     );
     /** 单笔超长只提示一次（见 MAX_STROKE_FRAMES）。 */
     const strokeTruncationReportedRef = useRef(false);
+    /** 音量自动化试听的 rAF 合并（投影 4 万帧不能每个 pointermove 都做）。 */
+    const volumePreviewRafRef = useRef<number | null>(null);
+    const volumePreviewPendingRef = useRef<{
+        pv: ParamViewSegment;
+        live: LiveEditOverride;
+    } | null>(null);
+    useEffect(
+        () => () => {
+            if (volumePreviewRafRef.current !== null) {
+                cancelAnimationFrame(volumePreviewRafRef.current);
+                volumePreviewRafRef.current = null;
+            }
+            volumePreviewPendingRef.current = null;
+        },
+        [],
+    );
 
     /** 推进覆盖层的全局版本号（缓冲原地更新后必须显式通知画布签名）。 */
     const touchLiveEdit = useCallback((live: LiveEditOverride) => {
@@ -134,7 +161,13 @@ export function useLiveParamEditing(args: {
     const clearLiveEditOverride = useCallback(() => {
         liveEditOverrideRef.current = null;
         liveEditWrittenRangeRef.current = null;
-    }, []);
+        if (volumePreviewRafRef.current !== null) {
+            cancelAnimationFrame(volumePreviewRafRef.current);
+            volumePreviewRafRef.current = null;
+        }
+        volumePreviewPendingRef.current = null;
+        if (editParam === "volume") audition?.cancel();
+    }, [audition, editParam]);
 
     /**
      * 把当前覆盖标记为"已提交"——**保留**其值，只等快照追上（见
@@ -260,6 +293,33 @@ export function useLiveParamEditing(args: {
                 );
             }
             touchLiveEdit(cur);
+            if (audition && editParam === "volume" && rootTrackId) {
+                volumePreviewPendingRef.current = { pv, live: cur };
+                if (
+                    volumePreviewRafRef.current === null &&
+                    typeof requestAnimationFrame === "function"
+                ) {
+                    volumePreviewRafRef.current = requestAnimationFrame(() => {
+                        volumePreviewRafRef.current = null;
+                        const pending = volumePreviewPendingRef.current;
+                        volumePreviewPendingRef.current = null;
+                        if (!pending) return;
+                        const values = projectLiveEdit(pending.live, pending.pv);
+                        audition.preview([
+                            {
+                                kind: "trackCurve",
+                                trackId: rootTrackId,
+                                paramId: editParam,
+                                window: {
+                                    startFrame: pending.pv.startFrame,
+                                    stride: pending.pv.stride,
+                                    values: [...values],
+                                },
+                            },
+                        ]);
+                    });
+                }
+            }
             // 记下写过的绝对帧区间**并集**（供"擦掉上一帧预览"精确回滚，见
             // resetLiveEditPreview）：一次擦除 + 一次写入为一帧，故并集恰好等于
             // 本帧写过的范围。空区间不记。
@@ -277,7 +337,7 @@ export function useLiveParamEditing(args: {
                 }
             }
         },
-        [clampLiveValue, ensureLiveEditBase, touchLiveEdit],
+        [audition, clampLiveValue, editParam, ensureLiveEditBase, rootTrackId, touchLiveEdit],
     );
 
     /**
@@ -308,7 +368,7 @@ export function useLiveParamEditing(args: {
         [touchLiveEdit],
     );
 
-    const commitStroke = useCallback(
+    const commitStrokeInner = useCallback(
         async (points: StrokePoint[], mode: StrokeMode) => {
             const trackId = rootTrackId;
             if (!trackId) return;
@@ -433,6 +493,24 @@ export function useLiveParamEditing(args: {
             markLiveEditCommitted,
             touchLiveEdit,
         ],
+    );
+
+    const commitStroke = useCallback(
+        async (points: StrokePoint[], mode: StrokeMode) => {
+            // 松手时丢弃尚未发出的 rAF 预览：它若在权威提交之后才跑，会新建一个
+            // 幽灵手势，把刚提交的曲线又盖回旧值。
+            if (volumePreviewRafRef.current !== null) {
+                cancelAnimationFrame(volumePreviewRafRef.current);
+                volumePreviewRafRef.current = null;
+            }
+            volumePreviewPendingRef.current = null;
+            if (!audition || editParam !== "volume") {
+                await commitStrokeInner(points, mode);
+                return;
+            }
+            await audition.commit(commitStrokeInner(points, mode));
+        },
+        [audition, commitStrokeInner, editParam],
     );
 
     return {
