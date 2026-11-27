@@ -131,10 +131,132 @@ REQUIRED = (
         r"^\s*take_gain:\s*Option<f32>,",
         "the command implementation must name the take layer take_gain as well",
     ),
+
+    # ── 分层读数入口：所有消费点只许从这四个函数取 ─────────────────────
+    (
+        "frontend/src/components/layout/timeline/clipGain.ts",
+        r"export function clipItemGain\(",
+        "the item-layer reader must exist and be the only way to read clip_gain",
+    ),
+    (
+        "frontend/src/components/layout/timeline/clipGain.ts",
+        r"export function clipTakeGain\(",
+        "the take-layer reader must preserve polarity",
+    ),
+    (
+        "frontend/src/components/layout/timeline/clipGain.ts",
+        r"export function clipAudibleGain\(",
+        "the audible reader must be item × take",
+    ),
+    (
+        "frontend/src/components/layout/timeline/clipGain.ts",
+        r"export function clipWaveformGain\(",
+        "the waveform reader must be |item × take|",
+    ),
+    (
+        "frontend/src/components/layout/timeline/takeLanes.ts",
+        r"clipWaveformGain\(clip\)",
+        "single-lane waveform must include the item layer",
+    ),
+    (
+        "frontend/src/components/layout/timeline/takeLanes.ts",
+        r"clipTakeWaveformGain\(clip,\s*take\.gain\)",
+        "multi-lane waveform must include item × its own take",
+    ),
+    (
+        "frontend/src/components/layout/pianoRoll/useClipsPeaksForPianoRoll.ts",
+        r"clipWaveformGain\(clip\)",
+        "parameter-editor waveform must include the item layer",
+    ),
+    (
+        "frontend/src/components/layout/timeline/hooks/useTimelineKernelFade.ts",
+        r'case "gain-knob":',
+        "the gain-knob tooltip branch must exist",
+    ),
+    (
+        "frontend/src/components/layout/timeline/hooks/useTimelineKernelFade.ts",
+        r"clipItemGain\(clip\)",
+        "the gain-knob tooltip must read the item layer",
+    ),
+    (
+        "backend/src-tauri/src/audio_engine/snapshot.rs",
+        r"clip\.render_gain\(gain_scope\)",
+        "the live engine must apply the scope-aware gain, not the take field",
+    ),
+    (
+        "backend/hifishifter-kernel/src/pitch_analysis/dyn_analysis.rs",
+        r"clip\.render_gain\(gain_scope\)",
+        "dyn analysis must use the same scope as rendering",
+    ),
+    (
+        "backend/hifishifter-kernel/src/pitch_analysis/dyn_analysis.rs",
+        r"clip\.clip_gain",
+        "the dyn cache key must hash the item layer",
+    ),
+    (
+        "backend/hifishifter-kernel/src/state/model.rs",
+        r"glued\.clip_gain\s*=\s*1\.0;",
+        "glue must reset the item layer after baking it into the WAV",
+    ),
+    (
+        "backend/hifishifter-kernel/src/state/model.rs",
+        r"source\.item_gain\(\)",
+        "packing clips into takes must fold the old item layer into each take",
+    ),
+    (
+        "frontend/src/features/session/sessionSlice/settings.ts",
+        r"MAX_TRACK_VOLUME\s*=\s*GAIN_MAX_LINEAR",
+        "the track fader must share the same 16× ceiling as the kernel",
+    ),
 )
 
 # (file, regex, why) -- every one of these must stay absent.
 FORBIDDEN = (
+    (
+        "frontend/src/utils/gainDb.ts",
+        r"gainDbFromKnobTravel",
+        "the old dB-returning gesture is forbidden: silence must be linear 0",
+    ),
+    (
+        "frontend/src/components/layout/timeline/hooks/useTimelineKernelGainCrossfade.ts",
+        r"gainDbFromKnobTravel",
+        "the gain drag must use resolveGainDrag, not the old dB gesture",
+    ),
+    (
+        "frontend/src/components/layout/timeline/hooks/useTimelineKernelFade.ts",
+        r"clip\.gain\b",
+        "the hover tooltip must not read the take projection as Clip gain",
+    ),
+    (
+        "frontend/src/components/layout/timeline/hooks/useTimelineKernelGainCrossfade.ts",
+        r"clip\.gain\b",
+        "the badge initial value must not read the take projection",
+    ),
+    (
+        "frontend/src/components/layout/pianoRoll/useClipsPeaksForPianoRoll.ts",
+        r"gain:\s*clip\.gain",
+        "the parameter-editor waveform must not read the take projection",
+    ),
+    (
+        "frontend/src/components/layout/timeline/takeLanes.ts",
+        r"gain:\s*take\.gain",
+        "take lanes must include the item layer, not take alone",
+    ),
+    (
+        "backend/src-tauri/src/audio_engine/snapshot.rs",
+        r"clip\.gain\.max",
+        "the live engine must not read the raw take projection",
+    ),
+    (
+        "backend/hifishifter-kernel/src/state/model.rs",
+        r"take[^\n]*clamp_gain\(",
+        "take gain must use clamp_take_gain (polarity-preserving), never clamp_gain",
+    ),
+    (
+        "frontend/src/features/session/sessionSlice/settings.ts",
+        r"MAX_TRACK_VOLUME\s*=\s*4\b",
+        "the track fader ceiling must not regress to 4×",
+    ),
     (
         PAYLOAD_TYPE,
         r"^\s*gain\??\s*:\s*number\s*;",
