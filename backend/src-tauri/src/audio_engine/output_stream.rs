@@ -15,7 +15,7 @@ use super::mix::{
     render_callback_f32, render_callback_i16, render_callback_u16, RtFault,
     SnapshotTransitionState, TrackMeterBus, TrackMeterScratch, U16_SILENCE,
 };
-use super::types::{EngineCommand, EngineSnapshot};
+use super::types::{EngineCommand, EngineSnapshot, LiveGainFrame, LiveGainRampState};
 
 pub(crate) struct OutputStreamArgs {
     pub device: cpal::Device,
@@ -23,6 +23,7 @@ pub(crate) struct OutputStreamArgs {
     pub sample_format: cpal::SampleFormat,
     pub channels: usize,
     pub snapshot: Arc<ArcSwap<EngineSnapshot>>,
+    pub live_gain: Arc<ArcSwap<LiveGainFrame>>,
     pub is_playing: Arc<AtomicBool>,
     pub play_start_wait: Arc<AtomicBool>,
     pub position_frames: Arc<AtomicU64>,
@@ -44,6 +45,7 @@ pub(crate) fn build_output_stream(args: OutputStreamArgs) -> Result<cpal::Stream
         sample_format,
         channels,
         snapshot,
+        live_gain,
         is_playing,
         play_start_wait,
         position_frames,
@@ -72,6 +74,7 @@ pub(crate) fn build_output_stream(args: OutputStreamArgs) -> Result<cpal::Stream
             let meter_bus_for_cb = meter_bus.clone();
             let meter_bus_for_err = meter_bus.clone();
             let mut meter_scratch = TrackMeterScratch::default();
+            let mut live_ramp = LiveGainRampState::default();
             let metro = metro.clone();
             let mut metro_voices = MetronomeVoices::default();
             device.build_output_stream(
@@ -82,6 +85,8 @@ pub(crate) fn build_output_stream(args: OutputStreamArgs) -> Result<cpal::Stream
                             data,
                             channels,
                             &snapshot,
+                            &live_gain,
+                            &mut live_ramp,
                             is_playing.as_ref(),
                             play_start_wait.as_ref(),
                             position_frames.as_ref(),
@@ -110,6 +115,7 @@ pub(crate) fn build_output_stream(args: OutputStreamArgs) -> Result<cpal::Stream
             let meter_bus_for_cb = meter_bus.clone();
             let meter_bus_for_err = meter_bus.clone();
             let mut meter_scratch = TrackMeterScratch::default();
+            let mut live_ramp = LiveGainRampState::default();
             let metro = metro.clone();
             let mut metro_voices = MetronomeVoices::default();
             device.build_output_stream(
@@ -120,6 +126,8 @@ pub(crate) fn build_output_stream(args: OutputStreamArgs) -> Result<cpal::Stream
                             data,
                             channels,
                             &snapshot,
+                            &live_gain,
+                            &mut live_ramp,
                             is_playing.as_ref(),
                             play_start_wait.as_ref(),
                             position_frames.as_ref(),
@@ -148,6 +156,7 @@ pub(crate) fn build_output_stream(args: OutputStreamArgs) -> Result<cpal::Stream
             let meter_bus_for_cb = meter_bus.clone();
             let meter_bus_for_err = meter_bus.clone();
             let mut meter_scratch = TrackMeterScratch::default();
+            let mut live_ramp = LiveGainRampState::default();
             let metro = metro.clone();
             let mut metro_voices = MetronomeVoices::default();
             device.build_output_stream(
@@ -158,6 +167,8 @@ pub(crate) fn build_output_stream(args: OutputStreamArgs) -> Result<cpal::Stream
                             data,
                             channels,
                             &snapshot,
+                            &live_gain,
+                            &mut live_ramp,
                             is_playing.as_ref(),
                             play_start_wait.as_ref(),
                             position_frames.as_ref(),

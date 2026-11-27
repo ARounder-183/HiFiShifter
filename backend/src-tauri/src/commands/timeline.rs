@@ -568,6 +568,7 @@ pub(super) fn set_track_state(
     pitch_analysis_algo: Option<String>,
     color: Option<String>,
     name: Option<String>,
+    preview_gesture_id: Option<String>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     state.checkpoint_timeline(&tl, crate::state::HistoryOp::EditTrack);
@@ -590,6 +591,10 @@ pub(super) fn set_track_state(
     // 重组，让本次编辑能立刻进入渲染；已收敛则是纯键比较，无副作用。
     let root_id = tl.resolve_root_track_id(&track_id);
     state.audio_engine.update_timeline(tl.clone());
+    if let Some(gesture_id) = preview_gesture_id {
+        // 与 UpdateTimeline 同一条 mpsc 队列：顺序保证“先换权威快照，再清试听帧”。
+        state.audio_engine.clear_gain_preview(gesture_id);
+    }
     let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     drop(tl);
@@ -1102,6 +1107,7 @@ pub(super) fn set_clips_state_bulk(
     state: State<'_, AppState>,
     updates: Vec<crate::state::BulkClipStatePatch>,
     checkpoint: Option<bool>,
+    preview_gesture_id: Option<String>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     if checkpoint.unwrap_or(true) {
@@ -1200,6 +1206,9 @@ pub(super) fn set_clips_state_bulk(
     }
 
     state.audio_engine.update_timeline(tl.clone());
+    if let Some(gesture_id) = preview_gesture_id {
+        state.audio_engine.clear_gain_preview(gesture_id);
+    }
     let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     drop(tl);

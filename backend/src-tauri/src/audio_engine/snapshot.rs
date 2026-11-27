@@ -294,11 +294,12 @@ pub(crate) fn build_snapshot(
         }
 
         // 快照里存“已按 scope 预乘”的增益：AppOwned = item × take × track，
-        // HostOwned = 1.0（宿主已经施加三层）。负值是反相，只跳过真正的 0。
+        // HostOwned = 1.0（宿主已经施加三层）。负值是反相。
+        //
+        // 【为什么 0 也保留】拖动试听必须能把一个 0 增益 clip 拉起来；混音
+        // 热路径对 g == 0 直接 continue，不会多算样本。若在这里丢掉，试听帧
+        // 根本没有对应的 EngineClip 可以覆盖。
         let gain = clip.render_gain(gain_scope) * track_gain_value;
-        if gain == 0.0 {
-            continue;
-        }
 
         let timeline_len_sec = clip.length_sec.max(0.0);
         if !(timeline_len_sec.is_finite() && timeline_len_sec > 1e-6) {
@@ -1564,6 +1565,11 @@ mod tests {
         assert_eq!(
             snapshot_gain(2.0, 0.5, 2.0, crate::gain::GainScope::HostOwned),
             1.0
+        );
+        // 0 增益是合法静音：必须仍在快照里，否则试听无法从 0 拉起来。
+        assert_eq!(
+            snapshot_gain(0.0, 1.0, 1.0, crate::gain::GainScope::AppOwned),
+            0.0
         );
     }
 }

@@ -52,6 +52,7 @@
 
 use crate::gain::GainScope;
 use crate::state::TimelineState;
+use std::collections::HashMap;
 
 /// `dyn_orig` 的安全上限（**纯防御性**，不表达值域语义）。
 ///
@@ -68,6 +69,20 @@ pub fn assemble_dyn_orig_from_cache(
     tl: &TimelineState,
     root_track_id: &str,
     gain_scope: GainScope,
+) -> (Vec<f32>, bool) {
+    assemble_dyn_orig_from_cache_with_gains(tl, root_track_id, gain_scope, None)
+}
+
+/// 与 assemble_dyn_orig_from_cache 相同，但允许按 clip 覆盖“可听增益”。
+///
+/// 【为什么需要】拖动 item/take 增益时，试听必须用**新的** item × take 重算
+/// dyn_orig；否则已画 DYN 的绝对目标会被旧基线除一次，松手再除一次，听感
+/// 就是“拖的时候对、松手跳一下”。覆盖表只在 worker 线程构建，音频线程不查表。
+pub fn assemble_dyn_orig_from_cache_with_gains(
+    tl: &TimelineState,
+    root_track_id: &str,
+    gain_scope: GainScope,
+    gain_overrides: Option<&HashMap<String, f32>>,
 ) -> (Vec<f32>, bool) {
     let fp = tl.frame_period_ms();
     let target_frames = tl.target_param_frames(fp);
@@ -153,8 +168,11 @@ pub fn assemble_dyn_orig_from_cache(
         let media_total = crate::state::clip_source_media_duration_sec(clip);
         let pre_silence_sec = crate::state::clip_leading_silence_sec(clip, media_total);
         // 与渲染同一个 scope：AppOwned 取 item × take（保号），HostOwned 取 1.0。
-        // 后面的能量融合会平方，负极性在这里自然消失。
-        let clip_gain = clip.render_gain(gain_scope) as f64;
+        // 后面的能量融合会平方，负极性在这里自然消失。试听覆盖表只替换
+        // “这一帧的 item × take”，scope 语义不变。
+        let clip_gain = gain_overrides
+            .and_then(|overrides| overrides.get(&clip.id).copied())
+            .unwrap_or_else(|| clip.render_gain(gain_scope)) as f64;
 
         // 淡化权重只作**纳入门限**（= 0：前导静音 / clip 末尾之外 → 不可听）；
         // 权重本身不进电平 —— 见文件头"电平的物理口径"。不可听帧贡献 0 能量。

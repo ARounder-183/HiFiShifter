@@ -883,6 +883,8 @@ pub fn run() {
             commands::apply_clip_linked_params,
             commands::set_clip_state,
             commands::set_clips_state_bulk,
+            commands::gain_preview::set_gain_preview,
+            commands::gain_preview::clear_gain_preview,
             commands::set_clip_active_take,
             commands::cycle_clip_takes,
             commands::pack_clips_into_takes,

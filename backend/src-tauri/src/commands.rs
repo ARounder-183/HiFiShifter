@@ -88,6 +88,8 @@ pub(crate) use hifishifter_kernel::midi_export;
 pub(crate) use hifishifter_kernel::midi_export::TempoTickConverter;
 #[path = "commands/formant.rs"]
 mod formant;
+#[path = "commands/gain_preview.rs"]
+pub(crate) mod gain_preview;
 #[path = "commands/notebook.rs"]
 mod notebook;
 #[path = "commands/onnx_status.rs"]
@@ -1636,6 +1638,7 @@ pub fn set_track_state(
     pitch_analysis_algo: Option<String>,
     color: Option<String>,
     name: Option<String>,
+    preview_gesture_id: Option<String>,
 ) -> crate::models::TimelineStatePayload {
     {
         // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
@@ -1654,6 +1657,7 @@ pub fn set_track_state(
                     pitch_analysis_algo,
                     color,
                     name,
+                    preview_gesture_id,
                 )
             },
         )
@@ -1942,6 +1946,7 @@ pub fn set_clips_state_bulk(
     state: State<'_, AppState>,
     updates: Vec<crate::state::BulkClipStatePatch>,
     checkpoint: Option<bool>,
+    preview_gesture_id: Option<String>,
 ) -> crate::models::TimelineStatePayload {
     {
         // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
@@ -1949,7 +1954,7 @@ pub fn set_clips_state_bulk(
         common::guard_command(
             "set_clips_state_bulk",
             common::timeline_error_payload("panic in command: set_clips_state_bulk"),
-            || timeline::set_clips_state_bulk(state, updates, checkpoint),
+            || timeline::set_clips_state_bulk(state, updates, checkpoint, preview_gesture_id),
         )
     }
 }
