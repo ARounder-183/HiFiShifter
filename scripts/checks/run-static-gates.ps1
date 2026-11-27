@@ -124,6 +124,15 @@ Invoke-Gate 'Gain audition gate' { python scripts/checks/check-gain-audition.py 
 # leg builds through tauri-action, which never imported the MSVC environment (no nmake).
 Invoke-Gate 'CI artifact name gate' { python scripts/checks/check-ci-artifact-names.py }
 
+# vslib is a **link-time** dependency (a #[link] directive, not a dlopen) and its import
+# library is x64 machine code. Every cfg that decides "the backend exists" must therefore name
+# target_arch = "x86_64"; lib.rs used to gate only on target_os = "windows" while the module
+# importing it also required the architecture, so Windows ARM64 compiled everything and then
+# died at the last link with "LNK1181: cannot open input file 'vslib_x64.lib'" (run 46016687058).
+# The same run also showed why the app must forward its features instead of inheriting the
+# kernel's defaults: --no-default-features --features onnx only silenced the app's vslib.
+Invoke-Gate 'vslib architecture gate' { python scripts/checks/check-vslib-arch-gate.py }
+
 # The host calls us synchronously on its own UI thread, and the WebView2 delivery we wait
 # on only advances while that thread pumps. A handler that takes the session's timeline
 # lock therefore waits for the actor, while the actor's post waits for the host to pump:

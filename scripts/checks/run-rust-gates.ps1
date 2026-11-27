@@ -149,7 +149,7 @@ function Get-CargoCommand([string]$kind, [int]$Threads = 0) {
 
             if ($pluginRun -and $threads -le 1) {
                 # [Why CLAP is not inside --workspace] Cargo unions features across the build
-                # graph: src-tauri uses kernel's default features (including vslib), so a
+                # graph: src-tauri's default feature set forwards vslib to the kernel, so a
                 # --workspace run shared with CLAP compiles kernel with vslib, and
                 # #[link(name="vslib_x64")] then leaks into hifishifter_clap.dll's import
                 # table — the clap_exports test "a single-file plugin must not import

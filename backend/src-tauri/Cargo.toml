@@ -27,7 +27,27 @@ cc = "1.0"
 [dependencies]
 # 离线内核（不依赖 Tauri / cpal）。内核模块正逐步从本 crate 搬过去，
 # 搬迁期间由 lib.rs 里的 `pub use` 把路径接回来。
-hifishifter-kernel = { path = "../hifishifter-kernel" }
+#
+# 【为什么必须 default-features = false】内核自己的 default 是
+# ["onnx", "vslib", "soundtouch"]，而 app 的 default 是 ["onnx", "vslib"]。
+# 直接吃内核默认值的话，`tauri build -- --no-default-features --features onnx`
+# 只是把 **app 这一侧**的 vslib 关掉，内核照旧带着 vslib 编 —— 于是 Windows ARM64
+# 上 `vslib.rs` 的 `#[link(name = "vslib_x64")]` 仍然要求那份 x64 导入库，
+# 最后一步链接直接 `LNK1181`（run 46016687058）。也就是说这条命令此前是"静默
+# 无效"的，它的字面意思和实际行为不一致。
+#
+# 关掉默认值之后，两边各自显式转发（见下方 [features]）：onnx / vslib 跟着 app 的
+# feature 走，soundtouch 因为已改成运行期 libloading 加载、三种格式都默认开启，
+# 所以固定在这里打开。与 hifishifter-plugin / hifishifter-clap 的写法一致。
+#
+# 【macOS / Linux 的发布包也会跟着变，这是有意的】那两条腿同样传
+# `--no-default-features --features onnx`，于是内核不再带 vslib：
+# `SynthPipelineKind::VocalShifterVslib` 变体不再存在，`from_track_algo` 走
+# `not(feature = "vslib")` 那一条（pitch edit 侧判 Bypass）。此前它们带着 vslib 的
+# 派发分支、却因为 `VslibProcessor` 在非 Windows 上不存在而回退到 HiFiGAN 链路 ——
+# 半套状态。工程文件里的 `PitchAnalysisAlgo::VocalShifterVslib` 不受影响（那个变体
+# 从来不是 feature 门控的），跨平台打开工程仍然原样往返。
+hifishifter-kernel = { path = "../hifishifter-kernel", default-features = false, features = ["soundtouch"] }
 hifishifter-host-link = { path = "../hifishifter-host-link" }
 hifishifter-clipboard = { path = "../hifishifter-clipboard" }
 tauri = { version = "2", features = [] }
@@ -102,8 +122,12 @@ wl-clipboard-rs = "0.9"
 [features]
 default = ["onnx", "vslib"]
 custom-protocol = ["tauri/custom-protocol"]
-onnx = ["dep:ort", "dep:ndarray", "dep:ort-tract"]
-vslib = []
+# 每一项都必须转发到内核：内核的默认 feature 已在依赖声明里关掉（见上方注释），
+# 少转发一项，app 关掉的特性就会在内核里"复活"，或者 app 打开的特性在内核里缺失。
+onnx = ["dep:ort", "dep:ndarray", "dep:ort-tract", "hifishifter-kernel/onnx"]
+# 内核侧的 vslib 是链接期依赖（`#[link(name = "vslib_x64")]`），且只在
+# x86_64-Windows 上成立；转发过去以后，关掉本 feature 的构建连那个模块都不编。
+vslib = ["hifishifter-kernel/vslib"]
 
 # GPU providers are baked into the platform-specific ort dependency below.
 # `cargo tauri build` produces GPU-accelerated binaries without extra --features.

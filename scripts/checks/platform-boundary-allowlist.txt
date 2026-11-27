@@ -45,8 +45,10 @@ backend/src-tauri/src/launch_args.rs :: #[cfg(any(target_os = "macos", test))]
 # Module declarations and feature-gated re-exports. linux_desktop / macos_menu
 # cannot move into platform/: that would make the convergence layer depend on the
 # desktop-only module it is meant to abstract. The vslib re-export is the same
-# shape one level down (a closed-source Windows x86_64 DLL).
-backend/src-tauri/src/lib.rs :: #[cfg(all(feature = "vslib", target_os = "windows"))]
+# shape one level down (a closed-source Windows x86_64 DLL) -- and it must repeat
+# target_arch = "x86_64" verbatim, because the kernel module it re-exports is only
+# built there (see scripts/checks/check-vslib-arch-gate.py).
+backend/src-tauri/src/lib.rs :: #[cfg(all(feature = "vslib", target_os = "windows", target_arch = "x86_64"))]
 backend/src-tauri/src/lib.rs :: #[cfg(target_os = "linux")]
 backend/src-tauri/src/lib.rs :: #[cfg(target_os = "macos")]
 backend/src-tauri/src/lib.rs :: #[cfg(target_os = "windows")]

@@ -103,7 +103,10 @@ pub(crate) use hifishifter_kernel::{
 };
 
 // 这几个的可见性跟着自己的 feature / target 走，不能放进上面那个统一的 `use`。
-#[cfg(all(feature = "vslib", target_os = "windows"))]
+// 【为什么带 target_arch】`hifishifter_kernel::vslib` 只在 x86_64-Windows 上存在
+// （见内核 `lib.rs` 的 `mod vslib`）。条件少一个 `target_arch` 就是
+// "re-export 了不存在的模块" —— 编译期报错，而不是链接期，但同样是红的。
+#[cfg(all(feature = "vslib", target_os = "windows", target_arch = "x86_64"))]
 pub(crate) use hifishifter_kernel::vslib;
 #[cfg(feature = "onnx")]
 pub(crate) use hifishifter_kernel::{fcpe_onnx, hnsep_onnx, nsf_hifigan_onnx};

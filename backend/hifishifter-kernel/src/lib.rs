@@ -260,8 +260,22 @@ pub mod project;
 pub mod temp_manager;
 pub mod unicode_path;
 
-// ── 可选的原生声码器（闭源、仅 Windows）────────────────────────────────────
-#[cfg(all(feature = "vslib", target_os = "windows"))]
+// ── 可选的原生声码器（闭源、仅 Windows x86_64）──────────────────────────────
+//
+// 【为什么必须带 target_arch】`vslib.rs` 里的 `#[link(name = "vslib_x64")]` 是**链接期**
+// 指令：只要这个模块参与编译，链接器就必须在搜索路径里找到那份导入库。而
+// `build.rs` 只在 x86_64-Windows 上把 `third_party/vslib` 加进搜索路径（那份 .lib
+// 本身就是 x64 机器码，链不进 ARM64）。少了 `target_arch`，Windows ARM64 会一路编译
+// 成功、在最后一步链接时报
+// `LNK1181: cannot open input file 'vslib_x64.lib'` —— 跑 46016687058 的
+// `Build Backend (windows-arm64)` 正是这样红的（在此之前它连 CMake 都没过，所以这
+// 条不一致一直没被暴露）。
+//
+// 这行必须与 `renderer/mod.rs` 的 `pub mod vslib_processor;`、app 侧 `lib.rs` 的
+// `pub(crate) use hifishifter_kernel::vslib;` 逐字一致；三处任何一处少一个
+// `target_arch` 都会得到同一个链接失败，所以由
+// `scripts/checks/check-vslib-arch-gate.py` 逐条核对。
+#[cfg(all(feature = "vslib", target_os = "windows", target_arch = "x86_64"))]
 pub mod vslib;
 
 // ── 节拍器（`EngineCommand` 的载荷类型在这里）──────────────────────────────
