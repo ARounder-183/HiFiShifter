@@ -20,7 +20,7 @@ test("waveform/geometry dual-band samples each channel plane independently", () 
         clipTotalDurationSec: 1,
         screenRect: { x: 0, y: 0, width: 4, height: 100 },
         reversed: false,
-        gain: 1,
+        amplitudeGain: 1,
         fadeInSec: 0,
         fadeOutSec: 0,
         fadeInShape: 0,
@@ -179,7 +179,7 @@ test("near-zero dyn gain: envelope never exceeds per-sample ground truth", async
                     clipTotalDurationSec: DUR,
                     screenRect: { x: 0, y: 0, width: widthPx, height: 100 },
                     reversed: false,
-                    gain: 1,
+                    amplitudeGain: 1,
                     fadeInSec: 0,
                     fadeOutSec: 0,
                     fadeInShape: 0,
@@ -314,7 +314,7 @@ test("waveform/geometry.test.ts scripted checks", async () => {
                 clipTotalDurationSec: 1,
                 screenRect: { x: 0, y: 0, width: 4, height: 100 },
                 reversed: false,
-                gain: 1,
+                amplitudeGain: 1,
                 fadeInSec: 0,
                 fadeOutSec: 0,
                 fadeInShape: 0,
@@ -436,7 +436,7 @@ test("waveform/geometry.test.ts scripted checks", async () => {
     // 音量增益 > 1 时包络按 gain 放大，必须被钳制在波形矩形内（削顶显示），
     // 不能溢出 clip 上下边界。
     const boosted = buildWaveformGeometry({
-        scene: { segments: [{ ...scene.segments[0], gain: 3 }], markers: [] },
+        scene: { segments: [{ ...scene.segments[0], amplitudeGain: 3 }], markers: [] },
         color: "#ffffff",
         getPeaks: () => ({
             min: new Float32Array([-1]),
@@ -495,7 +495,7 @@ test("amplitude map receives slice-anchored timeline time", async () => {
                 clipTotalDurationSec: 1,
                 screenRect: { x: 0, y: 0, width: 4, height: 100 },
                 reversed: false,
-                gain: 1,
+                amplitudeGain: 1,
                 fadeInSec: 0,
                 fadeOutSec: 0,
                 fadeInShape: 0,
@@ -591,7 +591,7 @@ test("volume-scaled envelope is zoom-stable (no phantom peaks at coarse zoom)", 
                 clipTotalDurationSec: 1,
                 screenRect: { x: 0, y: 0, width: widthPx, height: 100 },
                 reversed: false,
-                gain: 1,
+                amplitudeGain: 1,
                 fadeInSec: 0,
                 fadeOutSec: 0,
                 fadeInShape: 0,
@@ -669,7 +669,7 @@ test("amplitude map can vary per pixel column (dynamic gain)", async () => {
                 clipTotalDurationSec: 1,
                 screenRect: { x: 0, y: 0, width: 4, height: 100 },
                 reversed: false,
-                gain: 1,
+                amplitudeGain: 1,
                 fadeInSec: 0,
                 fadeOutSec: 0,
                 fadeInShape: 0,
@@ -736,7 +736,7 @@ test("amplitude factor view is pixel-identical to per-value calls", async () => 
                 clipTotalDurationSec: 1,
                 screenRect: { x: 0, y: 0, width: 4, height: 100 },
                 reversed: false,
-                gain: 0.8,
+                amplitudeGain: 0.8,
                 fadeInSec: 0,
                 fadeOutSec: 0,
                 fadeInShape: 0,
@@ -823,7 +823,7 @@ test("amplitude factor view falls back to per-value calls when factor is null", 
                 clipTotalDurationSec: 1,
                 screenRect: { x: 0, y: 0, width: 4, height: 100 },
                 reversed: false,
-                gain: 1,
+                amplitudeGain: 1,
                 fadeInSec: 0,
                 fadeOutSec: 0,
                 fadeInShape: 0,
@@ -897,7 +897,7 @@ test("device-pixel column enumeration (dpr grid alignment)", async () => {
         clipTotalDurationSec: 1,
         screenRect: { x: 0, y: 0, width: 4, height: 100 },
         reversed: false,
-        gain: 1,
+        amplitudeGain: 1,
         fadeInSec: 0,
         fadeOutSec: 0,
         fadeInShape: 0,
@@ -977,7 +977,7 @@ test("device-grid columns widen the sample window per column (dpr-aware)", async
                     clipTotalDurationSec: 1,
                     screenRect: { x: 0, y: 0, width: 4, height: 100 },
                     reversed: false,
-                    gain: 1,
+                    amplitudeGain: 1,
                     fadeInSec: 0,
                     fadeOutSec: 0,
                     fadeInShape: 0,
@@ -1065,7 +1065,7 @@ test("waveform/geometry constant-gain fast path is bit-identical to the slice pa
             clipTotalDurationSec: 4,
             screenRect: { x: 0, y: 0, width: 64, height: 100 },
             reversed: false,
-            gain: 1.5,
+            amplitudeGain: 1.5,
             fadeInSec: fade ? 1 : 0,
             fadeOutSec: fade ? 1 : 0,
             fadeInShape: 0,
@@ -1120,5 +1120,54 @@ test("waveform/geometry constant-gain fast path is bit-identical to the slice pa
                 );
             }
         }
+    }
+});
+
+test("★ level ceiling is already output-domain (do not multiply segment amplitude again)", () => {
+    const segment: WaveformSceneSegment = {
+        clipId: "clip",
+        sourcePath: "/tone.wav",
+        sourceSampleRate: 4,
+        sourceStartSec: 0,
+        sourceEndSec: 1,
+        clipLocalStartSec: 0,
+        clipLocalEndSec: 1,
+        clipTotalDurationSec: 1,
+        screenRect: { x: 0, y: 0, width: 4, height: 100 },
+        reversed: false,
+        amplitudeGain: 0.5,
+        fadeInSec: 0,
+        fadeOutSec: 0,
+        fadeInShape: 0,
+        fadeInDir: 0,
+        fadeOutShape: 0,
+        fadeOutDir: 0,
+        alpha: 1,
+        channelMode: 0,
+        sourceChannels: 0,
+    };
+    const map = ((value: number, gain: number) => value * gain) as unknown as {
+        (value: number, gain: number, timeSec: number | null): number;
+        factorAt: () => number;
+        levelCeilingOverWindow: () => number;
+    };
+    map.factorAt = () => 1;
+    map.levelCeilingOverWindow = () => 0.6;
+    const result = buildWaveformGeometry({
+        scene: { segments: [segment], markers: [] },
+        color: "#ffffff",
+        getPeaks: () => ({
+            min: new Float32Array([-1]),
+            max: new Float32Array([1]),
+            dataStartSec: 0,
+            dataDurationSec: 1,
+        }),
+        amplitudeMap: map,
+    });
+    const ys = Array.from(result.vertices).filter((_, index) => index % 6 === 1);
+    const top = Math.min(...ys);
+    // raw=1、gain=0.5 ⇒ mapped=0.5；limit=0.6 不触发；旧 limit=0.3 会把 top 钳到 35。
+    if (Math.abs(top - 25) > 1e-6) {
+        throw new Error(`expected top 25 (limit 0.6, not 0.3), got ${top}`);
     }
 });

@@ -159,6 +159,31 @@ REQUIRED = (
         "single-lane waveform must include the item layer",
     ),
     (
+        "frontend/src/features/session/clipGeometryTypes.ts",
+        r"readonly amplitudeGain: number;",
+        "the gesture snapshot must name the waveform amplitude amplitudeGain",
+    ),
+    (
+        "frontend/src/components/layout/timeline/clipGeometryPreview.ts",
+        r"amplitudeGain:",
+        "the geometry preview must write amplitudeGain, not a bare gain",
+    ),
+    (
+        "frontend/src/components/layout/pianoRoll/loudnessGeometryWarp.ts",
+        r"amplitudeGainOf\?\.",
+        "the warp must read the current amplitude from the explicit amplitudeGainOf reader",
+    ),
+    (
+        "frontend/src/components/layout/pianoRoll/useClipsPeaksForPianoRoll.ts",
+        r"amplitudeGain: clipWaveformGain\(clip\)",
+        "the parameter-editor peak entry must expose amplitudeGain",
+    ),
+    (
+        "frontend/src/waveform/sceneBuilder.ts",
+        r"amplitudeGain:",
+        "the waveform scene segment must expose amplitudeGain",
+    ),
+    (
         "frontend/src/components/layout/timeline/takeLanes.ts",
         r"clipTakeWaveformGain\(clip,\s*take\.gain\)",
         "multi-lane waveform must include item × its own take",

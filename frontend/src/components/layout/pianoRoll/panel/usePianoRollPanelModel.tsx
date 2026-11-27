@@ -29,6 +29,7 @@ import {
 } from "../../../../features/tracks/pitchAlgoOptions";
 import { useAppTheme } from "../../../../theme/AppThemeProvider";
 import { timelineApi } from "../../../../services/api";
+import { clipWaveformGain } from "../../timeline/clipGain";
 import { getWaveformColors } from "../../../../theme/waveformColors";
 import { isScaleKey } from "../../../../utils/musicalScales";
 import {
@@ -2238,6 +2239,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             clips: trackClips,
             framePeriodMs: loudnessFpMs,
             lockParamLines: s.lockParamLinesEnabled,
+            amplitudeGainOf: (clip) =>
+                clipWaveformGain(clip as { gain?: number; clip_gain?: number }),
         });
     }, [
         clipGeometryPreviewOrigin,

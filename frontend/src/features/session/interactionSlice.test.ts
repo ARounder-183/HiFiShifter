@@ -21,7 +21,7 @@ function preview(token: string) {
                 clipId: "a",
                 startSec: 0,
                 lengthSec: 1,
-                gain: 1,
+                amplitudeGain: 1,
                 sourceStartSec: 0,
                 sourceEndSec: 1,
                 playbackRate: 1,

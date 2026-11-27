@@ -30,7 +30,7 @@ const FP = 5;
 const FPS = 1000 / FP;
 
 interface GeoOpts {
-    gain?: number;
+    amplitudeGain?: number;
     sourceStartSec?: number;
     sourceEndSec?: number;
     playbackRate?: number;
@@ -53,7 +53,7 @@ function geo(
         id,
         startSec,
         lengthSec,
-        gain: opts.gain ?? 1,
+        amplitudeGain: opts.amplitudeGain ?? 1,
         sourceStartSec,
         sourceEndSec: opts.sourceEndSec ?? sourceStartSec + lengthSec * rate,
         playbackRate: rate,
@@ -357,8 +357,8 @@ describe("延伸/截短（速率不变，源窗口随边缘同步移动）——
 });
 
 describe("增益（基线含静态 clip 增益）", () => {
-    const originGeo = geo("c1", 0, 2, { gain: 0.5 });
-    const louder = geo("c1", 0, 2, { gain: 1 });
+    const originGeo = geo("c1", 0, 2, { amplitudeGain: 0.5 });
+    const louder = geo("c1", 0, 2, { amplitudeGain: 1 });
     const warp = warpOf([originGeo], [louder], true)!;
 
     it("基线按增益比缩放，且时域不变", () => {
@@ -681,7 +681,7 @@ describe("Loop：锚点跨界时的基线映射（周期折返）", () => {
         const out = new Array<number>(TOTAL_FRAMES).fill(0);
         for (let f = 0; f < TOTAL_FRAMES; f += 1) {
             const idx = srcFrameAt(g, f);
-            if (idx >= 0) out[f] = materialLevel(idx) * (g.gain ?? 1);
+            if (idx >= 0) out[f] = materialLevel(idx) * (g.amplitudeGain ?? 1);
         }
         return out;
     }
@@ -848,5 +848,23 @@ describe("Loop：锚点跨界时的基线映射（周期折返）", () => {
         const warp = warpOf([before], [after], true)!;
         // 无周期可折返：越界即未知（保持既有退化语义，不引入伪基线）。
         expect(warp.interpolableAt(0)).toBe(true);
+    });
+});
+
+describe("增益层口径", () => {
+    it("★ item 增益 ≠ 1 时，当前幅度必须由 amplitudeGainOf 提供，不能读 take 投影", () => {
+        const before = geo("c1", 0, 2, { amplitudeGain: 0.5 });
+        // 长度微变强制产出映射段；增益不变（item 0.5 × take 1）时 gainScale 必须为 1。
+        const after = { ...geo("c1", 0, 2.01, { amplitudeGain: 1 }), gain: 1 };
+        const warp = createLoudnessGeometryWarp({
+            origin: [before],
+            clips: [after],
+            framePeriodMs: FP,
+            lockParamLines: true,
+            amplitudeGainOf: () => 0.5,
+        })!;
+        // 生产里 after.gain 是 take（可能为 1），item 0.5 必须由 amplitudeGainOf 补上；
+        // 若误读 take，这里会得到 2。
+        expect(warp.baselineScale(100)).toBeCloseTo(1, 9);
     });
 });

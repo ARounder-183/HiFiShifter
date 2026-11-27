@@ -834,7 +834,7 @@ export function makeLoudnessAmplitudeMap(
                 }
                 // 窗口内**没有任何帧贡献** ⇒ 不钳制（`null`），而不是"钳到 0"。
                 // 【为什么这是必须的】把"无数据"当成"上界 = 0"会让几何层把整列的
-                // 上下包络都钳成 0（`limit = 0 × gCeil`）⇒ 该列画成中心线上的一条
+                // 上下包络都钳成 0（`limit = 0`）⇒ 该列画成中心线上的一条
                 // 细线，看起来像"这里还没渲染出来"。拖拽延伸/Slip 时新揭示的帧正是
                 // "有峰值但取不到目标电平"，于是它们会以离散步长一截一截地变成平线
                 // ——用户报告的"波形一截一截地加载"。`LUT_LEVEL_SKIP` 的既有注释
@@ -908,7 +908,7 @@ function toSceneClip(entry: ClipPeaksEntry): WaveformSceneClip | null {
         playbackRate: entry.playbackRate,
         reversed: entry.reversed,
         loopEnabled: entry.loopEnabled,
-        amplitudeGain: entry.gain,
+        amplitudeGain: entry.amplitudeGain,
         muted: false,
         fadeInSec: entry.fadeInSec,
         hostFades: entry.hostFades,

@@ -238,7 +238,7 @@ describe("查表路径与逐值路径逐值等价", () => {
         startSec: number;
         lengthSec: number;
         playbackRate?: number;
-        gain?: number;
+        amplitudeGain?: number;
     }
 
     function clipOf(spec: ClipSpec, id: string): WarpClipGeometry {
@@ -247,7 +247,7 @@ describe("查表路径与逐值路径逐值等价", () => {
             id,
             startSec: spec.startSec,
             lengthSec: spec.lengthSec,
-            gain: spec.gain ?? 1,
+            amplitudeGain: spec.amplitudeGain ?? 1,
             sourceStartSec: 0,
             sourceEndSec: spec.lengthSec * rate,
             playbackRate: rate,
@@ -285,8 +285,8 @@ describe("查表路径与逐值路径逐值等价", () => {
                 ],
                 // 压缩 + 增益：帧 600..1000 → 帧 200..400（速率 1→2，内容跨度守恒）。
                 [
-                    { startSec: 3.0, lengthSec: 2.0, gain: 1 },
-                    { startSec: 1.0, lengthSec: 1.0, playbackRate: 2, gain: 1.25 },
+                    { startSec: 3.0, lengthSec: 2.0, amplitudeGain: 1 },
+                    { startSec: 1.0, lengthSec: 1.0, playbackRate: 2, amplitudeGain: 1.25 },
                 ],
             ],
             lockParamLines,
@@ -307,8 +307,8 @@ describe("查表路径与逐值路径逐值等价", () => {
                 ],
                 // 纯增益（时域不变）：帧 600..800，增益 ×1.25。
                 [
-                    { startSec: 3.0, lengthSec: 1.0, gain: 1 },
-                    { startSec: 3.0, lengthSec: 1.0, gain: 1.25 },
+                    { startSec: 3.0, lengthSec: 1.0, amplitudeGain: 1 },
+                    { startSec: 3.0, lengthSec: 1.0, amplitudeGain: 1.25 },
                 ],
             ],
             lockParamLines,

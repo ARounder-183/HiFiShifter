@@ -231,7 +231,7 @@ export function buildSceneRows(args: SceneRowBuildArgs): WaveformSceneRow[] {
             playbackRate: 1,
             reversed: false,
             loopEnabled: false,
-            gain: 1,
+            amplitudeGain: 1,
             muted: false,
             fadeInSec: fadeSec,
             fadeOutSec: fadeSec,

@@ -28,7 +28,7 @@ describe("buildClipGeometryPreview", () => {
                 clipId: "a",
                 startSec: 1,
                 lengthSec: 2,
-                gain: 0.5,
+                amplitudeGain: 0.5,
                 sourceStartSec: 0.25,
                 sourceEndSec: 2.25,
                 playbackRate: 1.5,

@@ -65,7 +65,7 @@ export interface ClipPeaksEntry {
     /** 播放速率 */
     playbackRate: number;
     /** 波形幅度：|item × active take|（线性，非负；0 = 静音）。 */
-    gain: number;
+    amplitudeGain: number;
     /** 淡入时长（秒） */
     fadeInSec: number;
     /** 插件只读宿主淡化轴；仅供共享UI包络，不写入音频。 */
@@ -213,7 +213,7 @@ export function useClipsPeaksForPianoRoll(args: {
                 sourceEndSec: clipSourceEndSec,
                 sourceSampleRate,
                 playbackRate: pr,
-                gain: clipWaveformGain(clip),
+                amplitudeGain: clipWaveformGain(clip),
                 fadeInSec: clip.fadeInSec ?? 0,
                 hostFades: clip.hostFades,
                 fadeOutSec: clip.fadeOutSec ?? 0,

@@ -33,7 +33,7 @@ export function buildClipGeometryPreview(
             clipId: clip.id,
             startSec: Number(clip.startSec) || 0,
             lengthSec: Math.max(0, Number(clip.lengthSec) || 0),
-            gain: Number.isFinite(clip.gain) ? Number(clip.gain) : 1,
+            amplitudeGain: Number.isFinite(clip.amplitudeGain) ? Number(clip.amplitudeGain) : 1,
             sourceStartSec: Number(clip.sourceStartSec) || 0,
             sourceEndSec: Number(clip.sourceEndSec) || 0,
             playbackRate: Number(clip.playbackRate) || 1,

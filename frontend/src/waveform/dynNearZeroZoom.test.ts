@@ -160,7 +160,7 @@ function envelopeAt(
                 clipTotalDurationSec: DUR,
                 screenRect: { x: 0, y: 0, width: widthPx, height: 100 },
                 reversed: false,
-                gain: 1,
+                amplitudeGain: 1,
                 fadeInSec: 0,
                 fadeOutSec: 0,
                 fadeInShape: 0,
