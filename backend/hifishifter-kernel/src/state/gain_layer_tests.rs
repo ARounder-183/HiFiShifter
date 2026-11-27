@@ -208,3 +208,20 @@ fn packed_takes_fold_item_gain_and_mute() {
     );
     assert!((packed.takes[1].gain - 0.0).abs() < 1e-6, "静音源折成静音");
 }
+
+/// 渲染作用域是所有权，不是数值：HostOwned 必须输出干声 1.0。
+#[test]
+fn host_owned_scope_never_multiplies_the_layers_again() {
+    let (mut timeline, clip_id) = timeline_with_clip();
+    timeline.patch_clip_state(
+        &clip_id,
+        ClipStatePatch {
+            take_gain: Some(-0.5),
+            item_gain: Some(4.0),
+            ..Default::default()
+        },
+    );
+    let clip = timeline.clips.iter().find(|c| c.id == clip_id).unwrap();
+    assert!((clip.render_gain(crate::gain::GainScope::AppOwned) + 2.0).abs() < 1e-6);
+    assert_eq!(clip.render_gain(crate::gain::GainScope::HostOwned), 1.0);
+}
