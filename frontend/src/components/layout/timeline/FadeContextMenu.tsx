@@ -16,6 +16,7 @@
 /* eslint-disable react-refresh/only-export-components -- 文件同时导出组件与 Hook/常量（刷新边界按文件粒度接受） */
 import React, { useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
+import { MenuScrollScope } from "../../../ui/MenuScrollScope";
 import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
 import { AppSlider, AppSliderReadout } from "../../../ui/Slider";
 import { AppDensityProvider } from "../../../ui/density";
@@ -414,44 +415,49 @@ export const FadeContextMenu: React.FC<{
             onContextMenu={(e) => e.preventDefault()}
             onPointerDown={(e) => e.stopPropagation()}
         >
-            {secondary ? (
-                // 交叉点：双列 —— 先前者淡出、后后者淡入。
-                <>
-                    <div className="hs-menu__label">{labelFor(primary)}</div>
-                    <SideColumn
-                        side={primary}
-                        isOut={primary.isOut}
-                        onShapeChange={onShapeChange}
-                        onDirChange={onDirChange}
-                        onSChange={onSChange}
-                        t={(key) => t(key as MessageKey)}
-                    />
-                    <div className="hs-menu__separator" role="separator" />
-                    <div className="hs-menu__label">{labelFor(secondary)}</div>
-                    <SideColumn
-                        side={secondary}
-                        isOut={secondary.isOut}
-                        onShapeChange={onShapeChange}
-                        onDirChange={onDirChange}
-                        onSChange={onSChange}
-                        t={(key) => t(key as MessageKey)}
-                    />
-                </>
-            ) : (
-                <>
-                    <div className="hs-menu__label">{labelFor(primary)}</div>
-                    <SideColumn
-                        side={primary}
-                        isOut={primary.isOut}
-                        onShapeChange={onShapeChange}
-                        onDirChange={onDirChange}
-                        onSChange={onSChange}
-                        t={(key) => t(key as MessageKey)}
-                    />
-                </>
-            )}
-            {/* 形状切换重置曲率的语义提示（与 Clip 菜单一致的行为说明）。 */}
-            <div className="hs-menu__hint">{curvatureHint}</div>
+            {/* 【`scrollable={false}`】内容是一张紧凑面板（每侧一行形状 + 一个曲率
+                滑杆），高度可证明有界；壳滚起来反而会干扰曲率预览的指针捕获。
+                内边距仍然走内容层 —— 壳的内边距必须是 0，否则 sticky 提示行会内缩。 */}
+            <MenuScrollScope scrollable={false}>
+                {secondary ? (
+                    // 交叉点：双列 —— 先前者淡出、后后者淡入。
+                    <>
+                        <div className="hs-menu__label">{labelFor(primary)}</div>
+                        <SideColumn
+                            side={primary}
+                            isOut={primary.isOut}
+                            onShapeChange={onShapeChange}
+                            onDirChange={onDirChange}
+                            onSChange={onSChange}
+                            t={(key) => t(key as MessageKey)}
+                        />
+                        <div className="hs-menu__separator" role="separator" />
+                        <div className="hs-menu__label">{labelFor(secondary)}</div>
+                        <SideColumn
+                            side={secondary}
+                            isOut={secondary.isOut}
+                            onShapeChange={onShapeChange}
+                            onDirChange={onDirChange}
+                            onSChange={onSChange}
+                            t={(key) => t(key as MessageKey)}
+                        />
+                    </>
+                ) : (
+                    <>
+                        <div className="hs-menu__label">{labelFor(primary)}</div>
+                        <SideColumn
+                            side={primary}
+                            isOut={primary.isOut}
+                            onShapeChange={onShapeChange}
+                            onDirChange={onDirChange}
+                            onSChange={onSChange}
+                            t={(key) => t(key as MessageKey)}
+                        />
+                    </>
+                )}
+                {/* 形状切换重置曲率的语义提示（与 Clip 菜单一致的行为说明）。 */}
+                <div className="hs-menu__hint">{curvatureHint}</div>
+            </MenuScrollScope>
         </div>,
         menuPortalContainer(),
     );

@@ -476,21 +476,34 @@
      * 一档；需要更宽的表单型菜单（如倍率编辑器）显式给 `width`，而不是把最小
      * 宽度调大。
      *
-     * 【最大高度为什么是 60vh】长菜单（颤音预设、文件浏览器位置列表）此前没有
-     * 上限：条目多到超过视口时，定位夹紧会把它整体推回视口内，于是顶部条目被
-     * 推到视口之外且永远够不到。壳自己滚动是唯一能让"测量 → 夹紧"保持确定的做法
-     * —— 壳的高度恒为 `min(内容高, max-h)`，不随内容变化。
+     * 【最大高度 = 视口预算，不是视口的一个比例】曾经是 `60vh`，那是"菜单最多
+     * 占屏幕六成"的观感约定，与"这张菜单到底放不放得下"无关：900px 高的窗口里
+     * 60vh = 540px，而多选音频块时的右键菜单实测 574px —— 差 34px 就开始滚，
+     * 哪怕视口还剩 360px 没用上。用户看到的是"多选时菜单总是有滚动条，无论空间
+     * 够不够"。
+     *
+     * 现在的判据只有一条：菜单最多和视口一样高（两侧各留一个 EDGE_GAP）。真装
+     * 不下时（矮窗口、超长 Take 列表）才滚动，而滚动由两条提示行承担。
+     *
+     * 【为什么是 100vh 而不是 dvh】夹紧用的是 `window.innerHeight`，两者必须是
+     * 同一个口径，否则"夹到贴边"和 max-height 会差出一条地址栏。
      *
      * 【阴影为什么是字面量】它就是 Tailwind `shadow-lg` 的既有取值（两条投影
      * 叠加）。收进令牌只是让"菜单阴影"有一个可改的地方，观感与统一前完全一致。
      */
     --qt-menu-min-w: 190px;
-    --qt-menu-max-h: 60vh;
+    /* 必须等于 `components/appTooltipPosition.ts` 的 EDGE_GAP：菜单与气泡的
+       "贴边距离"是同一件事，两处各写一个数就会在窗口边缘露出 3px 差异。 */
+    --qt-menu-edge-gap: 8px;
+    --qt-menu-max-h: calc(100vh - var(--qt-menu-edge-gap) * 2);
     --qt-menu-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
     /* 项高复用控件高度：菜单项与工具栏按钮同高，菜单与周围 chrome 的行距才对齐 */
     --qt-menu-item-h: var(--qt-ctl-md, 24px);
     /* 前导图标列宽：有图标才占位，保证"有的项有图标、有的没有"时文字仍左对齐 */
     --qt-menu-icon-w: 16px;
+    /* 提示行高度：18px ≈ 0.75 个菜单项 —— 够画出渐变与箭头，又不至于让一张
+       10 项的菜单被吃掉两行。触摸形态覆写成 28px（手指按不准 18px）。 */
+    --qt-menu-scroll-hint-h: 18px;
 
     /*
      * 层级阶梯。原来是 index.css 里一段注释约定 + 各处的 z-[999]/z-[9999]
@@ -974,23 +987,167 @@ textarea {
  * 变化，夹紧结果不稳定；壳滚动时高度恒为 `min(内容高, --qt-menu-max-h)`，测量与
  * 夹紧都是确定的。
  *
+ * 【为什么没有竖直滚动条】菜单是瞬态表面，滚动条是常驻机械装置；它还偷宽度
+ * （原生条 10px）—— 出现时内容右缘整体左移，右对齐的快捷键列立刻不在同一列。
+ * 唯一的竖直滚动装置是两条 `.hs-menu__scroll-hint`（见下方）。
+ *
+ * `scrollbar-width: none` 只改**渲染**，不改可滚范围：滚轮、方向键、程序化
+ * `scrollTop` 全部照常。不用 `::-webkit-scrollbar` 自绘 —— 本仓实测分数 DPR 下
+ * 拖拽映射会放大 dpr² 倍。
+ *
+ * 【为什么 padding 是 0，内边距搬到 `.hs-menu__content`】提示行是
+ * `position: sticky`，它的约束盒是父元素的**内容盒**：壳若留 4px 内边距，提示行
+ * 会跟着内缩 4px，边缘露出一条没被渐变的空白（实测 165 vs 期望 161）。
+ *
  * 【为什么不预留滚动条槽位】条目自带 12px 横向内边距，滚动条压上来时文字与它之间
  * 仍有那 12px 呼吸，因此不需要额外让位（与 `.hs-scroll-gutter-flush` 的判据同源：
  * 容器本来就有留白）。反过来若写 `scrollbar-gutter: stable`，**每一张菜单**都会在
  * 不滚动时也空出一条槽位的宽度，左右内边距立刻不对称。
+ *
+ * 【不要给壳加 transform / filter / contain / will-change】子面板是
+ * `position: fixed`（`.hs-menu--submenu`），任何建立包含块的属性都会把它钉回壳里、
+ * 被 `overflow` 裁掉 —— 历史事故：子菜单可见宽度 5px。
  */
 .hs-menu {
     position: fixed;
     z-index: var(--qt-z-menu);
     min-width: var(--qt-menu-min-w);
     max-height: var(--qt-menu-max-h);
-    overflow-y: auto;
-    padding: var(--qt-space-2) 0;
+    /* 只裁圆角，不产生横向滚动条（`overflow-y: auto` 会把 `overflow-x` 也变成
+       auto，一个超长标签就能让菜单长出一条横向滚动条）。 */
+    overflow: hidden auto;
+    overscroll-behavior: contain;
+    padding: 0;
+    scrollbar-width: none;
     background: var(--qt-window);
     color: var(--qt-text);
     border: 1px solid var(--qt-border);
     border-radius: var(--qt-radius-sm);
     box-shadow: var(--qt-menu-shadow);
+}
+
+/* 内容层：内边距的持有者，也是"内容高度变化"的观测点。
+ *
+ * 【为什么内边距必须在这一层】见 `.hs-menu` 的说明：sticky 提示行的约束盒是父级
+ * 的内容盒，壳留内边距会让提示行内缩，边缘露出一条没被渐变的空白。 */
+.hs-menu__content {
+    padding: var(--qt-space-2) 0;
+}
+
+/* ── 提示行 ────────────────────────────────────────────────────────────────
+ *
+ * 【它表达什么】"这个方向还有内容，而且可以滚"。两个手段叠在一起：
+ *   ① 渐变：内容在边缘**溶进**菜单底色 —— 这是"下面还有"的语法；
+ *   ② 三角：唯一的可操作暗示 —— 这是"可以滚"的语法。
+ * 只做渐变，用户不知道能点；只做三角，菜单边缘会出现一条生硬的切线。
+ *
+ * 【为什么不是 REAPER 那种实心灰条】那是把提示做成"另一行菜单项"。菜单项的语法
+ * 是"点一下执行一个命令"，而这里点一下只是滚动 —— 同一套语法会让人以为它是一条
+ * 命令。渐变 + 小箭头是"表面边缘"的语法。
+ *
+ * 【零占位】`height: 0` + 内部绝对定位：菜单高度、内容位置、`scrollHeight` 在
+ * 提示行出现 / 消失时都不变（实测 574 → 574）。
+ *
+ * 【可见性写在自己身上】控制器把 `data-visible` 写到提示行元素本身，而不是祖先壳
+ * 上：子面板是父壳的 DOM 后代，写祖先会让"父菜单在滚"把"子面板的提示行"一起点亮。
+ */
+.hs-menu__scroll-hint {
+    position: sticky;
+    /* 【不写 left / right】对 sticky 元素而言它们是**吸附阈值**而不是布局偏移。
+       块级元素本来就占满宽度，不需要它们。 */
+    height: 0;
+    z-index: 1;
+    cursor: default;
+    user-select: none;
+    /* 手指按下不能变成页面滚动，否则按住快滚会被 `pointercancel` 打断。 */
+    touch-action: none;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--qt-dur-fast) linear;
+}
+
+.hs-menu__scroll-hint--up {
+    top: 0;
+}
+
+.hs-menu__scroll-hint--down {
+    bottom: 0;
+}
+
+/* 真正画出来的条：绝对定位，不参与流。
+ *
+ * 【命中区在 `::after` 上，不在宿主上】宿主的盒高是 0 —— 0 高的元素永远打不中。
+ * 真正 18px 高的命中区是 `::after`：它属于宿主这个元素，所以指针事件仍然派发到
+ * 宿主（实测 `elementFromPoint` 在条中心返回的正是提示行宿主，菜单中部返回的是
+ * `.hs-menu__item`）。 */
+.hs-menu__scroll-hint::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: var(--qt-menu-scroll-hint-h);
+    pointer-events: none;
+}
+
+.hs-menu__scroll-hint--up::after {
+    top: 0;
+    background-image: linear-gradient(to bottom, var(--qt-window) 45%, transparent);
+}
+
+.hs-menu__scroll-hint--down::after {
+    bottom: 0;
+    background-image: linear-gradient(to top, var(--qt-window) 45%, transparent);
+}
+
+/* 可见的那一条：整条（含箭头）淡入，命中区打开。 */
+.hs-menu__scroll-hint[data-visible="1"] {
+    opacity: 1;
+}
+
+.hs-menu__scroll-hint[data-visible="1"]::after {
+    pointer-events: auto;
+}
+
+/* 悬停 / 按下：在渐变**之下**叠一层底色，渐变的透明那一半透出它 ——
+ * 读起来是"这条边被激活了"，而不是"这里有一条命令"。 */
+.hs-menu__scroll-hint:hover::after {
+    background-color: color-mix(in oklab, var(--qt-menu-item-hover) 60%, transparent);
+}
+
+.hs-menu__scroll-hint[data-pressed="1"]::after {
+    background-color: color-mix(in oklab, var(--qt-menu-item-active) 22%, transparent);
+}
+
+/* 三角：与子菜单的右箭头同一支笔画（1.4px、圆头、`currentColor`）。
+ * 用 stroke 而不是填充三角形 —— 填充三角是"工具提示箭头"的语汇。 */
+.hs-menu__scroll-caret {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    color: var(--qt-text-muted);
+    pointer-events: none;
+    transition: color var(--qt-dur-fast) linear;
+}
+
+.hs-menu__scroll-hint--up .hs-menu__scroll-caret {
+    top: calc((var(--qt-menu-scroll-hint-h) - 6px) / 2);
+    transform: translateX(-50%) rotate(180deg);
+}
+
+.hs-menu__scroll-hint--down .hs-menu__scroll-caret {
+    bottom: calc((var(--qt-menu-scroll-hint-h) - 6px) / 2);
+}
+
+.hs-menu__scroll-hint:hover .hs-menu__scroll-caret,
+.hs-menu__scroll-hint[data-pressed="1"] .hs-menu__scroll-caret {
+    color: var(--qt-text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .hs-menu__scroll-hint,
+    .hs-menu__scroll-caret {
+        transition: none;
+    }
 }
 
 /*
@@ -1041,8 +1198,21 @@ textarea {
  * （`style={{ left: x, top: y }}`），内联样式只有 !important 能覆盖。
  * 这两个属性在 sheet 里本来就没有意义（sheet 贴底、通栏），覆盖掉不会丢失
  * 任何信息 —— 桌面形态下这条规则根本不命中。
+ *
+ * 【为什么选择器必须是 `[data-hs-context-menu="1"]`】这个属性有**两种**写法：
+ * `="1"` 是"已打开的菜单表面"，**无值**是常驻的锚点容器（工具栏按钮的
+ * `position: relative` 外壳）。写成不带值的 `[data-hs-context-menu]` 会把
+ * 8 个锚点容器一起套上 sheet 装饰 —— 实测（`?mock=1&form=mobile`）它们全部
+ * 带上了 `radius 16px` + `shadow 0 -12px` + `bottom: 0`，而那正是本仓在
+ * `ui/Menu.tsx` 顶部专门警告过的"两种写法不能混为一谈"。
+ *
+ * 【为什么排除 `[data-hs-menu-inline="1"]`】"住在 sheet 里的菜单"（移动形态的
+ * 菜单栏，见 `shell/MobileChrome.tsx`）与"子菜单面板"都不该再升起一层 sheet：
+ * 前者会叠出两层 sheet，后者会脱离它的触发项、跑到屏幕底部。它们由组件按
+ * **结构事实**（锚点是否在 sheet 里 / 是不是子面板）打上这个标记 —— 不是按
+ * `isMobileForm()` 分支，形态判据仍然只有 CSS 令牌层那一处。
  */
-html[data-form="mobile"] [data-hs-context-menu] {
+html[data-form="mobile"] [data-hs-context-menu="1"]:not([data-hs-menu-inline="1"]) {
     left: 0 !important;
     right: 0;
     top: auto !important;
@@ -1051,10 +1221,17 @@ html[data-form="mobile"] [data-hs-context-menu] {
     max-height: 70dvh;
     border-radius: 16px 16px 0 0;
     border-bottom: 0;
-    padding-bottom: calc(var(--qt-space-2) + env(safe-area-inset-bottom, 0px));
     box-shadow: 0 -12px 32px rgb(0 0 0 / 45%);
     /* 底部 sheet 从下往上滑入：120ms 足够"是它出现了"，再长就像卡了。 */
     animation: hs-menu-sheet-in 120ms ease-out;
+}
+
+/* 安全区的内边距跟着内边距一起搬进内容层：壳的内边距必须是 0（见 `.hs-menu`），
+   否则 sticky 提示行会内缩、在 sheet 内缘露出一条没被渐变的空白。 */
+html[data-form="mobile"]
+    [data-hs-context-menu="1"]:not([data-hs-menu-inline="1"])
+    > .hs-menu__content {
+    padding-bottom: calc(var(--qt-space-2) + env(safe-area-inset-bottom, 0px));
 }
 
 @keyframes hs-menu-sheet-in {
@@ -1069,7 +1246,7 @@ html[data-form="mobile"] [data-hs-context-menu] {
 }
 
 @media (prefers-reduced-motion: reduce) {
-    html[data-form="mobile"] [data-hs-context-menu] {
+    html[data-form="mobile"] [data-hs-context-menu="1"]:not([data-hs-menu-inline="1"]) {
         animation: none;
     }
 }
@@ -1086,18 +1263,24 @@ html[data-form="mobile"] [data-hs-context-menu] {
  * 【它不再为"带子菜单"服务】子面板已改为 fixed 定位（见 `.hs-menu--submenu`），
  * 不再被壳的 `overflow-y: auto` 裁切 —— 带子菜单的壳保持滚动，窗口高度不够时
  * 整张菜单可滚。
+ *
+ * 【为什么不需要再撤销滚动条槽位】壳已经不预留槽位（没有 `scrollbar-gutter`），
+ * 那行 `scrollbar-gutter: auto` 随本次改动一起删掉。
+ *
+ * 【它同时关掉了提示行】`overflow: visible` 让 `MenuScrollScope` 找不到滚动容器，
+ * 于是整段自动滚动与提示行逻辑关闭 —— 这是"内容有界"的**运行期**判据，静态的
+ * `scrollable={false}` 只是让 DOM 更干净。
  */
 .hs-menu--no-scroll {
     max-height: none;
     overflow: visible;
-    scrollbar-gutter: auto;
 }
 
 /*
  * 表单型菜单（倍率编辑器）：内容是一列带标签的输入框，需要横向内边距。
- * 与条目型菜单的区别**只在壳的内边距** —— 表面、边框、圆角、阴影仍然共用。
+ * 与条目型菜单的区别**只在内容层的内边距** —— 表面、边框、圆角、阴影仍然共用。
  */
-.hs-menu--form {
+.hs-menu--form .hs-menu__content {
     padding: var(--qt-space-2) var(--qt-space-5);
 }
 

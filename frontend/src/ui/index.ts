@@ -60,6 +60,8 @@ export {
     type AppSubMenuProps,
 } from "./Menu";
 
+export { MenuScrollScope, type MenuScrollScopeProps } from "./MenuScrollScope";
+
 export {
     AppConfirmDialog,
     AppDialog,

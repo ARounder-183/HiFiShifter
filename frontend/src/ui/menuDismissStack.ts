@@ -69,6 +69,30 @@ export function handleMenuDismissPointerDown(target: Node | null): void {
     }
 }
 
+/**
+ * 同一个 `Escape` 事件只处理一次。
+ *
+ * 【为什么需要】每个菜单表面都在 `document` 上挂着 keydown。一次 Escape 会让
+ * 所有打开的层各收到一次 —— 若每层都"关掉自己"，一次按键就关掉整棵菜单树。
+ * 用事件对象本身做去重键：同一个 KeyboardEvent 的第二、三次调用直接返回 true。
+ */
+let lastEscapeEvent: KeyboardEvent | null = null;
+
+/**
+ * 处理一次 Escape：**只关最内层**。
+ *
+ * @returns 有层被关掉（或本事件已被处理）时为 true；调用方据此决定要不要退回
+ * "关掉自己"。栈为空时返回 false。
+ */
+export function handleMenuDismissEscape(event: KeyboardEvent): boolean {
+    if (lastEscapeEvent === event) return true;
+    lastEscapeEvent = event;
+    const top = layers[layers.length - 1];
+    if (!top) return false;
+    top.dismiss();
+    return true;
+}
+
 /** 当前层数（测试用；生产代码不需要知道）。 */
 export function menuDismissLayerCount(): number {
     return layers.length;
@@ -77,4 +101,5 @@ export function menuDismissLayerCount(): number {
 /** 清空层栈（仅测试用：模块级状态必须在用例之间归零）。 */
 export function resetMenuDismissStack(): void {
     layers.length = 0;
+    lastEscapeEvent = null;
 }

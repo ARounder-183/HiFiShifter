@@ -24,6 +24,7 @@ import { FadeShapeIcon } from "./FadeShapeIcon";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
 
 import { AppSubMenu } from "../../../ui";
+import { MenuScrollScope } from "../../../ui/MenuScrollScope";
 import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
 import { useI18n } from "../../../i18n/I18nProvider";
 import type { MessageKey } from "../../../i18n/messages";
@@ -695,7 +696,9 @@ export const ClipContextMenu: React.FC<{
             style={{ left: x, top: y }}
             onPointerDown={(e) => e.stopPropagation()}
         >
-            {entries.map(renderEntry)}
+            {/* 壳自己不再持有内边距，也不再画滚动条：内容层负责内边距，两条
+                sticky 提示行负责"这个方向还有内容"。见 `ui/MenuScrollScope`。 */}
+            <MenuScrollScope>{entries.map(renderEntry)}</MenuScrollScope>
         </div>,
         document.body,
     );

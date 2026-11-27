@@ -31,7 +31,12 @@ function isScrollContainer(element: HTMLElement): boolean {
  * 菜单的滚动范围止于菜单自己。
  */
 export function menuScrollContainerOf(start: Element | null): HTMLElement | null {
-    let node: Element | null = start instanceof Element ? start.parentElement : null;
+    /*
+     * 从 `start` **自己**开始判，而不是它的父级：调用方有两种 —— 内容层
+     * （`.hs-menu__content`，自己永不滚动）与菜单表面（`.hs-menu`，自己就是滚动
+     * 容器）。从父级开始会让后一种直接越过壳，去命中面板的滚动区。
+     */
+    let node: Element | null = start instanceof Element ? start : null;
     while (node instanceof HTMLElement) {
         if (node.classList.contains("hs-menu")) return isScrollContainer(node) ? node : null;
         if (isScrollContainer(node)) return node;

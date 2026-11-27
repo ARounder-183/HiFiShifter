@@ -627,8 +627,25 @@ describe("抽象层不能空转（采用率）", () => {
          * 【判据】要么声明在与来源变量相同的作用域（选择器含 `.radix-themes` —— 每个
          * Radix portal 包裹层都有这个类），要么给 `var()` 提供 fallback。
          */
+        const blocks = cssBlocks(readFileSync(TOKEN_CSS, "utf8"));
+        /*
+         * `:root` 里声明的自定义属性在**任何**后代元素上都解析得到（它们沿 DOM 继承），
+         * 因此引用它们是安全的。Radix 的 `--accent-9` 之类只声明在 `.radix-themes`
+         * 上，那才是这条门禁要挡的东西 —— 判据必须是"这个变量在声明处解析得到吗"，
+         * 而不是"这个值里有没有 `var(`"。
+         */
+        const rootTokens = new Set<string>();
+        for (const block of blocks) {
+            if (!/(^|[\s,])html([\s,:.]|$)/.test(block.selector) && block.selector !== ":root")
+                continue;
+            for (const name of block.body.matchAll(/(--[a-z0-9-]+)\s*:/g)) rootTokens.add(name[1]);
+        }
+        expect(rootTokens.size, ":root 令牌集为空，正则已失效").toBeGreaterThan(20);
+
         const offenders: string[] = [];
-        for (const block of cssBlocks(readFileSync(TOKEN_CSS, "utf8"))) {
+        for (const block of blocks) {
+            const local = new Set<string>();
+            for (const name of block.body.matchAll(/(--[a-z0-9-]+)\s*:/g)) local.add(name[1]);
             const declaration = /--qt-[a-z0-9-]+:\s*([^;]+);/g;
             let match: RegExpExecArray | null;
             while ((match = declaration.exec(block.body)) !== null) {
@@ -637,6 +654,9 @@ describe("抽象层不能空转（采用率）", () => {
                 if (!value.includes("var(")) continue;
                 if (hasVarFallback(value)) continue;
                 if (/(^|[\s,])\.radix-themes([\s,:.]|$)/.test(block.selector)) continue;
+                // 引用的每个变量都能在声明处解析（本块或 :root）→ 安全。
+                const refs = [...value.matchAll(/var\((--[a-z0-9-]+)/g)].map((m) => m[1]);
+                if (refs.every((name) => local.has(name) || rootTokens.has(name))) continue;
                 offenders.push(`${block.context} → ${match[0].trim()}`);
             }
         }
