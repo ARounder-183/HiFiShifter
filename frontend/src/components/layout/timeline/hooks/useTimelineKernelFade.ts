@@ -206,7 +206,7 @@ export function useTimelineKernelFade({
                     text = t("clip_badge_rate_tip");
                     break;
                 case "gain-label":
-                    text = t("clip_badge_gain_tip");
+                    text = canEditItemGain() ? t("clip_badge_gain_tip") : t("gain_host_controlled");
                     break;
                 case "formant":
                     text = t("clip_formant_title");
