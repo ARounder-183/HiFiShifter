@@ -2,7 +2,7 @@
 import type { TimelineClip, TimelineClipTake, TimelineState } from "../../../types/api";
 import type { ClipInfo, ClipTakeInfo } from "../sessionTypes";
 import { modEuclid, resolveLoopMediaDurationSec } from "../../../utils/loopRender";
-import { clampGain } from "../../../utils/gainDb";
+import { clampTakeGain } from "../../../utils/gainDb";
 import { normalizeChannelMode } from "../../../utils/channelMode";
 import { clamp } from "./helpersCore";
 import { applyTimelineState } from "./helpersTimeline";
@@ -36,7 +36,7 @@ export function parseTimelineClipTake(take: TimelineClipTake): ClipTakeInfo {
     return {
         id: take.id,
         name: take.name ?? "",
-        gain: clampGain(Number(take.gain ?? 1)),
+        gain: clampTakeGain(Number(take.gain ?? 1)),
         sourcePath: take.source_path,
         sourcePathRelative: take.source_path_relative,
         durationSec: Number(take.duration_sec ?? 0) || undefined,
@@ -206,7 +206,7 @@ export function updateActiveTakeFromFlat(clip: ClipInfo): void {
     const takes = clip.takes ?? [];
     const take = takes.find((entry) => entry.id === clip.activeTakeId) ?? takes[0];
     if (!take) return;
-    take.gain = clip.gain;
+    take.gain = clampTakeGain(clip.gain);
     take.sourcePath = clip.sourcePath;
     take.sourcePathRelative = clip.sourcePathRelative;
     take.durationSec = clip.durationSec;
@@ -244,7 +244,7 @@ export function updateTakesFromFlatWithSync(state: SessionState, clip: ClipInfo)
     if (takes.length <= 1) return;
     const rateMultiplier = getClipRateMultiplier(clip);
     for (const take of takes) {
-        take.gain = clip.gain;
+        take.gain = clampTakeGain(clip.gain);
         take.sourceStartSec = clip.sourceStartSec;
         take.sourceEndSec = clip.sourceEndSec;
         take.playbackRate = clamp(clip.playbackRate / rateMultiplier, 0.1, 10);
@@ -256,7 +256,7 @@ export function updateTakesFromFlatWithSync(state: SessionState, clip: ClipInfo)
 }
 
 export function applyActiveTakeToFlat(clip: ClipInfo, take: ClipTakeInfo): void {
-    clip.gain = take.gain;
+    clip.gain = clampTakeGain(take.gain);
     clip.sourcePath = take.sourcePath;
     clip.sourcePathRelative = take.sourcePathRelative;
     clip.durationSec = take.durationSec;

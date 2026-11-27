@@ -459,17 +459,28 @@ export function useTimelineClipActions(
             for (const id of ids) {
                 const clip = sessionRef.current.clips.find((c) => c.id === id);
                 if (!clip) continue;
-                const newGain = computeClipNormalizationGain(clip, {
-                    getInterleavedSlice: (sourcePath, _channel, sourceStartSec, sourceSpanSec) =>
-                        waveformMipmapStore.getInterleavedSlice(
+                const newGain = computeClipNormalizationGain(
+                    {
+                        ...clip,
+                        takeGain: clip.gain,
+                    },
+                    {
+                        getInterleavedSlice: (
                             sourcePath,
-                            0,
+                            _channel,
                             sourceStartSec,
                             sourceSpanSec,
-                        ),
-                    releaseInterleaved: (data) =>
-                        waveformMipmapStore.releaseInterleaved(data as Float32Array),
-                });
+                        ) =>
+                            waveformMipmapStore.getInterleavedSlice(
+                                sourcePath,
+                                0,
+                                sourceStartSec,
+                                sourceSpanSec,
+                            ),
+                        releaseInterleaved: (data) =>
+                            waveformMipmapStore.releaseInterleaved(data as Float32Array),
+                    },
+                );
                 if (newGain == null) continue;
                 // 【乐观更新写 item 层，远程写入也必须写 item 层】见
                 // `BulkClipRemoteChange.itemGain` 的说明。

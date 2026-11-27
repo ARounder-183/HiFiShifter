@@ -1,7 +1,7 @@
 // Session 时间线快照应用与导入 upsert helper。
 import type { TimelineClip, TimelineState } from "../../../types/api";
 import type { GridSize } from "../sessionTypes";
-import { clampGain } from "../../../utils/gainDb";
+import { clampGain, clampTakeGain } from "../../../utils/gainDb";
 import { normalizeChannelMode } from "../../../utils/channelMode";
 import { SCALE_KEYS } from "../../../utils/musicalScales";
 import type { ScaleLike } from "../../../utils/musicalScales";
@@ -126,7 +126,7 @@ export function applyTimelineState(
             durationFrames: clip.duration_frames,
             sourceSampleRate: clip.source_sample_rate,
             // Take 级增益（active take 投影）。
-            gain: clampGain(Number(clip.gain ?? 1)),
+            gain: clampTakeGain(Number(clip.gain ?? 1)),
             // Item 级增益（时间轴旋钮）。后端未提供时按 1.0 —— 注意 0 是合法静音值，
             // 不能用 `|| 1` 兜底。
             clip_gain: clampGain(Number(clip.clip_gain ?? 1)),

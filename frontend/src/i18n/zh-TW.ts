@@ -964,8 +964,9 @@ export const zhTW = {
     fade_info_side_type_label: "{side}{type}",
     common_length: "長度",
 
-    gain_value_tooltip: "增益：{gain} dB",
-    gain_value_tooltip_drag: "增益：{gain} dB [{delta} dB]",
+    gain_value_tooltip: "增益：{gain}",
+    gain_value_tooltip_drag: "增益：{gain} [{delta}]",
+    gain_host_controlled: "此增益由宿主控制",
     clip_pitch_drag_tooltip: "音高偏移：{delta} ct",
     track_change_color: "變更軌道顏色",
     track_clone: "複製軌道",

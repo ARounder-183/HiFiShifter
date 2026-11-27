@@ -70,7 +70,7 @@ export interface ClipGeometrySnapshot {
     readonly startSec: number;
     /** 时间轴长度（秒）。 */
     readonly lengthSec: number;
-    /** 静态 clip 增益（响度基线的物理口径包含它）。 */
+    /** 波形幅度 |item × take|（响度基线的物理口径包含这两层）。 */
     readonly gain: number;
     /** 源窗口（秒）；Slip / 延伸 / 截短都靠它识别。 */
     readonly sourceStartSec: number;
@@ -99,8 +99,10 @@ export interface ClipSourceGeometry {
     readonly trackId: string;
     readonly startSec: number;
     readonly lengthSec: number;
-    /** 静态 clip 增益；响度基线的物理口径包含它。 */
+    /** 原始 take 层增益（兼容输入；投影后会折算成 |item × take|）。 */
     readonly gain?: number;
+    /** Item 层增益（REAPER item D_VOL）；与 gain 相乘得到可听幅度。 */
+    readonly clip_gain?: number;
     readonly sourceStartSec?: number;
     readonly sourceEndSec?: number;
     readonly playbackRate?: number;
@@ -169,6 +171,12 @@ function cloneMidiNotes(
  * 否则「按下时几何」会跟着手势一起移动，响度映射退化成恒等映射。
  */
 export function toClipSourceGeometry(clip: ClipSourceGeometry): ClipSourceGeometry {
+    const itemGain =
+        typeof clip.clip_gain === "number" && Number.isFinite(clip.clip_gain)
+            ? Math.max(0, clip.clip_gain)
+            : 1;
+    const takeGain = typeof clip.gain === "number" && Number.isFinite(clip.gain) ? clip.gain : 1;
+    const amplitude = Math.min(Math.abs(itemGain * takeGain), 256);
     const contentDurationSec =
         clip.contentDurationSec ?? (clip.durationSec === undefined ? null : clip.durationSec);
     return {
@@ -176,7 +184,7 @@ export function toClipSourceGeometry(clip: ClipSourceGeometry): ClipSourceGeomet
         trackId: clip.trackId,
         startSec: clip.startSec,
         lengthSec: clip.lengthSec,
-        gain: clip.gain,
+        gain: amplitude,
         sourceStartSec: clip.sourceStartSec,
         sourceEndSec: clip.sourceEndSec,
         playbackRate: clip.playbackRate,

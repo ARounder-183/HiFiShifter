@@ -5,6 +5,8 @@ export interface ClipNormalizationInput {
     sourceStartSec?: number;
     sourceEndSec?: number;
     playbackRate?: number;
+    /** 当前 active take 增益（可负：反相）。归一化要除以它的幅度。 */
+    takeGain?: number;
 }
 
 type InterleavedSlice = {
@@ -72,7 +74,13 @@ export function computeClipNormalizationGain(
     }
 
     try {
-        return computeNormalizationGainFromInterleaved(slice.interleaved);
+        const desired = computeNormalizationGainFromInterleaved(slice.interleaved);
+        if (desired === null) return null;
+        const takeMagnitude = Math.abs(Number(clip.takeGain ?? 1));
+        if (!Number.isFinite(takeMagnitude) || takeMagnitude <= 1e-6) return null;
+        // 峰值已由 take 层缩放：item 目标 = 1/peak / |take|，仍守 ±12 dB 策略。
+        const compensated = desired / takeMagnitude;
+        return Math.min(Math.max(compensated, MIN_NORMALIZED_GAIN), MAX_NORMALIZED_GAIN);
     } finally {
         deps.releaseInterleaved(slice.interleaved);
     }

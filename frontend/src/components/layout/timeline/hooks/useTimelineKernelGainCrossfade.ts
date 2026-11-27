@@ -1,7 +1,7 @@
 // 时间轴内核增益拖拽、就地编辑与交叉淡化手柄。拆自 TimelinePanel。
 import React from "react";
 import { clipItemGain } from "../clipGain";
-import { canEditFadeCurvature } from "../../../../services/hostCapabilities";
+import { canEditFadeCurvature, canEditItemGain } from "../../../../services/hostCapabilities";
 import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../../features/keybindings/types";
 import {
@@ -36,7 +36,7 @@ type FadeSideInfo = {
     hostFades?: HostFadeMetadata;
 };
 import { batch } from "react-redux";
-import { formatEditNumber, formatGainDbValue, gainToDb } from "../math";
+import { formatEditNumber } from "../math";
 import { parsePlaybackRateInput } from "../runtime/timelineCanvasStyle";
 import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../../../utils/snapHighlight";
 import { resolveKernelEditParticipants } from "../hooks/kernelEditSet";
@@ -45,14 +45,7 @@ import {
     computeInitialCrossfadeSides,
 } from "../hooks/autoCrossfade";
 import { computeEffectiveSnap } from "../../../../utils/timelineSnapping";
-import { applyBulkGainDeltaDb } from "../hooks/bulkClipEdit";
-import {
-    GAIN_MAX_DB,
-    GAIN_MIN_DB,
-    clampGainDb,
-    gainDbFromKnobTravel,
-    gainToDbSafe,
-} from "../../../../utils/gainDb";
+import { dbOrFloor, formatGainDbLabel, gainToDb, resolveGainDrag } from "../../../../utils/gainDb";
 import { advanceFineAxisDrag, type FineAxisDragState } from "../../../../utils/fineAxisDrag";
 import { readSlipClip } from "../hooks/slipWindow";
 import { computeCrossfadeGrip, type CrossfadeGripClipBase } from "../hooks/crossfadeGripWindow";
@@ -114,9 +107,8 @@ export function useTimelineKernelGainCrossfade({
     /**
      * 内核音量旋钮预览：竖直位移 → dB → 逐 clip 钳制后写乐观值。
      *
-     * 位移先经 `gainDbFromKnobTravel` 换算（归一化行程，全程 96px，与值域大小无关），
-     * 精细调整修饰键经 `advanceFineAxisDrag` 减速，钳制与多选平移复用
-     * `applyBulkGainDeltaDb`。
+     * 位移先经 `advanceFineAxisDrag` 减速，再由唯一手势解析器 `resolveGainDrag`
+     * 给出线性值；锚点精确跟手，其余成员按 dB 增量平移。
      */
     const handleKernelGainDragPreview = React.useCallback(
         (args: {
@@ -170,24 +162,28 @@ export function useTimelineKernelGainCrossfade({
             // 值域从 ±12 扩到 (−60, +24.1) 之后，固定 dB/px 会让拖 145px 就走完全程 ——
             // 用户明确要求"范围扩大不得让旋钮一动就大幅调整"。
             //
-            // 现在位移先换算成**归一化行程**上的位置（见 `gainDbFromKnobTravel`），
-            // 全程恒为 96px（与旧实现逐像素一致）；再把"锚点 clip 的新 dB − 旧 dB"
-            // 作为增量应用给整个多选集合 —— 这样多选时各 clip 的相对关系仍然保留。
+            // 现在位移换算成锥度位置后由 `resolveGainDrag` 统一解析；锚点精确跟手，
+            // 其余成员按同一 dB 增量平移 —— 多选时各 clip 的相对关系仍然保留。
+            if (!canEditItemGain()) return;
             const anchorBaseGain = origin.baseGainById.get(args.clipId) ?? 1;
-            const anchorBaseDb = gainToDbSafe(anchorBaseGain);
-            // 向上拖 = 变大 ⇒ 屏幕位移（向下为正）要取反。
-            const anchorNextDb = gainDbFromKnobTravel(anchorBaseDb, -adjustedY);
-            const updates = applyBulkGainDeltaDb({
-                clipIds: origin.clipIds,
-                clipsById: new Map(
-                    [...origin.baseGainById].map(([clipId, gain]) => [clipId, { gain }]),
-                ),
-                deltaDb: anchorNextDb - anchorBaseDb,
-                minDb: GAIN_MIN_DB,
-                maxDb: GAIN_MAX_DB,
+            // 唯一手势解析器：锚点精确等于指针位置，其余成员按同一 dB 增量平移。
+            // 向上拖 = 变大 ⇒ 屏幕位移（向下为正）要取反；精细减速已由
+            // advanceFineAxisDrag 完成，因此这里不再二次缩放。
+            const result = resolveGainDrag({
+                anchorBaseLinear: anchorBaseGain,
+                deltaPx: -adjustedY,
+                fine: false,
+                participants: [...origin.baseGainById].map(([clipId, baseLinear]) => ({
+                    clipId,
+                    baseLinear,
+                })),
+                anchorId: args.clipId,
             });
             batch(() => {
-                for (const update of updates) dispatch(setClipGain(update));
+                dispatch(setClipGain({ clipId: args.clipId, gain: result.anchorLinear }));
+                for (const update of result.others) {
+                    dispatch(setClipGain({ clipId: update.clipId, gain: update.linear }));
+                }
             });
             // 拖动中的实时浮标（旧实现 `ClipHeader` 的 `gainTooltip` 拖动变体）：
             // 普通悬停只显示当前值，拖动时还要显示**本次拖动的增量**。内容逐帧
@@ -200,21 +196,19 @@ export function useTimelineKernelGainCrossfade({
                       ) as HTMLElement | null);
             if (anchor !== null) {
                 const baseGain = origin.baseGainById.get(args.clipId);
-                // 浮标读的也是 item 层（与旋钮、header 标签同一口径）。
-                const currentGain =
-                    clipItemGain(
-                        sessionRef.current.clips.find((item) => item.id === args.clipId),
-                    ) ??
-                    baseGain ??
-                    1;
-                const clamped = clampGainDb(gainToDbSafe(currentGain));
+                // 浮标读 item 层；当前值直接取本帧手势结果，不依赖 Redux 提交时机。
+                const baseDb = dbOrFloor(baseGain ?? 1);
+                const deltaDb = gainToDb(result.anchorLinear) - baseDb;
                 publishFadeRichTooltip(
                     anchor,
                     baseGain === undefined
-                        ? t("gain_value_tooltip").replace("{gain}", formatGainDbValue(clamped))
+                        ? t("gain_value_tooltip").replace(
+                              "{gain}",
+                              formatGainDbLabel(result.anchorLinear),
+                          )
                         : t("gain_value_tooltip_drag")
-                              .replace("{gain}", formatGainDbValue(clamped))
-                              .replace("{delta}", formatGainDbValue(clamped - gainToDb(baseGain))),
+                              .replace("{gain}", formatGainDbLabel(result.anchorLinear))
+                              .replace("{delta}", formatGainDbLabel(10 ** (deltaDb / 20))),
                 );
             }
         },
@@ -275,6 +269,7 @@ export function useTimelineKernelGainCrossfade({
     /** 内核双击旋钮 → 恢复 0 dB（复用旧实现的增益提交入口，含乐观更新与落库）。 */
     const handleKernelGainReset = React.useCallback(
         (clipId: string) => {
+            if (!canEditItemGain()) return;
             commitTrackLaneGain(clipId, 0);
         },
         [commitTrackLaneGain],
@@ -325,10 +320,11 @@ export function useTimelineKernelGainCrossfade({
         (clipId: string, field: "gain" | "rate") => {
             const clip = sessionRef.current.clips.find((item) => item.id === clipId);
             if (clip === undefined) return;
+            if (field === "gain" && !canEditItemGain()) return;
             const initialValue =
                 field === "rate"
                     ? formatEditNumber(clip.playbackRate)
-                    : formatEditNumber(clampGainDb(gainToDbSafe(clip.gain)));
+                    : formatEditNumber(dbOrFloor(clipItemGain(clip)));
             setKernelInlineEdit({ clipId, field, initialValue, inputMode: "decimal" });
         },
         [sessionRef],

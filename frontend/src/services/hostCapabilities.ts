@@ -65,6 +65,27 @@ export function canEditHostClips(): boolean {
 export function canSplitHostClips(): boolean {
     return isPluginMode() && caps()?.split === true;
 }
+/**
+ * 增益层的编辑能力。
+ *
+ * 【为什么必须是能力位】ARA-only 宿主读不到 item/take 的 D_VOL，界面若仍显示
+ * 0 dB 并允许拖动，用户会得到一个"改了没反应"的旋钮。独立 App 自己拥有三层，
+ * 永远可编辑；插件只信任后端快照。
+ */
+export function canEditItemGain(): boolean {
+    return !isPluginMode() || caps()?.clipItemGain === true;
+}
+export function canEditTakeGain(): boolean {
+    return !isPluginMode() || caps()?.clipTakeGain === true;
+}
+export function canEditTrackVolume(): boolean {
+    return !isPluginMode() || caps()?.trackVolume === true;
+}
+/** 插件形态下三层增益由宿主施加；独立 App 由本进程施加。 */
+export function gainLayersAreHostOwned(): boolean {
+    return isPluginMode();
+}
+
 /** 原生完整item剪贴板及创建/删除接口已接通时开放，旧插件不会误发App私有媒体命令。 */
 export function canClipboardHostClips(): boolean {
     return isPluginMode() && caps()?.itemClipboard === true;

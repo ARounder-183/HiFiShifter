@@ -1132,8 +1132,9 @@ export const enUS = {
     fade_info_side_type_label: "{side} {type}",
     common_length: "Length",
 
-    gain_value_tooltip: "Gain: {gain} dB",
-    gain_value_tooltip_drag: "Gain: {gain} dB ({delta} dB)",
+    gain_value_tooltip: "Gain: {gain}",
+    gain_value_tooltip_drag: "Gain: {gain} ({delta})",
+    gain_host_controlled: "Host controls this gain",
     clip_pitch_drag_tooltip: "Pitch offset: {delta} ct",
     track_change_color: "Change track color",
     track_clone: "Clone Track",

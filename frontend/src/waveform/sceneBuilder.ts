@@ -45,7 +45,13 @@ export interface WaveformSceneClip {
     playbackRate: number;
     reversed: boolean;
     loopEnabled: boolean;
-    gain: number;
+    /**
+     * 波形幅度（非负）：已含 item × take，调用方不要再乘任何增益。
+     * 旧字段 `gain` 仅为兼容历史构造点保留。
+     */
+    amplitudeGain?: number;
+    /** @deprecated 用 amplitudeGain；它明确表示幅度而不是分层增益。 */
+    gain?: number;
     muted: boolean;
     fadeInSec: number;
     fadeOutSec: number;
@@ -517,7 +523,10 @@ export function buildWaveformScene(args: {
                             height: bandHeightPx,
                         },
                         reversed,
-                        gain: Number.isFinite(clip.gain) ? Math.max(0, clip.gain) : 1,
+                        gain: (() => {
+                            const amplitude = clip.amplitudeGain ?? clip.gain ?? 1;
+                            return Number.isFinite(amplitude) ? Math.max(0, amplitude) : 1;
+                        })(),
                         fadeInSec,
                         fadeOutSec,
                         hostFades: clip.hostFades,

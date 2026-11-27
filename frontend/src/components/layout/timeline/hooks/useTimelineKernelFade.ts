@@ -1,6 +1,11 @@
 // 时间轴内核淡变 hover / 预览 / 提交与右键菜单。拆自 TimelinePanel。
 import React from "react";
-import { isPluginMode, canEditFadeCurvature } from "../../../../services/hostCapabilities";
+import {
+    isPluginMode,
+    canEditFadeCurvature,
+    canEditItemGain,
+} from "../../../../services/hostCapabilities";
+import { clipItemGain } from "../clipGain";
 import { hostMediaState, hostMediaReason } from "../../../../features/ara/hostAudio";
 import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
 import {
@@ -33,11 +38,11 @@ import {
     setClipAutoFades,
 } from "../../../../features/session/sessionSlice";
 import { batch } from "react-redux";
-import { formatGainDbValue } from "../math";
+import { formatGainDbLabel } from "../../../../utils/gainDb";
 import { resolveKernelEditParticipants, type KernelEditParticipant } from "../hooks/kernelEditSet";
 import { computeInitialCrossfadeSides } from "../hooks/autoCrossfade";
 import { applyBulkFadeValue } from "../hooks/bulkClipEdit";
-import { clampGainDb, gainToDbSafe } from "../../../../utils/gainDb";
+
 import {
     clipHasNonlinearStretch,
     clipHasTakeEnvelope,
@@ -207,10 +212,12 @@ export function useTimelineKernelFade({
                     text = t("clip_formant_title");
                     break;
                 case "gain-knob":
-                    text = t("gain_value_tooltip").replace(
-                        "{gain}",
-                        formatGainDbValue(clampGainDb(gainToDbSafe(clip.gain))),
-                    );
+                    text = canEditItemGain()
+                        ? t("gain_value_tooltip").replace(
+                              "{gain}",
+                              formatGainDbLabel(clipItemGain(clip)),
+                          )
+                        : t("gain_host_controlled");
                     break;
                 default:
                     // SnapOffset 手柄没有 header 控件，用分区识别。

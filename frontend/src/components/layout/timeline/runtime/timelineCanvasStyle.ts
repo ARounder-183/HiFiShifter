@@ -18,8 +18,8 @@
  *   避免出现 "x1.50" 这种带冗余尾零或 "x1.0" 让用户误以为没拉伸的情况
  *   （Bug 修复，2026-06-30）。
  */
-import { gainToDb } from "../math.js";
-import { clampGainDb, formatGainDbValue, gainKnobAngleDeg } from "../../../../utils/gainDb";
+import { formatGainDbLabel, gainKnobAngleDeg } from "../../../../utils/gainDb";
+import { canEditItemGain } from "../../../../services/hostCapabilities";
 import { resolveTimelineClipHeaderVisibility } from "./timelineClipHeaderVisibility.js";
 
 // ── Font helpers ─────────────────────────────────────────────────────────
@@ -628,22 +628,22 @@ export function buildTimelineClipVisualStyle(args: {
         showChain,
         showMute,
         showFormant,
-        showGainKnob,
+        showGainKnob: gainKnobAllowed,
         showPlaybackRate,
         showGainLabel,
         showName,
     } = resolveTimelineClipHeaderVisibility(args.widthPx, isPitchAdj);
+    const gainEditable = canEditItemGain();
+    const showGainKnob = gainKnobAllowed && gainEditable;
     const showChainBadge = showChain && args.groupId != null;
 
     // Compute labels early so we can measure their widths with the correct font
-    const gainDb = gainToDb(args.gain);
-    const clampedGainDb = clampGainDb(gainDb);
     const playbackRate =
         Number.isFinite(args.playbackRate) && args.playbackRate > 0 ? args.playbackRate : 1;
     const playbackRateLabel = formatPlaybackRateLabel(playbackRate);
-    // 【必须走共享格式化】这里曾直接 `toFixed(1)`：增益为 0 时 `Math.log10(0) = -Infinity`，
-    // 标签会渲染成 `-InfinitydB`；而 −60 dB 以下的取值也显示不出 REAPER 的 `-inf`。
-    const gainLabel = `${formatGainDbValue(gainDb)}dB`;
+    // 唯一格式化入口：含单位、含 -inf、含正号；不要在调用点拼 "dB"。
+    // ARA-only 宿主读不到 item D_VOL：不要显示一个假的 0 dB。
+    const gainLabel = gainEditable ? formatGainDbLabel(args.gain) : "—";
 
     // Font-aware trailing reserve: measure actual label widths
     const gainLabelWidth = showGainLabel
@@ -805,7 +805,7 @@ export function buildTimelineClipVisualStyle(args: {
         gainKnobStroke: darkMode ? "rgba(255, 255, 255, 0.32)" : "rgba(0, 0, 0, 0.38)",
         gainKnobIndicator: darkMode ? "rgba(235, 240, 248, 0.95)" : "rgba(28, 32, 40, 0.95)",
         gainKnobCoreFill: darkMode ? "rgba(0, 0, 0, 0.35)" : "rgba(255, 255, 255, 0.4)",
-        gainKnobAngleDeg: gainKnobAngleDeg(clampedGainDb),
+        gainKnobAngleDeg: gainKnobAngleDeg(args.gain),
         gainKnobRadius,
         gainKnobCenterOffsetX,
         gainKnobCenterOffsetY,

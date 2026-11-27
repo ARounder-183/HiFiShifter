@@ -1,5 +1,5 @@
 // 原/插件共享take波形投影；宿主淡化元数据只影响UI，不能重复处理声音。
-import { clipItemGain } from "./clipGain";
+import { clipTakeWaveformGain, clipWaveformGain } from "./clipGain";
 import type { ClipInfo, ClipTakeInfo } from "../../../features/session/sessionTypes";
 import type { WaveformSceneClip } from "../../../waveform/sceneBuilder";
 
@@ -99,7 +99,7 @@ function sceneClipProjection(clip: ClipInfo, sourcePath: string): WaveformSceneC
         playbackRate: clip.playbackRate,
         reversed: clip.reversed,
         loopEnabled: clip.loopEnabled,
-        gain: clipItemGain(clip),
+        amplitudeGain: clipWaveformGain(clip),
         muted: clip.muted,
         fadeInSec: clip.fadeInSec,
         hostFades: clip.hostFades,
@@ -153,7 +153,7 @@ export function expandClipToTakeSceneClips(
             durationSec: take.durationSec,
             durationFrames: take.durationFrames,
             sourceSampleRate: take.sourceSampleRate,
-            gain: take.gain,
+            amplitudeGain: clipTakeWaveformGain(clip, take.gain),
             sourceStartSec: isActiveTake ? clip.sourceStartSec : take.sourceStartSec,
             sourceEndSec: isActiveTake ? clip.sourceEndSec : take.sourceEndSec,
             playbackRate: Number.isFinite(rate) && rate > 0.1 ? Math.min(10, rate) : 1,

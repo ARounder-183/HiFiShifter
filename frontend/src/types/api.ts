@@ -117,6 +117,7 @@ export interface TimelineClip {
         min: number;
         max: number;
     };
+    /** Take 层增益（active take 投影）；**不是** Clip/item 增益。 */
     gain?: number;
     muted?: boolean;
     source_start_sec?: number;

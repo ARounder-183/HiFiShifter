@@ -276,6 +276,7 @@ async function normalizeImportedClips(args: {
                 source_start_sec?: number;
                 source_end_sec?: number;
                 playback_rate?: number;
+                gain?: number;
             }>;
         }
     )?.clips;
@@ -291,6 +292,7 @@ async function normalizeImportedClips(args: {
                 sourceStartSec: Number(clip.source_start_sec ?? 0) || 0,
                 sourceEndSec: Number(clip.source_end_sec ?? 0) || 0,
                 playbackRate: Number(clip.playback_rate ?? 1) || 1,
+                takeGain: Number(clip.gain ?? 1),
             },
             {
                 getInterleavedSlice: (sourcePath, _channel, sourceStartSec, sourceSpanSec) =>

@@ -4,6 +4,7 @@ import {
     isPluginMode,
     canGroupPluginTracks,
     canCreateHostTracks,
+    canEditTrackVolume,
 } from "../../../services/hostCapabilities";
 import { registerDragAbort } from "../../../utils/gestureFocusGuard";
 import { formatEditNumber } from "./math";
@@ -24,11 +25,14 @@ import { useAppSelector } from "../../../app/hooks";
 import { useDevicePixelRatio } from "../../../hooks/useDevicePixelRatio";
 import { wholeDevicePxLength } from "../../../utils/devicePixelLine";
 import {
-    GAIN_DISPLAY_FLOOR_DB,
-    GAIN_MAX_DB,
-    GAIN_MIN_DB,
-    GAIN_TAPER_FLOOR_DB,
-    formatGainDbValue,
+    GAIN_MAX_LINEAR,
+    clampGainDb,
+    dbOrFloor,
+    dbToGain,
+    formatGainDbLabel,
+    gainKnobAngleDeg,
+    gainToDb,
+    resolveGainDrag,
 } from "../../../utils/gainDb";
 import {
     MAX_ROW_HEIGHT,
@@ -75,38 +79,9 @@ const TRACK_METER_MIN_DB = -48;
 const TRACK_METER_MAX_DB = 3;
 // 推子与 clip 增益共用同一个值域（见 `utils/gainDb`）。此前这里的上界是 12，
 // 而混音侧按 4.0 线性（= +12.04 dB）钳制 —— 两处都写死，改一处就会分叉。
-const TRACK_GAIN_MIN_DB = GAIN_MIN_DB;
-const TRACK_GAIN_MAX_DB = GAIN_MAX_DB;
-/** 推子**锥度**的下界：与旋钮同一条纪律，见 `utils/gainDb` 的 `GAIN_TAPER_FLOOR_DB`。 */
-const TRACK_GAIN_TAPER_DB = GAIN_TAPER_FLOOR_DB;
 const TRACK_GAIN_WHEEL_STEP_DB = 0.5;
 const TRACK_GAIN_WHEEL_FINE_STEP_DB = 0.1;
 const TRACK_GAIN_WHEEL_COMMIT_DEBOUNCE_MS = 120;
-const TRACK_GAIN_DRAG_DB_PER_PX = 0.2;
-
-function gainToDb(gain: number): number {
-    // 【不要在这里夹 1e-4】那会把 −80 dB 以下并成一个值，而显示要一路下探到 −150 dB
-    // （低于它才写 `-inf`）。判定"是否静音"由 `formatGainLabel` / `dbToGain` 各自负责。
-    if (!Number.isFinite(gain) || gain <= 0) return Number.NEGATIVE_INFINITY;
-    return 20 * Math.log10(gain);
-}
-
-function dbToGain(db: number): number {
-    if (!Number.isFinite(db) || db <= TRACK_GAIN_MIN_DB) return 0;
-    return Math.pow(10, db / 20);
-}
-
-function formatGainLabel(gain: number): string {
-    // 与 clip 增益、参数编辑器共用同一个格式化函数（含 −150 dB 边界与 `-inf`）。
-    const db = gainToDb(gain);
-    if (!Number.isFinite(db) || db < GAIN_DISPLAY_FLOOR_DB) return "-inf dB";
-    return `${formatGainDbValue(db)} dB`;
-}
-
-function clampGainDb(db: number): number {
-    if (!Number.isFinite(db)) return TRACK_GAIN_MIN_DB;
-    return Math.min(TRACK_GAIN_MAX_DB, Math.max(TRACK_GAIN_MIN_DB, db));
-}
 
 function linearToDb(linear: number): number {
     if (!Number.isFinite(linear) || linear <= 1e-6) return -Infinity;
@@ -391,7 +366,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
     const backendTrackVolumeById = useMemo(() => {
         const out: Record<string, number> = {};
         for (const tr of tracks) {
-            out[tr.id] = Math.max(0, Math.min(4, Number(tr.volume ?? 1)));
+            out[tr.id] = Math.max(0, Math.min(GAIN_MAX_LINEAR, Number(tr.volume ?? 1)));
         }
         return out;
     }, [tracks]);
@@ -399,9 +374,11 @@ const TrackListInner: React.FC<TrackListProps> = ({
     const currentTrackVolumeById = useMemo(() => {
         const out: Record<string, number> = {};
         for (const tr of tracks) {
-            const backendVolume = Math.max(0, Math.min(4, Number(tr.volume ?? 1)));
+            const backendVolume = Math.max(0, Math.min(GAIN_MAX_LINEAR, Number(tr.volume ?? 1)));
             const uiOverride = trackVolumeUi[tr.id];
-            out[tr.id] = Number.isFinite(uiOverride) ? uiOverride : backendVolume;
+            out[tr.id] = Number.isFinite(uiOverride)
+                ? Math.max(0, Math.min(GAIN_MAX_LINEAR, uiOverride))
+                : backendVolume;
         }
         return out;
     }, [tracks, trackVolumeUi]);
@@ -536,7 +513,8 @@ const TrackListInner: React.FC<TrackListProps> = ({
     }
 
     function beginTrackGainEdit(trackId: string, volume: number) {
-        const db = clampGainDb(gainToDb(volume));
+        if (!canEditTrackVolume()) return;
+        const db = clampGainDb(dbOrFloor(volume));
         editingGainTrackIdRef.current = trackId;
         setEditingGainTrackId(trackId);
         setEditingGainValue(formatEditNumber(db));
@@ -734,7 +712,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
             const volumeKnobEl = (e.target as HTMLElement | null)?.closest(
                 "[data-track-volume-knob]",
             ) as HTMLElement | null;
-            if (volumeKnobEl) {
+            if (volumeKnobEl && canEditTrackVolume()) {
                 const trackId = volumeKnobEl.dataset.trackId;
                 if (trackId) {
                     const currentVolume = currentTrackVolumeById[trackId];
@@ -747,13 +725,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
                             const wheelStepDb = isModifierActive(paramFineAdjustKb, e)
                                 ? TRACK_GAIN_WHEEL_FINE_STEP_DB
                                 : TRACK_GAIN_WHEEL_STEP_DB;
-                            const currentDb = gainToDb(currentVolume);
-                            const nextDb = Math.max(
-                                TRACK_GAIN_MIN_DB,
-                                Math.min(
-                                    TRACK_GAIN_MAX_DB,
-                                    currentDb + direction * wheelStepDb * notches,
-                                ),
+                            const currentDb = dbOrFloor(currentVolume);
+                            const nextDb = clampGainDb(
+                                currentDb + direction * wheelStepDb * notches,
                             );
                             const nextVolume = dbToGain(nextDb);
                             onVolumeUiChange(trackId, nextVolume);
@@ -899,12 +873,14 @@ const TrackListInner: React.FC<TrackListProps> = ({
         clearPendingVolumeCommit(trackId);
 
         const knobEl = e.currentTarget;
+        if (!canEditTrackVolume()) return;
         const startY = e.clientY;
-        const startDb = clampGainDb(gainToDb(volume));
+        const startGain = Math.max(0, Math.min(GAIN_MAX_LINEAR, Number(volume) || 0));
+        const startDb = clampGainDb(dbOrFloor(startGain));
         setVolumeDrag({ trackId, baseDb: startDb });
         setVolumeHoveredTrackId(trackId);
         setVolumeTooltipPos({ x: e.clientX, y: e.clientY });
-        let lastDb = startDb;
+        let lastGain = startGain;
         const fineAxisState: FineAxisDragState = {
             raw: startY,
             adjusted: startY,
@@ -931,10 +907,16 @@ const TrackListInner: React.FC<TrackListProps> = ({
                 isModifierActive(paramFineAdjustKb, ev),
             );
             const deltaY = startY - adjustedY;
-            const nextDb = clampGainDb(startDb + deltaY * TRACK_GAIN_DRAG_DB_PER_PX);
-            if (Math.abs(nextDb - lastDb) < 0.01) return;
-            lastDb = nextDb;
-            onVolumeUiChange(trackId, dbToGain(nextDb));
+            const next = resolveGainDrag({
+                anchorBaseLinear: startGain,
+                deltaPx: deltaY,
+                fine: false,
+                participants: [{ clipId: trackId, baseLinear: startGain }],
+                anchorId: trackId,
+            }).anchorLinear;
+            if (Math.abs(gainToDb(next) - gainToDb(lastGain)) < 0.01) return;
+            lastGain = next;
+            onVolumeUiChange(trackId, next);
         };
 
         // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，blur 时以
@@ -950,7 +932,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                 tooltipRafId = null;
             }
             setVolumeDrag(null);
-            onVolumeCommit(trackId, dbToGain(lastDb));
+            onVolumeCommit(trackId, lastGain);
         };
         const finish = () => {
             if (finished) return;
@@ -1115,13 +1097,16 @@ const TrackListInner: React.FC<TrackListProps> = ({
     );
 
     const buildVolumeTooltip = (trackId: string, volume: number): string => {
-        const db = clampGainDb(gainToDb(volume));
+        if (!canEditTrackVolume()) return t("gain_host_controlled");
         if (volumeDrag && volumeDrag.trackId === trackId) {
             return t("gain_value_tooltip_drag")
-                .replace("{gain}", formatGainDbValue(db))
-                .replace("{delta}", formatGainDbValue(db - volumeDrag.baseDb));
+                .replace("{gain}", formatGainDbLabel(volume))
+                .replace(
+                    "{delta}",
+                    formatGainDbLabel(dbToGain(dbOrFloor(volume) - volumeDrag.baseDb)),
+                );
         }
-        return t("gain_value_tooltip").replace("{gain}", formatGainDbValue(db));
+        return t("gain_value_tooltip").replace("{gain}", formatGainDbLabel(volume));
     };
 
     const volumeTooltipTrackId = volumeDrag?.trackId ?? volumeHoveredTrackId;
@@ -1262,15 +1247,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
                             const peakLinear = meter?.peakLinear ?? 0;
                             const maxPeakLinear = meter?.maxPeakLinear ?? 0;
                             const clipped = Boolean(meter?.clipped);
-                            const volumeDb = clampGainDb(gainToDb(volume));
-                            // 锥度按 `TRACK_GAIN_TAPER_DB` 铺开（不是显示下界 −150）：
-                            // 按下界铺会把有用的 −12~+12 dB 压进弧的 4%，推子会变得一动就飞。
-                            const knobDeg =
-                                volumeDb >= 0
-                                    ? (volumeDb / TRACK_GAIN_MAX_DB) * 135
-                                    : (Math.max(volumeDb, -TRACK_GAIN_TAPER_DB) /
-                                          TRACK_GAIN_TAPER_DB) *
-                                      135;
+                            // 与 Clip 旋钮共用同一个角度函数；负值不会被钉死在 −135°。
+                            const knobDeg = gainKnobAngleDeg(volume);
+                            const volumeEditable = canEditTrackVolume();
                             const volumeTooltip = buildVolumeTooltip(track.id, volume);
 
                             // 算法下拉的选项与取值：唯一来源（见 pitchAlgoOptions.ts）。
@@ -1796,6 +1775,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                     onClick={(e) => e.stopPropagation()}
                                                     onDoubleClick={(e) => {
                                                         e.stopPropagation();
+                                                        if (!canEditTrackVolume()) return;
                                                         const target =
                                                             e.target instanceof HTMLElement
                                                                 ? e.target
@@ -1820,6 +1800,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                             aria-label={volumeTooltip}
                                                             data-track-volume-knob
                                                             data-track-id={track.id}
+                                                            disabled={!volumeEditable}
                                                             onPointerEnter={(e) => {
                                                                 setVolumeHoveredTrackId(track.id);
                                                                 setVolumeTooltipPos({
@@ -1917,7 +1898,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                     e.stopPropagation()
                                                                 }
                                                             >
-                                                                {formatGainLabel(volume)}
+                                                                {volumeEditable
+                                                                    ? formatGainDbLabel(volume)
+                                                                    : "—"}
                                                             </span>
                                                         )}
                                                     </Flex>

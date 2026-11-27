@@ -2,94 +2,140 @@ import { test } from "vitest";
 
 import {
     GAIN_DISPLAY_FLOOR_DB,
+    GAIN_FLOOR,
     GAIN_MAX_DB,
     GAIN_MAX_LINEAR,
-    GAIN_MIN_DB,
     GAIN_TAPER_FLOOR_DB,
     clampGain,
+    clampTakeGain,
+    dbToGain,
     formatGainDbLabel,
     formatGainDbValue,
-    gainDbFromKnobTravel,
+    gainAt,
     gainKnobAngleDeg,
-    gainToDbSafe,
+    gainTaper,
+    gainToDb,
+    parseGainDbInput,
+    positionOf,
+    resolveGainDrag,
 } from "./gainDb.ts";
 
 function near(actual: number, expected: number, label: string, eps = 1e-6): void {
-    if (Math.abs(actual - expected) > eps) {
+    if (!Number.isFinite(actual) || Math.abs(actual - expected) > eps) {
         throw new Error(`${label}: expected ${expected}, received ${actual}`);
     }
 }
 
-test("utils/gainDb.test.ts scripted checks", () => {
-    // ── 值域 ────────────────────────────────────────────────────────────
-    near(GAIN_MAX_DB, 24.0824, "上界必须是 REAPER 的 +24.08 dB", 1e-3);
-    near(clampGain(1), 1, "单位增益不变");
-    near(clampGain(-5), 0, "负增益钳到静音");
-    near(clampGain(1e9), GAIN_MAX_LINEAR, "超上界钳到 16");
-    near(clampGain(Number.NaN), 1, "NaN 回退到不增不减（不能变成静音）");
-    near(gainToDbSafe(0), GAIN_MIN_DB, "0 线性映射到实用下界而不是 −Infinity");
+test("gain domain mirrors the kernel and keeps silence unique", () => {
+    near(GAIN_MAX_DB, 24.0824, "upper bound is REAPER item limit", 1e-3);
+    near(GAIN_FLOOR, 10 ** (-150 / 20), "display floor linear value");
+    if (clampGain(0) !== 0) throw new Error("zero must stay silence");
+    if (clampGain(-4) !== 0) throw new Error("negative item gain is silence");
+    if (clampGain(GAIN_FLOOR / 2) !== 0) throw new Error("sub-floor canonicalises");
+    if (clampGain(1e9) !== GAIN_MAX_LINEAR) throw new Error("upper clamp");
+    if (clampGain(Number.NaN) !== 1) throw new Error("NaN is unity");
+    if (clampTakeGain(-0.5) !== -0.5) throw new Error("take polarity survives");
+    if (clampTakeGain(-99) !== -16) throw new Error("take magnitude clamps");
+    if (clampTakeGain(Number.NaN) !== 1) throw new Error("take NaN is unity");
+    if (dbToGain(GAIN_DISPLAY_FLOOR_DB) <= 0) throw new Error("-150 dB is representable");
+    if (dbToGain(GAIN_DISPLAY_FLOOR_DB - 1) !== 0) throw new Error("below floor is silence");
+    if (gainToDb(0) !== Number.NEGATIVE_INFINITY) throw new Error("silence is not -150");
+});
 
-    // ── 旋钮角度：0 dB 恒在正中 ───────────────────────────────────────
-    near(gainKnobAngleDeg(0), 0, "0 dB 的指示线竖直向上");
-    near(gainKnobAngleDeg(GAIN_MAX_DB), 135, "上界偏转 +135°");
-    near(gainKnobAngleDeg(GAIN_MIN_DB), -135, "下界偏转 −135°");
-    // 负值按锥度铺满下半程（−60..0 ⇒ −135°..0°），不是恒停在弧底。
-    near(gainKnobAngleDeg(-6), -13.5, "−6 dB 指示线按 −60..0 锥度落在 −13.5°");
-    near(gainKnobAngleDeg(GAIN_TAPER_FLOOR_DB), -135, "锥度下界恰好铺满到弧底");
-    near(gainKnobAngleDeg(GAIN_MIN_DB + 1), -135, "低于锥度下界（如手输 −149）停在弧底");
+test("taper endpoints and roundtrip are exact", () => {
+    if (gainAt(0) !== 0) throw new Error("position 0 is silence");
+    near(gainAt(1), GAIN_FLOOR, "position 1 is the display floor", 1e-12);
+    near(gainAt(10), dbToGain(GAIN_TAPER_FLOOR_DB), "position 10 is the taper floor");
+    near(gainAt(58), 1, "position 58 is unity");
+    near(gainAt(106), GAIN_MAX_LINEAR, "position 106 is the top");
+    near(positionOf(GAIN_FLOOR), 1, "floor maps back to 1px");
+    near(positionOf(10 ** (-60 / 20)), 10, "taper floor maps back to 10px");
+    near(positionOf(1), 58, "unity maps to 58px");
+    near(positionOf(GAIN_MAX_LINEAR), 106, "top maps to 106px");
+    if (positionOf(0) !== 0) throw new Error("silence maps to 0px");
+    near(positionOf(Number.NaN), 58, "NaN position uses unity");
+    if (gainAt(Number.NaN) !== 0) throw new Error("NaN position is silence");
+    for (const gain of [GAIN_FLOOR, 1e-4, 0.1, 1, 4, 16]) {
+        near(gainAt(positionOf(gain)), gain, `roundtrip ${gain}`, gain * 1e-5);
+    }
+});
 
-    // ── 拖拽手感：全程行程与值域无关，且与旧实现（96px）一致 ───────────
-    // 从 0 dB 往上推 48px 恰好到顶（旧实现 ±12dB @ 0.25dB/px 也是 48px 到顶）。
-    near(gainDbFromKnobTravel(0, 48), GAIN_MAX_DB, "0 dB 上推 48px 到顶", 1e-3);
-    // 下半程是**同一条 1.25 dB/px** 的锥度（47px → −58.75 dB），最后 1px 是静音棘齿。
-    near(gainDbFromKnobTravel(0, -47), -58.75, "47px 处仍是逐像素一致的锥度", 1e-3);
-    near(gainDbFromKnobTravel(0, -48), 0, "推到底直接落静音（棘齿）", 1e-9);
-    // 微小位移不得产生大幅变化（用户明确要求的"手感不变"）。
-    const tiny = gainDbFromKnobTravel(0, 1);
-    if (!(tiny > 0 && tiny < 1)) {
-        throw new Error(`1px 位移只应带来不到 1dB 的变化，实际 ${tiny}`);
+test("taper is monotonic and keeps the 48/48 handfeel", () => {
+    let previous = -1;
+    for (let px = 0; px <= 106; px += 0.25) {
+        const value = gainAt(px);
+        if (value + 1e-12 < previous) throw new Error(`not monotonic at ${px}`);
+        previous = value;
     }
-    // 往返一致：推上去再推回来。
-    const up = gainDbFromKnobTravel(0, 12);
-    near(gainDbFromKnobTravel(up, -12), 0, "同一段位移往返必须回到原点", 1e-3);
-    // 越界钳制。
-    near(gainDbFromKnobTravel(0, 10_000), GAIN_MAX_DB, "推到天上去也只到上界");
-    near(gainDbFromKnobTravel(0, -10_000), 0, "推到地下只到静音（棘齿）");
+    near(gainAt(58) / gainAt(58 - 24), 10 ** (30 / 20), "lower half is 1.25 dB/px", 1e-3);
+    near(gainAt(58 + 24) / 1, 10 ** (12.0412 / 20), "upper half is 0.5 dB/px", 1e-3);
+    if (gainTaper.zeroPx !== 58 || gainTaper.topPx !== 106 || gainTaper.taperPx !== 10) {
+        throw new Error("taper geometry drifted");
+    }
+});
 
-    // ── 负值起点：归一化行程必须从**锥度下界**起算 ────────────────────
-    // （回归：曾把 −GAIN_TAPER_FLOOR_DB（+60）写进 max，导致任何负起点都被算成
-    // 行程顶 u=1，轻拖一下就把全部选中 clip 的增益顶到 +24 dB。）
-    near(gainDbFromKnobTravel(-6, 0), -6, "负起点原位不动必须返回原值", 1e-3);
-    // −6 dB 在下半程的位置：u = −6/60 = −0.1；上推 48px → u = 0.9 → +21.67 dB。
-    near(gainDbFromKnobTravel(-6, 48), 0.9 * GAIN_MAX_DB, "−6 dB 上推 48px 到 u=0.9", 1e-3);
-    // 下拉不越过棘齿时仍沿锥度走：u = −0.1 − 42/48 = −0.975 → −58.5 dB。
-    near(gainDbFromKnobTravel(-6, -42), -58.5, "−6 dB 下拉 42px 落在锥度上", 1e-3);
-    near(gainDbFromKnobTravel(-6, -48), 0, "−6 dB 下拉 48px 越过棘齿落静音");
-    // 低于锥度下界的起点按弧底算：第一像素上拉应落在弧底区（−58.75 dB），
-    // 而不是被旧 bug 顶到行程顶（+24 dB）；零位移则按棘齿语义落静音。
-    near(gainDbFromKnobTravel(-140, 1), -58.75, "低于锥度下界的起点按弧底算（第一像素上拉）", 1e-3);
-    near(gainDbFromKnobTravel(-140, -1), 0, "弧底再往下只落静音（棘齿）");
-    // 往返一致：从负起点推上去再拉回来。
-    const down = gainDbFromKnobTravel(-6, 10);
-    near(gainDbFromKnobTravel(down, -10), -6, "负起点的同段位移往返必须回到原点", 1e-3);
+test("knob angle is continuous and negative values are not pinned", () => {
+    near(gainKnobAngleDeg(1), 0, "0 dB is centred");
+    near(gainKnobAngleDeg(16), 135, "+24.08 is +135");
+    near(gainKnobAngleDeg(dbToGain(-6)), -11.7, "-6 dB is -11.7", 1e-3);
+    near(gainKnobAngleDeg(dbToGain(-30)), -58.5, "-30 dB is -58.5", 1e-3);
+    near(gainKnobAngleDeg(dbToGain(-60)), -117, "-60 dB is -117", 1e-3);
+    near(gainKnobAngleDeg(0), -135, "silence is -135");
+    near(gainKnobAngleDeg(GAIN_FLOOR), -135, "-150 dB is -135", 1e-3);
+});
 
-    // ── 展示文本：REAPER 口径（−150 以下才是 −inf）─────────────────────
-    near(GAIN_MIN_DB, GAIN_DISPLAY_FLOOR_DB, "显示下界是 −150 dB");
-    if (formatGainDbLabel(0) !== "-inf") throw new Error("增益 0 必须显示为 -inf");
-    if (formatGainDbLabel(1e-9) !== "-inf") {
-        throw new Error("−180 dB 必须显示为 -inf");
-    }
-    if (formatGainDbLabel(Math.pow(10, -140 / 20)) !== "-140") {
-        throw new Error("−140 dB 必须显示成数字，而不是 -inf");
-    }
-    if (formatGainDbLabel(16) !== "+24.1") {
-        throw new Error(`+24.08 dB 必须显示为 +24.1，实际 ${formatGainDbLabel(16)}`);
-    }
-    if (formatGainDbLabel(1) !== "0") throw new Error("单位增益显示为 0");
-    if (formatGainDbLabel(0.5) !== "-6") throw new Error("−6.02 显示为 -6（一位小数去尾零）");
-    if (formatGainDbValue(-150) !== "-150") throw new Error("恰好 −150 仍是数字");
-    if (formatGainDbValue(-150.1) !== "-inf") throw new Error("低于 −150 变成 -inf");
-    if (formatGainDbValue(Number.NEGATIVE_INFINITY) !== "-inf") {
-        throw new Error("−∞ 显示为 -inf");
-    }
+test("format and parse share one boundary", () => {
+    if (formatGainDbLabel(0) !== "-inf dB") throw new Error("silence label");
+    if (formatGainDbLabel(1) !== "0 dB") throw new Error("unity label");
+    if (formatGainDbLabel(2) !== "+6.0 dB") throw new Error("positive label");
+    if (formatGainDbLabel(GAIN_FLOOR) !== "-150 dB") throw new Error("floor label");
+    if (formatGainDbValue(-150.1) !== "-inf") throw new Error("below floor value");
+    if (parseGainDbInput("+3") !== 3) throw new Error("parse +3");
+    if (parseGainDbInput("3 dB") !== 3) throw new Error("parse unit suffix");
+    if (Math.abs((parseGainDbInput("-6,5") ?? 0) + 6.5) > 1e-9) throw new Error("parse comma");
+    if (parseGainDbInput("-inf") !== Number.NEGATIVE_INFINITY) throw new Error("parse -inf");
+    if (parseGainDbInput("inf") !== null) throw new Error("positive infinity rejected");
+    if (parseGainDbInput("loud") !== null) throw new Error("garbage rejected");
+});
+
+test("resolveGainDrag pins the anchor to the pointer and shifts others by dB", () => {
+    const single = resolveGainDrag({
+        anchorBaseLinear: 1,
+        deltaPx: 10,
+        fine: false,
+        participants: [{ clipId: "a", baseLinear: 1 }],
+        anchorId: "a",
+    });
+    near(single.anchorLinear, gainAt(68), "anchor follows pointer position");
+    if (single.others.length !== 0) throw new Error("anchor excluded from others");
+    const multi = resolveGainDrag({
+        anchorBaseLinear: 0.5,
+        deltaPx: 0,
+        fine: false,
+        participants: [
+            { clipId: "a", baseLinear: 0.5 },
+            { clipId: "b", baseLinear: 0.25 },
+            { clipId: "c", baseLinear: 0 },
+        ],
+        anchorId: "a",
+    });
+    near(multi.anchorLinear, 0.5, "zero delta keeps anchor");
+    near(multi.others[0].linear, 0.25, "relative difference preserved");
+    if (multi.others[1].linear !== 0) throw new Error("silent member stays silent");
+    const fromSilence = resolveGainDrag({
+        anchorBaseLinear: 0,
+        deltaPx: 1,
+        fine: false,
+        participants: [{ clipId: "a", baseLinear: 0 }],
+        anchorId: "a",
+    });
+    if (!(fromSilence.anchorLinear > 0)) throw new Error("silence can be pulled up");
+    const fine = resolveGainDrag({
+        anchorBaseLinear: 1,
+        deltaPx: 10,
+        fine: true,
+        participants: [{ clipId: "a", baseLinear: 1 }],
+        anchorId: "a",
+    });
+    near(fine.anchorLinear, gainAt(60.5), "fine drag is quarter speed");
 });

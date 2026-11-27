@@ -2,7 +2,7 @@
 import type { TimelineState } from "../../../types/api";
 import type { ClipInfo, ClipFormantMorph, TrackInfo } from "../sessionTypes";
 import { resolveLoopMediaDurationSec } from "../../../utils/loopRender";
-import { clampGain } from "../../../utils/gainDb";
+import { clampGain, clampTakeGain } from "../../../utils/gainDb";
 import { normalizeChannelMode } from "../../../utils/channelMode";
 import { markProjectDirty } from "../sessionDirtyState";
 import { resolveRootTrackId } from "../trackUtils";
@@ -391,7 +391,7 @@ export function applyOptimisticClipState(
         clip.clip_gain = clampGain(Number(payload.itemGain));
     }
     if (payload.takeGain !== undefined) {
-        clip.gain = clampGain(Number(payload.takeGain));
+        clip.gain = clampTakeGain(Number(payload.takeGain));
     }
     if (payload.muted !== undefined) {
         clip.muted = Boolean(payload.muted);
@@ -538,7 +538,7 @@ export function applyOptimisticBulkClipState(
             clip.clip_gain = clampGain(Number(update.itemGain));
         }
         if (update.takeGain !== undefined) {
-            clip.gain = clampGain(Number(update.takeGain));
+            clip.gain = clampTakeGain(Number(update.takeGain));
         }
         if (update.muted !== undefined) {
             clip.muted = Boolean(update.muted);

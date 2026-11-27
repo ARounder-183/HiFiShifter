@@ -2,7 +2,11 @@ import { test } from "vitest";
 
 import type { ClipInfo, ClipTakeInfo } from "../../../features/session/sessionTypes";
 import type { WaveformSceneClip } from "../../../waveform/sceneBuilder";
-import { expandClipToTakeSceneClips, resolveTakeLaneLayouts } from "./takeLanes.ts";
+import {
+    clipToSceneClip,
+    expandClipToTakeSceneClips,
+    resolveTakeLaneLayouts,
+} from "./takeLanes.ts";
 
 test("timeline/takeLanes.test.ts scripted checks", async () => {
     function assertEqual(actual: unknown, expected: unknown, label: string): void {
@@ -269,4 +273,69 @@ test("timeline/takeLanes.test.ts scripted checks", async () => {
         ],
         "host takes without a source path still get lanes",
     );
+});
+
+test("waveform amplitudes include the item layer and every take's own gain", () => {
+    const base = (overrides: Partial<ClipInfo>): ClipInfo =>
+        ({
+            id: "c",
+            trackId: "t",
+            name: "c",
+            startSec: 0,
+            lengthSec: 1,
+            color: "blue",
+            gain: 1,
+            clip_gain: 1,
+            muted: false,
+            sourceStartSec: 0,
+            sourceEndSec: 1,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: false,
+            channelMode: 0,
+            snapOffsetSec: 0,
+            fadeInSec: 0,
+            fadeOutSec: 0,
+            fadeInShape: 0,
+            fadeOutShape: 0,
+            fadeInDir: 0,
+            fadeOutDir: 0,
+            ...overrides,
+        }) as ClipInfo;
+    const takes = [
+        {
+            id: "a",
+            name: "A",
+            gain: 0.5,
+            sourcePath: "/a.wav",
+            sourceStartSec: 0,
+            sourceEndSec: 1,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: false,
+            channelMode: 0,
+        },
+        {
+            id: "b",
+            name: "B",
+            gain: -0.25,
+            sourcePath: "/b.wav",
+            sourceStartSec: 0,
+            sourceEndSec: 1,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: false,
+            channelMode: 0,
+        },
+    ] as ClipTakeInfo[];
+    const clip = base({ gain: -0.5, clip_gain: 2, takes, activeTakeId: "a", sourcePath: "/a.wav" });
+    const single = clipToSceneClip(clip);
+    if (single?.amplitudeGain !== 1) throw new Error("single lane must be |2 × -0.5| = 1");
+    const expanded = expandClipToTakeSceneClips(clip, true, 40);
+    const amplitudes = expanded?.map((entry) => entry.amplitudeGain);
+    if (JSON.stringify(amplitudes) !== JSON.stringify([1, 0.5])) {
+        throw new Error(
+            "multi lanes must be |item × each take|, got " + JSON.stringify(amplitudes),
+        );
+    }
 });

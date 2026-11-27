@@ -81,6 +81,12 @@ export type PluginBootstrap = {
          * 不出现。后端据真实 API 存在性算出这一位，前端不按宿主名猜。
          */
         clipReverse: boolean;
+        /** 宿主 item 增益（REAPER item D_VOL）可读可写。 */
+        clipItemGain: boolean;
+        /** 宿主 take 增益（REAPER take D_VOL，含极性）可读可写。 */
+        clipTakeGain: boolean;
+        /** 宿主轨道增益（REAPER track D_VOL）可读可写。 */
+        trackVolume: boolean;
         /**
          * 插件能否读写宿主 take 的**音高包络**（REAPER 的 PITCHENV）。
          *

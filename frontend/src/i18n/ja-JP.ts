@@ -998,8 +998,9 @@ export const jaJP = {
     fade_info_side_type_label: "{side}{type}",
     common_length: "長さ",
 
-    gain_value_tooltip: "ゲイン：{gain} dB",
-    gain_value_tooltip_drag: "ゲイン：{gain} dB（{delta} dB）",
+    gain_value_tooltip: "ゲイン：{gain}",
+    gain_value_tooltip_drag: "ゲイン：{gain}（{delta}）",
+    gain_host_controlled: "このゲインはホストが管理します",
     clip_pitch_drag_tooltip: "ピッチオフセット：{delta} ct",
     track_change_color: "トラックの色を変更",
     track_clone: "トラックを複製",

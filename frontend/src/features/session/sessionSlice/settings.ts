@@ -9,8 +9,9 @@ import type {
 } from "../sessionTypes";
 import type { SessionState } from "./types";
 import { isBlockSelectionActive } from "../toolMode";
+import { GAIN_MAX_LINEAR } from "../../../utils/gainDb";
 
-export const MAX_TRACK_VOLUME = 4;
+export const MAX_TRACK_VOLUME = GAIN_MAX_LINEAR;
 /** 播放光标"真实挪动"判定阈值：低于该值的差异视为浮点噪声，
  * 不触发撤销/重做后的"聚焦播放光标"（视图滚动）登记。 */
 export const PLAYHEAD_MOVE_EPS_SEC = 1e-6;

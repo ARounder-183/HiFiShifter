@@ -1059,8 +1059,9 @@ export const koKR = {
     fade_info_side_type_label: "{side} {type}",
     common_length: "길이",
 
-    gain_value_tooltip: "게인: {gain} dB",
-    gain_value_tooltip_drag: "게인: {gain} dB ({delta} dB)",
+    gain_value_tooltip: "게인: {gain}",
+    gain_value_tooltip_drag: "게인: {gain} ({delta})",
+    gain_host_controlled: "이 게인은 호스트가 제어합니다",
     clip_pitch_drag_tooltip: "피치 오프셋: {delta} ct",
     track_change_color: "트랙 색상 변경",
     track_clone: "트랙 복제",

@@ -1,180 +1,236 @@
 /**
- * Clip / 轨道增益的 dB 值域，以及旋钮拖拽的**手感映射**。
+ * Clip / Take / Track 增益的唯一数学入口。
  *
- * 【值域与后端一一对应】`hifishifter_kernel::gain` 是权威（线性 `[0, 16]`），
- * 这里给出它的 dB 表达。两边必须一致 —— 与 `paramRanges.ts` / `DYN_SILENCE_FLOOR`
- * 的既有约定相同：前端需要**同步**读取（旋钮角度、徽标、行内输入都在渲染期算），
- * 不可能为一次换算去等 IPC。
+ * 【值域】kernel 权威：线性 [0, 16]，0 是唯一静音；显示下界 −150 dB，
+ * 锥度下界 −60 dB。前端只镜像这些常量与边界，不另写一套。
  *
- * 【为什么上界是 +24.1 而不是 +24.08】REAPER 显示 `+24.08` 是 dB 的四舍五入；
- * 线性域取整为 16，换算回来是 `20*log10(16) = 24.082`。这里的常量按线性上界反算，
- * 保证"推到顶"恰好等于后端允许的最大值，而不是差 0.02 dB 被钳一下。
+ * 【dB 只住在边界】模型层（Redux / 手势结果）一律线性；dB 只在文本、
+ * 输入框与角度计算里出现。
  */
 
 /** 线性增益下界（0 = −inf dB，静音）。 */
-const GAIN_MIN_LINEAR = 0;
+export const GAIN_MIN_LINEAR = 0;
 
-/** 线性增益上界（16 = +24.08 dB，与 REAPER 的 item 增益上限一致）。 */
+/** 线性增益上界（16 = +24.08 dB，与 REAPER item 上限一致）。 */
 export const GAIN_MAX_LINEAR = 16;
 
-/**
- * dB 的**显示**下界（REAPER 口径）。
- *
- * 【为什么是 −150】REAPER 的电平读数一路能下探到 −150 dB，低于它才显示 `-inf`。
- * 此前这里写死 −60：于是 −90 dB 的增益在界面上显示成 `-inf`，而它其实还听得见一点点，
- * 用户按 REAPER 的读数去核对时对不上。
- */
+/** 显示下界（REAPER 口径）：低于它显示 -inf。 */
 export const GAIN_DISPLAY_FLOOR_DB = -150;
 
-/** dB 下界（= 显示下界，供"输入框 / 数值 / 提示"使用）。 */
+/** dB 输入/显示下界（与显示下界同源）。 */
 export const GAIN_MIN_DB = GAIN_DISPLAY_FLOOR_DB;
 
-/**
- * 旋钮**锥度**的下界。
- *
- * 【为什么与显示下界分开】旋钮角度与拖拽分辨率都按"到 0 dB 的距离"铺开。若按下界
- * −150 dB 铺，有用的 −12~+12 dB 会被压进整条弧的 4% —— 一动就飞，正是用户明确要求
- * 避免的手感崩坏。锥度仍按 −60 dB 铺满下半程，更低的取值（例如手输 −140）停在弧底，
- * 读数照常显示真实值。
- */
+/** 旋钮锥度下界：−60 以上保持 1.25 dB/px 的手感。 */
 export const GAIN_TAPER_FLOOR_DB = -60;
 
-/**
- * 底部的**静音棘齿**（CSS px）。
- *
- * 行程最后这 1px 直接落到 0（线性）= `-inf`，与 REAPER 推子最底下那段一致。
- *
- * 【为什么只有 1px】锥度是 `−60 dB / 48 px`（= 1.25 dB/px，与第一轮定下的手感逐像素
- * 一致）。棘齿若占 6px，下半程就只剩 42px，灵敏度变成 1.43 dB/px —— 用户明确要求过
- * "范围变大不能让旋钮变灵敏"，所以宁可让棘齿只是一格"到底"的吸附。
- */
-const GAIN_SILENCE_DETENT_PX = 1;
+/** 显示下界对应的线性值。 */
+export const GAIN_FLOOR = 10 ** (GAIN_DISPLAY_FLOOR_DB / 20);
 
-/** dB 上界（由线性上界反算，见文件头）。 */
+/** 两层增益的乘积上限（16 × 16），只做防溢出。 */
+export const GAIN_PRODUCT_MAX = GAIN_MAX_LINEAR * GAIN_MAX_LINEAR;
+
+/** dB 上界（由线性上界反算）。 */
 export const GAIN_MAX_DB = 20 * Math.log10(GAIN_MAX_LINEAR);
 
-/** 旋钮从 0 dB 推到任一端的**行程**（CSS px）。 */
-const KNOB_HALF_TRAVEL_PX = 48;
-
-/** 旋钮指示线在满量程处的偏转角（度）。 */
+const TRAVEL_UP_PX = 48;
+const TRAVEL_DOWN_PX = 48;
+const TRAVEL_DEEP_PX = 9;
+const DETENT_PX = 1;
+const ZERO_PX = DETENT_PX + TRAVEL_DEEP_PX + TRAVEL_DOWN_PX;
+const TOP_PX = ZERO_PX + TRAVEL_UP_PX;
+const TAPER_PX = DETENT_PX + TRAVEL_DEEP_PX;
 const KNOB_MAX_ANGLE_DEG = 135;
 
-/**
- * 把线性增益钳进值域（与后端 `clamp_gain` 逐条同构）。
- *
- * 只有 NaN 特判为 1.0；±Infinity 由 min/max 自然钳到端点（与 Rust 的
- * `f32::clamp` 行为一致）。
- */
+/** 非负层钳制：NaN → 1；≤0 / 低于显示下界 → 0；上界 16。 */
 export function clampGain(linear: number): number {
     if (Number.isNaN(linear)) return 1;
-    return Math.min(GAIN_MAX_LINEAR, Math.max(GAIN_MIN_LINEAR, linear));
+    if (!(linear > GAIN_MIN_LINEAR) || linear < GAIN_FLOOR) return 0;
+    return Math.min(GAIN_MAX_LINEAR, linear);
 }
 
-/** 把 dB 值钳进值域。 */
+/** take 层钳制：保号（负值 = 极性反转）；幅度低于显示下界归零。 */
+export function clampTakeGain(linear: number): number {
+    if (Number.isNaN(linear)) return 1;
+    const magnitude = Math.abs(linear);
+    if (magnitude < GAIN_FLOOR) return 0;
+    return Math.max(-GAIN_MAX_LINEAR, Math.min(GAIN_MAX_LINEAR, linear));
+}
+
+/** 把 dB 值钳进值域（输入边界用）。 */
 export function clampGainDb(db: number): number {
-    if (Number.isNaN(db)) return 0;
-    return Math.min(GAIN_MAX_DB, Math.max(GAIN_MIN_DB, db));
+    if (!Number.isFinite(db)) return GAIN_DISPLAY_FLOOR_DB;
+    return Math.min(GAIN_MAX_DB, Math.max(GAIN_DISPLAY_FLOOR_DB, db));
 }
 
-/** 线性 → dB（`0` 映射到 [`GAIN_MIN_DB`]，不返回 −Infinity）。 */
-export function gainToDbSafe(linear: number): number {
-    const g = clampGain(linear);
-    if (!(g > 0)) return GAIN_MIN_DB;
-    return clampGainDb(20 * Math.log10(g));
-}
-
-/**
- * 线性增益 → 展示文本（**唯一**的增益格式化入口）。
- *
- * 规则与 REAPER 一致：
- * - 0（静音）或低于 −150 dB ⇒ `-inf`；
- * - 其余四舍五入到一位小数，正数带 `+`；
- * - 恰好 0 dB 显示 `0`（不带符号、不带小数），免得界面上出现 `+0.0`。
- *
- * 【为什么要收口】此前仓里有**四套**格式化：轨道推子自己写 `-inf dB`、canvas 上直接
- * `toFixed(1)`（增益为 0 时打印 `-InfinitydB`）、时间轴用一个不带 −inf 分支的
- * `formatGainDbValue`、编辑框用 `formatEditNumber`。同一个值在四个地方四种写法。
- */
-export function formatGainDbLabel(linear: number): string {
+/** 线性 → dB；静音返回 -Infinity（不是 −150 的“实用下界”）。 */
+export function gainToDb(linear: number): number {
     const gain = clampGain(linear);
-    // 线性 0 就是静音：不能借 gainToDbSafe 的"实用下界"回退（那会显示成 −150）。
-    if (!(gain > 0)) return "-inf";
-    return formatGainDbValue(20 * Math.log10(gain));
+    return gain > 0 ? 20 * Math.log10(gain) : Number.NEGATIVE_INFINITY;
 }
 
-/** dB 值 → 展示文本（与 [`formatGainDbLabel`] 同一套规则，供已经是 dB 的调用点使用）。 */
+/** 线性 → dB，静音按显示下界 −150 处理（锥度/角度/增量基准用）。 */
+export function dbOrFloor(linear: number): number {
+    const db = gainToDb(linear);
+    return Number.isFinite(db) ? db : GAIN_DISPLAY_FLOOR_DB;
+}
+
+/** @deprecated 仅过渡用；新代码请用 gainToDb / dbOrFloor。 */
+export function gainToDbSafe(linear: number): number {
+    return dbOrFloor(linear);
+}
+
+/** dB → 线性；低于 −150 或非有限值 → 0（静音）。 */
+export function dbToGain(db: number): number {
+    if (!Number.isFinite(db) || db < GAIN_DISPLAY_FLOOR_DB) return 0;
+    return Math.min(GAIN_MAX_LINEAR, 10 ** (db / 20));
+}
+
+/** dB → 展示文本（不带单位）。 */
 export function formatGainDbValue(db: number): string {
-    if (!Number.isFinite(db) || db < GAIN_DISPLAY_FLOOR_DB) return "-inf";
+    if (!Number.isFinite(db) || db < GAIN_DISPLAY_FLOOR_DB - 1e-9) return "-inf";
     const rounded = Math.round(db * 10) / 10;
     if (Math.abs(rounded) < 0.05) return "0";
     const sign = rounded > 0 ? "+" : "";
-    return Number.isInteger(rounded) ? `${sign}${rounded}` : `${sign}${rounded.toFixed(1)}`;
+    // 统一一位小数：+6.0 / -6.0。只有精确的 0 dB 与 −150 dB 显示整数。
+    if (rounded === GAIN_DISPLAY_FLOOR_DB) return "-150";
+    return `${sign}${rounded.toFixed(1)}`;
+}
+
+/** 线性 → 完整展示标签（唯一格式化入口，含单位）。 */
+export function formatGainDbLabel(linear: number): string {
+    return `${formatGainDbValue(gainToDb(linear))} dB`;
 }
 
 /**
- * dB 值 → 旋钮指示线的偏转角（度，0 = 正上方）。
- *
- * 【为什么分两段】旧实现是 `(db / 12) * 135` —— 靠"值域 ±12 对称"让 0 dB 落在正中。
- * 新值域 `(−60, +24.1)` **不对称**，若仍用一个除数，0 dB 会偏到一边。分段之后
- * 0 dB 恒在正中（与旧观感一致），两侧各自铺满自己的半程。
+ * 解析用户输入的增益。返回 dB；`-inf` 返回 -Infinity（调用方 dbToGain 后是 0）。
+ * 接受 `+3`、`3 dB`、`-6,5`；正无穷与其他非法值返回 null。
  */
-export function gainKnobAngleDeg(db: number): number {
-    const value = clampGainDb(db);
-    if (value >= 0) return (value / GAIN_MAX_DB) * KNOB_MAX_ANGLE_DEG;
-    // 低于锥度下界（例如手输 −140）一律停在 −135°：读数仍是真实值，只是指针到底了。
-    return (Math.max(value, GAIN_TAPER_FLOOR_DB) / -GAIN_TAPER_FLOOR_DB) * KNOB_MAX_ANGLE_DEG;
+export function parseGainDbInput(raw: string): number | null {
+    let text = raw
+        .trim()
+        .toLowerCase()
+        .replace(/\s*d\s*b\s*$/u, "")
+        .trim();
+    if (text === "") return null;
+    if (text === "-inf" || text === "-∞" || text === "−inf") return Number.NEGATIVE_INFINITY;
+    text = text.replace(/[−–]/g, "-").replace(",", ".");
+    const value = Number(text);
+    if (!Number.isFinite(value)) return null;
+    return clampGainDb(value);
+}
+
+/** 与 Rust `GainScope` 对应的前端只读语义（UI 判断用）。 */
+export const GainScope = { AppOwned: "app", HostOwned: "host" } as const;
+
+export interface GainTaper {
+    readonly zeroPx: number;
+    readonly topPx: number;
+    readonly taperPx: number;
+    positionOf(linear: number): number;
+    gainAt(positionPx: number): number;
+    angleDeg(linear: number): number;
+}
+
+/** 线性值 → 底部起算的行程位置（px）。 */
+export function positionOf(linear: number): number {
+    const gain = clampGain(linear);
+    if (gain <= 0) return 0;
+    const db = 20 * Math.log10(gain);
+    if (db >= 0) return ZERO_PX + (db / GAIN_MAX_DB) * TRAVEL_UP_PX;
+    if (db >= GAIN_TAPER_FLOOR_DB) {
+        return ZERO_PX + (db / -GAIN_TAPER_FLOOR_DB) * TRAVEL_DOWN_PX;
+    }
+    return (
+        DETENT_PX +
+        ((db - GAIN_DISPLAY_FLOOR_DB) / (GAIN_TAPER_FLOOR_DB - GAIN_DISPLAY_FLOOR_DB)) *
+            TRAVEL_DEEP_PX
+    );
+}
+
+/** 行程位置（px）→ 线性值；0..1px 是静音棘齿。 */
+export function gainAt(positionPx: number): number {
+    if (!(positionPx >= DETENT_PX)) return 0;
+    if (positionPx <= TAPER_PX) {
+        const db =
+            GAIN_DISPLAY_FLOOR_DB +
+            ((positionPx - DETENT_PX) / TRAVEL_DEEP_PX) *
+                (GAIN_TAPER_FLOOR_DB - GAIN_DISPLAY_FLOOR_DB);
+        return dbToGain(db);
+    }
+    if (positionPx <= ZERO_PX) {
+        const db = ((positionPx - ZERO_PX) / TRAVEL_DOWN_PX) * -GAIN_TAPER_FLOOR_DB;
+        return dbToGain(db);
+    }
+    const db = ((positionPx - ZERO_PX) / TRAVEL_UP_PX) * GAIN_MAX_DB;
+    return dbToGain(Math.min(db, GAIN_MAX_DB));
+}
+
+/** 指针角度：0 dB = 0°，+24.08 = +135°，−60 = −117°，−150 = −135°。 */
+function angleDeg(linear: number): number {
+    const db = dbOrFloor(linear);
+    if (db >= 0) return (db / GAIN_MAX_DB) * KNOB_MAX_ANGLE_DEG;
+    if (db >= GAIN_TAPER_FLOOR_DB) {
+        return (db / -GAIN_TAPER_FLOOR_DB) * 117;
+    }
+    return (
+        -117 + ((db - GAIN_TAPER_FLOOR_DB) / (GAIN_DISPLAY_FLOOR_DB - GAIN_TAPER_FLOOR_DB)) * -18
+    );
+}
+
+/** 唯一锥度对象：Clip 旋钮、轨道旋钮、滚轮与拖拽共用。 */
+export const gainTaper: GainTaper = Object.freeze({
+    zeroPx: ZERO_PX,
+    topPx: TOP_PX,
+    taperPx: TAPER_PX,
+    positionOf,
+    gainAt,
+    angleDeg,
+});
+
+/** 线性入参的角度（保留旧名，签名从 dB 改为线性）。 */
+export function gainKnobAngleDeg(linear: number): number {
+    return angleDeg(linear);
+}
+
+export interface GainDragParticipant {
+    readonly clipId: string;
+    readonly baseLinear: number;
+}
+
+export interface GainDragResult {
+    /** 锚点 clip 的新线性增益；0 = 静音。 */
+    readonly anchorLinear: number;
+    /** 其余参与者按同一 dB 增量平移后的结果。 */
+    readonly others: ReadonlyArray<{ clipId: string; linear: number }>;
 }
 
 /**
- * 旋钮拖拽：竖直位移 → 新的 dB 值。
- *
- * 【为什么不能用固定的 dB/px】值域从 ±12 扩到 (−60, +24.1) 之后，
- * 固定 `0.25 dB/px` 会让拖 145 px 就走完全程 —— 手感直接崩掉。用户明确要求：
- * **范围扩大不得让旋钮变得"一动就大幅调整"**。
- *
- * 【映射】先在**归一化行程** `u ∈ [−1, 1]` 上走（与值域大小无关）：
- *
- * ```text
- * startU = start >= 0 ? start / GAIN_MAX_DB
- *                     : max(start, GAIN_TAPER_FLOOR_DB) / −GAIN_TAPER_FLOOR_DB
- * travel = startU + deltaPx / KNOB_HALF_TRAVEL_PX
- * travel < −(1 − GAIN_SILENCE_DETENT_PX / KNOB_HALF_TRAVEL_PX)
- *        ⇒  行程触底棘齿，直接返回 0（线性）= −inf
- * u      = clamp(travel, −1, 1)
- * u >= 0 ⇒  db = u · GAIN_MAX_DB
- * u < 0  ⇒  db = (−u) · GAIN_TAPER_FLOOR_DB
- * ```
- *
- * 下半程按**锥度下界**（−60，`GAIN_TAPER_FLOOR_DB`）铺满，不是按
- * `GAIN_MIN_DB`（−150）—— 有用的 −12~+12 dB 若按下界 −150 铺开会被压进
- * 整条行程的 4%，手感崩坏（见该常量的说明）；低于 −60 的起点按弧底算。
- *
- * 于是**全程行程恒为 96 px**（两段各 48），与值域大小无关 —— 与旧实现
- * （±12 dB / 0.25 dB·px⁻¹ ⇒ 96 px 走完全程）**逐像素一致**。
- *
- * 【为什么不是纯 dB/px】−inf 端没有下界可走；而且 dB 域在靠近 0 的地方非线性，
- * 纯 dB/px 会让"底部走得慢、顶部走得快"。归一化行程把两端都变成线性。
- *
- * @param startDb 按下时的 dB 值。
- * @param deltaPx 相对按下点的竖直位移（**向上为正**）。
+ * 唯一手势解析器：锚点精确等于指针位置，其余成员按 dB 增量平移。
+ * 返回线性值；静音严格是 0，绝不返回“0 dB”的哨兵。
  */
-export function gainDbFromKnobTravel(startDb: number, deltaPx: number): number {
-    if (!Number.isFinite(deltaPx)) return clampGainDb(startDb);
-    const start = clampGainDb(startDb);
-    // 起点在归一化行程上的位置（两段各自线性，见上方映射）。
-    // 起点低于锥度下界时按弧底算 —— 否则从 −140 往上一拉，前 80px 都在"追"回 −60。
-    const startU =
-        start >= 0
-            ? start / GAIN_MAX_DB
-            : Math.max(start, GAIN_TAPER_FLOOR_DB) / -GAIN_TAPER_FLOOR_DB;
-    const travel = startU + deltaPx / KNOB_HALF_TRAVEL_PX;
-    // 棘齿：行程**最后那 1px** 直接落 0（线性）= −inf。判据用严格小于，
-    // 让刚好推到边界时仍读到 −60 dB（同一个位置不能既算"到底"又算"−60"）。
-    const detent = 1 - GAIN_SILENCE_DETENT_PX / KNOB_HALF_TRAVEL_PX;
-    if (travel < -detent) return 0;
-    const u = Math.min(1, Math.max(-1, travel));
-    // 上段：u ∈ [0, 1] ⇒ db ∈ [0, GAIN_MAX_DB]。
-    if (u >= 0) return clampGainDb(u * GAIN_MAX_DB);
-    // 下段：u ∈ (−1, 0) ⇒ db ∈ (−GAIN_TAPER_FLOOR_DB, 0)。
-    return clampGainDb(GAIN_TAPER_FLOOR_DB * -u);
+export function resolveGainDrag(args: {
+    anchorBaseLinear: number;
+    deltaPx: number;
+    fine: boolean;
+    participants: ReadonlyArray<GainDragParticipant>;
+    anchorId: string;
+}): GainDragResult {
+    const { anchorBaseLinear, deltaPx, fine, participants, anchorId } = args;
+    const startPx = positionOf(anchorBaseLinear);
+    const scale = fine ? 0.25 : 1;
+    const anchorLinear = gainAt(startPx + deltaPx * scale);
+    const anchorBaseDb = dbOrFloor(anchorBaseLinear);
+    const anchorNextDb = dbOrFloor(anchorLinear);
+    const deltaDb = anchorNextDb - anchorBaseDb;
+    const others = participants
+        .filter((participant) => participant.clipId !== anchorId)
+        .map((participant) => {
+            const base = clampGain(participant.baseLinear);
+            const nextDb = clampGainDb(dbOrFloor(base) + deltaDb);
+            // 原本就是静音的成员不应因为“−150 的数值表示”变成 3.16e-8：
+            // 0 是唯一静音，db 边界只是锥度/增量的计算域。
+            const linear = base === 0 && nextDb <= GAIN_DISPLAY_FLOOR_DB ? 0 : dbToGain(nextDb);
+            return { clipId: participant.clipId, linear };
+        });
+    return { anchorLinear, others };
 }

@@ -908,7 +908,7 @@ function toSceneClip(entry: ClipPeaksEntry): WaveformSceneClip | null {
         playbackRate: entry.playbackRate,
         reversed: entry.reversed,
         loopEnabled: entry.loopEnabled,
-        gain: entry.gain,
+        amplitudeGain: entry.gain,
         muted: false,
         fadeInSec: entry.fadeInSec,
         hostFades: entry.hostFades,
