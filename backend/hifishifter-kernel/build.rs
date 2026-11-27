@@ -1051,6 +1051,40 @@ fn remove_tree(dir: &Path) {
 ///
 /// 【为什么返回 Result 而不是 panic】调用方要"失败就擦掉重来一次"（见 [`build_soundtouch`]）。
 /// 在这里 panic 会把一次可以自愈的缓存残骸，变成一台再也构建不了的机器。
+/// CMake 生成器真正依赖的那个可执行文件（`NMake Makefiles` → `nmake`，`Ninja` → `ninja`）。
+///
+/// 【为什么要在 build script 里知道这件事】生成器是**环境层**钉住的（见
+/// `scripts/env/native-toolchain.ps1`），而环境层只在"导入过 MSVC 环境"的进程里才生效。
+/// 一旦某个入口没有导入（2026-11-27 的 windows-arm64 CI 腿就是如此），cmake 会先报
+/// `Running 'nmake' '-?' failed` 再报 `CMAKE_CXX_COMPILER not set`，最后由这里 panic ——
+/// 整条链路没有一个字提到"工具链没进来"，排查要翻四十分钟日志。
+fn generator_driver(generator: &str) -> Option<&'static str> {
+    match generator {
+        "NMake Makefiles" => Some("nmake"),
+        "Ninja" => Some("ninja"),
+        _ => None,
+    }
+}
+
+/// PATH 上是否存在可执行的 `name`（Windows 上同时试 `.exe`）。
+fn command_on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    let mut names = vec![name.to_string()];
+    if cfg!(windows) {
+        names.push(format!("{name}.exe"));
+    }
+    for dir in std::env::split_paths(&path) {
+        for candidate in &names {
+            let full = dir.join(candidate);
+            if full.is_file() {
+                return true;
+            }
+        }
+    }
+    false
+}
 #[allow(clippy::too_many_arguments)]
 fn configure_and_build_soundtouch(
     build_dir: &Path,
@@ -1060,6 +1094,25 @@ fn configure_and_build_soundtouch(
     is_windows: bool,
     is_apple: bool,
 ) -> Result<(), String> {
+    // 【缺工具时立刻说人话】生成器由环境层钉住；这里只负责在"它要的那个可执行文件不在
+    // PATH 上"时，把可执行的下一步直接写进错误信息，而不是让 cmake 抛两条互不相关的报错。
+    if let Some(generator) = requested_generator {
+        if let Some(driver) = generator_driver(generator) {
+            if !command_on_path(driver) {
+                panic!(
+                    "[soundtouch] CMake generator `{}` needs `{}` on PATH, but it is not there.\n\
+                     On Windows the MSVC environment must be imported into the SAME process first:\n    \
+                     . .\\scripts\\env\\msvc-env.ps1          # local / build.ps1\n    \
+                     scripts\\setup\\export-msvc-env.ps1     # CI (writes $GITHUB_ENV)\n\
+                     TARGET={}",
+                    generator,
+                    driver,
+                    std::env::var("TARGET").unwrap_or_default()
+                );
+            }
+        }
+    }
+
     // Step 1: CMake configure - build SoundTouchDLL as a shared library.
     let mut cfg = Command::new("cmake");
     cfg.arg("-S").arg(st_src_path);

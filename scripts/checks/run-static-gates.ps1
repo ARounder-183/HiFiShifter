@@ -118,6 +118,12 @@ Invoke-Gate 'Touch coverage gate' { python scripts/checks/check-touch-coverage.p
 Invoke-Gate 'Gain layer gate' { python scripts/checks/check-gain-layers.py }
 Invoke-Gate 'Gain audition gate' { python scripts/checks/check-gain-audition.py }
 
+# The cross-platform workflow builds six legs, and two of them failed for naming/wiring
+# reasons that no compiler can see: the Linux arm64 leg was called `linux-arm64` while the
+# packager names the tarball `linux-aarch64` (upload matched nothing), and the Windows arm64
+# leg builds through tauri-action, which never imported the MSVC environment (no nmake).
+Invoke-Gate 'CI artifact name gate' { python scripts/checks/check-ci-artifact-names.py }
+
 # The host calls us synchronously on its own UI thread, and the WebView2 delivery we wait
 # on only advances while that thread pumps. A handler that takes the session's timeline
 # lock therefore waits for the actor, while the actor's post waits for the host to pump:

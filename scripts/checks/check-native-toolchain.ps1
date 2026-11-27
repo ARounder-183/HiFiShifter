@@ -91,6 +91,23 @@ if ($readings.ContainsKey('NINJA')) {
     Assert-True ($readings['NINJA'] -eq 'False') 'ninja is still reachable after pinning the NMake generator: opusic-sys would override it'
 }
 
+# ── 1b. The target architecture decides which vcvars entry point runs ───────
+#
+# [Why source-level] Which arm64 host/target combination exists depends on the VS payload of
+# the machine, so a runtime assertion would be machine-dependent (this dev box has no arm64
+# toolset at all). What must hold everywhere is the *decision*: x64 keeps calling
+# vcvars64.bat (byte-compatible with the old behaviour), and arm64 goes through vcvarsall
+# with the three documented fallbacks. Without that, the Windows arm64 CI leg (tauri-action,
+# no build.ps1) pins NMake Makefiles and finds no nmake.exe -- run 45953527512.
+$msvcText = [IO.File]::ReadAllText($msvcEnv)
+Assert-True ($msvcText.Contains('HFS_MSVC_TARGET_ARCH')) 'msvc-env.ps1 no longer honours HFS_MSVC_TARGET_ARCH, so the Windows arm64 leg cannot select its toolset'
+Assert-True ($msvcText.Contains('VC\Auxiliary\Build\vcvarsall.bat')) 'msvc-env.ps1 must discover VC\Auxiliary\Build\vcvarsall.bat: vcvars64.bat can only target x64'
+foreach ($arch in 'arm64', 'amd64_arm64', 'x86_arm64') {
+    Assert-True ($msvcText.Contains("'$arch'")) ("msvc-env.ps1 lost the '$arch' vcvarsall candidate; the arm64 leg would have nothing to fall back to")
+}
+Assert-True ($msvcText.Contains('Join-Path $vcvarsDir ''vcvars64.bat''')) 'msvc-env.ps1 must keep calling vcvars64.bat for x64 so that machine behaviour is unchanged'
+Assert-True ($msvcText.Contains('VSCMD_ARG_TGT_ARCH')) 'msvc-env.ps1 must verify the selected target: vcvarsall can exit 0 while leaving the x64 toolset on PATH'
+
 # ── 2. Every cargo entry point imports a toolchain env script ───────────────
 #
 # Criterion: a script that mentions cargo outside a comment must import msvc-env.ps1 or

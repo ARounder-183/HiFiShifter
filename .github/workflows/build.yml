@@ -79,10 +79,15 @@ jobs:
         # it just prevents the whole matrix from expanding. The matrix is now produced directly
         # by an expression: three platforms on PRs, six on tags and manual dispatch. The JSON
         # fields map 1:1 onto the old include (cargo_extra carried over verbatim).
+        # [Why `name` is the artifact tag] The non-Windows upload glob matches package.sh's
+        # HFS_TAG (scripts/plugin/unix/lib.sh), and that tag spells the Linux arm64 leg
+        # `linux-aarch64` (dpkg's spelling, already part of published file names). The
+        # matrix name must therefore be `linux-aarch64` too — run 45953527512 went red
+        # because the leg was named `linux-arm64` while the tarball was `linux-aarch64`.
         include: >-
           ${{ fromJSON(github.event_name == 'pull_request'
           && '[{"name":"windows-x86_64","os":"windows-latest","cargo_target":"x86_64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist","tauri_extra":""},{"name":"macos-arm64","os":"macos-latest","cargo_target":"aarch64-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""},{"name":"linux-x86_64","os":"ubuntu-24.04","cargo_target":"x86_64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--config tauri.linux.x86_64.conf.json"}]'
-          || '[{"name":"windows-x86_64","os":"windows-latest","cargo_target":"x86_64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist","tauri_extra":""},{"name":"windows-arm64","os":"windows-11-arm","cargo_target":"aarch64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""},{"name":"macos-arm64","os":"macos-latest","cargo_target":"aarch64-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""},{"name":"macos-x86_64","os":"macos-15-intel","cargo_target":"x86_64-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""},{"name":"linux-x86_64","os":"ubuntu-24.04","cargo_target":"x86_64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--config tauri.linux.x86_64.conf.json"},{"name":"linux-arm64","os":"ubuntu-24.04-arm","cargo_target":"aarch64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""}]') }}
+          || '[{"name":"windows-x86_64","os":"windows-latest","cargo_target":"x86_64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist","tauri_extra":""},{"name":"windows-arm64","os":"windows-11-arm","cargo_target":"aarch64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""},{"name":"macos-arm64","os":"macos-latest","cargo_target":"aarch64-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""},{"name":"macos-x86_64","os":"macos-15-intel","cargo_target":"x86_64-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""},{"name":"linux-x86_64","os":"ubuntu-24.04","cargo_target":"x86_64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--config tauri.linux.x86_64.conf.json"},{"name":"linux-aarch64","os":"ubuntu-24.04-arm","cargo_target":"aarch64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""}]') }}
     steps:
       - uses: actions/checkout@v6
 
@@ -258,6 +263,23 @@ jobs:
       # installed here.
       - name: Install frontend deps
         run: npm --prefix frontend ci
+
+      # ── Windows toolchain ──────────────────────────────────────────────
+      #
+      # [Why CI must import the MSVC environment explicitly] The repository's rule is
+      # "every entry point that runs cargo imports the MSVC environment first" (enforced
+      # by scripts/checks/check-native-toolchain.ps1). The x86_64 leg satisfies it through
+      # build.ps1, which dot-sources scripts/env/msvc-env.ps1 in-process. The arm64 leg
+      # uses tauri-action and has no script entry point at all, so nmake.exe was never on
+      # PATH and hifishifter-kernel's build script died inside `cmake` configure
+      # (run 45953527512). Publishing the environment to $GITHUB_ENV hands the same
+      # toolchain to that separate process.
+      - name: Import MSVC environment (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $arch = if ('${{ matrix.cargo_target }}' -like 'aarch64-*') { 'arm64' } else { 'x64' }
+          ./scripts/setup/export-msvc-env.ps1 -Arch $arch
 
       # ── Build + bundle ─────────────────────────────────────────────────
 
