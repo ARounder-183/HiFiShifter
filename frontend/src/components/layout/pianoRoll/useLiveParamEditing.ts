@@ -82,6 +82,50 @@ export function replayStrokePoints(
     buffer.write(minF, dense, { clamp });
 }
 
+/**
+ * 把窗口的 `orig` 平面写成 `[minF, maxF]` 的**逐帧**还原值（还原预览的唯一实现）。
+ *
+ * 【为什么是 orig 而不是 erase】覆盖层的 `erase` 语义是"这些帧回到已提交值"
+ * （投影时未覆盖的帧取基准 `pv.edit`），而"还原"要的是**原始值** —— 后端
+ * `restore_param_frames` 之后 `get_param_frames` 出口给出的正是 `pv.orig`：
+ * pitch 是 `pitch_edit=0` 哨兵回落到 `pitch_orig`，dyn 是 `DYN_FOLLOW_ORIG` 哨兵
+ * 回落到该帧基线，tension / extra 是 `param_reference_value`。四类参数无一例外。
+ * 写进去之后：预览 = 后端将写入的结果，提交后 `liveEditCaughtUp` 逐值比较必然相等，
+ * 占位层因此可以无损退场。
+ *
+ * 【为什么不 clamp】`pv.orig` 是后端出口的权威值，不是用户输入。dyn 的基线可以到
+ * `DYN_ORIG_MAX`(8.0)，而 dyn 的写入值域是 0..1 —— 钳制会把预览画低一截。
+ *
+ * 【为什么按 stride 展开】缓冲是**逐帧**的（投影按绝对帧取值），而 `pv.orig` 按
+ * 窗口步长采样；`stride > 1` 时必须就近取整展开，否则整段会错位。
+ *
+ * @returns 实际写入的帧数；0 = 这段窗口里取不到 orig（不写预览，交由提交兜底）。
+ */
+export function writeRestoreIntoBuffer(
+    buffer: StrokeBuffer,
+    pv: Pick<ParamViewSegment, "startFrame" | "stride" | "orig">,
+    minF: number,
+    maxF: number,
+): number {
+    const stride = Math.max(1, Math.floor(pv.stride) || 1);
+    const orig = pv.orig;
+    if (orig.length === 0) return 0;
+    const windowEndFrame = pv.startFrame + (orig.length - 1) * stride;
+    const from = Math.max(Math.floor(minF), pv.startFrame);
+    const to = Math.min(Math.floor(maxF), windowEndFrame);
+    if (to < from) return 0;
+    const dense = new Array<number>(to - from + 1);
+    for (let frame = from; frame <= to; frame += 1) {
+        const index = Math.round((frame - pv.startFrame) / stride);
+        const value = orig[Math.min(Math.max(index, 0), orig.length - 1)];
+        // 非有限值不写：宁可没有预览（提交仍会还原），也不要在曲线上画一个假值。
+        if (!Number.isFinite(value)) return 0;
+        dense[frame - from] = value;
+    }
+    buffer.write(from, dense, { from, to });
+    return dense.length;
+}
+
 export function useLiveParamEditing(args: {
     rootTrackId: string | null;
     editParam: ParamName;
@@ -273,7 +317,13 @@ export function useLiveParamEditing(args: {
             // 重新进入"编辑中"：提交值可能还没进快照，但用户已经又画了，
             // 此时覆盖层必须跟着手走（不能再被快照到达时的清理规则撤下）。
             cur.committed = false;
-            if (mode === "restore" || dense === null) {
+            if (mode === "restore") {
+                // 还原 = 把 pv.orig 写成预览（见 writeRestoreIntoBuffer 的说明）。
+                // 【为什么不再 erase】erase 让这些帧回到**已提交值**，也就是用户正要
+                // 还原掉的那条曲线；覆盖层为空时它连版本号都不动 ⇒ 一帧都不重绘，
+                // 用户看到的是"右键拖拽完全没有预览"。
+                writeRestoreIntoBuffer(cur.buffer, pv, minF, maxF);
+            } else if (dense === null) {
                 cur.buffer.erase(minF, maxF + 1);
             } else {
                 // 写入的坐标是**绝对帧**；`minF` / `maxF` 之外的值即使出现在 dense 里也不写
@@ -402,8 +452,15 @@ export function useLiveParamEditing(args: {
             // 在此兜底：否则 unhandledrejection，且 live 预览层会冻结在半提交状态。
             try {
                 if (mode === "restore") {
-                    if (live !== null && scope !== null && live.scope === scope) {
-                        if (live.buffer.erase(minF, maxF + 1)) touchLiveEdit(live);
+                    // 占位 = **还原后的值**（不是空缓冲）：补齐手势没经过的帧，保证
+                    // "预览范围 = 提交范围"，并让松手瞬间的画面与后端结果逐值一致。
+                    // 这里绝不能 erase —— 那会把刚写好的 orig 占位清空，线先跳回旧值、
+                    // 再等一次 IPC 才回来（"松手闪一下"的经典形状）。
+                    const pvNow = paramViewRef.current ?? pv;
+                    if (live !== null && scope !== null && live.scope === scope && pvNow !== null) {
+                        if (writeRestoreIntoBuffer(live.buffer, pvNow, minF, maxF) > 0) {
+                            touchLiveEdit(live);
+                        }
                     }
                     invalidate();
                     await paramsApi.restoreParamFrames(

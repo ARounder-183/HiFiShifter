@@ -437,6 +437,20 @@ export interface LiveEditOverride {
 export interface LiveProjectionCache {
     key: string;
     bufferVersion: number;
+    /**
+     * 投影所依据的**基底数组身份**（`window.edit`）。
+     *
+     * 【为什么必须是键的一部分】投影 = 基底 + 缓冲覆盖。只按窗口键与缓冲版本
+     * 缓存时，"缓冲没动、基底换了"会命中旧值：同一窗口重取（`paramsEpoch` /
+     * 提交后刷新 / 撤销）时 `window.key` 不变，而 `window.edit` 是**新数组**。
+     * 还原笔画正是这种形状（它从不写缓冲 ⇒ 版本恒为 1），于是后端已经还原成功、
+     * 屏幕上却停在旧曲线，直到滚动 / 切参数换了窗口键才刷新。
+     *
+     * 【为什么用身份而不是深比较】每次取数都会换数组（`usePianoRollData` 的
+     * `setParamView` 新建 `edit`），引用比较既准确又零成本；深比较会把这个
+     * 几何重建热路径（一次数万次调用）拖垮。
+     */
+    base: readonly number[];
     values: number[];
 }
 
@@ -465,13 +479,21 @@ export function projectLiveEdit(live: LiveEditOverride, window: LiveProjectionWi
     if (
         cached !== null &&
         cached.key === window.key &&
-        cached.bufferVersion === live.buffer.version
+        cached.bufferVersion === live.buffer.version &&
+        cached.base === window.edit
     ) {
         return cached.values;
     }
+    // 复用输出数组只在**同一窗口**下成立（长度相同、`project` 会逐元素覆盖）；
+    // 基底换了也照样复用，省一次分配，不影响正确性。
     const reuse = cached !== null && cached.key === window.key ? cached.values : undefined;
     const values = live.buffer.project(window.edit, window.startFrame, window.stride, reuse);
-    live.cache = { key: window.key, bufferVersion: live.buffer.version, values };
+    live.cache = {
+        key: window.key,
+        bufferVersion: live.buffer.version,
+        base: window.edit,
+        values,
+    };
     return values;
 }
 

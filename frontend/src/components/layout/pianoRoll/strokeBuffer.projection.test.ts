@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createStrokeBuffer } from "./strokeBuffer";
+import { createLiveEditOverride, createStrokeBuffer, projectLiveEdit } from "./strokeBuffer";
 import type { StrokeBuffer } from "./strokeBuffer";
 
 /**
@@ -112,5 +112,36 @@ describe("StrokeBuffer.project", () => {
                 referenceProject(buffer, base, startFrame, stride),
             );
         }
+    });
+});
+
+describe("projectLiveEdit：投影缓存", () => {
+    /**
+     * 还原笔画从不写缓冲（版本号恒为 1），而提交后同一窗口会换一份 `pv.edit`。
+     * 缓存键若只看"窗口 + 缓冲版本"，这里会返回旧投影 —— 用户看到的正是
+     * "后端已经还原、参数线却停在旧值，直到滚动一下才刷新"。
+     */
+    it("re-projects when only the base array changes", () => {
+        const live = createLiveEditOverride("v2|t|volume", 1);
+        const before = [0.8, 0.8, 0.8, 0.8];
+        const windowBefore = {
+            key: "v2|t|volume|0|4|1",
+            edit: before,
+            startFrame: 0,
+            stride: 1,
+        };
+        expect(projectLiveEdit(live, windowBefore)).toEqual(before);
+
+        const after = [0.5, 0.5, 0.5, 0.5];
+        const windowAfter = { ...windowBefore, edit: after };
+        expect(projectLiveEdit(live, windowAfter)).toEqual(after);
+    });
+
+    it("reuses the same array for an unchanged window and base", () => {
+        const live = createLiveEditOverride("v2|t|volume", 1);
+        const edit = [0.8, 0.8, 0.8];
+        const window = { key: "v2|t|volume|0|3|1", edit, startFrame: 0, stride: 1 };
+        const first = projectLiveEdit(live, window);
+        expect(projectLiveEdit(live, window)).toBe(first);
     });
 });

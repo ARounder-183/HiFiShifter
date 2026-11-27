@@ -15,6 +15,7 @@ vi.mock("../../../services/api", () => ({
     },
 }));
 
+import { projectLiveEdit } from "./strokeBuffer";
 import { useLiveParamEditing } from "./useLiveParamEditing";
 import type { ParamViewSegment } from "./types";
 
@@ -195,18 +196,39 @@ describe("commitStroke：分段与撤销", () => {
 });
 
 describe("commitStroke：还原笔", () => {
-    it("erases the drawn frames and asks the backend to restore them", async () => {
-        const pv = view("v2|track|volume|0|10|1", 0, new Array<number>(10).fill(0.5));
+    /** orig ≠ edit：用户已经画过这一段，右键要把它还原回原始值。 */
+    function drawnView(): ParamViewSegment {
+        return {
+            key: "v2|track|volume|0|10|1",
+            framePeriodMs: 5,
+            startFrame: 0,
+            stride: 1,
+            referenceKind: "source_curve",
+            orig: new Array<number>(10).fill(0.5),
+            edit: new Array<number>(10).fill(1.5),
+        };
+    }
+
+    it("previews the original values and keeps them as the placeholder", async () => {
+        const pv = drawnView();
         const h = await harness(pv);
 
         await act(async () => {
-            h.getLive().applyDenseToLiveEdit(pv, 5, [1.5, 1.5, 1.5, 1.5, 1.5], 5, 9, "draw");
+            h.getLive().applyDenseToLiveEdit(pv, 5, null, 5, 9, "restore");
         });
+
+        // 拖拽中：预览必须是**原始值**（0.5），而不是已提交值（1.5）—— 后者正是
+        // "右键拖拽完全看不到预览"的根源（erase 让这些帧回到基底）。
+        const live = h.getLive().liveEditOverrideRef.current;
+        expect(live).not.toBeNull();
+        const projected = live === null ? [] : Array.from(projectLiveEdit(live, pv));
+        expect(projected).toEqual([1.5, 1.5, 1.5, 1.5, 1.5, 0.5, 0.5, 0.5, 0.5, 0.5]);
+
         await act(async () => {
             await h.getLive().commitStroke(
                 [
-                    { frame: 5, value: 1.5 },
-                    { frame: 9, value: 1.5 },
+                    { frame: 5, value: 0.5 },
+                    { frame: 9, value: 0.5 },
                 ],
                 "restore",
             );
@@ -214,7 +236,34 @@ describe("commitStroke：还原笔", () => {
 
         expect(restoreParamFrames).toHaveBeenCalledWith("track", "volume", 5, 5, true);
         expect(setParamFrames).not.toHaveBeenCalled();
-        expect(h.getLive().liveEditOverrideRef.current?.buffer.frameCount).toBe(0);
+        // 松手后占位保留 orig（不是空缓冲）：空占位会让线先跳回 1.5，再等一次 IPC。
+        expect(h.getLive().liveEditOverrideRef.current?.buffer.frameCount).toBe(5);
+        expect(h.getLive().liveEditOverrideRef.current?.committed).toBe(true);
+
+        // 快照带回还原后的值 ⇒ 占位无损退场。
+        const caughtUp: ParamViewSegment = { ...pv, edit: pv.orig.slice() };
+        expect(h.getLive().clearCommittedLiveEditOverrideIfCaughtUp(caughtUp)).toBe(true);
+    });
+
+    it("fills frames the gesture skipped so the placeholder covers the committed range", async () => {
+        const pv = drawnView();
+        const h = await harness(pv);
+
+        // 手势只碰了第 5 帧（快速拖拽丢事件），提交范围却是 5..9。
+        await act(async () => {
+            h.getLive().applyDenseToLiveEdit(pv, 5, null, 5, 5, "restore");
+        });
+        await act(async () => {
+            await h.getLive().commitStroke(
+                [
+                    { frame: 5, value: 0.5 },
+                    { frame: 9, value: 0.5 },
+                ],
+                "restore",
+            );
+        });
+
+        expect(h.getLive().liveEditOverrideRef.current?.buffer.frameCount).toBe(5);
     });
 });
 
