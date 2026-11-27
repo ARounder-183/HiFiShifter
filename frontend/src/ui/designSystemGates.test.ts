@@ -1142,6 +1142,10 @@ describe("上下文菜单共用同一个样式模型", () => {
          * 这类字面量在样式表里不会被"调色板门禁"（那条只看 Tailwind 类）拦下。
          * 这里补上菜单这一块：壳与项的色值、字号、圆角必须取 `var(--qt-*)`，
          * 否则用户在外观设置里换主题/圆角时菜单不跟随。
+         *
+         * 【`background-image` 也算】滚动提示行的渐变是 `linear-gradient(` 里写
+         * `var(--qt-window)` 画出来的。它一旦被写成字面色，深色主题下提示行会变成
+         * 一条浅色条 —— 而那正是"内容溶进边缘"这个语法的全部内容。
          */
         const offenders: string[] = [];
         for (const block of cssBlocks(readFileSync(TOKEN_CSS, "utf8"))) {
@@ -1151,7 +1155,7 @@ describe("上下文菜单共用同一个样式模型", () => {
                 if (!text) continue;
                 const property = text.slice(0, text.indexOf(":")).trim();
                 if (
-                    !/^(font-size|border-radius|color|background|background-color|box-shadow|border|border-color)$/.test(
+                    !/^(font-size|border-radius|color|background|background-color|background-image|box-shadow|border|border-color)$/.test(
                         property,
                     )
                 ) {

@@ -94,3 +94,83 @@ test("不可滚的壳里，提示行不会被点亮", async () => {
         expect(hint.getAttribute("data-visible")).toBeNull();
     }
 });
+
+/*
+ * 按下期间冻结提示行可见性。
+ *
+ * 【为什么这条必须有】提示行滚到尽头会隐藏（data-visible 被清掉 → pointer-events:
+ * none）。若手指还按着，元素变成不可命中会让 pointerup 落到别处 —— 于是"按住快滚
+ * 到底"会留下一个永远收不到抬起的按下态，可见性从此**永久冻结**。
+ *
+ * 【怎么在没有布局的环境里测】jsdom 的 clientHeight / scrollHeight 恒为 0，这里
+ * 直接把三个布局数字钉在壳上（scrollHeight 300 / clientHeight 100 → 可滚 200），
+ * 然后手动派发 scroll 事件驱动判据。
+ */
+test("按下期间滚到边界不清提示行，抬起后补写", async () => {
+    const container = await render(
+        /*
+         * 【为什么要写内联 overflowY】用例不加载 index.css，jsdom 的
+         * getComputedStyle 对未声明的属性返回空串 —— 而"这张菜单可不可滚"的判据
+         * 正是 overflow-y ∈ {auto, scroll}。不声明它，MenuScrollScope 会认为找不到
+         * 滚动容器而整段关闭（那也正是 --no-scroll 壳的行为）。
+         */
+        <div className="hs-menu" style={{ overflowY: "auto" }}>
+            <MenuScrollScope>content</MenuScrollScope>
+        </div>,
+    );
+    const shell = container.querySelector<HTMLElement>(".hs-menu")!;
+    const down = container.querySelector<HTMLElement>(".hs-menu__scroll-hint--down")!;
+
+    Object.defineProperty(shell, "scrollHeight", { configurable: true, value: 300 });
+    Object.defineProperty(shell, "clientHeight", { configurable: true, value: 100 });
+    Object.defineProperty(shell, "scrollTop", {
+        configurable: true,
+        writable: true,
+        value: 0,
+    });
+
+    const fireScroll = async () => {
+        await act(async () => {
+            shell.dispatchEvent(new Event("scroll"));
+        });
+    };
+
+    // 在顶端：只有向下提示。
+    await fireScroll();
+    expect(down.getAttribute("data-visible")).toBe("1");
+
+    // 按下（手指按住向下提示行）。
+    await act(async () => {
+        down.dispatchEvent(
+            new PointerEvent("pointerdown", {
+                bubbles: true,
+                cancelable: true,
+                pointerType: "touch",
+                pointerId: 1,
+                isPrimary: true,
+            }),
+        );
+    });
+
+    // 滚到尽头：判据变了，但按下期间**不许**把可见性写掉。
+    shell.scrollTop = 200;
+    await fireScroll();
+    expect(
+        down.getAttribute("data-visible"),
+        "按下期间提示行不能隐藏 —— 隐藏会让 pointerup 落到别处",
+    ).toBe("1");
+
+    // 抬起：补写一次，提示行这才消失。
+    await act(async () => {
+        down.dispatchEvent(
+            new PointerEvent("pointerup", {
+                bubbles: true,
+                pointerType: "touch",
+                pointerId: 1,
+                isPrimary: true,
+            }),
+        );
+    });
+    await fireScroll();
+    expect(down.getAttribute("data-visible")).toBeNull();
+});
