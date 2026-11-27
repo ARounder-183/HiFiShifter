@@ -191,6 +191,25 @@ function reachableLevel(target: number, vol: number, base: number, fade: number)
 }
 
 /**
+ * 这一帧是否应当**参与**上界（levelCeilingOverWindow）。
+ *
+ * 【为什么要单独成函数】上界有两条实现（查表 buildLut 的 level 表、未命中时的
+ * 逐帧枚举），判据必须逐字相同 —— 分叉会让"钳不钳"随查表命中与否跳变，正是既有
+ * 注释里反复警告的那类缺陷。
+ *
+ * 【为什么"目标 ≤ 0 且基线未知"要跳过】dyn_orig 的 0 同时表示"这一帧没有内容"
+ * 与"这一帧的内容还没被分析"（后端 dyn_orig_level_at 把两者折叠成同一个 0）。
+ * 后端出口把"未画"的 DYN 帧物化成该帧基线，因此**基线未知时目标也是 0** —— 那是
+ * "没有数据"的占位，不是用户画的静音。让它参与上界会把整列钳成零高度（看起来像
+ * 根本没渲染）。用户**真的**把目标画成 0（基线已知）时仍然贡献 0，钳制不变。
+ */
+function frameContributesToCeiling(target: number | null, base: number | null): boolean {
+    if (target === null) return false;
+    if (!(target > 0) && !(base !== null && base > 0)) return false;
+    return true;
+}
+
+/**
  * 参数编辑器波形的**统一幅度映射**：把源波形画成应用响度自动化之后的可听结果。
  *
  * 【语义】`映射(value, gain, t) = value × gain × volume(t) × dynGain(t)`，其中
@@ -375,6 +394,16 @@ export function makeLoudnessAmplitudeMap(
             );
             base = rawBase === null ? null : rawBase * baseScale;
             fade = contentFadeAt(baseFrame, baseScale);
+            // 【0 不是"无内容"的证据】dyn_orig 的 0 同时表示"这一帧没有内容"与
+            // "这一帧的内容还没被分析"（后端 dyn_orig_level_at 把两者折叠成同一个
+            // 0）。"有峰值却基线为 0"只可能来自后者，因此 0 一律按"基线未知"处理：
+            // 动态增益恒 1、不施加无内容淡出。真无内容的帧峰值本来就是 0，乘 1 与
+            // 乘 0 在屏幕上看不出区别；而按 0 处理会把整段尚未分析的波形乘成空白
+            //（用户报告"导入后参数编辑器波形晚于 Clip 波形"）。
+            if (base !== null && !(base > 0)) {
+                base = null;
+                fade = 1;
+            }
 
             let liveTarget: number | null = null;
             if (liveDyn !== null && liveDyn.values.length > 0) {
@@ -623,8 +652,11 @@ export function makeLoudnessAmplitudeMap(
             lutContentFade[i] = samples.fade;
 
             // level 表：复刻 levelCeilingOverWindow 逐帧枚举的三分支语义
-            //（目标取不到 = 该帧跳过；乘积非有限 = 整体失效）。
-            if (target === null) {
+            //（目标取不到 / 目标≤0 且基线未知 = 该帧跳过；乘积非有限 = 整体失效）。
+            // 判据与逐帧枚举共用 frameContributesToCeiling，两条路径不可能分叉。
+            // 显式的 target === null 分支不只是重复判据：它把 target 收窄成 number，
+            // 供下面的 reachableLevel 使用（辅助函数只回答"参不参与"，不做类型收窄）。
+            if (target === null || !frameContributesToCeiling(target, base)) {
                 lutLevelKind[i] = LUT_LEVEL_SKIP;
                 lutLevel[i] = 0;
             } else {
@@ -854,10 +886,12 @@ export function makeLoudnessAmplitudeMap(
         const liveDyn = live.dyn();
         for (let f = first; f <= last; f += 1) {
             const samples = resolveFrame(w, f, liveVolume, liveDyn);
-            // 目标电平（哨兵已在后端出口解析成原声基线）；`≤0` = 画静音。
-            if (samples.target === null) continue;
+            // 目标电平（哨兵已在后端出口解析成原声基线）；`≤0` = 画静音 —— 但
+            // "基线未知时的 0"只是没有数据的占位，跳过（判据见 frameContributesToCeiling）。
+            const target = samples.target;
+            if (target === null || !frameContributesToCeiling(target, samples.base)) continue;
             const level = reachableLevel(
-                samples.target,
+                target,
                 samples.vol,
                 samples.base ?? Number.NaN,
                 samples.fade,
