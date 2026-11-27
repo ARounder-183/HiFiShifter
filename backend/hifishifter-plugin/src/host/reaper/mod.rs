@@ -402,6 +402,13 @@ impl NativeHost {
             media_import: self.can_import_audio() && !take_fx,
             track_create: self.can_create_audio_track() && !take_fx,
             item_clipboard: self.can_clipboard_items() && !take_fx,
+            // Item / take 增益写回走与几何相同的宿主写 API；没有写能力时
+            // 前端必须把旋钮置灰，而不是显示一个点了会失败的 0 dB。
+            clip_item_gain: self.can_edit_clips(),
+            clip_take_gain: self.can_edit_clips(),
+            // REAPER 轨道 D_VOL 的读写尚未接入原生适配器：这一位诚实地
+            // 报 false，避免插件推子看起来能调、实际被宿主再乘一遍。
+            track_volume: false,
             clip_reverse: self.can_reverse_clips(),
             take_pitch_bridge: self.can_bridge_take_pitch(),
             fade_axes: self.fade_axes_v2.is_some(),
@@ -1462,10 +1469,17 @@ impl NativeHost {
         let duration_sec = iv(c"D_LENGTH")?;
         let snap_offset_sec = iv(c"D_SNAPOFFSET")?;
         let source_start_sec = tv(c"D_STARTOFFS")?;
-        let item_gain = iv(c"D_VOL")?;
+        let mut item_gain = iv(c"D_VOL")?;
         let take_gain = tv(c"D_VOL")?;
+        // 负 item volume 是否能表达极性尚未在真机探针确认；在确认前不能因为
+        // 一个负值把整条 item 从清单里丢掉（那会让片段凭空消失）。按静音
+        // 降级并留下诊断，等探针结论再决定是否保号。
         if item_gain < 0. {
-            return Err("invalid REAPER item volume".into());
+            crate::log_line(&format!(
+                "[host] negative item D_VOL ({item_gain}) treated as silence; item {}",
+                item_id
+            ));
+            item_gain = 0.0;
         }
         let play_rate_signed = tv(c"D_PLAYRATE")?;
         if duration_sec <= 0. {

@@ -114,6 +114,9 @@ pub(crate) struct RenderInput {
     /// "能不能渲"。窗口之外的帧在快照里**不声明覆盖**，由播放侧按既有规则退回
     /// 宿主原声（见 `PlaybackSnapshot::covered`）。
     pub window: Option<(f64, f64)>,
+    /// 增益所有权：ARA 的 item/take/track 全由宿主施加（HostOwned）；
+    /// Capture 的时间线属于插件自己（AppOwned）。
+    pub gain_scope: hifishifter_kernel::gain::GainScope,
 }
 /// 输出帧域的"这些帧真的属于我们"覆盖区间（升序、不重叠，已夹进快照窗口）。
 ///
@@ -653,6 +656,10 @@ impl RenderInput {
                 cancel_flag: Some(cancel.clone()),
                 progress: progress.clone(),
                 cache_stats: None,
+                // ARA：三层增益都由宿主施加；Capture：时间线属于插件自己，
+                // 必须由本进程施加三层。把这两个形态混成一个常量就会让
+                // Capture 的推子/Clip 增益“看得见、听不见”。
+                gain_scope: self.gain_scope,
             };
             render_mixdown_with_pcm(view, options, sources)
         };
@@ -1013,6 +1020,7 @@ mod tests {
             project_sample_rate: None,
             clip_parameters: BTreeMap::from([("clip".into(), params)]),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
         let neural_before = hifishifter_kernel::nsf_hifigan_onnx::inference_runs();
         let separation_before = hifishifter_kernel::hnsep_onnx::separation_cache_stats().1;
@@ -1108,6 +1116,7 @@ mod tests {
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
         let before = blocks(&input, Arc::new(AtomicBool::new(false)));
         let mut other = input.timeline.as_ref().unwrap().tracks[0].clone();
@@ -1158,6 +1167,7 @@ mod tests {
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
         let snapshots = blocks(&input, Arc::new(AtomicBool::new(false)));
         // 【只渲一档】两个发布器共享同一份 PCM（见 `native_sample_rate`）：工程率缺席
@@ -1250,6 +1260,7 @@ mod tests {
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
         let budget = super::super::budget::global_budget();
         let baseline = budget.used();
@@ -1299,6 +1310,7 @@ mod tests {
             project_sample_rate: Some(44100.0),
             clip_parameters: BTreeMap::new(),
             window: Some((2.0, 3.0)),
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
         let snapshots = blocks(&input, Arc::new(AtomicBool::new(false)));
         assert_eq!(snapshots.len(), 2);
@@ -1372,6 +1384,7 @@ mod tests {
             project_sample_rate: None,
             clip_parameters: BTreeMap::from([("clip".into(), parameters)]),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
         let before = hifishifter_kernel::hnsep_onnx::separation_cache_stats();
         let began = std::time::Instant::now();
@@ -1482,6 +1495,7 @@ mod tests {
                 ("b".into(), params(0.25)),
             ]),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
         let output = blocks(&input, Arc::new(AtomicBool::new(false)));
         for (actual, want) in output[0].left.iter().zip([0.075_f32, 0.15, 0.225, 0.3]) {
@@ -1521,6 +1535,7 @@ mod tests {
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
         let output = blocks(&input, Arc::new(AtomicBool::new(false)));
         assert_eq!(output[0].left.len(), 44100);
@@ -1616,6 +1631,7 @@ mod tests {
                 project_sample_rate: None,
                 clip_parameters: BTreeMap::new(),
                 window: None,
+                gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
             };
             let output = blocks(&input, Arc::new(AtomicBool::new(false)));
             for snapshot in output {
@@ -1650,6 +1666,7 @@ mod tests {
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
         sources.insert(
             "fixture".into(),
@@ -1720,6 +1737,7 @@ mod tests {
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
         let cancel = Arc::new(AtomicBool::new(false));
         let sources = input.interleaved_sources(&timeline).unwrap();
@@ -1796,6 +1814,7 @@ mod tests {
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
         assert!(
             matches!(
@@ -1819,6 +1838,7 @@ mod tests {
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
         assert!(matches!(
             input.render(Arc::new(AtomicBool::new(false))).unwrap(),
@@ -1841,6 +1861,7 @@ mod tests {
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
         let error = match input.render(Arc::new(AtomicBool::new(false))) {
             Err(error) => error,

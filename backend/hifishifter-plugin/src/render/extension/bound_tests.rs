@@ -1252,9 +1252,9 @@ fn cold_restores_are_merged_document_wide_before_background_jobs_start() {
             owner.snapshots[0].copy_block(0, 44100, &mut crate::audio_abi::output_bus(&mut bus), 4)
         });
         for (actual, expected) in left.iter().zip(if index == 0 {
-            [0.05, 0.1, 0.15, 0.2]
+            [0.1, 0.2, 0.3, 0.4]
         } else {
-            [0.025, 0.05, 0.075, 0.1]
+            [0.1, 0.2, 0.3, 0.4]
         }) {
             assert!((*actual - expected).abs() < 1e-6);
         }

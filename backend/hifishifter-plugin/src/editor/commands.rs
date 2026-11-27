@@ -1022,8 +1022,11 @@ fn schedule_dyn_orig_for_roots<'a>(
     unique.sort_unstable();
     unique.dedup();
     for root in unique {
-        let _ =
-            hifishifter_kernel::pitch_analysis::maybe_schedule_dyn_orig(&session.timeline, root);
+        let _ = hifishifter_kernel::pitch_analysis::maybe_schedule_dyn_orig(
+            &session.timeline,
+            root,
+            hifishifter_kernel::gain::GainScope::HostOwned,
+        );
     }
 }
 

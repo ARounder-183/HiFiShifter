@@ -3352,7 +3352,9 @@ impl DocumentSession {
         }
         let (dyn_curve, _) =
             hifishifter_kernel::pitch_analysis::dyn_analysis::assemble_dyn_orig_from_cache(
-                timeline, root,
+                timeline,
+                root,
+                hifishifter_kernel::gain::GainScope::HostOwned,
             );
         if dyn_curve.iter().any(|value| *value > 0.0) {
             rebuilt.dyn_orig = dyn_curve;

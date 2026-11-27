@@ -239,6 +239,7 @@ impl ExtensionOwner {
             // 那个问题（见 `render/input.rs::mix_interleaved` 的第一支）。
             clip_parameters: std::collections::BTreeMap::new(),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
         Ok(Some((revision, edit, with_curves, input)))
     }

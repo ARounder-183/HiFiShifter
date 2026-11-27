@@ -1364,7 +1364,13 @@ fn handle_default_output_device_changed(
 
     // 1) 预构建快照（尚未发布）。
     let new_snapshot = if let Some(timeline) = s.last_timeline.as_ref() {
-        build_snapshot(timeline, new_sr, s.cache, s.stretch_cache)
+        build_snapshot(
+            timeline,
+            new_sr,
+            s.cache,
+            s.stretch_cache,
+            crate::gain::GainScope::AppOwned,
+        )
     } else if let Some((path, _offset, _target)) = s.last_play_file.as_ref() {
         // 【偏移不能重复累加】`handle_play_file` 把 `base_frames` 设成
         // `offset * sr`，因此 `audible_sec` 里已经包含 offset；这里再 `+offset`
@@ -1483,7 +1489,13 @@ fn handle_rendered_clips_changed(s: &mut EngineWorkerState) {
     let Some(tl) = s.last_timeline.clone() else {
         return;
     };
-    let snap = build_snapshot(&tl, s.sr, s.cache, s.stretch_cache);
+    let snap = build_snapshot(
+        &tl,
+        s.sr,
+        s.cache,
+        s.stretch_cache,
+        crate::gain::GainScope::AppOwned,
+    );
     s.duration_frames
         .store(snap.duration_frames, Ordering::Relaxed);
     s.retired_snapshots.retire(s.snapshot.swap(Arc::new(snap)));
@@ -1860,7 +1872,11 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
             .into_iter()
             .collect();
         for root in roots_using_dyn {
-            if !crate::pitch_analysis::assemble_dyn_orig_for_engine(&mut tl, &root) {
+            if !crate::pitch_analysis::assemble_dyn_orig_for_engine(
+                &mut tl,
+                &root,
+                crate::gain::GainScope::AppOwned,
+            ) {
                 dyn_needs_analysis = true;
             }
         }
@@ -2025,7 +2041,13 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         }
     }
 
-    let snap = build_snapshot(&tl, s.sr, s.cache, s.stretch_cache);
+    let snap = build_snapshot(
+        &tl,
+        s.sr,
+        s.cache,
+        s.stretch_cache,
+        crate::gain::GainScope::AppOwned,
+    );
     s.duration_frames
         .store(snap.duration_frames, Ordering::Relaxed);
     s.retired_snapshots.retire(s.snapshot.swap(Arc::new(snap)));
@@ -2066,7 +2088,13 @@ fn handle_stretch_ready(s: &mut EngineWorkerState, key: StretchKey) {
     }
 
     if let Some(tl) = s.last_timeline.as_ref() {
-        let snap = build_snapshot(tl, s.sr, s.cache, s.stretch_cache);
+        let snap = build_snapshot(
+            tl,
+            s.sr,
+            s.cache,
+            s.stretch_cache,
+            crate::gain::GainScope::AppOwned,
+        );
         s.duration_frames
             .store(snap.duration_frames, Ordering::Relaxed);
         s.retired_snapshots.retire(s.snapshot.swap(Arc::new(snap)));
@@ -2111,7 +2139,13 @@ fn handle_clip_pitch_ready(s: &mut EngineWorkerState, clip_id: String) {
 
     debug_eprintln!("[engine] Building snapshot...");
     if let Some(tl) = s.last_timeline.as_ref() {
-        let snap = build_snapshot(tl, s.sr, s.cache, s.stretch_cache);
+        let snap = build_snapshot(
+            tl,
+            s.sr,
+            s.cache,
+            s.stretch_cache,
+            crate::gain::GainScope::AppOwned,
+        );
         debug_eprintln!(
             "[engine] Snapshot built successfully, duration_frames={}",
             snap.duration_frames
@@ -2212,7 +2246,13 @@ fn handle_audio_ready(s: &mut EngineWorkerState, _key: super::types::AudioKey) {
             s.stretch_cache,
             s.app_handle.as_ref(),
         );
-        let snap = build_snapshot(tl, s.sr, s.cache, s.stretch_cache);
+        let snap = build_snapshot(
+            tl,
+            s.sr,
+            s.cache,
+            s.stretch_cache,
+            crate::gain::GainScope::AppOwned,
+        );
         s.duration_frames
             .store(snap.duration_frames, Ordering::Relaxed);
         s.retired_snapshots.retire(s.snapshot.swap(Arc::new(snap)));

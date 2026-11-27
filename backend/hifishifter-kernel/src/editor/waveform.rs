@@ -105,6 +105,7 @@ pub fn get_root_mix_waveform_peaks_segment(
             cancel_flag: None,
             progress: None,
             cache_stats: None,
+            gain_scope: crate::gain::GainScope::AppOwned,
         };
 
         let (_sr, ch, _dur, mix) = match crate::mixdown::render_mixdown_interleaved(&tl, opts) {
@@ -250,6 +251,7 @@ pub fn get_track_mix_waveform_peaks_segment(
             cancel_flag: None,
             progress: None,
             cache_stats: None,
+            gain_scope: crate::gain::GainScope::AppOwned,
         };
 
         let (_sr, ch, _dur, mix) = match crate::mixdown::render_mixdown_interleaved(&tl, opts) {

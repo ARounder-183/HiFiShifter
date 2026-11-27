@@ -133,3 +133,78 @@ fn the_audible_gain_is_the_product_of_both_layers() {
     let clip = timeline.clips.iter().find(|c| c.id == clip_id).unwrap();
     assert!((clip.audible_gain() - 6.0).abs() < 1e-5);
 }
+
+/// **不变量：normalize_takes 只物化投影，绝不在层间搬增益。**
+#[test]
+fn normalize_takes_never_moves_gain_between_layers() {
+    let (mut timeline, clip_id) = timeline_with_clip();
+    {
+        let clip = timeline.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+        clip.clip_gain = 1.0;
+        clip.gain = 0.5;
+        clip.sync_take_from_flat();
+        clip.normalize_takes();
+    }
+    let clip = timeline.clips.iter().find(|c| c.id == clip_id).unwrap();
+    assert!((clip.clip_gain - 1.0).abs() < 1e-6, "item 层不得被搬走");
+    assert!(
+        (clip.takes[0].gain - 0.5).abs() < 1e-6,
+        "take 层必须留在原地"
+    );
+    assert!((clip.gain - 0.5).abs() < 1e-6, "扁平投影随 take");
+}
+
+/// **回归：反相 take 不是静音。**
+#[test]
+fn a_negative_take_gain_is_not_silence() {
+    let (mut timeline, clip_id) = timeline_with_clip();
+    timeline.patch_clip_state(
+        &clip_id,
+        ClipStatePatch {
+            take_gain: Some(-0.25),
+            ..Default::default()
+        },
+    );
+    let clip = timeline.clips.iter().find(|c| c.id == clip_id).unwrap();
+    assert!((clip.take_gain() + 0.25).abs() < 1e-6);
+    assert!((clip.audible_gain() + 0.25).abs() < 1e-6);
+}
+
+/// **跨 Clip 聚合：旧 item × 旧 take 折进新 take，新 item 保持 0 dB。**
+#[test]
+fn packed_takes_fold_item_gain_and_mute() {
+    let (mut timeline, first) = timeline_with_clip();
+    let track_id = timeline.tracks[0].id.clone();
+    let second = timeline.add_clip(
+        Some(track_id),
+        Some("H".into()),
+        Some(0.0),
+        Some(1.0),
+        Some("C:/audio/h.wav".into()),
+    );
+    for (id, take_gain, item_gain, muted) in [
+        (&first, 0.5_f32, 2.0_f32, false),
+        (&second, 0.5_f32, 2.0_f32, true),
+    ] {
+        let clip = timeline.clips.iter_mut().find(|c| c.id == *id).unwrap();
+        clip.gain = take_gain;
+        clip.clip_gain = item_gain;
+        clip.muted = muted;
+        clip.sync_take_from_flat();
+        clip.normalize_takes();
+    }
+    let packed_id = timeline
+        .pack_clips_into_takes(&[first, second])
+        .expect("pack succeeds");
+    let packed = timeline.clips.iter().find(|c| c.id == packed_id).unwrap();
+    assert!(
+        (packed.clip_gain - 1.0).abs() < 1e-6,
+        "新容器 item 层为 0 dB"
+    );
+    assert_eq!(packed.takes.len(), 2);
+    assert!(
+        (packed.takes[0].gain - 1.0).abs() < 1e-6,
+        "2.0 × 0.5 折成 1.0"
+    );
+    assert!((packed.takes[1].gain - 0.0).abs() < 1e-6, "静音源折成静音");
+}

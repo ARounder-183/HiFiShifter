@@ -105,10 +105,9 @@ impl SynthConfig {
 ///
 /// v7：参数块改为“Take 源域编辑集 + 派生视图”。
 ///
-/// 【为什么直接升 v7 且不迁移】开发版从未分发给终端用户；旧的绝对帧块、
-/// 合并意图与切分/伸缩记录全部删除。旧工程里的这些字段被 serde 忽略，
-/// 块编辑从空集开始。工程版本不保留兼容分支。
-pub const CURRENT_PROJECT_FILE_VERSION: u32 = 7;
+/// v8：增益三层归一。v7 及更早的工程只有一个增益（存在 take 上），打开时
+/// 一次性提升到 item 层；v8 起 normalize_takes 不再做层间搬移。
+pub const CURRENT_PROJECT_FILE_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -229,6 +228,12 @@ pub fn read_project_file_version(bytes: &[u8]) -> Option<u32> {
 pub fn load_project_file(bytes: &[u8]) -> Result<ProjectFile, String> {
     // 先尝试 MessagePack（新格式）
     if let Ok(mut pf) = rmp_serde::from_slice::<ProjectFile>(bytes) {
+        if pf.version < 8 {
+            pf.timeline.sync_clip_takes_from_flat();
+            for clip in &mut pf.timeline.clips {
+                clip.migrate_legacy_gain_split();
+            }
+        }
         pf.timeline.normalize_clip_takes();
         pf.timeline.migrate_legacy_common_param_curves();
         pf.timeline.migrate_legacy_breath_separation(pf.version);
@@ -240,6 +245,12 @@ pub fn load_project_file(bytes: &[u8]) -> Result<ProjectFile, String> {
     serde_json::from_slice(bytes)
         .map_err(|e| format!("无法解析工程文件: {}", e))
         .map(|mut pf: ProjectFile| {
+            if pf.version < 8 {
+                pf.timeline.sync_clip_takes_from_flat();
+                for clip in &mut pf.timeline.clips {
+                    clip.migrate_legacy_gain_split();
+                }
+            }
             pf.timeline.normalize_clip_takes();
             pf.timeline.migrate_legacy_common_param_curves();
             pf.timeline.migrate_legacy_breath_separation(pf.version);
@@ -633,6 +644,13 @@ pub fn finalize_timeline_for_session(
     }
     // 上面的规范化改的是 active take 内存投影：先写回 Take 权威数据。
     tl.sync_clip_takes_from_flat();
+    // v8 一次性迁移：旧工程的“唯一那层增益”住在 take 上，而 v8 起旋钮编辑
+    // item 层。只在这里搬一次，normalize_takes / pack / duplicate 不再搬层。
+    if project_file_version < 8 {
+        for clip in &mut tl.clips {
+            clip.migrate_legacy_gain_split();
+        }
+    }
     // 再由 Take 物化回 Clip 投影（补齐 duration_frames / source_sample_rate /
     // 指纹 / 波形等被序列化省略的字段），并顺带完成旧 Fade 字段迁移。
     tl.normalize_clip_takes();
@@ -1039,5 +1057,47 @@ mod tests {
         }
         .normalized();
         assert_eq!(empty.notes, vec![0, 2, 4, 5, 7, 9, 11]);
+    }
+}
+
+#[cfg(test)]
+mod gain_migration_tests {
+    use super::*;
+    use crate::state::TimelineState;
+    use std::path::Path;
+
+    fn legacy_timeline() -> TimelineState {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("legacy".into()),
+            Some(0.0),
+            Some(1.0),
+            None,
+        );
+        let clip = tl.clips.iter_mut().find(|clip| clip.id == clip_id).unwrap();
+        clip.gain = 0.5;
+        clip.clip_gain = 1.0;
+        clip.sync_take_from_flat();
+        tl
+    }
+
+    #[test]
+    fn a_v7_project_moves_its_single_gain_to_the_item_layer_once() {
+        let (tl, _) = finalize_timeline_for_session(legacy_timeline(), Path::new("."), 7);
+        let clip = &tl.clips[0];
+        assert!((clip.clip_gain - 0.5).abs() < 1e-6);
+        assert!((clip.takes[0].gain - 1.0).abs() < 1e-6);
+        assert!((clip.gain - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_v8_project_keeps_take_gain_on_the_take_layer() {
+        let (tl, _) = finalize_timeline_for_session(legacy_timeline(), Path::new("."), 8);
+        let clip = &tl.clips[0];
+        assert!((clip.clip_gain - 1.0).abs() < 1e-6);
+        assert!((clip.takes[0].gain - 0.5).abs() < 1e-6);
+        assert!((clip.gain - 0.5).abs() < 1e-6);
     }
 }

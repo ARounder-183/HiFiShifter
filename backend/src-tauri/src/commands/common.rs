@@ -481,6 +481,7 @@ pub(crate) fn render_timeline_to_wav(
             cancel_flag: None,
             progress: None,
             cache_stats: None,
+            gain_scope: crate::gain::GainScope::AppOwned,
         },
     )
 }

@@ -468,7 +468,18 @@ pub fn host_geometry_projection(timeline: &TimelineState) -> serde_json::Value {
                 "source_end_sec": clip.source_end_sec,
                 "playback_rate": clip.playback_rate,
                 "clip_playback_rate": clip.clip_playback_rate,
+                // 三层分别入投影：裸 gain 是 active take 投影，clip_gain 是 item 层，
+                // takes[].gain 是每条 take 自己的值。只比一层会漏掉另外两层的宿主改动。
                 "gain": clip.gain,
+                "clip_gain": clip.clip_gain,
+                "takes": clip
+                    .takes
+                    .iter()
+                    .map(|take| serde_json::json!({
+                        "id": take.id,
+                        "gain": take.gain,
+                    }))
+                    .collect::<Vec<_>>(),
                 "muted": clip.muted,
                 "snap_offset_sec": clip.snap_offset_sec,
                 "fade_in_sec": clip.fade_in_sec,

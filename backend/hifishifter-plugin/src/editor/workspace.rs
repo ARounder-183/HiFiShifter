@@ -17,22 +17,14 @@ use std::sync::atomic::Ordering;
 /// 读取失败 / 超期）把状态永久钉在"进行中"。
 pub(crate) const PENDING_MEDIA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// 把宿主的 **item 增益**投影成 DSP 别名（`clip.gain`）。
+/// 把宿主的 **item 增益**投影到 item 层（`clip.clip_gain`）。
 ///
-/// 【契约：本函数**只**写 clip 层，绝不写 `clip_gain`，也绝不写 take 层】宿主已经在
-/// 这个 item 上施加过 `D_VOL` 了，插件再乘一次就等于把同一个旋钮乘两遍
-/// （`Clip::audible_gain() = clip_gain × gain`，见 `state/model.rs`）。而"用户在时间轴
-/// 旋钮上看到的那个数"是 `clip_gain` —— 它在**载荷**里的唯一写者是下面的
-/// `decorate_item_gain`。
-///
-/// 【为什么不许顺手写 take 层】take 增益是**另一个旋钮**（REAPER 的 take 属性面板），
-/// 它的权威值是 `ClipTake::gain`。把 item 增益刷进每一条 take 有两个后果，现场都出现过：
-/// 用户在 take 属性里改过的音量在下一轮几何刷新时被静默抹掉；载荷的 `gain` /
-/// `takes[].gain` 永远是 item 层的副本 —— 于是回执拿"item 增益"去比"take 层期望值"，
-/// 只要 item 增益不是 1 就**必然**报分歧（用户复现的 +12 dB → 归零那两条互为镜像的
-/// `write echo diverged` 就是它喊出来的）。
+/// 【契约】只写 item 层，绝不写 `clip.gain`（active take 投影），也绝不写
+/// `takes[].gain`。宿主已经在这个 item 上施加过 `D_VOL`，插件再乘一次就是
+/// 把同一个旋钮乘两遍；而把 item 写进 take 投影会让下一次 `sync_take_from_flat`
+/// 把 take 层覆盖成 item 值，用户的 take 音量静默消失。
 fn display_item_gain(clip: &mut hifishifter_kernel::state::Clip, gain: f64) {
-    clip.gain = gain as f32;
+    clip.clip_gain = hifishifter_kernel::gain::clamp_gain(gain as f32);
 }
 
 /// 把宿主的**两层增益**各自投影到自己那一层。
@@ -352,16 +344,15 @@ fn sync_host_takes(
     clip.takes = rebuilt;
     clip.active_take_id = active;
     clip.normalize_takes();
-    // 【take 增益按**每一条 take 自己的** `D_VOL` 播种，且必须落在 `normalize_takes` 之后】
-    // 此前这里是 `take.gain = clip.gain` —— 而 `clip.gain` 是 item 层的 DSP 别名，
-    // 于是 take 层永远是 item 层的副本：用户在 REAPER 的 take 属性面板里改过音量，
-    // 下一轮几何刷新就把它抹掉（"载荷里的 take 音量"从此再也读不出真值）。
-    // 放在 normalize 之后是必需的：`migrate_gain_split` 会把"所有 take 增益相同、
-    // item 层仍是 1.0"判成**旧工程**，把那个值提升到 item 层并把 take 置 1 —— 那条
-    // 迁移是给独立 App 的老工程准备的，在插件里会把宿主的 take 音量搬进 item 层。
+    // 【take 增益按每一条 take 自己的 D_VOL 播种】放进 take 层，且保号；
+    // 绝不能再从 item 层复制。normalize_takes 自 v8 起不再搬层，因此这里
+    // 不会被“旧工程迁移”改写。
     for (take, host_take) in clip.takes.iter_mut().zip(item.takes.iter()) {
-        take.gain = host_take.geometry.take_gain as f32;
+        take.gain = hifishifter_kernel::gain::clamp_take_gain(host_take.geometry.take_gain as f32);
     }
+    // 逐 Take 播种的是权威值；再物化一次 active take 的投影，否则 `clip.gain`
+    // 仍停在 normalize_takes 之前的旧值，载荷与回执会拿它当 take 层期望。
+    clip.normalize_takes();
 }
 
 /// 文档级 clip id（无命名空间）→ 本回合**呈现**用的 id（带命名空间）。
@@ -506,13 +497,11 @@ pub(crate) struct WorkspaceScope {
 /// 把它做成字段表之后，「不在表里」就是「这一轮没有答案」，类型上无法被误读。
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct ClipFadeFields {
-    /// DSP 别名（`Clip::gain`），来自宿主 item 的 `D_VOL`。
+    /// Item 层增益（`Clip::clip_gain`），来自宿主 item 的 `D_VOL`。
     ///
-    /// 【它为什么在这张表里】它不是淡变，但它与淡变来自**同一次**宿主几何读数
-    /// （`display_item_gain`）。渲染路径（`workspace_snapshot`）不过
-    /// `present_host_inventory`，这份增益只有这一个来源；把它留在补丁里，两条
-    /// 路径才会拿到同一个值。
-    pub gain: f32,
+    /// 【它为什么在这张表里】它不是淡变，但它与淡变来自**同一次**宿主几何读数。
+    /// 把它留在补丁里，GUI 与渲染两条路径才会拿到同一个值。
+    pub item_gain: f32,
     pub snap_offset_sec: f64,
     pub fade_in_sec: f64,
     pub fade_out_sec: f64,
@@ -572,7 +561,7 @@ pub(crate) fn apply_fade_projection(
         let Some(fields) = projection.clips.get(id) else {
             continue;
         };
-        clip.gain = fields.gain;
+        clip.clip_gain = hifishifter_kernel::gain::clamp_gain(fields.item_gain);
         clip.snap_offset_sec = fields.snap_offset_sec;
         clip.fade_in_sec = fields.fade_in_sec;
         clip.fade_out_sec = fields.fade_out_sec;
@@ -2253,7 +2242,7 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
                 };
                 let geometry = bound.geometry;
                 let mut fields = ClipFadeFields {
-                    gain: geometry.item_gain as f32,
+                    item_gain: geometry.item_gain as f32,
                     snap_offset_sec: geometry.snap_offset_sec,
                     fade_in_sec: geometry.fade_in_sec,
                     fade_out_sec: geometry.fade_out_sec,
@@ -3289,46 +3278,9 @@ mod tests {
         assert_eq!(payload["takes"][0]["gain"], serde_json::json!(0.25));
     }
 
-    /// **回归：`display_item_gain` 只写 DSP 别名，绝不动 `clip_gain`。**
-    ///
-    /// 两处都写 `clip_gain` 会让 `Clip::audible_gain()`（= `clip_gain × gain`）变成
-    /// 平方 —— 用户听到的是"调 6 dB 实际变了 12 dB"。这条把乘积的不变性钉住：
-    /// 别名乘 item 之后必须恰好等于宿主施加的那一份。
+    /// **回归：`display_item_gain` 只写 item 层，绝不写 take 投影。**
     #[test]
-    fn the_dsp_gain_alias_never_rewrites_the_item_gain() {
-        let mut clip: hifishifter_kernel::state::Clip = serde_json::from_value(serde_json::json!({
-            "id": "c1",
-            "track_id": "t1",
-            "name": "c",
-            "start_sec": 0.0,
-            "length_sec": 1.0,
-            "clip_gain": 1.0,
-            "gain": 1.0,
-        }))
-        .unwrap();
-        let audible_before = clip.audible_gain();
-        display_item_gain(&mut clip, 1.7);
-        assert_eq!(
-            clip.clip_gain, 1.0,
-            "item 增益只属于载荷（decorate_item_gain），不属于内核状态"
-        );
-        assert!(
-            (clip.gain - 1.7).abs() < 1e-6,
-            "DSP 别名必须跟上宿主 item 增益"
-        );
-        assert!(
-            (clip.audible_gain() - audible_before * 1.7).abs() < 1e-6,
-            "可听增益必须恰好等于宿主那一份；再写一遍 clip_gain 就会平方"
-        );
-    }
-
-    /// **回归：item 别名不许改写 take 增益。**
-    ///
-    /// take 增益是另一个旋钮（REAPER take 属性面板），权威值在 `ClipTake::gain`。
-    /// 此前 `display_item_gain` 会把它刷成 item 增益 —— 用户在 take 属性里改的音量
-    /// 在下一轮几何刷新时被静默抹掉，且 `audible_gain` 里出现两层互相顶替。
-    #[test]
-    fn the_item_alias_never_rewrites_a_take_gain() {
+    fn display_item_gain_writes_only_the_item_layer() {
         let mut clip: hifishifter_kernel::state::Clip = serde_json::from_value(serde_json::json!({
             "id": "c1",
             "track_id": "t1",
@@ -3341,16 +3293,32 @@ mod tests {
         }))
         .unwrap();
         clip.normalize_takes();
-        let take_gain_before = clip.takes[0].gain;
-        display_item_gain(&mut clip, 4.0);
+        display_item_gain(&mut clip, 1.7);
+        assert!((clip.clip_gain - 1.7).abs() < 1e-6);
         assert!(
-            (clip.gain - 4.0).abs() < 1e-6,
-            "DSP 别名必须跟上宿主 item 增益"
+            (clip.gain - 0.5).abs() < 1e-6,
+            "clip.gain 是 take 投影，不能被 item 增益覆盖"
         );
-        assert_eq!(
-            clip.takes[0].gain, take_gain_before,
-            "take 层是另一个旋钮；别名不许顺手覆盖它"
-        );
+        assert!((clip.takes[0].gain - 0.5).abs() < 1e-6);
+    }
+
+    /// **回归：宿主 take 音量穿过一次 normalize 仍存活。**
+    #[test]
+    fn a_host_take_volume_survives_a_normalize_roundtrip() {
+        let mut clip: hifishifter_kernel::state::Clip = serde_json::from_value(serde_json::json!({
+            "id": "c1",
+            "track_id": "t1",
+            "name": "c",
+            "start_sec": 0.0,
+            "length_sec": 1.0,
+            "clip_gain": 2.0,
+            "gain": 1.0,
+            "takes": [{"id": "k1", "gain": 0.5}],
+        }))
+        .unwrap();
+        clip.normalize_takes();
+        assert!((clip.takes[0].gain - 0.5).abs() < 1e-6);
+        assert!((clip.clip_gain - 2.0).abs() < 1e-6);
     }
 
     #[test]
@@ -4787,7 +4755,7 @@ mod tests {
 
     fn host_fields(fade_in: f64) -> ClipFadeFields {
         ClipFadeFields {
-            gain: 1.0,
+            item_gain: 1.0,
             fade_in_sec: fade_in,
             ..ClipFadeFields::default()
         }

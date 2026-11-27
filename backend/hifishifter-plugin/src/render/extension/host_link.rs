@@ -176,6 +176,7 @@ impl ExtensionOwner {
                 project_sample_rate: Some(self.setup_sample_rate()).filter(|rate| *rate > 0.0),
                 clip_parameters,
                 window: None,
+                gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
             },
         ))
     }

@@ -244,6 +244,7 @@ pub(crate) fn build_snapshot(
     out_rate: u32,
     cache: &Arc<Mutex<ByteBudgetCache<(PathBuf, u32), ResampledStereo>>>,
     stretch_cache: &Arc<Mutex<ByteBudgetCache<StretchKey, ResampledStereo>>>,
+    gain_scope: crate::gain::GainScope,
 ) -> EngineSnapshot {
     let debug = hifishifter_kernel::log_policy::probes_enabled();
     let stretch_algorithm = crate::time_stretch::resolved_user_external_stretch_algorithm();
@@ -252,7 +253,12 @@ pub(crate) fn build_snapshot(
         .round()
         .max(0.0) as u64;
 
-    let track_gain = compute_track_gains(&timeline.tracks);
+    let mut track_gain = compute_track_gains(&timeline.tracks);
+    if gain_scope == crate::gain::GainScope::HostOwned {
+        for value in track_gain.values_mut() {
+            value.0 = 1.0;
+        }
+    }
     let tracks_by_id: HashMap<&str, &Track> =
         timeline.tracks.iter().map(|t| (t.id.as_str(), t)).collect();
     // `track_id -> root_track_id`：按 clip 的热循环里一次建表、全程 O(1) 查询
@@ -287,9 +293,10 @@ pub(crate) fn build_snapshot(
             continue;
         }
 
-        // 直接用刚才提出来的 track_gain_value
-        let gain = crate::gain::clamp_gain(clip.gain.max(0.0) * track_gain_value);
-        if gain <= 0.0 {
+        // 快照里存“已按 scope 预乘”的增益：AppOwned = item × take × track，
+        // HostOwned = 1.0（宿主已经施加三层）。负值是反相，只跳过真正的 0。
+        let gain = clip.render_gain(gain_scope) * track_gain_value;
+        if gain == 0.0 {
             continue;
         }
 
@@ -1273,7 +1280,13 @@ mod tests {
         let stretch_cache: Arc<Mutex<ByteBudgetCache<StretchKey, ResampledStereo>>> =
             Arc::new(Mutex::new(ByteBudgetCache::new(4, u64::MAX)));
 
-        let snap = build_snapshot(&tl, out_rate, &cache, &stretch_cache);
+        let snap = build_snapshot(
+            &tl,
+            out_rate,
+            &cache,
+            &stretch_cache,
+            crate::gain::GainScope::AppOwned,
+        );
         std::fs::remove_file(&source_path).ok();
         assert_eq!(snap.clips.len(), 1);
         let engine_clip = &snap.clips[0];
@@ -1386,7 +1399,13 @@ mod tests {
         // 保证"边播边编"零中断（当前 miss 时旧渲染正是正在播放的内容）。
         insert_rendered_entry("clip-pad", 0x1234_5678_9ABC_DEF0, 0.25);
 
-        let snap = build_snapshot(&tl, 44_100, &cache, &stretch_cache);
+        let snap = build_snapshot(
+            &tl,
+            44_100,
+            &cache,
+            &stretch_cache,
+            crate::gain::GainScope::AppOwned,
+        );
         std::fs::remove_file(&path).ok();
         crate::synth_clip_cache::invalidate_clip_all_caches("clip-pad");
         crate::synth_clip_cache::clear_pad_suppressed_clips();
@@ -1416,7 +1435,13 @@ mod tests {
         // 旧渲染条目存在 —— 若无抑制，快照会拿它垫音（见上一个用例）。
         insert_rendered_entry("clip-pad", 0x1234_5678_9ABC_DEF0, 0.25);
 
-        let snap = build_snapshot(&tl, 44_100, &cache, &stretch_cache);
+        let snap = build_snapshot(
+            &tl,
+            44_100,
+            &cache,
+            &stretch_cache,
+            crate::gain::GainScope::AppOwned,
+        );
         std::fs::remove_file(&path).ok();
         crate::synth_clip_cache::invalidate_clip_all_caches("clip-pad");
         crate::synth_clip_cache::clear_pad_suppressed_clips();
@@ -1447,7 +1472,13 @@ mod tests {
         crate::synth_clip_cache::register_pending_rendered_key("clip-pad", current_key);
         insert_rendered_entry("clip-pad", 0x0F0F_0F0F_0F0F_0F0F, 0.75);
 
-        let snap = build_snapshot(&tl, 44_100, &cache, &stretch_cache);
+        let snap = build_snapshot(
+            &tl,
+            44_100,
+            &cache,
+            &stretch_cache,
+            crate::gain::GainScope::AppOwned,
+        );
         std::fs::remove_file(&path).ok();
         crate::synth_clip_cache::invalidate_clip_all_caches("clip-pad");
         crate::synth_clip_cache::clear_pad_suppressed_clips();
@@ -1493,6 +1524,46 @@ mod tests {
         assert_eq!(
             enqueued, 1,
             "同一个拉伸键在 in-flight 期间被重复投递：去重守卫（`_should_enqueue`）没有生效"
+        );
+    }
+    /// AppOwned 快照必须把 item × take × track 预乘；HostOwned 保持 1.0。
+    #[test]
+    fn snapshot_gain_applies_all_layers_only_for_app_owned_scope() {
+        fn snapshot_gain(item: f32, take: f32, track: f32, scope: crate::gain::GainScope) -> f32 {
+            let path = snapshot_test_source();
+            std::fs::write(&path, b"stub").expect("create source stub");
+            let mut tl = timeline_with_volume_curve(&path);
+            tl.tracks[0].volume = track;
+            tl.clips[0].clip_gain = item;
+            tl.clips[0].gain = take;
+            tl.clips[0].sync_take_from_flat();
+            let pcm = vec![0.5f32; 44_100 * 2];
+            let decoded = ResampledStereo {
+                sample_rate: 44_100,
+                frames: pcm.len() / 2,
+                pcm: Arc::new(pcm),
+            };
+            let cache: Arc<Mutex<DecodeCache>> =
+                Arc::new(Mutex::new(ByteBudgetCache::new(4, u64::MAX)));
+            cache
+                .lock()
+                .unwrap()
+                .insert((path.clone(), 44_100), decoded, 44_100 * 2 * 4);
+            let stretch_cache: Arc<Mutex<ByteBudgetCache<StretchKey, ResampledStereo>>> =
+                Arc::new(Mutex::new(ByteBudgetCache::new(4, u64::MAX)));
+            let snap = build_snapshot(&tl, 44_100, &cache, &stretch_cache, scope);
+            std::fs::remove_file(&path).ok();
+            snap.clips[0].gain
+        }
+        assert!(
+            (snapshot_gain(2.0, 0.5, 2.0, crate::gain::GainScope::AppOwned) - 2.0).abs() < 1e-6
+        );
+        assert!(
+            (snapshot_gain(2.0, -0.5, 1.0, crate::gain::GainScope::AppOwned) + 1.0).abs() < 1e-6
+        );
+        assert_eq!(
+            snapshot_gain(2.0, 0.5, 2.0, crate::gain::GainScope::HostOwned),
+            1.0
         );
     }
 }

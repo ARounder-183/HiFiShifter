@@ -70,6 +70,10 @@ impl ExtensionOwner {
             caps.media_import = host.can_import_audio();
             caps.track_create = host.can_create_audio_track();
             caps.undo_stack = host.has_project_history();
+            // 增益写回与几何写回共用同一束 item/take setter；轨道音量
+            // 尚未接原生适配器，因此不在这里冒充可用。
+            caps.clip_item_gain = host.can_edit_clips();
+            caps.clip_take_gain = host.can_edit_clips();
             // 【为什么这两位也走同一个 host】它们是**结构**写回（item state chunk /
             // take 包络），判据是那束 API 在不在，而不是"能不能拖片段"。
             caps.clip_reverse = host.can_reverse_clips();

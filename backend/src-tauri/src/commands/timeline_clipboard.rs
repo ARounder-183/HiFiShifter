@@ -137,7 +137,11 @@ fn schedule_dyn_orig_for_roots(
     roots.sort_unstable();
     roots.dedup();
     for root in &roots {
-        let _ = crate::pitch_analysis::maybe_schedule_dyn_orig(&state.timeline, root);
+        let _ = crate::pitch_analysis::maybe_schedule_dyn_orig(
+            &state.timeline,
+            root,
+            crate::gain::GainScope::AppOwned,
+        );
     }
 }
 

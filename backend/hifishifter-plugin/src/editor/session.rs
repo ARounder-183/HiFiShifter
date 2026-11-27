@@ -2773,7 +2773,11 @@ impl EditorSession {
         }
         for root in &roots {
             hifishifter_kernel::pitch_analysis::maybe_schedule_pitch_orig(&analysis, root);
-            hifishifter_kernel::pitch_analysis::maybe_schedule_dyn_orig(&analysis, root);
+            hifishifter_kernel::pitch_analysis::maybe_schedule_dyn_orig(
+                &analysis,
+                root,
+                hifishifter_kernel::gain::GainScope::HostOwned,
+            );
         }
         // 布局键必须取自**这一轮组装所用的**时间线：它与文档侧的键只差命名空间前缀，
         // 而 `build_root_pitch_layout_key` 已经把前缀剥掉（见 `clip_layout_identity`）。
@@ -5285,8 +5289,10 @@ impl EditorSession {
             clip.fade_out_shape = 0.;
             clip.fade_in_dir = 0.;
             clip.fade_out_dir = 0.;
-            // 宿主item音量只在GUI显示，提交参数前还原原始ARA源域，不能重复烘焙。
+            // 宿主 item / take / track 三层增益都由宿主施加。提交参数前把三层
+            // 全部还原为干声，避免同一旋钮在 ARA 合成里再乘一遍。
             clip.gain = 1.;
+            clip.clip_gain = 1.;
             for take in &mut clip.takes {
                 take.gain = 1.;
             }
@@ -5820,7 +5826,11 @@ impl EditorSession {
             hifishifter_kernel::pitch_analysis::maybe_schedule_pitch_orig(&self.timeline, &root);
         }
         if param == "dyn" {
-            hifishifter_kernel::pitch_analysis::maybe_schedule_dyn_orig(&self.timeline, &root);
+            hifishifter_kernel::pitch_analysis::maybe_schedule_dyn_orig(
+                &self.timeline,
+                &root,
+                hifishifter_kernel::gain::GainScope::HostOwned,
+            );
         }
         // 【发布的是"分析原线 + 布局键"，不是显示数组】`params.pitch_orig` 由
         // `maybe_schedule_pitch_orig` 从内容缓存组装（与用户编辑无关）；`pitch_edit`
@@ -9059,7 +9069,7 @@ pub mod tests {
                 left
             })
             .collect::<Vec<_>>();
-        assert_eq!(outputs[0], [0.05, 0.1, 0.15, 0.2]);
+        assert_eq!(outputs[0], [0.1, 0.2, 0.3, 0.4]);
         assert_eq!(outputs[1], [0.; 4], "其它轨solo不能在本renderer投影后丢失");
         editor.close();
     }
@@ -10369,7 +10379,11 @@ pub mod tests {
                 owners[index].snapshots[usize::from(rate == 48000)].diagnose(&[]),
                 editor.state()
             );
-            assert_eq!(&left[..511], &[value; 511]);
+            assert_eq!(
+                &left[..511],
+                &[value; 511],
+                "index={index} rate={rate} value={value}"
+            );
             assert_eq!(right, left);
             assert_eq!(&left[511..], &[0.; 2]);
         };
@@ -10388,7 +10402,7 @@ pub mod tests {
         wait(1);
         for rate in [44100, 48000] {
             check(0, rate, 0.25);
-            check(1, rate, 0.25);
+            check(1, rate, 0.5);
         }
         for owner in &owners {
             for publisher in &owner.snapshots {
@@ -10749,18 +10763,18 @@ pub mod tests {
         };
         wait(2);
         for plane in [output().0, output().1] {
-            for (actual, want) in plane.into_iter().zip([0.05, 0.1, 0.15, 0.2]) {
+            for (actual, want) in plane.into_iter().zip([0.1, 0.2, 0.3, 0.4]) {
                 assert!((actual - want).abs() < 1e-6);
             }
         }
         call(&editor, &sink, &receiver, 4, "undo_timeline", json!({}));
         wait(3);
-        for (actual, want) in output().0.into_iter().zip([0.025, 0.05, 0.075, 0.1]) {
+        for (actual, want) in output().0.into_iter().zip([0.1, 0.2, 0.3, 0.4]) {
             assert!((actual - want).abs() < 1e-6);
         }
         call(&editor, &sink, &receiver, 5, "redo_timeline", json!({}));
         wait(4);
-        for (actual, want) in output().0.into_iter().zip([0.05, 0.1, 0.15, 0.2]) {
+        for (actual, want) in output().0.into_iter().zip([0.1, 0.2, 0.3, 0.4]) {
             assert!((actual - want).abs() < 1e-6);
         }
         sink.closed.store(true, Ordering::Release);

@@ -555,7 +555,7 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
             let local_adj = local_adj_i64 as f64;
 
             let g = clip.gain * fade.gain_at(local);
-            if g <= 0.0 {
+            if g == 0.0 {
                 continue;
             }
 

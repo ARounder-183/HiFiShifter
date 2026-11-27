@@ -660,6 +660,28 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
                 .as_f64()
                 .filter(|v| v.is_finite())
                 .ok_or("finite numeric clip edit required")?;
+            // 增益三键共用 kernel 的边界：item 非负、take 保号。写入路径仍会
+            // 单独拒绝负 take（宿主没有“负 D_VOL”这回事），但模型层必须先接受
+            // 合法负值，否则“读得出、存不下”会在 normalize 时丢失极性。
+            if key == "itemGain"
+                && !(0.0..=f64::from(hifishifter_kernel::gain::GAIN_MAX)).contains(&number)
+            {
+                return Err(format!(
+                    "item gain outside the supported range 0..{}",
+                    hifishifter_kernel::gain::GAIN_MAX
+                ));
+            }
+            if matches!(key.as_str(), "gain" | "takeGain")
+                && !(-f64::from(hifishifter_kernel::gain::GAIN_MAX)
+                    ..=f64::from(hifishifter_kernel::gain::GAIN_MAX))
+                    .contains(&number)
+            {
+                return Err(format!(
+                    "take gain outside the supported range -{}..{}",
+                    hifishifter_kernel::gain::GAIN_MAX,
+                    hifishifter_kernel::gain::GAIN_MAX
+                ));
+            }
             if matches!(
                 key.as_str(),
                 "fadeInDir" | "fadeOutDir" | "fadeInS" | "fadeOutS"
@@ -668,7 +690,10 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
                 if !(-1.0..=1.0).contains(&number) {
                     return Err("fade curvature/S outside -1..1".into());
                 }
-            } else if key != "hostGroupId" && !(0. ..=1_000_000.).contains(&number) {
+            } else if key != "hostGroupId"
+                && !matches!(key.as_str(), "gain" | "takeGain" | "itemGain")
+                && !(0. ..=1_000_000.).contains(&number)
+            {
                 // 【为什么 hostGroupId 不走通用上限】通用上限服务的是"秒/倍率/增益"
                 // 这些几何量；编组 id 的值域是 `0..=HOST_GROUP_ID_MAX`（2e9，
                 // `host_group_id_for` 的哈希取模就落在整个区间上）。让它吃几何
@@ -689,16 +714,6 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
             }
             if key == "channelMode" && (number.fract() != 0. || number > 4.) {
                 return Err("invalid host channel mode".into());
-            }
-            // 【两层都要校验】`takeGain` 是新的 take 层键名，`gain` 是它的旧名；
-            // 漏掉前者会让新前端把一个越界值直接写进宿主。
-            if matches!(key.as_str(), "gain" | "takeGain" | "itemGain")
-                && number > f64::from(hifishifter_kernel::gain::GAIN_MAX)
-            {
-                return Err(format!(
-                    "clip volume outside the supported range 0..{}",
-                    hifishifter_kernel::gain::GAIN_MAX
-                ));
             }
             if key == "hostGroupId"
                 && (!(0.0..=HOST_GROUP_ID_MAX as f64).contains(&number) || number.fract() != 0.)
@@ -1521,15 +1536,21 @@ pub(crate) fn execute_managed(
                 target.set_item(c"B_MUTE", if value { 1. } else { 0. }, &authorized)?;
             }
             // Item 增益 → 宿主 item 的 D_VOL（用户在时间轴旋钮上拧的那一层）。
-            if let Some(value) = edit.patch.item_gain {
-                target.set_item(c"D_VOL", value as f64, &authorized)?;
+            // 【写 after，不写原始补丁】after 是经过 kernel 规范化后的权威值；
+            // 回执也按它生成。写请求原值会让“宿主收到的”与“回执声称的”分叉。
+            if edit.patch.item_gain.is_some() {
+                target.set_item(c"D_VOL", after.item_gain() as f64, &authorized)?;
             }
             // Take 增益 → 宿主 take 的 D_VOL（take 属性面板那一层）。
             //
             // 【为什么必须分开写】两者在 REAPER 里是两个字段、两个旋钮。此前只有
             // 一个 `gain` 且写向 item，take 侧永远写不到；反过来（早期）又把一个
             // 值写进 take，用户在时间轴拧的旋钮就跑到 take 上去了。
-            if let Some(value) = edit.patch.take_gain {
+            if edit.patch.take_gain.is_some() {
+                let value = after.take_gain();
+                if value < 0.0 {
+                    return Err("reaper does not accept a negative take D_VOL".into());
+                }
                 target.set_take(c"D_VOL", value as f64, &authorized)?;
             }
             if let Some(enabled) = edit.patch.loop_enabled {
@@ -2005,10 +2026,12 @@ mod tests {
             stale["clips"][0]["clip_gain"] = json!(1.);
             assert!(!receipt.matches(&stale), "item 增益的陈旧回显必须被门拦下");
         }
-        // 负增益没有意义（反相是宿主的 take 极性，不是增益），必须拒绝。
-        assert!(editor
+        // take 负值在模型层合法（极性），但 REAPER 写入路径必须拒绝。
+        let plan = editor
             .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"gain":-1.}))
-            .is_err());
+            .expect("model accepts a signed take gain");
+        assert!((plan.edits[0].after.take_gain() + 1.0).abs() < 1e-6);
+        assert!(execute(&owner, plan, || document.is_alive()).is_err());
         // **+24 dB（线性 16）现在必须被接受** —— 这正是值域扩大的目的：REAPER 的
         // item 增益上限是 +24.08 dB，此前上界是 4.0（+12 dB），于是任何超过 +12 dB
         // 的 clip 在写回宿主时都会被整条拒绝。

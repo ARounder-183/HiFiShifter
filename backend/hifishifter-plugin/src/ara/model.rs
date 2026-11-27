@@ -3408,6 +3408,8 @@ mod tests {
                 cancel_flag: None,
                 progress: None,
                 cache_stats: None,
+                // This test exercises the mixer’s own volume semantics, not ARA ownership.
+                gain_scope: hifishifter_kernel::gain::GainScope::AppOwned,
             };
             let (_, _, _, samples) =
                 hifishifter_kernel::mixdown::render_mixdown_with_pcm(&timeline, options, &pcm)

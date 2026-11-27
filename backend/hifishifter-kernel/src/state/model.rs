@@ -1115,6 +1115,9 @@ pub struct CreateClipTemplatePayload {
     pub source_clip_id: Option<String>,
     pub source_path: Option<String>,
     pub gain: Option<f32>,
+    /// Item 层增益（时间轴旋钮 / REAPER item D_VOL）；旧字段 gain 是 take 层。
+    #[serde(default)]
+    pub clip_gain: Option<f32>,
     pub muted: Option<bool>,
     pub source_start_sec: Option<f64>,
     pub source_end_sec: Option<f64>,
@@ -1315,7 +1318,7 @@ impl ClipTake {
             } else {
                 clip.active_take().name.clone()
             },
-            gain: clip.gain,
+            gain: crate::gain::clamp_take_gain(clip.gain),
             source_path: clip.source_path.clone(),
             source_path_relative: clip.source_path_relative.clone(),
             duration_sec: clip.duration_sec,
@@ -1354,7 +1357,7 @@ impl ClipTake {
         } else {
             1.0
         };
-        clip.gain = self.gain;
+        clip.gain = crate::gain::clamp_take_gain(self.gain);
         clip.source_path = self.source_path.clone();
         clip.source_path_relative = self.source_path_relative.clone();
         clip.duration_sec = self.duration_sec;
@@ -1862,8 +1865,45 @@ impl Clip {
     /// 【为什么要一个入口】两层增益相乘这件事若散落在渲染、混音、导出、波形各处，
     /// 漏乘一处的表现是"某个环节声音大了/小了一半"，而这类偏差在单测里几乎看不出来。
     /// 统一走这里，谁要增益谁调它。
+    pub fn item_gain(&self) -> f32 {
+        crate::gain::clamp_gain(self.clip_gain)
+    }
+
+    /// Active take 层（REAPER take D_VOL）。**保号**：负值是极性反转。
+    pub fn take_gain(&self) -> f32 {
+        crate::gain::clamp_take_gain(self.gain)
+    }
+
+    /// 可听增益（AppOwned）：item × take，保留极性。
+    ///
+    /// 两层各自钳制；乘积只做防溢出钳制（±GAIN_PRODUCT_MAX），不再压回单层上限。
+    /// 非有限乘积回退 1.0，避免一个坏字段把整段变成 NaN。
     pub fn audible_gain(&self) -> f32 {
-        crate::gain::clamp_gain(self.clip_gain.max(0.0) * self.gain.max(0.0))
+        let product = self.item_gain() * self.take_gain();
+        if !product.is_finite() {
+            1.0
+        } else {
+            product.clamp(
+                -crate::gain::GAIN_PRODUCT_MAX,
+                crate::gain::GAIN_PRODUCT_MAX,
+            )
+        }
+    }
+
+    /// 波形/表头用的幅度：可听增益的绝对值。
+    pub fn audible_gain_abs(&self) -> f32 {
+        self.audible_gain().abs()
+    }
+
+    /// 按所有权作用域给出渲染增益。
+    ///
+    /// HostOwned（ARA）下 item / take / track 全由宿主施加，本进程必须返回 1.0；
+    /// 显示仍读 item_gain / take_gain，二者互不影响。
+    pub fn render_gain(&self, scope: crate::gain::GainScope) -> f32 {
+        match scope {
+            crate::gain::GainScope::AppOwned => self.audible_gain(),
+            crate::gain::GainScope::HostOwned => 1.0,
+        }
     }
 
     /// 给本 Clip 的 Take 盖"用户显式设置声道模式"的封印。
@@ -1997,17 +2037,15 @@ impl Clip {
         }
         if self.takes.is_empty() {
             self.sync_take_from_flat();
-            self.migrate_gain_split();
             return;
         }
-        self.migrate_gain_split();
         let idx = self.active_take_index().min(self.takes.len() - 1);
         let take = self.takes[idx].clone();
         self.active_take_id = Some(take.id.clone());
         take.apply_to_clip(self);
     }
 
-    /// 把"唯一那层增益"提升到 item 层（幂等）。
+    /// 把旧工程“唯一那层增益”提升到 item 层（一次性迁移，幂等）。
     ///
     /// 【为什么必须做】在 item / take 拆成两层之前，工程里只有一个增益，而且存在
     /// **take** 上。旋钮从此编辑 item 层 —— 不提升的话，用户打开旧工程会看到旋钮
@@ -2016,7 +2054,7 @@ impl Clip {
     /// 【判据】只有"item 层仍是 1.0 且所有 take 增益彼此相同"时才提升：把 G 搬到
     /// item、把各 take 置 1，可听增益 `clip_gain × take.gain` **逐位不变**。
     /// 多 take 各自不同时无法用一个数代表整组，原样保留。
-    fn migrate_gain_split(&mut self) {
+    pub fn migrate_legacy_gain_split(&mut self) {
         if self.takes.is_empty() || (self.clip_gain - 1.0).abs() > f32::EPSILON {
             return;
         }
@@ -5946,6 +5984,7 @@ mod tests {
                     source_clip_id: None,
                     source_path: Some("a.wav".into()),
                     gain: Some(1.25),
+                    clip_gain: None,
                     muted: Some(true),
                     source_start_sec: Some(0.3),
                     source_end_sec: Some(1.8),
@@ -5973,6 +6012,7 @@ mod tests {
                     source_clip_id: None,
                     source_path: None,
                     gain: Some(0.9),
+                    clip_gain: None,
                     muted: Some(false),
                     source_start_sec: Some(0.0),
                     source_end_sec: Some(1.5),
@@ -6061,6 +6101,7 @@ mod tests {
                 source_clip_id: Some(source_clip_id.clone()),
                 source_path: Some("source.wav".into()),
                 gain: Some(1.5),
+                clip_gain: None,
                 muted: Some(true),
                 source_start_sec: Some(0.25),
                 source_end_sec: Some(0.9),
@@ -10057,7 +10098,7 @@ impl TimelineState {
             }
             if let Some(v) = patch.take_gain {
                 // take 级：写投影，并同步进 active take（权威值在那里）。
-                c.gain = crate::gain::clamp_gain(v);
+                c.gain = crate::gain::clamp_take_gain(v);
             }
             if let Some(v) = patch.item_gain {
                 c.clip_gain = crate::gain::clamp_gain(v);
@@ -10215,7 +10256,7 @@ impl TimelineState {
                 let clip_len_for_sync = c.length_sec;
                 for take in &mut c.takes {
                     if let Some(v) = content_sync_patch.take_gain {
-                        take.gain = crate::gain::clamp_gain(v);
+                        take.gain = crate::gain::clamp_take_gain(v);
                     }
                     if let Some(v) = content_sync_patch.source_start_sec {
                         if v.is_finite() {
@@ -10331,6 +10372,7 @@ impl TimelineState {
                     length_sec: Some(template.length_sec),
                     // 模板里的 `gain` 是 take 层（`CreateClipTemplatePayload::gain`）。
                     take_gain: template.gain,
+                    item_gain: template.clip_gain,
                     muted: template.muted,
                     source_start_sec: template.source_start_sec,
                     source_end_sec: template.source_end_sec,
@@ -10356,7 +10398,6 @@ impl TimelineState {
                     //（见 commands::timeline::create_clips_bulk）。
                     channel_mode: None,
                     host_group_id: None,
-                    item_gain: None,
                 },
             );
 
@@ -10600,6 +10641,14 @@ impl TimelineState {
                         note.end_sec += delta;
                     }
                 }
+                // 【跨 Clip 聚合必须折算 item 层】旧 take 增益与旧 Clip(item)
+                // 增益在源 Clip 上是相乘关系；新容器只有 take 一层可承载，
+                // 因此把 item 折进 take，并把新 Clip 的 item 层保持 1.0。
+                // 源 Clip 静音时把它的 take 折成 0：内容仍在，切过去是静音，
+                // 而不是“打包后突然出声”。
+                let mute_fold = if source.muted { 0.0 } else { 1.0 };
+                packed.gain =
+                    crate::gain::clamp_take_gain(packed.gain * source.item_gain() * mute_fold);
                 packed_takes.push(packed);
             }
         }
@@ -11666,6 +11715,7 @@ impl TimelineState {
                     cancel_flag: None,
                     progress: None,
                     cache_stats: None,
+                    gain_scope: crate::gain::GainScope::AppOwned,
                 },
             );
 
@@ -11689,6 +11739,7 @@ impl TimelineState {
                 // Loop 属性不再有意义，重置为关闭。
                 glued.loop_enabled = false;
                 glued.gain = 1.0;
+                glued.clip_gain = 1.0;
                 glued.muted = false;
                 glued.fade_in_sec = 0.0;
                 glued.fade_out_sec = 0.0;
@@ -12845,7 +12896,8 @@ mod gain_split_tests {
 
         {
             let clip = timeline.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
-            clip.normalize_takes();
+            // v8 起层间搬移只由一次性迁移负责；normalize 只物化投影。
+            clip.migrate_legacy_gain_split();
             assert!(
                 (clip.clip_gain - 0.5).abs() < 1e-6,
                 "the single gain must move to the item layer, got {}",
@@ -12856,7 +12908,7 @@ mod gain_split_tests {
                 "hoisting must not change what the clip sounds like"
             );
             // 幂等：再跑一遍不会把值乘两次。
-            clip.normalize_takes();
+            clip.migrate_legacy_gain_split();
             assert!((clip.audible_gain() - audible_before).abs() < 1e-6);
         }
     }
