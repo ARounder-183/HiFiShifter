@@ -194,32 +194,96 @@ async function record(page) {
     return out;
 }
 
-/** 逐字段比较，返回差异行（空数组 = 一致）。 */
-function diffTrees(a, b, path, out) {
-    if (a === b) return out;
-    if (a === null || b === null || typeof a !== typeof b) {
-        out.push(path + ": 基线 " + JSON.stringify(a) + " ≠ 现状 " + JSON.stringify(b));
-        return out;
-    }
-    if (Array.isArray(a)) {
-        if (!Array.isArray(b)) {
-            out.push(path + ": 基线是数组，现状不是");
-            return out;
+/**
+ * 空白不参与比较。
+ *
+ * 【为什么】迁移前的 JSX 在标签与快捷键列之间显式插了一个空格文本节点
+ * （`{t("menu_undo")}{" "}`），共享条目模型不会。两者在 flex 布局里读起来完全
+ * 一样（trail 列是右对齐的独立 flex 项），但如果把空白算进差异，这些**已知且
+ * 无害**的行会把真正的回归淹没掉。
+ */
+function squash(text) {
+    return String(text ?? "").replace(/\s+/g, "");
+}
+
+/** 逐行比较，返回差异行（空数组 = 一致）。 */
+function diffRows(baseline, current, path, out, gaps) {
+    if (!Array.isArray(baseline) || !Array.isArray(current)) {
+        if (baseline !== current) {
+            out.push(
+                path + ": 基线 " + JSON.stringify(baseline) + " ≠ 现状 " + JSON.stringify(current),
+            );
         }
-        if (a.length !== b.length) {
-            out.push(path + ": 条目数 " + a.length + " → " + b.length);
+        return;
+    }
+    if (baseline.length !== current.length) {
+        out.push(path + ": 条目数 " + baseline.length + " → " + current.length);
+    }
+    const count = Math.min(baseline.length, current.length);
+    for (let index = 0; index < count; index += 1) {
+        const before = baseline[index];
+        const after = current[index];
+        const at = path + "[" + index + "]";
+        for (const field of ["role", "disabled", "checked", "haspopup"]) {
+            if (before[field] !== after[field]) {
+                out.push(
+                    at +
+                        "." +
+                        field +
+                        ": 基线 " +
+                        JSON.stringify(before[field]) +
+                        " ≠ 现状 " +
+                        JSON.stringify(after[field]),
+                );
+            }
         }
-        const n = Math.min(a.length, b.length);
-        for (let i = 0; i < n; i += 1) diffTrees(a[i], b[i], path + "[" + i + "]", out);
-        return out;
+        if (squash(before.text) !== squash(after.text)) {
+            out.push(
+                at +
+                    ".text: 基线 " +
+                    JSON.stringify(before.text) +
+                    " ≠ 现状 " +
+                    JSON.stringify(after.text),
+            );
+        }
+        if (Array.isArray(before.items)) {
+            diffRows(before.items, after.items ?? [], at + ".items", out, gaps);
+        } else if (before.haspopup === "menu") {
+            /*
+             * 基线里这一层**没录到**：录制脚本当时用指针事件展开 Radix 的子菜单，
+             * 而个别嵌套层（另存为格式、时间单位）没有展开成功，于是记成了 null。
+             * 这不是"现状多了内容"，而是"基线没有覆盖到" —— 报成缺口，不报成差异，
+             * 否则一次探针噪声就会掩盖真正的回归。
+             */
+            gaps.push(at + " " + before.text);
+        }
     }
-    if (typeof a === "object") {
-        const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-        for (const key of keys) diffTrees(a[key], b[key], path + "." + key, out);
-        return out;
+}
+
+/** 逐菜单比较。 */
+function diffTrees(baseline, current, path, out, gaps) {
+    if (baseline === null || current === null) {
+        if (baseline !== current) {
+            out.push(
+                path + ": 基线 " + JSON.stringify(baseline) + " ≠ 现状 " + JSON.stringify(current),
+            );
+        }
+        return;
     }
-    out.push(path + ": 基线 " + JSON.stringify(a) + " ≠ 现状 " + JSON.stringify(b));
-    return out;
+    if (baseline.length !== current.length) {
+        out.push(path + ": 菜单数 " + baseline.length + " → " + current.length);
+    }
+    const count = Math.min(baseline.length, current.length);
+    for (let index = 0; index < count; index += 1) {
+        const label = baseline[index].label ?? "";
+        diffRows(
+            baseline[index].tree,
+            current[index].tree,
+            path + "[" + index + "](" + label + ")",
+            out,
+            gaps,
+        );
+    }
 }
 
 const mode = process.argv[2] ?? "dump";
@@ -263,9 +327,17 @@ if (mode === "compare") {
         process.exit(1);
     }
     const baseline = JSON.parse(readFileSync(arg, "utf8"));
-    const diffs = diffTrees(baseline, tree, "$", []);
+    const gaps = [];
+    const diffs = [];
+    diffTrees(baseline, tree, "$", diffs, gaps);
     if (diffs.length === 0) {
-        process.stdout.write("菜单条目树与基线一致\n");
+        // 一次写完再退出：分两次 write 时第二次会被 process.exit 截断（管道缓冲）。
+        process.stdout.write(
+            "菜单条目树与基线一致\n" +
+                (gaps.length > 0
+                    ? "（基线未覆盖的子菜单 " + gaps.length + " 处：" + gaps.join(" / ") + "）\n"
+                    : ""),
+        );
         process.exit(0);
     }
     process.stderr.write("菜单条目树与基线有 " + diffs.length + " 处差异：\n");

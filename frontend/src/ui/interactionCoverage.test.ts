@@ -271,11 +271,18 @@ describe("菜单表面必须走组合壳", () => {
         ).toEqual([]);
     });
 
-    test("豁免的组合菜单面仍在共享键盘模型与时间轴契约", () => {
-        // 豁免的前提是"它们做对了"，这里把前提钉住。
+    test("豁免的组合菜单面仍在共享键盘模型、滚动模型与时间轴契约里", () => {
+        /*
+         * 豁免的前提是"它们做对了"，这里把前提钉住。
+         *
+         * 【为什么现在多了一条 MenuScrollScope】内边距与滚动提示行都搬到了那一层
+         * （壳的 padding 必须是 0，否则 sticky 提示行会内缩）。漏掉它不会报错 ——
+         * 菜单只是没有内边距、也没有"还能往下翻"的提示。
+         */
         for (const file of MENU_SURFACE_ALLOWED.slice(1)) {
             const source = readFileSync(file, "utf8");
             expect(source, `${file} 丢了共享键盘模型`).toContain("useMenuKeyboard");
+            expect(source, `${file} 丢了共享滚动模型`).toContain("MenuScrollScope");
             expect(source, `${file} 丢了时间轴浮动菜单契约`).toContain("data-hs-floating-menu");
         }
     });

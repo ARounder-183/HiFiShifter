@@ -33,10 +33,16 @@ function check(name, ok, detail) {
 /** 读取当前打开的那张菜单的几何与提示行状态。 */
 async function readMenu(page) {
     return page.evaluate(() => {
-        const menu = document.querySelector(".hs-menu");
+        /*
+         * 【必须取最外层的那一张】子面板（.hs-menu--submenu）在 DOM 上是父壳的后代，
+         * 而 `querySelector` 会返回**文档顺序里的第一个** —— 子面板一旦展开，
+         * 量到的就是"子面板的提示行 + 两层的条目"。这里只认非子面板的那一张，
+         * 并把提示行限定为它的**直接子元素**。
+         */
+        const menu = document.querySelector(".hs-menu:not(.hs-menu--submenu)");
         if (!menu) return null;
         const style = getComputedStyle(menu);
-        const hints = [...menu.querySelectorAll(".hs-menu__scroll-hint")].map((hint) => {
+        const hints = [...menu.querySelectorAll(":scope > .hs-menu__scroll-hint")].map((hint) => {
             const rect = hint.getBoundingClientRect();
             const bar = getComputedStyle(hint, "::after");
             return {
@@ -60,7 +66,9 @@ async function readMenu(page) {
             hasContentLayer: content !== null,
             contentPadding: content ? getComputedStyle(content).padding : null,
             hints: hints,
-            items: menu.querySelectorAll(".hs-menu__item").length,
+            items: [...menu.querySelectorAll(".hs-menu__item")].filter(
+                (item) => item.closest('[role="menu"]') === menu,
+            ).length,
             rect: {
                 x: Math.round(rect.x),
                 y: Math.round(rect.y),
@@ -75,7 +83,9 @@ async function readMenu(page) {
 async function hintCenter(page, which) {
     return page.evaluate((which) => {
         const hint = document.querySelector(
-            which === "up" ? ".hs-menu__scroll-hint--up" : ".hs-menu__scroll-hint--down",
+            which === "up"
+                ? ".hs-menu:not(.hs-menu--submenu) > .hs-menu__scroll-hint--up"
+                : ".hs-menu:not(.hs-menu--submenu) > .hs-menu__scroll-hint--down",
         );
         if (!hint) return null;
         const rect = hint.getBoundingClientRect();
@@ -95,13 +105,20 @@ async function hintCenter(page, which) {
     }, which);
 }
 
+/** 菜单是否还开着（点提示行不该把它关掉）。 */
+async function menuAlive(page) {
+    return page.evaluate(() => document.querySelector(".hs-menu:not(.hs-menu--submenu)") !== null);
+}
+
 async function scrollTop(page) {
-    return page.evaluate(() => document.querySelector(".hs-menu")?.scrollTop ?? -1);
+    return page.evaluate(
+        () => document.querySelector(".hs-menu:not(.hs-menu--submenu)")?.scrollTop ?? -1,
+    );
 }
 
 async function setScrollTop(page, value) {
     await page.evaluate((value) => {
-        const menu = document.querySelector(".hs-menu");
+        const menu = document.querySelector(".hs-menu:not(.hs-menu--submenu)");
         if (menu) menu.scrollTop = value;
     }, value);
     await sleep(140);
@@ -235,8 +252,14 @@ async function probeMenuBar(page) {
     const afterHover = await scrollTop(page);
     check("悬停提示行会缓慢滚动", afterHover > menu.scrollTop, menu.scrollTop + " → " + afterHover);
 
-    // 指针离开即停。
-    await page.mouse.move(menu.rect.x + Math.round(menu.rect.w / 2), menu.rect.y + 30);
+    /*
+     * 指针离开即停。
+     *
+     * 【为什么移到视口右下角而不是"菜单里靠上的位置"】菜单里靠上的位置很可能正是
+     * 某个子菜单的触发项 —— 指针停在那里会展开子面板，之后所有"最外层菜单"的
+     * 查询都会量到两层叠在一起的结果。
+     */
+    await page.mouse.move(VW - 12, VH - 12);
     await sleep(420);
     const afterLeave = await scrollTop(page);
     await sleep(320);
@@ -245,6 +268,11 @@ async function probeMenuBar(page) {
     // 点击翻一页。
     await setScrollTop(page, 0);
     const clickTarget = await hintCenter(page, "down");
+    if (clickTarget === null) {
+        check("点击翻一页（提示行仍可命中）", false, "提示行已消失");
+        await closeMenus(page);
+        return;
+    }
     await page.mouse.click(clickTarget.x, clickTarget.y);
     await sleep(420);
     const afterClick = await scrollTop(page);
@@ -257,19 +285,38 @@ async function probeMenuBar(page) {
         afterClick + " vs " + expectedStep,
     );
 
+    check("点击提示行不会关掉菜单", await menuAlive(page), "");
+
     // 长按快滚。
     await setScrollTop(page, 0);
     const pressTarget = await hintCenter(page, "down");
+    if (pressTarget === null) {
+        check("长按快滚（提示行仍可命中）", false, "提示行已消失");
+        await closeMenus(page);
+        return;
+    }
     await page.mouse.move(pressTarget.x, pressTarget.y);
     await page.mouse.down();
     await sleep(900);
     const duringPress = await scrollTop(page);
+    // 继续按住 400ms：到底之后必须**停住**，不能越界或来回弹。
+    await sleep(400);
+    const laterInPress = await scrollTop(page);
     const panelsDuringPress = await page.evaluate(
         () => document.querySelectorAll('[role="menu"]').length,
     );
     await page.mouse.up();
     await sleep(220);
-    check("长按提示行持续滚动", duringPress > afterClick, String(duringPress));
+    check(
+        "长按提示行滚到可滚尽头",
+        maxScroll > 0 && duringPress === maxScroll,
+        duringPress + "/" + maxScroll,
+    );
+    check(
+        "到底后自动停住（不越界、不反弹）",
+        laterInPress === duringPress,
+        laterInPress + " vs " + duringPress,
+    );
     check("长按期间页面里仍只有一张菜单", panelsDuringPress === 1, String(panelsDuringPress));
 
     // 滚到底后上方提示出现。

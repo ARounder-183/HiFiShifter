@@ -1281,3 +1281,139 @@ describe("菜单 portal 与 .qt-range fallback", () => {
         ).toEqual([]);
     });
 });
+
+/*
+ * 菜单滚动模型与"只剩一套菜单表面"的门禁（G-1 … G-6）。
+ *
+ * 【为什么这些必须由机制兜住】它们全是"删掉不会有任何报错、只会让手感悄悄变回去"
+ * 的东西：删掉 scrollbar-width: none，滚动条回来；给提示行加个 padding，它就占位；
+ * 重新引入一个 Radix 菜单，两套键盘模型重新分叉。没有门禁时，下一个人的合理改动
+ * 就是下一次回归。
+ *
+ * G-7（条目树基线）不在本文件：它要真浏览器，见 scripts/menu-tree-baseline.mjs。
+ */
+describe("菜单滚动模型的门禁", () => {
+    /** 取某个选择器**完全相等**的规则块。 */
+    function blockOf(selector: string) {
+        return cssBlocks(readFileSync(TOKEN_CSS, "utf8")).find(
+            (block) => block.selector === selector,
+        );
+    }
+
+    /** 规则块里某条声明的取值。 */
+    function valueOf(selector: string, property: string): string | null {
+        const block = blockOf(selector);
+        if (!block) return null;
+        const match = block.body.match(new RegExp("(?:^|;)\\s*" + property + "\\s*:\\s*([^;]+)"));
+        return match ? match[1].trim() : null;
+    }
+
+    test("G-1 菜单壳没有原生竖直滚动条", () => {
+        // I1 的唯一实现点。删掉这一行不会有任何报错 —— 滚动条只是回来。
+        expect(valueOf(".hs-menu", "scrollbar-width"), "壳必须声明 scrollbar-width: none").toBe(
+            "none",
+        );
+        // 自绘滚动条同样不允许：本仓实测分数 DPR 下拖拽映射会放大 dpr² 倍。
+        expect(
+            /*
+             * 三条限制缺一不可：
+             *   ① 先剥注释 —— `.hs-menu` 的说明里就写着"不用 ::-webkit-scrollbar"；
+             *   ② `[^{}]*` 不许跨规则块，否则全局的
+             *      `html[data-input="touch"] ::-webkit-scrollbar` 会被算进来；
+             *   ③ `.hs-menu` 后面不许接 `__`/`--`，否则 `.hs-menu__scroll-hint`
+             *      会被当成壳。
+             */
+            /(^|[\s,])\.hs-menu(?!__|--)[^{}]*::-webkit-scrollbar/.test(
+                readFileSync(TOKEN_CSS, "utf8").replace(/\/\*[\s\S]*?\*\//g, ""),
+            ),
+            "不得用 ::-webkit-scrollbar 自绘菜单滚动条",
+        ).toBe(false);
+    });
+
+    test("G-2 提示行零占位（sticky + height: 0）", () => {
+        // I3：提示行出现 / 消失时，菜单高度、内容位置、scrollHeight 都不能变。
+        expect(valueOf(".hs-menu__scroll-hint", "position")).toBe("sticky");
+        expect(valueOf(".hs-menu__scroll-hint", "height")).toBe("0");
+        // 命中区在 ::after 上：宿主盒高是 0，0 高的元素永远打不中。
+        expect(blockOf(".hs-menu__scroll-hint::after"), "提示行必须有 ::after 命中区").toBeTruthy();
+        expect(valueOf(".hs-menu__scroll-hint::after", "height")).toBe(
+            "var(--qt-menu-scroll-hint-h)",
+        );
+    });
+
+    test("G-3 菜单壳不再自己留内边距", () => {
+        /*
+         * sticky 的约束盒是父元素的**内容盒**：壳留 4px 内边距，提示行就跟着内缩
+         * 4px，边缘露出一条没被渐变的空白（实测 165 vs 期望 161）。
+         */
+        expect(valueOf(".hs-menu", "padding"), "壳的 padding 必须搬到 .hs-menu__content").toBe("0");
+        expect(valueOf(".hs-menu__content", "padding"), "内容层必须持有内边距").not.toBeNull();
+    });
+
+    test("G-4 移动端 sheet 只命中**已打开**的菜单", () => {
+        /*
+         * data-hs-context-menu 有**两种**写法：带 =1 的是已打开的菜单表面，无值的是
+         * 常驻的锚点容器。写成不带值的属性选择器会把 8 个锚点容器一起套上 sheet 装饰
+         * （实测：radius 16px + shadow 0 -12px + bottom: 0）。
+         */
+        const css = readFileSync(TOKEN_CSS, "utf8");
+        expect(css).toContain('html[data-form="mobile"] [data-hs-context-menu="1"]');
+        expect(css).not.toMatch(/\[data-form="mobile"\] \[data-hs-context-menu\]\s*\{/);
+        // 住在 sheet 里的菜单与子面板不做 sheet 变换。
+        expect(css).toContain(':not([data-hs-menu-inline="1"])');
+    });
+
+    test("G-5 不得再出现 Radix 菜单（I10）", () => {
+        /*
+         * 全仓只剩**一套**菜单表面。两套的时候：键盘两套、滚动两套、定位两套、
+         * CSS 两套、门禁两套 —— 而"哪一套生效"取决于用户点的是菜单栏还是右键。
+         * Select 不在此列：role="listbox" 的表单控件不是命令菜单。
+         */
+        const offenders: string[] = [];
+        for (const file of sourceFiles(/\.tsx$/)) {
+            const source = stripCommentsAndStrings(readFileSync(file, "utf8"));
+            if (source.includes("<DropdownMenu.")) offenders.push(file);
+        }
+        expect(
+            offenders,
+            "以下文件仍在用 Radix 的 DropdownMenu —— 请改用 AppContextMenu / " +
+                "AppAnchoredMenu / AppSubMenu（条目数据用 AppMenuItemSpec）",
+        ).toEqual([]);
+    });
+
+    test("G-6 提示行只有一处实现", () => {
+        // 第二份"滚动提示"出现时，两套的可见性判据一定会分叉。
+        const offenders: string[] = [];
+        for (const file of sourceFiles(/\.tsx?$/)) {
+            if (file === join(UI_DIR, "MenuScrollScope.tsx")) continue;
+            const source = stripCommentsAndStrings(readFileSync(file, "utf8"), true);
+            if (source.includes("hs-menu__scroll-hint")) offenders.push(file);
+        }
+        expect(offenders, "hs-menu__scroll-hint 只允许出现在 ui/MenuScrollScope.tsx").toEqual([]);
+    });
+
+    test("每个自渲染的菜单表面都包了 MenuScrollScope（I11）", () => {
+        /*
+         * 判据取自结构事实：挂了 hs-menu 壳的文件，要么通过三个原语（它们在内部
+         * 渲染 MenuScrollScope），要么自己写一层。漏掉一处的症状是"这张菜单有滚动
+         * 条/滚不动却没提示"，用户不知道还能往下翻。
+         */
+        const PRIMITIVES = /AppContextMenu|AppAnchoredMenu|AppSubMenu/;
+        const offenders: string[] = [];
+        for (const file of sourceFiles(/\.tsx$/)) {
+            if (file.startsWith(UI_DIR)) continue;
+            const source = readFileSync(file, "utf8");
+            // 保留字符串（类名就在里面），只剥注释。hs-menu 后面必须是引号或空白 ——
+            // 这样 hs-menu__item / hs-menu--submenu 不算"拥有壳"。
+            const kept = stripCommentsAndStrings(source, true);
+            if (!/(^|["'\s])hs-menu(?=["'\s])/.test(kept)) continue;
+            if (PRIMITIVES.test(source)) continue;
+            if (source.includes("MenuScrollScope")) continue;
+            offenders.push(file);
+        }
+        expect(
+            offenders,
+            "自己渲染菜单壳的文件必须包一层 MenuScrollScope（内边距与提示行都在它里面）",
+        ).toEqual([]);
+    });
+});
