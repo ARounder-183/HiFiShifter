@@ -28,7 +28,14 @@
 #
 # Artifacts:
 #   Linux   dist/HiFiShifter_v<version>_<os>-<arch>-unified.tar.gz (includes install.sh)
-#   macOS   dist/HiFiShifter_v<version>_<os>-<arch>-unified.pkg (installs to /Applications and /Library)
+#   macOS   dist/HiFiShifter_v<version>_<os>-<arch>-unified.pkg
+#             a product archive: welcome / readme / licence / conclusion pages, one
+#             selectable choice per plug-in format, and the payload split so that "app
+#             only" is a real answer. Installs to /Applications and /Library.
+#           dist/HiFiShifter_v<version>_<os>-<arch>-uninstaller.pkg
+#             removes every file and receipt the installer wrote, system-wide and
+#             per-user. A copy also rides in the payload, so it is still on the machine
+#             after the download is gone.
 #   Plugins dist/HiFiShifter_v<version>_<os>-<arch>-plugins.tar.gz / .pkg
 #
 # Signing and notarization: once HIFISHIFTER_CODESIGN_IDENTITY is set, macOS signs with Developer
@@ -75,6 +82,7 @@ Usage: scripts/build/unix/package.sh [options]
                         architecture. macOS only
   --appimage=FILE       Linux unified: install an existing AppImage into the tar.gz too
   --app-bundle=DIR      macOS unified: install an existing .app into the pkg too
+                        (macOS always also produces the -uninstaller.pkg artifact)
   -h, --help
 USAGE
 }
@@ -112,6 +120,10 @@ MODEL_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))
 readonly PRODUCT_VERSION MODEL_VERSION
 ARTIFACT_BASE="$OUT_DIR/HiFiShifter_v${PRODUCT_VERSION}_${HFS_TAG}-plugins"
 UNIFIED_BASE="$OUT_DIR/HiFiShifter_v${PRODUCT_VERSION}_${HFS_TAG}-unified"
+UNINSTALLER_BASE="$OUT_DIR/HiFiShifter_v${PRODUCT_VERSION}_${HFS_TAG}-uninstaller"
+# CFBundleVersion and pkg versions only accept dot-separated integers; the full version
+# (including -beta) travels in the artifact name and in the bundles' custom Info.plist key.
+MACOS_NUMERIC_VERSION="$(hfs_numeric_version "$PRODUCT_VERSION")"
 
 log "Platform ${HFS_TAG} | Version ${PRODUCT_VERSION} | Models ${MODEL_VERSION} | Formats ${FORMATS} | profile $PROFILE"
 
@@ -436,58 +448,158 @@ package_linux_unified() {
     rm -rf "$stage"
 }
 
+# macOS: component packages + a product archive, and the standalone uninstaller.
+#
+# [Why the payload is split into component packages] A product archive is assembled from
+# component packages, one per choice. Installer records a receipt per component and installs
+# only the ones the user left selected, so the split is what makes "I only want the app" a
+# real answer -- "pkgbuild --root" over one tree can only produce one all-or-nothing choice,
+# which is exactly what this script used to do.
+#
+# [Why the Distribution XML and its resources are generated] Installer localizes in exactly
+# two ways: .lproj folders, and Localizable.strings -- the choice title/description
+# attributes are localization keys. Both are derived from the same five-language catalog the
+# Windows installer reads, by scripts/release/build-macos-pkg.mjs.
+#
+# [Why each component package is named after its choice] The Distribution references
+# "<choice>.pkg" and this script writes "$pkgs/<choice>.pkg", so there is no third list of
+# filenames to keep in step.
+
+# <choice> <root-dir> <output-pkg>
+macos_component_pkg() {
+    local choice="$1" root="$2" out="$3"
+    rm -f "$out"
+    pkgbuild --root "$root" \
+        --identifier "com.arounder.hifishifter.$choice" \
+        --version "$MACOS_NUMERIC_VERSION" \
+        --install-location / --ownership recommended "$out" >/dev/null \
+        || die "pkgbuild failed for the '$choice' component"
+}
+
+# <tool>... : the pkg tools are Xcode command line tools, node runs the layout generator.
+# Checked together so the failure names the reason instead of "command not found".
+require_macos_pkg_tools() {
+    command -v pkgbuild >/dev/null 2>&1 || die "pkgbuild missing (Xcode command line tools required)"
+    command -v productbuild >/dev/null 2>&1 || die "productbuild missing (Xcode command line tools required)"
+    command -v node >/dev/null 2>&1 || die "node missing: the installer pages are generated from frontend/src/i18n"
+}
+
+# The layout generator compiles frontend/src/i18n/*.ts with the esbuild the frontend already
+# depends on (see scripts/release/catalog.mjs for why it is compiled rather than parsed).
+#
+# [Why this installs instead of failing] The workflow builds the frontend in its own job and
+# ships only dist/ to this one, so frontend/node_modules is genuinely absent here. Failing
+# would make "package the app" depend on a directory that has nothing to do with packaging;
+# installing is the same one-liner stage_frontend already uses, and it only runs when the
+# module is missing.
+ensure_macos_pkg_node_deps() {
+    [ -d "$REPO_ROOT/frontend/node_modules/esbuild" ] && return 0
+    log "frontend/node_modules is missing: installing it (the installer pages come from frontend/src/i18n)"
+    ( cd "$REPO_ROOT/frontend" && npm ci --include=dev --no-audit --no-fund ) \
+        || die "npm ci failed: the installer pages are generated from frontend/src/i18n"
+}
+
+# The uninstaller: a product archive whose single component package carries no payload, only
+# the removal script. Published next to the installer and copied into the installer's payload.
+package_macos_uninstaller() {
+    local work="$OUT_DIR/pkg-uninstaller"
+    step "packaging the macOS uninstaller pkg"
+    require_macos_pkg_tools
+    ensure_macos_pkg_node_deps
+    rm -rf "$work"
+    mkdir -p "$work/pkgs" "$work/scripts"
+    cp -f "$REPO_ROOT/scripts/release/macos-pkg/uninstall.sh" "$work/scripts/postinstall"
+    chmod +x "$work/scripts/postinstall"
+    pkgbuild --nopayload --identifier com.arounder.hifishifter.uninstaller \
+        --version "$MACOS_NUMERIC_VERSION" --scripts "$work/scripts" \
+        "$work/pkgs/uninstaller.pkg" >/dev/null || die "pkgbuild failed (uninstaller)"
+    node "$REPO_ROOT/scripts/release/build-macos-pkg.mjs" --kind=uninstall \
+        --out="$work/resources" --version="$MACOS_NUMERIC_VERSION" \
+        || die "generating the macOS uninstaller layout failed"
+    rm -f "$UNINSTALLER_BASE.pkg"
+    productbuild --distribution "$work/resources/distribution.xml" \
+        --package-path "$work/pkgs" --resources "$work/resources" \
+        "$UNINSTALLER_BASE.pkg" >/dev/null || die "productbuild failed (uninstaller)"
+    rm -rf "$work"
+    sign_macos_pkg "$UNINSTALLER_BASE.pkg"
+}
+
 # macOS unified: /Applications/HiFiShifter.app + VST3 + CLAP + one shared model store.
 # The pkg installs at root /, so the directory structure mirrors the real system; the App and
 # plugin bundles keep only models.json, and the weights go to
 # /Library/Application Support/HiFiShifter/models/<version>.
 package_macos_unified() {
-    local root="$OUT_DIR/pkgroot-unified" numeric app
+    local work="$OUT_DIR/pkg-unified" pkgs="$OUT_DIR/pkg-unified/pkgs"
+    local app_root="$work/root-app" models_root="$work/root-models"
+    local vst3_root="$work/root-vst3" clap_root="$work/root-clap"
+    local app shared="$work/root-app/Library/Application Support/HiFiShifter"
+
     step "packaging the macOS unified pkg"
-    command -v pkgbuild >/dev/null 2>&1 || die "pkgbuild missing (Xcode command line tools required)"
+    require_macos_pkg_tools
+    ensure_macos_pkg_node_deps
     [ -d "$APP_BUNDLE" ] || die "--app-bundle directory does not exist: $APP_BUNDLE"
     [ "$(basename "$APP_BUNDLE")" = "HiFiShifter.app" ] \
         || die "--app-bundle must be HiFiShifter.app: $APP_BUNDLE"
+    [ -f "$UNINSTALLER_BASE.pkg" ] \
+        || die "the uninstaller pkg is missing: $UNINSTALLER_BASE.pkg"
 
-    rm -rf "$root"
-    mkdir -p "$root/Applications" \
-             "$root/Library/Audio/Plug-Ins/VST3" \
-             "$root/Library/Audio/Plug-Ins/CLAP" \
-             "$root/Library/Application Support/HiFiShifter/models/$MODEL_VERSION"
+    rm -rf "$work"
+    mkdir -p "$pkgs" \
+             "$app_root/Applications" \
+             "$models_root/Library/Application Support/HiFiShifter/models/$MODEL_VERSION" \
+             "$vst3_root/Library/Audio/Plug-Ins/VST3" \
+             "$clap_root/Library/Audio/Plug-Ins/CLAP"
 
-    cp -R "$APP_BUNDLE" "$root/Applications/"
-    app="$root/Applications/HiFiShifter.app"
+    # The App bundle: strip its weights to the manifest (they exist once, in the shared
+    # store), then sign -- after the copy, because the signature covers every file inside.
+    cp -R "$APP_BUNDLE" "$app_root/Applications/"
+    app="$app_root/Applications/HiFiShifter.app"
     hfs_strip_models_to_manifest "$app/Contents/Resources/models"
     hfs_sign_bundle "$app" "$app/Contents/MacOS/HiFiShifter"
 
+    # Licences and the uninstaller ride with the App component: it cannot be deselected, so
+    # they are always there, and the removal script deletes them together with it.
+    mkdir -p "$shared"
+    cp -f "$REPO_ROOT/LICENSE" "$shared/LICENSE"
+    cp -R "$REPO_ROOT/licenses" "$shared/licenses"
+    cp -f "$UNINSTALLER_BASE.pkg" "$shared/Uninstall HiFiShifter.pkg"
+
+    cp -R "$MODELS_SRC/." \
+        "$models_root/Library/Application Support/HiFiShifter/models/$MODEL_VERSION/"
+
     if wants vst3; then
         [ -d "$OUT_DIR/HiFiShifter.vst3" ] || die "missing $OUT_DIR/HiFiShifter.vst3"
-        cp -R "$OUT_DIR/HiFiShifter.vst3" "$root/Library/Audio/Plug-Ins/VST3/"
+        cp -R "$OUT_DIR/HiFiShifter.vst3" "$vst3_root/Library/Audio/Plug-Ins/VST3/"
         hfs_strip_models_to_manifest \
-            "$root/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3/Contents/Resources/models"
+            "$vst3_root/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3/Contents/Resources/models"
         hfs_sign_bundle \
-            "$root/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3" \
-            "$root/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3/Contents/MacOS/HiFiShifter"
+            "$vst3_root/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3" \
+            "$vst3_root/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3/Contents/MacOS/HiFiShifter"
     fi
     if wants clap; then
         [ -d "$OUT_DIR/clap/HiFiShifter.clap" ] || die "missing $OUT_DIR/clap/HiFiShifter.clap"
-        cp -R "$OUT_DIR/clap/HiFiShifter.clap" "$root/Library/Audio/Plug-Ins/CLAP/"
+        cp -R "$OUT_DIR/clap/HiFiShifter.clap" "$clap_root/Library/Audio/Plug-Ins/CLAP/"
         hfs_strip_models_to_manifest \
-            "$root/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap/Contents/Resources/models"
+            "$clap_root/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap/Contents/Resources/models"
         hfs_sign_bundle \
-            "$root/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap" \
-            "$root/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap/Contents/MacOS/HiFiShifter"
+            "$clap_root/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap" \
+            "$clap_root/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap/Contents/MacOS/HiFiShifter"
     fi
 
-    cp -R "$MODELS_SRC/." "$root/Library/Application Support/HiFiShifter/models/$MODEL_VERSION/"
-    cp -f "$REPO_ROOT/LICENSE" "$root/Library/Application Support/HiFiShifter/LICENSE"
-    cp -R "$REPO_ROOT/licenses" "$root/Library/Application Support/HiFiShifter/licenses"
+    macos_component_pkg app "$app_root" "$pkgs/app.pkg"
+    macos_component_pkg models "$models_root" "$pkgs/models.pkg"
+    if wants vst3; then macos_component_pkg vst3 "$vst3_root" "$pkgs/vst3.pkg"; fi
+    if wants clap; then macos_component_pkg clap "$clap_root" "$pkgs/clap.pkg"; fi
 
-    numeric="$(hfs_numeric_version "$PRODUCT_VERSION")"
+    node "$REPO_ROOT/scripts/release/build-macos-pkg.mjs" --kind=install \
+        --out="$work/resources" --version="$MACOS_NUMERIC_VERSION" --formats="$FORMATS" \
+        || die "generating the macOS pkg layout failed"
+
     rm -f "$UNIFIED_BASE.pkg"
-    pkgbuild --root "$root" --identifier com.hifishifter.unified --version "$numeric" \
-        --install-location / --ownership recommended "$UNIFIED_BASE.pkg" >/dev/null \
-        || die "pkgbuild failed"
-    rm -rf "$root"
+    productbuild --distribution "$work/resources/distribution.xml" \
+        --package-path "$pkgs" --resources "$work/resources" \
+        "$UNIFIED_BASE.pkg" >/dev/null || die "productbuild failed"
+    rm -rf "$work"
     sign_macos_pkg "$UNIFIED_BASE.pkg"
 }
 
@@ -517,6 +629,9 @@ if [ -n "$MERGE_APP_ARCH" ]; then merge_app_arch "$MERGE_APP_ARCH"; fi
 if [ "$HFS_OS" = "linux" ]; then
     if [ -n "$APPIMAGE" ]; then package_linux_unified; else package_linux_plugins; fi
 else
+    # The uninstaller comes first: the unified package embeds a copy of it, and a
+    # plugins-only package still needs one published next to it.
+    package_macos_uninstaller
     if [ -n "$APP_BUNDLE" ]; then package_macos_unified; else package_macos_plugins; fi
 fi
 
