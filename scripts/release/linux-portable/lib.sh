@@ -27,6 +27,17 @@ hfs_home() { printf '%s' "${HOME:-}"; }
 # which is exactly why they are used.
 hfs_layout() {
     local app_dir="$1" home data
+    # [Why the prefix is canonicalised] Every removal is checked against a root by string prefix, so
+    # "./app" or "/home/me/../me/app" would never match the path later written into the manifest
+    # (or, worse, would match something it should not). realpath -m also resolves symlinked home
+    # directories and accepts a directory that does not exist yet.
+    case "$app_dir" in
+        /*) ;;
+        *) app_dir="$(pwd)/$app_dir" ;;
+    esac
+    if command -v realpath >/dev/null 2>&1; then
+        app_dir="$(realpath -m -- "$app_dir")"
+    fi
     home="$(hfs_home)"
     [ -n "$home" ] || hfs_die "HOME is not set: a per-user install needs it (use the .deb/.rpm for a system install)"
     data="${XDG_DATA_HOME:-$home/.local/share}"

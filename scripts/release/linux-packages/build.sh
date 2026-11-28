@@ -252,7 +252,9 @@ require_stage() {
     HFS_MODEL_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' \
         "$STAGE/models/models.json")" || die "stage/models/models.json is missing: $STAGE"
     HFS_MODEL_PKG_VERSION="$(model_pkg_version "$HFS_MODEL_VERSION")"
-    verify_models_tree
+    # [Why only for the models package] A plug-ins-only build stages models.json alone, just to
+    # learn the version for the dependency; the weights are the models package's payload.
+    if wants models; then verify_models_tree; fi
     log "version $HFS_PRODUCT_VERSION (deb $HFS_DEB_VERSION / rpm $HFS_RPM_VERSION-$HFS_RPM_RELEASE) | models $HFS_MODEL_VERSION | arch $HFS_DEB_ARCH"
 }
 

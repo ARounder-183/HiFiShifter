@@ -16,7 +16,7 @@ It asks once and prints every file it writes. Unattended:
 Defaults: the app in ~/.local/lib/hifishifter, the hifishifter command in ~/.local/bin, the
 plug-ins in ~/.vst3 and ~/.clap, and the shared weights in $XDG_DATA_HOME/HiFiShifter/models.
 Use --prefix=DIR to put the app files elsewhere, or --components=app,models,vst3,clap,menu,mime
-to install only some of them.
+to install only some of them (the default is everything this bundle contains).
 
 Uninstall
 ---------
