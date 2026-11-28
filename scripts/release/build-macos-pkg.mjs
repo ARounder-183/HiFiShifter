@@ -30,10 +30,13 @@
  *   Localizable.strings               English choice titles and descriptions
  *   <lproj>/{welcome,readme,conclusion}.html, Localizable.strings
  *
- * The `.lproj` names are the ones Installer itself ships (zh_CN / zh_TW / ja / ko): the
- * legacy Apple spelling for Chinese, the ISO code for the other two. English lives at the
- * root on purpose — a non-localized resource is the documented fallback for every language
- * that has no folder, so French users get English instead of an empty page.
+ * The `.lproj` names are the language identifiers Installer resolves against (ja / ko /
+ * zh-Hans / zh-Hant): the script for Chinese, the ISO code for the other two. The legacy
+ * spellings (zh_CN, zh_TW) are not what Installer looks for -- `productbuild` rewrites them
+ * to the canonical names on the way into the archive, so writing the canonical names here
+ * keeps the generated layout and the packaged one identical. English lives at the root on
+ * purpose: a non-localized resource is the documented fallback for every language that has
+ * no folder, so French users get English instead of an empty page.
  */
 
 import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
@@ -44,8 +47,8 @@ import { collectInstallerStrings, repoRoot } from "./catalog.mjs";
 /** Catalog locale -> `.lproj` folder name (null = the unlocalized root). */
 const LPROJ = {
     "en-US": null,
-    "zh-CN": "zh_CN",
-    "zh-TW": "zh_TW",
+    "zh-CN": "zh-Hans",
+    "zh-TW": "zh-Hant",
     "ja-JP": "ja",
     "ko-KR": "ko",
 };

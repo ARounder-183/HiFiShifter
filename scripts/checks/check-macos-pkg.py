@@ -57,9 +57,10 @@ TAURI_CONF = ROOT / "backend/src-tauri/tauri.conf.json"
 APP_PATHS = ROOT / "backend/hifishifter-kernel/src/app_paths.rs"
 
 # Installer looks for these folder names, not for the ISO tags the frontend uses. The two
-# Chinese ones are the legacy Apple spelling, which is what Installer.app itself ships;
-# "zh-CN.lproj" is never consulted.
-LOCALIZED = ("ja", "ko", "zh_CN", "zh_TW")
+# Chinese ones are the canonical identifiers (`zh-Hans`, `zh-Hant`), not the legacy
+# `zh_CN`/`zh_TW` spelling: productbuild rewrites the legacy names to these on the way into
+# the archive, so "zh_CN.lproj" in the generated layout is a name no packaged pkg carries.
+LOCALIZED = ("ja", "ko", "zh-Hans", "zh-Hant")
 PAGES = ("welcome.html", "readme.html", "conclusion.html")
 
 # A product version is not a model size; a number followed by a storage unit is.
