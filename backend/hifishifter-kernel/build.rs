@@ -80,6 +80,23 @@ fn target_os() -> String {
     std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default()
 }
 
+/// **目标**架构，按 CMake 在 Apple 平台上的拼写返回（Rust 说 `aarch64`，CMake 说 `arm64`）。
+///
+/// 【为什么必须由我们自己给】本模块直接 spawn `cmake`，**不经过 `cmake` crate** —— 那个 crate
+/// 会在交叉编译时自动补 `-DCMAKE_OSX_ARCHITECTURES`，但这条代码路径上它根本不存在。少了
+/// 这个值，cmake 永远按**宿主**架构产出：在 Apple Silicon 上交叉编 x86_64 时，dylib 仍是
+/// arm64，而 Rust 侧一切正常 —— universal 包里于是混进一个单架构依赖，只有 `lipo -archs`
+/// 能发现（run 46099076516 的 `Assert universal Mach-O` 就是这样红的）。
+fn cmake_apple_arch() -> String {
+    match std::env::var("CARGO_CFG_TARGET_ARCH")
+        .unwrap_or_default()
+        .as_str()
+    {
+        "aarch64" => "arm64".to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// 目标是否是移动形态（Android / iOS）。
 ///
 /// 【为什么需要它】内核里两处原生依赖是**桌面专属**的：
@@ -784,12 +801,14 @@ fn build_soundtouch() {
     // 【已经最新就不必再问 cmake】构建脚本在**每次 `git commit`、每次改 `src/`** 时都会
     // 重跑；而这段代码是它里面唯一一段"跑子进程"的工作。三条 stat 就能回答"要不要跑"，
     // 于是那些必然发生的重跑从 0.5–1.5 s 变成 0.1 ms。
+    let apple_arch = is_apple.then(cmake_apple_arch);
     if soundtouch_is_fresh(
         &build_dir,
         st_src_path,
         requested_generator.as_deref(),
         is_windows,
         is_apple,
+        apple_arch.as_deref(),
     ) {
         println!(
             "cargo:warning=[soundtouch] reusing {} (up to date)",
@@ -810,6 +829,7 @@ fn build_soundtouch() {
                 &rc_shim_dir,
                 is_windows,
                 is_apple,
+                apple_arch.as_deref(),
             ) {
                 Ok(()) => break,
                 Err(message) => {
@@ -955,6 +975,7 @@ fn soundtouch_is_fresh(
     generator: Option<&str>,
     is_windows: bool,
     is_apple: bool,
+    apple_arch: Option<&str>,
 ) -> bool {
     let Ok(text) = std::fs::read_to_string(build_dir.join("CMakeCache.txt")) else {
         return false;
@@ -964,6 +985,18 @@ fn soundtouch_is_fresh(
             .lines()
             .find_map(|line| line.strip_prefix("CMAKE_GENERATOR:INTERNAL="));
         if recorded.is_some_and(|value| value != wanted) {
+            return false;
+        }
+    }
+    // 【为什么架构也算"新鲜"的一部分】缓存里没有这一项 = 这棵树是在"还没把架构传给 cmake"
+    // 的时候 configure 的，产物是宿主架构。判为不新鲜，让它重配一次 —— 否则修好之后，凡是
+    // 本地已经跑过一次旧代码的人都会继续拿到那份错的 dylib。
+    if let Some(wanted) = apple_arch {
+        let recorded = text
+            .lines()
+            .find_map(|line| line.strip_prefix("CMAKE_OSX_ARCHITECTURES:"))
+            .and_then(|rest| rest.split_once('=').map(|(_kind, value)| value));
+        if recorded != Some(wanted) {
             return false;
         }
     }
@@ -1093,6 +1126,7 @@ fn configure_and_build_soundtouch(
     rc_shim_dir: &Path,
     is_windows: bool,
     is_apple: bool,
+    apple_arch: Option<&str>,
 ) -> Result<(), String> {
     // 【缺工具时立刻说人话】生成器由环境层钉住；这里只负责在"它要的那个可执行文件不在
     // PATH 上"时，把可执行的下一步直接写进错误信息，而不是让 cmake 抛两条互不相关的报错。
@@ -1148,6 +1182,10 @@ fn configure_and_build_soundtouch(
     if is_apple {
         cfg.arg("-DCMAKE_INSTALL_NAME_DIR=@rpath");
         cfg.arg("-DCMAKE_MACOSX_RPATH=ON");
+        // 见 `cmake_apple_arch`：不给这一项，cmake 就按宿主架构编。
+        if let Some(arch) = apple_arch {
+            cfg.arg(format!("-DCMAKE_OSX_ARCHITECTURES={arch}"));
+        }
     }
 
     println!("cargo:warning=[soundtouch] spawning cmake configure...");

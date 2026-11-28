@@ -698,25 +698,46 @@ jobs:
               fi
           }
 
+          # Dylibs that exist for ONE architecture only. The x86_64 slice links ort-tract, so it
+          # has neither onnxruntime nor dawn; dyld resolves nothing the current slice does not
+          # reference, so the arm64 copies are harmless there. They appear in the App's
+          # Resources/macos and in each plugin bundle's Frameworks, because hfs_runtime_deps
+          # stages them for arm64 only.
+          ARCH_EXCLUSIVE="libonnxruntime.dylib libwebgpu_dawn.dylib"
+
+          is_arch_exclusive() {
+              local name candidate
+              name="$(basename "$1")"
+              for candidate in $ARCH_EXCLUSIVE; do
+                  [ "$name" = "$candidate" ] && return 0
+              done
+              return 1
+          }
+
+          # <dir>: every Mach-O inside carries both slices, except the arch-exclusive dylibs,
+          # which must carry exactly arm64.
+          check_tree() {
+              local dir="$1" f
+              while IFS= read -r -d '' f; do
+                  file -b "$f" | grep -q 'Mach-O' || continue
+                  if is_arch_exclusive "$f"; then
+                      expect_archs "$f" "arm64"
+                  else
+                      expect_archs "$f" "arm64 x86_64"
+                  fi
+              done < <(find "$dir" -type f -print0)
+          }
+
           [ -d "$APP" ] || { echo "ERROR: $APP not found" >&2; exit 1; }
           echo "=== $APP ==="
+          check_tree "$APP"
 
-          # 1) Architecture-exclusive dylibs stay arm64-only: the x86_64 slice links ort-tract,
-          #    so it has no onnxruntime at all and dyld never resolves these.
-          #    The [ -e ] guard is not optional: an empty directory leaves the glob unexpanded,
-          #    and the assertion would then fail as "file does not exist" while everything is
-          #    actually fine.
-          for f in "$APP"/Contents/Resources/macos/*.dylib; do
-              [ -e "$f" ] || continue
-              expect_archs "$f" "arm64"
-          done
-
-          # 2) Every other Mach-O carries both slices.
-          while IFS= read -r -d '' f; do
-              case "$f" in "$APP"/Contents/Resources/macos/*) continue ;; esac
-              file -b "$f" | grep -q 'Mach-O' || continue
-              expect_archs "$f" "arm64 x86_64"
-          done < <(find "$APP" -type f -print0)
+          # The arm64 slice must actually have its ORT dylibs: an App without them starts fine
+          # and then fails on the first inference on Apple Silicon.
+          if ! find "$APP/Contents/Resources/macos" -name '*.dylib' -print -quit 2>/dev/null | grep -q .; then
+              echo "  FAIL no ORT dylib under Contents/Resources/macos (stage_ort_macos_dylibs produced nothing)" >&2
+              FAIL=1
+          fi
 
           # 3) The x86_64 slice must not reference onnxruntime. Written as `if`, not as
           #    "cmd | grep -q X && exit 1": under `set -e` a non-matching grep makes the whole
@@ -729,14 +750,10 @@ jobs:
           # 4) lipo invalidates signatures, so this is the only proof that the re-sign took.
           codesign --verify --deep --strict "$APP" || FAIL=1
 
-          # The plugins go through the same merge and have no architecture-exclusive directory.
           for bundle in "$DIST/HiFiShifter.vst3" "$DIST/clap/HiFiShifter.clap"; do
               if [ ! -d "$bundle" ]; then echo "  FAIL missing $bundle" >&2; FAIL=1; continue; fi
               echo "=== $bundle ==="
-              while IFS= read -r -d '' f; do
-                  file -b "$f" | grep -q 'Mach-O' || continue
-                  expect_archs "$f" "arm64 x86_64"
-              done < <(find "$bundle" -type f -print0)
+              check_tree "$bundle"
               codesign --verify --deep --strict "$bundle" || FAIL=1
           done
 

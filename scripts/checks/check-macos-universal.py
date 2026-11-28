@@ -196,7 +196,7 @@ def main() -> int:
                 "that cannot fail is documentation"
             )
         for needle, why in (
-            ("Contents/Resources/macos/*.dylib", "the arm64-only allowlist is not checked"),
+            ("ARCH_EXCLUSIVE", "the arm64-only allowlist is not checked"),
             ("lipo -archs", "no file's slices are inspected"),
             ("otool -arch x86_64", "the x86_64 slice's dependencies are not inspected"),
             ("codesign --verify", "the re-sign after lipo is not verified"),
