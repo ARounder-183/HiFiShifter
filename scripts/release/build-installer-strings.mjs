@@ -11,11 +11,9 @@
  * "add a language" take effect automatically and makes a missing translation
  * **fail immediately** at installer build time.
  *
- * [Why esbuild instead of regex-parsing the .ts] The catalog contains
- * multi-line strings as well as comments; a regex would eventually be tripped
- * up by one comment line or one newline, and the failure mode is "quietly
- * dropping one string". Compiling it to JS with the esbuild already in the
- * repo and evaluating it yields the real object.
+ * [Why the catalog loader is a separate module] The macOS pkg generator
+ * (`build-macos-pkg.mjs`) reads the very same entries. One loader, one
+ * definition of "the installer copy".
  *
  * Usage:
  *   node scripts/release/build-installer-strings.mjs           # generate
@@ -23,29 +21,22 @@
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { collectInstallerStrings, KEY_PREFIX, MACOS_KEY_PREFIX } from "./catalog.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(scriptDir, "..", "..");
-const catalogDir = join(repoRoot, "frontend", "src", "i18n");
 const outputPath = join(scriptDir, "installer", "installer_strings.nsh");
 
-/** Catalog language → NSIS language constant. All five `.nlf` files ship with NSIS. */
-const LANGUAGES = [
-    { locale: "en-US", nsis: "English", export: "enUS", suffix: "EN" },
-    { locale: "zh-CN", nsis: "SimpChinese", export: "zhCN", suffix: "ZH_CN" },
-    { locale: "zh-TW", nsis: "TradChinese", export: "zhTW", suffix: "ZH_TW" },
-    { locale: "ja-JP", nsis: "Japanese", export: "jaJP", suffix: "JA" },
-    { locale: "ko-KR", nsis: "Korean", export: "koKR", suffix: "KO" },
-];
-
-/** Default language: NSIS falls back to the first one when the system language matches none. */
-const DEFAULT_LANGUAGE = LANGUAGES[0];
-
-/** Key prefix that gets extracted. */
-const KEY_PREFIX = "installer_";
+/** Catalog locale → NSIS language constant. All five `.nlf` files ship with NSIS. */
+const NSIS_LANGUAGE = {
+    "en-US": "English",
+    "zh-CN": "SimpChinese",
+    "zh-TW": "TradChinese",
+    "ja-JP": "Japanese",
+    "ko-KR": "Korean",
+};
 
 /** NSIS `LangString` name: `installer_welcome_title` → `HFS_WELCOME_TITLE`. */
 function langStringName(key) {
@@ -72,59 +63,12 @@ function nsisEscape(text) {
     return out;
 }
 
-/** Compile the catalog `.ts` into JS and evaluate it, taking the exported dictionary. */
-async function loadCatalog(entry) {
-    // esbuild is installed under frontend; `import()` needs a file:// URL (a
-    // Windows drive-letter path is rejected by the ESM loader as a protocol).
-    const esbuildEntry = createRequire(import.meta.url).resolve("esbuild", {
-        paths: [join(repoRoot, "frontend")],
-    });
-    const esbuild = await import(pathToFileURL(esbuildEntry).href);
-    const source = readFileSync(join(catalogDir, `${entry.locale}.ts`), "utf8");
-    const { code } = await esbuild.transform(source, { loader: "ts", format: "cjs" });
-    const module = { exports: {} };
-    // The catalog is a pure data module (only `export const x = {...} as const`); evaluating it is safe.
-    new Function("module", "exports", code)(module, module.exports);
-    const catalog = module.exports[entry.export];
-    if (!catalog || typeof catalog !== "object") {
-        throw new Error(`catalog ${entry.locale} did not export ${entry.export}`);
-    }
-    return catalog;
-}
-
-/** Collect the installer copy for every language; a missing key fails. */
-async function collectStrings() {
-    const catalogs = [];
-    for (const entry of LANGUAGES) {
-        catalogs.push({ entry, catalog: await loadCatalog(entry) });
-    }
-
-    const keys = Object.keys(catalogs[0].catalog)
-        .filter((key) => key.startsWith(KEY_PREFIX))
-        .sort();
-    if (keys.length === 0) {
-        throw new Error(`no keys with the ${KEY_PREFIX} prefix found in ${LANGUAGES[0].locale}`);
-    }
-
-    const missing = [];
-    for (const { entry, catalog } of catalogs) {
-        for (const key of keys) {
-            const value = catalog[key];
-            if (typeof value !== "string" || value.trim() === "") {
-                missing.push(`${entry.locale}: ${key}`);
-            }
-        }
-    }
-    if (missing.length > 0) {
-        throw new Error(
-            "installer strings are missing (add them to every catalog):\n  " + missing.join("\n  "),
-        );
-    }
-
-    return { keys, catalogs };
-}
-
 function render({ keys, catalogs }) {
+    const languages = catalogs.map(({ locale }) => NSIS_LANGUAGE[locale]);
+    if (languages.some((name) => !name)) {
+        throw new Error("a catalog locale has no NSIS language constant");
+    }
+
     const lines = [
         "; Generated by scripts/release/build-installer-strings.mjs — do not edit by hand.",
         ";",
@@ -132,17 +76,17 @@ function render({ keys, catalogs }) {
         "; editing this file directly gets overwritten on the next generation, and",
         "; scripts/checks/check-product-consistency.ps1 fails on the mismatch.",
         "",
-        `; Languages: ${LANGUAGES.map((entry) => `${entry.locale}→${entry.nsis}`).join(", ")}`,
-        `; Entries: ${keys.length} × ${LANGUAGES.length} languages`,
+        `; Languages: ${catalogs.map(({ locale }) => `${locale}→${NSIS_LANGUAGE[locale]}`).join(", ")}`,
+        `; Entries: ${keys.length} × ${catalogs.length} languages`,
         "",
     ];
 
     for (const key of keys) {
         const name = langStringName(key);
         lines.push(`; ${key}`);
-        for (const { entry, catalog } of catalogs) {
+        for (const { locale, catalog } of catalogs) {
             lines.push(
-                `LangString ${name} \${LANG_${entry.nsis.toUpperCase()}} "${nsisEscape(catalog[key])}"`,
+                `LangString ${name} \${LANG_${NSIS_LANGUAGE[locale].toUpperCase()}} "${nsisEscape(catalog[key])}"`,
             );
         }
         lines.push("");
@@ -157,8 +101,8 @@ function render({ keys, catalogs }) {
         "; at that point $LANGUAGE is unset and $(HFS_...) resolves to nothing, so all five languages are concatenated.",
         "!macro HFS_FATAL_NOT_X64",
     );
-    for (const { entry, catalog } of catalogs) {
-        lines.push(`  ; ${entry.locale}`);
+    for (const { locale, catalog } of catalogs) {
+        lines.push(`  ; ${locale}`);
         lines.push(`  StrCpy $0 "$0${nsisEscape(catalog.installer_err_not_x64)}$\\r$\\n"`);
     }
     lines.push('  MessageBox MB_OK|MB_ICONSTOP "$0"', "!macroend", "");
@@ -168,7 +112,14 @@ function render({ keys, catalogs }) {
 
 async function main() {
     const checkOnly = process.argv.includes("--check");
-    const strings = await collectStrings();
+    const collected = await collectInstallerStrings();
+    // [Why the macOS copy is filtered out] It is validated above (every language has it), but
+    // the NSIS wizard never shows it: a LangString nobody references is dead weight in a
+    // 15 × 5 block, and it invites "why is this here?" during review.
+    const strings = {
+        keys: collected.keys.filter((key) => !key.startsWith(MACOS_KEY_PREFIX)),
+        catalogs: collected.catalogs,
+    };
     const rendered = render(strings);
 
     if (checkOnly) {
@@ -191,7 +142,7 @@ async function main() {
     // scripts/**/*.ps1).
     writeFileSync(outputPath, "\uFEFF" + rendered, "utf8");
     console.log(
-        `wrote ${outputPath} (${strings.keys.length} keys × ${LANGUAGES.length} languages)`,
+        `wrote ${outputPath} (${strings.keys.length} keys × ${strings.catalogs.length} languages)`,
     );
 }
 
