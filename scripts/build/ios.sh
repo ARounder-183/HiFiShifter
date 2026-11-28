@@ -32,13 +32,19 @@ if [ "$(uname -s)" != "Darwin" ]; then
   exit 1
 fi
 
-# `cargo tauri` is what this repository uses for desktop builds; a clean CI runner only
-# has npm. `npx tauri` is not an option -- no such executable exists on npm.
-if command -v cargo-tauri >/dev/null 2>&1; then
-  tauri_cli=(cargo tauri)
-else
-  tauri_cli=(npx --yes --package @tauri-apps/cli@2 tauri)
+# [Why npx cannot be used here] `ios init` bakes the CLI invocation into the Xcode
+# "Build Rust Code" phase. Started through npx the CLI sees itself running as node and
+# records `npx tauri ios xcode-script ...`, which npm later reads as "run the package
+# named tauri" and fails inside gen/apple with
+#   npm error path .../gen/apple/package.json
+#   npm error enoent Could not read package.json
+# `cargo tauri` is recorded as `cargo tauri ...`, which is what the phase expects.
+if ! command -v cargo-tauri >/dev/null 2>&1; then
+  echo "cargo-tauri is required to build iOS: the Xcode build phase re-invokes the CLI." >&2
+  echo "Install it once with: cargo install tauri-cli --version '^2' --locked" >&2
+  exit 1
 fi
+tauri_cli=(cargo tauri)
 
 # gen/apple is produced by `tauri ios init` and cannot be generated on a non-macOS
 # host, so unlike gen/android it is not committed. `ios build` stops with "iOS project

@@ -192,6 +192,14 @@ jobs:
           set -euo pipefail
           rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 
+      # The Xcode project's "Build Rust Code" phase re-invokes the CLI recorded by
+      # `ios init`, and only the cargo subcommand survives that round trip (see
+      # scripts/build/ios.sh for the npx failure it replaces).
+      - name: Install cargo-tauri
+        run: |
+          set -euo pipefail
+          cargo install tauri-cli --version '^2' --locked
+
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
