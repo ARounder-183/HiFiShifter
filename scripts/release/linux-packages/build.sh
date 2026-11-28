@@ -207,7 +207,9 @@ ensure_nfpm() {
     else
         candidate="$TOOL_CACHE/nfpm-$NFPM_VERSION/nfpm"
         if [ ! -x "$candidate" ]; then
-            step "downloading nfpm $NFPM_VERSION"
+            # [Why stderr] ensure_nfpm stdout is the binary path ("NFPM=$(ensure_nfpm)"); a
+            # progress line on stdout would become part of the command build_package runs.
+            step "downloading nfpm $NFPM_VERSION" >&2
             mkdir -p "$(dirname "$candidate")"
             tarball="$TOOL_CACHE/nfpm-$NFPM_VERSION.tar.gz"
             curl -fsSL -o "$tarball" \
@@ -225,7 +227,7 @@ ensure_nfpm() {
         *) die "nfpm 2.x is required, found $reported ($candidate)" ;;
     esac
     if [ "$reported" != "${NFPM_VERSION#v}" ]; then
-        log "WARNING: nfpm $reported differs from the pinned ${NFPM_VERSION#v}; package metadata may drift"
+        log "WARNING: nfpm $reported differs from the pinned ${NFPM_VERSION#v}; package metadata may drift" >&2
     fi
     printf '%s\n' "$candidate"
 }
