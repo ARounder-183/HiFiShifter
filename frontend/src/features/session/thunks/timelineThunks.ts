@@ -359,45 +359,19 @@ export const moveClipsRemote = createAsyncThunk(
     },
 );
 
+/**
+ * 载荷类型只有一处定义：`services/api/timeline.ts` 里的命令签名。
+ *
+ * 【为什么不再手抄一份】这里曾把字段表抄了一遍，于是 `ClipStatePatch` 把裸
+ * `gain` 改名 `take_gain` 时，API 层改了、thunk 层没改 —— 类型检查依旧全绿，
+ * 直到有人真的走这条路径才在运行期发现。派生类型让"改名"永远是一处改动。
+ */
+type SetClipStatePayload = Parameters<typeof webApi.setClipState>[0];
+type SetClipsStateBulkPayload = Parameters<typeof webApi.setClipsStateBulk>[0];
+
 export const setClipStateRemote = createAsyncThunk(
     "session/setClipStateRemote",
-    async (
-        payload: {
-            clipId: string;
-            name?: string;
-            color?: string;
-            startSec?: number;
-            lengthSec?: number;
-            gain?: number;
-            muted?: boolean;
-            sourceStartSec?: number;
-            sourceEndSec?: number;
-            playbackRate?: number;
-            clipPlaybackRate?: number;
-            reversed?: boolean;
-            loopEnabled?: boolean;
-            snapOffsetSec?: number;
-            fadeInSec?: number;
-            fadeOutSec?: number;
-            fadeInShape?: number;
-            fadeOutShape?: number;
-            fadeInDir?: number;
-            fadeOutDir?: number;
-            autoFadeInSec?: number;
-            autoFadeOutSec?: number;
-            formantMorph?: {
-                enabled: boolean;
-                targetF1Hz: number;
-                targetF2Hz: number;
-                strength: number;
-            };
-            checkpoint?: boolean;
-            /** S 轴（REAPER ≥7.81 独有；旧宿主写入会被后端拒绝）。 */
-            fadeInS?: number;
-            fadeOutS?: number;
-        },
-        { rejectWithValue },
-    ) => {
+    async (payload: SetClipStatePayload, { rejectWithValue }) => {
         try {
             return await webApi.setClipState(payload);
         } catch (error) {
@@ -531,41 +505,7 @@ export const addClipTakeFromMediaRemote = createAsyncThunk(
 
 export const setClipsStateBulkRemote = createAsyncThunk(
     "session/setClipsStateBulkRemote",
-    async (
-        payload: {
-            updates: Array<{
-                clipId: string;
-                /** Take 级增益（take 属性面板）。 */
-                gain?: number;
-                /** Item 级增益（时间轴旋钮；REAPER 的 `D_VOL`）。 */
-                itemGain?: number;
-                muted?: boolean;
-                startSec?: number;
-                lengthSec?: number;
-                sourceStartSec?: number;
-                sourceEndSec?: number;
-                snapOffsetSec?: number;
-                clipPlaybackRate?: number;
-                fadeInSec?: number;
-                fadeOutSec?: number;
-                fadeInShape?: number;
-                fadeInDir?: number;
-                fadeOutShape?: number;
-                fadeOutDir?: number;
-                /** S 轴（REAPER ≥7.81 独有；旧宿主写入会被后端拒绝）。 */
-                fadeInS?: number;
-                fadeOutS?: number;
-                autoFadeInSec?: number;
-                autoFadeOutSec?: number;
-                reversed?: boolean;
-                loopEnabled?: boolean;
-                /** 声道模式 0..=4（对齐 REAPER CHANMODE）。 */
-                channelMode?: number;
-            }>;
-            checkpoint?: boolean;
-        },
-        { rejectWithValue },
-    ) => {
+    async (payload: SetClipsStateBulkPayload, { rejectWithValue }) => {
         try {
             return await webApi.setClipsStateBulk(payload);
         } catch (error) {

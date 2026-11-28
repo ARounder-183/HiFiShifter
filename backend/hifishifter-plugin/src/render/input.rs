@@ -19,23 +19,80 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-/// 两条固定率上的空快照。
+/// 一次渲染的**结论**。
 ///
-/// 【为什么是一个具名函数】"没有可渲染的片段"有三种来源 —— 没有 region、没有 clip、
-/// clip 全部几何非法 —— 它们都应当发布**同一份空快照**，而不是各自报错或各自拼一份。
-/// 此前只有第一种走了空快照，后两种（尤其"空列表"）撞上了 `unsupported host position`
-/// 这个**整份失败**的守卫。合并成一个具名函数后，这个语义只有一处定义。
-fn empty_snapshots() -> Vec<Arc<PlaybackSnapshot>> {
-    // 空快照只做一份、两个发布器共享：内容为空，没有理由为"两档率"付两份账。
-    let empty = Arc::new(PlaybackSnapshot {
-        sample_rate: 44100,
-        origin_sample: 0,
-        left: vec![],
-        right: vec![],
-        covered: Vec::new(),
-        _reservation: None,
+/// 【为什么要把它从 `Vec` 里分出来】"这一轮没有可渲染的内容"与"渲染失败"是两件不同的
+/// 事，而旧签名把前者写成 `Ok(空快照)` —— 空快照是一个**真实的发布动作**：它覆盖掉
+/// 上一份好快照，播放侧当场退回宿主原声，用户听到一次"处理消失"。反过来把它写成
+/// `Err("timeline has no renderable clip")` 又让"宿主这一瞬发布了空模型"变成状态栏
+/// 红字。两个都不是它：**这一轮什么都不发布**。
+///
+/// 这个形状是**常态**而不是故障：拖动一条 clip 的那几秒里，装配器每几百毫秒就会产出
+/// 一次结构上合法的空轮（`item map: attached=2 unbound=1`、`renderer assignment
+/// regions=0`）。把它当错误，状态栏就会跟着抖动闪红字。
+pub(crate) enum RenderOutcome {
+    /// 有内容：交给发布器。
+    Snapshots(Vec<Arc<PlaybackSnapshot>>),
+    /// 这一轮没有可渲染的 clip。**不是失败**，是"没有新东西要发布"。
+    Nothing,
+}
+
+impl RenderOutcome {
+    /// 把"没有内容"读成空列表。
+    ///
+    /// 【为什么只给测试用】生产的两条发布路径**必须**显式区分 `Nothing`（不去覆盖上一份
+    /// 快照）；把它们模糊成空列表，正是本轮修的那个缺陷。
+    #[cfg(test)]
+    pub(crate) fn into_snapshots(self) -> Vec<Arc<PlaybackSnapshot>> {
+        match self {
+            Self::Snapshots(snapshots) => snapshots,
+            Self::Nothing => Vec::new(),
+        }
+    }
+}
+
+/// 渲染前把"源还没发布"的 clip 摘掉；返回 `(要用的时间线, 第一个缺源 id)`。
+///
+/// 【为什么需要它】此前渲染对时间线上**每一个** `source_path` 都要求 `sources` 里有
+/// PCM，缺一个就 `Err("host PCM unavailable: <id>")`。而 `sources` 是按宿主授权进度
+/// **逐条**发布的：同一条轨上只要还有一条 clip 的源没读到（宿主没授权 / 读失败 /
+/// 在别的 take 上），**正在编辑的这一条**也永远渲不出来。macOS 实测的形状正是：
+/// 选中的是 `…-ARA-test.wav`，界面报的却是同轨另一条 `Default_5.wav`。
+///
+/// 【为什么返回 `Option<TimelineState>` 而不是总是克隆】绝大多数渲染没有任何缺源，
+/// 那时必须原样借用调用方的时间线（零拷贝）；只有真的要摘 clip 才克隆一份。
+///
+/// 【为什么"一条都不剩"不在这里报错】错误措辞属于调用方（渲染要 `host PCM unavailable`，
+/// 导出要它自己的上下文）。这里只如实回答"还剩几条、第一个缺的是谁"。
+fn without_unpublished_sources(
+    timeline: &TimelineState,
+    sources: &HashMap<String, Arc<SourcePcm>>,
+) -> (Option<TimelineState>, Option<String>) {
+    let missing_source = timeline
+        .clips
+        .iter()
+        .filter_map(|clip| clip.source_path.as_ref())
+        .find(|id| !sources.contains_key(*id))
+        .cloned();
+    if missing_source.is_none() {
+        return (None, None);
+    }
+    let mut view = timeline.clone();
+    let before = view.clips.len();
+    view.clips.retain(|clip| match clip.source_path.as_ref() {
+        Some(id) => sources.contains_key(id),
+        None => true,
     });
-    vec![Arc::clone(&empty), empty]
+    hifishifter_kernel::log_limiter::emit_limited_key(
+        log::Level::Warn,
+        "ara.render.missing-source",
+        format_args!(
+            "[ara] render skipped {} clip(s) whose host PCM is not published yet; \
+             the rest of the timeline still renders",
+            before - view.clips.len()
+        ),
+    );
+    (Some(view), missing_source)
 }
 
 pub(crate) struct RenderInput {
@@ -57,6 +114,9 @@ pub(crate) struct RenderInput {
     /// "能不能渲"。窗口之外的帧在快照里**不声明覆盖**，由播放侧按既有规则退回
     /// 宿主原声（见 `PlaybackSnapshot::covered`）。
     pub window: Option<(f64, f64)>,
+    /// 增益所有权：ARA 的 item/take/track 全由宿主施加（HostOwned）；
+    /// Capture 的时间线属于插件自己（AppOwned）。
+    pub gain_scope: hifishifter_kernel::gain::GainScope,
 }
 /// 输出帧域的"这些帧真的属于我们"覆盖区间（升序、不重叠，已夹进快照窗口）。
 ///
@@ -208,7 +268,7 @@ pub(crate) struct ExportRequest<'a> {
 
 impl RenderInput {
     /// 本函数只消费冻结值；调用前必须已释放文档transaction。新模型只能取消/拒绝发布。
-    pub fn render(&self, cancel: Arc<AtomicBool>) -> Result<Vec<Arc<PlaybackSnapshot>>, String> {
+    pub fn render(&self, cancel: Arc<AtomicBool>) -> Result<RenderOutcome, String> {
         self.render_with_progress(cancel, None)
     }
 
@@ -251,7 +311,7 @@ impl RenderInput {
         &self,
         cancel: Arc<AtomicBool>,
         progress: Option<hifishifter_kernel::mixdown::ProgressCallback>,
-    ) -> Result<Vec<Arc<PlaybackSnapshot>>, String> {
+    ) -> Result<RenderOutcome, String> {
         if cancel.load(Ordering::Acquire) {
             return Err("host preparation cancelled".into());
         }
@@ -264,10 +324,18 @@ impl RenderInput {
                 mix_plain_regions(&self.regions, &self.sources, rate, self.project_sample_rate)
                     .map_err(|e| format!("snapshot unavailable: {e:?}"))?;
             let shared = Arc::new(snapshot);
-            return Ok(vec![Arc::clone(&shared), shared]);
+            return Ok(RenderOutcome::Snapshots(vec![Arc::clone(&shared), shared]));
         };
         if self.regions.is_empty() {
-            return Ok(empty_snapshots());
+            // 【为什么不是空快照】见 `RenderOutcome`：发布空快照会把上一份好快照换掉。
+            return Ok(RenderOutcome::Nothing);
+        }
+        // 【"一条 clip 都没有"必须在这道校验**之前**收掉】下面 `validate_regions_with_fades`
+        // 会按 region 逐个查源；拖动 clip 的那几秒里 region 还指着上一代的源，于是它报
+        // `unsupported host region: MissingSource` —— 一句纯内部诊断，既不该进状态栏，
+        // 也不该让这一轮变成失败。没有 clip 就没有活。
+        if timeline.clips.is_empty() {
+            return Ok(RenderOutcome::Nothing);
         }
         // 只放行原kernel负责的真实正向时间拉伸；普通PCM mixer不放行，content-based fades另有契约。
         //
@@ -283,7 +351,17 @@ impl RenderInput {
             true,
             true,
         )
-        .map_err(|e| format!("unsupported host region: {e:?}"))?;
+        .map_err(|error| match error {
+            // 【源还没发布 ≠ 宿主给了不支持的东西】它是**可重试**的暂时失败，措辞
+            // 必须与 clip 层那条同一句（`host PCM unavailable`）。此前它被裹进
+            // `unsupported host region: MissingSource` —— 一句纯内部诊断，用户既看不懂、
+            // 前端也分不出该等还是该改。长文案进状态栏正是"一闪而过的红字"的来源。
+            super::snapshot::SnapshotError::MissingSource => format!(
+                "{}: a region still points at a source the host has not published yet",
+                crate::editor::errors::HOST_PCM_UNAVAILABLE
+            ),
+            other => format!("unsupported host region: {other:?}"),
+        })?;
         // 【为什么不能整份报错】此前这里对全部 clip 求 min/max，然后
         //     `if start < 0.0 || !start.is_finite() || !end.is_finite() { return Err("unsupported host position") }`
         // 一条坏 clip 就让整份渲染失败 —— 而调用方（自动应用）在 8 次重试后置 `settled`，
@@ -305,6 +383,24 @@ impl RenderInput {
                 view
             });
         let timeline = sanitized.as_ref().unwrap_or(timeline);
+        // ── 源缺席只静音**那一条 clip** ──────────────────────────────────────────
+        //
+        // 见 `without_unpublished_sources`：判据与理由都在那里，这里只负责"一条都不剩
+        // 就是真故障"这一条 —— 界面靠它继续报 `source_read_failed`。
+        let (view, missing_source) = without_unpublished_sources(timeline, &self.sources);
+        let timeline = view.as_ref().unwrap_or(timeline);
+        // 【两条分支的含义完全不同】`Some(id)` 是"这条 clip 的 PCM 还没发布"，可重试，
+        // 也是用户真该知道的一件事（短句已经写得清楚）；`None` 是"这一轮时间线里一条
+        // clip 都没有"—— 那不是失败，是**这一轮没有活**（见 `RenderOutcome`）。
+        if let Some(id) = missing_source {
+            return Err(format!(
+                "{}: {id}",
+                crate::editor::errors::HOST_PCM_UNAVAILABLE
+            ));
+        }
+        if timeline.clips.is_empty() {
+            return Ok(RenderOutcome::Nothing);
+        }
         if let Some(view) = &sanitized {
             hifishifter_kernel::log_limiter::emit_limited_key(
                 log::Level::Warn,
@@ -325,7 +421,7 @@ impl RenderInput {
             end = end.max(clip.start_sec + clip.length_sec);
         }
         if !(start.is_finite() && end.is_finite()) || end <= start.max(0.0) {
-            return Ok(empty_snapshots());
+            return Ok(RenderOutcome::Nothing);
         }
         let (mut start, mut end) = (start.max(0.0), end);
         // 【窗口夹取】只改渲染范围，不改时间线：clip 之外的帧照样是静音/未覆盖。
@@ -336,7 +432,7 @@ impl RenderInput {
             }
         }
         if !(end.is_finite() && end > start) {
-            return Ok(empty_snapshots());
+            return Ok(RenderOutcome::Nothing);
         }
         let mut input = HashMap::new();
         let source_bytes = timeline
@@ -458,7 +554,10 @@ impl RenderInput {
             .map_err(|error| format!("invalid prepared snapshot: {error:?}"))?;
         let snapshot = Arc::new(snapshot);
         // 两个发布器共享同一份 PCM：一次渲染、一份内存，换率不需要重渲。
-        Ok(vec![Arc::clone(&snapshot), snapshot])
+        Ok(RenderOutcome::Snapshots(vec![
+            Arc::clone(&snapshot),
+            snapshot,
+        ]))
     }
 
     /// 整段渲染大约需要多少字节（"整段能不能装下"的判定用）。
@@ -492,10 +591,13 @@ impl RenderInput {
         timeline: &TimelineState,
     ) -> Result<HashMap<String, MixdownPcm>, String> {
         let mut sources = HashMap::new();
+        // 【与 `render_with_progress` 同一条纪律】导出也按"源缺席=该 clip 静音"处理：
+        // 导出比预览更不能因为同轨上一条还没授权的 clip 就整份失败。
         for id in timeline
             .clips
             .iter()
             .filter_map(|clip| clip.source_path.as_ref())
+            .filter(|id| self.sources.contains_key(*id))
             .collect::<BTreeSet<_>>()
         {
             let pcm = self
@@ -554,6 +656,10 @@ impl RenderInput {
                 cancel_flag: Some(cancel.clone()),
                 progress: progress.clone(),
                 cache_stats: None,
+                // ARA：三层增益都由宿主施加；Capture：时间线属于插件自己，
+                // 必须由本进程施加三层。把这两个形态混成一个常量就会让
+                // Capture 的推子/Clip 增益“看得见、听不见”。
+                gain_scope: self.gain_scope,
             };
             render_mixdown_with_pcm(view, options, sources)
         };
@@ -732,6 +838,15 @@ impl RenderInput {
 mod tests {
     use super::*;
 
+    /// 跑一次渲染，只要**块**。
+    ///
+    /// 【为什么测试可以这么写】用例关心的是"渲出来的内容对不对"；"这一轮有没有内容"
+    /// 由 `RenderOutcome` 表达，另有专门的用例钉它。把两者分开，几十条既有用例就不必
+    /// 各自写一遍 `match`。
+    fn blocks(input: &RenderInput, cancel: Arc<AtomicBool>) -> Vec<Arc<PlaybackSnapshot>> {
+        input.render(cancel).expect("render").into_snapshots()
+    }
+
     /// 一份只有覆盖信息不同的源（其余字段无关）。
     fn source_with_coverage(covered: Vec<std::ops::Range<usize>>) -> Arc<SourcePcm> {
         Arc::new(SourcePcm {
@@ -905,11 +1020,12 @@ mod tests {
             project_sample_rate: None,
             clip_parameters: BTreeMap::from([("clip".into(), params)]),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
         let neural_before = hifishifter_kernel::nsf_hifigan_onnx::inference_runs();
         let separation_before = hifishifter_kernel::hnsep_onnx::separation_cache_stats().1;
         let began = std::time::Instant::now();
-        let cold = input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        let cold = blocks(&input, Arc::new(AtomicBool::new(false)));
         let cold_ms = began.elapsed().as_millis();
         let cold_neural = hifishifter_kernel::nsf_hifigan_onnx::inference_runs();
         let cold_separation = hifishifter_kernel::hnsep_onnx::separation_cache_stats().1;
@@ -946,7 +1062,7 @@ mod tests {
             }
         }
         let began = std::time::Instant::now();
-        let warm = input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        let warm = blocks(&input, Arc::new(AtomicBool::new(false)));
         let warm_ms = began.elapsed().as_millis();
         assert_eq!(
             hifishifter_kernel::nsf_hifigan_onnx::inference_runs(),
@@ -1000,20 +1116,21 @@ mod tests {
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
-        let before = input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        let before = blocks(&input, Arc::new(AtomicBool::new(false)));
         let mut other = input.timeline.as_ref().unwrap().tracks[0].clone();
         other.id = "unrelated".into();
         other.order = 1;
         other.pitch_analysis_algo = hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx;
         input.timeline.as_mut().unwrap().tracks.push(other);
-        let after = input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        let after = blocks(&input, Arc::new(AtomicBool::new(false)));
         for (before, after) in before.iter().zip(&after) {
             assert_eq!(before.left, after.left);
             assert_eq!(before.right, after.right);
         }
         input.timeline.as_mut().unwrap().tracks[1].solo = true;
-        let solo = input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        let solo = blocks(&input, Arc::new(AtomicBool::new(false)));
         assert!(solo
             .iter()
             .all(|snapshot| snapshot.left.iter().all(|value| *value == 0.)));
@@ -1050,8 +1167,9 @@ mod tests {
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
-        let snapshots = input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        let snapshots = blocks(&input, Arc::new(AtomicBool::new(false)));
         // 【只渲一档】两个发布器共享同一份 PCM（见 `native_sample_rate`）：工程率缺席
         // 时按 44100 算，整段就是 44100 * 180 帧，第二档不再物化、也不占第二份账。
         assert_eq!(snapshots.len(), 2);
@@ -1142,10 +1260,14 @@ mod tests {
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
         let budget = super::super::budget::global_budget();
         let baseline = budget.used();
-        let error = input.render(Arc::new(AtomicBool::new(false))).unwrap_err();
+        let error = match input.render(Arc::new(AtomicBool::new(false))) {
+            Err(error) => error,
+            Ok(_) => panic!("超出预算必须是错误，而不是一轮没有内容"),
+        };
         assert!(
             error.contains("BudgetExceeded"),
             "unexpected error: {error}"
@@ -1188,8 +1310,9 @@ mod tests {
             project_sample_rate: Some(44100.0),
             clip_parameters: BTreeMap::new(),
             window: Some((2.0, 3.0)),
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
-        let snapshots = input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        let snapshots = blocks(&input, Arc::new(AtomicBool::new(false)));
         assert_eq!(snapshots.len(), 2);
         assert!(Arc::ptr_eq(&snapshots[0], &snapshots[1]));
         let snapshot = &snapshots[0];
@@ -1261,11 +1384,12 @@ mod tests {
             project_sample_rate: None,
             clip_parameters: BTreeMap::from([("clip".into(), parameters)]),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
         let before = hifishifter_kernel::hnsep_onnx::separation_cache_stats();
         let began = std::time::Instant::now();
         let neural_before = hifishifter_kernel::nsf_hifigan_onnx::inference_runs();
-        let output = input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        let output = blocks(&input, Arc::new(AtomicBool::new(false)));
         assert_eq!(output[0].left.len(), 22050);
         assert_eq!(output[1].left.len(), 24000);
         assert_eq!(
@@ -1297,7 +1421,7 @@ mod tests {
             .clip_parameters
             .insert("other-owner-clip".into(), params);
         input.regions[0].start_in_playback_time = moved_start;
-        let moved = input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        let moved = blocks(&input, Arc::new(AtomicBool::new(false)));
         assert_eq!(
             moved[0].origin_sample,
             (moved_start * 44100.).round() as i64
@@ -1314,7 +1438,7 @@ mod tests {
             .unwrap()
             .pitch_edit
             .fill(64.);
-        let changed = input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        let changed = blocks(&input, Arc::new(AtomicBool::new(false)));
         assert!(
             hifishifter_kernel::nsf_hifigan_onnx::inference_runs() > cold_neural,
             "真正目标F0改变必须使HiFiGAN失效"
@@ -1371,8 +1495,9 @@ mod tests {
                 ("b".into(), params(0.25)),
             ]),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
-        let output = input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        let output = blocks(&input, Arc::new(AtomicBool::new(false)));
         for (actual, want) in output[0].left.iter().zip([0.075_f32, 0.15, 0.225, 0.3]) {
             assert!((*actual - want).abs() < 1e-6, "{actual} != {want}");
         }
@@ -1410,8 +1535,9 @@ mod tests {
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
-        let output = input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        let output = blocks(&input, Arc::new(AtomicBool::new(false)));
         assert_eq!(output[0].left.len(), 44100);
         // 只渲宿主工程率那一档；两个发布器共享同一份 PCM。
         assert!(Arc::ptr_eq(&output[0], &output[1]));
@@ -1505,10 +1631,9 @@ mod tests {
                 project_sample_rate: None,
                 clip_parameters: BTreeMap::new(),
                 window: None,
+                gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
             };
-            let output = input
-                .render(Arc::new(AtomicBool::new(false)))
-                .expect("一帧源尾取整不得拒绝整个renderer");
+            let output = blocks(&input, Arc::new(AtomicBool::new(false)));
             for snapshot in output {
                 assert!(
                     snapshot.left.iter().any(|sample| sample.abs() > 0.01),
@@ -1541,6 +1666,7 @@ mod tests {
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
         sources.insert(
             "fixture".into(),
@@ -1554,7 +1680,7 @@ mod tests {
         );
         drop(sources);
         let cancel = Arc::new(AtomicBool::new(false));
-        let output = input.render(cancel.clone()).unwrap();
+        let output = blocks(&input, cancel.clone());
         assert_eq!(output[0].left, [0.1, 0.2, 0.3, 0.4]);
         assert_eq!(output[0].right, output[0].left);
         // 只渲宿主工程率那一档（这里是 44100）；换率由 `copy_block` 重采样，不再物化。
@@ -1611,6 +1737,7 @@ mod tests {
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
             window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
         };
         let cancel = Arc::new(AtomicBool::new(false));
         let sources = input.interleaved_sources(&timeline).unwrap();
@@ -1662,5 +1789,84 @@ mod tests {
             );
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// 【回归】"这一轮时间线里一条 clip 都没有"是**常态**，不是故障。
+    ///
+    /// 现场：拖动一条 clip 的那几秒里，装配器每几百毫秒就会产出一次结构上合法的空轮
+    /// （`attached=2 unbound=1`、`renderer assignment regions=0`），而
+    /// `assigned_regions()` 还非空。旧实现于是每轮都报
+    /// `timeline has no renderable clip`，状态栏跟着闪红字 —— 而这一轮本就该
+    /// 什么都不发布。
+    #[test]
+    fn an_empty_timeline_is_not_a_render_failure() {
+        let mut timeline = plain_clip();
+        timeline.clips.clear();
+        let input = RenderInput {
+            timeline: Some(timeline),
+            regions: vec![AraPlaybackRegion {
+                audio_source_persistent_id: "src".into(),
+                duration_in_modification_time: 2.,
+                duration_in_playback_time: 2.,
+                ..Default::default()
+            }],
+            sources: HashMap::new(),
+            project_sample_rate: None,
+            clip_parameters: BTreeMap::new(),
+            window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
+        };
+        assert!(
+            matches!(
+                input.render(Arc::new(AtomicBool::new(false))).unwrap(),
+                RenderOutcome::Nothing
+            ),
+            "空时间线必须是 `Nothing`，不是 `Err`，也不是一份空快照"
+        );
+    }
+
+    /// 【回归】没有 region = 这一轮没有活：**不许**拿空快照覆盖上一份好快照。
+    ///
+    /// 空快照是一个真实的发布动作：`is_ready()` 变真、`copy_block_at` 逐样本
+    /// 返回 0 —— 播放侧当场退回静音，用户听到一次"处理消失"。
+    #[test]
+    fn an_empty_region_set_keeps_the_previous_snapshot() {
+        let input = RenderInput {
+            timeline: Some(plain_clip()),
+            regions: Vec::new(),
+            sources: HashMap::new(),
+            project_sample_rate: None,
+            clip_parameters: BTreeMap::new(),
+            window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
+        };
+        assert!(matches!(
+            input.render(Arc::new(AtomicBool::new(false))).unwrap(),
+            RenderOutcome::Nothing
+        ));
+    }
+
+    /// 【不回归】源缺席**仍然是**错误，而且措辞是那句可行动的话。
+    #[test]
+    fn a_missing_source_is_still_an_error() {
+        let input = RenderInput {
+            timeline: Some(plain_clip()),
+            regions: vec![AraPlaybackRegion {
+                audio_source_persistent_id: "src".into(),
+                duration_in_modification_time: 2.,
+                duration_in_playback_time: 2.,
+                ..Default::default()
+            }],
+            sources: HashMap::new(),
+            project_sample_rate: None,
+            clip_parameters: BTreeMap::new(),
+            window: None,
+            gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
+        };
+        let error = match input.render(Arc::new(AtomicBool::new(false))) {
+            Err(error) => error,
+            Ok(_) => panic!("缺源必须报错，不能被读成\"这一轮没有内容\""),
+        };
+        assert!(error.contains("host PCM unavailable"), "{error}");
     }
 }

@@ -780,7 +780,7 @@ pub fn cache_identity() -> Result<String, String> {
 /// 还会占用推理设备。而**整 clip 渲染键**在命令/快照构建路径上就要算出来，
 /// 那里明确不允许同步建会话（见 `infer_pitch_edit_mono_mel_stretch` 的说明）。
 ///
-/// 本函数只读模型文件做 blake3，**不建会话**：一次性约 54MB 的文件读取，
+/// 本函数只读模型文件做 blake3，**不建会话**：一次性读完整个权重文件，
 /// 代价可接受，且结果严格对应文件内容 —— 换掉磁盘上的模型文件即失效。
 ///
 /// 模型文件缺失/不可读时返回 `None`，此时渲染键退化为不含模型身份
@@ -1514,11 +1514,38 @@ fn confirmed_unavailable() -> Option<String> {
     }
 }
 
+/// 模型文件是否**在磁盘上**（不代表能建会话）。
+///
+/// 【为什么要单独判这一条】"乐观"只该覆盖"还没试过"，不能覆盖"文件根本不在"。
+/// 打包漏带权重时（见 `tauri.conf.json` 的 `bundle.resources` 与
+/// `scripts/checks/check-model-bundle.py`）会话构建必然失败，而 `is_available()`
+/// 在预热给出结论之前一直返回 true —— 界面因此照常显示"可编辑"，用户画完整条
+/// 音高线才在渲染时得到一片静音，日志里只有一行 `model not found`。
+///
+/// 【为什么缓存"命中"而不缓存"未命中"】命中是终态（同一进程内权重不会凭空出现
+/// 又消失），缓存它让热路径退化成一次原子读；未命中则每次都重新探一次，
+/// 这样用户在设置里补上模型目录后无需重启即可恢复（见 `model_store` 的
+/// 用户自备目录）。
+fn model_files_present() -> bool {
+    static PRESENT: OnceLock<()> = OnceLock::new();
+    if PRESENT.get().is_some() {
+        return true;
+    }
+    if resolve_model_paths().is_ok() {
+        let _ = PRESENT.set(());
+        return true;
+    }
+    false
+}
+
 /// **非阻塞**可用性查询：绝不构建会话（构建交给后台预热 / 显式加载路径）。
 ///
 /// 尚未预热完成时返回 true（乐观）—— 调用方在 false 时会**跳过处理器渲染**
 ///（产出未处理音频）或跳过分离/分析，乐观是安全侧；真实失败会在首次实际
 /// 使用（load / 预热完成）时暴露并缓存为 false。
+///
+/// 【例外：权重不在磁盘上就不乐观】见 [`model_files_present`]：那一种失败
+/// 不可能靠"再试一次"变好，继续上报可用只会把失败推给用户（画完线没有声音）。
 pub fn is_available() -> bool {
     // 可用性只读：快照/参数查询不应偷偷启动ORT线程。App已在登记模型后显式预热，
     // 插件真实worker使用get_or_init路径加载；避免短查询结束时线程撞上进程/DLL退出。
@@ -1530,7 +1557,18 @@ pub fn is_available() -> bool {
             }
             false
         }
-        None => true,
+        None => {
+            if model_files_present() {
+                return true;
+            }
+            if !LOGGED_UNAVAILABLE.swap(true, Ordering::Relaxed) {
+                log::error!(
+                    "nsf_hifigan_onnx: unavailable: model weights are not on disk ({})",
+                    resolve_model_paths().err().unwrap_or_default()
+                );
+            }
+            false
+        }
     }
 }
 
@@ -2813,6 +2851,55 @@ fn benchmark_gpu_ep(
     Ok((median, rtf, ep))
 }
 
+/// 移动端的「基准」：只回答一个问题 —— **声码器能不能建会话、能不能推理**。
+///
+/// 【为什么不跑全量基准】Android / iOS 只暴露一个执行提供者（CPU）。全量基准的
+/// 决策空间（CPU vs GPU vs DirectML）在那里**恒为空集**：跑完 5 轮 × 13.8 秒
+/// 得到的结论永远是「用 CPU」，而那本来就是唯一选项。代价是用户等 80 秒、
+/// 设备发烫、日志被淹没。
+///
+/// 保留一次**短跑**（默认 128 帧 ≈ 1.5 秒音频、1 轮）不是为了测速，而是为了
+/// 证明「这个包里的模型在这台机器上真的能推理」—— 那是诊断包唯一真正需要的
+/// 结论，而且它能在 1 秒内给出。
+///
+/// @param frames 帧数（缺省 128 = `BENCHMARK_FRAMES / 8`）。
+/// @param runs   推理轮数（缺省 1）。
+/// @returns 本次短跑的耗时（毫秒）；失败时返回可读原因。
+pub fn run_benchmark_smoke(frames: usize, runs: usize) -> Result<u128, String> {
+    let _busy = crate::diagnostics_busy::enter("benchmark-smoke");
+    // 与全量基准同一个线程预算：诊断期间不能把实时音频线程挤没。
+    let _budget = crate::vocoder_ort_session::DiagnosticBudget::enter(2);
+    let run = crate::vocoder_ort_session::begin_diagnostic_run("benchmark-smoke")?;
+    ensure_ort_init()?;
+    let (onnx_path, cfg_path) = resolve_model_paths()?;
+    let cfg = read_config(&cfg_path)?;
+    let frames = frames.max(16);
+    let (mut session, _) = crate::vocoder_ort_session::build_ort_session_with_ep(
+        &onnx_path,
+        crate::vocoder_ort_session::OrtSessionRole::Vocoder,
+        Some("cpu"),
+    )?;
+    let mel = vec![0.0f32; cfg.num_mels * frames];
+    let f0 = vec![440.0f32; frames];
+    let started = std::time::Instant::now();
+    for _ in 0..runs.max(1) {
+        run.heartbeat();
+        let mt = Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice()))
+            .map_err(|error| format!("smoke tensor build failed: {error}"))?;
+        let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice()))
+            .map_err(|error| format!("smoke tensor build failed: {error}"))?;
+        session
+            .run(ort::inputs![mt, ft])
+            .map_err(|error| format!("smoke inference failed: {error}"))?;
+    }
+    let elapsed = started.elapsed().as_millis();
+    log::info!(
+        "[benchmark] smoke ok frames={frames} runs={} elapsed={elapsed}ms",
+        runs.max(1)
+    );
+    Ok(elapsed)
+}
+
 pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     // 【为什么在这里就上静音】见 `hifishifter_kernel::diagnostics_busy`：诊断期间实时
     // 通路没有任何时间片保证，唯一诚实的做法是**静音但不停钟**。guard 活在函数体里，
@@ -3071,7 +3158,7 @@ mod tests {
     /// 模型内容摘要：必须惰性缓存，且与"现读文件"的结果一致。
     ///
     /// 【为什么钉住】该摘要进入整 clip 渲染键。若它不缓存，渲染键的计算就会
-    /// 在命令/快照路径上反复读 54MB；若它与文件内容脱钩，换模型后旧 PCM 会
+    /// 在命令/快照路径上反复读整个权重文件；若它与文件内容脱钩，换模型后旧 PCM 会
     /// 继续命中。
     #[test]
     fn model_digest_is_cached_and_matches_the_files() {

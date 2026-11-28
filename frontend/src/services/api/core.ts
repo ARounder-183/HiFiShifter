@@ -230,6 +230,22 @@ export const coreApi = {
             "reveal_export_paths",
             paths,
         ),
+    /**
+     * 把已导出的文件交给用户选定的位置（移动端：系统"保存到"对话框）。
+     *
+     * 【为什么是"导出之后再选位置"】导出按路径写盘，无法直接写 SAF 的
+     * `content://`；倒过来做只需一次文件到文件的拷贝，而且拷贝发生在导出**成功
+     * 之后** —— 不会出现"用户选好了位置、导出却失败，目标处留下一个空文件"。
+     * 桌面上后端直接返回 `skipped: true`（桌面本来就有保存对话框）。
+     */
+    saveOutputToLocation: (path: string) =>
+        invoke<{
+            ok: boolean;
+            canceled?: boolean;
+            skipped?: boolean;
+            name?: string;
+            error?: string;
+        }>("save_output_to_location", path),
 
     // Model / processing
     loadDefaultModel: () => invoke<ModelConfigResult>("load_default_model"),

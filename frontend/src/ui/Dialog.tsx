@@ -35,6 +35,7 @@ import { cx } from "./cx";
 import { translateOutsideReact } from "../i18n/I18nProvider";
 import { acquireShortcutSuppression, releaseShortcutSuppression } from "./shortcutScope";
 import { frontendLog } from "../services/frontendLog";
+import { appForm } from "../services/hostDetect";
 
 /**
  * 对话框宽度档位。四档取代历史上的 14 个字面量。
@@ -381,15 +382,40 @@ export function AppDialog({
     const themeScopeClass =
         themeMode === "dark" || themeMode === "light" ? `qt-theme ${themeMode}` : null;
 
+    /*
+     * 移动形态渲染成**底部 sheet**。
+     *
+     * 【为什么不是"居中小窗"】390×844 上，居中对话框两侧各浪费约 40px，而拇指的
+     * 自然活动区在屏幕下半部：一个居中的确认框，主按钮常常正好落在够不到的位置。
+     * 底部 sheet 同时解决"够得着"与"内容够宽"。
+     *
+     * 【为什么只改定位与尺寸、不改结构】42 个对话框都建立在本壳上，它们的内部
+     * 布局（表单列宽、列表行高）已经按内容设计；换定位是**形态**问题，换结构是
+     * **布局**问题。前者一处可改，后者要动 42 处。定位规则见
+     * `index.css` 的 `html[data-form="mobile"] .rt-DialogContent.hs-dialog-sheet`。
+     */
+    const isMobileSheet = appForm() === "mobile";
+
     return (
         <Dialog.Root open={open} onOpenChange={requestClose}>
             <Dialog.Content
-                className={cx("app-dialog flex flex-col", themeScopeClass, className)}
+                className={cx(
+                    "app-dialog flex flex-col",
+                    isMobileSheet && "hs-dialog-sheet",
+                    themeScopeClass,
+                    className,
+                )}
                 style={{
                     maxWidth: SIZE_PX[size],
                     // 高度上限统一：小窗口上内容滚动而不是溢出屏幕。
                     // 历史上约 30 个对话框完全没有上限。
-                    maxHeight: "min(86vh, 960px)",
+                    //
+                    // 【移动端为什么换成 dvh】`vh` 在移动浏览器上是"地址栏收起时"的
+                    // 高度，用它算上限会让 sheet 顶部被地址栏遮住一截；`dvh` 是当前
+                    // 可视高度。安全区再减掉，顶部就永远留出可点关闭的余量。
+                    maxHeight: isMobileSheet
+                        ? "calc(100dvh - var(--qt-safe-top, 0px) - 24px)"
+                        : "min(86vh, 960px)",
                 }}
                 aria-describedby={ariaDescribedBy}
                 /**

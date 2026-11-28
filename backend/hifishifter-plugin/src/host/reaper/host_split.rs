@@ -175,6 +175,9 @@ pub(crate) fn execute(
             .insert(pair.1.item_id.clone(), pair.0.item_id.clone());
         pairs.push(pair);
     }
+    // 分割同样是一次宿主写回：两半的几何必须立刻重新采集，右半段的媒体身份
+    // （`split_media_from`）也只有在呈现代次推进后才会被投影出来。
+    ExtensionOwner::note_host_write_completed(&document);
     owner.refresh_host_transport();
     for owner in document.renderer_owners() {
         owner.prepare();

@@ -1,6 +1,8 @@
 import { test } from "vitest";
 
 import {
+    resolveSyncViewportAlignment,
+    resolveViewportGeometry,
     resolveViewportOffsetPx,
     timelineViewportSync,
     timelineViewportNativeToState,
@@ -150,4 +152,96 @@ test("utils/timelineViewportSync.test.ts scripted checks", async () => {
     }
 
     void checks;
+});
+
+test("geometry and relationship-aware alignment", async () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        if (actual !== expected)
+            throw new Error(label + ": expected " + expected + ", received " + actual);
+    }
+
+    const rect = (left: number, right: number) => ({
+        left,
+        right,
+        width: right - left,
+        height: 200,
+    });
+    const stacked = resolveViewportGeometry({
+        trackRect: rect(100, 700),
+        paramRect: rect(140, 740),
+    });
+    assertEqual(stacked?.offsetPx, -40, "offset is track left minus param left");
+    assertEqual(stacked?.overlapXPx, 560, "x overlap is measured");
+
+    const sideBySide = resolveViewportGeometry({
+        trackRect: rect(0, 500),
+        paramRect: rect(520, 900),
+    });
+    assertEqual(sideBySide?.overlapXPx, 0, "side-by-side has no x overlap");
+    assertEqual(
+        resolveViewportGeometry({ trackRect: null, paramRect: rect(0, 1) }),
+        null,
+        "missing rect is unmeasurable",
+    );
+
+    assertEqual(
+        resolveSyncViewportAlignment({ relation: "tabbed", geometry: null }),
+        "tabbed",
+        "tabbed always uses content insets",
+    );
+    assertEqual(
+        resolveSyncViewportAlignment({
+            relation: "stacked",
+            geometry: { overlapXPx: 200 },
+        }),
+        "screen-x",
+        "stacked with overlap aligns by screen x",
+    );
+    assertEqual(
+        resolveSyncViewportAlignment({
+            relation: "sideBySide",
+            geometry: { overlapXPx: 0 },
+        }),
+        "left-start",
+        "side-by-side aligns content starts",
+    );
+    assertEqual(
+        resolveSyncViewportAlignment({
+            relation: "floating",
+            geometry: { overlapXPx: 23 },
+        }),
+        "left-start",
+        "floating below the 24px deadband uses left-start",
+    );
+    assertEqual(
+        resolveSyncViewportAlignment({
+            relation: "floating",
+            geometry: { overlapXPx: 24 },
+        }),
+        "screen-x",
+        "24px is the inclusive deadband boundary",
+    );
+    assertEqual(
+        resolveSyncViewportAlignment({
+            relation: "floating",
+            geometry: { overlapXPx: 25 },
+        }),
+        "screen-x",
+        "floating with overlap aligns by screen x",
+    );
+    assertEqual(
+        resolveSyncViewportAlignment({ relation: "detached", geometry: { overlapXPx: 999 } }),
+        "left-start",
+        "detached ignores screen geometry",
+    );
+    assertEqual(
+        resolveSyncViewportAlignment({ relation: "stacked", geometry: null }),
+        "screen-x",
+        "stacked without a measurement still requests screen-x and retries",
+    );
+    assertEqual(
+        resolveSyncViewportAlignment({ relation: "unknown", geometry: null }),
+        "left-start",
+        "unknown without geometry falls back to left-start",
+    );
 });

@@ -83,8 +83,24 @@ pub(crate) struct HostClipGeometry {
     pub fade_out_dir2_new: f64,
     /// 官方版本决定轴语义；版本无法读取时不把旧shape假报成7.81曲线。
     pub fade_axes_v2: Option<bool>,
+    /// **插件模型**的自动交叉淡化长度（秒）。
+    ///
+    /// 【权威归属】淡变只有一个权威 —— 插件。宿主那两个 `*_AUTO` 字段是
+    /// **派生值**：REAPER 会按工程级 auto-crossfade 在 `D_POSITION` 落下的那一刻
+    /// 自己写上它，而插件随后才用自己的算法写回。把宿主那份镜像进模型，就会出现
+    /// "关掉自动交叉淡化后包络先闪一下再变回去"（两个权威同时存在）。
+    ///
+    /// 读取时：本会话里插件**写过**这条 item ⇒ 用插件记下的值（`NativeHost::auto_fade_intent`）；
+    /// 没写过（冷加载）⇒ 用宿主值播种，不丢工程里已有的交叉淡化。
     pub auto_fade_in_sec: f64,
     pub auto_fade_out_sec: f64,
+    /// 宿主 `D_FADEINLEN_AUTO` 的**镜像读数**：只进诊断与漂移比较，绝不进模型。
+    ///
+    /// 【为什么必须单独留一格】"宿主和模型不一致"本身是有用的事实（用户可能真在
+    /// REAPER 里拖过），但它**不是**用户意图 —— 见上面那条注释。分开存之后，自愈
+    /// （下一次写入把两侧 auto 一起写回）才有判据可用。
+    pub auto_fade_in_sec_host: f64,
+    pub auto_fade_out_sec_host: f64,
     /// 宿主 item 的 `B_LOOPSRC`（"循环源"）。
     ///
     /// 【为什么是 item 级】REAPER 的循环源是 **item** 属性（官方头文件里

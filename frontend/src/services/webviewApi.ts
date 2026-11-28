@@ -58,6 +58,7 @@ export const webApi = {
     openProjectDialog: projectApi.openProjectDialog,
     openProject: projectApi.openProject,
     saveProject: projectApi.saveProject,
+    listProjects: projectApi.listProjects,
     saveProjectAs: projectApi.saveProjectAs,
     pickProjectSavePath: projectApi.pickProjectSavePath,
     saveProjectToPath: projectApi.saveProjectToPath,
@@ -98,6 +99,8 @@ export const webApi = {
 
     // Timeline
     getTimelineState: timelineApi.getTimelineState,
+    setGainPreview: timelineApi.setGainPreview,
+    clearGainPreview: timelineApi.clearGainPreview,
     importAudioItem: timelineApi.importAudioItem,
     importAudioBytes: timelineApi.importAudioBytes,
     importMidiAsClip: paramsApi.importMidiAsClip,

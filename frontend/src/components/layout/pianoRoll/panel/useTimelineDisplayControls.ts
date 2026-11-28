@@ -1,5 +1,8 @@
 /**
- * 标尺与时间显示的**派生值**：刻度、时间格式上下文、单位切换与"复制播放头时间"。
+ * 标尺与时间显示的**派生值**：刻度、时间格式上下文与"复制播放头时间"。
+ *
+ * 时间单位与读数位置的切换不在这里：它们由右键菜单的共享构建器
+ * （`timeline/timeContextMenu`）直接接会话切片，两个面板因此不可能各写一份。
  *
  * 【为什么是独立的一个 hook】这一组原本是模型尾部的七个绑定，全部
  * 由同一份会话切片（BPM / 拍号 / 网格 / Tempo Map / 时间单位）推出，没有一条读写
@@ -12,19 +15,13 @@
  * 调用点、hook 顺序与依赖数组全部保持原位。
  */
 import { useCallback, useMemo } from "react";
-import {
-    persistUiSettings,
-    setPrimaryTimeUnit,
-    setSecondaryTimeUnit,
-    setTempoMap,
-} from "../../../../features/session/sessionSlice";
+import { setTempoMap } from "../../../../features/session/sessionSlice";
 import { setTempoMapRemote } from "../../../../features/session/thunks/tempoMapThunks";
 import type { TempoMap } from "../../../../utils/tempoMap";
 import { buildTimelineTicks } from "../../timeline/runtime/buildTimelineTicks.js";
 import type { createTickAxis } from "../../timeline/runtime/tickAxis.js";
-import { formatCursorTime } from "../../timeline";
-import { readVisualPlayheadSec } from "../../../../features/capture/visualPlayheadBus";
-import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "../../timeline";
+import type { TimeFormatContext } from "../../timeline";
+import { copyPlayheadTimeToClipboard } from "../../timeline/playheadTimeClipboard";
 import type { ModelDeps } from "./modelDeps";
 
 type TimelineDisplayInputs = Pick<ModelDeps, "dispatch" | "s"> & {
@@ -77,21 +74,6 @@ export function useTimelineDisplayControls({ dispatch, s, prTickAxis }: Timeline
         [s.bpm, s.beats, s.grid, s.tempoMap],
     );
 
-    const handlePrimaryUnitChange = useCallback(
-        (unit: TimeUnit) => {
-            dispatch(setPrimaryTimeUnit(unit));
-            void dispatch(persistUiSettings());
-        },
-        [dispatch],
-    );
-    const handleSecondaryUnitChange = useCallback(
-        (unit: TimeUnitChoice) => {
-            dispatch(setSecondaryTimeUnit(unit));
-            void dispatch(persistUiSettings());
-        },
-        [dispatch],
-    );
-
     const handleTempoMapChange = useCallback(
         (next: TempoMap | null) => {
             dispatch(setTempoMap(next));
@@ -105,24 +87,14 @@ export function useTimelineDisplayControls({ dispatch, s, prTickAxis }: Timeline
         },
         [dispatch],
     );
-    const handleCopyPlayheadTime = useCallback(async () => {
-        const text = formatCursorTime(
-            s.primaryTimeUnit,
-            s.secondaryTimeUnit,
-            readVisualPlayheadSec(),
-            timeContext,
-        ).combined;
-        try {
-            await navigator.clipboard.writeText(text);
-        } catch {
-            // 忽略复制失败
-        }
-    }, [s.primaryTimeUnit, s.secondaryTimeUnit, timeContext]);
+    // 与时间轴标尺、读数菜单共用同一份"复制光标时间"：同一个菜单项在两处复制出
+    // 不同的值（一处用视觉插值、一处用已提交位置）是没人会报、但一定有人踩的偏差。
+    const handleCopyPlayheadTime = useCallback(() => {
+        copyPlayheadTimeToClipboard();
+    }, []);
     return {
         timelineTicks,
         timeContext,
-        handlePrimaryUnitChange,
-        handleSecondaryUnitChange,
         handleTempoMapChange,
         handleTempoMapCommit,
         handleCopyPlayheadTime,

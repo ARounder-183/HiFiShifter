@@ -48,6 +48,8 @@ fn error_payload(error: &str) -> crate::models::TimelineStatePayload {
         redo_depth: None,
         notes_markdown: None,
         param_selection_restore: None,
+        // 合成载荷（错误/占位）：不带版本号，前端不会拿它去覆盖真实状态。
+        revision: None,
     }
 }
 
@@ -429,7 +431,7 @@ pub(super) fn import_midi_as_clip(
         );
         tl.sync_clip_takes_from_flat();
         state.audio_engine.update_timeline(tl.clone());
-        let mut payload = tl.to_payload();
+        let mut payload = state.timeline_payload(&tl);
         payload.created_clip_ids = Some(vec![clip_id]);
         payload.project = Some(state.project_meta_payload());
         drop(tl);
@@ -597,7 +599,7 @@ pub(super) fn import_midi_as_clip(
         }
         tl.sync_clip_takes_from_flat();
         state.audio_engine.update_timeline(tl.clone());
-        let mut payload = tl.to_payload();
+        let mut payload = state.timeline_payload(&tl);
         payload.created_clip_ids = Some(created_clip_ids);
         payload.created_track_ids = Some(created_track_ids);
         payload.project = Some(state.project_meta_payload());
@@ -802,7 +804,7 @@ pub(super) fn replace_midi_clip_data(
     );
     tl.sync_clip_takes_from_flat();
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     if let Some(root) = root_track_id {

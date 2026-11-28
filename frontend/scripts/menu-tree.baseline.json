@@ -1,0 +1,942 @@
+{
+    "menubar": [
+        {
+            "label": "文件",
+            "tree": [
+                {
+                    "role": "menuitem",
+                    "text": "新建工程Ctrl+N",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "打开工程...Ctrl+Shift+O",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "最近打开",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": "menu",
+                    "items": [
+                        {
+                            "role": "menuitem",
+                            "text": "（空）",
+                            "disabled": true,
+                            "checked": null,
+                            "haspopup": null
+                        }
+                    ]
+                },
+                {
+                    "role": "menuitem",
+                    "text": "重新捕获缺失媒体...",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "separator",
+                    "text": "",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "保存Ctrl+S",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "另存为...Ctrl+Shift+S",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "另存为其他格式",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": "menu",
+                    "items": null
+                },
+                {
+                    "role": "separator",
+                    "text": "",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "导入媒体文件... Ctrl+O",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "导入 MIDI...",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "导入外部工程",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": "menu",
+                    "items": [
+                        {
+                            "role": "menuitem",
+                            "text": "导入 HiFiShifter 工程...",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "导入 Reaper 工程...",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "导入 VocalShifter 工程...",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        }
+                    ]
+                },
+                {
+                    "role": "menuitem",
+                    "text": "导出音频... Ctrl+E",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "separator",
+                    "text": "",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "自动备份...",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "录音...",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "separator",
+                    "text": "",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "退出",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                }
+            ]
+        },
+        {
+            "label": "编辑",
+            "tree": [
+                {
+                    "role": "menuitem",
+                    "text": "撤销 Ctrl+Z",
+                    "disabled": true,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "重做 Ctrl+Shift+Z;Ctrl+Y",
+                    "disabled": true,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "separator",
+                    "text": "",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "剪切 Ctrl+X",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "复制 Ctrl+C",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "粘贴 Ctrl+V",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "作为新轨道组粘贴Ctrl+Alt+V",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "separator",
+                    "text": "",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "粘贴 VocalShifter 剪贴板Shift+V",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "separator",
+                    "text": "",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "全选 Ctrl+A",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "取消选择",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "separator",
+                    "text": "",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "音频块范围加入参数选区 Ctrl+Shift+A",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "音频块范围移出参数选区",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                }
+            ]
+        },
+        {
+            "label": "轨道",
+            "tree": [
+                {
+                    "role": "menuitem",
+                    "text": "添加轨道Ctrl+T",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "克隆选中轨道Ctrl+D",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "删除选中轨道Ctrl+Delete",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                }
+            ]
+        },
+        {
+            "label": "视图",
+            "tree": [
+                {
+                    "role": "menuitem",
+                    "text": "窗口",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": "menu",
+                    "items": [
+                        {
+                            "role": "menuitem",
+                            "text": "● 时间轴",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "● 编辑器",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "○ 文件浏览器",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "○ 记事本",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "○ 操作记录",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        }
+                    ]
+                },
+                {
+                    "role": "menuitem",
+                    "text": "布局",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": "menu",
+                    "items": [
+                        {
+                            "role": "menuitem",
+                            "text": "新建空面板",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "解散面板",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "预设",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": "menu",
+                            "items": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "保存布局为预设...",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        },
+                        {
+                            "role": "separator",
+                            "text": "",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "导出布局...",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "导入布局...",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        },
+                        {
+                            "role": "separator",
+                            "text": "",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "重置布局",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "布局设置...",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        }
+                    ]
+                },
+                {
+                    "role": "separator",
+                    "text": "",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "● 速度映射",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "● 显示所有 Take (如果空间足够)",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "● 剪贴板预览",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "● 弹出展示参数",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "● Clip 音高曲线",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "separator",
+                    "text": "",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "时间显示",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": "menu",
+                    "items": [
+                        {
+                            "role": "menuitem",
+                            "text": "主时间单位: 秒",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": "menu",
+                            "items": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "副时间单位: 不使用",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": "menu",
+                            "items": null
+                        },
+                        {
+                            "role": "separator",
+                            "text": "",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "时间轴显示设置...",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        }
+                    ]
+                },
+                {
+                    "role": "menuitem",
+                    "text": "主题: 自动",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": "menu",
+                    "items": [
+                        {
+                            "role": "menuitem",
+                            "text": "● 自动",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "○ 深色",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "○ 浅色",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        }
+                    ]
+                },
+                {
+                    "role": "menuitem",
+                    "text": "外观设置...",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "打开宿主工作区...",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "separator",
+                    "text": "",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "刷新",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "清除波形缓存",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                }
+            ]
+        },
+        {
+            "label": "选项",
+            "tree": [
+                {
+                    "role": "menuitem",
+                    "text": "工程拉伸覆盖",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": "menu",
+                    "items": [
+                        {
+                            "role": "menuitem",
+                            "text": "算法: Signalsmith",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": "menu",
+                            "items": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "HiFiGAN Mel Stretch: 开启",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": "menu",
+                            "items": null
+                        }
+                    ]
+                },
+                {
+                    "role": "separator",
+                    "text": "",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "新建工程默认",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": "menu",
+                    "items": [
+                        {
+                            "role": "menuitem",
+                            "text": "算法: Signalsmith",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": "menu",
+                            "items": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "HiFiGAN Mel Stretch: 开启",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": "menu",
+                            "items": null
+                        }
+                    ]
+                },
+                {
+                    "role": "separator",
+                    "text": "",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "推理设备: 自动",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": "menu",
+                    "items": [
+                        {
+                            "role": "menuitem",
+                            "text": "● 自动",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "○ CPU",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "○ GPU",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        },
+                        {
+                            "role": "separator",
+                            "text": "",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        },
+                        {
+                            "role": "menuitem",
+                            "text": "运行基准测试...",
+                            "disabled": false,
+                            "checked": null,
+                            "haspopup": null
+                        }
+                    ]
+                },
+                {
+                    "role": "menuitem",
+                    "text": "● 后台预渲染",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "● 同步编辑所有 Take",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "● 自动重新加载已修改的媒体文件",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "● 为新的音频块启用循环",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "separator",
+                    "text": "",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "吸附/网格设置...",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "参数块设置",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "分割过渡设置",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "搜索与匹配...",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "separator",
+                    "text": "",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "渲染缓存管理...",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "颤音预设管理...",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "导入声道处理...",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "指针与触控笔输入...",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "separator",
+                    "text": "",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "快捷键设置...",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                }
+            ]
+        },
+        {
+            "label": "帮助",
+            "tree": [
+                {
+                    "role": "menuitem",
+                    "text": "日志详细程度：低",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": "menu",
+                    "items": [
+                        {
+                            "role": "menuitemradio",
+                            "text": "无",
+                            "disabled": false,
+                            "checked": "false",
+                            "haspopup": null
+                        },
+                        {
+                            "role": "menuitemradio",
+                            "text": "低",
+                            "disabled": false,
+                            "checked": "true",
+                            "haspopup": null
+                        },
+                        {
+                            "role": "menuitemradio",
+                            "text": "中",
+                            "disabled": false,
+                            "checked": "false",
+                            "haspopup": null
+                        },
+                        {
+                            "role": "menuitemradio",
+                            "text": "高",
+                            "disabled": false,
+                            "checked": "false",
+                            "haspopup": null
+                        }
+                    ]
+                },
+                {
+                    "role": "menuitem",
+                    "text": "打开日志文件夹",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "导出诊断信息...",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "separator",
+                    "text": "",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitem",
+                    "text": "关于 HiFiShifter",
+                    "disabled": false,
+                    "checked": null,
+                    "haspopup": null
+                }
+            ]
+        },
+        {
+            "label": "语言",
+            "tree": [
+                {
+                    "role": "menuitemradio",
+                    "text": "English",
+                    "disabled": false,
+                    "checked": "false",
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitemradio",
+                    "text": "简体中文",
+                    "disabled": false,
+                    "checked": "true",
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitemradio",
+                    "text": "繁體中文",
+                    "disabled": false,
+                    "checked": "false",
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitemradio",
+                    "text": "日本語",
+                    "disabled": false,
+                    "checked": "false",
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitemradio",
+                    "text": "한국어",
+                    "disabled": false,
+                    "checked": "false",
+                    "haspopup": null
+                }
+            ]
+        }
+    ],
+    "paramToolbar": [
+        {
+            "label": "",
+            "tree": [
+                {
+                    "role": "menuitemradio",
+                    "text": "音量",
+                    "disabled": false,
+                    "checked": "false",
+                    "haspopup": null
+                },
+                {
+                    "role": "menuitemradio",
+                    "text": "动态",
+                    "disabled": false,
+                    "checked": "false",
+                    "haspopup": null
+                }
+            ]
+        }
+    ]
+}

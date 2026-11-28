@@ -151,7 +151,15 @@ describe("菜单样式模型的形状", () => {
         );
         expect(disabled, "找不到禁用态规则").toBeTruthy();
         expect(declaredValue(disabled!, "color")).toBe("var(--qt-menu-item-disabled)");
+        /*
+         * 【判据只看 `.hs-menu__item`】这条规则治的是"**条目**的禁用态被做成半透明"。
+         * 菜单里还有一处合法的不透明度：滚动提示行的 `opacity: 0`（配
+         * `transition: opacity`）—— 那是"这条边还在不在"的淡入淡出，不是任何状态
+         * 的颜色表达，而且它必须靠 opacity 才能既不占位又能过渡（`visibility` 不能
+         * 过渡）。把它一起禁掉只能逼出一个更差的实现。
+         */
         for (const block of menuBlocks()) {
+            if (!block.selector.includes(".hs-menu__item")) continue;
             expect(
                 declaredValue(block, "opacity"),
                 `${block.selector} 用不透明度表达状态 —— 请改用弱化色令牌`,

@@ -138,6 +138,71 @@ export function rootOfForm(layout: DockLayout, formId: string): string | null {
     return null;
 }
 
+/** 两个窗体的布局关系；视口同步先据此选择对齐语义。 */
+export type DockFormRelation =
+    "tabbed" | "stacked" | "sideBySide" | "floating" | "detached" | "unknown";
+
+/**
+ * 从根到目标窗体的路径（含根与叶标签组）。
+ *
+ * 只在同一棵根内调用；找不到返回 null。
+ */
+function pathToForm(node: DockNode, formId: string, path: DockNode[] = []): DockNode[] | null {
+    const next = [...path, node];
+    if (node.t === "tabset") {
+        return node.tabs.includes(formId) ? next : null;
+    }
+    return pathToForm(node.a, formId, next) ?? pathToForm(node.b, formId, next);
+}
+
+/**
+ * 判定两个窗体在当前停靠布局里的几何关系。
+ *
+ * tabbed 优先于树路径：同一标签组共享一个槽位，语义与上下/左右都不同。
+ * 任一窗体浮动时返回 floating / detached（osWindow 优先），因为它们已离开树。
+ * 不同根（例如一个在主根、一个在面板子根）或找不到路径时返回 unknown，由运行期
+ * 几何是否可见兜底 —— 不猜一个可能错的对齐方式。
+ */
+export function resolveFormRelation(
+    layout: DockLayout,
+    formA: string,
+    formB: string,
+): DockFormRelation {
+    if (formA === formB) return "unknown";
+    const a = layout.forms[formA];
+    const b = layout.forms[formB];
+    if (!a || !b) return "unknown";
+
+    if (a.floating === true || b.floating === true) {
+        return a.floatMode === "osWindow" || b.floatMode === "osWindow" ? "detached" : "floating";
+    }
+
+    const rootA = rootOfForm(layout, formA);
+    const rootB = rootOfForm(layout, formB);
+    if (rootA === null || rootB === null || rootA !== rootB) return "unknown";
+    const tree = layout.roots[rootA];
+    if (!tree) return "unknown";
+
+    const tabsetA = findTabsetOfForm(tree, formA);
+    const tabsetB = findTabsetOfForm(tree, formB);
+    if (tabsetA && tabsetB && tabsetA.id === tabsetB.id) return "tabbed";
+
+    const pathA = pathToForm(tree, formA);
+    const pathB = pathToForm(tree, formB);
+    if (!pathA || !pathB) return "unknown";
+    let common = 0;
+    while (
+        common + 1 < pathA.length &&
+        common + 1 < pathB.length &&
+        pathA[common + 1] === pathB[common + 1]
+    ) {
+        common += 1;
+    }
+    const ancestor = pathA[common];
+    if (!ancestor || ancestor.t !== "split") return "unknown";
+    return ancestor.dir === "col" ? "stacked" : "sideBySide";
+}
+
 /**
  * 窗体可见性 —— 派生而非存储。
  *

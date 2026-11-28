@@ -93,6 +93,12 @@ pub struct HostCapabilities {
     /// 【为什么与 `export_audio` 分开】前者要渲染音频，后者只把前端算好的 JSON
     /// 写成文件；两者失败面完全不同，混用会让"JSON 导出能用"被音频导出拖住。
     pub export_data: bool,
+    /// 宿主允许读写 **item 增益**（REAPER item D_VOL）。
+    pub clip_item_gain: bool,
+    /// 宿主允许读写 **take 增益**（REAPER take D_VOL，含极性）。
+    pub clip_take_gain: bool,
+    /// 宿主允许读写 **轨道增益**（轨道 D_VOL）。
+    pub track_volume: bool,
     /// 宿主允许把 **take 的播放方向（倒放）** 写回。
     ///
     /// 【为什么它必须是独立一位，而不是由 `clip_write` 推出来】REAPER 没有"反向
@@ -131,6 +137,9 @@ impl HostCapabilities {
             fade_axes: false,
             export_audio: false,
             export_data: false,
+            clip_item_gain: false,
+            clip_take_gain: false,
+            track_volume: false,
             clip_reverse: false,
             take_pitch_bridge: false,
             capture: false,
@@ -159,6 +168,9 @@ impl HostCapabilities {
             fade_axes: false,
             export_audio: true,
             export_data: true,
+            clip_item_gain: false,
+            clip_take_gain: false,
+            track_volume: false,
             clip_reverse: false,
             take_pitch_bridge: false,
             capture: false,
@@ -195,6 +207,10 @@ impl HostCapabilities {
             fade_axes: false,
             export_audio: true,
             export_data: true,
+            // Capture 的时间线完全属于插件自己：三层增益都由本进程施加。
+            clip_item_gain: true,
+            clip_take_gain: true,
+            track_volume: true,
             clip_reverse: false,
             take_pitch_bridge: false,
             capture: true,

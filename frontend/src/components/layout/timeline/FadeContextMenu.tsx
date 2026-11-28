@@ -1,10 +1,9 @@
-// hs-interaction-exempt: 淡变曲率滑块位于自绘 SVG 面板内（与拖动/预览联动），已有滚轮 + 精细调整接线；原语不适用。
 /**
  * FadeContextMenu — 淡入淡出包络专属上下文菜单。
  *
  * 与 Clip 上下文菜单完全独立：**只**包含当前聚焦侧的
  *   1. 七个 REAPER 形状预设（图标 + data-tooltip 名称，选中态高亮）；
- *   2. 曲率滑块（原生 range；支持滚轮步进与 modifier.paramFineAdjust 微调；
+ *   2. 曲率滑块（AppSlider；支持小数步长、滚轮粗调/精调与键盘方向键，
  *      onChange 实时提交）。
  *
  * 右键目标为交叉点抓手时同时渲染两列 —— 前者淡出、后者淡入，
@@ -17,16 +16,17 @@
 /* eslint-disable react-refresh/only-export-components -- 文件同时导出组件与 Hook/常量（刷新边界按文件粒度接受） */
 import React, { useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
+import { MenuScrollScope } from "../../../ui/MenuScrollScope";
 import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
-import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
+import { AppSlider, AppSliderReadout } from "../../../ui/Slider";
+import { AppDensityProvider } from "../../../ui/density";
+import { menuPortalContainer } from "../../../ui/portalContainer";
 import { registerDragAbort } from "../../../utils/gestureFocusGuard";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { canEditFadeS, canSelectHostFadeShape } from "../../../services/hostCapabilities";
 import type { MessageKey } from "../../../i18n/messages";
 import {
     formatKeybindingList,
-    isModifierActive,
-    selectKeybinding,
     selectKeybindings,
 } from "../../../features/keybindings/keybindingsSlice";
 import { useAppSelector } from "../../../app/hooks";
@@ -77,9 +77,6 @@ export type FadeContextSide = {
     hostFades?: HostFadeMetadata;
 };
 
-/** 曲率滑块微调步长（dir 单位）。 */
-const CURVATURE_WHEEL_STEP = 0.05;
-const CURVATURE_FINE_STEP = 0.01;
 const CurvatureSlider: React.FC<{
     shape: number;
     dir: number;
@@ -92,38 +89,9 @@ const CurvatureSlider: React.FC<{
     onChange: (nextDir: number) => void;
     onSChange: (nextS: number) => void;
 }> = ({ shape, dir, s, continuous, isOut, onChange, onSChange }) => {
-    const fineAdjustKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.paramFineAdjust"),
-    );
+    const { t } = useI18n();
     const svgRef = useRef<SVGSVGElement | null>(null);
     const draggingRef = useRef(false);
-    /*
-     * 曲率滑块的滚轮步进必须走**原生非被动**监听。
-     *
-     * 【为什么不能写在 JSX 的 onWheel 里】React 17+ 在 root 上把 `wheel` 注册为
-     * passive，合成事件里的 `preventDefault()` 是空操作（浏览器打干预警告），
-     * 于是滚轮**同时**改了曲率、又滚了底下的面板。`useNonPassiveWheel` 的文件头
-     * 记录了这条；与 `PianoRollPanel` 的边缘平滑度滑块同因同解。
-     */
-    const attachCurvatureWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        // 原生事件本身就是事件对象，修饰键直接读它（不是 `e.nativeEvent`）。
-        const fine = isModifierActive(fineAdjustKb, e);
-        const step = fine ? CURVATURE_FINE_STEP : CURVATURE_WHEEL_STEP;
-        const direction = e.deltaY < 0 ? 1 : -1;
-        const next = Math.max(-1, Math.min(1, dir + direction * step));
-        onChange(Number(next.toFixed(2)));
-    });
-    const attachSWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const fine = isModifierActive(fineAdjustKb, e);
-        const step = fine ? CURVATURE_FINE_STEP : CURVATURE_WHEEL_STEP;
-        const direction = e.deltaY < 0 ? 1 : -1;
-        const next = Math.max(-1, Math.min(1, s + direction * step));
-        onSChange(Number(next.toFixed(2)));
-    });
     /** 失焦守卫注销函数（拖拽期间非空；blur/抬起/取消/卸载时清理）。 */
     const unregisterAbortRef = useRef<(() => void) | null>(null);
     // 卸载兜底：菜单被外部关闭时（如点击外部）不能残留失焦注册。
@@ -201,7 +169,7 @@ const CurvatureSlider: React.FC<{
 
     return (
         <div className="flex flex-col gap-1">
-            <div className="hs-menu__body flex items-center gap-2">
+            <div className="hs-menu__body flex min-w-0 items-center gap-2">
                 <svg
                     ref={svgRef}
                     width={34}
@@ -254,50 +222,44 @@ const CurvatureSlider: React.FC<{
                         strokeLinecap="round"
                     />
                 </svg>
-                <input
-                    ref={attachCurvatureWheel}
-                    type="range"
-                    className="qt-range"
-                    min={-1}
-                    max={1}
-                    step={0.01}
-                    value={dir}
-                    onChange={(e) => onChange(Number(e.currentTarget.value))}
-                    style={{ flex: 1 }}
-                />
-                <span
-                    className="text-qt-xs tabular-nums"
-                    style={{ minWidth: 44, textAlign: "right" }}
-                >
-                    {(dir >= 0 ? "+" : "") + dir.toFixed(2)}
-                </span>
+                <AppDensityProvider value="compact">
+                    <AppSlider
+                        value={dir}
+                        min={-1}
+                        max={1}
+                        step={0.01}
+                        unit="curvature"
+                        ariaLabel={t("common_curvature")}
+                        onChange={onChange}
+                    />
+                    <AppSliderReadout minWidth={44}>
+                        {(dir >= 0 ? "+" : "") + dir.toFixed(2)}
+                    </AppSliderReadout>
+                </AppDensityProvider>
             </div>
             {/* S 轴滑杆：只有 REAPER ≥7.81 有这根轴。 */}
             {continuous ? (
-                <div className="hs-menu__body flex items-center gap-2">
+                <div className="hs-menu__body flex min-w-0 items-center gap-2">
                     <span
                         className="text-qt-xs text-qt-text/70"
                         style={{ width: 34, textAlign: "center", flexShrink: 0 }}
                     >
                         S
                     </span>
-                    <input
-                        ref={attachSWheel}
-                        type="range"
-                        className="qt-range"
-                        min={-1}
-                        max={1}
-                        step={0.01}
-                        value={s}
-                        onChange={(e) => onSChange(Number(e.currentTarget.value))}
-                        style={{ flex: 1 }}
-                    />
-                    <span
-                        className="text-qt-xs tabular-nums"
-                        style={{ minWidth: 44, textAlign: "right" }}
-                    >
-                        {(s >= 0 ? "+" : "") + s.toFixed(2)}
-                    </span>
+                    <AppDensityProvider value="compact">
+                        <AppSlider
+                            value={s}
+                            min={-1}
+                            max={1}
+                            step={0.01}
+                            unit="curvature"
+                            ariaLabel={t("fade_axis_s")}
+                            onChange={onSChange}
+                        />
+                        <AppSliderReadout minWidth={44}>
+                            {(s >= 0 ? "+" : "") + s.toFixed(2)}
+                        </AppSliderReadout>
+                    </AppDensityProvider>
                 </div>
             ) : null}
         </div>
@@ -453,46 +415,51 @@ export const FadeContextMenu: React.FC<{
             onContextMenu={(e) => e.preventDefault()}
             onPointerDown={(e) => e.stopPropagation()}
         >
-            {secondary ? (
-                // 交叉点：双列 —— 先前者淡出、后后者淡入。
-                <>
-                    <div className="hs-menu__label">{labelFor(primary)}</div>
-                    <SideColumn
-                        side={primary}
-                        isOut={primary.isOut}
-                        onShapeChange={onShapeChange}
-                        onDirChange={onDirChange}
-                        onSChange={onSChange}
-                        t={(key) => t(key as MessageKey)}
-                    />
-                    <div className="hs-menu__separator" role="separator" />
-                    <div className="hs-menu__label">{labelFor(secondary)}</div>
-                    <SideColumn
-                        side={secondary}
-                        isOut={secondary.isOut}
-                        onShapeChange={onShapeChange}
-                        onDirChange={onDirChange}
-                        onSChange={onSChange}
-                        t={(key) => t(key as MessageKey)}
-                    />
-                </>
-            ) : (
-                <>
-                    <div className="hs-menu__label">{labelFor(primary)}</div>
-                    <SideColumn
-                        side={primary}
-                        isOut={primary.isOut}
-                        onShapeChange={onShapeChange}
-                        onDirChange={onDirChange}
-                        onSChange={onSChange}
-                        t={(key) => t(key as MessageKey)}
-                    />
-                </>
-            )}
-            {/* 形状切换重置曲率的语义提示（与 Clip 菜单一致的行为说明）。 */}
-            <div className="hs-menu__hint">{curvatureHint}</div>
+            {/* 【`scrollable={false}`】内容是一张紧凑面板（每侧一行形状 + 一个曲率
+                滑杆），高度可证明有界；壳滚起来反而会干扰曲率预览的指针捕获。
+                内边距仍然走内容层 —— 壳的内边距必须是 0，否则 sticky 提示行会内缩。 */}
+            <MenuScrollScope scrollable={false}>
+                {secondary ? (
+                    // 交叉点：双列 —— 先前者淡出、后后者淡入。
+                    <>
+                        <div className="hs-menu__label">{labelFor(primary)}</div>
+                        <SideColumn
+                            side={primary}
+                            isOut={primary.isOut}
+                            onShapeChange={onShapeChange}
+                            onDirChange={onDirChange}
+                            onSChange={onSChange}
+                            t={(key) => t(key as MessageKey)}
+                        />
+                        <div className="hs-menu__separator" role="separator" />
+                        <div className="hs-menu__label">{labelFor(secondary)}</div>
+                        <SideColumn
+                            side={secondary}
+                            isOut={secondary.isOut}
+                            onShapeChange={onShapeChange}
+                            onDirChange={onDirChange}
+                            onSChange={onSChange}
+                            t={(key) => t(key as MessageKey)}
+                        />
+                    </>
+                ) : (
+                    <>
+                        <div className="hs-menu__label">{labelFor(primary)}</div>
+                        <SideColumn
+                            side={primary}
+                            isOut={primary.isOut}
+                            onShapeChange={onShapeChange}
+                            onDirChange={onDirChange}
+                            onSChange={onSChange}
+                            t={(key) => t(key as MessageKey)}
+                        />
+                    </>
+                )}
+                {/* 形状切换重置曲率的语义提示（与 Clip 菜单一致的行为说明）。 */}
+                <div className="hs-menu__hint">{curvatureHint}</div>
+            </MenuScrollScope>
         </div>,
-        document.body,
+        menuPortalContainer(),
     );
 };
 

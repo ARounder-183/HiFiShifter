@@ -11,6 +11,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { ClipInfo } from "../../../features/session/sessionTypes";
+import { clipWaveformGain } from "../timeline/clipGain";
 import type { HostFadeMetadata } from "../../../types/api";
 import { resolveSourceEndSec } from "../../../utils/loopRender";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
@@ -63,8 +64,8 @@ export interface ClipPeaksEntry {
     sourceSampleRate: number;
     /** 播放速率 */
     playbackRate: number;
-    /** clip 增益（线性值，0~4） */
-    gain: number;
+    /** 波形幅度：|item × active take|（线性，非负；0 = 静音）。 */
+    amplitudeGain: number;
     /** 淡入时长（秒） */
     fadeInSec: number;
     /** 插件只读宿主淡化轴；仅供共享UI包络，不写入音频。 */
@@ -212,7 +213,7 @@ export function useClipsPeaksForPianoRoll(args: {
                 sourceEndSec: clipSourceEndSec,
                 sourceSampleRate,
                 playbackRate: pr,
-                gain: clip.gain ?? 1,
+                amplitudeGain: clipWaveformGain(clip),
                 fadeInSec: clip.fadeInSec ?? 0,
                 hostFades: clip.hostFades,
                 fadeOutSec: clip.fadeOutSec ?? 0,

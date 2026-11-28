@@ -1,8 +1,9 @@
 # 模型权重：放在哪、怎么发
 
 一句话：**清单进仓库，权重进 release**。仓库里只有
-`backend/src-tauri/resources/models/models.json`，约 200 MB 的权重以
-`models-<version>.zip` 的形式挂在 tag `models-<version>` 下，按内容哈希取用。
+`backend/src-tauri/resources/models/models.json`，权重本身以
+`models-<version>.zip` 的形式挂在 tag `models-<version>` 下，按内容哈希取用（体积以清单的
+`bytes` 为准）。
 
 这条线上只有三件事必须绝对正确，其余都是细节：
 
@@ -95,7 +96,7 @@ WebGPU。单独覆盖时设置 `HIFISHIFTER_GAME_ORT_EP=cpu|gpu|directml|coreml|
 
 ```bash
 python scripts/setup/fetch-models.py --write-manifest
-# 已写入 …/models.json（版本 d342aa989cee，6 个文件）
+# 已写入 …/models.json（版本 d342aa989cee）
 ```
 
 版本号变了 = 真的换了权重；没变 = 你只是把同一份清单重新生成了一次。**不要手改
@@ -105,10 +106,10 @@ python scripts/setup/fetch-models.py --write-manifest
 
 ```bash
 python scripts/setup/fetch-models.py --package
-# 资产 dist/models/models-d342aa989cee.zip（151.6 MB）
+# 资产 dist/models/models-d342aa989cee.zip
 #   sha256 9750177077373869ebe0d4904b6b71674f82b032bb84ebd1ea30842c4042c6cc
 python scripts/setup/fetch-models.py --verify-archive dist/models/models-d342aa989cee.zip
-# models-d342aa989cee.zip 与清单一致（版本 d342aa989cee，6 个文件）
+# models-d342aa989cee.zip 与清单一致（版本 d342aa989cee）
 ```
 
 `--package` 在打包前做三件事：逐文件比对字节数与 sha256、重算版本号（手改过的清单
@@ -157,7 +158,7 @@ notes，比让 tag 指着某个提交有用。
 curl -L -o "$env:TEMP\models.zip" `
   https://github.com/ARounder-183/HiFiShifter/releases/download/models-d342aa989cee/models-d342aa989cee.zip
 python scripts/setup/fetch-models.py --verify-archive "$env:TEMP\models.zip"
-# models-d342aa989cee.zip 与清单一致（版本 d342aa989cee，6 个文件）
+# models-d342aa989cee.zip 与清单一致（版本 d342aa989cee）
 ```
 
 `-L` 不能省：GitHub 的下载地址会 302 到对象存储。
@@ -181,7 +182,7 @@ git clone --depth 1 https://github.com/ARounder-183/HiFiShifter.git "$env:TEMP\h
 cd "$env:TEMP\hfs-check"
 python scripts/setup/fetch-models.py
 # 下载 https://github.com/…/releases/download/models-d342aa989cee/models-d342aa989cee.zip
-# 模型权重就绪（版本 d342aa989cee，6 个文件）
+# 模型权重就绪（版本 d342aa989cee）
 ```
 
 CI 替你跑同一件事的另一半：`build.yml` 的每个 job 都在编译前跑 `fetch-models.py`，
@@ -205,8 +206,8 @@ CI 替你跑同一件事的另一半：`build.yml` 的每个 job 都在编译前
 | 手改 `models.json` | `--package` 拒绝打包（版本号与内容重算值不符）。绕过的话更糟：运行时 `looks_complete` 只比字节数，"看起来装了、推理全错" |
 | 覆盖已发布 tag 的资产 | 同一个版本号对应两份字节。CI 的缓存键（`hashFiles(models.json)`）不变，会继续用旧权重；用户下到的也可能是旧的 |
 | 用"压缩为 zip"生成资产 | 时间戳与条目顺序不定 → 每次 sha256 都不同，发布物失去身份 |
-| 把权重提交回 git | checkout 从 200 MB 起步（一次 PR 十几次），且缓存键与内容无关 |
-| 把 CoreML 变体打进资产 | Windows/Linux 白装 56 MB 用不上的权重；版本号还会取决于"构建环境里编没编过 macOS 目标"（`--package` 因此把它列入已知构建产物） |
+| 把权重提交回 git | checkout 从一份完整的权重起步（一次 PR 十几次），且缓存键与内容无关 |
+| 把 CoreML 变体打进资产 | Windows/Linux 白装一份用不上的权重；版本号还会取决于"构建环境里编没编过 macOS 目标"（`--package` 因此把它列入已知构建产物） |
 | 删除旧版本的 release | 老 App 与老的 CI 提交再也取不到对应版本。资产是内容寻址的，旧 tag 必须永久保留 |
 
 ## 镜像与离线

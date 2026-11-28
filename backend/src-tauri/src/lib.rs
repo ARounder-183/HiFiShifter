@@ -77,6 +77,9 @@ mod launch_args;
 mod link_bridge;
 #[cfg(target_os = "macos")]
 mod macos_menu;
+/// 平台收敛层：形态 / 能力 / 平台门面。**全仓唯一允许出现 `cfg(target_os)` 的地方**
+/// （见模块文档与 `scripts/checks/check-platform-boundary.py`）。
+pub mod platform;
 mod recording;
 mod search;
 #[path = "audio/silence_detect.rs"]
@@ -100,7 +103,10 @@ pub(crate) use hifishifter_kernel::{
 };
 
 // 这几个的可见性跟着自己的 feature / target 走，不能放进上面那个统一的 `use`。
-#[cfg(all(feature = "vslib", target_os = "windows"))]
+// 【为什么带 target_arch】`hifishifter_kernel::vslib` 只在 x86_64-Windows 上存在
+// （见内核 `lib.rs` 的 `mod vslib`）。条件少一个 `target_arch` 就是
+// "re-export 了不存在的模块" —— 编译期报错，而不是链接期，但同样是红的。
+#[cfg(all(feature = "vslib", target_os = "windows", target_arch = "x86_64"))]
 pub(crate) use hifishifter_kernel::vslib;
 #[cfg(feature = "onnx")]
 pub(crate) use hifishifter_kernel::{fcpe_onnx, hnsep_onnx, nsf_hifigan_onnx};
@@ -214,7 +220,10 @@ mod system_clipboard;
 mod vocalshifter_clipboard;
 #[path = "import/vocalshifter_import.rs"]
 mod vocalshifter_import;
-#[cfg(all(feature = "vslib", target_os = "windows", target_arch = "x86_64"))]
+// 【为什么只有 `target_os = "windows"`】此前这里还叠了一条
+// `all(feature = "vslib", target_arch = "x86_64")` —— 于是"关掉 vslib 的 Windows 构建"
+// 与 "Windows ARM64 构建" 都编译不过（调用点在 `platform/window.rs` 里按 windows
+// 判断，模块却不存在）。这个模块只依赖 WebView2 的 COM 接口，与 vslib、与架构无关。
 #[cfg(target_os = "windows")]
 mod webview2_accelerators;
 
@@ -355,6 +364,12 @@ fn apply_app_directories_override(app: &mut tauri::utils::config::AppConfig) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // ── 日志（移动端的唯一初始化点）──────────────────────────────────────────
+    // 桌面的日志在 `main.rs` 就初始化了；但移动端**没有 main.rs** —— Tauri 的移动
+    // 入口就是这里。缺了这一步，移动端一行日志都没有：不建目录、不装 logger、
+    // 不装 panic hook，用户报障时没有任何现场。函数本身幂等（`Once`）。
+    platform::logging::init();
+
     // ── 一次性布局迁移（兜底调用）──────────────────────────────────────────
     // 权威调用点在 main() 的最前面（早于日志初始化）；这里再兜一次是为了让
     // **任何**启动路径（测试、将来的 CLI）也不会漏掉它。标记存在时它是一次
@@ -368,31 +383,51 @@ pub fn run() {
     apply_app_directories_override(&mut context.config_mut().app);
 
     let builder = tauri::Builder::default();
-    #[cfg(target_os = "macos")]
-    let builder = builder.enable_macos_default_menu(false);
+    // macOS 要关掉 Tauri 的默认菜单（我们自建一份带本地化的），其它平台无所谓。
+    // 判断留在收敛层里 —— 见 `platform::window::uses_custom_app_menu`。
+    let builder = if platform::window::uses_custom_app_menu() {
+        builder.enable_macos_default_menu(false)
+    } else {
+        builder
+    };
     builder
         .manage(state::AppState::default())
         .manage(link_bridge::LinkBridge::default())
         .plugin(tauri_plugin_opener::init())
+        /*
+         * 原生桥（Android：系统文件选择器 / 安全区 / 系统栏）。
+         *
+         * 【为什么无条件注册】它在桌面上是一个**空插件** —— 只有
+         * `#[cfg(target_os = "android")]` 分支里才会实例化 Kotlin 类，桌面构建
+         * 既不链接任何原生依赖，也不暴露任何 JS 命令。注册与不注册的差别只有
+         * "句柄是否存在"，而那正是移动端拿不到时应当降级的情形（见
+         * `platform::native` 的说明）。
+         */
+        .plugin(platform::native::init())
         .setup(|app| {
-            #[cfg(target_os = "macos")]
-            {
-                let menu = macos_menu::build(app.handle())?;
-                app.set_menu(menu)?;
-            }
-            // 模型位置由内核统一解析：优先共享模型库（与 ARA 插件共用同一份 152 MB），
+            // macOS 的应用菜单（含"关于/退出"的本地化与位置）。收敛层内部判断平台，
+            // 业务代码不出现 `cfg`。
+            platform::window::install_app_menu(app)?;
+            // 模型位置由内核统一解析：优先共享模型库（与 ARA 插件共用同一份权重），
             // 库里没有就从本 bundle 的副本建立（同卷硬链接，零额外字节），最后才退回
             // bundle 内的副本。此前这里直接登记 `resource_dir()/models`，于是"同时装
             // App 与插件"必然有两份完全相同的模型。
-            if let Ok(res_dir) = app.path().resource_dir() {
-                match hifishifter_kernel::model_store::resolve_and_register(&res_dir.join("models"))
-                {
-                    // 来源描述由内核统一给（来源 + 目录 + 版本 + 是否刚发布）。
-                    Ok(origin) => log::info!("models: {}", origin.describe()),
-                    // 模型不可用不该阻止应用启动：界面要能打开，用户才有机会看到
-                    // 诊断信息；推理相关的操作会各自报错。
-                    Err(error) => log::warn!("models unavailable: {error}"),
+            // 【为什么改走 `platform::resources`】`resource_dir()` 在 Android 上返回的是
+            // `"asset://localhost/"` —— 一个 WebView 协议 URL，不是文件系统路径
+            // （tauri 的 `PathPlugin.kt` 里 `getResourcesDir` 直接返回该常量）。
+            // 拿它 `join("models")` 得到的路径 `exists()` 恒为 false，模型会静默不可用。
+            // 收敛层负责在 Android 上先把随包资源物化成真实文件。
+            match platform::resources::models_root(app.handle()) {
+                Ok(models_dir) => {
+                    match hifishifter_kernel::model_store::resolve_and_register(&models_dir) {
+                        // 来源描述由内核统一给（来源 + 目录 + 版本 + 是否刚发布）。
+                        Ok(origin) => log::info!("models: {}", origin.describe()),
+                        // 模型不可用不该阻止应用启动：界面要能打开，用户才有机会看到
+                        // 诊断信息；推理相关的操作会各自报错。
+                        Err(error) => log::warn!("models unavailable: {error}"),
+                    }
                 }
+                Err(error) => log::warn!("models unavailable: {error}"),
             }
 
             let state = app.state::<state::AppState>();
@@ -417,6 +452,9 @@ pub fn run() {
             // 内核找宿主的出口（后台渲染开关 / 请求）。必须在任何内核 worker 启动前装配。
             let _ = app_events::install_host_callbacks();
 
+            // 平台收敛层的一次性准备：音频会话、窗口形态、进程级内存预算。
+            platform::init(app.handle());
+
             // 不再把 app_handle 经命令通道送给 audio engine worker ——
             // `EngineCommand` 已是内核的纯数据类型。worker 会在自己的循环里
             // 惰性从 `app_events::app_handle()` 取（见 engine.rs 的说明）。
@@ -428,9 +466,16 @@ pub fn run() {
             // 全部 IPC 都会被阻塞。这里只**派发**后台预热线程：UI 立即可交互，
             // 三个模型的会话在后台并行/串行构建，首个渲染或播放到来时通常已
             // 就绪（可用性查询 is_available 为非阻塞乐观语义，不触发构建）。
-            crate::nsf_hifigan_onnx::ensure_background_prewarm();
-            crate::fcpe_onnx::ensure_background_prewarm();
-            crate::hnsep_onnx::ensure_background_prewarm();
+            //
+            // 【为什么移动端不预热】预热的代价是**同时**持有三个会话的权重与工作区
+            // （实测桌面峰值 +600 MB 量级）。移动端的内存上限在 1~1.5 GB，三个会话
+            // 一起驻留会让"打开应用"这一步就被系统杀掉。移动端改为**用到哪个建哪个**
+            // （`is_available` 是非阻塞乐观语义，不会因此卡住 UI）。
+            if !platform::is_mobile() {
+                crate::nsf_hifigan_onnx::ensure_background_prewarm();
+                crate::fcpe_onnx::ensure_background_prewarm();
+                crate::hnsep_onnx::ensure_background_prewarm();
+            }
 
             // Prefer the OS-level app cache dir so peaks persist across runs.
             //
@@ -465,13 +510,25 @@ pub fn run() {
             // 否则两个形态各写一份设置 —— 用户在 App 里调好的外观、快捷键、语言
             // 在插件里全部失效。让内核算一次、两边都调用，就没有第二处可以算错。
             // 算出来的路径与 Tauri 的历史布局逐一对应（见 config_location 的模块注释）。
-            if let Ok(cfg_dir) = hifishifter_kernel::config_location::resolve_and_create(None) {
-                let recent = crate::config::load_recent(&cfg_dir);
-                {
-                    let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
-                    p.recent = recent;
+            match hifishifter_kernel::config_location::resolve_and_create(None) {
+                Ok(cfg_dir) => {
+                    let recent = crate::config::load_recent(&cfg_dir);
+                    {
+                        let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+                        p.recent = recent;
+                    }
+                    let _ = state.config_dir.set(cfg_dir);
                 }
-                let _ = state.config_dir.set(cfg_dir);
+                /*
+                 * 【为什么必须喊出来】配置目录解析失败时，所有"保存设置"的路径都是
+                 * `if let Some(dir) = state.config_dir.get()` —— 静默跳过。用户看到的是
+                 * "改了什么，重启就还原"，而日志里一个字都没有。移动端真实发生过：
+                 * Android 沙箱根算不出来（见 `app_paths::android_sandbox`），
+                 * 于是首选项全部存不住，连日志详细程度都改不了。
+                 */
+                Err(error) => log::error!(
+                    "user config directory unavailable: {error} — settings will NOT persist in this session"
+                ),
             }
 
             // 启动即同步"为新的音频块启用循环"的进程级默认值：拖放导入、
@@ -487,6 +544,12 @@ pub fn run() {
             }
 
             // 尝试恢复上次运行时保存的窗口状态（非强制性）
+            //
+            // 【为什么移动端整段跳过】移动端的窗口几何由系统给、随旋转变化，
+            // `set_size` / `set_position` 要么被忽略、要么在分屏下造成异常行为；
+            // 而下面那段"与显示器求交集"的算法在没有可枚举显示器的平台上会退化成
+            // "居中"，也就是每次冷启动都做一次无意义的窗口操作。
+            if platform::window::supports_window_state() {
             if let Some(cfg_dir) = state.config_dir.get() {
                 if let Some(win) = app.get_webview_window("main") {
                     let ws = crate::config::load_window_state(cfg_dir);
@@ -601,23 +664,27 @@ pub fn run() {
                         }
                     }
 
-                    if ws.fullscreen.unwrap_or(false) {
-                        let _ = win.set_fullscreen(true);
-                    } else if ws.maximized.unwrap_or(false) {
-                        let _ = win.maximize();
-                    } else {
-                        let _ = win.set_fullscreen(false);
-                    }
+                    // 模式位交给收敛层：`set_fullscreen` / `maximize` 在移动目标上
+                    // 不参与编译（见 `platform::window::apply_window_mode`）。
+                    platform::window::apply_window_mode(
+                        &win,
+                        ws.fullscreen.unwrap_or(false),
+                        ws.maximized.unwrap_or(false),
+                    );
                 }
             }
+            } // `platform::window::supports_window_state()`
 
             // 禁用 WebView2 的浏览器级快捷键（Ctrl+Plus/Minus 缩放、Ctrl+F
             // 查找、F5 刷新等）—— 它们不可被页面取消，会抢占应用快捷键
             // （参数线微调 Ctrl+= / Ctrl+- 等）。与窗口状态恢复相互独立，
             // 因此放在 cfg_dir 块之外。
-            #[cfg(target_os = "windows")]
+            //
+            // 【为什么搬进收敛层】它带着 `cfg(target_os = "windows")`，而业务代码里
+            // 不允许出现平台判断（见 `platform` 模块文档）。收敛层内部做同一件事，
+            // 调用点因此对平台无感知。
             if let Some(win) = app.get_webview_window("main") {
-                webview2_accelerators::disable_browser_accelerator_keys(&win);
+                platform::window::configure_main_webview(&win);
             }
 
             // 启动时清理上次遗留的临时文件（后台线程，不阻塞启动）
@@ -759,6 +826,7 @@ pub fn run() {
             commands::notebook_export_document,
             commands::notebook_save_asset_as,
             commands::save_project,
+            commands::list_projects,
             commands::project_save_commands::save_project_as,
             commands::project_save_commands::pick_project_save_path,
             commands::project_save_commands::save_project_to_path,
@@ -818,6 +886,8 @@ pub fn run() {
             commands::apply_clip_linked_params,
             commands::set_clip_state,
             commands::set_clips_state_bulk,
+            commands::gain_preview::set_gain_preview,
+            commands::gain_preview::clear_gain_preview,
             commands::set_clip_active_take,
             commands::cycle_clip_takes,
             commands::pack_clips_into_takes,
@@ -917,6 +987,8 @@ pub fn run() {
             commands::import_midi_as_clip,
             commands::replace_midi_clip_data,
             commands::pick_midi_output_path,
+    commands::save_output_to_location,
+    commands::pick_files_bytes,
             commands::export_pitch_to_midi,
             commands::get_ui_settings,
             commands::save_ui_settings,
@@ -925,6 +997,9 @@ pub fn run() {
             commands::ui_kv_delete,
             commands::get_log_settings,
             commands::set_log_settings,
+            commands::get_surface_profile,
+    commands::set_system_bars,
+    commands::get_surface_insets,
         ])
         .build(context)
         .expect("error while building tauri application")

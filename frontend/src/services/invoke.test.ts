@@ -26,7 +26,7 @@ test("services/invoke.test.ts scripted checks", async () => {
         "name-v", // name
         1.5, // startSec
         2.5, // lengthSec
-        1.25, // gain
+        1.25, // takeGain
         true, // muted
         0.25, // sourceStartSec
         3.25, // sourceEndSec
@@ -58,7 +58,7 @@ test("services/invoke.test.ts scripted checks", async () => {
         "name",
         "startSec",
         "lengthSec",
-        "gain",
+        "takeGain",
         "muted",
         "sourceStartSec",
         "sourceEndSec",
@@ -85,6 +85,8 @@ test("services/invoke.test.ts scripted checks", async () => {
 
     // 关键断言：snapOffset 与淡入淡出互不串位。
     assertEqual(mapped.snapOffsetSec, 0.75, "snapOffsetSec value");
+    // Take 级增益在第 5 位：位置或键名任一错位，take 层就会被写成 item 层。
+    assertEqual(mapped.takeGain, 1.25, "takeGain value");
     assertEqual(mapped.fadeInSec, 0.1, "fadeInSec value");
     assertEqual(mapped.fadeOutSec, 0.2, "fadeOutSec value");
     assertEqual(mapped.checkpoint, false, "checkpoint value");

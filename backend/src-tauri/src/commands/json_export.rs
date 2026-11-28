@@ -23,17 +23,18 @@
 /// @param title 保存对话框标题。
 /// @param log_tag 日志前缀（如 `layout` / `theme`），便于在日志里区分来源。
 pub(super) fn export_json_file(
+    app: &tauri::AppHandle,
     json: String,
     default_file_name: &str,
     title: &str,
     log_tag: &str,
 ) -> serde_json::Value {
     let file_type = &hifishifter_kernel::file_types::HIFISHIFTER_JSON;
-    let Some(path) = rfd::FileDialog::new()
+    let Some(path) = crate::platform::dialog::FileDialog::new()
         .set_title(title)
         .add_filter(file_type.name(), &file_type.extension_refs())
         .set_file_name(default_file_name)
-        .save_file()
+        .save_file(app)
     else {
         return serde_json::json!({ "ok": true, "canceled": true });
     };

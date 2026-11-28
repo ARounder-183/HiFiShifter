@@ -74,6 +74,7 @@ pub fn render_timeline(
         cancel_flag: None,
         progress: None,
         cache_stats: None,
+        gain_scope: hifishifter_kernel::gain::GainScope::HostOwned,
     };
     let (sample_rate, channels, _duration_sec, samples) =
         render_mixdown_interleaved(timeline, options)?;

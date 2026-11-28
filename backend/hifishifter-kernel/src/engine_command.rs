@@ -30,6 +30,62 @@ pub struct StretchKey {
     pub playback_rate_q: u32,
 }
 
+/// 一次增益试听要覆盖的目标层。
+///
+/// 【为什么不是 delta】试听帧最终按 clip 索引存**绝对可听增益**，0 / 负 take
+/// 都能被直接表达；delta 在 0 与反相处没有定义。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum GainPreviewTarget {
+    Clip {
+        clip_id: String,
+        #[serde(default)]
+        item_gain: Option<f32>,
+        #[serde(default)]
+        take_gain: Option<f32>,
+        /// 淡化长度（秒）；None = 沿用快照。
+        #[serde(default)]
+        fade_in_sec: Option<f64>,
+        #[serde(default)]
+        fade_out_sec: Option<f64>,
+        #[serde(default)]
+        fade_in_shape: Option<f64>,
+        #[serde(default)]
+        fade_in_dir: Option<f64>,
+        #[serde(default)]
+        fade_out_shape: Option<f64>,
+        #[serde(default)]
+        fade_out_dir: Option<f64>,
+        /// 音量自动化窗口（clip 级覆盖）。
+        #[serde(default)]
+        volume_curve_window: Option<VolumeCurveWindow>,
+    },
+    Track {
+        track_id: String,
+        volume: f32,
+    },
+    /// 根轨道的参数曲线窗口（音量自动化是轨道级参数，不是逐 clip 的）。
+    TrackCurve {
+        track_id: String,
+        param_id: String,
+        window: VolumeCurveWindow,
+    },
+}
+
+/// 参数曲线的一段窗口覆盖（绝对工程帧）。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VolumeCurveWindow {
+    pub start_frame: usize,
+    #[serde(default = "default_curve_stride")]
+    pub stride: usize,
+    pub values: Vec<f32>,
+}
+
+fn default_curve_stride() -> usize {
+    1
+}
+
 /// 内核与设备层之间的命令。**纯数据**，不含任何宿主句柄。
 pub enum EngineCommand {
     UpdateTimeline(TimelineState),
@@ -80,6 +136,16 @@ pub enum EngineCommand {
     /// 命令层拿不到；而动态是**混音级**参数，未开启合成的轨道同样需要它，
     /// 因此不能挂在 pitch（受 compose_enabled 门控）的调度上。
     ScheduleDynLevelAnalysis,
+    /// 拖动增益时的瞬时试听帧：不取时间线锁、不写 undo、不重建大快照。
+    SetGainPreview {
+        gesture_id: String,
+        seq: u64,
+        targets: Vec<GainPreviewTarget>,
+    },
+    /// 手势结束/取消：只清同名试听，迟到 clear 不会误伤新手势。
+    ClearGainPreview {
+        gesture_id: String,
+    },
     /// 使指定源路径的解码缓存和拉伸缓存失效（源文件被替换时调用）。
     EvictSourcePath {
         path: String,

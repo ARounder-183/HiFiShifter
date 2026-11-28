@@ -13,6 +13,7 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { MenuScrollScope } from "../../../ui/MenuScrollScope";
 import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { AppForm, AppSwitchRow } from "../../../ui/Field";
@@ -268,187 +269,197 @@ function ClipRateEditorFields({
             // 条目型菜单不同；`--no-scroll`：内容紧凑、不滚动，避免壳的滚动容器
             // 被内部绝对定位的 Radix 隐藏元素撑出一条滚不动的滚动条。
             // 宽度是**表单宽度**（248px），不是菜单最小宽度 —— 后者统一取令牌。
-            className="hs-menu hs-menu--form hs-menu--no-scroll w-[248px] flex flex-col gap-2"
+            //
+            // 【为什么 `flex flex-col gap-2` 不在这里】内边距与布局都搬到了内容层
+            // （见 `index.css` 的 `.hs-menu` 说明）：壳留内边距会让 sticky 提示行
+            // 内缩。布局类留在壳上会作用在包装元素上，间距就丢了一层。
+            className="hs-menu hs-menu--form hs-menu--no-scroll w-[248px]"
             style={{ left: position.x, top: position.y }}
             onPointerDown={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.preventDefault()}
         >
-            <div className="text-qt-sm font-medium">{tf("clip_rate_editor_title")}</div>
-            <div className="text-qt-micro text-qt-text/60 leading-snug">
-                {tf("clip_rate_editor_bpm_hint")}
-            </div>
+            <MenuScrollScope scrollable={false} contentClassName="flex flex-col gap-2">
+                <div className="text-qt-sm font-medium">{tf("clip_rate_editor_title")}</div>
+                <div className="text-qt-micro text-qt-text/60 leading-snug">
+                    {tf("clip_rate_editor_bpm_hint")}
+                </div>
 
-            <label className="flex flex-col gap-1">
-                <span className="text-qt-micro text-qt-text/60">{tf("clip_rate_editor_rate")}</span>
-                <input
-                    className="w-full text-qt-xs rounded px-2 py-1 outline-hidden bg-black/20 border border-qt-border"
-                    value={rateText}
-                    onChange={(e) => {
-                        setRateEdited(true);
-                        setRateText(e.target.value);
-                        // 手动改倍率 → 新 BPM 跟随（保持 原 BPM 不变）。
-                        const rate = parsePlaybackRateInput(e.target.value);
-                        const oldBpm = parseBpmText(oldBpmText);
-                        if (rate != null && oldBpm != null) {
-                            setNewBpmText(formatEditNumber(oldBpm * rate));
-                        }
-                    }}
-                    onKeyDown={(e) => {
-                        e.stopPropagation();
-                        if (e.key === "Enter" && canApply) {
+                <label className="flex flex-col gap-1">
+                    <span className="text-qt-micro text-qt-text/60">
+                        {tf("clip_rate_editor_rate")}
+                    </span>
+                    <input
+                        className="w-full text-qt-xs rounded px-2 py-1 outline-hidden bg-black/20 border border-qt-border"
+                        value={rateText}
+                        onChange={(e) => {
+                            setRateEdited(true);
+                            setRateText(e.target.value);
+                            // 手动改倍率 → 新 BPM 跟随（保持 原 BPM 不变）。
+                            const rate = parsePlaybackRateInput(e.target.value);
+                            const oldBpm = parseBpmText(oldBpmText);
+                            if (rate != null && oldBpm != null) {
+                                setNewBpmText(formatEditNumber(oldBpm * rate));
+                            }
+                        }}
+                        onKeyDown={(e) => {
+                            e.stopPropagation();
+                            if (e.key === "Enter" && canApply) {
+                                onApply(
+                                    parsed.rate ?? clip.playbackRate,
+                                    autoLength && !durationChanged,
+                                    durationChanged ? parsedDuration : null,
+                                );
+                                onClose();
+                            }
+                        }}
+                        ref={attachRateWheel}
+                    />
+                </label>
+
+                <div className="flex gap-2">
+                    <label className="flex-1 flex flex-col gap-1">
+                        <span className="text-qt-micro text-qt-text/60">
+                            {tf("clip_rate_editor_old_bpm")}
+                        </span>
+                        <input
+                            className="w-full text-qt-xs rounded px-2 py-1 outline-hidden bg-black/20 border border-qt-border"
+                            value={oldBpmText}
+                            onChange={(e) => {
+                                setOldBpmText(e.target.value);
+                                // 修改原 BPM → 倍率 = 新 / 原。
+                                const oldBpm = parseBpmText(e.target.value);
+                                const newBpm = parseBpmText(newBpmText);
+                                if (oldBpm != null && newBpm != null && oldBpm > 1e-6) {
+                                    applyRate(newBpm / oldBpm);
+                                }
+                            }}
+                            ref={attachOldBpmWheel}
+                        />
+                    </label>
+                    <label className="flex-1 flex flex-col gap-1">
+                        <span className="text-qt-micro text-qt-text/60">
+                            {tf("clip_rate_editor_new_bpm")}
+                        </span>
+                        <input
+                            className="w-full text-qt-xs rounded px-2 py-1 outline-hidden bg-black/20 border border-qt-border"
+                            value={newBpmText}
+                            onChange={(e) => {
+                                setNewBpmText(e.target.value);
+                                // 修改新 BPM → 倍率 = 新 / 原。
+                                const oldBpm = parseBpmText(oldBpmText);
+                                const newBpm = parseBpmText(e.target.value);
+                                if (oldBpm != null && newBpm != null && oldBpm > 1e-6) {
+                                    applyRate(newBpm / oldBpm);
+                                }
+                            }}
+                            ref={attachNewBpmWheel}
+                        />
+                    </label>
+                </div>
+
+                <label className="flex flex-col gap-1">
+                    <span className="text-qt-micro text-qt-text/60">
+                        {tVars("common_label_value", {
+                            label: tf("clip_rate_editor_duration"),
+                            value: formatDurationText(Number(clip.lengthSec) || 0, formatCtx),
+                        })}
+                    </span>
+                    <input
+                        className={`w-full text-qt-xs rounded px-2 py-1 outline-hidden bg-black/20 border ${
+                            durationEdited && parsedDuration == null
+                                ? "border-qt-danger-border"
+                                : "border-qt-border"
+                        }`}
+                        value={durationText}
+                        onChange={(e) => {
+                            setDurationEdited(true);
+                            setDurationText(e.target.value);
+                            // 时长即拉伸：源窗口保持不变，由时长反推有效速率，
+                            // 并联动 倍率 / 新 BPM 字段（三者始终自洽）。
+                            const dur = parseDurationInput(
+                                e.target.value,
+                                formatCtx.primaryTimeUnit,
+                                formatCtx.secondaryTimeUnit,
+                                formatCtx,
+                            );
+                            const oldLengthSec = Number(clip.lengthSec) || 0;
+                            const oldRate = Number(clip.playbackRate) || 1;
+                            if (dur != null && dur > 1e-6 && oldRate > 1e-6) {
+                                const implied = Math.min(
+                                    10,
+                                    Math.max(0.1, (oldLengthSec * oldRate) / dur),
+                                );
+                                setRateEdited(true);
+                                updateRateValue(implied);
+                            }
+                        }}
+                        onKeyDown={(e) => {
+                            e.stopPropagation();
+                            if (e.key === "Enter" && canApply) {
+                                onApply(
+                                    parsed.rate ?? clip.playbackRate,
+                                    autoLength,
+                                    durationChanged && parsedDuration != null
+                                        ? parsedDuration
+                                        : null,
+                                );
+                                onClose();
+                            }
+                        }}
+                    />
+                    <span className="text-qt-micro text-qt-text/60 tabular-nums">
+                        {formatDurationText(previewSec, formatCtx)}
+                    </span>
+                </label>
+
+                <AppForm booleanRow="leading">
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={tf("clip_rate_editor_auto_length")}
+                        checked={autoLength}
+                        onCheckedChange={setAutoLength}
+                    />
+                </AppForm>
+
+                <div className="text-qt-micro text-qt-text/60">
+                    {(() => {
+                        const base = tVars("common_label_value", {
+                            label: tf("clip_rate_editor_result"),
+                            value: formatDurationText(previewSec, formatCtx),
+                        });
+                        return !autoLength && !durationChanged
+                            ? tVars("common_parenthetical", {
+                                  value: base,
+                                  note: tf("clip_rate_editor_keep_length"),
+                              })
+                            : base;
+                    })()}
+                </div>
+
+                {targetCount > 1 ? (
+                    <div className="text-qt-micro text-qt-text/60">
+                        {tVars("clip_rate_editor_multi", { count: targetCount })}
+                    </div>
+                ) : null}
+
+                <div className="flex justify-end pt-1">
+                    <button
+                        role="menuitem"
+                        className="px-2 py-1 text-qt-xs rounded bg-qt-button-hover/60 hover:bg-qt-button-hover disabled:opacity-40"
+                        disabled={!canApply}
+                        onClick={() => {
                             onApply(
                                 parsed.rate ?? clip.playbackRate,
                                 autoLength && !durationChanged,
-                                durationChanged ? parsedDuration : null,
-                            );
-                            onClose();
-                        }
-                    }}
-                    ref={attachRateWheel}
-                />
-            </label>
-
-            <div className="flex gap-2">
-                <label className="flex-1 flex flex-col gap-1">
-                    <span className="text-qt-micro text-qt-text/60">
-                        {tf("clip_rate_editor_old_bpm")}
-                    </span>
-                    <input
-                        className="w-full text-qt-xs rounded px-2 py-1 outline-hidden bg-black/20 border border-qt-border"
-                        value={oldBpmText}
-                        onChange={(e) => {
-                            setOldBpmText(e.target.value);
-                            // 修改原 BPM → 倍率 = 新 / 原。
-                            const oldBpm = parseBpmText(e.target.value);
-                            const newBpm = parseBpmText(newBpmText);
-                            if (oldBpm != null && newBpm != null && oldBpm > 1e-6) {
-                                applyRate(newBpm / oldBpm);
-                            }
-                        }}
-                        ref={attachOldBpmWheel}
-                    />
-                </label>
-                <label className="flex-1 flex flex-col gap-1">
-                    <span className="text-qt-micro text-qt-text/60">
-                        {tf("clip_rate_editor_new_bpm")}
-                    </span>
-                    <input
-                        className="w-full text-qt-xs rounded px-2 py-1 outline-hidden bg-black/20 border border-qt-border"
-                        value={newBpmText}
-                        onChange={(e) => {
-                            setNewBpmText(e.target.value);
-                            // 修改新 BPM → 倍率 = 新 / 原。
-                            const oldBpm = parseBpmText(oldBpmText);
-                            const newBpm = parseBpmText(e.target.value);
-                            if (oldBpm != null && newBpm != null && oldBpm > 1e-6) {
-                                applyRate(newBpm / oldBpm);
-                            }
-                        }}
-                        ref={attachNewBpmWheel}
-                    />
-                </label>
-            </div>
-
-            <label className="flex flex-col gap-1">
-                <span className="text-qt-micro text-qt-text/60">
-                    {tVars("common_label_value", {
-                        label: tf("clip_rate_editor_duration"),
-                        value: formatDurationText(Number(clip.lengthSec) || 0, formatCtx),
-                    })}
-                </span>
-                <input
-                    className={`w-full text-qt-xs rounded px-2 py-1 outline-hidden bg-black/20 border ${
-                        durationEdited && parsedDuration == null
-                            ? "border-qt-danger-border"
-                            : "border-qt-border"
-                    }`}
-                    value={durationText}
-                    onChange={(e) => {
-                        setDurationEdited(true);
-                        setDurationText(e.target.value);
-                        // 时长即拉伸：源窗口保持不变，由时长反推有效速率，
-                        // 并联动 倍率 / 新 BPM 字段（三者始终自洽）。
-                        const dur = parseDurationInput(
-                            e.target.value,
-                            formatCtx.primaryTimeUnit,
-                            formatCtx.secondaryTimeUnit,
-                            formatCtx,
-                        );
-                        const oldLengthSec = Number(clip.lengthSec) || 0;
-                        const oldRate = Number(clip.playbackRate) || 1;
-                        if (dur != null && dur > 1e-6 && oldRate > 1e-6) {
-                            const implied = Math.min(
-                                10,
-                                Math.max(0.1, (oldLengthSec * oldRate) / dur),
-                            );
-                            setRateEdited(true);
-                            updateRateValue(implied);
-                        }
-                    }}
-                    onKeyDown={(e) => {
-                        e.stopPropagation();
-                        if (e.key === "Enter" && canApply) {
-                            onApply(
-                                parsed.rate ?? clip.playbackRate,
-                                autoLength,
                                 durationChanged && parsedDuration != null ? parsedDuration : null,
                             );
                             onClose();
-                        }
-                    }}
-                />
-                <span className="text-qt-micro text-qt-text/60 tabular-nums">
-                    {formatDurationText(previewSec, formatCtx)}
-                </span>
-            </label>
-
-            <AppForm booleanRow="leading">
-                <AppSwitchRow
-                    control="checkbox"
-                    label={tf("clip_rate_editor_auto_length")}
-                    checked={autoLength}
-                    onCheckedChange={setAutoLength}
-                />
-            </AppForm>
-
-            <div className="text-qt-micro text-qt-text/60">
-                {(() => {
-                    const base = tVars("common_label_value", {
-                        label: tf("clip_rate_editor_result"),
-                        value: formatDurationText(previewSec, formatCtx),
-                    });
-                    return !autoLength && !durationChanged
-                        ? tVars("common_parenthetical", {
-                              value: base,
-                              note: tf("clip_rate_editor_keep_length"),
-                          })
-                        : base;
-                })()}
-            </div>
-
-            {targetCount > 1 ? (
-                <div className="text-qt-micro text-qt-text/60">
-                    {tVars("clip_rate_editor_multi", { count: targetCount })}
+                        }}
+                    >
+                        {tf("clip_rate_editor_apply")}
+                    </button>
                 </div>
-            ) : null}
-
-            <div className="flex justify-end pt-1">
-                <button
-                    role="menuitem"
-                    className="px-2 py-1 text-qt-xs rounded bg-qt-button-hover/60 hover:bg-qt-button-hover disabled:opacity-40"
-                    disabled={!canApply}
-                    onClick={() => {
-                        onApply(
-                            parsed.rate ?? clip.playbackRate,
-                            autoLength && !durationChanged,
-                            durationChanged && parsedDuration != null ? parsedDuration : null,
-                        );
-                        onClose();
-                    }}
-                >
-                    {tf("clip_rate_editor_apply")}
-                </button>
-            </div>
+            </MenuScrollScope>
         </div>,
         document.body,
     );

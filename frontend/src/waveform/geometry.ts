@@ -150,8 +150,9 @@ export interface WaveformAmplitudeFactors {
      * 因子恒 1）永远不会被钳到（可证：`桶峰 ≤ 窗内基线最大 ≤ 窗内目标最大`）。
      *
      * 【语义】返回 `max over t ∈ [start, end] of (vol(t) × 目标电平(t))`，
-     * 单位与曲线一致（绝对电平倍率）。几何层再乘上该处的 clip 增益×淡变，
-     * 得到包络的钳制边界。
+     * 单位与曲线一致（绝对电平倍率）。**它已经是最终输出上界**：目标电平
+     * 已含静态 clip 增益（item × take），几何层不得再乘 clip 增益。淡化在下游
+     * 且 ≤1，因此仍是硬上界。
      *
      * @param windowStartSec 窗口起点（时间轴绝对秒）。
      * @param windowEndSec 窗口终点（时间轴绝对秒）。
@@ -661,7 +662,7 @@ export function buildWaveformGeometry(args: {
         const segmentHasFade = fadeInSec > 0 || fadeOutSec > 0;
         // 负增益会让「列内最大值 × 增益」不再等于「列内最大乘积」（乘负数把极值
         // 翻转），此时退回切片路径。场景层已把增益钳到 ≥0，这里是纵深防御。
-        const skipSlices = canUseConstantGain && segment.gain >= 0;
+        const skipSlices = canUseConstantGain && segment.amplitudeGain >= 0;
 
         // 桶索引 ↔ 时间轴绝对秒（「该峰值自己的时刻」），供极值配对使用。
         // 索引锚定 ⇒ 同一峰值在任何缩放等级下取到同一个增益（缩放一致性）。
@@ -688,7 +689,7 @@ export function buildWaveformGeometry(args: {
         // 传入的秒由 absSecAtIndex 产出，故减去 clipStartSec 即为
         // gainAtClipTime 需要的 clip 局部时间。
         const clipGainAtSec = (absSec: number): number =>
-            segment.gain *
+            segment.amplitudeGain *
             gainAtClipTime(
                 absSec - clipStartSec,
                 segment.clipTotalDurationSec,
@@ -827,8 +828,8 @@ export function buildWaveformGeometry(args: {
                     const rawMin = extremeScratch.min;
                     const rawMax = extremeScratch.max;
                     if (Number.isFinite(rawMin) && Number.isFinite(rawMax)) {
-                        mappedMax = rawMax * segment.gain;
-                        mappedMin = rawMin * segment.gain;
+                        mappedMax = rawMax * segment.amplitudeGain;
+                        mappedMin = rawMin * segment.amplitudeGain;
                     }
                 } else {
                     // 音量增益（gain > 1）会把包络放大到波形矩形之外 —— 表现为波形
@@ -928,11 +929,10 @@ export function buildWaveformGeometry(args: {
                                 sliceTimeHiScratch[slice] as number,
                             );
                             if (ceilLevel !== null && Number.isFinite(ceilLevel)) {
-                                // clip 增益×淡变随时刻变化：取两者中较大的增益作
-                                // 保守上界（钳制只用于压制越界，宁可略宽松也不
-                                // 误压合法包络）。这里用该切片的极端时刻增益。
-                                const gCeil = Math.max(gMax, gMin);
-                                const limit = ceilLevel * gCeil;
+                                // ceilLevel 已经是最终输出电平上界（目标电平含静态
+                                // clip 增益）。不能再乘 clip 幅度：gain<1 会压掉合法包络，
+                                // gain>1 会放过幻峰。淡化在下游且 ≤1，仍是硬上界。
+                                const limit = ceilLevel;
                                 if (Number.isFinite(limit)) {
                                     if (mappedSliceMax > limit) mappedSliceMax = limit;
                                     if (mappedSliceMin < -limit) mappedSliceMin = -limit;

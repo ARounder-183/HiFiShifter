@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ParamViewSegment } from "./types";
+import { createLiveEditOverride } from "./strokeBuffer";
 import {
     buildParamBlockFrameCenters,
     resolveParamBlockFrameValue,
@@ -23,12 +24,12 @@ const authoritative: ParamViewSegment = {
 describe("param block visual frame", () => {
     it("uses the interaction curve as the only source for lines and block sampling", () => {
         const interaction = { ...authoritative, edit: [64, 64, 64, 64] };
+        // live 覆盖按绝对帧投影到当前窗口：只画了 4 帧，正好覆盖 authoritative 的窗口。
+        const live = createLiveEditOverride("v2|track|pitch", 1);
+        live.buffer.write(authoritative.startFrame, [62, 62, 62, 62]);
         const frameView = resolveParamBlockFrameView({
             interaction,
-            live: {
-                key: authoritative.key,
-                edit: [62, 62, 62, 62],
-            },
+            live,
             paramView: authoritative,
         });
 
@@ -424,5 +425,52 @@ describe("unvalued block fallback chain", () => {
         });
         expect(block.averageValue).toBe(20);
         expect(block.centerPolicy).toBe("fallback");
+    });
+});
+
+describe("param block visual frame：取样域（I-D1）", () => {
+    it("extends the view to the viewport when the stroke reaches outside the window", () => {
+        // 【回归】绘制工具拖到水平边缘自动滚屏：窗口还没跟上，笔画已经画到窗口之外。
+        // 曲线拿到的视图必须覆盖**视口**，否则那一段既不进数组也不进画面。
+        const live = createLiveEditOverride("v2|track|pitch", 1);
+        for (let frame = 0; frame < 40; frame += 1) live.buffer.write(frame, [70]);
+
+        const withoutViewport = resolveParamBlockFrameView({
+            interaction: null,
+            live,
+            paramView: authoritative,
+            param: "pitch",
+        });
+        expect(withoutViewport?.edit).toEqual([70, 70, 70, 70]);
+
+        const withViewport = resolveParamBlockFrameView({
+            interaction: null,
+            live,
+            paramView: authoritative,
+            param: "pitch",
+            viewport: { startFrame: 20, endFrame: 30 },
+        });
+        expect(withViewport).not.toBe(withoutViewport);
+        // 窗口是 [0, 400)，视口是 [20, 30) —— 视口在窗口之外，扩展必须一路盖到视口右缘。
+        const lastFrame =
+            withViewport!.startFrame + (withViewport!.edit.length - 1) * withViewport!.stride;
+        expect(lastFrame).toBeGreaterThanOrEqual(30);
+        expect(withViewport!.edit[4]).toBe(70);
+        expect(withViewport!.startFrame).toBe(0);
+    });
+
+    it("without a viewport the resolver is byte-identical to today (regression pin)", () => {
+        const live = createLiveEditOverride("v2|track|pitch", 1);
+        live.buffer.write(0, [62, 62, 62, 62]);
+        const view = resolveParamBlockFrameView({
+            interaction: null,
+            live,
+            paramView: authoritative,
+        });
+        expect(view).not.toBeNull();
+        expect(view!.edit).toEqual([62, 62, 62, 62]);
+        expect(view!.orig).toBe(authoritative.orig);
+        expect(view!.key).toBe(authoritative.key);
+        expect(view!.startFrame).toBe(authoritative.startFrame);
     });
 });

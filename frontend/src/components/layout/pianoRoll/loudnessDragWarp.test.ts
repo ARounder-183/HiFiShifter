@@ -61,7 +61,7 @@ function amplitudeMap(
 }
 
 interface GeoOpts {
-    gain?: number;
+    amplitudeGain?: number;
     sourceStartSec?: number;
     sourceEndSec?: number;
     playbackRate?: number;
@@ -82,7 +82,7 @@ function geo(
         id,
         startSec,
         lengthSec,
-        gain: opts.gain ?? 1,
+        amplitudeGain: opts.amplitudeGain ?? 1,
         sourceStartSec,
         sourceEndSec: opts.sourceEndSec ?? sourceStartSec + lengthSec * rate,
         playbackRate: rate,
@@ -245,6 +245,42 @@ describe("用户曲线是否随几何搬移（镜像后端的锁定参数线开�
 });
 
 describe("增益变化（基线含静态 clip 增益）", () => {
+    it("★ item 1.0→2.0：拖拽与松手的因子/上界逐值一致（已画目标）", () => {
+        const target = new Array<number>(8).fill(0.8);
+        const drag = amplitudeMap(
+            source({
+                volume: new Array<number>(8).fill(1),
+                dynTarget: target,
+                dynBaseline: new Array<number>(8).fill(0.5),
+            }),
+            () =>
+                warpOf(
+                    [geo("c1", 0, 0.08, { amplitudeGain: 1 })],
+                    [geo("c1", 0, 0.08, { amplitudeGain: 2 })],
+                ),
+        );
+        const release = amplitudeMap(
+            source({
+                volume: new Array<number>(8).fill(1),
+                dynTarget: target,
+                dynBaseline: new Array<number>(8).fill(1),
+            }),
+            () => null,
+        );
+        drag.beginWindow?.(0, at(7));
+        release.beginWindow?.(0, at(7));
+        for (let frame = 0; frame < 8; frame += 1) {
+            expect(drag.factorAt?.(at(frame))).toBeCloseTo(
+                release.factorAt?.(at(frame)) ?? Number.NaN,
+                9,
+            );
+            expect(drag.levelCeilingOverWindow?.(at(frame), at(frame))).toBeCloseTo(
+                release.levelCeilingOverWindow?.(at(frame), at(frame)) ?? Number.NaN,
+                9,
+            );
+        }
+    });
+
     const baseline = new Array<number>(8).fill(0.5);
 
     it("未画帧：增益变化后仍为「不改变」（目标跟随缩放后的原声）", () => {
@@ -254,7 +290,10 @@ describe("增益变化（基线含静态 clip 增益）", () => {
             dynBaseline: baseline,
         });
         const map = amplitudeMap(src, () =>
-            warpOf([geo("c1", 0, 0.08, { gain: 1 })], [geo("c1", 0, 0.08, { gain: 2 })]),
+            warpOf(
+                [geo("c1", 0, 0.08, { amplitudeGain: 1 })],
+                [geo("c1", 0, 0.08, { amplitudeGain: 2 })],
+            ),
         );
         // 基线 ×2 → 1.0；未画帧的目标也取 1.0 ⇒ 增益 1（后端语义：未画 = 不改变）。
         expect(map.factorAt?.(at(2))).toBeCloseTo(1, 6);
@@ -267,7 +306,10 @@ describe("增益变化（基线含静态 clip 增益）", () => {
             dynBaseline: baseline,
         });
         const map = amplitudeMap(src, () =>
-            warpOf([geo("c1", 0, 0.08, { gain: 1 })], [geo("c1", 0, 0.08, { gain: 2 })]),
+            warpOf(
+                [geo("c1", 0, 0.08, { amplitudeGain: 1 })],
+                [geo("c1", 0, 0.08, { amplitudeGain: 2 })],
+            ),
         );
         // 目标 0.8（绝对） / 新基线 1.0 = 0.8。
         expect(map.factorAt?.(at(2))).toBeCloseTo(0.8, 6);

@@ -1,4 +1,5 @@
-import { clamp, dbToGain, gainToDb } from "../math";
+import { clamp } from "../math";
+import { clampGain, clampGainDb, dbOrFloor, dbToGain } from "../../../../utils/gainDb";
 
 type BulkEditableArgs = {
     activeClipId: string;
@@ -68,9 +69,10 @@ export function applyBulkGainDeltaDb(args: {
     return clipIds.flatMap((clipId) => {
         const clip = clipsById.get(clipId);
         if (!clip) return [];
-        const baseGain = Number(clip.gain ?? 1) || 1;
-        const nextDb = clamp(gainToDb(baseGain) + deltaDb, minDb, maxDb);
-        const gain = clamp(dbToGain(nextDb), dbToGain(minDb), dbToGain(maxDb));
-        return [{ clipId, gain }];
+        // 0 是合法静音，不能被 `|| 1` 当成缺省；静音基值按 −150 处理。
+        const baseGain = clampGain(Number(clip.gain ?? 1));
+        const nextDb = clampGainDb(dbOrFloor(baseGain) + deltaDb);
+        const boundedDb = Math.min(maxDb, Math.max(minDb, nextDb));
+        return [{ clipId, gain: dbToGain(boundedDb) }];
     });
 }

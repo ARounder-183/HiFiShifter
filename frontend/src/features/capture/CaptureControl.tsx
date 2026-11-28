@@ -31,7 +31,8 @@ import {
 } from "@radix-ui/react-icons";
 
 import { useI18n } from "../../i18n/I18nProvider";
-import { AppIconButton, AppStatusChip } from "../../ui";
+import { AppStatusChip, SlotText } from "../../ui";
+import { TransportIconButton } from "../../components/layout/transport/TransportIconButton";
 import { framesToSeconds } from "./captureApi";
 import { CaptureSettingsDialog } from "./CaptureSettingsDialog";
 import {
@@ -70,6 +71,16 @@ export function CaptureControl() {
               status.capture?.sampleRate || FALLBACK_SAMPLE_RATE,
           )
         : null;
+    // 预留上限：至少 1800s（后端当前的最大档位）。字符串位数变化只发生在槽位里，
+    // AppStatusChip 的宽度不会随 0.0 → 100.0 → 1000.0 逐位增长。
+    const configuredMaxSec = Number(status?.options?.maxDurationSec);
+    const maxCaptureSec = Math.max(1800, Number.isFinite(configuredMaxSec) ? configuredMaxSec : 0);
+    const elapsedText = recording
+        ? tVars("capture_recording_elapsed", { seconds: captured ?? "0.0" })
+        : "";
+    const reserveElapsedText = recording
+        ? tVars("capture_recording_elapsed", { seconds: maxCaptureSec.toFixed(1) })
+        : undefined;
 
     /*
      * 唯一那条 tooltip —— **一句短语**，只回答"按下去会怎样"。
@@ -100,9 +111,10 @@ export function CaptureControl() {
                     openCaptureSettings();
                 }}
             >
-                <AppIconButton
-                    size="sm"
-                    intent={armed ? "danger" : "default"}
+                {/* 与传输栏同一原语：捕获键就长在传输栏旁边，盒模型必须一致。 */}
+                <TransportIconButton
+                    tone={armed ? "danger" : "neutral"}
+                    fill="ghost"
                     active={armed}
                     icon={armed ? <StopIcon /> : <DotFilledIcon />}
                     tooltip={tooltip}
@@ -113,8 +125,8 @@ export function CaptureControl() {
             {/* 取消：只在武装期出现。捕获键就在工具栏上，误触很便宜 —— 而没有取消的话，
                 唯一的出路是"先停止（产生一个 take）再删掉它"。 */}
             {armed ? (
-                <AppIconButton
-                    size="sm"
+                <TransportIconButton
+                    fill="ghost"
                     icon={<Cross2Icon />}
                     tooltip={t("capture_cancel_hint")}
                     disabled={busy}
@@ -126,7 +138,11 @@ export function CaptureControl() {
                 上限预警折进它的颜色：接近上限时变危险色，不额外占位置。 */}
             {recording ? (
                 <AppStatusChip tone={limitWarning ? "danger" : "warning"} tabular tooltip={tooltip}>
-                    {tVars("capture_recording_elapsed", { seconds: captured ?? "0.0" })}
+                    <SlotText
+                        text={elapsedText}
+                        reserveText={reserveElapsedText}
+                        data-testid="capture-elapsed"
+                    />
                 </AppStatusChip>
             ) : null}
             {/* 出错：只给一个图标，**点击进设置**。错误正文可能是后端的一整句话，放进工具栏
@@ -148,7 +164,10 @@ export function CaptureControl() {
                         cursor: "pointer",
                     }}
                 >
-                    <ExclamationTriangleIcon width="var(--qt-icon-sm)" height="var(--qt-icon-sm)" />
+                    {/* 尺寸走 style：width 是 SVG 的 presentation attribute，解析不了 CSS 变量。 */}
+                    <ExclamationTriangleIcon
+                        style={{ width: "var(--qt-icon-sm)", height: "var(--qt-icon-sm)" }}
+                    />
                 </button>
             ) : null}
             <CaptureSettingsDialog

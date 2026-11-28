@@ -81,6 +81,7 @@ game baseline                      playback_rate / reverse        参数块编�
 ## 曲线与视觉预览
 
 - 参数窗口同 scope 刷新采用 stale-while-revalidate：paramsEpoch 前进但 root / param 未变时保留上一份可见曲线，新回包到达后原子替换；只有切 scope 才清空。同窗口空回包保留旧曲线，窗口变化后的空回包则立即接受，避免旧窗口曲线留在新坐标上。
+- **笔画的坐标是绝对帧，窗口只是投影**（`strokeBuffer.ts`）。正在画的那一笔存在按帧索引的稀疏缓冲里，渲染时投影到当前参数窗口，提交时按段写出；因此**换窗口（取数回包、滚动、缩放、paramsEpoch）对笔画完全无影响**，既不需要"笔画期间冻结取数"，也不需要把边缘滚屏夹在已取数窗口末端。旧实现把 live 覆盖层当成 `paramView.edit` 的一份副本、按窗口下标寻址，越界帧会被静默丢弃，提交时更会把窗口外那段写成 0 —— 用户看到的是"滚过一定距离后参数线不再更新"，松手后又"画完就回退"。
 - 参数块显示值按 run 缓存：当前采样 → 手动值 → 上一次同 run 且**几何一致**的有效值；canonical 块绝不回退到值域中点。没有值的块本帧不画，而不是叠到 F#4。
 - 结构命令（分割 / 删除 / 编组 / 还原 / 从选区新建）与外部历史 / 布局 / 参数变化统一走 invalidateParamBlockVisualPreviews：拖动快照、resize / create 预览、事务曲线一次性撤下，避免旧预览在结构编辑后覆盖 canonical。视觉 epoch 同时记录参数名与**结构令牌**（`paramBlockStructureToken`：块 id / 几何 / 过渡宽度 / 删除标记 / baseCover 的指纹）。**不**记录 revision —— 它在前端是内容代次、在后端是 CAS 代次，两者不可比；旧实现拿它做「自身提交归属」（`ownedEditRevision`），于是服务端回包一落地就撤掉自己的预览（回弹的根因）。结构令牌只在形状变化时变化，所以自身提交永不撤销自己的预览，第三方结构编辑立即失效。
 - paramBlockSpec 是纯投影，不在 useMemo 里写 ref；清理放在 layout effect（早于 paint）。拖动提交前校验全分辨率窗口与编辑集 revision，缺帧 / 结构变化直接取消，不写 0。

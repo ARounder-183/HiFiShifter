@@ -1,7 +1,14 @@
 // Session 同步 reducers。拆自 sessionSlice，按原顺序汇总。
 import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import { isPluginMode } from "../../services/hostCapabilities";
+import {
+    beginGestureReducer,
+    endGestureReducer,
+    flushDeferredSnapshot,
+} from "./sessionSlice/gestureReducers";
+import { beginGestureSession, endGestureSession } from "./gestureSession";
 import type { HistoryRecordSummary, TimelineState } from "../../types/api";
+import type { PendingImportRecord } from "./sessionSlice/types";
 import type {
     ClipFormantAnalysisState,
     EditParam,
@@ -27,6 +34,11 @@ import {
     type FolderImportOptions,
 } from "../fileBrowser/folderImportOptions";
 import { clampGain } from "../../utils/gainDb";
+import {
+    isPlayheadTimePlacement,
+    resolvePlayheadTimePlacement,
+    type PlayheadTimePlacement,
+} from "./playheadTimePlacement";
 import {
     type ChannelImportPolicy,
     type PenInputSettings,
@@ -79,6 +91,7 @@ import {
     MAX_TRACK_VOLUME,
 } from "./sessionSlice/settings";
 import { clamp, normalizeClipColor } from "./sessionSlice/helpersCore";
+import { applyHostFadeAxesPreviewToClip } from "./fadeAxesPreview";
 import { getClipRateMultiplier, updateActiveTakeFromFlat } from "./sessionSlice/helpersTakes";
 import { initialState } from "./sessionSlice/initialState";
 import { applyClipSyllableAnalysisReducer } from "./sessionSlice/syllableMetadata";
@@ -108,7 +121,11 @@ export type {
     ToolMode,
     TrackInfo,
 } from "./sessionTypes";
-export type { ParamSelectionSnapshot, SessionState } from "./sessionSlice/types";
+export type {
+    ParamSelectionSnapshot,
+    PendingImportRecord,
+    SessionState,
+} from "./sessionSlice/types";
 export {
     undoRemote,
     redoRemote,
@@ -233,6 +250,10 @@ const sessionSlice = createSlice({
         beginInteraction(state) {
             state._interactionLockCount = Math.max(0, state._interactionLockCount) + 1;
             if (isPluginMode()) state._pluginTimelineEpoch += 1;
+            // 交互锁与手势会话是**同一段生命周期**的两个视角：前者给「哪些回包要
+            // 跳过」用（轨道列表、插件纪元等旁路），后者给「快照推迟到何时」用。
+            // 一起入账，才不会出现「锁在但会话不在」的半开状态。
+            beginGestureSession(state, { kind: "interaction" }, state.timelineRevision);
         },
         /**
          * 标记连续交互结束。计数器归零后恢复正常的后端状态同步。
@@ -240,7 +261,19 @@ const sessionSlice = createSlice({
         endInteraction(state) {
             state._interactionLockCount = Math.max(0, state._interactionLockCount - 1);
             if (isPluginMode()) state._pluginTimelineEpoch += 1;
+            const deferred = endGestureSession(state);
+            if (deferred) {
+                // 交互锁已归零，此时落地不再被手势会话挡住。
+                flushDeferredSnapshot(state, deferred);
+            }
         },
+        /**
+         * 开始一次手势会话（任意画布）。参数编辑器用它声明「正在画参数线」，
+         * 从而让 `applyTimelineState` 在笔画期间不落地任何后端快照。
+         */
+        beginGesture: beginGestureReducer,
+        /** 结束一次手势会话；深度归零时落地被推迟的最新快照。 */
+        endGesture: endGestureReducer,
         /** 乐观更新轨道名称（立即反映到 UI，不等后端响应） */
         setTrackName(state, action: PayloadAction<{ trackId: string; name: string }>) {
             const track = state.tracks.find((entry) => entry.id === action.payload.trackId);
@@ -282,6 +315,41 @@ const sessionSlice = createSlice({
                 }));
             }
         },
+        /**
+         * 记下一条「item 已建成、等宿主交付音频」的导入。
+         *
+         * 【为什么按 item 去重】回执可能被重投（视图重连、媒体文档重开）；同一个 item
+         * 记两次会让「导入后规格化」执行两遍，用户看到的是增益被叠了两次。
+         */
+        importPendingAdded(state, action: PayloadAction<PendingImportRecord>) {
+            const index = state.pendingImports.findIndex(
+                (entry) => entry.item === action.payload.item,
+            );
+            if (index >= 0) state.pendingImports[index] = action.payload;
+            else state.pendingImports.push(action.payload);
+            state.status = "Import waiting for the host";
+        },
+        /** 宿主终于认领了它：清掉待定记录（此刻 clip 已经能解析出真 clip id）。 */
+        importReady(state, action: PayloadAction<{ item?: string; clipId?: string }>) {
+            if (!action.payload.item) {
+                state.pendingImports = [];
+                return;
+            }
+            state.pendingImports = state.pendingImports.filter(
+                (entry) => entry.item !== action.payload.item,
+            );
+            state.status = "Import done";
+        },
+        /**
+         * 等太久（60 s）：升级成错误条。
+         *
+         * 【为什么不删记录、不删占位】宿主的 Item 是既成事实，插件没有资格替它撤回；
+         * 能做的只有把「音频没来」这件事说出来，让用户去宿主里重做一次编辑或撤销。
+         */
+        importStalled(state, _action: PayloadAction<{ item?: string }>) {
+            state.error = "import_audio_stalled";
+        },
+
         markProjectEdited(state) {
             markProjectDirty(state.project);
         },
@@ -343,8 +411,19 @@ const sessionSlice = createSlice({
                 Math.min(320, Math.round(Number(action.payload) || 110)),
             );
         },
+        setPlayheadTimePlacement(state, action: PayloadAction<PlayheadTimePlacement>) {
+            if (isPlayheadTimePlacement(action.payload)) {
+                state.playheadTimePlacement = action.payload;
+                // 旧字段跟着走：旧后端 / 旧前端读它时才不会与新的放置策略打架。
+                state.showPlayheadTimeInTrackHeader =
+                    resolvePlayheadTimePlacement(action.payload) === "trackHeader";
+            }
+        },
         setShowPlayheadTimeInTrackHeader(state, action: PayloadAction<boolean>) {
             state.showPlayheadTimeInTrackHeader = Boolean(action.payload);
+            // 【迁移入口】旧调用点（设置页的历史复选框、外部脚本）仍然只给一个布尔：
+            // 打开 = 放到轨道头，关闭 = 回到自动（状态栏），而不是"什么都不显示"。
+            state.playheadTimePlacement = action.payload ? "trackHeader" : "auto";
         },
         setParamEditorSyncTimeline(state, action: PayloadAction<boolean>) {
             state.paramEditorSyncTimeline = Boolean(action.payload);
@@ -1077,6 +1156,10 @@ const sessionSlice = createSlice({
             if (action.payload.fadeOutS !== undefined) {
                 clip.fadeOutS = Math.min(1, Math.max(-1, Number(action.payload.fadeOutS) || 0));
             }
+            // hostFades 是显示投影，不是持久化字段：本地镜像只服务当前编辑，
+            // 下一次权威 TimelineState 快照会整份替换它。形状补丁还会把本地
+            // dir/S 纠正成后端实际写入的预设轴，保证下一次拖拽从画面上的轴起步。
+            applyHostFadeAxesPreviewToClip(clip, action.payload);
         },
         /** 自动交叉淡化长度（与手动 fade 分离，见 autoCrossfade.ts 的模型说明）。 */
         setClipAutoFades(
@@ -1229,6 +1312,8 @@ export const {
     setParamBlockFollowPitch,
     beginInteraction,
     endInteraction,
+    beginGesture,
+    endGesture,
     setTrackName,
     setTrackMeters,
     clearTrackMeters,
@@ -1245,6 +1330,7 @@ export const {
     setPrimaryTimeUnit,
     setSecondaryTimeUnit,
     setRulerLabelSpacingPx,
+    setPlayheadTimePlacement,
     setShowPlayheadTimeInTrackHeader,
     setParamEditorSyncTimeline,
     toggleAutoCrossfade,
@@ -1356,6 +1442,9 @@ export const {
     setClipFormantToolWindowPosition,
     closeClipFormantToolWindow,
     bumpParamsEpoch,
+    importPendingAdded,
+    importReady,
+    importStalled,
 } = sessionSlice.actions;
 
 export default sessionSlice.reducer;

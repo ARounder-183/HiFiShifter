@@ -14,6 +14,8 @@
 
 import { installGlobalErrorReporting, installFrontendLogPolicy } from "./services/frontendErrorLog";
 import { hydrateUiStorage, installUiStorageFlushHooks } from "./services/uiStorage";
+import { invoke } from "./services/invoke";
+import { hydrateSurfaceProfile } from "./services/surfaceProfileStore";
 
 // 日志策略先就位：Off 档下连错误监听器都不许跨 IPC 上报。
 void installFrontendLogPolicy();
@@ -32,6 +34,16 @@ installUiStorageFlushHooks();
 
 // 偏好就位（后端不可用时静默降级为本地缓存），此后加载的应用模块才能读到正确的值。
 await hydrateUiStorage();
+
+// ── 形态剖面就位 ──────────────────────────────────────────────────────────
+//
+// 【为什么必须在这里、而不是在 mount 里】形态决定的是一批**模块加载期**就要定型的
+// 东西：停靠布局的出厂值（`dockSlice` 的初始 state）、控件密度默认值、输入剖面。
+// 那些读取点在模块求值时就跑完了，晚一步灌入就等于没灌 —— 用户会看到"移动端以
+// 桌面布局起手"，而重启一次又好了（因为第二次读到了缓存），是最难复现的一类。
+//
+// 与 `hydrateUiStorage` 同一时机、同一理由。失败时静默回落桌面剖面（浏览器预览）。
+await hydrateSurfaceProfile(() => invoke("get_surface_profile"));
 
 const { mountApp } = await import("./mount");
 await mountApp();

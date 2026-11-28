@@ -41,11 +41,19 @@
 //!
 //! 【为什么删不掉不算错误】目录可能正被另一个进程的 WebView2 占用。删除失败就留着
 //! —— 下一轮（下一次扫描）会再试，而不是让插件启动失败。
+//!
+//! 【为什么失败要带原因】"删不掉"有三个完全不同的原因：被占用（下一次扫描会自己好）、
+//! 权限不足（在这台机器上永远不会好）、路径过长（与宿主无关）。现场只有
+//! `reclaimed=0 failed=234` 一个计数，而磁盘上只有 61 个目录 —— 计数既回答不了"为什么"，
+//! 也说明它数的是**尝试次数**而不是目录数。所以 `failures` 是一张按路径去重的
+//! "路径 → 原因"表，汇总行按原因分组。
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
+
+use super::sweep_reason::{classify_io, FailureTally, Removal};
 
 /// 名字里认不出属主进程时，超过这个年龄就删。
 const STALE_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
@@ -101,9 +109,15 @@ struct SweepState {
     last_scan: Instant,
     /// 上一次扫描的读数（用来只在**变化时**打日志）。
     stats: ScanStats,
-    /// 累计已回收目录数与失败次数（诊断用）。
+    /// 这一轮已回收的目录数（队列排空时落一行，然后清零）。
     reclaimed: u64,
-    failed: u64,
+    /// 这一轮删不掉的目录，**按路径去重**并带上原因。
+    ///
+    /// 【为什么不是计数】现场读到的是 `reclaimed=0 failed=234`，而磁盘上只有 61 个目录
+    /// —— `failed` 比目录还多，说明同一个目录被记了 3~4 次（它在四次重扫里都失败）。
+    /// 归因与去重的判据在 [`crate::editor::sweep_reason`]（那里能被普通单元测试守住；
+    /// 本模块在 `#[cfg(not(test))]` 下编译，测试进程不该去删真实的用户目录）。
+    failures: FailureTally,
     /// 一次性磁盘占用报告是否已经派发。
     size_report_spawned: bool,
 }
@@ -118,7 +132,7 @@ fn state() -> &'static Mutex<SweepState> {
             last_scan: Instant::now(),
             stats: ScanStats::default(),
             reclaimed: 0,
-            failed: 0,
+            failures: FailureTally::new(),
             size_report_spawned: false,
         })
     })
@@ -153,7 +167,7 @@ pub(crate) fn sweep_step() -> bool {
                     stats.denied,
                     stats.stale,
                     state.reclaimed,
-                    state.failed
+                    state.failures.len()
                 ));
             }
             // 【为什么另起线程】把 7 GiB 走一遍要几秒。这条读数只服务诊断，绝不能
@@ -168,21 +182,23 @@ pub(crate) fn sweep_step() -> bool {
             None => return false,
         }
     };
-    let deleted = remove_stale_dir(&path);
+    let removal = remove_stale_dir(&path);
     let mut state = state().lock().unwrap_or_else(|error| error.into_inner());
-    if deleted {
+    if removal == Removal::Reclaimed {
         state.reclaimed += 1;
-    } else {
-        state.failed += 1;
+    } else if let Some(line) = state.failures.record(&path, removal) {
+        crate::gui_log_line(&line);
     }
-    if state.pending.is_empty() && (state.reclaimed > 0 || state.failed > 0) {
+    if state.pending.is_empty() && (state.reclaimed > 0 || !state.failures.is_empty()) {
         // 队列排空：把这一轮的成果落一行，然后等下一次重扫。
         crate::gui_log_line(&format!(
-            "webview profiles swept: reclaimed={} failed={} (the rest is kept for the next scan)",
-            state.reclaimed, state.failed
+            "webview profiles swept: reclaimed={} failed={} ({}) (the rest is kept for the next scan)",
+            state.reclaimed,
+            state.failures.len(),
+            state.failures.summary()
         ));
         state.reclaimed = 0;
-        state.failed = 0;
+        state.failures.clear();
     }
     true
 }
@@ -333,32 +349,38 @@ enum ProcessProbe {
     Unknown,
 }
 
-/// 先改名再删除：改名是毫秒级的，删除可以慢。返回是否真的删掉了。
-fn remove_stale_dir(path: &Path) -> bool {
+/// 先改名再删除：改名是毫秒级的，删除可以慢。
+fn remove_stale_dir(path: &Path) -> Removal {
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
     if is_marked_for_deletion(&name) {
         // 上一轮已经改过名：直接删。
-        return std::fs::remove_dir_all(path).is_ok();
+        return match std::fs::remove_dir_all(path) {
+            Ok(()) => Removal::Reclaimed,
+            Err(error) => classify_io(&error),
+        };
     }
     let Some(parent) = path.parent() else {
-        return false;
+        return Removal::Other(0);
     };
     let marked = parent.join(format!("{name}{DELETING_MARK}{}", std::process::id()));
     // 目标已存在时先清掉它（上一次删除失败留下的）。
     if marked.exists() {
         let _ = std::fs::remove_dir_all(&marked);
     }
-    if std::fs::rename(path, &marked).is_err() {
+    if let Err(error) = std::fs::rename(path, &marked) {
         // 【为什么不再退化为原地删除】改名失败几乎只有两种原因：目录被占用、
         // 或权限不足。原地删除在第一种情形下会**部分删掉**一个还活着的 profile
         // （WebView2 之后会以各种方式失败），在第二种情形下同样失败。两种都不该做，
         // 留给下一次扫描重试。
-        return false;
+        return classify_io(&error);
     }
-    std::fs::remove_dir_all(&marked).is_ok()
+    match std::fs::remove_dir_all(&marked) {
+        Ok(()) => Removal::Reclaimed,
+        Err(error) => classify_io(&error),
+    }
 }
 
 fn is_marked_for_deletion(name: &str) -> bool {
@@ -582,7 +604,11 @@ mod tests {
         let target = root.join("view-4294967290");
         std::fs::create_dir_all(target.join("Cache")).unwrap();
         std::fs::write(target.join("Cache").join("blob"), b"data").unwrap();
-        assert!(remove_stale_dir(&target), "改名 + 删除必须成功");
+        assert_eq!(
+            remove_stale_dir(&target),
+            Removal::Reclaimed,
+            "改名 + 删除必须成功"
+        );
         assert!(!target.exists(), "原目录必须消失");
         let leftovers = std::fs::read_dir(&root).unwrap().flatten().count();
         assert_eq!(leftovers, 0, "不得留下删除标记目录");

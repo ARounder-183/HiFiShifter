@@ -14,7 +14,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use tauri::{Manager, State, Window};
+use tauri::{State, Window};
 
 /// 归一化音阶键名。清单只有一份，在 `hifishifter_kernel::state::model` 里 ——
 /// 此前 App 与插件各抄了一份，改一处就会让两边接受的取值分叉。
@@ -295,8 +295,9 @@ pub(crate) fn sanitize_file_name_segment(raw: &str) -> String {
 }
 
 fn resolve_documents_dir(state: &AppState) -> Option<PathBuf> {
+    // 同 `commands/synth.rs`：移动端指向用户可见的目录（`platform::paths::documents_dir`）。
     if let Some(handle) = state.app_handle.get() {
-        if let Ok(dir) = handle.path().document_dir() {
+        if let Some(dir) = crate::platform::paths::documents_dir(handle) {
             return Some(dir);
         }
     }
@@ -1170,12 +1171,14 @@ pub(super) fn new_project(
     get_timeline_state(state)
 }
 
-pub(super) fn open_project_dialog() -> serde_json::Value {
-    let picked = rfd::FileDialog::new()
+pub(super) fn open_project_dialog(app: &tauri::AppHandle) -> serde_json::Value {
+    let picked = crate::platform::dialog::FileDialog::new()
         .add_filter("HiFiShifter Project", &["hshp", "hsp"])
         .add_filter("HiFiShifter Backup Project", &["hshp-bak", "hsp-bak"])
         .add_filter("JSON Project", &["json"])
-        .pick_file();
+        // 工程是文档，不是素材：移动端收编进 imports/，不污染媒体面板。
+        .set_import_target(crate::platform::paths::ImportTarget::Document)
+        .pick_file(app);
     match picked {
         None => serde_json::json!({"ok": true, "canceled": true}),
         Some(path) => {
@@ -1396,6 +1399,7 @@ pub(super) fn open_project(
 }
 
 pub(super) fn save_project(
+    app: &tauri::AppHandle,
     state: State<'_, AppState>,
     window: Window,
     notes_markdown: Option<String>,
@@ -1419,8 +1423,135 @@ pub(super) fn save_project(
             Some(format.extension().to_string()),
         );
     }
+    // 【移动端：无路径时落进工程库，不弹 SAF】
+    //
+    // 移动端的「保存 / 打开」此前是**不对称**的：保存写死到一个固定目录，
+    // 打开却要用户自己走 SAF 找一个 `.hshp`。用户看不到那个固定目录，于是
+    // 「我保存的工程去哪了」与「我该打开哪个文件」两个问题都回答不了。
+    // 现在保存进库、打开看库；SAF 只留给「从设备导入…」与「导出 / 分享」。
+    if crate::platform::is_mobile() {
+        let dir = match crate::platform::paths::projects_dir(app) {
+            Ok(dir) => dir,
+            Err(error) => {
+                return serde_json::json!({ "ok": false, "error": error });
+            }
+        };
+        let name = default_project_save_name(&state);
+        let path = unique_project_path(&dir, &name);
+        return save_project_to_path(
+            state,
+            window,
+            path.to_string_lossy().to_string(),
+            None,
+            None,
+            Some(ProjectSaveFormat::Hshp.extension().to_string()),
+        );
+    }
     // No path yet -> Save As
-    save_project_as(state, window, None, None)
+    save_project_as(app, state, window, None, None)
+}
+
+/// 工程库里的一个条目（`list_projects` 的返回元素）。
+///
+/// 【为什么不解析工程内容】20 个几 MB 的 MessagePack 工程逐个解包要 1–2 秒，
+/// 而列表只需要「名字 / 时间 / 大小」。名字取文件名、时间取 mtime —— 三个字段
+/// 全部来自目录元数据，20 个工程在 200ms 内出结果。
+fn project_library_entries(dir: &std::path::Path, current: Option<&str>) -> Vec<serde_json::Value> {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<(u64, serde_json::Value)> = Vec::new();
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let is_project = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("hshp"));
+        if !is_project {
+            continue;
+        }
+        let meta = entry.metadata().ok();
+        let modified_ms = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let size_bytes = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let name = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let path_text = path.to_string_lossy().to_string();
+        entries.push((
+            modified_ms,
+            serde_json::json!({
+                "path": path_text,
+                "name": name,
+                "modifiedAtMs": modified_ms,
+                "sizeBytes": size_bytes,
+                "isCurrent": current.is_some_and(|c| c == path_text),
+            }),
+        ));
+    }
+    // 最近修改的排前面：库列表的第一条应当就是用户刚保存的那个。
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+    entries.into_iter().map(|(_, value)| value).collect()
+}
+
+/// 在库目录里取一个不冲突的工程路径（`名字.hshp` → `名字 (2).hshp` → …）。
+fn unique_project_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_control() || "/\\:*?\"<>|".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let stem = if sanitized.trim().is_empty() {
+        "Untitled".to_string()
+    } else {
+        sanitized.trim().to_string()
+    };
+    let mut candidate = dir.join(format!("{stem}.hshp"));
+    let mut index = 2;
+    while candidate.exists() && index < 1000 {
+        candidate = dir.join(format!("{stem} ({index}).hshp"));
+        index += 1;
+    }
+    candidate
+}
+
+/// 列出工程库（移动端的「打开工程」入口）。
+///
+/// 桌面也注册这条命令（无副作用）：它只是列一个目录，桌面用户看不到这个入口，
+/// 但让两个形态共享同一条命令，比在 invoke 表里按形态注册要少一处分叉。
+pub(super) fn list_projects(
+    app: &tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> serde_json::Value {
+    let dir = match crate::platform::paths::projects_dir(app) {
+        Ok(dir) => dir,
+        Err(error) => {
+            return serde_json::json!({ "ok": false, "error": error, "projects": [] });
+        }
+    };
+    let current = {
+        let p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+        p.path.clone()
+    };
+    let projects = project_library_entries(&dir, current.as_deref());
+    serde_json::json!({
+        "ok": true,
+        "dir": dir.to_string_lossy(),
+        "projects": projects,
+    })
 }
 
 fn default_project_save_name(state: &AppState) -> String {
@@ -1432,12 +1563,15 @@ fn default_project_save_name(state: &AppState) -> String {
     }
 }
 
-fn project_save_dialog(format: ProjectSaveFormat, default_name: &str) -> rfd::FileDialog {
+fn project_save_dialog(
+    format: ProjectSaveFormat,
+    default_name: &str,
+) -> crate::platform::dialog::FileDialog {
     let stem = Path::new(default_name)
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or("Untitled");
-    rfd::FileDialog::new()
+    crate::platform::dialog::FileDialog::new()
         .add_filter(format.filter_name(), format.extensions())
         .set_file_name(format!("{}.{}", stem, format.extension()))
 }
@@ -1456,6 +1590,7 @@ fn resolve_save_dialog_format(raw: Option<&str>) -> Result<ProjectSaveFormat, ()
 }
 
 pub(super) fn pick_project_save_path(
+    app: &tauri::AppHandle,
     state: State<'_, AppState>,
     format: String,
     default_name: Option<String>,
@@ -1466,7 +1601,7 @@ pub(super) fn pick_project_save_path(
     let default_name = default_name
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| default_project_save_name(state.inner()));
-    match project_save_dialog(format, &default_name).save_file() {
+    match project_save_dialog(format, &default_name).save_file(app) {
         None => serde_json::json!({"ok": true, "canceled": true}),
         Some(path) => serde_json::json!({
             "ok": true,
@@ -1477,6 +1612,7 @@ pub(super) fn pick_project_save_path(
 }
 
 pub(super) fn save_project_as(
+    app: &tauri::AppHandle,
     state: State<'_, AppState>,
     window: Window,
     format: Option<String>,
@@ -1490,7 +1626,7 @@ pub(super) fn save_project_as(
     let Ok(format) = resolve_save_dialog_format(format.as_deref()) else {
         return serde_json::json!({"ok": false, "error": "unsupported_project_format"});
     };
-    let picked = project_save_dialog(format, &default_name).save_file();
+    let picked = project_save_dialog(format, &default_name).save_file(app);
     match picked {
         None => serde_json::json!({"ok": true, "canceled": true}),
         Some(path) => {

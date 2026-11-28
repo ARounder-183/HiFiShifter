@@ -7,7 +7,9 @@ name: HiFiShifter Cross-Platform Build (Windows, macOS, Linux)
 # scripts/checks/ locally as needed.
 #
 # [Triggers] PRs run three platforms (windows-x86_64 / macos-arm64 / linux-x86_64);
-# a `v*` tag or manual dispatch runs all six.
+# a `v*` tag or manual dispatch runs five: those three plus windows-arm64 and
+# linux-aarch64, with the two macOS legs replaced by one `macos-universal` leg that
+# cross-compiles both architectures and ships a single .pkg.
 on:
   workflow_dispatch:
   pull_request:
@@ -58,7 +60,8 @@ jobs:
       always() && needs.frontend.result == 'success'
       && (needs.assert-version.result == 'success' || needs.assert-version.result == 'skipped')
     runs-on: ${{ matrix.os }}
-    # Six-platform matrix: the longest single build (cross-compile + packaging) is capped at 120 minutes.
+    # The longest single leg (the two-architecture macOS build plus packaging) is capped at 180
+    # minutes; the note here used to say 120, which the value below had already outgrown.
     timeout-minutes: 180
     env:
       # [Why RUSTFLAGS is no longer set] This used to be `RUSTFLAGS: "-Awarnings"`, which did
@@ -77,12 +80,28 @@ jobs:
         # platforms running at all**: the run log only showed a skipped job whose name still
         # contained `${{ matrix.name }}`. GitHub does not error on expressions inside exclude;
         # it just prevents the whole matrix from expanding. The matrix is now produced directly
-        # by an expression: three platforms on PRs, six on tags and manual dispatch. The JSON
+        # by an expression: three platforms on PRs, five on tags and manual dispatch. The JSON
         # fields map 1:1 onto the old include (cargo_extra carried over verbatim).
+        # [Why release builds have one macOS leg] It cross-compiles both architectures on Apple
+        # Silicon and ships one universal .pkg, which removes the Intel leg's two structural
+        # costs (Homebrew compiling cmake from source, then two fat-LTO links) and the duplicate
+        # package. PRs keep the single-architecture leg: a PR only proves that the code compiles,
+        # and the universal wiring is covered by a static gate instead.
+        # [Why every tauri-action leg passes --config tauri.conf.ci.json] tauri.conf.json's
+        # beforeBuildCommand runs the frontend build, but the frontend job already produced
+        # frontend/dist and this leg unpacked it -- so the second vite run costs every leg a
+        # minute and changes nothing. scripts/build/build.ps1 does the same thing inline for the
+        # Windows x86_64 leg, which is why that entry's tauri_extra stays empty (no step reads
+        # it).
+        # [Why `name` is the artifact tag] The non-Windows upload glob matches package.sh's
+        # HFS_TAG (scripts/plugin/unix/lib.sh), and that tag spells the Linux arm64 leg
+        # `linux-aarch64` (dpkg's spelling, already part of published file names). The
+        # matrix name must therefore be `linux-aarch64` too — run 45953527512 went red
+        # because the leg was named `linux-arm64` while the tarball was `linux-aarch64`.
         include: >-
           ${{ fromJSON(github.event_name == 'pull_request'
-          && '[{"name":"windows-x86_64","os":"windows-latest","cargo_target":"x86_64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist"},{"name":"macos-arm64","os":"macos-latest","cargo_target":"aarch64-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx"},{"name":"linux-x86_64","os":"ubuntu-24.04","cargo_target":"x86_64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx"}]'
-          || '[{"name":"windows-x86_64","os":"windows-latest","cargo_target":"x86_64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist"},{"name":"windows-arm64","os":"windows-11-arm","cargo_target":"aarch64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx"},{"name":"macos-arm64","os":"macos-latest","cargo_target":"aarch64-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx"},{"name":"macos-x86_64","os":"macos-15-intel","cargo_target":"x86_64-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx"},{"name":"linux-x86_64","os":"ubuntu-24.04","cargo_target":"x86_64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx"},{"name":"linux-arm64","os":"ubuntu-24.04-arm","cargo_target":"aarch64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx"}]') }}
+          && '[{"name":"windows-x86_64","os":"windows-latest","cargo_target":"x86_64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist","tauri_extra":""},{"name":"macos-arm64","os":"macos-latest","cargo_target":"aarch64-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--config tauri.conf.ci.json"},{"name":"linux-x86_64","os":"ubuntu-24.04","cargo_target":"x86_64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--config tauri.linux.x86_64.conf.json --config tauri.conf.ci.json"}]'
+          || '[{"name":"windows-x86_64","os":"windows-latest","cargo_target":"x86_64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist","tauri_extra":""},{"name":"windows-arm64","os":"windows-11-arm","cargo_target":"aarch64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--config tauri.conf.ci.json"},{"name":"macos-universal","os":"macos-15","cargo_target":"universal-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--target universal-apple-darwin --config tauri.conf.ci.json"},{"name":"linux-x86_64","os":"ubuntu-24.04","cargo_target":"x86_64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--config tauri.linux.x86_64.conf.json --config tauri.conf.ci.json"},{"name":"linux-aarch64","os":"ubuntu-24.04-arm","cargo_target":"aarch64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--config tauri.conf.ci.json"}]') }}
     steps:
       - uses: actions/checkout@v6
 
@@ -141,6 +160,15 @@ jobs:
           # build job must not go red over dependency-crate warnings, nor silence warnings —
           # so it is explicitly cleared, making warnings visible but non-fatal.
           rustflags: ''
+
+      # [Why the toolchain action cannot do this] It installs the host's default target only.
+      # The universal leg cross-compiles for the other architecture, and cargo's failure mode
+      # for a target that was never added is "can't find crate for `std`" — an error that names
+      # a dependency rather than the missing target.
+      - name: Add both macOS targets (universal)
+        if: matrix.cargo_target == 'universal-apple-darwin'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+        shell: bash
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -259,6 +287,23 @@ jobs:
       - name: Install frontend deps
         run: npm --prefix frontend ci
 
+      # ── Windows toolchain ──────────────────────────────────────────────
+      #
+      # [Why CI must import the MSVC environment explicitly] The repository's rule is
+      # "every entry point that runs cargo imports the MSVC environment first" (enforced
+      # by scripts/checks/check-native-toolchain.ps1). The x86_64 leg satisfies it through
+      # build.ps1, which dot-sources scripts/env/msvc-env.ps1 in-process. The arm64 leg
+      # uses tauri-action and has no script entry point at all, so nmake.exe was never on
+      # PATH and hifishifter-kernel's build script died inside `cmake` configure
+      # (run 45953527512). Publishing the environment to $GITHUB_ENV hands the same
+      # toolchain to that separate process.
+      - name: Import MSVC environment (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $arch = if ('${{ matrix.cargo_target }}' -like 'aarch64-*') { 'arm64' } else { 'x64' }
+          ./scripts/setup/export-msvc-env.ps1 -Arch $arch
+
       # ── Build + bundle ─────────────────────────────────────────────────
 
       # ── Windows x86_64: the only merged installer ───────────────────────
@@ -291,7 +336,10 @@ jobs:
           HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
         with:
           projectPath: backend/src-tauri
-          args: ${{ matrix.cargo_extra }}
+          # [Why tauri_extra comes before cargo_extra] The first `--` in the argument list ends the
+          # tauri CLI's own flags; everything after it is handed to cargo. A per-architecture
+          # config file has to land on the tauri side of that boundary.
+          args: ${{ matrix.tauri_extra }} ${{ matrix.cargo_extra }}
 
       - name: Build and bundle (macOS)
         if: runner.os == 'macOS'
@@ -304,7 +352,7 @@ jobs:
           # The unified macOS pkg needs the .app kept as the pkg payload; the DMG is no
           # longer produced separately. Only app is requested, preventing tauri-bundler
           # from cleaning up intermediate artifacts after generating a DMG.
-          args: --bundles app ${{ matrix.cargo_extra }}
+          args: --bundles app ${{ matrix.tauri_extra }} ${{ matrix.cargo_extra }}
 
       - name: Set LD_LIBRARY_PATH for linuxdeploy (Linux)
         if: runner.os == 'Linux'
@@ -333,7 +381,7 @@ jobs:
           NO_APPSTREAM: "1"
         with:
           projectPath: backend/src-tauri
-          args: --bundles appimage ${{ matrix.cargo_extra }}
+          args: --bundles appimage ${{ matrix.tauri_extra }} ${{ matrix.cargo_extra }}
 
       - name: Resolve Tauri release directory
         if: always()
@@ -594,12 +642,126 @@ jobs:
             APP_BUNDLE="$RELEASE_DIR/bundle/macos/HiFiShifter.app"
             [ -d "$APP_BUNDLE" ] || { echo "ERROR: macOS App not found: $APP_BUNDLE" >&2; exit 1; }
             APP_ARGS+=(--app-bundle "$APP_BUNDLE")
+            if [ "${{ matrix.cargo_target }}" = "universal-apple-darwin" ]; then
+              # package.sh builds the host architecture's plugins itself; the other slice is
+              # built here, into its own directory, and merged in by --merge-arch.
+              OTHER_TRIPLE="x86_64-apple-darwin"
+              OTHER_DIST="$GITHUB_WORKSPACE/dist-universal-other"
+              bash scripts/vst3/unix/build.sh --stage=bundle --profile=dist --skip-frontend \
+                --target="$OTHER_TRIPLE" --out="$OTHER_DIST"
+              bash scripts/clap/unix/build.sh --stage=bundle --profile=dist --reuse-frontend \
+                --target="$OTHER_TRIPLE" --out="$OTHER_DIST"
+              APP_ARGS+=(--merge-arch "$OTHER_DIST")
+              # The App's SoundTouch dylibs are single-arch -- build.rs writes them to one fixed
+              # source path, so the last build wins. The two per-target output directories are
+              # the authoritative per-architecture sources, and --merge-app-arch lipos those
+              # instead of whatever the bundle happens to hold.
+              APP_ARGS+=(--merge-app-arch "$GITHUB_WORKSPACE/backend/target/aarch64-apple-darwin/dist")
+              APP_ARGS+=(--merge-app-arch "$GITHUB_WORKSPACE/backend/target/x86_64-apple-darwin/dist")
+              # The artifact name is built from HFS_TAG (scripts/plugin/unix/lib.sh); without
+              # this the universal package would be published as "macos-arm64".
+              export HFS_PLATFORM_ARCH=universal
+            fi
           else
             APPIMAGE="$(find "$RELEASE_DIR/bundle/appimage" -maxdepth 1 -name '*.AppImage' -print -quit)"
             [ -f "$APPIMAGE" ] || { echo "ERROR: Linux AppImage not found: $RELEASE_DIR/bundle/appimage" >&2; exit 1; }
             APP_ARGS+=(--appimage "$APPIMAGE")
           fi
           bash scripts/build/unix/package.sh --profile dist --reuse-frontend --no-verify "${APP_ARGS[@]}"
+
+      # [Why this is a runtime assertion and not a static gate] lipo's output is the only
+      # evidence that a file carries both slices; reading the sources cannot produce it.
+      # Everything the merge could not repair shows up here instead of on a user's Intel Mac,
+      # where the symptom is "dyld: Library not loaded" with no log that explains it.
+      - name: Assert universal Mach-O
+        if: runner.os == 'macOS' && matrix.cargo_target == 'universal-apple-darwin' && success()
+        shell: bash
+        run: |
+          # No `set -e`: every offending file must be reported, not just the first one.
+          set -uo pipefail
+          APP="${GITHUB_WORKSPACE}/${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/macos/HiFiShifter.app"
+          DIST="$GITHUB_WORKSPACE/dist"
+          FAIL=0
+
+          # lipo prints a space-separated list; sorting makes the comparison independent of the
+          # order the slices happen to be stored in.
+          archs_of() { lipo -archs "$1" 2>/dev/null | tr ' ' '\n' | sed '/^$/d' | sort | tr '\n' ' ' | sed 's/ $//'; }
+
+          expect_archs() { # <file> <expected, sorted>
+              local target="$1" want="$2" got
+              got="$(archs_of "$target")"
+              if [ "$got" = "$want" ]; then
+                  printf '  ok   %-14s %s\n' "$got" "$target"
+              else
+                  printf '  FAIL %-14s %s (expected %s)\n' "$got" "$target" "$want" >&2
+                  FAIL=1
+              fi
+          }
+
+          # Dylibs that exist for ONE architecture only. The x86_64 slice links ort-tract, so it
+          # has neither onnxruntime nor dawn; dyld resolves nothing the current slice does not
+          # reference, so the arm64 copies are harmless there. They appear in the App's
+          # Resources/macos and in each plugin bundle's Frameworks, because hfs_runtime_deps
+          # stages them for arm64 only.
+          ARCH_EXCLUSIVE="libonnxruntime.dylib libwebgpu_dawn.dylib"
+
+          is_arch_exclusive() {
+              local name candidate
+              name="$(basename "$1")"
+              for candidate in $ARCH_EXCLUSIVE; do
+                  [ "$name" = "$candidate" ] && return 0
+              done
+              return 1
+          }
+
+          # <dir>: every Mach-O inside carries both slices, except the arch-exclusive dylibs,
+          # which must carry exactly arm64.
+          check_tree() {
+              local dir="$1" f
+              while IFS= read -r -d '' f; do
+                  file -b "$f" | grep -q 'Mach-O' || continue
+                  if is_arch_exclusive "$f"; then
+                      expect_archs "$f" "arm64"
+                  else
+                      expect_archs "$f" "arm64 x86_64"
+                  fi
+              done < <(find "$dir" -type f -print0)
+          }
+
+          [ -d "$APP" ] || { echo "ERROR: $APP not found" >&2; exit 1; }
+          echo "=== $APP ==="
+          check_tree "$APP"
+
+          # The arm64 slice must actually have its ORT dylibs: an App without them starts fine
+          # and then fails on the first inference on Apple Silicon.
+          if ! find "$APP/Contents/Resources/macos" -name '*.dylib' -print -quit 2>/dev/null | grep -q .; then
+              echo "  FAIL no ORT dylib under Contents/Resources/macos (stage_ort_macos_dylibs produced nothing)" >&2
+              FAIL=1
+          fi
+
+          # The x86_64 slice must not reference onnxruntime. Written as `if`, not as
+          # "cmd | grep -q X && exit 1": under `set -e` a non-matching grep makes the whole
+          # AND-list return 1, so the step would go red exactly when the rule holds.
+          if otool -arch x86_64 -L "$APP/Contents/MacOS/HiFiShifter" | grep -q onnxruntime; then
+              echo "  FAIL the x86_64 slice references onnxruntime; it must use tract only" >&2
+              FAIL=1
+          fi
+
+          # lipo invalidates signatures, so this is the only proof that the re-sign took.
+          codesign --verify --deep --strict "$APP" || FAIL=1
+
+          for bundle in "$DIST/HiFiShifter.vst3" "$DIST/clap/HiFiShifter.clap"; do
+              if [ ! -d "$bundle" ]; then echo "  FAIL missing $bundle" >&2; FAIL=1; continue; fi
+              echo "=== $bundle ==="
+              check_tree "$bundle"
+              codesign --verify --deep --strict "$bundle" || FAIL=1
+          done
+
+          if [ "$FAIL" -ne 0 ]; then
+              echo "ERROR: the package is not universal (see the FAIL lines above)" >&2
+              exit 1
+          fi
+          echo "every Mach-O carries both slices, or is on the arm64-only list"
 
       # ── Artifact naming ───────────────────────────────────────────────
 

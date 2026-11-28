@@ -439,9 +439,18 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                 className="fixed z-99999 flex flex-col"
                 style={{
                     left: position.x,
-                    top: position.y,
+                    /*
+                     * 【为什么 top 是 max() 而不是裸数字】`getQuickSearchInitialPosition`
+                     * 把弹窗夹在 `[0, viewportHeight - 高度]` 之间，于是"贴近顶部"是
+                     * 一个合法结果 —— 而移动端的视口从状态栏底下开始（边到边）。
+                     * 直接用它会让搜索框落在状态栏下方：既被系统栏盖住、又因为系统栏
+                     * 吃掉触摸而点不到输入框。`max()` 让安全区成为下界，桌面形态下
+                     * `--qt-safe-top` 不存在、取 0px，行为与引入这行之前完全相同。
+                     */
+                    top: `max(${position.y}px, var(--qt-safe-top, 0px))`,
                     width: QUICK_SEARCH_POPUP_WIDTH,
-                    maxHeight: QUICK_SEARCH_POPUP_HEIGHT,
+                    // 高度同理：不能超出"可视高度减去上下安全区"。
+                    maxHeight: `min(${QUICK_SEARCH_POPUP_HEIGHT}px, calc(100dvh - var(--qt-safe-top, 0px) - var(--qt-safe-bottom, 0px)))`,
                     background: "var(--qt-panel)",
                     border: "1px solid var(--qt-border)",
                     borderRadius: "var(--qt-radius-lg)",

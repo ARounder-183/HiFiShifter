@@ -606,3 +606,32 @@ companion 的 `clap` feature 只挂在 `[dev-dependencies]`：它是纯 checked-
 | CLAP 外壳 | `backend/hifishifter-clap/` |
 | VST3 外壳 | `backend/hifishifter-vst3/`（模块入口、工厂/组件/处理器、IPlugView、IConnectionPoint、ARA COM 入口） |
 | VST3 ABI 词汇 | `backend/hifishifter-plugin/src/vst3_abi.rs` |
+
+---
+
+## 10. 宿主线程边界：能力可以缺，锁不能等
+
+前九节回答"哪个宿主能做哪件事"。这一节回答另一个方向的问题：**插件在宿主的线程上
+被调用时，允许做什么。**
+
+四条入口都在宿主 UI 线程上（WebView2 消息回调、`IPlugView` 回调、
+`plugin_register("timer")` 的节拍、ARA 模型回调）。宿主在这些调用返回之前**不泵
+消息**，而 WebView2 的同步投递正靠它泵 —— 所以一次"等锁"可以变成一次互相等待。
+不变量与落地规则见 [`docs/thread-model.md`](thread-model.md) 第 9 节，这里只列三条
+与本文件直接相关的推论：
+
+1. **能力位与线程无关。** "这个宿主没有 clip 剪贴板 API" 是能力问题，用
+   `HostCapabilities` 表达；"这条命令不能在宿主线程上等锁"是线程问题，用
+   `host::thread_mark` 表达。把两者混成一个"不支持"会让用户以为换个宿主就能用。
+2. **回执必须能在宿主不泵的情况下送达。** 一条丢掉的回执 = 前端那个 `invoke` 挂到
+   30 s 超时，并一直占着在途预算（32 条用满之后本视图拒绝一切后续命令）。所以出站
+   分类里 `Reply` 永不合并、永不丢弃（见 `editor/gui/outbound.rs`）。
+3. **ARA 心跳有预算。** `notifyModelUpdates` 是宿主空闲时唯一保证到达的入口，而它
+   顺手做的三件事（全量重映射 / 经宿主读整段音源 / 逐条回推）代价都不可控。
+   `HFS_NOTIFY_BUDGET_MS` 是"这一次调用最多占住宿主多久"的上界；超了就把剩下的留给
+   下一次心跳。
+4. **读宿主音源这件事搬不到别的线程。** `retry_failed_source_read` 的第二个参数是
+   `HostContentScope<'_, '_>` —— 那个 scope 由宿主在**它自己的回调里**给出，离开回调即失效
+   （见 `ara/model.rs`）。所以"把重试交给 worker"不是一个省事的实现选择，而是一句对宿主
+   API 的误解：没有 scope 就取不到 `IAudioSourceContentReader`。这条重试因此留在
+   `notifyModelUpdates` 里，用 `HFS_SOURCE_RETRY_MS`（默认 1 s）限流、用心跳预算封顶。

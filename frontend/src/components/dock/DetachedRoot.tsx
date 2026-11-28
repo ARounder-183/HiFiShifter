@@ -40,6 +40,8 @@ import { installFocusSurfaceTracking } from "../../features/uiFocus/focusSurface
 import { useKeybindings } from "../../features/keybindings/useKeybindings";
 import { useDetachedKeybindingAction } from "../../features/keybindings/useDetachedKeybindingAction";
 import { setActiveEditorWindow } from "../../features/session/interactionSlice";
+import { PlayheadTimeReadout } from "../layout/transport/PlayheadTimeReadout";
+import { PANEL_PARAM_EDITOR, PANEL_TIMELINE } from "./registerBuiltinPanels";
 import "./dock.css";
 
 export function DetachedRoot() {
@@ -117,6 +119,8 @@ export function DetachedRoot() {
     // 先挂宿主层，再渲染面板自己的布局根。
     const layout = useAppSelector((state) => state.dock.layout);
     const isPanel = isPanelForm(form ?? undefined);
+    const showEditorTimeBar =
+        !isPanel && (panelId === PANEL_TIMELINE || panelId === PANEL_PARAM_EDITOR);
     const subtreeRootIds = useMemo(
         () =>
             isPanel && form?.childRootId ? collectSubtreeRootIds(layout, form.childRootId) : null,
@@ -135,50 +139,57 @@ export function DetachedRoot() {
 
     return (
         <div
-            className="relative h-screen w-screen overflow-hidden bg-qt-window text-qt-text"
+            className="relative flex h-screen w-screen flex-col overflow-hidden bg-qt-window text-qt-text"
             onDragOver={onDragOver}
             data-detached-form={formId ?? undefined}
         >
-            {shortcutUnavailable ? (
-                <div className="pointer-events-none absolute bottom-3 left-1/2 z-50 -translate-x-1/2 rounded bg-qt-panel px-3 py-1.5 text-qt-xs text-qt-text shadow">
-                    {translateOutsideReact("detached_shortcut_unavailable")}
+            {showEditorTimeBar ? (
+                <div className="shrink-0 border-b border-qt-border bg-qt-window">
+                    <PlayheadTimeReadout variant="detached" interpolate={false} />
                 </div>
             ) : null}
-            {/*
-             * 三态（普通窗体）：面板未注册（找不到 panelId）→ 显示"不可用"而不是
-             * 空白；已注册 → 渲染；快照未到（无 formId）→ 显示"正在连接"。
-             * 面板窗体走上面的分支：渲染它自己的整棵布局树。
-             */}
-            {isPanel && form?.childRootId ? (
-                <div className="flex h-full w-full flex-col">
-                    <DockPanelHosts forms={hostedForms} />
-                    <DockSubRoot rootId={form.childRootId} kind="panel" />
-                </div>
-            ) : panelId && !PanelComponent ? (
-                <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-qt-xs text-qt-text-muted">
-                    <span>{translateOutsideReact("panel_unavailable")}</span>
-                    <span className="text-qt-text-muted opacity-70">{panelId}</span>
-                </div>
-            ) : PanelComponent ? (
-                // 与停靠宿主一致：注册表里的 component 可能是 lazy 组件
-                <Suspense
-                    fallback={
-                        <div className="flex h-full w-full items-center justify-center text-qt-xs text-qt-text-muted">
-                            …
-                        </div>
-                    }
-                >
-                    <PanelComponent
-                        formId={formId ?? ""}
-                        panelId={panelId ?? ""}
-                        props={form?.props ?? {}}
-                    />
-                </Suspense>
-            ) : (
-                <div className="flex h-full w-full items-center justify-center text-qt-xs text-qt-text-muted">
-                    …
-                </div>
-            )}
+            <div className="relative min-h-0 flex-1">
+                {shortcutUnavailable ? (
+                    <div className="pointer-events-none absolute bottom-3 left-1/2 z-50 -translate-x-1/2 rounded bg-qt-panel px-3 py-1.5 text-qt-xs text-qt-text shadow">
+                        {translateOutsideReact("detached_shortcut_unavailable")}
+                    </div>
+                ) : null}
+                {/*
+                 * 三态（普通窗体）：面板未注册（找不到 panelId）→ 显示"不可用"而不是
+                 * 空白；已注册 → 渲染；快照未到（无 formId）→ 显示"正在连接"。
+                 * 面板窗体走上面的分支：渲染它自己的整棵布局树。
+                 */}
+                {isPanel && form?.childRootId ? (
+                    <div className="flex h-full w-full flex-col">
+                        <DockPanelHosts forms={hostedForms} />
+                        <DockSubRoot rootId={form.childRootId} kind="panel" />
+                    </div>
+                ) : panelId && !PanelComponent ? (
+                    <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-qt-xs text-qt-text-muted">
+                        <span>{translateOutsideReact("panel_unavailable")}</span>
+                        <span className="text-qt-text-muted opacity-70">{panelId}</span>
+                    </div>
+                ) : PanelComponent ? (
+                    // 与停靠宿主一致：注册表里的 component 可能是 lazy 组件
+                    <Suspense
+                        fallback={
+                            <div className="flex h-full w-full items-center justify-center text-qt-xs text-qt-text-muted">
+                                …
+                            </div>
+                        }
+                    >
+                        <PanelComponent
+                            formId={formId ?? ""}
+                            panelId={panelId ?? ""}
+                            props={form?.props ?? {}}
+                        />
+                    </Suspense>
+                ) : (
+                    <div className="flex h-full w-full items-center justify-center text-qt-xs text-qt-text-muted">
+                        …
+                    </div>
+                )}
+            </div>
         </div>
     );
 }

@@ -1,0 +1,7 @@
+{
+    "bundle": {
+        "resources": {
+            "resources/linux/libwebgpu_dawn.so": "libwebgpu_dawn.so"
+        }
+    }
+}

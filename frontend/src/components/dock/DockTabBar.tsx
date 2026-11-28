@@ -272,6 +272,33 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                     <div className="hs-dock-tabbar-spacer" />
 
                     <div className="hs-dock-tabbar-actions">
+                        {/*
+                         * 关闭当前标签：**触摸形态唯一的关闭入口**（标签上不再有小叉，
+                         * 见 dock.css 的触摸段与下面的说明）。
+                         *
+                         * 【为什么把它放在这里而不是标签里】切换标签时的误触全部来自
+                         * "叉就长在标签上"：手指要点的是标签，落点偏几像素就成了关闭，
+                         * 而关掉的面板此前**没有任何办法重新打开**（现在有了窗口清单，
+                         * 但"别误关"永远比"关错了能找回"更好）。
+                         * 移到这里之后，关闭变成两步：先选中标签，再点这一格 ——
+                         * 两步都发生在同一个明确的按钮上，且它与标签之间有间隔。
+                         *
+                         * 【为什么用 CSS 而不是 JS 判形态】`data-input` 由启动时的
+                         * 形态剖面写入；用 JS 读它会在剖面到达前后渲染出两种结构
+                         * （React 重挂载丢焦点）。`data-touch-only` 让它在桌面隐藏、
+                         * 触摸显示，结构恒定。
+                         */}
+                        <button
+                            type="button"
+                            className="hs-dock-tabbar-action"
+                            data-touch-only="1"
+                            data-dock-tab-close-action="1"
+                            data-tooltip={t("close")}
+                            aria-label={t("close")}
+                            onClick={() => dispatch(closeForm(node.active))}
+                        >
+                            <Cross2Icon />
+                        </button>
                         <button
                             type="button"
                             className="hs-dock-tabbar-action"

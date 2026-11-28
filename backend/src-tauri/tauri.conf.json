@@ -33,10 +33,15 @@
             }
         },
         "licenseFile": "../../LICENSE",
+        "android": {
+            "minSdkVersion": 26
+        },
         "resources": {
             "../../LICENSE": "LICENSE",
             "../../licenses": "licenses/",
             "resources/models/nsf_hifigan/config.json": "models/nsf_hifigan/config.json",
+            "resources/models/nsf_hifigan/pc_nsf_hifigan.onnx": "models/nsf_hifigan/pc_nsf_hifigan.onnx",
+            "resources/models/nsf_hifigan/coreml_pads_patch.txt": "models/nsf_hifigan/coreml_pads_patch.txt",
             "resources/models/hnsep/hnsep.onnx": "models/hnsep/hnsep.onnx",
             "resources/models/hnsep/config.yaml": "models/hnsep/config.yaml",
             "resources/models/fcpe/fcpe.onnx": "models/fcpe/fcpe.onnx",

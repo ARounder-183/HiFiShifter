@@ -64,6 +64,19 @@ impl Drop for WaveformInflightGuard<'_> {
 pub struct AppState {
     pub timeline: std::sync::Mutex<TimelineState>,
     pub timeline_version: std::sync::atomic::AtomicU64,
+
+    /// 载荷版本号：**每构建一份 `TimelineStatePayload` 自增一次**。
+    ///
+    /// 与 `timeline_version` 严格区分（两者动机不同，混用会互相破坏）：
+    /// - `timeline_version` 回答「时间线**内容**变过没有」，用于保存竞态检测
+    ///   （`commands/project.rs`）与后台渲染的失效判断
+    ///   （`commands/playback.rs`）—— 它**必须**只在内容变化时自增，否则
+    ///   每次轮询都会让正在进行的后台渲染自我中止。
+    /// - `payload_revision` 回答「这份载荷**比手上那份新还是旧**」，只服务于
+    ///   前端的乱序回包仲裁（见 `TimelineStatePayload::revision`）。它按读取
+    ///   次数自增，因此在锁内「自增 + 读状态」是一个原子对：先构建的载荷
+    ///   版本号必然更小，与内容是否变化无关。
+    pub payload_revision: std::sync::atomic::AtomicU64,
     pub param_curve_revision: std::sync::atomic::AtomicU64,
     pub timeline_history: std::sync::Mutex<TimelineHistory>,
     pub project: std::sync::Mutex<ProjectState>,
@@ -158,6 +171,17 @@ pub struct AppState {
     pub import_session: OnceLock<String>,
 }
 
+/// 构造一份**不带版本号**的合成载荷（错误 / 占位响应）。
+///
+/// 【为什么不复用 `AppState::timeline_payload`】合成载荷描述的**不是**当前
+/// 时间线状态（典型例子：`import_audio_bytes_error` 返回一份空时间线 +
+/// `ok = false`）。给它盖一个「最新版本号」会让它在任何按版本号比较的前端
+/// 逻辑里**赢过真实状态** —— 一份空时间线会把用户工程擦成白板。不带版本号，
+/// 前端就只能靠 `ok` 判断，而那正是这类载荷的语义。
+pub fn unversioned_timeline_payload(tl: &TimelineState) -> TimelineStatePayload {
+    tl.to_payload()
+}
+
 impl Default for AppState {
     fn default() -> Self {
         Self::with_audio_engine(AudioEngine::new())
@@ -170,6 +194,7 @@ impl AppState {
         Self {
             timeline: std::sync::Mutex::new(TimelineState::default()),
             timeline_version: std::sync::atomic::AtomicU64::new(0),
+            payload_revision: std::sync::atomic::AtomicU64::new(0),
             param_curve_revision: std::sync::atomic::AtomicU64::new(0),
             timeline_history: std::sync::Mutex::new(TimelineHistory::default()),
             project: std::sync::Mutex::new(ProjectState::default()),
@@ -217,6 +242,47 @@ impl AppState {
         self.timeline_version
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
             .saturating_add(1)
+    }
+
+    /// 构建一份带版本号的时间线载荷 —— **全仓唯一**允许构造
+    /// `TimelineStatePayload` 业务内容的入口（`to_payload()` 的调用点已全部
+    /// 收敛到这里，由 `scripts/check-timeline-payload-gate.py` 看守）。
+    ///
+    /// 【为什么必须收敛到一处】版本号是前端乱序仲裁的**唯一**依据。任何一处
+    /// 漏填 `revision` 的载荷都会被前端当成「旧后端」而走兼容分支，那条分支
+    /// 又退回单槽 requestId 的老毛病（不同动作互相作废）。与其在每个命令里
+    /// 记得填一次，不如让「构造载荷」这件事只有一条路。
+    ///
+    /// 【调用约定】调用方**必须**已经持有 `self.timeline` 的锁，并把那个
+    /// guard 的 `&*guard` 传进来。这样「自增版本号」与「读时间线状态」在同
+    /// 一把锁内完成，任何两个载荷的版本号顺序都等于它们所描述状态的顺序。
+    pub fn timeline_payload(&self, tl: &TimelineState) -> TimelineStatePayload {
+        let revision = self.next_payload_revision();
+        let mut payload = tl.to_payload();
+        payload.revision = Some(revision);
+        payload
+    }
+
+    /// 领取下一个载荷版本号（全仓唯一自增点）。
+    ///
+    /// 【为什么单独暴露】`get_timeline_state_lite` 走的是 `to_payload_lite()`，
+    /// 它同样是一份「可以覆盖前端状态」的载荷，也必须带版本号；把自增逻辑
+    /// 抽出来让两条载荷通路共用同一个计数器，前端看到的序号才是单调的。
+    pub fn next_payload_revision(&self) -> u64 {
+        self.payload_revision
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            .saturating_add(1)
+    }
+    /// 瘦身版时间线载荷（跳过 waveform_preview / pitch_range / midi_note_data）。
+    ///
+    /// 与 `timeline_payload` 同一约定：版本号在持锁期间领取，因此两条载荷通路
+    /// 共用同一个单调序列。当前前端仍轮询全量载荷，这里保留给瘦身入口使用；
+    /// 若将来切过去，前端不需要任何改动就能继续按版本号仲裁。
+    pub fn timeline_payload_lite(&self, tl: &TimelineState) -> TimelineStatePayload {
+        let revision = self.next_payload_revision();
+        let mut payload = tl.to_payload_lite();
+        payload.revision = Some(revision);
+        payload
     }
 
     /// 当前工程的绝对路径（工程未保存时为 `None`）。
@@ -904,7 +970,7 @@ impl AppState {
         );
         self.suppress_checkpoints
             .store(true, std::sync::atomic::Ordering::Release);
-        let mut payload = tl.to_payload();
+        let mut payload = self.timeline_payload(&tl);
         payload.project = Some(self.project_meta_payload());
         let (undo_depth, redo_depth) = self.history_depths();
         payload.undo_depth = Some(undo_depth);
@@ -1081,7 +1147,7 @@ impl AppState {
         if target >= h.records.len() || target == h.position {
             let (undo_depth, redo_depth) = history_depths_of(&h);
             drop(h);
-            let mut payload = tl.to_payload();
+            let mut payload = self.timeline_payload(&tl);
             payload.project = Some(self.project_meta_payload());
             payload.ok = false;
             payload.undo_depth = Some(undo_depth);
@@ -1103,7 +1169,7 @@ impl AppState {
             // 补齐）。宁可原地不动，也不套用一个不完整的状态。
             let (undo_depth, redo_depth) = history_depths_of(&h);
             drop(h);
-            let mut payload = tl.to_payload();
+            let mut payload = self.timeline_payload(&tl);
             payload.project = Some(self.project_meta_payload());
             payload.ok = false;
             payload.undo_depth = Some(undo_depth);
@@ -1208,7 +1274,7 @@ impl AppState {
             self.audio_engine.update_timeline(tl.clone());
         }
         self.invalidate_render_caches_if_scale_changed(&tl, &scale_before);
-        let mut payload = tl.to_payload();
+        let mut payload = self.timeline_payload(&tl);
         payload.project = Some(self.project_meta_payload());
         payload.undo_depth = Some(undo_depth);
         payload.redo_depth = Some(redo_depth);

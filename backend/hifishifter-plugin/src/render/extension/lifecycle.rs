@@ -43,14 +43,73 @@ impl ExtensionOwner {
         if !offline_declared {
             return Ok(());
         }
+        self.prepare_offline_now("setup_processing")
+    }
+
+    /// 离线准备在宿主回调上的唯一入口：**尝试一次**，不等合成。
+    ///
+    /// 【为什么不能等】`setup_processing` / `processing_started` 都在宿主的 UI 线程上。
+    /// 旧实现在这里轮询到 15 s（`OFFLINE_PREPARE_TIMEOUT`）：合成一旦不收敛，宿主就冻
+    /// 满 15 秒，导出以"宿主未响应"收场 —— 而这正是要修的那一类缺陷。
+    ///
+    /// 【没准备好怎么办】起一条**专用的收尾线程**（`spawn_offline_prepare_worker`）继续
+    /// 把这一轮做完，然后返回 `Err`：外壳按各自的 ABI 记日志并继续（VST3 仍回
+    /// `kResultOk`），宿主自己的导出线程照常跑 —— 它拿到的是"还在准备"，而不是"卡住"。
+    ///
+    /// 【读数】`[capture] offline prepare: ready=... waited_ms=... reason=...`：这一行
+    /// 同时回答"准备好了没有"与"等没等"，下次现场不必再从导出产物反推。
+    fn prepare_offline_now(self: &Arc<Self>, at: &'static str) -> Result<(), String> {
         let started = std::time::Instant::now();
-        self.prepare_offline_until(started + OFFLINE_PREPARE_TIMEOUT)
-            .map_err(|error| {
-                format!(
-                    "offline preparation failed after {:?}: {error}",
-                    started.elapsed()
-                )
-            })
+        let readiness = self.try_prepare_offline_once()?;
+        let waited_ms = started.elapsed().as_millis();
+        if readiness.is_ready() {
+            log::info!("[capture] offline prepare: ready=true waited_ms={waited_ms} at {at}");
+            return Ok(());
+        }
+        let reason = readiness.reason();
+        crate::log_line(&format!(
+            "[capture] offline prepare: ready=false waited_ms={waited_ms} reason={reason} at {at}"
+        ));
+        self.spawn_offline_prepare_worker();
+        Err(format!(
+            "offline preparation is still running ({reason}) after {waited_ms} ms; a background \
+             worker is finishing it"
+        ))
+    }
+
+    /// 起一条后台收尾线程把离线准备做完（同一时刻只允许一条）。
+    ///
+    /// 【为什么是线程而不是"让宿主再调一次"】宿主不会重试 `setupProcessing`。它声明离线
+    /// 之后就直接开渲染，而渲染线程比实时快一到两个数量级 —— 没有人接着做，这一趟产物
+    /// 就是静音。收尾线程是唯一既不冻宿主、又不放弃这次机会的落点。
+    fn spawn_offline_prepare_worker(self: &Arc<Self>) {
+        if self
+            .offline_prepare_worker
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let owner = Arc::clone(self);
+        let started = std::time::Instant::now();
+        let spawned = std::thread::Builder::new()
+            .name("hifishifter-offline-prepare".into())
+            .spawn(move || {
+                let result = owner.prepare_offline_blocking(started + OFFLINE_PREPARE_TIMEOUT);
+                owner.offline_prepare_worker.store(false, Ordering::Release);
+                let waited_ms = started.elapsed().as_millis();
+                match result {
+                    Ok(()) => {
+                        log::info!("[capture] offline prepare: ready=true waited_ms={waited_ms}")
+                    }
+                    Err(error) => log::warn!(
+                        "[capture] offline prepare: ready=false waited_ms={waited_ms} error={error}"
+                    ),
+                }
+            });
+        if spawned.is_err() {
+            self.offline_prepare_worker.store(false, Ordering::Release);
+        }
     }
 
     /// 组件进入激活状态（VST3 `setActive(true)` / CLAP `activate`）。
@@ -84,12 +143,11 @@ impl ExtensionOwner {
             return;
         }
         // 【离线预览的第二个入口】有些宿主声明离线模式之后直到开始处理才真正开始预览。
-        // 这里同步准备一次；失败只记日志，让宿主保留插件（产物静音但可诊断）。
-        let started = std::time::Instant::now();
-        if let Err(error) = self.prepare_offline_until(started + OFFLINE_PREPARE_TIMEOUT) {
+        // 与 `setup_processing` 走**同一个**入口：尝试一次、不等、失败只记日志 ——
+        // 这条线程同样是宿主的 UI 线程（见 `prepare_offline_now`）。
+        if let Err(error) = self.prepare_offline_now("processing_started") {
             crate::log_line(&format!(
-                "Offline preparation at processing start failed after {:?}: {error}",
-                started.elapsed()
+                "Offline preparation at processing start deferred: {error}"
             ));
         }
     }
@@ -142,6 +200,78 @@ mod tests {
         assert!(!owner.is_closed());
         owner.component_terminated();
         assert!(owner.is_closed());
+    }
+
+    /// **不变量：阻塞式离线准备永远不在宿主回调上跑。**
+    ///
+    /// 【为什么钉这一条】它是"宿主线程不许等"这条不变量在离线通路上的唯一闸门。
+    /// 旧实现（`prepare_offline_until`）在 `setup_processing` 里 `sleep(20ms)` 轮询到
+    /// 15 s，现场表现为导出时宿主整个冻住。守卫一旦被删，这条测试立刻失败 —— 而不是
+    /// 等下一次现场报"宿主未响应"。
+    #[test]
+    fn the_blocking_offline_prepare_refuses_a_host_callback() {
+        let owner = Arc::new(ExtensionOwner::default());
+        let guard = crate::host::HostCallGuard::enter("test_setup_processing");
+        let started = std::time::Instant::now();
+        let error = owner
+            .prepare_offline_blocking(std::time::Instant::now() + OFFLINE_PREPARE_TIMEOUT)
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            error.contains("must not block a host callback"),
+            "宿主回调上必须直接拒绝：{error}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "拒绝必须立刻返回，实际等了 {elapsed:?}"
+        );
+        drop(guard);
+    }
+
+    /// **不变量：离线 setup 把活交给 worker，自己立刻返回。**
+    ///
+    /// 【为什么要绑一份真文档】"没有文档"的实例在两条判据上都会早退，测出来的只是
+    /// 空实现。这里要的是那条**真会准备**的路径：快照还没发布时，`setup_processing`
+    /// 必须返回"还在准备"，而不是把宿主 UI 线程占住直到快照就绪。
+    #[test]
+    fn an_offline_setup_hands_the_work_to_a_worker_instead_of_waiting() {
+        let model = crate::ara::model::ModelHandle::new();
+        let document = model.session();
+        *document.timeline.lock_or_recover() = Some(
+            serde_json::from_value(serde_json::json!({
+                "tracks": [], "clips": [], "bpm": 120, "project_sec": 0
+            }))
+            .unwrap(),
+        );
+        document.ready.store(true, Ordering::Release);
+        let owner = Arc::new(ExtensionOwner::default());
+        owner
+            .bind_to_document(
+                document.clone(),
+                ApiGeneration::V2Final,
+                ExtensionRoles::all(),
+                ExtensionRoles::PLAYBACK_RENDERER,
+                None,
+            )
+            .unwrap();
+        let guard = crate::host::HostCallGuard::enter("test_setup_processing");
+        let started = std::time::Instant::now();
+        let error = owner.setup_processing(48_000.0, true).unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            error.contains("still running"),
+            "没准备好时必须如实回报，而不是等：{error}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "离线 setup 不许在宿主线程上等合成，实际等了 {elapsed:?}"
+        );
+        assert!(
+            owner.offline_prepare_worker.load(Ordering::Acquire),
+            "拒绝之后必须有一条后台线程接着把这一轮做完"
+        );
+        drop(guard);
+        document.close();
     }
 
     /// 激活/失活与处理开始/停止在"没有文档、没有宿主"的实例上必须全部可用。

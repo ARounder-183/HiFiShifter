@@ -54,21 +54,24 @@ test("no diagnostics-summary or redundant status keys survive", () => {
 
 test("the only UI entry is one lean Help submenu", () => {
     const menuBar = readFileSync(join(ROOT, "src/components/layout/MenuBar.tsx"), "utf8");
-    expect(menuBar).toContain("<LogVerbosityMenuItems");
+    /*
+     * 入口现在是**一段条目数据**（`useLogVerbosityMenu`）而不是一个 Radix 组件：
+     * 菜单表面只有一套，条目只有一个渲染路径。判据随之从 "渲染了 DropdownMenu.Sub"
+     * 变成"产出了恰好一个子菜单里的一组单选"，守的东西没变。
+     */
+    expect(menuBar).toContain("useLogVerbosityMenu(");
     expect(menuBar).not.toContain("menu_copy_diagnostics");
     expect(menuBar).not.toContain("diagnosticsSummary");
-    const component = readFileSync(
-        join(ROOT, "src/components/layout/LogVerbosityMenuItems.tsx"),
-        "utf8",
-    );
-    expect(component).toContain("<DropdownMenu.Sub>");
-    expect(component).toContain("<DropdownMenu.SubTrigger");
-    expect(component).toContain("<DropdownMenu.SubContent>");
-    expect(component).toContain("<DropdownMenu.RadioGroup");
-    // SubContent 里只允许四档单项；不得再塞标题、当前值、说明或分隔线。
-    expect(component).not.toContain("<DropdownMenu.Label");
-    expect(component).not.toContain("<DropdownMenu.Separator");
-    expect((component.match(/<DropdownMenu.RadioItem/g) ?? []).length).toBe(1);
+    const hook = readFileSync(join(ROOT, "src/components/layout/useLogVerbosityMenu.ts"), "utf8");
+    // 四档在**一个**子菜单里，且每一项都是单选。
+    expect(hook).toContain("items: model.options.map(");
+    expect(hook).toContain("radio: true");
+    expect(hook).toContain("checked: selected === option.value");
+    // 子菜单里只允许四档单项；不得再塞标题、当前值、说明或分隔线。
+    expect(hook).not.toContain("heading: true");
+    expect(hook).not.toContain("separatorBefore");
+    // 条目的构造模板只有一处（四个档位共用它）。
+    expect((hook.match(/onSelect: \(\) => onChange/g) ?? []).length).toBe(1);
     const about = readFileSync(join(ROOT, "src/components/layout/AboutDialog.tsx"), "utf8");
     expect(about).not.toContain("LogVerbosity");
     const app = readFileSync(join(ROOT, "src/App.tsx"), "utf8");
@@ -77,11 +80,12 @@ test("the only UI entry is one lean Help submenu", () => {
 
 test("the Help menu lists verbosity, log folder and diagnostics in that order", () => {
     const menuBar = readFileSync(join(ROOT, "src/components/layout/MenuBar.tsx"), "utf8");
-    const help = menuBar.slice(menuBar.indexOf("{/* Help Menu */}"));
-    const content = help.slice(0, help.indexOf("</DropdownMenu.Content>"));
-    const verbosity = content.indexOf("<LogVerbosityMenuItems");
-    const openFolder = content.indexOf('{tf("menu_open_log_folder")}');
-    const exportDiagnostics = content.indexOf('{tf("menu_export_diagnostics")}');
+    const start = menuBar.indexOf("const helpMenuItems");
+    expect(start, "帮助菜单必须以 helpMenuItems 的形式定义").toBeGreaterThanOrEqual(0);
+    const help = menuBar.slice(start, menuBar.indexOf("const languageMenuItems"));
+    const verbosity = help.indexOf('key: "log-verbosity"');
+    const openFolder = help.indexOf('key: "open-log-folder"');
+    const exportDiagnostics = help.indexOf('key: "export-diagnostics"');
     expect(verbosity, "verbosity submenu must be present in the Help menu").toBeGreaterThanOrEqual(
         0,
     );

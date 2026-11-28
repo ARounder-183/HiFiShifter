@@ -29,6 +29,7 @@ import {
 } from "../../../../features/tracks/pitchAlgoOptions";
 import { useAppTheme } from "../../../../theme/AppThemeProvider";
 import { timelineApi } from "../../../../services/api";
+import { clipWaveformGain } from "../../timeline/clipGain";
 import { getWaveformColors } from "../../../../theme/waveformColors";
 import { isScaleKey } from "../../../../utils/musicalScales";
 import {
@@ -206,6 +207,8 @@ import { isPanParam, resolvePanAxisDirection, type PanAxisDirections } from "../
 import { supportsParamFlip } from "../paramFlip";
 import { useLoudnessCurves, type LoudnessSnapshot } from "../useLoudnessCurves";
 import { createLiveOverrideReader, type LiveOverrideReader } from "../liveLoudnessOverride";
+import { paramWindowScope } from "../paramWindowKey";
+import { projectLiveEdit } from "../strokeBuffer";
 import { pianoRollViewportBus } from "../pianoRollViewportBus";
 import { pianoRollInteractionViewportBus } from "../pianoRollInteractionViewportBus";
 import { createLoudnessGeometryWarp, type LoudnessGeometryWarp } from "../loudnessGeometryWarp";
@@ -1747,7 +1750,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         scrollLeftRef,
         pxPerSecRef,
         invalidate,
-        liveEditActiveRef,
     });
 
     /**
@@ -1791,12 +1793,20 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     }
 
     /**
-     * 把 live 覆盖读成 LoudnessLiveCurve（按 key 中的参数 id 与窗口对齐）。
+     * 把 live 覆盖读成 LoudnessLiveCurve（按作用域判定参数归属，按**当前窗口**投影）。
      *
-     * 键解析与视图对象由 `createLiveOverrideReader` 按覆盖对象身份缓存。
+     * 【为什么需要窗口】live 覆盖是绝对帧缓冲，投影到哪个窗口由调用方决定；这里用
+     * 当前参数窗口，与曲线层看到的完全是同一份数据（同一个投影缓存条目）。
+     * 视图对象由 `createLiveOverrideReader` 按 (覆盖, 窗口, 缓冲版本) 缓存。
      */
     const readLiveOverrideFor = useCallback((param: "volume" | "dyn") => {
-        return liveOverrideReaderRef.current?.read(param, liveEditOverrideRef.current) ?? null;
+        return (
+            liveOverrideReaderRef.current?.read(
+                param,
+                liveEditOverrideRef.current,
+                paramViewRef.current,
+            ) ?? null
+        );
         // eslint-disable-next-line react-hooks/exhaustive-deps -- 两个 ref 都是稳定引用（reader 在下方惰性创建、live 覆盖由 useLiveParamEditing 持有并就地更新）；加入依赖不会让回调更正确，反而会在每次渲染换掉引用、使幅度映射的几何缓存键失效
     }, []);
 
@@ -2229,6 +2239,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             clips: trackClips,
             framePeriodMs: loudnessFpMs,
             lockParamLines: s.lockParamLinesEnabled,
+            amplitudeGainOf: (clip) =>
+                clipWaveformGain(clip as { gain?: number; clip_gain?: number }),
         });
     }, [
         clipGeometryPreviewOrigin,
@@ -2489,7 +2501,14 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                  */
                 values:
                     interactionCurve?.edit ??
-                    (live !== null && live.key === snapshot.key ? live.edit : snapshot.baseValues),
+                    (live !== null && live.scope === paramWindowScope(snapshot.key)
+                        ? projectLiveEdit(live, {
+                              key: snapshot.key,
+                              edit: snapshot.baseValues,
+                              startFrame: snapshot.startFrame,
+                              stride: snapshot.stride,
+                          })
+                        : snapshot.baseValues),
                 startFrame: interactionCurve?.startFrame ?? snapshot.startFrame,
                 stride: interactionCurve?.stride ?? snapshot.stride,
                 framePeriodMs: interactionCurve?.framePeriodMs ?? snapshot.framePeriodMs,
@@ -6798,13 +6817,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         paramBlockToolIcon,
     } = buildToolIcons(currentDrawTool, s.selectToolMode);
 
-    // 标尺刻度 / 时间格式 / 单位切换 / 复制播放头时间整块在
-    // `useTimelineDisplayControls` 里（见该文件头）。它们只依赖会话切片与刻度轴。
+    // 标尺刻度 / 时间格式 / 复制播放头时间整块在 `useTimelineDisplayControls` 里
+    // （见该文件头）。它们只依赖会话切片与刻度轴。
     const {
         timelineTicks,
         timeContext,
-        handlePrimaryUnitChange,
-        handleSecondaryUnitChange,
         handleTempoMapChange,
         handleTempoMapCommit,
         handleCopyPlayheadTime,
@@ -7050,9 +7067,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         gridLayerRef,
         hScrollbarThumbRef,
         handleCopyPlayheadTime,
-        handlePrimaryUnitChange,
         handleRulerWheel,
-        handleSecondaryUnitChange,
         handleTempoMapChange,
         handleTempoMapCommit,
         interactions,

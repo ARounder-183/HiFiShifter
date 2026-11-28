@@ -52,6 +52,7 @@ import {
     isNoneBinding,
 } from "../../../../../features/keybindings/keybindingsSlice";
 import { resolveClipSelectionModifiers } from "../../../../../features/keybindings/clipSelectionModifiers";
+import { modifierView } from "../../../../../features/keybindings/modifierState";
 import type { Keybinding } from "../../../../../features/keybindings/types";
 import { isPrimaryModifierDown } from "../../../../../utils/platform";
 import { WHEEL_LINE_HEIGHT_PX } from "../../../../../utils/pinchGesture";
@@ -1301,6 +1302,30 @@ export interface TimelineKernelHost {
         readonly contentTopPx: number;
         readonly widthPx: number;
     } | null;
+    /**
+     * 该屏幕坐标是否落在某个 Clip 上（触摸输入层用）。
+     *
+     * 【为什么单独开一个方法而不是让调用方读 `debugHitAt`】触摸意图判定
+     * （`features/touch/touchIntent.ts`）在**每次手指按下**时都要跑一次，而
+     * `debugHitAt` 是诊断出口（返回整包几何、语义上随时可能改）。这里只承诺
+     * 一个稳定的问题：「这一下按在 Clip 上吗」。
+     *
+     * 命中为空（轨道空白区 / 轨道下方）时返回 `"empty"` —— 那正是触摸平移的
+     * 触发条件，不需要任何新几何。
+     *
+     * @param clientX 屏幕坐标 x。@param clientY 屏幕坐标 y。
+     */
+    hitTestAt(clientX: number, clientY: number): "clip" | "empty";
+    /**
+     * 取消当前正在进行的编辑手势（触摸第二根手指落下时调用）。
+     *
+     * 【为什么必须由宿主提供】手势状态完全在宿主内部（`gesture` 闭包变量），
+     * 外部无法从 DOM 观察，也无法用合成 `pointercancel` 精确命中——那个事件
+     * 需要真实的 `pointerId`。走宿主自己的收尾路径还能保证语义正确：
+     * 回滚乐观位置、**不提交**、释放指针捕获、停掉边缘自动滚屏。
+     */
+    cancelActiveGesture(): void;
+
     /**
      * 调试用：报告某屏幕坐标的命中结果与 header 控件判定。
      *
@@ -4086,11 +4111,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
          * resolveHeaderControl 单独识别，不进入重叠区解析。
          */
         const rawHit = hitAt(event.clientX, event.clientY);
+        const pressModifiers = modifierView(event);
         const press = resolveOverlapPressTarget(rawHit, {
-            altKey: event.altKey,
-            ctrlKey: event.ctrlKey,
-            metaKey: event.metaKey,
-            shiftKey: event.shiftKey,
+            altKey: pressModifiers.altKey,
+            ctrlKey: pressModifiers.ctrlKey,
+            metaKey: pressModifiers.metaKey === true,
+            shiftKey: pressModifiers.shiftKey,
         });
         const hit = press.hit;
         const overlapClickClipId = press.plainControlClick
@@ -5034,11 +5060,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         altKey: boolean;
         metaKey: boolean;
     }): KernelDragModifiers {
+        // 走 `modifierView`：移动端的虚拟修饰键（屏幕上的芯片）必须与桌面上
+        // 按住的 Ctrl 产生**同一份**快照。这里是内核所有拖拽（移动 / 修剪 /
+        // 淡变 / 增益 / 交叉淡化抓手）的**唯一**修饰键入口 —— 换掉这一处，
+        // 复制拖动、slip 编辑、边缘拉伸在触摸形态下才第一次可达。
+        const view = modifierView(event);
         return {
-            ctrlKey: event.ctrlKey,
-            shiftKey: event.shiftKey,
-            altKey: event.altKey,
-            metaKey: event.metaKey,
+            ctrlKey: view.ctrlKey,
+            shiftKey: view.shiftKey,
+            altKey: view.altKey,
+            metaKey: view.metaKey === true,
         };
     }
 
@@ -5059,7 +5090,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     function resolveSelectionMods(event: PointerEvent | MouseEvent) {
         const kb = data().keybindings;
         return resolveClipSelectionModifiers({
-            event,
+            // 与 `dragModifiersOf` 同一口径：虚拟修饰键必须参与「多选切换 /
+            // 范围选择」的判定，否则手机上永远只能单选。
+            event: modifierView(event),
             multiSelectToggleKb: kb.clipMultiSelectToggle ?? { key: "Control" },
             rangeSelectKb: kb.clipRangeSelect ?? { key: "Shift" },
         });
@@ -6379,6 +6412,29 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 contentTopPx: rowTopPx,
                 widthPx: CLIP_HEADER_RATE_BADGE_ANCHOR_WIDTH_PX,
             };
+        },
+
+        hitTestAt(clientX: number, clientY: number) {
+            return hitAt(clientX, clientY).kind === "clip" ? "clip" : "empty";
+        },
+
+        cancelActiveGesture() {
+            // 与系统抢占（pointercancel）走**同一条**收尾路径：回滚乐观值、
+            // 不提交、释放捕获、停掉边缘自动滚屏。合成事件只用来满足形状，
+            // 坐标全零且标记 synthetic —— seek 类提交必须跳过（见收尾函数的说明）。
+            finalizeActiveGesture(
+                {
+                    clientX: 0,
+                    clientY: 0,
+                    ctrlKey: false,
+                    shiftKey: false,
+                    altKey: false,
+                    metaKey: false,
+                },
+                true,
+                null,
+                true,
+            );
         },
 
         debugHitAt(clientX: number, clientY: number) {

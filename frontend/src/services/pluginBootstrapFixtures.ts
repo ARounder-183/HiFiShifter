@@ -27,6 +27,9 @@ export function araOnlyCaps(overrides: Partial<HostCaps> = {}): HostCaps {
         // 倒放写回与 take 音高包络都是**宿主原生结构**能力，ARA-only 宿主上不成立；
         // 需要它们的用例显式覆盖（与写能力同一手法）。
         clipReverse: false,
+        clipItemGain: false,
+        clipTakeGain: false,
+        trackVolume: false,
         takePitchBridge: false,
         ...overrides,
     };

@@ -251,3 +251,157 @@ test("焦点在输入框里时方向键归输入框，菜单不抢", async () =>
     // 若菜单抢走这个按键，焦点会跑到第一项 —— 用户就没法在输入框里移动光标了。
     expect(document.activeElement).toBe(field);
 });
+
+/*
+ * PageUp / PageDown。
+ *
+ * 【为什么是"移动选中项"而不是"只滚"】只滚会让高亮停在屏幕外 —— 用户按了
+ * PageDown，界面滚了，但"当前项"看不见，下一次 Enter 会激活一个他没看见的条目。
+ * 菜单的键盘模型里"当前项"必须永远可见。
+ *
+ * jsdom 没有布局（clientHeight 恒为 0），因此这里锁的是**边界**：视口量不到时
+ * 一页至少是一步；视口很大时一步走到尽头。精确的项数在
+ * menuScrollModel.test.ts 里逐值断言。
+ */
+test("PageDown / PageUp 至少移动一项，且不越界", async () => {
+    const m = await mount();
+
+    await m.press("Home");
+    expect(m.focusedId()).toBe("a");
+
+    await m.press("PageDown");
+    // clientHeight 为 0 时一页 = 1 项（下限），绝不能是 0 项。
+    expect(m.focusedId()).toBe("b");
+
+    await m.press("PageUp");
+    expect(m.focusedId()).toBe("a");
+
+    // 已经在第一项时再往上翻：停在第一项，不绕到末尾（翻页的语义是"再走一屏"，
+    // 从末尾循环回开头会让"翻到底"变成一个没有尽头的动作）。
+    await m.press("PageUp");
+    expect(m.focusedId()).toBe("a");
+});
+
+test("视口很高时 PageDown 一步到末尾并停住", async () => {
+    const m = await mount();
+    Object.defineProperty(m.menu, "clientHeight", { configurable: true, value: 600 });
+
+    await m.press("Home");
+    await m.press("PageDown");
+    expect(m.focusedId()).toBe("c");
+
+    await m.press("PageDown");
+    expect(m.focusedId()).toBe("c");
+});
+
+/*
+ * 打字跳项。
+ *
+ * 【为什么必须在这里也有】方向键在"帮助"菜单里要走十几次才能到目标项；原生菜单
+ * 与 VS Code 都支持直接打首字母跳过去。两族菜单（activeIndex 与 DOM 焦点）各写
+ * 一套的话，手感和可用性会立刻分叉。
+ */
+function TypeaheadMenu() {
+    const ref = useRef<HTMLDivElement | null>(null);
+    useMenuKeyboard(ref);
+    return (
+        <div ref={ref} role="menu">
+            <button type="button" role="menuitem" data-id="alpha">
+                Alpha
+            </button>
+            <button type="button" role="menuitem" data-id="beta">
+                Beta
+            </button>
+            <button type="button" role="menuitem" data-id="gamma">
+                Gamma
+            </button>
+        </div>
+    );
+}
+
+test("打字跳到以该前缀开头的项", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    mounted.push(async () => {
+        await act(async () => root.unmount());
+        host.remove();
+    });
+    await act(async () => root.render(<TypeaheadMenu />));
+
+    const press = async (key: string) => {
+        await act(async () => {
+            document.dispatchEvent(
+                new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
+            );
+        });
+    };
+
+    await press("g");
+    expect(document.activeElement?.getAttribute("data-id")).toBe("gamma");
+
+    // 前缀继续拼：\`ga\` 仍然指向 gamma。
+    await press("a");
+    expect(document.activeElement?.getAttribute("data-id")).toBe("gamma");
+
+    // 无匹配时**不动**（而不是跳回第一项）。
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    await press("z");
+    expect(document.activeElement?.getAttribute("data-id")).toBe("gamma");
+});
+
+/*
+ * ArrowLeft 退出子面板。
+ *
+ * 【为什么只有子面板响应】外层菜单没有"左边"可去；子面板按左键应当收起自己、
+ * 回到触发项 —— 那是原生菜单的行为。给所有层都响应会让一次左键关掉整棵树。
+ */
+test("ArrowLeft 只让子面板退出，外层不响应", async () => {
+    let dismissed = 0;
+    function NestedDismiss() {
+        const outerRef = useRef<HTMLDivElement | null>(null);
+        const innerRef = useRef<HTMLDivElement | null>(null);
+        useMenuKeyboard(outerRef);
+        useMenuKeyboard(innerRef, true, { nested: true, onDismiss: () => (dismissed += 1) });
+        return (
+            <div ref={outerRef} role="menu">
+                <button type="button" role="menuitem" data-id="outer-1">
+                    O1
+                </button>
+                <div ref={innerRef} role="menu">
+                    <button type="button" role="menuitem" data-id="inner-1">
+                        I1
+                    </button>
+                </div>
+            </div>
+        );
+    }
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    mounted.push(async () => {
+        await act(async () => root.unmount());
+        host.remove();
+    });
+    await act(async () => root.render(<NestedDismiss />));
+
+    const press = async (key: string) => {
+        await act(async () => {
+            document.dispatchEvent(
+                new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
+            );
+        });
+    };
+
+    // 焦点在外层：左键不该有任何反应。
+    const outer1 = host.querySelector<HTMLElement>('[data-id="outer-1"]');
+    await act(async () => outer1?.focus());
+    await press("ArrowLeft");
+    expect(dismissed).toBe(0);
+
+    // 焦点在子面板里：左键退出本层。
+    const inner1 = host.querySelector<HTMLElement>('[data-id="inner-1"]');
+    await act(async () => inner1?.focus());
+    await press("ArrowLeft");
+    expect(dismissed).toBe(1);
+});

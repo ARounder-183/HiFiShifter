@@ -184,10 +184,11 @@ git -C soundtouch rev-parse HEAD
 
 #### 모델 가중치(필요할 때 받기)
 
-저장소에는 매니페스트 `backend/src-tauri/resources/models/models.json`(1.5 KB)만 커밋됩니다.
-151.6 MB의 가중치는 릴리스 자산 `models-<매니페스트 버전>.zip`으로 배포됩니다(버전은 내용
-해시이므로 오래된 파일을 받으면 파일별 검증에서 즉시 실패합니다). 빌드 스크립트가 가져오기
-스크립트를 자동으로 호출하며, 멱등이고 이미 완전하면 디렉터리 스캔만 합니다:
+저장소에는 매니페스트 `backend/src-tauri/resources/models/models.json`만 커밋됩니다.
+가중치 자체는 릴리스 자산 `models-<매니페스트 버전>.zip`으로 배포됩니다(크기는 매니페스트의
+`bytes`가 기준이며, 버전은 내용 해시이므로 오래된 파일을 받으면 파일별 검증에서 즉시
+실패합니다). 빌드 스크립트가 가져오기 스크립트를 자동으로 호출하며, 멱등이고 이미 완전하면
+디렉터리 스캔만 합니다:
 
 ```bash
 python scripts/setup/fetch-models.py                # 없으면 받기
@@ -209,7 +210,8 @@ cargo tauri dev
 cargo tauri build
 
 # Linux AppImage (vslib은 Windows 전용이므로 기본 feature 제외)
-cargo tauri build --bundles appimage -- --no-default-features --features onnx
+cargo tauri build --bundles appimage --config tauri.linux.x86_64.conf.json -- --no-default-features --features onnx  # x86_64
+cargo tauri build --bundles appimage -- --no-default-features --features onnx  # arm64 (no dawn resource)
 # 또는 보조 스크립트 사용: bash scripts/build/build-linux-appimage.sh
 
 # Windows: 통합 설치 프로그램(App + VST3 + 모델 라이브러리) + 포터블 ZIP

@@ -711,7 +711,12 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         const resolved = resolveSyncOffsetForms(layout, "timeline", "paramEditor");
         assertEqual(
             resolved,
-            { timelineFormId: "timeline", paramFormId: "paramEditor", sameTabset: false },
+            {
+                timelineFormId: "timeline",
+                paramFormId: "paramEditor",
+                sameTabset: false,
+                relation: "stacked",
+            },
             "the default stacked layout resolves two DISTINCT forms in different tabsets",
         );
 
@@ -771,7 +776,12 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         // 注入的 formId 不属于本面板 → 忽略它，按面板 id 回退。
         assertEqual(
             resolveSyncOffsetForms(layout, "timeline", "paramEditor", "fileBrowser"),
-            { timelineFormId: "timeline", paramFormId: "paramEditor", sameTabset: false },
+            {
+                timelineFormId: "timeline",
+                paramFormId: "paramEditor",
+                sameTabset: false,
+                relation: "stacked",
+            },
             "an unrelated injected formId is ignored",
         );
         // 参数写反（两个面板 id 传成同一个）→ 拒绝，而不是算出一个必然错的值。
@@ -808,7 +818,12 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         const tabbed = createDefaultDockLayout("plugin");
         assertEqual(
             resolveSyncOffsetForms(tabbed, "timeline", "paramEditor"),
-            { timelineFormId: "timeline", paramFormId: "paramEditor", sameTabset: true },
+            {
+                timelineFormId: "timeline",
+                paramFormId: "paramEditor",
+                sameTabset: true,
+                relation: "tabbed",
+            },
             "two tabs in ONE tabset still resolve: the offset falls back to content insets",
         );
 
@@ -822,7 +837,12 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         };
         assertEqual(
             resolveSyncOffsetForms(tabbedOnTimeline, "timeline", "paramEditor"),
-            { timelineFormId: "timeline", paramFormId: "paramEditor", sameTabset: true },
+            {
+                timelineFormId: "timeline",
+                paramFormId: "paramEditor",
+                sameTabset: true,
+                relation: "tabbed",
+            },
             "the mapping must not depend on which of the two tabs is active",
         );
     }
@@ -851,4 +871,98 @@ test("a layout that cannot be normalized falls back to the layout of the running
             assertEqual(main.active, "paramEditor", "the plug-in opens on the parameter editor");
         }
     }
+});
+
+test("viewport sync chooses alignment by layout relation", () => {
+    const standalone = ensureRegisteredPanels(createDefaultDockLayout());
+    assertEqual(
+        resolveSyncOffsetForms(standalone, "timeline", "paramEditor")?.relation,
+        "stacked",
+        "standalone default is vertically stacked",
+    );
+    assertEqual(
+        resolveSyncOffsetForms(createDefaultDockLayout("plugin"), "timeline", "paramEditor")
+            ?.relation,
+        "tabbed",
+        "plugin default is one tabset",
+    );
+
+    const sideBySide = normalizeDockLayout({
+        schema: 2,
+        roots: {
+            main: {
+                t: "split",
+                id: "z1",
+                dir: "row",
+                ratio: 0.5,
+                fixed: null,
+                a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
+                b: { t: "tabset", id: "z3", tabs: ["paramEditor"], active: "paramEditor" },
+            },
+        },
+        forms: {
+            timeline: { id: "timeline", panelId: "timeline" },
+            paramEditor: { id: "paramEditor", panelId: "paramEditor" },
+        },
+    });
+    assertEqual(
+        resolveSyncOffsetForms(sideBySide, "timeline", "paramEditor")?.relation,
+        "sideBySide",
+        "row split is side by side",
+    );
+
+    const floating = normalizeDockLayout({
+        schema: 2,
+        roots: { main: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" } },
+        forms: {
+            timeline: { id: "timeline", panelId: "timeline" },
+            paramEditor: {
+                id: "paramEditor",
+                panelId: "paramEditor",
+                float: { x: 40, y: 40, w: 300, h: 200 },
+                floating: true,
+            },
+        },
+        order: ["timeline", "paramEditor"],
+    });
+    assertEqual(
+        resolveSyncOffsetForms(floating, "timeline", "paramEditor")?.relation,
+        "floating",
+        "in-app floating is floating",
+    );
+    const detached = {
+        ...floating,
+        forms: {
+            ...floating.forms,
+            paramEditor: { ...floating.forms.paramEditor, floatMode: "osWindow" as const },
+        },
+    };
+    assertEqual(
+        resolveSyncOffsetForms(detached, "timeline", "paramEditor")?.relation,
+        "detached",
+        "osWindow floating is detached",
+    );
+
+    // 面板子根里的两个标签页：sameTabset 必须为 true，而不是旧实现只看主根时的 false。
+    const childRoot = normalizeDockLayout({
+        schema: 2,
+        roots: {
+            main: { t: "tabset", id: "z1", tabs: ["panel"], active: "panel" },
+            child: {
+                t: "tabset",
+                id: "z2",
+                tabs: ["timeline", "paramEditor"],
+                active: "paramEditor",
+            },
+        },
+        forms: {
+            panel: { id: "panel", panelId: "__panel", childRootId: "child" },
+            timeline: { id: "timeline", panelId: "timeline" },
+            paramEditor: { id: "paramEditor", panelId: "paramEditor" },
+        },
+        order: ["panel", "timeline", "paramEditor"],
+    });
+    const resolved = resolveSyncOffsetForms(childRoot, "timeline", "paramEditor");
+    assertEqual(resolved?.sameTabset, true, "child-root tabs are the same tabset");
+    assertEqual(resolved?.relation, "tabbed", "child-root tabs are tabbed");
 });

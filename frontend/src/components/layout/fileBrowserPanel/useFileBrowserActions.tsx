@@ -484,7 +484,8 @@ export function useFileBrowserActions(
                     void dispatch(
                         importAudioAtPosition({
                             audioPath: paths[0],
-                            trackId: selectedTrackId,
+                            // 未选中轨 = 未指定（不是"新建"）；`null` 专指显式新建。
+                            trackId: selectedTrackId ?? undefined,
                             startSec: store.getState().session.playheadSec,
                         }),
                     );
@@ -493,7 +494,7 @@ export function useFileBrowserActions(
                         importMultipleAudioAtPosition({
                             audioPaths: paths,
                             mode: "across-time",
-                            trackId: selectedTrackId,
+                            trackId: selectedTrackId ?? undefined,
                             startSec: store.getState().session.playheadSec,
                         }),
                     );
@@ -529,7 +530,7 @@ export function useFileBrowserActions(
                     importMultipleAudioAtPosition({
                         audioPaths: paths,
                         mode,
-                        trackId: selectedTrackId,
+                        trackId: selectedTrackId ?? undefined,
                         startSec: store.getState().session.playheadSec,
                     }),
                 );

@@ -33,6 +33,7 @@ export const initialState: SessionState = {
     primaryTimeUnit: DEFAULT_PRIMARY_TIME_UNIT,
     secondaryTimeUnit: DEFAULT_SECONDARY_TIME_UNIT,
     rulerLabelSpacingPx: DEFAULT_RULER_LABEL_SPACING_PX,
+    playheadTimePlacement: "auto",
     showPlayheadTimeInTrackHeader: true,
     paramEditorSyncTimeline: true,
 
@@ -141,6 +142,8 @@ export const initialState: SessionState = {
     ],
     trackMeters: {},
     clips: [],
+    // 还没有任何导入在等宿主交付音频（见 SessionState.pendingImports）。
+    pendingImports: [],
     selectedTrackId: "track_main",
     selectedClipId: null,
     multiSelectedClipIds: [],
@@ -233,6 +236,11 @@ export const initialState: SessionState = {
     _paramSelectionRestoreSeq: 0,
     hostAudio: null,
     _latestEditRequestId: null,
+    timelineRevision: -1,
+    _gestureDepth: 0,
+    _gestureKind: null,
+    _gestureBaseRevision: -1,
+    _deferredSnapshot: null,
     _transportEpoch: 0,
     _stopInterruptedPlayback: false,
 };

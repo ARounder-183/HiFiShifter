@@ -184,9 +184,10 @@ git -C soundtouch rev-parse HEAD
 
 #### モデルの重み（必要時に取得）
 
-リポジトリに入るのはマニフェスト `backend/src-tauri/resources/models/models.json`（1.5 KB）だけです。
-151.6 MB の重みは release アセット `models-<マニフェストのバージョン>.zip` として配布されます
-（バージョンは内容ハッシュなので、古い版を取るとファイル単位の検証で即座に失敗します）。
+リポジトリに入るのはマニフェスト `backend/src-tauri/resources/models/models.json` だけです。
+重みそのものは release アセット `models-<マニフェストのバージョン>.zip` として配布されます
+（サイズはマニフェストの `bytes` が示すとおりです。バージョンは内容ハッシュなので、古い版を
+取るとファイル単位の検証で即座に失敗します）。
 ビルドスクリプトが取得スクリプトを自動で呼びます（冪等で、揃っていればディレクトリ走査のみ）：
 
 ```bash
@@ -209,7 +210,8 @@ cargo tauri dev
 cargo tauri build
 
 # Linux AppImage（vslib は Windows 専用のため、デフォルト機能を除外）
-cargo tauri build --bundles appimage -- --no-default-features --features onnx
+cargo tauri build --bundles appimage --config tauri.linux.x86_64.conf.json -- --no-default-features --features onnx  # x86_64
+cargo tauri build --bundles appimage -- --no-default-features --features onnx  # arm64 (no dawn resource)
 # 補助スクリプトも利用可: bash scripts/build/build-linux-appimage.sh
 
 # Windows: 統合インストーラー（App + VST3 + モデルライブラリ）+ ポータブル ZIP

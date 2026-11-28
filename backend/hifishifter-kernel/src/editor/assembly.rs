@@ -547,6 +547,65 @@ pub fn inherit_media(
     inherited
 }
 
+/// 把**上一轮已发布**的呈现字段借给这一轮重新装配出来的 clip。
+///
+/// ## 为什么需要它
+///
+/// 装配的输入（[`ItemRow`]）只描述**几何与媒体身份**：`guid / track_id / name /
+/// start_sec / length_sec / takes / active_take / loop_source / muted / gain`。
+/// 淡变与吸附偏移**不在其中** —— 它们不是几何，也不是媒体身份，它们是宿主曾经
+/// 通过另一条通路（清单 / 几何求解）告诉过我们的事实。
+///
+/// 于是 `clip_for_item` 造出来的每条 clip 的这十一个字段都是 serde 默认值 0。而装配
+/// 会在**每一次清单刷新**后重跑（拖动 item 期间约 4.5 次/秒），于是「发布一条 clip」
+/// 这个动作每一轮都把淡变抹成 0，再由另一个步骤（`project_ui_fades_locked`）补回来。
+/// 那个步骤只在「宿主几何缓存这一轮有效」时才说话，而一次装配发布正好会推进
+/// `document.revision` ⇒ 缓存失效 ⇒ 它一条都不说话 ⇒ 用户看到**所有** clip 的淡变
+/// 包络同时闪回 0 长度，下一拍才恢复。
+///
+/// ## 规则
+///
+/// **装配不是淡变的权威。** 它产出的这十一个字段一律是「没有观测」，不是「观测到 0」。
+/// 因此这里无条件把上一轮**同一个 clip id** 的值搬过来：clip id 是
+/// `ara-item-{guid}`，对同一个 item 稳定；而「用户把淡变调成 0.25 s」这件事不会因为
+/// item 挪了 0.39 s 而改变。
+///
+/// 这与 [`inherit_media`] 是同一条纪律的两个实例：**一个发布动作必须把它推导不出来的
+/// 东西一起带过去**，而不是留给下一个动作补。
+///
+/// 返回借出的条数（读数用：它是「这一轮有多少条靠继承保住了淡变」）。
+pub fn inherit_presentation(clips: &mut [Clip], previous: &[Clip]) -> usize {
+    if clips.is_empty() || previous.is_empty() {
+        return 0;
+    }
+    let by_id: BTreeMap<&str, &Clip> = previous
+        .iter()
+        .map(|clip| (clip.id.as_str(), clip))
+        .collect();
+    let mut inherited = 0_usize;
+    for clip in clips.iter_mut() {
+        let Some(donor) = by_id.get(clip.id.as_str()) else {
+            continue;
+        };
+        clip.snap_offset_sec = donor.snap_offset_sec;
+        clip.fade_in_sec = donor.fade_in_sec;
+        clip.fade_out_sec = donor.fade_out_sec;
+        // 【自动交叉淡化也一起借】它与手动淡变是**两组独立的字段**（见 `Clip` 的说明）：
+        // 只借手动那一组，等于「自动交叉淡化开着时仍然闪一下」。
+        clip.auto_fade_in_sec = donor.auto_fade_in_sec;
+        clip.auto_fade_out_sec = donor.auto_fade_out_sec;
+        clip.fade_in_shape = donor.fade_in_shape;
+        clip.fade_out_shape = donor.fade_out_shape;
+        clip.fade_in_dir = donor.fade_in_dir;
+        clip.fade_out_dir = donor.fade_out_dir;
+        // S 是宿主 ≥7.81 才有的第二根曲率轴，同样不是几何。
+        clip.fade_in_s = donor.fade_in_s;
+        clip.fade_out_s = donor.fade_out_s;
+        inherited += 1;
+    }
+    inherited
+}
+
 fn build(value: serde_json::Value) -> Result<Clip, String> {
     let mut clip: Clip = serde_json::from_value(value).map_err(|error| error.to_string())?;
     // 把 active take 物化到扁平投影 —— 与产品加载工程时走同一步。
@@ -1068,6 +1127,79 @@ mod tests {
         assert!(clips[0].source_path.is_none());
     }
 
+    /// **不变量：一次装配发布不可能把已经发布的淡变抹成 0。**
+    ///
+    /// 【现场原形】REAPER ARA：拖动 item 期间 `[ara] item map` 每秒跑 4.5 次，每次都是
+    /// 一次完整的装配发布。装配的输入里没有淡变字段 ⇒ 每条 clip 都从 `fade_*=0` 重新
+    /// 出生；淡变随后由 `project_ui_fades_locked` 补回，而它只在宿主几何缓存这一轮有效
+    /// 时才说话 —— 缓存恰被这次发布推进的 `revision` 作废。于是**所有** clip 的淡变包络
+    /// 同时闪回 0 长度。这条用例钉住「装配不是淡变的权威」。
+    #[test]
+    fn an_assembly_publish_never_zeros_a_fade() {
+        let host = item(
+            "a",
+            1.0,
+            2.0,
+            vec![take("t", geometry(0.0, 2.0, Some(9.0), None, false, false))],
+        );
+        // 上一轮已发布的那一份：用户把淡入调成 0.25 s、自动淡出 0.5 s，还有曲率与 S。
+        let mut previous = assemble(std::slice::from_ref(&host), &[row(7, 1.0, 2.0)]).clips;
+        previous[0].fade_in_sec = 0.25;
+        previous[0].auto_fade_out_sec = 0.5;
+        previous[0].fade_in_shape = 3.0;
+        previous[0].fade_in_dir = -0.4;
+        previous[0].fade_in_s = 0.7;
+        previous[0].snap_offset_sec = 0.125;
+        // 这一轮：item 挪了 0.5 s（清单每一代都在变），装配重跑一次。
+        let mut moved = host.clone();
+        moved.start_sec = 1.5;
+        let mut clips = assemble(std::slice::from_ref(&moved), &[row(7, 1.5, 2.0)]).clips;
+        assert_eq!(clips[0].fade_in_sec, 0.0, "先确认装配这一轮真的给的是 0");
+        assert_eq!(inherit_presentation(&mut clips, &previous), 1);
+        assert_eq!(clips[0].fade_in_sec, 0.25);
+        assert_eq!(clips[0].auto_fade_out_sec, 0.5);
+        assert_eq!(clips[0].fade_in_shape, 3.0);
+        assert_eq!(clips[0].fade_in_dir, -0.4);
+        assert_eq!(clips[0].fade_in_s, 0.7);
+        // 几何仍然取这一轮的 item，不是上一轮的。
+        assert_eq!(clips[0].start_sec, 1.5);
+    }
+
+    /// **不变量：吸附偏移与淡变同一条纪律。**
+    ///
+    /// 【为什么单独一条】它是同一批「UI 专用的宿主装饰」里的另一个成员，丢失机理完全
+    /// 相同（装配不产出、投影补、投影缺席就归 0）。把它留在淡变之外，下一个改动就会
+    /// 把它重新弄丢 —— 而它的表现（吸附点跳回片段起点）与淡变毫无关系，极难归因。
+    #[test]
+    fn the_snap_offset_survives_the_same_rebuild() {
+        let host = item(
+            "a",
+            0.0,
+            4.0,
+            vec![take("t", geometry(0.0, 4.0, Some(9.0), None, false, false))],
+        );
+        let mut previous = assemble(std::slice::from_ref(&host), &[row(1, 0.0, 4.0)]).clips;
+        previous[0].snap_offset_sec = 0.75;
+        let mut clips = assemble(std::slice::from_ref(&host), &[row(1, 0.0, 4.0)]).clips;
+        assert_eq!(clips[0].snap_offset_sec, 0.0);
+        assert_eq!(inherit_presentation(&mut clips, &previous), 1);
+        assert_eq!(clips[0].snap_offset_sec, 0.75);
+    }
+
+    /// 上一轮没有这条 clip（新粘贴 / 新分割）⇒ 一个字段都不借，也不能 panic。
+    #[test]
+    fn a_clip_with_no_published_history_inherits_nothing() {
+        let host = item(
+            "a",
+            0.0,
+            2.0,
+            vec![take("t", geometry(0.0, 2.0, Some(9.0), None, false, false))],
+        );
+        let mut clips = assemble(std::slice::from_ref(&host), &[row(1, 0.0, 2.0)]).clips;
+        clips[0].fade_in_sec = 0.3;
+        assert_eq!(inherit_presentation(&mut clips, &[]), 0);
+        assert_eq!(clips[0].fade_in_sec, 0.3, "没有上一轮就原样保留装配产物");
+    }
     /// 这一轮已经有源 ⇒ 一个字段都不覆盖（装配给出的源是权威）。
     #[test]
     fn an_assembled_source_is_never_overwritten() {

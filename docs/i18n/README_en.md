@@ -184,9 +184,10 @@ git -C soundtouch rev-parse HEAD
 
 #### Model weights (fetched on demand)
 
-Only the manifest `backend/src-tauri/resources/models/models.json` (1.5 KB) is committed. The
-151.6 MB of weights ship as the release asset `models-<manifest version>.zip` — the version is a
-content hash, so a stale download fails the per-file check immediately. The build scripts call the
+Only the manifest `backend/src-tauri/resources/models/models.json` is committed. The weights
+themselves ship as the release asset `models-<manifest version>.zip` (their size is whatever the
+manifest's `bytes` fields say) — the version is a content hash, so a stale download fails the
+per-file check immediately. The build scripts call the
 fetch script for you; it is idempotent and only scans the directory when everything is present:
 
 ```bash
@@ -209,7 +210,8 @@ cargo tauri dev
 cargo tauri build
 
 # Linux AppImage (vslib is Windows-only; exclude the default feature)
-cargo tauri build --bundles appimage -- --no-default-features --features onnx
+cargo tauri build --bundles appimage --config tauri.linux.x86_64.conf.json -- --no-default-features --features onnx  # x86_64
+cargo tauri build --bundles appimage -- --no-default-features --features onnx  # arm64 (no dawn resource)
 # Or use the helper script: bash scripts/build/build-linux-appimage.sh
 
 # Windows: merged installer (app + VST3 + model library) and portable ZIP

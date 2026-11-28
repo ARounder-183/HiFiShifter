@@ -208,6 +208,7 @@ impl BlockTraceRing {
                 record.counted.load(Ordering::Relaxed),
                 record.emitted.load(Ordering::Relaxed),
                 record.capture.load(Ordering::Relaxed),
+                record.position_source.load(Ordering::Relaxed),
             )
         };
         let values = read();
@@ -237,15 +238,21 @@ impl BlockTraceRing {
             counted,
             emitted,
             capture,
+            position_source,
         ) = values;
         let rate = f64::from_bits(rate_bits);
         let music = f64::from_bits(music_bits);
         let tempo = f64::from_bits(tempo_bits);
+        // 【`src=` 回答的是「这个数被用了吗」】现场反复问过同一个问题：`music=16677.1`
+        // （≈2.3 小时 @120 BPM）显然不是一个位置，那它会不会把我们带偏？答案在这一栏
+        // 里 —— `src` 是本块**实际采用**的位置来源。宿主给了一个荒谬的 music，而我们
+        // 用的是 `project`，那这条读数就从「可疑」变成了「已忽略」。
+        let source = PositionSource::from_code(position_source).map_or("?", |value| value.as_str());
         // 【形状键：除了位置以外的一切】见 `last_context` 的说明。
         let key = format!(
             "stream={} mode={mode} state=0x{state:x} frames={frames} phase={phase} \
              playing={} rising={} cycle={} had_prev={} cycle_meta={} cont={}{} \
-             music={}{} tempo={}{} rate={rate:.0} counted={} allow_output={} outcome={}",
+             music={}{} tempo={}{} rate={rate:.0} counted={} allow_output={} outcome={} src={source}",
             ProcessStream::from_code(stream).map_or("?", |value| value.as_str()),
             u8::from(playing),
             u8::from(playing_rising),
@@ -271,7 +278,7 @@ impl BlockTraceRing {
              raw={raw_start} pos={position} delta={} frames={frames} phase={phase} \
              playing={} rising={} cycle={} had_prev={} \
              cycle_meta={} cont={}{} music={}{} tempo={}{} rate={rate:.0} counted={} allow_output={} \
-             outcome={}",
+             outcome={} src={source}",
             ProcessStream::from_code(stream).map_or("?", |value| value.as_str()),
             position.saturating_sub(raw_start),
             u8::from(playing),

@@ -21,27 +21,65 @@
 hfs_die() { printf '[plugin] ERROR: %s\n' "$*" >&2; exit 1; }
 hfs_log() { printf '[plugin] %s\n' "$*"; }
 
+# Architecture tag of a Rust target triple, in the same spelling hfs_detect_platform uses.
+hfs_arch_of_triple() {
+    case "$1" in
+        x86_64-*)          printf 'x86_64\n' ;;
+        aarch64-*|arm64-*) printf 'arm64\n' ;;
+        *)                 hfs_die "unsupported target triple: $1 (expected x86_64-* or aarch64-*)" ;;
+    esac
+}
+
 # Platform triple. macOS keeps uname's architecture name (arm64); Linux uses dpkg's spelling
 # (aarch64) — this matches the existing artifact naming HiFiShifter_v<version>_<os>-<arch>-*,
 # and renaming would break continuity with already-published file names.
+#
+# [Why the two variables may be preset] A universal build has two architectures and therefore
+# no single host answer: the cross-compiled slice presets HFS_ARCH so the runtime-dependency
+# list and the artifact tag describe the **target**, and the merged package presets
+# HFS_PLATFORM_ARCH so the artifact name matches the matrix leg (macos-universal). Deriving
+# both from uname would make a cross build ask for the host's dylibs and ship them under the
+# host's name — the package would look right and fail to load on the other architecture.
 hfs_detect_platform() {
     case "$(uname -s)" in
         Linux)  HFS_OS="linux" ;;
         Darwin) HFS_OS="macos" ;;
         *)      hfs_die "only Linux and macOS are supported, current: $(uname -s)" ;;
     esac
-    case "$(uname -m)" in
-        x86_64|amd64)  HFS_ARCH="x86_64" ;;
-        arm64|aarch64) HFS_ARCH="arm64" ;;
-        *)             hfs_die "unsupported CPU architecture: $(uname -m)" ;;
+    case "${HFS_ARCH:-}" in
+        x86_64|arm64) ;;
+        "")
+            case "$(uname -m)" in
+                x86_64|amd64)  HFS_ARCH="x86_64" ;;
+                arm64|aarch64) HFS_ARCH="arm64" ;;
+                *)             hfs_die "unsupported CPU architecture: $(uname -m)" ;;
+            esac
+            ;;
+        *) hfs_die "HFS_ARCH must be x86_64 or arm64, got: $HFS_ARCH" ;;
     esac
-    if [ "$HFS_OS" = "linux" ] && [ "$HFS_ARCH" = "arm64" ]; then
-        HFS_PLATFORM_ARCH="aarch64"
-    else
-        HFS_PLATFORM_ARCH="$HFS_ARCH"
+    if [ -z "${HFS_PLATFORM_ARCH:-}" ]; then
+        if [ "$HFS_OS" = "linux" ] && [ "$HFS_ARCH" = "arm64" ]; then
+            HFS_PLATFORM_ARCH="aarch64"
+        else
+            HFS_PLATFORM_ARCH="$HFS_ARCH"
+        fi
     fi
     HFS_TAG="$HFS_OS-$HFS_PLATFORM_ARCH"
     export HFS_OS HFS_ARCH HFS_PLATFORM_ARCH HFS_TAG
+}
+
+# Architectures inside a Mach-O file, one per line and sorted, so that two files' slices can be
+# compared as strings. Empty for a file lipo cannot read.
+hfs_macho_archs() {
+    lipo -archs "$1" 2>/dev/null | tr ' ' '\n' | sed '/^$/d' | sort
+}
+
+# True when the file already carries both slices (lipo refuses a second merge of the same
+# architecture, so every merge site has to ask first).
+hfs_is_universal() {
+    local archs
+    archs="$(hfs_macho_archs "$1")"
+    printf '%s\n' "$archs" | grep -qx x86_64 && printf '%s\n' "$archs" | grep -qx arm64
 }
 
 hfs_sha256() {
@@ -120,7 +158,7 @@ hfs_stage_frontend() {
 # Models must ship in the package. Windows has an installer-owned shared model store; the
 # unified macOS/Linux installer also keeps the weights in a shared store and lets only
 # models.json travel with the bundle. The plugin-only package (not going through the unified
-# installer) stays self-contained (~200 MB): extract and it works, no external directory.
+# installer) stays self-contained: extract and it works, no external directory.
 # <resources-dir> <models-source>
 hfs_stage_models() {
     local res="$1" src="$2"

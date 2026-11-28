@@ -37,10 +37,12 @@ import { PANEL_PARAM_EDITOR, PANEL_TIMELINE } from "../../../dock/registerBuilti
 import { readUiValue, writeUiValue } from "../../../../services/uiStorage";
 import {
     measureTabbedViewportOffsetPx,
-    measureTimelineViewportOffsetPx,
+    measureTimelineViewportGeometry,
+    resolveSyncViewportAlignment,
     timelineViewportNativeToState,
     timelineViewportStateToNative,
     timelineViewportSync,
+    type SyncViewportAlignment,
 } from "../../../../utils/timelineViewportSync";
 import { DEFAULT_PX_PER_SEC, MAX_PX_PER_SEC, MIN_PX_PER_SEC } from "../../timeline";
 import {
@@ -157,15 +159,15 @@ export function usePianoRollViewport({
      */
     const dockLayout = useAppSelector((state) => state.dock.layout);
     /**
-     * 同步所需的两个窗体。`sameTabset` 决定偏移怎么算：
-     * 同一标签组时用"内容内边距之差"（两个宿主同槽位），否则用屏幕左缘之差。
+     * 同步所需的两个窗体及布局关系。
+     * tabbed → 内容内边距之差；stacked / x 重叠 → 屏幕左缘之差；
+     * sideBySide / detached / 不重叠浮动 → 左侧起点对齐（offset 0）。
      */
     const syncPair = useMemo(
         () => resolveSyncOffsetForms(dockLayout, PANEL_TIMELINE, PANEL_PARAM_EDITOR, dockFormId),
         [dockFormId, dockLayout],
     );
     const syncOffsetApplicable = syncPair !== null;
-    const syncOffsetTabbed = syncPair?.sameTabset === true;
 
     // 待落地的同步视口：**只记缩放**。位置在落地时直接取共享视口的当前值（权威且最新），
     // 不再捕获快照——见下方落地 effect 的说明（捕获值 + 比对 React state 的老做法会在
@@ -198,25 +200,19 @@ export function usePianoRollViewport({
     // 每次重测都重新绑定观察器，元素后出现时也能补上。
     useLayoutEffect(() => {
         // 时间轴不可见（或本面板不可见）：偏移没有意义，固定为 0 并停止重试/观察。
-        if (!syncOffsetApplicable) {
+        if (!syncOffsetApplicable || !syncPair) {
             timelineOffsetRef.current = 0;
             setTimelineOffsetPx((prev) => (prev === 0 ? prev : 0));
             return;
         }
 
+        type MeasuredSync = { offsetPx: number; alignment: SyncViewportAlignment };
+
         /** 视口元素缺失时的重试上限（帧）；超过后退回低频轮询，避免长期每帧空转。 */
         const RETRY_FRAMES = 120;
         /** 低频轮询间隔（ms）。 */
         const RETRY_INTERVAL_MS = 500;
-        /**
-         * 低频轮询的**总次数上限**。
-         *
-         * 【为什么必须封顶】面板被收起 / 停靠到别的标签时视口元素根本不存在，
-         * `measureOffset()` 永远返回 null；旧的 `setInterval` 会一直跑到 effect
-         * 重跑为止，2Hz 的 querySelector + getBoundingClientRect 白烧整个会话。
-         * 停掉之后由布局变化（本 effect 的 deps）或 ResizeObserver 重新拉起，
-         * 不会因为放弃轮询而永久失去同步。
-         */
+        /** 低频轮询的总次数上限；用尽后由布局变化 / ResizeObserver 重新拉起。 */
         const RETRY_POLLS = 120;
 
         let observer: ResizeObserver | null = null;
@@ -236,23 +232,15 @@ export function usePianoRollViewport({
             }
         };
 
-        // 当前已绑定的观察目标（元素身份比较，见 observeViewports 的卫兵说明）。
         let observedPiano: Element | null = null;
         let observedTrack: Element | null = null;
 
-        /** 把两边的视口元素（重新）挂到观察器上：元素可能后于本面板出现。 */
+        /** 只对需要几何的模式绑定 ResizeObserver；left-start 不依赖任何尺寸。 */
         const observeViewports = () => {
             if (typeof ResizeObserver === "undefined") return;
             const piano = scrollerRef.current;
             const track = document.querySelector<HTMLElement>("[data-timeline-scroller]");
-            // 【目标集合未变化时绝不重绑】disconnect + observe 会对同一元素再次
-            // 投递初始回调，回调路径（measureAndApply → applyMeasured）又会走到
-            // 这里 —— 每帧一次投递的永久循环，正是 "ResizeObserver loop
-            // completed with undelivered notifications" 以 60Hz 刷屏的来源。
-            // 只在目标元素真的出现 / 被替换时才重新绑定。
-            if (observer !== null && piano === observedPiano && track === observedTrack) {
-                return;
-            }
+            if (observer !== null && piano === observedPiano && track === observedTrack) return;
             observer = observer ?? new ResizeObserver(() => measureAndApply());
             observer.disconnect();
             observedPiano = piano;
@@ -262,31 +250,46 @@ export function usePianoRollViewport({
         };
 
         /**
-         * 量一次偏移。
+         * 关系 → 语义 → 偏移。
          *
-         * 同一标签组（插件默认视图）里两个面板永不共屏，绝对坐标不可用（非活动标签的
-         * 宿主停在视口外），改用"内容内边距之差"；其余布局仍是屏幕左缘之差。
+         * 同一标签组用"内容内边距之差"；独立窗口直接 left-start；其余关系先测 x 区间，
+         * 只有两个视口真的共享一段屏幕 x 时才做 screen-x，否则左侧起点对齐。
          */
-        const measureOffset = () =>
-            syncOffsetTabbed ? measureTabbedViewportOffsetPx() : measureTimelineViewportOffsetPx();
+        const measureSync = (): MeasuredSync | null => {
+            if (syncPair.relation === "tabbed") {
+                const inset = measureTabbedViewportOffsetPx();
+                return inset == null ? null : { offsetPx: inset, alignment: "tabbed" };
+            }
+            if (syncPair.relation === "detached") {
+                return { offsetPx: 0, alignment: "left-start" };
+            }
+            const geometry = measureTimelineViewportGeometry();
+            const alignment = resolveSyncViewportAlignment({
+                relation: syncPair.relation,
+                geometry,
+            });
+            if (alignment === "left-start") return { offsetPx: 0, alignment };
+            if (!geometry) return null; // 屏幕 x 模式测不到：保持旧值并重试
+            return { offsetPx: geometry.offsetPx, alignment };
+        };
 
-        /** 采用一次有效测量（并停止重试）。 */
-        const applyMeasured = (value: number) => {
+        const applyMeasured = (measured: MeasuredSync) => {
             stopRetry();
-            timelineOffsetRef.current = value;
-            setTimelineOffsetPx((prev) => (Math.abs(prev - value) < 0.5 ? prev : value));
-            observeViewports();
+            timelineOffsetRef.current = measured.offsetPx;
+            setTimelineOffsetPx((prev) =>
+                Math.abs(prev - measured.offsetPx) < 0.5 ? prev : measured.offsetPx,
+            );
+            if (measured.alignment !== "left-start") observeViewports();
         };
 
         const scheduleRetry = () => {
-            // 轮询总次数已用尽：不再排任何重试（布局变化会重跑本 effect）。
             if (stopped || pollAttempts >= RETRY_POLLS) return;
             if (frame !== null || retryTimer !== null) return;
             let attempts = 0;
             const tick = () => {
                 frame = null;
                 if (stopped) return;
-                const next = measureOffset();
+                const next = measureSync();
                 if (next !== null) {
                     applyMeasured(next);
                     return;
@@ -298,8 +301,6 @@ export function usePianoRollViewport({
                         if (stopped) return;
                         pollAttempts += 1;
                         measureAndApply();
-                        // 用尽后停表：measureAndApply 里的 scheduleRetry 已被
-                        // pollAttempts 闸门挡住，这里再显式清一次防止空转。
                         if (pollAttempts >= RETRY_POLLS && retryTimer !== null) {
                             clearInterval(retryTimer);
                             retryTimer = null;
@@ -314,12 +315,12 @@ export function usePianoRollViewport({
 
         function measureAndApply(): void {
             if (stopped) return;
-            const next = measureOffset();
+            const next = measureSync();
             if (next !== null) {
                 applyMeasured(next);
                 return;
             }
-            // 尚不可测（视口元素未挂载）：保持上一次的有效偏移并重试——**绝不能**当成 0。
+            // 尚不可测：保持上一次有效偏移并重试 —— 绝不能当成 0。
             observeViewports();
             scheduleRetry();
         }
@@ -334,11 +335,8 @@ export function usePianoRollViewport({
             observer?.disconnect();
             window.removeEventListener("resize", measureAndApply);
         };
-        // 【为什么要依赖布局】停靠重排会把面板的 DOM 宿主搬到别处，而**尺寸可能
-        // 完全不变** —— 那样 ResizeObserver 不会触发，本 effect 若只挂载时跑一次，
-        // 偏移就永远停在旧布局测出的值（实测：两面板相差数百像素，且只在恰好发生
-        // 一次尺寸变化时才自愈）。因此布局一变就重测。
-    }, [syncOffsetApplicable, syncOffsetTabbed, dockLayout]);
+        // 布局一变就重测：停靠重排可能只移动 DOM 宿主、尺寸完全不变。
+    }, [syncOffsetApplicable, syncPair, dockLayout]);
 
     useEffect(() => {
         // 捕获区间推进：只请内核补一帧**叠加层**（不重建曲线几何，也不触发 React

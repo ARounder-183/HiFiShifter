@@ -102,6 +102,18 @@ export interface PluginApplyState {
      * 状态快照每 250ms 轮询一次，是不依赖时序的那条通道。
      */
     mode?: "capture" | "ara";
+    /**
+     * 后端"状态还没算出来"（缓存尚未发布）。
+     *
+     * 【为什么它是独立一位而不是错误】`plugin_get_apply_state` 现在读的是 actor 在
+     * 每次命令收尾写入的**叶子缓存**（见后端 `EditorSession::apply_state` 的说明）。
+     * 会话刚插上、还没有任何命令跑过时缓存是空的 —— 那不是故障，只是"还没轮到算"。
+     * 把它答成 Err，状态栏就会画一条红条（"尚未应用：BackendInvokeError: ..."），
+     * 而用户什么都没做错。
+     *
+     * 【读者怎么用它】当 transient：保持轮询、不写 `failure`、不显示重载按钮。
+     */
+    busy?: boolean;
 }
 
 export interface PluginApplySnapshot {
@@ -167,6 +179,7 @@ function sameState(a: PluginApplyState | null, b: PluginApplyState | null): bool
         // （`mode` 此前正是这样漏掉的，见 2026-11-11 全仓审查 Q9）。
         a.audible_state === b.audible_state &&
         a.error === b.error &&
+        a.busy === b.busy &&
         a.mode === b.mode
     );
 }
@@ -248,15 +261,36 @@ export function startPluginApplyPolling(refreshTimeline: () => Promise<unknown>)
         }
     }
 
+    // 【同一版重复投递只取一次】`plugin_host_changed` 的负载带着这一条通知的
+    // `version`（= `host_version`）。出站桥已经把**同一批**里的重复合并掉了，但跨批
+    // 仍会收到同一个版本两次：多个等待者共用一次提交、事件通道与 250 ms 轮询各自到达、
+    // 以及"通知 → 重取 → 重取推动上游 → 再通知"这个环。同一个版本对应同一份时间线，
+    // 再取一次只是又造一棵同样大小的对象图，而 Chromium 的 GC 追不上它们 —— 页面堆
+    // 在两次 GC 之间冲到 1.3 GB 就是这么来的。
+    //
+    // 【判据是版本，不是"第几条事件"】`lastHostVersion` 是**已取到**的那一版的高水位，
+    // 所以 `announced <= lastHostVersion` 与"这一版我们已经有了"等价；`lastEventVersion`
+    // 补的是另一条缝：取回成功但快照里还没有 `host_version`（首次轮询尚未回来）时，
+    // 高水位推不动，而这一批数据其实已经取到了。
+    let lastEventVersion: number | undefined;
+    //
     // 【事件路径必须同步 `lastHostVersion`】否则紧接着的 250 ms 轮询会认为"版本变了"，
-    // 再取一次整份时间线 —— 一次宿主写入于是产生**两次**全量往返（而每条往返都是一棵
-    // 新的对象图，Chromium 的 GC 追不上，页面堆在两次 GC 之间冲到 1.3 GB 就 OOM）。
+    // 再取一次整份时间线 —— 一次宿主写入于是产生**两次**全量往返。
     //
     // 【为什么取完成时刻的版本号而不是回调入口的】事件到达时 `snapshot.state` 可能还是
     // 上一份；等取回完成再读，读到的一定是"这次刷新对应的那一版"。
-    const hostSubscription = listen("plugin_host_changed", () => {
+    const hostSubscription = listen<{ version?: number }>("plugin_host_changed", (event) => {
+        const announced = event.payload?.version;
+        if (
+            announced !== undefined &&
+            (announced === lastEventVersion ||
+                (lastHostVersion !== undefined && announced <= lastHostVersion))
+        ) {
+            return;
+        }
         void updateTimeline().then((ok) => {
             if (!ok) return;
+            if (announced !== undefined) lastEventVersion = announced;
             const version = snapshot.state?.host_version;
             if (version !== undefined) lastHostVersion = version;
         });
@@ -294,10 +328,15 @@ export function startPluginApplyPolling(refreshTimeline: () => Promise<unknown>)
             //
             // 就绪状态的那一次跳变仍然要取：宿主可能什么都没改，只是终于把音频交付齐了。
             const justBecameReady = current.ready && lastReady === false;
-            if (current.host_version !== lastHostVersion || justBecameReady) {
+            // 【busy 时必须跳过版本比较】降级载荷的 `host_version` 是 0，而真实值
+            // 可能是 7 —— 直接比较会让"缓存还没算出来"的每一拍都被判成"宿主版本变了"，
+            // 于是每 250 ms 重取一次整份时间线（一棵新的对象图），直到缓存就绪为止。
+            if (!current.busy && (current.host_version !== lastHostVersion || justBecameReady)) {
                 if (await updateTimeline()) lastHostVersion = current.host_version;
             }
-            lastReady = current.ready;
+            // 【busy 的 `ready=false` 不是"从就绪退回"】把它写进 lastReady 会让下一次
+            // 真读数看起来像"从未就绪 → 就绪"，多触发一次整份时间线重取。
+            if (!current.busy) lastReady = current.ready;
             schedule(BASE_POLL_MS);
         } catch (error) {
             if (disposed) return;

@@ -136,6 +136,7 @@ export function AutoScrollButton({
         // 锚点外壳：菜单贴在这个盒子下方展开（与参数编辑器的工具菜单同一种弹出面）。
         <Box ref={anchorRef} data-hs-context-menu>
             <AppIconButton
+                data-toolbar-control="autoScroll"
                 active={enabled}
                 // 激活时用主题强调色（与相邻开关同款；不带 color 时 Radix 回落强调色）
                 emphasis="accent"

@@ -27,7 +27,27 @@ cc = "1.0"
 [dependencies]
 # 离线内核（不依赖 Tauri / cpal）。内核模块正逐步从本 crate 搬过去，
 # 搬迁期间由 lib.rs 里的 `pub use` 把路径接回来。
-hifishifter-kernel = { path = "../hifishifter-kernel" }
+#
+# 【为什么必须 default-features = false】内核自己的 default 是
+# ["onnx", "vslib", "soundtouch"]，而 app 的 default 是 ["onnx", "vslib"]。
+# 直接吃内核默认值的话，`tauri build -- --no-default-features --features onnx`
+# 只是把 **app 这一侧**的 vslib 关掉，内核照旧带着 vslib 编 —— 于是 Windows ARM64
+# 上 `vslib.rs` 的 `#[link(name = "vslib_x64")]` 仍然要求那份 x64 导入库，
+# 最后一步链接直接 `LNK1181`（run 46016687058）。也就是说这条命令此前是"静默
+# 无效"的，它的字面意思和实际行为不一致。
+#
+# 关掉默认值之后，两边各自显式转发（见下方 [features]）：onnx / vslib 跟着 app 的
+# feature 走，soundtouch 因为已改成运行期 libloading 加载、三种格式都默认开启，
+# 所以固定在这里打开。与 hifishifter-plugin / hifishifter-clap 的写法一致。
+#
+# 【macOS / Linux 的发布包也会跟着变，这是有意的】那两条腿同样传
+# `--no-default-features --features onnx`，于是内核不再带 vslib：
+# `SynthPipelineKind::VocalShifterVslib` 变体不再存在，`from_track_algo` 走
+# `not(feature = "vslib")` 那一条（pitch edit 侧判 Bypass）。此前它们带着 vslib 的
+# 派发分支、却因为 `VslibProcessor` 在非 Windows 上不存在而回退到 HiFiGAN 链路 ——
+# 半套状态。工程文件里的 `PitchAnalysisAlgo::VocalShifterVslib` 不受影响（那个变体
+# 从来不是 feature 门控的），跨平台打开工程仍然原样往返。
+hifishifter-kernel = { path = "../hifishifter-kernel", default-features = false, features = ["soundtouch"] }
 hifishifter-host-link = { path = "../hifishifter-host-link" }
 hifishifter-clipboard = { path = "../hifishifter-clipboard" }
 tauri = { version = "2", features = [] }
@@ -38,7 +58,6 @@ rmp-serde = "1"
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-rfd = "0.17"
 hound = "3"
 cpal = "0.18"
 rubato = "5"
@@ -64,6 +83,18 @@ rusty_flac = "=0.1.3"
 id3 = "1"
 
 ndarray = { version = "0.17", optional = true }
+
+# ── 只在桌面形态存在的依赖 ───────────────────────────────────────────────────
+#
+# 【为什么 rfd 必须搬到这里】`rfd` 0.17 的后端只有 gtk3 / linux / macos / wasm /
+# win32 —— **没有任何 android / ios 实现**。留在全局 `[dependencies]` 里，移动目标
+# 会直接编译失败（失败点在链接期，错误信息指向一个与本项目无关的 crate）。
+# 调用点已全部改走 `platform::dialog::FileDialog`，移动分支不使用它。
+#
+# `trash` 同理：回收站是三个桌面平台的系统集成（`IFileOperation` / `NSFileManager` /
+# XDG trash），移动端没有对应 API。移动分支走 `platform::trash` 的永久删除。
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+rfd = "0.17"
 trash = "5.2.9"
 
 [target.'cfg(windows)'.dependencies]
@@ -91,8 +122,12 @@ wl-clipboard-rs = "0.9"
 [features]
 default = ["onnx", "vslib"]
 custom-protocol = ["tauri/custom-protocol"]
-onnx = ["dep:ort", "dep:ndarray", "dep:ort-tract"]
-vslib = []
+# 每一项都必须转发到内核：内核的默认 feature 已在依赖声明里关掉（见上方注释），
+# 少转发一项，app 关掉的特性就会在内核里"复活"，或者 app 打开的特性在内核里缺失。
+onnx = ["dep:ort", "dep:ndarray", "dep:ort-tract", "hifishifter-kernel/onnx"]
+# 内核侧的 vslib 是链接期依赖（`#[link(name = "vslib_x64")]`），且只在
+# x86_64-Windows 上成立；转发过去以后，关掉本 feature 的构建连那个模块都不编。
+vslib = ["hifishifter-kernel/vslib"]
 
 # GPU providers are baked into the platform-specific ort dependency below.
 # `cargo tauri build` produces GPU-accelerated binaries without extra --features.
@@ -154,3 +189,33 @@ ort = { version = "2.0.0-rc.13", optional = true, default-features = false, feat
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
 ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "alternative-backend"] }
 ort-tract = { version = "0.4.0", optional = true }
+
+# ── 移动目标 ─────────────────────────────────────────────────────────────────
+#
+# 【为什么必须写这两段】`ort` 是可选依赖，而 `onnx` feature 是默认开启的。
+# 一个目标若没有任何一段 `ort` 声明，`dep:ort` 在该目标上就不存在，
+# `--features onnx` 会直接报 "feature onnx includes dep:ort, but ort is not an
+# optional dependency"。桌面有 6 段、移动必须有这 2 段。
+#
+# 【NNAPI 而不是 WebGPU】`ort-sys` 2.0.0-rc.13 的 `download-binaries` 只为
+# `aarch64-linux-android` 提供 `+nnapi` 分发；`+wgpu` 没有 Android 构建。
+# iOS 侧是 `+coreml`，与 macOS ARM 同一套 EP（且要求 iOS ≥ 15.1 —— 见
+# `tauri.ios.conf.json` 的 minimumSystemVersion）。
+#
+# 【x86_64-linux-android 为什么单独一段】预编译分发里没有这一项，带
+# `download-binaries` 会直接失败："no prebuilt binaries available for target
+# x86_64-linux-android"。它唯一的用途是 **模拟器**（Google 的 x86_64 系统镜像；
+# arm64 镜像只能在 arm64 宿主上跑），而 macOS Intel 早就是同一个处境 —— 那里用
+# `alternative-backend` + `ort-tract`（纯 Rust 的 CPU 实现）绕过去了。这里复用同一条路：
+# 结果是一个真能跑、只是没有 NNAPI 加速的模拟器包，而不是"没有模拟器可用"。
+# 真机（arm64-v8a）仍然走下面的 NNAPI 分发，一个字节都没变。
+[target.'cfg(all(target_os = "android", not(target_arch = "x86_64")))'.dependencies]
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "nnapi", "copy-dylibs"] }
+
+# Android x86_64 —— 模拟器专用，CPU only via ort-tract（与 macOS Intel 同一套机制）。
+[target.'cfg(all(target_os = "android", target_arch = "x86_64"))'.dependencies]
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "alternative-backend"] }
+ort-tract = { version = "0.4.0", optional = true }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "coreml", "copy-dylibs"] }

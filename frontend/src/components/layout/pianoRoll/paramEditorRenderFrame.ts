@@ -58,7 +58,16 @@ function composePreview(view: ParamViewSegment | null): ParamViewSegment | null 
 let nextFrame = 0;
 export function createParamEditorRenderFrame(args: {
     param: string;
+    /** 取数窗口视图：`samples` / `baseSamples` 用它（块高只在有真实采样的区间里算）。 */
     view: ParamViewSegment | null;
+    /**
+     * **曲线**用的视图：取样域已扩展到视口（见 `extendCurveViewToViewport`）。
+     *
+     * 【为什么要和 `view` 分开】两者在"窗口外有没有数据"上不同：曲线要画到视口边缘
+     * （用户正在看的那一段），而块的中心值只能从**真实采样**里算 —— 把 NaN 与窗口外的帧
+     * 喂进 `averageParamValueInSpan`，块高会在滚动时抖动。缺省等于 `view`。
+     */
+    curveView?: ParamViewSegment | null;
     blocks: PianoRollParamBlockSpec | null;
     currentParamDefaultValue?: number | null;
     curves:
@@ -84,12 +93,14 @@ export function createParamEditorRenderFrame(args: {
               }
             : null;
     const view = composePreview(args.view);
+    // 曲线视图走同一条 preview 合成（它带着自己的 edit 数组），但**不**回写到 samples。
+    const curveView = args.curveView == null ? view : composePreview(args.curveView);
     return {
         id: ++nextFrame,
         param: args.param,
         blocks: args.blocks,
         view,
-        curves: typeof args.curves === "function" ? args.curves(view) : args.curves,
+        curves: typeof args.curves === "function" ? args.curves(curveView) : args.curves,
         samples: samples(view),
         baseSamples: samples(view?.preview?.base ?? view),
         currentParamDefaultValue: args.currentParamDefaultValue,

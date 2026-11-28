@@ -473,6 +473,16 @@ pub mod error_code {
     pub const INVALID_EDIT: u32 = 14;
     /// 链接身份对不上：这份编辑不属于这份清单。
     pub const LINK_MISMATCH: u32 = 15;
+
+    // ── 渲染状态（'plugin_get_apply_state'）的回答 ─────────────────────────
+
+    /// 连续一段时间没有任何可渲染的 clip：宿主发布了一份空模型。
+    ///
+    /// 【为什么它值得一个码】这不是"渲染失败"，而是"渲染输入一直空着"。两者在
+    /// 状态栏上长得一样，修复动作却完全不同（前者查预算/发布，后者查宿主模型）。
+    pub const NO_RENDERABLE_CLIP: u32 = 16;
+    /// 渲染本身失败（预算、发布、合成）。
+    pub const RENDER_FAILED: u32 = 17;
 }
 
 /// 交接身份：`<source_kind>:<host_label>:<doc_key>`。

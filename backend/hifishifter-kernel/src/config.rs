@@ -460,8 +460,17 @@ pub struct UiSettings {
     pub secondary_time_unit: String,
     #[serde(default = "default_ruler_label_spacing_px")]
     pub ruler_label_spacing_px: u32,
+    /// 旧字段：只作为**迁移来源**保留（读盘时仍要能认出旧配置）。
     #[serde(default = "default_true")]
     pub show_playhead_time_in_track_header: bool,
+    /// 播放光标时间读数的放置位置：`auto` / `toolbar` / `statusBar` /
+    /// `trackHeader` / `hidden`。`None` = 旧配置（前端按旧布尔迁移）。
+    ///
+    /// 【为什么是 Option 而不是带默认值的字符串】"没有这个字段"与"用户选了 auto"
+    /// 是两件事：前者要按旧布尔迁移（轨道头 / 自动），后者是用户明确的决定。
+    /// 用默认值填平这个差别，会让所有老用户的读数从轨道头被悄悄挪到状态栏。
+    #[serde(default)]
+    pub playhead_time_placement: Option<String>,
     #[serde(default = "default_true")]
     pub param_editor_sync_timeline: bool,
     #[serde(default = "default_true")]
@@ -820,6 +829,20 @@ pub struct UiSettings {
     /// 的共享**（locale / 快捷键 / 主题 / 设备选择仍然共用）。
     #[serde(default)]
     pub dock_plugin: serde_json::Value,
+    /// 移动形态的停靠布局（与 `dock` / `dock_plugin` **同形**，三者互不干扰）。
+    ///
+    /// 【为什么需要第三个槽位】移动端不是"更小的桌面"：390×844 上文件浏览器一开就
+    /// 只剩 134px 给时间轴（实测最小可用宽度是 684px），用户必然把面板全关掉、只留
+    /// 一个标签组。那份布局放到桌面上是"只剩一个面板"，放到插件里是"6 个面板全关"，
+    /// 都不是用户想要的。三个形态各留一份，谁也不覆盖谁。
+    ///
+    /// 判据与 `dock_plugin` 完全一致：**凡是"正确取值取决于视口有多少像素"的设置
+    /// 分形态**；locale / 快捷键 / 主题 / 设备选择仍然共用。
+    ///
+    /// 同样必须在 `editor::settings::DEEP_MERGE_KEYS` 里，否则一次"只改一个行为
+    /// 开关"的部分保存会把 `layout` 子键整块抹掉。
+    #[serde(default)]
+    pub dock_mobile: serde_json::Value,
     /// 插件形态的音乐上下文。
     ///
     /// 【为什么必须存在】REAPER **没有工程调号概念**（`src-tauri/src/import/reaper_import.rs`
@@ -1856,6 +1879,7 @@ impl Default for UiSettings {
             secondary_time_unit: default_secondary_time_unit(),
             ruler_label_spacing_px: default_ruler_label_spacing_px(),
             show_playhead_time_in_track_header: true,
+            playhead_time_placement: None,
             param_editor_sync_timeline: true,
             param_editor_timeline_click_select_track: true,
             pitch_snap: false,
@@ -1938,6 +1962,7 @@ impl Default for UiSettings {
             notebook: serde_json::Value::Null,
             dock: serde_json::Value::Null,
             dock_plugin: serde_json::Value::Null,
+            dock_mobile: serde_json::Value::Null,
             plugin_musical_context: PluginMusicalContext::default(),
             pen_input: serde_json::Value::Null,
         }
@@ -1986,6 +2011,7 @@ impl UiSettings {
             self.split_transition_overlap_crossfade = default_split_transition_overlap_crossfade();
         }
         self.normalize_time_display();
+        self.normalize_playhead_time_placement();
         self.timeline_snap.normalize();
         self.normalize_ripple_mode();
         self.normalize_auto_scroll_mode();
@@ -2025,6 +2051,22 @@ impl UiSettings {
     pub fn normalize_auto_scroll_mode(&mut self) {
         if !["scroll", "page"].contains(&self.auto_scroll_mode.as_str()) {
             self.auto_scroll_mode = default_auto_scroll_mode();
+        }
+    }
+
+    /// 规范化播放光标时间读数的放置位置。
+    ///
+    /// 【为什么非法值置 None 而不是默认值】`None` 是"没有这一项"，前端据此走**旧布尔
+    /// 迁移**；把非法值改写成 `"auto"` 会让一份手改坏的配置把老用户的读数从轨道头
+    /// 挪到状态栏 —— 脏数据不该改变用户的既有选择。
+    pub fn normalize_playhead_time_placement(&mut self) {
+        const VALID: [&str; 5] = ["auto", "toolbar", "statusBar", "trackHeader", "hidden"];
+        if self
+            .playhead_time_placement
+            .as_deref()
+            .is_some_and(|value| !VALID.contains(&value))
+        {
+            self.playhead_time_placement = None;
         }
     }
 
@@ -2488,6 +2530,38 @@ mod tests {
         assert_eq!(migrate("exponential"), "lateSlight");
         assert_eq!(migrate("logarithmic"), "convexSlight");
         assert_eq!(migrate("bogus"), "keep");
+    }
+
+    /// **放置策略的脏值必须回到"没有这一项"，而不是被改写成默认值。**
+    ///
+    /// 【为什么这条重要】`None` 是"旧配置"，前端据此按旧布尔迁移（轨道头 / 自动）；
+    /// 把非法值改写成 `"auto"` 会让一份手改坏的配置把老用户的读数从轨道头悄悄挪到
+    /// 状态栏 —— 脏数据不该改变用户的既有选择。
+    #[test]
+    fn ui_settings_rejects_an_unknown_playhead_time_placement() {
+        let legacy: UiSettings =
+            serde_json::from_value(serde_json::json!({ "autoCrossfade": true }))
+                .expect("旧配置必须能读");
+        assert_eq!(
+            legacy.playhead_time_placement, None,
+            "缺字段必须读成 None（= 交给前端按旧布尔迁移）"
+        );
+
+        let mut bogus = UiSettings {
+            playhead_time_placement: Some("somewhere".to_string()),
+            ..UiSettings::default()
+        };
+        bogus.normalize_split_transition();
+        assert_eq!(bogus.playhead_time_placement, None, "非法值必须置 None");
+
+        for valid in ["auto", "toolbar", "statusBar", "trackHeader", "hidden"] {
+            let mut settings = UiSettings {
+                playhead_time_placement: Some(valid.to_string()),
+                ..UiSettings::default()
+            };
+            settings.normalize_split_transition();
+            assert_eq!(settings.playhead_time_placement.as_deref(), Some(valid));
+        }
     }
 
     #[test]

@@ -1,0 +1,9 @@
+/src/main/**/generated
+/src/main/jniLibs/**/*.so
+# Everything under assets/ is generated: tauri.conf.json by tauri-cli, and the bundle
+# resources (models, licenses) by scripts/build/android.ps1 on machines where the CLI
+# cannot create its staging symlink.
+/src/main/assets
+/tauri.build.gradle.kts
+/proguard-tauri.pro
+/tauri.properties

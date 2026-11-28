@@ -150,11 +150,13 @@ fn import_finished_recording(
             .and_then(|id| timeline.clips.iter_mut().find(|clip| &clip.id == id))
         {
             if finished.peak.is_finite() && finished.peak > 0.0001 {
-                clip.gain = (1.0 / finished.peak).clamp(1.0, 4.0);
-                // 自动增益写在 active-take 内存投影上，必须同步写回 Take 权威
-                // 数据；否则后续任何 normalize_takes()（复制/粘贴/合并等克隆
-                // 路径）都会用 Take 里的旧 gain=1.0 覆盖投影，归一化静默丢失。
-                clip.sync_take_from_flat();
+                // 归一化写 item 层（与菜单/导入同层）；分母要含 take 幅度，
+                // 否则 take 0.5 时“推到 0 dBFS”实际只有 −6 dB。
+                let mut take_magnitude = clip.take_gain().abs();
+                if !take_magnitude.is_finite() || take_magnitude <= 1e-6 {
+                    take_magnitude = 1.0;
+                }
+                clip.clip_gain = (1.0 / finished.peak / take_magnitude).clamp(1.0, 4.0);
             }
         }
     }
@@ -172,7 +174,7 @@ fn import_finished_recording(
 
     state.audio_engine.update_timeline(timeline.clone());
 
-    let mut payload = timeline.to_payload();
+    let mut payload = state.timeline_payload(&timeline);
     payload.project = Some(state.project_meta_payload());
     Ok(payload)
 }

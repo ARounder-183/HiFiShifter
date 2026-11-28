@@ -765,14 +765,19 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
             const levels = getMockWaveformLevels(sourcePath);
             return levels[level] ?? "";
         },
+        // 逐源结果数组：一条源出错只影响它自己那条（与真实后端同一契约）。
         batch_get_waveform_mipmap: (...args: unknown[]) => {
             const paths = Array.isArray(args[0]) ? (args[0] as unknown[]) : [];
-            const out: Record<string, [string, string, string]> = {};
-            for (const path of paths) {
+            return paths.map((path) => {
                 const key = String(path);
-                out[key] = getMockWaveformLevels(key);
-            }
-            return out;
+                return {
+                    path: key,
+                    ok: true,
+                    pending: false,
+                    data: getMockWaveformLevels(key),
+                    error: null,
+                };
+            });
         },
         preload_waveform_mipmap: () => ({ ok: true }),
         /**

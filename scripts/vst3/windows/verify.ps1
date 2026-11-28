@@ -13,6 +13,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# [Why this script imports the MSVC environment itself] It used to assume the caller had already
+# dot-sourced msvc-env.ps1 and failed with "cl.exe is not on PATH: dot-source ... first" otherwise.
+# That advice is only correct when the caller remembers it; running the gate on its own then
+# reports a missing compiler instead of a broken bundle. Importing is idempotent (the importer
+# returns early when the environment is already present), so both callers are served.
+. (Join-Path $PSScriptRoot '..\..\env\msvc-env.ps1')
 & (Join-Path $PSScriptRoot 'verify-frontend.ps1') -FrontendDirectory (Join-Path ([IO.Path]::GetFullPath($BundleDirectory)) 'Contents\Resources\frontend')
 $module = Join-Path ([IO.Path]::GetFullPath($BundleDirectory)) 'Contents\x86_64-win'
 $shim = Join-Path $module 'HiFiShifter.vst3'

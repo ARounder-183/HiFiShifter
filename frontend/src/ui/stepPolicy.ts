@@ -117,6 +117,11 @@ export type StepUnit =
      */
     | "pressureFactor"
     /**
+     * 曲率 / 连续轴（-1..1）。粗调 0.05，精调 0.01，保留 2 位小数。
+     * 与淡变曲率滑杆的既有滚轮步长一致（CURVATURE_WHEEL_STEP / FINE_STEP）。
+     */
+    | "curvature"
+    /**
      * 以秒计量的**等待 / 停顿时长**（毫秒）。粗调 1000，精调 100。
      *
      * 【为什么不复用 `milliseconds`】那个是"毫秒"这个**符号**的通用档位（粗调
@@ -171,6 +176,7 @@ const STEPS: Record<StepUnit, StepSpec> = {
     vibratoHz: { coarse: 0.5, fine: 0.1, decimals: 2 },
     scaleDegree: { coarse: 0.5, fine: 0.1, decimals: 2 },
     pressureFactor: { coarse: 0.1, fine: 0.01, decimals: 3 },
+    curvature: { coarse: 0.05, fine: 0.01, decimals: 2 },
     // 以秒计量的等待时长与图片尺寸：各自一个量级，理由见 `StepUnit` 的对应条目。
     idleMilliseconds: { coarse: 1000, fine: 100, decimals: 0 },
     imagePixels: { coarse: 128, fine: 8, decimals: 0 },

@@ -7,11 +7,9 @@ import {
 } from "./paramBlocks";
 import type { ParamViewSegment } from "./types";
 import { reportParamBlockDiagnostic } from "./paramBlockDiagnostics";
-
-type LiveEdit = {
-    readonly key: string;
-    readonly edit: readonly number[];
-};
+import { paramWindowScope } from "./paramWindowKey";
+import { extendCurveViewToViewport, projectLiveEdit } from "./strokeBuffer";
+import type { CurveViewport, LiveEditOverride } from "./strokeBuffer";
 
 /** Block boundaries are shared; every non-auto block may carry an explicit center. */
 export function resolveParamBlockPanelValues(args: {
@@ -122,17 +120,24 @@ export function resolveParamBlockPanelValues(args: {
  */
 export function resolveParamBlockFrameView(args: {
     readonly interaction: ParamViewSegment | null;
-    readonly live: LiveEdit | null;
+    readonly live: LiveEditOverride | null;
     readonly paramView: ParamViewSegment | null;
     readonly param?: string;
+    /**
+     * 视口覆盖的帧区间。给了它，返回的就是**曲线用**的扩展视图：窗口之外、被笔画覆盖
+     * 的帧由缓冲直接供给（见 `extendCurveViewToViewport`）。
+     *
+     * 【为什么挂在同一个解析器上】曲线、块高、拖动中心都从这里取视图。渲染域只对
+     * **曲线**扩展：块的中心值必须只在"有真实采样"的区间里算，把窗口外的帧喂进去会让
+     * 块高在滚动时抖动。所以调用方按用途各取一份：给 `viewport` = 画线，不给 = 取块值。
+     */
+    readonly viewport?: CurveViewport;
 }): ParamViewSegment | null {
-    const scope = (key: string) =>
-        key.startsWith("v2|") ? key.split("|").slice(0, 3).join("|") : key;
     const interaction = args.interaction;
     const sameScope =
         interaction !== null &&
         args.paramView !== null &&
-        scope(interaction.key) === scope(args.paramView.key);
+        paramWindowScope(interaction.key) === paramWindowScope(args.paramView.key);
     if (
         interaction !== null &&
         sameScope &&
@@ -141,8 +146,27 @@ export function resolveParamBlockFrameView(args: {
             interaction.key.split("|")[2] === args.param)
     )
         return interaction;
-    if (args.live !== null && args.live.key === args.paramView?.key) {
-        return { ...args.paramView, edit: args.live.edit } as ParamViewSegment;
+    // live 覆盖是绝对帧缓冲：只要作用域对得上，就按**当前窗口**投影出来。
+    // 旧实现要求 key 完全相同，于是"取数回包换了窗口"会让正在画的曲线整条消失。
+    if (
+        args.live !== null &&
+        args.paramView !== null &&
+        args.live.scope === paramWindowScope(args.paramView.key)
+    ) {
+        const projected = {
+            ...args.paramView,
+            edit: projectLiveEdit(args.live, args.paramView),
+        } as ParamViewSegment;
+        if (args.viewport === undefined) return projected;
+        // 取样域 = 视口 ∩ (窗口 ∪ 笔画域)。窗口够不着视口时，由缓冲把那一段补上；
+        // 补不上（缓冲没覆盖）的帧写 NaN，折线在缺口处断开 —— 不画假线、也不画 0。
+        return (
+            extendCurveViewToViewport({
+                view: projected,
+                live: args.live,
+                viewport: args.viewport,
+            }) ?? projected
+        );
     }
     return args.paramView;
 }

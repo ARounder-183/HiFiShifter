@@ -1,6 +1,23 @@
 #[path = "../build-support/product_version.rs"]
 mod product_version;
 
+/// **目标**操作系统的编译期事实。
+///
+/// 【为什么不能写 `cfg!(target_os = ...)`】build script 是给**宿主**编译的，所以
+/// 脚本里的 `cfg!(target_os)` 回答的是"我在哪台机器上构建"，不是"我在为谁构建"。
+/// 交叉编译时这两者不同：在 Windows 上构建 Android 包时 `cfg!(target_os="windows")`
+/// 为真，于是 `stage_ort_linux_so` 会跳过、`copy_directml_dll` 会执行、MSVC 的
+/// `/DELAYLOAD` 会被塞进 Android 的链接行 —— 每一条都以"与本项目无关的链接错误"
+/// 的形式暴露出来。唯一正确的来源是 cargo 注入的 `CARGO_CFG_TARGET_OS`。
+fn target_os() -> String {
+    std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default()
+}
+
+/// **目标**环境的编译期事实（`msvc` / `gnu` / `musl` / 空）。
+fn target_env() -> String {
+    std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default()
+}
+
 /// 让可执行文件在运行时能找到随包分发的共享库。
 ///
 /// 【为什么必须写在这里】`hifishifter-kernel` 的 build script 确实打印了
@@ -25,6 +42,24 @@ mod product_version;
 ///   * `@executable_path` —— 纯 cargo 运行（target/<triple>/release）。
 fn link_runtime_search_paths() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "android" {
+        /*
+         * 16 KB 页对齐。
+         *
+         * 【为什么必须有】Android 15 起，设备可以配置成 16 KB 页大小；Play 对
+         * targetSdk >= 35 的应用**要求**原生库支持 16 KB 页（2025-11 起硬性）。
+         * NDK r27 的 aarch64 链接器默认仍是 4 KB（`llvm-readelf -l` 里 LOAD 段
+         * `Align 0x1000`），于是库在 16 KB 页的设备上根本加载不起来
+         * （`dlopen failed`），而构建期毫无提示。NDK r28 才把默认值改成 16 KB。
+         *
+         * 【为什么写在这里而不是 .cargo/config.toml 的 rustflags】本仓的
+         * `.cargo/config.toml` 已经记过这条教训：per-target rustflags 会被烤进
+         * **每一个依赖 crate** 的指纹，改一次就全量重编。`cargo:rustc-link-arg`
+         * 只作用于本 crate 自己产出的目标（`libbackend_lib.so` 正是它），
+         * 且只在 android 目标上打印 —— 桌面链接行一个字节都不变。
+         */
+        println!("cargo:rustc-link-arg=-Wl,-z,max-page-size=16384");
+    }
     if matches!(target_os.as_str(), "linux" | "freebsd" | "android") {
         println!("cargo:rustc-link-arg=-Wl,--enable-new-dtags");
         println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
@@ -48,7 +83,7 @@ fn link_runtime_search_paths() {
 fn stage_ort_linux_so() {
     use std::path::Path;
 
-    if !cfg!(target_os = "linux") {
+    if target_os() != "linux" {
         return;
     }
 
@@ -178,6 +213,13 @@ fn main() {
 
     // Allow skipping expensive native builds in CI checks via env var
     // Set HIFISHIFTER_SKIP_NATIVE_BUILD=1 to skip WORLD/Signalsmith/VSLIB builds
+    //
+    // 【为什么必须有 rerun-if-env-changed】cargo 默认只在源码变化时重跑 build script。
+    // 少了这一行，"先在 `HIFISHIFTER_SKIP_NATIVE_BUILD=1` 下跑过一次类型检查、再正常
+    // 构建"这条最常见的本地流程会复用那份只写了空占位文件的产物，随后在资源校验
+    // 或运行期才发现 DLL 是 0 字节 —— 而根因只是 build script 没重跑。
+    println!("cargo:rerun-if-env-changed=HIFISHIFTER_SKIP_NATIVE_BUILD");
+    println!("cargo:rerun-if-env-changed=HIFISHIFTER_SKIP_FRONTEND_BUILD");
     let skip_native = std::env::var("HIFISHIFTER_SKIP_NATIVE_BUILD").unwrap_or_default();
     if skip_native != "1" {
         // `build_world_static()` 已搬到 `backend/hifishifter-kernel/build.rs`：
@@ -261,8 +303,11 @@ fn main() {
     // the load never triggers); the main binary keeps its v6 manifest and
     // binds v6 on first real dialog use. `cargo test` and `cargo build`
     // work directly on Windows with no manifest injection of any kind.
-    #[cfg(all(target_os = "windows", target_env = "msvc"))]
-    {
+    // 【为什么是运行期判断而不是 `#[cfg]`】`/DELAYLOAD` 是**链接参数**，作用于目标
+    // 平台。在 Windows 上交叉编译 Android 时，`cfg!(target_os = "windows")`（宿主）
+    // 为真，这串 MSVC 旗标就会被塞进 Android 的链接行 —— 表现为一串与 comctl32
+    // 毫无关系的链接错误。目标平台必须读 `CARGO_CFG_TARGET_OS`。
+    if target_os() == "windows" && target_env() == "msvc" {
         // Delay-load comctl32 for all targets of this package (bin, lib
         // unit-test harness, integration tests). Static TaskDialogIndirect
         // imports are only resolvable against the v6 assembly; delaying the
@@ -350,6 +395,9 @@ fn build_frontend() {
 
     println!("cargo:warning=[Frontend] 正在构建前端，请稍候...");
 
+    // 【这一处刻意用宿主判据】npm 是**在构建机上跑**的，与目标平台无关：
+    // 在 Windows 上交叉编译 Android 包，仍然要调用 Windows 的 `npm.cmd`。
+    // 与上面几个函数（问目标）方向相反，不要"统一"掉。
     let npm_cmd = if cfg!(target_os = "windows") {
         "npm.cmd"
     } else {
@@ -382,7 +430,7 @@ fn build_frontend() {
 /// so tauri_build resource validation passes.  On x86_64 with the vslib
 /// feature active, the real DLL is linked by build_vslib().
 fn create_vslib_placeholder() {
-    if !cfg!(target_os = "windows") {
+    if target_os() != "windows" {
         return;
     }
     let target = std::env::var("TARGET").unwrap_or_default();
@@ -410,7 +458,7 @@ fn create_vslib_placeholder() {
 fn copy_directml_dll() {
     use std::path::Path;
 
-    if !cfg!(target_os = "windows") {
+    if target_os() != "windows" {
         return;
     }
 
@@ -465,7 +513,7 @@ fn copy_directml_dll() {
 fn stage_ort_macos_dylibs() {
     use std::path::Path;
 
-    if !cfg!(target_os = "macos") {
+    if target_os() != "macos" {
         return;
     }
 
@@ -792,7 +840,7 @@ mod coreml_pb {
 /// - ConvTranspose: explicit `kernel_shape` attributes are removed so CoreML EP
 ///   accepts the upsampling layers.
 /// Only the node/initializer protobuf fields are touched; all other bytes
-/// (including the ~54 MB weight raw_data) are preserved verbatim.
+/// (including the weight raw_data) are preserved verbatim.
 #[cfg(target_os = "macos")]
 fn rewrite_coreml_model(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
     use coreml_pb::{encode, parse, Field};

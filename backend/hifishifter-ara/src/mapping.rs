@@ -760,6 +760,32 @@ pub fn ara_document_to_rows(
     // 轨道，但保留下标对齐（ownership 用的仍是未压缩的扁平槽位）。
     let mut track_ids: Vec<Option<String>> = Vec::new();
     let live_sequences = identities.map(|ids| ids.live_sequences.as_slice());
+    // 【每条扁平序列槽位上有几条 region】
+    //
+    // 【为什么需要这个计数】本函数为**每一条 region sequence** 建一条轨道行，而宿主
+    // 会为它自己新建的轨道建出**还没有任何 region** 的空序列。那种序列在本实例里
+    // 没有任何可见内容：画出来就是一行谁也操作不了的空轨 —— 用户报的"ARA 里导入
+    // 音频后凭空多出一条轨道，重载之后才恢复"就是它。
+    //
+    // 【为什么这条判据不误杀用户在宿主里新建的空轨】那种轨道的权威在**宿主清单**
+    // （`present_host_inventory` 会为 `ui_tracks` 里的每一条轨建行，哪怕它一个
+    // item 都没有）。这里只需要保证"映射层不替宿主凭空造一条它没报告过的轨"。
+    //
+    // 【为什么是"零 region"而不是"零 clip"】region 是宿主文档里的事实，clip 是装配
+    // 产物；一条 region 被跳过（源缺失等）时仍应留下那一行，好让缺口可见。
+    let ownership = region_sequence_of(doc)?;
+    let mut regions_per_sequence = vec![
+        0_usize;
+        doc.musical_contexts
+            .iter()
+            .map(|context| context.region_sequences.len())
+            .sum()
+    ];
+    for slot in &ownership {
+        if let Some(count) = regions_per_sequence.get_mut(*slot) {
+            *count += 1;
+        }
+    }
     for (position, sequence) in doc
         .musical_contexts
         .iter()
@@ -791,6 +817,14 @@ pub fn ara_document_to_rows(
         // 序号会让插件里的轨道顺序停在宿主重排之前。这里**只改排序值**：track_ids
         // 仍按扁平位置排列，因为 region_sequence_of 返回的就是扁平下标，
         // 重排数组会让 region→track 归属整体错位。
+        // 零 region 的序列不产出轨道行（判据见上面 `regions_per_sequence` 的说明）。
+        // 槽位仍按扁平下标保留为 `None`：那是"这个槽位没有轨道"的既有语义，
+        // 于是即使某条 region 因宿主下标错乱而指到这里，也会落回第一条存活轨，
+        // 而不是指向一条不存在的行。
+        if regions_per_sequence.get(position).copied().unwrap_or(0) == 0 {
+            track_ids.push(None);
+            continue;
+        }
         tracks.push(TrackRow {
             id: id.clone(),
             name: sequence.name.clone().unwrap_or_default(),
@@ -804,7 +838,6 @@ pub fn ara_document_to_rows(
     // 重建序列而整批消失）。
     let fallback_track = track_ids.iter().flatten().next().cloned();
 
-    let ownership = region_sequence_of(doc)?;
     let mut rows: Vec<RegionRow> = Vec::new();
     let mut clip_regions: Vec<usize> = Vec::new();
     let mut skipped: Vec<SkippedRegion> = Vec::new();
@@ -2048,6 +2081,61 @@ mod tests {
             outcome.timeline.tracks[0].color, "#3366cc",
             "宿主的序列颜色必须成为轨道颜色"
         );
+    }
+
+    /// **回归：一条没有任何 playback region 的 region sequence 不得变成一行轨道。**
+    ///
+    /// 【现场】ARA 里用"文件 → 导入音频"：宿主为它新建了一条轨，那条轨没有被本实例
+    /// 采纳（不在 `ui_scope` 里），它的 item 于是永远进不了清单 —— 而 ARA 文档里那条
+    /// **空** region sequence 反而被映射成一行轨。用户看到的是"凭空多出一条轨道"，
+    /// 重载之后又消失（重载后 `ui_scope` 仍不含它，于是它不再被呈现；音频却留在
+    /// 错的地方）。
+    ///
+    /// 【契约】映射层只按**宿主文档里真实存在的 region** 造轨：零 region 的序列在本
+    /// 实例里没有任何可见内容。用户在宿主里自己新建的空轨不受影响 —— 它的权威在
+    /// 宿主清单（`present_host_inventory` 会为 `ui_tracks` 的每一条轨建行）。
+    #[test]
+    fn a_region_sequence_with_no_playback_region_is_not_a_track() {
+        let mut doc: AraDocument = serde_json::from_str(
+            r#"{
+                "audioSources": [{ "persistentID": "src", "sampleRate": 48000, "sampleCount": 480000 }],
+                "audioModifications": [{ "persistentID": "mod", "audioSourcePersistentID": "src" }],
+                "musicalContexts": [{ "regionSequences": [
+                    { "name": "with regions", "orderIndex": 0 },
+                    { "name": "host made it and never used it", "orderIndex": 1 }] }],
+                "playbackRegions": [
+                    { "audioSourcePersistentID": "src", "audioModificationPersistentID": "mod",
+                      "regionSequenceRef": 11,
+                      "startInModificationTime": 0.0, "durationInModificationTime": 1.0,
+                      "startInPlaybackTime": 0.0, "durationInPlaybackTime": 1.0 }]
+            }"#,
+        )
+        .expect("document parses");
+        doc.sequence_refs = vec![11, 22];
+        let identities = MappingIdentities {
+            region_keys: vec![7],
+            sequence_ids: vec!["a".into(), "b".into()],
+            live_sequences: vec![true, true],
+        };
+        let outcome =
+            ara_document_to_timeline_with_identities(&doc, &identities).expect("document maps");
+        let ids: Vec<&str> = outcome
+            .timeline
+            .tracks
+            .iter()
+            .map(|track| track.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["ara-sequence-a"],
+            "零 region 的序列不得产出一行空轨：{ids:?}"
+        );
+        assert_eq!(
+            outcome.timeline.clips.len(),
+            1,
+            "有 region 的那条必须照常出现"
+        );
+        assert_eq!(outcome.timeline.clips[0].track_id, "ara-sequence-a");
     }
 
     /// **宿主重建 region sequence 不得把同一批片段拆到两条轨。**

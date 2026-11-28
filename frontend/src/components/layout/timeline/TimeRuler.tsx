@@ -6,7 +6,8 @@ import { Box } from "@radix-ui/themes";
 import { timeAtPointerX } from "./runtime/timeAtPointer.js";
 import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeFormat.js";
-import { TIME_UNITS, TIME_UNIT_CHOICES, formatCursorTime } from "./timeFormat.js";
+import { formatCursorTime } from "./timeFormat.js";
+import { useTimeContextMenuItems } from "./timeContextMenu";
 import { formatPositionText } from "./timeValueText";
 import { formatTemplate } from "../../../i18n/format";
 import type { GridSize } from "../../../features/session/sessionTypes.ts";
@@ -41,19 +42,6 @@ import { useDevicePixelRatio } from "../../../hooks/useDevicePixelRatio";
 import { playheadLineLeftViewportPx } from "../renderKernel/timelineAxis.ts";
 import { tickWindowRangePx } from "./runtime/tickWindow.js";
 import { clampAxisPosition } from "../../appTooltipPosition";
-
-function unitLabelKey(unit: TimeUnit): string {
-    switch (unit) {
-        case "barBeats":
-            return "time_unit_bar_beats";
-        case "barDivisions":
-            return "time_unit_bar_divisions";
-        case "seconds":
-            return "time_unit_seconds";
-        case "clock":
-            return "time_unit_clock";
-    }
-}
 
 /**
  * 标尺刻度。
@@ -343,14 +331,10 @@ const TempoMapFloatingLabel = React.memo(function TempoMapFloatingLabel({
 function TimeRulerContextMenu({
     x,
     y,
-    primaryUnit,
-    secondaryUnit,
     tempoMap,
     clickedSec,
     pxPerSec,
     t,
-    onSelectPrimary,
-    onSelectSecondary,
     onCopyPlayheadTime,
     onOpenSettings,
     onAddTempoPointAt,
@@ -361,14 +345,10 @@ function TimeRulerContextMenu({
 }: {
     x: number;
     y: number;
-    primaryUnit: TimeUnit;
-    secondaryUnit: TimeUnitChoice;
     tempoMap: TempoMap | null;
     clickedSec: number;
     pxPerSec: number;
     t: (key: string) => string;
-    onSelectPrimary: (unit: TimeUnit) => void;
-    onSelectSecondary: (unit: TimeUnitChoice) => void;
     onCopyPlayheadTime?: () => void;
     onOpenSettings?: () => void;
     onAddTempoPointAt: (sec: number, focus: "tempo" | "timeSignature" | "scale" | null) => void;
@@ -397,6 +377,14 @@ function TimeRulerContextMenu({
     // （见 `canEditTempoMapTempo`）。此前整组隐藏的理由（"写入命令不被支持 + 宿主不提供
     // 速度内容"）已经随插件实现 `set_timeline_tempo_map` 而消失。
     const scaleOnly = isPluginMode();
+    // 时间显示那一组（主/副单位、读数位置、复制、显示设置）与**播放光标时间读数
+    // 的右键菜单**共用同一份构建器 —— 两个入口给出的必须是同一组设置。
+    const timeItems = useTimeContextMenuItems({
+        t,
+        leadingSeparator: true,
+        onCopyPlayheadTime,
+        onOpenSettings,
+    });
     const items: AppMenuItemSpec[] = [
         { key: "tempoMapHeader", label: t("tempo_map"), heading: true },
         {
@@ -433,50 +421,7 @@ function TimeRulerContextMenu({
                   } satisfies AppMenuItemSpec,
               ]
             : []),
-        {
-            key: "primaryHeader",
-            label: t("time_unit_primary"),
-            heading: true,
-            separatorBefore: true,
-        },
-        ...TIME_UNITS.map((unit) => ({
-            key: `primary-${unit}`,
-            label: t(unitLabelKey(unit)),
-            checked: primaryUnit === unit,
-            onSelect: () => onSelectPrimary(unit),
-        })),
-        {
-            key: "secondaryHeader",
-            label: t("time_unit_secondary"),
-            heading: true,
-            separatorBefore: true,
-        },
-        ...TIME_UNIT_CHOICES.map((unit) => ({
-            key: `secondary-${unit}`,
-            label: unit === "none" ? t("time_unit_none") : t(unitLabelKey(unit as TimeUnit)),
-            checked: secondaryUnit === unit,
-            onSelect: () => onSelectSecondary(unit),
-        })),
-        ...(onCopyPlayheadTime
-            ? [
-                  {
-                      key: "copyPlayheadTime",
-                      label: t("copy_playhead_time"),
-                      separatorBefore: true,
-                      onSelect: onCopyPlayheadTime,
-                  } satisfies AppMenuItemSpec,
-              ]
-            : []),
-        ...(onOpenSettings
-            ? [
-                  {
-                      key: "openSettings",
-                      label: t("timeline_display_settings"),
-                      separatorBefore: !onCopyPlayheadTime,
-                      onSelect: onOpenSettings,
-                  } satisfies AppMenuItemSpec,
-              ]
-            : []),
+        ...timeItems,
     ];
 
     return createPortal(
@@ -545,8 +490,9 @@ const TimeRulerInner: React.FC<{
     timeContext: TimeFormatContext;
     primaryUnit: TimeUnit;
     secondaryUnit: TimeUnitChoice;
-    onPrimaryUnitChange: (unit: TimeUnit) => void;
-    onSecondaryUnitChange: (unit: TimeUnitChoice) => void;
+    // 单位切换**不在这里**：右键菜单里那一组（含读数位置）由
+    // `useTimeContextMenuItems` 直接接会话切片，标尺只提供自己的坐标与 Tempo Map
+    // 那一组。这样标尺菜单与读数菜单不可能各自实现一遍"改单位 + 持久化"。
     onOpenSettings?: () => void;
     onCopyPlayheadTime?: () => void;
     t?: (key: string) => string;
@@ -589,8 +535,6 @@ const TimeRulerInner: React.FC<{
     timeContext,
     primaryUnit,
     secondaryUnit,
-    onPrimaryUnitChange,
-    onSecondaryUnitChange,
     onOpenSettings,
     onCopyPlayheadTime,
     t,
@@ -989,14 +933,10 @@ const TimeRulerInner: React.FC<{
                 <TimeRulerContextMenu
                     x={ctxMenu.x}
                     y={ctxMenu.y}
-                    primaryUnit={primaryUnit}
-                    secondaryUnit={secondaryUnit}
                     tempoMap={tempoMap}
                     clickedSec={ctxMenu.sec}
                     pxPerSec={pxPerSec}
                     t={tAny}
-                    onSelectPrimary={onPrimaryUnitChange}
-                    onSelectSecondary={onSecondaryUnitChange}
                     onCopyPlayheadTime={onCopyPlayheadTime}
                     onOpenSettings={onOpenSettings}
                     onAddTempoPointAt={handleAddTempoPointAt}

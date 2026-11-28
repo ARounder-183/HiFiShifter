@@ -74,6 +74,7 @@ function Get-CargoCommand([string]$kind, [int]$Threads = 0) {
     $msvc = Join-Path $root 'scripts\env\msvc-env.ps1'
     $sdkEnv = Join-Path $root 'scripts/env/sdk-env.ps1'
     $sdkRoot = Join-Path $root 'third_party/sdk'
+    $backendDir = Join-Path $root 'backend'
     $prefix = ''
     # [Why the platform check] msvc-env.ps1 reads ${env:ProgramFiles(x86)}, which is null on
     # Linux, and Join-Path then throws "Cannot bind argument to parameter Path because it is
@@ -81,7 +82,16 @@ function Get-CargoCommand([string]$kind, [int]$Threads = 0) {
     # hit anyway, and the fmt tier (Linux, compiles nothing) would be killed outright by that
     # dot-import.
     $onWindows = [IO.Path]::DirectorySeparatorChar -eq '\'
-    if ($onWindows -and (Test-Path $msvc)) { $prefix += ". '$msvc';" }
+    # [Why the cache sweep rides along with the environment import] This script is the single
+    # entry point for every cargo command in CI, and the native crates (opusic-sys, soundtouch)
+    # configure CMake on the first run. A cache recorded under another generator would fail that
+    # build script with "generator ... does not match the generator used previously" -- a message
+    # that names neither this script nor the generator decision. The sweep makes the environment
+    # self-healing; see scripts/env/native-toolchain.ps1.
+    if ($onWindows -and (Test-Path $msvc)) {
+        $prefix += ". '$msvc';"
+        $prefix += " [void](Clear-StaleCmakeCaches -TargetDir (Get-NativeCargoTargetDir -BackendDir '$backendDir'));"
+    }
     # [Why also check whether the SDK directory exists] The fmt tier (Linux) installs no SDK
     # and compiles nothing; Set-SdkEnvironment would then push two empty paths into the env
     # vars, turning a pure formatting check into "Cannot bind argument to parameter Path
@@ -139,7 +149,7 @@ function Get-CargoCommand([string]$kind, [int]$Threads = 0) {
 
             if ($pluginRun -and $threads -le 1) {
                 # [Why CLAP is not inside --workspace] Cargo unions features across the build
-                # graph: src-tauri uses kernel's default features (including vslib), so a
+                # graph: src-tauri's default feature set forwards vslib to the kernel, so a
                 # --workspace run shared with CLAP compiles kernel with vslib, and
                 # #[link(name="vslib_x64")] then leaks into hifishifter_clap.dll's import
                 # table — the clap_exports test "a single-file plugin must not import

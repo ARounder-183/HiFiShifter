@@ -75,10 +75,11 @@ use super::snapshot::{
     build_snapshot, build_snapshot_for_file, schedule_stretch_jobs, source_bounds_frames,
 };
 use super::types::{
-    AudioEngineStateSnapshot, EngineCommand, EngineSnapshot, ResampledStereo, StretchJob,
-    StretchKey, TrackMeterValue,
+    AudioEngineStateSnapshot, EngineCommand, EngineSnapshot, LiveCurve, LiveFade, LiveGainFrame,
+    ResampledStereo, StretchJob, StretchKey, TrackMeterValue,
 };
 use crate::pitch_clip::schedule_clip_pitch_jobs;
+use hifishifter_kernel::engine_command::{GainPreviewTarget, VolumeCurveWindow};
 
 use crate::pitch_clip::get_clip_pitch_midi_global;
 use tauri::{Emitter, Manager};
@@ -127,6 +128,9 @@ pub struct AudioEngine {
     tx: mpsc::Sender<EngineCommand>,
 
     snapshot: Arc<ArcSwap<EngineSnapshot>>,
+    /// 拖动增益的瞬时试听帧（无锁读；worker 写）。与 snapshot 一样按 Arc 换代，
+    /// 音频回调用 Arc::ptr_eq 确认它属于当前快照。
+    live_gain: Arc<ArcSwap<LiveGainFrame>>,
 
     is_playing: Arc<AtomicBool>,
     /// "传输层原地等待渲染"标志（RT 回调动态判定）：后台渲染进行中遇到
@@ -158,6 +162,7 @@ impl Clone for AudioEngine {
         Self {
             tx: self.tx.clone(),
             snapshot: self.snapshot.clone(),
+            live_gain: self.live_gain.clone(),
             is_playing: self.is_playing.clone(),
             play_start_wait: self.play_start_wait.clone(),
             target: self.target.clone(),
@@ -222,6 +227,9 @@ impl AudioEngine {
         // This is updated by the engine worker thread.
         let snapshot: Arc<ArcSwap<EngineSnapshot>> =
             Arc::new(ArcSwap::from_pointee(EngineSnapshot::empty(44100)));
+        let live_gain: Arc<ArcSwap<LiveGainFrame>> = Arc::new(ArcSwap::from_pointee(
+            LiveGainFrame::empty(Arc::new(EngineSnapshot::empty(44100))),
+        ));
         let meter_state = Arc::new(Mutex::new(HashMap::<String, TrackMeterValue>::new()));
         let meter_generation = Arc::new(AtomicU64::new(0));
         let meter_app_handle = Arc::new(Mutex::new(app_handle.clone()));
@@ -252,6 +260,7 @@ impl AudioEngine {
         let worker_ready_thread = worker_ready.clone();
 
         let snapshot_for_thread = snapshot.clone();
+        let live_gain_for_thread = live_gain.clone();
         {
             let meter_state = meter_state.clone();
             let meter_generation = meter_generation.clone();
@@ -462,6 +471,7 @@ impl AudioEngine {
                         sample_format,
                         channels,
                         snapshot: snapshot_for_thread.clone(),
+                        live_gain: live_gain_for_thread.clone(),
                         is_playing: is_playing_thread.clone(),
                         play_start_wait: play_start_wait_thread.clone(),
                         position_frames: position_frames_thread.clone(),
@@ -683,6 +693,8 @@ impl AudioEngine {
 
             let mut last_timeline: Option<Arc<TimelineState>> = None;
             let mut last_play_file: Option<(PathBuf, f64, String)> = None;
+            let mut live_gain_targets: Option<GainPreviewState> = None;
+            let mut retired_live_gains = RetirementKeeper::<Arc<LiveGainFrame>>::new(8);
             let mut app_handle_for_worker: Option<tauri::AppHandle> = app_handle;
             // 合并连发推送时被 try_recv 取出的下一条命令：渲染线程可能以远快
             // 于本线程消费的速度逐 clip 推送 RenderedClipsChanged，排水时取到
@@ -745,6 +757,9 @@ impl AudioEngine {
                     position_frames: &position_frames_thread,
                     duration_frames: &duration_frames_thread,
                     snapshot: &snapshot_for_thread,
+                    live_gain: &live_gain_for_thread,
+                    live_gain_targets: &mut live_gain_targets,
+                    retired_live_gains: &mut retired_live_gains,
                     cache: &cache_for_cmd,
                     stretch_cache: &stretch_cache_for_cmd,
                     stretch_inflight: &stretch_inflight_for_cmd,
@@ -854,6 +869,18 @@ impl AudioEngine {
                             handle_update_timeline(&mut state, tl)
                         })
                     }
+                    EngineCommand::SetGainPreview {
+                        gesture_id,
+                        seq,
+                        targets,
+                    } => contain_command_panic("SetGainPreview", || {
+                        handle_set_gain_preview(&mut state, gesture_id, seq, targets)
+                    }),
+                    EngineCommand::ClearGainPreview { gesture_id } => {
+                        contain_command_panic("ClearGainPreview", || {
+                            handle_clear_gain_preview(&mut state, gesture_id)
+                        })
+                    }
                     EngineCommand::RenderedClipsChanged => {
                         contain_command_panic("RenderedClipsChanged", || {
                             handle_rendered_clips_changed(&mut state)
@@ -900,6 +927,7 @@ impl AudioEngine {
         Self {
             tx,
             snapshot,
+            live_gain,
             is_playing,
             play_start_wait,
             target,
@@ -946,6 +974,20 @@ impl AudioEngine {
 
     pub fn update_timeline(&self, timeline: TimelineState) {
         self.dispatch(EngineCommand::UpdateTimeline(timeline));
+    }
+
+    /// 拖动增益的瞬时试听。轻量命令：不取时间线锁、不写 undo、不返回 payload。
+    pub fn set_gain_preview(&self, gesture_id: String, seq: u64, targets: Vec<GainPreviewTarget>) {
+        self.dispatch(EngineCommand::SetGainPreview {
+            gesture_id,
+            seq,
+            targets,
+        });
+    }
+
+    /// 手势结束/取消：只清同名试听（迟到 clear 不会误伤新手势）。
+    pub fn clear_gain_preview(&self, gesture_id: String) {
+        self.dispatch(EngineCommand::ClearGainPreview { gesture_id });
     }
 
     pub fn seek_sec(&self, sec: f64) {
@@ -1020,7 +1062,7 @@ impl AudioEngine {
         let snap = self.snapshot.load();
         snap.clips
             .iter()
-            .any(|c| c.needs_synthesis && c.rendered_pcm.is_none())
+            .any(|c| c.gain != 0.0 && c.needs_synthesis && c.rendered_pcm.is_none())
     }
 
     pub fn snapshot_state(&self) -> AudioEngineStateSnapshot {
@@ -1197,6 +1239,11 @@ struct EngineWorkerState<'a> {
     position_frames: &'a Arc<AtomicU64>,
     duration_frames: &'a Arc<AtomicU64>,
     snapshot: &'a Arc<ArcSwap<EngineSnapshot>>,
+    live_gain: &'a Arc<ArcSwap<LiveGainFrame>>,
+    /// 当前手势的试听目标（只由 worker 线程读写）。
+    live_gain_targets: &'a mut Option<GainPreviewState>,
+    /// 被换下的试听帧暂存区：析构绝不能在音频线程上发生。
+    retired_live_gains: &'a mut RetirementKeeper<Arc<LiveGainFrame>>,
     cache: &'a Arc<Mutex<ByteBudgetCache<(PathBuf, u32), ResampledStereo>>>,
     stretch_cache: &'a Arc<Mutex<ByteBudgetCache<StretchKey, ResampledStereo>>>,
     stretch_inflight: &'a Arc<Mutex<HashSet<StretchKey>>>,
@@ -1244,6 +1291,9 @@ fn handle_stop(s: &mut EngineWorkerState) {
         s.base_frames.store(0, Ordering::Relaxed);
     }
     *s.last_play_file = None;
+    *s.live_gain_targets = None;
+    let snap = s.snapshot.load_full();
+    publish_live_gain_frame(s, &snap);
     idle_track_meter_state(s.meter_state, s.meter_generation);
     // ★ 起播等待期的垫音抑制随播放会话结束而清空：抑制集合表达的是"本次
     // 起播时哪些 clip 未就绪"（见 synth_clip_cache 的垫音抑制说明），跨会话
@@ -1364,7 +1414,13 @@ fn handle_default_output_device_changed(
 
     // 1) 预构建快照（尚未发布）。
     let new_snapshot = if let Some(timeline) = s.last_timeline.as_ref() {
-        build_snapshot(timeline, new_sr, s.cache, s.stretch_cache)
+        build_snapshot(
+            timeline,
+            new_sr,
+            s.cache,
+            s.stretch_cache,
+            crate::gain::GainScope::AppOwned,
+        )
     } else if let Some((path, _offset, _target)) = s.last_play_file.as_ref() {
         // 【偏移不能重复累加】`handle_play_file` 把 `base_frames` 设成
         // `offset * sr`，因此 `audible_sec` 里已经包含 offset；这里再 `+offset`
@@ -1385,6 +1441,7 @@ fn handle_default_output_device_changed(
         sample_format,
         channels,
         snapshot: s.snapshot.clone(),
+        live_gain: s.live_gain.clone(),
         is_playing: is_playing.clone(),
         play_start_wait: play_start_wait.clone(),
         position_frames: position_frames.clone(),
@@ -1422,12 +1479,12 @@ fn handle_default_output_device_changed(
     let (new_base, new_position) =
         super::device_watch::rescale_position_frames(old_base, old_position, old_sr, new_sr);
     *sr = new_sr;
+    s.sr = new_sr;
     sample_rate.store(new_sr, Ordering::Relaxed);
     s.base_frames.store(new_base, Ordering::Relaxed);
     s.position_frames.store(new_position, Ordering::Relaxed);
     duration_frames.store(new_duration_frames, Ordering::Relaxed);
-    s.retired_snapshots
-        .retire(s.snapshot.swap(Arc::new(new_snapshot)));
+    publish_snapshot(s, new_snapshot);
     s.play_start_wait.store(false, Ordering::Relaxed);
     if let Some((_, offset, _)) = s.last_play_file.as_mut() {
         *offset = audible_sec.max(0.0);
@@ -1483,10 +1540,16 @@ fn handle_rendered_clips_changed(s: &mut EngineWorkerState) {
     let Some(tl) = s.last_timeline.clone() else {
         return;
     };
-    let snap = build_snapshot(&tl, s.sr, s.cache, s.stretch_cache);
+    let snap = build_snapshot(
+        &tl,
+        s.sr,
+        s.cache,
+        s.stretch_cache,
+        crate::gain::GainScope::AppOwned,
+    );
     s.duration_frames
         .store(snap.duration_frames, Ordering::Relaxed);
-    s.retired_snapshots.retire(s.snapshot.swap(Arc::new(snap)));
+    publish_snapshot(s, snap);
     idle_track_meter_state(s.meter_state, s.meter_generation);
 }
 
@@ -1564,6 +1627,408 @@ fn invalidate_root_group_clips(tl: &TimelineState, root_id: Option<&str>) -> boo
         }
     }
     invalidated
+}
+
+/// 当前试听手势的目标。seq 单调：迟到包不会覆盖新值。
+struct GainPreviewState {
+    gesture_id: String,
+    seq: u64,
+    targets: Vec<GainPreviewTarget>,
+}
+
+#[derive(Default)]
+struct ClipPreview<'a> {
+    item_gain: Option<f32>,
+    take_gain: Option<f32>,
+    fade_in_sec: Option<f64>,
+    fade_out_sec: Option<f64>,
+    fade_in_shape: Option<f64>,
+    fade_in_dir: Option<f64>,
+    fade_out_shape: Option<f64>,
+    fade_out_dir: Option<f64>,
+    volume_curve_window: Option<&'a VolumeCurveWindow>,
+}
+
+fn preview_clip_gain(clip: &crate::state::Clip, item: Option<f32>, take: Option<f32>) -> f32 {
+    let item = crate::gain::clamp_gain(item.unwrap_or(clip.clip_gain));
+    let take = crate::gain::clamp_take_gain(take.unwrap_or(clip.gain));
+    let product = item * take;
+    if product.is_finite() {
+        product.clamp(
+            -crate::gain::GAIN_PRODUCT_MAX,
+            crate::gain::GAIN_PRODUCT_MAX,
+        )
+    } else {
+        1.0
+    }
+}
+
+fn track_gain_with_overrides(
+    track_id: &str,
+    tracks_by_id: &HashMap<&str, &crate::state::Track>,
+    overrides: &HashMap<&str, f32>,
+) -> f32 {
+    let mut gain = 1.0f32;
+    let mut current = Some(track_id);
+    let mut safety = 0;
+    while let Some(id) = current {
+        let Some(track) = tracks_by_id.get(id) else {
+            break;
+        };
+        gain *= crate::gain::clamp_gain(overrides.get(id).copied().unwrap_or(track.volume));
+        current = track.parent_id.as_deref();
+        safety += 1;
+        if safety > 2048 {
+            break;
+        }
+    }
+    gain
+}
+
+fn build_live_fade(
+    clip: &crate::state::Clip,
+    preview: &ClipPreview<'_>,
+    sample_rate: u32,
+) -> LiveFade {
+    let in_sec = preview
+        .fade_in_sec
+        .unwrap_or_else(|| clip.effective_fade_in_sec())
+        .max(0.0);
+    let out_sec = preview
+        .fade_out_sec
+        .unwrap_or_else(|| clip.effective_fade_out_sec())
+        .max(0.0);
+    let fade_in_frames = (in_sec * sample_rate as f64).round().max(0.0) as u64;
+    let fade_out_frames = (out_sec * sample_rate as f64).round().max(0.0) as u64;
+    let fade_in_shape = preview.fade_in_shape.unwrap_or(clip.fade_in_shape);
+    let fade_in_dir = preview.fade_in_dir.unwrap_or(clip.fade_in_dir);
+    let fade_out_shape = preview.fade_out_shape.unwrap_or(clip.fade_out_shape);
+    let fade_out_dir = preview.fade_out_dir.unwrap_or(clip.fade_out_dir);
+    LiveFade {
+        fade_in_frames,
+        fade_in_lut: (fade_in_frames > 0)
+            .then(|| crate::fade_curves::global_fade_lut(fade_in_shape, fade_in_dir, false)),
+        fade_out_frames,
+        fade_out_lut: (fade_out_frames > 0)
+            .then(|| crate::fade_curves::global_fade_lut(fade_out_shape, fade_out_dir, true)),
+    }
+}
+
+/// 把一段窗口覆盖叠到基准曲线上。复制只发生在 worker 线程；RT 只读 Arc。
+fn build_live_curve(
+    base: Option<&[f32]>,
+    window: Option<&VolumeCurveWindow>,
+    frames: usize,
+    default_value: f32,
+) -> Arc<Vec<f32>> {
+    let mut curve = base
+        .map(|values| values.to_vec())
+        .unwrap_or_else(|| vec![default_value; frames]);
+    if curve.len() < frames {
+        curve.resize(frames, default_value);
+    }
+    if let Some(window) = window {
+        let stride = window.stride.max(1);
+        for (index, value) in window.values.iter().enumerate() {
+            if !value.is_finite() {
+                continue;
+            }
+            let frame = window
+                .start_frame
+                .saturating_add(index.saturating_mul(stride));
+            if frame < curve.len() {
+                curve[frame] = *value;
+            }
+        }
+    }
+    Arc::new(curve)
+}
+
+fn build_live_gain_frame(s: &EngineWorkerState, snap: &Arc<EngineSnapshot>) -> LiveGainFrame {
+    let Some(tl) = s.last_timeline.as_ref() else {
+        return LiveGainFrame::empty(snap.clone());
+    };
+    let Some(preview) = s.live_gain_targets.as_ref() else {
+        return LiveGainFrame::empty(snap.clone());
+    };
+
+    let mut clip_targets: HashMap<&str, ClipPreview<'_>> = HashMap::new();
+    let mut track_targets: HashMap<&str, f32> = HashMap::new();
+    let mut track_curves: HashMap<&str, &VolumeCurveWindow> = HashMap::new();
+    for target in &preview.targets {
+        match target {
+            GainPreviewTarget::Clip {
+                clip_id,
+                item_gain,
+                take_gain,
+                fade_in_sec,
+                fade_out_sec,
+                fade_in_shape,
+                fade_in_dir,
+                fade_out_shape,
+                fade_out_dir,
+                volume_curve_window,
+            } => {
+                let entry = clip_targets.entry(clip_id.as_str()).or_default();
+                if item_gain.is_some() {
+                    entry.item_gain = *item_gain;
+                }
+                if take_gain.is_some() {
+                    entry.take_gain = *take_gain;
+                }
+                if fade_in_sec.is_some() {
+                    entry.fade_in_sec = *fade_in_sec;
+                }
+                if fade_out_sec.is_some() {
+                    entry.fade_out_sec = *fade_out_sec;
+                }
+                if fade_in_shape.is_some() {
+                    entry.fade_in_shape = *fade_in_shape;
+                }
+                if fade_in_dir.is_some() {
+                    entry.fade_in_dir = *fade_in_dir;
+                }
+                if fade_out_shape.is_some() {
+                    entry.fade_out_shape = *fade_out_shape;
+                }
+                if fade_out_dir.is_some() {
+                    entry.fade_out_dir = *fade_out_dir;
+                }
+                if volume_curve_window.is_some() {
+                    entry.volume_curve_window = volume_curve_window.as_ref();
+                }
+            }
+            GainPreviewTarget::Track { track_id, volume } => {
+                track_targets.insert(track_id.as_str(), *volume);
+            }
+            GainPreviewTarget::TrackCurve {
+                track_id,
+                param_id,
+                window,
+            } => {
+                if param_id == "volume" || param_id == "hifigan_volume" {
+                    track_curves.insert(track_id.as_str(), window);
+                }
+            }
+        }
+    }
+
+    let tracks_by_id: HashMap<&str, &crate::state::Track> = tl
+        .tracks
+        .iter()
+        .map(|track| (track.id.as_str(), track))
+        .collect();
+    let clips_by_id: HashMap<&str, &crate::state::Clip> = tl
+        .clips
+        .iter()
+        .map(|clip| (clip.id.as_str(), clip))
+        .collect();
+    let root_by_track = tl.root_track_map();
+    let frame_period_ms = tl.frame_period_ms();
+    let target_frames = tl.target_param_frames(frame_period_ms);
+
+    // 只有 item/take 改变才会改变 dyn_orig；track 推子不在基线里。
+    let mut affected_roots: HashSet<String> = HashSet::new();
+    for (clip_id, target) in &clip_targets {
+        if target.item_gain.is_none() && target.take_gain.is_none() {
+            continue;
+        }
+        let Some(clip) = clips_by_id.get(clip_id) else {
+            continue;
+        };
+        if let Some(root) = root_of(&root_by_track, &clip.track_id) {
+            affected_roots.insert(root);
+        }
+    }
+    let mut baseline_by_root: HashMap<String, Vec<f32>> = HashMap::new();
+    for root in &affected_roots {
+        let has_dyn = tl
+            .params_by_root_track
+            .get(root)
+            .and_then(|entry| entry.extra_curves.get("dyn"))
+            .is_some_and(|curve| curve.iter().any(|value| value.is_finite() && *value >= 0.0));
+        if !has_dyn {
+            continue;
+        }
+        let mut overrides: HashMap<String, f32> = HashMap::new();
+        for clip in &tl.clips {
+            if root_of(&root_by_track, &clip.track_id).as_deref() != Some(root.as_str()) {
+                continue;
+            }
+            let target = clip_targets.get(clip.id.as_str());
+            overrides.insert(
+                clip.id.clone(),
+                preview_clip_gain(
+                    clip,
+                    target.and_then(|value| value.item_gain),
+                    target.and_then(|value| value.take_gain),
+                ),
+            );
+        }
+        let (baseline, _) =
+            hifishifter_kernel::pitch_analysis::dyn_analysis::assemble_dyn_orig_from_cache_with_gains(
+                tl,
+                root,
+                crate::gain::GainScope::AppOwned,
+                Some(&overrides),
+            );
+        baseline_by_root.insert(root.clone(), baseline);
+    }
+
+    let mut gains = vec![f32::NAN; snap.clips.len()];
+    let mut dyn_curves: Vec<
+        Option<Arc<hifishifter_kernel::renderer::common_params::AudioDynCurves>>,
+    > = vec![None; snap.clips.len()];
+    let mut fades: Vec<Option<LiveFade>> = (0..snap.clips.len()).map(|_| None).collect();
+    let mut volume_curves: Vec<Option<Arc<LiveCurve>>> =
+        (0..snap.clips.len()).map(|_| None).collect();
+
+    for (index, engine_clip) in snap.clips.iter().enumerate() {
+        let Some(clip) = clips_by_id.get(engine_clip.clip_id.as_str()) else {
+            continue;
+        };
+        let clip_preview = clip_targets.get(engine_clip.clip_id.as_str());
+        let track_target = track_targets.get(engine_clip.track_id.as_str()).copied();
+        let has_gain_override = clip_preview
+            .is_some_and(|value| value.item_gain.is_some() || value.take_gain.is_some())
+            || track_target.is_some();
+        if has_gain_override {
+            let audible = preview_clip_gain(
+                clip,
+                clip_preview.and_then(|value| value.item_gain),
+                clip_preview.and_then(|value| value.take_gain),
+            );
+            let track_gain =
+                track_gain_with_overrides(&clip.track_id, &tracks_by_id, &track_targets);
+            gains[index] = audible * track_gain;
+        }
+
+        let root = root_of(&root_by_track, &clip.track_id);
+        if let Some(root) = root.as_deref() {
+            if let Some(baseline) = baseline_by_root.get(root) {
+                if let Some(entry) = tl.params_by_root_track.get(root) {
+                    if let Some(curve) =
+                        crate::pitch_editing::common_dyn_curve_for_clip(entry, clip)
+                    {
+                        let resolved = crate::renderer::common_params::resolve_dyn_curves_for_audio(
+                            curve,
+                            Some(baseline),
+                        );
+                        if !resolved.target.is_empty() {
+                            dyn_curves[index] = Some(Arc::new(resolved));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(preview) = clip_preview {
+            if preview.fade_in_sec.is_some()
+                || preview.fade_out_sec.is_some()
+                || preview.fade_in_shape.is_some()
+                || preview.fade_in_dir.is_some()
+                || preview.fade_out_shape.is_some()
+                || preview.fade_out_dir.is_some()
+            {
+                fades[index] = Some(build_live_fade(clip, preview, s.sr));
+            }
+        }
+
+        let clip_window = clip_preview.and_then(|value| value.volume_curve_window);
+        let track_window = root
+            .as_deref()
+            .and_then(|root| track_curves.get(root).copied());
+        if clip_window.is_some() || track_window.is_some() {
+            let clip_has_volume = clip.extra_curves.as_ref().is_some_and(|curves| {
+                curves.contains_key("volume") || curves.contains_key("hifigan_volume")
+            });
+            if track_window.is_some() && clip_window.is_none() && clip_has_volume {
+                continue;
+            }
+            let base = clip_window
+                .and_then(|_| {
+                    tl.params_by_root_track
+                        .get(root.as_deref().unwrap_or(""))
+                        .and_then(|entry| {
+                            crate::pitch_editing::common_volume_curve_for_clip(entry, clip)
+                        })
+                })
+                .or_else(|| {
+                    root.as_deref().and_then(|root| {
+                        tl.params_by_root_track.get(root).and_then(|entry| {
+                            entry
+                                .extra_curves
+                                .get("volume")
+                                .or_else(|| entry.extra_curves.get("hifigan_volume"))
+                                .map(Vec::as_slice)
+                        })
+                    })
+                });
+            let window = clip_window.or(track_window);
+            volume_curves[index] = Some(Arc::new(LiveCurve {
+                curve: build_live_curve(base, window, target_frames, 1.0),
+                frame_period_ms,
+            }));
+        }
+    }
+
+    LiveGainFrame {
+        snapshot: snap.clone(),
+        gains: Arc::new(gains),
+        dyn_curves: Arc::new(dyn_curves),
+        fades: Arc::new(fades),
+        volume_curves: Arc::new(volume_curves),
+    }
+}
+
+fn publish_live_gain_frame(s: &mut EngineWorkerState, snap: &Arc<EngineSnapshot>) {
+    let frame = if s.last_play_file.is_some() {
+        LiveGainFrame::empty(snap.clone())
+    } else {
+        build_live_gain_frame(s, snap)
+    };
+    let old = s.live_gain.swap(Arc::new(frame));
+    s.retired_live_gains.retire(old);
+}
+
+fn publish_snapshot(s: &mut EngineWorkerState, snap: EngineSnapshot) {
+    let snap = Arc::new(snap);
+    let old = s.snapshot.swap(snap.clone());
+    s.retired_snapshots.retire(old);
+    publish_live_gain_frame(s, &snap);
+}
+
+fn handle_set_gain_preview(
+    s: &mut EngineWorkerState,
+    gesture_id: String,
+    seq: u64,
+    targets: Vec<GainPreviewTarget>,
+) {
+    if let Some(current) = s.live_gain_targets.as_ref() {
+        if current.gesture_id == gesture_id && seq <= current.seq {
+            return;
+        }
+    }
+    *s.live_gain_targets = Some(GainPreviewState {
+        gesture_id,
+        seq,
+        targets,
+    });
+    let snap = s.snapshot.load_full();
+    publish_live_gain_frame(s, &snap);
+}
+
+fn handle_clear_gain_preview(s: &mut EngineWorkerState, gesture_id: String) {
+    let matches = s
+        .live_gain_targets
+        .as_ref()
+        .is_some_and(|current| current.gesture_id == gesture_id);
+    if !matches {
+        return;
+    }
+    *s.live_gain_targets = None;
+    let snap = s.snapshot.load_full();
+    publish_live_gain_frame(s, &snap);
 }
 
 fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
@@ -1860,7 +2325,11 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
             .into_iter()
             .collect();
         for root in roots_using_dyn {
-            if !crate::pitch_analysis::assemble_dyn_orig_for_engine(&mut tl, &root) {
+            if !crate::pitch_analysis::assemble_dyn_orig_for_engine(
+                &mut tl,
+                &root,
+                crate::gain::GainScope::AppOwned,
+            ) {
                 dyn_needs_analysis = true;
             }
         }
@@ -2025,10 +2494,16 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         }
     }
 
-    let snap = build_snapshot(&tl, s.sr, s.cache, s.stretch_cache);
+    let snap = build_snapshot(
+        &tl,
+        s.sr,
+        s.cache,
+        s.stretch_cache,
+        crate::gain::GainScope::AppOwned,
+    );
     s.duration_frames
         .store(snap.duration_frames, Ordering::Relaxed);
-    s.retired_snapshots.retire(s.snapshot.swap(Arc::new(snap)));
+    publish_snapshot(s, snap);
     idle_track_meter_state(s.meter_state, s.meter_generation);
 }
 
@@ -2066,10 +2541,16 @@ fn handle_stretch_ready(s: &mut EngineWorkerState, key: StretchKey) {
     }
 
     if let Some(tl) = s.last_timeline.as_ref() {
-        let snap = build_snapshot(tl, s.sr, s.cache, s.stretch_cache);
+        let snap = build_snapshot(
+            tl,
+            s.sr,
+            s.cache,
+            s.stretch_cache,
+            crate::gain::GainScope::AppOwned,
+        );
         s.duration_frames
             .store(snap.duration_frames, Ordering::Relaxed);
-        s.retired_snapshots.retire(s.snapshot.swap(Arc::new(snap)));
+        publish_snapshot(s, snap);
         idle_track_meter_state(s.meter_state, s.meter_generation);
     }
 }
@@ -2111,14 +2592,20 @@ fn handle_clip_pitch_ready(s: &mut EngineWorkerState, clip_id: String) {
 
     debug_eprintln!("[engine] Building snapshot...");
     if let Some(tl) = s.last_timeline.as_ref() {
-        let snap = build_snapshot(tl, s.sr, s.cache, s.stretch_cache);
+        let snap = build_snapshot(
+            tl,
+            s.sr,
+            s.cache,
+            s.stretch_cache,
+            crate::gain::GainScope::AppOwned,
+        );
         debug_eprintln!(
             "[engine] Snapshot built successfully, duration_frames={}",
             snap.duration_frames
         );
         s.duration_frames
             .store(snap.duration_frames, Ordering::Relaxed);
-        s.retired_snapshots.retire(s.snapshot.swap(Arc::new(snap)));
+        publish_snapshot(s, snap);
         idle_track_meter_state(s.meter_state, s.meter_generation);
         debug_eprintln!("[engine] Snapshot stored, handle_clip_pitch_ready done");
 
@@ -2212,16 +2699,22 @@ fn handle_audio_ready(s: &mut EngineWorkerState, _key: super::types::AudioKey) {
             s.stretch_cache,
             s.app_handle.as_ref(),
         );
-        let snap = build_snapshot(tl, s.sr, s.cache, s.stretch_cache);
+        let snap = build_snapshot(
+            tl,
+            s.sr,
+            s.cache,
+            s.stretch_cache,
+            crate::gain::GainScope::AppOwned,
+        );
         s.duration_frames
             .store(snap.duration_frames, Ordering::Relaxed);
-        s.retired_snapshots.retire(s.snapshot.swap(Arc::new(snap)));
+        publish_snapshot(s, snap);
         idle_track_meter_state(s.meter_state, s.meter_generation);
     } else if let Some((path, offset_sec, _target)) = s.last_play_file.as_ref() {
         let snap = build_snapshot_for_file(path.as_path(), s.sr, *offset_sec, s.cache);
         s.duration_frames
             .store(snap.duration_frames, Ordering::Relaxed);
-        s.retired_snapshots.retire(s.snapshot.swap(Arc::new(snap)));
+        publish_snapshot(s, snap);
         idle_track_meter_state(s.meter_state, s.meter_generation);
     }
 }
@@ -2229,6 +2722,7 @@ fn handle_audio_ready(s: &mut EngineWorkerState, _key: super::types::AudioKey) {
 fn handle_play_file(s: &mut EngineWorkerState, path: PathBuf, offset_sec: f64, target: String) {
     *s.last_timeline = None;
     *s.last_play_file = Some((path.clone(), offset_sec, target.clone()));
+    *s.live_gain_targets = None;
 
     // Request decode asynchronously (snapshot building is cache-only).
     let _ = s.resources.get_or_request(path.as_path(), s.sr);
@@ -2237,7 +2731,7 @@ fn handle_play_file(s: &mut EngineWorkerState, path: PathBuf, offset_sec: f64, t
     let snap = build_snapshot_for_file(&path, s.sr, offset_sec, s.cache);
     s.duration_frames
         .store(snap.duration_frames, Ordering::Relaxed);
-    s.retired_snapshots.retire(s.snapshot.swap(Arc::new(snap)));
+    publish_snapshot(s, snap);
     // File playback reports absolute position via base_sec + position_sec.
     let base = (offset_sec.max(0.0) * s.sr as f64).round().max(0.0) as u64;
     s.base_frames.store(base, Ordering::Relaxed);
@@ -2596,6 +3090,16 @@ mod tests {
         timeline
     }
 
+    /// 试听增益必须保留 0 与负 take：0 能被拉起来，负值仍是反相而不是静音。
+    #[test]
+    fn preview_gain_preserves_zero_and_take_polarity() {
+        let timeline = make_plain_stretch_timeline();
+        let clip = &timeline.clips[0];
+        assert_eq!(preview_clip_gain(clip, Some(0.0), Some(1.0)), 0.0);
+        assert_eq!(preview_clip_gain(clip, Some(2.0), Some(-0.5)), -1.0);
+        assert_eq!(preview_clip_gain(clip, Some(16.0), Some(16.0)), 256.0);
+    }
+
     /// 曲线推送的判据回归。
     ///
     /// 这两类曾经漏发，正是"参数编辑器里留下旧音高线残影"的来源：新建 clip
@@ -2731,6 +3235,11 @@ mod tests {
         let mut last_timeline = Some(Arc::new(timeline));
         let mut last_play_file = None;
         let mut retired_snapshots = RetirementKeeper::<Arc<EngineSnapshot>>::new(3);
+        let live_gain = Arc::new(ArcSwap::from_pointee(LiveGainFrame::empty(Arc::new(
+            EngineSnapshot::empty(44_100),
+        ))));
+        let mut live_gain_targets = None;
+        let mut retired_live_gains = RetirementKeeper::<Arc<LiveGainFrame>>::new(3);
 
         let mut worker = EngineWorkerState {
             sr: 44_100,
@@ -2741,6 +3250,9 @@ mod tests {
             position_frames: &position_frames,
             duration_frames: &duration_frames,
             snapshot: &snapshot,
+            live_gain: &live_gain,
+            live_gain_targets: &mut live_gain_targets,
+            retired_live_gains: &mut retired_live_gains,
             cache: &cache,
             stretch_cache: &stretch_cache,
             stretch_inflight: &stretch_inflight,
@@ -2798,6 +3310,11 @@ mod tests {
         let mut last_timeline = Some(Arc::new(make_plain_stretch_timeline()));
         let mut last_play_file = None;
         let mut retired_snapshots = RetirementKeeper::<Arc<EngineSnapshot>>::new(3);
+        let live_gain = Arc::new(ArcSwap::from_pointee(LiveGainFrame::empty(Arc::new(
+            EngineSnapshot::empty(44_100),
+        ))));
+        let mut live_gain_targets = None;
+        let mut retired_live_gains = RetirementKeeper::<Arc<LiveGainFrame>>::new(3);
 
         let mut worker = EngineWorkerState {
             sr: sample_rate,
@@ -2808,6 +3325,9 @@ mod tests {
             position_frames: &position_frames,
             duration_frames: &duration_frames,
             snapshot: &snapshot,
+            live_gain: &live_gain,
+            live_gain_targets: &mut live_gain_targets,
+            retired_live_gains: &mut retired_live_gains,
             cache: &cache,
             stretch_cache: &stretch_cache,
             stretch_inflight: &stretch_inflight,
@@ -2876,6 +3396,11 @@ mod tests {
             "file".to_string(),
         ));
         let mut retired_snapshots = RetirementKeeper::<Arc<EngineSnapshot>>::new(3);
+        let live_gain = Arc::new(ArcSwap::from_pointee(LiveGainFrame::empty(Arc::new(
+            EngineSnapshot::empty(44_100),
+        ))));
+        let mut live_gain_targets = None;
+        let mut retired_live_gains = RetirementKeeper::<Arc<LiveGainFrame>>::new(3);
 
         let mut worker = EngineWorkerState {
             sr: 44_100,
@@ -2886,6 +3411,9 @@ mod tests {
             position_frames: &position_frames,
             duration_frames: &duration_frames,
             snapshot: &snapshot,
+            live_gain: &live_gain,
+            live_gain_targets: &mut live_gain_targets,
+            retired_live_gains: &mut retired_live_gains,
             cache: &cache,
             stretch_cache: &stretch_cache,
             stretch_inflight: &stretch_inflight,
@@ -2933,6 +3461,11 @@ mod tests {
         let mut last_timeline = Some(Arc::new(timeline.clone()));
         let mut last_play_file = None;
         let mut retired_snapshots = RetirementKeeper::<Arc<EngineSnapshot>>::new(3);
+        let live_gain = Arc::new(ArcSwap::from_pointee(LiveGainFrame::empty(Arc::new(
+            EngineSnapshot::empty(44_100),
+        ))));
+        let mut live_gain_targets = None;
+        let mut retired_live_gains = RetirementKeeper::<Arc<LiveGainFrame>>::new(3);
 
         let mut worker = EngineWorkerState {
             sr: 44_100,
@@ -2943,6 +3476,9 @@ mod tests {
             position_frames: &position_frames,
             duration_frames: &duration_frames,
             snapshot: &snapshot,
+            live_gain: &live_gain,
+            live_gain_targets: &mut live_gain_targets,
+            retired_live_gains: &mut retired_live_gains,
             cache: &cache,
             stretch_cache: &stretch_cache,
             stretch_inflight: &stretch_inflight,

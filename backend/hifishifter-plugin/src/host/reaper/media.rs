@@ -10,7 +10,17 @@ pub(super) type CreateItem = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
 pub(super) type CreateTake = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
 pub(super) type TakeInfo =
     unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_void) -> *mut c_void;
+pub(super) type SetActiveTake = unsafe extern "C" fn(*mut c_void);
+pub(super) type CountTakes = unsafe extern "C" fn(*mut c_void) -> i32;
+pub(super) type TakeString =
+    unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_char, bool) -> bool;
 pub(super) type DeleteItem = unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool;
+/// `int PCM_Source_BuildPeaks(PCM_source* src, int mode)`：对**源**直接构建峰值。
+///
+/// 【为什么是源而不是 item】峰值文件属于源；item 只是它的一个使用者。按 item 那条路
+/// （`Main_OnCommand(40047)`）要求先选中它，而"改用户的选区再改回来"是在用户脸上动手 ——
+/// 有源级入口时就该走源级入口。
+pub(super) type BuildPeaks = unsafe extern "C" fn(*mut c_void, i32) -> i32;
 pub(super) type FilePicker =
     unsafe extern "C" fn(*mut c_char, *const c_char, *const c_char) -> bool;
 pub(super) type MultiPicker = unsafe extern "C" fn(
@@ -48,6 +58,22 @@ pub(super) struct MediaApi {
     pub delete_item: DeleteItem,
     pub track_guid: Guid,
     pub picker: FilePicker,
+    /// `SetActiveTake`：把某个 take 设为 item 的**活动** take。
+    ///
+    /// 【为什么是 Option】缺了它整条媒体创建链仍要能用（旧宿主 / 未来改名），
+    /// 代价只是导入后的 take 可能不是活动 take —— 那一点由下面的自检日志显式说出来，
+    /// 不静默降级。
+    pub set_active_take: Option<SetActiveTake>,
+    /// `CountTakes`：只服务 `[import]` 诊断行（"这个 item 到底有几个 take"）。
+    pub count_takes: Option<CountTakes>,
+    /// `GetSetMediaItemTakeInfo_String`：给 take 起名（`P_NAME`）。
+    pub take_string: Option<TakeString>,
+    /// `PCM_Source_BuildPeaks`：让宿主为某个源建峰值（见 [`HostTrackTarget::kick_peaks`]）。
+    ///
+    /// 【为什么是 Option】缺了它导入照常成立，只是波形要等宿主自己高兴才出现 ——
+    /// 那正是本轮要修的现场。缺省时退到 `Item: Build peaks for selected items` 那条
+    /// 宿主动作（见 `host_action`），两条都没有才明确降级。
+    pub build_peaks: Option<BuildPeaks>,
 }
 pub(super) struct ExtendedMedia {
     pub picker: Option<MultiPicker>,
@@ -271,6 +297,10 @@ impl NativeHost {
             return self.on_host(|| self.pick_audio_paths(multiple, authorized))?;
         }
         self.project(authorized)?;
+        // 【为什么选文件也要包住】宿主的选择器是**模态**的：它跑在自己的消息循环里，
+        // 期间可能把挂起的事件泵进来（包括 ARA 回调）。守卫让那些回调知道自己在一次
+        // 宿主调用里 —— 否则它们会在模态循环内部去等准备 worker，把选择器一起拖死。
+        let _call = crate::host::HostCallGuard::enter("host.pick_audio");
         if let Some(picker) = self.extended_media.as_ref().and_then(|m| m.picker) {
             let mut bytes = vec![0_u8; 65536];
             if !checked(authorized, || unsafe {
@@ -354,6 +384,9 @@ impl NativeHost {
             Ok(result)
         };
         let before = enumerate()?;
+        // 【为什么要包住插入】插入轨道会改变工程的轨道集合，宿主的 ARA 文档随之重建
+        // （region 重新分配 / `beginEditing`）。这次重入比一次字段写入重得多。
+        let _call = crate::host::HostCallGuard::enter("track.create");
         // `IP_TRACKNUMBER` 是 1-based；`InsertTrackInProject` 的 idx 是 0-based，且
         // 插入后新轨道占据 idx。因此"插在 IP_TRACKNUMBER=N 的轨道之后" = `idx = N`。
         let insert_at = match after_track_order {
@@ -601,6 +634,7 @@ impl HostTrackTarget {
             return Err("copied active take identity differs from prepared state".into());
         }
         created.verify(authorized)?;
+        let _call = crate::host::HostCallGuard::enter("item.paste");
         checked(authorized, || unsafe { (write.update)(item) })?;
         checked(authorized, || unsafe { (write.arrange)() })?;
         created.committed = true;
@@ -658,6 +692,11 @@ impl HostTrackTarget {
                 .on_host(|| self.import_audio(path, start_sec, authorized))?;
         }
         self.verify(authorized)?;
+        // 【为什么整笔导入都要包住】它在宿主里连续做四件会触发重入的事：建 source、
+        // 建 item、建 take、`UpdateItem`+`UpdateArrange`。现场就是在这里挂起的 ——
+        // 最后的 `UpdateArrange` 同步触发 ARA `endEditing`，而那次回调去等了 2 s 的
+        // 准备 worker。守卫的覆盖范围必须包含**整笔**，否则前面几步触发的回调照样会等。
+        let _call = crate::host::HostCallGuard::enter("import_audio");
         if !std::path::Path::new(path).is_absolute()
             || path.len() > 32767
             || !start_sec.is_finite()
@@ -665,6 +704,13 @@ impl HostTrackTarget {
         {
             return Err("absolute audio path and nonnegative finite start required".into());
         }
+        // take 的名字（`P_NAME`）。在 path 被移进 CString 之前取出来：现场看到
+        // "take 是空的"，而一个没有名字的 take 在宿主的 take 列表里就是一行空白，
+        // 与"音频没挂上"完全无法区分。
+        let file_stem = std::path::Path::new(path)
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| String::from("imported audio"));
         let path = CString::new(path).map_err(|_| "audio path contains NUL")?;
         let media = self
             .host
@@ -752,15 +798,289 @@ impl HostTrackTarget {
         })?;
         verify()?;
         // 此setter无bool失败返回；调用发生即把新源交给宿主，随后租约失效也不能双重释放。
+        // 交接出去的指针值留一份：下面的自检要证明"活动 take 的 source 就是它"。
+        let handed_over = source.pointer;
         unsafe { (media.take_info)(take, c"P_SOURCE".as_ptr(), source.pointer) };
         source.pointer = std::ptr::null_mut();
         if !old.is_null() {
             unsafe { (media.destroy_source)(old) };
         }
         verify()?;
+        // ── take 的写后自检 ────────────────────────────────────────────────
+        //
+        // 【为什么必须做】现场观察到"item 建出来了、take 却是空的"。此前的日志只能证明
+        // **item** 的 GUID —— 而音频真正挂上去的地方是 **take**，它的状态从来没有被读过。
+        // 于是"导入失败"与"take 没填"只能靠猜。这三步把 take 变成**可读的事实**：
+        // 活动 take 是谁、名字是什么、P_SOURCE 是不是我们刚交出去的那个指针。
+        //
+        // 【为什么还要 SetActiveTake】新建 item 只有一个 take，但"存在"不等于"活动"：
+        // 宿主侧读 take 的路径（渲染、状态块、拷贝）取的是 active take，不设的话它可能
+        // 指向别处（或为空），表现为"item 在、音频不在"。
+        if let Some(set_active_take) = media.set_active_take {
+            checked(authorized, || unsafe { set_active_take(take) })?;
+        } else {
+            log::warn!(
+                "[import] SetActiveTake is unavailable; the created take may not be the active one"
+            );
+        }
+        if let Some(set_string) = media.take_string {
+            if let Ok(name) = CString::new(file_stem.clone()) {
+                verify()?;
+                checked(authorized, || unsafe {
+                    set_string(take, c"P_NAME".as_ptr(), name.as_ptr() as *mut c_char, true)
+                })?;
+            }
+        }
+        verify()?;
+        // 活动 take 优先按宿主自己的答案取（GetActiveTake 已在 SplitApi 里）；
+        // 没有这个 API 时退回刚创建的那个 take —— 那正是我们唯一建过的 take。
+        let active = match self.host.split.as_ref() {
+            Some(split) => checked(authorized, || unsafe { (split.active_take)(item) })?,
+            None => take,
+        };
+        let active_source = if active.is_null() {
+            std::ptr::null_mut()
+        } else {
+            checked(authorized, || unsafe {
+                (media.take_info)(active, c"P_SOURCE".as_ptr(), std::ptr::null_mut())
+            })?
+        };
+        let takes = match media.count_takes {
+            Some(count) => checked(authorized, || unsafe { count(item) })?,
+            None => 1,
+        };
+        let active_guid = if active.is_null() {
+            String::from("-")
+        } else {
+            read_guid(api.take_guid, active, authorized).unwrap_or_else(|_| String::from("-"))
+        };
+        let source_state = if active_source.is_null() {
+            "none"
+        } else if active_source == handed_over {
+            "match"
+        } else {
+            "mismatch"
+        };
+        if source_state != "match" {
+            // 自检不过 = 这一笔导入在宿主侧是坏的。删掉它（CreatedItem 的 Drop 会做），
+            // 不留一个"看起来有 item、实际没有音频"的残骸 —— 那正是用户看到的现场。
+            log::warn!(
+                "[import] item={guid} takes={takes} active={active_guid} source={source_state} len={length:.6} name={file_stem} verdict=rolled-back"
+            );
+            return Err("imported take did not keep the audio source".into());
+        }
+        // 一行日志回答"item / take / source 各是什么状态"。区域是否绑定由插件的回执
+        // 泵另行记录（那一层才知道 ARA 图），这里只报宿主侧的事实。
+        log::info!(
+            "[import] item={guid} takes={takes} active={active_guid} source={source_state} len={length:.6} name={file_stem} verdict=ok"
+        );
         checked(authorized, || unsafe { (write.update)(item) })?;
         checked(authorized, || unsafe { (write.arrange)() })?;
         created.committed = true;
         Ok(guid)
+    }
+}
+
+/// `CountTrackMediaItems(MediaTrack*)` / `GetTrackMediaItem(MediaTrack*, int)`。
+type CountItems = unsafe extern "C" fn(*mut c_void) -> i32;
+type GetItemAt = unsafe extern "C" fn(*mut c_void, i32) -> *mut c_void;
+
+/// 一条轨道上一次导入能枚举的 item 数上限（与清单枚举同一道预算）。
+const MAX_ITEMS: i32 = 10_000;
+
+/// `PCM_Source_BuildPeaks` 的 `mode`：**缺才建**。官方取值 0；1 是强制重建。
+///
+/// 【为什么是 0 而不是 1】导入的源刚被宿主接手，缓存里通常没有它的峰值；0 于是等价于
+/// "建"，而"已经有了"时它什么都不做 —— 同一次导入被重试两次也不会白重算一份几十 MB 的
+/// `.reapeaks`。
+const BUILD_PEAKS_IF_MISSING: i32 = 0;
+
+/// 一次峰值踢的结论。只服务 `[import] peaks` 那一行与用例断言 —— 它不改导入的成败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PeakKick {
+    /// 宿主直接回答了构建进度（非零 = 这一轮已完成，0 = 还有活）。
+    Built(i32),
+    /// 走了宿主动作那条路（动作没有返回值）。
+    Action,
+    /// item 已经不在了：用户撤回了这次导入，正常结束。
+    Gone,
+    /// 没有踢，原因在这里（`host-call` / `repeat` / `no-source` / `no-api`）。
+    Skipped(&'static str),
+}
+
+impl HostTrackTarget {
+    /// 让宿主为**刚导入的 item** 建一次峰值。
+    ///
+    /// # 三条必须守住的纪律
+    ///
+    /// 1. **绝不在另一次宿主调用里踢**。REAPER 的峰值作业由它自己的峰值工作者在
+    ///    **空闲期**执行；在一个宿主回调里请求它，等于把这一轮空闲用掉了 —— 那正是
+    ///    "item 建出来了、波形却是空白，要切窗口才出现"的成因。所以这里第一件事就是
+    ///    读 `in_host_call()`，为真直接拒绝：这个不变量的**执行者**是函数本身，不是
+    ///    调用方的记性。
+    /// 2. **一条 item 只踢一次**（`NativeHost::peaks_kicked` 记最近若干条）。重复请求
+    ///    本身无害，但"每次导入一行 `[import] peaks`"这条契约会因为重试而失真。
+    /// 3. **找不到 item 不算错误**。用户撤销 / 删掉那条 item 是正常操作，安静返回即可；
+    ///    只有"API 在、调用失败"才值得报错。
+    pub(crate) fn kick_peaks(
+        &self,
+        item_guid: &str,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<PeakKick, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            return self
+                .host
+                .on_host(|| self.kick_peaks(item_guid, authorized))?;
+        }
+        if crate::host::in_host_call() {
+            return Ok(PeakKick::Skipped("host-call"));
+        }
+        if self.host.peaks_kicked(item_guid) {
+            return Ok(PeakKick::Skipped("repeat"));
+        }
+        let media = self
+            .host
+            .media
+            .as_ref()
+            .ok_or("REAPER media API unavailable")?;
+        let Some(item) = self.imported_item(item_guid, authorized)? else {
+            self.report_peaks(item_guid, "absent", PeakKick::Gone);
+            return Ok(PeakKick::Gone);
+        };
+        let take = self.imported_take(item, authorized)?;
+        let source = match take {
+            None => None,
+            Some(take) => Some(checked(authorized, || unsafe {
+                (media.take_info)(take, c"P_SOURCE".as_ptr(), std::ptr::null_mut())
+            })?),
+        }
+        .filter(|pointer| !pointer.is_null());
+        let source_state = if source.is_some() { "ok" } else { "absent" };
+        let kick = match (source, take, media.build_peaks) {
+            (None, _, _) => PeakKick::Skipped("no-source"),
+            (Some(source), _, Some(build)) => {
+                // 【为什么这一次要包守卫】它是**新的一次**宿主调用（导入那一次早已结束），
+                // 守卫在这里只负责计时与停滞登记 —— 峰值构建是宿主内部排一个作业，很短。
+                let _call = crate::host::HostCallGuard::enter("import.peaks");
+                PeakKick::Built(checked(authorized, || unsafe {
+                    build(source, BUILD_PEAKS_IF_MISSING)
+                })?)
+            }
+            (Some(_), Some(take), None) => {
+                let _call = crate::host::HostCallGuard::enter("import.peaks");
+                self.host.run_item_action(
+                    item,
+                    take,
+                    &super::host_action::BUILD_PEAKS,
+                    authorized,
+                )?;
+                PeakKick::Action
+            }
+            // 源在、却没有两个入口中的任何一个：明确降级，不静默。
+            (Some(_), None, None) => PeakKick::Skipped("no-api"),
+        };
+        self.report_peaks(item_guid, source_state, kick);
+        if matches!(kick, PeakKick::Built(_) | PeakKick::Action) {
+            self.host.remember_peaks_kick(item_guid);
+        }
+        Ok(kick)
+    }
+
+    /// 这条 item 上"峰值该建在哪条 take 的源上"。
+    ///
+    /// 【为什么不是直接用 active take】`GetActiveTake` 只随 `SplitApi` 一起装（那一束是
+    /// "能写才齐备"的能力束），而峰值与写回无关：读清单时宿主只要给出 take 就够了。
+    /// 于是这里按"活动 take → 第一条 take"两级取：新建 item 只有一个 take，第一条就是它。
+    fn imported_take(
+        &self,
+        item: *mut c_void,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<Option<*mut c_void>, String> {
+        if let Some(split) = self.host.split.as_ref() {
+            let take = checked(authorized, || unsafe { (split.active_take)(item) })?;
+            if !take.is_null() {
+                return Ok(Some(take));
+            }
+        }
+        let Some(api) = self.host.take_enum.as_ref() else {
+            return Ok(None);
+        };
+        let total = checked(authorized, || unsafe { (api.count)(item) })?;
+        if total <= 0 {
+            return Ok(None);
+        }
+        let take = checked(authorized, || unsafe { (api.at)(item, 0) })?;
+        Ok((!take.is_null()).then_some(take))
+    }
+
+    /// 本轨上 GUID 等于 `item_guid` 的那条 item；没有枚举接口或它已经不在时为 `None`。
+    ///
+    /// 【为什么按 GUID 而不是"刚创建的那个指针"】`import_audio` 返回之后，item 的所有权
+    /// 已经在宿主手里；跨越"返回"再去撞一个裸指针，等于假设宿主没有重建过它。GUID 是
+    /// 宿主自己发的身份，按它找回对象是唯一不依赖时间的做法。
+    fn imported_item(
+        &self,
+        item_guid: &str,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<Option<*mut c_void>, String> {
+        let Ok(count) = self
+            .host
+            .native_api::<CountItems>(c"CountTrackMediaItems", authorized)
+        else {
+            return Ok(None);
+        };
+        let Ok(at) = self
+            .host
+            .native_api::<GetItemAt>(c"GetTrackMediaItem", authorized)
+        else {
+            return Ok(None);
+        };
+        let geometry = self
+            .host
+            .geometry
+            .as_ref()
+            .ok_or("REAPER geometry API unavailable")?;
+        let track = self.track as *mut c_void;
+        let total = checked(authorized, || unsafe { count(track) })?;
+        if !(0..=MAX_ITEMS).contains(&total) {
+            return Err("host track item count budget exceeded".into());
+        }
+        for index in 0..total {
+            let item = checked(authorized, || unsafe { at(track, index) })?;
+            if item.is_null() {
+                continue;
+            }
+            if read_guid(geometry.item_guid, item, authorized)
+                .ok()
+                .as_deref()
+                == Some(item_guid)
+            {
+                return Ok(Some(item));
+            }
+        }
+        Ok(None)
+    }
+
+    /// 一行 `[import] peaks` 把三位读数写出来：哪条 item、源在不在、踢的结果是什么。
+    ///
+    /// 【为什么 result 必须落日志】这条能力是"看不见的"：峰值建没建，界面在下一帧才说
+    /// 话，而下一帧可能永远不来（宿主没排作业）。没有这一行，"导入后没有波形"就只能靠
+    /// 猜是缓存目录、源坏了、还是根本没请求过。
+    fn report_peaks(&self, item_guid: &str, source_state: &str, kick: PeakKick) {
+        match kick {
+            PeakKick::Built(result) => {
+                log::info!("[import] peaks guid={item_guid} source={source_state} result={result}")
+            }
+            PeakKick::Action => {
+                log::info!("[import] peaks guid={item_guid} source={source_state} result=action")
+            }
+            PeakKick::Gone => {
+                log::info!("[import] peaks guid={item_guid} source={source_state} result=gone")
+            }
+            PeakKick::Skipped(reason) => log::warn!(
+                "[import] peaks guid={item_guid} source={source_state} result=skipped:{reason}"
+            ),
+        }
     }
 }

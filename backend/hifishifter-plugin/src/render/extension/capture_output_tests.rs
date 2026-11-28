@@ -33,6 +33,177 @@ fn record(owner: &Arc<ExtensionOwner>, frames: usize) {
     owner.capture().stop().unwrap();
 }
 
+/// **不变量：渲染那一趟即使开着监听也不直通。**
+///
+/// 【现场原形】VEGAS 的 Render As 不置 kOffline，于是旧判据 monitor && !offline
+/// 在渲染那一趟为真 ⇒ 直通把输入原声写进产物。
+#[test]
+fn a_render_with_monitor_does_not_pass_through() {
+    let mut evidence = super::BlockEvidence::default();
+    evidence.playing = false;
+    evidence.start_window = false;
+    assert!(
+        !super::playback::live_monitor_allowed(
+            true,
+            false,
+            super::CapturePassKind::Render,
+            Some(evidence)
+        ),
+        "被判成渲染的那一遍不得直通"
+    );
+}
+
+/// **不变量：实时监听照旧直通。**
+#[test]
+fn a_realtime_monitor_still_passes_through() {
+    let mut evidence = super::BlockEvidence::default();
+    evidence.playing = true;
+    assert!(super::playback::live_monitor_allowed(
+        true,
+        false,
+        super::CapturePassKind::Realtime,
+        Some(evidence)
+    ));
+    // 起播窗口里 kPlaying 还没升起，但窗口本身是"这一块会被播出来"的证据。
+    let mut rising = super::BlockEvidence::default();
+    rising.start_window = true;
+    assert!(super::playback::live_monitor_allowed(
+        true,
+        false,
+        super::CapturePassKind::Realtime,
+        Some(rising)
+    ));
+    // 宿主明说离线：绝不直通。
+    assert!(!super::playback::live_monitor_allowed(
+        true,
+        true,
+        super::CapturePassKind::Realtime,
+        Some(evidence)
+    ));
+}
+
+/// 在工程 start 帧处录一段并 promote 成一个 take。
+///
+/// 【为什么要能指定起点】本轮两个现象都只在「片段不在工程 0」时出现：预览里片段在
+/// 28.000 s、Render As 的窗口也从 28.000 s 起。只录 0 起点的用例永远走不到那条路。
+fn record_at(owner: &Arc<ExtensionOwner>, start: i64, frames: usize) {
+    owner.capture().start().unwrap();
+    let samples: &'static [f32] = Box::leak(vec![0.25_f32; frames].into_boxed_slice());
+    owner.capture().on_block(InputBlock {
+        start,
+        frames,
+        sample_rate: 48_000.0,
+        planes: [Some(samples), Some(samples)],
+        playing: true,
+    });
+    owner.capture().stop().unwrap();
+}
+
+/// **不变量：读位置由片段在工程里的位置决定，不由宿主播放头决定。**
+///
+/// 【现场原形】VEGAS 把捕获片段放在 28.000 s，projectTimeSamples 却停在 18.62 s。
+/// 第三轮把 raw 当起点 ⇒ 整段平移 18.62 s；第四轮把 0 当起点 ⇒ 前 28 s 落在快照
+/// 窗口之外 ⇒ 直通。唯一有证据的答案是**片段自己**。
+#[test]
+fn project_position_follows_the_clip_not_the_playhead() {
+    const RATE: i64 = 48_000;
+    const START: i64 = 28 * RATE;
+    let owner = insert_owner();
+    record_at(&owner, START, RATE as usize);
+    // 宿主读数（893 720 = 18.62 s）只作消歧线索，绝不参与换算。
+    assert_eq!(
+        owner.project_position_for_tape(0, 893_720, 893_720),
+        START,
+        "磁带第 0 帧在工程 28.000 s"
+    );
+    assert_eq!(
+        owner.project_position_for_tape(RATE / 2, 893_720, 893_720),
+        START + RATE / 2,
+        "逐帧跟随，步长就是 1:1"
+    );
+}
+
+/// **不变量：预览从播放头起播时，读位置就是播放头，而不是片段起点。**
+///
+/// 【现场原形】VEGAS 预览：片段在 15.000 s，播放头在 33.625 s（1 614 000），预卷从
+/// 播放头开始喂 9 040 帧。第五轮把喂入域 0 锚在片段起点 ⇒ 整段预卷读的是
+/// `[15.000 s, 15.188 s]`，而宿主正在播 `[33.625 s, 33.813 s]`。用户听到的就是
+/// "片段起点的处理结果"，直到 kPlaying 升起、喂入流切回传输域才恢复 —— 这就是
+/// "起播 1 s 内内容完全错误"。
+#[test]
+fn a_preview_that_starts_mid_item_reads_from_the_playhead() {
+    const RATE: i64 = 48_000;
+    const START: i64 = 15 * RATE;
+    let owner = insert_owner();
+    // 片段 15.000 s 起、长 4 s；播放头落在片段中间（17.000 s）。
+    record_at(&owner, START, 4 * RATE as usize);
+    let playhead = 17 * RATE;
+    assert_eq!(
+        owner.project_position_for_tape(0, playhead, playhead),
+        playhead,
+        "喂入域第 0 帧就是播放头那一刻"
+    );
+    assert_eq!(
+        owner.project_position_for_tape(9_040, playhead, playhead),
+        playhead + 9_040,
+        "逐帧跟随，步长 1:1"
+    );
+}
+
+/// **不变量：锚点越过片段末尾就没有映射（退回直通），不许接着数。**
+///
+/// 【为什么要紧】接着数会让读位置落到快照窗口之外，而 `layered` 在那里的行为是
+/// "回退宿主原声" —— 读数说 `processed`、听感是原声，这正是最难诊断的一类错位。
+#[test]
+fn an_anchor_never_runs_past_the_item_end() {
+    const RATE: i64 = 48_000;
+    const START: i64 = 15 * RATE;
+    let owner = insert_owner();
+    record_at(&owner, START, RATE as usize);
+    let playhead = START + RATE / 2;
+    assert_eq!(
+        owner.project_position_for_tape(RATE / 2 - 1, playhead, playhead),
+        playhead + RATE / 2 - 1
+    );
+    assert_eq!(
+        owner.project_position_for_tape(RATE / 2, playhead, playhead),
+        super::NO_POSITION,
+        "片段末尾之后没有映射"
+    );
+}
+
+/// **不变量：锚点对整条喂入流恒定，中途的宿主读数不参与。**
+///
+/// 【为什么必须恒定】钉住流里宿主已经把位置钉住，后面的块报的是同一个数；若每块都按
+/// 它重算，锚点会随读数抖动而抖动——那正是"每一块都跳一下"的来源。
+#[test]
+fn the_anchor_is_chosen_once_per_feed() {
+    const RATE: i64 = 48_000;
+    const START: i64 = 15 * RATE;
+    let owner = insert_owner();
+    record_at(&owner, START, 4 * RATE as usize);
+    let playhead = 17 * RATE;
+    let first = owner.project_position_for_tape(0, playhead, playhead);
+    // 同一块之后宿主报了一个完全不同的位置：首块读数才是这条流的锚点。
+    let later = owner.project_position_for_tape(0, playhead, START);
+    assert_eq!(first, playhead);
+    assert_eq!(later, first, "同一条流中途改读数不许挪动锚点");
+}
+
+/// **不变量：没有映射时读位置是「未知」，不是 0。**
+///
+/// 【为什么必须显式】0 是一个合法的工程位置。把「不知道」答成 0，输出就会去读快照
+/// 的第 0 帧 —— 那正是「前 N 秒是另一段内容」的来源。未知必须是可判定的状态。
+#[test]
+fn no_mapping_means_passthrough_not_garbage() {
+    let owner = insert_owner();
+    assert_eq!(
+        owner.project_position_for_tape(0, 893_720, 893_720),
+        super::NO_POSITION,
+        "没有素材就没有映射，读位置必须是未知"
+    );
+}
+
 /// 一份可发布的最小快照（处理结果的替身）。
 fn processed_snapshot() -> crate::render::snapshot::PlaybackSnapshot {
     crate::render::snapshot::PlaybackSnapshot {
@@ -2763,4 +2934,258 @@ fn event_relative_switch_maps_the_event_start_to_local_zero() {
         "整条 take 必须平移 -event_start"
     );
     assert_eq!(switched.timebase, TimebaseKind::EventRelative);
+}
+
+/// 让几何认为"宿主这一块送来了彼此不同的音频"。
+///
+/// 【为什么测试里要手工置位】这一位在生产路径由 `capture_observe` 按内容指纹写；
+/// 本组用例只驱动**位置记账**（不喂样本），所以直接把结论写进去 —— 它等价于
+/// "宿主在送变化的音频"，而这正是渲染现场的事实（素材不是周期信号，产物却周期）。
+fn host_is_feeding_changing_audio(owner: &Arc<ExtensionOwner>) {
+    let geometry = &owner.streams[ProcessStream::Realtime.index()];
+    geometry.activity_changed.store(1, Ordering::Release);
+    geometry.last_block_silent.store(false, Ordering::Release);
+}
+
+/// **回归：一次 VEGAS `Render As` 只喂一条时间轴，位置一路向前。**
+///
+/// 【现场原形】宿主不报 kPlaying、位置钉在 0，却持续把彼此不同的音频按块喂进来。
+/// 旧实现把"起点窗口"当成"条件成立就重开"，于是每 49 152 帧（1.024 s）开一个新 epoch，
+/// 而新 epoch 把位置重锚回 `raw_start` = 0 —— 产物就是前一秒复读 31 遍。
+///
+/// 【这条用例钉的是结果而不是机制】它只关心三件事：整段只有一个 pass、位置严格向前、
+/// 读游标一次都没有被纠正。任何"边界重开窗口"的改动都会让第一个断言变红。
+#[test]
+fn a_vegas_render_feeds_the_whole_take_once() {
+    let owner = insert_owner();
+    // 宿主不报传输（kPlaying = 0）、位置钉在 0：这正是渲染现场的形状。
+    let context = crate::block_context::BlockContext {
+        sample_rate: 48_000.0,
+        project_time_samples: 0,
+        playing: false,
+        ..Default::default()
+    };
+    // 与现场产物同长（31.798562 s），块长按渲染的实际节奏混合。
+    const TOTAL: usize = 1_526_331;
+    const SIZES: [usize; 6] = [512, 1_024, 2_048, 4_096, 16_384, 960];
+    let mut fed = 0usize;
+    let mut next_position = Some(0i64);
+    let mut index = 0usize;
+    while fed < TOTAL {
+        host_is_feeding_changing_audio(&owner);
+        let frames = SIZES[index % SIZES.len()].min(TOTAL - fed);
+        index += 1;
+        // 只有首块由 `playback` 合成一个起播上升沿（`!had && !playing && audio_evidence`）。
+        let rising = fed == 0;
+        let block = owner.note_stream_block_at(
+            ProcessStream::Realtime,
+            context,
+            frames,
+            rising,
+            false,
+            None,
+        );
+        assert!(
+            block.transport_active,
+            "第 {index} 块没有推进权：位置会冻结，渲染里就是一个洞"
+        );
+        if let Some(expected) = next_position {
+            assert_eq!(
+                block.position, expected,
+                "位置必须逐块续接（第 {index} 块）"
+            );
+        }
+        next_position = Some(block.position + frames as i64);
+        fed += frames;
+    }
+    let geometry = &owner.streams[ProcessStream::Realtime.index()];
+    assert_eq!(
+        geometry.pass.load(Ordering::Acquire),
+        1,
+        "整段渲染只许有一个 pass：多一个就说明位置被重锚过"
+    );
+    assert_eq!(geometry.pass_rewinds.load(Ordering::Acquire), 0);
+    assert_eq!(
+        owner.position_corrections.load(Ordering::Acquire),
+        0,
+        "位置从没被纠正过，读游标就不该有一次修正"
+    );
+    assert_eq!(next_position, Some(TOTAL as i64));
+}
+
+/// **回归：pass 边界不许重锚一条钉住的喂入流。**
+///
+/// 【为什么单独一条】上一轮修完"渲染 run"之后，问题仍然复现，因为凶手不是 run 而是
+/// 位置记账：每一次"窗口用尽"都会开新 epoch，而新 epoch 把位置拉回 `raw_start`。
+/// 这里在 49 152 帧处**人为注入**一次起播上升沿（旧实现每一块都会合成它），断言：
+/// pass 仍然只有一个，位置继续向下。
+#[test]
+fn a_pass_boundary_never_re_anchors_a_pinned_feed() {
+    let owner = insert_owner();
+    let context = crate::block_context::BlockContext {
+        sample_rate: 48_000.0,
+        project_time_samples: 0,
+        playing: false,
+        ..Default::default()
+    };
+    // 先喂满一个 1.024 s 的现场周期（49 152 帧 = 2 × 24 576）。
+    let mut fed = 0usize;
+    let mut rising = true;
+    while fed < 49_152 {
+        host_is_feeding_changing_audio(&owner);
+        let frames = 24_576.min(49_152 - fed);
+        owner.note_stream_block_at(
+            ProcessStream::Realtime,
+            context,
+            frames,
+            rising,
+            false,
+            None,
+        );
+        rising = false;
+        fed += frames;
+    }
+    let geometry = &owner.streams[ProcessStream::Realtime.index()];
+    assert_eq!(
+        geometry.pass.load(Ordering::Acquire),
+        1,
+        "前提：窗口已经提级"
+    );
+    // 注入边界：这一块"又升起了一次"。
+    host_is_feeding_changing_audio(&owner);
+    let block =
+        owner.note_stream_block_at(ProcessStream::Realtime, context, 24_576, true, false, None);
+    assert_eq!(
+        geometry.pass.load(Ordering::Acquire),
+        1,
+        "钉住的喂入流里，起播上升沿不许再开一个 pass"
+    );
+    assert_eq!(
+        block.position, 49_152,
+        "位置必须从上一块终点继续，而不是回到 0"
+    );
+    assert_eq!(geometry.pass_rewinds.load(Ordering::Acquire), 0);
+}
+
+/// **回归：渲染位置从喂入域的 0 起算，不是宿主的最后播放头。**
+///
+/// 【现场原形】VEGAS Render As 期间 `kPlaying` 全程为 0，而 `projectTimeSamples`
+/// 停在用户**最后一次播放/停止**的位置（现场三次渲染分别是 0、0、893720 = 18.62 s）。
+/// 旧实现把位置锚在它上面，于是整段产物被平移了同样的长度 —— 三次渲染因此互不相同，
+/// 而用户的描述正是"最后播放/停止的位置会极大地影响渲染输出的偏移"。
+///
+/// 【这条用例钉的是结果】它只关心三件事：位置从 0 起算并逐块续接、整段只有一个 pass、
+/// 首块 raw 只作诊断（可以任意大）。
+#[test]
+fn a_pinned_render_starts_at_zero_even_when_the_host_playhead_is_stale() {
+    const STALE_RAW: i64 = 893_720; // 18.62 s
+    let owner = insert_owner();
+    let context = crate::block_context::BlockContext {
+        sample_rate: 48_000.0,
+        project_time_samples: STALE_RAW,
+        playing: false,
+        ..Default::default()
+    };
+    const BLOCK: usize = 24_576;
+    let mut fed = 0usize;
+    let mut next_position = Some(0i64);
+    let mut index = 0usize;
+    while fed < 480_000 {
+        host_is_feeding_changing_audio(&owner);
+        index += 1;
+        let block = owner.note_stream_block_at(
+            ProcessStream::Realtime,
+            context,
+            BLOCK,
+            // 只有首块由 `playback` 合成一个起播上升沿。
+            index == 1,
+            false,
+            None,
+        );
+        if let Some(expected) = next_position {
+            assert_eq!(
+                block.position, expected,
+                "第 {index} 块的位置必须从喂入域的 0 起算，而不是宿主播放头"
+            );
+        }
+        next_position = Some(block.position + BLOCK as i64);
+        fed += BLOCK;
+    }
+    let geometry = &owner.streams[ProcessStream::Realtime.index()];
+    assert_eq!(
+        geometry.pass.load(Ordering::Acquire),
+        1,
+        "整段渲染只许有一个 pass"
+    );
+    assert_eq!(geometry.pass_rewinds.load(Ordering::Acquire), 0);
+    assert_eq!(
+        geometry.feed_first_raw.load(Ordering::Acquire),
+        STALE_RAW,
+        "首块 raw 只作诊断，可以任意大"
+    );
+    assert_eq!(next_position, Some(fed as i64));
+}
+
+/// **验收：同一段渲染跑三次，读到的帧序列必须逐块相同。**
+///
+/// 【现场原形】VEGAS Render As 连渲三次，得到三个**互不相同**的文件（偏移
+/// +1.85 s / 0.00 s / +18.60 s）。三次之间唯一的差别是宿主在渲染前停在哪儿 ——
+/// `projectTimeSamples` 分别是 0 / 0 / 893720。
+///
+/// 【为什么判据是"读到的帧序列"】磁带与快照三次都是同一份，位置相同就意味着逐样本
+/// 相同；偏移正是唯一能把三个产物区分开的量。真正逐样本比对由
+/// `scripts/audit/render-repeat-check.py --align` 在现场文件上做（它有源文件可比），
+/// 这里钉的是那条因果：位置序列不依赖宿主播放头。
+#[test]
+fn three_renders_of_the_same_range_read_the_same_frames() {
+    const BLOCK: usize = 24_576;
+    const TOTAL: usize = 480_000;
+
+    fn drive(stale_raw: i64) -> Vec<i64> {
+        let owner = insert_owner();
+        let context = crate::block_context::BlockContext {
+            sample_rate: 48_000.0,
+            project_time_samples: stale_raw,
+            playing: false,
+            ..Default::default()
+        };
+        let mut positions = Vec::new();
+        let mut fed = 0usize;
+        let mut index = 0usize;
+        while fed < TOTAL {
+            host_is_feeding_changing_audio(&owner);
+            index += 1;
+            let block = owner.note_stream_block_at(
+                ProcessStream::Realtime,
+                context,
+                BLOCK,
+                index == 1,
+                false,
+                None,
+            );
+            positions.push(block.position);
+            fed += BLOCK;
+        }
+        positions
+    }
+
+    let first = drive(0);
+    let blocks = first.len();
+    assert!(blocks >= 2, "前提：这一遍要跨块");
+    assert_eq!(
+        first,
+        (0..blocks)
+            .map(|index| (index * BLOCK) as i64)
+            .collect::<Vec<_>>(),
+        "首块从 0 起算，此后逐块 +{BLOCK}"
+    );
+    // 三次现场用例的宿主播放头：0、0、893720。这里故意换两个不同的非零值，
+    // 因为"再跑一次 0"会让状态泄漏也看起来是对的。
+    for stale_raw in [893_720i64, 1_800_000] {
+        assert_eq!(
+            drive(stale_raw),
+            first,
+            "宿主播放头 {stale_raw} 不许改变任何一块的读位置"
+        );
+    }
 }

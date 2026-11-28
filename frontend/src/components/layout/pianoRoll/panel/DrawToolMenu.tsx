@@ -180,7 +180,11 @@ export function DrawToolMenu({ m }: Props) {
                     icon={
                         <VibratoPresetGlyph preset={activeVibratoPreset} width={15} height={15} />
                     }
-                    panelClassName="hs-menu--no-scroll flex flex-col"
+                    // 【布局类落在内容层】内边距搬到 `.hs-menu__content` 之后，
+                    // `flex flex-col` 必须跟着搬 —— 留在壳上就只作用在包装元素上，
+                    // 里面的 `flex: 1 1 auto`（滚动区）再也拿不到剩余高度。
+                    panelClassName="hs-menu--no-scroll"
+                    panelContentClassName="flex flex-col"
                 >
                     <ScrollArea
                         className="hs-scroll-area min-h-0"

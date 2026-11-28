@@ -83,6 +83,9 @@ describe("stepFor", () => {
         expect(stepFor("integer").decimals).toBe(0);
         // 0.05 的步长必须是 2 位小数，否则滚轮一动就会把 0.05 显示成 0.1。
         expect(stepFor("clipSeconds").decimals).toBe(2);
+        expect(stepFor("curvature").coarse).toBe(0.05);
+        expect(stepFor("curvature").fine).toBe(0.01);
+        expect(stepFor("curvature").decimals).toBe(2);
     });
 
     test("每个单位都有定义（新增单位必须显式给步长）", () => {
@@ -108,6 +111,7 @@ describe("stepFor", () => {
             "vibratoHz",
             "scaleDegree",
             "pressureFactor",
+            "curvature",
             "idleMilliseconds",
             "imagePixels",
         ];

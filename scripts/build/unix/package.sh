@@ -7,6 +7,9 @@
 #     scripts/build/unix/package.sh --reuse-frontend   # reuse frontend/dist
 #     scripts/build/unix/package.sh --appimage=...     # Linux unified (AppImage + plugins + model store)
 #     scripts/build/unix/package.sh --app-bundle=...   # macOS unified (App + plugins + model store)
+#     HFS_PLATFORM_ARCH=universal scripts/build/unix/package.sh --app-bundle=... \
+#         --merge-arch=DIR --merge-app-arch=OUTDIR --merge-app-arch=OUTDIR \
+#                                                      # ...and both architectures in one package
 #
 # [Why builds are separate but distribution is unified] The two formats' **builds** are two
 # different jobs: different crates, different bundle layouts, different entry symbols, different
@@ -49,6 +52,7 @@ OUT_DIR="$REPO_ROOT/dist"
 REUSE_FRONTEND=0
 SKIP_VERIFY=0
 MERGE_ARCH=""
+MERGE_APP_ARCH=""
 APPIMAGE=""
 APP_BUNDLE=""
 
@@ -66,6 +70,9 @@ Usage: scripts/build/unix/package.sh [options]
   --reuse-frontend      reuse an existing frontend/dist (it must already exist)
   --no-verify           skip format self-checks (only for machines where probes cannot run)
   --merge-arch=DIR      merge another architecture's dist into a universal (needs lipo, macOS only)
+  --merge-app-arch=DIR  merge the App's single-arch Mach-Os from one architecture's cargo
+                        output directory (backend/target/<triple>/<profile>); repeat once per
+                        architecture. macOS only
   --appimage=FILE       Linux unified: install an existing AppImage into the tar.gz too
   --app-bundle=DIR      macOS unified: install an existing .app into the pkg too
   -h, --help
@@ -88,6 +95,8 @@ while [ $# -gt 0 ]; do
         --no-verify)      SKIP_VERIFY=1; shift ;;
         --merge-arch=*)   MERGE_ARCH="${1#*=}"; shift ;;
         --merge-arch)     [ $# -ge 2 ] || die "--merge-arch requires a value"; MERGE_ARCH="$2"; shift 2 ;;
+        --merge-app-arch=*) MERGE_APP_ARCH="${MERGE_APP_ARCH}${1#*=}"$'\n'; shift ;;
+        --merge-app-arch) [ $# -ge 2 ] || die "--merge-app-arch requires a value"; MERGE_APP_ARCH="${MERGE_APP_ARCH}${2}"$'\n'; shift 2 ;;
         --appimage=*)     APPIMAGE="${1#*=}"; shift ;;
         --appimage)       [ $# -ge 2 ] || die "--appimage requires a value"; APPIMAGE="$2"; shift 2 ;;
         --app-bundle=*)   APP_BUNDLE="${1#*=}"; shift ;;
@@ -160,27 +169,144 @@ verify_format() {
 
 # ── Stage 3: merge universal (optional, macOS only) ─────────────────────────
 #
-# [Why it is optional] The App side currently ships unified pkgs per architecture; making the
-# plugins universal on their own would produce the mismatch "universal plugins + per-arch App".
-# When universal is really wanted, both sides' CI legs produce dist/, and --merge-arch points
-# here at the other one.
+# [Why there are two switches] A universal package has two kinds of single-arch leftovers, and
+# their other half lives in two different places: the plugin bundles come from another dist/
+# directory, the App bundle comes from Tauri's other target. One switch cannot describe both.
+#
+# Every merge site has to ask "is it already universal?" first: lipo refuses a second slice of
+# an architecture it already has, so merging a file Tauri already lipo'd turns a correct package
+# into a red build (and the error names a temp path, not the cause).
+
+# <dst> <src>: lipo the two single-arch slices into <dst>.
+# Returns 0 when it merged, 1 when there was nothing to merge (not a Mach-O, already universal,
+# or both sides carry the same slice -- that last case cannot be repaired here and is what the
+# workflow's arch assertion is for).
+merge_macho_pair() {
+    local dst="$1" src="$2" dst_archs src_archs
+    [ -f "$dst" ] || return 1
+    [ -f "$src" ] || return 1
+    file -b "$dst" | grep -q 'Mach-O' || return 1
+    file -b "$src" | grep -q 'Mach-O' || return 1
+    hfs_is_universal "$dst" && return 1
+    hfs_is_universal "$src" && return 1
+    dst_archs="$(hfs_macho_archs "$dst" | tr '\n' ' ' | sed 's/ $//')"
+    src_archs="$(hfs_macho_archs "$src" | tr '\n' ' ' | sed 's/ $//')"
+    if [ "$dst_archs" = "$src_archs" ]; then
+        log "WARNING: $dst carries only ${dst_archs} and so does its counterpart; nothing to merge"
+        return 1
+    fi
+    lipo -create "$dst" "$src" -output "$dst.universal" || die "lipo merge failed: $dst"
+    mv -f "$dst.universal" "$dst"
+    return 0
+}
+
 merge_arch() {
-    local other="$1" rel
+    local other="$1" rel merged=0
     [ "$HFS_OS" = "macos" ] || die "--merge-arch only makes sense on macOS"
     command -v lipo >/dev/null 2>&1 || die "lipo missing (Xcode command line tools required)"
     [ -d "$other" ] || die "--merge-arch directory does not exist: $other"
-    step "merging universal (${other})"
+    # [Why the tag is checked] The merged artifact is universal whether or not the name says so;
+    # letting it keep the host's tag publishes "macos-arm64" for a package that runs on Intel too
+    # -- the one mistake a user cannot see until they install it.
+    [ "$HFS_PLATFORM_ARCH" = "universal" ] \
+        || die "--merge-arch produces a universal package: set HFS_PLATFORM_ARCH=universal so the artifact name says so (current tag: ${HFS_TAG})"
+    step "merging the universal plugin bundles (${other})"
     while IFS= read -r rel; do
-        [ -f "$other/$rel" ] || continue
-        file -b "$OUT_DIR/$rel" | grep -q 'Mach-O' || continue
-        file -b "$other/$rel" | grep -q 'Mach-O' || continue
-        lipo -create "$OUT_DIR/$rel" "$other/$rel" -output "$OUT_DIR/$rel.universal" \
-            || die "lipo merge failed: $rel"
-        mv -f "$OUT_DIR/$rel.universal" "$OUT_DIR/$rel"
-        log "universal: $rel"
+        [ -n "$rel" ] || continue
+        if merge_macho_pair "$OUT_DIR/$rel" "$other/$rel"; then
+            log "universal: $rel"
+            merged=$((merged + 1))
+        fi
     done <<< "$( cd "$OUT_DIR" && find HiFiShifter.vst3 clap -type f 2>/dev/null )"
-    hfs_sign_bundle "$OUT_DIR/HiFiShifter.vst3" "$OUT_DIR/HiFiShifter.vst3/Contents/MacOS/HiFiShifter"
-    hfs_sign_bundle "$OUT_DIR/clap/HiFiShifter.clap" "$OUT_DIR/clap/HiFiShifter.clap/Contents/MacOS/HiFiShifter"
+    # lipo invalidates the signature of every file it touches, and a bundle's signature covers
+    # all of them: re-sign after the merge, never before.
+    if wants vst3; then
+        hfs_sign_bundle "$OUT_DIR/HiFiShifter.vst3" "$OUT_DIR/HiFiShifter.vst3/Contents/MacOS/HiFiShifter"
+    fi
+    if wants clap; then
+        hfs_sign_bundle "$OUT_DIR/clap/HiFiShifter.clap" "$OUT_DIR/clap/HiFiShifter.clap/Contents/MacOS/HiFiShifter"
+    fi
+    log "plugins: ${merged} file(s) merged into universal binaries"
+}
+
+# ── Stage 3b: make the App bundle universal ─────────────────────────────────
+#
+# Tauri lipos the main executable (crates/tauri-cli/src/interface/rust/desktop.rs: it runs
+# `lipo -create -output <out_dir>/HiFiShifter <aarch64>/HiFiShifter <x86_64>/HiFiShifter` and
+# never bundles per target), so the .app is assembled once, from whichever architecture's files
+# the shared source paths happen to hold. A file both builds write to the *same* source path
+# therefore stays single-arch, and which architecture wins depends on build order -- that is the
+# SoundTouch dylib, whose path tauri.conf.json's `frameworks`/`files` entries fix.
+#
+# [Why the sources are cargo output directories and not another .app] There is no other .app to
+# point at. What exists per target is `backend/target/<triple>/<profile>/`, which holds that
+# architecture's `libSoundTouchDLL.dylib` (kernel build.rs Step 5 copies it there) next to its
+# binary. Matching by **basename** is exact rather than a guess: the bundle copies a fixed
+# filename from a fixed path, so the same filename in a target's output directory is the same
+# file built for that target.
+#
+# [Why the App's own copy is not one of the inputs] It is whatever the last build wrote to the
+# shared source path -- x86_64, because tauri-cli builds aarch64 first and x86_64 second. Lipoing
+# that against the other target would fail ("same architecture"), and lipoing it against itself
+# proves nothing. The two target directories are the authoritative per-architecture sources, so
+# the merged dylib is a function of the two builds and not of build order.
+#
+# Resources/macos/ is excluded by design: the x86_64 slice links ort-tract instead of
+# onnxruntime, so those dylibs have no counterpart and must stay arm64-only (the workflow
+# asserts exactly that).
+#
+# <dir>... : one directory per architecture (see the option's help text)
+merge_app_arch() {
+    local app="$APP_BUNDLE" rel base merged=0 dir cand archs seen files
+    local -a dirs=() picked=()
+    [ "$HFS_OS" = "macos" ] || die "--merge-app-arch only makes sense on macOS"
+    command -v lipo >/dev/null 2>&1 || die "lipo missing (Xcode command line tools required)"
+    [ -n "$app" ] || die "--merge-app-arch requires --app-bundle"
+    [ -d "$app" ] || die "--app-bundle directory does not exist: $app"
+    [ "$HFS_PLATFORM_ARCH" = "universal" ] \
+        || die "--merge-app-arch produces a universal package: set HFS_PLATFORM_ARCH=universal so the artifact name says so (current tag: ${HFS_TAG})"
+    while IFS= read -r dir; do
+        [ -n "$dir" ] || continue
+        [ -d "$dir" ] || die "--merge-app-arch directory does not exist: $dir"
+        dirs+=("$dir")
+    done <<< "$MERGE_APP_ARCH"
+    [ ${#dirs[@]} -gt 0 ] || die "--merge-app-arch needs at least one directory"
+
+    step "merging the universal App bundle (${dirs[*]})"
+    # [Why the list is materialised first] The loop replaces files in the tree it is walking
+    # (lipo writes <file>.universal, then renames it over <file>). Streaming `find` through a
+    # process substitution would be reading a directory while it changes; a here-string makes
+    # the walk a snapshot.
+    files="$( cd "$app" && find . -type f | sed 's|^\./||' )"
+    while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
+        # Architecture-exclusive by design (see the comment above).
+        case "$rel" in
+            Contents/Resources/macos/*) continue ;;
+        esac
+        # Tauri already lipo'd the main executable; leave it alone.
+        if hfs_is_universal "$app/$rel"; then continue; fi
+        base="$(basename "$rel")"
+        picked=()
+        seen="|"
+        for dir in "${dirs[@]}"; do
+            cand="$dir/$base"
+            [ -f "$cand" ] || continue
+            file -b "$cand" | grep -q 'Mach-O' || continue
+            archs="$(hfs_macho_archs "$cand" | tr '\n' ',')"
+            [ -n "$archs" ] || continue
+            case "$seen" in *"|$archs|"*) continue ;; esac
+            seen="$seen$archs|"
+            picked+=("$cand")
+        done
+        [ ${#picked[@]} -ge 2 ] || continue
+        lipo -create "${picked[@]}" -output "$app/$rel.universal" || die "lipo merge failed: $rel"
+        mv -f "$app/$rel.universal" "$app/$rel"
+        log "universal: $rel"
+        merged=$((merged + 1))
+    done <<< "$files"
+    hfs_sign_bundle "$app" "$app/Contents/MacOS/HiFiShifter"
+    log "App: ${merged} file(s) merged into universal binaries"
 }
 
 # ── Stage 4: assemble distribution artifacts ────────────────────────────────
@@ -378,11 +504,15 @@ fi
 if [ -n "$APP_BUNDLE" ] && [ ! -d "$APP_BUNDLE" ]; then
     die "--app-bundle directory does not exist: $APP_BUNDLE"
 fi
+if [ -n "$MERGE_APP_ARCH" ] && [ -z "$APP_BUNDLE" ]; then
+    die "--merge-app-arch requires --app-bundle: the App bundle is what gets merged"
+fi
 
 stage_frontend
 if wants vst3; then build_format vst3; verify_format vst3; fi
 if wants clap; then build_format clap; verify_format clap; fi
 if [ -n "$MERGE_ARCH" ]; then merge_arch "$MERGE_ARCH"; fi
+if [ -n "$MERGE_APP_ARCH" ]; then merge_app_arch "$MERGE_APP_ARCH"; fi
 
 if [ "$HFS_OS" = "linux" ]; then
     if [ -n "$APPIMAGE" ]; then package_linux_unified; else package_linux_plugins; fi

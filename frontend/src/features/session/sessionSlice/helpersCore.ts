@@ -2,13 +2,14 @@
 import type { TimelineState } from "../../../types/api";
 import type { ClipInfo, ClipFormantMorph, TrackInfo } from "../sessionTypes";
 import { resolveLoopMediaDurationSec } from "../../../utils/loopRender";
-import { clampGain } from "../../../utils/gainDb";
+import { clampGain, clampTakeGain } from "../../../utils/gainDb";
 import { normalizeChannelMode } from "../../../utils/channelMode";
 import { markProjectDirty } from "../sessionDirtyState";
 import { resolveRootTrackId } from "../trackUtils";
 import type { ClipColor, SessionState } from "./types";
 import { MAX_TRACK_VOLUME } from "./settings";
 import { applyTimelineState } from "./helpersTimeline";
+import { applyHostFadeAxesPreviewToClip } from "../fadeAxesPreview";
 import {
     getClipRateMultiplier,
     flipSourceWindowForDirection,
@@ -336,9 +337,15 @@ export function applyOptimisticClipState(
         color?: string;
         startSec?: number;
         lengthSec?: number;
-        /** Take 级增益（take 面板）。 */
-        gain?: number;
-        /** Item 级增益（时间轴旋钮）。 */
+        /**
+         * Take 级增益（take 面板）。
+         *
+         * 【载荷键名带层，状态字段仍叫 `gain`】写入的是 `clip.gain` —— 状态里的
+         * `gain` 就是 take 层的投影（与 `ClipStatePatch::take_gain` 写 `c.gain`
+         * 同一口径）。键名带层是为了让调用点无法"顺手"把它当成 item 层。
+         */
+        takeGain?: number;
+        /** Item 级增益（时间轴旋钮；写入 `clip.clip_gain`）。 */
         itemGain?: number;
         muted?: boolean;
         sourceStartSec?: number;
@@ -383,8 +390,8 @@ export function applyOptimisticClipState(
     if (payload.itemGain !== undefined) {
         clip.clip_gain = clampGain(Number(payload.itemGain));
     }
-    if (payload.gain !== undefined) {
-        clip.gain = clampGain(Number(payload.gain));
+    if (payload.takeGain !== undefined) {
+        clip.gain = clampTakeGain(Number(payload.takeGain));
     }
     if (payload.muted !== undefined) {
         clip.muted = Boolean(payload.muted);
@@ -472,6 +479,7 @@ export function applyOptimisticClipState(
     if (payload.fadeOutS !== undefined) {
         clip.fadeOutS = Math.min(1, Math.max(-1, Number(payload.fadeOutS) || 0));
     }
+    applyHostFadeAxesPreviewToClip(clip, payload);
     if (payload.autoFadeInSec !== undefined) {
         clip.autoFadeInSec = Math.max(0, Number(payload.autoFadeInSec) || 0);
     }
@@ -493,9 +501,9 @@ export function applyOptimisticBulkClipState(
     state: SessionState,
     updates: Array<{
         clipId: string;
-        /** Take 级增益（take 面板）。 */
-        gain?: number;
-        /** Item 级增益（时间轴旋钮）。 */
+        /** Take 级增益（take 面板；写入 `clip.gain`）。 */
+        takeGain?: number;
+        /** Item 级增益（时间轴旋钮；写入 `clip.clip_gain`）。 */
         itemGain?: number;
         muted?: boolean;
         startSec?: number;
@@ -529,8 +537,8 @@ export function applyOptimisticBulkClipState(
         if (update.itemGain !== undefined) {
             clip.clip_gain = clampGain(Number(update.itemGain));
         }
-        if (update.gain !== undefined) {
-            clip.gain = clampGain(Number(update.gain));
+        if (update.takeGain !== undefined) {
+            clip.gain = clampTakeGain(Number(update.takeGain));
         }
         if (update.muted !== undefined) {
             clip.muted = Boolean(update.muted);
@@ -598,6 +606,7 @@ export function applyOptimisticBulkClipState(
         if (update.fadeOutS !== undefined) {
             clip.fadeOutS = Math.min(1, Math.max(-1, Number(update.fadeOutS) || 0));
         }
+        applyHostFadeAxesPreviewToClip(clip, update);
         if (update.autoFadeInSec !== undefined) {
             clip.autoFadeInSec = Math.max(0, Number(update.autoFadeInSec) || 0);
         }

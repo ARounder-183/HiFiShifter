@@ -23,7 +23,7 @@ import { configureStore } from "@reduxjs/toolkit";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Provider } from "react-redux";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import keybindingsReducer from "../features/keybindings/keybindingsSlice";
 import { AppDensityProvider } from "./density";
@@ -108,4 +108,34 @@ test("包装盒是块级 flex 容器，非 flex 父元素里也能铺满", () =>
     const tokens = renderSlider("form").className.split(/\s+/);
     expect(tokens).toContain("flex");
     expect(tokens).not.toContain("inline-flex");
+});
+
+test("显式 step=0.01 时方向键以 0.01 前进", () => {
+    const store = configureStore({ reducer: { keybindings: keybindingsReducer } });
+    const onChange = vi.fn();
+    act(() => {
+        root.render(
+            <Provider store={store}>
+                <AppDensityProvider value="compact">
+                    <AppSlider
+                        value={0.2}
+                        unit="curvature"
+                        min={-1}
+                        max={1}
+                        step={0.01}
+                        ariaLabel="curvature"
+                        onChange={onChange}
+                    />
+                </AppDensityProvider>
+            </Provider>,
+        );
+    });
+    const thumb = container.querySelector<HTMLElement>('[role="slider"]');
+    expect(thumb).toBeTruthy();
+    act(() => {
+        thumb!.focus();
+        thumb!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    });
+    expect(onChange).toHaveBeenCalled();
+    expect(onChange.mock.calls.at(-1)?.[0]).toBeCloseTo(0.21, 6);
 });

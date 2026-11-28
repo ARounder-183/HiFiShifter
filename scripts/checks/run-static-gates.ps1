@@ -46,6 +46,12 @@ Invoke-Gate 'Dialog filter gate' { python scripts/checks/check-dialog-filters.py
 # conventions where "one missing spot errors nothing".
 Invoke-Gate 'Product consistency gate' { & (Join-Path $PSScriptRoot 'check-product-consistency.ps1') }
 
+# Every model in resources/models/models.json must be listed in tauri.conf.json's
+# bundle.resources. A manifest entry with no bundle entry ships in no artefact at all and
+# the runtime only logs "model not found" -- which is how the NSF-HiFiGAN vocoder
+# went missing from every build, leaving the default pitch algorithm unable to synthesise.
+Invoke-Gate 'Model bundle gate' { python scripts/checks/check-model-bundle.py }
+
 # Dot-sourced env scripts may only touch $env:*. Real incident: a `foreach ($root in ...)`
 # in msvc-env.ps1 overwrote the build script's `$root` (repo root) with the Visual Studio
 # install directory, and the build failed at "backend\src-tauri\resources\models\models.json
@@ -60,7 +66,86 @@ Invoke-Gate 'Source UTF-8 gate' { python scripts/checks/check-utf8.py }
 # SoundTouch build generator and cache self-healing.
 Invoke-Gate 'SoundTouch generator gate' { python scripts/checks/check-soundtouch-generator.py }
 
+# Tauri validates bundle.resources while the app crate's build script runs, so a resource that the
+# target does not produce kills the compile with a message that names neither the file nor the
+# platform ("ERROR: AppDir not found" is all CI shows). Architecture-scoped config files keep the
+# declaration honest; this gate keeps them honest and referenced.
+Invoke-Gate 'Bundle resource gate' { python scripts/checks/check-tauri-resources.py }
+
+# The same discipline for every other CMake consumer in the build: one environment, one
+# generator, and a cache recorded under another one is deleted instead of fatal. Without it,
+# "the build works on my machine" depends on whether ninja happens to be on PATH.
+Invoke-Gate 'Native toolchain gate' { & (Join-Path $PSScriptRoot 'check-native-toolchain.ps1') }
+
 # Test names in the skip manifest must still resolve against the Rust sources.
 Invoke-Gate 'Test skip gate' { python scripts/checks/check-test-skips.py }
+
+# The mobile adaptation's central rule: cfg(target_os) is allowed in exactly one
+# directory (backend/src-tauri/src/platform/). A stray one raises no error on the
+# developer's machine; it only shows up as an unrelated failure when somebody
+# builds for a target they are not on.
+Invoke-Gate 'Platform boundary gate' { python scripts/checks/check-platform-boundary.py }
+
+# And its frontend counterpart: the application form has one answer (appForm).
+# A second answer (window width / user agent / pointer media query) is right on
+# the developer's device and wrong on somebody else's.
+#
+# [Why there is no separate "mobile bundle size" gate] frontend/scripts/check-bundle-size.mjs
+# already pins the first-paint chunk and the CSS total, and the mobile budget is
+# the same budget -- a second file would be a second source of truth for one
+# number. Run it with "npm run check:bundle" after a build.
+Invoke-Gate 'Mobile form gate' { python scripts/checks/check-mobile-form-gate.py }
+
+# Every timeline payload must come from AppState::timeline_payload so it carries a
+# monotonic revision. A payload built with a bare tl.to_payload() compiles, runs, and
+# silently drops the frontend back onto the legacy single-slot requestId arbitration --
+# where two different actions invalidate each other ("I split it and it did not split").
+# Only reproducible under latency, so it needs a machine to remember it.
+Invoke-Gate 'Timeline payload gate' { python scripts/checks/check-timeline-payload-gate.py }
+
+# And the layer that made the phone unusable: both canvases must be able to answer
+# "is this input a finger?". Zero occurrences of "touch" in either canvas directory
+# is what "scrolling is unusable on the phone" looked like in the source.
+Invoke-Gate 'Touch coverage gate' { python scripts/checks/check-touch-coverage.py }
+
+# REAPER has two gain knobs per clip -- the item D_VOL and the active take D_VOL -- and
+# they sit one word apart in every payload. A bare `gain` names neither: the kernel read
+# it as the take layer while the UI wrote it as the item layer, so a +12 dB knob came
+# back as -12 dB and both layers ended up wrong. Every one of those mistakes compiles.
+# The gate also holds the command boundary (take_gain <-> takeGain) and refuses a
+# ClipStatePatch literal that kept the old field name -- that one is a compile error
+# only when the crate holding it is built, and src-tauri is not in the fast test loop.
+Invoke-Gate 'Gain layer gate' { python scripts/checks/check-gain-layers.py }
+Invoke-Gate 'Gain audition gate' { python scripts/checks/check-gain-audition.py }
+
+# The cross-platform workflow builds six legs, and two of them failed for naming/wiring
+# reasons that no compiler can see: the Linux arm64 leg was called `linux-arm64` while the
+# packager names the tarball `linux-aarch64` (upload matched nothing), and the Windows arm64
+# leg builds through tauri-action, which never imported the MSVC environment (no nmake).
+Invoke-Gate 'CI artifact name gate' { python scripts/checks/check-ci-artifact-names.py }
+
+# The macOS release leg builds both architectures and ships one package. Its failure modes are
+# all "green but wrong": --target on the cargo side of the `--` boundary builds the host
+# architecture, a missing HFS_PLATFORM_ARCH names the artifact after the host, and a missing arch
+# assertion lets an arm64-only package through. Only the last one is visible on a Mac, and only
+# if someone runs it there.
+Invoke-Gate 'macOS universal gate' { python scripts/checks/check-macos-universal.py }
+
+# vslib is a **link-time** dependency (a #[link] directive, not a dlopen) and its import
+# library is x64 machine code. Every cfg that decides "the backend exists" must therefore name
+# target_arch = "x86_64"; lib.rs used to gate only on target_os = "windows" while the module
+# importing it also required the architecture, so Windows ARM64 compiled everything and then
+# died at the last link with "LNK1181: cannot open input file 'vslib_x64.lib'" (run 46016687058).
+# The same run also showed why the app must forward its features instead of inheriting the
+# kernel's defaults: --no-default-features --features onnx only silenced the app's vslib.
+Invoke-Gate 'vslib architecture gate' { python scripts/checks/check-vslib-arch-gate.py }
+
+# The host calls us synchronously on its own UI thread, and the WebView2 delivery we wait
+# on only advances while that thread pumps. A handler that takes the session's timeline
+# lock therefore waits for the actor, while the actor's post waits for the host to pump:
+# the field symptom is "REAPER stopped responding" plus a red BackendInvokeError strip,
+# and neither is a compile error. The gate also pins the ARA callbacks, which run on the
+# host's model thread for the same reason.
+Invoke-Gate 'Host thread lock gate' { python scripts/checks/check-host-thread-locks.py }
 
 Write-Host 'All static gates passed.' -ForegroundColor Green

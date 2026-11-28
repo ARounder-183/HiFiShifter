@@ -1008,6 +1008,15 @@ impl ModelHandle {
             }
         }
         self.session.prepare_renderers();
+        // 【导入转正挂在"发布完成"之后】这一轮 ARA 图已经写进装配输入、清单也已经
+        // 刷新（见上面的 `refresh_ui_inventory`），于是"宿主到底认领了哪些 item"此刻
+        // 才第一次可判定。放在 `prepare_renderers` 之后是为了不与它争同一把事务锁。
+        //
+        // 【为什么先取快照再对账】对账的输入是**数据**（见 `ImportClaims`）：它自己
+        // 不取任何表锁，所以"在某个持锁作用域里调它"不可能变成自锁。这里没有持锁，
+        // 直接向文档要一份快照即可。
+        let claims = self.session.import_claims();
+        self.session.publish_pending_imports(&claims);
     }
 
     /// 收口之后发一行"读者们拿的是哪一版"的读数。
@@ -1137,6 +1146,8 @@ impl DocumentLifecycle for ModelHandle {
     /// `destroy/create_playback_region`、`update_audio_source_content` 各自负责。
     /// 会话本身只需要被**记录**下来，供会话侧把"会话中的未就绪窗口"识别为暂缓。
     fn begin_editing(&mut self, _document: &mut Self::Document) -> Result<(), AraError> {
+        let _host_thread = crate::host::RoleGuard::enter(crate::host::HostThreadRole::AraModel);
+        let _callback = crate::host::AraCallbackGuard::enter("begin_editing");
         self.service_model_thread();
         self.editing = true;
         // 【G5】把"编辑会话中"这个事实推给文档：存档载荷到达时据此判断它是
@@ -1154,12 +1165,21 @@ impl DocumentLifecycle for ModelHandle {
         _document: &mut Self::Document,
         _host: &HostContentScope<'_, '_>,
     ) -> Result<(), AraError> {
+        // 【为什么要量这一层】ARA 回调是宿主**直接**进入我们的代码，占住的正是宿主主
+        // 线程。超过 1 s 就会让 Windows 把窗口画成"未响应"，而日志里此前只有"发布了
+        // 什么"，没有"花了多久"。
+        let _host_thread = crate::host::RoleGuard::enter(crate::host::HostThreadRole::AraModel);
+        let _callback = crate::host::AraCallbackGuard::enter("end_editing");
+        crate::host::mark_progress("end_editing:prune_source_reads");
         self.source_reads.retain(|_, job| !job.finished());
         self.retired_source_reads.retain(|(_, job)| !job.finished());
         self.service_model_thread();
         self.editing = false;
         self.session.set_in_edit_session(false);
         self.session.note_editing_finished();
+        // 【停滞看门狗的阶段标记】这一句是全插件最长的一段"宿主主线程被我们占住"：
+        // 全量重映射 + 装配 + 发布。它必须能在挂起现场被单独点名（见 host::stall_watch）。
+        crate::host::mark_progress("end_editing:remap_and_log");
         self.remap_and_log();
         Ok(())
     }
@@ -1174,11 +1194,13 @@ impl DocumentLifecycle for ModelHandle {
     }
 
     fn flush_pending_model_updates(&mut self) -> bool {
+        let _host_thread = crate::host::RoleGuard::enter(crate::host::HostThreadRole::AraModel);
         self.service_model_thread();
         if !self.model_dirty {
             return false;
         }
         log::info!("[ara] flushing pending model changes without endEditing");
+        crate::host::mark_progress("flush_pending_model_updates:remap_and_log");
         self.remap_and_log();
         true
     }
@@ -3386,6 +3408,8 @@ mod tests {
                 cancel_flag: None,
                 progress: None,
                 cache_stats: None,
+                // This test exercises the mixer’s own volume semantics, not ARA ownership.
+                gain_scope: hifishifter_kernel::gain::GainScope::AppOwned,
             };
             let (_, _, _, samples) =
                 hifishifter_kernel::mixdown::render_mixdown_with_pcm(&timeline, options, &pcm)

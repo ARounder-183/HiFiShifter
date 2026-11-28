@@ -209,9 +209,9 @@ $env:HIFISHIFTER_OFFLINE = '1'
 
 #### 模型权重（按需获取）
 
-仓库里只提交清单 `backend/src-tauri/resources/models/models.json`；约 200 MB 的权重
-作为 release 资产 `models-<清单版本>.zip` 分发（版本号是内容哈希，取错版本会在逐文件校验里
-立刻失败）。构建脚本会自动调用取权重脚本 —— 它是幂等的，已完整时只做一次目录扫描：
+仓库里只提交清单 `backend/src-tauri/resources/models/models.json`；权重本身作为 release
+资产 `models-<清单版本>.zip` 分发（体积以清单里的 `bytes` 为准；版本号是内容哈希，取错版本
+会在逐文件校验里立刻失败）。构建脚本会自动调用取权重脚本 —— 它是幂等的，已完整时只做一次目录扫描：
 
 ```bash
 python scripts/setup/fetch-models.py                # 缺就取
@@ -234,7 +234,8 @@ cargo tauri dev
 cargo tauri build
 
 # Linux AppImage（vslib 仅限 Windows，需排除默认 feature）
-cargo tauri build --bundles appimage -- --no-default-features --features onnx
+cargo tauri build --bundles appimage --config tauri.linux.x86_64.conf.json -- --no-default-features --features onnx  # x86_64
+cargo tauri build --bundles appimage -- --no-default-features --features onnx  # arm64 (no dawn resource)
 # 或使用辅助脚本：bash scripts/build/build-linux-appimage.sh
 
 # Linux 三合一（AppImage + VST3/CLAP + 共享模型库）：

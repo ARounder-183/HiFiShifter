@@ -627,8 +627,25 @@ describe("抽象层不能空转（采用率）", () => {
          * 【判据】要么声明在与来源变量相同的作用域（选择器含 `.radix-themes` —— 每个
          * Radix portal 包裹层都有这个类），要么给 `var()` 提供 fallback。
          */
+        const blocks = cssBlocks(readFileSync(TOKEN_CSS, "utf8"));
+        /*
+         * `:root` 里声明的自定义属性在**任何**后代元素上都解析得到（它们沿 DOM 继承），
+         * 因此引用它们是安全的。Radix 的 `--accent-9` 之类只声明在 `.radix-themes`
+         * 上，那才是这条门禁要挡的东西 —— 判据必须是"这个变量在声明处解析得到吗"，
+         * 而不是"这个值里有没有 `var(`"。
+         */
+        const rootTokens = new Set<string>();
+        for (const block of blocks) {
+            if (!/(^|[\s,])html([\s,:.]|$)/.test(block.selector) && block.selector !== ":root")
+                continue;
+            for (const name of block.body.matchAll(/(--[a-z0-9-]+)\s*:/g)) rootTokens.add(name[1]);
+        }
+        expect(rootTokens.size, ":root 令牌集为空，正则已失效").toBeGreaterThan(20);
+
         const offenders: string[] = [];
-        for (const block of cssBlocks(readFileSync(TOKEN_CSS, "utf8"))) {
+        for (const block of blocks) {
+            const local = new Set<string>();
+            for (const name of block.body.matchAll(/(--[a-z0-9-]+)\s*:/g)) local.add(name[1]);
             const declaration = /--qt-[a-z0-9-]+:\s*([^;]+);/g;
             let match: RegExpExecArray | null;
             while ((match = declaration.exec(block.body)) !== null) {
@@ -637,6 +654,9 @@ describe("抽象层不能空转（采用率）", () => {
                 if (!value.includes("var(")) continue;
                 if (hasVarFallback(value)) continue;
                 if (/(^|[\s,])\.radix-themes([\s,:.]|$)/.test(block.selector)) continue;
+                // 引用的每个变量都能在声明处解析（本块或 :root）→ 安全。
+                const refs = [...value.matchAll(/var\((--[a-z0-9-]+)/g)].map((m) => m[1]);
+                if (refs.every((name) => local.has(name) || rootTokens.has(name))) continue;
                 offenders.push(`${block.context} → ${match[0].trim()}`);
             }
         }
@@ -1084,11 +1104,36 @@ describe("上下文菜单共用同一个样式模型", () => {
         ];
         expect(defined.length, "没有找到任何 --qt-menu-* 令牌，正则已失效").toBeGreaterThan(5);
 
-        const files = sourceFiles(/\.(tsx?|css)$/);
+        /*
+         * 【为什么先读进内存再比对】原先按"每个令牌 × 每个文件"各读一次 —— 令牌有
+         * 二十来个，一次门禁就要几千次同步 I/O。单跑 1.5s 尚可，整仓并行跑满时它会
+         * 撞上 5s 的默认超时，表现为一条与改动无关的随机失败。读一遍再比对是同一判据，
+         * 但只走一次磁盘。
+         */
+        const sources = sourceFiles(/\.(tsx?|css)$/).map((file) => readFileSync(file, "utf8"));
         const missing = defined.filter(
-            (token) => !files.some((file) => readFileSync(file, "utf8").includes(`var(${token}`)),
+            (token) => !sources.some((source) => source.includes(`var(${token}`)),
         );
         expect(missing, "以下菜单令牌没有任何消费者 —— 令牌层在空转，删掉或接上：").toEqual([]);
+    });
+
+    test("触摸形态的最小命中面积是 44px（WCAG 2.5.5）", () => {
+        // 【为什么是一条令牌门禁】移动端工具栏此前**根本不存在**（外壳只渲染菜单
+        // sheet 与动作抽屉），所以"按钮太小"从来没有人报 —— 报的是"功能用不了"。
+        // 把 44px 收进令牌之后，"这个可点区域够不够大"只在一处决定；这条测试钉住
+        // 两件事：令牌存在，且触摸形态真的覆写成 44（桌面仍是紧凑值）。
+        const css = readFileSync(TOKEN_CSS, "utf8");
+        // fallback 是**必须**的：派生令牌在 `:root` 声明，而 portal 里的内容
+        // 不一定继承得到 `--qt-ctl-sm`（见上面"派生令牌在 portal 安全的作用域声明"
+        // 那条门禁）；没有 fallback 时它会静默解析成 0。
+        expect(css, "令牌必须存在（桌面取紧凑控件高度）").toMatch(
+            /--qt-hit-min:\s*var\(--qt-ctl-sm,\s*20px\)/,
+        );
+        const touch = css.slice(css.indexOf('html[data-input="touch"]'));
+        expect(touch, "触摸形态必须覆写成 44px").toMatch(/--qt-hit-min:\s*44px/);
+        // 工具栏 sheet 的控件取的是这个令牌，而不是各自写 44 —— 否则下一个控件
+        // 又会漏掉，而漏掉的症状是"点不中"。
+        expect(css).toContain("min-height: var(--qt-hit-min)");
     });
 
     test(".hs-menu* 的取值只来自令牌层", () => {
@@ -1097,6 +1142,10 @@ describe("上下文菜单共用同一个样式模型", () => {
          * 这类字面量在样式表里不会被"调色板门禁"（那条只看 Tailwind 类）拦下。
          * 这里补上菜单这一块：壳与项的色值、字号、圆角必须取 `var(--qt-*)`，
          * 否则用户在外观设置里换主题/圆角时菜单不跟随。
+         *
+         * 【`background-image` 也算】滚动提示行的渐变是 `linear-gradient(` 里写
+         * `var(--qt-window)` 画出来的。它一旦被写成字面色，深色主题下提示行会变成
+         * 一条浅色条 —— 而那正是"内容溶进边缘"这个语法的全部内容。
          */
         const offenders: string[] = [];
         for (const block of cssBlocks(readFileSync(TOKEN_CSS, "utf8"))) {
@@ -1106,7 +1155,7 @@ describe("上下文菜单共用同一个样式模型", () => {
                 if (!text) continue;
                 const property = text.slice(0, text.indexOf(":")).trim();
                 if (
-                    !/^(font-size|border-radius|color|background|background-color|box-shadow|border|border-color)$/.test(
+                    !/^(font-size|border-radius|color|background|background-color|background-image|box-shadow|border|border-color)$/.test(
                         property,
                     )
                 ) {
@@ -1196,6 +1245,179 @@ describe("菜单表面必须挂在文档流之外", () => {
             offenders,
             "菜单壳必须相对视口定位（`position: fixed`，坐标由调用方算好下发）。" +
                 "`hs-menu--submenu` 是父菜单内部的子面板专用变体，不要在工具栏下拉上使用",
+        ).toEqual([]);
+    });
+});
+
+/*
+ * portal 与旧滑块的最后防线。
+ *
+ * Radix Themes 的 --accent-9 只定义在 .radix-themes 上。任何含 Radix 控件的
+ * 弹出面必须挂 menuPortalContainer()；旧 .qt-range 若仍被 body portal 使用，
+ * thumb 背景必须带 fallback，否则会再次出现"看得见轨道、看不见滑块头"。
+ */
+describe("菜单 portal 与 .qt-range fallback", () => {
+    test("FadeContextMenu 使用 menuPortalContainer()，不再直接 portal 到 body", () => {
+        const source = readFileSync(
+            join("src", "components", "layout", "timeline", "FadeContextMenu.tsx"),
+            "utf8",
+        );
+        expect(source).toContain("menuPortalContainer()");
+        expect(source).not.toContain("document.body");
+        expect(source).not.toContain('type="range"');
+    });
+
+    test(".qt-range 的 thumb 背景引用 Radix 变量时必须自带 fallback", () => {
+        const css = readFileSync(TOKEN_CSS, "utf8");
+        const offenders: string[] = [];
+        for (const block of cssBlocks(css)) {
+            if (!block.selector.includes(".qt-range")) continue;
+            if (!block.selector.includes("thumb")) continue;
+            for (const match of block.body.matchAll(/background(?:-color)?:\s*([^;]+);/g)) {
+                const value = match[1].trim();
+                if (!value.includes("var(--accent-")) continue;
+                if (!hasVarFallback(value)) offenders.push(`${block.selector} → ${value}`);
+            }
+        }
+        expect(
+            offenders,
+            "旧 range 的 thumb 若不慎挂在 body portal 下，无 fallback 的 var(--accent-9) 会整条失效",
+        ).toEqual([]);
+    });
+});
+
+/*
+ * 菜单滚动模型与"只剩一套菜单表面"的门禁（G-1 … G-6）。
+ *
+ * 【为什么这些必须由机制兜住】它们全是"删掉不会有任何报错、只会让手感悄悄变回去"
+ * 的东西：删掉 scrollbar-width: none，滚动条回来；给提示行加个 padding，它就占位；
+ * 重新引入一个 Radix 菜单，两套键盘模型重新分叉。没有门禁时，下一个人的合理改动
+ * 就是下一次回归。
+ *
+ * G-7（条目树基线）不在本文件：它要真浏览器，见 scripts/menu-tree-baseline.mjs。
+ */
+describe("菜单滚动模型的门禁", () => {
+    /** 取某个选择器**完全相等**的规则块。 */
+    function blockOf(selector: string) {
+        return cssBlocks(readFileSync(TOKEN_CSS, "utf8")).find(
+            (block) => block.selector === selector,
+        );
+    }
+
+    /** 规则块里某条声明的取值。 */
+    function valueOf(selector: string, property: string): string | null {
+        const block = blockOf(selector);
+        if (!block) return null;
+        const match = block.body.match(new RegExp("(?:^|;)\\s*" + property + "\\s*:\\s*([^;]+)"));
+        return match ? match[1].trim() : null;
+    }
+
+    test("G-1 菜单壳没有原生竖直滚动条", () => {
+        // I1 的唯一实现点。删掉这一行不会有任何报错 —— 滚动条只是回来。
+        expect(valueOf(".hs-menu", "scrollbar-width"), "壳必须声明 scrollbar-width: none").toBe(
+            "none",
+        );
+        // 自绘滚动条同样不允许：本仓实测分数 DPR 下拖拽映射会放大 dpr² 倍。
+        expect(
+            /*
+             * 三条限制缺一不可：
+             *   ① 先剥注释 —— `.hs-menu` 的说明里就写着"不用 ::-webkit-scrollbar"；
+             *   ② `[^{}]*` 不许跨规则块，否则全局的
+             *      `html[data-input="touch"] ::-webkit-scrollbar` 会被算进来；
+             *   ③ `.hs-menu` 后面不许接 `__`/`--`，否则 `.hs-menu__scroll-hint`
+             *      会被当成壳。
+             */
+            /(^|[\s,])\.hs-menu(?!__|--)[^{}]*::-webkit-scrollbar/.test(
+                readFileSync(TOKEN_CSS, "utf8").replace(/\/\*[\s\S]*?\*\//g, ""),
+            ),
+            "不得用 ::-webkit-scrollbar 自绘菜单滚动条",
+        ).toBe(false);
+    });
+
+    test("G-2 提示行零占位（sticky + height: 0）", () => {
+        // I3：提示行出现 / 消失时，菜单高度、内容位置、scrollHeight 都不能变。
+        expect(valueOf(".hs-menu__scroll-hint", "position")).toBe("sticky");
+        expect(valueOf(".hs-menu__scroll-hint", "height")).toBe("0");
+        // 命中区在 ::after 上：宿主盒高是 0，0 高的元素永远打不中。
+        expect(blockOf(".hs-menu__scroll-hint::after"), "提示行必须有 ::after 命中区").toBeTruthy();
+        expect(valueOf(".hs-menu__scroll-hint::after", "height")).toBe(
+            "var(--qt-menu-scroll-hint-h)",
+        );
+    });
+
+    test("G-3 菜单壳不再自己留内边距", () => {
+        /*
+         * sticky 的约束盒是父元素的**内容盒**：壳留 4px 内边距，提示行就跟着内缩
+         * 4px，边缘露出一条没被渐变的空白（实测 165 vs 期望 161）。
+         */
+        expect(valueOf(".hs-menu", "padding"), "壳的 padding 必须搬到 .hs-menu__content").toBe("0");
+        expect(valueOf(".hs-menu__content", "padding"), "内容层必须持有内边距").not.toBeNull();
+    });
+
+    test("G-4 移动端 sheet 只命中**已打开**的菜单", () => {
+        /*
+         * data-hs-context-menu 有**两种**写法：带 =1 的是已打开的菜单表面，无值的是
+         * 常驻的锚点容器。写成不带值的属性选择器会把 8 个锚点容器一起套上 sheet 装饰
+         * （实测：radius 16px + shadow 0 -12px + bottom: 0）。
+         */
+        const css = readFileSync(TOKEN_CSS, "utf8");
+        expect(css).toContain('html[data-form="mobile"] [data-hs-context-menu="1"]');
+        expect(css).not.toMatch(/\[data-form="mobile"\] \[data-hs-context-menu\]\s*\{/);
+        // 住在 sheet 里的菜单与子面板不做 sheet 变换。
+        expect(css).toContain(':not([data-hs-menu-inline="1"])');
+    });
+
+    test("G-5 不得再出现 Radix 菜单（I10）", () => {
+        /*
+         * 全仓只剩**一套**菜单表面。两套的时候：键盘两套、滚动两套、定位两套、
+         * CSS 两套、门禁两套 —— 而"哪一套生效"取决于用户点的是菜单栏还是右键。
+         * Select 不在此列：role="listbox" 的表单控件不是命令菜单。
+         */
+        const offenders: string[] = [];
+        for (const file of sourceFiles(/\.tsx$/)) {
+            const source = stripCommentsAndStrings(readFileSync(file, "utf8"));
+            if (source.includes("<DropdownMenu.")) offenders.push(file);
+        }
+        expect(
+            offenders,
+            "以下文件仍在用 Radix 的 DropdownMenu —— 请改用 AppContextMenu / " +
+                "AppAnchoredMenu / AppSubMenu（条目数据用 AppMenuItemSpec）",
+        ).toEqual([]);
+    });
+
+    test("G-6 提示行只有一处实现", () => {
+        // 第二份"滚动提示"出现时，两套的可见性判据一定会分叉。
+        const offenders: string[] = [];
+        for (const file of sourceFiles(/\.tsx?$/)) {
+            if (file === join(UI_DIR, "MenuScrollScope.tsx")) continue;
+            const source = stripCommentsAndStrings(readFileSync(file, "utf8"), true);
+            if (source.includes("hs-menu__scroll-hint")) offenders.push(file);
+        }
+        expect(offenders, "hs-menu__scroll-hint 只允许出现在 ui/MenuScrollScope.tsx").toEqual([]);
+    });
+
+    test("每个自渲染的菜单表面都包了 MenuScrollScope（I11）", () => {
+        /*
+         * 判据取自结构事实：挂了 hs-menu 壳的文件，要么通过三个原语（它们在内部
+         * 渲染 MenuScrollScope），要么自己写一层。漏掉一处的症状是"这张菜单有滚动
+         * 条/滚不动却没提示"，用户不知道还能往下翻。
+         */
+        const PRIMITIVES = /AppContextMenu|AppAnchoredMenu|AppSubMenu/;
+        const offenders: string[] = [];
+        for (const file of sourceFiles(/\.tsx$/)) {
+            if (file.startsWith(UI_DIR)) continue;
+            const source = readFileSync(file, "utf8");
+            // 保留字符串（类名就在里面），只剥注释。hs-menu 后面必须是引号或空白 ——
+            // 这样 hs-menu__item / hs-menu--submenu 不算"拥有壳"。
+            const kept = stripCommentsAndStrings(source, true);
+            if (!/(^|["'\s])hs-menu(?=["'\s])/.test(kept)) continue;
+            if (PRIMITIVES.test(source)) continue;
+            if (source.includes("MenuScrollScope")) continue;
+            offenders.push(file);
+        }
+        expect(
+            offenders,
+            "自己渲染菜单壳的文件必须包一层 MenuScrollScope（内边距与提示行都在它里面）",
         ).toEqual([]);
     });
 });

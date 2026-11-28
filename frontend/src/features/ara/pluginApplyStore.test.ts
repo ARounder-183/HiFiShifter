@@ -185,6 +185,47 @@ test("a host change event refetches the timeline immediately", async () => {
     expect(refetches).toBe(before + 1);
 });
 
+test("a repeated host change event for the same version does not refetch", async () => {
+    // 同一个版本重复到达的三种来源：多个等待者共用一次提交、事件通道与轮询各自到达、
+    // 以及"通知 → 重取 → 重取推动上游 → 再通知"这条环。每多取一次就多一棵整图对象。
+    invokeMock.mockResolvedValue(readyState({ host_version: 5 }));
+    let refetches = 0;
+    stop = startPluginApplyPolling(async () => {
+        refetches++;
+    });
+    await flush();
+
+    handlers.get("plugin_host_changed")?.({ payload: { version: 6 } });
+    await flush();
+    const afterFirst = refetches;
+
+    // 同一版本再来两次：一次都不该重取。
+    handlers.get("plugin_host_changed")?.({ payload: { version: 6 } });
+    handlers.get("plugin_host_changed")?.({ payload: { version: 6 } });
+    await flush();
+    expect(refetches).toBe(afterFirst);
+
+    // 版本真的前进了才重取 —— 去重不能把新版本一起吞掉。
+    handlers.get("plugin_host_changed")?.({ payload: { version: 7 } });
+    await flush();
+    expect(refetches).toBe(afterFirst + 1);
+});
+
+test("a stale host change event does not refetch the version already fetched", async () => {
+    // 轮询已经把 v9 取回来了，晚到的 v8 事件不构成"内容变了"。
+    invokeMock.mockResolvedValue(readyState({ host_version: 9 }));
+    let refetches = 0;
+    stop = startPluginApplyPolling(async () => {
+        refetches++;
+    });
+    await flush();
+    const before = refetches;
+
+    handlers.get("plugin_host_changed")?.({ payload: { version: 8 } });
+    await flush();
+    expect(refetches).toBe(before);
+});
+
 test("reload passes force through to the host instead of silently downgrading it", async () => {
     invokeMock.mockResolvedValue(readyState());
     stop = startPluginApplyPolling(async () => undefined);
@@ -312,4 +353,38 @@ test("the terminal protocol code is carried through to the snapshot", async () =
     await flush();
     expect(getPluginApplySnapshot().sessionEnded).toBe(true);
     expect(getPluginApplySnapshot().sessionCode).toBe(9);
+});
+
+test("a busy apply state is transient, not an error, and never refetches the timeline", async () => {
+    // 后端缓存还没发布时答的是同形载荷 + `busy: true`（见 `EditorSession::busy_apply_state`）。
+    // 它不是故障：把它当错误就会画一条红条（"尚未应用：BackendInvokeError: ..."），
+    // 而用户此刻什么都没做错。
+    const busy = readyState({
+        generation: 0,
+        applied_generation: 0,
+        host_version: 0,
+        ready: false,
+        busy: true,
+    });
+    invokeMock.mockResolvedValue(busy);
+    let refetches = 0;
+    stop = startPluginApplyPolling(async () => {
+        refetches += 1;
+    });
+    await flush();
+
+    const snapshot = getPluginApplySnapshot();
+    expect(snapshot.state?.busy).toBe(true);
+    expect(snapshot.failure).toBe("");
+    expect(snapshot.sessionEnded).toBe(false);
+    // 【为什么这一条比"不显示红条"更重要】降级载荷的 `host_version` 是 0，而真实值
+    // 可能是 7 —— 直接比较会把每一拍都判成"宿主版本变了"，于是每 250 ms 重取一次
+    // 整份时间线，直到缓存就绪为止。
+    expect(refetches).toBe(0);
+
+    // 仍按正常间隔继续轮询：缓存就绪之后下一拍就会拿到真读数。
+    const calls = invokeMock.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(300);
+    await flush();
+    expect(invokeMock.mock.calls.length).toBeGreaterThan(calls);
 });

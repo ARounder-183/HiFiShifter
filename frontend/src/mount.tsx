@@ -32,8 +32,34 @@ import { I18nProvider } from "./i18n/I18nProvider";
 import { AppThemeProvider } from "./theme/AppThemeProvider";
 import { SessionUnavailable } from "./features/ara/SessionUnavailable";
 import { probeSession } from "./services/sessionProbe";
-import { isPluginMode } from "./services/hostDetect";
+import { appForm, isPluginMode } from "./services/hostDetect";
+import { surfaceProfile } from "./services/surfaceProfileStore";
+import { installSurfaceInsets } from "./services/surfaceInsets";
+import { installBackGesture } from "./services/backGesture";
 import { invoke } from "./services/invoke";
+import { installTouchContextMenu } from "./utils/useLongPress";
+import { setGlRasterMaxDpr } from "./components/layout/renderKernel/gl/glRaster";
+
+/**
+ * 把当前形态写进 `<html>` 的 `data-*` 属性。
+ *
+ * | 属性 | 取值 | 用途 |
+ * |---|---|---|
+ * | `data-form` | desktop / plugin / mobile | 外壳与布局分支 |
+ * | `data-input` | pointer / touch | 令牌层（控件高度、滚动条、字号） |
+ * | `data-os` | windows / macos / linux / android / ios | 平台微调（例如 iOS 的橡皮筋） |
+ *
+ * 【为什么 `data-input` 不直接等于形态】桌面可以有触摸屏（Windows 平板），
+ * 移动端也可以接鼠标。CSS 该跟着**输入通道**走，而不是跟着"是不是手机"走 ——
+ * 这条区分在 `inputProfile.ts` 里已经是既有做法（`profileFor(event)`）。
+ */
+function applySurfaceMarkers(): void {
+    const root = document.documentElement;
+    const profile = surfaceProfile();
+    root.dataset.form = appForm();
+    root.dataset.input = profile.input.primary;
+    root.dataset.os = profile.os;
+}
 
 export async function mountApp(): Promise<void> {
     // dev-only 性能工程脚手架：动态 import 保证生产构建完全不打包该模块。
@@ -49,6 +75,59 @@ export async function mountApp(): Promise<void> {
 
     // 探活必须在扇出之前完成（见 `probeSession` 的说明）。
     const session = await probeSession();
+
+    // ── 形态标记写进 <html> ───────────────────────────────────────────────
+    //
+    // 【为什么用 `data-*` 而不是给根组件传 className】CSS 令牌层要按形态覆写
+    // （`html[data-input="touch"]` 抬升控件高度、放大滚动条、加安全区内边距），
+    // 而这些规则必须能作用到 `html`/`body` 自身（`100dvh`、`padding: env(...)`）——
+    // 组件的 className 够不到那里。属性写在 `<html>` 上，两处都能命中。
+    //
+    // 另外这两个属性是**调试入口**：`?form=mobile` 之后 DevTools 里一眼能看出
+    // 当前跑的是哪个形态，不必去翻 store。
+    applySurfaceMarkers();
+
+    // ── 安全区内边距写进 CSS 变量 ──────────────────────────────────────────
+    //
+    // 【为什么在这里而不是某个组件里】`--qt-safe-*` 的消费点遍布全应用（外壳、
+    // 抽屉、对话框、菜单），它们分属不同的 React 子树与 portal 容器，只有
+    // `<html>` 是共同祖先。而"首帧就要对"是硬要求：晚一帧，顶栏会先画在状态栏
+    // 底下再跳下来，用户看到的是闪一下。
+    //
+    // 传剖面里的值而不是只订阅事件：`main.tsx` 已经在挂载前取到了剖面，
+    // 这里用同一份数据，第一次绘制就是对的。
+    void installSurfaceInsets(surfaceProfile().viewport.insets);
+
+    // ── 返回键 / 返回手势 ──────────────────────────────────────────────────
+    //
+    // 【为什么只在移动形态装】原生侧只有 Android 会执行 `window.__HFS_HANDLE_BACK__`。
+    // 桌面上装一个没人调用的全局函数既无意义，也让"桌面路径不变"这条纪律多一个
+    // 需要解释的例外。
+    if (appForm() === "mobile") {
+        installBackGesture();
+    }
+
+    // ── 触摸的长按 → 上下文菜单 ────────────────────────────────────────────
+    //
+    // 【为什么装在这里、只装一次】全仓有 136 处 `onContextMenu`（52 个文件）。逐个
+    // 改写成"触摸也支持"意味着 136 次漏掉的机会，而漏掉的症状是"这个对象在手机上
+    // 不能右键"，没有任何报错。装在 document 上之后，**今天存在的和明天新增的**
+    // 处理器都会自动生效 —— 这是唯一不会随功能增加而退化的做法。
+    //
+    // 桌面形态下 `installTouchContextMenu()` 直接返回空卸载函数（能力表里
+    // `input.secondaryButton` 为真），因此桌面路径一行都不变。
+    installTouchContextMenu();
+
+    // ── 光栅化 DPR 上限 ────────────────────────────────────────────────────
+    //
+    // 【为什么是 2.0】移动端旗舰机的 DPR 是 3：390×844 的画布在 DPR 3 下约 9.0 Mpx，
+    // 单个 RGBA 帧缓冲 36 MB，而全应用有 6 个 WebGL2 上下文。iOS 给单进程的内存上限
+    // 在 1~1.5 GB —— 几张这样的帧缓冲加上 ORT 会话就会触发 jetsam（无异常、无日志、
+    // 进程直接消失）。降到 2.0 像素量减半，而在 6 英寸屏上看不出差别（波形与曲线都是
+    // 低频内容）。
+    //
+    // 桌面传 Infinity：行为与引入这个上限之前**逐字节相同**。
+    setGlRasterMaxDpr(surfaceProfile().form === "mobile" ? 2 : Number.POSITIVE_INFINITY);
 
     createRoot(document.getElementById("root")!).render(
         <StrictMode>

@@ -11,10 +11,10 @@
  * （用户看到的就是控件反复横跳）。常挂载 + 只改 `display` 之后，"同一层级的内容"
  * 与"层级本身"无关，判据才是宽度的纯函数。
  */
-import React from "react";
-import { DropdownMenu } from "@radix-ui/themes";
+import React, { useRef, useState } from "react";
 import { ChevronDownIcon, EyeOpenIcon, EyeClosedIcon } from "@radix-ui/react-icons";
 
+import { AppAnchoredMenu, type AppMenuItemSpec } from "../../../../ui/Menu";
 import { slotDisplay } from "../toolbarOverflow";
 
 /**
@@ -113,8 +113,22 @@ export type ParamToolbarPillProps = {
     eyeTooltip?: string;
     /** 眼睛的无障碍标签（简短，如“显示/隐藏副参数叠加曲线”） */
     eyeLabel?: string;
-    /** 可选片段：子参数下拉菜单的触发按钮（已含 param-pill__seg 样式类） */
-    dropdown?: React.ReactNode;
+    /**
+     * 可选片段：子参数下拉的触发按钮。
+     *
+     * 【为什么由本组件渲染而不是传一个 ReactNode】菜单要**锚定在这个按钮上**
+     * （`AppAnchoredMenu` 按锚点矩形定位），所以调用方必须拿得到那个按钮的 ref。
+     * 传节点时 ref 与节点是两处，接错了没有任何报错 —— 只表现为"菜单从左上角弹出"。
+     * 收敛成"调用方给 ref 与开关，本组件渲染按钮"，这类接错从结构上不可能发生。
+     */
+    dropdown?: {
+        /** 锚点：菜单按这个按钮的矩形定位。 */
+        ref: React.RefObject<HTMLButtonElement | null>;
+        /** 菜单是否展开（决定 `aria-expanded`）。 */
+        open: boolean;
+        onToggle: () => void;
+        tooltip?: string;
+    };
     /**
      * 参数是否不可用（置灰、不可选中）。
      *
@@ -189,7 +203,26 @@ export const ParamToolbarPill: React.FC<ParamToolbarPillProps> = ({
             >
                 {label}
             </button>
-            {dropdown}
+            {dropdown ? (
+                <button
+                    ref={dropdown.ref}
+                    type="button"
+                    // 药丸是一整个控件：Tab 只停在标签片段上，箭头片段不单独进
+                    // 焦点序列（与迁移前的 `tabIndex={-1}` 一致）。
+                    tabIndex={-1}
+                    className="param-pill__seg param-pill__seg--chev"
+                    data-tooltip={dropdown.tooltip}
+                    aria-haspopup="menu"
+                    aria-expanded={dropdown.open}
+                    onClick={(e) => {
+                        // 药丸整体有 onClick（选中该参数）；箭头只负责开菜单。
+                        e.stopPropagation();
+                        dropdown.onToggle();
+                    }}
+                >
+                    <ChevronDownIcon width="12" height="12" />
+                </button>
+            ) : null}
         </div>
     );
 };
@@ -257,72 +290,81 @@ export const ParamGroupButton: React.FC<ParamGroupButtonProps> = ({
     onToggleSecondary,
     alwaysShowDropdown = false,
 }) => {
+    /*
+     * 【钩子必须无条件调用】下面的 `if (!showDropdown)` 是**渲染**分支，不是钩子
+     * 分支：把 `useRef`/`useState` 放在它后面，条件一变就会破坏调用顺序。
+     */
+    const anchorRef = useRef<HTMLButtonElement | null>(null);
+    const menuRef = useRef<HTMLDivElement | null>(null);
+    const [open, setOpen] = useState(false);
+
     const eyeMode: "main" | "on" | "off" =
         rootActive || childActive ? "main" : secondaryVisible ? "on" : "off";
+    const showDropdown = Boolean(childParamId) || alwaysShowDropdown;
 
-    if (!childParamId && !alwaysShowDropdown) {
-        return (
-            <ParamToolbarPill
-                label={rootLabel}
-                labelTooltip={rootTooltip}
-                active={rootActive}
-                onSelect={onSelectRoot}
-                eyeMode={eyeMode}
-                onToggleEye={onToggleSecondary}
-                eyeTooltip={secondaryVisible ? showSecondaryTooltip : hideSecondaryTooltip}
-                eyeLabel={secondaryVisible ? showSecondaryLabel : hideSecondaryLabel}
-            />
-        );
+    const pillProps = {
+        label: showDropdown && childActive ? childLabel : rootLabel,
+        labelTooltip: showDropdown && childActive ? (childMenuLabel ?? childLabel) : rootTooltip,
+        active: showDropdown ? rootActive || childActive : rootActive,
+        onSelect: onSelectRoot,
+        eyeMode,
+        onToggleEye: onToggleSecondary,
+        eyeTooltip: secondaryVisible ? showSecondaryTooltip : hideSecondaryTooltip,
+        eyeLabel: secondaryVisible ? showSecondaryLabel : hideSecondaryLabel,
+    } as const;
+
+    if (!showDropdown) {
+        return <ParamToolbarPill {...pillProps} />;
     }
 
+    /*
+     * 两项都是"单选"：`menuitemradio` + `aria-checked`。迁移前用 Radix 的
+     * `RadioGroup`，迁移后走同一套条目模型 —— 视觉与读屏语义都不变，但不再有
+     * 第二套菜单实现。
+     */
+    const items: AppMenuItemSpec[] = [
+        {
+            key: rootParamId,
+            label: rootMenuLabel ?? rootLabel,
+            radio: true,
+            checked: rootActive,
+            onSelect: onSelectRoot,
+        },
+        ...(childParamId
+            ? [
+                  {
+                      key: childParamId,
+                      label: childMenuLabel ?? childLabel,
+                      radio: true,
+                      checked: childActive,
+                      onSelect: onSelectChild,
+                  },
+              ]
+            : []),
+    ];
+
     return (
-        <DropdownMenu.Root>
+        <>
             <ParamToolbarPill
-                label={childActive ? childLabel : rootLabel}
-                labelTooltip={childActive ? (childMenuLabel ?? childLabel) : rootTooltip}
-                active={rootActive || childActive}
-                onSelect={onSelectRoot}
-                eyeMode={eyeMode}
-                onToggleEye={onToggleSecondary}
-                eyeTooltip={secondaryVisible ? showSecondaryTooltip : hideSecondaryTooltip}
-                eyeLabel={secondaryVisible ? showSecondaryLabel : hideSecondaryLabel}
-                dropdown={
-                    <DropdownMenu.Trigger
-                        className="param-pill__seg param-pill__seg--chev"
-                        data-tooltip={childActive ? (childMenuLabel ?? childLabel) : rootTooltip}
-                        tabIndex={-1}
-                    >
-                        <ChevronDownIcon width="12" height="12" />
-                    </DropdownMenu.Trigger>
-                }
+                {...pillProps}
+                dropdown={{
+                    ref: anchorRef,
+                    open,
+                    onToggle: () => setOpen((value) => !value),
+                    tooltip: childActive ? (childMenuLabel ?? childLabel) : rootTooltip,
+                }}
             />
-            <DropdownMenu.Content variant="soft" color="gray">
-                <DropdownMenu.RadioGroup
-                    value={
-                        rootActive
-                            ? rootParamId
-                            : childActive && childParamId
-                              ? childParamId
-                              : undefined
-                    }
-                    onValueChange={(value) => {
-                        if (value === rootParamId) {
-                            onSelectRoot();
-                        } else if (value === childParamId) {
-                            onSelectChild();
-                        }
-                    }}
-                >
-                    <DropdownMenu.RadioItem value={rootParamId}>
-                        {rootMenuLabel ?? rootLabel}
-                    </DropdownMenu.RadioItem>
-                    {childParamId ? (
-                        <DropdownMenu.RadioItem value={childParamId}>
-                            {childMenuLabel ?? childLabel}
-                        </DropdownMenu.RadioItem>
-                    ) : null}
-                </DropdownMenu.RadioGroup>
-            </DropdownMenu.Content>
-        </DropdownMenu.Root>
+            <AppAnchoredMenu
+                open={open}
+                anchorRef={anchorRef}
+                menuRef={menuRef}
+                items={items}
+                onClose={() => setOpen(false)}
+                // 药丸贴着工具栏右侧时，左对齐展开会横跨整个面板；右对齐与原生
+                // 下拉在右端的行为一致。
+                align="end"
+                ariaLabel={rootMenuLabel ?? rootLabel}
+            />
+        </>
     );
 };

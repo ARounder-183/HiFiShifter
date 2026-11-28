@@ -318,7 +318,7 @@ pub fn disable_coreml(reason: &str) {
 ///   axes.  Requiring static shapes here was measured to make the vocoder
 ///   ~1.7x *slower* than the CPU EP (see the module docs).
 /// - A persistent model cache avoids recompiling the CoreML model on every
-///   session creation (can take tens of seconds for this 56 MB model).
+///   session creation (can take tens of seconds for this model).
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn build_coreml_ep(role: OrtSessionRole) -> ort::ep::CoreML {
     use ort::ep::coreml::{ComputeUnits, ModelFormat};
@@ -1028,18 +1028,26 @@ pub(crate) fn ensure_ort_backend() {
     register_alternative_backend();
 }
 
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "x86_64"),
+    all(target_os = "android", target_arch = "x86_64")
+))]
 fn register_alternative_backend() {
     static BACKEND: std::sync::Once = std::sync::Once::new();
     BACKEND.call_once(|| {
         ort::set_api(ort_tract::api());
-        log::info!("[ort] registered the ort-tract CPU backend (macOS x86_64)");
+        log::info!(
+            "[ort] registered the ort-tract CPU backend (no native ORT binary for this target)"
+        );
     });
 }
 
 /// On every other target `ort` links the native ONNX Runtime directly, so
 /// there is no alternative API to install.
-#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+#[cfg(not(any(
+    all(target_os = "macos", target_arch = "x86_64"),
+    all(target_os = "android", target_arch = "x86_64")
+)))]
 fn register_alternative_backend() {}
 
 /// The global env var, defaulting to `"auto"`.  Only used for diagnostics.
@@ -1424,8 +1432,13 @@ fn build_session_inner(
         if role != OrtSessionRole::Game {
             match build_dml_session_inner(onnx_path, role, &choice, true, device) {
                 Ok((session, ep)) => return Ok((session, ep, device)),
-                Err(e) => log::error!(
-                    "ort_session[{role:?}]: strict DirectML failed (will retry with CPU fallback): {e}"
+                // 【为什么不是 ERROR】这是一次**策略尝试**的结果，不是一次失败：
+                // 严格模式要求整张图都能落在 DirectML 上，而只要图里有一个 CPU-only
+                // 节点，它必然被拒 —— 那是预期形状，紧随其后的回退构建通常就成功了。
+                // 用 ERROR 记它，等于把"失败后立刻成功"写进 ERROR 渠道：现场检索
+                // ERROR 的人会看到一条根本不需要行动的记录，而真正的失败在下面那一条。
+                Err(e) => log::info!(
+                    "ort_session[{role:?}]: strict DirectML unavailable, using DirectML with CPU fallback: {e}"
                 ),
             }
         }

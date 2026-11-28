@@ -5,7 +5,7 @@ import {
     canCreateHostTracks,
     canImportAsTakes,
 } from "../../services/hostCapabilities";
-import { DropdownMenu, Flex } from "@radix-ui/themes";
+import { Flex } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import type { Locale } from "../../i18n/messages";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -45,7 +45,8 @@ import { TIME_UNITS, TIME_UNIT_CHOICES } from "./timeline/timeFormat";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
 import { SnapGridSettingsDialog } from "./SnapGridSettingsDialog";
 import { SplitTransitionSettingsDialog } from "./SplitTransitionSettingsDialog";
-import { DockLayoutMenus, DockLayoutDialogs } from "../dock/DockLayoutMenu";
+import { DockLayoutDialogs } from "../dock/DockLayoutMenu";
+import { useDockLayoutMenuItems } from "../dock/useDockLayoutMenuItems";
 import { scaleChangesInRange, scaleLikeEquals } from "../../utils/tempoMap";
 import type { ScaleLike } from "../../utils/musicalScales";
 import { selectPianoRollSelection } from "../../features/session/interactionSlice";
@@ -109,7 +110,8 @@ const BenchmarkDialog = lazy(() =>
     import("./BenchmarkDialog").then((module) => ({ default: module.BenchmarkDialog })),
 );
 import { AboutDialog } from "./AboutDialog";
-import { LogVerbosityMenuItems } from "./LogVerbosityMenuItems";
+import { useLogVerbosityMenu } from "./useLogVerbosityMenu";
+import { isMobileForm } from "../../services/hostDetect";
 
 import {
     isChildPitchOffsetCentsParam,
@@ -122,7 +124,13 @@ import { AppChoiceList } from "../../ui/ChoiceList";
 import { togglePanelVisible } from "../../features/dock/dockApi";
 import { PANEL_APPEARANCE, PANEL_HOST_LINK } from "../dock/registerBuiltinPanels";
 import { openCaptureSettings } from "../../features/capture/captureSettingsBus";
-import { AppBusy, AppConfirmDialog, AppNoticeDialog } from "../../ui";
+import {
+    AppBusy,
+    AppConfirmDialog,
+    AppMenuBarItem,
+    AppNoticeDialog,
+    type AppMenuItemSpec,
+} from "../../ui";
 import { copyTextToClipboard } from "../../utils/copyText";
 import { logFolderNotice } from "./logFolderNotice";
 // import type { VibratoParams } from "../editDialogs/EditDialogs"; // 已移除无效导入
@@ -400,6 +408,17 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
     const withCheck = (active: boolean, label: string) => `${active ? "●" : "○"} ${label}`;
 
+    /** 当前展开的菜单栏下拉。同一时刻只有一个 —— 见 `ui/AppMenuBarItem` 的说明。 */
+    const [openMenu, setOpenMenu] = useState<string | null>(null);
+
+    /** 「视图」里的两个停靠二级菜单（停靠状态的订阅收在 DockLayoutMenu 模块内部）。 */
+    const dockLayoutItems = useDockLayoutMenuItems({ withCheck });
+
+    /** 「帮助」里的日志详细程度子菜单（含它自己的一份设置订阅）。 */
+    const logVerbosity = useLogVerbosityMenu({
+        onSaveFailed: (message) => setNotice({ title: tf("status_error_prefix"), message }),
+    });
+
     const resolveScaleToken = (scaleValue: string) =>
         scaleValue === "__project__" ? "__project__" : scaleValue;
 
@@ -573,6 +592,22 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     title: tf("status_error_prefix"),
                     message: res.error || tf("menu_export_diagnostics_failed"),
                 });
+                return;
+            }
+            /*
+             * 移动端：把落点**直接说出来**。
+             *
+             * 桌面导出成功后由后端在资源管理器里定位文件，用户看得见；移动端没有
+             * 这个动作（见 `platform::share`），而导出物落在
+             * `Android/media/<pkg>/HiFiShifter` —— 那是文件管理器与 USB 都可见的
+             * 位置，但用户不会知道。只报"成功"等于让他自己去找。
+             */
+            if (isMobileForm() && res.path) {
+                setNotice({
+                    title: tf("menu_export_diagnostics"),
+                    message: <span data-hs-selectable="true">{res.path}</span>,
+                    copyText: res.path,
+                });
             }
         } catch (e) {
             setNotice({ title: tf("status_error_prefix"), message: String(e) });
@@ -590,1056 +625,1007 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         return () => window.removeEventListener("hifi:importMediaFromMenu", handler);
     }, [handleImportAudioFromMenu]);
 
+    /*
+     * ── 菜单条目（数据） ────────────────────────────────────────────────────
+     *
+     * 【为什么是数组而不是 JSX】全仓只有一套菜单表面（hs-menu）与一条条目渲染
+     * 路径。写成 <DropdownMenu.Item> 时「视图」这张菜单里会混着两种条目来源，
+     * 于是键盘、滚动、勾选、禁用态都要各写一遍 —— 而这正是本次要消除的分叉。
+     *
+     * 【条件项怎么表达】一律用条件展开（...(cond ? [x] : [])）。**分隔线必须跟着
+     * 条件走**：写成「下一条带 separatorBefore」时，条件一旦为假就会留下一条孤立的
+     * 分隔线（本仓在「粘贴 VocalShifter 剪贴板」那里踩过这个坑）。
+     *
+     * 【快捷键列】shortcutLabel() 与快捷键设置面板同源：绑了多个键就显示多个。
+     */
+
+    /* ── 文件 ── */
+    const fileMenuItems: AppMenuItemSpec[] = isPluginMode()
+        ? [
+              /*
+               * 【为什么不按「能否导入音频」禁用整个菜单】导出处理结果不需要任何宿主
+               * 写接口 —— 授权 PCM 与编码器都在插件内（见 editor/commands.rs 的
+               * export_audio_advanced）。此前整个菜单跟着 canImportHostAudio() 一起
+               * 禁用，于是 ARA-only 宿主上连「导出」都点不开，而它本来是可用的。
+               *
+               * 【为什么禁用项不附一行原因】那一行会把菜单项撑成两行，而菜单的行高
+               * 与对齐是按单行排的 —— 混进去之后整块菜单的节奏就乱了。「为什么点不了」
+               * 由**位置**回答：它就在插件形态的文件菜单里，旁边就是能点的「导出音频」。
+               */
+              {
+                  key: "import-media",
+                  label: t("menu_import_media"),
+                  shortcut: shortcutLabel("project.importMedia"),
+                  disabled: !canImportHostAudio(),
+                  onSelect: () => void handleImportAudioFromMenu(),
+              },
+              {
+                  key: "export-audio",
+                  label: t("menu_export_audio"),
+                  shortcut: shortcutLabel("project.export"),
+                  onSelect: () => setExportDialogOpen(true),
+              },
+              // 保存工程由宿主负责：插件没有「工程文件」这个概念（工程就是宿主的那个文件）。
+              {
+                  key: "save-project",
+                  label: t("menu_save_project"),
+                  disabled: true,
+                  separatorBefore: true,
+              },
+          ]
+        : [
+              {
+                  key: "new",
+                  label: t("menu_new_project"),
+                  shortcut: shortcutLabel("project.new"),
+                  onSelect: onNewProject,
+              },
+              {
+                  key: "open",
+                  label: t("menu_open_project"),
+                  shortcut: shortcutLabel("project.open"),
+                  onSelect: onOpenProject,
+              },
+              {
+                  key: "recent",
+                  label: t("menu_recent_projects"),
+                  items: s.project.recent.length
+                      ? s.project.recent.slice(0, 12).map((path) => ({
+                            key: path,
+                            label: path,
+                            onSelect: () => onOpenRecentProject(path),
+                        }))
+                      : [{ key: "recent-empty", label: t("menu_recent_empty"), disabled: true }],
+              },
+              {
+                  key: "recapture",
+                  label: t("menu_recapture_missing_media"),
+                  onSelect: onRecaptureMissingMedia,
+              },
+              {
+                  key: "save",
+                  label: t("menu_save_project"),
+                  shortcut: shortcutLabel("project.save"),
+                  separatorBefore: true,
+                  onSelect: () => void dispatch(saveProjectRemote()),
+              },
+              // 「另存为」：按上次格式**直接**存（选路径 → 写文件），不再先弹一层应用内格式选择。
+              {
+                  key: "save-as",
+                  label: t("menu_save_project_as"),
+                  shortcut: shortcutLabel("project.saveAs"),
+                  onSelect: () => {
+                      void dispatch(saveProjectAsFormat(s.project.lastSaveFormat ?? "hshp"));
+                  },
+              },
+              /*
+               * 指定格式另存：格式在菜单项里一次选定，原生对话框只带该格式的单一
+               * 过滤器（macOS 的 NSSavePanel 没有「文件类型」下拉框，把格式留在对话框里
+               * 等于让用户猜扩展名）。格式说明（尤其「zip 需解压后打开」）不能丢 ——
+               * 因此逐项带上 tooltip。
+               */
+              {
+                  key: "save-as-format",
+                  label: tf("menu_save_project_as_submenu"),
+                  items: SAVE_PROJECT_AS_FORMATS.map((entry) => ({
+                      key: entry.format,
+                      label: tf(entry.labelKey),
+                      shortcut: shortcutLabel(entry.actionId),
+                      tooltip: tf(entry.descKey),
+                      onSelect: () => {
+                          void dispatch(saveProjectAsFormat(entry.format));
+                      },
+                  })),
+              },
+              {
+                  key: "import-media",
+                  label: t("menu_import_media"),
+                  shortcut: shortcutLabel("project.importMedia"),
+                  separatorBefore: true,
+                  onSelect: () => void handleImportAudioFromMenu(),
+              },
+              /*
+               * MIDI 导入在插件里**可用**：音符写进插件自己的音高曲线（与参数编辑器
+               * 同一份数据）。只有「建成片段」那一档做不到（片段归宿主），而那是对话框
+               * 内部按能力摆好的选项 —— 见 MidiTrackSelectDialog 的 canImportMidiAsClip。
+               */
+              {
+                  key: "import-midi",
+                  label: t("menu_import_midi"),
+                  shortcut: shortcutLabel("project.importMidi"),
+                  onSelect: () => void handleImportMidiFromMenu(),
+              },
+              // 导入外部工程（HiFiShifter / Reaper / VocalShifter）
+              {
+                  key: "import-external",
+                  label: tf("menu_import_external_project"),
+                  items: [
+                      {
+                          key: "import-hifishifter",
+                          label: t("menu_import_hifishifter"),
+                          shortcut: shortcutLabel("project.importHifishifter"),
+                          onSelect: onImportProject,
+                      },
+                      {
+                          key: "import-reaper",
+                          label: t("menu_import_reaper"),
+                          shortcut: shortcutLabel("project.importReaper"),
+                          onSelect: () => void dispatch(openReaperFromDialog()),
+                      },
+                      {
+                          key: "import-vocalshifter",
+                          label: t("menu_import_vocalshifter"),
+                          shortcut: shortcutLabel("project.importVocalShifter"),
+                          onSelect: () => void dispatch(openVocalShifterFromDialog()),
+                      },
+                  ],
+              },
+              {
+                  key: "export-audio",
+                  label: t("menu_export_audio"),
+                  shortcut: shortcutLabel("project.export"),
+                  onSelect: () => setExportDialogOpen(true),
+              },
+              {
+                  key: "auto-backup",
+                  label: tf("menu_auto_backup"),
+                  separatorBefore: true,
+                  onSelect: () => setAutoBackupDialogOpen(true),
+              },
+              {
+                  key: "recording",
+                  label: tf("menu_recording_settings"),
+                  onSelect: () => setRecordingDialogOpen(true),
+              },
+              {
+                  key: "exit",
+                  label: t("menu_exit"),
+                  danger: true,
+                  separatorBefore: true,
+                  onSelect: onExit,
+              },
+          ];
+
+    /* ── 编辑 ── */
+    const editMenuItems: AppMenuItemSpec[] = [
+        // 无可撤销/可重做状态时置灰（不发请求、不刷新界面）：深度镜像由后端
+        // history_state 广播实时维护。
+        {
+            key: "undo",
+            label: t("menu_undo"),
+            shortcut: shortcutLabel("edit.undo"),
+            disabled: s.historyUndoDepth <= 0,
+            onSelect: () => void dispatch(undoRemote()),
+        },
+        {
+            key: "redo",
+            label: t("menu_redo"),
+            shortcut: shortcutLabel("edit.redo"),
+            disabled: s.historyRedoDepth <= 0,
+            onSelect: () => void dispatch(redoRemote()),
+        },
+        {
+            key: "cut",
+            label: tf("menu_cut"),
+            shortcut: shortcutLabel("clip.cut"),
+            separatorBefore: true,
+            onSelect: () => dispatchEditOp("cut"),
+        },
+        {
+            key: "copy",
+            label: tf("menu_copy"),
+            shortcut: shortcutLabel("pianoRoll.copy"),
+            onSelect: () => dispatchEditOp("copy"),
+        },
+        {
+            key: "paste",
+            label: tf("menu_paste"),
+            shortcut: shortcutLabel("pianoRoll.paste"),
+            onSelect: () => dispatchEditOp("paste"),
+        },
+        {
+            key: "paste-tracks",
+            label: t("menu_paste_new_tracks"),
+            shortcut: shortcutLabel("edit.pasteTracks"),
+            onSelect: () => dispatchEditOp("pasteTracks"),
+        },
+        /*
+         * 外部剪贴板交换：VocalShifter 只在 Windows 上写 %TEMP%/vocalshifter_tmp，
+         * 其它平台点了必然 clipboard_not_found。分隔线收进条件块内部 —— 否则隐藏后
+         * 会留下一条孤立的分隔线（与下方推理设备里的写法同一约定）。
+         * 快捷键绑定保持不变：隐藏菜单项 ≠ 移除功能。
+         */
+        ...(IS_WINDOWS
+            ? [
+                  {
+                      key: "paste-vocalshifter",
+                      label: t("menu_paste_vocalshifter_clipboard"),
+                      shortcut: shortcutLabel("edit.pasteVocalShifter"),
+                      separatorBefore: true,
+                      onSelect: () => dispatchEditOp("pasteVocalShifter"),
+                  },
+              ]
+            : []),
+        {
+            key: "select-all",
+            label: tf("menu_select_all"),
+            shortcut: shortcutLabel("edit.selectAll"),
+            separatorBefore: true,
+            onSelect: () => dispatchEditOp("selectAll"),
+        },
+        {
+            key: "deselect",
+            label: tf("menu_deselect"),
+            shortcut: shortcutLabel("edit.deselect"),
+            onSelect: () => dispatchEditOp("deselect"),
+        },
+        // 音频块范围 → 参数编辑器选区（批量入口）。标签直接复用快捷键设置里的动作名：
+        // 菜单与设置面板共用同一份文案，避免两处翻译漂移。
+        {
+            key: "add-clips-to-param-selection",
+            label: tf("kb_edit_add_clips_to_param_selection"),
+            shortcut: shortcutLabel("edit.addClipsToParamSelection"),
+            separatorBefore: true,
+            onSelect: () => dispatchEditOp("addClipsToParamSelection"),
+        },
+        {
+            key: "remove-clips-from-param-selection",
+            label: tf("kb_edit_remove_clips_from_param_selection"),
+            shortcut: shortcutLabel("edit.removeClipsFromParamSelection"),
+            onSelect: () => dispatchEditOp("removeClipsFromParamSelection"),
+        },
+    ];
+
+    /*
+     * ── 轨道 ──
+     *
+     * 插件里其余轨道操作都会写宿主工程，但「新建一条宿主轨道」是明确实现过的
+     * （create_host_track）。所以菜单不再整体禁用：能建轨就打开，打开后只放这一项
+     * —— 点得到的都是真能做的。不能建轨时也只留一条禁用项（理由常驻可见，
+     * 不需要用户猜到要悬停）。
+     */
+    const trackMenuItems: AppMenuItemSpec[] = isPluginMode()
+        ? [
+              {
+                  key: "add-host-track",
+                  label: t("track_add_host"),
+                  disabled: !canCreateHostTracks(),
+                  onSelect: () => void dispatch(createHostTrackRemote()),
+              },
+          ]
+        : [
+              {
+                  key: "add-track",
+                  label: t("track_add"),
+                  shortcut: shortcutLabel("track.add"),
+                  onSelect: () => {
+                      // 新建轨道继承选中轨道的层级，并紧跟在选中轨道下方插入。
+                      const placement = computeInsertBelowPlacement(s.tracks, s.selectedTrackId);
+                      dispatch(
+                          addTrackRemote({
+                              parentTrackId: placement.parentTrackId,
+                              index: placement.index,
+                          }),
+                      );
+                  },
+              },
+              {
+                  key: "clone-track",
+                  label: tf("menu_clone_selected_track"),
+                  shortcut: shortcutLabel("track.clone"),
+                  disabled: !s.selectedTrackId,
+                  onSelect: () =>
+                      s.selectedTrackId && dispatch(duplicateTrackRemote(s.selectedTrackId)),
+              },
+              {
+                  key: "remove-track",
+                  label: t("track_remove_selected"),
+                  shortcut: shortcutLabel("track.delete"),
+                  disabled:
+                      !s.selectedTrackId ||
+                      // 只剩最后一个根轨道时，禁止删除根轨道
+                      (s.tracks.filter((track) => !track.parentId).length <= 1 &&
+                          !s.tracks.find((track) => track.id === s.selectedTrackId)?.parentId),
+                  onSelect: () =>
+                      s.selectedTrackId && dispatch(removeTrackRemote(s.selectedTrackId)),
+              },
+          ];
+
+    /* ── 视图 ── */
+    const viewMenuItems: AppMenuItemSpec[] = [
+        // 窗口 / 布局：原顶层「布局」选项卡并入视图。窗体显隐收进「窗口」，其余布局级
+        // 操作收进「布局」二级菜单 —— 两个子菜单的停靠订阅都在 DockLayoutMenu 模块内部。
+        ...dockLayoutItems,
+        {
+            key: "view-tempo-map",
+            label: withCheck(s.tempoMapVisible, tf("menu_view_tempo_map")),
+            separatorBefore: true,
+            onSelect: () => {
+                dispatch(toggleTempoMapVisible());
+                void dispatch(persistUiSettings());
+            },
+        },
+        {
+            key: "view-all-takes",
+            label: withCheck(s.showAllTakes, tf("options_show_all_takes")),
+            onSelect: () => {
+                dispatch(toggleShowAllTakes());
+                void dispatch(persistUiSettings());
+            },
+        },
+        {
+            key: "view-clipboard-preview",
+            label: withCheck(s.showClipboardPreview, t("clipboard_preview")),
+            onSelect: () => {
+                dispatch(toggleClipboardPreview());
+                void dispatch(persistUiSettings());
+            },
+        },
+        {
+            key: "view-param-value-popup",
+            label: withCheck(s.showParamValuePopup, t("param_value_popup")),
+            onSelect: () => {
+                dispatch(toggleParamValuePopup());
+                void dispatch(persistUiSettings());
+            },
+        },
+        {
+            key: "view-clip-pitch",
+            label: withCheck(s.showClipPitchOverlay, t("menu_view_clip_pitch")),
+            onSelect: () => {
+                dispatch(toggleClipPitchOverlay());
+                void dispatch(persistUiSettings());
+            },
+        },
+        {
+            key: "time-display",
+            label: tf("time_display"),
+            separatorBefore: true,
+            items: [
+                {
+                    key: "time-unit-primary",
+                    label: tf("time_unit_primary") + ": " + tf(timeUnitLabelKey(s.primaryTimeUnit)),
+                    items: TIME_UNITS.map((unit) => ({
+                        key: unit,
+                        label: withCheck(s.primaryTimeUnit === unit, tf(timeUnitLabelKey(unit))),
+                        onSelect: () => {
+                            dispatch(setPrimaryTimeUnit(unit));
+                            void dispatch(persistUiSettings());
+                        },
+                    })),
+                },
+                {
+                    key: "time-unit-secondary",
+                    label:
+                        tf("time_unit_secondary") +
+                        ": " +
+                        (s.secondaryTimeUnit === "none"
+                            ? tf("time_unit_none")
+                            : tf(timeUnitLabelKey(s.secondaryTimeUnit as TimeUnit))),
+                    items: TIME_UNIT_CHOICES.map((unit) => ({
+                        key: unit,
+                        label: withCheck(
+                            s.secondaryTimeUnit === unit,
+                            unit === "none"
+                                ? tf("time_unit_none")
+                                : tf(timeUnitLabelKey(unit as TimeUnit)),
+                        ),
+                        onSelect: () => {
+                            dispatch(setSecondaryTimeUnit(unit));
+                            void dispatch(persistUiSettings());
+                        },
+                    })),
+                },
+                {
+                    key: "time-display-settings",
+                    label: tf("timeline_display_settings"),
+                    separatorBefore: true,
+                    onSelect: () => setTimeDisplaySettingsOpen(true),
+                },
+            ],
+        },
+        {
+            key: "theme",
+            label: t("common_theme") + ": " + tf("theme_" + theme.modeSetting),
+            items: (["auto", "dark", "light"] as const).map((mode) => ({
+                key: mode,
+                label: withCheck(theme.modeSetting === mode, tf("theme_" + mode)),
+                onSelect: () => {
+                    theme.applySettings({
+                        mode,
+                        accentColor: theme.accentColor,
+                        grayColor: theme.grayColor,
+                        radius: theme.radius,
+                        fontFamily: theme.fontFamily,
+                        activeCustomThemeId: theme.activeCustomThemeId,
+                    });
+                },
+            })),
+        },
+        /*
+         * 外观设置现在是停靠面板（居中浮出、不可停靠、不进「窗口」菜单）。
+         * togglePanelVisible 让它与「窗口」菜单里的其它面板行为一致：已打开则关闭、
+         * 关闭则打开 —— 比「每次新建一个」更符合用户预期，而且它声明了
+         * singleton: true，重复打开本来就只会聚焦同一个窗体。
+         */
+        {
+            key: "appearance-settings",
+            label: tf("menu_appearance_settings"),
+            onSelect: () => togglePanelVisible(dispatch, store.getState, PANEL_APPEARANCE),
+        },
+        /*
+         * 宿主链接**只在独立 App** 里出现：插件模式下工作区由插件自己导出，
+         * 「打开哪个工作区」这一步属于接收侧。
+         */
+        ...(isPluginMode()
+            ? []
+            : [
+                  {
+                      key: "host-link",
+                      label: tf("menu_host_link"),
+                      onSelect: () => togglePanelVisible(dispatch, store.getState, PANEL_HOST_LINK),
+                  },
+              ]),
+        /*
+         * 捕获设置**只在插件形态**里出现。判据刻意**不**看「宿主给不给 ARA」：
+         * 那要等 5 秒宽限期才落定，拿它当可见性判据会让入口在窗口开得早的会话里
+         * 彻底消失（用户实测）。宿主正在走 ARA 时，设置窗口自己会说清「不需要捕获」。
+         */
+        ...(isPluginMode()
+            ? [
+                  {
+                      key: "capture-settings",
+                      label: tf("menu_capture"),
+                      onSelect: openCaptureSettings,
+                  },
+              ]
+            : []),
+        // 刷新与缓存清理是维护性操作，沉底。
+        {
+            key: "refresh",
+            label: t("action_refresh"),
+            separatorBefore: true,
+            onSelect: () => dispatch(refreshRuntime()),
+        },
+        /*
+         * 【为什么插件里**整项不渲染**】clear_waveform_cache 只存在于独立 App。
+         * 摆一个永远点不动的灰项只会让用户困惑「为什么有这一项却不能用」——
+         * 它在本形态下是**结构性不存在**的能力，不是「暂时禁用」。
+         */
+        ...(isPluginMode()
+            ? []
+            : [
+                  {
+                      key: "clear-waveform-cache",
+                      label: t("menu_clear_waveform_cache"),
+                      onSelect: () => setWaveformCacheConfirmOpen(true),
+                  },
+              ]),
+    ];
+
+    /*
+     * ── 选项 ──
+     *
+     * 工程拉伸设置：**工程自带**渲染口径。之前这里是「工程覆盖 / 继承全局」两级，
+     * 且「继承全局」让工程文件根本不携带这个决定 —— 工程换台机器就换个声音。现在保存
+     * 时会把当时生效的值固化进工程，菜单因此只呈现「当前值 + 三个算法」。
+     */
+    const STRETCH_ALGORITHMS = ["linear", "signalsmith", "soundtouch"] as const;
+    const optionsMenuItems: AppMenuItemSpec[] = [
+        {
+            key: "project-stretch",
+            label: tf("stretch_project_override"),
+            items: [
+                {
+                    key: "project-stretch-algorithm",
+                    label:
+                        tf("stretch_algorithm") +
+                        ": " +
+                        stretchAlgorithmLabel(effectiveProjectStretchAlgorithm),
+                    items: STRETCH_ALGORITHMS.map((algorithm) => ({
+                        key: algorithm,
+                        label: withCheck(
+                            effectiveProjectStretchAlgorithm === algorithm,
+                            stretchAlgorithmLabel(algorithm),
+                        ),
+                        onSelect: () =>
+                            void dispatch(
+                                setProjectStretchSettingsRemote({
+                                    stretchAlgorithmOverride: algorithm,
+                                    hifiganMelStretchOverride: effectiveProjectHifiganMelStretch,
+                                }),
+                            ),
+                    })),
+                },
+                {
+                    key: "project-stretch-hifigan",
+                    label:
+                        tf("stretch_hifigan_mel") +
+                        ": " +
+                        (effectiveProjectHifiganMelStretch
+                            ? tf("stretch_toggle_on")
+                            : tf("stretch_toggle_off")),
+                    items: [
+                        {
+                            key: "on",
+                            label: withCheck(
+                                effectiveProjectHifiganMelStretch,
+                                tf("stretch_toggle_on"),
+                            ),
+                            onSelect: () =>
+                                void dispatch(
+                                    setProjectStretchSettingsRemote({
+                                        stretchAlgorithmOverride: effectiveProjectStretchAlgorithm,
+                                        hifiganMelStretchOverride: true,
+                                    }),
+                                ),
+                        },
+                        {
+                            key: "off",
+                            label: withCheck(
+                                !effectiveProjectHifiganMelStretch,
+                                tf("stretch_toggle_off"),
+                            ),
+                            onSelect: () =>
+                                void dispatch(
+                                    setProjectStretchSettingsRemote({
+                                        stretchAlgorithmOverride: effectiveProjectStretchAlgorithm,
+                                        hifiganMelStretchOverride: false,
+                                    }),
+                                ),
+                        },
+                    ],
+                },
+            ],
+        },
+        /*
+         * 全局默认 = **只影响新建工程**的初值。已有工程在保存时固化了自己的值
+         * （见后端 build_project_file_snapshot），这里改它不会动到任何已存在的工程
+         * —— 标题因此写明「新建工程」。
+         */
+        {
+            key: "global-stretch",
+            label: tf("stretch_global_default"),
+            separatorBefore: true,
+            items: [
+                {
+                    key: "global-stretch-algorithm",
+                    label:
+                        tf("stretch_algorithm") +
+                        ": " +
+                        stretchAlgorithmLabel(s.defaultStretchAlgorithm),
+                    items: STRETCH_ALGORITHMS.map((algorithm) => ({
+                        key: algorithm,
+                        label: withCheck(
+                            s.defaultStretchAlgorithm === algorithm,
+                            stretchAlgorithmLabel(algorithm),
+                        ),
+                        onSelect: () => {
+                            dispatch(setDefaultStretchAlgorithm(algorithm));
+                            void dispatch(persistUiSettings());
+                        },
+                    })),
+                },
+                {
+                    key: "global-stretch-hifigan",
+                    label:
+                        tf("stretch_hifigan_mel") +
+                        ": " +
+                        (s.defaultHifiganMelStretch
+                            ? tf("stretch_toggle_on")
+                            : tf("stretch_toggle_off")),
+                    items: [
+                        {
+                            key: "on",
+                            label: withCheck(s.defaultHifiganMelStretch, tf("stretch_toggle_on")),
+                            onSelect: () => {
+                                dispatch(setDefaultHifiganMelStretch(true));
+                                void dispatch(persistUiSettings());
+                            },
+                        },
+                        {
+                            key: "off",
+                            label: withCheck(!s.defaultHifiganMelStretch, tf("stretch_toggle_off")),
+                            onSelect: () => {
+                                dispatch(setDefaultHifiganMelStretch(false));
+                                void dispatch(persistUiSettings());
+                            },
+                        },
+                    ],
+                },
+            ],
+        },
+        /*
+         * 推理设备。
+         *
+         * 【为什么插件里可用】插件与独立 App 共用同一份设置与同一个内核：
+         * ui_settings_apply::apply 会把 ort_ep / ort_device_key 下发给会话，
+         * 渲染管线按它选 EP。设备清单由内核的 DXGI 枚举提供（get_dml_adapters），
+         * 不初始化 ORT。
+         */
+        {
+            key: "inference-device",
+            label:
+                t("menu_inference_device") +
+                ": " +
+                (s.ortEp === "auto"
+                    ? t("menu_inference_auto") + (gpuBackend ? " (" + gpuBackend + ")" : "")
+                    : s.ortEp === "cpu"
+                      ? t("menu_inference_cpu")
+                      : t("menu_inference_gpu") + " (" + (gpuBackend || "GPU") + ")"),
+            separatorBefore: true,
+            items: [
+                ...(["auto", "cpu", "gpu"] as const).map((ep) => ({
+                    key: ep,
+                    label: withCheck(
+                        s.ortEp === ep,
+                        ep === "auto"
+                            ? t("menu_inference_auto")
+                            : ep === "cpu"
+                              ? t("menu_inference_cpu")
+                              : t("menu_inference_gpu"),
+                    ),
+                    onSelect: () => {
+                        dispatch(setOrtEp(ep));
+                        void dispatch(persistUiSettings());
+                    },
+                })),
+                /*
+                 * GPU 设备选择 —— 只要 EP 可能用到 GPU 就显示（auto 也算）。
+                 * 【为什么不是只在 gpu 下显示】设备选择与 EP 选择是两件事，auto
+                 * 也会走 DirectML。此前只在 gpu 下渲染，于是「上次选过某块卡、后来
+                 * 切回 auto」成了一个看不见也改不掉的状态（实测日志：choice=auto
+                 * 却 DirectML device_id=1）。
+                 * 【为什么按 vendorId:deviceIdPci 记】DXGI 序号是**本进程**的，同一
+                 * 分钟内独立 App 与 VEGAS 插件可以互换。PCI 标识与枚举顺序无关。
+                 */
+                ...(s.ortEp !== "cpu" && dmlAdapters.length > 0
+                    ? [
+                          {
+                              key: "gpu-device-heading",
+                              label: tf("menu_gpu_device"),
+                              heading: true,
+                              separatorBefore: true,
+                          },
+                          {
+                              key: "gpu-device-auto",
+                              label: withCheck(s.ortDeviceKey == null, tf("menu_gpu_auto_select")),
+                              onSelect: () => {
+                                  dispatch(setOrtDeviceKey(null));
+                                  void dispatch(persistUiSettings());
+                              },
+                          },
+                          ...dmlAdapters.map((adapter) => {
+                              const key = adapter.vendorId + ":" + adapter.deviceIdPci;
+                              return {
+                                  key: "gpu-device-" + key,
+                                  label: withCheck(
+                                      s.ortDeviceKey === key,
+                                      adapter.name + " (" + adapter.memoryMb + " MB)",
+                                  ),
+                                  onSelect: () => {
+                                      dispatch(setOrtDeviceKey(key));
+                                      void dispatch(persistUiSettings());
+                                  },
+                              };
+                          }),
+                      ]
+                    : []),
+                /*
+                 * 【为什么插件里也能跑】内核的 run_benchmark 自带全局单飞锁租约、
+                 * 烟测超时与 EP 禁用收敛，「可能在 DAW 进程里硬崩」这个前提已不成立。
+                 * 而它是用户排查「推理设备选哪个」的唯一手段，在插件里同样需要。
+                 */
+                {
+                    key: "run-benchmark",
+                    label: t("menu_run_benchmark"),
+                    separatorBefore: true,
+                    onSelect: () => setBenchmarkDialogOpen(true),
+                },
+            ],
+        },
+        /*
+         * 后台预渲染 —— 与推理设备同级、无分隔线。
+         * 【为什么插件里**整项不渲染**】插件的渲染由宿主按需驱动（editor/session.rs
+         * 的 schedule_analysis），从不读这个开关 —— 勾选它只会写下一个没人读的值，
+         * 看起来像生效了。
+         */
+        ...(isPluginMode()
+            ? []
+            : [
+                  {
+                      key: "background-prerender",
+                      label: withCheck(s.autoBackgroundRender, tf("menu_background_prerender")),
+                      onSelect: async () => {
+                          dispatch(toggleAutoBackgroundRender());
+                          await dispatch(persistUiSettings());
+                      },
+                  },
+              ]),
+        {
+            key: "sync-edits-across-takes",
+            label: withCheck(s.syncEditsAcrossTakes, tf("sync_edits_across_takes")),
+            onSelect: () => {
+                dispatch(toggleSyncEditsAcrossTakes());
+                void dispatch(persistUiSettings());
+            },
+        },
+        {
+            key: "auto-reload-media",
+            label: withCheck(autoReloadModifiedMedia, tf("options_auto_reload_modified_media")),
+            onSelect: () => onAutoReloadModifiedMediaChange(!autoReloadModifiedMedia),
+        },
+        {
+            key: "loop-new-clips",
+            label: withCheck(loopNewClips, tf("options_loop_new_clips")),
+            onSelect: () => onLoopNewClipsChange(!loopNewClips),
+        },
+        {
+            key: "snap-grid-settings",
+            label: tf("snap_grid_settings_title"),
+            separatorBefore: true,
+            onSelect: () => setSnapSettingsOpen(true),
+        },
+        {
+            key: "param-block-settings",
+            label: tf("param_block_settings_title"),
+            onSelect: () => setParamBlockSettingsOpen(true),
+        },
+        // 分割过渡设置：与工具栏按钮的右键同一个对话框。放在「参数块设置」旁边是因为
+        // 二者都是「编辑行为」类设置 —— 用户在找「分割之后发生什么」时不会先去工具栏右键猜。
+        {
+            key: "split-transition-settings",
+            label: tf("split_transition_settings_title"),
+            onSelect: () => setSplitTransitionSettingsOpen(true),
+        },
+        // 搜索匹配设置：作用于全部搜索面，因此与吸附/网格同级，而不是塞进某个面板自己的设置页。
+        {
+            key: "search-settings",
+            label: tf("search_settings_title"),
+            onSelect: () => dispatch(setSearchSettingsDialogOpen(true)),
+        },
+        /*
+         * 【为什么插件里**整项不渲染**】插件没有渲染缓存（get_render_cache_stats /
+         * clear_render_cache / open_render_cache_dir 都不存在），对话框里每个动作
+         * 都会报错。
+         */
+        ...(isPluginMode()
+            ? []
+            : [
+                  {
+                      key: "render-cache",
+                      label: tf("menu_render_cache_manager"),
+                      separatorBefore: true,
+                      onSelect: () => setRenderCacheDialogOpen(true),
+                  },
+              ]),
+        // 颤音预设库。与上下文菜单用**不同**的文案：选项菜单这一层没有「颤音」语境，
+        // 只写「管理预设」没人知道管的是哪一种。
+        {
+            key: "vibrato-presets",
+            label: tf("menu_vibrato_presets"),
+            // 插件里上一项被整项隐藏，这里要自己补回分隔线。
+            separatorBefore: isPluginMode(),
+            onSelect: () => setVibratoDialogOpen(true),
+        },
+        {
+            key: "channel-import-settings",
+            label: tf("menu_channel_import_settings"),
+            onSelect: () => setChannelImportDialogOpen(true),
+        },
+        {
+            key: "pen-input-settings",
+            label: tf("menu_pen_input_settings"),
+            onSelect: () => setPenInputDialogOpen(true),
+        },
+        {
+            key: "keybindings",
+            label: t("menu_keybindings"),
+            separatorBefore: true,
+            onSelect: () => setKbDialogOpen(true),
+        },
+    ];
+
+    /* ── 帮助 ── */
+    const helpMenuItems: AppMenuItemSpec[] = [
+        // 日志详细程度的唯一入口：一级菜单只占一行，四档在子菜单里。
+        {
+            key: "log-verbosity",
+            label: logVerbosity.triggerLabel,
+            disabled: logVerbosity.disabled,
+            items: logVerbosity.items,
+        },
+        {
+            key: "open-log-folder",
+            label: tf("menu_open_log_folder"),
+            onSelect: async () => {
+                const { openLogFolder } = await import("../../services/api/diagnostics");
+                try {
+                    const res = await openLogFolder();
+                    // 判定收在纯函数里（logFolderNotice）—— 这段逻辑恰恰是用户抱怨过
+                    // 的地方，抽出来才有回归测试。
+                    const outcome = logFolderNotice(res, isPluginMode());
+                    if (outcome.kind === "none") return;
+                    if (outcome.kind === "error") {
+                        setNotice({
+                            title: tf("status_error_prefix"),
+                            message: outcome.detail || tf("menu_open_log_folder_failed"),
+                        });
+                        return;
+                    }
+                    /*
+                     * 日志没在写：**先说原因，再给路径**。用户点这个菜单时默认假设
+                     * 「那里有我刚才那次崩溃的记录」。档位是「无」时目录是空的 ——
+                     * 只显示路径等于让他去找一个永远不会出现的文件。
+                     */
+                    if (outcome.kind === "disabled") {
+                        setNotice({
+                            title: tf("menu_open_log_folder"),
+                            message: (
+                                <>
+                                    <div>{tf("log_file_disabled_hint")}</div>
+                                    <span data-hs-selectable="true">{outcome.path}</span>
+                                </>
+                            ),
+                            copyText: outcome.path,
+                        });
+                        return;
+                    }
+                    // 打不开时把路径摆出来，并且**必须能复制**：路径最容易手抄错，
+                    // 而「打不开」正是用户最需要把它交给我们的时候。
+                    setNotice({
+                        title: tf("menu_open_log_folder"),
+                        message: <span data-hs-selectable="true">{outcome.path}</span>,
+                        copyText: outcome.path,
+                    });
+                } catch (e) {
+                    setNotice({
+                        title: tf("status_error_prefix"),
+                        message: String(e),
+                    });
+                }
+            },
+        },
+        {
+            key: "export-diagnostics",
+            label: tf("menu_export_diagnostics"),
+            // 插件里**也能导出** —— 走的是精简版（日志 + 构建身份 + 运行时 + 宿主版本），
+            // 不含推理设备基准测试：那条路径在 DAW 进程里崩掉会带走用户整个会话。
+            // 详见 editor/plugin_diagnostics.rs。
+            disabled: diagnosticsExporting,
+            onSelect: () => void handleExportDiagnostics(),
+        },
+        {
+            key: "about",
+            label: t("menu_about"),
+            separatorBefore: true,
+            onSelect: () => setAboutDialogOpen(true),
+        },
+    ];
+
+    /* ── 语言（菜单栏右端） ── */
+    const languageMenuItems: AppMenuItemSpec[] = (
+        [
+            ["en-US", "lang_en"],
+            ["zh-CN", "lang_zh"],
+            ["zh-TW", "lang_zh_tw"],
+            ["ja-JP", "lang_ja"],
+            ["ko-KR", "lang_ko"],
+        ] as const
+    ).map(([value, labelKey]) => ({
+        key: value,
+        label: t(labelKey),
+        // 语言是单选项：menuitemradio + aria-checked，否则读屏与键盘用户
+        // 无从得知当前语言。
+        radio: true,
+        checked: locale === value,
+        onSelect: () => setLocale(value as Locale),
+    }));
+
     return (
         <Flex
             align="center"
             /* 【为什么也换行】菜单栏此前是 flex-nowrap + overflow-x-auto，与主工具栏
-               同一形态：窄窗口下出现横向滚动条，而 ui/Toolbar 已经把"滚动条吃高度、
-               并把容器变成裁剪上下文"写成已知问题。菜单项都是唯一入口，不能像参数
-               工具栏那样分级隐藏，因此同样按"行"降级：min-h- 让条形自然长高。
-               下拉弹层由 Radix portal 到 body，不受 overflow-hidden 影响。 */
+               同一形态：窄窗口下出现横向滚动条，而 ui/Toolbar 已经把「滚动条吃高度、
+               并把容器变成裁剪上下文」写成已知问题。菜单项都是唯一入口，不能像参数
+               工具栏那样分级隐藏，因此同样按「行」降级：min-h- 让条形自然长高。
+               下拉弹层由原语 portal 到 body，不受 overflow-hidden 影响。 */
             className="min-h-qt-bar-main bg-qt-panel border-b border-qt-border px-1 py-1 select-none z-50 flex-wrap items-center gap-x-1 gap-y-0.5 overflow-hidden min-w-0"
         >
-            {/**
-             * Note: @radix-ui/themes DropdownMenu.Trigger does not support asChild.
-             * Use Trigger as the actual button element to avoid nesting <button>.
-             */}
-            {/* File Menu */}
-            {isPluginMode() ? (
-                <DropdownMenu.Root>
-                    {/* 【为什么不按"能否导入音频"禁用整个菜单】导出处理结果不需要任何
-                        宿主写接口 —— 授权 PCM 与编码器都在插件内（见
-                        `editor/commands.rs` 的 `export_audio_advanced`）。此前整个菜单
-                        跟着 `canImportHostAudio()` 一起禁用，于是 ARA-only 宿主上连
-                        "导出"都点不开，而它本来是可用的。 */}
-                    <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
-                        <span>{t("menu_file")}</span>
-                    </DropdownMenu.Trigger>
-                    <DropdownMenu.Content variant="soft" color="gray">
-                        <DropdownMenu.Item
-                            disabled={!canImportHostAudio()}
-                            onSelect={() => void handleImportAudioFromMenu()}
-                            // 【为什么禁用项不再附一行原因】那一行会把菜单项撑成两行，
-                            // 而菜单的行高与对齐是按单行排的 —— 混进去之后整块菜单的节奏就乱了
-                            // （用户原话："这些提示被加进来时根本没有考虑到菜单的布局，很丑陋"）。
-                            // "为什么点不了"由**位置**回答：它就在插件形态的文件菜单里，旁边
-                            // 就是能点的"导出音频"。需要长句解释的地方是设置窗口与悬停提示，
-                            // 不是菜单项内部。
-                        >
-                            {t("menu_import_media")}
-                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                {shortcutLabel("project.importMedia")}
-                            </div>
-                        </DropdownMenu.Item>
-                        <DropdownMenu.Item onSelect={() => setExportDialogOpen(true)}>
-                            {t("menu_export_audio")}
-                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                {shortcutLabel("project.export")}
-                            </div>
-                        </DropdownMenu.Item>
-                        <DropdownMenu.Separator />
-                        {/* 保存工程由宿主负责：插件没有"工程文件"这个概念（工程就是
-                            宿主的那个文件）。禁用项**不附第二行说明** —— 见上方
-                            "为什么禁用项不再附一行原因"。 */}
-                        <DropdownMenu.Item disabled>{t("menu_save_project")}</DropdownMenu.Item>
-                    </DropdownMenu.Content>
-                </DropdownMenu.Root>
-            ) : (
-                <DropdownMenu.Root>
-                    {/* 这个分支只在独立 App 走：插件有上面那个只留"导入媒体"的菜单。
-                        此前这里还写着 `disabled={isPluginMode()}` —— 恒为假的死条件。 */}
-                    <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
-                        <span>{t("menu_file")}</span>
-                    </DropdownMenu.Trigger>
-                    <DropdownMenu.Content variant="soft" color="gray">
-                        <DropdownMenu.Item onSelect={onNewProject}>
-                            {t("menu_new_project")}
-                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                {shortcutLabel("project.new")}
-                            </div>
-                        </DropdownMenu.Item>
-                        <DropdownMenu.Item onSelect={onOpenProject}>
-                            {t("menu_open_project")}
-                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                {shortcutLabel("project.open")}
-                            </div>
-                        </DropdownMenu.Item>
+            {/* 文件 */}
+            <AppMenuBarItem
+                open={openMenu === "file"}
+                onOpenChange={(open) => setOpenMenu(open ? "file" : null)}
+                items={fileMenuItems}
+                ariaLabel={t("menu_file")}
+            >
+                <span>{t("menu_file")}</span>
+            </AppMenuBarItem>
 
-                        <DropdownMenu.Sub>
-                            <DropdownMenu.SubTrigger>
-                                {t("menu_recent_projects")}
-                            </DropdownMenu.SubTrigger>
-                            <DropdownMenu.SubContent>
-                                {s.project.recent.length ? (
-                                    s.project.recent.slice(0, 12).map((p) => (
-                                        <DropdownMenu.Item
-                                            key={p}
-                                            onSelect={() => onOpenRecentProject(p)}
-                                        >
-                                            {p}
-                                        </DropdownMenu.Item>
-                                    ))
-                                ) : (
-                                    <DropdownMenu.Item disabled>
-                                        {t("menu_recent_empty")}
-                                    </DropdownMenu.Item>
-                                )}
-                            </DropdownMenu.SubContent>
-                        </DropdownMenu.Sub>
+            {/* 编辑 */}
+            <AppMenuBarItem
+                open={openMenu === "edit"}
+                onOpenChange={(open) => setOpenMenu(open ? "edit" : null)}
+                items={editMenuItems}
+                ariaLabel={t("menu_edit")}
+            >
+                <span>{t("menu_edit")}</span>
+            </AppMenuBarItem>
 
-                        <DropdownMenu.Item onSelect={onRecaptureMissingMedia}>
-                            {t("menu_recapture_missing_media")}
-                        </DropdownMenu.Item>
+            {/* 轨道 */}
+            <AppMenuBarItem
+                open={openMenu === "track"}
+                onOpenChange={(open) => setOpenMenu(open ? "track" : null)}
+                items={trackMenuItems}
+                ariaLabel={t("menu_track")}
+            >
+                <span>{t("menu_track")}</span>
+            </AppMenuBarItem>
 
-                        <DropdownMenu.Separator />
+            {/* 视图 */}
+            <AppMenuBarItem
+                open={openMenu === "view"}
+                onOpenChange={(open) => setOpenMenu(open ? "view" : null)}
+                items={viewMenuItems}
+                ariaLabel={t("menu_view")}
+            >
+                <span>{t("menu_view")}</span>
+            </AppMenuBarItem>
 
-                        <DropdownMenu.Item onSelect={() => void dispatch(saveProjectRemote())}>
-                            {t("menu_save_project")}
-                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                {shortcutLabel("project.save")}
-                            </div>
-                        </DropdownMenu.Item>
-                        {/* 「另存为」：按上次格式**直接**存（选路径 → 写文件），
-                            不再先弹一层应用内格式选择。 */}
-                        <DropdownMenu.Item
-                            onSelect={() => {
-                                void dispatch(
-                                    saveProjectAsFormat(s.project.lastSaveFormat ?? "hshp"),
-                                );
-                            }}
-                        >
-                            {t("menu_save_project_as")}
-                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                {shortcutLabel("project.saveAs")}
-                            </div>
-                        </DropdownMenu.Item>
-                        {/* 指定格式另存：格式在菜单项里一次选定，原生对话框只带该格式的
-                            单一过滤器（macOS 的 NSSavePanel 没有"文件类型"下拉框，
-                            把格式留在对话框里等于让用户猜扩展名）。每项都挂
-                            data-tooltip：格式说明（尤其"zip 需解压后打开"）不能丢。 */}
-                        <DropdownMenu.Sub>
-                            <DropdownMenu.SubTrigger>
-                                {tf("menu_save_project_as_submenu")}
-                            </DropdownMenu.SubTrigger>
-                            <DropdownMenu.SubContent>
-                                {SAVE_PROJECT_AS_FORMATS.map((entry) => (
-                                    <DropdownMenu.Item
-                                        key={entry.format}
-                                        data-tooltip={tf(entry.descKey)}
-                                        onSelect={() => {
-                                            void dispatch(saveProjectAsFormat(entry.format));
-                                        }}
-                                    >
-                                        {tf(entry.labelKey)}
-                                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                            {shortcutLabel(entry.actionId)}
-                                        </div>
-                                    </DropdownMenu.Item>
-                                ))}
-                            </DropdownMenu.SubContent>
-                        </DropdownMenu.Sub>
+            {/* 选项 */}
+            <AppMenuBarItem
+                open={openMenu === "options"}
+                onOpenChange={(open) => setOpenMenu(open ? "options" : null)}
+                items={optionsMenuItems}
+                ariaLabel={t("menu_options")}
+            >
+                <span>{t("menu_options")}</span>
+            </AppMenuBarItem>
 
-                        <DropdownMenu.Separator />
-
-                        <DropdownMenu.Item
-                            onSelect={() => {
-                                void handleImportAudioFromMenu();
-                            }}
-                        >
-                            {t("menu_import_media")}{" "}
-                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                {shortcutLabel("project.importMedia")}
-                            </div>
-                        </DropdownMenu.Item>
-                        <DropdownMenu.Item
-                            // MIDI 导入在插件里**可用**：音符写进插件自己的音高曲线
-                            // （与参数编辑器同一份数据）。只有"建成片段"那一档做不到
-                            // （片段归宿主），而那是对话框内部按能力摆好的选项 ——
-                            // 见 `MidiTrackSelectDialog` 的 `canImportMidiAsClip`。
-                            onSelect={() => {
-                                void handleImportMidiFromMenu();
-                            }}
-                        >
-                            {t("menu_import_midi")}{" "}
-                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                {shortcutLabel("project.importMidi")}
-                            </div>
-                        </DropdownMenu.Item>
-                        {/* 导入外部工程（HiFiShifter / Reaper / VocalShifter）*/}
-                        <DropdownMenu.Sub>
-                            <DropdownMenu.SubTrigger>
-                                {tf("menu_import_external_project")}
-                            </DropdownMenu.SubTrigger>
-                            <DropdownMenu.SubContent>
-                                <DropdownMenu.Item onSelect={onImportProject}>
-                                    {t("menu_import_hifishifter")}
-                                    <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                        {shortcutLabel("project.importHifishifter")}
-                                    </div>
-                                </DropdownMenu.Item>
-                                <DropdownMenu.Item
-                                    onSelect={() => void dispatch(openReaperFromDialog())}
-                                >
-                                    {t("menu_import_reaper")}
-                                    <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                        {shortcutLabel("project.importReaper")}
-                                    </div>
-                                </DropdownMenu.Item>
-                                <DropdownMenu.Item
-                                    onSelect={() => void dispatch(openVocalShifterFromDialog())}
-                                >
-                                    {t("menu_import_vocalshifter")}
-                                    <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                        {shortcutLabel("project.importVocalShifter")}
-                                    </div>
-                                </DropdownMenu.Item>
-                            </DropdownMenu.SubContent>
-                        </DropdownMenu.Sub>
-                        <DropdownMenu.Item onSelect={() => setExportDialogOpen(true)}>
-                            {t("menu_export_audio")}{" "}
-                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                {shortcutLabel("project.export")}
-                            </div>
-                        </DropdownMenu.Item>
-                        <DropdownMenu.Separator />
-                        <DropdownMenu.Item onSelect={() => setAutoBackupDialogOpen(true)}>
-                            {tf("menu_auto_backup")}
-                        </DropdownMenu.Item>
-                        <DropdownMenu.Item onSelect={() => setRecordingDialogOpen(true)}>
-                            {tf("menu_recording_settings")}
-                        </DropdownMenu.Item>
-                        <DropdownMenu.Separator />
-                        <DropdownMenu.Item onSelect={onExit} color="red">
-                            {t("menu_exit")}
-                        </DropdownMenu.Item>
-                    </DropdownMenu.Content>
-                </DropdownMenu.Root>
-            )}
-
-            {/* Edit Menu */}
-            <DropdownMenu.Root>
-                <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
-                    <span>{t("menu_edit")}</span>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Content variant="soft" color="gray">
-                    {/* 无可撤销/可重做状态时置灰（不发请求、不刷新界面）：
-                        深度镜像由后端 history_state 广播实时维护。 */}
-                    <DropdownMenu.Item
-                        disabled={s.historyUndoDepth <= 0}
-                        onSelect={() => void dispatch(undoRemote())}
-                    >
-                        {t("menu_undo")}{" "}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("edit.undo")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                        disabled={s.historyRedoDepth <= 0}
-                        onSelect={() => void dispatch(redoRemote())}
-                    >
-                        {t("menu_redo")}{" "}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("edit.redo")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
-                    {/* 剪贴板：剪切 / 复制 */}
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("cut")}>
-                        {tf("menu_cut")}{" "}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("clip.cut")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("copy")}>
-                        {tf("menu_copy")}{" "}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("pianoRoll.copy")}
-                        </div>
-                    </DropdownMenu.Item>
-                    {/* 剪贴板：粘贴 */}
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("paste")}>
-                        {tf("menu_paste")}{" "}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("pianoRoll.paste")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("pasteTracks")}>
-                        {t("menu_paste_new_tracks")}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("edit.pasteTracks")}
-                        </div>
-                    </DropdownMenu.Item>
-                    {/*
-                        外部剪贴板交换：VocalShifter 只在 Windows 上写
-                        %TEMP%/vocalshifter_tmp，其它平台点了必然 clipboard_not_found。
-                        分隔线收进条件块内部 —— 否则隐藏后会留下一条孤立的分隔线
-                        （与下方 `ortEp === "gpu"` 处的写法同一约定）。
-                        快捷键绑定保持不变：隐藏菜单项 ≠ 移除功能。
-                    */}
-                    {IS_WINDOWS && (
-                        <>
-                            <DropdownMenu.Separator />
-                            <DropdownMenu.Item onSelect={() => dispatchEditOp("pasteVocalShifter")}>
-                                {t("menu_paste_vocalshifter_clipboard")}
-                                <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                    {shortcutLabel("edit.pasteVocalShifter")}
-                                </div>
-                            </DropdownMenu.Item>
-                        </>
-                    )}
-                    <DropdownMenu.Separator />
-                    {/* 选择 */}
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("selectAll")}>
-                        {tf("menu_select_all")}{" "}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("edit.selectAll")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("deselect")}>
-                        {tf("menu_deselect")}{" "}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("edit.deselect")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
-                    {/* 音频块范围 → 参数编辑器选区（批量入口）。标签直接复用
-                        快捷键设置里的动作名：菜单与设置面板共用同一份文案，
-                        避免两处翻译漂移。 */}
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("addClipsToParamSelection")}>
-                        {tf("kb_edit_add_clips_to_param_selection")}{" "}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("edit.addClipsToParamSelection")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                        onSelect={() => dispatchEditOp("removeClipsFromParamSelection")}
-                    >
-                        {tf("kb_edit_remove_clips_from_param_selection")}{" "}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("edit.removeClipsFromParamSelection")}
-                        </div>
-                    </DropdownMenu.Item>
-                </DropdownMenu.Content>
-            </DropdownMenu.Root>
-
-            {/* Track Menu */}
-            <DropdownMenu.Root>
-                <DropdownMenu.Trigger
-                    // 插件里其余轨道操作都会写宿主工程，但"新建一条宿主轨道"是明确
-                    // 实现过的（`create_host_track`）。所以菜单不再整体禁用：能建轨
-                    // 就打开，打开后只放这一项 —— 点得到的都是真能做的。
-                    //
-                    // 【为什么禁用理由不再放 Trigger 上】触发器上的原生 `title` 在
-                    // 深色主题下与菜单栏撞色，且不受本项目排版控制；而自定义气泡在
-                    // 菜单弹出期间被全局抑制 —— 两条悬停通道都不可靠。改成"菜单仍可
-                    // 打开，进去之后只有一条带理由的禁用项"（与 File 菜单的做法一致）：
-                    // 理由是**常驻可见**的，不需要用户猜到要悬停。
-                    // 菜单不再整体禁用（能建轨/不能建轨都允许打开，理由在条目上）。
-                    className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white"
-                >
-                    <span>{t("menu_track")}</span>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Content variant="soft" color="gray">
-                    {isPluginMode() ? (
-                        canCreateHostTracks() ? (
-                            <DropdownMenu.Item
-                                onSelect={() => void dispatch(createHostTrackRemote())}
-                            >
-                                {t("track_add_host")}
-                            </DropdownMenu.Item>
-                        ) : (
-                            // 不能建轨时菜单里只留一条禁用项（不附第二行原因，见上）。
-                            <DropdownMenu.Item disabled>{t("track_add_host")}</DropdownMenu.Item>
-                        )
-                    ) : (
-                        <>
-                            <DropdownMenu.Item
-                                onSelect={() => {
-                                    // 新建轨道继承选中轨道的层级，并紧跟在选中轨道下方插入。
-                                    const placement = computeInsertBelowPlacement(
-                                        s.tracks,
-                                        s.selectedTrackId,
-                                    );
-                                    dispatch(
-                                        addTrackRemote({
-                                            parentTrackId: placement.parentTrackId,
-                                            index: placement.index,
-                                        }),
-                                    );
-                                }}
-                            >
-                                {t("track_add")}
-                                <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                    {shortcutLabel("track.add")}
-                                </div>
-                            </DropdownMenu.Item>
-                            <DropdownMenu.Item
-                                disabled={!s.selectedTrackId}
-                                onSelect={() =>
-                                    s.selectedTrackId &&
-                                    dispatch(duplicateTrackRemote(s.selectedTrackId))
-                                }
-                            >
-                                {tf("menu_clone_selected_track")}
-                                <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                    {shortcutLabel("track.clone")}
-                                </div>
-                            </DropdownMenu.Item>
-                            <DropdownMenu.Item
-                                disabled={
-                                    !s.selectedTrackId ||
-                                    // 只剩最后一个根轨道时，禁止删除根轨道
-                                    (s.tracks.filter((t) => !t.parentId).length <= 1 &&
-                                        !s.tracks.find((t) => t.id === s.selectedTrackId)?.parentId)
-                                }
-                                onSelect={() =>
-                                    s.selectedTrackId &&
-                                    dispatch(removeTrackRemote(s.selectedTrackId))
-                                }
-                            >
-                                {t("track_remove_selected")}
-                                <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                    {shortcutLabel("track.delete")}
-                                </div>
-                            </DropdownMenu.Item>
-                        </>
-                    )}
-                </DropdownMenu.Content>
-            </DropdownMenu.Root>
-
-            {/* View Menu */}
-            <DropdownMenu.Root>
-                <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
-                    <span>{t("menu_view")}</span>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Content variant="soft" color="gray">
-                    {/* 窗口 / 布局：原顶层「布局」选项卡并入视图。窗体显隐收进
-                        「窗口」，其余布局级操作（预设、导入导出、重置）收进
-                        「布局」二级菜单 —— 两个组件的停靠订阅都在 DockLayoutMenu
-                        模块内部，不进 MenuBar。 */}
-                    <DockLayoutMenus withCheck={withCheck} />
-                    <DropdownMenu.Separator />
-
-                    {/* 时间轴 / 编辑器里的显示开关。 */}
-                    <DropdownMenu.Item
-                        onSelect={() => {
-                            dispatch(toggleTempoMapVisible());
-                            void dispatch(persistUiSettings());
-                        }}
-                    >
-                        {withCheck(s.tempoMapVisible, tf("menu_view_tempo_map"))}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                        onSelect={() => {
-                            dispatch(toggleShowAllTakes());
-                            void dispatch(persistUiSettings());
-                        }}
-                    >
-                        {withCheck(s.showAllTakes, tf("options_show_all_takes"))}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                        onSelect={() => {
-                            dispatch(toggleClipboardPreview());
-                            void dispatch(persistUiSettings());
-                        }}
-                    >
-                        {withCheck(s.showClipboardPreview, t("clipboard_preview"))}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                        onSelect={() => {
-                            dispatch(toggleParamValuePopup());
-                            void dispatch(persistUiSettings());
-                        }}
-                    >
-                        {withCheck(s.showParamValuePopup, t("param_value_popup"))}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                        onSelect={() => {
-                            dispatch(toggleClipPitchOverlay());
-                            void dispatch(persistUiSettings());
-                        }}
-                    >
-                        {withCheck(s.showClipPitchOverlay, t("menu_view_clip_pitch"))}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
-
-                    {/* 时间与外观：低频的展示设置。 */}
-                    {/* Time Display */}
-                    <DropdownMenu.Sub>
-                        <DropdownMenu.SubTrigger>{tf("time_display")}</DropdownMenu.SubTrigger>
-                        <DropdownMenu.SubContent>
-                            <DropdownMenu.Sub>
-                                <DropdownMenu.SubTrigger>
-                                    {tf("time_unit_primary")}:{" "}
-                                    {tf(timeUnitLabelKey(s.primaryTimeUnit))}
-                                </DropdownMenu.SubTrigger>
-                                <DropdownMenu.SubContent>
-                                    {TIME_UNITS.map((unit) => (
-                                        <DropdownMenu.Item
-                                            key={unit}
-                                            onSelect={() => {
-                                                dispatch(setPrimaryTimeUnit(unit));
-                                                void dispatch(persistUiSettings());
-                                            }}
-                                        >
-                                            {withCheck(
-                                                s.primaryTimeUnit === unit,
-                                                tf(timeUnitLabelKey(unit)),
-                                            )}
-                                        </DropdownMenu.Item>
-                                    ))}
-                                </DropdownMenu.SubContent>
-                            </DropdownMenu.Sub>
-                            <DropdownMenu.Sub>
-                                <DropdownMenu.SubTrigger>
-                                    {tf("time_unit_secondary")}:{" "}
-                                    {s.secondaryTimeUnit === "none"
-                                        ? tf("time_unit_none")
-                                        : tf(timeUnitLabelKey(s.secondaryTimeUnit as TimeUnit))}
-                                </DropdownMenu.SubTrigger>
-                                <DropdownMenu.SubContent>
-                                    {TIME_UNIT_CHOICES.map((unit) => (
-                                        <DropdownMenu.Item
-                                            key={unit}
-                                            onSelect={() => {
-                                                dispatch(setSecondaryTimeUnit(unit));
-                                                void dispatch(persistUiSettings());
-                                            }}
-                                        >
-                                            {withCheck(
-                                                s.secondaryTimeUnit === unit,
-                                                unit === "none"
-                                                    ? tf("time_unit_none")
-                                                    : tf(timeUnitLabelKey(unit as TimeUnit)),
-                                            )}
-                                        </DropdownMenu.Item>
-                                    ))}
-                                </DropdownMenu.SubContent>
-                            </DropdownMenu.Sub>
-                            <DropdownMenu.Separator />
-                            <DropdownMenu.Item onSelect={() => setTimeDisplaySettingsOpen(true)}>
-                                {tf("timeline_display_settings")}
-                            </DropdownMenu.Item>
-                        </DropdownMenu.SubContent>
-                    </DropdownMenu.Sub>
-                    <DropdownMenu.Sub>
-                        <DropdownMenu.SubTrigger>
-                            {`${t("common_theme")}: ${tf(`theme_${theme.modeSetting}`)}`}
-                        </DropdownMenu.SubTrigger>
-                        <DropdownMenu.SubContent>
-                            {(["auto", "dark", "light"] as const).map((mode) => (
-                                <DropdownMenu.Item
-                                    key={mode}
-                                    onSelect={() => {
-                                        theme.applySettings({
-                                            mode,
-                                            accentColor: theme.accentColor,
-                                            grayColor: theme.grayColor,
-                                            radius: theme.radius,
-                                            fontFamily: theme.fontFamily,
-                                            activeCustomThemeId: theme.activeCustomThemeId,
-                                        });
-                                    }}
-                                >
-                                    {withCheck(theme.modeSetting === mode, tf(`theme_${mode}`))}
-                                </DropdownMenu.Item>
-                            ))}
-                        </DropdownMenu.SubContent>
-                    </DropdownMenu.Sub>
-                    {/*
-                      外观设置现在是停靠面板（居中浮出、不可停靠、不进「窗口」菜单）。
-                      `togglePanelVisible` 让它与「窗口」菜单里的其它面板行为一致：
-                      已打开则关闭、关闭则打开 —— 比"每次新建一个"更符合用户预期，
-                      而且它声明了 `singleton: true`，重复打开本来就只会聚焦同一个窗体。
-                    */}
-                    <DropdownMenu.Item
-                        onSelect={() =>
-                            togglePanelVisible(dispatch, store.getState, PANEL_APPEARANCE)
-                        }
-                    >
-                        {tf("menu_appearance_settings")}
-                    </DropdownMenu.Item>
-                    {/*
-                      宿主链接**只在独立 App**里出现：插件模式下工作区由插件自己导出，
-                      "打开哪个工作区"这一步属于接收侧。它同样是浮出面板 +
-                      `togglePanelVisible`（见注册表声明）。
-                    */}
-                    {!isPluginMode() && (
-                        <DropdownMenu.Item
-                            onSelect={() =>
-                                togglePanelVisible(dispatch, store.getState, PANEL_HOST_LINK)
-                            }
-                        >
-                            {tf("menu_host_link")}
-                        </DropdownMenu.Item>
-                    )}
-                    {/*
-                      捕获设置**只在插件形态**里出现。判据刻意**不**看"宿主给不给 ARA"：
-                      那要等 5 秒宽限期才落定，拿它当可见性判据会让入口在窗口开得早的会话里
-                      彻底消失（用户实测）。宿主正在走 ARA 时，设置窗口自己会说清"不需要捕获"
-                      （见 `capture_status.araBound`）。
-                    */}
-                    {isPluginMode() && (
-                        <DropdownMenu.Item onSelect={openCaptureSettings}>
-                            {tf("menu_capture")}
-                        </DropdownMenu.Item>
-                    )}
-                    <DropdownMenu.Separator />
-
-                    {/* 刷新与缓存清理是维护性操作，沉底。 */}
-                    <DropdownMenu.Item onSelect={() => dispatch(refreshRuntime())}>
-                        {t("action_refresh")}
-                    </DropdownMenu.Item>
-                    {/* 【为什么插件里**整项不渲染**】`clear_waveform_cache` 只存在于独立
-                        App。摆一个永远点不动的灰项只会让用户困惑"为什么有这一项却不能用" ——
-                        它在本形态下是**结构性不存在**的能力，不是"暂时禁用"。 */}
-                    {!isPluginMode() && (
-                        <DropdownMenu.Item onSelect={() => setWaveformCacheConfirmOpen(true)}>
-                            {t("menu_clear_waveform_cache")}
-                        </DropdownMenu.Item>
-                    )}
-                </DropdownMenu.Content>
-            </DropdownMenu.Root>
-
-            <DropdownMenu.Root>
-                <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
-                    <span>{t("menu_options")}</span>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Content variant="soft" color="gray">
-                    {/* 工程拉伸设置：**工程自带**渲染口径。
-                        之前这里是"工程覆盖 / 继承全局"两级，且"继承全局"让工程文件
-                        根本不携带这个决定 —— 工程换台机器就换个声音。现在保存时会把当时
-                        生效的值固化进工程，菜单因此只呈现"当前值 + 三个算法"，不再有
-                        "继承"这个选项。 */}
-                    <DropdownMenu.Sub>
-                        <DropdownMenu.SubTrigger>
-                            {tf("stretch_project_override")}
-                        </DropdownMenu.SubTrigger>
-                        <DropdownMenu.SubContent>
-                            <DropdownMenu.Sub>
-                                <DropdownMenu.SubTrigger>
-                                    {`${tf("stretch_algorithm")}: ${stretchAlgorithmLabel(effectiveProjectStretchAlgorithm)}`}
-                                </DropdownMenu.SubTrigger>
-                                <DropdownMenu.SubContent>
-                                    {(["linear", "signalsmith", "soundtouch"] as const).map(
-                                        (algorithm) => (
-                                            <DropdownMenu.Item
-                                                key={algorithm}
-                                                onSelect={() =>
-                                                    void dispatch(
-                                                        setProjectStretchSettingsRemote({
-                                                            stretchAlgorithmOverride: algorithm,
-                                                            hifiganMelStretchOverride:
-                                                                effectiveProjectHifiganMelStretch,
-                                                        }),
-                                                    )
-                                                }
-                                            >
-                                                {withCheck(
-                                                    effectiveProjectStretchAlgorithm === algorithm,
-                                                    stretchAlgorithmLabel(algorithm),
-                                                )}
-                                            </DropdownMenu.Item>
-                                        ),
-                                    )}
-                                </DropdownMenu.SubContent>
-                            </DropdownMenu.Sub>
-                            <DropdownMenu.Sub>
-                                <DropdownMenu.SubTrigger>
-                                    {`${tf("stretch_hifigan_mel")}: ${effectiveProjectHifiganMelStretch ? tf("stretch_toggle_on") : tf("stretch_toggle_off")}`}
-                                </DropdownMenu.SubTrigger>
-                                <DropdownMenu.SubContent>
-                                    <DropdownMenu.Item
-                                        onSelect={() =>
-                                            void dispatch(
-                                                setProjectStretchSettingsRemote({
-                                                    stretchAlgorithmOverride:
-                                                        effectiveProjectStretchAlgorithm,
-                                                    hifiganMelStretchOverride: true,
-                                                }),
-                                            )
-                                        }
-                                    >
-                                        {withCheck(
-                                            effectiveProjectHifiganMelStretch,
-                                            tf("stretch_toggle_on"),
-                                        )}
-                                    </DropdownMenu.Item>
-                                    <DropdownMenu.Item
-                                        onSelect={() =>
-                                            void dispatch(
-                                                setProjectStretchSettingsRemote({
-                                                    stretchAlgorithmOverride:
-                                                        effectiveProjectStretchAlgorithm,
-                                                    hifiganMelStretchOverride: false,
-                                                }),
-                                            )
-                                        }
-                                    >
-                                        {withCheck(
-                                            !effectiveProjectHifiganMelStretch,
-                                            tf("stretch_toggle_off"),
-                                        )}
-                                    </DropdownMenu.Item>
-                                </DropdownMenu.SubContent>
-                            </DropdownMenu.Sub>
-                        </DropdownMenu.SubContent>
-                    </DropdownMenu.Sub>
-
-                    <DropdownMenu.Separator />
-
-                    {/* 全局默认 = **只影响新建工程**的初值。已有工程在保存时固化了
-                        自己的值（见后端 build_project_file_snapshot），这里改它不会
-                        动到任何已存在的工程 —— 标题因此写明"新建工程"。 */}
-                    <DropdownMenu.Sub>
-                        <DropdownMenu.SubTrigger>
-                            {tf("stretch_global_default")}
-                        </DropdownMenu.SubTrigger>
-                        <DropdownMenu.SubContent>
-                            <DropdownMenu.Sub>
-                                <DropdownMenu.SubTrigger>
-                                    {`${tf("stretch_algorithm")}: ${stretchAlgorithmLabel(s.defaultStretchAlgorithm)}`}
-                                </DropdownMenu.SubTrigger>
-                                <DropdownMenu.SubContent>
-                                    {(["linear", "signalsmith", "soundtouch"] as const).map(
-                                        (algorithm) => (
-                                            <DropdownMenu.Item
-                                                key={algorithm}
-                                                onSelect={() => {
-                                                    dispatch(setDefaultStretchAlgorithm(algorithm));
-                                                    void dispatch(persistUiSettings());
-                                                }}
-                                            >
-                                                {withCheck(
-                                                    s.defaultStretchAlgorithm === algorithm,
-                                                    stretchAlgorithmLabel(algorithm),
-                                                )}
-                                            </DropdownMenu.Item>
-                                        ),
-                                    )}
-                                </DropdownMenu.SubContent>
-                            </DropdownMenu.Sub>
-                            <DropdownMenu.Sub>
-                                <DropdownMenu.SubTrigger>
-                                    {`${tf("stretch_hifigan_mel")}: ${s.defaultHifiganMelStretch ? tf("stretch_toggle_on") : tf("stretch_toggle_off")}`}
-                                </DropdownMenu.SubTrigger>
-                                <DropdownMenu.SubContent>
-                                    <DropdownMenu.Item
-                                        onSelect={() => {
-                                            dispatch(setDefaultHifiganMelStretch(true));
-                                            void dispatch(persistUiSettings());
-                                        }}
-                                    >
-                                        {withCheck(
-                                            s.defaultHifiganMelStretch,
-                                            tf("stretch_toggle_on"),
-                                        )}
-                                    </DropdownMenu.Item>
-                                    <DropdownMenu.Item
-                                        onSelect={() => {
-                                            dispatch(setDefaultHifiganMelStretch(false));
-                                            void dispatch(persistUiSettings());
-                                        }}
-                                    >
-                                        {withCheck(
-                                            !s.defaultHifiganMelStretch,
-                                            tf("stretch_toggle_off"),
-                                        )}
-                                    </DropdownMenu.Item>
-                                </DropdownMenu.SubContent>
-                            </DropdownMenu.Sub>
-                        </DropdownMenu.SubContent>
-                    </DropdownMenu.Sub>
-
-                    <DropdownMenu.Separator />
-
-                    {/* Inference Device。
-                        【为什么插件里可用】插件与独立 App 共用同一份设置与同一个内核：
-                        `ui_settings_apply::apply` 会把 `ort_ep` / `ort_device_key` 下发给
-                        会话，渲染管线按它选 EP。此前子菜单在插件里被整体禁用，用户能在
-                        独立 App 选 GPU、在插件里却只能看着 CPU。设备清单由内核的 DXGI
-                        枚举提供（`get_dml_adapters`），不初始化 ORT。 */}
-                    <DropdownMenu.Sub>
-                        <DropdownMenu.SubTrigger>
-                            {`${t("menu_inference_device")}: ${
-                                s.ortEp === "auto"
-                                    ? `${t("menu_inference_auto")}${gpuBackend ? ` (${gpuBackend})` : ""}`
-                                    : s.ortEp === "cpu"
-                                      ? t("menu_inference_cpu")
-                                      : `${t("menu_inference_gpu")} (${gpuBackend || "GPU"})`
-                            }`}
-                        </DropdownMenu.SubTrigger>
-                        <DropdownMenu.SubContent>
-                            {(["auto", "cpu", "gpu"] as const).map((ep) => {
-                                const labels: Record<string, string> = {
-                                    auto: t("menu_inference_auto"),
-                                    cpu: t("menu_inference_cpu"),
-                                    gpu: t("menu_inference_gpu"),
-                                };
-                                return (
-                                    <DropdownMenu.Item
-                                        key={ep}
-                                        onSelect={() => {
-                                            dispatch(setOrtEp(ep));
-                                            void dispatch(persistUiSettings());
-                                        }}
-                                    >
-                                        {withCheck(s.ortEp === ep, labels[ep])}
-                                    </DropdownMenu.Item>
-                                );
-                            })}
-
-                            {/* GPU Device Selector —— 只要 EP 可能用到 GPU 就显示（`auto` 也算）。
-                                【为什么不是只在 `gpu` 下显示】设备选择与 EP 选择是两件事，
-                                `auto` 也会走 DirectML。此前只在 `gpu` 下渲染，于是"上次选过
-                                某块卡、后来切回 auto"成了一个看不见也改不掉的状态（实测日志：
-                                `choice=auto` 却 `DirectML device_id=1`）。
-                                【为什么按 `vendorId:deviceIdPci` 记】DXGI 序号是**本进程**的，
-                                同一分钟内独立 App 与 VEGAS 插件可以互换（`1` 在 App 里是独显、
-                                在插件里是集显）。PCI 标识与枚举顺序无关，见
-                                `UiSettings::ort_device_key`。 */}
-                            {s.ortEp !== "cpu" && dmlAdapters.length > 0 && (
-                                <>
-                                    <DropdownMenu.Separator />
-                                    <DropdownMenu.Label>{tf("menu_gpu_device")}</DropdownMenu.Label>
-                                    <DropdownMenu.Item
-                                        onSelect={() => {
-                                            dispatch(setOrtDeviceKey(null));
-                                            void dispatch(persistUiSettings());
-                                        }}
-                                    >
-                                        {withCheck(
-                                            s.ortDeviceKey == null,
-                                            tf("menu_gpu_auto_select"),
-                                        )}
-                                    </DropdownMenu.Item>
-                                    {dmlAdapters.map((adapter) => {
-                                        const key = `${adapter.vendorId}:${adapter.deviceIdPci}`;
-                                        return (
-                                            <DropdownMenu.Item
-                                                key={key}
-                                                onSelect={() => {
-                                                    dispatch(setOrtDeviceKey(key));
-                                                    void dispatch(persistUiSettings());
-                                                }}
-                                            >
-                                                {withCheck(
-                                                    s.ortDeviceKey === key,
-                                                    `${adapter.name} (${adapter.memoryMb} MB)`,
-                                                )}
-                                            </DropdownMenu.Item>
-                                        );
-                                    })}
-                                </>
-                            )}
-
-                            <DropdownMenu.Separator />
-                            {/* 【为什么插件里也能跑】内核的 `run_benchmark` 自带全局单飞锁
-                                租约、烟测超时与 EP 禁用收敛（见 `vocoder_ort_session` 的文件头），
-                                "可能在 DAW 进程里硬崩"这个前提已不成立。而它是用户排查
-                                "推理设备选哪个"的唯一手段，在插件里同样需要。 */}
-                            <DropdownMenu.Item onSelect={() => setBenchmarkDialogOpen(true)}>
-                                {t("menu_run_benchmark")}
-                            </DropdownMenu.Item>
-                        </DropdownMenu.SubContent>
-                    </DropdownMenu.Sub>
-
-                    {/* Background Pre-render — same level as Inference Device, no separator */}
-                    {/* 【为什么插件里**整项不渲染**】插件的渲染由宿主按需驱动
-                        （`editor/session.rs` 的 `schedule_analysis`），从不读这个开关 ——
-                        勾选它只会写下一个没人读的值，看起来像生效了。 */}
-                    {!isPluginMode() && (
-                        <DropdownMenu.Item
-                            onSelect={async () => {
-                                dispatch(toggleAutoBackgroundRender());
-                                await dispatch(persistUiSettings());
-                            }}
-                        >
-                            {withCheck(s.autoBackgroundRender, tf("menu_background_prerender"))}
-                        </DropdownMenu.Item>
-                    )}
-
-                    {/* Take display / editing options */}
-                    <DropdownMenu.Item
-                        onSelect={() => {
-                            dispatch(toggleSyncEditsAcrossTakes());
-                            void dispatch(persistUiSettings());
-                        }}
-                    >
-                        {withCheck(s.syncEditsAcrossTakes, tf("sync_edits_across_takes"))}
-                    </DropdownMenu.Item>
-
-                    {/* Auto-reload modified media — same level as Background Pre-render */}
-                    <DropdownMenu.Item
-                        onSelect={() => onAutoReloadModifiedMediaChange(!autoReloadModifiedMedia)}
-                    >
-                        {withCheck(
-                            autoReloadModifiedMedia,
-                            tf("options_auto_reload_modified_media"),
-                        )}
-                    </DropdownMenu.Item>
-
-                    {/* Loop for new clips — 为新的音频块启用循环（默认开启） */}
-                    <DropdownMenu.Item onSelect={() => onLoopNewClipsChange(!loopNewClips)}>
-                        {withCheck(loopNewClips, tf("options_loop_new_clips"))}
-                    </DropdownMenu.Item>
-
-                    <DropdownMenu.Separator />
-
-                    {/* Snap/Grid Settings — above Keyboard Shortcuts */}
-                    <DropdownMenu.Item onSelect={() => setSnapSettingsOpen(true)}>
-                        {tf("snap_grid_settings_title")}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => setParamBlockSettingsOpen(true)}>
-                        {tf("param_block_settings_title")}
-                    </DropdownMenu.Item>
-                    {/* 分割过渡设置：与工具栏按钮的右键同一个对话框。
-                        放在「参数块设置」旁边是因为二者都是"编辑行为"类设置 —— 用户
-                        在找"分割之后发生什么"时不会先去工具栏右键猜一次。 */}
-                    <DropdownMenu.Item onSelect={() => setSplitTransitionSettingsOpen(true)}>
-                        {tf("split_transition_settings_title")}
-                    </DropdownMenu.Item>
-
-                    {/* Search matching settings — 作用于全部搜索面，因此与
-                        吸附/网格同级，而不是塞进某个面板自己的设置页。 */}
-                    <DropdownMenu.Item onSelect={() => dispatch(setSearchSettingsDialogOpen(true))}>
-                        {tf("search_settings_title")}
-                    </DropdownMenu.Item>
-
-                    <DropdownMenu.Separator />
-
-                    {/* Render cache manager — above Keyboard Shortcuts */}
-                    {/* 【为什么插件里**整项不渲染**】插件没有渲染缓存
-                        （`get_render_cache_stats` / `clear_render_cache` /
-                        `open_render_cache_dir` 都不存在），对话框里每个动作都会报错。 */}
-                    {!isPluginMode() && (
-                        <DropdownMenu.Item onSelect={() => setRenderCacheDialogOpen(true)}>
-                            {tf("menu_render_cache_manager")}
-                        </DropdownMenu.Item>
-                    )}
-
-                    {/* 颤音预设库。与上下文菜单用**不同**的文案：选项菜单这一层
-                        没有"颤音"语境，只写"管理预设"没人知道管的是哪一种。 */}
-                    <DropdownMenu.Item onSelect={() => setVibratoDialogOpen(true)}>
-                        {tf("menu_vibrato_presets")}
-                    </DropdownMenu.Item>
-
-                    {/* Import channel policy（假立体声 → 单声道） */}
-                    <DropdownMenu.Item onSelect={() => setChannelImportDialogOpen(true)}>
-                        {tf("menu_channel_import_settings")}
-                    </DropdownMenu.Item>
-
-                    {/* 指针设备（触控板 / 数位板 / 触控笔 / 触摸）输入偏好 */}
-                    <DropdownMenu.Item onSelect={() => setPenInputDialogOpen(true)}>
-                        {tf("menu_pen_input_settings")}
-                    </DropdownMenu.Item>
-
-                    <DropdownMenu.Separator />
-
-                    {/* Keyboard Shortcuts — at the bottom */}
-                    <DropdownMenu.Item onSelect={() => setKbDialogOpen(true)}>
-                        {t("menu_keybindings")}
-                    </DropdownMenu.Item>
-                </DropdownMenu.Content>
-            </DropdownMenu.Root>
-
-            {/* Help Menu */}
-            <DropdownMenu.Root>
-                <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
-                    <span>{t("menu_help")}</span>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Content variant="soft" color="gray">
-                    {/* 日志详细程度的唯一入口：一级菜单只占一行，四档在子菜单里。 */}
-                    <LogVerbosityMenuItems
-                        onSaveFailed={(message) =>
-                            setNotice({ title: tf("status_error_prefix"), message })
-                        }
-                    />
-                    <DropdownMenu.Item
-                        onSelect={async () => {
-                            const { openLogFolder } =
-                                await import("../../services/api/diagnostics");
-                            try {
-                                const res = await openLogFolder();
-                                // 判定收在纯函数里（`logFolderNotice`）—— 这段逻辑
-                                // 恰恰是用户抱怨过的地方，抽出来才有回归测试。
-                                const outcome = logFolderNotice(res, isPluginMode());
-                                if (outcome.kind === "none") return;
-                                if (outcome.kind === "error") {
-                                    setNotice({
-                                        title: tf("status_error_prefix"),
-                                        message:
-                                            outcome.detail || tf("menu_open_log_folder_failed"),
-                                    });
-                                    return;
-                                }
-                                // 打不开时把路径摆出来，并且**必须能复制**：路径最容易
-                                // 手抄错，而"打不开"正是用户最需要把它交给我们的时候。
-                                setNotice({
-                                    title: tf("menu_open_log_folder"),
-                                    message: <span data-hs-selectable="true">{outcome.path}</span>,
-                                    copyText: outcome.path,
-                                });
-                            } catch (e) {
-                                setNotice({
-                                    title: tf("status_error_prefix"),
-                                    message: String(e),
-                                });
-                            }
-                        }}
-                    >
-                        {tf("menu_open_log_folder")}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                        // 插件里**也能导出** —— 走的是精简版（日志 + 构建身份 + 运行时 +
-                        // 宿主版本），不含推理设备基准测试：那条路径在 DAW 进程里崩掉会
-                        // 带走用户整个会话。详见 `editor/plugin_diagnostics.rs`。
-                        disabled={diagnosticsExporting}
-                        onSelect={() => void handleExportDiagnostics()}
-                    >
-                        {tf("menu_export_diagnostics")}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
-                    <DropdownMenu.Item onSelect={() => setAboutDialogOpen(true)}>
-                        {t("menu_about")}
-                    </DropdownMenu.Item>
-                </DropdownMenu.Content>
-            </DropdownMenu.Root>
+            {/* 帮助 */}
+            <AppMenuBarItem
+                open={openMenu === "help"}
+                onOpenChange={(open) => setOpenMenu(open ? "help" : null)}
+                items={helpMenuItems}
+                ariaLabel={t("menu_help")}
+            >
+                <span>{t("menu_help")}</span>
+            </AppMenuBarItem>
 
             <Flex ml="auto" gap="2" align="center" className="shrink-0">
-                <DropdownMenu.Root>
-                    <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
-                        <Flex align="center" gap="1">
-                            <GlobeIcon width={14} height={14} />
-                            <span>{t("common_language")}</span>
-                        </Flex>
-                    </DropdownMenu.Trigger>
-                    <DropdownMenu.Content>
-                        {/* RadioGroup/RadioItem：语言是单选项，当前项必须带
-                            aria-checked 与指示符（role="menuitemradio" 由
-                            Radix 提供），否则读屏与键盘用户无从得知当前语言。 */}
-                        <DropdownMenu.RadioGroup
-                            value={locale}
-                            onValueChange={(value) => setLocale(value as Locale)}
-                        >
-                            <DropdownMenu.RadioItem value="en-US">
-                                {t("lang_en")}
-                            </DropdownMenu.RadioItem>
-                            <DropdownMenu.RadioItem value="zh-CN">
-                                {t("lang_zh")}
-                            </DropdownMenu.RadioItem>
-                            <DropdownMenu.RadioItem value="zh-TW">
-                                {t("lang_zh_tw")}
-                            </DropdownMenu.RadioItem>
-                            <DropdownMenu.RadioItem value="ja-JP">
-                                {t("lang_ja")}
-                            </DropdownMenu.RadioItem>
-                            <DropdownMenu.RadioItem value="ko-KR">
-                                {t("lang_ko")}
-                            </DropdownMenu.RadioItem>
-                        </DropdownMenu.RadioGroup>
-                    </DropdownMenu.Content>
-                </DropdownMenu.Root>
+                <AppMenuBarItem
+                    open={openMenu === "language"}
+                    onOpenChange={(open) => setOpenMenu(open ? "language" : null)}
+                    items={languageMenuItems}
+                    ariaLabel={t("common_language")}
+                    // 菜单栏最右端：右对齐展开才不会横跨整条菜单栏。
+                    align="end"
+                >
+                    <Flex align="center" gap="1">
+                        <GlobeIcon width={14} height={14} />
+                        <span>{t("common_language")}</span>
+                    </Flex>
+                </AppMenuBarItem>
             </Flex>
 
             {/* 快捷键设置对话框：只在打开时加载，避免把整块编辑器塞进首屏。 */}

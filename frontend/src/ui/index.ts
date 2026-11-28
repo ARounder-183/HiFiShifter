@@ -60,6 +60,10 @@ export {
     type AppSubMenuProps,
 } from "./Menu";
 
+export { MenuScrollScope, type MenuScrollScopeProps } from "./MenuScrollScope";
+
+export { AppMenuBarItem, type AppMenuBarItemProps } from "./AppMenuBarItem";
+
 export {
     AppConfirmDialog,
     AppDialog,
@@ -90,6 +94,8 @@ export { AppSelect, type AppSelectEntry, type AppSelectItem, type AppSelectProps
 export { AppNumberField, type AppNumberFieldProps } from "./NumberField";
 
 export { AppSlider, AppSliderReadout, type AppSliderProps } from "./Slider";
+
+export { SlotText, type SlotTextProps } from "./SlotText";
 
 export { AppBusy, AppEmptyState, type AppBusyProps, type AppEmptyStateProps } from "./State";
 

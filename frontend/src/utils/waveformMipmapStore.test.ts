@@ -8,7 +8,7 @@ vi.mock("../services/api/waveform", () => ({
     waveformApi: {
         getWaveformMipmapBinary: vi.fn(),
         preloadWaveformMipmap: vi.fn(async () => ({ ok: true })),
-        batchGetWaveformMipmap: vi.fn(async () => ({})),
+        batchGetWaveformMipmap: vi.fn(async () => []),
         getRootMixWaveformPeaksSegment: vi.fn(),
         getTrackMixWaveformPeaksSegment: vi.fn(),
     },

@@ -26,6 +26,47 @@ pub(crate) struct HostUndo {
     /// 只控制自动合成，不阻塞参数命令/flush屏障，否则宿主getState会与actor循环等待。
     pub pending: AtomicBool,
 }
+/// 一次宿主 undo 请求的 **RAII 收尾**。
+///
+/// 【为什么必须是 RAII】`begin_request` / `finish_request` 之间夹着真正的宿主写入
+/// （建轨、导入、写字段），而那条路径上 `?` 满地都是。漏掉一次 `finish_request`
+/// 的后果不是"少一次收尾"：请求表永远非空 ⇒ `HostUndo::pending` 恒真 ⇒ 自动合成
+/// 被永久挂起，而且宿主那个 undo 块**再也不会关**（用户的 Ctrl+Z 会一次撤销一堆
+/// 互不相干的操作）。
+///
+/// 【为什么它持有 `&HostUndo` 而不是 `Arc<DocumentSession>`】它只需要那一个对象；
+/// 持有文档会把"收尾"与"文档还活着"绑在一起，而 Drop 完全可能发生在文档关闭之后。
+pub(crate) struct UndoRequestGuard<'a> {
+    undo: &'a HostUndo,
+    view: String,
+    id: u64,
+}
+
+impl<'a> UndoRequestGuard<'a> {
+    pub(crate) fn begin(
+        undo: &'a HostUndo,
+        view: &str,
+        id: u64,
+        checkpoint: bool,
+        native: bool,
+        host: &Arc<NativeHost>,
+        authorized: &impl Fn() -> bool,
+    ) -> Result<Self, String> {
+        undo.begin_request(view, id, checkpoint, native, host, authorized)?;
+        Ok(Self {
+            undo,
+            view: view.to_owned(),
+            id,
+        })
+    }
+}
+
+impl Drop for UndoRequestGuard<'_> {
+    fn drop(&mut self) {
+        self.undo.finish_request(&self.view, self.id);
+    }
+}
+
 impl HostUndo {
     pub(crate) fn begin_group(&self, view: &str) {
         let mut state = self.state.lock_or_recover();

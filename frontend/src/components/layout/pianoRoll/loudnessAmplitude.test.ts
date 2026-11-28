@@ -5,7 +5,11 @@ import {
     type LoudnessAutomationSource,
     type LoudnessLiveCurve,
 } from "./PianoRollWaveformSurface";
-import { readAmplitudeRevision, type WaveformAmplitudeMap } from "../../../waveform/geometry";
+import {
+    readAmplitudeRevision,
+    type WaveformAmplitudeFactors,
+    type WaveformAmplitudeMap,
+} from "../../../waveform/geometry";
 import { DYN_MAX_GAIN, DYN_SILENCE_FLOOR, DYN_VALUE_MAX } from "./paramRanges";
 
 /**
@@ -144,13 +148,16 @@ describe("makeLoudnessAmplitudeMap", () => {
             () => 0,
         );
         expect(map(1, 1, 0)).toBeCloseTo(0, 10);
-        // 真静音基线（0）：画 0 = 静音。
+        // 基线恰为 0：协议里与"还没分析"不可区分（后端 dyn_orig_level_at 把两者
+        // 折叠成同一个 0），显示端按**未知**处理 —— 不施加动态增益。该帧的真实
+        // 峰值本来就是 0，屏幕结果仍是静音；若按 0 处理，尚未分析的整段波形会被
+        // 乘成空白（见文件末尾"未知基线"一组用例）。
         const zeroBase = makeLoudnessAmplitudeMap(
             source({ dynTarget: [0], dynBaseline: [0] }),
             { volume: noLive, dyn: noLive },
             () => 0,
         );
-        expect(zeroBase(1, 1, 0)).toBeCloseTo(0, 10);
+        expect(zeroBase(1, 1, 0)).toBeCloseTo(1, 10);
     });
 
     it("★ honors the target exactly; the clamp is only a numeric backstop", () => {
@@ -341,7 +348,9 @@ describe("makeLoudnessAmplitudeMap · factor view", () => {
         );
         const factor = factorOf(map);
 
-        expect(factor(0)).toBe(0); // 真静音：画了静音 = 静音
+        // 帧 0 的基线是 0：与"还没分析"不可区分 ⇒ 按未知处理（因子 1）。该帧真实
+        // 峰值本来就是 0，屏幕结果仍是静音。
+        expect(factor(0)).toBe(1);
         // 无内容帧：有界 + 淡出（详见上一条用例的说明）。关键是**有限** ——
         // 非有限值会让几何层跳过整列。
         const gain = factor(0.01);
@@ -358,5 +367,68 @@ describe("makeLoudnessAmplitudeMap · factor view", () => {
         );
         expect(typeof factorOf(map)).toBe("function");
         expect(readAmplitudeRevision(map)).toBe(7);
+    });
+});
+
+/**
+ * 基线为 0 的两种含义：**这一帧没有内容**，或**这一帧的内容还没被分析**。
+ *
+ * `dyn_orig` 把两者折叠成同一个 0（后端 `dyn_orig_level_at`），而后端出口又把
+ * "未画"的 DYN 帧物化成该帧基线 —— 于是分析未就绪时 `目标 = 基线 = 0`，
+ * `dynLevelTargetingGain(0,0) = 0` 且 `dynContentFade(0) = 0`：波形被乘成 0，
+ * 上界也被算成 0 再钳成零高度。用户看到的就是"导入新文件后参数编辑器波形要等
+ * 分析完成才出现"。
+ */
+describe("未知基线（dyn_orig = 0）不得把波形乘成 0", () => {
+    type CeilingProbe = WaveformAmplitudeMap & Partial<WaveformAmplitudeFactors>;
+
+    it("treats a zero baseline as unknown: factor 1, not 0", () => {
+        const map = makeLoudnessAmplitudeMap(
+            source({ volume: [1, 1], dynTarget: [0, 0], dynBaseline: [0, 0] }),
+            { volume: noLive, dyn: noLive },
+            () => 0,
+        );
+        expect(map(0.5, 1, 0)).toBeCloseTo(0.5, 10);
+        expect(map(0.5, 1, 0.01)).toBeCloseTo(0.5, 10);
+    });
+
+    it("keeps known frames intact when only one frame is unknown", () => {
+        // 帧 0 基线 0（未知）、帧 1 基线 0.5 且目标 1.0 → ×2。
+        const map = makeLoudnessAmplitudeMap(
+            source({ volume: [1, 1], dynTarget: [0, 1.0], dynBaseline: [0, 0.5] }),
+            { volume: noLive, dyn: noLive },
+            () => 0,
+        );
+        expect(map(0.5, 1, 0)).toBeCloseTo(0.5, 10);
+        expect(map(0.5, 1, 0.01)).toBeCloseTo(1.0, 10);
+    });
+
+    it("still silences frames whose target the user drew to zero", () => {
+        // 基线已知（0.5）而目标被画成 0 = 真静音，语义不变。
+        const map = makeLoudnessAmplitudeMap(
+            source({ volume: [1], dynTarget: [0], dynBaseline: [0.5] }),
+            { volume: noLive, dyn: noLive },
+            () => 0,
+        );
+        expect(map(0.5, 1, 0)).toBe(0);
+    });
+
+    it("does not clamp the level ceiling to zero when the baseline is unknown", () => {
+        const map = makeLoudnessAmplitudeMap(
+            source({ volume: [1], dynTarget: [0], dynBaseline: [0] }),
+            { volume: noLive, dyn: noLive },
+            () => 0,
+        ) as CeilingProbe;
+        // 窗口内没有任何帧贡献上界 ⇒ null（不钳制），而不是 0（钳成零高度）。
+        expect(map.levelCeilingOverWindow?.(0, 0.01) ?? null).toBeNull();
+    });
+
+    it("still clamps to the reachable level when the baseline is known", () => {
+        const map = makeLoudnessAmplitudeMap(
+            source({ volume: [1], dynTarget: [0.5], dynBaseline: [0.5] }),
+            { volume: noLive, dyn: noLive },
+            () => 0,
+        ) as CeilingProbe;
+        expect(map.levelCeilingOverWindow?.(0, 0.01) ?? null).toBeCloseTo(0.5, 10);
     });
 });

@@ -7,6 +7,9 @@ use super::metronome::MetronomeRt;
 use super::metronome::MetronomeVoices;
 use super::types::EngineClip;
 use super::types::EngineSnapshot;
+use super::types::LiveCurve;
+use super::types::LiveGainFrame;
+use super::types::LiveGainRampState;
 use super::util::clamp11;
 
 /// 快照切换时新旧渲染的交叉淡化时长（毫秒）。
@@ -23,6 +26,12 @@ const SNAPSHOT_XFADE_MS: f32 = 20.0;
 /// 一次杂音"里最响的那一类。用一小段淡出把**已经播出的内容**收尾，恢复时
 /// 再用同样长度淡入。
 const WAIT_RAMP_MS: f32 = 5.0;
+
+/// 拖动静态增益时的线性斜坡时长（毫秒）。
+///
+/// 与 WAIT_RAMP_MS 同量级：足够消除阶跃，又短到听不出“滞后”。跨音频块精确
+/// 保持总时长（见 LiveGainRampState::gain_at）。
+const LIVE_GAIN_RAMP_MS: f32 = 5.0;
 
 /// 毫秒 → 帧数（至少 1 帧，避免斜坡长度为 0 时退化成硬切）。
 #[inline]
@@ -274,15 +283,30 @@ fn pan_gains(pan: f32) -> (f32, f32) {
 /// 采样规则与 volume/pan 完全一致（`sample_automation_curve`，越界钳制到末值），
 /// 保证三者在同一时间轴上对齐。
 #[inline]
-fn dyn_gain_at(clip: &EngineClip, abs_frame: u64) -> f32 {
-    if clip.dyn_curve.as_ref().is_none_or(|c| c.is_empty()) {
+fn dyn_gain_at(
+    clip: &EngineClip,
+    abs_frame: u64,
+    live: Option<&hifishifter_kernel::renderer::common_params::AudioDynCurves>,
+) -> f32 {
+    let (target_curve, orig_curve) = match live {
+        Some(curves) if !curves.target.is_empty() => (
+            Some(curves.target.as_slice()),
+            Some(curves.baseline.as_slice()),
+        ),
+        Some(_) => return 1.0,
+        None => (
+            clip.dyn_curve.as_deref().map(|v| v.as_slice()),
+            clip.dyn_orig_curve.as_deref().map(|v| v.as_slice()),
+        ),
+    };
+    if target_curve.is_none_or(|c| c.is_empty()) {
         return 1.0;
     }
     // 用 DYN 专用采样器：越界回落到"沿用原声"哨兵，而不是持有末值 ——
     // 否则用户画的最后一个目标电平会被 hold 到曲线尽头，对后续所有音频
     // 逐帧强加同一个目标电平（末点污染）。
     let target = crate::renderer::common_params::sample_dyn_curve_at_frame(
-        clip.dyn_curve.as_deref().map(|v| v.as_slice()),
+        target_curve,
         abs_frame,
         clip.src.sample_rate,
         clip.dyn_curve_frame_period_ms,
@@ -292,8 +316,8 @@ fn dyn_gain_at(clip: &EngineClip, abs_frame: u64) -> f32 {
         return 1.0;
     }
     // 基线缺失（或空曲线）时不得推导增益：采样器的兜底默认值只是占位，
-    // 拿它去算 `目标 / 兜底` 会产生一个凭空的增益（曾表现为 max gain）。
-    let Some(orig_curve) = clip.dyn_orig_curve.as_deref().filter(|c| !c.is_empty()) else {
+    // 拿它去算 目标 / 兜底 会产生一个凭空的增益（曾表现为 max gain）。
+    let Some(orig_curve) = orig_curve.filter(|c| !c.is_empty()) else {
         return 1.0;
     };
     let orig = sample_automation_curve(
@@ -311,15 +335,37 @@ fn dyn_gain_at(clip: &EngineClip, abs_frame: u64) -> f32 {
 }
 
 /// 对一帧 PCM 应用共通音量/声像/动态自动化。
+#[cfg(test)]
 #[inline]
 fn apply_mix_automation(clip: &EngineClip, abs_frame: u64, l: f32, r: f32) -> (f32, f32) {
-    let vol = sample_automation_curve(
-        clip.volume_curve.as_deref().map(|v| v.as_slice()),
-        abs_frame,
-        clip.src.sample_rate,
-        clip.volume_curve_frame_period_ms,
-        1.0,
-    );
+    apply_mix_automation_with_live(clip, abs_frame, l, r, None, None)
+}
+
+#[inline]
+fn apply_mix_automation_with_live(
+    clip: &EngineClip,
+    abs_frame: u64,
+    l: f32,
+    r: f32,
+    live_dyn: Option<&hifishifter_kernel::renderer::common_params::AudioDynCurves>,
+    live_volume: Option<&LiveCurve>,
+) -> (f32, f32) {
+    let vol = match live_volume {
+        Some(curve) => sample_automation_curve(
+            Some(curve.curve.as_slice()),
+            abs_frame,
+            clip.src.sample_rate,
+            curve.frame_period_ms,
+            1.0,
+        ),
+        None => sample_automation_curve(
+            clip.volume_curve.as_deref().map(|v| v.as_slice()),
+            abs_frame,
+            clip.src.sample_rate,
+            clip.volume_curve_frame_period_ms,
+            1.0,
+        ),
+    };
     let pan = sample_automation_curve(
         clip.pan_curve.as_deref().map(|v| v.as_slice()),
         abs_frame,
@@ -327,7 +373,7 @@ fn apply_mix_automation(clip: &EngineClip, abs_frame: u64, l: f32, r: f32) -> (f
         clip.pan_curve_frame_period_ms,
         0.0,
     );
-    let dyn_gain = dyn_gain_at(clip, abs_frame);
+    let dyn_gain = dyn_gain_at(clip, abs_frame, live_dyn);
     let (left_gain, right_gain) = pan_gains(pan);
     let gain = vol * dyn_gain;
     (l * gain * left_gain, r * gain * right_gain)
@@ -355,8 +401,20 @@ fn apply_take_channel_mode(
 
 /// 采样 clip 在 local 帧处的原始 PCM（不含 gain/fade，但含 volume/pan 自动化）。
 /// 返回 None 表示该帧应静音（越界、leading silence 等）。
+#[cfg(test)]
 #[inline]
 fn sample_clip_pcm(clip: &EngineClip, local: u64, local_adj: f64) -> Option<(f32, f32)> {
+    sample_clip_pcm_with_live(clip, local, local_adj, None, None)
+}
+
+#[inline]
+fn sample_clip_pcm_with_live(
+    clip: &EngineClip,
+    local: u64,
+    local_adj: f64,
+    live_dyn: Option<&hifishifter_kernel::renderer::common_params::AudioDynCurves>,
+    live_volume: Option<&LiveCurve>,
+) -> Option<(f32, f32)> {
     let abs_frame = clip.start_frame.saturating_add(local);
     let raw = if let Some(ref rendered) = clip.rendered_pcm {
         let idx = (local as usize) * 2;
@@ -466,21 +524,100 @@ fn sample_clip_pcm(clip: &EngineClip, local: u64, local_adj: f64) -> Option<(f32
         }
     };
 
-    raw.map(|(left, right)| apply_mix_automation(clip, abs_frame, left, right))
+    raw.map(|(left, right)| {
+        apply_mix_automation_with_live(clip, abs_frame, left, right, live_dyn, live_volume)
+    })
 }
 
+/// RT 侧一次试听帧播放所需的借用。
+pub(crate) struct LiveGainPlayback<'a> {
+    pub(crate) frame: &'a LiveGainFrame,
+    pub(crate) ramp: &'a mut LiveGainRampState,
+}
+
+impl LiveGainRampState {
+    /// 快照换代：把 current 重置成新快照的权威增益。只在 worker 发布新快照后
+    /// 的第一块发生，且不做任何分配。
+    fn prepare(&mut self, snap: &EngineSnapshot) {
+        let ptr = snap as *const EngineSnapshot as usize;
+        if ptr == self.snapshot_ptr {
+            return;
+        }
+        self.snapshot_ptr = ptr;
+        if snap.clips.len() > self.current.len() {
+            self.enabled = false;
+            return;
+        }
+        self.enabled = true;
+        for (index, clip) in snap.clips.iter().enumerate() {
+            self.current[index] = clip.gain;
+            self.step[index] = 0.0;
+            self.remaining[index] = 0;
+        }
+        for index in snap.clips.len()..self.current.len() {
+            self.remaining[index] = 0;
+        }
+    }
+
+    /// 推进一帧并返回本帧实际使用的增益。
+    ///
+    /// 目标在斜坡中途再次变化时，从**当前值**重新起一段 5ms 斜坡；总时长不会
+    /// 因为分块而被拉长（remaining 跨块保留）。
+    #[inline]
+    fn gain_at(&mut self, index: usize, target: f32, sample_rate: u32) -> f32 {
+        if !self.enabled || index >= self.current.len() {
+            return target;
+        }
+        if self.remaining[index] == 0 {
+            let current = self.current[index];
+            if target == current {
+                return target;
+            }
+            let frames = ms_to_frames(LIVE_GAIN_RAMP_MS, sample_rate).min(u16::MAX as usize);
+            self.remaining[index] = frames.max(1) as u16;
+            self.step[index] = (target - current) / frames.max(1) as f32;
+        }
+        self.current[index] += self.step[index];
+        self.remaining[index] = self.remaining[index].saturating_sub(1);
+        if self.remaining[index] == 0 {
+            self.current[index] = target;
+        }
+        self.current[index]
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn mix_snapshot_clips_into_scratch(
-    _frames: usize,
+    frames: usize,
     snap: &EngineSnapshot,
     pos0: u64,
     pos1: u64,
     scratch: &mut [f32],
     meter: Option<&mut TrackMeterScratch>,
 ) {
+    mix_snapshot_clips_into_scratch_with_live(frames, snap, pos0, pos1, scratch, meter, None);
+}
+
+fn mix_snapshot_clips_into_scratch_with_live(
+    _frames: usize,
+    snap: &EngineSnapshot,
+    pos0: u64,
+    pos1: u64,
+    scratch: &mut [f32],
+    meter: Option<&mut TrackMeterScratch>,
+    live: Option<LiveGainPlayback<'_>>,
+) {
+    let (live_frame, mut live_ramp) = match live {
+        Some(live) => (Some(live.frame), Some(live.ramp)),
+        None => (None, None),
+    };
+    if let Some(ramp) = live_ramp.as_deref_mut() {
+        ramp.prepare(snap);
+    }
     let mut meter = meter;
     let has_meter = meter.is_some();
 
-    for clip in snap.clips.iter() {
+    for (clip_index, clip) in snap.clips.iter().enumerate() {
         let clip_start = clip.start_frame;
         let clip_end = clip.start_frame.saturating_add(clip.length_frames);
         if clip_end <= pos0 || clip_start >= pos1 {
@@ -510,6 +647,21 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
         let clip_off = overlap_start - clip_start;
         let mix_frames = (overlap_end - overlap_start) as usize;
 
+        let live_gain_target = live_frame
+            .and_then(|frame| frame.gains.get(clip_index))
+            .copied()
+            .filter(|gain| gain.is_finite())
+            .unwrap_or(clip.gain);
+        let live_dyn = live_frame
+            .and_then(|frame| frame.dyn_curves.get(clip_index))
+            .and_then(|curves| curves.as_deref());
+        let live_volume = live_frame
+            .and_then(|frame| frame.volume_curves.get(clip_index))
+            .and_then(|curve| curve.as_deref());
+        let live_fade = live_frame
+            .and_then(|frame| frame.fades.get(clip_index))
+            .and_then(|fade| fade.as_ref());
+
         // 淡出（端点锁定 + 内容耗尽收缩）：
         // - 端点锁定：N 帧区间的最后一帧（clip 末帧）进度恰为 1 → 增益精确
         //   0。旧公式 `1-remain/N` 让末帧进度停在 1-1/N，对“先慢后快”
@@ -519,21 +671,35 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
         //   若直接静音，会在增益还很大时硬切（与曲线形状无关）。处理：
         //   淡出区间收缩为 [E-N, L]（E=内容末端），内容末端之后按淡出增益
         //   保持末帧衰减 —— 全程无阶跃。
-        let default_zone_start = clip.length_frames.saturating_sub(clip.fade_out_frames);
+        let fade_in_frames = live_fade
+            .map(|fade| fade.fade_in_frames)
+            .unwrap_or(clip.fade_in_frames);
+        let fade_out_frames = live_fade
+            .map(|fade| fade.fade_out_frames)
+            .unwrap_or(clip.fade_out_frames);
+        let default_zone_start = clip.length_frames.saturating_sub(fade_out_frames);
         let content_end = clip_content_end_frame(clip);
         let fade_zone_start = match content_end {
-            Some(end) if end < default_zone_start => end.saturating_sub(clip.fade_out_frames),
+            Some(end) if end < default_zone_start => end.saturating_sub(fade_out_frames),
             _ => default_zone_start,
         };
-        // 淡化应用收口在内核 `fade_curves::ClipFade`（帧中心淡入、端点锁定淡出、
+        // 淡化应用收口在内核 fade_curves::ClipFade（帧中心淡入、端点锁定淡出、
         // 内容耗尽收缩），与导出（mixdown.rs）逐位同源 —— "预览 ≠ 导出"那类漂移
         // 在这里结构上不可能再发生。逐帧不变的参数在循环外构造一次。
+        let fade_in_lut = live_fade
+            .and_then(|fade| fade.fade_in_lut.as_deref())
+            .map(|lut| lut.as_slice())
+            .or(clip.fade_in_lut.as_deref().map(|lut| lut.as_slice()));
+        let fade_out_lut = live_fade
+            .and_then(|fade| fade.fade_out_lut.as_deref())
+            .map(|lut| lut.as_slice())
+            .or(clip.fade_out_lut.as_deref().map(|lut| lut.as_slice()));
         let fade = crate::fade_curves::ClipFade {
-            fade_in_frames: clip.fade_in_frames,
-            fade_in_lut: clip.fade_in_lut.as_deref().map(Vec::as_slice),
+            fade_in_frames,
+            fade_in_lut,
             fade_zone_start,
-            fade_out_frames: clip.fade_out_frames,
-            fade_out_lut: clip.fade_out_lut.as_deref().map(Vec::as_slice),
+            fade_out_frames,
+            fade_out_lut,
             clip_total_frames: clip.length_frames,
         };
         let mut last_l: f32 = 0.0;
@@ -554,13 +720,19 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
             }
             let local_adj = local_adj_i64 as f64;
 
-            let g = clip.gain * fade.gain_at(local);
-            if g <= 0.0 {
+            let base_gain = match live_ramp.as_deref_mut() {
+                Some(ramp) => ramp.gain_at(clip_index, live_gain_target, snap.sample_rate),
+                None => live_gain_target,
+            };
+            let g = base_gain * fade.gain_at(local);
+            if g == 0.0 {
                 continue;
             }
 
             let oi = (out_off + f) * 2;
-            let Some((l, r)) = sample_clip_pcm(clip, local, local_adj) else {
+            let Some((l, r)) =
+                sample_clip_pcm_with_live(clip, local, local_adj, live_dyn, live_volume)
+            else {
                 // 内容耗尽：淡出激活时保持末帧内容按淡出增益继续衰减（E
                 // 处及其后增益从 ~1 平滑走到 0），杜绝“增益还很大时内容
                 // 硬切”的 Click。淡出未激活时维持越界静音语义。
@@ -646,7 +818,9 @@ fn clip_content_end_frame(clip: &EngineClip) -> Option<u64> {
 
 fn snapshot_has_pending_clip(snap: &EngineSnapshot, pos0: u64, pos1: u64) -> bool {
     snap.clips.iter().any(|clip| {
-        if !clip.needs_synthesis || clip.rendered_pcm.is_some() {
+        // 0 增益是合法静音（试听可以从 0 拉起来），不得因为“未渲染”把
+        // 传输层卡进 play_start_wait。真正需要等的是会出声的 clip。
+        if clip.gain == 0.0 || !clip.needs_synthesis || clip.rendered_pcm.is_some() {
             return false;
         }
         let clip_end = clip.start_frame.saturating_add(clip.length_frames);
@@ -662,6 +836,18 @@ fn render_snapshot_window(
     scratch: &mut Vec<f32>,
     meter: Option<&mut TrackMeterScratch>,
 ) -> bool {
+    render_snapshot_window_with_live(frames, snap, pos0, pos1, scratch, meter, None)
+}
+
+fn render_snapshot_window_with_live(
+    frames: usize,
+    snap: &EngineSnapshot,
+    pos0: u64,
+    pos1: u64,
+    scratch: &mut Vec<f32>,
+    meter: Option<&mut TrackMeterScratch>,
+    live: Option<LiveGainPlayback<'_>>,
+) -> bool {
     if scratch.len() == frames * 2 {
         scratch.fill(0.0);
     } else {
@@ -673,7 +859,15 @@ fn render_snapshot_window(
         return false;
     }
 
-    mix_snapshot_clips_into_scratch(frames, snap, pos0, pos1, scratch.as_mut_slice(), meter);
+    mix_snapshot_clips_into_scratch_with_live(
+        frames,
+        snap,
+        pos0,
+        pos1,
+        scratch.as_mut_slice(),
+        meter,
+        live,
+    );
     true
 }
 fn blend_snapshot_windows_in_place(
@@ -779,6 +973,8 @@ pub(crate) struct BlockRender {
 fn mix_into_scratch_stereo(
     frames: usize,
     snapshot: &Arc<ArcSwap<EngineSnapshot>>,
+    live_gain: &Arc<ArcSwap<LiveGainFrame>>,
+    live_ramp: &mut LiveGainRampState,
     is_playing: &AtomicBool,
     play_start_wait: &AtomicBool,
     position_frames: &AtomicU64,
@@ -834,8 +1030,26 @@ fn mix_into_scratch_stereo(
     transition.current_snapshot = Some(snap.clone());
 
     meter.reset(snap.track_ids.len());
-    let current_ready =
-        render_snapshot_window(frames, &snap, pos0, pos1, scratch, Some(&mut *meter));
+    // 试听帧只在它引用的快照仍是当前快照时生效。Arc::ptr_eq 比“按 id 查表”
+    // 便宜，而且天然阻止旧手势的帧套到换代后的新快照上。
+    let live_frame = live_gain.load_full();
+    let live = if Arc::ptr_eq(&live_frame.snapshot, &snap) {
+        Some(LiveGainPlayback {
+            frame: &live_frame,
+            ramp: live_ramp,
+        })
+    } else {
+        None
+    };
+    let current_ready = render_snapshot_window_with_live(
+        frames,
+        &snap,
+        pos0,
+        pos1,
+        scratch,
+        Some(&mut *meter),
+        live,
+    );
 
     // ── 原地等待渲染（Case A + Case B 统一）──────────────────────────────
     // 引擎快照是唯一真相，本回调是其**纯函数**：
@@ -939,6 +1153,8 @@ pub(crate) fn render_callback_f32(
     data: &mut [f32],
     out_channels: usize,
     snapshot: &Arc<ArcSwap<EngineSnapshot>>,
+    live_gain: &Arc<ArcSwap<LiveGainFrame>>,
+    live_ramp: &mut LiveGainRampState,
     is_playing: &AtomicBool,
     play_start_wait: &AtomicBool,
     position_frames: &AtomicU64,
@@ -969,6 +1185,8 @@ pub(crate) fn render_callback_f32(
     let block = mix_into_scratch_stereo(
         frames,
         snapshot,
+        live_gain,
+        live_ramp,
         is_playing,
         play_start_wait,
         position_frames,
@@ -1009,6 +1227,8 @@ pub(crate) fn render_callback_i16(
     data: &mut [i16],
     out_channels: usize,
     snapshot: &Arc<ArcSwap<EngineSnapshot>>,
+    live_gain: &Arc<ArcSwap<LiveGainFrame>>,
+    live_ramp: &mut LiveGainRampState,
     is_playing: &AtomicBool,
     play_start_wait: &AtomicBool,
     position_frames: &AtomicU64,
@@ -1038,6 +1258,8 @@ pub(crate) fn render_callback_i16(
     let block = mix_into_scratch_stereo(
         frames,
         snapshot,
+        live_gain,
+        live_ramp,
         is_playing,
         play_start_wait,
         position_frames,
@@ -1079,6 +1301,8 @@ pub(crate) fn render_callback_u16(
     data: &mut [u16],
     out_channels: usize,
     snapshot: &Arc<ArcSwap<EngineSnapshot>>,
+    live_gain: &Arc<ArcSwap<LiveGainFrame>>,
+    live_ramp: &mut LiveGainRampState,
     is_playing: &AtomicBool,
     play_start_wait: &AtomicBool,
     position_frames: &AtomicU64,
@@ -1110,6 +1334,8 @@ pub(crate) fn render_callback_u16(
     let block = mix_into_scratch_stereo(
         frames,
         snapshot,
+        live_gain,
+        live_ramp,
         is_playing,
         play_start_wait,
         position_frames,
@@ -1150,7 +1376,9 @@ pub(crate) fn render_callback_u16(
 #[cfg(test)]
 mod tests {
     use super::{apply_mix_automation, sample_automation_curve};
-    use crate::audio_engine::types::{EngineClip, EngineSnapshot, ResampledStereo};
+    use crate::audio_engine::types::{
+        EngineClip, EngineSnapshot, LiveGainRampState, ResampledStereo,
+    };
     use std::sync::Arc;
 
     #[test]
@@ -1670,6 +1898,31 @@ mod tests {
             (cur[(total + 1) * 2] - 1.0).abs() < 1e-6,
             "淡化区之后保持新值"
         );
+    }
+
+    /// 5ms 试听斜坡：跨块总时长精确、逐帧单调、无阶跃。
+    #[test]
+    fn live_gain_ramp_reaches_target_in_five_ms_without_steps() {
+        let mut clip = clip_with_dyn(None, None);
+        clip.gain = 1.0;
+        let snap = EngineSnapshot {
+            sample_rate: 48_000,
+            duration_frames: 0,
+            track_ids: Arc::new(vec!["t".to_string()]),
+            clips: Arc::new(vec![clip]),
+        };
+        let mut ramp = LiveGainRampState::default();
+        ramp.prepare(&snap);
+        let frames = super::ms_to_frames(super::LIVE_GAIN_RAMP_MS, 48_000);
+        let mut previous = 1.0f32;
+        for _ in 0..frames {
+            let gain = ramp.gain_at(0, 0.5, 48_000);
+            assert!(gain <= previous + 1e-6, "斜坡必须单调下降");
+            assert!((gain - previous).abs() <= 0.5 / frames as f32 + 1e-5);
+            previous = gain;
+        }
+        assert!((previous - 0.5).abs() < 1e-6, "5ms 后必须精确到目标");
+        assert_eq!(ramp.gain_at(0, 0.5, 48_000), 0.5, "稳态零额外斜坡");
     }
 
     /// App 实时路径的分配门禁。

@@ -396,6 +396,9 @@
     --qt-scrollbar-gutter: 8px;
 
     /* chrome 条高度：与上面的控件高度解耦（条要容纳 1px 边框与内边距） */
+    /* 最小命中面积（WCAG 2.5.5 的下限 = 44px）。桌面取紧凑控件高度；
+     * 触摸形态在下面覆写成 44（见 `html[data-input="touch"]` 的同一段）。 */
+    --qt-hit-min: var(--qt-ctl-sm, 20px);
     --qt-bar-title: 28px; /* 浮动窗标题栏 */
     --qt-bar-compact: 26px; /* PanelToolbar / dock 标签栏 */
     --qt-bar-main: 32px; /* MenuBar / ActionBar / PianoRoll 头部 */
@@ -473,21 +476,34 @@
      * 一档；需要更宽的表单型菜单（如倍率编辑器）显式给 `width`，而不是把最小
      * 宽度调大。
      *
-     * 【最大高度为什么是 60vh】长菜单（颤音预设、文件浏览器位置列表）此前没有
-     * 上限：条目多到超过视口时，定位夹紧会把它整体推回视口内，于是顶部条目被
-     * 推到视口之外且永远够不到。壳自己滚动是唯一能让"测量 → 夹紧"保持确定的做法
-     * —— 壳的高度恒为 `min(内容高, max-h)`，不随内容变化。
+     * 【最大高度 = 视口预算，不是视口的一个比例】曾经是 `60vh`，那是"菜单最多
+     * 占屏幕六成"的观感约定，与"这张菜单到底放不放得下"无关：900px 高的窗口里
+     * 60vh = 540px，而多选音频块时的右键菜单实测 574px —— 差 34px 就开始滚，
+     * 哪怕视口还剩 360px 没用上。用户看到的是"多选时菜单总是有滚动条，无论空间
+     * 够不够"。
+     *
+     * 现在的判据只有一条：菜单最多和视口一样高（两侧各留一个 EDGE_GAP）。真装
+     * 不下时（矮窗口、超长 Take 列表）才滚动，而滚动由两条提示行承担。
+     *
+     * 【为什么是 100vh 而不是 dvh】夹紧用的是 `window.innerHeight`，两者必须是
+     * 同一个口径，否则"夹到贴边"和 max-height 会差出一条地址栏。
      *
      * 【阴影为什么是字面量】它就是 Tailwind `shadow-lg` 的既有取值（两条投影
      * 叠加）。收进令牌只是让"菜单阴影"有一个可改的地方，观感与统一前完全一致。
      */
     --qt-menu-min-w: 190px;
-    --qt-menu-max-h: 60vh;
+    /* 必须等于 `components/appTooltipPosition.ts` 的 EDGE_GAP：菜单与气泡的
+       "贴边距离"是同一件事，两处各写一个数就会在窗口边缘露出 3px 差异。 */
+    --qt-menu-edge-gap: 8px;
+    --qt-menu-max-h: calc(100vh - var(--qt-menu-edge-gap) * 2);
     --qt-menu-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
     /* 项高复用控件高度：菜单项与工具栏按钮同高，菜单与周围 chrome 的行距才对齐 */
     --qt-menu-item-h: var(--qt-ctl-md, 24px);
     /* 前导图标列宽：有图标才占位，保证"有的项有图标、有的没有"时文字仍左对齐 */
     --qt-menu-icon-w: 16px;
+    /* 提示行高度：18px ≈ 0.75 个菜单项 —— 够画出渐变与箭头，又不至于让一张
+       10 项的菜单被吃掉两行。触摸形态覆写成 28px（手指按不准 18px）。 */
+    --qt-menu-scroll-hint-h: 18px;
 
     /*
      * 层级阶梯。原来是 index.css 里一段注释约定 + 各处的 z-[999]/z-[9999]
@@ -971,23 +987,171 @@ textarea {
  * 变化，夹紧结果不稳定；壳滚动时高度恒为 `min(内容高, --qt-menu-max-h)`，测量与
  * 夹紧都是确定的。
  *
+ * 【为什么没有竖直滚动条】菜单是瞬态表面，滚动条是常驻机械装置；它还偷宽度
+ * （原生条 10px）—— 出现时内容右缘整体左移，右对齐的快捷键列立刻不在同一列。
+ * 唯一的竖直滚动装置是两条 `.hs-menu__scroll-hint`（见下方）。
+ *
+ * `scrollbar-width: none` 只改**渲染**，不改可滚范围：滚轮、方向键、程序化
+ * `scrollTop` 全部照常。不用 `::-webkit-scrollbar` 自绘 —— 本仓实测分数 DPR 下
+ * 拖拽映射会放大 dpr² 倍。
+ *
+ * 【为什么 padding 是 0，内边距搬到 `.hs-menu__content`】提示行是
+ * `position: sticky`，它的约束盒是父元素的**内容盒**：壳若留 4px 内边距，提示行
+ * 会跟着内缩 4px，边缘露出一条没被渐变的空白（实测 165 vs 期望 161）。
+ *
  * 【为什么不预留滚动条槽位】条目自带 12px 横向内边距，滚动条压上来时文字与它之间
  * 仍有那 12px 呼吸，因此不需要额外让位（与 `.hs-scroll-gutter-flush` 的判据同源：
  * 容器本来就有留白）。反过来若写 `scrollbar-gutter: stable`，**每一张菜单**都会在
  * 不滚动时也空出一条槽位的宽度，左右内边距立刻不对称。
+ *
+ * 【不要给壳加 transform / filter / contain / will-change】子面板是
+ * `position: fixed`（`.hs-menu--submenu`），任何建立包含块的属性都会把它钉回壳里、
+ * 被 `overflow` 裁掉 —— 历史事故：子菜单可见宽度 5px。
  */
 .hs-menu {
     position: fixed;
     z-index: var(--qt-z-menu);
     min-width: var(--qt-menu-min-w);
     max-height: var(--qt-menu-max-h);
-    overflow-y: auto;
-    padding: var(--qt-space-2) 0;
+    /* 只裁圆角，不产生横向滚动条（`overflow-y: auto` 会把 `overflow-x` 也变成
+       auto，一个超长标签就能让菜单长出一条横向滚动条）。 */
+    overflow: hidden auto;
+    overscroll-behavior: contain;
+    padding: 0;
+    scrollbar-width: none;
     background: var(--qt-window);
     color: var(--qt-text);
     border: 1px solid var(--qt-border);
     border-radius: var(--qt-radius-sm);
     box-shadow: var(--qt-menu-shadow);
+}
+
+/* 内容层：内边距的持有者，也是"内容高度变化"的观测点。
+ *
+ * 【为什么内边距必须在这一层】见 `.hs-menu` 的说明：sticky 提示行的约束盒是父级
+ * 的内容盒，壳留内边距会让提示行内缩，边缘露出一条没被渐变的空白。 */
+.hs-menu__content {
+    padding: var(--qt-space-2) 0;
+}
+
+/* ── 提示行 ────────────────────────────────────────────────────────────────
+ *
+ * 【它表达什么】"这个方向还有内容，而且可以滚"。两个手段叠在一起：
+ *   ① 渐变：内容在边缘**溶进**菜单底色 —— 这是"下面还有"的语法；
+ *   ② 三角：唯一的可操作暗示 —— 这是"可以滚"的语法。
+ * 只做渐变，用户不知道能点；只做三角，菜单边缘会出现一条生硬的切线。
+ *
+ * 【为什么不是 REAPER 那种实心灰条】那是把提示做成"另一行菜单项"。菜单项的语法
+ * 是"点一下执行一个命令"，而这里点一下只是滚动 —— 同一套语法会让人以为它是一条
+ * 命令。渐变 + 小箭头是"表面边缘"的语法。
+ *
+ * 【零占位】`height: 0` + 内部绝对定位：菜单高度、内容位置、`scrollHeight` 在
+ * 提示行出现 / 消失时都不变（实测 574 → 574）。
+ *
+ * 【可见性写在自己身上】控制器把 `data-visible` 写到提示行元素本身，而不是祖先壳
+ * 上：子面板是父壳的 DOM 后代，写祖先会让"父菜单在滚"把"子面板的提示行"一起点亮。
+ */
+.hs-menu__scroll-hint {
+    position: sticky;
+    /* 【不写 left / right】对 sticky 元素而言它们是**吸附阈值**而不是布局偏移。
+       块级元素本来就占满宽度，不需要它们。 */
+    height: 0;
+    z-index: 1;
+    cursor: default;
+    user-select: none;
+    /* 手指按下不能变成页面滚动，否则按住快滚会被 `pointercancel` 打断。 */
+    touch-action: none;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--qt-dur-fast) linear;
+}
+
+.hs-menu__scroll-hint--up {
+    top: 0;
+}
+
+.hs-menu__scroll-hint--down {
+    bottom: 0;
+}
+
+/* 真正画出来的条：绝对定位，不参与流。
+ *
+ * 【命中区在 `::after` 上，不在宿主上】宿主的盒高是 0 —— 0 高的元素永远打不中。
+ * 真正 18px 高的命中区是 `::after`：它属于宿主这个元素，所以指针事件仍然派发到
+ * 宿主（实测 `elementFromPoint` 在条中心返回的正是提示行宿主，菜单中部返回的是
+ * `.hs-menu__item`）。 */
+.hs-menu__scroll-hint::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: var(--qt-menu-scroll-hint-h);
+    pointer-events: none;
+}
+
+.hs-menu__scroll-hint--up::after {
+    top: 0;
+    background-image: linear-gradient(to bottom, var(--qt-window) 45%, transparent);
+}
+
+.hs-menu__scroll-hint--down::after {
+    bottom: 0;
+    background-image: linear-gradient(to top, var(--qt-window) 45%, transparent);
+}
+
+/* 可见的那一条：整条（含箭头）淡入，命中区打开。 */
+.hs-menu__scroll-hint[data-visible="1"] {
+    opacity: 1;
+}
+
+.hs-menu__scroll-hint[data-visible="1"]::after {
+    pointer-events: auto;
+}
+
+/* 悬停 / 按下：在渐变**之下**叠一层底色，渐变的透明那一半透出它 ——
+ * 读起来是"这条边被激活了"，而不是"这里有一条命令"。 */
+.hs-menu__scroll-hint:hover::after {
+    background-color: color-mix(in oklab, var(--qt-menu-item-hover) 60%, transparent);
+}
+
+.hs-menu__scroll-hint[data-pressed="1"]::after {
+    background-color: color-mix(in oklab, var(--qt-menu-item-active) 22%, transparent);
+}
+
+/* 三角：与子菜单的右箭头同一支笔画（1.4px、圆头、`currentColor`）。
+ * 用 stroke 而不是填充三角形 —— 填充三角是"工具提示箭头"的语汇。 */
+.hs-menu__scroll-caret {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    color: var(--qt-text-muted);
+    pointer-events: none;
+    transition: color var(--qt-dur-fast) linear;
+    /* 【必须在渐变之上】渐变条是宿主的 `::after`，生成内容在**子元素之后**绘制 ——
+       不给箭头抬一层，它的下半截会被 `--qt-window` 那段不透明渐变盖住，看起来像
+       一支褪色的、断掉的箭头。 */
+    z-index: 1;
+}
+
+.hs-menu__scroll-hint--up .hs-menu__scroll-caret {
+    top: calc((var(--qt-menu-scroll-hint-h) - 6px) / 2);
+    transform: translateX(-50%) rotate(180deg);
+}
+
+.hs-menu__scroll-hint--down .hs-menu__scroll-caret {
+    bottom: calc((var(--qt-menu-scroll-hint-h) - 6px) / 2);
+}
+
+.hs-menu__scroll-hint:hover .hs-menu__scroll-caret,
+.hs-menu__scroll-hint[data-pressed="1"] .hs-menu__scroll-caret {
+    color: var(--qt-text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .hs-menu__scroll-hint,
+    .hs-menu__scroll-caret {
+        transition: none;
+    }
 }
 
 /*
@@ -1023,6 +1187,75 @@ textarea {
 }
 
 /*
+ * 移动端：对象菜单改成**底部 sheet**。
+ *
+ * 【为什么只改 CSS】菜单的 40+ 个条目、分组、禁用条件、子菜单全部由
+ * `clipMenuModel` 生成，与形态无关；在 390px 上真正难受的是**表面**——
+ * 一列 24px 行高的条目排下来是一屏半，贴着手指弹出还会被屏幕边缘截断。
+ * 换成一个从底部升起、最高 70dvh、内部可滚的面板，内容一行都不用改。
+ *
+ * 【为什么可以只靠 `html[data-form]`】形态是 CSS 令牌层的一等公民（见
+ * `services/hostDetect.ts` 与 `check-mobile-form-gate.py`）。用一个 JS 分支去
+ * 选两套布局，等于给「这是哪种形态」开第二个答案 —— 而那正是本仓明令禁止的。
+ *
+ * 【为什么要 !important】菜单的锚点坐标由组件以**内联样式**写在壳上
+ * （`style={{ left: x, top: y }}`），内联样式只有 !important 能覆盖。
+ * 这两个属性在 sheet 里本来就没有意义（sheet 贴底、通栏），覆盖掉不会丢失
+ * 任何信息 —— 桌面形态下这条规则根本不命中。
+ *
+ * 【为什么选择器必须是 `[data-hs-context-menu="1"]`】这个属性有**两种**写法：
+ * `="1"` 是"已打开的菜单表面"，**无值**是常驻的锚点容器（工具栏按钮的
+ * `position: relative` 外壳）。写成不带值的 `[data-hs-context-menu]` 会把
+ * 8 个锚点容器一起套上 sheet 装饰 —— 实测（`?mock=1&form=mobile`）它们全部
+ * 带上了 `radius 16px` + `shadow 0 -12px` + `bottom: 0`，而那正是本仓在
+ * `ui/Menu.tsx` 顶部专门警告过的"两种写法不能混为一谈"。
+ *
+ * 【为什么排除 `[data-hs-menu-inline="1"]`】"住在 sheet 里的菜单"（移动形态的
+ * 菜单栏，见 `shell/MobileChrome.tsx`）与"子菜单面板"都不该再升起一层 sheet：
+ * 前者会叠出两层 sheet，后者会脱离它的触发项、跑到屏幕底部。它们由组件按
+ * **结构事实**（锚点是否在 sheet 里 / 是不是子面板）打上这个标记 —— 不是按
+ * `isMobileForm()` 分支，形态判据仍然只有 CSS 令牌层那一处。
+ */
+html[data-form="mobile"] [data-hs-context-menu="1"]:not([data-hs-menu-inline="1"]) {
+    left: 0 !important;
+    right: 0;
+    top: auto !important;
+    bottom: 0;
+    min-width: 0;
+    max-height: 70dvh;
+    border-radius: 16px 16px 0 0;
+    border-bottom: 0;
+    box-shadow: 0 -12px 32px rgb(0 0 0 / 45%);
+    /* 底部 sheet 从下往上滑入：120ms 足够"是它出现了"，再长就像卡了。 */
+    animation: hs-menu-sheet-in 120ms ease-out;
+}
+
+/* 安全区的内边距跟着内边距一起搬进内容层：壳的内边距必须是 0（见 `.hs-menu`），
+   否则 sticky 提示行会内缩、在 sheet 内缘露出一条没被渐变的空白。 */
+html[data-form="mobile"]
+    [data-hs-context-menu="1"]:not([data-hs-menu-inline="1"])
+    > .hs-menu__content {
+    padding-bottom: calc(var(--qt-space-2) + env(safe-area-inset-bottom, 0px));
+}
+
+@keyframes hs-menu-sheet-in {
+    from {
+        transform: translateY(24px);
+        opacity: 0;
+    }
+    to {
+        transform: translateY(0);
+        opacity: 1;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    html[data-form="mobile"] [data-hs-context-menu="1"]:not([data-hs-menu-inline="1"]) {
+        animation: none;
+    }
+}
+
+/*
  * 壳不接管滚动的例外。
  *
  * 两种情形用同一条：① 面板/菜单内部自带滚动区，且需要固定页脚不随列表滚动
@@ -1034,18 +1267,24 @@ textarea {
  * 【它不再为"带子菜单"服务】子面板已改为 fixed 定位（见 `.hs-menu--submenu`），
  * 不再被壳的 `overflow-y: auto` 裁切 —— 带子菜单的壳保持滚动，窗口高度不够时
  * 整张菜单可滚。
+ *
+ * 【为什么不需要再撤销滚动条槽位】壳已经不预留槽位（没有 `scrollbar-gutter`），
+ * 那行 `scrollbar-gutter: auto` 随本次改动一起删掉。
+ *
+ * 【它同时关掉了提示行】`overflow: visible` 让 `MenuScrollScope` 找不到滚动容器，
+ * 于是整段自动滚动与提示行逻辑关闭 —— 这是"内容有界"的**运行期**判据，静态的
+ * `scrollable={false}` 只是让 DOM 更干净。
  */
 .hs-menu--no-scroll {
     max-height: none;
     overflow: visible;
-    scrollbar-gutter: auto;
 }
 
 /*
  * 表单型菜单（倍率编辑器）：内容是一列带标签的输入框，需要横向内边距。
- * 与条目型菜单的区别**只在壳的内边距** —— 表面、边框、圆角、阴影仍然共用。
+ * 与条目型菜单的区别**只在内容层的内边距** —— 表面、边框、圆角、阴影仍然共用。
  */
-.hs-menu--form {
+.hs-menu--form .hs-menu__content {
     padding: var(--qt-space-2) var(--qt-space-5);
 }
 
@@ -1376,17 +1615,20 @@ textarea {
     z-index: var(--qt-z-dialog) !important;
 }
 
-.rt-DropdownMenuContent,
+/*
+ * 【为什么这里不再有 .rt-DropdownMenuContent / .rt-ContextMenuContent】菜单栏与
+ * 参数工具栏的下拉已经全部迁到共享表面（.hs-menu）。那两条覆盖本身就是"两套
+ * 菜单表面"的证据：背景、圆角、字体、层级、条目高亮各写一遍，改一处另一处不跟随。
+ * 留着它们只会在下一次有人重新引入 Radix 菜单时**静默生效**，把分叉藏起来。
+ * Select 不在此列：它是 role="listbox" 的表单控件，不是命令菜单。
+ */
 .rt-SelectContent,
-.rt-ContextMenuContent,
 .rt-PopoverContent {
     z-index: var(--qt-z-dialog) !important;
 }
 
 .rt-DialogContent,
-.rt-DropdownMenuContent,
 .rt-SelectContent,
-.rt-ContextMenuContent,
 .rt-PopoverContent {
     background: var(--qt-panel) !important;
     color: var(--qt-text) !important;
@@ -1403,10 +1645,8 @@ textarea {
 .rt-TextFieldInput,
 .rt-TextArea,
 .rt-DialogContent,
-.rt-DropdownMenuContent,
 .rt-SelectContent,
 .rt-SelectItem,
-.rt-ContextMenuContent,
 .rt-PopoverContent,
 .rt-TooltipContent {
     font-family: var(--qt-font-family) !important;
@@ -1424,6 +1664,31 @@ textarea {
     box-sizing: border-box;
     width: var(--base-button-height);
     height: var(--base-button-height);
+    padding: 0;
+    --margin-top-override: var(--margin-top);
+    --margin-right-override: var(--margin-right);
+    --margin-bottom-override: var(--margin-bottom);
+    --margin-left-override: var(--margin-left);
+}
+
+/*
+ * 传输栏按钮的盒模型**对所有变体**生效。
+ *
+ * 【为什么不能只归一化 ghost】上面那条规则让"ghost ↔ solid 切换"不再抖，却留下
+ * "soft vs solid 的填充边界不一致"：同一行里的 Stop（soft）比 Play（solid）宽一圈，
+ * 而 Record 在 soft / solid 之间切换 —— 用户看到的就是"录音键的红色填充与播放键
+ * 不齐"。填充色不同是**语义**（危险/强调），盒子不同是**缺陷**：因此这里治的是盒子，
+ * 不是把 Record 的变体固定下来（它按语义该在待机 soft / 录制中 solid 之间切）。
+ *
+ * 因此这条规则按属性选择，覆盖 ghost / soft / solid 三种变体：宽度、高度、内边距、
+ * 负 margin 全部取同一个值。新加的传输按钮只要带 data-hs-transport-button 就自动
+ * 继承，不需要再记一遍。
+ */
+[data-hs-transport-button].rt-IconButton {
+    box-sizing: border-box;
+    width: var(--base-button-height);
+    height: var(--base-button-height);
+    min-width: var(--base-button-height);
     padding: 0;
     --margin-top-override: var(--margin-top);
     --margin-right-override: var(--margin-right);
@@ -1562,7 +1827,7 @@ textarea {
     height: 12px;
     border: none;
     border-radius: 50%;
-    background: var(--accent-9);
+    background: var(--qt-accent, var(--qt-highlight));
 }
 .qt-range::-moz-range-track {
     height: 4px;
@@ -1575,26 +1840,24 @@ textarea {
     height: 12px;
     border: none;
     border-radius: 50%;
-    background: var(--accent-9);
+    background: var(--qt-accent, var(--qt-highlight));
 }
 
-.rt-DropdownMenuItem,
-.rt-SelectItem,
-.rt-ContextMenuItem {
-    /* 跟随「圆角风格」：与 Radix 菜单项同档（--radius-3）。 */
+/*
+ * Select 的条目与分隔线仍然需要跟随「圆角风格」与主题分隔色 —— 它是表单控件
+ * （role="listbox"），不参与菜单表面统一。菜单条目的同款取值由 .hs-menu__item /
+ * .hs-menu__separator 自己持有（见上方的「上下文菜单样式模型」块）。
+ */
+.rt-SelectItem {
     border-radius: var(--qt-radius-md) !important;
 }
 
-.rt-DropdownMenuItem[data-highlighted],
-.rt-SelectItem[data-highlighted],
-.rt-ContextMenuItem[data-highlighted] {
+.rt-SelectItem[data-highlighted] {
     background: color-mix(in oklab, var(--qt-highlight) 24%, transparent) !important;
     color: var(--qt-text) !important;
 }
 
-.rt-DropdownMenuSeparator,
-.rt-SelectSeparator,
-.rt-ContextMenuSeparator {
+.rt-SelectSeparator {
     background: var(--qt-divider) !important;
 }
 
@@ -1625,4 +1888,291 @@ textarea {
     white-space: pre-wrap;
     max-width: calc(100vw - 16px);
     tab-size: 4;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 形态层：触摸令牌与安全区
+ *
+ * 【为什么是"令牌覆写"而不是"另一套样式表"】移动端真正需要改的不是布局结构，
+ * 而是**一组尺寸**：控件要 44px（iOS HIG 的最小可点面积）、菜单项要 44px、滚动条
+ * 要让位更宽（手指比鼠标光标粗）、字号下限要抬起来（小于 12px 在 3x 屏上也看不清）。
+ * 这些全部已经是令牌（`--qt-ctl-*` / `--qt-menu-item-h` / `--qt-scrollbar-gutter`），
+ * 所以形态差异只需要在 `<html data-input="touch">` 下**重新赋值** —— 不需要给每个
+ * 组件写移动变体，也不会出现"某个组件忘了适配"。
+ *
+ * 【为什么判据是 `data-input` 而不是 `data-form`】桌面可以有触摸屏（Windows 平板），
+ * 移动端也可以接鼠标。尺寸该跟着**输入通道**走。`data-input` 由 `mount.tsx` 按
+ * 后端剖面写入，与 `inputProfile.ts` 的 `primary` 同一个来源。
+ *
+ * 【为什么不用 `@media (pointer: coarse)`】WebView 的该媒体特性在 Android 上恒为
+ * coarse（即使接了鼠标），在桌面触摸屏上却可能报 fine —— 两端都不准。而"后端已经
+ * 告诉我们这是什么设备"是**确定**的信息，没有理由再让浏览器猜一次。
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+html[data-input="touch"] {
+    /* 控件高度：44 / 44 / 48。桌面是 20 / 24 / 32。
+     *
+     * 【为什么 sm 直接跳到 44 而不是 32】sm 档的消费者是"紧凑面板里的按钮"
+     * （文件浏览器、记事本工具栏、轨道头）。在触摸上"紧凑"不是一个可选项：
+     * 任何小于 44px 的目标都会有一半概率点错，而点错的代价是"打开了错误的片段"
+     * 或"删掉了错误的轨道"。宁可让这些面板多占 20px 高度。 */
+    --qt-ctl-sm: 44px;
+    --qt-ctl-md: 44px;
+    --qt-ctl-lg: 48px;
+
+    /* 菜单项：与控件同高。菜单是移动端最主要的操作入口（抽屉 + 长按菜单），
+     * 它的项高必须与按钮一致，否则用户会在两个几乎相同的列表间产生"手感差异"。 */
+    --qt-menu-item-h: 44px;
+
+    /* 最小命中面积：WCAG 2.5.5 要求 44×44。桌面的紧凑控件是 20px，
+     * 触摸上那不是"更紧凑"，是"点不中"。 */
+    --qt-hit-min: 44px;
+
+    /* chrome 条：顶栏 48（容纳 44px 按钮 + 边框）、状态栏 28（一行 12px 文字）。 */
+    --qt-bar-main: 48px;
+    --qt-bar-status: 28px;
+    --qt-bar-compact: 40px;
+    --qt-bar-title: 44px;
+
+    /* 滚动条让位：手指滑动时滑块会盖住内容右缘，14px 比桌面的 8px 更安全。 */
+    --qt-scrollbar-gutter: 14px;
+
+    /* 触摸不显示滚动条轨道（系统本来也不给），但保留 `scrollbar-gutter` 的布局预留，
+     * 避免内容在滚动条出现/消失时左右跳动。 */
+    scrollbar-width: none;
+
+    /* 关闭 iOS 的"点一下闪一片灰"：它会在拖动开始时整块变色，
+     * 而我们的画布本来就有自己的按下反馈。 */
+    -webkit-tap-highlight-color: transparent;
+}
+
+html[data-input="touch"] ::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+}
+
+/* ── 安全区 ────────────────────────────────────────────────────────────────
+ *
+ * 【为什么写在 `html`/`body` 而不是根组件上】`env(safe-area-inset-*)` 只有在
+ * `viewport-fit=cover`（见 `index.html`）下才非零；而一旦非零，**页面本身**会铺到
+ * 刘海与手势条底下。让位必须发生在最外层容器上，否则内部的 `position: fixed`
+ * 弹层、Toast、下拉菜单仍然会跑到安全区外。
+ *
+ * 【为什么要和 `--qt-inset-*` 取较大者，而不是只用 `env()`】两个来源各覆盖一半
+ * 事实，缺一不可：
+ *
+ * - `env(safe-area-inset-*)` —— 刘海（display cutout）。iOS 上它连状态栏一起给，
+ *   是完整的；Android WebView 上**只**给刘海，状态栏与导航栏的高度不在其中。
+ * - `--qt-inset-*` —— 原生的 `WindowInsets`（见 `services/surfaceInsets.ts`）。
+ *   它给的是真实系统栏高度，但拿不到刘海在横屏时可能伸出的那部分。
+ *
+ * 取 `max()` 让两者互相补齐：任何一边更大就用哪一边。桌面形态下两个变量都不存在，
+ * 整条规则不生效 —— 桌面布局一个像素都不变。
+ */
+html[data-form="mobile"] {
+    --qt-safe-top: max(var(--qt-inset-top, 0px), env(safe-area-inset-top, 0px));
+    --qt-safe-right: max(var(--qt-inset-right, 0px), env(safe-area-inset-right, 0px));
+    --qt-safe-bottom: max(var(--qt-inset-bottom, 0px), env(safe-area-inset-bottom, 0px));
+    --qt-safe-left: max(var(--qt-inset-left, 0px), env(safe-area-inset-left, 0px));
+}
+
+html[data-form="mobile"] body {
+    /* `dvh` 而不是 `vh`：移动端浏览器的 `100vh` 是"地址栏收起时"的高度，
+     * 首次渲染会让页面比可视区高出一截，底部工具栏被推到屏幕外。 */
+    height: 100dvh;
+    overflow: hidden;
+    /* 移动端不允许整页橡皮筋：画布手势自己处理平移，
+     * 系统级的 overscroll 会把画布拖出边界并回弹。 */
+    overscroll-behavior: none;
+}
+
+/* 全屏抽屉（`MobileActionDrawer`）的安全区内边距。
+ *
+ * 【为什么它自己也要一份】`.hs-surface-root` 上的 `padding` 只推开**在流内**的
+ * 子元素。抽屉是 `position: absolute; inset: 0`，而绝对定位的包含块是祖先的
+ * **padding box** —— 也就是说 `inset-0` 连 padding 那一圈一起盖住了。于是抽屉的
+ * 标题行（含右上角的关闭按钮）正好落在状态栏下方，被系统栏吃掉触摸。
+ * 背景色相同，所以这里的 padding 在视觉上是不可见的，只是把内容推回可达区域。 */
+html[data-form="mobile"] .hs-mobile-drawer {
+    padding-top: var(--qt-safe-top);
+    padding-right: var(--qt-safe-right);
+    padding-bottom: var(--qt-safe-bottom);
+    padding-left: var(--qt-safe-left);
+}
+
+/* 移动形态的菜单 sheet（`MobileMenuSheet`）。
+ *
+ * 【为什么是 fixed 而不是像抽屉那样 absolute】抽屉挂在工作区里（`absolute inset-0`
+ * 以工作区为界），而菜单 sheet 要盖住顶栏与底栏 —— 它的内容就是"整个应用的菜单"，
+ * 留一条底栏在下面只会让下拉菜单与底栏抢层级。`fixed` 以视口为界，也顺带绕开
+ * 了祖先 `overflow: hidden` 的裁剪。
+ *
+ * 【为什么要自己补安全区】`.hs-surface-root` 的 padding 只推开流内子元素；
+ * `fixed` 元素的包含块是视口，不享受那层 padding（与抽屉同一条理由）。
+ */
+html[data-form="mobile"] .hs-mobile-menu-sheet {
+    position: fixed;
+    inset: 0;
+    z-index: var(--qt-z-dialog);
+    display: flex;
+    flex-direction: column;
+    background: var(--qt-window);
+    padding-top: var(--qt-safe-top);
+    padding-right: var(--qt-safe-right);
+    padding-bottom: var(--qt-safe-bottom);
+    padding-left: var(--qt-safe-left);
+}
+
+html[data-form="mobile"] .hs-mobile-menu-sheet-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+/* 移动形态的工具栏 sheet（`MobileToolbarSheet`）。
+ *
+ * 【为什么与菜单 sheet 分开一个类】两者的容器契约相同（fixed 全屏、安全区、常驻），
+ * 但**内容**完全不同：菜单是 Radix 的下拉与二级菜单，工具栏是一排排开关。给它们
+ * 同一个类会让"工具栏的换行与 44px 命中"漏进菜单里。
+ */
+html[data-form="mobile"] .hs-mobile-toolbar-sheet {
+    position: fixed;
+    inset: 0;
+    z-index: var(--qt-z-dialog);
+    display: flex;
+    flex-direction: column;
+    background: var(--qt-window);
+    padding-top: var(--qt-safe-top);
+    padding-right: var(--qt-safe-right);
+    padding-bottom: var(--qt-safe-bottom);
+    padding-left: var(--qt-safe-left);
+}
+
+html[data-form="mobile"] .hs-mobile-toolbar-sheet-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+/* 工具栏的触摸排版。
+ *
+ * 【为什么不是给每个控件写移动变体】形态差异只有三条：换行、内边距、命中面积。
+ * 三条都落在 `.hs-toolbar` 这一层，控件本身（`ToolbarStrip`）一个字都不用改 ——
+ * 于是"桌面有、手机没有"这类分叉不可能再长出来。
+ *
+ * 【为什么命中面积用 min-width/min-height 而不是 padding】`AppIconButton` 的盒子
+ * 由原语决定（24px）。加 padding 会把图标挤歪，而 min-* 让盒子长到 44 并保持图标居中。
+ * 下拉与滑块的触发器同理（它们此前是 24px 高，触摸命中率低于可用阈值）。
+ */
+html[data-form="mobile"] .hs-toolbar {
+    flex-wrap: wrap;
+    height: auto;
+    row-gap: var(--qt-space-2);
+    column-gap: var(--qt-space-2);
+    padding: var(--qt-space-2);
+    overflow: visible;
+}
+
+html[data-form="mobile"] .hs-toolbar button,
+html[data-form="mobile"] .hs-toolbar [role="button"],
+html[data-form="mobile"] .hs-toolbar [aria-haspopup="menu"],
+html[data-form="mobile"] .hs-toolbar .rt-SelectTrigger,
+html[data-form="mobile"] .hs-toolbar .rt-SliderRoot {
+    min-width: var(--qt-hit-min);
+    min-height: var(--qt-hit-min);
+}
+
+/* 数值输入（BPM / 拍号 / 节拍器音量）在触摸上同样抬到 44：它们只有 24px 高时，
+ * 点进输入框的成功率低于一半，而每一次失败都会把光标丢到别处。 */
+html[data-form="mobile"] .hs-toolbar .rt-TextFieldRoot {
+    min-height: var(--qt-hit-min);
+}
+
+/* 菜单栏的一级触发器：触摸下抬到 44px。
+ *
+ * 【为什么选择器是 [aria-haspopup="menu"] 而不是 button】Radix Themes 的
+ * `DropdownMenu.Trigger` 渲染的是 **`<span type="button">`**，不是真正的
+ * `<button>`（`MenuBar` 的注释里记着这条：它不支持 `asChild`，直接用 Trigger
+ * 才不会嵌套按钮）。按 `button` 选会一条都命中不了 —— 症状是"菜单项在手机上
+ * 仍然只有 24px 高、手指点不中"，而且看不出任何报错。
+ *
+ * 【为什么只作用于触发器】下拉内容由 Radix portal 到 body，不在这个子树里；
+ * 那些条目的高度已经由 `--qt-menu-item-h`（触摸 44px）统一控制。这里补的是
+ * `MenuBar` 自己写死的紧凑触发器（桌面 24px 高、`text-qt-xs`）。 */
+html[data-form="mobile"] .hs-mobile-menu-sheet-body [aria-haspopup="menu"] {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    font-size: var(--qt-fs-sm);
+}
+
+/* 根容器的安全区内边距。由 `AppChrome` 挂 `.hs-surface-root`。
+ *
+ * 【为什么用 padding 而不是 margin】padding 让背景色延伸到安全区之下（刘海两侧
+ * 与手势条区域仍是应用自己的底色），margin 会露出 WebView 的白底。 */
+html[data-form="mobile"] .hs-surface-root {
+    padding-top: var(--qt-safe-top);
+    padding-right: var(--qt-safe-right);
+    padding-bottom: var(--qt-safe-bottom);
+    padding-left: var(--qt-safe-left);
+}
+
+/* ── 触摸下的文本选择 ──────────────────────────────────────────────────────
+ *
+ * 【为什么必须放开】`useBrowserDefaultGuards` 会全局关掉 `user-select` 以防拖动时
+ * 选中文字。但触摸上**长按**的默认行为就是选词 —— 一旦被关掉，长按就只剩我们自己
+ * 合成的 contextmenu，用户再也无法从记事本里复制一段文字。
+ *
+ * 因此：画布类区域仍然禁止选择（拖动不能选词），文本类区域显式放开。
+ */
+html[data-input="touch"] {
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+html[data-input="touch"] input,
+html[data-input="touch"] textarea,
+html[data-input="touch"] [contenteditable="true"],
+html[data-input="touch"] .hs-selectable-text {
+    -webkit-user-select: text;
+    user-select: text;
+}
+
+/* ── 移动形态的对话框：底部 sheet ─────────────────────────────────────────
+ *
+ * 【为什么是 sheet 而不是居中小窗】390×844 上，居中对话框的两侧会浪费约 40px，
+ * 而拇指自然活动区在屏幕下半部。底部 sheet 同时解决"够得着"与"内容宽"。
+ */
+html[data-form="mobile"] .rt-DialogContent.hs-dialog-sheet {
+    top: auto;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    transform: none;
+    width: 100vw;
+    max-width: 100vw !important;
+    margin: 0;
+    /* 底部留出安全区（手势条）。`padding` 而不是 `margin`：背景色要铺到屏幕边缘。 */
+    padding-bottom: calc(var(--qt-space-4) + var(--qt-safe-bottom));
+    border-bottom-left-radius: 0 !important;
+    border-bottom-right-radius: 0 !important;
+    border-top-left-radius: var(--qt-radius-lg) !important;
+    border-top-right-radius: var(--qt-radius-lg) !important;
+}
+
+/* 页脚按钮在触摸上并排会挤成两个小方块：改成**等宽撑满**，
+ * 主操作靠右（与桌面一致），但两者都拿到足够的宽度。 */
+html[data-form="mobile"] .app-dialog__footer {
+    gap: var(--qt-space-2);
+}
+
+html[data-form="mobile"] .app-dialog__footer .app-button {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+/* 移动端底栏里的修饰键芯片。 */
+.hs-modifier-chip {
+    font-size: var(--qt-fs-sm);
+    line-height: 1;
 }

@@ -212,8 +212,12 @@ pub fn get_param_frames(
             },
         };
     }
+    // 【这是探针，不是告警】每一次参数取数都打一行 WARN，现场 App 日志里它占 850 行
+    // （该文件 WARN 共 5 734 行，占 15%），把真告警压在里面。它回答的是"界面刚才取了
+    // 哪一段"，属于开发期读数，因此降到 DEBUG —— 探针开关（`probes_enabled`）本身
+    // 仍然保留：需要读数时打开它就能逐条看到，不需要时它不该出现。
     if crate::log_policy::probes_enabled() {
-        log::warn!(
+        log::debug!(
             "get_param_frames(track_id={}, param={}, start_frame={}, frame_count={}, stride={:?} binary={:?})",
             track_id, param, start_frame, frame_count, stride, binary
         );
@@ -366,6 +370,7 @@ pub fn get_param_frames(
         Some(crate::pitch_analysis::maybe_schedule_dyn_orig(
             state.timeline(),
             &root,
+            crate::gain::GainScope::AppOwned,
         ))
     } else {
         None
@@ -861,7 +866,11 @@ fn set_param_frames_legacy_body(
     drop(tl);
 
     if dyn_touched {
-        let _ = crate::pitch_analysis::maybe_schedule_dyn_orig(state.timeline(), &root_for_dyn);
+        let _ = crate::pitch_analysis::maybe_schedule_dyn_orig(
+            state.timeline(),
+            &root_for_dyn,
+            crate::gain::GainScope::AppOwned,
+        );
     }
 
     serde_json::json!({"ok": true})
@@ -1164,7 +1173,11 @@ pub fn convert_mix_param(
     };
 
     // 基线必须就绪（key 命中）。未命中则触发组装/调度后明确拒绝。
-    let analysis_pending = crate::pitch_analysis::maybe_schedule_dyn_orig(state.timeline(), &root);
+    let analysis_pending = crate::pitch_analysis::maybe_schedule_dyn_orig(
+        state.timeline(),
+        &root,
+        crate::gain::GainScope::AppOwned,
+    );
     if analysis_pending {
         return serde_json::json!({"ok": false, "reason": "analysis_pending"});
     }
@@ -1269,7 +1282,11 @@ pub fn convert_mix_param(
     drop(tl);
     // dyn 曲线可能刚获得第一个非哨兵值（volume→dyn 方向），与 set_param_frames
     // 的既有约定一致：锁外补一次组装/调度（基线已就绪时它是 no-op）。
-    let _ = crate::pitch_analysis::maybe_schedule_dyn_orig(state.timeline(), &root_for_dyn);
+    let _ = crate::pitch_analysis::maybe_schedule_dyn_orig(
+        state.timeline(),
+        &root_for_dyn,
+        crate::gain::GainScope::AppOwned,
+    );
 
     serde_json::json!({
         "ok": true,

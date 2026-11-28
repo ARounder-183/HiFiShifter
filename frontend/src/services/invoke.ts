@@ -303,6 +303,7 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 pitchAnalysisAlgo: args[5],
                 color: args[6],
                 name: args[7],
+                ...(args[8] !== undefined ? { previewGestureId: args[8] } : {}),
             };
 
         case "select_track":
@@ -376,7 +377,7 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 name: args[1],
                 startSec: args[2],
                 lengthSec: args[3],
-                gain: args[4],
+                takeGain: args[4],
                 muted: args[5],
                 sourceStartSec: args[6],
                 sourceEndSec: args[7],
@@ -406,6 +407,7 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             return {
                 updates: args[0],
                 checkpoint: args[1],
+                ...(args[2] !== undefined ? { previewGestureId: args[2] } : {}),
             };
 
         case "set_clip_active_take":
@@ -705,6 +707,22 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
 
         case "pick_midi_output_path":
             return {};
+
+        case "save_output_to_location":
+            return { path: args[0] };
+
+        case "get_surface_insets":
+            return {};
+
+        case "set_system_bars":
+            return { dark: args[0] === true };
+
+        case "pick_files_bytes":
+            return {
+                extensions: args[0] ?? [],
+                multiple: args[1] === true,
+                ...(args[2] !== undefined ? { maxBytes: args[2] } : {}),
+            };
 
         case "export_pitch_to_midi":
             return { request: args[0] };
@@ -1059,6 +1077,11 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "set_log_settings":
             return { verbosity: args[0] };
 
+        // 增益试听：调用点传的是单个命名参数对象（gestureId / seq / targets）。
+        case "set_gain_preview":
+        case "clear_gain_preview":
+            return { ...((args[0] ?? {}) as Record<string, unknown>) };
+
         default:
             // 无参命令白名单：不携带参数的命令在此统一登记（invoke 时以空
             // args 对象调用，与无 args 调用在 Tauri 侧等价）。新命令若携带
@@ -1128,6 +1151,8 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "get_recording_settings",
     "get_recording_state",
     "get_runtime_info",
+    // 形态剖面（能力表）。前端在挂载之前拉一次，见 `services/surfaceProfileStore.ts`。
+    "get_surface_profile",
     "get_timeline_state",
     "get_ui_settings",
     "ui_kv_dump",

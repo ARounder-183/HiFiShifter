@@ -27,7 +27,7 @@ use ara2_bridge::companion::vst3::ffi::{
 use ara2_bridge::companion::vst3::Vst3MainFactoryAdapter;
 use ara2_bridge::companion::CompanionRoles;
 use hifishifter_plugin::vst3_abi::{
-    iid_matches, uid_guid, TResult, Tuid, UnknownVtbl, K_INVALID_ARGUMENT, K_NOT_IMPLEMENTED,
+    iid_matches, platform_iid, TResult, Tuid, UnknownVtbl, K_INVALID_ARGUMENT, K_NOT_IMPLEMENTED,
     K_NO_INTERFACE, K_RESULT_FALSE, K_RESULT_OK,
 };
 use std::ffi::{c_char, c_void};
@@ -38,21 +38,42 @@ use std::sync::Arc;
 /// `PClassInfo::kManyInstances`。
 const K_MANY_INSTANCES: i32 = 0x7FFF_FFFF;
 
-/// 处理器 / 控制器 / ARA 工厂的类 ID。
+/// 处理器 / 控制器 / ARA 工厂的身份**字**（四个 32 位字，与 C++ 侧 `DECLARE_CLASS_IID` 同形）。
 ///
-/// 【为什么是 GUID 而不是 16 个 ASCII 字符】ASCII 形式（如 `HFSARAProbe.Prc1`）看着像
-/// 名字，实际只是 16 个字节：谁"顺手改一个字符"ID 就变了，却看不出这是一次身份变更。
-/// GUID 有明确的字形与生成方式，能对着工具核对；编码沿用本文件的 [`uid_guid`]
-/// （Windows VST3 的 GUID 内存布局，见该函数的三段注释与实测依据）。
+/// 【为什么存"字"而不是存"字节"】宿主把类 ID 写进工程时用的是**平台自己的文本化规则**：
+/// Windows 按 COM/GUID 展开（首字小端、第二三字拆成 u16 小端），macOS / Linux 按
+/// `COM_COMPATIBLE=0` 逐字大端展开。**同一串字节在两个平台上文本化出来的字符串不同**，
+/// 而宿主认工程里那个字符串 —— 这就是"macOS 存的工程在 Windows 上打开时插件丢失"的根因。
+/// 实测（REAPER 7.85，同一个 RPP）：Windows 只接受 `9C3A4F1700001E8B00004D02B7A13C6E`，
+/// 把 macOS 写的那串 `174F3A9C00008B1E00004D02B7A13C6E` 原样丢回来就是"效果不可用"；
+/// 只把这一串换掉、别的一个字节不动，同一个文件立刻加载。
+///
+/// 【为什么是 `platform_iid`，而不是"让两边都等于 macOS 那串"】判据是"两个平台文本化出
+/// 同一个字符串"，`alternate_iid` 与 `platform_iid` 两种布局都能满足 —— 区别只在于
+/// **落在哪一串上**：
+///
+/// * `platform_iid`（当前选择）→ 两边都落在 `9C3A4F17…`，**就是 Windows 现役产物与
+///   存量工程用的那串**。Windows 侧字节零变化：已扫描的缓存、已保存的工程、用户机器上
+///   的每一个实例都不受影响；
+/// * 另一种布局 → 两边都落在 `174F3A9C…`，只有 0.2.0 的 macOS 产物用过它。
+///
+/// 产品存量在 Windows，所以取前者。macOS 侧字节会变（`uid_guid` → `uid_be`），0.2.0
+/// 的 macOS 工程因此认不回来 —— 那批工程用
+/// `scripts/migrate/vst3-identity.py` 改一行文本即可（把工程里的 `174F3A9C…` 换成
+/// `9C3A4F17…`），不需要重装或重建插件。
 ///
 /// 【这三个值一旦发布就再也不能改】它们写在宿主工程里，换掉等于让所有已存在的实例
 /// 认不出来（表现为"插件丢失"）。当前仍是开发期（从未分发），因此这一轮把探针时代的
 /// 名字一并换掉；此后的任何改动都必须视为破坏性变更。
-const PROCESSOR_CID: Tuid = uid_guid([0x9C3A_4F17, 0x1E8B, 0x4D02, 0xB7A1_3C6E]);
+const PROCESSOR_WORDS: [u32; 4] = [0x9C3A_4F17, 0x1E8B, 0x4D02, 0xB7A1_3C6E];
+const CONTROLLER_WORDS: [u32; 4] = [0x9C3A_4F18, 0x1E8B, 0x4D02, 0xB7A1_3C6E];
+const FACTORY_WORDS: [u32; 4] = [0x9C3A_4F19, 0x1E8B, 0x4D02, 0xB7A1_3C6E];
+
+const PROCESSOR_CID: Tuid = platform_iid(PROCESSOR_WORDS);
 /// 编辑器控制器类 ID。
-const CONTROLLER_CID: Tuid = uid_guid([0x9C3A_4F18, 0x1E8B, 0x4D02, 0xB7A1_3C6E]);
+const CONTROLLER_CID: Tuid = platform_iid(CONTROLLER_WORDS);
 /// ARA 主工厂类 ID。
-const FACTORY_CID: Tuid = uid_guid([0x9C3A_4F19, 0x1E8B, 0x4D02, 0xB7A1_3C6E]);
+const FACTORY_CID: Tuid = platform_iid(FACTORY_WORDS);
 
 /// `Component Controller Class`（`kVstComponentControllerClass`）。
 const COMPONENT_CONTROLLER_CLASS: &str = "Component Controller Class";
@@ -1300,6 +1321,10 @@ unsafe extern "system" fn component_set_active(this: *mut c_void, state: i8) -> 
             } else {
                 owner.component_deactivated();
                 hifishifter_plugin::log_line(&format!("IComponent::setActive({state})"));
+                // 【为什么在这里落盘】`setActive(0)` 是宿主"这次用完了"的时刻，也常常是
+                // 挂起前的最后一站（编辑器关掉、工程被卸载）。日志的 2 秒年龄闸兜不住
+                // "紧接着就冻住"这一类；卸载点主动落一次，成本是一次 write。
+                hifishifter_plugin::diagnostics::flush_pending();
             }
             K_RESULT_OK
         })

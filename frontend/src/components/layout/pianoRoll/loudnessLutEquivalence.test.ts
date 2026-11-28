@@ -32,6 +32,8 @@
 import { describe, expect, test } from "vitest";
 
 import { createLiveOverrideReader } from "./liveLoudnessOverride";
+import { createLiveEditOverride } from "./strokeBuffer";
+import type { LiveProjectionWindow } from "./strokeBuffer";
 import { makeLoudnessAmplitudeMap } from "./PianoRollWaveformSurface";
 import {
     createLoudnessGeometryWarp,
@@ -89,13 +91,18 @@ function makeInstrumentedMap(args: {
 }): { factors: WaveformAmplitudeFactors; calls: () => number } {
     const stride = args.stride ?? 1;
     const reader = createLiveOverrideReader();
-    const live =
-        args.liveEdit === null
-            ? null
-            : {
-                  key: `v2|track-1|volume|${LIVE_START_FRAME}|${LIVE_FRAME_COUNT}|${stride}`,
-                  edit: args.liveEdit,
-              };
+    // live 覆盖是**绝对帧**缓冲：把"窗口对齐的稠密数组"按帧写进去，再把它投影到同一个
+    // 窗口上 —— 结果与旧实现的 `values` 逐值相同，但坐标不再依赖窗口。
+    const live = args.liveEdit === null ? null : createLiveEditOverride("v2|track-1|volume", 1);
+    if (live !== null && args.liveEdit !== null) {
+        live.buffer.write(LIVE_START_FRAME, args.liveEdit);
+    }
+    const liveWindow: LiveProjectionWindow = {
+        key: `v2|track-1|volume|${LIVE_START_FRAME}|${LIVE_FRAME_COUNT}|${stride}`,
+        edit: args.liveEdit ?? [],
+        startFrame: LIVE_START_FRAME,
+        stride,
+    };
     let calls = 0;
     const map = makeLoudnessAmplitudeMap(
         {
@@ -109,11 +116,11 @@ function makeInstrumentedMap(args: {
         {
             volume: () => {
                 calls += 1;
-                return reader.read("volume", live);
+                return reader.read("volume", live, liveWindow);
             },
             dyn: () => {
                 calls += 1;
-                return reader.read("dyn", live);
+                return reader.read("dyn", live, liveWindow);
             },
         },
         () => 0,
@@ -231,7 +238,7 @@ describe("查表路径与逐值路径逐值等价", () => {
         startSec: number;
         lengthSec: number;
         playbackRate?: number;
-        gain?: number;
+        amplitudeGain?: number;
     }
 
     function clipOf(spec: ClipSpec, id: string): WarpClipGeometry {
@@ -240,7 +247,7 @@ describe("查表路径与逐值路径逐值等价", () => {
             id,
             startSec: spec.startSec,
             lengthSec: spec.lengthSec,
-            gain: spec.gain ?? 1,
+            amplitudeGain: spec.amplitudeGain ?? 1,
             sourceStartSec: 0,
             sourceEndSec: spec.lengthSec * rate,
             playbackRate: rate,
@@ -278,8 +285,8 @@ describe("查表路径与逐值路径逐值等价", () => {
                 ],
                 // 压缩 + 增益：帧 600..1000 → 帧 200..400（速率 1→2，内容跨度守恒）。
                 [
-                    { startSec: 3.0, lengthSec: 2.0, gain: 1 },
-                    { startSec: 1.0, lengthSec: 1.0, playbackRate: 2, gain: 1.25 },
+                    { startSec: 3.0, lengthSec: 2.0, amplitudeGain: 1 },
+                    { startSec: 1.0, lengthSec: 1.0, playbackRate: 2, amplitudeGain: 1.25 },
                 ],
             ],
             lockParamLines,
@@ -300,8 +307,8 @@ describe("查表路径与逐值路径逐值等价", () => {
                 ],
                 // 纯增益（时域不变）：帧 600..800，增益 ×1.25。
                 [
-                    { startSec: 3.0, lengthSec: 1.0, gain: 1 },
-                    { startSec: 3.0, lengthSec: 1.0, gain: 1.25 },
+                    { startSec: 3.0, lengthSec: 1.0, amplitudeGain: 1 },
+                    { startSec: 3.0, lengthSec: 1.0, amplitudeGain: 1.25 },
                 ],
             ],
             lockParamLines,

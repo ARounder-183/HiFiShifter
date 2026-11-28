@@ -66,12 +66,26 @@ pub(crate) struct HostEditReceipt {
 }
 
 /// 一条 clip 的回执期望：顶层字段 + （逐 take 写回时）**兄弟 take** 的字段。
+///
+/// 【第三个分量为什么存在】回执现在要回答**两个不同的问题**：
+///   1. "宿主回声最终与 `after` 一致吗" —— 诊断（`divergences`）；
+///   2. "这次补丁真正写过哪些字段" —— 决定哪些字段可以按 `after` 覆盖载荷（`overlay`）。
+///
+/// 两者不能用同一份清单：`fields` 里始终包含 `start_sec` / `clip_gain` 等"结构性"
+/// 字段（哪怕这次补丁一位都没动），拿它们做覆盖会把**没写过的宿主真值**改掉。
 #[derive(Debug)]
 struct ClipReceipt {
     id: String,
-    fields: Vec<(&'static str, Value)>,
+    /// `(载荷键, 应用后的权威值, 本次补丁是否真的写过它)`
+    fields: Vec<(&'static str, Value, bool)>,
     /// 逐 take 期望：键为内核 take id（与载荷 `takes[].id` 同一空间）。
     takes: Vec<(String, Vec<(&'static str, Value)>)>,
+    /// 增益三层对账用的**内核**快照：`(clip_gain, gain, 各 take 增益)`。
+    ///
+    /// 【为什么回执要留一份】增益有两层（item / take），而"载荷里的 `gain`"是第三条
+    /// 投影。分歧出现时只报"载荷 X 期望 Y"回答不了"是三层里的哪一层错了" —— 现场那两条
+    /// 互为镜像的行就是证据：看上去像写入失败，其实是投影把 item 增益写进了 take 层。
+    gain_layers: (f32, f32, Vec<f32>),
 }
 impl HostEditPlan {
     /// 冻结本次确切clip及预期宿主几何，单独的fade宽度也必须进入完成门。
@@ -97,17 +111,33 @@ impl HostEditPlan {
                 .iter()
                 .map(|edit| {
                     let after = &edit.after;
+                    // "这一位被补丁写到了吗"——只有写过的位才允许按 `after` 覆盖载荷。
+                    let moved = edit.source_track != edit.destination_track;
                     let mut fields = vec![
-                        ("start_sec", serde_json::json!(after.start_sec)),
-                        ("length_sec", serde_json::json!(after.length_sec)),
+                        (
+                            "start_sec",
+                            serde_json::json!(after.start_sec),
+                            edit.patch.start_sec.is_some(),
+                        ),
+                        (
+                            "length_sec",
+                            serde_json::json!(after.length_sec),
+                            edit.patch.length_sec.is_some(),
+                        ),
                         (
                             "source_start_sec",
                             serde_json::json!(after.source_start_sec),
+                            edit.patch.source_start_sec.is_some(),
                         ),
-                        ("playback_rate", serde_json::json!(after.playback_rate)),
+                        (
+                            "playback_rate",
+                            serde_json::json!(after.playback_rate),
+                            edit.patch.playback_rate.is_some(),
+                        ),
                         (
                             "track_id",
                             serde_json::json!(format!("{namespace}{}", edit.destination_track)),
+                            moved,
                         ),
                         // 【为什么两层增益都要进门，且都取 `after`】REAPER 里 item 增益
                         // （`D_VOL`）与 take 增益是两个独立旋钮，链路里也分两路写
@@ -120,8 +150,16 @@ impl HostEditPlan {
                         // 取 `after` 而不是补丁值：`after` 是应用后的权威快照（含
                         // `clamp_gain` 的结果），补丁值只是请求；用请求当判据会把
                         // "宿主把 16 夹到 15.8" 这类事判成成功。
-                        ("clip_gain", serde_json::json!(after.clip_gain)),
-                        ("gain", serde_json::json!(after.gain)),
+                        (
+                            "clip_gain",
+                            serde_json::json!(after.clip_gain),
+                            edit.patch.item_gain.is_some(),
+                        ),
+                        (
+                            "gain",
+                            serde_json::json!(after.gain),
+                            edit.patch.take_gain.is_some(),
+                        ),
                         // 【为什么方向与循环源也必须进门】倒放 / 循环都是**只改这一位**的
                         // 补丁：整段媒体上的位置、长度、源窗口一位都不动，于是没有这两项时
                         // `matches()` 恒真 —— 响应立刻带着**改动前**的 `reversed=false`
@@ -129,8 +167,16 @@ impl HostEditPlan {
                         // 倒放"（真机日志 18:14:45 那次倒放，2 s 后才被几何刷新纠正）。
                         // 与当年 dir/shape 弹回同一类缺陷：**凡是被补丁改到、又出现在载荷
                         // 里的字段，都必须进完成门**。
-                        ("reversed", serde_json::json!(after.reversed)),
-                        ("loop_enabled", serde_json::json!(after.loop_enabled)),
+                        (
+                            "reversed",
+                            serde_json::json!(after.reversed),
+                            edit.patch.reversed.is_some(),
+                        ),
+                        (
+                            "loop_enabled",
+                            serde_json::json!(after.loop_enabled),
+                            edit.patch.loop_enabled.is_some(),
+                        ),
                     ];
                     for (value, key) in [
                         (edit.patch.fade_in_sec, "fade_in_sec"),
@@ -140,7 +186,7 @@ impl HostEditPlan {
                         (edit.patch.snap_offset_sec, "snap_offset_sec"),
                     ] {
                         if let Some(value) = value {
-                            fields.push((key, serde_json::json!(value)));
+                            fields.push((key, serde_json::json!(value), true));
                         }
                     }
                     for (shape, dir, s, shape_key, dir_key, s_key) in [
@@ -169,34 +215,35 @@ impl HostEditPlan {
                                     if let Some((curvature, preset_s)) =
                                         hifishifter_kernel::fade_axes::host_fade_preset_axes(shape)
                                     {
-                                        fields.push((dir_key, serde_json::json!(curvature)));
+                                        fields.push((dir_key, serde_json::json!(curvature), true));
                                         // 形状预设自带 S；补丁同带 S 时以补丁为准
                                         // （与写回块同一口径）。
                                         fields.push((
                                             s_key,
                                             serde_json::json!(s.unwrap_or(preset_s)),
+                                            true,
                                         ));
                                     }
                                 }
                                 // 旧轴（或版本读不出来）：形状号本身可写，且 dir 原样写回。
                                 _ => {
-                                    fields.push((shape_key, serde_json::json!(shape)));
+                                    fields.push((shape_key, serde_json::json!(shape), true));
                                     if let Some(dir) = dir {
-                                        fields.push((dir_key, serde_json::json!(dir)));
+                                        fields.push((dir_key, serde_json::json!(dir), true));
                                     }
                                 }
                             }
                             continue;
                         }
                         if let Some(dir) = dir {
-                            fields.push((dir_key, serde_json::json!(dir)));
+                            fields.push((dir_key, serde_json::json!(dir), true));
                         }
                         // 【为什么 S 也要进门】此前只比 curvature，理由是"GUI 载荷没有
                         // 这个字段"。现在载荷已带**顶层** `fade_*_s`
                         // （`decorate_host_fades_locked`），不比它会让"只改 S"的补丁
                         // `matches()` 恒真、回显带着改动前的 S 回来 ⇒ 曲线弹回。
                         if let Some(s) = s {
-                            fields.push((s_key, serde_json::json!(s)));
+                            fields.push((s_key, serde_json::json!(s), true));
                         }
                     }
                     if let Some(group) = edit.patch.host_group_id {
@@ -207,6 +254,7 @@ impl HostEditPlan {
                             } else {
                                 serde_json::json!(format!("host-group-{group}"))
                             },
+                            true,
                         ));
                     }
                     // 【逐 take 写回也必须进门】凡是被补丁改到、又出现在载荷里的字段，
@@ -229,6 +277,11 @@ impl HostEditPlan {
                         id: edit.before.id.clone(),
                         fields,
                         takes,
+                        gain_layers: (
+                            after.clip_gain,
+                            after.gain,
+                            after.takes.iter().map(|take| take.gain).collect(),
+                        ),
                     }
                 })
                 .collect(),
@@ -236,56 +289,197 @@ impl HostEditPlan {
     }
 }
 impl HostEditReceipt {
-    /// 仅验证回流快照，不从GUI乐观状态或路径/位置猜clip身份。
+    /// 逐字段比较"应用后的权威快照"（`after`）与载荷回声，返回**不一致的明细**。
+    ///
+    /// 【为什么不再把它当成功判据】回执此前的唯一用途是"写入是否成功"，而它比的是
+    /// **载荷**（另一条异步通路的产物：编辑器时间线 → 图集投影 → 序列化）。用异步
+    /// 通路的进度判定一次同步写入的结果，必然出两种错：回声慢 ⇒ 误报失败；字段错
+    /// （例如本轮修掉的 `clip_gain` 从不被投影）⇒ **永远**失败。现在这条判据只用于
+    /// **诊断**：非空表示"宿主说的和我们写下的不一样"，值得记一笔，但写入本身已经
+    /// 由 `execute_managed` 的返回码与结构读回核对确认过了（那是宿主的直接答复）。
     ///
     /// 【为什么必须与写回前置检查共用同一个容差】写回前置检查用的是
     /// `host_value_compatible`（相对容差 `1e-6 + 1e-9·max`，见 `host::geometry`），
     /// 而这里此前用的是**纯绝对** `1e-6`。两侧不对称会造出一个窗口：写回被接受
-    /// （差值在相对容差内），完成门却判定"宿主还没跟上"，于是 `geometry_waiting`
-    /// 常真 ⇒ 前端拿到终态错误"clip was edited in REAPER but its ARA geometry has not
-    /// caught up"（用户表现为"音频块编辑被拒绝"）。`playback_rate` 尤其容易撞上：
-    /// kernel 里是 f32，写回时与 REAPER 的 f64 比，往返本身就有 ~1e-7 相对误差；
+    /// （差值在相对容差内），完成门却判定"宿主还没跟上"。`playback_rate` 尤其容易
+    /// 撞上：kernel 里是 f32，写回时与 REAPER 的 f64 比，往返本身就有 ~1e-7 相对误差；
     /// 长工程上的 `start_sec` / `length_sec` 也在绝对阈值的边缘。
-    pub(crate) fn matches(&self, payload: &Value) -> bool {
+    pub(crate) fn divergences(&self, payload: &Value) -> Vec<String> {
         let Some(clips) = payload["clips"].as_array() else {
-            return false;
+            return vec!["payload has no clips array".to_string()];
         };
-        self.clips.iter().all(|ClipReceipt { id, fields, takes }| {
-            clips
-                .iter()
-                .find(|clip| clip["id"] == *id)
-                .is_some_and(|clip| {
-                    fields
+        let mut out = Vec::new();
+        for ClipReceipt {
+            id, fields, takes, ..
+        } in &self.clips
+        {
+            let Some(clip) = clips.iter().find(|clip| clip["id"] == *id) else {
+                // 载荷里找不到这条 clip 是最强的一种分歧：整条缺席。
+                out.push(format!("clip {id} missing from the payload"));
+                continue;
+            };
+            // 【只比"这次补丁真的写过"的位】`fields` 里始终包含 `start_sec` / `clip_gain`
+            // 这类结构性字段，而 `after` 是"补丁前的快照 + 本补丁"。拿**没写过**的字段去比
+            // `after`，等于让补丁前的旧值去对一个补丁后的载荷 —— 两边必然差一步。
+            // 用户复现的 +12 dB → 归零那两条互为镜像的行正是这样产生的：旋钮写的是
+            // `item_gain`，`gain`（take 层）一位没动，期望值停在补丁前，载荷却是写完之后的值。
+            for (key, expected, touched) in fields {
+                if !touched {
+                    continue;
+                }
+                if !value_compatible(&clip[*key], expected) {
+                    out.push(format!(
+                        "clip {id} {}={} expected {expected}",
+                        gain_layer_label(key),
+                        clip[*key]
+                    ));
+                }
+            }
+            for (take_id, take_fields) in takes {
+                let Some(take) = clip["takes"].as_array().and_then(|takes| {
+                    takes
                         .iter()
-                        .all(|(key, value)| match (clip[*key].as_f64(), value.as_f64()) {
-                            (Some(actual), Some(expected)) => {
-                                crate::host::geometry::host_value_compatible(actual, expected)
-                            }
-                            _ => clip[*key] == *value,
-                        })
-                        && takes.iter().all(|(take_id, take_fields)| {
-                            // 载荷的 `takes[].id` 与期望同在内核 take id 空间；
-                            // 找不到这一条 take 就是"宿主还没跟上"。
-                            clip["takes"].as_array().is_some_and(|takes| {
-                                takes
-                                    .iter()
-                                    .find(|take| take["id"].as_str() == Some(take_id.as_str()))
-                                    .is_some_and(|take| {
-                                        take_fields.iter().all(|(key, value)| {
-                                            match (take[*key].as_f64(), value.as_f64()) {
-                                                (Some(actual), Some(expected)) => {
-                                                    crate::host::geometry::host_value_compatible(
-                                                        actual, expected,
-                                                    )
-                                                }
-                                                _ => take[*key] == *value,
-                                            }
-                                        })
-                                    })
-                            })
-                        })
-                })
-        })
+                        .find(|take| take["id"].as_str() == Some(take_id.as_str()))
+                }) else {
+                    out.push(format!("clip {id} take {take_id} missing from the payload"));
+                    continue;
+                };
+                for (key, expected) in take_fields {
+                    if !value_compatible(&take[*key], expected) {
+                        out.push(format!(
+                            "clip {id} take {take_id} {}={} expected {expected}",
+                            gain_layer_label(key),
+                            take[*key]
+                        ));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// 增益**三层对账**：内核层 / 载荷投影 / 宿主读数各是什么，一条命令行说完。
+    ///
+    /// 【为什么需要它】增益有两条独立的层（item 的 `D_VOL` 与 take 的 `D_VOL`），而
+    /// 载荷里还多出一条**投影**。分歧出现时"clip X gain=4 expected 1"这种话回答不了
+    /// "错在哪一层"：可能是宿主没写进去、可能是内核状态没跟上、也可能是投影写错了层。
+    /// 现场那一轮（+12 dB → 归零，两条互为镜像）就花了一整轮才定位到是**投影**。
+    ///
+    /// 【只在出现增益类分歧时才产出】每个 clip 一行会把日志撑爆；没有分歧时它没有信息量。
+    pub(crate) fn gain_layers(&self, payload: &Value) -> Option<String> {
+        let diverged = self.divergences(payload);
+        if !diverged.iter().any(|line| line.contains("gain")) {
+            return None;
+        }
+        let clips = payload["clips"].as_array()?;
+        let mut lines = Vec::new();
+        for receipt in &self.clips {
+            let Some(clip) = clips.iter().find(|clip| clip["id"] == receipt.id) else {
+                continue;
+            };
+            let take_gains: Vec<String> = clip["takes"]
+                .as_array()
+                .map(|takes| takes.iter().map(|take| take["gain"].to_string()).collect())
+                .unwrap_or_default();
+            let (kernel_clip, kernel_take, kernel_takes) = &receipt.gain_layers;
+            // 【三层各自带层名】`item=` 是时间轴旋钮（REAPER 的 item `D_VOL`），
+            // `take=` 是 take 属性面板。此前这一行只有 `clip_gain` / `gain` 两个裸键，
+            // 而现场那对镜像读数正是"哪一层错了"—— 名字里带层之后，一眼可判。
+            lines.push(format!(
+                "clip={} kernel{{item={kernel_clip} take={kernel_take} takes=[{}]}} \
+                 payload{{item={} take={} takes=[{}]}} host{{item={} take={}}}",
+                receipt.id,
+                kernel_takes
+                    .iter()
+                    .map(|gain| gain.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                clip["clip_gain"],
+                clip["gain"],
+                take_gains.join(","),
+                clip["host_gain"]["item"],
+                clip["host_gain"]["take"],
+            ));
+        }
+        if lines.is_empty() {
+            None
+        } else {
+            Some(lines.join(" | "))
+        }
+    }
+
+    /// 把"本次补丁真正写过的字段"按 `after` 覆盖进载荷。
+    ///
+    /// 【I-E2】一次成功写入的权威是**我们写下的值**，不是宿主模型的回声。载荷是前端
+    /// 拿到之后**整份应用**的那份数据：只要它还停在旧值，用户就会看到"改完回弹"
+    /// —— 哪怕写入成功、哪怕我们随后返回 `ok`。
+    ///
+    /// 【为什么只覆盖"写过的位"】`fields` 始终带着 `start_sec` / `clip_gain` 这类
+    /// 结构性字段（补丁一位都没动它们时也在），无条件覆盖会把**没写过**的宿主真值改掉。
+    /// 只覆盖补丁触及的位，等价于"把 after 叠加到载荷上"，其余一律继续信宿主。
+    pub(crate) fn overlay(&self, payload: &mut Value) {
+        let Some(clips) = payload["clips"].as_array_mut() else {
+            return;
+        };
+        for ClipReceipt {
+            id, fields, takes, ..
+        } in &self.clips
+        {
+            let Some(clip) = clips.iter_mut().find(|clip| clip["id"] == *id) else {
+                continue;
+            };
+            for (key, expected, touched) in fields {
+                if *touched {
+                    clip[*key] = expected.clone();
+                }
+            }
+            for (take_id, take_fields) in takes {
+                let Some(take) = clip["takes"].as_array_mut().and_then(|takes| {
+                    takes
+                        .iter_mut()
+                        .find(|take| take["id"].as_str() == Some(take_id.as_str()))
+                }) else {
+                    continue;
+                };
+                for (key, expected) in take_fields {
+                    take[*key] = expected.clone();
+                }
+            }
+        }
+    }
+
+    /// 载荷回声是否与 `after` 逐字段相容（`divergences` 为空）。
+    ///
+    /// 只保留给"另一次异步投影是否追上了"这类**诊断性**判断使用；它不再是写入成功的
+    /// 判据（见 `divergences` 的说明）。生产路径已经没有调用方，因此只在测试里编出来 ——
+    /// 让"回执仍然认得出陈旧回声"这条不变量继续被钉住，同时不给库里留一个随时会被
+    /// 误用回成功判据的死方法。
+    #[cfg(test)]
+    pub(crate) fn matches(&self, payload: &Value) -> bool {
+        self.divergences(payload).is_empty()
+    }
+}
+
+/// 载荷键 → 增益层的名字（其它字段原样返回）。
+///
+/// 【为什么消息里要带层名】现场那两条互为镜像的行（`gain=4.0 expected 1.0` 与
+/// `gain=1.0 expected 4.0`）花了一整轮才定位到"写错了层"。名字里带上层之后，一眼
+/// 就能看出是 item 还是 take 对不上 —— 而这两个字段在载荷里只差一个前缀。
+fn gain_layer_label(key: &str) -> &str {
+    match key {
+        "clip_gain" => "item(clip_gain)",
+        "gain" => "take(gain)",
+        other => other,
+    }
+}
+
+/// 载荷值与期望值是否相容：数字走共享容差，其余走逐字相等。
+fn value_compatible(actual: &Value, expected: &Value) -> bool {
+    match (actual.as_f64(), expected.as_f64()) {
+        (Some(actual), Some(expected)) => {
+            crate::host::geometry::host_value_compatible(actual, expected)
+        }
+        _ => actual == expected,
     }
 }
 
@@ -366,7 +560,10 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
                 | "sourceEndSec"
                 | "playbackRate"
                 | "clipPlaybackRate"
-                // 两层增益：`itemGain` 写宿主 item 的 D_VOL，`gain` 写 take 的 D_VOL。
+                // 两层增益：`itemGain` 写宿主 item 的 D_VOL，`takeGain` 写 take 的
+                // D_VOL。裸 `gain` 只为旧前端保留（后端把它读成 take 层，见
+                // `ClipStatePatch::take_gain` 的别名说明）。
+                | "takeGain"
                 | "gain"
                 | "itemGain"
                 | "muted"
@@ -463,6 +660,28 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
                 .as_f64()
                 .filter(|v| v.is_finite())
                 .ok_or("finite numeric clip edit required")?;
+            // 增益三键共用 kernel 的边界：item 非负、take 保号。写入路径仍会
+            // 单独拒绝负 take（宿主没有“负 D_VOL”这回事），但模型层必须先接受
+            // 合法负值，否则“读得出、存不下”会在 normalize 时丢失极性。
+            if key == "itemGain"
+                && !(0.0..=f64::from(hifishifter_kernel::gain::GAIN_MAX)).contains(&number)
+            {
+                return Err(format!(
+                    "item gain outside the supported range 0..{}",
+                    hifishifter_kernel::gain::GAIN_MAX
+                ));
+            }
+            if matches!(key.as_str(), "gain" | "takeGain")
+                && !(-f64::from(hifishifter_kernel::gain::GAIN_MAX)
+                    ..=f64::from(hifishifter_kernel::gain::GAIN_MAX))
+                    .contains(&number)
+            {
+                return Err(format!(
+                    "take gain outside the supported range -{}..{}",
+                    hifishifter_kernel::gain::GAIN_MAX,
+                    hifishifter_kernel::gain::GAIN_MAX
+                ));
+            }
             if matches!(
                 key.as_str(),
                 "fadeInDir" | "fadeOutDir" | "fadeInS" | "fadeOutS"
@@ -471,7 +690,10 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
                 if !(-1.0..=1.0).contains(&number) {
                     return Err("fade curvature/S outside -1..1".into());
                 }
-            } else if key != "hostGroupId" && !(0. ..=1_000_000.).contains(&number) {
+            } else if key != "hostGroupId"
+                && !matches!(key.as_str(), "gain" | "takeGain" | "itemGain")
+                && !(0. ..=1_000_000.).contains(&number)
+            {
                 // 【为什么 hostGroupId 不走通用上限】通用上限服务的是"秒/倍率/增益"
                 // 这些几何量；编组 id 的值域是 `0..=HOST_GROUP_ID_MAX`（2e9，
                 // `host_group_id_for` 的哈希取模就落在整个区间上）。让它吃几何
@@ -492,12 +714,6 @@ fn patch(input: &Value) -> Result<ClipStatePatch, String> {
             }
             if key == "channelMode" && (number.fract() != 0. || number > 4.) {
                 return Err("invalid host channel mode".into());
-            }
-            if key == "gain" && number > f64::from(hifishifter_kernel::gain::GAIN_MAX) {
-                return Err(format!(
-                    "clip volume outside the supported range 0..{}",
-                    hifishifter_kernel::gain::GAIN_MAX
-                ));
             }
             if key == "hostGroupId"
                 && (!(0.0..=HOST_GROUP_ID_MAX as f64).contains(&number) || number.fract() != 0.)
@@ -542,6 +758,14 @@ impl EditorSession {
         // 拿它去改 DAW 会把一次局部 panic 升级成工程级损坏（S1）。因此这里在恢复即
         // 拒绝本次写回，让用户走"刷新/重开"这条明确的恢复路径，而不是默默写坏。
         // 【为什么不再是 mut】参数线不再在这里搬（见下面那段注释），这份时间线只被读。
+        // 【宿主线程的探针 / 闸】见 `host::thread_mark`。默认只记一行读数；设
+        // `HFS_HOST_LOCK=refuse` 时这里会拒绝，让"宿主线程等长锁"当场可见。
+        if crate::host::host_thread_may_not_lock(crate::host::LongLock::EditorTimeline) {
+            return Err(
+                "the host thread must not take the editor timeline; retry from the actor"
+                    .to_owned(),
+            );
+        }
         let (timeline, recovered) = self.timeline.lock_or_recover_checked();
         if recovered {
             hifishifter_kernel::log_limiter::emit_limited_key(
@@ -1275,25 +1499,58 @@ pub(crate) fn execute_managed(
                     target.set_take(c"D_STARTOFFS", after_offs, &authorized)?;
                 }
             }
-            if (before.start_sec - after.start_sec).abs() > 1e-9 {
+            let position_moved = (before.start_sec - after.start_sec).abs() > 1e-9;
+            let length_changed = (before.length_sec - after.length_sec).abs() > 1e-9;
+            if position_moved {
                 target.set_item(c"D_POSITION", after.start_sec, &authorized)?;
             }
-            if (before.length_sec - after.length_sec).abs() > 1e-9 {
+            if length_changed {
                 target.set_item(c"D_LENGTH", after.length_sec, &authorized)?;
+            }
+            // 【淡变必须跟着几何**同一次**写下去】REAPER 在 `D_POSITION` 落下的那一刻就会
+            // 按工程级 auto-crossfade 给 item 写上 `D_FADEINLEN_AUTO` / `D_FADEOUTLEN_AUTO`。
+            // 插件紧接着在这里用**模型值**覆盖它 —— 于是那个"已交叉淡化"的中间态从未被
+            // 任何人读到：没有中间态就没有"包络先闪成交叉淡化再变回去"。
+            //
+            // 这不是"再写一次以覆盖"，而是同一次编辑的一部分：
+            // `(start, length, autoIn, autoOut)` 是一组必须同生共死的几何事实。
+            if position_moved || length_changed {
+                for (name, value, host_before) in [
+                    (
+                        c"D_FADEINLEN_AUTO",
+                        after.auto_fade_in_sec,
+                        target.geometry.auto_fade_in_sec_host,
+                    ),
+                    (
+                        c"D_FADEOUTLEN_AUTO",
+                        after.auto_fade_out_sec,
+                        target.geometry.auto_fade_out_sec_host,
+                    ),
+                ] {
+                    if (host_before - value).abs() > 1e-9 {
+                        target.set_item(name, value, &authorized)?;
+                    }
+                }
             }
             if let Some(value) = edit.patch.muted {
                 target.set_item(c"B_MUTE", if value { 1. } else { 0. }, &authorized)?;
             }
             // Item 增益 → 宿主 item 的 D_VOL（用户在时间轴旋钮上拧的那一层）。
-            if let Some(value) = edit.patch.item_gain {
-                target.set_item(c"D_VOL", value as f64, &authorized)?;
+            // 【写 after，不写原始补丁】after 是经过 kernel 规范化后的权威值；
+            // 回执也按它生成。写请求原值会让“宿主收到的”与“回执声称的”分叉。
+            if edit.patch.item_gain.is_some() {
+                target.set_item(c"D_VOL", after.item_gain() as f64, &authorized)?;
             }
             // Take 增益 → 宿主 take 的 D_VOL（take 属性面板那一层）。
             //
             // 【为什么必须分开写】两者在 REAPER 里是两个字段、两个旋钮。此前只有
             // 一个 `gain` 且写向 item，take 侧永远写不到；反过来（早期）又把一个
             // 值写进 take，用户在时间轴拧的旋钮就跑到 take 上去了。
-            if let Some(value) = edit.patch.gain {
+            if edit.patch.take_gain.is_some() {
+                let value = after.take_gain();
+                if value < 0.0 {
+                    return Err("reaper does not accept a negative take D_VOL".into());
+                }
                 target.set_take(c"D_VOL", value as f64, &authorized)?;
             }
             if let Some(enabled) = edit.patch.loop_enabled {
@@ -1333,6 +1590,10 @@ pub(crate) fn execute_managed(
                     target.set_item(name, value, &authorized)?;
                 }
             }
+            // 【记下模型值】回读时以它为准（见 ' + BT + 'NativeHost::model_auto_fades' + BT + '）。
+            // 这条记录就是"插件是淡变的唯一权威"那句话的**存储**：宿主那两个字段只是
+            // 我们与 REAPER 共用的落点，不是判据。
+            target.remember_auto_fades(after.auto_fade_in_sec, after.auto_fade_out_sec);
             if let Some(destination) = destination {
                 target.move_to(destination, &authorized)?;
             }
@@ -1598,7 +1859,11 @@ pub(crate) fn execute_managed(
     // `get_timeline_state` 就能对上。
     if result.is_ok() {
         if let Ok(document) = owner.editor_document() {
-            *document.ui_inventory_sampled_at.lock_or_recover() = None;
+            // 【为什么收敛到这一个入口】写回成功只落在**宿主**上；完成门比对的却是
+            // **编辑器时间线**。清单采样时刻、几何缓存、呈现代次三者必须一起失效 ——
+            // 少任何一个，`HostEditReceipt` 都会读到写前那份几何，把一次成功的写回
+            // 报成"宿主没跟上"（用户看到的正是"淡化/自动交叉淡化没生效"）。
+            ExtensionOwner::note_host_write_completed(&document);
         }
         owner.refresh_host_transport();
     }
@@ -1683,9 +1948,10 @@ fn write_take_direction(
 /// 把已写入的片段**按编辑前的几何**写回去。
 ///
 /// 范围刻意限定为几何（位置 / 长度 / 源起点）：批量移动只改这些，回滚它们才能让
-/// "拒绝 = 没改"成立。音量与淡变**不回滚** —— 在 item / take 两层增益模型落地前，
-/// 它们的"原值"是含糊的（patch.gain 目前写 item 的 D_VOL，而 before.gain 是 take 级），
-/// 用错的来源写回去比不写更糟。这类失败仍会如实报告，并保留 Undo 块。
+/// "拒绝 = 没改"成立。音量与淡变**不回滚** —— 它们的"原值"分布在两个宿主字段上
+/// （`patch.item_gain` 写 item 的 `D_VOL`、`patch.gain` 写 take 的 `D_VOL`），
+/// 而本函数只拿着内核 Clip 的 `before`，读不到宿主那两层各自的原始读数；用错的来源
+/// 写回去比不写更糟。这类失败仍会如实报告，并保留 Undo 块。
 fn restore_applied_geometry(
     applied: &[(&ClipEdit, &HostClipTarget)],
     authorized: &impl Fn() -> bool,
@@ -1760,10 +2026,12 @@ mod tests {
             stale["clips"][0]["clip_gain"] = json!(1.);
             assert!(!receipt.matches(&stale), "item 增益的陈旧回显必须被门拦下");
         }
-        // 负增益没有意义（反相是宿主的 take 极性，不是增益），必须拒绝。
-        assert!(editor
+        // take 负值在模型层合法（极性），但 REAPER 写入路径必须拒绝。
+        let plan = editor
             .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"gain":-1.}))
-            .is_err());
+            .expect("model accepts a signed take gain");
+        assert!((plan.edits[0].after.take_gain() + 1.0).abs() < 1e-6);
+        assert!(execute(&owner, plan, || document.is_alive()).is_err());
         // **+24 dB（线性 16）现在必须被接受** —— 这正是值域扩大的目的：REAPER 的
         // item 增益上限是 +24.08 dB，此前上界是 4.0（+12 dB），于是任何超过 +12 dB
         // 的 clip 在写回宿主时都会被整条拒绝。
@@ -1776,6 +2044,189 @@ mod tests {
         assert!(patch(&json!({"clipId":clip.id,"gain":17.})).is_err());
         document.close();
     }
+
+    /// **不变量：`takeGain` 只写 take 层，item 层一位都不动。**
+    ///
+    /// 【为什么必须有这条】两层在 REAPER 里是两个旋钮（item 的 `D_VOL` 与 take 的
+    /// `D_VOL`），而在载荷里只差一个前缀。此前只有一个裸 `gain`，它被读成 take 层，
+    /// 于是"时间轴旋钮"这个动作实际改的是 take —— 用户看到旋钮回弹，而日志里是一对
+    /// 互为镜像的读数。
+    #[test]
+    fn the_take_gain_key_writes_only_the_take_layer() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_writer();
+        host.clear_markers();
+        host.set_take_volume(0.25);
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        // 【先记 item 层】这一条要证明的是"item 层一位都没动"，所以基准必须来自
+        // 写之前的宿主读数，而不是内核里的 clip 值（两者在夹具里本来就可以不同）。
+        let native = clip.id.strip_prefix(&editor.namespace).unwrap();
+        let item_before = owner.host_edit_target(native).unwrap().geometry.item_gain;
+        let plan = editor
+            .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"takeGain":4.0}))
+            .unwrap();
+        host.reset();
+        execute(&owner, plan, || document.is_alive()).unwrap();
+        assert!(
+            host.calls().contains(&"write-take:D_VOL".into()),
+            "take 层必须走 take 的 D_VOL：{:?}",
+            host.calls()
+        );
+        assert!(
+            !host.calls().iter().any(|call| call == "write-item:D_VOL"),
+            "item 层一位都不许动：{:?}",
+            host.calls()
+        );
+        let g = owner.host_edit_target(native).unwrap().geometry;
+        assert_eq!(g.take_gain, 4.0);
+        assert!(
+            (g.item_gain - item_before).abs() < 1e-9,
+            "item 层保持原值：{} -> {}",
+            item_before,
+            g.item_gain
+        );
+        document.close();
+    }
+    /// **回归：陈旧回声必须在交给前端之前被 `after` 修正，且不得波及没写过的位。**
+    ///
+    /// 【现场】ARA 里调 item 增益：REAPER 的 item 收到了，HiFiShifter 的 Clip 却回弹。
+    /// 这条缺陷有两个成因，缺一都修不干净：
+    ///   1. 载荷里前端读的 `clip_gain` 从不被宿主投影写出来（见
+    ///      `workspace::the_item_gain_the_ui_reads_is_projected_into_the_payload`）；
+    ///   2. 完成门把"载荷回声"当成**写入成功**的判据，于是回声一旧就退避重试、最后
+    ///      回一个终态错误，前端按 `rejectWithValue` 回滚乐观更新。
+    ///
+    /// 这里钉住的是第 2 条的补救方式：`overlay` 只按 `after` 覆盖**补丁写过的那几位**，
+    /// 于是前端整份应用到的载荷与写入一致；没写过的位（例如宿主吸附调整过的
+    /// `start_sec`）继续信宿主，不会被我们的快照碾掉。
+    #[test]
+    fn a_stale_echo_is_repaired_before_the_ui_applies_it() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_writer();
+        host.clear_markers();
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        let plan = editor
+            .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"itemGain":1.7}))
+            .unwrap();
+        let receipt = plan.receipt(&editor.namespace, owner.host_fade_axes());
+        // 回声：`clip_gain` 还停在旧值；`start_sec` 与模型不同（宿主把它吸附到了网格点）。
+        let host_snapped_start = clip.start_sec + 0.125;
+        let mut payload = json!({"clips":[{
+            "id":clip.id,
+            "start_sec":host_snapped_start,
+            "length_sec":clip.length_sec,
+            "source_start_sec":clip.source_start_sec,
+            "playback_rate":clip.playback_rate,
+            "track_id":clip.track_id,
+            "clip_gain":1.0,
+            "gain":clip.gain,
+            "reversed":clip.reversed,
+            "loop_enabled":clip.loop_enabled,
+        }]});
+        let diverged = receipt.divergences(&payload);
+        assert!(
+            diverged.iter().any(|line| line.contains("clip_gain")),
+            "陈旧回显必须被**看见**（诊断），实际：{diverged:?}"
+        );
+        receipt.overlay(&mut payload);
+        // `clip_gain` 在内核里是 f32，1.7 落到 JSON 是 1.700000047…；用容差比。
+        let written = payload["clips"][0]["clip_gain"].as_f64().unwrap();
+        assert!(
+            (written - 1.7).abs() < 1e-6,
+            "前端读的就是这一栏：载荷必须带着我们写下去的值（实际 {written}）"
+        );
+        assert_eq!(
+            payload["clips"][0]["start_sec"],
+            json!(host_snapped_start),
+            "本次补丁没写过 start_sec，宿主真值不得被快照覆盖"
+        );
+        // 覆盖之后，"本次写过的位"不得再有分歧；剩下的分歧只允许是**没写过**的宿主管辖
+        // 字段（这里是被宿主吸附过的 `start_sec`）—— 那正是"回声只用于诊断"的意思。
+        let remaining = receipt.divergences(&payload);
+        assert!(
+            !remaining.iter().any(|line| line.contains("clip_gain")),
+            "写过的位覆盖之后不得再有分歧：{remaining:?}"
+        );
+        assert!(
+            remaining.iter().all(|line| line.contains("start_sec")),
+            "覆盖只碰本次写过的位：{remaining:?}"
+        );
+        document.close();
+    }
+
+    /// **回归：没被补丁写过的字段不许报分歧。**
+    ///
+    /// 【现场】REAPER ARA 里把 Clip 增益 +12 dB 再归零，日志里恰好两条互为镜像的行：
+    /// `gain=4.0 expected 1.0` / `gain=1.0 expected 4.0`。两次写入都成功了 —— 旋钮写的是
+    /// `item_gain`，`gain`（take 层）一位没动，而回执拿"补丁前的 take 增益"去比"写完
+    /// 之后的载荷"，于是必然差一步。回执只该回答"我写下的那几位，载荷跟上了没有"。
+    #[test]
+    fn an_untouched_field_never_reports_a_divergence() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_writer();
+        host.clear_markers();
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        let plan = editor
+            .plan_host_edit("set_clip_state", &json!({"clipId":clip.id,"itemGain":4.0}))
+            .unwrap();
+        let receipt = plan.receipt(&editor.namespace, owner.host_fade_axes());
+        let mut payload = crate::editor::commands::payload(&editor, false).unwrap();
+        // 载荷是"写完之后"的投影：take 层与补丁前的模型值不同（那是宿主真实的 take 音量）。
+        payload["clips"][0]["gain"] = json!(0.5);
+        let diverged = receipt.divergences(&payload);
+        // 【消息里带层名】`take(gain)` 与 `item(clip_gain)` 在载荷里只差一个前缀，
+        // 而现场那两条镜像读数花了一整轮才定位到"哪一层错了"。
+        assert!(
+            !diverged.iter().any(|line| line.contains("take(gain)")),
+            "take 层没被这次补丁写过，不得拿它报分歧：{diverged:?}"
+        );
+        assert!(
+            diverged.iter().any(|line| line.contains("item(clip_gain)")),
+            "写过的位仍然必须被看见，且必须带层名：{diverged:?}"
+        );
+        let layers = receipt
+            .gain_layers(&payload)
+            .expect("增益分歧必须带三层对账行");
+        assert!(layers.contains("kernel{item="), "{layers}");
+        assert!(layers.contains("take="), "{layers}");
+        assert!(layers.contains("payload{item="), "{layers}");
+        assert!(layers.contains("host{item="), "{layers}");
+        document.close();
+    }
+
     /// S1：编辑器时间线被 panic 毒化后，**不得**拿半写状态去改宿主 —— 规划必须拒绝。
     #[test]
     fn a_poisoned_editor_timeline_refuses_host_edits() {
@@ -2052,6 +2503,131 @@ mod tests {
             "颜色不得被当成宿主属性"
         );
         editor.close();
+    }
+    /// **回归：自动淡化的写回必须能在**一轮**内被完成门确认。**
+    ///
+    /// 【为什么这条是用户报障的可执行形式】自动交叉淡化走的是 `D_FADE*LEN_AUTO`
+    /// 两个 **item 级** 读数，而它们**不推进** `GetProjectStateChangeCount`。
+    /// 写回之后若不清几何缓存，`refresh_host_geometry` 会命中"令牌未变"的早退，
+    /// 完成门读回的仍是**写前**那份几何 —— 于是它一直等到重试预算耗尽，报出
+    /// "clip was edited in the host but its ARA geometry has not caught up"。
+    /// 用户看到的就是"自动交叉淡化没有执行"。
+    ///
+    /// 这里同时钉住两件事：① 两个 AUTO 字段确实被写到宿主且能读回原值；
+    /// ② 完成门按**同一份载荷**立刻匹配（不需要等下一轮几何刷新）。
+    #[test]
+    fn host_edit_auto_fade_round_trips_and_the_receipt_matches_at_once() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_writer();
+        host.clear_markers();
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        let plan = editor
+            .plan_host_edit(
+                "set_clip_state",
+                &json!({
+                    "clipId": clip.id,
+                    "autoFadeInSec": 0.2,
+                    "autoFadeOutSec": 0.25,
+                }),
+            )
+            .unwrap();
+        let receipt = plan.receipt(&editor.namespace, owner.host_fade_axes());
+        host.reset();
+        execute(&owner, plan, || document.is_alive()).unwrap();
+        // ① 宿主上真的写下了这两个值。
+        assert_eq!(host.item_value("D_FADEINLEN_AUTO"), Some(0.2));
+        assert_eq!(host.item_value("D_FADEOUTLEN_AUTO"), Some(0.25));
+        // ② 完成门用同一份载荷**立刻**匹配：不需要等下一轮几何刷新。
+        let payload = json!({"clips":[{
+            "id": clip.id,
+            "start_sec": clip.start_sec,
+            "length_sec": clip.length_sec,
+            "source_start_sec": clip.source_start_sec,
+            "playback_rate": clip.playback_rate,
+            "track_id": clip.track_id,
+            "clip_gain": clip.clip_gain,
+            "gain": clip.gain,
+            "reversed": clip.reversed,
+            "loop_enabled": clip.loop_enabled,
+            "auto_fade_in_sec": 0.2,
+            "auto_fade_out_sec": 0.25,
+        }]});
+        assert!(
+            receipt.matches(&payload),
+            "自动淡化的完成门必须一轮内匹配：{receipt:?} vs {payload}"
+        );
+        // 对照：旧值不得通过（否则这条门对 auto fade 形同虚设）。
+        let mut stale = payload;
+        stale["clips"][0]["auto_fade_in_sec"] = json!(0.0);
+        assert!(!receipt.matches(&stale), "自动淡化的陈旧回显必须被门拦下");
+        document.close();
+    }
+
+    /// 【回归】几何写入必须**连带**写死两侧 auto，而且写在 `D_POSITION` 之后。
+    ///
+    /// REAPER 在 `D_POSITION` 落下的那一刻就按工程级 auto-crossfade 给 item 写上
+    /// `*_AUTO`。插件必须在**同一次写入**里把它改回模型值 —— 中间态于是从未被
+    /// 任何人读到，包络也就不会"先闪成交叉淡化再变回去"。
+    #[test]
+    fn a_move_writes_the_auto_fades_in_the_same_patch() {
+        let (model, owner, _id) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let host = crate::host::reaper::MockHost::new();
+        host.enable_writer();
+        host.clear_markers();
+        host.set_value("D_POSITION", 0.);
+        host.set_value("D_LENGTH", 4. / 44100.);
+        host.set_value("D_PLAYRATE", 1.);
+        unsafe {
+            owner.bind_host_adapter(host.context());
+        }
+        owner.refresh_host_transport();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip = editor.timeline.lock_or_recover().clips[0].clone();
+        // ① 宿主先自作主张了一次（真实形状：REAPER 按工程级 auto-crossfade 写了 1.0）。
+        // 模型此刻是夹具的冷播种值 0.4 —— 插件**没有**写过它，这正是"移动要与几何
+        // 一起把宿主拉回模型值"要覆盖的那一档。
+        host.set_value("D_FADEINLEN_AUTO", 1.0);
+        host.set_value("D_FADEOUTLEN_AUTO", 1.0);
+        host.reset();
+        // ② 插件只改几何 —— 补丁里**没有** auto 字段。
+        let plan = editor
+            .plan_host_edit(
+                "set_clip_state",
+                &json!({"clipId": clip.id, "startSec": 1.0}),
+            )
+            .unwrap();
+        execute(&owner, plan, || document.is_alive()).unwrap();
+        assert_eq!(
+            host.item_value("D_FADEINLEN_AUTO"),
+            Some(0.4),
+            "移动必须把宿主的 auto 拉回**模型**值"
+        );
+        assert_eq!(host.item_value("D_FADEOUTLEN_AUTO"), Some(0.5));
+        let calls = host.calls();
+        let position = calls
+            .iter()
+            .position(|call| call == "write-item:D_POSITION");
+        let auto = calls
+            .iter()
+            .position(|call| call == "write-item:D_FADEINLEN_AUTO");
+        assert!(
+            position.is_some() && auto.is_some() && position < auto,
+            "auto 必须写在 D_POSITION 之后、同一次写入里：{calls:?}"
+        );
+        document.close();
     }
     /// 宽度patch冗余带着原shape不要求委托；实际改shape仍保持明确的责任门。
     #[test]
@@ -2870,8 +3446,14 @@ FILE \"ara://source\"
         editor.ensure_loaded(false).unwrap();
         let clip = editor.timeline.lock_or_recover().clips[0].clone();
 
+        // 回执的字段表现在是三元的（键 / 期望值 / 本次补丁是否写过它）；
+        // 这条用例只关心"哪些字段进了门"，把第三位剥掉即可。
         let fields_of = |receipt: &super::HostEditReceipt| -> Vec<(&'static str, Value)> {
-            receipt.clips[0].fields.clone()
+            receipt.clips[0]
+                .fields
+                .iter()
+                .map(|(name, value, _)| (*name, value.clone()))
+                .collect()
         };
         let key_value = |fields: &[(&'static str, Value)], key: &str| -> Option<Value> {
             fields

@@ -2,11 +2,10 @@
 """Fetch / package model weights: three acquisition paths + one publishing path,
 each verified file by file.
 
-[Why the weights are not in the repository] The main package (151.6 MB / 6 files)
-would make a single checkout huge, and every CI job checks out once (about 11
-times per PR). Only
-the manifest stays in the repository:
-`backend/src-tauri/resources/models/models.json` (1.5 KB).
+[Why the weights are not in the repository] The weight package would make a single
+checkout huge, and every CI job checks out once (about 11 times per PR). Only the
+manifest stays in the repository:
+`backend/src-tauri/resources/models/models.json`.
 
 [Why .py instead of .ps1] One implementation must run on three platforms
 (build.ps1 / vst3/unix/build.sh / CI). This repo's gate scripts
@@ -65,8 +64,8 @@ MANIFEST = MODELS_DIR / "models.json"
 # wiped by the next build.
 ASSET_DIR = REPO_ROOT / "dist" / "models"
 # [Why zip instead of tar.zst] All three platforms can unpack it
-# (Expand-Archive / zipfile / unzip); no extra zstd binary is needed. In a one-time
-# 150 MB download the compression-ratio difference is negligible.
+# (Expand-Archive / zipfile / unzip); no extra zstd binary is needed. For a one-time
+# download the compression-ratio difference is negligible.
 DEFAULT_BASE_URL = "https://github.com/ARounder-183/HiFiShifter/releases/download"
 
 # GAME automatic note-segmentation weights. Upstream publishes them as a model
@@ -91,7 +90,7 @@ GAME_FILES = (
 # CoreML variant (backend/src-tauri/build.rs::
 # generate_coreml_model_variant), and the output lands in the same resource tree.
 # The build generates it automatically -- listing it would mean Windows/Linux
-# installing 56 MB of unusable weights, and the version would depend on
+# installing an unusable weight set, and the version would depend on
 # "whether the build environment ever compiled the macOS target". Packaging takes
 # files from the manifest, so it is naturally excluded; this set only stops it
 # from being reported as a "stray file".
@@ -235,7 +234,7 @@ def check_manifest() -> int:
 def missing_files(models_dir: Path, manifest: dict) -> list[str]:
     """Return entries that are incomplete (missing file / byte count mismatch).
 
-    [Why byte counts are compared first] Hashing 150 MB takes hundreds of
+    [Why byte counts are compared first] Hashing all the weights takes hundreds of
     milliseconds to a few seconds, and this script runs before every build. A
     byte-count mismatch already blocks the vast majority of failures (unfinished
     extraction, half-copied files, mixed versions); the real hash verification is
@@ -403,7 +402,7 @@ def fetch_official_game() -> None:
 def download(url: str, destination: Path) -> None:
     """Download to `destination`: write a .part first, then replace atomically.
 
-    [Why timeout is mandatory] On a hung connection a 150 MB model download would
+    [Why timeout is mandatory] On a hung connection a model download would
     block CI forever (urlopen without timeout keeps waiting on TCP keepalive).
     [Why a .part file] A mid-download failure / Ctrl-C would leave a truncated zip
     at the destination; the next run sees "file already exists" and skips it, and
@@ -444,7 +443,7 @@ def build_asset(destination: Path, manifest: dict) -> None:
     """
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(destination.name + ".tmp")
-    # [Why write .tmp first, then rename] A failure halfway through writing 150 MB
+    # [Why write .tmp first, then rename] A failure halfway through writing the archive
     # would leave an asset that "looks present" -- and it is a release artifact;
     # the next person uploading it would be a disaster.
     try:

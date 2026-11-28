@@ -1115,6 +1115,9 @@ pub struct CreateClipTemplatePayload {
     pub source_clip_id: Option<String>,
     pub source_path: Option<String>,
     pub gain: Option<f32>,
+    /// Item 层增益（时间轴旋钮 / REAPER item D_VOL）；旧字段 gain 是 take 层。
+    #[serde(default)]
+    pub clip_gain: Option<f32>,
     pub muted: Option<bool>,
     pub source_start_sec: Option<f64>,
     pub source_end_sec: Option<f64>,
@@ -1315,7 +1318,7 @@ impl ClipTake {
             } else {
                 clip.active_take().name.clone()
             },
-            gain: clip.gain,
+            gain: crate::gain::clamp_take_gain(clip.gain),
             source_path: clip.source_path.clone(),
             source_path_relative: clip.source_path_relative.clone(),
             duration_sec: clip.duration_sec,
@@ -1354,7 +1357,7 @@ impl ClipTake {
         } else {
             1.0
         };
-        clip.gain = self.gain;
+        clip.gain = crate::gain::clamp_take_gain(self.gain);
         clip.source_path = self.source_path.clone();
         clip.source_path_relative = self.source_path_relative.clone();
         clip.duration_sec = self.duration_sec;
@@ -1862,8 +1865,45 @@ impl Clip {
     /// 【为什么要一个入口】两层增益相乘这件事若散落在渲染、混音、导出、波形各处，
     /// 漏乘一处的表现是"某个环节声音大了/小了一半"，而这类偏差在单测里几乎看不出来。
     /// 统一走这里，谁要增益谁调它。
+    pub fn item_gain(&self) -> f32 {
+        crate::gain::clamp_gain(self.clip_gain)
+    }
+
+    /// Active take 层（REAPER take D_VOL）。**保号**：负值是极性反转。
+    pub fn take_gain(&self) -> f32 {
+        crate::gain::clamp_take_gain(self.gain)
+    }
+
+    /// 可听增益（AppOwned）：item × take，保留极性。
+    ///
+    /// 两层各自钳制；乘积只做防溢出钳制（±GAIN_PRODUCT_MAX），不再压回单层上限。
+    /// 非有限乘积回退 1.0，避免一个坏字段把整段变成 NaN。
     pub fn audible_gain(&self) -> f32 {
-        crate::gain::clamp_gain(self.clip_gain.max(0.0) * self.gain.max(0.0))
+        let product = self.item_gain() * self.take_gain();
+        if !product.is_finite() {
+            1.0
+        } else {
+            product.clamp(
+                -crate::gain::GAIN_PRODUCT_MAX,
+                crate::gain::GAIN_PRODUCT_MAX,
+            )
+        }
+    }
+
+    /// 波形/表头用的幅度：可听增益的绝对值。
+    pub fn audible_gain_abs(&self) -> f32 {
+        self.audible_gain().abs()
+    }
+
+    /// 按所有权作用域给出渲染增益。
+    ///
+    /// HostOwned（ARA）下 item / take / track 全由宿主施加，本进程必须返回 1.0；
+    /// 显示仍读 item_gain / take_gain，二者互不影响。
+    pub fn render_gain(&self, scope: crate::gain::GainScope) -> f32 {
+        match scope {
+            crate::gain::GainScope::AppOwned => self.audible_gain(),
+            crate::gain::GainScope::HostOwned => 1.0,
+        }
     }
 
     /// 给本 Clip 的 Take 盖"用户显式设置声道模式"的封印。
@@ -1997,17 +2037,15 @@ impl Clip {
         }
         if self.takes.is_empty() {
             self.sync_take_from_flat();
-            self.migrate_gain_split();
             return;
         }
-        self.migrate_gain_split();
         let idx = self.active_take_index().min(self.takes.len() - 1);
         let take = self.takes[idx].clone();
         self.active_take_id = Some(take.id.clone());
         take.apply_to_clip(self);
     }
 
-    /// 把"唯一那层增益"提升到 item 层（幂等）。
+    /// 把旧工程“唯一那层增益”提升到 item 层（一次性迁移，幂等）。
     ///
     /// 【为什么必须做】在 item / take 拆成两层之前，工程里只有一个增益，而且存在
     /// **take** 上。旋钮从此编辑 item 层 —— 不提升的话，用户打开旧工程会看到旋钮
@@ -2016,7 +2054,7 @@ impl Clip {
     /// 【判据】只有"item 层仍是 1.0 且所有 take 增益彼此相同"时才提升：把 G 搬到
     /// item、把各 take 置 1，可听增益 `clip_gain × take.gain` **逐位不变**。
     /// 多 take 各自不同时无法用一个数代表整组，原样保留。
-    fn migrate_gain_split(&mut self) {
+    pub fn migrate_legacy_gain_split(&mut self) {
         if self.takes.is_empty() || (self.clip_gain - 1.0).abs() > f32::EPSILON {
             return;
         }
@@ -2164,11 +2202,20 @@ pub struct ClipStatePatch {
     pub name: Option<String>,
     pub start_sec: Option<f64>,
     pub length_sec: Option<f64>,
-    /// Take 级增益（take 属性面板用）。
-    pub gain: Option<f32>,
+    /// **Take 级**增益（take 属性面板用；REAPER 的 take `D_VOL`）。
+    ///
+    /// 【为什么名字里必须带 `take`】它此前叫裸 `gain`，而前端的"时间轴行内编辑/双击
+    /// 复位"把 **item** 层的值发在这个键上 —— 写入层与显示层从此错位。现场的表现是
+    /// 一对镜像读数：`gain=4.0 expected 1.0` 与 `gain=1.0 expected 4.0`（+12 dB 与
+    /// 0 dB 各错一次）。字段名自己说明层，这类错位在写代码时就看得见。
+    ///
+    /// 【`alias = "gain"` 只服务旧前端/旧工程】新代码一律发 `takeGain`；别名存在的
+    /// 意义是"不因为一次改名把已经保存的载荷读丢"，不是"裸 gain 也可以继续用"。
+    #[serde(default, alias = "gain")]
+    pub take_gain: Option<f32>,
     /// **Item 级增益**（时间轴旋钮用；REAPER 的 `D_VOL`）。
     ///
-    /// 与 `gain` 分开：两者在 REAPER 里是两个旋钮，合成一个数就再也分不回去。
+    /// 与 `take_gain` 分开：两者在 REAPER 里是两个旋钮，合成一个数就再也分不回去。
     pub item_gain: Option<f32>,
     pub muted: Option<bool>,
     pub source_start_sec: Option<f64>,
@@ -5373,7 +5420,7 @@ mod tests {
             BulkClipStatePatch {
                 clip_id: ids[0].clone(),
                 patch: ClipStatePatch {
-                    gain: Some(1.5),
+                    take_gain: Some(1.5),
                     ..Default::default()
                 },
             },
@@ -5937,6 +5984,7 @@ mod tests {
                     source_clip_id: None,
                     source_path: Some("a.wav".into()),
                     gain: Some(1.25),
+                    clip_gain: None,
                     muted: Some(true),
                     source_start_sec: Some(0.3),
                     source_end_sec: Some(1.8),
@@ -5964,6 +6012,7 @@ mod tests {
                     source_clip_id: None,
                     source_path: None,
                     gain: Some(0.9),
+                    clip_gain: None,
                     muted: Some(false),
                     source_start_sec: Some(0.0),
                     source_end_sec: Some(1.5),
@@ -6022,7 +6071,7 @@ mod tests {
         timeline.patch_clip_state(
             &source_clip_id,
             ClipStatePatch {
-                gain: Some(1.5),
+                take_gain: Some(1.5),
                 muted: Some(true),
                 source_start_sec: Some(0.25),
                 source_end_sec: Some(0.9),
@@ -6052,6 +6101,7 @@ mod tests {
                 source_clip_id: Some(source_clip_id.clone()),
                 source_path: Some("source.wav".into()),
                 gain: Some(1.5),
+                clip_gain: None,
                 muted: Some(true),
                 source_start_sec: Some(0.25),
                 source_end_sec: Some(0.9),
@@ -6429,6 +6479,68 @@ mod tests {
         // Loop 左段保留原锚点；右段锚点按左段消费量对 D 回绕。
         assert!((left.source_start_sec - 0.0).abs() < 1e-9);
         assert!((right.source_start_sec - 2.0).abs() < 1e-9);
+    }
+
+    // ── can_split_at ─────────────────────────────────────────────
+    /// **不变量：`can_split_at` 与 `split_clip` 的判据逐点一致。**
+    ///
+    /// 命令层靠 `can_split_at` 决定「要不要打撤销点」（空操作分割不得在历史里
+    /// 留下一步），前端靠它决定「在此处分割」是否可点。三者只要有一处漂移，
+    /// 就会重现用户报的两种症状之一：按了没反应，或撤销栈里塞满空步。
+    ///
+    /// 这里用**同一批采样点**分别跑两个函数，断言二者同真同假 —— 比各自写死
+    /// 期望值更能防住将来的常数改动（比如把 1e-6 改成 1e-3）。
+    #[test]
+    fn can_split_at_matches_split_clip_edge_convention() {
+        let mut tl = TimelineState::default();
+        let tid = tl.add_track(Some("T1".into()), None, None);
+        let clip = tl.add_clip(Some(tid), Some("A".into()), Some(1.0), Some(2.0), None);
+        // 片段覆盖 [1.0, 3.0]。
+        let samples = [
+            -1.0,
+            0.0,
+            0.999,
+            1.0,
+            1.0 + 1e-9,
+            1.0 + 1e-7,
+            1.0 + 1e-5,
+            1.5,
+            3.0 - 1e-5,
+            3.0 - 1e-7,
+            3.0 - 1e-9,
+            3.0,
+            3.5,
+            10.0,
+            f64::NAN,
+            f64::INFINITY,
+        ];
+        for t in samples {
+            let mut probe = tl.clone();
+            let cut = probe.split_clip(&clip, t).is_some();
+            assert_eq!(
+                tl.can_split_at(&clip, t),
+                cut,
+                "can_split_at 与 split_clip 在 t={t} 处不一致"
+            );
+        }
+        // 不存在的 clip 一律不可分割（命令层据此直接返回，不打点）。
+        assert!(!tl.can_split_at("no-such-clip", 1.5));
+    }
+
+    /// 空操作分割必须**零副作用**：不能新建 clip、不能改几何、不能动工程长度。
+    #[test]
+    fn split_at_edge_is_noop() {
+        let mut tl = TimelineState::default();
+        let tid = tl.add_track(Some("T1".into()), None, None);
+        let clip = tl.add_clip(Some(tid), Some("A".into()), Some(1.0), Some(2.0), None);
+        let before_clips = tl.clips.len();
+        let before_project_sec = tl.project_sec;
+        for t in [1.0, 3.0, 0.5, 99.0] {
+            assert!(!tl.can_split_at(&clip, t), "t={t} 不该可分割");
+            assert!(tl.split_clip(&clip, t).is_none(), "t={t} 不该产生右段");
+        }
+        assert_eq!(tl.clips.len(), before_clips);
+        assert_eq!(tl.project_sec, before_project_sec);
     }
 
     // ── split_clips_at tests ──────────────────────────────────────
@@ -8334,6 +8446,9 @@ impl TimelineState {
             redo_depth: None,
             notes_markdown: None,
             param_selection_restore: None,
+            // 版本号由命令层（`AppState::timeline_payload`）填：内核不认识
+            // 「现在是第几版」，保持 None，由 serde 省略该字段。
+            revision: None,
         }
     }
 
@@ -8429,6 +8544,9 @@ impl TimelineState {
             redo_depth: None,
             notes_markdown: None,
             param_selection_restore: None,
+            // 版本号由命令层（`AppState::timeline_payload`）填：内核不认识
+            // 「现在是第几版」，保持 None，由 serde 省略该字段。
+            revision: None,
         }
     }
 
@@ -9577,59 +9695,13 @@ impl TimelineState {
     /// 返回的 `MoveClipPayload` 列表可直接交给 [`TimelineState::move_clips`]
     /// （锁定参数线联动与撤销检查点由调用方决定）。
     pub fn close_track_gaps_moves(&self, track_id: &str, from_sec: f64) -> Vec<MoveClipPayload> {
-        let from_ok = from_sec.is_finite();
-        let mut clips: Vec<&Clip> = self
+        let rows = self
             .clips
             .iter()
-            .filter(|c| c.track_id == track_id)
-            .collect();
-        // 稳定排序：按 start 升序，同起点保持现有顺序。
-        clips.sort_by(|a, b| {
-            a.start_sec
-                .partial_cmp(&b.start_sec)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        let mut moves: Vec<MoveClipPayload> = Vec::new();
-        // cursor：已就位内容（含未受影响部分）的最大尾端，即下一个带间隙
-        // Clip 的对齐目标；初值 0 = 工程最开头。
-        let mut cursor = 0.0f64;
-        // 前一个 Clip 的原始尾端（用于判定原始间距）与其位移（重叠跟随者
-        // 继承同一位移，保持相对间距）。
-        let mut prev_end = f64::NEG_INFINITY;
-        let mut prev_delta = 0.0f64;
-        for clip in clips {
-            let end = clip.start_sec + clip.length_sec;
-            if !from_ok || clip.start_sec <= from_sec {
-                // 点击位置之前（或恰好包含点击位置）的 Clip：不动，只推进游标。
-                cursor = cursor.max(end);
-                prev_end = end;
-                prev_delta = 0.0;
-                continue;
-            }
-            // 与前一个 Clip 的原始间距：正值 = 间隙（闭合），非正值 =
-            // 重叠/紧贴（继承位移，保持原交叠）。
-            let orig_gap = clip.start_sec - prev_end;
-            let delta = if !prev_end.is_finite() || orig_gap > 1e-9 {
-                cursor - clip.start_sec
-            } else {
-                prev_delta
-            };
-            if delta.abs() > 1e-9 {
-                let target = (clip.start_sec + delta).max(0.0);
-                moves.push(MoveClipPayload {
-                    clip_id: clip.id.clone(),
-                    start_sec: target,
-                    track_id: None,
-                });
-                prev_delta = target - clip.start_sec;
-            } else {
-                prev_delta = 0.0;
-            }
-            cursor = cursor.max(clip.start_sec + delta + clip.length_sec);
-            prev_end = end;
-        }
-        moves
+            .filter(|clip| clip.track_id == track_id)
+            .map(|clip| (clip.id.clone(), clip.start_sec, clip.length_sec))
+            .collect::<Vec<_>>();
+        close_track_gaps_moves_from(&rows, from_sec)
     }
 
     /// 应用静音切除变换：对每个 Clip 在静音边界切分（复用 [`Self::split_clip`]
@@ -9968,7 +10040,7 @@ impl TimelineState {
         &mut self,
         clip_id: &str,
         length_sec: Option<f64>,
-        gain: Option<f32>,
+        take_gain: Option<f32>,
         muted: Option<bool>,
         source_start_sec: Option<f64>,
         source_end_sec: Option<f64>,
@@ -9983,7 +10055,7 @@ impl TimelineState {
                 name: None,
                 start_sec: None,
                 length_sec,
-                gain,
+                take_gain,
                 muted,
                 source_start_sec,
                 source_end_sec,
@@ -10024,9 +10096,9 @@ impl TimelineState {
             if let Some(v) = patch.length_sec {
                 c.length_sec = v.max(0.0);
             }
-            if let Some(v) = patch.gain {
+            if let Some(v) = patch.take_gain {
                 // take 级：写投影，并同步进 active take（权威值在那里）。
-                c.gain = crate::gain::clamp_gain(v);
+                c.gain = crate::gain::clamp_take_gain(v);
             }
             if let Some(v) = patch.item_gain {
                 c.clip_gain = crate::gain::clamp_gain(v);
@@ -10183,8 +10255,8 @@ impl TimelineState {
                     };
                 let clip_len_for_sync = c.length_sec;
                 for take in &mut c.takes {
-                    if let Some(v) = content_sync_patch.gain {
-                        take.gain = crate::gain::clamp_gain(v);
+                    if let Some(v) = content_sync_patch.take_gain {
+                        take.gain = crate::gain::clamp_take_gain(v);
                     }
                     if let Some(v) = content_sync_patch.source_start_sec {
                         if v.is_finite() {
@@ -10298,7 +10370,9 @@ impl TimelineState {
                     name: Some(template.name.clone()),
                     start_sec: Some(template.start_sec),
                     length_sec: Some(template.length_sec),
-                    gain: template.gain,
+                    // 模板里的 `gain` 是 take 层（`CreateClipTemplatePayload::gain`）。
+                    take_gain: template.gain,
+                    item_gain: template.clip_gain,
                     muted: template.muted,
                     source_start_sec: template.source_start_sec,
                     source_end_sec: template.source_end_sec,
@@ -10324,7 +10398,6 @@ impl TimelineState {
                     //（见 commands::timeline::create_clips_bulk）。
                     channel_mode: None,
                     host_group_id: None,
-                    item_gain: None,
                 },
             );
 
@@ -10568,6 +10641,14 @@ impl TimelineState {
                         note.end_sec += delta;
                     }
                 }
+                // 【跨 Clip 聚合必须折算 item 层】旧 take 增益与旧 Clip(item)
+                // 增益在源 Clip 上是相乘关系；新容器只有 take 一层可承载，
+                // 因此把 item 折进 take，并把新 Clip 的 item 层保持 1.0。
+                // 源 Clip 静音时把它的 take 折成 0：内容仍在，切过去是静音，
+                // 而不是“打包后突然出声”。
+                let mute_fold = if source.muted { 0.0 } else { 1.0 };
+                packed.gain =
+                    crate::gain::clamp_take_gain(packed.gain * source.item_gain() * mute_fold);
                 packed_takes.push(packed);
             }
         }
@@ -11002,6 +11083,32 @@ impl TimelineState {
         }
     }
 
+    /// 该 Clip 能否在 `split_sec` 处被切开（不修改任何状态）。
+    ///
+    /// 【为什么要单独成方法】分割是**命令层先判后打点**的前提：
+    /// `checkpoint_timeline` 一旦执行就必然产生一个撤销步，而「在片段边界上
+    /// 分割」是一个**不改变任何字节**的操作 —— 用户按十次就在历史里留下十个
+    /// 空步，撤销要按十次才退回到真正的上一步。把判据抽出来之后，命令层可以
+    /// 在打点之前就把这类请求挡掉（见 `commands/timeline.rs::split_clip`）。
+    ///
+    /// 【边沿容差必须与 `split_clip` 完全一致】这里是 `1e-6`（秒），
+    /// `split_clip` 内部是同一个常数；前端 `splitTargets.ts` 的
+    /// `SPLIT_EDGE_EPSILON_SEC` 也是它。三处任何一处漂移，都会出现
+    /// 「前端说能切、后端说切不动」或反之 —— 因此这个判据**只允许**有这一份
+    /// 后端实现，前端不得再自行推导。
+    pub fn can_split_at(&self, clip_id: &str, split_sec: f64) -> bool {
+        let Some(clip) = self.clips.iter().find(|c| c.id == clip_id) else {
+            return false;
+        };
+        if !split_sec.is_finite() {
+            return false;
+        }
+        let start = clip.start_sec;
+        let end = start + clip.length_sec;
+        let split = split_sec.clamp(start, end);
+        split > start + 1e-6 && split < end - 1e-6
+    }
+
     pub fn split_clip(&mut self, clip_id: &str, split_sec: f64) -> Option<String> {
         let idx = self.clips.iter().position(|c| c.id == clip_id)?;
 
@@ -11013,6 +11120,14 @@ impl TimelineState {
         left.sync_take_from_flat();
         let start = left.start_sec;
         let end = start + left.length_sec;
+        // 【NaN 必须挡在这里】`f64::clamp` 对 NaN 返回 NaN，而下面两个比较
+        // 对 NaN 都是 false —— 于是 NaN 会**穿过**边沿判据，造出一段长度为
+        // NaN 的 clip（几何从此全是 NaN，渲染与音频调度都读不懂）。
+        // 这个入口同时被命令层（鼠标/触摸落点）与撤销重做路径复用，
+        // 任何一个上游把除零/空值算成 NaN 都会走到这里，因此守在最里面。
+        if !split_sec.is_finite() {
+            return None;
+        }
         let split = split_sec.clamp(start, end);
         if split <= start + 1e-6 || split >= end - 1e-6 {
             return None;
@@ -11600,6 +11715,7 @@ impl TimelineState {
                     cancel_flag: None,
                     progress: None,
                     cache_stats: None,
+                    gain_scope: crate::gain::GainScope::AppOwned,
                 },
             );
 
@@ -11623,6 +11739,7 @@ impl TimelineState {
                 // Loop 属性不再有意义，重置为关闭。
                 glued.loop_enabled = false;
                 glued.gain = 1.0;
+                glued.clip_gain = 1.0;
                 glued.muted = false;
                 glued.fade_in_sec = 0.0;
                 glued.fade_out_sec = 0.0;
@@ -12779,7 +12896,8 @@ mod gain_split_tests {
 
         {
             let clip = timeline.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
-            clip.normalize_takes();
+            // v8 起层间搬移只由一次性迁移负责；normalize 只物化投影。
+            clip.migrate_legacy_gain_split();
             assert!(
                 (clip.clip_gain - 0.5).abs() < 1e-6,
                 "the single gain must move to the item layer, got {}",
@@ -12790,7 +12908,7 @@ mod gain_split_tests {
                 "hoisting must not change what the clip sounds like"
             );
             // 幂等：再跑一遍不会把值乘两次。
-            clip.normalize_takes();
+            clip.migrate_legacy_gain_split();
             assert!((clip.audible_gain() - audible_before).abs() < 1e-6);
         }
     }
@@ -12956,4 +13074,58 @@ mod timeline_fingerprint_tests {
         selected.selected_clip_id = Some("ara-item-a".into());
         assert_ne!(timeline_fingerprint(&selected), base);
     }
+}
+
+/// 关闭间隙的**纯**计算：只需要片段的 `(id, start, length)`。
+///
+/// 【为什么把算法抽出来】同一个决定有两个调用点：一是 actor（持着时间线），二是宿主
+/// UI 线程（只能读一份**锁自由**的片段索引 —— 它绝不能去取 actor 的时间线锁，那正是
+/// "宿主线程不取 GUI 锁"这条不变量的落点）。算法留一份，两条路才不可能分叉。
+///
+/// 语义与 [`TimelineState::close_track_gaps_moves`] 逐字相同（见那里的说明）。
+pub fn close_track_gaps_moves_from(
+    clips: &[(String, f64, f64)],
+    from_sec: f64,
+) -> Vec<MoveClipPayload> {
+    let from_ok = from_sec.is_finite();
+    // 稳定排序：按 start 升序，同起点保持现有顺序。
+    let mut ordered = clips.to_vec();
+    ordered.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut moves: Vec<MoveClipPayload> = Vec::new();
+    // cursor：已就位内容（含未受影响部分）的最大尾端，即下一个带间隙 Clip 的对齐目标；
+    // 初值 0 = 工程最开头。
+    let mut cursor = 0.0f64;
+    // 前一个 Clip 的原始尾端（判定原始间距）与其位移（重叠跟随者继承同一位移）。
+    let mut prev_end = f64::NEG_INFINITY;
+    let mut prev_delta = 0.0f64;
+    for (id, start_sec, length_sec) in ordered {
+        let end = start_sec + length_sec;
+        if !from_ok || start_sec <= from_sec {
+            // 点击位置之前（或恰好包含点击位置）的 Clip：不动，只推进游标。
+            cursor = cursor.max(end);
+            prev_end = end;
+            prev_delta = 0.0;
+            continue;
+        }
+        let orig_gap = start_sec - prev_end;
+        let delta = if !prev_end.is_finite() || orig_gap > 1e-9 {
+            cursor - start_sec
+        } else {
+            prev_delta
+        };
+        if delta.abs() > 1e-9 {
+            let target = (start_sec + delta).max(0.0);
+            moves.push(MoveClipPayload {
+                clip_id: id,
+                start_sec: target,
+                track_id: None,
+            });
+            prev_delta = target - start_sec;
+        } else {
+            prev_delta = 0.0;
+        }
+        cursor = cursor.max(start_sec + delta + length_sec);
+        prev_end = end;
+    }
+    moves
 }

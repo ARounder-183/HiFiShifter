@@ -22,7 +22,16 @@
  * `--qt-*` 令牌同样能继承主题（见 `src/index.css` 的度量令牌块）。
  */
 import { Box, Button, IconButton } from "@radix-ui/themes";
-import { cloneElement, isValidElement, type ComponentPropsWithoutRef, type ReactNode } from "react";
+
+import { useDensity, radixSizeFor } from "./density";
+import {
+    cloneElement,
+    isValidElement,
+    type ComponentPropsWithoutRef,
+    type CSSProperties,
+    type ReactNode,
+    type Ref,
+} from "react";
 
 import { cx } from "./cx";
 
@@ -82,6 +91,15 @@ export interface AppButtonProps extends Omit<
     intent?: AppButtonIntent;
     size?: AppButtonSize;
     emphasis?: AppButtonEmphasis;
+    /**
+     * 转发到原生 `<button>` 的 ref。
+     *
+     * 【为什么要显式声明】React 19 允许 `ref` 作为普通 prop 传递，但 `ref` 不在
+     * `ComponentPropsWithoutRef` 的类型里 —— 不写这一行，`tsc -b` 会报
+     * "Property 'ref' does not exist"。与 `AppIconButtonProps` 的同名字段同一理由：
+     * 锚定菜单要把这个按钮当锚点。
+     */
+    ref?: Ref<HTMLButtonElement>;
 }
 
 /**
@@ -100,11 +118,18 @@ export function AppButton({
     ...rest
 }: AppButtonProps) {
     const base = INTENT_PROPS[intent];
+    /*
+     * 尺寸仍由调用方的语义档决定，但**触摸形态下会被密度层抬到 40px**（Radix size="3"）。
+     * 【为什么不再写死 `size="2" | "1"`】触摸上 24/32px 都点不中（iOS HIG 的下限是
+     * 44px，Radix size=3 是 40px + 4px 内边距，实测命中区足够）。密度层是唯一判据，
+     * 于是"哪些按钮该变大"不需要在这里逐个判断 —— 见 `ui/density.ts`。
+     */
+    const density = useDensity(size === "md" ? "form" : "compact");
     return (
         <Button
             {...base}
             variant={emphasis === undefined ? base.variant : emphasis}
-            size={size === "md" ? "2" : "1"}
+            size={radixSizeFor(density)}
             className={cx("app-button", className)}
             {...rest}
         />
@@ -130,17 +155,41 @@ const ICON_PX: Record<AppIconSize, string> = {
  * 非合法元素（字符串、null）原样返回，允许调用方传任意节点。
  */
 function withIconSize(icon: ReactNode, size: AppIconSize): ReactNode {
-    if (!isValidElement<{ width?: number | string; height?: number | string }>(icon)) return icon;
+    if (
+        !isValidElement<{
+            width?: number | string;
+            height?: number | string;
+            style?: CSSProperties;
+        }>(icon)
+    )
+        return icon;
     const px = ICON_PX[size];
     // 调用方显式传了尺寸则以调用方为准：有些图标（如带角标的复合图）需要特例。
     if (icon.props.width !== undefined || icon.props.height !== undefined) return icon;
-    return cloneElement(icon, { width: px, height: px });
+    /*
+     * 【为什么写在 style 而不是 width/height 属性】令牌的值是 `var(--qt-icon-md)`，
+     * 而 `<svg width>` 是 **presentation attribute**：它只接受长度字面量，解析不了
+     * CSS 变量。浏览器于是每渲染一个按钮就在控制台报两条
+     *     Error: <svg> attribute width: Expected length, "var(--qt-icon-md…".
+     * 尺寸也不会生效（退回 24px）。CSS 属性则正常解析变量，且优先级高于
+     * presentation attribute —— 同样的令牌、同样的意图，只是写在了能被解析的地方。
+     * 这是模拟器 + DevTools 协议抓到的控制台错误，桌面端只是没人翻控制台。
+     */
+    return cloneElement(icon, { style: { width: px, height: px, ...icon.props.style } });
 }
 
 export interface AppIconButtonProps extends Omit<
     ComponentPropsWithoutRef<typeof IconButton>,
     "variant" | "color" | "size" | "children"
 > {
+    /**
+     * 转发到原生 `<button>` 的 ref。
+     *
+     * 【为什么要显式声明】React 19 允许 `ref` 作为普通 prop 传递，但**类型**上仍然
+     * 需要组件自己把它写进 props —— 否则 `tsc -b`（项目引用那套配置）会报
+     * "Property 'ref' does not exist"。撤销/重做按钮就靠它把锚点交给右键历史面板。
+     */
+    ref?: Ref<HTMLButtonElement>;
     /** 图标节点。尺寸由本组件统一注入，调用方不要自己写 width/height。 */
     icon: ReactNode;
     /**
@@ -169,6 +218,16 @@ export interface AppIconButtonProps extends Omit<
      */
     emphasis?: "neutral" | "accent";
     /**
+     * 填充家族（不激活时的变体）。
+     *
+     * 【为什么需要它】`active` 只能表达"实心 / 幽灵"两档，而传输栏与录音键需要
+     * **soft**（半透明强调色，例如待机态的 Stop）这一档。没有这个属性时，调用方只能
+     * 绕过原语直接写 `IconButton`，于是同一个工具栏里又出现两套盒模型。
+     *
+     * 缺省 `ghost`：与既有全部调用点逐字一致，升级不会改变任何现网按钮。
+     */
+    surface?: "ghost" | "soft" | "solid";
+    /**
      * 右下角小三角：提示"这枚按钮还有右键菜单"。
      *
      * 【为什么由原语承担】它是**交互协议**的一部分（"右键还有东西"），不是某一枚
@@ -196,6 +255,7 @@ export function AppIconButton({
     active = false,
     intent = "default",
     emphasis = "neutral",
+    surface = "ghost",
     size = "md",
     menuCaret = false,
     className,
@@ -206,11 +266,17 @@ export function AppIconButton({
      * 这与它替换掉的旧写法逐字节一致，因此那 18 个开关恢复原色。
      */
     const color = intent === "danger" ? "red" : emphasis === "accent" ? undefined : "gray";
+    /*
+     * 【为什么图标按钮也读密度】它的硬编码 `size="1"`（24px）是桌面上的正确值，
+     * 但在触摸上 24px 的图标按钮**必然点错** —— 而它恰恰是移动端最主要的控件
+     * （传输栏、工具栏、抽屉）。"图标按钮固定 24px"这条约定只在有光标精度的设备上成立。
+     */
+    const density = useDensity("compact");
     return (
         <IconButton
-            variant={active ? "solid" : "ghost"}
+            variant={active ? "solid" : surface}
             color={color}
-            size="1"
+            size={radixSizeFor(density)}
             data-tooltip={tooltip}
             aria-label={tooltip}
             aria-pressed={active || undefined}

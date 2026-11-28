@@ -141,7 +141,11 @@ pub fn save(verbosity: LogVerbosity) -> Result<LogSettingsFile, String> {
 }
 
 pub fn save_to(dir: &Path, verbosity: LogVerbosity) -> Result<LogSettingsFile, String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("create config dir failed: {e}"))?;
+    // 【为什么错误里要带路径】移动端"改档直接报错"的真实原因是**配置目录没解析出来**
+    // （退到了不可写的临时目录）。只说 "create config dir failed: Permission denied"
+    // 的话，用户与我们都看不出它到底想写哪儿 —— 带上路径，一条日志就能定位。
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("create config dir failed: {} ({e})", dir.display()))?;
     with_write_lock(dir, || write_settings(dir, verbosity))
 }
 
@@ -159,7 +163,8 @@ fn write_settings(dir: &Path, verbosity: LogVerbosity) -> Result<LogSettingsFile
         .map_err(|e| format!("serialize log settings failed: {e}"))?;
     let target = dir.join(LOG_SETTINGS_FILE_NAME);
     let tmp = dir.join(format!("{LOG_SETTINGS_FILE_NAME}.tmp"));
-    std::fs::write(&tmp, &data).map_err(|e| format!("write log settings failed: {e}"))?;
+    std::fs::write(&tmp, &data)
+        .map_err(|e| format!("write log settings failed: {} ({e})", tmp.display()))?;
     match crate::util::replace_file_atomically(&tmp, &target) {
         Ok(()) => Ok(file),
         Err(error) => {

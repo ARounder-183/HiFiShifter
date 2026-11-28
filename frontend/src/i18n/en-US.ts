@@ -200,6 +200,7 @@ export const enUS = {
     export_dialog_browse: "Browse",
     export_dialog_example_path: "Example output path: {path}",
     export_dialog_open_folder: "Open Folder",
+    export_dialog_save_to_location: "Save to...",
     export_dialog_name_pattern: "Track Name Pattern",
     export_pattern_placeholders: "Placeholders:",
     import_files_selected: "{count} file selected|{count} files selected",
@@ -731,6 +732,9 @@ export const enUS = {
     status_clip_edit_rejected: "Clip edit rejected",
     status_track_edit_rejected: "Track edit rejected",
     status_import_done: "Import done",
+    status_import_waiting_host: "Waiting for the host to hand over audio",
+    status_import_audio_stalled:
+        "The host created the item but never handed over its audio; redo the edit in the host or undo the import",
     status_import_failed: "Import failed",
     status_project_imported: "Project imported",
     status_vocalshifter_project_imported: "VocalShifter project imported",
@@ -1010,6 +1014,7 @@ export const enUS = {
     ctx_replace_midi: "Replace MIDI",
     ctx_replace_midi_all: "Replace MIDI All",
     ctx_split_at_playhead: "Split at Playhead",
+    ctx_split_here: "Split Here",
     ctx_silence_detection: "Silence Detection...",
     silence_method: "Detection",
     silence_method_rms: "RMS (energy)",
@@ -1127,8 +1132,9 @@ export const enUS = {
     fade_info_side_type_label: "{side} {type}",
     common_length: "Length",
 
-    gain_value_tooltip: "Gain: {gain} dB",
-    gain_value_tooltip_drag: "Gain: {gain} dB ({delta} dB)",
+    gain_value_tooltip: "Gain: {gain}",
+    gain_value_tooltip_drag: "Gain: {gain} ({delta})",
+    gain_host_controlled: "Host controls this gain",
     clip_pitch_drag_tooltip: "Pitch offset: {delta} ct",
     track_change_color: "Change track color",
     track_clone: "Clone Track",
@@ -1293,6 +1299,7 @@ export const enUS = {
     kb_modifier_copy_drag: "Copy Drag (hold while dragging clip body)",
     kb_modifier_crossfade_grip: "Crossfade Reverse Mode (hold while dragging crossfade grip)",
     kb_modifier_fade_curvature: "Fade Curvature (hold while dragging fade envelope / crossfade)",
+    fade_axis_s: "S axis",
     fade_menu_curvature_hint: "Curvature (hold {keys} and drag the envelope)",
     kb_modifier_fade_shape_cycle: "Cycle Fade Shape (hold while clicking fade envelope)",
     kb_modifier_horizontal_zoom:
@@ -1524,7 +1531,13 @@ export const enUS = {
     kernel_unavailable_diagnostics: "Copy diagnostics",
     kernel_unavailable_copied: "Copied",
     ruler_label_spacing: "Label Spacing",
-    show_playhead_time_in_track_header: "Show playhead time in track header",
+    playhead_time_readout: "Playhead time",
+    playhead_time_placement: "Playhead time position",
+    playhead_time_placement_auto: "Automatic",
+    playhead_time_placement_toolbar: "Toolbar",
+    playhead_time_placement_status_bar: "Status bar",
+    playhead_time_placement_track_header: "Track header",
+    playhead_time_placement_hidden: "Hidden",
     copy_playhead_time: "Copy Playhead Time",
     sync_timeline_view: "Sync Timeline View",
     sync_timeline_view_tooltip:
@@ -2352,6 +2365,37 @@ export const enUS = {
     cap_reason_plugin_only: "Only available in the plug-in",
     cap_reason_piano_roll_only: "Only applies to the parameter editor",
     cap_reason_not_in_plugin: "Not available in the plug-in",
+    // ── 形态能力（surface capabilities）─────────────────────────────
+    // 移动端与桌面端的差异不是"功能少一点"，而是**输入通道不同**：没有悬停、
+    // 没有滚轮、没有右键。界面必须说清"为什么这里没有这个入口"，否则用户看到的
+    // 只是"这个按钮不见了"。
+    surface_reason_touch_input: "Touch input has no such channel",
+    surface_reason_no_path_access: "Apps cannot browse arbitrary folders on this platform",
+    surface_reason_not_on_this_surface: "Not available on this platform",
+    // 移动端抽屉的分段标题。桌面用菜单栏（文件/编辑/视图…），移动端没有菜单栏，
+    // 但分组的**语义**要一致，否则同一批功能在两个形态里归到了不同的类。
+    mobile_section_playback: "Playback",
+    mobile_section_mode: "Mode",
+    mobile_section_clip: "Clips",
+    mobile_section_param_block: "Parameter blocks",
+    mobile_section_project: "Project",
+    mobile_section_param_editor: "Parameter editor",
+    mobile_section_piano_roll: "Piano roll",
+    mobile_project_library: "Project Library",
+    mobile_project_import: "Import from device...",
+    mobile_project_loading: "Loading...",
+    mobile_project_empty: "No projects yet. Save one to see it here.",
+    log_file_disabled_hint:
+        "Log verbosity is set to None, so no log file is being written. Set Help → Log verbosity to Low or higher, then restart the app.",
+    mobile_menu_title: "Menu",
+    mobile_toolbar_title: "Toolbar",
+    mobile_actions_title: "Actions",
+    mobile_windows_section: "Windows",
+    mobile_window_shown: "Shown",
+    mobile_window_hidden: "Closed",
+    mobile_window_close_current: "Close Current Window",
+    mobile_search_placeholder: "Search actions...",
+    mobile_search_empty: "No matching action",
     // ── 片段菜单：REAPER take 音高互转 ─────────────────────────────
     ctx_host_pitch: "REAPER Pitch",
     ctx_host_pitch_import: "Import REAPER Take Pitch",

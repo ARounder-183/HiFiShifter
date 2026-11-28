@@ -800,7 +800,7 @@ REAPER manages ARA plug-ins **per track**: it only hands the plug-in the audio o
 
 ### Model Files and Sharing
 
-The plug-in needs FCPE, HNSEP, HiFiGAN, and related models (about 200 MB in total at present). The unified installer puts them into the platform shared library (Windows `%ProgramData%\HiFiShifter\models\<model version>`; macOS `/Library/Application Support/HiFiShifter/models/<model version>`; Linux `$XDG_DATA_HOME/HiFiShifter/models/<model version>` or `/usr/local/share/HiFiShifter/models/<model version>`), which the standalone app and every plug-in read — the 200 MB is not duplicated. A manual-copy plug-in bundle carries its own models and does not depend on the shared library.
+The plug-in needs FCPE, HNSEP, HiFiGAN, and related models (the model manifest is the only source of truth for their size). The unified installer puts them into the platform shared library (Windows `%ProgramData%\HiFiShifter\models\<model version>`; macOS `/Library/Application Support/HiFiShifter/models/<model version>`; Linux `$XDG_DATA_HOME/HiFiShifter/models/<model version>` or `/usr/local/share/HiFiShifter/models/<model version>`), which the standalone app and every plug-in read — the weights are not duplicated. A manual-copy plug-in bundle carries its own models and does not depend on the shared library.
 
 - The model version is derived from the model content: an upgrade lands in a new directory, and reinstalling the same version is skipped.
 - Uninstalling the plugin does **not** delete the shared model library (the standalone app uses it too). If you really want it gone, delete the shared model directory for your platform by hand.

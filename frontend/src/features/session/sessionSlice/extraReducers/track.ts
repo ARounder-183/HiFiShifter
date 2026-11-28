@@ -124,6 +124,8 @@ export function registerTrack(builder: ActionReducerMapBuilder<SessionState>) {
                 state.bpm = echoedBpm;
             }
             if (payload.tracks && payload.clips) {
+                // 传输 / Tempo 路径不是手势驱动的编辑：它们各有自己的乱序守卫，
+                // 快照必须立刻生效（否则光标与网格会在旧回声值之间来回抽搐）。
                 applyTimelineState(state, payload as TimelineState, { force: true });
             }
         })
@@ -174,6 +176,8 @@ export function registerTrack(builder: ActionReducerMapBuilder<SessionState>) {
                 state.playbackAnchorSec = state.playheadSec;
             }
             if (payload.tracks && payload.clips) {
+                // 传输 / Tempo 路径不是手势驱动的编辑：它们各有自己的乱序守卫，
+                // 快照必须立刻生效（否则光标与网格会在旧回声值之间来回抽搐）。
                 applyTimelineState(state, payload as TimelineState, { force: true });
             }
         })
@@ -246,10 +250,6 @@ export function registerTrack(builder: ActionReducerMapBuilder<SessionState>) {
             state._latestEditRequestId = action.meta.requestId;
         })
         .addCase(setProjectLengthRemote.fulfilled, (state, action) => {
-            // 乱序守卫：见 setClipStateRemote.fulfilled。
-            if (state._latestEditRequestId !== action.meta.requestId) {
-                return;
-            }
             const payload = action.payload as {
                 ok?: boolean;
             } & TimelineState;

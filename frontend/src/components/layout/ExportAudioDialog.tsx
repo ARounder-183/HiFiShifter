@@ -30,6 +30,7 @@ import {
     nearestAllowedSampleRate,
     sampleRateOptions,
 } from "../../utils/exportFormat";
+import { appForm } from "../../services/hostDetect";
 import { ProgressBar } from "../ProgressBar";
 import {
     DISPLAY_TICK_MS,
@@ -1350,9 +1351,28 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                         ? [
                               {
                                   id: "open-folder",
-                                  label: tf("export_dialog_open_folder"),
+                                  /*
+                                   * 同一个按钮在两种形态下做的是**同一件事**："把产物交给用户"。
+                                   *
+                                   * - 桌面：在文件管理器里定位并选中它们（`reveal`）。
+                                   * - 移动端：系统文件管理器不接受"高亮几个文件"的请求，
+                                   *   而产物落在 `Android/media/<pkg>/HiFiShifter`（用户可见，
+                                   *   但需要绕一层"文件"应用才能拿去用）。这里改成走系统的
+                                   *   "保存到"对话框，直接把文件放到用户挑的位置 ——
+                                   *   那是移动端唯一真正"交出去"的动作。
+                                   */
+                                  label:
+                                      appForm() === "mobile" && lastOutputPaths.length === 1
+                                          ? tf("export_dialog_save_to_location")
+                                          : tf("export_dialog_open_folder"),
                                   autoClose: false,
                                   onClick: () => {
+                                      if (appForm() === "mobile" && lastOutputPaths.length === 1) {
+                                          void coreApi
+                                              .saveOutputToLocation(lastOutputPaths[0])
+                                              .catch(() => undefined);
+                                          return;
+                                      }
                                       // 优先定位并选中所有已渲染文件；没有产物路径时退化为
                                       // 打开目标文件夹（后端据路径类型自动分派）。
                                       const targets =

@@ -16,9 +16,9 @@ import { createAsyncThunk } from "@reduxjs/toolkit";
 
 import type { AppDispatch, RootState } from "../../app/store";
 import { settingsApi } from "../../services/api/settings";
-import { hostMode } from "../../services/hostCapabilities";
+import { appForm } from "../../services/hostDetect";
 import { applyDockPreset, setDockLayout } from "./dockSlice";
-import { findMainTabset } from "./dockSchema";
+import { dockModeForForm, findMainTabset } from "./dockSchema";
 import { restoreDetachedWindows } from "./dockApi";
 import { insertForm } from "./dockTree";
 import { MAIN_ROOT_ID } from "./dockTypes";
@@ -34,8 +34,11 @@ import { MAIN_ROOT_ID } from "./dockTypes";
  * 判据：**凡是"正确取值取决于窗口有多少像素"的设置分模式**；locale / 快捷键 / 主题 /
  * 设备选择这些"取决于用户是谁"的仍然共用同一个键。
  */
-function dockFieldKey(): "dock" | "dockPlugin" {
-    return hostMode() === "plugin" ? "dockPlugin" : "dock";
+function dockFieldKey(): "dock" | "dockPlugin" | "dockMobile" {
+    const form = appForm();
+    if (form === "plugin") return "dockPlugin";
+    if (form === "mobile") return "dockMobile";
+    return "dock";
 }
 
 export const loadDockSettings = createAsyncThunk("dock/loadSettings", async () => {
@@ -50,20 +53,25 @@ export const loadDockSettings = createAsyncThunk("dock/loadSettings", async () =
      * 判据放在这里而不是布局内部：布局 schema 由前端整体归一化，多一个顶层字段
      * 会跟着导入/导出/预设一起流动，没必要。
      */
-    const isPluginSlot = dockFieldKey() === "dockPlugin";
+    const slot = dockFieldKey();
     const storedMode = (stored as { mode?: unknown } | null)?.mode;
+    // 槽位归属标记：`dockPlugin` 必须是 `mode: "plugin"`，`dockMobile` 必须是
+    // `mode: "mobile"`。历史上有过一条后端迁移把独立 App 的 `dock` **复制**进
+    // `dockPlugin`，那些被写坏的副本没有标记 —— 照常采纳的话，插件/移动端的出厂
+    // 布局永远不会生效，用户看到的是为大窗口设计的上下堆叠。
+    const expectedMode = slot === "dockPlugin" ? "plugin" : slot === "dockMobile" ? "mobile" : null;
     const layout =
-        isPluginSlot && storedMode !== "plugin"
+        expectedMode !== null && storedMode !== expectedMode
             ? null
             : ((stored as { layout?: unknown } | null)?.layout ?? null);
     return {
         settings: stored,
         // 布局的**取值**由前端的 `normalizeDockLayout` 收口，这里不做假设。
         layout,
-        // 形态决定**出厂布局**（插件里是"时间轴 / 参数编辑器"并列标签页，活动标签是
-        // 参数编辑器）以及插件首次使用的轨道头宽度。两者都是"正确取值取决于窗口有多少
+        // 形态决定**出厂布局**（插件：并列标签页 / 活动标签参数编辑器；移动：单标签组 /
+        // 活动标签时间轴）以及首次使用的轨道头宽度。两者都是"正确取值取决于窗口有多少
         // 像素"的同一类决定，因此一起由形态决定 —— 见 `createDefaultDockLayout`。
-        mode: hostMode(),
+        mode: dockModeForForm(appForm()),
     };
 });
 
@@ -76,11 +84,15 @@ export const persistDockSettings = createAsyncThunk(
         // 里 `DockPersistedSettings` 的注释）。
         // 显式分支而不是计算键：计算键在 `Partial<UiSettings>` 上会退化成索引签名，
         // 写错字段名也不会被类型检查抓到。
+        // `mode` 是插件 / 移动槽位的归属标记，见 `loadDockSettings`。
+        // 显式三分支而不是计算键：计算键在 `Partial<UiSettings>` 上会退化成索引签名，
+        // 写错字段名也不会被类型检查抓到。
         await settingsApi.saveUiSettings(
-            hostMode() === "plugin"
-                ? // `mode` 是插件槽位的归属标记，见 `loadDockSettings`。
-                  { dockPlugin: { ...dock.settings, mode: "plugin", layout: dock.layout } }
-                : { dock: { ...dock.settings, layout: dock.layout } },
+            appForm() === "plugin"
+                ? { dockPlugin: { ...dock.settings, mode: "plugin", layout: dock.layout } }
+                : appForm() === "mobile"
+                  ? { dockMobile: { ...dock.settings, mode: "mobile", layout: dock.layout } }
+                  : { dock: { ...dock.settings, layout: dock.layout } },
         );
     },
 );

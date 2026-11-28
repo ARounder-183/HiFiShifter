@@ -66,6 +66,147 @@ impl std::ops::Deref for NoMusic {
     }
 }
 
+/// 一次 `new_pass` 是被哪一闸宣布的。
+///
+/// 【为什么只有这五种】`playback.rs` 里能让位置重锚的入口就这几个；捕获侧的
+/// "窗口用尽 / 提级"刻意**不在**其中 —— 本轮的整个要点就是：一条钉住的时间轴
+/// 不许被窗口边界重锚。一个永远不会产生的理由码不该出现在词表里。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PassReason {
+    /// 新一次播放 / 新一次离线 pass。
+    Epoch = 1,
+    /// 宿主报了新位置（真 seek）。
+    Seek = 2,
+    /// 循环回卷。
+    Cycle = 4,
+    /// 宿主停顿后重新升起 kPlaying（中间没有 kPlaying=0 的块）。
+    Edge = 8,
+    /// 传输会话被复位（`setProcessing(false)` / 组件停止）。
+    Reset = 16,
+}
+
+impl PassReason {
+    pub(super) fn code(self) -> u32 {
+        self as u32
+    }
+
+    pub(super) fn from_code(code: u32) -> Option<Self> {
+        match code {
+            1 => Some(Self::Epoch),
+            2 => Some(Self::Seek),
+            4 => Some(Self::Cycle),
+            8 => Some(Self::Edge),
+            16 => Some(Self::Reset),
+            _ => None,
+        }
+    }
+
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Epoch => "epoch",
+            Self::Seek => "seek",
+            Self::Cycle => "cycle",
+            Self::Edge => "edge",
+            Self::Reset => "reset",
+        }
+    }
+}
+
+/// 一条喂入流**为什么还没有工程锚点**。
+///
+/// 【为什么必须把「不知道」分类】「这一块没有工程位置」有两种完全不同的含义：
+///
+///   * **我们还没算出来**（映射表为空 / 正在重建 / 内容对上了但表里没有那一片）——
+///     那是缺陷，该报警；
+///   * **按设计就不该有**（这一块是数字静音，或只有 128 帧）—— 此时直通宿主原声是
+///     唯一正确的输出，连日志都不该是 WARN。
+///
+/// 混成一个 `Option::None`，现场就只能看见一串长得像老缺陷的 WARN：渲染开头 1~4 条
+/// `no project mapping`，而它们对应的正是「前 1088 帧是 −102 dBFS 的数字静音」。
+/// 一个和真实缺陷同形的读数，会让下一次现场把它当成回归。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum AnchorAbsence {
+    /// 有锚点（正常）。
+    #[default]
+    None = 0,
+    /// 映射表为空或正在写：**我们不知道**这一块该在哪。
+    Mapping = 1,
+    /// 这一块是静音 —— 探测按设计不消耗这次机会（静音块在任何锚点下都是静音）。
+    Silent = 2,
+    /// 这一块太短（折不出足够的包络格），同上。
+    Short = 3,
+    /// 素材在这一段没有覆盖（洞），或整段比一块还短。
+    NoMaterial = 4,
+    /// 周期性素材：对上了不止一处，不猜。
+    Ambiguous = 5,
+    /// 这一块超了探测的乘加预算。
+    Busy = 6,
+    /// 内容说得出位置，但映射表里没有那一片（表与素材不同代）。
+    Unmapped = 7,
+    /// 映射模式是 raw，而宿主还没给过 raw 起点。
+    NoRaw = 8,
+    /// 喂入帧已经越过这一片能覆盖的末尾（片尾之后的预取块）。
+    PastEnd = 9,
+}
+
+impl AnchorAbsence {
+    pub(super) fn code(self) -> u8 {
+        self as u8
+    }
+
+    pub(super) fn from_code(code: u8) -> Self {
+        match code {
+            1 => Self::Mapping,
+            2 => Self::Silent,
+            3 => Self::Short,
+            4 => Self::NoMaterial,
+            5 => Self::Ambiguous,
+            6 => Self::Busy,
+            7 => Self::Unmapped,
+            8 => Self::NoRaw,
+            9 => Self::PastEnd,
+            _ => Self::None,
+        }
+    }
+
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Mapping => "mapping",
+            Self::Silent => "silent",
+            Self::Short => "short",
+            Self::NoMaterial => "no-material",
+            Self::Ambiguous => "ambiguous",
+            Self::Busy => "busy",
+            Self::Unmapped => "unmapped",
+            Self::NoRaw => "no-raw",
+            Self::PastEnd => "past-end",
+        }
+    }
+
+    /// 从内容探测的「未决原因」映射过来。
+    ///
+    /// 【为什么是映射而不是重新判一次】探测已经回答过「为什么没定稿」，这里再判一次
+    /// 就多了一份会漂移的判据。两边共用同一个词表，`silent` 在日志里就只有一个含义。
+    pub(super) fn from_reason(reason: hifishifter_capture::anchor_probe::ProbeReason) -> Self {
+        use hifishifter_capture::anchor_probe::ProbeReason;
+        match reason {
+            ProbeReason::Silent => Self::Silent,
+            ProbeReason::Short => Self::Short,
+            ProbeReason::NoMaterial => Self::NoMaterial,
+            ProbeReason::Ambiguous => Self::Ambiguous,
+            ProbeReason::Busy => Self::Busy,
+        }
+    }
+    /// 这个原因是否**按设计**（输出直通就是正确答案，不是故障）。
+    ///
+    /// 【只有两个】静音与过短：两者都让「内容定位」无从下手，而两者的输出本来
+    /// 就是静音 —— 直通不会改变任何一个样本。其余原因都意味着**我们本该知道**
+    /// 这一块在哪却没有答案，那才是需要人看一眼的事。
+    pub(super) fn is_expected(self) -> bool {
+        matches!(self, Self::Silent | Self::Short)
+    }
+}
 #[derive(Default)]
 pub(super) struct StreamGeometry {
     pub(super) seen: AtomicBool,
@@ -170,6 +311,77 @@ pub(super) struct StreamGeometry {
     pub(super) rebase_count: AtomicU64,
     /// 本流的 pass 序号（R1 递增）。`0` = 还没有过任何一块。
     pub(super) pass: AtomicU64,
+    /// 宣布最近一次 `new_pass` 的**理由**（[`PassReason`] 的位码）。
+    ///
+    /// 【为什么必须记】`[capture] pass begin` 此前只报 run/pass/gap_ms/raw/local，
+    /// 不报"为什么"。于是"每 1.024 s 重开一次"这种灾难在现场只能靠把产物切块算互相关
+    /// 才能发现，而无法直接点名是哪一闸（新 epoch / seek / 循环回卷 / 起播上升沿）。
+    pub(super) pass_reason: AtomicU32,
+    /// 位置**倒退**且带 `new_pass` 的次数。
+    ///
+    /// 【它补的是 `clock_rewinds` 的洞】那一位带 `&& !new_pass`（见 `playback.rs`），
+    /// 而每一次重锚都伴随 `new_pass` —— 于是 31 次回退一次都没被计数，读数看起来
+    /// 完全健康。同一个现象的两种数法，必然让其中一种骗人。
+    pub(super) pass_rewinds: AtomicU64,
+    /// 本流此刻属于哪一类时间轴（`FeedKind::code`：0 = transport、1 = pinned）。
+    pub(super) feed: AtomicU8,
+    /// 本次喂入流已经走了多少块 / 多少帧（`feed end` 的读数）。
+    pub(super) feed_blocks: AtomicU64,
+    pub(super) feed_frames: AtomicU64,
+    /// 起点窗口是否已经用掉（一次性）。跨块存在，所以必须是文档级原子。
+    pub(super) window_spent: AtomicBool,
+    /// "钉住 + 有信号"已经累积了多少帧（提级的判据，见 `FEED_PROMOTE_SEC`）。
+    pub(super) pinned_signal_frames: AtomicU64,
+    /// 这条喂入流从起点起已经喂进来的帧数（喂入域）。
+    ///
+    /// 【为什么必须存在几何里】`TransportSession` 每块都是临时重建的，而这条时间轴
+    /// 要跨块存活（见 `TapeCursor`）。它是**喂入域**的计数：工程位置由
+    /// `capture::project_mapping` 从它换算出来，两者不共用任何一个变量。
+    pub(super) feed_frames_total: AtomicU64,
+    /// 本喂入流的**工程锚点**（`project_map::FeedAnchor` 的原子形态）。
+    ///
+    /// 【为什么放在几何里而不是 `ExtensionOwner`】它属于**这一条喂入流**，和
+    /// `feed_frames_total` 同一生命周期：首块选一次、跨块读、`reset_transport_session`
+    /// 清掉。三条流各有一条喂入流，所以各存一份。
+    ///
+    /// 【为什么不存成 `Mutex<Option<FeedAnchor>>`】读方是音频回调，每块一次。五个原子
+    /// 读换一把锁 —— 这条通路上的锁已经吃过一次亏（见 `FeedTimeline` 的说明）。
+    pub(super) anchor_project_zero: AtomicI64,
+    /// 本条喂入流还能走多远（帧）；0 = 没有锚点。
+    pub(super) anchor_feed_end: AtomicI64,
+    pub(super) anchor_take: AtomicU64,
+    /// `AnchorSource` 的编码：0 = 没有锚点，1 = 播放头，2 = 片段起点。
+    pub(super) anchor_source: AtomicU8,
+    /// 建锚时映射表的代次（投影重建 ⇒ 这条锚点可能指向已经不在的片段）。
+    pub(super) anchor_revision: AtomicU64,
+    /// 本喂入流最近一次求解锚点时**为什么没拿到**（`AnchorAbsence` 的编码；0 = 有）。
+    ///
+    /// 【为什么按流存】三条流各有自己的喂入流；prefetch 的静音块不该把实时流的
+    /// 读数改掉。写入方是求解那一块的线程（音频线程），读方是同一块的输出仲裁 ——
+    /// 同一个块内读写，没有跨块陈旧窗口。
+    pub(super) anchor_absent: AtomicU8,
+    /// 建锚时这条流的首块 raw（换一条喂入流 ⇒ 重选）。
+    pub(super) anchor_first_raw: AtomicI64,
+    /// 本喂入流最近一次**内容探测**的读数（f32 位模式）：主候选相关。
+    ///
+    /// 【为什么存在几何里】`feed begin` 那一行要报 `probe=0.997/0.121@720000`，而它
+    /// 只在 `anchor_source == Content` 时有意义。三者同一生命周期：首块算一次、跨块读、
+    /// `feed end` 清掉。
+    pub(super) anchor_score: AtomicU32,
+    /// 次优候选相关（f32 位模式）。
+    pub(super) anchor_second: AtomicU32,
+    /// 内容判定的 `offset`（喂入流第 0 帧的工程帧）。
+    pub(super) anchor_probe_offset: AtomicI64,
+    /// 已经写过日志的探测结论位（见 `playback::note_anchor_probe`）。
+    ///
+    /// 【为什么是位图】一次探测可能连着给出 `silent` 好几次才定稿，而每条喂入流只该留
+    /// 一行 `silent` 与一行最终结论。按结论分桶，既不会把重复的刷屏，也不会把「为什么
+    /// 没按内容判」吞掉。
+    pub(super) anchor_probe_logged: AtomicU32,
+    /// 第一块的宿主 raw（只用于诊断；`NO_POSITION` = 未知）。
+    pub(super) feed_first_raw: NoPosition,
+    /// 这条喂入流是否已经完成 0.5 s 提级。
+    pub(super) feed_promoted: AtomicBool,
     /// 锚点那一刻 `continuousTimeSamples` / `projectTimeMusic` 的读数。
     ///
     /// 【为什么存锚而不是累加增量】两者都是**绝对**读数（相对工程起点）。把"本块与
@@ -564,8 +776,17 @@ pub(super) fn block_is_silent(block: &crate::capture::recorder::InputBlock<'_>) 
 /// 一条流在本块上的位置/相位结论。
 #[derive(Clone, Copy, Debug)]
 pub(super) struct StreamBlock {
-    /// 本块的有效工程起点（可能来自 continuous/music 回退）。
+    /// 本块的**磁带走带位置**（喂入域；可能来自 continuous/music 回退）。
+    ///
+    /// 【为什么它不再是"工程位置"】捕获通路有两个域（见 `TapeCursor` 与
+    /// `project_map`）。这一位是"这条喂入流走到第几帧"，磁带写入、循环切分与 I-3
+    /// 连续性都以它为准；读快照与 UI 播放头读的是 `project_position`。
     pub(super) position: i64,
+    /// 本块的**工程位置**（工程域）；`NO_POSITION` = 还没有映射。
+    ///
+    /// 【为什么必须与 `position` 分开】两者在钉住喂入流里**不相等**（片段在工程
+    /// 28.000 s、磁带从 0 起）。共用一个变量就是"前 N 秒直通、后段才出声"的全部原因。
+    pub(super) project_position: i64,
     /// 宿主原始 `projectTimeSamples`。
     pub(super) raw_start: i64,
     pub(super) phase: TransportPhase,
@@ -612,6 +833,18 @@ pub(super) struct StreamBlock {
     pub(super) prune_before: i64,
     /// 本块位置可以发布给 UI / 输出仲裁。
     pub(super) position_trusted: bool,
+    /// 本块的工程位置是否有意义（有映射 / 不是钉住流）。
+    ///
+    /// 【为什么单独一位】`NO_POSITION` 是一个合法可比较的整数，把它当"未知"靠
+    /// 比较会让"工程帧恰好等于 i64::MIN"这种不可能的事成为判据的一部分。一个布尔位
+    /// 让"我不知道这一段在工程哪里"成为**显式**状态，输出据此退回直通。
+    pub(super) project_position_valid: bool,
+    /// 没有工程位置时的**原因**（`project_position_valid` 为假时才有意义）。
+    ///
+    /// 【为什么一路带到 `BlockEvidence`】输出仲裁要按它决定这条日志的级别：
+    /// 「这一块是静音」是设计，不是缺陷（见 [`AnchorAbsence`]）。把它留在几何里
+    /// 让 `capture_stage` 去读，就会读到**另一条流**或**另一块**的结论。
+    pub(super) anchor_absence: AnchorAbsence,
     /// **UI 播放头修正量**（帧）：喂入位置与宿主 UI 播放头的当前差。UI 发布
     /// （捕获通道与 realtime 通道）用 `position - playhead_offset`，磁带记账仍用
     /// `position`（喂入域）。维护规则见 `note_stream_geometry` 调用侧的说明。

@@ -369,6 +369,8 @@ pub(crate) fn timeline_error_payload(error: &str) -> crate::models::TimelineStat
         redo_depth: None,
         notes_markdown: None,
         param_selection_restore: None,
+        // 合成载荷（错误/占位）：不带版本号，前端不会拿它去覆盖真实状态。
+        revision: None,
     }
 }
 
@@ -406,65 +408,21 @@ pub(crate) fn ok_bool() -> serde_json::Value {
 /// 在系统文件管理器中定位一批路径：存在的文件被**多选高亮**，全是目录时打开
 /// 第一个目录。
 ///
+/// 【实现已下沉到 `platform::share`】移动端没有"高亮某几个文件"这个动作 ——
+/// 系统文件管理器不接受该请求，`revealItemInDir` 在移动端是空实现。收敛层在那里
+/// 分成两条：桌面 reveal、移动端"告知落点"。留在本文件里就得在业务代码中写
+/// `if is_mobile`，而那正是本仓明令禁止的形状。
+///
 /// 【为什么走 Rust 而不是前端 `@tauri-apps/plugin-opener`】`opener:default` 实际
 /// 只授予 `open-url` / `reveal-item-in-dir` / `default-urls`，**不含 `open_path`**；
 /// 而 Rust 侧的 `OpenerExt` 调用不过 ACL。本仓既有 4 处同款做法
 /// （`diagnostics.rs` 的日志目录与 zip、`cache.rs` 的缓存目录与导出产物）。
-///
-/// 【为什么先过滤不存在的项】`reveal_items_in_dir` 内部会 `canonicalize`，
-/// 任何一个缺失路径都会让整批 reveal 失败 —— 分轨导出时个别目标被跳过 / 写入失败
-/// 就会连累其余文件。
 pub(crate) fn reveal_paths_in_file_manager(
     app: &tauri::AppHandle,
     paths: Vec<String>,
     empty_error: &str,
 ) -> serde_json::Value {
-    use tauri_plugin_opener::OpenerExt;
-
-    let mut files: Vec<PathBuf> = Vec::new();
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    for raw in paths {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let path = PathBuf::from(trimmed);
-        if path.is_file() {
-            files.push(path);
-        } else if path.is_dir() {
-            dirs.push(path);
-        }
-    }
-
-    if !files.is_empty() {
-        return match app.opener().reveal_items_in_dir(files.iter()) {
-            Ok(()) => serde_json::json!({ "ok": true, "count": files.len() }),
-            Err(e) => {
-                // 多选失败（个别文件管理器不支持）→ 至少打开首个文件的所在目录。
-                if let Some(parent) = files[0].parent() {
-                    let _ = app
-                        .opener()
-                        .open_path(parent.to_string_lossy(), None::<&str>);
-                }
-                serde_json::json!({
-                    "ok": false,
-                    "error": format!("reveal files failed: {e}"),
-                })
-            }
-        };
-    }
-
-    if let Some(dir) = dirs.first() {
-        return match app.opener().open_path(dir.to_string_lossy(), None::<&str>) {
-            Ok(()) => serde_json::json!({ "ok": true, "path": dir.to_string_lossy() }),
-            Err(e) => serde_json::json!({
-                "ok": false,
-                "error": format!("open folder failed: {e}"),
-            }),
-        };
-    }
-
-    serde_json::json!({ "ok": false, "error": empty_error })
+    crate::platform::share::reveal_or_announce(app, paths, empty_error)
 }
 
 /// 用系统默认程序打开一个路径（文件或目录）。
@@ -523,6 +481,7 @@ pub(crate) fn render_timeline_to_wav(
             cancel_flag: None,
             progress: None,
             cache_stats: None,
+            gain_scope: crate::gain::GainScope::AppOwned,
         },
     )
 }

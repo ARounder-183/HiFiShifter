@@ -1,5 +1,5 @@
 //! 工程编辑权限是同一活ARA文档renderer区域并集，音频输出仍按各renderer原分配隔离。
-use crate::render::document::DocumentSession;
+use crate::render::document::{DocumentSession, ImportClaims};
 use crate::render::ownership::region_owners;
 use crate::sync::MutexExt;
 use hifishifter_kernel::state::TimelineState;
@@ -17,19 +17,43 @@ use std::sync::atomic::Ordering;
 /// 读取失败 / 超期）把状态永久钉在"进行中"。
 pub(crate) const PENDING_MEDIA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// gain在原GUI是active-take扁平投影；插件显示item音量，两份显示字段必须一致且不送DSP。
+/// 把宿主的 **item 增益**投影到 item 层（`clip.clip_gain`）。
+///
+/// 【契约】只写 item 层，绝不写 `clip.gain`（active take 投影），也绝不写
+/// `takes[].gain`。宿主已经在这个 item 上施加过 `D_VOL`，插件再乘一次就是
+/// 把同一个旋钮乘两遍；而把 item 写进 take 投影会让下一次 `sync_take_from_flat`
+/// 把 take 层覆盖成 item 值，用户的 take 音量静默消失。
 fn display_item_gain(clip: &mut hifishifter_kernel::state::Clip, gain: f64) {
-    clip.gain = gain as f32;
-    for take in &mut clip.takes {
-        take.gain = gain as f32;
-    }
+    clip.clip_gain = hifishifter_kernel::gain::clamp_gain(gain as f32);
 }
-/// JSON装饰与actor投影同源；host_gain额外保留真实take音量/极性用于现场排查。
+
+/// 把宿主的**两层增益**各自投影到自己那一层。
+///
+/// 【为什么 `clip_gain` 必须在这里写】它才是前端读的那一栏
+/// （`timeline/clipGain.ts`，画布与旋钮都用它）。而 `clip.gain` 是
+/// `skip_serializing` 的 DSP 别名，序列化时不出门。缺了这一行，任何一次 `D_VOL`
+/// 变化之后载荷都回吐旧值：旋钮与波形峰值回弹，回执也永远对不上
+/// （"clip was edited in the host but its ARA geometry has not caught up"）。
+///
+/// 【take 层为什么取 `g.take_gain` 而不是 `g.item_gain`】`HostClipGeometry` 同时带着
+/// 两层读数（`item_gain` = item 的 `D_VOL`，`take_gain` = 这条 take 的 `D_VOL`）。
+/// 拿 item 层顶替 take 层，等于让"载荷里的 take 音量"变成 item 音量的副本：用户在 take
+/// 属性面板里改的音量在界面上看不到，回执还会拿它当期望值报出必然的分歧。
+///
+/// 【为什么只写几何描述的那一条 take】一个 item 可以有多条 take，各自的 `D_VOL` 互不
+/// 相干；`g` 只描述本实例绑定的那一条（`g.take_id`）。载荷里的 take id 带命名空间
+/// 前缀，因此按**后缀**认领；认不到就**不写这一栏**，而不是拿 item 增益顶上。
 fn decorate_item_gain(clip: &mut serde_json::Value, g: &crate::host::geometry::HostClipGeometry) {
-    clip["gain"] = serde_json::json!(g.item_gain);
+    clip["clip_gain"] = serde_json::json!(g.item_gain);
+    clip["gain"] = serde_json::json!(g.take_gain);
     if let Some(takes) = clip["takes"].as_array_mut() {
-        for take in takes {
-            take["gain"] = serde_json::json!(g.item_gain);
+        if let Some(take) = takes.iter_mut().find(|take| {
+            !g.take_id.is_empty()
+                && take["id"]
+                    .as_str()
+                    .is_some_and(|id| id.ends_with(g.take_id.as_str()))
+        }) {
+            take["gain"] = serde_json::json!(g.take_gain);
         }
     }
     clip["host_gain"] = serde_json::json!({"item":g.item_gain,"take":g.take_gain});
@@ -317,13 +341,17 @@ fn sync_host_takes(
     if let Some((index, media)) = media {
         apply_take_media(&mut rebuilt[index], &media);
     }
-    // take 级音量在宿主侧是 item 音量（`display_item_gain` 会把两者对齐）；
-    // 这里先按当前投影播种，紧接着的 display_item_gain 会统一覆盖。
-    for take in &mut rebuilt {
-        take.gain = clip.gain;
-    }
     clip.takes = rebuilt;
     clip.active_take_id = active;
+    clip.normalize_takes();
+    // 【take 增益按每一条 take 自己的 D_VOL 播种】放进 take 层，且保号；
+    // 绝不能再从 item 层复制。normalize_takes 自 v8 起不再搬层，因此这里
+    // 不会被“旧工程迁移”改写。
+    for (take, host_take) in clip.takes.iter_mut().zip(item.takes.iter()) {
+        take.gain = hifishifter_kernel::gain::clamp_take_gain(host_take.geometry.take_gain as f32);
+    }
+    // 逐 Take 播种的是权威值；再物化一次 active take 的投影，否则 `clip.gain`
+    // 仍停在 normalize_takes 之前的旧值，载荷与回执会拿它当 take 层期望。
     clip.normalize_takes();
 }
 
@@ -389,6 +417,60 @@ fn present_document_clip(
     clip
 }
 
+/// 装配结果 → 编辑器占位：**只**补媒体身份，不动任何几何。
+///
+/// 【为什么需要】`present_host_inventory` 的兜底占位是**按构造无源**的（它拿不到
+/// region，也就拿不到 ARA 源身份）。而"先画占位、后装配出有源 clip"是粘贴/分割后的
+/// 常态顺序：清单先看到新 item，装配在下一个安全点才产出结果。旧实现只在
+/// `timeline.clips` **找不到**这条 id 时才用装配结果，于是已经画上去的占位永远
+/// 不会被升级 —— 用户看到的就是"新 Clip 一直显示正在等待宿主完成音频分配，重开工程
+/// 才恢复"。
+///
+/// 【为什么只补媒体身份】源窗口 / 方向 / 倍率 / 名字都是宿主几何（由清单提供），
+/// 用装配的几何覆盖它们会把用户刚拖过的 item 弹回旧位置。
+///
+/// 【为什么 take 身份必须对上】`authorized_takes` 的纪律是"宁可显示占位，也不把
+/// 上一个 take 的采样挂到新 take 上" —— 挂错采样是**听不见的错**，占位是看得见的。
+/// 这里沿用同一条判据：active take 对不上就什么都不借。
+fn adopt_assembled_media(
+    clip: &mut hifishifter_kernel::state::Clip,
+    assembled: Option<&hifishifter_kernel::state::Clip>,
+    prefix: &impl Fn(&str) -> String,
+) -> bool {
+    let Some(assembled) = assembled else {
+        return false;
+    };
+    // 已经有源 ⇒ 不覆盖（装配结果不是"更权威"，只是"另一条来源"）。
+    if clip.source_path.is_some() || assembled.takes.is_empty() {
+        return false;
+    }
+    let media = assembled.active_take();
+    if media.source_path.is_none() {
+        return false;
+    }
+    // 呈现域与文档域的 take id 只差命名空间前缀（见 `present_document_clip`）。
+    if let Some(active) = clip.active_take_id.as_deref() {
+        let expected = assembled.active_take_id.as_deref().map(prefix);
+        if expected.as_deref() != Some(active) {
+            return false;
+        }
+    }
+    if clip.takes.is_empty() {
+        let mut take = hifishifter_kernel::state::ClipTake::from_clip(clip);
+        apply_take_media(&mut take, media);
+        // 装配产物与这条 item 是同一份源内容：音节缓存可以直接继承，
+        // 否则新 Clip 要等一次重新分析才有块（与 `derive_split_media` 同一理由）。
+        take.syllable_analysis = media.syllable_analysis.clone();
+        clip.takes.push(take);
+        clip.active_take_id = clip.takes.first().map(|take| take.id.clone());
+    } else {
+        let index = clip.active_take_index().min(clip.takes.len() - 1);
+        apply_take_media(&mut clip.takes[index], media);
+    }
+    clip.normalize_takes();
+    true
+}
+
 fn materialise_presented_clip(
     item: &crate::host::UiItem,
     id: &str,
@@ -406,14 +488,101 @@ fn materialise_presented_clip(
 pub(crate) struct WorkspaceScope {
     pub regions: BTreeSet<u64>,
 }
+/// 这一轮**宿主几何确实说得出来**的呈现字段。
+///
+/// 【为什么是一张字段表，而不是一整条 clip】它是本轮的第二个核心类型：一个
+/// **稀疏补丁**。「这一轮宿主没给几何」与「宿主说淡变是 0」在产物上完全同形（都是
+/// 0），但在语义上是相反的两件事。旧实现交出的是一整份时间线，于是「没有答案」
+/// 只能被读成「答案是 0」—— 现场的表现就是所有 clip 的淡变包络同时闪回 0 长度。
+/// 把它做成字段表之后，「不在表里」就是「这一轮没有答案」，类型上无法被误读。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct ClipFadeFields {
+    /// Item 层增益（`Clip::clip_gain`），来自宿主 item 的 `D_VOL`。
+    ///
+    /// 【它为什么在这张表里】它不是淡变，但它与淡变来自**同一次**宿主几何读数。
+    /// 把它留在补丁里，GUI 与渲染两条路径才会拿到同一个值。
+    pub item_gain: f32,
+    pub snap_offset_sec: f64,
+    pub fade_in_sec: f64,
+    pub fade_out_sec: f64,
+    pub auto_fade_in_sec: f64,
+    pub auto_fade_out_sec: f64,
+    pub fade_in_shape: f64,
+    pub fade_out_shape: f64,
+    pub fade_in_dir: f64,
+    pub fade_out_dir: f64,
+    pub fade_in_s: f64,
+    pub fade_out_s: f64,
+}
+
+/// 一次淡变投影的产物：**只有宿主几何覆盖到的 clip 在里面**。
+///
+/// 【为什么需要 `expected`】它让「这一轮覆盖了几条」变成一个可读的数（见
+/// `refresh_ui_geometry` 的读数）。没有它，下一次现场只能靠复述「闪了一下」来
+/// 描述缺陷。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct FadeProjection {
+    /// 取数时的宿主几何代次（诊断用）。
+    pub revision: u64,
+    /// 本文档的 region 身份表里有几条 clip（= 宿主**本可以**说得出来的条数）。
+    pub expected: usize,
+    /// clip id（**不带** GUI 命名空间前缀）→ 这一轮的字段。
+    pub clips: std::collections::BTreeMap<String, ClipFadeFields>,
+}
+
+impl FadeProjection {
+    /// 这一轮覆盖了几条 clip。
+    pub(crate) fn covered(&self) -> usize {
+        self.clips.len()
+    }
+}
+
+/// 把一份稀疏淡变补丁盖到时间线上。
+///
+/// 【语义是补丁，不是替换】只有出现在 `projection.clips` 里的 clip 会被改写；
+/// 不在里面的 clip **保持它当前的值**（在 GUI 路径上那是 `present_host_inventory`
+/// 刚写下的宿主真值，在渲染路径上那是装配继承下来的上一轮发布值）。
+///
+/// 【为什么按 `namespace` 剥前缀而不是拼字符串】GUI 时间线里的 id 带命名空间
+/// （`ui-ara-item-{guid}`），而身份表里的是裸 id。拼一遍 `format!` 等于每条 clip
+/// 一次分配，而这条路径每 20 ms 跑一次。
+pub(crate) fn apply_fade_projection(
+    timeline: &mut TimelineState,
+    projection: &FadeProjection,
+    namespace: &str,
+) {
+    if projection.clips.is_empty() {
+        return;
+    }
+    for clip in &mut timeline.clips {
+        let Some(id) = clip.id.strip_prefix(namespace) else {
+            continue;
+        };
+        let Some(fields) = projection.clips.get(id) else {
+            continue;
+        };
+        clip.clip_gain = hifishifter_kernel::gain::clamp_gain(fields.item_gain);
+        clip.snap_offset_sec = fields.snap_offset_sec;
+        clip.fade_in_sec = fields.fade_in_sec;
+        clip.fade_out_sec = fields.fade_out_sec;
+        clip.auto_fade_in_sec = fields.auto_fade_in_sec;
+        clip.auto_fade_out_sec = fields.auto_fade_out_sec;
+        clip.fade_in_shape = fields.fade_in_shape;
+        clip.fade_out_shape = fields.fade_out_shape;
+        clip.fade_in_dir = fields.fade_in_dir;
+        clip.fade_out_dir = fields.fade_out_dir;
+        clip.fade_in_s = fields.fade_in_s;
+        clip.fade_out_s = fields.fade_out_s;
+    }
+}
+
 impl DocumentSession {
     /// 参数分组只沿宿主已校验的轨道GUID关联；namespace仅用于当前WebView显示身份。
     pub(crate) fn group_aliases(
         &self,
         namespace: &str,
     ) -> std::collections::BTreeMap<String, String> {
-        self.ui_tracks
-            .lock_or_recover()
+        self.ui_tracks_guard()
             .values()
             .map(|track| (track.guid.clone(), format!("{namespace}{}", track.id)))
             .collect()
@@ -430,7 +599,7 @@ impl DocumentSession {
     }
     /// 显示参数根可包含无播放区域的空父轨；不创建任何clip或未经授权的源。
     fn add_group_view_tracks(&self, timeline: &mut TimelineState) {
-        for host in self.ui_tracks.lock_or_recover().values() {
+        for host in self.ui_tracks_guard().values() {
             if !timeline.tracks.iter().any(|track| track.id == host.id) {
                 // 【为什么不用 unwrap】这条路径跑在**宿主 UI 线程**的清单刷新里，一次
                 // panic 会带走整个 DAW 会话（与同文件 `present_host_inventory` 的注释
@@ -506,18 +675,80 @@ impl DocumentSession {
             .retain(|root, _| roots.contains(root));
         Ok((flat, grouped))
     }
-    /// UI可显示宿主尚未分配给ARA的静音item；这些占位不进入任何renderer或源PCM读取。
+    /// item GUID → 它播放的 ARA 音频源（**显示用**的媒体身份边）。
+    ///
+    /// 【为什么装配的 spans 优先】`region_items` 是"region key → item GUID"的**几何**
+    /// 换算边，它的唯一写者要求几何缓存、宿主 change count、region 唯一匹配、owner
+    /// 分配同时成立 —— 新粘贴 / 拖动 / 循环延伸 / folder 父轨上它都可能晚一拍甚至
+    /// 缺席。而 `assembly_spans` 是装配器**已经算出来**的 clip id → region 行下标，
+    /// 它才是"这条 item 的音频来自哪个源"的稳定边。
+    ///
+    /// 把显示身份继续只挂在 `region_items` 上，就会在新粘贴的那几秒里让
+    /// `pcm_by_item` 为空 ⇒ 占位拿不到媒体身份 ⇒ 用户看到"正在等待宿主完成音频分配"，
+    /// 直到下一次重新加载。
+    ///
+    /// 【只用于显示】这条边不改变 PCM 授权：真正读采样仍走
+    /// `edit_sources` / `source_states`（见 `present_host_inventory` 的说明）。
     fn item_source_pairs(&self) -> Vec<(String, String)> {
-        let regions = self.regions.lock_or_recover();
-        let items = self.region_items.lock_or_recover();
-        items
-            .iter()
-            .filter_map(|(key, item)| {
-                regions
-                    .get(key)
-                    .map(|region| (item.clone(), region.audio_source_persistent_id.clone()))
-            })
-            .collect()
+        // 【锁序】两张装配表只 clone 一次就释放，不与 `regions` / `region_items`
+        // 同时持有 —— 不给锁序图加新边（`regions → region_items → …` 是既有顺序）。
+        let (spans, rows) = {
+            let spans = self.assembly_spans.lock_or_recover().clone();
+            let rows = self.region_rows.lock_or_recover().clone();
+            (spans, rows)
+        };
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        let mut by_item: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for (clip_id, indices) in &spans {
+            let Some(item) = host_item_guid(clip_id) else {
+                continue;
+            };
+            let Some(source) = indices
+                .iter()
+                .filter_map(|index| rows.get(*index))
+                .map(|row| row.source_id.clone())
+                .find(|id| !id.is_empty())
+            else {
+                continue;
+            };
+            by_item.insert(item.to_owned(), source);
+        }
+        pairs.extend(
+            by_item
+                .iter()
+                .map(|(item, source)| (item.clone(), source.clone())),
+        );
+        // 映射侧作为回退/补充：它同时覆盖 ARA-only 宿主（没有 item 清单、没有 spans）。
+        {
+            let regions = self.regions.lock_or_recover();
+            let items = self.region_items.lock_or_recover();
+            for (key, item) in items.iter() {
+                let Some(region) = regions.get(key) else {
+                    continue;
+                };
+                let source = &region.audio_source_persistent_id;
+                if source.is_empty() {
+                    continue;
+                }
+                match by_item.get(item) {
+                    // 【冲突以装配为准】两个来源各说一套时，装配器那份来自"同一刻的两份
+                    // 输入"，映射侧那份可能还停在上一代几何上。
+                    Some(known) if known != source => {
+                        hifishifter_kernel::log_limiter::emit_limited_key(
+                            log::Level::Warn,
+                            "ara.media.identity.conflict",
+                            format_args!(
+                                "[ara] media identity conflict for item {item}: assembly says                                  {known}, region mapping says {source}; keeping the assembly edge"
+                            ),
+                        );
+                    }
+                    Some(_) => {}
+                    None => pairs.push((item.clone(), source.clone())),
+                }
+            }
+        }
+        pairs
     }
 
     pub(crate) fn present_host_inventory(&self, timeline: &mut TimelineState, namespace: &str) {
@@ -661,8 +892,11 @@ impl DocumentSession {
         // 这里的 `timeline` 是**编辑器**时间线（id 带命名空间），而 `clip_ids` 是
         // **文档**事实（id 无命名空间）。取一次快照之后立刻释放锁，后面所有比较都用它 ——
         // 混用两者正是"同一个 item 被画成两条 clip"的根因（见 `PresentedIds`）。
-        let presented = PresentedIds::build(&prefix, &self.clip_ids.lock_or_recover());
-        let tracks = self.ui_tracks.lock_or_recover();
+        let (presented, clip_ids) = {
+            let ids = self.clip_ids.lock_or_recover();
+            (PresentedIds::build(&prefix, &ids), ids.clone())
+        };
+        let tracks = self.ui_tracks_guard();
         if tracks.is_empty() {
             // 【为什么在这里整体返回，而不是只跳过两条 retain】`present` / `owned` 两个集合
             // 都由**这份**宿主清单派生，所以清单一空，下面两条 `retain` 的条件就都恒不成立
@@ -987,6 +1221,21 @@ impl DocumentSession {
                     present.remove(&id);
                     continue;
                 };
+                // 【占位 → 有源：只补媒体身份】装配器可能**晚于**清单一步才产出这条
+                // clip（粘贴/分割后的常态顺序）。此时画布上已经有一条无源占位，而
+                // `assembled` 里有同一 id 的有源产物 —— 借它的媒体身份，几何仍由下面
+                // 的清单投影决定。没有这一步，占位就永远停在"正在等待宿主完成音频分配"。
+                if adopt_assembled_media(
+                    clip,
+                    assembled.get(&format!("ara-item-{}", g.item_id)),
+                    &prefix,
+                ) {
+                    log::debug!(
+                        "[ara] adopted assembled media for item {} source={}",
+                        g.item_id,
+                        clip.source_path.as_deref().unwrap_or("-")
+                    );
+                }
                 sync_host_takes(
                     clip,
                     item,
@@ -1182,6 +1431,24 @@ impl DocumentSession {
         if timeline.selected_track_id.is_none() {
             timeline.selected_track_id = timeline.tracks.first().map(|track| track.id.clone());
         }
+        // 【为什么导入的转正要挂在这一步之后】清单刚把 item 变成一条可见的占位 clip，
+        // 这是"用户现在能看见它了"的第一个时刻。待定导入如果只在 ARA 发布时对账，
+        // 那么"宿主建了 item、但还没建 region"这一段就永远没有转正的观测点。
+        //
+        // 【为什么必须就地组快照、并且显式放锁】对账要问"这条 item 在不在清单里"，
+        // 而答案正是上面这份 `tracks`。把 guard 带进对账 ⇒ 同一个线程第二次取
+        // `ui_tracks` ⇒ `std::sync::Mutex` 自锁 ⇒ 宿主整机未响应（导入成功之后必现）。
+        // 于是这里先把清单折成一份**数据**，放掉 guard，再交给对账器。
+        let claims = ImportClaims {
+            present_items: tracks
+                .values()
+                .flat_map(|track| track.items.iter().map(|item| item.geometry.item_id.clone()))
+                .collect(),
+            clip_ids,
+            region_items: self.region_items.lock_or_recover().clone(),
+        };
+        drop(tracks);
+        self.publish_pending_imports(&claims);
     }
     /// 组件保存/恢复仅操作其实际assigned clips的item GUID，防止另一个轨道的形状串入。
     pub(crate) fn fade_items_locked(
@@ -1226,8 +1493,7 @@ impl DocumentSession {
         if let Some(id) = self.clip_for_host_item(item) {
             return Some(id);
         }
-        self.ui_tracks
-            .lock_or_recover()
+        self.ui_tracks_guard()
             .values()
             .any(|track| {
                 track
@@ -1248,7 +1514,7 @@ impl DocumentSession {
         let Some(clips) = payload["clips"].as_array_mut() else {
             return;
         };
-        for track in self.ui_tracks.lock_or_recover().values() {
+        for track in self.ui_tracks_guard().values() {
             for item in &track.items {
                 if let Some(clip) = clips.iter_mut().find(|clip| {
                     clip["id"] == format!("{namespace}ara-item-{}", item.geometry.item_id)
@@ -1384,7 +1650,7 @@ impl DocumentSession {
         let Some(clips) = payload["clips"].as_array_mut() else {
             return;
         };
-        for track in self.ui_tracks.lock_or_recover().values() {
+        for track in self.ui_tracks_guard().values() {
             for item in &track.items {
                 let item_id = item.geometry.item_id.clone();
                 let Some(clip) = clips
@@ -1951,48 +2217,60 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
     }
     /// 普通手动/自动fade和吸附偏移投影到原GUI，内核继续消费未烘焙fade的ARA时间线。
     /// 只沿已核对的唯一真实region key，不按轨名/位置猜关联。
+    ///
+    /// 【为什么返回补丁而不是改写时间线】见 [`FadeProjection`]。改写的版本必须先把整份
+    /// 工作区时间线克隆一遍（含全部 clip / take / 参数），只为拷十个 f64 —— 而那份克隆
+    /// 的淡变值在装配重跑之后是 0。稀疏补丁把这两件事一起解决：不再克隆，也不会把
+    /// 「没有答案」写成 0。
     pub(crate) fn project_ui_fades_locked(
         &self,
-        timeline: &mut TimelineState,
         fades: &std::collections::BTreeMap<String, crate::fade::FadeStyle>,
-    ) {
+    ) -> FadeProjection {
         let identities = self.clip_ids.lock_or_recover().clone();
+        let mut projection = FadeProjection {
+            revision: self.ui_geometry_revision.load(Ordering::Acquire),
+            expected: identities
+                .values()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            clips: std::collections::BTreeMap::new(),
+        };
         for owner in self.renderer_owners() {
             for bound in owner.host_geometries_locked(self) {
                 let Some(id) = identities.get(&bound.region_key) else {
                     continue;
                 };
-                let Some(clip) = timeline.clips.iter_mut().find(|clip| &clip.id == id) else {
-                    continue;
-                };
                 let geometry = bound.geometry;
-                display_item_gain(clip, geometry.item_gain);
-                clip.snap_offset_sec = geometry.snap_offset_sec;
-                clip.fade_in_sec = geometry.fade_in_sec;
-                clip.fade_out_sec = geometry.fade_out_sec;
-                clip.auto_fade_in_sec = geometry.auto_fade_in_sec;
-                clip.auto_fade_out_sec = geometry.auto_fade_out_sec;
-                clip.fade_in_shape = geometry.fade_in_shape;
-                clip.fade_out_shape = geometry.fade_out_shape;
-                // 【为什么按轴分流】"曲率"落在哪个宿主字段取决于宿主版本
+                let mut fields = ClipFadeFields {
+                    item_gain: geometry.item_gain as f32,
+                    snap_offset_sec: geometry.snap_offset_sec,
+                    fade_in_sec: geometry.fade_in_sec,
+                    fade_out_sec: geometry.fade_out_sec,
+                    auto_fade_in_sec: geometry.auto_fade_in_sec,
+                    auto_fade_out_sec: geometry.auto_fade_out_sec,
+                    fade_in_shape: geometry.fade_in_shape,
+                    fade_out_shape: geometry.fade_out_shape,
+                    ..ClipFadeFields::default()
+                };
+                // 【为什么按轴分流】「曲率」落在哪个宿主字段取决于宿主版本
                 // （≤7.80 `D_FADE*DIR`，≥7.81 `D_FADE*DIR_NEW`）。取错的话滑杆
                 // 显示和编辑的都是**不是权威**的那个值 —— 在 7.81+ 上表现为
-                // "拖了滑杆但淡变没变"。
+                // 「拖了滑杆但淡变没变」。
                 let (in_dir, out_dir) = match geometry.fade_axes_v2 {
                     Some(true) => (geometry.fade_in_dir_new, geometry.fade_out_dir_new),
                     _ => (geometry.fade_in_dir, geometry.fade_out_dir),
                 };
-                clip.fade_in_dir = in_dir;
-                clip.fade_out_dir = out_dir;
+                fields.fade_in_dir = in_dir;
+                fields.fade_out_dir = out_dir;
                 // S 是**新轴才有的第二根轴**（`D_FADE*DIR2_NEW`）。写进 clip 才能让
-                // 载荷、写回去重、以及"未变的 S 不该触发写回"共用同一个权威值；
+                // 载荷、写回去重、以及「未变的 S 不该触发写回」共用同一个权威值；
                 // 旧轴宿主没有这根轴，恒为 0。
                 let (in_s, out_s) = match geometry.fade_axes_v2 {
                     Some(true) => (geometry.fade_in_dir2_new, geometry.fade_out_dir2_new),
                     _ => (0.0, 0.0),
                 };
-                clip.fade_in_s = in_s;
-                clip.fade_out_s = out_s;
+                fields.fade_in_s = in_s;
+                fields.fade_out_s = out_s;
                 if self
                     .regions
                     .lock_or_recover()
@@ -2003,17 +2281,19 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
                     })
                 {
                     // 委托：曲线由 HFS 自己的 `FadeStyle` 渲染，宿主两轴不参与 ——
-                    // S 在 `FadeStyle` 里没有位置，显式归 0（不是"漏了"）。
+                    // S 在 `FadeStyle` 里没有位置，显式归 0（不是「漏了」）。
                     let style = fades.get(&geometry.item_id).cloned().unwrap_or_default();
-                    clip.fade_in_shape = style.in_shape;
-                    clip.fade_out_shape = style.out_shape;
-                    clip.fade_in_dir = style.in_dir;
-                    clip.fade_out_dir = style.out_dir;
-                    clip.fade_in_s = 0.0;
-                    clip.fade_out_s = 0.0;
+                    fields.fade_in_shape = style.in_shape;
+                    fields.fade_out_shape = style.out_shape;
+                    fields.fade_in_dir = style.in_dir;
+                    fields.fade_out_dir = style.out_dir;
+                    fields.fade_in_s = 0.0;
+                    fields.fade_out_s = 0.0;
                 }
+                projection.clips.insert(id.clone(), fields);
             }
         }
+        projection
     }
     /// 只把宿主明确委托的一端写进原kernel；另一端仍归宿主，不能凭能力广告重复烘焙。
     pub(crate) fn project_audio_fades_locked(
@@ -2426,11 +2706,18 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
         }
     }
     /// 无PCM复制或host getter，pending曲线也可独立更新可见宿主fade。
-    pub(crate) fn ui_fade_projection(&self) -> Result<(u64, TimelineState), String> {
+    ///
+    /// 【为什么不再克隆整份工作区时间线】见 [`FadeProjection`]：这一轮只交出「宿主
+    /// 几何确实说得出来」的那几条，所以不需要 `workspace_timeline_locked()` —— 它会把
+    /// 全部 clip / take / 参数整份克隆一遍，只为拷十二个浮点数，而且那份克隆的淡变值
+    /// 在装配重跑之后还是 0。
+    pub(crate) fn ui_fade_projection(&self) -> Result<FadeProjection, String> {
         let _transaction = self.transaction.lock_or_recover();
-        let mut timeline = self.workspace_timeline_locked()?;
-        self.project_ui_fades_locked(&mut timeline, &self.edits.lock_or_recover().fades);
-        Ok((self.ui_geometry_revision.load(Ordering::Acquire), timeline))
+        if !self.is_alive() {
+            return Err(crate::editor::errors::DOCUMENT_CLOSED.error());
+        }
+        let fades = self.edits.lock_or_recover().fades.clone();
+        Ok(self.project_ui_fades_locked(&fades))
     }
     /// 非实时短事务读取完整授权scope；零分配只能返回零区域，不能等同全文档。
     // 非实时诊断入口，保留供授权范围核对。
@@ -2605,7 +2892,7 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
             .iter()
             .map(|clip| clip.track_id.clone())
             .collect::<BTreeSet<_>>();
-        for track in self.ui_tracks.lock_or_recover().values() {
+        for track in self.ui_tracks_guard().values() {
             if timeline.tracks.iter().any(|t| t.id == track.id) {
                 tracks.insert(track.id.clone());
             }
@@ -2879,6 +3166,160 @@ mod tests {
     use ara2_bridge::core::ApiGeneration;
     use ara2_bridge::plugin::ExtensionRoles;
     use std::sync::Arc;
+
+    /// **回归：载荷里前端读的那一栏（`clip_gain`）必须由宿主投影写出来。**
+    ///
+    /// 【现场】ARA 里拖 Clip 增益旋钮 / 右键"规格化"：REAPER 的 item 收到了增益，
+    /// 插件时间线上的 Clip 却回弹，日志里是 `set_clips_state_bulk` 的
+    /// "clip was edited in the host but its ARA geometry has not caught up"。
+    /// 根因不是宿主慢，而是**字段选错了**：`display_item_gain` 只写 `gain`
+    /// （`skip_serializing`，序列化时根本不出门），载荷里的 `clip_gain` 于是永远是
+    /// 旧值 —— 前端按它整份回灌（旋钮 + 波形峰值回弹），完成门也拿它当判据
+    /// （写入成功被判失败）。
+    #[test]
+    fn the_item_gain_the_ui_reads_is_projected_into_the_payload() {
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        let api = Arc::new(host.client());
+        let mut geometry = api.ui_track(&|| true).unwrap().items[0].geometry.clone();
+        geometry.item_gain = 1.7;
+        let mut payload = serde_json::json!({
+            "clip_gain": 1.0,
+            "gain": 1.0,
+            "takes": [{"id": "t1", "gain": 1.0}],
+        });
+        decorate_item_gain(&mut payload, &geometry);
+        assert_eq!(
+            payload["clip_gain"],
+            serde_json::json!(1.7),
+            "前端读的是 clip_gain；漏写它等于让旋钮与波形峰值回弹"
+        );
+        assert_eq!(
+            payload["gain"],
+            serde_json::json!(geometry.take_gain),
+            "载荷的 gain 是 take 层：写 item 增益会让回执拿它当 take 层期望值报分歧"
+        );
+        assert_eq!(payload["host_gain"]["item"], serde_json::json!(1.7));
+        assert_eq!(
+            payload["host_gain"]["take"],
+            serde_json::json!(geometry.take_gain),
+            "真实 take 音量必须原样保留，不能被 item 增益覆盖"
+        );
+    }
+
+    /// **回归：两层增益在载荷里各占各的栏，谁也不许顶替谁。**
+    ///
+    /// 【现场】REAPER ARA 里把 Clip 增益 +12 dB 再归零，日志里恰好两条互为镜像的行：
+    /// `gain=4.0 expected 1.0` / `gain=1.0 expected 4.0`。两次写入都没有失败 ——
+    /// 是**投影**把 item 增益写进了 take 层（`clip["gain"]` 与每一条 `takes[].gain`），
+    /// 于是"载荷里的 take 音量"永远是 item 音量的副本。
+    #[test]
+    fn the_payload_keeps_the_take_layer_separate_from_the_item_layer() {
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        let api = Arc::new(host.client());
+        let mut geometry = api.ui_track(&|| true).unwrap().items[0].geometry.clone();
+        geometry.item_gain = 4.0;
+        geometry.take_gain = 0.5;
+        // take id 在载荷里带命名空间前缀，投影按后缀认领（见 `decorate_item_gain`）。
+        let namespaced = format!("hfs-test-take-{}", geometry.take_id);
+        let mut payload = serde_json::json!({
+            "clip_gain": 1.0,
+            "gain": 1.0,
+            "takes": [
+                {"id": namespaced, "gain": 1.0},
+                {"id": "hfs-test-take-sibling", "gain": 0.25},
+            ],
+        });
+        decorate_item_gain(&mut payload, &geometry);
+        assert_eq!(
+            payload["clip_gain"],
+            serde_json::json!(4.0),
+            "item 层只写 clip_gain"
+        );
+        assert_eq!(
+            payload["gain"],
+            serde_json::json!(0.5),
+            "take 层取 g.take_gain，不许拿 item 增益顶上"
+        );
+        assert_eq!(
+            payload["takes"][0]["gain"],
+            serde_json::json!(0.5),
+            "几何描述的那条 take 必须投影它自己的 D_VOL"
+        );
+        assert_eq!(
+            payload["takes"][1]["gain"],
+            serde_json::json!(0.25),
+            "别的 take 有自己的音量，不许被同一条几何覆盖"
+        );
+    }
+
+    /// **回归：认不到 take 时不写 take 层，而不是拿 item 增益顶上。**
+    #[test]
+    fn a_take_the_geometry_does_not_describe_keeps_its_own_gain() {
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        let api = Arc::new(host.client());
+        let mut geometry = api.ui_track(&|| true).unwrap().items[0].geometry.clone();
+        geometry.item_gain = 2.0;
+        geometry.take_gain = 0.5;
+        let mut payload = serde_json::json!({
+            "clip_gain": 1.0,
+            "gain": 1.0,
+            "takes": [{"id": "someone-elses-take", "gain": 0.25}],
+        });
+        decorate_item_gain(&mut payload, &geometry);
+        assert_eq!(payload["takes"][0]["gain"], serde_json::json!(0.25));
+    }
+
+    /// **回归：`display_item_gain` 只写 item 层，绝不写 take 投影。**
+    #[test]
+    fn display_item_gain_writes_only_the_item_layer() {
+        let mut clip: hifishifter_kernel::state::Clip = serde_json::from_value(serde_json::json!({
+            "id": "c1",
+            "track_id": "t1",
+            "name": "c",
+            "start_sec": 0.0,
+            "length_sec": 1.0,
+            "clip_gain": 1.0,
+            "gain": 1.0,
+            "takes": [{"id": "k1", "gain": 0.5}],
+        }))
+        .unwrap();
+        clip.normalize_takes();
+        display_item_gain(&mut clip, 1.7);
+        assert!((clip.clip_gain - 1.7).abs() < 1e-6);
+        assert!(
+            (clip.gain - 0.5).abs() < 1e-6,
+            "clip.gain 是 take 投影，不能被 item 增益覆盖"
+        );
+        assert!((clip.takes[0].gain - 0.5).abs() < 1e-6);
+    }
+
+    /// **回归：宿主 take 音量穿过一次 normalize 仍存活。**
+    #[test]
+    fn a_host_take_volume_survives_a_normalize_roundtrip() {
+        let mut clip: hifishifter_kernel::state::Clip = serde_json::from_value(serde_json::json!({
+            "id": "c1",
+            "track_id": "t1",
+            "name": "c",
+            "start_sec": 0.0,
+            "length_sec": 1.0,
+            "clip_gain": 2.0,
+            "gain": 1.0,
+            "takes": [{"id": "k1", "gain": 0.5}],
+        }))
+        .unwrap();
+        clip.normalize_takes();
+        assert!((clip.takes[0].gain - 0.5).abs() < 1e-6);
+        assert!((clip.clip_gain - 2.0).abs() < 1e-6);
+    }
 
     #[test]
     fn item_source_snapshot_does_not_hold_items_while_waiting_for_regions() {
@@ -3818,5 +4259,598 @@ mod tests {
         );
         document.close();
         drop(model);
+    }
+
+    /// **回归：装配的 spans 必须能独立供给媒体身份。**
+    ///
+    /// 【为什么这是用户报障的可执行形式】新粘贴的 item 先出现在宿主清单里，而
+    /// `region_items`（region key → item GUID 的**几何**换算边）要等几何缓存、
+    /// change count、region 唯一匹配同时成立才写得上。那段窗口里旧实现的
+    /// `pcm_by_item` 是空的 ⇒ 已经画在画布上的占位拿不到媒体身份 ⇒ 用户看到
+    /// "正在等待宿主完成音频分配"，直到重新加载。
+    ///
+    /// 装配器**已经算出来**了同一条边（`assembly_spans`），它才是稳定来源。
+    #[test]
+    fn assembly_spans_supply_media_identity_without_region_items() {
+        use hifishifter_kernel::editor::assembly::RegionRow;
+        let document = DocumentSession::new(40_010);
+        assert!(
+            document.item_source_pairs().is_empty(),
+            "夹具必须先是一个没有任何映射的文档"
+        );
+        document.region_rows.lock_or_recover().push(RegionRow {
+            key: 0x77,
+            clip_id: "ara-item-{SPAN}".into(),
+            track_id: "track".into(),
+            start_sec: 0.0,
+            duration_sec: 1.0,
+            source_start_sec: 0.0,
+            source_end_sec: 1.0,
+            playback_rate: 1.0,
+            name: "span".into(),
+            source_id: "ara://span-source".into(),
+            modification_id: "mod".into(),
+            source_sample_rate: 48_000.0,
+            source_duration_sec: 1.0,
+            source_channels: 2,
+        });
+        document
+            .assembly_spans
+            .lock_or_recover()
+            .insert("ara-item-{SPAN}".into(), vec![0]);
+        // region_items 故意保持为空：这正是粘贴后那几百毫秒的形状。
+        assert!(document.region_items.lock_or_recover().is_empty());
+        assert_eq!(
+            document.item_source_pairs(),
+            vec![("{SPAN}".to_owned(), "ara://span-source".to_owned())],
+            "装配 spans 必须能独立给出 item → 源 的显示边"
+        );
+        document.close();
+    }
+
+    /// **回归：映射侧的边仍然是回退，且与装配冲突时以装配为准。**
+    #[test]
+    fn region_items_remain_the_fallback_media_edge() {
+        use crate::ara::AraPlaybackRegion;
+        let document = DocumentSession::new(40_011);
+        let key = 0x88_u64;
+        let mut region = AraPlaybackRegion::default();
+        region.audio_source_persistent_id = "ara://mapped".into();
+        document.regions.lock_or_recover().insert(key, region);
+        document
+            .region_items
+            .lock_or_recover()
+            .insert(key, "{MAPPED}".into());
+        assert_eq!(
+            document.item_source_pairs(),
+            vec![("{MAPPED}".to_owned(), "ara://mapped".to_owned())],
+            "没有装配结果时映射边必须照旧生效（ARA-only 宿主走的就是这一支）"
+        );
+        document.close();
+    }
+
+    /// **回归：先画占位、后装配出源 —— 占位必须被升级，而不是永远等下去。**
+    ///
+    /// 【为什么这条是用户报障的原形】REAPER 里复制/粘贴一个 item 时，清单先看到新
+    /// item（`present_host_inventory` 于是先造了一条无源占位），装配器在下一个安全点
+    /// 才产出有源 clip。旧实现只在 `timeline.clips` **找不到**这条 id 时才用装配结果，
+    /// 于是占位永久保留 —— 界面一直显示"正在等待宿主完成音频分配"，只有重新加载
+    /// （`workspace_timeline_locked` 直接给完整装配结果）才恢复。
+    #[test]
+    fn a_pending_placeholder_adopts_the_assembled_source() {
+        let document = DocumentSession::new(40_012);
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        let api = Arc::new(host.client());
+        let mut track = api.ui_track(&|| true).unwrap();
+        track.id = "track".into();
+        let mut item = track.items[0].clone();
+        item.geometry.start_sec = 0.0;
+        item.geometry.duration_sec = 1.0;
+        item.geometry.item_id = "{PASTE-1}".into();
+        track.items = vec![item.clone()];
+        let guid = track.guid.clone();
+        document.ui_tracks.lock_or_recover().insert(guid, track);
+
+        // ① 第一轮：装配还没有这条 clip ⇒ 只能画无源占位。
+        let mut editor = TimelineState::default();
+        document.present_host_inventory(&mut editor, "");
+        let id = format!("ara-item-{}", item.geometry.item_id);
+        assert_eq!(editor.clips.len(), 1);
+        assert_eq!(editor.clips[0].id, id);
+        assert!(
+            editor.clips[0].source_path.is_none(),
+            "夹具前提：第一轮必须是占位（装配还没产出这条 clip）"
+        );
+
+        // ② 装配完成：同一条 item 已经有源。
+        let row = crate::host::geometry::item_row_from_host(&item, "track");
+        let mut assembled =
+            hifishifter_kernel::editor::assembly::clip_for_item(&row, "track", None).unwrap();
+        assembled.track_id = "track".into();
+        for take in &mut assembled.takes {
+            take.source_path = Some("ara://pasted".into());
+        }
+        assembled.normalize_takes();
+        let mut host_timeline = TimelineState::default();
+        host_timeline.clips.push(assembled);
+        *document.timeline.lock_or_recover() = Some(host_timeline);
+
+        // ③ 下一轮清单刷新必须把它升级成有源 clip。
+        document.present_host_inventory(&mut editor, "");
+        assert_eq!(editor.clips.len(), 1, "升级不得再造一条副本 clip");
+        assert_eq!(
+            editor.clips[0].source_path.as_deref(),
+            Some("ara://pasted"),
+            "占位必须采用装配结果里的媒体身份，否则界面永远显示“正在等待宿主完成音频分配”"
+        );
+
+        // ④ 宿主媒体分类也必须跟着变成 ready。
+        //
+        // 【为什么手工拼载荷】`Clip::source_path` 是 `skip_serializing` 的内存投影
+        // （权威值在 take 上），生产路径的载荷由 take 补出这一层；这里按同一形状拼。
+        let mut payload = serde_json::json!({"clips": editor
+            .clips
+            .iter()
+            .map(|clip| {
+                serde_json::json!({
+                    "id": clip.id,
+                    "source_path": clip.active_take().source_path,
+                    "takes": clip.takes,
+                })
+            })
+            .collect::<Vec<_>>()});
+        document.decorate_host_media_locked(&mut payload, "");
+        assert_eq!(
+            payload["clips"][0]["host_media"], "ready",
+            "媒体身份补上之后，逐 clip 分类不能还停在 pending"
+        );
+        document.close();
+    }
+
+    /// **安全底线：active take 对不上时一个字段都不借。**
+    ///
+    /// 把另一条 take 的采样挂上来是**听不见的错**（渲染读的是同一条 source_path）；
+    /// 占位则是看得见的。`authorized_takes` 与 `choose_link` 已经按这条纪律写了，
+    /// 装配侧的补位必须沿用同一条。
+    #[test]
+    fn adoption_never_borrows_across_a_take_switch() {
+        let mut placeholder: hifishifter_kernel::state::Clip =
+            serde_json::from_value(serde_json::json!({
+                "id": "ara-item-{X}", "track_id": "track", "name": "p",
+                "start_sec": 0.0, "length_sec": 1.0,
+                "takes": [{"id": "take-host", "source_start_sec": 0.0, "source_end_sec": 1.0}]
+            }))
+            .unwrap();
+        placeholder.normalize_takes();
+        let mut assembled: hifishifter_kernel::state::Clip =
+            serde_json::from_value(serde_json::json!({
+                "id": "ara-item-{X}", "track_id": "track", "name": "a",
+                "start_sec": 0.0, "length_sec": 1.0,
+                "takes": [{"id": "take-other", "source_path": "ara://wrong",
+                           "source_start_sec": 0.0, "source_end_sec": 1.0}]
+            }))
+            .unwrap();
+        assembled.normalize_takes();
+        let adopted = adopt_assembled_media(&mut placeholder, Some(&assembled), &|id: &str| {
+            id.to_owned()
+        });
+        assert!(!adopted, "active take 不同就不许借");
+        assert!(
+            placeholder.source_path.is_none(),
+            "宁可显示占位，也不能把另一条 take 的采样挂上来"
+        );
+    }
+
+    /// **回归：待定导入在下一轮清单/发布时必须转正，而不是永远挂着。**
+    ///
+    /// 【现场原形】REAPER 里"文件 → 导入音频"：item 89 ms 就建成了，宿主发布 ARA 图
+    /// 要 212~299 ms。旧的回执用"这一轮图里有没有它"当完成门，于是把一个**已经成功**
+    /// 的写入判成失败（用户看到红色错误条），而波形请求又把"还没轮到"记成永久失败。
+    /// 现在回执只回答"item 在不在"，转正由这张账本负责。
+    #[test]
+    fn a_pending_import_resolves_on_the_next_publish() {
+        let document = DocumentSession::new(40_101);
+        document.begin_pending_import(crate::render::document::PendingImport {
+            item: "{IMPORT-1}".into(),
+            source_path: "C:/audio/one.wav".into(),
+            landed_track: Some("track".into()),
+            requested_at: std::time::Instant::now(),
+            rounds: 0,
+            stall_reported: false,
+        });
+        // ① 清单里还没有这条 item ⇒ 不转正（也不是失败，只是"还没轮到"）。
+        assert!(
+            document
+                .resolve_pending_imports(&document.import_claims())
+                .is_empty(),
+            "清单里没有它的时候不许凭空造一条 clip"
+        );
+        // ② 清单到了 ⇒ 同一轮就对账成功，并且给出的 id 是时间线里那一条。
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        let api = Arc::new(host.client());
+        let mut track = api.ui_track(&|| true).unwrap();
+        track.id = "track".into();
+        let mut item = track.items[0].clone();
+        item.geometry.item_id = "{IMPORT-1}".into();
+        track.items = vec![item];
+        let guid = track.guid.clone();
+        document.ui_tracks.lock_or_recover().insert(guid, track);
+        let resolved = document.resolve_pending_imports(&document.import_claims());
+        assert_eq!(resolved.len(), 1, "下一轮发布必须把它转正");
+        assert_eq!(resolved[0].item, "{IMPORT-1}");
+        assert_eq!(resolved[0].clip_id, "ara-item-{IMPORT-1}");
+        assert_eq!(resolved[0].landed_track.as_deref(), Some("track"));
+        assert_eq!(resolved[0].source_path, "C:/audio/one.wav");
+        document.close();
+    }
+
+    /// **回归：转正只发生一次。**
+    ///
+    /// 【为什么这条要紧】账本如果只"报"不"划掉"，那么每一轮发布都会再发一条
+    /// `import_ready` —— 前端于是每次都触发一次规格化，用户勾了"导入后规格化"就会
+    /// 得到一串重复的增益。
+    #[test]
+    fn a_pending_import_is_dropped_once_resolved() {
+        let document = DocumentSession::new(40_102);
+        document.begin_pending_import(crate::render::document::PendingImport {
+            item: "{IMPORT-2}".into(),
+            source_path: "C:/audio/two.wav".into(),
+            landed_track: None,
+            requested_at: std::time::Instant::now(),
+            rounds: 0,
+            stall_reported: false,
+        });
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        let api = Arc::new(host.client());
+        let mut track = api.ui_track(&|| true).unwrap();
+        track.id = "track".into();
+        let mut item = track.items[0].clone();
+        item.geometry.item_id = "{IMPORT-2}".into();
+        track.items = vec![item];
+        let guid = track.guid.clone();
+        document.ui_tracks.lock_or_recover().insert(guid, track);
+        assert_eq!(
+            document
+                .resolve_pending_imports(&document.import_claims())
+                .len(),
+            1
+        );
+        assert!(
+            document
+                .resolve_pending_imports(&document.import_claims())
+                .is_empty(),
+            "同一条导入不许被转正两次"
+        );
+        document.close();
+    }
+
+    /// **回归：等太久只发一次通知，绝不伪造 clip。**
+    ///
+    /// 【为什么不能伪造】宿主的 Item 是用户能看见的既成事实，插件的占位来自宿主清单 ——
+    /// 两者都不是这条账本造的。账本能做的只有"说一声"，超出这句话的任何动作都会让
+    /// 时间线上出现一条宿主里并不存在的片段。
+    #[test]
+    fn a_stalled_import_never_fabricates_a_clip() {
+        let document = DocumentSession::new(40_103);
+        document.begin_pending_import(crate::render::document::PendingImport {
+            item: "{IMPORT-3}".into(),
+            source_path: "C:/audio/three.wav".into(),
+            landed_track: None,
+            requested_at: std::time::Instant::now() - std::time::Duration::from_secs(61),
+            rounds: 0,
+            stall_reported: false,
+        });
+        let timeline = TimelineState::default();
+        assert!(timeline.clips.is_empty());
+        let stalled = document.take_stalled_imports(std::time::Duration::from_secs(60));
+        assert_eq!(stalled.len(), 1, "超过 60 s 必须报一次");
+        assert_eq!(stalled[0].0, "{IMPORT-3}");
+        assert!(
+            document
+                .take_stalled_imports(std::time::Duration::from_secs(60))
+                .is_empty(),
+            "同一条只报一次"
+        );
+        assert!(
+            !document
+                .resolve_pending_imports(&document.import_claims())
+                .iter()
+                .any(|done| done.item == "{IMPORT-3}"),
+            "没有 region 也没有清单条目时，账本不许把它转正"
+        );
+        document.close();
+    }
+
+    /// **回归：账本被持有时，对账必须跳过而不是等它。**
+    ///
+    /// 【为什么这条是"永不挂死"的判据】结构修复让"对账在持锁作用域里跑"这件事不再
+    /// 发生（见 `ImportClaims`）。这一条保证的是**万一它又发生**：`try_lock` 把
+    /// "同一线程自锁"降级成"这一轮不动 + 一行 `[import] reconcile skipped`"，
+    /// 而不是宿主整机未响应。对账本来就是机会性的，跳过一轮没有任何语义代价。
+    #[test]
+    fn a_busy_ledger_skips_the_reconcile() {
+        let document = DocumentSession::new(40_106);
+        document.begin_pending_import(crate::render::document::PendingImport {
+            item: "{IMPORT-BUSY}".into(),
+            source_path: "C:/audio/busy.wav".into(),
+            landed_track: None,
+            requested_at: std::time::Instant::now(),
+            rounds: 0,
+            stall_reported: false,
+        });
+        let claims = document.import_claims();
+        // 同一线程先把账本拿在手上 —— 这正是曾经把宿主卡死的形状。
+        let held = document.pending_imports.lock_or_recover();
+        document.publish_pending_imports(&claims);
+        assert!(
+            document.pending_imports.try_lock().is_err(),
+            "对账不许把别人持有的账本悄悄放掉"
+        );
+        drop(held);
+        // 放掉之后下一轮照常对账：账本还在，只是这一轮什么都没发生。
+        assert!(document.resolve_pending_imports(&claims).is_empty());
+        assert!(
+            document.pending_import_for_source("C:/audio/busy.wav"),
+            "被跳过的那一轮不许划掉任何东西"
+        );
+        document.close();
+    }
+
+    /// **回归：导入之后的两轮清单 —— 第一轮什么都不报，第二轮才转正。**
+    ///
+    /// 【为什么要走 `present_host_inventory`】这是生产里的真实时序：`import_audio_item`
+    /// 返回时宿主清单里已经有 item，而 region 还要 200~300 ms。于是第一轮对账只能
+    /// 看见"清单里有、region 没有"，第二轮才看得见 region。它同时钉住两件事：
+    /// 第一轮**什么都不许发**（发了就是替用户画一条假的"已就绪"），第二轮**必须**转正。
+    #[test]
+    fn the_first_inventory_pass_after_an_import_reports_nothing() {
+        let document = DocumentSession::new(40_105);
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        let api = Arc::new(host.client());
+        // 清单非空（否则 `present_host_inventory` 在开口就早退），但**不含**这条导入。
+        let mut other = api.ui_track(&|| true).unwrap();
+        other.id = "other".into();
+        other.items[0].geometry.item_id = "{SOMETHING-ELSE}".into();
+        let other_guid = other.guid.clone();
+        document
+            .ui_tracks
+            .lock_or_recover()
+            .insert(other_guid, other);
+
+        document.begin_pending_import(crate::render::document::PendingImport {
+            item: "{IMPORT-LATE}".into(),
+            source_path: "C:/audio/late.wav".into(),
+            landed_track: Some("track".into()),
+            requested_at: std::time::Instant::now(),
+            rounds: 0,
+            stall_reported: false,
+        });
+        let mut timeline = TimelineState::default();
+        document.present_host_inventory(&mut timeline, "");
+        assert!(
+            document.pending_import_for_source("C:/audio/late.wav"),
+            "第一轮清单里还没有它：账本必须原样留着，不许提前划掉"
+        );
+
+        // 第二轮：宿主清单到了。
+        let mut track = api.ui_track(&|| true).unwrap();
+        track.id = "track".into();
+        let mut item = track.items[0].clone();
+        item.geometry.item_id = "{IMPORT-LATE}".into();
+        track.items = vec![item];
+        let guid = track.guid.clone();
+        document.ui_tracks.lock_or_recover().insert(guid, track);
+        document.present_host_inventory(&mut timeline, "");
+        assert!(
+            !document.pending_import_for_source("C:/audio/late.wav"),
+            "第二轮必须转正：账本被划掉、`import_ready` 已发出"
+        );
+        assert!(
+            timeline
+                .clips
+                .iter()
+                .any(|clip| clip.id == "ara-item-{IMPORT-LATE}"),
+            "转正之后时间线里必须有这条占位 clip"
+        );
+        document.close();
+    }
+
+    /// **回归：一次导入不许把清单函数锁死。**
+    ///
+    /// 【现场原形】REAPER ARA 里"文件 → 导入音频"：item 建成几百毫秒之后宿主整体未响应，
+    /// Windows 记录 `AppHangB1`，状态栏同时报
+    /// `BackendInvokeError: … plugin_get_apply_state` —— 那是宿主线程停止泵消息 **30 s 之后**
+    /// 的读数，不是原因。
+    ///
+    /// 【为什么这条用例必须走 `present_host_inventory`】缺陷不在对账逻辑里，而在**组合**里：
+    /// `present_host_inventory` 从 `ui_tracks.lock_or_recover()` 那一行起整段持有 guard，
+    /// 并在函数末尾调对账；对账为了回答"这条 item 在不在清单里"**再取一次** `ui_tracks`。
+    /// `std::sync::Mutex` 不可重入 ⇒ 同一线程自锁。单独调 `resolve_pending_imports` 的
+    /// 用例永远看不到它 —— 这正是上一轮四条待定导入用例全绿、现场却必挂的原因。
+    ///
+    /// 【为什么要一个线程加超时】自锁的表现是"永不返回"，直接调用的失败形态是整个测试
+    /// 进程挂死 —— 那在 CI 上只会变成一次超时，看不出是哪一条。这里把"没有返回"本身
+    /// 变成断言。
+    #[test]
+    fn an_import_does_not_deadlock_the_inventory_pass() {
+        let document = Arc::new(DocumentSession::new(40_104));
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        let api = Arc::new(host.client());
+        let mut track = api.ui_track(&|| true).unwrap();
+        track.id = "track".into();
+        let mut item = track.items[0].clone();
+        item.geometry.item_id = "{IMPORT-LOCK}".into();
+        track.items = vec![item];
+        let guid = track.guid.clone();
+        document.ui_tracks.lock_or_recover().insert(guid, track);
+        document.begin_pending_import(crate::render::document::PendingImport {
+            item: "{IMPORT-LOCK}".into(),
+            source_path: "C:/audio/lock.wav".into(),
+            landed_track: Some("track".into()),
+            requested_at: std::time::Instant::now(),
+            rounds: 0,
+            stall_reported: false,
+        });
+
+        let (done, wait) = std::sync::mpsc::channel();
+        let worker = {
+            let document = Arc::clone(&document);
+            std::thread::spawn(move || {
+                let mut timeline = TimelineState::default();
+                document.present_host_inventory(&mut timeline, "");
+                let _ = done.send(());
+                document.close();
+            })
+        };
+        let returned = wait.recv_timeout(std::time::Duration::from_secs(5)).is_ok();
+        // 【不 join】自锁时它会永远停在那把锁上；join 只会把失败形态重新变回"进程挂死"。
+        drop(worker);
+        assert!(
+            returned,
+            "present_host_inventory 在有待定导入时没有返回：它在自己的 ui_tracks 作用域里又取了一次同一把锁"
+        );
+    }
+    // ── 稀疏淡变补丁（第八轮 §2.4.2 / §2.4.3）────────────────────────────
+
+    /// 两条 clip 的时间线，淡变都非 0 —— 补丁的对照组。
+    fn fade_timeline(ids: &[&str]) -> TimelineState {
+        serde_json::from_value(serde_json::json!({
+            "tracks": [{"id": "t", "name": "t", "order": 0}],
+            "clips": ids
+                .iter()
+                .map(|id| {
+                    serde_json::json!({
+                        "id": *id,
+                        "track_id": "t",
+                        "name": *id,
+                        "start_sec": 0.0,
+                        "length_sec": 1.0,
+                        "fade_in_sec": 0.25,
+                        "fade_out_sec": 0.5,
+                        "auto_fade_in_sec": 0.1,
+                        "snap_offset_sec": 0.125,
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "bpm": 120.0,
+            "project_sec": 1.0,
+        }))
+        .unwrap()
+    }
+
+    fn host_fields(fade_in: f64) -> ClipFadeFields {
+        ClipFadeFields {
+            item_gain: 1.0,
+            fade_in_sec: fade_in,
+            ..ClipFadeFields::default()
+        }
+    }
+
+    /// **回归：补丁只覆盖它说得出来的那几条。**
+    ///
+    /// 【现场原形】宿主几何缓存这一轮只覆盖了一部分 clip（其余还没求解出来）。旧实现
+    /// 交出的是一整份时间线，于是没覆盖到的那几条被写成装配刚产出的 0 —— 用户看到
+    /// 「只有一部分 clip 的淡变闪了」。
+    #[test]
+    fn a_partial_projection_never_overwrites_an_unprojected_clip() {
+        let mut timeline = fade_timeline(&["ui-ara-item-a", "ui-ara-item-b"]);
+        let projection = FadeProjection {
+            revision: 7,
+            expected: 2,
+            clips: [("ara-item-a".to_string(), host_fields(0.9))]
+                .into_iter()
+                .collect(),
+        };
+        apply_fade_projection(&mut timeline, &projection, "ui-");
+        assert_eq!(timeline.clips[0].fade_in_sec, 0.9, "覆盖到的那条按宿主更新");
+        assert_eq!(
+            timeline.clips[1].fade_in_sec, 0.25,
+            "没覆盖到的那条一个字都不许动"
+        );
+        assert_eq!(timeline.clips[1].fade_out_sec, 0.5);
+        assert_eq!(timeline.clips[1].auto_fade_in_sec, 0.1);
+        assert_eq!(timeline.clips[1].snap_offset_sec, 0.125);
+    }
+
+    /// 全覆盖时宿主值必须落地 —— 防止「为了不写 0 干脆不写」。
+    #[test]
+    fn a_full_projection_still_applies_the_host_values() {
+        let mut timeline = fade_timeline(&["ui-ara-item-a", "ui-ara-item-b"]);
+        let projection = FadeProjection {
+            revision: 9,
+            expected: 2,
+            clips: [
+                ("ara-item-a".to_string(), host_fields(0.9)),
+                ("ara-item-b".to_string(), host_fields(0.0)),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        assert_eq!(projection.covered(), 2);
+        apply_fade_projection(&mut timeline, &projection, "ui-");
+        assert_eq!(timeline.clips[0].fade_in_sec, 0.9);
+        assert_eq!(
+            timeline.clips[1].fade_in_sec, 0.0,
+            "宿主**明确说** 0 的时候必须写 0：空补丁与 0 值补丁是两件事"
+        );
+    }
+
+    /// **本轮的契约：空补丁 ≠ 全 0 补丁。**
+    ///
+    /// 【为什么这条是本轮的核心】旧实现把「这一轮没有几何」表达成「一整份淡变为 0 的
+    /// 时间线」，于是「没有答案」被读成「答案是 0」。这条用例把两者钉成不同的类型：
+    /// `clips` 为空 ⇒ 一个字段都不许变。
+    #[test]
+    fn an_empty_projection_is_not_a_zero_projection() {
+        let before = fade_timeline(&["ui-ara-item-a", "ui-ara-item-b"]);
+        let mut after = before.clone();
+        let projection = FadeProjection {
+            revision: 11,
+            expected: 2,
+            clips: std::collections::BTreeMap::new(),
+        };
+        assert_eq!(projection.covered(), 0);
+        assert!(
+            projection.clips.is_empty(),
+            "空补丁必须是空的，不是一份全 0 的时间线"
+        );
+        apply_fade_projection(&mut after, &projection, "ui-");
+        for (left, right) in before.clips.iter().zip(after.clips.iter()) {
+            assert_eq!(left.fade_in_sec, right.fade_in_sec);
+            assert_eq!(left.fade_out_sec, right.fade_out_sec);
+            assert_eq!(left.auto_fade_in_sec, right.auto_fade_in_sec);
+            assert_eq!(left.auto_fade_out_sec, right.auto_fade_out_sec);
+            assert_eq!(left.snap_offset_sec, right.snap_offset_sec);
+        }
+    }
+
+    /// 命名空间不匹配的 clip 永远不在补丁的管辖范围内（跨文档 / 跨实例的 id 不许互串）。
+    #[test]
+    fn a_clip_outside_the_namespace_is_never_touched() {
+        let mut timeline = fade_timeline(&["other-ara-item-a"]);
+        let projection = FadeProjection {
+            revision: 3,
+            expected: 1,
+            clips: [("ara-item-a".to_string(), host_fields(0.9))]
+                .into_iter()
+                .collect(),
+        };
+        apply_fade_projection(&mut timeline, &projection, "ui-");
+        assert_eq!(timeline.clips[0].fade_in_sec, 0.25);
     }
 }

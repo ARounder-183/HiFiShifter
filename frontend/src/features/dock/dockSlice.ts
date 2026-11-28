@@ -13,9 +13,11 @@
 
 import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 
+import { appForm } from "../../services/hostDetect";
 import {
     closeFormInLayout,
     createDefaultDockLayout,
+    dockModeForForm,
     ensureRegisteredPanels,
     findMainTabset,
     findVisibleFormForPanel,
@@ -121,9 +123,15 @@ export interface DockState {
     maximized: { rootId: string; tree: DockNode } | null;
 }
 
+/*
+ * 【为什么初始布局按当前形态算】初始 state 在模块求值期定型，而 `main.tsx` 保证
+ * 形态剖面在那之前就已灌入（见 `surfaceProfileStore` 的说明）。若这里写死
+ * `createDefaultDockLayout()`（= 独立 App 的上下堆叠），移动端首帧会是"时间轴
+ * 压着参数编辑器"—— 而 390px 宽下那两半都不可用。
+ */
 const initialState: DockState = {
-    mode: "standalone",
-    layout: createDefaultDockLayout(),
+    mode: dockModeForForm(appForm()),
+    layout: createDefaultDockLayout(dockModeForForm(appForm())),
     settings: DEFAULT_DOCK_SETTINGS,
     activeFormId: null,
     hydrated: false,

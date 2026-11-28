@@ -7,6 +7,7 @@
  * 【ref 全部来自模型】DOM 节点由模型里的 ref 持有（内核通过同一批 ref 绘制），
  * 本文件只负责把它们摆到正确的层级上。
  */
+import React from "react";
 import { Flex, Box } from "@radix-ui/themes";
 import { BackgroundGrid, TimeRuler } from "../../timeline";
 import { timeRulerHeightPx } from "../../timeline/rulerHeight";
@@ -26,6 +27,11 @@ import {
 } from "../../vibrato/vibratoDialogLogic";
 import { PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX } from "./panelHelpers";
 
+import {
+    useViewportGestures,
+    dispatchPinchWheel,
+} from "../../../../features/touch/useViewportGestures";
+import { surfaceProfile, subscribeSurfaceProfile } from "../../../../services/surfaceProfileStore";
 import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
 
 /** 本文件用到的模型字段（AST 扫描得出）；`Pick<>` 保证它不会悄悄变宽。 */
@@ -59,9 +65,7 @@ type Props = {
         | "gridLayerRef"
         | "hScrollbarThumbRef"
         | "handleCopyPlayheadTime"
-        | "handlePrimaryUnitChange"
         | "handleRulerWheel"
-        | "handleSecondaryUnitChange"
         | "handleTempoMapChange"
         | "handleTempoMapCommit"
         | "interactions"
@@ -120,9 +124,7 @@ export function EditorArea({ m }: Props) {
         gridLayerRef,
         hScrollbarThumbRef,
         handleCopyPlayheadTime,
-        handlePrimaryUnitChange,
         handleRulerWheel,
-        handleSecondaryUnitChange,
         handleTempoMapChange,
         handleTempoMapCommit,
         interactions,
@@ -150,6 +152,45 @@ export function EditorArea({ m }: Props) {
         viewSize,
         waveformColors,
     } = m;
+
+    // ── 触摸视口手势（双指捏合 + 平移）──────────────────────────────
+    //
+    // 【单指不在这里】参数编辑器的单指有十几种语义（画线 / 框选 / 拉伸 / 颤音
+    // / 块拖动），把其中任何一种改成平移都会破坏编辑。单指的平移只发生在
+    // 「选择工具 + 空白」这一种情况下，由画布自己的命中测试决定（见
+    // `canvasPointerDown` 的触摸分支）。这里负责的是**双指**：捏合缩放 +
+    // 双指拖动平移。
+    //
+    // 【为什么挂在画布而不是滚动容器】画布铺满整个视口且 `touch-action: none`，
+    // 触摸事件只会落在它上面；挂在容器上等于等一个永远不会到来的事件。
+    const touchGesturesEnabled = React.useSyncExternalStore(
+        subscribeSurfaceProfile,
+        () => surfaceProfile().input.two_finger_gesture,
+        () => false,
+    );
+    const gestureAdapter = React.useMemo(
+        () => ({
+            panBy(dx: number, dy: number) {
+                interactions.onTouchPanBy(dx, dy);
+            },
+            zoomBy(factor: number, clientX: number, clientY: number) {
+                const scroller = scrollerRef.current;
+                if (scroller === null) return;
+                // 复用既有的滚轮缩放通道（原生 wheel 监听挂在 scroller 上）：
+                // 锚点换算、上下限钳制、与时间轴的共享视口同步全在里面。
+                dispatchPinchWheel(scroller, clientX, clientY, factor);
+            },
+            cancelActiveEdit() {
+                interactions.cancelActivePointerGesture();
+            },
+        }),
+        [interactions, scrollerRef],
+    );
+    useViewportGestures({
+        elementRef: canvasRef,
+        enabled: touchGesturesEnabled,
+        adapter: gestureAdapter,
+    });
 
     return (
         <Flex className="flex-1 overflow-hidden relative">
@@ -260,8 +301,6 @@ export function EditorArea({ m }: Props) {
                         timeContext={timeContext}
                         primaryUnit={s.primaryTimeUnit}
                         secondaryUnit={s.secondaryTimeUnit}
-                        onPrimaryUnitChange={handlePrimaryUnitChange}
-                        onSecondaryUnitChange={handleSecondaryUnitChange}
                         onOpenSettings={() => setTimeDisplaySettingsOpen(true)}
                         onCopyPlayheadTime={() => void handleCopyPlayheadTime()}
                         t={tf}

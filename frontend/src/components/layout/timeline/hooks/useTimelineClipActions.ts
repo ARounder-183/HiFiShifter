@@ -16,7 +16,6 @@ import {
     pasteTimelineClipboardRemote,
     removeClipsRemote,
     selectClipRemote,
-    setClipAutoFades,
     setClipGain,
     setClipMuted,
     setClipStateRemote,
@@ -46,11 +45,19 @@ import {
 } from "../../../../services/hostCapabilities";
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
 import { snapTimelinePosition } from "../../../../utils/timelineSnapping";
-import { computeAutoCrossfadeFromPayload } from "./autoCrossfade";
+import {
+    autoFadeSnapshot,
+    computeAutoCrossfadeFromPayload,
+    persistAutoFadeUpdates,
+} from "./autoCrossfade";
 import { getBulkEditableClipIds } from "./bulkClipEdit";
 import { getGroupClipIds } from "./useGroupExpansion";
 import { isClipSplittableAtSec, resolveSplitTargetsWithSnap } from "../splitTargets";
-import { buildBulkClipStateUpdates } from "./bulkClipRemotePayloads";
+import {
+    buildBulkClipStateUpdates,
+    itemGainChange,
+    type BulkClipRemoteChange,
+} from "./bulkClipRemotePayloads";
 import { computeClipNormalizationGain } from "../../../../features/session/clipNormalization";
 import type { TimelineViewportAccess } from "./timelineViewportAccess";
 
@@ -151,7 +158,12 @@ export interface UseTimelineClipActionsResult {
     toggleGroupDisabled: (groupId: string) => void;
     normalizeClips: (ids: string[]) => void;
     replaceClipSources: (ids: string[]) => Promise<void>;
-    splitClipIdsAtPlayhead: (clipIds: string[]) => string[];
+    /**
+     * 在 `splitSecOverride` 处分割；缺省用播放头位置。
+     *
+     * @returns 真正送进后端的 Clip id（已按 1e-6 边沿过滤）。
+     */
+    splitClipIdsAtPlayhead: (clipIds: string[], splitSecOverride?: number) => string[];
     splitSelectedAtPlayhead: () => void;
     selectClipRangeByRect: (
         targetClipId: string,
@@ -443,24 +455,37 @@ export function useTimelineClipActions(
     // ── normalizeClips ───────────────────────────────────────
     const normalizeClips = React.useCallback(
         (ids: string[]) => {
-            const changesById = new Map<string, { gain: number }>();
+            const changesById = new Map<string, BulkClipRemoteChange>();
             for (const id of ids) {
                 const clip = sessionRef.current.clips.find((c) => c.id === id);
                 if (!clip) continue;
-                const newGain = computeClipNormalizationGain(clip, {
-                    getInterleavedSlice: (sourcePath, _channel, sourceStartSec, sourceSpanSec) =>
-                        waveformMipmapStore.getInterleavedSlice(
+                const newGain = computeClipNormalizationGain(
+                    {
+                        ...clip,
+                        takeGain: clip.gain,
+                    },
+                    {
+                        getInterleavedSlice: (
                             sourcePath,
-                            0,
+                            _channel,
                             sourceStartSec,
                             sourceSpanSec,
-                        ),
-                    releaseInterleaved: (data) =>
-                        waveformMipmapStore.releaseInterleaved(data as Float32Array),
-                });
+                        ) =>
+                            waveformMipmapStore.getInterleavedSlice(
+                                sourcePath,
+                                0,
+                                sourceStartSec,
+                                sourceSpanSec,
+                            ),
+                        releaseInterleaved: (data) =>
+                            waveformMipmapStore.releaseInterleaved(data as Float32Array),
+                    },
+                );
                 if (newGain == null) continue;
+                // 【乐观更新写 item 层，远程写入也必须写 item 层】见
+                // `BulkClipRemoteChange.itemGain` 的说明。
                 dispatch(setClipGain({ clipId: id, gain: newGain }));
-                changesById.set(id, { gain: newGain });
+                changesById.set(id, itemGainChange(newGain));
             }
             if (changesById.size === 0) return;
             const clipIds = [...changesById.keys()];
@@ -760,24 +785,19 @@ export function useTimelineClipActions(
                                         allClips,
                                         created,
                                     );
-                                    if (fadeUpdates.length > 0) {
-                                        // 粘贴后的自动交叉淡化写入“自动 fade”（与手动 fade 分离）。
-                                        for (const u of fadeUpdates) {
-                                            dispatch(
-                                                setClipAutoFades({
-                                                    clipId: u.clipId,
-                                                    autoFadeInSec: u.autoFadeInSec,
-                                                    autoFadeOutSec: u.autoFadeOutSec,
-                                                }),
-                                            );
-                                            await webApi.setClipState({
-                                                clipId: u.clipId,
-                                                autoFadeInSec: u.autoFadeInSec,
-                                                autoFadeOutSec: u.autoFadeOutSec,
-                                                checkpoint: false,
-                                            });
-                                        }
-                                    }
+                                    // 粘贴后的自动交叉淡化写入“自动 fade”（与手动 fade 分离），
+                                    // 且**整批一次写回**：N 条 Clip 不能变成 N 个宿主写回请求、
+                                    // N 个撤销点 —— 那正是"自动交叉淡化看起来没执行"的来源。
+                                    await persistAutoFadeUpdates(fadeUpdates, dispatch, {
+                                        checkpoint: false,
+                                        previous: autoFadeSnapshot(
+                                            sessionRef.current,
+                                            fadeUpdates.map((u) => u.clipId),
+                                        ),
+                                        requirePresent: new Set(
+                                            sessionRef.current.clips.map((clip) => clip.id),
+                                        ),
+                                    });
                                 }
                             }
                         } catch {
@@ -1009,7 +1029,12 @@ export function useTimelineClipActions(
                 multiSelectedClipIds: multiSelectedClipIdsRef.current,
                 multiSelectedSet: multiSelectedSetRef.current,
             });
-            const changesById = new Map(targetIds.map((targetId) => [targetId, { gain }] as const));
+            // 【同一层：乐观更新与远程写入】行内编辑 / 双击复位改的是时间轴旋钮，
+            // 也就是 item 层（REAPER 的 `D_VOL`）。此前这里发的是裸 `gain`，被后端
+            // 读成 take 层 —— 用户看到的正是"旋钮先到 +12 dB，随后被权威载荷拉回"。
+            const changesById = new Map(
+                targetIds.map((targetId) => [targetId, itemGainChange(gain)] as const),
+            );
             for (const targetId of targetIds) {
                 dispatch(setClipGain({ clipId: targetId, gain }));
             }

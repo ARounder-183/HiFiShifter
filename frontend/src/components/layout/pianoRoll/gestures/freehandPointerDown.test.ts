@@ -230,16 +230,25 @@ test("pointercancel 回滚：不提交、清引用、复位 live 标志", () => 
     expect(h.edgeScroll.stop).toHaveBeenCalled();
 });
 
-test("右键走擦除模式，松手同样提交", async () => {
+test("右键走还原模式：逐点写预览，松手同样提交", async () => {
     const h = makeDeps({ mode: "restore" });
     h.strokeRef.current = { ...h.strokeRef.current!, mode: "restore" };
     press(h.deps, { button: 2, buttons: 2 });
 
     move(150, 110, 2);
+    move(160, 120, 2);
     flushFrames();
     up();
     await Promise.resolve();
 
+    // 【为什么逐点断言】还原曾经被实现成"擦掉自己写过的帧"，而擦除让这些帧回到
+    // **已提交值** —— 右键拖拽因此一帧预览都没有（覆盖层为空时连版本号都不动）。
+    // 这里钉住：每一次移动都必须以 restore 模式写一次预览。
+    expect(h.applyDenseToLiveEdit).toHaveBeenCalledTimes(2);
+    for (const call of h.applyDenseToLiveEdit.mock.calls) {
+        expect(call[2]).toBeNull();
+        expect(call[5]).toBe("restore");
+    }
     expect(h.commitStroke).toHaveBeenCalledTimes(1);
     expect(h.commitStroke.mock.calls[0][1]).toBe("restore");
 });

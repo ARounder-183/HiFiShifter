@@ -28,16 +28,20 @@
  * 挂同一套类，因此两边不可能再漂移。这也是 `ITEM_BASE` 常量被删掉的原因：
  * 它把取值复制到了 TypeScript 里，CSS 那份改不到它。
  *
+ * 【滚动】三个原语的内容都包在 `<MenuScrollScope>` 里：壳没有滚动条，只有两条
+ * sticky 提示行。内边距因此搬到了 `.hs-menu__content`（见 `index.css` 的说明）。
+ *
  * 【两个 data 标记的分工】`data-hs-context-menu` 有**两种**写法，含义不同：
  *   - `="1"`：这是一个**已打开**的菜单表面。时间轴的关闭逻辑据此判断"点在菜单
  *     里面"，别处不得用它当"菜单开着"的判据（常驻元素带这个值会让判据永远为真）。
  *   - 无值：常驻的**锚点**容器（工具栏按钮的 `position: relative` 外壳），只表示
  *     "这里会长出菜单"。`AppTooltip` 的注释记录了为什么不能把两者混为一谈。
  *
- * 【菜单表面必须挂在 `document.body`】`AppContextMenu` 由调用方 portal，
+ * 【菜单表面必须挂在主题作用域、且在文档流之外】`AppContextMenu` 由调用方 portal，
  * `AppAnchoredMenu` 自己 portal。留在触发它的布局盒里会被沿途任何一层
  * `overflow: hidden` 裁掉 —— 实测参数编辑器工具栏下拉要穿过 9 层，可视高度 0px
- * （详见 `src/index.css` 的 `.hs-menu--submenu`）。新增菜单表面时请沿用这条。
+ * （详见 `src/index.css` 的 `.hs-menu--submenu`）。挂载目标用
+ * `menuPortalContainer()`：优先 `.radix-themes` 以拿全 Radix 令牌，无主题时退回 body。
  */
 import {
     Fragment,
@@ -55,6 +59,25 @@ import { CheckIcon } from "@radix-ui/react-icons";
 
 import { EDGE_GAP, clampAxisPosition } from "../components/appTooltipPosition";
 import { cx } from "./cx";
+import { MenuScrollScope } from "./MenuScrollScope";
+import { menuItemHeightOf, revealMenuItem } from "./menuScrollDom";
+import {
+    handleMenuDismissEscape,
+    handleMenuDismissPointerDown,
+    menuDismissLayerCount,
+    pushMenuDismissLayer,
+} from "./menuDismissStack";
+import { computeMenuPageItemCount, placeMenuWithinViewport } from "./menuScrollModel";
+import {
+    EMPTY_MENU_TYPEAHEAD,
+    matchMenuTypeahead,
+    menuItemTypeaheadText,
+    menuItemsOf,
+    menuTypeaheadChar,
+    pushMenuTypeahead,
+    type MenuTypeaheadState,
+} from "./menuTypeahead";
+import { menuPortalContainer } from "./portalContainer";
 import { ownsArrowKeys, useMenuKeyboard } from "./useMenuKeyboard";
 
 export interface AppMenuItemSpec {
@@ -64,15 +87,70 @@ export interface AppMenuItemSpec {
     onSelect?: () => void;
     /** 展示用快捷键文本（不参与绑定，与 `data-tooltip` 同源）。 */
     shortcut?: string;
+    /**
+     * 悬停提示文本，渲染成 `data-tooltip`。
+     *
+     * 【它什么时候有意义】只用于"这一项到底会做什么"说不清的地方（例如「另存为」
+     * 子菜单里每种格式的说明：zip 需要解压后才能打开）。菜单弹出期间项目的自定义
+     * 气泡通道被全局抑制（见 `docs/i18n/style-guide.md` §3.5），因此这条**不能**
+     * 用来承载"为什么点不了" —— 那件事必须走 `description`，它是正立可见的。
+     */
+    tooltip?: string;
+    /**
+     * 尾部**弱化标注**（不是快捷键）。
+     *
+     * 【它解决什么】有些项自身说不清会发生什么，需要一处"结果预告"跟在标签后面：
+     * "自动"要说明它此刻会落到哪一处，"默认（当前）"要说明默认值是什么。塞进
+     * `label` 会让标注跟着标签一起被截断，也会被读屏念成名字的一部分；塞进
+     * `shortcut` 则是在借一个语义不同的字段（那列还承担"按什么键"的约定）。
+     * 与 `shortcut` 同列、同样式，但语义独立。
+     */
+    hint?: string;
     /** 破坏性操作：悬停变红底红字。 */
     danger?: boolean;
     disabled?: boolean;
+    /**
+     * 激活后**不关闭**菜单。
+     *
+     * 【为什么需要】菜单的默认语义是"点一条命令就完事，收起菜单"。但**多选**
+     * 不是一条命令：参考轨道组要连着勾几条轨道、逐条看画布上的曲线变化，
+     * 每勾一次就关掉菜单等于让用户重新打开 N 次。这与原生菜单里复选项不收起
+     * 是同一条约定 —— 复选框是"开关"，不是"命令"。
+     *
+     * 单选（`radio`）与普通条目保持默认收起。
+     */
+    keepOpen?: boolean;
     /** 该项上方加一条分隔线，用于视觉分组。 */
     separatorBefore?: boolean;
     /** 右侧勾选标记（用于"当前选中项"这类菜单）。 */
     checked?: boolean;
+    /**
+     * 单选态：把项渲染成 `role="menuitemradio"` 而不是 `menuitemcheckbox`。
+     *
+     * 【为什么必须有】`aria-checked` 只允许出现在 `menuitemcheckbox` /
+     * `menuitemradio` / `option` / `switch` 上。互斥档位（语言、推理设备、
+     * 日志级别、子轨道音高组）此前只有"勾选"这一个角色可用，读屏会把它念成
+     * "复选框"——用户听到的是"可以多选"，而实际只能选一个。
+     */
+    radio?: boolean;
     /** 条目左侧图标（take 操作、菜单按钮等）。 */
     icon?: ReactNode;
+    /**
+     * 指针进入本项时的回调。
+     *
+     * 【它解决什么】有些菜单项与菜单**之外**的东西联动：参考轨道组的每一项要在
+     * 指针悬停时高亮画布上那条参考曲线。那个联动不属于"菜单内部状态"，必须由
+     * 调用方拿到事件；而声明式条目模型此前只有 `onSelect`，悬停无从表达。
+     */
+    onHover?: () => void;
+    /**
+     * 指针离开本项时的回调。
+     *
+     * 【为什么与 `onHover` 成对】只有进入没有离开，高亮会**粘住**：指针从第 3 条
+     * 轨道划到"全部"（那一项没有联动）时，画布上第 3 条曲线仍然亮着，而指针底下
+     * 已经不是它。两者必须成对出现才是一份完整的"悬停联动"契约。
+     */
+    onHoverEnd?: () => void;
     /**
      * 禁用理由，渲染成标签下的**第二行弱化小字**。
      *
@@ -166,12 +244,12 @@ function renderMenuEntries(
                     active={index === layerActiveIndex}
                     reserveIcon={reserveIcon}
                     id={idPrefix ? `${idPrefix}-item-${index}` : undefined}
-                    onHover={
+                    onActive={
                         onHoverItem ? () => onHoverItem(item.disabled ? -1 : index) : undefined
                     }
                     onSelect={() => {
                         item.onSelect?.();
-                        onClose();
+                        if (!item.keepOpen) onClose();
                     }}
                 />
             )}
@@ -262,6 +340,8 @@ export function AppContextMenu({
     });
     /** 键盘焦点所在的下标（指向**可选项**，跳过禁用项与分隔符）。 */
     const [activeIndex, setActiveIndex] = useState(-1);
+    /** 打字跳项的缓冲（每个菜单各一份，跨菜单不串）。 */
+    const typeaheadRef = useRef<MenuTypeaheadState>(EMPTY_MENU_TYPEAHEAD);
 
     /**
      * 打开菜单前的焦点元素。
@@ -319,7 +399,7 @@ export function AppContextMenu({
     const reserveIconColumn = useMemo(() => items.some((item) => item.icon), [items]);
 
     /**
-     * 按实测尺寸夹紧。
+     * 按实测尺寸夹紧，装得下时翻到指针的左上。
      *
      * 【为什么推翻了原先"固定估算高度"的决策】被替换掉的 `NotebookContextMenu`
      * 里有一段注释，说明它刻意用估算而非测量，理由是"在 layout effect 里同步
@@ -330,19 +410,29 @@ export function AppContextMenu({
      * 现在统一为测量：`useLayoutEffect` 在**绘制前**完成，因此没有视觉闪动；
      * 多付一次渲染的代价远小于"菜单被裁"。同时消除了同一仓库里两种做法并存
      * （本组件测量、`DockTabMenu` 估算），后者也已改为测量。
+     *
+     * 【为什么不再只是夹紧】锚点在指针上、菜单往右下展开，于是菜单第一行**永远
+     * 盖住用户刚点的那个位置**。装得下时翻到左上（原生菜单就是这样）；装不下时
+     * 落回 `clampAxisPosition`，与迁移前逐值相同。
      */
     useLayoutEffect(() => {
         const el = ref.current;
         if (!el) return;
         const reclamp = () => {
             const rect = el.getBoundingClientRect();
-            const next = {
-                left: clampAxisPosition(x, rect.width, window.innerWidth, 0, EDGE_GAP),
-                top: clampAxisPosition(y, rect.height, window.innerHeight, 0, EDGE_GAP),
-                ready: true,
-            };
+            const placement = placeMenuWithinViewport({
+                anchorX: x,
+                anchorY: y,
+                width: rect.width,
+                height: rect.height,
+                viewportWidth: window.innerWidth,
+                viewportHeight: window.innerHeight,
+                edgeGap: EDGE_GAP,
+            });
             setPosition((prev) =>
-                prev.left === next.left && prev.top === next.top && prev.ready ? prev : next,
+                prev.left === placement.left && prev.top === placement.top && prev.ready
+                    ? prev
+                    : { left: placement.left, top: placement.top, ready: true },
             );
         };
         reclamp();
@@ -357,13 +447,30 @@ export function AppContextMenu({
     }, [x, y, items]);
 
     /*
-     * 【壳始终滚动，子菜单不再要求壳放手】子面板（`AppSubMenu`）现在以
-     * `position: fixed` 相对视口定位，不再是被 `overflow-y: auto` 裁切的
-     * 绝对定位后代 —— 因此带子菜单的壳也能保持 `max-height` + 滚动条
-     * （窗口高度不够时整张菜单可滚，与无子菜单的菜单同一行为）。
-     * 历史约束与实测证据已随定位模型移入 `src/index.css` 的
-     * `.hs-menu--submenu` 说明。
+     * 关闭回调走 ref。
+     *
+     * 【为什么不能把它放进 effect 依赖】调用方几乎都传内联箭头函数，它的身份每次
+     * 渲染都变。放进依赖会让"登记 → 注销 → 再登记"跟着每次渲染跑，而**层栈的顺序
+     * 就是"谁在最上面"** —— 外层菜单只要重渲染一次就会排到里层之上，于是点里层
+     * 菜单时外层先被关掉，正是层栈要解决的问题本身。
      */
+    const closeRef = useRef(onClose);
+    useLayoutEffect(() => {
+        closeRef.current = onClose;
+    });
+
+    /**
+     * 登记到 dismiss 层栈（只在挂载时登记一次）。
+     *
+     * 【为什么右键菜单也要登记】"菜单里住着另一个菜单的触发器"确实存在（参数编辑器
+     * 工具栏的「⋯」溢出面板里就放着两个自带下拉的组件）。层栈让"点内层不关外层"
+     * 成为全局规则，而不是每个菜单各自判断自己是不是外层。
+     */
+    useEffect(() => {
+        const el = ref.current;
+        if (!el) return;
+        return pushMenuDismissLayer(el, () => closeRef.current());
+    }, []);
 
     const step = useCallback(
         (delta: 1 | -1) => {
@@ -380,7 +487,7 @@ export function AppContextMenu({
     );
 
     /**
-     * 全局监听：Esc 关闭、外部指针按下关闭、方向键导航。
+     * 全局监听：Esc 关闭、外部指针按下关闭、方向键导航、打字跳项。
      *
      * 【pointerdown 用捕获阶段】编辑器/画布自身的 `pointerdown` 会先改变选择，
      * 若用冒泡阶段，菜单可能先关闭又被下层重新打开。
@@ -392,7 +499,12 @@ export function AppContextMenu({
      */
     useEffect(() => {
         function onPointerDown(event: PointerEvent) {
-            if (ref.current && !ref.current.contains(event.target as Node)) onClose();
+            if (ref.current && !ref.current.contains(event.target as Node)) {
+                // 交给层栈：它知道"点在里层菜单里"不等于"点在所有菜单之外"。
+                // 栈为空时（例如只开着某个不登记的手写壳）退回关掉自己。
+                if (menuDismissLayerCount() === 0) onClose();
+                else handleMenuDismissPointerDown(event.target as Node);
+            }
         }
         function onKeyDown(event: KeyboardEvent) {
             // 内层表面（`AppSubMenu` 的子面板）用捕获阶段先处理并 preventDefault；
@@ -406,17 +518,21 @@ export function AppContextMenu({
             }
             // 焦点已在另一层菜单表面时，方向键 / Home / End 也属于那一层。
             // 父层若继续按过期的 activeIndex 移动，会出现两处高亮；子菜单键盘
-            // 用户因此无法稳定走到目标项。Escape 仍由所有打开的层一起关闭。
+            // 用户因此无法稳定走到目标项。
             const focused = document.activeElement;
             if (event.key !== "Escape" && focused instanceof HTMLElement) {
                 const surface = focused.closest<HTMLElement>('[data-hs-context-menu="1"]');
                 if (surface !== null && surface !== ref.current) return;
             }
             switch (event.key) {
-                case "Escape":
+                case "Escape": {
                     event.preventDefault();
+                    // 【只关最内层】层栈按打开顺序排列，一次 Escape 只弹一层 ——
+                    // 否则"视图 → 布局 → 预设"三层会被一次按键全部关掉。
+                    if (handleMenuDismissEscape(event)) return;
                     onClose();
                     return;
+                }
                 case "ArrowDown":
                     event.preventDefault();
                     step(1);
@@ -433,8 +549,72 @@ export function AppContextMenu({
                     event.preventDefault();
                     if (selectableIndexes.length) setActiveIndex(selectableIndexes.at(-1)!);
                     return;
-                default:
+                /*
+                 * PageUp/PageDown = **移动高亮一页**，而不是只滚。
+                 *
+                 * 【为什么不只滚】只滚会让高亮停在屏幕外（违反"当前项永远完整
+                 * 可见"），而 `activeIndex` 与 DOM 焦点这两种高亮表示各要一份特例。
+                 */
+                case "PageDown":
+                case "PageUp": {
+                    event.preventDefault();
+                    if (selectableIndexes.length === 0) return;
+                    const page = computeMenuPageItemCount({
+                        clientHeight: ref.current?.clientHeight ?? 0,
+                        itemHeight: menuItemHeightOf(ref.current),
+                    });
+                    const at = selectableIndexes.indexOf(activeIndex);
+                    const delta = event.key === "PageDown" ? page : -page;
+                    const nextAt =
+                        at < 0
+                            ? event.key === "PageDown"
+                                ? 0
+                                : selectableIndexes.length - 1
+                            : Math.min(selectableIndexes.length - 1, Math.max(0, at + delta));
+                    setActiveIndex(selectableIndexes[nextAt]);
                     return;
+                }
+                /*
+                 * ArrowRight = 展开当前项的子菜单。ArrowLeft 在**顶层**没有去处
+                 * （原生菜单里它只是把焦点交给菜单栏），因此不处理。
+                 */
+                case "ArrowRight": {
+                    const item = items[activeIndex];
+                    if (!item?.items?.length) return;
+                    event.preventDefault();
+                    const trigger = Array.from(
+                        ref.current?.querySelectorAll<HTMLElement>("[data-menu-key]") ?? [],
+                    ).find((element) => element.dataset.menuKey === item.key);
+                    if (trigger?.getAttribute("aria-expanded") !== "true") trigger?.click();
+                    return;
+                }
+                default: {
+                    /*
+                     * 打字跳项。
+                     *
+                     * 【为什么在 DOM 上匹配】`label` 是 `ReactNode`（图标 + 文本 +
+                     * 角标），从 props 里取不出干净字符串；而渲染出来的
+                     * `.hs-menu__label-text` 是唯一权威文本，手写菜单也共用它。
+                     */
+                    const char = menuTypeaheadChar(event.key, event);
+                    if (char === null) return;
+                    const surface = ref.current;
+                    if (!surface) return;
+                    const state = pushMenuTypeahead(typeaheadRef.current, char, performance.now());
+                    typeaheadRef.current = state;
+                    const domItems = menuItemsOf(surface);
+                    // DOM 里的可导航项与 `selectableIndexes` 是**同一个顺序**
+                    // （渲染顺序 = items 顺序，两者都跳过禁用与标题行）。
+                    const match = matchMenuTypeahead(
+                        domItems.map(menuItemTypeaheadText),
+                        state.query,
+                        selectableIndexes.indexOf(activeIndex),
+                    );
+                    if (match < 0 || match >= selectableIndexes.length) return;
+                    event.preventDefault();
+                    setActiveIndex(selectableIndexes[match]);
+                    return;
+                }
             }
         }
         document.addEventListener("pointerdown", onPointerDown, true);
@@ -443,7 +623,7 @@ export function AppContextMenu({
             document.removeEventListener("pointerdown", onPointerDown, true);
             document.removeEventListener("keydown", onKeyDown);
         };
-    }, [onClose, step, selectableIndexes]);
+    }, [activeIndex, items, onClose, selectableIndexes, step]);
 
     /** 键盘激活：与鼠标点击走同一条路径，保证行为不分叉。（冒泡阶段，理由同上） */
     useEffect(() => {
@@ -494,16 +674,6 @@ export function AppContextMenu({
         return () => document.removeEventListener("keydown", onKeyActivate);
     }, [activeIndex, items, onClose]);
 
-    /**
-     * 渲染一层条目（递归：带 `items` 的项长成子菜单）。
-     *
-     * 【为什么抽成函数而不是内联】子菜单的子项与顶层项必须**逐字一致** —— 分隔线、
-     * 禁用态、图标列、悬停高亮都一样，否则两层会出现"顶层有分隔线、子层没有"这类
-     * 细微分裂。递归也让嵌套层数不再受代码结构限制。
-     *
-     * `activeIndex` 只对**本层**有意义：子菜单的高亮走 DOM 焦点（`useMenuKeyboard`），
-     * 因此递归时传 -1，让子项不吃父层的高亮。
-     */
     /*
      * 键盘高亮的可访问名称：`role="menu"` 的键盘契约要求容器报告"当前项"
      *（焦点不落到项上 —— 见 renderEntries 的说明），否则方向键移动时读屏静默。
@@ -518,17 +688,17 @@ export function AppContextMenu({
     /*
      * 键盘高亮滚动跟随。
      *
-     * 【为什么需要】壳是 `max-height` + `overflow-y: auto` 的滚动容器：菜单项多到
-     * 超出视口高度时，方向键走到可视区之外的项上，高亮存在（`data-active` 已写）
-     * 却看不见 —— 键盘用户等于在盲走。滚动跟随让可视区始终跟上高亮。
-     * 鼠标悬停不需要它：能被指到的项必然已在可视区里。
+     * 【为什么需要】壳是 `max-height` + 滚动容器：菜单项多到超出视口高度时，方向键
+     * 走到可视区之外的项上，高亮存在（`data-active` 已写）却看不见 —— 键盘用户
+     * 等于在盲走。
+     *
+     * 【为什么不用 `scrollIntoView({ block: "nearest" })`】它只知道"客户端可见区域"，
+     * 不知道那里盖着一条提示行 —— 于是走到最后一项时，项**技术上可见**、
+     * **实际被渐变吃掉**。`revealMenuItem` 按"扣掉提示行"的窗口计算。
      */
     useEffect(() => {
         if (activeIndex < 0) return;
-        // `?.` 兜底 jsdom（无此方法）；浏览器里它必然存在。
-        document
-            .getElementById(`${menuId}-item-${activeIndex}`)
-            ?.scrollIntoView?.({ block: "nearest" });
+        revealMenuItem(ref.current, document.getElementById(`${menuId}-item-${activeIndex}`));
     }, [activeIndex, menuId]);
 
     return (
@@ -555,15 +725,17 @@ export function AppContextMenu({
             onPointerDown={(event) => event.stopPropagation()}
             onContextMenu={(event) => event.preventDefault()}
         >
-            {header ? <div className="hs-menu__header">{header}</div> : null}
-            {renderMenuEntries(
-                items,
-                activeIndex,
-                reserveIconColumn,
-                setActiveIndex,
-                menuId,
-                onClose,
-            )}
+            <MenuScrollScope>
+                {header ? <div className="hs-menu__header">{header}</div> : null}
+                {renderMenuEntries(
+                    items,
+                    activeIndex,
+                    reserveIconColumn,
+                    setActiveIndex,
+                    menuId,
+                    onClose,
+                )}
+            </MenuScrollScope>
         </div>
     );
 }
@@ -573,7 +745,7 @@ function AppContextMenuItem({
     active,
     reserveIcon,
     id,
-    onHover,
+    onActive,
     onSelect,
 }: {
     item: AppMenuItemSpec;
@@ -582,32 +754,48 @@ function AppContextMenuItem({
     /** 顶层项的 id（aria-activedescendant 引用）；子层为 undefined。 */
     id?: string;
     /**
-     * 悬停回调。**只有拥有 `activeIndex` 的那一层会传** —— 子面板的项不传，
-     * 因为它的下标不能写进外层（见 `renderEntries` 的 `onHoverItem`）。
-     * 悬停高亮本身由 CSS `:hover` 负责，与这个回调无关。
+     * 把"指针在这一项上"汇报给**拥有 activeIndex 的那一层**。
+     * 子面板不传 —— 它的下标不能写进外层（见 `renderMenuEntries` 的 `onHoverItem`）。
      */
-    onHover?: () => void;
+    onActive?: () => void;
     onSelect: () => void;
 }) {
+    /* 见 `AppMenuItemSpec.onHover` / `onHoverEnd`：调用方的联动与"本层高亮"是两件事。 */
     if (item.heading) {
         return <div className="hs-menu__label">{item.label}</div>;
     }
+
+    /*
+     * 【三种角色的分工】`aria-checked` 只允许出现在 `menuitemcheckbox` /
+     * `menuitemradio` 上。互斥档位必须是 radio —— 挂成 checkbox 时读屏会念
+     * "复选框"，用户听到的是"可以多选"。
+     */
+    const role = item.radio
+        ? "menuitemradio"
+        : item.checked === undefined
+          ? "menuitem"
+          : "menuitemcheckbox";
 
     return (
         <button
             type="button"
             id={id}
             disabled={item.disabled}
-            // aria-checked 只允许出现在 menuitemcheckbox / menuitemradio 上：
-            // 挂在 menuitem 上多数读屏会忽略，勾选态因此不可知。
-            role={item.checked === undefined ? "menuitem" : "menuitemcheckbox"}
+            role={role}
             aria-checked={item.checked === undefined ? undefined : item.checked ? "true" : "false"}
             // 键盘高亮与鼠标悬停在 CSS 里是**同一条规则**（`[data-active]` 与
             // `:hover` 并列），因此这里只需如实标出"当前高亮的是这一项"。
             data-active={active && !item.disabled ? "1" : undefined}
             data-danger={item.danger ? "1" : undefined}
+            data-tooltip={item.tooltip}
             className="hs-menu__item"
-            onMouseEnter={onHover}
+            onMouseEnter={() => {
+                onActive?.();
+                // 调用方的联动（例如高亮画布上的参考曲线）与"本层高亮"是两件事：
+                // 前者即使在没有 activeIndex 的子面板里也要照常触发。
+                item.onHover?.();
+            }}
+            onMouseLeave={() => item.onHoverEnd?.()}
             onClick={() => {
                 if (item.disabled) return;
                 onSelect();
@@ -637,6 +825,7 @@ function AppContextMenuItem({
                     </span>
                 ) : null}
                 {item.shortcut ? <span>{item.shortcut}</span> : null}
+                {item.hint ? <span>{item.hint}</span> : null}
             </span>
         </button>
     );
@@ -671,8 +860,6 @@ export interface AppSubMenuProps {
      * 这样"划过去再按回车"激活的才是划到的那一条。但触发项此前**从不汇报悬停**，
      * 于是 `activeIndex` 停在上一个被划过的普通项上：指针移到触发项、或进了子面板
      * 之后，那条普通项仍然带着 `data-active` 亮着，与指针底下那一条**同时高亮**。
-     * 实测（正文菜单）：划过「全选」再划过「格式」，两条同时亮；继续进「格式」的
-     * 子面板，还是那两条同时亮。
      *
      * 传 `false` 表示"指针已不在触发项上"，父层据此清掉自己的高亮。
      */
@@ -695,14 +882,23 @@ export interface AppSubMenuProps {
      */
     reserveIcon?: boolean;
     /**
-     * 子面板的追加类。
+     * 子面板壳的追加类。
      *
-     * 【为什么需要】子面板默认与主菜单同一套壳（`max-height` + `overflow-y: auto`）。
-     * 子面板里若要放**自带滚动**的内容（长列表 + 钉住的页脚，如颤音预设的飞行面板），
-     * 面板再滚一次就是双滚动条；此时需要 `hs-menu--no-scroll` 让面板放手，由内容
-     * 自己约束高度。
+     * 【为什么需要】子面板默认与主菜单同一套壳（`max-height` + 滚动）。子面板里若
+     * 要放**自带滚动**的内容（长列表 + 钉住的页脚，如颤音预设的飞行面板），面板再
+     * 滚一次就是双滚动条；此时需要 `hs-menu--no-scroll` 让面板放手，由内容自己
+     * 约束高度。
      */
     panelClassName?: string;
+    /**
+     * 子面板**内容层**的追加类。
+     *
+     * 【为什么与 `panelClassName` 分开】内边距搬到了 `.hs-menu__content`（见
+     * `index.css` 的说明），于是"壳是 flex 容器"不再等于"内容层是 flex 容器"。
+     * `flex flex-col` 这类**布局**类必须落在内容层上，否则它们作用在包装元素上，
+     * 里面的 `flex: 1 1 auto` 子项就再也拿不到剩余高度。
+     */
+    panelContentClassName?: string;
     /**
      * 子面板内容。
      *
@@ -723,7 +919,7 @@ export interface AppSubMenuProps {
  * 键盘导航，也顺带让 `useMenuKeyboard` 的嵌套菜单支持有了第二个消费者。
  *
  * 【导航】`useMenuKeyboard` 按 `closest('[role="menu"]')` 分层，因此外层菜单与
- * 子面板各按各的方向键走，互不串门。
+ * 子面板各按各的方向键走，互不串门。子面板额外接受 `ArrowLeft` 退出。
  */
 export function AppSubMenu({
     label,
@@ -735,6 +931,7 @@ export function AppSubMenu({
     active = false,
     reserveIcon = false,
     panelClassName,
+    panelContentClassName,
     children,
 }: AppSubMenuProps) {
     const [open, setOpen] = useState(false);
@@ -743,7 +940,18 @@ export function AppSubMenu({
     // 子面板是**条件渲染**的：挂载瞬间 `panelRef.current` 还是 null。把 `open`
     // 作为钩子的 `active` 传下去，面板真正出现时 effect 才会重跑并注册导航
     // （否则只跑一次就命中 `if (!container) return`，方向键永远由外层菜单响应）。
-    useMenuKeyboard(panelRef, open);
+    useMenuKeyboard(panelRef, open, { nested: true, onDismiss: () => setOpen(false) });
+
+    /*
+     * 子面板也进 dismiss 层栈：它比外层菜单**后打开**，所以是栈顶。
+     * 没有这一条时，点子面板会被外层判成"点在菜单外面"。
+     */
+    useEffect(() => {
+        if (!open) return;
+        const panel = panelRef.current;
+        if (!panel) return;
+        return pushMenuDismissLayer(panel, () => setOpen(false));
+    }, [open]);
 
     useLayoutEffect(() => {
         if (!open) return;
@@ -754,7 +962,7 @@ export function AppSubMenu({
          * 【为什么面板是 fixed 定位】子面板以 `position: fixed` 相对**视口**展开
          * （见 `index.css` 的 `.hs-menu--submenu`）：它不再是父壳里被
          * `overflow-y: auto` 裁切的绝对定位后代，因此父壳可以保持
-         * `max-height` + 滚动条 —— 带子菜单的菜单与扁平菜单在窗口高度不够时
+         * `max-height` + 滚动 —— 带子菜单的菜单与扁平菜单在窗口高度不够时
          * 行为一致（都能滚）。代价是面板不再跟随壳滚动，由下面的滚动收起兜住。
          *
          * 坐标全部从触发项的**视口矩形**推出，量与夹的循环与壳的定位同一套纪律：
@@ -804,6 +1012,7 @@ export function AppSubMenu({
      * 【滚动即收起】面板不再随壳滚动：壳（或任何祖先滚动容器）滚动时，触发项
      * 移走了而面板停在原地 —— 指针与键盘都会"指着空气"。原生菜单在宿主滚动时
      * 同样收起子菜单，取舍一致：滚动一次 = 子菜单收起，再悬停即可重新展开。
+     *
      * 面板**自己**的滚动除外 —— 长列表（Take、预设）在面板内滚动是正常操作，
      * 不该把面板收掉。
      */
@@ -883,6 +1092,11 @@ export function AppSubMenu({
                     ref={panelRef}
                     role="menu"
                     data-hs-context-menu="1"
+                    // 【不做移动端的底部 sheet】面板的坐标由上面的 layout effect
+                    // 逐条写在**内联样式**里；sheet 变换会用 `!important` 把它们
+                    // 全部覆盖成"贴底通栏"，于是子菜单脱离触发项、跑到屏幕底部，
+                    // 而父菜单还开着 —— 两层各自都不知道对方在哪。
+                    data-hs-menu-inline="1"
                     // 子面板与主菜单**共用同一个表面**；定位由上面的 layout effect
                     // 逐条覆盖（翻左 / 对齐 / 收宽），因此只借 `--submenu` 的
                     // `position: fixed`（相对视口展开，不被父壳裁切 —— 见
@@ -896,37 +1110,20 @@ export function AppSubMenu({
                     onMouseEnter={() => onHoverChange?.(false)}
                     onMouseLeave={() => onHoverChange?.(true)}
                 >
-                    {children}
+                    <MenuScrollScope contentClassName={panelContentClassName}>
+                        {children}
+                    </MenuScrollScope>
                 </div>
             ) : null}
         </div>
     );
 }
 
-/**
- * 弹出面该挂到哪个容器。
- *
- * 【为什么不是 `document.body`】Radix Themes 把整套组件令牌（`--accent-9`、
- * `--gray-a5`、`--space-*` …）定义在 `.radix-themes` 元素上。挂到 `body` 的弹出面
- * 落在那个元素**之外**，里面的 Radix 组件拿不到任何令牌 —— 滑块轨道与滑块头的
- * 背景色整条失效（计算成 `transparent`），于是节拍器菜单里出现一行
- * "看得见 60% 读数、看不见滑块"的空白（用户报告的「滑块不见了」）。
- *
- * 挂进主题作用域同时得到两件事：布局盒的裁切照旧被绕过（弹出面是 `position: fixed`，
- * 祖先的 `overflow: hidden` 不裁它），而令牌全部可见。
- *
- * 【为什么仍然可以挂到 body 兜底】`.radix-themes` 不存在时（极端早期的渲染、
- * 或没有套主题的单元测试）退回 `document.body` —— 那时也没有 Radix 组件可放。
- */
-function portalContainer(): HTMLElement {
-    return document.querySelector<HTMLElement>(".radix-themes") ?? document.body;
-}
-
 /** 锚定菜单与触发元素之间的呼吸（与 `--qt-space-2` 同一个值）。 */
 const ANCHORED_MENU_GAP_PX = 4;
 
 export interface AppAnchoredMenuProps {
-    /** 触发元素：菜单在它**下方左对齐**展开。 */
+    /** 触发元素：菜单在它**下方**展开（`align` 决定左右对齐）。 */
     anchorRef: RefObject<HTMLElement | null>;
     /** 是否展开。`false` 时本组件返回 `null`，调用方不必自己判空。 */
     open: boolean;
@@ -941,8 +1138,17 @@ export interface AppAnchoredMenuProps {
     menuRef: RefObject<HTMLDivElement | null>;
     /** 追加类（布局用，如 `flex flex-col`）。外观类由壳提供，不要在这里重写。 */
     className?: string;
+    /** 内容层的追加类（内边距与布局都在这一层，见 `MenuScrollScope`）。 */
+    contentClassName?: string;
     /** 内联样式（如各面板自己算出的 `maxHeight`）。 */
     style?: CSSProperties;
+    /**
+     * 与锚点的水平对齐：`"start"`（默认，左对齐）或 `"end"`（右对齐）。
+     *
+     * 【为什么需要】工具栏最右侧的下拉（语言、溢出菜单）左对齐展开时会横跨整个
+     * 工具栏、甚至被视口夹回来；原生下拉在右端一律右对齐。
+     */
+    align?: "start" | "end";
     /**
      * 声明式条目（与 `AppContextMenu` **同一套** `AppMenuItemSpec`）。
      *
@@ -961,6 +1167,15 @@ export interface AppAnchoredMenuProps {
      * 与改动前逐字一致。
      */
     onClose?: () => void;
+    /**
+     * 打开时把键盘焦点收到菜单上。
+     *
+     * 【与 `AppContextMenu.autoFocus` 的分工】那个解决的是"触发面自己会吞方向键"
+     * （contenteditable）；这里解决的是"**键盘打开**的下拉菜单焦点应当进入菜单"
+     * —— 鼠标打开时焦点留在触发器上（与 VS Code / Windows 菜单栏一致）。
+     * 由触发器在 `ArrowDown` / `Enter` 打开时传 `true`。
+     */
+    autoFocus?: boolean;
     /** 无障碍名称（`role="menu"` 需要一个可读名字）。 */
     ariaLabel?: string;
     children?: ReactNode;
@@ -977,10 +1192,10 @@ export interface AppAnchoredMenuProps {
  * 实测可视高度 0px（详见 `src/index.css` 的 `.hs-menu--submenu` 说明）。挂到
  * body 之后，布局盒里再加多少层裁切/滚动/变换都不影响它。
  *
- * 【坐标怎么来】一次 `useLayoutEffect` 同时做两件事：按锚点矩形取期望坐标，再按
- * 菜单**实测尺寸**夹紧进视口（菜单宽度随内容变化，而锚点可能贴着视口右缘）。
- * 它在浏览器绘制**之前**跑完，因此菜单首帧那一次临时坐标（`0,0`）用户看不到 ——
- * 这也是不需要"先渲染、再夹紧"两趟状态机的原因。
+ * 【坐标怎么来】一次 `useLayoutEffect` 同时做三件事：按锚点矩形取期望坐标、
+ * 按菜单**实测尺寸**夹紧进视口、按"锚点是否住在移动端菜单 sheet 里"决定要不要
+ * 跳过底部 sheet 变换。它在浏览器绘制**之前**跑完，因此菜单首帧那一次临时坐标
+ * （`0,0`）用户看不到 —— 这也是不需要"先渲染、再夹紧"两趟状态机的原因。
  * 竖直方向只夹紧、不翻转：菜单属于它所在的面板，翻到按钮上方只会盖住本面板自己
  * 的工具栏（见 `menuPlacement.ts` 的同名说明）。
  */
@@ -989,16 +1204,19 @@ export function AppAnchoredMenu({
     open,
     menuRef,
     className,
+    contentClassName,
     style,
+    align = "start",
     items,
     onClose,
+    autoFocus = false,
     ariaLabel,
     children,
 }: AppAnchoredMenuProps) {
     const [position, setPosition] = useState({ left: 0, top: 0 });
 
     /*
-     * 方向键 / Home / End 导航。
+     * 方向键 / Home / End / PageUp·PageDown / 打字跳项。
      *
      * 【为什么锚定菜单也要有】它与 `AppContextMenu` 是同一类表面（工具栏按钮的
      * "更多选项"），键盘用户没有任何理由在两处得到两套手感。用真实 DOM 焦点导航
@@ -1011,17 +1229,29 @@ export function AppAnchoredMenu({
      *
      * pointerdown 用**捕获**阶段：面板自身的 pointerdown 会先改变选择，冒泡阶段
      * 处理会让"点外面"变成"先选中、再关菜单"。与 `AppContextMenu` 同一理由。
+     *
+     * 【为什么不直接 `close()`】层栈里可能还压着里层菜单（参数工具栏的「⋯」面板
+     * 里就住着两个自带下拉的组件）。由层栈判断"点在谁身上"，本层才不会在用户点
+     * 内层菜单时被误关。
      */
     useEffect(() => {
         if (!open || !onClose) return;
         const close = onClose;
         function onPointerDown(event: PointerEvent) {
             if (menuRef.current?.contains(event.target as Node)) return;
-            close();
+            /*
+             * 【触发器自己不算"外面"】点触发器是**切换**（开着就关、关着就开），
+             * 由触发器自己的 onClick 负责。若这里先关一次，切换就会变成"关了再
+             * 开"——用户看到菜单闪一下又回来。
+             */
+            if (anchorRef.current?.contains(event.target as Node)) return;
+            if (menuDismissLayerCount() === 0) close();
+            else handleMenuDismissPointerDown(event.target as Node);
         }
         function onKeyDown(event: KeyboardEvent) {
             if (event.key !== "Escape") return;
             event.preventDefault();
+            if (handleMenuDismissEscape(event)) return;
             close();
         }
         document.addEventListener("pointerdown", onPointerDown, true);
@@ -1030,7 +1260,24 @@ export function AppAnchoredMenu({
             document.removeEventListener("pointerdown", onPointerDown, true);
             document.removeEventListener("keydown", onKeyDown, true);
         };
-    }, [open, onClose, menuRef]);
+    }, [open, onClose, menuRef, anchorRef]);
+
+    /*
+     * 进层栈：让"点内层菜单不关外层"对锚定菜单同样成立。
+     *
+     * 【依赖只有 open】与 AppContextMenu 同一理由：onClose 的身份每次渲染都变，
+     * 放进依赖会让层栈顺序跟着渲染次数抖 —— 而顺序就是"谁在最上面"。
+     */
+    const anchoredCloseRef = useRef(onClose);
+    useLayoutEffect(() => {
+        anchoredCloseRef.current = onClose;
+    });
+    useEffect(() => {
+        if (!open) return;
+        const element = menuRef.current;
+        if (!element) return;
+        return pushMenuDismissLayer(element, () => anchoredCloseRef.current?.());
+    }, [open, menuRef]);
 
     /*
      * 关闭时把焦点还给触发它的元素。
@@ -1050,22 +1297,49 @@ export function AppAnchoredMenu({
         };
     }, [open]);
 
+    /*
+     * 键盘打开时把焦点收进菜单。
+     *
+     * 【为什么延后一个宏任务】与 `AppContextMenu.autoFocus` 同一原因：触发键的
+     * 默认行为（以及浏览器的焦点收尾）会在本帧之后才落定，同步 `focus()` 会被
+     * 回滚。
+     */
+    useEffect(() => {
+        if (!open || !autoFocus) return;
+        const timer = window.setTimeout(() => menuRef.current?.focus(), 0);
+        return () => window.clearTimeout(timer);
+    }, [open, autoFocus, menuRef]);
+
     useLayoutEffect(() => {
         if (!open) return;
         const el = menuRef.current;
         const anchor = anchorRef.current;
         if (!el || !anchor) return;
+        /*
+         * 【移动端：住在 sheet 里的菜单不做 sheet 变换】
+         *
+         * 移动形态的菜单栏住在 `MobileMenuSheet` 里（`shell/MobileChrome.tsx`）。
+         * 若它的下拉也命中"底部 sheet"那条规则，点一次「视图」会**叠出第二层
+         * sheet**，返回路径从一层变成两层。
+         *
+         * 判据取**结构事实**（锚点是否住在 sheet 里），而不是 `isMobileForm()`
+         * 分支：形态是 CSS 令牌层的一等公民，多一个 JS 分支就等于给"这是哪种
+         * 形态"开了第二个答案。
+         */
+        // 【属性名对不上是无声的】dataset.menuInline 产出的是 data-menu-inline，
+        // 而 CSS 判的是 data-hs-menu-inline —— 写成前者不会报错，只是规则永不命中，
+        // 表现为"菜单在手机形态下仍然变成底部 sheet"。
+        if (anchor.closest("[data-mobile-menu-sheet]") !== null) {
+            el.dataset.hsMenuInline = "1";
+        } else {
+            delete el.dataset.hsMenuInline;
+        }
         const reclamp = () => {
             const anchorRect = anchor.getBoundingClientRect();
             const rect = el.getBoundingClientRect();
+            const desiredLeft = align === "end" ? anchorRect.right - rect.width : anchorRect.left;
             const next = {
-                left: clampAxisPosition(
-                    anchorRect.left,
-                    rect.width,
-                    window.innerWidth,
-                    0,
-                    EDGE_GAP,
-                ),
+                left: clampAxisPosition(desiredLeft, rect.width, window.innerWidth, 0, EDGE_GAP),
                 top: clampAxisPosition(
                     anchorRect.bottom + ANCHORED_MENU_GAP_PX,
                     rect.height,
@@ -1096,7 +1370,7 @@ export function AppAnchoredMenu({
             window.removeEventListener("resize", reclamp);
             observer?.disconnect();
         };
-    }, [open, anchorRef, menuRef]);
+    }, [open, anchorRef, menuRef, align]);
 
     if (!open) return null;
 
@@ -1107,19 +1381,28 @@ export function AppAnchoredMenu({
             aria-label={ariaLabel}
             data-hs-context-menu="1"
             className={cx("hs-menu", className)}
-            style={{ left: position.left, top: position.top, ...style }}
+            tabIndex={autoFocus ? -1 : undefined}
+            style={{
+                left: position.left,
+                top: position.top,
+                // 聚焦到菜单上时不该出现焦点圈：它是弹出表面，不是可交互控件本身。
+                outline: autoFocus ? "none" : undefined,
+                ...style,
+            }}
         >
-            {items
-                ? renderMenuEntries(
-                      items,
-                      -1,
-                      items.some((item) => item.icon),
-                      null,
-                      null,
-                      onClose ?? (() => undefined),
-                  )
-                : children}
+            <MenuScrollScope contentClassName={contentClassName}>
+                {items
+                    ? renderMenuEntries(
+                          items,
+                          -1,
+                          items.some((item) => item.icon),
+                          null,
+                          null,
+                          onClose ?? (() => undefined),
+                      )
+                    : children}
+            </MenuScrollScope>
         </div>,
-        portalContainer(),
+        menuPortalContainer(),
     );
 }

@@ -12,7 +12,13 @@ pub(crate) use hifishifter_kernel::engine_command::{AudioKey, EngineCommand, Str
 
 use std::sync::Arc;
 
+use hifishifter_kernel::renderer::common_params::AudioDynCurves;
+
 use crate::time_stretch::StretchAlgorithm;
+
+/// 试听帧能覆盖的 clip 上限。超过时 RT 侧退化为“直接使用快照增益”，
+/// 绝不在音频线程扩容（见 LiveGainRampState）。
+pub(crate) const MAX_LIVE_GAIN_CLIPS: usize = 8192;
 
 #[derive(Debug, Clone)]
 pub(crate) struct StretchJob {
@@ -109,6 +115,8 @@ pub(crate) struct EngineClip {
     /// None 时退化为旧线性渐变（长度为 0 的淡化不会进入混音分支）。
     pub(crate) fade_in_lut: Option<Arc<Vec<f32>>>,
     pub(crate) fade_out_lut: Option<Arc<Vec<f32>>>,
+    /// 已按 GainScope 预乘的增益：AppOwned = item × take × 轨道链；
+    /// HostOwned = 1.0。热路径只乘淡化，不再解析增益层。
     pub(crate) gain: f32,
 
     /// 预渲染后的 stereo interleaved PCM（优先级最高）。
@@ -162,6 +170,74 @@ impl EngineSnapshot {
             duration_frames: 0,
             track_ids: Arc::new(vec![]),
             clips: Arc::new(vec![]),
+        }
+    }
+}
+
+/// 一次拖动期间的瞬时增益帧。
+///
+/// 【为什么按 clip 索引存绝对增益】音频回调只做一次数组索引；不需要在 RT 线程
+/// 解析层、查字符串或算 ratio。snapshot 用来做 Arc::ptr_eq：快照换代后旧帧
+/// 自动失效，不会把旧手势的增益套到新快照上。
+pub(crate) struct LiveGainFrame {
+    pub(crate) snapshot: Arc<EngineSnapshot>,
+    /// 长度 = snapshot.clips.len()；NaN = 不覆盖，使用 clip.gain。
+    pub(crate) gains: Arc<Vec<f32>>,
+    /// 已解析的 DYN 目标/基线（item/take 改变会改变 dyn_orig）。
+    pub(crate) dyn_curves: Arc<Vec<Option<Arc<AudioDynCurves>>>>,
+    /// 淡化覆盖；None = 使用 clip 自带 fade。
+    pub(crate) fades: Arc<Vec<Option<LiveFade>>>,
+    /// 音量自动化覆盖；None = 使用 clip.volume_curve。
+    pub(crate) volume_curves: Arc<Vec<Option<Arc<LiveCurve>>>>,
+}
+
+impl LiveGainFrame {
+    pub(crate) fn empty(snapshot: Arc<EngineSnapshot>) -> Self {
+        Self {
+            snapshot,
+            gains: Arc::new(Vec::new()),
+            dyn_curves: Arc::new(Vec::new()),
+            fades: Arc::new(Vec::new()),
+            volume_curves: Arc::new(Vec::new()),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct LiveFade {
+    pub(crate) fade_in_frames: u64,
+    pub(crate) fade_in_lut: Option<Arc<Vec<f32>>>,
+    pub(crate) fade_out_frames: u64,
+    pub(crate) fade_out_lut: Option<Arc<Vec<f32>>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct LiveCurve {
+    pub(crate) curve: Arc<Vec<f32>>,
+    pub(crate) frame_period_ms: f64,
+}
+
+/// RT 侧 5ms 线性斜坡状态。
+///
+/// 【为什么预分配】音频线程不得分配。current/step/remaining 在流创建时一次性
+/// 建到 MAX_LIVE_GAIN_CLIPS；工程 clip 数超过容量时 enabled=false，直接使用
+/// 目标值（宁可没有斜坡，也不在 RT 线程扩容）。
+pub(crate) struct LiveGainRampState {
+    pub(crate) current: Vec<f32>,
+    pub(crate) step: Vec<f32>,
+    pub(crate) remaining: Vec<u16>,
+    pub(crate) snapshot_ptr: usize,
+    pub(crate) enabled: bool,
+}
+
+impl Default for LiveGainRampState {
+    fn default() -> Self {
+        Self {
+            current: vec![0.0; MAX_LIVE_GAIN_CLIPS],
+            step: vec![0.0; MAX_LIVE_GAIN_CLIPS],
+            remaining: vec![0; MAX_LIVE_GAIN_CLIPS],
+            snapshot_ptr: 0,
+            enabled: true,
         }
     }
 }

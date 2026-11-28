@@ -92,3 +92,16 @@ test("components/layout/timeline/hooks/bulkClipEdit.test.ts scripted checks", as
         "gain updates preserve per-clip relative delta",
     );
 });
+
+test("silence is not treated as unity by bulk gain edits", () => {
+    const updates = applyBulkGainDeltaDb({
+        clipIds: ["silent"],
+        clipsById: new Map([["silent", { gain: 0 }]]),
+        deltaDb: 6,
+        minDb: -150,
+        maxDb: 24.08,
+    });
+    if (!(updates[0].gain > 0 && updates[0].gain < 1e-5)) {
+        throw new Error("silent base must move from -150 dB, got " + updates[0].gain);
+    }
+});

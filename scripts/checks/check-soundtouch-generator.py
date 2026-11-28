@@ -41,7 +41,36 @@ def main() -> int:
     )
     require(text, '"-G"', "explicit cmake -G argument", failures)
     require(text, "CMAKE_GENERATOR:INTERNAL=", "cached-generator comparison", failures)
-    require(text, "remove_dir_all(&build_dir)", "cleanup of a mismatched cache", failures)
+    require(
+        text,
+        "remove_tree(&build_dir)",
+        "cleanup of a mismatched cache (via remove_tree)",
+        failures,
+    )
+    require(
+        text,
+        "fn remove_tree",
+        "the cleanup helper that actually deletes the directory",
+        failures,
+    )
+    require(
+        text,
+        "std::fs::remove_dir_all(dir)",
+        "cleanup helper body",
+        failures,
+    )
+    require(
+        text,
+        "native_build_root()",
+        "shared native build root (the CMake tree must not live in OUT_DIR)",
+        failures,
+    )
+    require(
+        text,
+        '"-DSOUNDSTRETCH=OFF"',
+        "the soundstretch CLI is not built",
+        failures,
+    )
     require(text, "cmake configure stdout", "stdout surfaced when configure fails", failures)
     require(text, "cmake configure stderr", "stderr surfaced when configure fails", failures)
     if failures:

@@ -14,6 +14,7 @@
  * 【为什么边缘滚屏要经 `onEdgeScrolledRef`】驱动在 `canvasPointerDown` 里构造时就闭包读了
  * 那个槽位；按值传进来会得到一份副本，写入到不了驱动的闭包。与颤音分支同一约定。
  */
+import { modifierView } from "../../../../features/keybindings/modifierState";
 import { startPointerGesture, type PointerGesture } from "./pointerGesture";
 import { PEN_ERASER_BUTTONS_MASK, coalescedEventsOf } from "../../../../utils/penInput";
 import {
@@ -165,9 +166,14 @@ export function handleFreehandPointerDown(
         lastStrokeSample = {
             clientX: ev.clientX,
             clientY: ev.clientY,
-            ctrlKey: ev.ctrlKey,
-            shiftKey: ev.shiftKey,
-            altKey: ev.altKey,
+            // 虚拟修饰键参与「精细调整 / 吸附切换」的判定：桌面靠按住 Ctrl，
+            // 移动端靠屏幕上的芯片。两者必须在同一份快照里。
+            ...modifierView({
+                ctrlKey: ev.ctrlKey,
+                shiftKey: ev.shiftKey,
+                altKey: ev.altKey,
+                metaKey: false,
+            }),
         };
         const adjusted = getFineAdjustedPointerPosition(finePointerState, ev);
         const last = st.points[st.points.length - 1];

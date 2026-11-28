@@ -2,12 +2,12 @@
 
 use super::extension::ExtensionOwner;
 use super::ownership::DocumentId;
-use crate::sync::MutexExt;
+use crate::sync::{try_lock_or_recover, MutexExt};
 use ara2_bridge::companion::CompanionControllerBinding;
 use ara2_bridge::core::{ApiGeneration, AraError};
 use ara2_bridge::plugin::ExtensionControllerLease;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 thread_local! {
@@ -400,6 +400,139 @@ pub(crate) enum AssemblyOutcome {
     Deferred,
 }
 
+/// 一条"item 已在宿主里建成、但 ARA 还没认领"的导入。
+///
+/// 【为什么需要一张独立的账】导入命令能观测到的事实只有一条：宿主给了我们一个 item
+/// GUID。它什么时候被 ARA 图认领，由**宿主的**编辑会话决定 —— 现场实测 125~299 ms，
+/// 而命令的回执只有几十毫秒的生命周期。把两件事绑在同一个超时上，唯一的结局是把
+/// 宿主的调度延迟翻译成我们的失败率（用户看到的就是"导入成功了一半"）。
+///
+/// 这张表是"谁还没到"的唯一账本：导入时登记，任何一轮 ARA 图发布都来对一次账，
+/// 对上了就转正并划掉。
+pub(crate) struct PendingImport {
+    /// 宿主 item GUID。
+    pub item: String,
+    /// 导入时写下的源文件路径（波形授权判定要用，见 `pending_import_for_source`）。
+    pub source_path: String,
+    /// 落点轨道（新建轨时为采纳后的清单 guid）。
+    pub landed_track: Option<String>,
+    /// 登记时刻：`after_ms` 与绊线都从它算。
+    pub requested_at: std::time::Instant,
+    /// 经过了多少轮发布。宿主拖得久时这个数会大 —— 它是唯一能回答"等了多久"的读数。
+    pub rounds: u32,
+    /// 已经报过 `stalled`（每一条只报一次）。
+    pub stall_reported: bool,
+}
+
+/// 一次转正：待定导入终于被某一轮 ARA 图（或宿主清单）认领。
+pub(crate) struct ResolvedImport {
+    pub item: String,
+    /// 导入时写下的源文件路径（日志与前端都可能要用；它来自导入命令，不是宿主）。
+    pub source_path: String,
+    /// **未加命名空间**的 clip id（`ara-item-{guid}`）；调用方按自己的 namespace 加前缀。
+    pub clip_id: String,
+    pub landed_track: Option<String>,
+    pub rounds: u32,
+    pub elapsed: std::time::Duration,
+}
+
+/// 两个源路径是不是同一个文件。
+///
+/// 【为什么要一个比较函数】路径来自两条不同的通路：用户选中的路径（导入命令）与宿主
+/// 回报的 persistentID（ARA / 清单）。在 Windows 上两者的大小写与分隔符都可能不同，
+/// 而这条判据只决定"这次波形请求该不该等"，放宽一点是安全的 —— 它只能放宽到
+/// **我们自己登记过的那几个文件**。
+fn same_source_path(left: &str, right: &str) -> bool {
+    fn normalised(value: &str) -> String {
+        value.replace('/', "\\").to_ascii_lowercase()
+    }
+    !left.is_empty() && !right.is_empty() && normalised(left) == normalised(right)
+}
+
+/// 一条 region 连续多少轮未认领才值得 WARN。
+///
+/// 【为什么是 3】ARA 的认领是分轮的，现场实测一轮的间隔是几十毫秒、正常中间态在
+/// 213 ms 内自愈；3 轮已经覆盖"宿主慢一拍"，又不至于把真正挂不上的 region 拖到
+/// 用户看不见。低于它的一律 DEBUG。
+const UNBOUND_WARN_STREAK: u32 = 3;
+
+/// 对账所需的**事实快照**：由调用方在自己取锁之前/之后算好，作为参数传进来。
+///
+/// 【为什么必须是数据而不是方法】上一版的对账会去取 `region_items` / `clip_ids` /
+/// `ui_tracks` 三把锁，而它的调用方 `present_host_inventory` 从头到尾持着 `ui_tracks`。
+/// `std::sync::Mutex` 不可重入，于是"对账"这件小事把整个宿主卡死 —— 现场表现是
+/// REAPER 在导入成功之后整体未响应（`AppHangB1`），而状态栏那条
+/// `plugin_get_apply_state` 只是宿主线程停止泵消息 30 s 之后才浮现的读数。
+///
+/// 把输入变成数据之后，对账器**结构上不可能**再取锁：它手里没有表，只有一份快照。
+/// 这类缺陷不该靠"记得别这么写"来防。
+pub(crate) struct ImportClaims {
+    /// 本轮宿主清单里的 item GUID（`present_host_inventory` 手上那份 `ui_tracks` 的投影）。
+    pub present_items: std::collections::BTreeSet<String>,
+    /// region key → 文档 clip id（`PresentedIds` 的同一份快照）。
+    pub clip_ids: std::collections::HashMap<u64, String>,
+    /// region key → item GUID（`region_items` 的只读克隆）。
+    pub region_items: std::collections::HashMap<u64, String>,
+}
+
+impl ImportClaims {
+    /// item GUID → 当前时间线里的 clip id（**不带命名空间**，命名空间由调用方加）。
+    ///
+    /// 【两条判据、一个顺序】活着的 region 认领它 ⇒ 有源；否则退到宿主清单 ⇒ 至少
+    /// 画得出占位。这与 `clip_for_host_item` / `gui_clip_for_host_item` 是同一条边。
+    fn clip_for_item(&self, item: &str) -> Option<String> {
+        if let Some((key, _)) = self
+            .region_items
+            .iter()
+            .find(|(_, bound)| bound.as_str() == item)
+        {
+            if let Some(clip) = self.clip_ids.get(key) {
+                return Some(clip.clone());
+            }
+        }
+        self.present_items
+            .contains(item)
+            .then(|| format!("ara-item-{item}"))
+    }
+}
+
+/// 一次自动应用（`apply_workspace_edits_with_progress`）的结论。
+///
+/// 【为什么要多一个值】"发布了"与"这一轮没有可渲染内容"必须分开：后者既不能写
+/// `applied`（写了下一轮就不再重试，宿主下一次发布真模型时没人接），也不能算错误
+/// （那正是状态栏闪红字的来源）。见 [`crate::render::input::RenderOutcome`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApplyOutcome {
+    /// 至少发布了一份快照。
+    Published,
+    /// 这一轮没有可渲染的 clip：**什么都不发布**，下一轮再来。
+    ///
+    /// `report` 非空 = 连续为空刚刚跨过预算，这一次值得说给用户听（一次性）。
+    Nothing { report: Option<EmptyStreak> },
+}
+
+/// 连续多少个"空轮"值得说给用户听（≈ 10 s @ 4 Hz，也覆盖一次 Click 的最坏节奏）。
+const EMPTY_ROUNDS_MAX: u32 = 40;
+
+/// 连续为空的墙钟上限：到点就说一次，不再等轮数。
+const EMPTY_BUDGET_MS: u64 = 10_000;
+
+/// 一次"空轮"的累积读数（由 [`DocumentSession::note_empty_round`] 给出，**只在跨过预算
+/// 的那一轮返回一次**）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EmptyStreak {
+    pub rounds: u32,
+    pub elapsed_ms: u64,
+}
+
+/// 墙钟毫秒：只服务"连续为空多久了"这条预算，不参与任何音视频时序。
+fn wall_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 #[derive(Default)]
 pub struct DocumentSession {
     controller: AtomicUsize,
@@ -546,6 +679,15 @@ pub struct DocumentSession {
     /// 音频。用户表现为"波形更新了、声音没变，编辑一下才对"（编辑是唯一能推动
     /// `PreparedVersion.edit` 的手动途径）。见 `host::geometry::RenderFacts`。
     pub render_facts: Mutex<crate::host::geometry::RenderFacts>,
+    /// 连续"这一轮没有可渲染内容"的轮数 / 起点（Unix 毫秒）/ 是否已经说过一次。
+    ///
+    /// 【为什么需要计数】`RenderOutcome::Nothing` 是**常态**：宿主在拖动一条 clip 的
+    /// 那几秒里，每几百毫秒就会发布一次空模型（`item map: attached=2 unbound=1`、
+    /// `renderer assignment regions=0`）。所以"闪一下"永远不该留痕迹；而**持续**为空
+    /// 不是常态，值得说一次。三个量就是这条分界线，且它只在这里定义一次。
+    empty_rounds: AtomicU32,
+    empty_since_ms: AtomicU64,
+    empty_reported: AtomicBool,
     pub sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,
     pub edit_sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,
     /// 每个宿主 item 最近一次观察到的**媒体事实**（item GUID → 源身份）。**只增不减**。
@@ -569,6 +711,15 @@ pub struct DocumentSession {
     /// `host_media_reason` 报成真因（`source_read_failed`），而不是含混的
     /// `awaiting_region`。
     pub source_failures: Mutex<HashMap<String, String>>,
+    /// 已经建成、但 ARA 还没认领的导入（见 `PendingImport`）。
+    pub(crate) pending_imports: Mutex<Vec<PendingImport>>,
+    /// 未认领 region 的**连续轮次**（region key → `(轮次, 首次未认领时刻)`）。
+    ///
+    /// 【为什么需要"连续多少轮"】region → item 的认领是**分轮**完成的：一轮里还没轮到
+    /// 的那条 region，下一轮就认领了（现场实测 213 ms 自愈）。把这种正常中间态记成
+    /// WARN，等于让每份日志都背着一堆假告警，真告警被压在里面。只有连续
+    /// [`UNBOUND_WARN_STREAK`] 轮仍未认领才值得 WARN，并带上 streak 与首次出现时刻。
+    pub(crate) unbound_streaks: Mutex<HashMap<u64, (u32, std::time::Instant)>>,
     /// 本插件拒绝创建 region 的原因（有界环形缓冲，最新的在尾部）。
     ///
     /// 【为什么要单独一张表】"等待宿主音频"是用户可见的唯一状态，而它把两种截然
@@ -646,6 +797,20 @@ pub struct DocumentSession {
     pub scope_revision: AtomicU64,
     /// 纯GUI宿主装饰版本，不改变编辑曲线或神经合成代次。
     pub ui_geometry_revision: AtomicU64,
+    /// 编辑器**可见内容**的代次：装配发布、源状态变化、宿主写回后的投影变化都推进它。
+    ///
+    /// 【为什么不能复用 `ui_geometry_revision`】那个读数的语义是"宿主清单的几何变了"，
+    /// 而本轮用户报障的三种情形**都不改宿主几何**：
+    ///   * 粘贴后装配发布了新 clip（几何早就在清单里了，变的是媒体身份）；
+    ///   * 宿主重新授权样本访问，源从 Revoked 回到 Published（同代重读，PCM 一模一样）；
+    ///   * 宿主写回成功、fade 需要重新投影（fade 长度不推进 `GetProjectStateChangeCount`）。
+    ///     复用几何代次会让"几何没变"变成"不用重画"，而真正该重画的正是那些情形 ——
+    ///     用户看到的就是"新粘贴的 Clip 一直等宿主音频，重开工程才恢复"。
+    ///
+    /// 【为什么是独立原子量而不是布尔】`refresh_ui_geometry` 是**读-比较-投影-写回**
+    /// 的循环：它必须在投影成功后记住"我投影的是哪一代"。布尔只能表达"脏了"，
+    /// 无法回答"我投影的这一份是不是最新的" —— 投影期间到来的新一代会被静默吞掉。
+    pub presentation_revision: AtomicU64,
     /// 最近一次把图集重投影进 `edits.params` 时的 `ui_geometry_revision`。
     ///
     /// 【为什么需要它】视图重建只应发生在**几何真的变了**之后。没有这个读数时，
@@ -1100,6 +1265,65 @@ mod tests {
             revision + 1,
             "the flag is consumed by one flush"
         );
+    }
+
+    /// **回归：正常的"这一轮还没认领"不许记成 WARN。**
+    ///
+    /// 【现场】20:04:15.431 一轮里 `attached=3 unbound=1`，15.647（213 ms 后）
+    /// `attached=4 unbound=0`。这是 ARA 分轮认领的正常中间态，却以 WARN 出现，
+    /// 而且不带"已经持续了多久"这个量 —— 与"把还没轮到写成出错了"是同一个病根。
+    /// 现在只有连续 [`UNBOUND_WARN_STREAK`] 轮仍未认领才 WARN。
+    #[test]
+    fn an_unbound_region_only_warns_after_repeated_rounds() {
+        use hifishifter_kernel::editor::assembly::{Assembly, RegionRow};
+        let document = DocumentSession::new(900123);
+        let rows = vec![RegionRow {
+            key: 7,
+            clip_id: "ara-region-7".into(),
+            track_id: "track".into(),
+            start_sec: 0.0,
+            duration_sec: 2.0,
+            source_start_sec: 0.0,
+            source_end_sec: 2.0,
+            playback_rate: 1.0,
+            name: "vocal".into(),
+            source_id: "src".into(),
+            modification_id: "mod".into(),
+            source_sample_rate: 48_000.0,
+            source_duration_sec: 2.0,
+            source_channels: 1,
+        }];
+        let mut assembly = Assembly::default();
+        assembly.unbound = vec![0];
+        // 前两轮是中间态（DEBUG 档），第三轮才够 WARN。
+        assert_eq!(
+            document.track_unbound_streaks(&assembly, &rows, false)[0].1,
+            1
+        );
+        assert_eq!(
+            document.track_unbound_streaks(&assembly, &rows, false)[0].1,
+            2
+        );
+        assert_eq!(
+            document.track_unbound_streaks(&assembly, &rows, false)[0].1,
+            UNBOUND_WARN_STREAK,
+            "第三轮才够 WARN 档"
+        );
+        // 认领上了 ⇒ 账必须清掉；否则"失败 → 成功 → 又失败"会继承旧轮次直接报 WARN。
+        assert!(document
+            .track_unbound_streaks(&Assembly::default(), &rows, false)
+            .is_empty());
+        assert!(document.unbound_streaks.lock_or_recover().is_empty());
+        assert_eq!(
+            document.track_unbound_streaks(&assembly, &rows, false)[0].1,
+            1,
+            "清账之后重新从第一轮数起"
+        );
+        // 推迟的那一轮没有真的判定过：不计数，也不清账。
+        assert!(document
+            .track_unbound_streaks(&assembly, &rows, true)
+            .is_empty());
+        assert_eq!(document.unbound_streaks.lock_or_recover()[&7].0, 1);
     }
 
     /// **`unbound` 什么时候该推迟发布、什么时候就是结论。**
@@ -1833,12 +2057,21 @@ impl DocumentSession {
                         .lock_or_recover()
                         .insert(id.clone(), SourceState::Published);
                     self.source_failures.lock_or_recover().remove(&id);
+                    // 【同代重读也必须推进呈现代次】宿主每次重新授予样本访问都会重读一遍，
+                    // 读回的是同一代内容（`superseded == true`）—— 于是
+                    // `editor_audio_revision` 不动。但**界面**要的恰恰是这一次：
+                    // 源从 Revoked 回到 Published，占位应当立刻变成波形。少了这一句，
+                    // 日志里就是"re-read the same content generation 0"之后仍然 pending。
+                    self.note_presentation_changed();
                 }
                 Err(error) => {
                     self.source_states
                         .lock_or_recover()
                         .insert(id.clone(), SourceState::Failed);
                     self.source_failures.lock_or_recover().insert(id, error);
+                    // 真因同样要出现在界面上（`source_read_failed`），否则它要等到
+                    // 下一次几何刷新才被看见 —— 而那时用户早已把"还在等"当成结论。
+                    self.note_presentation_changed();
                 }
             }
         }
@@ -1880,6 +2113,9 @@ impl DocumentSession {
         // 【同一代内容不重复发布】见 `publish_source_read_result` 的说明：重读幂等。
         if let Some(existing) = self.edit_sources.lock_or_recover().get(&id) {
             if Self::same_pcm_generation(existing, &pcm) {
+                // 内容没变，但"这一轮有 PCM 了"是界面要的事实（见
+                // `publish_source_read_result` 的同一条说明）。
+                self.note_presentation_changed();
                 return;
             }
         }
@@ -1920,7 +2156,7 @@ impl DocumentSession {
     /// 失败模式。这里每次都从同一份清单派生，装配结果因此永远与"用户此刻在宿主里
     /// 看到的东西"一致。
     pub(crate) fn collect_item_rows(&self) -> Vec<hifishifter_kernel::editor::assembly::ItemRow> {
-        let tracks = self.ui_tracks.lock_or_recover();
+        let tracks = self.ui_tracks_guard();
         tracks
             .values()
             .flat_map(|track| {
@@ -1937,6 +2173,16 @@ impl DocumentSession {
     /// 唯一职责是置位；重装由 [Self::flush_pending_assembly] 在安全点上完成。
     pub(crate) fn note_assembly_input_changed(&self) {
         self.assembly_dirty.store(true, Ordering::Release);
+    }
+
+    /// 记一次"编辑器可见内容变了"（见 [Self::presentation_revision]）。
+    ///
+    /// 【为什么装配发布也要调】装配产出的 clip 集合/媒体身份是编辑器呈现的第一来源；
+    /// 它变了而 `ui_geometry_revision` 不变（清单早就枚举到这个 item 了）时，旧实现
+    /// 让 `refresh_ui_geometry` 早退 —— 已经画在画布上的无源占位永远不会被升级成
+    /// 有源 clip。这正是"粘贴后一直显示正在等待宿主完成音频分配"的那条断链。
+    pub(crate) fn note_presentation_changed(&self) {
+        self.presentation_revision.fetch_add(1, Ordering::AcqRel);
     }
 
     /// 在安全点上把挂起的装配跑掉（不持任何相关锁时调用）。
@@ -1980,6 +2226,11 @@ impl DocumentSession {
         if *self.clip_ids.lock_or_recover() != before {
             self.revision.fetch_add(1, Ordering::AcqRel);
         }
+        // 【为什么无条件推进】装配发布就是"编辑器该看的那份 clip 集合/媒体身份换了"。
+        // 只在 `clip_ids` 变化时推进会漏掉最要命的一类：**clip 集合没变、媒体身份变了**
+        // （占位 → 有源）。那正是粘贴后卡在"正在等待宿主完成音频分配"的形状 ——
+        // id 一直是 `ara-item-{guid}`，变的是它背后的 `source_path`。
+        self.note_presentation_changed();
     }
 
     /// **唯一**的时间线重建入口 —— clip 集合只在这里产生。
@@ -1998,7 +2249,9 @@ impl DocumentSession {
     /// 立刻释放，再取 `timeline` / `clip_ids` —— 与 `transaction → timeline → edits →
     /// host facts` 同向。
     pub(crate) fn rebuild_timeline_locked(&self) -> Result<AssemblyOutcome, String> {
-        use hifishifter_kernel::editor::assembly::{assemble, attach, inherit_media};
+        use hifishifter_kernel::editor::assembly::{
+            assemble, attach, inherit_media, inherit_presentation,
+        };
         // 【模型没交付过 ⇒ 不动已发布的时间线】见 `ara_model_seen` 的说明。装配器的
         // 输入只有两份，缺了 ARA 那一份时它只能给出"没有源窗口的占位" —— 用那份占位
         // 盖掉一份真实的图，比不刷新糟得多。
@@ -2073,6 +2326,12 @@ impl DocumentSession {
             .map(|timeline| timeline.clips.clone())
             .unwrap_or_default();
         let inherited = inherit_media(&mut assembly.clips, &previous_clips, &live_sources);
+        // 【淡变与吸附偏移在同一处继承】见 `assembly::inherit_presentation`。装配的输入
+        // 里根本没有这些字段（`ItemRow` 只有几何与媒体身份），所以「发布一条 clip」
+        // 这个动作必须把推导不出来的东西一起带走 —— 否则每一次清单刷新都会把它们抹成
+        // 0，再由 `project_ui_fades_locked` 补回来，而那一步只在宿主几何缓存这一轮
+        // 有效时才说话，缓存恰好被这次发布本身推进的 `revision` 作废。
+        let presented = inherit_presentation(&mut assembly.clips, &previous_clips);
         // 【`unbound` 不是结论，是"两份输入还没对齐"】
         //
         // 判据只有一条：**这一轮读到的两份输入，与上一次尝试相比动过吗**。
@@ -2122,6 +2381,13 @@ impl DocumentSession {
             // 解释性跟踪：拖动 item 期间它每一轮都可能 > 0 —— 那正是这条继承在起作用，
             // 属于竞态的自愈，用户不需要为此做任何事，所以不是 WARN。
             log::debug!("[ara] inherited the media identity of {inherited} clip(s) this round");
+        }
+        if presented > 0 {
+            // 与上面同一档：它是「这一轮有多少条 clip 的淡变靠继承活了下来」。
+            // 拖动期间每轮都 > 0 是**正常**的（装配每轮重跑一次），不是故障。
+            log::debug!(
+                "[ara] carried the published fades of {presented} clip(s) across this rebuild"
+            );
         }
         // 这一轮已经把**当前**两份输入都消费掉了（含中途到达的那一份）。
         self.assembly_dirty.store(false, Ordering::Release);
@@ -2195,8 +2461,16 @@ impl DocumentSession {
             .iter()
             .filter(|clip| clip.loop_enabled)
             .count();
+        // 【连续未认领的轮次】见 `unbound_streaks`：只有"这一轮还没轮到"与"一直轮不到"
+        // 分开，中间态才不会被记成故障。推迟的那一轮不计数（它没有真的判定过）。
+        let unbound = self.track_unbound_streaks(assembly, rows, deferred);
+        let max_streak = unbound
+            .iter()
+            .map(|(_, streak, _)| *streak)
+            .max()
+            .unwrap_or(0);
         log::info!(
-            "[ara] item map: items={items} regions={} attached={attached} unbound={}                  multi={multi} max_regions_per_item={max} loops={loops}",
+            "[ara] item map: items={items} regions={} attached={attached} unbound={}                  multi={multi} max_regions_per_item={max} loops={loops} unmatched_max_streak={max_streak}",
             rows.len(),
             assembly.unbound.len()
         );
@@ -2213,7 +2487,7 @@ impl DocumentSession {
                 log::Level::Warn,
                 "ara.item-map",
                 format_args!(
-                    "[ara] item map: items={items} regions={} unbound={} multi={multi}                      items_stamp={} regions_stamp={} deferred={deferred}",
+                    "[ara] item map: items={items} regions={} unbound={} multi={multi}                      items_stamp={} regions_stamp={} deferred={deferred} unmatched_max_streak={max_streak}",
                     rows.len(),
                     assembly.unbound.len(),
                     inputs.0,
@@ -2249,19 +2523,64 @@ impl DocumentSession {
         // 【推迟的那一轮不逐条报】下一轮要么已经挂上（这些 region 就不该再报），要么在
         // 发布时统一报一次（上面的汇总行）。逐条报会让同一条 region 每 20 ms 刷一行，
         // 而它恰好是"清单每一代都在变"的拖动期间。
-        for index in assembly.unbound.iter().filter(|_| !deferred) {
-            let Some(row) = rows.get(*index) else {
+        for (index, streak, age_ms) in unbound {
+            let Some(row) = rows.get(index) else {
                 continue;
             };
+            // 【分档：中间态 DEBUG，连续多轮才 WARN】见 `unbound_streaks`。
+            if streak < UNBOUND_WARN_STREAK {
+                log::debug!(
+                    "[ara] playback region {} (start={:.6} duration={:.6} source={}) is not inside any host item this round (streak={streak} age_ms={age_ms}); it produces no clip",
+                    row.key,
+                    row.start_sec,
+                    row.duration_sec,
+                    row.source_id
+                );
+                continue;
+            }
             hifishifter_kernel::log_limiter::emit_limited_key(
                 log::Level::Warn,
                 "ara.region.unbound",
                 format_args!(
-                    "[ara] playback region {} (start={:.6} duration={:.6} source={}) is not                      inside any host item this round; it produces no clip",
+                    "[ara] playback region {} (start={:.6} duration={:.6} source={}) is still not inside any host item after {streak} rounds (first seen {age_ms} ms ago); it produces no clip",
                     row.key, row.start_sec, row.duration_sec, row.source_id
                 ),
             );
         }
+    }
+
+    /// 更新每个未认领 region 的连续轮次，返回 `(region 行下标, 轮次, 已持续毫秒)`。
+    ///
+    /// 【为什么把计数与输出分开】计数是纯状态判定，必须能脱离日志后端被断言 ——
+    /// 与 `binding_report_is_new` 同一手法。它决定"正常中间态"会不会又被写成告警。
+    fn track_unbound_streaks(
+        &self,
+        assembly: &hifishifter_kernel::editor::assembly::Assembly,
+        rows: &[hifishifter_kernel::editor::assembly::RegionRow],
+        deferred: bool,
+    ) -> Vec<(usize, u32, u128)> {
+        // 推迟的那一轮没有真的判定过（清单还在变），不计数、也不清账。
+        if deferred {
+            return Vec::new();
+        }
+        let mut streaks = self.unbound_streaks.lock_or_recover();
+        let mut live = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for index in &assembly.unbound {
+            let Some(row) = rows.get(*index) else {
+                continue;
+            };
+            let entry = streaks
+                .entry(row.key)
+                .or_insert_with(|| (0, std::time::Instant::now()));
+            entry.0 = entry.0.saturating_add(1);
+            live.insert(row.key);
+            out.push((*index, entry.0, entry.1.elapsed().as_millis()));
+        }
+        // 【认领上了就必须清账】否则"失败 → 成功 → 又失败"会继承旧轮次，把一次新的
+        // 中间态直接报成 WARN，而那条 region 其实刚刚好过。
+        streaks.retain(|key, _| live.contains(key));
+        out
     }
 
     /// region key → clip id；`clip_ids` 缺席时按映射层同一算式补出来。
@@ -2644,9 +2963,199 @@ impl DocumentSession {
         }
     }
 
+    /// 撤销一次登记（轨道没建成 / 提交失败 / 被显式删除）。
+    ///
+    /// 【为什么需要显式撤销，而不是"等下一轮枚举自然丢掉"】采纳表是**枚举范围**的输入：
+    /// 一条指向已不存在轨道的 GUID 只是多一次线性扫描，无害；但一次"提交失败却留在表里"
+    /// 的登记会在中途那一轮把一条**半成品轨道**枚举进来，时间线上就凭空多出一行。
+    /// 显式撤销让"撤销"这件事与创建在同一次请求里完成，中间不留窗口。
+    pub(crate) fn unadopt_track(&self, guid: &str) {
+        if guid.is_empty() {
+            return;
+        }
+        self.adopted_tracks
+            .lock_or_recover()
+            .retain(|known| known != guid);
+    }
+
     /// 当前登记表快照（清单枚举用；返回副本以免持锁回调宿主）。
     pub(crate) fn adopted_track_ids(&self) -> Vec<String> {
         self.adopted_tracks.lock_or_recover().clone()
+    }
+
+    /// 登记一条待定导入（导入命令在宿主返回 item GUID **之后**调用）。
+    ///
+    /// 【为什么判重】回执可能被重投（媒体文档重开、视图重连）；同一个 item 登记两次
+    /// 只会让 `rounds` 翻倍，读起来像是两件事。
+    ///
+    /// 【为什么这里可以阻塞取锁】这是**写**：登记一旦丢掉，这条导入就再也不会转正，
+    /// 用户会在 60 s 后收到一条 `import_stalled`，而 item 明明在宿主里。所以宁可等。
+    /// 等得起的前提是这把锁是**叶子**：它的持有者只做纯计算（见
+    /// `take_resolved_imports`），不取别的锁、不做 I/O、不向 WebView 投递。
+    pub(crate) fn begin_pending_import(&self, pending: PendingImport) {
+        let mut imports = self.pending_imports.lock_or_recover();
+        if imports.iter().any(|entry| entry.item == pending.item) {
+            return;
+        }
+        imports.push(pending);
+    }
+
+    /// 对账一次，并把转正的每一条记一行、发一条 `import_ready`。
+    ///
+    /// 【`claims` 是参数不是自取】见 [`ImportClaims`]。这条约束是**结构性**的：本函数
+    /// 不再取任何 `DocumentSession` 的表锁，于是"在持锁的作用域里调它"不可能变成自锁。
+    pub(crate) fn publish_pending_imports(&self, claims: &ImportClaims) {
+        let Some(resolved) = self.take_resolved_imports(claims) else {
+            return;
+        };
+        if resolved.is_empty() {
+            return;
+        }
+        for done in &resolved {
+            // 【为什么要这一行】`[import] pending` 说"登记了"，这一行说"转正了，
+            // 用了多久"。两者之间没有任何别的观测点，现场只能靠这两行的差判断宿主节奏。
+            log::info!(
+                "[import] ready item={} clip={} rounds={} after_ms={} source={}",
+                done.item,
+                done.clip_id,
+                done.rounds,
+                done.elapsed.as_millis(),
+                done.source_path
+            );
+        }
+        if let Some(editor) = self.existing_editor_session() {
+            editor.announce_import_ready(&resolved);
+        }
+    }
+
+    /// 对账一次：把已经被 ARA 图（或宿主清单）认领的待定导入转正，返回本轮转正的条目。
+    ///
+    /// 给测试用；生产路径只有 `publish_pending_imports`（它要顺手把事件播报出去）。
+    #[cfg(test)]
+    pub(crate) fn resolve_pending_imports(&self, claims: &ImportClaims) -> Vec<ResolvedImport> {
+        self.take_resolved_imports(claims).unwrap_or_default()
+    }
+
+    /// 对账的实现：**只取 `pending_imports` 这一把锁**，并在同一次持锁里完成
+    /// "读候选 → 判定 → 划掉"。
+    ///
+    /// 【为什么三步必须在一次持锁里】"报了却没划掉"会让同一条导入在下一轮再发一次
+    /// `import_ready`，前端于是重复做一次规格化（用户勾了"导入后规格化"会得到一串增益）。
+    /// 返回 `None` = 账本此刻被别人持有，这一轮什么都没做，下一次发布再来。
+    fn take_resolved_imports(&self, claims: &ImportClaims) -> Option<Vec<ResolvedImport>> {
+        // 【为什么拿不到就走】对账是**机会性**的：每一次 ARA 发布、每一次清单刷新都会
+        // 再来一次。拿不到账本只有两种可能：① 有别的线程正在写它（下一个 tick 就好）；
+        // ② 我们自己已经持有它（那是缺陷，但绝不能以"挂死宿主"的形式表现）。
+        // 两种情况都只能得出同一个结论：这一轮不动，留一行可归因的字。
+        let Some(mut imports) = try_lock_or_recover(&self.pending_imports) else {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "import.reconcile.busy",
+                format_args!(
+                    "[import] reconcile skipped: the pending ledger is busy \
+                     (retried on the next publish)"
+                ),
+            );
+            return None;
+        };
+        if imports.is_empty() || !self.is_alive() {
+            return Some(Vec::new());
+        }
+        let mut resolved = Vec::new();
+        for entry in imports.iter_mut() {
+            entry.rounds = entry.rounds.saturating_add(1);
+            let Some(clip_id) = claims.clip_for_item(&entry.item) else {
+                continue;
+            };
+            resolved.push(ResolvedImport {
+                item: entry.item.clone(),
+                source_path: entry.source_path.clone(),
+                clip_id,
+                landed_track: entry.landed_track.clone(),
+                rounds: entry.rounds,
+                elapsed: entry.requested_at.elapsed(),
+            });
+        }
+        if !resolved.is_empty() {
+            imports.retain(|entry| !resolved.iter().any(|done| done.item == entry.item));
+        }
+        Some(resolved)
+    }
+
+    /// 取宿主清单（`ui_tracks`）。**本仓对这张表的所有访问都走这里**。
+    ///
+    /// 【为什么要包一层】它是唯一一张"被长时间持有、而且持有期间还要调用别的函数"的
+    /// 表：`present_host_inventory` 拿着它跑完整个投影。一次重入就是宿主级挂死
+    /// （REAPER 现场：导入成功之后整机未响应），而挂死的样子与"什么都没发生"完全同形。
+    /// `lock_tracked` 在调试构建里让重入**当场点名**（见 `hifishifter_plugin_core::sync`），
+    /// 发布构建里与直接取锁逐字等价。
+    #[track_caller]
+    pub(crate) fn ui_tracks_guard(
+        &self,
+    ) -> crate::sync::TrackedGuard<'_, std::collections::BTreeMap<String, crate::host::UiTrack>>
+    {
+        crate::sync::lock_tracked(&self.ui_tracks)
+    }
+
+    /// 一份对账输入（三张表的快照）。
+    ///
+    /// 【调用方不得持有任何 `DocumentSession` 锁】它自己会取三把；而在**已经持有**
+    /// `ui_tracks` 的作用域里调用它就是自锁。需要"边算边用"的路径（`present_host_inventory`）
+    /// 应当自己按 [`ImportClaims`] 的形状就地组一份。
+    pub(crate) fn import_claims(&self) -> ImportClaims {
+        ImportClaims {
+            present_items: self
+                .ui_tracks
+                .lock_or_recover()
+                .values()
+                .flat_map(|track| track.items.iter().map(|item| item.geometry.item_id.clone()))
+                .collect(),
+            clip_ids: self.clip_ids.lock_or_recover().clone(),
+            region_items: self.region_items.lock_or_recover().clone(),
+        }
+    }
+
+    /// 这条路径是不是一条**还没到**的导入所写下的源？
+    ///
+    /// 【它为什么不是放松安全边界】它只承认"我们自己刚为某个宿主 item 写下的路径"，
+    /// 而那条记录是导入命令在宿主**已经建成 item 之后**才写的 —— 证据来自宿主。
+    ///
+    /// 【读不到账本时回答"不是"】这是**安全边界**的一侧：认不出这条路径时只能拒绝。
+    /// 账本被持有是微秒级的事，而拒绝的后果只是"这一拍波形读不到" —— 前端对
+    /// `source is not authorized` 本来就有"未就绪 + 有界重试"的兜底。
+    /// 反过来猜"是"会把一条与本次会话无关的路径放进来。
+    pub(crate) fn pending_import_for_source(&self, path: &str) -> bool {
+        try_lock_or_recover(&self.pending_imports).is_some_and(|imports| {
+            imports
+                .iter()
+                .any(|entry| same_source_path(&entry.source_path, path))
+        })
+    }
+
+    /// 取走"等了太久、还没转正"的导入（每一条只报一次，**不改回执、不删占位**）。
+    pub(crate) fn take_stalled_imports(
+        &self,
+        after: std::time::Duration,
+    ) -> Vec<(String, std::time::Duration)> {
+        // 【为什么这里也不能阻塞】调用方是宿主 UI 线程上的 20 ms 视图定时器。账本被
+        // 别人持有的那一拍直接跳过 —— 下一条 `ui_tick` 会再来，而"报告超期导入"
+        // 本来就不需要精确到某一块。
+        let Some(mut imports) = try_lock_or_recover(&self.pending_imports) else {
+            return Vec::new();
+        };
+        let mut stalled = Vec::new();
+        for entry in imports.iter_mut() {
+            if entry.stall_reported {
+                continue;
+            }
+            let elapsed = entry.requested_at.elapsed();
+            if elapsed < after {
+                continue;
+            }
+            entry.stall_reported = true;
+            stalled.push((entry.item.clone(), elapsed));
+        }
+        stalled
     }
 
     /// scope版本参与投影指纹；区域退出后即便edit/model没动也不能接受旧工作区。
@@ -2843,7 +3352,9 @@ impl DocumentSession {
         }
         let (dyn_curve, _) =
             hifishifter_kernel::pitch_analysis::dyn_analysis::assemble_dyn_orig_from_cache(
-                timeline, root,
+                timeline,
+                root,
+                hifishifter_kernel::gain::GainScope::HostOwned,
             );
         if dyn_curve.iter().any(|value| *value > 0.0) {
             rebuilt.dyn_orig = dyn_curve;
@@ -2992,7 +3503,11 @@ impl DocumentSession {
             .filter_map(|id| available.get(id).map(|pcm| (id.clone(), pcm.clone())))
             .collect::<Vec<_>>();
         let projection = self.workspace_projection_locked(&edits)?;
-        self.project_ui_fades_locked(&mut timeline, &edits.fades);
+        // 【与 GUI 路径同一份稀疏补丁】见 `workspace::FadeProjection`：宿主几何这一轮
+        // 说得出来的那几条才在补丁里，其余保持装配继承下来的上一轮发布值。这里的时间线
+        // 是**裸 id**（没有 GUI 命名空间），所以前缀是空串。
+        let fades = self.project_ui_fades_locked(&edits.fades);
+        crate::editor::workspace::apply_fade_projection(&mut timeline, &fades, "");
         self.project_private_group_view(&mut timeline, &edits)?;
         // 【G1】这是编辑器**真正会看到**的那份参数视图 —— 连同它的指纹一起交出去。
         // 冲突重基的唯一基线就是它（见 `accept_workspace_edits_with_groups`）；
@@ -3258,6 +3773,7 @@ impl DocumentSession {
         current: impl Fn() -> bool,
     ) -> Result<(), String> {
         self.apply_workspace_edits_with_progress(cancel, current, None)
+            .map(|_| ())
     }
     /// 这一轮该渲整段还是只渲播放头附近的一段。
     ///
@@ -3315,12 +3831,44 @@ impl DocumentSession {
         Some((start, start + window_sec))
     }
 
+    /// 记一轮"没有可渲染内容"；**只在刚刚跨过预算的那一轮**返回读数。
+    ///
+    /// 【为什么要"报一次"而不是"每轮都报"】空轮是常态：宿主拖动一条 clip 时每几百毫秒
+    /// 一次。每轮都报会把日志刷满、也会让状态栏一直红着；一次都不报则"真的空了"没有声音。
+    fn note_empty_round(&self) -> Option<EmptyStreak> {
+        let rounds = self.empty_rounds.fetch_add(1, Ordering::AcqRel) + 1;
+        let now = wall_millis();
+        let since =
+            match self
+                .empty_since_ms
+                .compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => now,
+                Err(known) => known,
+            };
+        let elapsed_ms = now.saturating_sub(since);
+        if rounds < EMPTY_ROUNDS_MAX && elapsed_ms < EMPTY_BUDGET_MS {
+            return None;
+        }
+        if self.empty_reported.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        Some(EmptyStreak { rounds, elapsed_ms })
+    }
+
+    /// 发布成功：三个量一起归零（下一次空轮从零开始计）。
+    fn clear_empty_rounds(&self) {
+        self.empty_rounds.store(0, Ordering::Release);
+        self.empty_since_ms.store(0, Ordering::Release);
+        self.empty_reported.store(false, Ordering::Release);
+    }
+
     pub(crate) fn apply_workspace_edits_with_progress(
         &self,
         cancel: Arc<AtomicBool>,
         current: impl Fn() -> bool,
         progress: Option<hifishifter_kernel::mixdown::ProgressCallback>,
-    ) -> Result<(), String> {
+    ) -> Result<ApplyOutcome, String> {
         let (ticket, inputs) = {
             let _transaction = self.transaction.lock_or_recover();
             if !self.is_alive() || !self.ready.load(Ordering::Acquire) {
@@ -3348,6 +3896,8 @@ impl DocumentSession {
             return Err("automatic apply superseded".into());
         }
         let mut prepared = Vec::new();
+        // 这一轮里有没有任何 owner 明确回答"没有可渲染的 clip"。
+        let mut empty = false;
         // 【一个作业要渲染多个 owner 时，进度必须**分段聚合**】
         //
         // 每个 owner 的 `render_with_progress` 都从 0 走到 1。此前它们共用一个回调，
@@ -3368,8 +3918,16 @@ impl DocumentSession {
                     callback.call((index as f64 + value) / owners as f64);
                 })
             });
-            let snapshots = input.render_with_progress(cancel.clone(), slice)?;
-            prepared.push((owner, keys, snapshots));
+            match input.render_with_progress(cancel.clone(), slice)? {
+                crate::render::input::RenderOutcome::Snapshots(snapshots) => {
+                    prepared.push((owner, keys, snapshots))
+                }
+                crate::render::input::RenderOutcome::Nothing => {
+                    // 【为什么不 push 一份空快照】空快照是一个**真实的发布动作**：播放侧
+                    // 随即逐样本读 0，用户听到一次"处理消失"。见 `RenderOutcome`。
+                    empty = true;
+                }
+            }
         }
         let _transaction = self.transaction.lock_or_recover();
         // 复核只看"这份已算好的东西还能不能用"：活着、仍就绪，且票据没有变。
@@ -3395,6 +3953,10 @@ impl DocumentSession {
                 return Err("retired snapshot budget exhausted; reopen instance".into());
             }
         }
+        // 【空轮按"这一轮"记，不按"某条 owner"】一次作业要么发布了内容，要么没有；
+        // 逐 owner 计数会让"两个 renderer 里只有一个空"变成两套时间线。
+        let report = if empty { self.note_empty_round() } else { None };
+        let published = !prepared.is_empty();
         for (owner, keys, snapshots) in prepared {
             for (publisher, snapshot) in owner.snapshots.iter().zip(snapshots) {
                 publisher
@@ -3403,7 +3965,16 @@ impl DocumentSession {
             }
             owner.record_prepared(ticket.model, ticket.edit, ticket.epoch, ticket.scope, keys);
         }
-        Ok(())
+        if published {
+            // 只要这一轮真的发布了东西，连续为空的账就一笔勾销。
+            self.clear_empty_rounds();
+        }
+        if empty {
+            // 【不写 `applied`】下一轮 150 ms 后还会再来一次：宿主把模型补回来时，
+            // 这一次的空轮就是"没人接"的那一半。
+            return Ok(ApplyOutcome::Nothing { report });
+        }
+        Ok(ApplyOutcome::Published)
     }
 
     /// 宿主专属API调用前核对真实文档仍存活，销毁后的view不能沿旧project指针查询。
@@ -4749,7 +5320,7 @@ impl DocumentSession {
         self.region_rejections.lock_or_recover().clear();
         self.pending_since.lock_or_recover().clear();
         self.skipped_regions.lock_or_recover().clear();
-        self.ui_tracks.lock_or_recover().clear();
+        self.ui_tracks_guard().clear();
         self.ui_known_tracks.lock_or_recover().clear();
         *self.ui_inventory_stamp.lock_or_recover() = None;
         *self.ui_inventory_sampled_at.lock_or_recover() = None;
@@ -4864,7 +5435,11 @@ impl DocumentSession {
         self.log_diag_if_changed();
         for owner in owners {
             owner.refresh_host_state_for_model();
-            owner.prepare();
+            // 【这里**绝不**能等】本函数的主要调用者是 ARA 的 `end_editing`（`remap_and_log`
+            // 的尾巴）与存档回调 —— 两者都在宿主线程上，且都是宿主**同步**进入我们的代码。
+            // 传 `None` 让首快照只排队：等它就是把宿主的消息泵扣在这里，现场 REAPER 因此
+            // 被判 `AppHangB1`（`reaper.exe stopped interacting with Windows`）。
+            owner.prepare_with_budget(None);
         }
     }
 
@@ -5410,7 +5985,7 @@ impl DocumentSession {
         let readiness = self.readiness();
         let scope_regions = self.sequence_regions.lock_or_recover().len();
         let assignments = self.renderer_owners().len();
-        let ui_tracks = self.ui_tracks.lock_or_recover().len();
+        let ui_tracks = self.ui_tracks_guard().len();
         let region_items = self.region_items.lock_or_recover().len();
         let editing = self.editing_elapsed().map(|elapsed| elapsed.as_millis());
         // 【T11：图账本进这一行】没有它，"宿主没发图"与"我们拒了图"在这里完全同形 ——
@@ -5879,5 +6454,147 @@ mod input_verdict_tests {
     fn a_partial_failure_degrades_a_usable_document() {
         assert_eq!(InputVerdict::decide(3, 2, 1, 2), InputVerdict::Degraded);
         assert_eq!(InputVerdict::decide(1, 0, 1, 0), InputVerdict::Degraded);
+    }
+}
+
+#[cfg(test)]
+mod presentation_revision_tests {
+    use super::*;
+
+    fn pcm(version: u64) -> crate::render::source::SourcePcm {
+        crate::render::source::SourcePcm {
+            covered: Vec::new(),
+            sample_rate: 44_100,
+            planes: vec![vec![0.25, -0.25, 0.5, -0.5]],
+            version,
+            _reservation: None,
+        }
+    }
+
+    /// **回归：同代重读也必须推进呈现代次。**
+    ///
+    /// 【为什么这条是用户报障的原形】宿主每次重新授予样本访问（起播、前台恢复、
+    /// 重同步）都会让插件把源重读一遍；读回来的是同一代内容，于是
+    /// `editor_audio_revision` 刻意**不**推进（否则每次播放开始都会排一轮输出完全
+    /// 相同的重渲染）。但界面要的恰恰是这一次：源从 `Revoked` 回到 `Published`，
+    /// 已经画成占位的 clip 应当立刻拿到波形。
+    ///
+    /// 旧实现两者都不推进 ⇒ 日志里就是 "re-read the same content generation 0"
+    /// 之后仍然 `media ready=3 pending=2`，直到用户重新加载工程。
+    #[test]
+    fn a_same_generation_reread_still_refreshes_the_presentation() {
+        let document = DocumentSession::new(50_001);
+        let cancelled = AtomicBool::new(false);
+        let id = "ara://source".to_owned();
+        document.publish_source_read_result(id.clone(), Ok(pcm(0)), &cancelled);
+        let after_first = document.presentation_revision.load(Ordering::Acquire);
+        assert!(after_first > 0, "首次发布必须推进呈现代次");
+        document.publish_source_read_result(id.clone(), Ok(pcm(0)), &cancelled);
+        assert!(
+            document.presentation_revision.load(Ordering::Acquire) > after_first,
+            "同代重读不得让界面停在旧投影上"
+        );
+        document.close();
+    }
+
+    /// **失败同样要上屏。**
+    ///
+    /// 源读不出来时界面必须立刻报 `source_read_failed`，而不是等下一次几何刷新 ——
+    /// 那段等待正是"所有 Clip 都在等宿主音频"的一部分。
+    #[test]
+    fn a_failed_read_also_refreshes_the_presentation() {
+        let document = DocumentSession::new(50_002);
+        let cancelled = AtomicBool::new(false);
+        document.publish_source_read_result(
+            "ara://broken".to_owned(),
+            Err("sample access denied".to_owned()),
+            &cancelled,
+        );
+        assert!(
+            document.presentation_revision.load(Ordering::Acquire) > 0,
+            "读取失败必须推进呈现代次，界面才能报出真因"
+        );
+        document.close();
+    }
+
+    /// **装配发布 = 编辑器该看的内容变了。**
+    ///
+    /// 这里钉的是"代次只在 `clip_ids` 变化时才推进"会漏掉的那一类：clip 集合没变、
+    /// 媒体身份变了（占位 → 有源）。它正是粘贴后卡在"正在等待宿主完成音频分配"的形状。
+    fn document_with_one_empty_track(project_sec: f64) -> Arc<DocumentSession> {
+        let document = DocumentSession::new(50_003);
+        *document.timeline.lock_or_recover() = Some(
+            serde_json::from_value(serde_json::json!({
+                "tracks": [{"id": "track", "name": "t", "order": 0}],
+                "clips": [],
+                "bpm": 120.0,
+                "project_sec": project_sec,
+            }))
+            .unwrap(),
+        );
+        document
+    }
+
+    #[test]
+    fn publishing_an_assembly_always_advances_the_presentation() {
+        let document = document_with_one_empty_track(1.0);
+        // 没有 ARA 模型 ⇒ 装配器按既有纪律不动已发布的时间线，本函数直接返回。
+        let before = document.presentation_revision.load(Ordering::Acquire);
+        document.flush_pending_assembly();
+        assert_eq!(
+            document.presentation_revision.load(Ordering::Acquire),
+            before,
+            "没有脏标记时不得白跑一次呈现"
+        );
+        // 模型交付过之后，同样的清单刷新就是一次真正的发布。
+        document.ara_model_seen.store(true, Ordering::Release);
+        document.note_assembly_input_changed();
+        document.flush_pending_assembly();
+        assert!(
+            document.presentation_revision.load(Ordering::Acquire) > before,
+            "装配发布必须推进呈现代次（clip 集合没变、媒体身份变了的情形也要推进）"
+        );
+    }
+
+    /// 【回归】连续为空**跨过预算**才说一次；说过之后不再重复。
+    ///
+    /// 空轮是常态（拖动 clip 时每几百毫秒一次），所以一个都不该留痕迹；但持续为空
+    /// 不是常态，10 s 之后值得让用户看见一条可读的话 —— 而且只看见一次。
+    #[test]
+    fn a_long_empty_streak_surfaces_once() {
+        let document = DocumentSession::new(50_004);
+        let reports = (0..EMPTY_ROUNDS_MAX)
+            .map(|_| document.note_empty_round())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reports.iter().filter(|report| report.is_some()).count(),
+            1,
+            "整段空轮里只该有**一次**播报"
+        );
+        let streak = reports
+            .last()
+            .unwrap()
+            .expect("最后一轮就是跨过预算的那一轮");
+        assert_eq!(streak.rounds, EMPTY_ROUNDS_MAX);
+        assert!(
+            document.note_empty_round().is_none(),
+            "说过一次之后不许刷屏"
+        );
+        document.close();
+    }
+
+    /// 【不回归】一旦发布了内容，连续为空的账就一笔勾销（下一次重新从零开始）。
+    #[test]
+    fn a_published_snapshot_clears_the_empty_streak() {
+        let document = DocumentSession::new(50_005);
+        for _ in 0..10 {
+            assert!(document.note_empty_round().is_none());
+        }
+        document.clear_empty_rounds();
+        assert_eq!(document.empty_rounds.load(Ordering::Acquire), 0);
+        assert_eq!(document.empty_since_ms.load(Ordering::Acquire), 0);
+        // 清零之后重新开始计：单轮空不再是"跨过预算"。
+        assert!(document.note_empty_round().is_none());
+        document.close();
     }
 }

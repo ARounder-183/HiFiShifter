@@ -32,6 +32,7 @@ readonly MODELS_SRC="$BACKEND_DIR/src-tauri/resources/models"
 STAGE="all"
 PROFILE="release"
 OUT_DIR="$REPO_ROOT/dist"
+TARGET_TRIPLE=""
 SKIP_VERIFY=0
 SKIP_FRONTEND=0
 WANT_INSTALL=0
@@ -48,6 +49,8 @@ Usage: scripts/vst3/unix/build.sh [options]
                                      stop after a given stage (default all)
   --profile=release|dist|dev         cargo profile (default release)
   --out=DIR                          artifact directory (default dist)
+  --target=TRIPLE                    cross-compile for TRIPLE (e.g. x86_64-apple-darwin);
+                                     the platform rules then describe the target, not the host
   --skip-frontend                    skip the frontend build (dist must already exist)
   --install                          install into ~/.vst3 after assembly (macOS: ~/Library/…/VST3)
   --no-verify                        skip self-checks (only when probes cannot run on this platform)
@@ -62,6 +65,8 @@ while [ $# -gt 0 ]; do
         --profile=*)     PROFILE="${1#*=}"; shift ;;
         --out=*)         OUT_DIR="${1#*=}"; shift ;;
         --out)           OUT_DIR="$2"; shift 2 ;;
+        --target=*)      TARGET_TRIPLE="${1#*=}"; shift ;;
+        --target)        [ $# -ge 2 ] || die "--target requires a value"; TARGET_TRIPLE="$2"; shift 2 ;;
         --skip-frontend) SKIP_FRONTEND=1; shift ;;
         --install)       WANT_INSTALL=1; shift ;;
         --no-verify)     SKIP_VERIFY=1; shift ;;
@@ -78,6 +83,15 @@ esac
 # ── Platform table ───────────────────────────────────────────────────────────
 #
 # All platform differences converge here; no platform if should appear further down.
+#
+# [Why HFS_ARCH follows the triple] The runtime-dependency list and the artifact tag describe
+# the artifact, not the machine that produced it: an x86_64 slice built on Apple Silicon links
+# tract (no onnxruntime, no dawn) and must be tagged macos-x86_64. Letting hfs_detect_platform
+# read uname here would demand the host's dylibs and name the package after the host.
+if [ -n "$TARGET_TRIPLE" ]; then
+    HFS_ARCH="$(hfs_arch_of_triple "$TARGET_TRIPLE")"
+    export HFS_ARCH
+fi
 hfs_detect_platform
 if [ "$HFS_OS" = "linux" ]; then
     MODULE_SUBDIR="Contents/${HFS_PLATFORM_ARCH}-linux"
@@ -93,7 +107,10 @@ fi
 readonly MODULE_SUBDIR MODULE_FILE RUNTIME_LIB_SUBDIR CARGO_LIB
 readonly BUNDLE_TAG="$HFS_TAG"
 readonly OUT_DIR
-readonly TARGET_DIR="${CARGO_TARGET_DIR:-$BACKEND_DIR/target}"
+# cargo puts a cross build under <target-root>/<triple>/<profile>, so every downstream path
+# (the built dylib, ort's copy-dylibs output, the cargo log) hangs off the same variable.
+readonly CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$BACKEND_DIR/target}"
+readonly TARGET_DIR="$CARGO_TARGET_ROOT${TARGET_TRIPLE:+/$TARGET_TRIPLE}"
 PROFILE_DIR="$PROFILE"
 if [ "$PROFILE" = "dev" ]; then PROFILE_DIR="debug"; fi
 readonly PROFILE_DIR
@@ -120,6 +137,9 @@ for tool in git python3 tar; do
 done
 
 log "platform ${BUNDLE_TAG} | version ${PRODUCT_VERSION} | profile ${PROFILE} | output $OUT_DIR"
+if [ -n "$TARGET_TRIPLE" ]; then
+    log "cross-compiling for ${TARGET_TRIPLE} (artifacts under ${TARGET_DIR})"
+fi
 
 # ── Stage 1: SDK ─────────────────────────────────────────────────────────────
 #
@@ -277,8 +297,12 @@ stage_build() {
     # [Why the exit code is captured separately] when a signal kills cargo it never gets to
     # write an error line; the exit code is the only clue.
     local status=0
-    CARGO_TERM_COLOR=never cargo build --manifest-path "$BACKEND_DIR/Cargo.toml" \
-        -p hifishifter-vst3 --profile "$PROFILE" --locked >"$CARGO_LOG" 2>&1 || status=$?
+    local -a cargo_args=(--manifest-path "$BACKEND_DIR/Cargo.toml" -p hifishifter-vst3
+                         --profile "$PROFILE" --locked)
+    # macOS ships bash 3.2, where "${arr[@]}" on an empty array aborts under set -u; appending
+    # only when a triple was asked for keeps the array non-empty in the native case.
+    [ -n "$TARGET_TRIPLE" ] && cargo_args+=(--target "$TARGET_TRIPLE")
+    CARGO_TERM_COLOR=never cargo build "${cargo_args[@]}" >"$CARGO_LOG" 2>&1 || status=$?
     if [ "$status" -ne 0 ]; then
         hfs_report_build_failure "$CARGO_LOG" "$status"
         die "build failed (exit ${status}); full log: $CARGO_LOG"

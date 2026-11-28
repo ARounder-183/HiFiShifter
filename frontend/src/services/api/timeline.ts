@@ -8,6 +8,7 @@ import type {
     RemoveSilenceResult,
 } from "../../types/api";
 import type { LinkedParamCurves } from "../../features/session/sessionTypes";
+import type { GainPreviewTarget } from "../../features/session/gainAudition";
 
 import { invoke } from "../invoke";
 import type { ClipTemplate } from "../../features/session/sessionTypes";
@@ -184,6 +185,16 @@ export const timelineApi = {
 
     getTimelineState: () => invoke<TimelineResult>("get_timeline_state"),
 
+    // Gain audition (transient; never writes timeline/undo)
+    setGainPreview: (payload: {
+        gestureId: string;
+        seq: number;
+        targets: readonly GainPreviewTarget[];
+    }) => invoke<void>("set_gain_preview", payload),
+
+    clearGainPreview: (payload: { gestureId: string }) =>
+        invoke<void>("clear_gain_preview", payload),
+
     // Transport
     setTransport: (payload: { playheadSec?: number; bpm?: number }) =>
         invoke<{ ok: boolean; playhead_sec?: number; bpm?: number }>(
@@ -289,6 +300,8 @@ export const timelineApi = {
         pitchAnalysisAlgo?: string;
         color?: string;
         name?: string;
+        /** 手势结束时随权威提交一起清掉同名试听帧。 */
+        previewGestureId?: string;
     }) =>
         invoke<TimelineResult>(
             "set_track_state",
@@ -300,6 +313,7 @@ export const timelineApi = {
             payload.pitchAnalysisAlgo,
             payload.color,
             payload.name,
+            payload.previewGestureId,
         ),
 
     selectTrack: (trackId: string) => invoke<TimelineResult>("select_track", trackId),
@@ -356,7 +370,8 @@ export const timelineApi = {
         name?: string;
         startSec?: number;
         lengthSec?: number;
-        gain?: number;
+        /** Take 级增益（take 属性面板；REAPER 的 take `D_VOL`）。 */
+        takeGain?: number;
         muted?: boolean;
         sourceStartSec?: number;
         sourceEndSec?: number;
@@ -395,7 +410,7 @@ export const timelineApi = {
             payload.name,
             payload.startSec,
             payload.lengthSec,
-            payload.gain,
+            payload.takeGain,
             payload.muted,
             payload.sourceStartSec,
             payload.sourceEndSec,
@@ -504,7 +519,7 @@ export const timelineApi = {
         updates: Array<{
             clipId: string;
             /** Take 级增益（take 面板）。 */
-            gain?: number;
+            takeGain?: number;
             /** Item 级增益（时间轴旋钮；REAPER 的 `D_VOL`）。 */
             itemGain?: number;
             muted?: boolean;
@@ -533,7 +548,15 @@ export const timelineApi = {
             channelMode?: number;
         }>;
         checkpoint?: boolean;
-    }) => invoke<TimelineResult>("set_clips_state_bulk", payload.updates, payload.checkpoint),
+        /** 手势结束时随权威提交一起清掉同名试听帧。 */
+        previewGestureId?: string;
+    }) =>
+        invoke<TimelineResult>(
+            "set_clips_state_bulk",
+            payload.updates,
+            payload.checkpoint,
+            payload.previewGestureId,
+        ),
 
     setClipActiveTake: (payload: { clipId: string; takeId: string; checkpoint?: boolean }) =>
         invoke<TimelineResult>(

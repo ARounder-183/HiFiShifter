@@ -30,11 +30,14 @@ import {
     duplicateClipsBulkRemote,
     selectClipRemote,
     seekPlayhead,
-    setClipAutoFades,
     setPlayheadSec,
 } from "../../../../features/session/sessionSlice";
 import { webApi } from "../../../../services/webviewApi";
-import { computeAutoCrossfadeFromPayload } from "./autoCrossfade";
+import {
+    autoFadeSnapshot,
+    computeAutoCrossfadeFromPayload,
+    persistAutoFadeUpdates,
+} from "./autoCrossfade";
 import { buildDuplicateClipsBulkPayload } from "./bulkClipRemotePayloads";
 import { computeSelectedTrackSpan } from "./clipDropMoveUtils";
 
@@ -248,24 +251,15 @@ export async function copyClipsFromDrag(deps: CopyClipsFromDragDeps): Promise<vo
                 fade_out_sec?: number;
             }>;
             const fadeUpdates = computeAutoCrossfadeFromPayload(allClips, created);
-            if (fadeUpdates.length > 0) {
-                // 复制后的自动交叉淡化写入"自动 fade"（与手动 fade 分离）。
-                for (const u of fadeUpdates) {
-                    dispatch(
-                        setClipAutoFades({
-                            clipId: u.clipId,
-                            autoFadeInSec: u.autoFadeInSec,
-                            autoFadeOutSec: u.autoFadeOutSec,
-                        }),
-                    );
-                    await webApi.setClipState({
-                        clipId: u.clipId,
-                        autoFadeInSec: u.autoFadeInSec,
-                        autoFadeOutSec: u.autoFadeOutSec,
-                        checkpoint: false,
-                    });
-                }
-            }
+            // 复制后的自动交叉淡化写入"自动 fade"（与手动 fade 分离），整批一次写回。
+            await persistAutoFadeUpdates(fadeUpdates, dispatch, {
+                checkpoint: false,
+                previous: autoFadeSnapshot(
+                    sessionRef.current,
+                    fadeUpdates.map((u) => u.clipId),
+                ),
+                requirePresent: new Set(sessionRef.current.clips.map((clip) => clip.id)),
+            });
         }
     } finally {
         // 【必须无条件收组，失败也不能漏】`begin_undo_group` 把会话的

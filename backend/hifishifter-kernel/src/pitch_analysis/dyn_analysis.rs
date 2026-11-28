@@ -50,7 +50,9 @@
 //! - 产物写入 `TrackParamsState::dyn_orig`，由 `pitch_editing::dyn_orig_curve_for_clip`
 //!   暴露给混音层，由 `commands::params` 暴露给前端画虚线基线。
 
+use crate::gain::GainScope;
 use crate::state::TimelineState;
+use std::collections::HashMap;
 
 /// `dyn_orig` 的安全上限（**纯防御性**，不表达值域语义）。
 ///
@@ -63,7 +65,25 @@ const DYN_ORIG_MAX: f32 = 8.0;
 /// 返回 `(curve, all_cache_hit)`：
 /// - `curve`：长度 = 工程参数帧数的 `dyn_orig`（绝对电平，1.0 = 0 dBFS）；
 /// - `all_cache_hit`：false 表示部分 clip 尚未分析完成，`curve` 是当前可得的部分。
-pub fn assemble_dyn_orig_from_cache(tl: &TimelineState, root_track_id: &str) -> (Vec<f32>, bool) {
+pub fn assemble_dyn_orig_from_cache(
+    tl: &TimelineState,
+    root_track_id: &str,
+    gain_scope: GainScope,
+) -> (Vec<f32>, bool) {
+    assemble_dyn_orig_from_cache_with_gains(tl, root_track_id, gain_scope, None)
+}
+
+/// 与 assemble_dyn_orig_from_cache 相同，但允许按 clip 覆盖“可听增益”。
+///
+/// 【为什么需要】拖动 item/take 增益时，试听必须用**新的** item × take 重算
+/// dyn_orig；否则已画 DYN 的绝对目标会被旧基线除一次，松手再除一次，听感
+/// 就是“拖的时候对、松手跳一下”。覆盖表只在 worker 线程构建，音频线程不查表。
+pub fn assemble_dyn_orig_from_cache_with_gains(
+    tl: &TimelineState,
+    root_track_id: &str,
+    gain_scope: GainScope,
+    gain_overrides: Option<&HashMap<String, f32>>,
+) -> (Vec<f32>, bool) {
     let fp = tl.frame_period_ms();
     let target_frames = tl.target_param_frames(fp);
 
@@ -147,7 +167,12 @@ pub fn assemble_dyn_orig_from_cache(tl: &TimelineState, root_track_id: &str) -> 
 
         let media_total = crate::state::clip_source_media_duration_sec(clip);
         let pre_silence_sec = crate::state::clip_leading_silence_sec(clip, media_total);
-        let clip_gain = crate::gain::clamp_gain(clip.gain.max(0.0)) as f64;
+        // 与渲染同一个 scope：AppOwned 取 item × take（保号），HostOwned 取 1.0。
+        // 后面的能量融合会平方，负极性在这里自然消失。试听覆盖表只替换
+        // “这一帧的 item × take”，scope 语义不变。
+        let clip_gain = gain_overrides
+            .and_then(|overrides| overrides.get(&clip.id).copied())
+            .unwrap_or_else(|| clip.render_gain(gain_scope)) as f64;
 
         // 淡化权重只作**纳入门限**（= 0：前导静音 / clip 末尾之外 → 不可听）；
         // 权重本身不进电平 —— 见文件头"电平的物理口径"。不可听帧贡献 0 能量。
@@ -326,8 +351,12 @@ fn fade_weight_at(
 ///
 /// 必须持有 timeline 写锁调用；两个入口（命令侧 / 引擎侧）共用它，
 /// 保证"什么算命中、什么时候记 key"只有一处定义。
-fn assemble_and_store(tl: &mut TimelineState, root_track_id: &str) -> (bool, bool) {
-    let key = build_root_dyn_key(tl, root_track_id);
+fn assemble_and_store(
+    tl: &mut TimelineState,
+    root_track_id: &str,
+    gain_scope: GainScope,
+) -> (bool, bool) {
+    let key = build_root_dyn_key(tl, root_track_id, gain_scope);
     let fp = tl.frame_period_ms();
     let target = tl.target_param_frames(fp);
 
@@ -348,7 +377,7 @@ fn assemble_and_store(tl: &mut TimelineState, root_track_id: &str) -> (bool, boo
         return (false, true);
     }
 
-    let (curve, all_cache_hit) = assemble_dyn_orig_from_cache(tl, root_track_id);
+    let (curve, all_cache_hit) = assemble_dyn_orig_from_cache(tl, root_track_id, gain_scope);
     tl.ensure_params_for_root(root_track_id);
     let mut changed = false;
     if let Some(entry) = tl.params_by_root_track.get_mut(root_track_id) {
@@ -383,10 +412,11 @@ fn assemble_and_store(tl: &mut TimelineState, root_track_id: &str) -> (bool, boo
 pub fn maybe_schedule_dyn_orig(
     timeline: &std::sync::Mutex<TimelineState>,
     root_track_id: &str,
+    gain_scope: GainScope,
 ) -> bool {
     let (snapshot_source, all_cache_hit) = {
         let mut tl = timeline.lock().unwrap_or_else(|e| e.into_inner());
-        let (changed, all_hit) = assemble_and_store(&mut tl, root_track_id);
+        let (changed, all_hit) = assemble_and_store(&mut tl, root_track_id, gain_scope);
         (changed.then(|| tl.clone()), all_hit)
     };
 
@@ -423,8 +453,12 @@ pub fn maybe_schedule_dyn_orig(
 ///
 /// 直接改传进来的 timeline（调用方随后 store 进 `last_timeline`），
 /// 因此本次 snapshot 就会带上新基线 —— 无需再走一次 update 往返。
-pub fn assemble_dyn_orig_for_engine(tl: &mut TimelineState, root_track_id: &str) -> bool {
-    let (_changed, all_cache_hit) = assemble_and_store(tl, root_track_id);
+pub fn assemble_dyn_orig_for_engine(
+    tl: &mut TimelineState,
+    root_track_id: &str,
+    gain_scope: GainScope,
+) -> bool {
+    let (_changed, all_cache_hit) = assemble_and_store(tl, root_track_id, gain_scope);
     all_cache_hit
 }
 
@@ -432,7 +466,11 @@ pub fn assemble_dyn_orig_for_engine(tl: &mut TimelineState, root_track_id: &str)
 ///
 /// 语义与 `build_root_pitch_key` 一致：任何会改变"逐帧电平"的时间线变化
 /// （clip 几何、源文件签名、淡化、增益…）都必须产出一个不同的 key。
-pub fn build_root_dyn_key(tl: &TimelineState, root_track_id: &str) -> String {
+pub fn build_root_dyn_key(
+    tl: &TimelineState,
+    root_track_id: &str,
+    gain_scope: GainScope,
+) -> String {
     // 同 assemble_dyn_orig_from_cache：查表代替逐 clip 沿链上行（见那里的说明）。
     let root_by_track = tl.root_track_map();
     // 与 resolve_root_track_id 的语义对齐：空 id 恒不属于任何根；未知 id（不在
@@ -451,8 +489,12 @@ pub fn build_root_dyn_key(tl: &TimelineState, root_track_id: &str) -> String {
     let mut hasher = blake3::Hasher::new();
     // 【v3】基线改为**绝对电平**（不归一化）+ 逐帧峰值口径（见文件头）。
     // 旧 key 命中的基线是旧口径产物，必须整体重组一次。
-    hasher.update(b"root_dyn_orig_v3");
+    hasher.update(b"root_dyn_orig_v4");
     hasher.update(root_track_id.as_bytes());
+    hasher.update(match gain_scope {
+        GainScope::AppOwned => b"app" as &[u8],
+        GainScope::HostOwned => b"host" as &[u8],
+    });
     hasher.update(&crate::pitch_analysis::quantize_u32(fp, 1000.0).to_le_bytes());
 
     for clip in &tl.clips {
@@ -471,6 +513,11 @@ pub fn build_root_dyn_key(tl: &TimelineState, root_track_id: &str) -> String {
         );
         hasher.update(
             &crate::pitch_analysis::quantize_u32(clip.playback_rate as f64, 1000.0).to_le_bytes(),
+        );
+        // 两层分别入键：任何一层改动都必须让缓存失效。raw 值参与哈希，
+        // 不能被 clamp_gain 把负 take 折叠成 0。
+        hasher.update(
+            &crate::pitch_analysis::quantize_u32(clip.clip_gain as f64, 1000.0).to_le_bytes(),
         );
         hasher.update(&crate::pitch_analysis::quantize_u32(clip.gain as f64, 1000.0).to_le_bytes());
         hasher.update(&[u8::from(clip.reversed), u8::from(clip.loop_enabled)]);
@@ -568,20 +615,20 @@ mod tests {
         let track = make_track("root");
         tl.tracks = vec![track];
         tl.clips.push(make_clip("c1", 0.0, 1.0));
-        let k1 = build_root_dyn_key(&tl, "root");
+        let k1 = build_root_dyn_key(&tl, "root", GainScope::AppOwned);
 
         // 仅移动位置也应改变键（窗口映射随之变化）。
         tl.clips[0].start_sec = 2.0;
-        let k2 = build_root_dyn_key(&tl, "root");
+        let k2 = build_root_dyn_key(&tl, "root", GainScope::AppOwned);
         assert_ne!(k1, k2);
 
         // 增益变化同样改变键（融合权重依赖它）。
         tl.clips[0].gain = 0.5;
-        let k3 = build_root_dyn_key(&tl, "root");
+        let k3 = build_root_dyn_key(&tl, "root", GainScope::AppOwned);
         assert_ne!(k2, k3);
 
         // 无变化时稳定。
-        assert_eq!(k3, build_root_dyn_key(&tl, "root"));
+        assert_eq!(k3, build_root_dyn_key(&tl, "root", GainScope::AppOwned));
     }
 
     /// **四种几何手势都必须改变溯源键** —— 参数编辑器的「拖拽期间搬运基线、
@@ -594,33 +641,36 @@ mod tests {
         let mut tl = TimelineState::default();
         tl.tracks = vec![make_track("root")];
         tl.clips.push(make_clip("c1", 1.0, 2.0));
-        let baseline_key = build_root_dyn_key(&tl, "root");
+        let baseline_key = build_root_dyn_key(&tl, "root", GainScope::AppOwned);
 
         // ① 移动：只有 start_sec 变。
         tl.clips[0].start_sec = 3.0;
-        let moved_key = build_root_dyn_key(&tl, "root");
+        let moved_key = build_root_dyn_key(&tl, "root", GainScope::AppOwned);
         assert_ne!(baseline_key, moved_key, "移动必须改变溯源键");
 
         // ② Slip：起点/长度/速率都不变，只有源窗口平移。
         tl.clips[0].source_start_sec = 5.0;
         tl.clips[0].source_end_sec = 7.0;
-        let slipped_key = build_root_dyn_key(&tl, "root");
+        let slipped_key = build_root_dyn_key(&tl, "root", GainScope::AppOwned);
         assert_ne!(moved_key, slipped_key, "Slip 必须改变溯源键");
 
         // ③ 拉伸：源窗口不动，长度与速率同时变（内容跨度为常量）。
         tl.clips[0].length_sec = 4.0;
         tl.clips[0].playback_rate = 0.5;
-        let stretched_key = build_root_dyn_key(&tl, "root");
+        let stretched_key = build_root_dyn_key(&tl, "root", GainScope::AppOwned);
         assert_ne!(slipped_key, stretched_key, "拉伸必须改变溯源键");
 
         // ④ 延伸/截短：速率不变，长度与源窗口终点一起变。
         tl.clips[0].length_sec = 3.0;
         tl.clips[0].source_end_sec = 6.0;
-        let trimmed_key = build_root_dyn_key(&tl, "root");
+        let trimmed_key = build_root_dyn_key(&tl, "root", GainScope::AppOwned);
         assert_ne!(stretched_key, trimmed_key, "延伸/截短必须改变溯源键");
 
         // 无变化时稳定（拖拽期间后端几何被冻结 ⇒ 键必须恒定，映射才有意义）。
-        assert_eq!(trimmed_key, build_root_dyn_key(&tl, "root"));
+        assert_eq!(
+            trimmed_key,
+            build_root_dyn_key(&tl, "root", GainScope::AppOwned)
+        );
     }
 
     /// 能量域融合的口径守护（文件头"电平的物理口径"的逐条断言）。
@@ -663,6 +713,26 @@ mod tests {
         assert!((fused[0] - 0.5).abs() < 1e-6);
         assert!((fused[2] - 1.0).abs() < 1e-6);
         assert_eq!(fused.len(), 4);
+    }
+
+    /// 两层增益与 scope 都必须进入 dyn 缓存键。
+    #[test]
+    fn dyn_key_hashes_both_gain_layers_and_scope() {
+        let mut tl = TimelineState::default();
+        tl.tracks = vec![make_track("root")];
+        tl.clips.push(make_clip("c1", 0.0, 1.0));
+        let base = build_root_dyn_key(&tl, "root", GainScope::AppOwned);
+        tl.clips[0].clip_gain = 2.0;
+        let item_changed = build_root_dyn_key(&tl, "root", GainScope::AppOwned);
+        assert_ne!(base, item_changed, "item gain 必须使缓存失效");
+        tl.clips[0].gain = -0.5;
+        let take_changed = build_root_dyn_key(&tl, "root", GainScope::AppOwned);
+        assert_ne!(
+            item_changed, take_changed,
+            "take gain（含极性）必须使缓存失效"
+        );
+        let host_scope = build_root_dyn_key(&tl, "root", GainScope::HostOwned);
+        assert_ne!(take_changed, host_scope, "scope 必须进入缓存键");
     }
 
     /// ★ 量纲守护：基线必须是**绝对电平**，不得被任何归一化改写。

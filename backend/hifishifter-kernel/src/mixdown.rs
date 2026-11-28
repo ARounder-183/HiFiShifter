@@ -1,6 +1,7 @@
 //! 离线时间线混音：文件入口保持独立，宿主入口仅消费显式授权的 PCM。
 
 use crate::encode::{create_encoder, ChannelMode, EncodeError, OutputSpec};
+use crate::gain::GainScope;
 use crate::state::{TimelineState, Track};
 use crate::time_stretch::{time_stretch_interleaved, StretchAlgorithm};
 use std::collections::{HashMap, HashSet};
@@ -60,6 +61,8 @@ pub struct MixdownOptions {
     /// 单例，与后台渲染 pass 并发会互相污染计数器/回调；导出走 `spawn_blocking`，
     /// 必须与之隔离。
     pub progress: Option<ProgressCallback>,
+    /// 增益所有权：AppOwned 自己乘 item×take×track；HostOwned（ARA）保持干声。
+    pub gain_scope: GainScope,
     /// 可选：整 Clip 渲染缓存的复用/回填统计。
     ///
     /// 导出命令用它向用户与日志上报"复用了 N 个片段"（与后台预渲染的
@@ -496,7 +499,10 @@ fn track_lineage(track_id: &str, parent_map: &HashMap<String, Option<String>>) -
     out
 }
 
-fn compute_track_gains(tracks: &[Track]) -> HashMap<String, (f32, bool, bool)> {
+fn compute_track_gains(
+    tracks: &[Track],
+    gain_scope: GainScope,
+) -> HashMap<String, (f32, bool, bool)> {
     let parent_map = build_parent_map(tracks);
     let by_id: HashMap<&str, &Track> = tracks.iter().map(|t| (t.id.as_str(), t)).collect();
 
@@ -515,6 +521,11 @@ fn compute_track_gains(tracks: &[Track]) -> HashMap<String, (f32, bool, bool)> {
                 muted |= node.muted;
                 soloed |= node.solo;
             }
+        }
+
+        // HostOwned：轨道推子属于宿主，插件渲染只保留 muted/solo 语义。
+        if gain_scope == GainScope::HostOwned {
+            gain = 1.0;
         }
 
         // Solo overrides mute: when a track (or its ancestor) is soloed,
@@ -1223,7 +1234,7 @@ fn render_mixdown_internal(
     let out_frames = (duration_sec * out_rate as f64).round().max(1.0) as usize;
     let mut mix = vec![0.0f32; out_frames * out_channels as usize];
 
-    let track_gain = compute_track_gains(&timeline.tracks);
+    let track_gain = compute_track_gains(&timeline.tracks, opts.gain_scope);
 
     // Precompute audible tracks set.
     let mut audible_tracks: HashSet<String> = HashSet::new();
@@ -1272,7 +1283,7 @@ fn render_mixdown_internal(
                 .get(&clip.track_id)
                 .cloned()
                 .unwrap_or((1.0, false, true));
-            if crate::gain::clamp_gain(clip.audible_gain() * track_gain_value) <= 0.0 {
+            if clip.render_gain(opts.gain_scope) * track_gain_value == 0.0 {
                 continue;
             }
             let clip_timeline_len_sec = clip.length_sec.max(0.0);
@@ -1321,9 +1332,10 @@ fn render_mixdown_internal(
             .get(&clip.track_id)
             .cloned()
             .unwrap_or((1.0, false, true));
-        // item × take：两层增益都要算进来（见 Clip::audible_gain）。
-        let gain = crate::gain::clamp_gain(clip.audible_gain() * track_gain_value);
-        if gain <= 0.0 {
+        // item × take：AppOwned 两层都要算进来；HostOwned 保持干声（1.0）。
+        // 负增益是反相，不能当静音跳过 —— 只跳过真正的 0。
+        let gain = clip.render_gain(opts.gain_scope) * track_gain_value;
+        if gain == 0.0 {
             continue;
         }
 
@@ -2327,6 +2339,7 @@ mod tests {
                 cancel_flag: None,
                 progress: None,
                 cache_stats: None,
+                gain_scope: crate::gain::GainScope::AppOwned,
             }
         }
 
@@ -2860,6 +2873,7 @@ mod tests {
                     cancel_flag: None,
                     progress: None,
                     cache_stats: None,
+                    gain_scope: crate::gain::GainScope::AppOwned,
                 },
             )
             .unwrap();
@@ -2998,6 +3012,7 @@ mod tests {
                     cancel_flag: None,
                     progress: None,
                     cache_stats: None,
+                    gain_scope: crate::gain::GainScope::AppOwned,
                 },
             )
             .unwrap();
@@ -3123,6 +3138,7 @@ mod tests {
                     sink.lock().unwrap().push(value);
                 })),
                 cache_stats: None,
+                gain_scope: crate::gain::GainScope::AppOwned,
             },
         )
         .unwrap();
@@ -3312,6 +3328,7 @@ mod tests {
             cancel_flag: None,
             progress: None,
             cache_stats: None,
+            gain_scope: crate::gain::GainScope::AppOwned,
         };
         let run = |tl: &TimelineState| {
             render_mixdown_with_pcm(tl, options.clone(), &src)
@@ -3406,6 +3423,7 @@ mod tests {
                     cancel_flag: None,
                     progress: None,
                     cache_stats: Some(Arc::clone(stats)),
+                    gain_scope: crate::gain::GainScope::AppOwned,
                 },
             )
             .expect("render ok");
@@ -3561,6 +3579,7 @@ mod tests {
                     cancel_flag: None,
                     progress: None,
                     cache_stats: Some(Arc::clone(&stats)),
+                    gain_scope: crate::gain::GainScope::AppOwned,
                 },
             )
             .expect("render ok");
@@ -3750,6 +3769,7 @@ mod tests {
                     cancel_flag: None,
                     progress: None,
                     cache_stats: None,
+                    gain_scope: crate::gain::GainScope::AppOwned,
                 };
                 let (r, ch, _dur, mix) = render_mixdown_interleaved(&tl, opts).expect("render ok");
                 let ch = ch as usize;
@@ -3864,6 +3884,7 @@ mod tests {
                 cancel_flag: None,
                 progress: None,
                 cache_stats: None,
+                gain_scope: crate::gain::GainScope::AppOwned,
             }
         }
 
@@ -4094,6 +4115,7 @@ mod tests {
                 cancel_flag: None,
                 progress: None,
                 cache_stats: None,
+                gain_scope: crate::gain::GainScope::AppOwned,
             };
             let (_, _, _, forward) =
                 render_mixdown_interleaved(&build(false), options.clone()).unwrap();

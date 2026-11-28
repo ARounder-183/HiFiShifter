@@ -1022,8 +1022,11 @@ fn schedule_dyn_orig_for_roots<'a>(
     unique.sort_unstable();
     unique.dedup();
     for root in unique {
-        let _ =
-            hifishifter_kernel::pitch_analysis::maybe_schedule_dyn_orig(&session.timeline, root);
+        let _ = hifishifter_kernel::pitch_analysis::maybe_schedule_dyn_orig(
+            &session.timeline,
+            root,
+            hifishifter_kernel::gain::GainScope::HostOwned,
+        );
     }
 }
 
@@ -1571,13 +1574,25 @@ fn after_musical_context_write(session: &EditorSession) {
     document.project_plugin_musical_context_locked(&mut session.timeline.lock_or_recover());
     document.render_epoch.fetch_add(1, Ordering::AcqRel);
 }
+/// 一条源的峰值文件；`Ok(None)` = **还没轮到它**（宿主尚未授权这条刚导入的源）。
+///
+/// 【为什么返回值多了一层 Option】"尚未就绪"与"拒绝"在协议里必须用不同的答案：
+/// 前者由空载荷表达（前端有冷却与有界重试），后者是安全边界，必须报错。把两者都
+/// 折成一个 Err 会让前端把瞬时状态记成永久失败 —— 那正是"新导入的 Clip 要重载才
+/// 显示波形"的成因。
 fn peaks(
     session: &EditorSession,
     path: &str,
-) -> Result<std::sync::Arc<hifishifter_kernel::hfspeaks_v2::HfsPeakFile>, String> {
-    session.check_source(path)?;
+) -> Result<Option<std::sync::Arc<hifishifter_kernel::hfspeaks_v2::HfsPeakFile>>, String> {
+    match session.check_source(path) {
+        crate::editor::session::SourceCheck::Ready => {}
+        crate::editor::session::SourceCheck::NotYetAuthorized => return Ok(None),
+        crate::editor::session::SourceCheck::Denied => {
+            return Err("source is not authorized by this ARA session".into())
+        }
+    }
     if let Some(found) = session.peaks.lock_or_recover().get(path).cloned() {
-        return Ok(found);
+        return Ok(Some(found));
     }
     let result = std::sync::Arc::new(hifishifter_kernel::hfspeaks_v2::compute_mipmap_peaks(
         std::path::Path::new(path),
@@ -1588,7 +1603,7 @@ fn peaks(
         cache.clear();
     }
     cache.insert(path.into(), result.clone());
-    Ok(result)
+    Ok(Some(result))
 }
 
 /// Read-only startup data has no document/PCM dependency and can bypass the actor.
@@ -1985,6 +2000,59 @@ pub(super) fn dispatch(
             session.emit(event, input["payload"].clone());
             return Ok(Value::Null);
         }
+        // ── 只读状态 / 能力探测：**不经过 ensure_loaded** ──
+        //
+        // 【为什么必须挪到这里】它们回答的是"现在有什么进度 / 这个能力在不在"，
+        // 与时间线是否就绪**无关**。放在加载闸之后，宿主还在准备素材时每一次轮询都会
+        // 拿到 `source files are preparing` / `missing host PCM` —— 前端于是每 250 ms
+        // 记一条错误，而界面上什么都不会变。用户看到的是"应用一直在报错"。
+        //
+        // 【vslib】闭源库，插件包**刻意不随附**（见 `hifishifter-plugin/Cargo.toml`
+        // 的说明）。如实回答"没编进来 + 为什么"，算法列表才能按能力过滤掉它。
+        "get_vslib_status" => {
+            return Ok(json!({
+                "compiled": false,
+                "available": false,
+                "version": serde_json::Value::Null,
+                "error": "vslib is not bundled with the plug-in",
+            }))
+        }
+        // 【推理设备】插件与独立 App 共用同一份设置、同一个内核，所以这几条读数在插件里
+        // 同样成立。三个读数都**不初始化 ORT**（`is_available` 是只读快照，GPU/DXGI
+        // 枚举是纯查询），不会在 DAW 进程里触发重量级会话重建。
+        "get_onnx_status" => {
+            let compiled = hifishifter_kernel::nsf_hifigan_onnx::compiled();
+            return Ok(json!({
+                "compiled": compiled,
+                "available": compiled && hifishifter_kernel::nsf_hifigan_onnx::is_available(),
+                "error": hifishifter_kernel::nsf_hifigan_onnx::model_load_error(),
+                "epChoice": hifishifter_kernel::nsf_hifigan_onnx::ep_choice(),
+            }));
+        }
+        // 【长分析进度】事件通道（`pitch_orig_analysis_progress`）在正常情况下就够了，
+        // 但事件可能在窗口尚未挂载时发出 —— 那时前端只能靠轮询把"正在分析第 3/8 个
+        // 片段"补回来。`null` = 现在没有可报告的进度（既有契约）。
+        "get_pitch_analysis_progress" => {
+            return Ok(
+                match hifishifter_kernel::pitch_clip::get_clip_pitch_batch_progress() {
+                    Some(batch) => json!({
+                        "rootTrackId": "",
+                        "progress": batch.progress,
+                        "currentClipName": batch.current_clip_name,
+                        "completedClips": batch.completed_clips,
+                        "totalClips": batch.total_clips,
+                    }),
+                    None => Value::Null,
+                },
+            )
+        }
+        "get_syllable_analysis_progress" => {
+            return Ok(
+                hifishifter_kernel::pitch_analysis::syllable_analysis_progress()
+                    .map(|progress| serde_json::to_value(progress).unwrap_or(Value::Null))
+                    .unwrap_or(Value::Null),
+            )
+        }
         _ => {}
     }
     if let Err(error) = session.ensure_loaded(false) {
@@ -2195,34 +2263,6 @@ pub(super) fn dispatch(
         }
         "get_timeline_state_lite" => payload(session, true),
         "get_project_meta" => Ok(payload(session, true)?["project"].clone()),
-        // vslib 是闭源库，插件包**刻意不随附**（见 `hifishifter-plugin/Cargo.toml` 的
-        // 说明）。此前这条落到 `Command unavailable`，于是每次启动都有一次失败
-        // invoke，前端只能把 vslib 显示成"未知"。如实回答"没编进来 + 为什么"，
-        // 算法列表才能按能力过滤掉它。
-        "get_vslib_status" => Ok(json!({
-            "compiled": false,
-            "available": false,
-            "version": serde_json::Value::Null,
-            "error": "vslib is not bundled with the plug-in",
-        })),
-        // 推理设备（ORT Execution Provider）只读状态。插件与独立 App **共用同一份设置、
-        // 同一个内核**：`ui_settings_apply::apply` 已把 `ort_ep` / `ort_device_key` 下发给
-        // 会话，所以这几条读数在插件里同样成立。
-        //
-        // 【为什么必须补】此前它们落到 `Command unavailable`，于是 `MenuBar` 把整个
-        // 推理设备子菜单禁用（`disabled={isPluginMode()}`）—— 用户能在独立 App 里选
-        // GPU，在插件里却只能看着 CPU。三个读数都**不初始化 ORT**（`is_available` 是
-        // 只读快照，GPU/DXGI 枚举是纯查询），不会像 `run_vocoder_benchmark` 那样在
-        // DAW 进程里触发重量级会话重建。
-        "get_onnx_status" => {
-            let compiled = hifishifter_kernel::nsf_hifigan_onnx::compiled();
-            Ok(json!({
-                "compiled": compiled,
-                "available": compiled && hifishifter_kernel::nsf_hifigan_onnx::is_available(),
-                "error": hifishifter_kernel::nsf_hifigan_onnx::model_load_error(),
-                "epChoice": hifishifter_kernel::nsf_hifigan_onnx::ep_choice(),
-            }))
-        }
         "get_gpu_devices" => value(hifishifter_kernel::gpu_info::enumerate_gpus()),
         "get_dml_adapters" => value(hifishifter_kernel::dml_adapters::enumerate_dml_adapters()),
         // 记事本正文：独立 App 把它写进工程文件；插件没有工程文件，写进插件自己的
@@ -2452,27 +2492,6 @@ pub(super) fn dispatch(
             after_write(session, json!({"ok":true}))?;
             payload(session, true)
         }
-        // 长分析的轮询兜底。事件通道（`pitch_orig_analysis_progress`）在正常情况下
-        // 就够了，但事件可能在窗口尚未挂载时发出 —— 那时前端只能靠轮询这条把
-        // "正在分析第 3/8 个片段"补回来。此前这里恒回 `null`，于是**首次**分析
-        // 期间界面完全没有进度，看起来像卡死。
-        "get_pitch_analysis_progress" => Ok(
-            match hifishifter_kernel::pitch_clip::get_clip_pitch_batch_progress() {
-                Some(batch) => json!({
-                    "rootTrackId": "",
-                    "progress": batch.progress,
-                    "currentClipName": batch.current_clip_name,
-                    "completedClips": batch.completed_clips,
-                    "totalClips": batch.total_clips,
-                }),
-                None => Value::Null,
-            },
-        ),
-        "get_syllable_analysis_progress" => Ok(
-            hifishifter_kernel::pitch_analysis::syllable_analysis_progress()
-                .map(|progress| serde_json::to_value(progress).unwrap_or(Value::Null))
-                .unwrap_or(Value::Null),
-        ),
         // 把编辑后的音高曲线导出成 MIDI。
         //
         // 【为什么插件里能做】整条链路是纯变换（读音高数据 → 写文件），不需要任何
@@ -2778,9 +2797,13 @@ pub(super) fn dispatch(
         "get_waveform_mipmap_binary" => {
             let path = input["sourcePath"].as_str().ok_or("sourcePath missing")?;
             let level = input["level"].as_u64().unwrap_or(2).min(2) as usize;
+            // 空串 = 尚未就绪（见 `peaks`）：前端对它有 3 s 冷却 + 有界重试，
+            // 绝不会把它记成永久失败。
+            let Some(data) = peaks(session, path)? else {
+                return Ok(Value::String(String::new()));
+            };
             Ok(Value::String(
-                base64::engine::general_purpose::STANDARD
-                    .encode(peaks(session, path)?.to_binary_level(level)),
+                base64::engine::general_purpose::STANDARD.encode(data.to_binary_level(level)),
             ))
         }
         "preload_waveform_mipmap" => {
@@ -2796,25 +2819,59 @@ pub(super) fn dispatch(
             if paths.len() > 64 {
                 return Err("too many waveform sources".into());
             }
-            let mut result = serde_json::Map::new();
+            // 【为什么是逐源结果数组，而不是一张 path→数据的表】表里没有"这一条怎么了"
+            // 的位置：一条源没就绪只能用空串表达，一条源被拒绝（未授权 / 读不出来）只能
+            // 整批上抛。于是任何一条硬错误都会让同批其余路径全部退回逐个重试 —— 自己给
+            // 自己制造故障，而前端除了"整批失败"读不出第二种信息。
+            //
+            // 现在每条源各带 `ok` / `pending` / `error`：调用方按源更新，一个坏源只影响
+            // 它自己。`pending` 与 `error` 必须分开 —— 前者是瞬时（宿主尚未授权这条刚导入
+            // 的源、峰值还没算完），前端对它有冷却与有界重试；后者是终态，不该重试。
+            let mut results = Vec::with_capacity(paths.len());
             for path in paths {
-                let data = peaks(session, &path)?;
-                let encoded: Vec<_> = (0..3)
-                    .map(|level| {
-                        if levels
-                            .as_ref()
-                            .is_none_or(|l| l.is_empty() || l.contains(&level))
-                        {
-                            base64::engine::general_purpose::STANDARD
-                                .encode(data.to_binary_level(level))
-                        } else {
-                            String::new()
-                        }
-                    })
-                    .collect();
-                result.insert(path, json!(encoded));
+                let entry = match peaks(session, &path) {
+                    Ok(Some(data)) => {
+                        let encoded: Vec<_> = (0..3)
+                            .map(|level| {
+                                if levels
+                                    .as_ref()
+                                    .is_none_or(|l| l.is_empty() || l.contains(&level))
+                                {
+                                    base64::engine::general_purpose::STANDARD
+                                        .encode(data.to_binary_level(level))
+                                } else {
+                                    String::new()
+                                }
+                            })
+                            .collect();
+                        json!({
+                            "path": path,
+                            "ok": true,
+                            "pending": false,
+                            "data": encoded,
+                            "error": null,
+                        })
+                    }
+                    // 尚未就绪：`ok=false` + `pending=true`，`error` 为空。
+                    Ok(None) => json!({
+                        "path": path,
+                        "ok": false,
+                        "pending": true,
+                        "data": null,
+                        "error": null,
+                    }),
+                    // 硬错误：只记在这一条上，`pending=false` 让前端**不要**重试。
+                    Err(error) => json!({
+                        "path": path,
+                        "ok": false,
+                        "pending": false,
+                        "data": null,
+                        "error": error,
+                    }),
+                };
+                results.push(entry);
             }
-            Ok(Value::Object(result))
+            Ok(Value::Array(results))
         }
         "get_root_mix_waveform_peaks_segment" | "get_track_mix_waveform_peaks_segment" => {
             let a: Segment = args(input)?;
@@ -2965,6 +3022,64 @@ pub(super) fn dispatch(
             )
         }
         _ => Err(format!("Command unavailable in plug-in mode: {command}")),
+    }
+}
+
+#[cfg(test)]
+mod status_probe_tests {
+    use super::*;
+
+    /// **回归：加载窗口里的只读状态命令必须给中性值，不是错误。**
+    ///
+    /// 【为什么这条是用户报障的可执行形式】`get_syllable_analysis_progress` /
+    /// `get_pitch_analysis_progress` / `get_vslib_status` / `get_onnx_status` 都是
+    /// **只读探针**：它们回答"现在有什么进度、这个能力在不在"，与时间线是否就绪无关。
+    /// 放在 `ensure_loaded` 闸之后就变成"宿主还在准备素材时，每一次轮询都返回
+    /// `source files are preparing` / `missing host PCM`" —— 前端每 250 ms 记一条
+    /// 错误，而界面上什么都不变。现场日志里那一片 `missing host PCM` 就是这条缺陷。
+    ///
+    /// 【怎么把"闸门失败"变成一个确定的夹具】夹具里的素材太小，`ensure_loaded` 会当场
+    /// 成功 —— 于是"等待窗口"复现不出来。这里改用**更强**的判据：把会话关掉（此时任何
+    /// 依赖会话的命令都必然失败），四个探针仍然必须答得出来。它们能答，就证明它们真的
+    /// 走在那道闸**之前**；将来谁把它们挪回闸后，这条用例会当场红。
+    #[test]
+    fn status_probes_answer_before_the_load_gate() {
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let editor = owner.editor_session().unwrap();
+        editor.close();
+        for command in [
+            "get_vslib_status",
+            "get_onnx_status",
+            "get_pitch_analysis_progress",
+            "get_syllable_analysis_progress",
+        ] {
+            let result = dispatch(&editor, command, Value::Null);
+            assert!(
+                result.is_ok(),
+                "{command} 必须在加载闸之前作答（只读探针与时间线是否就绪无关）：{result:?}"
+            );
+        }
+        // 【对照：顺序】"答得出来"只说明它们不碰会话；真正要钉的是它们排在
+        // `ensure_loaded` 闸**之前** —— 那才是"加载窗口里不再刷错误"的机制。
+        let source = include_str!("commands.rs");
+        let gate = source
+            .find("if let Err(error) = session.ensure_loaded(false)")
+            .expect("加载闸必须存在于本文件");
+        for command in [
+            "get_vslib_status",
+            "get_onnx_status",
+            "get_pitch_analysis_progress",
+            "get_syllable_analysis_progress",
+        ] {
+            let at = source
+                .find(&format!("\"{command}\" =>"))
+                .unwrap_or_else(|| panic!("{command} 的匹配臂必须存在"));
+            assert!(
+                at < gate,
+                "{command} 必须排在加载闸之前：排在闸后会在素材准备期间每次轮询都报错"
+            );
+        }
+        drop(model);
     }
 }
 

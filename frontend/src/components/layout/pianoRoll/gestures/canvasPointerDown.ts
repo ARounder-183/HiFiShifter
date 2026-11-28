@@ -28,6 +28,7 @@ import type { ParamBlockPointerDownResult, PointerDeps } from "./pointerDeps";
 import { handleFreehandPointerDown } from "./freehandPointerDown";
 import { handleVibratoPointerDown } from "./vibratoPointerDown";
 import { handleSelectPointerDown } from "./selectPointerDown";
+import { surfaceProfile } from "../../../../services/surfaceProfileStore";
 
 /** 指针按下所需的上下文。 */
 type CanvasPointerDownDeps = Pick<
@@ -623,44 +624,33 @@ export function handleCanvasPointerDown(
     } = { current: null };
 
     /**
-     * 滚动上界：工程末端与**已取数窗口末端**取小。
+     * 滚动上界：**工程末端**。
      *
-     * 【为什么绘制类要额外受窗口约束】`usePianoRollData` 的取数窗口是
-     * "可见区 ± 一个可见时长"，而笔画期间取数被 `liveEditDeferral` 推迟到
-     * pointer-up（换窗口会让正在画的轨迹消失）。滚出窗口后
-     * 提交仍会写进后端，但**画面上什么都不会出现** —— 用户对着空白拖一条
-     * 看不见的线。窗口自带一整个视口宽的余量，因此这个上限足够一次边缘
-     * 滚屏走完一屏，用户感知不到限制。
+     * 【为什么不再按"已取数窗口末端"夹紧】这里曾经是绘制类工具的上界，理由写得很
+     * 直白："笔画期间取数被 `liveEditDeferral` 推迟，滚出窗口后提交仍会写进后端，
+     * 但画面上什么都不会出现 —— 用户对着空白拖一条看不见的线。"
      *
-     * 选择工具不受此限：选区是纯视觉范围，不依赖已取数的曲线。
+     * 那段推理的前半句是**对的**，后半句是补丁：真正的问题是笔画被"窗口下标"
+     * 寻址，于是窗口外的帧既画不出来、提交时还会被写成 0（见 `strokeBuffer`）。
+     * 笔画改成绝对帧缓冲之后，滚出窗口只是"暂时看不见"，新窗口一到就立刻补上，
+     * 提交永远不丢帧 —— 这个夹紧因此失去存在理由，而它本身正是用户报告的
+     * "滚过一定距离后参数线不再更新"里的那个"一定距离"。
+     *
+     * 选择工具与绘制类工具现在共用同一个上界。
      */
-    const maxScrollLeftFor = (limitToLoadedWindow: boolean): number => {
+    const maxScrollLeftFor = (): number => {
         const scroller = scrollerRef.current;
         if (!scroller) return 0;
         const axis = axisFromRefs();
         const nativeOffsetPx = syncTimelineEnabled ? timelineOffsetRef.current : 0;
         const projectEndFrame = Math.max(0, timeToFrame(dynamicProjectSec, framePeriodMs));
-        const projectMax = edgeScrollMaxLeftPx({
+        return edgeScrollMaxLeftPx({
             pxPerSec: axis.pxPerSec,
             framePeriodMs,
             maxFrame: projectEndFrame,
             viewportWidthPx: scroller.clientWidth,
             nativeOffsetPx,
         });
-        if (!limitToLoadedWindow) return projectMax;
-
-        const pv = paramViewRef.current;
-        if (!pv || pv.edit.length === 0) return 0;
-        const stride = Math.max(1, Math.floor(pv.stride));
-        const windowEndFrame = pv.startFrame + (pv.edit.length - 1) * stride;
-        const windowMax = edgeScrollMaxLeftPx({
-            pxPerSec: axis.pxPerSec,
-            framePeriodMs,
-            maxFrame: windowEndFrame,
-            viewportWidthPx: scroller.clientWidth,
-            nativeOffsetPx,
-        });
-        return Math.min(projectMax, windowMax);
     };
 
     const edgeScroll = createEdgeScrollDriver({
@@ -686,7 +676,7 @@ export function handleCanvasPointerDown(
                 },
                 // 上界同为绘制坐标（`edgeScrollMaxLeftPx` 已含 nativeOffset 平移）。
                 // block 已收进 select 族，滚动上界与 range 选择完全同源。
-                getMaxScrollLeft: () => maxScrollLeftFor(toolMode !== "select"),
+                getMaxScrollLeft: () => maxScrollLeftFor(),
                 // ★ 下界必须也是绘制坐标且可为负：开启同步时绘制域是
                 // `[−偏移, 内容宽 − 偏移]`，左侧那片预留的对齐留白是**合法的负区间**。
                 // 传 0 会让"向左滚"每帧都被夹回 0，与内核自己的下界（−偏移）打架 ——
@@ -768,6 +758,93 @@ export function handleCanvasPointerDown(
             )
         ) {
             return;
+        }
+        /*
+         * 触摸：选择工具在**空白处**按下 = 平移视图。
+         *
+         * 【为什么只有这一种组合】单指在参数编辑器里有十几种语义（画线 / 框选 /
+         * 拉伸 / 颤音 / 块拖动），把其中任何一种改成平移都会破坏编辑。而
+         * 「选择工具 + 什么都没命中」这一种情况本来**什么都不做**（松手时只是
+         * 清掉选区），把它改成平移不占用任何既有语义 —— 而它恰好是手机上
+         * 「我想滚一下看看」最自然的起手式。
+         *
+         * 【为什么读能力位而不是 pointerType】触摸屏笔记本同样会发
+         * `pointerType === "touch"`。能力位是后端按形态下发的产品决定，
+         * 桌面为假 ⇒ 这条分支在桌面上根本不存在。
+         */
+        if (
+            e.pointerType === "touch" &&
+            e.button === 0 &&
+            !isStylusLike(e.nativeEvent) &&
+            surfaceProfile().input.two_finger_gesture
+        ) {
+            const scroller = scrollerRef.current;
+            if (scroller) {
+                e.preventDefault();
+                setCanvasCursor("grabbing");
+                const pid = e.pointerId;
+                panRef.current = {
+                    pointerId: pid,
+                    startClientX: e.clientX,
+                    startClientY: e.clientY,
+                    startScrollLeft: scroller.scrollLeft,
+                    startView:
+                        editParam === "pitch"
+                            ? pitchViewRef.current
+                            : (paramViewsRef.current[editParam] ?? { center: 0.5, span: 1 }),
+                    startRectH:
+                        (canvasRef.current?.getBoundingClientRect().height ??
+                            viewSizeRef.current.h) ||
+                        1,
+                };
+                const onMove = (ev: globalThis.PointerEvent) => {
+                    // 触摸没有 buttons 位可读（抬起时是 0），只能按 pointerId 认人。
+                    if (ev.pointerId !== pid) return;
+                    const pan = panRef.current;
+                    if (!pan) return;
+                    const dx = ev.clientX - pan.startClientX;
+                    const dy = ev.clientY - pan.startClientY;
+                    scroller.scrollLeft = Math.max(0, pan.startScrollLeft - dx);
+                    syncScrollLeft(scroller);
+                    const hPx = Math.max(1, pan.startRectH);
+                    const deltaCenter = (dy / hPx) * pan.startView.span;
+                    if (editParam === "pitch") {
+                        setPitchView(
+                            clampViewport("pitch", {
+                                span: pan.startView.span,
+                                center: centerForPanDelta({
+                                    param: editParam,
+                                    directions: paramAxisDirectionsRef.current,
+                                    center: pan.startView.center,
+                                    deltaCenter,
+                                }),
+                            }),
+                        );
+                    } else {
+                        setParamViewport(
+                            editParam,
+                            clampViewport(editParam, {
+                                span: pan.startView.span,
+                                center: pan.startView.center + deltaCenter,
+                            }),
+                        );
+                    }
+                    invalidate();
+                };
+                const onEnd = () => {
+                    panRef.current = null;
+                    setCanvasCursor(getDefaultCanvasCursor());
+                };
+                startPointerGesture({
+                    pointerId: pid,
+                    captureTarget: e.currentTarget,
+                    onMove,
+                    onEnd,
+                    registerEnd: setActivePointerGestureEnd,
+                    clearEnd: clearActivePointerGestureEnd,
+                });
+                return;
+            }
         }
     }
 

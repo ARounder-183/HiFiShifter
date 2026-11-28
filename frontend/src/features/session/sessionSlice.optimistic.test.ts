@@ -271,7 +271,7 @@ test("features/session/sessionSlice.optimistic.test.ts scripted checks", async (
             setClipStateRemote.pending("req-clip-state", {
                 clipId: "clip-a",
                 name: "Renamed",
-                gain: 1.5,
+                takeGain: 1.5,
                 fadeOutShape: 6,
                 fadeOutDir: 0.35,
             }),
@@ -283,18 +283,35 @@ test("features/session/sessionSlice.optimistic.test.ts scripted checks", async (
     }
 
     {
+        // 载荷键名带层 ⇒ 状态字段按层落位：itemGain 只写 `clip_gain`。
+        // 这条断言就是"两个旋钮互为镜像"的客户端一侧回归测试。
+        const next = reducer(
+            createState(),
+            setClipStateRemote.pending("req-clip-state-item", {
+                clipId: "clip-a",
+                itemGain: 4,
+            }),
+        );
+        assertEqual(next.clips[0].clip_gain, 4, "item gain lands on clip_gain");
+        assertEqual(next.clips[0].gain, 1, "item gain never touches the take layer");
+    }
+
+    {
         const next = reducer(
             createState(),
             setClipsStateBulkRemote.pending("req-clips-bulk", {
                 updates: [
                     { clipId: "clip-a", muted: true },
-                    { clipId: "clip-b", gain: 0.5 },
+                    { clipId: "clip-a", itemGain: 2 },
+                    { clipId: "clip-b", takeGain: 0.5 },
                 ],
                 checkpoint: false,
             }),
         );
         assertEqual(next.clips[0].muted, true, "bulk mute updates on pending");
-        assertEqual(next.clips[1].gain, 0.5, "bulk gain updates on pending");
+        assertEqual(next.clips[0].clip_gain, 2, "bulk item gain lands on clip_gain");
+        assertEqual(next.clips[0].gain, 1, "bulk item gain never touches the take layer");
+        assertEqual(next.clips[1].gain, 0.5, "bulk take gain updates on pending");
     }
 
     {

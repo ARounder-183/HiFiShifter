@@ -52,6 +52,18 @@ export interface LogFolderResult {
      * 调用系统 shell，失败时仍要把路径交给用户（可选中、可复制），不能假装打开成功。
      */
     opened?: boolean;
+    /**
+     * 文件日志当前是否在写。
+     *
+     * 【为什么要报】目录存在不等于里面有日志：用户可能把「日志详细程度」选成了
+     * 「无」，此时后端一个字节都不写。只给路径会让他在空文件夹里找半天。
+     * 插件侧的 `open_log_folder` 不返回这个字段（那里的日志始终开启）。
+     */
+    fileEnabled?: boolean;
+    /** 日志子系统自检是否健康（目录解析 / 文件打开失败时为 false）。 */
+    loggingHealthy?: boolean;
+    /** 日志子系统最近一次失败原因（健康时为 `null`）。 */
+    lastError?: string | null;
     error?: string;
 }
 

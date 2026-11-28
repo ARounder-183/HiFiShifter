@@ -77,7 +77,7 @@ export interface WarpClipGeometry {
     readonly id: string;
     readonly startSec: number;
     readonly lengthSec: number;
-    readonly gain?: number | null;
+    readonly amplitudeGain?: number | null;
     readonly sourceStartSec?: number | null;
     readonly sourceEndSec?: number | null;
     readonly playbackRate?: number | null;
@@ -103,7 +103,7 @@ export interface WarpClipOrigin {
     readonly clipId: string;
     readonly startSec: number;
     readonly lengthSec: number;
-    readonly gain: number;
+    readonly amplitudeGain: number;
     readonly sourceStartSec: number;
     readonly sourceEndSec: number;
     readonly playbackRate: number;
@@ -139,7 +139,7 @@ export interface ClipConsumption {
     readonly rate: number;
     /** 消费锚点（源帧）：`T = startF` 时播放的源位置。 */
     readonly anchorF: number;
-    readonly gain: number;
+    readonly amplitudeGain: number;
     /**
      * **回绕周期**（时间线帧数）：`> 0` = 该 clip 的基线是时间线帧的**周期函数**，
      * 周期为本值；`0` = 非周期（非 Loop，或 Loop 但媒体时长 `D` 未知）。
@@ -299,6 +299,7 @@ function finiteOr(value: number | null | undefined, fallback: number): number {
 export function resolveClipConsumption(
     clip: WarpClipGeometry,
     fps: number,
+    amplitudeGainOverride?: number,
 ): ClipConsumption | null {
     if (!(fps > 0)) return null;
     const startSec = Math.max(0, finiteOr(clip.startSec, 0));
@@ -308,7 +309,7 @@ export function resolveClipConsumption(
 
     const startF = Math.round(startSec * fps);
     const lenF = Math.round(lengthSec * fps);
-    const gain = finiteOr(clip.gain, 1);
+    const amplitudeGain = finiteOr(amplitudeGainOverride ?? clip.amplitudeGain, 1);
     const sourceStartSec = finiteOr(clip.sourceStartSec, 0);
     const sourceEndSec = finiteOr(clip.sourceEndSec, sourceStartSec + lengthSec * rate);
 
@@ -349,7 +350,7 @@ export function resolveClipConsumption(
                     lenF,
                     rate: -rate,
                     anchorF: Math.round(anchorRSec * fps) - 1,
-                    gain,
+                    amplitudeGain,
                     wrapFrames,
                     exact: true,
                 };
@@ -359,7 +360,7 @@ export function resolveClipConsumption(
                 lenF,
                 rate,
                 anchorF: Math.round(sourceStartSec * fps),
-                gain,
+                amplitudeGain,
                 wrapFrames,
                 exact: true,
             };
@@ -370,7 +371,7 @@ export function resolveClipConsumption(
             lenF,
             rate,
             anchorF: sourceStartSec * fps,
-            gain,
+            amplitudeGain,
             wrapFrames: 0,
             exact: false,
         };
@@ -385,7 +386,7 @@ export function resolveClipConsumption(
             lenF,
             rate: -rate,
             anchorF: winStartSec * fps + (lenF - 1) * rate,
-            gain,
+            amplitudeGain,
             wrapFrames: 0,
             exact: true,
         };
@@ -396,20 +397,24 @@ export function resolveClipConsumption(
         lenF,
         rate,
         anchorF: sourceStartSec * fps,
-        gain,
+        amplitudeGain,
         wrapFrames: 0,
         exact: true,
     };
 }
 
-function readConsumption(clip: WarpClipGeometry, fps: number): ClipConsumption | null {
+function readConsumption(
+    clip: WarpClipGeometry,
+    fps: number,
+    amplitudeGainOverride?: number,
+): ClipConsumption | null {
     const startSec = Math.max(0, finiteOr(clip.startSec, 0));
     const lengthSec = Math.max(0, finiteOr(clip.lengthSec, 0));
     const rate = finiteOr(clip.playbackRate, 1);
     if (!(rate > 0)) return null;
     // 时长/速率都合法才继续；`resolveClipConsumption` 负责其余口径。
     if (!Number.isFinite(startSec + lengthSec)) return null;
-    return resolveClipConsumption(clip, fps);
+    return resolveClipConsumption(clip, fps, amplitudeGainOverride);
 }
 
 /** 曲线重采样的帧映射（逐字镜像后端 `resample_curve` 的下标公式）。 */
@@ -439,6 +444,14 @@ export function createLoudnessGeometryWarp(args: {
     clips: readonly WarpClipGeometry[];
     framePeriodMs: number;
     lockParamLines: boolean;
+    /**
+     * 当前 clip 的波形幅度读取器（abs(item × take)）。
+     *
+     * 为什么必须由调用方给：Redux ClipInfo.gain 是 take 投影，不是可听幅度；
+     * 若这里直接读它，item 增益 ≠ 1 时拖拽期基线会被按错误倍率缩放。调用方传
+     * clipWaveformGain 即与峰值条目/后端 dyn_orig 同口径。
+     */
+    amplitudeGainOf?: (clip: WarpClipGeometry) => number;
 }): LoudnessGeometryWarp | null {
     // 锁定时编辑跟着素材走，预览可以一起搬；不锁定时编辑钉在工程位置，只搬基线。
     const movesUserCurves = args.lockParamLines;
@@ -459,7 +472,11 @@ export function createLoudnessGeometryWarp(args: {
         const before = originById.get(clip.id);
         if (before === undefined) continue;
         const oldC = readConsumption(before, fps);
-        const newC = readConsumption(clip, fps);
+        const newC = readConsumption(
+            clip,
+            fps,
+            args.amplitudeGainOf?.(clip) ?? finiteOr(clip.amplitudeGain, 1),
+        );
         if (oldC === null || newC === null) continue;
         if (newC.lenF <= 0) continue;
 
@@ -469,9 +486,10 @@ export function createLoudnessGeometryWarp(args: {
         const oldEndF = oldC.startF + oldC.lenF;
 
         const gainScale =
-            Math.abs(oldC.gain) > 1e-6 &&
-            Math.abs(newC.gain - oldC.gain) > GAIN_EPSILON * Math.abs(oldC.gain)
-                ? newC.gain / oldC.gain
+            Math.abs(oldC.amplitudeGain) > 1e-6 &&
+            Math.abs(newC.amplitudeGain - oldC.amplitudeGain) >
+                GAIN_EPSILON * Math.abs(oldC.amplitudeGain)
+                ? newC.amplitudeGain / oldC.amplitudeGain
                 : 1;
 
         // 基线仿射：g(f) = startF_old + (anchor'_new − anchor_old + (f − startF_new)·rate_new) / rate_old

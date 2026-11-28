@@ -117,6 +117,7 @@ export interface TimelineClip {
         min: number;
         max: number;
     };
+    /** Take 层增益（active take 投影）；**不是** Clip/item 增益。 */
     gain?: number;
     muted?: boolean;
     source_start_sec?: number;
@@ -418,6 +419,16 @@ export interface TimelineResult {
     clips: TimelineClip[];
     created_clip_ids?: string[];
     created_track_ids?: string[];
+    /**
+     * 宿主**已经建好 item、但 ARA 还没认领**的那一次导入。
+     *
+     * 【为什么要带回来】回执的成功判据是「item 存在」；`import_pending` 只回答
+     * 「要不要先画占位」。三者一起让前端把回执与随后的 `import_ready` 事件对上，
+     * 而不必按位置猜是哪一次导入。
+     */
+    imported_item?: string;
+    imported_clip_id?: string;
+    import_pending?: boolean;
     selected_track_id: string | null;
     selected_clip_id: string | null;
     bpm: number;

@@ -584,6 +584,20 @@ pub struct BlockEvidence {
     ///
     /// 有切分时这是**第一段**的起点；逐段几何以 `split` 为准。
     pub position: i64,
+    /// 本块的**工程位置**（工程域）；读快照与 UI 播放头用它。
+    ///
+    /// 【为什么与 `position` 分开】钉住喂入流里两者不相等：`position` 是磁带帧号
+    /// （从 0 起），`project_position` 是这一帧在工程里的位置（片段在 28.000 s ⇒
+    /// 1 344 000）。共用一个数就是"前 N 秒直通、后段才出声"。
+    pub project_position: i64,
+    /// `project_position` 是否有意义（有映射 / 不是钉住流）。
+    pub project_position_valid: bool,
+    /// 没有工程位置时的原因（`project_position_valid` 为假时才有意义）。
+    ///
+    /// 【为什么输出仲裁需要它】「没有位置」有两种：我们还没算出来（缺陷），与这一块
+    /// 按设计就不该有（数字静音 / 128 帧的过短块）。前者的直通要报警，后者是唯一正确
+    /// 的输出 —— 把两者压成同一个 `false`，现场就会看见一串长得像老缺陷的 WARN。
+    pub anchor_absence: AnchorAbsence,
     pub frames: usize,
     pub playing: bool,
     pub recording: bool,
@@ -651,6 +665,9 @@ impl Default for BlockEvidence {
         Self {
             stream: ProcessStream::Realtime,
             position: 0,
+            project_position: 0,
+            project_position_valid: true,
+            anchor_absence: AnchorAbsence::None,
             frames: 0,
             playing: false,
             recording: false,

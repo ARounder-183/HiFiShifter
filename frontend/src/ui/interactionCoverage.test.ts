@@ -31,14 +31,15 @@ const EXEMPT_MARKER = "hs-interaction-exempt";
 /**
  * 已审计并接受的豁免清单。
  *
- * 这四个文件的共同点：都是**紧凑 chrome**（主工具栏 / 标尺行 / 淡变面板 /
+ * 这三个文件的共同点：都是**紧凑 chrome**（主工具栏 / 标尺行 /
  * 参数编辑器工具栏），控件尺寸与行高耦合、需要内联底色，而能力层原语是表单尺寸。
  * 它们的滚轮与精细调整接线**已经完备** —— 豁免的理由是"原语不适用"，
  * 不是"能力缺失"。
  */
 const ACCEPTED_EXEMPTIONS = [
-    join("src", "components", "layout", "ActionBar.tsx"),
-    join("src", "components", "layout", "timeline", "FadeContextMenu.tsx"),
+    // 主工具栏的渲染体在 `toolbar/ToolbarStrip.tsx`（桌面与移动共用同一份）；
+    // `ActionBar.tsx` 只剩一行薄壳，不再含任何取值控件。
+    join("src", "components", "layout", "toolbar", "ToolbarStrip.tsx"),
     join("src", "components", "layout", "timeline", "TempoMapRulerRow.tsx"),
     join("src", "components", "layout", "pianoRoll", "panel", "ParamToolbar.tsx"),
 ];
@@ -270,11 +271,18 @@ describe("菜单表面必须走组合壳", () => {
         ).toEqual([]);
     });
 
-    test("豁免的组合菜单面仍在共享键盘模型与时间轴契约", () => {
-        // 豁免的前提是"它们做对了"，这里把前提钉住。
+    test("豁免的组合菜单面仍在共享键盘模型、滚动模型与时间轴契约里", () => {
+        /*
+         * 豁免的前提是"它们做对了"，这里把前提钉住。
+         *
+         * 【为什么现在多了一条 MenuScrollScope】内边距与滚动提示行都搬到了那一层
+         * （壳的 padding 必须是 0，否则 sticky 提示行会内缩）。漏掉它不会报错 ——
+         * 菜单只是没有内边距、也没有"还能往下翻"的提示。
+         */
         for (const file of MENU_SURFACE_ALLOWED.slice(1)) {
             const source = readFileSync(file, "utf8");
             expect(source, `${file} 丢了共享键盘模型`).toContain("useMenuKeyboard");
+            expect(source, `${file} 丢了共享滚动模型`).toContain("MenuScrollScope");
             expect(source, `${file} 丢了时间轴浮动菜单契约`).toContain("data-hs-floating-menu");
         }
     });

@@ -1,5 +1,5 @@
 //! 真实ARA文档共享原编辑命令actor：UI只排队，分析/文件/离线渲染均不在音频或UI回调执行。
-use crate::render::document::DocumentSession;
+use crate::render::document::{ApplyOutcome, DocumentSession};
 use crate::sync::MutexExt;
 use hifishifter_kernel::editor::{
     history,
@@ -47,6 +47,26 @@ const RENDER_RETRY_BACKOFF: Duration = Duration::from_secs(5);
 
 /// 预算内的快速重试间隔。
 const RENDER_RETRY_INTERVAL: Duration = Duration::from_millis(150);
+
+/// 波形授权判定的三个答案（见 `EditorSession::check_source`）。
+///
+/// 【为什么必须三态】`Ready` 与 `Denied` 之间那一段不是错误，是**时序**：我们刚
+/// 导入的源要等宿主建 region 才被授权。把它报成拒绝，前端就只能永久记失败。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SourceCheck {
+    /// 已授权，可以读。
+    Ready,
+    /// 这是我们自己刚导入、宿主还没授权的那条源：**尚未就绪**，按空载荷回答。
+    NotYetAuthorized,
+    /// 与本会话的任何一个宿主 item 都无关 —— 安全边界，照旧拒绝。
+    Denied,
+}
+
+/// 一条待定导入等多久还没被 ARA 认领，就该告诉用户"宿主的 Item 建了，音频没来"。
+///
+/// 【为什么是 60 秒】现场 100~300 ms 就追上了；60 s 只会在"用户已经在宿主里撤销了
+/// 这次导入"这类场合触发。它刻意**不改回执、不删占位** —— 那条 item 确实在宿主里。
+const IMPORT_STALL_AFTER: Duration = Duration::from_secs(60);
 
 /// 分析 pending 的**绝对**上限：超过它就**不再等这条原线**，本次渲染直接放行。
 ///
@@ -161,14 +181,14 @@ impl RetryState {
             || error == "Conflict: workspace changed during automatic apply"
         {
             self.streak = 0;
-            *session.render_error.lock_or_recover() = None;
+            session.clear_render_error();
             return RenderAction::Retry(RENDER_RETRY_INTERVAL);
         }
         self.streak = self.streak.saturating_add(1);
         // 预算内：快速重试（宿主的编辑事务通常会在这 1.2 秒内收口）。
         if self.streak < RENDER_RETRY_BUDGET {
             if error != "automatic apply superseded" {
-                *session.render_error.lock_or_recover() = Some(error);
+                session.note_render_error(RenderErrorCode::RenderFailed, &error, error.clone());
             }
         } else {
             // 预算耗尽：**退避**，不是放弃（见 `RENDER_RETRY_BACKOFF`）。错误读数仍然写出去，
@@ -180,7 +200,7 @@ impl RetryState {
                     RENDER_RETRY_BACKOFF
                 );
             }
-            *session.render_error.lock_or_recover() = Some(error);
+            session.note_render_error(RenderErrorCode::RenderFailed, &error, error.clone());
         }
         render_retry_action(self.streak)
     }
@@ -390,7 +410,7 @@ struct RenderTask {
     ticket: u64,
     generation: u64,
     cancel: Arc<AtomicBool>,
-    reply: mpsc::Receiver<Result<(), String>>,
+    reply: mpsc::Receiver<Result<ApplyOutcome, String>>,
     worker: std::thread::JoinHandle<()>,
 }
 impl RenderTask {
@@ -398,7 +418,7 @@ impl RenderTask {
         ticket: u64,
         generation: u64,
         cancel: Arc<AtomicBool>,
-        work: impl FnOnce() -> Result<(), String> + Send + 'static,
+        work: impl FnOnce() -> Result<ApplyOutcome, String> + Send + 'static,
     ) -> Result<Self, String> {
         let (sender, reply) = mpsc::sync_channel(1);
         let worker = std::thread::Builder::new()
@@ -443,6 +463,48 @@ impl RegisteredView {
     fn retire(&self) {
         self.sink.closed.store(true, Ordering::Release);
     }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderErrorCode {
+    /// 连续一段时间没有任何可渲染的 clip（宿主发布了一份空模型）。
+    NoRenderableClip,
+    /// 一次编辑没能落上（重放预算耗尽 / 不可重放的冲突）。
+    EditNotApplied,
+    /// 渲染本身失败（预算、发布、合成）。
+    RenderFailed,
+}
+
+impl RenderErrorCode {
+    fn code(self) -> u32 {
+        match self {
+            Self::NoRenderableClip => crate::editor::errors::NO_RENDERABLE_CLIP,
+            Self::EditNotApplied => crate::editor::errors::EDIT_NOT_APPLIED,
+            Self::RenderFailed => crate::editor::errors::RENDER_FAILED,
+        }
+    }
+}
+
+/// 状态栏一句最多多长。
+///
+/// 【为什么是 120】状态栏是一行；超过它的文案会把后面的按钮挤掉，而用户本来就
+/// 读不完一屏字。判据在产生点统一执行，前端不需要再截。
+const RENDER_ERROR_SHORT_MAX: usize = 120;
+
+/// 这条短句是不是"新的一条"（[' + BT + 'EditorSession::note_render_error' + BT + '] 的去重判据）。
+///
+/// 【为什么抽成纯函数】"同一条错误只留一行日志"靠的就是它；埋在锁里就只能靠读代码相信。
+fn render_error_is_new(previous: Option<&str>, short: &str) -> bool {
+    previous != Some(short)
+}
+
+/// 把一句话压到状态栏能显示的长度（按**字符**截，不切坏 UTF-8）。
+fn short_render_text(text: &str) -> String {
+    if text.chars().count() <= RENDER_ERROR_SHORT_MAX {
+        return text.to_owned();
+    }
+    let mut short: String = text.chars().take(RENDER_ERROR_SHORT_MAX - 1).collect();
+    short.push('…');
+    short
 }
 #[derive(Default)]
 struct Loaded {
@@ -600,6 +662,20 @@ impl Default for PlayheadGaps {
     }
 }
 
+/// GUI 线程可读的一段片段（见 EditorSession::ui_clips）。
+///
+/// 【为什么不是整份 TimelineState】宿主线程只需要四个数 + 一个身份。整份时间线
+/// 带着参数曲线数组（几十 MB），克隆一次就是一次卡顿 —— 而这条索引是**每次发布**
+/// 都要重建的。
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct UiClip {
+    pub(crate) id: String,
+    pub(crate) track_id: String,
+    pub(crate) start_sec: f64,
+    pub(crate) length_sec: f64,
+    pub(crate) active_take_id: Option<String>,
+}
+
 pub struct EditorSession {
     /// 时间线/参数来源（[`SessionBacking`]）。
     ///
@@ -700,6 +776,18 @@ pub struct EditorSession {
     /// 不该排在那后面。写入点只有 `publish_timeline` / `load_capture_timeline` /
     /// `ensure_loaded` 三处。
     clip_count: AtomicU64,
+    /// GUI 线程可读的片段索引（**锁只持有一次 `Arc` 交换的时间**）。
+    ///
+    /// 【为什么需要它】宿主 UI 线程上有两条命令需要"当前有哪些片段"：
+    /// `close_track_gaps`（算位移）与 `rename_clip_take`（判断是不是 active take）。
+    /// 它们此前直接取 `timeline` —— 而那把锁会被会话 actor 在整份投影期间持有。
+    /// 宿主线程一旦排在那后面，WebView2 就不再被泵消息，而 actor 的投递又需要它泵：
+    /// 这就是现场那条"导入之后宿主未响应 + `plugin_get_apply_state` 超时"的 ABBA。
+    ///
+    /// 【为什么是 `Mutex<Arc<Vec<..>>>` 而不是直接给 `timeline` 加锁助手】这里要守的
+    /// 不是"不取任何锁"，而是**不等待长临界区**。写方只在发布时构造一次索引，读方
+    /// 只克隆一个 `Arc` —— 两个方向的持有时间都是纳秒级，且**永不跨** `post_message`。
+    ui_clips: Mutex<Arc<Vec<UiClip>>>,
     /// 已经**放弃等待**原线分析的根轨道（见 [`RetryState::classify`] 的上限分支）。
     ///
     /// 【为什么需要这份状态】等待本身是对的（原线是渲染的输入之一），但等待必须**有界**：
@@ -733,9 +821,26 @@ pub struct EditorSession {
     /// 指纹把"要不要通知"从"谁调用了"换成"内容变了没有"。
     notified_fingerprint: Mutex<Option<u64>>,
     ui_geometry_version: AtomicU64,
+    /// 上一次把**呈现代次**（`DocumentSession::presentation_revision`）投影进
+    /// `self.timeline` 时的读数。
+    ///
+    /// 【为什么与 `ui_geometry_version` 并存】两者回答不同的问题：前者是"宿主清单的
+    /// 几何变了没有"，后者是"编辑器该看的内容变了没有"。装配发布、源状态变化、宿主
+    /// 写回后的 fade 重新投影都只推进后者 —— 只看几何会让这些变化被"早退"吞掉，
+    /// 用户看到的就是"新粘贴的 Clip 一直等宿主音频，重开工程才恢复"。
+    ui_presentation_version: AtomicU64,
     project_duration: AtomicU64,
     pub(super) error: Mutex<Option<String>>,
+    /// 状态栏红字（**短句**，≤ 120 字符）。写入只经 `note_render_error`。
+    ///
+    /// 【为什么必须收口】它的读者是 4 Hz 的 `plugin_get_apply_state`，而那个轮询
+    /// 失败才写日志。于是三处直接赋值 = 红字在屏幕上存在 250 ms ~ 1 s、用户看不完、
+    /// 日志里查不到、下一轮被清空 —— 「一闪而过的长报错」是结构性的，不是手慢。
     render_error: Mutex<Option<String>>,
+    /// 上面那条错误的**协议码**（`hifishifter_host_link::error_code`，只增不改）。
+    render_error_code: Mutex<Option<u32>>,
+    /// 上面那条错误的**全量诊断**：只进日志与 tooltip，绝不进状态栏主行。
+    render_error_detail: Mutex<Option<String>>,
     render_requested: AtomicBool,
     /// `rearm_render` 被调用的累计次数（诊断/回归读数；见该字段的说明）。
     ///
@@ -794,6 +899,22 @@ pub struct EditorSession {
     /// `record_prepared`），而 `rendering_active` 要等作业真正结束才落。没有阶段名时，
     /// 那一段只能显示成"渲染中 100%"—— 一句会停留上百毫秒的假话。
     render_stage: AtomicU8,
+    /// **状态快照的叶子缓存**：`plugin_get_apply_state` 唯一的读源。
+    ///
+    /// 【为什么需要它】这条命令每 250 ms 由 GUI 线程轮询一次，而 `state()` 要取
+    /// `timeline`、`render_task` 与文档侧的多张表。只要 actor 在某个命令里持着
+    /// `timeline` 锁、同时正在向 WebView 投递，GUI 线程就卡在那把锁上；而 actor 的
+    /// 投递又需要 GUI 线程泵消息 —— 这就是 ABBA。现场表现是状态栏红条
+    /// `BackendInvokeError: Backend invoke failed: plugin:plugin_get_apply_state`，
+    /// 而用户此刻什么都没做错。
+    ///
+    /// 【为什么是"算完之后再存"而不是"读的时候现算"】一个只读状态命令没有理由和编辑
+    /// 命令争同一把时间线锁。把计算留在**唯一本来就要算它的地方**（actor 每次命令收尾
+    /// 的 `emit_state`），GUI 只做一次 `Arc` 克隆。
+    ///
+    /// 【为什么它不参与锁序】写入方在**算完之后**才取这把锁，读方只克隆一个 `Arc`。
+    /// 没有任何代码在持有别的锁时取它，也没有任何代码在持有它时取别的锁 —— 它是叶子。
+    apply_cache: std::sync::RwLock<Option<std::sync::Arc<Value>>>,
     closed: AtomicBool,
     pub(super) suppress_history: AtomicBool,
     /// **上一次采纳过的**宿主编辑器视图选择（A5），用于与宿主的新选择比对。
@@ -837,6 +958,21 @@ impl Drop for EditorSession {
             }
         }
     }
+}
+
+/// 一次淡变发布的读数（见 [`EditorSession::fade_readout`]）。
+///
+/// 【为什么是一个显式的值】它要跨出 `self.timeline` 的作用域之后才写进日志 ——
+/// `emit_limited_key` 自己有一把锁，而在时间线作用域里再取一把锁是这个仓库踩过两次
+/// 的坑（见 `hifishifter_plugin_core::sync` 的模块文档）。
+struct FadeReadout {
+    covered: usize,
+    expected: usize,
+    clips: usize,
+    min_in: f64,
+    min_out: f64,
+    min_auto_in: f64,
+    min_auto_out: f64,
 }
 
 impl EditorSession {
@@ -1214,6 +1350,7 @@ impl EditorSession {
             revision_bumps_analysis: AtomicU64::new(0),
             last_revision_report: Mutex::new(None),
             clip_count: AtomicU64::new(0),
+            ui_clips: Mutex::new(Arc::new(Vec::new())),
             analysis_abandoned: Mutex::new(std::collections::BTreeSet::new()),
             auto_pitch_write: Mutex::new(AutoPitchWrite::default()),
             suppress_auto_pitch_write: AtomicBool::new(false),
@@ -1223,9 +1360,12 @@ impl EditorSession {
             host_version: AtomicU64::new(0),
             notified_fingerprint: Mutex::new(None),
             ui_geometry_version: AtomicU64::new(0),
+            ui_presentation_version: AtomicU64::new(0),
             project_duration: AtomicU64::new(0),
             error: Mutex::new(None),
             render_error: Mutex::new(None),
+            render_error_code: Mutex::new(None),
+            render_error_detail: Mutex::new(None),
             render_requested: AtomicBool::new(false),
             rearm_requests: AtomicU64::new(0),
             bypass_gate_logged: AtomicU8::new(0),
@@ -1239,6 +1379,7 @@ impl EditorSession {
             render_progress_ticket: AtomicU64::new(0),
             render_progress_tracked: AtomicBool::new(false),
             render_stage: AtomicU8::new(Stage::Idle.encode()),
+            apply_cache: std::sync::RwLock::new(None),
             closed: AtomicBool::new(false),
             suppress_history: AtomicBool::new(false),
             host_selection: Mutex::new(None),
@@ -1252,6 +1393,9 @@ impl EditorSession {
             .map_err(|e| format!("create editor command worker: {e}"))?;
         *session.worker.lock_or_recover() = Some(worker);
         super::events::register(&session);
+        // 【为什么创建时就发布一次】状态栏的第一拍轮询可能早于任何命令；缓存空着
+        // 会答 `busy`（正确但没必要），而这一份就是真实的初始读数。
+        session.publish_apply_state();
         Ok(session)
     }
 
@@ -1328,6 +1472,30 @@ impl EditorSession {
     /// 已发布片段数；健康探活/状态栏用，不取时间线锁。
     pub(crate) fn clip_count(&self) -> u64 {
         self.clip_count.load(Ordering::Acquire)
+    }
+
+    /// 重建并发布 GUI 线程可读的片段索引。
+    ///
+    /// 【调用点】凡是"时间线内容可能变了"的发布点。多调一次只是重建一份几百字节的
+    /// 索引；漏调一次的表现是"关闭间隙算错位 / 改名说不是 active take"。
+    fn publish_ui_clips(&self, timeline: &hifishifter_kernel::state::TimelineState) {
+        let clips = timeline
+            .clips
+            .iter()
+            .map(|clip| UiClip {
+                id: clip.id.clone(),
+                track_id: clip.track_id.clone(),
+                start_sec: clip.start_sec,
+                length_sec: clip.length_sec,
+                active_take_id: clip.active_take_id.clone(),
+            })
+            .collect::<Vec<_>>();
+        *self.ui_clips.lock_or_recover() = Arc::new(clips);
+    }
+
+    /// GUI 线程可读的片段索引快照（**不会等待投影**）。
+    pub(crate) fn ui_clips(&self) -> Arc<Vec<UiClip>> {
+        self.ui_clips.lock_or_recover().clone()
     }
 
     /// 时间线上是否有**可保存的用户内容**（不要求 `is_loaded`）。
@@ -1824,11 +1992,29 @@ impl EditorSession {
                         && generation == session.generation.load(Ordering::Acquire);
                     if current {
                         match result {
-                            Ok(()) => {
+                            Ok(ApplyOutcome::Published) => {
                                 session.applied.store(generation, Ordering::Release);
                                 session.render_requested.store(false, Ordering::Release);
-                                *session.render_error.lock_or_recover() = None;
+                                session.clear_render_error();
                                 retry.rearm();
+                            }
+                            Ok(ApplyOutcome::Nothing { report }) => {
+                                // 【不写 `applied`】宿主这一瞬发布的是一份空模型（拖动 clip 时
+                                // 每几百毫秒一次）。写下去就等于"这一代处理完了"，而真正的内容
+                                // 还没到 —— 下一轮重试才是把它接住的那只手。
+                                if let Some(streak) = report {
+                                    // 连续为空跨过预算（10 s）：这一次值得说给用户听。
+                                    // 短句可行动，长句留给日志与 tooltip。
+                                    session.note_render_error(
+                                        RenderErrorCode::NoRenderableClip,
+                                        "No audio reached the renderer for 10 s; the host is publishing an empty timeline",
+                                        format!(
+                                            "no renderable clip reached the renderer for {} ms ({} empty rounds); the host published an empty model",
+                                            streak.elapsed_ms, streak.rounds
+                                        ),
+                                    );
+                                }
+                                deadline = Some(Instant::now() + Duration::from_millis(150));
                             }
                             Err(error) => {
                                 let RenderAction::Retry(delay) = retry.classify(&session, error);
@@ -2114,7 +2300,7 @@ impl EditorSession {
             render.cancel.store(true, Ordering::Release);
         }
     }
-    fn complete_render(&self) -> Option<(u64, u64, bool, Result<(), String>)> {
+    fn complete_render(&self) -> Option<(u64, u64, bool, Result<ApplyOutcome, String>)> {
         let mut task = self.render_task.lock_or_recover();
         let current = task.as_ref()?;
         let result = match current.reply.try_recv() {
@@ -2242,7 +2428,7 @@ impl EditorSession {
             // （见 `rearm_render`），所以这里不是在"假装成功"。
             self.applied.store(generation, Ordering::Release);
             self.render_requested.store(false, Ordering::Release);
-            *self.render_error.lock_or_recover() = None;
+            self.clear_render_error();
             self.emit_state();
             return Ok(None);
         }
@@ -2436,7 +2622,7 @@ impl EditorSession {
             self.applied
                 .store(self.generation.load(Ordering::Acquire), Ordering::Release);
             self.render_requested.store(false, Ordering::Release);
-            *self.render_error.lock_or_recover() = None;
+            self.clear_render_error();
             self.emit_state();
             return Ok(());
         }
@@ -2461,7 +2647,7 @@ impl EditorSession {
         let worker = RenderTask::spawn(ticket, generation, cancel, move || {
             owner.capture_prepare_job(job_cancel.clone())?;
             if current.closed.load(Ordering::Acquire) {
-                return Ok(());
+                return Ok(ApplyOutcome::Published);
             }
             if current.submitted.load(Ordering::Acquire) != ticket
                 || current.generation.load(Ordering::Acquire) != generation
@@ -2470,7 +2656,7 @@ impl EditorSession {
                 current.render_requested.store(true, Ordering::Release);
                 return Err("capture render superseded".into());
             }
-            Ok(())
+            Ok(ApplyOutcome::Published)
         })?;
         *self.render_task.lock_or_recover() = Some(worker);
         Ok(())
@@ -2485,14 +2671,16 @@ impl EditorSession {
         let Some((document, _generation)) = self.prepare_apply()? else {
             return Ok(());
         };
-        document.apply_workspace_edits_with_progress(
-            self.analysis_cancel.clone(),
-            || {
-                !self.closed.load(Ordering::Acquire)
-                    && self.submitted.load(Ordering::Acquire) == ticket
-            },
-            progress,
-        )
+        document
+            .apply_workspace_edits_with_progress(
+                self.analysis_cancel.clone(),
+                || {
+                    !self.closed.load(Ordering::Acquire)
+                        && self.submitted.load(Ordering::Acquire) == ticket
+                },
+                progress,
+            )
+            .map(|_| ())
     }
     /// 音高和气声等处理器效果都依赖完成的原线；纯混音/禁用算法不受此门禁阻塞。
     ///
@@ -2585,7 +2773,11 @@ impl EditorSession {
         }
         for root in &roots {
             hifishifter_kernel::pitch_analysis::maybe_schedule_pitch_orig(&analysis, root);
-            hifishifter_kernel::pitch_analysis::maybe_schedule_dyn_orig(&analysis, root);
+            hifishifter_kernel::pitch_analysis::maybe_schedule_dyn_orig(
+                &analysis,
+                root,
+                hifishifter_kernel::gain::GainScope::HostOwned,
+            );
         }
         // 布局键必须取自**这一轮组装所用的**时间线：它与文档侧的键只差命名空间前缀，
         // 而 `build_root_pitch_layout_key` 已经把前缀剥掉（见 `clip_layout_identity`）。
@@ -2776,6 +2968,7 @@ impl EditorSession {
                 root.hash(&mut audio);
                 params.pitch_assembly_partial.hash(&mut audio);
             }
+            self.publish_ui_clips(&timeline);
             (timeline.clips.len(), audio.finish())
         };
         self.clip_count.store(clip_count as u64, Ordering::Release);
@@ -3109,6 +3302,7 @@ impl EditorSession {
         }
         self.apply_host_selection(&mut timeline);
         self.publish_duration(timeline.project_sec);
+        self.publish_ui_clips(&timeline);
         self.clip_count
             .store(timeline.clips.len() as u64, Ordering::Release);
         for owner in document.renderer_owners() {
@@ -3136,7 +3330,7 @@ impl EditorSession {
             view: Some(view),
         };
         *self.error.lock_or_recover() = None;
-        *self.render_error.lock_or_recover() = None;
+        self.clear_render_error();
         // 【不要在这里宣告"音频已应用"】`applied` 的语义是"这一代的**音频**已经发布"，
         // 而本函数只装载了编辑/时间线状态。旧实现在这里直接写 `applied = generation`，
         // 于是任何一次重载（宿主回写、焦点切换、模型回调）都会把"还没重算的音频"
@@ -3145,6 +3339,7 @@ impl EditorSession {
         self.peaks.lock_or_recover().clear();
         // snapshot返回后UI缓存可能再次更新，强制下一轮按短事务版本同步，不能吞掉该变化。
         self.ui_geometry_version.store(0, Ordering::Release);
+        self.ui_presentation_version.store(0, Ordering::Release);
         self.complete_cached_analysis();
         self.schedule_analysis();
         // 【只有 GUI 真的会看到区别时才请求合成、才通知】见 `notified_fingerprint`。
@@ -3360,7 +3555,7 @@ impl EditorSession {
             view: None,
         };
         *self.error.lock_or_recover() = None;
-        *self.render_error.lock_or_recover() = None;
+        self.clear_render_error();
         self.peaks.lock_or_recover().clear();
         self.complete_cached_analysis();
         self.schedule_analysis();
@@ -3373,18 +3568,99 @@ impl EditorSession {
         Ok(())
     }
 
+    /// 这一轮发出去的淡变最小值（`HFS_FADE_TRACE` 的读数）。
+    fn fade_readout(
+        timeline: &TimelineState,
+        projection: &crate::editor::workspace::FadeProjection,
+    ) -> FadeReadout {
+        let mut readout = FadeReadout {
+            covered: projection.covered(),
+            expected: projection.expected,
+            clips: timeline.clips.len(),
+            min_in: f64::INFINITY,
+            min_out: f64::INFINITY,
+            min_auto_in: f64::INFINITY,
+            min_auto_out: f64::INFINITY,
+        };
+        for clip in &timeline.clips {
+            readout.min_in = readout.min_in.min(clip.fade_in_sec);
+            readout.min_out = readout.min_out.min(clip.fade_out_sec);
+            readout.min_auto_in = readout.min_auto_in.min(clip.auto_fade_in_sec);
+            readout.min_auto_out = readout.min_auto_out.min(clip.auto_fade_out_sec);
+        }
+        readout
+    }
+
+    /// 两行读数：这一轮覆盖了几条 clip、发出去的最小淡变是多少。
+    ///
+    /// 【为什么必须有第一行】用户说「闪了一下」，而「我们发了一帧 0」与「界面自己闪」
+    /// 在日志里完全同形。这一行把「这一轮到底有没有几何」变成可读的，于是下一次现场
+    /// 只需看一眼就能排除掉一半假设。
+    ///
+    /// 【为什么两档】全零覆盖在 ARA-only 宿主上是**常态**（那里根本没有原生几何，一条
+    /// 都投不出来），把它报成 WARN 会让这些宿主每次刷新刷一行。部分覆盖才是本轮缺陷的
+    /// 签名：几何明明有，却只覆盖了一部分。
+    fn emit_fade_readout(readout: FadeReadout) {
+        if readout.covered < readout.expected {
+            if readout.covered == 0 {
+                log::debug!(
+                    "[ara] fade projection: none of the {} clip(s) has host geometry this round; \
+                     every clip keeps its published values",
+                    readout.expected
+                );
+            } else {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.fade-projection",
+                    format_args!(
+                        "[ara] fade projection: {} of {} clip(s) have host geometry this round; \
+                         the rest keep their published values",
+                        readout.covered, readout.expected
+                    ),
+                );
+            }
+        }
+        if readout.clips == 0 {
+            return;
+        }
+        // 【为什么是 Debug + 限流，而不是一个独立开关】它是一块一行的跟踪点（这条路径
+        // 由 20 ms 的视图定时器驱动），按仓库的四档日志策略属于 High 档的 Debug，
+        // 而 High 档也必须限流 —— 一次调试会话足以烧掉整份轮转预算。验收要求「连续
+        // 拖动 3 分钟零帧 0 长度」，肉眼判不了「一帧」，这条读数可以：`min_in /
+        // `min_out` 在整个手势里不下降，就等价于「从来没有发布过 0」。
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Debug,
+            "ara.fades",
+            format_args!(
+                "[ara] fades: clips={} min_in={:.3} min_out={:.3} auto={:.3}/{:.3} event=publish",
+                readout.clips,
+                readout.min_in,
+                readout.min_out,
+                readout.min_auto_in,
+                readout.min_auto_out
+            ),
+        );
+    }
+
     /// 清单结构与普通fade独立同步；ARA未ready时也通知新增/删除，不清空曲线、选择或历史。
     /// `adopt_view` 只在 `refresh_host` 这条路径上为真：那里补丁之后需要立刻换一份
     /// 基线。`ensure_loaded` 内部那次调用传 false —— 它的末尾会用快照自己的视图覆盖，
     /// 重复取一次只是白做一次投影。
     pub(super) fn refresh_ui_geometry(&self, document: &DocumentSession, adopt_view: bool) {
         let version = document.ui_geometry_revision.load(Ordering::Acquire);
-        if version == self.ui_geometry_version.load(Ordering::Acquire) {
+        let presentation = document.presentation_revision.load(Ordering::Acquire);
+        // 【两个代次都要比】几何没变而内容变了（装配发布 / 源状态变化 / 宿主写回后的
+        // fade 投影）恰恰是本轮要修的那一类：只看几何会让它永远等不到重画。
+        if version == self.ui_geometry_version.load(Ordering::Acquire)
+            && presentation == self.ui_presentation_version.load(Ordering::Acquire)
+        {
             return;
         }
         // 先冻结可用fade，再合并清单；只确认开始时的代次，期间的新变化留到下一轮。
         let fades = document.ui_fade_projection().ok();
         let reverse_paths = self.loaded.lock_or_recover().reverse_paths.clone();
+        // 这一轮淡变发布的读数（在时间线作用域里算，出了作用域再写日志）。
+        let mut fade_readout: Option<FadeReadout> = None;
         {
             let mut timeline = self.timeline.lock_or_recover();
             self.retain_display_waveforms(&mut timeline, false);
@@ -3395,36 +3671,45 @@ impl EditorSession {
             document.project_host_take_facts_locked(&mut timeline);
             Self::restore_materialized_source_paths(&mut timeline, &reverse_paths);
             self.retain_display_waveforms(&mut timeline, true);
-            if let Some((_, host)) = fades {
-                for clip in &mut timeline.clips {
-                    if let Some(original) = host
-                        .clips
-                        .iter()
-                        .find(|original| format!("{}{}", self.namespace, original.id) == clip.id)
-                    {
-                        clip.muted = original.muted;
-                        clip.gain = original.gain;
-                        for take in &mut clip.takes {
-                            take.gain = original.gain;
-                        }
-                        clip.snap_offset_sec = original.snap_offset_sec;
-                        clip.fade_in_sec = original.fade_in_sec;
-                        clip.fade_out_sec = original.fade_out_sec;
-                        clip.auto_fade_in_sec = original.auto_fade_in_sec;
-                        clip.auto_fade_out_sec = original.auto_fade_out_sec;
-                        clip.fade_in_shape = original.fade_in_shape;
-                        clip.fade_out_shape = original.fade_out_shape;
-                        clip.fade_in_dir = original.fade_in_dir;
-                        clip.fade_out_dir = original.fade_out_dir;
-                    }
-                }
+            // 【补丁，不是替换】见 `FadeProjection`：只有这一轮宿主几何真的说得出来的
+            // clip 在补丁里。不在里面的 clip **保持清单刚写下的宿主真值** —— 此前这里
+            // 是「整份工作区时间线覆盖上来」，而那份时间线的淡变值在装配重跑之后是 0，
+            // 于是宿主几何缓存一失效（一次装配发布就会让它失效），**所有** clip 的淡变
+            // 包络同时闪回 0 长度。
+            //
+            // 【为什么不再顺手抄 muted / gain / take.gain】`present_host_inventory` 上面
+            // 已经按同一个 `UiItem` 写过 muted 与 gain；而 `take.gain = clip.gain` 那一行
+            // 违反 `decorate_item_gain` 的契约（take 增益是**另一个旋钮**，不该被 item
+            // 增益顶替）。淡变补丁只做它自己那件事。
+            if let Some(projection) = fades {
+                crate::editor::workspace::apply_fade_projection(
+                    &mut timeline,
+                    &projection,
+                    &self.namespace,
+                );
+                fade_readout = Some(Self::fade_readout(&timeline, &projection));
             }
             self.publish_duration(timeline.project_sec);
+            self.publish_ui_clips(&timeline);
+        }
+        // 【读数必须在释放时间线之后写】`emit_limited_key` 自己有一把锁，而这里已经
+        // 踩过一次「在时间线作用域里再取一把锁」的亏（见 `sync` 的模块文档）。
+        if let Some(readout) = fade_readout {
+            Self::emit_fade_readout(readout);
         }
         // 宿主清单已经换成这一轮几何：先做一次参数几何事务，再读派生视图。
         // 失败时不推进版本，下一轮重试同一 delta。
         if let Err(error) = document.reconcile_parameter_geometry() {
-            log::warn!("[ara] parameter geometry deferred: {error}");
+            // 【为什么必须限流】这条路径由 20 ms 的视图定时器驱动，而"工作区轨道身份
+            // 还没长成"会连续成立几百毫秒到几秒。逐轮 `warn!` 在一份现场日志里留下过
+            // 3493 行同一条消息 —— 它把真正有用的那几行淹掉了，而它要表达的信息只是
+            // "还在等，还没好"。改成按 key 限流之后，同一个窗口内只出现一条，并在下一条
+            // 真的写出去时带上"期间被压掉了多少条"的计数（见 `emit_limited_key`）。
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.geometry.deferred",
+                format_args!("[ara] parameter geometry deferred: {error}"),
+            );
             return;
         }
         // 【版本号必须在 adopt **成功之后**才推进】否则一次失败的 adopt 会把
@@ -3481,7 +3766,12 @@ impl EditorSession {
             }
         }
         if adopted {
+            // 与 `ui_geometry_version` 同一条纪律：**投影成功之后**才推进，失败留给下一轮。
+            // 这里重新读一次呈现代次而不是用函数开头那个快照：投影期间到来的新一代必须
+            // 留到下一轮（否则那一代会被静默吞掉，界面上永远差一次更新）。
             self.ui_geometry_version.store(version, Ordering::Release);
+            self.ui_presentation_version
+                .store(presentation, Ordering::Release);
         }
         self.notify_timeline();
     }
@@ -3772,6 +4062,12 @@ impl EditorSession {
             return;
         }
         *self.initial_retry_at.lock_or_recover() = None;
+        // 【先收口装配，再投影】`refresh_ui_geometry` 读的是文档时间线（装配产物）；
+        // 而装配是"标记 + 安全点"两段式：这一轮标记可能刚被置位、安全点还没跑。
+        // 顺序反过来的话，投影会拿到**上一代**装配结果并把呈现代次推到最新 ——
+        // 那一代变化从此再也等不到重画。`flush_pending_assembly` 内部用
+        // `try_transaction`：拿不到事务就原样留着，下一个 tick 再来。
+        document.flush_pending_assembly();
         self.refresh_ui_geometry(&document, true);
         // 原生媒体写入的短Undo窗口先回执GUI结构；音频物化留给写入收尾后的后台加载。
         if !document.host_undo.pending.load(Ordering::Acquire)
@@ -3892,7 +4188,18 @@ impl EditorSession {
     }
 
     /// 波形入口只接受本会话从宿主PCM生成的路径，不能让JS任意读取本地文件。
-    pub(super) fn check_source(&self, path: &str) -> Result<(), String> {
+    ///
+    /// 【为什么是三个答案】这个函数此前把两种完全不同的情形压成同一个 `Err`：
+    ///
+    ///   * **尚未授权**：这就是我们刚导入、宿主还没建 region 的那个源。它是**瞬时**
+    ///     状态，下一秒就会自己好；
+    ///   * **拒绝**：这条路径与本会话任何一个宿主 item 都无关 —— 安全边界。
+    ///
+    /// 压成一个之后，前端只能把两种都记成"永久失败"（`failedLevels`），于是"还没轮到"
+    /// 变成"永远没有波形，直到重载" —— 用户报的原话就是"重新加载以后才恢复正常"。
+    /// 协议里其实早就区分开了：空载荷 = 尚未就绪（前端有 3 s 冷却 + 有界重试），
+    /// 缺的只是后端用对它的那一步。
+    pub(super) fn check_source(&self, path: &str) -> SourceCheck {
         if self
             .loaded
             .lock_or_recover()
@@ -3904,10 +4211,22 @@ impl EditorSession {
                 .values()
                 .any(|(_, clip)| clip.source_path.as_deref() == Some(path))
         {
-            Ok(())
-        } else {
-            Err("source is not authorized by this ARA session".into())
+            return SourceCheck::Ready;
         }
+        // 【为什么这一条不是放松安全边界】它只承认"我们自己刚为某个宿主 item 写下的
+        // 路径"，而那条记录是导入命令在**宿主的 item 已经建成之后**才写的 —— 证据来自
+        // 宿主，不是来自调用方。
+        if self
+            .document()
+            .is_some_and(|document| document.pending_import_for_source(path))
+        {
+            // 【为什么直接 info 不套限流】门禁（`check-log-levels.py`）的规则是"Info 是
+            // 叙事，不许限流"；而这里每次请求只有一行，且只在"待定导入还活着"的那几百
+            // 毫秒里出现 —— 它本来就该被看见，不该被折进一条 `[throttled]` 汇总。
+            log::info!("[waveform] not-yet-authorized path={path} (a pending import owns it)");
+            return SourceCheck::NotYetAuthorized;
+        }
+        SourceCheck::Denied
     }
 
     /// 为一次音节分析冻结 owned 快照，并把请求登记为在途。
@@ -3934,7 +4253,13 @@ impl EditorSession {
             .clone()
             .or_else(|| clip.source_path.clone())
             .ok_or("source_not_authorized")?;
-        self.check_source(&source_path)?;
+        // 音节分析要真的读这条 PCM：**尚未授权**在这里不能当成"再等等"——
+        // worker 一旦拿到路径就会去解文件。所以只有 `Ready` 放行。
+        match self.check_source(&source_path) {
+            SourceCheck::Ready => {}
+            SourceCheck::NotYetAuthorized => return Err("source_not_ready".into()),
+            SourceCheck::Denied => return Err("source_not_authorized".into()),
+        }
         let frame_period_ms = timeline.frame_period_ms().max(0.1);
         let source_digest = syllable_source_digest(&source_path, take, frame_period_ms);
         let audible_window = clip_audible_window(clip);
@@ -4964,8 +5289,10 @@ impl EditorSession {
             clip.fade_out_shape = 0.;
             clip.fade_in_dir = 0.;
             clip.fade_out_dir = 0.;
-            // 宿主item音量只在GUI显示，提交参数前还原原始ARA源域，不能重复烘焙。
+            // 宿主 item / take / track 三层增益都由宿主施加。提交参数前把三层
+            // 全部还原为干声，避免同一旋钮在 ARA 合成里再乘一遍。
             clip.gain = 1.;
+            clip.clip_gain = 1.;
             for take in &mut clip.takes {
                 take.gain = 1.;
             }
@@ -5084,6 +5411,55 @@ impl EditorSession {
         }
         fingerprint
     }
+    /// 把"待定导入转正"发成一条事件。
+    ///
+    /// 【为什么单独一条事件】`plugin_host_changed` 只说"时间线变了"，前端无法区分
+    /// "这次发布是宿主终于认领了那次导入"与"别处改了一笔"。而导入之后要做的事 ——
+    /// 清 pending 状态、补一次规格化、把斜纹占位换成真 clip —— 全都挂在这一次转正上。
+    pub(crate) fn announce_import_ready(
+        &self,
+        resolved: &[crate::render::document::ResolvedImport],
+    ) {
+        for entry in resolved {
+            self.emit(
+                "import_ready",
+                json!({
+                    "item": entry.item,
+                    "clipId": format!("{}{}", self.namespace, entry.clip_id),
+                    // `trackId` 只是诊断线索：落点来自导入时那一轮清单，宿主可能已经
+                    // 换过它。前端按 clipId 定位，不按这条边。
+                    "trackId": entry
+                        .landed_track
+                        .as_ref()
+                        .map(|id| format!("{}{}", self.namespace, id)),
+                    "pending": false,
+                    "rounds": entry.rounds,
+                    "afterMs": entry.elapsed.as_millis() as u64,
+                }),
+            );
+        }
+    }
+
+    /// 报告"等了太久还没被认领"的导入（20 ms 视图定时器驱动；每一条只报一次）。
+    ///
+    /// 【为什么由定时器问、而不是由发布路径问】宿主如果一直不发布，发布路径就一次都
+    /// 不会跑 —— 那正是需要通知用户的场合。定时器是唯一与宿主节奏无关的观测点。
+    pub(crate) fn report_stalled_imports(&self) {
+        let Some(document) = self.document() else {
+            return;
+        };
+        for (item, elapsed) in document.take_stalled_imports(IMPORT_STALL_AFTER) {
+            log::warn!(
+                "[import] stalled item={item} after_ms={} reason=no-region-after-publish",
+                elapsed.as_millis()
+            );
+            self.emit(
+                "import_stalled",
+                json!({"item": item, "afterMs": elapsed.as_millis() as u64, "pending": true}),
+            );
+        }
+    }
+
     /// 一段 pending 持续多久之后才值得记一行。3 秒：短于它的是正常的一次应用往返。
     const PENDING_REPORT_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -5168,6 +5544,48 @@ impl EditorSession {
         Stage::decode(self.render_stage.load(Ordering::Acquire))
     }
 
+    /// `render_error` 的**唯一**写入口：短句进状态栏，长句进日志与 `errorDetail`。
+    ///
+    /// 【为什么必须只有一个入口】这条红字一闪而过是结构性的：读它的是 4 Hz 的
+    /// `plugin_get_apply_state`，而那个轮询不写日志。只要还有第二处直接赋值，
+    /// 新加的日志就会被绕过 —— 现场仍然只能拿到"有个红的、看不清"。
+    ///
+    /// 【为什么去重】同一个短句每秒会被写四次（每轮重试都写一次）。日志按"短句变了"
+    /// 去重，于是"闪一下"留下一行，"一直错"也只留一行。
+    fn note_render_error(&self, code: RenderErrorCode, short: &str, detail: String) {
+        let short = short_render_text(short);
+        let changed = {
+            let mut slot = self.render_error.lock_or_recover();
+            let changed = render_error_is_new(slot.as_deref(), &short);
+            *slot = Some(short.clone());
+            changed
+        };
+        *self.render_error_code.lock_or_recover() = Some(code.code());
+        *self.render_error_detail.lock_or_recover() = Some(detail.clone());
+        if !changed {
+            return;
+        }
+        // 【为什么带 gen / ticket / rendering】这条日志的唯一用途是让下一次现场回答
+        // "那一刻渲染到第几代、是不是正在跑、用户停在哪一步"。只写 text 会重演
+        // "知道报错但不知道为什么"。
+        log::warn!(
+            "[state] render-error code={} gen={} ticket={} rendering={} text={:?} detail={:?}",
+            code.code(),
+            self.generation.load(Ordering::Acquire),
+            self.render_ticket.load(Ordering::Acquire),
+            self.render_task.lock_or_recover().is_some(),
+            short,
+            detail,
+        );
+    }
+
+    /// 清空渲染错误（同样收口：三个字段一起清，谁都不许只清一半）。
+    fn clear_render_error(&self) {
+        *self.render_error.lock_or_recover() = None;
+        *self.render_error_code.lock_or_recover() = None;
+        *self.render_error_detail.lock_or_recover() = None;
+    }
+
     pub(super) fn state(&self) -> Value {
         let generation = self.generation.load(Ordering::Acquire);
         let applied = self.applied.load(Ordering::Acquire);
@@ -5242,6 +5660,20 @@ impl EditorSession {
         } else {
             "current"
         };
+        // 【三层错误读数在这里合成一次】`self.error` 是终态（需要用户处置），
+        // `render_error` 是"这一轮没落上"，`host_error` 是宿主自报的准备失败。
+        // 码与长诊断只属于**渲染**那一条：另外两层的措辞本身就是给用户看的。
+        let base_error = self.error.lock_or_recover().clone();
+        let render_error = self.render_error.lock_or_recover().clone();
+        let (error_code, error_detail) = if base_error.is_none() && render_error.is_some() {
+            (
+                json!(self.render_error_code.lock_or_recover().unwrap_or(0)),
+                json!(self.render_error_detail.lock_or_recover().clone()),
+            )
+        } else {
+            (Value::Null, Value::Null)
+        };
+        let error = base_error.or(render_error).or(host_error);
         json!({
             // 【为什么把形态放进状态快照】bootstrap 是**窗口创建那一刻**算的，而形态判定
             // 要等 `setActive` 之后 5 秒宽限期才落定 —— 于是窗口打开时读到的一律是
@@ -5297,11 +5729,77 @@ impl EditorSession {
                 })
             }).unwrap_or(serde_json::Value::Null),
             "host_version":self.host_version.load(Ordering::Acquire),
-            "error":self.error.lock_or_recover().clone().or_else(||self.render_error.lock_or_recover().clone()).or(host_error),"connected":!self.closed.load(Ordering::Acquire),
+            // 【为什么要有这一位】`plugin_get_apply_state` 在没有缓存时答的是同形
+            // 的 `busy` 载荷；前端据此把"还没算出来"当 transient，而不是红色错误。
+            "busy":false,
+            "error":error,
+            // 【只增不改】短句的协议码与全量诊断。前端拿 `error` 显示单行，拿
+            // `errorDetail` 做 tooltip / 报障附件 —— 状态栏主行永远只有一句可行动的话。
+            "errorCode":error_code,
+            "errorDetail":error_detail,
+            "connected":!self.closed.load(Ordering::Acquire),
             "ready":self.loaded.lock_or_recover().initialized})
     }
     fn emit_state(&self) {
-        self.emit("plugin_apply_state", self.state());
+        let state = self.state();
+        // 【顺序：先存缓存、再投递事件】事件投递可能失败（队列满 / 视图已关），
+        // 而缓存是状态栏 250 ms 轮询的唯一读源 —— 它必须总是有值可答。
+        self.store_apply_state(&state);
+        self.emit("plugin_apply_state", state);
+    }
+
+    /// 立刻重算一次状态并放进缓存（构造、命令收尾、渲染阶段变化时调用）。
+    pub(crate) fn publish_apply_state(&self) {
+        let state = self.state();
+        self.store_apply_state(&state);
+    }
+
+    /// 把一份算好的状态放进叶子缓存。
+    fn store_apply_state(&self, state: &Value) {
+        let mut cache = self
+            .apply_cache
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        *cache = Some(std::sync::Arc::new(state.clone()));
+    }
+
+    /// 状态快照的**无锁**读源（GUI 线程用）。
+    ///
+    /// 【为什么是 "没有就答 busy" 而不是 "没有就现算"】现算就是回到 `state()`，
+    /// 也就是回到那组会与编辑命令互锁的时间线/文档锁。宁可让前端多等一拍（它本来
+    /// 就 250 ms 轮询一次），也不要在 GUI 线程上制造一次 ABBA。
+    pub(crate) fn apply_state(&self) -> Value {
+        let cached = self
+            .apply_cache
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        match cached {
+            Some(state) => (*state).clone(),
+            None => Self::busy_apply_state(),
+        }
+    }
+
+    /// "状态还没算出来"的同形载荷。
+    ///
+    /// 【为什么它是 `busy` 而不是一个错误】一个刚插上、还没有任何命令跑过的
+    /// 会话**不是**故障。把它答成 Err，状态栏就会画一条红条
+    /// （`尚未应用：BackendInvokeError: ...`），而用户什么都没做错。
+    /// 同形载荷让前端不需要任何特判：它只多认一个 `busy` 位。
+    pub(crate) fn busy_apply_state() -> Value {
+        json!({
+            "mode": "ara",
+            "generation": 0,
+            "applied_generation": 0,
+            "pending": false,
+            "analysis_pending": false,
+            "rendering_active": false,
+            "host_version": 0,
+            "error": Value::Null,
+            "connected": true,
+            "ready": false,
+            "busy": true,
+        })
     }
 }
 impl EditorSession {
@@ -5328,7 +5826,11 @@ impl EditorSession {
             hifishifter_kernel::pitch_analysis::maybe_schedule_pitch_orig(&self.timeline, &root);
         }
         if param == "dyn" {
-            hifishifter_kernel::pitch_analysis::maybe_schedule_dyn_orig(&self.timeline, &root);
+            hifishifter_kernel::pitch_analysis::maybe_schedule_dyn_orig(
+                &self.timeline,
+                &root,
+                hifishifter_kernel::gain::GainScope::HostOwned,
+            );
         }
         // 【发布的是"分析原线 + 布局键"，不是显示数组】`params.pitch_orig` 由
         // `maybe_schedule_pitch_orig` 从内容缓存组装（与用户编辑无关）；`pitch_edit`
@@ -5679,10 +6181,17 @@ impl ParamHost for EditorSession {
                     // 【瞬时冲突不进 `self.error`】那个位置是"终态、需要用户处置"的。
                     // 放进去会让 `prepare_apply` 永久短路（见 R7）。这里只进渲染读数，
                     // 并把"这次编辑没有被采纳"记成可读的读数 —— 用户至少知道该重画。
-                    *self.render_error.lock_or_recover() = Some(format!(
-                        "Conflict: this edit was not applied after {} attempt(s): {error}",
-                        attempt + 1
-                    ));
+                    // 【短句进 UI，长句进日志】状态栏只留"这次编辑没落上"，**原因**
+                    // 放进 `errorDetail`：它是内部诊断（含子串与代次），原样展示只会
+                    // 让用户读一屏看不懂的字。
+                    self.note_render_error(
+                        RenderErrorCode::EditNotApplied,
+                        "This edit was not applied; draw it again or refresh",
+                        format!(
+                            "Conflict: this edit was not applied after {} attempt(s): {error}",
+                            attempt + 1
+                        ),
+                    );
                     if let Some(document) = self.document() {
                         document.note_edit_dropped(format!(
                             "replay budget exhausted after {} attempt(s): {error}",
@@ -5694,7 +6203,11 @@ impl ParamHost for EditorSession {
                     // 一次"这次没落上"放进去会让 `prepare_apply` 永久短路（渲染停摆），
                     // 也会让 `after_write` 把之后每一次**成功**的写入都报成失败 ——
                     // 前端于是把已经生效的笔画回滚掉，用户看到的就是"参数线回退"。
-                    *self.render_error.lock_or_recover() = Some(error.clone());
+                    self.note_render_error(
+                        RenderErrorCode::EditNotApplied,
+                        "This edit was not applied; draw it again or refresh",
+                        error.clone(),
+                    );
                     if let Some(document) = self.document() {
                         document.note_edit_dropped(error);
                     }
@@ -5951,7 +6464,7 @@ pub mod tests {
                 started.send(()).unwrap();
                 wait.recv_timeout(Duration::from_secs(3))
                     .map_err(|error| error.to_string())?;
-                Ok(())
+                Ok(ApplyOutcome::Published)
             },
         )
         .unwrap();
@@ -6027,7 +6540,7 @@ pub mod tests {
                 started.send(()).unwrap();
                 wait.recv_timeout(Duration::from_secs(3))
                     .map_err(|error| error.to_string())?;
-                Ok(())
+                Ok(ApplyOutcome::Published)
             },
         )
         .unwrap();
@@ -6083,7 +6596,7 @@ pub mod tests {
         document.host_undo.pending.store(true, Ordering::Release);
         let editor = owner.editor_session().unwrap();
         let cancel = Arc::new(AtomicBool::new(true));
-        let job = RenderTask::spawn(41, 17, cancel, || Ok(())).unwrap();
+        let job = RenderTask::spawn(41, 17, cancel, || Ok(ApplyOutcome::Published)).unwrap();
         {
             let mut active = editor.render_task.lock_or_recover();
             assert!(active.is_none());
@@ -7265,6 +7778,105 @@ pub mod tests {
         );
     }
 
+    /// **回归：一次装配发布不许让已经发布的淡变闪回 0。**
+    ///
+    /// 【现场原形】REAPER ARA 拖动 item：`[ara] item map` 在 `unbound=0` 与
+    /// `unbound=1` 之间来回（≈4.5 次/秒）。每来回一次就是一次完整的装配发布，而
+    /// `clip_ids` 跟着变（挂不上的那条 region 从表里消失）⇒ `document.revision` 前进
+    /// 一步 ⇒ `cached_geometry` 的判据失效 ⇒ `ui_fade_projection` 这一轮一条都覆盖
+    /// 不到。旧实现把那份「覆盖 0 条」的时间线**整份**盖到界面上，于是所有 clip 的
+    /// 淡变同时闪回 0 长度，下一拍缓存有效时才恢复。
+    ///
+    /// 【这条用例钉的是组合，不是任何一行】淡变值在装配层就已经丢了（见
+    /// `assembly::inherit_presentation`），而闪回发生在「空投影被当成 0 投影」这一步。
+    /// 两个修法各管一半，缺任何一个这条用例都会红。
+    #[test]
+    fn an_assembly_publish_never_flashes_the_gui_fades_to_zero() {
+        let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
+        let document = model.session();
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        unsafe {
+            owners[0].bind_host_adapter(host.context());
+        }
+        // 清单：一条轨、一个 item。`present_host_inventory` 是 GUI 淡变在非 ARA 侧的
+        // 唯一写者，而它读的就是这份 `UiItem.geometry`。
+        let api = Arc::new(host.client());
+        let mut track = api.ui_track(&|| true).unwrap();
+        track.items.truncate(1);
+        document
+            .ui_tracks
+            .lock_or_recover()
+            .insert(track.guid.clone(), track);
+        document.ui_geometry_revision.fetch_add(1, Ordering::AcqRel);
+        // 让装配真的跑一次：夹具的文档时间线里已经有 clip，而装配器只在
+        // 「ARA 模型交付过」之后才允许覆盖它。
+        document.ara_model_seen.store(true, Ordering::Release);
+        document.note_assembly_input_changed();
+        document.flush_pending_assembly();
+        // 【旧实现盖上去的那个值】装配产出的 clip 淡变恒为 0（输入 `ItemRow` 里没有
+        // 这些字段），而旧实现把整份工作区时间线覆盖到界面上 —— 盖的就是这个 0。
+        {
+            let timeline = document.timeline.lock_or_recover();
+            let timeline = timeline.as_ref().expect("装配必须发布一份时间线");
+            let zeroed = timeline
+                .clips
+                .iter()
+                .filter(|clip| clip.id.starts_with("ara-item-"))
+                .collect::<Vec<_>>();
+            assert!(!zeroed.is_empty(), "装配必须为清单里的 item 产出一条 clip");
+            for clip in zeroed {
+                assert_eq!(
+                    clip.fade_in_sec, 0.0,
+                    "装配产物的淡变是「没有观测」，不是观测到 0"
+                );
+            }
+        }
+        let editor = owners[0].editor_session().unwrap();
+        let read = |editor: &EditorSession| {
+            let timeline = editor.timeline.lock_or_recover();
+            timeline
+                .clips
+                .iter()
+                .map(|clip| {
+                    (
+                        clip.fade_in_sec,
+                        clip.fade_out_sec,
+                        clip.auto_fade_in_sec,
+                        clip.auto_fade_out_sec,
+                        clip.snap_offset_sec,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        editor.refresh_ui_geometry(&document, false);
+        let published = read(&editor);
+        assert!(
+            published
+                .iter()
+                .any(|(fade_in, _, _, _, _)| (*fade_in - 0.2).abs() < 1e-9),
+            "夹具必须先有宿主淡变，否则这条用例什么也没证明：{published:?}"
+        );
+
+        // 一次装配发布：`cached_geometry` 的判据是 `cached.model == document.revision`。
+        document.revision.fetch_add(1, Ordering::AcqRel);
+        document.note_presentation_changed();
+        assert_eq!(
+            document.ui_fade_projection().unwrap().covered(),
+            0,
+            "缓存失效的那一轮，宿主几何一条都说不出 —— 这正是闪回发生的窗口"
+        );
+        editor.refresh_ui_geometry(&document, false);
+
+        let after = read(&editor);
+        assert_eq!(
+            after, published,
+            "宿主几何这一轮一条都说不出时，界面必须保持已经发布的值"
+        );
+        editor.close();
+    }
     /// 两真实组件使用同源的不同区域，测试原actor而不是拼接UI快照。
     pub fn workspace_fixture() -> (ModelHandle, Vec<Arc<ExtensionOwner>>, Vec<Box<u8>>) {
         let (model, a, first) = fixture();
@@ -8457,7 +9069,7 @@ pub mod tests {
                 left
             })
             .collect::<Vec<_>>();
-        assert_eq!(outputs[0], [0.05, 0.1, 0.15, 0.2]);
+        assert_eq!(outputs[0], [0.1, 0.2, 0.3, 0.4]);
         assert_eq!(outputs[1], [0.; 4], "其它轨solo不能在本renderer投影后丢失");
         editor.close();
     }
@@ -8547,7 +9159,11 @@ pub mod tests {
         assert_eq!(editor.timeline.lock_or_recover().tracks[0].volume, 1.);
         assert!(editor.history.lock_or_recover().records.is_empty());
         assert_eq!(editor.generation.load(Ordering::Acquire), 0);
-        assert!(editor.check_source("C:/Users/user/private.wav").is_err());
+        assert_eq!(
+            editor.check_source("C:/Users/user/private.wav"),
+            SourceCheck::Denied,
+            "未登记的路径必须仍然是拒绝，不能因为新增了\"尚未就绪\"就放宽"
+        );
         editor.close();
     }
     /// 原前端以base+position消费；停播seek也必须得到宿主绝对位置。
@@ -8794,7 +9410,7 @@ pub mod tests {
                 source.ends_with(".wav"),
                 "inventory replaced the authorized PCM path: {source}"
             );
-            assert!(editor.check_source(&source).is_ok());
+            assert_eq!(editor.check_source(&source), SourceCheck::Ready);
             document.ui_geometry_revision.fetch_add(1, Ordering::AcqRel);
             editor.refresh_ui_geometry(&document, false);
             assert_eq!(
@@ -9213,7 +9829,7 @@ pub mod tests {
         editor.retain_display_waveforms(&mut visible, true);
         assert!(visible.clips[0].muted);
         assert_eq!(visible.clips[0].source_path.as_ref(), Some(&path));
-        assert!(editor.check_source(&path).is_ok());
+        assert_eq!(editor.check_source(&path), SourceCheck::Ready);
         track.items[0].geometry.take_id = "different-take".into();
         document
             .ui_tracks
@@ -9263,9 +9879,11 @@ pub mod tests {
             "媒体路径应指向物化后的本地 PCM：{source}"
         );
         // 波形与渲染输入共用同一份授权 PCM：能取到源即证明两者都可用。
-        editor
-            .check_source(&source)
-            .expect("授权 PCM 必须已物化，波形/渲染输入才可用");
+        assert_eq!(
+            editor.check_source(&source),
+            SourceCheck::Ready,
+            "授权 PCM 必须已物化，波形/渲染输入才可用"
+        );
         document.close();
     }
     /// 真实宿主正向倍率不再被GUI挡住；take的源窗口和项目时长保留各自坐标。
@@ -9761,7 +10379,11 @@ pub mod tests {
                 owners[index].snapshots[usize::from(rate == 48000)].diagnose(&[]),
                 editor.state()
             );
-            assert_eq!(&left[..511], &[value; 511]);
+            assert_eq!(
+                &left[..511],
+                &[value; 511],
+                "index={index} rate={rate} value={value}"
+            );
             assert_eq!(right, left);
             assert_eq!(&left[511..], &[0.; 2]);
         };
@@ -9780,7 +10402,7 @@ pub mod tests {
         wait(1);
         for rate in [44100, 48000] {
             check(0, rate, 0.25);
-            check(1, rate, 0.25);
+            check(1, rate, 0.5);
         }
         for owner in &owners {
             for publisher in &owner.snapshots {
@@ -10141,18 +10763,18 @@ pub mod tests {
         };
         wait(2);
         for plane in [output().0, output().1] {
-            for (actual, want) in plane.into_iter().zip([0.05, 0.1, 0.15, 0.2]) {
+            for (actual, want) in plane.into_iter().zip([0.1, 0.2, 0.3, 0.4]) {
                 assert!((actual - want).abs() < 1e-6);
             }
         }
         call(&editor, &sink, &receiver, 4, "undo_timeline", json!({}));
         wait(3);
-        for (actual, want) in output().0.into_iter().zip([0.025, 0.05, 0.075, 0.1]) {
+        for (actual, want) in output().0.into_iter().zip([0.1, 0.2, 0.3, 0.4]) {
             assert!((actual - want).abs() < 1e-6);
         }
         call(&editor, &sink, &receiver, 5, "redo_timeline", json!({}));
         wait(4);
-        for (actual, want) in output().0.into_iter().zip([0.05, 0.1, 0.15, 0.2]) {
+        for (actual, want) in output().0.into_iter().zip([0.1, 0.2, 0.3, 0.4]) {
             assert!((actual - want).abs() < 1e-6);
         }
         sink.closed.store(true, Ordering::Release);
@@ -10855,5 +11477,166 @@ mod auto_pitch_write_tests {
         hifishifter_kernel::config::set_reaper_auto_take_pitch_write(false);
         drop(model);
         editor.close();
+    }
+
+    /// **回归：只有"呈现代次"变了，也必须重新投影。**
+    ///
+    /// 【为什么这条是用户报障的可执行形式】粘贴后装配发布了新 clip，但宿主清单的
+    /// **几何**早就在那里了（`ui_geometry_revision` 不动）。旧实现只看几何 ⇒ 早退 ⇒
+    /// 已经画成占位的 clip 永远等不到媒体身份，只能靠重新加载工程恢复。
+    ///
+    /// 这里钉两件事：① 只推进 `presentation_revision` 时投影必须真的跑；
+    /// ② 投影成功后两个读数都要被记住 —— 否则同一代变化会被每一轮重复投影。
+    #[test]
+    fn a_presentation_only_change_is_projected_without_a_geometry_change() {
+        let (model, owner, _identity) = crate::editor::session::tests::fixture();
+        let document = model.session();
+        let editor = owner.editor_session().unwrap();
+        crate::editor::session::tests::wait_for_source_files(&editor);
+        editor.ensure_loaded(true).unwrap();
+        let geometry = document.ui_geometry_revision.load(Ordering::Acquire);
+        // 只推进"编辑器可见内容"：几何一个字都不动。
+        document.note_presentation_changed();
+        let presentation = document.presentation_revision.load(Ordering::Acquire);
+        editor.refresh_ui_geometry(&document, false);
+        assert_eq!(
+            document.ui_geometry_revision.load(Ordering::Acquire),
+            geometry,
+            "夹具前提：这一轮没有几何变化"
+        );
+        assert_eq!(
+            editor.ui_geometry_version.load(Ordering::Acquire),
+            geometry,
+            "夹具前提：投影必须真的成功（失败时两个读数都不推进，留给下一轮）"
+        );
+        assert_eq!(
+            editor.ui_presentation_version.load(Ordering::Acquire),
+            presentation,
+            "只推进呈现代次也必须重新投影，否则新粘贴的 Clip 永远等不到源"
+        );
+        document.close();
+        drop(model);
+        editor.close();
+    }
+}
+
+#[cfg(test)]
+mod apply_state_cache_tests {
+    use super::*;
+
+    /// **不变量：状态缓存可以在一把被占住的时间线锁之外被读到。**
+    ///
+    /// 【为什么钉死】`plugin_get_apply_state` 是 GUI 线程上的 4 Hz 轮询，而 `state()`
+    /// 要取 `timeline` / `render_task` 与文档侧的多张表。actor 持着 `timeline` 锁、
+    /// 同时正在向 WebView 投递时，GUI 线程就卡在那把锁上 —— 而 actor 的投递又需要
+    /// GUI 线程泵消息，这是 ABBA。现场表现就是状态栏红条
+    /// `BackendInvokeError: Backend invoke failed: plugin:plugin_get_apply_state`。
+    ///
+    /// 【为什么读方开一条线程】同线程重取一把 `std::sync::Mutex` 是死锁而不是 panic；
+    /// 开线程 + `recv_timeout` 把"卡住"变成一条**有超时**的断言，CI 不会挂死。
+    #[test]
+    fn the_apply_state_is_readable_while_the_timeline_is_locked() {
+        let (model, _owners, _ids) = super::tests::workspace_fixture();
+        let document = model.session();
+        let editor = document.editor_session().unwrap();
+        editor.publish_apply_state();
+
+        let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let holder = {
+            let editor = editor.clone();
+            let released = released.clone();
+            std::thread::spawn(move || {
+                let _guard = editor.timeline.lock_or_recover();
+                let _ = ready_tx.send(());
+                while !released.load(Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            })
+        };
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("持锁线程必须起来");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = {
+            let editor = editor.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(editor.apply_state());
+            })
+        };
+        let payload = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("apply_state 不得等待时间线锁");
+        assert_eq!(payload["busy"], serde_json::json!(false));
+        reader.join().unwrap();
+        released.store(true, Ordering::Release);
+        holder.join().unwrap();
+        document.close();
+    }
+
+    /// **不变量：没有缓存时答的是 `busy`，不是错误。**
+    ///
+    /// 【为什么钉死】会话刚插上、还没有任何命令跑过时，`state()` 还没算过。把那一刻
+    /// 答成 Err，状态栏就会画一条红条（"尚未应用：BackendInvokeError: ..."），而用户
+    /// 什么都没做错。同形载荷让前端只多认一个 `busy` 位，不需要任何特判。
+    #[test]
+    fn the_apply_cache_reports_busy_instead_of_an_invoke_error() {
+        let payload = EditorSession::busy_apply_state();
+        assert_eq!(payload["busy"], serde_json::json!(true));
+        assert_eq!(payload["connected"], serde_json::json!(true));
+        assert_eq!(payload["error"], serde_json::Value::Null);
+        assert_eq!(payload["ready"], serde_json::json!(false));
+
+        // 【同形】真载荷的每一个字段都必须在这份降级载荷里有对应项 —— 否则前端
+        // 在"刚插上"那一拍读到的形状与之后读到的形状不同，就得写特判。
+        let (model, _owners, _ids) = super::tests::workspace_fixture();
+        let document = model.session();
+        let editor = document.editor_session().unwrap();
+        let real = editor.state();
+        for key in payload.as_object().unwrap().keys() {
+            assert!(real.get(key).is_some(), "真载荷缺少字段 {key}");
+        }
+        document.close();
+    }
+
+    /// 【回归】状态栏只放**一句可行动的话**；长诊断只进日志与 tooltip。
+    ///
+    /// 现场那条"比较长的报错"一闪而过、日志里又查不到，根因就是长文案原样进了
+    /// `"error"`。现在长度在产生点统一压到 120 字符，全量文本进 `"errorDetail"`。
+    #[test]
+    fn the_status_bar_never_shows_a_detail() {
+        let (model, _owners, _ids) = super::tests::workspace_fixture();
+        let document = model.session();
+        let editor = document.editor_session().unwrap();
+        let detail = "unsupported host region: ".to_owned() + &"x".repeat(400);
+        editor.note_render_error(RenderErrorCode::RenderFailed, &detail, detail.clone());
+        let state = editor.state();
+        let shown = state["error"].as_str().expect("状态栏必须有一句");
+        assert!(
+            shown.chars().count() <= RENDER_ERROR_SHORT_MAX,
+            "状态栏一句最多 {} 字符，实际 {}: {shown}",
+            RENDER_ERROR_SHORT_MAX,
+            shown.chars().count()
+        );
+        assert!(!shown.contains(&"x".repeat(100)), "长诊断不许进主行");
+        assert_eq!(state["errorCode"], crate::editor::errors::RENDER_FAILED);
+        assert_eq!(state["errorDetail"], detail);
+        editor.clear_render_error();
+        // 清空的是**渲染**那一层：码与长诊断一起归零（另两层错误各有自己的来源）。
+        let cleared = editor.state();
+        assert!(cleared["errorCode"].is_null());
+        assert!(cleared["errorDetail"].is_null());
+        document.close();
+    }
+
+    /// 【回归】同一条短句只算"新的一条"一次（4 Hz 重试不许把日志刷满）。
+    #[test]
+    fn a_render_error_is_written_to_the_log_once() {
+        assert!(render_error_is_new(None, "a"));
+        assert!(!render_error_is_new(Some("a"), "a"));
+        assert!(render_error_is_new(Some("a"), "b"));
+        // 截断之后长度相同的两条不同错误仍然算"不同"（比较的是内容，不是长度）。
+        assert!(render_error_is_new(Some("a"), "b"));
     }
 }

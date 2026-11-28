@@ -153,11 +153,16 @@ Assert-Ok 'model weights'
 Assert-Ok 'GAME model weights'
 
 $profile = $Configuration.ToLowerInvariant()
-$cargoTarget = Join-Path $root 'backend\target'
-if ($env:CARGO_TARGET_DIR) {
-    $cargoTarget = [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
-    $env:CARGO_TARGET_DIR = $cargoTarget
-}
+# [Why the target directory is resolved by the shared helper] A relative CARGO_TARGET_DIR
+# resolves against the directory cargo runs in (backend/), not the repository root; two scripts
+# each carried their own copy of that rule. See scripts/env/native-toolchain.ps1.
+$cargoTarget = Get-NativeCargoTargetDir -BackendDir (Join-Path $root 'backend')
+if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR = $cargoTarget }
+# [Why the sweep runs before the first cargo call] A CMake build tree recorded under a different
+# generator makes the first native crate's build script fail with "generator ... does not match
+# the generator used previously", and nothing later in this script can recover from it. The
+# invariant ("one environment, one generator") lives in scripts/env/native-toolchain.ps1.
+$null = Clear-StaleCmakeCaches -TargetDir $cargoTarget
 $built = Join-Path $cargoTarget $profile
 $dist = Join-Path $root 'dist'
 $stage = Join-Path $dist '_stage\installer'
@@ -259,7 +264,7 @@ if ($Target -eq 'All' -or $Target -eq 'Plugin') {
     # [Why the bundle holds only the manifest, not the weights] The installer writes the weights
     # to %PROGRAMDATA%\HiFiShifter\models\<version>, and both the standalone App and the plugin
     # read that one copy (see backend/hifishifter-kernel/src/model_store.rs). Keeping another
-    # copy in the bundle would charge the user's disk a second time for the same 152 MB. For
+    # copy in the bundle would charge the user's disk a second time for the same weights. For
     # manual-copy installs, use the portable zip instead.
     Copy-Item "$modelsSource\models.json" "$resources\models"
 

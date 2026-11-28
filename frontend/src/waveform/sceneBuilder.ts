@@ -45,7 +45,8 @@ export interface WaveformSceneClip {
     playbackRate: number;
     reversed: boolean;
     loopEnabled: boolean;
-    gain: number;
+    /** 波形幅度（非负）：已含 item × take，调用方不要再乘任何增益。 */
+    amplitudeGain?: number;
     muted: boolean;
     fadeInSec: number;
     fadeOutSec: number;
@@ -97,7 +98,8 @@ export interface WaveformSceneSegment {
     clipTotalDurationSec: number;
     screenRect: { x: number; y: number; width: number; height: number };
     reversed: boolean;
-    gain: number;
+    /** 波形幅度（非负）：已含 item × take；几何层只再乘淡化。 */
+    amplitudeGain: number;
     fadeInSec: number;
     fadeOutSec: number;
     hostFades?: HostFadeMetadata;
@@ -517,7 +519,10 @@ export function buildWaveformScene(args: {
                             height: bandHeightPx,
                         },
                         reversed,
-                        gain: Number.isFinite(clip.gain) ? Math.max(0, clip.gain) : 1,
+                        amplitudeGain: (() => {
+                            const amplitude = clip.amplitudeGain ?? 1;
+                            return Number.isFinite(amplitude) ? Math.max(0, amplitude) : 1;
+                        })(),
                         fadeInSec,
                         fadeOutSec,
                         hostFades: clip.hostFades,

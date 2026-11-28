@@ -9,7 +9,8 @@
  * 通过 `setPanelRenderer` 提供，因为它需要大量只有 App 才持有的 props。
  */
 
-import { registerPanel } from "../../features/dock/panelRegistry";
+import { listPanels, registerPanel, type PanelDefinition } from "../../features/dock/panelRegistry";
+import { appForm } from "../../services/hostDetect";
 import { MAIN_FORM_PARAM_EDITOR, MAIN_FORM_TIMELINE } from "../../features/dock/dockSchema";
 import { NOTEBOOK_PANEL_MIN_WIDTH } from "../layout/notebook/notebookSettings";
 import { RULER_BASE_HEIGHT_PX } from "../layout/timeline/rulerHeight";
@@ -222,4 +223,39 @@ export function registerBuiltinPanels(): void {
         // 排在「外观设置」之后：同为低频入口。
         order: 95,
     });
+
+    applyMobilePanelShape();
+}
+
+/**
+ * 移动形态下把所有面板的落点与形态收成"单一标签组"。
+ *
+ * 【为什么要改写面板定义而不是改布局】面板的 `defaultPlacement` / `detachable` /
+ * `openAsFloating` 是**用户每次打开它**时用的规则，不是一次性的出厂布局。只改布局
+ * 的话，用户在移动端点"文件浏览器"仍然会按 `side: "right"` 拆出一个 360px 的侧栏 ——
+ * 390px 屏上那就是整屏，而时间轴被挤到 0。
+ *
+ * 三条改写：
+ * - `defaultPlacement` → `center`：一律并进当前标签组，不拆分隔条；
+ * - `detachable: false`：移动端没有第二块屏幕，拆独立窗口没有落点；
+ * - `openAsFloating` 去掉：浮窗在移动端由 `DockFloatingLayer` 渲染成全屏 sheet，
+ *   但"默认浮出"这个行为本身是桌面语义（用户还要拖它、缩放它），移动端改为并进
+ *   标签组，由用户自己切。
+ *
+ * 【为什么用"重新注册"而不是给 registerPanel 加参数】注册表本来就是"同 id 覆盖"的
+ * 幂等语义（见上面的注释），重放一次即可；给注册函数加一个"形态"参数会把形态判断
+ * 塞进注册表 —— 那是数据层，不该知道窗口有多大。
+ */
+function applyMobilePanelShape(): void {
+    if (appForm() !== "mobile") return;
+    // 先取快照：registerPanel 会改动同一个注册表，边遍历边写会漏掉后半部分。
+    const panels: PanelDefinition[] = listPanels();
+    for (const panel of panels) {
+        registerPanel({
+            ...panel,
+            defaultPlacement: { side: "center" },
+            detachable: false,
+            openAsFloating: undefined,
+        });
+    }
 }

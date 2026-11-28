@@ -15,8 +15,12 @@ import { expect, test } from "vitest";
 const source = readFileSync(join("src", "components", "layout", "MenuBar.tsx"), "utf8");
 
 test("选项菜单有「分割过渡设置」项，且打开的是同一个对话框", () => {
-    // 菜单项：置位打开状态。
-    expect(source).toContain("onSelect={() => setSplitTransitionSettingsOpen(true)}");
+    /*
+     * 菜单条目现在是**数据**（`AppMenuItemSpec`）而不是 JSX：菜单表面只有一套，
+     * 条目只有一个渲染路径。判据因此从 `onSelect={...}` 变成 `onSelect: ...`，
+     * 但守的东西没变 —— 菜单项置位 → 同一个状态 → 对话框真的被渲染。
+     */
+    expect(source).toContain("onSelect: () => setSplitTransitionSettingsOpen(true)");
     // 菜单文案复用对话框标题（与吸附/网格、参数块、搜索设置同一口径）。
     expect(source).toContain('tf("split_transition_settings_title")');
     // 对话框渲染，且 open 受同一个状态控制。

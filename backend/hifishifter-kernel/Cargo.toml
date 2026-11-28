@@ -121,3 +121,25 @@ ort = { version = "2.0.0-rc.13", optional = true, default-features = false, feat
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
 ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "alternative-backend"] }
 ort-tract = { version = "0.4.0", optional = true }
+
+# ── 移动目标（与 app 的 Cargo.toml 逐字一致）─────────────────────────────────
+#
+# 【为什么内核也必须声明】内核自己就是 `ort` 的使用者（`fcpe_onnx` / `hnsep_onnx` /
+# `nsf_hifigan_onnx` / `vocoder_ort_session` 都在这里），它的 `onnx` feature 同样
+# 是默认开启的。少一段声明，移动目标会在编译内核时报 "dep:ort is not an optional
+# dependency" —— 而错误位置指向 feature 定义，看起来与目标平台毫无关系。
+#
+# EP 选择与理由见 app 侧同段的注释：Android → NNAPI，iOS → CoreML（≥ 15.1）。
+#
+# x86_64 单独一段：预编译分发里没有它，带 download-binaries 会失败；模拟器因此改走
+# alternative-backend + ort-tract（纯 Rust CPU 实现），机制与 macOS Intel 完全相同，
+# 见 `vocoder_ort_session::register_alternative_backend`。
+[target.'cfg(all(target_os = "android", not(target_arch = "x86_64")))'.dependencies]
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "nnapi", "copy-dylibs"] }
+
+[target.'cfg(all(target_os = "android", target_arch = "x86_64"))'.dependencies]
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "alternative-backend"] }
+ort-tract = { version = "0.4.0", optional = true }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "coreml", "copy-dylibs"] }

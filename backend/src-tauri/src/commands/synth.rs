@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, State};
 
 use super::common::{new_temp_wav_path, render_timeline_to_wav};
 
@@ -330,6 +330,7 @@ pub(super) fn save_synthesized(
         cancel_flag: None,
         progress: None,
         cache_stats: None,
+        gain_scope: crate::gain::GainScope::AppOwned,
     };
 
     // 3. 直接调用 mixdown 模块进行高质量重新渲染并写入目标路径
@@ -471,6 +472,7 @@ pub(super) fn save_separated(state: State<'_, AppState>, output_dir: String) -> 
             cancel_flag: None,
             progress: None,
             cache_stats: None,
+            gain_scope: crate::gain::GainScope::AppOwned,
         };
 
         match crate::mixdown::render_mixdown_to_file(&sub_tl, &out_path, opts) {
@@ -1042,6 +1044,7 @@ pub(super) fn export_audio_advanced(
                     })
                 }),
                 cache_stats: Some(Arc::clone(&cache_stats)),
+                gain_scope: crate::gain::GainScope::AppOwned,
             };
 
             match crate::mixdown::render_mixdown_to_file(&timeline, &out_path, opts) {
@@ -1420,6 +1423,7 @@ pub(super) fn export_audio_advanced(
                         })
                     }),
                     cache_stats: Some(Arc::clone(&cache_stats)),
+                    gain_scope: crate::gain::GainScope::AppOwned,
                 };
 
                 match crate::mixdown::render_mixdown_to_file(&sub_timeline, &out_path, opts) {
@@ -1681,6 +1685,7 @@ pub(super) fn quick_export_selected_clips(
             cancel_flag: None,
             progress: None,
             cache_stats: None,
+            gain_scope: crate::gain::GainScope::AppOwned,
         },
     ) {
         Ok(result) => {
@@ -2068,8 +2073,10 @@ fn resolve_project_folder(state: &AppState) -> PathBuf {
 }
 
 fn resolve_documents_dir(state: &AppState) -> Option<PathBuf> {
+    // 移动端要的是"用户能找到的目录"（Android/media），不是被系统隐藏的
+    // Android/data/<pkg>/files/Documents —— 见 `platform::paths::documents_dir`。
     if let Some(handle) = state.app_handle.get() {
-        if let Ok(dir) = handle.path().document_dir() {
+        if let Some(dir) = crate::platform::paths::documents_dir(handle) {
             return Some(dir);
         }
     }

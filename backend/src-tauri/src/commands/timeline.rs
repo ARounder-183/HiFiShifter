@@ -136,7 +136,8 @@ fn schedule_clip_formant_rebuild(state: &AppState, clip: crate::state::Clip) {
 
 /// 构造 import 失败响应：ok=false + missing_files 携带错误原因（沿用既有约定）。
 fn import_audio_bytes_error(message: &str) -> crate::models::TimelineStatePayload {
-    let mut payload = crate::state::TimelineState::default().to_payload();
+    let mut payload =
+        crate::state::unversioned_timeline_payload(&crate::state::TimelineState::default());
     payload.ok = false;
     payload.missing_files = Some(vec![message.to_string()]);
     payload
@@ -314,7 +315,7 @@ pub(super) fn import_audio_bytes(
         None
     };
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     if let Some(clip_id) = schedule_syllables {
@@ -352,7 +353,7 @@ pub(super) fn import_audio_item(
                 Ok(path) => path,
                 Err(error) => {
                     let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-                    let mut payload = tl.to_payload();
+                    let mut payload = state.timeline_payload(&tl);
                     payload.project = Some(state.project_meta_payload());
                     payload.ok = false;
                     payload.created_clip_ids = Some(vec![]);
@@ -375,7 +376,7 @@ pub(super) fn import_audio_item(
     };
     if source_meta.exists() && header.is_none() {
         let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-        let mut payload = tl.to_payload();
+        let mut payload = state.timeline_payload(&tl);
         payload.project = Some(state.project_meta_payload());
         payload.ok = false;
         payload.created_clip_ids = Some(vec![]);
@@ -428,7 +429,7 @@ pub(super) fn import_audio_item(
         })
         .map(|_| clip_id);
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     if let Some(clip_id) = schedule_syllables {
@@ -449,7 +450,7 @@ pub(super) fn add_track(
     state.checkpoint_timeline(&tl, crate::state::HistoryOp::AddTrack);
     tl.add_track(name, parent_track_id, index);
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     payload
 }
@@ -512,7 +513,7 @@ pub(super) fn remove_track(
         });
     }
 
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     payload
 }
@@ -536,7 +537,7 @@ pub(super) fn duplicate_track(
         None => tl.duplicate_track(&track_id),
     };
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.created_track_ids = Some(new_track_ids);
     payload.project = Some(state.project_meta_payload());
     payload
@@ -552,7 +553,7 @@ pub(super) fn move_track(
     state.checkpoint_timeline(&tl, crate::state::HistoryOp::MoveTrack);
     tl.move_track(&track_id, target_index, parent_track_id);
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     payload
 }
@@ -567,6 +568,7 @@ pub(super) fn set_track_state(
     pitch_analysis_algo: Option<String>,
     color: Option<String>,
     name: Option<String>,
+    preview_gesture_id: Option<String>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     state.checkpoint_timeline(&tl, crate::state::HistoryOp::EditTrack);
@@ -589,7 +591,11 @@ pub(super) fn set_track_state(
     // 重组，让本次编辑能立刻进入渲染；已收敛则是纯键比较，无副作用。
     let root_id = tl.resolve_root_track_id(&track_id);
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    if let Some(gesture_id) = preview_gesture_id {
+        // 与 UpdateTimeline 同一条 mpsc 队列：顺序保证“先换权威快照，再清试听帧”。
+        state.audio_engine.clear_gain_preview(gesture_id);
+    }
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     if let Some(root_id) = root_id {
@@ -605,7 +611,7 @@ pub(super) fn select_track(
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     tl.select_track(&track_id);
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     payload
 }
@@ -618,7 +624,7 @@ pub(super) fn set_project_length(
     state.checkpoint_timeline(&tl, crate::state::HistoryOp::EditProjectLength);
     tl.set_project_length(project_sec);
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     payload
 }
@@ -640,7 +646,7 @@ pub(super) fn add_clip(
     let clip_id = tl.add_clip(track_id, name, start_sec, length_sec, source_path);
     tl.apply_channel_decision_to_clip(&clip_id, channel_decision);
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     payload
 }
@@ -715,7 +721,7 @@ pub(super) fn create_clips_bulk(
         }
     }
     state.audio_engine.update_timeline(tl.clone());
-    let mut timeline_payload = tl.to_payload();
+    let mut timeline_payload = state.timeline_payload(&tl);
     timeline_payload.created_clip_ids = Some(created_clip_ids);
     timeline_payload.project = Some(state.project_meta_payload());
     timeline_payload
@@ -786,7 +792,7 @@ pub(super) fn remove_clips(
     }
 
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     for root_id in affected_root_tracks {
@@ -910,7 +916,7 @@ pub(super) fn move_clips(
         }
 
         state.audio_engine.update_timeline(tl.clone());
-        let mut payload = tl.to_payload();
+        let mut payload = state.timeline_payload(&tl);
         payload.project = Some(state.project_meta_payload());
         drop(tl);
 
@@ -948,7 +954,7 @@ pub(super) fn apply_clip_linked_params(
     state.checkpoint_timeline(&tl, crate::state::HistoryOp::ApplyLinkedParams);
     tl.apply_linked_params_to_clip(&clip_id, &linked_params);
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     payload
 }
@@ -960,7 +966,9 @@ pub(super) fn set_clip_state(
     name: Option<String>,
     start_sec: Option<f64>,
     length_sec: Option<f64>,
-    gain: Option<f32>,
+    // Take 级增益（take 属性面板）。与 `item_gain` 分开：REAPER 里它们是两个
+    // 旋钮，合成一个数就再也分不回去（见 `ClipStatePatch::take_gain`）。
+    take_gain: Option<f32>,
     muted: Option<bool>,
     source_start_sec: Option<f64>,
     source_end_sec: Option<f64>,
@@ -1001,7 +1009,7 @@ pub(super) fn set_clip_state(
             name,
             start_sec,
             length_sec,
-            gain,
+            take_gain,
             item_gain,
             muted,
             source_start_sec,
@@ -1077,7 +1085,7 @@ pub(super) fn set_clip_state(
         .map(|c| c.track_id.clone())
         .and_then(|tid| tl.resolve_root_track_id(&tid));
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     drop(tl);
 
@@ -1099,6 +1107,7 @@ pub(super) fn set_clips_state_bulk(
     state: State<'_, AppState>,
     updates: Vec<crate::state::BulkClipStatePatch>,
     checkpoint: Option<bool>,
+    preview_gesture_id: Option<String>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     if checkpoint.unwrap_or(true) {
@@ -1197,7 +1206,10 @@ pub(super) fn set_clips_state_bulk(
     }
 
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    if let Some(gesture_id) = preview_gesture_id {
+        state.audio_engine.clear_gain_preview(gesture_id);
+    }
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     for root in &root_track_ids {
@@ -1256,6 +1268,8 @@ fn take_error_payload_with_missing(
         redo_depth: None,
         notes_markdown: None,
         param_selection_restore: None,
+        // 合成载荷（错误/占位）：不带版本号，前端不会拿它去覆盖真实状态。
+        revision: None,
     };
     payload.project = Some(state.project_meta_payload());
     payload
@@ -1316,7 +1330,7 @@ pub(super) fn set_clip_active_take(
     invalidate_take_related_caches(&clip_id);
     maybe_schedule_formant_rebuild(&state, &tl, &clip_id);
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     drop(tl);
 
@@ -1354,7 +1368,7 @@ pub(super) fn cycle_clip_takes(
     if changed.is_empty() {
         // 纯 no-op（选区全是单 take）：保持既有“静默无操作”语义，
         // 不写 checkpoint、不刷新引擎，返回当前状态即可。
-        let mut payload = tl.to_payload();
+        let mut payload = state.timeline_payload(&tl);
         payload.project = Some(state.project_meta_payload());
         drop(tl);
         return payload;
@@ -1371,7 +1385,7 @@ pub(super) fn cycle_clip_takes(
         maybe_schedule_formant_rebuild(&state, &tl, clip_id);
     }
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     for root in roots {
@@ -1405,7 +1419,7 @@ pub(super) fn pack_clips_into_takes(
         .and_then(|t| tl.resolve_root_track_id(&t));
     maybe_schedule_formant_rebuild(&state, &tl, &clip_id);
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.created_clip_ids = Some(vec![clip_id]);
     payload.project = Some(state.project_meta_payload());
     drop(tl);
@@ -1441,7 +1455,7 @@ pub(super) fn explode_clip_takes(
         }
     }
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     if !created.is_empty() {
         payload.created_clip_ids = Some(created);
     }
@@ -1489,7 +1503,7 @@ pub(super) fn duplicate_clip_take(
         clip.add_take(copy);
     }
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     payload
 }
@@ -1542,7 +1556,7 @@ pub(super) fn remove_clip_take(
         maybe_schedule_formant_rebuild(&state, &tl, &clip_id);
     }
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     if schedule_pitch {
@@ -1580,7 +1594,7 @@ pub(super) fn rename_clip_take(
         }
     }
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     payload
 }
@@ -1628,7 +1642,7 @@ pub(super) fn set_clip_take_reversed(
         maybe_schedule_formant_rebuild(&state, &tl, &clip_id);
     }
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     if flipped_active {
@@ -1679,7 +1693,7 @@ pub(super) fn set_clip_take_channel_mode(
         maybe_schedule_formant_rebuild(&state, &tl, &clip_id);
     }
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     if active_changed {
@@ -1935,7 +1949,7 @@ pub(super) fn add_clip_take_from_media(
     }
     invalidate_take_related_caches(&clip_id);
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     payload
 }
@@ -2122,7 +2136,7 @@ pub(super) fn import_media_files_as_takes(
     tl.selected_clip_id = Some(clip_id.clone());
     tl.playhead_sec = start;
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     payload.missing_files = if missing.is_empty() {
         None
@@ -2144,7 +2158,7 @@ pub(super) fn duplicate_clips_bulk(
     state.checkpoint_timeline(&tl, crate::state::HistoryOp::DuplicateClips);
     let created_clip_ids = tl.duplicate_clips_bulk(&payload);
     state.audio_engine.update_timeline(tl.clone());
-    let mut timeline_payload = tl.to_payload();
+    let mut timeline_payload = state.timeline_payload(&tl);
     timeline_payload.created_clip_ids = Some(created_clip_ids);
     timeline_payload.project = Some(state.project_meta_payload());
     timeline_payload
@@ -2192,7 +2206,7 @@ pub(super) fn replace_clip_source(
         }
     }
 
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     // 重链后的 Take 判定档案已在 `replace_clip_sources` 里作废（旧结论属于旧
     // 文件、旧声道数）。**必须在锁释放之后**才请求扫描：判定要解码音频，而
@@ -2412,6 +2426,17 @@ pub(super) fn split_clip(
     split_sec: f64,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    // 【先判后打点】在片段边界（或片段外）分割**不改变任何字节**：
+    // 旧实现先 `checkpoint_timeline` 再调用 `split_clip`，后者返回 None，
+    // 于是每按一次「分割」就往撤销栈里塞一个空步 —— 用户按了五次就得多按
+    // 五次撤销才能回到真正的上一步，这正是「撤销几乎不可用」的一半来源。
+    // 判据只有一份：`TimelineState::can_split_at`（与前端 `splitTargets.ts`
+    // 共用同一个 1e-6 边沿约定）。
+    if !tl.can_split_at(&clip_id, split_sec) {
+        let mut payload = state.timeline_payload(&tl);
+        payload.project = Some(state.project_meta_payload());
+        return payload;
+    }
     state.checkpoint_timeline(&tl, crate::state::HistoryOp::SplitClip);
     let root_track_id = tl
         .clips
@@ -2427,7 +2452,7 @@ pub(super) fn split_clip(
         tl.selected_clip_id = Some(right_id.clone());
     }
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     if let Some(right_id) = &right_id {
         payload.created_clip_ids = Some(vec![right_id.clone()]);
     }
@@ -2445,8 +2470,20 @@ pub(super) fn split_clips_at(
     split_sec: f64,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    // 【先判后打点】同 `split_clip`：全部目标都切不动时直接返回当前快照，
+    // 不产生撤销步。多选分割里只要**有一个**能切，就正常打点。
+    let eligible: Vec<String> = clip_ids
+        .iter()
+        .filter(|cid| tl.can_split_at(cid, split_sec))
+        .cloned()
+        .collect();
+    if eligible.is_empty() {
+        let mut payload = state.timeline_payload(&tl);
+        payload.project = Some(state.project_meta_payload());
+        return payload;
+    }
     state.checkpoint_timeline(&tl, crate::state::HistoryOp::SplitClip);
-    let root_ids: Vec<String> = clip_ids
+    let root_ids: Vec<String> = eligible
         .iter()
         .filter_map(|cid| tl.clips.iter().find(|c| c.id == *cid))
         .map(|c| c.track_id.clone())
@@ -2456,7 +2493,7 @@ pub(super) fn split_clips_at(
         .collect();
     let options = split_transition_options(&state);
     let before_ids: HashSet<String> = tl.clips.iter().map(|c| c.id.clone()).collect();
-    tl.split_clips_at_with_transition(&clip_ids, split_sec, &options);
+    tl.split_clips_at_with_transition(&eligible, split_sec, &options);
     // 新建的右段按创建顺序收集（分割按输入顺序处理，故与输入顺序一致）。
     let right_ids: Vec<String> = tl
         .clips
@@ -2469,7 +2506,7 @@ pub(super) fn split_clips_at(
         tl.selected_clip_id = Some(first_right.clone());
     }
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     if !right_ids.is_empty() {
         payload.created_clip_ids = Some(right_ids);
     }
@@ -2496,7 +2533,7 @@ pub(super) fn close_track_gaps(
     let moves = tl.close_track_gaps_moves(&track_id, from_sec);
     if moves.is_empty() {
         // 无需移动：不打撤销检查点，直接返回当前快照。
-        let mut payload = tl.to_payload();
+        let mut payload = state.timeline_payload(&tl);
         payload.project = Some(state.project_meta_payload());
         return payload;
     }
@@ -2505,7 +2542,7 @@ pub(super) fn close_track_gaps(
     tl.move_clips(&moves, link);
     let root_id = tl.resolve_root_track_id(&track_id);
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     if let Some(root_id) = root_id {
@@ -2570,6 +2607,20 @@ pub(super) fn glue_clips(
     clip_ids: Vec<String>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    // 【先判后打点】不足两片时 `glue_clips` 什么都不做，而打点已经发生 ——
+    // 空操作在历史里留一步，撤销要按两次才退到真正的上一步。
+    let glueable = {
+        let live = clip_ids
+            .iter()
+            .filter(|id| tl.clips.iter().any(|c| c.id == **id))
+            .count();
+        live >= 2
+    };
+    if !glueable {
+        let mut payload = state.timeline_payload(&tl);
+        payload.project = Some(state.project_meta_payload());
+        return payload;
+    }
     state.checkpoint_timeline(&tl, crate::state::HistoryOp::GlueClip);
     // Collect root track IDs before gluing
     let root_ids: Vec<String> = clip_ids
@@ -2591,7 +2642,7 @@ pub(super) fn glue_clips(
     // 结构性重构，未随本次 take 层加固一并处理。
     tl.glue_clips(&clip_ids);
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     for root_id in root_ids {
@@ -2621,7 +2672,7 @@ pub(super) fn convert_clips_to_pitch_reference(
         .collect();
     tl.convert_clips_to_pitch_reference(&clip_ids);
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     for root_id in root_ids {
@@ -2651,7 +2702,7 @@ pub(super) fn update_pitch_reference(
         .collect();
     tl.update_pitch_reference_from_track_params(&clip_ids);
     state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     for root_id in root_ids {
@@ -2666,7 +2717,7 @@ pub(super) fn select_clip(
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     tl.select_clip(clip_id);
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
     payload
 }
@@ -2752,7 +2803,7 @@ pub(super) fn set_timeline_tempo_map(
     // 典型场景：内联编辑/对话框确认时内容未修改 —— 若每次都无条件
     // checkpoint，一次编辑会产生两个撤销步，用户需要按两次撤销。
     if incoming.tempo_map == tl.tempo_map {
-        let mut payload = tl.to_payload();
+        let mut payload = state.timeline_payload(&tl);
         payload.project = Some(state.project_meta_payload());
         return payload;
     }
@@ -2778,7 +2829,7 @@ pub(super) fn set_timeline_tempo_map(
         }
     }
 
-    let mut payload = tl.to_payload();
+    let mut payload = state.timeline_payload(&tl);
     payload.project = Some(state.project_meta_payload());
 
     // ★ 触发后台预渲染前必须先释放时间线锁：

@@ -21,12 +21,13 @@ fn update_window_title(window: &Window, name: &str, dirty: bool) {
     let _ = window.set_title(&title);
 }
 
-pub(super) fn import_project_dialog() -> serde_json::Value {
-    let picked = rfd::FileDialog::new()
+pub(super) fn import_project_dialog(app: &tauri::AppHandle) -> serde_json::Value {
+    let picked = crate::platform::dialog::FileDialog::new()
         .add_filter("HiFiShifter Project", &["hshp", "hsp"])
         .add_filter("HiFiShifter Backup Project", &["hshp-bak", "hsp-bak"])
         .add_filter("JSON Project", &["json"])
-        .pick_file();
+        .set_import_target(crate::platform::paths::ImportTarget::Document)
+        .pick_file(app);
     match picked {
         None => serde_json::json!({"ok": true, "canceled": true}),
         Some(path) => {
@@ -208,7 +209,7 @@ pub(super) fn import_project(
         state.audio_engine.update_timeline(tl.clone());
         let scale_signature_after = tl.render_scale_signature();
 
-        let mut payload = tl.to_payload();
+        let mut payload = state.timeline_payload(&tl);
         payload.created_clip_ids = Some(merge.created_clip_ids.clone());
         payload.created_track_ids = Some(merge.created_track_ids.clone());
         payload.project = Some(state.project_meta_payload());

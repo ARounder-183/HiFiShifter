@@ -15,7 +15,15 @@ export type LogFolderNotice =
     /** 出错：把后端的原文（或兜底文案）显示出来。 */
     | { kind: "error"; detail: string }
     /** 打不开：把路径摆出来，必须可选中、可复制。 */
-    | { kind: "path"; path: string };
+    | { kind: "path"; path: string }
+    /**
+     * 日志功能本身关着：路径照给，但必须先说清"里面不会有东西"。
+     *
+     * 【为什么单独一种】用户点「打开日志文件夹」时默认假设"那里有我刚才那次
+     * 崩溃的记录"。若档位是「无」，目录是空的 —— 此时只显示路径等于让他去
+     * 找一个永远不存在的文件。原因（没开日志）比路径更该先看到。
+     */
+    | { kind: "disabled"; path: string };
 
 /**
  * 判定结果。
@@ -27,6 +35,11 @@ export type LogFolderNotice =
 export function logFolderNotice(res: LogFolderResult, pluginMode: boolean): LogFolderNotice {
     if (!res.ok) {
         return { kind: "error", detail: res.error ?? "" };
+    }
+    // 日志没在写：路径仍然要给（用户可能想确认目录位置），但理由必须一起给。
+    if (res.fileEnabled === false) {
+        const path = res.file || res.path;
+        return path ? { kind: "disabled", path } : { kind: "none" };
     }
     if (pluginMode && res.opened) {
         return { kind: "none" };

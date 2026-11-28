@@ -91,6 +91,13 @@ pub(super) type PluginRegister = unsafe extern "C" fn(*const c_char, *mut c_void
 /// 调用全部快速失败 —— 界面不会因为一次宿主繁忙而卡两秒半。
 const HOST_UNREACHABLE_BACKOFF_MS: u64 = 1000;
 
+/// `kicked_peaks` 记住最近多少条 item。
+///
+/// 【为什么只需要几条】它防的是"同一次导入被请求两次"，而不是"整场会话的去重"：导入是
+/// 用户手势，几十条的量级里留下最近 16 条足够覆盖任何一次重试。取更大会让这份记忆在长
+/// 会话里无限增长，而它唯一的作用是让日志不重复。
+const KICKED_PEAKS_MEMORY: usize = 16;
+
 /// 墙钟毫秒；只用于熔断窗口，不参与任何音视频时序。
 fn unix_millis() -> u64 {
     std::time::SystemTime::now()
@@ -235,6 +242,22 @@ pub(crate) struct NativeHost {
     host_timer_retry_at: std::sync::Mutex<Option<std::time::Instant>>,
     /// 到这个时刻（Unix 毫秒）之前不再尝试投递 —— 见 `on_host` 的熔断说明。
     host_unreachable_until: std::sync::atomic::AtomicU64,
+    /// 已经踢过峰值的 item GUID（最近 [`Self::peaks_kicked`] 记忆的那几条）。
+    ///
+    /// 【为什么记】"每次导入恰好一行 `[import] peaks`"是可读的契约；同一条 item 被
+    /// 重复请求（重试、二次回执）本身无害，但会把这条契约变成噪声。容量很小，见
+    /// `KICKED_PEAKS_MEMORY`。
+    kicked_peaks: std::sync::Mutex<std::collections::VecDeque<String>>,
+    /// 本会话里**插件为每条 item 写过的自动交叉淡化长度**（item GUID → 两侧秒数）。
+    ///
+    /// 【为什么需要这份记录】REAPER 的 `D_FADEINLEN_AUTO` / `D_FADEOUTLEN_AUTO` 是**同一个
+    /// 位置**：插件写进去的值、和 REAPER 按工程级 auto-crossfade 自己写进去的值，落点
+    /// 完全一样。不记"我上次写的是什么"，回读时就分不出"用户改了"与"REAPER 又自作主张
+    /// 了一次"，只能把后者当真 —— 那正是"关掉自动交叉淡化后包络先闪一下"的成因。
+    ///
+    /// 【为什么不做持久化】冷加载时插件没有任何写入记录，此时宿主值就是工程的真实状态
+    /// （播种而不是覆盖）；一旦本会话里写过，插件就是权威。
+    auto_fade_intent: std::sync::Mutex<std::collections::BTreeMap<String, (f64, f64)>>,
     /// 已解析的宿主动作号（键 = 登记的回退命令号）。
     ///
     /// 【为什么必须缓存】解析一次要枚举几千条动作（每条一次宿主调用）；而"建一条 take
@@ -379,6 +402,13 @@ impl NativeHost {
             media_import: self.can_import_audio() && !take_fx,
             track_create: self.can_create_audio_track() && !take_fx,
             item_clipboard: self.can_clipboard_items() && !take_fx,
+            // Item / take 增益写回走与几何相同的宿主写 API；没有写能力时
+            // 前端必须把旋钮置灰，而不是显示一个点了会失败的 0 dB。
+            clip_item_gain: self.can_edit_clips(),
+            clip_take_gain: self.can_edit_clips(),
+            // REAPER 轨道 D_VOL 的读写尚未接入原生适配器：这一位诚实地
+            // 报 false，避免插件推子看起来能调、实际被宿主再乘一遍。
+            track_volume: false,
             clip_reverse: self.can_reverse_clips(),
             take_pitch_bridge: self.can_bridge_take_pitch(),
             fade_axes: self.fade_axes_v2.is_some(),
@@ -672,6 +702,19 @@ impl NativeHost {
             picker: lookup!(c"GetUserFileName", media::MultiPicker),
             tracks,
         });
+        // `PCM_Source_BuildPeaks` 是**增强项**：缺了导入照常成立，只是波形要等宿主自己
+        // 高兴才出现（见 `media::HostTrackTarget::kick_peaks`）。与下面那三个同理，
+        // 它必须在 `match` 之前单独取，否则 `lookup!` 的 `?` 会把"缺一个可选入口"
+        // 升级成"整个媒体 API 不可用"。
+        let build_peaks = lookup!(c"PCM_Source_BuildPeaks", media::BuildPeaks);
+        // 【为什么先取再配对】`lookup!` 内部用 `?` 提前返回，写进 match 臂里会把
+        // "可选符号缺失" 变成"整个媒体 API 不可用"。这三个是**增强项**：缺任何一个，
+        // 导入本身仍然成立，只是少了 take 侧的自检。
+        let take_extras = (
+            lookup!(c"SetActiveTake", media::SetActiveTake),
+            lookup!(c"CountTakes", media::CountTakes),
+            lookup!(c"GetSetMediaItemTakeInfo_String", media::TakeString),
+        );
         let media = match (
             lookup!(c"PCM_Source_CreateFromFileEx", media::CreateSource),
             lookup!(c"PCM_Source_Destroy", media::DestroySource),
@@ -703,6 +746,10 @@ impl NativeHost {
                 delete_item,
                 track_guid,
                 picker,
+                set_active_take: take_extras.0,
+                count_takes: take_extras.1,
+                take_string: take_extras.2,
+                build_peaks,
             }),
             _ => None,
         };
@@ -925,6 +972,8 @@ impl NativeHost {
             item_track,
             undo_entry_times: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             undo_ends: std::sync::Mutex::new(Vec::new()),
+            kicked_peaks: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            auto_fade_intent: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             action_ids: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         })
     }
@@ -951,6 +1000,57 @@ impl NativeHost {
             ));
         }
         Ok(unsafe { std::mem::transmute_copy::<*mut c_void, T>(&function) })
+    }
+
+    /// 这条 item 的自动交叉淡化**模型值**：本会话里插件写过就用插件的，否则用宿主播种。
+    fn model_auto_fades(&self, item_id: &str, host_in: f64, host_out: f64) -> (f64, f64) {
+        let Some((model_in, model_out)) = self
+            .auto_fade_intent
+            .lock_or_recover()
+            .get(item_id)
+            .copied()
+        else {
+            // 冷加载：本会话还没写过这条 item，宿主值就是工程的真实状态。
+            return (host_in, host_out);
+        };
+        if (model_in - host_in).abs() > 1e-9 || (model_out - host_out).abs() > 1e-9 {
+            // 【为什么是 Debug】它会在"宿主写了、我们还没写"的那一帧命中，是读数不是故障。
+            // 键里带 item，避免一条 item 的漂移把另一条的读数吞掉。
+            let key = format!("ara.host-auto-fade-drift:{item_id}");
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Debug,
+                &key,
+                format_args!(
+                    "[ara] host auto-fade drifted from the model (item={item_id}, host={host_in:.3}/{host_out:.3}, model={model_in:.3}/{model_out:.3})"
+                ),
+            );
+        }
+        (model_in, model_out)
+    }
+
+    /// 记下"插件为这条 item 写下的自动交叉淡化"。下一次回读以它为准。
+    pub(super) fn remember_auto_fades(&self, item_id: &str, auto_in: f64, auto_out: f64) {
+        self.auto_fade_intent
+            .lock_or_recover()
+            .insert(item_id.to_owned(), (auto_in, auto_out));
+    }
+    /// 这条 item 的峰值是不是已经被踢过了（见 `kicked_peaks`）。
+    pub(super) fn peaks_kicked(&self, item_guid: &str) -> bool {
+        self.kicked_peaks
+            .lock_or_recover()
+            .iter()
+            .any(|known| known == item_guid)
+    }
+
+    /// 记住"这条 item 的峰值已经踢过"，并丢掉最旧的那条。
+    pub(super) fn remember_peaks_kick(&self, item_guid: &str) {
+        let mut known = self.kicked_peaks.lock_or_recover();
+        if !known.iter().any(|entry| entry == item_guid) {
+            known.push_back(item_guid.to_owned());
+        }
+        while known.len() > KICKED_PEAKS_MEMORY {
+            known.pop_front();
+        }
     }
 
     /// 当前线程是不是宿主绑定线程（model/UI 线程）。
@@ -991,6 +1091,20 @@ impl NativeHost {
                     self.host_unreachable_until.store(
                         now.saturating_add(HOST_UNREACHABLE_BACKOFF_MS),
                         std::sync::atomic::Ordering::Release,
+                    );
+                    // 【为什么要单独落一行】这条错误会以命令失败的形式回到前端（`[cmd] ...
+                    // failed: host thread did not pick ...`），但它真正描述的是**宿主没在
+                    // 泵**：那条线程正卡在某处（可能正是我们自己）。一行带 `pending` 与
+                    // `kind` 的读数让"谁在等谁"当场可读，而不是等下一次现场复盘。
+                    hifishifter_kernel::log_limiter::emit_limited_key(
+                        log::Level::Warn,
+                        "host.marshal.timeout",
+                        format_args!(
+                            "[host] marshal timeout kind={} waited_ms={} pending={}",
+                            std::thread::current().name().unwrap_or("unnamed"),
+                            crate::host::marshal::host_thread_timeout().as_millis(),
+                            crate::host::marshal::pending()
+                        ),
                     );
                 }
                 Err(error.message())
@@ -1355,10 +1469,17 @@ impl NativeHost {
         let duration_sec = iv(c"D_LENGTH")?;
         let snap_offset_sec = iv(c"D_SNAPOFFSET")?;
         let source_start_sec = tv(c"D_STARTOFFS")?;
-        let item_gain = iv(c"D_VOL")?;
+        let mut item_gain = iv(c"D_VOL")?;
         let take_gain = tv(c"D_VOL")?;
+        // 负 item volume 是否能表达极性尚未在真机探针确认；在确认前不能因为
+        // 一个负值把整条 item 从清单里丢掉（那会让片段凭空消失）。按静音
+        // 降级并留下诊断，等探针结论再决定是否保号。
         if item_gain < 0. {
-            return Err("invalid REAPER item volume".into());
+            crate::log_line(&format!(
+                "[host] negative item D_VOL ({item_gain}) treated as silence; item {}",
+                item_id
+            ));
+            item_gain = 0.0;
         }
         let play_rate_signed = tv(c"D_PLAYRATE")?;
         if duration_sec <= 0. {
@@ -1419,8 +1540,11 @@ impl NativeHost {
         };
         let fade_in_sec = length(c"D_FADEINLEN")?;
         let fade_out_sec = length(c"D_FADEOUTLEN")?;
-        let auto_fade_in_sec = length(c"D_FADEINLEN_AUTO")?;
-        let auto_fade_out_sec = length(c"D_FADEOUTLEN_AUTO")?;
+        // 【宿主那一对是镜像，不是用户意图】见 ' + BT + 'HostClipGeometry::auto_fade_in_sec' + BT + '。
+        let auto_fade_in_sec_host = length(c"D_FADEINLEN_AUTO")?;
+        let auto_fade_out_sec_host = length(c"D_FADEOUTLEN_AUTO")?;
+        let (auto_fade_in_sec, auto_fade_out_sec) =
+            self.model_auto_fades(&item_id, auto_fade_in_sec_host, auto_fade_out_sec_host);
         let fade_in_shape = iv(c"C_FADEINSHAPE")?;
         let fade_out_shape = iv(c"C_FADEOUTSHAPE")?;
         let fade_in_dir = iv(c"D_FADEINDIR")?;
@@ -1502,6 +1626,8 @@ impl NativeHost {
             fade_axes_v2: self.fade_axes_v2,
             auto_fade_in_sec,
             auto_fade_out_sec,
+            auto_fade_in_sec_host,
+            auto_fade_out_sec_host,
             source_file_name,
             source_length_sec,
         })

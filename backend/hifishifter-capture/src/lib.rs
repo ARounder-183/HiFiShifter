@@ -26,7 +26,11 @@
 // 在代码里），搬来之后为了两个格式外壳共享才变成 `pub`。要求它们逐个补齐字段级文档
 // 只会造出一堆复述字段名的噪音；真正需要解释的判定仍写在原处。
 #[allow(missing_docs)]
+pub mod anchor_probe;
+#[allow(missing_docs)]
 pub mod budget;
+#[allow(missing_docs)]
+pub mod project_map;
 #[allow(missing_docs)]
 pub mod recorder;
 #[allow(missing_docs)]
@@ -39,6 +43,9 @@ pub mod timeline;
 pub mod transport;
 pub mod types;
 
+pub use project_map::{
+    AnchorOutcome, AnchorPolicy, AnchorSource, FeedAnchor, ProjectMapCell, ProjectMapSegment,
+};
 pub use store::{
     CaptureOptions, CaptureSpan, CaptureStatus, CaptureStore, MaterialSpan, MaterialSummary,
     MissingCapture, RecordingStatus, TakeSummary,

@@ -1,6 +1,12 @@
 import { test } from "vitest";
 
-import { clipItemGain } from "./clipGain";
+import {
+    clipAudibleGain,
+    clipItemGain,
+    clipTakeGain,
+    clipTakeWaveformGain,
+    clipWaveformGain,
+} from "./clipGain";
 
 function assertEqual(actual: unknown, expected: unknown, label: string): void {
     if (actual !== expected) {
@@ -21,4 +27,12 @@ test("clipItemGain reads the item layer and never mistakes silence for absence",
     assertEqual(clipItemGain({ clip_gain: Number.POSITIVE_INFINITY }), 1, "Infinity falls back");
     // 负值钳到静音（与后端 clamp_gain 一致）。
     assertEqual(clipItemGain({ clip_gain: -3 }), 0, "negative clamps to silence");
+});
+
+test("clip gain layers multiply and preserve take polarity", () => {
+    assertEqual(clipTakeGain({ gain: -0.5 }), -0.5, "take sign survives");
+    assertEqual(clipAudibleGain({ clip_gain: 2, gain: -0.5 }), -1, "item × signed take");
+    assertEqual(clipWaveformGain({ clip_gain: 2, gain: -0.5 }), 1, "waveform is absolute");
+    assertEqual(clipTakeWaveformGain({ clip_gain: 4 }, -0.25), 1, "per-take lane amplitude");
+    assertEqual(clipAudibleGain({ clip_gain: 0, gain: 4 }), 0, "item silence wins");
 });

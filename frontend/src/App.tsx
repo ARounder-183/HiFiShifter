@@ -12,6 +12,7 @@ import {
 import { Flex, Button } from "@radix-ui/themes";
 import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
+import { ToolbarStrip } from "./components/layout/toolbar/ToolbarStrip";
 import { HostLinkPanel } from "./features/hostLink/HostLinkPanel";
 import { HostAudioNotice } from "./features/ara/HostAudioNotice";
 import { useSyllableAnalysisEvents } from "./features/session/useSyllableAnalysisEvents";
@@ -25,6 +26,7 @@ import {
 } from "./features/session/sessionSlice/extraReducers/transport";
 import { getPluginHost } from "./services/pluginHost";
 import {
+    completePendingImport,
     importAudioAtPosition,
     importMultipleAudioAtPosition,
 } from "./features/session/thunks/importThunks";
@@ -83,6 +85,7 @@ import {
     openReaperFromDialog,
     importAudioFromPath,
     saveProjectRemote,
+    importStalled,
     setTrackMeters,
     setVslibAvailable,
     setPlaybackRenderingState,
@@ -108,6 +111,7 @@ import { ParamDataLoadingChip } from "./components/layout/ParamDataLoadingChip";
 import { AppStatusProgressChips } from "./components/layout/AppStatusProgressChips";
 import { ParamBlockAnalysisStatus } from "./components/layout/pianoRoll/panel/ParamBlockAnalysisStatus";
 import { ParamBlockFeedbackChip } from "./components/layout/pianoRoll/panel/ParamBlockFeedbackChip";
+import { PlayheadTimeReadoutSlot } from "./components/layout/transport/PlayheadTimeReadoutSlot";
 import { appStatusProgressBus } from "./utils/appStatusProgressBus";
 const FileBrowserPanel = lazy(() =>
     import("./components/layout/FileBrowserPanel").then((module) => ({
@@ -121,6 +125,8 @@ const AppearanceSettingsPanel = lazy(() =>
 );
 import { UndoHistoryPanel } from "./components/layout/UndoHistoryPanel";
 import { DockRoot } from "./components/dock/DockRoot";
+import { AppChrome } from "./shell/AppChrome";
+import { DesktopChrome } from "./shell/DesktopChrome";
 import { registerBuiltinPanels } from "./components/dock/registerBuiltinPanels";
 import { attachBuiltinPanelComponents } from "./components/dock/attachBuiltinPanelComponents";
 import {
@@ -176,6 +182,14 @@ import { FolderImportHost } from "./components/layout/FolderImportHost";
 import { useKeybindings } from "./features/keybindings/useKeybindings";
 import { selectMergedKeybindings } from "./features/keybindings/keybindingsSlice";
 import { beginHoldRepeat } from "./features/keybindings/holdRepeat";
+import { ProjectLibrarySheet } from "./components/layout/ProjectLibrarySheet";
+import { useEditTelemetryFlush } from "./shell/useEditTelemetryFlush";
+import { appForm } from "./services/hostDetect";
+import {
+    DEFAULT_DISPATCH,
+    MOBILE_DISPATCH,
+    type ActionDispatchContext,
+} from "./features/keybindings/dispatchContext";
 import {
     ACTION_TO_EDIT_OP,
     PARAM_BLOCK_ACTION_TO_OP,
@@ -194,6 +208,7 @@ import {
     installWindowEventBridge,
     KEYBINDING_ACTION_EVENT,
 } from "./features/dock/windowEventBridge";
+import { installTimelineViewportBridge } from "./utils/timelineViewportBridge";
 import { setActiveEditorWindow } from "./features/session/interactionSlice";
 import {
     classifyHostKeyRelay,
@@ -288,6 +303,7 @@ const statusKey: Record<string, string> = {
     "Clip edit rejected": "status_clip_edit_rejected",
     "Track edit rejected": "status_track_edit_rejected",
     "Import done": "status_import_done",
+    "Import waiting for the host": "status_import_waiting_host",
     "Import failed": "status_import_failed",
     "Import audio failed": "status_import_audio_failed",
     "Project imported": "status_project_imported",
@@ -351,6 +367,8 @@ const errorCodeKey: Record<string, string> = {
     import_parse_failed: "vs_import_parse_failed",
     /* 前端合成码：音频导入 fulfilled 但 ok=false（原版只写灰色 status，失败不可辨） */
     import_audio_failed: "status_import_audio_failed",
+    /* 前端合成码：待定导入 60 s 仍未被宿主认领（见 import_stalled 事件） */
+    import_audio_stalled: "status_import_audio_stalled",
     // Take 操作被拒绝 / 失败（sessionSlice 以原文写入 error 通道）
     "Take switch rejected": "status_take_switch_rejected",
     "Take cycle rejected": "status_take_cycle_rejected",
@@ -594,6 +612,26 @@ function sameMeterContents(
     });
 }
 
+/**
+ * 移动外壳派发动作时用的**合成按键**。
+ *
+ * 【为什么需要一个假的 stroke】动作的派发器（`handleKeybindingAction`）签名要求一个
+ * 按键，因为它需要知道"用户按的是哪个键"来决定要不要把这次操作让给宿主
+ * （见 `hostKeyRelay`）。移动端没有按键 —— 而这个入口**永远不需要让路**：插件形态
+ * 不可能跑在移动端（插件由 DAW 加载，DAW 只在桌面）。
+ *
+ * 用一个显式的 `"__mobile__"` 而不是随便造一个 `"Space"`：万一将来有按 code 分支的
+ * 逻辑，它读到的会是一个一眼能看出"这不是键盘"的值，而不是一个会被误当成空格键的
+ * 字符串。
+ */
+const MOBILE_ACTION_STROKE: HostKeyStroke = {
+    code: "__mobile__",
+    ctrl: false,
+    shift: false,
+    alt: false,
+    meta: false,
+};
+
 function AppInner() {
     useSyllableAnalysisEvents();
     const dispatch = useAppDispatch();
@@ -608,6 +646,12 @@ function AppInner() {
     const toolMode = useAppSelector((state) => state.session.toolMode);
     const drawToolMode = useAppSelector((state) => state.session.drawToolMode);
     const projectDirty = useAppSelector((state) => state.session.project.dirty);
+    // 移动外壳的顶栏标题：工程名。空名按 "Untitled" 显示（与窗口标题同一口径）。
+    const projectName = useAppSelector((state) => state.session.project.name || "Untitled");
+    // 撤销/重做可用性。移动端没有菜单栏，按钮的置灰状态是**唯一**的可用性提示 ——
+    // 桌面还能靠菜单项灰掉来表达，移动端只能靠这两枚按钮。
+    const historyUndoDepth = useAppSelector((state) => state.session.historyUndoDepth);
+    const historyRedoDepth = useAppSelector((state) => state.session.historyRedoDepth);
     // playheadSec / selectedTrackId 均只在 handleImportMidiFromMenu 打开对话框
     // 的瞬间需要快照，经 store.getState() 读取即可 —— 订阅它们会让 AppInner
     // 随播放头移动 / seek 高频重渲。
@@ -1111,6 +1155,52 @@ function AppInner() {
         return () => {
             disposed = true;
             if (unlisten) unlisten();
+        };
+    }, [dispatch]);
+
+    // 宿主终于认领了一条待定导入（`import_ready`），或者等太久（`import_stalled`）。
+    //
+    // 【为什么必须有这条监听】回执的成功判据是「item 存在」，而宿主建 region 在它之后
+    // 几百毫秒。这期间「导入后规格化」不能做（那时还拿不到 source_path），做早了就是
+    // 静默跳过。这条事件是两件事之间唯一的汇合点。
+    useEffect(() => {
+        let disposed = false;
+        const unlisteners: Array<() => void> = [];
+
+        async function setup() {
+            try {
+                const mod = await import("./services/hostEvents");
+                unlisteners.push(
+                    await mod.listen(
+                        "import_ready",
+                        (event: { payload?: { item?: string; clipId?: string } }) => {
+                            if (disposed) return;
+                            const item = event?.payload?.item;
+                            if (typeof item !== "string" || !item) return;
+                            void dispatch(
+                                completePendingImport({ item, clipId: event.payload?.clipId }),
+                            );
+                        },
+                    ),
+                );
+                unlisteners.push(
+                    await mod.listen("import_stalled", (event: { payload?: { item?: string } }) => {
+                        if (disposed) return;
+                        dispatch(importStalled({ item: event?.payload?.item }));
+                    }),
+                );
+                if (disposed) {
+                    for (const off of unlisteners.splice(0)) off();
+                }
+            } catch {
+                // Safe no-op for non-Tauri builds.
+            }
+        }
+
+        void setup();
+        return () => {
+            disposed = true;
+            for (const off of unlisteners.splice(0)) off();
         };
     }, [dispatch]);
 
@@ -1877,7 +1967,26 @@ function AppInner() {
         });
     }, [dispatch, runOrPromptUnsavedAction]);
 
+    /**
+     * 工程库（移动端「打开工程」的入口）。
+     *
+     * 【为什么移动端不再走 SAF】保存是写进固定目录、打开却要用户自己找一个
+     * `.hshp` —— 用户看不到那个目录，于是「我保存的工程去哪了」与「我该打开
+     * 哪个文件」两个问题都回答不了。库把打开变成「从列表里点一条」；SAF 保留
+     * 给「从设备导入…」。
+     */
+    const [projectLibraryOpen, setProjectLibraryOpen] = useState(false);
+
+    // 编辑链路埋点的唯一出口（快照被丢弃 / 被推迟都会在这里留下证据）。
+    useEditTelemetryFlush();
+
     const handleOpenProject = useCallback(() => {
+        if (appForm() === "mobile") {
+            // 未保存改动的确认发生在**真正打开**那一步（`handleOpenRecentProject`），
+            // 因此这里只负责把库打开。
+            setProjectLibraryOpen(true);
+            return;
+        }
         runOrPromptUnsavedAction("switch", async () => {
             const result = await dispatch(openProjectFromDialog()).unwrap();
             showProjectVersionConfirmationIfNeeded(result);
@@ -2739,7 +2848,16 @@ function AppInner() {
 
     // 统一快捷键处理（通过 keybindings 模块管理，用户可自定义）
     const handleKeybindingAction = useCallback(
-        (actionId: ActionId, stroke: HostKeyStroke, surfaceOverride?: EditSurfaceId | null) => {
+        (
+            actionId: ActionId,
+            stroke: HostKeyStroke,
+            surfaceOverride?: EditSurfaceId | null,
+            dispatchContext: ActionDispatchContext = DEFAULT_DISPATCH,
+        ) => {
+            // 【长按重复只属于真键盘】合成派发（菜单 / 抽屉 / 快捷面板 / 独立窗口）
+            // 没有 `keyup` 可等，一旦布防就永不停止 —— 用户「点一下撤销」会变成
+            // 「每 50ms 撤一次」。判据集中在 dispatchContext，不散在 8 个调用点。
+            const allowHoldRepeat = dispatchContext.repeat;
             // 独立窗口交回的快捷键带 sourceSurface：不能再用主窗口自己的 getActiveSurface，
             // 否则会把卫星参数编辑器的操作误路由到主窗口时间轴。
             const activeSurface = surfaceOverride ?? getActiveSurface();
@@ -2815,16 +2933,17 @@ function AppInner() {
                     let channel: EditOpChannel | null = null;
                     const pasteKb = selectMergedKeybindings(store.getState())["clip.paste"];
                     if (pasteKb) {
-                        beginHoldRepeat(pasteKb, () => {
-                            if (
-                                channel === "hifi:timelineEditOp" &&
-                                pluginAllowsEditChannel(channel, "paste")
-                            ) {
-                                window.dispatchEvent(
-                                    new CustomEvent(channel, { detail: { op: "paste" } }),
-                                );
-                            }
-                        });
+                        if (allowHoldRepeat)
+                            beginHoldRepeat(pasteKb, () => {
+                                if (
+                                    channel === "hifi:timelineEditOp" &&
+                                    pluginAllowsEditChannel(channel, "paste")
+                                ) {
+                                    window.dispatchEvent(
+                                        new CustomEvent(channel, { detail: { op: "paste" } }),
+                                    );
+                                }
+                            });
                     }
                     void (async () => {
                         let kind: string | null = null;
@@ -2982,7 +3101,7 @@ function AppInner() {
                         );
                         return hasUndoableStep;
                     };
-                    if (fire()) {
+                    if (fire() && allowHoldRepeat) {
                         beginHoldRepeat(
                             selectMergedKeybindings(store.getState())["edit.undo"],
                             fire,
@@ -3001,7 +3120,7 @@ function AppInner() {
                         );
                         return hasRedoableStep;
                     };
-                    if (fire()) {
+                    if (fire() && allowHoldRepeat) {
                         beginHoldRepeat(
                             selectMergedKeybindings(store.getState())["edit.redo"],
                             fire,
@@ -3114,7 +3233,12 @@ function AppInner() {
                         return true;
                     };
                     fire();
-                    beginHoldRepeat(selectMergedKeybindings(store.getState())["track.add"], fire);
+                    if (allowHoldRepeat) {
+                        beginHoldRepeat(
+                            selectMergedKeybindings(store.getState())["track.add"],
+                            fire,
+                        );
+                    }
                     break;
                 }
                 case "track.clone": {
@@ -3127,7 +3251,7 @@ function AppInner() {
                         void dispatch(duplicateTrackRemote(selectedId));
                         return true;
                     };
-                    if (fire()) {
+                    if (fire() && allowHoldRepeat) {
                         beginHoldRepeat(
                             selectMergedKeybindings(store.getState())["track.clone"],
                             fire,
@@ -3429,7 +3553,7 @@ function AppInner() {
                         })();
                         return true;
                     };
-                    if (fire()) {
+                    if (fire() && allowHoldRepeat) {
                         beginHoldRepeat(selectMergedKeybindings(store.getState())[actionId], fire);
                     }
                     break;
@@ -3470,7 +3594,7 @@ function AppInner() {
                         );
                         return true;
                     };
-                    if (fire()) {
+                    if (fire() && allowHoldRepeat) {
                         beginHoldRepeat(selectMergedKeybindings(store.getState())[actionId], fire);
                     }
                     break;
@@ -3505,10 +3629,12 @@ function AppInner() {
                         return true;
                     };
                     fire();
-                    beginHoldRepeat(
-                        selectMergedKeybindings(store.getState())["edit.pasteTracks"],
-                        fire,
-                    );
+                    if (allowHoldRepeat) {
+                        beginHoldRepeat(
+                            selectMergedKeybindings(store.getState())["edit.pasteTracks"],
+                            fire,
+                        );
+                    }
                     break;
                 }
                 // 注：edit.pasteVocalShifter（文件型剪贴板）未启用长按重复 ——
@@ -3548,7 +3674,13 @@ function AppInner() {
                 }>
             ).detail;
             if (!detail?.actionId || !detail.stroke) return;
-            handleKeybindingAction(detail.actionId, detail.stroke, detail.surface ?? null);
+            // 独立窗口转发：**不布防长按重复**。`holdRepeat` 的终止靠主窗口的
+            // `keyup`，而用户是在**那个**窗口按的键 —— 松手事件永远到不了这里，
+            // 布防就等于一次点击变无限重复（与移动端抽屉同一类缺陷）。
+            handleKeybindingAction(detail.actionId, detail.stroke, detail.surface ?? null, {
+                source: "shortcut",
+                repeat: false,
+            });
         };
         window.addEventListener(KEYBINDING_ACTION_EVENT, onDetachedShortcut as EventListener);
         return () =>
@@ -3721,7 +3853,10 @@ function AppInner() {
             if (paths.length === 0) return;
             const session = store.getState().session;
             const startSec = session.playheadSec ?? 0;
-            const trackId = session.selectedTrackId ?? null;
+            // 【"没选中轨" = 未指定，不是"新建轨"】`null` 在这条链上专指"显式新建"
+            // （见 `importAudioAtPosition` 的三态说明）；拖放落点没有指定轨道时必须留空，
+            // 否则插件里每拖一个文件就多一条宿主轨。
+            const trackId = session.selectedTrackId ?? undefined;
             if (paths.length === 1) {
                 void dispatch(importAudioAtPosition({ audioPath: paths[0], trackId, startSec }));
             } else {
@@ -3751,6 +3886,7 @@ function AppInner() {
     // 阶段位于传播链最前端，子元素的 preventDefault / stopPropagation 均
     // 无法逃过解析（时间轴正是靠 preventDefault 自管焦点的）。
     useEffect(() => installWindowEventBridge(), []);
+    useEffect(() => installTimelineViewportBridge(), []);
     useEffect(
         () =>
             installFocusSurfaceTracking(() => {
@@ -4044,10 +4180,171 @@ function AppInner() {
         </Suspense>
     ));
 
+    // ── 外壳装配（见 `shell/AppChrome.tsx`）─────────────────────────────────
+    /**
+     * 移动外壳派发一条动作。
+     *
+     * 【为什么复用 `handleKeybindingAction`】它是全仓**唯一**的动作派发器：
+     * 快捷键、独立窗口的转发、以及现在的移动抽屉，走的都是同一条路径。
+     * 另写一个"执行动作"的 switch 会让移动端与桌面端在某些动作上分叉 ——
+     * 而那类分叉只会表现为"这个功能在手机上行为不一样"，很难被注意到。
+     */
+    const handleMobileAction = useCallback(
+        // 移动端抽屉 / 顶栏按钮：合成派发，**永不**布防长按重复。
+        // 这正是用户报的「点一下撤销，它自己一直撤」的直接成因：抽屉走的是
+        // 同一条派发器，而 `beginHoldRepeat` 只由 `keyup`/`blur` 终止 ——
+        // 触摸屏上没有 `keyup`。
+        (actionId: ActionId) =>
+            handleKeybindingAction(actionId, MOBILE_ACTION_STROKE, null, MOBILE_DISPATCH),
+        [handleKeybindingAction],
+    );
+
+    /*
+     * 状态栏内容。
+     *
+     * 【为什么抽成变量而不是复制两份 JSX】桌面把它放在底部状态条、移动端放在底栏
+     * 最后一行 —— 容器不同、内容相同。复制一份是最容易漂移的写法（改一处忘一处），
+     * 而漂移的症状是"手机上看到的状态和桌面上说的不是一回事"。
+     */
+    const desktopStatusBarContent = (
+        <>
+            <Flex align="center" gap="1" className="truncate min-w-0">
+                {/* 排列规则：**长时效的提示在前，短时效的进度片在后**。
+                    绿色提示位（后台缓存统计 / 自动声道折叠）会挂十几秒，而
+                    紫色进度片（拉伸、波形分析、渲染…）只是几百毫秒的过客。
+                    若把进度片放在前面，它每出现/消失一次，后面所有片就整体
+                    横移一次 —— 用户视线里"提示在乱动"。把长时效的钉在最左，
+                    短的插在它右侧，左侧位置就永远稳定。 */}
+                {noticeText ? (
+                    <AppStatusChip tone={noticeTone} tooltip={noticeTooltip || undefined}>
+                        {noticeText}
+                    </AppStatusChip>
+                ) : null}
+                {importBusy ? (
+                    <AppStatusChip tone="accent">{t("status_importing")}</AppStatusChip>
+                ) : null}
+                <PitchAnalysisStatusChip />
+                <ParamBlockAnalysisStatus enabled />
+                <ParamBlockFeedbackChip />
+                <ParamDataLoadingChip />
+                <AppStatusProgressChips />
+                <span
+                    className="hs-type-label truncate"
+                    style={{
+                        ...(error ? { color: "var(--qt-danger-text)" } : {}),
+                        ...(statusDetailText ? { cursor: "help" } : {}),
+                    }}
+                    title={statusDetailText}
+                    data-status-detail={statusDetailText ? "1" : undefined}
+                >
+                    {errorText}
+                </span>
+            </Flex>
+            <PlayheadTimeReadoutSlot slot="statusBar" />
+            {isPluginMode() ? (
+                <>
+                    <PluginApplyStatus
+                        onTimelineChanged={async () => {
+                            await dispatch(fetchTimeline()).unwrap();
+                        }}
+                    />
+                    <CaptureHostLinkExportControl />
+                </>
+            ) : null}
+        </>
+    );
+
+    /*
+     * 移动端的状态栏：只留**两件事** —— 一条长时效提示、一条错误。
+     *
+     * 【为什么不是同一份内容】桌面状态条有 24px 高、整行宽，能摆 6 个进度片；
+     * 移动端底栏那一行还要容纳修饰键行与传输按钮，390px 宽装不下 6 个片。而进度
+     * 本身在画布上已有反馈（渲染中/分析中会改变光标与波形），这里只留"用户需要
+     * 读一句话才能决定下一步"的两类。
+     */
+    const mobileStatusBar = (
+        <div
+            className="flex items-center gap-1 truncate px-1 text-qt-micro"
+            style={{ minHeight: "var(--qt-bar-status)" }}
+        >
+            {noticeText ? <AppStatusChip tone={noticeTone}>{noticeText}</AppStatusChip> : null}
+            <span className="truncate text-qt-text-muted">{errorText}</span>
+        </div>
+    );
+
+    /*
+     * 菜单栏节点**只构造一次**，桌面与移动共用同一个实例。
+     *
+     * 【为什么必须是同一个实例】`MenuBar` 内部持有十几套对话框的开关状态，并在
+     * `useEffect` 里监听 `hifi:openEditDialog` / `hifi:importMediaFromMenu`。
+     * 渲染两份会让同一个事件触发两次、同一个对话框被打开两次；而移动端此前
+     * `display:none` 挂载它的理由（对话框宿主）也要求它只有一份。
+     *
+     * 桌面把它放进 `DesktopChrome` 的菜单槽位；移动端把它放进菜单 sheet
+     * （见 `AppChrome` 的 `mobileMenu`）—— 同一时刻只会出现在其中一处。
+     */
+    const menuBarNode = (
+        <MenuBar
+            onNewProject={handleNewProject}
+            onOpenProject={handleOpenProject}
+            onOpenRecentProject={handleOpenRecentProject}
+            onRecaptureMissingMedia={handleRecaptureMissingMedia}
+            onImportProject={handleImportProject}
+            onExit={handleExitApp}
+            onImportMidiFromMenu={handleImportMidiFromMenu}
+            autoBackupSettings={autoBackupSettings}
+            onAutoBackupSettingsSaved={handleAutoBackupSettingsSaved}
+            autoReloadModifiedMedia={autoReloadModifiedMedia}
+            onAutoReloadModifiedMediaChange={handleAutoReloadModifiedMediaChange}
+            loopNewClips={loopNewClips}
+            onLoopNewClipsChange={handleLoopNewClipsChange}
+        />
+    );
+
     return (
-        <Flex
-            direction="column"
-            className="h-screen w-screen bg-qt-window text-qt-text overflow-hidden font-sans text-qt-md selection:bg-qt-highlight selection:text-white"
+        <AppChrome
+            /*
+             * 【为什么外壳只有一个装配点】见 `shell/AppChrome.tsx` 的说明：
+             * 形态分支、根容器度量（dvh / 安全区 / overflow）、抽屉生命周期必须同时
+             * 成立。分散在三处时，漏掉任何一条的症状都是"底部工具栏被手势条盖住 8px"
+             * 这种肉眼要盯很久才发现的问题。
+             */
+            mobileMenu={menuBarNode}
+            /*
+             * 工具栏的两个宿主：桌面在 `DesktopChrome` 的第二层（菜单与宿主提示条之间），
+             * 移动端在工具栏 sheet 里。**同一个组件**，只是 `variant` 不同 —— 控件定义
+             * 只有一份，所以"桌面有、手机没有"这类分叉不可能再长出来。
+             */
+            mobileToolbar={<ToolbarStrip variant="sheet" />}
+            desktopHeader={
+                <DesktopChrome
+                    menuBar={menuBarNode}
+                    actionBar={<ActionBar />}
+                    notice={
+                        isPluginMode() ? (
+                            <HostAudioNotice status={hostAudio} restore={hostAudioRestore} />
+                        ) : null
+                    }
+                />
+            }
+            desktopFooter={
+                <Flex
+                    align="center"
+                    justify="between"
+                    className="h-qt-bar-status bg-qt-window border-t border-qt-border px-1 select-none gap-2"
+                >
+                    {desktopStatusBarContent}
+                </Flex>
+            }
+            mobileTitle={projectName}
+            mobileDirty={projectDirty}
+            canUndo={historyUndoDepth > 0}
+            canRedo={historyRedoDepth > 0}
+            isPlaying={Boolean(runtimeIsPlaying)}
+            onTogglePlay={() => handleMobileAction("playback.toggle")}
+            onStop={() => handleMobileAction("playback.stop")}
+            onMobileAction={handleMobileAction}
+            mobileStatusBar={mobileStatusBar}
         >
             <AppDialog
                 open={Boolean(vocalShifterSkippedFilesDialog?.length)}
@@ -4677,32 +4974,10 @@ function AppInner() {
                 onConfirm={handleImportProjectConfirmed}
             />
 
-            <MenuBar
-                onNewProject={handleNewProject}
-                onOpenProject={handleOpenProject}
-                onOpenRecentProject={handleOpenRecentProject}
-                onRecaptureMissingMedia={handleRecaptureMissingMedia}
-                onImportProject={handleImportProject}
-                onExit={handleExitApp}
-                onImportMidiFromMenu={handleImportMidiFromMenu}
-                autoBackupSettings={autoBackupSettings}
-                onAutoBackupSettingsSaved={handleAutoBackupSettingsSaved}
-                autoReloadModifiedMedia={autoReloadModifiedMedia}
-                onAutoReloadModifiedMediaChange={handleAutoReloadModifiedMediaChange}
-                loopNewClips={loopNewClips}
-                onLoopNewClipsChange={handleLoopNewClipsChange}
-            />
-            <ActionBar />
-
             {/*
-             * 宿主音频提示条：只在"插件挂在 REAPER 轨道组（folder）父轨上、因此拿不到
-             * 组内子轨音频"时出现（见 `HostAudioNotice`）。放在工作区**之上**而不是
-             * 状态栏里：这条提示要给出原因与下一步，状态栏那个高度装不下；而它出现时
-             * 用户看到的正是一片没有内容的片段，提示必须紧挨着那片区域。
+             * 菜单栏 / 动作栏 / 宿主提示条已经搬到 `desktopHeader`（见 return 处）。
+             * 移动形态根本不渲染它们 —— 移动端的外壳是顶栏 + 抽屉 + 底栏。
              */}
-            {isPluginMode() ? (
-                <HostAudioNotice status={hostAudio} restore={hostAudioRestore} />
-            ) : null}
 
             {/*
              * 工作区：全部可停靠窗体由布局树驱动。
@@ -4722,80 +4997,19 @@ function AppInner() {
               不同位置 —— 只有一份对话框状态，才不会出现"两个面板各弹一个"。
             */}
             <FolderImportHost />
+            {/* 工程库：移动端「打开工程」的列表表面（见 `handleOpenProject`）。 */}
+            <ProjectLibrarySheet
+                open={projectLibraryOpen}
+                onClose={() => setProjectLibraryOpen(false)}
+                onOpenProject={(path) => handleOpenRecentProject(path)}
+                onImportFromDevice={() => {
+                    setProjectLibraryOpen(false);
+                    void handleImportProject();
+                }}
+            />
 
-            {/* Status Bar */}
-            <Flex
-                align="center"
-                justify="between"
-                className="h-qt-bar-status bg-qt-window border-t border-qt-border px-1 select-none gap-2"
-            >
-                <Flex align="center" gap="1" className="truncate min-w-0">
-                    {/* 排列规则：**长时效的提示在前，短时效的进度片在后**。
-                        绿色提示位（后台缓存统计 / 自动声道折叠）会挂十几秒，而
-                        紫色进度片（拉伸、波形分析、渲染…）只是几百毫秒的过客。
-                        若把进度片放在前面，它每出现/消失一次，后面所有片就整体
-                        横移一次 —— 用户视线里"提示在乱动"。把长时效的钉在最左，
-                        短的插在它右侧，左侧位置就永远稳定。 */}
-                    {noticeText ? (
-                        <AppStatusChip tone={noticeTone} tooltip={noticeTooltip || undefined}>
-                            {noticeText}
-                        </AppStatusChip>
-                    ) : null}
-                    {/* 导入等待提示：只在真慢时点亮（见 IMPORT_BUSY_DELAY_MS），
-                        位置紧跟长时效提示位之后、短时效进度片之前。 */}
-                    {importBusy ? (
-                        <AppStatusChip tone="accent">{t("status_importing")}</AppStatusChip>
-                    ) : null}
-                    {/* 音高分析进度片：**独立订阅** PitchAnalysisContext，
-                        逐 clip 的进度事件不参与本组件重渲染
-                        （见 PitchAnalysisStatusChip 的说明）。 */}
-                    <PitchAnalysisStatusChip />
-                    {/* 音符块（GAME / VAD）分析：与音高进度同一状态栏槽位。 */}
-                    <ParamBlockAnalysisStatus enabled />
-                    {/* 参数块编辑反馈：错误 / 拒绝 / 需要用户处置的提示统一走状态栏。 */}
-                    <ParamBlockFeedbackChip />
-                    {/* 参数曲线取数提示：**独立订阅**外部 store，不参与本组件重渲染
-                        （见 ParamDataLoadingChip 的说明）。 */}
-                    <ParamDataLoadingChip />
-                    {/* 高频进度三片（拉伸 / 波形分析 / 渲染进度）：**独立订阅**外部
-                        store，不参与本组件重渲染（见 AppStatusProgressChips 的说明）。 */}
-                    <AppStatusProgressChips />
-                    <span
-                        className="hs-type-label truncate"
-                        style={{
-                            ...(error ? { color: "var(--qt-danger-text)" } : {}),
-                            ...(statusDetailText ? { cursor: "help" } : {}),
-                        }}
-                        title={statusDetailText}
-                        data-status-detail={statusDetailText ? "1" : undefined}
-                    >
-                        {errorText}
-                    </span>
-                </Flex>
-                {/*
-                  状态栏右侧槽位：插件宿主的「自动应用」状态。
-                  它曾经是 `ActionBar` 与工作区之间的一整行横条 —— 在插件那个小窗口里
-                  一整行高度很贵，而这段内容本来就是状态读数，归状态栏。
-                  （见 `PluginApplyStatus`：片独立订阅外部 store，250 ms 的轮询不会
-                  带动本组件重渲染。）
-                */}
-                {isPluginMode() ? (
-                    <>
-                        <PluginApplyStatus
-                            onTimelineChanged={async () => {
-                                await dispatch(fetchTimeline()).unwrap();
-                            }}
-                        />
-                        {/*
-                          「导出到 HiFiShifter」：插件把工作区导出到磁盘，用户再在独立
-                          App 里打开它编辑。它同样是一段状态读数 + 一个动作，归状态栏
-                          （见 `HostLinkExportControl` 的文件头）。
-                        */}
-                        <CaptureHostLinkExportControl />
-                    </>
-                ) : null}
-            </Flex>
-        </Flex>
+            {/* 状态栏内容已上移到 `desktopFooter` / `mobileStatusBar`（见 return 处）。 */}
+        </AppChrome>
     );
 }
 

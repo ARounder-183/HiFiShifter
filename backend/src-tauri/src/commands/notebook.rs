@@ -469,6 +469,7 @@ fn extension_of(path: &Path) -> String {
 /// 导出物是**单个自包含文件**（图片以 data URI 内嵌），不生成任何旁挂目录 ——
 /// 与工程本身的存储模型一致：内容跟着文件走，拷到哪里都能看。
 pub(super) fn export_document(
+    app: &tauri::AppHandle,
     state: State<'_, AppState>,
     suggested_name: String,
     extension: String,
@@ -481,10 +482,10 @@ pub(super) fn export_document(
 
     // 类型名与扩展名同源（内核词表），不再在这里按扩展名手抄一份标签。
     let file_type = hifishifter_kernel::file_types::notebook_document(&ext);
-    let picked = rfd::FileDialog::new()
+    let picked = crate::platform::dialog::FileDialog::new()
         .add_filter(file_type.name(), &file_type.extension_refs())
         .set_file_name(format!("{base_name}.{ext}"))
-        .save_file();
+        .save_file(app);
     let Some(output_path) = picked else {
         return json!({ "ok": true, "canceled": true });
     };
@@ -538,6 +539,7 @@ pub(super) fn export_document(
 
 /// 把一条附件的内容另存到用户选定路径（从内嵌数据里"取出"一个文件）。
 pub(super) fn save_asset_as(
+    app: &tauri::AppHandle,
     state: State<'_, AppState>,
     asset_id: String,
     suggested_name: Option<String>,
@@ -566,10 +568,10 @@ pub(super) fn save_asset_as(
     // 【为什么这里此前没有过滤器】附件另存为是唯一一处"只设文件名"的保存对话框，
     // 于是可以存成任意扩展名 —— 与插件侧同一个缺口。类型名由资产扩展名派生。
     let file_type = hifishifter_kernel::file_types::FileType::asset(&asset.ext);
-    let picked = rfd::FileDialog::new()
+    let picked = crate::platform::dialog::FileDialog::new()
         .set_file_name(name)
         .add_filter(file_type.name(), &file_type.extension_refs())
-        .save_file();
+        .save_file(app);
     let Some(output_path) = picked else {
         return json!({ "ok": true, "canceled": true });
     };

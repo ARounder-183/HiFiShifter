@@ -1,4 +1,6 @@
 //! 原生QI/vtable/raw函数回归；fixture不是实际REAPER parent/API返回的验收证据。
+#[cfg(test)]
+use super::media::PeakKick;
 use super::*;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -524,6 +526,7 @@ unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_voi
         "Undo_GetNumEntries" if f.writer_enabled.get() => undo_count as *const (),
         "Undo_GetEntryDesc" if f.writer_enabled.get() => undo_entry as *const (),
         "PCM_Source_CreateFromFileEx" if f.media_enabled.get() => media_source as *const (),
+        "PCM_Source_BuildPeaks" if f.media_enabled.get() => build_peaks as *const (),
         "PCM_Source_Destroy" if f.media_enabled.get() => media_destroy as *const (),
         "GetMediaSourceLength" if f.media_enabled.get() => media_length as *const (),
         "AddMediaItemToTrack" if f.media_enabled.get() => media_item as *const (),
@@ -775,6 +778,19 @@ unsafe extern "C" fn set_take(object: *mut c_void, name: *const c_char, value: f
     );
     let name = unsafe { CStr::from_ptr(name) }.to_str().unwrap();
     f.record(format!("write-take:{name}"));
+    // 【take 音量有自己的一格】见 `take_volume` 的说明：它必须独立于 item 的
+    // `D_VOL`，否则"改 clip 音量顺带改了 take 极性"这类回归在夹具里看不见。
+    // 写入也要落到那一格上，否则 `take_gain` 的读数永远停在夹具初值 —— 而
+    // "写进去了没有"正是 take 层唯一的判据。
+    if name == "D_VOL" {
+        f.take_volume.set(value);
+        f.change.set(f.change.get().wrapping_add(1));
+        // 【写完就返回】读数路径对 take 的 D_VOL 是**单独拦截**的（见 `value`），
+        // 所以这一格绝不能同时落进共用的 `values` 表 —— 那张表就是 item 的读数表，
+        // 一旦写进去，"只改 take 层"的用例会看到 item 层跟着变成新值，夹具本身
+        // 伪造出了它正要证伪的那个缺陷。
+        return true;
+    }
     let mut values = f.values.borrow_mut();
     let key = values.keys().find(|key| **key == name).copied();
     if let Some(key) = key {
@@ -912,6 +928,22 @@ unsafe extern "C" fn media_source(path: *const c_char, force: bool) -> *mut c_vo
     f.media_sources.borrow_mut().push(source);
     pointer
 }
+/// `int PCM_Source_BuildPeaks(PCM_source* src, int mode)`：只回答"这一轮建完了"。
+///
+/// 【为什么断言 `mode == 0`】1 是**强制重建**：同一条 item 被导入两次会白重算一整份
+/// 峰值文件。用例把它钉死，避免哪天有人为了"更保险"改成 1。
+unsafe extern "C" fn build_peaks(source: *mut c_void, mode: i32) -> i32 {
+    let f = fixture();
+    assert_eq!(mode, 0, "缺才建，不强制重建");
+    assert_eq!(
+        source as usize,
+        f.take_source.get(),
+        "峰值必须建在活动 take 的那个源上"
+    );
+    f.record("build-peaks");
+    1
+}
+
 unsafe extern "C" fn media_destroy(pointer: *mut c_void) {
     let f = fixture();
     f.record("media-source-destroy");
@@ -1267,7 +1299,7 @@ const SECTION_HANDLE: usize = 0x5EC7;
 ///
 /// 【为什么"无关动作"必须在最前面】真实现是按索引逐条枚举、按名字匹配；只有表里存在
 /// 不匹配的条目，"匹配错位置"才会被用例抓住。
-fn action_table() -> [(&'static std::ffi::CStr, i32); 3] {
+fn action_table() -> [(&'static std::ffi::CStr, i32); 4] {
     [
         (c"File: New project", 40023),
         (
@@ -1275,6 +1307,9 @@ fn action_table() -> [(&'static std::ffi::CStr, i32); 3] {
             fixture().pitch_action_id.get(),
         ),
         (c"Item properties: Toggle take reverse", 41051),
+        // 峰值那条退路的**公开名字**；命令号与它一起写在这里，才测得出
+        // "按名字解析而不是背号码"。
+        (c"Item: Build peaks for selected items", 40047),
     ]
 }
 
@@ -1736,6 +1771,151 @@ fn host_media_import_failure_removes_only_created_item_and_frees_unattached_sour
     );
     assert!(f.media_sources.borrow().is_empty());
 }
+/// `PCM_source* GetMediaItemTake_Source` / `GetActiveTake` 由 `enable_item_state`
+/// 那一束夹具一起打开：导入用例需要的三件套（枚举 / 活动 take / 媒体 API）。
+fn peaks_fixture() -> (
+    &'static Fixture,
+    std::sync::Arc<NativeHost>,
+    HostTrackTarget,
+) {
+    let f = Fixture::new();
+    f.enable_item_state(&f.single_take_chunk());
+    f.inventory_enabled.set(true);
+    let host = std::sync::Arc::new(f.client());
+    let target = host.direct_track_target(&|| true).unwrap();
+    (f, host, target)
+}
+
+/// 峰值必须在**导入守卫退出之后**才踢。
+///
+/// 【为什么这条用例是本质的】现场缺陷的成因不是"没调峰值 API"，而是"调它的时机在
+/// 宿主回调里"：REAPER 的峰值作业排进自己的空闲期，回调里请求等于把这一轮空闲用掉。
+/// 这条用例把那个**时间关系**钉成断言：守卫在的时候，`kick_peaks` 必须拒绝执行，
+/// 且一次宿主调用都不许发生（拒绝要发生在碰宿主之前）。
+#[test]
+fn the_import_kicks_peaks_after_the_host_call_guard_is_released() {
+    let f = Fixture::new();
+    f.enable_media();
+    // 清单枚举 + 多 take 枚举：前者给"这条 item"，后者给"它上面哪一条 take"。
+    // 不用 `enable_takes`：它会预置一个哨兵 `take_source`，而导入会把那个哨兵当成
+    // "旧源"去销毁 —— 那是另一个用例的形状，这里要的是"真的没有旧源"。
+    f.inventory_enabled.set(true);
+    f.takes_enabled.set(true);
+    let host = std::sync::Arc::new(f.client());
+    let target = host.direct_track_target(&|| true).unwrap();
+    let guid = target
+        .import_audio(&abs_path("clip.wav"), 0., &|| true)
+        .unwrap();
+    // 导入函数返回 ⇒ 它内部的守卫已经 Drop ⇒ 现在"不在宿主调用里"。
+    assert!(!crate::host::in_host_call());
+    assert_eq!(
+        target.kick_peaks(&guid, &|| true).unwrap(),
+        PeakKick::Built(1)
+    );
+    assert!(f.calls().iter().any(|call| call == "build-peaks"));
+    // 在另一层守卫里踢：拒绝，而且**没有任何**宿主调用（判据在碰宿主之前）。
+    let before = f.calls().len();
+    let depth = crate::host::HostCallGuard::enter("test");
+    assert_eq!(
+        target
+            .kick_peaks("{99999999-9999-9999-9999-999999999999}", &|| true)
+            .unwrap(),
+        PeakKick::Skipped("host-call")
+    );
+    drop(depth);
+    assert_eq!(f.calls().len(), before, "拒绝必须发生在调用宿主之前");
+}
+
+/// 一次导入只踢一次：重复请求是"已经踢过"，不是"再踢一次"。
+#[test]
+fn peaks_are_kicked_once_per_imported_item() {
+    let (f, _host, target) = peaks_fixture();
+    let guid = "{11111111-1111-1111-1111-111111111111}";
+    assert_eq!(
+        target.kick_peaks(guid, &|| true).unwrap(),
+        PeakKick::Built(1)
+    );
+    assert_eq!(
+        target.kick_peaks(guid, &|| true).unwrap(),
+        PeakKick::Skipped("repeat")
+    );
+    assert_eq!(
+        f.calls()
+            .iter()
+            .filter(|call| call.as_str() == "build-peaks")
+            .count(),
+        1
+    );
+}
+
+/// 回滚的导入不踢峰值；已经不在的 item 也不是错误。
+#[test]
+fn a_cancelled_import_never_kicks_peaks() {
+    let f = Fixture::new();
+    f.enable_media();
+    f.inventory_enabled.set(true);
+    f.fail_media_take.set(true);
+    let host = std::sync::Arc::new(f.client());
+    let target = host.direct_track_target(&|| true).unwrap();
+    assert!(target
+        .import_audio(&abs_path("clip.wav"), 0., &|| true)
+        .is_err());
+    assert!(!f.calls().iter().any(|call| call == "build-peaks"));
+    // 用户撤销之后按 GUID 找回 item ⇒ 找不到。这条路径必须**安静**：撤销是正常操作。
+    assert_eq!(
+        target
+            .kick_peaks("{00000000-0000-0000-0000-000000000000}", &|| true)
+            .unwrap(),
+        PeakKick::Gone
+    );
+    assert!(!f.calls().iter().any(|call| call == "build-peaks"));
+}
+
+/// 源级入口缺席时退到宿主动作，并且**改完选区要还回去**。
+#[test]
+fn peaks_fall_back_to_the_host_action_when_the_api_is_absent() {
+    let f = Fixture::new();
+    f.enable_item_state(&f.single_take_chunk());
+    f.inventory_enabled.set(true);
+    f.take_env_enabled.set(true);
+    // 必须在 `client()` **之前**：缺 API 是适配器**装配时**的事实，不是每次调用的。
+    f.missing.set(Some("PCM_Source_BuildPeaks"));
+    let host = std::sync::Arc::new(f.client());
+    let target = host.direct_track_target(&|| true).unwrap();
+    let guid = "{11111111-1111-1111-1111-111111111111}";
+    assert_eq!(target.kick_peaks(guid, &|| true).unwrap(), PeakKick::Action);
+    assert!(
+        f.calls().iter().any(|call| call == "run-command-ex:40047"),
+        "{:?}",
+        f.calls()
+    );
+    assert!(!f.item_ui_selected.get(), "动作路径必须还原用户的选区");
+}
+
+/// 【回归】宿主那一对 `*_AUTO` 是**派生值**，一旦插件写过就以插件为准。
+///
+/// 现场：关掉自动交叉淡化后拖动 clip，REAPER 按工程级 auto-crossfade 给 item 写上
+/// `D_FADEINLEN_AUTO`，插件下一次回读把它镜像进模型 ⇒ 包络先闪成交叉淡化，
+/// 再被写回 0 变回去。模型与宿主镜像分开存之后，这条路径只剩一行 Debug 读数。
+#[test]
+fn a_host_auto_fade_never_overrides_what_the_plugin_wrote() {
+    let f = Fixture::new();
+    f.enable_media();
+    let host = std::sync::Arc::new(f.client());
+    // 冷加载：本会话还没写过这条 item ⇒ 宿主值**播种**进模型（工程的真实状态，不丢）。
+    let cold = f.geometry(&host).unwrap();
+    assert_eq!(cold.auto_fade_in_sec, 0.4);
+    assert_eq!(cold.auto_fade_in_sec_host, 0.4);
+    // 插件写下 0 ⇒ 从此模型是 0，宿主的镜像读数照旧如实。
+    host.remember_auto_fades(&cold.item_id, 0., 0.);
+    f.set_value("D_FADEINLEN_AUTO", 1.0);
+    f.set_value("D_FADEOUTLEN_AUTO", 1.0);
+    let warm = f.geometry(&host).unwrap();
+    assert_eq!(warm.auto_fade_in_sec, 0., "宿主 auto 不许进模型");
+    assert_eq!(warm.auto_fade_out_sec, 0., "宿主 auto 不许进模型");
+    assert_eq!(warm.auto_fade_in_sec_host, 1.0, "镜像读数仍然如实");
+    assert_eq!(warm.auto_fade_out_sec_host, 1.0, "镜像读数仍然如实");
+}
 unsafe extern "C" fn update_item(item: *mut c_void) {
     let f = fixture();
     assert!(item == f.item() || item == f.right_item());
@@ -1841,6 +2021,17 @@ unsafe extern "C" fn item_guid(o: *mut c_void, n: *const c_char, b: *mut c_char,
     guid(o, n, b, w, false)
 }
 unsafe extern "C" fn take_guid(o: *mut c_void, n: *const c_char, b: *mut c_char, w: bool) -> bool {
+    // 导入会给 take 起名（`P_NAME`）。名字是**可写**的，与只读的 GUID 走不同分支 ——
+    // 判据与 `media_track_guid` 的 P_NAME 分支同形。
+    if w {
+        assert_eq!(unsafe { CStr::from_ptr(n) }, c"P_NAME");
+        fixture().record("take-name");
+        return true;
+    }
+    if unsafe { CStr::from_ptr(n) } == c"P_NAME" {
+        fixture().record("take-name-read");
+        return true;
+    }
     guid(o, n, b, w, true)
 }
 unsafe extern "C" fn count(take: *mut c_void) -> i32 {

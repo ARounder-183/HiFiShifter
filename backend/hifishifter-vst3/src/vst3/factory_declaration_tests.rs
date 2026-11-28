@@ -11,6 +11,7 @@
 use super::*;
 use ara2_bridge::companion::vst3::ffi::ara2_vst3_release;
 use ara2_bridge::core::ApiGeneration;
+use hifishifter_plugin::vst3_abi::uid_guid;
 use std::ffi::CStr;
 
 /// 读一个 `[c_char; N]` 字段（Windows 上 `c_char` 是 `i8`，必须先按字节重解释）。

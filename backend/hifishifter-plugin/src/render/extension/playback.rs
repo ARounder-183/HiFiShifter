@@ -1,7 +1,7 @@
 //! 播放记账：流位置、门控、块分割与输出放行，以及它自己的两个切片助手。
 use super::host_clock::{ClockDomain, ClockInput};
 use super::timebase::TimebaseKind;
-use super::transport_session::{SessionInput, SessionPhase, TransportSession};
+use super::transport_session::{FeedKind, SessionInput, SessionPhase, TransportSession};
 use super::*;
 impl ExtensionOwner {
     /// 取走"该重新合成一次"的意图（非音频线程调用；见 [`Self::render_wanted`]）。
@@ -114,6 +114,7 @@ impl ExtensionOwner {
     }
 
     /// 与 note_stream_block 相同，但允许调用方给出**本地有效位置**（离线 cursor）。
+    #[cfg(test)]
     pub(super) fn note_stream_block_at(
         &self,
         stream: ProcessStream,
@@ -123,13 +124,41 @@ impl ExtensionOwner {
         recording_rising: bool,
         effective_position: Option<i64>,
     ) -> StreamBlock {
+        self.note_stream_block_at_probed(
+            stream,
+            context,
+            frames,
+            playing_rising,
+            recording_rising,
+            effective_position,
+            None,
+        )
+    }
+
+    /// 与 [`Self::note_stream_block_at`] 相同，但把**这一块的样本**一起交出去。
+    ///
+    /// 【为什么单独一个入口】`probe` 是内容定位的输入，而它只有一条生产路径
+    /// （`capture_observe_block`）能提供 —— 测试与离线 pass 都没有。把它做成必填参数会
+    /// 让五个测试调用点各自写一个 `None`，而那个 `None` 在将来某一次改签名时会被静默
+    /// 抄成生产路径的值。
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn note_stream_block_at_probed(
+        &self,
+        stream: ProcessStream,
+        context: impl Into<crate::block_context::BlockContext>,
+        frames: usize,
+        playing_rising: bool,
+        recording_rising: bool,
+        effective_position: Option<i64>,
+        probe: Option<hifishifter_capture::anchor_probe::ProbeBlock<'_>>,
+    ) -> StreamBlock {
         let context = context.into();
         let rate = if context.sample_rate.is_finite() && context.sample_rate > 0.0 {
             context.sample_rate
         } else {
             self.setup_sample_rate()
         };
-        self.note_stream_geometry(
+        self.note_stream_geometry_probed(
             stream,
             effective_position.unwrap_or(context.project_time_samples),
             frames,
@@ -140,6 +169,7 @@ impl ExtensionOwner {
             // kPlaying 是 SDK 对"transport 是否在走"的权威回答，与位置、采样率、
             // 样本同属**同一个块**。计数器的推进权必须以它为准（见 may_advance）。
             context.playing,
+            probe,
         )
     }
 
@@ -208,6 +238,11 @@ impl ExtensionOwner {
         );
         StreamBlock {
             position: processing.local_start,
+            // 【处理 pass 的位置只有一个域】离线 / 冻结预览的 cursor 本来就是这条 pass
+            // 自己的本地时间轴，读快照用的就是它 —— 这里没有"磁带 vs 工程"之分。
+            project_position: processing.local_start,
+            project_position_valid: true,
+            anchor_absence: AnchorAbsence::None,
             raw_start: context.project_time_samples,
             phase: if processing.new_pass {
                 TransportPhase::Start
@@ -246,6 +281,36 @@ impl ExtensionOwner {
         }
     }
 
+    /// 与 [`Self::note_stream_geometry_probed`] 相同，但不给样本。
+    ///
+    /// 【为什么只在测试构建里存在】生产路径只有 `capture_observe_block` 一条，而它永远
+    /// 带着样本。留一个非测试的 `None` 版本等于给下一个人一个「忘传样本也能编译」的
+    /// 入口 —— 那个入口在产物上的表现是「内容判定永远不跑」，与「跑过但没找到」同形。
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn note_stream_geometry(
+        &self,
+        stream: ProcessStream,
+        raw_start: i64,
+        frames: usize,
+        rate: f64,
+        time: StreamTime,
+        playing_rising: bool,
+        recording_rising: bool,
+        playing: bool,
+    ) -> StreamBlock {
+        self.note_stream_geometry_probed(
+            stream,
+            raw_start,
+            frames,
+            rate,
+            time,
+            playing_rising,
+            recording_rising,
+            playing,
+            None,
+        )
+    }
     /// 每流几何 + 有效位置 + 相位。音频线程调用：只读写原子，不分配。
     ///
     /// # 三条规则（没有第四条，也没有任何预算）
@@ -296,8 +361,11 @@ impl ExtensionOwner {
     /// 实测 VEGAS 在 Capture 播放期间会让 `projectTimeSamples` 停住不动。那时
     /// "每块前进 frames"是唯一自洽的换算 —— 它是合法记账，不是猜测。把它删掉不会让
     /// 宿主变好，只会让 take 变成一大片洞。
+    ///
+    /// 【`probe` 只有一条生产路径能给】`capture_observe_block` 手上才有这一块的样本；
+    /// 其余入口（离线 pass、测试）传 `None`，那时行为与第七轮逐字相同。
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn note_stream_geometry(
+    pub(super) fn note_stream_geometry_probed(
         &self,
         stream: ProcessStream,
         raw_start: i64,
@@ -307,6 +375,7 @@ impl ExtensionOwner {
         playing_rising: bool,
         recording_rising: bool,
         playing: bool,
+        probe: Option<hifishifter_capture::anchor_probe::ProbeBlock<'_>>,
     ) -> StreamBlock {
         let geometry = &self.streams[stream.index()];
         geometry.blocks.fetch_add(1, Ordering::Relaxed);
@@ -321,6 +390,10 @@ impl ExtensionOwner {
             // 零帧块是参数 flush，不代表时间轴在走。
             return StreamBlock {
                 position: raw_start,
+                // 零帧块不读快照也不发布播放头：工程位置就是它报的那一个。
+                project_position: raw_start,
+                project_position_valid: true,
+                anchor_absence: AnchorAbsence::None,
                 raw_start,
                 phase: if had {
                     TransportPhase::Resting
@@ -465,6 +538,18 @@ impl ExtensionOwner {
             session_frames: session_frames_before,
             last_playing: geometry.last_playing.load(Ordering::Acquire),
             max_start_window_frames: pre_roll_cap,
+            // 【这三格必须跨块存活】它们回答的是"这条喂入流从哪一刻开始、走到了哪"，
+            // 而每次调用都会重建一个 `TransportSession`。放在几何里而不是 `self` 上，
+            // 是因为它本来就是**每条流**的属性（realtime 与 prefetch 的节奏不同）。
+            feed: FeedKind::from_code(geometry.feed.load(Ordering::Acquire)),
+            window_spent: geometry.window_spent.load(Ordering::Acquire),
+            pinned_signal_frames: geometry.pinned_signal_frames.load(Ordering::Acquire),
+            // 【喂入流自己的走带位置也要跨块】见 `TapeCursor`。它和上面三格同一理由：
+            // 本结构体每块重建，几何才是它真正的家。
+            tape: hifishifter_capture::transport::TapeCursor {
+                frames: geometry.feed_frames_total.load(Ordering::Acquire),
+                first_raw: geometry.feed_first_raw.load(Ordering::Acquire),
+            },
         };
         // 【首块起播容差的唯一正证据】见下面 `playing_rising` 的说明：只有本块真的
         // 有信号，才允许“kPlaying 滞后”的宿主在第一块上打开有界起点窗口。
@@ -486,8 +571,15 @@ impl ExtensionOwner {
         // 输入监听（宿主没播，FX 实时返回输入）。监听时位置**不该**前进 —— 冻结才是
         // 正确的。武装（用户正在录）或有素材（捕获模式回放监听宿主的起播）才有理由
         // 把这段流动当作播放时间。
+        // 【为什么 ARA 实例不参与】它的输出语义由 ARA 通路决定，捕获仲裁对它是
+        // 无意义的；`log_capture_report` 早已用同一条守卫跳过它。
+        // 【钉住流的身份要在这块判定**之前**读】`host_reset` 是 `observe` 的输入，
+        // 而它必须被钉住流抑制（见下面的 `host_reset:` 实参）。
+        let pinned_before =
+            FeedKind::from_code(geometry.feed.load(Ordering::Acquire)) == FeedKind::Pinned;
         let stream_window_eligible = !playing
             && !is_offline
+            && !self.is_bound()
             && audio_evidence
             && !repeated_nonzero
             && (self.capture().is_armed() || self.capture().has_material());
@@ -516,10 +608,42 @@ impl ExtensionOwner {
                     )),
             recording_rising,
             // 域切换不是 seek：不能让它触发 host_reset 的新 epoch。
-            host_reset: host_rewound && !clock.switched,
+            // 【钉住流里也没有 seek】它没有宿主位置可言，raw 的抖动只是宿主自己的记账。
+            host_reset: host_rewound && !clock.switched && !pinned_before,
             offline: is_offline,
             frames: frames32,
+            // 【钉住 = 宿主这一块报的位置与上一块相同】它不是"宿主在走"的反证，
+            // 而是"宿主没在报"的正证 —— 提级成喂入流的判据之一。
+            // 开关见 `hifishifter_capture::transport::pinned_feed_enabled`（`HFS_PINNED_FEED=0`
+            // 一键退回旧行为）。
+            pinned: had
+                && raw_start == last_raw
+                && hifishifter_capture::transport::pinned_feed_enabled(),
+            // 【有信号 = 内容彼此不同且非静音】停播反复投递同一份缓冲（FL Studio 形状）
+            // 在这一位上恒为假，于是它永远不会被误认成时间轴。
+            signal: !silent && !repeated_nonzero,
+            // 【录制中绝不发明时间】录制的时间只能来自宿主。
+            armed: self.capture().is_armed(),
+            // 【喂入域的起点要用它记一次诊断】见 `FeedTimeline::first_raw`。
+            raw_start,
+            had_previous: had,
         });
+        // 【这三格必须写回】它们跨块存活（见上面 `TransportSession` 的构造）。
+        geometry
+            .window_spent
+            .store(session.window_spent, Ordering::Release);
+        geometry
+            .pinned_signal_frames
+            .store(session.pinned_signal_frames, Ordering::Release);
+        geometry
+            .feed_frames_total
+            .store(session.tape.frames, Ordering::Release);
+        geometry
+            .feed_first_raw
+            .store(session.tape.first_raw, Ordering::Release);
+        geometry
+            .feed_promoted
+            .store(session.feed == FeedKind::Pinned, Ordering::Release);
         // 【预览候选也算有权推进】候选期间宿主 kPlaying=0，但它送来的正是预览
         // 要录的音频；不把候选算进来，起播窗口一过位置就冻结，预览只剩 1 秒。
         let preview_candidate = self.processing_pass.phase() == PreviewPhase::Candidate;
@@ -532,9 +656,38 @@ impl ExtensionOwner {
         // 上升沿则是新一次起播（宿主可能没有先送 kPlaying=0 的块）。
         // 【域切换不是新 pass】VEGAS Event FX 的 kPlaying 上升沿同时是域切换；
         // 把它当新 pass 会把一条连续演奏切成两段（第一段留在绝对域）。
-        let playing_edge_new_pass =
-            playing_rising && phase_before != SessionPhase::Starting && !clock.switched;
-        let new_pass = new_epoch || clock.seek || cycle_wrap || playing_edge_new_pass;
+        let playing_edge_new_pass = playing_rising
+            && phase_before != SessionPhase::Starting
+            && !clock.switched
+            // 【钉住的喂入流里没有"起播"这回事】这一位可能来自宿主，也可能来自我们
+            // 自己合成的容差上升沿。只要宿主在喂一条钉住的时间轴，它就不许把连续音频
+            // 切成两遍 —— 现场正是每 1.024 s 切一次。真正的 kPlaying 升起会让
+            // `playing=true`，那时 feed 已经被规则 1 复位成 Transport，不会被这一条挡住。
+            && decision.feed == FeedKind::Transport;
+        // 【钉住喂入流有自己的时间轴】它的位置不来自宿主读数，而来自这条流已经喂进来的
+        // 帧数。候选块也算 —— 否则前 0.5 s 会留在 raw 域里，接缝处出现一个洞。
+        let feed_local = decision.feed == FeedKind::Pinned || decision.candidate;
+        // 【一次喂入流只有一个 pass】钉住流里"新一遍"这个概念不成立：宿主只是在按块
+        // 交付一条连续内容。允许 seek / 循环 / 上升沿在这里宣布新 pass，就会把同一条
+        // 时间轴切成几段（现场 31 次"每 1.024 s 重来一遍"正是这样来的）。
+        let new_pass = if feed_local {
+            !had
+        } else {
+            new_epoch || clock.seek || cycle_wrap || playing_edge_new_pass
+        };
+        // 【这一遍是被哪一闸宣布的】四个候选闸各一位。没有这一位，现场只能靠把产物
+        // 切块算互相关来猜是哪一闸 —— 本轮就是这么查出问题的，不该让下一个人再走一遍。
+        let pass_reason = if new_epoch {
+            Some(PassReason::Epoch)
+        } else if clock.seek {
+            Some(PassReason::Seek)
+        } else if cycle_wrap {
+            Some(PassReason::Cycle)
+        } else if playing_edge_new_pass {
+            Some(PassReason::Edge)
+        } else {
+            None
+        };
 
         let time_base_switch = clock.switched;
         let rebase_frames = clock.rebase_frames;
@@ -600,6 +753,34 @@ impl ExtensionOwner {
                     clock.local_start
                 };
                 geometry.pass.fetch_add(1, Ordering::Relaxed);
+                // 【两个读数】`pass_reason` 回答"为什么"，`pass_rewinds` 回答"有没有
+                // 把位置拉回去"。后者补的是 `clock_rewinds` 的洞：那一位带
+                // `&& !new_pass`，于是"每一遍都重锚回同一个点"在旧读数里完全不可见。
+                let reason = pass_reason.unwrap_or(PassReason::Reset);
+                geometry.pass_reason.store(reason.code(), Ordering::Release);
+                if had && position < last_position {
+                    geometry.pass_rewinds.fetch_add(1, Ordering::Relaxed);
+                }
+                // 【为什么敢在音频线程 log】与 `processing_pass` 的同名行同一条纪律：
+                // 一次 pass 只有一行（现场 1/s），不是一块一行。
+                // 【这一遍是渲染还是实时监听】见 `CapturePassKind`。`speed=` 是判据的
+                // 直接证据：没有它，"这一遍是不是渲染"永远只能靠猜。
+                log::info!(
+                    "[capture] pass begin stream={} pass={} reason={} raw={} local={} frames={} \
+                     kind={} speed={} fed={}",
+                    stream.as_str(),
+                    geometry.pass.load(Ordering::Acquire),
+                    reason.as_str(),
+                    raw_start,
+                    position,
+                    frames,
+                    self.processing_pass.pass_kind().as_str(),
+                    self.processing_pass
+                        .feed_speed()
+                        .map(|speed| format!("{speed:.0}x"))
+                        .unwrap_or_else(|| "n/a".to_owned()),
+                    self.processing_pass.feed_total_frames(),
+                );
             } else if time_base_switch {
                 // 【时间基切换：把整条流挪到新域里】不是 seek，不能新开段。
                 geometry
@@ -697,6 +878,56 @@ impl ExtensionOwner {
                 offset.saturating_add(frames as i64).max(0) as u64,
                 Ordering::Release,
             );
+        }
+
+        // ── 钉住的喂入流：两个域，两个变量，永不互相赋值 ──────────────
+        //
+        // 【为什么必须在既有记账之后覆盖】上面那一段回答的是"宿主给了什么位置"，而
+        // 钉住流的宿主**没有**给出位置：它要么把 raw 钉住不动，要么停在最后一次播放/
+        // 停止的播放头（VEGAS Render As 实测 r3 = 893720 = 18.62 s）。它给出的只有
+        // **内容顺序**。
+        //
+        // 【为什么是两个变量】"磁带走带位置"与"工程时间"是两个域。此前它们共用一个
+        // `i64`，于是"喂入域的 0 是不是工程 0"只能靠一个环境变量回答 —— 而两个答案
+        // 都是错的。现在：
+        //
+        //   * `position`（磁带记账域）= 本块之前喂进来的帧数，**永远从 0 起**；
+        //   * `project_position`（工程域）= 由 `project_map` 从片段位置算出，
+        //     没有映射时是 `NO_POSITION`（输出退回直通，UI 保持上一拍）。
+        //
+        // 【为什么锚点也要跟着写】`last_position` 是下一块判"续接 / 回退"的依据；
+        // 留着 raw 会让每一块都被记成一次跳变（`clock_rewinds` 虚高，`pass_rewinds`
+        // 也就看不出真相）。
+        let mut project_position = position;
+        // 【缺席的原因跟着位置一起走】见 [`AnchorAbsence`]：`project_position_valid`
+        // 只说「有没有」，输出仲裁还要知道「为什么没有」才能决定这条日志的级别。
+        let mut anchor_absence = AnchorAbsence::None;
+        if feed_local {
+            let tape_position = i64::try_from(decision.tape_frames_before).unwrap_or(i64::MAX);
+            // 【`frames_before` 就是这一块的喂入域起点】`capture_observe_block` 交上来
+            // 的 `ProbeBlock` 只知道样本，不知道它在喂入域的哪里；那个数只有这里知道
+            // （它是 `TapeCursor` 在**本块之前**的计数）。
+            let probe = probe.map(|probe| hifishifter_capture::anchor_probe::ProbeBlock {
+                frames_before: tape_position,
+                ..probe
+            });
+            project_position = self.project_position_for_stream_probed(
+                stream,
+                tape_position,
+                session.tape.first_raw,
+                raw_start,
+                probe,
+            );
+            anchor_absence = AnchorAbsence::from_code(
+                self.streams[stream.index()]
+                    .anchor_absent
+                    .load(Ordering::Acquire),
+            );
+            position = tape_position;
+            geometry.anchor.store(position, Ordering::Release);
+            geometry
+                .frames_since_anchor
+                .store(frames as u64, Ordering::Release);
         }
 
         // ── 前导静音（诊断 + 门控）────────────────────────────────────
@@ -808,6 +1039,78 @@ impl ExtensionOwner {
             geometry.clock_deltas.fetch_add(1, Ordering::Relaxed);
         }
 
+        // ── 喂入流的起止（一次渲染应当只有一条 begin + 一条 end）────────
+        //
+        // 【为什么要单独记】`[capture] clock` 每 20 ms 一行、按内容去重，看不清"这条
+        // 时间轴是什么时候开始被当成时间轴的"。而"一次渲染有几条 begin"正是本轮要修的
+        // 那个病：不止一条就说明位置被重锚过。
+        {
+            let before = geometry.feed.load(Ordering::Acquire);
+            let now = decision.feed.code();
+            if before != now {
+                let blocks = geometry.feed_blocks.load(Ordering::Acquire);
+                let fed = geometry.feed_frames.load(Ordering::Acquire);
+                geometry.feed.store(now, Ordering::Release);
+                geometry.feed_blocks.store(0, Ordering::Release);
+                geometry.feed_frames.store(0, Ordering::Release);
+                if decision.feed == FeedKind::Pinned {
+                    geometry.feed_blocks.store(1, Ordering::Release);
+                    geometry.feed_frames.store(frames as u64, Ordering::Release);
+                    // 【钉住流的 UI 修正量必须归零】见下面 `playhead_offset` 的说明。
+                    geometry.render_lead_valid.store(false, Ordering::Release);
+                    // 【origin / first_raw 是这一轮的关键读数】它们回答"这条时间轴从哪
+                    // 起算"。origin 恒为 0 是本轮的修复点；first_raw 只作诊断，它可以是
+                    // 任意值（VEGAS 会把它留在最后播放头），**不参与**读位置。
+                    // 【两个域各报一位】`tape=` 是喂入域（永远从 0 起），`project=`
+                    // 是工程域（由片段位置算出；`n/a` = 映射还没发布）。
+                    // 【为什么必须分开报】此前只有一位 `local`，而它同时被当成两种东西
+                    // —— 于是"这一块到底被当成工程哪一段"只能靠读者自己算。
+                    log::info!(
+                        "[capture] feed begin kind=pinned raw={} tape={} frames={} project={} \
+                         mapping={} anchor={} probe={} first_raw={}",
+                        raw_start,
+                        decision.tape_frames_before,
+                        frames,
+                        format_project_position(project_position),
+                        format_project_mapping(project_position),
+                        format_anchor_source(geometry.anchor_source.load(Ordering::Acquire)),
+                        format_probe(
+                            geometry.anchor_score.load(Ordering::Acquire),
+                            geometry.anchor_second.load(Ordering::Acquire),
+                            geometry.anchor_probe_offset.load(Ordering::Acquire),
+                            geometry.anchor_source.load(Ordering::Acquire),
+                        ),
+                        session.tape.first_raw,
+                    );
+                } else {
+                    log::info!(
+                        "[capture] feed end blocks={blocks} frames={fed} reason=transport first_raw={} last_raw={} passes={}",
+                        session.tape.first_raw,
+                        raw_start,
+                        geometry.pass.load(Ordering::Acquire),
+                    );
+                    // 【喂入流结束，锚点跟着作废】留着它，下一条流在"首块还没到"的那一块
+                    // 就会读到一个属于上一条流的零点 —— 而那条流的内容早就播完了。
+                    geometry.anchor_source.store(0, Ordering::Release);
+                    geometry.anchor_feed_end.store(0, Ordering::Release);
+                    geometry
+                        .anchor_first_raw
+                        .store(NO_POSITION, Ordering::Release);
+                    // 【探测读数跟着作废】它们描述的是**上一条**喂入流。留着会让下一条流
+                    // 的 `feed begin` 报出一份属于别人的分数。
+                    geometry.anchor_score.store(0, Ordering::Release);
+                    geometry.anchor_second.store(0, Ordering::Release);
+                    geometry.anchor_probe_offset.store(0, Ordering::Release);
+                    geometry.anchor_probe_logged.store(0, Ordering::Release);
+                }
+            } else if decision.feed == FeedKind::Pinned {
+                geometry.feed_blocks.fetch_add(1, Ordering::Relaxed);
+                geometry
+                    .feed_frames
+                    .fetch_add(frames as u64, Ordering::Relaxed);
+            }
+        }
+
         // ── UI 播放头修正量（`playhead_offset`）───────────────────────
         //
         // 【喂入位置 ≠ 宿主 UI 播放头】VEGAS 的渲染缓存让 FX 的喂入位置领先宿主自己的
@@ -846,7 +1149,9 @@ impl ExtensionOwner {
             }
         }
         let mut playhead_offset = geometry.playhead_offset.load(Ordering::Acquire);
-        if !had || new_pass || !transport_active {
+        // 【钉住流没有 UI 播放头可言】修正量的全部依据是"喂入位置领先宿主光标多少"，
+        // 而钉住流根本没有宿主光标在走。留一个非零值只会把 UI 读数也一起推歪。
+        if !had || new_pass || !transport_active || feed_local {
             // 新流 / 新 pass / 停播：喂入域与宿主读数对齐，修正量作废。
             playhead_offset = 0;
         } else if !playing {
@@ -950,6 +1255,9 @@ impl ExtensionOwner {
             && (counted_before > 0 || advance_before > 0);
         StreamBlock {
             position,
+            project_position,
+            project_position_valid: project_position != NO_POSITION,
+            anchor_absence,
             raw_start,
             phase,
             had_previous: had,
@@ -1019,6 +1327,40 @@ impl ExtensionOwner {
             geometry
                 .session_phase
                 .store(SessionPhase::Idle.code(), Ordering::Release);
+            // 【喂入流在这次复位里结束】不复位它就是一条跨会话的"钉住"：下一次起播
+            // 会被当成上一遍的延续，位置从头一块就开始错。
+            if geometry.feed.load(Ordering::Acquire) == FeedKind::Pinned.code() {
+                log::info!(
+                    "[capture] feed end blocks={} frames={} reason=reset first_raw={} last_raw={} passes={}",
+                    geometry.feed_blocks.load(Ordering::Acquire),
+                    geometry.feed_frames.load(Ordering::Acquire),
+                    geometry.feed_first_raw.load(Ordering::Acquire),
+                    geometry.last_raw_start.load(Ordering::Acquire),
+                    geometry.pass.load(Ordering::Acquire),
+                );
+            }
+            geometry
+                .feed
+                .store(FeedKind::Transport.code(), Ordering::Release);
+            geometry.feed_blocks.store(0, Ordering::Release);
+            geometry.feed_frames.store(0, Ordering::Release);
+            geometry.window_spent.store(false, Ordering::Release);
+            geometry.pinned_signal_frames.store(0, Ordering::Release);
+            // 【时间轴必须跟着清】留着 frames 会让下一次起播从上一条喂入流的末尾接着数
+            // —— 一次复位就凭空多出几十秒的偏移。
+            geometry.feed_frames_total.store(0, Ordering::Release);
+            geometry
+                .feed_first_raw
+                .store(NO_POSITION, Ordering::Release);
+            geometry.feed_promoted.store(false, Ordering::Release);
+            // 【锚点属于这一条喂入流】会话边界之后它没有任何意义：留着它，下一次起播
+            // 的第一块会按上一条流的零点去读快照。
+            geometry.anchor_source.store(0, Ordering::Release);
+            geometry.anchor_feed_end.store(0, Ordering::Release);
+            geometry.anchor_revision.store(0, Ordering::Release);
+            geometry
+                .anchor_first_raw
+                .store(NO_POSITION, Ordering::Release);
             geometry
                 .timebase_kind
                 .store(TimebaseKind::Unknown.code(), Ordering::Release);
@@ -1027,9 +1369,13 @@ impl ExtensionOwner {
         }
         // pass 号必须推进：所有按 pass 锁存的状态（rung / read_position_jump）都以它
         // 为“是不是同一次播放”的判据。
-        self.streams[ProcessStream::Realtime.index()]
-            .pass
-            .fetch_add(1, Ordering::AcqRel);
+        let realtime = &self.streams[ProcessStream::Realtime.index()];
+        realtime.pass.fetch_add(1, Ordering::AcqRel);
+        // 【这一次 pass 是"复位"宣布的】见 `PassReason`：`[capture] clock` 会把它读出来，
+        // 于是"这一遍为什么从头开始"在同一行里就有答案。
+        realtime
+            .pass_reason
+            .store(PassReason::Reset.code(), Ordering::Release);
         for flag in &self.stream_recording {
             flag.store(false, Ordering::Release);
         }
@@ -1041,6 +1387,224 @@ impl ExtensionOwner {
         if let Some(clock) = self.clock.get() {
             clock.clear_capture();
         }
+    }
+
+    /// 磁带帧号 → 工程帧号。**这是唯一的换算入口**。
+    ///
+    /// 【为什么只有一处】三个消费者（参数曲线、处理快照、UI 播放头）都要工程位置，
+    /// 而"磁带走到第几帧"只有一个来源。把换算写成一处，任何一条通路都不再有自己
+    /// 发明位置的机会 —— 上一轮的两个错位正是"两条通路各发明了一个起点"。
+    ///
+    /// 【`first_raw` 与 `hint` 是两件事】`first_raw` 是这条喂入流第一块的宿主读数
+    /// （`HFS_CAPTURE_MAP=raw` 的回退起点）；`hint` 是**本块**的宿主读数（多 take 时
+    /// 用来挑出"这一遍喂的是哪一片"）。两者都不可信，都不参与默认换算。
+    /// 【只给测试】生产路径都带显式的流（见 [`Self::project_position_for_stream`]）。
+    #[cfg(test)]
+    pub(super) fn project_position_for_tape(
+        &self,
+        tape_frame: i64,
+        first_raw: i64,
+        hint: i64,
+    ) -> i64 {
+        self.project_position_for_stream(ProcessStream::Realtime, tape_frame, first_raw, hint)
+    }
+
+    /// 与 [`Self::project_position_for_tape`] 相同，但显式指定**哪一条喂入流**。
+    ///
+    /// 【为什么锚点要按流存】几何是每流一份的（`feed_frames_total` 也是），三条流各有
+    /// 自己的喂入流。锚点若只有一份，prefetch / offline 的喂入会复用实时流那一条的零点。
+    #[cfg(test)]
+    pub(super) fn project_position_for_stream(
+        &self,
+        stream: ProcessStream,
+        tape_frame: i64,
+        first_raw: i64,
+        hint: i64,
+    ) -> i64 {
+        self.project_position_for_stream_probed(stream, tape_frame, first_raw, hint, None)
+    }
+
+    /// 与 [`Self::project_position_for_stream`] 相同，但把**这一块的样本**交给内容探测。
+    pub(super) fn project_position_for_stream_probed(
+        &self,
+        stream: ProcessStream,
+        tape_frame: i64,
+        first_raw: i64,
+        hint: i64,
+        probe: Option<hifishifter_capture::anchor_probe::ProbeBlock<'_>>,
+    ) -> i64 {
+        use hifishifter_capture::transport::{capture_map_mode, CaptureMapMode};
+        let geometry = &self.streams[stream.index()];
+        // 【一个数 + 它缺席的原因】两者必须由同一次求解写出：分成两处写，任何一条
+        // 返回路径漏掉其中一半，输出仲裁就会拿上一块的结论解释这一块。
+        let (position, absence) = match capture_map_mode() {
+            CaptureMapMode::Clip => {
+                let (anchor, absence) = self.feed_anchor(stream, first_raw, hint, probe);
+                match anchor.and_then(|anchor| anchor.project(tape_frame)) {
+                    Some(position) => (position, AnchorAbsence::None),
+                    // 有锚点但喂入帧已越过这一片的末尾：片尾之后的预取块。
+                    None if absence == AnchorAbsence::None => (NO_POSITION, AnchorAbsence::PastEnd),
+                    None => (NO_POSITION, absence),
+                }
+            }
+            CaptureMapMode::Origin => (tape_frame, AnchorAbsence::None),
+            CaptureMapMode::Raw => {
+                if first_raw == hifishifter_capture::transport::NO_RAW {
+                    (NO_POSITION, AnchorAbsence::NoRaw)
+                } else {
+                    (first_raw.saturating_add(tape_frame), AnchorAbsence::None)
+                }
+            }
+        };
+        geometry
+            .anchor_absent
+            .store(absence.code(), Ordering::Release);
+        position
+    }
+
+    /// 本喂入流的锚点：**首块选一次**，之后每块只读原子量。
+    ///
+    /// 【为什么"选一次"是硬要求】锚点必须对整条喂入流恒定：中途按当前块重算，位置就会
+    /// 跟着宿主读数的抖动而抖动（那正是"每一块都跳一下"的来源）。首块的 `hint` 是这条
+    /// 流上唯一一次可信的读数 —— 之后的块里宿主已经把位置钉住，它不再说明任何事。
+    ///
+    /// 【什么时候重选】① 换了一条喂入流（`first_raw` 变了）；② 映射表重新发布过
+    /// （投影重建，片段可能已经不在了）。两件事都由原子量比对，不取任何锁。
+    fn feed_anchor(
+        &self,
+        stream: ProcessStream,
+        first_raw: i64,
+        hint: i64,
+        probe: Option<hifishifter_capture::anchor_probe::ProbeBlock<'_>>,
+    ) -> (
+        Option<hifishifter_capture::project_map::FeedAnchor>,
+        AnchorAbsence,
+    ) {
+        use hifishifter_capture::anchor_probe::{ProbeOutcome, ProbeReason};
+        use hifishifter_capture::project_map::{AnchorSource, FeedAnchor};
+        let capture = self.capture();
+        let revision = capture.project_map_revision();
+        let geometry = &self.streams[stream.index()];
+        let cached = AnchorSource::from_code(geometry.anchor_source.load(Ordering::Acquire));
+        if let Some(source) = cached {
+            if geometry.anchor_revision.load(Ordering::Acquire) == revision
+                && geometry.anchor_first_raw.load(Ordering::Acquire) == first_raw
+            {
+                // 【定稿之后永不重锚】中途改锚点等于在产物中间切一刀。
+                return (
+                    Some(FeedAnchor {
+                        project_zero: geometry.anchor_project_zero.load(Ordering::Acquire),
+                        feed_end: geometry.anchor_feed_end.load(Ordering::Acquire),
+                        take: geometry.anchor_take.load(Ordering::Acquire),
+                        source,
+                    }),
+                    AnchorAbsence::None,
+                );
+            }
+        }
+        let outcome = capture.feed_anchor_probed(
+            hint,
+            hifishifter_capture::transport::capture_anchor_mode(),
+            probe,
+        );
+        if let Some(verdict) = outcome.probe {
+            self.note_anchor_probe(stream, verdict, hint);
+            // 【静音 / 太短不消耗这次机会】见 `ProbeReason::Silent`：静音块在任何锚点下
+            // 输出都是静音，它不是「这次机会用掉了」的证据。所以既不建锚、也不定稿，
+            // 等下一个有信号的块再跑。输出这一块退回直通（本来就是静音）。
+            if let ProbeOutcome::Undecided(reason) = verdict.outcome {
+                if matches!(reason, ProbeReason::Silent | ProbeReason::Short) {
+                    return (None, AnchorAbsence::from_reason(reason));
+                }
+            }
+        }
+        let Some(anchor) = outcome.anchor else {
+            // 【表为空 / 正在写】这一轮没有答案，下一块再试（**不定稿**）。
+            // 【为什么要把原因带出去】见 [`AnchorAbsence`]：静音块与「表还没到」在
+            // 输出上是同一件事（直通），但在日志上是两件完全不同的事。
+            return (
+                None,
+                match outcome.probe.map(|verdict| verdict.outcome) {
+                    Some(ProbeOutcome::Undecided(reason)) => AnchorAbsence::from_reason(reason),
+                    // 内容判出了位置、但表里没有那一片 —— 表与素材不同代。
+                    Some(ProbeOutcome::Content) => AnchorAbsence::Unmapped,
+                    None => AnchorAbsence::Mapping,
+                },
+            );
+        };
+        geometry
+            .anchor_project_zero
+            .store(anchor.project_zero, Ordering::Release);
+        geometry
+            .anchor_feed_end
+            .store(anchor.feed_end, Ordering::Release);
+        geometry.anchor_take.store(anchor.take, Ordering::Release);
+        geometry.anchor_revision.store(revision, Ordering::Release);
+        geometry
+            .anchor_first_raw
+            .store(first_raw, Ordering::Release);
+        geometry
+            .anchor_source
+            .store(anchor.source.code(), Ordering::Release);
+        (Some(anchor), AnchorAbsence::None)
+    }
+
+    /// 记一次内容探测的读数，并把**每一条喂入流只该出现一次**的那行日志写出去。
+    ///
+    /// 【为什么按结论分桶】一次探测可能连着给出 `silent` 好几次才定稿（渲染范围从片段
+    /// 之前开始时就是这样），而每条喂入流只该留一行 `silent` 与一行最终结论。位图既不会
+    /// 把重复的刷屏，也不会把「为什么这次没按内容判」吞掉。
+    fn note_anchor_probe(
+        &self,
+        stream: ProcessStream,
+        verdict: hifishifter_capture::anchor_probe::ProbeVerdict,
+        hint: i64,
+    ) {
+        use hifishifter_capture::anchor_probe::{ProbeOutcome, ProbeReason};
+        let geometry = &self.streams[stream.index()];
+        geometry
+            .anchor_score
+            .store(verdict.score.to_bits(), Ordering::Release);
+        geometry
+            .anchor_second
+            .store(verdict.second.to_bits(), Ordering::Release);
+        geometry
+            .anchor_probe_offset
+            .store(verdict.offset, Ordering::Release);
+        let bit = match verdict.outcome {
+            ProbeOutcome::Content => 1_u32 << 5,
+            ProbeOutcome::Undecided(reason) => match reason {
+                ProbeReason::Silent => 1,
+                ProbeReason::Short => 1 << 1,
+                ProbeReason::NoMaterial => 1 << 2,
+                ProbeReason::Ambiguous => 1 << 3,
+                ProbeReason::Busy => 1 << 4,
+            },
+        };
+        if geometry.anchor_probe_logged.fetch_or(bit, Ordering::AcqRel) & bit != 0 {
+            return;
+        }
+        let policy = hifishifter_capture::transport::capture_anchor_mode();
+        let reason = match verdict.outcome {
+            ProbeOutcome::Content => "content".to_owned(),
+            ProbeOutcome::Undecided(reason) => format!("undecided reason={}", reason.as_str()),
+        };
+        // 【这一行必须无条件写】它是「为什么这次没按内容判」的唯一答案。没有它，现场
+        // 只有 `anchor=playhead` 一个词，而那既可能是「内容说就是这里」，也可能是
+        // 「探测一次都没跑」—— 两种完全不同的故障。
+        log::info!(
+            "[capture] anchor probe: stream={} frames={} verdict={} offset={} score={:.3} \
+             second={:.3}@{} hint={} policy={}",
+            stream.as_str(),
+            verdict.frames,
+            reason,
+            verdict.offset,
+            verdict.score,
+            verdict.second,
+            verdict.second_offset,
+            hint,
+            policy.as_str(),
+        );
     }
 
     /// 宿主此刻**确实在推进工程位置**（无锁、无分配，可从音频线程调用）。
@@ -1264,6 +1828,16 @@ impl ExtensionOwner {
         // 实时流“在前进”的证据（用户听到的开头小段循环）。
         // 【处理 pass 必须先于 HostClock】mode=0 的冻结预览 raw 固定、kPlaying=0；
         // 若先走实时会话，它会在 1 秒起播窗口后被判成 Paused，预览永远只录 1 秒。
+        // 【这一遍是渲染还是实时监听】见 `CapturePassKind`。只喂实时流：prefetch 与
+        // offline 的节奏不是"宿主在按墙钟喂我们"，它们的速度不说明任何事。
+        if stream == ProcessStream::Realtime {
+            self.processing_pass.note_feed_progress(
+                u32::try_from(block.frames).unwrap_or(u32::MAX),
+                rate,
+                self.processing_pass.is_offline(),
+                playing,
+            );
+        }
         let stream_time = StreamTime::from_context(&context);
         let phase_before = SessionPhase::from_code(
             self.streams[stream.index()]
@@ -1320,13 +1894,24 @@ impl ExtensionOwner {
             self.note_processing_block(stream, context, block.frames, processing)
         } else {
             self.capture().set_preview_active(false);
-            self.note_stream_block_at(
+            // 【这一块的样本交给内容定位】只有钉住喂入流才值得比（见
+            // `CaptureStore::feed_anchor_probed`），而「值不值得」由 `playback` 侧的
+            // `feed_local` 判 —— 这里只负责把样本原样递过去。
+            // 【空平面就是静音】宿主在 pre-roll 期间给空输入平面是正常形状；`&[]` 会让
+            // 探测回答「太短 / 没信号」，两者都是「这一轮不定稿」。
+            let probe = hifishifter_capture::anchor_probe::ProbeBlock {
+                left: block.planes[0].unwrap_or(&[]),
+                right: block.planes[1].unwrap_or(&[]),
+                frames_before: 0,
+            };
+            self.note_stream_block_at_probed(
                 stream,
                 context,
                 block.frames,
                 playing_rising,
                 recording_rising,
                 Some(effective_position),
+                Some(probe),
             )
         };
         // 【候选期间位置不可发布】HostClock 可能已经把 PendingAbsolute 探针走完
@@ -1351,14 +1936,22 @@ impl ExtensionOwner {
             // 新会话第一块的位置天然与它不同 —— 那不是读游标跳变，是一次新的起播。
             self.rt_last_read_position.store(0, Ordering::Release);
         }
-        let split = self.block_split(context, block.frames, rate, stream_block.position);
+        // 【几何量一律用工程位置】循环切分、循环区间与门控都在**工程时间**上定义。
+        // 钉住喂入流里 `position` 是磁带帧号（从 0 起），拿它算出来的切分与区间会
+        // 整体偏移片段起点的距离 —— 那正是"处理结果出现在错误的时间上"。
+        let spatial_position = if stream_block.project_position_valid {
+            stream_block.project_position
+        } else {
+            stream_block.position
+        };
+        let split = self.block_split(context, block.frames, rate, spatial_position);
         let (cycle_start, cycle_end) = self
-            .cycle_region(context, rate, stream_block.position)
+            .cycle_region(context, rate, spatial_position)
             .map_or((None, None), |(start, end)| (Some(start), Some(end)));
         let allow_output = self.allow_output_for(
             stream,
             &block,
-            stream_block.position,
+            spatial_position,
             stream_block.phase,
             playing_rising,
             recording_rising,
@@ -1456,16 +2049,23 @@ impl ExtensionOwner {
                 // 位置（磁带记账域）；VEGAS 的渲染缓存喂入领先它自己的播放头一个预热
                 // 窗（见 `playhead_offset` 的维护说明），UI 必须减掉它才能与宿主光标
                 // 对齐。无窗口的宿主（REAPER 等）修正量恒为 0，行为不变。
-                clock.publish_capture_block(
-                    (stream_block
-                        .position
-                        .saturating_sub(stream_block.playhead_offset)) as f64
-                        / rate.max(1.0),
-                    recording || stream == ProcessStream::Offline || stream_block.preview,
-                    stream == ProcessStream::Offline,
-                    stream_block.preview,
-                    self.capture().capture_epoch(),
-                );
+                // 【发布的是工程位置】钉住喂入流的 `position` 是磁带帧号（从 0 起），
+                // 把它画出去会让 UI 播放头从 0 开始 —— 而声音在工程 28 s。
+                if !stream_block.project_position_valid {
+                    clock.hold_capture();
+                } else {
+                    clock.publish_capture_block(
+                        (stream_block
+                            .project_position
+                            .saturating_sub(stream_block.playhead_offset))
+                            as f64
+                            / rate.max(1.0),
+                        recording || stream == ProcessStream::Offline || stream_block.preview,
+                        stream == ProcessStream::Offline,
+                        stream_block.preview,
+                        self.capture().capture_epoch(),
+                    );
+                }
             }
         }
         self.note_block_trace(
@@ -1491,6 +2091,9 @@ impl ExtensionOwner {
         Some(BlockEvidence {
             stream,
             position: stream_block.position,
+            project_position: stream_block.project_position,
+            project_position_valid: stream_block.project_position_valid,
+            anchor_absence: stream_block.anchor_absence,
             frames: block.frames,
             playing,
             recording,
@@ -1898,7 +2501,36 @@ impl ExtensionOwner {
         // （用户监听自己），它不该被"停播重复抑制"影响 —— 那个判据描述的是"同一段
         // 内容又来了"，而录制中来的每一块都是要录的新内容。此前防御清空排在仲裁之前，
         // 于是一次误判就能把监听整块抹掉。
-        let output = self.capture_output_with(evidence);
+        let mut output = self.capture_output_with(evidence);
+        // 【没有工程映射就不许读快照】快照是按**工程域**发布的（`origin_sample` 是
+        // 片段的工程起点）。没有映射就等于"不知道这一块该读哪一段" —— 此时唯一
+        // 诚实的输出是直通：它是宿主本来会播的东西，不引入任何新内容。此前这里
+        // 照读不误，于是落在快照窗口之外的位置由 `layered` 回退宿主原声：
+        // 读数说 `output=processed`，听感是"前 N 秒是原声"。
+        if matches!(output, CaptureOutput::Processed | CaptureOutput::Raw)
+            && evidence.is_some_and(|evidence| !evidence.project_position_valid)
+        {
+            // 【级别由原因决定，而不是由"没有位置"这个事实决定】见 [`AnchorAbsence`]：
+            // 渲染开头的 1~4 块是 −102 dBFS 的数字静音与 128 帧的过短块，探测按设计
+            // 不为它们定稿，直通输出的是**同一份静音** —— 一个样本都没变。那既不是
+            // 故障，也不该长得像故障：它在现场与老缺陷同形，只会误导下一次判断。
+            let absence = evidence.map_or(AnchorAbsence::Mapping, |e| e.anchor_absence);
+            let level = if absence.is_expected() {
+                log::Level::Debug
+            } else {
+                log::Level::Warn
+            };
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                level,
+                "capture.no-project-mapping",
+                format_args!(
+                    "[capture] no project mapping for this block (reason={}); passing the host input \
+                     through instead of reading a snapshot at an unknown position",
+                    absence.as_str(),
+                ),
+            );
+            output = CaptureOutput::PassThrough;
+        }
         if output == CaptureOutput::Recording {
             // 录制中不锁存：录完之后的那一遍必须重新仲裁内容源。
             self.rung_locked.store(0, Ordering::Release);
@@ -1986,7 +2618,22 @@ impl ExtensionOwner {
                 // **输入原声**写进产物 —— 而用户会把它当成"处理后的结果"，那是最难发现的一类
                 // 错误。静音是诚实的：这一趟的唯一作用是把素材拿进来；第二趟（解除武装后再
                 // 导出）才是结果。实时播放则照旧监听，因为用户要听到自己正在录的东西。
-                if options.monitor && !offline {
+                //
+                // 【为什么 `!offline` 一个人不够】VEGAS 的 Render As **不置** `kOffline`
+                // （现场整段 `setupProcessing mode=0`），于是"监视"这一位在渲染那一趟也为真
+                // ⇒ 直通把输入原声写进产物。判据补上两条**宿主行为的正证据**：
+                //
+                //   * `pass_kind == Realtime`：这一遍没被速度 / 长度判成渲染；
+                //   * `host_is_live`：宿主说它在播，或起播窗口还开着 —— "这一块会被真的
+                //     播出来"。渲染那一趟 `kPlaying` 全程为 0，窗口 1 秒后就用掉了。
+                //
+                // 两条都成立才监听。`HFS_PASS_KIND=off` 只关掉前一条（回到第三轮的判据）。
+                if live_monitor_allowed(
+                    options.monitor,
+                    offline,
+                    self.processing_pass.pass_kind(),
+                    evidence,
+                ) {
                     // SAFETY: 与上面同一份数据；`pass_through` 自己会校验形状。
                     let _ = unsafe { block.pass_through() };
                     self.note_emitted(evidence);
@@ -2031,6 +2678,73 @@ impl ExtensionOwner {
         }
     }
 }
+/// 录制中这一块该不该直通（= 让用户听到自己正在录的东西）。
+///
+/// 【为什么是一个纯函数】它是"渲染产物里混进输入原声"的唯一判据，而那条缺陷的
+/// 现场读数与正确行为**完全同形**（都是 `output=recording`）。把它提成纯函数，
+/// 三种形状（实时监听 / 渲染 / 宿主明说离线）就能被逐个断言。
+///
+/// 三条同时成立才监听：
+///
+///   * `monitor`：用户打开了监听；
+///   * `!offline`：宿主明说这是离线渲染；
+///   * `host_is_live`：宿主说它在播，或起播窗口还开着 —— "这一块会被真的播出来"；
+///   * `pass_kind == Realtime`：这一遍没有被速度 / 长度判成渲染。
+pub(super) fn live_monitor_allowed(
+    monitor: bool,
+    offline: bool,
+    pass_kind: CapturePassKind,
+    evidence: Option<BlockEvidence>,
+) -> bool {
+    if !monitor || offline {
+        return false;
+    }
+    let host_is_live = evidence.is_none_or(|evidence| evidence.playing || evidence.start_window);
+    host_is_live && (pass_kind == CapturePassKind::Realtime || !pass_kind_enabled())
+}
+
+/// 本块用的锚点来源（`none` = 这一块没有工程位置）。
+fn format_anchor_source(code: u8) -> &'static str {
+    hifishifter_capture::project_map::AnchorSource::from_code(code)
+        .map(|source| source.as_str())
+        .unwrap_or("none")
+}
+
+/// `feed begin` 的 `probe=` 字段：`主相关/次优相关@实测 offset`。
+///
+/// 【为什么只在 `anchor=content` 时有值】另外两种来源是**位置规则**的结论，它们没有
+/// 分数可言。给它们印一个 0 只会让读者以为「探测跑了但没找到」。
+fn format_probe(score_bits: u32, second_bits: u32, offset: i64, source: u8) -> String {
+    if hifishifter_capture::project_map::AnchorSource::from_code(source)
+        != Some(hifishifter_capture::project_map::AnchorSource::Content)
+    {
+        return "n/a".to_owned();
+    }
+    format!(
+        "{:.3}/{:.3}@{}",
+        f32::from_bits(score_bits),
+        f32::from_bits(second_bits),
+        offset
+    )
+}
+
+/// 工程位置的诊断写法（`n/a` = 映射还没发布）。
+fn format_project_position(position: i64) -> String {
+    if position == NO_POSITION {
+        "n/a".to_owned()
+    } else {
+        position.to_string()
+    }
+}
+
+/// 这个工程位置是哪一种映射算出来的。
+fn format_project_mapping(project_position: i64) -> &'static str {
+    if project_position == NO_POSITION {
+        return "n/a";
+    }
+    hifishifter_capture::transport::capture_map_mode().as_str()
+}
+
 /// HostClock 域 -> 诊断时基编码。
 fn timebase_of(domain: ClockDomain) -> TimebaseKind {
     match domain {

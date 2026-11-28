@@ -64,6 +64,18 @@ VOCABULARY = (
 # rfd terminating calls: a builder chain ends here.
 RFD_TERMINATORS = (".save_file(", ".pick_file(", ".pick_files(", ".pick_folder(")
 
+# rfd facades that *replay* caller-supplied filters instead of spelling them out.
+#
+# [Why this is not a loophole] `platform::dialog::FileDialog::into_rfd` iterates its
+# own `filters` vector and calls `.add_filter(name, refs)` once per entry. The
+# vocabulary check already happened at every real call site (each builder in
+# `commands/dialogs.rs` names a FileType or an explicit extension list, and the
+# facade's `add_filter` signature makes an unfiltered request impossible to write
+# by accident). Requiring the literal token here would only ask the loop to spell
+# out something it cannot know -- and the pressure would be to inline a fake
+# filter, which is worse than no gate.
+RFD_FORWARDERS = {"into_rfd"}
+
 SKIP_DIRS = {"target", "node_modules", ".git", "third-party", "gen"}
 
 
@@ -105,6 +117,16 @@ def enclosing_signature(source, index):
         return ""
     brace = source.find("{", start)
     return source[start : brace if brace >= 0 else index]
+
+
+def enclosing_fn_name(source, index):
+    """The name of the function enclosing index ("" when it cannot be read)."""
+    start = source.rfind("fn ", 0, index)
+    if start < 0:
+        return ""
+    rest = source[start + 3 :]
+    match = re.match(r"\s*([A-Za-z0-9_]+)", rest)
+    return match.group(1) if match else ""
 
 
 def call_arguments(source, start):
@@ -160,6 +182,8 @@ def main():
             if ".pick_folder(" in chain:
                 continue
             checked_rfd += 1
+            if enclosing_fn_name(source, match.start()) in RFD_FORWARDERS:
+                continue
             if ".add_filter(" not in chain:
                 violations.append(
                     display

@@ -1,4 +1,5 @@
 // 宿主淡化只读显示：用户允许HiFiShifter自己的示意曲线；普通fade声音仍由宿主负责一次。
+// metadata 可能是编辑期的本地镜像（见 session/fadeAxesPreview.ts）；continuous 求值只看轴值，不看来源。
 import type { HostFadeMetadata } from "../../../types/api";
 import {
     FADE_LINEAR,

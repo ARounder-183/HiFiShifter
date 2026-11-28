@@ -156,6 +156,17 @@ export type LoadCallback = (
 
 // ============== 核心实现 ==============
 
+/**
+ * 后端回答"这条源还没被本会话授权"（旧后端用错误表达"还没轮到"）。
+ *
+ * 【为什么按字符串判】协议没有错误码，只有一句话；这句话是 `check_source` 的固定
+ * 返回。新后端已经改用空载荷表达同一件事，这条分支只为旧后端兜底 —— 但它必须存在，
+ * 否则一次版本错配就足以让波形永久消失。
+ */
+function isSourceNotAuthorizedYet(message: string): boolean {
+    return message.includes("not authorized by this ARA session");
+}
+
 class WaveformMipmapStoreImpl {
     /** sourcePath → FileMipmapCache */
     private cache = new Map<string, FileMipmapCache>();
@@ -805,12 +816,25 @@ class WaveformMipmapStoreImpl {
                 // 的 peaks，base64 后更大，长文件批量预载时纯属浪费。
                 const batchResult = await waveformApi.batchGetWaveformMipmap(registered, [2]);
 
-                for (const [sourcePath, levels] of Object.entries(batchResult)) {
+                // 【逐源结果】后端对每条源各回一条 `{ok, pending, error, data}`。
+                // 整批要么全成功、要么整体报错的旧协议逼着调用方"猜"：一条源被拒绝
+                // （未授权 / 读不出来）时，其余文件只能退回逐个重试。
+                for (const entry of batchResult) {
+                    const sourcePath = entry.path;
                     const index = registered.indexOf(sourcePath);
                     if (index >= 0 && this.loadToken(sourcePath) !== requestTokens[index]) {
                         // 该文件已被作废：丢弃本条响应，并按需补发一次
                         // （与 loadLevel 同一套语义，避免"丢了就没人再要"）。
                         this.requeueIfMissing(sourcePath, 2);
+                        continue;
+                    }
+                    // 【终态失败】后端已判定这条源出不了数据：记负缓存并通知 error，
+                    // **绝不排重试** —— 重试只会把同一个错误刷满日志，而波形永远
+                    // 不会出现。它与下面的"尚未就绪"必须走两条不同的路。
+                    if (!entry.ok && !entry.pending) {
+                        const cached = this.cache.get(sourcePath);
+                        if (cached) cached.failedLevels.add(2);
+                        this.notify(sourcePath, "error", entry.error ?? "batch source unavailable");
                         continue;
                     }
                     // 仅解码 L2（索引 2），L0/L1 丢弃。
@@ -822,7 +846,7 @@ class WaveformMipmapStoreImpl {
                     // 后，坏条目只把**自己**标进 L2 负缓存并通知 error，批次里
                     // 其余文件照常落地。
                     try {
-                        const l2Base64 = levels[2];
+                        const l2Base64 = entry.data?.[2];
                         if (l2Base64) {
                             const decoded = decodeWaveformFromBase64(l2Base64);
                             if (decoded) {
@@ -834,7 +858,8 @@ class WaveformMipmapStoreImpl {
                                 this.notify(sourcePath, "error", "batch decode L2 failure");
                             }
                         } else {
-                            // 空串 = 后端尚未就绪（波形分析/首次计算未完成），是
+                            // 无数据 = 后端尚未就绪（波形分析/首次计算未完成；逐源结果里
+                            // 就是 `pending`），是
                             // **瞬时**条件：绝不能写 failedLevels——否则打开工程
                             // 瞬间的抢先批量请求会把 L2 永久毒化，波形要等用户
                             // 滚动/缩放才出现。进入重试冷却；与单发路径一样，
@@ -1141,6 +1166,16 @@ class WaveformMipmapStoreImpl {
                 }
             } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
+                if (isSourceNotAuthorizedYet(msg)) {
+                    // 旧后端用一条**错误**回答"这条源还没被授权"。它与"文件真的不可用"
+                    // 不是一回事：写成 failedLevels 会让波形永久消失到重载为止 —— 用户
+                    // 报的"新导入的 Clip 不显示波形、重载后才恢复"正是这条路径。按
+                    // "尚未就绪"处理，与新后端的空载荷走同一条冷却 + 有界重试。
+                    this.retryCooldownUntil.set(retryKey, Date.now() + RETRY_NOT_READY_COOLDOWN_MS);
+                    this.notify(sourcePath, "loading");
+                    this.scheduleNotReadyRetry(sourcePath, level);
+                    return;
+                }
                 const current = this.cache.get(sourcePath);
                 if (current) current.failedLevels.add(level);
                 this.notify(sourcePath, "error", msg);

@@ -176,6 +176,9 @@ pub fn status_json(store: &CaptureStore, extras: StatusExtras<'_>) -> Value {
 mod tests {
     use super::*;
 
+    // 【为什么允许这个 lint】`single_range_in_vec_init` 拦的是"把区间展开成 vec"的
+    // 笔误，而这里要的确实只是**一条**连续区间。夹具的意图写在字段旁，lint 判不出来。
+    #[allow(clippy::single_range_in_vec_init)]
     fn span() -> CaptureSpan {
         CaptureSpan {
             start_frame: 480_000,
@@ -183,6 +186,7 @@ mod tests {
             position_frame: 528_000,
             block_frames: 848,
             sample_rate: 48_000,
+            // 一条连续捕获区间（夹具只覆盖"单段"这一形状）。
             runs: vec![480_000..528_000],
         }
     }

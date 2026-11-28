@@ -323,6 +323,11 @@ pub struct CaptureStore {
     takes: Mutex<Vec<CaptureTake>>,
     /// 按素材代次缓存的投影产物（见 `ProjectionCache`）。
     projection_cache: Mutex<Option<ProjectionCache>>,
+    /// 磁带帧 → 工程帧的分段映射（无锁；音频线程每块都要读）。
+    ///
+    /// 【为什么不能放在 `ProjectionCache` 里】那份缓存是 `Mutex` 下的，而读它的
+    /// 是音频线程。映射必须是一份**独立发布**的原子表 —— 见 `project_map` 模块头。
+    project_map: crate::project_map::ProjectMapCell,
     /// 上一次恢复时**读不出来**的 take（见 [`MissingCapture`]）。
     ///
     /// 只在 `restore_manifest` 里写；界面据此给出"这些音频不在本地"的提示。
@@ -415,6 +420,7 @@ impl Default for CaptureStore {
             capture: Mutex::new(Capture::default()),
             takes: Mutex::new(Vec::new()),
             projection_cache: Mutex::new(None),
+            project_map: crate::project_map::ProjectMapCell::default(),
             missing: Mutex::new(Vec::new()),
             next_take_id: AtomicU64::new(1),
             material_present: AtomicBool::new(false),
@@ -814,6 +820,11 @@ impl CaptureStore {
         let (timeline, summary) = timeline::project_tapes(&tapes, dropped, 120.0);
         let sources = timeline::sources_from_tapes(&tapes);
         let fingerprints = timeline::fingerprints_from_tapes(&tapes);
+        // 【映射与投影同一次发布】两者都由 `resolved_pieces` 派生，分开发布就会
+        // 出现"快照已经是新一代、映射还是上一代"的窗口，而那个窗口里的读位置
+        // 恰好是错的。
+        self.project_map
+            .publish(revision, &timeline::project_map(&tapes));
         ProjectionCache {
             revision,
             timeline,
@@ -1277,8 +1288,14 @@ impl CaptureStore {
     }
 
     /// 推进素材代次（任何改变 take 集合的动作都要调它）。
+    ///
+    /// 【为什么映射也在这里发布】映射是 take 集合的**派生量**：只要素材变了，哪一片
+    /// 落在工程哪里就可能变。把它挂在"素材代次推进"这一个动作上，就不存在
+    /// "忘了发布映射"的路径 —— 而这个漏项的表现是"输出退回直通"，极难归因。
     fn bump_revision(&self) {
-        self.revision.fetch_add(1, Ordering::AcqRel);
+        let revision = self.revision.fetch_add(1, Ordering::AcqRel) + 1;
+        let segments = self.with_projection(timeline::project_map_from_takes);
+        self.project_map.publish(revision, &segments);
     }
 
     /// 音频线程入口：记录"宿主实际做了什么"，并（若已武装）捕获本块。
@@ -1912,6 +1929,83 @@ impl CaptureStore {
     /// 内容 id -> 稳定的分析指纹（取 BLAKE3 前 8 字节）。
     pub fn content_fingerprints(&self) -> HashMap<String, u64> {
         self.with_projection_cache(|cache| cache.fingerprints.clone())
+    }
+
+    /// 本喂入流的工程锚点（**无锁**，可从音频线程调用）。
+    ///
+    /// 【`hint` 是什么】宿主在**这一块**报的位置。它的可信度取决于宿主在做什么
+    /// （见 `ProjectMapCell::anchor`）：预览里它就是播放头，Render As 里它是上一次的
+    /// 播放头。判据只有一个可观测的问题——它落在片段的工程窗口里吗。没有映射时返回
+    /// `None`，调用方据此退回直通，而不是猜一个位置。
+    pub fn feed_anchor(
+        &self,
+        hint: i64,
+        policy: crate::project_map::AnchorPolicy,
+    ) -> Option<crate::project_map::FeedAnchor> {
+        self.project_map.anchor(hint, policy)
+    }
+
+    /// 与 [`Self::feed_anchor`] 相同，但把**这一块的样本**一起交出去，让内容判定参与。
+    ///
+    /// 【为什么块是可选的】只有钉住喂入流的块才值得比 —— 普通播放里宿主每块都报位置，
+    /// 那个位置是权威的；比对一整份素材只会白烧预算。
+    pub fn feed_anchor_probed(
+        &self,
+        hint: i64,
+        policy: crate::project_map::AnchorPolicy,
+        block: Option<crate::anchor_probe::ProbeBlock<'_>>,
+    ) -> crate::project_map::AnchorOutcome {
+        self.project_map.anchor_probed(hint, policy, block)
+    }
+
+    /// 发布内容定位器（**非音频线程**，必须与 `raw_tape` 同一次发布）。
+    ///
+    /// 【为什么要在这里而不是在发布器里】定位器属于「磁带 → 工程帧」这张表，而那张表
+    /// 就在 `project_map` 里。把它挂到表上，音频线程取它时只碰一个叶子锁，不必回头去
+    /// 问发布器要样本。
+    pub fn publish_tape_probe(&self, samples: Arc<dyn crate::anchor_probe::TapeSamples>) {
+        self.project_map
+            .publish_probe(crate::anchor_probe::TapeProbe::new(samples).map(Arc::new));
+    }
+
+    /// 撤掉内容定位器（清空素材 / 换 take 前的那一帧）。
+    pub fn clear_tape_probe(&self) {
+        self.project_map.publish_probe(None);
+    }
+
+    /// 当前映射表的代次（诊断；`0` = 还没发布过）。
+    pub fn project_map_revision(&self) -> u64 {
+        self.project_map.revision()
+    }
+    /// **诊断 / 测试专用**：直接发布一张映射表（生产路径只能由
+    /// [`Self::publish_project_map`] 从真实 take 算出来）。
+    ///
+    /// 【为什么需要这个钩子】「内容判定把锚点挪到正确位置」这条判据必须能在**没有
+    /// 真实录音**的环境里被断言 —— 而录音需要宿主。表本身是纯数据，直接给它是
+    /// 唯一能让那条判据进 CI 的办法。
+    ///
+    /// 【为什么不是 `#[cfg(test)]`】跨 crate 的测试（`hifishifter-plugin` 的集成用例）
+    /// 把本 crate 当**普通依赖**编译，`cfg(test)` 的项在那里不存在。名字里带 `for_test`
+    /// 与 `#[doc(hidden)]` 是这条边界的替代写法：它在文档里不出现，也不会被误当成
+    /// 生产入口。
+    #[doc(hidden)]
+    pub fn publish_project_map_for_test(
+        &self,
+        revision: u64,
+        segments: &[crate::project_map::ProjectMapSegment],
+    ) {
+        self.project_map.publish(revision, segments);
+    }
+
+    /// 立刻重算并发布一次映射（`promote` / `restore_manifest` 之后调用）。
+    ///
+    /// 【为什么 promote 之后要显式调一次】映射的读方是音频线程，而它不会去建投影
+    /// 缓存。等某个非音频调用方"顺手"建缓存，等于让第一遍预览在一段未定义的长度里
+    /// 没有映射 —— 那段时间的输出是直通。这里在 promote 的收尾处主动发布一次。
+    pub fn publish_project_map(&self) {
+        let revision = self.revision.load(Ordering::Acquire);
+        let segments = self.with_projection(timeline::project_map_from_takes);
+        self.project_map.publish(revision, &segments);
     }
 
     /// 素材的**未处理** PCM，做成一份可直接发布的快照（"原始磁带"）。

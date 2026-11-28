@@ -40,6 +40,8 @@ import { buildReferencePitchStrokeColor } from "../referenceRootTracks";
 import type { ParamViewSegment, ValueViewport } from "../types";
 import { useClipsPeaksForPianoRoll } from "../useClipsPeaksForPianoRoll";
 import { useLiveParamEditing } from "../useLiveParamEditing";
+import { useGainAudition } from "../../timeline/hooks/useGainAudition";
+import { paramWindowScope } from "../paramWindowKey";
 import type { LiveEditFlag } from "../liveEditFlag";
 import { drawPianoRollFrame } from "./drawFrame";
 import type { ModelDeps } from "./modelDeps";
@@ -254,6 +256,7 @@ export function usePianoRollFrameAssembly({
         paramViewRef.current = paramView;
     }, [paramView]);
 
+    const gainAudition = useGainAudition();
     const {
         liveEditOverrideRef,
         ensureLiveEditBase,
@@ -268,9 +271,9 @@ export function usePianoRollFrameAssembly({
         editParam,
         pitchEnabled,
         paramView,
-        setParamView,
         bumpRefreshToken,
         invalidate,
+        audition: gainAudition,
     });
 
     /**
@@ -348,7 +351,7 @@ export function usePianoRollFrameAssembly({
             if (!drag || !paramView || editParam !== "pitch" || !pitchEnabled) return;
             ensureLiveEditBase(paramView);
             const override = liveEditOverrideRef.current;
-            if (!override || override.key !== paramView.key) return;
+            if (!override || override.scope !== paramWindowScope(paramView.key)) return;
             const deltaSemitones = drag.cents / 100;
             const windowEndFrame = drag.startFrame + drag.frameCount;
             // 以 paramView 的原始帧为基准重复推导（预览事件幂等，不叠加），
@@ -357,7 +360,7 @@ export function usePianoRollFrameAssembly({
             // 时预览值与后端存下的值不一致），也不推进版本号（主画布签名与波形
             // 几何缓存都看不到变化）。
             const dense = new Array<number>(drag.frameCount);
-            for (let i = 0; i < override.edit.length; i += 1) {
+            for (let i = 0; i < paramView.edit.length; i += 1) {
                 const frame = paramView.startFrame + i * paramView.stride;
                 if (frame < drag.startFrame || frame >= windowEndFrame) continue;
                 dense[frame - drag.startFrame] = shiftPitchValue(
@@ -365,7 +368,8 @@ export function usePianoRollFrameAssembly({
                     deltaSemitones,
                 );
             }
-            // 步长 > 1 时 dense 会有空洞：写入侧 `dense[j] ?? edit[i]` 会保留原值。
+            // 步长 > 1 时 dense 会有空洞：写入侧会**跳过**这些帧（它们不在窗口栅格上，
+            // 见 strokeBuffer.write），因此预览与提交看到的是同一份值。
             applyDenseToLiveEdit(
                 paramView,
                 drag.startFrame,

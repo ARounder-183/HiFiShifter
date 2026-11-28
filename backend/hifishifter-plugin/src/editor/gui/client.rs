@@ -17,7 +17,6 @@
 use super::port::{EditorPort, NativeWindow};
 use super::protocol;
 use crate::editor::host_key_relay;
-use crate::sync::MutexExt;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -67,6 +66,22 @@ fn host_reply_retry_backoff(attempt: u32) -> std::time::Duration {
     let shift = attempt.saturating_sub(1).min(5);
     let millis = 20_u64.saturating_mul(1_u64 << shift).min(500);
     std::time::Duration::from_millis(millis)
+}
+
+/// 一条"本该重投、却被闸挡下"的回复必须留下理由。
+///
+/// 【为什么这不是普通诊断】上一轮现场的导入回执是"判据成立、一次重投都没发生、
+/// 日志一个字都没有"—— 也就是一个**不可恢复的判定没有留下"为什么不可恢复"**。
+/// 四个理由各自指向一处：`budget` 用完、`window` 到期、`lease` 编辑租约换了、
+/// `queue` actor 队列拒收。没有这四个词，下一次只能再猜一遍。
+fn report_reply_finalized_without_retry(id: u64, reason: &str, command: &str) {
+    hifishifter_kernel::log_limiter::emit_limited_key(
+        log::Level::Warn,
+        "host.reply.no-retry",
+        format_args!(
+            "[host] reply finalized without retry: id={id} reason={reason} command={command}"
+        ),
+    );
 }
 
 /// 把前端上报的错误文本折成一个**稳定、有界**的限流键片段。
@@ -219,7 +234,7 @@ pub(crate) struct EditorClient {
     /// 路由兜底是否已经试过（只试一次，见 [`try_route_fallback`]）。
     route_fallback_tried: bool,
     /// 就绪前的待发队列（见 `4.3`）。
-    queue: std::collections::VecDeque<String>,
+    queue: std::collections::VecDeque<(String, super::outbound::OutboundKind)>,
     /// 连续投递失败次数；页面进程死掉后它只增不减，是"视图该自毁"的唯一判据。
     post_failures: u32,
     /// 已经判定为死视图（投递连续失败或平台报告进程崩溃）。
@@ -282,6 +297,12 @@ pub(crate) struct EditorClient {
     last_transport_move_at: std::time::Instant,
     /// 上一次推送的位置（判断"动没动"用）。
     last_transport_position: f64,
+    /// "宿主说在播、位置不动"这一段从什么时候开始（`None` = 现在没卡住）。
+    ///
+    /// 【为什么要记起点】只报"卡了 2408 ms"回答不了"这是第一次还是第 N 次"。有了
+    /// 起点与恢复行（`reason=recovered after_ms=…`），这一对行才构成一段**有始有终**
+    /// 的事实，而不是一堆散落的告警。
+    transport_pinned_since: Option<std::time::Instant>,
     /// 就绪之后累计投递给页面的字节数。
     ///
     /// 【为什么这条读数必须存在】一条消息的体积是渲染进程内存的直接输入，而它此前
@@ -523,6 +544,23 @@ struct HostReply {
     action: Option<MediaAction>,
 }
 
+/// 导入回执的**三态**（见 `ImportState` 的说明与计划 §4）。
+///
+/// 【为什么是三种而不是两种】旧判据只有"区域已绑定 / 还没绑定"，把"宿主 item 已经
+/// 建出来、只是 ARA 区域还没建"这一**正常中间态**归进了失败。而 REAPER 建区域的时机
+/// 是 `beginEditing` 边界 —— 导入命令永远跑在那个边界之外，所以这一态不是"还没好"，
+/// 是"已经好了，只是插件看不到"。
+enum ImportState {
+    /// 本次回执与导入无关。
+    Idle,
+    /// ARA 区域已绑定：最完整的一态，直接给 clip id。
+    Bound(String),
+    /// 宿主 item 已在 GUI 清单里、ARA 区域还没建。**正常状态**，不是错误。
+    Inventory(String),
+    /// 宿主侧还看不到这个 item：只有这一态值得重投。
+    Absent,
+}
+
 impl EditorClient {
     /// 建一个视图的判定状态，并把它交给调用方的 `Rc`。
     ///
@@ -582,6 +620,7 @@ impl EditorClient {
             last_transport_at: std::time::Instant::now(),
             last_transport_move_at: std::time::Instant::now(),
             last_transport_position: f64::NAN,
+            transport_pinned_since: None,
             outbound_bytes: 0,
             outbound_reported: 0,
             outbound_at: std::time::Instant::now(),
@@ -706,8 +745,8 @@ impl EditorClient {
             "page ready after {}ms ({queued} queued)",
             self.opened_at.elapsed().as_millis()
         ));
-        while let Some(text) = self.queue.pop_front() {
-            if !self.deliver_text(&text) {
+        while let Some((text, kind)) = self.queue.pop_front() {
+            if !self.deliver_text(&text, kind) {
                 // 一条投不出去，后面的也排在同一条通道上；留着队列只会在下次
                 // `on_page_ready` 里重复失败。
                 self.queue.clear();
@@ -725,6 +764,7 @@ impl EditorClient {
             return false;
         }
         let text = value.to_string();
+        let kind = super::outbound::classify(&value);
         if !self.ready {
             if self.queue.len() >= QUEUE_BUDGET {
                 self.queue.pop_front();
@@ -741,14 +781,14 @@ impl EditorClient {
                     }
                 }
             }
-            self.queue.push_back(text);
+            self.queue.push_back((text, kind));
             return true;
         }
-        self.deliver_text(&text)
+        self.deliver_text(&text, kind)
     }
 
     /// 就绪之后的实际投递，顺带维护"连续失败"计数。
-    fn deliver_text(&mut self, text: &str) -> bool {
+    fn deliver_text(&mut self, text: &str, kind: super::outbound::OutboundKind) -> bool {
         let Some(port) = self.port.clone() else {
             // 端口还没接上：与"未就绪"同义，但不要再攒进队列（队列已经刷过了）。
             return false;
@@ -759,10 +799,17 @@ impl EditorClient {
             // 【为什么大消息要单独一行】它是唯一能在"渲染进程被一条消息打死"这类
             // 事故里指出**是哪一条**的读数。
             if text.len() >= BIG_MESSAGE_BYTES {
+                // 【为什么必须带种类与视图】没有这一位，"1.9 MB 是哪条消息"只能靠读源码
+                // 回答 —— 而它正是"渲染进程被一条消息打死"这类事故里唯一能定位的读数。
                 hifishifter_kernel::log_limiter::emit_limited_key(
                     log::Level::Warn,
                     "gui_big_outbound",
-                    format_args!("[gui] outbound big message bytes={}", text.len()),
+                    format_args!(
+                        "[gui] outbound big message bytes={} kind={} view={}",
+                        text.len(),
+                        kind.as_str(),
+                        self.view_id
+                    ),
                 );
             }
             return true;
@@ -953,18 +1000,32 @@ fn push_transport(state: &Rc<RefCell<EditorClient>>) {
         state.last_transport_at = now;
         frozen
     };
+    // 【这是"宿主未推进"，不是一句 trace】"光标卡住"的三种成因（来源停摆 / 来源一直在
+    // 给同一个值 / 前端没消费）在日志里同形。这一行把**来源、年龄、定位窗口**一起写
+    // 出来，一次现场就能定死是哪一种；恢复时再补一行带 `after_ms` 的收尾，于是
+    // "卡了多久、恢复没有"成为一对有始有终的事实。限流由 `emit_limited_key` 负责。
     if frozen_for >= TRANSPORT_FROZEN {
-        // 【为什么这一行值得存在】"光标卡住"的三种成因（来源停摆 / 来源一直在给
-        // 同一个值 / 前端没消费）在日志里同形。这一行把**来源、年龄、定位窗口**
-        // 一起写出来，一次现场就能定死是哪一种。限流由 `emit_limited_key` 负责。
+        let first = state.borrow_mut().transport_pinned_since.is_none();
+        if first {
+            state.borrow_mut().transport_pinned_since =
+                Some(std::time::Instant::now() - frozen_for);
+        }
         hifishifter_kernel::log_limiter::emit_limited_key(
             log::Level::Warn,
             "transport.frozen",
             format_args!(
-                "[transport] trace: the host reports playing but the position has not moved for {} ms ({}); the editor keeps extrapolating at 1x",
+                "[transport] pinned: the host reports playing but the position has not moved for {} ms ({}); the editor keeps extrapolating at 1x",
                 frozen_for.as_millis(),
                 view.to_json(clock.duration(), true)
             ),
+        );
+    } else if let Some(since) = state.borrow_mut().transport_pinned_since.take() {
+        // 【为什么这里**不用**限流】这一行每次"卡住 → 恢复"只出现一次（起点被 `take`
+        // 掉了）。限流键会把"恢复了又卡住"的第二次恢复吞掉 —— 而那正是最需要看的
+        // 那一次。限流的规则也只允许 Warn/Error/Debug，Info 是会话叙事。
+        log::info!(
+            "[transport] pinned: reason=recovered after_ms={} (the position is advancing again)",
+            since.elapsed().as_millis()
         );
     }
     // 【载荷与 `get_playback_state` 同形】见 `TransportView::to_json`：缺 `ok` 的那一版
@@ -1037,6 +1098,12 @@ pub(crate) fn ui_tick(state: &Rc<RefCell<EditorClient>>) {
     try_route_fallback(state, &link);
     if let Ok(owner) = link.owner() {
         owner.note_editor_tick();
+        // 【为什么在这里问"导入等了多久"】这是全插件唯一与宿主节奏无关的观测点：
+        // 宿主若一直不发 ARA 图，发布路径一次都不会跑，也就没人能告诉用户
+        // "Item 建了、音频没来"。每一条只报一次（见 `take_stalled_imports`）。
+        if let Some(session) = owner.existing_editor_session() {
+            session.report_stalled_imports();
+        }
         if owner.take_bootstrap_changed() {
             if let Some(session) = owner.existing_editor_session() {
                 let view_id = state.borrow().view_id.clone();
@@ -1053,6 +1120,8 @@ pub(crate) fn ui_tick(state: &Rc<RefCell<EditorClient>>) {
 }
 
 pub(crate) fn tick(state: &Rc<RefCell<EditorClient>>) {
+    // 视图节拍同样是宿主 UI 线程（见 host::thread_mark）。
+    let _host_thread = crate::host::RoleGuard::enter(crate::host::HostThreadRole::ViewTimer);
     ui_tick(state);
     host_heartbeat();
     push_transport(state);
@@ -1094,15 +1163,33 @@ fn report_outbound(state: &Rc<RefCell<EditorClient>>) {
 
 pub(crate) fn pump(state: &Rc<RefCell<EditorClient>>) {
     let link = state.borrow().link.clone();
-    let (mut replies, events) = {
+    let (mut replies, events, dropped) = {
         let state = state.borrow();
         if state.closed {
             return;
         }
-        let replies = state.replies.try_iter().take(32).collect::<Vec<_>>();
-        let events = state.events.try_iter().take(64).collect::<Vec<_>>();
-        (replies, events)
+        let replies = state
+            .replies
+            .try_iter()
+            .take(super::outbound::OUTBOUND_BATCH_REPLIES)
+            .collect::<Vec<_>>();
+        // 【为什么要把队列抽干】此前只取 64 条。队列积压时，"每拍取 64 条"就等于
+        // 把一份 1.9 MB 的洪峰摊到很多拍里 —— 而每一拍都还在宿主线程上阻塞一次。
+        // 抽干之后合并才有意义：100 条状态事件合成 1 条。
+        let (events, dropped) = super::outbound::coalesce_events(
+            state.events.try_iter().collect::<Vec<_>>(),
+            super::outbound::OUTBOUND_BATCH_BYTES,
+        );
+        (replies, events, dropped)
     };
+    if dropped > 0 {
+        // 【为什么必须报出来】"事件被预算丢掉"与"事件从没产生"在页面上完全同形。
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "gui_outbound_coalesced",
+            format_args!("[gui] outbound coalesced: dropped {dropped} superseded event(s)"),
+        );
+    }
     // 在宿主模型/PCM尚未ready的过渡期，保留原Promise。只排actor读取，不在UI做文件/推理。
     replies.retain_mut(|reply| {
         let Some(id)=reply["id"].as_u64() else {return true;};
@@ -1168,15 +1255,88 @@ pub(crate) fn pump(state: &Rc<RefCell<EditorClient>>) {
         let mut state=state.borrow_mut();
         if let Some(host)=state.host_replies.get(&id) {
             let error=reply["error"].as_str().unwrap_or("").to_owned();
-            let imported=host.imported.as_ref().and_then(|item|host.document.upgrade().and_then(|doc|doc.clip_for_host_item(item))).map(|clip|host.editor.ui_clip_id(&clip));
-            let waiting=host.imported.is_some()&&(imported.is_none()||!reply["value"]["clips"].as_array().is_some_and(|clips|clips.iter().any(|clip|Some(clip["id"].as_str().unwrap_or(""))==imported.as_deref())));
-            let geometry_waiting=reply["ok"]==true&&host.geometry.as_ref().is_some_and(|geometry|!geometry.matches(&reply["value"]));
+            // 【三态判据】导入的成功判据必须是"宿主**已经确认**的事实"，而不是"只在某个
+            // 会话边界才出现的事实"。
+            //
+            // 旧判据只认 `clip_for_host_item`（ARA 区域 → clip 的映射）。而 REAPER 不是
+            // "item 一出现就建区域"，是**在 beginEditing 边界重建图时才补**：原生文件对话框
+            // 让插件窗口失焦、编辑会话结束，导入命令全程跑在编辑会话之外，于是区域必然晚于
+            // 命令 —— 现场日志里是"报错后 32~45 ms 开始编辑会话，再 60~73 ms 新 region 出现"。
+            // item、take、source 其实都建对了，命令只是用一个**还没发生**的事实判了它失败。
+            let import_state=match host.imported.as_ref(){
+                None=>ImportState::Idle,
+                Some(item)=>match host.document.upgrade(){
+                    None=>ImportState::Absent,
+                    Some(doc)=>match doc.clip_for_host_item(item){
+                        Some(clip)=>ImportState::Bound(host.editor.ui_clip_id(&clip)),
+                        None=>match doc.gui_clip_for_host_item(item){
+                            Some(clip)=>ImportState::Inventory(host.editor.ui_clip_id(&clip)),
+                            None=>ImportState::Absent,
+                        },
+                    },
+                },
+            };
+            let imported=match &import_state{ImportState::Bound(clip)|ImportState::Inventory(clip)=>Some(clip.clone()),_=>None};
+            let in_payload=|clip:&str|reply["value"]["clips"].as_array().is_some_and(|clips|clips.iter().any(|entry|entry["id"].as_str()==Some(clip)));
+            // 【契约：导入成功 = item 存在】回执的职责到"宿主交回 item GUID"为止；
+            // 之后由待定导入账本（`DocumentSession::publish_pending_imports`）负责转正。
+            // 这里不再判"等待"，只回答一件事：要不要让前端先画那条斜纹占位。
+            //
+            // 【为什么曾经是错的】旧代码把这一位当成**完成门**：89 ms 判死，而宿主
+            // 发布 ARA 图要 212~299 ms（现场实测）。判据选的不是"我们观测到的事实"，
+            // 而是"宿主按自己的节奏迟早会做的一件事"，于是宿主的调度延迟变成了我们的
+            // 失败率。同一段注释上面早就写明了这个机理，却仍然留着 `if waiting { ok = false }`。
+            let import_pending=match &import_state{
+                ImportState::Absent=>true,
+                ImportState::Bound(clip)=>!in_payload(clip),
+                ImportState::Inventory(_)=>true,
+                ImportState::Idle=>false,
+            };
+            // 【I-E2：一次成功写入的权威是"我们写下的值"，不是宿主回声】
+            //
+            // 此前这里把 `clip_gain` 等字段的**载荷回声**当成写回成功的判据。而载荷是
+            // 另一条异步通路的产物（编辑器时间线 → 图集投影 → 序列化），拿它的进度判定
+            // 一次同步写入，必然出两种错：回声慢 ⇒ 误报"宿主还没跟上"；字段错（本轮修掉的
+            // `clip_gain` 从不被宿主投影写出来）⇒ **永远**对不上 —— 退避重试 24 次（约
+            // 10.6 s）之后仍然落到终态错误，前端按 `rejectWithValue` 回滚乐观更新，用户
+            // 看到的就是"宿主改对了、插件里的 Clip 反而回弹"。
+            //
+            // 现在的分工：
+            //   * 写入是否成功 —— 由 `execute_managed` 的返回码与结构读回核对回答（那是
+            //     宿主的**直接答复**，比任何回声都强）；
+            //   * 回声与 `after` 不一致 —— 只记一条诊断（限流），用于发现"setter 返回 0
+            //     但其实没生效"这类宿主缺陷；
+            //   * 前端拿到载荷之前，把**本次补丁写过的那几位**按 `after` 覆盖上去 ——
+            //     否则前端整份应用一份旧载荷，视觉上仍然会回弹。
+            if reply["ok"] == true {
+                if let Some(geometry) = host.geometry.as_ref() {
+                    let diverged = geometry.divergences(&reply["value"]);
+                    if !diverged.is_empty() {
+                        hifishifter_kernel::log_limiter::emit_limited_key(
+                            log::Level::Warn,
+                            "host.write.echo-divergence",
+                            format_args!(
+                                "[host] write echo diverged from the applied snapshot after a successful write: {}",
+                                diverged.join("; ")
+                            ),
+                        );
+                    }
+                    // 【增益分歧要能指出是哪一层】两层增益（item / take）加上载荷投影共三层，
+                    // "clip X gain=4 expected 1"读不出错在哪一层。只在出现增益类分歧时输出。
+                    if let Some(layers) = geometry.gain_layers(&reply["value"]) {
+                        hifishifter_kernel::log_limiter::emit_limited_key(
+                            log::Level::Warn,
+                            "host.gain.layers",
+                            format_args!("[host] gain layers: {layers}"),
+                        );
+                    }
+                    geometry.overlay(&mut reply["value"]);
+                }
+            }
             let split_waiting=reply["ok"]==true&&host.split.as_ref().is_some_and(|split|!host.document.upgrade().is_some_and(|doc|split.matches(&doc,&host.editor.namespace,&mut reply["value"])));
             let media_waiting=reply["ok"]==true&&host.media.as_ref().is_some_and(|media|!host.document.upgrade().is_some_and(|doc|media.matches(&doc,&host.editor.namespace,&mut reply["value"])));
             let now = std::time::Instant::now();
-            let retryable = waiting
-                || geometry_waiting
-                || split_waiting
+            let retryable = split_waiting
                 || media_waiting
                 || reply["ok"] == false
                     && (crate::editor::errors::is_retryable_host_conflict(&error)
@@ -1185,6 +1345,13 @@ pub(crate) fn pump(state: &Rc<RefCell<EditorClient>>) {
             // 退避：只在到点且未超预算时重投。预算与 `until` 双保险 —— 前者挡住
             // "永不收敛的失败"（否则 50 Hz 空转到 30 s），后者挡住"慢宿主"。
             let can_retry = host.attempts < HOST_REPLY_RETRY_BUDGET && now >= host.next_attempt;
+            // 【为什么把命令名提到这里】"重投被闸挡下"那一行要回答"哪条命令没能重投"，
+            // 而它有两个出口（排不进去 / 窗口或预算到期），只有一处算得出来。
+            let command = if host.media.is_some() {
+                "get_timeline_inventory"
+            } else {
+                "get_timeline_state"
+            };
             if retryable && now < host.until && can_retry {
                 let allowed = host.document.upgrade().is_some_and(|doc| {
                     state
@@ -1192,11 +1359,6 @@ pub(crate) fn pump(state: &Rc<RefCell<EditorClient>>) {
                         .authorize(&doc)
                         .is_ok_and(|lease| lease == host.lease)
                 });
-                let command = if host.media.is_some() {
-                    "get_timeline_inventory"
-                } else {
-                    "get_timeline_state"
-                };
                 let editor = host.editor.clone();
                 let sink = state.sink.clone();
                 let link = state.link.clone();
@@ -1218,12 +1380,47 @@ pub(crate) fn pump(state: &Rc<RefCell<EditorClient>>) {
                     }
                     return false;
                 }
+                // 判据成立、却排不进去：租约换了，或 actor 队列拒收。两条都不是"重试
+                // 会好"，必须留下理由（见 `report_reply_finalized_without_retry`）。
+                report_reply_finalized_without_retry(id, if allowed { "queue" } else { "lease" }, command);
+            } else if retryable {
+                report_reply_finalized_without_retry(
+                    id,
+                    if host.attempts >= HOST_REPLY_RETRY_BUDGET { "budget" } else { "window" },
+                    command,
+                );
             }
-            if waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("item was created in the host but its ARA audio is not ready; use host Undo if canceling");}
-            if geometry_waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("clip was edited in the host but its ARA geometry has not caught up; host Undo remains available");}
             if split_waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("item was split in the host but both clips have not caught up; host Undo remains available");}
             if media_waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("media was edited in the host but its GUI/ARA identities have not caught up; host Undo remains available");}
-            if !waiting&&host.imported.is_some() {reply["value"]["imported_clip_id"]=serde_json::json!(imported);}
+            // 导入回执的终态：**item 存在就是成功**，`pending` 只是一个状态位。
+            //
+            // 三个字段各有分工：`imported_item` 是这次导入的宿主身份（前端用它把回执与
+            // 后续的 `import_ready` 对上），`imported_clip_id` 能解析就带上（前端据此
+            // 定位乐观更新的目标），`import_pending` 只决定"先画占位还是直接画波形"。
+            //
+            // 只在回包本身成功时写：失败的回包（取数失败 / 会话已换）不能被这一层
+            // 改写成一份"成功但带 pending"的假象。
+            if reply["ok"] == true {
+                if let Some(item) = host.imported.as_deref() {
+                    reply["value"]["imported_item"] = serde_json::json!(item);
+                    reply["value"]["import_pending"] = serde_json::json!(import_pending);
+                }
+                if let Some(clip) = imported.as_deref() {
+                    reply["value"]["imported_clip_id"] = serde_json::json!(clip);
+                }
+            }
+            if host.imported.is_some() {
+                // `item=` 与请求那一行的 `item=` 是同一条证据链：一行说"落到哪条轨"，
+                // 一行说"判据是什么"。缺了它，现场只能靠时间戳猜这两件事说的是同一次导入。
+                log::info!(
+                    "[import] item={} state={} clip={} ok={} pending={}",
+                    host.imported.as_deref().unwrap_or("-"),
+                    match &import_state{ImportState::Bound(_)=>"region-bound",ImportState::Inventory(_)=>"inventory-only",ImportState::Absent=>"absent",ImportState::Idle=>"idle"},
+                    imported.as_deref().unwrap_or("-"),
+                    reply["ok"],
+                    reply["value"]["import_pending"],
+                );
+            }
         }
         let done_history=state.history_requests.remove(&id);let view_id=state.view_id.clone();
         let finished_undo=state.undo_requests.remove(&id).and_then(|document|document.upgrade());
@@ -1609,6 +1806,9 @@ pub(crate) fn bootstrap_json(
 /// `rename_clip_take` 三条命令的改写只依赖时间线与路由（不依赖任何平台 API），
 /// 而它们改的是**同一条**前端命令的语义。放到平台侧就等于三份拷贝。
 pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
+    // 【宿主线程标记】这里是 WebView2 / WebKit 的消息回调 —— 宿主 UI 线程。有了这一位，
+    // "本线程不得等长锁"就从一条注释变成可判定的事实（见 host::thread_mark）。
+    let _host_thread = crate::host::RoleGuard::enter(crate::host::HostThreadRole::WebView);
     // 【为什么这三处早退各留一行】它们是「命令到底到没到」这个问题上唯一的盲区：
     // 命令既没被接受、也没被拒绝，在日志里与「从未发送」完全同形。此前三处都是裸
     // `return`，于是一次「点了没反应」无从归因。
@@ -1732,12 +1932,20 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
         let track = request["args"]["trackId"].as_str().unwrap_or("").to_owned();
         let from = request["args"]["fromSec"].as_f64().unwrap_or(f64::NAN);
         let link = state.borrow().link.clone();
+        // 【为什么不取 `editor.timeline`】这里是 WebView2 的消息回调 —— **宿主 UI 线程**。
+        // 那把锁会被会话 actor 在整份投影期间持有；宿主线程排在那后面就不再泵消息，
+        // 而 actor 的投递又需要它泵。这正是"导入之后宿主未响应 + plugin_get_apply_state
+        // 超时"那条 ABBA。改成读一份**锁自由**的片段索引：读方只克隆一个 Arc，持有时间
+        // 是纳秒级，且永不跨 `post_message`。
         if let Ok(owner) = link.owner() {
-            if let Ok(editor) = owner.editor_session() {
-                let moves = editor
-                    .timeline
-                    .lock_or_recover()
-                    .close_track_gaps_moves(&track, from);
+            if let Some(editor) = owner.existing_editor_session() {
+                let clips = editor.ui_clips();
+                let rows = clips
+                    .iter()
+                    .filter(|clip| clip.track_id == track)
+                    .map(|clip| (clip.id.clone(), clip.start_sec, clip.length_sec))
+                    .collect::<Vec<_>>();
+                let moves = hifishifter_kernel::state::close_track_gaps_moves_from(&rows, from);
                 request["command"] = if moves.is_empty() {
                     serde_json::json!("get_timeline_state")
                 } else {
@@ -1757,11 +1965,10 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
         let name = request["args"]["name"].as_str().unwrap_or("").to_owned();
         let link = state.borrow().link.clone();
         if let Ok(owner) = link.owner() {
-            if let Ok(editor) = owner.editor_session() {
-                let active = editor
-                    .timeline
-                    .lock_or_recover()
-                    .clips
+            // 【同 `close_track_gaps`：这里也不许取时间线锁】见那里的说明。
+            if let Some(editor) = owner.existing_editor_session() {
+                let clips = editor.ui_clips();
+                let active = clips
                     .iter()
                     .find(|clip| clip.id == clip_id)
                     .and_then(|clip| clip.active_take_id.clone());
@@ -1881,25 +2088,20 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
         // 刷一条 `Backend invoke failed: plugin_plugin_get_apply_state`。
         Some("plugin_get_apply_state") => {
             let link = state.borrow().link.clone();
+            // 【为什么读缓存而不是 `editor.state()`】这是 GUI 线程上的 4 Hz 轮询，
+            // 而 `state()` 要取 `timeline` / `render_task` 与文档侧的多张表。actor 在
+            // 某个命令里持着 `timeline` 锁、同时正在向 WebView 投递时，GUI 线程就卡在
+            // 那把锁上；而 actor 的投递又需要 GUI 线程泵消息 —— 这是 ABBA，现场表现
+            // 是状态栏红条 `BackendInvokeError: ... plugin_get_apply_state`。
+            // 缓存由 actor 在每次命令收尾的 `emit_state` 里写入，读方只克隆一个 Arc。
             let payload = match link
                 .owner()
                 .ok()
                 .and_then(|owner| owner.existing_editor_session())
             {
-                Some(editor) => editor.state(),
-                // 与 `EditorSession::state()` 逐字段同形，只是"什么都没有"。
-                None => serde_json::json!({
-                    "mode": "ara",
-                    "generation": 0,
-                    "applied_generation": 0,
-                    "pending": false,
-                    "analysis_pending": false,
-                    "rendering_active": false,
-                    "host_version": 0,
-                    "error": serde_json::Value::Null,
-                    "connected": true,
-                    "ready": false,
-                }),
+                Some(editor) => editor.apply_state(),
+                // 与 `EditorSession::busy_apply_state()` 逐字段同形，只是"什么都没有"。
+                None => crate::editor::session::EditorSession::busy_apply_state(),
             };
             Ok(payload)
         }
@@ -1947,17 +2149,109 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 let track=input["trackId"].as_str().map(|id|editor.host_track_id(id)).transpose()?;
                 let allowed=||link.authorize(&document).is_ok_and(|current|current==lease);
                 let host=owner.project_history_host().ok_or("import project history missing")?;
+                // 【三态语义：字段缺失 = "宿主决定"，null = "显式新建"】
+                //
+                // 协议的三层曾经各说各话：前端把 `null` 当"交给插件决定（=当前轨）"，
+                // `invoke` 原样透传，而这里把"字段存在且为 null"读成**新建一条宿主轨**。
+                // 于是"文件 → 导入音频"这个最普通的动作在 ARA 里每次都建一条 REAPER 轨，
+                // 而那条轨没有被本实例采纳 ⇒ 它的 item 永远进不了清单 ⇒ 导入的 clip 停在
+                // "等宿主音频"，时间线上还凭空多出一行没有 region 的 sequence。
+                //
+                // 现在 `null` 只有一个意思（显式新建），"未指定"用**字段缺失**表达 ——
+                // 两个后端（这里与独立 App 的 `import_audio_item`）口径一致。
                 let new_track=input["trackId"].is_null()&&input.as_object().is_some_and(|object|object.contains_key("trackId"));
+                let requested=if new_track { "new" } else { track.as_deref().unwrap_or("none") }.to_owned();
                 let existing=if new_track {None} else {Some(owner.audio_import_target(track.as_deref(),&allowed)?)};
                 state.borrow_mut().undo_document=Some(Arc::downgrade(&document));
-                document.host_undo.begin_request(&view_id,id,true,true,&host,&allowed)?;
-                let result=(||->Result<String,String>{
-                    let mut created=if new_track {Some(host.create_audio_track(std::path::Path::new(path).file_stem().and_then(|name|name.to_str()).unwrap_or("Imported audio"),None,&allowed)?)} else {None};
-                    let target=existing.as_ref().or_else(||created.as_ref().map(|track|&track.target)).ok_or("import target missing")?;
-                    let id=target.import_audio(path,input["startSec"].as_f64().unwrap_or_else(||owner.clock.get().map(|clock|clock.read().0).unwrap_or(0.)),&allowed)?;
-                    if let Some(track)=&mut created {track.commit();}Ok(id)
-                })();
-                document.host_undo.finish_request(&view_id,id);let imported=result?;
+                // 【RAII：undo 组必须与宿主写入同生共死】见 `UndoRequestGuard` 的说明 ——
+                // 中间那条路径上 `?` 满地都是，漏一次收尾就让宿主 undo 块永久开着，
+                // 而 `HostUndo::pending` 恒真会把自动合成一起挂起。
+                let _undo = crate::host::undo::UndoRequestGuard::begin(
+                    &document.host_undo,&view_id,id,true,true,&host,&allowed)?;
+                // 【顺序】守卫在 `_undo` **之后**进入：Drop 逆序，于是宿主调用先结束、
+                // undo 组后关闭 —— 宿主写入期间那个组必须仍然开着。
+                // 【守卫的作用域就是**宿主写入**的作用域】它必须覆盖 `create_audio_track` 与
+                // `import_audio`（两者都会让宿主**同步**回调 ARA：`beginEditing` /
+                // `endEditing`）。没有这一层，那次回调会去等准备 worker —— 现场就是在这里
+                // 挂起（`AppHangB1`）。
+                //
+                // 【为什么它必须在这里**结束**】峰值构建是**新的一次**宿主调用：REAPER 把
+                // 峰值作业排进它自己的空闲期，在回调里请求它等于把这一轮空闲用掉 ——
+                // 那正是"导入后没有波形、要切窗口才出现"的成因（见 `host/reaper/media.rs`
+                // 的 `kick_peaks`）。所以 `let (created, imported) = {…}` 这个块就是守卫的
+                // 全部范围，块一结束就踢峰值。
+                let (mut created, imported) = {
+                    let _call = crate::host::HostCallGuard::enter("import_item");
+                    let created=if new_track {Some(host.create_audio_track(std::path::Path::new(path).file_stem().and_then(|name|name.to_str()).unwrap_or("Imported audio"),None,&allowed)?)} else {None};
+                    // 【I-P1：新建轨必须在**同一次请求里**进入本实例作用域】
+                    //
+                    // `create_audio_track` 把新轨插在锚点之后 —— 那是本轨的**兄弟**，而清单
+                    // 的枚举范围是"本轨 + folder 后代 + 已采纳"（`ui_folder_tracks`）。不登记，
+                    // 它下一轮就会被枚举漏掉：宿主里真实存在、插件里**构造上**永远看不到，
+                    // 于是这条导入的 clip 停在 `state=absent`，而 ARA 侧那条空 region
+                    // sequence 反而被画成一行轨。这正是"导入后多出一条轨、重载才恢复"。
+                    if let Some(track)=&created {document.adopt_track(track.target.inventory_guid());}
+                    let imported=(||->Result<String,String>{
+                        let target=existing.as_ref().or_else(||created.as_ref().map(|track|&track.target)).ok_or("import target missing")?;
+                        target.import_audio(path,input["startSec"].as_f64().unwrap_or_else(||owner.clock.get().map(|clock|clock.read().0).unwrap_or(0.)),&allowed)
+                    })();
+                    (created, imported)
+                };
+                // 守卫已经退出：从这里开始是**新的**一次宿主调用。
+                //
+                // 【为什么在错误分支之前】成功才需要建峰值；失败时 item 已经被
+                // `CreatedItem::drop` 删掉，再按 GUID 去踢只会白跑一趟。
+                if let Ok(item)=&imported {
+                    let target=existing.as_ref().or_else(||created.as_ref().map(|track|&track.target));
+                    if let Some(target)=target {
+                        if let Err(error)=target.kick_peaks(item,&allowed) {
+                            log::warn!("[import] peaks guid={item} failed: {error}");
+                        }
+                    }
+                }
+                let (imported,landed)=match imported {
+                    Ok(item)=>{
+                        let landed=created.as_ref().map(|track|track.target.inventory_guid().to_owned())
+                            .or_else(||track.clone());
+                        if let Some(track)=&mut created {track.commit();}
+                        (item,landed)
+                    }
+                    Err(error)=>{
+                        // 【采纳记录必须与宿主轨同生共死】`CreatedTrack::drop` 只在"仍为空
+                        // 且只含自己新增的 FX"时才删轨；判据不成立时（宿主已经塞进半条
+                        // item、或轨道句柄验证失败）轨道会**留下**。那就更不能把它留在
+                        // 采纳表里 —— 下一轮枚举到它，时间线上又是一条凭空多出来的空轨。
+                        if let Some(track)=&created {document.unadopt_track(track.target.inventory_guid());}
+                        return Err(error);
+                    }
+                };
+                // 【为什么这一行单独记】`[import] state=…` 那一行只能回答"判据是什么"，
+                // 回答不了"这次导入**落到**哪条轨"。三态 + 落点 + item GUID 才是一条完整
+                // 的证据链（与回执那行按 item 关联）。
+                log::info!(
+                    "[import] requested={} track={} item={}",
+                    requested,
+                    landed.as_deref().unwrap_or("-"),
+                    imported,
+                );
+                // 【登记待定导入】宿主已经交回 item GUID —— 这就是"成功"的全部证据。
+                // 从这里到"ARA 认领它"之间的那几百毫秒不该由回执来等（见
+                // `PendingImport` 的说明）；账本在每一轮 ARA 发布与清单刷新时对账。
+                document.begin_pending_import(crate::render::document::PendingImport {
+                    item: imported.clone(),
+                    source_path: path.to_owned(),
+                    landed_track: landed.clone(),
+                    requested_at: std::time::Instant::now(),
+                    rounds: 0,
+                    stall_reported: false,
+                });
+                log::info!(
+                    "[import] pending item={} track={} source={} (requested={})",
+                    imported,
+                    landed.as_deref().unwrap_or("-"),
+                    path,
+                    requested,
+                );
                 owner.refresh_host_transport();editor.notify_timeline();
                 editor.enqueue(crate::editor::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
                 Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),attempts:0,next_attempt:std::time::Instant::now(),jump:None,imported:Some(imported),geometry:None,split:None,media:None,action:None})
@@ -2857,7 +3151,7 @@ mod startup_settings_tests {
                 "startup settings must not enter the session queue"
             );
             let reply: serde_json::Value =
-                serde_json::from_str(client.queue.back().expect("immediate response")).unwrap();
+                serde_json::from_str(&client.queue.back().expect("immediate response").0).unwrap();
             assert_eq!(
                 reply["ok"], true,
                 "{command} must work before the editor route binds"

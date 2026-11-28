@@ -41,12 +41,17 @@
 //! periodic availability poll stops opening the OS clipboard at all unless
 //! its content actually changed.
 
+// 【为什么 base64 也要跟着 cfg】它唯一的使用者是 `decode_text_envelope`（文本信封
+// 解码）。移动端走文件末尾的 "Unsupported platform" 桩，信封协议在那里没有使用者，
+// 留着这条 import 就会在 Android / iOS 构建上多出一条 unused import 警告。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use base64::Engine;
 use std::sync::Mutex;
 
 pub const OBJECT_FORMAT: &str = "application/x-hifishifter-object";
 #[cfg(not(target_os = "linux"))]
 pub const REAPER_MEDIA_FORMAT: &str = "REAPERMedia";
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 const TEXT_PREFIX: &str = "HIFISHIFTER_CLIPBOARD_V1:";
 
 /// Upper bound for a plain-text clipboard payload (1 MiB).
@@ -73,6 +78,10 @@ pub fn validate_clipboard_text(text: &str) -> Result<(), &'static str> {
 /// held only around the raw Win32 session, never during encode/decode.
 /// `pub(crate)` so `midi_clipboard`'s macOS reader takes the SAME lock (a
 /// separate lock would not serialize against this module's write path).
+// 【为什么移动端没有这把锁】它序列化的是"独占打开系统剪贴板"这件事，而三个桌面
+// 平台是唯一有该实现的平台；移动端的写路径直接返回 `clipboard_unsupported_platform`
+// （见文件末尾），没有需要序列化的东西。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
 
 /// `clipboard-win::Clipboard::new_attempts` retries with `Sleep(0)` — it
@@ -91,6 +100,8 @@ const OPEN_RETRY_MAX_MS: u64 = 150;
 #[cfg(target_os = "windows")]
 const WRITE_SESSION_ATTEMPTS: u32 = 3;
 
+// 只有读路径会解信封（Windows / macOS / Linux 各自的 `read_bytes`）。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn decode_text_envelope(text: &str) -> Option<Vec<u8>> {
     let body = text.strip_prefix(TEXT_PREFIX)?;
     base64::engine::general_purpose::STANDARD.decode(body).ok()

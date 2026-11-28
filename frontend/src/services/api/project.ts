@@ -145,6 +145,28 @@ export const projectApi = {
     openProject: (projectPath: string, force?: boolean) =>
         invoke<TimelineResult>("open_project", projectPath, force),
 
+    /**
+     * 列出**工程库**（移动端「打开工程」的入口）。
+     *
+     * 【为什么需要它】移动端的「保存 / 打开」此前不对称：保存写死到一个固定
+     * 目录，打开却要用户自己走 SAF 找一个 `.hshp`。用户看不到那个目录，于是
+     * 「我保存的工程去哪了」与「我该打开哪个文件」都回答不了。库把它变成
+     * 一个列表：保存进库、打开看库。SAF 保留给「从设备导入…」。
+     */
+    listProjects: () =>
+        invoke<{
+            ok: boolean;
+            dir?: string;
+            error?: string;
+            projects?: Array<{
+                path: string;
+                name: string;
+                modifiedAtMs: number;
+                sizeBytes: number;
+                isCurrent: boolean;
+            }>;
+        }>("list_projects"),
+
     saveProject: (notesMarkdown?: string) =>
         invoke<SaveProjectResult>("save_project", notesMarkdown),
 
