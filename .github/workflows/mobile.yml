@@ -62,31 +62,53 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # The NDK version is pinned: AGP picks the newest installed NDK, and an
-      # unpinned one silently changes the C++ toolchain between runs (WORLD and
-      # Signalsmith are compiled by it).
+      # [Why the SDK comes from the runner image instead of android-actions/setup-android]
+      # That action's default `packages` is "tools platform-tools", and the legacy `tools`
+      # package is gone from Google's repository (repository2-3.xml has no remotePackage
+      # path that starts with `tools`). Every run therefore died inside the action with
       #
-      # [Why the platform and build-tools are named explicitly] setup-android
-      # installs only cmdline-tools and platform-tools. The generated project asks
-      # for compileSdk 36 (see backend/src-tauri/gen/android/app/build.gradle.kts),
-      # and a missing platform fails as "failed to find target with hash string
-      # android-36" -- a message that names a hash, not a package.
+      #   Warning: Failed to find package 'tools'
+      #   Error: The process '.../sdkmanager' failed with exit code 1
       #
-      # [Why cmake] libopus (via opusic-sys) is built by CMake, and the NDK
-      # toolchain file cannot drive the Visual Studio generator; the SDK's cmake
-      # also ships the ninja binary the build needs. scripts/build/android.sh
-      # prepends it to PATH and sets CMAKE_GENERATOR=Ninja.
-      - name: Set up Android SDK + NDK
-        uses: android-actions/setup-android@v3
-      - name: Install SDK packages and NDK 27
+      # before this project compiled a single file. The image already ships a current
+      # sdkmanager, platform-tools, build-tools 36.0.0 and platforms/android-36, so all
+      # that is left is to accept the licenses and install what it does not ship: the
+      # pinned NDK, which cargo compiles WORLD / Signalsmith / fdk-aac / libopus with, and
+      # cmake + ninja, because libopus is built by CMake and the NDK toolchain file cannot
+      # drive the Visual Studio generator (scripts/build/android.sh prepends the SDK's
+      # cmake to PATH and sets CMAKE_GENERATOR=Ninja).
+      - name: Install Android SDK packages
         run: |
           set -euo pipefail
-          sdkmanager --install \
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          if [ ! -d "$sdk/cmdline-tools" ]; then
+            echo "no cmdline-tools under $sdk (ANDROID_SDK_ROOT=$sdk)" >&2
+            exit 1
+          fi
+          sdkmanager="$(command -v sdkmanager || true)"
+          if [ -z "$sdkmanager" ]; then
+            sdkmanager="$(find "$sdk/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          fi
+          if [ -z "$sdkmanager" ]; then
+            echo "sdkmanager not found under $sdk/cmdline-tools" >&2
+            exit 1
+          fi
+          echo "== sdkmanager: $sdkmanager"
+          # `yes` is killed by SIGPIPE once sdkmanager stops reading; under pipefail that is
+          # exit 141, not a real failure. A license that is still unaccepted shows up in the
+          # install call below, which is the one that must succeed.
+          yes | "$sdkmanager" --licenses > /dev/null || true
+          "$sdkmanager" --install \
             "ndk;27.0.12077973" \
             "platforms;android-36" \
             "build-tools;36.0.0" \
-            "cmake;3.31.6"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> "$GITHUB_ENV"
+            "cmake;3.31.6" \
+            "platform-tools"
+          {
+            echo "ANDROID_SDK_ROOT=$sdk"
+            echo "ANDROID_HOME=$sdk"
+            echo "ANDROID_NDK_HOME=$sdk/ndk/27.0.12077973"
+          } >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v6
         with:
