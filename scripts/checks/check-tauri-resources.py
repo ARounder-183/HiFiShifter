@@ -183,6 +183,23 @@ def main() -> int:
                 "declares are simply never bundled."
             )
 
+    # ── 3b. variant configs must be referenced too ─────────────────────────
+    #
+    # tauri.conf.<variant>.json does not follow the platform/arch naming, so it is not part of
+    # the merge above -- but the same "a config nobody passes is dead" rule applies. The CI one
+    # exists only to skip the beforeBuildCommand rebuild, so dropping it has no symptom beyond a
+    # minute per leg: exactly the kind of regression nobody notices.
+    for path in sorted(SRC_TAURI.glob("tauri.conf.*.json")):
+        # The dev config is deliberately referenced by no build entry point (security_config.rs
+        # asserts that: it hardcodes devUrl).
+        if path.name == "tauri.conf.dist-dev.json":
+            continue
+        if path.name not in corpus:
+            problems.append(
+                f"{path.name}: no build entry point passes it. Add --config {path.name} to the "
+                "legs that need it, otherwise the file is dead and its intent is lost."
+            )
+
     # ── 4. no duplicate destinations in a merged view ──────────────────────
     merged_report: list[str] = []
     for platform in PLATFORMS:

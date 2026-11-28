@@ -87,6 +87,12 @@ jobs:
         # costs (Homebrew compiling cmake from source, then two fat-LTO links) and the duplicate
         # package. PRs keep the single-architecture leg: a PR only proves that the code compiles,
         # and the universal wiring is covered by a static gate instead.
+        # [Why every tauri-action leg passes --config tauri.conf.ci.json] tauri.conf.json's
+        # beforeBuildCommand runs the frontend build, but the frontend job already produced
+        # frontend/dist and this leg unpacked it -- so the second vite run costs every leg a
+        # minute and changes nothing. scripts/build/build.ps1 does the same thing inline for the
+        # Windows x86_64 leg, which is why that entry's tauri_extra stays empty (no step reads
+        # it).
         # [Why `name` is the artifact tag] The non-Windows upload glob matches package.sh's
         # HFS_TAG (scripts/plugin/unix/lib.sh), and that tag spells the Linux arm64 leg
         # `linux-aarch64` (dpkg's spelling, already part of published file names). The
@@ -94,8 +100,8 @@ jobs:
         # because the leg was named `linux-arm64` while the tarball was `linux-aarch64`.
         include: >-
           ${{ fromJSON(github.event_name == 'pull_request'
-          && '[{"name":"windows-x86_64","os":"windows-latest","cargo_target":"x86_64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist","tauri_extra":""},{"name":"macos-arm64","os":"macos-latest","cargo_target":"aarch64-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""},{"name":"linux-x86_64","os":"ubuntu-24.04","cargo_target":"x86_64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--config tauri.linux.x86_64.conf.json"}]'
-          || '[{"name":"windows-x86_64","os":"windows-latest","cargo_target":"x86_64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist","tauri_extra":""},{"name":"windows-arm64","os":"windows-11-arm","cargo_target":"aarch64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""},{"name":"macos-universal","os":"macos-15","cargo_target":"universal-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--target universal-apple-darwin"},{"name":"linux-x86_64","os":"ubuntu-24.04","cargo_target":"x86_64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--config tauri.linux.x86_64.conf.json"},{"name":"linux-aarch64","os":"ubuntu-24.04-arm","cargo_target":"aarch64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""}]') }}
+          && '[{"name":"windows-x86_64","os":"windows-latest","cargo_target":"x86_64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist","tauri_extra":""},{"name":"macos-arm64","os":"macos-latest","cargo_target":"aarch64-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--config tauri.conf.ci.json"},{"name":"linux-x86_64","os":"ubuntu-24.04","cargo_target":"x86_64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--config tauri.linux.x86_64.conf.json --config tauri.conf.ci.json"}]'
+          || '[{"name":"windows-x86_64","os":"windows-latest","cargo_target":"x86_64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist","tauri_extra":""},{"name":"windows-arm64","os":"windows-11-arm","cargo_target":"aarch64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--config tauri.conf.ci.json"},{"name":"macos-universal","os":"macos-15","cargo_target":"universal-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--target universal-apple-darwin --config tauri.conf.ci.json"},{"name":"linux-x86_64","os":"ubuntu-24.04","cargo_target":"x86_64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--config tauri.linux.x86_64.conf.json --config tauri.conf.ci.json"},{"name":"linux-aarch64","os":"ubuntu-24.04-arm","cargo_target":"aarch64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--config tauri.conf.ci.json"}]') }}
     steps:
       - uses: actions/checkout@v6
 
