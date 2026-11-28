@@ -1,28 +1,21 @@
 name: HiFiShifter Mobile Build (Android, iOS)
 
-# Mobile artifact pipeline. Manual-only on purpose.
+# Artifact pipeline for the two mobile targets, shaped like build.yml: one shared frontend
+# artifact, then a per-platform matrix that only compiles and packages.
 #
-# [Why nothing here runs automatically]
-#   1. A pull request could only ever exercise the unsigned half: a fork has no signing
-#      material, so every release branch below was dead code there. The debug APK that
-#      did run was never installed by anyone -- the leg only re-proved that Rust, the
-#      NDK and Xcode still worked, hours at a time, on every frontend/backend PR.
-#   2. A mobile toolchain break turned an unrelated desktop PR red. That is not
-#      hypothetical: run 46116758037 died inside android-actions/setup-android, before a
-#      single line of this project compiled, because Google removed the legacy `tools`
-#      SDK package that the action installed by default. The red check belonged to
-#      whoever opened the PR, not to a mobile change.
-#   3. The artifacts only matter when a mobile build is actually being cut, and these
-#      two legs are the slowest in the repository (Rust + NDK + Xcode, up to two hours).
-# Start it from Actions -> "HiFiShifter Mobile Build (Android, iOS)" -> Run workflow.
+# [CI builds only] Like build.yml this workflow only produces artifacts; the gates under
+# scripts/checks/ are run locally.
 #
-# [What each mode does]
-#   debug   (default) debug APK on Linux, simulator build on macOS. No secrets and no
-#                     signing, so it runs on a fresh fork and answers "does the mobile
-#                     code still compile end to end".
-#   release           release AAB + APK (signed when gen/android/keystore.properties
-#                     exists) and a device IPA. Needs the APPLE_* signing secrets; a
-#                     missing one stops the leg before anything is uploaded.
+# [Triggers] Manual only. A pull request could only ever exercise the unsigned half (a fork
+# has no signing material), so the release half was dead code there while the slowest legs
+# in the repository ran on every frontend/backend PR. Start it from Actions ->
+# "HiFiShifter Mobile Build (Android, iOS)" -> Run workflow.
+#
+# [What each mode produces]
+#   debug   (default) Android debug APK + iOS simulator .app. No secrets, no signing, so it
+#                     also answers "does the mobile code still compile end to end".
+#   release           Android AAB + release APK, and a signed device IPA. Needs the APPLE_*
+#                     secrets; a missing one stops the leg before anything is uploaded.
 on:
   workflow_dispatch:
     inputs:
@@ -37,57 +30,140 @@ on:
 permissions:
   contents: read
 
-# The mode is part of the group: a debug run and a release run produce different
-# artifacts and must not cancel each other.
+# The mode is part of the group: a debug run and a release run produce different artifacts
+# and must not cancel each other.
 concurrency:
   group: mobile-${{ github.workflow }}-${{ github.ref }}-${{ inputs.mode }}
   cancel-in-progress: true
 
 jobs:
-  android:
-    name: Android (arm64-v8a)
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
+  # ── Frontend artifact: build only, no tests ────────────────────────────
+  #
+  # The same reusable job build.yml packages with: both legs bundle the same frontend/dist,
+  # so neither reruns vite itself.
+  frontend:
+    uses: ./.github/workflows/frontend-build.yml
+
+  mobile:
+    name: Build Mobile (${{ matrix.name }})
+    needs: [frontend]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    env:
+      # tauri.conf.ci.json blanks beforeBuildCommand (handed to the CLI through
+      # HIFISHIFTER_TAURI_CONFIG below); build.rs must not rebuild the frontend either.
+      HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
+      HIFISHIFTER_TAURI_CONFIG: ${{ github.workspace }}/backend/src-tauri/tauri.conf.ci.json
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: android-arm64
+            os: ubuntu-latest
+          - name: ios-arm64
+            os: macos-15
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust targets
-        run: |
-          set -euo pipefail
-          rustup target add aarch64-linux-android
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: frontend-dist
+          path: frontend-dist
 
-      # [Why cargo-tauri and not the npm CLI] Gradle's rustBuild task shells out to
-      # `cargo tauri android android-studio-script`, and cargo resolves that subcommand
-      # through PATH. The npm package ships a binary named `tauri`, not `cargo-tauri`,
-      # so only the real cargo subcommand survives the second half of the build; with
-      # npx the compile succeeded and Gradle then failed with "no such command: tauri".
+      - name: Extract frontend dist
+        run: |
+          ZIP=$(ls frontend-dist | grep -E "\.zip$" || true)
+          if [ -z "$ZIP" ]; then echo "No zip artifact found in frontend-dist"; ls -la frontend-dist; exit 1; fi
+          unzip frontend-dist/$ZIP -d frontend
+        shell: bash
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-${{ matrix.name }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.name }}-cargo-
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          # The action promotes existing warnings to errors by default (-D warnings); the
+          # legs must not go red over dependency-crate warnings, nor silence ours.
+          rustflags: ''
+
+      # [Why the toolchain action cannot do this] It installs the host's default target only;
+      # a target that was never added fails as "can't find crate for `std`" -- an error that
+      # names a dependency rather than the missing target.
+      - name: Add Rust targets (Android)
+        if: runner.os == 'Linux'
+        run: rustup target add aarch64-linux-android
+        shell: bash
+
+      - name: Add Rust targets (iOS)
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+        shell: bash
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # ── Model weights ───────────────────────────────────────────────────
+      #
+      # The weights are not in the repository (see scripts/setup/fetch-models.py). Without
+      # them the Rust build dies in tauri-build's resource check -- "resource path
+      # resources/models/nsf_hifigan/config.json doesn't exist" -- before anything compiles.
+      # The key is the manifest hash, so a model change invalidates the cache.
+      - name: Cache model weights
+        uses: actions/cache@v5
+        with:
+          path: backend/src-tauri/resources/models
+          key: models-${{ hashFiles('backend/src-tauri/resources/models/models.json') }}
+
+      - name: Fetch model weights
+        run: |
+          python scripts/setup/fetch-models.py
+          python scripts/setup/fetch-models.py --fetch-game
+        shell: bash
+
+      # [Why cargo-tauri and not the npm CLI] Gradle's rustBuild task and the Xcode "Build
+      # Rust Code" phase both shell out to `cargo tauri ...`, and cargo resolves that
+      # subcommand through PATH. The npm package ships a binary named `tauri`, not
+      # `cargo-tauri`, so only the real cargo subcommand survives the second half of the
+      # build; with npx the compile succeeded and the packaging phase failed afterwards.
       - name: Install cargo-tauri
-        run: |
-          set -euo pipefail
-          cargo install tauri-cli --version '^2' --locked
+        run: cargo install tauri-cli --version '^2' --locked
+        shell: bash
 
-      - name: Set up JDK 17
+      # ── Android toolchain ───────────────────────────────────────────────
+      #
+      # [Why the SDK comes from the runner image instead of android-actions/setup-android]
+      # That action's default `packages` is "tools platform-tools", and the legacy `tools`
+      # package is gone from Google's repository (repository2-3.xml has no remotePackage path
+      # that starts with `tools`), so every run died inside the action with
+      #   Warning: Failed to find package 'tools'
+      #   Error: The process '.../sdkmanager' failed with exit code 1
+      # before a single line of this project compiled. The image already ships a current
+      # sdkmanager, platform-tools, build-tools 36.0.0 and platforms/android-36, so only the
+      # pinned NDK and cmake + ninja are installed here: cargo compiles WORLD / Signalsmith /
+      # fdk-aac / libopus with the NDK, and libopus is built by CMake (the NDK toolchain file
+      # cannot drive the Visual Studio generator).
+      - name: Set up JDK 17 (Android)
+        if: runner.os == 'Linux'
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      # [Why the SDK comes from the runner image instead of android-actions/setup-android]
-      # That action's default `packages` is "tools platform-tools", and the legacy `tools`
-      # package is gone from Google's repository (repository2-3.xml has no remotePackage
-      # path that starts with `tools`). Every run therefore died inside the action with
-      #
-      #   Warning: Failed to find package 'tools'
-      #   Error: The process '.../sdkmanager' failed with exit code 1
-      #
-      # before this project compiled a single file. The image already ships a current
-      # sdkmanager, platform-tools, build-tools 36.0.0 and platforms/android-36, so all
-      # that is left is to accept the licenses and install what it does not ship: the
-      # pinned NDK, which cargo compiles WORLD / Signalsmith / fdk-aac / libopus with, and
-      # cmake + ninja, because libopus is built by CMake and the NDK toolchain file cannot
-      # drive the Visual Studio generator (scripts/build/android.sh prepends the SDK's
-      # cmake to PATH and sets CMAKE_GENERATOR=Ninja).
       - name: Install Android SDK packages
+        if: runner.os == 'Linux'
         run: |
           set -euo pipefail
           sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
@@ -104,7 +180,7 @@ jobs:
             exit 1
           fi
           echo "== sdkmanager: $sdkmanager"
-          # `yes` is killed by SIGPIPE once sdkmanager stops reading; under pipefail that is
+          # yes(1) is killed by SIGPIPE once sdkmanager stops reading; under pipefail that is
           # exit 141, not a real failure. A license that is still unaccepted shows up in the
           # install call below, which is the one that must succeed.
           yes | "$sdkmanager" --licenses > /dev/null || true
@@ -119,129 +195,62 @@ jobs:
             echo "ANDROID_HOME=$sdk"
             echo "ANDROID_NDK_HOME=$sdk/ndk/27.0.12077973"
           } >> "$GITHUB_ENV"
+        shell: bash
 
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install frontend dependencies
-        run: npm ci
-        working-directory: frontend
-
-      # The Android leg needs the frontend dist before cargo runs, because
-      # tauri-build validates frontendDist at compile time.
-      - name: Build frontend
-        run: npm run build
-        working-directory: frontend
-
-      # The weights are not in the repository (see scripts/setup/fetch-models.py), so a
-      # bare checkout has none. Without them the Rust build dies in tauri-build's
-      # resource check -- "resource path resources/models/nsf_hifigan/config.json
-      # doesn't exist" -- before anything is compiled. The cache key is the manifest
-      # hash, so a model change invalidates it and a stale tree is never reused.
-      - name: Cache model weights
-        uses: actions/cache@v5
-        with:
-          path: backend/src-tauri/resources/models
-          key: models-${{ hashFiles('backend/src-tauri/resources/models/models.json') }}
-
-      - name: Fetch model weights
+      # ── Artifact naming ─────────────────────────────────────────────────
+      #
+      # Same scheme build.yml uses: <product>_v<version>_<matrix.name>-<kind>, read from
+      # tauri.conf.json so the artifact, the installer and the About dialog never disagree.
+      - name: Determine mobile artifact name
+        id: artifact-name
         run: |
-          set -euo pipefail
-          python scripts/setup/fetch-models.py
-          python scripts/setup/fetch-models.py --fetch-game
+          $prod = 'HiFiShifter'
+          $ver = '0.0.0'
+          $conf = 'backend/src-tauri/tauri.conf.json'
+          if (Test-Path $conf) {
+            try {
+              $j = Get-Content $conf -Raw | ConvertFrom-Json -ErrorAction Stop
+              if ($j.productName) { $prod = $j.productName }
+              if ($j.package -and $j.package.version) { $ver = $j.package.version }
+              elseif ($j.version) { $ver = $j.version }
+            } catch { throw "Cannot read the version from ${conf} (missing or broken JSON): $_" }
+          } else {
+            throw "Cannot read the version from ${conf} (file missing)"
+          }
+          $prodSafe = ($prod -replace '["\\/:*?<>|]', '') -replace '\s+', '_'
+          $verSafe = ($ver -replace '["\\/:*?<>|]', '') -replace '^v', ''
+          $artifactName = "${prodSafe}_v${verSafe}_${{ matrix.name }}-${{ inputs.mode }}"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "artifact-name=$artifactName"
+        shell: pwsh
 
-      - name: Build APK (debug)
-        if: inputs.mode == 'debug'
+      # ── Build ───────────────────────────────────────────────────────────
+      - name: Build APK (Android, debug)
+        if: runner.os == 'Linux' && inputs.mode == 'debug'
         run: |
           set -euo pipefail
           chmod +x scripts/build/android.sh
           ./scripts/build/android.sh --debug
+        shell: bash
 
-      - name: Build AAB and APK (release)
-        if: inputs.mode == 'release'
+      - name: Build AAB and APK (Android, release)
+        if: runner.os == 'Linux' && inputs.mode == 'release'
         run: |
           set -euo pipefail
           chmod +x scripts/build/android.sh
           ./scripts/build/android.sh --bundle
           ./scripts/build/android.sh
+        shell: bash
 
-      # [Why the artifact name carries run_number and not ref_name] ref_name is the branch
-      # name, and upload-artifact rejects the '/' it contains (`feature/tools`) with
-      # "Artifact name is not valid".
-      - uses: actions/upload-artifact@v7
-        with:
-          name: android-${{ inputs.mode }}-${{ github.run_number }}
-          path: |
-            backend/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
-            backend/src-tauri/gen/android/app/build/outputs/bundle/**/*.aab
-          if-no-files-found: error
-          retention-days: 14
-
-  ios:
-    name: iOS (arm64)
-    runs-on: macos-15
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust targets
-        run: |
-          set -euo pipefail
-          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
-
-      # The Xcode project's "Build Rust Code" phase re-invokes the CLI recorded by
-      # `ios init`, and only the cargo subcommand survives that round trip (see
-      # scripts/build/ios.sh for the npx failure it replaces).
-      - name: Install cargo-tauri
-        run: |
-          set -euo pipefail
-          cargo install tauri-cli --version '^2' --locked
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install frontend dependencies
-        run: npm ci
-        working-directory: frontend
-
-      - name: Build frontend
-        run: npm run build
-        working-directory: frontend
-
-      # The weights are not in the repository (see scripts/setup/fetch-models.py), so a
-      # bare checkout has none. Without them the Rust build dies in tauri-build's
-      # resource check -- "resource path resources/models/nsf_hifigan/config.json
-      # doesn't exist" -- before anything is compiled. The cache key is the manifest
-      # hash, so a model change invalidates it and a stale tree is never reused.
-      - name: Cache model weights
-        uses: actions/cache@v5
-        with:
-          path: backend/src-tauri/resources/models
-          key: models-${{ hashFiles('backend/src-tauri/resources/models/models.json') }}
-
-      - name: Fetch model weights
-        run: |
-          set -euo pipefail
-          python scripts/setup/fetch-models.py
-          python scripts/setup/fetch-models.py --fetch-game
-
-      # A simulator build needs no signing material, which is the whole point of the
-      # debug mode: it can run anywhere, including on a fork with no secrets.
-      - name: Build (simulator, no signing)
-        if: inputs.mode == 'debug'
+      - name: Build simulator app (iOS, debug)
+        if: runner.os == 'macOS' && inputs.mode == 'debug'
         run: |
           set -euo pipefail
           chmod +x scripts/build/ios.sh
           ./scripts/build/ios.sh --simulator
+        shell: bash
 
-      - name: Build (device)
-        if: inputs.mode == 'release'
+      - name: Build device IPA (iOS, release)
+        if: runner.os == 'macOS' && inputs.mode == 'release'
         env:
           APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -251,27 +260,46 @@ jobs:
           set -euo pipefail
           chmod +x scripts/build/ios.sh
           ./scripts/build/ios.sh
+        shell: bash
 
-      - uses: actions/upload-artifact@v7
-        if: inputs.mode == 'release'
-        with:
-          name: ios-${{ github.run_number }}
-          path: backend/src-tauri/gen/apple/build/**/*.ipa
-          if-no-files-found: error
-          retention-days: 14
-
-  # The static gates are host-independent, take seconds, and build.yml does not run them
-  # (CI is artifact-only). Keeping them here means a manual mobile build cannot ship a
-  # tree that violates the platform boundary or the single form predicate.
-  static-gates:
-    name: Static gates
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-      - name: Python gates
+      # ── Package ─────────────────────────────────────────────────────────
+      - name: Package simulator app (iOS, debug)
+        if: runner.os == 'macOS' && inputs.mode == 'debug'
         run: |
           set -euo pipefail
-          python3 scripts/checks/check-platform-boundary.py
-          python3 scripts/checks/check-mobile-form-gate.py
-          python3 scripts/checks/check-command-gating.py
+          APP="$(find backend/src-tauri/gen/apple/build -maxdepth 3 -type d -name '*.app' -print -quit)"
+          if [ -z "$APP" ]; then
+            echo "no .app under gen/apple/build" >&2
+            find backend/src-tauri/gen/apple/build -maxdepth 3 || true
+            exit 1
+          fi
+          mkdir -p dist
+          # [Why ditto] zip(1) drops the symlinks and extended attributes a bundle carries;
+          # ditto preserves them, so the archived .app still installs in Simulator.
+          ditto -c -k --sequesterRsrc --keepParent "$APP" dist/HiFiShifter-simulator.zip
+        shell: bash
+
+      # ── Upload artifacts ────────────────────────────────────────────────
+      #
+      # One artifact per leg, named by the step above, exactly like the desktop matrix.
+      - name: Upload Android artifacts
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.artifact-name.outputs.artifact-name }}
+          path: |
+            backend/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+            backend/src-tauri/gen/android/app/build/outputs/bundle/**/*.aab
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload iOS artifacts
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.artifact-name.outputs.artifact-name }}
+          path: |
+            backend/src-tauri/gen/apple/build/**/*.ipa
+            dist/HiFiShifter-simulator.zip
+          if-no-files-found: error
+          retention-days: 30

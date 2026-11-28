@@ -207,6 +207,16 @@ if ! command -v cargo-tauri >/dev/null 2>&1; then
 fi
 tauri_cli=(cargo tauri)
 
+# [Why the optional config passthrough] CI packages the frontend-dist artifact produced by
+# the frontend job, so the CLI must not run build.beforeBuildCommand again -- that command
+# needs frontend/node_modules, which the artifact does not carry. tauri.conf.ci.json blanks
+# it, and build.yml hands the same file to the desktop legs. The path is absolute so it does
+# not depend on how the CLI resolves relative --config values.
+config_args=()
+if [ -n "${HIFISHIFTER_TAURI_CONFIG:-}" ]; then
+  config_args=(--config "$HIFISHIFTER_TAURI_CONFIG")
+fi
+
 rust_target="aarch64-linux-android"
 rustup target add "$rust_target" >/dev/null
 
@@ -246,7 +256,9 @@ for pair in "arm64-v8a:aarch64-linux-android" "armeabi-v7a:armv7-linux-androidea
   echo "== bundled libc++_shared.so for $jni_abi"
 done
 
-args=(android build --target aarch64 --features onnx)
+args=(android build)
+if [ "${#config_args[@]}" -gt 0 ]; then args+=("${config_args[@]}"); fi
+args+=(--target aarch64 --features onnx)
 if [ "$bundle" -eq 1 ]; then args+=(--aab); else args+=(--apk); fi
 if [ "$debug" -eq 1 ]; then args+=(--debug); fi
 

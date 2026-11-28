@@ -49,6 +49,14 @@ tauri_cli=(cargo tauri)
 # gen/apple is produced by `tauri ios init` and cannot be generated on a non-macOS
 # host, so unlike gen/android it is not committed. `ios build` stops with "iOS project
 # not found" when it is missing, which does not say how to create one.
+# [Why the optional config passthrough] Same reason as scripts/build/android.sh: CI packages
+# the frontend-dist artifact, and tauri.conf.ci.json blanks beforeBuildCommand so the CLI does
+# not try to rebuild a frontend whose node_modules are absent.
+config_args=()
+if [ -n "${HIFISHIFTER_TAURI_CONFIG:-}" ]; then
+  config_args=(--config "$HIFISHIFTER_TAURI_CONFIG")
+fi
+
 if [ ! -d "backend/src-tauri/gen/apple" ]; then
   echo "== gen/apple is missing; initialising the iOS project"
   ( cd backend && "${tauri_cli[@]}" ios init --ci )
@@ -65,7 +73,13 @@ if [ "$simulator" -eq 1 ]; then
   cli_target="aarch64-sim"
   echo "== simulator build ($rust_target); signing skipped"
   rustup target add "$rust_target" >/dev/null
-  ( cd backend && "${tauri_cli[@]}" ios build --target "$cli_target" --features onnx --debug )
+  # [Why the args array] bash 3.2 (the /bin/bash macOS ships) treats an empty
+  # "${arr[@]}" as unbound under set -u, so the optional --config is appended to an
+  # explicit list instead of being spliced in.
+  build_args=(ios build)
+  if [ "${#config_args[@]}" -gt 0 ]; then build_args+=("${config_args[@]}"); fi
+  build_args+=(--target "$cli_target" --features onnx --debug)
+  ( cd backend && "${tauri_cli[@]}" "${build_args[@]}" )
   exit $?
 fi
 
@@ -78,4 +92,7 @@ fi
 rust_target="aarch64-apple-ios"
 rustup target add "$rust_target" >/dev/null
 echo "== device build ($rust_target), team $APPLE_DEVELOPMENT_TEAM"
-( cd backend && "${tauri_cli[@]}" ios build --target aarch64 --features onnx )
+build_args=(ios build)
+if [ "${#config_args[@]}" -gt 0 ]; then build_args+=("${config_args[@]}"); fi
+build_args+=(--target aarch64 --features onnx)
+( cd backend && "${tauri_cli[@]}" "${build_args[@]}" )
