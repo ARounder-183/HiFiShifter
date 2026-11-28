@@ -2459,4 +2459,39 @@ export const koKR = {
         "이전 버전의 HiFiShifter가 있습니다. 새 버전을 설치하기 전에 먼저 제거하며 같은 설치 폴더를 사용합니다.",
     installer_reinstall_uninstalling: "이전 버전을 제거하는 중...",
     installer_reinstall_failed: "이전 버전을 제거하지 못했습니다. 직접 제거한 뒤 다시 시도하세요.",
+    // ── 설치 프로그램 (macOS pkg) ─────────────────────────────────────────────────
+    //
+    // 【为什么这些文案也在词表里】macOS 的 Distribution 只有两条本地化通道：'.lproj'
+    // 下的 welcome/readme/conclusion HTML，以及 'Localizable.strings'（choice 的
+    // title/description 是**本地化键**）。两条通道都由
+    // scripts/release/build-macos-pkg.mjs 从这一组条目生成 —— 与 NSIS 共用同一份五语
+    // 词表，因此"新增一种语言"只改词典一处，漏译则在打包时直接失败。
+    //
+    // 正文用 \n 分段：welcome / conclusion 的每行渲染成一个段落，readme 的每行渲染成
+    // 一条列表项。这样译文不需要写 HTML，也就不会有人把标签写错。
+
+    installer_macos_welcome_title: "HiFiShifter 설치를 시작합니다",
+    installer_macos_welcome_body:
+        "이 설치 프로그램은 HiFiShifter 앱, VST3·CLAP 플러그인, 공유 모델 라이브러리를 이 Mac에 설치합니다.\n계속하기 전에 HiFiShifter와 플러그인을 불러온 모든 DAW를 종료하세요.\n모델 라이브러리는 한 번만 설치되어 앱과 모든 플러그인이 함께 사용합니다. 건너뛸 수 없습니다. 앱 안에 모델을 따로 내려받는 기능은 없습니다.\nNSF-HiFiGAN 가중치는 CC BY-NC-SA 4.0으로 비상업적 용도로만 사용할 수 있습니다. 자세한 내용은 LICENSE를 참조하세요.",
+    installer_macos_readme_title: "설치되는 항목",
+    installer_macos_readme_body:
+        "/Applications/HiFiShifter.app — 독립 실행형 편집기.\n/Library/Application Support/HiFiShifter — 공유 모델 라이브러리, LICENSE, 서드파티 라이선스.\n/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3 — VST3 플러그인(ARA + Capture).\n/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap — CLAP 플러그인(ARA + Capture).\n설치 후 DAW를 다시 시작하거나 DAW에서 플러그인을 다시 검사해야 HiFiShifter를 찾습니다.\n나중에 모두 제거하려면 /Library/Application Support/HiFiShifter/Uninstall HiFiShifter.pkg를 여세요.",
+    installer_macos_conclusion_title: "HiFiShifter 설치 완료",
+    installer_macos_conclusion_body:
+        "DAW를 다시 시작하거나 DAW에서 플러그인을 다시 검사해야 HiFiShifter를 찾습니다.\n앱은 /Applications에 있습니다. 나중에 제거하려면 /Library/Application Support/HiFiShifter의 Uninstall HiFiShifter.pkg를 여세요.",
+    installer_macos_desc_vst3:
+        "VST3 플러그인(ARA + Capture). /Library/Audio/Plug-Ins/VST3에 설치합니다.",
+    installer_macos_desc_clap:
+        "CLAP 플러그인(ARA + Capture). /Library/Audio/Plug-Ins/CLAP에 설치합니다.",
+    installer_macos_desc_models_required:
+        "필수: 앱과 모든 플러그인이 이 한 곳을 읽습니다. 모델을 따로 내려받는 기능은 없습니다.",
+    installer_macos_uninstall_welcome_title: "HiFiShifter 제거",
+    installer_macos_uninstall_welcome_body:
+        "이 Mac에 있는 HiFiShifter의 모든 것(앱, VST3·CLAP 플러그인, 공유 모델 라이브러리, 캐시·로그·설정)을 제거합니다.\n계속하기 전에 HiFiShifter와 플러그인을 불러온 모든 DAW를 종료하세요.\n프로젝트(.hshp/.hsp)와 오디오 파일은 건드리지 않습니다.",
+    installer_macos_uninstall_readme_title: "제거되는 항목",
+    installer_macos_uninstall_readme_body:
+        "/Applications/HiFiShifter.app\n/Library/Application Support/HiFiShifter — 모델 라이브러리, LICENSE, 라이선스.\n/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3\n/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap\n~/Library/Application Support/HiFiShifter, ~/Library/Caches/HiFiShifter, ~/Library/Logs/HiFiShifter.\n이전 레이아웃의 잔여물과 설치 프로그램의 영수증.",
+    installer_macos_uninstall_conclusion_title: "HiFiShifter 제거 완료",
+    installer_macos_uninstall_conclusion_body:
+        "DAW를 다시 시작하면 플러그인 목록에서 HiFiShifter가 사라집니다.\n이 Mac의 다른 것은 변경되지 않았습니다.",
 } as const;

@@ -2487,4 +2487,39 @@ export const enUS = {
     installer_reinstall_uninstalling: "Uninstalling the previous version...",
     installer_reinstall_failed:
         "Could not uninstall the previous version. Uninstall it manually and try again.",
+    // ── 安装器（macOS pkg） ─────────────────────────────────────────────────
+    //
+    // 【为什么这些文案也在词表里】macOS 的 Distribution 只有两条本地化通道：'.lproj'
+    // 下的 welcome/readme/conclusion HTML，以及 'Localizable.strings'（choice 的
+    // title/description 是**本地化键**）。两条通道都由
+    // scripts/release/build-macos-pkg.mjs 从这一组条目生成 —— 与 NSIS 共用同一份五语
+    // 词表，因此"新增一种语言"只改词典一处，漏译则在打包时直接失败。
+    //
+    // 正文用 \n 分段：welcome / conclusion 的每行渲染成一个段落，readme 的每行渲染成
+    // 一条列表项。这样译文不需要写 HTML，也就不会有人把标签写错。
+
+    installer_macos_welcome_title: "Welcome to HiFiShifter",
+    installer_macos_welcome_body:
+        "This installer puts the HiFiShifter app, its VST3 and CLAP plug-ins, and the shared model library on this Mac.\nQuit HiFiShifter and every DAW that has loaded the plug-ins before you continue.\nThe model library is installed once and shared by the app and all plug-ins. It is required: the app has no separate model download.\nThe NSF-HiFiGAN weights are CC BY-NC-SA 4.0, non-commercial use only; see LICENSE.",
+    installer_macos_readme_title: "What gets installed",
+    installer_macos_readme_body:
+        "/Applications/HiFiShifter.app - the standalone editor.\n/Library/Application Support/HiFiShifter - the shared model library, LICENSE and third-party licenses.\n/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3 - the VST3 plug-in (ARA + Capture).\n/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap - the CLAP plug-in (ARA + Capture).\nRestart your DAW, or rescan plug-ins inside it, so it finds HiFiShifter.\nTo remove all of it later, open /Library/Application Support/HiFiShifter/Uninstall HiFiShifter.pkg.",
+    installer_macos_conclusion_title: "HiFiShifter is installed",
+    installer_macos_conclusion_body:
+        "Restart your DAW, or rescan plug-ins inside it, so it finds HiFiShifter.\nThe app is in /Applications. To uninstall later, open Uninstall HiFiShifter.pkg in /Library/Application Support/HiFiShifter.",
+    installer_macos_desc_vst3:
+        "VST3 plug-in (ARA + Capture). Installed into /Library/Audio/Plug-Ins/VST3.",
+    installer_macos_desc_clap:
+        "CLAP plug-in (ARA + Capture). Installed into /Library/Audio/Plug-Ins/CLAP.",
+    installer_macos_desc_models_required:
+        "Required: the app and every plug-in read this one copy, and there is no separate model download.",
+    installer_macos_uninstall_welcome_title: "Uninstall HiFiShifter",
+    installer_macos_uninstall_welcome_body:
+        "This removes every part of HiFiShifter that this Mac has: the app, the VST3 and CLAP plug-ins, the shared model library, and your caches, logs and settings.\nQuit HiFiShifter and every DAW that has loaded the plug-ins before you continue.\nYour projects (.hshp/.hsp) and your audio files are never touched.",
+    installer_macos_uninstall_readme_title: "What gets removed",
+    installer_macos_uninstall_readme_body:
+        "/Applications/HiFiShifter.app\n/Library/Application Support/HiFiShifter - model library, LICENSE and licenses.\n/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3\n/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap\n~/Library/Application Support/HiFiShifter, ~/Library/Caches/HiFiShifter and ~/Library/Logs/HiFiShifter.\nLeftovers from older layouts, and the installer's receipts.",
+    installer_macos_uninstall_conclusion_title: "HiFiShifter has been removed",
+    installer_macos_uninstall_conclusion_body:
+        "Restart your DAW so it drops HiFiShifter from its plug-in list.\nNothing else on this Mac was touched.",
 } as const;

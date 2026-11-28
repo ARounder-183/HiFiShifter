@@ -2394,4 +2394,37 @@ export const zhCN = {
         "检测到已安装的 HiFiShifter。安装新版本前将先卸载旧版本，并沿用原来的安装目录。",
     installer_reinstall_uninstalling: "正在卸载旧版本...",
     installer_reinstall_failed: "卸载旧版本失败，请先手动卸载后重试。",
+    // ── 安装器（macOS pkg） ─────────────────────────────────────────────────
+    //
+    // 【为什么这些文案也在词表里】macOS 的 Distribution 只有两条本地化通道：'.lproj'
+    // 下的 welcome/readme/conclusion HTML，以及 'Localizable.strings'（choice 的
+    // title/description 是**本地化键**）。两条通道都由
+    // scripts/release/build-macos-pkg.mjs 从这一组条目生成 —— 与 NSIS 共用同一份五语
+    // 词表，因此"新增一种语言"只改词典一处，漏译则在打包时直接失败。
+    //
+    // 正文用 \n 分段：welcome / conclusion 的每行渲染成一个段落，readme 的每行渲染成
+    // 一条列表项。这样译文不需要写 HTML，也就不会有人把标签写错。
+
+    installer_macos_welcome_title: "欢迎安装 HiFiShifter",
+    installer_macos_welcome_body:
+        "本安装包会把 HiFiShifter 独立 App、VST3 与 CLAP 插件，以及共享模型库装到这台 Mac 上。\n继续之前请先退出 HiFiShifter，以及所有已加载插件的 DAW。\n模型库只装一份，供独立 App 与全部插件共用。它是必装的：App 内没有单独的模型下载。\nNSF-HiFiGAN 权重采用 CC BY-NC-SA 4.0，仅限非商业使用，详见 LICENSE。",
+    installer_macos_readme_title: "会装上哪些东西",
+    installer_macos_readme_body:
+        "/Applications/HiFiShifter.app —— 独立编辑器。\n/Library/Application Support/HiFiShifter —— 共享模型库、LICENSE 与第三方许可。\n/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3 —— VST3 插件（ARA + Capture）。\n/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap —— CLAP 插件（ARA + Capture）。\n装完请重启 DAW，或在 DAW 内重新扫描插件，它才会找到 HiFiShifter。\n日后要全部移除，请打开 /Library/Application Support/HiFiShifter/Uninstall HiFiShifter.pkg。",
+    installer_macos_conclusion_title: "HiFiShifter 已安装",
+    installer_macos_conclusion_body:
+        "请重启 DAW，或在 DAW 内重新扫描插件，它才会找到 HiFiShifter。\n独立 App 在 /Applications 里。日后卸载请打开 /Library/Application Support/HiFiShifter 里的 Uninstall HiFiShifter.pkg。",
+    installer_macos_desc_vst3: "VST3 插件（ARA + Capture），装入 /Library/Audio/Plug-Ins/VST3。",
+    installer_macos_desc_clap: "CLAP 插件（ARA + Capture），装入 /Library/Audio/Plug-Ins/CLAP。",
+    installer_macos_desc_models_required:
+        "必装：独立 App 与全部插件共用这一份，App 内没有单独的模型下载。",
+    installer_macos_uninstall_welcome_title: "卸载 HiFiShifter",
+    installer_macos_uninstall_welcome_body:
+        "这会移除这台 Mac 上 HiFiShifter 的全部内容：独立 App、VST3 与 CLAP 插件、共享模型库，以及缓存、日志与设置。\n继续之前请先退出 HiFiShifter，以及所有已加载插件的 DAW。\n工程文件（.hshp/.hsp）与音频文件一律不动。",
+    installer_macos_uninstall_readme_title: "会被移除的内容",
+    installer_macos_uninstall_readme_body:
+        "/Applications/HiFiShifter.app\n/Library/Application Support/HiFiShifter —— 模型库、LICENSE 与第三方许可。\n/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3\n/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap\n~/Library/Application Support/HiFiShifter、~/Library/Caches/HiFiShifter 与 ~/Library/Logs/HiFiShifter。\n旧布局留下的残余，以及安装器登记的回执。",
+    installer_macos_uninstall_conclusion_title: "HiFiShifter 已移除",
+    installer_macos_uninstall_conclusion_body:
+        "请重启 DAW，它才会把 HiFiShifter 从插件列表里去掉。\n这台 Mac 上的其他内容没有被改动。",
 } as const;
