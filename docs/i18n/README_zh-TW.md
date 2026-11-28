@@ -23,7 +23,7 @@ HiFiShifter 是一個圖形化人聲編輯與合成工具。它支援多軌道�
 從 [Releases](https://github.com/ARounder-183/HiFiShifter/releases) 頁面下載對應作業系統與架構的安裝包：
 
 - **Windows**：NSIS 安裝包（`installer`）或可攜版壓縮包（`portable`），提供 x86_64 與 arm64 架構。安裝包包含獨立 App、VST3/CLAP 外掛與共享模型庫。
-- **macOS**：一個 `macos-universal` 三合一 `.pkg`（Intel 與 Apple Silicon 通用）裝上 `/Applications/HiFiShifter.app`、VST3/CLAP 外掛與共享模型庫；安裝精靈裡可以只勾選需要的外掛格式，App 與模型庫必裝。裝完後 `/Library/Application Support/HiFiShifter` 裡有一份解除安裝包，同版本的 `-uninstaller.pkg` 也會一起發布，一鍵清乾淨且不碰專案與音訊檔。安裝包未簽名，首次安裝需要手動放行；若提示「檔案已損毀」，請按照[使用手冊](USERMANUAL_zh-TW.md#一安裝)中的步驟處理。
+- **macOS**：一個 `macos-universal` 三合一 `.pkg`（Intel 與 Apple Silicon 通用）裝上 `/Applications/HiFiShifter.app`、VST3/CLAP 外掛與共享模型庫；安裝精靈裡可以只勾選需要的外掛格式，App 與模型庫必裝。裝完後 `/Library/Application Support/HiFiShifter` 裡有一份解除安裝包，同版本的 `-uninstaller.pkg` 也會一起發布，一鍵移除 App、外掛、模型庫與快取，不碰專案、音訊檔與你的設定。安裝包未簽名，首次安裝需要手動放行；若提示「檔案已損毀」，請按照[使用手冊](USERMANUAL_zh-TW.md#一安裝)中的步驟處理。
 - **Linux**：三合一 `.tar.gz`（x86_64 / arm64），內含 AppImage、VST3/CLAP 外掛、共享模型庫與 `install.sh`。執行 `./install.sh` 裝進目前使用者，或 `sudo ./install.sh --system` 裝到系統。執行需要系統提供 `webkit2gtk-4.1`（Arch/CachyOS、Ubuntu 24.04+、Fedora 39+、Debian 13+ 等均已提供；Ubuntu 22.04 僅有 `webkit2gtk-4.0`，不支援）。
 
 **VST3 ARA 外掛與 CLAP 外掛**：三個平台都包含兩種外掛形態。在 REAPER 裡請以 VST3 外掛作為 ARA 嵌入介面使用（目前主要針對 REAPER 驗證），CLAP 外掛則可作為一般插入效果器。安裝方式、執行依賴與使用限制見使用手冊的 [外掛](USERMANUAL_zh-TW.md#八vst3-ara-外掛與-clap-外掛reaper)章節。

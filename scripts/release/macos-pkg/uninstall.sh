@@ -80,14 +80,18 @@ if [ -n "$target_user" ]; then
     home="$(/usr/bin/dscl . -read "/Users/$target_user" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}')"
     [ -n "${home:-}" ] || home="/Users/$target_user"
     if [ -d "$home" ]; then
-        log "cleaning user data under $home"
+        log "cleaning derived data under $home"
         # These names belong to backend/hifishifter-kernel/src/app_paths.rs; the static gate
         # check-macos-pkg.py fails if the two lists drift apart.
+        #
+        # [Why Library/Application Support is NOT in this list] That directory is not ours to
+        # delete: it holds the user's settings, the plug-in notepad, and -- the decisive one --
+        # "models-user", where someone who brought their own weights keeps them. Deleting a
+        # multi-gigabyte file the installer never wrote is not "uninstalling the product".
+        # Caches, logs, WebView data and the saved window state are derived, so they go.
         for relative in \
-            "Library/Application Support/HiFiShifter" \
             "Library/Caches/HiFiShifter" \
             "Library/Logs/HiFiShifter" \
-            "Library/Application Support/com.arounder.hifishifter" \
             "Library/Caches/com.arounder.hifishifter" \
             "Library/Logs/com.arounder.hifishifter" \
             "Library/WebKit/com.arounder.hifishifter" \
@@ -95,6 +99,10 @@ if [ -n "$target_user" ]; then
             "Library/Saved Application State/com.arounder.hifishifter.savedState" ; do
             remove "$home/$relative"
         done
+        kept="$home/Library/Application Support/HiFiShifter"
+        if [ -e "$kept" ]; then
+            log "kept $kept (settings, plug-in notes and your own model files)"
+        fi
     fi
 else
     log "no logged-in user found; per-user caches and settings were left alone"

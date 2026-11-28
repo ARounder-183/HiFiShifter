@@ -12,7 +12,7 @@ HiFiShifter 是一款图形化人声编辑与合成工具。它支持多轨道�
   如果你是 Windows 用户，且不知道 `x86_64` 与 `arm64` 有什么区别，请选择 `x86_64` 版本。只有你清楚地了解 `arm64` 是什么，并且你确实拥有一台 Windows ARM 设备，则可以下载使用 `arm64` 版。
 
 - macOS 版本提供的是未经过签名的三合一 `pkg` 安装包，一个 `macos-universal` 包同时适用于 Intel 与 Apple Silicon。安装向导会列出要装的东西：`独立 App` 与 `模型库` 必装（App 内没有单独的模型下载），`VST3` 与 `CLAP` 可以只勾选你的 DAW 支持的那个。因为暂未签名，安装时需要经过一个比较复杂的步骤来允许安装。  
-  装完之后 `/Library/Application Support/HiFiShifter` 里有一份卸载包（`Uninstall HiFiShifter.pkg`），也可以直接下载同版本的 `-uninstaller.pkg`；它会把 App、插件、模型库、缓存与设置一次清干净，工程文件与音频文件不动。  
+  装完之后 `/Library/Application Support/HiFiShifter` 里有一份卸载包（`Uninstall HiFiShifter.pkg`），也可以直接下载同版本的 `-uninstaller.pkg`；它会移除 App、插件、模型库与缓存，工程文件、音频文件、你的设置与自备模型不动。  
   如果安装后提示文件已损坏，按以下步骤操作：
     1. 终端输入 `xattr -cr /Applications/HiFiShifter.app`；
     2. 通过系统设置允许运行 `系统设置` -> `隐私与安全性` -> 点击 `仍要打开`。
@@ -859,7 +859,7 @@ REAPER 按**轨道**管理 ARA 插件：它只会把插件所在**那一条轨�
 - 参数没有生效，或重新打开工程后不一致：保留工程副本和状态栏上的错误信息，先不要覆盖工程，也不要反复强制重新载入。
 - 出现内存不足的提示：表示这次没有执行气声分离，`气声分离` 相关的效果不会被静默忽略；可以改用更短的素材，或先关闭 `气声分离`。
 - 需要提交日志或排查问题：插件日志与独立 App 的日志**放在同一个目录**（插件按格式与宿主分文件（`plugin-vst3-reaper.log` / `plugin-clap-reaper.log`），独立 App 是 `hifishifter.log`，文件名不同，互不覆盖、各自轮转）。菜单 `帮助 → 打开日志文件夹` 会替你打开这个文件夹；若宿主环境不允许，则显示路径供你复制。`帮助 → 导出诊断信息...` 与 `选项 → 推理设备基准测试` 属于独立 App，插件里不可用。
-- 卸载：Windows 装的是安装器版本时，在「程序和功能 / 已安装的应用」里卸载 HiFiShifter；macOS 运行 `/Library/Application Support/HiFiShifter/Uninstall HiFiShifter.pkg`（或同版本的 `-uninstaller.pkg`），它会连同共享模型库、缓存与设置一起清干净；手动拷贝的版本删除 `HiFiShifter.vst3` 文件夹即可。手动拷贝时设置与共享模型库会保留（见[模型文件与共享](#模型文件与共享)）。
+- 卸载：Windows 装的是安装器版本时，在「程序和功能 / 已安装的应用」里卸载 HiFiShifter；macOS 运行 `/Library/Application Support/HiFiShifter/Uninstall HiFiShifter.pkg`（或同版本的 `-uninstaller.pkg`），它会连同共享模型库与缓存一起移除（设置与自备模型保留）；手动拷贝的版本删除 `HiFiShifter.vst3` 文件夹即可。手动拷贝时设置与共享模型库会保留（见[模型文件与共享](#模型文件与共享)）。
 
 ### 从独立 App 连接宿主
 

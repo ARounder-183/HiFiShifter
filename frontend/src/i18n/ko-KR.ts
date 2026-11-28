@@ -2487,11 +2487,11 @@ export const koKR = {
         "필수: 앱과 모든 플러그인이 이 한 곳을 읽습니다. 모델을 따로 내려받는 기능은 없습니다.",
     installer_macos_uninstall_welcome_title: "HiFiShifter 제거",
     installer_macos_uninstall_welcome_body:
-        "이 Mac에 있는 HiFiShifter의 모든 것(앱, VST3·CLAP 플러그인, 공유 모델 라이브러리, 캐시·로그·설정)을 제거합니다.\n계속하기 전에 HiFiShifter와 플러그인을 불러온 모든 DAW를 종료하세요.\n프로젝트(.hshp/.hsp)와 오디오 파일은 건드리지 않습니다.",
+        "이 Mac에 있는 HiFiShifter 앱, VST3·CLAP 플러그인, 공유 모델 라이브러리, 캐시와 로그를 제거합니다.\n계속하기 전에 HiFiShifter와 플러그인을 불러온 모든 DAW를 종료하세요.\n프로젝트(.hshp/.hsp), 오디오 파일, 설정, 직접 추가한 모델 파일은 유지됩니다.",
     installer_macos_uninstall_readme_title: "제거되는 항목",
     installer_macos_uninstall_readme_body:
-        "/Applications/HiFiShifter.app\n/Library/Application Support/HiFiShifter — 모델 라이브러리, LICENSE, 라이선스.\n/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3\n/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap\n~/Library/Application Support/HiFiShifter, ~/Library/Caches/HiFiShifter, ~/Library/Logs/HiFiShifter.\n이전 레이아웃의 잔여물과 설치 프로그램의 영수증.",
+        "/Applications/HiFiShifter.app\n/Library/Application Support/HiFiShifter — 모델 라이브러리, LICENSE, 라이선스, 제거 프로그램 사본.\n/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3\n/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap\n~/Library/Caches/HiFiShifter, ~/Library/Logs/HiFiShifter, WebView 데이터, 창 상태.\n이전 레이아웃의 잔여물과 설치 프로그램의 영수증.",
     installer_macos_uninstall_conclusion_title: "HiFiShifter 제거 완료",
     installer_macos_uninstall_conclusion_body:
-        "DAW를 다시 시작하면 플러그인 목록에서 HiFiShifter가 사라집니다.\n이 Mac의 다른 것은 변경되지 않았습니다.",
+        "DAW를 다시 시작하면 플러그인 목록에서 HiFiShifter가 사라집니다.\n설정, 플러그인 노트, 직접 추가한 모델 파일은 ~/Library/Application Support/HiFiShifter에 남습니다. 필요 없으면 이 폴더를 삭제하세요.",
 } as const;

@@ -2424,11 +2424,11 @@ export const zhTW = {
         "必裝：獨立 App 與全部外掛共用這一份，App 內沒有單獨的模型下載。",
     installer_macos_uninstall_welcome_title: "解除安裝 HiFiShifter",
     installer_macos_uninstall_welcome_body:
-        "這會移除這台 Mac 上 HiFiShifter 的全部內容：獨立 App、VST3 與 CLAP 外掛、共用模型庫，以及快取、記錄檔與設定。\n繼續之前請先結束 HiFiShifter，以及所有已載入外掛的 DAW。\n專案檔（.hshp/.hsp）與音訊檔一律不動。",
+        "這會移除這台 Mac 上的 HiFiShifter 本體、VST3 與 CLAP 外掛、共用模型庫，以及快取與記錄檔。\n繼續之前請先結束 HiFiShifter，以及所有已載入外掛的 DAW。\n專案檔（.hshp/.hsp）、音訊檔、你的設定，以及你自己放進去的模型檔一律保留。",
     installer_macos_uninstall_readme_title: "會被移除的內容",
     installer_macos_uninstall_readme_body:
-        "/Applications/HiFiShifter.app\n/Library/Application Support/HiFiShifter —— 模型庫、LICENSE 與第三方授權。\n/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3\n/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap\n~/Library/Application Support/HiFiShifter、~/Library/Caches/HiFiShifter 與 ~/Library/Logs/HiFiShifter。\n舊版面留下的殘留，以及安裝器登記的收據。",
+        "/Applications/HiFiShifter.app\n/Library/Application Support/HiFiShifter —— 模型庫、LICENSE、第三方授權與解除安裝包副本。\n/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3\n/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap\n~/Library/Caches/HiFiShifter、~/Library/Logs/HiFiShifter、WebView 資料與視窗狀態。\n舊版面留下的殘留，以及安裝器登記的收據。",
     installer_macos_uninstall_conclusion_title: "HiFiShifter 已移除",
     installer_macos_uninstall_conclusion_body:
-        "請重新啟動 DAW，它才會把 HiFiShifter 從外掛清單裡移除。\n這台 Mac 上的其他內容沒有被改動。",
+        "請重新啟動 DAW，它才會把 HiFiShifter 從外掛清單裡移除。\n你的設定、外掛記事本與你自備的模型檔仍留在 ~/Library/Application Support/HiFiShifter；要一併清掉，刪除這個資料夾即可。",
 } as const;

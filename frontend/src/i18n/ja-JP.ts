@@ -2522,11 +2522,11 @@ export const jaJP = {
         "必須：本体とすべてのプラグインがこの 1 か所を読みます。モデルの個別ダウンロードはありません。",
     installer_macos_uninstall_welcome_title: "HiFiShifter を削除",
     installer_macos_uninstall_welcome_body:
-        "この Mac にある HiFiShifter のすべて（本体、VST3・CLAP プラグイン、共有モデルライブラリ、キャッシュ・ログ・設定）を削除します。\n続行する前に HiFiShifter と、プラグインを読み込んでいるすべての DAW を終了してください。\nプロジェクト（.hshp/.hsp）と音声ファイルには一切触れません。",
+        "この Mac にある HiFiShifter 本体、VST3・CLAP プラグイン、共有モデルライブラリ、キャッシュとログを削除します。\n続行する前に HiFiShifter と、プラグインを読み込んでいるすべての DAW を終了してください。\nプロジェクト（.hshp/.hsp）、音声ファイル、設定、ご自身で追加したモデルファイルは保持されます。",
     installer_macos_uninstall_readme_title: "削除されるもの",
     installer_macos_uninstall_readme_body:
-        "/Applications/HiFiShifter.app\n/Library/Application Support/HiFiShifter — モデルライブラリ、LICENSE、ライセンス類。\n/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3\n/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap\n~/Library/Application Support/HiFiShifter、~/Library/Caches/HiFiShifter、~/Library/Logs/HiFiShifter。\n旧レイアウトの残骸と、インストーラのレシート。",
+        "/Applications/HiFiShifter.app\n/Library/Application Support/HiFiShifter — モデルライブラリ、LICENSE、ライセンス類、アンインストーラのコピー。\n/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3\n/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap\n~/Library/Caches/HiFiShifter、~/Library/Logs/HiFiShifter、WebView データ、ウインドウ状態。\n旧レイアウトの残骸と、インストーラのレシート。",
     installer_macos_uninstall_conclusion_title: "HiFiShifter を削除しました",
     installer_macos_uninstall_conclusion_body:
-        "DAW を再起動すると、プラグイン一覧から HiFiShifter が消えます。\nこの Mac のほかのものは変更していません。",
+        "DAW を再起動すると、プラグイン一覧から HiFiShifter が消えます。\n設定、プラグインノート、ご自身のモデルファイルは ~/Library/Application Support/HiFiShifter に残ります。不要ならこのフォルダーを削除してください。",
 } as const;

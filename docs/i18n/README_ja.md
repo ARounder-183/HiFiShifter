@@ -23,7 +23,7 @@ HiFiShifterは、グラフィカルなボーカル編集・合成ツールです
 [Releases](https://github.com/ARounder-183/HiFiShifter/releases) ページから、お使いの OS とアーキテクチャに対応したインストーラーをダウンロードしてください：
 
 - **Windows**：NSIS インストーラー（`installer`）またはポータブル版 ZIP（`portable`）。x86_64 と arm64 の両アーキテクチャを提供しています。インストーラーにはスタンドアロン版、VST3/CLAP プラグイン、共有モデルライブラリが含まれます。
-- **macOS**：`macos-universal` の統合 `.pkg`（Intel と Apple Silicon 共通の 1 ファイル）で `/Applications/HiFiShifter.app`、VST3/CLAP プラグイン、共有モデルライブラリをインストールします。ウィザードでは必要なプラグイン形式だけを選べます（本体とモデルライブラリは常にインストール）。`/Library/Application Support/HiFiShifter` にアンインストーラが入り、同じ `-uninstaller.pkg` もダウンロードページから取得できます —— プロジェクトと音声ファイルには触れずにすべて削除します。パッケージは未署名のため、初回インストール時に手動で許可する必要があります。「ファイルが破損しています」と表示された場合は、[ユーザーマニュアル](USERMANUAL_ja.md#一インストール)の手順に従ってください。
+- **macOS**：`macos-universal` の統合 `.pkg`（Intel と Apple Silicon 共通の 1 ファイル）で `/Applications/HiFiShifter.app`、VST3/CLAP プラグイン、共有モデルライブラリをインストールします。ウィザードでは必要なプラグイン形式だけを選べます（本体とモデルライブラリは常にインストール）。`/Library/Application Support/HiFiShifter` にアンインストーラが入り、同じ `-uninstaller.pkg` もダウンロードページから取得できます —— プロジェクト、音声ファイル、設定には触れずに、アプリ・プラグイン・モデルライブラリ・キャッシュを削除します。パッケージは未署名のため、初回インストール時に手動で許可する必要があります。「ファイルが破損しています」と表示された場合は、[ユーザーマニュアル](USERMANUAL_ja.md#一インストール)の手順に従ってください。
 - **Linux**：統合 `.tar.gz`（x86_64 / arm64）。AppImage、VST3/CLAP プラグイン、共有モデルライブラリ、`install.sh` を含みます。`./install.sh` でユーザー単位、`sudo ./install.sh --system` でシステム単位にインストールします。実行にはシステムの `webkit2gtk-4.1` が必要です（Arch/CachyOS、Ubuntu 24.04+、Fedora 39+、Debian 13+ などが提供。Ubuntu 22.04 は `webkit2gtk-4.0` のみのため非対応）。
 
 **VST3 ARA プラグインと CLAP プラグイン**：3 プラットフォームすべてに両方の形態があります。REAPER 内では VST3 プラグインを ARA の埋め込みインターフェースとして使用し（現在は REAPER でのみ検証済み）、CLAP プラグインは通常のインサートエフェクトとして使用できます。インストール方法、実行時依存、使用上の制限はユーザーマニュアルの [プラグイン](USERMANUAL_ja.md#八vst3-ara-プラグインと-clap-プラグインreaper)の章を参照してください。

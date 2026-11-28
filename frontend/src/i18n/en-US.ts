@@ -2515,11 +2515,11 @@ export const enUS = {
         "Required: the app and every plug-in read this one copy, and there is no separate model download.",
     installer_macos_uninstall_welcome_title: "Uninstall HiFiShifter",
     installer_macos_uninstall_welcome_body:
-        "This removes every part of HiFiShifter that this Mac has: the app, the VST3 and CLAP plug-ins, the shared model library, and your caches, logs and settings.\nQuit HiFiShifter and every DAW that has loaded the plug-ins before you continue.\nYour projects (.hshp/.hsp) and your audio files are never touched.",
+        "This removes the app, the VST3 and CLAP plug-ins, the shared model library, and the caches and logs this Mac has.\nQuit HiFiShifter and every DAW that has loaded the plug-ins before you continue.\nYour projects (.hshp/.hsp), your audio files, your settings and any model files you added yourself are kept.",
     installer_macos_uninstall_readme_title: "What gets removed",
     installer_macos_uninstall_readme_body:
-        "/Applications/HiFiShifter.app\n/Library/Application Support/HiFiShifter - model library, LICENSE and licenses.\n/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3\n/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap\n~/Library/Application Support/HiFiShifter, ~/Library/Caches/HiFiShifter and ~/Library/Logs/HiFiShifter.\nLeftovers from older layouts, and the installer's receipts.",
+        "/Applications/HiFiShifter.app\n/Library/Application Support/HiFiShifter - model library, LICENSE, licenses and the uninstaller copy.\n/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3\n/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap\n~/Library/Caches/HiFiShifter, ~/Library/Logs/HiFiShifter, the WebView data and the saved window state.\nLeftovers from older layouts, and the installer's receipts.",
     installer_macos_uninstall_conclusion_title: "HiFiShifter has been removed",
     installer_macos_uninstall_conclusion_body:
-        "Restart your DAW so it drops HiFiShifter from its plug-in list.\nNothing else on this Mac was touched.",
+        "Restart your DAW so it drops HiFiShifter from its plug-in list.\nYour settings, plug-in notes and any model files you added yourself stay in ~/Library/Application Support/HiFiShifter; delete that folder too if you want them gone.",
 } as const;
