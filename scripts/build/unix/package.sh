@@ -257,7 +257,7 @@ merge_arch() {
 #
 # <dir>... : one directory per architecture (see the option's help text)
 merge_app_arch() {
-    local app="$APP_BUNDLE" rel base merged=0 dir cand archs seen
+    local app="$APP_BUNDLE" rel base merged=0 dir cand archs seen files
     local -a dirs=() picked=()
     [ "$HFS_OS" = "macos" ] || die "--merge-app-arch only makes sense on macOS"
     command -v lipo >/dev/null 2>&1 || die "lipo missing (Xcode command line tools required)"
@@ -273,6 +273,11 @@ merge_app_arch() {
     [ ${#dirs[@]} -gt 0 ] || die "--merge-app-arch needs at least one directory"
 
     step "merging the universal App bundle (${dirs[*]})"
+    # [Why the list is materialised first] The loop replaces files in the tree it is walking
+    # (lipo writes <file>.universal, then renames it over <file>). Streaming `find` through a
+    # process substitution would be reading a directory while it changes; a here-string makes
+    # the walk a snapshot.
+    files="$( cd "$app" && find . -type f | sed 's|^\./||' )"
     while IFS= read -r rel; do
         [ -n "$rel" ] || continue
         # Architecture-exclusive by design (see the comment above).
@@ -299,7 +304,7 @@ merge_app_arch() {
         mv -f "$app/$rel.universal" "$app/$rel"
         log "universal: $rel"
         merged=$((merged + 1))
-    done <<< "$( cd "$app" && find . -type f | sed 's|^\./||' )"
+    done <<< "$files"
     hfs_sign_bundle "$app" "$app/Contents/MacOS/HiFiShifter"
     log "App: ${merged} file(s) merged into universal binaries"
 }
