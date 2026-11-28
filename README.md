@@ -247,6 +247,8 @@ cargo tauri build --bundles appimage -- --no-default-features --features onnx  #
 # cargo tauri build --bundles app -- --locked --no-default-features --features onnx
 # bash scripts/build/unix/package.sh --reuse-frontend \
 #   --app-bundle backend/target/release/bundle/macos/HiFiShifter.app
+# 产物两份：-unified.pkg（带组件选择的安装向导）与 -uninstaller.pkg（卸载）；
+# 安装向导的文案与 .lproj 页面由 scripts/release/build-macos-pkg.mjs 从 frontend/src/i18n 生成。
 
 # Windows：合并安装器（App + VST3 + 模型库）+ 便携 ZIP，产物全在 dist\
 .\build.bat

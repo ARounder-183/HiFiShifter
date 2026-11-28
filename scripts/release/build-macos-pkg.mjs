@@ -93,7 +93,12 @@ function fail(message) {
 // ── Arguments ───────────────────────────────────────────────────────────────
 function parseArgs(argv) {
     const options = { kind: "", out: "", version: "", formats: "vst3,clap" };
-    const known = { "--kind": "kind", "--out": "out", "--version": "version", "--formats": "formats" };
+    const known = {
+        "--kind": "kind",
+        "--out": "out",
+        "--version": "version",
+        "--formats": "formats",
+    };
     for (let index = 0; index < argv.length; index += 1) {
         const raw = argv[index];
         const eq = raw.indexOf("=");
@@ -233,7 +238,11 @@ function page(lang, heading, body, list) {
         .map((line) => line.trim())
         .filter(Boolean);
     const rendered = list
-        ? ["    <ul>", ...lines.map((line) => "        <li>" + htmlEscape(line) + "</li>"), "    </ul>"]
+        ? [
+              "    <ul>",
+              ...lines.map((line) => "        <li>" + htmlEscape(line) + "</li>"),
+              "    </ul>",
+          ]
         : lines.map((line) => "    <p>" + htmlEscape(line) + "</p>");
     return [
         "<!DOCTYPE html>",
@@ -300,17 +309,14 @@ function distributionXml({ kind, copy, choices, version }) {
     if (kind === "install") {
         lines.push('    <license file="license.txt"/>');
     }
-    lines.push(
-        '    <conclusion file="conclusion.html"/>',
-        "    <choices-outline>",
-    );
+    lines.push('    <conclusion file="conclusion.html"/>', "    <choices-outline>");
     for (const choice of choices) {
         lines.push('        <line choice="' + choice.id + '"/>');
     }
     lines.push("    </choices-outline>");
     for (const choice of choices) {
         lines.push(
-            "    <choice id=\"" +
+            '    <choice id="' +
                 choice.id +
                 '" title="' +
                 xmlEscape(choice.title) +
@@ -350,7 +356,9 @@ async function main() {
     const englishChoices = build(reference.catalog, options.formats);
 
     const welcomeKey =
-        options.kind === "install" ? "installer_macos_welcome" : "installer_macos_uninstall_welcome";
+        options.kind === "install"
+            ? "installer_macos_welcome"
+            : "installer_macos_uninstall_welcome";
     const readmeKey =
         options.kind === "install" ? "installer_macos_readme" : "installer_macos_uninstall_readme";
     const conclusionKey =
@@ -380,12 +388,7 @@ async function main() {
         const lang = HTML_LANG[locale];
         writeFileSync(
             join(target, "welcome.html"),
-            page(
-                lang,
-                catalog[welcomeKey + "_title"],
-                catalog[welcomeKey + "_body"],
-                false,
-            ),
+            page(lang, catalog[welcomeKey + "_title"], catalog[welcomeKey + "_body"], false),
             "utf8",
         );
         writeFileSync(
@@ -395,19 +398,20 @@ async function main() {
         );
         writeFileSync(
             join(target, "conclusion.html"),
-            page(
-                lang,
-                catalog[conclusionKey + "_title"],
-                catalog[conclusionKey + "_body"],
-                false,
-            ),
+            page(lang, catalog[conclusionKey + "_title"], catalog[conclusionKey + "_body"], false),
             "utf8",
         );
 
         // Choice titles and descriptions are looked up by the English text as the key.
         const choices = build(catalog, options.formats);
         if (choices.length !== englishChoices.length) {
-            fail(locale + " produced " + choices.length + " choices, expected " + englishChoices.length);
+            fail(
+                locale +
+                    " produced " +
+                    choices.length +
+                    " choices, expected " +
+                    englishChoices.length,
+            );
         }
         const entries = [];
         for (let index = 0; index < choices.length; index += 1) {
