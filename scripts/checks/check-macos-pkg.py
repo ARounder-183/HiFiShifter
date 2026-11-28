@@ -470,6 +470,19 @@ def main() -> int:
         ("Uninstall HiFiShifter.pkg", "the uninstaller is not copied into the payload"),
         ("macos_component_pkg app", "the app component package is never built"),
         ("macos_component_pkg models", "the model-library component package is never built"),
+        # A relocatable bundle is the bug this gate exists to prevent: Installer finds the
+        # bundle elsewhere on disk, upgrades that copy, writes the receipt, and leaves
+        # /Applications empty -- which looks exactly like a working install until it is run.
+        (
+            "BundleIsRelocatable",
+            "component bundles stay relocatable; Installer would install over a copy it finds "
+            "elsewhere on disk instead of the payload path",
+        ),
+        ("--component-plist", "the component plist that pins the bundles is never passed"),
+        (
+            '"Applications/HiFiShifter.app"',
+            "the app component is not pinned to /Applications",
+        ),
     ):
         if needle not in package_code:
             findings.append("scripts/build/unix/package.sh: %s (%r missing)" % (why, needle))

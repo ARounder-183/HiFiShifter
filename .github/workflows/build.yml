@@ -765,6 +765,18 @@ jobs:
               "/Library/Application Support/HiFiShifter/models" ; do
               if [ -e "$path" ]; then ok "installed $path"; else bad "not installed: $path"; fi
           done
+          # [Why this diagnostic] A receipt without the App at /Applications is what a relocatable
+          # bundle looks like: Installer "upgraded" a copy it found elsewhere on disk instead of
+          # writing the payload path. Printing where the copies are turns that into evidence
+          # instead of a guess the next time this goes red.
+          if [ ! -e "/Applications/HiFiShifter.app" ]; then
+              echo "--- /Applications (first 20) ---" >&2
+              ls -la /Applications | head -20 >&2 || true
+              echo "--- copies Spotlight knows about ---" >&2
+              mdfind -name HiFiShifter.app 2>/dev/null | head -20 >&2 || true
+              echo "--- what Installer itself said ---" >&2
+              grep -i -m 10 -e relocat -e 'HiFiShifter.app' /var/log/install.log >&2 || true
+          fi
           codesign --verify --deep --strict "/Applications/HiFiShifter.app" || bad "the installed app lost its signature"
           # [Why --pkgs=PATTERN and not "pkgutil --pkgs | grep -q"] grep exits on the first
           # match, and with `set -o pipefail` the resulting SIGPIPE in pkgutil would turn a

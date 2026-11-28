@@ -465,15 +465,53 @@ package_linux_unified() {
 # "<choice>.pkg" and this script writes "$pkgs/<choice>.pkg", so there is no third list of
 # filenames to keep in step.
 
-# <choice> <root-dir> <output-pkg>
+# <choice> <root-dir> <output-pkg> [<bundle, relative to the root>]...
+#
+# [Why the bundle list and the component plist] pkgbuild treats every .app/.vst3/.clap in the
+# payload as a bundle component and marks it relocatable. A relocatable bundle makes Installer
+# look the bundle identifier up on disk and "upgrade" the copy it finds instead of writing the
+# payload path -- so on a build machine, where the same App bundle also sits in the build tree,
+# the install writes there, records the receipt, and leaves /Applications empty. A component
+# plist with BundleIsRelocatable=false pins each bundle to the path the payload names, which is
+# the only behaviour a downloadable installer may have.
 macos_component_pkg() {
     local choice="$1" root="$2" out="$3"
-    rm -f "$out"
-    pkgbuild --root "$root" \
-        --identifier "com.arounder.hifishifter.$choice" \
-        --version "$MACOS_NUMERIC_VERSION" \
-        --install-location / --ownership recommended "$out" >/dev/null \
+    shift 3
+    local plist="$OUT_DIR/pkg-component-$choice.plist"
+    local -a args=(
+        --root "$root"
+        --identifier "com.arounder.hifishifter.$choice"
+        --version "$MACOS_NUMERIC_VERSION"
+        --install-location /
+        --ownership recommended
+    )
+    rm -f "$out" "$plist"
+    if [ "$#" -gt 0 ]; then
+        local bundle
+        {
+            printf '%s\n' \
+                '<?xml version="1.0" encoding="UTF-8"?>' \
+                '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+                '<plist version="1.0">' \
+                '<array>'
+            for bundle in "$@"; do
+                printf '%s\n' \
+                    '<dict>' \
+                    '    <key>BundleIsRelocatable</key>' \
+                    '    <false/>' \
+                    '    <key>BundleOverwriteAction</key>' \
+                    '    <string>upgrade</string>' \
+                    '    <key>RootRelativeBundlePath</key>' \
+                    "    <string>$bundle</string>" \
+                    '</dict>'
+            done
+            printf '%s\n' '</array>' '</plist>'
+        } >"$plist"
+        args+=(--component-plist "$plist")
+    fi
+    pkgbuild "${args[@]}" "$out" >/dev/null \
         || die "pkgbuild failed for the '$choice' component"
+    rm -f "$plist"
 }
 
 # <tool>... : the pkg tools are Xcode command line tools, node runs the layout generator.
@@ -586,10 +624,17 @@ package_macos_unified() {
             "$clap_root/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap/Contents/MacOS/HiFiShifter"
     fi
 
-    macos_component_pkg app "$app_root" "$pkgs/app.pkg"
+    macos_component_pkg app "$app_root" "$pkgs/app.pkg" \
+        "Applications/HiFiShifter.app"
     macos_component_pkg models "$models_root" "$pkgs/models.pkg"
-    if wants vst3; then macos_component_pkg vst3 "$vst3_root" "$pkgs/vst3.pkg"; fi
-    if wants clap; then macos_component_pkg clap "$clap_root" "$pkgs/clap.pkg"; fi
+    if wants vst3; then
+        macos_component_pkg vst3 "$vst3_root" "$pkgs/vst3.pkg" \
+            "Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3"
+    fi
+    if wants clap; then
+        macos_component_pkg clap "$clap_root" "$pkgs/clap.pkg" \
+            "Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap"
+    fi
 
     node "$REPO_ROOT/scripts/release/build-macos-pkg.mjs" --kind=install \
         --out="$work/resources" --version="$MACOS_NUMERIC_VERSION" --formats="$FORMATS" \
