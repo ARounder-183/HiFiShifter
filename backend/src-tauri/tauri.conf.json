@@ -37,7 +37,11 @@
             "minSdkVersion": 26
         },
         "iOS": {
-            "minimumSystemVersion": "15.1"
+            "minimumSystemVersion": "15.1",
+            "frameworks": [
+                "AVFAudio",
+                "AudioToolbox"
+            ]
         },
         "resources": {
             "../../LICENSE": "LICENSE",
