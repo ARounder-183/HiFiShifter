@@ -12,8 +12,12 @@ things can go wrong without any compiler ever running:
   * a Windows leg that builds through an action instead of build.ps1 never imports
     the MSVC environment, so the pinned CMake generator (NMake Makefiles) has no
     nmake.exe and the kernel build script dies inside cmake configure.
+  * the universal macOS leg is the one leg whose tag does not come from `uname`: it
+    cross-compiles both architectures, so the packaging step has to preset
+    HFS_PLATFORM_ARCH. Without it the artifact is named after the host and the upload
+    glob matches nothing -- the same failure as the first bullet, from the other end.
 
-Both are naming/wiring mistakes, invisible to typecheck and to every unit test.
+All of them are naming/wiring mistakes, invisible to typecheck and to every unit test.
 Exit code 0 when every rule holds.
 """
 
@@ -56,7 +60,12 @@ def matrix_entries(workflow: str) -> list[dict]:
 
 
 def platform_tag(name: str) -> str:
-    """The tag scripts/plugin/unix/lib.sh computes for this leg (os + platform arch)."""
+    """The tag scripts/plugin/unix/lib.sh computes for this leg (os + platform arch).
+
+    The `-universal` leg is the exception: lib.sh takes HFS_PLATFORM_ARCH from the environment
+    there (it has no single host architecture to describe), so the name is only honest if the
+    packaging step presets it -- which rule 2b checks.
+    """
     os_name, _, arch = name.partition("-")
     # lib.sh: Linux keeps dpkg's spelling for arm64; everything else uses uname's.
     platform_arch = "aarch64" if (os_name == "linux" and arch == "arm64") else arch
@@ -108,6 +117,17 @@ def main() -> int:
                 % (name, name, expected)
             )
 
+    # ── 2b. A universal leg's tag cannot come from uname ──
+    packaging = step_block(workflow, "Package unified installer (Unix)") or ""
+    for entry in matrix_entries(workflow):
+        name = str(entry.get("name", ""))
+        if name.endswith("-universal") and "HFS_PLATFORM_ARCH=universal" not in packaging:
+            findings.append(
+                "build.yml: leg %r is universal, but the packaging step never exports "
+                "HFS_PLATFORM_ARCH=universal -- lib.sh would derive the tag from the host "
+                "architecture and the upload glob would match nothing" % name
+            )
+
     # ── 3. The non-Windows upload must glob the tag, not a hand-written suffix ──
     upload = step_block(workflow, "Upload unified package (Unix)")
     if upload is None:
@@ -148,7 +168,10 @@ def main() -> int:
         for finding in findings:
             print("check-ci-artifact-names: %s" % finding, file=sys.stderr)
         return 1
-    print("check-ci-artifact-names: every leg name is its artifact tag, and Windows imports MSVC")
+    print(
+        "check-ci-artifact-names: every leg name is its artifact tag, the universal leg presets "
+        "its tag, and Windows imports MSVC"
+    )
     return 0
 
 

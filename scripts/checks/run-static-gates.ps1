@@ -124,6 +124,13 @@ Invoke-Gate 'Gain audition gate' { python scripts/checks/check-gain-audition.py 
 # leg builds through tauri-action, which never imported the MSVC environment (no nmake).
 Invoke-Gate 'CI artifact name gate' { python scripts/checks/check-ci-artifact-names.py }
 
+# The macOS release leg builds both architectures and ships one package. Its failure modes are
+# all "green but wrong": --target on the cargo side of the `--` boundary builds the host
+# architecture, a missing HFS_PLATFORM_ARCH names the artifact after the host, and a missing arch
+# assertion lets an arm64-only package through. Only the last one is visible on a Mac, and only
+# if someone runs it there.
+Invoke-Gate 'macOS universal gate' { python scripts/checks/check-macos-universal.py }
+
 # vslib is a **link-time** dependency (a #[link] directive, not a dlopen) and its import
 # library is x64 machine code. Every cfg that decides "the backend exists" must therefore name
 # target_arch = "x86_64"; lib.rs used to gate only on target_os = "windows" while the module

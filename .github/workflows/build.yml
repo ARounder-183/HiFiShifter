@@ -7,7 +7,9 @@ name: HiFiShifter Cross-Platform Build (Windows, macOS, Linux)
 # scripts/checks/ locally as needed.
 #
 # [Triggers] PRs run three platforms (windows-x86_64 / macos-arm64 / linux-x86_64);
-# a `v*` tag or manual dispatch runs all six.
+# a `v*` tag or manual dispatch runs five: those three plus windows-arm64 and
+# linux-aarch64, with the two macOS legs replaced by one `macos-universal` leg that
+# cross-compiles both architectures and ships a single .pkg.
 on:
   workflow_dispatch:
   pull_request:
@@ -58,7 +60,8 @@ jobs:
       always() && needs.frontend.result == 'success'
       && (needs.assert-version.result == 'success' || needs.assert-version.result == 'skipped')
     runs-on: ${{ matrix.os }}
-    # Six-platform matrix: the longest single build (cross-compile + packaging) is capped at 120 minutes.
+    # The longest single leg (the two-architecture macOS build plus packaging) is capped at 180
+    # minutes; the note here used to say 120, which the value below had already outgrown.
     timeout-minutes: 180
     env:
       # [Why RUSTFLAGS is no longer set] This used to be `RUSTFLAGS: "-Awarnings"`, which did
@@ -77,8 +80,13 @@ jobs:
         # platforms running at all**: the run log only showed a skipped job whose name still
         # contained `${{ matrix.name }}`. GitHub does not error on expressions inside exclude;
         # it just prevents the whole matrix from expanding. The matrix is now produced directly
-        # by an expression: three platforms on PRs, six on tags and manual dispatch. The JSON
+        # by an expression: three platforms on PRs, five on tags and manual dispatch. The JSON
         # fields map 1:1 onto the old include (cargo_extra carried over verbatim).
+        # [Why release builds have one macOS leg] It cross-compiles both architectures on Apple
+        # Silicon and ships one universal .pkg, which removes the Intel leg's two structural
+        # costs (Homebrew compiling cmake from source, then two fat-LTO links) and the duplicate
+        # package. PRs keep the single-architecture leg: a PR only proves that the code compiles,
+        # and the universal wiring is covered by a static gate instead.
         # [Why `name` is the artifact tag] The non-Windows upload glob matches package.sh's
         # HFS_TAG (scripts/plugin/unix/lib.sh), and that tag spells the Linux arm64 leg
         # `linux-aarch64` (dpkg's spelling, already part of published file names). The
@@ -87,7 +95,7 @@ jobs:
         include: >-
           ${{ fromJSON(github.event_name == 'pull_request'
           && '[{"name":"windows-x86_64","os":"windows-latest","cargo_target":"x86_64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist","tauri_extra":""},{"name":"macos-arm64","os":"macos-latest","cargo_target":"aarch64-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""},{"name":"linux-x86_64","os":"ubuntu-24.04","cargo_target":"x86_64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--config tauri.linux.x86_64.conf.json"}]'
-          || '[{"name":"windows-x86_64","os":"windows-latest","cargo_target":"x86_64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist","tauri_extra":""},{"name":"windows-arm64","os":"windows-11-arm","cargo_target":"aarch64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""},{"name":"macos-arm64","os":"macos-latest","cargo_target":"aarch64-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""},{"name":"macos-x86_64","os":"macos-15-intel","cargo_target":"x86_64-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""},{"name":"linux-x86_64","os":"ubuntu-24.04","cargo_target":"x86_64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--config tauri.linux.x86_64.conf.json"},{"name":"linux-aarch64","os":"ubuntu-24.04-arm","cargo_target":"aarch64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""}]') }}
+          || '[{"name":"windows-x86_64","os":"windows-latest","cargo_target":"x86_64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist","tauri_extra":""},{"name":"windows-arm64","os":"windows-11-arm","cargo_target":"aarch64-pc-windows-msvc","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""},{"name":"macos-universal","os":"macos-15","cargo_target":"universal-apple-darwin","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--target universal-apple-darwin"},{"name":"linux-x86_64","os":"ubuntu-24.04","cargo_target":"x86_64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":"--config tauri.linux.x86_64.conf.json"},{"name":"linux-aarch64","os":"ubuntu-24.04-arm","cargo_target":"aarch64-unknown-linux-gnu","cargo_extra":"-- --locked --profile dist --no-default-features --features onnx","tauri_extra":""}]') }}
     steps:
       - uses: actions/checkout@v6
 
@@ -146,6 +154,15 @@ jobs:
           # build job must not go red over dependency-crate warnings, nor silence warnings —
           # so it is explicitly cleared, making warnings visible but non-fatal.
           rustflags: ''
+
+      # [Why the toolchain action cannot do this] It installs the host's default target only.
+      # The universal leg cross-compiles for the other architecture, and cargo's failure mode
+      # for a target that was never added is "can't find crate for `std`" — an error that names
+      # a dependency rather than the missing target.
+      - name: Add both macOS targets (universal)
+        if: matrix.cargo_target == 'universal-apple-darwin'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+        shell: bash
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -619,12 +636,109 @@ jobs:
             APP_BUNDLE="$RELEASE_DIR/bundle/macos/HiFiShifter.app"
             [ -d "$APP_BUNDLE" ] || { echo "ERROR: macOS App not found: $APP_BUNDLE" >&2; exit 1; }
             APP_ARGS+=(--app-bundle "$APP_BUNDLE")
+            if [ "${{ matrix.cargo_target }}" = "universal-apple-darwin" ]; then
+              # package.sh builds the host architecture's plugins itself; the other slice is
+              # built here, into its own directory, and merged in by --merge-arch.
+              OTHER_TRIPLE="x86_64-apple-darwin"
+              OTHER_DIST="$GITHUB_WORKSPACE/dist-universal-other"
+              bash scripts/vst3/unix/build.sh --stage=bundle --profile=dist --skip-frontend \
+                --target="$OTHER_TRIPLE" --out="$OTHER_DIST"
+              bash scripts/clap/unix/build.sh --stage=bundle --profile=dist --reuse-frontend \
+                --target="$OTHER_TRIPLE" --out="$OTHER_DIST"
+              APP_ARGS+=(--merge-arch "$OTHER_DIST")
+              # The App's SoundTouch dylibs are single-arch -- build.rs writes them to one fixed
+              # source path, so the last build wins. The two per-target output directories are
+              # the authoritative per-architecture sources, and --merge-app-arch lipos those
+              # instead of whatever the bundle happens to hold.
+              APP_ARGS+=(--merge-app-arch "$GITHUB_WORKSPACE/backend/target/aarch64-apple-darwin/dist")
+              APP_ARGS+=(--merge-app-arch "$GITHUB_WORKSPACE/backend/target/x86_64-apple-darwin/dist")
+              # The artifact name is built from HFS_TAG (scripts/plugin/unix/lib.sh); without
+              # this the universal package would be published as "macos-arm64".
+              export HFS_PLATFORM_ARCH=universal
+            fi
           else
             APPIMAGE="$(find "$RELEASE_DIR/bundle/appimage" -maxdepth 1 -name '*.AppImage' -print -quit)"
             [ -f "$APPIMAGE" ] || { echo "ERROR: Linux AppImage not found: $RELEASE_DIR/bundle/appimage" >&2; exit 1; }
             APP_ARGS+=(--appimage "$APPIMAGE")
           fi
           bash scripts/build/unix/package.sh --profile dist --reuse-frontend --no-verify "${APP_ARGS[@]}"
+
+      # [Why this is a runtime assertion and not a static gate] lipo's output is the only
+      # evidence that a file carries both slices; reading the sources cannot produce it.
+      # Everything the merge could not repair shows up here instead of on a user's Intel Mac,
+      # where the symptom is "dyld: Library not loaded" with no log that explains it.
+      - name: Assert universal Mach-O
+        if: runner.os == 'macOS' && matrix.cargo_target == 'universal-apple-darwin' && success()
+        shell: bash
+        run: |
+          # No `set -e`: every offending file must be reported, not just the first one.
+          set -uo pipefail
+          APP="${GITHUB_WORKSPACE}/${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/macos/HiFiShifter.app"
+          DIST="$GITHUB_WORKSPACE/dist"
+          FAIL=0
+
+          # lipo prints a space-separated list; sorting makes the comparison independent of the
+          # order the slices happen to be stored in.
+          archs_of() { lipo -archs "$1" 2>/dev/null | tr ' ' '\n' | sed '/^$/d' | sort | tr '\n' ' ' | sed 's/ $//'; }
+
+          expect_archs() { # <file> <expected, sorted>
+              local target="$1" want="$2" got
+              got="$(archs_of "$target")"
+              if [ "$got" = "$want" ]; then
+                  printf '  ok   %-14s %s\n' "$got" "$target"
+              else
+                  printf '  FAIL %-14s %s (expected %s)\n' "$got" "$target" "$want" >&2
+                  FAIL=1
+              fi
+          }
+
+          [ -d "$APP" ] || { echo "ERROR: $APP not found" >&2; exit 1; }
+          echo "=== $APP ==="
+
+          # 1) Architecture-exclusive dylibs stay arm64-only: the x86_64 slice links ort-tract,
+          #    so it has no onnxruntime at all and dyld never resolves these.
+          #    The [ -e ] guard is not optional: an empty directory leaves the glob unexpanded,
+          #    and the assertion would then fail as "file does not exist" while everything is
+          #    actually fine.
+          for f in "$APP"/Contents/Resources/macos/*.dylib; do
+              [ -e "$f" ] || continue
+              expect_archs "$f" "arm64"
+          done
+
+          # 2) Every other Mach-O carries both slices.
+          while IFS= read -r -d '' f; do
+              case "$f" in "$APP"/Contents/Resources/macos/*) continue ;; esac
+              file -b "$f" | grep -q 'Mach-O' || continue
+              expect_archs "$f" "arm64 x86_64"
+          done < <(find "$APP" -type f -print0)
+
+          # 3) The x86_64 slice must not reference onnxruntime. Written as `if`, not as
+          #    "cmd | grep -q X && exit 1": under `set -e` a non-matching grep makes the whole
+          #    AND-list return 1, so the step would go red exactly when the rule holds.
+          if otool -arch x86_64 -L "$APP/Contents/MacOS/HiFiShifter" | grep -q onnxruntime; then
+              echo "  FAIL the x86_64 slice references onnxruntime; it must use tract only" >&2
+              FAIL=1
+          fi
+
+          # 4) lipo invalidates signatures, so this is the only proof that the re-sign took.
+          codesign --verify --deep --strict "$APP" || FAIL=1
+
+          # The plugins go through the same merge and have no architecture-exclusive directory.
+          for bundle in "$DIST/HiFiShifter.vst3" "$DIST/clap/HiFiShifter.clap"; do
+              if [ ! -d "$bundle" ]; then echo "  FAIL missing $bundle" >&2; FAIL=1; continue; fi
+              echo "=== $bundle ==="
+              while IFS= read -r -d '' f; do
+                  file -b "$f" | grep -q 'Mach-O' || continue
+                  expect_archs "$f" "arm64 x86_64"
+              done < <(find "$bundle" -type f -print0)
+              codesign --verify --deep --strict "$bundle" || FAIL=1
+          done
+
+          if [ "$FAIL" -ne 0 ]; then
+              echo "ERROR: the package is not universal (see the FAIL lines above)" >&2
+              exit 1
+          fi
+          echo "every Mach-O carries both slices, or is on the arm64-only list"
 
       # ── Artifact naming ───────────────────────────────────────────────
 
