@@ -1,0 +1,27 @@
+# Common header shared by the four package definitions; kept here as a comment so the four files
+# stay readable on their own.
+#
+# [Why ${...} placeholders] nfpm expands environment variables in the config. build.sh exports
+# HFS_PKG_ARCH / HFS_PKG_VERSION / HFS_PKG_RELEASE before each packager run, so one file yields the
+# deb (0.2.0~beta) and the rpm (0.2.0-0.1.beta) from the same metadata. "contents:" is appended by
+# build.sh from the staged tree -- everything a human reviews lives in this file.
+
+name: hifishifter-models
+# [Why "all"] models.json is content-derived: it lists every file's sha256 and byte count, and
+# build.sh refuses to package a tree that does not validate against it. A tree that validates is
+# byte-identical to any other tree that validates, so the weights cannot differ per architecture.
+arch: all
+platform: linux
+version: ${HFS_PKG_VERSION}
+release: ${HFS_PKG_RELEASE}
+section: sound
+priority: optional
+maintainer: ${HFS_PKG_MAINTAINER}
+vendor: HiFiShifter
+homepage: ${HFS_PKG_HOMEPAGE}
+license: MIT
+description: |
+  The model library HiFiShifter's app and plug-ins share: pitch detection, note separation
+  and the neural vocoder. Installing it once serves every form of the product, and its
+  version is the content hash recorded in models.json, so an app that needs newer weights
+  simply depends on a newer version of this package.

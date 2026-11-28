@@ -1,0 +1,61 @@
+# Common header shared by the four package definitions; kept here as a comment so the four files
+# stay readable on their own.
+#
+# [Why ${...} placeholders] nfpm expands environment variables in the config. build.sh exports
+# HFS_PKG_ARCH / HFS_PKG_VERSION / HFS_PKG_RELEASE before each packager run, so one file yields the
+# deb (0.2.0~beta) and the rpm (0.2.0-0.1.beta) from the same metadata. "contents:" is appended by
+# build.sh from the staged tree -- everything a human reviews lives in this file.
+
+name: hifishifter-clap
+arch: ${HFS_PKG_ARCH}
+platform: linux
+version: ${HFS_PKG_VERSION}
+release: ${HFS_PKG_RELEASE}
+section: sound
+priority: optional
+maintainer: ${HFS_PKG_MAINTAINER}
+vendor: HiFiShifter
+homepage: ${HFS_PKG_HOMEPAGE}
+license: MIT
+description: |
+  The CLAP form of HiFiShifter, installed into the system CLAP folder. The module is a single
+  file and carries its resources in a sibling HiFiShifter-resources directory, which is the
+  layout the plug-in resolves at runtime.
+depends:
+  - hifishifter-models (= ${HFS_MODEL_VERSION})
+  - libwebkit2gtk-4.1-0
+  - libgtk-3-0
+  - libasound2t64
+  - libnss3
+  - libx11-6
+  - libxcomposite1
+  - libxdamage1
+  - libxrandr2
+  - libxkbcommon0
+  - libgbm1
+  - libpango-1.0-0
+  - libcairo2
+  - libgdk-pixbuf-2.0-0
+  - libsoup-3.0-0
+  - libgstreamer1.0-0
+  - libgstreamer-plugins-base1.0-0
+overrides:
+  rpm:
+    depends:
+      - hifishifter-models = ${HFS_MODEL_VERSION}
+      - webkit2gtk4.1
+      - gtk3
+      - alsa-lib
+      - nss
+      - libX11
+      - libXcomposite
+      - libXdamage
+      - libXrandr
+      - libxkbcommon
+      - mesa-libgbm
+      - pango
+      - cairo
+      - gdk-pixbuf2
+      - libsoup3
+      - gstreamer1
+      - gstreamer1-plugins-base

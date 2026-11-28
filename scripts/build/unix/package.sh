@@ -27,11 +27,13 @@
 # under models/<version>. Without these flags, the original plugins-only behavior is kept.
 #
 # Artifacts:
-#   Linux   dist/HiFiShifter_v<version>_<os>-<arch>-unified.run
-#             a self-extracting wizard (welcome / license / scope / components / folder /
-#             progress / conclusion), localized in five languages. It installs the AppImage,
-#             the plug-ins, the shared model library, a menu entry and an uninstaller;
-#             --extract=DIR gives back the plain tree for anyone who wants it.
+#   Linux   dist/HiFiShifter_v<version>_<os>-<arch>-packages/
+#             the native packages (scripts/release/linux-packages): one .deb and one .rpm each
+#             for hifishifter, hifishifter-models, hifishifter-vst3 and hifishifter-clap, plus
+#             the portable AppImage, the portable bundle and SHA256SUMS. This is what a Linux
+#             user installs: "apt install ./hifishifter*.deb" or "dnf install ./hifishifter*.rpm".
+#           dist/HiFiShifter_v<version>_<os>-<arch>-plugins/
+#             the same two packages for the plug-in formats only (local builds without an app).
 #   macOS   dist/HiFiShifter_v<version>_<os>-<arch>-unified.pkg
 #             a product archive: welcome / readme / licence / conclusion pages, one
 #             selectable choice per plug-in format, and the payload split so that "app
@@ -65,6 +67,7 @@ SKIP_VERIFY=0
 MERGE_ARCH=""
 MERGE_APP_ARCH=""
 APPIMAGE=""
+APP_DIR=""
 APP_BUNDLE=""
 
 log()  { printf '[package] %s\n' "$*"; }
@@ -84,7 +87,9 @@ Usage: scripts/build/unix/package.sh [options]
   --merge-app-arch=DIR  merge the App's single-arch Mach-Os from one architecture's cargo
                         output directory (backend/target/<triple>/<profile>); repeat once per
                         architecture. macOS only
-  --appimage=FILE       Linux unified: wrap this AppImage into the self-extracting installer
+  --appimage=FILE       Linux packages: the AppImage to ship next to the .deb/.rpm files
+  --app-dir=DIR         the AppDir that AppImage was built from (default: HiFiShifter.AppDir
+                        next to it); it is where the binary and its libraries come from
   --app-bundle=DIR      macOS unified: install an existing .app into the pkg too
                         (macOS always also produces the -uninstaller.pkg artifact)
   -h, --help
@@ -111,6 +116,8 @@ while [ $# -gt 0 ]; do
         --merge-app-arch) [ $# -ge 2 ] || die "--merge-app-arch requires a value"; MERGE_APP_ARCH="${MERGE_APP_ARCH}${2}"$'\n'; shift 2 ;;
         --appimage=*)     APPIMAGE="${1#*=}"; shift ;;
         --appimage)       [ $# -ge 2 ] || die "--appimage requires a value"; APPIMAGE="$2"; shift 2 ;;
+        --app-dir=*)      APP_DIR="${1#*=}"; shift ;;
+        --app-dir)        [ $# -ge 2 ] || die "--app-dir requires a value"; APP_DIR="$2"; shift 2 ;;
         --app-bundle=*)   APP_BUNDLE="${1#*=}"; shift ;;
         --app-bundle)     [ $# -ge 2 ] || die "--app-bundle requires a value"; APP_BUNDLE="$2"; shift 2 ;;
         -h|--help)        usage; exit 0 ;;
@@ -123,6 +130,8 @@ PRODUCT_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]
 MODEL_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$MODELS_SRC/models.json")"
 readonly PRODUCT_VERSION MODEL_VERSION
 ARTIFACT_BASE="$OUT_DIR/HiFiShifter_v${PRODUCT_VERSION}_${HFS_TAG}-plugins"
+PACKAGES_BASE="$OUT_DIR/HiFiShifter_v${PRODUCT_VERSION}_${HFS_TAG}-packages"
+PORTABLE_BASE="$PACKAGES_BASE/HiFiShifter_v${PRODUCT_VERSION}_${HFS_TAG}-portable.tar.xz"
 UNIFIED_BASE="$OUT_DIR/HiFiShifter_v${PRODUCT_VERSION}_${HFS_TAG}-unified"
 UNINSTALLER_BASE="$OUT_DIR/HiFiShifter_v${PRODUCT_VERSION}_${HFS_TAG}-uninstaller"
 # CFBundleVersion and pkg versions only accept dot-separated integers; the full version
@@ -327,36 +336,35 @@ merge_app_arch() {
 
 # ── Stage 4: assemble distribution artifacts ────────────────────────────────
 package_linux_plugins() {
-    local stage="$OUT_DIR/stage-plugins" entries=()
-    step "packaging the Linux plugins package"
+    local stage="$OUT_DIR/stage-linux-plugins" only=""
+    step "packaging the Linux plug-in packages"
     rm -rf "$stage"
-    mkdir -p "$stage"
+    mkdir -p "$stage/models"
     if wants vst3; then
         [ -d "$OUT_DIR/HiFiShifter.vst3" ] || die "missing $OUT_DIR/HiFiShifter.vst3"
-        cp -R "$OUT_DIR/HiFiShifter.vst3" "$stage/"
-        entries+=("HiFiShifter.vst3")
+        mkdir -p "$stage/vst3"
+        cp -R "$OUT_DIR/HiFiShifter.vst3" "$stage/vst3/"
+        hfs_strip_models_to_manifest "$stage/vst3/HiFiShifter.vst3/Contents/Resources/models"
     fi
     if wants clap; then
         [ -f "$OUT_DIR/clap/HiFiShifter.clap" ] || die "missing $OUT_DIR/clap/HiFiShifter.clap"
-        cp "$OUT_DIR/clap/HiFiShifter.clap" "$stage/"
-        cp -R "$OUT_DIR/clap/HiFiShifter-resources" "$stage/"
-        entries+=("HiFiShifter.clap" "HiFiShifter-resources")
+        mkdir -p "$stage/clap"
+        cp -R "$OUT_DIR/clap/HiFiShifter.clap" "$OUT_DIR/clap/HiFiShifter-resources" "$stage/clap/"
+        hfs_strip_models_to_manifest "$stage/clap/HiFiShifter-resources/models"
     fi
-    # Plugins-only mode stays "self-contained per format": hard links in the staging directory
-    # let the two formats share inodes, so tar stores the second copy as a hard-link entry.
-    # Unified mode instead lifts the weights to the top-level models/, written into the shared
-    # store by install.sh; no hard links here.
-    if wants vst3 && wants clap; then
-        rm -rf "$stage/HiFiShifter-resources/models"
-        cp -al "$stage/HiFiShifter.vst3/Contents/Resources/models" "$stage/HiFiShifter-resources/models"
-    fi
-    # [Why the emptiness check] macOS ships bash 3.2, where ${arr[@]} on an empty array exits
-    # with "unbound variable" (set -u). An empty array can only come from a mistyped --formats;
-    # give a human-readable message in that case instead of making the user decode array expansion.
-    [ ${#entries[@]} -gt 0 ] || die "no format selected: --formats=$FORMATS"
-    stage_linux_installer "$stage"
+    # [Why only the manifest is staged here] build.sh reads the model version from
+    # models.json to write the packages' exact dependency; the weights themselves are the
+    # hifishifter-models package's payload, not the plug-ins'.
+    cp -f "$MODELS_SRC/models.json" "$stage/models/models.json"
     hfs_stage_licenses "$stage" "$REPO_ROOT"
-    hfs_tarball "$ARTIFACT_BASE.tar.gz" "$stage" "${entries[@]}" install.sh installer version LICENSE licenses
+    if wants vst3; then only="vst3"; fi
+    if wants clap; then only="${only:+$only,}clap"; fi
+    [ -n "$only" ] || die "no format selected: --formats=$FORMATS"
+    rm -rf "$ARTIFACT_BASE"
+    mkdir -p "$ARTIFACT_BASE"
+    bash "$REPO_ROOT/scripts/release/linux-packages/build.sh" \
+        --arch="$HFS_ARCH" --version="$PRODUCT_VERSION" --only="$only" \
+        --stage="$stage" --out="$ARTIFACT_BASE" || die "building the plug-in packages failed"
     rm -rf "$stage"
 }
 
@@ -413,91 +421,163 @@ sign_macos_pkg() {
 
 # ── Linux payload assembly ─────────────────────────────────────────────────
 #
-# [Why the wizard is assembled here and not inside the .run] The self-extracting file is a stub
-# with a tar.gz appended; everything the user sees is a file in that tar. Keeping the assembly
-# in one function means the plugin-only package and the unified one ship byte-identical
-# installer scripts, so "the uninstaller works" is not a property of one artifact.
+# [Why the payload is assembled here and not inside the packager] Everything Linux ships is a
+# function of one tree: the app binary and its private libraries, the model store, the two plug-in
+# bundles and the icons/licenses. Building that tree once means the .deb, the .rpm and the
+# portable bundle cannot disagree about what the product is.
 
-# <stage>: install.sh at the top, its implementation in installer/, and the version the wizard
-# shows and records in the manifest.
-stage_linux_installer() {
-    local stage="$1" src="$REPO_ROOT/scripts/release/linux-installer"
-    mkdir -p "$stage/installer"
-    cp -f "$src/install.sh" "$stage/install.sh"
-    cp -f "$src/run.sh" "$stage/installer/run.sh"
-    cp -f "$src/ui.sh" "$stage/installer/ui.sh"
-    cp -f "$src/paths.sh" "$stage/installer/paths.sh"
-    cp -f "$src/strings.sh" "$stage/installer/strings.sh"
-    cp -f "$src/uninstall.sh" "$stage/installer/uninstall.sh"
-    chmod +x "$stage/install.sh" "$stage/installer/run.sh"
-    printf '%s\n' "$PRODUCT_VERSION" >"$stage/version"
-}
-
-# <stage> <output.run>: stub + payload, in one executable file.
+# <stage>: the payload every Linux artifact is built from.
 #
-# [Why cat and not a zip with a header] The stub finds its payload by line number and hands the
-# rest to tar. Nothing is re-encoded, so the download is exactly "stub + payload" in size, and
-# --extract gives back the same tree the tar.gz used to contain.
-make_self_extracting_run() {
-    local stage="$1" out="$2" stub="$REPO_ROOT/scripts/release/linux-installer/self-extract.sh"
-    local payload="$OUT_DIR/.hifishifter-payload.tar.gz"
-    step "assembling the self-extracting installer"
-    [ -f "$stub" ] || die "missing self-extract stub: $stub"
-    rm -f "$payload" "$out"
-    tar -C "$stage" -czf "$payload" . || die "failed to pack the installer payload"
-    cat "$stub" "$payload" >"$out" || die "failed to assemble $out"
-    chmod +x "$out"
-    rm -f "$payload"
-    log "artifact $(du -h "$out" | cut -f1): $out"
-}
-
-# Linux unified: AppImage + VST3 + CLAP + one shared model store, wrapped in a self-extracting
-# installer that opens a wizard. All bundles keep only models.json; the weights live in the
-# top-level models/<version>, installed by the wizard into the XDG data directory (with
-# --system: /usr/local/share/HiFiShifter).
-#
-# [Why .run instead of .tar.gz] The other two platforms hand the user one file that opens a
-# wizard. "Extract this archive, then run install.sh" is two steps, needs a terminal, and leaves
-# a folder nobody explains -- and it had no uninstaller at all. The payload is unchanged; only
-# the container became executable.
-package_linux_unified() {
-    local stage="$OUT_DIR/stage-unified"
-    step "packaging the Linux unified installer"
-    [ -f "$APPIMAGE" ] || die "--appimage file does not exist: $APPIMAGE"
+# Layout (see scripts/release/linux-packages/build.sh for how it maps onto the FHS):
+#   app/hifishifter, app/lib/*.so     the executable and its private libraries
+#   models/...                        the model store, models.json at its root
+#   vst3/HiFiShifter.vst3             the VST3 bundle (weights stripped to the manifest)
+#   clap/HiFiShifter.clap + -resources
+#   icons/, LICENSE, licenses/
+stage_linux_payload() {
+    local stage="$1" app_dir="$2" lib icon
     rm -rf "$stage"
-    mkdir -p "$stage"
-    cp -f "$APPIMAGE" "$stage/HiFiShifter.AppImage"
-    chmod +x "$stage/HiFiShifter.AppImage"
+    mkdir -p "$stage/app/lib" "$stage/models" "$stage/icons"
+
+    # [Why the AppDir is the source] It is the tree linuxdeploy produced and the AppImage smoke
+    # test ran against: the binary there is already relinked for a relocatable lib/ layout, and
+    # usr/lib/HiFiShifter holds exactly the libraries the build decided to ship.
+    [ -f "$app_dir/usr/bin/HiFiShifter" ] || die "missing $app_dir/usr/bin/HiFiShifter"
+    cp -f "$app_dir/usr/bin/HiFiShifter" "$stage/app/hifishifter"
+    chmod 755 "$stage/app/hifishifter"
+    while IFS= read -r lib; do
+        [ -n "$lib" ] || continue
+        [ -f "$app_dir/usr/lib/HiFiShifter/$lib" ] \
+            || die "missing runtime library: $app_dir/usr/lib/HiFiShifter/$lib"
+        cp -f "$app_dir/usr/lib/HiFiShifter/$lib" "$stage/app/lib/$lib"
+        chmod 755 "$stage/app/lib/$lib"
+    done <<< "$(hfs_runtime_deps)"
+
+    # [Why the rpath is rewritten] linuxdeploy gave the AppImage binary "$ORIGIN/../lib", which
+    # is /usr/lib once installed -- but these private libraries live in /usr/lib/HiFiShifter.
+    # Without this the app starts and then dies on "libwebgpu_dawn.so: cannot open shared object
+    # file", which is exactly the kind of failure that only shows up on a user's machine.
+    command -v patchelf >/dev/null 2>&1 || die "patchelf missing (needed to point the binary at /usr/lib/HiFiShifter)"
+    patchelf --set-rpath '$ORIGIN/../lib:$ORIGIN/../lib/HiFiShifter' "$stage/app/hifishifter" \
+        || die "patchelf failed on $stage/app/hifishifter"
+
+    cp -R "$MODELS_SRC/." "$stage/models/"
+    [ -f "$stage/models/models.json" ] || die "models.json missing from the model store"
 
     if wants vst3; then
         [ -d "$OUT_DIR/HiFiShifter.vst3" ] || die "missing $OUT_DIR/HiFiShifter.vst3"
-        cp -R "$OUT_DIR/HiFiShifter.vst3" "$stage/"
-        hfs_strip_models_to_manifest "$stage/HiFiShifter.vst3/Contents/Resources/models"
+        mkdir -p "$stage/vst3"
+        cp -R "$OUT_DIR/HiFiShifter.vst3" "$stage/vst3/"
+        hfs_strip_models_to_manifest "$stage/vst3/HiFiShifter.vst3/Contents/Resources/models"
     fi
     if wants clap; then
         [ -f "$OUT_DIR/clap/HiFiShifter.clap" ] || die "missing $OUT_DIR/clap/HiFiShifter.clap"
-        cp "$OUT_DIR/clap/HiFiShifter.clap" "$stage/"
-        cp -R "$OUT_DIR/clap/HiFiShifter-resources" "$stage/"
-        hfs_strip_models_to_manifest "$stage/HiFiShifter-resources/models"
+        mkdir -p "$stage/clap"
+        cp -R "$OUT_DIR/clap/HiFiShifter.clap" "$OUT_DIR/clap/HiFiShifter-resources" "$stage/clap/"
+        hfs_strip_models_to_manifest "$stage/clap/HiFiShifter-resources/models"
     fi
-
-    mkdir -p "$stage/models/$MODEL_VERSION"
-    cp -R "$MODELS_SRC/." "$stage/models/$MODEL_VERSION/"
-    [ -f "$stage/models/$MODEL_VERSION/models.json" ] \
-        || die "models.json missing from the shared model directory"
 
     # Icons for the application menu entry: the same PNG sizes the Tauri bundle ships.
     # [Why 256x256 is icons/icon.png] That file is the large master; hicolor resolves by the
     # directory name, not by the pixel size, so this is the size a theme lookup will find.
-    mkdir -p "$stage/icons"
     cp -f "$REPO_ROOT/backend/src-tauri/icons/32x32.png" "$stage/icons/32x32.png"
     cp -f "$REPO_ROOT/backend/src-tauri/icons/128x128.png" "$stage/icons/128x128.png"
     cp -f "$REPO_ROOT/backend/src-tauri/icons/icon.png" "$stage/icons/256x256.png"
 
-    stage_linux_installer "$stage"
     hfs_stage_licenses "$stage" "$REPO_ROOT"
-    make_self_extracting_run "$stage" "$UNIFIED_BASE.run"
+}
+
+# <stage> <output.tar.xz>: the no-root bundle.
+#
+# [Why it still exists] The distribution packages cover Debian/Ubuntu and Fedora/RHEL. A user on
+# Arch, openSUSE or an unknown distribution, or one who simply wants the app in their home folder,
+# has no package to install -- and the AppImage alone cannot carry the plug-ins or the shared
+# weights. The bundle is that path, and it is deliberately dumb: a plain tree plus a text
+# installer with no dialog backend.
+make_linux_portable() {
+    local stage="$1" out="$2" work="$OUT_DIR/stage-portable" src="$REPO_ROOT/scripts/release/linux-portable"
+    local components="app,models"
+    step "assembling the portable bundle"
+    rm -rf "$work"
+    mkdir -p "$work/models"
+    cp -f "$APPIMAGE" "$work/HiFiShifter.AppImage"
+    chmod 755 "$work/HiFiShifter.AppImage"
+    if wants vst3; then
+        cp -R "$stage/vst3/HiFiShifter.vst3" "$work/"
+        components="$components,vst3"
+    fi
+    if wants clap; then
+        cp -R "$stage/clap/HiFiShifter.clap" "$stage/clap/HiFiShifter-resources" "$work/"
+        components="$components,clap"
+    fi
+    cp -R "$stage/models" "$work/models/$MODEL_VERSION"
+    cp -R "$stage/icons" "$work/icons"
+    cp -f "$stage/LICENSE" "$work/LICENSE"
+    cp -R "$stage/licenses" "$work/licenses"
+    cp -f "$src/install-user.sh" "$src/uninstall-user.sh" "$src/lib.sh" "$src/README.txt" "$work/"
+    printf '%s\n' "$PRODUCT_VERSION" >"$work/version"
+    printf '%s\n' "$MODEL_VERSION" >"$work/model-version"
+    # [Why the component list is a file] A bundle built with --formats=vst3 has no CLAP module;
+    # an installer whose default list names it would stop halfway through and leave a partial
+    # install. The bundle describes what it holds, and install-user.sh defaults to that.
+    printf '%s\n' "$components,menu,mime" >"$work/components"
+
+    # [Why the modes are set here] The tree is assembled on whatever machine runs the build
+    # (a Windows checkout mounted into WSL reports 0777 for every file), and a tarball is the
+    # one artifact that carries those modes to the user. Packages get their modes from nfpm.
+    find "$work" -type d -exec chmod 755 {} +
+    find "$work" -type f -exec chmod 644 {} +
+    find "$work" -type f \( -name '*.clap' -o -name '*.so' \) -exec chmod 755 {} +
+    chmod 755 "$work/HiFiShifter.AppImage" "$work/install-user.sh" "$work/uninstall-user.sh"
+
+    rm -f "$out"
+    tar -C "$work" -cJf "$out" . || die "failed to write $out"
+    rm -rf "$work"
+    log "artifact $(du -h "$out" | cut -f1): $out"
+}
+
+# Linux: four native packages + the portable AppImage and bundle.
+#
+# [Why a directory and not one file] There is no single Linux installer that serves every
+# distribution; a .deb cannot be installed on Fedora and a .rpm needs rpm on Debian. The directory
+# holds both formats plus the two portable fallbacks, and SHA256SUMS so a user can check what they
+# downloaded.
+package_linux_packages() {
+    local stage="$OUT_DIR/stage-linux" app_dir
+    step "packaging the Linux native packages"
+    [ -f "$APPIMAGE" ] || die "--appimage file does not exist: $APPIMAGE"
+    if [ -z "$APP_DIR" ]; then
+        APP_DIR="$(dirname -- "$APPIMAGE")/HiFiShifter.AppDir"
+    fi
+    [ -d "$APP_DIR" ] || die "--app-dir not found: $APP_DIR (run scripts/build/linux-appimage.sh package first)"
+
+    stage_linux_payload "$stage" "$APP_DIR"
+
+    rm -rf "$PACKAGES_BASE"
+    mkdir -p "$PACKAGES_BASE"
+    # --formats still decides which plug-in packages exist; the app and the model library are
+    # always part of a Linux distribution.
+    local only="app,models"
+    if wants vst3; then only="$only,vst3"; fi
+    if wants clap; then only="$only,clap"; fi
+    bash "$REPO_ROOT/scripts/release/linux-packages/build.sh" \
+        --arch="$HFS_ARCH" --version="$PRODUCT_VERSION" --only="$only" \
+        --stage="$stage" --out="$PACKAGES_BASE" || die "building the Linux packages failed"
+
+    cp -f "$APPIMAGE" "$PACKAGES_BASE/HiFiShifter_v${PRODUCT_VERSION}_${HFS_TAG}.AppImage"
+    chmod 755 "$PACKAGES_BASE/HiFiShifter_v${PRODUCT_VERSION}_${HFS_TAG}.AppImage"
+    make_linux_portable "$stage" "$PORTABLE_BASE"
+
+    # [Why the sums are written last] They cover every file above; a sums file that lists a file
+    # which was not written yet is worse than none at all.
+    (
+        cd "$PACKAGES_BASE" || exit 1
+        find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | LC_ALL=C sort \
+            | xargs -r sha256sum >SHA256SUMS
+    ) || die "failed to write $PACKAGES_BASE/SHA256SUMS"
+
     rm -rf "$stage"
+    log "artifact: $PACKAGES_BASE"
 }
 
 # macOS: component packages + a product archive, and the standalone uninstaller.
@@ -710,6 +790,9 @@ fi
 if [ -n "$APPIMAGE" ] && [ ! -f "$APPIMAGE" ]; then
     die "--appimage file does not exist: $APPIMAGE"
 fi
+if [ -n "$APP_DIR" ] && [ ! -d "$APP_DIR" ]; then
+    die "--app-dir is not a directory: $APP_DIR"
+fi
 if [ -n "$APP_BUNDLE" ] && [ ! -d "$APP_BUNDLE" ]; then
     die "--app-bundle directory does not exist: $APP_BUNDLE"
 fi
@@ -724,7 +807,7 @@ if [ -n "$MERGE_ARCH" ]; then merge_arch "$MERGE_ARCH"; fi
 if [ -n "$MERGE_APP_ARCH" ]; then merge_app_arch "$MERGE_APP_ARCH"; fi
 
 if [ "$HFS_OS" = "linux" ]; then
-    if [ -n "$APPIMAGE" ]; then package_linux_unified; else package_linux_plugins; fi
+    if [ -n "$APPIMAGE" ]; then package_linux_packages; else package_linux_plugins; fi
 else
     # The uninstaller comes first: the unified package embeds a copy of it, and a
     # plugins-only package still needs one published next to it.

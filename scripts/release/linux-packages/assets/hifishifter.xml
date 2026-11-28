@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Shared MIME-info for HiFiShifter projects. Both extensions are what the app writes today. -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-hifishifter-project">
+    <comment>HiFiShifter project</comment>
+    <glob pattern="*.hshp"/>
+    <glob pattern="*.hsp"/>
+  </mime-type>
+</mime-info>

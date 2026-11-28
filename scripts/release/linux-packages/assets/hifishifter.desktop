@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=HiFiShifter
+GenericName=Audio Editor
+Comment=Standalone editor for vocal editing and pitch processing
+# [Why plain "hifishifter"] The package installs exactly one executable on PATH, and a system
+# package has no AppImage/FUSE fallback to hide behind: the launcher indirection the old
+# per-user installer needed does not exist here.
+Exec=hifishifter %F
+TryExec=hifishifter
+Icon=hifishifter
+Terminal=false
+Categories=AudioVideo;Audio;AudioVideoEditing;
+Keywords=audio;pitch;vocal;music;reaper;
+MimeType=application/x-hifishifter-project;
+StartupWMClass=HiFiShifter

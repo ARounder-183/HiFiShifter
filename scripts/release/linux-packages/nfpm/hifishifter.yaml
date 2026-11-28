@@ -1,0 +1,78 @@
+# Common header shared by the four package definitions; kept here as a comment so the four files
+# stay readable on their own.
+#
+# [Why ${...} placeholders] nfpm expands environment variables in the config. build.sh exports
+# HFS_PKG_ARCH / HFS_PKG_VERSION / HFS_PKG_RELEASE before each packager run, so one file yields the
+# deb (0.2.0~beta) and the rpm (0.2.0-0.1.beta) from the same metadata. "contents:" is appended by
+# build.sh from the staged tree -- everything a human reviews lives in this file.
+
+name: hifishifter
+arch: ${HFS_PKG_ARCH}
+platform: linux
+version: ${HFS_PKG_VERSION}
+release: ${HFS_PKG_RELEASE}
+section: sound
+priority: optional
+maintainer: ${HFS_PKG_MAINTAINER}
+vendor: HiFiShifter
+homepage: ${HFS_PKG_HOMEPAGE}
+license: MIT
+description: |
+  HiFiShifter is a vocal editing and pitch-processing workstation: a standalone editor
+  plus VST3 (ARA) and CLAP plug-ins that open the same editing interface inside a DAW.
+  This package installs the editor, its desktop entry and the model manifest. The weights
+  live in hifishifter-models and the plug-ins in hifishifter-vst3 / hifishifter-clap, so an
+  app upgrade never re-downloads the model library.
+depends:
+  # [Why the model package is pinned exactly] models.json's version is derived from the weights'
+  # content. Pinning it means "new code + old weights" is a dependency error the package manager
+  # reports, instead of an inference that silently produces worse audio.
+  - hifishifter-models (= ${HFS_MODEL_VERSION})
+  - libwebkit2gtk-4.1-0
+  - libjavascriptcoregtk-4.1-0
+  - libgtk-3-0
+  - libasound2t64
+  - libnss3
+  - libx11-6
+  - libxcomposite1
+  - libxdamage1
+  - libxrandr2
+  - libxkbcommon0
+  - libgbm1
+  - libpango-1.0-0
+  - libcairo2
+  - libgdk-pixbuf-2.0-0
+  - libsoup-3.0-0
+  - libgstreamer1.0-0
+  - libgstreamer-plugins-base1.0-0
+recommends:
+  - hifishifter-vst3 (= ${HFS_PKG_VERSION})
+  - hifishifter-clap (= ${HFS_PKG_VERSION})
+overrides:
+  # Fedora/RHEL spell the same libraries differently. This list replaces the deb one: a single
+  # package config that named both would make the rpm require nonexistent deb packages.
+  rpm:
+    depends:
+      - hifishifter-models = ${HFS_MODEL_VERSION}
+      - webkit2gtk4.1
+      - gtk3
+      - alsa-lib
+      - nss
+      - libX11
+      - libXcomposite
+      - libXdamage
+      - libXrandr
+      - libxkbcommon
+      - mesa-libgbm
+      - pango
+      - cairo
+      - gdk-pixbuf2
+      - libsoup3
+      - gstreamer1
+      - gstreamer1-plugins-base
+    recommends:
+      - hifishifter-vst3 = ${HFS_PKG_VERSION}
+      - hifishifter-clap = ${HFS_PKG_VERSION}
+scripts:
+  postinstall: ${HFS_SCRIPTS_DIR}/postinst.sh
+  postremove: ${HFS_SCRIPTS_DIR}/postrm.sh
