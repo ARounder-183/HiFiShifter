@@ -192,13 +192,20 @@ export_android_triple i686-linux-android i686-linux-android
 export_android_triple x86_64-linux-android x86_64-linux-android
 
 # ── Build ────────────────────────────────────────────────────────────────────
-# `cargo tauri` is what this repository uses for desktop builds; a clean CI runner only
-# has npm. `npx tauri` is not an option -- no such executable exists on npm.
-if command -v cargo-tauri >/dev/null 2>&1; then
-  tauri_cli=(cargo tauri)
-else
-  tauri_cli=(npx --yes --package @tauri-apps/cli@2 tauri)
+# [Why the npm CLI cannot replace this] `tauri android build` is only the first half of
+# the work: it drives Gradle, and Gradle's rustBuild* task shells out to
+#   cargo tauri android android-studio-script --target aarch64
+# (gen/android/buildSrc/.../BuildTask.kt). cargo resolves that subcommand by looking
+# for `cargo-tauri` on PATH; the npm package installs a binary called `tauri`, not
+# that. With npx as the CLI the compile succeeded and Gradle then died on
+#   error: no such command: `tauri`
+# several minutes in, which reads like a broken toolchain instead of a missing package.
+if ! command -v cargo-tauri >/dev/null 2>&1; then
+  echo "cargo-tauri is required: Gradle runs 'cargo tauri android android-studio-script'." >&2
+  echo "Install it once with: cargo install tauri-cli --version '^2' --locked" >&2
+  exit 1
 fi
+tauri_cli=(cargo tauri)
 
 rust_target="aarch64-linux-android"
 rustup target add "$rust_target" >/dev/null

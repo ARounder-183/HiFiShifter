@@ -56,6 +56,16 @@ jobs:
           set -euo pipefail
           rustup target add aarch64-linux-android
 
+      # [Why cargo-tauri and not the npm CLI] Gradle's rustBuild task shells out to
+      # `cargo tauri android android-studio-script`, and cargo resolves that subcommand
+      # through PATH. The npm package ships a binary named `tauri`, not `cargo-tauri`,
+      # so only the real cargo subcommand survives the second half of the build; with
+      # npx the compile succeeded and Gradle then failed with "no such command: tauri".
+      - name: Install cargo-tauri
+        run: |
+          set -euo pipefail
+          cargo install tauri-cli --version '^2' --locked
+
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
