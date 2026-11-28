@@ -7,7 +7,8 @@
 # [Why minimumSystemVersion is 15.1 and not Tauri default 15.0] ort-sys prebuilt
 # CoreML binaries declare iOS >= 15.1; linking them into a 15.0 deployment target
 # produces a dyld failure at launch on 15.0 devices. The value lives in
-# backend/src-tauri/tauri.ios.conf.json so a single source decides it.
+# backend/src-tauri/tauri.conf.json (bundle.iOS.minimumSystemVersion) so a single
+# source decides it.
 #
 # [Why --simulator exists] The App Store requires an arm64 device build, but the
 # only way to iterate on CI without signing certificates is a simulator build.
@@ -57,7 +58,7 @@ fi
 
 if [ -z "${APPLE_DEVELOPMENT_TEAM:-}" ]; then
   echo "APPLE_DEVELOPMENT_TEAM is not set; device builds need a signing identity." >&2
-  echo "Set it in the environment or in backend/src-tauri/tauri.ios.conf.json." >&2
+  echo "Set it in the environment or in backend/src-tauri/tauri.conf.json." >&2
   exit 1
 fi
 

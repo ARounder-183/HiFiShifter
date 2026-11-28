@@ -200,7 +200,7 @@ ort-tract = { version = "0.4.0", optional = true }
 # 【NNAPI 而不是 WebGPU】`ort-sys` 2.0.0-rc.13 的 `download-binaries` 只为
 # `aarch64-linux-android` 提供 `+nnapi` 分发；`+wgpu` 没有 Android 构建。
 # iOS 侧是 `+coreml`，与 macOS ARM 同一套 EP（且要求 iOS ≥ 15.1 —— 见
-# `tauri.ios.conf.json` 的 minimumSystemVersion）。
+# `tauri.conf.json` 的 bundle.iOS.minimumSystemVersion）。
 #
 # 【x86_64-linux-android 为什么单独一段】预编译分发里没有这一项，带
 # `download-binaries` 会直接失败："no prebuilt binaries available for target

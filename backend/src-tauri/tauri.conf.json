@@ -36,6 +36,9 @@
         "android": {
             "minSdkVersion": 26
         },
+        "iOS": {
+            "minimumSystemVersion": "15.1"
+        },
         "resources": {
             "../../LICENSE": "LICENSE",
             "../../licenses": "licenses/",
