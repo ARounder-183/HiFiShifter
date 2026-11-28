@@ -126,6 +126,23 @@ jobs:
         run: npm run build
         working-directory: frontend
 
+      # The weights are not in the repository (see scripts/setup/fetch-models.py), so a
+      # bare checkout has none. Without them the Rust build dies in tauri-build's
+      # resource check -- "resource path resources/models/nsf_hifigan/config.json
+      # doesn't exist" -- before anything is compiled. The cache key is the manifest
+      # hash, so a model change invalidates it and a stale tree is never reused.
+      - name: Cache model weights
+        uses: actions/cache@v5
+        with:
+          path: backend/src-tauri/resources/models
+          key: models-${{ hashFiles('backend/src-tauri/resources/models/models.json') }}
+
+      - name: Fetch model weights
+        run: |
+          set -euo pipefail
+          python scripts/setup/fetch-models.py
+          python scripts/setup/fetch-models.py --fetch-game
+
       - name: Build APK (debug)
         if: inputs.mode == 'debug'
         run: |
@@ -178,6 +195,23 @@ jobs:
       - name: Build frontend
         run: npm run build
         working-directory: frontend
+
+      # The weights are not in the repository (see scripts/setup/fetch-models.py), so a
+      # bare checkout has none. Without them the Rust build dies in tauri-build's
+      # resource check -- "resource path resources/models/nsf_hifigan/config.json
+      # doesn't exist" -- before anything is compiled. The cache key is the manifest
+      # hash, so a model change invalidates it and a stale tree is never reused.
+      - name: Cache model weights
+        uses: actions/cache@v5
+        with:
+          path: backend/src-tauri/resources/models
+          key: models-${{ hashFiles('backend/src-tauri/resources/models/models.json') }}
+
+      - name: Fetch model weights
+        run: |
+          set -euo pipefail
+          python scripts/setup/fetch-models.py
+          python scripts/setup/fetch-models.py --fetch-game
 
       # A simulator build needs no signing material, which is the whole point of the
       # debug mode: it can run anywhere, including on a fork with no secrets.
