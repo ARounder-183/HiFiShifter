@@ -49,10 +49,17 @@ if [ ! -d "backend/src-tauri/gen/apple" ]; then
 fi
 
 if [ "$simulator" -eq 1 ]; then
+  # [Why the Rust triple is not what --target takes] Tauri's iOS build takes the
+  # short architecture names (aarch64, aarch64-sim, x86_64) and maps them onto the
+  # Rust triple itself; passing the triple is rejected before xcodebuild starts:
+  #   error: invalid value 'aarch64-apple-ios-sim' for '--target [<TARGETS>...]'
+  #         [possible values: aarch64, aarch64-sim, x86_64]
+  # rustup still needs the triple, so the two are kept apart on purpose.
   rust_target="aarch64-apple-ios-sim"
+  cli_target="aarch64-sim"
   echo "== simulator build ($rust_target); signing skipped"
   rustup target add "$rust_target" >/dev/null
-  ( cd backend && "${tauri_cli[@]}" ios build --target "$rust_target" --features onnx --debug )
+  ( cd backend && "${tauri_cli[@]}" ios build --target "$cli_target" --features onnx --debug )
   exit $?
 fi
 
@@ -65,4 +72,4 @@ fi
 rust_target="aarch64-apple-ios"
 rustup target add "$rust_target" >/dev/null
 echo "== device build ($rust_target), team $APPLE_DEVELOPMENT_TEAM"
-( cd backend && "${tauri_cli[@]}" ios build --target "$rust_target" --features onnx )
+( cd backend && "${tauri_cli[@]}" ios build --target aarch64 --features onnx )
