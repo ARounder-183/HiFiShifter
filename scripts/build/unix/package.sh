@@ -487,11 +487,11 @@ require_macos_pkg_tools() {
 # The layout generator compiles frontend/src/i18n/*.ts with the esbuild the frontend already
 # depends on (see scripts/release/catalog.mjs for why it is compiled rather than parsed).
 #
-# [Why this installs instead of failing] The workflow builds the frontend in its own job and
-# ships only dist/ to this one, so frontend/node_modules is genuinely absent here. Failing
-# would make "package the app" depend on a directory that has nothing to do with packaging;
-# installing is the same one-liner stage_frontend already uses, and it only runs when the
-# module is missing.
+# [Why this installs instead of failing] --reuse-frontend exists precisely to skip the
+# frontend build, so it never installs anything: on a fresh checkout there is no esbuild to
+# compile the catalog with. The workflow happens to run "npm --prefix frontend ci" before this
+# step, which makes the function a no-op there; locally it is the difference between a clear
+# wait and "Cannot find module 'esbuild'".
 ensure_macos_pkg_node_deps() {
     [ -d "$REPO_ROOT/frontend/node_modules/esbuild" ] && return 0
     log "frontend/node_modules is missing: installing it (the installer pages come from frontend/src/i18n)"

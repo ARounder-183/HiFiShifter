@@ -357,7 +357,8 @@ def main() -> int:
         return check_one_distribution(argv)
 
     findings: list[str] = []
-    package_code = code_only(read(PACKAGE_SH))
+    package_raw = read(PACKAGE_SH)
+    package_code = code_only(package_raw)
     workflow = read(WORKFLOW)
     uninstall_raw = read(UNINSTALL_SH)
     uninstall = code_only(uninstall_raw)
@@ -460,7 +461,11 @@ def main() -> int:
         ("--nopayload", "the uninstaller component carries a payload it does not need"),
         ("--scripts", "the uninstaller's removal script is never attached to the package"),
         ("ensure_macos_pkg_node_deps", "the layout generator's esbuild dependency is never ensured"),
-        ("npm ci", "frontend/node_modules is assumed to exist; the build job does not install it"),
+        (
+            "npm ci",
+            "the esbuild dependency is never ensured; --reuse-frontend installs nothing, so a "
+            "fresh checkout cannot generate the layout",
+        ),
         ("com.arounder.hifishifter.$choice", "component identifiers are not derived from the choice"),
         ("Uninstall HiFiShifter.pkg", "the uninstaller is not copied into the payload"),
         ("macos_component_pkg app", "the app component package is never built"),
@@ -475,11 +480,11 @@ def main() -> int:
             )
     # The order that matters is the one in the entry point, not the order of the definitions:
     # the unified package embeds a copy of the uninstaller, so it has to exist first.
-    entry_point = read(PACKAGE_SH).find("# ── Entry point")
+    entry_point = package_raw.find("# ── Entry point")
     if entry_point < 0:
         findings.append("scripts/build/unix/package.sh: the entry point marker is gone")
     else:
-        calls = code_only(read(PACKAGE_SH)[entry_point:])
+        calls = code_only(package_raw[entry_point:])
         uninstaller_call = calls.find("package_macos_uninstaller")
         unified_call = calls.find("package_macos_unified")
         if uninstaller_call < 0 or unified_call < 0:
