@@ -184,9 +184,10 @@ git -C soundtouch rev-parse HEAD
 
 #### モデルの重み（必要時に取得）
 
-リポジトリに入るのはマニフェスト `backend/src-tauri/resources/models/models.json`（1.5 KB）だけです。
-151.6 MB の重みは release アセット `models-<マニフェストのバージョン>.zip` として配布されます
-（バージョンは内容ハッシュなので、古い版を取るとファイル単位の検証で即座に失敗します）。
+リポジトリに入るのはマニフェスト `backend/src-tauri/resources/models/models.json` だけです。
+重みそのものは release アセット `models-<マニフェストのバージョン>.zip` として配布されます
+（サイズはマニフェストの `bytes` が示すとおりです。バージョンは内容ハッシュなので、古い版を
+取るとファイル単位の検証で即座に失敗します）。
 ビルドスクリプトが取得スクリプトを自動で呼びます（冪等で、揃っていればディレクトリ走査のみ）：
 
 ```bash

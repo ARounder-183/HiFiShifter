@@ -5,7 +5,7 @@
 GPU 收益评估。
 
 所有数字均在 **Apple Silicon（8 核，M 系列）/ macOS / ONNX Runtime 1.28.0** 上实测，
-模型为 `pc_nsf_hifigan_coreml.onnx`（56 MB）、`fcpe.onnx`（43 MB）、`hnsep.onnx`（93 MB）。
+模型为 `pc_nsf_hifigan_coreml.onnx`、`fcpe.onnx`、`hnsep.onnx`。
 `rtf` = 实时倍率，即「生成的音频时长 ÷ 推理耗时」，越大越好。
 
 ---
@@ -127,7 +127,7 @@ correlation(h_old, h_new)      = 1.000000
 ```
 
 差值在浮点噪声量级，LSTM 节点数两版均为 24 —— 是**同一个网络**，只是 I/O 边界不同。
-模型体积也从 88 MB 降到 56 MB。
+模型体积也随之下降（见该轮 commit 的产物对比）。
 
 **分段计时**（release，5 s 音频，448 帧）：
 

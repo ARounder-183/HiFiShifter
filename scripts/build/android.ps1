@@ -327,7 +327,7 @@ function Assert-BundleModels {
     # neither: the APK ships without it, the app starts normally, and the only trace is
     # "NSF-HiGAN ONNX model not found" in a log nobody reads -- while the UI keeps
     # reporting the pitch backend as available (availability is optimistic until a build
-    # fails). That is exactly how the 56 MB vocoder went missing from every artefact and
+    # fails). That is exactly how the vocoder weight went missing from every artefact and
     # pitch edits stopped producing any sound. A missing weight must fail the build, not
     # the user's session. The static gate (scripts/checks/check-model-bundle.py) catches
     # the configuration half; this catches a copy that silently did not happen.

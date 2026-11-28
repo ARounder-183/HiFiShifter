@@ -120,7 +120,7 @@ hfs_stage_frontend() {
 # Models must ship in the package. Windows has an installer-owned shared model store; the
 # unified macOS/Linux installer also keeps the weights in a shared store and lets only
 # models.json travel with the bundle. The plugin-only package (not going through the unified
-# installer) stays self-contained (~200 MB): extract and it works, no external directory.
+# installer) stays self-contained: extract and it works, no external directory.
 # <resources-dir> <models-source>
 hfs_stage_models() {
     local res="$1" src="$2"

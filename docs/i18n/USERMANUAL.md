@@ -802,7 +802,7 @@ REAPER 按**轨道**管理 ARA 插件：它只会把插件所在**那一条轨�
 
 ### 模型文件与共享
 
-插件需要 FCPE、HNSEP 与 HiFiGAN 等模型（当前合计约 200 MB）。三合一安装器把模型装进平台共享库（Windows `%ProgramData%\HiFiShifter\models\<模型版本>`；macOS `/Library/Application Support/HiFiShifter/models/<模型版本>`；Linux `$XDG_DATA_HOME/HiFiShifter/models/<模型版本>` 或 `/usr/local/share/HiFiShifter/models/<模型版本>`），独立 App 与所有插件读的是同一份 —— 不会重复占用这 200 MB。手动拷贝的纯插件包自带一份模型，不依赖共享库。
+插件需要 FCPE、HNSEP 与 HiFiGAN 等模型（体积以模型清单为准）。三合一安装器把模型装进平台共享库（Windows `%ProgramData%\HiFiShifter\models\<模型版本>`；macOS `/Library/Application Support/HiFiShifter/models/<模型版本>`；Linux `$XDG_DATA_HOME/HiFiShifter/models/<模型版本>` 或 `/usr/local/share/HiFiShifter/models/<模型版本>`），独立 App 与所有插件读的是同一份 —— 不会重复占用这份权重。手动拷贝的纯插件包自带一份模型，不依赖共享库。
 
 - 模型版本由模型内容派生：升级后新版本落在新目录，同版本的重复安装会被跳过。
 - 卸载插件**不会**删除共享模型库（独立 App 也在用）。确实需要清理时，手动删除对应平台的共享模型目录。

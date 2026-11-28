@@ -318,7 +318,7 @@ pub fn disable_coreml(reason: &str) {
 ///   axes.  Requiring static shapes here was measured to make the vocoder
 ///   ~1.7x *slower* than the CPU EP (see the module docs).
 /// - A persistent model cache avoids recompiling the CoreML model on every
-///   session creation (can take tens of seconds for this 56 MB model).
+///   session creation (can take tens of seconds for this model).
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn build_coreml_ep(role: OrtSessionRole) -> ort::ep::CoreML {
     use ort::ep::coreml::{ComputeUnits, ModelFormat};

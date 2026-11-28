@@ -48,7 +48,7 @@ Invoke-Gate 'Product consistency gate' { & (Join-Path $PSScriptRoot 'check-produ
 
 # Every model in resources/models/models.json must be listed in tauri.conf.json's
 # bundle.resources. A manifest entry with no bundle entry ships in no artefact at all and
-# the runtime only logs "model not found" -- which is how the 56 MB NSF-HiFiGAN vocoder
+# the runtime only logs "model not found" -- which is how the NSF-HiFiGAN vocoder
 # went missing from every build, leaving the default pitch algorithm unable to synthesise.
 Invoke-Gate 'Model bundle gate' { python scripts/checks/check-model-bundle.py }
 

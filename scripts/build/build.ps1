@@ -264,7 +264,7 @@ if ($Target -eq 'All' -or $Target -eq 'Plugin') {
     # [Why the bundle holds only the manifest, not the weights] The installer writes the weights
     # to %PROGRAMDATA%\HiFiShifter\models\<version>, and both the standalone App and the plugin
     # read that one copy (see backend/hifishifter-kernel/src/model_store.rs). Keeping another
-    # copy in the bundle would charge the user's disk a second time for the same 152 MB. For
+    # copy in the bundle would charge the user's disk a second time for the same weights. For
     # manual-copy installs, use the portable zip instead.
     Copy-Item "$modelsSource\models.json" "$resources\models"
 

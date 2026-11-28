@@ -1,4 +1,4 @@
-//! 共享模型库：让独立 App、VST3 与 CLAP 插件共用同一份约 200 MB 的模型文件。
+//! 共享模型库：让独立 App、VST3 与 CLAP 插件共用同一份模型文件。
 //!
 //! 【为什么需要它】每种形态都有自己的 bundle：App 从 "resource_dir()/models" 读，
 //! 插件从 "Contents/Resources/models" 读。若每个 bundle 都带完整权重，同一台
@@ -147,7 +147,7 @@ pub fn read_manifest(models_dir: &Path) -> Option<ModelManifest> {
 
 /// 廉价校验：清单里列出的文件都在、且字节数一致。
 ///
-/// 【为什么不算 sha256】这里在每次启动的路径上。200 MB 的哈希要几百毫秒，而字节数
+/// 【为什么不算 sha256】这里在每次启动的路径上。对全部权重做哈希要几百毫秒，而字节数
 /// 一致已经能挡住绝大多数实际故障（拷贝中断、只复制了一部分、版本混装）。完整校验
 /// 留给诊断导出。
 pub fn looks_complete(models_dir: &Path, manifest: &ModelManifest) -> bool {
@@ -186,7 +186,7 @@ pub fn shared_store_dir(version: &str) -> Option<PathBuf> {
 }
 /// 把一个完整可用的模型目录"发布"到共享库。
 ///
-/// 优先硬链接（同卷时零额外字节 —— 这正是"不再重复占用 200 MB"的关键），失败则退回
+/// 优先硬链接（同卷时零额外字节 —— 这正是"不再重复占用一份权重"的关键），失败则退回
 /// 拷贝。先写临时目录再原子改名：中途失败不会留下一个"看起来存在但缺文件"的库，
 /// 那会让后续启动误以为库可用。
 fn publish(source_dir: &Path, manifest: &ModelManifest, target_dir: &Path) -> Result<(), String> {
@@ -557,7 +557,7 @@ mod tests {
     /// 【为什么这条必须有】清单是生成物（`scripts/setup/fetch-models.py --write-manifest`），而
     /// 运行时要靠它判断共享库是否可用。清单一旦与文件不符（换了模型没重新生成、
     /// 或手工改过），共享库就会被永久判为"不完整"，两个形态每次都退回各自的 bundle
-    /// —— 重复占用 200 MB，且没有任何报错。这条测试让它变成构建失败。
+    /// —— 重复占用一份权重，且没有任何报错。这条测试让它变成构建失败。
     #[test]
     fn the_committed_manifest_matches_the_real_model_files() {
         let models =
@@ -611,7 +611,7 @@ mod tests {
     /// 非 Windows：解析模型绝不能往用户目录写任何东西。
     ///
     /// 【为什么值得单独钉一条】历史实现在这两条平台上退回本地数据目录，结果是每个
-    /// 用户首启就往 `~/Library/Caches` / `$XDG_CACHE_HOME` 里多写 200 MB ——
+    /// 用户首启就往 `~/Library/Caches` / `$XDG_CACHE_HOME` 里多写一份权重 ——
     /// 而那正是系统会清理的目录，AppImage 上还必然退化成真拷贝（只读挂载）。
     ///
     /// 【为什么走 resolve_models 而不是公共入口】公共入口读**真实的**用户自备目录；

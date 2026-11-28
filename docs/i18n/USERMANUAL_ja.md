@@ -778,7 +778,7 @@ REAPER は ARA プラグインを**トラック単位**で管理します。プ�
 
 ### モデルファイルと共有
 
-プラグインには FCPE、HNSEP、HiFiGAN などのモデルが必要です（現在合計約 200 MB）。統合インストーラーはモデルをプラットフォーム共有ライブラリ（Windows `%ProgramData%\HiFiShifter\models\<モデルバージョン>`、macOS `/Library/Application Support/HiFiShifter/models/<モデルバージョン>`、Linux `$XDG_DATA_HOME/HiFiShifter/models/<モデルバージョン>` または `/usr/local/share/HiFiShifter/models/<モデルバージョン>`）にインストールし、スタンドアロン版とすべてのプラグインが同じものを読みます —— この 200 MB は重複しません。手動コピー版はモデルを自前で持ち、共有ライブラリに依存しません。
+プラグインには FCPE、HNSEP、HiFiGAN などのモデルが必要です（サイズはモデルマニフェストが唯一の根拠です）。統合インストーラーはモデルをプラットフォーム共有ライブラリ（Windows `%ProgramData%\HiFiShifter\models\<モデルバージョン>`、macOS `/Library/Application Support/HiFiShifter/models/<モデルバージョン>`、Linux `$XDG_DATA_HOME/HiFiShifter/models/<モデルバージョン>` または `/usr/local/share/HiFiShifter/models/<モデルバージョン>`）にインストールし、スタンドアロン版とすべてのプラグインが同じものを読みます —— この重みは重複しません。手動コピー版はモデルを自前で持ち、共有ライブラリに依存しません。
 
 - モデルバージョンはモデルの内容から導出されます：アップグレードすると新しいバージョンは新しいディレクトリに配置され、同じバージョンの再インストールはスキップされます。
 - プラグインをアンインストールしても共有モデルライブラリは**削除されません**（スタンドアロン版も使用しているため）。本当に消したい場合は、各プラットフォームの共有モデルディレクトリを手動で削除してください。

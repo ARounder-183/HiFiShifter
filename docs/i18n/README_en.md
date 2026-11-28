@@ -184,9 +184,10 @@ git -C soundtouch rev-parse HEAD
 
 #### Model weights (fetched on demand)
 
-Only the manifest `backend/src-tauri/resources/models/models.json` (1.5 KB) is committed. The
-151.6 MB of weights ship as the release asset `models-<manifest version>.zip` — the version is a
-content hash, so a stale download fails the per-file check immediately. The build scripts call the
+Only the manifest `backend/src-tauri/resources/models/models.json` is committed. The weights
+themselves ship as the release asset `models-<manifest version>.zip` (their size is whatever the
+manifest's `bytes` fields say) — the version is a content hash, so a stale download fails the
+per-file check immediately. The build scripts call the
 fetch script for you; it is idempotent and only scans the directory when everything is present:
 
 ```bash

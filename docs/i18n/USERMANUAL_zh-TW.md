@@ -777,7 +777,7 @@ REAPER 按**軌道**管理 ARA 外掛：它只會把外掛所在**那一條軌�
 
 ### 模型檔案與共享
 
-外掛需要 FCPE、HNSEP 與 HiFiGAN 等模型（目前合計約 200 MB）。三合一安裝程式把模型裝進平台共享庫（Windows `%ProgramData%\HiFiShifter\models\<模型版本>`；macOS `/Library/Application Support/HiFiShifter/models/<模型版本>`；Linux `$XDG_DATA_HOME/HiFiShifter/models/<模型版本>` 或 `/usr/local/share/HiFiShifter/models/<模型版本>`），獨立 App 與所有外掛讀同一份 —— 不會重複佔用這 200 MB。手動複製的純外掛包自帶一份模型，不依賴共享庫。
+外掛需要 FCPE、HNSEP 與 HiFiGAN 等模型（體積以模型清單為準）。三合一安裝程式把模型裝進平台共享庫（Windows `%ProgramData%\HiFiShifter\models\<模型版本>`；macOS `/Library/Application Support/HiFiShifter/models/<模型版本>`；Linux `$XDG_DATA_HOME/HiFiShifter/models/<模型版本>` 或 `/usr/local/share/HiFiShifter/models/<模型版本>`），獨立 App 與所有外掛讀同一份 —— 不會重複佔用這份權重。手動複製的純外掛包自帶一份模型，不依賴共享庫。
 
 - 模型版本由模型內容派生：升級後新版本落在新目錄，同版本的重複安裝會被跳過。
 - 解除安裝外掛**不會**刪除共享模型庫（獨立 App 也在用）。確實需要清理時，手動刪除對應平台的共享模型目錄。

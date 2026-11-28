@@ -199,7 +199,7 @@ Test-Invariant 'merged installer defaults to per-machine install' {
 
 # Windows ships a single installer: the build script must invoke the installer itself with
 # --no-bundle, and the bundle carries only models.json (the installer writes the weights into
-# ProgramData). If either condition breaks, the user pays for the same 152 MB of weights twice on
+# ProgramData). If either condition breaks, the user pays for the same weights twice on
 # disk — while the artifact looks perfectly normal.
 Test-Invariant 'Windows has one installer and the models install only once' {
     $build = Get-RepoText 'scripts/build/build.ps1'

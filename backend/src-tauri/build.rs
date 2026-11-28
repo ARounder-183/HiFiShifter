@@ -840,7 +840,7 @@ mod coreml_pb {
 /// - ConvTranspose: explicit `kernel_shape` attributes are removed so CoreML EP
 ///   accepts the upsampling layers.
 /// Only the node/initializer protobuf fields are touched; all other bytes
-/// (including the ~54 MB weight raw_data) are preserved verbatim.
+/// (including the weight raw_data) are preserved verbatim.
 #[cfg(target_os = "macos")]
 fn rewrite_coreml_model(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
     use coreml_pb::{encode, parse, Field};
