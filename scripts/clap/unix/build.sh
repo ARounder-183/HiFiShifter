@@ -30,6 +30,7 @@ readonly MODELS_SRC="$BACKEND_DIR/src-tauri/resources/models"
 STAGE="all"
 PROFILE="release"
 OUT_DIR="$REPO_ROOT/dist"
+TARGET_TRIPLE=""
 REUSE_FRONTEND=0
 SKIP_VERIFY=0
 
@@ -45,6 +46,8 @@ Usage: scripts/clap/unix/build.sh [options]
                                      stop after a given stage (default all)
   --profile=release|dist|dev         cargo profile (default release)
   --out=DIR                          artifact directory (default dist)
+  --target=TRIPLE                    cross-compile for TRIPLE (e.g. x86_64-apple-darwin);
+                                     the platform rules then describe the target, not the host
   --reuse-frontend                   reuse the existing frontend/dist (it must already exist)
   --no-verify                        skip self-checks
   -h, --help                         show this help
@@ -58,6 +61,8 @@ while [ $# -gt 0 ]; do
         --profile=*)      PROFILE="${1#*=}"; shift ;;
         --out=*)          OUT_DIR="${1#*=}"; shift ;;
         --out)            OUT_DIR="$2"; shift 2 ;;
+        --target=*)       TARGET_TRIPLE="${1#*=}"; shift ;;
+        --target)         [ $# -ge 2 ] || die "--target requires a value"; TARGET_TRIPLE="$2"; shift 2 ;;
         --reuse-frontend) REUSE_FRONTEND=1; shift ;;
         --no-verify)      SKIP_VERIFY=1; shift ;;
         -h|--help)        usage; exit 0 ;;
@@ -70,8 +75,16 @@ case "$STAGE" in
     *) die "--stage must be one of all|build|bundle|verify|package, got: $STAGE" ;;
 esac
 
+# [Why HFS_ARCH follows the triple] see the matching note in vst3/unix/build.sh: the
+# runtime-dependency list and the artifact tag describe the artifact, not the build machine.
+if [ -n "$TARGET_TRIPLE" ]; then
+    HFS_ARCH="$(hfs_arch_of_triple "$TARGET_TRIPLE")"
+    export HFS_ARCH
+fi
 hfs_detect_platform
-TARGET_DIR="${CARGO_TARGET_DIR:-$BACKEND_DIR/target}"
+# cargo puts a cross build under <target-root>/<triple>/<profile>.
+CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$BACKEND_DIR/target}"
+TARGET_DIR="$CARGO_TARGET_ROOT${TARGET_TRIPLE:+/$TARGET_TRIPLE}"
 PROFILE_DIR="$PROFILE"
 [ "$PROFILE" = "dev" ] && PROFILE_DIR="debug"
 PRODUCT_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$BACKEND_DIR/src-tauri/tauri.conf.json")"
@@ -93,6 +106,9 @@ fi
 ARTIFACT="$OUT_DIR/${API_NAME}_v${PRODUCT_VERSION}_${HFS_TAG}-clap.tar.gz"
 
 log "platform ${HFS_TAG} | version ${PRODUCT_VERSION} | profile ${PROFILE} | output $OUT_DIR"
+if [ -n "$TARGET_TRIPLE" ]; then
+    log "cross-compiling for ${TARGET_TRIPLE} (artifacts under ${TARGET_DIR})"
+fi
 
 # ── Stage 1: compile ─────────────────────────────────────────────────────────
 stage_build() {
@@ -104,8 +120,12 @@ stage_build() {
     # Exit code captured separately, color forcibly off, failures located by error line:
     # see hfs_report_build_failure in lib.sh and the matching comments in vst3/unix/build.sh.
     local status=0
-    CARGO_TERM_COLOR=never cargo build --manifest-path "$BACKEND_DIR/Cargo.toml" \
-        -p hifishifter-clap --profile "$PROFILE" --locked >"$cargo_log" 2>&1 || status=$?
+    local -a cargo_args=(--manifest-path "$BACKEND_DIR/Cargo.toml" -p hifishifter-clap
+                         --profile "$PROFILE" --locked)
+    # macOS ships bash 3.2, where "${arr[@]}" on an empty array aborts under set -u; appending
+    # only when a triple was asked for keeps the array non-empty in the native case.
+    [ -n "$TARGET_TRIPLE" ] && cargo_args+=(--target "$TARGET_TRIPLE")
+    CARGO_TERM_COLOR=never cargo build "${cargo_args[@]}" >"$cargo_log" 2>&1 || status=$?
     if [ "$status" -ne 0 ]; then
         hfs_report_build_failure "$cargo_log" "$status"
         die "build failed (exit ${status}); full log: $cargo_log"
