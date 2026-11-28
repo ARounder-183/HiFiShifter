@@ -23,7 +23,7 @@ HiFiShifter는 그래픽 보컬 편집 및 합성 도구입니다. 멀티트랙 
 [Releases](https://github.com/ARounder-183/HiFiShifter/releases) 페이지에서 운영체제와 아키텍처에 맞는 설치 패키지를 다운로드하세요:
 
 - **Windows**: NSIS 설치 관리자(`installer`) 또는 포터블 ZIP(`portable`), x86_64와 arm64 아키텍처를 제공합니다. 설치 관리자에는 독립 실행형 앱, VST3/CLAP 플러그인과 공유 모델 라이브러리가 포함됩니다.
-- **macOS**: 서명되지 않은 통합 `.pkg`(Apple Silicon은 `arm64`, Intel은 `x86_64`)로 앱, VST3/CLAP 플러그인과 공유 모델 라이브러리를 한 번에 설치합니다. 첫 실행 시 수동으로 허용해야 합니다. "파일이 손상되었습니다"라는 메시지가 표시되면 [사용자 매뉴얼](USERMANUAL_ko.md#1-설치)의 절차에 따라 처리하세요.
+- **macOS**: `macos-universal` 통합 `.pkg`(Intel과 Apple Silicon 공용 단일 파일)로 `/Applications/HiFiShifter.app`, VST3/CLAP 플러그인과 공유 모델 라이브러리를 설치합니다. 마법사에서 필요한 플러그인 형식만 선택할 수 있으며 앱과 모델 라이브러리는 항상 설치됩니다. `/Library/Application Support/HiFiShifter`에 제거 프로그램이 함께 설치되고, 같은 `-uninstaller.pkg`를 다운로드 페이지에서도 받을 수 있습니다 —— 프로젝트와 오디오 파일은 건드리지 않고 모두 지웁니다. 패키지가 서명되지 않아 첫 설치 시 수동으로 허용해야 합니다. "파일이 손상되었습니다"가 표시되면 [사용자 매뉴얼](USERMANUAL_ko.md#1-설치)의 절차를 따르세요.
 - **Linux**: 통합 `.tar.gz`(x86_64 / arm64)로 AppImage, VST3/CLAP 플러그인, 공유 모델 라이브러리와 `install.sh`를 포함합니다. `./install.sh`는 사용자 단위, `sudo ./install.sh --system`은 시스템 단위로 설치합니다. 실행하려면 시스템의 `webkit2gtk-4.1` 이 필요합니다(Arch/CachyOS, Ubuntu 24.04+, Fedora 39+, Debian 13+ 등 제공. Ubuntu 22.04 는 `webkit2gtk-4.0` 만 있어 미지원).
 
 **VST3 ARA 플러그인과 CLAP 플러그인**: 세 플랫폼 모두 두 가지 형태가 있습니다. REAPER에서는 VST3 플러그인을 ARA 임베디드 인터페이스로 사용하고(현재 REAPER에서만 검증), CLAP 플러그인은 일반 인서트 이펙트로 사용할 수 있습니다. 설치 방법, 실행 종속성과 사용 제한은 사용자 매뉴얼의 [플러그인](USERMANUAL_ko.md#8-vst3-ara-플러그인과-clap-플러그인-reaper) 장을 참고하세요.

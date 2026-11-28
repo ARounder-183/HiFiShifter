@@ -11,8 +11,8 @@ HiFiShifter 是一款图形化人声编辑与合成工具。它支持多轨道�
 - Windows 版本提供的是 NSIS 安装包版（`installer`）和便携版压缩包（`portable`）这两版。对于一般用户，直接选择安装包版并安装即可。  
   如果你是 Windows 用户，且不知道 `x86_64` 与 `arm64` 有什么区别，请选择 `x86_64` 版本。只有你清楚地了解 `arm64` 是什么，并且你确实拥有一台 Windows ARM 设备，则可以下载使用 `arm64` 版。
 
-- macOS 版本提供的是未经过签名的三合一 `pkg` 安装包：一次装上 `/Applications/HiFiShifter.app`、VST3/CLAP 插件与共享模型库。因为暂未签名，安装时需要经过一个比较复杂的步骤来允许安装。  
-  M 芯片的 macOS 用户请安装 `arm64` 版本。只有较老的 Intel 用户需要安装 `x86_64` 版本。  
+- macOS 版本提供的是未经过签名的三合一 `pkg` 安装包，一个 `macos-universal` 包同时适用于 Intel 与 Apple Silicon。安装向导会列出要装的东西：`独立 App` 与 `模型库` 必装（App 内没有单独的模型下载），`VST3` 与 `CLAP` 可以只勾选你的 DAW 支持的那个。因为暂未签名，安装时需要经过一个比较复杂的步骤来允许安装。  
+  装完之后 `/Library/Application Support/HiFiShifter` 里有一份卸载包（`Uninstall HiFiShifter.pkg`），也可以直接下载同版本的 `-uninstaller.pkg`；它会把 App、插件、模型库、缓存与设置一次清干净，工程文件与音频文件不动。  
   如果安装后提示文件已损坏，按以下步骤操作：
     1. 终端输入 `xattr -cr /Applications/HiFiShifter.app`；
     2. 通过系统设置允许运行 `系统设置` -> `隐私与安全性` -> 点击 `仍要打开`。
@@ -779,7 +779,7 @@ App**，编辑结果随 REAPER 工程一起保存。
 
 插件有两种装法，任选其一：
 
-- **三合一安装包（推荐）**：Windows 运行 `HiFiShifter_v<版本>_windows-x86_64-setup.exe`；macOS 运行 `HiFiShifter_v<版本>_macos-<架构>-unified.pkg`；Linux 解压 `HiFiShifter_v<版本>_linux-<架构>-unified.tar.gz` 后执行 `./install.sh`（或 `sudo ./install.sh --system`）。**一个安装包同时装上独立 App、VST3/ARA 与 CLAP 插件**；模型只装一遍（共享库，见[模型文件与共享](#模型文件与共享)）。Windows 安装器会先确认 REAPER 与 HiFiShifter 均已退出。
+- **三合一安装包（推荐）**：Windows 运行 `HiFiShifter_v<版本>_windows-x86_64-setup.exe`；macOS 运行 `HiFiShifter_v<版本>_macos-universal-unified.pkg`（安装向导里可只勾选需要的插件格式，App 与模型库必装）；Linux 解压 `HiFiShifter_v<版本>_linux-<架构>-unified.tar.gz` 后执行 `./install.sh`（或 `sudo ./install.sh --system`）。**一个安装包同时装上独立 App、VST3/ARA 与 CLAP 插件**；模型只装一遍（共享库，见[模型文件与共享](#模型文件与共享)）。Windows 安装器会先确认 REAPER 与 HiFiShifter 均已退出。
 - **手动拷贝**：关闭 REAPER，把**整个** `HiFiShifter.vst3` 文件夹放入一个 VST3 目录（例如 Windows 的 `C:\Program Files\Common Files\VST3`，macOS 的 `~/Library/Audio/Plug-Ins/VST3`，Linux 的 `~/.vst3`），或把它的父目录加入 REAPER 的 VST 扫描路径。不要只复制文件夹里的单个文件 —— 界面与运行依赖都在这个文件夹里。手动拷贝版需要单独准备模型（或把 `HIFISHIFTER_MODELS_DIR` 指向模型目录）。
 
 Windows 需要已安装 WebView2 运行时与 VC++ x64 运行库；macOS 与 Linux 的依赖见[安装](#一安装)章节。
@@ -859,7 +859,7 @@ REAPER 按**轨道**管理 ARA 插件：它只会把插件所在**那一条轨�
 - 参数没有生效，或重新打开工程后不一致：保留工程副本和状态栏上的错误信息，先不要覆盖工程，也不要反复强制重新载入。
 - 出现内存不足的提示：表示这次没有执行气声分离，`气声分离` 相关的效果不会被静默忽略；可以改用更短的素材，或先关闭 `气声分离`。
 - 需要提交日志或排查问题：插件日志与独立 App 的日志**放在同一个目录**（插件按格式与宿主分文件（`plugin-vst3-reaper.log` / `plugin-clap-reaper.log`），独立 App 是 `hifishifter.log`，文件名不同，互不覆盖、各自轮转）。菜单 `帮助 → 打开日志文件夹` 会替你打开这个文件夹；若宿主环境不允许，则显示路径供你复制。`帮助 → 导出诊断信息...` 与 `选项 → 推理设备基准测试` 属于独立 App，插件里不可用。
-- 卸载：装的是安装器版本时，在 Windows 的「程序和功能 / 已安装的应用」里卸载 HiFiShifter；手动拷贝的版本删除 `HiFiShifter.vst3` 文件夹即可。两种情况下设置与共享模型库都会保留（见[模型文件与共享](#模型文件与共享)）。
+- 卸载：Windows 装的是安装器版本时，在「程序和功能 / 已安装的应用」里卸载 HiFiShifter；macOS 运行 `/Library/Application Support/HiFiShifter/Uninstall HiFiShifter.pkg`（或同版本的 `-uninstaller.pkg`），它会连同共享模型库、缓存与设置一起清干净；手动拷贝的版本删除 `HiFiShifter.vst3` 文件夹即可。手动拷贝时设置与共享模型库会保留（见[模型文件与共享](#模型文件与共享)）。
 
 ### 从独立 App 连接宿主
 

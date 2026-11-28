@@ -11,9 +11,9 @@ HiFiShifter 是一款圖形化人聲編輯與合成工具。它支援多軌道�
 - Windows 版本提供的是 NSIS 安裝包版（`installer`）和可攜版壓縮包（`portable`）這兩版。對於一般使用者，直接選擇安裝包版並安裝即可。  
   如果你是 Windows 使用者，且不知道 `x86_64` 與 `arm64` 有什麼區別，請選擇 `x86_64` 版本。只有你清楚地了解 `arm64` 是什麼，並且你確實擁有一台 Windows ARM 裝置，則可以下載使用 `arm64` 版。
 
-- macOS 版本提供的是未經過簽名的三合一 `pkg` 安裝包：一次裝上 `/Applications/HiFiShifter.app`、VST3/CLAP 外掛與共享模型庫。因為暫未簽名，安裝時需要經過一個比較複雜的步驟來允許安裝。  
-  M 晶片的 macOS 使用者請安裝 `arm64` 版本。只有較老的 Intel 使用者需要安裝 `x86_64` 版本。  
-  如果按兩下 dmg 安裝後提示檔案已損毀，按以下步驟操作：
+- macOS 版本提供的是未經過簽名的三合一 `pkg` 安裝包，一個 `macos-universal` 包同時適用於 Intel 與 Apple Silicon。安裝精靈會列出要裝的東西：`獨立 App` 與 `模型庫` 必裝（App 內沒有單獨的模型下載），`VST3` 與 `CLAP` 可以只勾選你的 DAW 支援的那個。因為暫未簽名，安裝時需要經過一個比較複雜的步驟來允許安裝。  
+  裝完之後 `/Library/Application Support/HiFiShifter` 裡有一份解除安裝包（`Uninstall HiFiShifter.pkg`），也可以直接下載同版本的 `-uninstaller.pkg`；它會把 App、外掛、模型庫、快取與設定一次清乾淨，專案檔與音訊檔不動。  
+  如果按兩下 pkg 安裝後提示檔案已損毀，按以下步驟操作：
     1. 終端機輸入 `xattr -cr /Applications/HiFiShifter.app`；
     2. 透過系統設定允許執行 `系統設定` -> `隱私權與安全性` -> 點選 `仍要打開`。
 
