@@ -635,10 +635,12 @@ def main() -> int:
                     % (why, needle)
                 )
 
-    upload = code_only(step_block(workflow, "Upload unified package (Unix)") or "")
+    # [Why the macOS step and not "the Unix one"] Linux now uploads a directory of packages from
+    # its own step, so a shared "Unix" step no longer exists; this rule is about the pkg only.
+    upload = code_only(step_block(workflow, "Upload unified package (macOS)") or "")
     if "-uninstaller" not in upload or "matrix.name" not in upload:
         findings.append(
-            "build.yml: the Unix upload glob ignores *-uninstaller.*; the artifact would be "
+            "build.yml: the macOS upload glob ignores *-uninstaller.*; the artifact would be "
             "built and thrown away"
         )
 

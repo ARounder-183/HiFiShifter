@@ -209,7 +209,7 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y jq cmake libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0 librsvg2-dev patchelf pkg-config libasound2-dev
+          sudo apt-get install -y jq cmake rpm libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0 librsvg2-dev patchelf pkg-config libasound2-dev
           sudo apt-get install -y libappindicator3-dev || sudo apt-get install -y libayatana-appindicator3-dev
 
       - name: Ensure AppImage bundling prerequisites (Linux)
@@ -631,7 +631,7 @@ jobs:
       # format, the model manifest version, and the frontend artifact; producing both from
       # one build makes a version mismatch impossible. This workflow is the sole build path
       # for every platform's App and plugins.
-      - name: Package unified installer (Unix)
+      - name: Package installers (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
@@ -669,101 +669,233 @@ jobs:
           fi
           bash scripts/build/unix/package.sh --profile dist --reuse-frontend --no-verify "${APP_ARGS[@]}"
 
-      # [Why the Linux installer is round-tripped here] The download is an executable wizard now:
-      # a stub, a payload, a plan file, and an uninstaller that reads the manifest the installer
-      # wrote. Reading the sources cannot prove any of it. The static gate checks the wiring; this
-      # step does what a user does -- extract, install into a throwaway HOME, uninstall -- and it
-      # also proves the self-extractor works with the real payload (hundreds of megabytes), not a
-      # fixture.
-      - name: Assert Linux installer layout and round trip
+      # [Why the packages are installed and removed here] A .deb or .rpm can be malformed in ways no
+      # static check sees: an unsatisfied dependency, a path the app cannot resolve, a postinst
+      # that fails, a file the package manager refuses to overwrite. Only dpkg and dnf know. The
+      # runner is ephemeral, so installing into / and purging again is the cheapest way to find
+      # out before a user does.
+      - name: Assert Linux package layout
         if: runner.os == 'Linux' && success()
         shell: bash
         run: |
           set -euo pipefail
-          RUN_FILE="$(find dist -maxdepth 1 -name '*-unified.run' -print -quit)"
-          [ -n "$RUN_FILE" ] || { echo "ERROR: no *-unified.run under dist/" >&2; exit 1; }
-          echo "installer: $RUN_FILE ($(du -h "$RUN_FILE" | cut -f1))"
+          python3 scripts/checks/check-linux-packages.py
 
-          python3 scripts/checks/check-linux-installer.py
-
-          WORK="$(mktemp -d)"
-          trap 'rm -rf "$WORK"' EXIT
-          export HOME="$WORK/home"
-          export XDG_DATA_HOME="$HOME/.local/share"
-          export XDG_CACHE_HOME="$HOME/.cache"
-          export XDG_STATE_HOME="$HOME/.local/state"
-          export XDG_CONFIG_HOME="$HOME/.config"
-          mkdir -p "$HOME"
+          PKG_DIR="$(find dist -maxdepth 1 -type d -name '*-packages' -print -quit)"
+          [ -n "$PKG_DIR" ] || { echo "ERROR: no *-packages directory under dist/" >&2; exit 1; }
+          echo "packages: $PKG_DIR"
+          ls -la "$PKG_DIR"
 
           FAIL=0
           ok()  { printf '  ok   %s\n' "$1"; }
           bad() { printf '  FAIL %s\n' "$1" >&2; FAIL=1; }
 
-          echo "=== extract ==="
-          "$RUN_FILE" --extract="$WORK/payload"
-          for path in \
-              install.sh installer/run.sh installer/ui.sh installer/paths.sh \
-              installer/strings.sh installer/uninstall.sh \
-              HiFiShifter.AppImage models version icons/32x32.png LICENSE; do
-              if [ -e "$WORK/payload/$path" ]; then ok "payload $path"; else bad "payload $path missing"; fi
+          for pkg in hifishifter hifishifter-models hifishifter-vst3 hifishifter-clap; do
+              deb="$(find "$PKG_DIR" -maxdepth 1 -name "${pkg}_*.deb" -print -quit)"
+              rpm="$(find "$PKG_DIR" -maxdepth 1 -name "${pkg}-*.rpm" -print -quit)"
+              if [ -n "$deb" ]; then ok "deb $(basename "$deb")"; else bad "no deb for $pkg"; fi
+              if [ -n "$rpm" ]; then ok "rpm $(basename "$rpm")"; else bad "no rpm for $pkg"; fi
           done
 
-          echo "=== install (zh-CN, unattended) ==="
-          "$RUN_FILE" --yes --lang=zh-CN
+          WORK="$(mktemp -d)"
+          trap 'rm -rf "$WORK"' EXIT
+          dpkg-deb -x "$PKG_DIR"/hifishifter_*.deb "$WORK/app"
+          dpkg-deb -x "$PKG_DIR"/hifishifter-models_*.deb "$WORK/models"
+          dpkg-deb -x "$PKG_DIR"/hifishifter-vst3_*.deb "$WORK/vst3"
+          dpkg-deb -x "$PKG_DIR"/hifishifter-clap_*.deb "$WORK/clap"
+
+          for path in \
+              "$WORK/app/usr/bin/hifishifter" \
+              "$WORK/app/usr/lib/HiFiShifter/models/models.json" \
+              "$WORK/app/usr/share/applications/hifishifter.desktop" \
+              "$WORK/app/usr/share/mime/packages/hifishifter.xml" \
+              "$WORK/models/usr/share/HiFiShifter/models" \
+              "$WORK/vst3/usr/lib/vst3/HiFiShifter.vst3/Contents/Resources/models/models.json" \
+              "$WORK/clap/usr/lib/clap/HiFiShifter.clap" \
+              "$WORK/clap/usr/lib/clap/HiFiShifter-resources/frontend/plugin.html" ; do
+              if [ -e "$path" ]; then ok "deb payload $path"; else bad "missing from the deb: $path"; fi
+          done
+
+          # The binary must find its private libraries where the package puts them.
+          APP_BIN="$WORK/app/usr/bin/hifishifter"
+          if readelf -d "$APP_BIN" | grep -q 'RUNPATH.*\$ORIGIN/../lib/HiFiShifter'; then
+              ok "RUNPATH covers /usr/lib/HiFiShifter"
+          else
+              bad "the binary does not search /usr/lib/HiFiShifter"
+          fi
+          UNRESOLVED="$(ldd "$APP_BIN" 2>&1 | grep 'not found' || true)"
+          if [ -z "$UNRESOLVED" ]; then ok "every shared library resolves"; else bad "unresolved: $UNRESOLVED"; fi
+          desktop-file-validate "$WORK/app/usr/share/applications/hifishifter.desktop" \
+              || bad "desktop-file-validate rejected the menu entry"
+
+          echo "=== rpm metadata ==="
+          rpm -qpi "$PKG_DIR"/hifishifter-*.rpm || bad "rpm -qpi failed"
+          rpm -qpl "$PKG_DIR"/hifishifter-*.rpm | grep -qx '/usr/bin/hifishifter' \
+              || bad "the rpm does not install /usr/bin/hifishifter"
+          rpm -qpl "$PKG_DIR"/hifishifter-clap-*.rpm | grep -qx '/usr/lib/clap/HiFiShifter.clap' \
+              || bad "the rpm does not install /usr/lib/clap/HiFiShifter.clap"
+          if rpm -qp --requires "$PKG_DIR"/hifishifter-*.rpm | grep -q webkit2gtk4.1; then
+              ok "the rpm depends on webkit2gtk4.1"
+          else
+              bad "the rpm does not depend on webkit2gtk4.1"
+          fi
+
+          [ "$FAIL" -eq 0 ] || { echo "ERROR: the Linux packages are not what they claim to be" >&2; exit 1; }
+          echo "the .deb and .rpm payloads carry the app, the model store and both plug-in formats"
+
+      - name: Install and uninstall Linux packages (Ubuntu)
+        if: runner.os == 'Linux' && success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG_DIR="$(pwd)/$(find dist -maxdepth 1 -type d -name '*-packages' -print -quit)"
+
+          FAIL=0
+          ok()  { printf '  ok   %s\n' "$1"; }
+          bad() { printf '  FAIL %s\n' "$1" >&2; FAIL=1; }
+
+          echo "=== install ==="
+          sudo apt-get install -y "$PKG_DIR"/hifishifter_*.deb "$PKG_DIR"/hifishifter-models_*.deb \
+              "$PKG_DIR"/hifishifter-vst3_*.deb "$PKG_DIR"/hifishifter-clap_*.deb
+          for path in \
+              /usr/bin/hifishifter \
+              /usr/share/applications/hifishifter.desktop \
+              /usr/share/mime/packages/hifishifter.xml \
+              /usr/lib/vst3/HiFiShifter.vst3 \
+              /usr/lib/clap/HiFiShifter.clap \
+              /usr/lib/clap/HiFiShifter-resources/frontend/plugin.html ; do
+              if [ -e "$path" ]; then ok "installed $path"; else bad "not installed: $path"; fi
+          done
+          if find /usr/share/HiFiShifter/models -name models.json -print -quit | grep -q .; then
+              ok "the shared model store is installed"
+          else
+              bad "the shared model store is missing"
+          fi
+          # [Why the entry is checked] A .desktop file that names a binary the package does not
+          # install is a menu entry that does nothing when clicked.
+          grep -q '^Exec=hifishifter' /usr/share/applications/hifishifter.desktop \
+              || bad "the menu entry does not start the installed binary"
+          dpkg -s hifishifter hifishifter-models hifishifter-vst3 hifishifter-clap >/dev/null \
+              || bad "a package is not registered with dpkg"
+
+          # User data that no package may touch.
+          mkdir -p "$HOME/.config/HiFiShifter" "$HOME/.local/share/HiFiShifter/models-user"
+          printf '{}\n' >"$HOME/.config/HiFiShifter/settings.json"
+          printf 'mine\n' >"$HOME/.local/share/HiFiShifter/models-user/mine.onnx"
+
+          echo "=== purge ==="
+          sudo apt-get purge -y hifishifter hifishifter-models hifishifter-vst3 hifishifter-clap
+          for path in \
+              /usr/bin/hifishifter \
+              /usr/share/applications/hifishifter.desktop \
+              /usr/lib/vst3/HiFiShifter.vst3 \
+              /usr/lib/clap/HiFiShifter.clap \
+              /usr/share/HiFiShifter/models ; do
+              if [ -e "$path" ]; then bad "still there after purging: $path"; else ok "removed $path"; fi
+          done
+          for path in "$HOME/.config/HiFiShifter/settings.json" "$HOME/.local/share/HiFiShifter/models-user/mine.onnx"; do
+              if [ -e "$path" ]; then ok "kept $path"; else bad "removed user data: $path"; fi
+          done
+
+          [ "$FAIL" -eq 0 ] || { echo "ERROR: the Linux packages do not install/uninstall what they claim" >&2; exit 1; }
+          echo "the .deb packages install, register, and purge cleanly, and never touch user data"
+
+      # [Why a container] Fedora spells the dependencies differently from Debian, and "dnf install"
+      # is the only thing that can prove the rpm overrides are right. A container keeps the
+      # runner's Ubuntu untouched.
+      - name: Install and uninstall Linux packages (Fedora)
+        if: runner.os == 'Linux' && success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG_DIR="$(pwd)/$(find dist -maxdepth 1 -type d -name '*-packages' -print -quit)"
+          docker run --rm -v "$PKG_DIR:/packages:ro" fedora:41 bash -euxo pipefail -c '
+            dnf install -y --setopt=install_weak_deps=False /packages/*.rpm
+            test -x /usr/bin/hifishifter
+            test -f /usr/share/applications/hifishifter.desktop
+            test -d /usr/lib/vst3/HiFiShifter.vst3
+            test -x /usr/lib/clap/HiFiShifter.clap
+            test -f /usr/lib/clap/HiFiShifter-resources/frontend/plugin.html
+            test -n "$(find /usr/share/HiFiShifter/models -name models.json -print -quit)"
+            rpm -q hifishifter hifishifter-models hifishifter-vst3 hifishifter-clap
+
+            mkdir -p /root/.config/HiFiShifter /root/.local/share/HiFiShifter/models-user
+            printf "{}\n" > /root/.config/HiFiShifter/settings.json
+            printf "mine\n" > /root/.local/share/HiFiShifter/models-user/mine.onnx
+
+            dnf remove -y hifishifter hifishifter-models hifishifter-vst3 hifishifter-clap
+            test ! -e /usr/bin/hifishifter
+            test ! -e /usr/lib/clap/HiFiShifter.clap
+            test -f /root/.config/HiFiShifter/settings.json
+            test -f /root/.local/share/HiFiShifter/models-user/mine.onnx
+          '
+
+      # [Why the portable bundle is round-tripped too] It is the only path for a user whose
+      # distribution has neither deb nor rpm, and it is the part that used to be a 900-line
+      # wizard. It has to work with the real payload, in a throwaway HOME, both ways.
+      - name: Run the portable installer round trip
+        if: runner.os == 'Linux' && success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARBALL="$(find dist -maxdepth 1 -name '*-portable.tar.xz' -print -quit)"
+          [ -n "$TARBALL" ] || { echo "ERROR: no *-portable.tar.xz under dist/" >&2; exit 1; }
+          echo "portable bundle: $TARBALL ($(du -h "$TARBALL" | cut -f1))"
+
+          WORK="$(mktemp -d)"
+          trap 'rm -rf "$WORK"' EXIT
+          tar -C "$WORK" -xJf "$TARBALL"
+          export HOME="$WORK/home"
+          export XDG_DATA_HOME="$HOME/.local/share"
+          export XDG_CONFIG_HOME="$HOME/.config"
+          export XDG_CACHE_HOME="$HOME/.cache"
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME/HiFiShifter" "$XDG_DATA_HOME/HiFiShifter/models-user"
+          printf '{}\n' >"$XDG_CONFIG_HOME/HiFiShifter/settings.json"
+          printf 'mine\n' >"$XDG_DATA_HOME/HiFiShifter/models-user/mine.onnx"
+
+          FAIL=0
+          ok()  { printf '  ok   %s\n' "$1"; }
+          bad() { printf '  FAIL %s\n' "$1" >&2; FAIL=1; }
+
+          echo "=== install (unattended) ==="
+          ( cd "$WORK" && ./install-user.sh --yes )
           for path in \
               "$HOME/.local/lib/hifishifter/HiFiShifter.AppImage" \
-              "$HOME/.local/lib/hifishifter/installer/run.sh" \
-              "$HOME/.local/lib/hifishifter/uninstall" \
               "$HOME/.local/bin/hifishifter" \
               "$HOME/.local/bin/hifishifter-uninstall" \
               "$HOME/.vst3/HiFiShifter.vst3" \
               "$HOME/.clap/HiFiShifter.clap" \
               "$HOME/.clap/HiFiShifter-resources" \
-              "$XDG_DATA_HOME/HiFiShifter/models" \
               "$XDG_DATA_HOME/HiFiShifter/install-manifest" \
               "$XDG_DATA_HOME/applications/hifishifter.desktop" \
-              "$XDG_DATA_HOME/applications/hifishifter-uninstall.desktop" \
-              "$XDG_DATA_HOME/mime/packages/hifishifter.xml" \
-              "$XDG_DATA_HOME/icons/hicolor/128x128/apps/hifishifter.png"; do
+              "$XDG_DATA_HOME/mime/packages/hifishifter.xml" ; do
               if [ -e "$path" ]; then ok "installed $path"; else bad "not installed: $path"; fi
           done
-          grep -q "Exec=\"$HOME/.local/bin/hifishifter\"" \
-              "$XDG_DATA_HOME/applications/hifishifter.desktop" || bad "the menu entry does not point at the launcher"
-          grep -q 'MimeType=application/x-hifishifter-project;' \
-              "$XDG_DATA_HOME/applications/hifishifter.desktop" || bad "the menu entry lost the project association"
-          # The manifest is what the uninstaller reads: it has to list the payload, not a summary.
-          for needle in "version=" "scope=user" "path=$HOME/.vst3/HiFiShifter.vst3" "path=$XDG_DATA_HOME/HiFiShifter/models"; do
-              grep -qF "$needle" "$XDG_DATA_HOME/HiFiShifter/install-manifest" || bad "manifest missing: $needle"
-          done
-          test -x "$HOME/.local/bin/hifishifter" || bad "the launcher is not executable"
-
-          # User data the uninstaller must keep.
-          mkdir -p "$XDG_CONFIG_HOME/HiFiShifter" "$XDG_DATA_HOME/HiFiShifter/models-user"
-          printf '{}\n' >"$XDG_CONFIG_HOME/HiFiShifter/settings.json"
-          printf 'mine\n' >"$XDG_DATA_HOME/HiFiShifter/models-user/mine.onnx"
+          if find "$XDG_DATA_HOME/HiFiShifter/models" -name models.json -print -quit | grep -q .; then
+              ok "the portable bundle installs the shared weights"
+          else
+              bad "the portable bundle did not install the shared weights"
+          fi
+          grep -q '^Exec="' "$XDG_DATA_HOME/applications/hifishifter.desktop" \
+              || bad "the menu entry does not point at the launcher"
 
           echo "=== uninstall ==="
           "$HOME/.local/bin/hifishifter-uninstall" --yes
           for path in \
               "$HOME/.local/lib/hifishifter" \
               "$HOME/.local/bin/hifishifter" \
-              "$HOME/.local/bin/hifishifter-uninstall" \
               "$HOME/.vst3/HiFiShifter.vst3" \
               "$HOME/.clap/HiFiShifter.clap" \
               "$XDG_DATA_HOME/HiFiShifter/models" \
-              "$XDG_DATA_HOME/HiFiShifter/install-manifest" \
-              "$XDG_DATA_HOME/applications/hifishifter.desktop" \
-              "$XDG_DATA_HOME/mime/packages/hifishifter.xml"; do
+              "$XDG_DATA_HOME/HiFiShifter/install-manifest" ; do
               if [ -e "$path" ]; then bad "still there after uninstalling: $path"; else ok "removed $path"; fi
           done
-          for path in \
-              "$XDG_CONFIG_HOME/HiFiShifter/settings.json" \
-              "$XDG_DATA_HOME/HiFiShifter/models-user/mine.onnx"; do
+          for path in "$XDG_CONFIG_HOME/HiFiShifter/settings.json" "$XDG_DATA_HOME/HiFiShifter/models-user/mine.onnx"; do
               if [ -e "$path" ]; then ok "kept $path"; else bad "removed user data: $path"; fi
           done
 
-          [ "$FAIL" -eq 0 ] || { echo "ERROR: the Linux installer does not install/uninstall what it claims" >&2; exit 1; }
-          echo "the self-extracting installer installs, offers a menu entry, and uninstalls cleanly"
+          [ "$FAIL" -eq 0 ] || { echo "ERROR: the portable bundle does not install/uninstall what it claims" >&2; exit 1; }
+          echo "the portable bundle installs, offers a menu entry, and uninstalls cleanly"
 
       # [Why the wizard is asserted at runtime and not only in a static gate] The static gate
       # reads the generator's output; only Installer can prove that the product archive is
@@ -1012,7 +1144,11 @@ jobs:
           }
           $prodSafe = ($prod -replace '["\\/:*?<>|]', '') -replace '\s+', '_'
           $verSafe = ($ver -replace '["\\/:*?<>|]', '') -replace '^v', ''
-          $artifactName = "${prodSafe}_v${verSafe}_${{ matrix.name }}-unified"
+          # [Why the suffix depends on the OS] Both platforms used to ship one "unified"
+          # installer. Linux now ships a directory of packages, and a name that says "unified"
+          # would promise a single file that no longer exists.
+          $suffix = if ($env:RUNNER_OS -eq 'Linux') { 'packages' } else { 'unified' }
+          $artifactName = "${prodSafe}_v${verSafe}_${{ matrix.name }}-$suffix"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "artifact-name=$artifactName"
         shell: pwsh
 
@@ -1106,21 +1242,32 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload unified package (Unix)
-        if: runner.os != 'Windows'
+      - name: Upload unified package (macOS)
+        if: runner.os == 'macOS'
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.artifact-name-nonwindows.outputs.artifact-name }}
           # package.sh's naming literal is
-          # `HiFiShifter_v<version>_<os>-<arch>-unified.{pkg,tar.gz}` — note the **underscore**
+          # `HiFiShifter_v<version>_<os>-<arch>-unified.pkg` — note the **underscore**
           # before `<os>-<arch>` (the tag is appended to the version, not hyphenated onto it).
-          # One artifact carries one installer; each platform has its own leg, so they cannot mix.
           # macOS also ships the uninstaller: a .pkg that only removes things is the one file a
           # user cannot find anywhere else once the download is gone.
           path: |
             dist/HiFiShifter_*_${{ matrix.name }}-unified.*
             dist/HiFiShifter_*_${{ matrix.name }}-uninstaller.*
           if-no-files-found: error
+
+      - name: Upload Linux packages
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.artifact-name-nonwindows.outputs.artifact-name }}
+          # One directory per leg: four .deb + four .rpm, the portable AppImage, the portable
+          # bundle and SHA256SUMS. The **underscore** before `<os>-<arch>` is package.sh's.
+          path: |
+            dist/HiFiShifter_*_${{ matrix.name }}-packages/**
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Dump diagnostics on failure (Linux)
         if: runner.os == 'Linux' && failure()

@@ -205,9 +205,9 @@ def main() -> int:
                 findings.append("build.yml: 'Assert universal Mach-O': %s (%r missing)" % (why, needle))
 
     # ── 4. The packaging step must build, merge and name the universal package ──
-    packaging = step_block(workflow, "Package unified installer (Unix)")
+    packaging = step_block(workflow, "Package installers (Unix)")
     if packaging is None:
-        findings.append("build.yml: step 'Package unified installer (Unix)' is missing")
+        findings.append("build.yml: step 'Package installers (Unix)' is missing")
     else:
         if "HFS_PLATFORM_ARCH=universal" not in packaging:
             findings.append(

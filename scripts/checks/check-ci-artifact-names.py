@@ -102,8 +102,13 @@ def main() -> int:
         )
     if '"$OUT_DIR/HiFiShifter_v${PRODUCT_VERSION}_${HFS_TAG}-unified"' not in package_sh:
         findings.append(
-            "scripts/build/unix/package.sh: the unified artifact is no longer "
+            "scripts/build/unix/package.sh: the macOS artifact is no longer "
             "HiFiShifter_v<version>_<tag>-unified.*; the upload glob must follow it"
+        )
+    if '"$OUT_DIR/HiFiShifter_v${PRODUCT_VERSION}_${HFS_TAG}-packages"' not in package_sh:
+        findings.append(
+            "scripts/build/unix/package.sh: the Linux artifact is no longer "
+            "HiFiShifter_v<version>_<tag>-packages/; the upload glob must follow it"
         )
 
     # ── 2. Every matrix leg name must equal the tag the packager will emit ──
@@ -118,7 +123,7 @@ def main() -> int:
             )
 
     # ── 2b. A universal leg's tag cannot come from uname ──
-    packaging = step_block(workflow, "Package unified installer (Unix)") or ""
+    packaging = step_block(workflow, "Package installers (Unix)") or ""
     for entry in matrix_entries(workflow):
         name = str(entry.get("name", ""))
         if name.endswith("-universal") and "HFS_PLATFORM_ARCH=universal" not in packaging:
@@ -128,18 +133,28 @@ def main() -> int:
                 "architecture and the upload glob would match nothing" % name
             )
 
-    # ── 3. The non-Windows upload must glob the tag, not a hand-written suffix ──
-    upload = step_block(workflow, "Upload unified package (Unix)")
-    if upload is None:
-        findings.append("build.yml: step 'Upload unified package (Unix)' is missing")
-    else:
+    # ── 3. Each upload must glob the tag and the suffix its platform actually writes ──
+    # [Why the two platforms are checked separately] They used to share one step: both produced
+    # one "unified" file. Linux now produces a directory of packages, so the shared step would
+    # either upload nothing or, worse, upload the macOS glob for a Linux leg.
+    uploads = [
+        ("Upload unified package (macOS)", "-unified"),
+        ("Upload Linux packages", "-packages"),
+    ]
+    for step_name, suffix in uploads:
+        upload = step_block(workflow, step_name)
+        if upload is None:
+            findings.append("build.yml: step %r is missing" % step_name)
+            continue
         if "matrix.name" not in upload:
             findings.append(
-                "build.yml: the unified upload must glob ${{ matrix.name }} so it follows "
-                "the matrix instead of a copy-pasted arch spelling"
+                "build.yml: %r must glob ${{ matrix.name }} so it follows the matrix "
+                "instead of a copy-pasted arch spelling" % step_name
             )
-        if "-unified" not in upload:
-            findings.append("build.yml: the unified upload path lost its '-unified' suffix")
+        if suffix not in upload:
+            findings.append(
+                "build.yml: %r lost its %r suffix" % (step_name, suffix)
+            )
 
     # ── 4. Windows must import the MSVC environment before tauri-action runs ──
     import_step = step_block(workflow, "Import MSVC environment (Windows)")
