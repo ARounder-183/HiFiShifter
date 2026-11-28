@@ -24,7 +24,12 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { collectInstallerStrings, KEY_PREFIX, MACOS_KEY_PREFIX } from "./catalog.mjs";
+import {
+    collectInstallerStrings,
+    KEY_PREFIX,
+    MACOS_KEY_PREFIX,
+    LINUX_KEY_PREFIX,
+} from "./catalog.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const outputPath = join(scriptDir, "installer", "installer_strings.nsh");
@@ -113,11 +118,13 @@ function render({ keys, catalogs }) {
 async function main() {
     const checkOnly = process.argv.includes("--check");
     const collected = await collectInstallerStrings();
-    // [Why the macOS copy is filtered out] It is validated above (every language has it), but
-    // the NSIS wizard never shows it: a LangString nobody references is dead weight in a
-    // 15 × 5 block, and it invites "why is this here?" during review.
+    // [Why the macOS and Linux copy is filtered out] Both are validated above (every language
+    // has them), but the NSIS wizard never shows them: a LangString nobody references is dead
+    // weight in a 15 × 5 block, and it invites "why is this here?" during review.
     const strings = {
-        keys: collected.keys.filter((key) => !key.startsWith(MACOS_KEY_PREFIX)),
+        keys: collected.keys.filter(
+            (key) => !key.startsWith(MACOS_KEY_PREFIX) && !key.startsWith(LINUX_KEY_PREFIX),
+        ),
         catalogs: collected.catalogs,
     };
     const rendered = render(strings);

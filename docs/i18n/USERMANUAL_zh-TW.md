@@ -17,7 +17,7 @@ HiFiShifter 是一款圖形化人聲編輯與合成工具。它支援多軌道�
     1. 終端機輸入 `xattr -cr /Applications/HiFiShifter.app`；
     2. 透過系統設定允許執行 `系統設定` -> `隱私權與安全性` -> 點選 `仍要打開`。
 
-- Linux 版本提供的是三合一 `.tar.gz`，內含 AppImage、VST3/CLAP 外掛、共享模型庫與 `install.sh`。解壓後執行 `./install.sh` 裝進目前使用者，或 `sudo ./install.sh --system` 裝到系統。執行前請確認系統已提供 **WebKitGTK 4.1**（見下方「關於 WebView 的說明」），它是 AppImage 唯一需要系統額外提供的大型相依套件。
+- Linux 版本提供的是自解壓安裝包 `.run`，雙擊或在終端機執行後開啟安裝精靈（介面語言跟隨 `LANG`，也可用 `--lang` 指定）：歡迎、授權條款、安裝範圍、元件選擇、安裝目錄、進度與完成頁。預設裝進目前使用者（`~/.local`、`~/.vst3`、`~/.clap`）；加上 `--system` 則裝到系統目錄（`/opt`、`/usr/lib/vst3`、`/usr/lib/clap`），此時只有檔案操作需要提權。裝完後應用程式選單裡有「解除安裝 HiFiShifter」，也可執行 `hifishifter-uninstall`；解除安裝會移除本體、外掛與模型庫，保留設定、專案與你自備的模型。`--yes` 為無人值守安裝，`--extract=<目錄>` 只解包不安裝。執行前請確認系統已提供 **WebKitGTK 4.1**（見下方「關於 WebView 的說明」），它是 AppImage 唯一需要系統額外提供的大型相依套件。
 
 **關於 GPU 加速**：HiFiShifter 為各平台提供了多種 GPU 加速方案：
 

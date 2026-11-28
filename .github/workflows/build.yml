@@ -669,6 +669,102 @@ jobs:
           fi
           bash scripts/build/unix/package.sh --profile dist --reuse-frontend --no-verify "${APP_ARGS[@]}"
 
+      # [Why the Linux installer is round-tripped here] The download is an executable wizard now:
+      # a stub, a payload, a plan file, and an uninstaller that reads the manifest the installer
+      # wrote. Reading the sources cannot prove any of it. The static gate checks the wiring; this
+      # step does what a user does -- extract, install into a throwaway HOME, uninstall -- and it
+      # also proves the self-extractor works with the real payload (hundreds of megabytes), not a
+      # fixture.
+      - name: Assert Linux installer layout and round trip
+        if: runner.os == 'Linux' && success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_FILE="$(find dist -maxdepth 1 -name '*-unified.run' -print -quit)"
+          [ -n "$RUN_FILE" ] || { echo "ERROR: no *-unified.run under dist/" >&2; exit 1; }
+          echo "installer: $RUN_FILE ($(du -h "$RUN_FILE" | cut -f1))"
+
+          python3 scripts/checks/check-linux-installer.py
+
+          WORK="$(mktemp -d)"
+          trap 'rm -rf "$WORK"' EXIT
+          export HOME="$WORK/home"
+          export XDG_DATA_HOME="$HOME/.local/share"
+          export XDG_CACHE_HOME="$HOME/.cache"
+          export XDG_STATE_HOME="$HOME/.local/state"
+          export XDG_CONFIG_HOME="$HOME/.config"
+          mkdir -p "$HOME"
+
+          FAIL=0
+          ok()  { printf '  ok   %s\n' "$1"; }
+          bad() { printf '  FAIL %s\n' "$1" >&2; FAIL=1; }
+
+          echo "=== extract ==="
+          "$RUN_FILE" --extract="$WORK/payload"
+          for path in \
+              install.sh installer/run.sh installer/ui.sh installer/paths.sh \
+              installer/strings.sh installer/uninstall.sh \
+              HiFiShifter.AppImage models version icons/32x32.png LICENSE; do
+              if [ -e "$WORK/payload/$path" ]; then ok "payload $path"; else bad "payload $path missing"; fi
+          done
+
+          echo "=== install (zh-CN, unattended) ==="
+          "$RUN_FILE" --yes --lang=zh-CN
+          for path in \
+              "$HOME/.local/lib/hifishifter/HiFiShifter.AppImage" \
+              "$HOME/.local/lib/hifishifter/installer/run.sh" \
+              "$HOME/.local/lib/hifishifter/uninstall" \
+              "$HOME/.local/bin/hifishifter" \
+              "$HOME/.local/bin/hifishifter-uninstall" \
+              "$HOME/.vst3/HiFiShifter.vst3" \
+              "$HOME/.clap/HiFiShifter.clap" \
+              "$HOME/.clap/HiFiShifter-resources" \
+              "$XDG_DATA_HOME/HiFiShifter/models" \
+              "$XDG_DATA_HOME/HiFiShifter/install-manifest" \
+              "$XDG_DATA_HOME/applications/hifishifter.desktop" \
+              "$XDG_DATA_HOME/applications/hifishifter-uninstall.desktop" \
+              "$XDG_DATA_HOME/mime/packages/hifishifter.xml" \
+              "$XDG_DATA_HOME/icons/hicolor/128x128/apps/hifishifter.png"; do
+              if [ -e "$path" ]; then ok "installed $path"; else bad "not installed: $path"; fi
+          done
+          grep -q "Exec=\"$HOME/.local/lib/hifishifter/HiFiShifter.AppImage\"" \
+              "$XDG_DATA_HOME/applications/hifishifter.desktop" || bad "the menu entry does not point at the installed AppImage"
+          grep -q 'MimeType=application/x-hifishifter-project;' \
+              "$XDG_DATA_HOME/applications/hifishifter.desktop" || bad "the menu entry lost the project association"
+          # The manifest is what the uninstaller reads: it has to list the payload, not a summary.
+          for needle in "version=" "scope=user" "path=$HOME/.vst3/HiFiShifter.vst3" "path=$XDG_DATA_HOME/HiFiShifter/models"; do
+              grep -qF "$needle" "$XDG_DATA_HOME/HiFiShifter/install-manifest" || bad "manifest missing: $needle"
+          done
+          test -x "$HOME/.local/bin/hifishifter" || bad "the launcher is not executable"
+
+          # User data the uninstaller must keep.
+          mkdir -p "$XDG_CONFIG_HOME/HiFiShifter" "$XDG_DATA_HOME/HiFiShifter/models-user"
+          printf '{}\n' >"$XDG_CONFIG_HOME/HiFiShifter/settings.json"
+          printf 'mine\n' >"$XDG_DATA_HOME/HiFiShifter/models-user/mine.onnx"
+
+          echo "=== uninstall ==="
+          "$HOME/.local/bin/hifishifter-uninstall" --yes
+          for path in \
+              "$HOME/.local/lib/hifishifter" \
+              "$HOME/.local/bin/hifishifter" \
+              "$HOME/.local/bin/hifishifter-uninstall" \
+              "$HOME/.vst3/HiFiShifter.vst3" \
+              "$HOME/.clap/HiFiShifter.clap" \
+              "$XDG_DATA_HOME/HiFiShifter/models" \
+              "$XDG_DATA_HOME/HiFiShifter/install-manifest" \
+              "$XDG_DATA_HOME/applications/hifishifter.desktop" \
+              "$XDG_DATA_HOME/mime/packages/hifishifter.xml"; do
+              if [ -e "$path" ]; then bad "still there after uninstalling: $path"; else ok "removed $path"; fi
+          done
+          for path in \
+              "$XDG_CONFIG_HOME/HiFiShifter/settings.json" \
+              "$XDG_DATA_HOME/HiFiShifter/models-user/mine.onnx"; do
+              if [ -e "$path" ]; then ok "kept $path"; else bad "removed user data: $path"; fi
+          done
+
+          [ "$FAIL" -eq 0 ] || { echo "ERROR: the Linux installer does not install/uninstall what it claims" >&2; exit 1; }
+          echo "the self-extracting installer installs, offers a menu entry, and uninstalls cleanly"
+
       # [Why the wizard is asserted at runtime and not only in a static gate] The static gate
       # reads the generator's output; only Installer can prove that the product archive is
       # installable, that the choices page really offers what it claims, and that the

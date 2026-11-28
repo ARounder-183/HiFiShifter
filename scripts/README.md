@@ -11,7 +11,7 @@
 | `release/` | 发布物：VST3 的 NSIS 安装器（`.nsi` + 五语词表）、版本号同步（`version.py` + 落盘清单 `version-sources.json`）。                                                                  |
 | `checks/`  | CI 门禁：FFI panic 守卫、日志级别、日志详细程度（四档）、命令接线、产品一致性、依赖通告扫描；`-Package hifishifter-plugin-core` 只跑格式无关层。                                  |
 | `clap/`    | CLAP 自检与构建：`probe.c`（黑盒 dlopen + 短流宿主）、`verify.sh`、`unix/build.sh`、`windows/build.ps1`；ABI 布局 oracle 在 `backend/hifishifter-clap/tests/clap_layout.{c,rs}`。 |
-| `plugin/`  | 插件打包的共享规则：`unix/lib.sh`（运行时依赖 / rpath / 前端 / 许可证 / 签名）、`unix/install.sh`（随 Linux 插件包分发）。                                                        |
+| `plugin/`  | 插件打包的共享规则：`unix/lib.sh`（运行时依赖 / rpath / 前端 / 许可证 / 签名）；Linux 的安装 / 卸载向导在 `release/linux-installer/`。                                            |
 | `vst3/`    | 自检与 Unix 构建：`windows/verify.ps1`（导出表 + 依赖 + 黑盒加载）、`unix/build.sh`、`unix/verify.sh`。                                                                           |
 | `dev/`     | 开发期辅助：`tauri dev` 的前端启动脚本、音高分析内存计量。                                                                                                                        |
 
@@ -35,7 +35,7 @@ Windows 只有一条构建命令，它按顺序做完：前端 → App → VST3 
 macOS / Linux 的插件构建不经过 PowerShell。**构建按格式分开，分发统一**：
 
 ```bash
-# 分发入口：一次编译 → 每个 OS 一个可安装的产物（Linux 三合一 tar.gz / macOS 三合一 pkg）
+# 分发入口：一次编译 → 每个 OS 一个可安装的产物（Linux 三合一 .run / macOS 三合一 pkg）
 scripts/build/unix/package.sh                  # VST3 + CLAP
 scripts/build/unix/package.sh --formats=vst3   # 只出 VST3
 

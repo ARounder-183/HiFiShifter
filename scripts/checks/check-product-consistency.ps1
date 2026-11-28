@@ -79,6 +79,11 @@ Test-Invariant 'installer strings match the five-language glossary' {
     'scripts/release/installer/installer_strings.nsh'
 }
 
+Test-Invariant 'linux installer strings match the five-language glossary' {
+    Invoke-Tool 'node' @((Join-Path $root 'scripts/release/build-linux-installer-strings.mjs'), '--check') | Out-Null
+    'scripts/release/linux-installer/strings.sh'
+}
+
 # The license texts are the "missing one and nothing errors" kind: the packaging script just copies
 # a directory, and the file names appear only in the README. A rename or a missing file means some
 # artifact silently drops a required attribution — so the manifest is pinned here.

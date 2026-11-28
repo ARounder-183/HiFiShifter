@@ -139,6 +139,14 @@ Invoke-Gate 'macOS universal gate' { python scripts/checks/check-macos-universal
 # trip (the workflow does); this gate proves the wiring and the generated layout.
 Invoke-Gate 'macOS pkg wizard gate' { python scripts/checks/check-macos-pkg.py }
 
+# The Linux download is a self-extracting wizard now: a stub with a payload, pages generated from
+# the same five-language catalog, a plan file that both installs and uninstalls, and a removal
+# path that must never touch anything outside the product's own roots. Every failure here is
+# "green but wrong" -- a dead translation, a page in English, a manifest that lists a path the
+# uninstaller refuses to delete. The workflow also installs and uninstalls the real .run; this
+# gate proves the wiring without a Linux machine.
+Invoke-Gate 'Linux installer gate' { python scripts/checks/check-linux-installer.py }
+
 # vslib is a **link-time** dependency (a #[link] directive, not a dlopen) and its import
 # library is x64 machine code. Every cfg that decides "the backend exists" must therefore name
 # target_arch = "x86_64"; lib.rs used to gate only on target_os = "windows" while the module

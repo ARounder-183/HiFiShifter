@@ -38,6 +38,16 @@ export const KEY_PREFIX = "installer_";
  */
 export const MACOS_KEY_PREFIX = "installer_macos_";
 
+/**
+ * Copy that only the Linux installer uses.
+ *
+ * Same reason as MACOS_KEY_PREFIX: the Linux wizard asks Linux questions ("application menu
+ * entry", "/opt or the home folder") and its answer cannot be shared with the other two. The
+ * generator `build-linux-installer-strings.mjs` reads this prefix and nothing else, so the
+ * NSIS fragment and the pkg pages never grow a key nobody displays.
+ */
+export const LINUX_KEY_PREFIX = "installer_linux_";
+
 /** `en-US` -> `enUS`: the name each catalog module exports. */
 function exportName(locale) {
     const [language, region] = locale.split("-");

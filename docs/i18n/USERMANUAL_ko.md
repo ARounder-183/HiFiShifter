@@ -17,7 +17,7 @@ HiFiShifter는 그래픽 보컬 편집 및 합성 도구입니다. 멀티트랙 
     1. 터미널에서 `xattr -cr /Applications/HiFiShifter.app` 입력；
     2. `시스템 설정` -> `개인정보 보호 및 보안` -> `그래도 열기`를 클릭하여 앱 실행을 허용합니다.
 
-- Linux 버전은 통합 `.tar.gz`를 제공합니다. AppImage, VST3/CLAP 플러그인, 공유 모델 라이브러리와 `install.sh`를 포함합니다. `./install.sh`는 사용자 단위, `sudo ./install.sh --system`은 시스템 단위로 설치합니다. 실행 전에 시스템에 **WebKitGTK 4.1** 이 있는지 확인하세요(아래 "WebView 안내" 참고). AppImage 가 호스트에 요구하는 유일한 대형 의존성입니다.
+- Linux 버전은 자체 압축 해제형 `.run` 설치 프로그램을 제공합니다. 두 번 클릭하거나 터미널에서 실행하면 마법사가 열립니다(표시 언어는 `LANG`을 따르며 `--lang`으로 지정할 수 있습니다). 환영, 라이선스, 설치 범위, 구성 요소, 설치 폴더, 진행, 완료 페이지가 있습니다. 기본값은 사용자 단위(`~/.local`, `~/.vst3`, `~/.clap`)이며, `--system`은 시스템 단위(`/opt`, `/usr/lib/vst3`, `/usr/lib/clap`)로 설치하고 파일 작업만 권한을 높입니다. 설치 후 애플리케이션 메뉴에 "HiFiShifter 제거"가 추가되고 터미널에서는 `hifishifter-uninstall`로도 제거할 수 있습니다. 설정, 프로젝트, 직접 추가한 모델 파일은 유지됩니다. `--yes`는 무인 설치, `--extract=<폴더>`는 압축 해제만 합니다. 실행 전에 시스템에 **WebKitGTK 4.1** 이 있는지 확인하세요(아래 "WebView 안내" 참고). AppImage 가 호스트에 요구하는 유일한 대형 의존성입니다.
 
 **GPU 가속 정보**: HiFiShifter는 각 플랫폼별로 다양한 GPU 가속 옵션을 제공합니다:
 

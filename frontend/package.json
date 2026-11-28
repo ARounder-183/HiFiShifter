@@ -17,7 +17,8 @@
         "preview": "vite preview",
         "build:sdk": "tsc -p tsconfig.sdk.json",
         "build:installer-strings": "node ../scripts/release/build-installer-strings.mjs",
-        "check:bundle": "node scripts/check-bundle-size.mjs"
+        "check:bundle": "node scripts/check-bundle-size.mjs",
+        "build:linux-installer-strings": "node ../scripts/release/build-linux-installer-strings.mjs"
     },
     "engines": {
         "node": ">=22.12"

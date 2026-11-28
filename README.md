@@ -24,7 +24,7 @@ HiFiShifter 是一个图形化人声编辑与合成工具。它支持多轨道�
 
 - **Windows**：NSIS 安装包（`installer`）或便携版压缩包（`portable`），提供 x86_64 与 arm64 架构。安装包一次装上独立 App、VST3/CLAP 插件与全机共享模型库。
 - **macOS**：一个 `macos-universal` 三合一 `.pkg`（Intel 与 Apple Silicon 通用）装上 `/Applications/HiFiShifter.app`、VST3/CLAP 插件与共享模型库；安装向导里可以只勾选需要的插件格式，App 与模型库必装。装完后 `/Library/Application Support/HiFiShifter` 里有一份卸载包，同版本的 `-uninstaller.pkg` 也会一起发布，一键移除 App、插件、模型库与缓存，不碰工程、音频文件与你的设置。安装包未签名，首次安装需要手动放行；若提示"文件已损坏"，请按[使用手册](docs/i18n/USERMANUAL.md#一安装)中的步骤处理。
-- **Linux**：三合一 `.tar.gz`，内含 AppImage、VST3/CLAP 插件、共享模型库与 `install.sh`。解压后执行 `./install.sh` 装进当前用户（`~/.local`、`~/.vst3`、`~/.clap`），或 `sudo ./install.sh --system` 装到系统目录。运行需要系统提供 `webkit2gtk-4.1`（Arch/CachyOS、Ubuntu 24.04+、Fedora 39+、Debian 13+ 等均已提供；Ubuntu 22.04 只有 `webkit2gtk-4.0`，不受支持）。
+- **Linux**：一个自解压安装包 `.run`（x86_64 / arm64），双击或在终端执行后打开安装向导：欢迎页、许可协议、安装范围（仅当前用户 / 所有用户）、组件选择（VST3、CLAP、应用菜单项、工程文件关联，App 与模型库必装）、安装目录、进度与完成页。默认装进当前用户（`~/.local`、`~/.vst3`、`~/.clap`）；装给所有用户时只对文件操作提权。装完在应用菜单里有「卸载 HiFiShifter」入口，命令行也可以运行 `hifishifter-uninstall`，卸载会移除本体、插件与模型库，保留设置、工程与你自备的模型。`--extract=<目录>` 可只解包不安装。运行需要系统提供 `webkit2gtk-4.1`（Arch/CachyOS、Ubuntu 24.04+、Fedora 39+、Debian 13+ 等均已提供；Ubuntu 22.04 只有 `webkit2gtk-4.0`，不受支持）。
 
 **VST3 / ARA 插件**：Windows、macOS 与 Linux 的三合一安装包都已包含 VST3（ARA）与 CLAP 插件，可在 REAPER 中以嵌入界面使用（目前主要针对 REAPER 验证）。安装方式、运行依赖与使用限制见[使用手册](docs/i18n/USERMANUAL.md#八vst3--ara-插件reaper)的插件章节。
 

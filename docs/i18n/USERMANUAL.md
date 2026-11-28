@@ -17,7 +17,7 @@ HiFiShifter 是一款图形化人声编辑与合成工具。它支持多轨道�
     1. 终端输入 `xattr -cr /Applications/HiFiShifter.app`；
     2. 通过系统设置允许运行 `系统设置` -> `隐私与安全性` -> 点击 `仍要打开`。
 
-- Linux 版本提供的是三合一 `.tar.gz`，内含 AppImage、VST3/CLAP 插件、共享模型库与 `install.sh`。解压后执行 `./install.sh` 装进当前用户（`~/.local`、`~/.vst3`、`~/.clap`），或执行 `sudo ./install.sh --system` 装到系统目录（`/opt`、`/usr/lib/vst3`、`/usr/lib/clap`）。运行前请确认系统已提供 **WebKitGTK 4.1**（见下方「关于 WebView 的说明」），它是 AppImage 唯一需要宿主额外提供的大型依赖。
+- Linux 版本提供的是自解压安装包 `.run`，双击或在终端执行后打开安装向导（界面语言跟随 `LANG`，也可用 `--lang` 指定）：欢迎页、许可协议、安装范围、组件选择、安装目录、进度与完成页。默认装进当前用户（`~/.local`、`~/.vst3`、`~/.clap`）；加 `--system` 则装到系统目录（`/opt`、`/usr/lib/vst3`、`/usr/lib/clap`），此时只有文件操作需要提权。装完在应用菜单里有「卸载 HiFiShifter」，也可以运行 `hifishifter-uninstall`；卸载会移除本体、插件与模型库，保留设置、工程与你自备的模型。`--yes` 为无人值守安装，`--extract=<目录>` 只解包不安装。运行前请确认系统已提供 **WebKitGTK 4.1**（见下方「关于 WebView 的说明」），它是 AppImage 唯一需要宿主额外提供的大型依赖。
 
 **关于 GPU 加速**：HiFiShifter 为各平台提供了多种 GPU 加速方案：
 
@@ -779,7 +779,7 @@ App**，编辑结果随 REAPER 工程一起保存。
 
 插件有两种装法，任选其一：
 
-- **三合一安装包（推荐）**：Windows 运行 `HiFiShifter_v<版本>_windows-x86_64-setup.exe`；macOS 运行 `HiFiShifter_v<版本>_macos-universal-unified.pkg`（安装向导里可只勾选需要的插件格式，App 与模型库必装）；Linux 解压 `HiFiShifter_v<版本>_linux-<架构>-unified.tar.gz` 后执行 `./install.sh`（或 `sudo ./install.sh --system`）。**一个安装包同时装上独立 App、VST3/ARA 与 CLAP 插件**；模型只装一遍（共享库，见[模型文件与共享](#模型文件与共享)）。Windows 安装器会先确认 REAPER 与 HiFiShifter 均已退出。
+- **三合一安装包（推荐）**：Windows 运行 `HiFiShifter_v<版本>_windows-x86_64-setup.exe`；macOS 运行 `HiFiShifter_v<版本>_macos-universal-unified.pkg`（安装向导里可只勾选需要的插件格式，App 与模型库必装）；Linux 运行 `HiFiShifter_v<版本>_linux-<架构>-unified.run`（安装向导里同样可只勾选需要的插件格式，App 与模型库必装；`--yes` 无人值守，`--extract=<目录>` 只解包）。**一个安装包同时装上独立 App、VST3/ARA 与 CLAP 插件**；模型只装一遍（共享库，见[模型文件与共享](#模型文件与共享)）。Windows 安装器会先确认 REAPER 与 HiFiShifter 均已退出。
 - **手动拷贝**：关闭 REAPER，把**整个** `HiFiShifter.vst3` 文件夹放入一个 VST3 目录（例如 Windows 的 `C:\Program Files\Common Files\VST3`，macOS 的 `~/Library/Audio/Plug-Ins/VST3`，Linux 的 `~/.vst3`），或把它的父目录加入 REAPER 的 VST 扫描路径。不要只复制文件夹里的单个文件 —— 界面与运行依赖都在这个文件夹里。手动拷贝版需要单独准备模型（或把 `HIFISHIFTER_MODELS_DIR` 指向模型目录）。
 
 Windows 需要已安装 WebView2 运行时与 VC++ x64 运行库；macOS 与 Linux 的依赖见[安装](#一安装)章节。

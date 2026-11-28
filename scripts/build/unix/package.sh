@@ -27,7 +27,11 @@
 # under models/<version>. Without these flags, the original plugins-only behavior is kept.
 #
 # Artifacts:
-#   Linux   dist/HiFiShifter_v<version>_<os>-<arch>-unified.tar.gz (includes install.sh)
+#   Linux   dist/HiFiShifter_v<version>_<os>-<arch>-unified.run
+#             a self-extracting wizard (welcome / license / scope / components / folder /
+#             progress / conclusion), localized in five languages. It installs the AppImage,
+#             the plug-ins, the shared model library, a menu entry and an uninstaller;
+#             --extract=DIR gives back the plain tree for anyone who wants it.
 #   macOS   dist/HiFiShifter_v<version>_<os>-<arch>-unified.pkg
 #             a product archive: welcome / readme / licence / conclusion pages, one
 #             selectable choice per plug-in format, and the payload split so that "app
@@ -80,7 +84,7 @@ Usage: scripts/build/unix/package.sh [options]
   --merge-app-arch=DIR  merge the App's single-arch Mach-Os from one architecture's cargo
                         output directory (backend/target/<triple>/<profile>); repeat once per
                         architecture. macOS only
-  --appimage=FILE       Linux unified: install an existing AppImage into the tar.gz too
+  --appimage=FILE       Linux unified: wrap this AppImage into the self-extracting installer
   --app-bundle=DIR      macOS unified: install an existing .app into the pkg too
                         (macOS always also produces the -uninstaller.pkg artifact)
   -h, --help
@@ -350,10 +354,9 @@ package_linux_plugins() {
     # with "unbound variable" (set -u). An empty array can only come from a mistyped --formats;
     # give a human-readable message in that case instead of making the user decode array expansion.
     [ ${#entries[@]} -gt 0 ] || die "no format selected: --formats=$FORMATS"
-    cp "$REPO_ROOT/scripts/plugin/unix/install.sh" "$stage/install.sh"
-    chmod +x "$stage/install.sh"
+    stage_linux_installer "$stage"
     hfs_stage_licenses "$stage" "$REPO_ROOT"
-    hfs_tarball "$ARTIFACT_BASE.tar.gz" "$stage" "${entries[@]}" install.sh LICENSE licenses
+    hfs_tarball "$ARTIFACT_BASE.tar.gz" "$stage" "${entries[@]}" install.sh installer version LICENSE licenses
     rm -rf "$stage"
 }
 
@@ -408,13 +411,57 @@ sign_macos_pkg() {
     log "artifact $(du -h "$pkg" | cut -f1): $pkg"
 }
 
-# Linux unified: AppImage + VST3 + CLAP + one shared model store + install.sh.
-# All bundles keep only models.json; the weights live in the top-level models/<version>,
-# installed by install.sh into the XDG data directory (with --system: /usr/local/share/HiFiShifter).
+# ── Linux payload assembly ─────────────────────────────────────────────────
+#
+# [Why the wizard is assembled here and not inside the .run] The self-extracting file is a stub
+# with a tar.gz appended; everything the user sees is a file in that tar. Keeping the assembly
+# in one function means the plugin-only package and the unified one ship byte-identical
+# installer scripts, so "the uninstaller works" is not a property of one artifact.
+
+# <stage>: install.sh at the top, its implementation in installer/, and the version the wizard
+# shows and records in the manifest.
+stage_linux_installer() {
+    local stage="$1" src="$REPO_ROOT/scripts/release/linux-installer"
+    mkdir -p "$stage/installer"
+    cp -f "$src/install.sh" "$stage/install.sh"
+    cp -f "$src/run.sh" "$stage/installer/run.sh"
+    cp -f "$src/ui.sh" "$stage/installer/ui.sh"
+    cp -f "$src/paths.sh" "$stage/installer/paths.sh"
+    cp -f "$src/strings.sh" "$stage/installer/strings.sh"
+    cp -f "$src/uninstall.sh" "$stage/installer/uninstall.sh"
+    chmod +x "$stage/install.sh" "$stage/installer/run.sh"
+    printf '%s\n' "$PRODUCT_VERSION" >"$stage/version"
+}
+
+# <stage> <output.run>: stub + payload, in one executable file.
+#
+# [Why cat and not a zip with a header] The stub finds its payload by line number and hands the
+# rest to tar. Nothing is re-encoded, so the download is exactly "stub + payload" in size, and
+# --extract gives back the same tree the tar.gz used to contain.
+make_self_extracting_run() {
+    local stage="$1" out="$2" stub="$REPO_ROOT/scripts/release/linux-installer/self-extract.sh"
+    local payload="$OUT_DIR/.hifishifter-payload.tar.gz"
+    step "assembling the self-extracting installer"
+    [ -f "$stub" ] || die "missing self-extract stub: $stub"
+    rm -f "$payload" "$out"
+    tar -C "$stage" -czf "$payload" . || die "failed to pack the installer payload"
+    cat "$stub" "$payload" >"$out" || die "failed to assemble $out"
+    chmod +x "$out"
+    rm -f "$payload"
+    log "artifact $(du -h "$out" | cut -f1): $out"
+}
+
+# Linux unified: AppImage + VST3 + CLAP + one shared model store, wrapped in a self-extracting
+# installer that opens a wizard. All bundles keep only models.json; the weights live in the
+# top-level models/<version>, installed by the wizard into the XDG data directory (with
+# --system: /usr/local/share/HiFiShifter).
+#
+# [Why .run instead of .tar.gz] The other two platforms hand the user one file that opens a
+# wizard. "Extract this archive, then run install.sh" is two steps, needs a terminal, and leaves
+# a folder nobody explains -- and it had no uninstaller at all. The payload is unchanged; only
+# the container became executable.
 package_linux_unified() {
-    local stage="$OUT_DIR/stage-unified" entries=(
-        "HiFiShifter.AppImage" "models" "install.sh" "LICENSE" "licenses"
-    )
+    local stage="$OUT_DIR/stage-unified"
     step "packaging the Linux unified installer"
     [ -f "$APPIMAGE" ] || die "--appimage file does not exist: $APPIMAGE"
     rm -rf "$stage"
@@ -426,14 +473,12 @@ package_linux_unified() {
         [ -d "$OUT_DIR/HiFiShifter.vst3" ] || die "missing $OUT_DIR/HiFiShifter.vst3"
         cp -R "$OUT_DIR/HiFiShifter.vst3" "$stage/"
         hfs_strip_models_to_manifest "$stage/HiFiShifter.vst3/Contents/Resources/models"
-        entries+=("HiFiShifter.vst3")
     fi
     if wants clap; then
         [ -f "$OUT_DIR/clap/HiFiShifter.clap" ] || die "missing $OUT_DIR/clap/HiFiShifter.clap"
         cp "$OUT_DIR/clap/HiFiShifter.clap" "$stage/"
         cp -R "$OUT_DIR/clap/HiFiShifter-resources" "$stage/"
         hfs_strip_models_to_manifest "$stage/HiFiShifter-resources/models"
-        entries+=("HiFiShifter.clap" "HiFiShifter-resources")
     fi
 
     mkdir -p "$stage/models/$MODEL_VERSION"
@@ -441,10 +486,17 @@ package_linux_unified() {
     [ -f "$stage/models/$MODEL_VERSION/models.json" ] \
         || die "models.json missing from the shared model directory"
 
-    cp "$REPO_ROOT/scripts/plugin/unix/install.sh" "$stage/install.sh"
-    chmod +x "$stage/install.sh"
+    # Icons for the application menu entry: the same PNG sizes the Tauri bundle ships.
+    # [Why 256x256 is icons/icon.png] That file is the large master; hicolor resolves by the
+    # directory name, not by the pixel size, so this is the size a theme lookup will find.
+    mkdir -p "$stage/icons"
+    cp -f "$REPO_ROOT/backend/src-tauri/icons/32x32.png" "$stage/icons/32x32.png"
+    cp -f "$REPO_ROOT/backend/src-tauri/icons/128x128.png" "$stage/icons/128x128.png"
+    cp -f "$REPO_ROOT/backend/src-tauri/icons/icon.png" "$stage/icons/256x256.png"
+
+    stage_linux_installer "$stage"
     hfs_stage_licenses "$stage" "$REPO_ROOT"
-    hfs_tarball "$UNIFIED_BASE.tar.gz" "$stage" "${entries[@]}"
+    make_self_extracting_run "$stage" "$UNIFIED_BASE.run"
     rm -rf "$stage"
 }
 
