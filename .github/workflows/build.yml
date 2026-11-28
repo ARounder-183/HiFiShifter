@@ -694,33 +694,18 @@ jobs:
           find "$WORK/unified" -maxdepth 2 | sort
 
           FAIL=0
-          ok()   { printf '  ok   %s\n' "$1"; }
-          bad()  { printf '  FAIL %s\n' "$1" >&2; FAIL=1; }
-          # <file> <extended regex> <what it proves>
-          expect() {
-              if grep -Eq -- "$2" "$1"; then ok "$3"; else bad "$3 (missing /$2/ in $(basename "$1"))"; fi
-          }
+          ok()  { printf '  ok   %s\n' "$1"; }
+          bad() { printf '  FAIL %s\n' "$1" >&2; FAIL=1; }
 
           DIST="$(find "$WORK/unified" -name Distribution -print -quit)"
           [ -f "$DIST" ] || { echo "ERROR: the pkg has no Distribution; it is a bare component package" >&2; exit 1; }
 
-          expect "$DIST" 'customize="always"' "the wizard always shows the choices page"
-          expect "$DIST" '<choices-outline>' "the wizard has a choices page"
-          expect "$DIST" '<os-version min=' "the minimum macOS is declared"
-          expect "$DIST" '<must-close>' "a running app is closed instead of failing mid-install"
-          expect "$DIST" '<welcome file="welcome.html"' "the wizard has a welcome page"
-          expect "$DIST" '<readme file="readme.html"' "the wizard has a read-me page"
-          expect "$DIST" '<license file="license.txt"' "the wizard has a licence page"
-          expect "$DIST" '<conclusion file="conclusion.html"' "the wizard has a conclusion page"
-          for choice in app models vst3 clap; do
-              expect "$DIST" "choice id=\"$choice\"" "choice $choice exists"
-          done
-          # The two halves of "the user can choose": what must be installed cannot be
-          # deselected, and what may be skipped starts selected so a default install works.
-          expect "$DIST" 'id="app" title="[^"]+" description="[^"]+" enabled="false"' "the app cannot be deselected"
-          expect "$DIST" 'id="models" title="[^"]+" description="[^"]+" enabled="false"' "the model library cannot be deselected"
-          expect "$DIST" 'id="vst3" title="[^"]+" description="[^"]+" enabled="true"' "the VST3 plug-in can be deselected"
-          expect "$DIST" 'id="clap" title="[^"]+" description="[^"]+" enabled="true"' "the CLAP plug-in can be deselected"
+          # [Why the rules live in the static gate] productbuild re-serializes the Distribution
+          # -- attributes come back reordered and installKBytes is added -- so a regex here
+          # would describe the generator instead of the artifact, and would break the day the
+          # order changes. The gate's own parser is pointed at the packaged file.
+          python3 scripts/checks/check-macos-pkg.py --distribution "$DIST" --kind=install \
+              || bad "the packaged Distribution does not offer the wizard it claims"
 
           # Localized pages: four languages, plus the English fallback at the resource root.
           for lang in ja ko zh_CN zh_TW; do
@@ -760,12 +745,8 @@ jobs:
 
           UDIST="$(find "$WORK/uninstaller" -name Distribution -print -quit)"
           [ -f "$UDIST" ] || { echo "ERROR: the uninstaller is not a product archive" >&2; exit 1; }
-          expect "$UDIST" 'customize="never"' "the uninstaller asks no questions"
-          if grep -q '<license' "$UDIST"; then
-              bad "the uninstaller shows a licence page"
-          else
-              ok "the uninstaller asks for no licence"
-          fi
+          python3 scripts/checks/check-macos-pkg.py --distribution "$UDIST" --kind=uninstall \
+              || bad "the packaged uninstaller is not the one this repository describes"
 
           # ── Round trip ──────────────────────────────────────────────────
           echo "=== install ==="
@@ -779,8 +760,11 @@ jobs:
               if [ -e "$path" ]; then ok "installed $path"; else bad "not installed: $path"; fi
           done
           codesign --verify --deep --strict "/Applications/HiFiShifter.app" || bad "the installed app lost its signature"
+          # [Why --pkgs=PATTERN and not "pkgutil --pkgs | grep -q"] grep exits on the first
+          # match, and with `set -o pipefail` the resulting SIGPIPE in pkgutil would turn a
+          # present receipt into "no receipt".
           for id in com.arounder.hifishifter.app com.arounder.hifishifter.models com.arounder.hifishifter.vst3 com.arounder.hifishifter.clap; do
-              if pkgutil --pkgs | grep -qx "$id"; then ok "receipt $id"; else bad "no receipt for $id"; fi
+              if [ -n "$(pkgutil --pkgs="^$id$")" ]; then ok "receipt $id"; else bad "no receipt for $id"; fi
           done
 
           echo "=== uninstall ==="
@@ -793,7 +777,7 @@ jobs:
               if [ -e "$path" ]; then bad "still there after uninstalling: $path"; else ok "removed $path"; fi
           done
           for id in com.arounder.hifishifter.app com.arounder.hifishifter.models com.arounder.hifishifter.vst3 com.arounder.hifishifter.clap; do
-              if pkgutil --pkgs | grep -qx "$id"; then bad "receipt still present: $id"; else ok "receipt forgotten: $id"; fi
+              if [ -n "$(pkgutil --pkgs="^$id$")" ]; then bad "receipt still present: $id"; else ok "receipt forgotten: $id"; fi
           done
 
           [ "$FAIL" -eq 0 ] || { echo "ERROR: the macOS pkg is not the wizard it claims to be" >&2; exit 1; }

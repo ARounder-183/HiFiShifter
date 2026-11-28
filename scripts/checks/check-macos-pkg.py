@@ -22,6 +22,15 @@ a way that still builds:
 Only Installer itself can prove the round trip; that is the workflow's "Assert macOS pkg
 layout and round trip" step. This gate proves the wiring and the generated layout.
 
+[Why the workflow also runs this file] `productbuild` re-serializes the Distribution it embeds:
+attributes are reordered and `installKBytes` is added. A grep for 'id="app" title=...' therefore
+proves nothing about the packaged artifact, and would break the day the order changes. The
+workflow passes the extracted Distribution back to this file with --distribution, so the rules
+above are applied to the real artifact by the same code that checks the generator.
+
+  python3 scripts/checks/check-macos-pkg.py                          # the whole gate
+  python3 scripts/checks/check-macos-pkg.py --distribution FILE --kind=install|uninstall
+
 Exit code 0 when every rule holds.
 """
 
@@ -296,7 +305,57 @@ def check_uninstall(dist: pathlib.Path, findings: list[str]) -> None:
         )
 
 
+def check_one_distribution(argv: list[str]) -> int:
+    """Validate one Distribution XML, as extracted from a built product archive."""
+    path = None
+    kind = "install"
+    index = 0
+    while index < len(argv):
+        argument = argv[index]
+        if argument == "--distribution":
+            index += 1
+            if index >= len(argv):
+                raise SystemExit("check-macos-pkg: --distribution requires a path")
+            path = pathlib.Path(argv[index])
+        elif argument.startswith("--distribution="):
+            path = pathlib.Path(argument.split("=", 1)[1])
+        elif argument.startswith("--kind="):
+            kind = argument.split("=", 1)[1]
+        else:
+            raise SystemExit("check-macos-pkg: unknown argument %r" % argument)
+        index += 1
+    if path is None:
+        raise SystemExit("check-macos-pkg: --distribution requires a path")
+    if kind not in ("install", "uninstall"):
+        raise SystemExit("check-macos-pkg: --kind must be install or uninstall")
+    if not path.is_file():
+        raise SystemExit("check-macos-pkg: no such file: %s" % path)
+
+    try:
+        identifier = json.loads(read(TAURI_CONF))["identifier"]
+    except (json.JSONDecodeError, KeyError) as error:
+        raise SystemExit(
+            "check-macos-pkg: cannot read the identifier from tauri.conf.json: %s" % error
+        )
+
+    findings: list[str] = []
+    if kind == "install":
+        check_install(path, identifier, findings)
+    else:
+        check_uninstall(path, findings)
+    if findings:
+        for finding in findings:
+            print("check-macos-pkg: %s" % finding, file=sys.stderr)
+        return 1
+    print("check-macos-pkg: the packaged Distribution still says what it said before packaging")
+    return 0
+
+
 def main() -> int:
+    argv = sys.argv[1:]
+    if "--distribution" in argv:
+        return check_one_distribution(argv)
+
     findings: list[str] = []
     package_code = code_only(read(PACKAGE_SH))
     workflow = read(WORKFLOW)
@@ -443,16 +502,32 @@ def main() -> int:
         )
     else:
         product_dir = product_dir_match.group(1)
+        # Derived data goes, user data stays. That distinction is what makes the uninstaller
+        # safe to run: "models-user" holds weights the installer never wrote, and the plug-in
+        # notepad is text somebody typed.
         for relative in (
-            "Library/Application Support/" + product_dir,
             "Library/Caches/" + product_dir,
             "Library/Logs/" + product_dir,
         ):
             if relative not in uninstall:
                 findings.append(
-                    "scripts/release/macos-pkg/uninstall.sh: %r is never removed, but the app "
-                    "writes it (see app_paths.rs)" % relative
+                    "scripts/release/macos-pkg/uninstall.sh: %r is never removed, but it is "
+                    "derived data the app writes (see app_paths.rs)" % relative
                 )
+        support = "Library/Application Support/" + product_dir
+        for line in uninstall.splitlines():
+            if line.strip().startswith("remove ") and 'remove "$home/' + support in line:
+                findings.append(
+                    "scripts/release/macos-pkg/uninstall.sh: %r is deleted, but that directory "
+                    "holds the user's settings, plug-in notes and their own model files "
+                    "(models-user); an uninstaller must not remove data the installer never "
+                    "wrote" % support
+                )
+        if not any("kept" in line and support in line for line in uninstall.splitlines()):
+            findings.append(
+                "scripts/release/macos-pkg/uninstall.sh: nothing records that %r is kept, so "
+                "the user cannot find their settings or their own models afterwards" % support
+            )
     for path in (
         "/Applications/HiFiShifter.app",
         "/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3",
@@ -500,6 +575,10 @@ def main() -> int:
             ("installer -allowUntrusted", "nothing actually installs the package"),
             ("codesign --verify", "the installed app's signature is never verified"),
             ("pkgutil --pkgs", "the receipts are never checked"),
+            (
+                "check-macos-pkg.py --distribution",
+                "the packaged Distribution is not checked by the same rules as the generator",
+            ),
         ):
             if needle not in assert_code:
                 findings.append(
