@@ -166,13 +166,21 @@ def main() -> int:
                     violations.append(
                         f'{path.relative_to(ROOT).as_posix()}:{number}: removed log UI identifier: {identifier}'
                     )
-    submenu = FRONTEND_SRC / 'components' / 'layout' / 'LogVerbosityMenuItems.tsx'
+    # The submenu is menu-item *data* now (useLogVerbosityMenu.ts returns
+    # AppMenuItemSpec[] and the shared menu surface renders it), so it can no longer
+    # grow a title row, a "Current: Low" row or a separator by rendering a Radix
+    # surface of its own -- which is exactly what the density rule forbids. Assert
+    # the two ways that could come back: rendering a menu surface here, and a status
+    # string; plus the semantic that must survive the migration: four mutually
+    # exclusive radio items, never checkboxes.
+    submenu = FRONTEND_SRC / 'components' / 'layout' / 'useLogVerbosityMenu.ts'
     submenu_text = submenu.read_text(encoding='utf-8')
-    for forbidden in ('<DropdownMenu.Label', '<DropdownMenu.Separator', 'statusText'):
+    submenu_rel = submenu.relative_to(ROOT).as_posix()
+    for forbidden in ('<DropdownMenu.', 'statusText'):
         if forbidden in submenu_text:
-            violations.append(
-                f'{submenu.relative_to(ROOT).as_posix()}: low-density submenu element: {forbidden}'
-            )
+            violations.append(f'{submenu_rel}: low-density submenu element: {forbidden}')
+    if 'radio: true' not in submenu_text:
+        violations.append(f'{submenu_rel}: the four levels must stay mutually exclusive radio items')
 
     if violations:
         print('log verbosity gate failed:')
