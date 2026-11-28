@@ -669,6 +669,136 @@ jobs:
           fi
           bash scripts/build/unix/package.sh --profile dist --reuse-frontend --no-verify "${APP_ARGS[@]}"
 
+      # [Why the wizard is asserted at runtime and not only in a static gate] The static gate
+      # reads the generator's output; only Installer can prove that the product archive is
+      # installable, that the choices page really offers what it claims, and that the
+      # uninstaller removes the same files the installer wrote. The runner is ephemeral, so
+      # installing into / and removing again is the cheapest way to find out before a user does.
+      - name: Assert macOS pkg layout and round trip
+        if: runner.os == 'macOS' && success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG="$(find dist -maxdepth 1 -name '*-unified.pkg' -print -quit)"
+          UNINSTALLER="$(find dist -maxdepth 1 -name '*-uninstaller.pkg' -print -quit)"
+          [ -n "$PKG" ] || { echo "ERROR: no *-unified.pkg under dist/" >&2; exit 1; }
+          [ -n "$UNINSTALLER" ] || { echo "ERROR: no *-uninstaller.pkg under dist/" >&2; exit 1; }
+          echo "installer:   $PKG"
+          echo "uninstaller: $UNINSTALLER"
+
+          WORK="$(mktemp -d)"
+          trap 'rm -rf "$WORK"' EXIT
+          pkgutil --expand-full "$PKG" "$WORK/unified"
+          pkgutil --expand-full "$UNINSTALLER" "$WORK/uninstaller"
+          echo "=== expanded product archive ==="
+          find "$WORK/unified" -maxdepth 2 | sort
+
+          FAIL=0
+          ok()   { printf '  ok   %s\n' "$1"; }
+          bad()  { printf '  FAIL %s\n' "$1" >&2; FAIL=1; }
+          # <file> <extended regex> <what it proves>
+          expect() {
+              if grep -Eq -- "$2" "$1"; then ok "$3"; else bad "$3 (missing /$2/ in $(basename "$1"))"; fi
+          }
+
+          DIST="$(find "$WORK/unified" -name Distribution -print -quit)"
+          [ -f "$DIST" ] || { echo "ERROR: the pkg has no Distribution; it is a bare component package" >&2; exit 1; }
+
+          expect "$DIST" 'customize="always"' "the wizard always shows the choices page"
+          expect "$DIST" '<choices-outline>' "the wizard has a choices page"
+          expect "$DIST" '<os-version min=' "the minimum macOS is declared"
+          expect "$DIST" '<must-close>' "a running app is closed instead of failing mid-install"
+          expect "$DIST" '<welcome file="welcome.html"' "the wizard has a welcome page"
+          expect "$DIST" '<readme file="readme.html"' "the wizard has a read-me page"
+          expect "$DIST" '<license file="license.txt"' "the wizard has a licence page"
+          expect "$DIST" '<conclusion file="conclusion.html"' "the wizard has a conclusion page"
+          for choice in app models vst3 clap; do
+              expect "$DIST" "choice id=\"$choice\"" "choice $choice exists"
+          done
+          # The two halves of "the user can choose": what must be installed cannot be
+          # deselected, and what may be skipped starts selected so a default install works.
+          expect "$DIST" 'id="app" title="[^"]+" description="[^"]+" enabled="false"' "the app cannot be deselected"
+          expect "$DIST" 'id="models" title="[^"]+" description="[^"]+" enabled="false"' "the model library cannot be deselected"
+          expect "$DIST" 'id="vst3" title="[^"]+" description="[^"]+" enabled="true"' "the VST3 plug-in can be deselected"
+          expect "$DIST" 'id="clap" title="[^"]+" description="[^"]+" enabled="true"' "the CLAP plug-in can be deselected"
+
+          # Localized pages: four languages, plus the English fallback at the resource root.
+          for lang in ja ko zh_CN zh_TW; do
+              for page in welcome readme conclusion; do
+                  if [ -n "$(find "$WORK/unified" -path "*/$lang.lproj/$page.html" -print -quit)" ]; then
+                      ok "$lang/$page.html"
+                  else
+                      bad "$lang/$page.html missing (the wizard would show English)"
+                  fi
+              done
+              if [ -n "$(find "$WORK/unified" -path "*/$lang.lproj/Localizable.strings" -print -quit)" ]; then
+                  ok "$lang/Localizable.strings"
+              else
+                  bad "$lang/Localizable.strings missing (choice titles stay English)"
+              fi
+          done
+
+          # The payload has to carry all four choices' content, plus the uninstaller copy that
+          # survives deleting the download.
+          for path in \
+              "Applications/HiFiShifter.app/Contents/MacOS/HiFiShifter" \
+              "Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3/Contents/MacOS/HiFiShifter" \
+              "Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap/Contents/MacOS/HiFiShifter" \
+              "Library/Application Support/HiFiShifter/Uninstall HiFiShifter.pkg" \
+              "Library/Application Support/HiFiShifter/LICENSE" ; do
+              if [ -n "$(find "$WORK/unified" -path "*/$path" -print -quit)" ]; then
+                  ok "payload $path"
+              else
+                  bad "payload $path missing"
+              fi
+          done
+          if [ -n "$(find "$WORK/unified" -path "*/Library/Application Support/HiFiShifter/models/*/models.json" -print -quit)" ]; then
+              ok "the shared model store carries its manifest"
+          else
+              bad "the shared model store has no models.json"
+          fi
+
+          UDIST="$(find "$WORK/uninstaller" -name Distribution -print -quit)"
+          [ -f "$UDIST" ] || { echo "ERROR: the uninstaller is not a product archive" >&2; exit 1; }
+          expect "$UDIST" 'customize="never"' "the uninstaller asks no questions"
+          if grep -q '<license' "$UDIST"; then
+              bad "the uninstaller shows a licence page"
+          else
+              ok "the uninstaller asks for no licence"
+          fi
+
+          # ── Round trip ──────────────────────────────────────────────────
+          echo "=== install ==="
+          sudo installer -allowUntrusted -pkg "$PKG" -target / -verbose
+          for path in \
+              "/Applications/HiFiShifter.app" \
+              "/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3" \
+              "/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap" \
+              "/Library/Application Support/HiFiShifter/Uninstall HiFiShifter.pkg" \
+              "/Library/Application Support/HiFiShifter/models" ; do
+              if [ -e "$path" ]; then ok "installed $path"; else bad "not installed: $path"; fi
+          done
+          codesign --verify --deep --strict "/Applications/HiFiShifter.app" || bad "the installed app lost its signature"
+          for id in com.arounder.hifishifter.app com.arounder.hifishifter.models com.arounder.hifishifter.vst3 com.arounder.hifishifter.clap; do
+              if pkgutil --pkgs | grep -qx "$id"; then ok "receipt $id"; else bad "no receipt for $id"; fi
+          done
+
+          echo "=== uninstall ==="
+          sudo installer -allowUntrusted -pkg "$UNINSTALLER" -target / -verbose
+          for path in \
+              "/Applications/HiFiShifter.app" \
+              "/Library/Audio/Plug-Ins/VST3/HiFiShifter.vst3" \
+              "/Library/Audio/Plug-Ins/CLAP/HiFiShifter.clap" \
+              "/Library/Application Support/HiFiShifter" ; do
+              if [ -e "$path" ]; then bad "still there after uninstalling: $path"; else ok "removed $path"; fi
+          done
+          for id in com.arounder.hifishifter.app com.arounder.hifishifter.models com.arounder.hifishifter.vst3 com.arounder.hifishifter.clap; do
+              if pkgutil --pkgs | grep -qx "$id"; then bad "receipt still present: $id"; else ok "receipt forgotten: $id"; fi
+          done
+
+          [ "$FAIL" -eq 0 ] || { echo "ERROR: the macOS pkg is not the wizard it claims to be" >&2; exit 1; }
+          echo "the product archive installs, offers choices, is localized, and uninstalls cleanly"
+
       # [Why this is a runtime assertion and not a static gate] lipo's output is the only
       # evidence that a file carries both slices; reading the sources cannot produce it.
       # Everything the merge could not repair shows up here instead of on a user's Intel Mac,
@@ -887,7 +1017,11 @@ jobs:
           # `HiFiShifter_v<version>_<os>-<arch>-unified.{pkg,tar.gz}` — note the **underscore**
           # before `<os>-<arch>` (the tag is appended to the version, not hyphenated onto it).
           # One artifact carries one installer; each platform has its own leg, so they cannot mix.
-          path: dist/HiFiShifter_*_${{ matrix.name }}-unified.*
+          # macOS also ships the uninstaller: a .pkg that only removes things is the one file a
+          # user cannot find anywhere else once the download is gone.
+          path: |
+            dist/HiFiShifter_*_${{ matrix.name }}-unified.*
+            dist/HiFiShifter_*_${{ matrix.name }}-uninstaller.*
           if-no-files-found: error
 
       - name: Dump diagnostics on failure (Linux)
