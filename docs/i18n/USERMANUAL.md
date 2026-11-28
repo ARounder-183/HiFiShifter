@@ -17,7 +17,7 @@ HiFiShifter 是一款图形化人声编辑与合成工具。它支持多轨道�
     1. 终端输入 `xattr -cr /Applications/HiFiShifter.app`；
     2. 通过系统设置允许运行 `系统设置` -> `隐私与安全性` -> 点击 `仍要打开`。
 
-- Linux 版本提供的是自解压安装包 `.run`，双击或在终端执行后打开安装向导（界面语言跟随 `LANG`，也可用 `--lang` 指定）：欢迎页、许可协议、安装范围、组件选择、安装目录、进度与完成页。默认装进当前用户（`~/.local`、`~/.vst3`、`~/.clap`）；加 `--system` 则装到系统目录（`/opt`、`/usr/lib/vst3`、`/usr/lib/clap`），此时只有文件操作需要提权。装完在应用菜单里有「卸载 HiFiShifter」，也可以运行 `hifishifter-uninstall`；卸载会移除本体、插件与模型库，保留设置、工程与你自备的模型。`--yes` 为无人值守安装，`--extract=<目录>` 只解包不安装。运行前请确认系统已提供 **WebKitGTK 4.1**（见下方「关于 WebView 的说明」），它是 AppImage 唯一需要宿主额外提供的大型依赖。
+- Linux 版本按发行版提供原生安装包：Debian/Ubuntu 用 `.deb`（`sudo apt install ./hifishifter*.deb`，或在软件中心双击打开），Fedora/RHEL 用 `.rpm`（`sudo dnf install ./hifishifter*.rpm`）。下载目录里是四个包 —— `hifishifter`（本体与桌面项）、`hifishifter-models`（共享模型库）、`hifishifter-vst3`、`hifishifter-clap`，一次全部安装即可；插件装进 `/usr/lib/vst3` 与 `/usr/lib/clap`，装完在 DAW 里重新扫描插件。卸载用 `sudo apt remove hifishifter hifishifter-vst3 hifishifter-clap`（模型库随后可由 `apt autoremove` 清掉）或对应的 `dnf remove`，设置、工程与你自备的模型（`~/.local/share/HiFiShifter/models-user`）不会被删除。没有对应发行版的包时用便携包：解压 `-portable.tar.xz` 后运行 `./install-user.sh`（`--yes` 无人值守，`--prefix=<目录>` 改安装位置），装进当前用户（`~/.local`、`~/.vst3`、`~/.clap`），`~/.local/bin/hifishifter-uninstall` 卸载；包里的 AppImage 也可以直接运行。原生包会声明依赖；AppImage 与便携包需要宿主自备 **WebKitGTK 4.1**（见下方「关于 WebView 的说明」）。
 
 **关于 GPU 加速**：HiFiShifter 为各平台提供了多种 GPU 加速方案：
 
@@ -779,7 +779,7 @@ App**，编辑结果随 REAPER 工程一起保存。
 
 插件有两种装法，任选其一：
 
-- **三合一安装包（推荐）**：Windows 运行 `HiFiShifter_v<版本>_windows-x86_64-setup.exe`；macOS 运行 `HiFiShifter_v<版本>_macos-universal-unified.pkg`（安装向导里可只勾选需要的插件格式，App 与模型库必装）；Linux 运行 `HiFiShifter_v<版本>_linux-<架构>-unified.run`（安装向导里同样可只勾选需要的插件格式，App 与模型库必装；`--yes` 无人值守，`--extract=<目录>` 只解包）。**一个安装包同时装上独立 App、VST3/ARA 与 CLAP 插件**；模型只装一遍（共享库，见[模型文件与共享](#模型文件与共享)）。Windows 安装器会先确认 REAPER 与 HiFiShifter 均已退出。
+- **安装包（推荐）**：Windows 运行 `HiFiShifter_v<版本>_windows-x86_64-setup.exe`；macOS 运行 `HiFiShifter_v<版本>_macos-universal-unified.pkg`（安装向导里可只勾选需要的插件格式，App 与模型库必装）；Linux 用 `sudo apt install ./hifishifter*.deb` 或 `sudo dnf install ./hifishifter*.rpm` 一次装齐本体、模型库与 `hifishifter-vst3` / `hifishifter-clap` 两个插件包。**一次安装同时装上独立 App、VST3/ARA 与 CLAP 插件**；模型只装一遍（共享库，见[模型文件与共享](#模型文件与共享)）。Windows 安装器会先确认 REAPER 与 HiFiShifter 均已退出。
 - **手动拷贝**：关闭 REAPER，把**整个** `HiFiShifter.vst3` 文件夹放入一个 VST3 目录（例如 Windows 的 `C:\Program Files\Common Files\VST3`，macOS 的 `~/Library/Audio/Plug-Ins/VST3`，Linux 的 `~/.vst3`），或把它的父目录加入 REAPER 的 VST 扫描路径。不要只复制文件夹里的单个文件 —— 界面与运行依赖都在这个文件夹里。手动拷贝版需要单独准备模型（或把 `HIFISHIFTER_MODELS_DIR` 指向模型目录）。
 
 Windows 需要已安装 WebView2 运行时与 VC++ x64 运行库；macOS 与 Linux 的依赖见[安装](#一安装)章节。
@@ -859,7 +859,7 @@ REAPER 按**轨道**管理 ARA 插件：它只会把插件所在**那一条轨�
 - 参数没有生效，或重新打开工程后不一致：保留工程副本和状态栏上的错误信息，先不要覆盖工程，也不要反复强制重新载入。
 - 出现内存不足的提示：表示这次没有执行气声分离，`气声分离` 相关的效果不会被静默忽略；可以改用更短的素材，或先关闭 `气声分离`。
 - 需要提交日志或排查问题：插件日志与独立 App 的日志**放在同一个目录**（插件按格式与宿主分文件（`plugin-vst3-reaper.log` / `plugin-clap-reaper.log`），独立 App 是 `hifishifter.log`，文件名不同，互不覆盖、各自轮转）。菜单 `帮助 → 打开日志文件夹` 会替你打开这个文件夹；若宿主环境不允许，则显示路径供你复制。`帮助 → 导出诊断信息...` 与 `选项 → 推理设备基准测试` 属于独立 App，插件里不可用。
-- 卸载：Windows 装的是安装器版本时，在「程序和功能 / 已安装的应用」里卸载 HiFiShifter；macOS 运行 `/Library/Application Support/HiFiShifter/Uninstall HiFiShifter.pkg`（或同版本的 `-uninstaller.pkg`）；Linux 在应用菜单里选「卸载 HiFiShifter」，或在终端执行 `hifishifter-uninstall`（`--system` 安装的加 `sudo`）。这些卸载入口会移除本体、插件、共享模型库与缓存（设置、工程与自备模型保留）；手动拷贝的版本删除 `HiFiShifter.vst3` 文件夹即可。手动拷贝时设置与共享模型库会保留（见[模型文件与共享](#模型文件与共享)）。
+- 卸载：Windows 装的是安装器版本时，在「程序和功能 / 已安装的应用」里卸载 HiFiShifter；macOS 运行 `/Library/Application Support/HiFiShifter/Uninstall HiFiShifter.pkg`（或同版本的 `-uninstaller.pkg`）；Linux 用包管理器卸载 —— `sudo apt remove hifishifter hifishifter-vst3 hifishifter-clap`（模型库随后 `sudo apt autoremove` 清掉）或对应的 `dnf remove`，便携包装的则运行 `~/.local/bin/hifishifter-uninstall`。这些卸载入口会移除本体、插件、共享模型库与缓存（设置、工程与自备模型保留）；手动拷贝的版本删除 `HiFiShifter.vst3` 文件夹即可。手动拷贝时设置与共享模型库会保留（见[模型文件与共享](#模型文件与共享)）。
 
 ### 从独立 App 连接宿主
 

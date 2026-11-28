@@ -17,7 +17,7 @@ HiFiShifter는 그래픽 보컬 편집 및 합성 도구입니다. 멀티트랙 
     1. 터미널에서 `xattr -cr /Applications/HiFiShifter.app` 입력；
     2. `시스템 설정` -> `개인정보 보호 및 보안` -> `그래도 열기`를 클릭하여 앱 실행을 허용합니다.
 
-- Linux 버전은 자체 압축 해제형 `.run` 설치 프로그램을 제공합니다. 두 번 클릭하거나 터미널에서 실행하면 마법사가 열립니다(표시 언어는 `LANG`을 따르며 `--lang`으로 지정할 수 있습니다). 환영, 라이선스, 설치 범위, 구성 요소, 설치 폴더, 진행, 완료 페이지가 있습니다. 기본값은 사용자 단위(`~/.local`, `~/.vst3`, `~/.clap`)이며, `--system`은 시스템 단위(`/opt`, `/usr/lib/vst3`, `/usr/lib/clap`)로 설치하고 파일 작업만 권한을 높입니다. 설치 후 애플리케이션 메뉴에 "HiFiShifter 제거"가 추가되고 터미널에서는 `hifishifter-uninstall`로도 제거할 수 있습니다. 설정, 프로젝트, 직접 추가한 모델 파일은 유지됩니다. `--yes`는 무인 설치, `--extract=<폴더>`는 압축 해제만 합니다. 실행 전에 시스템에 **WebKitGTK 4.1** 이 있는지 확인하세요(아래 "WebView 안내" 참고). AppImage 가 호스트에 요구하는 유일한 대형 의존성입니다.
+- Linux 버전은 배포판별 네이티브 패키지를 제공합니다. Debian/Ubuntu는 `.deb`(`sudo apt install ./hifishifter*.deb`, 또는 소프트웨어 센터에서 더블 클릭), Fedora/RHEL은 `.rpm`(`sudo dnf install ./hifishifter*.rpm`)을 사용합니다. 다운로드에는 네 개의 패키지가 들어 있습니다 — `hifishifter`(앱과 데스크톱 항목), `hifishifter-models`(공유 모델 라이브러리), `hifishifter-vst3`, `hifishifter-clap`. 한 번에 모두 설치하세요. 플러그인은 `/usr/lib/vst3`와 `/usr/lib/clap`에 설치되므로 DAW에서 다시 스캔합니다. 제거는 `sudo apt remove hifishifter hifishifter-vst3 hifishifter-clap`(모델은 이어서 `apt autoremove`) 또는 해당 `dnf remove`로 합니다. 설정, 프로젝트, 직접 추가한 모델(`~/.local/share/HiFiShifter/models-user`)은 삭제되지 않습니다. 패키지가 없는 배포판에서는 `-portable.tar.xz`를 풀고 `./install-user.sh`를 실행하세요(`--yes`는 무인, `--prefix=<폴더>`는 설치 위치 변경). 현재 사용자(`~/.local`, `~/.vst3`, `~/.clap`)에 설치되며 `~/.local/bin/hifishifter-uninstall`로 제거합니다. 안에 있는 AppImage는 단독으로도 실행됩니다. 네이티브 패키지는 의존성을 선언하며, AppImage와 포터블 번들은 시스템의 **WebKitGTK 4.1**이 필요합니다(아래 "WebView 안내" 참고).
 
 **GPU 가속 정보**: HiFiShifter는 각 플랫폼별로 다양한 GPU 가속 옵션을 제공합니다:
 
@@ -833,7 +833,7 @@ REAPER는 ARA 플러그인을 **트랙 단위**로 관리합니다. 플러그인
 - 파라미터가 적용되지 않거나 프로젝트를 다시 열었을 때 일치하지 않음: 프로젝트 사본과 상태 표시줄의 오류 내용을 보관하고, 프로젝트를 덮어쓰거나 강제 다시 로드를 반복하지 마세요.
 - 메모리 부족 알림이 표시됨: 이번에는 하모닉 분리가 실행되지 않았다는 뜻이며, `하모닉 분리` 관련 효과가 조용히 무시되지는 않습니다. 더 짧은 소재를 사용하거나 먼저 `하모닉 분리`를 끄세요.
 - 로그 제출이나 문제 해결: 플러그인 로그와 독립 실행형 앱의 로그는 **같은 폴더**에 저장됩니다(플러그인은 `plugin-<format>-<host>.log`(예: `plugin-vst3-reaper.log`), 앱은 `hifishifter.log`. 파일 이름이 달라 서로 덮어쓰지 않고 로테이션도 각자 수행합니다). 메뉴 `도움말 → 로그 폴더 열기`가 이 폴더를 열어 줍니다. 호스트 환경이 허용하지 않으면 경로를 표시하므로 바로 복사할 수 있습니다. `도움말 → 진단 정보 내보내기...`와 `옵션 → 추론 장치 벤치마크`는 독립 실행형 앱의 기능이며 플러그인에서는 사용할 수 없습니다.
-- 제거: Windows는 "프로그램 및 기능 / 설치된 앱"에서 HiFiShifter를 제거합니다. macOS는 `/Library/Application Support/HiFiShifter/Uninstall HiFiShifter.pkg`(또는 함께 배포되는 `-uninstaller.pkg`)를 실행합니다. Linux는 애플리케이션 메뉴에서 "HiFiShifter 제거"를 선택하거나 터미널에서 `hifishifter-uninstall`을 실행합니다(`--system`으로 설치했다면 `sudo`를 붙입니다). 이 제거 경로는 앱, 플러그인, 공유 모델 라이브러리와 캐시를 지우고 설정, 프로젝트, 직접 추가한 모델 파일은 유지합니다. 폴더를 직접 복사했다면 `HiFiShifter.vst3` 폴더를 삭제하면 됩니다. 직접 복사한 경우 설정과 공유 모델 라이브러리는 유지됩니다([모델 파일과 공유](#모델-파일과-공유) 참고).
+- 제거: Windows는 "프로그램 및 기능 / 설치된 앱"에서 HiFiShifter를 제거합니다. macOS는 `/Library/Application Support/HiFiShifter/Uninstall HiFiShifter.pkg`(또는 함께 배포되는 `-uninstaller.pkg`)를 실행합니다. Linux는 패키지 관리자로 제거합니다 — `sudo apt remove hifishifter hifishifter-vst3 hifishifter-clap`(모델 라이브러리는 이어서 `sudo apt autoremove`) 또는 해당 `dnf remove`, 포터블 설치라면 `~/.local/bin/hifishifter-uninstall`입니다. 이 제거 경로는 앱, 플러그인, 공유 모델 라이브러리와 캐시를 지우고 설정, 프로젝트, 직접 추가한 모델 파일은 유지합니다. 폴더를 직접 복사했다면 `HiFiShifter.vst3` 폴더를 삭제하면 됩니다. 직접 복사한 경우 설정과 공유 모델 라이브러리는 유지됩니다([모델 파일과 공유](#모델-파일과-공유) 참고).
 
 ### 독립 실행형 앱에서 호스트 연결
 

@@ -4,7 +4,7 @@
 Rust / 插件的黑盒自检与 AppImage 冒烟均已从工作流中移除。依赖漏洞扫描也不再由 CI
 承担，只在本地按需运行。需要跑测试时请在本地直接调用 `scripts/checks/` 下的脚本。
 
-唯一的例外是安装包的**打包断言**：macOS 的 `.pkg` 与 Linux 的 `.run` 会在 runner 上
+唯一的例外是安装包的**打包断言**：macOS 的 `.pkg` 与 Linux 的 `.deb` / `.rpm` 会在 runner 上
 真的装一遍、检查布局、再卸一遍。那不是测试代码，而是「这个安装包能不能装」的最后
 一环——只有真正运行过才知道，读源码永远读不出来。
 
@@ -13,7 +13,7 @@ Rust / 插件的黑盒自检与 AppImage 冒烟均已从工作流中移除。依
 | 工作流                | 触发                  | 职责                                                                  | 产物                                                   |
 | --------------------- | --------------------- | --------------------------------------------------------------------- | ------------------------------------------------------ |
 | `frontend-build.yml` | 被调用 / 手动         | 构建前端 `dist`（typecheck + vite build），供各产物流水线复用        | `frontend-dist`                                        |
-| `build.yml`          | PR、`v*` tag、手动    | 六平台产物；Windows x64 出一个合并安装器 + 便携包；macOS/Linux 出「App + 插件 + 共享模型库」三合一包 | Windows 安装器 / 便携包；macOS `.pkg`；Linux `.run`（自解压安装向导） |
+| `build.yml`          | PR、`v*` tag、手动    | 六平台产物；Windows x64 出一个合并安装器 + 便携包；macOS 出「App + 插件 + 共享模型库」三合一 pkg；Linux 出原生包 + 便携包 | Windows 安装器 / 便携包；macOS `.pkg`；Linux `.deb` / `.rpm` / AppImage / `-portable.tar.xz` |
 
 ## 构建脚本与自检
 
@@ -25,10 +25,11 @@ Rust / 插件的黑盒自检与 AppImage 冒烟均已从工作流中移除。依
   - `scripts/build/build.ps1 -SkipVerify`
   - `scripts/build/unix/package.sh --no-verify`
   - `linux-appimage.sh` 通过 `HIFISHIFTER_SKIP_SMOKE=1` 跳过启动冒烟。
-- 安装包断言：`Assert macOS pkg layout and round trip` 与
-  `Assert Linux installer layout and round trip` 两步在 CI 里运行真实产物（展开、安装、
+- 安装包断言：`Assert macOS pkg layout and round trip`、`Assert Linux package layout`、
+  `Install and uninstall Linux packages (Ubuntu)`、`Install and uninstall Linux packages (Fedora)`
+  与 `Run the portable installer round trip` 五步在 CI 里运行真实产物（展开、安装、
   检查菜单项 / 清单 / 插件、卸载、确认用户数据保留），并在安装前跑对应的静态门禁
-  （`check-macos-pkg.py` / `check-linux-installer.py`）。
+  （`check-macos-pkg.py` / `check-linux-packages.py`）。
 - 想在本地复现 CI 的构建步骤，去掉上述开关即可；想在本地跑 Rust 测试，使用
   `pwsh scripts/checks/run-rust-gates.ps1`。依赖漏洞扫描可手动运行
   `python3 scripts/checks/check-dependency-advisories.py --verbose`。

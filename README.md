@@ -15,7 +15,7 @@ HiFiShifter 是一个图形化人声编辑与合成工具。它支持多轨道�
 - **三种声码器算法**：nsf-hifigan（PC-NSF-HiFiGAN）、World、VsLib，详见[算法](#算法)。
 - **互操作性**：导入 REAPER（`.rpp`）与 VocalShifter（`.vshp` / `.vsp`）工程，双向读写 REAPER 与 VocalShifter 剪贴板；MIDI 可导入为音高参考块 / 音高参数 / 速度映射，音频块与音高线可导出为 MIDI。
 - **导入导出**：常见音频 / 视频格式导入（视频自动提取音轨），工程与分轨导出为 `wav` / `mp3` / `flac`。
-- **VST3 / ARA 与 CLAP 插件**：三个平台的三合一安装包都包含插件，可在 REAPER 中直接打开同一套编辑界面：宿主负责片段几何、BPM 与淡变声音，HiFiShifter 负责参数曲线，编辑自动应用回宿主。插件随各平台的安装包统一构建，不再单独提供插件构建产物。详见[使用手册](docs/i18n/USERMANUAL.md#八vst3--ara-插件reaper)的插件章节。
+- **VST3 / ARA 与 CLAP 插件**：三个平台的分发包都包含插件，可在 REAPER 中直接打开同一套编辑界面：宿主负责片段几何、BPM 与淡变声音，HiFiShifter 负责参数曲线，编辑自动应用回宿主。插件随各平台的安装包统一构建，不再单独提供插件构建产物。详见[使用手册](docs/i18n/USERMANUAL.md#八vst3--ara-插件reaper)的插件章节。
 - **其他**：内置文件浏览器与快速搜索、记事本、自动备份、多语言界面（简体中文 / 繁體中文 / English / 日本語 / 한국어）、深浅色主题、推理设备选择与基准测试。
 
 ## 安装
@@ -24,7 +24,7 @@ HiFiShifter 是一个图形化人声编辑与合成工具。它支持多轨道�
 
 - **Windows**：NSIS 安装包（`installer`）或便携版压缩包（`portable`），提供 x86_64 与 arm64 架构。安装包一次装上独立 App、VST3/CLAP 插件与全机共享模型库。
 - **macOS**：一个 `macos-universal` 三合一 `.pkg`（Intel 与 Apple Silicon 通用）装上 `/Applications/HiFiShifter.app`、VST3/CLAP 插件与共享模型库；安装向导里可以只勾选需要的插件格式，App 与模型库必装。装完后 `/Library/Application Support/HiFiShifter` 里有一份卸载包，同版本的 `-uninstaller.pkg` 也会一起发布，一键移除 App、插件、模型库与缓存，不碰工程、音频文件与你的设置。安装包未签名，首次安装需要手动放行；若提示"文件已损坏"，请按[使用手册](docs/i18n/USERMANUAL.md#一安装)中的步骤处理。
-- **Linux**：一个自解压安装包 `.run`（x86_64 / arm64），双击或在终端执行后打开安装向导：欢迎页、许可协议、安装范围（仅当前用户 / 所有用户）、组件选择（VST3、CLAP、应用菜单项、工程文件关联，App 与模型库必装）、安装目录、进度与完成页。默认装进当前用户（`~/.local`、`~/.vst3`、`~/.clap`）；装给所有用户时只对文件操作提权。装完在应用菜单里有「卸载 HiFiShifter」入口，命令行也可以运行 `hifishifter-uninstall`，卸载会移除本体、插件与模型库，保留设置、工程与你自备的模型。`--extract=<目录>` 可只解包不安装。运行需要系统提供 `webkit2gtk-4.1`（Arch/CachyOS、Ubuntu 24.04+、Fedora 39+、Debian 13+ 等均已提供；Ubuntu 22.04 只有 `webkit2gtk-4.0`，不受支持）。
+- **Linux**：按发行版提供原生安装包（x86_64 / arm64）。Debian/Ubuntu 用 `.deb`：`sudo apt install ./hifishifter*.deb`，或在文件管理器里双击用软件中心打开；Fedora/RHEL 用 `.rpm`：`sudo dnf install ./hifishifter*.rpm`。下载目录里是四个包 —— `hifishifter`（本体与桌面项）、`hifishifter-models`（共享模型库）、`hifishifter-vst3`、`hifishifter-clap`；一次装齐即可，插件装进 `/usr/lib/vst3` 与 `/usr/lib/clap`，装完在 DAW 里重新扫描插件。卸载用 `sudo apt remove hifishifter hifishifter-vst3 hifishifter-clap`（模型库随后由 `apt autoremove` 清掉）或对应的 `dnf remove`；设置、工程与你自备的模型（`~/.local/share/HiFiShifter/models-user`）不会被删除。发行版没有对应的包时，用便携包 `HiFiShifter_..._linux-<架构>-portable.tar.xz`：解压后 `./install-user.sh` 全部装进当前用户（`~/.local`、`~/.vst3`、`~/.clap`，`--yes` 无人值守），`~/.local/bin/hifishifter-uninstall` 卸载；包里的 AppImage 也可以直接运行。原生包会声明依赖；AppImage 与便携包需要宿主自备 `webkit2gtk-4.1`（Arch/CachyOS、Ubuntu 24.04+、Fedora 39+、Debian 13+ 等均已提供；Ubuntu 22.04 只有 `webkit2gtk-4.0`，不受支持）。
 
 **VST3 / ARA 插件**：Windows、macOS 与 Linux 的三合一安装包都已包含 VST3（ARA）与 CLAP 插件，可在 REAPER 中以嵌入界面使用（目前主要针对 REAPER 验证）。安装方式、运行依赖与使用限制见[使用手册](docs/i18n/USERMANUAL.md#八vst3--ara-插件reaper)的插件章节。
 
@@ -238,10 +238,12 @@ cargo tauri build --bundles appimage --config tauri.linux.x86_64.conf.json -- --
 cargo tauri build --bundles appimage -- --no-default-features --features onnx  # arm64 (no dawn resource)
 # 或使用辅助脚本：bash scripts/build/build-linux-appimage.sh
 
-# Linux 三合一（AppImage + VST3/CLAP + 共享模型库）：
+# Linux 原生包（deb + rpm）+ 便携包：
 # HIFISHIFTER_EXTERNAL_MODELS=1 bash scripts/build/linux-appimage.sh package backend/target/release
 # bash scripts/build/unix/package.sh --reuse-frontend \
 #   --appimage backend/target/release/bundle/appimage/HiFiShifter_*.AppImage
+# 产物是 dist/HiFiShifter_v<版本>_<平台>-packages/：四个 deb、四个 rpm、AppImage、便携 tar.xz 与 SHA256SUMS；
+# 包定义在 scripts/release/linux-packages/，便携安装器在 scripts/release/linux-portable/。
 
 # macOS 三合一（.app + VST3/CLAP + 共享模型库）：
 # cargo tauri build --bundles app -- --locked --no-default-features --features onnx

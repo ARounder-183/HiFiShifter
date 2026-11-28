@@ -17,7 +17,7 @@ HiFiShifter 是一款圖形化人聲編輯與合成工具。它支援多軌道�
     1. 終端機輸入 `xattr -cr /Applications/HiFiShifter.app`；
     2. 透過系統設定允許執行 `系統設定` -> `隱私權與安全性` -> 點選 `仍要打開`。
 
-- Linux 版本提供的是自解壓安裝包 `.run`，雙擊或在終端機執行後開啟安裝精靈（介面語言跟隨 `LANG`，也可用 `--lang` 指定）：歡迎、授權條款、安裝範圍、元件選擇、安裝目錄、進度與完成頁。預設裝進目前使用者（`~/.local`、`~/.vst3`、`~/.clap`）；加上 `--system` 則裝到系統目錄（`/opt`、`/usr/lib/vst3`、`/usr/lib/clap`），此時只有檔案操作需要提權。裝完後應用程式選單裡有「解除安裝 HiFiShifter」，也可執行 `hifishifter-uninstall`；解除安裝會移除本體、外掛與模型庫，保留設定、專案與你自備的模型。`--yes` 為無人值守安裝，`--extract=<目錄>` 只解包不安裝。執行前請確認系統已提供 **WebKitGTK 4.1**（見下方「關於 WebView 的說明」），它是 AppImage 唯一需要系統額外提供的大型相依套件。
+- Linux 版本依發行版提供原生安裝包：Debian/Ubuntu 用 `.deb`（`sudo apt install ./hifishifter*.deb`，或在軟體中心雙擊開啟），Fedora/RHEL 用 `.rpm`（`sudo dnf install ./hifishifter*.rpm`）。下載目錄裡是四個套件 —— `hifishifter`（本體與桌面項）、`hifishifter-models`（共享模型庫）、`hifishifter-vst3`、`hifishifter-clap`，一次全部安裝即可；外掛裝進 `/usr/lib/vst3` 與 `/usr/lib/clap`，裝完在 DAW 裡重新掃描外掛。卸載用 `sudo apt remove hifishifter hifishifter-vst3 hifishifter-clap`（模型庫隨後可由 `apt autoremove` 清掉）或對應的 `dnf remove`，設定、專案與你自備的模型（`~/.local/share/HiFiShifter/models-user`）不會被刪除。沒有對應發行版的套件時用可攜包：解壓 `-portable.tar.xz` 後執行 `./install-user.sh`（`--yes` 無人值守，`--prefix=<目錄>` 改安裝位置），裝進目前使用者（`~/.local`、`~/.vst3`、`~/.clap`），`~/.local/bin/hifishifter-uninstall` 卸載；包裡的 AppImage 也可以直接執行。原生套件會宣告相依性；AppImage 與可攜包需要系統自備 **WebKitGTK 4.1**（見下方「關於 WebView 的說明」）。
 
 **關於 GPU 加速**：HiFiShifter 為各平台提供了多種 GPU 加速方案：
 
@@ -832,7 +832,7 @@ REAPER 按**軌道**管理 ARA 外掛：它只會把外掛所在**那一條軌�
 - 參數沒有生效，或重新開啟專案後不一致：保留專案副本和狀態列上的錯誤訊息，先不要覆寫專案，也不要反覆強制重新載入。
 - 出現記憶體不足的提示：表示這次沒有執行氣聲分離，`氣聲分離` 相關的效果不會被靜默忽略；可以改用更短的素材，或先關閉 `氣聲分離`。
 - 需要提交日誌或排查問題：外掛日誌與獨立 App 的日誌**放在同一個目錄**（外掛按格式與宿主分檔（`plugin-vst3-reaper.log` / `plugin-clap-reaper.log`），獨立 App 是 `hifishifter.log`，檔名不同，互不覆蓋、各自輪轉）。選單 `說明 → 開啟日誌資料夾` 會替你開啟這個資料夾；若宿主環境不允許，則顯示路徑供你複製。`說明 → 匯出診斷資訊...` 與 `選項 → 推理裝置基準測試` 屬於獨立 App，外掛裡不可用。
-- 解除安裝：Windows 在「程式和功能 / 已安裝的應用程式」裡解除安裝 HiFiShifter；macOS 執行 `/Library/Application Support/HiFiShifter/Uninstall HiFiShifter.pkg`（或同版本的 `-uninstaller.pkg`）；Linux 在應用程式選單裡選「解除安裝 HiFiShifter」，或終端機執行 `hifishifter-uninstall`（`--system` 安裝的加 `sudo`）。這些解除安裝入口會移除本體、外掛、共享模型庫與快取，設定、專案與自備模型保留；手動複製的版本刪除 `HiFiShifter.vst3` 資料夾即可（設定與共享模型庫會保留，見[模型檔案與共享](#模型檔案與共享)）。
+- 解除安裝：Windows 在「程式和功能 / 已安裝的應用程式」裡解除安裝 HiFiShifter；macOS 執行 `/Library/Application Support/HiFiShifter/Uninstall HiFiShifter.pkg`（或同版本的 `-uninstaller.pkg`）；Linux 用套件管理員卸載 —— `sudo apt remove hifishifter hifishifter-vst3 hifishifter-clap`（模型庫隨後 `sudo apt autoremove` 清掉）或對應的 `dnf remove`，可攜包裝的則執行 `~/.local/bin/hifishifter-uninstall`。這些卸載入口會移除本體、外掛、共享模型庫與快取（設定、專案與自備模型保留）；手動複製的版本刪除 `HiFiShifter.vst3` 資料夾即可（設定與共享模型庫會保留，見[模型檔案與共享](#模型檔案與共享)）。
 
 ### 從獨立 App 連線宿主
 

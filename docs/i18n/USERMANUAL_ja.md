@@ -17,7 +17,7 @@ HiFiShifterは、グラフィカルなボーカル編集・合成ツールです
     1. ターミナルで `xattr -cr /Applications/HiFiShifter.app` を実行します；
     2. `システム設定` -> `プライバシーとセキュリティ` -> `このまま開く` をクリックして、アプリの実行を許可します。
 
-- Linux版は自己展開型の `.run` インストーラーを提供しています。ダブルクリックするか端末で実行するとウィザードが開きます（表示言語は `LANG` に従い、`--lang` で指定できます）。ようこそ、使用許諾、インストール範囲、コンポーネント、インストール先、進捗、完了の各ページがあります。既定ではユーザー単位（`~/.local`、`~/.vst3`、`~/.clap`）にインストールし、`--system` ではシステム単位（`/opt`、`/usr/lib/vst3`、`/usr/lib/clap`）にインストールしてファイル操作だけを昇格します。インストール後はアプリケーションメニューに「HiFiShifter を削除」が加わり、端末からは `hifishifter-uninstall` でも削除できます。設定・プロジェクト・ご自身で追加したモデルファイルは保持されます。`--yes` は無人インストール、`--extract=<ディレクトリ>` は展開のみです。起動前に **WebKitGTK 4.1** がシステムに用意されていることを確認してください（下記「WebView について」参照）。AppImage がホストに求める唯一の大きな依存関係です。
+- Linux版はディストリビューションごとのネイティブパッケージを提供します。Debian/Ubuntu は `.deb`（`sudo apt install ./hifishifter*.deb`、またはソフトウェアセンターでダブルクリック）、Fedora/RHEL は `.rpm`（`sudo dnf install ./hifishifter*.rpm`）を使います。ダウンロードには 4 つのパッケージが入っています —— `hifishifter`（本体とデスクトップ項目）、`hifishifter-models`（共有モデルライブラリ）、`hifishifter-vst3`、`hifishifter-clap`。まとめてインストールしてください。プラグインは `/usr/lib/vst3` と `/usr/lib/clap` に入るので、DAW で再スキャンします。削除は `sudo apt remove hifishifter hifishifter-vst3 hifishifter-clap`（モデルは続けて `apt autoremove`）または対応する `dnf remove` です。設定・プロジェクト・ご自身で追加したモデル（`~/.local/share/HiFiShifter/models-user`）は削除されません。パッケージがないディストリビューションでは、`-portable.tar.xz` を展開して `./install-user.sh` を実行してください（`--yes` で無人、`--prefix=<ディレクトリ>` でインストール先を変更）。現在のユーザー向け（`~/.local`、`~/.vst3`、`~/.clap`）にインストールされ、`~/.local/bin/hifishifter-uninstall` で削除できます。中の AppImage は単体でも実行できます。ネイティブパッケージは依存関係を宣言し、AppImage とポータブルバンドルはシステムの **WebKitGTK 4.1** を必要とします（下記「WebView について」参照）。
 
 **GPUアクセラレーションについて**：HiFiShifterは各プラットフォーム向けに複数のGPUアクセラレーションオプションを提供しています：
 
@@ -832,7 +832,7 @@ REAPER は ARA プラグインを**トラック単位**で管理します。プ�
 - パラメータが反映されない、またはプロジェクトを開き直すと一致しない：プロジェクトのコピーとステータスバーに出ているエラー内容を残し、プロジェクトを上書きしたり強制再読み込みを繰り返したりしないでください。
 - メモリ不足の通知が出る：今回はハーモニック分離が実行されなかったという意味で、`ハーモニック分離` に関する効果が黙って無視されることはありません。より短い素材を使うか、先に `ハーモニック分離` をオフにしてください。
 - ログの提出や問題の切り分け：プラグインのログとスタンドアロン版のログは**同じフォルダー**に置かれます（プラグインは `plugin-<format>-<host>.log`（例：`plugin-vst3-reaper.log`）、スタンドアロン版は `hifishifter.log`。ファイル名が異なるため上書きされず、ローテーションも別々です）。メニュー `ヘルプ → ログフォルダーを開く` でこのフォルダーを開きます。ホスト環境が許可しない場合はパスを表示するので、そのままコピーできます。`ヘルプ → 診断情報をエクスポート...` と `オプション → 推論デバイスのベンチマーク` はスタンドアロン版の機能で、プラグインでは使用できません。
-- アンインストール：Windows は「プログラムと機能 / インストールされているアプリ」から HiFiShifter を削除します。macOS は `/Library/Application Support/HiFiShifter/Uninstall HiFiShifter.pkg`（または同じ `-uninstaller.pkg`）を実行します。Linux はアプリケーションメニューの「HiFiShifter を削除」を選ぶか、端末で `hifishifter-uninstall` を実行します（`--system` で入れた場合は `sudo` を付けます）。これらの削除入口は本体・プラグイン・共有モデルライブラリ・キャッシュを削除し、設定・プロジェクト・ご自身のモデルファイルは残します。手動でフォルダーをコピーした場合は、`HiFiShifter.vst3` フォルダーを削除するだけです。手動コピーの場合、設定と共有モデルライブラリは保持されます（[モデルファイルと共有](#モデルファイルと共有)を参照）。
+- アンインストール：Windows は「プログラムと機能 / インストールされているアプリ」から HiFiShifter を削除します。macOS は `/Library/Application Support/HiFiShifter/Uninstall HiFiShifter.pkg`（または同じ `-uninstaller.pkg`）を実行します。Linux はパッケージマネージャーで削除します —— `sudo apt remove hifishifter hifishifter-vst3 hifishifter-clap`（モデルライブラリは続けて `sudo apt autoremove`）または対応する `dnf remove`、ポータブル版は `~/.local/bin/hifishifter-uninstall` です。これらの削除入口は本体・プラグイン・共有モデルライブラリ・キャッシュを削除し、設定・プロジェクト・ご自身のモデルファイルは残します。手動でフォルダーをコピーした場合は、`HiFiShifter.vst3` フォルダーを削除するだけです。手動コピーの場合、設定と共有モデルライブラリは保持されます（[モデルファイルと共有](#モデルファイルと共有)を参照）。
 
 ### スタンドアロン版からホストへ接続
 
