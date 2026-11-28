@@ -230,8 +230,19 @@ for pair in "arm64-v8a:aarch64-linux-android" "armeabi-v7a:armv7-linux-androidea
   triple="${pair##*:}"
   src="$prebuilt/sysroot/usr/lib/$triple/libc++_shared.so"
   [ -f "$src" ] || continue
+  dst="$jni_root/$jni_abi/libc++_shared.so"
   mkdir -p "$jni_root/$jni_abi"
-  cp -f "$src" "$jni_root/$jni_abi/libc++_shared.so"
+  # [Why the -ef guard] tauri-cli symlinks libc++_shared.so from the NDK into jniLibs.
+  # A second `tauri android build` in the same worktree (release AAB, then release APK)
+  # would then copy the NDK file over a symlink that points at it, and GNU cp refuses:
+  #   cp: '.../libc++_shared.so' and '.../libc++_shared.so' are the same file
+  # which aborts the script under set -e although nothing is wrong.
+  if [ -e "$dst" ] && [ "$src" -ef "$dst" ]; then
+    echo "== libc++_shared.so for $jni_abi already links to the NDK copy"
+    continue
+  fi
+  rm -f "$dst"
+  cp -f "$src" "$dst"
   echo "== bundled libc++_shared.so for $jni_abi"
 done
 
