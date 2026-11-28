@@ -123,6 +123,33 @@ def generated_files(out: pathlib.Path) -> list[pathlib.Path]:
     return sorted(path for path in out.rglob("*") if path.is_file())
 
 
+def package_entries(root: ElementTree.Element) -> dict[str, list[tuple[str, str | None]]]:
+    """id -> [(file text, version attribute)] for every top-level <pkg-ref>.
+
+    [Why a list and not one string per id] productbuild writes **two** entries for each
+    component package: one that names the file ("#app.pkg", carrying version and
+    installKBytes) and a second that carries only <bundle-version>. Collapsing them into a
+    single string keeps whichever came last -- the version-less one -- and the gate then
+    reports "carries no version" and "installs ''" for a product archive that is correct.
+    """
+    entries: dict[str, list[tuple[str, str | None]]] = {}
+    for ref in root.findall("pkg-ref"):
+        entries.setdefault(ref.get("id") or "", []).append(
+            ((ref.text or "").strip(), ref.get("version"))
+        )
+    return entries
+
+
+def package_files(entries: list[tuple[str, str | None]]) -> list[str]:
+    """The component package filenames the entries name, with productbuild's '#' removed."""
+    names = []
+    for text, _ in entries:
+        name = text[1:] if text.startswith("#") else text
+        if name:
+            names.append(name)
+    return names
+
+
 def check_install(dist: pathlib.Path, bundle_id: str, findings: list[str]) -> None:
     try:
         root = ElementTree.parse(dist).getroot()
@@ -193,7 +220,7 @@ def check_install(dist: pathlib.Path, bundle_id: str, findings: list[str]) -> No
             )
 
     # ── Package references ──
-    refs = {ref.get("id"): (ref.text or "").strip() for ref in root.findall("pkg-ref")}
+    refs = package_entries(root)
     for choice_id, choice in choices.items():
         referenced = choice.find("pkg-ref")
         if referenced is None:
@@ -205,16 +232,17 @@ def check_install(dist: pathlib.Path, bundle_id: str, findings: list[str]) -> No
                 % (choice_id, target)
             )
             continue
-        if refs[target] != choice_id + ".pkg":
+        named = package_files(refs[target])
+        if choice_id + ".pkg" not in named:
             findings.append(
                 "distribution.xml: choice %r installs %r; package.sh writes %r"
-                % (choice_id, refs[target], choice_id + ".pkg")
+                % (choice_id, named or "nothing", choice_id + ".pkg")
             )
-    for ref in root.findall("pkg-ref"):
-        if not ref.get("version"):
+    for target, entries in refs.items():
+        if not any(version for _, version in entries):
             findings.append(
                 "distribution.xml: pkg-ref %r carries no version; productbuild rejects a "
-                "reference that does not match the component package" % ref.get("id")
+                "reference that does not match the component package" % target
             )
 
     # ── Wizard pages ──
@@ -298,11 +326,13 @@ def check_uninstall(dist: pathlib.Path, findings: list[str]) -> None:
                 "uninstaller distribution.xml: no <%s> page; the user cannot see what is about "
                 "to be deleted" % tag
             )
-    refs = root.findall("pkg-ref")
-    if len(refs) != 1 or (refs[0].text or "").strip() != "uninstaller.pkg":
+    refs = package_entries(root)
+    named = [name for entries in refs.values() for name in package_files(entries)]
+    if named.count("uninstaller.pkg") != 1:
         findings.append(
             "uninstaller distribution.xml: expected exactly one pkg-ref to uninstaller.pkg, "
-            "found %s" % [(ref.get("id"), (ref.text or "").strip()) for ref in refs]
+            "found %s"
+            % [(ref.get("id"), (ref.text or "").strip()) for ref in root.findall("pkg-ref")]
         )
 
 
