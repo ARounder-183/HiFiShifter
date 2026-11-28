@@ -18,7 +18,13 @@ path = "src/main.rs"
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "backend_lib"
-crate-type = ["cdylib", "rlib"]
+# [Why staticlib] The iOS build links the Rust code as a static library: Xcode's
+# "Build Rust Code" phase looks for target/<triple>/<profile>/libbackend_lib.a and
+# fails with "Library not found ... Make sure your Cargo.toml file has a [lib] block
+# with `crate-type = ["staticlib", ...]`" when it is absent. Desktop builds only use
+# the cdylib, but crate-type cannot be conditional, so all targets build the .a too;
+# this is the same triple the Tauri template ships.
+crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
