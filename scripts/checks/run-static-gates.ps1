@@ -131,6 +131,14 @@ Invoke-Gate 'CI artifact name gate' { python scripts/checks/check-ci-artifact-na
 # if someone runs it there.
 Invoke-Gate 'macOS universal gate' { python scripts/checks/check-macos-universal.py }
 
+# The macOS download is a wizard now: a product archive with a choices page, four localized
+# welcome / read-me / conclusion pages, and a second archive that removes everything. Every
+# part of that fails as "green but wrong" -- a pkg-ref naming a file package.sh never writes,
+# a .lproj folder spelled with the ISO tag Installer does not look for, an uninstaller that
+# removes paths the app does not use and keeps the ones it does. Only a Mac can run the round
+# trip (the workflow does); this gate proves the wiring and the generated layout.
+Invoke-Gate 'macOS pkg wizard gate' { python scripts/checks/check-macos-pkg.py }
+
 # vslib is a **link-time** dependency (a #[link] directive, not a dlopen) and its import
 # library is x64 machine code. Every cfg that decides "the backend exists" must therefore name
 # target_arch = "x86_64"; lib.rs used to gate only on target_os = "windows" while the module
