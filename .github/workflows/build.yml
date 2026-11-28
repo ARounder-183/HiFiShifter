@@ -739,15 +739,15 @@ jobs:
               FAIL=1
           fi
 
-          # 3) The x86_64 slice must not reference onnxruntime. Written as `if`, not as
-          #    "cmd | grep -q X && exit 1": under `set -e` a non-matching grep makes the whole
-          #    AND-list return 1, so the step would go red exactly when the rule holds.
+          # The x86_64 slice must not reference onnxruntime. Written as `if`, not as
+          # "cmd | grep -q X && exit 1": under `set -e` a non-matching grep makes the whole
+          # AND-list return 1, so the step would go red exactly when the rule holds.
           if otool -arch x86_64 -L "$APP/Contents/MacOS/HiFiShifter" | grep -q onnxruntime; then
               echo "  FAIL the x86_64 slice references onnxruntime; it must use tract only" >&2
               FAIL=1
           fi
 
-          # 4) lipo invalidates signatures, so this is the only proof that the re-sign took.
+          # lipo invalidates signatures, so this is the only proof that the re-sign took.
           codesign --verify --deep --strict "$APP" || FAIL=1
 
           for bundle in "$DIST/HiFiShifter.vst3" "$DIST/clap/HiFiShifter.clap"; do
