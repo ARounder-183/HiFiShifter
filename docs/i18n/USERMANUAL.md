@@ -859,7 +859,7 @@ REAPER 按**轨道**管理 ARA 插件：它只会把插件所在**那一条轨�
 - 参数没有生效，或重新打开工程后不一致：保留工程副本和状态栏上的错误信息，先不要覆盖工程，也不要反复强制重新载入。
 - 出现内存不足的提示：表示这次没有执行气声分离，`气声分离` 相关的效果不会被静默忽略；可以改用更短的素材，或先关闭 `气声分离`。
 - 需要提交日志或排查问题：插件日志与独立 App 的日志**放在同一个目录**（插件按格式与宿主分文件（`plugin-vst3-reaper.log` / `plugin-clap-reaper.log`），独立 App 是 `hifishifter.log`，文件名不同，互不覆盖、各自轮转）。菜单 `帮助 → 打开日志文件夹` 会替你打开这个文件夹；若宿主环境不允许，则显示路径供你复制。`帮助 → 导出诊断信息...` 与 `选项 → 推理设备基准测试` 属于独立 App，插件里不可用。
-- 卸载：Windows 装的是安装器版本时，在「程序和功能 / 已安装的应用」里卸载 HiFiShifter；macOS 运行 `/Library/Application Support/HiFiShifter/Uninstall HiFiShifter.pkg`（或同版本的 `-uninstaller.pkg`），它会连同共享模型库与缓存一起移除（设置与自备模型保留）；手动拷贝的版本删除 `HiFiShifter.vst3` 文件夹即可。手动拷贝时设置与共享模型库会保留（见[模型文件与共享](#模型文件与共享)）。
+- 卸载：Windows 装的是安装器版本时，在「程序和功能 / 已安装的应用」里卸载 HiFiShifter；macOS 运行 `/Library/Application Support/HiFiShifter/Uninstall HiFiShifter.pkg`（或同版本的 `-uninstaller.pkg`）；Linux 在应用菜单里选「卸载 HiFiShifter」，或在终端执行 `hifishifter-uninstall`（`--system` 安装的加 `sudo`）。这些卸载入口会移除本体、插件、共享模型库与缓存（设置、工程与自备模型保留）；手动拷贝的版本删除 `HiFiShifter.vst3` 文件夹即可。手动拷贝时设置与共享模型库会保留（见[模型文件与共享](#模型文件与共享)）。
 
 ### 从独立 App 连接宿主
 

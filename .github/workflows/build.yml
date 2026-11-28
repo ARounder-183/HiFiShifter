@@ -727,8 +727,8 @@ jobs:
               "$XDG_DATA_HOME/icons/hicolor/128x128/apps/hifishifter.png"; do
               if [ -e "$path" ]; then ok "installed $path"; else bad "not installed: $path"; fi
           done
-          grep -q "Exec=\"$HOME/.local/lib/hifishifter/HiFiShifter.AppImage\"" \
-              "$XDG_DATA_HOME/applications/hifishifter.desktop" || bad "the menu entry does not point at the installed AppImage"
+          grep -q "Exec=\"$HOME/.local/bin/hifishifter\"" \
+              "$XDG_DATA_HOME/applications/hifishifter.desktop" || bad "the menu entry does not point at the launcher"
           grep -q 'MimeType=application/x-hifishifter-project;' \
               "$XDG_DATA_HOME/applications/hifishifter.desktop" || bad "the menu entry lost the project association"
           # The manifest is what the uninstaller reads: it has to list the payload, not a summary.

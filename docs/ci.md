@@ -1,9 +1,12 @@
 # CI 流水线
 
 构建流水线**只负责构建与打包**，不运行任何测试：单元测试、集成测试、testkit、
-安装器闭环（装 → 查 → 重装 → 卸载）与 AppImage 冒烟均已从工作流中移除。依赖漏洞
-扫描也不再由 CI 承担，只在本地按需运行。需要跑测试时请在本地直接调用
-`scripts/checks/` 下的脚本。
+Rust / 插件的黑盒自检与 AppImage 冒烟均已从工作流中移除。依赖漏洞扫描也不再由 CI
+承担，只在本地按需运行。需要跑测试时请在本地直接调用 `scripts/checks/` 下的脚本。
+
+唯一的例外是安装包的**打包断言**：macOS 的 `.pkg` 与 Linux 的 `.run` 会在 runner 上
+真的装一遍、检查布局、再卸一遍。那不是测试代码，而是「这个安装包能不能装」的最后
+一环——只有真正运行过才知道，读源码永远读不出来。
 
 ## 工作流
 
@@ -22,6 +25,10 @@
   - `scripts/build/build.ps1 -SkipVerify`
   - `scripts/build/unix/package.sh --no-verify`
   - `linux-appimage.sh` 通过 `HIFISHIFTER_SKIP_SMOKE=1` 跳过启动冒烟。
+- 安装包断言：`Assert macOS pkg layout and round trip` 与
+  `Assert Linux installer layout and round trip` 两步在 CI 里运行真实产物（展开、安装、
+  检查菜单项 / 清单 / 插件、卸载、确认用户数据保留），并在安装前跑对应的静态门禁
+  （`check-macos-pkg.py` / `check-linux-installer.py`）。
 - 想在本地复现 CI 的构建步骤，去掉上述开关即可；想在本地跑 Rust 测试，使用
   `pwsh scripts/checks/run-rust-gates.ps1`。依赖漏洞扫描可手动运行
   `python3 scripts/checks/check-dependency-advisories.py --verbose`。

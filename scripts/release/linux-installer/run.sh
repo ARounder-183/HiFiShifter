@@ -138,7 +138,11 @@ hfs_parse_args() {
                 shift
                 ;;
             --version)
-                printf 'HiFiShifter installer\n'
+                if [ -f "$HFS_PAYLOAD/version" ]; then
+                    printf 'HiFiShifter installer %s\n' "$(cat "$HFS_PAYLOAD/version")"
+                else
+                    printf 'HiFiShifter installer\n'
+                fi
                 exit 0
                 ;;
             -h | --help)
@@ -326,7 +330,7 @@ EOF
 
 # <plan> <work>: every file the install writes, in execution order.
 hfs_build_install_plan() {
-    local plan="$1" gen="$2/gen" app_exec="" icon
+    local plan="$1" gen="$2/gen" app_exec="" icon old path keep
     mkdir -p "$gen"
     HFS_PLAN_PATHS=()
     HFS_PLAN_SIZE=0
@@ -342,7 +346,11 @@ hfs_build_install_plan() {
     # 2. The app and its launchers.
     if hfs_component_on app; then
         plan_copy "$plan" "$HFS_PAYLOAD/HiFiShifter.AppImage" "$HFS_APP_DIR/HiFiShifter.AppImage" 755 "$HFS_APP_DIR/HiFiShifter.AppImage"
-        app_exec="\"$(hfs_desktop_value "$HFS_APP_DIR/HiFiShifter.AppImage")\" %F"
+        # [Why the launcher and not the AppImage] The launcher checks for libfuse2 and sets
+        # APPIMAGE_EXTRACT_AND_RUN when it is missing. Pointing the menu entry at the image
+        # directly would start the app through a path that has no such fallback -- the user
+        # clicks "HiFiShifter" and nothing happens on Ubuntu 24.04.
+        app_exec="\"$(hfs_desktop_value "$HFS_BIN_DIR/hifishifter")\" %F"
     fi
 
     # 3. The uninstaller: a copy of this wizard, next to the app, so it survives the download
@@ -412,6 +420,24 @@ hfs_build_install_plan() {
         } >"$gen/hifishifter-uninstall"
         chmod 755 "$gen/hifishifter-uninstall"
         plan_write "$plan" "$gen/hifishifter-uninstall" "$HFS_BIN_DIR/hifishifter-uninstall" 755 "$HFS_BIN_DIR/hifishifter-uninstall"
+    fi
+
+    # [Why the previous manifest is read] Reinstalling must not accumulate: choosing "no CLAP"
+    # on the second run would otherwise leave the first run's HiFiShifter.clap behind, and the
+    # DAW would keep finding a plug-in the user just declined. Only payload paths are compared --
+    # models-user, settings and projects are never in a manifest.
+    if hfs_manifest_read "$HFS_MANIFEST_FILE"; then
+        for old in "${HFS_MANIFEST_PATHS[@]}"; do
+            [ -n "$old" ] || continue
+            keep=0
+            for path in "${HFS_PLAN_PATHS[@]}"; do
+                if [ "$path" = "$old" ]; then
+                    keep=1
+                    break
+                fi
+            done
+            [ "$keep" = 1 ] || printf 'remove\t%s\n' "$old" >>"$plan"
+        done
     fi
 
     {
