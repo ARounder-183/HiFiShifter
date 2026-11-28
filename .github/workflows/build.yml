@@ -693,6 +693,12 @@ jobs:
           echo "=== expanded product archive ==="
           find "$WORK/unified" -maxdepth 2 | sort
 
+          # The wizard gate is registered in scripts/checks/run-static-gates.ps1, which is a
+          # local discipline (see this file's header). Running it here too costs about a second
+          # and makes the wiring rules -- package.sh builds what the Distribution references,
+          # the uninstaller removes what the app writes -- enforced by CI as well.
+          python3 scripts/checks/check-macos-pkg.py
+
           FAIL=0
           ok()  { printf '  ok   %s\n' "$1"; }
           bad() { printf '  FAIL %s\n' "$1" >&2; FAIL=1; }
