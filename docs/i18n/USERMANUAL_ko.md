@@ -37,7 +37,7 @@ HiFiShifter는 그래픽 보컬 편집 및 합성 도구입니다. 멀티트랙 
 
 Windows에서는 HiFiShifter가 WebView2 자체의 브라우저 단축키(`Ctrl + F`, `Ctrl + P`, `F5`, 그리고 `Ctrl`과 `+` / `-`를 이용한 페이지 확대/축소)를 비활성화했으므로, 이 키들은 HiFiShifter로 정상 전달되어 편집 작업을 방해하지 않습니다.
 
-**플러그인 정보**: 독립 실행형 앱 외에도 HiFiShifter는 VST3·CLAP 플러그인 형태를 제공하며, 동일한 편집 인터페이스를 REAPER 프로젝트 안에서 바로 열 수 있습니다. REAPER에서는 ARA에 VST3 형태를 사용하고, CLAP 형태는 일반 인서트 이펙트로 사용할 수 있습니다. 세 플랫폼의 통합 설치 패키지에 VST3와 CLAP 플러그인이 포함되어 있습니다. 현재는 주로 REAPER에서 검증되었습니다. 설치와 사용 방법은 [VST3 ARA 플러그인과 CLAP 플러그인](#8-vst3-ara-플러그인과-clap-플러그인-reaper) 장을 참고하세요.
+**플러그인 정보**: 독립 실행형 앱 외에도 HiFiShifter는 VST3·CLAP 플러그인 형태를 제공하며, 동일한 편집 인터페이스를 REAPER 프로젝트 안에서 바로 열 수 있습니다. REAPER에서는 ARA에 VST3 형태를 사용하고, CLAP 형태는 일반 인서트 이펙트로 사용할 수 있습니다. 세 플랫폼의 설치 패키지에 VST3와 CLAP 플러그인이 포함되어 있습니다. 현재는 주로 REAPER에서 검증되었습니다. 설치와 사용 방법은 [VST3 ARA 플러그인과 CLAP 플러그인](#8-vst3-ara-플러그인과-clap-플러그인-reaper) 장을 참고하세요.
 
 ## 2. 메뉴
 
@@ -749,7 +749,7 @@ REAPER의 ARA-over-CLAP 구현(2022 비공개 초안)이 타임라인에 오디�
 ARA SDK 정식 프로토콜을 구현한 CLAP 호스트에만 ARA를 제공합니다. REAPER에서 ARA가
 필요하면 VST3 형태를 사용하세요.
 
-세 플랫폼의 통합 설치 패키지에 VST3와 CLAP 플러그인이 포함되어 있습니다. 현재는 주로 REAPER에서 검증되었습니다.
+세 플랫폼의 설치 패키지에 VST3와 CLAP 플러그인이 포함되어 있습니다. 현재는 주로 REAPER에서 검증되었습니다.
 
 ### 설치 및 연결
 
@@ -778,7 +778,7 @@ REAPER는 ARA 플러그인을 **트랙 단위**로 관리합니다. 플러그인
 
 ### 모델 파일과 공유
 
-플러그인에는 FCPE, HNSEP, HiFiGAN 등의 모델이 필요합니다(크기는 모델 매니페스트가 유일한 근거입니다). 통합 설치 프로그램은 모델을 플랫폼 공유 라이브러리(Windows `%ProgramData%\HiFiShifter\models\<모델 버전>`, macOS `/Library/Application Support/HiFiShifter/models/<모델 버전>`, Linux `$XDG_DATA_HOME/HiFiShifter/models/<모델 버전>` 또는 `/usr/local/share/HiFiShifter/models/<모델 버전>`)에 설치하며, 독립 실행형 앱과 모든 플러그인이 같은 것을 읽습니다 —— 이 가중치는 중복되지 않습니다. 수동 복사 버전은 자체적으로 모델을 포함하며 공유 라이브러리에 의존하지 않습니다.
+플러그인에는 FCPE, HNSEP, HiFiGAN 등의 모델이 필요합니다(크기는 모델 매니페스트가 유일한 근거입니다). 설치 패키지는 모델을 플랫폼 공유 라이브러리(Windows `%ProgramData%\HiFiShifter\models\<모델 버전>`, macOS `/Library/Application Support/HiFiShifter/models/<모델 버전>`, Linux `$XDG_DATA_HOME/HiFiShifter/models/<모델 버전>` 또는 `/usr/local/share/HiFiShifter/models/<모델 버전>`)에 설치하며, 독립 실행형 앱과 모든 플러그인이 같은 것을 읽습니다 —— 이 가중치는 중복되지 않습니다. 수동 복사 버전은 자체적으로 모델을 포함하며 공유 라이브러리에 의존하지 않습니다.
 
 - 모델 버전은 모델 내용에서 파생됩니다: 업그레이드하면 새 버전이 새 디렉터리에 배치되고, 같은 버전의 재설치는 건너뜁니다.
 - 플러그인을 제거해도 공유 모델 라이브러리는 **삭제되지 않습니다**(독립 실행형 앱도 사용하기 때문입니다). 정말 지우고 싶다면 각 플랫폼의 공유 모델 디렉터리를 직접 삭제하세요.

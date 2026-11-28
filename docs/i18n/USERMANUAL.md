@@ -37,7 +37,7 @@ HiFiShifter 是一款图形化人声编辑与合成工具。它支持多轨道�
 
 在 Windows 上，HiFiShifter 已关闭 WebView2 自带的浏览器快捷键（如 `Ctrl + F`、`Ctrl + P`、`F5` 以及 `Ctrl` 配合 `+` / `-` 的页面缩放），因此这些按键会正常交给 HiFiShifter 处理，不会打断你的编辑操作。
 
-**关于插件**：除独立 App 外，HiFiShifter 还提供 VST3 与 CLAP 两种插件形态，可以把同一套编辑界面直接开在 REAPER 的工程里。在 REAPER 里请用 VST3 形态接入 ARA；CLAP 形态可用作普通插入效果器。三个平台的三合一安装包都包含 VST3 与 CLAP 插件；目前主要针对 REAPER 验证。安装与使用见 [VST3 ARA 插件与 CLAP 插件](#八vst3-ara-插件与-clap-插件reaper)章节。
+**关于插件**：除独立 App 外，HiFiShifter 还提供 VST3 与 CLAP 两种插件形态，可以把同一套编辑界面直接开在 REAPER 的工程里。在 REAPER 里请用 VST3 形态接入 ARA；CLAP 形态可用作普通插入效果器。三个平台的安装包都包含 VST3 与 CLAP 插件；目前主要针对 REAPER 验证。安装与使用见 [VST3 ARA 插件与 CLAP 插件](#八vst3-ara-插件与-clap-插件reaper)章节。
 
 ## 二、菜单
 
@@ -773,7 +773,7 @@ App**，编辑结果随 REAPER 工程一起保存。
 因此本插件只对按 ARA SDK 定稿协议实现的 CLAP 宿主提供 ARA。在 REAPER 里需要 ARA 时，
 请使用 VST3 形态。
 
-三个平台的三合一安装包都包含 VST3 与 CLAP 插件；目前主要针对 REAPER 验证。
+三个平台的安装包都包含 VST3 与 CLAP 插件；目前主要针对 REAPER 验证。
 
 ### 安装与接入
 
@@ -802,7 +802,7 @@ REAPER 按**轨道**管理 ARA 插件：它只会把插件所在**那一条轨�
 
 ### 模型文件与共享
 
-插件需要 FCPE、HNSEP 与 HiFiGAN 等模型（体积以模型清单为准）。三合一安装器把模型装进平台共享库（Windows `%ProgramData%\HiFiShifter\models\<模型版本>`；macOS `/Library/Application Support/HiFiShifter/models/<模型版本>`；Linux `$XDG_DATA_HOME/HiFiShifter/models/<模型版本>` 或 `/usr/local/share/HiFiShifter/models/<模型版本>`），独立 App 与所有插件读的是同一份 —— 不会重复占用这份权重。手动拷贝的纯插件包自带一份模型，不依赖共享库。
+插件需要 FCPE、HNSEP 与 HiFiGAN 等模型（体积以模型清单为准）。安装包把模型装进平台共享库（Windows `%ProgramData%\HiFiShifter\models\<模型版本>`；macOS `/Library/Application Support/HiFiShifter/models/<模型版本>`；Linux `$XDG_DATA_HOME/HiFiShifter/models/<模型版本>` 或 `/usr/local/share/HiFiShifter/models/<模型版本>`），独立 App 与所有插件读的是同一份 —— 不会重复占用这份权重。手动拷贝的纯插件包自带一份模型，不依赖共享库。
 
 - 模型版本由模型内容派生：升级后新版本落在新目录，同版本的重复安装会被跳过。
 - 卸载插件**不会**删除共享模型库（独立 App 也在用）。确实需要清理时，手动删除对应平台的共享模型目录。

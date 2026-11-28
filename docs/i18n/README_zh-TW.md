@@ -15,7 +15,7 @@ HiFiShifter 是一個圖形化人聲編輯與合成工具。它支援多軌道�
 - **三種聲碼器演算法**：nsf-hifigan（PC-NSF-HiFiGAN）、World、VsLib，詳見[演算法](#演算法)。
 - **互操作性**：匯入 REAPER（`.rpp`）與 VocalShifter（`.vshp` / `.vsp`）專案，雙向讀寫 REAPER 與 VocalShifter 剪貼簿；MIDI 可匯入為音高參考塊 / 音高參數 / 速度映射，音訊塊與音高線可匯出為 MIDI。
 - **匯入匯出**：常見音訊 / 視訊格式匯入（視訊檔自動提取音訊軌），專案與分軌匯出為 `wav` / `mp3` / `flac`。
-- **VST3 ARA 外掛與 CLAP 外掛**：除獨立 App 外，三個平台的三合一安裝包都包含 VST3 與 CLAP 外掛。VST3 外掛可透過 ARA 在 REAPER 中直接開啟同一套編輯介面：宿主負責片段幾何、BPM 與漸變聲音，HiFiShifter 負責參數曲線，編輯自動套用回宿主。CLAP 外掛是同一套編輯器的插入效果器形態（不與 REAPER 建立 ARA 綁定）。詳見使用手冊的 [外掛](USERMANUAL_zh-TW.md#八vst3-ara-外掛與-clap-外掛reaper)章節。
+- **VST3 ARA 外掛與 CLAP 外掛**：除獨立 App 外，三個平台的安裝包都包含 VST3 與 CLAP 外掛。VST3 外掛可透過 ARA 在 REAPER 中直接開啟同一套編輯介面：宿主負責片段幾何、BPM 與漸變聲音，HiFiShifter 負責參數曲線，編輯自動套用回宿主。CLAP 外掛是同一套編輯器的插入效果器形態（不與 REAPER 建立 ARA 綁定）。詳見使用手冊的 [外掛](USERMANUAL_zh-TW.md#八vst3-ara-外掛與-clap-外掛reaper)章節。
 - **其他**：內建檔案瀏覽器與快速搜尋、記事本、自動備份、多語言介面（简体中文 / 繁體中文 / English / 日本語 / 한국어）、深淺色主題、推理裝置選擇與基準測試。
 
 ## 安裝

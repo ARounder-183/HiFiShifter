@@ -37,7 +37,7 @@ In the menu `Options → Inference Device`, you can select `Auto`, `CPU`, or `GP
 
 On Windows, HiFiShifter disables the browser shortcuts that WebView2 normally intercepts (such as `Ctrl + F`, `Ctrl + P`, `F5`, and `Ctrl` with `+` / `-` for page zoom), so those key combinations reach HiFiShifter normally and never interrupt your editing.
 
-**About the plug-ins**: Besides the standalone app, HiFiShifter is also available as VST3 and CLAP plug-ins, which opens the same editing interface directly inside a REAPER project. In REAPER, use the VST3 form for ARA; the CLAP form works as an ordinary insert effect. The unified installers for all three platforms include the VST3 and CLAP plug-ins; they are currently verified primarily against REAPER. See the [VST3 ARA Plug-in and CLAP Plug-in](#8-vst3-ara-plug-in-and-clap-plug-in-reaper) chapter for installation and usage.
+**About the plug-ins**: Besides the standalone app, HiFiShifter is also available as VST3 and CLAP plug-ins, which opens the same editing interface directly inside a REAPER project. In REAPER, use the VST3 form for ARA; the CLAP form works as an ordinary insert effect. The installers for all three platforms include the VST3 and CLAP plug-ins; they are currently verified primarily against REAPER. See the [VST3 ARA Plug-in and CLAP Plug-in](#8-vst3-ara-plug-in-and-clap-plug-in-reaper) chapter for installation and usage.
 
 ## 2. Menu
 
@@ -771,7 +771,7 @@ inside REAPER's own code as soon as the timeline contains audio; this is unrelat
 plug-in. The plug-in therefore offers ARA only to CLAP hosts that implement the finalized
 ARA SDK protocol. If you need ARA in REAPER, use the VST3 form.
 
-The unified installers for all three platforms include the VST3 and CLAP plug-ins; they are currently verified primarily against REAPER.
+The installers for all three platforms include the VST3 and CLAP plug-ins; they are currently verified primarily against REAPER.
 
 ### Installation and Connection
 
