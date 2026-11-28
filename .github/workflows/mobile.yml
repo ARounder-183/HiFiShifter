@@ -1,37 +1,46 @@
 name: HiFiShifter Mobile Build (Android, iOS)
 
-# Mobile artifact pipeline.
+# Mobile artifact pipeline. Manual-only on purpose.
 #
-# [Why this is a separate workflow and not a leg of build.yml] Two reasons, both
-# about failure modes:
-#   1. A missing Android SDK / iOS certificate must never turn the six desktop
-#      legs red -- they are unrelated toolchains, and a red desktop matrix hides
-#      real desktop regressions behind mobile setup noise.
-#   2. Mobile builds are minutes longer per leg and only matter to two of the
-#      three hosts. Keeping them out of build.yml keeps the PR loop short.
+# [Why nothing here runs automatically]
+#   1. A pull request could only ever exercise the unsigned half: a fork has no signing
+#      material, so every release branch below was dead code there. The debug APK that
+#      did run was never installed by anyone -- the leg only re-proved that Rust, the
+#      NDK and Xcode still worked, hours at a time, on every frontend/backend PR.
+#   2. A mobile toolchain break turned an unrelated desktop PR red. That is not
+#      hypothetical: run 46116758037 died inside android-actions/setup-android, before a
+#      single line of this project compiled, because Google removed the legacy `tools`
+#      SDK package that the action installed by default. The red check belonged to
+#      whoever opened the PR, not to a mobile change.
+#   3. The artifacts only matter when a mobile build is actually being cut, and these
+#      two legs are the slowest in the repository (Rust + NDK + Xcode, up to two hours).
+# Start it from Actions -> "HiFiShifter Mobile Build (Android, iOS)" -> Run workflow.
 #
-# [What each trigger does]
-#   pull_request -> "does it compile" only: debug APK on Linux, simulator build
-#                   on macOS. No signing material is touched, so a fork PR works.
-#   v* tag       -> full artifacts (AAB + signed APK, device IPA) using secrets.
-#   dispatch     -> same as the tag, for manual releases.
+# [What each mode does]
+#   debug   (default) debug APK on Linux, simulator build on macOS. No secrets and no
+#                     signing, so it runs on a fresh fork and answers "does the mobile
+#                     code still compile end to end".
+#   release           release AAB + APK (signed when gen/android/keystore.properties
+#                     exists) and a device IPA. Needs the APPLE_* signing secrets; a
+#                     missing one stops the leg before anything is uploaded.
 on:
   workflow_dispatch:
-  pull_request:
-    branches: [main, develop]
-    paths:
-      - "backend/**"
-      - "frontend/**"
-      - "scripts/build/**"
-      - ".github/workflows/mobile.yml"
-  push:
-    tags: ["v*"]
+    inputs:
+      mode:
+        description: 'debug = compile check, no signing; release = signed artifacts'
+        type: choice
+        options:
+          - debug
+          - release
+        default: debug
 
 permissions:
   contents: read
 
+# The mode is part of the group: a debug run and a release run produce different
+# artifacts and must not cancel each other.
 concurrency:
-  group: mobile-${{ github.workflow }}-${{ github.ref }}
+  group: mobile-${{ github.workflow }}-${{ github.ref }}-${{ inputs.mode }}
   cancel-in-progress: true
 
 jobs:
@@ -51,7 +60,7 @@ jobs:
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
       # The NDK version is pinned: AGP picks the newest installed NDK, and an
       # unpinned one silently changes the C++ toolchain between runs (WORLD and
@@ -79,9 +88,9 @@ jobs:
             "cmake;3.31.6"
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> "$GITHUB_ENV"
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: '22'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -95,21 +104,27 @@ jobs:
         run: npm run build
         working-directory: frontend
 
-      - name: Build APK
+      - name: Build APK (debug)
+        if: inputs.mode == 'debug'
         run: |
           set -euo pipefail
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            chmod +x scripts/build/android.sh
-            ./scripts/build/android.sh --bundle
-            ./scripts/build/android.sh
-          else
-            chmod +x scripts/build/android.sh
-            ./scripts/build/android.sh --debug
-          fi
+          chmod +x scripts/build/android.sh
+          ./scripts/build/android.sh --debug
 
-      - uses: actions/upload-artifact@v5
+      - name: Build AAB and APK (release)
+        if: inputs.mode == 'release'
+        run: |
+          set -euo pipefail
+          chmod +x scripts/build/android.sh
+          ./scripts/build/android.sh --bundle
+          ./scripts/build/android.sh
+
+      # [Why the artifact name carries run_number and not ref_name] ref_name is the branch
+      # name, and upload-artifact rejects the '/' it contains (`feature/tools`) with
+      # "Artifact name is not valid".
+      - uses: actions/upload-artifact@v7
         with:
-          name: android-${{ github.ref_name }}
+          name: android-${{ inputs.mode }}-${{ github.run_number }}
           path: |
             backend/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
             backend/src-tauri/gen/android/app/build/outputs/bundle/**/*.aab
@@ -128,9 +143,9 @@ jobs:
           set -euo pipefail
           rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: '22'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -142,17 +157,17 @@ jobs:
         run: npm run build
         working-directory: frontend
 
-      # PRs only prove the toolchain works: a simulator build needs no signing
-      # material, so a fork PR can run it. Tags do the real device build.
+      # A simulator build needs no signing material, which is the whole point of the
+      # debug mode: it can run anywhere, including on a fork with no secrets.
       - name: Build (simulator, no signing)
-        if: github.ref_type != 'tag'
+        if: inputs.mode == 'debug'
         run: |
           set -euo pipefail
           chmod +x scripts/build/ios.sh
           ./scripts/build/ios.sh --simulator
 
       - name: Build (device)
-        if: github.ref_type == 'tag'
+        if: inputs.mode == 'release'
         env:
           APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -163,17 +178,17 @@ jobs:
           chmod +x scripts/build/ios.sh
           ./scripts/build/ios.sh
 
-      - uses: actions/upload-artifact@v5
-        if: github.ref_type == 'tag'
+      - uses: actions/upload-artifact@v7
+        if: inputs.mode == 'release'
         with:
-          name: ios-${{ github.ref_name }}
+          name: ios-${{ github.run_number }}
           path: backend/src-tauri/gen/apple/build/**/*.ipa
           if-no-files-found: error
           retention-days: 14
 
-  # The static gates are host-independent and cheap; running them here as well
-  # means a mobile-only PR still gets the platform-boundary and form-gate checks
-  # even though the desktop matrix did not run.
+  # The static gates are host-independent, take seconds, and build.yml does not run them
+  # (CI is artifact-only). Keeping them here means a manual mobile build cannot ship a
+  # tree that violates the platform boundary or the single form predicate.
   static-gates:
     name: Static gates
     runs-on: ubuntu-latest
